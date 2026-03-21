@@ -594,6 +594,35 @@ if ! k_have_func k_apply_profile; then
         chroot "${target}" systemctl enable gdm >> "$log" 2>&1 || true
       fi
       chroot "${target}" systemctl set-default graphical.target >> "$log" 2>&1 || true
+
+      # GNOME desktop defaults — dark mode, terminal in dock, no idle blank
+      mkdir -p "${target}/etc/dconf/db/local.d" "${target}/etc/dconf/profile"
+      cat > "${target}/etc/dconf/profile/user" << 'DPROF'
+user-db:user
+system-db:local
+DPROF
+      cat > "${target}/etc/dconf/db/local.d/00-kldload-desktop" << 'DCONF'
+[org/gnome/desktop/interface]
+color-scheme='prefer-dark'
+gtk-theme='Adwaita-dark'
+
+[org/gnome/shell]
+favorite-apps=['org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'firefox-esr.desktop', 'firefox.desktop']
+welcome-dialog-last-shown-version='99'
+
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+idle-activation-enabled=false
+
+[org/gnome/settings-daemon/plugins/power]
+idle-dim=false
+sleep-inactive-ac-type='nothing'
+sleep-inactive-battery-type='nothing'
+DCONF
+      chroot "${target}" dconf update 2>/dev/null || true
     fi
 
     k_log "Profile packages installed (${distro}/${profile})"
