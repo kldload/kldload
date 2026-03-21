@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# kexport — export a disk to qcow2, raw, VHD, VMDK, or OVA
+# Usage: kexport /dev/sda qcow2
+#        kexport /dev/vda vmdk
+#        kexport /dev/sda all
+
+DISK="${1:-}"
+FMT="${2:-}"
+OUTDIR="${3:-$(pwd)}"
+NAME="${KEXPORT_NAME:-kldload-export-$(date -u +%Y%m%d-%H%M)}"
+
+usage() {
+  echo "kexport — export a disk image"
+  echo ""
+  echo "Usage: kexport <disk> <format> [output-dir]"
+  echo ""
+  echo "Formats:"
+  echo "  qcow2    KVM / Proxmox / OpenStack (compressed)"
+  echo "  raw      dd-ready sparse disk image"
+  echo "  vhd      Azure / Hyper-V"
+  echo "  vmdk     VMware ESXi / vSphere"
+  echo "  ova      VMware / VirtualBox portable (OVF + VMDK tar)"
+  echo "  all      Export all formats"
+  echo ""
+  echo "Examples:"
+  echo "  kexport /dev/sda qcow2"
+  echo "  kexport /dev/vda all /home/live/Desktop"
+  echo "  KEXPORT_NAME=myserver kexport /dev/sda vmdk"
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+log() { echo "[kexport] $*"; }
+
+[[ -n "$DISK" ]] || { usage; exit 1; }
+[[ -n "$FMT" ]]  || { usage; exit 1; }
+[[ -b "$DISK" ]] || die "$DISK is not a block device"
+command -v qemu-img >/dev/null || die "qemu-img not found — install qemu-img"
+
+mkdir -p "$OUTDIR"
+
+do_export() {
+  local fmt="$1"
+  case "$fmt" in
+    qcow2)
+      log "Exporting ${DISK} → ${OUTDIR}/${NAME}.qcow2 (compressed)"
+      qemu-img convert -f raw -O qcow2 -c -p "$DISK" "${OUTDIR}/${NAME}.qcow2"
+      log "Done: ${OUTDIR}/${NAME}.qcow2 ($(du -sh "${OUTDIR}/${NAME}.qcow2" | cut -f1))"
+      ;;
+    raw)
+      log "Exporting ${DISK} → ${OUTDIR}/${NAME}.raw (sparse)"
+      dd if="$DISK" of="${OUTDIR}/${NAME}.raw" bs=4M status=progress conv=sparse
+      log "Done: ${OUTDIR}/${NAME}.raw ($(du -sh "${OUTDIR}/${NAME}.raw" | cut -f1))"
+      ;;
+    vhd)
+      log "Exporting ${DISK} → ${OUTDIR}/${NAME}.vhd"
+      qemu-img convert -f raw -O vpc -o subformat=fixed,force_size "$DISK" "${OUTDIR}/${NAME}.vhd"
+      log "Done: ${OUTDIR}/${NAME}.vhd ($(du -sh "${OUTDIR}/${NAME}.vhd" | cut -f1))"
+      ;;
+    vmdk)
+      log "Exporting ${DISK} → ${OUTDIR}/${NAME}.vmdk"
+      qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "$DISK" "${OUTDIR}/${NAME}.vmdk"
+      log "Done: ${OUTDIR}/${NAME}.vmdk ($(du -sh "${OUTDIR}/${NAME}.vmdk" | cut -f1))"
+      ;;
+    ova)
+      log "Exporting ${DISK} → ${OUTDIR}/${NAME}.ova"
+      qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "$DISK" "${OUTDIR}/${NAME}.vmdk"
+      local vmdk_size
+      vmdk_size=$(stat -c%s "${OUTDIR}/${NAME}.vmdk" 2>/dev/null || echo 0)
+      local disk_bytes
+      disk_bytes=$(blockdev --getsize64 "$DISK" 2>/dev/null || echo 42949672960)
+      cat > "${OUTDIR}/${NAME}.ovf" <<OVFEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<Envelope xmlns="http://schemas.dmtf.org/ovf/envelope/1"
+          xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
+          xmlns:vssd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_VirtualSystemSettingData">
+  <References><File ovf:href="${NAME}.vmdk" ovf:id="file1" ovf:size="${vmdk_size}"/></References>
+  <DiskSection><Disk ovf:capacity="${disk_bytes}" ovf:diskId="vmdisk1" ovf:fileRef="file1" ovf:format="http://www.vmware.com/interfaces/specifications/vmdk.html#streamOptimized"/></DiskSection>
+  <VirtualSystem ovf:id="${NAME}">
+    <Name>${NAME}</Name>
+    <OperatingSystemSection ovf:id="101"><Description>Linux</Description></OperatingSystemSection>
+    <VirtualHardwareSection>
+      <System><vssd:VirtualSystemType>vmx-14</vssd:VirtualSystemType></System>
+      <Item><rasd:ResourceType>3</rasd:ResourceType><rasd:VirtualQuantity>4</rasd:VirtualQuantity></Item>
+      <Item><rasd:ResourceType>4</rasd:ResourceType><rasd:VirtualQuantity>4096</rasd:VirtualQuantity></Item>
+      <Item><rasd:ResourceType>17</rasd:ResourceType><rasd:HostResource>ovf:/disk/vmdisk1</rasd:HostResource></Item>
+    </VirtualHardwareSection>
+  </VirtualSystem>
+</Envelope>
+OVFEOF
+      (cd "${OUTDIR}" && tar cf "${NAME}.ova" "${NAME}.ovf" "${NAME}.vmdk")
+      rm -f "${OUTDIR}/${NAME}.vmdk" "${OUTDIR}/${NAME}.ovf"
+      log "Done: ${OUTDIR}/${NAME}.ova ($(du -sh "${OUTDIR}/${NAME}.ova" | cut -f1))"
+      ;;
+    *)
+      die "Unknown format: $fmt (use qcow2, raw, vhd, vmdk, ova, or all)"
+      ;;
+  esac
+}
+
+if [[ "$FMT" == "all" ]]; then
+  for f in qcow2 raw vhd vmdk ova; do
+    do_export "$f"
+  done
+else
+  do_export "$FMT"
+fi
+
+log "Export complete → ${OUTDIR}/"
