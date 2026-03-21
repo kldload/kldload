@@ -109,6 +109,7 @@ log "Starting builder container '$BUILDER_CONTAINER'..."
     --volume "${ROOT}:/build:z" \
     --env PROFILE="$PROFILE" \
     --env EDITION="$EDITION" \
+    --env DISTRO="${DISTRO:-centos}" \
     --env ARCH="${ARCH:-amd64}" \
     --env SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     --env OUTPUT_DIR="/build/live-build/output" \

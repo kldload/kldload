@@ -17,7 +17,8 @@ BUILD_DATE="$(date +%Y%m%d)"
 
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
-ISO_NAME="kldload-${EDITION}-${ARCH}-${BUILD_DATE}.iso"
+DISTRO_TAG="${DISTRO:-centos}"
+ISO_NAME="kldload-${EDITION}-${DISTRO_TAG}-${ARCH}-${BUILD_DATE}.iso"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
 log() { printf '[%s] [build-iso] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
