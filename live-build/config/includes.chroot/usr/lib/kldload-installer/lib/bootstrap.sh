@@ -314,12 +314,67 @@ _k_bootstrap_dnf() {
   local release="${KLDLOAD_RELEASE:-9}"
   local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
 
-  k_log_to "$log" "Bootstrapping CentOS/RHEL ${release} → ${target}"
+  local distro="${KLDLOAD_DISTRO:-centos}"
+  k_log_to "$log" "Bootstrapping ${distro} ${release} → ${target}"
 
-  # Set up repos
+  # Set up repos — distro-specific
   mkdir -p "${target}/etc/yum.repos.d" "${target}/etc/pki/rpm-gpg"
 
-  cat > "${target}/etc/yum.repos.d/centos.repo" <<DNFREPO
+  case "${distro}" in
+    rocky)
+      cat > "${target}/etc/yum.repos.d/rocky.repo" <<ROCKYREPO
+[baseos]
+name=Rocky Linux ${release} - BaseOS
+mirrorlist=https://mirrors.rockylinux.org/mirrorlist?arch=\$basearch&repo=BaseOS-${release}
+gpgcheck=0
+enabled=1
+
+[appstream]
+name=Rocky Linux ${release} - AppStream
+mirrorlist=https://mirrors.rockylinux.org/mirrorlist?arch=\$basearch&repo=AppStream-${release}
+gpgcheck=0
+enabled=1
+
+[crb]
+name=Rocky Linux ${release} - CRB
+mirrorlist=https://mirrors.rockylinux.org/mirrorlist?arch=\$basearch&repo=CRB-${release}
+gpgcheck=0
+enabled=1
+ROCKYREPO
+      ;;
+    rhel)
+      # RHEL uses subscription-manager — register before setting up repos
+      local rhel_key="${KLDLOAD_RHEL_KEY:-${RHEL_ACTIVATION_KEY:-}}"
+      local rhel_org="${KLDLOAD_RHEL_ORG:-${RHEL_ORG_ID:-}}"
+      if [[ -z "${rhel_key}" || -z "${rhel_org}" ]]; then
+        k_die "RHEL install requires KLDLOAD_RHEL_KEY and KLDLOAD_RHEL_ORG (activation key + org ID)"
+      fi
+      k_log_to "$log" "Registering with Red Hat CDN (key=${rhel_key}, org=${rhel_org})"
+      # Install subscription-manager into the installroot first via CentOS bootstrap,
+      # then re-register with RHEL repos
+      cat > "${target}/etc/yum.repos.d/centos-bootstrap.repo" <<CENTBOOT
+[baseos-bootstrap]
+name=CentOS Stream ${release} - BaseOS (bootstrap only)
+metalink=https://mirrors.centos.org/metalink?repo=centos-baseos-${release}-stream&arch=\$basearch&protocol=https
+gpgcheck=0
+enabled=1
+CENTBOOT
+      dnf --installroot="${target}" --releasever="${release}" --nogpgcheck -y install \
+        subscription-manager >> "$log" 2>&1 || true
+      rm -f "${target}/etc/yum.repos.d/centos-bootstrap.repo"
+      # Register the installroot with RHEL
+      chroot "${target}" subscription-manager register \
+        --activationkey="${rhel_key}" --org="${rhel_org}" --force >> "$log" 2>&1 \
+        || { k_log_to "$log" "WARNING: subscription-manager register failed"; }
+      # Enable repos
+      chroot "${target}" subscription-manager repos \
+        --enable="rhel-${release}-for-x86_64-baseos-rpms" \
+        --enable="rhel-${release}-for-x86_64-appstream-rpms" \
+        --enable="codeready-builder-for-rhel-${release}-x86_64-rpms" \
+        >> "$log" 2>&1 || true
+      ;;
+    *) # centos (default)
+      cat > "${target}/etc/yum.repos.d/centos.repo" <<DNFREPO
 [baseos]
 name=CentOS Stream ${release} - BaseOS
 metalink=https://mirrors.centos.org/metalink?repo=centos-baseos-${release}-stream&arch=\$basearch&protocol=https
@@ -338,7 +393,10 @@ metalink=https://mirrors.centos.org/metalink?repo=centos-crb-${release}-stream&a
 gpgcheck=0
 enabled=1
 DNFREPO
+      ;;
+  esac
 
+  # EPEL + ZFS repos (shared across CentOS/Rocky/RHEL)
   cat > "${target}/etc/yum.repos.d/epel.repo" <<EPELREPO
 [epel]
 name=EPEL ${release}
