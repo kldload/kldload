@@ -555,6 +555,66 @@
           </div>
         </div>
       </div>
+
+      <!-- Pool Designer -->
+      <div class="panel">
+        <div class="panel-hdr">◈ Pool Designer</div>
+        <div class="panel-body">
+          <p style="font-size:0.82rem;color:var(--muted);margin-bottom:0.75rem">Visualize ZFS pool topologies before building. Select disks and a layout to see usable space, fault tolerance, and the resulting <code>zpool create</code> command.</p>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem">
+            <div>
+              <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.4rem">Topology</label>
+              <select id="pool-topology" onchange="poolCalc()" style="width:100%;padding:0.4rem;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px">
+                <option value="single">Single disk (no redundancy)</option>
+                <option value="mirror">Mirror (2-way)</option>
+                <option value="mirror3">Mirror (3-way)</option>
+                <option value="raidz1">RAIDZ1 (single parity)</option>
+                <option value="raidz2">RAIDZ2 (double parity)</option>
+                <option value="raidz3">RAIDZ3 (triple parity)</option>
+                <option value="stripe">Stripe (no redundancy, max speed)</option>
+                <option value="mirror-stripe">Striped mirrors (2× mirror vdevs)</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.4rem">Disks</label>
+              <div style="display:flex;gap:0.5rem">
+                <input type="number" id="pool-disk-count" value="2" min="1" max="64" onchange="poolCalc()" style="width:4rem;padding:0.4rem;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;text-align:center">
+                <span style="color:var(--muted);font-size:0.82rem;line-height:2.2">×</span>
+                <input type="number" id="pool-disk-size" value="1" min="1" max="100" onchange="poolCalc()" style="width:4rem;padding:0.4rem;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;text-align:center">
+                <select id="pool-disk-unit" onchange="poolCalc()" style="padding:0.4rem;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px">
+                  <option value="TB" selected>TB</option>
+                  <option value="GB">GB</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Visual -->
+          <div id="pool-visual" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem;min-height:60px;font-family:var(--mono);font-size:0.78rem"></div>
+
+          <!-- Stats -->
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem;margin-bottom:1rem">
+            <div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:0.6rem 0.8rem;text-align:center">
+              <div style="font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">Raw</div>
+              <div id="pool-raw" style="font-size:1.1rem;font-weight:700;color:var(--text)">—</div>
+            </div>
+            <div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:0.6rem 0.8rem;text-align:center">
+              <div style="font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">Usable</div>
+              <div id="pool-usable" style="font-size:1.1rem;font-weight:700;color:var(--green)">—</div>
+            </div>
+            <div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:0.6rem 0.8rem;text-align:center">
+              <div style="font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em">Fault tolerance</div>
+              <div id="pool-fault" style="font-size:1.1rem;font-weight:700;color:var(--accent)">—</div>
+            </div>
+          </div>
+
+          <!-- Command -->
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:0.6rem 0.8rem;font-family:var(--mono);font-size:0.78rem;color:var(--muted);word-break:break-all">
+            <span style="color:var(--accent)">$</span> <span id="pool-cmd">zpool create rpool /dev/sda</span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ── Logs ─────────────────────────────────────────────────────────────── -->
@@ -957,6 +1017,86 @@ function rollback(snap) {
   }
 }
 function takeSnapshot() { send({ action: 'snapshot_take' }); }
+
+// ── Pool Designer ─────────────────────────────────────────────────────────────
+function poolCalc() {
+  const topo = document.getElementById('pool-topology').value;
+  const n = parseInt(document.getElementById('pool-disk-count').value) || 1;
+  const sz = parseFloat(document.getElementById('pool-disk-size').value) || 1;
+  const unit = document.getElementById('pool-disk-unit').value;
+  const diskGB = unit === 'TB' ? sz * 1000 : sz;
+  const rawGB = n * diskGB;
+
+  let usableGB = 0, fault = '0 disks', minDisks = 1, vdevDesc = '';
+  const disks = Array.from({length: n}, (_, i) => `/dev/sd${String.fromCharCode(97 + (i % 26))}`);
+
+  switch (topo) {
+    case 'single':
+      usableGB = diskGB; fault = 'none'; minDisks = 1;
+      vdevDesc = `[ ${disks[0]} ]`;
+      break;
+    case 'mirror':
+      usableGB = diskGB; fault = '1 disk'; minDisks = 2;
+      vdevDesc = `mirror [ ${disks.slice(0, Math.max(2,n)).join(' ')} ]`;
+      break;
+    case 'mirror3':
+      usableGB = diskGB; fault = '2 disks'; minDisks = 3;
+      vdevDesc = `mirror [ ${disks.slice(0, Math.max(3,n)).join(' ')} ]`;
+      break;
+    case 'raidz1':
+      usableGB = (n - 1) * diskGB; fault = '1 disk'; minDisks = 3;
+      vdevDesc = `raidz1 [ ${disks.join(' ')} ]`;
+      break;
+    case 'raidz2':
+      usableGB = (n - 2) * diskGB; fault = '2 disks'; minDisks = 4;
+      vdevDesc = `raidz2 [ ${disks.join(' ')} ]`;
+      break;
+    case 'raidz3':
+      usableGB = (n - 3) * diskGB; fault = '3 disks'; minDisks = 5;
+      vdevDesc = `raidz3 [ ${disks.join(' ')} ]`;
+      break;
+    case 'stripe':
+      usableGB = rawGB; fault = 'none — any disk failure loses pool'; minDisks = 2;
+      vdevDesc = disks.join(' ');
+      break;
+    case 'mirror-stripe': {
+      const pairs = Math.floor(n / 2);
+      usableGB = pairs * diskGB; fault = '1 disk per mirror';
+      minDisks = 4;
+      const vdevs = [];
+      for (let i = 0; i < pairs; i++) vdevs.push(`mirror [ ${disks[i*2]} ${disks[i*2+1]} ]`);
+      vdevDesc = vdevs.join('\n    ');
+      break;
+    }
+  }
+
+  const fmt = (gb) => gb >= 1000 ? (gb / 1000).toFixed(1) + ' TB' : gb.toFixed(0) + ' GB';
+  const warn = n < minDisks;
+
+  document.getElementById('pool-raw').textContent = fmt(rawGB);
+  document.getElementById('pool-usable').textContent = warn ? 'need ' + minDisks + '+ disks' : fmt(usableGB);
+  document.getElementById('pool-usable').style.color = warn ? 'var(--red)' : 'var(--green)';
+  document.getElementById('pool-fault').textContent = fault;
+
+  // Visual
+  document.getElementById('pool-visual').innerHTML =
+    `<div style="color:var(--accent);margin-bottom:0.3rem">rpool</div>` +
+    `<div style="padding-left:1rem;color:var(--text);white-space:pre-wrap">${vdevDesc}</div>` +
+    (warn ? `<div style="color:var(--red);margin-top:0.5rem;font-size:0.75rem">⚠ ${topo} requires at least ${minDisks} disks</div>` : '') +
+    `<div style="color:var(--muted);margin-top:0.5rem;font-size:0.72rem">Efficiency: ${rawGB > 0 ? Math.round(usableGB / rawGB * 100) : 0}% · Overhead: ${fmt(rawGB - usableGB)}</div>`;
+
+  // Command
+  const zpoolTopo = topo === 'single' ? disks[0] :
+    topo === 'mirror' || topo === 'mirror3' ? 'mirror ' + disks.join(' ') :
+    topo === 'stripe' ? disks.join(' ') :
+    topo === 'mirror-stripe' ? Array.from({length: Math.floor(n/2)}, (_, i) => `mirror ${disks[i*2]} ${disks[i*2+1]}`).join(' ') :
+    topo + ' ' + disks.join(' ');
+  document.getElementById('pool-cmd').textContent =
+    `zpool create -o ashift=12 -O compression=lz4 -O acltype=posixacl -O xattr=sa rpool ${zpoolTopo}`;
+}
+
+// Init pool designer on page load
+document.addEventListener('DOMContentLoaded', () => { if (document.getElementById('pool-topology')) poolCalc(); });
 
 // ── Install ──────────────────────────────────────────────────────────────────
 let _installPayload = null;
