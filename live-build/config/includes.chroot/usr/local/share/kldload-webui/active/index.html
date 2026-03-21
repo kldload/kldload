@@ -206,15 +206,6 @@
         <div class="panel" style="margin-bottom:1rem">
           <div class="panel-hdr">↯ Target Disk &amp; Identity</div>
           <div class="panel-body">
-            <div class="form-group">
-              <label>Target distro</label>
-              <select id="install-distro" onchange="toggleRhelKey()">
-                <option value="centos">CentOS Stream 9</option>
-                <option value="debian">Debian 13 (Trixie)</option>
-                <option value="rhel">RHEL 9 (requires subscription)</option>
-                <option value="rocky">Rocky Linux 9</option>
-              </select>
-            </div>
             <div id="rhel-key-group" style="display:none">
               <div class="form-group">
                 <label>RHEL activation key</label>
@@ -257,29 +248,7 @@
               <textarea id="install-ssh-key" rows="2" placeholder="ssh-ed25519 AAAA… user@host" style="font-family:monospace;font-size:0.78rem;resize:vertical;width:100%;box-sizing:border-box;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:0.4rem 0.5rem;outline:none"></textarea>
             </div>
 
-            <div style="margin-top:1rem;padding:0.8rem;background:var(--surface2);border:1px solid var(--border);border-radius:6px">
-              <label style="font-weight:600;margin-bottom:0.5rem;display:block">Kernel modules <span style="color:var(--muted);font-weight:400;font-size:0.8rem">(bundled on first boot)</span></label>
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem 1rem">
-                <label style="display:flex;align-items:center;gap:0.4rem;font-weight:400;cursor:default;font-size:0.85rem">
-                  <input type="checkbox" id="mod-zfs" checked disabled style="accent-color:var(--accent)">
-                  <strong style="color:var(--accent)">ZFS on Root</strong>
-                </label>
-                <label style="display:flex;align-items:center;gap:0.4rem;font-weight:400;cursor:pointer;font-size:0.85rem">
-                  <input type="checkbox" id="mod-wireguard" checked style="accent-color:var(--accent)">
-                  <strong>WireGuard</strong>
-                </label>
-                <label style="display:flex;align-items:center;gap:0.4rem;font-weight:400;cursor:pointer;font-size:0.85rem">
-                  <input type="checkbox" id="mod-nvidia" style="accent-color:var(--accent)">
-                  <strong>NVIDIA Drivers</strong>
-                </label>
-                <label style="display:flex;align-items:center;gap:0.4rem;font-weight:400;cursor:pointer;font-size:0.85rem">
-                  <input type="checkbox" id="mod-ebpf" style="accent-color:var(--accent)">
-                  <strong>eBPF Tools</strong>
-                </label>
-              </div>
-            </div>
-
-            <div class="form-group" style="margin-top:0.8rem">
+            <div class="form-group" style="margin-top:1rem">
               <label>ZFS encryption</label>
               <select id="install-encryption" onchange="toggleEncryption()">
                 <option value="0">None — standard ZFS (recommended)</option>
@@ -497,9 +466,21 @@
         <div class="panel" style="margin-bottom:1rem">
           <div class="panel-hdr">⚙ Additional Options</div>
           <div class="panel-body">
-            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem">
+            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.6rem">
               <input type="checkbox" id="install-nvidia" style="width:1rem;height:1rem;cursor:pointer;accent-color:var(--accent);flex-shrink:0">
-              <label for="install-nvidia" style="cursor:pointer;font-size:0.9rem;margin:0">Install NVIDIA drivers <span style="color:var(--muted);font-weight:400">(GPU workstation / CUDA compute)</span></label>
+              <label for="install-nvidia" style="cursor:pointer;font-size:0.9rem;margin:0">NVIDIA drivers <span style="color:var(--muted);font-weight:400">(GPU workstation / CUDA compute)</span></label>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.6rem">
+              <input type="checkbox" id="install-wireguard" checked style="width:1rem;height:1rem;cursor:pointer;accent-color:var(--accent);flex-shrink:0">
+              <label for="install-wireguard" style="cursor:pointer;font-size:0.9rem;margin:0">WireGuard <span style="color:var(--muted);font-weight:400">(VPN mesh networking)</span></label>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.6rem">
+              <input type="checkbox" id="install-ebpf" style="width:1rem;height:1rem;cursor:pointer;accent-color:var(--accent);flex-shrink:0">
+              <label for="install-ebpf" style="cursor:pointer;font-size:0.9rem;margin:0">eBPF tools <span style="color:var(--muted);font-weight:400">(BCC tracing + bpftrace)</span></label>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.5rem">
+              <input type="checkbox" id="install-zfs-dedup" style="width:1rem;height:1rem;cursor:pointer;accent-color:var(--accent);flex-shrink:0">
+              <label for="install-zfs-dedup" style="cursor:pointer;font-size:0.9rem;margin:0">ZFS deduplication <span style="color:var(--muted);font-weight:400">(requires 5GB+ RAM per TB)</span></label>
             </div>
           </div>
         </div>
@@ -890,6 +871,8 @@ function selectDistro(el) {
   el.classList.add('selected');
   const sum = document.getElementById('distro-summary');
   if (sum) sum.textContent = '✓ ' + (DISTRO_DESCS[el.dataset.distro] || el.dataset.distro);
+  const rhelGroup = document.getElementById('rhel-key-group');
+  if (rhelGroup) rhelGroup.style.display = el.dataset.distro === 'rhel' ? 'block' : 'none';
 }
 
 // ── DHCP toggle ──────────────────────────────────────────────────────────────

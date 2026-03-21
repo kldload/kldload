@@ -2,200 +2,111 @@
 
 **Not an OS. Not a distro. A kernel loader.**
 
-kldload is a build tool that assembles Linux images with kernel modules — ZFS, WireGuard, NVIDIA — bundled and ready on first boot. Pull any distro. Build an image. Boot it. That's it.
+kldload builds a single bootable ISO that installs CentOS, Debian, or RHEL with ZFS on root — offline, from a USB stick, in under 2 minutes. Both package mirrors (RPM + APT) are baked into the image. No internet required.
 
-**Website & ZFS Wiki:** [kldload.com](https://kldload.com)
-
----
-
-## What it does
-
-kldload automates the process of building a bootable Linux image with ZFS on root. It does exactly what you'd do by hand — `wget` the packages, install them, configure the kernel modules, assemble the bootloader — just automated. Every step is a readable bash script. Every step is auditable.
-
-**By using kldload, you naturally get:**
-
-- **ZFS on root** — checksummed, compressed, snapshot-capable root filesystem
-- **ZFSBootMenu** — boot environment management, 15-second rollback
-- **WireGuard** — kernel-level mesh networking
-- **NVIDIA drivers** — baked in, loaded on first boot
-- **30+ CLI tools** — `kst`, `ksnap`, `kbe`, `kdf`, `kdir`, `kpkg`, and more
-- **Automatic snapshots** — before every package change, on schedule
-- **Web UI installer** — browser-based, 5-step guided install
-- **Offline install** — no internet required at deploy time
-
-You still do all the work — design your storage, configure your network, deploy your applications. kldload just makes it easier to bundle kernel modules into a bootable image so they're there when you need them.
-
-## Supported distros
-
-| Distro | Status |
-|--------|--------|
-| Debian 13 (Trixie) | Stable |
-| CentOS Stream 9 | Stable |
-| Rocky Linux 9 | Planned |
-| RHEL 9 | Planned |
-
-Same tools, same ZFS layout, same boot environments — regardless of distro.
+**Website & ZFS Wiki:** [kldload.com](https://kldload.com) | **Architecture & Developer Guide:** [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ---
 
-## Build your own
-
-The real way to use kldload is to clone the repo and build your own image.
+## Quickstart
 
 ```bash
 git clone https://github.com/kldload/kldload.git
 cd kldload
 
-# Build a Debian 13 ISO
-./deploy.sh build
+# Full build: builder image + Debian darksite + CentOS ISO
+./deploy.sh clean
+./deploy.sh builder-image
+./deploy.sh build-debian-darksite
+PROFILE=desktop ./deploy.sh build
 
-# Build a CentOS Stream 9 ISO
-DISTRO=centos ./deploy.sh build
+# Deploy
+./deploy.sh kvm-deploy          # local KVM
+./deploy.sh proxmox-deploy      # Proxmox (set PROXMOX_HOST in kldload.env)
+./deploy.sh burn                # USB (/dev/sda)
 ```
 
-Swap the package list, change the profile, build whatever you want. À la carte.
-
-## Pre-built ISOs
-
-If you just want to try it without setting up a build environment, pre-built ISOs are available at [kldload.com](https://kldload.com). Same result you'd get building it yourself.
+Output: `live-build/output/kldload-free-centos-desktop-x86_64-DATE.iso`
 
 ---
 
-## CLI tools
+## What's inside the ISO
 
-Short names, no flags to memorize, sensible defaults. Work identically on Debian and CentOS.
+```
+ISO 9660 image
+├── LiveOS/squashfs.img          ← CentOS live environment (GNOME + web UI)
+├── /root/darksite/rpm/          ← offline CentOS package mirror (~900 RPMs)
+├── /root/darksite/debian/apt/   ← offline Debian package mirror (~2,700 debs)
+├── /root/darksite/boot/         ← ZFSBootMenu EFI binary
+├── kldload-install-target       ← installer (bash)
+├── kldload-webui                ← web UI (Python)
+└── 30+ CLI tools (kst, ksnap, kbe, kdf, kdir, kpkg, ...)
+```
 
-### Everyday
+Boot the ISO → web UI opens → pick distro + profile → install to disk. Two separate bootstrap paths run underneath — `dnf --installroot` for CentOS/RHEL, `debootstrap` for Debian. Same ZFS layout, same bootloader, same tools on both.
+
+---
+
+## deploy.sh commands
 
 | Command | What it does |
 |---------|-------------|
-| `kst` | System status — pool health, dataset usage, compression, snapshots, services |
-| `ksnap` | Snapshot management — create, list, rollback, destroy |
-| `kclone` | Instant copy-on-write clones of any dataset |
-| `kdf` | ZFS-aware disk usage with compression ratios |
-| `kdir` | Create a ZFS dataset instead of a directory |
-| `kpkg` | Universal package manager (apt/dnf) with automatic pre-snapshot |
-| `khelp` | Built-in command reference |
+| `full` | Clean + rebuild everything |
+| `build` | Build ISO (uses cached darksite) |
+| `build-debian-darksite` | Rebuild Debian APT mirror cache |
+| `builder-image` | Rebuild builder container |
+| `clean` | Remove build artifacts |
+| `kvm-deploy` | Deploy to local KVM |
+| `proxmox-deploy` | Deploy to Proxmox |
+| `deploy-all` | KVM + Proxmox + print USB command |
+| `burn` | Write ISO to USB |
 
-### Boot environments
+---
 
-| Command | What it does |
-|---------|-------------|
-| `kbe list` | List all boot environments |
-| `kbe create <name>` | Snapshot current root as a named boot environment |
-| `kbe activate <name>` | Set a boot environment as next boot target |
-| `kbe rollback <name>` | Roll back root to a previous snapshot |
-| `kupgrade` | Full system upgrade with automatic pre-upgrade snapshot |
-| `krecovery` | Emergency recovery — import pools, chroot, reinstall bootloader |
-
-### Administration
-
-| Command | What it does |
-|---------|-------------|
-| `khold` | Mark critical packages as held (kernel, ZFS, bootloader) |
-| `kpoof` | Scrub all sensitive ephemeral data from RAM |
-
-### Shell aliases
-
-50+ context-aware aliases loaded automatically. ZFS, Kubernetes, Helm, Salt, Docker, virsh — each set only appears if the tool is installed.
+## Project structure
 
 ```
-zls     → zfs list
-zsnap   → zfs list -t snapshot
-zbe     → kbe list
-ports   → ss -tuln
+kldload-free/
+├── deploy.sh                    ← entry point
+├── builder/
+│   ├── Dockerfile               ← CentOS builder container
+│   └── build-iso.sh             ← ISO assembly (runs in container)
+├── build/
+│   ├── darksite/                ← RPM darksite builder + package lists
+│   └── darksite-debian/         ← APT darksite builder + package lists
+├── live-build/
+│   ├── output/                  ← built ISOs
+│   └── config/includes.chroot/  ← everything baked into the live ISO
+│       ├── usr/sbin/kldload-install-target
+│       ├── usr/lib/kldload-installer/lib/   ← 9 installer libraries
+│       ├── usr/local/bin/kldload-webui
+│       └── usr/local/bin/kst, ksnap, ...
+└── profiles/                    ← desktop.yaml, server.yaml
 ```
 
----
-
-## ZFS dataset layout
-
-Every kldload install creates this hierarchy. Rolling back `/` doesn't affect `/home`, `/var/log`, or `/srv`.
-
-```
-rpool
-├── ROOT/<hostname>     ← /  (active boot environment)
-├── home                ← /home (per-user child datasets)
-├── root                ← /root
-├── srv                 ← /srv (snapshotted every 15 min)
-├── var                 ← /var
-│   ├── log             ← /var/log (persists across rollbacks)
-│   ├── cache           ← /var/cache
-│   └── tmp             ← /var/tmp (excluded from snapshots)
-```
-
-Pool properties: `ashift=12`, `compression=lz4`, `autotrim=on`, `xattr=sa`, `acltype=posixacl`, `dnodesize=auto`, `normalization=formD`
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full developer guide — build pipeline, installer internals, how to add packages, postinstallers, and custom profiles.
 
 ---
 
-## Automatic snapshots
+## What you get
 
-No configuration needed. Running from first boot.
+- **ZFS on root** with ZFSBootMenu boot environments
+- **Automatic snapshots** before every package change
+- **30+ CLI tools** — `kst`, `ksnap`, `kbe`, `kdf`, `kdir`, `kpkg`
+- **Web UI** installer and management (Python, port 8080)
+- **Offline install** — both darksites baked in
+- **Secure Boot** support via MOK enrollment
+- **Multi-distro** — CentOS, Debian, RHEL from one ISO
 
-| Trigger | Retention | What |
-|---------|-----------|------|
-| Every `apt`/`dnf` operation | Last 10 | Root filesystem snapshot before package changes |
-| Every 15 minutes | Last 4 | `/srv` service data |
-| Hourly | Configurable | Boot environment |
-| Post-install | Permanent | Factory reset point |
+## What you don't get
 
----
-
-## Web UI
-
-Browser-based installer and management interface. Python 3, no framework dependencies. Runs on port 8080.
-
-- **Installer** — 5-step guided install with real-time progress streaming
-- **Dashboard** — system health, pool status, service status
-- **ZFS** — dataset browser, snapshot management, boot environments
-- **Logs** — real-time log streaming with filtering
-
-WebSocket API available on port 8081 for automation.
-
----
-
-## How it works
-
-kldload automates the standard Linux installation process:
-
-1. **Partition** — EFI + ZFS pool
-2. **Bootstrap** — `debootstrap` (Debian) or `dnf --installroot` (CentOS)
-3. **DKMS** — build ZFS kernel module against installed kernel
-4. **Initramfs** — rebuild with ZFS support (`initramfs-tools` or `dracut`)
-5. **Bootloader** — install ZFSBootMenu to EFI partition
-6. **Export** — clean pool export for first boot
-
-Every step is a function in `bootstrap.sh` and `bootloader.sh`. Read them.
-
----
-
-## What you can build on top
-
-kldload is a foundation. What you put on it is up to you.
-
-- **Containers** — Docker/Podman/LXC on ZFS with CoW storage
-- **VMs** — KVM + QEMU + libvirt with zvol-backed instant clones
-- **Storage servers** — NFS/iSCSI/Samba with self-healing ZFS
-- **Media servers** — Jellyfin/Plex on checksummed storage
-- **Clusters** — WireGuard mesh + Salt orchestration
-- **Whatever you want** — `postinstall.sh` is your hook
-
-See [kldload.com/build](https://kldload.com/#build) for recipes.
-
----
-
-## Fully auditable
-
-- No compiled binaries
-- No vendor SDKs
-- No obfuscation
-- Every tool is a bash script you can `cat` and read
-- You don't trust kldload — you trust your own eyes
+- Not an OS — it installs one
+- Not a distro — you pick yours
+- Not a cluster manager — build your own on top
+- Not opinionated — ZFS on root is the only non-negotiable
 
 ---
 
 ## License
 
 BSD 3-Clause. See [LICENSE](LICENSE).
-
-Third-party components (Linux kernel, OpenZFS, GNOME, etc.) retain their own licenses.

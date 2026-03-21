@@ -28,7 +28,7 @@ VM_CORES="${VM_CORES:-4}"
 VM_DISK_GB="${VM_DISK_GB:-40}"
 VM_BRIDGE="${VM_BRIDGE:-vmbr0}"
 
-USB_DEVICE="${USB_DEVICE:-}"
+USB_DEVICE="${USB_DEVICE:-/dev/sda}"
 USB_BURN_ON_DEPLOY="${USB_BURN_ON_DEPLOY:-no}"
 
 log() { printf '[%s] [deploy] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
@@ -57,10 +57,36 @@ cmd_builder_image() {
     log "Builder image ready: $BUILDER_IMAGE"
 }
 
+cmd_build_debian_darksite() {
+    local runtime
+    runtime="$(detect_runtime)"
+    local darksite_dir="$ROOT/live-build/darksite-debian-cache"
+    mkdir -p "$darksite_dir"
+    log "Building Debian darksite APT mirror (runs in Debian container)..."
+    "$runtime" run --rm \
+        -v "$ROOT/build/darksite-debian:/darksite-build:z,ro" \
+        -v "$darksite_dir:/output:z" \
+        -e PROFILE="$PROFILE" \
+        -e ARCH="amd64" \
+        -e SUITE="trixie" \
+        --name "kldload-darksite-deb-$$" \
+        debian:trixie-slim \
+        bash -c "apt-get update -qq && apt-get install -y -qq dpkg-dev curl >/dev/null 2>&1 && bash /darksite-build/build-darksite-debian.sh"
+    log "Debian darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
+}
+
 cmd_build() {
     local runtime
     runtime="$(detect_runtime)"
     log "Building kldload ISO (PROFILE=$PROFILE ARCH=$ARCH RELEASE=$RELEASE)"
+
+    # Build Debian darksite if not already cached
+    local darksite_dir="$ROOT/live-build/darksite-debian-cache"
+    if [[ ! -f "$darksite_dir/apt/dists/trixie/Release" ]]; then
+        cmd_build_debian_darksite
+    else
+        log "Debian darksite cached: $(du -sh "$darksite_dir" | cut -f1)"
+    fi
 
     "$runtime" run --rm --privileged \
         -v "$ROOT:/build:z" \
@@ -124,32 +150,101 @@ cmd_full() {
     if [[ "$USB_BURN_ON_DEPLOY" == "yes" ]]; then
         cmd_burn
     fi
+    local iso
+    iso="$(latest_iso)"
+    if [[ -n "$iso" ]]; then
+        log ""
+        log "USB burn command:"
+        log "  dd if=$iso of=/dev/sda bs=4M status=progress oflag=sync conv=fsync && sync"
+    fi
     log "=== FULL complete ==="
+}
+
+cmd_kvm_deploy() {
+    local iso
+    iso="$(latest_iso)"
+    [[ -n "$iso" ]] || die "No ISO found — run build first"
+    log "Deploying to KVM..."
+    virsh destroy kldload-free 2>/dev/null || true
+    virsh undefine kldload-free --remove-all-storage 2>/dev/null || true
+    cp "$iso" /var/lib/libvirt/images/kldload-free-latest.iso
+    chown qemu:qemu /var/lib/libvirt/images/kldload-free-latest.iso
+    qemu-img create -f qcow2 /var/lib/libvirt/images/kldload-free.qcow2 "${VM_DISK_GB}G"
+    chown qemu:qemu /var/lib/libvirt/images/kldload-free.qcow2
+    virt-install --name kldload-free --ram "$VM_MEMORY" --vcpus "$VM_CORES" \
+        --disk path=/var/lib/libvirt/images/kldload-free.qcow2,format=qcow2,bus=virtio \
+        --cdrom /var/lib/libvirt/images/kldload-free-latest.iso \
+        --os-variant centos-stream9 --network network=default,model=virtio \
+        --graphics vnc,listen=0.0.0.0 \
+        --boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no \
+        --noautoconsole
+    log "KVM VM ready — VNC on $(virsh vncdisplay kldload-free 2>/dev/null || echo ':0')"
+}
+
+cmd_proxmox_deploy() {
+    local iso
+    iso="$(latest_iso)"
+    [[ -n "$iso" ]] || die "No ISO found — run build first"
+    [[ -n "$PROXMOX_HOST" ]] || die "PROXMOX_HOST not set"
+    log "Deploying to Proxmox ($PROXMOX_HOST VMID=$VMID)..."
+    scp "$iso" "root@${PROXMOX_HOST}:/var/lib/vz/template/iso/kldload-free-latest.iso"
+    ssh "root@${PROXMOX_HOST}" bash -s "$VMID" "$VM_MEMORY" "$VM_CORES" "$VM_DISK_GB" <<'PVESH'
+        VMID="$1" VMEM="$2" VCORES="$3" VDISK="$4"
+        qm stop "$VMID" 2>/dev/null; sleep 1
+        qm destroy "$VMID" --purge 2>/dev/null; sleep 1
+        qm create "$VMID" --name kldload-free --memory "$VMEM" --cores "$VCORES" \
+            --sockets 1 --cpu host --machine q35 --ostype l26 --bios ovmf \
+            --efidisk0 local-zfs:4,efitype=4m,pre-enrolled-keys=0 \
+            --scsihw virtio-scsi-single --scsi0 "local-zfs:${VDISK}" \
+            --net0 virtio,bridge=vmbr0 --serial0 socket --agent 1 --vga std \
+            --ide2 local:iso/kldload-free-latest.iso,media=cdrom \
+            --boot 'order=ide2;scsi0'
+        qm set "$VMID" --tpmstate0 local-zfs:4,version=v2.0
+        qm start "$VMID"
+PVESH
+    log "Proxmox VM $VMID started on $PROXMOX_HOST"
+}
+
+cmd_deploy_all() {
+    cmd_kvm_deploy
+    cmd_proxmox_deploy
+    log ""
+    log "Both VMs deployed. USB burn command:"
+    local iso; iso="$(latest_iso)"
+    log "  dd if=$iso of=/dev/sda bs=4M status=progress oflag=sync conv=fsync && sync"
 }
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 case "${1:-help}" in
-    build)          cmd_build ;;
-    builder-image)  cmd_builder_image ;;
-    clean)          cmd_clean ;;
-    burn)           cmd_burn ;;
-    full)           cmd_full ;;
+    build)              cmd_build ;;
+    build-debian-darksite) cmd_build_debian_darksite ;;
+    builder-image)      cmd_builder_image ;;
+    clean)              cmd_clean ;;
+    burn)               cmd_burn ;;
+    full)               cmd_full ;;
+    kvm-deploy)         cmd_kvm_deploy ;;
+    proxmox-deploy)     cmd_proxmox_deploy ;;
+    deploy-all)         cmd_deploy_all ;;
     help|*)
-        echo "kldload deploy.sh — CentOS/Rocky ZFS live ISO builder"
+        echo "kldload deploy.sh — multi-distro ZFS live ISO builder"
         echo ""
         echo "Usage: ./deploy.sh <command>"
         echo ""
         echo "Commands:"
-        echo "  full            Clean + rebuild builder + build ISO + burn"
-        echo "  build           Build ISO only"
-        echo "  builder-image   Rebuild the container builder image"
-        echo "  clean           Remove build artifacts"
-        echo "  burn            Write ISO to USB (USB_DEVICE=/dev/sdX)"
+        echo "  full                  Clean + rebuild builder + build ISO"
+        echo "  build                 Build ISO only (caches Debian darksite)"
+        echo "  build-debian-darksite Rebuild Debian APT darksite cache"
+        echo "  builder-image         Rebuild the container builder image"
+        echo "  clean                 Remove build artifacts"
+        echo "  burn                  Write ISO to USB (USB_DEVICE=/dev/sda)"
+        echo "  kvm-deploy            Deploy ISO to local KVM (virsh)"
+        echo "  proxmox-deploy        Deploy ISO to Proxmox (VMID=$VMID)"
+        echo "  deploy-all            Deploy to KVM + Proxmox + print USB command"
         echo ""
         echo "Environment:"
         echo "  PROFILE         desktop | server (default: desktop)"
         echo "  RELEASE         CentOS release (default: 9)"
-        echo "  USB_DEVICE      USB block device for burn"
+        echo "  USB_DEVICE      USB block device for burn (default: /dev/sda)"
         ;;
 esac

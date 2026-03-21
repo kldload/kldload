@@ -18,7 +18,7 @@ BUILD_DATE="$(date +%Y%m%d)"
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
 DISTRO_TAG="${DISTRO:-centos}"
-ISO_NAME="kldload-${EDITION}-${DISTRO_TAG}-${ARCH}-${BUILD_DATE}.iso"
+ISO_NAME="kldload-${EDITION}-${DISTRO_TAG}-${PROFILE}-${ARCH}-${BUILD_DATE}.iso"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
 log() { printf '[%s] [build-iso] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
@@ -301,6 +301,24 @@ X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=5
 AUTOSTART
 
+    # Firefox policy — suppress first-run tabs, privacy notice, default browser check
+    mkdir -p "${ROOTFS}/usr/lib64/firefox/distribution"
+    cat > "${ROOTFS}/usr/lib64/firefox/distribution/policies.json" << 'FFPOLICY'
+{
+  "policies": {
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "DontCheckDefaultBrowser": true,
+    "DisablePrivateBrowsing": false,
+    "NoDefaultBookmarks": true,
+    "Homepage": {
+      "URL": "http://localhost:8080",
+      "StartPage": "homepage"
+    }
+  }
+}
+FFPOLICY
+
     # Disable screensaver / screen blank / auto-lock on live session
     mkdir -p "${ROOTFS}/etc/dconf/db/local.d" "${ROOTFS}/etc/dconf/profile"
     cat > "${ROOTFS}/etc/dconf/profile/user" << 'DCONFPROFILE'
@@ -435,6 +453,25 @@ SVCEOF
 
 chroot "$ROOTFS" systemctl enable kldload-webui 2>/dev/null || true
 
+# Debian darksite APT mirror service (serves on port 3142 for debootstrap)
+cat > "${ROOTFS}/usr/lib/systemd/system/kldload-apt-mirror.service" << 'APTEOF'
+[Unit]
+Description=kldload Debian darksite APT mirror
+After=network.target
+ConditionPathExists=/root/darksite/debian/apt/dists/trixie/Release
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m http.server 3142 --bind 127.0.0.1 --directory /root/darksite/debian
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+APTEOF
+
+chroot "$ROOTFS" systemctl enable kldload-apt-mirror 2>/dev/null || true
+
 # Ensure ZFS module loads at boot
 cat > "${ROOTFS}/etc/modules-load.d/zfs.conf" << 'ZFSMOD'
 zfs
@@ -451,7 +488,16 @@ ZFSTUNE
 if [[ -d /build/live-build/config/includes.chroot/root/darksite ]]; then
     mkdir -p "${ROOTFS}/root/darksite"
     cp -r /build/live-build/config/includes.chroot/root/darksite/. "${ROOTFS}/root/darksite/"
-    log "Darksite repo copied to rootfs: $(du -sh "${ROOTFS}/root/darksite" 2>/dev/null | cut -f1)"
+    log "RPM darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite" 2>/dev/null | cut -f1)"
+fi
+
+# Copy Debian darksite APT mirror into the rootfs
+if [[ -d /build/live-build/darksite-debian-cache/apt ]]; then
+    mkdir -p "${ROOTFS}/root/darksite/debian"
+    cp -r /build/live-build/darksite-debian-cache/apt "${ROOTFS}/root/darksite/debian/"
+    log "Debian darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/debian" 2>/dev/null | cut -f1)"
+else
+    log "WARNING: No Debian darksite found — Debian installs will require internet"
 fi
 
 # Download ZFSBootMenu EFI binary into darksite for offline installs
@@ -537,16 +583,14 @@ menuentry "KLDload Live (troubleshooting)" {
 }
 GRUBCFG
 
-# Create EFI boot image
+# Create EFI boot image (using mtools — no loop device needed in containers)
 dd if=/dev/zero of="${ISO_STAGING}/images/efiboot.img" bs=1M count=10
 mkfs.vfat "${ISO_STAGING}/images/efiboot.img"
-mkdir -p /tmp/efi-mount
-mount "${ISO_STAGING}/images/efiboot.img" /tmp/efi-mount
-mkdir -p /tmp/efi-mount/EFI/BOOT
-cp "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" /tmp/efi-mount/EFI/BOOT/ 2>/dev/null || true
-cp "${ISO_STAGING}/EFI/BOOT/grubx64.efi" /tmp/efi-mount/EFI/BOOT/ 2>/dev/null || true
-cp "${ISO_STAGING}/EFI/BOOT/grub.cfg" /tmp/efi-mount/EFI/BOOT/
-umount /tmp/efi-mount
+mmd -i "${ISO_STAGING}/images/efiboot.img" ::EFI
+mmd -i "${ISO_STAGING}/images/efiboot.img" ::EFI/BOOT
+mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" ::EFI/BOOT/ 2>/dev/null || true
+mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grubx64.efi" ::EFI/BOOT/ 2>/dev/null || true
+mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grub.cfg" ::EFI/BOOT/
 
 # Build ISO (EFI-only, no legacy BIOS)
 xorriso -as mkisofs \

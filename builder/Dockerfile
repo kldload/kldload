@@ -30,6 +30,7 @@ RUN dnf install -y epel-release && \
         rsync \
         genisoimage \
         syslinux \
+        mtools \
         python3 \
         python3-pyyaml \
     && dnf clean all
