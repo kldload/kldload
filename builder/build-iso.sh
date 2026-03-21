@@ -281,7 +281,7 @@ if [[ "$PROFILE" == "desktop" ]]; then
 [Desktop Entry]
 Type=Application
 Name=kldload Web UI
-Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/8080) 2>/dev/null && break; sleep 1; done; sleep 3; firefox --no-remote http://localhost:8080'
+Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/8080) 2>/dev/null && break; sleep 1; done; sleep 3; MOZ_ENABLE_WAYLAND=0 firefox --no-remote http://localhost:8080'
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=8
 AUTOSTART
