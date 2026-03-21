@@ -79,6 +79,9 @@
     </li>
   </ul>
 
+  <div style="margin-top:auto;padding:0.8rem 1rem;font-size:0.7rem;color:var(--muted);border-top:1px solid var(--border);line-height:1.5">
+    After install completes, remove the USB/ISO before rebooting so the system boots from disk.
+  </div>
 </nav>
 
 <!-- ── Main ───────────────────────────────────────────────────────────────── -->
@@ -475,6 +478,27 @@
             <div style="display:flex;align-items:center;gap:0.5rem">
               <input type="checkbox" id="install-zfs-dedup" style="width:1rem;height:1rem;cursor:pointer;accent-color:var(--accent);flex-shrink:0">
               <label for="install-zfs-dedup" style="cursor:pointer;font-size:0.9rem;margin:0">ZFS deduplication <span style="color:var(--muted);font-weight:400">(requires 5GB+ RAM per TB)</span></label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Image export -->
+        <div class="panel" style="margin-bottom:1rem">
+          <div class="panel-hdr">◉ Image Export</div>
+          <div class="panel-body">
+            <div class="form-group" style="margin-bottom:0.4rem">
+              <label>Export format <span style="color:var(--muted);font-weight:400">(after install completes)</span></label>
+              <select id="install-export-format">
+                <option value="none">None — install to disk only</option>
+                <option value="qcow2">qcow2 — KVM / Proxmox / OpenStack</option>
+                <option value="raw">raw — dd-ready disk image</option>
+                <option value="vhd">VHD — Azure / Hyper-V</option>
+                <option value="vmdk">VMDK — VMware ESXi / vSphere</option>
+                <option value="ova">OVA — VMware / VirtualBox portable</option>
+              </select>
+            </div>
+            <div style="font-size:0.75rem;color:var(--muted);line-height:1.5">
+              Exports the installed disk as a deployable image to the live desktop. One install, any platform.
             </div>
           </div>
         </div>
@@ -974,10 +998,15 @@ function startInstall() {
 
   const distro = (document.querySelector('#distro-grid .target-card.selected') || {}).dataset?.distro || 'centos';
   const nvidia = document.getElementById('install-nvidia')?.checked ? '1' : '0';
+  const wireguard = document.getElementById('install-wireguard')?.checked ? '1' : '0';
+  const ebpf = document.getElementById('install-ebpf')?.checked ? '1' : '0';
+  const dedup = document.getElementById('install-zfs-dedup')?.checked ? '1' : '0';
+  const exportFmt = document.getElementById('install-export-format')?.value || 'none';
   const params = {
     disk, hostname: host, username: user,
     password: pass, timezone, keyboard, locale, role, distro,
-    nvidia_drivers: nvidia,
+    nvidia_drivers: nvidia, wireguard, ebpf, zfs_dedup: dedup,
+    export_format: exportFmt,
     storage_mode: 'zfs', infra_mode: 'standalone',
     zfs_encrypt: encrypt ? '1' : '0',
     ...(sshKey   ? { ssh_pubkey: sshKey }  : {}),
@@ -1034,6 +1063,7 @@ function confirmInstall() {
   if (document.getElementById('install-ebpf')?.checked) addons.push('+eBPF');
   if (document.getElementById('install-zfs-dedup')?.checked) addons.push('+Dedup');
   if (p.zfs_encrypt === '1') addons.push('+Encrypted');
+  if (p.export_format && p.export_format !== 'none') addons.push('→ ' + p.export_format.toUpperCase());
   if (addons.length) summary += '  ' + addons.join(' ');
   document.getElementById('install-profile-summary').textContent = summary;
 
