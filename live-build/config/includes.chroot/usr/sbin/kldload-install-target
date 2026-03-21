@@ -1228,9 +1228,99 @@ main() {
   zfs snapshot -r "bpool@install-${_snap_ts}" 2>/dev/null || true
   _ok "Snapshot"    "rpool@install-${_snap_ts}"
 
+  # ── Image export ────────────────────────────────────────────────────────
+  local export_fmt="${KLDLOAD_EXPORT_FORMAT:-none}"
+  if [[ "${export_fmt}" != "none" && -n "${export_fmt}" ]]; then
+    _info "▸  Exporting disk image (${export_fmt})..."
+    k_export_image "${export_fmt}"
+  fi
+
   k_log "Install complete"
   k_poweroff_after_success
   sync || true
+}
+
+# ── Image export ─────────────────────────────────────────────────────────────
+k_export_image() {
+  local fmt="${1:?}"
+  local disk="${KLDLOAD_DISK:?}"
+  local hostname="${KLDLOAD_HOSTNAME:-kldload}"
+  local distro="${KLDLOAD_DISTRO:-centos}"
+  local profile="${KLDLOAD_PROFILE:-server}"
+  local ts
+  ts=$(date -u +%Y%m%d)
+  local base="kldload-${distro}-${profile}-${hostname}-${ts}"
+  local outdir="/home/live/Desktop"
+  mkdir -p "${outdir}" 2>/dev/null || outdir="/tmp"
+
+  # Ensure pool is exported cleanly before imaging
+  zpool export rpool 2>/dev/null || true
+  zpool export bpool 2>/dev/null || true
+  sync
+
+  case "${fmt}" in
+    qcow2)
+      k_log "Exporting ${disk} → ${outdir}/${base}.qcow2"
+      qemu-img convert -f raw -O qcow2 -c -p "${disk}" "${outdir}/${base}.qcow2"
+      _ok "Export" "${outdir}/${base}.qcow2 ($(du -sh "${outdir}/${base}.qcow2" 2>/dev/null | cut -f1))"
+      ;;
+    raw)
+      k_log "Exporting ${disk} → ${outdir}/${base}.raw"
+      dd if="${disk}" of="${outdir}/${base}.raw" bs=4M status=progress conv=sparse
+      _ok "Export" "${outdir}/${base}.raw ($(du -sh "${outdir}/${base}.raw" 2>/dev/null | cut -f1))"
+      ;;
+    vhd)
+      k_log "Exporting ${disk} → ${outdir}/${base}.vhd"
+      qemu-img convert -f raw -O vpc -o subformat=fixed,force_size "${disk}" "${outdir}/${base}.vhd"
+      _ok "Export" "${outdir}/${base}.vhd ($(du -sh "${outdir}/${base}.vhd" 2>/dev/null | cut -f1))"
+      ;;
+    vmdk)
+      k_log "Exporting ${disk} → ${outdir}/${base}.vmdk"
+      qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "${disk}" "${outdir}/${base}.vmdk"
+      _ok "Export" "${outdir}/${base}.vmdk ($(du -sh "${outdir}/${base}.vmdk" 2>/dev/null | cut -f1))"
+      ;;
+    ova)
+      k_log "Exporting ${disk} → ${outdir}/${base}.ova"
+      # OVA = OVF descriptor + VMDK in a tar
+      local vmdk_tmp="${outdir}/${base}.vmdk"
+      qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "${disk}" "${vmdk_tmp}"
+      local vmdk_size
+      vmdk_size=$(stat -c%s "${vmdk_tmp}" 2>/dev/null || echo 0)
+      cat > "${outdir}/${base}.ovf" <<OVFEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<Envelope xmlns="http://schemas.dmtf.org/ovf/envelope/1"
+          xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
+          xmlns:vssd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_VirtualSystemSettingData">
+  <References>
+    <File ovf:href="${base}.vmdk" ovf:id="file1" ovf:size="${vmdk_size}"/>
+  </References>
+  <DiskSection>
+    <Disk ovf:capacity="42949672960" ovf:diskId="vmdisk1" ovf:fileRef="file1" ovf:format="http://www.vmware.com/interfaces/specifications/vmdk.html#streamOptimized"/>
+  </DiskSection>
+  <VirtualSystem ovf:id="${hostname}">
+    <Name>${hostname}</Name>
+    <OperatingSystemSection ovf:id="101"><Description>Linux</Description></OperatingSystemSection>
+    <VirtualHardwareSection>
+      <System><vssd:VirtualSystemType>vmx-14</vssd:VirtualSystemType></System>
+      <Item><rasd:ResourceType>3</rasd:ResourceType><rasd:VirtualQuantity>4</rasd:VirtualQuantity><rasd:Description>CPUs</rasd:Description></Item>
+      <Item><rasd:ResourceType>4</rasd:ResourceType><rasd:VirtualQuantity>4096</rasd:VirtualQuantity><rasd:Description>Memory</rasd:Description></Item>
+      <Item><rasd:ResourceType>17</rasd:ResourceType><rasd:HostResource>ovf:/disk/vmdisk1</rasd:HostResource></Item>
+    </VirtualHardwareSection>
+  </VirtualSystem>
+</Envelope>
+OVFEOF
+      (cd "${outdir}" && tar cf "${base}.ova" "${base}.ovf" "${base}.vmdk")
+      rm -f "${vmdk_tmp}" "${outdir}/${base}.ovf"
+      _ok "Export" "${outdir}/${base}.ova ($(du -sh "${outdir}/${base}.ova" 2>/dev/null | cut -f1))"
+      ;;
+    *)
+      k_log "WARNING: Unknown export format '${fmt}' — skipping"
+      ;;
+  esac
+
+  # Re-import pools so poweroff cleanup works
+  zpool import -f rpool 2>/dev/null || true
+  zpool import -f bpool 2>/dev/null || true
 }
 
 main "$@"

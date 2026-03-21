@@ -74,7 +74,7 @@ PKGS=(
     # Cross-distro installer (debootstrap for Debian targets from CentOS live)
     debootstrap
     # Guest agents
-    qemu-guest-agent open-vm-tools-desktop
+    qemu-guest-agent qemu-img open-vm-tools-desktop
 )
 
 if [[ "$PROFILE" == "desktop" ]]; then
