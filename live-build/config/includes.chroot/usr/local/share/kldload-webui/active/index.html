@@ -207,6 +207,28 @@
           <div class="panel-hdr">↯ Target Disk &amp; Identity</div>
           <div class="panel-body">
             <div class="form-group">
+              <label>Target distro</label>
+              <select id="install-distro" onchange="toggleRhelKey()">
+                <option value="centos">CentOS Stream 9</option>
+                <option value="debian">Debian 13 (Trixie)</option>
+                <option value="rhel">RHEL 9 (requires subscription)</option>
+                <option value="rocky">Rocky Linux 9</option>
+              </select>
+            </div>
+            <div id="rhel-key-group" style="display:none">
+              <div class="form-group">
+                <label>RHEL activation key</label>
+                <input type="text" id="rhel-key" placeholder="activation key name">
+              </div>
+              <div class="form-group">
+                <label>RHEL org ID</label>
+                <input type="text" id="rhel-org" placeholder="numeric org ID">
+              </div>
+              <div class="note" style="font-size:0.8rem;color:var(--muted);margin-top:0.25rem">
+                Used at install time only to pull packages from Red Hat CDN. Not stored on the installed system.
+              </div>
+            </div>
+            <div class="form-group">
               <label>Disk <span id="disk-refresh" style="font-size:0.75rem;color:var(--accent);cursor:pointer" onclick="requestDisks()">↻ refresh</span></label>
               <select id="install-disk">
                 <option value="">— scanning… —</option>
@@ -231,10 +253,33 @@
               <div class="pass-hint" id="pass-match"></div>
             </div>
             <div class="form-group" style="margin-top:0.5rem">
-              <label>SSH public key <span style="color:var(--muted);font-weight:400">(optional — paste authorized_keys entry)</span></label>
-              <textarea id="install-ssh-key" rows="3" placeholder="ssh-ed25519 AAAA… user@host" style="font-family:monospace;font-size:0.78rem;resize:vertical;width:100%;box-sizing:border-box;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:0.4rem 0.5rem;outline:none"></textarea>
+              <label>SSH public key <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+              <textarea id="install-ssh-key" rows="2" placeholder="ssh-ed25519 AAAA… user@host" style="font-family:monospace;font-size:0.78rem;resize:vertical;width:100%;box-sizing:border-box;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:0.4rem 0.5rem;outline:none"></textarea>
             </div>
-            <div class="form-group" style="margin-top:0.5rem">
+
+            <div style="margin-top:1rem;padding:0.8rem;background:var(--surface2);border:1px solid var(--border);border-radius:6px">
+              <label style="font-weight:600;margin-bottom:0.5rem;display:block">Kernel modules <span style="color:var(--muted);font-weight:400;font-size:0.8rem">(bundled on first boot)</span></label>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem 1rem">
+                <label style="display:flex;align-items:center;gap:0.4rem;font-weight:400;cursor:default;font-size:0.85rem">
+                  <input type="checkbox" id="mod-zfs" checked disabled style="accent-color:var(--accent)">
+                  <strong style="color:var(--accent)">ZFS on Root</strong>
+                </label>
+                <label style="display:flex;align-items:center;gap:0.4rem;font-weight:400;cursor:pointer;font-size:0.85rem">
+                  <input type="checkbox" id="mod-wireguard" checked style="accent-color:var(--accent)">
+                  <strong>WireGuard</strong>
+                </label>
+                <label style="display:flex;align-items:center;gap:0.4rem;font-weight:400;cursor:pointer;font-size:0.85rem">
+                  <input type="checkbox" id="mod-nvidia" style="accent-color:var(--accent)">
+                  <strong>NVIDIA Drivers</strong>
+                </label>
+                <label style="display:flex;align-items:center;gap:0.4rem;font-weight:400;cursor:pointer;font-size:0.85rem">
+                  <input type="checkbox" id="mod-ebpf" style="accent-color:var(--accent)">
+                  <strong>eBPF Tools</strong>
+                </label>
+              </div>
+            </div>
+
+            <div class="form-group" style="margin-top:0.8rem">
               <label>ZFS encryption</label>
               <select id="install-encryption" onchange="toggleEncryption()">
                 <option value="0">None — standard ZFS (recommended)</option>
@@ -254,27 +299,6 @@
               </div>
               <div class="note" style="font-size:0.8rem;color:var(--muted);margin-top:0.25rem">
                 ZFSBootMenu will prompt for this passphrase on every boot before mounting the root pool. Store it somewhere safe — there is no recovery.
-              </div>
-            </div>
-            <div class="form-group" style="margin-top:1rem">
-              <label>Kernel modules <span style="color:var(--muted);font-weight:400">(bundled on first boot)</span></label>
-              <div style="display:flex;flex-direction:column;gap:0.5rem;margin-top:0.4rem">
-                <label style="display:flex;align-items:center;gap:0.5rem;font-weight:400;cursor:pointer">
-                  <input type="checkbox" id="mod-zfs" checked disabled style="accent-color:var(--accent)">
-                  <span><strong style="color:var(--accent)">ZFS on Root</strong> — checksummed, compressed, snapshot-capable filesystem</span>
-                </label>
-                <label style="display:flex;align-items:center;gap:0.5rem;font-weight:400;cursor:pointer">
-                  <input type="checkbox" id="mod-wireguard" checked style="accent-color:var(--accent)">
-                  <span><strong>WireGuard</strong> — kernel-level encrypted mesh networking</span>
-                </label>
-                <label style="display:flex;align-items:center;gap:0.5rem;font-weight:400;cursor:pointer">
-                  <input type="checkbox" id="mod-nvidia" style="accent-color:var(--accent)">
-                  <span><strong>NVIDIA Drivers</strong> — GPU drivers, CUDA-ready on first boot</span>
-                </label>
-                <label style="display:flex;align-items:center;gap:0.5rem;font-weight:400;cursor:pointer">
-                  <input type="checkbox" id="mod-ebpf" style="accent-color:var(--accent)">
-                  <span><strong>eBPF Tools</strong> — bpftool, bpftrace, bcc for kernel observability</span>
-                </label>
               </div>
             </div>
           </div>
@@ -878,6 +902,11 @@ function toggleDHCP() {
 function toggleEncryption() {
   const enc = document.getElementById('install-encryption').value === '1';
   document.getElementById('enc-passphrase-group').style.display = enc ? 'block' : 'none';
+}
+
+function toggleRhelKey() {
+  const distro = document.getElementById('install-distro').value;
+  document.getElementById('rhel-key-group').style.display = distro === 'rhel' ? 'block' : 'none';
 }
 
 function checkEncPass() {
