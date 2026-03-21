@@ -274,31 +274,16 @@ fi
 
 # Auto-launch Firefox to webui on live session login
 if [[ "$PROFILE" == "desktop" ]]; then
-    # GDM PostLogin script — most reliable on CentOS
-    mkdir -p "${ROOTFS}/etc/gdm/PostLogin"
-    cat > "${ROOTFS}/etc/gdm/PostLogin/Default" << 'POSTLOGIN'
-#!/bin/sh
-# Wait for webui to be listening, then launch Firefox
-(
-  for i in $(seq 1 60); do
-    (echo >/dev/tcp/localhost/8080) 2>/dev/null && break
-    sleep 1
-  done
-  sleep 2
-  su - live -c 'DISPLAY=:0 firefox http://localhost:8080'
-) &
-POSTLOGIN
-    chmod +x "${ROOTFS}/etc/gdm/PostLogin/Default"
-
-    # XDG autostart as backup
+    # XDG autostart — waits for GNOME Shell to be ready, then opens Firefox
+    # PostLogin removed: it raced with the compositor and caused black windows
     mkdir -p "${ROOTFS}/etc/xdg/autostart"
     cat > "${ROOTFS}/etc/xdg/autostart/kldload-webui.desktop" << 'AUTOSTART'
 [Desktop Entry]
 Type=Application
 Name=kldload Web UI
-Exec=firefox http://localhost:8080
+Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/8080) 2>/dev/null && break; sleep 1; done; sleep 3; firefox --no-remote http://localhost:8080'
 X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=5
+X-GNOME-Autostart-Delay=8
 AUTOSTART
 
     # Firefox policy — suppress first-run tabs, privacy notice, default browser check
