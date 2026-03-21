@@ -51,6 +51,14 @@ read_package_set "target-zfs"
 read_package_set "target-desktop"
 read_package_set "target-server"
 
+# Enable contrib + non-free-firmware (ZFS is in contrib)
+log "Enabling contrib and non-free-firmware components..."
+sed -i 's/Components: main/Components: main contrib non-free-firmware/' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+# Fallback for traditional sources.list format
+if [[ -f /etc/apt/sources.list ]]; then
+    sed -i 's/main$/main contrib non-free-firmware/' /etc/apt/sources.list 2>/dev/null || true
+fi
+
 # Update APT cache
 log "Updating APT package lists..."
 apt-get update -q 2>&1 | grep -v '^Get\|^Hit\|^Ign' || true
