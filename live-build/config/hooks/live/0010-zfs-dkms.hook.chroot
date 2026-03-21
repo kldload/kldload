@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# 0010-zfs-dkms.hook.chroot
+# Builds and installs the ZFS DKMS kernel module.
+# linux-headers-amd64 and build-essential are installed via package lists.
+# ---------------------------------------------------------------------------
+
+LOG="/var/log/kldload-zfs-dkms-build.log"
+mkdir -p "$(dirname "$LOG")"
+
+# Use explicit paths so the ERR trap works even if PATH is broken
+_DATE="$(command -v date 2>/dev/null || echo /usr/bin/date)"
+_TEE="$(command -v tee  2>/dev/null || echo /usr/bin/tee)"
+
+ts()  { "$_DATE" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo "??:??:??"; }
+log() { echo "$(ts) [zfs-dkms] $*" | "$_TEE" -a "$LOG" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+trap 'die "Unexpected error at line $LINENO (exit $?)"' ERR
+
+log "Starting ZFS DKMS build hook"
+
+# ---------------------------------------------------------------------------
+# Debian 13 usrmerge: /sbin/dkms hardcodes /bin/date and /bin/sh.
+# If /bin is not yet a symlink to usr/bin, create targeted symlinks so DKMS
+# can find the tools it needs with hardcoded /bin/... paths.
+# ---------------------------------------------------------------------------
+if [[ ! -L /bin ]]; then
+    log "WARNING: /bin is not a symlink to usr/bin — creating /bin compat links for DKMS"
+    for _bin in date sh bash; do
+        if [[ ! -e "/bin/${_bin}" ]]; then
+            _src="$(command -v "${_bin}" 2>/dev/null || true)"
+            if [[ -x "${_src}" ]]; then
+                ln -sf "${_src}" "/bin/${_bin}" 2>/dev/null \
+                    && log "  linked /bin/${_bin} -> ${_src}" \
+                    || log "  WARNING: could not link /bin/${_bin}"
+            fi
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# Detect kernel version from installed modules directory
+# ---------------------------------------------------------------------------
+
+KVER=""
+if [[ -d /lib/modules ]]; then
+    KVER="$(ls -1 /lib/modules/ 2>/dev/null | sort -V | tail -n1 || true)"
+fi
+[[ -n "$KVER" ]] || die "No kernel modules directory found under /lib/modules"
+log "Kernel version: $KVER"
+
+# ---------------------------------------------------------------------------
+# Verify linux-headers build directory exists
+# Headers are pre-installed via package list; if missing, try to recover.
+# ---------------------------------------------------------------------------
+
+HEADERS_DIR="/lib/modules/${KVER}/build"
+if [[ ! -d "$HEADERS_DIR" ]]; then
+    log "Headers build dir not found: $HEADERS_DIR"
+    log "Attempting to find and install matching headers package..."
+
+    # Derive the headers package name from the installed kernel package
+    KPKG="$(dpkg-query -W -f='${Package}\n' 'linux-image-*' 2>/dev/null \
+            | grep -v '^linux-image-amd64$' | sort -V | tail -1 || true)"
+    if [[ -n "$KPKG" ]]; then
+        HPKG="${KPKG/linux-image-/linux-headers-}"
+        log "Installing $HPKG..."
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$HPKG" \
+            2>&1 | tee -a "$LOG" || die "Failed to install $HPKG"
+    else
+        die "Cannot determine headers package for kernel $KVER"
+    fi
+fi
+
+[[ -d "$HEADERS_DIR" ]] || die "Headers build dir still missing: $HEADERS_DIR"
+log "Headers verified: $HEADERS_DIR"
+
+# ---------------------------------------------------------------------------
+# Find ZFS DKMS source
+# ---------------------------------------------------------------------------
+
+ZFS_SRC=""
+for d in /usr/src/zfs-*; do
+    [[ -d "$d" ]] && ZFS_SRC="$d"
+done
+[[ -n "$ZFS_SRC" ]] || die "No ZFS source found under /usr/src/zfs-*"
+
+ZFS_VER="$(basename "$ZFS_SRC" | sed 's/^zfs-//')"
+[[ -n "$ZFS_VER" ]] || die "Cannot extract ZFS version from $ZFS_SRC"
+log "ZFS DKMS version: $ZFS_VER  source: $ZFS_SRC"
+
+# ---------------------------------------------------------------------------
+# DKMS: remove → add → build → install
+# ---------------------------------------------------------------------------
+
+log "DKMS remove (if exists)..."
+dkms remove "zfs/${ZFS_VER}" --kernelver "$KVER" 2>&1 | "$_TEE" -a "$LOG" || true
+
+log "DKMS add..."
+dkms add "zfs/${ZFS_VER}" 2>&1 | "$_TEE" -a "$LOG" || true
+
+# Pre-create the build directory and make.log so DKMS can write to them
+# before the configure/pre_build step runs (avoids "No such file or directory"
+# errors from /sbin/dkms when it tries to log the configure output).
+mkdir -p "/var/lib/dkms/zfs/${ZFS_VER}/build"
+touch "/var/lib/dkms/zfs/${ZFS_VER}/build/make.log"
+log "Pre-created DKMS build dir: /var/lib/dkms/zfs/${ZFS_VER}/build"
+
+log "DKMS build (kernel $KVER)..."
+dkms build "zfs/${ZFS_VER}" --kernelver "$KVER" --force 2>&1 | "$_TEE" -a "$LOG" \
+    || die "dkms build failed for zfs/$ZFS_VER on $KVER"
+
+log "DKMS install..."
+dkms install "zfs/${ZFS_VER}" --kernelver "$KVER" --force 2>&1 | "$_TEE" -a "$LOG" \
+    || die "dkms install failed for zfs/$ZFS_VER on $KVER"
+
+# ---------------------------------------------------------------------------
+# Post-install
+# ---------------------------------------------------------------------------
+
+log "Running depmod..."
+depmod -a "$KVER" 2>&1 | "$_TEE" -a "$LOG"
+
+# Do NOT add zfs to /etc/modules-load.d/ — systemd-modules-load.service would
+# fail on a Secure Boot live boot (MOK not yet enrolled → modprobe zfs fails).
+# The ZFS systemd services (zfs-import-cache, zfs-mount, etc.) load the module
+# themselves as needed; the modules-load.d entry is redundant.
+
+# ---------------------------------------------------------------------------
+# Secure Boot: generate MOK key and sign ZFS modules
+# Must happen BEFORE update-initramfs so the signed modules are included.
+# ---------------------------------------------------------------------------
+
+MOK_DIR="/etc/kldload/mok"
+mkdir -p "$MOK_DIR"
+
+log "Generating Secure Boot MOK key pair at $MOK_DIR ..."
+openssl req -new -x509 -newkey rsa:2048 \
+    -keyout "$MOK_DIR/mok.key" \
+    -out    "$MOK_DIR/mok.pub" \
+    -days 3650 -nodes \
+    -subj "/CN=kldload Live ISO Secure Boot MOK/" \
+    2>&1 | "$_TEE" -a "$LOG"
+
+openssl x509 \
+    -in  "$MOK_DIR/mok.pub" \
+    -out "$MOK_DIR/mok.der" \
+    -outform DER \
+    2>&1 | "$_TEE" -a "$LOG"
+
+chmod 0600 "$MOK_DIR/mok.key"
+chmod 0644 "$MOK_DIR/mok.pub" "$MOK_DIR/mok.der"
+log "MOK key pair generated"
+
+# Locate sign-file from the installed linux-headers (same search as sign_helper.sh)
+SIGN_FILE=""
+for _d in "/usr/src/linux-headers-${KVER}" /usr/lib/linux-kbuild-"${KVER%%.*}"*; do
+    [[ -x "${_d}/scripts/sign-file" ]] && SIGN_FILE="${_d}/scripts/sign-file" && break
+done
+
+if [[ -z "$SIGN_FILE" ]]; then
+    log "WARNING: sign-file not found for $KVER — ZFS modules will not be signed"
+    log "         Secure Boot must be disabled to use ZFS from this live ISO"
+else
+    log "Signing ZFS modules with sign-file: $SIGN_FILE"
+    _signed=0
+    _failed=0
+
+    while IFS= read -r _mod; do
+        case "$_mod" in
+            *.ko.xz)
+                _ko="${_mod%.xz}"
+                xz -dk "$_mod" 2>>"$LOG"                   # decompress, keep .xz
+                if "$SIGN_FILE" sha256 "$MOK_DIR/mok.key" "$MOK_DIR/mok.pub" "$_ko" \
+                        2>&1 | "$_TEE" -a "$LOG"; then
+                    xz --check=crc32 -f "$_ko" 2>>"$LOG"  # recompress — kernel decompressor requires crc32 not crc64
+                    _signed=$(( _signed + 1 ))
+                    log "  signed: $(basename "$_mod")"
+                else
+                    rm -f "$_ko"
+                    _failed=$(( _failed + 1 ))
+                    log "  WARNING: signing failed: $(basename "$_mod")"
+                fi
+                ;;
+            *.ko.gz)
+                _ko="${_mod%.gz}"
+                gunzip -c "$_mod" > "$_ko" 2>>"$LOG"       # decompress, keep .gz
+                if "$SIGN_FILE" sha256 "$MOK_DIR/mok.key" "$MOK_DIR/mok.pub" "$_ko" \
+                        2>&1 | "$_TEE" -a "$LOG"; then
+                    gzip -f "$_ko" 2>>"$LOG"               # recompress
+                    mv "${_ko}.gz" "$_mod" 2>>"$LOG"       # put back
+                    _signed=$(( _signed + 1 ))
+                    log "  signed: $(basename "$_mod")"
+                else
+                    rm -f "$_ko"
+                    _failed=$(( _failed + 1 ))
+                    log "  WARNING: signing failed: $(basename "$_mod")"
+                fi
+                ;;
+            *.ko)
+                if "$SIGN_FILE" sha256 "$MOK_DIR/mok.key" "$MOK_DIR/mok.pub" "$_mod" \
+                        2>&1 | "$_TEE" -a "$LOG"; then
+                    _signed=$(( _signed + 1 ))
+                    log "  signed: $(basename "$_mod")"
+                else
+                    _failed=$(( _failed + 1 ))
+                    log "  WARNING: signing failed: $(basename "$_mod")"
+                fi
+                ;;
+        esac
+    done < <(find "/lib/modules/${KVER}" \
+                  \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.gz' \) \
+                  2>/dev/null | grep -i zfs || true)
+
+    log "ZFS module signing complete: $_signed signed, $_failed failed"
+fi
+
+# ---------------------------------------------------------------------------
+# Recompress all ZFS .ko.xz modules with --check=crc32
+# The Linux kernel XZ decompressor only supports CRC32, not the default CRC64.
+# DKMS compresses with CRC64 by default — recompress everything to be safe.
+# ---------------------------------------------------------------------------
+log "Recompressing ZFS modules with --check=crc32 (kernel requires crc32, not crc64)..."
+while IFS= read -r _mod; do
+    case "$_mod" in
+        *.ko.xz)
+            _check="$(xz --robot --list "$_mod" 2>/dev/null | awk '/^file/{print $7}')"
+            if [[ "$_check" != "CRC32" ]]; then
+                _ko="${_mod%.xz}"
+                xz -dk "$_mod" 2>>"$LOG"
+                rm -f "$_mod"
+                xz --check=crc32 -f "$_ko" 2>>"$LOG"
+                log "  recompressed (${_check:-unknown}→CRC32): $(basename "$_mod")"
+            fi
+            ;;
+    esac
+done < <(find "/lib/modules/${KVER}" -name '*.ko.xz' 2>/dev/null | grep -i zfs || true)
+
+log "Rebuilding initramfs for $KVER..."
+update-initramfs -u -k "$KVER" 2>&1 | "$_TEE" -a "$LOG" \
+    || die "update-initramfs failed"
+
+# ---------------------------------------------------------------------------
+# Verify zfs.ko is present
+# ---------------------------------------------------------------------------
+
+ZFS_KO="$(find "/lib/modules/${KVER}" -name "zfs.ko" -o -name "zfs.ko.xz" -o -name "zfs.ko.gz" 2>/dev/null | head -1 || true)"
+[[ -n "$ZFS_KO" ]] || die "zfs.ko (or compressed variant) not found under /lib/modules/${KVER}"
+log "ZFS module verified: $ZFS_KO"
+log "ZFS DKMS build complete. Kernel=$KVER  ZFS=$ZFS_VER"

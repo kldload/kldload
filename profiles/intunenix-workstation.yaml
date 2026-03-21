@@ -1,0 +1,73 @@
+name: intunenix-workstation
+description: >
+  Managed Linux workstation. Auto-enrolls with MasterControl server on
+  first boot via WireGuard wg0. Pulls assigned profile, applies packages
+  and config, reports compliance. Kiosk or full GNOME desktop depending
+  on assigned profile. Replaces Intune-managed Windows endpoints.
+
+# ---------------------------------------------------------------------------
+# TODO: Integration status
+# ---------------------------------------------------------------------------
+# DONE (from intunenix.sh):
+#   - GNOME desktop with operator autologin
+#   - Kiosk mode (Firefox/Chromium fullscreen → KIOSK_URL)
+#   - First-boot service (intunenix-firstboot.service)
+#   - Hooks system (/opt/intunenix/firstboot.d/)
+#
+# TODO — pre-golden-image:
+#   [1] Bake intunenix-agent into image (see build/intunenix/agent.sh)
+#       Agent must: enroll via wg0 → 10.78.0.1, pull profile, apply, heartbeat
+#   [2] WireGuard wg0 enrollment key pre-provisioned at build time
+#       MasterControl hands out wg0 peer config as part of enrollment response
+#   [3] Salt minion auto-registers with master at 10.78.0.1 (wg0)
+#       Profile application = salt-call state.highstate
+#   [4] Compliance reporting: installed pkgs, running services, config drift
+#       Reported back to MC API on heartbeat interval
+#   [5] KIOSK_URL set to https://10.78.0.1 (MC server on wg0) at enroll time
+#   [6] Golden image build: kldload golden build intunenix-workstation
+# ---------------------------------------------------------------------------
+
+packages:
+  base:
+    - openssh-server
+    - sudo
+    - curl
+    - rsync
+    - chrony
+    - nftables
+    - htop
+    - vim-tiny
+  desktop:
+    - task-gnome-desktop
+    - gdm3
+    - firefox-esr
+  agent:
+    - python3
+    - python3-requests
+    - salt-minion
+    # Kiosk fallback browser
+    - chromium
+  zfs:
+    - zfsutils-linux
+    - zfs-initramfs
+    - zfs-zed
+
+features:
+  - ssh
+  - zfs
+  - nftables
+  - gnome
+  - kiosk
+  - intunenix-agent
+  - salt-minion
+
+services:
+  enable:
+    - ssh
+    - chrony
+    - gdm
+    - intunenix-agent
+    - salt-minion
+    - kldload-firstboot
+  disable:
+    - bluetooth

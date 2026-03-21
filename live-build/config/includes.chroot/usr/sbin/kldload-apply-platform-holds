@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PKGS=(
+  linux-image-amd64
+  linux-headers-amd64
+  zfsutils-linux
+  zfs-zed
+  zfs-initramfs
+  zfs-dkms
+  grub-efi-amd64
+  shim-signed
+  mokutil
+)
+
+installed=()
+for p in "${PKGS[@]}"; do
+  if dpkg-query -W -f='${Status}\n' "$p" 2>/dev/null | grep -q installed; then
+    installed+=("$p")
+  fi
+done
+
+if (( ${#installed[@]} > 0 )); then
+  apt-mark hold "${installed[@]}" || true
+fi

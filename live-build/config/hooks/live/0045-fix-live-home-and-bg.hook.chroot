@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+LOG=/var/log/kldload-live-home-fix.log
+mkdir -p /var/log
+exec >>"$LOG" 2>&1
+
+echo "=== $(date -Is) fix live home/bg start ==="
+
+install -d -m 0755 /home/live
+install -d -m 0755 /home/live/.config
+install -d -m 0755 /home/live/.config/autostart
+install -d -m 0755 /home/live/Pictures
+
+# SSH directory — strict permissions required by sshd
+install -d -m 0700 /home/live/.ssh
+# authorized_keys is placed here by includes.chroot; ensure mode is correct
+if [[ -f /home/live/.ssh/authorized_keys ]]; then
+  chmod 0600 /home/live/.ssh/authorized_keys
+  echo "fixed mode: /home/live/.ssh/authorized_keys"
+fi
+# motd.d directory for ssh-init banner
+install -d -m 0755 /etc/motd.d
+
+if [[ -f /root/darksite/bg.jpg ]]; then
+  cp -f /root/darksite/bg.jpg /home/live/Pictures/kldload-bg.jpg
+  chown -R live:live /home/live/Pictures || true
+fi
+
+# Correct paths are /usr/bin, not /usr/local/bin
+for f in \
+  /usr/bin/kldload-launch-installer \
+  /usr/bin/kldload-live-session-init \
+  /usr/bin/kldload-apply-live-wallpaper
+do
+  if [[ -e "$f" ]]; then
+    chmod 0755 "$f"
+    echo "fixed mode: $f"
+  else
+    echo "warn: missing expected file: $f"
+  fi
+done
+
+chown -R live:live /home/live || true
+
+echo "=== $(date -Is) fix live home/bg done ==="

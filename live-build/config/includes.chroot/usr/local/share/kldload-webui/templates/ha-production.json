@@ -1,0 +1,412 @@
+{
+  "name": "ha-production",
+  "description": "HA Production — 16-node Kubernetes cluster with redundant firewalls, HA etcd, control plane, workers, load balancers, storage, and monitoring",
+  "domain": "internal.example.com",
+  "wgCidr": "10.200.0.0/16",
+  "mgmtCidr": "10.100.10.0/24",
+  "k8sApiVip": "10.100.10.208",
+  "wgPlanes": {
+    "wg0": "Management",
+    "wg1": "Service mesh",
+    "wg2": "Storage/metrics",
+    "wg3": "k8s backplane"
+  },
+  "groups": [
+    {
+      "id": "g1",
+      "name": "fw",
+      "role": "firewall",
+      "count": 2,
+      "cpu": 4,
+      "ram": 8,
+      "disk": 128,
+      "wg": [0, 1, 2, 3]
+    },
+    {
+      "id": "g2",
+      "name": "master",
+      "role": "salt-master",
+      "count": 2,
+      "cpu": 4,
+      "ram": 16,
+      "disk": 256,
+      "wg": [0, 1]
+    },
+    {
+      "id": "g3",
+      "name": "etcd",
+      "role": "etcd",
+      "count": 3,
+      "cpu": 4,
+      "ram": 8,
+      "disk": 32,
+      "wg": [0, 1, 3]
+    },
+    {
+      "id": "g4",
+      "name": "cp",
+      "role": "k8s-control-plane",
+      "count": 3,
+      "cpu": 4,
+      "ram": 16,
+      "disk": 128,
+      "wg": [0, 1, 3]
+    },
+    {
+      "id": "g5",
+      "name": "w",
+      "role": "k8s-worker",
+      "count": 3,
+      "cpu": 8,
+      "ram": 32,
+      "disk": 512,
+      "wg": [0, 1, 3]
+    },
+    {
+      "id": "g6",
+      "name": "lb",
+      "role": "k8s-loadbalancer",
+      "count": 3,
+      "cpu": 2,
+      "ram": 4,
+      "disk": 32,
+      "wg": [0, 1, 3]
+    },
+    {
+      "id": "g7",
+      "name": "storage",
+      "role": "storage",
+      "count": 1,
+      "cpu": 4,
+      "ram": 32,
+      "disk": 24576,
+      "wg": [0, 2]
+    },
+    {
+      "id": "g8",
+      "name": "monitoring",
+      "role": "monitoring",
+      "count": 1,
+      "cpu": 4,
+      "ram": 16,
+      "disk": 1024,
+      "wg": [0, 1]
+    }
+  ],
+  "firewall": [
+    {
+      "id": 1,
+      "prio": 10,
+      "from": "external",
+      "to": "dmz",
+      "proto": "tcp",
+      "port": "80,443",
+      "action": "ACCEPT",
+      "comment": "HTTPS inbound"
+    },
+    {
+      "id": 2,
+      "prio": 20,
+      "from": "external",
+      "to": "mgmt",
+      "proto": "tcp",
+      "port": "22",
+      "action": "DROP",
+      "comment": "Block SSH from internet"
+    },
+    {
+      "id": 3,
+      "prio": 30,
+      "from": "mgmt",
+      "to": "any",
+      "proto": "tcp",
+      "port": "22",
+      "action": "ACCEPT",
+      "comment": "SSH from management"
+    },
+    {
+      "id": 4,
+      "prio": 40,
+      "from": "internal",
+      "to": "external",
+      "proto": "tcp",
+      "port": "80,443",
+      "action": "ACCEPT",
+      "comment": "Outbound web"
+    },
+    {
+      "id": 5,
+      "prio": 50,
+      "from": "internal",
+      "to": "external",
+      "proto": "udp",
+      "port": "53",
+      "action": "ACCEPT",
+      "comment": "DNS outbound"
+    },
+    {
+      "id": 6,
+      "prio": 60,
+      "from": "wg",
+      "to": "internal",
+      "proto": "tcp",
+      "port": "6443",
+      "action": "ACCEPT",
+      "comment": "k8s API server"
+    },
+    {
+      "id": 7,
+      "prio": 70,
+      "from": "internal",
+      "to": "internal",
+      "proto": "tcp",
+      "port": "2379,2380",
+      "action": "ACCEPT",
+      "comment": "etcd cluster"
+    },
+    {
+      "id": 8,
+      "prio": 80,
+      "from": "internal",
+      "to": "internal",
+      "proto": "tcp",
+      "port": "10250",
+      "action": "ACCEPT",
+      "comment": "kubelet API"
+    },
+    {
+      "id": 9,
+      "prio": 90,
+      "from": "external",
+      "to": "internal",
+      "proto": "tcp",
+      "port": "30000-32767",
+      "action": "ACCEPT",
+      "comment": "k8s NodePorts"
+    },
+    {
+      "id": 10,
+      "prio": 100,
+      "from": "wg",
+      "to": "internal",
+      "proto": "any",
+      "port": "any",
+      "action": "ACCEPT",
+      "comment": "WG mesh → internal"
+    },
+    {
+      "id": 11,
+      "prio": 110,
+      "from": "wg",
+      "to": "mgmt",
+      "proto": "tcp",
+      "port": "4505,4506",
+      "action": "ACCEPT",
+      "comment": "Salt master (wg0)"
+    },
+    {
+      "id": 12,
+      "prio": 120,
+      "from": "wg2",
+      "to": "any",
+      "proto": "tcp",
+      "port": "9090,9100,3000",
+      "action": "ACCEPT",
+      "comment": "Metrics scrape (Prometheus/Grafana/node-exporter)"
+    },
+    {
+      "id": 13,
+      "prio": 999,
+      "from": "any",
+      "to": "any",
+      "proto": "any",
+      "port": "any",
+      "action": "DROP",
+      "comment": "Default deny"
+    }
+  ],
+  "services": [
+    "ssh-hardening",
+    "nftables",
+    "wireguard",
+    "salt-master",
+    "salt-minion",
+    "prometheus",
+    "grafana",
+    "node-exporter",
+    "chrony",
+    "kldload-firstboot",
+    "kldload-snapshots",
+    "zfs-recv",
+    "k3s-server",
+    "k3s-agent",
+    "containerd",
+    "certmanager"
+  ],
+  "nodeInventory": [
+    {
+      "name": "master-1",
+      "ip": "10.100.10.224",
+      "role": "salt-master",
+      "group": "g2",
+      "wg0": "10.77.0.1/32",
+      "wg1": "10.78.0.1/32",
+      "wg2": "10.79.0.1/32",
+      "wg3": "10.80.0.1/32"
+    },
+    {
+      "name": "master-2",
+      "ip": "10.100.10.223",
+      "role": "salt-master",
+      "group": "g2",
+      "wg0": "10.77.0.2/32",
+      "wg1": "10.78.0.2/32",
+      "wg2": "10.79.0.2/32",
+      "wg3": "10.80.0.2/32"
+    },
+    {
+      "name": "fw1",
+      "ip": "10.100.10.229",
+      "role": "firewall",
+      "group": "g1",
+      "wg0": "10.77.0.3/32",
+      "wg1": "10.78.0.3/32",
+      "wg2": "10.79.0.3/32",
+      "wg3": "10.80.0.3/32"
+    },
+    {
+      "name": "fw2",
+      "ip": "10.100.10.228",
+      "role": "firewall",
+      "group": "g1",
+      "wg0": "10.77.0.4/32",
+      "wg1": "10.78.0.4/32",
+      "wg2": "10.79.0.4/32",
+      "wg3": "10.80.0.4/32"
+    },
+    {
+      "name": "etcd-1",
+      "ip": "10.100.10.220",
+      "role": "etcd",
+      "group": "g3",
+      "wg0": "10.77.0.5/32",
+      "wg1": "10.78.0.5/32",
+      "wg3": "10.80.0.5/32"
+    },
+    {
+      "name": "etcd-2",
+      "ip": "10.100.10.219",
+      "role": "etcd",
+      "group": "g3",
+      "wg0": "10.77.0.6/32",
+      "wg1": "10.78.0.6/32",
+      "wg3": "10.80.0.6/32"
+    },
+    {
+      "name": "etcd-3",
+      "ip": "10.100.10.218",
+      "role": "etcd",
+      "group": "g3",
+      "wg0": "10.77.0.7/32",
+      "wg1": "10.78.0.7/32",
+      "wg3": "10.80.0.7/32"
+    },
+    {
+      "name": "cp-1",
+      "ip": "10.100.10.217",
+      "role": "k8s-control-plane",
+      "group": "g4",
+      "wg0": "10.77.0.8/32",
+      "wg1": "10.78.0.8/32",
+      "wg3": "10.80.0.8/32"
+    },
+    {
+      "name": "cp-2",
+      "ip": "10.100.10.216",
+      "role": "k8s-control-plane",
+      "group": "g4",
+      "wg0": "10.77.0.9/32",
+      "wg1": "10.78.0.9/32",
+      "wg3": "10.80.0.9/32"
+    },
+    {
+      "name": "cp-3",
+      "ip": "10.100.10.215",
+      "role": "k8s-control-plane",
+      "group": "g4",
+      "wg0": "10.77.0.10/32",
+      "wg1": "10.78.0.10/32",
+      "wg3": "10.80.0.10/32"
+    },
+    {
+      "name": "w-1",
+      "ip": "10.100.10.214",
+      "role": "k8s-worker",
+      "group": "g5",
+      "wg0": "10.77.0.11/32",
+      "wg1": "10.78.0.11/32",
+      "wg3": "10.80.0.11/32"
+    },
+    {
+      "name": "w-2",
+      "ip": "10.100.10.213",
+      "role": "k8s-worker",
+      "group": "g5",
+      "wg0": "10.77.0.12/32",
+      "wg1": "10.78.0.12/32",
+      "wg3": "10.80.0.12/32"
+    },
+    {
+      "name": "w-3",
+      "ip": "10.100.10.212",
+      "role": "k8s-worker",
+      "group": "g5",
+      "wg0": "10.77.0.13/32",
+      "wg1": "10.78.0.13/32",
+      "wg3": "10.80.0.13/32"
+    },
+    {
+      "name": "lb-1",
+      "ip": "10.100.10.211",
+      "role": "k8s-loadbalancer",
+      "group": "g6",
+      "wg0": "10.77.0.14/32",
+      "wg1": "10.78.0.14/32",
+      "wg3": "10.80.0.14/32"
+    },
+    {
+      "name": "lb-2",
+      "ip": "10.100.10.210",
+      "role": "k8s-loadbalancer",
+      "group": "g6",
+      "wg0": "10.77.0.15/32",
+      "wg1": "10.78.0.15/32",
+      "wg3": "10.80.0.15/32"
+    },
+    {
+      "name": "lb-3",
+      "ip": "10.100.10.209",
+      "role": "k8s-loadbalancer",
+      "group": "g6",
+      "wg0": "10.77.0.16/32",
+      "wg1": "10.78.0.16/32",
+      "wg3": "10.80.0.16/32"
+    },
+    {
+      "name": "storage",
+      "ip": "10.100.10.221",
+      "role": "storage",
+      "group": "g7",
+      "wg0": "10.77.0.17/32",
+      "wg2": "10.79.0.17/32"
+    },
+    {
+      "name": "monitoring",
+      "ip": "10.100.10.222",
+      "role": "monitoring",
+      "group": "g8",
+      "wg0": "10.77.0.18/32",
+      "wg1": "10.78.0.18/32"
+    }
+  ]
+}

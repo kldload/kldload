@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# kldload-poof — scrub sensitive ephemeral material from a live session's RAM.
+# Only runs in live mode (no KLDLOAD_INSTALLED=1 in /etc/kldload/install-manifest.env).
+set -euo pipefail
+
+LOG_DIR="/var/log/kldload"
+LOG_FILE="${LOG_DIR}/poof.log"
+mkdir -p "${LOG_DIR}"
+
+log() {
+    local ts
+    ts="$(date '+%Y-%m-%dT%H:%M:%S')"
+    printf '[%s] [poof] %s\n' "${ts}" "$*" | tee -a "${LOG_FILE}"
+}
+
+# ── Live mode gate ─────────────────────────────────────────────────────────────
+
+MANIFEST="/etc/kldload/install-manifest.env"
+if [[ -f "${MANIFEST}" ]] && grep -q 'KLDLOAD_INSTALLED=1' "${MANIFEST}" 2>/dev/null; then
+    echo "kldload-poof only runs in live mode. Installed systems use ZFS encryption and boot environments." >&2
+    exit 1
+fi
+
+log "Starting live session scrub"
+SCRUBBED=()
+
+# ── 1. WireGuard private keys in memory ───────────────────────────────────────
+
+log "Scrubbing WireGuard private keys from memory..."
+if command -v wg >/dev/null 2>&1; then
+    for iface in $(wg show interfaces 2>/dev/null || true); do
+        if ip link show "${iface}" up >/dev/null 2>&1; then
+            if wg set "${iface}" private-key /dev/null 2>/dev/null; then
+                log "  Cleared WireGuard private key for ${iface}"
+                SCRUBBED+=("wg:${iface}")
+            else
+                log "  Could not clear ${iface} (may already be down)"
+            fi
+        fi
+    done
+else
+    log "  wg not found — skipping WireGuard scrub"
+fi
+
+# ── 2. In-memory SSH host keys ─────────────────────────────────────────────────
+
+log "Scrubbing SSH host keys..."
+ssh-keygen -R localhost 2>/dev/null || true
+if systemctl stop ssh 2>/dev/null || systemctl stop sshd 2>/dev/null; then
+    log "  SSH daemon stopped"
+    SCRUBBED+=("ssh:daemon-stopped")
+else
+    log "  SSH daemon was not running (OK)"
+fi
+
+# ── 3. /tmp/kldload-* files ──────────────────────────────────────────────────────
+
+log "Removing /tmp/kldload-* files..."
+shopt -s nullglob
+for f in /tmp/kldload-*; do
+    rm -rf -- "${f}"
+    log "  Removed: ${f}"
+    SCRUBBED+=("tmp:${f}")
+done
+shopt -u nullglob
+
+# ── 4. /run/kldload/ directory ───────────────────────────────────────────────────
+
+log "Removing /run/kldload/ contents..."
+if [[ -d /run/kldload ]]; then
+    rm -rf /run/kldload
+    log "  Removed: /run/kldload"
+    SCRUBBED+=("run:kldload")
+else
+    log "  /run/kldload does not exist (OK)"
+fi
+
+# ── 5. CA private key (live mode only) ────────────────────────────────────────
+
+CA_KEY="/etc/kldload/ca/ca.key"
+log "Checking for CA private key..."
+if [[ -f "${CA_KEY}" ]]; then
+    if shred -u "${CA_KEY}" 2>/dev/null; then
+        log "  Shredded and removed: ${CA_KEY}"
+        SCRUBBED+=("ca:ca.key")
+    else
+        log "  Could not shred ${CA_KEY} — attempting rm"
+        rm -f "${CA_KEY}" || true
+    fi
+else
+    log "  No CA key at ${CA_KEY} (OK)"
+fi
+
+# ── 6. Sync filesystem ────────────────────────────────────────────────────────
+
+log "Syncing filesystem..."
+sync
+SCRUBBED+=("fs:sync")
+
+# ── 7. Drop page cache ────────────────────────────────────────────────────────
+
+log "Dropping page cache..."
+echo 3 > /proc/sys/vm/drop_caches
+SCRUBBED+=("mem:drop_caches")
+log "  Page cache dropped"
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+log "────────────────────────────────────────────────"
+log "Scrub summary (${#SCRUBBED[@]} items):"
+for item in "${SCRUBBED[@]}"; do
+    log "  ✓ ${item}"
+done
+log "────────────────────────────────────────────────"
+echo ""
+echo "Live session scrubbed. All ephemeral keys and credentials have been cleared."

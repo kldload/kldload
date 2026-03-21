@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# kpkg — universal package manager wrapper
+# Auto-detects apt/dnf and runs the right command.
+# Takes a ZFS snapshot before install/upgrade/remove operations.
+
+cmd="${1:-help}"
+shift 2>/dev/null || true
+
+_snap() {
+  if command -v zfs &>/dev/null && zpool list &>/dev/null 2>&1; then
+    local ds
+    ds=$(mount | awk '$3=="/" && /zfs/{print $1}')
+    [[ -n "$ds" ]] && zfs snapshot "${ds}@kpkg-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+  fi
+}
+
+if command -v dnf &>/dev/null; then
+  PKG=dnf
+elif command -v apt-get &>/dev/null; then
+  PKG=apt-get
+else
+  echo "No package manager found" >&2; exit 1
+fi
+
+case "$cmd" in
+  install)   _snap; sudo $PKG install -y "$@" ;;
+  remove)    _snap; sudo $PKG remove -y "$@" ;;
+  update)
+    if [[ "$PKG" == "dnf" ]]; then
+      sudo dnf check-update "$@" || true
+    else
+      sudo apt-get update "$@"
+    fi
+    ;;
+  upgrade)   _snap; sudo $PKG upgrade -y "$@" ;;
+  search)
+    if [[ "$PKG" == "dnf" ]]; then
+      dnf search "$@"
+    else
+      apt-cache search "$@"
+    fi
+    ;;
+  list)
+    if [[ "$PKG" == "dnf" ]]; then
+      rpm -qa "$@" | sort
+    else
+      dpkg -l "$@"
+    fi
+    ;;
+  info)
+    if [[ "$PKG" == "dnf" ]]; then
+      dnf info "$@"
+    else
+      apt-cache show "$@"
+    fi
+    ;;
+  help|*)
+    echo "kpkg — universal package manager (auto-detects apt/dnf)"
+    echo ""
+    echo "  kpkg install <pkg>    Install a package (ZFS snapshot first)"
+    echo "  kpkg remove <pkg>     Remove a package (ZFS snapshot first)"
+    echo "  kpkg update           Refresh package index"
+    echo "  kpkg upgrade          Upgrade all packages (ZFS snapshot first)"
+    echo "  kpkg search <term>    Search for packages"
+    echo "  kpkg list             List installed packages"
+    echo "  kpkg info <pkg>       Show package details"
+    echo ""
+    echo "  Using: $PKG"
+    ;;
+esac

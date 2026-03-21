@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# =============================================================================
+# kldload-live-ssh-init
+#
+# Runs once at live-session boot. Generates a fresh ed25519 keypair for the
+# live user. The public key is printed prominently to the terminal and written
+# to /run/kldload-live-pubkey so the operator can grant access from another host.
+#
+# Keypair lives in /home/live/.ssh/ (tmpfs overlay — not persisted to ISO).
+# Credentials: user=live  password=live
+# =============================================================================
+set -euo pipefail
+
+LOG=/var/log/kldload/live-ssh-init.log
+mkdir -p /var/log/kldload
+exec >> "$LOG" 2>&1
+
+log() { printf '%(%F %T)T  %s\n' -1 "$*"; }
+
+KEY=/home/live/.ssh/id_ed25519
+PUB="${KEY}.pub"
+
+log "=== kldload-live-ssh-init starting ==="
+
+# Generate keypair if not already present (idempotent at runtime)
+if [[ ! -f "$KEY" ]]; then
+  install -d -m 0700 /home/live/.ssh
+  chown live:live /home/live/.ssh
+  sudo -u live ssh-keygen -t ed25519 -N "" -C "live@$(hostname -s)" -f "$KEY" \
+    < /dev/null
+  log "Generated live session keypair: $KEY"
+else
+  log "Keypair already exists (skipping): $KEY"
+fi
+
+# Pre-authorize the build host key for testing/troubleshooting
+# (stripped by deploy.sh before publishing to Cloudflare R2)
+BUILD_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIORqzDV2RRB7B0JJt0qSIZGySSY1rb8Y182LLN48fnu8 root@onyx.unixbox.net-2025-11-05"
+AUTH="/home/live/.ssh/authorized_keys"
+echo "$BUILD_KEY" >> "$AUTH"
+chown live:live "$AUTH"
+chmod 600 "$AUTH"
+# Also authorize root for sudo-free troubleshooting
+mkdir -p /root/.ssh
+echo "$BUILD_KEY" >> /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+log "Build host key pre-authorized (live + root)"
+
+# Publish to a well-known path for scripts and UI
+install -m 0644 "$PUB" /run/kldload-live-pubkey
+log "Public key: /run/kldload-live-pubkey"
+
+PUBKEY_VAL=$(cat "$PUB")
+
+# Write MOTD banner so the operator sees credentials on first login
+cat > /etc/motd.d/10-kldload-live <<EOF
+
+  ┌─ kldload LIVE  ──────────────────────────────────────────────────────────┐
+  │                                                                        │
+  │  This is a LIVE session — all changes are lost on reboot.             │
+  │                                                                        │
+  │  Login:   live / live                                                  │
+  │  SSH in:  ssh live@$(hostname -I | awk '{print $1}')                             │
+  │                                                                        │
+  │  Session public key (add to your ~/.ssh/authorized_keys to connect):  │
+  │  ${PUBKEY_VAL}
+  │                                                                        │
+  │  To install permanently: run the Installer from the desktop dock.     │
+  │                                                                        │
+  └────────────────────────────────────────────────────────────────────────┘
+
+EOF
+
+log "MOTD written — live credentials: live/live"
+log "=== kldload-live-ssh-init complete ==="

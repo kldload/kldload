@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+# Bake build metadata into the image for traceability
+MARKER=/etc/kldload-build-marker
+{
+  echo "KLDLOAD_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # git may not be available in chroot; read pre-baked value if present
+  if [[ -f /etc/kldload-build-sha ]]; then
+    echo "KLDLOAD_BUILD_SHA=$(cat /etc/kldload-build-sha)"
+  fi
+  echo "KLDLOAD_BUILD_PROFILE=${PROFILE:-unknown}"
+} > "$MARKER"
+chmod 644 "$MARKER"

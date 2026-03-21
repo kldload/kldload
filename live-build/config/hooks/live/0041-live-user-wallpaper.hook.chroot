@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+LIVE_USER="live"
+LIVE_HOME="/home/${LIVE_USER}"
+SRC="/root/darksite/bg.jpg"
+DST_DIR="${LIVE_HOME}/Pictures"
+DST="${DST_DIR}/kldload-bg.jpg"
+LOG="/var/log/kldload-live-wallpaper-build.log"
+
+touch "$LOG"
+
+{
+  echo "==== $(date -Is) stage wallpaper ===="
+  echo "src=$SRC"
+  echo "dst=$DST"
+} >>"$LOG" 2>&1
+
+mkdir -p "${LIVE_HOME}" "${DST_DIR}" "${LIVE_HOME}/.config/autostart"
+
+if [[ -f /etc/skel/.config/autostart/kldload-session-init.desktop ]]; then
+  cp -f /etc/skel/.config/autostart/kldload-session-init.desktop "${LIVE_HOME}/.config/autostart/"
+fi
+
+if [[ -f "${SRC}" ]]; then
+  cp -f "${SRC}" "${DST}"
+  chmod 0644 "${DST}"
+fi
+
+if id "${LIVE_USER}" >/dev/null 2>&1; then
+  chown -R "${LIVE_USER}:${LIVE_USER}" "${LIVE_HOME}"
+fi
+
+chmod 0755 "${LIVE_HOME}" "${DST_DIR}" "${LIVE_HOME}/.config" "${LIVE_HOME}/.config/autostart" || true
+ls -ld "${LIVE_HOME}" "${DST_DIR}" >>"$LOG" 2>&1 || true
+ls -l "${DST_DIR}" >>"$LOG" 2>&1 || true
+ls -l "${LIVE_HOME}/.config/autostart" >>"$LOG" 2>&1 || true

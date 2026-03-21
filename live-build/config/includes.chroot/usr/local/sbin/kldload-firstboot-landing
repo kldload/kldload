@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+# kldload-firstboot-landing — runs once on first boot of a landing zone node.
+#
+# Sets up a hardened SFTP-only drop zone using OpenSSH + chroot jails.
+# Each SFTP user is isolated to their own ZFS dataset under rpool/srv/landing.
+# Encryption is on by default (set in template-landing.env).
+#
+# Features:
+#   - sftp-only: no shell, no port forwarding, chroot per user
+#   - ZFS dataset per landing user (rpool/srv/landing/<user>)
+#   - Separate inbound (upload) and outbound (pickup) subdirs
+#   - Optional node_exporter metrics endpoint (port 9100)
+#   - Registers with master for monitoring + DNS
+#
+# Usage (post-firstboot):
+#   kldload-landing-adduser <username>       — create a new SFTP user
+#   kldload-landing-removeuser <username>    — remove user + dataset
+#   kldload-landing-list                     — list active landing users + stats
+#
+# Logs: /var/log/kldload/firstboot.log
+set -Eeuo pipefail
+
+LOG=/var/log/kldload/firstboot.log
+STATE=/var/lib/kldload/firstboot
+DONE_FILE="${STATE}/landing-done"
+LANDING_ROOT=/srv/landing
+
+mkdir -p "${STATE}" /var/log/kldload
+exec >> "${LOG}" 2>&1
+
+log()  { printf '[%(%F %T)T] [landing-firstboot] %s\n' -1 "$*"; }
+die()  { log "FATAL: $*"; exit 1; }
+
+[[ -f "${DONE_FILE}" ]] && { log "Already complete — skipping"; exit 0; }
+
+# ── Load environment ──────────────────────────────────────────────────────────
+[[ -f /etc/kldload/hub.env  ]] && source /etc/kldload/hub.env
+[[ -f /etc/kldload/node.env ]] && source /etc/kldload/node.env
+
+MASTER_IP="${KLDLOAD_MASTER_IP:-10.78.0.1}"
+MASTER_API="http://${MASTER_IP}:8080"
+MY_IP="${KLDLOAD_NET_IP:-}"
+MY_HOSTNAME="${KLDLOAD_HOSTNAME:-landing}"
+
+# ── Wait for network ──────────────────────────────────────────────────────────
+log "Waiting for network..."
+for i in $(seq 1 30); do
+    ping -c1 -W2 8.8.8.8 &>/dev/null && break
+    [[ "${i}" -eq 30 ]] && log "WARNING: network not fully up yet — continuing anyway"
+    sleep 2
+done
+
+# ── Install packages ──────────────────────────────────────────────────────────
+log "Installing packages..."
+apt-get update -qq
+apt-get install -y \
+    prometheus-node-exporter \
+    rsync \
+    quota \
+    acl
+
+# ── ZFS dataset layout ────────────────────────────────────────────────────────
+log "Creating ZFS landing zone dataset..."
+if ! zfs list rpool/srv/landing &>/dev/null; then
+    zfs create \
+        -o mountpoint="${LANDING_ROOT}" \
+        -o compression=lz4 \
+        -o atime=off \
+        rpool/srv/landing
+    log "Created rpool/srv/landing → ${LANDING_ROOT}"
+fi
+
+mkdir -p "${LANDING_ROOT}"
+chmod 755 "${LANDING_ROOT}"
+
+# ── Create sftpusers group ────────────────────────────────────────────────────
+if ! getent group sftpusers &>/dev/null; then
+    groupadd --system sftpusers
+    log "Created sftpusers group"
+fi
+
+# ── Harden sshd for SFTP chroot ───────────────────────────────────────────────
+log "Writing SFTP sshd configuration..."
+cat > /etc/ssh/sshd_config.d/50-kldload-landing-sftp.conf <<SSHCFG
+# kldload landing zone — SFTP chroot for sftpusers group
+# All members of sftpusers get sftp-only access, chrooted to their home dir.
+
+Subsystem sftp internal-sftp -l INFO -f AUTH
+
+Match Group sftpusers
+    ChrootDirectory ${LANDING_ROOT}/%u
+    ForceCommand internal-sftp
+    AllowTcpForwarding no
+    X11Forwarding no
+    PermitTTY no
+    AuthorizedKeysFile ${LANDING_ROOT}/%u/.ssh/authorized_keys /etc/ssh/authorized_keys.d/%u
+SSHCFG
+
+# ── Write user management helper scripts ──────────────────────────────────────
+log "Installing landing zone management tools..."
+
+cat > /usr/local/sbin/kldload-landing-adduser <<'ADDUSER'
+#!/usr/bin/env bash
+# kldload-landing-adduser <username> [--key "ssh-ed25519 ..."]
+set -euo pipefail
+
+USERNAME="${1:?Usage: kldload-landing-adduser <username> [--key <pubkey>]}"
+PUBKEY=""
+if [[ "${2:-}" == "--key" ]]; then
+    PUBKEY="${3:?--key requires a value}"
+fi
+
+LANDING_ROOT=/srv/landing
+ZFS_DATASET="rpool/srv/landing/${USERNAME}"
+
+# Create ZFS dataset for this user
+if ! zfs list "${ZFS_DATASET}" &>/dev/null; then
+    zfs create \
+        -o mountpoint="${LANDING_ROOT}/${USERNAME}" \
+        -o compression=lz4 \
+        -o atime=off \
+        -o quota=50G \
+        "${ZFS_DATASET}"
+    echo "Created ZFS dataset: ${ZFS_DATASET}"
+fi
+
+# Create user (no login shell, no home outside chroot)
+if ! id "${USERNAME}" &>/dev/null; then
+    useradd \
+        --no-create-home \
+        --shell /usr/sbin/nologin \
+        --gid sftpusers \
+        "${USERNAME}"
+    echo "Created user: ${USERNAME}"
+fi
+
+# Chroot dir must be owned root:root 755 — SSH requirement
+chown root:root "${LANDING_ROOT}/${USERNAME}"
+chmod 755 "${LANDING_ROOT}/${USERNAME}"
+
+# Create upload/pickup subdirs owned by the user
+mkdir -p "${LANDING_ROOT}/${USERNAME}/inbound"
+mkdir -p "${LANDING_ROOT}/${USERNAME}/outbound"
+mkdir -p "${LANDING_ROOT}/${USERNAME}/.ssh"
+chown "${USERNAME}:sftpusers" \
+    "${LANDING_ROOT}/${USERNAME}/inbound" \
+    "${LANDING_ROOT}/${USERNAME}/outbound"
+chown root:root "${LANDING_ROOT}/${USERNAME}/.ssh"
+chmod 700 "${LANDING_ROOT}/${USERNAME}/.ssh"
+touch "${LANDING_ROOT}/${USERNAME}/.ssh/authorized_keys"
+chown root:root "${LANDING_ROOT}/${USERNAME}/.ssh/authorized_keys"
+chmod 600 "${LANDING_ROOT}/${USERNAME}/.ssh/authorized_keys"
+
+# Install SSH key if provided
+if [[ -n "${PUBKEY}" ]]; then
+    echo "${PUBKEY}" >> "${LANDING_ROOT}/${USERNAME}/.ssh/authorized_keys"
+    echo "SSH key installed"
+fi
+
+# Generate a temporary password and print it (user should rotate)
+TMP_PASS="$(openssl rand -base64 12)"
+echo "${USERNAME}:${TMP_PASS}" | chpasswd
+echo ""
+echo "Landing zone user created:"
+echo "  Username:  ${USERNAME}"
+echo "  Dataset:   ${ZFS_DATASET}  (quota: 50G)"
+echo "  Inbound:   ${LANDING_ROOT}/${USERNAME}/inbound"
+echo "  Outbound:  ${LANDING_ROOT}/${USERNAME}/outbound"
+echo "  Password:  ${TMP_PASS}  (temporary — rotate immediately)"
+echo ""
+echo "SFTP command:"
+echo "  sftp ${USERNAME}@$(hostname -I | awk '{print $1}')"
+ADDUSER
+
+cat > /usr/local/sbin/kldload-landing-removeuser <<'RMUSER'
+#!/usr/bin/env bash
+# kldload-landing-removeuser <username> [--destroy-data]
+set -euo pipefail
+
+USERNAME="${1:?Usage: kldload-landing-removeuser <username> [--destroy-data]}"
+DESTROY="${2:-}"
+
+LANDING_ROOT=/srv/landing
+ZFS_DATASET="rpool/srv/landing/${USERNAME}"
+
+if id "${USERNAME}" &>/dev/null; then
+    userdel "${USERNAME}"
+    echo "Removed user: ${USERNAME}"
+fi
+
+if [[ "${DESTROY}" == "--destroy-data" ]]; then
+    if zfs list "${ZFS_DATASET}" &>/dev/null; then
+        zfs destroy -r "${ZFS_DATASET}"
+        echo "Destroyed ZFS dataset: ${ZFS_DATASET}"
+    fi
+else
+    echo "Data preserved at: ${LANDING_ROOT}/${USERNAME}"
+    echo "Run with --destroy-data to also remove ZFS dataset"
+fi
+RMUSER
+
+cat > /usr/local/sbin/kldload-landing-list <<'LSUSER'
+#!/usr/bin/env bash
+# kldload-landing-list — show active SFTP landing users and their disk usage
+set -euo pipefail
+
+LANDING_ROOT=/srv/landing
+
+printf '%-20s %-12s %-10s %-10s %s\n' USER DATASET USED QUOTA INBOUND_FILES
+printf '%-20s %-12s %-10s %-10s %s\n' ---- ------- ---- ----- -------------
+
+for user in $(getent group sftpusers | cut -d: -f4 | tr ',' '\n'); do
+    ds="rpool/srv/landing/${user}"
+    if zfs list "${ds}" &>/dev/null; then
+        used="$(zfs get -Hp -o value used "${ds}" | numfmt --to=iec)"
+        quota="$(zfs get -Hp -o value quota "${ds}" | numfmt --to=iec)"
+        files="$(find "${LANDING_ROOT}/${user}/inbound" -type f 2>/dev/null | wc -l)"
+    else
+        used="-"
+        quota="-"
+        files="-"
+    fi
+    printf '%-20s %-12s %-10s %-10s %s\n' "${user}" "${ds##*/}" "${used}" "${quota}" "${files}"
+done
+LSUSER
+
+chmod +x \
+    /usr/local/sbin/kldload-landing-adduser \
+    /usr/local/sbin/kldload-landing-removeuser \
+    /usr/local/sbin/kldload-landing-list
+
+# ── Enable node_exporter for monitoring ───────────────────────────────────────
+log "Enabling node_exporter..."
+systemctl daemon-reload
+systemctl enable prometheus-node-exporter
+systemctl start  prometheus-node-exporter
+
+# ── Restart sshd ──────────────────────────────────────────────────────────────
+log "Reloading sshd..."
+systemctl reload sshd || systemctl restart sshd
+
+# ── Register with master ──────────────────────────────────────────────────────
+log "Registering with master at ${MASTER_API}..."
+
+PAYLOAD="$(cat <<JSON
+{
+  "hostname": "${MY_HOSTNAME}",
+  "ip": "${MY_IP}",
+  "role": "landing",
+  "sftp_port": 22,
+  "metrics_port": 9100,
+  "landing_root": "${LANDING_ROOT}"
+}
+JSON
+)"
+
+if curl -sf -X POST \
+        -H "Content-Type: application/json" \
+        -d "${PAYLOAD}" \
+        "${MASTER_API}/api/landing/register" \
+        --retry 5 --retry-delay 5 --retry-connrefused; then
+    log "Registered with master successfully"
+else
+    log "WARNING: Master registration failed — node will still function"
+fi
+
+if command -v kldload-dns-register &>/dev/null; then
+    kldload-dns-register --hostname "${MY_HOSTNAME}" --ip "${MY_IP}" || true
+fi
+
+touch "${DONE_FILE}"
+log "Landing zone firstboot complete"
+log "  SFTP port:       22"
+log "  node_exporter:   http://${MY_IP}:9100/metrics"
+log "  Landing root:    ${LANDING_ROOT}"
+log ""
+log "Create SFTP users with: kldload-landing-adduser <username>"

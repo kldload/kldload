@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# kst — system health at a glance
+# Shows pool health, disk usage, snapshots, boot environments, and services.
+
+G='\033[0;32m'  # green
+Y='\033[0;33m'  # yellow
+R='\033[0;31m'  # red
+C='\033[0;36m'  # cyan
+B='\033[1m'     # bold
+N='\033[0m'     # reset
+
+dot_ok="${G}●${N}"
+dot_warn="${Y}●${N}"
+dot_fail="${R}●${N}"
+
+# ── Pool health ───────────────────────────────────────────────────────────────
+pool_name="rpool"
+pool_state="$(zpool get -H -o value health "$pool_name" 2>/dev/null || echo "UNKNOWN")"
+case "$pool_state" in
+  ONLINE)   pool_dot="$dot_ok" ;;
+  DEGRADED) pool_dot="$dot_warn" ;;
+  *)        pool_dot="$dot_fail" ;;
+esac
+pool_errors="$(zpool status "$pool_name" 2>/dev/null | grep 'errors:' | sed 's/.*errors: //')"
+
+# ── Disk usage ────────────────────────────────────────────────────────────────
+root_ds="$(mount | awk '$3=="/" && /zfs/{print $1}' || echo "rpool/ROOT/kldload")"
+root_used="$(zfs get -H -o value used "$root_ds" 2>/dev/null || echo "?")"
+root_avail="$(zfs get -H -o value available "$root_ds" 2>/dev/null || echo "?")"
+compress="$(zfs get -H -o value compressratio "$root_ds" 2>/dev/null || echo "?")"
+
+# ── Snapshots ─────────────────────────────────────────────────────────────────
+snap_count="$(zfs list -H -t snapshot -o name 2>/dev/null | wc -l)"
+snap_oldest="$(zfs list -H -t snapshot -o creation -s creation 2>/dev/null | head -1 | xargs -r)"
+snap_newest="$(zfs list -H -t snapshot -o creation -S creation 2>/dev/null | head -1 | xargs -r)"
+
+# ── Boot environments ────────────────────────────────────────────────────────
+be_count="$(zfs list -H -o name -r rpool/ROOT 2>/dev/null | grep -c 'rpool/ROOT/' || echo 0)"
+be_active="$(zfs get -H -o value mountpoint rpool/ROOT 2>/dev/null | head -1 || echo "?")"
+
+# ── Services ──────────────────────────────────────────────────────────────────
+svc_status() {
+  local state
+  state="$(systemctl is-active "$1" 2>/dev/null || echo "inactive")"
+  case "$state" in
+    active)   printf "${G}●${N} " ;;
+    inactive) printf "${Y}○${N} " ;;
+    *)        printf "${R}✗${N} " ;;
+  esac
+  printf "%s" "$1"
+}
+
+# ── Memory / CPU ──────────────────────────────────────────────────────────────
+mem_info="$(free -h | awk '/^Mem:/{print $3 " / " $2}')"
+cpu_count="$(nproc 2>/dev/null || echo "?")"
+uptime_str="$(uptime -p 2>/dev/null | sed 's/^up //' || echo "?")"
+hostname="$(hostname 2>/dev/null || echo "kldload")"
+edition="$(cat /etc/kldload/edition 2>/dev/null || echo "?")"
+build="$(cat /etc/kldload-build-sha 2>/dev/null || echo "?")"
+
+# ── Output ────────────────────────────────────────────────────────────────────
+echo ""
+printf "  ${B}${C}kldload${N} ${B}%s${N}  (%s edition, build %s)\n" "$hostname" "$edition" "$build"
+echo ""
+printf "  ${B}Pool${N}       %b %s  %s\n" "$pool_dot" "$pool_name $pool_state" "($pool_errors)"
+printf "  ${B}Root${N}       %s used / %s available  (compression: %s)\n" "$root_used" "$root_avail" "$compress"
+printf "  ${B}Snapshots${N}  %s total" "$snap_count"
+[[ -n "$snap_newest" ]] && printf "  (newest: %s)" "$snap_newest"
+echo ""
+printf "  ${B}Boot envs${N}  %s available\n" "$be_count"
+printf "  ${B}Memory${N}     %s  |  ${B}CPUs${N}  %s  |  ${B}Uptime${N}  %s\n" "$mem_info" "$cpu_count" "$uptime_str"
+echo ""
+printf "  ${B}Services${N}   "
+for svc in kldload-webui sshd zfs-zed sanoid.timer NetworkManager; do
+  svc_status "$svc"
+  printf "  "
+done
+echo ""
+echo ""

@@ -1,0 +1,23 @@
+[Unit]
+Description=KLDload Local APT Mirror (darksite)
+Documentation=file:///root/darksite/manifests/build-manifest.json
+# Only start if the APT repo was built into the ISO
+ConditionPathExists=/root/darksite/apt/dists/trixie/Release
+DefaultDependencies=no
+After=local-fs.target
+Before=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m http.server 3142 \
+    --bind 127.0.0.1 \
+    --directory /root/darksite
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+# Low priority — this is a background helper
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

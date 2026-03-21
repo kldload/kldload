@@ -1,0 +1,24 @@
+#!/bin/sh
+# Set GRUB timeout to 5 seconds with countdown on the live ISO
+
+for cfg in \
+    binary/boot/grub/grub.cfg \
+    binary/EFI/boot/grub.cfg \
+    binary/EFI/BOOT/grub.cfg; do
+
+    [ -f "$cfg" ] || continue
+
+    echo "Patching GRUB timeout in: $cfg"
+
+    if grep -q '^set timeout=' "$cfg"; then
+        sed -i 's/^set timeout=.*/set timeout=5/' "$cfg"
+    else
+        sed -i '1s/^/set timeout=5\n/' "$cfg"
+    fi
+
+    if grep -q '^set timeout_style=' "$cfg"; then
+        sed -i 's/^set timeout_style=.*/set timeout_style=countdown/' "$cfg"
+    else
+        sed -i '/^set timeout=/a set timeout_style=countdown' "$cfg"
+    fi
+done

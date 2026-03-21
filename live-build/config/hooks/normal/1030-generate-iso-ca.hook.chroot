@@ -1,0 +1,67 @@
+#!/bin/sh
+# 1030-generate-iso-ca.hook.chroot
+# Generate a fresh CA for this ISO build.
+# ca.key stays on the ISO (and on the master after firstboot).
+# ca.crt is distributed to every installed node by k_seed_ca in the installer.
+set -e
+
+CA_DIR="/etc/kldload/ca"
+mkdir -p "${CA_DIR}"
+chmod 0700 "${CA_DIR}"
+
+if [ -f "${CA_DIR}/ca.key" ] && [ -f "${CA_DIR}/ca.crt" ]; then
+    echo "ISO CA already exists — skipping generation"
+    exit 0
+fi
+
+echo "Generating ISO CA..."
+
+# CA private key
+openssl genrsa -out "${CA_DIR}/ca.key" 4096
+chmod 0600 "${CA_DIR}/ca.key"
+
+# OpenSSL CA config
+cat > "${CA_DIR}/openssl.cnf" << 'CONF'
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_ca
+prompt = no
+
+[req_distinguished_name]
+C  = CA
+ST = kldload
+L  = kldload
+O  = kldload Infrastructure CA
+OU = kldload ISO Build
+CN = kldload ISO CA
+
+[v3_ca]
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints       = critical, CA:true
+keyUsage               = critical, digitalSignature, cRLSign, keyCertSign
+
+[v3_node]
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid,issuer
+basicConstraints       = critical, CA:false
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = serverAuth, clientAuth
+CONF
+chmod 0640 "${CA_DIR}/openssl.cnf"
+
+# Self-signed CA cert — 10 year validity
+openssl req -new -x509 -days 3650 \
+    -key  "${CA_DIR}/ca.key" \
+    -out  "${CA_DIR}/ca.crt" \
+    -config "${CA_DIR}/openssl.cnf" \
+    -extensions v3_ca
+chmod 0644 "${CA_DIR}/ca.crt"
+
+# Install as a system-trusted CA on the live ISO itself
+cp "${CA_DIR}/ca.crt" /usr/local/share/ca-certificates/kldload-iso-ca.crt
+update-ca-certificates
+
+echo "ISO CA generated:"
+echo "  key : ${CA_DIR}/ca.key  (0600 — never leaves ISO or master)"
+echo "  cert: ${CA_DIR}/ca.crt  (0644 — distributed to all installed nodes)"

@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# kdir — create a ZFS dataset instead of a plain directory
+# Usage: kdir [-p] [-o property=value] ... <mountpoint> [<mountpoint> ...]
+#
+# Examples:
+#   kdir /home/alice               → zfs create rpool/home/alice
+#   kdir /srv/myapp/data           → zfs create rpool/srv/myapp/data
+#   kdir -p /srv/a/b/c             → create intermediate datasets as needed
+#   kdir -o compression=zstd /data → set extra ZFS properties
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: kdir [-p] [-o property=value] ... <mountpoint> [<mountpoint> ...]
+
+Creates a ZFS dataset mounted at each given path.
+The parent path must already be a ZFS mountpoint (or use -p).
+
+Options:
+  -p              Create parent datasets as needed
+  -o prop=value   Set a ZFS property (can be repeated)
+  -h              Show this help
+
+Examples:
+  kdir /home/alice
+  kdir /srv/myapp
+  kdir -p /srv/apps/backend/data
+  kdir -o compression=zstd -o quota=50G /srv/bigdata
+EOF
+    exit 1
+}
+
+die()  { echo "kdir: error: $*" >&2; exit 1; }
+info() { echo "kdir: $*"; }
+
+# ── Resolve the ZFS dataset name for a given absolute path ───────────────────
+# Walks up the path to find the ZFS dataset that owns it, then appends the
+# relative suffix to form the new dataset name.
+#
+# e.g.  /srv/apps  →  rpool/srv/apps  (if /srv is rpool/srv)
+dataset_for_path() {
+    local path="$1"
+    path="$(realpath -m "$path")"           # normalise without requiring existence
+
+    local parent="${path%/*}"
+    [[ -n "$parent" ]] || parent="/"
+
+    # Find the ZFS dataset that owns the parent directory
+    local parent_ds
+    parent_ds="$(zfs list -Ho name "$parent" 2>/dev/null)" \
+        || die "parent '$parent' is not a ZFS mountpoint. Use -p to create parents."
+
+    local basename="${path##*/}"
+    [[ -n "$basename" ]] || die "cannot create dataset at filesystem root"
+
+    echo "${parent_ds}/${basename}"
+}
+
+# ── Parse arguments ──────────────────────────────────────────────────────────
+PARENTS=0
+ZFS_OPTS=()
+
+while getopts ":po:h" opt; do
+    case "$opt" in
+        p)  PARENTS=1 ;;
+        o)  ZFS_OPTS+=(-o "$OPTARG") ;;
+        h)  usage ;;
+        :)  die "option -$OPTARG requires an argument" ;;
+        \?) die "unknown option: -$OPTARG" ;;
+    esac
+done
+shift $(( OPTIND - 1 ))
+
+[[ $# -gt 0 ]] || usage
+
+# ── Create each requested dataset ───────────────────────────────────────────
+for mountpoint in "$@"; do
+    # Require absolute path
+    [[ "$mountpoint" == /* ]] || die "'$mountpoint' must be an absolute path"
+
+    abs="$(realpath -m "$mountpoint")"
+
+    if [[ "$PARENTS" -eq 1 ]]; then
+        # Build a list of ancestor paths that don't exist yet as datasets,
+        # then create them from shallowest to deepest.
+        declare -a to_create=()
+        check="$abs"
+        while [[ "$check" != "/" ]]; do
+            if zfs list -Ho name "$check" >/dev/null 2>&1; then
+                break   # already a dataset — stop walking up
+            fi
+            to_create=("$check" "${to_create[@]+"${to_create[@]}"}")
+            check="${check%/*}"
+            [[ -n "$check" ]] || check="/"
+        done
+
+        for path in "${to_create[@]+"${to_create[@]}"}"; do
+            ds="$(dataset_for_path "$path")"
+            info "creating dataset: $ds  →  $path"
+            zfs create "${ZFS_OPTS[@]+"${ZFS_OPTS[@]}"}" "$ds"
+        done
+    else
+        ds="$(dataset_for_path "$abs")"
+        info "creating dataset: $ds  →  $abs"
+        zfs create "${ZFS_OPTS[@]+"${ZFS_OPTS[@]}"}" "$ds"
+    fi
+done

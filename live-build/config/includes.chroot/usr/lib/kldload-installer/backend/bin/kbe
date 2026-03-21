@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# kbe — boot environment management tool
+# Usage:
+#   kbe list
+#   kbe create <name>
+#   kbe activate <snapshot>
+#   kbe rollback <snapshot>
+#   kbe delete <snapshot>
+# ---------------------------------------------------------------------------
+
+PROGNAME="$(basename "$0")"
+
+log() {
+    echo "[$PROGNAME] $*" >&2
+}
+
+die() {
+    echo "[$PROGNAME] ERROR: $*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<EOF
+Usage: $PROGNAME <command> [args]
+
+Commands:
+  list                      List boot environments (datasets under rpool/ROOT)
+  create <name>             Create a snapshot: rpool/ROOT/default@<name>
+  activate <snapshot>       Set pool bootfs to the dataset of <snapshot>
+  rollback <snapshot>       Roll back rpool/ROOT/default to <snapshot>
+  delete <snapshot>         Destroy a boot environment snapshot
+
+Examples:
+  $PROGNAME list
+  $PROGNAME create my-backup
+  $PROGNAME activate rpool/ROOT/default@my-backup
+  $PROGNAME rollback rpool/ROOT/default@my-backup
+  $PROGNAME delete rpool/ROOT/default@my-backup
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Locate and source bootenv.sh
+# ---------------------------------------------------------------------------
+
+BOOTENV_LIB=""
+CANDIDATES=(
+    "/usr/lib/kldload-installer/backend/bootenv.sh"
+    "$(dirname "$(dirname "$(realpath "$0")")")/bootenv.sh"
+    "/root/kldload/installer/backend/bootenv.sh"
+)
+
+for candidate in "${CANDIDATES[@]}"; do
+    if [[ -f "$candidate" ]]; then
+        BOOTENV_LIB="$candidate"
+        break
+    fi
+done
+
+[[ -n "$BOOTENV_LIB" ]] \
+    || die "bootenv.sh not found. Checked: ${CANDIDATES[*]}"
+
+# Also source common.sh for log/die/run helpers
+COMMON_LIB="$(dirname "$BOOTENV_LIB")/common.sh"
+[[ -f "$COMMON_LIB" ]] \
+    || die "common.sh not found at $COMMON_LIB"
+
+# shellcheck source=../common.sh
+source "$COMMON_LIB"
+# shellcheck source=../bootenv.sh
+source "$BOOTENV_LIB"
+
+# ---------------------------------------------------------------------------
+# Require root
+# ---------------------------------------------------------------------------
+
+require_root
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    list)
+        echo "Boot environments (rpool/ROOT):"
+        echo "---"
+        zfs list -H -r -t filesystem -o name,creation,used rpool/ROOT 2>/dev/null \
+            | column -t \
+            || echo "(no boot environments found)"
+
+        echo ""
+        echo "Active bootfs:"
+        zpool get -H -o value bootfs rpool 2>/dev/null || echo "(unknown)"
+        ;;
+
+    create)
+        NAME="${1:-}"
+        [[ -n "$NAME" ]] || die "create requires a name argument. Usage: $PROGNAME create <name>"
+        # If name doesn't look like a full snapshot path, treat as just the name
+        if [[ "$NAME" != *"@"* ]]; then
+            bootenv_create "$NAME"
+        else
+            die "For create, provide just the snapshot name (without @), e.g.: $PROGNAME create my-backup"
+        fi
+        ;;
+
+    activate)
+        SNAP="${1:-}"
+        [[ -n "$SNAP" ]] || die "activate requires a snapshot argument."
+        bootenv_activate "$SNAP"
+        log "Next boot will use: ${SNAP%%@*}"
+        ;;
+
+    rollback)
+        SNAP="${1:-}"
+        [[ -n "$SNAP" ]] || die "rollback requires a snapshot argument."
+        log "WARNING: Rolling back will DISCARD all changes made after $SNAP."
+        log "Press Ctrl+C within 5 seconds to abort..."
+        sleep 5
+        bootenv_rollback "$SNAP"
+        log "Rollback complete. Reboot to apply."
+        ;;
+
+    delete)
+        SNAP="${1:-}"
+        [[ -n "$SNAP" ]] || die "delete requires a snapshot argument."
+        [[ "$SNAP" == *"@"* ]] || die "delete requires a full snapshot path (e.g. rpool/ROOT/default@name)"
+        log "Deleting boot environment: $SNAP"
+        run zfs destroy "$SNAP"
+        log "Deleted: $SNAP"
+        ;;
+
+    help|--help|-h|"")
+        usage
+        ;;
+
+    *)
+        usage
+        die "Unknown command: '$COMMAND'"
+        ;;
+esac

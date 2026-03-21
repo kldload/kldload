@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# kclone — CoW clone a ZFS dataset (near-instant, near-zero space)
+# Usage:
+#   kclone /home/admin /home/admin-backup
+#   kclone /srv/database /srv/database-test
+
+src_path="${1:?Usage: kclone <source-path> <dest-path>}"
+dst_path="${2:?Usage: kclone <source-path> <dest-path>}"
+
+_log() { printf '\033[0;32m[kclone]\033[0m %s\n' "$*"; }
+_err() { printf '\033[0;31m[kclone]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Resolve source path to dataset
+src_ds="$(df --output=source "$src_path" 2>/dev/null | tail -1)"
+[[ -n "$src_ds" ]] || _err "Cannot find ZFS dataset for $src_path"
+
+# Derive destination dataset name from the destination path
+# e.g., /home/admin-backup → rpool/home/admin-backup
+pool="$(echo "$src_ds" | cut -d/ -f1)"
+dst_ds="${pool}${dst_path}"
+
+# Check destination doesn't already exist
+if zfs list "$dst_ds" &>/dev/null; then
+  _err "Destination already exists: $dst_ds ($dst_path)"
+fi
+
+ts="$(date +%Y%m%d-%H%M%S)"
+snap="${src_ds}@clone-${ts}"
+
+_log "Source:      $src_ds ($src_path)"
+_log "Destination: $dst_ds ($dst_path)"
+_log "Creating snapshot: $snap"
+
+sudo zfs snapshot "$snap"
+
+_log "Cloning (CoW — near-instant, near-zero space)..."
+sudo zfs clone -o mountpoint="$dst_path" "$snap" "$dst_ds"
+
+_log "Done."
+_log ""
+_log "  Source:  $src_path → $src_ds"
+_log "  Clone:   $dst_path → $dst_ds"
+_log "  Size:    $(zfs get -H -o value used "$dst_ds") (CoW — grows only as changes are made)"
+_log ""
+_log "  To destroy:  sudo zfs destroy $dst_ds && sudo zfs destroy $snap"

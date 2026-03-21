@@ -1,0 +1,19 @@
+[Unit]
+Description=KLDload Unattended Installer (KLDLOAD-SEED disk)
+Documentation=https://github.com/your-org/kldload
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+# Only run in the live environment, not on the installed system
+ConditionPathExists=!/var/lib/kldload-installer/install-done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kldload-autoinstall
+StandardOutput=journal+console
+StandardError=journal+console
+RemainAfterExit=yes
+# Give udev time to settle and label disks before scanning
+ExecStartPre=/bin/sleep 3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+LOG_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+LOG="${LOG_DIR}/kldload-live-session.log"
+
+mkdir -p "${LOG_DIR}" 2>/dev/null || true
+touch "${LOG}" 2>/dev/null || true
+
+{
+  echo "[$(date '+%F %T')] live session init"
+  echo "uid=$(id -u) user=$(id -un) DISPLAY=${DISPLAY:-<unset>}"
+
+  systemctl --user daemon-reload 2>/dev/null || true
+  /usr/bin/kldload-apply-live-wallpaper || true
+
+  # Suppress "Set GNOME Terminal as default" nag
+  update-alternatives --set x-terminal-emulator /usr/bin/gnome-terminal.wrapper \
+    2>/dev/null || true
+} >>"${LOG}" 2>&1
+
+exit 0

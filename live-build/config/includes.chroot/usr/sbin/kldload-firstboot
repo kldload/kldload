@@ -1,0 +1,831 @@
+#!/usr/bin/env bash
+# kldload-firstboot — runs once on first boot of any installed kldload node.
+# Reads KLDLOAD_PROFILE from /etc/kldload/install-manifest.env, performs
+# role-specific setup, then registers with MASTER.
+set -euo pipefail
+
+LOG=/var/log/kldload/firstboot.log
+MANIFEST=/etc/kldload/install-manifest.env
+SECRETS=/etc/kldload/secrets
+HUB_ENV=/etc/kldload/hub.env
+
+mkdir -p /var/log/kldload "${SECRETS}"
+chmod 0700 "${SECRETS}"
+exec > >(tee -a "${LOG}") 2>&1
+
+log() { printf '[%(%F %T)T] [firstboot] %s\n' -1 "$*"; }
+die() { log "FATAL: $*"; exit 1; }
+ok()  { log "OK: $*"; }
+
+# ── Load install manifest ─────────────────────────────────────────────────────
+[[ -f "${MANIFEST}" ]] || die "install manifest not found: ${MANIFEST}"
+# shellcheck disable=SC1090
+source "${MANIFEST}"
+ROLE="${KLDLOAD_PROFILE:-server}"
+HOSTNAME="$(cat /etc/hostname | tr -d '[:space:]')"
+LAN_IP="$(ip route get 1.1.1.1 2>/dev/null \
+  | awk '/src/{print $7}' | head -1 \
+  || hostname -I | awk '{print $1}')"
+
+log "Node: ${HOSTNAME}  role: ${ROLE}  lan_ip: ${LAN_IP}"
+
+# ── Shared: WireGuard client (all 4 planes) ───────────────────────────────────
+# wg0 = enrollment only (unreliable on some hardware — never bind services here)
+# wg1 = management (SSH, Salt)   wg2 = k8s backend   wg3 = storage
+setup_wg_client() {
+  [[ -f "${HUB_ENV}" ]] || { log "No hub.env — skipping WireGuard client"; return 0; }
+  # shellcheck disable=SC1090
+  source "${HUB_ENV}"
+  local idx="${KLDLOAD_NODE_INDEX:-1}"
+
+  log "Configuring WireGuard planes wg0-wg3 (node index ${idx})"
+
+  # Generate keypairs for all planes
+  local plane
+  for plane in 0 1 2 3; do
+    if [[ ! -f "${SECRETS}/wg${plane}-client.key" ]]; then
+      wg genkey | tee "${SECRETS}/wg${plane}-client.key" \
+        | wg pubkey > "${SECRETS}/wg${plane}-client.pub"
+      chmod 0600 "${SECRETS}/wg${plane}-client.key"
+    fi
+  done
+
+  # wg0 — enrollment bootstrap (do not bind services here)
+  cat > /etc/wireguard/wg0.conf <<WG
+[Interface]
+PrivateKey = $(cat "${SECRETS}/wg0-client.key")
+Address    = 10.77.0.${idx}/16
+
+[Peer]
+PublicKey  = ${WG0_PUB}
+Endpoint   = ${HUB_LAN}:${WG0_PORT:-51820}
+AllowedIPs = 10.77.0.0/16
+PersistentKeepalive = 25
+WG
+
+  # wg1 — management plane (Salt master binds here at 10.78.0.1)
+  cat > /etc/wireguard/wg1.conf <<WG
+[Interface]
+PrivateKey = $(cat "${SECRETS}/wg1-client.key")
+Address    = 10.78.0.${idx}/16
+
+[Peer]
+PublicKey  = ${WG1_PUB}
+Endpoint   = ${HUB_LAN}:${WG1_PORT:-51821}
+AllowedIPs = 10.78.0.0/16
+PersistentKeepalive = 15
+WG
+
+  # wg2 — Kubernetes backend (etcd, kubelet, API server)
+  cat > /etc/wireguard/wg2.conf <<WG
+[Interface]
+PrivateKey = $(cat "${SECRETS}/wg2-client.key")
+Address    = 10.79.0.${idx}/16
+
+[Peer]
+PublicKey  = ${WG2_PUB}
+Endpoint   = ${HUB_LAN}:${WG2_PORT:-51822}
+AllowedIPs = 10.79.0.0/16
+PersistentKeepalive = 15
+WG
+
+  # wg3 — storage (NFS, iSCSI, ZFS send/receive)
+  cat > /etc/wireguard/wg3.conf <<WG
+[Interface]
+PrivateKey = $(cat "${SECRETS}/wg3-client.key")
+Address    = 10.80.0.${idx}/16
+
+[Peer]
+PublicKey  = ${WG3_PUB}
+Endpoint   = ${HUB_LAN}:${WG3_PORT:-51823}
+AllowedIPs = 10.80.0.0/16
+PersistentKeepalive = 15
+WG
+
+  chmod 0600 /etc/wireguard/wg{0,1,2,3}.conf
+
+  # Bring up wg1 first (management) — wg0 is enrollment fallback
+  systemctl enable --now wg-quick@wg1
+  systemctl enable --now wg-quick@wg2
+  systemctl enable --now wg-quick@wg3
+  systemctl enable --now wg-quick@wg0
+  ok "WireGuard up — wg1=10.78.0.${idx} wg2=10.79.0.${idx} wg3=10.80.0.${idx}"
+}
+
+# ── Shared: Salt minion — registers on wg1 (management plane) ─────────────────
+setup_salt_minion() {
+  [[ -f "${HUB_ENV}" ]] || return 0
+  # shellcheck disable=SC1090
+  source "${HUB_ENV}"
+  local idx="${KLDLOAD_NODE_INDEX:-1}"
+
+  # Salt master binds to wg1 — 10.78.0.1
+  local salt_master="10.78.0.1"
+  local wg1_pub="" wg2_pub="" wg3_pub=""
+  [[ -f "${SECRETS}/wg1-client.pub" ]] && wg1_pub="$(cat "${SECRETS}/wg1-client.pub")"
+  [[ -f "${SECRETS}/wg2-client.pub" ]] && wg2_pub="$(cat "${SECRETS}/wg2-client.pub")"
+  [[ -f "${SECRETS}/wg3-client.pub" ]] && wg3_pub="$(cat "${SECRETS}/wg3-client.pub")"
+
+  log "Registering Salt minion → ${salt_master} (wg1)"
+  mkdir -p /etc/salt/minion.d
+  cat > /etc/salt/minion.d/kldload.conf <<SALT
+master: ${salt_master}
+grains:
+  role: ${ROLE}
+  hostname: ${HOSTNAME}
+  lan_ip: ${LAN_IP}
+  node_index: ${idx}
+  wg1_ip: 10.78.0.${idx}
+  wg2_ip: 10.79.0.${idx}
+  wg3_ip: 10.80.0.${idx}
+  wg1_pub: ${wg1_pub}
+  wg2_pub: ${wg2_pub}
+  wg3_pub: ${wg3_pub}
+SALT
+  systemctl enable --now salt-minion
+  ok "Salt minion registered"
+}
+
+# ══ MASTER ═══════════════════════════════════════════════════════════════════
+setup_master() {
+  log "=== MASTER setup ==="
+
+  # 1. Generate 4 WireGuard hub keypairs
+  local -a ports=(51820 51821 51822 51823)
+  local -a hub_ips=(10.77.0.1 10.78.0.1 10.79.0.1 10.80.0.1)
+  local i
+  for i in 0 1 2 3; do
+    [[ ! -f "${SECRETS}/wg${i}.key" ]] && \
+      wg genkey | tee "${SECRETS}/wg${i}.key" \
+        | wg pubkey > "${SECRETS}/wg${i}.pub" && \
+      chmod 0600 "${SECRETS}/wg${i}.key"
+
+    cat > "/etc/wireguard/wg${i}.conf" <<WG
+[Interface]
+PrivateKey = $(cat "${SECRETS}/wg${i}.key")
+Address    = ${hub_ips[$i]}/16
+ListenPort = ${ports[$i]}
+WG
+    chmod 0600 "/etc/wireguard/wg${i}.conf"
+    systemctl enable --now "wg-quick@wg${i}"
+    ok "wg${i}  ${hub_ips[$i]}  :${ports[$i]}"
+  done
+
+  # 2. hub.env — minions fetch this to join
+  # wg1 is the management plane — Salt and SSH bind there
+  cat > "${HUB_ENV}" <<ENV
+HUB_LAN=${LAN_IP}
+HUB_HOSTNAME=${HOSTNAME}
+# wg0 enrollment only — do not bind services here
+HUB_WG0_IP=10.77.0.1
+WG0_PUB=$(cat "${SECRETS}/wg0.pub")
+WG0_PORT=51820
+# wg1 management — Salt master, SSH, admin (SERVICES BIND HERE)
+HUB_WG1_IP=10.78.0.1
+WG1_PUB=$(cat "${SECRETS}/wg1.pub")
+WG1_PORT=51821
+WG2_PUB=$(cat "${SECRETS}/wg2.pub")
+WG2_PORT=51822
+WG3_PUB=$(cat "${SECRETS}/wg3.pub")
+WG3_PORT=51823
+ENV
+  chmod 0640 "${HUB_ENV}"
+  ok "hub.env written"
+
+  # 3. nftables — traffic separated by WireGuard plane
+  cat > /etc/nftables.conf <<NFT
+#!/usr/sbin/nft -f
+flush ruleset
+table inet filter {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iif lo accept
+    ct state established,related accept
+    ip protocol icmp accept
+    # WireGuard UDP ports — all 4 planes
+    udp dport { 51820, 51821, 51822, 51823 } accept
+    # SSH on LAN + wg1 management plane
+    tcp dport 22 accept
+    # Salt master on wg1 management plane only
+    ip saddr 10.78.0.0/16 tcp dport { 4505, 4506 } accept
+    # nginx hub.env enrollment on wg0 (enrollment only)
+    ip saddr 10.77.0.0/16 tcp dport 80 accept
+    # Kubernetes API on wg2 backend plane
+    ip saddr 10.79.0.0/16 tcp dport 6443 accept
+    # Storage (NFS/iSCSI) on wg3 only
+    ip saddr 10.80.0.0/16 tcp dport { 2049, 3260 } accept
+    ip saddr 10.80.0.0/16 udp dport 2049 accept
+  }
+  chain forward { type filter hook forward priority 0; policy accept; }
+  chain output  { type filter hook output  priority 0; policy accept; }
+}
+NFT
+  systemctl enable --now nftables
+  ok "nftables configured (wg1=mgmt wg2=k8s wg3=storage)"
+
+  # 4. Salt master — binds to wg1 (10.78.0.1), management plane
+  mkdir -p /srv/salt/roles /srv/pillar
+  cat > /etc/salt/master.d/kldload.conf <<SALT
+# Bind to wg1 management plane only
+interface: 10.78.0.1
+auto_accept: False
+file_roots:
+  base: [/srv/salt]
+pillar_roots:
+  base: [/srv/pillar]
+SALT
+  cat > /srv/salt/top.sls <<TOP
+base:
+  '*':             [roles.common]
+  'G@role:kvm':    [roles.kvm]
+  'G@role:storage':[roles.storage]
+  'G@role:vdi':    [roles.vdi]
+  'G@role:k8s-worker': [roles.k8s-worker]
+  'G@role:k8s-etcd':   [roles.k8s-etcd]
+TOP
+  cat > /srv/pillar/top.sls <<TOP
+base:
+  '*': [common]
+TOP
+  cat > /srv/pillar/common.sls <<PIL
+kldload:
+  hub_lan: ${LAN_IP}
+  hub_wg0_ip: 10.77.0.1
+PIL
+  systemctl enable --now salt-master
+  ok "Salt master started (auto-accept minions)"
+
+  # 5. nginx — hub.env served on wg0 (enrollment), admin on wg1
+  cat > /etc/nginx/sites-available/kldload-hub <<NGINX
+# wg0 enrollment endpoint — new nodes fetch hub.env here
+server {
+  listen 10.77.0.1:80;
+  location /hub.env { alias ${HUB_ENV}; default_type text/plain; }
+  location /health  { return 200 "ok\n"; }
+}
+# wg1 management endpoint — admin + Salt API
+server {
+  listen 10.78.0.1:80;
+  location /health  { return 200 "ok\n"; }
+}
+NGINX
+  ln -sf /etc/nginx/sites-available/kldload-hub \
+         /etc/nginx/sites-enabled/kldload-hub
+  rm -f /etc/nginx/sites-enabled/default
+  systemctl enable --now nginx
+  ok "nginx serving hub.env at http://10.77.0.1/hub.env"
+
+  # 6. dnsmasq PXE/TFTP
+  cat > /etc/dnsmasq.d/kldload-pxe.conf <<DNS
+interface=wg0
+dhcp-range=10.77.1.0,10.77.254.255,12h
+dhcp-option=3,10.77.0.1
+dhcp-option=6,10.77.0.1
+enable-tftp
+tftp-root=/srv/tftp
+pxe-service=x86PC,"kldload PXE",pxelinux
+DNS
+  mkdir -p /srv/tftp
+  systemctl enable --now dnsmasq
+  ok "dnsmasq PXE/TFTP ready on wg0"
+
+  # 7. Enrollment SSH keypair
+  [[ ! -f "${SECRETS}/enrollment_ed25519" ]] && \
+    ssh-keygen -t ed25519 -N "" -C "kldload-enrollment@${HOSTNAME}" \
+      -f "${SECRETS}/enrollment_ed25519"
+
+  # 8. Tang server — key sealing endpoint for all nodes (binds to wg0/wg1)
+  if [[ -x /usr/local/sbin/kldload-tang-setup ]]; then
+    /usr/local/sbin/kldload-tang-setup --bind-ip 10.77.0.1 --tang-port 7500 \
+      && ok "Tang server started on 10.77.0.1:7500" \
+      || log "WARNING: kldload-tang-setup failed — check /var/log/kldload/tang.log"
+  fi
+
+  # 9. DNS registration API — accepts POSTs from worker nodes at boot
+  systemctl enable --now kldload-dns-api.service 2>/dev/null \
+    && ok "kldload-dns-api listening on :8081" \
+    || log "WARNING: kldload-dns-api.service failed to start"
+
+  # 10. cluster-autobootstrap timer
+  systemctl enable --now kldload-autobootstrap.timer 2>/dev/null || true
+
+  # 11. Snapshot timer (inherited from base)
+  systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
+
+  ok "=== MASTER ready ==="
+}
+
+# ══ KVM ══════════════════════════════════════════════════════════════════════
+setup_kvm() {
+  log "=== KVM setup ==="
+
+  # Network bridge for VMs
+  if command -v nmcli >/dev/null 2>&1; then
+    nmcli con add type bridge ifname br0 con-name br0 stp no \
+      -- bridge.forward-delay 0 2>/dev/null || true
+    # Attach first physical ethernet to bridge
+    local eth
+    eth="$(ip -o link | awk -F': ' '/^[0-9]+: e/{print $2}' | head -1)"
+    [[ -n "${eth}" ]] && \
+      nmcli con add type bridge-slave ifname "${eth}" master br0 2>/dev/null || true
+    nmcli con up br0 2>/dev/null || true
+  fi
+
+  # libvirt default pool
+  systemctl enable --now libvirtd
+  virsh net-destroy  default 2>/dev/null || true
+  virsh net-undefine default 2>/dev/null || true
+  virsh pool-define-as default dir --target /var/lib/libvirt/images 2>/dev/null || true
+  virsh pool-autostart default 2>/dev/null || true
+  virsh pool-start    default 2>/dev/null || true
+
+  printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/99-kldload-kvm.conf
+  sysctl -p /etc/sysctl.d/99-kldload-kvm.conf
+
+  # ── Install Firecracker + jailer + firectl from darksite binaries ────────────
+  local darksite_bins="/root/darksite/binaries"
+  local bin_dest="/usr/local/bin"
+
+  install_darksite_binary() {
+    local tool="$1"
+    local tool_dir
+    # Find newest version dir (sorted descending)
+    tool_dir="$(find "${darksite_bins}/${tool}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+      | sort -rV | head -1)"
+    if [[ -n "${tool_dir}" && -f "${tool_dir}/${tool}" ]]; then
+      install -m 0755 "${tool_dir}/${tool}" "${bin_dest}/${tool}"
+      local ver; ver="$(cat "${tool_dir}/VERSION" 2>/dev/null || echo unknown)"
+      log "  installed ${tool} ${ver} → ${bin_dest}/${tool}"
+    else
+      log "  WARNING: ${tool} not found in darksite — will try GitHub download"
+      # Fallback: fetch latest from GitHub if network is available
+      local gh_url
+      case "${tool}" in
+        firecracker|jailer)
+          local fc_ver
+          fc_ver="$(curl -fsSL --connect-timeout 10 \
+            https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest \
+            2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"\(v[^"]*\)".*/\1/')"
+          [[ -z "${fc_ver}" ]] && { log "  SKIP: no network for ${tool}"; return 0; }
+          local tgz="/tmp/firecracker-${fc_ver}.tgz"
+          curl -fsSL --connect-timeout 30 --max-time 300 \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${fc_ver}/firecracker-${fc_ver}-x86_64.tgz" \
+            -o "${tgz}" 2>/dev/null || { log "  SKIP: download failed"; return 0; }
+          tar -xzf "${tgz}" -C /tmp 2>/dev/null || true
+          find /tmp -name "firecracker-*-x86_64" -exec install -m 0755 {} "${bin_dest}/firecracker" \; 2>/dev/null || true
+          find /tmp -name "jailer-*-x86_64"      -exec install -m 0755 {} "${bin_dest}/jailer"      \; 2>/dev/null || true
+          rm -f "${tgz}"
+          ;;
+        firectl)
+          local fc_ver
+          fc_ver="$(curl -fsSL --connect-timeout 10 \
+            https://api.github.com/repos/firecracker-microvm/firectl/releases/latest \
+            2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"\(v[^"]*\)".*/\1/')"
+          [[ -z "${fc_ver}" ]] && { log "  SKIP: no network for firectl"; return 0; }
+          curl -fsSL --connect-timeout 30 --max-time 120 \
+            "https://github.com/firecracker-microvm/firectl/releases/download/${fc_ver}/firectl" \
+            -o "${bin_dest}/firectl" 2>/dev/null \
+            && chmod +x "${bin_dest}/firectl" \
+            || log "  SKIP: firectl download failed"
+          ;;
+      esac
+    fi
+  }
+
+  log "Installing Firecracker microVM runtime..."
+  install_darksite_binary firecracker
+  install_darksite_binary jailer
+  install_darksite_binary firectl
+
+  # Create /etc/firecracker directory and containerd config stub
+  mkdir -p /etc/firecracker /var/lib/firecracker/rootfs /run/firecracker
+  systemctl enable --now containerd 2>/dev/null || true
+
+  systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
+  ok "=== KVM ready (bridge: br0, Firecracker microVM runtime installed) ==="
+}
+
+# ══ STORAGE ══════════════════════════════════════════════════════════════════
+setup_storage() {
+  log "=== STORAGE setup ==="
+
+  for ds in rpool/exports/nfs rpool/exports/iscsi; do
+    zfs list "${ds}" >/dev/null 2>&1 || zfs create -p "${ds}"
+    ok "dataset: ${ds}"
+  done
+
+  zfs set sharenfs="rw=10.77.0.0/16,no_subtree_check,no_root_squash" \
+    rpool/exports/nfs
+  systemctl enable --now nfs-kernel-server
+  exportfs -ra
+  ok "NFS exports active"
+
+  cat > /etc/tgt/conf.d/kldload.conf <<TGT
+<target iqn.$(date +%Y-%m).local.kldload:storage>
+  backing-store /dev/zvol/rpool/exports/iscsi
+  initiator-address 10.77.0.0/16
+</target>
+TGT
+  systemctl enable --now tgt
+  ok "iSCSI target configured"
+
+  systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
+  ok "=== STORAGE ready ==="
+}
+
+# ══ VDI ══════════════════════════════════════════════════════════════════════
+setup_vdi() {
+  log "=== VDI setup ==="
+
+  # mediamtx latest stable
+  local api_url="https://api.github.com/repos/bluenviron/mediamtx/releases/latest"
+  local dl_url
+  dl_url="$(curl -sL "${api_url}" \
+    | grep -o '"browser_download_url":"[^"]*linux_amd64\.tar\.gz"' \
+    | cut -d'"' -f4)"
+  [[ -n "${dl_url}" ]] || die "Cannot find mediamtx download URL"
+
+  log "Downloading mediamtx: ${dl_url}"
+  curl -sL "${dl_url}" | tar -xz -C /usr/local/bin mediamtx
+  chmod +x /usr/local/bin/mediamtx
+  ok "mediamtx: $(/usr/local/bin/mediamtx --version 2>&1 | head -1)"
+
+  mkdir -p /etc/mediamtx
+  cat > /etc/mediamtx/mediamtx.yml <<MCONF
+logLevel: info
+logDestinations: [stdout]
+srtAddress:    :8890
+hls:           yes
+hlsAddress:    :8888
+hlsVariant:    lowLatency
+hlsSegmentCount: 3
+hlsSegmentDuration: 1s
+webrtc:        yes
+webrtcAddress: :8889
+paths:
+  session~([0-9]+):
+    source: publisher
+MCONF
+
+  cat > /usr/lib/systemd/system/mediamtx.service <<SVC
+[Unit]
+Description=mediamtx media server
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/mediamtx /etc/mediamtx/mediamtx.yml
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+SVC
+  systemctl enable --now mediamtx
+  ok "mediamtx started (SRT :8890  HLS :8888  WebRTC :8889)"
+
+  # VDI session launcher
+  cat > /usr/local/sbin/kldload-vdi-session <<'SESS'
+#!/usr/bin/env bash
+# kldload-vdi-session <session-id>
+set -euo pipefail
+SID="${1:?session-id required}"
+export XDG_RUNTIME_DIR="/run/user/${SID}"
+mkdir -p "${XDG_RUNTIME_DIR}" && chmod 0700 "${XDG_RUNTIME_DIR}"
+mutter --wayland --headless --virtual-monitor 1920x1080 &
+MUTTER_PID=$!
+sleep 2
+wf-recorder --audio --codec libx264 \
+  --params "preset=ultrafast,tune=zerolatency" \
+  --file "srt://127.0.0.1:8890?streamid=publish:session${SID}&pkt_size=1316" &
+wait "${MUTTER_PID}"
+SESS
+  chmod +x /usr/local/sbin/kldload-vdi-session
+
+  # nginx proxy for HLS/WebRTC delivery
+  cat > /etc/nginx/sites-available/kldload-vdi <<NGINX
+server {
+  listen 80 default_server;
+  location /hls/    { proxy_pass http://127.0.0.1:8888/;
+                      add_header Access-Control-Allow-Origin *;
+                      add_header Cache-Control no-cache; }
+  location /webrtc/ { proxy_pass http://127.0.0.1:8889/;
+                      proxy_http_version 1.1;
+                      proxy_set_header Upgrade \$http_upgrade;
+                      proxy_set_header Connection "upgrade"; }
+  location /health  { return 200 "ok\n"; }
+}
+NGINX
+  ln -sf /etc/nginx/sites-available/kldload-vdi \
+         /etc/nginx/sites-enabled/kldload-vdi
+  rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+  systemctl enable --now nginx
+  ok "nginx VDI proxy active"
+
+  systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
+  ok "=== VDI ready ==="
+}
+
+# ══ MONITORING ═══════════════════════════════════════════════════════════════
+setup_monitoring() {
+  log "=== MONITORING setup ==="
+
+  # Prometheus data dir
+  mkdir -p /var/lib/prometheus /etc/prometheus/rules
+  chown -R prometheus:prometheus /var/lib/prometheus 2>/dev/null || true
+
+  # Default prometheus.yml scraping localhost + node exporter
+  cat > /etc/prometheus/prometheus.yml <<'PROM'
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['localhost:9093']
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+  - job_name: node
+    static_configs:
+      - targets: ['localhost:9100']
+PROM
+
+  systemctl enable --now prometheus prometheus-node-exporter prometheus-alertmanager 2>/dev/null || true
+
+  # Grafana: set admin password + enable service
+  if command -v grafana-server >/dev/null 2>&1 || [[ -f /usr/sbin/grafana-server ]]; then
+    systemctl enable --now grafana-server 2>/dev/null || true
+    log "  Grafana enabled (default login admin/admin — change on first login)"
+  else
+    log "  WARNING: grafana-server not found — monitoring profile may be incomplete"
+  fi
+
+  ok "=== MONITORING ready (Prometheus :9090  Grafana :3000  Alertmanager :9093) ==="
+}
+
+# ══ PROXMOX ══════════════════════════════════════════════════════════════════
+setup_proxmox() {
+  log "=== PROXMOX setup ==="
+
+  # Add Proxmox VE no-subscription repo (online) or skip if offline
+  local PVE_KEYRING="/usr/share/keyrings/proxmox-release-bookworm.gpg"
+  if curl -fsSL --connect-timeout 10 \
+      "https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg" \
+      -o "${PVE_KEYRING}" 2>/dev/null; then
+    echo "deb [signed-by=${PVE_KEYRING}] http://download.proxmox.com/debian/pve bookworm pve-no-subscription" \
+      > /etc/apt/sources.list.d/pve.list
+    log "  Proxmox VE repo added — running apt-get install proxmox-ve..."
+    apt-get update -qq 2>/dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y proxmox-ve postfix open-iscsi chrony 2>/dev/null \
+      && log "  Proxmox VE installed" \
+      || log "  WARNING: Proxmox VE install failed — network may be required"
+  else
+    log "  No network access — Proxmox VE packages must be installed manually after connectivity is established"
+    log "  Run: curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg | sudo gpg --dearmor -o /usr/share/keyrings/proxmox-release-bookworm.gpg"
+    log "  Then: echo 'deb [signed-by=...] http://download.proxmox.com/debian/pve bookworm pve-no-subscription' > /etc/apt/sources.list.d/pve.list && apt-get update && apt-get install -y proxmox-ve"
+  fi
+
+  ok "=== PROXMOX setup complete ==="
+}
+
+# ══ ZERO TRUST ════════════════════════════════════════════════════════════════
+# Runs after WireGuard is up for all roles.
+# 1. Issue node cert signed by ISO CA (SAN includes all WG IPs + hostname)
+# 2. Enable Salt mTLS using the issued cert
+# 3. Apply nftables per-plane microsegmentation
+# 4. Mark node as permanently installed
+setup_zero_trust() {
+  local idx="${KLDLOAD_NODE_INDEX:-1}"
+  local color="${KLDLOAD_NODE_COLOR:-blue}"
+  [[ "${color}" == "green" ]] && local oct3=200 || local oct3=100
+
+  log "=== Zero-trust setup: cert issuance + mTLS + microsegmentation ==="
+
+  # 1. Issue node cert with all WireGuard IPs as SANs
+  if [[ -x /usr/local/sbin/kldload-issue-cert ]]; then
+    mkdir -p /etc/kldload/certs
+    /usr/local/sbin/kldload-issue-cert \
+      --hostname "${HOSTNAME}" \
+      --ip "10.77.${oct3}.${idx}" \
+      --ip "10.78.${oct3}.${idx}" \
+      --ip "10.79.${oct3}.${idx}" \
+      --ip "10.80.${oct3}.${idx}" \
+      --ip "${LAN_IP}" \
+      --out-dir /etc/kldload/certs \
+      && ok "Node cert issued: /etc/kldload/certs/${HOSTNAME}.crt" \
+      || log "WARNING: kldload-issue-cert failed — continuing without node cert"
+  else
+    log "kldload-issue-cert not found — skipping cert issuance"
+  fi
+
+  # 2. Enable Salt mTLS (requires cert from step 1)
+  if [[ -x /usr/local/sbin/kldload-salt-ssl-enable ]]; then
+    /usr/local/sbin/kldload-salt-ssl-enable \
+      && ok "Salt mTLS enabled" \
+      || log "WARNING: Salt SSL enable failed — Salt will use classic PKI"
+  fi
+
+  # 3. Apply per-plane nftables microsegmentation
+  if [[ -x /usr/local/sbin/kldload-nftables-apply ]]; then
+    /usr/local/sbin/kldload-nftables-apply \
+      && ok "nftables microsegmentation applied" \
+      || log "WARNING: nftables-apply failed — check /var/log/kldload/nftables.log"
+  fi
+
+  # 4. Seal ZFS passphrase against TPM2 + tang (encrypted pools only)
+  local passphrase_file="/etc/kldload/zfs-passphrase"
+  local tang_url_file="/etc/kldload/tang-url"
+  if [[ -f "${passphrase_file}" && -x /usr/local/sbin/kldload-clevis-seal ]]; then
+    local tang_url="http://10.77.${oct3}.1:7500"
+    [[ -f "${tang_url_file}" ]] && tang_url="$(cat "${tang_url_file}")"
+    log "Sealing ZFS passphrase against TPM2 + tang @ ${tang_url}"
+    /usr/local/sbin/kldload-clevis-seal \
+      --passphrase "$(cat "${passphrase_file}")" \
+      --tang-url "${tang_url}" \
+      --pool rpool \
+      && ok "ZFS passphrase sealed — auto-unlock requires TPM PCR match + tang reachable" \
+      || log "WARNING: clevis-seal failed — ZFS will require manual passphrase at boot"
+    # Shred the plaintext passphrase regardless of seal outcome
+    shred -uz "${passphrase_file}" 2>/dev/null || rm -f "${passphrase_file}"
+    log "Plaintext passphrase shredded"
+  fi
+
+  # 5. Register node DNS in cluster.kldload (master must be up and reachable via wg0)
+  if [[ -x /usr/local/sbin/kldload-dns-register ]]; then
+    local master_ip="10.77.${oct3}.1"
+    /usr/local/sbin/kldload-dns-register \
+      --hostname "${HOSTNAME}" \
+      --wg0-ip "10.77.${oct3}.${idx}" \
+      --wg1-ip "10.78.${oct3}.${idx}" \
+      --wg2-ip "10.79.${oct3}.${idx}" \
+      --wg3-ip "10.80.${oct3}.${idx}" \
+      --master-api "http://${master_ip}:8081" \
+      && ok "DNS registered: ${HOSTNAME}.node.cluster.kldload" \
+      || log "WARNING: DNS registration failed — node won't appear in cluster.kldload until master is reachable"
+  fi
+
+  # 6. Mark as permanently installed (disables live-mode poof, enables Avahi installed-mode)
+  grep -q 'KLDLOAD_INSTALLED' "${MANIFEST}" 2>/dev/null \
+    || printf '\nKLDLOAD_INSTALLED=1\n' >> "${MANIFEST}"
+
+  ok "=== Zero-trust setup complete ==="
+}
+
+# ── Hub.env auto-discovery ────────────────────────────────────────────────────
+# Tries to fetch hub.env from the master's enrollment endpoint if no local
+# hub.env exists yet. This allows nodes to auto-join without pre-seeding.
+_try_fetch_hub_env() {
+  [[ -f "${HUB_ENV}" ]] && return 0   # already have one — nothing to do
+
+  local hub_urls=("http://10.77.0.1/hub.env")
+  # Also try LAN-based discovery if KLDLOAD_HUB_LAN is known from manifest
+  local hub_lan="${KLDLOAD_HUB_LAN:-}"
+  [[ -n "${hub_lan}" ]] && hub_urls+=("http://${hub_lan}/hub.env")
+
+  local url
+  for url in "${hub_urls[@]}"; do
+    log "Trying hub.env discovery: ${url}"
+    if curl -fsS --max-time 5 "${url}" -o "${HUB_ENV}.tmp" 2>/dev/null; then
+      # Sanity check — must contain WG0_PUB
+      if grep -q 'WG0_PUB=' "${HUB_ENV}.tmp"; then
+        mv "${HUB_ENV}.tmp" "${HUB_ENV}"
+        chmod 0640 "${HUB_ENV}"
+        log "hub.env auto-discovered from ${url}"
+        return 0
+      else
+        log "WARNING: hub.env from ${url} looks invalid — skipping"
+        rm -f "${HUB_ENV}.tmp"
+      fi
+    fi
+  done
+  rm -f "${HUB_ENV}.tmp" 2>/dev/null || true
+  log "hub.env not found locally or via discovery — running standalone"
+  return 0
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+main() {
+  local _edition
+  _edition="$(cat /etc/kldload/edition 2>/dev/null || echo free)"
+
+  log "kldload-firstboot start — role=${ROLE} hostname=${HOSTNAME} edition=${_edition}"
+
+  # Always enable snapshot timer
+  systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
+
+  # ── FREE edition: standalone only ─────────────────────────────────────────
+  if [[ "$_edition" == "free" ]]; then
+    log "Free edition — standalone setup only (no WireGuard mesh, no cluster)"
+
+    # Basic single-node Salt minion config (master = localhost, useful for local states)
+    if command -v salt-call &>/dev/null; then
+      mkdir -p /etc/salt/minion.d
+      cat > /etc/salt/minion.d/kldload-standalone.conf <<SALT
+# kldload Free — standalone Salt config (masterless mode)
+file_client: local
+file_roots:
+  base:
+    - /srv/salt
+SALT
+      ok "Salt configured for standalone/masterless mode"
+    fi
+
+    # Suppress GNOME Terminal "set as default terminal" nag
+    # Find whatever path gnome-terminal registered with update-alternatives
+    _gt_alt="$(update-alternatives --list x-terminal-emulator 2>/dev/null \
+      | grep -i gnome-terminal | head -1 || true)"
+    if [[ -n "$_gt_alt" ]]; then
+      update-alternatives --set x-terminal-emulator "$_gt_alt" 2>/dev/null || true
+    fi
+    unset _gt_alt
+
+    # Enable web UI (free version)
+    systemctl enable kldload-webui 2>/dev/null || true
+    systemctl start  kldload-webui 2>/dev/null || true
+
+    # Remove darksite APT mirror (~1.8G) — not needed after install
+    if [[ -d /root/darksite ]]; then
+      log "Removing darksite directory (~1.8G)..."
+      rm -rf /root/darksite
+      systemctl disable --now kldload-apt-mirror.service 2>/dev/null || true
+      log "Darksite removed."
+    fi
+
+    log "kldload-firstboot complete (free edition)"
+    return 0
+  fi
+
+  # ── PRO edition: full cluster-aware setup ──────────────────────────────────
+  # Auto-discover hub.env before template dispatch so all firstboot scripts
+  # can find the WireGuard hub when the network is up.
+  _try_fetch_hub_env
+
+  # Template-specific firstboot scripts override the standard role dispatch.
+  # KLDLOAD_TEMPLATE is set in the answer file (e.g. template-monitoring.env).
+  local template="${KLDLOAD_TEMPLATE:-}"
+  if [[ -n "${template}" ]]; then
+    local tscript="/usr/local/sbin/kldload-firstboot-${template}"
+    if [[ -x "${tscript}" ]]; then
+      log "Delegating to template firstboot: ${tscript}"
+      exec "${tscript}" "$@"
+    else
+      log "WARNING: no template script at ${tscript} — falling through to role dispatch"
+    fi
+  fi
+
+  # KLDLOAD_INFRA_MODE written by installer — dispatch to specialized firstboots
+  local _infra_mode="${KLDLOAD_INFRA_MODE:-standalone}"
+  case "${_infra_mode}" in
+    cluster-manager)
+      if [[ -x /usr/local/sbin/kldload-firstboot-master ]]; then
+        log "Delegating to kldload-firstboot-master"
+        exec /usr/local/sbin/kldload-firstboot-master "$@"
+      fi
+      ;;
+    join)
+      log "Join mode — role=${ROLE}"
+      ;;
+  esac
+
+  case "${ROLE}" in
+    master)
+      setup_master
+      ;;
+    kvm)
+      setup_wg_client; setup_kvm;        setup_salt_minion ;;
+    storage)
+      setup_wg_client; setup_storage;    setup_salt_minion ;;
+    vdi)
+      setup_wg_client; setup_vdi;        setup_salt_minion ;;
+    monitoring)
+      setup_wg_client; setup_monitoring; setup_salt_minion ;;
+    proxmox)
+      setup_wg_client; setup_proxmox ;;
+    server|client|desktop)
+      setup_wg_client; setup_salt_minion ;;
+    *)
+      log "Unknown role '${ROLE}' — base setup only"
+      setup_wg_client; setup_salt_minion ;;
+  esac
+
+  # Zero-trust chain runs after all role setup (WireGuard must be up)
+  setup_zero_trust
+
+  # ── Darksite cleanup ──────────────────────────────────────────────────────
+  # ZBM EFI already on EFI partition, APT pool not needed post-install —
+  # reclaim the space.
+  if [[ -d /root/darksite ]]; then
+    log "Removing darksite directory (~1.8G)..."
+    rm -rf /root/darksite
+    log "Darksite removed."
+  fi
+  systemctl disable --now kldload-apt-mirror.service 2>/dev/null || true
+
+  log "kldload-firstboot complete (free edition)"
+}
+
+main "$@"

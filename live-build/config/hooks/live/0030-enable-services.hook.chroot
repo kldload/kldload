@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# 0030-enable-services.hook.chroot
+# Enables required systemd services and timers in the live/installed image.
+# ---------------------------------------------------------------------------
+
+log() {
+    echo "[$(date '+%Y-%m-%dT%H:%M:%S')] [enable-services] $*" >&2
+}
+
+die() {
+    log "ERROR: $*"
+    exit 1
+}
+
+# Enable a service if the unit file exists on disk; log but do not fail if missing
+enable_if_present() {
+    local unit="$1"
+    local found=false
+    # Try the unit name as-is, then with .service suffix (for bare names like "ssh", "gdm")
+    for dir in /lib/systemd/system /usr/lib/systemd/system /etc/systemd/system; do
+        if [[ -f "${dir}/${unit}" ]] || [[ -f "${dir}/${unit}.service" ]]; then
+            found=true
+            break
+        fi
+    done
+    if "$found"; then
+        log "Enabling: $unit"
+        systemctl enable "$unit" 2>&1 || log "Warning: systemctl enable $unit returned non-zero (may be normal in chroot)"
+    else
+        log "Skipping (unit not found on disk): $unit"
+    fi
+}
+
+log "Starting service enablement hook"
+
+# ---------------------------------------------------------------------------
+# Core services — required for all profiles
+# ---------------------------------------------------------------------------
+
+CORE_SERVICES=(
+    ssh
+    zfs-import-cache
+    zfs-import-scan
+    zfs-mount
+    zfs-share
+    zfs-zed
+)
+
+for svc in "${CORE_SERVICES[@]}"; do
+    enable_if_present "$svc"
+done
+
+# NetworkManager — enabled on desktop, may be absent on server
+enable_if_present "NetworkManager"
+
+# ---------------------------------------------------------------------------
+# KLDload snapshot services
+# ---------------------------------------------------------------------------
+
+enable_if_present "kldload-apt-snapshot.path"
+# Darksite extension — mounts KLDLOAD-DARK disk into /root/darksite/ before mirror starts
+enable_if_present "kldload-darksite-extend.service"
+# Local APT mirror — serves /root/darksite/apt/ at http://127.0.0.1:3142/
+enable_if_present "kldload-apt-mirror.service"
+# Web UI — browser-based installer and management frontend on port 8080
+enable_if_present "kldload-webui.service"
+# kldload-firstboot.service is NOT enabled on the live ISO — it runs only on
+# the installed system, where the installer enables it inside the target chroot.
+
+# ---------------------------------------------------------------------------
+# Live log shipping — SSH keypair init + remote log collection
+# ---------------------------------------------------------------------------
+enable_if_present "kldload-live-ssh-init.service"
+enable_if_present "kldload-live-log-ship.timer"
+# Secure Boot MOK enrollment — runs before GDM on first live boot when SB is active
+enable_if_present "kldload-live-mok-enroll.service"
+# kldload-reconcile.service is NOT enabled on live ISO — enabled by installer on master nodes only
+# kldload-node-register runs on installed nodes via firstboot/systemd timer
+
+# ---------------------------------------------------------------------------
+# Desktop services — enable GDM if present (desktop profile only)
+# ---------------------------------------------------------------------------
+
+if dpkg -s gdm3 >/dev/null 2>&1; then
+    log "GDM3 detected — enabling gdm service (desktop profile)"
+    enable_if_present "gdm"
+else
+    log "GDM3 not installed — skipping desktop service enablement (server profile)"
+fi
+
+# ---------------------------------------------------------------------------
+# Live-only: mask services that must NOT run in the live session
+# ---------------------------------------------------------------------------
+
+# tangd.socket: Tang NBDE server — port 80 by default. Only master nodes
+# enable this after kldload-tang-setup reconfigures it to the WireGuard port.
+log "Masking tangd.socket"
+systemctl mask tangd.socket 2>/dev/null || true
+
+# unbound.service: DNSSEC resolver — conflicts with NetworkManager's internal
+# dnsmasq on port 53. Enabled by installer on target after NM is configured.
+log "Masking unbound.service"
+systemctl mask unbound.service 2>/dev/null || true
+
+# pdns.service: PowerDNS authoritative server — port 53. Only runs on
+# installed master nodes. Would fight systemd-resolved on the live ISO.
+# Note: Debian package pdns-server installs the unit as pdns.service.
+log "Masking pdns.service"
+systemctl mask pdns.service 2>/dev/null || true
+
+# dnsmasq.service: installed via template-master package list. Not needed in
+# live mode — conflicts with NetworkManager's built-in DHCP/DNS on port 53.
+log "Masking dnsmasq.service"
+systemctl mask dnsmasq.service 2>/dev/null || true
+
+# salt-master / salt-minion / salt-api: SaltStack control plane. These are
+# installed from the SaltProject repo but must not run on the live ISO — no
+# minion keys, no master configuration. The installer enables salt-master on
+# master nodes only.
+for _salt in salt-master.service salt-minion.service salt-api.service; do
+    log "Masking ${_salt}"
+    systemctl mask "${_salt}" 2>/dev/null || true
+done
+
+log "Service enablement hook complete."

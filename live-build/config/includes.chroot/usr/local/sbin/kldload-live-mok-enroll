@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# kldload-live-mok-enroll
+# Enrolls the kldload Secure Boot MOK key on first live boot.
+# Run by kldload-live-mok-enroll.service before GDM / the installer.
+# One-time: exits immediately if the key is already enrolled.
+set -euo pipefail
+
+MOK_DER="/etc/kldload/mok/mok.der"
+MOK_PASS="kldload"
+LOG="/var/log/kldload-mok-enroll.log"
+
+mkdir -p "$(dirname "$LOG")"
+ts()  { date '+%Y-%m-%dT%H:%M:%S'; }
+log() { echo "$(ts) [mok-enroll] $*" | tee -a "$LOG"; }
+
+log "kldload Secure Boot MOK enrollment check"
+
+if [[ ! -f "$MOK_DER" ]]; then
+    log "MOK cert not found at $MOK_DER — skipping (ISO may have been built without Secure Boot support)"
+    exit 0
+fi
+
+# Belt-and-suspenders: systemd ConditionSecurity=secure-boot handles this too
+if ! mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; then
+    log "Secure Boot is not active — nothing to do"
+    exit 0
+fi
+
+log "Secure Boot is ENABLED"
+
+# Already enrolled — nothing to do
+# NOTE: mokutil --test-key exits 0 regardless of enrollment status; check text output instead
+if mokutil --test-key "$MOK_DER" 2>/dev/null | grep -qi 'is already enrolled'; then
+    log "kldload MOK is already enrolled — ZFS modules should load fine"
+    exit 0
+fi
+
+# Enrollment already pending (e.g. user rebooted before MokManager appeared)
+if mokutil --list-new 2>/dev/null | grep -qi 'kldload'; then
+    log "kldload MOK enrollment is already pending — reboot to complete it in MokManager"
+    _pending=1
+else
+    log "Importing kldload MOK cert via mokutil..."
+    if ! printf '%s\n%s\n' "$MOK_PASS" "$MOK_PASS" | mokutil --import "$MOK_DER" 2>>"$LOG"; then
+        log "WARNING: mokutil --import failed — check $LOG"
+        log "         Secure Boot + ZFS installer may not work until manually resolved"
+        exit 0
+    fi
+    log "kldload MOK enrollment queued"
+    _pending=0
+fi
+
+wall <<MSG
+
+  ╔══════════════════════════════════════════════════════════════════╗
+  ║        kldload — Secure Boot MOK Enrollment Required               ║
+  ║                                                                  ║
+  ║  The kldload ZFS module signing key must be enrolled once.         ║
+  ║                                                                  ║
+  ║  On the NEXT BOOT a blue "MOK Management" screen will appear:   ║
+  ║    1.  Enroll MOK  →  Continue                                  ║
+  ║    2.  Enter password:  kldload                                     ║
+  ║    3.  Yes  →  Reboot                                            ║
+  ║                                                                  ║
+  ║  After enrolling once, ZFS and the kldload installer work with     ║
+  ║  Secure Boot enabled — no further action needed.                ║
+  ║                                                                  ║
+  ║  Rebooting in 15 seconds...                                      ║
+  ╚══════════════════════════════════════════════════════════════════╝
+
+MSG
+
+log "Rebooting in 15 seconds for MOK enrollment..."
+sleep 15
+systemctl reboot

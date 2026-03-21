@@ -1,0 +1,215 @@
+{
+  "name": "scc-starter",
+  "description": "Starter Cluster Configuration — 6-node cluster with firewall pair, Salt master, storage, monitoring, and compute",
+  "domain": "internal.example.com",
+  "wgCidr": "10.200.0.0/16",
+  "mgmtCidr": "10.100.10.0/24",
+  "wgPlanes": {
+    "wg0": "Management",
+    "wg1": "Service mesh",
+    "wg2": "Storage/metrics",
+    "wg3": "k8s backplane"
+  },
+  "groups": [
+    {
+      "id": "g1",
+      "name": "fw",
+      "role": "firewall",
+      "count": 2,
+      "cpu": 2,
+      "ram": 4,
+      "disk": 64,
+      "wg": [0, 1, 2, 3]
+    },
+    {
+      "id": "g2",
+      "name": "master",
+      "role": "salt-master",
+      "count": 1,
+      "cpu": 4,
+      "ram": 8,
+      "disk": 128,
+      "wg": [0, 1]
+    },
+    {
+      "id": "g3",
+      "name": "storage",
+      "role": "storage",
+      "count": 1,
+      "cpu": 4,
+      "ram": 16,
+      "disk": 4096,
+      "wg": [0, 2]
+    },
+    {
+      "id": "g4",
+      "name": "monitoring",
+      "role": "monitoring",
+      "count": 1,
+      "cpu": 4,
+      "ram": 16,
+      "disk": 512,
+      "wg": [0, 1]
+    },
+    {
+      "id": "g5",
+      "name": "compute",
+      "role": "compute",
+      "count": 1,
+      "cpu": 8,
+      "ram": 32,
+      "disk": 256,
+      "wg": [0, 1]
+    }
+  ],
+  "firewall": [
+    {
+      "id": 1,
+      "prio": 10,
+      "from": "external",
+      "to": "dmz",
+      "proto": "tcp",
+      "port": "80,443",
+      "action": "ACCEPT",
+      "comment": "HTTPS inbound"
+    },
+    {
+      "id": 2,
+      "prio": 20,
+      "from": "external",
+      "to": "mgmt",
+      "proto": "tcp",
+      "port": "22",
+      "action": "DROP",
+      "comment": "Block SSH from internet"
+    },
+    {
+      "id": 3,
+      "prio": 30,
+      "from": "mgmt",
+      "to": "any",
+      "proto": "tcp",
+      "port": "22",
+      "action": "ACCEPT",
+      "comment": "SSH from management"
+    },
+    {
+      "id": 4,
+      "prio": 40,
+      "from": "internal",
+      "to": "external",
+      "proto": "tcp",
+      "port": "80,443",
+      "action": "ACCEPT",
+      "comment": "Outbound web"
+    },
+    {
+      "id": 5,
+      "prio": 50,
+      "from": "internal",
+      "to": "external",
+      "proto": "udp",
+      "port": "53",
+      "action": "ACCEPT",
+      "comment": "DNS outbound"
+    },
+    {
+      "id": 6,
+      "prio": 60,
+      "from": "wg",
+      "to": "internal",
+      "proto": "any",
+      "port": "any",
+      "action": "ACCEPT",
+      "comment": "WG mesh → internal"
+    },
+    {
+      "id": 7,
+      "prio": 70,
+      "from": "wg",
+      "to": "mgmt",
+      "proto": "tcp",
+      "port": "4505,4506",
+      "action": "ACCEPT",
+      "comment": "Salt master (wg0)"
+    },
+    {
+      "id": 8,
+      "prio": 80,
+      "from": "any",
+      "to": "any",
+      "proto": "any",
+      "port": "any",
+      "action": "DROP",
+      "comment": "Default deny"
+    }
+  ],
+  "services": [
+    "ssh-hardening",
+    "nftables",
+    "wireguard",
+    "salt-master",
+    "salt-minion",
+    "prometheus",
+    "grafana",
+    "node-exporter",
+    "chrony",
+    "kldload-firstboot",
+    "kldload-snapshots",
+    "zfs-recv"
+  ],
+  "nodeInventory": [
+    {
+      "name": "fw1",
+      "ip": "10.100.10.229",
+      "role": "firewall",
+      "group": "g1",
+      "wg0": "10.77.0.2/32",
+      "wg1": "10.78.0.2/32",
+      "wg2": "10.79.0.2/32",
+      "wg3": "10.80.0.2/32"
+    },
+    {
+      "name": "fw2",
+      "ip": "10.100.10.228",
+      "role": "firewall",
+      "group": "g1",
+      "wg0": "10.77.0.3/32",
+      "wg1": "10.78.0.3/32",
+      "wg2": "10.79.0.3/32",
+      "wg3": "10.80.0.3/32"
+    },
+    {
+      "name": "master",
+      "ip": "10.100.10.224",
+      "role": "salt-master",
+      "group": "g2",
+      "wg0": "10.77.0.1/32",
+      "wg1": "10.78.0.1/32"
+    },
+    {
+      "name": "storage",
+      "ip": "10.100.10.221",
+      "role": "storage",
+      "group": "g3",
+      "wg0": "10.77.0.4/32",
+      "wg2": "10.79.0.4/32"
+    },
+    {
+      "name": "monitoring",
+      "ip": "10.100.10.222",
+      "role": "monitoring",
+      "group": "g4",
+      "wg0": "10.77.0.5/32",
+      "wg1": "10.78.0.5/32"
+    },
+    {
+      "name": "compute",
+      "ip": "10.100.10.225",
+      "role": "compute",
+      "group": "g5",
+      "wg0": "10.77.0.6/32",
+      "wg1": "10.78.0.6/32"
+    }
+  ]
+}

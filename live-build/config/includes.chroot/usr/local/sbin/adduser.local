@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/adduser.local
+# Called automatically by Debian's adduser after creating a user.
+# Args: username uid gid home
+#
+# If the home directory falls under a ZFS mountpoint, replace the plain
+# directory with a dedicated ZFS dataset so every user gets their own
+# isolated dataset with its own snapshot, quota, and compression scope.
+
+set -euo pipefail
+
+USERNAME="${1:?}"
+# UID="${2:?}"   (unused)
+# GID="${3:?}"   (unused)
+HOME_DIR="${4:?}"
+
+log() { logger -t kldload-adduser "$*"; echo "adduser.local: $*"; }
+
+# Only act on ZFS pools
+command -v zfs >/dev/null 2>&1 || exit 0
+
+# Find the parent ZFS dataset (e.g. /home -> rpool/home)
+parent_dir="${HOME_DIR%/*}"
+[[ -n "$parent_dir" ]] || exit 0
+
+parent_ds="$(zfs list -Ho name "$parent_dir" 2>/dev/null)" || {
+    log "parent '$parent_dir' is not a ZFS mountpoint — skipping dataset creation"
+    exit 0
+}
+
+target_ds="${parent_ds}/${USERNAME}"
+
+# Skip if dataset already exists (adduser called on an existing user)
+if zfs list -Ho name "$target_ds" >/dev/null 2>&1; then
+    log "dataset already exists: $target_ds"
+    exit 0
+fi
+
+log "creating home dataset: $target_ds -> $HOME_DIR"
+
+# If adduser created a plain directory, remove it before zfs create
+# (zfs create will mount and own the path)
+if [[ -d "$HOME_DIR" ]] && ! mountpoint -q "$HOME_DIR"; then
+    # Preserve any files adduser seeded from /etc/skel
+    tmp_skel="$(mktemp -d)"
+    cp -a "$HOME_DIR/." "$tmp_skel/" 2>/dev/null || true
+    rm -rf "$HOME_DIR"
+fi
+
+zfs create \
+    -o "mountpoint=${HOME_DIR}" \
+    "$target_ds"
+
+log "dataset created: $target_ds"
+
+# Restore skel files if any were saved
+if [[ -n "${tmp_skel:-}" && -d "$tmp_skel" ]]; then
+    cp -a "$tmp_skel/." "$HOME_DIR/" 2>/dev/null || true
+    rm -rf "$tmp_skel"
+fi
+
+# Ensure correct ownership (adduser sets this, but zfs create resets it)
+chown "${USERNAME}:" "$HOME_DIR"
+chmod 0750 "$HOME_DIR"
+
+log "home dataset ready: $HOME_DIR (dataset: $target_ds)"

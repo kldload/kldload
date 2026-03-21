@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Launcher for the KLDload installer — runs from the GNOME dock as the live user.
+# The installer itself requires root; we elevate via sudo (live user has NOPASSWD).
+
+LOG_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+LOG="${LOG_DIR}/kldload-installer-launch.log"
+
+mkdir -p "${LOG_DIR}" 2>/dev/null || true
+
+_log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "${LOG}"; }
+
+_log "Launching KLDload installer"
+_log "uid=$(id -u) user=$(id -un) DISPLAY=${DISPLAY:-<unset>} WAYLAND=${WAYLAND_DISPLAY:-<unset>}"
+
+# The installer must run as root. On the live image the live user has
+# passwordless sudo — use 'sudo -E' to preserve the display environment.
+_INSTALLER_CMD="sudo -E /usr/sbin/kldload-install-target --guided"
+
+if [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]]; then
+    if command -v gnome-terminal >/dev/null 2>&1; then
+        _log "Opening gnome-terminal"
+        exec gnome-terminal \
+            --wait \
+            --title="KLDload Installer  ·  close this window to cancel" \
+            --geometry=120x40 \
+            -- bash -c "${_INSTALLER_CMD}"
+    elif command -v xterm >/dev/null 2>&1; then
+        _log "Opening xterm"
+        exec xterm \
+            -title    "KLDload Installer  ·  close this window to cancel" \
+            -fa       "Monospace" \
+            -fs       18 \
+            -fg       "#e2e8f0" \
+            -bg       "#1a1f2b" \
+            -cr       "#64b5f6" \
+            -geometry 120x40 \
+            +sb -bc \
+            -e bash -c "${_INSTALLER_CMD}"
+    else
+        _log "No terminal emulator found — running inline"
+        exec bash -c "${_INSTALLER_CMD}"
+    fi
+else
+    _log "No display — running inline"
+    exec bash -c "${_INSTALLER_CMD}"
+fi

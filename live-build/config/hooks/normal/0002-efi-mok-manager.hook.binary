@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# 0002-efi-mok-manager.hook.binary
+# Injects mmx64.efi (MokManager) into the ISO EFI FAT image so that
+# Secure Boot MOK enrollment works when booting the live ISO.
+#
+# binary_hooks runs this with CWD=binary/ — all paths are relative to binary/.
+#
+# Problem: binary_grub-efi sizes efi.img only for the files it knows about
+# (bootx64.efi + grubx64.efi + grub.cfg) with ~22KB headroom — not enough
+# for mmx64.efi (~957KB). We recreate the image at the right size.
+# ---------------------------------------------------------------------------
+
+log() { echo "[efi-mok-manager] $*" >&2; }
+
+EFI_IMG="boot/grub/efi.img"
+
+# Find mmx64.efi source from builder image (shim-signed in Dockerfile)
+SRC=""
+for candidate in /usr/lib/shim/mmx64.efi.signed /usr/lib/shim/mmx64.efi; do
+    [[ -f "$candidate" ]] && SRC="$candidate" && break
+done
+
+if [[ -z "$SRC" ]]; then
+    log "WARNING: mmx64.efi source not found — skipping"
+    exit 0
+fi
+
+if [[ ! -f "$EFI_IMG" ]]; then
+    log "WARNING: $EFI_IMG not found — skipping"
+    exit 0
+fi
+
+log "Source: $SRC ($(du -sh "$SRC" | cut -f1))"
+log "Existing efi.img: $(du -sh "$EFI_IMG" | cut -f1)"
+
+MMX_SIZE=$(stat -c %s "$SRC")
+OLD_SIZE=$(stat -c %s "$EFI_IMG")
+
+# New size: old + mmx64.efi + 128KB padding, rounded up to 32-block boundary
+NEW_BLOCKS=$(( ( (OLD_SIZE + MMX_SIZE) / 1024 + 183) / 32 * 32 ))
+log "Resizing efi.img: ${OLD_SIZE} bytes → ${NEW_BLOCKS} blocks (1 block=1KB)"
+
+TMPDIR=$(mktemp -d)
+trap "rm -rf '$TMPDIR'" EXIT
+
+# Extract all contents from existing efi.img
+log "Extracting existing efi.img contents..."
+mcopy -s -i "$EFI_IMG" "::" "$TMPDIR/" 2>/dev/null || true
+log "Extracted: $(find "$TMPDIR" -type f | tr '\n' ' ')"
+
+# Build new larger image
+NEW_IMG="${EFI_IMG}.new"
+mkfs.msdos -C "$NEW_IMG" "$NEW_BLOCKS"
+mmd -i "$NEW_IMG" ::EFI ::EFI/boot ::boot ::boot/grub
+
+# Restore original EFI files
+for f in "$TMPDIR"/EFI/boot/*.efi; do
+    [[ -f "$f" ]] || continue
+    mcopy -o -i "$NEW_IMG" "$f" "::EFI/boot/$(basename "$f")"
+    log "Restored: EFI/boot/$(basename "$f")"
+done
+
+# Restore grub.cfg
+if [[ -f "$TMPDIR/boot/grub/grub.cfg" ]]; then
+    mcopy -o -i "$NEW_IMG" "$TMPDIR/boot/grub/grub.cfg" "::boot/grub/grub.cfg"
+    log "Restored: boot/grub/grub.cfg"
+fi
+
+# Inject mmx64.efi
+mcopy -o -i "$NEW_IMG" "$SRC" "::EFI/boot/mmx64.efi"
+log "Injected: EFI/boot/mmx64.efi"
+
+# Replace original
+mv "$NEW_IMG" "$EFI_IMG"
+log "efi.img updated: $(du -sh "$EFI_IMG" | cut -f1)"
+log "Final contents: $(mdir -i "$EFI_IMG" ::EFI/boot/ 2>/dev/null | grep -v '^\.' | tr '\n' ' ')"
+
+# Also copy into ISO9660 EFI tree
+for efi_dir in "EFI/boot" "EFI/BOOT"; do
+    if [[ -d "$efi_dir" ]]; then
+        cp "$SRC" "$efi_dir/mmx64.efi"
+        log "Also copied to $efi_dir/mmx64.efi"
+        break
+    fi
+done

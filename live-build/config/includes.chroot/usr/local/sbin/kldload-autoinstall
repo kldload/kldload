@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# kldload-autoinstall — unattended installer triggered by a KLDLOAD-SEED disk.
+#
+# Called by kldload-autoinstall.service on live ISO boot.
+# Scans for a FAT32 volume labelled KLDLOAD-SEED, reads answers.env from it,
+# and runs kldload-install-target --config <answers>.
+#
+# To create a seed disk (32 MB FAT32, label KLDLOAD-SEED, contains answers.env):
+#   ./deploy.sh seed-disk --answers /etc/kldload/answers/zfs-single-disk.env
+#
+# Exits 0 silently if no seed disk is found (safe to enable unconditionally).
+set -Eeuo pipefail
+
+LOG=/var/log/installer/autoinstall.log
+mkdir -p "$(dirname "$LOG")"
+exec > >(tee -a "$LOG") 2>&1
+
+log() { printf '[%(%F %T)T] [autoinstall] %s\n' -1 "$*"; }
+
+# ── Find seed disk ────────────────────────────────────────────────────────────
+
+log "Scanning for KLDLOAD-SEED disk..."
+
+SEED_DEV=""
+
+# Try /dev/disk/by-label first (udev symlink)
+for candidate in /dev/disk/by-label/KLDLOAD-SEED /dev/disk/by-label/kldload-seed; do
+    if [[ -b "$candidate" ]]; then
+        SEED_DEV="$(readlink -f "$candidate")"
+        break
+    fi
+done
+
+# Fallback: blkid scan
+if [[ -z "$SEED_DEV" ]]; then
+    SEED_DEV="$(blkid -o device -t LABEL=KLDLOAD-SEED 2>/dev/null | head -1 || true)"
+fi
+
+if [[ -z "$SEED_DEV" ]]; then
+    log "No KLDLOAD-SEED disk found — skipping autoinstall"
+    exit 0
+fi
+
+log "Found seed disk: $SEED_DEV"
+
+# ── Mount and read answers ────────────────────────────────────────────────────
+
+SEED_MNT="$(mktemp -d)"
+mount -o ro "$SEED_DEV" "$SEED_MNT"
+
+ANSWERS="$SEED_MNT/answers.env"
+if [[ ! -f "$ANSWERS" ]]; then
+    log "ERROR: answers.env not found on seed disk"
+    umount "$SEED_MNT" || true
+    rmdir  "$SEED_MNT" || true
+    exit 1
+fi
+
+ANSWERS_TMP="$(mktemp /tmp/kldload-answers.XXXXXX.env)"
+cp "$ANSWERS" "$ANSWERS_TMP"
+umount "$SEED_MNT" || true
+rmdir  "$SEED_MNT" || true
+
+log "Answers loaded from seed disk: $ANSWERS_TMP"
+
+# ── Auto-detect disk if not set ───────────────────────────────────────────────
+
+if ! grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP" || \
+   grep -q "^KLDLOAD_DISK=$" "$ANSWERS_TMP"; then
+    DETECTED=""
+    for dev in /dev/sda /dev/vda /dev/xvda /dev/nvme0n1; do
+        [[ -b "$dev" ]] && DETECTED="$dev" && break
+    done
+    if [[ -n "$DETECTED" ]]; then
+        log "Auto-detected install disk: $DETECTED"
+        # Append or replace KLDLOAD_DISK
+        if grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP"; then
+            sed -i "s|^KLDLOAD_DISK=.*|KLDLOAD_DISK=${DETECTED}|" "$ANSWERS_TMP"
+        else
+            echo "KLDLOAD_DISK=${DETECTED}" >> "$ANSWERS_TMP"
+        fi
+    fi
+fi
+
+log "Starting unattended install..."
+log "  Answers: $ANSWERS_TMP"
+log "  Log:     /var/log/installer/"
+log ""
+
+exec /usr/sbin/kldload-install-target --config "$ANSWERS_TMP"

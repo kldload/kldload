@@ -1,0 +1,60 @@
+#!/bin/sh
+# Generate a local CA and bake it into the ISO.
+# kldload-webui uses this CA at runtime to sign a per-boot server cert,
+# giving Firefox a trusted green lock with zero user interaction.
+set -e
+
+TLS_DIR=/etc/kldload/tls
+mkdir -p "${TLS_DIR}"
+chmod 750 "${TLS_DIR}"
+
+# Generate CA key + self-signed cert (4096-bit, 10-year validity)
+openssl genrsa -out "${TLS_DIR}/ca-key.pem" 4096 2>/dev/null
+openssl req -new -x509 -days 3650 \
+    -key "${TLS_DIR}/ca-key.pem" \
+    -out "${TLS_DIR}/ca-cert.pem" \
+    -subj "/CN=kldload Local CA/O=kldload/C=CA" 2>/dev/null
+
+chmod 640 "${TLS_DIR}/ca-key.pem"
+chmod 644 "${TLS_DIR}/ca-cert.pem"
+
+# Add to system trust store (curl, wget, Python, etc.)
+cp "${TLS_DIR}/ca-cert.pem" /usr/local/share/ca-certificates/kldload-ca.crt
+update-ca-certificates 2>/dev/null || true
+
+# Firefox ESR enterprise policy — auto-installs the CA into Firefox's
+# cert store on first launch. No user interaction required.
+mkdir -p /etc/firefox-esr/policies
+cat > /etc/firefox-esr/policies/policies.json << 'EOF'
+{
+  "policies": {
+    "Certificates": {
+      "Install": ["/etc/kldload/tls/ca-cert.pem"]
+    }
+  }
+}
+EOF
+
+# Also pre-seed the CA into the live user's Firefox NSS db so the cert
+# is trusted on the very first page load (enterprise policy only kicks
+# in after the first launch completes).
+if command -v certutil >/dev/null 2>&1; then
+    PROFILE_DIR="/home/live/.mozilla/firefox/kldload.default"
+    mkdir -p "${PROFILE_DIR}"
+    # Create a minimal profiles.ini so Firefox uses this profile
+    cat > /home/live/.mozilla/firefox/profiles.ini << 'PROFEOF'
+[Profile0]
+Name=kldload
+IsRelative=1
+Path=kldload.default
+Default=1
+
+[General]
+StartWithLastProfile=1
+Version=2
+PROFEOF
+    certutil -A -n "kldload Local CA" -t "CT,," \
+        -i "${TLS_DIR}/ca-cert.pem" \
+        -d "sql:${PROFILE_DIR}" 2>/dev/null || true
+    chown -R live:live /home/live/.mozilla 2>/dev/null || true
+fi

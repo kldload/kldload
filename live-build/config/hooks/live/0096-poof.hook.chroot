@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# 0096-poof.hook.chroot
+# Bakes kldload-poof.service and the live session banner into the squashfs.
+# On shutdown/reboot in live mode, kldload-poof fires to scrub ephemeral secrets.
+set -euo pipefail
+
+log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] [0096-poof] $*" >&2; }
+
+# ── Sanity: kldload-poof must exist and be executable ────────────────────────────
+
+if [[ ! -x /usr/local/sbin/kldload-poof ]]; then
+    echo "ERROR: /usr/local/sbin/kldload-poof not found or not executable" >&2
+    exit 1
+fi
+log "kldload-poof is present and executable"
+
+# ── kldload-poof.service ─────────────────────────────────────────────────────────
+
+mkdir -p /usr/lib/systemd/system
+
+cat > /usr/lib/systemd/system/kldload-poof.service <<'SVC'
+[Unit]
+Description=kldload live session scrub (poof)
+DefaultDependencies=no
+Before=shutdown.target reboot.target halt.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kldload-poof
+StandardOutput=journal
+RemainAfterExit=yes
+
+[Install]
+WantedBy=halt.target reboot.target shutdown.target
+SVC
+
+log "Created kldload-poof.service"
+
+# ── Enable the service (symlinks into the appropriate .wants dirs) ─────────────
+
+for target in halt.target reboot.target shutdown.target; do
+    wants_dir="/etc/systemd/system/${target}.wants"
+    mkdir -p "${wants_dir}"
+    ln -sf /usr/lib/systemd/system/kldload-poof.service \
+           "${wants_dir}/kldload-poof.service"
+    log "Enabled kldload-poof.service for ${target}"
+done
+
+# ── Live session login banner ──────────────────────────────────────────────────
+
+cat > /etc/profile.d/kldload-live-banner.sh <<'BANNER'
+#!/bin/bash
+if [[ ! -f /etc/kldload/install-manifest.env ]] || ! grep -q 'KLDLOAD_INSTALLED=1' /etc/kldload/install-manifest.env 2>/dev/null; then
+  echo ""
+  echo "  ╔══════════════════════════════════════════╗"
+  echo "  ║  kldload LIVE SESSION — ephemeral mode       ║"
+  echo "  ║  All keys and credentials exist in RAM    ║"
+  echo "  ║  Run: kldload-poof  to scrub and clear       ║"
+  echo "  ╚══════════════════════════════════════════╝"
+  echo ""
+fi
+BANNER
+
+chmod +x /etc/profile.d/kldload-live-banner.sh
+log "Created /etc/profile.d/kldload-live-banner.sh"
+
+log "0096-poof.hook.chroot complete"

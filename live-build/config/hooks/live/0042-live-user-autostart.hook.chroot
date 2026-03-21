@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+LIVE_USER="live"
+LIVE_HOME="/home/${LIVE_USER}"
+LOG="/var/log/kldload-live-autostart-build.log"
+
+touch "$LOG"
+
+mkdir -p "${LIVE_HOME}/.config/autostart"
+
+if [[ -f /etc/skel/.config/autostart/kldload-session-init.desktop ]]; then
+  cp -f /etc/skel/.config/autostart/kldload-session-init.desktop "${LIVE_HOME}/.config/autostart/"
+fi
+
+if id "${LIVE_USER}" >/dev/null 2>&1; then
+  chown -R "${LIVE_USER}:${LIVE_USER}" "${LIVE_HOME}/.config"
+fi
+
+chmod 0755 "${LIVE_HOME}/.config" "${LIVE_HOME}/.config/autostart" || true
+chmod 0644 "${LIVE_HOME}/.config/autostart/"*.desktop 2>/dev/null || true
+
+{
+  echo "==== $(date -Is) autostart staging ===="
+  ls -l "${LIVE_HOME}/.config/autostart" || true
+} >>"$LOG" 2>&1

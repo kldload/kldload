@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# 0020-zfsbootmenu.hook.chroot
+# Downloads the ZFSBootMenu prebuilt EFI binary and stages it so the
+# installer (bootenv.sh) can copy it to the target EFI partition.
+#
+# ZFSBootMenu is NOT in Debian repos — it ships as a standalone EFI binary
+# from GitHub releases: https://github.com/zbm-dev/zfsbootmenu/releases
+# ---------------------------------------------------------------------------
+
+LOG=/var/log/kldload-zfsbootmenu-hook.log
+mkdir -p "$(dirname "$LOG")"
+
+log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] [zbm-hook] $*" | tee -a "$LOG"; }
+die() { log "ERROR: $*"; exit 1; }
+
+log "Starting ZFSBootMenu EFI download hook"
+
+# ---------------------------------------------------------------------------
+# Version — override with ZBM_VERSION env var if needed
+# ---------------------------------------------------------------------------
+ZBM_VERSION="${ZBM_VERSION:-2.3.0}"
+# ZBM_ARCH is set by build-iso.sh; derive from dpkg as fallback
+if [[ -z "${ZBM_ARCH:-}" ]]; then
+    _dpkg_arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+    case "$_dpkg_arch" in
+        arm64) ZBM_ARCH="aarch64" ;;
+        *)     ZBM_ARCH="x86_64" ;;
+    esac
+fi
+ZBM_FILENAME="zfsbootmenu-release-${ZBM_ARCH}-v${ZBM_VERSION}-vmlinuz.EFI"
+ZBM_URL="https://github.com/zbm-dev/zfsbootmenu/releases/download/v${ZBM_VERSION}/${ZBM_FILENAME}"
+ZBM_DEST_DIR="/usr/share/zfsbootmenu"
+ZBM_DEST="${ZBM_DEST_DIR}/zfsbootmenu.EFI"
+
+log "ZFSBootMenu version : v${ZBM_VERSION}"
+log "Download URL        : ${ZBM_URL}"
+log "Destination         : ${ZBM_DEST}"
+
+mkdir -p "$ZBM_DEST_DIR"
+
+# ---------------------------------------------------------------------------
+# Download
+# ---------------------------------------------------------------------------
+if ! curl -fsSL --retry 3 --retry-delay 2 -o "$ZBM_DEST" "$ZBM_URL"; then
+    die "Failed to download ZFSBootMenu from: $ZBM_URL"
+fi
+
+[[ -s "$ZBM_DEST" ]] || die "Downloaded file is empty: $ZBM_DEST"
+
+EFI_SIZE="$(du -sh "$ZBM_DEST" | cut -f1)"
+log "Downloaded ZFSBootMenu EFI: ${ZBM_DEST} (${EFI_SIZE})"
+
+# ---------------------------------------------------------------------------
+# Also install the generate-zbm helper if the package is available,
+# but do not fail if it's not — the prebuilt EFI is all we need.
+# ---------------------------------------------------------------------------
+if apt-get install -y --no-install-recommends zfsbootmenu 2>/dev/null; then
+    log "zfsbootmenu package installed (generate-zbm available)"
+else
+    log "zfsbootmenu package not available in repos — using prebuilt EFI only (expected)"
+fi
+
+log "ZFSBootMenu hook complete. EFI binary staged at: ${ZBM_DEST}"

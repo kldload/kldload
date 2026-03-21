@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# kdf — ZFS-aware disk usage (shows compression ratio and quotas)
+
+B='\033[1m'
+N='\033[0m'
+C='\033[0;36m'
+G='\033[0;32m'
+Y='\033[0;33m'
+
+echo ""
+printf "  ${B}%-35s %6s  %6s  %5s  %6s  %s${N}\n" "DATASET" "USED" "AVAIL" "RATIO" "QUOTA" "MOUNTPOINT"
+printf "  %-35s %6s  %6s  %5s  %6s  %s\n" "───────" "────" "─────" "─────" "─────" "──────────"
+
+zfs list -H -o name,used,avail,compressratio,quota,mountpoint -r rpool 2>/dev/null | \
+  grep -v '^rpool$' | \
+  sort | \
+  while IFS=$'\t' read -r name used avail ratio quota mountpoint; do
+    # Color quota
+    if [[ "$quota" == "none" || "$quota" == "0" ]]; then
+      quota_str="  -"
+    else
+      quota_str="$quota"
+    fi
+    # Color compression ratio
+    ratio_num="${ratio%x}"
+    if (( $(echo "$ratio_num > 1.5" | bc -l 2>/dev/null || echo 0) )); then
+      ratio_col="${G}${ratio}${N}"
+    elif (( $(echo "$ratio_num > 1.0" | bc -l 2>/dev/null || echo 0) )); then
+      ratio_col="${C}${ratio}${N}"
+    else
+      ratio_col="$ratio"
+    fi
+
+    # Shorten dataset name for display
+    short="${name#rpool/}"
+    printf "  %-35s %6s  %6s  %5b  %6s  %s\n" "$short" "$used" "$avail" "$ratio_col" "$quota_str" "$mountpoint"
+  done
+
+echo ""
+
+# Pool summary
+pool_size="$(zpool get -H -o value size rpool 2>/dev/null || echo "?")"
+pool_alloc="$(zpool get -H -o value allocated rpool 2>/dev/null || echo "?")"
+pool_free="$(zpool get -H -o value free rpool 2>/dev/null || echo "?")"
+pool_frag="$(zpool get -H -o value fragmentation rpool 2>/dev/null || echo "?")"
+printf "  ${B}Pool:${N} rpool  ${B}Size:${N} %s  ${B}Alloc:${N} %s  ${B}Free:${N} %s  ${B}Frag:${N} %s\n\n" \
+  "$pool_size" "$pool_alloc" "$pool_free" "$pool_frag"

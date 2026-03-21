@@ -1,0 +1,2175 @@
+#!/usr/bin/env python3
+"""
+kldload-webui — lightweight web-based installer UI for KLDload.
+Serves a browser frontend and exposes a WebSocket API so the browser
+can drive installs, spawns, and VM management without a terminal.
+
+Usage:
+  kldload-webui [--port PORT] [--bind ADDR] [--no-browser]
+"""
+import argparse
+import asyncio
+import datetime
+import json
+import logging
+import os
+import re
+import shlex
+import sqlite3
+import ssl
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+try:
+    import websockets
+except ImportError:
+    print("[kldload-webui] Installing websockets...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "websockets"])
+    import websockets
+
+LOG = logging.getLogger("kldload-webui")
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [webui] %(message)s",
+                    datefmt="%Y-%m-%dT%H:%M:%S")
+
+# Serve from edition-specific UI directory.
+# build-iso.sh copies the right edition into 'active/' at build time.
+# Fall back to base dir if active/ doesn't exist yet.
+_WEBUI_BASE = Path("/usr/local/share/kldload-webui")
+_WEBUI_ACTIVE = _WEBUI_BASE / "active"
+WEBUI_DIR = _WEBUI_ACTIVE if _WEBUI_ACTIVE.is_dir() else _WEBUI_BASE
+
+EDITION = Path("/etc/kldload/edition").read_text().strip() if Path("/etc/kldload/edition").exists() else "free"
+MANIFEST         = Path("/etc/kldload/install-manifest.env")
+CREDENTIALS_PATH = Path("/run/kldload/credentials.json")
+DB_PATH          = Path("/var/lib/kldload/state.db")
+LOG_FILES  = {
+    "installer": "/var/log/installer/kldload-installer.log",
+    "storage":   "/var/log/installer/storage.log",
+    "network":   "/var/log/installer/network.log",
+    "bootstrap": "/var/log/installer/bootstrap.log",
+    "snapshots": "/var/log/kldload/snapshots.log",
+    "firstboot": "/var/log/kldload/firstboot.log",
+    "autoboot":  "/var/log/kldload/autobootstrap.log",
+    "audit":     "/var/log/kldload/audit.log",
+}
+
+# ── State database ─────────────────────────────────────────────────────────────
+
+def _db_now():
+    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _db_connect():
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    return con
+
+def db_init():
+    """Create state.db and all tables if not present."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    con = _db_connect()
+    con.executescript("""
+    CREATE TABLE IF NOT EXISTS templates (
+        id          TEXT PRIMARY KEY,
+        type        TEXT NOT NULL,
+        name        TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        data        TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS nodes (
+        id          TEXT PRIMARY KEY,
+        hostname    TEXT NOT NULL UNIQUE,
+        role        TEXT DEFAULT 'unknown',
+        ip_mgmt     TEXT DEFAULT '',
+        ip_wg0      TEXT DEFAULT '',
+        ip_wg1      TEXT DEFAULT '',
+        ip_wg2      TEXT DEFAULT '',
+        ip_wg3      TEXT DEFAULT '',
+        wg_pubkey   TEXT DEFAULT '',
+        cluster_id  TEXT DEFAULT '',
+        status      TEXT DEFAULT 'unknown',
+        last_seen   TEXT DEFAULT '',
+        facts       TEXT DEFAULT '{}',
+        created_at  TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS clusters (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL UNIQUE,
+        template_id TEXT DEFAULT '',
+        status      TEXT DEFAULT 'designing',
+        data        TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS vms (
+        id          TEXT PRIMARY KEY,
+        cluster_id  TEXT NOT NULL,
+        node_id     TEXT DEFAULT '',
+        name        TEXT NOT NULL,
+        role        TEXT NOT NULL,
+        cpu         INTEGER DEFAULT 2,
+        ram_gb      INTEGER DEFAULT 4,
+        disk_gb     INTEGER DEFAULT 64,
+        status      TEXT DEFAULT 'defined',
+        golden_src  TEXT DEFAULT '',
+        ip_addr     TEXT DEFAULT '',
+        wg_pubkey   TEXT DEFAULT '',
+        last_seen   TEXT DEFAULT '',
+        data        TEXT DEFAULT '{}',
+        created_at  TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts          TEXT NOT NULL,
+        type        TEXT NOT NULL,
+        subject     TEXT DEFAULT '',
+        message     TEXT NOT NULL,
+        data        TEXT DEFAULT '{}'
+    );
+    CREATE TABLE IF NOT EXISTS services (
+        id           TEXT PRIMARY KEY,
+        name         TEXT NOT NULL UNIQUE,
+        description  TEXT DEFAULT '',
+        cluster_id   TEXT DEFAULT '',
+        node_targets TEXT DEFAULT '[]',
+        dataset      TEXT DEFAULT '',
+        image        TEXT DEFAULT '',
+        runtime      TEXT DEFAULT 'systemd',
+        status       TEXT DEFAULT 'defined',
+        version      TEXT DEFAULT '',
+        replicas     INTEGER DEFAULT 1,
+        repl_targets TEXT DEFAULT '[]',
+        config       TEXT DEFAULT '{}',
+        salt_state   TEXT DEFAULT '',
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+    );
+    """)
+    con.commit()
+    con.close()
+    LOG.info("State DB ready: %s", DB_PATH)
+
+def db_save_template(type_, name, description, data):
+    """Insert or update a template by type+name. Returns the id."""
+    con = _db_connect()
+    now = _db_now()
+    row = con.execute(
+        "SELECT id FROM templates WHERE type=? AND name=?", (type_, name)
+    ).fetchone()
+    if row:
+        id_ = row["id"]
+        con.execute(
+            "UPDATE templates SET description=?,data=?,updated_at=? WHERE id=?",
+            (description, json.dumps(data), now, id_)
+        )
+    else:
+        id_ = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO templates (id,type,name,description,data,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (id_, type_, name, description, json.dumps(data), now, now)
+        )
+    con.commit()
+    con.close()
+    return id_
+
+def db_list_templates(type_=None):
+    """List templates, optionally filtered by type, newest first."""
+    con = _db_connect()
+    if type_:
+        rows = con.execute(
+            "SELECT id,type,name,description,created_at,updated_at "
+            "FROM templates WHERE type=? ORDER BY updated_at DESC", (type_,)
+        ).fetchall()
+    else:
+        rows = con.execute(
+            "SELECT id,type,name,description,created_at,updated_at "
+            "FROM templates ORDER BY type,updated_at DESC"
+        ).fetchall()
+    result = [dict(r) for r in rows]
+    con.close()
+    return result
+
+def db_load_template(id_):
+    """Load a full template by id. Returns dict with data parsed, or None."""
+    con = _db_connect()
+    row = con.execute("SELECT * FROM templates WHERE id=?", (id_,)).fetchone()
+    con.close()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        d["data"] = json.loads(d["data"])
+    except Exception:
+        pass
+    return d
+
+def db_delete_template(id_):
+    con = _db_connect()
+    con.execute("DELETE FROM templates WHERE id=?", (id_,))
+    con.commit()
+    con.close()
+
+def db_register_node(hostname, role="unknown", ip_mgmt="", ip_wg0="", ip_wg1="",
+                     ip_wg2="", ip_wg3="", wg_pubkey="", cluster_id="", facts=None):
+    """Upsert a node into the inventory. Returns the node id."""
+    con = _db_connect()
+    now = _db_now()
+    facts_str = json.dumps(facts or {})
+    row = con.execute("SELECT id FROM nodes WHERE hostname=?", (hostname,)).fetchone()
+    if row:
+        id_ = row["id"]
+        con.execute(
+            "UPDATE nodes SET role=?,ip_mgmt=?,ip_wg0=?,ip_wg1=?,ip_wg2=?,ip_wg3=?,"
+            "wg_pubkey=?,cluster_id=?,status='online',last_seen=?,facts=? WHERE hostname=?",
+            (role, ip_mgmt, ip_wg0, ip_wg1, ip_wg2, ip_wg3,
+             wg_pubkey, cluster_id, now, facts_str, hostname)
+        )
+    else:
+        id_ = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO nodes (id,hostname,role,ip_mgmt,ip_wg0,ip_wg1,ip_wg2,ip_wg3,"
+            "wg_pubkey,cluster_id,status,last_seen,facts,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (id_, hostname, role, ip_mgmt, ip_wg0, ip_wg1, ip_wg2, ip_wg3,
+             wg_pubkey, cluster_id, "online", now, facts_str, now)
+        )
+    con.commit()
+    con.close()
+    return id_
+
+def db_list_nodes():
+    con = _db_connect()
+    rows = con.execute(
+        "SELECT * FROM nodes ORDER BY role,hostname"
+    ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try:    d["facts"] = json.loads(d["facts"])
+        except Exception: d["facts"] = {}
+        result.append(d)
+    con.close()
+    return result
+
+def db_log_event(type_, subject, message, data=None):
+    con = _db_connect()
+    con.execute(
+        "INSERT INTO events (ts,type,subject,message,data) VALUES (?,?,?,?,?)",
+        (_db_now(), type_, subject, message, json.dumps(data or {}))
+    )
+    con.commit()
+    con.close()
+
+def db_list_events(limit=100):
+    con = _db_connect()
+    rows = con.execute(
+        "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try:    d["data"] = json.loads(d["data"])
+        except Exception: d["data"] = {}
+        result.append(d)
+    con.close()
+    return result
+
+def db_list_clusters():
+    con = _db_connect()
+    rows = con.execute("SELECT * FROM clusters ORDER BY updated_at DESC").fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try: d["data"] = json.loads(d["data"])
+        except Exception: d["data"] = {}
+        result.append(d)
+    con.close()
+    return result
+
+def db_list_vms(cluster_id=None):
+    con = _db_connect()
+    if cluster_id:
+        rows = con.execute("SELECT * FROM vms WHERE cluster_id=? ORDER BY role,name", (cluster_id,)).fetchall()
+    else:
+        rows = con.execute("SELECT * FROM vms ORDER BY cluster_id,role,name").fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try: d["data"] = json.loads(d["data"])
+        except Exception: d["data"] = {}
+        result.append(d)
+    con.close()
+    return result
+
+def db_upsert_cluster(name, data, template_id="", status="designing"):
+    con = _db_connect()
+    now = _db_now()
+    row = con.execute("SELECT id FROM clusters WHERE name=?", (name,)).fetchone()
+    if row:
+        id_ = row["id"]
+        con.execute(
+            "UPDATE clusters SET data=?,template_id=?,status=?,updated_at=? WHERE id=?",
+            (json.dumps(data), template_id, status, now, id_)
+        )
+    else:
+        id_ = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO clusters (id,name,template_id,status,data,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+            (id_, name, template_id, status, json.dumps(data), now, now)
+        )
+    con.commit()
+    con.close()
+    return id_
+
+def db_save_service(name, description="", cluster_id="", node_targets=None,
+                    dataset="", image="", runtime="systemd", replicas=1,
+                    repl_targets=None, config=None, salt_state=""):
+    """Insert or update a service definition. Returns the id."""
+    con = _db_connect()
+    now = _db_now()
+    row = con.execute("SELECT id FROM services WHERE name=?", (name,)).fetchone()
+    data_args = (
+        description, cluster_id,
+        json.dumps(node_targets or []),
+        dataset or f"rpool/services/{name}",
+        image, runtime, replicas,
+        json.dumps(repl_targets or []),
+        json.dumps(config or {}),
+        salt_state, now,
+    )
+    if row:
+        id_ = row["id"]
+        con.execute(
+            "UPDATE services SET description=?,cluster_id=?,node_targets=?,dataset=?,"
+            "image=?,runtime=?,replicas=?,repl_targets=?,config=?,salt_state=?,updated_at=? WHERE id=?",
+            data_args + (id_,)
+        )
+    else:
+        id_ = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO services (id,name,description,cluster_id,node_targets,dataset,"
+            "image,runtime,replicas,repl_targets,config,salt_state,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (id_, name) + data_args + ("defined", now,)
+        )
+    con.commit()
+    con.close()
+    return id_
+
+def db_list_services(cluster_id=None):
+    con = _db_connect()
+    if cluster_id:
+        rows = con.execute(
+            "SELECT * FROM services WHERE cluster_id=? ORDER BY name", (cluster_id,)
+        ).fetchall()
+    else:
+        rows = con.execute("SELECT * FROM services ORDER BY name").fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        for f in ("node_targets", "repl_targets", "config"):
+            try: d[f] = json.loads(d[f])
+            except Exception: d[f] = [] if f != "config" else {}
+        result.append(d)
+    con.close()
+    return result
+
+def db_load_service(id_):
+    con = _db_connect()
+    row = con.execute("SELECT * FROM services WHERE id=?", (id_,)).fetchone()
+    con.close()
+    if not row:
+        return None
+    d = dict(row)
+    for f in ("node_targets", "repl_targets", "config"):
+        try: d[f] = json.loads(d[f])
+        except Exception: d[f] = [] if f != "config" else {}
+    return d
+
+def db_delete_service(id_):
+    con = _db_connect()
+    con.execute("DELETE FROM services WHERE id=?", (id_,))
+    con.commit()
+    con.close()
+
+def db_update_service_status(id_, status, version=""):
+    con = _db_connect()
+    con.execute(
+        "UPDATE services SET status=?,version=?,updated_at=? WHERE id=?",
+        (status, version, _db_now(), id_)
+    )
+    con.commit()
+    con.close()
+
+def db_export_all():
+    """Export entire DB as a JSON dict (for seed disk / live→master handoff)."""
+    con = _db_connect()
+    export = {}
+    for table in ("templates", "nodes", "clusters", "vms", "services", "events"):
+        try:
+            rows = con.execute(f"SELECT * FROM {table}").fetchall()
+            export[table] = [dict(r) for r in rows]
+        except Exception:
+            export[table] = []
+    con.close()
+    return export
+
+def db_import_all(data, merge=True):
+    """Import a DB export dict. merge=True skips rows with existing PKs."""
+    con = _db_connect()
+    counts = {}
+    for table, rows in data.items():
+        if table == "events":
+            continue  # events are append-only, skip import
+        n = 0
+        for row in rows:
+            cols = list(row.keys())
+            placeholders = ",".join(["?"] * len(cols))
+            vals = [row[c] for c in cols]
+            conflict = "OR IGNORE" if merge else "OR REPLACE"
+            try:
+                con.execute(
+                    f"INSERT {conflict} INTO {table} ({','.join(cols)}) VALUES ({placeholders})",
+                    vals
+                )
+                n += 1
+            except Exception:
+                pass
+        counts[table] = n
+    con.commit()
+    con.close()
+    return counts
+
+def is_live_mode():
+    """Return True if running on the live ISO (not installed system)."""
+    try:
+        cmdline = Path("/proc/cmdline").read_text()
+        if "boot=live" in cmdline:
+            return True
+    except Exception:
+        pass
+    node_env = Path("/etc/kldload/node.env")
+    return not node_env.exists()
+
+def get_node_env():
+    """Return dict of key=value pairs from /etc/kldload/node.env, or {} if absent."""
+    env = {}
+    try:
+        for line in Path("/etc/kldload/node.env").read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                env[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return env
+
+# ── Disk detection ─────────────────────────────────────────────────────────────
+
+def get_disks():
+    """Return list of usable block devices."""
+    try:
+        out = subprocess.check_output(
+            ["lsblk", "-J", "-o", "NAME,SIZE,MODEL,TYPE,RM,MOUNTPOINT,ROTA,TRAN"],
+            text=True
+        )
+        data = json.loads(out)
+        disks = []
+        for d in data.get("blockdevices", []):
+            if d.get("type") == "disk":
+                disks.append({
+                    "name":       f'/dev/{d["name"]}',
+                    "size":       d.get("size", "?"),
+                    "model":      (d.get("model") or "").strip(),
+                    "removable":  d.get("rm", False),
+                    "mountpoint": d.get("mountpoint"),
+                    "rota":       d.get("rota", None),
+                    "tran":       d.get("tran") or "",
+                })
+        return disks
+    except Exception as e:
+        LOG.error("lsblk failed: %s", e)
+        return []
+
+def get_system_info():
+    """Return basic system info dict."""
+    info = {}
+    try:
+        info["hostname"] = open("/etc/hostname").read().strip()
+    except Exception:
+        info["hostname"] = "unknown"
+    try:
+        mem = subprocess.check_output(["free", "-h"], text=True).splitlines()[1].split()
+        info["memory_total"] = mem[1]
+        info["memory_free"]  = mem[3]
+    except Exception:
+        info["memory_total"] = "?"
+        info["memory_free"]  = "?"
+    try:
+        info["cpus"] = subprocess.check_output(["nproc"], text=True).strip()
+    except Exception:
+        info["cpus"] = "?"
+    try:
+        uptime_s = subprocess.check_output(["uptime", "-p"], text=True).strip()
+        info["uptime"] = uptime_s
+    except Exception:
+        pass
+    try:
+        with open("/etc/kldload/install-manifest.env") as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    info[k.lower()] = v
+    except Exception:
+        pass
+    info["edition"] = EDITION
+    # Live mode: no KLDLOAD_INSTALLED=1 in manifest
+    info["live_mode"] = True
+    try:
+        with open("/etc/kldload/install-manifest.env") as f:
+            if "KLDLOAD_INSTALLED=1" in f.read():
+                info["live_mode"] = False
+    except Exception:
+        pass
+    # Grains: node_index, wg1_ip
+    try:
+        grains_path = "/etc/salt/grains"
+        if os.path.exists(grains_path) and yaml is not None:
+            with open(grains_path) as f:
+                grains = yaml.safe_load(f) or {}
+            info["node_index"] = grains.get("node_index", "")
+            info["wg1_ip"]     = grains.get("wg1_ip", "")
+    except Exception:
+        pass
+    # Quick WG up/down status for dashboard mini-table
+    info["wg"] = {}
+    for n, net in [(0, "10.77"), (1, "10.78"), (2, "10.79"), (3, "10.80")]:
+        iface = f"wg{n}"
+        entry = {"up": False, "ip": ""}
+        try:
+            out = subprocess.check_output(
+                ["ip", "-o", "addr", "show", iface],
+                text=True, stderr=subprocess.DEVNULL
+            )
+            m = re.search(r"inet (\S+)", out)
+            if m:
+                entry["ip"] = m.group(1).split("/")[0]
+                entry["up"] = True
+        except Exception:
+            pass
+        info["wg"][iface] = entry
+    return info
+
+
+def get_wg_status():
+    """Return detailed WireGuard status for all four planes."""
+    data = {}
+    for n in range(4):
+        iface = f"wg{n}"
+        entry = {"up": False, "ip": "", "peers": 0, "peer_list": []}
+        try:
+            out = subprocess.check_output(
+                ["ip", "-o", "addr", "show", iface],
+                text=True, stderr=subprocess.DEVNULL
+            )
+            m = re.search(r"inet (\S+)", out)
+            if m:
+                entry["ip"]  = m.group(1).split("/")[0]
+                entry["up"]  = True
+        except Exception:
+            pass
+        try:
+            wg_out = subprocess.check_output(
+                ["wg", "show", iface, "dump"],
+                text=True, stderr=subprocess.DEVNULL
+            )
+            peers = []
+            for line in wg_out.strip().splitlines()[1:]:  # skip own pubkey line
+                parts = line.split("\t")
+                if len(parts) >= 5:
+                    pub   = parts[0]
+                    ep    = parts[2] if parts[2] != "(none)" else "—"
+                    aips  = parts[3]
+                    hs    = parts[4]
+                    rx_tx = f"{parts[5]} / {parts[6]}" if len(parts) > 6 else "—"
+                    peers.append({
+                        "pubkey":       pub,
+                        "pubkey_short": pub[:12] + "…",
+                        "endpoint":     ep,
+                        "allowed_ips":  aips,
+                        "last_handshake": _fmt_handshake(hs),
+                        "transfer":     rx_tx,
+                    })
+            entry["peers"]     = len(peers)
+            entry["peer_list"] = peers
+        except Exception:
+            pass
+        data[iface] = entry
+    return data
+
+
+def get_network_interfaces():
+    """Return list of network interfaces with addresses."""
+    ifaces = []
+    try:
+        out = subprocess.check_output(
+            ["ip", "-o", "addr", "show"],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        seen = {}
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            name  = parts[1]
+            family = parts[2]
+            addr  = parts[3]
+            if family not in ("inet", "inet6"):
+                continue
+            if name not in seen:
+                seen[name] = {"name": name, "addresses": [], "state": "DOWN", "mtu": ""}
+            seen[name]["addresses"].append(addr)
+        # Get state and MTU
+        link_out = subprocess.check_output(
+            ["ip", "-o", "link", "show"],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        for line in link_out.splitlines():
+            m_name = re.match(r"\d+:\s+(\S+):", line)
+            if not m_name:
+                continue
+            name = m_name.group(1).rstrip("@eth0").split("@")[0]
+            if name not in seen:
+                seen[name] = {"name": name, "addresses": [], "state": "DOWN", "mtu": ""}
+            seen[name]["state"] = "UP" if "UP" in line else "DOWN"
+            m_mtu = re.search(r"mtu (\d+)", line)
+            if m_mtu:
+                seen[name]["mtu"] = m_mtu.group(1)
+        ifaces = [v for k, v in sorted(seen.items()) if k != "lo"]
+    except Exception as e:
+        LOG.warning("network info failed: %s", e)
+    return ifaces
+
+
+def get_golden_status():
+    """Return exists/size for each golden image template."""
+    golden_dir = Path("/var/lib/kldload/golden")
+    status = {}
+    for tmpl in ("master", "kvm", "storage", "vdi"):
+        path = golden_dir / f"golden-{tmpl}.qcow2"
+        if path.exists():
+            size_bytes = path.stat().st_size
+            size_hr = _human_size(size_bytes)
+            status[tmpl] = {"exists": True, "size": size_hr, "path": str(path)}
+        else:
+            status[tmpl] = {"exists": False}
+    return status
+
+
+def _fmt_handshake(ts_str):
+    """Convert epoch timestamp to human-readable."""
+    try:
+        ts = int(ts_str)
+        if ts == 0:
+            return "never"
+        delta = int(time.time()) - ts
+        if delta < 120:
+            return f"{delta}s ago"
+        elif delta < 7200:
+            return f"{delta // 60}m ago"
+        else:
+            return f"{delta // 3600}h ago"
+    except Exception:
+        return ts_str
+
+
+def _human_size(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+def _load_credentials():
+    try:
+        return json.loads(CREDENTIALS_PATH.read_text())
+    except Exception:
+        return {"proxmox": [], "aws": {}, "azure": {}, "gcp": {}, "ssh": []}
+
+def _save_credentials(creds):
+    CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CREDENTIALS_PATH.write_text(json.dumps(creds, indent=2))
+    os.chmod(CREDENTIALS_PATH, 0o600)
+
+# ── WebSocket handler ──────────────────────────────────────────────────────────
+
+RUNNING_PROCS = {}
+
+PRO_ONLY_ACTIONS = {
+    "spawn", "golden", "cluster_deploy", "wg_peer_add", "wg_peer_remove",
+    "wg_info", "node_list", "node_register", "node_poof", "apply_role",
+    "salt_highstate", "salt_apply", "ansible_run", "k8s_join",
+    "vm_list", "vm_start", "vm_stop", "vm_destroy", "vm_clone",
+    "service_action", "credential_list", "credential_add",
+    "proxmox_list", "firewall_rule", "cluster_info",
+}
+
+async def _pro_required(websocket, action: str) -> bool:
+    """Return True (and send error) if this is a free edition trying a pro action."""
+    if EDITION == "free" and action in PRO_ONLY_ACTIONS:
+        await websocket.send(json.dumps({
+            "type": "error",
+            "msg": f"'{action}' requires kldload Pro. Upgrade at kldload.ca/upgrade.",
+            "pro_required": True,
+        }))
+        return True
+    return False
+
+async def ws_handler(websocket):
+    LOG.info("WebSocket client connected: %s", websocket.remote_address)
+    try:
+        async for raw in websocket:
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                await websocket.send(json.dumps({"type": "error", "msg": "invalid JSON"}))
+                continue
+
+            action = msg.get("action", "")
+            LOG.info("WS action: %s", action)
+            try:
+                if await _pro_required(websocket, action):
+                    continue
+                if action == "ping":
+                    await websocket.send(json.dumps({"type": "pong"}))
+                elif action == "system_info":
+                    await websocket.send(json.dumps({
+                        "type": "system_info",
+                        "data": get_system_info(),
+                    }))
+                elif action == "list_disks":
+                    await websocket.send(json.dumps({
+                        "type": "disk_list",
+                        "disks": get_disks(),
+                    }))
+                elif action == "install":
+                    await _run_install(websocket, msg)
+                elif action == "wipe_disk":
+                    await _run_wipe_disk(websocket, msg)
+                elif action == "spawn":
+                    await _run_spawn(websocket, msg)
+                elif action == "golden":
+                    await _run_golden(websocket, msg)
+                elif action == "tail_log":
+                    log_name = msg.get("log", "installer")
+                    log_path = LOG_FILES.get(log_name, LOG_FILES["installer"])
+                    await _tail_log(websocket, log_path)
+                elif action == "list_vms":
+                    await _list_vms(websocket)
+                elif action == "vm_op":
+                    await _vm_op(websocket, msg)
+                elif action == "zfs_list":
+                    await _zfs_list(websocket)
+                elif action == "k8s_nodes":
+                    await _k8s_nodes(websocket)
+                elif action == "salt_status":
+                    await _salt_status(websocket)
+                elif action == "wg_status":
+                    await websocket.send(json.dumps({
+                        "type": "wg_data",
+                        "data": get_wg_status(),
+                    }))
+                elif action == "wg_gen_keypair":
+                    await _wg_gen_keypair(websocket)
+                elif action == "wg_add_peer":
+                    await _wg_add_peer(websocket, msg)
+                elif action == "wg_remove_peer":
+                    await _wg_remove_peer(websocket, msg)
+                elif action == "golden_status":
+                    await websocket.send(json.dumps({
+                        "type": "golden_status",
+                        "status": get_golden_status(),
+                    }))
+                elif action == "stamp":
+                    await _run_stamp(websocket, msg)
+                elif action == "k8s_join":
+                    await _run_k8s_join(websocket, msg)
+                elif action == "salt_highstate":
+                    await _run_salt_highstate(websocket, msg)
+                elif action == "salt_accept_all":
+                    await _salt_accept_all(websocket)
+                elif action == "node_list":
+                    await _node_list(websocket)
+                elif action == "node_apply":
+                    await _node_apply(websocket, msg)
+                elif action == "mine_refresh":
+                    await _mine_refresh(websocket, msg)
+                elif action == "node_accept_key":
+                    await _node_accept_key(websocket, msg)
+                elif action == "poof":
+                    await _run_poof(websocket, msg)
+                elif action == "cluster_deploy":
+                    await _run_cluster_deploy(websocket, msg)
+                elif action == "run_audit":
+                    await _run_audit(websocket)
+                elif action == "credentials_load":
+                    creds = _load_credentials()
+                    # Mask secrets before sending to browser
+                    masked = json.loads(json.dumps(creds))
+                    for p in masked.get("proxmox", []):
+                        if p.get("token_secret"):
+                            p["token_secret"] = "••••••••"
+                    if masked.get("aws", {}).get("secret"):
+                        masked["aws"]["secret"] = "••••••••"
+                    if masked.get("azure", {}).get("client_secret"):
+                        masked["azure"]["client_secret"] = "••••••••"
+                    await websocket.send(json.dumps({"type": "credentials_data", "creds": masked}))
+                elif action == "credentials_save":
+                    # Merge: if secret field is masked placeholder, keep existing value
+                    existing = _load_credentials()
+                    incoming = msg.get("creds", {})
+                    # Proxmox: match by id, preserve secret if masked
+                    for i, p in enumerate(incoming.get("proxmox", [])):
+                        if p.get("token_secret") == "••••••••":
+                            for ep in existing.get("proxmox", []):
+                                if ep.get("id") == p.get("id"):
+                                    p["token_secret"] = ep.get("token_secret", "")
+                    # AWS
+                    if incoming.get("aws", {}).get("secret") == "••••••••":
+                        incoming["aws"]["secret"] = existing.get("aws", {}).get("secret", "")
+                    # Azure
+                    if incoming.get("azure", {}).get("client_secret") == "••••••••":
+                        incoming["azure"]["client_secret"] = existing.get("azure", {}).get("client_secret", "")
+                    _save_credentials(incoming)
+                    await websocket.send(json.dumps({"type": "credentials_saved"}))
+                elif action == "credentials_test":
+                    provider = msg.get("provider", "")
+                    creds = _load_credentials()
+                    ok, err = False, "unknown provider"
+                    if provider == "proxmox":
+                        pid = msg.get("id", "")
+                        for p in creds.get("proxmox", []):
+                            if p.get("id") == pid:
+                                try:
+                                    import urllib.request, urllib.error
+                                    url = f"https://{p['host']}:{p.get('port',8006)}/api2/json/version"
+                                    req = urllib.request.Request(url,
+                                        headers={"Authorization": f"PVEAPIToken={p['token_id']}={p['token_secret']}"},
+                                    )
+                                    import ssl as _ssl
+                                    ctx = _ssl.create_default_context()
+                                    ctx.check_hostname = False
+                                    ctx.verify_mode = _ssl.CERT_NONE
+                                    urllib.request.urlopen(req, context=ctx, timeout=5)
+                                    ok, err = True, ""
+                                except Exception as e:
+                                    ok, err = False, str(e)
+                    await websocket.send(json.dumps({"type": "credentials_test_result",
+                                                      "provider": provider, "ok": ok, "err": err}))
+                elif action == "wg_planes_list":
+                    await _wg_planes_list(websocket)
+                elif action == "wg_plane_create":
+                    await _wg_plane_create(websocket, msg)
+                elif action == "wg_plane_delete":
+                    await _wg_plane_delete(websocket, msg)
+                elif action == "db_list":
+                    type_ = msg.get("db_type") or None
+                    items = db_list_templates(type_)
+                    await websocket.send(json.dumps({
+                        "type": "db_list", "db_type": type_, "items": items,
+                    }))
+                elif action == "db_save":
+                    id_ = db_save_template(
+                        msg.get("db_type", "generic"),
+                        msg.get("name", "Untitled"),
+                        msg.get("description", ""),
+                        msg.get("data", {}),
+                    )
+                    db_log_event("save", id_,
+                        f"Saved {msg.get('db_type','?')} template: {msg.get('name','?')}")
+                    await websocket.send(json.dumps({
+                        "type": "db_saved", "id": id_,
+                        "name": msg.get("name"), "db_type": msg.get("db_type"),
+                    }))
+                elif action == "db_load":
+                    tpl = db_load_template(msg.get("id", ""))
+                    if tpl:
+                        await websocket.send(json.dumps({"type": "db_loaded", "template": tpl}))
+                    else:
+                        await websocket.send(json.dumps({"type": "error", "msg": "template not found"}))
+                elif action == "db_delete":
+                    db_delete_template(msg.get("id", ""))
+                    db_log_event("delete", msg.get("id", ""), "Template deleted")
+                    await websocket.send(json.dumps({"type": "db_deleted", "id": msg.get("id")}))
+                elif action == "db_node_register":
+                    id_ = db_register_node(
+                        msg.get("hostname", "unknown"),
+                        role=msg.get("role", "unknown"),
+                        ip_mgmt=msg.get("ip_mgmt", ""),
+                        ip_wg0=msg.get("ip_wg0", ""),
+                        ip_wg1=msg.get("ip_wg1", ""),
+                        ip_wg2=msg.get("ip_wg2", ""),
+                        ip_wg3=msg.get("ip_wg3", ""),
+                        wg_pubkey=msg.get("wg_pubkey", ""),
+                        cluster_id=msg.get("cluster_id", ""),
+                        facts=msg.get("facts", {}),
+                    )
+                    db_log_event("node_join", id_, f"Node registered: {msg.get('hostname')}")
+                    await websocket.send(json.dumps({"type": "db_node_registered", "id": id_}))
+                elif action == "db_nodes":
+                    nodes = db_list_nodes()
+                    await websocket.send(json.dumps({"type": "db_nodes", "nodes": nodes}))
+                elif action == "db_events":
+                    events = db_list_events(msg.get("limit", 100))
+                    await websocket.send(json.dumps({"type": "db_events", "events": events}))
+                elif action == "service_list":
+                    svcs = db_list_services(msg.get("cluster_id") or None)
+                    await websocket.send(json.dumps({"type": "service_list", "services": svcs}))
+                elif action == "service_save":
+                    id_ = db_save_service(
+                        msg.get("name", "unnamed"),
+                        description  = msg.get("description", ""),
+                        cluster_id   = msg.get("cluster_id", ""),
+                        node_targets = msg.get("node_targets", []),
+                        dataset      = msg.get("dataset", ""),
+                        image        = msg.get("image", ""),
+                        runtime      = msg.get("runtime", "systemd"),
+                        replicas     = msg.get("replicas", 1),
+                        repl_targets = msg.get("repl_targets", []),
+                        config       = msg.get("config", {}),
+                        salt_state   = msg.get("salt_state", ""),
+                    )
+                    db_log_event("service_save", id_, f"Service saved: {msg.get('name')}")
+                    await websocket.send(json.dumps({"type": "service_saved", "id": id_}))
+                elif action == "service_load":
+                    svc = db_load_service(msg.get("id", ""))
+                    if svc:
+                        await websocket.send(json.dumps({"type": "service_data", "service": svc}))
+                    else:
+                        await websocket.send(json.dumps({"type": "error", "msg": "service not found"}))
+                elif action == "service_delete":
+                    db_delete_service(msg.get("id", ""))
+                    db_log_event("service_delete", msg.get("id",""), "Service deleted")
+                    await websocket.send(json.dumps({"type": "service_deleted", "id": msg.get("id")}))
+                elif action == "service_deploy":
+                    await _service_deploy(websocket, msg)
+                elif action == "db_export":
+                    export = db_export_all()
+                    await websocket.send(json.dumps({"type": "db_export", "data": export}))
+                elif action == "db_import":
+                    counts = db_import_all(msg.get("data", {}), merge=msg.get("merge", True))
+                    db_log_event("db_import", "system", f"DB import: {counts}")
+                    await websocket.send(json.dumps({"type": "db_imported", "counts": counts}))
+                elif action == "ui_mode":
+                    live = is_live_mode()
+                    nenv = get_node_env()
+                    role = nenv.get("KLDLOAD_NODE_ROLE", "live" if live else "node")
+                    ui_title = nenv.get("KLDLOAD_UI_TITLE", "kldload")
+                    hostname = nenv.get("KLDLOAD_NODE_HOSTNAME", "")
+                    await websocket.send(json.dumps({
+                        "type": "ui_mode",
+                        "live": live,
+                        "role": role,
+                        "ui_title": ui_title,
+                        "hostname": hostname,
+                        "db_path": str(DB_PATH),
+                        "db_exists": DB_PATH.exists(),
+                        "db_size_kb": round(DB_PATH.stat().st_size / 1024, 1) if DB_PATH.exists() else 0,
+                    }))
+                elif action == "infra_status":
+                    clusters = db_list_clusters()
+                    nodes    = db_list_nodes()
+                    vms      = db_list_vms()
+                    events   = db_list_events(50)
+                    # Augment nodes with live virsh VM count per host
+                    vm_counts = {}
+                    try:
+                        out = subprocess.check_output(["virsh", "list", "--all", "--name"],
+                                                       text=True, stderr=subprocess.DEVNULL)
+                        vm_counts["localhost"] = len([l for l in out.strip().splitlines() if l.strip()])
+                    except Exception:
+                        pass
+                    await websocket.send(json.dumps({
+                        "type": "infra_status",
+                        "clusters": clusters,
+                        "nodes": nodes,
+                        "vms": vms,
+                        "events": events,
+                        "vm_counts": vm_counts,
+                    }))
+                elif action == "cluster_save":
+                    # Save a cluster definition to DB (called from Cluster Designer deploy flow)
+                    id_ = db_upsert_cluster(
+                        msg.get("name", "unnamed"),
+                        msg.get("data", {}),
+                        template_id=msg.get("template_id", ""),
+                        status=msg.get("status", "designing"),
+                    )
+                    db_log_event("cluster_save", id_, f"Cluster saved: {msg.get('name')}")
+                    await websocket.send(json.dumps({"type": "cluster_saved", "id": id_}))
+                elif action == "vm_clone":
+                    await _vm_clone(websocket, msg)
+                elif action == "vm_replace":
+                    await _vm_replace(websocket, msg)
+
+                # ── Free-edition actions (ZFS / snapshots / logs) ──────────────
+                elif action == "zfs_status":
+                    try:
+                        out = subprocess.check_output(
+                            ["zpool", "status", "-v"], text=True, stderr=subprocess.STDOUT)
+                    except Exception as e:
+                        out = str(e)
+                    await websocket.send(json.dumps({"type": "zfs_status", "output": out}))
+
+                elif action == "snapshot_list":
+                    try:
+                        out = subprocess.check_output(
+                            ["zfs", "list", "-t", "snapshot", "-o", "name,used", "-H"],
+                            text=True, stderr=subprocess.STDOUT)
+                        snaps = []
+                        for line in out.strip().splitlines():
+                            parts = line.split('\t')
+                            if len(parts) >= 2:
+                                snaps.append({"name": parts[0], "used": parts[1]})
+                    except Exception:
+                        snaps = []
+                    await websocket.send(json.dumps({"type": "snapshot_list", "snapshots": snaps}))
+
+                elif action == "snapshot_take":
+                    import datetime as _dt
+                    ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                    try:
+                        subprocess.check_call(
+                            ["zfs", "snapshot", "-r", f"rpool@manual-{ts}"],
+                            stderr=subprocess.DEVNULL)
+                        await websocket.send(json.dumps({"type": "snapshot_done", "ts": ts}))
+                    except Exception as e:
+                        await websocket.send(json.dumps({"type": "error", "msg": str(e)}))
+
+                elif action == "snapshot_rollback":
+                    snap = msg.get("name", "")
+                    try:
+                        subprocess.check_call(
+                            ["zfs", "rollback", "-r", snap],
+                            stderr=subprocess.DEVNULL)
+                        await websocket.send(json.dumps({"type": "snapshot_done", "name": snap}))
+                    except Exception as e:
+                        await websocket.send(json.dumps({"type": "error", "msg": str(e)}))
+
+                elif action == "be_list":
+                    try:
+                        out = subprocess.check_output(
+                            ["/usr/lib/kldload-installer/backend/bin/kldload-be", "list"],
+                            text=True, stderr=subprocess.STDOUT)
+                    except Exception as e:
+                        out = str(e)
+                    await websocket.send(json.dumps({"type": "be_list", "output": out}))
+
+                elif action == "be_create":
+                    name = msg.get("name", "")
+                    try:
+                        subprocess.check_call(
+                            ["/usr/lib/kldload-installer/backend/bin/kldload-be", "create", name],
+                            stderr=subprocess.DEVNULL)
+                        await websocket.send(json.dumps({"type": "be_list", "output": f"Created: {name}"}))
+                    except Exception as e:
+                        await websocket.send(json.dumps({"type": "error", "msg": str(e)}))
+
+                elif action == "read_log":
+                    key = msg.get("log", "firstboot")
+                    log_path = LOG_FILES.get(key, f"/var/log/kldload/{key}.log")
+                    try:
+                        content = Path(log_path).read_text(errors="replace")[-32768:]
+                    except Exception:
+                        content = f"(log not found: {log_path})"
+                    await websocket.send(json.dumps({"type": "log_content", "key": key, "content": content}))
+
+                elif action == "install_state":
+                    state = {"running": False, "rc": None}
+                    try:
+                        state = json.loads(INSTALL_STATE_PATH.read_text())
+                    except Exception:
+                        pass
+                    await websocket.send(json.dumps({"type": "install_state", **state}))
+
+                elif action == "network_info":
+                    ifaces = []
+                    try:
+                        out = subprocess.check_output(["ip", "-j", "addr"], text=True)
+                        import json as _json
+                        for iface in _json.loads(out):
+                            name = iface.get("ifname", "")
+                            up   = iface.get("operstate", "") in ("UP", "UNKNOWN")
+                            addrs = [a.get("local", "") for a in iface.get("addr_info", [])
+                                     if a.get("family") in ("inet", "inet6")]
+                            ifaces.append({"name": name, "up": up, "addr": ", ".join(addrs)})
+                    except Exception:
+                        pass
+                    await websocket.send(json.dumps({"type": "network_info", "interfaces": ifaces}))
+
+                elif action == "ansible_run":
+                    pb     = msg.get("playbook", "")
+                    limit  = msg.get("limit", "localhost")
+                    extra  = msg.get("extra_vars", {})
+                    import json as _json
+                    cmd = ["ansible-playbook", pb, "-i", "localhost,",
+                           "--connection", "local", "-l", limit]
+                    if extra:
+                        cmd += ["--extra-vars", _json.dumps(extra)]
+                    await _stream_proc(websocket, cmd, target="ansible_log")
+
+                else:
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "msg": f"unknown action: {action}",
+                    }))
+            except Exception as _action_err:
+                LOG.exception("Error handling action %s", action)
+                try:
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "msg": f"action '{action}' failed: {_action_err}",
+                    }))
+                except Exception:
+                    pass
+
+    except websockets.exceptions.ConnectionClosed:
+        LOG.info("WebSocket client disconnected")
+
+async def _wg_gen_keypair(websocket):
+    """Generate a fresh WireGuard keypair and return it to the client."""
+    try:
+        privkey = subprocess.check_output(["wg", "genkey"], text=True).strip()
+        pubkey  = subprocess.check_output(["wg", "pubkey"], input=privkey, text=True).strip()
+        await websocket.send(json.dumps({
+            "type": "wg_keypair",
+            "privkey": privkey,
+            "pubkey":  pubkey,
+        }))
+    except Exception as exc:
+        await websocket.send(json.dumps({"type": "error", "msg": f"wg genkey failed: {exc}"}))
+
+
+async def _wg_add_peer(websocket, msg):
+    """Add a peer to one or all WireGuard interfaces live via wg set.
+
+    Expected msg fields:
+      iface       - "wg0"|"wg1"|"wg2"|"wg3"|"all"
+      pubkey      - peer's public key
+      allowed_ips - CIDR(s) comma-separated, e.g. "10.77.100.5/32"
+      endpoint    - optional "host:port"
+    """
+    iface       = msg.get("iface", "wg1")
+    pubkey      = msg.get("pubkey", "").strip()
+    allowed_ips = msg.get("allowed_ips", "").strip()
+    endpoint    = msg.get("endpoint", "").strip()
+
+    if not pubkey or not allowed_ips:
+        await websocket.send(json.dumps({"type": "error", "msg": "wg_add_peer: pubkey and allowed_ips required"}))
+        return
+
+    targets = ["wg0", "wg1", "wg2", "wg3"] if iface == "all" else [iface]
+    results = []
+    for intf in targets:
+        cmd = ["wg", "set", intf, "peer", pubkey, "allowed-ips", allowed_ips]
+        if endpoint:
+            cmd += ["endpoint", endpoint]
+        try:
+            subprocess.check_call(cmd, stderr=subprocess.DEVNULL)
+            # Persist to wg-quick config if it exists
+            conf = f"/etc/wireguard/{intf}.conf"
+            if os.path.exists(conf):
+                peer_block = f"\n[Peer]\nPublicKey = {pubkey}\nAllowedIPs = {allowed_ips}\n"
+                if endpoint:
+                    peer_block += f"Endpoint = {endpoint}\n"
+                with open(conf, "a") as f:
+                    f.write(peer_block)
+            results.append({"iface": intf, "ok": True})
+        except Exception as exc:
+            results.append({"iface": intf, "ok": False, "error": str(exc)})
+
+    await websocket.send(json.dumps({"type": "wg_add_peer_result", "results": results}))
+    # Push updated status
+    await websocket.send(json.dumps({"type": "wg_data", "data": get_wg_status()}))
+
+
+async def _wg_remove_peer(websocket, msg):
+    """Remove a peer from one or all WireGuard interfaces live via wg set.
+
+    Expected msg fields:
+      iface  - "wg0"|"wg1"|"wg2"|"wg3"|"all"
+      pubkey - peer's public key to remove
+    """
+    iface  = msg.get("iface", "wg1")
+    pubkey = msg.get("pubkey", "").strip()
+
+    if not pubkey:
+        await websocket.send(json.dumps({"type": "error", "msg": "wg_remove_peer: pubkey required"}))
+        return
+
+    targets = ["wg0", "wg1", "wg2", "wg3"] if iface == "all" else [iface]
+    results = []
+    for intf in targets:
+        try:
+            subprocess.check_call(
+                ["wg", "set", intf, "peer", pubkey, "remove"],
+                stderr=subprocess.DEVNULL
+            )
+            # Remove from wg-quick config if it exists
+            conf = f"/etc/wireguard/{intf}.conf"
+            if os.path.exists(conf):
+                with open(conf, "r") as f:
+                    content = f.read()
+                # Strip the [Peer] block that contains this pubkey
+                import re as _re
+                content = _re.sub(
+                    r"\[Peer\][^\[]*PublicKey\s*=\s*" + _re.escape(pubkey) + r"[^\[]*",
+                    "", content, flags=_re.DOTALL
+                )
+                with open(conf, "w") as f:
+                    f.write(content)
+            results.append({"iface": intf, "ok": True})
+        except Exception as exc:
+            results.append({"iface": intf, "ok": False, "error": str(exc)})
+
+    await websocket.send(json.dumps({"type": "wg_remove_peer_result", "results": results}))
+    await websocket.send(json.dumps({"type": "wg_data", "data": get_wg_status()}))
+
+
+async def _stream_proc(websocket, cmd, env=None, target="log"):
+    """Run a command, stream stdout/stderr lines to websocket."""
+    await websocket.send(json.dumps({"type": "exec_start", "cmd": str(cmd), "target": target}))
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env={**os.environ, **(env or {})},
+    )
+    async for line in proc.stdout:
+        await websocket.send(json.dumps({
+            "type": "log_line",
+            "line": line.decode(errors="replace").rstrip(),
+            "target": target,
+        }))
+    rc = await proc.wait()
+    await websocket.send(json.dumps({"type": "exec_done", "rc": rc, "target": target}))
+    return rc
+
+async def _run_wipe_disk(websocket, msg):
+    disk = msg.get("disk", "")
+    if not re.match(r'^/dev/[a-z]{2,8}[0-9]{0,3}$', disk):
+        await websocket.send(json.dumps({"type": "error", "msg": f"Invalid disk: {disk}"}))
+        return
+    # Report disk size, attempt blkdiscard first, fall back to dd with progress
+    cmd = ["bash", "-c", f"""
+set -e
+SIZE_BYTES=$(blockdev --getsize64 {shlex.quote(disk)} 2>/dev/null || echo 0)
+SIZE_MB=$((SIZE_BYTES / 1048576))
+echo "Disk: {disk}  Size: ${{SIZE_MB}} MB"
+echo "Attempting blkdiscard (fast zero)..."
+if blkdiscard -z {shlex.quote(disk)} 2>/dev/null; then
+    echo "blkdiscard succeeded"
+else
+    echo "blkdiscard not supported — falling back to dd zero-fill..."
+    WRITTEN=0
+    while true; do
+        dd if=/dev/zero of={shlex.quote(disk)} bs=1M count=256 seek=$WRITTEN conv=notrunc 2>/dev/null || break
+        WRITTEN=$((WRITTEN + 256))
+        if [ "$SIZE_MB" -gt 0 ]; then
+            PCT=$((WRITTEN * 100 / SIZE_MB))
+            [ "$PCT" -gt 100 ] && PCT=100
+            echo "  ${{WRITTEN}} / ${{SIZE_MB}} MB  (${{PCT}}%)"
+        else
+            echo "  ${{WRITTEN}} MB written"
+        fi
+        [ "$SIZE_MB" -gt 0 ] && [ "$WRITTEN" -ge "$SIZE_MB" ] && break
+    done
+fi
+sync
+echo "Wipe complete."
+"""]
+    await _stream_proc(websocket, cmd, target="install")
+
+INSTALL_STATE_PATH = Path("/run/kldload/install_state.json")
+
+def _detect_distro():
+    """Detect the running distro from os-release."""
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                if line.startswith("ID="):
+                    val = line.strip().split("=", 1)[1].strip('"')
+                    if val in ("centos", "rocky", "rhel", "almalinux"):
+                        return "centos" if val == "almalinux" else val
+                    if val in ("debian", "ubuntu"):
+                        return val
+    except Exception:
+        pass
+    return "centos"  # default for kldload
+
+async def _run_install(websocket, msg):
+    params = msg.get("params", {})
+    # Map frontend 'role' → KLDLOAD_PROFILE (installer key)
+    if "role" in params and "profile" not in params:
+        params["profile"] = params.pop("role")
+    # Auto-detect distro if not specified
+    if "distro" not in params:
+        params["distro"] = _detect_distro()
+    answers = []
+    for k, v in params.items():
+        key = k.upper()
+        if not key.startswith("KLDLOAD_"):
+            key = f"KLDLOAD_{key}"
+        answers.append(f"{key}={shlex.quote(str(v))}")
+
+    answers_path = "/tmp/kldload-webui-answers.env"
+    with open(answers_path, "w") as f:
+        f.write("\n".join(answers) + "\n")
+    os.chmod(answers_path, 0o600)
+
+    # Persist install state so reconnecting clients can restore UI
+    INSTALL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    INSTALL_STATE_PATH.write_text(json.dumps({"running": True, "rc": None}))
+
+    target = msg.get("_target", "install")
+    rc = await _stream_proc(websocket,
+        ["/usr/local/bin/kldload-install-target", "--config", answers_path],
+        target=target)
+    INSTALL_STATE_PATH.write_text(json.dumps({"running": False, "rc": rc}))
+
+async def _run_spawn(websocket, msg):
+    params = msg.get("params", {})
+    cmd = ["/usr/local/sbin/kldload-spawn"]
+    for k, v in params.items():
+        cmd += [f"--{k.replace('_','-')}", str(v)]
+    target = msg.get("_target", "spawn")
+    await _stream_proc(websocket, cmd, target=target)
+
+async def _run_golden(websocket, msg):
+    template = msg.get("template", "kvm")
+    if not re.match(r'^(master|kvm|storage|vdi)$', template):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid template"}))
+        return
+    target = msg.get("_target", "golden")
+    cmd = ["/usr/local/sbin/kldload-golden", "--template", template]
+    await _stream_proc(websocket, cmd, target=target)
+
+async def _run_stamp(websocket, msg):
+    template   = msg.get("template", "kvm")
+    count      = int(msg.get("count", 1))
+    base_index = int(msg.get("base_index", 1))
+    color      = msg.get("color", "blue")
+    if not re.match(r'^(master|kvm|storage|vdi|firewall|proxmox|monitoring|storage|worker|etcd|lb|landing)$', template):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid template"}))
+        return
+    if color not in ("blue", "green"):
+        color = "blue"
+    target     = msg.get("_target", "golden")
+    golden_dir = Path("/var/lib/kldload/golden")
+    image_path = golden_dir / f"golden-{template}.qcow2"
+    if not image_path.exists():
+        await websocket.send(json.dumps({"type": "error", "msg": f"Golden image not found: {image_path}"}))
+        return
+    for i in range(count):
+        idx      = base_index + i
+        hostname = f"{template}-{idx:02d}"
+        clone    = golden_dir / f"{hostname}.qcow2"
+        # Create CoW clone
+        rc = await _stream_proc(websocket,
+            ["qemu-img", "create", "-f", "qcow2", "-b", str(image_path), "-F", "qcow2", str(clone)],
+            target=target)
+        if rc != 0:
+            break
+        # Stamp identity into clone
+        rc = await _stream_proc(websocket,
+            ["/usr/local/sbin/kldload-stamp-identity",
+             "--image",    str(clone),
+             "--hostname", hostname,
+             "--template", template,
+             "--index",    str(idx),
+             "--color",    color],
+            target=target)
+        if rc != 0:
+            break
+
+async def _run_k8s_join(websocket, msg):
+    role   = msg.get("role", "worker")
+    target = msg.get("_target", "log")
+    if role not in ("worker", "etcd"):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid role"}))
+        return
+    cmd = ["/usr/local/sbin/kldload-k8s-join", "--role", role]
+    await _stream_proc(websocket, cmd, target=target)
+
+async def _run_salt_highstate(websocket, msg):
+    salt_target = msg.get("target", "*")
+    ws_target   = msg.get("_target", "log")
+    if not re.match(r'^[a-zA-Z0-9_\-\*]+$', salt_target):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid salt target"}))
+        return
+    cmd = ["salt", salt_target, "state.highstate"]
+    await _stream_proc(websocket, cmd, target=ws_target)
+
+async def _salt_accept_all(websocket):
+    try:
+        subprocess.check_call(
+            ["salt-key", "-A", "-y"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        await websocket.send(json.dumps({"type": "log_line", "line": "All pending keys accepted.", "target": "log"}))
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "error", "msg": str(e)}))
+
+async def _tail_log(websocket, log_path):
+    if not os.path.exists(log_path):
+        await websocket.send(json.dumps({
+            "type": "log_content",
+            "lines": [f"Log not found: {log_path}"],
+        }))
+        return
+    try:
+        out = subprocess.check_output(["tail", "-n", "200", log_path], text=True)
+        lines = out.splitlines()
+    except Exception as e:
+        lines = [f"Error reading log: {e}"]
+    await websocket.send(json.dumps({"type": "log_content", "lines": lines}))
+
+async def _list_vms(websocket):
+    vms = []
+    try:
+        out = subprocess.check_output(
+            ["virsh", "list", "--all", "--name"], text=True,
+            stderr=subprocess.DEVNULL
+        )
+        for name in out.strip().splitlines():
+            name = name.strip()
+            if not name:
+                continue
+            state = "unknown"
+            try:
+                s = subprocess.check_output(
+                    ["virsh", "domstate", name], text=True,
+                    stderr=subprocess.DEVNULL
+                ).strip()
+                state = s
+            except Exception:
+                pass
+            vms.append({"name": name, "state": state})
+    except Exception as e:
+        LOG.warning("virsh list failed: %s", e)
+    await websocket.send(json.dumps({"type": "vm_list", "vms": vms}))
+
+async def _vm_op(websocket, msg):
+    vm   = msg.get("vm", "")
+    op   = msg.get("op", "")
+    ops  = {"start": "virsh start", "stop": "virsh shutdown",
+            "force-stop": "virsh destroy", "delete": "virsh undefine --nvram"}
+    if op not in ops or not re.match(r'^[a-zA-Z0-9_\-]+$', vm):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid vm op"}))
+        return
+    cmd = shlex.split(f"{ops[op]} {vm}")
+    await _stream_proc(websocket, cmd)
+
+async def _zfs_list(websocket):
+    pools, datasets = [], []
+    try:
+        out = subprocess.check_output(
+            ["zpool", "list", "-H", "-o", "name,size,alloc,free,health"],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        for line in out.strip().splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 5:
+                pools.append({"name": parts[0], "size": parts[1],
+                               "alloc": parts[2], "free": parts[3],
+                               "health": parts[4]})
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(
+            ["zfs", "list", "-H", "-o", "name,used,avail,refer,mountpoint"],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        for line in out.strip().splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 5:
+                datasets.append({"name": parts[0], "used": parts[1],
+                                  "avail": parts[2], "refer": parts[3],
+                                  "mountpoint": parts[4]})
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "zfs_data", "pools": pools, "datasets": datasets}))
+
+async def _k8s_nodes(websocket):
+    nodes = []
+    try:
+        cols = (
+            "NAME:.metadata.name,"
+            "STATUS:.status.conditions[-1].type,"
+            "ROLE:.metadata.labels.node-role\\.kubernetes\\.io/control-plane,"
+            "VERSION:.status.nodeInfo.kubeletVersion,"
+            "WG2:.metadata.annotations.kldload\\.ca/wg2-ip"
+        )
+        out = subprocess.check_output(
+            ["kubectl", "get", "nodes", "-o",
+             f"custom-columns={cols}", "--no-headers"],
+            text=True, stderr=subprocess.DEVNULL,
+            env={**os.environ, "KUBECONFIG": "/root/.kube/config"},
+        )
+        for line in out.strip().splitlines():
+            parts = line.split()
+            if parts:
+                nodes.append({
+                    "name":       parts[0],
+                    "status":     parts[1] if len(parts) > 1 else "?",
+                    "role":       "control-plane" if len(parts) > 2 and parts[2] not in ("<none>", "") else "worker",
+                    "version":    parts[3] if len(parts) > 3 else "?",
+                    "wg2_ip":     parts[4] if len(parts) > 4 and parts[4] != "<none>" else "—",
+                    "api_server": "https://10.79.0.1:6443",
+                })
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_nodes", "nodes": nodes}))
+
+async def _node_list(websocket):
+    """Full node fleet: mine query + live ping, returns addressing table."""
+    nodes = []
+    pending_keys = []
+    try:
+        # Live ping — 5s timeout, non-fatal if salt not running
+        ping_data = {}
+        try:
+            out = subprocess.check_output(
+                ["salt", "*", "test.ping", "--out=json", "-t", "5"],
+                text=True, stderr=subprocess.DEVNULL,
+            )
+            ping_data = json.loads(out)
+        except Exception:
+            pass
+
+        # Grains: role, color, index, all four WireGuard IPs
+        grains_data = {}
+        try:
+            g_out = subprocess.check_output(
+                ["salt", "*", "grains.item",
+                 "role", "color", "node_index",
+                 "wg0_ip", "wg1_ip", "wg2_ip", "wg3_ip",
+                 "--out=json", "-t", "5"],
+                text=True, stderr=subprocess.DEVNULL,
+            )
+            grains_data = json.loads(g_out)
+        except Exception:
+            pass
+
+        # Merge: any host that appears in grains OR ping
+        all_hosts = set(grains_data.keys()) | set(ping_data.keys())
+        for host in sorted(all_hosts):
+            g = grains_data.get(host, {})
+            color = g.get("color", "")
+            index = g.get("node_index", "")
+            # Derive IPs from index+color if grains not yet set
+            if index and not g.get("wg0_ip"):
+                octet3 = 100 if color == "blue" else 200
+                g["wg0_ip"] = f"10.77.{octet3}.{index}"
+                g["wg1_ip"] = f"10.78.{octet3}.{index}"
+                g["wg2_ip"] = f"10.79.{octet3}.{index}"
+                g["wg3_ip"] = f"10.80.{octet3}.{index}"
+            nodes.append({
+                "host":   host,
+                "online": ping_data.get(host) is True,
+                "role":   g.get("role", ""),
+                "color":  color,
+                "index":  str(index),
+                "wg0":    g.get("wg0_ip", ""),
+                "wg1":    g.get("wg1_ip", ""),
+                "wg2":    g.get("wg2_ip", ""),
+                "wg3":    g.get("wg3_ip", ""),
+            })
+    except Exception as e:
+        LOG.warning("node_list failed: %s", e)
+
+    # Pending keys
+    try:
+        k_out = subprocess.check_output(
+            ["salt-key", "-l", "pre", "--out=json"],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        pending_keys = json.loads(k_out).get("minions_pre", [])
+    except Exception:
+        pass
+
+    await websocket.send(json.dumps({
+        "type":    "node_list",
+        "nodes":   nodes,
+        "pending": pending_keys,
+    }))
+
+
+async def _node_apply(websocket, msg):
+    """Apply a Salt state to a target minion (or grain match)."""
+    salt_target = msg.get("target", "")
+    state       = msg.get("state", "")
+    ws_target   = msg.get("_target", "log")
+    if not re.match(r'^[a-zA-Z0-9_\-\.\*]+$', salt_target):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid target"}))
+        return
+    if not re.match(r'^[a-zA-Z0-9_\.\-]+$', state):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid state"}))
+        return
+    cmd = ["salt", salt_target, "state.apply", state]
+    await _stream_proc(websocket, cmd, target=ws_target)
+
+
+async def _mine_refresh(websocket, msg):
+    """Force all minions to update their mine data."""
+    salt_target = msg.get("target", "*")
+    if not re.match(r'^[a-zA-Z0-9_\-\.\*]+$', salt_target):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid target"}))
+        return
+    await _stream_proc(websocket, ["salt", salt_target, "mine.update"],
+                       target=msg.get("_target", "log"))
+
+
+async def _node_accept_key(websocket, msg):
+    """Accept a specific pending Salt key by minion name."""
+    name = msg.get("name", "")
+    if not re.match(r'^[a-zA-Z0-9_\-\.]+$', name):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid key name"}))
+        return
+    try:
+        subprocess.check_call(
+            ["salt-key", "-a", name, "-y"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        await websocket.send(json.dumps({
+            "type": "log_line", "line": f"Accepted key: {name}", "target": "log",
+        }))
+        # Immediately refresh node list
+        await _node_list(websocket)
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "error", "msg": str(e)}))
+
+
+async def _salt_status(websocket):
+    minions = []
+    pending = 0
+    try:
+        out = subprocess.check_output(
+            ["salt", "*", "test.ping", "--out=json", "-t", "5"],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        ping_data = json.loads(out)
+        # Fetch grains for role/wg1_ip/node_index
+        grains_data = {}
+        try:
+            g_out = subprocess.check_output(
+                ["salt", "*", "grains.item", "role", "wg1_ip", "node_index",
+                 "--out=json", "-t", "5"],
+                text=True, stderr=subprocess.DEVNULL
+            )
+            grains_data = json.loads(g_out)
+        except Exception:
+            pass
+        for host, ok in ping_data.items():
+            g = grains_data.get(host, {})
+            minions.append({
+                "host":       host,
+                "online":     ok is True,
+                "role":       g.get("role", ""),
+                "wg1_ip":     g.get("wg1_ip", ""),
+                "node_index": g.get("node_index", ""),
+            })
+    except Exception:
+        pass
+    # Pending keys
+    try:
+        k_out = subprocess.check_output(
+            ["salt-key", "-l", "pre", "--out=json"],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        k_data = json.loads(k_out)
+        pending = len(k_data.get("minions_pre", []))
+    except Exception:
+        pass
+    await websocket.send(json.dumps({
+        "type": "salt_status",
+        "minions": minions,
+        "pending": pending,
+    }))
+
+async def _run_poof(websocket, msg):
+    """Run kldload-poof in live mode only; stream output then send poof_done."""
+    live = True
+    try:
+        with open("/etc/kldload/install-manifest.env") as f:
+            if "KLDLOAD_INSTALLED=1" in f.read():
+                live = False
+    except Exception:
+        pass
+    if not live:
+        await websocket.send(json.dumps({"type": "error", "msg": "poof only runs in live mode"}))
+        return
+    await _stream_proc(websocket, ["/usr/local/sbin/kldload-poof"],
+                       target=msg.get("_target", "log"))
+    await websocket.send(json.dumps({"type": "poof_done"}))
+
+
+async def _run_cluster_deploy(websocket, msg):
+    cmd_type = msg.get("cmd", "")
+    if cmd_type not in ("scc", "k8s-ha"):
+        await websocket.send(json.dumps({"type": "error", "msg": "cmd must be scc or k8s-ha"}))
+        return
+
+    # Load saved credentials to resolve named targets
+    all_creds = _load_credentials()
+    px_by_id  = {p["id"]: p for p in all_creds.get("proxmox", [])}
+
+    # Per-node target overrides: {"master": "px-123", "fw1": "px-456", ...}
+    node_targets = msg.get("node_targets", {})
+    # Default target (falls back to inline form values)
+    default_px = {
+        "host":         msg.get("proxmox_host",  ""),
+        "node":         msg.get("proxmox_node",  "pve"),
+        "token_id":     msg.get("token_id",      ""),
+        "token_secret": msg.get("token_secret",  ""),
+        "iso_storage":  msg.get("iso_storage",   "local"),
+    }
+
+    def _env_for_node(hostname):
+        cid = node_targets.get(hostname)
+        px  = px_by_id.get(cid, default_px) if cid else default_px
+        return {
+            "PROXMOX_HOST":         px.get("host",         default_px["host"]),
+            "PROXMOX_NODE":         px.get("node",         default_px["node"]),
+            "PROXMOX_TOKEN_ID":     px.get("token_id",     default_px["token_id"]),
+            "PROXMOX_TOKEN_SECRET": px.get("token_secret", default_px["token_secret"]),
+            "PROXMOX_ISO_STORAGE":  px.get("iso_storage",  default_px["iso_storage"]),
+        }
+
+    # Find deploy script
+    deploy_sh = None
+    for p in ["/usr/local/sbin/kldload-deploy-sh",
+              "/root/kldload/deploy.sh",
+              "/opt/kldload/deploy.sh"]:
+        if Path(p).exists():
+            deploy_sh = p
+            break
+    if not deploy_sh:
+        await websocket.send(json.dumps({"type": "error",
+            "msg": "deploy script not found", "target": "cluster-deploy"}))
+        return
+
+    # Build combined env: default proxmox + per-node JSON map for multi-target
+    env = {**os.environ}
+    env.update(_env_for_node("__default__"))
+    if node_targets:
+        env["KLDLOAD_NODE_TARGETS"] = json.dumps(node_targets)
+        # Serialize per-node credentials so deploy.sh can source them
+        resolved = {}
+        for node, cid in node_targets.items():
+            resolved[node] = _env_for_node(node)
+        env["KLDLOAD_NODE_CREDS"] = json.dumps(resolved)
+
+    await _stream_proc(websocket, [deploy_sh, cmd_type], env=env, target="cluster-deploy")
+
+async def _wg_planes_list(websocket):
+    """Return all WireGuard interfaces: fixed defaults + user-defined."""
+    DEFAULTS = [
+        {"iface": "wg0", "subnet": "10.77.0.0/16", "port": 51820, "role": "Enrollment",  "fixed": True},
+        {"iface": "wg1", "subnet": "10.78.0.0/16", "port": 51821, "role": "Management",  "fixed": True},
+        {"iface": "wg2", "subnet": "10.79.0.0/16", "port": 51822, "role": "Kubernetes",  "fixed": True},
+        {"iface": "wg3", "subnet": "10.80.0.0/16", "port": 51823, "role": "Storage",     "fixed": True},
+    ]
+    planes = list(DEFAULTS)
+    # Scan for user-defined planes wg4+
+    wg_dir = Path("/etc/wireguard")
+    idx = 4
+    while True:
+        iface = f"wg{idx}"
+        conf = wg_dir / f"{iface}.conf"
+        if not conf.exists():
+            break
+        label, subnet, port = iface, "", 0
+        try:
+            text = conf.read_text()
+            for line in text.splitlines():
+                if line.startswith("# label="):
+                    label = line.split("=", 1)[1].strip()
+                if "Address" in line:
+                    subnet = line.split("=", 1)[1].strip()
+                if "ListenPort" in line:
+                    port = int(line.split("=", 1)[1].strip())
+        except Exception:
+            pass
+        planes.append({"iface": iface, "subnet": subnet, "port": port,
+                        "role": label, "fixed": False})
+        idx += 1
+    await websocket.send(json.dumps({"type": "wg_planes", "planes": planes}))
+
+async def _wg_plane_create(websocket, msg):
+    label  = msg.get("label", "custom").replace(" ", "-")[:32]
+    subnet = msg.get("subnet", "")
+    port   = int(msg.get("port", 0))
+    if not subnet or not port:
+        await websocket.send(json.dumps({"type": "error", "msg": "subnet and port required"}))
+        return
+    # Find next free interface index
+    idx = 4
+    while Path(f"/etc/wireguard/wg{idx}.conf").exists():
+        idx += 1
+    iface = f"wg{idx}"
+    try:
+        privkey = subprocess.check_output(["wg", "genkey"], text=True).strip()
+        pubkey  = subprocess.check_output(["wg", "pubkey"], input=privkey, text=True).strip()
+        conf = f"""# label={label}
+[Interface]
+Address = {subnet.split('/')[0].rsplit('.', 1)[0]}.1/{subnet.split('/')[1]}
+ListenPort = {port}
+PrivateKey = {privkey}
+"""
+        Path(f"/etc/wireguard/{iface}.conf").write_text(conf)
+        Path(f"/etc/wireguard/{iface}.conf").chmod(0o600)
+        subprocess.check_call(["systemctl", "enable", "--now", f"wg-quick@{iface}"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        await websocket.send(json.dumps({"type": "wg_plane_created",
+            "iface": iface, "pubkey": pubkey, "label": label}))
+        await _wg_planes_list(websocket)
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "error", "msg": f"plane create failed: {e}"}))
+
+async def _wg_plane_delete(websocket, msg):
+    iface = msg.get("iface", "")
+    if not re.match(r'^wg[4-9][0-9]*$', iface):
+        await websocket.send(json.dumps({"type": "error", "msg": "can only delete user-defined planes (wg4+)"}))
+        return
+    try:
+        subprocess.call(["systemctl", "disable", "--now", f"wg-quick@{iface}"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        conf = Path(f"/etc/wireguard/{iface}.conf")
+        if conf.exists():
+            conf.unlink()
+        await websocket.send(json.dumps({"type": "wg_plane_deleted", "iface": iface}))
+        await _wg_planes_list(websocket)
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "error", "msg": f"plane delete failed: {e}"}))
+
+async def _run_audit(websocket):
+    """Run kldload-audit --json, stream the log, then push the parsed results."""
+    audit_bin = "/usr/local/sbin/kldload-audit"
+    if not os.path.exists(audit_bin):
+        await websocket.send(json.dumps({"type": "error", "msg": "kldload-audit not found"}))
+        return
+    await websocket.send(json.dumps({"type": "audit_started"}))
+    # Run with --json so we can parse final results, but also capture the log
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            audit_bin, "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await proc.communicate()
+        output = stdout.decode(errors="replace").strip()
+        # Try to parse JSON results
+        try:
+            results = json.loads(output)
+        except json.JSONDecodeError:
+            results = []
+        pass_count = sum(1 for r in results if r.get("status") == "PASS")
+        fail_count = sum(1 for r in results if r.get("status") == "FAIL")
+        skip_count = sum(1 for r in results if r.get("status") == "SKIP")
+        await websocket.send(json.dumps({
+            "type": "audit_done",
+            "results": results,
+            "summary": {"pass": pass_count, "fail": fail_count, "skip": skip_count},
+            "rc": proc.returncode,
+        }))
+    except Exception as exc:
+        await websocket.send(json.dumps({"type": "error", "msg": str(exc)}))
+
+
+async def _vm_clone(websocket, msg):
+    """Clone a VM from its golden image and stamp a new identity."""
+    src_vm   = msg.get("vm", "")
+    new_name = msg.get("new_name", "")
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', src_vm):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid vm name"}))
+        return
+    if not new_name:
+        import time as _time
+        new_name = f"{src_vm}-clone-{int(_time.time()) % 100000}"
+    await websocket.send(json.dumps({"type": "log_line", "line": f"[clone] Cloning {src_vm} → {new_name}", "target": "vm-log"}))
+    golden_dir = Path("/var/lib/kldload/golden")
+    image_path = golden_dir / f"{src_vm}.qcow2"
+    if not image_path.exists():
+        # Fall back: look for any golden matching the vm's role pattern
+        await websocket.send(json.dumps({"type": "log_line", "line": f"[clone] No golden image for {src_vm} — using live disk clone via virsh", "target": "vm-log"}))
+        cmd = ["virt-clone", "--original", src_vm, "--name", new_name, "--auto-clone"]
+    else:
+        clone_path = golden_dir / f"{new_name}.qcow2"
+        try:
+            subprocess.check_call(
+                ["qemu-img", "create", "-f", "qcow2", "-b", str(image_path), "-F", "qcow2", str(clone_path)],
+                stderr=subprocess.DEVNULL
+            )
+        except Exception as e:
+            await websocket.send(json.dumps({"type": "error", "msg": f"qemu-img clone failed: {e}"}))
+            return
+        cmd = ["kldload-stamp-identity", "--hostname", new_name, "--image", str(clone_path), "--start"]
+    await _stream_proc(websocket, cmd, target="vm-log")
+    db_log_event("vm_clone", src_vm, f"Cloned {src_vm} → {new_name}")
+    await websocket.send(json.dumps({"type": "exec_done", "rc": 0, "target": "vm-log"}))
+
+async def _vm_replace(websocket, msg):
+    """Replace a VM: clone it, then destroy the original."""
+    vm = msg.get("vm", "")
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', vm):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid vm name"}))
+        return
+    import time as _time
+    new_name = f"{vm}-new-{int(_time.time()) % 100000}"
+    await websocket.send(json.dumps({"type": "log_line", "line": f"[replace] Starting replace of {vm}", "target": "vm-log"}))
+    # Step 1: clone
+    await _vm_clone(websocket, {"vm": vm, "new_name": new_name})
+    # Step 2: destroy original
+    await websocket.send(json.dumps({"type": "log_line", "line": f"[replace] Destroying original {vm}", "target": "vm-log"}))
+    try:
+        subprocess.call(["virsh", "destroy", vm], stderr=subprocess.DEVNULL)
+        subprocess.call(["virsh", "undefine", "--nvram", vm], stderr=subprocess.DEVNULL)
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "log_line", "line": f"[replace] WARNING: destroy failed: {e}", "target": "vm-log"}))
+    db_log_event("vm_replace", vm, f"Replaced {vm} with {new_name}")
+    await websocket.send(json.dumps({"type": "log_line", "line": f"[replace] Done. New VM: {new_name}", "target": "vm-log"}))
+
+async def _service_deploy(websocket, msg):
+    """Deploy a service to target nodes via Salt highstate.
+    Generates a Salt state from the service definition and pushes it."""
+    svc_id = msg.get("id", "")
+    svc    = db_load_service(svc_id) if svc_id else msg.get("service")
+    if not svc:
+        await websocket.send(json.dumps({"type": "error", "msg": "service not found"}))
+        return
+
+    name     = svc.get("name", "unknown")
+    dataset  = svc.get("dataset") or f"rpool/services/{name}"
+    image    = svc.get("image", "")
+    runtime  = svc.get("runtime", "systemd")
+    config   = svc.get("config", {})
+    targets  = svc.get("node_targets", [])
+    salt_tgt = " ".join(targets) if targets else "*"
+
+    await websocket.send(json.dumps({
+        "type": "log_line", "line": f"[deploy] Deploying service: {name}", "target": "svc-log"
+    }))
+
+    # Generate Salt state YAML
+    salt_state = _generate_salt_state(name, dataset, image, runtime, config)
+
+    # Write state to /srv/salt/kldload/services/<name>.sls
+    state_dir  = Path(f"/srv/salt/kldload/services")
+    state_file = state_dir / f"{name}.sls"
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(salt_state)
+        await websocket.send(json.dumps({
+            "type": "log_line", "line": f"[deploy] State written: {state_file}", "target": "svc-log"
+        }))
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "log_line", "line": f"[deploy] WARNING: could not write state: {e}", "target": "svc-log"
+        }))
+
+    # Update DB: mark as deploying
+    if svc_id:
+        db_update_service_status(svc_id, "deploying")
+
+    # Push via Salt
+    cmd = ["salt", salt_tgt, "state.apply", f"kldload.services.{name}",
+           "--timeout=60", "--out=yaml"]
+    await _stream_proc(websocket, cmd, target="svc-log")
+
+    if svc_id:
+        db_update_service_status(svc_id, "running")
+    db_log_event("service_deploy", svc_id or name, f"Service deployed: {name} → {salt_tgt}")
+    await websocket.send(json.dumps({"type": "exec_done", "rc": 0, "target": "svc-log"}))
+
+def _generate_salt_state(name, dataset, image, runtime, config):
+    """Generate a Salt state YAML for a ZFS-backed service."""
+    mountpoint = f"/srv/services/{name}"
+    env_lines  = "\n".join(
+        f"    - {k}={v}" for k, v in (config.get("env") or {}).items()
+    )
+    ports      = config.get("ports", [])
+    port_lines = "\n".join(f"    - {p}" for p in ports) if ports else ""
+
+    if runtime == "nspawn":
+        svc_block = f"""
+{name}-nspawn:
+  nspawn.running:
+    - name: {name}
+    - root: {mountpoint}
+    - require:
+      - zfs: {dataset}
+"""
+    elif runtime == "podman":
+        svc_block = f"""
+{name}-container:
+  cmd.run:
+    - name: >-
+        podman run -d --name {name}
+        --restart=always
+        -v {mountpoint}:/data
+        {chr(10).join('        -e ' + l.strip('- ') for l in env_lines.splitlines()) if env_lines else ''}
+        {chr(10).join('        -p ' + l.strip('- ') for l in port_lines.splitlines()) if port_lines else ''}
+        {image or 'debian:trixie'}
+    - unless: podman inspect {name}
+    - require:
+      - zfs: {dataset}
+"""
+    else:  # systemd / bare
+        svc_block = f"""
+{name}-service:
+  service.running:
+    - name: {name}
+    - enable: True
+    - require:
+      - zfs: {dataset}
+"""
+
+    return f"""# Auto-generated by kldload-webui — do not edit manually
+# Service: {name}  Runtime: {runtime}
+
+# 1. Ensure ZFS dataset exists
+{dataset}:
+  zfs.filesystem_present:
+    - properties:
+        compression: lz4
+        mountpoint: {mountpoint}
+        com.sun:auto-snapshot: 'true'
+
+# 2. Ensure mountpoint directory exists
+{mountpoint}:
+  file.directory:
+    - makedirs: True
+    - require:
+      - zfs: {dataset}
+{svc_block}
+"""
+
+# ── HTTP handler ───────────────────────────────────────────────────────────────
+
+class WebUIHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(WEBUI_DIR), **kwargs)
+
+    def log_message(self, fmt, *args):
+        pass  # silence access log
+
+    def do_GET(self):
+        if self.path == "/" or self.path == "":
+            self.path = "/index.html"
+        super().do_GET()
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+
+def _get_ssl_context():
+    """Try to generate a per-boot TLS cert and return an SSLContext.
+    Returns None if the CA is not present (falls back to plain HTTP)."""
+    try:
+        result = subprocess.check_output(
+            ["/usr/local/sbin/kldload-tls-cert"], text=True
+        ).strip()
+        key_path, crt_path = result.split()
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile=crt_path, keyfile=key_path)
+        LOG.info("TLS cert loaded: %s", crt_path)
+        return ctx
+    except Exception as e:
+        LOG.warning("TLS setup failed, falling back to plain HTTP: %s", e)
+        return None
+
+async def main_async(args):
+    import http
+    import mimetypes
+    from websockets.http11 import Response as WsResponse
+    from websockets.datastructures import Headers as WsHeaders
+
+    db_init()
+    ssl_ctx = _get_ssl_context()
+    scheme    = "https" if ssl_ctx else "http"
+
+    async def process_request(connection, request):
+        """Serve static HTTP requests inline; return None to allow WS upgrade."""
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            return None  # hand off to ws_handler
+        url_path = request.path.split("?")[0] or "/"
+        if url_path == "/":
+            url_path = "/index.html"
+        file_path = WEBUI_DIR / url_path.lstrip("/")
+        # Prevent path traversal
+        try:
+            file_path.resolve().relative_to(WEBUI_DIR.resolve())
+        except ValueError:
+            return WsResponse(403, "Forbidden", WsHeaders([]), b"Forbidden\n")
+        if not file_path.exists() or not file_path.is_file():
+            return WsResponse(404, "Not Found", WsHeaders([]), b"Not Found\n")
+        ctype, _ = mimetypes.guess_type(str(file_path))
+        body = file_path.read_bytes()
+        headers = WsHeaders([
+            ("Content-Type", ctype or "application/octet-stream"),
+            ("Content-Length", str(len(body))),
+            ("Cache-Control", "no-cache"),
+        ])
+        return WsResponse(200, "OK", headers, body)
+
+    # Single port for both HTTP (static files) and WebSocket
+    ws_server = await websockets.serve(
+        ws_handler, args.bind, args.port,
+        ping_interval=20, ping_timeout=10,
+        ssl=ssl_ctx,
+        process_request=process_request,
+    )
+    LOG.info("kldload Web UI on %s://%s:%d (HTTP + WebSocket)", scheme, args.bind, args.port)
+
+    url = f"{scheme}://localhost:{args.port}"
+    LOG.info("kldload Web UI ready: %s", url)
+
+    if not args.no_browser:
+        for cmd in ["xdg-open", "firefox-esr", "chromium"]:
+            try:
+                subprocess.Popen([cmd, url],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                break
+            except FileNotFoundError:
+                continue
+
+    await ws_server.wait_closed()
+
+def main():
+    parser = argparse.ArgumentParser(description="kldload Web UI")
+    parser.add_argument("--port",       type=int, default=8080,  help="HTTP + WebSocket port (default 8080)")
+    parser.add_argument("--bind",       default="0.0.0.0",       help="Bind address (default 0.0.0.0)")
+    parser.add_argument("--no-browser", action="store_true",     help="Don't open browser")
+    args = parser.parse_args()
+
+    try:
+        asyncio.run(main_async(args))
+    except KeyboardInterrupt:
+        LOG.info("Shutting down")
+
+if __name__ == "__main__":
+    main()

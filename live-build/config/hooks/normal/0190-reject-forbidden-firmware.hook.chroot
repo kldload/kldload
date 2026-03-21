@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# 0190-remove-downloader-firmware.hook.chroot
+# Remove firmware packages that are downloaders (not actual firmware blobs).
+# These packages try to fetch firmware from the internet at runtime, which
+# is not appropriate in a self-contained live ISO.
+# ---------------------------------------------------------------------------
+
+log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] [firmware-hook] $*"; }
+
+REMOVE_PKGS=(
+    firmware-b43-installer
+    firmware-b43legacy-installer
+    b43-fwcutter
+)
+
+for pkg in "${REMOVE_PKGS[@]}"; do
+    if dpkg-query -W -f='${db:Status-Abbrev}\n' "$pkg" 2>/dev/null | grep -q '^ii '; then
+        log "Removing downloader-firmware package: $pkg"
+        apt-get purge -y "$pkg" 2>/dev/null || true
+    fi
+done
+
+log "Firmware downloader cleanup complete."

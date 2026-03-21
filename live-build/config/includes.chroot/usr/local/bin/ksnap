@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ksnap — simplified ZFS snapshot interface
+# Usage:
+#   ksnap                     # snapshot all key datasets
+#   ksnap /home/admin         # snapshot a specific path
+#   ksnap list                # show all snapshots with ages
+#   ksnap rollback /path      # roll back a dataset to its last snapshot
+#   ksnap destroy <snap>      # destroy a specific snapshot
+
+cmd="${1:-all}"
+
+_ts() { date +%Y%m%d-%H%M%S; }
+_log() { printf '\033[0;32m[ksnap]\033[0m %s\n' "$*"; }
+_err() { printf '\033[0;31m[ksnap]\033[0m %s\n' "$*" >&2; }
+
+# Resolve a path to its ZFS dataset
+_path_to_ds() {
+  df --output=source "$1" 2>/dev/null | tail -1
+}
+
+case "$cmd" in
+  list)
+    echo ""
+    printf '  %-50s %-22s %s\n' "SNAPSHOT" "CREATED" "USED"
+    printf '  %-50s %-22s %s\n' "--------" "-------" "----"
+    zfs list -H -t snapshot -o name,creation,used -S creation 2>/dev/null | while IFS=$'\t' read -r name created used; do
+      printf '  %-50s %-22s %s\n' "$name" "$created" "$used"
+    done
+    echo ""
+    total="$(zfs list -H -t snapshot -o name 2>/dev/null | wc -l)"
+    printf '  %s snapshots total\n\n' "$total"
+    ;;
+
+  rollback)
+    target="${2:?Usage: ksnap rollback /path}"
+    ds="$(_path_to_ds "$target")"
+    [[ -n "$ds" ]] || { _err "Cannot find ZFS dataset for $target"; exit 1; }
+    last_snap="$(zfs list -H -t snapshot -o name -S creation -d1 "$ds" 2>/dev/null | head -1)"
+    [[ -n "$last_snap" ]] || { _err "No snapshots found for $ds"; exit 1; }
+    _log "Rolling back $ds to $last_snap"
+    sudo zfs rollback "$last_snap"
+    _log "Done. $target is now at: $last_snap"
+    ;;
+
+  destroy)
+    snap="${2:?Usage: ksnap destroy <snapshot-name>}"
+    _log "Destroying snapshot: $snap"
+    sudo zfs destroy "$snap"
+    _log "Done."
+    ;;
+
+  all)
+    ts="$(_ts)"
+    _log "Snapshotting key datasets (manual-${ts})"
+    for ds in $(zfs list -H -o name -d1 rpool/ROOT 2>/dev/null) \
+              $(zfs list -H -o name -d1 rpool/home 2>/dev/null) \
+              rpool/srv rpool/var/lib; do
+      if zfs list "$ds" &>/dev/null; then
+        sudo zfs snapshot "${ds}@manual-${ts}" 2>/dev/null && \
+          _log "  ${ds}@manual-${ts}" || true
+      fi
+    done
+    _log "Done."
+    ;;
+
+  /*)
+    # Snapshot a specific path
+    ts="$(_ts)"
+    ds="$(_path_to_ds "$cmd")"
+    [[ -n "$ds" ]] || { _err "Cannot find ZFS dataset for $cmd"; exit 1; }
+    snap="${ds}@manual-${ts}"
+    _log "Snapshotting $ds"
+    sudo zfs snapshot "$snap"
+    _log "Done: $snap"
+    ;;
+
+  *)
+    echo "Usage: ksnap [list|rollback <path>|destroy <snap>|<path>]"
+    echo ""
+    echo "  ksnap              Snapshot all key datasets"
+    echo "  ksnap /home/admin  Snapshot a specific path"
+    echo "  ksnap list         Show all snapshots"
+    echo "  ksnap rollback /x  Roll back to last snapshot"
+    echo "  ksnap destroy NAME Destroy a snapshot"
+    exit 1
+    ;;
+esac

@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# 0010-cleanup.hook.chroot
+# Final cleanup pass — removes ephemeral files before image squashing.
+# Runs in the normal hook stage (image finalization).
+# ---------------------------------------------------------------------------
+
+log() {
+    echo "[$(date '+%Y-%m-%dT%H:%M:%S')] [cleanup] $*" >&2
+}
+
+log "Starting final cleanup hook"
+
+# ---------------------------------------------------------------------------
+# APT cache and lists
+# ---------------------------------------------------------------------------
+
+log "Removing APT package cache..."
+rm -f /var/cache/apt/archives/*.deb
+rm -f /var/cache/apt/archives/partial/*.deb
+
+log "Removing APT package lists..."
+rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Temporary files
+# ---------------------------------------------------------------------------
+
+log "Clearing /tmp and /var/tmp..."
+find /tmp -mindepth 1 -delete 2>/dev/null || true
+find /var/tmp -mindepth 1 -delete 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# Machine identity — must be blank in image
+# ---------------------------------------------------------------------------
+
+log "Truncating /etc/machine-id (will be regenerated on first boot)..."
+: > /etc/machine-id
+
+log "Removing /var/lib/dbus/machine-id..."
+rm -f /var/lib/dbus/machine-id
+
+# ---------------------------------------------------------------------------
+# SSH host keys — regenerated on first boot
+# ---------------------------------------------------------------------------
+
+log "Removing SSH host keys..."
+rm -f /etc/ssh/ssh_host_*
+
+# ---------------------------------------------------------------------------
+# Shell history
+# ---------------------------------------------------------------------------
+
+log "Removing root shell history..."
+rm -f /root/.bash_history
+rm -f /root/.zsh_history
+
+# ---------------------------------------------------------------------------
+# Backup and editor swap files
+# ---------------------------------------------------------------------------
+
+log "Removing backup files (~, .bak, .orig, .swp, .swo)..."
+find / \
+    -not \( -path '/proc/*' -prune \) \
+    -not \( -path '/sys/*' -prune \) \
+    -not \( -path '/dev/*' -prune \) \
+    \( \
+        -name '*.bak' \
+        -o -name '*~' \
+        -o -name '*.orig' \
+        -o -name '*.swp' \
+        -o -name '*.swo' \
+    \) \
+    -type f \
+    -delete \
+    2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# Done
+# ---------------------------------------------------------------------------
+
+log "Cleanup hook complete."

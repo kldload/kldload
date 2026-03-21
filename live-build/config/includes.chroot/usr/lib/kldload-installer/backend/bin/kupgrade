@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# kupgrade — perform system upgrade with automatic boot environment snapshot
+# Creates a pre-upgrade ZFS snapshot, runs apt dist-upgrade, then verifies
+# that ZFS DKMS modules are built and signed for every installed kernel.
+# ---------------------------------------------------------------------------
+
+PROGNAME="$(basename "$0")"
+LOG_DIR=/var/log/kldload
+LOG="${LOG_DIR}/upgrade.log"
+
+ts()  { date '+%Y-%m-%dT%H:%M:%S'; }
+log() { echo "$(ts) [$PROGNAME] $*" | tee -a "$LOG" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+[[ "$(id -u)" -eq 0 ]] || die "kupgrade must be run as root."
+
+mkdir -p "$LOG_DIR"
+log "==================================================================="
+log "kldload upgrade started"
+log "==================================================================="
+
+# ---------------------------------------------------------------------------
+# Create pre-upgrade boot environment snapshot
+# ---------------------------------------------------------------------------
+
+SNAPSHOT_CREATED=""
+if zfs list -H rpool/ROOT/default >/dev/null 2>&1; then
+    SNAP="rpool/ROOT/default@pre-upgrade-$(date +%Y%m%d-%H%M%S)"
+    log "Creating pre-upgrade boot environment: ${SNAP}"
+    zfs snapshot "${SNAP}" 2>&1 | tee -a "$LOG"
+    SNAPSHOT_CREATED="${SNAP}"
+    log "Roll back with:  kldload-be rollback ${SNAP}"
+else
+    log "WARNING: rpool/ROOT/default not found — skipping boot environment snapshot"
+fi
+
+# ---------------------------------------------------------------------------
+# apt update + dist-upgrade + autoremove
+# ---------------------------------------------------------------------------
+
+log "Running: apt-get update"
+DEBIAN_FRONTEND=noninteractive apt-get update 2>&1 | tee -a "$LOG"
+
+log "Running: apt-get dist-upgrade"
+DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y 2>&1 | tee -a "$LOG"
+
+log "Running: apt-get autoremove"
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>&1 | tee -a "$LOG"
+
+# ---------------------------------------------------------------------------
+# Verify ZFS DKMS modules for every installed kernel
+#
+# When a new kernel is installed, /etc/kernel/postinst.d/kldload-dkms-verify
+# already attempts a rebuild. This is a second-pass check so kupgrade
+# can report clearly and roll back if needed.
+# ---------------------------------------------------------------------------
+
+log "Verifying ZFS DKMS modules for all installed kernels..."
+
+DKMS_WARN=0
+while IFS= read -r kver; do
+    [[ -n "${kver}" ]] || continue
+
+    if dkms status -k "${kver}" 2>/dev/null | grep -qi 'zfs.*installed'; then
+        log "  ZFS OK: ${kver}"
+        continue
+    fi
+
+    log "  ZFS modules missing for ${kver} — attempting rebuild"
+
+    if dkms autoinstall -k "${kver}" >> "$LOG" 2>&1; then
+        log "  ZFS rebuilt OK: ${kver}"
+
+        # Re-sign with MOK key if configured
+        if [[ -x /etc/dkms/sign_helper.sh && -f /var/lib/dkms/mok.key ]]; then
+            while IFS= read -r ko; do
+                /etc/dkms/sign_helper.sh "${kver}" "${ko}" >> "$LOG" 2>&1 || true
+            done < <(find "/lib/modules/${kver}" \
+                          -name '*.ko' -o -name '*.ko.gz' -o -name '*.ko.zst' \
+                          2>/dev/null | grep -i zfs || true)
+            log "  ZFS modules re-signed: ${kver}"
+        fi
+    else
+        log "  WARNING: ZFS DKMS build FAILED for ${kver}"
+        DKMS_WARN=1
+    fi
+
+done < <(find /lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
+
+if [[ "${DKMS_WARN}" -eq 1 ]]; then
+    cat >&2 <<'WARN'
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  kldload WARNING: ZFS DKMS build failed for one or more        │
+  │  kernels. The previous kernel is still bootable via          │
+  │  ZFSBootMenu. Check: /var/log/kldload/upgrade.log              │
+  │                                                             │
+  │  To fix:  dkms autoinstall -k <kver>                        │
+  │  To roll back: kldload-be rollback <snapshot>                  │
+  └─────────────────────────────────────────────────────────────┘
+
+WARN
+fi
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+
+log "==================================================================="
+log "kldload upgrade complete"
+[[ -n "${SNAPSHOT_CREATED}" ]] && log "Pre-upgrade snapshot: ${SNAPSHOT_CREATED}"
+log "Log: ${LOG}"
+log "==================================================================="

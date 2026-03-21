@@ -1,0 +1,86 @@
+#!/bin/bash
+# /etc/kernel/postinst.d/kldload-dkms-verify
+# Called by dpkg after every linux-image-* install with args: KVER IMAGE_PATH
+#
+# Verifies that ZFS DKMS modules were built for the new kernel. If DKMS did
+# not build them (e.g. headers were missing at install time), this attempts
+# one rebuild. On success, re-signs the modules with the kldload MOK key so they
+# load under Secure Boot.
+set -euo pipefail
+
+KVER="${1:-}"
+LOG_DIR=/var/log/kldload
+LOG="${LOG_DIR}/dkms.log"
+
+[[ -n "${KVER}" ]] || exit 0
+
+mkdir -p "${LOG_DIR}"
+ts() { date '+%Y-%m-%dT%H:%M:%S'; }
+log() { echo "$(ts) [dkms-verify] $*" | tee -a "${LOG}" >&2; }
+
+log "=== Kernel postinst: verifying DKMS modules for ${KVER} ==="
+
+# ── Check if ZFS is already built for this kernel ────────────────────────────
+
+if dkms status -k "${KVER}" 2>/dev/null | grep -qi 'zfs.*installed'; then
+    log "ZFS DKMS modules OK for ${KVER}"
+    exit 0
+fi
+
+# ── Not built — attempt rebuild ───────────────────────────────────────────────
+
+log "ZFS modules not found for ${KVER} — attempting DKMS rebuild"
+
+if ! command -v dkms >/dev/null 2>&1; then
+    log "WARNING: dkms not installed — cannot rebuild ZFS modules"
+    exit 0
+fi
+
+if dkms autoinstall -k "${KVER}" >> "${LOG}" 2>&1; then
+    log "ZFS DKMS rebuild succeeded for ${KVER}"
+else
+    log "WARNING: ZFS DKMS rebuild FAILED for ${KVER}"
+    log "  Run manually:  dkms autoinstall -k ${KVER}"
+    log "  Check headers: dpkg -l linux-headers-${KVER}"
+    # Non-fatal — old kernel still works, just warn
+    cat >&2 <<WARN
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  kldload WARNING: ZFS DKMS build failed for kernel ${KVER}
+  │  ZFS will NOT be available on this kernel until fixed.      │
+  │  Your current kernel is unaffected.                         │
+  │                                                             │
+  │  To fix:  dkms autoinstall -k ${KVER}                       │
+  └─────────────────────────────────────────────────────────────┘
+
+WARN
+    exit 0
+fi
+
+# ── Re-sign newly built modules with MOK key ─────────────────────────────────
+
+SIGN_HELPER=/etc/dkms/sign_helper.sh
+MOK_KEY=/var/lib/dkms/mok.key
+
+if [[ ! -x "${SIGN_HELPER}" || ! -f "${MOK_KEY}" ]]; then
+    log "MOK signing skipped (sign_helper or key not present)"
+    exit 0
+fi
+
+log "Re-signing ZFS modules for ${KVER} with MOK key"
+
+signed=0
+failed=0
+while IFS= read -r ko; do
+    if "${SIGN_HELPER}" "${KVER}" "${ko}" >> "${LOG}" 2>&1; then
+        (( signed++ )) || true
+    else
+        (( failed++ )) || true
+        log "WARNING: failed to sign ${ko}"
+    fi
+done < <(find "/lib/modules/${KVER}" \
+              -name '*.ko' -o -name '*.ko.gz' -o -name '*.ko.zst' \
+              2>/dev/null | grep -i zfs || true)
+
+log "Signing complete: ${signed} signed, ${failed} failed"
+exit 0
