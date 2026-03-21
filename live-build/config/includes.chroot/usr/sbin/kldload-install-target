@@ -621,7 +621,20 @@ idle-dim=false
 sleep-inactive-ac-type='nothing'
 sleep-inactive-battery-type='nothing'
 DCONF
+      # Lock screensaver/power settings so GNOME can't override
+      mkdir -p "${target}/etc/dconf/db/local.d/locks"
+      cat > "${target}/etc/dconf/db/local.d/locks/kldload" << 'DLOCKS'
+/org/gnome/desktop/session/idle-delay
+/org/gnome/desktop/screensaver/lock-enabled
+/org/gnome/desktop/screensaver/idle-activation-enabled
+/org/gnome/settings-daemon/plugins/power/idle-dim
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-type
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-type
+DLOCKS
       chroot "${target}" dconf update 2>/dev/null || true
+
+      # Kernel console blanking off
+      echo "kernel.consoleblank=0" > "${target}/etc/sysctl.d/99-no-blank.conf"
     fi
 
     k_log "Profile packages installed (${distro}/${profile})"
