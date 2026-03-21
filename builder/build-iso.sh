@@ -67,8 +67,8 @@ PKGS=(
     python3 python3-pip python3-websockets python3-pyyaml
     htop pv lzop mbuffer
     perl-Config-IniFiles perl-Capture-Tiny
-    # ZFS — DKMS build (kmod-zfs requires exact kernel match)
-    dkms gcc make autoconf automake libtool
+    # ZFS — DKMS build inside chroot against target kernel
+    dkms gcc make autoconf automake libtool kernel-devel
     zfs zfs-dkms
     # Cross-distro installer (debootstrap for Debian targets from CentOS live)
     debootstrap
@@ -123,6 +123,7 @@ name=ZFS on Linux for EL9 - dkms
 baseurl=http://download.zfsonlinux.org/epel/9/$basearch/
 enabled=1
 gpgcheck=0
+
 ZFSREPO
 
 dnf --installroot="$ROOTFS" --releasever=9 --setopt=install_weak_deps=False \
@@ -155,19 +156,40 @@ KVER=$(ls "${ROOTFS}/lib/modules/" | grep -v '^$' | head -1)
 log "Kernel version: $KVER"
 log "Building ZFS DKMS module for $KVER..."
 
-# Chroot needs /proc, /sys, /dev for DKMS
-mount -t proc proc "${ROOTFS}/proc"
-mount -t sysfs sysfs "${ROOTFS}/sys"
-mount --bind /dev "${ROOTFS}/dev"
-mount --bind /dev/pts "${ROOTFS}/dev/pts"
+# Mount chroot filesystems for DKMS
+mount -t sysfs sysfs "${ROOTFS}/sys" 2>/dev/null || true
+mount --bind /dev "${ROOTFS}/dev" 2>/dev/null || true
+mount --bind /dev/pts "${ROOTFS}/dev/pts" 2>/dev/null || true
 
-# DKMS build
+# DO NOT mount host /proc — it exposes the host kernel (Fedora 6.18.x).
+# Instead mount a fresh procfs so DKMS doesn't see the wrong kernel version.
+mount -t proc proc "${ROOTFS}/proc" 2>/dev/null || true
+
+# Ensure the kernel headers symlink is correct
+ln -sfn "/usr/src/kernels/${KVER}" "${ROOTFS}/lib/modules/${KVER}/build" 2>/dev/null || true
+
+# DKMS build — force the target kernel explicitly
 ZFS_VER=$(chroot "$ROOTFS" rpm -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")
 if [[ -n "$ZFS_VER" ]]; then
+    # Remove any failed autoinstall attempt, then add fresh
+    chroot "$ROOTFS" dkms remove -m zfs -v "$ZFS_VER" --all 2>/dev/null || true
     chroot "$ROOTFS" dkms add -m zfs -v "$ZFS_VER" 2>&1 | tee -a "$LOG_FILE" || true
-    chroot "$ROOTFS" dkms build -m zfs -v "$ZFS_VER" -k "$KVER" 2>&1 | tee -a "$LOG_FILE" || \
-        log "WARNING: DKMS build failed"
-    chroot "$ROOTFS" dkms install -m zfs -v "$ZFS_VER" -k "$KVER" 2>&1 | tee -a "$LOG_FILE" || \
+
+    # Force DKMS to use the CentOS kernel headers, not autodetect from /proc
+    chroot "$ROOTFS" dkms build -m zfs -v "$ZFS_VER" -k "$KVER" \
+        --kernelsourcedir "/usr/src/kernels/${KVER}" \
+        --force \
+        2>&1 | tee -a "$LOG_FILE"
+
+    # Dump make.log to stdout so we can see the actual error
+    if [[ -f "${ROOTFS}/var/lib/dkms/zfs/${ZFS_VER}/build/make.log" ]]; then
+        log "=== DKMS make.log (last 50 lines) ==="
+        tail -50 "${ROOTFS}/var/lib/dkms/zfs/${ZFS_VER}/build/make.log" | tee -a "$LOG_FILE"
+        log "=== end make.log ==="
+    fi
+
+    chroot "$ROOTFS" dkms install -m zfs -v "$ZFS_VER" -k "$KVER" --force \
+        2>&1 | tee -a "$LOG_FILE" || \
         log "WARNING: DKMS install failed"
 fi
 
@@ -176,8 +198,10 @@ chroot "$ROOTFS" depmod -a "$KVER" 2>/dev/null || true
 # Verify
 if find "${ROOTFS}/lib/modules/${KVER}" -name 'zfs.ko*' 2>/dev/null | grep -q .; then
     log "ZFS kernel module built successfully for $KVER"
+elif find "${ROOTFS}/lib/modules/" -name 'zfs.ko*' 2>/dev/null | grep -q .; then
+    log "ZFS kernel module found (alternate path)"
 else
-    log "WARNING: ZFS kernel module not found after DKMS build"
+    die "ZFS kernel module NOT found — DKMS build failed for $KVER"
 fi
 
 # Unmount chroot mounts
@@ -241,8 +265,15 @@ if [[ "$PROFILE" == "desktop" ]]; then
     mkdir -p "${ROOTFS}/etc/gdm/PostLogin"
     cat > "${ROOTFS}/etc/gdm/PostLogin/Default" << 'POSTLOGIN'
 #!/bin/sh
-# Wait for GNOME shell to settle, then launch Firefox to the installer
-(sleep 5 && su - live -c 'DISPLAY=:0 firefox http://localhost:8080' &) &
+# Wait for webui to be listening, then launch Firefox
+(
+  for i in $(seq 1 60); do
+    (echo >/dev/tcp/localhost/8080) 2>/dev/null && break
+    sleep 1
+  done
+  sleep 2
+  su - live -c 'DISPLAY=:0 firefox http://localhost:8080'
+) &
 POSTLOGIN
     chmod +x "${ROOTFS}/etc/gdm/PostLogin/Default"
 
