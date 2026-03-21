@@ -305,6 +305,7 @@ AUTOSTART
 FFPOLICY
 
     # Disable screensaver / screen blank / auto-lock on live session
+    # Method 1: dconf system database (GNOME settings)
     mkdir -p "${ROOTFS}/etc/dconf/db/local.d" "${ROOTFS}/etc/dconf/profile"
     cat > "${ROOTFS}/etc/dconf/profile/user" << 'DCONFPROFILE'
 user-db:user
@@ -326,7 +327,33 @@ sleep-inactive-battery-type='nothing'
 [org/gnome/shell]
 welcome-dialog-last-shown-version='99'
 DCONF
+    # Lock these settings so the user can't accidentally re-enable
+    mkdir -p "${ROOTFS}/etc/dconf/db/local.d/locks"
+    cat > "${ROOTFS}/etc/dconf/db/local.d/locks/kldload-live" << 'LOCKS'
+/org/gnome/desktop/session/idle-delay
+/org/gnome/desktop/screensaver/lock-enabled
+/org/gnome/desktop/screensaver/idle-activation-enabled
+/org/gnome/settings-daemon/plugins/power/idle-dim
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-type
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-type
+LOCKS
     chroot "$ROOTFS" dconf update 2>/dev/null || true
+
+    # Method 2: systemd — disable any screen blanking services
+    chroot "$ROOTFS" systemctl mask gnome-screensaver.service 2>/dev/null || true
+
+    # Method 3: xset/xorg — disable DPMS and screensaver at X level
+    mkdir -p "${ROOTFS}/etc/X11/xinit/xinitrc.d"
+    cat > "${ROOTFS}/etc/X11/xinit/xinitrc.d/99-no-blank.sh" << 'XSET'
+#!/bin/sh
+xset s off s noblank 2>/dev/null || true
+xset -dpms 2>/dev/null || true
+XSET
+    chmod +x "${ROOTFS}/etc/X11/xinit/xinitrc.d/99-no-blank.sh"
+
+    # Method 4: kernel — disable console blanking
+    mkdir -p "${ROOTFS}/etc/sysctl.d"
+    echo "kernel.consoleblank=0" > "${ROOTFS}/etc/sysctl.d/99-no-blank.conf"
 fi
 
 # Edition marker
