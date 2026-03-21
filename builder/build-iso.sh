@@ -127,9 +127,19 @@ gpgcheck=0
 
 ZFSREPO
 
+# Note: DKMS autoinstall will fail here (host kernel != target kernel).
+# That's expected — we rebuild DKMS explicitly below with --kernelsourcedir.
+# Don't let the scriptlet failure kill the build.
+set +o pipefail
 dnf --installroot="$ROOTFS" --releasever=9 --setopt=install_weak_deps=False \
-    --setopt=tsflags=nodocs --nogpgcheck -y install "${PKGS[@]}" 2>&1 | tee -a "$LOG_FILE" || \
-    die "dnf --installroot failed"
+    --setopt=tsflags=nodocs --nogpgcheck -y install "${PKGS[@]}" 2>&1 | tee -a "$LOG_FILE"
+DNF_RC=${PIPESTATUS[0]}
+set -o pipefail
+# Check if packages actually installed (ignore DKMS scriptlet exit code)
+if ! chroot "$ROOTFS" rpm -q zfs zfs-dkms kernel-core >/dev/null 2>&1; then
+    die "dnf --installroot failed — core packages missing"
+fi
+log "dnf completed (exit $DNF_RC — DKMS scriptlet failures are expected and handled below)"
 
 log "Root filesystem bootstrapped: $(du -sh "$ROOTFS" | cut -f1)"
 
@@ -177,10 +187,12 @@ if [[ -n "$ZFS_VER" ]]; then
     chroot "$ROOTFS" dkms add -m zfs -v "$ZFS_VER" 2>&1 | tee -a "$LOG_FILE" || true
 
     # Force DKMS to use the CentOS kernel headers, not autodetect from /proc
-    chroot "$ROOTFS" dkms build -m zfs -v "$ZFS_VER" -k "$KVER" \
+    # ARCH=x86_64 prevents "arch/amd64/Makefile: No such file" in cross-arch Docker builds
+    # || true because DKMS may fail — we check for zfs.ko below
+    chroot "$ROOTFS" env ARCH=x86_64 dkms build -m zfs -v "$ZFS_VER" -k "$KVER" \
         --kernelsourcedir "/usr/src/kernels/${KVER}" \
         --force \
-        2>&1 | tee -a "$LOG_FILE"
+        2>&1 | tee -a "$LOG_FILE" || true
 
     # Dump make.log to stdout so we can see the actual error
     if [[ -f "${ROOTFS}/var/lib/dkms/zfs/${ZFS_VER}/build/make.log" ]]; then
