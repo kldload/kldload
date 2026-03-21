@@ -166,7 +166,8 @@ cmd_kvm_deploy() {
     [[ -n "$iso" ]] || die "No ISO found — run build first"
     log "Deploying to KVM..."
     virsh destroy kldload-free 2>/dev/null || true
-    virsh undefine kldload-free --remove-all-storage 2>/dev/null || true
+    virsh undefine kldload-free --nvram --remove-all-storage 2>/dev/null || true
+    rm -f /var/lib/libvirt/images/kldload-free.qcow2 2>/dev/null || true
     cp "$iso" /var/lib/libvirt/images/kldload-free-latest.iso
     chown qemu:qemu /var/lib/libvirt/images/kldload-free-latest.iso
     qemu-img create -f qcow2 /var/lib/libvirt/images/kldload-free.qcow2 "${VM_DISK_GB}G"
