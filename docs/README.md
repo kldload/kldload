@@ -25,7 +25,8 @@ All guides work on both distro families unless noted.
 ## Networking
 
 - [Networking](networking.md) — static IPs, bridges, VLANs, bonding, firewall
-- [WireGuard](wireguard.md) — point-to-point, hub-and-spoke, 4-plane mesh
+- [WireGuard Basics](wireguard.md) — point-to-point, hub-and-spoke, 4-plane mesh
+- [WireGuard Masterclass](wireguard-masterclass.md) — silent backplanes, multi-plane isolation, full mesh, stealth configs, NAT traversal, site-to-site, key management, monitoring
 
 ## Virtualization
 
