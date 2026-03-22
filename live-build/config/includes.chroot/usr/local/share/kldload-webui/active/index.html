@@ -227,20 +227,39 @@
           <div class="panel-hdr">↯ Target Disk &amp; Identity</div>
           <div class="panel-body">
             <div id="rhel-key-group" style="display:none">
-              <div class="form-group">
-                <label>RHEL activation key</label>
-                <input type="text" id="rhel-key" placeholder="activation key name">
+              <div style="margin-bottom:0.75rem">
+                <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.4rem">RHEL Authentication</label>
+                <div style="display:flex;gap:1rem">
+                  <label style="font-size:0.85rem;cursor:pointer"><input type="radio" name="rhel-auth" value="userpass" checked onchange="toggleRhelAuth()"> Username &amp; password</label>
+                  <label style="font-size:0.85rem;cursor:pointer"><input type="radio" name="rhel-auth" value="activation" onchange="toggleRhelAuth()"> Activation key</label>
+                </div>
               </div>
-              <div class="form-group">
-                <label>RHEL org ID</label>
-                <input type="text" id="rhel-org" placeholder="numeric org ID">
+              <div id="rhel-userpass-fields">
+                <div class="form-group">
+                  <label>Red Hat username</label>
+                  <input type="text" id="rhel-username" placeholder="your Red Hat portal login">
+                </div>
+                <div class="form-group">
+                  <label>Red Hat password</label>
+                  <input type="password" id="rhel-password" placeholder="portal password">
+                </div>
+              </div>
+              <div id="rhel-activation-fields" style="display:none">
+                <div class="form-group">
+                  <label>Activation key</label>
+                  <input type="text" id="rhel-key" placeholder="activation key name">
+                </div>
+                <div class="form-group">
+                  <label>Org ID</label>
+                  <input type="text" id="rhel-org" placeholder="numeric org ID">
+                </div>
               </div>
               <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.5rem">
                 <button class="btn btn-ghost btn-sm" onclick="testRhelCdn()" style="font-size:0.78rem">Test CDN Connection</button>
                 <span id="rhel-cdn-status" style="font-size:0.78rem;color:var(--muted)"></span>
               </div>
               <div class="note" style="font-size:0.8rem;color:var(--muted);margin-top:0.25rem">
-                RHEL requires internet to pull packages from Red Hat CDN. Test connectivity before installing.
+                RHEL requires internet to pull packages from Red Hat CDN. Use your access.redhat.com login or an activation key.
               </div>
             </div>
             <div class="form-group">
@@ -1003,6 +1022,15 @@ function selectDistro(el) {
   if (rhelGroup) rhelGroup.style.display = el.dataset.distro === 'rhel' ? 'block' : 'none';
 }
 
+// ── RHEL auth toggle ─────────────────────────────────────────────────────────
+function toggleRhelAuth() {
+  const mode = document.querySelector('input[name="rhel-auth"]:checked')?.value || 'userpass';
+  const up = document.getElementById('rhel-userpass-fields');
+  const ak = document.getElementById('rhel-activation-fields');
+  if (up) up.style.display = mode === 'userpass' ? 'block' : 'none';
+  if (ak) ak.style.display = mode === 'activation' ? 'block' : 'none';
+}
+
 // ── DHCP toggle ──────────────────────────────────────────────────────────────
 function toggleDHCP() {
   const dhcp = document.getElementById('net-dhcp').checked;
@@ -1191,11 +1219,21 @@ function startInstall() {
   const ebpf = document.getElementById('install-ebpf')?.checked ? '1' : '0';
   const dedup = document.getElementById('install-zfs-dedup')?.checked ? '1' : '0';
   const exportFmt = document.getElementById('install-export-format')?.value || 'none';
+  const rhelAuthMode = document.querySelector('input[name="rhel-auth"]:checked')?.value || 'userpass';
+  const rhelUser = (document.getElementById('rhel-username')?.value || '').trim();
+  const rhelPass = (document.getElementById('rhel-password')?.value || '').trim();
   const rhelKey = (document.getElementById('rhel-key')?.value || '').trim();
   const rhelOrg = (document.getElementById('rhel-org')?.value || '').trim();
 
-  if (distro === 'rhel' && !rhelKey)    return showErr('RHEL activation key is required');
-  if (distro === 'rhel' && !rhelOrg)    return showErr('RHEL org ID is required');
+  if (distro === 'rhel') {
+    if (rhelAuthMode === 'userpass') {
+      if (!rhelUser) return showErr('Enter your Red Hat username');
+      if (!rhelPass) return showErr('Enter your Red Hat password');
+    } else {
+      if (!rhelKey) return showErr('Enter your RHEL activation key');
+      if (!rhelOrg) return showErr('Enter your RHEL org ID');
+    }
+  }
   const manualStorage = role === 'core' && document.querySelector('input[name="storage-mode"][value="manual"]')?.checked;
   const params = {
     disk, hostname: host, username: user,
@@ -1205,10 +1243,12 @@ function startInstall() {
     storage_mode: 'zfs', infra_mode: 'standalone',
     zfs_encrypt: encrypt ? '1' : '0',
     storage_manual: manualStorage ? '1' : '0',
-    ...(sshKey   ? { ssh_pubkey: sshKey }  : {}),
-    ...(netIface ? { net_iface: netIface } : {}),
-    ...(rhelKey  ? { rhel_key: rhelKey }   : {}),
-    ...(rhelOrg  ? { rhel_org: rhelOrg }   : {}),
+    ...(sshKey    ? { ssh_pubkey: sshKey }            : {}),
+    ...(netIface  ? { net_iface: netIface }           : {}),
+    ...(rhelUser  ? { rhel_username: rhelUser }       : {}),
+    ...(rhelPass  ? { rhel_password: rhelPass }       : {}),
+    ...(rhelKey   ? { rhel_key: rhelKey }             : {}),
+    ...(rhelOrg   ? { rhel_org: rhelOrg }             : {}),
     network_dhcp: dhcp ? 'yes' : 'no',
   };
   if (encrypt) params.zfs_passphrase = encPass;

@@ -343,13 +343,26 @@ enabled=1
 ROCKYREPO
       ;;
     rhel)
-      # RHEL uses subscription-manager — register before setting up repos
+      # RHEL uses subscription-manager — supports two auth methods:
+      #   1. Username + password (simplest — use your Red Hat portal login)
+      #   2. Activation key + org ID (for automation / shared credentials)
       local rhel_key="${KLDLOAD_RHEL_KEY:-${RHEL_ACTIVATION_KEY:-}}"
       local rhel_org="${KLDLOAD_RHEL_ORG:-${RHEL_ORG_ID:-}}"
-      if [[ -z "${rhel_key}" || -z "${rhel_org}" ]]; then
-        k_die "RHEL install requires KLDLOAD_RHEL_KEY and KLDLOAD_RHEL_ORG (activation key + org ID)"
+      local rhel_user="${KLDLOAD_RHEL_USERNAME:-${RHEL_USERNAME:-}}"
+      local rhel_pass="${KLDLOAD_RHEL_PASSWORD:-${RHEL_PASSWORD:-}}"
+
+      # Determine auth method
+      local rhel_auth=""
+      if [[ -n "${rhel_user}" && -n "${rhel_pass}" ]]; then
+        rhel_auth="userpass"
+        k_log_to "$log" "RHEL auth: username/password (user=${rhel_user})"
+      elif [[ -n "${rhel_key}" && -n "${rhel_org}" ]]; then
+        rhel_auth="activation"
+        k_log_to "$log" "RHEL auth: activation key (key=${rhel_key}, org=${rhel_org})"
+      else
+        k_die "RHEL install requires either KLDLOAD_RHEL_USERNAME + KLDLOAD_RHEL_PASSWORD (Red Hat portal login) or KLDLOAD_RHEL_KEY + KLDLOAD_RHEL_ORG (activation key + org ID)"
       fi
-      k_log_to "$log" "Registering with Red Hat CDN (key=${rhel_key}, org=${rhel_org})"
+
       # Install subscription-manager into the installroot first via CentOS bootstrap,
       # then re-register with RHEL repos
       cat > "${target}/etc/yum.repos.d/centos-bootstrap.repo" <<CENTBOOT
@@ -375,13 +388,22 @@ CENTBOOT
       cp /etc/pki/ca-trust/source/anchors/redhat-uep.pem "${target}/etc/pki/ca-trust/source/anchors/" 2>/dev/null || true
       chroot "${target}" update-ca-trust 2>>"$log" || true
       # Register with RHEL
-      k_log_to "$log" "Running subscription-manager register..."
-      chroot "${target}" subscription-manager register \
-        --activationkey="${rhel_key}" --org="${rhel_org}" --force >> "$log" 2>&1 \
-        || { k_log_to "$log" "WARNING: subscription-manager register failed — trying with --insecure"; \
-             chroot "${target}" subscription-manager register \
-               --activationkey="${rhel_key}" --org="${rhel_org}" --force --insecure >> "$log" 2>&1 \
-               || k_log_to "$log" "WARNING: subscription-manager register failed even with --insecure"; }
+      k_log_to "$log" "Running subscription-manager register (${rhel_auth})..."
+      if [[ "${rhel_auth}" == "userpass" ]]; then
+        chroot "${target}" subscription-manager register \
+          --username="${rhel_user}" --password="${rhel_pass}" --force >> "$log" 2>&1 \
+          || { k_log_to "$log" "WARNING: subscription-manager register failed — trying with --insecure"; \
+               chroot "${target}" subscription-manager register \
+                 --username="${rhel_user}" --password="${rhel_pass}" --force --insecure >> "$log" 2>&1 \
+                 || k_die "subscription-manager register failed — check your Red Hat username and password"; }
+      else
+        chroot "${target}" subscription-manager register \
+          --activationkey="${rhel_key}" --org="${rhel_org}" --force >> "$log" 2>&1 \
+          || { k_log_to "$log" "WARNING: subscription-manager register failed — trying with --insecure"; \
+               chroot "${target}" subscription-manager register \
+                 --activationkey="${rhel_key}" --org="${rhel_org}" --force --insecure >> "$log" 2>&1 \
+                 || k_die "subscription-manager register failed — check your activation key and org ID"; }
+      fi
       # Enable repos
       chroot "${target}" subscription-manager repos \
         --enable="rhel-${release}-for-x86_64-baseos-rpms" \
