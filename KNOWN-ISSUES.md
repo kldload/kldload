@@ -1,5 +1,7 @@
 # Known Issues — RC-1 Beta
 
+> kldload went from concept to working multi-distro installer in one week. This is a rapid prototype that works — but not everything has been fully validated. Expect rough edges. Report issues at [github.com/kldload/kldload/issues](https://github.com/kldload/kldload/issues).
+
 ## Tested On
 
 | Target | Desktop | Server | Core | Notes |
