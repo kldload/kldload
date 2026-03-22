@@ -12,9 +12,11 @@ You stick a USB drive into any x86_64 machine — bare metal, KVM, Proxmox, VMwa
 
 The original idea was simple — load a kernel, install ZFS on root, get out of the way. But once you have a consistent ZFS layout, you need snapshot tools. Once you have snapshot tools, you need boot environments. Once you have boot environments, you need a safe upgrade path. Once you support multiple distros, you need a universal package manager. And once you have all of that, you've built an operating system.
 
-kldloadOS still installs stock CentOS, Debian, RHEL, or Rocky underneath. Stock kernel, stock packages, stock systemd. Nothing is patched or forked. But on top of that it adds a **unified experience**: `kpkg` replaces `apt` and `dnf` with one command set, every operation gets an automatic ZFS snapshot, boot environments let you roll back anything, and the same tools work identically whether you're on Debian or CentOS.
+kldloadOS still installs stock CentOS, Debian, RHEL, or Rocky underneath. Stock kernel, stock packages, stock systemd. Nothing is patched, nothing is forked, nothing is removed. `apt` and `dnf` still work exactly as they always do.
 
-You pick the distro. kldloadOS makes them all behave the same way.
+What kldloadOS adds — optionally — is a set of `k*` convenience tools that automate common tasks and work identically across distro families. `kpkg` wraps the native package manager so you can use one command on both Debian and CentOS if you want to. Or don't — run `apt install nginx` directly, it works fine. The `k*` tools are there to make cross-distro workflows easier, not to replace anything.
+
+You pick the distro. You use it as-is, or you use the kldloadOS tools. Both work.
 
 ---
 
@@ -49,12 +51,12 @@ kbe activate before-risky-change && reboot
 
 This is how Solaris, FreeBSD, and illumos have worked for years. Stock Linux doesn't have it. kldloadOS does.
 
-### Universal CLI tools
+### Optional CLI tools
 
-The `k*` commands work the same on CentOS and Debian:
+kldloadOS ships a set of `k*` commands that work the same on CentOS and Debian. They're all optional — the native tools (`apt`, `dnf`, `zfs`, `zpool`) are untouched and work exactly as you'd expect. The `k*` tools just automate common patterns:
 
 ```
-kpkg install nginx          # auto-detects dnf or apt
+kpkg install nginx          # wraps dnf or apt (adds ZFS snapshot)
 ksnap                       # snapshot all key datasets
 kbe create my-checkpoint    # create a boot environment
 kclone /srv/prod /srv/test  # instant CoW clone
@@ -64,7 +66,7 @@ kupgrade                    # safe upgrade with rollback
 kexport qcow2               # export to disk image
 ```
 
-Every `kpkg install`, `remove`, and `upgrade` takes an automatic ZFS snapshot first. You can't permanently break your system with a package operation.
+If you use `kpkg`, it takes an automatic ZFS snapshot before every install/remove/upgrade. If you use `apt` or `dnf` directly, everything works — you just don't get the automatic snapshot. Nothing is intercepted or replaced.
 
 ### Automatic snapshots
 

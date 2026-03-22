@@ -1,8 +1,8 @@
-# Package Management with kpkg
+# Package Management
 
-kldload includes `kpkg` — a universal package manager that wraps `dnf` (CentOS/RHEL) and `apt` (Debian) with automatic ZFS snapshots before every operation.
+kldload does not replace or modify your distro's package manager. `apt` and `dnf` work exactly as they do on a stock install — use them directly if you prefer.
 
-All examples work on both distros unless noted. `kpkg` detects which distro you're on and calls the right package manager.
+kldload also includes `kpkg`, an optional convenience wrapper that calls the native package manager underneath and adds automatic ZFS snapshots before every operation. It's there if you want cross-distro consistency; it's not required for anything.
 
 ---
 
@@ -170,4 +170,4 @@ PROFILE=desktop ./deploy.sh build   # rebuild ISO (RPM darksite rebuilds automat
 | Firewall | `firewalld` | `nftables` |
 | Service manager | `systemctl` (same) | `systemctl` (same) |
 
-With `kpkg`, you don't need to remember these differences — it picks the right command automatically.
+With `kpkg`, you don't need to remember these differences — it picks the right command automatically. But the native commands always work too. `kpkg` is a shortcut, not a gate.

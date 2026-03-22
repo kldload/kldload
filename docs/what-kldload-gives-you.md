@@ -6,9 +6,15 @@ This page covers what kldloadOS gives you that a stock Linux install doesn't.
 
 ---
 
-## One command set across Debian and CentOS/RHEL
+## Nothing removed, everything optional
 
-Every kldload system ships the same CLI tools regardless of distro. You don't need to remember whether it's `apt` or `dnf`, `dpkg -l` or `rpm -qa`. The `k*` tools abstract away the differences:
+kldloadOS does not modify, patch, replace, or remove anything from the base distro. `apt`, `dnf`, `zfs`, `zpool`, `systemctl` — they all work exactly as they do on a stock install. The underlying OS is completely standard.
+
+What kldloadOS adds is a set of optional `k*` convenience commands that automate common tasks and provide a consistent interface across distro families. You can use them, or ignore them entirely and operate the system with native tools. Both approaches are fully supported.
+
+## One optional command set across Debian and CentOS/RHEL
+
+Every kldload system ships the same `k*` CLI tools regardless of distro. If you don't want to remember whether it's `apt` or `dnf`, `dpkg -l` or `rpm -qa`, the `k*` tools abstract away the differences:
 
 | You type | On CentOS/RHEL it runs | On Debian it runs |
 |----------|----------------------|-------------------|
@@ -135,7 +141,7 @@ One ISO installs:
 - RHEL 9
 - Rocky Linux 9
 
-The same USB stick works for all four. Same installer, same ZFS layout, same tools, same boot environments. The only difference is the package manager underneath — and `kpkg` hides that.
+The same USB stick works for all four. Same installer, same ZFS layout, same tools, same boot environments. The native package manager is still there — `dnf` on CentOS/RHEL, `apt` on Debian — fully functional. `kpkg` is an optional wrapper if you want one command for both.
 
 ---
 
@@ -165,10 +171,16 @@ Instantly shows pool health, disk usage, compression ratios, snapshot counts, bo
 
 ---
 
-## What you don't get (intentionally)
+## What's not changed
 
-- **No custom kernel** — uses the stock distro kernel. ZFS is built via DKMS.
+kldloadOS is deliberately non-invasive. The base distro is stock:
+
+- **Kernel** — unmodified distro kernel. ZFS is built via DKMS, not a custom kernel.
+- **Package managers** — `apt` and `dnf` are untouched. `kpkg` wraps them optionally; it does not replace, intercept, or modify them.
+- **Init system** — stock systemd. No custom init, no wrapper services around systemd.
+- **Filesystem tools** — `zfs`, `zpool`, `zdb` are standard OpenZFS. The `k*` tools call them underneath.
+- **Network stack** — standard NetworkManager. WireGuard is the stock kernel module.
 - **No proprietary components** — everything is open source (BSD 3-Clause).
-- **No cloud lock-in** — exports to any format, runs on any hardware.
-- **No package manager replacement** — `dnf` and `apt` still work directly. The `k*` tools are wrappers, not replacements.
-- **No init system changes** — uses stock systemd.
+- **No lock-in** — exports to any format, runs on any hardware. `kexport` uses `qemu-img`, not a custom tool.
+
+If you uninstalled every `k*` tool, you'd have a standard CentOS or Debian system with ZFS on root. The `k*` tools are additions, not modifications.
