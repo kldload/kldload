@@ -382,6 +382,24 @@ CENTBOOT
       dnf --installroot="${target}" --releasever="${release}" --nogpgcheck -y install \
         subscription-manager ca-certificates >> "$log" 2>&1 || true
       rm -f "${target}/etc/yum.repos.d/centos-bootstrap.repo"
+
+      # Swap CentOS release for RHEL release — subscription-manager uses
+      # /etc/os-release to determine available repos. Without redhat-release,
+      # it thinks it's CentOS and won't show RHEL 9 repos.
+      k_log_to "$log" "Installing redhat-release (replacing centos-stream-release)..."
+      local rhel_rpms="/root/darksite/rhel-release"
+      # Also check the live ISO path where build-iso.sh places them
+      [[ -d "$rhel_rpms" ]] || rhel_rpms="/usr/share/kldload/rhel-release"
+      if [[ -d "$rhel_rpms" ]] && ls "$rhel_rpms"/redhat-release*.rpm >/dev/null 2>&1; then
+        cp "$rhel_rpms"/redhat-release*.rpm "${target}/tmp/"
+        chroot "${target}" rpm -e --nodeps centos-stream-release centos-stream-repos centos-gpg-keys 2>>"$log" || true
+        chroot "${target}" rpm -ivh --force --nodeps /tmp/redhat-release*.rpm 2>>"$log" || true
+        rm -f "${target}"/tmp/redhat-release*.rpm
+        k_log_to "$log" "redhat-release installed: $(chroot "${target}" cat /etc/redhat-release 2>/dev/null)"
+      else
+        k_log_to "$log" "WARNING: redhat-release RPMs not found at ${rhel_rpms} — subscription-manager may not show RHEL repos"
+      fi
+
       # Install Red Hat's CDN CA cert (redhat-uep.pem) into the chroot
       k_log_to "$log" "Installing Red Hat CDN CA certificates..."
       mkdir -p "${target}/etc/pki/ca-trust/source/anchors"
@@ -404,12 +422,21 @@ CENTBOOT
                  --activationkey="${rhel_key}" --org="${rhel_org}" --force --insecure >> "$log" 2>&1 \
                  || k_die "subscription-manager register failed — check your activation key and org ID"; }
       fi
-      # Enable repos
+      # Set release version and enable repos
+      k_log_to "$log" "Setting RHEL release to ${release} and enabling repos..."
+      chroot "${target}" subscription-manager release --set="${release}" >> "$log" 2>&1 || true
       chroot "${target}" subscription-manager repos \
         --enable="rhel-${release}-for-x86_64-baseos-rpms" \
         --enable="rhel-${release}-for-x86_64-appstream-rpms" \
         --enable="codeready-builder-for-rhel-${release}-x86_64-rpms" \
         >> "$log" 2>&1 || true
+      # Verify repos are enabled
+      local _enabled
+      _enabled="$(chroot "${target}" subscription-manager repos --list-enabled 2>/dev/null | grep -c 'Repo ID' || echo 0)"
+      k_log_to "$log" "RHEL repos enabled: ${_enabled}"
+      if [[ "$_enabled" -eq 0 ]]; then
+        k_log_to "$log" "WARNING: No RHEL repos enabled — dnf install will likely fail"
+      fi
       ;;
     *) # centos (default)
       cat > "${target}/etc/yum.repos.d/centos.repo" <<DNFREPO

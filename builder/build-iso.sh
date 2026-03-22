@@ -520,6 +520,15 @@ cat > "${ROOTFS}/etc/modprobe.d/zfs.conf" << 'ZFSTUNE'
 options zfs zfs_arc_max=0
 ZFSTUNE
 
+# RHEL release RPMs (both editions — needed for RHEL installs)
+if [[ -d /build/build/rhel-release ]]; then
+    mkdir -p "${ROOTFS}/usr/share/kldload/rhel-release"
+    cp /build/build/rhel-release/redhat-release*.rpm "${ROOTFS}/usr/share/kldload/rhel-release/"
+    log "RHEL release RPMs copied to rootfs"
+else
+    log "WARNING: No RHEL release RPMs found at /build/build/rhel-release/"
+fi
+
 # ZFSBootMenu EFI binary (both editions — needed for ZFS boot)
 mkdir -p "${ROOTFS}/root/darksite/boot"
 log "Downloading ZFSBootMenu EFI binary..."
