@@ -6,9 +6,19 @@ FROM quay.io/centos/centos:stream9
 # Purpose: Provides the lorax/livemedia-creator toolchain for building the
 #          KLDload live ISO. ZFS packages are installed INTO the ISO via
 #          kickstart — NOT here in the builder.
+# Supports: x86_64 and aarch64 (auto-detects architecture)
 # ---------------------------------------------------------------------------
 
-RUN dnf install -y epel-release && \
+# Detect architecture for EFI packages
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ]; then \
+        EFI_GRUB="grub2-efi-aa64" ; \
+        EFI_SHIM="shim-aa64" ; \
+    else \
+        EFI_GRUB="grub2-efi-x64" ; \
+        EFI_SHIM="shim-x64" ; \
+    fi && \
+    dnf install -y epel-release && \
     /usr/bin/crb enable && \
     dnf install -y --allowerasing \
         lorax \
@@ -17,8 +27,8 @@ RUN dnf install -y epel-release && \
         dnf-plugins-core \
         squashfs-tools \
         xorriso \
-        grub2-efi-x64 \
-        shim-x64 \
+        ${EFI_GRUB} \
+        ${EFI_SHIM} \
         dracut \
         dracut-live \
         dracut-squash \
