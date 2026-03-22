@@ -346,6 +346,11 @@ ROCKYREPO
       # RHEL uses subscription-manager — supports two auth methods:
       #   1. Username + password (simplest — use your Red Hat portal login)
       #   2. Activation key + org ID (for automation / shared credentials)
+      #
+      # IMPORTANT: We register from the LIVE environment (not the installroot)
+      # and then write the RHEL repo configs into the clean installroot.
+      # Previous approach installed CentOS packages first, which conflicted
+      # with RHEL packages (CentOS Stream versions are newer than RHEL point releases).
       local rhel_key="${KLDLOAD_RHEL_KEY:-${RHEL_ACTIVATION_KEY:-}}"
       local rhel_org="${KLDLOAD_RHEL_ORG:-${RHEL_ORG_ID:-}}"
       local rhel_user="${KLDLOAD_RHEL_USERNAME:-${RHEL_USERNAME:-}}"
@@ -363,79 +368,160 @@ ROCKYREPO
         k_die "RHEL install requires either KLDLOAD_RHEL_USERNAME + KLDLOAD_RHEL_PASSWORD (Red Hat portal login) or KLDLOAD_RHEL_KEY + KLDLOAD_RHEL_ORG (activation key + org ID)"
       fi
 
-      # Install subscription-manager into the installroot first via CentOS bootstrap,
-      # then re-register with RHEL repos
-      cat > "${target}/etc/yum.repos.d/centos-bootstrap.repo" <<CENTBOOT
-[baseos-bootstrap]
-name=CentOS Stream ${release} - BaseOS (bootstrap only)
-metalink=https://mirrors.centos.org/metalink?repo=centos-baseos-${release}-stream&arch=\$basearch&protocol=https
-gpgcheck=0
-enabled=1
-CENTBOOT
-      # Set up chroot networking BEFORE subscription-manager (needs DNS + /proc)
-      mkdir -p "${target}/proc" "${target}/sys" "${target}/dev" "${target}/dev/pts" "${target}/run" "${target}/etc"
-      mount -t proc proc "${target}/proc" 2>/dev/null || true
-      mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
-      mount --bind /dev "${target}/dev" 2>/dev/null || true
-      mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
-      cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
-      dnf --installroot="${target}" --releasever="${release}" --nogpgcheck -y install \
-        subscription-manager ca-certificates >> "$log" 2>&1 || true
-      rm -f "${target}/etc/yum.repos.d/centos-bootstrap.repo"
+      # Step 1: Register from the LIVE environment (subscription-manager is
+      # already installed on the CentOS live ISO). This avoids polluting the
+      # installroot with CentOS packages.
+      k_log_to "$log" "Registering with Red Hat CDN from live environment..."
+      # Unregister any previous registration on the live system
+      subscription-manager unregister >> "$log" 2>&1 || true
 
-      # Swap CentOS release for RHEL release — subscription-manager uses
-      # /etc/os-release to determine available repos. Without redhat-release,
-      # it thinks it's CentOS and won't show RHEL 9 repos.
-      k_log_to "$log" "Installing redhat-release (replacing centos-stream-release)..."
-      local rhel_rpms="/root/darksite/rhel-release"
-      # Also check the live ISO path where build-iso.sh places them
-      [[ -d "$rhel_rpms" ]] || rhel_rpms="/usr/share/kldload/rhel-release"
-      if [[ -d "$rhel_rpms" ]] && ls "$rhel_rpms"/redhat-release*.rpm >/dev/null 2>&1; then
-        cp "$rhel_rpms"/redhat-release*.rpm "${target}/tmp/"
-        chroot "${target}" rpm -e --nodeps centos-stream-release centos-stream-repos centos-gpg-keys 2>>"$log" || true
-        chroot "${target}" rpm -ivh --force --nodeps /tmp/redhat-release*.rpm 2>>"$log" || true
-        rm -f "${target}"/tmp/redhat-release*.rpm
-        k_log_to "$log" "redhat-release installed: $(chroot "${target}" cat /etc/redhat-release 2>/dev/null)"
-      else
-        k_log_to "$log" "WARNING: redhat-release RPMs not found at ${rhel_rpms} — subscription-manager may not show RHEL repos"
-      fi
-
-      # Install Red Hat's CDN CA cert (redhat-uep.pem) into the chroot
-      k_log_to "$log" "Installing Red Hat CDN CA certificates..."
-      mkdir -p "${target}/etc/pki/ca-trust/source/anchors"
-      cp /etc/pki/ca-trust/source/anchors/redhat-uep.pem "${target}/etc/pki/ca-trust/source/anchors/" 2>/dev/null || true
-      chroot "${target}" update-ca-trust 2>>"$log" || true
-      # Register with RHEL
-      k_log_to "$log" "Running subscription-manager register (${rhel_auth})..."
       if [[ "${rhel_auth}" == "userpass" ]]; then
-        chroot "${target}" subscription-manager register \
+        subscription-manager register \
           --username="${rhel_user}" --password="${rhel_pass}" --force >> "$log" 2>&1 \
-          || { k_log_to "$log" "WARNING: subscription-manager register failed — trying with --insecure"; \
-               chroot "${target}" subscription-manager register \
+          || { k_log_to "$log" "WARNING: register failed — trying --insecure"; \
+               subscription-manager register \
                  --username="${rhel_user}" --password="${rhel_pass}" --force --insecure >> "$log" 2>&1 \
                  || k_die "subscription-manager register failed — check your Red Hat username and password"; }
       else
-        chroot "${target}" subscription-manager register \
+        subscription-manager register \
           --activationkey="${rhel_key}" --org="${rhel_org}" --force >> "$log" 2>&1 \
-          || { k_log_to "$log" "WARNING: subscription-manager register failed — trying with --insecure"; \
-               chroot "${target}" subscription-manager register \
+          || { k_log_to "$log" "WARNING: register failed — trying --insecure"; \
+               subscription-manager register \
                  --activationkey="${rhel_key}" --org="${rhel_org}" --force --insecure >> "$log" 2>&1 \
                  || k_die "subscription-manager register failed — check your activation key and org ID"; }
       fi
-      # Set release version and enable repos
-      k_log_to "$log" "Setting RHEL release to ${release} and enabling repos..."
-      chroot "${target}" subscription-manager release --set="${release}" >> "$log" 2>&1 || true
-      chroot "${target}" subscription-manager repos \
-        --enable="rhel-${release}-for-x86_64-baseos-rpms" \
-        --enable="rhel-${release}-for-x86_64-appstream-rpms" \
-        --enable="codeready-builder-for-rhel-${release}-x86_64-rpms" \
-        >> "$log" 2>&1 || true
-      # Verify repos are enabled
-      local _enabled
-      _enabled="$(chroot "${target}" subscription-manager repos --list-enabled 2>/dev/null | grep -c 'Repo ID' || echo 0)"
-      k_log_to "$log" "RHEL repos enabled: ${_enabled}"
-      if [[ "$_enabled" -eq 0 ]]; then
-        k_log_to "$log" "WARNING: No RHEL repos enabled — dnf install will likely fail"
+
+      # Step 2: Install redhat-release into the installroot so it has proper
+      # RHEL identity from the start (no CentOS packages ever touch it)
+      k_log_to "$log" "Setting up clean RHEL ${release} installroot..."
+      local rhel_rpms="/root/darksite/rhel-release"
+      [[ -d "$rhel_rpms" ]] || rhel_rpms="/usr/share/kldload/rhel-release"
+      if [[ -d "$rhel_rpms" ]] && ls "$rhel_rpms"/redhat-release*.rpm >/dev/null 2>&1; then
+        mkdir -p "${target}/tmp"
+        cp "$rhel_rpms"/redhat-release*.rpm "${target}/tmp/"
+        rpm --root="${target}" -ivh --nodeps "${target}"/tmp/redhat-release*.rpm 2>>"$log" || true
+        rm -f "${target}"/tmp/redhat-release*.rpm
+        k_log_to "$log" "redhat-release installed: $(chroot "${target}" cat /etc/redhat-release 2>/dev/null || echo unknown)"
+      else
+        k_log_to "$log" "WARNING: redhat-release RPMs not found — creating minimal RHEL identity"
+        mkdir -p "${target}/etc"
+        echo "Red Hat Enterprise Linux release ${release} (kldload)" > "${target}/etc/redhat-release"
+      fi
+
+      # Step 3: Copy subscription identity from the live system into the installroot
+      # so dnf in the installroot can access RHEL repos
+      k_log_to "$log" "Copying subscription identity to installroot..."
+      mkdir -p "${target}/etc/pki/entitlement" "${target}/etc/pki/consumer" \
+               "${target}/etc/pki/product" "${target}/etc/pki/product-default" \
+               "${target}/etc/rhsm" "${target}/etc/pki/ca-trust/source/anchors"
+      cp -a /etc/pki/entitlement/* "${target}/etc/pki/entitlement/" 2>/dev/null || true
+      cp -a /etc/pki/consumer/* "${target}/etc/pki/consumer/" 2>/dev/null || true
+      cp -a /etc/pki/product/* "${target}/etc/pki/product/" 2>/dev/null || true
+      cp -a /etc/pki/product-default/* "${target}/etc/pki/product-default/" 2>/dev/null || true
+      cp -a /etc/rhsm/* "${target}/etc/rhsm/" 2>/dev/null || true
+      # CDN CA cert
+      cp /etc/pki/ca-trust/source/anchors/redhat-uep.pem "${target}/etc/pki/ca-trust/source/anchors/" 2>/dev/null || true
+
+      # Step 4: Write RHEL repo configs using the actual entitlement cert filenames
+      k_log_to "$log" "Configuring RHEL ${release} repos in installroot..."
+
+      # Find the entitlement cert and key (resolve the actual filenames)
+      local _ent_cert="" _ent_key="" _ca_cert="/etc/rhsm/ca/redhat-uep.pem"
+      _ent_cert="$(ls /etc/pki/entitlement/*[0-9].pem 2>/dev/null | grep -v key | head -1)"
+      _ent_key="$(ls /etc/pki/entitlement/*-key.pem 2>/dev/null | head -1)"
+
+      if [[ -n "$_ent_cert" && -n "$_ent_key" ]]; then
+        k_log_to "$log" "Entitlement cert: ${_ent_cert}"
+        k_log_to "$log" "Entitlement key:  ${_ent_key}"
+
+        # Copy certs to installroot with fixed names
+        cp "$_ent_cert" "${target}/etc/pki/entitlement/entitlement.pem"
+        cp "$_ent_key" "${target}/etc/pki/entitlement/entitlement-key.pem"
+        [[ -f "$_ca_cert" ]] && cp "$_ca_cert" "${target}/etc/rhsm/ca/redhat-uep.pem"
+
+        mkdir -p "${target}/etc/yum.repos.d" "${target}/etc/pki/rpm-gpg"
+        cp /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release "${target}/etc/pki/rpm-gpg/" 2>/dev/null || true
+
+        cat > "${target}/etc/yum.repos.d/rhel.repo" <<RHELREPO
+[rhel-${release}-baseos]
+name=Red Hat Enterprise Linux ${release} - BaseOS
+baseurl=https://cdn.redhat.com/content/dist/rhel${release}/${release}/x86_64/baseos/os
+enabled=1
+gpgcheck=0
+sslverify=1
+sslcacert=/etc/rhsm/ca/redhat-uep.pem
+sslclientkey=/etc/pki/entitlement/entitlement-key.pem
+sslclientcert=/etc/pki/entitlement/entitlement.pem
+
+[rhel-${release}-appstream]
+name=Red Hat Enterprise Linux ${release} - AppStream
+baseurl=https://cdn.redhat.com/content/dist/rhel${release}/${release}/x86_64/appstream/os
+enabled=1
+gpgcheck=0
+sslverify=1
+sslcacert=/etc/rhsm/ca/redhat-uep.pem
+sslclientkey=/etc/pki/entitlement/entitlement-key.pem
+sslclientcert=/etc/pki/entitlement/entitlement.pem
+
+[rhel-${release}-crb]
+name=Red Hat Enterprise Linux ${release} - CRB
+baseurl=https://cdn.redhat.com/content/dist/rhel${release}/${release}/x86_64/codeready-builder/os
+enabled=1
+gpgcheck=0
+sslverify=1
+sslcacert=/etc/rhsm/ca/redhat-uep.pem
+sslclientkey=/etc/pki/entitlement/entitlement-key.pem
+sslclientcert=/etc/pki/entitlement/entitlement.pem
+RHELREPO
+        k_log_to "$log" "RHEL repos configured with entitlement certs"
+      else
+        # No entitlement certs — Simple Content Access may work without them
+        # Fall back to subscription-manager in the chroot
+        k_log_to "$log" "WARNING: No entitlement certs found — falling back to chroot sub-man"
+        mkdir -p "${target}/proc" "${target}/sys" "${target}/dev" "${target}/dev/pts" "${target}/run"
+        mount -t proc proc "${target}/proc" 2>/dev/null || true
+        mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
+        mount --bind /dev "${target}/dev" 2>/dev/null || true
+        mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
+        mkdir -p "${target}/etc/yum.repos.d"
+        # Install sub-man into the installroot via CentOS, then swap to RHEL
+        cat > "${target}/etc/yum.repos.d/centos-tmp.repo" <<CTMP
+[centos-tmp]
+name=CentOS Stream ${release} - BaseOS (temp)
+metalink=https://mirrors.centos.org/metalink?repo=centos-baseos-${release}-stream&arch=\$basearch&protocol=https
+gpgcheck=0
+enabled=1
+CTMP
+        dnf --installroot="${target}" --releasever="${release}" --nogpgcheck -y install \
+          subscription-manager ca-certificates >> "$log" 2>&1 || true
+        rm -f "${target}/etc/yum.repos.d/centos-tmp.repo"
+        # Remove ALL CentOS packages to avoid version conflicts with RHEL
+        chroot "${target}" rpm -e --nodeps --allmatches \
+          $(chroot "${target}" rpm -qa 'centos-*' 2>/dev/null) 2>>"$log" || true
+        # Install redhat-release
+        local rhel_rpms="/root/darksite/rhel-release"
+        [[ -d "$rhel_rpms" ]] || rhel_rpms="/usr/share/kldload/rhel-release"
+        if [[ -d "$rhel_rpms" ]]; then
+          cp "$rhel_rpms"/redhat-release*.rpm "${target}/tmp/"
+          chroot "${target}" rpm -ivh --force --nodeps /tmp/redhat-release*.rpm 2>>"$log" || true
+          rm -f "${target}"/tmp/redhat-release*.rpm
+        fi
+        # Register in the chroot
+        cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
+        if [[ "${rhel_auth}" == "userpass" ]]; then
+          chroot "${target}" subscription-manager register \
+            --username="${rhel_user}" --password="${rhel_pass}" --force >> "$log" 2>&1 || true
+        else
+          chroot "${target}" subscription-manager register \
+            --activationkey="${rhel_key}" --org="${rhel_org}" --force >> "$log" 2>&1 || true
+        fi
+        chroot "${target}" subscription-manager release --set="${release}" >> "$log" 2>&1 || true
+        chroot "${target}" subscription-manager repos \
+          --enable="rhel-${release}-for-x86_64-baseos-rpms" \
+          --enable="rhel-${release}-for-x86_64-appstream-rpms" \
+          --enable="codeready-builder-for-rhel-${release}-x86_64-rpms" \
+          >> "$log" 2>&1 || true
+        k_log_to "$log" "RHEL repos configured via chroot subscription-manager"
       fi
       ;;
     *) # centos (default)
