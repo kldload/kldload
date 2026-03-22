@@ -142,7 +142,7 @@ Desktop and Server include the full kldloadOS experience — `k*` tools, web UI,
 
 All three profiles are available for all four distros (CentOS, Debian, RHEL, Rocky).
 
-See [Editions](editions.md) for the full comparison.
+See [Editions](overview/editions.md) for the full comparison.
 
 ---
 
