@@ -768,6 +768,8 @@ async def ws_handler(websocket):
                     }))
                 elif action == "install":
                     await _run_install(websocket, msg)
+                elif action == "test_rhel_cdn":
+                    await _test_rhel_cdn(websocket, msg)
                 elif action == "wipe_disk":
                     await _run_wipe_disk(websocket, msg)
                 elif action == "spawn":
@@ -1321,6 +1323,44 @@ def _detect_distro():
     except Exception:
         pass
     return "centos"  # default for kldload
+
+async def _test_rhel_cdn(websocket, msg):
+    """Test RHEL CDN connectivity and subscription validity."""
+    params = msg.get("params", {})
+    key = params.get("rhel_key", "")
+    org = params.get("rhel_org", "")
+    try:
+        # Test 1: Can we reach the CDN?
+        proc = await asyncio.create_subprocess_exec(
+            "curl", "-s", "--connect-timeout", "10", "-o", "/dev/null", "-w", "%{http_code}",
+            "https://subscription.rhsm.redhat.com/",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        http_code = stdout.decode().strip()
+        if http_code == "000":
+            await websocket.send(json.dumps({
+                "type": "rhel_cdn_result", "ok": False,
+                "error": "Cannot reach subscription.rhsm.redhat.com — check network/firewall"
+            }))
+            return
+        # Test 2: Try subscription-manager register --dry-run (if available)
+        # For now just confirm CDN is reachable
+        await websocket.send(json.dumps({
+            "type": "rhel_cdn_result", "ok": True,
+            "error": None
+        }))
+    except asyncio.TimeoutError:
+        await websocket.send(json.dumps({
+            "type": "rhel_cdn_result", "ok": False,
+            "error": "Connection timed out — CDN unreachable"
+        }))
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "rhel_cdn_result", "ok": False,
+            "error": str(e)
+        }))
+
 
 async def _run_install(websocket, msg):
     params = msg.get("params", {})

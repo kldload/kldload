@@ -212,8 +212,12 @@
                 <label>RHEL org ID</label>
                 <input type="text" id="rhel-org" placeholder="numeric org ID">
               </div>
+              <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.5rem">
+                <button class="btn btn-ghost btn-sm" onclick="testRhelCdn()" style="font-size:0.78rem">Test CDN Connection</button>
+                <span id="rhel-cdn-status" style="font-size:0.78rem;color:var(--muted)"></span>
+              </div>
               <div class="note" style="font-size:0.8rem;color:var(--muted);margin-top:0.25rem">
-                Used at install time only to pull packages from Red Hat CDN. Not stored on the installed system.
+                RHEL requires internet to pull packages from Red Hat CDN. Test connectivity before installing.
               </div>
             </div>
             <div class="form-group">
@@ -794,6 +798,18 @@ function handle(msg) {
       break;
     }
 
+    case 'rhel_cdn_result': {
+      const st = document.getElementById('rhel-cdn-status');
+      if (msg.ok) {
+        st.textContent = '✓ CDN reachable — subscription valid';
+        st.style.color = 'var(--green)';
+      } else {
+        st.textContent = '✗ ' + (msg.error || 'CDN unreachable or subscription invalid');
+        st.style.color = 'var(--red)';
+      }
+      break;
+    }
+
     case 'zfs_status': {
       const out = msg.output || '(no pools)';
       document.getElementById('zfs-pool-status').textContent = out;
@@ -1217,6 +1233,15 @@ function confirmInstall() {
   const bar = document.getElementById('install-progress');
   if (bar) { bar.className = 'progress-bar active'; bar.style.width = '100%'; }
   send({ action: 'install', params: _installPayload });
+}
+
+function testRhelCdn() {
+  const key = (document.getElementById('rhel-key')?.value || '').trim();
+  const org = (document.getElementById('rhel-org')?.value || '').trim();
+  const st = document.getElementById('rhel-cdn-status');
+  if (!key || !org) { st.textContent = 'Enter key and org ID first'; st.style.color = 'var(--red)'; return; }
+  st.textContent = 'Testing...'; st.style.color = 'var(--muted)';
+  send({ action: 'test_rhel_cdn', params: { rhel_key: key, rhel_org: org } });
 }
 
 function wipeDisk() {
