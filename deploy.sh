@@ -9,7 +9,7 @@ ROOT="$(dirname "$(realpath "$0")")"
 
 PROFILE="${PROFILE:-desktop}"
 EDITION="${EDITION:-free}"
-ARCH="${ARCH:-$(uname -m)}"
+ARCH="${ARCH:-x86_64}"
 RELEASE="${RELEASE:-9}"
 BUILDER_IMAGE="${BUILDER_IMAGE:-kldload-live-builder:latest}"
 BUILDER_CONTAINER="${BUILDER_CONTAINER:-kldload-free-build-$$}"
@@ -67,7 +67,7 @@ cmd_build_debian_darksite() {
         -v "$ROOT/build/darksite-debian:/darksite-build:z,ro" \
         -v "$darksite_dir:/output:z" \
         -e PROFILE="$PROFILE" \
-        -e ARCH="$([ "$ARCH" = "aarch64" ] && echo arm64 || echo amd64)" \
+        -e ARCH="amd64" \
         -e SUITE="trixie" \
         --name "kldload-darksite-deb-$$" \
         debian:trixie-slim \

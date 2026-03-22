@@ -9,7 +9,7 @@ set -euo pipefail
 
 PROFILE="${PROFILE:-desktop}"
 EDITION="${EDITION:-free}"
-ARCH="${ARCH:-$(uname -m)}"
+ARCH="${ARCH:-x86_64}"
 OUTPUT_DIR="${OUTPUT_DIR:-/build/live-build/output}"
 LOG_DIR="${LOG_DIR:-/build/live-build/logs}"
 BUILD_ROOT="/build"
@@ -64,7 +64,7 @@ PKGS=(
     dnf rpm coreutils bash glibc glibc-langpack-en
     systemd systemd-udev dbus-daemon
     kernel kernel-core kernel-modules kernel-devel dracut dracut-live dracut-squash
-    grub2-tools efibootmgr mokutil
+    grub2-efi-x64 grub2-tools shim-x64 efibootmgr mokutil
     NetworkManager openssh-server openssh-clients sudo
     vim-enhanced tmux curl wget rsync jq less tar gzip
     iproute iputils net-tools nftables chrony
@@ -76,13 +76,6 @@ PKGS=(
     # RHEL support — subscription-manager needed on live system for RHEL installs
     subscription-manager
 )
-
-# Architecture-specific EFI packages
-if [[ "$ARCH" == "aarch64" ]]; then
-    PKGS+=(grub2-efi-aa64 shim-aa64)
-else
-    PKGS+=(grub2-efi-x64 shim-x64)
-fi
 
 # Free edition: add tools needed for webui, installer, darksites, guest agents
 if [[ "$EDITION" != "core" ]]; then
@@ -211,12 +204,9 @@ if [[ -n "$ZFS_VER" ]]; then
     chroot "$ROOTFS" dkms add -m zfs -v "$ZFS_VER" 2>&1 | tee -a "$LOG_FILE" || true
 
     # Force DKMS to use the CentOS kernel headers, not autodetect from /proc
-    # Set kernel ARCH explicitly to prevent cross-arch Docker build issues
-    # x86_64 → x86_64, aarch64 → arm64 (kernel uses arm64 not aarch64)
-    local _karch="$ARCH"
-    [[ "$_karch" == "aarch64" ]] && _karch="arm64"
+    # ARCH=x86_64 prevents "arch/amd64/Makefile: No such file" in cross-arch Docker builds
     # || true because DKMS may fail — we check for zfs.ko below
-    chroot "$ROOTFS" env ARCH="$_karch" dkms build -m zfs -v "$ZFS_VER" -k "$KVER" \
+    chroot "$ROOTFS" env ARCH=x86_64 dkms build -m zfs -v "$ZFS_VER" -k "$KVER" \
         --kernelsourcedir "/usr/src/kernels/${KVER}" \
         --force \
         2>&1 | tee -a "$LOG_FILE" || true
@@ -600,14 +590,8 @@ chroot "$ROOTFS" dracut --force --add "dmsquash-live" \
 log "Creating squashfs image..."
 
 mkdir -p "$SQUASHFS_DIR"
-# ARM64 doesn't support the x86 BCJ filter
-if [[ "$ARCH" == "aarch64" ]]; then
-    mksquashfs "$ROOTFS" "${SQUASHFS_DIR}/squashfs.img" \
-        -comp xz -b 1M -noappend 2>&1 | tail -5
-else
-    mksquashfs "$ROOTFS" "${SQUASHFS_DIR}/squashfs.img" \
-        -comp xz -Xbcj x86 -b 1M -noappend 2>&1 | tail -5
-fi
+mksquashfs "$ROOTFS" "${SQUASHFS_DIR}/squashfs.img" \
+    -comp xz -Xbcj x86 -b 1M -noappend 2>&1 | tail -5
 
 log "Squashfs: $(du -sh "${SQUASHFS_DIR}/squashfs.img" | cut -f1)"
 
@@ -623,47 +607,30 @@ mkdir -p "${ISO_STAGING}/EFI/BOOT" "${ISO_STAGING}/images/pxeboot" "${ISO_STAGIN
 cp "${ROOTFS}/boot/vmlinuz-${KVER}" "${ISO_STAGING}/images/pxeboot/vmlinuz"
 cp "${ROOTFS}/boot/initramfs-${KVER}.img" "${ISO_STAGING}/images/pxeboot/initrd.img"
 
-# EFI bootloader — architecture-specific binary names
-if [[ "$ARCH" == "aarch64" ]]; then
-    _efi_boot="BOOTAA64.EFI"
-    _efi_shim="shimaa64.efi"
-    _efi_grub="grubaa64.efi"
-else
-    _efi_boot="BOOTX64.EFI"
-    _efi_shim="shimx64.efi"
-    _efi_grub="grubx64.efi"
-fi
+# EFI bootloader
+cp "${ROOTFS}/boot/efi/EFI/centos/shimx64.efi" "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || \
+    cp "${ROOTFS}/boot/efi/EFI/BOOT/BOOTX64.EFI" "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || \
+    cp /boot/efi/EFI/centos/shimx64.efi "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || \
+    find "$ROOTFS" -name 'shimx64.efi' -exec cp {} "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" \; 2>/dev/null || \
+    log "WARNING: shimx64.efi not found"
 
-find "$ROOTFS" -name "${_efi_shim}" -exec cp {} "${ISO_STAGING}/EFI/BOOT/${_efi_boot}" \; 2>/dev/null || \
-    cp "${ROOTFS}/boot/efi/EFI/centos/${_efi_shim}" "${ISO_STAGING}/EFI/BOOT/${_efi_boot}" 2>/dev/null || \
-    cp "${ROOTFS}/boot/efi/EFI/BOOT/${_efi_boot}" "${ISO_STAGING}/EFI/BOOT/${_efi_boot}" 2>/dev/null || \
-    log "WARNING: ${_efi_shim} not found"
+find "$ROOTFS" -name 'grubx64.efi' -exec cp {} "${ISO_STAGING}/EFI/BOOT/grubx64.efi" \; 2>/dev/null || \
+    log "WARNING: grubx64.efi not found"
 
-find "$ROOTFS" -name "${_efi_grub}" -exec cp {} "${ISO_STAGING}/EFI/BOOT/${_efi_grub}" \; 2>/dev/null || \
-    log "WARNING: ${_efi_grub} not found"
-
-# GRUB config — ARM64 uses linux/initrd, x86_64 uses linuxefi/initrdefi
-if [[ "$ARCH" == "aarch64" ]]; then
-    _grub_linux="linux"
-    _grub_initrd="initrd"
-else
-    _grub_linux="linuxefi"
-    _grub_initrd="initrdefi"
-fi
-
-cat > "${ISO_STAGING}/EFI/BOOT/grub.cfg" << GRUBCFG
+# GRUB config
+cat > "${ISO_STAGING}/EFI/BOOT/grub.cfg" << 'GRUBCFG'
 set default=0
 set timeout=5
 set timeout_style=countdown
 
 menuentry "KLDload Live (CentOS Stream 9 + ZFS)" --hotkey=l {
-    ${_grub_linux} /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image
-    ${_grub_initrd} /images/pxeboot/initrd.img
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image
+    initrdefi /images/pxeboot/initrd.img
 }
 
 menuentry "KLDload Live (troubleshooting)" {
-    ${_grub_linux} /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.shell
-    ${_grub_initrd} /images/pxeboot/initrd.img
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.shell
+    initrdefi /images/pxeboot/initrd.img
 }
 GRUBCFG
 
@@ -672,8 +639,8 @@ dd if=/dev/zero of="${ISO_STAGING}/images/efiboot.img" bs=1M count=10
 mkfs.vfat "${ISO_STAGING}/images/efiboot.img"
 mmd -i "${ISO_STAGING}/images/efiboot.img" ::EFI
 mmd -i "${ISO_STAGING}/images/efiboot.img" ::EFI/BOOT
-mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/${_efi_boot}" ::EFI/BOOT/ 2>/dev/null || true
-mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/${_efi_grub}" ::EFI/BOOT/ 2>/dev/null || true
+mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" ::EFI/BOOT/ 2>/dev/null || true
+mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grubx64.efi" ::EFI/BOOT/ 2>/dev/null || true
 mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grub.cfg" ::EFI/BOOT/
 
 # Build ISO (EFI-only, no legacy BIOS)
