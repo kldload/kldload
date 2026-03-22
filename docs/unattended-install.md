@@ -50,6 +50,7 @@ EOF
 | `KLDLOAD_KEYBOARD_LAYOUT` | `us`, `de`, etc. | `us` | Keyboard layout |
 | `KLDLOAD_NVIDIA_DRIVERS` | `0`, `1` | `0` | Install NVIDIA (CentOS only) |
 | `KLDLOAD_ENABLE_EBPF` | `0`, `1` | `0` | Install eBPF tools |
+| `KLDLOAD_STORAGE_MANUAL` | `0`, `1` | `0` | Drop to shell for manual pool creation |
 | `KLDLOAD_INFRA_MODE` | `standalone`, `cluster-manager`, `join` | `standalone` | Deployment mode |
 | `KLDLOAD_HUB_LAN` | IP | — | CM IP (if join mode) |
 

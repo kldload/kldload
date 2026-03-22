@@ -1204,13 +1204,87 @@ main() {
   # ── Installation progress ─────────────────────────────────────────────────
   _hdr "Installing — do not power off"
 
-  _info "▸  Wiping and partitioning ${KLDLOAD_DISK}..."
-  k_install_zfs_storage
-  export KLDLOAD_PART_ROOT="${KLDLOAD_PART_ROOT:-${KLDLOAD_ROOT_PART:-}}"
-  export KLDLOAD_ROOT_PART="${KLDLOAD_ROOT_PART:-${KLDLOAD_PART_ROOT:-}}"
-  export KLDLOAD_PART_EFI="${KLDLOAD_PART_EFI:-${KLDLOAD_EFI_PART:-}}"
-  export KLDLOAD_EFI_PART="${KLDLOAD_EFI_PART:-${KLDLOAD_PART_EFI:-}}"
-  _ok "Storage"     "ZFS pools created on ${KLDLOAD_DISK}"
+  if [[ "${KLDLOAD_STORAGE_MANUAL:-0}" == "1" ]]; then
+    # ── Manual shell mode (core profile) ─────────────────────────────────
+    # User creates their own ZFS pool and datasets. We just need:
+    #   1. An EFI partition mounted at /target/boot/efi (or we create one)
+    #   2. A pool named 'rpool' imported with a dataset for /
+    _info ""
+    _info "  ┌─────────────────────────────────────────────────────────┐"
+    _info "  │  Manual storage mode                                    │"
+    _info "  │                                                         │"
+    _info "  │  Create your ZFS pool and datasets now.                 │"
+    _info "  │  Requirements:                                          │"
+    _info "  │    • Pool named 'rpool'                                 │"
+    _info "  │    • Dataset 'rpool/ROOT/default' mounted at /target    │"
+    _info "  │    • EFI partition (512M, FAT32) at /target/boot/efi    │"
+    _info "  │                                                         │"
+    _info "  │  Example:                                               │"
+    _info "  │    sgdisk -Z /dev/sda                                   │"
+    _info "  │    sgdisk -n1:0:+512M -t1:EF00 /dev/sda                │"
+    _info "  │    sgdisk -n2:0:0 -t2:BF01 /dev/sda                    │"
+    _info "  │    mkfs.fat -F32 /dev/sda1                              │"
+    _info "  │    zpool create -o ashift=12 -O compression=lz4 \\      │"
+    _info "  │      -O acltype=posixacl -O xattr=sa rpool /dev/sda2   │"
+    _info "  │    zfs create -o canmount=off rpool/ROOT                │"
+    _info "  │    zfs create -o mountpoint=/ rpool/ROOT/default        │"
+    _info "  │    mkdir -p /target/boot/efi                            │"
+    _info "  │    mount /dev/sda1 /target/boot/efi                     │"
+    _info "  │                                                         │"
+    _info "  │  Type 'exit' when done. The installer will continue.    │"
+    _info "  └─────────────────────────────────────────────────────────┘"
+    _info ""
+
+    # Drop to an interactive shell
+    export KLDLOAD_TARGET_MNT
+    export PS1='\[\e[1;33m\][kldload-storage]\[\e[0m\] \w # '
+    bash --norc --noprofile -i || true
+
+    # Verify the user created what we need
+    if ! zpool list rpool >/dev/null 2>&1; then
+      k_die "Pool 'rpool' not found. Create it before exiting the shell."
+    fi
+    if ! zfs list rpool/ROOT/default >/dev/null 2>&1; then
+      k_die "Dataset 'rpool/ROOT/default' not found. Create it before exiting the shell."
+    fi
+    # Detect the mountpoint
+    local _mnt
+    _mnt="$(zfs get -H -o value mountpoint rpool/ROOT/default 2>/dev/null)"
+    if [[ "$_mnt" != "/" && "$_mnt" != "${KLDLOAD_TARGET_MNT}" ]]; then
+      # Try to set it
+      zfs set mountpoint="${KLDLOAD_TARGET_MNT}" rpool/ROOT/default 2>/dev/null || true
+    fi
+    # Ensure it's mounted
+    zfs mount rpool/ROOT/default 2>/dev/null || true
+    [[ -d "${KLDLOAD_TARGET_MNT}" ]] || k_die "/target not mounted. Mount rpool/ROOT/default at ${KLDLOAD_TARGET_MNT}."
+
+    # Try to detect EFI partition
+    if [[ ! -d "${KLDLOAD_TARGET_MNT}/boot/efi" ]] || ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
+      # Check if user mounted it somewhere
+      local _efi_dev
+      _efi_dev="$(lsblk -rno PATH,PARTTYPE 2>/dev/null | grep -i 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' | awk '{print $1}' | head -1)"
+      if [[ -n "$_efi_dev" ]]; then
+        mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi"
+        mount "$_efi_dev" "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
+      fi
+    fi
+
+    # Export partition vars for bootloader step
+    export KLDLOAD_PART_EFI="${_efi_dev:-}"
+    export KLDLOAD_EFI_PART="${KLDLOAD_PART_EFI}"
+    export KLDLOAD_PART_ROOT=""
+    export KLDLOAD_ROOT_PART=""
+
+    _ok "Storage"     "Manual — rpool created by user"
+  else
+    _info "▸  Wiping and partitioning ${KLDLOAD_DISK}..."
+    k_install_zfs_storage
+    export KLDLOAD_PART_ROOT="${KLDLOAD_PART_ROOT:-${KLDLOAD_ROOT_PART:-}}"
+    export KLDLOAD_ROOT_PART="${KLDLOAD_ROOT_PART:-${KLDLOAD_PART_ROOT:-}}"
+    export KLDLOAD_PART_EFI="${KLDLOAD_PART_EFI:-${KLDLOAD_EFI_PART:-}}"
+    export KLDLOAD_EFI_PART="${KLDLOAD_EFI_PART:-${KLDLOAD_PART_EFI:-}}"
+    _ok "Storage"     "ZFS pools created on ${KLDLOAD_DISK}"
+  fi
 
   _info "▸  Bootstrapping ${KLDLOAD_DISTRO:-centos} base system (this takes a few minutes)..."
   k_bootstrap_base

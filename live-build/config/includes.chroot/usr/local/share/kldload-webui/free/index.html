@@ -172,6 +172,24 @@
             <div id="role-summary" style="margin-top:0.6rem;font-size:0.8rem;color:var(--accent)">
               ✓ Desktop selected — GNOME workstation + ZFS on root
             </div>
+
+            <!-- Storage mode (visible only for core) -->
+            <div id="storage-mode-row" style="display:none;margin-top:1rem;padding:0.8rem;background:var(--surface2);border:1px solid var(--border);border-radius:6px">
+              <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.5rem">Storage Setup</label>
+              <div style="display:flex;gap:0.8rem">
+                <label style="font-size:0.85rem;color:var(--text);cursor:pointer">
+                  <input type="radio" name="storage-mode" value="auto" checked onchange="updateStorageMode()"> Automatic — kldload partitions and creates the ZFS pool
+                </label>
+              </div>
+              <div style="display:flex;gap:0.8rem;margin-top:0.3rem">
+                <label style="font-size:0.85rem;color:var(--text);cursor:pointer">
+                  <input type="radio" name="storage-mode" value="manual" onchange="updateStorageMode()"> Manual — drop to shell, create your own pool and datasets
+                </label>
+              </div>
+              <div id="storage-manual-hint" style="display:none;margin-top:0.5rem;font-size:0.78rem;color:var(--muted);padding-left:1.5rem">
+                The installer will pause and give you a shell. Create <code>rpool/ROOT/default</code> and an EFI partition, then type <code>exit</code> to continue.
+              </div>
+            </div>
           </div>
         </div>
 
@@ -758,6 +776,12 @@ document.querySelectorAll('#sidebar li[data-view]').forEach(li => {
 });
 
 // ── Target type selection ────────────────────────────────────────────────────
+function updateStorageMode() {
+  const manual = document.querySelector('input[name="storage-mode"][value="manual"]');
+  const hint = document.getElementById('storage-manual-hint');
+  if (hint) hint.style.display = manual && manual.checked ? 'block' : 'none';
+}
+
 const ROLE_DESCS = {
   desktop: 'Desktop selected — GNOME workstation + ZFS on root',
   server:  'Server selected — headless SSH node + ZFS on root',
@@ -768,6 +792,9 @@ function selectTarget(el) {
   el.classList.add('selected');
   const sum = document.getElementById('role-summary');
   if (sum) sum.textContent = '✓ ' + (ROLE_DESCS[el.dataset.role] || el.dataset.role);
+  // Show storage mode choice for core profile
+  const smRow = document.getElementById('storage-mode-row');
+  if (smRow) smRow.style.display = el.dataset.role === 'core' ? 'block' : 'none';
 }
 
 // ── DHCP toggle ──────────────────────────────────────────────────────────────
@@ -862,11 +889,13 @@ function startInstall() {
   if (encrypt && encPass.length < 8)    return showErr('ZFS passphrase must be at least 8 characters');
   if (encrypt && encPass !== encPass2)  return showErr('ZFS passphrases do not match');
 
+  const manualStorage = role === 'core' && document.querySelector('input[name="storage-mode"][value="manual"]')?.checked;
   const params = {
     disk, hostname: host, username: user,
     password: pass, timezone, keyboard, locale, role,
     storage_mode: 'zfs', infra_mode: 'standalone',
     zfs_encrypt: encrypt ? '1' : '0',
+    storage_manual: manualStorage ? '1' : '0',
     ...(sshKey   ? { ssh_pubkey: sshKey }  : {}),
     ...(netIface ? { net_iface: netIface } : {}),
     network_dhcp: dhcp ? 'yes' : 'no',
