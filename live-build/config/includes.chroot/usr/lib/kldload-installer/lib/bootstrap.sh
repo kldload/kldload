@@ -439,6 +439,11 @@ ROCKYREPO
         k_log_to "$log" "Entitlement cert: ${_ent_cert}"
         k_log_to "$log" "Entitlement key:  ${_ent_key}"
 
+        # Remove any repo files that redhat-release dropped (they use wildcard
+        # cert paths that don't resolve and create duplicate repo definitions)
+        rm -f "${target}"/etc/yum.repos.d/redhat.repo 2>/dev/null || true
+        rm -f "${target}"/etc/yum.repos.d/redhat-*.repo 2>/dev/null || true
+
         # Copy certs to installroot with fixed names
         cp "$_ent_cert" "${target}/etc/pki/entitlement/entitlement.pem"
         cp "$_ent_key" "${target}/etc/pki/entitlement/entitlement-key.pem"
