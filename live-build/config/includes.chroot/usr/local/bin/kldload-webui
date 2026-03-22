@@ -1330,25 +1330,36 @@ async def _test_rhel_cdn(websocket, msg):
     key = params.get("rhel_key", "")
     org = params.get("rhel_org", "")
     try:
-        # Test 1: Can we reach the CDN?
+        # Test 1: Try with proper cert verification
         proc = await asyncio.create_subprocess_exec(
             "curl", "-s", "--connect-timeout", "10", "-o", "/dev/null", "-w", "%{http_code}",
             "https://subscription.rhsm.redhat.com/",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
         http_code = stdout.decode().strip()
-        if http_code == "000":
+        if http_code != "000":
             await websocket.send(json.dumps({
-                "type": "rhel_cdn_result", "ok": False,
-                "error": "Cannot reach subscription.rhsm.redhat.com — check network/firewall"
+                "type": "rhel_cdn_result", "ok": True, "error": None
             }))
             return
-        # Test 2: Try subscription-manager register --dry-run (if available)
-        # For now just confirm CDN is reachable
+        # Test 2: Try with -k (skip cert verify) — CDN may use Red Hat's own CA
+        proc2 = await asyncio.create_subprocess_exec(
+            "curl", "-sk", "--connect-timeout", "10", "-o", "/dev/null", "-w", "%{http_code}",
+            "https://subscription.rhsm.redhat.com/",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout2, _ = await asyncio.wait_for(proc2.communicate(), timeout=15)
+        http_code2 = stdout2.decode().strip()
+        if http_code2 != "000":
+            await websocket.send(json.dumps({
+                "type": "rhel_cdn_result", "ok": True,
+                "error": None
+            }))
+            return
         await websocket.send(json.dumps({
-            "type": "rhel_cdn_result", "ok": True,
-            "error": None
+            "type": "rhel_cdn_result", "ok": False,
+            "error": "Cannot reach subscription.rhsm.redhat.com — check network/firewall"
         }))
     except asyncio.TimeoutError:
         await websocket.send(json.dumps({

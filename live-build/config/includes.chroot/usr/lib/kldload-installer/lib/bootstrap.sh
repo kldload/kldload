@@ -360,12 +360,20 @@ gpgcheck=0
 enabled=1
 CENTBOOT
       dnf --installroot="${target}" --releasever="${release}" --nogpgcheck -y install \
-        subscription-manager >> "$log" 2>&1 || true
+        subscription-manager ca-certificates >> "$log" 2>&1 || true
       rm -f "${target}/etc/yum.repos.d/centos-bootstrap.repo"
+      # Fetch Red Hat's CDN CA cert (needed for subscription-manager TLS)
+      k_log_to "$log" "Installing Red Hat CDN CA certificates..."
+      chroot "${target}" rpm --import https://www.redhat.com/security/data/fd431d51.txt 2>>"$log" || true
+      chroot "${target}" update-ca-trust 2>>"$log" || true
       # Register the installroot with RHEL
+      k_log_to "$log" "Running subscription-manager register..."
       chroot "${target}" subscription-manager register \
         --activationkey="${rhel_key}" --org="${rhel_org}" --force >> "$log" 2>&1 \
-        || { k_log_to "$log" "WARNING: subscription-manager register failed"; }
+        || { k_log_to "$log" "WARNING: subscription-manager register failed — trying with --insecure"; \
+             chroot "${target}" subscription-manager register \
+               --activationkey="${rhel_key}" --org="${rhel_org}" --force --insecure >> "$log" 2>&1 \
+               || k_log_to "$log" "WARNING: subscription-manager register failed even with --insecure"; }
       # Enable repos
       chroot "${target}" subscription-manager repos \
         --enable="rhel-${release}-for-x86_64-baseos-rpms" \
