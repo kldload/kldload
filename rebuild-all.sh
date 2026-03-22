@@ -12,11 +12,7 @@ R2_BUCKET="s3://kldload-releases"
 PROFILE=desktop EDITION=free ./deploy.sh build
 FREE_ISO=$(ls -t live-build/output/kldload-free-*.iso | head -1)
 
-# Build core edition (server) — just ZFS on root, nothing else
-EDITION=core PROFILE=server ./deploy.sh build
-CORE_ISO=$(ls -t live-build/output/kldload-core-*.iso | head -1)
-
-# Deploy free edition to KVM + Proxmox
+# Deploy free edition to KVM + Proxmox (before core build so latest_iso picks free)
 ./deploy.sh deploy-all
 
 # Burn free edition to USB
@@ -24,10 +20,13 @@ echo "=== Burning free ISO to USB ==="
 dd if="$FREE_ISO" of=/dev/sda bs=4M status=progress oflag=sync conv=fsync
 sync
 
+# Build core edition (server) — just ZFS on root, nothing else
+EDITION=core PROFILE=server ./deploy.sh build
+CORE_ISO=$(ls -t live-build/output/kldload-core-*.iso | head -1)
+
 # Upload both editions to R2
 for ISO in "$FREE_ISO" "$CORE_ISO"; do
     BASENAME=$(basename "$ISO")
-    # Derive the "latest" name: kldload-free-centos-desktop-... → kldload-free-latest.iso
     LATEST=$(echo "$BASENAME" | sed -E 's/^(kldload-(free|core))-.*/\1-latest.iso/')
 
     echo "=== Uploading $BASENAME → $LATEST ==="
