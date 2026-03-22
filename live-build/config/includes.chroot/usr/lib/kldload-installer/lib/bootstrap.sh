@@ -359,14 +359,20 @@ metalink=https://mirrors.centos.org/metalink?repo=centos-baseos-${release}-strea
 gpgcheck=0
 enabled=1
 CENTBOOT
+      # Set up chroot networking BEFORE subscription-manager (needs DNS + /proc)
+      mkdir -p "${target}/proc" "${target}/sys" "${target}/dev" "${target}/dev/pts" "${target}/run" "${target}/etc"
+      mount -t proc proc "${target}/proc" 2>/dev/null || true
+      mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
+      mount --bind /dev "${target}/dev" 2>/dev/null || true
+      mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
+      cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
       dnf --installroot="${target}" --releasever="${release}" --nogpgcheck -y install \
         subscription-manager ca-certificates >> "$log" 2>&1 || true
       rm -f "${target}/etc/yum.repos.d/centos-bootstrap.repo"
-      # Fetch Red Hat's CDN CA cert (needed for subscription-manager TLS)
+      # Update CA trust inside chroot
       k_log_to "$log" "Installing Red Hat CDN CA certificates..."
-      chroot "${target}" rpm --import https://www.redhat.com/security/data/fd431d51.txt 2>>"$log" || true
       chroot "${target}" update-ca-trust 2>>"$log" || true
-      # Register the installroot with RHEL
+      # Register with RHEL
       k_log_to "$log" "Running subscription-manager register..."
       chroot "${target}" subscription-manager register \
         --activationkey="${rhel_key}" --org="${rhel_org}" --force >> "$log" 2>&1 \
