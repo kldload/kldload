@@ -96,6 +96,11 @@ k_profile_packages() {
         wireguard-tools"
       ;;
 
+    core)
+      # Bare minimum — ZFS on root, SSH, networking. No kldload tools, no sanoid, no webui.
+      echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables"
+      ;;
+
     *)
       k_die "unsupported profile: $profile"
       ;;
@@ -131,7 +136,14 @@ k_install_system_files() {
   local root_ds
   root_ds="rpool/ROOT/${KLDLOAD_HOSTNAME:-kldload}"
 
-  k_log "Installing system files into target"
+  local _profile="${KLDLOAD_PROFILE:-server}"
+  k_log "Installing system files into target (profile=${_profile})"
+
+  # ── Core profile: skip all kldload tools, sanoid, webui, snapshot hooks ────
+  # Core gets ZFS on root + boot environments + stock distro. Nothing else.
+  if [[ "$_profile" == "core" ]]; then
+    k_log "Core profile — skipping kldload tools, sanoid, webui, snapshot hooks."
+  else
 
   # ── Sanoid snapshot automation ─────────────────────────────────────────────
   if [[ -f /etc/sanoid/sanoid.conf ]]; then
@@ -185,6 +197,8 @@ k_install_system_files() {
     cp -r /usr/local/share/kldload-webui/active/. "${target}/usr/local/share/kldload-webui/"
   fi
 
+  fi # end non-core block
+
   # ── Build SHA marker ──────────────────────────────────────────────────────
   [[ -f /etc/kldload-build-sha ]] && cp /etc/kldload-build-sha "${target}/etc/kldload-build-sha"
 
@@ -198,16 +212,18 @@ k_install_system_files() {
   mkdir -p "${target}/etc/kldload"
   [[ -f /etc/kldload/edition ]] && cp /etc/kldload/edition "${target}/etc/kldload/edition"
 
-  # ── User tools: ZFS helpers + adduser.local hook ────────────────────────────
+  # ── User tools: ZFS helpers + adduser.local hook (skip for core) ─────────────
   mkdir -p "${target}/usr/local/bin" "${target}/usr/local/sbin"
-  for _tool in kst ksnap kclone kdf kdir kpkg; do
-    [[ -x "/usr/local/bin/${_tool}" ]] && \
-      cp "/usr/local/bin/${_tool}" "${target}/usr/local/bin/${_tool}" && \
-      chmod +x "${target}/usr/local/bin/${_tool}"
-  done
-  [[ -f /usr/local/sbin/adduser.local ]] && \
-    cp /usr/local/sbin/adduser.local "${target}/usr/local/sbin/adduser.local" && \
-    chmod +x "${target}/usr/local/sbin/adduser.local"
+  if [[ "$_profile" != "core" ]]; then
+    for _tool in kst ksnap kclone kdf kdir kpkg; do
+      [[ -x "/usr/local/bin/${_tool}" ]] && \
+        cp "/usr/local/bin/${_tool}" "${target}/usr/local/bin/${_tool}" && \
+        chmod +x "${target}/usr/local/bin/${_tool}"
+    done
+    [[ -f /usr/local/sbin/adduser.local ]] && \
+      cp /usr/local/sbin/adduser.local "${target}/usr/local/sbin/adduser.local" && \
+      chmod +x "${target}/usr/local/sbin/adduser.local"
+  fi
 
   # ── OS branding ───────────────────────────────────────────────────────────────
   [[ -f /etc/os-release ]] && cp /etc/os-release "${target}/etc/os-release"
@@ -285,8 +301,8 @@ EOGDM
   [[ -f /etc/udev/rules.d/60-kldload-scheduler.rules ]] && \
     { mkdir -p "${target}/etc/udev/rules.d"; cp /etc/udev/rules.d/60-kldload-scheduler.rules "${target}/etc/udev/rules.d/60-kldload-scheduler.rules"; }
 
-  # ── Backend runtime tools (kldload-be, kldload-recovery, kldload-upgrade) ───────────
-  if [[ -d /usr/lib/kldload-installer/backend ]]; then
+  # ── Backend runtime tools (kbe, krecovery, kupgrade) — skip for core ──────────
+  if [[ "$_profile" != "core" && -d /usr/lib/kldload-installer/backend ]]; then
     mkdir -p "${target}/usr/lib/kldload-installer/backend/bin"
     cp -r /usr/lib/kldload-installer/backend/. "${target}/usr/lib/kldload-installer/backend/"
     chmod +x "${target}/usr/lib/kldload-installer/backend/bin/"* 2>/dev/null || true
@@ -302,17 +318,20 @@ EOGDM
   printf '%s\n' "${root_ds}" > "${target}/etc/kldload/boot-environment"
 
   # ── Darksite (full APT mirror + support scripts) → target /root/darksite/ ──
-  local darksite_src="/root/darksite"
-  local darksite_tgt="${target}/root/darksite"
-  if [[ -d "$darksite_src" ]]; then
-    mkdir -p "$darksite_tgt"
-    # Copy the full darksite tree (apt pool, manifests, scripts)
-    rsync -a --exclude='*.lock' "${darksite_src}/" "${darksite_tgt}/"
-    # Ensure scripts are executable
-    for f in kldload-syscheck.sh audit.sh; do
-      [[ -f "${darksite_tgt}/${f}" ]] && chmod +x "${darksite_tgt}/${f}"
-    done
-    k_log "Darksite installed to target: ${darksite_tgt}"
+  # Core profile skips darksites — installs from internet
+  if [[ "$_profile" != "core" ]]; then
+    local darksite_src="/root/darksite"
+    local darksite_tgt="${target}/root/darksite"
+    if [[ -d "$darksite_src" ]]; then
+      mkdir -p "$darksite_tgt"
+      rsync -a --exclude='*.lock' "${darksite_src}/" "${darksite_tgt}/"
+      for f in kldload-syscheck.sh audit.sh; do
+        [[ -f "${darksite_tgt}/${f}" ]] && chmod +x "${darksite_tgt}/${f}"
+      done
+      k_log "Darksite installed to target: ${darksite_tgt}"
+    fi
+  else
+    k_log "Core profile — skipping darksite copy."
   fi
 
   # ── Kernel module pinning (Debian: APT conf, CentOS: dnf versionlock) ────────
@@ -328,15 +347,16 @@ EOGDM
     chmod +x "${target}/etc/kernel/postinst.d/kldload-dkms-verify" 2>/dev/null || true
   fi
 
-  # ── APT mirror service on the installed target ──────────────────────────────
-  # Copy the service unit so the installed system can also serve its local APT repo
-  local mirror_svc="/usr/lib/systemd/system/kldload-apt-mirror.service"
-  if [[ -f "$mirror_svc" ]]; then
-    cp "$mirror_svc" "${target}/usr/lib/systemd/system/kldload-apt-mirror.service"
-    mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
-    ln -sf "/usr/lib/systemd/system/kldload-apt-mirror.service" \
-      "${target}/etc/systemd/system/multi-user.target.wants/kldload-apt-mirror.service" || true
-    k_log "kldload-apt-mirror.service enabled on target"
+  # ── APT mirror service on the installed target (skip for core) ────────────────
+  if [[ "$_profile" != "core" ]]; then
+    local mirror_svc="/usr/lib/systemd/system/kldload-apt-mirror.service"
+    if [[ -f "$mirror_svc" ]]; then
+      cp "$mirror_svc" "${target}/usr/lib/systemd/system/kldload-apt-mirror.service"
+      mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
+      ln -sf "/usr/lib/systemd/system/kldload-apt-mirror.service" \
+        "${target}/etc/systemd/system/multi-user.target.wants/kldload-apt-mirror.service" || true
+      k_log "kldload-apt-mirror.service enabled on target"
+    fi
   fi
 
   k_log "System files installed (root_ds=${root_ds})"
