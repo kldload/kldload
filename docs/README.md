@@ -50,12 +50,13 @@ Your Linux construction kit — ZFS on root, universal CLI tools, boot environme
 | [Kubernetes on KVM](tutorials/virtualization/kubernetes-on-kvm.md) | Advanced | Golden images to K8s cluster, scaling, WireGuard pod networking |
 | [Proxmox and ZFS](tutorials/virtualization/proxmox-and-zfs.md) | Intermediate | Double-ZFS tradeoffs, tuning, when to use bare metal instead |
 
-### Infrastructure
+### Infrastructure & Cloud
 
 | Guide | Level | Description |
 |-------|-------|-------------|
-| [16-Node Cluster Setup](tutorials/infrastructure/cluster-setup.md) | Advanced | Full walkthrough — hub to 16 workers, WireGuard mesh, blue/green upgrades |
+| [Cloud & Packer Integration](tutorials/infrastructure/cloud-and-packer.md) | Intermediate | Use kldload Core as Packer base image, deploy with Terraform to AWS/Azure/Proxmox |
 | [Export Formats](tutorials/infrastructure/export-formats.md) | Intermediate | qcow2, raw, VHD, VMDK, OVA — export and import on any platform |
+| [16-Node Cluster Setup](tutorials/infrastructure/cluster-setup.md) | Advanced | Full walkthrough — hub to 16 workers, WireGuard mesh, blue/green upgrades |
 
 ### Observability
 
