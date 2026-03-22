@@ -1,0 +1,64 @@
+# Known Issues — RC-1 Beta
+
+## Tested On
+
+| Target | Desktop | Server | Core | Notes |
+|--------|---------|--------|------|-------|
+| CentOS Stream 9 | ✓ | ✓ | ✓ | Offline darksite, fastest RPM path |
+| Debian 13 (Trixie) | ✓ | ✓ | ✓ | Offline darksite, fastest overall (~2 min) |
+| Rocky Linux 9 | ✓ | ✓ | ✓ | Same RPM darksite as CentOS |
+| RHEL 9 | ✓ | ✓ | ✓ | Requires internet + Red Hat account |
+| RHEL 10 | ✗ | ✗ | ✗ | Subscription content not available |
+| CentOS 10 | ? | ? | ? | Untested — repos exist |
+| Rocky 10 | ? | ? | ? | Untested — repos exist |
+
+**Tested platforms:**
+- KVM/libvirt (Fedora host, UEFI, no Secure Boot)
+- Proxmox VE (q35, OVMF, TPM 2.0)
+- Bare metal USB boot (x86_64)
+
+---
+
+## Secure Boot
+
+**KVM VMs fail to boot with Secure Boot enabled.** The ZFS DKMS module on the live ISO is not signed with an enrolled MOK key. `modprobe zfs` fails and the installer crashes.
+
+**Workaround:** Disable Secure Boot in the VM firmware settings, or use `--boot uefi,firmware.feature0.enabled=no,firmware.feature0.name=secure-boot` with virt-install. Bare metal with Secure Boot disabled works fine.
+
+**Fix planned:** Auto-generate and enroll MOK key during ISO build, sign the ZFS module.
+
+---
+
+## RHEL 10
+
+**RHEL 10 installs fail.** The version selector offers RHEL 10, but the ISO only ships `redhat-release-9.7`. The Red Hat Developer subscription may not serve RHEL 10 content depending on account type.
+
+**Workaround:** Use RHEL 9. CentOS 10 Stream may work (untested — repos exist).
+
+**Fix planned:** Bake `redhat-release-10` RPM into the ISO, test RHEL 10 CDN access.
+
+---
+
+## RHEL password special characters
+
+**RHEL passwords with shell special characters may fail** when passed through the web UI → answers file → subscription-manager. Characters like `}`, `{`, `)`, `(` can break shell quoting.
+
+**Workaround:** Use a password without shell metacharacters, or use activation key auth instead.
+
+---
+
+## CentOS 10 / Rocky 10
+
+**Version 10 for CentOS and Rocky is untested.** The version selector offers it and the repo URLs are correct, but no install has been validated. Packages come from the internet (no darksite for v10).
+
+---
+
+## ISO size
+
+**The ISO is ~3.7 GB** due to the embedded RPM + APT darksites. This is intentional — offline installs require all packages baked in. The installed system is ~1.5 GB (desktop) or ~800 MB (server).
+
+---
+
+## Debian install speed vs CentOS/RHEL
+
+**Debian installs are significantly faster** (~2 minutes) because all packages come from the local APT darksite on the ISO. CentOS installs from the local RPM darksite are also fast. RHEL installs are slower because packages come from the Red Hat CDN over the internet.
