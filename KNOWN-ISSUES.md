@@ -59,6 +59,30 @@
 
 ---
 
+## ZFS encryption
+
+**ZFS encryption (AES-256-GCM) is not fully tested.** The UI toggle exists and the `storage-zfs.sh` code supports it, but end-to-end testing with passphrase prompt at boot, key management, and Clevis/TPM sealing has not been validated across all distros and profiles.
+
+---
+
+## Image export (kexport)
+
+**`kexport` has not been fully validated.** The tool exists and uses `qemu-img convert` for all formats (qcow2, raw, VHD, VMDK, OVA), but end-to-end testing of exported images booting on target hypervisors (Azure, VMware, VirtualBox, Hyper-V) is ongoing.
+
+---
+
+## Pool Designer
+
+**The Pool Designer is experimental.** It visualizes ZFS topologies and generates `zpool create` commands, but it does not yet drive the actual install. The installer uses its own hardcoded layout. The Core profile's manual storage mode (shell escape) is the current way to use custom pool layouts.
+
+---
+
+## Cross-distro verification
+
+**Full verification of all OS + profile + version combinations is ongoing.** The tested matrix above reflects confirmed working installs. Untested combinations may have package name differences, missing dependencies, or repo configuration issues. Report issues at [github.com/kldload/kldload/issues](https://github.com/kldload/kldload/issues).
+
+---
+
 ## Debian install speed vs CentOS/RHEL
 
 **Debian installs are significantly faster** (~2 minutes) because all packages come from the local APT darksite on the ISO. CentOS installs from the local RPM darksite are also fast. RHEL installs are slower because packages come from the Red Hat CDN over the internet.
