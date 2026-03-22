@@ -448,12 +448,12 @@ ROCKYREPO
         # dnf --installroot resolves SSL cert paths from the HOST, not the installroot.
         cp "$_ent_cert" "${target}/etc/pki/entitlement/entitlement.pem"
         cp "$_ent_key" "${target}/etc/pki/entitlement/entitlement-key.pem"
-        [[ -f "$_ca_cert" ]] && cp "$_ca_cert" "${target}/etc/rhsm/ca/redhat-uep.pem"
+        [[ -f "$_ca_cert" ]] && cp "$_ca_cert" "${target}/etc/rhsm/ca/redhat-uep.pem" 2>/dev/null || true
         # Also copy to host paths for dnf --installroot SSL resolution
         mkdir -p /etc/pki/entitlement /etc/rhsm/ca
-        cp "$_ent_cert" /etc/pki/entitlement/entitlement.pem
-        cp "$_ent_key" /etc/pki/entitlement/entitlement-key.pem
-        [[ -f "$_ca_cert" ]] && cp "$_ca_cert" /etc/rhsm/ca/redhat-uep.pem
+        cp "$_ent_cert" /etc/pki/entitlement/entitlement.pem 2>/dev/null || true
+        cp "$_ent_key" /etc/pki/entitlement/entitlement-key.pem 2>/dev/null || true
+        [[ -f "$_ca_cert" ]] && cp "$_ca_cert" /etc/rhsm/ca/redhat-uep.pem 2>/dev/null || true
 
         mkdir -p "${target}/etc/yum.repos.d" "${target}/etc/pki/rpm-gpg"
         cp /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release "${target}/etc/pki/rpm-gpg/" 2>/dev/null || true
