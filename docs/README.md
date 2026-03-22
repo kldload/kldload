@@ -8,6 +8,7 @@ All guides work on both distro families unless noted.
 
 ## Getting Started
 
+- [Editions](editions.md) — **core** (just ZFS on root, nothing else) vs **free** (ZFS + optional tools + darksites + web UI)
 - [What is kldloadOS](what-kldload-gives-you.md) — what's different from stock Linux
 - [CLI Tools Reference](cli-tools-reference.md) — kst, ksnap, kbe, kclone, kdf, kdir, kpkg, kupgrade, kexport, krecovery
 - [Unattended Installation](unattended-install.md) — answers files, fleet deployment, post-install hooks
