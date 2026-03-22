@@ -174,6 +174,16 @@
             <div id="distro-summary" style="margin-top:0.6rem;font-size:0.8rem;color:var(--accent)">
               ✓ CentOS Stream 9 selected
             </div>
+
+            <!-- Version selector (CentOS / RHEL) -->
+            <div id="version-row" style="display:none;margin-top:0.75rem">
+              <label style="font-size:0.82rem;font-weight:600;margin-right:0.5rem">Version</label>
+              <select id="distro-version" onchange="updateDistroVersion()" style="padding:0.3rem 0.6rem;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:0.85rem">
+                <option value="9" selected>9</option>
+                <option value="10">10</option>
+              </select>
+              <span id="version-note" style="margin-left:0.5rem;font-size:0.78rem;color:var(--muted)"></span>
+            </div>
           </div>
         </div>
 
@@ -1007,19 +1017,43 @@ function selectTarget(el) {
   if (smRow) smRow.style.display = el.dataset.role === 'core' ? 'block' : 'none';
 }
 
-const DISTRO_DESCS = {
-  centos: 'CentOS Stream 9 selected',
-  rocky:  'Rocky Linux 9 selected',
-  debian: 'Debian 13 (trixie) selected',
-  rhel:   'RHEL 9 selected — subscription required',
-};
+function distroDesc(distro, ver) {
+  const descs = {
+    centos: `CentOS Stream ${ver} selected`,
+    rocky:  `Rocky Linux ${ver} selected`,
+    debian: 'Debian 13 (trixie) selected',
+    rhel:   `RHEL ${ver} selected — subscription required`,
+  };
+  return descs[distro] || distro;
+}
 function selectDistro(el) {
   document.querySelectorAll('#distro-grid .target-card').forEach(c => c.classList.remove('selected'));
   el.classList.add('selected');
+  const distro = el.dataset.distro;
+  const ver = document.getElementById('distro-version')?.value || '9';
   const sum = document.getElementById('distro-summary');
-  if (sum) sum.textContent = '✓ ' + (DISTRO_DESCS[el.dataset.distro] || el.dataset.distro);
+  if (sum) sum.textContent = '✓ ' + distroDesc(distro, ver);
+  // Show version selector for CentOS and RHEL
+  const vRow = document.getElementById('version-row');
+  if (vRow) vRow.style.display = (distro === 'centos' || distro === 'rhel' || distro === 'rocky') ? 'flex' : 'none';
+  // Show RHEL auth fields
   const rhelGroup = document.getElementById('rhel-key-group');
-  if (rhelGroup) rhelGroup.style.display = el.dataset.distro === 'rhel' ? 'block' : 'none';
+  if (rhelGroup) rhelGroup.style.display = distro === 'rhel' ? 'block' : 'none';
+  updateDistroVersion();
+}
+function updateDistroVersion() {
+  const distro = (document.querySelector('#distro-grid .target-card.selected') || {}).dataset?.distro || 'centos';
+  const ver = document.getElementById('distro-version')?.value || '9';
+  const sum = document.getElementById('distro-summary');
+  if (sum) sum.textContent = '✓ ' + distroDesc(distro, ver);
+  const note = document.getElementById('version-note');
+  if (note) {
+    if (ver === '10') {
+      note.textContent = distro === 'rhel' ? 'Requires internet — no offline darksite for v10' : 'Packages pulled from internet (darksite is v9 only)';
+    } else {
+      note.textContent = '';
+    }
+  }
 }
 
 // ── RHEL auth toggle ─────────────────────────────────────────────────────────
@@ -1214,6 +1248,7 @@ function startInstall() {
   if (encrypt && encPass !== encPass2)  return showErr('ZFS passphrases do not match');
 
   const distro = (document.querySelector('#distro-grid .target-card.selected') || {}).dataset?.distro || 'centos';
+  const release = document.getElementById('distro-version')?.value || '9';
   const nvidia = document.getElementById('install-nvidia')?.checked ? '1' : '0';
   const wireguard = document.getElementById('install-wireguard')?.checked ? '1' : '0';
   const ebpf = document.getElementById('install-ebpf')?.checked ? '1' : '0';
@@ -1237,7 +1272,7 @@ function startInstall() {
   const manualStorage = role === 'core' && document.querySelector('input[name="storage-mode"][value="manual"]')?.checked;
   const params = {
     disk, hostname: host, username: user,
-    password: pass, timezone, keyboard, locale, role, distro,
+    password: pass, timezone, keyboard, locale, role, distro, release,
     nvidia_drivers: nvidia, wireguard, ebpf, zfs_dedup: dedup,
     export_format: exportFmt,
     storage_mode: 'zfs', infra_mode: 'standalone',
