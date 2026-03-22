@@ -369,8 +369,10 @@ CENTBOOT
       dnf --installroot="${target}" --releasever="${release}" --nogpgcheck -y install \
         subscription-manager ca-certificates >> "$log" 2>&1 || true
       rm -f "${target}/etc/yum.repos.d/centos-bootstrap.repo"
-      # Update CA trust inside chroot
+      # Install Red Hat's CDN CA cert (redhat-uep.pem) into the chroot
       k_log_to "$log" "Installing Red Hat CDN CA certificates..."
+      mkdir -p "${target}/etc/pki/ca-trust/source/anchors"
+      cp /etc/pki/ca-trust/source/anchors/redhat-uep.pem "${target}/etc/pki/ca-trust/source/anchors/" 2>/dev/null || true
       chroot "${target}" update-ca-trust 2>>"$log" || true
       # Register with RHEL
       k_log_to "$log" "Running subscription-manager register..."
