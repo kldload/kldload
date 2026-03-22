@@ -8,7 +8,7 @@ ROOT="$(dirname "$(realpath "$0")")"
 [[ -f "$ROOT/kldload.env" ]] && source "$ROOT/kldload.env"
 
 PROFILE="${PROFILE:-desktop}"
-EDITION="free"
+EDITION="${EDITION:-free}"
 ARCH="${ARCH:-x86_64}"
 RELEASE="${RELEASE:-9}"
 BUILDER_IMAGE="${BUILDER_IMAGE:-kldload-live-builder:latest}"
@@ -78,14 +78,18 @@ cmd_build_debian_darksite() {
 cmd_build() {
     local runtime
     runtime="$(detect_runtime)"
-    log "Building kldload ISO (PROFILE=$PROFILE ARCH=$ARCH RELEASE=$RELEASE)"
+    log "Building kldload ISO (PROFILE=$PROFILE EDITION=$EDITION ARCH=$ARCH RELEASE=$RELEASE)"
 
-    # Build Debian darksite if not already cached
-    local darksite_dir="$ROOT/live-build/darksite-debian-cache"
-    if [[ ! -f "$darksite_dir/apt/dists/trixie/Release" ]]; then
-        cmd_build_debian_darksite
+    # Build Debian darksite if not already cached (free edition only)
+    if [[ "$EDITION" != "core" ]]; then
+        local darksite_dir="$ROOT/live-build/darksite-debian-cache"
+        if [[ ! -f "$darksite_dir/apt/dists/trixie/Release" ]]; then
+            cmd_build_debian_darksite
+        else
+            log "Debian darksite cached: $(du -sh "$darksite_dir" | cut -f1)"
+        fi
     else
-        log "Debian darksite cached: $(du -sh "$darksite_dir" | cut -f1)"
+        log "Core edition — skipping Debian darksite."
     fi
 
     "$runtime" run --rm --privileged \

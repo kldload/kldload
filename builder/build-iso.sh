@@ -8,7 +8,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 PROFILE="${PROFILE:-desktop}"
-EDITION="free"
+EDITION="${EDITION:-free}"
 ARCH="${ARCH:-x86_64}"
 OUTPUT_DIR="${OUTPUT_DIR:-/build/live-build/output}"
 LOG_DIR="${LOG_DIR:-/build/live-build/logs}"
@@ -40,12 +40,16 @@ rm -rf "$ROOTFS" "$ISO_STAGING" /var/tmp/kldload-*
 mkdir -p "$ROOTFS" "$ISO_STAGING"
 
 # ---------------------------------------------------------------------------
-# Build darksite RPM mirror
+# Build darksite RPM mirror (free edition only)
 # ---------------------------------------------------------------------------
-DARKSITE_SCRIPT="${BUILD_ROOT}/build/darksite/build-darksite.sh"
-if [[ -x "$DARKSITE_SCRIPT" ]]; then
-    log "Building darksite RPM mirror..."
-    bash "$DARKSITE_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
+if [[ "$EDITION" != "core" ]]; then
+    DARKSITE_SCRIPT="${BUILD_ROOT}/build/darksite/build-darksite.sh"
+    if [[ -x "$DARKSITE_SCRIPT" ]]; then
+        log "Building darksite RPM mirror..."
+        bash "$DARKSITE_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
+    fi
+else
+    log "Core edition — skipping darksite RPM mirror build."
 fi
 
 # ---------------------------------------------------------------------------
@@ -54,6 +58,7 @@ fi
 log "Bootstrapping CentOS Stream 9 root filesystem..."
 
 # Install base + profile packages
+# Core packages: minimal OS + ZFS on root (both editions)
 PKGS=(
     basesystem filesystem setup
     dnf rpm coreutils bash glibc glibc-langpack-en
@@ -65,17 +70,23 @@ PKGS=(
     iproute iputils net-tools nftables chrony
     passwd shadow-utils util-linux procps-ng findutils grep sed gawk
     rootfiles parted gdisk dosfstools
-    python3 python3-pip python3-websockets python3-pyyaml
-    htop pv lzop mbuffer
-    perl-Config-IniFiles perl-Capture-Tiny
     # ZFS — DKMS build inside chroot against target kernel
     dkms gcc make autoconf automake libtool kernel-devel
     zfs zfs-dkms
-    # Cross-distro installer (debootstrap for Debian targets from CentOS live)
-    debootstrap
-    # Guest agents
-    qemu-guest-agent qemu-img open-vm-tools-desktop
 )
+
+# Free edition: add tools needed for webui, installer, darksites, guest agents
+if [[ "$EDITION" != "core" ]]; then
+    PKGS+=(
+        python3 python3-pip python3-websockets python3-pyyaml
+        htop pv lzop mbuffer
+        perl-Config-IniFiles perl-Capture-Tiny
+        # Cross-distro installer (debootstrap for Debian targets from CentOS live)
+        debootstrap
+        # Guest agents
+        qemu-guest-agent qemu-img open-vm-tools-desktop
+    )
+fi
 
 if [[ "$PROFILE" == "desktop" ]]; then
     PKGS+=(
@@ -143,22 +154,26 @@ log "dnf completed (exit $DNF_RC — DKMS scriptlet failures are expected and ha
 
 log "Root filesystem bootstrapped: $(du -sh "$ROOTFS" | cut -f1)"
 
-# Install sanoid from GitHub (not in EPEL for EL9)
-log "Installing sanoid from GitHub..."
-SANOID_VER="2.2.0"
-curl -sL "https://github.com/jimsalterjrs/sanoid/archive/refs/tags/v${SANOID_VER}.tar.gz" | \
-    tar xz -C /tmp/
-cp "/tmp/sanoid-${SANOID_VER}/sanoid" "${ROOTFS}/usr/local/sbin/sanoid"
-cp "/tmp/sanoid-${SANOID_VER}/syncoid" "${ROOTFS}/usr/local/sbin/syncoid"
-cp "/tmp/sanoid-${SANOID_VER}/findoid" "${ROOTFS}/usr/local/sbin/findoid"
-chmod +x "${ROOTFS}/usr/local/sbin/sanoid" "${ROOTFS}/usr/local/sbin/syncoid" "${ROOTFS}/usr/local/sbin/findoid"
-# Sanoid systemd units
-cp "/tmp/sanoid-${SANOID_VER}/packages/debian/sanoid.timer" "${ROOTFS}/usr/lib/systemd/system/"
-cp "/tmp/sanoid-${SANOID_VER}/packages/debian/sanoid.service" "${ROOTFS}/usr/lib/systemd/system/"
-sed -i 's|/usr/sbin/sanoid|/usr/local/sbin/sanoid|' "${ROOTFS}/usr/lib/systemd/system/sanoid.service"
-chroot "$ROOTFS" systemctl enable sanoid.timer 2>/dev/null || true
-rm -rf "/tmp/sanoid-${SANOID_VER}"
-log "Sanoid ${SANOID_VER} installed."
+# Install sanoid from GitHub (free edition only)
+if [[ "$EDITION" != "core" ]]; then
+    log "Installing sanoid from GitHub..."
+    SANOID_VER="2.2.0"
+    curl -sL "https://github.com/jimsalterjrs/sanoid/archive/refs/tags/v${SANOID_VER}.tar.gz" | \
+        tar xz -C /tmp/
+    cp "/tmp/sanoid-${SANOID_VER}/sanoid" "${ROOTFS}/usr/local/sbin/sanoid"
+    cp "/tmp/sanoid-${SANOID_VER}/syncoid" "${ROOTFS}/usr/local/sbin/syncoid"
+    cp "/tmp/sanoid-${SANOID_VER}/findoid" "${ROOTFS}/usr/local/sbin/findoid"
+    chmod +x "${ROOTFS}/usr/local/sbin/sanoid" "${ROOTFS}/usr/local/sbin/syncoid" "${ROOTFS}/usr/local/sbin/findoid"
+    # Sanoid systemd units
+    cp "/tmp/sanoid-${SANOID_VER}/packages/debian/sanoid.timer" "${ROOTFS}/usr/lib/systemd/system/"
+    cp "/tmp/sanoid-${SANOID_VER}/packages/debian/sanoid.service" "${ROOTFS}/usr/lib/systemd/system/"
+    sed -i 's|/usr/sbin/sanoid|/usr/local/sbin/sanoid|' "${ROOTFS}/usr/lib/systemd/system/sanoid.service"
+    chroot "$ROOTFS" systemctl enable sanoid.timer 2>/dev/null || true
+    rm -rf "/tmp/sanoid-${SANOID_VER}"
+    log "Sanoid ${SANOID_VER} installed."
+else
+    log "Core edition — skipping sanoid."
+fi
 
 # ---------------------------------------------------------------------------
 # Step 1b: Build ZFS DKMS module inside the rootfs
@@ -240,10 +255,11 @@ echo "root:kldload" | chroot "$ROOTFS" chpasswd
 echo "%wheel ALL=(ALL) NOPASSWD: ALL" > "${ROOTFS}/etc/sudoers.d/wheel-nopasswd"
 chmod 440 "${ROOTFS}/etc/sudoers.d/wheel-nopasswd"
 
-# Fix websockets — CentOS ships old version that's incompatible with webui
-# Remove the system package, install latest via pip
-chroot "$ROOTFS" dnf remove -y python3-websockets 2>/dev/null || true
-chroot "$ROOTFS" pip3 install websockets 2>&1 | tail -2 || true
+# Fix websockets — CentOS ships old version that's incompatible with webui (free only)
+if [[ "$EDITION" != "core" ]]; then
+    chroot "$ROOTFS" dnf remove -y python3-websockets 2>/dev/null || true
+    chroot "$ROOTFS" pip3 install websockets 2>&1 | tail -2 || true
+fi
 
 # Enable services
 chroot "$ROOTFS" systemctl enable NetworkManager sshd 2>/dev/null || true
@@ -272,8 +288,8 @@ AutomaticLogin=live
 GDMCONF
 fi
 
-# Auto-launch Firefox to webui on live session login
-if [[ "$PROFILE" == "desktop" ]]; then
+# Auto-launch Firefox to webui on live session login (free edition only)
+if [[ "$PROFILE" == "desktop" && "$EDITION" != "core" ]]; then
     # XDG autostart — waits for GNOME Shell to be ready, then opens Firefox
     # PostLogin removed: it raced with the compositor and caused black windows
     mkdir -p "${ROOTFS}/etc/xdg/autostart"
@@ -373,80 +389,78 @@ HOME_URL="https://kldload.ca"
 SUPPORT_URL="https://kldload.ca"
 OSREL
 
-# Copy kldload tools (short names)
-for tool in kst ksnap kclone kdf kdir kpkg kldload-install-target kldload-webui; do
-    src="/build/live-build/config/includes.chroot/usr/local/bin/${tool}"
-    [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/bin/${tool}" && chmod +x "${ROOTFS}/usr/local/bin/${tool}"
-done
-
-# Copy the main installer to /usr/sbin
-for sbin_tool in kldload-install-target kldload-firstboot kldload-recovery kldload-apply-platform-holds; do
-    src="/build/live-build/config/includes.chroot/usr/sbin/${sbin_tool}"
-    [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/sbin/${sbin_tool}" && chmod +x "${ROOTFS}/usr/sbin/${sbin_tool}"
-done
-
-# Copy installer library files
-if [[ -d /build/live-build/config/includes.chroot/usr/lib/kldload-installer ]]; then
-    cp -r /build/live-build/config/includes.chroot/usr/lib/kldload-installer "${ROOTFS}/usr/lib/"
-    chmod +x "${ROOTFS}/usr/lib/kldload-installer/backend/bin/"* 2>/dev/null || true
-    # Symlink backend tools to PATH
-    for be_tool in kbe krecovery kupgrade; do
-        [[ -f "${ROOTFS}/usr/lib/kldload-installer/backend/bin/${be_tool}" ]] && \
-            ln -sf "/usr/lib/kldload-installer/backend/bin/${be_tool}" "${ROOTFS}/usr/local/bin/${be_tool}"
+# ---------------------------------------------------------------------------
+# Free edition: copy kldload tools, webui, installer, darksites, sanoid config
+# Core edition: skip all of this — just ZFS on root with stock tools
+# ---------------------------------------------------------------------------
+if [[ "$EDITION" != "core" ]]; then
+    # Copy kldload tools (short names)
+    for tool in kst ksnap kclone kdf kdir kpkg kldload-install-target kldload-webui; do
+        src="/build/live-build/config/includes.chroot/usr/local/bin/${tool}"
+        [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/bin/${tool}" && chmod +x "${ROOTFS}/usr/local/bin/${tool}"
     done
-fi
 
-# Copy sanoid config
-mkdir -p "${ROOTFS}/etc/sanoid"
-[[ -f /build/live-build/config/includes.chroot/etc/sanoid/sanoid.conf ]] && \
-    cp /build/live-build/config/includes.chroot/etc/sanoid/sanoid.conf "${ROOTFS}/etc/sanoid/"
+    # Copy the main installer to /usr/sbin
+    for sbin_tool in kldload-install-target kldload-firstboot kldload-recovery kldload-apply-platform-holds; do
+        src="/build/live-build/config/includes.chroot/usr/sbin/${sbin_tool}"
+        [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/sbin/${sbin_tool}" && chmod +x "${ROOTFS}/usr/sbin/${sbin_tool}"
+    done
 
-# Copy virtio modules config
-mkdir -p "${ROOTFS}/etc/modules-load.d"
-[[ -f /build/live-build/config/includes.chroot/etc/modules-load.d/virtio.conf ]] && \
-    cp /build/live-build/config/includes.chroot/etc/modules-load.d/virtio.conf "${ROOTFS}/etc/modules-load.d/"
-
-# Copy webui binary + static files
-if [[ -x /build/live-build/config/includes.chroot/usr/local/bin/kldload-webui ]]; then
-    # Use kldload-webui as-is for now (works on any distro — it's Python)
-    cp /build/live-build/config/includes.chroot/usr/local/bin/kldload-webui \
-       "${ROOTFS}/usr/local/bin/kldload-webui"
-    chmod +x "${ROOTFS}/usr/local/bin/kldload-webui"
-    # Copy webui static files
-    if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/active ]]; then
-        mkdir -p "${ROOTFS}/usr/local/share/kldload-webui"
-        cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/active/. \
-              "${ROOTFS}/usr/local/share/kldload-webui/"
+    # Copy installer library files
+    if [[ -d /build/live-build/config/includes.chroot/usr/lib/kldload-installer ]]; then
+        cp -r /build/live-build/config/includes.chroot/usr/lib/kldload-installer "${ROOTFS}/usr/lib/"
+        chmod +x "${ROOTFS}/usr/lib/kldload-installer/backend/bin/"* 2>/dev/null || true
+        # Symlink backend tools to PATH
+        for be_tool in kbe krecovery kupgrade; do
+            [[ -f "${ROOTFS}/usr/lib/kldload-installer/backend/bin/${be_tool}" ]] && \
+                ln -sf "/usr/lib/kldload-installer/backend/bin/${be_tool}" "${ROOTFS}/usr/local/bin/${be_tool}"
+        done
     fi
-fi
 
-# Copy snapshot scripts
-for script in snapshot-create.sh snapshot-prune.sh snapshot-policy.sh; do
-    src="/build/live-build/config/includes.chroot/usr/local/sbin/${script}"
-    [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/sbin/${script}" && chmod +x "${ROOTFS}/usr/local/sbin/${script}"
-done
+    # Copy sanoid config
+    mkdir -p "${ROOTFS}/etc/sanoid"
+    [[ -f /build/live-build/config/includes.chroot/etc/sanoid/sanoid.conf ]] && \
+        cp /build/live-build/config/includes.chroot/etc/sanoid/sanoid.conf "${ROOTFS}/etc/sanoid/"
 
-# Copy adduser hook (works the same — useradd on CentOS triggers /usr/local/sbin/useradd.local)
-if [[ -f /build/live-build/config/includes.chroot/usr/local/sbin/adduser.local ]]; then
-    cp /build/live-build/config/includes.chroot/usr/local/sbin/adduser.local \
-       "${ROOTFS}/usr/local/sbin/adduser.local"
-    chmod +x "${ROOTFS}/usr/local/sbin/adduser.local"
-fi
+    # Copy webui binary + static files
+    if [[ -x /build/live-build/config/includes.chroot/usr/local/bin/kldload-webui ]]; then
+        cp /build/live-build/config/includes.chroot/usr/local/bin/kldload-webui \
+           "${ROOTFS}/usr/local/bin/kldload-webui"
+        chmod +x "${ROOTFS}/usr/local/bin/kldload-webui"
+        if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/active ]]; then
+            mkdir -p "${ROOTFS}/usr/local/share/kldload-webui"
+            cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/active/. \
+                  "${ROOTFS}/usr/local/share/kldload-webui/"
+        fi
+    fi
 
-# Copy .bashrc with tmux auto-attach
-if [[ -f /build/live-build/config/includes.chroot/etc/skel/.bashrc ]]; then
-    cp /build/live-build/config/includes.chroot/etc/skel/.bashrc "${ROOTFS}/etc/skel/.bashrc"
-    cp /build/live-build/config/includes.chroot/etc/skel/.bashrc "${ROOTFS}/home/live/.bashrc" 2>/dev/null || true
-    cp /build/live-build/config/includes.chroot/etc/skel/.bashrc "${ROOTFS}/root/.bashrc"
-fi
-[[ -f /build/live-build/config/includes.chroot/etc/skel/.tmux.conf ]] && \
-    cp /build/live-build/config/includes.chroot/etc/skel/.tmux.conf "${ROOTFS}/etc/skel/.tmux.conf" && \
-    cp /build/live-build/config/includes.chroot/etc/skel/.tmux.conf "${ROOTFS}/home/live/.tmux.conf" 2>/dev/null || true
-[[ -f /build/live-build/config/includes.chroot/etc/skel/.vimrc ]] && \
-    cp /build/live-build/config/includes.chroot/etc/skel/.vimrc "${ROOTFS}/etc/skel/.vimrc"
+    # Copy snapshot scripts
+    for script in snapshot-create.sh snapshot-prune.sh snapshot-policy.sh; do
+        src="/build/live-build/config/includes.chroot/usr/local/sbin/${script}"
+        [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/sbin/${script}" && chmod +x "${ROOTFS}/usr/local/sbin/${script}"
+    done
 
-# Create kldload-webui systemd service
-cat > "${ROOTFS}/usr/lib/systemd/system/kldload-webui.service" << 'SVCEOF'
+    # Copy adduser hook
+    if [[ -f /build/live-build/config/includes.chroot/usr/local/sbin/adduser.local ]]; then
+        cp /build/live-build/config/includes.chroot/usr/local/sbin/adduser.local \
+           "${ROOTFS}/usr/local/sbin/adduser.local"
+        chmod +x "${ROOTFS}/usr/local/sbin/adduser.local"
+    fi
+
+    # Copy .bashrc with tmux auto-attach
+    if [[ -f /build/live-build/config/includes.chroot/etc/skel/.bashrc ]]; then
+        cp /build/live-build/config/includes.chroot/etc/skel/.bashrc "${ROOTFS}/etc/skel/.bashrc"
+        cp /build/live-build/config/includes.chroot/etc/skel/.bashrc "${ROOTFS}/home/live/.bashrc" 2>/dev/null || true
+        cp /build/live-build/config/includes.chroot/etc/skel/.bashrc "${ROOTFS}/root/.bashrc"
+    fi
+    [[ -f /build/live-build/config/includes.chroot/etc/skel/.tmux.conf ]] && \
+        cp /build/live-build/config/includes.chroot/etc/skel/.tmux.conf "${ROOTFS}/etc/skel/.tmux.conf" && \
+        cp /build/live-build/config/includes.chroot/etc/skel/.tmux.conf "${ROOTFS}/home/live/.tmux.conf" 2>/dev/null || true
+    [[ -f /build/live-build/config/includes.chroot/etc/skel/.vimrc ]] && \
+        cp /build/live-build/config/includes.chroot/etc/skel/.vimrc "${ROOTFS}/etc/skel/.vimrc"
+
+    # Create kldload-webui systemd service
+    cat > "${ROOTFS}/usr/lib/systemd/system/kldload-webui.service" << 'SVCEOF'
 [Unit]
 Description=kldload Web UI (installer + management frontend)
 After=network-online.target
@@ -463,10 +477,10 @@ RestartSec=5
 WantedBy=multi-user.target
 SVCEOF
 
-chroot "$ROOTFS" systemctl enable kldload-webui 2>/dev/null || true
+    chroot "$ROOTFS" systemctl enable kldload-webui 2>/dev/null || true
 
-# Debian darksite APT mirror service (serves on port 3142 for debootstrap)
-cat > "${ROOTFS}/usr/lib/systemd/system/kldload-apt-mirror.service" << 'APTEOF'
+    # Debian darksite APT mirror service (serves on port 3142 for debootstrap)
+    cat > "${ROOTFS}/usr/lib/systemd/system/kldload-apt-mirror.service" << 'APTEOF'
 [Unit]
 Description=kldload Debian darksite APT mirror
 After=network.target
@@ -482,7 +496,17 @@ RestartSec=3
 WantedBy=multi-user.target
 APTEOF
 
-chroot "$ROOTFS" systemctl enable kldload-apt-mirror 2>/dev/null || true
+    chroot "$ROOTFS" systemctl enable kldload-apt-mirror 2>/dev/null || true
+
+    log "Free edition tools and services installed."
+else
+    log "Core edition — no kldload tools, webui, or darksites."
+fi
+
+# Copy virtio modules config (both editions — needed for VM guests)
+mkdir -p "${ROOTFS}/etc/modules-load.d"
+[[ -f /build/live-build/config/includes.chroot/etc/modules-load.d/virtio.conf ]] && \
+    cp /build/live-build/config/includes.chroot/etc/modules-load.d/virtio.conf "${ROOTFS}/etc/modules-load.d/"
 
 # Ensure ZFS module loads at boot
 cat > "${ROOTFS}/etc/modules-load.d/zfs.conf" << 'ZFSMOD'
@@ -496,23 +520,7 @@ cat > "${ROOTFS}/etc/modprobe.d/zfs.conf" << 'ZFSTUNE'
 options zfs zfs_arc_max=0
 ZFSTUNE
 
-# Copy darksite RPM repo into the rootfs for offline target installs
-if [[ -d /build/live-build/config/includes.chroot/root/darksite ]]; then
-    mkdir -p "${ROOTFS}/root/darksite"
-    cp -r /build/live-build/config/includes.chroot/root/darksite/. "${ROOTFS}/root/darksite/"
-    log "RPM darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite" 2>/dev/null | cut -f1)"
-fi
-
-# Copy Debian darksite APT mirror into the rootfs
-if [[ -d /build/live-build/darksite-debian-cache/apt ]]; then
-    mkdir -p "${ROOTFS}/root/darksite/debian"
-    cp -r /build/live-build/darksite-debian-cache/apt "${ROOTFS}/root/darksite/debian/"
-    log "Debian darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/debian" 2>/dev/null | cut -f1)"
-else
-    log "WARNING: No Debian darksite found — Debian installs will require internet"
-fi
-
-# Download ZFSBootMenu EFI binary into darksite for offline installs
+# ZFSBootMenu EFI binary (both editions — needed for ZFS boot)
 mkdir -p "${ROOTFS}/root/darksite/boot"
 log "Downloading ZFSBootMenu EFI binary..."
 curl -sL --connect-timeout 30 --max-time 300 \
@@ -522,6 +530,26 @@ if [[ -f "${ROOTFS}/root/darksite/boot/zfsbootmenu.EFI" ]]; then
     log "ZFSBootMenu EFI: $(du -sh "${ROOTFS}/root/darksite/boot/zfsbootmenu.EFI" | cut -f1)"
 else
     log "WARNING: ZFSBootMenu EFI not available — installer will try to download at install time"
+fi
+
+# Offline package darksites (free edition only — core requires internet for installs)
+if [[ "$EDITION" != "core" ]]; then
+    # Copy darksite RPM repo into the rootfs for offline target installs
+    if [[ -d /build/live-build/config/includes.chroot/root/darksite ]]; then
+        cp -r /build/live-build/config/includes.chroot/root/darksite/. "${ROOTFS}/root/darksite/"
+        log "RPM darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite" 2>/dev/null | cut -f1)"
+    fi
+
+    # Copy Debian darksite APT mirror into the rootfs
+    if [[ -d /build/live-build/darksite-debian-cache/apt ]]; then
+        mkdir -p "${ROOTFS}/root/darksite/debian"
+        cp -r /build/live-build/darksite-debian-cache/apt "${ROOTFS}/root/darksite/debian/"
+        log "Debian darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/debian" 2>/dev/null | cut -f1)"
+    else
+        log "WARNING: No Debian darksite found — Debian installs will require internet"
+    fi
+else
+    log "Core edition — no offline darksites (internet required for target installs)."
 fi
 
 # Fix ownership for live user
