@@ -27,7 +27,18 @@ PROFILE=desktop ./deploy.sh build
 ./deploy.sh deploy-all              # all three
 ```
 
-Output lands in `live-build/output/`. Environment variables (`PROFILE`, `ARCH`, `VMID`, etc.) are set in `kldload.env` or passed on the command line.
+Output lands in `live-build/output/`. Environment variables (`PROFILE`, `EDITION`, `ARCH`, `VMID`, etc.) are set in `kldload.env` or passed on the command line.
+
+## Editions and profiles
+
+Two editions: `EDITION=free` (default, full kldloadOS) and `EDITION=core` (stripped, ZFS only).
+
+Three install profiles shown in the web UI:
+- **desktop** — GNOME + ZFS + all kldloadOS tools
+- **server** — headless SSH + ZFS + all kldloadOS tools
+- **core** — ZFS on root only, stock distro, no k* tools/webui/sanoid/darksites
+
+The `core` profile gates are in `profiles.sh` (`k_profile_packages` and `k_install_system_files`) and `build-iso.sh` (package list, tool copies, darksite embedding). Both use `!= "core"` checks.
 
 ## Architecture
 

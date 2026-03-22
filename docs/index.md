@@ -130,6 +130,22 @@ $ kst
 
 ---
 
+## Three profiles
+
+When you boot the ISO, you choose a profile:
+
+- **Desktop** — GNOME workstation + ZFS on root + all kldloadOS tools
+- **Server** — Headless + SSH + ZFS on root + all kldloadOS tools
+- **Core** — ZFS on root only. Stock distro, no kldload tools, no extras. For advanced users who want to manage everything themselves with native `zfs`/`zpool`/`apt`/`dnf` commands.
+
+Desktop and Server include the full kldloadOS experience — `k*` tools, web UI, automatic snapshots, offline darksites. Core gives you just the hard part (ZFS on root with ZFSBootMenu and DKMS) and gets out of the way.
+
+All three profiles are available for all four distros (CentOS, Debian, RHEL, Rocky).
+
+See [Editions](editions.md) for the full comparison.
+
+---
+
 ## Get started
 
 ```bash
@@ -143,6 +159,6 @@ PROFILE=desktop ./deploy.sh build
 ./deploy.sh burn                    # write to USB
 ```
 
-Boot from the USB. Pick your distro. Install. That's it.
+Boot from the USB. Pick your distro. Pick your profile. Install. That's it.
 
 **[Full documentation →](README.md)**

@@ -38,7 +38,7 @@ EOF
 | `KLDLOAD_HOSTNAME` | any hostname | `kldload-node` | System hostname |
 | `KLDLOAD_USERNAME` | any username | `admin` | Admin user |
 | `KLDLOAD_PASSWORD` | any string | — | User password |
-| `KLDLOAD_PROFILE` | `desktop`, `server` | `desktop` | Install profile |
+| `KLDLOAD_PROFILE` | `desktop`, `server`, `core` | `desktop` | Install profile |
 | `KLDLOAD_STORAGE_MODE` | `zfs` | `zfs` | Always ZFS |
 | `KLDLOAD_ZFS_ENCRYPT` | `0`, `1` | `0` | Enable encryption |
 | `KLDLOAD_NET_METHOD` | `dhcp`, `static` | `dhcp` | Network config |
@@ -166,6 +166,25 @@ KLDLOAD_NET_DNS=1.1.1.1
 KLDLOAD_TIMEZONE=UTC
 EOF
 ```
+
+---
+
+## Example: core (ZFS only, no extras)
+
+```bash
+cat > answers.env << 'EOF'
+KLDLOAD_DISTRO=debian
+KLDLOAD_DISK=/dev/sda
+KLDLOAD_HOSTNAME=zfs-node
+KLDLOAD_USERNAME=admin
+KLDLOAD_PASSWORD=changeme
+KLDLOAD_PROFILE=core
+KLDLOAD_NET_METHOD=dhcp
+KLDLOAD_TIMEZONE=UTC
+EOF
+```
+
+This installs a stock Debian with ZFS on root, ZFSBootMenu, SSH, and networking. No `k*` tools, no web UI, no sanoid, no darksites. Manage everything with native `zfs`, `zpool`, `apt`/`dnf` commands.
 
 ---
 

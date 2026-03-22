@@ -4,6 +4,8 @@
 
 This page covers what kldloadOS gives you that a stock Linux install doesn't.
 
+> **Just want ZFS on root with no extras?** Choose the **Core** profile during install. You get ZFS on root, ZFSBootMenu, and a stock distro — nothing else. See [Editions](editions.md).
+
 ---
 
 ## Nothing removed, everything optional

@@ -43,7 +43,17 @@ ISO 9660 image
 └── 30+ CLI tools (kst, ksnap, kbe, kdf, kdir, kpkg, ...)
 ```
 
-Boot the ISO → web UI opens → pick distro + profile → install to disk. Two separate bootstrap paths run underneath — `dnf --installroot` for CentOS/RHEL, `debootstrap` for Debian. Same ZFS layout, same bootloader, same tools on both.
+Boot the ISO → web UI opens → pick distro + profile → install to disk. Two separate bootstrap paths run underneath — `dnf --installroot` for CentOS/RHEL, `debootstrap` for Debian. Same ZFS layout, same bootloader on all.
+
+### Profiles
+
+| Profile | What you get |
+|---------|-------------|
+| **Desktop** | GNOME workstation + ZFS on root + all kldloadOS tools |
+| **Server** | Headless + SSH + ZFS on root + all kldloadOS tools |
+| **Core** | ZFS on root only — stock distro, no kldload tools, no extras |
+
+Core is for advanced users who want ZFS on root and nothing else. Desktop and Server include the full kldloadOS experience — `k*` tools, web UI, automatic snapshots, offline darksites.
 
 ---
 

@@ -4,6 +4,8 @@ kldload ships a set of optional `k*` CLI tools for system management. All tools 
 
 **Nothing is replaced.** The native tools (`zfs`, `zpool`, `apt`, `dnf`, `qemu-img`, etc.) are untouched and always work directly. The `k*` tools are thin wrappers that simplify common operations by removing repetitive flags, adding sensible defaults, and taking advantage of the ZFS safety net (automatic snapshots before destructive operations, cleanup after upgrades, DKMS verification after kernel changes). They exist to reduce the number of steps in routine tasks — not to replace the underlying commands.
 
+> **Note:** The `k*` tools are included with the **Desktop** and **Server** profiles. The **Core** profile does not include them — it installs ZFS on root with stock distro tools only. See [Editions](editions.md).
+
 ---
 
 ## kst — System status
