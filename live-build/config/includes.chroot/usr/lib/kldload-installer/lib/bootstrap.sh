@@ -368,9 +368,14 @@ ROCKYREPO
         k_die "RHEL install requires either KLDLOAD_RHEL_USERNAME + KLDLOAD_RHEL_PASSWORD (Red Hat portal login) or KLDLOAD_RHEL_KEY + KLDLOAD_RHEL_ORG (activation key + org ID)"
       fi
 
-      # Step 1: Register from the LIVE environment (subscription-manager is
-      # already installed on the CentOS live ISO). This avoids polluting the
-      # installroot with CentOS packages.
+      # Step 1: Register from the LIVE environment. This avoids polluting the
+      # installroot with CentOS packages that conflict with RHEL versions.
+      # Install subscription-manager on the live system if not present.
+      if ! command -v subscription-manager >/dev/null 2>&1; then
+        k_log_to "$log" "Installing subscription-manager on live system..."
+        dnf install -y --nogpgcheck subscription-manager >> "$log" 2>&1 \
+          || k_die "Failed to install subscription-manager on live system"
+      fi
       k_log_to "$log" "Registering with Red Hat CDN from live environment..."
       # Unregister any previous registration on the live system
       subscription-manager unregister >> "$log" 2>&1 || true

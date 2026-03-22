@@ -73,6 +73,8 @@ PKGS=(
     # ZFS — DKMS build inside chroot against target kernel
     dkms gcc make autoconf automake libtool kernel-devel
     zfs zfs-dkms
+    # RHEL support — subscription-manager needed on live system for RHEL installs
+    subscription-manager
 )
 
 # Free edition: add tools needed for webui, installer, darksites, guest agents
