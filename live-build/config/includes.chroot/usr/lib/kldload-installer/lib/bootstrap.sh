@@ -432,8 +432,8 @@ ROCKYREPO
 
       # Find the entitlement cert and key (resolve the actual filenames)
       local _ent_cert="" _ent_key="" _ca_cert="/etc/rhsm/ca/redhat-uep.pem"
-      _ent_cert="$(ls /etc/pki/entitlement/*[0-9].pem 2>/dev/null | grep -v key | head -1)"
-      _ent_key="$(ls /etc/pki/entitlement/*-key.pem 2>/dev/null | head -1)"
+      _ent_key="$(find /etc/pki/entitlement -name '*-key.pem' 2>/dev/null | head -1)"
+      _ent_cert="$(find /etc/pki/entitlement -name '*.pem' ! -name '*-key.pem' 2>/dev/null | head -1)"
 
       if [[ -n "$_ent_cert" && -n "$_ent_key" ]]; then
         k_log_to "$log" "Entitlement cert: ${_ent_cert}"
@@ -444,10 +444,16 @@ ROCKYREPO
         rm -f "${target}"/etc/yum.repos.d/redhat.repo 2>/dev/null || true
         rm -f "${target}"/etc/yum.repos.d/redhat-*.repo 2>/dev/null || true
 
-        # Copy certs to installroot with fixed names
+        # Copy certs to installroot AND host paths with fixed names.
+        # dnf --installroot resolves SSL cert paths from the HOST, not the installroot.
         cp "$_ent_cert" "${target}/etc/pki/entitlement/entitlement.pem"
         cp "$_ent_key" "${target}/etc/pki/entitlement/entitlement-key.pem"
         [[ -f "$_ca_cert" ]] && cp "$_ca_cert" "${target}/etc/rhsm/ca/redhat-uep.pem"
+        # Also copy to host paths for dnf --installroot SSL resolution
+        mkdir -p /etc/pki/entitlement /etc/rhsm/ca
+        cp "$_ent_cert" /etc/pki/entitlement/entitlement.pem
+        cp "$_ent_key" /etc/pki/entitlement/entitlement-key.pem
+        [[ -f "$_ca_cert" ]] && cp "$_ca_cert" /etc/rhsm/ca/redhat-uep.pem
 
         mkdir -p "${target}/etc/yum.repos.d" "${target}/etc/pki/rpm-gpg"
         cp /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release "${target}/etc/pki/rpm-gpg/" 2>/dev/null || true
@@ -585,9 +591,17 @@ ZFSREPO
   # Copy DNS resolution into the installroot so dnf/curl can resolve hosts
   cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
 
+  # Disable subscription-manager dnf plugin — it regenerates redhat.repo with
+  # wildcard cert paths that conflict with our explicit repo configs for RHEL.
+  # Also remove any redhat.repo it may have already created.
+  rm -f "${target}/etc/yum.repos.d/redhat.repo" 2>/dev/null || true
+  mkdir -p "${target}/etc/dnf/plugins"
+  echo -e "[main]\nenabled=0" > "${target}/etc/dnf/plugins/subscription-manager.conf"
+
   k_log_to "$log" "Running dnf --installroot..."
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+      --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install \
       basesystem filesystem setup \
       dnf rpm coreutils bash glibc glibc-langpack-en \
