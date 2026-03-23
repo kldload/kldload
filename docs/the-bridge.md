@@ -160,9 +160,7 @@ If you like shiny enterprise dashboards and don't mind the bill — go for it. B
 
 I've been a staunch supporter of free and open source since before Wikipedia was built. I've been deprived of useful tools because of licensing squabbles for years. My answer to that has always been: get better, learn how, and teach others.
 
-kldloadOS is my contribution. It forces greedy companies to actually produce products that are good — not just hacks with a pretty UI. Every tool included in this release is the minimum I expect from a production system. Not the maximum. The minimum.
-
-70,000+ pages of personal notes went into this. Decades of running real infrastructure. Distilled into something you can boot from a USB stick in two minutes.
+Every tutorial, every recipe, every one-liner in this project is the result of that answer. 70,000+ pages of personal notes. Decades of running real infrastructure. Distilled into something you can boot from a USB stick in two minutes.
 
 It's yours. Do what you want with it.
 
