@@ -628,7 +628,8 @@ DSREPO
     dkms gcc make autoconf automake libtool
     zfs zfs-dkms
     # Tools needed for kldloadOS (non-core profiles)
-    wireguard-tools ethtool htop sanoid pv lzop mbuffer eject
+    # NOTE: sanoid is NOT in any RPM repo — installed from GitHub by k_install_system_files
+    wireguard-tools ethtool htop pv lzop mbuffer eject
     qemu-guest-agent open-vm-tools
   )
 
@@ -638,7 +639,7 @@ DSREPO
     desktop)
       _dnf_pkgs+=(
         gnome-shell gnome-session gnome-control-center gnome-settings-daemon
-        gdm nautilus gnome-terminal gnome-text-editor gnome-keyring
+        gdm nautilus gnome-terminal gedit gnome-keyring
         adwaita-icon-theme google-noto-sans-fonts firefox
         mesa-dri-drivers pipewire wireplumber
       )
