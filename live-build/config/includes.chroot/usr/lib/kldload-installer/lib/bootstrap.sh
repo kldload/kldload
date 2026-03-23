@@ -598,24 +598,78 @@ ZFSREPO
   mkdir -p "${target}/etc/dnf/plugins"
   echo -e "[main]\nenabled=0" > "${target}/etc/dnf/plugins/subscription-manager.conf"
 
-  k_log_to "$log" "Running dnf --installroot..."
+  # Add local RPM darksite as a repo if it exists (offline CentOS/Rocky installs)
+  local _darksite_rpm="/root/darksite/rpm"
+  if [[ -d "${_darksite_rpm}/repodata" ]]; then
+    k_log_to "$log" "Using local RPM darksite: ${_darksite_rpm}"
+    cat > "${target}/etc/yum.repos.d/kldload-darksite.repo" <<DSREPO
+[kldload-darksite]
+name=kldload offline RPM mirror
+baseurl=file://${_darksite_rpm}/
+enabled=1
+gpgcheck=0
+priority=1
+DSREPO
+  fi
+
+  # Build the package list — base + profile-specific
+  local _dnf_pkgs=(
+    basesystem filesystem setup
+    dnf rpm coreutils bash glibc glibc-langpack-en
+    systemd systemd-udev dbus-common
+    kernel kernel-core kernel-modules kernel-devel
+    dracut grub2-efi-x64 grub2-tools shim-x64 efibootmgr mokutil
+    NetworkManager openssh-server openssh-clients sudo
+    vim-enhanced tmux curl wget rsync jq less
+    iproute iputils net-tools nftables chrony
+    passwd shadow-utils util-linux procps-ng findutils grep sed gawk
+    parted gdisk dosfstools
+    python3 python3-pip
+    dkms gcc make autoconf automake libtool
+    zfs zfs-dkms
+    # Tools needed for kldloadOS (non-core profiles)
+    wireguard-tools ethtool htop sanoid pv lzop mbuffer eject
+    qemu-guest-agent open-vm-tools
+  )
+
+  # Profile-specific packages for DNF-based distros
+  local _profile="${KLDLOAD_PROFILE:-server}"
+  case "$_profile" in
+    desktop)
+      _dnf_pkgs+=(
+        gnome-shell gnome-session gnome-control-center gnome-settings-daemon
+        gdm nautilus gnome-terminal gnome-text-editor gnome-keyring
+        adwaita-icon-theme google-noto-sans-fonts firefox
+        mesa-dri-drivers pipewire wireplumber
+      )
+      ;;
+    server)
+      _dnf_pkgs+=(tcpdump socat sysstat)
+      ;;
+    core)
+      # Core: strip extras — no sanoid, no wireguard-tools, no guest agents
+      _dnf_pkgs=(
+        basesystem filesystem setup
+        dnf rpm coreutils bash glibc glibc-langpack-en
+        systemd systemd-udev dbus-common
+        kernel kernel-core kernel-modules kernel-devel
+        dracut grub2-efi-x64 grub2-tools shim-x64 efibootmgr mokutil
+        NetworkManager openssh-server openssh-clients sudo
+        vim-enhanced curl less iproute iputils nftables chrony
+        passwd shadow-utils util-linux procps-ng findutils grep sed gawk
+        parted gdisk dosfstools
+        dkms gcc make autoconf automake libtool
+        zfs zfs-dkms
+      )
+      ;;
+  esac
+
+  k_log_to "$log" "Running dnf --installroot (${#_dnf_pkgs[@]} packages, profile=${_profile})..."
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install \
-      basesystem filesystem setup \
-      dnf rpm coreutils bash glibc glibc-langpack-en \
-      systemd systemd-udev dbus-common \
-      kernel kernel-core kernel-modules kernel-devel \
-      dracut grub2-efi-x64 grub2-tools shim-x64 efibootmgr mokutil \
-      NetworkManager openssh-server openssh-clients sudo \
-      vim-enhanced tmux curl wget rsync jq less \
-      iproute iputils net-tools nftables chrony \
-      passwd shadow-utils util-linux procps-ng findutils grep sed gawk \
-      parted gdisk dosfstools \
-      python3 python3-pip \
-      dkms gcc make autoconf automake libtool \
-      zfs zfs-dkms \
+      "${_dnf_pkgs[@]}" \
       >> "$log" 2>&1 \
       || { k_log_to "$log" "dnf --installroot failed"; return 1; }
 
