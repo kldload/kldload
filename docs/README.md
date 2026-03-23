@@ -29,9 +29,7 @@ Your Linux construction kit — ZFS on root, universal CLI tools, boot environme
 
 | Guide | Level | Description |
 |-------|-------|-------------|
-| [ZFS Fundamentals](tutorials/storage/zfs-fundamentals.md) | Beginner | Snapshots, boot environments, clones, compression, encryption, send/receive |
-| [ZFS Zero to Hero](tutorials/storage/zfs-zero-to-hero.md) | All levels | Complete operational guide — pools, datasets, snapshots, clones, boot environments, replication, two-node setup |
-| [Backup and Recovery](tutorials/storage/backup-and-recovery.md) | Intermediate | Snapshot strategies, offsite replication, disaster recovery |
+| [ZFS Zero to Hero](tutorials/storage/zfs-zero-to-hero.md) | All levels | Complete guide — pools, datasets, snapshots, clones, boot environments, replication, two-node setup, monitoring |
 | [NFS and iSCSI](tutorials/storage/nfs-and-iscsi.md) | Intermediate | Sharing ZFS datasets as file or block storage |
 
 ### Networking
