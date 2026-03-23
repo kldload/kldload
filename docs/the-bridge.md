@@ -6,7 +6,7 @@ A document for BSD people coming to Linux, Linux people discovering ZFS, and eve
 
 ## For BSD people
 
-You already know ZFS. You know boot environments, jails, bhyve, pkg, and the beauty of a system where every piece of hardware is a text file. You know what real isolation looks like. You know that FreeBSD's ports tree is one directory with everything in it — no extra repos, no GPG key imports, no third-party package managers.
+You already know ZFS. You know boot environments, jails, bhyve, pkg, and the beauty of a base system built and maintained as one cohesive unit. You know what real isolation looks like. You know that FreeBSD's ports tree is one directory with everything in it — no extra repos, no GPG key imports, no third-party package managers.
 
 You've avoided Linux because it's fragmented. Every distro does things differently. There are dozens of package managers. Getting ZFS on root requires fighting DKMS, initramfs, and a bootloader that doesn't understand your filesystem. The documentation assumes you want to use ext4 and be happy about it.
 
@@ -48,29 +48,29 @@ This isn't a feature list. This is a fundamental change in how you operate Linux
 
 Every item below is something you've either paid for, spent hours configuring, or accepted as "just how Linux works":
 
-| What you're paying for | What it actually is | kldloadOS equivalent |
-|------------------------|--------------------|--------------------|
-| Enterprise VPN ($99/month) | WireGuard config file | `wg-quick up wg0` — 20 lines of config |
-| Enterprise mesh network ($999/month) | WireGuard + a for loop | `for peer in $PEERS; do wg set wg0 peer $key ...; done` |
-| Log collection SaaS ($299/month) | A tar command | `tar -czf - /var/log/ \| ssh backup "cat > /srv/logs/$(date +%Y%m%d).tar.gz"` |
-| Backup solution ($X/month) | ZFS send/receive | `syncoid -r rpool backup:tank/backup` |
-| Snapshot manager | ZFS snapshots | `zfs snapshot -r rpool@$(date +%Y%m%d)` |
-| Disk encryption tool | ZFS native encryption | Built in. AES-256-GCM. Per-dataset. |
-| LVM + mdadm + fsck | ZFS | One tool replaces three. Self-healing on mirrors. |
-| Boot recovery tool | Boot environments | `kbe activate before-upgrade && reboot` |
-| Container image registry | ZFS clone + export | `zfs clone rpool/image@v1 rpool/deploy && kexport qcow2` |
-| Multi-distro management | Different playbooks per distro | `kpkg install nginx` — works on Debian and CentOS |
-| Network monitoring appliance ($5K) | eBPF + bpftrace | `execsnoop`, `tcplife`, `biolatency` — already installed |
-| IDS/IPS appliance ($15K) | XDP + eBPF | Kernel-level packet filtering at line rate |
-| SIEM ($50K+/year) | LogHog + ZFS snapshots | Forensics tool + immutable audit trail |
-| Configuration management | Salt/Ansible over WireGuard | `ssh 10.200.0.$i 'kpkg upgrade'` in a for loop |
-| Certificate management | Let's Encrypt + cron | `certbot renew` — one cron job, zero cost |
-| DNS-based service discovery | WireGuard peer list | `/etc/hosts` on a ZFS dataset, replicated to all nodes |
-| Secrets management vault | Encrypted ZFS dataset | `zfs create -o encryption=aes-256-gcm rpool/secrets` |
-| Disaster recovery platform | ZFS send/receive | `syncoid -r rpool offsite:tank/dr` — hourly cron |
-| Load balancer appliance ($10K) | HAProxy + WireGuard | 50 lines of config, zero licensing |
-| Network file share appliance ($5K) | NFS on ZFS | `zfs set sharenfs=on rpool/share` — one command |
-| Replication software ($X/seat) | ZFS native replication | `zfs send -i @snap1 rpool@snap2 \| ssh remote zfs recv` |
+| What you're paying for | What it actually is |
+|------------------------|---------------------|
+| Enterprise VPN ($99/mo) | `wg-quick up wg0` — 20 lines of config |
+| Enterprise mesh ($999/mo) | WireGuard + a for loop |
+| Log collection ($299/mo) | `tar` piped over SSH |
+| Backup solution ($X/mo) | `syncoid -r rpool backup:tank` |
+| Snapshot manager | `zfs snapshot -r rpool@today` |
+| Disk encryption | ZFS native — AES-256-GCM, per-dataset |
+| LVM + mdadm + fsck | ZFS — one tool replaces three |
+| Boot recovery | `kbe activate before-upgrade && reboot` |
+| Image registry | `zfs clone` + `kexport qcow2` |
+| Multi-distro management | `kpkg install nginx` — Debian and CentOS |
+| Network monitoring ($5K) | `execsnoop`, `tcplife` — already installed |
+| IDS/IPS appliance ($15K) | XDP + eBPF — line-rate packet filtering |
+| SIEM ($50K+/yr) | LogHog + ZFS snapshots |
+| Config management | SSH + WireGuard + a for loop |
+| Certificate management | `certbot renew` — one cron job |
+| Service discovery | `/etc/hosts` on ZFS, replicated |
+| Secrets vault | `zfs create -o encryption=on rpool/secrets` |
+| Disaster recovery | `syncoid -r rpool offsite:tank/dr` |
+| Load balancer ($10K) | HAProxy — 50 lines of config |
+| NFS appliance ($5K) | `zfs set sharenfs=on rpool/share` |
+| Replication ($X/seat) | `zfs send \| ssh remote zfs recv` |
 
 The enterprise software industry has built a $500 billion business selling you things that are one-liners on a properly configured Linux system. kldloadOS configures that system for you.
 
