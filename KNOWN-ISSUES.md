@@ -2,6 +2,21 @@
 
 > kldload went from concept to working multi-distro installer in one week. This is a rapid prototype that works — but not everything has been fully validated. Expect rough edges. Report issues at [github.com/kldload/kldload/issues](https://github.com/kldload/kldload/issues).
 
+## Minimum Requirements
+
+| Profile | RAM | Disk | Notes |
+|---------|-----|------|-------|
+| **Core** | 4 GB | 20 GB | Minimal install, no desktop |
+| **Server** | 4 GB | 30 GB | Headless + tools |
+| **Desktop (Debian)** | 4 GB | 40 GB | GNOME + tools, fast offline install |
+| **Desktop (CentOS/Rocky/RHEL)** | 8 GB | 40 GB | RPM installs need 2GB live overlay for 875+ packages |
+| **Image export (kexport)** | 8 GB+ | 2× disk size | Runs after install, needs space for the output image |
+| **Custom darksites / extra repos** | 8-16 GB | 60 GB+ | More packages = more RAM for RPM database + cache |
+
+The live installer uses a tmpfs overlay in RAM for write operations. RPM-based desktop installs (CentOS, Rocky, RHEL) install 875+ packages which requires more overlay space than Debian's debootstrap approach. If you get "No space left on device" during install, increase VM RAM.
+
+---
+
 ## Tested On
 
 | Target | Desktop | Server | Core | Notes |
