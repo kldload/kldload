@@ -8,7 +8,7 @@ A document for BSD people coming to Linux, Linux people discovering ZFS, and eve
 
 You already know ZFS. You know boot environments, jails, bhyve, pkg, and the beauty of a system where every piece of hardware is a text file. You know what real isolation looks like. You know that FreeBSD's ports tree is one directory with everything in it — no extra repos, no GPG key imports, no third-party package managers.
 
-You've avoided Linux because it's fragmented. Every distro does things differently. There are 50 package managers. Getting ZFS on root requires fighting DKMS, initramfs, and a bootloader that doesn't understand your filesystem. The documentation assumes you want to use ext4 and be happy about it.
+You've avoided Linux because it's fragmented. Every distro does things differently. There are dozens of package managers. Getting ZFS on root requires fighting DKMS, initramfs, and a bootloader that doesn't understand your filesystem. The documentation assumes you want to use ext4 and be happy about it.
 
 **kldloadOS changes that.**
 
@@ -19,7 +19,7 @@ You've avoided Linux because it's fragmented. Every distro does things different
 - WireGuard is in the kernel, not a port — same config files, same behavior
 - The installer drops you to a shell if you want to build your own pool layout
 
-**What you give up:** Real jails (Linux containers are not the same — they share a kernel). bhyve's hardware-level isolation (KVM is close but not identical). LibreSSL (Linux uses OpenSSL). The simplicity of `rc.conf`.
+**What you give up:** Real jails (Linux containers are not the same — they share a kernel). bhyve's hardware-level isolation (KVM is close but not identical). The simplicity of `rc.conf`.
 
 **What you gain:** Hardware support (Linux drivers cover everything). eBPF (the 'e' that BSD doesn't have — kernel-level tracing and packet processing that FreeBSD's BPF can't match). NVIDIA CUDA support. The entire Docker/Kubernetes ecosystem. Package availability — every open source project ships Linux packages first.
 
@@ -52,7 +52,7 @@ Every item below is something you've either paid for, spent hours configuring, o
 |------------------------|--------------------|--------------------|
 | Enterprise VPN ($99/month) | WireGuard config file | `wg-quick up wg0` — 20 lines of config |
 | Enterprise mesh network ($999/month) | WireGuard + a for loop | `for peer in $PEERS; do wg set wg0 peer $key ...; done` |
-| Log collection SaaS ($299/month) | A tar command | `tar -czf - /var/log/ \| ssh backup zfs receive` |
+| Log collection SaaS ($299/month) | A tar command | `tar -czf - /var/log/ \| ssh backup "cat > /srv/logs/$(date +%Y%m%d).tar.gz"` |
 | Backup solution ($X/month) | ZFS send/receive | `syncoid -r rpool backup:tank/backup` |
 | Snapshot manager | ZFS snapshots | `zfs snapshot -r rpool@$(date +%Y%m%d)` |
 | Disk encryption tool | ZFS native encryption | Built in. AES-256-GCM. Per-dataset. |
@@ -105,7 +105,7 @@ Every "VS" comparison you've ever read is asking the wrong question. It's not Li
 | Strength | Why |
 |----------|-----|
 | Hardware support | Every driver, every chipset, every GPU. Linux runs on everything. |
-| eBPF | Kernel-level tracing, network filtering, security monitoring. BSD has BPF but not eBPF — the 'e' matters. |
+| eBPF | Kernel-level tracing, network filtering, security monitoring. BSD has classic BPF but not extended BPF (yet) — the 'e' matters. |
 | NVIDIA / CUDA | Full GPU compute support. Machine learning, rendering, video encoding. |
 | Docker / Kubernetes | The entire container ecosystem assumes Linux. |
 | Package availability | Every open source project ships Linux packages. |
@@ -119,7 +119,7 @@ Every "VS" comparison you've ever read is asking the wrong question. It's not Li
 | Real isolation (jails) | Not containers sharing a kernel — actual isolated userlands with their own process trees. |
 | bhyve | Hardware-level VM isolation. Every VM is built from individual components. Hardware is a text file. |
 | Simplicity | One base system. One package manager. One way to configure services (`rc.conf`). One ports tree. |
-| Security model | LibreSSL instead of OpenSSL. Different TLS implementation = different vulnerability surface. |
+| Security model | Capsicum capability framework, pledge/unveil-style sandboxing, conservative defaults. Base system is audited as a whole. |
 | ZFS (native) | First-class citizen since 2007. No DKMS. No kernel module dance. Just there. |
 | Documentation | The FreeBSD Handbook is the gold standard. Everything is documented, organized, and correct. |
 | Stability | Release engineering is conservative. Things don't break between updates. |
