@@ -1327,17 +1327,18 @@ main() {
   # ── Image export ────────────────────────────────────────────────────────
   local export_fmt="${KLDLOAD_EXPORT_FORMAT:-none}"
   if [[ "${export_fmt}" != "none" && -n "${export_fmt}" ]]; then
-    _info "▸  Exporting disk image (${export_fmt})..."
+    # Image export cannot run from the live installer — the overlay doesn't have enough
+    # space for the output file, and the disk can't be imaged while the pool is mounted.
+    # Instead, save the export request to firstboot so it runs after the installed system boots.
+    _info "▸  Image export (${export_fmt}) scheduled for first boot..."
     local _ename="kldload-${KLDLOAD_DISTRO:-centos}-${KLDLOAD_PROFILE:-server}-${KLDLOAD_HOSTNAME:-kldload}-$(date -u +%Y%m%d)"
-    local _edir="/home/live/Desktop"
-    mkdir -p "${_edir}" 2>/dev/null || _edir="/tmp"
-    zpool export rpool 2>/dev/null || true
-    zpool export bpool 2>/dev/null || true
-    sync
-    KEXPORT_NAME="${_ename}" kexport "${KLDLOAD_DISK}" "${export_fmt}" "${_edir}"
-    zpool import -f rpool 2>/dev/null || true
-    zpool import -f bpool 2>/dev/null || true
-    _ok "Export" "${_edir}/${_ename}.${export_fmt}"
+    mkdir -p "${KLDLOAD_TARGET_MNT}/etc/kldload"
+    cat > "${KLDLOAD_TARGET_MNT}/etc/kldload/pending-export.env" << EXPEOF
+KEXPORT_FORMAT=${export_fmt}
+KEXPORT_NAME=${_ename}
+KEXPORT_DISK=${KLDLOAD_DISK}
+EXPEOF
+    _ok "Export" "Scheduled — run 'kexport ${KLDLOAD_DISK} ${export_fmt}' after boot, or it runs on first login"
   fi
 
   k_log "Install complete"
