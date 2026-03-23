@@ -172,5 +172,9 @@ The shift from "log into every machine and fix things" to "snapshot, replicate, 
 
 And I can't wait to see what's next.
 
+A scene release done right.
+
+Built by someone who's been assembling disc images since before ISO 9660 had a Wikipedia page. BBS sysop, scene contributor, one of the original Threewave CTF server operators — Vancouver, 604, early '90s. The darksite concept isn't new. Self-contained packages with no external dependencies have been the standard in certain communities for thirty years. The tools changed. The philosophy didn't.
+
 — Anthony
 Blackthorn · 604 · kldload.com · 2026
