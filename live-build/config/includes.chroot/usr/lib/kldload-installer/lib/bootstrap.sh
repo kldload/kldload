@@ -603,10 +603,25 @@ ZFSREPO
   mkdir -p "${target}/etc/dnf/plugins"
   echo -e "[main]\nenabled=0" > "${target}/etc/dnf/plugins/subscription-manager.conf"
 
-  # Add local RPM darksite as a repo if it exists (offline CentOS/Rocky installs)
+  # Repo configuration — darksite mode vs internet
   local _darksite_rpm="/root/darksite/rpm"
-  if [[ -d "${_darksite_rpm}/repodata" ]]; then
-    k_log_to "$log" "Using local RPM darksite: ${_darksite_rpm}"
+  local _darksite_mode="${KLDLOAD_DARKSITE_MODE:-0}"
+  local _custom_repo="${KLDLOAD_CUSTOM_REPO:-}"
+
+  if [[ "$_darksite_mode" == "1" && -d "${_darksite_rpm}/repodata" ]]; then
+    # Darksite mode: disable ALL internet repos, use only local mirror
+    k_log_to "$log" "DARKSITE MODE: using only local RPM mirror (no internet)"
+    rm -f "${target}"/etc/yum.repos.d/*.repo 2>/dev/null || true
+    cat > "${target}/etc/yum.repos.d/kldload-darksite.repo" <<DSREPO
+[kldload-darksite]
+name=kldload offline RPM mirror
+baseurl=file://${_darksite_rpm}/
+enabled=1
+gpgcheck=0
+DSREPO
+  elif [[ -d "${_darksite_rpm}/repodata" ]]; then
+    # Normal mode: darksite as supplement with low cost (preferred when available)
+    k_log_to "$log" "Using local RPM darksite + internet repos"
     cat > "${target}/etc/yum.repos.d/kldload-darksite.repo" <<DSREPO
 [kldload-darksite]
 name=kldload offline RPM mirror
@@ -615,6 +630,18 @@ enabled=1
 gpgcheck=0
 cost=500
 DSREPO
+  fi
+
+  # Custom repo (user-specified, appended alongside existing repos)
+  if [[ -n "$_custom_repo" ]]; then
+    k_log_to "$log" "Adding custom repo: ${_custom_repo}"
+    cat > "${target}/etc/yum.repos.d/kldload-custom.repo" <<CUSTOMREPO
+[kldload-custom]
+name=Custom user repository
+baseurl=${_custom_repo}
+enabled=1
+gpgcheck=0
+CUSTOMREPO
   fi
 
   # Build the package list — base + profile-specific

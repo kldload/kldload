@@ -531,9 +531,19 @@
               <input type="checkbox" id="install-ebpf" style="width:1rem;height:1rem;cursor:pointer;accent-color:var(--accent);flex-shrink:0">
               <label for="install-ebpf" style="cursor:pointer;font-size:0.9rem;margin:0">eBPF tools <span style="color:var(--muted);font-weight:400">(BCC tracing + bpftrace)</span></label>
             </div>
-            <div style="display:flex;align-items:center;gap:0.5rem">
+            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.6rem">
               <input type="checkbox" id="install-zfs-dedup" style="width:1rem;height:1rem;cursor:pointer;accent-color:var(--accent);flex-shrink:0">
               <label for="install-zfs-dedup" style="cursor:pointer;font-size:0.9rem;margin:0">ZFS deduplication <span style="color:var(--muted);font-weight:400">(requires 5GB+ RAM per TB)</span></label>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.6rem">
+              <input type="checkbox" id="install-darksite" style="width:1rem;height:1rem;cursor:pointer;accent-color:var(--accent);flex-shrink:0" onchange="toggleDarksite()">
+              <label for="install-darksite" style="cursor:pointer;font-size:0.9rem;margin:0">Darksite mode <span style="color:var(--muted);font-weight:400">(offline only — use local package mirror, no internet)</span></label>
+            </div>
+            <div id="custom-repo-group" style="display:none;margin-left:1.5rem;margin-bottom:0.6rem">
+              <div class="form-group" style="margin-bottom:0.3rem">
+                <label style="font-size:0.82rem">Custom repo URL <span style="color:var(--muted);font-weight:400">(optional — appended to darksite)</span></label>
+                <input type="text" id="install-custom-repo" placeholder="https://your-mirror.example.com/repo/" style="font-size:0.85rem">
+              </div>
             </div>
           </div>
         </div>
@@ -1066,6 +1076,11 @@ function toggleRhelAuth() {
 }
 
 // ── DHCP toggle ──────────────────────────────────────────────────────────────
+function toggleDarksite() {
+  var checked = document.getElementById('install-darksite').checked;
+  document.getElementById('custom-repo-group').style.display = checked ? 'block' : 'none';
+}
+
 function toggleDHCP() {
   const dhcp = document.getElementById('net-dhcp').checked;
   document.getElementById('net-static').style.display = dhcp ? 'none' : 'block';
@@ -1253,6 +1268,8 @@ function startInstall() {
   const wireguard = document.getElementById('install-wireguard')?.checked ? '1' : '0';
   const ebpf = document.getElementById('install-ebpf')?.checked ? '1' : '0';
   const dedup = document.getElementById('install-zfs-dedup')?.checked ? '1' : '0';
+  const darksiteMode = document.getElementById('install-darksite')?.checked ? '1' : '0';
+  const customRepo = (document.getElementById('install-custom-repo')?.value || '').trim();
   const exportFmt = document.getElementById('install-export-format')?.value || 'none';
   const rhelAuthMode = document.querySelector('input[name="rhel-auth"]:checked')?.value || 'userpass';
   const rhelUser = (document.getElementById('rhel-username')?.value || '').trim();
@@ -1273,7 +1290,8 @@ function startInstall() {
   const params = {
     disk, hostname: host, username: user,
     password: pass, timezone, keyboard, locale, role, distro, release,
-    nvidia_drivers: nvidia, wireguard, ebpf, zfs_dedup: dedup,
+    nvidia_drivers: nvidia, wireguard, ebpf, zfs_dedup: dedup, darksite_mode: darksiteMode,
+    ...(customRepo ? { custom_repo: customRepo } : {}),
     export_format: exportFmt,
     storage_mode: 'zfs', infra_mode: 'standalone',
     zfs_encrypt: encrypt ? '1' : '0',
