@@ -1,6 +1,10 @@
 #!/bin/bash
 # lib-test.sh — shared test functions for kldloadOS smoke tests
 
+# Ensure /usr/local/bin and /usr/local/sbin are in PATH
+# (CentOS/RHEL sudo strips them from secure_path)
+export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+
 PASS=0
 FAIL=0
 WARN=0
