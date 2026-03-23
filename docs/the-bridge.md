@@ -142,6 +142,8 @@ You don't have to choose one forever. Use Linux where you need hardware support,
 
 ## The point
 
+Linux and BSD are apples and pitchforks. Don't expect BSD-level isolation from Linux containers. Don't expect Linux hardware support from FreeBSD. They're different tools built on different philosophies — and that's the point. Learn the limitations of each. Use them together with purpose.
+
 Code is free. Code is what you make of it. If you want to pay for a tool, a service, or a function — that's your choice. But there should be no incentive for companies to charge $999/month for a WireGuard config file wrapped in a UI.
 
 kldloadOS includes everything you need to build secure-by-default environments on hostile hardware in a way that wasn't previously possible on Linux. Secure networking, eBPF observability, ZFS replication, boot environments — these are core required components, not optional bolt-ons.
