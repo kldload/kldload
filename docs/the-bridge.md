@@ -146,6 +146,8 @@ Linux and BSD are apples and pitchforks. Don't expect BSD-level isolation from L
 
 And don't expect OpenZFS to magically fix your problems. Every workload is different. The defaults are just that — defaults. If you don't understand how to tune recordsize for your database, or when to use zstd over lz4, or why your ARC is eating all your RAM — you're going to have a bad time. Not because ZFS is wrong, but because your expectations are. ZFS gives you the knobs. Learning which ones to turn is on you.
 
+This is precisely why kldloadOS goes far beyond a normal installer. The documentation, the tutorials, the zero-to-hero guides, the appliance recipes — they exist to empower you to understand what you're building and why. Not to sell you a product, but to give you the knowledge to make informed decisions. Because a tool without understanding is just a liability.
+
 Code is free. Code is what you make of it. If you want to pay for a tool, a service, or a function — that's your choice. But there should be no incentive for companies to charge $999/month for a WireGuard config file wrapped in a UI.
 
 kldloadOS includes everything you need to build secure-by-default environments on hostile hardware in a way that wasn't previously possible on Linux. Secure networking, eBPF observability, ZFS replication, boot environments — these are core required components, not optional bolt-ons.
