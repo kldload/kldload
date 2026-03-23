@@ -156,7 +156,7 @@ If you like shiny enterprise dashboards and don't mind the bill — go for it. B
 
 ---
 
-## From the author
+## A few words from Anthony
 
 I've been a staunch supporter of free and open source since before Wikipedia was built. I've been deprived of useful tools because of licensing squabbles for years. My answer to that has always been: get better, learn how, and teach others.
 
