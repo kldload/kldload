@@ -148,7 +148,7 @@ And don't expect OpenZFS to magically fix your problems. Every workload is diffe
 
 This is precisely why kldloadOS goes far beyond a normal installer. The documentation, the tutorials, the zero-to-hero guides, the appliance recipes — they exist to empower you to understand what you're building and why. Not to sell you a product, but to give you the knowledge to make informed decisions. Because a tool without understanding is just a liability.
 
-Code is free. Code is what you make of it. If you want to pay for a tool, a service, or a function — that's your choice. But there should be no incentive for companies to charge $999/month for a WireGuard config file wrapped in a UI.
+Code is free. Code is what you make of it. If you want to pay for a tool, a service, or a function — that's your choice, fill your boots! If the product works for you, keep it — kldload won't get in the way. But there should be no incentive for companies to charge $999/month for a WireGuard config file wrapped in a UI.
 
 kldloadOS includes everything you need to build secure-by-default environments on hostile hardware in a way that wasn't previously possible on Linux. Secure networking, eBPF observability, ZFS replication, boot environments — these are core required components, not optional bolt-ons.
 
