@@ -153,6 +153,60 @@ fi
 test_dir "ZFSBootMenu in darksite" "/root/darksite/boot"
 test_file "ZFSBootMenu EFI" "/root/darksite/boot/zfsbootmenu.EFI"
 
+# ── eBPF / Observability ──────────────────────────────────────────────────────
+_section "eBPF / Observability"
+
+if [[ "$DISTRO" == "deb" ]]; then
+  test_cmd "bpftrace" "bpftrace"
+  test_cmd "bpftool" "bpftool"
+  if [[ -f /usr/sbin/execsnoop-bpfcc ]] || command -v execsnoop-bpfcc >/dev/null 2>&1; then
+    _pass "execsnoop (bpfcc-tools)"
+  elif command -v execsnoop >/dev/null 2>&1; then
+    _pass "execsnoop"
+  else
+    _warn "execsnoop" "not found — install bpfcc-tools"
+  fi
+  test_cmd "perf" "perf"
+else
+  if [[ -d /usr/share/bcc/tools ]]; then
+    _pass "bcc-tools directory"
+    test_file "execsnoop (bcc)" "/usr/share/bcc/tools/execsnoop"
+    test_file "tcplife (bcc)" "/usr/share/bcc/tools/tcplife"
+    test_file "opensnoop (bcc)" "/usr/share/bcc/tools/opensnoop"
+  else
+    _warn "bcc-tools" "not found — install bcc-tools"
+  fi
+  test_cmd "bpftrace" "bpftrace"
+fi
+
+if [[ -f /sys/kernel/btf/vmlinux ]]; then
+  _pass "BTF available (eBPF CO-RE)"
+else
+  _warn "BTF" "/sys/kernel/btf/vmlinux not found"
+fi
+
+if command -v bpftrace >/dev/null 2>&1; then
+  if timeout 3 bpftrace -e 'BEGIN { printf("ok\n"); exit(); }' 2>/dev/null | grep -q "ok"; then
+    _pass "bpftrace executes"
+  else
+    _warn "bpftrace execution" "failed — may need root or BTF"
+  fi
+fi
+
+# ── NVIDIA (optional) ────────────────────────────────────────────────────────
+_section "NVIDIA (optional)"
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+  _pass "nvidia-smi found"
+  if nvidia-smi >/dev/null 2>&1; then
+    _pass "nvidia-smi executes (GPU detected)"
+  else
+    _warn "nvidia-smi" "no GPU detected (expected in VM)"
+  fi
+else
+  _pass "NVIDIA not installed (expected if checkbox not selected)"
+fi
+
 # ── System Files ─────────────────────────────────────────────────────────────
 _section "System Files"
 
