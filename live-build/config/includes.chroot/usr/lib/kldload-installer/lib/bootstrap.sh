@@ -608,7 +608,7 @@ name=kldload offline RPM mirror
 baseurl=file://${_darksite_rpm}/
 enabled=1
 gpgcheck=0
-priority=1
+cost=500
 DSREPO
   fi
 
@@ -669,7 +669,7 @@ DSREPO
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
       --disableplugin=subscription-manager --disableplugin=product-id \
-      --nogpgcheck -y install \
+      --nogpgcheck --skip-broken -y install \
       "${_dnf_pkgs[@]}" \
       >> "$log" 2>&1 \
       || { k_log_to "$log" "dnf --installroot failed"; return 1; }
