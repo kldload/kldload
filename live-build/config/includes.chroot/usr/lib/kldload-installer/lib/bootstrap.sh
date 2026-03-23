@@ -589,6 +589,7 @@ ZFSREPO
   mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
 
   # Copy DNS resolution into the installroot so dnf/curl can resolve hosts
+  mkdir -p "${target}/etc"
   cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
 
   # Disable subscription-manager dnf plugin — it regenerates redhat.repo with
