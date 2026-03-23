@@ -156,7 +156,8 @@ Do you want to pay for it, or build it? kldloadOS gives you the option to actual
 
 If you like shiny enterprise dashboards and don't mind the bill — go for it. But if you want to understand how the machine actually works, and build something that's yours, with no strings attached — the tools are here. Free. Open source. Auditable.
 
-**Learn the primitives. Understand the real computer. Because if it leaves the kernel — it's dead.**
+> *"Learn the primitives. Understand the real computer. Because if it leaves the kernel — it's already dead."*
+> — Anthony Carpenter
 
 ---
 
