@@ -57,6 +57,17 @@ Your Linux construction kit — ZFS on root, universal CLI tools, boot environme
 | [Export Formats](tutorials/infrastructure/export-formats.md) | Intermediate | qcow2, raw, VHD, VMDK, OVA — export and import on any platform |
 | [16-Node Cluster Setup](tutorials/infrastructure/cluster-setup.md) | Advanced | Full walkthrough — hub to 16 workers, WireGuard mesh, blue/green upgrades |
 
+### Appliance Recipes
+
+Real-world appliances built on kldloadOS. Complete configs, package lists, systemd services.
+
+| Recipe | Description |
+|--------|-------------|
+| [IoT Gateway](tutorials/infrastructure/recipe-iot-gateway.md) | Quad-NIC BACnet/Modbus capture → WireGuard → RabbitMQ. Secures unencrypted building automation traffic. |
+| [IRLP Ham Radio](tutorials/infrastructure/recipe-irlp-ham-radio.md) | Ham radio voice bridging over WireGuard. SvxLink + CM108 USB audio + encrypted internet backhaul. |
+| [Live TV Streaming](tutorials/infrastructure/recipe-live-tv-streaming.md) | Capture card → ffmpeg → SRT/HLS/DASH/IPTV. Carrier-grade live video with SRT callers. |
+| [Plex on ZFS](tutorials/infrastructure/recipe-plex-zfs.md) | Per-movie ZFS datasets. Clone, replicate, snapshot. Netflix Open Connect architecture at home. |
+
 ### Observability
 
 | Guide | Level | Description |
