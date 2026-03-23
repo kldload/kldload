@@ -670,9 +670,14 @@ DSREPO
       ;;
   esac
 
+  # Point DNF cache to the target ZFS filesystem to avoid filling the live overlay
+  mkdir -p "${target}/var/cache/dnf"
+  export DNF_CACHEDIR="${target}/var/cache/dnf"
+
   k_log_to "$log" "Running dnf --installroot (${#_dnf_pkgs[@]} packages, profile=${_profile})..."
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+      --setopt=cachedir="${target}/var/cache/dnf" \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck --skip-broken -y install \
       "${_dnf_pkgs[@]}" \
