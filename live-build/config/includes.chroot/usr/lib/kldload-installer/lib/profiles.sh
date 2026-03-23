@@ -306,11 +306,16 @@ EOGDM
     mkdir -p "${target}/usr/lib/kldload-installer/backend/bin"
     cp -r /usr/lib/kldload-installer/backend/. "${target}/usr/lib/kldload-installer/backend/"
     chmod +x "${target}/usr/lib/kldload-installer/backend/bin/"* 2>/dev/null || true
-    # Expose kldload-be in PATH
+    # Expose backend tools in PATH with short names
     mkdir -p "${target}/usr/local/bin"
-    ln -sf /usr/lib/kldload-installer/backend/bin/kldload-be       "${target}/usr/local/bin/kldload-be"
-    ln -sf /usr/lib/kldload-installer/backend/bin/kldload-recovery  "${target}/usr/local/bin/kldload-recovery"
-    ln -sf /usr/lib/kldload-installer/backend/bin/kldload-upgrade   "${target}/usr/local/bin/kldload-upgrade" || true
+    for _bt in kbe krecovery kupgrade; do
+      [[ -f "${target}/usr/lib/kldload-installer/backend/bin/${_bt}" ]] && \
+        ln -sf "/usr/lib/kldload-installer/backend/bin/${_bt}" "${target}/usr/local/bin/${_bt}"
+    done
+    # kexport lives in the main tools directory
+    [[ -x "/usr/local/bin/kexport" ]] && \
+      cp "/usr/local/bin/kexport" "${target}/usr/local/bin/kexport" && \
+      chmod +x "${target}/usr/local/bin/kexport"
   fi
 
   # ── Boot environment marker — tells kldload-be which dataset is active ─────────

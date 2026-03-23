@@ -9,7 +9,7 @@ source "${SCRIPT_DIR}/lib-test.sh"
 
 DISTRO=$(detect_distro)
 
-clear
+export TERM=xterm; clear
 printf "\e[1;36m╔══════════════════════════════════════════════════════════╗\e[0m\n"
 printf "\e[1;36m║  kldloadOS Smoke Test — CORE profile                     ║\e[0m\n"
 printf "\e[1;36m╚══════════════════════════════════════════════════════════╝\e[0m\n"

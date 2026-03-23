@@ -25,6 +25,6 @@ for IP in "$@"; do
     "${USER}@${IP}:/tmp/" 2>/dev/null
 
   # Run auto-detect smoke test
-  sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -t "${USER}@${IP}" \
-    "echo '$PASS' | sudo -S bash /tmp/smoke-auto.sh" 2>/dev/null || echo "  FAILED to connect to $IP"
+  sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "${USER}@${IP}" \
+    "echo '$PASS' | sudo -S bash /tmp/smoke-auto.sh" 2>&1 || echo "  FAILED to connect to $IP"
 done
