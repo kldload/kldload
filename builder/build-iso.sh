@@ -460,6 +460,12 @@ if [[ "$EDITION" != "core" ]]; then
         cp /build/live-build/config/includes.chroot/etc/skel/.tmux.conf "${ROOTFS}/home/live/.tmux.conf" 2>/dev/null || true
     [[ -f /build/live-build/config/includes.chroot/etc/skel/.vimrc ]] && \
         cp /build/live-build/config/includes.chroot/etc/skel/.vimrc "${ROOTFS}/etc/skel/.vimrc"
+    # vim colorscheme
+    if [[ -d /build/live-build/config/includes.chroot/etc/skel/.vim ]]; then
+        cp -r /build/live-build/config/includes.chroot/etc/skel/.vim "${ROOTFS}/etc/skel/.vim"
+        cp -r /build/live-build/config/includes.chroot/etc/skel/.vim "${ROOTFS}/root/.vim"
+        cp -r /build/live-build/config/includes.chroot/etc/skel/.vim "${ROOTFS}/home/live/.vim" 2>/dev/null || true
+    fi
 
     # Create kldload-webui systemd service
     cat > "${ROOTFS}/usr/lib/systemd/system/kldload-webui.service" << 'SVCEOF'
