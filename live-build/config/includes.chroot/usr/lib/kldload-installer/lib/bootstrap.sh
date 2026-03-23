@@ -588,8 +588,12 @@ ZFSREPO
   mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
   mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
 
+  # Ensure key directories exist in the installroot BEFORE dnf runs
+  mkdir -p "${target}/etc" "${target}/var/cache/dnf" "${target}/var/lib/dnf" \
+           "${target}/var/lib/rpm" "${target}/var/log" "${target}/run" \
+           "${target}/tmp"
+
   # Copy DNS resolution into the installroot so dnf/curl can resolve hosts
-  mkdir -p "${target}/etc"
   cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
 
   # Disable subscription-manager dnf plugin — it regenerates redhat.repo with
