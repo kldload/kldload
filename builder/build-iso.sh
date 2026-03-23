@@ -397,7 +397,7 @@ OSREL
 # ---------------------------------------------------------------------------
 if [[ "$EDITION" != "core" ]]; then
     # Copy kldload tools (short names)
-    for tool in kst ksnap kclone kdf kdir kpkg kexport kldload-install-target kldload-webui; do
+    for tool in kst ksnap kclone kdf kdir kpkg kexport kldload-test kldload-install-target kldload-webui; do
         src="/build/live-build/config/includes.chroot/usr/local/bin/${tool}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/bin/${tool}" && chmod +x "${ROOTFS}/usr/local/bin/${tool}"
     done
