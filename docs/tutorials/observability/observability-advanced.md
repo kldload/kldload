@@ -363,7 +363,7 @@ aws ec2 run-instances \
 Or use the `deploy-vm.sh` helper:
 
 ```bash
-cd /opt/linux-tools/aws/deploy-vm
+cd /opt/kldload/tools/aws
 AWS_REGION=us-west-2 INSTANCE_TYPE=t3.medium ./deploy-vm.sh
 ```
 
@@ -371,7 +371,7 @@ AWS_REGION=us-west-2 INSTANCE_TYPE=t3.medium ./deploy-vm.sh
 
 ```bash
 # Check instance metadata
-/opt/linux-tools/aws/meta-scrape/meta-scrape.py
+/opt/kldload/tools/aws/meta-scrape.py
 ```
 
 Shows: instance ID, region, availability zone, AMI ID, instance type, public/private IPs, IAM role, security groups.
@@ -448,9 +448,9 @@ virt-install \
 # 3. Copy setup script into the VM and run it
 virt-customize -d obs-golden \
   --run-command 'kpkg install bcc-tools bpftrace perf' \
-  --mkdir /opt/linux-tools \
-  --copy-in /opt/linux-tools/debian/monitoring:/opt/linux-tools/debian/ \
-  --run-command 'cd /opt/linux-tools/debian/monitoring && make setup && make deps' \
+  --mkdir /opt/kldload \
+  --copy-in /opt/kldload/tools/monitoring:/opt/kldload/tools/ \
+  --run-command 'cd /opt/kldload/tools/monitoring && make setup && make deps' \
   --copy-in /etc/systemd/system/socket-snoop.service:/etc/systemd/system/ \
   --copy-in /etc/systemd/system/latency-snoop.service:/etc/systemd/system/ \
   --run-command 'systemctl enable socket-snoop latency-snoop' \
@@ -511,7 +511,7 @@ Now every new node you clone from this image comes up with the full observabilit
 
 ## Reference: linux-tools repo
 
-The observability tools referenced in this guide come from [github.com/unixbox-net/linux-tools](https://github.com/unixbox-net/linux-tools):
+The observability tools referenced in this guide come from [github.com/kldload/kldload (tools/ directory)](https://github.com/kldload/kldload (tools/ directory)):
 
 | Tool | Location | Level |
 |------|----------|-------|

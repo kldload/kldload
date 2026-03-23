@@ -11,7 +11,7 @@ You know `execsnoop` and `bpftrace` one-liners. Now build real-time monitoring: 
 ### Install
 
 ```bash
-cd /opt/linux-tools/debian/monitoring
+cd /opt/kldload/tools/monitoring
 
 # One-shot install (system deps + Python venv)
 chmod +x install-deps-debian.sh
@@ -104,7 +104,7 @@ sudo docker run --rm -it \
 Same venv as socket_snoop, plus:
 
 ```bash
-source /opt/linux-tools/debian/monitoring/.venv/bin/activate
+source /opt/kldload/tools/monitoring/.venv/bin/activate
 pip install prometheus_client
 ```
 
@@ -245,8 +245,8 @@ Description=TCP Latency Monitor (eBPF)
 After=network.target
 
 [Service]
-ExecStart=/opt/linux-tools/debian/monitoring/.venv/bin/python \
-  /opt/linux-tools/debian/monitoring/latency_snoop.py \
+ExecStart=/opt/kldload/tools/monitoring/.venv/bin/python \
+  /opt/kldload/tools/monitoring/latency_snoop.py \
   --prometheus-port 9900 \
   --log-file /var/log/latency_monitor.log
 Restart=always
@@ -271,7 +271,7 @@ Now you have:
 If your kldloadOS system runs a mail server or you need to audit mail delivery:
 
 ```bash
-cd /opt/linux-tools/debian/email
+cd /opt/kldload/tools/email
 
 # Install dependencies
 pip install dnspython cryptography pyOpenSSL requests

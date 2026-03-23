@@ -182,8 +182,8 @@ For LogHog:
 ```bash
 kpkg install libjson-c-dev libreadline-dev
 cd /opt
-git clone https://github.com/unixbox-net/linux-tools.git
-cd linux-tools/debian/utils/lh
+git clone https://github.com/kldload/kldload.git
+cd kldload/tools/utils/lh
 ./install.sh
 ```
 
@@ -196,16 +196,16 @@ kpkg install bcc-tools bpftrace perf
 # LogHog
 kpkg install json-c-devel readline-devel
 cd /opt
-git clone https://github.com/unixbox-net/linux-tools.git
-cd linux-tools/debian/utils/lh
+git clone https://github.com/kldload/kldload.git
+cd kldload/tools/utils/lh
 ./install.sh
 ```
 
 The diagnostics scripts work out of the box:
 ```bash
 # Use the right one for your distro
-sudo /opt/linux-tools/debian/diagnostics/diagnostics.sh   # Debian
-sudo /opt/linux-tools/rhel/rhel-diag.sh                   # CentOS/RHEL
+sudo /opt/kldload/tools/diagnostics/diagnostics.sh   # Debian
+sudo /opt/kldload/tools/diagnostics/rhel-diag.sh                   # CentOS/RHEL
 ```
 
 ---
