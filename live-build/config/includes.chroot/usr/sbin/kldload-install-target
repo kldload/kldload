@@ -14,38 +14,30 @@ _emergency_cleanup() {
 trap '_emergency_cleanup' ERR EXIT
 
 k_poweroff_after_success() {
-  # Callers (kldload-deploy-tui, kldload-installer-tui) may set KLDLOAD_SKIP_POWEROFF=1
-  # to handle the poweroff/countdown themselves. Without it we power off here.
-  if [[ "${KLDLOAD_SKIP_POWEROFF:-0}" == "1" ]]; then
-    k_log "Install completed successfully (poweroff delegated to caller)"
-    return 0
-  fi
-  k_log "Install completed successfully; ejecting media and powering off"
+  local _fmt="${1:-none}"
+  local _name="${2:-}"
+  local _path="${3:-}"
+
+  k_log "Install completed successfully"
   sync || true
   # Eject all optical drives so machine boots from disk on next start
   for _dev in /dev/sr0 /dev/sr1 /dev/cdrom /dev/dvd; do
     [[ -b "$_dev" ]] && eject "$_dev" 2>/dev/null || true
   done
-  # Kill the live GNOME session so systemd doesn't hang waiting for it on shutdown
-  loginctl terminate-session 1 2>/dev/null || true
-  loginctl terminate-user live  2>/dev/null || true
-  # Cap shutdown wait so a stray process can't block poweroff indefinitely
-  mkdir -p /run/systemd/system.conf.d
-  printf '[Manager]\nDefaultTimeoutStopSec=10s\n' \
-    > /run/systemd/system.conf.d/kldload-fast-shutdown.conf
-  systemctl daemon-reexec 2>/dev/null || true
 
   echo
   printf '\e[1;32m╔══════════════════════════════════════════════════════════╗\e[0m\n'
   printf '\e[1;32m║                                                          ║\e[0m\n'
   printf '\e[1;32m║        ✔  Installation complete!                         ║\e[0m\n'
   printf '\e[1;32m║                                                          ║\e[0m\n'
-  printf '\e[1;32m║   Remove the USB / ISO before rebooting.                 ║\e[0m\n'
-  printf '\e[1;32m║                                                          ║\e[0m\n'
-  printf '\e[1;32m║   To export an image:                                    ║\e[0m\n'
-  printf '\e[1;32m║     kexport /dev/sdX qcow2                               ║\e[0m\n'
-  printf '\e[1;32m║     kexport /dev/sdX all                                 ║\e[0m\n'
-  printf '\e[1;32m║                                                          ║\e[0m\n'
+  if [[ -n "$_path" && -f "$_path" ]]; then
+    local _size
+    _size="$(du -sh "$_path" 2>/dev/null | cut -f1)"
+    printf '\e[1;32m║   ✔  Image exported: %-36s ║\e[0m\n' "${_name}.${_fmt} (${_size})"
+    printf '\e[1;32m║      Location: ~/Downloads/                              ║\e[0m\n'
+    printf '\e[1;32m║                                                          ║\e[0m\n'
+  fi
+  printf '\e[1;32m║   Remove the USB / ISO and reboot when ready.            ║\e[0m\n'
   printf '\e[1;32m║   To reboot:  systemctl reboot                           ║\e[0m\n'
   printf '\e[1;32m║                                                          ║\e[0m\n'
   printf '\e[1;32m╚══════════════════════════════════════════════════════════╝\e[0m\n'
@@ -1326,23 +1318,39 @@ main() {
 
   # ── Image export ────────────────────────────────────────────────────────
   local export_fmt="${KLDLOAD_EXPORT_FORMAT:-none}"
+  local _ename="kldload-${KLDLOAD_DISTRO:-centos}-${KLDLOAD_PROFILE:-server}-${KLDLOAD_HOSTNAME:-kldload}-$(date -u +%Y%m%d)"
+  local _export_path=""
+
   if [[ "${export_fmt}" != "none" && -n "${export_fmt}" ]]; then
-    # Image export cannot run from the live installer — the overlay doesn't have enough
-    # space for the output file, and the disk can't be imaged while the pool is mounted.
-    # Instead, save the export request to firstboot so it runs after the installed system boots.
-    _info "▸  Image export (${export_fmt}) scheduled for first boot..."
-    local _ename="kldload-${KLDLOAD_DISTRO:-centos}-${KLDLOAD_PROFILE:-server}-${KLDLOAD_HOSTNAME:-kldload}-$(date -u +%Y%m%d)"
-    mkdir -p "${KLDLOAD_TARGET_MNT}/etc/kldload"
-    cat > "${KLDLOAD_TARGET_MNT}/etc/kldload/pending-export.env" << EXPEOF
-KEXPORT_FORMAT=${export_fmt}
-KEXPORT_NAME=${_ename}
-KEXPORT_DISK=${KLDLOAD_DISK}
-EXPEOF
-    _ok "Export" "Scheduled — run 'kexport ${KLDLOAD_DISK} ${export_fmt}' after boot, or it runs on first login"
+    _info "▸  Exporting disk image (${export_fmt}) — this may take a few minutes..."
+
+    # Write to the target user's Downloads (on ZFS — plenty of space), then symlink to live desktop
+    local _user="${KLDLOAD_USERNAME:-admin}"
+    local _export_dir="${KLDLOAD_TARGET_MNT}/home/${_user}/Downloads"
+    mkdir -p "${_export_dir}"
+
+    # Sync to flush all writes before imaging
+    sync || true
+
+    # Export the disk — pools stay mounted, qemu-img reads the block device directly
+    # ZFS is CoW so the image will be crash-consistent
+    if KEXPORT_NAME="${_ename}" kexport "${KLDLOAD_DISK}" "${export_fmt}" "${_export_dir}"; then
+      _export_path="${_export_dir}/${_ename}.${export_fmt}"
+
+      # Symlink to live GNOME desktop so user can see it and copy to USB
+      local _desktop="/home/live/Desktop"
+      mkdir -p "${_desktop}"
+      ln -sf "${_export_path}" "${_desktop}/${_ename}.${export_fmt}"
+      chown -h live:live "${_desktop}/${_ename}.${export_fmt}" 2>/dev/null || true
+
+      _ok "Export" "${_ename}.${export_fmt} → Desktop"
+    else
+      _warn "Export failed — you can run manually: kexport ${KLDLOAD_DISK} ${export_fmt}"
+    fi
   fi
 
   k_log "Install complete"
-  k_poweroff_after_success
+  k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
   sync || true
 }
 

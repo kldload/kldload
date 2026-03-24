@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# kldload-help — command reference with examples
+
+G='\033[0;32m'
+C='\033[0;36m'
+Y='\033[0;33m'
+B='\033[1m'
+D='\033[2m'
+N='\033[0m'
+
+cat <<EOF
+
+${B}${G} ╔═══════════════════════════════════════════════════════════════════════════╗${N}
+${B}${G} ║${N}${B}  kldloadOS — Command Reference                                          ${G}║${N}
+${B}${G} ╚═══════════════════════════════════════════════════════════════════════════╝${N}
+
+${B}${G} ── kldload Tools ───────────────────────────────────────────────────────────${N}
+
+${B}${C} kst${N} — System health at a glance
+    ${D}Pool health, disk usage, snapshots, boot environments, services.${N}
+    ${Y}\$ ${N}kst
+
+${B}${C} kst-dashboard${N} — Live tmux monitoring dashboard
+    ${D}Four-pane view: health, pools, btop, services. Auto-refreshes.${N}
+    ${Y}\$ ${N}kst-dashboard                 ${D}# launch and attach${N}
+    ${Y}\$ ${N}kst-dashboard --kill          ${D}# stop the dashboard${N}
+
+${B}${C} ksnap${N} — ZFS snapshot manager
+    ${D}Create, list, rollback, and destroy snapshots in one command.${N}
+    ${Y}\$ ${N}ksnap                         ${D}# snapshot all key datasets${N}
+    ${Y}\$ ${N}ksnap list                    ${D}# show all snapshots with ages${N}
+    ${Y}\$ ${N}ksnap /home/admin             ${D}# snapshot a specific path${N}
+    ${Y}\$ ${N}ksnap rollback /home/admin    ${D}# roll back to last snapshot${N}
+
+${B}${C} kclone${N} — Instant CoW clone
+    ${D}Clone a dataset in milliseconds. Zero extra space until divergence.${N}
+    ${Y}\$ ${N}kclone /home/admin /home/admin-backup
+    ${Y}\$ ${N}kclone /srv/database /srv/database-test
+
+${B}${C} kdf${N} — ZFS-aware disk usage
+    ${D}Shows compression ratios, quotas, and real space usage.${N}
+    ${Y}\$ ${N}kdf
+
+${B}${C} kdir${N} — Create ZFS datasets (not directories)
+    ${D}Every directory can be a dataset — separate snapshots, quotas, compression.${N}
+    ${Y}\$ ${N}kdir /home/alice               ${D}# new user dataset${N}
+    ${Y}\$ ${N}kdir -p /srv/app/data          ${D}# create parents too${N}
+    ${Y}\$ ${N}kdir -o quota=50G /home/bob    ${D}# with a 50G quota${N}
+
+${B}${C} kpkg${N} — Universal package manager
+    ${D}Auto-detects apt or dnf. Takes a ZFS snapshot before changes.${N}
+    ${Y}\$ ${N}kpkg install nginx             ${D}# snapshot → install${N}
+    ${Y}\$ ${N}kpkg remove nginx              ${D}# snapshot → remove${N}
+    ${Y}\$ ${N}kpkg upgrade                   ${D}# snapshot → full upgrade${N}
+    ${Y}\$ ${N}kpkg search vim                ${D}# search packages${N}
+
+${B}${C} kexport${N} — Export disk to VM image
+    ${D}Convert this system to qcow2, VMDK, VHD, OVA, or raw.${N}
+    ${Y}\$ ${N}sudo kexport /dev/vda qcow2              ${D}# KVM/Proxmox${N}
+    ${Y}\$ ${N}sudo kexport /dev/vda vmdk ~/Desktop      ${D}# VMware${N}
+    ${Y}\$ ${N}sudo kexport /dev/sda all                 ${D}# all formats${N}
+
+${B}${G} ── Terminal Tools ──────────────────────────────────────────────────────────${N}
+
+${B}${C} tmux${N} — Terminal multiplexer   ${D}(prefix: Ctrl-a)${N}
+    ${Y}C-a |${N}     split horizontal      ${Y}C-a -${N}     split vertical
+    ${Y}Alt+←→↑↓${N}  move between panes    ${Y}Shift+←→↑↓${N} resize panes
+    ${Y}Alt+1-9${N}   switch windows        ${Y}Alt+h/l${N}   prev/next window
+    ${Y}C-a z${N}     zoom pane (toggle)    ${Y}C-a d${N}     detach session
+    ${Y}C-a S${N}     kst health            ${Y}C-a D${N}     launch dashboard
+    ${Y}C-a H${N}     this help             ${Y}C-a r${N}     reload config
+
+${B}${C} fzf${N} — Fuzzy finder   ${D}(the most useful tool you've never used)${N}
+    ${Y}Ctrl-R${N}    fuzzy history search   ${D}# type any fragment, it finds the command${N}
+    ${Y}Ctrl-T${N}    fuzzy file finder      ${D}# find files without remembering the path${N}
+    ${Y}Alt-C${N}     fuzzy cd               ${D}# jump to any directory${N}
+    ${Y}\$ ${N}vim \$(fzf)                    ${D}# pipe into any command${N}
+    ${Y}\$ ${N}kpkg install \$(apt list 2>/dev/null | fzf)  ${D}# pick a package${N}
+
+${B}${C} bat${N} — cat with syntax highlighting
+    ${D}Aliased to 'cat'. Shows line numbers, git diff markers, and syntax colors.${N}
+    ${Y}\$ ${N}bat /etc/fstab                ${D}# highlighted config${N}
+    ${Y}\$ ${N}bat --diff file.conf          ${D}# show git changes inline${N}
+    ${Y}\$ ${N}catp script.sh                ${D}# bat with pager (scrollable)${N}
+
+${B}${C} eza${N} — Modern ls replacement
+    ${D}Aliased to 'ls'. Git status, file icons, tree view built in.${N}
+    ${Y}\$ ${N}ll                            ${D}# long list with git status${N}
+    ${Y}\$ ${N}tree                          ${D}# recursive tree view${N}
+    ${Y}\$ ${N}eza --git --long --header     ${D}# full details${N}
+
+${B}${C} zoxide${N} — Smart cd   ${D}(learns your directories)${N}
+    ${Y}\$ ${N}z logs                        ${D}# jumps to /var/log (most visited match)${N}
+    ${Y}\$ ${N}z kld                         ${D}# jumps to whatever matches 'kld'${N}
+    ${Y}\$ ${N}zi                            ${D}# interactive picker with fzf${N}
+
+${B}${C} fd${N} — Modern find
+    ${Y}\$ ${N}fd '\.conf\$'                  ${D}# find all .conf files${N}
+    ${Y}\$ ${N}fd nginx /etc                 ${D}# find files matching 'nginx' in /etc${N}
+
+${B}${C} rg${N} — ripgrep (fast grep)
+    ${Y}\$ ${N}rg 'listen 80' /etc           ${D}# search file contents${N}
+    ${Y}\$ ${N}rg -l TODO                    ${D}# list files containing TODO${N}
+
+${B}${C} btop${N} — System monitor   ${D}(CPU, memory, disk, network, GPU in one TUI)${N}
+    ${Y}\$ ${N}btop
+
+${B}${C} fastfetch${N} — System info banner   ${D}(shows on login)${N}
+    ${Y}\$ ${N}fastfetch
+
+${B}${G} ── ZFS Essentials ─────────────────────────────────────────────────────────${N}
+    ${D}Everything above is built on ZFS. Learn these and you own your data.${N}
+
+    ${Y}\$ ${N}zpool status                  ${D}# pool health + errors${N}
+    ${Y}\$ ${N}zfs list                      ${D}# all datasets${N}
+    ${Y}\$ ${N}zfs list -t snapshot          ${D}# all snapshots${N}
+    ${Y}\$ ${N}zfs snapshot rpool/home@now   ${D}# manual snapshot${N}
+    ${Y}\$ ${N}zfs rollback rpool/home@now   ${D}# revert to snapshot${N}
+    ${Y}\$ ${N}zfs send rpool@snap | ssh box2 zfs recv tank  ${D}# replicate${N}
+    ${Y}\$ ${N}syncoid rpool/home remote:tank/home           ${D}# easy replication${N}
+
+${B}${G} ── Aliases ─────────────────────────────────────────────────────────────────${N}
+    ${C}zls${N}  zfs list          ${C}zsnap${N}  zfs list -t snapshot   ${C}ports${N}  ss -tuln
+    ${C}ll${N}   eza long list     ${C}tree${N}   eza --tree             ${C}catp${N}   bat with pager
+    ${C}z${N}    smart cd          ${C}zi${N}     interactive cd         ${C}e${N}      vim
+${B}${G}═════════════════════════════════════════════════════════════════════════════${N}
+${D} Docs: https://kldload.com/docs${N}
+${D} Learn the primitives — they'll outlast any product.${N}
+
+EOF

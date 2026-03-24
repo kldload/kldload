@@ -21,6 +21,12 @@ if command -v tmux >/dev/null 2>&1 && ! _inside_tmux; then
 fi
 unset -f _inside_tmux
 
+# ── Login banner — fastfetch (once per session) ──────────────────────────────
+if __have fastfetch && [[ -z "${_KLDLOAD_BANNER_SHOWN:-}" ]]; then
+  export _KLDLOAD_BANNER_SHOWN=1
+  fastfetch 2>/dev/null
+fi
+
 # ── History ───────────────────────────────────────────────────────────────────
 HISTSIZE=100000
 HISTFILESIZE=200000
@@ -31,6 +37,30 @@ shopt -s cdspell 2>/dev/null || true
 
 # ── Completion ────────────────────────────────────────────────────────────────
 [[ -f /etc/bash_completion ]] && . /etc/bash_completion
+
+# ── fzf — fuzzy finder (Ctrl-R history, Ctrl-T files, Alt-C cd) ──────────────
+if __have fzf; then
+  eval "$(fzf --bash 2>/dev/null)" || {
+    [[ -f /usr/share/doc/fzf/examples/key-bindings.bash ]] && . /usr/share/doc/fzf/examples/key-bindings.bash
+    [[ -f /usr/share/bash-completion/completions/fzf ]] && . /usr/share/bash-completion/completions/fzf
+  }
+  export FZF_DEFAULT_OPTS="--height 40% --layout=reverse --border --color=bg+:#1e2533,fg+:#34d399,hl:#60a5fa,hl+:#60a5fa,info:#64748b,prompt:#34d399,pointer:#34d399,marker:#34d399"
+  # Use fd/fdfind if available (faster than find)
+  if __have fdfind; then
+    export FZF_DEFAULT_COMMAND='fdfind --type f --hidden --follow --exclude .git'
+    export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+    export FZF_ALT_C_COMMAND='fdfind --type d --hidden --follow --exclude .git'
+  elif __have fd; then
+    export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
+    export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+    export FZF_ALT_C_COMMAND='fd --type d --hidden --follow --exclude .git'
+  fi
+fi
+
+# ── zoxide — smart cd (use 'z' instead of 'cd') ─────────────────────────────
+if __have zoxide; then
+  eval "$(zoxide init bash)"
+fi
 
 # ── PATH ──────────────────────────────────────────────────────────────────────
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/local/sbin:$PATH"
@@ -50,17 +80,46 @@ else
   PS1='\[\e[1;36m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
 fi
 
+# ── Internal helpers (must be before tool sections) ─────────────────────────
+__have()           { command -v "$1" >/dev/null 2>&1; }
+
 # ── Bracketed paste ───────────────────────────────────────────────────────────
 bpoff() { bind 'set enable-bracketed-paste off' 2>/dev/null || true; }
 bpon()  { bind 'set enable-bracketed-paste on'  2>/dev/null || true; }
 
+# ── Modern tool upgrades (graceful fallback to originals) ────────────────────
+if __have eza; then
+  alias ls='eza --color=auto --group-directories-first'
+  alias ll='eza -alF --git --group-directories-first'
+  alias la='eza -a --group-directories-first'
+  alias l='eza -F --group-directories-first'
+  alias tree='eza --tree'
+else
+  alias ls='ls --color=auto'
+  alias ll='ls -alFh --color=auto'
+  alias la='ls -A --color=auto'
+  alias l='ls -CF --color=auto'
+fi
+if __have bat; then
+  alias cat='bat --paging=never --style=plain'
+  alias catp='bat'
+  export MANPAGER="sh -c 'col -bx | bat -l man -p'"
+elif __have batcat; then
+  # Debian names it batcat to avoid conflict with bacula
+  alias bat='batcat'
+  alias cat='batcat --paging=never --style=plain'
+  alias catp='batcat'
+  export MANPAGER="sh -c 'col -bx | batcat -l man -p'"
+fi
+if __have fd; then
+  alias find='fd'
+elif __have fdfind; then
+  # Debian names it fdfind
+  alias fd='fdfind'
+fi
+__have rg && alias grep='rg' || alias grep='grep --color=auto'
+
 # ── Core aliases ──────────────────────────────────────────────────────────────
-alias tk='tmux kill-server'
-alias ls='ls --color=auto'
-alias ll='ls -alFh --color=auto'
-alias la='ls -A --color=auto'
-alias l='ls -CF --color=auto'
-alias grep='grep --color=auto'
 alias cp='cp -i'
 alias mv='mv -i'
 alias rm='rm -i'
@@ -79,7 +138,6 @@ alias ta='tmux attach -t'
 alias tn='tmux new-session -s'
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
-__have()           { command -v "$1" >/dev/null 2>&1; }
 __require_kubectl(){ __have kubectl || { echo "kubectl not found" >&2; return 127; }; }
 __require_helm()   { __have helm   || { echo "helm not found"    >&2; return 127; }; }
 __fn_exists()      { declare -F "$1" >/dev/null 2>&1; }
@@ -370,4 +428,6 @@ ZFS / kldload
 EOF
 }
 
-kldload-help() { khelp; }
+if command -v kldload-help >/dev/null 2>&1; then
+  alias khelp='kldload-help'
+fi

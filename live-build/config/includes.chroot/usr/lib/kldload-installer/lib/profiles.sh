@@ -7,7 +7,7 @@ k_profile_packages() {
   local profile="${KLDLOAD_PROFILE:-server}"
   case "$profile" in
     server)
-      echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htop net-tools ethtool nftables tcpdump"
+      echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide fastfetch"
       ;;
     client)
       echo "openssh-server sudo curl ca-certificates vim less network-manager wireguard-tools iproute2"
@@ -24,7 +24,7 @@ k_profile_packages() {
         adwaita-icon-theme fonts-cantarell gvfs gvfs-backends \
         gnome-keyring \
         firefox-esr \
-        tmux eject sanoid python3 python3-websockets python3-yaml htop net-tools wireguard-tools iproute2"
+        tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide fastfetch"
       ;;
 
     # ── kldload templates ────────────────────────────────────────────────────────
@@ -150,6 +150,20 @@ k_install_system_files() {
     mkdir -p "${target}/etc/sanoid"
     cp /etc/sanoid/sanoid.conf "${target}/etc/sanoid/sanoid.conf"
   fi
+  # Sanoid binaries — Debian installs via apt, but RPM targets need the live copies
+  for _sb in sanoid syncoid findoid; do
+    if [[ -x "/usr/local/sbin/${_sb}" ]] && ! chroot "${target}" command -v "${_sb}" >/dev/null 2>&1; then
+      cp "/usr/local/sbin/${_sb}" "${target}/usr/local/sbin/${_sb}"
+      chmod +x "${target}/usr/local/sbin/${_sb}"
+    fi
+  done
+  # Sanoid systemd units — copy from live if not already on target (RPM)
+  for _su in sanoid.service sanoid.timer; do
+    if [[ -f "/lib/systemd/system/${_su}" ]] && [[ ! -f "${target}/lib/systemd/system/${_su}" ]]; then
+      mkdir -p "${target}/lib/systemd/system"
+      cp "/lib/systemd/system/${_su}" "${target}/lib/systemd/system/${_su}"
+    fi
+  done
 
   # ── APT pre/post snapshot hooks ────────────────────────────────────────────
   if [[ -d /etc/apt/apt.conf.d ]]; then
@@ -167,7 +181,7 @@ k_install_system_files() {
 
   # ── Systemd units ──────────────────────────────────────────────────────────
   mkdir -p "${target}/usr/lib/systemd/system"
-  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service; do
+  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-export.service; do
     [[ -f "/usr/lib/systemd/system/${f}" ]] && \
       cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
   done
@@ -215,7 +229,12 @@ k_install_system_files() {
   # ── User tools: ZFS helpers + adduser.local hook (skip for core) ─────────────
   mkdir -p "${target}/usr/local/bin" "${target}/usr/local/sbin"
   if [[ "$_profile" != "core" ]]; then
-    for _tool in kst ksnap kclone kdf kdir kpkg; do
+    # eza not in EPEL — copy from live if target doesn't have it
+    if [[ -x /usr/local/bin/eza ]] && ! chroot "${target}" command -v eza >/dev/null 2>&1; then
+      cp /usr/local/bin/eza "${target}/usr/local/bin/eza"
+      chmod +x "${target}/usr/local/bin/eza"
+    fi
+    for _tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kldload-help; do
       [[ -x "/usr/local/bin/${_tool}" ]] && \
         cp "/usr/local/bin/${_tool}" "${target}/usr/local/bin/${_tool}" && \
         chmod +x "${target}/usr/local/bin/${_tool}"
@@ -256,10 +275,12 @@ k_install_system_files() {
 [debug]
 EOGDM
 
-  # ── Custom .desktop launchers — vim only (kldload-webui is live-only) ───────────
+  # ── Custom .desktop launchers ───────────────────────────────────────────────
   mkdir -p "${target}/usr/share/applications"
-  [[ -f /usr/share/applications/vim.desktop ]] && \
-    cp /usr/share/applications/vim.desktop "${target}/usr/share/applications/vim.desktop"
+  for _dt in vim.desktop kst.desktop kst-dashboard.desktop ksnap.desktop kexport.desktop kldload-terminal.desktop kldload-docs.desktop; do
+    [[ -f "/usr/share/applications/${_dt}" ]] && \
+      cp "/usr/share/applications/${_dt}" "${target}/usr/share/applications/${_dt}"
+  done
 
   # ── Wallpaper ─────────────────────────────────────────────────────────────
   if [[ -d /usr/share/backgrounds/kldload ]]; then

@@ -173,6 +173,19 @@ if [[ "$EDITION" != "core" ]]; then
     chroot "$ROOTFS" systemctl enable sanoid.timer 2>/dev/null || true
     rm -rf "/tmp/sanoid-${SANOID_VER}"
     log "Sanoid ${SANOID_VER} installed."
+
+    # Install eza from GitHub (not in EPEL)
+    log "Installing eza from GitHub..."
+    EZA_VER="$(curl -fsSL https://api.github.com/repos/eza-community/eza/releases/latest 2>/dev/null \
+        | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/')" || true
+    if [[ -n "$EZA_VER" ]]; then
+        curl -fsSL "https://github.com/eza-community/eza/releases/download/v${EZA_VER}/eza_x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xz -C "${ROOTFS}/usr/local/bin/"
+        chmod +x "${ROOTFS}/usr/local/bin/eza"
+        log "eza ${EZA_VER} installed."
+    else
+        log "WARNING: could not fetch eza version — skipping"
+    fi
 else
     log "Core edition — skipping sanoid."
 fi

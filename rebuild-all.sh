@@ -8,17 +8,21 @@ R2_BUCKET="s3://kldload-releases"
 ./deploy.sh clean
 ./deploy.sh builder-image
 
+# Rebuild Debian darksite (needed when package lists change — cached after first run)
+./deploy.sh build-debian-darksite
+
 # Build the ISO — one ISO with Desktop, Server, and Core profiles
 PROFILE=desktop ./deploy.sh build
 ISO=$(ls -t live-build/output/kldload-free-*.iso | head -1)
 
-# Deploy to KVM + Proxmox
-./deploy.sh deploy-all
+# Deploy to KVM (2 VMs)
+./deploy.sh kvm-deploy
 
-# Burn to USB
-echo "=== Burning ISO to USB ==="
-dd if="$ISO" of=/dev/sda bs=4M status=progress oflag=sync conv=fsync
-sync
+# Print USB command (don't auto-burn)
+echo ""
+echo "=== USB burn command ==="
+echo "  dd if=\"$ISO\" of=/dev/sda bs=4M status=progress oflag=sync conv=fsync && sync"
+echo ""
 
 # Upload to R2
 echo "=== Uploading to R2 ==="
@@ -29,4 +33,4 @@ aws s3 cp /tmp/latest.sha256 "${R2_BUCKET}/kldload-free-latest.iso.sha256" --end
 # Deploy website
 ssh -o StrictHostKeyChecking=no -i /root/.ssh/kldload-deploy kldload.com@ssh.us.stackcp.com "cd ~/public_html && git pull"
 
-echo "=== DONE: KVM + Proxmox + USB + R2 + website ==="
+echo "=== DONE: KVM + R2 + website ==="

@@ -25,7 +25,7 @@ VMID="${VMID:-902}"
 VM_NAME="${VM_NAME:-kldload-free}"
 VM_MEMORY="${VM_MEMORY:-8192}"
 VM_CORES="${VM_CORES:-4}"
-VM_DISK_GB="${VM_DISK_GB:-40}"
+VM_DISK_GB="${VM_DISK_GB:-80}"
 VM_BRIDGE="${VM_BRIDGE:-vmbr0}"
 
 USB_DEVICE="${USB_DEVICE:-/dev/sda}"
@@ -168,22 +168,52 @@ cmd_kvm_deploy() {
     local iso
     iso="$(latest_iso)"
     [[ -n "$iso" ]] || die "No ISO found — run build first"
-    log "Deploying to KVM..."
-    virsh destroy kldload-free 2>/dev/null || true
-    virsh undefine kldload-free --nvram --remove-all-storage 2>/dev/null || true
-    rm -f /var/lib/libvirt/images/kldload-free.qcow2 2>/dev/null || true
+
     cp "$iso" /var/lib/libvirt/images/kldload-free-latest.iso
     chown qemu:qemu /var/lib/libvirt/images/kldload-free-latest.iso
-    qemu-img create -f qcow2 /var/lib/libvirt/images/kldload-free.qcow2 "${VM_DISK_GB}G"
-    chown qemu:qemu /var/lib/libvirt/images/kldload-free.qcow2
-    virt-install --name kldload-free --ram "$VM_MEMORY" --vcpus "$VM_CORES" \
-        --disk path=/var/lib/libvirt/images/kldload-free.qcow2,format=qcow2,bus=virtio \
-        --cdrom /var/lib/libvirt/images/kldload-free-latest.iso \
-        --os-variant centos-stream9 --network network=default,model=virtio \
-        --graphics vnc,listen=0.0.0.0 \
-        --boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no \
-        --noautoconsole
-    log "KVM VM ready — VNC on $(virsh vncdisplay kldload-free 2>/dev/null || echo ':0')"
+
+    # Static DHCP reservations: .10 and .11 on the default network
+    local -A VM_IPS=( [kldload-free-1]=192.168.122.33 [kldload-free-2]=192.168.122.34 )
+
+    # Clear old DHCP reservations for these IPs
+    for _ip in "${VM_IPS[@]}"; do
+        local _old_mac
+        _old_mac="$(virsh net-dumpxml default 2>/dev/null \
+            | grep -B1 "ip='${_ip}'" | grep -oP "mac='[^']+'" | cut -d"'" -f2)" || true
+        [[ -n "$_old_mac" ]] && \
+            virsh net-update default delete ip-dhcp-host \
+                "<host mac='${_old_mac}' ip='${_ip}'/>" --live --config 2>/dev/null || true
+    done
+
+    for _name in kldload-free-1 kldload-free-2; do
+        local _disk="/var/lib/libvirt/images/${_name}.qcow2"
+        local _ip="${VM_IPS[$_name]}"
+
+        log "Deploying ${_name} (${_ip})..."
+        virsh destroy "$_name" 2>/dev/null || true
+        virsh undefine "$_name" --nvram --remove-all-storage 2>/dev/null || true
+        rm -f "$_disk" 2>/dev/null || true
+
+        qemu-img create -f qcow2 "$_disk" "${VM_DISK_GB}G"
+        chown qemu:qemu "$_disk"
+
+        virt-install --name "$_name" --ram "$VM_MEMORY" --vcpus "$VM_CORES" \
+            --disk "path=${_disk},format=qcow2,bus=virtio" \
+            --cdrom /var/lib/libvirt/images/kldload-free-latest.iso \
+            --os-variant centos-stream9 --network network=default,model=virtio \
+            --graphics vnc,listen=0.0.0.0 \
+            --boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no \
+            --noautoconsole
+
+        # Get the MAC that was assigned and pin it to the static IP
+        local _mac
+        _mac="$(virsh domiflist "$_name" 2>/dev/null | awk '/virbr0/{print $NF}')"
+        [[ -n "$_mac" ]] && \
+            virsh net-update default add ip-dhcp-host \
+                "<host mac='${_mac}' name='${_name}' ip='${_ip}'/>" --live --config 2>/dev/null || true
+
+        log "${_name} ready — VNC $(virsh vncdisplay "$_name" 2>/dev/null || echo '?') — IP ${_ip}"
+    done
 }
 
 cmd_proxmox_deploy() {
