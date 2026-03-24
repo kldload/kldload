@@ -352,21 +352,39 @@ EOGDM
   mkdir -p "${target}/etc/kldload"
   printf '%s\n' "${root_ds}" > "${target}/etc/kldload/boot-environment"
 
-  # ── Darksite (full APT mirror + support scripts) → target /root/darksite/ ──
-  # Core profile skips darksites — installs from internet
-  if [[ "$_profile" != "core" ]]; then
-    local darksite_src="/root/darksite"
+  # ── Darksite — copy ONLY the matching distro's darksite to target ──────────
+  # Core profile and RHEL skip darksites (RHEL uses Red Hat CDN)
+  local _distro="${KLDLOAD_DISTRO:-centos}"
+  if [[ "$_profile" != "core" && "$_distro" != "rhel" ]]; then
     local darksite_tgt="${target}/root/darksite"
-    if [[ -d "$darksite_src" ]]; then
-      mkdir -p "$darksite_tgt"
-      rsync -a --exclude='*.lock' "${darksite_src}/" "${darksite_tgt}/"
-      for f in kldload-syscheck.sh audit.sh; do
-        [[ -f "${darksite_tgt}/${f}" ]] && chmod +x "${darksite_tgt}/${f}"
-      done
-      k_log "Darksite installed to target: ${darksite_tgt}"
-    fi
+    mkdir -p "$darksite_tgt"
+
+    case "$_distro" in
+      debian|ubuntu)
+        # Copy only the APT darksite
+        if [[ -d /root/darksite/debian ]]; then
+          rsync -a --exclude='*.lock' /root/darksite/debian/ "${darksite_tgt}/debian/"
+          k_log "Debian APT darksite installed to target"
+        fi
+        ;;
+      centos|rocky)
+        # Copy only the RPM darksite
+        if [[ -d /root/darksite/rpm ]]; then
+          rsync -a --exclude='*.lock' /root/darksite/rpm/ "${darksite_tgt}/rpm/"
+          k_log "RPM darksite installed to target"
+        fi
+        ;;
+      *)
+        k_log "No darksite for distro: ${_distro}"
+        ;;
+    esac
+
+    # Copy support scripts if present
+    for f in kldload-syscheck.sh audit.sh; do
+      [[ -f "/root/darksite/${f}" ]] && cp "/root/darksite/${f}" "${darksite_tgt}/${f}" && chmod +x "${darksite_tgt}/${f}"
+    done
   else
-    k_log "Core profile — skipping darksite copy."
+    k_log "Skipping darksite copy (profile=${_profile}, distro=${_distro})"
   fi
 
   # ── Kernel module pinning (Debian: APT conf, CentOS: dnf versionlock) ────────
