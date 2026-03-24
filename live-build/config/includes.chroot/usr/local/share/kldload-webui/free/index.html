@@ -148,9 +148,53 @@
 
       <div id="install-idle">
 
+        <!-- Distro -->
+        <div class="panel" style="margin-bottom:1rem">
+          <div class="panel-hdr">◈ Distribution</div>
+          <div class="panel-body">
+            <div class="target-grid" id="distro-grid" style="grid-template-columns:repeat(4,1fr)">
+              <div class="target-card selected" data-distro="centos" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🐧</div>
+                <div class="tc-name">CentOS 9</div>
+              </div>
+              <div class="target-card" data-distro="debian" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🌀</div>
+                <div class="tc-name">Debian 13</div>
+              </div>
+              <div class="target-card" data-distro="rocky" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">⛰</div>
+                <div class="tc-name">Rocky 9</div>
+              </div>
+              <div class="target-card" data-distro="rhel" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🎩</div>
+                <div class="tc-name">RHEL 9</div>
+              </div>
+              <div class="target-card" data-distro="freebsd" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">😈</div>
+                <div class="tc-name">FreeBSD</div>
+              </div>
+              <div class="target-card" data-distro="openbsd" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🐡</div>
+                <div class="tc-name">OpenBSD</div>
+              </div>
+              <div class="target-card" data-distro="ghostbsd" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">👻</div>
+                <div class="tc-name">GhostBSD</div>
+              </div>
+              <div class="target-card" data-distro="illumos" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">☀</div>
+                <div class="tc-name">illumos</div>
+              </div>
+            </div>
+            <div id="distro-summary" style="margin-top:0.6rem;font-size:0.8rem;color:var(--accent)">
+              ✓ CentOS Stream 9 selected
+            </div>
+          </div>
+        </div>
+
         <!-- Target type -->
         <div class="panel" style="margin-bottom:1rem">
-          <div class="panel-hdr">◈ Target Type</div>
+          <div class="panel-hdr">◈ Profile</div>
           <div class="panel-body">
             <div class="target-grid" id="target-grid">
               <div class="target-card selected" data-role="desktop" onclick="selectTarget(this)">
@@ -794,13 +838,29 @@ const ROLE_DESCS = {
   ai:      'AI selected — local LLM assistant + ZFS on root + WireGuard (needs internet for model download)',
 };
 function selectTarget(el) {
-  document.querySelectorAll('.target-card').forEach(c => c.classList.remove('selected'));
+  document.querySelectorAll('#target-grid .target-card').forEach(c => c.classList.remove('selected'));
   el.classList.add('selected');
   const sum = document.getElementById('role-summary');
   if (sum) sum.textContent = '✓ ' + (ROLE_DESCS[el.dataset.role] || el.dataset.role);
-  // Show storage mode choice for core profile
   const smRow = document.getElementById('storage-mode-row');
   if (smRow) smRow.style.display = el.dataset.role === 'core' ? 'block' : 'none';
+}
+
+const DISTRO_DESCS = {
+  centos:   'CentOS Stream 9 — RHEL upstream, offline from RPM darksite',
+  debian:   'Debian 13 (trixie) — stable, offline from APT darksite',
+  rocky:    'Rocky Linux 9 — RHEL-compatible, offline from RPM darksite',
+  rhel:     'RHEL 9 — requires activation key (needs internet)',
+  freebsd:  'FreeBSD 14.4 — native ZFS, jails, bhyve',
+  openbsd:  'OpenBSD 7.8 — security-focused, pf firewall, pledge/unveil',
+  ghostbsd: 'GhostBSD — FreeBSD with MATE desktop',
+  illumos:  'OpenIndiana (illumos) — the original ZFS home',
+};
+function selectDistro(el) {
+  document.querySelectorAll('#distro-grid .target-card').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+  const sum = document.getElementById('distro-summary');
+  if (sum) sum.textContent = '✓ ' + (DISTRO_DESCS[el.dataset.distro] || el.dataset.distro);
 }
 
 // ── DHCP toggle ──────────────────────────────────────────────────────────────
@@ -874,7 +934,8 @@ function startInstall() {
   const timezone = document.getElementById('install-timezone').value || 'UTC';
   const keyboard = document.getElementById('install-keyboard').value || 'us';
   const locale   = document.getElementById('install-locale').value || 'en_US.UTF-8';
-  const role     = (document.querySelector('.target-card.selected') || {}).dataset?.role || 'desktop';
+  const role     = (document.querySelector('#target-grid .target-card.selected') || {}).dataset?.role || 'desktop';
+  const distro   = (document.querySelector('#distro-grid .target-card.selected') || {}).dataset?.distro || 'centos';
   const dhcp     = document.getElementById('net-dhcp').checked;
   const sshKey   = (document.getElementById('install-ssh-key')?.value || '').trim();
   const netIface = document.getElementById('net-iface')?.value || '';
@@ -898,7 +959,7 @@ function startInstall() {
   const manualStorage = role === 'core' && document.querySelector('input[name="storage-mode"][value="manual"]')?.checked;
   const params = {
     disk, hostname: host, username: user,
-    password: pass, timezone, keyboard, locale, role,
+    password: pass, timezone, keyboard, locale, role, distro,
     storage_mode: 'zfs', infra_mode: 'standalone',
     zfs_encrypt: encrypt ? '1' : '0',
     storage_manual: manualStorage ? '1' : '0',
@@ -923,8 +984,9 @@ function startInstall() {
   // Show confirmation modal
   _installPayload = params;
   document.getElementById('confirm-detail').innerHTML =
-    `<b>Disk:</b> ${disk}<br><b>Hostname:</b> ${host}<br><b>User:</b> ${user}<br>` +
-    `<b>Target:</b> ${role}<br><b>Encryption:</b> ${encrypt ? '🔒 AES-256-GCM (passphrase at boot)' : 'None'}<br>` +
+    `<b>Disk:</b> ${disk}<br><b>Distro:</b> ${DISTRO_DESCS[distro]?.split(' — ')[0] || distro}<br>` +
+    `<b>Hostname:</b> ${host}<br><b>User:</b> ${user}<br>` +
+    `<b>Profile:</b> ${role}<br><b>Encryption:</b> ${encrypt ? '🔒 AES-256-GCM (passphrase at boot)' : 'None'}<br>` +
     `<b>Network:</b> ${dhcp ? 'DHCP' : params.network_ip + '/' + params.network_prefix}<br>` +
     `<b>Timezone:</b> ${timezone} &nbsp; <b>Keyboard:</b> ${keyboard}<br><br>` +
     `All data on <b>${disk}</b> will be erased. An initial snapshot will be taken after install. ` +

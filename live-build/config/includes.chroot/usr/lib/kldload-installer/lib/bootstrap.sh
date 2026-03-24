@@ -839,3 +839,155 @@ _k_bootstrap_apt() {
   mkdir -p "${target}/var/log/kldload"
   k_log_to "$log" "Debian bootstrap complete"
 }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BSD / illumos bootstrap functions
+# ══════════════════════════════════════════════════════════════════════════════
+
+_k_bootstrap_freebsd() {
+  local target="${KLDLOAD_TARGET:?}"
+  local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
+  local darksite="/root/darksite-bsd/freebsd"
+
+  k_log_to "$log" "FreeBSD bootstrap starting..."
+
+  # Extract base and kernel
+  [[ -f "${darksite}/base.txz" ]] || { k_log_to "$log" "FATAL: FreeBSD base.txz not found"; return 1; }
+  k_log_to "$log" "Extracting FreeBSD base..."
+  tar -xpf "${darksite}/base.txz" -C "${target}" >> "$log" 2>&1
+  k_log_to "$log" "Extracting FreeBSD kernel..."
+  tar -xpf "${darksite}/kernel.txz" -C "${target}" >> "$log" 2>&1
+
+  # Configure rc.conf
+  cat > "${target}/etc/rc.conf" <<RCCONF
+hostname="${KLDLOAD_HOSTNAME:-kldload-node}"
+ifconfig_DEFAULT="DHCP"
+sshd_enable="YES"
+zfs_enable="YES"
+dumpdev="AUTO"
+RCCONF
+
+  # Enable ZFS boot
+  echo 'zfs_load="YES"' > "${target}/boot/loader.conf"
+  echo "vfs.root.mountfrom=\"zfs:rpool/ROOT/${KLDLOAD_HOSTNAME:-kldload-node}\"" >> "${target}/boot/loader.conf"
+
+  # DNS
+  cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
+
+  # Timezone
+  ln -sf "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE:-UTC}" "${target}/etc/localtime" 2>/dev/null || true
+
+  # Create user
+  local user="${KLDLOAD_USERNAME:-admin}"
+  chroot "${target}" pw useradd "${user}" -m -G wheel -s /bin/sh 2>/dev/null || true
+  if [[ -n "${KLDLOAD_PASSWORD:-}" ]]; then
+    echo "${KLDLOAD_PASSWORD}" | chroot "${target}" pw usermod "${user}" -h 0
+  fi
+  # Enable root login via SSH (initial setup only)
+  sed -i '' 's/^#PermitRootLogin.*/PermitRootLogin yes/' "${target}/etc/ssh/sshd_config" 2>/dev/null || true
+
+  # FreeBSD bootloader EFI
+  local efi_mnt="${KLDLOAD_TARGET_MNT:-/target}/boot/efi"
+  mkdir -p "${efi_mnt}/EFI/BOOT"
+  cp "${target}/boot/loader.efi" "${efi_mnt}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || true
+
+  mkdir -p "${target}/var/log/kldload"
+  k_log_to "$log" "FreeBSD bootstrap complete"
+}
+
+_k_bootstrap_openbsd() {
+  local target="${KLDLOAD_TARGET:?}"
+  local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
+  local darksite="/root/darksite-bsd/openbsd"
+  local ver_short
+  ver_short="$(cat "${darksite}/VERSION" 2>/dev/null | tr -d '.')"
+
+  k_log_to "$log" "OpenBSD bootstrap starting..."
+
+  # Extract base sets
+  for f in "base${ver_short}.tgz" "comp${ver_short}.tgz" "man${ver_short}.tgz"; do
+    if [[ -f "${darksite}/${f}" ]]; then
+      k_log_to "$log" "Extracting ${f}..."
+      tar -xzpf "${darksite}/${f}" -C "${target}" >> "$log" 2>&1
+    fi
+  done
+
+  # Copy kernel
+  [[ -f "${darksite}/bsd" ]] && cp "${darksite}/bsd" "${target}/bsd"
+  [[ -f "${darksite}/bsd.rd" ]] && cp "${darksite}/bsd.rd" "${target}/bsd.rd"
+
+  # Configure hostname
+  echo "${KLDLOAD_HOSTNAME:-kldload-node}" > "${target}/etc/myname"
+
+  # Network — DHCP on first interface
+  echo "dhcp" > "${target}/etc/hostname.vio0"
+  echo "dhcp" > "${target}/etc/hostname.em0"
+
+  # Enable SSH
+  echo "sshd_flags=" >> "${target}/etc/rc.conf.local"
+
+  # DNS
+  cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
+
+  # Create user
+  local user="${KLDLOAD_USERNAME:-admin}"
+  chroot "${target}" useradd -m -G wheel -s /bin/ksh "${user}" 2>/dev/null || true
+  if [[ -n "${KLDLOAD_PASSWORD:-}" ]]; then
+    echo "${KLDLOAD_PASSWORD}" | chroot "${target}" chpasswd 2>/dev/null || true
+  fi
+
+  # Enable doas (OpenBSD's sudo)
+  echo "permit persist :wheel" > "${target}/etc/doas.conf"
+
+  mkdir -p "${target}/var/log/kldload"
+  k_log_to "$log" "OpenBSD bootstrap complete"
+}
+
+_k_bootstrap_ghostbsd() {
+  local target="${KLDLOAD_TARGET:?}"
+  local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
+
+  # GhostBSD is FreeBSD + desktop — bootstrap with FreeBSD base
+  k_log_to "$log" "GhostBSD bootstrap starting (FreeBSD base + desktop)..."
+  _k_bootstrap_freebsd
+
+  # Enable MATE desktop (GhostBSD default)
+  cat >> "${target}/etc/rc.conf" <<GHOST
+slim_enable="YES"
+dbus_enable="YES"
+hald_enable="YES"
+GHOST
+
+  # Desktop packages will be installed on firstboot via pkg
+  mkdir -p "${target}/etc/kldload"
+  cat > "${target}/etc/kldload/firstboot-packages.txt" <<'PKGS'
+xorg mate mate-desktop slim firefox
+PKGS
+
+  k_log_to "$log" "GhostBSD bootstrap complete (desktop packages install on firstboot)"
+}
+
+_k_bootstrap_illumos() {
+  local target="${KLDLOAD_TARGET:?}"
+  local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
+  local darksite="/root/darksite-bsd/illumos"
+
+  k_log_to "$log" "illumos (OpenIndiana) bootstrap starting..."
+
+  # illumos installs differently — it uses its own installer (caiman/kayak)
+  # For kldload, we chain-boot the OpenIndiana ISO and let its installer handle it
+  # The kldload value-add is the ZFS configuration and darksite embedding
+
+  if [[ -f "${darksite}/oi-hipster-minimal.iso" ]]; then
+    # Copy the ISO to the target disk for chain-booting
+    local iso_dest="/root/darksite-bsd/illumos/oi-hipster-minimal.iso"
+    k_log_to "$log" "illumos ISO available at: ${iso_dest}"
+    k_log_to "$log" "illumos requires its native installer — reboot from this ISO"
+    k_log_to "$log" "After install, kldload tools can be added via: pkg install kldload-tools"
+  else
+    k_log_to "$log" "WARNING: OpenIndiana ISO not found in darksite"
+    k_log_to "$log" "Download from: https://www.openindiana.org/download/"
+  fi
+
+  k_log_to "$log" "illumos bootstrap complete (chain-boot installer)"
+}

@@ -254,6 +254,7 @@ cmd_deploy_all() {
 case "${1:-help}" in
     build)              cmd_build ;;
     build-debian-darksite) cmd_build_debian_darksite ;;
+    build-bsd-darksite)    bash build/darksite-bsd/build-darksite-bsd.sh "$ROOT/live-build/darksite-bsd-cache" ;;
     builder-image)      cmd_builder_image ;;
     clean)              cmd_clean ;;
     burn)               cmd_burn ;;
