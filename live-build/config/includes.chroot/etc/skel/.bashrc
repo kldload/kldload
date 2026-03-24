@@ -4,22 +4,9 @@
 [[ -n "${BASH_VERSION:-}" ]] || return
 case $- in *i*) ;; *) return ;; esac
 
-# ── tmux auto-attach (skip if already inside tmux, even via sudo su -) ────────
-_inside_tmux() {
-  [[ -n "${TMUX:-}" ]] && return 0
-  local p=$$
-  while [[ $p -gt 1 ]]; do
-    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
-    [[ -z "$p" ]] && return 1
-    local cmd; cmd=$(ps -o comm= -p "$p" 2>/dev/null)
-    [[ "$cmd" == "tmux"* ]] && return 0
-  done
-  return 1
-}
-if command -v tmux >/dev/null 2>&1 && ! _inside_tmux; then
-  tmux new-session -A -s kldload
-fi
-unset -f _inside_tmux
+# ── tmux (available but not forced — type 'tmux' or 'ta' to start) ────────
+# To auto-attach on login, uncomment the next line:
+# command -v tmux >/dev/null 2>&1 && [[ -z "${TMUX:-}" ]] && tmux new-session -A -s kldload
 
 # ── Login banner — fastfetch (once per session) ──────────────────────────────
 if __have fastfetch && [[ -z "${_KLDLOAD_BANNER_SHOWN:-}" ]]; then
