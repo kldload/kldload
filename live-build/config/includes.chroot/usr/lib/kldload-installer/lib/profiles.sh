@@ -106,7 +106,8 @@ k_profile_packages() {
       echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
         wireguard-tools tmux python3 python3-pip jq htop btop fzf bat eza fd-find ripgrep zoxide fastfetch \
         sanoid cloud-init qemu-guest-agent qemu-utils eject zstd \
-        python3-websockets python3-yaml net-tools ethtool tcpdump"
+        python3-websockets python3-yaml net-tools ethtool tcpdump \
+        alsa-utils pipewire pipewire-utils cmake gcc-c++ make git"
       ;;
 
     *)
