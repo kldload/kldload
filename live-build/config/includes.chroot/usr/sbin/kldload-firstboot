@@ -755,6 +755,10 @@ SALT
       zfs create -o compression=zstd -o recordsize=1M rpool/srv 2>/dev/null || true
       zfs create -o compression=zstd -o recordsize=1M rpool/srv/ollama 2>/dev/null || true
 
+      # Ollama runs as 'ollama' user — pre-create dirs with correct ownership
+      mkdir -p /srv/ollama/models
+      # ollama user created by the installer script, set ownership after install
+
       # Install Ollama
       if curl -fsSL --connect-timeout 30 https://ollama.com/install.sh | sh >> "${LOG}" 2>&1; then
         ok "Ollama installed"
@@ -766,6 +770,8 @@ SALT
 Environment="OLLAMA_MODELS=/srv/ollama/models"
 Environment="OLLAMA_HOST=0.0.0.0:11434"
 OLLAMA
+        # Fix ownership — Ollama installer creates 'ollama' user
+        chown -R ollama:ollama /srv/ollama 2>/dev/null || true
         systemctl daemon-reload
         systemctl enable --now ollama
         sleep 3
