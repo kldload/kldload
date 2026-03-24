@@ -87,6 +87,8 @@ if [[ "$EDITION" != "core" ]]; then
         debootstrap
         # Guest agents
         qemu-guest-agent qemu-img open-vm-tools-desktop
+        # Windows installer support (WIM image extraction)
+        wimlib-utils ntfs-3g ntfsprogs
     )
 fi
 

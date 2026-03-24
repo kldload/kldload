@@ -991,3 +991,119 @@ _k_bootstrap_illumos() {
 
   k_log_to "$log" "illumos bootstrap complete (chain-boot installer)"
 }
+
+_k_bootstrap_windows() {
+  local target="${KLDLOAD_TARGET:?}"
+  local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
+  local disk="${KLDLOAD_DISK:?}"
+
+  k_log_to "$log" "Windows bootstrap starting..."
+
+  # User must provide a Windows ISO — check common locations
+  local win_iso=""
+  for _path in /root/windows.iso /home/live/Desktop/*.iso /home/live/Downloads/*.iso /media/*/sources/install.wim; do
+    if [[ -f "$_path" ]]; then
+      win_iso="$_path"
+      break
+    fi
+  done
+
+  # Also check if a mounted USB/CD has Windows files
+  if [[ -z "$win_iso" ]]; then
+    for _mnt in /media/* /run/media/live/*; do
+      if [[ -f "${_mnt}/sources/install.wim" ]]; then
+        win_iso="${_mnt}/sources/install.wim"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "$win_iso" ]]; then
+    k_log_to "$log" "FATAL: No Windows ISO or install.wim found"
+    k_log_to "$log" "Place a Windows ISO on the Desktop, Downloads, or mount a Windows install USB"
+    return 1
+  fi
+
+  k_log_to "$log" "Windows source: ${win_iso}"
+
+  # If it's an ISO, mount it and find install.wim
+  local wim_file=""
+  if [[ "$win_iso" == *.iso ]]; then
+    mkdir -p /mnt/win-iso
+    mount -o loop,ro "$win_iso" /mnt/win-iso 2>/dev/null || \
+      { k_log_to "$log" "FATAL: Cannot mount Windows ISO"; return 1; }
+    wim_file="/mnt/win-iso/sources/install.wim"
+  elif [[ "$win_iso" == *.wim ]]; then
+    wim_file="$win_iso"
+  else
+    wim_file="$win_iso"
+  fi
+
+  [[ -f "$wim_file" ]] || { k_log_to "$log" "FATAL: install.wim not found in ISO"; return 1; }
+
+  # Show available Windows editions
+  k_log_to "$log" "Available Windows editions:"
+  wiminfo "$wim_file" >> "$log" 2>&1
+
+  # Use image index 1 (usually Windows Pro or the first available)
+  local wim_index="${KLDLOAD_WINDOWS_INDEX:-1}"
+
+  # Partition the disk: EFI (512M) + MSR (16M) + Windows (NTFS)
+  k_log_to "$log" "Partitioning ${disk} for Windows..."
+  sgdisk --zap-all "$disk" >> "$log" 2>&1
+  sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI" "$disk" >> "$log" 2>&1
+  sgdisk -n 2:0:+16M  -t 2:0c01 -c 2:"MSR" "$disk" >> "$log" 2>&1
+  sgdisk -n 3:0:0     -t 3:0700 -c 3:"Windows" "$disk" >> "$log" 2>&1
+  partprobe "$disk" 2>/dev/null; sleep 2
+
+  # Determine partition names
+  local part1="${disk}1" part3="${disk}3"
+  [[ -b "${disk}p1" ]] && part1="${disk}p1" && part3="${disk}p3"
+
+  # Format
+  mkfs.fat -F32 "$part1" >> "$log" 2>&1
+  mkfs.ntfs -f -L "Windows" "$part3" >> "$log" 2>&1
+
+  # Mount
+  mkdir -p /mnt/win-efi /mnt/win-root
+  mount "$part3" /mnt/win-root
+  mount "$part1" /mnt/win-efi
+
+  # Apply Windows image
+  k_log_to "$log" "Applying Windows image (index ${wim_index}) — this takes a few minutes..."
+  wimapply "$wim_file" "$wim_index" /mnt/win-root >> "$log" 2>&1 || \
+    { k_log_to "$log" "FATAL: wimapply failed"; return 1; }
+
+  # Install bootloader
+  k_log_to "$log" "Installing Windows bootloader..."
+  mkdir -p /mnt/win-efi/EFI/Microsoft/Boot
+  if [[ -f /mnt/win-root/Windows/Boot/EFI/bootmgfw.efi ]]; then
+    cp /mnt/win-root/Windows/Boot/EFI/bootmgfw.efi /mnt/win-efi/EFI/Microsoft/Boot/
+    cp /mnt/win-root/Windows/Boot/EFI/bootmgfw.efi /mnt/win-efi/EFI/BOOT/BOOTX64.EFI
+    k_log_to "$log" "Windows bootloader installed"
+  else
+    k_log_to "$log" "WARNING: bootmgfw.efi not found — manual BCD setup may be needed"
+  fi
+
+  # Copy BCD from Windows image
+  if [[ -d /mnt/win-root/Windows/Boot/EFI ]]; then
+    cp -r /mnt/win-root/Windows/Boot/EFI/BCD /mnt/win-efi/EFI/Microsoft/Boot/ 2>/dev/null || true
+  fi
+
+  # Install virtio drivers if available (for KVM/Proxmox)
+  if [[ -d /usr/share/virtio-win ]] || [[ -d /root/darksite/virtio-win ]]; then
+    local vio_src="/usr/share/virtio-win"
+    [[ -d /root/darksite/virtio-win ]] && vio_src="/root/darksite/virtio-win"
+    k_log_to "$log" "Copying virtio drivers for KVM guests..."
+    mkdir -p /mnt/win-root/virtio-drivers
+    cp -r "${vio_src}/." /mnt/win-root/virtio-drivers/ 2>/dev/null || true
+  fi
+
+  # Cleanup
+  sync
+  umount /mnt/win-efi 2>/dev/null || true
+  umount /mnt/win-root 2>/dev/null || true
+  [[ -d /mnt/win-iso ]] && umount /mnt/win-iso 2>/dev/null || true
+
+  k_log_to "$log" "Windows bootstrap complete — reboot to finish Windows setup (OOBE)"
+}
