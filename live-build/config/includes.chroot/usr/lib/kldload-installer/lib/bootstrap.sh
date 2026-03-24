@@ -662,7 +662,13 @@ CUSTOMREPO
     # Tools needed for kldloadOS (non-core profiles)
     # NOTE: sanoid is NOT in any RPM repo — installed from GitHub by k_install_system_files
     wireguard-tools ethtool htop pv lzop mbuffer eject
-    qemu-guest-agent open-vm-tools
+    qemu-guest-agent qemu-img open-vm-tools
+    # Modern CLI tools + cloud
+    fzf btop fd-find ripgrep zoxide fastfetch cloud-init
+    # Sanoid Perl deps (sanoid binary copied by k_install_system_files)
+    perl-Config-IniFiles perl-Capture-Tiny
+    # Web UI + kldload tools backend
+    python3 python3-websockets python3-pyyaml tmux
   )
 
   # Profile-specific packages for DNF-based distros
@@ -677,7 +683,7 @@ CUSTOMREPO
       )
       ;;
     server)
-      _dnf_pkgs+=(tcpdump socat sysstat)
+      _dnf_pkgs+=(tcpdump socat sysstat net-tools)
       ;;
     core)
       # Core: strip extras — no sanoid, no wireguard-tools, no guest agents

@@ -410,13 +410,19 @@ OSREL
 # ---------------------------------------------------------------------------
 if [[ "$EDITION" != "core" ]]; then
     # Copy kldload tools (short names)
-    for tool in kst ksnap kclone kdf kdir kpkg kexport kldload-test kldload-install-target kldload-webui; do
+    for tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kldload-help kldload-test kldload-install-target kldload-webui; do
         src="/build/live-build/config/includes.chroot/usr/local/bin/${tool}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/bin/${tool}" && chmod +x "${ROOTFS}/usr/local/bin/${tool}"
     done
 
+    # Copy .desktop files for GNOME menu
+    for dt in kst.desktop kst-dashboard.desktop ksnap.desktop kexport.desktop kldload-terminal.desktop kldload-docs.desktop vim.desktop; do
+        src="/build/live-build/config/includes.chroot/usr/share/applications/${dt}"
+        [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/share/applications/${dt}"
+    done
+
     # Copy the main installer to /usr/sbin
-    for sbin_tool in kldload-install-target kldload-firstboot kldload-recovery kldload-apply-platform-holds; do
+    for sbin_tool in kldload-install-target kldload-firstboot kldload-recovery kldload-apply-platform-holds kldload-export-deferred; do
         src="/build/live-build/config/includes.chroot/usr/sbin/${sbin_tool}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/sbin/${sbin_tool}" && chmod +x "${ROOTFS}/usr/sbin/${sbin_tool}"
     done
@@ -643,12 +649,12 @@ set timeout=5
 set timeout_style=countdown
 
 menuentry "KLDload Live (CentOS Stream 9 + ZFS)" --hotkey=l {
-    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=2048
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240
     initrdefi /images/pxeboot/initrd.img
 }
 
 menuentry "KLDload Live (troubleshooting)" {
-    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=2048 rd.shell
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 rd.shell
     initrdefi /images/pxeboot/initrd.img
 }
 GRUBCFG
