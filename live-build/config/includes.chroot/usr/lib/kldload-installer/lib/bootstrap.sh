@@ -703,6 +703,22 @@ CUSTOMREPO
       ;;
   esac
 
+  # Optional packages (eBPF, extra ZFS tools) — same logic as Debian path
+  local _opt_pkgs
+  _opt_pkgs="$(k_profile_optional_packages 2>/dev/null || true)"
+  if [[ -n "$_opt_pkgs" ]]; then
+    # Map Debian package names to CentOS equivalents
+    _opt_pkgs="${_opt_pkgs//bpfcc-tools/bcc-tools}"
+    _opt_pkgs="${_opt_pkgs//linux-perf/perf}"
+    _opt_pkgs="${_opt_pkgs//zfsutils-linux/}"
+    _opt_pkgs="${_opt_pkgs//zfs-zed/}"
+    _opt_pkgs="${_opt_pkgs//zfs-initramfs/}"
+    _opt_pkgs="${_opt_pkgs//zfs-dkms/}"
+    read -ra _opt_arr <<< "$_opt_pkgs"
+    _dnf_pkgs+=("${_opt_arr[@]}")
+    k_log_to "$log" "Optional packages added: ${_opt_pkgs}"
+  fi
+
   # Point DNF cache to the target ZFS filesystem to avoid filling the live overlay
   mkdir -p "${target}/var/cache/dnf"
   export DNF_CACHEDIR="${target}/var/cache/dnf"
