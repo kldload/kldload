@@ -4,6 +4,9 @@
 [[ -n "${BASH_VERSION:-}" ]] || return
 case $- in *i*) ;; *) return ;; esac
 
+# ── Helper (must be before all tool checks) ───────────────────────────────
+__have() { command -v "$1" >/dev/null 2>&1; }
+
 # ── tmux (available but not forced — type 'tmux' or 'ta' to start) ────────
 # To auto-attach on login, uncomment the next line:
 # command -v tmux >/dev/null 2>&1 && [[ -z "${TMUX:-}" ]] && tmux new-session -A -s kldload
