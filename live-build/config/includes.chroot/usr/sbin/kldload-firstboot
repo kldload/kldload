@@ -928,7 +928,88 @@ echo -e "Current system:\n${CTX}\n\nQuestion: ${Q}" | ollama run kldload-ai
 KAI
         chmod +x /usr/local/bin/kai
 
-        ok "AI profile ready — run 'kai' to ask questions or 'ollama run kldload-ai' to chat"
+        # ── Voice control: whisper.cpp + kai-voice + kai-do ──────────────
+        log "Installing voice control (whisper.cpp)..."
+        if command -v cmake >/dev/null 2>&1 || dnf install -y cmake gcc-c++ make git 2>/dev/null || apt install -y cmake g++ make git 2>/dev/null; then
+          cd /opt
+          git clone https://github.com/ggerganov/whisper.cpp.git 2>/dev/null || (cd whisper.cpp && git pull)
+          cd whisper.cpp
+          cmake -B build >> "${LOG}" 2>&1 && cmake --build build -j$(nproc) >> "${LOG}" 2>&1
+          bash models/download-ggml-model.sh base.en >> "${LOG}" 2>&1
+          if [[ -x build/bin/whisper-cli ]]; then
+            ok "whisper.cpp built + base.en model downloaded"
+          else
+            log "WARNING: whisper.cpp build failed"
+          fi
+          cd /
+        fi
+
+        # kai-voice — record from mic, transcribe, send to AI
+        cat > /usr/local/bin/kai-voice <<'KAIVOICE'
+#!/usr/bin/env bash
+WHISPER=/opt/whisper.cpp/build/bin/whisper-cli
+MODEL=/opt/whisper.cpp/models/ggml-base.en.bin
+RECORDING=/tmp/kai-voice-recording.wav
+[[ -x "$WHISPER" ]] || { echo "ERROR: whisper not built"; exit 1; }
+echo ""
+echo "  kai-voice — speak your command"
+echo "  Press Enter to record, Enter to stop"
+echo ""
+while true; do
+  read -rp "  [Enter to record] "
+  echo "  Listening... (Enter to stop)"
+  if command -v parecord >/dev/null 2>&1; then
+    parecord --format=s16le --rate=16000 --channels=1 --file-format=wav "$RECORDING" &
+  elif command -v arecord >/dev/null 2>&1; then
+    arecord -f S16_LE -r 16000 -c 1 -d 30 "$RECORDING" &
+  else
+    echo "  ERROR: no audio recorder"; exit 1
+  fi
+  REC_PID=$!; read -r; kill $REC_PID 2>/dev/null; wait $REC_PID 2>/dev/null
+  echo "  Transcribing..."
+  TEXT=$($WHISPER -m "$MODEL" -f "$RECORDING" --no-timestamps -nt 2>/dev/null | sed '/^$/d' | head -5 | xargs)
+  echo "  You said: ${TEXT}"
+  [[ -z "$TEXT" ]] && { echo "  (nothing detected)"; continue; }
+  echo "  Asking AI..."
+  kai "$TEXT"
+  echo ""
+done
+KAIVOICE
+        chmod +x /usr/local/bin/kai-voice
+
+        # kai-do — AI generates and executes commands on remote hosts
+        cat > /usr/local/bin/kai-do <<'KAIDO'
+#!/usr/bin/env bash
+HOST="${1:?Usage: kai-do <host> <instruction>}"
+shift; Q="$*"
+CTX="$(ssh -o StrictHostKeyChecking=no root@${HOST} 'hostname; echo ---; qm list 2>/dev/null || virsh list --all 2>/dev/null; echo ---; free -h | head -2' 2>/dev/null)"
+PROMPT="Remote host ${HOST}:\n${CTX}\n\nInstruction: ${Q}\n\nRespond with ONLY bash commands. No explanation."
+CMDS=$(echo -e "$PROMPT" | ollama run kldload-ai 2>/dev/null | grep -v '^```' | sed '/^[[:space:]]*$/d')
+echo ""; echo "  Commands for ${HOST}:"; echo "  ──────────────────"
+echo "$CMDS" | while IFS= read -r l; do echo "  \$ $l"; done
+echo "  ──────────────────"; echo ""
+read -rp "  Execute? [y/N] " c
+if [[ "$c" == "y" || "$c" == "Y" ]]; then
+  echo "$CMDS" | while IFS= read -r cmd; do
+    [[ -z "$cmd" ]] && continue
+    echo "  > $cmd"; ssh -o StrictHostKeyChecking=no root@${HOST} "$cmd" 2>&1 | sed 's/^/    /'
+  done; echo "  Du-Nn!"
+fi
+KAIDO
+        chmod +x /usr/local/bin/kai-do
+
+        # kai-remote — ask AI about a remote host (read-only)
+        cat > /usr/local/bin/kai-remote <<'KAIREMOTE'
+#!/usr/bin/env bash
+HOST="${1:?Usage: kai-remote <host> <question>}"
+shift; Q="$*"
+CTX="$(ssh -o StrictHostKeyChecking=no root@${HOST} 'hostname; echo ---; qm list 2>/dev/null || virsh list --all 2>/dev/null; echo ---; free -h | head -2' 2>/dev/null)"
+echo -e "Remote host ${HOST}:\n${CTX}\n\nQuestion: ${Q}" | ollama run kldload-ai
+KAIREMOTE
+        chmod +x /usr/local/bin/kai-remote
+
+        ok "Voice control installed: kai-voice, kai-do, kai-remote"
+        ok "AI profile ready — commands: kai, kai-voice, kai-do, kai-remote"
         ok "Trained on $(wc -l < "$_corpus") lines of kldload.com documentation"
       else
         log "WARNING: Ollama install failed (no internet?) — run 'curl -fsSL https://ollama.com/install.sh | sh' manually"
