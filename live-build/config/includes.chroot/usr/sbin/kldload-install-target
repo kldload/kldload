@@ -1381,6 +1381,15 @@ main() {
     fi
   fi
 
+  # Clean up installer temp — give all disk space back to the installed OS
+  k_log "Cleaning up installer temp space..."
+  umount /tmp 2>/dev/null || true
+  umount /var/tmp 2>/dev/null || true
+  swapoff /dev/zvol/rpool/swap 2>/dev/null || true
+  zfs destroy rpool/installer-tmp 2>/dev/null || true
+  zfs destroy rpool/swap 2>/dev/null || true
+  k_log "Swap + tmp cleaned — full disk space available to installed OS"
+
   k_log "Install complete"
   k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
   sync || true
