@@ -200,8 +200,35 @@
           </div>
         </div>
 
+        <!-- Windows options (hidden unless Windows selected) -->
+        <div class="panel" id="windows-options" style="margin-bottom:1rem;display:none">
+          <div class="panel-hdr">◈ Windows Options</div>
+          <div class="panel-body">
+            <div class="form-row" style="margin-bottom:0.5rem">
+              <label style="font-size:0.82rem;color:var(--subtle)">Windows ISO location</label>
+              <select id="windows-iso-path" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem">
+                <option value="auto">Auto-detect (Desktop, Downloads, or mounted USB)</option>
+                <option value="/home/live/Desktop">Desktop</option>
+                <option value="/home/live/Downloads">Downloads</option>
+              </select>
+            </div>
+            <div class="form-row" style="margin-bottom:0.5rem">
+              <label style="font-size:0.82rem;color:var(--subtle)">Windows Edition</label>
+              <select id="windows-index" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem">
+                <option value="1">1 — Windows Pro (default)</option>
+                <option value="2">2 — Windows Home</option>
+                <option value="3">3 — Windows Education</option>
+                <option value="4">4 — Windows Enterprise</option>
+                <option value="5">5 — Server Standard</option>
+                <option value="6">6 — Server Datacenter</option>
+              </select>
+              <div style="font-size:0.72rem;color:var(--muted);margin-top:0.3rem">Index varies by ISO. Run <code>wiminfo /path/to/install.wim</code> to check.</div>
+            </div>
+          </div>
+        </div>
+
         <!-- Target type -->
-        <div class="panel" style="margin-bottom:1rem">
+        <div class="panel" id="profile-panel" style="margin-bottom:1rem">
           <div class="panel-hdr">◈ Profile</div>
           <div class="panel-body">
             <div class="target-grid" id="target-grid">
@@ -871,6 +898,11 @@ function selectDistro(el) {
   el.classList.add('selected');
   const sum = document.getElementById('distro-summary');
   if (sum) sum.textContent = '✓ ' + (DISTRO_DESCS[el.dataset.distro] || el.dataset.distro);
+  // Show/hide Windows options and profile panel
+  const winOpts = document.getElementById('windows-options');
+  const profilePanel = document.getElementById('profile-panel');
+  if (winOpts) winOpts.style.display = el.dataset.distro === 'windows' ? 'block' : 'none';
+  if (profilePanel) profilePanel.style.display = el.dataset.distro === 'windows' ? 'none' : 'block';
 }
 
 // ── DHCP toggle ──────────────────────────────────────────────────────────────
@@ -970,6 +1002,9 @@ function startInstall() {
   const params = {
     disk, hostname: host, username: user,
     password: pass, timezone, keyboard, locale, role, distro,
+    ...(distro === 'windows' ? {
+      windows_index: document.getElementById('windows-index')?.value || '1',
+    } : {}),
     storage_mode: 'zfs', infra_mode: 'standalone',
     zfs_encrypt: encrypt ? '1' : '0',
     storage_manual: manualStorage ? '1' : '0',
