@@ -101,6 +101,12 @@ k_profile_packages() {
       echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables"
       ;;
 
+    ai)
+      # AI learning tool — core + WireGuard + Python + tmux. Ollama installed on firstboot.
+      echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
+        wireguard-tools tmux python3 python3-pip jq htop btop fzf"
+      ;;
+
     *)
       k_die "unsupported profile: $profile"
       ;;

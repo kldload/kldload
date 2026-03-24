@@ -747,6 +747,104 @@ SALT
     systemctl enable kldload-webui 2>/dev/null || true
     systemctl start  kldload-webui 2>/dev/null || true
 
+    # ── AI profile: install Ollama + pull model + create kldload-trained assistant ──
+    if [[ "$ROLE" == "ai" ]]; then
+      log "AI profile — installing Ollama and kldload-trained model..."
+
+      # Create ZFS dataset for models (compressed, snapshotable)
+      zfs create -o compression=zstd -o recordsize=1M rpool/srv 2>/dev/null || true
+      zfs create -o compression=zstd -o recordsize=1M rpool/srv/ollama 2>/dev/null || true
+
+      # Install Ollama
+      if curl -fsSL --connect-timeout 30 https://ollama.com/install.sh | sh >> "${LOG}" 2>&1; then
+        ok "Ollama installed"
+
+        # Configure Ollama to use ZFS-backed storage
+        mkdir -p /etc/systemd/system/ollama.service.d
+        cat > /etc/systemd/system/ollama.service.d/override.conf <<OLLAMA
+[Service]
+Environment="OLLAMA_MODELS=/srv/ollama/models"
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+OLLAMA
+        systemctl daemon-reload
+        systemctl enable --now ollama
+        sleep 3
+
+        # Pull a model (8B — runs on 8GB RAM)
+        log "Pulling llama3.1:8b model (this may take several minutes)..."
+        ollama pull llama3.1:8b >> "${LOG}" 2>&1 && ok "Model llama3.1:8b pulled" \
+          || log "WARNING: model pull failed — run 'ollama pull llama3.1:8b' manually"
+
+        # Create the kldload infrastructure Modelfile
+        mkdir -p /srv/ollama
+        cat > /srv/ollama/Modelfile.kldload <<'MODELFILE'
+FROM llama3.1:8b
+
+SYSTEM """
+You are a Linux infrastructure assistant trained on kldloadOS.
+
+You know these tools and use them in your answers:
+  kst          — system health dashboard (pool, snapshots, services, memory)
+  ksnap        — ZFS snapshot manager (create, list, rollback, destroy)
+  kclone       — instant CoW clone of any dataset
+  kdf          — ZFS-aware disk usage with compression ratios
+  kdir         — create ZFS datasets instead of plain directories
+  kpkg         — universal package manager (auto-detects apt/dnf, snapshots first)
+  kexport      — export disk to qcow2, vmdk, vhd, ova, raw
+  kbe          — boot environment manager (list, activate, rollback)
+  kst-dashboard — tmux 4-pane monitoring dashboard
+  kldload-help — command reference with examples
+
+You know ZFS deeply:
+  zpool status, zfs list, zfs snapshot, zfs rollback, zfs send/recv
+  Compression (lz4/zstd), encryption (per-dataset AES-256-GCM)
+  Boot environments via ZFSBootMenu
+  Sanoid/syncoid for automated snapshots and replication
+  ARC tuning, recordsize optimization, special vdevs
+
+You know WireGuard:
+  wg-quick up/down, config file format, mesh networking patterns
+  Site-to-site tunnels, split tunneling, NAT traversal
+
+You know eBPF:
+  execsnoop, tcplife, opensnoop, biolatency, bpftrace one-liners
+
+You know systemd:
+  journalctl, systemctl, unit files, timers
+
+Your philosophy: teach the primitives. Don't give abstract advice — give exact
+commands the user can run. Always recommend a snapshot before changes.
+When diagnosing, ask for kst output first.
+"""
+
+PARAMETER temperature 0.3
+PARAMETER num_ctx 8192
+MODELFILE
+
+        # Build the custom model
+        ollama create kldload-ai -f /srv/ollama/Modelfile.kldload >> "${LOG}" 2>&1 \
+          && ok "kldload-ai model created" \
+          || log "WARNING: custom model creation failed"
+
+        # Snapshot the clean model state
+        zfs snapshot rpool/srv/ollama@initial 2>/dev/null || true
+
+        # Create the 'kai' command — ask the AI with live system context
+        cat > /usr/local/bin/kai <<'KAI'
+#!/usr/bin/env bash
+# kai — ask the kldload AI assistant with live system context
+Q="${*:-What should I check on this system?}"
+CTX="$(kst 2>/dev/null; echo '---'; zpool status -x 2>/dev/null; echo '---'; free -h 2>/dev/null)"
+echo -e "Current system:\n${CTX}\n\nQuestion: ${Q}" | ollama run kldload-ai
+KAI
+        chmod +x /usr/local/bin/kai
+
+        ok "AI profile ready — run 'kai' to ask questions or 'ollama run kldload-ai' to chat"
+      else
+        log "WARNING: Ollama install failed (no internet?) — run 'curl -fsSL https://ollama.com/install.sh | sh' manually"
+      fi
+    fi
+
     # Remove darksite APT mirror (~1.8G) — not needed after install
     if [[ -d /root/darksite ]]; then
       log "Removing darksite directory (~1.8G)..."
