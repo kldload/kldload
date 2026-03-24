@@ -277,6 +277,40 @@
           </div>
         </div>
 
+        <!-- RHEL auth (hidden unless RHEL selected) -->
+        <div class="panel" id="rhel-auth-panel" style="margin-bottom:1rem;display:none">
+          <div class="panel-hdr">🎩 RHEL Authentication</div>
+          <div class="panel-body">
+            <div style="display:flex;gap:1rem;margin-bottom:0.6rem">
+              <label style="font-size:0.85rem;cursor:pointer"><input type="radio" name="rhel-auth" value="userpass" checked onchange="toggleRhelAuth()"> Username &amp; password</label>
+              <label style="font-size:0.85rem;cursor:pointer"><input type="radio" name="rhel-auth" value="activation" onchange="toggleRhelAuth()"> Activation key</label>
+            </div>
+            <div id="rhel-userpass-fields">
+              <div class="form-group">
+                <label>Red Hat username</label>
+                <input type="text" id="rhel-username" placeholder="your Red Hat portal login">
+              </div>
+              <div class="form-group">
+                <label>Red Hat password</label>
+                <input type="password" id="rhel-password" placeholder="portal password">
+              </div>
+            </div>
+            <div id="rhel-activation-fields" style="display:none">
+              <div class="form-group">
+                <label>Activation key</label>
+                <input type="text" id="rhel-key" placeholder="activation key name">
+              </div>
+              <div class="form-group">
+                <label>Org ID</label>
+                <input type="text" id="rhel-org" placeholder="numeric org ID">
+              </div>
+            </div>
+            <div style="font-size:0.8rem;color:var(--muted);margin-top:0.4rem">
+              RHEL requires internet to pull packages from Red Hat CDN.
+            </div>
+          </div>
+        </div>
+
         <!-- Disk + identity -->
         <div class="panel" style="margin-bottom:1rem">
           <div class="panel-hdr">↯ Target Disk &amp; Identity</div>
@@ -934,14 +968,22 @@ function selectDistro(el) {
   el.classList.add('selected');
   const sum = document.getElementById('distro-summary');
   if (sum) sum.textContent = '✓ ' + (DISTRO_DESCS[el.dataset.distro] || el.dataset.distro);
-  // Show/hide Windows options and profile panel
+  // Show/hide Windows options, RHEL auth, and profile panel
   const winOpts = document.getElementById('windows-options');
   const profilePanel = document.getElementById('profile-panel');
+  const rhelPanel = document.getElementById('rhel-auth-panel');
   if (winOpts) winOpts.style.display = el.dataset.distro === 'windows' ? 'block' : 'none';
   if (profilePanel) profilePanel.style.display = el.dataset.distro === 'windows' ? 'none' : 'block';
+  if (rhelPanel) rhelPanel.style.display = el.dataset.distro === 'rhel' ? 'block' : 'none';
 }
 
 // ── DHCP toggle ──────────────────────────────────────────────────────────────
+function toggleRhelAuth() {
+  const mode = document.querySelector('input[name="rhel-auth"]:checked')?.value || 'userpass';
+  document.getElementById('rhel-userpass-fields').style.display = mode === 'userpass' ? 'block' : 'none';
+  document.getElementById('rhel-activation-fields').style.display = mode === 'activation' ? 'block' : 'none';
+}
+
 function toggleDHCP() {
   const dhcp = document.getElementById('net-dhcp').checked;
   document.getElementById('net-static').style.display = dhcp ? 'none' : 'block';
@@ -1040,6 +1082,13 @@ function startInstall() {
     password: pass, timezone, keyboard, locale, role, distro,
     ...(distro === 'windows' ? {
       windows_index: document.getElementById('windows-index')?.value || '1',
+    } : {}),
+    ...(distro === 'rhel' ? {
+      rhel_auth: document.querySelector('input[name="rhel-auth"]:checked')?.value || 'userpass',
+      rhel_username: document.getElementById('rhel-username')?.value || '',
+      rhel_password: document.getElementById('rhel-password')?.value || '',
+      rhel_key: document.getElementById('rhel-key')?.value || '',
+      rhel_org: document.getElementById('rhel-org')?.value || '',
     } : {}),
     storage_mode: 'zfs', infra_mode: 'standalone',
     zfs_encrypt: encrypt ? '1' : '0',
