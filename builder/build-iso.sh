@@ -450,15 +450,14 @@ if [[ "$EDITION" != "core" ]]; then
         cp /build/live-build/config/includes.chroot/usr/local/bin/kldload-webui \
            "${ROOTFS}/usr/local/bin/kldload-webui"
         chmod +x "${ROOTFS}/usr/local/bin/kldload-webui"
-        mkdir -p "${ROOTFS}/usr/local/share/kldload-webui"
+        # Remove the old active/ UI and replace with the correct edition
+        rm -rf "${ROOTFS}/usr/local/share/kldload-webui/active" 2>/dev/null || true
+        mkdir -p "${ROOTFS}/usr/local/share/kldload-webui/active"
         if [[ "$EDITION" != "core" ]]; then
-            # Free edition: use the free UI (8 distros, AI profile)
             if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/free ]]; then
                 cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/free/. \
-                      "${ROOTFS}/usr/local/share/kldload-webui/"
-            elif [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/active ]]; then
-                cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/active/. \
-                      "${ROOTFS}/usr/local/share/kldload-webui/"
+                      "${ROOTFS}/usr/local/share/kldload-webui/active/"
+                log "Free UI copied to active/"
             fi
         fi
     fi

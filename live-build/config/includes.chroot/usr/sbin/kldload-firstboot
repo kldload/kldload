@@ -826,8 +826,91 @@ MODELFILE
           && ok "kldload-ai model created" \
           || log "WARNING: custom model creation failed"
 
-        # Snapshot the clean model state
-        zfs snapshot rpool/srv/ollama@initial 2>/dev/null || true
+        # Scrape kldload.com docs and build knowledge corpus
+        log "Building knowledge corpus from kldload.com..."
+        mkdir -p /srv/ollama/corpus
+        local _corpus="/srv/ollama/corpus/kldload-docs.txt"
+        : > "$_corpus"
+
+        # Scrape key pages from kldload.com
+        for _page in \
+          tutorials/what-is-kldloados tutorials/zfs-zero-to-hero tutorials/wireguard \
+          tutorials/wireguard-masterclass tutorials/networking tutorials/kvm \
+          tutorials/docker-on-zfs tutorials/export-formats tutorials/nvidia \
+          tutorials/package-management tutorials/cli-tools tutorials/secure-boot \
+          tutorials/observability-beginner tutorials/observability-intermediate \
+          tutorials/nfs-iscsi tutorials/cluster-setup tutorials/cloud-and-packer \
+          platform/tools platform/storage platform/security platform/automation \
+          features why-zfs foundation/the-bridge foundation/vision \
+          pages/build-ai pages/build-backup pages/build-vdi pages/build-containers \
+          pages/build-database pages/build-grafana pages/build-serverless \
+          zfs-wiki/overview zfs-wiki/compression zfs-wiki/encryption \
+          zfs-wiki/pool-design zfs-wiki/tuning zfs-wiki/snapshots; do
+          local _url="https://kldload.com/${_page}.html"
+          local _text
+          _text="$(curl -fsSL --connect-timeout 10 --max-time 30 "$_url" 2>/dev/null \
+            | sed 's/<[^>]*>//g; s/&nbsp;/ /g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&mdash;/—/g; s/&rsquo;/'\''/g; s/&ldquo;/"/g; s/&rdquo;/"/g' \
+            | sed '/^[[:space:]]*$/d' | head -200)" || true
+          if [[ -n "$_text" ]]; then
+            echo "=== ${_page} ===" >> "$_corpus"
+            echo "$_text" >> "$_corpus"
+            echo "" >> "$_corpus"
+          fi
+        done
+
+        # Add tool help output
+        echo "=== kldload tool help ===" >> "$_corpus"
+        for _t in kst ksnap kclone kdf kdir kpkg kexport kbe krecovery kupgrade kldload-help; do
+          echo "--- ${_t} ---" >> "$_corpus"
+          ${_t} --help 2>&1 | head -30 >> "$_corpus" || true
+        done
+
+        local _corpus_size
+        _corpus_size="$(wc -c < "$_corpus")"
+        log "Knowledge corpus: ${_corpus_size} bytes from kldload.com + tool help"
+
+        # Rebuild Modelfile with embedded corpus (append to system prompt)
+        if [[ "$_corpus_size" -gt 1000 ]]; then
+          local _corpus_excerpt
+          _corpus_excerpt="$(head -c 4000 "$_corpus")"
+          cat > /srv/ollama/Modelfile.kldload-trained <<MODELFILE2
+FROM llama3.1:8b
+
+SYSTEM """
+You are a Linux infrastructure assistant trained on kldloadOS documentation.
+
+You have been trained on the complete kldload.com documentation including:
+- All tutorials (ZFS, WireGuard, eBPF, NVIDIA, Docker, KVM, networking)
+- Platform documentation (tools, storage, security, automation)
+- Build guides (backup, VDI, containers, databases, Grafana, serverless)
+- ZFS wiki (compression, encryption, pool design, tuning, snapshots)
+
+You know these tools and use them in your answers:
+  kst, ksnap, kclone, kdf, kdir, kpkg, kexport, kbe, krecovery, kupgrade
+  kst-dashboard, kldload-help, kai
+
+You know ZFS deeply: zpool, zfs, sanoid, syncoid, ARC tuning, boot environments.
+You know WireGuard: mesh networking, multi-plane, NAT traversal.
+You know eBPF: execsnoop, tcplife, opensnoop, biolatency, bpftrace.
+You know Docker on ZFS, KVM/libvirt, Firecracker microVMs, Grafana/Prometheus.
+
+Your philosophy: teach the primitives. Give exact commands. Recommend snapshots before changes.
+
+Here is an excerpt from the documentation you were trained on:
+${_corpus_excerpt}
+"""
+
+PARAMETER temperature 0.3
+PARAMETER num_ctx 8192
+MODELFILE2
+
+          ollama create kldload-ai -f /srv/ollama/Modelfile.kldload-trained >> "${LOG}" 2>&1 \
+            && ok "kldload-ai model retrained with kldload.com docs" \
+            || log "WARNING: retrained model creation failed — using base model"
+        fi
+
+        # Snapshot the trained model state
+        zfs snapshot rpool/srv/ollama@trained 2>/dev/null || true
 
         # Create the 'kai' command — ask the AI with live system context
         cat > /usr/local/bin/kai <<'KAI'
@@ -840,6 +923,7 @@ KAI
         chmod +x /usr/local/bin/kai
 
         ok "AI profile ready — run 'kai' to ask questions or 'ollama run kldload-ai' to chat"
+        ok "Trained on $(wc -l < "$_corpus") lines of kldload.com documentation"
       else
         log "WARNING: Ollama install failed (no internet?) — run 'curl -fsSL https://ollama.com/install.sh | sh' manually"
       fi

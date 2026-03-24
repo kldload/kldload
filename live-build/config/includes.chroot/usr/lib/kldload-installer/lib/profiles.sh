@@ -102,9 +102,11 @@ k_profile_packages() {
       ;;
 
     ai)
-      # AI learning tool — core + WireGuard + Python + tmux. Ollama installed on firstboot.
+      # AI learning tool — core + WireGuard + Python + tmux + modern CLI. Ollama on firstboot.
       echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
-        wireguard-tools tmux python3 python3-pip jq htop btop fzf"
+        wireguard-tools tmux python3 python3-pip jq htop btop fzf bat eza fd-find ripgrep zoxide fastfetch \
+        sanoid cloud-init qemu-guest-agent qemu-utils eject \
+        python3-websockets python3-yaml net-tools ethtool tcpdump"
       ;;
 
     *)
