@@ -662,7 +662,7 @@ CUSTOMREPO
     # Tools needed for kldloadOS (non-core profiles)
     # NOTE: sanoid is NOT in any RPM repo — installed from GitHub by k_install_system_files
     wireguard-tools ethtool htop pv lzop mbuffer eject
-    qemu-guest-agent qemu-img open-vm-tools
+    qemu-guest-agent qemu-img open-vm-tools zstd
     # Modern CLI tools + cloud
     fzf btop fd-find ripgrep zoxide fastfetch cloud-init
     # Sanoid Perl deps (sanoid binary copied by k_install_system_files)
@@ -772,6 +772,7 @@ CUSTOMREPO
 
   k_create_users
   k_install_system_files
+  k_write_manifest
 
   # NVIDIA drivers if requested
   if [[ "${KLDLOAD_NVIDIA_DRIVERS:-0}" == "1" ]]; then
