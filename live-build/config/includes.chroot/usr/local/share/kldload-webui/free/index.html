@@ -247,11 +247,6 @@
                 <div class="tc-name">Core</div>
                 <div class="tc-sub">ZFS only — no extras</div>
               </div>
-              <div class="target-card" data-role="ai" onclick="selectTarget(this)">
-                <div class="tc-icon">🧠</div>
-                <div class="tc-name">AI</div>
-                <div class="tc-sub">Local LLM + ZFS</div>
-              </div>
             </div>
             <div id="role-summary" style="margin-top:0.6rem;font-size:0.8rem;color:var(--accent)">
               ✓ Desktop selected — GNOME workstation + ZFS on root
@@ -561,6 +556,10 @@
         <div class="panel" style="margin-bottom:1rem">
           <div class="panel-hdr">⚙ Additional Options</div>
           <div class="panel-body">
+            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.6rem">
+              <input type="checkbox" id="install-ai" style="width:1rem;height:1rem;cursor:pointer;accent-color:var(--accent);flex-shrink:0">
+              <label for="install-ai" style="cursor:pointer;font-size:0.9rem;margin:0">🧠 AI Assistant <span style="color:var(--muted);font-weight:400">(Ollama + voice control — needs internet + 16GB RAM)</span></label>
+            </div>
             <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.6rem">
               <input type="checkbox" id="install-nvidia" style="width:1rem;height:1rem;cursor:pointer;accent-color:var(--accent);flex-shrink:0">
               <label for="install-nvidia" style="cursor:pointer;font-size:0.9rem;margin:0">NVIDIA drivers <span style="color:var(--muted);font-weight:400">(GPU workstation / CUDA compute)</span></label>
@@ -941,7 +940,6 @@ const ROLE_DESCS = {
   desktop: 'Desktop selected — GNOME workstation + ZFS on root',
   server:  'Server selected — headless SSH node + ZFS on root',
   core:    'Core selected — ZFS on root only, no kldload tools, no extras',
-  ai:      'AI selected — local LLM assistant + ZFS on root + WireGuard (needs internet for model download)',
 };
 function selectTarget(el) {
   document.querySelectorAll('#target-grid .target-card').forEach(c => c.classList.remove('selected'));
@@ -1094,6 +1092,7 @@ function startInstall() {
     storage_mode: 'zfs', infra_mode: 'standalone',
     zfs_encrypt: encrypt ? '1' : '0',
     storage_manual: manualStorage ? '1' : '0',
+    enable_ai: document.getElementById('install-ai')?.checked ? '1' : '0',
     nvidia_drivers: document.getElementById('install-nvidia')?.checked ? '1' : '0',
     wireguard: document.getElementById('install-wireguard')?.checked ? '1' : '0',
     ebpf: document.getElementById('install-ebpf')?.checked ? '1' : '0',
@@ -1149,6 +1148,7 @@ function confirmInstall() {
   const profileNames = { desktop: 'Desktop', server: 'Server', core: 'Core', ai: 'AI' };
   let summary = (distroNames[p.distro] || p.distro || 'CentOS') + ' · ' + (profileNames[p.role] || p.role || 'Desktop');
   const addons = [];
+  if (document.getElementById('install-ai')?.checked) addons.push('+AI');
   if (document.getElementById('install-wireguard')?.checked) addons.push('+WireGuard');
   if (document.getElementById('install-nvidia')?.checked) addons.push('+NVIDIA');
   if (document.getElementById('install-ebpf')?.checked) addons.push('+eBPF');
