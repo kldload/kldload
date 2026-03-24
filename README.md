@@ -1,122 +1,99 @@
 # kldload
 
-**Not an OS. Not a distro. A kernel loader.**
+![kldloadOS — 4 distros installed from one USB](https://kldload.com/screenshots/installed-4-distros.png)
 
-kldload builds a single bootable ISO that installs CentOS, Debian, or RHEL with ZFS on root — offline, from a USB stick, in under 2 minutes. Both package mirrors (RPM + APT) are baked into the image. No internet required.
+**10 operating systems. One USB. ZFS on root. AI-powered. Free.**
 
-**Website & ZFS Wiki:** [kldload.com](https://kldload.com) | **Architecture & Developer Guide:** [ARCHITECTURE.md](ARCHITECTURE.md)
+kldload builds a single bootable ISO that installs CentOS, Debian, Rocky, RHEL, Ubuntu, FreeBSD, OpenBSD, GhostBSD, illumos, or Windows — with ZFS on root, offline, from a USB stick. Both RPM and APT package mirrors are baked into the image. No internet required.
+
+The first operating system with a built-in local AI assistant — voice-controlled, trained on its own documentation, running entirely on your hardware. No cloud. No API key.
+
+**Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Release Notes:** [RELEASE-1.0.md](RELEASE-1.0.md)
 
 ---
 
 ## Quickstart
 
 ```bash
-git clone https://github.com/kldload/kldload.git
-cd kldload
+# Download and burn
+curl -L -o kldload.iso https://dl.kldload.com/kldload-free-latest.iso
+dd if=kldload.iso of=/dev/sdX bs=4M status=progress oflag=sync && sync
 
-# Full build: builder image + Debian darksite + CentOS ISO
-./deploy.sh clean
-./deploy.sh builder-image
-./deploy.sh build-debian-darksite
-PROFILE=desktop ./deploy.sh build
-
-# Deploy
-./deploy.sh kvm-deploy          # local KVM
-./deploy.sh proxmox-deploy      # Proxmox (set PROXMOX_HOST in kldload.env)
-./deploy.sh burn                # USB (/dev/sda)
+# Or build from source
+git clone https://github.com/kldload/kldload.git && cd kldload
+./deploy.sh build-debian-darksite && PROFILE=desktop ./deploy.sh build
 ```
 
-Output: `live-build/output/kldload-free-centos-desktop-x86_64-DATE.iso`
+Boot the USB → web UI opens → pick distro + profile → install. Two minutes.
 
 ---
 
-## What's inside the ISO
+## 10 Distros, One USB
 
-```
-ISO 9660 image
-├── LiveOS/squashfs.img          ← CentOS live environment (GNOME + web UI)
-├── /root/darksite/rpm/          ← offline CentOS package mirror (~900 RPMs)
-├── /root/darksite/debian/apt/   ← offline Debian package mirror (~2,700 debs)
-├── /root/darksite/boot/         ← ZFSBootMenu EFI binary
-├── kldload-install-target       ← installer (bash)
-├── kldload-webui                ← web UI (Python)
-└── 30+ CLI tools (kst, ksnap, kbe, kdf, kdir, kpkg, ...)
-```
+| OS | Method | Offline |
+|---|---|---|
+| CentOS Stream 9 | dnf --installroot | Yes |
+| Debian 13 | debootstrap | Yes |
+| Rocky Linux 9 | dnf --installroot | Yes |
+| RHEL 9 | dnf --installroot | Internet |
+| Ubuntu 24.04 | debootstrap | Planned |
+| FreeBSD 14.4 | base.txz | Yes |
+| OpenBSD 7.8 | base sets | Yes |
+| GhostBSD | FreeBSD + desktop | Partial |
+| illumos | Chain-boot | Yes |
+| Windows | WIM extraction | User ISO |
 
-Boot the ISO → web UI opens → pick distro + profile → install to disk. Two separate bootstrap paths run underneath — `dnf --installroot` for CentOS/RHEL, `debootstrap` for Debian. Same ZFS layout, same bootloader on all.
-
-### Profiles
+## 3 Profiles + AI
 
 | Profile | What you get |
-|---------|-------------|
-| **Desktop** | GNOME workstation + ZFS on root + all kldloadOS tools |
-| **Server** | Headless + SSH + ZFS on root + all kldloadOS tools |
-| **Core** | ZFS on root only — stock distro, no kldload tools, no extras |
+|---|---|
+| **Desktop** | GNOME + ZFS + all kldloadOS tools |
+| **Server** | Headless SSH + ZFS + all kldloadOS tools |
+| **Core** | ZFS on root only — stock distro |
 
-Core is for advanced users who want ZFS on root and nothing else. Desktop and Server include the full kldloadOS experience — `k*` tools, web UI, automatic snapshots, offline darksites.
+**AI checkbox** — adds Ollama + voice control to any profile. Needs internet on first boot + 16GB RAM.
 
----
+## What's Inside
 
-## deploy.sh commands
+- **ZFS on root** — boot environments, snapshots, replication, per-dataset encryption
+- **AI assistant** — Ollama + whisper.cpp, voice-controlled, trained on kldload.com docs
+- **WireGuard** — kernel-level encrypted mesh networking
+- **eBPF** — execsnoop, tcplife, opensnoop, biolatency
+- **NVIDIA** — GPU drivers + CUDA + container GPU sharing
+- **Image export** — qcow2, VMDK, VHD, OVA, raw from one install
+- **cloud-init** — Terraform/Packer ready
+- **30+ CLI tools** — kst, ksnap, kclone, kdf, kdir, kpkg, kexport
+- **Modern terminal** — fzf, btop, eza, ripgrep, zoxide, fastfetch
+- **96 pages of docs** at kldload.com
+
+## deploy.sh
 
 | Command | What it does |
-|---------|-------------|
-| `full` | Clean + rebuild everything |
-| `build` | Build ISO (uses cached darksite) |
-| `build-debian-darksite` | Rebuild Debian APT mirror cache |
+|---|---|
+| `build` | Build ISO (caches darksites) |
+| `build-debian-darksite` | Rebuild Debian APT mirror |
+| `build-bsd-darksite` | Download BSD base sets |
+| `build-ubuntu-darksite` | Rebuild Ubuntu APT mirror |
 | `builder-image` | Rebuild builder container |
-| `clean` | Remove build artifacts |
-| `kvm-deploy` | Deploy to local KVM |
+| `kvm-deploy` | Deploy to local KVM (2 VMs) |
 | `proxmox-deploy` | Deploy to Proxmox |
-| `deploy-all` | KVM + Proxmox + print USB command |
 | `burn` | Write ISO to USB |
+| `clean` | Remove build artifacts |
 
----
-
-## Project structure
+## Architecture
 
 ```
-kldload-free/
-├── deploy.sh                    ← entry point
-├── builder/
-│   ├── Dockerfile               ← CentOS builder container
-│   └── build-iso.sh             ← ISO assembly (runs in container)
-├── build/
-│   ├── darksite/                ← RPM darksite builder + package lists
-│   └── darksite-debian/         ← APT darksite builder + package lists
-├── live-build/
-│   ├── output/                  ← built ISOs
-│   └── config/includes.chroot/  ← everything baked into the live ISO
-│       ├── usr/sbin/kldload-install-target
-│       ├── usr/lib/kldload-installer/lib/   ← 9 installer libraries
-│       ├── usr/local/bin/kldload-webui
-│       └── usr/local/bin/kst, ksnap, ...
-└── profiles/                    ← desktop.yaml, server.yaml
+100% bash. One Python file. Zero compiled binaries.
+cat any file and read what it does.
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full developer guide — build pipeline, installer internals, how to add packages, postinstallers, and custom profiles.
-
----
-
-## What you get
-
-- **ZFS on root** with ZFSBootMenu boot environments
-- **Automatic snapshots** before every package change
-- **30+ CLI tools** — `kst`, `ksnap`, `kbe`, `kdf`, `kdir`, `kpkg`
-- **Web UI** installer and management (Python, port 8080)
-- **Offline install** — both darksites baked in
-- **Secure Boot** support via MOK enrollment
-- **Multi-distro** — CentOS, Debian, RHEL from one ISO
-
-## What you don't get
-
-- Not an OS — it installs one
-- Not a distro — you pick yours
-- Not a cluster manager — build your own on top
-- Not opinionated — ZFS on root is the only non-negotiable
-
----
+See [ARCHITECTURE.md](ARCHITECTURE.md) for internals.
 
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE).
+BSD-3-Clause. Free forever. See [LICENSE](LICENSE).
+
+---
+
+*Built by one person who just knows the primitives.*
+*Learn the primitives — they'll outlast any product.*
