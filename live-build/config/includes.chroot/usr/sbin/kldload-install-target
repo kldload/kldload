@@ -1295,6 +1295,21 @@ main() {
     _ok "Storage"     "ZFS pools created on ${KLDLOAD_DISK}"
   fi
 
+  # Create swap + redirect ALL temp to target ZFS — the live overlay is tiny
+  _info "▸  Creating swap and temp space on target ZFS..."
+  # 20GB swap on ZFS zvol
+  zfs create -V 20G rpool/swap 2>/dev/null || true
+  mkswap /dev/zvol/rpool/swap 2>/dev/null && swapon /dev/zvol/rpool/swap 2>/dev/null || true
+  # 20GB tmp dataset on ZFS (auto-grows, quota prevents runaway)
+  zfs create -o mountpoint=none -o quota=20G rpool/installer-tmp 2>/dev/null || true
+  mkdir -p "${KLDLOAD_TARGET_MNT}/installer-tmp"
+  zfs set mountpoint="${KLDLOAD_TARGET_MNT}/installer-tmp" rpool/installer-tmp 2>/dev/null || true
+  # Bind-mount over live /tmp and /var/tmp so ALL temp goes to ZFS
+  mount --bind "${KLDLOAD_TARGET_MNT}/installer-tmp" /tmp 2>/dev/null || true
+  mount --bind "${KLDLOAD_TARGET_MNT}/installer-tmp" /var/tmp 2>/dev/null || true
+  export TMPDIR="/tmp"
+  k_log "Swap: 20G | /tmp + /var/tmp → target ZFS (quota 20G) | ~40G free for OS"
+
   _info "▸  Bootstrapping ${KLDLOAD_DISTRO:-centos} base system (this takes a few minutes)..."
   k_bootstrap_base
   _ok "Bootstrap"   "${KLDLOAD_DISTRO:-centos} base installed"
