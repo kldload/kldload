@@ -448,10 +448,16 @@ if [[ "$EDITION" != "core" ]]; then
         cp /build/live-build/config/includes.chroot/usr/local/bin/kldload-webui \
            "${ROOTFS}/usr/local/bin/kldload-webui"
         chmod +x "${ROOTFS}/usr/local/bin/kldload-webui"
-        if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/active ]]; then
-            mkdir -p "${ROOTFS}/usr/local/share/kldload-webui"
-            cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/active/. \
-                  "${ROOTFS}/usr/local/share/kldload-webui/"
+        mkdir -p "${ROOTFS}/usr/local/share/kldload-webui"
+        if [[ "$EDITION" != "core" ]]; then
+            # Free edition: use the free UI (8 distros, AI profile)
+            if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/free ]]; then
+                cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/free/. \
+                      "${ROOTFS}/usr/local/share/kldload-webui/"
+            elif [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/active ]]; then
+                cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/active/. \
+                      "${ROOTFS}/usr/local/share/kldload-webui/"
+            fi
         fi
     fi
 
@@ -583,6 +589,24 @@ if [[ "$EDITION" != "core" ]]; then
         log "Debian darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/debian" 2>/dev/null | cut -f1)"
     else
         log "WARNING: No Debian darksite found — Debian installs will require internet"
+    fi
+
+    # Copy Ubuntu darksite APT mirror into the rootfs
+    if [[ -d /build/live-build/darksite-ubuntu-cache/apt ]]; then
+        mkdir -p "${ROOTFS}/root/darksite/ubuntu"
+        cp -r /build/live-build/darksite-ubuntu-cache/apt "${ROOTFS}/root/darksite/ubuntu/"
+        log "Ubuntu darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/ubuntu" 2>/dev/null | cut -f1)"
+    else
+        log "No Ubuntu darksite found — Ubuntu installs will require internet"
+    fi
+
+    # Copy BSD/illumos base sets into the rootfs for offline installs
+    if [[ -d /build/live-build/darksite-bsd-cache ]]; then
+        mkdir -p "${ROOTFS}/root/darksite-bsd"
+        cp -r /build/live-build/darksite-bsd-cache/. "${ROOTFS}/root/darksite-bsd/"
+        log "BSD darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite-bsd" 2>/dev/null | cut -f1)"
+    else
+        log "No BSD darksite found — BSD installs will require internet"
     fi
 else
     log "Core edition — no offline darksites (internet required for target installs)."

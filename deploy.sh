@@ -75,6 +75,25 @@ cmd_build_debian_darksite() {
     log "Debian darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
 }
 
+cmd_build_ubuntu_darksite() {
+    local runtime
+    runtime="$(detect_runtime)"
+    local darksite_dir="$ROOT/live-build/darksite-ubuntu-cache"
+    mkdir -p "$darksite_dir"
+    log "Building Ubuntu darksite APT mirror (runs in Ubuntu container)..."
+    "$runtime" run --rm \
+        -v "$ROOT/build/darksite-debian:/darksite-build:z,ro" \
+        -v "$ROOT/build/darksite-ubuntu:/darksite-ubuntu:z,ro" \
+        -v "$darksite_dir:/output:z" \
+        -e PROFILE="$PROFILE" \
+        -e ARCH="amd64" \
+        -e SUITE="noble" \
+        --name "kldload-darksite-ubuntu-$$" \
+        ubuntu:noble \
+        bash -c "apt-get update -qq && apt-get install -y -qq dpkg-dev curl >/dev/null 2>&1 && PKG_SETS_DIR=/darksite-ubuntu/config/package-sets bash /darksite-build/build-darksite-debian.sh"
+    log "Ubuntu darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
+}
+
 cmd_build() {
     local runtime
     runtime="$(detect_runtime)"
@@ -255,6 +274,7 @@ case "${1:-help}" in
     build)              cmd_build ;;
     build-debian-darksite) cmd_build_debian_darksite ;;
     build-bsd-darksite)    bash build/darksite-bsd/build-darksite-bsd.sh "$ROOT/live-build/darksite-bsd-cache" ;;
+    build-ubuntu-darksite) cmd_build_ubuntu_darksite ;;
     builder-image)      cmd_builder_image ;;
     clean)              cmd_clean ;;
     burn)               cmd_burn ;;
