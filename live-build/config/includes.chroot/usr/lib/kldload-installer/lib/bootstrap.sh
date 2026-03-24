@@ -724,6 +724,12 @@ CUSTOMREPO
   mkdir -p "${target}/var/cache/dnf"
   export DNF_CACHEDIR="${target}/var/cache/dnf"
 
+  # Create merged-usr symlinks so RPM scriptlets can find /bin/sh during install
+  mkdir -p "${target}/usr/bin" "${target}/usr/sbin" "${target}/usr/lib" "${target}/usr/lib64"
+  for _d in bin sbin lib lib64; do
+    [[ -L "${target}/${_d}" ]] || ln -sf "usr/${_d}" "${target}/${_d}"
+  done
+
   k_log_to "$log" "Running dnf --installroot (${#_dnf_pkgs[@]} packages, profile=${_profile})..."
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
