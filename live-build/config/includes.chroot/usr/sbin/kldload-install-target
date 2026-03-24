@@ -1295,20 +1295,11 @@ main() {
     _ok "Storage"     "ZFS pools created on ${KLDLOAD_DISK}"
   fi
 
-  # Create swap + redirect ALL temp to target ZFS — the live overlay is tiny
-  _info "▸  Creating swap and temp space on target ZFS..."
-  # 20GB swap on ZFS zvol
-  zfs create -V 20G rpool/swap 2>/dev/null || true
+  # Create swap for extra RAM — the 8B AI model needs it
+  _info "▸  Creating swap on target ZFS..."
+  zfs create -V 4G rpool/swap 2>/dev/null || true
   mkswap /dev/zvol/rpool/swap 2>/dev/null && swapon /dev/zvol/rpool/swap 2>/dev/null || true
-  # 20GB tmp dataset on ZFS (auto-grows, quota prevents runaway)
-  zfs create -o mountpoint=none -o quota=20G rpool/installer-tmp 2>/dev/null || true
-  mkdir -p "${KLDLOAD_TARGET_MNT}/installer-tmp"
-  zfs set mountpoint="${KLDLOAD_TARGET_MNT}/installer-tmp" rpool/installer-tmp 2>/dev/null || true
-  # Bind-mount over live /tmp and /var/tmp so ALL temp goes to ZFS
-  mount --bind "${KLDLOAD_TARGET_MNT}/installer-tmp" /tmp 2>/dev/null || true
-  mount --bind "${KLDLOAD_TARGET_MNT}/installer-tmp" /var/tmp 2>/dev/null || true
-  export TMPDIR="/tmp"
-  k_log "Swap: 20G | /tmp + /var/tmp → target ZFS (quota 20G) | ~40G free for OS"
+  k_log "Swap: 4G on ZFS zvol"
 
   _info "▸  Bootstrapping ${KLDLOAD_DISTRO:-centos} base system (this takes a few minutes)..."
   k_bootstrap_base
@@ -1381,14 +1372,11 @@ main() {
     fi
   fi
 
-  # Clean up installer temp — give all disk space back to the installed OS
-  k_log "Cleaning up installer temp space..."
-  umount /tmp 2>/dev/null || true
-  umount /var/tmp 2>/dev/null || true
+  # Clean up installer swap — give disk space back
+  k_log "Cleaning up installer swap..."
   swapoff /dev/zvol/rpool/swap 2>/dev/null || true
-  zfs destroy rpool/installer-tmp 2>/dev/null || true
   zfs destroy rpool/swap 2>/dev/null || true
-  k_log "Swap + tmp cleaned — full disk space available to installed OS"
+  k_log "Swap cleaned — full disk space available to installed OS"
 
   k_log "Install complete"
   k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
