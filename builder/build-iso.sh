@@ -698,6 +698,7 @@ mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grub.cfg" 
 xorriso -as mkisofs \
     -o "${OUTPUT_DIR}/${ISO_NAME}" \
     -R -J -joliet-long \
+    -iso-level 3 \
     -V "KLDLOAD" \
     -e images/efiboot.img \
     -no-emul-boot \
