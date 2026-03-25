@@ -535,13 +535,13 @@ APTEOF
     # Copy systemd service units from includes.chroot
     for _svc in kldload-firstboot.service kldload-srv-snapshot.service kldload-srv-snapshot.timer \
                 kldload-snapshot.service kldload-snapshot.timer kldload-export.service; do
-        local _src="/build/live-build/config/includes.chroot/usr/lib/systemd/system/${_svc}"
+        _src="/build/live-build/config/includes.chroot/usr/lib/systemd/system/${_svc}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/lib/systemd/system/${_svc}"
     done
 
     # Copy kldload-firstboot and kldload-export-deferred to sbin
     for _sb in kldload-firstboot kldload-export-deferred; do
-        local _src="/build/live-build/config/includes.chroot/usr/local/sbin/${_sb}"
+        _src="/build/live-build/config/includes.chroot/usr/local/sbin/${_sb}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/local/sbin/${_sb}" && chmod +x "${ROOTFS}/usr/local/sbin/${_sb}"
     done
 
