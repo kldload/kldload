@@ -1386,11 +1386,12 @@ MANIFEST
     fi
   fi
 
-  # Clean up installer swap — give disk space back
+  # Clean up installer swap
   k_log "Cleaning up installer swap..."
   swapoff /dev/zvol/rpool/swap 2>/dev/null || true
-  zfs destroy rpool/swap 2>/dev/null || true
-  k_log "Swap cleaned — full disk space available to installed OS"
+  # Don't destroy the zvol — it can cause pool sync issues during export
+  # Firstboot will clean it up on the installed system
+  k_log "Swap deactivated (zvol cleanup deferred to firstboot)"
 
   k_log "Install complete"
   k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
