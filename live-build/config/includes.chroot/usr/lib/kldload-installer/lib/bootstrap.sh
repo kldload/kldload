@@ -26,9 +26,9 @@ deb [trusted=yes] ${mirror} ${suite} main
 EOS
   elif [[ "$distro" == "ubuntu" ]]; then
     cat > "${target}/etc/apt/sources.list" <<EOS
-deb ${mirror} ${suite} main restricted universe multiverse
-deb ${mirror} ${suite}-updates main restricted universe multiverse
-deb ${mirror} ${suite}-security main restricted universe multiverse
+deb [trusted=yes] ${mirror} ${suite} main restricted universe multiverse
+deb [trusted=yes] ${mirror} ${suite}-updates main restricted universe multiverse
+deb [trusted=yes] ${mirror} ${suite}-security main restricted universe multiverse
 EOS
   else
     cat > "${target}/etc/apt/sources.list" <<EOS
