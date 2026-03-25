@@ -304,8 +304,12 @@ k_install_target_packages() {
     fi
   fi
 
+  # Ubuntu noble may have DEB822 format sources that override sources.list
+  # Remove them so our sources.list is authoritative
+  rm -f "${target}"/etc/apt/sources.list.d/*.sources 2>/dev/null || true
+
   k_in_chroot "${target}" apt-get update
-  k_in_chroot "${target}" apt-get install -y "${pkgs[@]}"
+  DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y "${pkgs[@]}"
 
   profile_pkgs="$(k_profile_packages)"
   profile_opt="$(k_profile_optional_packages)"
