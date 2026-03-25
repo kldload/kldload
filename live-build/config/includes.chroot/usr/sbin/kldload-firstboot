@@ -774,12 +774,37 @@ OLLAMA
         chown -R ollama:ollama /srv/ollama 2>/dev/null || true
         systemctl daemon-reload
         systemctl enable --now ollama
-        sleep 3
 
-        # Pull a model (8B — runs on 8GB RAM)
+        # Wait for Ollama API to be ready (up to 60 seconds)
+        log "Waiting for Ollama to start..."
+        local _ollama_ready=0
+        for _try in $(seq 1 12); do
+          if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
+            _ollama_ready=1
+            ok "Ollama API ready (attempt ${_try})"
+            break
+          fi
+          log "  Ollama not ready yet (attempt ${_try}/12)..."
+          sleep 5
+        done
+
+        if [[ "${_ollama_ready}" -eq 0 ]]; then
+          log "WARNING: Ollama API not responding after 60s — model pull may fail"
+        fi
+
+        # Pull a model (8B — runs on 8GB RAM) with retry
         log "Pulling llama3.1:8b model (this may take several minutes)..."
-        ollama pull llama3.1:8b >> "${LOG}" 2>&1 && ok "Model llama3.1:8b pulled" \
-          || log "WARNING: model pull failed — run 'ollama pull llama3.1:8b' manually"
+        local _pull_ok=0
+        for _attempt in 1 2 3; do
+          if ollama pull llama3.1:8b >> "${LOG}" 2>&1; then
+            _pull_ok=1
+            ok "Model llama3.1:8b pulled (attempt ${_attempt})"
+            break
+          fi
+          log "  Model pull attempt ${_attempt}/3 failed — retrying in 10s..."
+          sleep 10
+        done
+        [[ "${_pull_ok}" -eq 0 ]] && log "WARNING: model pull failed after 3 attempts — run 'ollama pull llama3.1:8b' manually"
 
         # Create the kldload infrastructure Modelfile
         mkdir -p /srv/ollama
