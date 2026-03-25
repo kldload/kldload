@@ -92,7 +92,10 @@ k_bind_chroot_mounts() {
   k_mount_bind /sys "${target}/sys"
   k_mount_bind /run "${target}/run"
   # Copy resolv.conf so chroot has DNS for apt/dnf
-  cp -f /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
+  # Ubuntu may have a dangling symlink — remove it and write a real file
+  rm -f "${target}/etc/resolv.conf" 2>/dev/null || true
+  cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || \
+    echo "nameserver 8.8.8.8" > "${target}/etc/resolv.conf"
   if [[ -d /sys/firmware/efi/efivars ]]; then
     mkdir -p "${target}/sys/firmware/efi/efivars"
     mountpoint -q "${target}/sys/firmware/efi/efivars" || \
@@ -298,10 +301,8 @@ k_install_target_packages() {
       zfs-initramfs
       zfs-zed
     )
-    # Debian needs zfs-dkms explicitly; Ubuntu has it in universe
-    if [[ "$distro" == "ubuntu" ]]; then
-      pkgs+=( zfs-dkms )
-    else
+    # Debian needs zfs-dkms for DKMS build; Ubuntu ships ZFS in the kernel image
+    if [[ "$distro" != "ubuntu" ]]; then
       pkgs+=( zfs-dkms )
     fi
   fi
