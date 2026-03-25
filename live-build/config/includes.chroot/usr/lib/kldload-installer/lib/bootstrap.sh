@@ -152,7 +152,7 @@ k_create_users() {
 }
 
 k_write_manifest() {
-  local target="${KLDLOAD_TARGET:?}"
+  local target="${KLDLOAD_TARGET_MNT:-${KLDLOAD_TARGET:-/target}}"
   mkdir -p "${target}/etc/kldload"
 
   cat > "${target}/etc/kldload/install-manifest.env" <<EOM
