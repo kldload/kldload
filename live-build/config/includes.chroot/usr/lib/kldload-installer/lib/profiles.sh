@@ -13,17 +13,22 @@ k_profile_packages() {
       echo "openssh-server sudo curl ca-certificates vim less network-manager wireguard-tools iproute2"
       ;;
     desktop)
-      # task-gnome-desktop pulls gnome-core → gnome-snapshot → gstreamer1.0-plugins-bad
-      # → libfluidsynth3 → sf3-soundfont-gm which is not in the darksite (soundfonts
-      # are blacklisted). Install individual packages that avoid gnome-snapshot entirely.
-      # Only packages confirmed present in the darksite pool are listed here.
-      # loupe = GNOME image viewer (replaces eog in trixie). firefox-esr confirmed in darksite pool.
+      local _distro="${KLDLOAD_DISTRO:-debian}"
+      local _browser="firefox-esr"
+      local _viewer="loupe"
+      local _terminal="gnome-terminal"
+      # Ubuntu uses different package names for some GNOME components
+      if [[ "$_distro" == "ubuntu" ]]; then
+        _browser="firefox"
+        _viewer="eog"
+        _terminal="gnome-terminal"
+      fi
       echo "openssh-server sudo curl ca-certificates vim less network-manager \
         gnome-shell gnome-session gnome-control-center gnome-settings-daemon \
-        gdm3 nautilus gnome-terminal loupe \
+        gdm3 nautilus ${_terminal} ${_viewer} \
         adwaita-icon-theme fonts-cantarell gvfs gvfs-backends \
         gnome-keyring \
-        firefox-esr \
+        ${_browser} \
         tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide fastfetch"
       ;;
 
