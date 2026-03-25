@@ -754,6 +754,8 @@ KLDLOAD_DISTRO="${KLDLOAD_DISTRO:-centos}"
 KLDLOAD_ENABLE_AI="${KLDLOAD_ENABLE_AI:-0}"
 KLDLOAD_ENABLE_EBPF="${KLDLOAD_ENABLE_EBPF:-0}"
 KLDLOAD_NVIDIA_DRIVERS="${KLDLOAD_NVIDIA_DRIVERS:-0}"
+KLDLOAD_WIREGUARD="${KLDLOAD_WIREGUARD:-0}"
+KLDLOAD_EXPORT_FORMAT="${KLDLOAD_EXPORT_FORMAT:-none}"
 # For join mode: LAN IP of the Cluster Manager to connect to at first boot
 KLDLOAD_HUB_LAN="${KLDLOAD_HUB_LAN:-}"
 EOF
@@ -1303,18 +1305,9 @@ main() {
   k_bootstrap_base
   _ok "Bootstrap"   "${KLDLOAD_DISTRO:-centos} base installed"
 
-  # Write install manifest — must happen here where KLDLOAD_TARGET_MNT is known
-  mkdir -p "${KLDLOAD_TARGET_MNT}/etc/kldload"
-  cat > "${KLDLOAD_TARGET_MNT}/etc/kldload/install-manifest.env" <<MANIFEST
-KLDLOAD_PROFILE=${KLDLOAD_PROFILE:-server}
-KLDLOAD_DISTRO=${KLDLOAD_DISTRO:-centos}
-KLDLOAD_STORAGE_MODE=${KLDLOAD_STORAGE_MODE:-standard}
-KLDLOAD_ENABLE_ZFS=${KLDLOAD_ENABLE_ZFS:-0}
-KLDLOAD_ENABLE_EBPF=${KLDLOAD_ENABLE_EBPF:-0}
-KLDLOAD_ENABLE_AI=${KLDLOAD_ENABLE_AI:-0}
-KLDLOAD_SECURE_BOOT=${KLDLOAD_SECURE_BOOT:-0}
-KLDLOAD_HOSTNAME=${KLDLOAD_HOSTNAME:-kldload-node}
-MANIFEST
+  # Write install manifest via the k_write_manifest function (defined earlier)
+  # which includes all flags: AI, eBPF, NVIDIA, WireGuard, etc.
+  k_write_manifest
   k_log "Install manifest written to ${KLDLOAD_TARGET_MNT}/etc/kldload/install-manifest.env"
 
   _info "▸  Configuring network..."
