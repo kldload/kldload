@@ -8,7 +8,7 @@ kldload builds a single bootable ISO that installs CentOS, Debian, Rocky, RHEL, 
 
 The first operating system with a built-in local AI assistant — voice-controlled, trained on its own documentation, running entirely on your hardware. No cloud. No API key.
 
-**Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Release Notes:** [RELEASE-1.0.md](RELEASE-1.0.md)
+**Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Discord:** [discord.gg/tkVN6sSU](https://discord.gg/tkVN6sSU) | **Release Notes:** [RELEASE-1.0.md](RELEASE-1.0.md)
 
 ---
 
