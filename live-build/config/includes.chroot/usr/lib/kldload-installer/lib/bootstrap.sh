@@ -258,9 +258,22 @@ k_install_target_packages() {
   # during build rather than requiring retroactive signing afterward.
   k_generate_mok_keys
 
-  pkgs=(
-    "linux-image-$(dpkg --print-architecture)"
-    "linux-headers-$(dpkg --print-architecture)"
+  local distro="${KLDLOAD_DISTRO:-debian}"
+
+  # Ubuntu uses different kernel metapackage names than Debian
+  if [[ "$distro" == "ubuntu" ]]; then
+    pkgs=(
+      linux-image-generic
+      linux-headers-generic
+    )
+  else
+    pkgs=(
+      "linux-image-$(dpkg --print-architecture)"
+      "linux-headers-$(dpkg --print-architecture)"
+    )
+  fi
+
+  pkgs+=(
     efibootmgr
     mokutil
     kexec-tools
@@ -279,11 +292,16 @@ k_install_target_packages() {
     # zfs-dkms must be explicit so DKMS builds (and signs) the kernel module;
     # zfsutils-linux alone may pull a pre-built binary that bypasses DKMS.
     pkgs+=(
-      zfs-dkms
       zfsutils-linux
       zfs-initramfs
       zfs-zed
     )
+    # Debian needs zfs-dkms explicitly; Ubuntu has it in universe
+    if [[ "$distro" == "ubuntu" ]]; then
+      pkgs+=( zfs-dkms )
+    else
+      pkgs+=( zfs-dkms )
+    fi
   fi
 
   k_in_chroot "${target}" apt-get update
