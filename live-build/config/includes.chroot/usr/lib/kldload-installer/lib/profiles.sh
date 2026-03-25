@@ -119,7 +119,11 @@ k_profile_packages() {
 k_profile_optional_packages() {
   local out=()
   if [[ "${KLDLOAD_ENABLE_EBPF:-0}" == "1" ]]; then
-    out+=(bpftool bpfcc-tools bpftrace linux-perf)
+    if [[ "${KLDLOAD_DISTRO:-debian}" == "ubuntu" ]]; then
+      out+=(bpfcc-tools bpftrace linux-tools-common linux-tools-generic)
+    else
+      out+=(bpftool bpfcc-tools bpftrace linux-perf)
+    fi
   fi
   if [[ "${KLDLOAD_ENABLE_ZFS:-0}" == "1" ]]; then
     out+=(zfsutils-linux zfs-zed zfs-initramfs zfs-dkms sanoid)
