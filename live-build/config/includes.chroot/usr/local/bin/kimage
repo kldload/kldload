@@ -36,6 +36,23 @@ detect_disk() {
   log "Detected root disk: ${DISK}"
 }
 
+# Detect virt-install --os-variant from the running distro
+_detect_os_variant() {
+  local id="" version_id=""
+  if [[ -f /etc/os-release ]]; then
+    id="$(. /etc/os-release && echo "${ID:-}")"
+    version_id="$(. /etc/os-release && echo "${VERSION_ID:-}")"
+  fi
+  case "$id" in
+    debian)       echo "debian${version_id%%.*}" ;;
+    ubuntu)       echo "ubuntu${version_id}" ;;
+    rocky)        echo "rocky${version_id%%.*}" ;;
+    rhel)         echo "rhel${version_id%%.*}" ;;
+    centos)       echo "centos-stream${version_id%%.*}" ;;
+    *)            echo "centos-stream9" ;;
+  esac
+}
+
 cmd_build() {
   log "Preparing golden image..."
 
@@ -70,8 +87,8 @@ cmd_build() {
   root_ds="$(zfs list -Ho name / 2>/dev/null || echo "rpool/ROOT/kldload")"
   log "Snapshotting ${root_ds}@golden..."
   zfs snapshot "${root_ds}@golden" 2>/dev/null || \
-    zfs destroy "${root_ds}@golden" 2>/dev/null && \
-    zfs snapshot "${root_ds}@golden"
+    { zfs destroy "${root_ds}@golden" 2>/dev/null && \
+    zfs snapshot "${root_ds}@golden"; }
   ok "Golden snapshot: ${root_ds}@golden"
 
   ok "Golden image ready — run 'kimage export' to export"
@@ -143,7 +160,13 @@ cmd_deploy() {
 
     # Create disk from golden image (instant CoW copy if on same FS)
     cp --reflink=auto "$image" "$vm_disk"
-    chown qemu:qemu "$vm_disk" 2>/dev/null || true
+    local _qemu_user="qemu"
+    if id -u libvirt-qemu >/dev/null 2>&1; then
+      _qemu_user="libvirt-qemu"
+    fi
+    local _qemu_group
+    _qemu_group="$(id -gn "$_qemu_user" 2>/dev/null || echo "$_qemu_user")"
+    chown "${_qemu_user}:${_qemu_group}" "$vm_disk" 2>/dev/null || true
 
     # Create cloud-init ISO with unique hostname
     local ci_dir
@@ -181,7 +204,7 @@ EOF
       --ram "$vm_ram" --vcpus "$vm_cores" \
       --disk "path=${vm_disk},format=qcow2,bus=virtio" \
       --disk "path=${ci_iso},device=cdrom" \
-      --os-variant centos-stream9 \
+      --os-variant "$(_detect_os_variant)" \
       --network network=default,model=virtio \
       --boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no \
       --graphics vnc,listen=0.0.0.0 \
