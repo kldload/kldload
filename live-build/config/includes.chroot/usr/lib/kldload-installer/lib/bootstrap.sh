@@ -8,13 +8,27 @@ set -Eeuo pipefail
 # overwrites it at the end of bootstrap with the correct post-install config.
 k_write_sources_list() {
   local target="${KLDLOAD_TARGET:?}"
-  local suite="${KLDLOAD_SUITE:-trixie}"
-  local mirror="${KLDLOAD_MIRROR:-https://mirror.it.ubc.ca/debian}"
+  local distro="${KLDLOAD_DISTRO:-debian}"
+  local suite mirror
+
+  if [[ "$distro" == "ubuntu" ]]; then
+    suite="${KLDLOAD_SUITE:-noble}"
+    mirror="${KLDLOAD_MIRROR:-http://archive.ubuntu.com/ubuntu}"
+  else
+    suite="${KLDLOAD_SUITE:-trixie}"
+    mirror="${KLDLOAD_MIRROR:-https://mirror.it.ubc.ca/debian}"
+  fi
 
   if [[ "$mirror" == "http://127.0.0.1:"* ]]; then
     cat > "${target}/etc/apt/sources.list" <<EOS
 # Install-time only — darksite local mirror (will be replaced after install)
 deb [trusted=yes] ${mirror} ${suite} main
+EOS
+  elif [[ "$distro" == "ubuntu" ]]; then
+    cat > "${target}/etc/apt/sources.list" <<EOS
+deb ${mirror} ${suite} main restricted universe multiverse
+deb ${mirror} ${suite}-updates main restricted universe multiverse
+deb ${mirror} ${suite}-security main restricted universe multiverse
 EOS
   else
     cat > "${target}/etc/apt/sources.list" <<EOS
@@ -34,14 +48,29 @@ EOS
 #                                      local APT mirror server or updated ISO)
 k_finalize_sources_list() {
   local target="${KLDLOAD_TARGET:?}"
-  local suite="${KLDLOAD_SUITE:-trixie}"
+  local distro="${KLDLOAD_DISTRO:-debian}"
+  local suite
+
+  if [[ "$distro" == "ubuntu" ]]; then
+    suite="${KLDLOAD_SUITE:-noble}"
+  else
+    suite="${KLDLOAD_SUITE:-trixie}"
+  fi
 
   if [[ "${KLDLOAD_KEEP_DARKSITE:-0}" == "1" && -n "${KLDLOAD_CUSTOM_MIRROR_URL:-}" ]]; then
     k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
       "Finalizing sources.list: custom mirror ${KLDLOAD_CUSTOM_MIRROR_URL}"
     cat > "${target}/etc/apt/sources.list" <<EOS
 # Custom APT mirror — configured at install time
-deb [trusted=yes] ${KLDLOAD_CUSTOM_MIRROR_URL} ${suite} main contrib non-free non-free-firmware
+deb [trusted=yes] ${KLDLOAD_CUSTOM_MIRROR_URL} ${suite} main
+EOS
+  elif [[ "$distro" == "ubuntu" ]]; then
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
+      "Finalizing sources.list: standard Ubuntu internet repos"
+    cat > "${target}/etc/apt/sources.list" <<EOS
+deb http://archive.ubuntu.com/ubuntu ${suite} main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu ${suite}-updates main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu ${suite}-security main restricted universe multiverse
 EOS
   else
     k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
@@ -799,16 +828,26 @@ CUSTOMREPO
 }
 
 _k_bootstrap_apt() {
-  local suite="${KLDLOAD_SUITE:-trixie}"
-  local target="${KLDLOAD_TARGET:?}"
-  local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
+  local distro="${KLDLOAD_DISTRO:-debian}"
+  local suite target log mirror
+
+  # Set suite and fallback mirror based on distro
+  if [[ "$distro" == "ubuntu" ]]; then
+    suite="${KLDLOAD_SUITE:-noble}"
+    local default_mirror="http://archive.ubuntu.com/ubuntu"
+  else
+    suite="${KLDLOAD_SUITE:-trixie}"
+    local default_mirror="https://mirror.it.ubc.ca/debian"
+  fi
+
+  target="${KLDLOAD_TARGET:?}"
+  log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
 
   # Prefer the local darksite APT mirror; fall back to internet
-  local mirror
   if mirror="$(k_detect_local_mirror 2>/dev/null)"; then
     k_log_to "$log" "Using local darksite APT mirror: ${mirror}"
   else
-    mirror="${KLDLOAD_MIRROR:-https://mirror.it.ubc.ca/debian}"
+    mirror="${KLDLOAD_MIRROR:-$default_mirror}"
     k_log_to "$log" "Darksite mirror not available; using: ${mirror}"
   fi
   export KLDLOAD_MIRROR="$mirror"
