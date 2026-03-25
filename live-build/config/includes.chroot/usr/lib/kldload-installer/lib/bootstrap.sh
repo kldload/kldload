@@ -813,10 +813,7 @@ _k_bootstrap_apt() {
   fi
   export KLDLOAD_MIRROR="$mirror"
 
-  # Point TMPDIR to target ZFS so debootstrap doesn't fill the live overlay
-  export TMPDIR="${target}/tmp"
-  mkdir -p "${target}/tmp"
-  k_log_to "$log" "Running debootstrap suite=${suite} target=${target} mirror=${mirror} (TMPDIR=${TMPDIR})"
+  k_log_to "$log" "Running debootstrap suite=${suite} target=${target} mirror=${mirror}"
   local debootstrap_opts=(
     --arch "$(dpkg --print-architecture)"
     --merged-usr

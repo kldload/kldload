@@ -1299,14 +1299,6 @@ main() {
     _ok "Storage"     "ZFS pools created on ${KLDLOAD_DISK}"
   fi
 
-  # Swap only if AI is enabled (model needs extra RAM)
-  if [[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]; then
-    _info "▸  Creating swap for AI model..."
-    zfs create -V 4G rpool/swap 2>/dev/null || true
-    mkswap /dev/zvol/rpool/swap 2>/dev/null && swapon /dev/zvol/rpool/swap 2>/dev/null || true
-    k_log "Swap: 4G on ZFS zvol (AI enabled)"
-  fi
-
   _info "▸  Bootstrapping ${KLDLOAD_DISTRO:-centos} base system (this takes a few minutes)..."
   k_bootstrap_base
   _ok "Bootstrap"   "${KLDLOAD_DISTRO:-centos} base installed"
@@ -1392,11 +1384,6 @@ MANIFEST
     fi
   fi
 
-  # Clean up installer swap if it exists
-  if swapon --show | grep -q rpool/swap 2>/dev/null; then
-    swapoff /dev/zvol/rpool/swap 2>/dev/null || true
-    k_log "Swap deactivated (cleanup on firstboot)"
-  fi
 
   k_log "Install complete"
   k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
