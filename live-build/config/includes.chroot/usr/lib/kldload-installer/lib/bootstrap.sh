@@ -297,9 +297,17 @@ k_install_target_packages() {
 }
 
 # k_detect_local_mirror — returns the local darksite mirror URL if the
-# kldload-apt-mirror service is running and the repo is healthy.
+# kldload-apt-mirror service is running and has the requested suite.
 k_detect_local_mirror() {
-  local test_url="http://127.0.0.1:3142/apt/dists/trixie/Release"
+  local distro="${KLDLOAD_DISTRO:-debian}"
+  local suite
+  if [[ "$distro" == "ubuntu" ]]; then
+    suite="${KLDLOAD_SUITE:-noble}"
+  else
+    suite="${KLDLOAD_SUITE:-trixie}"
+  fi
+
+  local test_url="http://127.0.0.1:3142/apt/dists/${suite}/Release"
   if curl -sf --connect-timeout 3 --max-time 5 "$test_url" >/dev/null 2>&1; then
     echo "http://127.0.0.1:3142/apt"
     return 0
