@@ -76,11 +76,11 @@ k_finalize_zfs_pools() {
   zpool set cachefile="${target}/etc/zfs/zpool.cache" rpool >&"${log_fd}" 2>&1 || true
 
   # Try to export pool — timeout after 5 seconds if it hangs (live system may hold it)
-  timeout 5 zpool export rpool >&"${log_fd}" 2>&1 || {
+  timeout 5 zpool export rpool >&"${log_fd}" 2>&1 || \
     k_log "Pool export timed out (live system still using it) — pool will import cleanly on reboot"
-  }
 
-  k_log "ZFS pool exported cleanly"
+  k_log "ZFS pool finalized"
+  return 0
 }
 
 k_install_bootloader() {
