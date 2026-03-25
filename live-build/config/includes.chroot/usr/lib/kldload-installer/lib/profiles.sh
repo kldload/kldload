@@ -5,15 +5,20 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 k_profile_packages() {
   local profile="${KLDLOAD_PROFILE:-server}"
+  local _distro="${KLDLOAD_DISTRO:-debian}"
+
+  # fastfetch is not in Ubuntu noble repos — skip it there
+  local _fastfetch="fastfetch"
+  [[ "$_distro" == "ubuntu" ]] && _fastfetch=""
+
   case "$profile" in
     server)
-      echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide fastfetch"
+      echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide ${_fastfetch}"
       ;;
     client)
       echo "openssh-server sudo curl ca-certificates vim less network-manager wireguard-tools iproute2"
       ;;
     desktop)
-      local _distro="${KLDLOAD_DISTRO:-debian}"
       local _browser="firefox-esr"
       local _viewer="loupe"
       local _terminal="gnome-terminal"
@@ -29,7 +34,7 @@ k_profile_packages() {
         adwaita-icon-theme fonts-cantarell gvfs gvfs-backends \
         gnome-keyring \
         ${_browser} \
-        tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide fastfetch"
+        tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide ${_fastfetch}"
       ;;
 
     # ── kldload templates ────────────────────────────────────────────────────────
@@ -109,7 +114,7 @@ k_profile_packages() {
     ai)
       # AI learning tool — core + WireGuard + Python + tmux + modern CLI. Ollama on firstboot.
       echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
-        wireguard-tools tmux python3 python3-pip jq htop btop fzf bat eza fd-find ripgrep zoxide fastfetch \
+        wireguard-tools tmux python3 python3-pip jq htop btop fzf bat eza fd-find ripgrep zoxide ${_fastfetch} \
         sanoid cloud-init qemu-guest-agent qemu-utils eject zstd \
         python3-websockets python3-yaml net-tools ethtool tcpdump \
         alsa-utils pipewire pipewire-utils cmake gcc-c++ make git"
