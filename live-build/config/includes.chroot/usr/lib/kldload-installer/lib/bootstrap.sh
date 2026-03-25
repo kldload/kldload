@@ -91,6 +91,8 @@ k_bind_chroot_mounts() {
   k_mount_bind /proc "${target}/proc"
   k_mount_bind /sys "${target}/sys"
   k_mount_bind /run "${target}/run"
+  # Copy resolv.conf so chroot has DNS for apt/dnf
+  cp -f /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
   if [[ -d /sys/firmware/efi/efivars ]]; then
     mkdir -p "${target}/sys/firmware/efi/efivars"
     mountpoint -q "${target}/sys/firmware/efi/efivars" || \
@@ -304,12 +306,21 @@ k_install_target_packages() {
     fi
   fi
 
-  # Ubuntu noble may have DEB822 format sources that override sources.list
-  # Remove them so our sources.list is authoritative
+  # Remove any DEB822 format sources and stale sources.list.d entries
+  # that override our sources.list (Ubuntu noble uses these by default)
   rm -f "${target}"/etc/apt/sources.list.d/*.sources 2>/dev/null || true
+  rm -f "${target}"/etc/apt/sources.list.d/*.list 2>/dev/null || true
 
-  k_in_chroot "${target}" apt-get update
-  DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y "${pkgs[@]}"
+  # Log what we're working with
+  k_log_to "$log" "sources.list contents:"
+  cat "${target}/etc/apt/sources.list" >> "$log" 2>&1 || true
+  k_log_to "$log" "sources.list.d contents:"
+  ls -la "${target}/etc/apt/sources.list.d/" >> "$log" 2>&1 || true
+
+  k_log_to "$log" "Running apt-get update..."
+  DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update 2>&1 | tee -a "$log" || true
+  k_log_to "$log" "Installing packages: ${pkgs[*]}"
+  DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y "${pkgs[@]}" 2>&1 | tee -a "$log"
 
   profile_pkgs="$(k_profile_packages)"
   profile_opt="$(k_profile_optional_packages)"
