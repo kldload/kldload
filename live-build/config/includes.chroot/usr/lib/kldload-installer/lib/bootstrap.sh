@@ -936,6 +936,15 @@ NMEOF
   chmod 600 "${target}/etc/NetworkManager/system-connections/wired.nmconnection"
   # Disable netplan so NetworkManager is the sole network manager
   rm -f "${target}"/etc/netplan/*.yaml 2>/dev/null || true
+  # Tell NetworkManager to manage all devices (Ubuntu/Debian default to unmanaged)
+  mkdir -p "${target}/etc/NetworkManager/conf.d"
+  cat > "${target}/etc/NetworkManager/conf.d/10-manage-all.conf" <<'NMCONF'
+[keyfile]
+unmanaged-devices=none
+
+[device]
+wifi.scan-rand-mac-address=no
+NMCONF
   k_in_chroot "${target}" systemctl enable NetworkManager 2>/dev/null || true
 
   if [[ -d "${target}/etc/dconf/db/local.d" ]]; then
