@@ -863,14 +863,27 @@ CUSTOMREPO
   # NVIDIA drivers if requested
   if [[ "${KLDLOAD_NVIDIA_DRIVERS:-0}" == "1" ]]; then
     k_log_to "$log" "Installing NVIDIA drivers..."
-    # Add NVIDIA CUDA repo
-    chroot "${target}" dnf install -y \
-        "https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-repo-rhel9-12.9.0-1.x86_64.rpm" \
-        >> "$log" 2>&1 || true
+    # Add NVIDIA CUDA repo — use repo config instead of versioned RPM
+    cat > "${target}/etc/yum.repos.d/cuda.repo" <<'CUDAREPO'
+[cuda-rhel9]
+name=NVIDIA CUDA for RHEL 9
+baseurl=https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/
+enabled=1
+gpgcheck=0
+CUDAREPO
     chroot "${target}" dnf install -y --skip-broken \
         nvidia-driver nvidia-driver-libs nvidia-driver-cuda \
-        >> "$log" 2>&1 || k_log_to "$log" "WARNING: NVIDIA driver install had issues"
+        >> "$log" 2>&1 || k_log_to "$log" "WARNING: NVIDIA driver install had issues (no GPU?)"
     k_log_to "$log" "NVIDIA drivers installed"
+  fi
+
+  # BCC tools: symlink into PATH (installed to /usr/share/bcc/tools/ on RPM distros)
+  if [[ -d "${target}/usr/share/bcc/tools" ]]; then
+    for _tool in execsnoop opensnoop tcplife tcpconnect biolatency biotop cachestat runqlat; do
+      [[ -f "${target}/usr/share/bcc/tools/${_tool}" ]] && \
+        ln -sf "/usr/share/bcc/tools/${_tool}" "${target}/usr/local/bin/${_tool}-bpfcc" 2>/dev/null || true
+    done
+    k_log_to "$log" "BCC tools symlinked to /usr/local/bin"
   fi
 
   mkdir -p "${target}/var/log/kldload"
