@@ -65,9 +65,11 @@ PKGS=(
     systemd systemd-udev dbus-daemon
     kernel kernel-core kernel-modules kernel-devel dracut dracut-live dracut-squash
     grub2-efi-x64 grub2-tools shim-x64 efibootmgr mokutil
-    NetworkManager openssh-server openssh-clients sudo
+    NetworkManager NetworkManager-wifi wpa_supplicant openssh-server openssh-clients sudo
     vim-enhanced tmux curl wget rsync jq less tar gzip
     iproute iputils net-tools nftables chrony
+    # Hardware support — WiFi firmware, storage controllers, USB, etc.
+    linux-firmware iwl*-firmware
     passwd shadow-utils util-linux procps-ng findutils grep sed gawk
     rootfiles parted gdisk dosfstools
     # ZFS — DKMS build inside chroot against target kernel
