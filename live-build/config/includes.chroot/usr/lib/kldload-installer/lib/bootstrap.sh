@@ -916,14 +916,6 @@ _k_bootstrap_apt() {
   fi
   export KLDLOAD_MIRROR="$mirror"
 
-  # Prevent services from starting during debootstrap (systemd-resolved etc.)
-  mkdir -p "${target}/usr/sbin"
-  cat > "${target}/usr/sbin/policy-rc.d" <<'POLICYEOF'
-#!/bin/sh
-exit 101
-POLICYEOF
-  chmod +x "${target}/usr/sbin/policy-rc.d"
-
   k_log_to "$log" "Running debootstrap suite=${suite} target=${target} mirror=${mirror}"
   local debootstrap_opts=(
     --arch "$(dpkg --print-architecture)"
@@ -931,6 +923,11 @@ POLICYEOF
     "--include=dash,diffutils,gzip,zstd"
     --keep-debootstrap-dir
   )
+  # Ubuntu noble: systemd-resolved fails to configure during debootstrap (no systemd running)
+  # Exclude it from debootstrap, install it post-debootstrap with policy-rc.d to prevent start
+  if [[ "$distro" == "ubuntu" ]]; then
+    debootstrap_opts+=("--exclude=systemd-resolved")
+  fi
   [[ "$mirror" == "http://127.0.0.1:"* ]] && debootstrap_opts+=(--no-check-gpg)
   debootstrap "${debootstrap_opts[@]}" "${suite}" "${target}" "${mirror}" \
     2>&1 | tee -a "$log" || {
@@ -938,8 +935,16 @@ POLICYEOF
     return 1
   }
 
-  # Remove policy-rc.d so services can start normally after install
-  rm -f "${target}/usr/sbin/policy-rc.d"
+  # Install systemd-resolved post-debootstrap with policy-rc.d to prevent it from starting
+  if [[ "$distro" == "ubuntu" ]]; then
+    k_log_to "$log" "Installing systemd-resolved post-debootstrap..."
+    mkdir -p "${target}/usr/sbin"
+    printf '#!/bin/sh\nexit 101\n' > "${target}/usr/sbin/policy-rc.d"
+    chmod +x "${target}/usr/sbin/policy-rc.d"
+    DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get update -qq >> "$log" 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y --allow-unauthenticated systemd-resolved >> "$log" 2>&1 || true
+    rm -f "${target}/usr/sbin/policy-rc.d"
+  fi
 
   k_write_sources_list
   k_bind_chroot_mounts
