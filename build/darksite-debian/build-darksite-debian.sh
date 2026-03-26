@@ -51,12 +51,19 @@ read_package_set "target-zfs"
 read_package_set "target-desktop"
 read_package_set "target-server"
 
-# Enable contrib + non-free-firmware (ZFS is in contrib)
-log "Enabling contrib and non-free-firmware components..."
-sed -i 's/Components: main/Components: main contrib non-free-firmware/' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-# Fallback for traditional sources.list format
-if [[ -f /etc/apt/sources.list ]]; then
-    sed -i 's/main$/main contrib non-free-firmware/' /etc/apt/sources.list 2>/dev/null || true
+# Enable extra components — Debian needs contrib (ZFS), Ubuntu needs universe (ZFS)
+if [[ "${SUITE}" == "noble" || "${SUITE}" == "jammy" || "${SUITE}" == "mantic" || "${SUITE}" == "oracular" ]]; then
+    log "Ubuntu detected — enabling universe, restricted, multiverse..."
+    sed -i 's/Components: main/Components: main restricted universe multiverse/' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+    if [[ -f /etc/apt/sources.list ]]; then
+        sed -i 's/main$/main restricted universe multiverse/' /etc/apt/sources.list 2>/dev/null || true
+    fi
+else
+    log "Debian detected — enabling contrib and non-free-firmware..."
+    sed -i 's/Components: main/Components: main contrib non-free-firmware/' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+    if [[ -f /etc/apt/sources.list ]]; then
+        sed -i 's/main$/main contrib non-free-firmware/' /etc/apt/sources.list 2>/dev/null || true
+    fi
 fi
 
 # Update APT cache
