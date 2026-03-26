@@ -162,6 +162,12 @@ k_install_system_files() {
   local _profile="${KLDLOAD_PROFILE:-server}"
   k_log "Installing system files into target (profile=${_profile})"
 
+  # Fix sudo secure_path so k* tools in /usr/local/bin work with sudo
+  mkdir -p "${target}/etc/sudoers.d"
+  echo 'Defaults    secure_path = /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+    > "${target}/etc/sudoers.d/kldload-path"
+  chmod 440 "${target}/etc/sudoers.d/kldload-path"
+
   # ── Core profile: skip all kldload tools, sanoid, webui, snapshot hooks ────
   # Core gets ZFS on root + boot environments + stock distro. Nothing else.
   if [[ "$_profile" == "core" ]]; then
