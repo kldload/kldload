@@ -1,0 +1,113 @@
+# kldload bash completions
+
+# ksnap: snap create list rollback destroy all
+_ksnap() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    case "$prev" in
+        ksnap)
+            COMPREPLY=($(compgen -W "create list rollback destroy all" -- "$cur"))
+            ;;
+        rollback|destroy)
+            # Complete with snapshot names
+            COMPREPLY=($(compgen -W "$(zfs list -H -t snapshot -o name 2>/dev/null)" -- "$cur"))
+            ;;
+        create)
+            # Complete with dataset names
+            COMPREPLY=($(compgen -W "$(zfs list -H -o name 2>/dev/null)" -- "$cur"))
+            ;;
+    esac
+}
+complete -F _ksnap ksnap
+
+# kpkg: install remove upgrade search list
+_kpkg() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    case "$prev" in
+        kpkg)
+            COMPREPLY=($(compgen -W "install remove upgrade search list" -- "$cur"))
+            ;;
+    esac
+}
+complete -F _kpkg kpkg
+
+# kbe: list create activate rollback destroy
+_kbe() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    case "$prev" in
+        kbe)
+            COMPREPLY=($(compgen -W "list create activate rollback destroy" -- "$cur"))
+            ;;
+        activate|rollback|destroy)
+            # Complete with boot environment names
+            COMPREPLY=($(compgen -W "$(zfs list -H -r -o name rpool/ROOT 2>/dev/null | tail -n+2)" -- "$cur"))
+            ;;
+    esac
+}
+complete -F _kbe kbe
+
+# kdf: no subcommands, just runs
+complete -f kdf
+
+# kdir: complete with directories
+complete -d kdir
+
+# kclone: complete with paths
+complete -f kclone
+
+# kexport: format completion
+_kexport() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    case "$COMP_CWORD" in
+        1) # disk device
+            COMPREPLY=($(compgen -W "$(lsblk -dno NAME 2>/dev/null | sed 's|^|/dev/|')" -- "$cur"))
+            ;;
+        2) # format
+            COMPREPLY=($(compgen -W "qcow2 vmdk vhd raw ova" -- "$cur"))
+            ;;
+    esac
+}
+complete -F _kexport kexport
+
+# kimage: subcommands
+_kimage() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    case "$prev" in
+        kimage)
+            COMPREPLY=($(compgen -W "build export deploy list" -- "$cur"))
+            ;;
+    esac
+}
+complete -F _kimage kimage
+
+# kupgrade: no subcommands
+complete -f kupgrade
+
+# krecovery: subcommands
+_krecovery() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    case "$prev" in
+        krecovery)
+            COMPREPLY=($(compgen -W "mount chroot unmount list-bootenvs" -- "$cur"))
+            ;;
+    esac
+}
+complete -F _krecovery krecovery
+
+# kst: no subcommands
+complete -f kst
+
+# kst-dashboard: flags
+_kst_dashboard() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    COMPREPLY=($(compgen -W "--attach --detach" -- "$cur"))
+}
+complete -F _kst_dashboard kst-dashboard
+
+# kai: just free text
+complete -f kai
