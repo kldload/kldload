@@ -237,20 +237,27 @@ EOFSTAB
     k_configure_mok
   fi
 
-  # ── Unbind chroot mounts BEFORE pool export ───────────────────────────────
-  # zpool export fails if any process holds file descriptors inside the pool.
-  # The bind mounts (dev/proc/sys/run) must be gone before we export rpool.
+  k_log "Bootloader EFI + initramfs + efibootmgr complete (ZFSBootMenu)"
+}
 
+# k_finalize_bootloader — unbind chroot, export pools. Call AFTER image export.
+k_finalize_bootloader() {
+  : "${KLDLOAD_TARGET_MNT:=/target}"
+  : "${KLDLOAD_LOG_DIR:=/var/log/installer}"
+  local target="${KLDLOAD_TARGET_MNT}"
+
+  exec 7>>"${KLDLOAD_LOG_DIR}/bootloader.log"
+
+  # ── Unbind chroot mounts BEFORE pool export ───────────────────────────────
   if declare -F k_unbind_chroot_mounts >/dev/null 2>&1; then
     k_unbind_chroot_mounts
     k_log "Chroot mounts unbound"
   fi
 
   # ── Export pools cleanly ──────────────────────────────────────────────────
-
   if [[ "${KLDLOAD_STORAGE_MODE:-standard}" == "zfs" ]]; then
     k_finalize_zfs_pools "${target}" 7
   fi
 
-  k_log "Bootloader installation complete (ZFSBootMenu)"
+  k_log "Bootloader finalization complete"
 }

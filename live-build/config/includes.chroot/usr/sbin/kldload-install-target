@@ -1342,7 +1342,12 @@ main() {
   zfs snapshot -r "bpool@install-${_snap_ts}" 2>/dev/null || true
   _ok "Snapshot"    "rpool@install-${_snap_ts}"
 
-  # ── Image export (BEFORE bootloader — pool must still be mounted) ──────
+  # ── Bootloader — write EFI files + initramfs (pool still mounted) ──────
+  k_install_bootloader
+  _ok "Bootloader"  "ZFSBootMenu + EFI registered"
+
+  # ── Image export — AFTER bootloader so image includes ZFSBootMenu ──────
+  # BEFORE pool finalization so qemu-img can read the block device
   local export_fmt="${KLDLOAD_EXPORT_FORMAT:-none}"
   local _ename="kldload-${KLDLOAD_DISTRO:-centos}-${KLDLOAD_PROFILE:-server}-${KLDLOAD_HOSTNAME:-kldload}-$(date -u +%Y%m%d)"
   local _export_path=""
@@ -1369,9 +1374,9 @@ main() {
     fi
   fi
 
-  # ── Bootloader (finalizes and exports pool — must be LAST) ─────────────
-  k_install_bootloader
-  _ok "Bootloader"  "ZFSBootMenu + EFI registered"
+  # ── Finalize — unbind chroot, export pools (LAST step) ─────────────────
+  k_finalize_bootloader
+  _ok "Finalized"   "Pools exported, ready to reboot"
 
   k_log "Install complete"
   k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
