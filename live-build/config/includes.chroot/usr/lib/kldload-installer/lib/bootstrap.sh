@@ -695,9 +695,13 @@ enabled=1
 gpgcheck=0
 DSREPO
   elif [[ -d "${_darksite_rpm}/repodata" ]]; then
-    # Normal mode: darksite as supplement with low cost (preferred when available)
-    k_log_to "$log" "Using local RPM darksite + internet repos"
-    cat > "${target}/etc/yum.repos.d/kldload-darksite.repo" <<DSREPO
+    # RHEL: do NOT use the CentOS darksite — packages conflict (centos-logos etc.)
+    # CentOS/Rocky: use darksite as supplement
+    if [[ "${KLDLOAD_DISTRO:-centos}" == "rhel" ]]; then
+      k_log_to "$log" "RHEL install — skipping CentOS darksite (using Red Hat CDN only)"
+    else
+      k_log_to "$log" "Using local RPM darksite + internet repos"
+      cat > "${target}/etc/yum.repos.d/kldload-darksite.repo" <<DSREPO
 [kldload-darksite]
 name=kldload offline RPM mirror
 baseurl=file://${_darksite_rpm}/
@@ -705,6 +709,7 @@ enabled=1
 gpgcheck=0
 cost=500
 DSREPO
+    fi
   fi
 
   # Custom repo (user-specified, appended alongside existing repos)
