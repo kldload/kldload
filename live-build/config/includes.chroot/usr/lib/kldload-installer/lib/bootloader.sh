@@ -130,6 +130,10 @@ k_install_bootloader() {
   cp "${zbm_src}" "${zbm_fallback_dir}/BOOTX64.EFI"
   k_log "ZFSBootMenu EFI fallback installed: ${zbm_fallback_dir}/BOOTX64.EFI"
 
+  # startup.nsh — UEFI shell auto-runs this if no boot entries exist (exported images)
+  echo '\EFI\BOOT\BOOTX64.EFI' > "${target}/boot/efi/startup.nsh"
+  k_log "startup.nsh written for exported image boot support"
+
   # ── Write fstab (ESP only — ZFS mounts are handled by zfs-mount) ─────────
 
   local efi_uuid
