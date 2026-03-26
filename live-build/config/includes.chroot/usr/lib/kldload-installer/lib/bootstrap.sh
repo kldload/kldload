@@ -918,6 +918,26 @@ _k_bootstrap_apt() {
   k_create_users
   k_install_system_files
 
+  # Ensure NetworkManager has a DHCP connection profile for all ethernet interfaces.
+  # CentOS auto-creates these; Debian/Ubuntu do not.
+  mkdir -p "${target}/etc/NetworkManager/system-connections"
+  cat > "${target}/etc/NetworkManager/system-connections/wired.nmconnection" <<'NMEOF'
+[connection]
+id=Wired DHCP
+type=ethernet
+autoconnect=true
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+NMEOF
+  chmod 600 "${target}/etc/NetworkManager/system-connections/wired.nmconnection"
+  # Disable netplan so NetworkManager is the sole network manager
+  rm -f "${target}"/etc/netplan/*.yaml 2>/dev/null || true
+  k_in_chroot "${target}" systemctl enable NetworkManager 2>/dev/null || true
+
   if [[ -d "${target}/etc/dconf/db/local.d" ]]; then
     k_in_chroot "${target}" dconf update 2>/dev/null || true
   fi
