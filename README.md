@@ -1,14 +1,14 @@
 # kldload
 
-![kldloadOS — 4 distros installed from one USB](https://kldload.com/screenshots/installed-4-distros.png)
+![kldloadOS — RHEL 9 Desktop with ZFS on root](https://kldload.com/screenshots/rhel-desktop-zfs.png)
 
-**10 operating systems. One USB. ZFS on root. AI-powered. Free.**
+**Your platform, your way, anywhere. Free.**
 
-kldload builds a single bootable ISO that installs CentOS, Debian, Rocky, RHEL, Ubuntu, FreeBSD, OpenBSD, GhostBSD, illumos, or Windows — with ZFS on root, offline, from a USB stick. Both RPM and APT package mirrors are baked into the image. No internet required.
+kldload builds a single bootable ISO that installs CentOS, Debian, Ubuntu, Rocky, or RHEL with ZFS on root from a USB stick. CentOS, Debian, and Ubuntu install fully offline from embedded darksites. RHEL requires your own Red Hat credentials.
 
-The first operating system with a built-in local AI assistant — voice-controlled, trained on its own documentation, running entirely on your hardware. No cloud. No API key.
+Works with any APT or DNF-based Linux distribution. Focus on stable, production-grade releases.
 
-**Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Discord:** [discord.gg/tkVN6sSU](https://discord.gg/tkVN6sSU) | **Release Notes:** [RELEASE-1.0.md](RELEASE-1.0.md)
+**Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Discord:** [discord.gg/tkVN6sSU](https://discord.gg/tkVN6sSU)
 
 ---
 
@@ -21,61 +21,60 @@ dd if=kldload.iso of=/dev/sdX bs=4M status=progress oflag=sync && sync
 
 # Or build from source
 git clone https://github.com/kldload/kldload.git && cd kldload
-./deploy.sh build-debian-darksite && PROFILE=desktop ./deploy.sh build
+PROFILE=desktop ./deploy.sh build
 ```
 
-Boot the USB → web UI opens → pick distro + profile → install. Two minutes.
+Boot the USB → web UI opens at `:8080` → pick distro + profile → install.
 
 ---
 
-## 10 Distros, One USB
+## 5 Distros, One USB
 
 | OS | Method | Offline |
 |---|---|---|
-| CentOS Stream 9 | dnf --installroot | Yes |
-| Debian 13 | debootstrap | Yes |
-| Rocky Linux 9 | dnf --installroot | Yes |
-| RHEL 9 | dnf --installroot | Internet |
-| Ubuntu 24.04 | debootstrap | Planned |
-| FreeBSD 14.4 | base.txz | Yes |
-| OpenBSD 7.8 | base sets | Yes |
-| GhostBSD | FreeBSD + desktop | Partial |
-| illumos | Chain-boot | Yes |
-| Windows | WIM extraction | User ISO |
+| CentOS Stream 9 | dnf --installroot | Yes (RPM darksite) |
+| Debian 13 (Trixie) | debootstrap | Yes (APT darksite) |
+| Ubuntu 24.04 (Noble) | debootstrap | Yes (APT darksite) |
+| Rocky Linux 9 | dnf --installroot | Yes (shared RPM darksite) |
+| RHEL 9 | dnf --installroot | No (Red Hat CDN) |
 
-## 3 Profiles + AI
+## 4 Profiles
 
 | Profile | What you get |
 |---|---|
 | **Desktop** | GNOME + ZFS + all kldloadOS tools |
 | **Server** | Headless SSH + ZFS + all kldloadOS tools |
-| **Core** | ZFS on root only — stock distro |
+| **Core** | ZFS on root + WireGuard — stock distro, nothing else |
+| **AI** | Core + Ollama + local LLM + voice control |
 
-**AI checkbox** — adds Ollama + voice control to any profile. Needs internet on first boot + 16GB RAM.
+## Two Primitives
 
-## What's Inside
+**Encrypted L3 networking** — WireGuard in the kernel from boot. Every profile, including core.
 
-- **ZFS on root** — boot environments, snapshots, replication, per-dataset encryption
-- **AI assistant** — Ollama + whisper.cpp, voice-controlled, trained on kldload.com docs
-- **WireGuard** — kernel-level encrypted mesh networking
-- **eBPF** — execsnoop, tcplife, opensnoop, biolatency
-- **NVIDIA** — GPU drivers + CUDA + container GPU sharing
-- **Image export** — qcow2, VMDK, VHD, OVA, raw from one install
-- **cloud-init** — Terraform/Packer ready
-- **30+ CLI tools** — kst, ksnap, kclone, kdf, kdir, kpkg, kexport
-- **Modern terminal** — fzf, btop, eza, ripgrep, zoxide, fastfetch
-- **96 pages of docs** at kldload.com
+**Self-healing storage** — ZFS on root with boot environments, snapshots, replication, per-dataset AES-256 encryption, lz4 compression, checksummed self-healing.
+
+Everything else follows from these two.
+
+## What's Included
+
+- **30+ CLI tools** — `kst`, `ksnap`, `kclone`, `kdf`, `kdir`, `kpkg`, `kupgrade`, `kbe`, `kexport`, `krecovery`
+- **Image export** — qcow2, VMDK, VHD, OVA, raw — one install, any platform
+- **eBPF observability** — bpftrace, execsnoop, tcplife, opensnoop, biolatency
+- **NVIDIA support** — GPU drivers + CUDA from the installer
+- **WiFi firmware** — linux-firmware for laptop/Surface hardware support
+- **cloud-init** — Packer/Terraform ready
+- **Modern terminal** — fzf, btop, eza, ripgrep, zoxide, bat
+- **107+ pages of documentation** at [kldload.com](https://kldload.com)
 
 ## deploy.sh
 
 | Command | What it does |
 |---|---|
-| `build` | Build ISO (caches darksites) |
-| `build-debian-darksite` | Rebuild Debian APT mirror |
-| `build-bsd-darksite` | Download BSD base sets |
-| `build-ubuntu-darksite` | Rebuild Ubuntu APT mirror |
+| `build` | Build ISO (uses cached darksites) |
+| `build-debian-darksite` | Build Debian APT offline mirror |
+| `build-ubuntu-darksite` | Build Ubuntu APT offline mirror |
 | `builder-image` | Rebuild builder container |
-| `kvm-deploy` | Deploy to local KVM (2 VMs) |
+| `kvm-deploy` | Deploy to local KVM |
 | `proxmox-deploy` | Deploy to Proxmox |
 | `burn` | Write ISO to USB |
 | `clean` | Remove build artifacts |
@@ -87,7 +86,7 @@ Boot the USB → web UI opens → pick distro + profile → install. Two minutes
 cat any file and read what it does.
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for internals.
+Future upgrades use the public repos of the distro you chose. There is no kldload repo. There are no kldload updates. That's handled by the OS owner. kldload just lays down the plumbing.
 
 ## License
 
@@ -95,5 +94,4 @@ BSD-3-Clause. Free forever. See [LICENSE](LICENSE).
 
 ---
 
-*Built by one person who just knows the primitives.*
-*Learn the primitives — they'll outlast any product.*
+*kldloadOS 1.0 "Du-Nn" — Released March 26, 2026*
