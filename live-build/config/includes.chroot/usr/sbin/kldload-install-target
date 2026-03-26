@@ -1355,7 +1355,9 @@ main() {
   if [[ "${export_fmt}" != "none" && -n "${export_fmt}" ]]; then
     _info "▸  Exporting disk image (${export_fmt}) — this may take a few minutes..."
 
-    local _export_dir="/tmp/kldload-exports"
+    # Write to the target ZFS filesystem (plenty of space) not /tmp (ramdisk, limited)
+    local _user="${KLDLOAD_USERNAME:-admin}"
+    local _export_dir="${KLDLOAD_TARGET_MNT}/home/${_user}/exports"
     mkdir -p "${_export_dir}"
     sync || true
 
@@ -1367,8 +1369,8 @@ main() {
       ln -sf "${_export_path}" "${_desktop}/${_ename}.${export_fmt}"
       chown -h live:live "${_desktop}/${_ename}.${export_fmt}" 2>/dev/null || true
 
-      _ok "Export" "${_ename}.${export_fmt} ($(du -sh "${_export_path}" | cut -f1)) → /tmp/kldload-exports/"
-      _info "    Copy to USB before rebooting — export is on the live ramdisk"
+      _ok "Export" "${_ename}.${export_fmt} ($(du -sh "${_export_path}" | cut -f1)) → /home/${_user}/exports/"
+      _info "    Export saved to the installed system — available after reboot at /home/${_user}/exports/"
     else
       _warn "Export failed — you can run manually after reboot: sudo kexport ${KLDLOAD_DISK} ${export_fmt}"
     fi
