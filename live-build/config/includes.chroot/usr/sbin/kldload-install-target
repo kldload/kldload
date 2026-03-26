@@ -1345,6 +1345,8 @@ main() {
   _ok "Snapshot"    "rpool@install-${_snap_ts}"
 
   # ── Image export ────────────────────────────────────────────────────────
+  # Runs AFTER bootloader but the pool may already be exported.
+  # Write to /tmp (live overlay, not ZFS) so it works regardless of pool state.
   local export_fmt="${KLDLOAD_EXPORT_FORMAT:-none}"
   local _ename="kldload-${KLDLOAD_DISTRO:-centos}-${KLDLOAD_PROFILE:-server}-${KLDLOAD_HOSTNAME:-kldload}-$(date -u +%Y%m%d)"
   local _export_path=""
@@ -1352,16 +1354,17 @@ main() {
   if [[ "${export_fmt}" != "none" && -n "${export_fmt}" ]]; then
     _info "▸  Exporting disk image (${export_fmt}) — this may take a few minutes..."
 
-    # Write to the target user's Downloads (on ZFS — plenty of space), then symlink to live desktop
-    local _user="${KLDLOAD_USERNAME:-admin}"
-    local _export_dir="${KLDLOAD_TARGET_MNT}/home/${_user}/Downloads"
+    # Re-import pool if it was exported by bootloader finalization
+    zpool import rpool 2>/dev/null || true
+
+    # Write to /tmp (live overlay ramdisk) — always writable
+    local _export_dir="/tmp/kldload-exports"
     mkdir -p "${_export_dir}"
 
     # Sync to flush all writes before imaging
     sync || true
 
-    # Export the disk — pools stay mounted, qemu-img reads the block device directly
-    # ZFS is CoW so the image will be crash-consistent
+    # Export the disk — qemu-img reads the block device directly
     if KEXPORT_NAME="${_ename}" kexport "${KLDLOAD_DISK}" "${export_fmt}" "${_export_dir}"; then
       _export_path="${_export_dir}/${_ename}.${export_fmt}"
 
@@ -1371,10 +1374,10 @@ main() {
       ln -sf "${_export_path}" "${_desktop}/${_ename}.${export_fmt}"
       chown -h live:live "${_desktop}/${_ename}.${export_fmt}" 2>/dev/null || true
 
-      _ok "Export" "${_ename}.${export_fmt} → Desktop"
+      _ok "Export" "${_ename}.${export_fmt} ($(du -sh "${_export_path}" | cut -f1)) → /tmp/kldload-exports/"
+      _info "    Copy to USB before rebooting — export is on the live ramdisk"
     else
-      _warn "Export failed — you can run manually: kexport ${KLDLOAD_DISK} ${export_fmt} /target/home/${_user}/Downloads"
-      _warn "Note: export writes to the target ZFS filesystem at ${_export_dir}"
+      _warn "Export failed — you can run manually after reboot: sudo kexport ${KLDLOAD_DISK} ${export_fmt}"
     fi
   fi
 
