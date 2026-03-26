@@ -274,6 +274,13 @@ echo "root:kldload" | chroot "$ROOTFS" chpasswd
 echo "%wheel ALL=(ALL) NOPASSWD: ALL" > "${ROOTFS}/etc/sudoers.d/wheel-nopasswd"
 chmod 440 "${ROOTFS}/etc/sudoers.d/wheel-nopasswd"
 
+# Enable SSH password auth on the live ISO (CentOS 9 disables it by default)
+mkdir -p "${ROOTFS}/etc/ssh/sshd_config.d"
+cat > "${ROOTFS}/etc/ssh/sshd_config.d/50-kldload-live.conf" <<'SSHEOF'
+PasswordAuthentication yes
+PermitRootLogin yes
+SSHEOF
+
 # Fix websockets — CentOS ships old version that's incompatible with webui (free only)
 if [[ "$EDITION" != "core" ]]; then
     chroot "$ROOTFS" dnf remove -y python3-websockets 2>/dev/null || true
