@@ -1327,8 +1327,6 @@ main() {
   k_write_install_manifest
   k_seed_ca
   k_enable_firstboot
-  k_install_bootloader
-  _ok "Bootloader"  "ZFSBootMenu + EFI registered"
 
   # Copy live session state DB to target if it exists
   if [[ -f "/var/lib/kldload/state.db" ]]; then
@@ -1344,9 +1342,7 @@ main() {
   zfs snapshot -r "bpool@install-${_snap_ts}" 2>/dev/null || true
   _ok "Snapshot"    "rpool@install-${_snap_ts}"
 
-  # ── Image export ────────────────────────────────────────────────────────
-  # Runs AFTER bootloader but the pool may already be exported.
-  # Write to /tmp (live overlay, not ZFS) so it works regardless of pool state.
+  # ── Image export (BEFORE bootloader — pool must still be mounted) ──────
   local export_fmt="${KLDLOAD_EXPORT_FORMAT:-none}"
   local _ename="kldload-${KLDLOAD_DISTRO:-centos}-${KLDLOAD_PROFILE:-server}-${KLDLOAD_HOSTNAME:-kldload}-$(date -u +%Y%m%d)"
   local _export_path=""
@@ -1354,21 +1350,13 @@ main() {
   if [[ "${export_fmt}" != "none" && -n "${export_fmt}" ]]; then
     _info "▸  Exporting disk image (${export_fmt}) — this may take a few minutes..."
 
-    # Re-import pool if it was exported by bootloader finalization
-    zpool import rpool 2>/dev/null || true
-
-    # Write to /tmp (live overlay ramdisk) — always writable
     local _export_dir="/tmp/kldload-exports"
     mkdir -p "${_export_dir}"
-
-    # Sync to flush all writes before imaging
     sync || true
 
-    # Export the disk — qemu-img reads the block device directly
     if KEXPORT_NAME="${_ename}" kexport "${KLDLOAD_DISK}" "${export_fmt}" "${_export_dir}"; then
       _export_path="${_export_dir}/${_ename}.${export_fmt}"
 
-      # Symlink to live GNOME desktop so user can see it and copy to USB
       local _desktop="/home/live/Desktop"
       mkdir -p "${_desktop}"
       ln -sf "${_export_path}" "${_desktop}/${_ename}.${export_fmt}"
@@ -1381,6 +1369,9 @@ main() {
     fi
   fi
 
+  # ── Bootloader (finalizes and exports pool — must be LAST) ─────────────
+  k_install_bootloader
+  _ok "Bootloader"  "ZFSBootMenu + EFI registered"
 
   k_log "Install complete"
   k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
