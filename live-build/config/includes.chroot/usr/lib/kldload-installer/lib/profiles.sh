@@ -268,7 +268,22 @@ k_install_system_files() {
   fi
 
   # ── OS branding ───────────────────────────────────────────────────────────────
-  [[ -f /etc/os-release ]] && cp /etc/os-release "${target}/etc/os-release"
+  # Write os-release for the TARGET distro, not the live ISO (which is always CentOS)
+  local _target_distro="${KLDLOAD_DISTRO:-centos}"
+  local _target_suite=""
+  case "$_target_distro" in
+    centos)  _target_suite="stream9" ;;
+    rocky)   _target_suite="9" ;;
+    rhel)    _target_suite="9" ;;
+    debian)  _target_suite="${KLDLOAD_SUITE:-trixie}" ;;
+    ubuntu)  _target_suite="${KLDLOAD_SUITE:-noble}" ;;
+  esac
+  cat > "${target}/etc/os-release" <<OSREL
+PRETTY_NAME="kldload (${_target_distro} ${_target_suite})"
+NAME="kldload"
+ID=${_target_distro}
+VERSION="${_target_suite}"
+OSREL
 
   # ── GNOME dconf system settings (dock, theme, terminal defaults) ──────────────
   mkdir -p "${target}/etc/dconf/db/local.d" "${target}/etc/dconf/profile"
