@@ -107,8 +107,8 @@ k_profile_packages() {
       ;;
 
     core)
-      # Bare minimum — ZFS on root, SSH, networking. No kldload tools, no sanoid, no webui.
-      echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables"
+      # Bare minimum — ZFS on root, SSH, networking, WireGuard. No kldload tools, no sanoid, no webui.
+      echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables wireguard-tools"
       ;;
 
     ai)
