@@ -639,12 +639,14 @@ DNFREPO
   esac
 
   # EPEL + ZFS repos (shared across CentOS/Rocky/RHEL)
+  # skip_if_unavailable=1 so EPEL mirror outages don't kill the install
   cat > "${target}/etc/yum.repos.d/epel.repo" <<EPELREPO
 [epel]
 name=EPEL ${release}
 metalink=https://mirrors.fedoraproject.org/metalink?repo=epel-${release}&arch=\$basearch
 gpgcheck=0
 enabled=1
+skip_if_unavailable=1
 EPELREPO
 
   cat > "${target}/etc/yum.repos.d/zfs.repo" <<ZFSREPO
