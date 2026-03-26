@@ -8,7 +8,7 @@ set -Eeuo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PKG_SETS_DIR="${SCRIPT_DIR}/config/package-sets"
+PKG_SETS_DIR="${PKG_SETS_DIR:-${SCRIPT_DIR}/config/package-sets}"
 
 PROFILE="${PROFILE:-desktop}"
 ARCH="${ARCH:-amd64}"
