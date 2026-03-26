@@ -334,16 +334,19 @@ k_install_target_packages() {
 # kldload-apt-mirror service is running and has the requested suite.
 k_detect_local_mirror() {
   local distro="${KLDLOAD_DISTRO:-debian}"
-  local suite
+  local suite port
+
   if [[ "$distro" == "ubuntu" ]]; then
     suite="${KLDLOAD_SUITE:-noble}"
+    port=3143
   else
     suite="${KLDLOAD_SUITE:-trixie}"
+    port=3142
   fi
 
-  local test_url="http://127.0.0.1:3142/apt/dists/${suite}/Release"
+  local test_url="http://127.0.0.1:${port}/apt/dists/${suite}/Release"
   if curl -sf --connect-timeout 3 --max-time 5 "$test_url" >/dev/null 2>&1; then
-    echo "http://127.0.0.1:3142/apt"
+    echo "http://127.0.0.1:${port}/apt"
     return 0
   fi
   return 1

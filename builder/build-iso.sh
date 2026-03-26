@@ -532,6 +532,25 @@ APTEOF
 
     chroot "$ROOTFS" systemctl enable kldload-apt-mirror 2>/dev/null || true
 
+    # Ubuntu darksite APT mirror service (serves on port 3143)
+    cat > "${ROOTFS}/usr/lib/systemd/system/kldload-apt-mirror-ubuntu.service" << 'UAPTEOF'
+[Unit]
+Description=kldload Ubuntu darksite APT mirror
+After=network.target
+ConditionPathExists=/root/darksite/ubuntu/apt/dists/noble/Release
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m http.server 3143 --bind 127.0.0.1 --directory /root/darksite/ubuntu
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UAPTEOF
+
+    chroot "$ROOTFS" systemctl enable kldload-apt-mirror-ubuntu 2>/dev/null || true
+
     # Copy systemd service units from includes.chroot
     for _svc in kldload-firstboot.service kldload-srv-snapshot.service kldload-srv-snapshot.timer \
                 kldload-snapshot.service kldload-snapshot.timer kldload-export.service; do
