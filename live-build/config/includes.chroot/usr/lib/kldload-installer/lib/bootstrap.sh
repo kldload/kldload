@@ -766,7 +766,8 @@ CUSTOMREPO
       _dnf_pkgs+=(tcpdump socat sysstat net-tools)
       ;;
     core)
-      # Core: strip extras — no sanoid, no wireguard-tools, no guest agents
+      # Core: strip extras — no sanoid, no guest agents, no k* tools
+      # WireGuard is a kernel primitive, included in all profiles
       _dnf_pkgs=(
         basesystem filesystem setup
         dnf rpm coreutils bash glibc glibc-langpack-en
@@ -774,7 +775,7 @@ CUSTOMREPO
         kernel kernel-core kernel-modules kernel-devel
         dracut grub2-efi-x64 grub2-tools shim-x64 efibootmgr mokutil
         NetworkManager openssh-server openssh-clients sudo
-        vim-enhanced curl less iproute iputils nftables chrony
+        vim-enhanced curl less iproute iputils nftables chrony wireguard-tools
         passwd shadow-utils util-linux procps-ng findutils grep sed gawk
         parted gdisk dosfstools
         dkms gcc make autoconf automake libtool
