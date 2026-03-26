@@ -916,6 +916,14 @@ _k_bootstrap_apt() {
   fi
   export KLDLOAD_MIRROR="$mirror"
 
+  # Prevent services from starting during debootstrap (systemd-resolved etc.)
+  mkdir -p "${target}/usr/sbin"
+  cat > "${target}/usr/sbin/policy-rc.d" <<'POLICYEOF'
+#!/bin/sh
+exit 101
+POLICYEOF
+  chmod +x "${target}/usr/sbin/policy-rc.d"
+
   k_log_to "$log" "Running debootstrap suite=${suite} target=${target} mirror=${mirror}"
   local debootstrap_opts=(
     --arch "$(dpkg --print-architecture)"
@@ -929,6 +937,9 @@ _k_bootstrap_apt() {
     k_log_to "$log" "debootstrap failed"
     return 1
   }
+
+  # Remove policy-rc.d so services can start normally after install
+  rm -f "${target}/usr/sbin/policy-rc.d"
 
   k_write_sources_list
   k_bind_chroot_mounts
