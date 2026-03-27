@@ -2,11 +2,11 @@
 
 ![kldloadOS — RHEL 9 Desktop with ZFS on root](https://kldload.com/screenshots/rhel-desktop-zfs.png)
 
-**Your platform, your way, anywhere. Free.**
+**The base image factory. ZFS + WireGuard + kernel, any distro, any platform. Free.**
 
-kldload builds a single bootable ISO that installs CentOS, Debian, Ubuntu, Rocky, or RHEL with ZFS on root from a USB stick. CentOS, Debian, and Ubuntu install fully offline from embedded darksites. RHEL requires your own Red Hat credentials.
+kldload builds a single bootable ISO that installs CentOS, Debian, Ubuntu, Fedora, Rocky, RHEL, or Arch Linux with ZFS on root. Seven distros, one USB, two minutes. Most install fully offline from embedded darksites.
 
-Works with any APT or DNF-based Linux distribution. Focus on stable, production-grade releases.
+Build golden images for Packer, Terraform, and cloud deployment — or install directly to bare metal.
 
 **Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Discord:** [discord.gg/tkVN6sSU](https://discord.gg/tkVN6sSU)
 
@@ -28,15 +28,17 @@ Boot the USB → web UI opens at `:8080` → pick distro + profile → install.
 
 ---
 
-## 5 Distros, One USB
+## 7 Distros, One USB
 
 | OS | Method | Offline |
 |---|---|---|
 | CentOS Stream 9 | dnf --installroot | Yes (RPM darksite) |
 | Debian 13 (Trixie) | debootstrap | Yes (APT darksite) |
 | Ubuntu 24.04 (Noble) | debootstrap | Yes (APT darksite) |
+| Fedora 41 | dnf --installroot | Yes (RPM darksite) |
 | Rocky Linux 9 | dnf --installroot | Yes (shared RPM darksite) |
 | RHEL 9 | dnf --installroot | No (Red Hat CDN) |
+| Arch Linux | pacstrap | Yes (pacman darksite) |
 
 ## 4 Profiles
 
@@ -73,6 +75,8 @@ Everything else follows from these two.
 | `build` | Build ISO (uses cached darksites) |
 | `build-debian-darksite` | Build Debian APT offline mirror |
 | `build-ubuntu-darksite` | Build Ubuntu APT offline mirror |
+| `build-fedora-darksite` | Build Fedora RPM offline mirror |
+| `build-arch-darksite` | Build Arch pacman offline mirror |
 | `builder-image` | Rebuild builder container |
 | `kvm-deploy` | Deploy to local KVM |
 | `proxmox-deploy` | Deploy to Proxmox |
@@ -82,7 +86,7 @@ Everything else follows from these two.
 ## Architecture
 
 ```
-100% bash. One Python file. Zero compiled binaries.
+100% bash. One Python file. Zero compiled binaries. Three bootstrap paths: dnf, debootstrap, pacstrap.
 cat any file and read what it does.
 ```
 
