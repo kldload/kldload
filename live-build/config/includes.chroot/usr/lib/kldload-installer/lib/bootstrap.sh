@@ -1400,6 +1400,13 @@ EOH
   # ── Enable services ──────────────────────────────────────────────────────
   chroot "${target}" systemctl enable NetworkManager sshd 2>/dev/null || true
 
+  # ── SSH: enable password auth (Arch defaults to no) ─────────────────────
+  local _sshd_conf="${target}/etc/ssh/sshd_config"
+  if [[ -f "$_sshd_conf" ]]; then
+    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$_sshd_conf"
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' "$_sshd_conf"
+  fi
+
   local _profile="${KLDLOAD_PROFILE:-server}"
   if [[ "$_profile" == "desktop" ]]; then
     chroot "${target}" systemctl enable gdm 2>/dev/null || true
