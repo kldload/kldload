@@ -1,6 +1,6 @@
 # kldload
 
-![kldloadOS — RHEL 9 Desktop with ZFS on root](https://kldload.com/screenshots/rhel-desktop-zfs.png)
+![kldloadOS — Arch Linux on ZFS](arch101.png)
 
 **The base image factory. ZFS + WireGuard + kernel, any distro, any platform. Free.**
 
