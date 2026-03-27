@@ -1384,6 +1384,15 @@ MIRRORS
     fi
   fi
 
+  # ── NVIDIA drivers (if requested) ─────────────────────────────────────────
+  if [[ "${KLDLOAD_NVIDIA_DRIVERS:-0}" == "1" ]]; then
+    k_log_to "$log" "Installing NVIDIA drivers..."
+    pacman --root "${target}" --config "${pacman_conf}" \
+      --noconfirm --needed -S nvidia nvidia-utils nvidia-settings >> "$log" 2>&1 || {
+      k_log_to "$log" "WARNING: NVIDIA driver install failed (no GPU or package not available)"
+    }
+  fi
+
   # ── Locale + timezone + hostname ─────────────────────────────────────────
   local locale="${KLDLOAD_LOCALE:-en_US.UTF-8}"
   echo "${locale} UTF-8" > "${target}/etc/locale.gen"
