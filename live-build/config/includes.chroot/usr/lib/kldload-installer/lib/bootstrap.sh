@@ -1370,10 +1370,18 @@ MIRRORS
   if [[ -n "${profile_pkgs}${profile_opt}" ]]; then
     k_log_to "$log" "Installing profile packages..."
     # shellcheck disable=SC2086
-    pacman --root "${target}" --config "${pacman_conf}" \
-      --noconfirm --needed -S ${profile_pkgs} ${profile_opt} >> "$log" 2>&1 || {
-      k_log_to "$log" "WARNING: Some profile packages failed"
-    }
+    if ! pacman --root "${target}" --config "${pacman_conf}" \
+      --noconfirm --needed -S ${profile_pkgs} ${profile_opt} >> "$log" 2>&1; then
+      # Retry with forced DB refresh — Arch rolling repos can 404 between sync and download
+      k_log_to "$log" "Profile packages failed — retrying with fresh database..."
+      pacman --root "${target}" --config "${pacman_conf}" \
+        --noconfirm -Syy >> "$log" 2>&1 || true
+      # shellcheck disable=SC2086
+      pacman --root "${target}" --config "${pacman_conf}" \
+        --noconfirm --needed -S ${profile_pkgs} ${profile_opt} >> "$log" 2>&1 || {
+        k_log_to "$log" "WARNING: Some profile packages failed after retry"
+      }
+    fi
   fi
 
   # ── Locale + timezone + hostname ─────────────────────────────────────────
