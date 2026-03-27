@@ -86,7 +86,7 @@ Everything else follows from these two.
 ## Architecture
 
 ```
-100% bash. One Python file. Zero compiled binaries. Three bootstrap paths: dnf, debootstrap, pacstrap.
+Fully auditable. Zero compiled binaries. Three bootstrap paths: dnf, debootstrap, pacstrap.
 cat any file and read what it does.
 ```
 

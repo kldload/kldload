@@ -1,8 +1,8 @@
 # Package Management
 
-kldload does not replace or modify your distro's package manager. `apt` and `dnf` work exactly as they do on a stock install — use them directly if you prefer.
+kldload does not replace or modify your distro's package manager. `apt`, `dnf`, and `pacman` work exactly as they do on a stock install — use them directly if you prefer.
 
-kldload also includes `kpkg`, an optional convenience wrapper that calls the native package manager underneath and adds automatic ZFS snapshots before every operation. It's there if you want cross-distro consistency; it's not required for anything.
+kldload also includes `kpkg`, an optional convenience wrapper that auto-detects apt/dnf/pacman underneath and adds automatic ZFS snapshots before every operation. It's there if you want cross-distro consistency; it's not required for anything.
 
 ---
 
@@ -47,7 +47,7 @@ ksnap rollback /
 
 kldload bakes complete package mirrors into the ISO. After install, these mirrors are available at `/root/darksite/`.
 
-### CentOS/RHEL — RPM darksite
+### CentOS/Fedora/RHEL/Rocky — RPM darksite
 
 The RPM mirror is pre-configured as a local repo:
 
@@ -105,7 +105,7 @@ kupgrade
 
 What it does:
 1. Creates `pre-upgrade-YYYYMMDD-HHMMSS` boot environment
-2. Runs `apt-get update` + `apt-get dist-upgrade` (Debian) or `dnf upgrade` (CentOS)
+2. Runs `apt-get update` + `apt-get dist-upgrade` (Debian/Ubuntu), `dnf upgrade` (CentOS/Fedora/RHEL/Rocky), or `pacman -Syu` (Arch)
 3. Runs `apt-get autoremove` to clean up
 4. Verifies ZFS DKMS modules built for every installed kernel
 5. Re-signs DKMS modules with MOK key if Secure Boot is enabled
@@ -125,7 +125,7 @@ reboot
 
 To include additional packages in future ISO builds, add them to the package list files:
 
-### For CentOS/RHEL installs
+### For CentOS/Fedora/RHEL/Rocky installs
 
 ```bash
 # Base packages (all installs)
@@ -159,15 +159,15 @@ PROFILE=desktop ./deploy.sh build   # rebuild ISO (RPM darksite rebuilds automat
 
 ## Package differences between distros
 
-| Task | CentOS/RHEL | Debian |
-|------|-------------|--------|
-| Install a package | `dnf install pkg` | `apt install pkg` |
-| Search | `dnf search pkg` | `apt search pkg` |
-| List installed | `dnf list installed` | `dpkg -l` |
-| Show dependencies | `dnf deplist pkg` | `apt depends pkg` |
-| Clean cache | `dnf clean all` | `apt clean` |
-| eBPF tools | `bcc-tools` | `bpfcc-tools` |
-| Firewall | `firewalld` | `nftables` |
-| Service manager | `systemctl` (same) | `systemctl` (same) |
+| Task | CentOS/Fedora/RHEL/Rocky | Debian/Ubuntu | Arch |
+|------|-------------|--------|------|
+| Install a package | `dnf install pkg` | `apt install pkg` | `pacman -S pkg` |
+| Search | `dnf search pkg` | `apt search pkg` | `pacman -Ss pkg` |
+| List installed | `dnf list installed` | `dpkg -l` | `pacman -Q` |
+| Show dependencies | `dnf deplist pkg` | `apt depends pkg` | `pactree pkg` |
+| Clean cache | `dnf clean all` | `apt clean` | `pacman -Sc` |
+| eBPF tools | `bcc-tools` | `bpfcc-tools` | `bcc-tools` |
+| Firewall | `firewalld` | `nftables` | `nftables` |
+| Service manager | `systemctl` (same) | `systemctl` (same) | `systemctl` (same) |
 
 With `kpkg`, you don't need to remember these differences — it picks the right command automatically. But the native commands always work too. `kpkg` is a shortcut, not a gate.

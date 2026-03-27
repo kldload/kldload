@@ -157,10 +157,14 @@
         <div class="panel" style="margin-bottom:1rem">
           <div class="panel-hdr">◈ Distribution</div>
           <div class="panel-body">
-            <div class="target-grid" id="distro-grid" style="grid-template-columns:repeat(5,1fr);max-width:500px">
+            <div class="target-grid" id="distro-grid" style="grid-template-columns:repeat(7,1fr);max-width:700px">
               <div class="target-card selected" data-distro="centos" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🐧</div>
                 <div class="tc-name">CentOS 9</div>
+              </div>
+              <div class="target-card" data-distro="fedora" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🎩</div>
+                <div class="tc-name">Fedora 41</div>
               </div>
               <div class="target-card" data-distro="debian" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🌀</div>
@@ -171,12 +175,16 @@
                 <div class="tc-name">Rocky 9</div>
               </div>
               <div class="target-card" data-distro="rhel" onclick="selectDistro(this)">
-                <div class="tc-icon" style="font-size:1.2rem">🎩</div>
+                <div class="tc-icon" style="font-size:1.2rem">🔴</div>
                 <div class="tc-name">RHEL 9</div>
               </div>
               <div class="target-card" data-distro="ubuntu" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🟠</div>
                 <div class="tc-name">Ubuntu</div>
+              </div>
+              <div class="target-card" data-distro="arch" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🔵</div>
+                <div class="tc-name">Arch</div>
               </div>
             </div>
             <div style="margin-top:0.8rem;font-size:0.7rem;color:var(--muted)">FreeBSD, OpenBSD, GhostBSD, illumos, Windows — coming soon</div>
@@ -591,8 +599,8 @@
             <input type="checkbox" id="install-zfs-dedup" style="display:none">
             <!-- Export format -->
             <div style="margin-top:0.8rem;padding-top:0.8rem;border-top:1px solid var(--border)">
-              <label style="font-size:0.82rem;color:var(--subtle);display:block;margin-bottom:0.3rem">Export format (after install)</label>
-              <select id="install-export-format" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem">
+              <label style="font-size:0.82rem;color:var(--subtle);display:block;margin-bottom:0.3rem">Export image format</label>
+              <select id="install-export-format" onchange="toggleExportFields()" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem">
                 <option value="none">None — install to disk only</option>
                 <option value="qcow2">qcow2 — KVM / Proxmox / OpenStack</option>
                 <option value="raw">raw — dd-ready disk image</option>
@@ -600,7 +608,21 @@
                 <option value="vmdk">VMDK — VMware ESXi / vSphere</option>
                 <option value="ova">OVA — VMware / VirtualBox portable</option>
               </select>
-              <div style="font-size:0.72rem;color:var(--muted);margin-top:0.3rem">Exports the installed disk as a deployable image. Files are saved to <code>/home/admin/exports/</code> on the installed ZFS filesystem and available after reboot. No extra RAM needed — the export writes directly to the target disk.</div>
+              <div style="font-size:0.72rem;color:var(--muted);margin-top:0.3rem">Build a golden image — ZFS on root, WireGuard, eBPF baked in. Use as a Packer base or hypervisor template. Cloud-init ready.</div>
+              <!-- Remote export target (shown when export != none) -->
+              <div id="export-remote-fields" style="display:none;margin-top:0.6rem;padding:0.6rem;background:var(--bg2);border-radius:4px;border:1px solid var(--border)">
+                <label style="font-size:0.78rem;color:var(--subtle);display:block;margin-bottom:0.3rem">SCP export target (optional — leave blank to save locally)</label>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.3rem">
+                  <input type="text" id="export-scp-host" placeholder="host or IP" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
+                  <input type="text" id="export-scp-user" placeholder="user (default: root)" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
+                </div>
+                <input type="text" id="export-scp-path" placeholder="remote path (default: /root/)" style="width:100%;padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem;margin-bottom:0.3rem">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.3rem">
+                  <input type="password" id="export-scp-pass" placeholder="SSH password (if no key)" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
+                  <input type="text" id="export-scp-key" placeholder="SSH key path (optional)" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
+                </div>
+                <div style="font-size:0.68rem;color:var(--muted);margin-top:0.3rem">Provide either a password or SSH key path. Key auth is preferred — set up with: <code>ssh-keygen && ssh-copy-id user@host</code></div>
+              </div>
             </div>
           </div>
         </div>
@@ -968,10 +990,12 @@ function selectTarget(el) {
 
 const DISTRO_DESCS = {
   centos:   'CentOS Stream 9 — RHEL upstream, offline from RPM darksite',
+  fedora:   'Fedora 41 — Latest packages, fast updates',
   debian:   'Debian 13 (trixie) — stable, offline from APT darksite',
   rocky:    'Rocky Linux 9 — RHEL-compatible, offline from RPM darksite',
   rhel:     'RHEL 9 — requires activation key (needs internet)',
   ubuntu:   'Ubuntu 24.04 LTS — popular, huge community, debootstrap from darksite',
+  arch:     'Arch Linux — rolling release, real Firefox, offline from pacman darksite',
   freebsd:  'FreeBSD 14.4 — native ZFS, jails, bhyve',
   openbsd:  'OpenBSD 7.8 — security-focused, pf firewall, pledge/unveil',
   ghostbsd: 'GhostBSD — FreeBSD with MATE desktop',
@@ -1104,6 +1128,12 @@ function takeSnapshot() { send({ action: 'snapshot_take' }); }
 // ── Install ──────────────────────────────────────────────────────────────────
 let _installPayload = null;
 
+function toggleExportFields() {
+  const fmt = document.getElementById('install-export-format')?.value || 'none';
+  const fields = document.getElementById('export-remote-fields');
+  if (fields) fields.style.display = fmt !== 'none' ? 'block' : 'none';
+}
+
 function startInstall() {
   const disk     = document.getElementById('install-disk').value;
   const host     = document.getElementById('install-hostname').value.trim();
@@ -1158,6 +1188,11 @@ function startInstall() {
     enable_ebpf: document.getElementById('install-ebpf')?.checked ? '1' : '0',
     zfs_dedup: document.getElementById('install-zfs-dedup')?.checked ? '1' : '0',
     export_format: document.getElementById('install-export-format')?.value || 'none',
+    export_scp_host: document.getElementById('export-scp-host')?.value?.trim() || '',
+    export_scp_user: document.getElementById('export-scp-user')?.value?.trim() || '',
+    export_scp_path: document.getElementById('export-scp-path')?.value?.trim() || '',
+    export_scp_pass: document.getElementById('export-scp-pass')?.value || '',
+    export_scp_key: document.getElementById('export-scp-key')?.value?.trim() || '',
     ...(sshKey   ? { ssh_pubkey: sshKey }  : {}),
     ...(netIface ? { net_iface: netIface } : {}),
     network_dhcp: dhcp ? 'yes' : 'no',
@@ -1184,8 +1219,11 @@ function startInstall() {
     `<b>Profile:</b> ${role}<br><b>Encryption:</b> ${encrypt ? '🔒 AES-256-GCM (passphrase at boot)' : 'None'}<br>` +
     `<b>Network:</b> ${dhcp ? 'DHCP' : params.network_ip + '/' + params.network_prefix}<br>` +
     `<b>Timezone:</b> ${timezone} &nbsp; <b>Keyboard:</b> ${keyboard}<br><br>` +
-    `All data on <b>${disk}</b> will be erased. An initial snapshot will be taken after install. ` +
-    `The system will power off when complete.`;
+    (params.export_format && params.export_format !== 'none'
+      ? `All data on <b>${disk}</b> will be erased to build a <b>${params.export_format.toUpperCase()}</b> golden image. ` +
+        `The image will be exported` + (params.export_scp_host ? ` via SCP to <b>${params.export_scp_host}</b>` : ' locally') + ` when complete.`
+      : `All data on <b>${disk}</b> will be erased. An initial snapshot will be taken after install. ` +
+        `The system will power off when complete.`);
   document.getElementById('confirm-modal').classList.add('open');
 
   function showErr(m) { err.textContent = m; err.style.display = 'block'; }
@@ -1204,7 +1242,7 @@ function confirmInstall() {
 
   // Build profile summary line
   const p = _installPayload || {};
-  const distroNames = { centos: 'CentOS Stream 9', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', freebsd: 'FreeBSD 14.4', openbsd: 'OpenBSD 7.8', ghostbsd: 'GhostBSD', illumos: 'illumos', windows: 'Windows' };
+  const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 41', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', freebsd: 'FreeBSD 14.4', openbsd: 'OpenBSD 7.8', ghostbsd: 'GhostBSD', illumos: 'illumos', windows: 'Windows' };
   const profileNames = { desktop: 'Desktop', server: 'Server', core: 'Core', ai: 'AI' };
   let summary = (distroNames[p.distro] || p.distro || 'CentOS') + ' · ' + (profileNames[p.role] || p.role || 'Desktop');
   const addons = [];

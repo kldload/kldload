@@ -22,7 +22,7 @@ KEXPORT_NAME=myserver kexport qcow2
 # → myserver.qcow2
 ```
 
-Output lands in the current directory. Files are named `kldload-export-YYYYMMDD-HHMMSS.<ext>` by default.
+Output lands in the current directory. Files are named `kldload-export-YYYYMMDD-HHMMSS.<ext>` by default. Images can also be SCP'd directly to a remote host and sealed as golden images with cloud-init for template cloning.
 
 ---
 

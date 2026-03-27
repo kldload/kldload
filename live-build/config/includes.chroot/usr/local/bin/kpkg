@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # kpkg — universal package manager wrapper
-# Auto-detects apt/dnf and runs the right command.
+# Auto-detects apt/dnf/pacman and runs the right command.
 # Takes a ZFS snapshot before install/upgrade/remove operations.
 
 cmd="${1:-help}"
@@ -16,7 +16,9 @@ _snap() {
   fi
 }
 
-if command -v dnf &>/dev/null; then
+if command -v pacman &>/dev/null; then
+  PKG=pacman
+elif command -v dnf &>/dev/null; then
   PKG=dnf
 elif command -v apt-get &>/dev/null; then
   PKG=apt-get
@@ -25,46 +27,60 @@ else
 fi
 
 case "$cmd" in
-  install)   _snap; sudo $PKG install -y "$@" ;;
-  remove)    _snap; sudo $PKG remove -y "$@" ;;
+  install)
+    _snap
+    case "$PKG" in
+      pacman)  sudo pacman -S --noconfirm "$@" ;;
+      dnf)     sudo dnf install -y "$@" ;;
+      apt-get) sudo apt-get install -y "$@" ;;
+    esac
+    ;;
+  remove)
+    _snap
+    case "$PKG" in
+      pacman)  sudo pacman -R --noconfirm "$@" ;;
+      dnf)     sudo dnf remove -y "$@" ;;
+      apt-get) sudo apt-get remove -y "$@" ;;
+    esac
+    ;;
   update)
-    if [[ "$PKG" == "dnf" ]]; then
-      sudo dnf check-update "$@" || true
-    else
-      sudo apt-get update "$@"
-    fi
+    case "$PKG" in
+      pacman)  sudo pacman -Sy ;;
+      dnf)     sudo dnf check-update "$@" || true ;;
+      apt-get) sudo apt-get update "$@" ;;
+    esac
     ;;
   upgrade)
     _snap
-    if [[ "$PKG" == "apt-get" ]]; then
-      sudo apt-get dist-upgrade -y "$@"
-    else
-      sudo $PKG upgrade -y "$@"
-    fi
+    case "$PKG" in
+      pacman)  sudo pacman -Syu --noconfirm "$@" ;;
+      dnf)     sudo dnf upgrade -y "$@" ;;
+      apt-get) sudo apt-get dist-upgrade -y "$@" ;;
+    esac
     ;;
   search)
-    if [[ "$PKG" == "dnf" ]]; then
-      dnf search "$@"
-    else
-      apt-cache search "$@"
-    fi
+    case "$PKG" in
+      pacman)  pacman -Ss "$@" ;;
+      dnf)     dnf search "$@" ;;
+      apt-get) apt-cache search "$@" ;;
+    esac
     ;;
   list)
-    if [[ "$PKG" == "dnf" ]]; then
-      rpm -qa "$@" | sort
-    else
-      dpkg -l "$@"
-    fi
+    case "$PKG" in
+      pacman)  pacman -Q "$@" ;;
+      dnf)     rpm -qa "$@" | sort ;;
+      apt-get) dpkg -l "$@" ;;
+    esac
     ;;
   info)
-    if [[ "$PKG" == "dnf" ]]; then
-      dnf info "$@"
-    else
-      apt-cache show "$@"
-    fi
+    case "$PKG" in
+      pacman)  pacman -Qi "$@" 2>/dev/null || pacman -Si "$@" ;;
+      dnf)     dnf info "$@" ;;
+      apt-get) apt-cache show "$@" ;;
+    esac
     ;;
   help|*)
-    echo "kpkg — universal package manager (auto-detects apt/dnf)"
+    echo "kpkg — universal package manager (auto-detects apt/dnf/pacman)"
     echo ""
     echo "  kpkg install <pkg>    Install a package (ZFS snapshot first)"
     echo "  kpkg remove <pkg>     Remove a package (ZFS snapshot first)"

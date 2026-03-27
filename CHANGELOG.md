@@ -4,6 +4,49 @@ All notable changes to kldload are documented here.
 
 ---
 
+## [1.0.1] — 2026-03-27
+
+### Added
+- **Fedora 41** — new distro target. DNF bootstrap, same path as CentOS. RPM darksite.
+- **Arch Linux** — new distro target. pacstrap bootstrap via pacman-static binary. pacman darksite with archzfs repo.
+- **Golden image export with SCP** — export images and SCP them directly to a remote host (key or password auth). Images sealed for cloning: machine-id cleared, SSH host keys removed, cloud-init enabled with multi-datasource config.
+- **Hardware/firmware packages** — linux-firmware, nvme-cli, pciutils, usbutils, smartmontools on all targets. linux-modules-extra-generic on Ubuntu. Debian firmware packages (firmware-linux-nonfree, firmware-iwlwifi, firmware-realtek).
+- **Distro wallpapers** — dconf sets the distro's default wallpaper on desktop installs (Ubuntu, Debian, CentOS, Fedora).
+- **pacman support in kpkg** — `kpkg install/remove/upgrade` now works across apt, dnf, and pacman with ZFS snapshot before each operation.
+- **Fedora darksite builder** — `./deploy.sh build-fedora-darksite` (port 3145).
+- **Arch darksite builder** — `./deploy.sh build-arch-darksite` (port 3144).
+- **pacman-static** — embedded in live ISO for Arch bootstrap from CentOS live environment.
+
+### Fixed
+- **Ubuntu darksite not built** — `cmd_build` now auto-builds Ubuntu darksite alongside Debian. Previously required manual `build-ubuntu-darksite`.
+- **Firefox/snapd on Ubuntu** — replaced with epiphany-browser. Ubuntu's firefox package is a snapd transitional shim.
+- **Xorg missing on desktop** — added xserver-xorg to desktop profile package list. GDM black screen on VMs resolved.
+- **Wayland on VMs** — Wayland remains default; Xorg installed as automatic fallback. Removed forced Wayland disable.
+- **websockets module** — CentOS 9 RPM lacks `websockets.http11`. Restored pip install with better error handling.
+- **Core profile dotfiles** — .bashrc/.tmux.conf/.vimrc no longer copied on core profile. Stock distro only.
+- **GDM config path** — Ubuntu/Debian use `/etc/gdm3/`, Fedora/Arch/CentOS use `/etc/gdm/`.
+- **Loop device support** — ZFS partition prefix handles `/dev/loopN` devices.
+- **kexport file input** — accepts raw files alongside block devices for OVA size detection.
+- **network-manager postinst** — added `file` package to Ubuntu base (required by NM postinst script).
+
+### Changed
+- **Messaging** — "base image factory" positioning. Executive summary rewritten with 4-step how-to-use guide.
+- **7 distros** — all docs, README, website updated.
+- **Removed "100% bash"** — replaced with "fully auditable" across all docs and website.
+- **Canonical ZFS warning** — added to executive summary (Ubuntu 26.10 dropping ZFS from signed GRUB).
+
+---
+
+## [1.0] — 2026-03-26
+
+### Released
+- kldloadOS 1.0 "Du-Nn" — 5 distros (CentOS, Debian, Ubuntu, Rocky, RHEL), ZFS on root, offline install.
+- Image export to qcow2, VMDK, VHD, OVA, raw.
+- WireGuard, eBPF, NVIDIA support.
+- 30+ CLI tools, web UI installer, ZFSBootMenu.
+
+---
+
 ## [RC-2] — 2026-03-23
 
 ### Fixed
@@ -18,7 +61,7 @@ All notable changes to kldload are documented here.
 - **RHEL entitlement certs** — copy to both host and installroot paths (dnf resolves SSL from host, not installroot). Use `find` instead of glob to match cert filenames.
 
 ### Added
-- **Smoke test framework** — automated post-install verification for all 3 profiles × 4 distros. Tests ZFS pool health, dataset hierarchy, boot environments, SSH, networking, k* tools, webui, sanoid, WireGuard, eBPF, NVIDIA, kpkg snapshot integration, GNOME desktop, and more.
+- **Smoke test framework** — automated post-install verification for all 3 profiles × 7 distros. Tests ZFS pool health, dataset hierarchy, boot environments, SSH, networking, k* tools, webui, sanoid, WireGuard, eBPF, NVIDIA, kpkg snapshot integration, GNOME desktop, and more.
 - **Integration test** — WireGuard tunnel + ZFS replication between two nodes. Proves full stack end-to-end.
 - **Fleet test runner** — `run-fleet.sh` SSHs into multiple VMs and runs smoke tests remotely.
 - **Core profile** — new install profile. Just ZFS on root, stock distro, no kldload tools. Manual storage mode drops to shell for custom pool layout.
@@ -42,7 +85,7 @@ All notable changes to kldload are documented here.
 ## [RC-1] — 2026-03-22
 
 ### Initial release
-- Single bootable ISO installs CentOS Stream 9, Debian 13 (Trixie), Rocky Linux 9, or RHEL 9 with ZFS on root.
+- Single bootable ISO installs CentOS Stream 9, Debian 13 (Trixie), Ubuntu 24.04, Fedora 41, RHEL 9, Rocky Linux 9, or Arch Linux with ZFS on root.
 - Three profiles: Desktop (GNOME), Server (headless), Core (ZFS only).
 - Dual offline darksites: RPM (~900 packages) + APT (~2,700 packages) baked into ISO.
 - ZFS on root with ZFSBootMenu, boot environments, automatic snapshots via sanoid.
@@ -51,6 +94,6 @@ All notable changes to kldload are documented here.
 - WireGuard pre-installed with kernel module.
 - eBPF tools (bpftrace, bpfcc-tools, bpftool, linux-perf) on Debian.
 - NVIDIA driver support via install checkbox.
-- Export to qcow2, raw, VHD, VMDK, OVA via kexport.
+- Export to qcow2, raw, VHD, VMDK, OVA via kexport with SCP to remote hosts and golden image sealing (cloud-init).
 - Pool Designer in web UI for visual ZFS topology calculation.
 - BSD-3-Clause license. Free forever.

@@ -4,11 +4,11 @@ Automated post-install verification for every distro × profile combination. Run
 
 ## Test Matrix
 
-| | CentOS 9 | Debian 13 | Rocky 9 | RHEL 9 |
-|---|---|---|---|---|
-| **Desktop** | `smoke-desktop.sh` | `smoke-desktop.sh` | `smoke-desktop.sh` | `smoke-desktop.sh` |
-| **Server** | `smoke-server.sh` | `smoke-server.sh` | `smoke-server.sh` | `smoke-server.sh` |
-| **Core** | `smoke-core.sh` | `smoke-core.sh` | `smoke-core.sh` | `smoke-core.sh` |
+| | CentOS 9 | Debian 13 | Ubuntu 24.04 | Fedora 41 | Rocky 9 | RHEL 9 | Arch |
+|---|---|---|---|---|---|---|---|
+| **Desktop** | `smoke-desktop.sh` | `smoke-desktop.sh` | `smoke-desktop.sh` | `smoke-desktop.sh` | `smoke-desktop.sh` | `smoke-desktop.sh` | `smoke-desktop.sh` |
+| **Server** | `smoke-server.sh` | `smoke-server.sh` | `smoke-server.sh` | `smoke-server.sh` | `smoke-server.sh` | `smoke-server.sh` | `smoke-server.sh` |
+| **Core** | `smoke-core.sh` | `smoke-core.sh` | `smoke-core.sh` | `smoke-core.sh` | `smoke-core.sh` | `smoke-core.sh` | `smoke-core.sh` |
 
 ## Usage
 

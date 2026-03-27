@@ -23,8 +23,11 @@ The live installer uses a tmpfs overlay in RAM for write operations. RPM-based d
 |--------|---------|--------|------|-------|
 | CentOS Stream 9 | ✓ | ✓ | ✓ | Offline darksite, fastest RPM path |
 | Debian 13 (Trixie) | ✓ | ✓ | ✓ | Offline darksite, fastest overall (~2 min) |
+| Ubuntu 24.04 (Noble) | ✓ | ✓ | ✓ | Offline darksite, debootstrap |
+| Fedora 41 | ✓ | ✓ | ✓ | Offline darksite, DNF bootstrap |
 | Rocky Linux 9 | ✓ | ✓ | ✓ | Same RPM darksite as CentOS |
 | RHEL 9 | ✓ | ✓ | ✓ | Requires internet + Red Hat account |
+| Arch Linux | ✓ | ✓ | ✓ | Offline darksite, pacstrap bootstrap |
 | RHEL 10 | ✗ | ✗ | ✗ | Subscription content not available |
 | CentOS 10 | ? | ? | ? | Untested — repos exist |
 | Rocky 10 | ? | ? | ? | Untested — repos exist |
@@ -102,4 +105,4 @@ The live installer uses a tmpfs overlay in RAM for write operations. RPM-based d
 
 ## Debian install speed vs CentOS/RHEL
 
-**Debian installs are significantly faster** (~2 minutes) because all packages come from the local APT darksite on the ISO. CentOS installs from the local RPM darksite are also fast. RHEL installs are slower because packages come from the Red Hat CDN over the internet.
+**Debian and Ubuntu installs are significantly faster** (~2 minutes) because all packages come from the local APT darksite on the ISO. CentOS, Fedora, and Rocky installs from the local RPM darksite are also fast. Arch installs from the local pacman darksite are similarly quick. RHEL installs are slower because packages come from the Red Hat CDN over the internet.

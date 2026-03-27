@@ -94,21 +94,77 @@ cmd_build_ubuntu_darksite() {
     log "Ubuntu darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
 }
 
+cmd_build_arch_darksite() {
+    local runtime
+    runtime="$(detect_runtime)"
+    local darksite_dir="$ROOT/live-build/darksite-arch-cache"
+    mkdir -p "$darksite_dir"
+    log "Building Arch Linux darksite pacman cache (runs in Arch container)..."
+    "$runtime" run --rm \
+        -v "$ROOT/build/darksite-arch:/darksite-build:z,ro" \
+        -v "$darksite_dir:/output:z" \
+        -e PROFILE="$PROFILE" \
+        -e ARCH="x86_64" \
+        --name "kldload-darksite-arch-$$" \
+        archlinux:latest \
+        bash /darksite-build/build-darksite-arch.sh
+    log "Arch darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
+}
+
+cmd_build_fedora_darksite() {
+    local runtime
+    runtime="$(detect_runtime)"
+    local darksite_dir="$ROOT/live-build/darksite-fedora-cache"
+    mkdir -p "$darksite_dir"
+    log "Building Fedora darksite RPM mirror (runs in Fedora container)..."
+    "$runtime" run --rm \
+        -v "$ROOT/build/darksite-fedora:/darksite-build:z,ro" \
+        -v "$darksite_dir:/output:z" \
+        -e PROFILE="$PROFILE" \
+        -e ARCH="x86_64" \
+        -e FEDORA_RELEASE="41" \
+        --name "kldload-darksite-fedora-$$" \
+        fedora:41 \
+        bash /darksite-build/build-darksite-fedora.sh
+    log "Fedora darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
+}
+
 cmd_build() {
     local runtime
     runtime="$(detect_runtime)"
     log "Building kldload ISO (PROFILE=$PROFILE EDITION=$EDITION ARCH=$ARCH RELEASE=$RELEASE)"
 
-    # Build Debian darksite if not already cached (free edition only)
+    # Build APT darksites if not already cached (free edition only)
     if [[ "$EDITION" != "core" ]]; then
-        local darksite_dir="$ROOT/live-build/darksite-debian-cache"
-        if [[ ! -f "$darksite_dir/apt/dists/trixie/Release" ]]; then
+        local debian_darksite="$ROOT/live-build/darksite-debian-cache"
+        if [[ ! -f "$debian_darksite/apt/dists/trixie/Release" ]]; then
             cmd_build_debian_darksite
         else
-            log "Debian darksite cached: $(du -sh "$darksite_dir" | cut -f1)"
+            log "Debian darksite cached: $(du -sh "$debian_darksite" | cut -f1)"
+        fi
+
+        local ubuntu_darksite="$ROOT/live-build/darksite-ubuntu-cache"
+        if [[ ! -f "$ubuntu_darksite/apt/dists/noble/Release" ]]; then
+            cmd_build_ubuntu_darksite
+        else
+            log "Ubuntu darksite cached: $(du -sh "$ubuntu_darksite" | cut -f1)"
+        fi
+
+        local arch_darksite="$ROOT/live-build/darksite-arch-cache"
+        if [[ ! -d "$arch_darksite/pkg" ]] || [[ "$(find "$arch_darksite/pkg" -name '*.pkg.tar.*' 2>/dev/null | wc -l)" -eq 0 ]]; then
+            cmd_build_arch_darksite
+        else
+            log "Arch darksite cached: $(du -sh "$arch_darksite" | cut -f1)"
+        fi
+
+        local fedora_darksite="$ROOT/live-build/darksite-fedora-cache"
+        if [[ ! -d "$fedora_darksite/rpm" ]] || [[ "$(find "$fedora_darksite/rpm" -name '*.rpm' 2>/dev/null | wc -l)" -eq 0 ]]; then
+            cmd_build_fedora_darksite
+        else
+            log "Fedora darksite cached: $(du -sh "$fedora_darksite" | cut -f1)"
         fi
     else
-        log "Core edition — skipping Debian darksite."
+        log "Core edition — skipping darksites."
     fi
 
     "$runtime" run --rm --privileged \
@@ -254,6 +310,8 @@ case "${1:-help}" in
     build-debian-darksite) cmd_build_debian_darksite ;;
     build-bsd-darksite)    bash build/darksite-bsd/build-darksite-bsd.sh "$ROOT/live-build/darksite-bsd-cache" ;;
     build-ubuntu-darksite) cmd_build_ubuntu_darksite ;;
+    build-arch-darksite) cmd_build_arch_darksite ;;
+    build-fedora-darksite) cmd_build_fedora_darksite ;;
     builder-image)      cmd_builder_image ;;
     clean)              cmd_clean ;;
     burn)               cmd_burn ;;

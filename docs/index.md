@@ -12,22 +12,24 @@ You stick a USB drive into any x86_64 machine — bare metal, KVM, Proxmox, VMwa
 
 The original idea was simple — load a kernel, install ZFS on root, get out of the way. But once you have a consistent ZFS layout, you need snapshot tools. Once you have snapshot tools, you need boot environments. Once you have boot environments, you need a safe upgrade path. Once you support multiple distros, you need a universal package manager. And once you have all of that, you've built an operating system.
 
-kldloadOS still installs stock CentOS, Debian, RHEL, or Rocky underneath. Stock kernel, stock packages, stock systemd. Nothing is patched, nothing is forked, nothing is removed. `apt` and `dnf` still work exactly as they always do.
+kldloadOS still installs stock CentOS, Debian, Ubuntu, Fedora, RHEL, Rocky, or Arch underneath. Stock kernel, stock packages, stock systemd. Nothing is patched, nothing is forked, nothing is removed. `apt`, `dnf`, and `pacman` still work exactly as they always do.
 
-What kldloadOS adds — optionally — is a set of `k*` convenience tools that automate common tasks and work identically across distro families. `kpkg` wraps the native package manager so you can use one command on both Debian and CentOS if you want to. Or don't — run `apt install nginx` directly, it works fine. The `k*` tools are there to make cross-distro workflows easier, not to replace anything.
+What kldloadOS adds — optionally — is a set of `k*` convenience tools that automate common tasks and work identically across distro families. `kpkg` wraps the native package manager so you can use one command on Debian, CentOS, Arch, or any supported distro. Or don't — run `apt install nginx` directly, it works fine. The `k*` tools are there to make cross-distro workflows easier, not to replace anything.
 
 You pick the distro. You use it as-is, or you use the kldloadOS tools. Both work.
 
 ---
 
-## One USB, four distros
+## One USB, seven distros
 
-The ISO contains two complete offline package mirrors:
+The ISO contains complete offline package mirrors for every supported distro:
 
-- **~900 RPMs** for CentOS/RHEL/Rocky
+- **~900 RPMs** for CentOS/Fedora/RHEL/Rocky
 - **~2,700 .debs** for Debian
+- **~2,500 .debs** for Ubuntu
+- **Arch packages** for Arch Linux
 
-You pick the distro at install time. The installer dispatches to `dnf --installroot` or `debootstrap` underneath, but from the outside the experience is the same: same disk layout, same bootloader, same tools, same CLI, same web UI.
+You pick the distro at install time. The installer dispatches to `dnf --installroot` (CentOS/Fedora/RHEL/Rocky), `debootstrap` (Debian/Ubuntu), or `pacstrap` (Arch) underneath, but from the outside the experience is the same: same disk layout, same bootloader, same tools, same CLI, same web UI.
 
 ---
 
@@ -53,7 +55,7 @@ This is how Solaris, FreeBSD, and illumos have worked for years. Stock Linux doe
 
 ### Optional CLI tools
 
-kldloadOS ships a set of `k*` commands that work the same on CentOS and Debian. They're all optional — the native tools (`apt`, `dnf`, `zfs`, `zpool`) are untouched and work exactly as you'd expect. The `k*` tools just automate common patterns:
+kldloadOS ships a set of `k*` commands that work the same on all seven supported distros. They're all optional — the native tools (`apt`, `dnf`, `pacman`, `zfs`, `zpool`) are untouched and work exactly as you'd expect. The `k*` tools just automate common patterns:
 
 ```
 kpkg install nginx          # wraps dnf or apt (adds ZFS snapshot)
@@ -94,7 +96,7 @@ Set `KLDLOAD_NVIDIA_DRIVERS=1` during install and the NVIDIA CUDA repo and drive
 
 ### Export anywhere
 
-`kexport` converts a running system to qcow2 (KVM/Proxmox), VHD (Azure/Hyper-V), VMDK (VMware), OVA (VirtualBox), or raw disk images. Build once, run anywhere.
+`kexport` converts a running system to qcow2 (KVM/Proxmox), VHD (Azure/Hyper-V), VMDK (VMware), OVA (VirtualBox), or raw disk images. Images can be SCP'd to remote hosts and sealed as golden images with cloud-init for template cloning. Build once, run anywhere.
 
 ### Secure Boot + encryption
 
@@ -106,7 +108,7 @@ Shim-signed UEFI boot chain with automatic MOK key generation for DKMS modules. 
 
 - **Sysadmins** who want ZFS on root without the manual setup pain
 - **Home labbers** who want boot environments and instant rollbacks
-- **Teams** who deploy both CentOS and Debian and want one tool set
+- **Teams** who deploy across multiple distros and want one tool set
 - **Air-gapped environments** that need offline installs with no internet
 - **Anyone** who's tired of reinstalling Linux because an upgrade broke something
 
@@ -140,7 +142,7 @@ When you boot the ISO, you choose a profile:
 
 Desktop and Server include the full kldloadOS experience — `k*` tools, web UI, automatic snapshots, offline darksites. Core gives you just the hard part (ZFS on root with ZFSBootMenu and DKMS) and gets out of the way.
 
-All three profiles are available for all four distros (CentOS, Debian, RHEL, Rocky).
+All three profiles are available for all seven distros (CentOS, Debian, Ubuntu, Fedora, RHEL, Rocky, Arch).
 
 See [Editions](overview/editions.md) for the full comparison.
 

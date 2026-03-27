@@ -33,8 +33,12 @@ k_poweroff_after_success() {
   if [[ -n "$_path" && -f "$_path" ]]; then
     local _size
     _size="$(du -sh "$_path" 2>/dev/null | cut -f1)"
-    printf '\e[1;32m║   ✔  Image exported: %-36s ║\e[0m\n' "${_name}.${_fmt} (${_size})"
-    printf '\e[1;32m║      Location: ~/Downloads/                              ║\e[0m\n'
+    printf '\e[1;32m║   ✔  Golden image: %-37s ║\e[0m\n' "${_name}.${_fmt} (${_size})"
+    printf '\e[1;32m║      Cloud-init ready — use as Packer base or template   ║\e[0m\n'
+    printf '\e[1;32m║      Location: %-41s ║\e[0m\n' "${_path}"
+    if [[ -n "${KLDLOAD_EXPORT_SCP_HOST:-}" ]]; then
+      printf '\e[1;32m║      Uploaded: %-41s ║\e[0m\n' "${KLDLOAD_EXPORT_SCP_USER:-root}@${KLDLOAD_EXPORT_SCP_HOST}"
+    fi
     printf '\e[1;32m║                                                          ║\e[0m\n'
   fi
   printf '\e[1;32m║   Remove the USB / ISO and reboot when ready.            ║\e[0m\n'
@@ -164,6 +168,55 @@ if ! k_have_func k_unbind_chroot_mounts; then
   }
 fi
 
+# Seal the installed system for use as a clonable golden image.
+# Clears machine-specific state so cloud-init / first-boot can repersonalize.
+k_seal_image_for_clone() {
+  local target="${KLDLOAD_TARGET_MNT}"
+  k_log "Sealing image for clone: clearing machine-id, SSH host keys, cloud-init state"
+
+  # Truncate machine-id — systemd regenerates on first boot
+  : > "${target}/etc/machine-id"
+  rm -f "${target}/var/lib/dbus/machine-id" 2>/dev/null || true
+
+  # Remove SSH host keys — sshd-keygen regenerates on first boot
+  rm -f "${target}"/etc/ssh/ssh_host_*
+
+  # Remove any hardcoded DHCP leases
+  rm -f "${target}"/var/lib/NetworkManager/*.lease 2>/dev/null || true
+  rm -f "${target}"/var/lib/dhclient/*.lease 2>/dev/null || true
+  rm -rf "${target}"/var/lib/dhcp/* 2>/dev/null || true
+
+  # Reset cloud-init so it runs on next boot
+  if [[ -d "${target}/var/lib/cloud" ]]; then
+    rm -rf "${target}/var/lib/cloud/instances" 2>/dev/null || true
+    rm -f "${target}/var/lib/cloud/instance" 2>/dev/null || true
+  fi
+
+  # Ensure cloud-init is enabled (not masked)
+  chroot "${target}" systemctl enable cloud-init.service 2>/dev/null || true
+  chroot "${target}" systemctl enable cloud-init-local.service 2>/dev/null || true
+  chroot "${target}" systemctl enable cloud-config.service 2>/dev/null || true
+  chroot "${target}" systemctl enable cloud-final.service 2>/dev/null || true
+
+  # Write cloud-init datasource config — NoCloud for Proxmox/KVM, falls back to others
+  mkdir -p "${target}/etc/cloud/cloud.cfg.d"
+  cat > "${target}/etc/cloud/cloud.cfg.d/99-kldload-datasource.cfg" <<'CLOUDINIT'
+# kldload golden image — accept any datasource
+datasource_list: [ NoCloud, ConfigDrive, OpenStack, Azure, GCE, Ec2, None ]
+CLOUDINIT
+
+  # Clear bash history and logs from the build process
+  rm -f "${target}/root/.bash_history"
+  : > "${target}/var/log/wtmp" 2>/dev/null || true
+  : > "${target}/var/log/btmp" 2>/dev/null || true
+  : > "${target}/var/log/lastlog" 2>/dev/null || true
+
+  # Remove the install manifest (contains build-time passwords)
+  rm -f "${target}/etc/kldload/install-manifest.env" 2>/dev/null || true
+
+  k_log "Image sealed for cloning"
+}
+
 if ! k_have_func k_preflight; then
   k_preflight() {
     k_log "========== Preflight =========="
@@ -216,7 +269,7 @@ if ! k_have_func k_bootstrap_base; then
 
     case "${distro}" in
       # ── CentOS / Rocky / RHEL (DNF-based) ──────────────────────────────
-      centos|rocky|rhel)
+      centos|rocky|rhel|fedora)
         local release="${KLDLOAD_RELEASE:-9}"
 
         # Set up repos inside installroot
@@ -365,7 +418,7 @@ EOS
         ;;
 
       *)
-        k_die "Unsupported distro: ${distro}. Use: centos, rocky, rhel, debian, ubuntu, freebsd, openbsd, ghostbsd, illumos, windows"
+        k_die "Unsupported distro: ${distro}. Use: centos, rocky, rhel, fedora, debian, ubuntu, freebsd, openbsd, ghostbsd, illumos, windows"
         ;;
     esac
 
@@ -1353,27 +1406,71 @@ main() {
   local _export_path=""
 
   if [[ "${export_fmt}" != "none" && -n "${export_fmt}" ]]; then
+    # ── Seal the image for cloning (cloud-init / Packer ready) ──────────
+    _info "▸  Sealing image for cloning..."
+    k_seal_image_for_clone
+    _ok "Sealed"     "machine-id cleared, SSH host keys removed, cloud-init enabled"
+
     _info "▸  Exporting disk image (${export_fmt}) — this may take a few minutes..."
 
-    # Write to the target ZFS filesystem (plenty of space) not /tmp (ramdisk, limited)
-    local _user="${KLDLOAD_USERNAME:-admin}"
-    local _export_dir="${KLDLOAD_TARGET_MNT}/home/${_user}/exports"
-    mkdir -p "${_export_dir}"
+    # Unbind chroot mounts and export pools BEFORE qemu-img reads the disk
+    k_unbind_chroot_mounts
     sync || true
+    zpool export bpool 2>/dev/null || true
+    zpool export rpool 2>/dev/null || true
+    sleep 1
 
-    if KEXPORT_NAME="${_ename}" kexport "${KLDLOAD_DISK}" "${export_fmt}" "${_export_dir}"; then
-      _export_path="${_export_dir}/${_ename}.${export_fmt}"
+    # Pools exported — qemu-img reads the raw block device, writes compressed to /tmp
+    local _tmp_export="/tmp/kldload-export"
+    mkdir -p "${_tmp_export}"
 
-      local _desktop="/home/live/Desktop"
-      mkdir -p "${_desktop}"
-      ln -sf "${_export_path}" "${_desktop}/${_ename}.${export_fmt}"
-      chown -h live:live "${_desktop}/${_ename}.${export_fmt}" 2>/dev/null || true
+    if KEXPORT_NAME="${_ename}" kexport "${KLDLOAD_DISK}" "${export_fmt}" "${_tmp_export}"; then
+      _export_path="${_tmp_export}/${_ename}.${export_fmt}"
+      local _size
+      _size="$(du -sh "${_export_path}" 2>/dev/null | cut -f1)"
+      _ok "Export" "${_ename}.${export_fmt} (${_size})"
 
-      _ok "Export" "${_ename}.${export_fmt} ($(du -sh "${_export_path}" | cut -f1)) → /home/${_user}/exports/"
-      _info "    Export saved to the installed system — available after reboot at /home/${_user}/exports/"
+      # ── SCP to remote host if configured ────────────────────────────
+      local _scp_host="${KLDLOAD_EXPORT_SCP_HOST:-}"
+      local _scp_user="${KLDLOAD_EXPORT_SCP_USER:-root}"
+      local _scp_path="${KLDLOAD_EXPORT_SCP_PATH:-/root/}"
+      local _scp_key="${KLDLOAD_EXPORT_SCP_KEY:-}"
+      local _scp_pass="${KLDLOAD_EXPORT_SCP_PASS:-}"
+
+      if [[ -n "${_scp_host}" ]]; then
+        _info "▸  Uploading image to ${_scp_user}@${_scp_host}:${_scp_path} ..."
+        local _scp_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+        local _scp_cmd=(scp)
+
+        if [[ -n "${_scp_key}" && -f "${_scp_key}" ]]; then
+          # Key-based auth
+          _scp_opts+=(-i "${_scp_key}")
+        elif [[ -n "${_scp_pass}" ]]; then
+          # Password auth via sshpass
+          if command -v sshpass >/dev/null 2>&1; then
+            _scp_cmd=(sshpass -p "${_scp_pass}" scp)
+          else
+            _warn "sshpass not available — trying key-based auth"
+          fi
+        fi
+
+        if "${_scp_cmd[@]}" "${_scp_opts[@]}" "${_export_path}" "${_scp_user}@${_scp_host}:${_scp_path}"; then
+          _ok "Upload"  "${_ename}.${export_fmt} → ${_scp_user}@${_scp_host}:${_scp_path}"
+        else
+          _warn "SCP failed — image saved locally at ${_export_path}"
+        fi
+      else
+        _info "    Image saved to: ${_export_path}"
+        _info "    Retrieve via: scp root@<this-machine>:${_export_path} ."
+      fi
     else
-      _warn "Export failed — you can run manually after reboot: sudo kexport ${KLDLOAD_DISK} ${export_fmt}"
+      _warn "Export failed — you can run manually: sudo kexport ${KLDLOAD_DISK} ${export_fmt}"
     fi
+
+    k_log "Install + export complete"
+    k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
+    sync || true
+    return
   fi
 
   # ── Finalize — unbind chroot, export pools (LAST step) ─────────────────

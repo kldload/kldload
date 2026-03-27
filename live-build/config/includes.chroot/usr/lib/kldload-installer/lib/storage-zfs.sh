@@ -45,7 +45,7 @@ k_zfs_log() {
 k_zfs_disk_prefix() {
   local disk="${1:?}"
   case "${disk}" in
-    *nvme*|*mmcblk*) echo "${disk}p" ;;
+    *nvme*|*mmcblk*|*loop*) echo "${disk}p" ;;
     *) echo "${disk}" ;;
   esac
 }

@@ -161,8 +161,11 @@ build {
       "sudo apt-get update",
       "sudo apt-get install -y nginx postgresql redis",
 
-      # Or on CentOS/RHEL:
+      # Or on CentOS/Fedora/RHEL/Rocky:
       # "sudo dnf install -y nginx postgresql redis",
+
+      # Or on Arch:
+      # "sudo pacman -S --noconfirm nginx postgresql redis",
 
       # Configure your app
       "sudo systemctl enable nginx postgresql redis",

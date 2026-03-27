@@ -87,8 +87,10 @@ if [[ "$EDITION" != "core" ]]; then
         perl-Config-IniFiles perl-Capture-Tiny
         # Cross-distro installer (debootstrap for Debian targets from CentOS live)
         debootstrap
+        # Arch Linux support — pacman-static (not in CentOS repos)
+        # Downloaded during build and placed in /usr/local/bin/pacman
         # Guest agents
-        qemu-guest-agent qemu-img open-vm-tools-desktop
+        qemu-guest-agent qemu-img open-vm-tools-desktop sshpass
         # Windows installer support (WIM image extraction)
         wimlib-utils ntfs-3g ntfsprogs
     )
@@ -257,6 +259,21 @@ umount "${ROOTFS}/dev" 2>/dev/null || true
 umount "${ROOTFS}/sys" 2>/dev/null || true
 umount "${ROOTFS}/proc" 2>/dev/null || true
 
+# Download pacman-static for Arch Linux bootstrap support
+# (CentOS has no pacman package — we need a static binary)
+if [[ "$EDITION" != "core" ]]; then
+    log "Downloading pacman-static for Arch support..."
+    curl -sfL "https://pkgbuild.com/~morganamilo/pacman-static/x86_64/bin/pacman-static" \
+        -o "${ROOTFS}/usr/local/bin/pacman" && \
+        chmod +x "${ROOTFS}/usr/local/bin/pacman" && \
+        ln -sf /usr/local/bin/pacman "${ROOTFS}/usr/bin/pacman" && \
+        mkdir -p "${ROOTFS}/etc/pacman.d" "${ROOTFS}/etc/ssl/certs" && \
+        ln -sf /etc/pki/tls/certs/ca-bundle.crt "${ROOTFS}/etc/ssl/certs/ca-certificates.crt" && \
+        printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n' > "${ROOTFS}/etc/pacman.d/mirrorlist" && \
+        log "pacman-static installed: $(chroot "$ROOTFS" /usr/bin/pacman --version 2>&1 | head -1)" || \
+        log "WARNING: pacman-static download failed — Arch installs will not work"
+fi
+
 # ---------------------------------------------------------------------------
 # Step 2: Configure the live system
 # ---------------------------------------------------------------------------
@@ -281,10 +298,14 @@ PasswordAuthentication yes
 PermitRootLogin yes
 SSHEOF
 
-# Fix websockets — CentOS ships old version that's incompatible with webui (free only)
+# CentOS 9 python3-websockets RPM lacks websockets.http11 module needed by webui.
+# Remove the RPM and install a compatible version via pip at build time.
+# The wheel is downloaded during build (builder container has network access).
 if [[ "$EDITION" != "core" ]]; then
     chroot "$ROOTFS" dnf remove -y python3-websockets 2>/dev/null || true
-    chroot "$ROOTFS" pip3 install websockets 2>&1 | tail -2 || true
+    chroot "$ROOTFS" pip3 install --no-cache-dir websockets 2>&1 | tail -3 || {
+        log "WARNING: pip install websockets failed — webui may not start"
+    }
 fi
 
 # Enable services
@@ -560,6 +581,44 @@ UAPTEOF
 
     chroot "$ROOTFS" systemctl enable kldload-apt-mirror-ubuntu 2>/dev/null || true
 
+    # Arch Linux darksite pacman mirror service (serves on port 3144)
+    cat > "${ROOTFS}/usr/lib/systemd/system/kldload-pacman-mirror.service" << 'PACEOF'
+[Unit]
+Description=kldload Arch darksite pacman mirror
+After=network.target
+ConditionPathIsDirectory=/root/darksite/arch/pkg
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m http.server 3144 --bind 127.0.0.1 --directory /root/darksite/arch
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+PACEOF
+
+    chroot "$ROOTFS" systemctl enable kldload-pacman-mirror 2>/dev/null || true
+
+    # Fedora darksite RPM mirror service (serves on port 3145)
+    cat > "${ROOTFS}/usr/lib/systemd/system/kldload-fedora-mirror.service" << 'FEDEOF'
+[Unit]
+Description=kldload Fedora darksite RPM mirror
+After=network.target
+ConditionPathIsDirectory=/root/darksite/fedora/rpm
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m http.server 3145 --bind 127.0.0.1 --directory /root/darksite/fedora
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+FEDEOF
+
+    chroot "$ROOTFS" systemctl enable kldload-fedora-mirror 2>/dev/null || true
+
     # Copy systemd service units from includes.chroot
     for _svc in kldload-firstboot.service kldload-srv-snapshot.service kldload-srv-snapshot.timer \
                 kldload-snapshot.service kldload-snapshot.timer kldload-export.service; do
@@ -640,6 +699,25 @@ if [[ "$EDITION" != "core" ]]; then
         log "Ubuntu darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/ubuntu" 2>/dev/null | cut -f1)"
     else
         log "No Ubuntu darksite found — Ubuntu installs will require internet"
+    fi
+
+    # Copy Arch Linux darksite pacman cache into the rootfs
+    if [[ -d /build/live-build/darksite-arch-cache/pkg ]]; then
+        mkdir -p "${ROOTFS}/root/darksite/arch/pkg" "${ROOTFS}/root/darksite/arch/db"
+        cp -r /build/live-build/darksite-arch-cache/pkg/. "${ROOTFS}/root/darksite/arch/pkg/"
+        cp -r /build/live-build/darksite-arch-cache/db/. "${ROOTFS}/root/darksite/arch/db/" 2>/dev/null || true
+        log "Arch darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/arch" 2>/dev/null | cut -f1)"
+    else
+        log "No Arch darksite found — Arch installs will require internet"
+    fi
+
+    # Copy Fedora darksite RPM repo into the rootfs
+    if [[ -d /build/live-build/darksite-fedora-cache/rpm ]]; then
+        mkdir -p "${ROOTFS}/root/darksite/fedora"
+        cp -r /build/live-build/darksite-fedora-cache/rpm "${ROOTFS}/root/darksite/fedora/"
+        log "Fedora darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/fedora" 2>/dev/null | cut -f1)"
+    else
+        log "No Fedora darksite found — Fedora installs will require internet"
     fi
 
     # Copy BSD/illumos base sets into the rootfs for offline installs

@@ -1,6 +1,6 @@
 # kldloadOS Documentation
 
-Your Linux construction kit — ZFS on root, universal CLI tools, boot environments, offline package mirrors, and a unified experience across CentOS, Debian, RHEL, and Rocky.
+Your Linux construction kit — ZFS on root, universal CLI tools, boot environments, offline package mirrors, and a unified experience across CentOS, Debian, Ubuntu, Fedora, RHEL, Rocky, and Arch.
 
 ---
 

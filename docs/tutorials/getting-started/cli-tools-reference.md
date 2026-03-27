@@ -1,8 +1,8 @@
 # CLI Tools Reference
 
-kldload ships a set of optional `k*` CLI tools for system management. All tools work on CentOS/RHEL and Debian.
+kldload ships a set of optional `k*` CLI tools for system management. All tools work on CentOS, Debian, Ubuntu, Fedora, RHEL, Rocky, and Arch.
 
-**Nothing is replaced.** The native tools (`zfs`, `zpool`, `apt`, `dnf`, `qemu-img`, etc.) are untouched and always work directly. The `k*` tools are thin wrappers that simplify common operations by removing repetitive flags, adding sensible defaults, and taking advantage of the ZFS safety net (automatic snapshots before destructive operations, cleanup after upgrades, DKMS verification after kernel changes). They exist to reduce the number of steps in routine tasks — not to replace the underlying commands.
+**Nothing is replaced.** The native tools (`zfs`, `zpool`, `apt`, `dnf`, `pacman`, `qemu-img`, etc.) are untouched and always work directly. The `k*` tools are thin wrappers that simplify common operations by removing repetitive flags, adding sensible defaults, and taking advantage of the ZFS safety net (automatic snapshots before destructive operations, cleanup after upgrades, DKMS verification after kernel changes). They exist to reduce the number of steps in routine tasks — not to replace the underlying commands.
 
 > **Note:** The `k*` tools are included with the **Desktop** and **Server** profiles. The **Core** profile does not include them — it installs ZFS on root with stock distro tools only. See [Editions](editions.md).
 
@@ -93,7 +93,7 @@ Like `mkdir`, but creates a ZFS dataset instead of a plain directory. Each `kdir
 ## kpkg — Universal package manager
 
 ```bash
-kpkg install nginx       # install (auto-detects apt/dnf)
+kpkg install nginx       # install (auto-detects apt/dnf/pacman)
 kpkg remove nginx        # remove
 kpkg search redis        # search
 kpkg info nginx          # package details

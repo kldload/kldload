@@ -1,6 +1,6 @@
 # What is kldloadOS
 
-**kldload** is the builder and installer. **kldloadOS** is what you're running afterward — an opinionated OS layer on top of CentOS, Debian, or RHEL that gives you ZFS on root, universal CLI tools, boot environments, offline package mirrors, and a consistent experience across distro families.
+**kldload** is the builder and installer. **kldloadOS** is what you're running afterward — an opinionated OS layer on top of CentOS, Debian, Ubuntu, Fedora, RHEL, Rocky, or Arch that gives you ZFS on root, universal CLI tools, boot environments, offline package mirrors, and a consistent experience across distro families.
 
 This page covers what kldloadOS gives you that a stock Linux install doesn't.
 
@@ -14,23 +14,23 @@ kldloadOS does not modify, patch, replace, or remove anything from the base dist
 
 What kldloadOS adds is a set of optional `k*` convenience commands that automate common tasks and provide a consistent interface across distro families. You can use them, or ignore them entirely and operate the system with native tools. Both approaches are fully supported.
 
-## One optional command set across Debian and CentOS/RHEL
+## One optional command set across all distros
 
-Every kldload system ships the same `k*` CLI tools regardless of distro. If you don't want to remember whether it's `apt` or `dnf`, `dpkg -l` or `rpm -qa`, the `k*` tools abstract away the differences:
+Every kldload system ships the same `k*` CLI tools regardless of distro. If you don't want to remember whether it's `apt`, `dnf`, or `pacman`, the `k*` tools abstract away the differences:
 
-| You type | On CentOS/RHEL it runs | On Debian it runs |
-|----------|----------------------|-------------------|
-| `kpkg install nginx` | `dnf install -y nginx` | `apt-get install -y nginx` |
-| `kpkg remove nginx` | `dnf remove -y nginx` | `apt-get remove -y nginx` |
-| `kpkg search redis` | `dnf search redis` | `apt-cache search redis` |
-| `kpkg update` | `dnf check-update` | `apt-get update` |
-| `kpkg upgrade` | `dnf upgrade -y` | `apt-get upgrade -y` |
-| `kpkg list` | `rpm -qa \| sort` | `dpkg -l` |
-| `kpkg info nginx` | `dnf info nginx` | `apt-cache show nginx` |
+| You type | On CentOS/Fedora/RHEL/Rocky | On Debian/Ubuntu | On Arch |
+|----------|----------------------|-------------------|---------|
+| `kpkg install nginx` | `dnf install -y nginx` | `apt-get install -y nginx` | `pacman -S --noconfirm nginx` |
+| `kpkg remove nginx` | `dnf remove -y nginx` | `apt-get remove -y nginx` | `pacman -R --noconfirm nginx` |
+| `kpkg search redis` | `dnf search redis` | `apt-cache search redis` | `pacman -Ss redis` |
+| `kpkg update` | `dnf check-update` | `apt-get update` | `pacman -Sy` |
+| `kpkg upgrade` | `dnf upgrade -y` | `apt-get upgrade -y` | `pacman -Syu --noconfirm` |
+| `kpkg list` | `rpm -qa \| sort` | `dpkg -l` | `pacman -Q` |
+| `kpkg info nginx` | `dnf info nginx` | `apt-cache show nginx` | `pacman -Si nginx` |
 
 And every `kpkg install`, `remove`, and `upgrade` takes an automatic ZFS snapshot first. If a package breaks something, roll back in seconds.
 
-This is significant: you can write scripts, documentation, and automation that work on both distro families with zero conditional logic. `kpkg install htop tmux nginx` works everywhere.
+This is significant: you can write scripts, documentation, and automation that work on all distro families with zero conditional logic. `kpkg install htop tmux nginx` works everywhere.
 
 ---
 
@@ -106,10 +106,12 @@ Each path is an independent ZFS dataset with its own:
 
 ## Offline installation
 
-Both RPM and APT package mirrors are baked into the ISO:
+Complete package mirrors for all seven distros are baked into the ISO:
 
-- **~900 RPMs** for CentOS/RHEL installs
+- **~900 RPMs** for CentOS/Fedora/RHEL/Rocky installs
 - **~2,700 .debs** for Debian installs
+- **~2,500 .debs** for Ubuntu installs
+- **Arch packages** for Arch Linux installs
 
 No internet required. Boot from USB, pick your distro, install. This matters for:
 - Air-gapped environments
@@ -139,11 +141,14 @@ The clone is instant (takes milliseconds) and starts at near-zero disk space. On
 
 One ISO installs:
 - CentOS Stream 9
-- Debian Trixie
+- Debian 13 (Trixie)
+- Ubuntu 24.04 (Noble)
+- Fedora 41
 - RHEL 9
 - Rocky Linux 9
+- Arch Linux
 
-The same USB stick works for all four. Same installer, same ZFS layout, same tools, same boot environments. The native package manager is still there — `dnf` on CentOS/RHEL, `apt` on Debian — fully functional. `kpkg` is an optional wrapper if you want one command for both.
+The same USB stick works for all seven. Same installer, same ZFS layout, same tools, same boot environments. The native package manager is still there — `dnf` on CentOS/Fedora/RHEL/Rocky, `apt` on Debian/Ubuntu, `pacman` on Arch — fully functional. `kpkg` is an optional wrapper if you want one command for all.
 
 ---
 
@@ -159,7 +164,7 @@ kexport ova     # VMware / VirtualBox
 kexport raw     # dd-ready image
 ```
 
-Build one system, deploy it everywhere.
+Images can be SCP'd to remote hosts and sealed as golden images with cloud-init for template cloning. Build one system, deploy it everywhere.
 
 ---
 
@@ -178,11 +183,11 @@ Instantly shows pool health, disk usage, compression ratios, snapshot counts, bo
 kldloadOS is deliberately non-invasive. The base distro is stock:
 
 - **Kernel** — unmodified distro kernel. ZFS is built via DKMS, not a custom kernel.
-- **Package managers** — `apt` and `dnf` are untouched. `kpkg` wraps them optionally; it does not replace, intercept, or modify them.
+- **Package managers** — `apt`, `dnf`, and `pacman` are untouched. `kpkg` wraps them optionally; it does not replace, intercept, or modify them.
 - **Init system** — stock systemd. No custom init, no wrapper services around systemd.
 - **Filesystem tools** — `zfs`, `zpool`, `zdb` are standard OpenZFS. The `k*` tools call them underneath.
 - **Network stack** — standard NetworkManager. WireGuard is the stock kernel module.
 - **No proprietary components** — everything is open source (BSD 3-Clause).
 - **No lock-in** — exports to any format, runs on any hardware. `kexport` uses `qemu-img`, not a custom tool.
 
-If you uninstalled every `k*` tool, you'd have a standard CentOS or Debian system with ZFS on root. The `k*` tools are additions, not modifications.
+If you uninstalled every `k*` tool, you'd have a standard CentOS, Debian, Ubuntu, Fedora, RHEL, Rocky, or Arch system with ZFS on root. The `k*` tools are additions, not modifications.

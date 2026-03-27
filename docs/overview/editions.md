@@ -8,11 +8,11 @@ kldload comes in two editions. Both install ZFS on root with ZFSBootMenu. The di
 
 **The kernel and ZFS. Nothing else.**
 
-kldload-core solves the hard problem: getting ZFS on root working properly on CentOS or Debian. That's it. No tools, no web UI, no darksites, no wrappers. You get a stock distro with ZFS on root and boot environments, and you take it from there.
+kldload-core solves the hard problem: getting ZFS on root working properly on any of the seven supported distros. That's it. No tools, no web UI, no darksites, no wrappers. You get a stock distro with ZFS on root and boot environments, and you take it from there.
 
 ### What's in core
 
-- Stock CentOS Stream 9 or Debian Trixie (your choice at install time)
+- Stock CentOS Stream 9, Debian 13, Ubuntu 24.04, Fedora 41, RHEL 9, Rocky Linux 9, or Arch Linux (your choice at install time)
 - ZFS on root with proper DKMS module, built against the installed kernel
 - Deterministic dataset layout (separate `/home`, `/var/log`, `/var/cache`, `/srv`)
 - ZFSBootMenu bootloader with boot environment support
@@ -45,8 +45,9 @@ After install, you have a standard Linux system. Use the native tools:
 
 ```bash
 # Package management
-dnf install nginx              # CentOS/RHEL
-apt install nginx              # Debian
+dnf install nginx              # CentOS/Fedora/RHEL/Rocky
+apt install nginx              # Debian/Ubuntu
+pacman -S nginx                # Arch
 
 # ZFS
 zfs snapshot rpool/home@backup
@@ -60,8 +61,9 @@ zfs clone rpool/ROOT/default@before-upgrade rpool/ROOT/rollback-point
 zpool set bootfs=rpool/ROOT/rollback-point rpool
 
 # Upgrades
-dnf upgrade                    # CentOS
-apt dist-upgrade               # Debian
+dnf upgrade                    # CentOS/Fedora/RHEL/Rocky
+apt dist-upgrade               # Debian/Ubuntu
+pacman -Syu                    # Arch
 # (no automatic snapshot — manage your own)
 ```
 
@@ -99,7 +101,7 @@ kldload-free starts with everything in core and adds a layer of optional tooling
 ### Who it's for
 
 - People who want ZFS on root without having to learn ZFS administration first
-- Teams deploying both CentOS and Debian who want consistent tooling
+- Teams deploying across multiple distros who want consistent tooling
 - Air-gapped environments that need offline installs
 - Home labbers who want boot environments and instant rollbacks
 - Anyone who's tired of reinstalling Linux because an upgrade broke something
@@ -120,8 +122,8 @@ Free is core with guard rails and shortcuts. Core is free without them. The unde
 | ZFSBootMenu | Yes | Yes |
 | Boot environments | Yes (manual) | Yes (manual + `kbe`) |
 | Snapshots | Yes (manual `zfs snapshot`) | Yes (manual + `ksnap` + automatic via sanoid) |
-| Package management | Native (`apt`/`dnf`) | Native + optional `kpkg` wrapper |
-| Upgrades | Native (`apt dist-upgrade`/`dnf upgrade`) | Native + optional `kupgrade` with auto-snapshot |
+| Package management | Native (`apt`/`dnf`/`pacman`) | Native + optional `kpkg` wrapper |
+| Upgrades | Native (`apt dist-upgrade`/`dnf upgrade`/`pacman -Syu`) | Native + optional `kupgrade` with auto-snapshot |
 | Offline install | Internet required for packages | Complete offline mirrors baked in |
 | Web UI | No | Yes (port 8080) |
 | Export to images | Manual (`qemu-img`) | `kexport qcow2/vhd/vmdk/ova/raw` |

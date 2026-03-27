@@ -34,8 +34,10 @@ squashfs.img (root filesystem)
 ├── usr/lib/kldload-installer/lib/    ← installer library (9 bash files)
 ├── usr/local/share/kldload-webui/    ← web UI static files (HTML/JS/CSS)
 ├── root/darksite/
-│   ├── rpm/                          ← CentOS offline RPM mirror (~900 packages)
+│   ├── rpm/                          ← CentOS/Fedora/Rocky offline RPM mirror (~900 packages)
 │   ├── debian/apt/                   ← Debian offline APT mirror (~2,700 packages)
+│   ├── ubuntu/apt/                   ← Ubuntu offline APT mirror
+│   ├── arch/                         ← Arch Linux offline package mirror
 │   └── boot/zfsbootmenu.EFI         ← ZFSBootMenu UEFI binary
 └── ... (standard CentOS root filesystem with GNOME, ZFS, etc.)
 ```
@@ -57,9 +59,15 @@ kldload-free/
 │   ├── darksite/
 │   │   ├── build-darksite.sh          ← RPM darksite builder
 │   │   └── config/package-sets/       ← RPM package lists
-│   └── darksite-debian/
-│       ├── build-darksite-debian.sh   ← APT darksite builder (runs in Debian container)
-│       └── config/package-sets/       ← APT package lists (*.txt)
+│   ├── darksite-debian/
+│   │   ├── build-darksite-debian.sh   ← APT darksite builder (runs in Debian container)
+│   │   └── config/package-sets/       ← APT package lists (*.txt)
+│   ├── darksite-ubuntu/
+│   │   ├── build-darksite-ubuntu.sh   ← APT darksite builder (runs in Ubuntu container)
+│   │   └── config/package-sets/       ← Ubuntu APT package lists (*.txt)
+│   └── darksite-arch/
+│       ├── build-darksite-arch.sh     ← Arch darksite builder (runs in Arch container)
+│       └── config/package-sets/       ← Arch package lists (*.txt)
 ├── live-build/
 │   ├── output/                        ← built ISOs land here
 │   ├── logs/                          ← build logs
@@ -86,7 +94,7 @@ kldload-free/
 
 ## Build pipeline
 
-The full build runs four stages. Each stage is a `deploy.sh` subcommand.
+The full build runs multiple stages. Each stage is a `deploy.sh` subcommand.
 
 ### Stage 1: `deploy.sh clean`
 
@@ -161,8 +169,9 @@ kldload-install-target --config /tmp/kldload-webui-answers.env
 main()
   ├── k_install_zfs_storage()        ← partition disk, create zpool
   ├── k_bootstrap_base()             ← detect distro, dispatch:
-  │   ├── _k_bootstrap_dnf()         ←   CentOS/RHEL: dnf --installroot
-  │   └── _k_bootstrap_apt()         ←   Debian: debootstrap from darksite
+  │   ├── _k_bootstrap_dnf()         ←   CentOS/Fedora/RHEL/Rocky: dnf --installroot
+  │   ├── _k_bootstrap_apt()         ←   Debian/Ubuntu: debootstrap from darksite
+  │   └── _k_bootstrap_pacstrap()   ←   Arch: pacstrap from darksite
   ├── k_configure_network()          ← NetworkManager config
   ├── k_configure_security()         ← SSH, users, sudoers
   ├── k_apply_profile()              ← desktop/server packages
@@ -181,7 +190,7 @@ main()
 | `logging.sh` | Log file paths and rotation |
 | `storage-zfs.sh` | Pool creation, dataset hierarchy |
 | `profiles.sh` | Profile-specific package lists |
-| `bootstrap.sh` | Distro bootstrap (dnf/debootstrap), package install |
+| `bootstrap.sh` | Distro bootstrap (dnf/debootstrap/pacstrap), package install |
 | `security.sh` | MOK keys, DKMS signing, user security |
 | `bootloader.sh` | ZFSBootMenu EFI, initramfs, efibootmgr |
 | `answers.sh` | Configuration loading from env files |
@@ -192,7 +201,7 @@ main()
 The installer is configured entirely through environment variables. The web UI writes these to a file; the installer sources it. Key variables:
 
 ```bash
-KLDLOAD_DISTRO=centos           # centos, debian, rhel, rocky
+KLDLOAD_DISTRO=centos           # centos, debian, ubuntu, fedora, rhel, rocky, arch
 KLDLOAD_DISK=/dev/vda           # target disk
 KLDLOAD_HOSTNAME=myhost         # hostname
 KLDLOAD_USERNAME=admin          # admin user
@@ -209,7 +218,7 @@ For unattended installs: `kldload-install-target --config /path/to/answers.env`
 
 ## Darksite mirrors
 
-### RPM darksite (CentOS)
+### RPM darksite (CentOS/Fedora/RHEL/Rocky)
 
 Built by `build/darksite/build-darksite.sh` inside the CentOS builder container.
 - Reads package lists from `build/darksite/config/package-sets/*.txt`
@@ -226,6 +235,21 @@ Built by `build/darksite-debian/build-darksite-debian.sh` inside a Debian contai
 - Lives at `/root/darksite/debian/apt/` on the ISO
 - Served on `localhost:3142` by `kldload-apt-mirror.service` (python3 http.server)
 
+### APT darksite (Ubuntu)
+
+Built by `build/darksite-ubuntu/build-darksite-ubuntu.sh` inside an Ubuntu container.
+- Reads package lists from `build/darksite-ubuntu/config/package-sets/*.txt`
+- Same resolution and download approach as the Debian darksite
+- Lives at `/root/darksite/ubuntu/apt/` on the ISO
+- Served on `localhost:3143` by `kldload-ubuntu-mirror.service` (python3 http.server)
+
+### Pacman darksite (Arch)
+
+Built by `build/darksite-arch/build-darksite-arch.sh` inside an Arch container.
+- Reads package lists from `build/darksite-arch/config/package-sets/*.txt`
+- Downloads packages with `pacman -Sw`
+- Lives at `/root/darksite/arch/` on the ISO
+
 ### Adding packages to a darksite
 
 Add package names to the appropriate `.txt` file in `config/package-sets/`:
@@ -233,8 +257,10 @@ Add package names to the appropriate `.txt` file in `config/package-sets/`:
 ```
 build/darksite/config/package-sets/target-base.txt          ← RPM packages for all installs
 build/darksite/config/package-sets/target-desktop.txt       ← RPM packages for desktop
-build/darksite-debian/config/package-sets/target-base.txt   ← APT packages for all installs
-build/darksite-debian/config/package-sets/target-desktop.txt ← APT packages for desktop
+build/darksite-debian/config/package-sets/target-base.txt   ← Debian APT packages for all installs
+build/darksite-debian/config/package-sets/target-desktop.txt ← Debian APT packages for desktop
+build/darksite-ubuntu/config/package-sets/target-base.txt   ← Ubuntu APT packages for all installs
+build/darksite-arch/config/package-sets/target-base.txt     ← Arch packages for all installs
 ```
 
 One package name per line. Comments start with `#`. Dependencies are resolved automatically.
@@ -274,11 +300,17 @@ live-build/config/includes.chroot/usr/local/bin/mytool    →  /usr/local/bin/my
 Create a new `.txt` file in the darksite package-sets directory:
 
 ```bash
-# RPM packages (CentOS installs)
+# RPM packages (CentOS/Fedora/RHEL/Rocky installs)
 echo "nginx" >> build/darksite/config/package-sets/target-base.txt
 
 # APT packages (Debian installs)
 echo "nginx" >> build/darksite-debian/config/package-sets/target-base.txt
+
+# APT packages (Ubuntu installs)
+echo "nginx" >> build/darksite-ubuntu/config/package-sets/target-base.txt
+
+# Pacman packages (Arch installs)
+echo "nginx" >> build/darksite-arch/config/package-sets/target-base.txt
 ```
 
 Rebuild the ISO — the darksite builder resolves all dependencies automatically.

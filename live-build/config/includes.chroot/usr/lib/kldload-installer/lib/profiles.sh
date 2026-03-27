@@ -7,9 +7,44 @@ k_profile_packages() {
   local profile="${KLDLOAD_PROFILE:-server}"
   local _distro="${KLDLOAD_DISTRO:-debian}"
 
-  # fastfetch is not in Ubuntu noble repos — skip it there
+  # fastfetch is not in Ubuntu noble repos — skip it there (Fedora has it)
   local _fastfetch="fastfetch"
   [[ "$_distro" == "ubuntu" ]] && _fastfetch=""
+
+  # Arch Linux uses different package names
+  if [[ "$_distro" == "arch" ]]; then
+    case "$profile" in
+      server)
+        echo "openssh sudo curl ca-certificates vim less chrony wireguard-tools iproute2 tmux eject python python-websockets python-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd ripgrep zoxide fastfetch"
+        ;;
+      client)
+        echo "openssh sudo curl ca-certificates vim less networkmanager wireguard-tools iproute2"
+        ;;
+      desktop)
+        echo "openssh sudo curl ca-certificates vim less networkmanager \
+          gnome-shell gnome-session gnome-control-center gnome-settings-daemon \
+          gdm nautilus gnome-terminal eog \
+          adwaita-icon-theme cantarell-fonts gvfs gvfs-mtp gvfs-smb \
+          gnome-keyring \
+          firefox \
+          tmux eject python python-websockets python-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd ripgrep zoxide fastfetch"
+        ;;
+      core)
+        echo "openssh sudo curl ca-certificates vim less iproute2 chrony nftables wireguard-tools"
+        ;;
+      ai)
+        echo "openssh sudo curl ca-certificates vim less iproute2 chrony nftables \
+          wireguard-tools tmux python python-pip jq htop btop fzf bat eza fd ripgrep zoxide fastfetch \
+          eject zstd cloud-init qemu-guest-agent \
+          python-websockets python-yaml net-tools ethtool tcpdump \
+          pipewire cmake gcc make git"
+        ;;
+      *)
+        k_die "unsupported profile: $profile"
+        ;;
+    esac
+    return
+  fi
 
   case "$profile" in
     server)
@@ -23,8 +58,9 @@ k_profile_packages() {
       local _viewer="loupe"
       local _terminal="gnome-terminal"
       # Ubuntu uses different package names for some GNOME components
+      # Ubuntu's firefox is a snapd transitional package — use GNOME Web instead
       if [[ "$_distro" == "ubuntu" ]]; then
-        _browser="firefox"
+        _browser="epiphany-browser"
         _viewer="eog"
         _terminal="gnome-terminal"
       fi
@@ -32,7 +68,7 @@ k_profile_packages() {
         gnome-shell gnome-session gnome-control-center gnome-settings-daemon \
         gdm3 nautilus ${_terminal} ${_viewer} \
         adwaita-icon-theme fonts-cantarell gvfs gvfs-backends \
-        gnome-keyring \
+        gnome-keyring xserver-xorg \
         ${_browser} \
         tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide ${_fastfetch}"
       ;;
@@ -128,15 +164,22 @@ k_profile_packages() {
 
 k_profile_optional_packages() {
   local out=()
+  local _distro="${KLDLOAD_DISTRO:-debian}"
   if [[ "${KLDLOAD_ENABLE_EBPF:-0}" == "1" ]]; then
-    if [[ "${KLDLOAD_DISTRO:-debian}" == "ubuntu" ]]; then
+    if [[ "$_distro" == "arch" ]]; then
+      out+=(bcc bcc-tools bpftrace perf)
+    elif [[ "$_distro" == "ubuntu" ]]; then
       out+=(bpfcc-tools bpftrace linux-tools-common linux-tools-generic)
     else
       out+=(bpftool bpfcc-tools bpftrace linux-perf)
     fi
   fi
   if [[ "${KLDLOAD_ENABLE_ZFS:-0}" == "1" ]]; then
-    out+=(zfsutils-linux zfs-zed zfs-initramfs zfs-dkms sanoid)
+    if [[ "$_distro" == "arch" ]]; then
+      out+=(zfs-dkms zfs-utils)
+    else
+      out+=(zfsutils-linux zfs-zed zfs-initramfs zfs-dkms sanoid)
+    fi
   fi
 
   # Auto-detect hypervisor and add guest tools
@@ -281,8 +324,10 @@ k_install_system_files() {
     centos)  _target_suite="stream9" ;;
     rocky)   _target_suite="9" ;;
     rhel)    _target_suite="9" ;;
+    fedora)  _target_suite="${KLDLOAD_FEDORA_RELEASE:-41}" ;;
     debian)  _target_suite="${KLDLOAD_SUITE:-trixie}" ;;
     ubuntu)  _target_suite="${KLDLOAD_SUITE:-noble}" ;;
+    arch)    _target_suite="rolling" ;;
   esac
   cat > "${target}/etc/os-release" <<OSREL
 PRETTY_NAME="kldload (${_target_distro} ${_target_suite})"
@@ -306,8 +351,13 @@ OSREL
     [[ -f /etc/dconf/profile/gdm ]] && cp /etc/dconf/profile/gdm "${target}/etc/dconf/profile/gdm"
   fi
   # GDM config: no auto-login on installed system (live has AutomaticLogin=live)
-  mkdir -p "${target}/etc/gdm3"
-  cat > "${target}/etc/gdm3/daemon.conf" <<'EOGDM'
+  # Debian/Ubuntu use /etc/gdm3/, Arch/CentOS use /etc/gdm/
+  local _gdm_dir="gdm3"
+  if [[ "${KLDLOAD_DISTRO:-centos}" == "arch" || "${KLDLOAD_DISTRO:-centos}" == "centos" || "${KLDLOAD_DISTRO:-centos}" == "rocky" || "${KLDLOAD_DISTRO:-centos}" == "rhel" || "${KLDLOAD_DISTRO:-centos}" == "fedora" ]]; then
+    _gdm_dir="gdm"
+  fi
+  mkdir -p "${target}/etc/${_gdm_dir}"
+  cat > "${target}/etc/${_gdm_dir}/daemon.conf" <<'EOGDM'
 [daemon]
 
 [security]
@@ -319,6 +369,9 @@ OSREL
 [debug]
 EOGDM
 
+  # Wayland is the default — xserver-xorg is installed as fallback so GDM
+  # can fall back to X11 if Wayland fails (older virtual GPUs, etc.)
+
   # ── Custom .desktop launchers ───────────────────────────────────────────────
   mkdir -p "${target}/usr/share/applications"
   for _dt in vim.desktop kst.desktop kst-dashboard.desktop ksnap.desktop kexport.desktop kldload-terminal.desktop kldload-docs.desktop; do
@@ -326,28 +379,45 @@ EOGDM
       cp "/usr/share/applications/${_dt}" "${target}/usr/share/applications/${_dt}"
   done
 
-  # ── Wallpaper ─────────────────────────────────────────────────────────────
+  # ── Wallpaper — set the distro's default background ───────────────────────
   if [[ -d /usr/share/backgrounds/kldload ]]; then
     mkdir -p "${target}/usr/share/backgrounds/kldload"
     cp -r /usr/share/backgrounds/kldload/. "${target}/usr/share/backgrounds/kldload/"
   fi
+  local _wp=""
+  case "${KLDLOAD_DISTRO:-centos}" in
+    ubuntu)  _wp="/usr/share/backgrounds/warty-final-ubuntu.png" ;;
+    debian)  _wp="/usr/share/desktop-base/active-theme/wallpaper/contents/images/1920x1080.svg" ;;
+    centos|rocky|rhel|fedora) _wp="/usr/share/backgrounds/default.png" ;;
+  esac
+  if [[ -n "$_wp" ]]; then
+    mkdir -p "${target}/etc/dconf/db/local.d"
+    cat > "${target}/etc/dconf/db/local.d/01-kldload-wallpaper" <<WPEOF
+[org/gnome/desktop/background]
+picture-uri='file://${_wp}'
+picture-uri-dark='file://${_wp}'
+picture-options='zoom'
+WPEOF
+    chroot "${target}" dconf update 2>/dev/null || true
+  fi
 
-  # ── Shell dotfiles (.bashrc, .tmux.conf, .vimrc) for root, skel, and admin user
-  # k_create_users runs before k_install_system_files so useradd copies from skel
-  # before these files exist — explicitly push them to the admin home dir too.
-  local _user="${KLDLOAD_USERNAME:-admin}"
-  local _user_home="${target}/home/${_user}"
-  for _f in .bashrc .tmux.conf .vimrc; do
-    [[ -f "/etc/skel/${_f}" ]] || continue
-    cp "/etc/skel/${_f}" "${target}/etc/skel/${_f}"
-    cp "/etc/skel/${_f}" "${target}/root/${_f}"
-    [[ -d "$_user_home" ]] && cp "/etc/skel/${_f}" "${_user_home}/${_f}"
-  done
-  # vim colorscheme
-  if [[ -d /etc/skel/.vim ]]; then
-    cp -r /etc/skel/.vim "${target}/etc/skel/.vim"
-    cp -r /etc/skel/.vim "${target}/root/.vim"
-    [[ -d "$_user_home" ]] && cp -r /etc/skel/.vim "${_user_home}/.vim"
+  # ── Shell dotfiles (.bashrc, .tmux.conf, .vimrc) — non-core profiles only
+  # Core profile gets the stock distro dotfiles untouched.
+  if [[ "$_profile" != "core" ]]; then
+    local _user="${KLDLOAD_USERNAME:-admin}"
+    local _user_home="${target}/home/${_user}"
+    for _f in .bashrc .tmux.conf .vimrc; do
+      [[ -f "/etc/skel/${_f}" ]] || continue
+      cp "/etc/skel/${_f}" "${target}/etc/skel/${_f}"
+      cp "/etc/skel/${_f}" "${target}/root/${_f}"
+      [[ -d "$_user_home" ]] && cp "/etc/skel/${_f}" "${_user_home}/${_f}"
+    done
+    # vim colorscheme
+    if [[ -d /etc/skel/.vim ]]; then
+      cp -r /etc/skel/.vim "${target}/etc/skel/.vim"
+      cp -r /etc/skel/.vim "${target}/root/.vim"
+      [[ -d "$_user_home" ]] && cp -r /etc/skel/.vim "${_user_home}/.vim"
+    fi
   fi
   # Fix ownership of admin home dotfiles
   if [[ -d "$_user_home" ]]; then
@@ -407,6 +477,21 @@ EOGDM
         if [[ -d /root/darksite/rpm ]]; then
           rsync -a --exclude='*.lock' /root/darksite/rpm/ "${darksite_tgt}/rpm/"
           k_log "RPM darksite installed to target"
+        fi
+        ;;
+      fedora)
+        # Copy only the Fedora RPM darksite
+        if [[ -d /root/darksite/fedora/rpm ]]; then
+          mkdir -p "${darksite_tgt}/fedora"
+          rsync -a --exclude='*.lock' /root/darksite/fedora/ "${darksite_tgt}/fedora/"
+          k_log "Fedora RPM darksite installed to target"
+        fi
+        ;;
+      arch)
+        # Copy only the pacman darksite
+        if [[ -d /root/darksite/arch ]]; then
+          rsync -a --exclude='*.lock' /root/darksite/arch/ "${darksite_tgt}/arch/"
+          k_log "Arch pacman darksite installed to target"
         fi
         ;;
       *)

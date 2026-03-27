@@ -363,7 +363,9 @@ k_bootstrap_base() {
     [[ -f /etc/os-release ]] && _id="$(. /etc/os-release && echo "$ID")"
     case "$_id" in
       centos|rocky|rhel|almalinux) distro="centos" ;;
+      fedora) distro="fedora" ;;
       debian|ubuntu) distro="debian" ;;
+      arch) distro="arch" ;;
       *) distro="debian" ;;
     esac
     export KLDLOAD_DISTRO="$distro"
@@ -372,11 +374,14 @@ k_bootstrap_base() {
   k_log_to "$log" "Distro detected: ${distro}"
 
   case "$distro" in
-    centos|rocky|rhel)
+    centos|rocky|rhel|fedora)
       _k_bootstrap_dnf
       ;;
     debian|ubuntu)
       _k_bootstrap_apt
+      ;;
+    arch)
+      _k_bootstrap_pacman
       ;;
     *)
       k_die "Unsupported distro: $distro"
@@ -390,6 +395,12 @@ _k_bootstrap_dnf() {
   local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
 
   local distro="${KLDLOAD_DISTRO:-centos}"
+
+  # Fedora uses its own release version (41), not the EL release (9)
+  if [[ "${distro}" == "fedora" ]]; then
+    release="${KLDLOAD_FEDORA_RELEASE:-41}"
+  fi
+
   k_log_to "$log" "Bootstrapping ${distro} ${release} → ${target}"
 
   # Set up repos — distro-specific
@@ -615,6 +626,22 @@ CTMP
         k_log_to "$log" "RHEL repos configured via chroot subscription-manager"
       fi
       ;;
+    fedora)
+      local fedora_release="${KLDLOAD_FEDORA_RELEASE:-41}"
+      cat > "${target}/etc/yum.repos.d/fedora.repo" <<FEDORAREPO
+[fedora]
+name=Fedora ${fedora_release} - \$basearch
+metalink=https://mirrors.fedoraproject.org/metalink?repo=fedora-${fedora_release}&arch=\$basearch
+gpgcheck=0
+enabled=1
+
+[fedora-updates]
+name=Fedora ${fedora_release} - Updates - \$basearch
+metalink=https://mirrors.fedoraproject.org/metalink?repo=updates-released-f${fedora_release}&arch=\$basearch
+gpgcheck=0
+enabled=1
+FEDORAREPO
+      ;;
     *) # centos (default)
       cat > "${target}/etc/yum.repos.d/centos.repo" <<DNFREPO
 [baseos]
@@ -638,9 +665,10 @@ DNFREPO
       ;;
   esac
 
-  # EPEL + ZFS repos (shared across CentOS/Rocky/RHEL)
+  # EPEL + ZFS repos (shared across CentOS/Rocky/RHEL; Fedora skips EPEL)
   # skip_if_unavailable=1 so EPEL mirror outages don't kill the install
-  cat > "${target}/etc/yum.repos.d/epel.repo" <<EPELREPO
+  if [[ "${distro}" != "fedora" ]]; then
+    cat > "${target}/etc/yum.repos.d/epel.repo" <<EPELREPO
 [epel]
 name=EPEL ${release}
 metalink=https://mirrors.fedoraproject.org/metalink?repo=epel-${release}&arch=\$basearch
@@ -648,14 +676,27 @@ gpgcheck=0
 enabled=1
 skip_if_unavailable=1
 EPELREPO
+  fi
 
-  cat > "${target}/etc/yum.repos.d/zfs.repo" <<ZFSREPO
+  # ZFS repo — Fedora uses /fedora/$releasever, EL uses /epel/$releasever
+  if [[ "${distro}" == "fedora" ]]; then
+    local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-41}"
+    cat > "${target}/etc/yum.repos.d/zfs.repo" <<ZFSREPO
+[zfs]
+name=ZFS on Linux for Fedora ${_fedora_rel}
+baseurl=http://download.zfsonlinux.org/fedora/${_fedora_rel}/\$basearch/
+enabled=1
+gpgcheck=0
+ZFSREPO
+  else
+    cat > "${target}/etc/yum.repos.d/zfs.repo" <<ZFSREPO
 [zfs]
 name=ZFS on Linux for EL${release}
 baseurl=http://download.zfsonlinux.org/epel/${release}/\$basearch/
 enabled=1
 gpgcheck=0
 ZFSREPO
+  fi
 
   # Mount chroot filesystems BEFORE dnf so postinst scripts (grub, dracut) work
   mkdir -p "${target}/proc" "${target}/sys" "${target}/dev" "${target}/dev/pts" "${target}/run"
@@ -681,7 +722,11 @@ ZFSREPO
   echo -e "[main]\nenabled=0" > "${target}/etc/dnf/plugins/subscription-manager.conf"
 
   # Repo configuration — darksite mode vs internet
+  # Fedora has its own darksite; CentOS/Rocky share one
   local _darksite_rpm="/root/darksite/rpm"
+  if [[ "${KLDLOAD_DISTRO:-centos}" == "fedora" ]]; then
+    _darksite_rpm="/root/darksite/fedora/rpm"
+  fi
   local _darksite_mode="${KLDLOAD_DARKSITE_MODE:-0}"
   local _custom_repo="${KLDLOAD_CUSTOM_REPO:-}"
 
@@ -890,7 +935,7 @@ CUDAREPO
   fi
 
   mkdir -p "${target}/var/log/kldload"
-  k_log_to "$log" "CentOS bootstrap complete"
+  k_log_to "$log" "${distro} bootstrap complete"
 }
 
 _k_bootstrap_apt() {
@@ -996,6 +1041,311 @@ NMCONF
 
   mkdir -p "${target}/var/log/kldload"
   k_log_to "$log" "Debian bootstrap complete"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Arch Linux bootstrap (pacman / pacstrap)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# k_detect_arch_darksite — returns the local darksite pacman cache path
+# if packages are available for offline install.
+k_detect_arch_darksite() {
+  local darksite="/root/darksite/arch"
+  if [[ -d "${darksite}/pkg" ]] && ls "${darksite}/pkg/"*.pkg.tar.* >/dev/null 2>&1; then
+    echo "${darksite}"
+    return 0
+  fi
+  return 1
+}
+
+_k_bootstrap_pacman() {
+  local target="${KLDLOAD_TARGET:?}"
+  local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
+
+  k_log_to "$log" "Bootstrapping Arch Linux -> ${target}"
+
+  # ── Detect darksite or internet ───────────────────────────────────────────
+  local darksite=""
+  if darksite="$(k_detect_arch_darksite 2>/dev/null)"; then
+    k_log_to "$log" "Using local darksite pacman cache: ${darksite}"
+  else
+    darksite=""
+    k_log_to "$log" "No darksite found — Arch install will use internet mirrors"
+  fi
+
+  # ── Set up pacman.conf for the bootstrap ──────────────────────────────────
+  local pacman_conf="/tmp/kldload-pacman.conf"
+  cat > "${pacman_conf}" <<'PACCONF'
+[options]
+HoldPkg     = pacman glibc
+Architecture = auto
+SigLevel    = Never
+ParallelDownloads = 5
+
+[core]
+Include = /etc/pacman.d/mirrorlist
+
+[extra]
+Include = /etc/pacman.d/mirrorlist
+
+[multilib]
+Include = /etc/pacman.d/mirrorlist
+PACCONF
+
+  # Add archzfs repo for ZFS packages
+  cat >> "${pacman_conf}" <<'ARCHZFS'
+
+[archzfs]
+Server = https://archzfs.com/$repo/$arch
+SigLevel = Never
+ARCHZFS
+
+  # ── If darksite, set up a local file:// repo ─────────────────────────────
+  if [[ -n "$darksite" ]]; then
+    # Create a local repo from the darksite cache
+    local local_repo="/tmp/kldload-arch-repo"
+    mkdir -p "$local_repo"
+
+    # Symlink all packages to the local repo
+    ln -sf "${darksite}/pkg/"*.pkg.tar.* "$local_repo/" 2>/dev/null || true
+
+    # Generate a package database
+    if command -v repo-add >/dev/null 2>&1; then
+      repo-add "${local_repo}/kldload.db.tar.gz" "${local_repo}/"*.pkg.tar.* >> "$log" 2>&1 || true
+    fi
+
+    # Prepend local repo to pacman.conf (highest priority)
+    local pacman_conf_new="/tmp/kldload-pacman-local.conf"
+    cat > "${pacman_conf_new}" <<LOCALREPO
+[options]
+HoldPkg     = pacman glibc
+Architecture = auto
+SigLevel    = Never
+ParallelDownloads = 5
+CacheDir    = ${darksite}/pkg/
+
+[kldload-darksite]
+Server = file://${local_repo}
+SigLevel = Never
+
+[core]
+Include = /etc/pacman.d/mirrorlist
+
+[extra]
+Include = /etc/pacman.d/mirrorlist
+
+[archzfs]
+Server = https://archzfs.com/\$repo/\$arch
+SigLevel = Never
+LOCALREPO
+    pacman_conf="$pacman_conf_new"
+  fi
+
+  # ── Bootstrap with pacstrap (or manual pacman --root) ────────────────────
+  # pacstrap is part of arch-install-scripts. On the CentOS live ISO we don't
+  # have it natively, so we use a minimal reimplementation.
+  mkdir -p "${target}/var/lib/pacman" "${target}/var/cache/pacman/pkg" \
+           "${target}/etc" "${target}/var/log" "${target}/dev" \
+           "${target}/proc" "${target}/sys" "${target}/run" "${target}/tmp"
+
+  # Copy darksite packages into the target cache for offline use
+  if [[ -n "$darksite" ]]; then
+    cp "${darksite}/pkg/"*.pkg.tar.* "${target}/var/cache/pacman/pkg/" 2>/dev/null || true
+    # Copy sync databases
+    mkdir -p "${target}/var/lib/pacman/sync"
+    cp "${darksite}/db/"*.db "${target}/var/lib/pacman/sync/" 2>/dev/null || true
+    k_log_to "$log" "Darksite packages cached in target"
+  fi
+
+  # Mount chroot filesystems
+  mount --bind /dev "${target}/dev" 2>/dev/null || true
+  mkdir -p "${target}/dev/pts"
+  mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
+  mount -t proc proc "${target}/proc" 2>/dev/null || true
+  mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
+  mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
+
+  # DNS for package downloads
+  rm -f "${target}/etc/resolv.conf" 2>/dev/null || true
+  cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || \
+    echo "nameserver 8.8.8.8" > "${target}/etc/resolv.conf"
+
+  # Set up mirrorlist in the target
+  mkdir -p "${target}/etc/pacman.d"
+  cat > "${target}/etc/pacman.d/mirrorlist" <<'MIRRORS'
+Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
+Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch
+Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch
+MIRRORS
+
+  # Copy our pacman.conf to the target
+  cp "${pacman_conf}" "${target}/etc/pacman.conf"
+
+  # ── Initialize pacman and install base packages ──────────────────────────
+  k_log_to "$log" "Initializing pacman database in target..."
+
+  # Use pacman with --root to bootstrap (since we don't have pacstrap on CentOS)
+  # First sync the databases
+  pacman --root "${target}" --config "${pacman_conf}" -Sy --noconfirm >> "$log" 2>&1 || {
+    k_log_to "$log" "WARNING: pacman -Sy failed — trying with individual repos"
+  }
+
+  # Base packages for initial bootstrap
+  local _base_pkgs=(
+    base linux linux-headers linux-firmware
+    systemd systemd-sysvcompat
+    mkinitcpio
+    efibootmgr
+    bash coreutils util-linux
+    sudo openssh
+    networkmanager
+    vim
+  )
+
+  k_log_to "$log" "Installing base packages: ${_base_pkgs[*]}"
+  pacman --root "${target}" --config "${pacman_conf}" \
+    --noconfirm --needed -S "${_base_pkgs[@]}" >> "$log" 2>&1 || {
+    k_log_to "$log" "WARNING: Some base packages failed — continuing"
+  }
+
+  k_log_to "$log" "Root filesystem: $(du -sh --exclude="${target}/proc" --exclude="${target}/sys" --exclude="${target}/dev" "${target}" 2>/dev/null | cut -f1 || echo "?")"
+
+  # ── Install ZFS ──────────────────────────────────────────────────────────
+  if [[ "${KLDLOAD_STORAGE_MODE:-standard}" == "zfs" ]]; then
+    k_log_to "$log" "Installing ZFS packages..."
+
+    local _zfs_pkgs=(dkms gcc make linux-headers zfs-dkms zfs-utils)
+    pacman --root "${target}" --config "${pacman_conf}" \
+      --noconfirm --needed -S "${_zfs_pkgs[@]}" >> "$log" 2>&1 || {
+      k_log_to "$log" "WARNING: ZFS package install had issues"
+    }
+
+    # Build ZFS DKMS
+    local kver moddir
+    for moddir in "${target}/usr/lib/modules" "${target}/lib/modules"; do
+      [[ -d "$moddir" ]] && break
+    done
+    kver=$(ls "$moddir/" 2>/dev/null | grep -v '^$' | head -1)
+    if [[ -n "$kver" ]]; then
+      k_log_to "$log" "Building ZFS DKMS for kernel ${kver}..."
+      local zfs_ver
+      zfs_ver=$(chroot "${target}" pacman -Q zfs-dkms 2>/dev/null | awk '{print $2}' | cut -d- -f1 || echo "")
+      if [[ -n "$zfs_ver" ]]; then
+        chroot "${target}" dkms build -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
+        chroot "${target}" dkms install -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
+      fi
+      chroot "${target}" depmod -a "$kver" 2>/dev/null || true
+    fi
+
+    # Configure mkinitcpio to include ZFS
+    if [[ -f "${target}/etc/mkinitcpio.conf" ]]; then
+      # Add zfs to HOOKS after filesystems
+      sed -i 's/HOOKS=(\(.*\)filesystems\(.*\))/HOOKS=(\1filesystems zfs\2)/' \
+        "${target}/etc/mkinitcpio.conf" 2>/dev/null || true
+      k_log_to "$log" "mkinitcpio.conf updated with ZFS hook"
+    fi
+
+    # Rebuild initramfs with ZFS support
+    if [[ -n "$kver" ]]; then
+      k_log_to "$log" "Rebuilding initramfs with mkinitcpio for ${kver}..."
+      chroot "${target}" mkinitcpio -P >> "$log" 2>&1 || \
+        k_log_to "$log" "WARNING: mkinitcpio rebuild failed"
+    fi
+
+    # Enable ZFS services
+    chroot "${target}" systemctl enable zfs-import-cache.service zfs-mount.service zfs.target 2>/dev/null || true
+  fi
+
+  # ── Profile packages ─────────────────────────────────────────────────────
+  local profile_pkgs profile_opt
+  profile_pkgs="$(k_profile_packages)"
+  profile_opt="$(k_profile_optional_packages)"
+  if [[ -n "${profile_pkgs}${profile_opt}" ]]; then
+    k_log_to "$log" "Installing profile packages..."
+    # shellcheck disable=SC2086
+    pacman --root "${target}" --config "${pacman_conf}" \
+      --noconfirm --needed -S ${profile_pkgs} ${profile_opt} >> "$log" 2>&1 || {
+      k_log_to "$log" "WARNING: Some profile packages failed"
+    }
+  fi
+
+  # ── Locale + timezone + hostname ─────────────────────────────────────────
+  local locale="${KLDLOAD_LOCALE:-en_US.UTF-8}"
+  echo "${locale} UTF-8" > "${target}/etc/locale.gen"
+  chroot "${target}" locale-gen >> "$log" 2>&1 || true
+  echo "LANG=${locale}" > "${target}/etc/locale.conf"
+
+  local keymap="${KLDLOAD_KEYBOARD_LAYOUT:-us}"
+  echo "KEYMAP=${keymap}" > "${target}/etc/vconsole.conf"
+
+  ln -sf "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE:-UTC}" "${target}/etc/localtime" 2>/dev/null || true
+
+  echo "${KLDLOAD_HOSTNAME:-kldload-node}" > "${target}/etc/hostname"
+  cat > "${target}/etc/hosts" <<EOH
+127.0.0.1 localhost
+127.0.1.1 ${KLDLOAD_HOSTNAME:-kldload-node}
+::1 localhost ip6-localhost ip6-loopback
+EOH
+
+  # ── Users ────────────────────────────────────────────────────────────────
+  k_create_users
+
+  # ── Enable services ──────────────────────────────────────────────────────
+  chroot "${target}" systemctl enable NetworkManager sshd 2>/dev/null || true
+
+  local _profile="${KLDLOAD_PROFILE:-server}"
+  if [[ "$_profile" == "desktop" ]]; then
+    chroot "${target}" systemctl enable gdm 2>/dev/null || true
+    chroot "${target}" systemctl set-default graphical.target 2>/dev/null || true
+  else
+    chroot "${target}" systemctl set-default multi-user.target 2>/dev/null || true
+  fi
+
+  # ── NetworkManager DHCP connection ───────────────────────────────────────
+  mkdir -p "${target}/etc/NetworkManager/system-connections"
+  cat > "${target}/etc/NetworkManager/system-connections/wired.nmconnection" <<'NMEOF'
+[connection]
+id=Wired DHCP
+type=ethernet
+autoconnect=true
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+NMEOF
+  chmod 600 "${target}/etc/NetworkManager/system-connections/wired.nmconnection"
+
+  # ── System files + manifest ──────────────────────────────────────────────
+  k_install_system_files
+  k_write_manifest
+
+  # ── Finalize pacman.conf in the installed system ─────────────────────────
+  # Write a clean pacman.conf for post-install use (internet repos)
+  cat > "${target}/etc/pacman.conf" <<'PACFINAL'
+[options]
+HoldPkg     = pacman glibc
+Architecture = auto
+SigLevel    = Required DatabaseOptional
+ParallelDownloads = 5
+
+[core]
+Include = /etc/pacman.d/mirrorlist
+
+[extra]
+Include = /etc/pacman.d/mirrorlist
+
+[multilib]
+Include = /etc/pacman.d/mirrorlist
+
+[archzfs]
+Server = https://archzfs.com/$repo/$arch
+SigLevel = Optional TrustAll
+PACFINAL
+
+  mkdir -p "${target}/var/log/kldload"
+  k_log_to "$log" "Arch Linux bootstrap complete"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════

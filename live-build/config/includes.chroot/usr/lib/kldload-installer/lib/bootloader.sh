@@ -180,6 +180,11 @@ EOFSTAB
     chroot "${target}" update-initramfs -c -k all >&7 2>&1 || \
       chroot "${target}" update-initramfs -u -k all >&7 2>&1 || \
       k_log "WARNING: update-initramfs had errors — check ${KLDLOAD_LOG_DIR}/bootloader.log"
+  elif chroot "${target}" command -v mkinitcpio >/dev/null 2>&1; then
+    # Arch Linux uses mkinitcpio — rebuild all presets
+    k_log "Rebuilding initramfs with mkinitcpio..."
+    chroot "${target}" mkinitcpio -P >&7 2>&1 || \
+      k_log "WARNING: mkinitcpio had errors — check ${KLDLOAD_LOG_DIR}/bootloader.log"
   elif chroot "${target}" command -v dracut >/dev/null 2>&1; then
     local _kver
     for _kver in "${target}"/usr/lib/modules/*/vmlinuz "${target}"/lib/modules/*/vmlinuz; do
