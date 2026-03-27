@@ -475,6 +475,8 @@ EOS
       if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
         DEBIAN_FRONTEND=noninteractive chroot "${target}" \
           apt-get install -y "${_extra[@]}" >> "$log" 2>&1 || true
+      elif [[ "${distro}" == "arch" ]]; then
+        chroot "${target}" pacman --noconfirm --needed -S "${_extra[@]}" >> "$log" 2>&1 || true
       else
         chroot "${target}" dnf install -y "${_extra[@]}" >> "$log" 2>&1 || true
       fi
@@ -641,6 +643,9 @@ if ! k_have_func k_apply_profile; then
     if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
       DEBIAN_FRONTEND=noninteractive chroot "${target}" \
         apt-get install -y "${pkgs[@]}" >> "$log" 2>&1 \
+        || k_log "WARNING: some profile packages failed"
+    elif [[ "${distro}" == "arch" ]]; then
+      chroot "${target}" pacman --noconfirm --needed -S "${pkgs[@]}" >> "$log" 2>&1 \
         || k_log "WARNING: some profile packages failed"
     else
       chroot "${target}" dnf install -y --skip-broken "${pkgs[@]}" >> "$log" 2>&1 \

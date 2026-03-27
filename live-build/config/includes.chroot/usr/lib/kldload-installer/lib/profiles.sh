@@ -15,7 +15,7 @@ k_profile_packages() {
   if [[ "$_distro" == "arch" ]]; then
     case "$profile" in
       server)
-        echo "openssh sudo curl ca-certificates vim less chrony wireguard-tools iproute2 tmux eject python python-websockets python-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd ripgrep zoxide fastfetch"
+        echo "openssh sudo curl ca-certificates vim less chrony wireguard-tools iproute2 tmux python python-websockets python-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd ripgrep zoxide fastfetch"
         ;;
       client)
         echo "openssh sudo curl ca-certificates vim less networkmanager wireguard-tools iproute2"
@@ -27,7 +27,7 @@ k_profile_packages() {
           adwaita-icon-theme cantarell-fonts gvfs gvfs-mtp gvfs-smb \
           gnome-keyring \
           firefox \
-          tmux eject python python-websockets python-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd ripgrep zoxide fastfetch"
+          tmux python python-websockets python-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd ripgrep zoxide fastfetch"
         ;;
       core)
         echo "openssh sudo curl ca-certificates vim less iproute2 chrony nftables wireguard-tools"
@@ -35,7 +35,7 @@ k_profile_packages() {
       ai)
         echo "openssh sudo curl ca-certificates vim less iproute2 chrony nftables \
           wireguard-tools tmux python python-pip jq htop btop fzf bat eza fd ripgrep zoxide fastfetch \
-          eject zstd cloud-init qemu-guest-agent \
+          zstd cloud-init qemu-guest-agent \
           python-websockets python-yaml net-tools ethtool tcpdump \
           pipewire cmake gcc make git"
         ;;

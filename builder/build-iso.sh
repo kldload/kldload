@@ -264,14 +264,19 @@ umount "${ROOTFS}/proc" 2>/dev/null || true
 if [[ "$EDITION" != "core" ]]; then
     log "Downloading pacman-static for Arch support..."
     curl -sfL "https://pkgbuild.com/~morganamilo/pacman-static/x86_64/bin/pacman-static" \
-        -o "${ROOTFS}/usr/local/bin/pacman" && \
-        chmod +x "${ROOTFS}/usr/local/bin/pacman" && \
-        ln -sf /usr/local/bin/pacman "${ROOTFS}/usr/bin/pacman" && \
-        mkdir -p "${ROOTFS}/etc/pacman.d" "${ROOTFS}/etc/ssl/certs" && \
-        ln -sf /etc/pki/tls/certs/ca-bundle.crt "${ROOTFS}/etc/ssl/certs/ca-certificates.crt" && \
-        printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n' > "${ROOTFS}/etc/pacman.d/mirrorlist" && \
-        log "pacman-static installed: $(chroot "$ROOTFS" /usr/bin/pacman --version 2>&1 | head -1)" || \
+        -o "${ROOTFS}/usr/local/bin/pacman" || {
         log "WARNING: pacman-static download failed — Arch installs will not work"
+    }
+    if [[ -f "${ROOTFS}/usr/local/bin/pacman" ]]; then
+        chmod +x "${ROOTFS}/usr/local/bin/pacman"
+        ln -sf /usr/local/bin/pacman "${ROOTFS}/usr/bin/pacman"
+        mkdir -p "${ROOTFS}/etc/pacman.d"
+        # pacman-static looks for /etc/ssl/certs/ca-certificates.crt (Arch path)
+        # CentOS has /etc/ssl/certs -> /etc/pki/tls/certs (symlink), so create the file at the real path
+        ln -sf /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem "${ROOTFS}/etc/pki/tls/certs/ca-certificates.crt"
+        printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n' > "${ROOTFS}/etc/pacman.d/mirrorlist"
+        log "pacman-static installed: $(chroot "$ROOTFS" /usr/bin/pacman --version 2>&1 | head -1)"
+    fi
 fi
 
 # ---------------------------------------------------------------------------

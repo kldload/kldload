@@ -1051,7 +1051,9 @@ NMCONF
 # if packages are available for offline install.
 k_detect_arch_darksite() {
   local darksite="/root/darksite/arch"
-  if [[ -d "${darksite}/pkg" ]] && ls "${darksite}/pkg/"*.pkg.tar.* >/dev/null 2>&1; then
+  local count=0
+  [[ -d "${darksite}/pkg" ]] && count=$(find "${darksite}/pkg" -name '*.pkg.tar.*' -not -name '*.sig' 2>/dev/null | wc -l)
+  if [[ "$count" -gt 10 ]]; then
     echo "${darksite}"
     return 0
   fi
@@ -1100,45 +1102,13 @@ Server = https://archzfs.com/$repo/$arch
 SigLevel = Never
 ARCHZFS
 
-  # ── If darksite, set up a local file:// repo ─────────────────────────────
+  # ── If darksite, set CacheDir so pacman uses cached packages ─────────────
+  # No custom repo — just point pacman's cache at the darksite packages.
+  # Pacman checks the cache before downloading, so pre-cached packages install offline.
   if [[ -n "$darksite" ]]; then
-    # Create a local repo from the darksite cache
-    local local_repo="/tmp/kldload-arch-repo"
-    mkdir -p "$local_repo"
-
-    # Symlink all packages to the local repo
-    ln -sf "${darksite}/pkg/"*.pkg.tar.* "$local_repo/" 2>/dev/null || true
-
-    # Generate a package database
-    if command -v repo-add >/dev/null 2>&1; then
-      repo-add "${local_repo}/kldload.db.tar.gz" "${local_repo}/"*.pkg.tar.* >> "$log" 2>&1 || true
-    fi
-
-    # Prepend local repo to pacman.conf (highest priority)
-    local pacman_conf_new="/tmp/kldload-pacman-local.conf"
-    cat > "${pacman_conf_new}" <<LOCALREPO
-[options]
-HoldPkg     = pacman glibc
-Architecture = auto
-SigLevel    = Never
-ParallelDownloads = 5
-CacheDir    = ${darksite}/pkg/
-
-[kldload-darksite]
-Server = file://${local_repo}
-SigLevel = Never
-
-[core]
-Include = /etc/pacman.d/mirrorlist
-
-[extra]
-Include = /etc/pacman.d/mirrorlist
-
-[archzfs]
-Server = https://archzfs.com/\$repo/\$arch
-SigLevel = Never
-LOCALREPO
-    pacman_conf="$pacman_conf_new"
+    sed -i "s|^#CacheDir.*|CacheDir = ${darksite}/pkg/|" "${pacman_conf}" 2>/dev/null || \
+      sed -i "/^\[options\]/a CacheDir = ${darksite}/pkg/" "${pacman_conf}"
+    k_log_to "$log" "Darksite CacheDir set: ${darksite}/pkg/"
   fi
 
   # ── Bootstrap with pacstrap (or manual pacman --root) ────────────────────
@@ -1190,9 +1160,56 @@ MIRRORS
     k_log_to "$log" "WARNING: pacman -Sy failed — trying with individual repos"
   }
 
+  # Determine the kernel version archzfs supports (AFTER database sync)
+  # archzfs prebuilt modules lag behind the latest Arch kernel.
+  local _zfs_kernel_ver=""
+  local _zfs_si_output
+  _zfs_si_output=$(pacman --root "${target}" --config "${pacman_conf}" -Si zfs-linux 2>/dev/null || echo "")
+  if [[ -n "$_zfs_si_output" ]]; then
+    # Parse "Depends On : ... linux=X.Y.Z ..." — extract version after linux=
+    _zfs_kernel_ver=$(echo "$_zfs_si_output" | grep -oP 'linux=\K[0-9][^\s]*' | head -1 || echo "")
+    k_log_to "$log" "pacman -Si zfs-linux output: $(echo "$_zfs_si_output" | grep 'Depends On')"
+  fi
+  # Fallback: check darksite for a zfs-linux package filename
+  if [[ -z "$_zfs_kernel_ver" && -n "$darksite" ]]; then
+    local _cached_zfs
+    _cached_zfs=$(ls "${darksite}/pkg/"zfs-linux-*.pkg.tar.* 2>/dev/null | grep -v '\.sig$' | head -1 || echo "")
+    if [[ -n "$_cached_zfs" ]]; then
+      # zfs-linux-2.3.3_6.12.8.arch1.1-1-x86_64.pkg.tar.zst → extract kernel part
+      # Format: zfs-linux-<zfs_ver>_<kernel_ver>-<pkgrel>-<arch>.pkg.tar.zst
+      _zfs_kernel_ver=$(basename "$_cached_zfs" | sed 's/^zfs-linux-[^_]*_//' | sed 's/-[0-9]*-x86_64.*//' | tr '_' '-' || echo "")
+      [[ -n "$_zfs_kernel_ver" ]] && \
+        k_log_to "$log" "Detected zfs-linux kernel version from darksite: ${_zfs_kernel_ver}"
+    fi
+  fi
+  if [[ -n "$_zfs_kernel_ver" ]]; then
+    k_log_to "$log" "archzfs requires linux=${_zfs_kernel_ver} — pinning kernel"
+  else
+    k_log_to "$log" "Could not determine archzfs kernel version — using latest"
+  fi
+
   # Base packages for initial bootstrap
+  # Pin kernel to the version archzfs supports — download from Arch Linux Archive
+  local _linux_pkg="linux"
+  local _linux_headers_pkg="linux-headers"
+  if [[ -n "${_zfs_kernel_ver:-}" ]]; then
+    local _archive_url="https://archive.archlinux.org/packages"
+    local _kpkg="${_archive_url}/l/linux/linux-${_zfs_kernel_ver}-x86_64.pkg.tar.zst"
+    local _hpkg="${_archive_url}/l/linux-headers/linux-headers-${_zfs_kernel_ver}-x86_64.pkg.tar.zst"
+    k_log_to "$log" "Downloading pinned kernel ${_zfs_kernel_ver} from Arch Linux Archive..."
+    curl -sfL "$_kpkg" -o "${target}/var/cache/pacman/pkg/linux-${_zfs_kernel_ver}-x86_64.pkg.tar.zst" >> "$log" 2>&1 && \
+    curl -sfL "$_hpkg" -o "${target}/var/cache/pacman/pkg/linux-headers-${_zfs_kernel_ver}-x86_64.pkg.tar.zst" >> "$log" 2>&1 && {
+      _linux_pkg="${target}/var/cache/pacman/pkg/linux-${_zfs_kernel_ver}-x86_64.pkg.tar.zst"
+      _linux_headers_pkg="${target}/var/cache/pacman/pkg/linux-headers-${_zfs_kernel_ver}-x86_64.pkg.tar.zst"
+      k_log_to "$log" "Pinned kernel ${_zfs_kernel_ver} downloaded from archive"
+    } || {
+      k_log_to "$log" "WARNING: Archive download failed — using latest kernel (ZFS may need DKMS)"
+      _linux_pkg="linux"
+      _linux_headers_pkg="linux-headers"
+    }
+  fi
   local _base_pkgs=(
-    base linux linux-headers linux-firmware
+    base linux-firmware
     systemd systemd-sysvcompat
     mkinitcpio
     efibootmgr
@@ -1202,58 +1219,148 @@ MIRRORS
     vim
   )
 
-  k_log_to "$log" "Installing base packages: ${_base_pkgs[*]}"
+  k_log_to "$log" "Installing base packages (without kernel)..."
   pacman --root "${target}" --config "${pacman_conf}" \
     --noconfirm --needed -S "${_base_pkgs[@]}" >> "$log" 2>&1 || {
     k_log_to "$log" "WARNING: Some base packages failed — continuing"
   }
 
+  # Install kernel — pinned from archive or latest from repos
+  if [[ "${_linux_pkg}" == "${target}/"* ]]; then
+    k_log_to "$log" "Installing pinned kernel from archive..."
+    pacman --root "${target}" --config "${pacman_conf}" \
+      --noconfirm -U "${_linux_pkg}" "${_linux_headers_pkg}" >> "$log" 2>&1 || {
+      k_log_to "$log" "WARNING: Pinned kernel install failed — trying latest"
+      pacman --root "${target}" --config "${pacman_conf}" \
+        --noconfirm --needed -S linux linux-headers >> "$log" 2>&1 || true
+    }
+  else
+    k_log_to "$log" "Installing latest kernel..."
+    pacman --root "${target}" --config "${pacman_conf}" \
+      --noconfirm --needed -S linux linux-headers >> "$log" 2>&1 || {
+      k_log_to "$log" "WARNING: Kernel install failed"
+    }
+  fi
+
   k_log_to "$log" "Root filesystem: $(du -sh --exclude="${target}/proc" --exclude="${target}/sys" --exclude="${target}/dev" "${target}" 2>/dev/null | cut -f1 || echo "?")"
+
+  # ── Create vconsole.conf early — mkinitcpio's sd-vconsole hook needs it ──
+  local keymap="${KLDLOAD_KEYBOARD_LAYOUT:-us}"
+  echo "KEYMAP=${keymap}" > "${target}/etc/vconsole.conf"
 
   # ── Install ZFS ──────────────────────────────────────────────────────────
   if [[ "${KLDLOAD_STORAGE_MODE:-standard}" == "zfs" ]]; then
     k_log_to "$log" "Installing ZFS packages..."
 
-    local _zfs_pkgs=(dkms gcc make linux-headers zfs-dkms zfs-utils)
+    # Bind chroot mounts — needed for DKMS, mkinitcpio, depmod inside chroot
+    k_bind_chroot_mounts
+
+    # Generate hostid BEFORE mkinitcpio so it gets baked into the initramfs.
+    # The mkinitcpio zfs hook copies /etc/hostid into the initramfs image.
+    chroot "${target}" zgenhostid -f 2>/dev/null || \
+      dd if=/dev/urandom of="${target}/etc/hostid" bs=4 count=1 status=none
+    k_log_to "$log" "hostid generated: $(xxd -p "${target}/etc/hostid" 2>/dev/null || echo "unknown")"
+
+    # Configure mkinitcpio BEFORE installing ZFS so pacman hooks (if they run)
+    # build the initramfs with ZFS support on first pass.
+    #
+    # CRITICAL: Modern Arch defaults to systemd-based initramfs hooks:
+    #   HOOKS=(base systemd autodetect microcode modconf kms keyboard keymap sd-vconsole block filesystems fsck)
+    # The archzfs "zfs" hook runtime script ONLY works with udev/busybox init,
+    # NOT systemd init. With systemd hooks, the ZFS pool is never imported and
+    # the system hangs at boot. We MUST switch to udev-based hooks.
+    if [[ -f "${target}/etc/mkinitcpio.conf" ]]; then
+      # Replace the entire HOOKS line with udev-based hooks + zfs
+      sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block zfs filesystems fsck)/' \
+        "${target}/etc/mkinitcpio.conf"
+      # Force zfs module into MODULES array — belt-and-suspenders
+      sed -i 's/^MODULES=()/MODULES=(zfs)/' "${target}/etc/mkinitcpio.conf" 2>/dev/null || true
+      k_log_to "$log" "mkinitcpio.conf: udev-based HOOKS with zfs, MODULES=(zfs)"
+    fi
+
+    # Try prebuilt zfs-linux first (avoids DKMS compilation from CentOS chroot).
+    # zfs-linux is matched to a specific kernel by archzfs.
+    local _zfs_installed=false
     pacman --root "${target}" --config "${pacman_conf}" \
-      --noconfirm --needed -S "${_zfs_pkgs[@]}" >> "$log" 2>&1 || {
-      k_log_to "$log" "WARNING: ZFS package install had issues"
+      --noconfirm --needed -S zfs-linux zfs-utils >> "$log" 2>&1 && {
+      _zfs_installed=true
+      k_log_to "$log" "Prebuilt zfs-linux installed successfully"
+    } || {
+      k_log_to "$log" "Prebuilt zfs-linux failed — falling back to zfs-dkms..."
+
+      # Install DKMS + build dependencies + zfs-dkms
+      pacman --root "${target}" --config "${pacman_conf}" \
+        --noconfirm --needed -S dkms gcc make linux-headers zfs-dkms zfs-utils >> "$log" 2>&1 || {
+        k_log_to "$log" "ERROR: ZFS package install failed — ZFS will not work"
+      }
+
+      # pacman --root does NOT run hooks in the target chroot, so we must
+      # manually build the DKMS module and run depmod.
+      local _dkms_kver _dkms_moddir
+      for _dkms_moddir in "${target}/usr/lib/modules" "${target}/lib/modules"; do
+        [[ -d "$_dkms_moddir" ]] && break
+      done
+      _dkms_kver=$(ls "$_dkms_moddir/" 2>/dev/null | grep -v '^$' | head -1)
+      if [[ -n "$_dkms_kver" ]]; then
+        local _zfs_dkms_ver
+        _zfs_dkms_ver=$(chroot "${target}" pacman -Q zfs-dkms 2>/dev/null | awk '{print $2}' | cut -d- -f1 || echo "")
+        if [[ -n "$_zfs_dkms_ver" ]]; then
+          k_log_to "$log" "Building ZFS DKMS ${_zfs_dkms_ver} for kernel ${_dkms_kver}..."
+          if chroot "${target}" dkms build -m zfs -v "$_zfs_dkms_ver" -k "$_dkms_kver" >> "$log" 2>&1 && \
+             chroot "${target}" dkms install -m zfs -v "$_zfs_dkms_ver" -k "$_dkms_kver" >> "$log" 2>&1; then
+            _zfs_installed=true
+            k_log_to "$log" "ZFS DKMS built and installed for ${_dkms_kver}"
+          else
+            k_log_to "$log" "ERROR: ZFS DKMS build failed — check log for details"
+          fi
+        else
+          k_log_to "$log" "ERROR: zfs-dkms package not found in target"
+        fi
+        chroot "${target}" depmod -a "$_dkms_kver" 2>/dev/null || true
+      fi
     }
 
-    # Build ZFS DKMS
+    # Detect kernel version
     local kver moddir
     for moddir in "${target}/usr/lib/modules" "${target}/lib/modules"; do
       [[ -d "$moddir" ]] && break
     done
     kver=$(ls "$moddir/" 2>/dev/null | grep -v '^$' | head -1)
+
+    # Verify zfs.ko is actually present before rebuilding initramfs
     if [[ -n "$kver" ]]; then
-      k_log_to "$log" "Building ZFS DKMS for kernel ${kver}..."
-      local zfs_ver
-      zfs_ver=$(chroot "${target}" pacman -Q zfs-dkms 2>/dev/null | awk '{print $2}' | cut -d- -f1 || echo "")
-      if [[ -n "$zfs_ver" ]]; then
-        chroot "${target}" dkms build -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
-        chroot "${target}" dkms install -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
-      fi
       chroot "${target}" depmod -a "$kver" 2>/dev/null || true
+      if find "${target}/usr/lib/modules/${kver}" -name 'zfs.ko*' 2>/dev/null | grep -q .; then
+        k_log_to "$log" "VERIFIED: zfs.ko found for kernel ${kver}"
+      else
+        k_log_to "$log" "ERROR: zfs.ko NOT found for kernel ${kver} — boot will fail!"
+        k_log_to "$log" "  Installed modules: $(ls "${target}/usr/lib/modules/${kver}/extra/" 2>/dev/null || echo "none")"
+      fi
     fi
 
-    # Configure mkinitcpio to include ZFS
-    if [[ -f "${target}/etc/mkinitcpio.conf" ]]; then
-      # Add zfs to HOOKS after filesystems
-      sed -i 's/HOOKS=(\(.*\)filesystems\(.*\))/HOOKS=(\1filesystems zfs\2)/' \
-        "${target}/etc/mkinitcpio.conf" 2>/dev/null || true
-      k_log_to "$log" "mkinitcpio.conf updated with ZFS hook"
-    fi
-
-    # Rebuild initramfs with ZFS support
+    # Rebuild initramfs — picks up ZFS hook, hostid, and zfs.ko
     if [[ -n "$kver" ]]; then
       k_log_to "$log" "Rebuilding initramfs with mkinitcpio for ${kver}..."
       chroot "${target}" mkinitcpio -P >> "$log" 2>&1 || \
         k_log_to "$log" "WARNING: mkinitcpio rebuild failed"
+
+      # Verify initramfs was generated with reasonable size
+      local _initrd="${target}/boot/initramfs-linux.img"
+      if [[ -f "$_initrd" ]]; then
+        local _size
+        _size=$(stat -c%s "$_initrd" 2>/dev/null || echo "0")
+        k_log_to "$log" "initramfs-linux.img size: $(( _size / 1024 / 1024 )) MB"
+        if [[ "$_size" -lt 5000000 ]]; then
+          k_log_to "$log" "WARNING: initramfs seems too small (${_size} bytes) — may be missing modules"
+        fi
+      else
+        k_log_to "$log" "ERROR: initramfs-linux.img not found — boot will fail!"
+      fi
     fi
 
     # Enable ZFS services
     chroot "${target}" systemctl enable zfs-import-cache.service zfs-mount.service zfs.target 2>/dev/null || true
+    chroot "${target}" systemctl enable zfs-zed.service 2>/dev/null || true
   fi
 
   # ── Profile packages ─────────────────────────────────────────────────────
