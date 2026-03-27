@@ -183,7 +183,7 @@ k_zfs_create_rpool() {
 
   # Set ZFSBootMenu properties — inherited by all boot environments
   # console=tty1 keeps VGA output; console=ttyS0 adds serial (Proxmox console tab)
-  zfs set org.zfsbootmenu:commandline="ro console=tty1 console=ttyS0,115200" rpool/ROOT
+  zfs set org.zfsbootmenu:commandline="rw console=tty1 console=ttyS0,115200" rpool/ROOT
 
   # Data datasets
   zfs create -o mountpoint=/root      rpool/root

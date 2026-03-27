@@ -1417,12 +1417,17 @@ EOH
   # ── Enable services ──────────────────────────────────────────────────────
   chroot "${target}" systemctl enable NetworkManager sshd 2>/dev/null || true
 
-  # ── SSH: enable password auth (Arch defaults to no) ─────────────────────
+  # ── SSH: enable password auth + generate host keys ───────────────────────
+  # Arch defaults PasswordAuthentication to no and doesn't generate host keys
+  # until sshd first starts — but if root is read-only at boot, key generation
+  # fails and sshd refuses to start. Generate keys now during install.
   local _sshd_conf="${target}/etc/ssh/sshd_config"
   if [[ -f "$_sshd_conf" ]]; then
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$_sshd_conf"
     sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' "$_sshd_conf"
   fi
+  chroot "${target}" ssh-keygen -A >> "$log" 2>&1 || true
+  k_log_to "$log" "SSH host keys generated"
 
   local _profile="${KLDLOAD_PROFILE:-server}"
   if [[ "$_profile" == "desktop" ]]; then
