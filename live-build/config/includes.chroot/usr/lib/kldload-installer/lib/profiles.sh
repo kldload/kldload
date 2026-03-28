@@ -420,7 +420,7 @@ WPEOF
     fi
   fi
   # Fix ownership of admin home dotfiles
-  if [[ -d "$_user_home" ]]; then
+  if [[ -n "${_user_home:-}" && -d "${_user_home}" ]]; then
     local _uid _gid
     _uid="$(chroot "${target}" id -u "${_user}" 2>/dev/null || echo '')"
     _gid="$(chroot "${target}" id -g "${_user}" 2>/dev/null || echo '')"
