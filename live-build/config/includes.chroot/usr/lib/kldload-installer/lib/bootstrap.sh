@@ -1433,6 +1433,13 @@ EOH
   if [[ "$_profile" == "desktop" ]]; then
     chroot "${target}" systemctl enable gdm 2>/dev/null || true
     chroot "${target}" systemctl set-default graphical.target 2>/dev/null || true
+    # GDM first-boot hang fix — add a short delay so the display driver
+    # is fully initialized before GDM tries to start
+    mkdir -p "${target}/etc/systemd/system/gdm.service.d"
+    cat > "${target}/etc/systemd/system/gdm.service.d/10-wait-for-display.conf" <<'GDMFIX'
+[Service]
+ExecStartPre=/usr/bin/sleep 3
+GDMFIX
   else
     chroot "${target}" systemctl set-default multi-user.target 2>/dev/null || true
   fi
