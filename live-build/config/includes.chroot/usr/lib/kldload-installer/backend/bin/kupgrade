@@ -31,8 +31,10 @@ if command -v dnf &>/dev/null; then
     PKG=dnf
 elif command -v apt-get &>/dev/null; then
     PKG=apt-get
+elif command -v pacman &>/dev/null; then
+    PKG=pacman
 else
-    die "No supported package manager found (need dnf or apt-get)"
+    die "No supported package manager found (need dnf, apt-get, or pacman)"
 fi
 
 log "Detected package manager: ${PKG}"
@@ -82,6 +84,9 @@ fi
 if [[ "${PKG}" == "dnf" ]]; then
     log "Running: dnf upgrade"
     dnf upgrade -y 2>&1 | tee -a "$LOG"
+elif [[ "${PKG}" == "pacman" ]]; then
+    log "Running: pacman -Syu"
+    pacman -Syu --noconfirm 2>&1 | tee -a "$LOG"
 else
     log "Running: apt-get update"
     DEBIAN_FRONTEND=noninteractive apt-get update 2>&1 | tee -a "$LOG"
@@ -103,6 +108,8 @@ fi
 
 if [[ "${PKG}" == "dnf" ]] && rpm -q kmod-zfs &>/dev/null; then
     log "kmod-zfs detected — ZFS modules are kABI-tracked, skipping DKMS verification"
+elif [[ "${PKG}" == "pacman" ]] && pacman -Q zfs-linux &>/dev/null; then
+    log "zfs-linux detected — prebuilt ZFS modules, skipping DKMS verification"
 else
     log "Verifying ZFS DKMS modules for all installed kernels..."
 
