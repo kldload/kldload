@@ -1,158 +1,92 @@
-# What is kldloadOS
+# What kldloadOS Adds to a Stock Distro
 
-**kldload** is the builder and installer. **kldloadOS** is what you're running afterward — an opinionated OS layer on top of CentOS, Debian, Ubuntu, Fedora, RHEL, Rocky, or Arch that gives you ZFS on root, universal CLI tools, boot environments, offline package mirrors, and a consistent experience across distro families.
+**kldload** is the builder/installer. **kldloadOS** is the resulting system -- an optional tooling layer on top of CentOS, Debian, Ubuntu, Fedora, RHEL, Rocky, or Arch with ZFS on root.
 
-This page covers what kldloadOS gives you that a stock Linux install doesn't.
+The base distro is unmodified. `apt`, `dnf`, `pacman`, `zfs`, `zpool`, `systemctl` all work as stock. The `k*` tools are additions, not replacements. Uninstall them and you have a standard distro with ZFS on root.
 
-> **Just want ZFS on root with no extras?** Choose the **Core** profile during install. You get ZFS on root, ZFSBootMenu, and a stock distro — nothing else. See [Editions](editions.md).
-
----
-
-## Nothing removed, everything optional
-
-kldloadOS does not modify, patch, replace, or remove anything from the base distro. `apt`, `dnf`, `zfs`, `zpool`, `systemctl` — they all work exactly as they do on a stock install. The underlying OS is completely standard.
-
-What kldloadOS adds is a set of optional `k*` convenience commands that automate common tasks and provide a consistent interface across distro families. You can use them, or ignore them entirely and operate the system with native tools. Both approaches are fully supported.
-
-## One optional command set across all distros
-
-Every kldload system ships the same `k*` CLI tools regardless of distro. If you don't want to remember whether it's `apt`, `dnf`, or `pacman`, the `k*` tools abstract away the differences:
-
-| You type | On CentOS/Fedora/RHEL/Rocky | On Debian/Ubuntu | On Arch |
-|----------|----------------------|-------------------|---------|
-| `kpkg install nginx` | `dnf install -y nginx` | `apt-get install -y nginx` | `pacman -S --noconfirm nginx` |
-| `kpkg remove nginx` | `dnf remove -y nginx` | `apt-get remove -y nginx` | `pacman -R --noconfirm nginx` |
-| `kpkg search redis` | `dnf search redis` | `apt-cache search redis` | `pacman -Ss redis` |
-| `kpkg update` | `dnf check-update` | `apt-get update` | `pacman -Sy` |
-| `kpkg upgrade` | `dnf upgrade -y` | `apt-get upgrade -y` | `pacman -Syu --noconfirm` |
-| `kpkg list` | `rpm -qa \| sort` | `dpkg -l` | `pacman -Q` |
-| `kpkg info nginx` | `dnf info nginx` | `apt-cache show nginx` | `pacman -Si nginx` |
-
-And every `kpkg install`, `remove`, and `upgrade` takes an automatic ZFS snapshot first. If a package breaks something, roll back in seconds.
-
-This is significant: you can write scripts, documentation, and automation that work on all distro families with zero conditional logic. `kpkg install htop tmux nginx` works everywhere.
+> **Core profile:** ZFS on root + ZFSBootMenu only, no `k*` tools. See [Editions](editions.md).
 
 ---
 
-## Automatic safety net for every operation
+## ZFS on Root
 
-kldload tools create ZFS snapshots before destructive operations:
+Manual ZFS-on-root setup requires: custom partitioning (EFI + ZFS), pool creation with tuned properties (ashift=12, lz4, acltype, xattr=sa), dataset hierarchy, DKMS module build, ZFS-aware initramfs, ZFSBootMenu or patched GRUB, zgenhostid, and correct fstab ordering. kldload automates all of it.
 
-| Tool | Snapshot before | Naming |
-|------|----------------|--------|
-| `kpkg install` | Package install | `kpkg-YYYYMMDD-HHMMSS` |
-| `kpkg remove` | Package removal | `kpkg-YYYYMMDD-HHMMSS` |
-| `kpkg upgrade` | Package upgrade | `kpkg-YYYYMMDD-HHMMSS` |
-| `kupgrade` | Full system upgrade | `pre-upgrade-YYYYMMDD-HHMMSS` |
-| `ksnap` | Manual snapshot | `manual-YYYYMMDD-HHMMSS` |
-
-Plus sanoid runs automatic hourly/daily/weekly/monthly snapshots in the background.
-
-The result: you can't permanently break your system with a package operation. Every change is reversible.
-
----
-
-## Boot environments
-
-Stock Linux doesn't have boot environments. If a kernel update breaks your system, you're in recovery mode or reinstalling.
-
-kldload gives you ZFSBootMenu + boot environments:
-
-```bash
-kbe create before-risky-change    # checkpoint
-kupgrade                          # upgrade the system
-# Broken? Reboot, pick the old BE from the menu
-# Or: kbe activate before-risky-change && reboot
-```
-
-Every upgrade, every kernel change, every DKMS rebuild — you can always go back to the last working state in one command.
-
----
-
-## ZFS on root (not bolted on)
-
-Stock CentOS and Debian don't support ZFS on root out of the box. Getting ZFS on root working manually requires:
-
-1. Custom partitioning (EFI + ZFS partition)
-2. Pool creation with the right properties (ashift, compression, acltype, xattr, relatime)
-3. Dataset hierarchy (separate /home, /var/log, /var/cache, /srv)
-4. DKMS module build for the running kernel
-5. Initramfs with ZFS support
-6. Bootloader that understands ZFS (ZFSBootMenu or GRUB with ZFS patches)
-7. Hostid configuration (zgenhostid)
-8. Proper fstab/mount ordering
-
-kldload does all of this automatically during install. The dataset hierarchy is deterministic:
+Dataset layout:
 
 ```
 rpool
-├── ROOT/default      /                (the OS)
-├── home              /home            (user data, separate snapshots)
+├── ROOT/default      /                (OS root)
+├── home              /home            (separate snapshots)
 ├── root              /root
 ├── srv               /srv             (application data)
 └── var
-    ├── log           /var/log         (logs, separate snapshots)
-    ├── cache         /var/cache       (no auto-snapshot, cache is disposable)
+    ├── log           /var/log         (separate snapshots)
+    ├── cache         /var/cache       (no auto-snapshot)
     └── tmp           /var/tmp         (no auto-snapshot)
 ```
 
-Each path is an independent ZFS dataset with its own:
-- Snapshot schedule
-- Compression settings
-- Quotas
-- Send/receive replication
+Each dataset has independent snapshot schedules, compression settings, quotas, and send/receive replication.
 
 ---
 
-## Offline installation
+## Boot Environments
 
-Complete package mirrors for all seven distros are baked into the ISO:
-
-- **~900 RPMs** for CentOS/Fedora/RHEL/Rocky installs
-- **~2,700 .debs** for Debian installs
-- **~2,500 .debs** for Ubuntu installs
-- **Arch packages** for Arch Linux installs
-
-No internet required. Boot from USB, pick your distro, install. This matters for:
-- Air-gapped environments
-- Unreliable network connections
-- Consistent, reproducible installs (same packages every time)
-- Fast deployment (no downloading 2GB+ of packages per machine)
-
----
-
-## Instant CoW cloning
-
-`kclone` creates copy-on-write clones of any directory:
+ZFSBootMenu + `kbe` provides Solaris/FreeBSD-style boot environments on Linux:
 
 ```bash
-kclone /srv/production /srv/staging
+kbe create before-risky-change
+kupgrade
+# broken? kbe activate before-risky-change && reboot
 ```
 
-The clone is instant (takes milliseconds) and starts at near-zero disk space. Only divergent blocks consume space. Use cases:
-
-- Clone a production database for testing
-- Create a staging environment from live data
-- Duplicate a project directory without doubling disk usage
+Every upgrade is reversible. Select previous boot environments from the ZFSBootMenu at boot.
 
 ---
 
-## Multi-distro from one ISO
+## Cross-Distro CLI Tools
 
-One ISO installs:
-- CentOS Stream 9
-- Debian 13 (Trixie)
-- Ubuntu 24.04 (Noble)
-- Fedora 41
-- RHEL 9
-- Rocky Linux 9
-- Arch Linux
+The `k*` commands abstract package manager differences:
 
-The same USB stick works for all seven. Same installer, same ZFS layout, same tools, same boot environments. The native package manager is still there — `dnf` on CentOS/Fedora/RHEL/Rocky, `apt` on Debian/Ubuntu, `pacman` on Arch — fully functional. `kpkg` is an optional wrapper if you want one command for all.
+| Command | CentOS/Fedora/RHEL/Rocky | Debian/Ubuntu | Arch |
+|---------|----------------------|-------------------|---------|
+| `kpkg install nginx` | `dnf install -y nginx` | `apt-get install -y nginx` | `pacman -S --noconfirm nginx` |
+| `kpkg remove nginx` | `dnf remove -y nginx` | `apt-get remove -y nginx` | `pacman -R --noconfirm nginx` |
+| `kpkg search redis` | `dnf search redis` | `apt-cache search redis` | `pacman -Ss redis` |
+| `kpkg upgrade` | `dnf upgrade -y` | `apt-get upgrade -y` | `pacman -Syu --noconfirm` |
+
+Every `kpkg install`, `remove`, and `upgrade` takes an automatic ZFS snapshot first.
+
+Other tools: `ksnap` (snapshots), `kbe` (boot environments), `kst` (health dashboard), `kdf` (ZFS-aware disk usage), `kdir` (create datasets), `kclone` (CoW clones), `kexport` (image export), `kupgrade` (safe upgrade), `krecovery` (disaster recovery).
 
 ---
 
-## Export to any hypervisor
+## Automatic Snapshots
+
+Sanoid runs hourly/daily/weekly/monthly snapshot rotation with automatic pruning. The `k*` tools also snapshot before destructive operations:
+
+| Tool | Trigger | Snapshot naming |
+|------|---------|-----------------|
+| `kpkg install/remove/upgrade` | Package operation | `kpkg-YYYYMMDD-HHMMSS` |
+| `kupgrade` | System upgrade | `pre-upgrade-YYYYMMDD-HHMMSS` |
+| `ksnap` | Manual | `manual-YYYYMMDD-HHMMSS` |
+
+---
+
+## Offline Package Mirrors (Darksites)
+
+Complete mirrors baked into the ISO:
+
+- ~900 RPMs (CentOS/Fedora/RHEL/Rocky)
+- ~2,700 .debs (Debian)
+- ~2,500 .debs (Ubuntu)
+- Arch packages (Arch Linux)
+
+No internet required. Identical packages across installs -- no mirror drift.
+
+---
+
+## Image Export
 
 `kexport` converts a running system to portable disk images:
 
@@ -164,30 +98,28 @@ kexport ova     # VMware / VirtualBox
 kexport raw     # dd-ready image
 ```
 
-Images can be SCP'd to remote hosts and sealed as golden images with cloud-init for template cloning. Build one system, deploy it everywhere.
+Images are sealed with cloud-init for golden template cloning. Uses `qemu-img convert` underneath.
 
 ---
 
-## Health dashboard in one command
+## Additional Components
 
-```bash
-kst
-```
-
-Instantly shows pool health, disk usage, compression ratios, snapshot counts, boot environments, memory, CPU, uptime, and service status. No setup, no agents, no configuration.
+| Component | Details |
+|-----------|---------|
+| **Web UI** | Python + single HTML file on port 8080. Installation and management. |
+| **WireGuard** | `wireguard-tools` pre-installed. 4-plane mesh support for cluster deployments. |
+| **eBPF** | `bpftrace`, `bpfcc-tools`, `bpftool`, `linux-perf` included on Debian installs. |
+| **NVIDIA** | Set `KLDLOAD_NVIDIA_DRIVERS=1` during install. Includes MOK signing on CentOS/RHEL. |
+| **Secure Boot** | Shim-signed UEFI chain, automatic MOK key generation for DKMS modules. |
+| **Encryption** | Optional ZFS native encryption (AES-256-GCM), passphrase or keyfile. |
 
 ---
 
-## What's not changed
+## What is Not Modified
 
-kldloadOS is deliberately non-invasive. The base distro is stock:
-
-- **Kernel** — unmodified distro kernel. ZFS is built via DKMS, not a custom kernel.
-- **Package managers** — `apt`, `dnf`, and `pacman` are untouched. `kpkg` wraps them optionally; it does not replace, intercept, or modify them.
-- **Init system** — stock systemd. No custom init, no wrapper services around systemd.
-- **Filesystem tools** — `zfs`, `zpool`, `zdb` are standard OpenZFS. The `k*` tools call them underneath.
-- **Network stack** — standard NetworkManager. WireGuard is the stock kernel module.
-- **No proprietary components** — everything is open source (BSD 3-Clause).
-- **No lock-in** — exports to any format, runs on any hardware. `kexport` uses `qemu-img`, not a custom tool.
-
-If you uninstalled every `k*` tool, you'd have a standard CentOS, Debian, Ubuntu, Fedora, RHEL, Rocky, or Arch system with ZFS on root. The `k*` tools are additions, not modifications.
+- **Kernel** -- unmodified distro kernel; ZFS built via DKMS
+- **Package managers** -- `apt`, `dnf`, `pacman` untouched
+- **Init** -- stock systemd
+- **Filesystem tools** -- standard OpenZFS (`zfs`, `zpool`, `zdb`)
+- **Network** -- standard NetworkManager, stock WireGuard kernel module
+- **License** -- BSD 3-Clause, no proprietary components

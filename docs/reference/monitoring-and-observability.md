@@ -1,6 +1,6 @@
 # Monitoring and Observability
 
-Setting up Prometheus, Grafana, and node_exporter on kldload systems. All examples work on CentOS/RHEL and Debian.
+Setting up Prometheus, Grafana, and node_exporter on kldloadOS. Examples use `dnf` (CentOS/Fedora/RHEL/Rocky) or `apt` (Debian/Ubuntu). Arch uses `pacman`.
 
 ---
 

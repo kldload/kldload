@@ -1,96 +1,118 @@
 # kldloadOS Documentation
 
-Your Linux construction kit — ZFS on root, universal CLI tools, boot environments, offline package mirrors, and a unified experience across CentOS, Debian, Ubuntu, Fedora, RHEL, Rocky, and Arch.
-
----
+Single bootable ISO that installs CentOS Stream 9, Debian 13, Ubuntu 24.04, Fedora 41, RHEL 9, Rocky Linux 9, or Arch Linux with ZFS on root. Offline, from USB.
 
 ## Overview
 
+| Document | Description |
+|----------|-------------|
+| [What is kldloadOS](overview/what-kldload-gives-you.md) | Technical overview -- what it adds to a stock distro |
+| [Editions & Profiles](overview/editions.md) | Core vs Free, Desktop vs Server vs Core profile |
+| [The Bridge](the-bridge.md) | BSD-to-Linux perspective, ZFS on Linux tradeoffs |
+| [Architecture](ARCHITECTURE.md) | Build pipeline, installer internals, ISO assembly |
+| [Known Issues](KNOWN-ISSUES.md) | Compatibility matrix, tested platforms, known bugs |
+| [Changelog](CHANGELOG.md) | Release history |
+
+## Getting Started
+
 | Guide | Description |
 |-------|-------------|
-| [What is kldloadOS](overview/what-kldload-gives-you.md) | What's different from stock Linux — nothing removed, everything optional |
-| [Editions & Profiles](overview/editions.md) | Desktop vs Server vs Core — what's included in each |
-| [Architecture](../ARCHITECTURE.md) | Build pipeline, installer internals, how the ISO is assembled |
-| [Known Issues](../KNOWN-ISSUES.md) | Compatibility matrix, tested platforms, known bugs |
+| [Unattended Installation](tutorials/getting-started/unattended-install.md) | Answers files, fleet deployment, post-install hooks |
+| [CLI Tools Reference](tutorials/getting-started/cli-tools-reference.md) | All `k*` commands: kst, ksnap, kbe, kclone, kdf, kdir, kpkg, kupgrade, kexport, krecovery |
+| [Package Management](tutorials/getting-started/package-management.md) | kpkg, offline darksites, kupgrade, adding packages to the ISO |
 
----
+## Storage & ZFS
 
-## Tutorials
+| Guide | Description |
+|-------|-------------|
+| [ZFS Zero to Hero](tutorials/storage/zfs-zero-to-hero.md) | Pools, datasets, snapshots, clones, boot environments, replication, monitoring |
+| [NFS and iSCSI](tutorials/storage/nfs-and-iscsi.md) | Sharing ZFS datasets as file or block storage |
 
-### Getting Started
+## Networking
 
-| Guide | Level | Description |
-|-------|-------|-------------|
-| [Unattended Installation](tutorials/getting-started/unattended-install.md) | Beginner | Answers files, fleet deployment, post-install hooks |
-| [CLI Tools Reference](tutorials/getting-started/cli-tools-reference.md) | Beginner | kst, ksnap, kbe, kclone, kdf, kdir, kpkg, kupgrade, kexport, krecovery |
-| [Package Management](tutorials/getting-started/package-management.md) | Beginner | kpkg, offline darksites, kupgrade, adding packages to the ISO |
+| Guide | Description |
+|-------|-------------|
+| [Networking](tutorials/networking/networking.md) | Static IPs, bridges, VLANs, bonding, firewalld + nftables |
+| [WireGuard Basics](tutorials/networking/wireguard.md) | Point-to-point tunnels, hub-and-spoke, 4-plane mesh |
+| [WireGuard Masterclass](tutorials/networking/wireguard-masterclass.md) | Silent backplanes, multi-plane isolation, full mesh, NAT traversal |
 
-### Storage & ZFS
+## Virtualization
 
-| Guide | Level | Description |
-|-------|-------|-------------|
-| [ZFS Zero to Hero](tutorials/storage/zfs-zero-to-hero.md) | All levels | Complete guide — pools, datasets, snapshots, clones, boot environments, replication, two-node setup, monitoring |
-| [NFS and iSCSI](tutorials/storage/nfs-and-iscsi.md) | Intermediate | Sharing ZFS datasets as file or block storage |
+| Guide | Description |
+|-------|-------------|
+| [KVM Virtual Machines](tutorials/virtualization/kvm-virtual-machines.md) | Golden images, CoW cloning, snapshots, migration |
+| [Docker & Podman on ZFS](tutorials/virtualization/docker-on-zfs.md) | ZFS storage driver, per-service datasets, compose workflows |
+| [Kubernetes on KVM](tutorials/virtualization/kubernetes-on-kvm.md) | Golden images to K8s cluster, WireGuard pod networking |
+| [Proxmox and ZFS](tutorials/virtualization/proxmox-and-zfs.md) | Double-ZFS tradeoffs, tuning, bare metal alternatives |
 
-### Networking
+## Cloud & Infrastructure
 
-| Guide | Level | Description |
-|-------|-------|-------------|
-| [Networking](tutorials/networking/networking.md) | Beginner | Static IPs, bridges, VLANs, bonding, firewall (firewalld + nftables) |
-| [WireGuard Basics](tutorials/networking/wireguard.md) | Beginner | Point-to-point tunnels, hub-and-spoke, 4-plane mesh |
-| [WireGuard Masterclass](tutorials/networking/wireguard-masterclass.md) | Advanced | Silent backplanes, multi-plane isolation, full mesh, stealth, NAT traversal |
+| Guide | Description |
+|-------|-------------|
+| [Packer & Terraform](cloud/packer-and-terraform.md) | kldload Core as Packer base image, deploy to AWS/Azure/Proxmox |
+| [Export Formats](cloud/export-formats.md) | qcow2, raw, VHD, VMDK, OVA -- export and import per platform |
+| [Multi-Site Deployment](cloud/multi-site.md) | WireGuard mesh, ZFS replication topology, failover, DR runbook |
+| [16-Node Cluster Setup](cloud/cluster-setup.md) | Hub to 16 workers, WireGuard mesh, blue/green upgrades |
 
-### Virtualization & Containers
+## Observability
 
-| Guide | Level | Description |
-|-------|-------|-------------|
-| [KVM Virtual Machines](tutorials/virtualization/kvm-virtual-machines.md) | Beginner | Golden images, CoW cloning, snapshots, migration |
-| [Docker & Podman on ZFS](tutorials/virtualization/docker-on-zfs.md) | Intermediate | ZFS storage driver, per-service datasets, compose workflows |
-| [Kubernetes on KVM](tutorials/virtualization/kubernetes-on-kvm.md) | Advanced | Golden images to K8s cluster, scaling, WireGuard pod networking |
-| [Proxmox and ZFS](tutorials/virtualization/proxmox-and-zfs.md) | Intermediate | Double-ZFS tradeoffs, tuning, when to use bare metal instead |
+| Guide | Description |
+|-------|-------------|
+| [Beginner](tutorials/observability/observability-beginner.md) | kst, diagnostics, execsnoop, opensnoop, LogHog, bpftrace one-liners |
+| [Intermediate](tutorials/observability/observability-intermediate.md) | socket_snoop, latency_snoop, Prometheus, mail-audit |
+| [Advanced](tutorials/observability/observability-advanced.md) | eBPF in C, CO-RE builds, deploy instrumented images to AWS/Azure |
 
-### Infrastructure & Cloud
+## Security
 
-| Guide | Level | Description |
-|-------|-------|-------------|
-| [Cloud & Packer Integration](tutorials/infrastructure/cloud-and-packer.md) | Intermediate | Use kldload Core as Packer base image, deploy with Terraform to AWS/Azure/Proxmox |
-| [Export Formats](tutorials/infrastructure/export-formats.md) | Intermediate | qcow2, raw, VHD, VMDK, OVA — export and import on any platform |
-| [16-Node Cluster Setup](tutorials/infrastructure/cluster-setup.md) | Advanced | Full walkthrough — hub to 16 workers, WireGuard mesh, blue/green upgrades |
+| Guide | Description |
+|-------|-------------|
+| [Secure Boot & Encryption](tutorials/security/secure-boot-and-encryption.md) | MOK enrollment, ZFS encryption, DKMS signing |
+| [NVIDIA](tutorials/security/nvidia.md) | Driver install (CentOS + Debian), CUDA, Secure Boot signing, ARC tuning |
 
-### Appliance Recipes
+## Appliance Recipes
 
-Real-world appliances built on kldloadOS. Complete configs, package lists, systemd services.
+Complete build guides: [recipes/README.md](recipes/README.md)
+
+### Cloud Platform
 
 | Recipe | Description |
 |--------|-------------|
-| [IoT Gateway](tutorials/infrastructure/recipe-iot-gateway.md) | Quad-NIC BACnet/Modbus capture → WireGuard → RabbitMQ. Secures unencrypted building automation traffic. |
-| [IRLP Ham Radio](tutorials/infrastructure/recipe-irlp-ham-radio.md) | Ham radio voice bridging over WireGuard. SvxLink + CM108 USB audio + encrypted internet backhaul. |
-| [Live TV Streaming](tutorials/infrastructure/recipe-live-tv-streaming.md) | Capture card → ffmpeg → SRT/HLS/DASH/IPTV. Carrier-grade live video with SRT callers. |
-| [Plex on ZFS](tutorials/infrastructure/recipe-plex-zfs.md) | Per-movie ZFS datasets. Clone, replicate, snapshot. Netflix Open Connect architecture at home. |
+| [Homelab Cloud](recipes/homelab-cloud.md) | Self-hosted Nextcloud, Immich, Vaultwarden, Gitea, Matrix, MinIO on ZFS |
+| [Multi-Site Cloud](recipes/multi-site-cloud.md) | Three-site WireGuard mesh, ZFS replication, failover, BMaaS |
+| [Production Cloud](recipes/production-cloud.md) | VXLAN + OVS, FRRouting (BGP/OSPF), HAProxy, PowerDNS, Keycloak |
 
-### Observability
+### Storage & Network
 
-| Guide | Level | Description |
-|-------|-------|-------------|
-| [Beginner](tutorials/observability/observability-beginner.md) | Beginner | kst, diagnostics, execsnoop, opensnoop, LogHog, first bpftrace one-liners |
-| [Intermediate](tutorials/observability/observability-intermediate.md) | Intermediate | socket_snoop, latency_snoop, Prometheus, mail-audit |
-| [Advanced](tutorials/observability/observability-advanced.md) | Advanced | Write eBPF in C, CO-RE builds, deploy instrumented images to AWS/Azure |
+| Recipe | Description |
+|--------|-------------|
+| [NAS Server](recipes/nas-server.md) | Samba, NFS, Time Machine, shadow copies, offsite replication |
+| [dRAID Storage](recipes/draid-storage.md) | Petabyte-scale ZFS dRAID, 12+ disk arrays, fast resilver |
+| [Firewall & Gateway](recipes/firewall-gateway.md) | nftables zones, Unbound DNS, Kea DHCP, WireGuard VPN |
+| [IoT Gateway](recipes/iot-gateway.md) | BACnet/Modbus capture, WireGuard backhaul, RabbitMQ |
 
-### Security & Hardware
+### Media & Entertainment
 
-| Guide | Level | Description |
-|-------|-------|-------------|
-| [Secure Boot & Encryption](tutorials/security/secure-boot-and-encryption.md) | Intermediate | MOK enrollment, ZFS encryption, DKMS signing |
-| [NVIDIA](tutorials/security/nvidia.md) | Intermediate | Driver install (CentOS + Debian), CUDA, Secure Boot signing, ARC tuning |
-
----
+| Recipe | Description |
+|--------|-------------|
+| [Plex on ZFS](recipes/plex-on-zfs.md) | Per-movie datasets, instant clones, incremental replication |
+| [Live TV Streaming](recipes/live-tv-streaming.md) | Capture card, ffmpeg, SRT/HLS/DASH/IPTV |
+| [Satellite DVR](recipes/satellite-dvr.md) | DVB-S2 satellite TV, SDR, ADS-B, spectrum scanning |
+| [Radio Station](recipes/radio-station.md) | Icecast, Liquidsoap automation, per-station ZFS datasets |
+| [Seedbox](recipes/seedbox.md) | rtorrent, Flexget RSS, FileBot, ZFS replication to Plex |
+| [Game Servers](recipes/game-servers.md) | Minecraft, Valheim, Palworld, Rust on ZFS with instant rollback |
+| [Ham Radio (IRLP)](recipes/ham-radio.md) | SvxLink, CM108 USB audio, WireGuard backhaul |
 
 ## Reference
 
-| Reference | Description |
-|-----------|-------------|
+| Document | Description |
+|----------|-------------|
 | [CLI Tools](tutorials/getting-started/cli-tools-reference.md) | All `k*` commands with usage and examples |
 | [eBPF Reference](reference/ebpf.md) | bpftrace one-liners, BCC tools, kernel tracing |
-| [Monitoring Stack](reference/monitoring-and-observability.md) | Prometheus, Grafana, node_exporter setup, ZFS alerting rules |
-| [Export Formats](tutorials/infrastructure/export-formats.md) | Format details, size comparison, import instructions per platform |
-| [Unattended Install Variables](tutorials/getting-started/unattended-install.md) | All `KLDLOAD_*` environment variables |
+| [Monitoring Stack](reference/monitoring-and-observability.md) | Prometheus, Grafana, node_exporter, ZFS alerting rules |
+
+## Releases
+
+| Release | Description |
+|---------|-------------|
+| [1.0.1](releases/RELEASE-1.0.1.md) | Current release |
+| [1.0](releases/RELEASE-1.0.md) | Initial release |

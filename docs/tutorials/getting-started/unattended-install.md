@@ -2,7 +2,7 @@
 
 kldload supports fully automated installs via an answers file — no web UI or user interaction required. Boot the ISO, and it installs to disk using pre-defined settings.
 
-Works for CentOS/RHEL and Debian targets.
+Works for all seven supported distros: CentOS, Debian, Ubuntu, Fedora, RHEL, Rocky, and Arch.
 
 ---
 
@@ -33,7 +33,7 @@ EOF
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `KLDLOAD_DISTRO` | `centos`, `debian`, `rhel`, `rocky` | — | Target distro |
+| `KLDLOAD_DISTRO` | `centos`, `debian`, `ubuntu`, `fedora`, `rhel`, `rocky`, `arch` | — | Target distro |
 | `KLDLOAD_DISK` | `/dev/vda`, `/dev/sda`, etc. | — | Install disk |
 | `KLDLOAD_HOSTNAME` | any hostname | `kldload-node` | System hostname |
 | `KLDLOAD_USERNAME` | any username | `admin` | Admin user |
@@ -48,7 +48,7 @@ EOF
 | `KLDLOAD_TIMEZONE` | tz database name | `UTC` | Timezone |
 | `KLDLOAD_LOCALE` | locale string | `en_US.UTF-8` | System locale |
 | `KLDLOAD_KEYBOARD_LAYOUT` | `us`, `de`, etc. | `us` | Keyboard layout |
-| `KLDLOAD_NVIDIA_DRIVERS` | `0`, `1` | `0` | Install NVIDIA (CentOS only) |
+| `KLDLOAD_NVIDIA_DRIVERS` | `0`, `1` | `0` | Install NVIDIA drivers |
 | `KLDLOAD_ENABLE_EBPF` | `0`, `1` | `0` | Install eBPF tools |
 | `KLDLOAD_STORAGE_MANUAL` | `0`, `1` | `0` | Drop to shell for manual pool creation |
 | `KLDLOAD_INFRA_MODE` | `standalone`, `cluster-manager`, `join` | `standalone` | Deployment mode |
