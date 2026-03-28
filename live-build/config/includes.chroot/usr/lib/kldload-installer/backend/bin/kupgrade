@@ -85,8 +85,18 @@ if [[ "${PKG}" == "dnf" ]]; then
     log "Running: dnf upgrade"
     dnf upgrade -y 2>&1 | tee -a "$LOG"
 elif [[ "${PKG}" == "pacman" ]]; then
+    # Arch+ZFS: the kernel is pinned to whatever version archzfs supports.
+    # A full pacman -Syu will fail if the repos have a newer kernel that
+    # breaks zfs-linux. Strategy: try full upgrade first, if it fails due
+    # to kernel/zfs conflict, hold the kernel back and upgrade everything else.
     log "Running: pacman -Syu"
-    pacman -Syu --noconfirm 2>&1 | tee -a "$LOG"
+    if ! pacman -Syu --noconfirm 2>&1 | tee -a "$LOG"; then
+        log "Full upgrade failed (likely kernel/ZFS version conflict)"
+        log "Holding kernel back — upgrading everything else"
+        pacman -Syu --noconfirm --ignore linux,linux-headers,linux-firmware 2>&1 | tee -a "$LOG" || true
+        log "Kernel held at $(pacman -Q linux 2>/dev/null | awk '{print $2}') (archzfs requires this version)"
+        log "Kernel will upgrade automatically when archzfs releases a matching zfs-linux"
+    fi
 else
     log "Running: apt-get update"
     DEBIAN_FRONTEND=noninteractive apt-get update 2>&1 | tee -a "$LOG"
