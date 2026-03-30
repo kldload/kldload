@@ -375,8 +375,8 @@ AutomaticLogin=live
 GDMCONF
 fi
 
-# Auto-launch Firefox to webui on live session login (free edition only)
-if [[ "$PROFILE" == "desktop" && "$EDITION" != "core" ]]; then
+# Auto-launch Firefox to webui on live session login (free edition only, not Bob)
+if [[ "$PROFILE" == "desktop" && "$EDITION" != "core" && "${BOB_LIVE:-}" != "1" ]]; then
     # XDG autostart — waits for GNOME Shell to be ready, then opens Firefox
     # PostLogin removed: it raced with the compositor and caused black windows
     mkdir -p "${ROOTFS}/etc/xdg/autostart"
