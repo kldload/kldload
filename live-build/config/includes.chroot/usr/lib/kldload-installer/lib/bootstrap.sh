@@ -783,8 +783,8 @@ CUSTOMREPO
     # NOTE: sanoid is NOT in any RPM repo — installed from GitHub by k_install_system_files
     wireguard-tools ethtool htop pv lzop mbuffer eject
     qemu-guest-agent qemu-img open-vm-tools zstd
-    # Modern CLI tools + cloud
-    fzf btop fd-find ripgrep zoxide fastfetch cloud-init
+    # Modern CLI tools + cloud + container runtime for Open WebUI
+    fzf btop fd-find ripgrep zoxide fastfetch cloud-init podman
     # Sanoid Perl deps (sanoid binary copied by k_install_system_files)
     perl-Config-IniFiles perl-Capture-Tiny
     # Web UI + kldload tools backend
@@ -800,10 +800,11 @@ CUSTOMREPO
         gdm nautilus gnome-terminal gedit gnome-keyring
         adwaita-icon-theme google-noto-sans-fonts firefox
         mesa-dri-drivers pipewire wireplumber
+        podman
       )
       ;;
     server)
-      _dnf_pkgs+=(tcpdump socat sysstat net-tools)
+      _dnf_pkgs+=(tcpdump socat sysstat net-tools podman)
       ;;
     core)
       # Core: strip extras — no sanoid, no guest agents, no k* tools

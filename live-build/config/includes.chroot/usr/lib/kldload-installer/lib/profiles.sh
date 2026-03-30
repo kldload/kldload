@@ -305,6 +305,19 @@ k_install_system_files() {
     cp -r /usr/local/share/kldload-webui/active/. "${target}/usr/local/share/kldload-webui/"
   fi
 
+  # ── Firefox autostart to dashboard (desktop profiles) ──────────────────────
+  if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
+    mkdir -p "${target}/etc/xdg/autostart"
+    cat > "${target}/etc/xdg/autostart/kldload-dashboard.desktop" <<'DASHSTART'
+[Desktop Entry]
+Type=Application
+Name=kldload Dashboard
+Exec=firefox http://localhost:9000
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+DASHSTART
+  fi
+
   fi # end non-core block
 
   # ── Build SHA marker ──────────────────────────────────────────────────────
