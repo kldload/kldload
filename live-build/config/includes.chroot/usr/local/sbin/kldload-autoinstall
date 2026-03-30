@@ -36,32 +36,38 @@ if [[ -z "$SEED_DEV" ]]; then
     SEED_DEV="$(blkid -o device -t LABEL=KLDLOAD-SEED 2>/dev/null | head -1 || true)"
 fi
 
-if [[ -z "$SEED_DEV" ]]; then
-    log "No KLDLOAD-SEED disk found — skipping autoinstall"
-    exit 0
-fi
+ANSWERS_TMP=""
 
-log "Found seed disk: $SEED_DEV"
+if [[ -n "$SEED_DEV" ]]; then
+    log "Found seed disk: $SEED_DEV"
 
-# ── Mount and read answers ────────────────────────────────────────────────────
+    # ── Mount and read answers from seed disk ────────────────────────────────
+    SEED_MNT="$(mktemp -d)"
+    mount -o ro "$SEED_DEV" "$SEED_MNT"
 
-SEED_MNT="$(mktemp -d)"
-mount -o ro "$SEED_DEV" "$SEED_MNT"
-
-ANSWERS="$SEED_MNT/answers.env"
-if [[ ! -f "$ANSWERS" ]]; then
-    log "ERROR: answers.env not found on seed disk"
+    ANSWERS="$SEED_MNT/answers.env"
+    if [[ -f "$ANSWERS" ]]; then
+        ANSWERS_TMP="$(mktemp /tmp/kldload-answers.XXXXXX.env)"
+        cp "$ANSWERS" "$ANSWERS_TMP"
+        log "Answers loaded from seed disk: $ANSWERS_TMP"
+    else
+        log "WARNING: answers.env not found on seed disk"
+    fi
     umount "$SEED_MNT" || true
     rmdir  "$SEED_MNT" || true
-    exit 1
 fi
 
-ANSWERS_TMP="$(mktemp /tmp/kldload-answers.XXXXXX.env)"
-cp "$ANSWERS" "$ANSWERS_TMP"
-umount "$SEED_MNT" || true
-rmdir  "$SEED_MNT" || true
+# ── Fallback: baked-in answers file ──────────────────────────────────────────
+if [[ -z "$ANSWERS_TMP" && -f /etc/kldload/autoinstall.env ]]; then
+    ANSWERS_TMP="$(mktemp /tmp/kldload-answers.XXXXXX.env)"
+    cp /etc/kldload/autoinstall.env "$ANSWERS_TMP"
+    log "Answers loaded from baked-in /etc/kldload/autoinstall.env"
+fi
 
-log "Answers loaded from seed disk: $ANSWERS_TMP"
+if [[ -z "$ANSWERS_TMP" ]]; then
+    log "No answers file found (no seed disk, no /etc/kldload/autoinstall.env) — skipping autoinstall"
+    exit 0
+fi
 
 # ── Auto-detect disk if not set ───────────────────────────────────────────────
 

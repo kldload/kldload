@@ -196,6 +196,18 @@ cmd_build_ai_docs() {
     ls -lh "$ai_dir/"
 }
 
+cmd_build_ai_appliance() {
+    local answers_src="$ROOT/live-build/config/includes.chroot/etc/kldload/debz/answers/ai-appliance.env"
+    local answers_dst="$ROOT/live-build/config/includes.chroot/etc/kldload/autoinstall.env"
+    [[ -f "$answers_src" ]] || die "Answers file not found: $answers_src"
+    cp "$answers_src" "$answers_dst"
+    log "AI appliance mode: baked autoinstall.env into ISO"
+    log "  On boot: auto-detects disk, wipes, installs CentOS + Ollama + Open WebUI"
+    PROFILE=server cmd_build
+    log "AI appliance ISO ready — boot it, walk away, come back to a working AI box"
+    rm -f "$answers_dst"  # clean up so normal builds aren't affected
+}
+
 cmd_build() {
     local runtime
     runtime="$(detect_runtime)"
@@ -387,6 +399,7 @@ cmd_deploy_all() {
 
 case "${1:-help}" in
     build)              cmd_build ;;
+    build-ai-appliance) cmd_build_ai_appliance ;;
     build-debian-darksite) cmd_build_debian_darksite ;;
     build-bsd-darksite)    bash build/darksite-bsd/build-darksite-bsd.sh "$ROOT/live-build/darksite-bsd-cache" ;;
     build-ubuntu-darksite) cmd_build_ubuntu_darksite ;;
@@ -409,6 +422,7 @@ case "${1:-help}" in
         echo "Commands:"
         echo "  full                  Clean + rebuild builder + build ISO"
         echo "  build                 Build ISO only (caches Debian darksite)"
+        echo "  build-ai-appliance    Build unattended AI appliance ISO (Ollama + Open WebUI)"
         echo "  build-ai-docs         Scrape site + OCR PDF for AI knowledge base"
         echo "  build-alpine-darksite Rebuild Alpine apk darksite cache"
         echo "  build-debian-darksite Rebuild Debian APT darksite cache"
