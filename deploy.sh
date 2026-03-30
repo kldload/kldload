@@ -203,8 +203,8 @@ cmd_build_ai_appliance() {
     cp "$answers_src" "$answers_dst"
     log "AI appliance mode: baked autoinstall.env into ISO"
     log "  On boot: auto-detects disk, wipes, installs CentOS + Ollama + Open WebUI"
-    PROFILE=desktop cmd_build
-    log "AI appliance ISO ready — boot it, walk away, come back to a working AI box"
+    ISO_NAME_OVERRIDE="bob-${KLDLOAD_VERSION:-1.0.2}-${ARCH}.iso" PROFILE=desktop cmd_build
+    log "Bob ISO ready: $ROOT/live-build/output/bob-${KLDLOAD_VERSION:-1.0.2}-${ARCH}.iso"
     rm -f "$answers_dst"  # clean up so normal builds aren't affected
 }
 
@@ -256,6 +256,7 @@ cmd_build() {
         -e EDITION="$EDITION" \
         -e ARCH="$ARCH" \
         -e RELEASE="$RELEASE" \
+        -e ISO_NAME_OVERRIDE="${ISO_NAME_OVERRIDE:-}" \
         --name "$BUILDER_CONTAINER" \
         "$BUILDER_IMAGE" \
         bash /build/builder/build-iso.sh
@@ -363,9 +364,8 @@ cmd_kvm_deploy() {
 }
 
 cmd_kvm_deploy_bob() {
-    local iso
-    iso="$(latest_iso)"
-    [[ -n "$iso" ]] || die "No ISO found — run build-ai-appliance first"
+    local iso="$ROOT/live-build/output/bob-${KLDLOAD_VERSION:-1.0.2}-${ARCH}.iso"
+    [[ -f "$iso" ]] || die "Bob ISO not found at $iso — run build-ai-appliance first"
 
     cp "$iso" /var/lib/libvirt/images/kldload-bob.iso
     chown qemu:qemu /var/lib/libvirt/images/kldload-bob.iso
