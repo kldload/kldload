@@ -1,5 +1,7 @@
 # kldload
 
+![kldloadOS — AI Assistant](ai-assistant.png)
+
 ![kldloadOS — Arch Linux on ZFS](arch101.png)
 
 **Build once, deploy anywhere. Your AI platform, your way, for free.**
