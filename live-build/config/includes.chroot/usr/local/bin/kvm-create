@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# kvm-create — create a VM on ZFS zvol with sensible defaults
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: kvm-create <name> [options]
+
+Options:
+  --ram    <MB>       RAM in MB (default: 2048)
+  --cpus   <N>        vCPUs (default: 2)
+  --disk   <GB>       Disk size in GB (default: 20)
+  --iso    <path>     Boot ISO (optional)
+  --bridge <name>     Bridge interface (default: br0)
+  --os     <variant>  OS variant for virt-install (default: generic)
+
+Examples:
+  kvm-create myvm
+  kvm-create webserver --ram 4096 --cpus 4 --disk 40
+  kvm-create testbox --iso /tmp/debian.iso --ram 2048
+
+The VM disk is a ZFS zvol at rpool/vms/<name> — thin provisioned,
+compressed, snapshotable. Clone with kvm-clone, snapshot with kvm-snap.
+EOF
+  exit 1
+}
+
+[[ $# -lt 1 ]] && usage
+NAME="$1"; shift
+
+RAM=2048
+CPUS=2
+DISK=20
+ISO=""
+BRIDGE="br0"
+OS_VARIANT="generic"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ram)    RAM="$2"; shift 2 ;;
+    --cpus)   CPUS="$2"; shift 2 ;;
+    --disk)   DISK="$2"; shift 2 ;;
+    --iso)    ISO="$2"; shift 2 ;;
+    --bridge) BRIDGE="$2"; shift 2 ;;
+    --os)     OS_VARIANT="$2"; shift 2 ;;
+    *)        echo "Unknown option: $1"; usage ;;
+  esac
+done
+
+ZVOL="rpool/vms/${NAME}"
+
+# Snapshot before creating (safety net)
+zfs snapshot "rpool/vms@pre-create-${NAME}" 2>/dev/null || true
+
+# Create thin-provisioned zvol
+echo "Creating ZFS zvol: ${ZVOL} (${DISK}G, thin provisioned)..."
+zfs create -V "${DISK}G" -s -o compression=lz4 -o volblocksize=64K "${ZVOL}"
+
+# Build virt-install command
+CMD=(virt-install
+  --name "${NAME}"
+  --ram "${RAM}"
+  --vcpus "${CPUS}"
+  --cpu host-model
+  --machine q35
+  --disk "/dev/zvol/${ZVOL},bus=virtio,cache=none"
+  --network "bridge=${BRIDGE},model=virtio"
+  --graphics vnc,listen=0.0.0.0
+  --os-variant "${OS_VARIANT}"
+  --noautoconsole
+)
+
+if [[ -n "$ISO" ]]; then
+  CMD+=(--cdrom "${ISO}" --boot uefi,cdrom,hd)
+else
+  CMD+=(--boot uefi --import)
+fi
+
+echo "Creating VM: ${NAME} (${RAM}MB RAM, ${CPUS} vCPUs, ${DISK}GB disk)..."
+"${CMD[@]}"
+
+echo ""
+echo "✔ VM '${NAME}' created"
+echo "  Disk:    /dev/zvol/${ZVOL}"
+echo "  Console: virsh console ${NAME}"
+echo "  VNC:     virsh vncdisplay ${NAME}"
+echo "  Snap:    kvm-snap ${NAME}"
+echo "  Clone:   kvm-clone ${NAME} <new-name>"

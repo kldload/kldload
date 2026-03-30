@@ -160,6 +160,14 @@ k_profile_packages() {
       echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables wireguard-tools"
       ;;
 
+    kvm)
+      # KVM Host — hypervisor + ZFS zvols + bridge networking
+      echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
+        wireguard-tools tmux python3 python3-websockets python3-yaml htop btop net-tools ethtool tcpdump \
+        fzf bat eza fd-find ripgrep zoxide podman sanoid ${_fastfetch} \
+        qemu-kvm libvirt-daemon-system libvirt-clients virtinst bridge-utils ovmf dnsmasq-base"
+      ;;
+
     ai)
       # AI learning tool — core + WireGuard + Python + tmux + modern CLI. Ollama on firstboot.
       echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
@@ -194,6 +202,17 @@ k_profile_optional_packages() {
       out+=(zfs-dkms zfs-utils)
     else
       out+=(zfsutils-linux zfs-zed zfs-initramfs zfs-dkms sanoid)
+    fi
+  fi
+
+  # KVM Host (optional checkbox)
+  if [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
+    if [[ "$_distro" == "arch" ]]; then
+      out+=(qemu-full libvirt virt-install bridge-utils edk2-ovmf dnsmasq)
+    elif [[ "$_distro" == "ubuntu" || "$_distro" == "debian" ]]; then
+      out+=(qemu-kvm libvirt-daemon-system libvirt-clients virtinst bridge-utils ovmf cpu-checker dnsmasq-base)
+    else
+      out+=(qemu-kvm libvirt-daemon libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq)
     fi
   fi
 

@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# kvm-snap — ZFS snapshot a VM's zvol
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: kvm-snap <vm-name> [action]
+
+Actions:
+  (none)     Create a timestamped snapshot
+  list       List all snapshots for this VM
+  rollback   Roll back to the most recent snapshot
+  rollback <snap>  Roll back to a specific snapshot
+  delete <snap>    Delete a specific snapshot
+
+Examples:
+  kvm-snap myvm                    # snapshot now
+  kvm-snap myvm list               # list snapshots
+  kvm-snap myvm rollback           # rollback to latest
+  kvm-snap myvm delete @2026-03-30
+EOF
+  exit 1
+}
+
+[[ $# -lt 1 ]] && usage
+NAME="$1"; shift
+ACTION="${1:-snap}"; shift 2>/dev/null || true
+
+ZVOL="rpool/vms/${NAME}"
+
+# Verify zvol exists
+if ! zfs list "${ZVOL}" >/dev/null 2>&1; then
+  echo "Error: VM zvol '${ZVOL}' not found"
+  exit 1
+fi
+
+case "$ACTION" in
+  snap|create)
+    SNAP="${ZVOL}@$(date +%Y-%m-%d_%H%M%S)"
+    # Stop VM briefly for consistent snapshot (optional)
+    STATE=$(virsh domstate "${NAME}" 2>/dev/null || echo "unknown")
+    if [[ "$STATE" == "running" ]]; then
+      echo "Pausing VM for consistent snapshot..."
+      virsh suspend "${NAME}" 2>/dev/null || true
+    fi
+    zfs snapshot "${SNAP}"
+    if [[ "$STATE" == "running" ]]; then
+      virsh resume "${NAME}" 2>/dev/null || true
+    fi
+    echo "✔ Snapshot: ${SNAP}"
+    ;;
+  list|ls)
+    echo "Snapshots for ${NAME}:"
+    zfs list -t snapshot -o name,creation,used -r "${ZVOL}" 2>/dev/null || echo "  (none)"
+    ;;
+  rollback)
+    SNAP="${1:-}"
+    if [[ -z "$SNAP" ]]; then
+      # Get most recent snapshot
+      SNAP=$(zfs list -t snapshot -o name -r "${ZVOL}" -S creation 2>/dev/null | head -2 | tail -1)
+    fi
+    if [[ -z "$SNAP" || "$SNAP" == "NAME" ]]; then
+      echo "No snapshots found for ${NAME}"
+      exit 1
+    fi
+    echo "Rolling back to: ${SNAP}"
+    virsh destroy "${NAME}" 2>/dev/null || true
+    zfs rollback -r "${SNAP}"
+    virsh start "${NAME}" 2>/dev/null || true
+    echo "✔ Rolled back to ${SNAP}"
+    ;;
+  delete|rm)
+    SNAP="${1:?Usage: kvm-snap $NAME delete <snapshot>}"
+    [[ "$SNAP" != *@* ]] && SNAP="${ZVOL}@${SNAP}"
+    zfs destroy "${SNAP}"
+    echo "✔ Deleted: ${SNAP}"
+    ;;
+  *)
+    usage
+    ;;
+esac

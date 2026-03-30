@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# kvm-clone — instant CoW clone of a VM using ZFS
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: kvm-clone <source-vm> <new-name> [--snap <snapshot>]
+
+Creates an instant copy-on-write clone of a VM. Zero bytes copied —
+the clone shares all data with the source until either is modified.
+
+Options:
+  --snap <name>   Clone from a specific snapshot (default: creates one)
+
+Examples:
+  kvm-clone template webserver-01     # snapshot + clone
+  kvm-clone template webserver-02     # another clone, instant
+  kvm-clone myvm test --snap @stable  # clone from named snapshot
+EOF
+  exit 1
+}
+
+[[ $# -lt 2 ]] && usage
+SOURCE="$1"
+DEST="$2"
+shift 2
+
+SNAP_NAME=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --snap) SNAP_NAME="$2"; shift 2 ;;
+    *)      echo "Unknown option: $1"; usage ;;
+  esac
+done
+
+SRC_ZVOL="rpool/vms/${SOURCE}"
+DST_ZVOL="rpool/vms/${DEST}"
+
+# Verify source exists
+if ! zfs list "${SRC_ZVOL}" >/dev/null 2>&1; then
+  echo "Error: Source VM zvol '${SRC_ZVOL}' not found"
+  exit 1
+fi
+
+# Check dest doesn't exist
+if zfs list "${DST_ZVOL}" >/dev/null 2>&1; then
+  echo "Error: Destination '${DST_ZVOL}' already exists"
+  exit 1
+fi
+
+# Create or use snapshot
+if [[ -n "$SNAP_NAME" ]]; then
+  [[ "$SNAP_NAME" != *@* ]] && SNAP_NAME="${SRC_ZVOL}@${SNAP_NAME}"
+  SNAP="${SNAP_NAME}"
+else
+  SNAP="${SRC_ZVOL}@clone-$(date +%Y%m%d_%H%M%S)"
+  # Pause source if running for consistent snapshot
+  STATE=$(virsh domstate "${SOURCE}" 2>/dev/null || echo "unknown")
+  [[ "$STATE" == "running" ]] && virsh suspend "${SOURCE}" 2>/dev/null || true
+  zfs snapshot "${SNAP}"
+  [[ "$STATE" == "running" ]] && virsh resume "${SOURCE}" 2>/dev/null || true
+fi
+
+# Clone the zvol (instant, zero copy)
+echo "Cloning ${SNAP} → ${DST_ZVOL}..."
+zfs clone "${SNAP}" "${DST_ZVOL}"
+
+# Clone the libvirt domain definition
+echo "Cloning VM definition..."
+virt-clone --original "${SOURCE}" --name "${DEST}" \
+  --file "/dev/zvol/${DST_ZVOL}" \
+  --preserve-data --check path_in_use=off 2>/dev/null || {
+  # Fallback: dump XML, sed the name/disk, define
+  virsh dumpxml "${SOURCE}" | \
+    sed "s|<name>${SOURCE}</name>|<name>${DEST}</name>|" | \
+    sed "s|${SRC_ZVOL}|${DST_ZVOL}|g" | \
+    sed '/<uuid>/d' | \
+    sed '/<mac address/d' | \
+    virsh define /dev/stdin
+}
+
+echo ""
+echo "✔ Cloned '${SOURCE}' → '${DEST}' (instant, zero bytes copied)"
+echo "  Source: /dev/zvol/${SRC_ZVOL}"
+echo "  Clone:  /dev/zvol/${DST_ZVOL}"
+echo "  Start:  virsh start ${DEST}"
+echo "  Snap:   kvm-snap ${DEST}"

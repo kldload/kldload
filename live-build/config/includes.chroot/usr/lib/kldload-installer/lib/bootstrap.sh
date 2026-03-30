@@ -197,6 +197,7 @@ KLDLOAD_ENABLE_EBPF=${KLDLOAD_ENABLE_EBPF:-0}
 KLDLOAD_SECURE_BOOT=${KLDLOAD_SECURE_BOOT:-0}
 KLDLOAD_TPM_PRESENT=${KLDLOAD_TPM_PRESENT:-0}
 KLDLOAD_ENABLE_AI=${KLDLOAD_ENABLE_AI:-0}
+KLDLOAD_ENABLE_KVM=${KLDLOAD_ENABLE_KVM:-0}
 EOM
 }
 
@@ -805,6 +806,13 @@ CUSTOMREPO
       ;;
     server)
       _dnf_pkgs+=(tcpdump socat sysstat net-tools podman)
+      ;;
+    kvm)
+      _dnf_pkgs+=(
+        tcpdump socat sysstat net-tools podman
+        qemu-kvm libvirt-daemon libvirt-client virt-install
+        bridge-utils edk2-ovmf dnsmasq
+      )
       ;;
     core)
       # Core: strip extras — no sanoid, no guest agents, no k* tools

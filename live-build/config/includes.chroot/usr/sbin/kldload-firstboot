@@ -1264,6 +1264,68 @@ AIMOTD
       fi
     fi
 
+    # ── KVM Host profile setup ──────────────────────────────────────────────
+    if [[ "$ROLE" == "kvm" || "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
+      log "KVM Host profile — configuring hypervisor..."
+
+      # Create ZFS dataset for VMs — optimized for VM I/O
+      zfs create -o compression=lz4 -o recordsize=64K -o primarycache=metadata rpool/vms 2>/dev/null || true
+      ok "ZFS dataset rpool/vms created (compressed, 64K recordsize)"
+
+      # Configure libvirt to use ZFS
+      mkdir -p /etc/libvirt/storage
+      cat > /tmp/zfs-vms-pool.xml <<'ZFSPOOL'
+<pool type='zfs'>
+  <name>zfs-vms</name>
+  <source>
+    <name>rpool/vms</name>
+  </source>
+</pool>
+ZFSPOOL
+
+      # Enable and start libvirtd
+      systemctl enable libvirtd 2>/dev/null || true
+      systemctl start libvirtd 2>/dev/null || true
+
+      # Define and start the ZFS storage pool
+      virsh pool-define /tmp/zfs-vms-pool.xml 2>/dev/null || true
+      virsh pool-autostart zfs-vms 2>/dev/null || true
+      virsh pool-start zfs-vms 2>/dev/null || true
+      rm -f /tmp/zfs-vms-pool.xml
+      ok "libvirt ZFS storage pool configured"
+
+      # Set up bridge networking
+      local _primary_nic
+      _primary_nic=$(nmcli -t -f DEVICE,TYPE device | grep ':ethernet' | head -1 | cut -d: -f1)
+      if [[ -n "$_primary_nic" && "$_primary_nic" != "br0" ]]; then
+        log "Setting up bridge br0 on ${_primary_nic}..."
+        nmcli connection add type bridge ifname br0 con-name br0 2>/dev/null || true
+        nmcli connection add type bridge-slave ifname "${_primary_nic}" master br0 2>/dev/null || true
+        # Copy IP config from primary NIC to bridge
+        local _ip _gw _dns
+        _ip=$(nmcli -g IP4.ADDRESS device show "${_primary_nic}" 2>/dev/null | head -1)
+        _gw=$(nmcli -g IP4.GATEWAY device show "${_primary_nic}" 2>/dev/null | head -1)
+        _dns=$(nmcli -g IP4.DNS device show "${_primary_nic}" 2>/dev/null | head -1)
+        if [[ -n "$_ip" ]]; then
+          nmcli connection modify br0 ipv4.addresses "${_ip}" ipv4.gateway "${_gw}" ipv4.dns "${_dns}" ipv4.method manual 2>/dev/null || true
+        fi
+        ok "Bridge br0 configured on ${_primary_nic}"
+      fi
+
+      # Enable IP forwarding
+      echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-kvm-forward.conf
+      sysctl -p /etc/sysctl.d/99-kvm-forward.conf 2>/dev/null || true
+
+      # Disable default NAT network (we use bridge)
+      virsh net-destroy default 2>/dev/null || true
+      virsh net-autostart default --disable 2>/dev/null || true
+
+      ok "KVM Host ready — use kvm-create, kvm-snap, kvm-clone"
+      log "  Storage pool: zfs-vms (rpool/vms)"
+      log "  Bridge: br0"
+      log "  Tools: kvm-create, kvm-snap, kvm-clone"
+    fi
+
     # Remove darksite APT mirror (~1.8G) — not needed after install
     if [[ -d /root/darksite ]]; then
       log "Removing darksite directory (~1.8G)..."
