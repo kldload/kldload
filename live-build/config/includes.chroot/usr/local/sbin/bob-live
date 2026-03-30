@@ -22,20 +22,55 @@ for _pkg in zstd curl podman; do
   command -v "$_pkg" >/dev/null 2>&1 || { log "Installing $_pkg..."; dnf install -y "$_pkg" >> "$LOG" 2>&1 || true; }
 done
 
+# ── Expand live overlay if possible ───────────────────────────────────────────
+# Live rootfs is small (~3GB). Mount a tmpdir on the real disk for big downloads.
+_workspace=""
+for _dev in /dev/vda /dev/sda /dev/nvme0n1; do
+  [[ -b "$_dev" ]] || continue
+  # Only use if disk has no partitions (empty disk, safe for temp use)
+  if [[ $(lsblk -n -o TYPE "$_dev" 2>/dev/null | head -1) == "disk" ]]; then
+    mkdir -p /var/tmp/bob-workspace
+    # Use tmpfs backed by available RAM instead of writing to disk
+    mount -t tmpfs -o size=8G tmpfs /var/tmp/bob-workspace 2>/dev/null && {
+      _workspace=/var/tmp/bob-workspace
+      log "Workspace mounted: 8GB tmpfs at $_workspace"
+    } || true
+    break
+  fi
+done
+
 # ── Install Ollama ────────────────────────────────────────────────────────────
 log "Installing Ollama..."
 _status "Installing Ollama..."
 if ! command -v ollama >/dev/null 2>&1; then
-  curl -fsSL --connect-timeout 30 https://ollama.com/install.sh | sh >> "$LOG" 2>&1
+  # Install to workspace if available (live rootfs is too small for CUDA)
+  if [[ -n "$_workspace" ]]; then
+    OLLAMA_INSTALL_DIR="$_workspace/ollama" curl -fsSL --connect-timeout 30 https://ollama.com/install.sh | sh >> "$LOG" 2>&1 || {
+      # Fallback: CPU-only install to /usr/local
+      log "Full install failed — trying CPU-only..."
+      curl -fsSL --connect-timeout 30 https://ollama.com/install.sh | OLLAMA_NO_CUDA=1 sh >> "$LOG" 2>&1
+    }
+  else
+    curl -fsSL --connect-timeout 30 https://ollama.com/install.sh | sh >> "$LOG" 2>&1
+  fi
 fi
 ok "Ollama installed"
 
-# Configure Ollama
+# Configure Ollama — store models in workspace if available
 mkdir -p /etc/systemd/system/ollama.service.d
-cat > /etc/systemd/system/ollama.service.d/override.conf <<'OLLAMA'
+if [[ -n "$_workspace" ]]; then
+  mkdir -p "$_workspace/models"
+  cat > /etc/systemd/system/ollama.service.d/override.conf <<OLLAMA
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+Environment="OLLAMA_MODELS=${_workspace}/models"
+OLLAMA
+else
+  cat > /etc/systemd/system/ollama.service.d/override.conf <<'OLLAMA'
 [Service]
 Environment="OLLAMA_HOST=0.0.0.0:11434"
 OLLAMA
+fi
 systemctl daemon-reload
 systemctl enable --now ollama
 
