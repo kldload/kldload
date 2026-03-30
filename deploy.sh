@@ -203,7 +203,7 @@ cmd_build_ai_appliance() {
     cp "$answers_src" "$answers_dst"
     log "AI appliance mode: baked autoinstall.env into ISO"
     log "  On boot: auto-detects disk, wipes, installs CentOS + Ollama + Open WebUI"
-    PROFILE=server cmd_build
+    PROFILE=desktop cmd_build
     log "AI appliance ISO ready — boot it, walk away, come back to a working AI box"
     rm -f "$answers_dst"  # clean up so normal builds aren't affected
 }
