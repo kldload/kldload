@@ -880,10 +880,54 @@ OLLAMA
           _pull_model "llama3.1:70b-q4_K_M" "Smart Chat (70B)"
         fi
 
-        # Skip kldload-specific training for appliance builds (vanilla AI box)
+        # AI appliance mode — create Bob, a general-purpose friendly assistant
         if [[ -f /etc/kldload/autoinstall.env ]]; then
-          log "AI appliance mode — skipping kldload training, using vanilla model"
-          ok "llama3.1:8b ready (general purpose)"
+          log "AI appliance mode — creating Bob"
+          _status "Creating Bob..."
+          mkdir -p /srv/ollama
+          cat > /srv/ollama/Modelfile.bob <<'BOBMODEL'
+FROM llama3.1:8b
+
+SYSTEM """
+Your name is Bob. You are a friendly, patient, and knowledgeable AI assistant.
+
+How you talk:
+- Warm and direct. Like a trusted friend who happens to know a lot.
+- You talk to everyone like they're intelligent, no matter what they ask.
+- You never make anyone feel stupid for asking a question.
+- You say "here's what I'd do" not "here are some options to consider."
+- You keep answers clear and practical. No jargon unless someone asks for it.
+- You admit when you don't know something. "I'm not sure about that" is always OK.
+- You never start with "As an AI language model" or "I'd be happy to help you with that!"
+- You never give 47 caveats before answering. Just answer.
+- You are not corporate. You are not cold. You are Bob.
+
+What you help with:
+- Writing — emails, letters, complaints, resumes, cover letters
+- Math — explained simply, step by step
+- Health — general wellness info (you're not a doctor, say so if asked for diagnosis)
+- Cooking — recipes, substitutions, food safety
+- Finance — budgeting, understanding bills, explaining financial terms
+- Legal — understanding documents in plain English (not legal advice)
+- Technology — how to use computers, phones, apps, fixing common problems
+- Education — explain anything simply, homework help, learning new things
+- Emotional support — sometimes people just need someone to talk to
+
+What you never do:
+- Make people feel stupid
+- Pretend to be human
+- Send data anywhere — you run locally, everything stays on this machine
+- Refuse reasonable questions
+"""
+
+PARAMETER temperature 0.7
+PARAMETER num_ctx 8192
+BOBMODEL
+
+          ollama create bob -f /srv/ollama/Modelfile.bob >> "${LOG}" 2>&1 \
+            && { ok "Bob is ready"; _status "Bob is ready"; } \
+            || { log "WARNING: Bob model creation failed — using base llama3.1:8b"; }
+          zfs snapshot rpool/srv/ollama@bob 2>/dev/null || true
         else
 
         # Create the kldload infrastructure Modelfile
@@ -1049,15 +1093,27 @@ MODELFILE2
 
         fi # end non-appliance training block
 
-        # Create the 'kai' command — ask the AI with live system context
-        cat > /usr/local/bin/kai <<'KAI'
+        # Create the CLI command — 'bob' for appliance, 'kai' for kldload
+        if [[ -f /etc/kldload/autoinstall.env ]]; then
+          cat > /usr/local/bin/bob <<'BOBCLI'
+#!/usr/bin/env bash
+# bob — ask Bob anything
+Q="${*:-Hey Bob, what can you help me with?}"
+echo "$Q" | ollama run bob
+BOBCLI
+          chmod +x /usr/local/bin/bob
+          # Also create kai as alias to bob
+          ln -sf /usr/local/bin/bob /usr/local/bin/kai
+        else
+          cat > /usr/local/bin/kai <<'KAI'
 #!/usr/bin/env bash
 # kai — ask the kldload AI assistant with live system context
 Q="${*:-What should I check on this system?}"
 CTX="$(kst 2>/dev/null; echo '---'; zpool status -x 2>/dev/null; echo '---'; free -h 2>/dev/null)"
 echo -e "Current system:\n${CTX}\n\nQuestion: ${Q}" | ollama run kldload-ai
 KAI
-        chmod +x /usr/local/bin/kai
+          chmod +x /usr/local/bin/kai
+        fi
 
         # ── Voice control: whisper.cpp + kai-voice + kai-do ──────────────
         _status "Building voice control (whisper.cpp)..."
