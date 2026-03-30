@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# bob-live — live boot AI assistant setup
-# Installs Ollama, auto-detects hardware, pulls the right model, creates Bob,
-# starts Open WebUI, opens Firefox. Runs entirely from RAM + USB.
+# bob-live — start the pre-baked Bob AI assistant on live boot
+# Everything is already in the image: Ollama, llama3.1:8b, Bob model, Open WebUI.
+# This script just starts the services and opens Firefox when ready.
 set -euo pipefail
 
 LOG=/var/log/bob-live.log
@@ -17,229 +17,49 @@ _status() {
 
 _status "Starting Bob..."
 
-# ── Prerequisites ─────────────────────────────────────────────────────────────
-for _pkg in zstd curl podman; do
-  command -v "$_pkg" >/dev/null 2>&1 || { log "Installing $_pkg..."; dnf install -y "$_pkg" >> "$LOG" 2>&1 || true; }
-done
-
-# ── Expand live overlay if possible ───────────────────────────────────────────
-# Live rootfs is small (~3GB). Mount a tmpdir on the real disk for big downloads.
-_workspace=""
-for _dev in /dev/vda /dev/sda /dev/nvme0n1; do
-  [[ -b "$_dev" ]] || continue
-  # Only use if disk has no partitions (empty disk, safe for temp use)
-  if [[ $(lsblk -n -o TYPE "$_dev" 2>/dev/null | head -1) == "disk" ]]; then
-    mkdir -p /var/tmp/bob-workspace
-    # Use tmpfs backed by available RAM instead of writing to disk
-    mount -t tmpfs -o size=8G tmpfs /var/tmp/bob-workspace 2>/dev/null && {
-      _workspace=/var/tmp/bob-workspace
-      log "Workspace mounted: 8GB tmpfs at $_workspace"
-    } || true
-    break
-  fi
-done
-
-# ── Install Ollama ────────────────────────────────────────────────────────────
-log "Installing Ollama..."
-_status "Installing Ollama..."
-if ! command -v ollama >/dev/null 2>&1; then
-  if [[ -n "$_workspace" ]]; then
-    mkdir -p "$_workspace/models"
-    # Download just the ollama binary — skip the full install script which
-    # extracts ~2GB of CUDA libs that fill the live rootfs
-    log "Downloading Ollama binary..."
-    curl -fL -o /usr/local/bin/ollama "https://ollama.com/download/ollama-linux-amd64" >> "$LOG" 2>&1
-    chmod +x /usr/local/bin/ollama
-    # Create ollama user + systemd service
-    useradd -r -s /bin/false -U -m -d /usr/share/ollama ollama 2>/dev/null || true
-    cat > /etc/systemd/system/ollama.service <<'OSERVICE'
-[Unit]
-Description=Ollama Service
-After=network-online.target
-
-[Service]
-ExecStart=/usr/local/bin/ollama serve
-User=ollama
-Group=ollama
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=default.target
-OSERVICE
-  else
-    curl -fsSL --connect-timeout 30 https://ollama.com/install.sh | sh >> "$LOG" 2>&1
-  fi
-fi
-ok "Ollama installed"
-
-# Configure Ollama — store models in workspace if available
-mkdir -p /etc/systemd/system/ollama.service.d
-if [[ -n "$_workspace" ]]; then
-  cat > /etc/systemd/system/ollama.service.d/override.conf <<OLLAMA
-[Service]
-Environment="OLLAMA_HOST=0.0.0.0:11434"
-Environment="OLLAMA_MODELS=${_workspace}/models"
-OLLAMA
-else
-  cat > /etc/systemd/system/ollama.service.d/override.conf <<'OLLAMA'
-[Service]
-Environment="OLLAMA_HOST=0.0.0.0:11434"
-OLLAMA
-fi
-systemctl daemon-reload
-systemctl enable --now ollama
-
-# Wait for Ollama API
+# ── Start Ollama ──────────────────────────────────────────────────────────────
+systemctl start ollama
 log "Waiting for Ollama..."
-for _try in $(seq 1 12); do
+for _try in $(seq 1 30); do
   curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && break
-  sleep 5
+  sleep 2
 done
-ok "Ollama API ready"
+ok "Ollama ready"
 
-# ── Auto-detect hardware ─────────────────────────────────────────────────────
-_total_ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
-_has_nvidia=0
-lspci 2>/dev/null | grep -qi nvidia && _has_nvidia=1
-_has_amd=0
-lspci 2>/dev/null | grep -qi 'amd.*radeon\|radeon.*amd\|amd.*navi\|amd.*vega' && _has_amd=1
-
-log "Hardware: ${_total_ram_gb}GB RAM, NVIDIA=${_has_nvidia}, AMD=${_has_amd}"
-
-# ── NVIDIA drivers if detected ───────────────────────────────────────────────
-if [[ "$_has_nvidia" -eq 1 ]]; then
-  _status "Installing NVIDIA drivers..."
-  cat > /etc/yum.repos.d/cuda.repo <<'CUDAREPO'
-[cuda-rhel9]
-name=NVIDIA CUDA for RHEL 9
-baseurl=https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/
-enabled=1
-gpgcheck=0
-CUDAREPO
-  dnf install -y --skip-broken nvidia-driver nvidia-driver-libs nvidia-driver-cuda >> "$LOG" 2>&1 \
-    && ok "NVIDIA drivers installed" \
-    || log "WARNING: NVIDIA driver install had issues"
-  systemctl restart ollama
-  sleep 3
-fi
-
-# ── Pick best model for this hardware ────────────────────────────────────────
-_bob_base="llama3.1:8b"
-if [[ "$_total_ram_gb" -ge 64 ]]; then
-  _bob_base="llama3.1:70b-q4_K_M"
-  _status "Downloading AI model (70B — ${_total_ram_gb}GB RAM detected)..."
-elif [[ "$_total_ram_gb" -ge 16 ]]; then
-  _bob_base="llama3.1:8b"
-  _status "Downloading AI model (~4.9 GB)..."
-else
-  _bob_base="llama3.2:3b"
-  _status "Downloading AI model (3B — ${_total_ram_gb}GB RAM)..."
-fi
-
-log "Selected model: ${_bob_base}"
-
-# Pull with retry
-_pull_ok=0
-for _attempt in 1 2 3; do
-  if ollama pull "$_bob_base" >> "$LOG" 2>&1; then
-    _pull_ok=1
-    ok "${_bob_base} downloaded (attempt ${_attempt})"
-    break
-  fi
-  log "Pull attempt ${_attempt}/3 failed — retrying in 10s..."
-  sleep 10
-done
-[[ "$_pull_ok" -eq 0 ]] && log "WARNING: model pull failed — run 'ollama pull ${_bob_base}' manually"
-
-# ── Create Bob ───────────────────────────────────────────────────────────────
-_status "Creating Bob..."
-cat > /tmp/Modelfile.bob <<BOBMODEL
-FROM ${_bob_base}
-
-SYSTEM """
-Your name is Bob. You are a friendly, patient, and knowledgeable AI assistant.
-
-How you talk:
-- Warm and direct. Like a trusted friend who happens to know a lot.
-- You talk to everyone like they're intelligent, no matter what they ask.
-- You never make anyone feel stupid for asking a question.
-- You say "here's what I'd do" not "here are some options to consider."
-- You keep answers clear and practical. No jargon unless someone asks for it.
-- You admit when you don't know something. "I'm not sure about that" is always OK.
-- You never start with "As an AI language model" or "I'd be happy to help you with that!"
-- You never give 47 caveats before answering. Just answer.
-- You are not corporate. You are not cold. You are Bob.
-
-What you help with:
-- Writing — emails, letters, complaints, resumes, cover letters
-- Math — explained simply, step by step
-- Health — general wellness info (you're not a doctor, say so if asked for diagnosis)
-- Cooking — recipes, substitutions, food safety
-- Finance — budgeting, understanding bills, explaining financial terms
-- Legal — understanding documents in plain English (not legal advice)
-- Technology — how to use computers, phones, apps, fixing common problems
-- Education — explain anything simply, homework help, learning new things
-- Emotional support — sometimes people just need someone to talk to
-
-What you never do:
-- Make people feel stupid
-- Pretend to be human
-- Send data anywhere — you run locally, everything stays on this machine
-- Refuse reasonable questions
-"""
-
-PARAMETER temperature 0.7
-PARAMETER num_ctx 8192
-BOBMODEL
-
-ollama create bob -f /tmp/Modelfile.bob >> "$LOG" 2>&1 \
-  && ok "Bob is ready" \
-  || log "WARNING: Bob model creation failed — using base model"
-
-# ── Start Open WebUI ─────────────────────────────────────────────────────────
+# ── Start Open WebUI ──────────────────────────────────────────────────────────
 _status "Starting Open WebUI..."
-if command -v podman >/dev/null 2>&1; then
-  _crt=podman
-elif command -v docker >/dev/null 2>&1; then
-  _crt=docker
-else
-  log "WARNING: No container runtime — installing podman..."
-  dnf install -y podman >> "$LOG" 2>&1 || true
-  _crt=podman
-fi
-
-$_crt pull ghcr.io/open-webui/open-webui:main >> "$LOG" 2>&1 && {
-  $_crt run -d \
-    --name open-webui \
-    --network host \
+if command -v open-webui >/dev/null 2>&1; then
+  # Installed via pip — run directly
+  open-webui serve --host 0.0.0.0 --port 8080 >> "$LOG" 2>&1 &
+  log "Open WebUI started (pip)"
+elif command -v podman >/dev/null 2>&1; then
+  # Fallback: podman container
+  podman run -d --name open-webui --network host \
     -v open-webui:/app/backend/data \
     -e OLLAMA_BASE_URL=http://127.0.0.1:11434 \
     --restart always \
     ghcr.io/open-webui/open-webui:main >> "$LOG" 2>&1 \
-    && ok "Open WebUI running on port 8080" \
-    || log "WARNING: Open WebUI container failed to start"
-} || log "WARNING: Open WebUI pull failed"
+    && log "Open WebUI started (podman)" \
+    || log "WARNING: Open WebUI container failed"
+else
+  log "WARNING: No Open WebUI available"
+fi
 
-# ── Create 'bob' CLI command ─────────────────────────────────────────────────
-cat > /usr/local/bin/bob <<'BOBCLI'
-#!/usr/bin/env bash
-Q="${*:-Hey Bob, what can you help me with?}"
-echo "$Q" | ollama run bob
-BOBCLI
-chmod +x /usr/local/bin/bob
-
-# ── Wait for Open WebUI to be ready, then open Firefox ───────────────────────
-_status "Bob is ready — opening browser..."
+# ── Wait for Open WebUI, then open Firefox ────────────────────────────────────
+_status "Bob is starting up..."
 log "Waiting for Open WebUI on port 8080..."
 for _i in $(seq 1 120); do
   curl -sf http://localhost:8080 >/dev/null 2>&1 && break
   sleep 2
 done
 
+_status "Bob is ready"
+ok "Bob is live at http://localhost:8080"
+
 # Open Firefox for any logged-in desktop user
 (
   set +e
+  sleep 3
   for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
     _user=$(id -nu "$_uid" 2>/dev/null) || continue
     sudo -u "$_user" \
@@ -250,6 +70,4 @@ done
   done
 ) 2>/dev/null
 
-_status "Bob is ready"
-ok "Bob is live at http://localhost:8080"
 log "CLI: bob 'your question'"

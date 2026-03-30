@@ -708,7 +708,113 @@ if [[ "${BOB_LIVE:-}" == "1" ]]; then
         "${ROOTFS}/etc/systemd/system/multi-user.target.wants/bob-live.service"
     # Disable the kldload installer webui — Bob replaces it
     rm -f "${ROOTFS}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" 2>/dev/null || true
-    log "Bob live mode enabled — AI assistant starts on boot"
+
+    # ── Pre-bake Ollama + model + Open WebUI into the image ──────────────
+    log "Bob: downloading Ollama binary..."
+    curl -fL -o "${ROOTFS}/usr/local/bin/ollama" "https://ollama.com/download/ollama-linux-amd64"
+    chmod +x "${ROOTFS}/usr/local/bin/ollama"
+
+    # Create ollama user + service in rootfs
+    chroot "${ROOTFS}" useradd -r -s /bin/false -U -m -d /usr/share/ollama ollama 2>/dev/null || true
+    cat > "${ROOTFS}/etc/systemd/system/ollama.service" <<'OSERVICE'
+[Unit]
+Description=Ollama Service
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/ollama serve
+User=ollama
+Group=ollama
+Restart=always
+RestartSec=3
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+
+[Install]
+WantedBy=default.target
+OSERVICE
+    ln -sf "/etc/systemd/system/ollama.service" \
+        "${ROOTFS}/etc/systemd/system/multi-user.target.wants/ollama.service"
+
+    # Pull the model at build time — run ollama temporarily
+    log "Bob: pulling llama3.1:8b model (this takes a few minutes)..."
+    mkdir -p "${ROOTFS}/usr/share/ollama/.ollama/models"
+    export OLLAMA_MODELS="${ROOTFS}/usr/share/ollama/.ollama/models"
+    "${ROOTFS}/usr/local/bin/ollama" serve &
+    _ollama_pid=$!
+    sleep 3
+    # Wait for API
+    for _try in $(seq 1 20); do
+        curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && break
+        sleep 2
+    done
+    "${ROOTFS}/usr/local/bin/ollama" pull llama3.1:8b
+    log "Bob: model pulled, creating Bob personality..."
+
+    # Create Bob modelfile and build it
+    cat > /tmp/Modelfile.bob <<'BOBMODEL'
+FROM llama3.1:8b
+
+SYSTEM """
+Your name is Bob. You are a friendly, patient, and knowledgeable AI assistant.
+
+How you talk:
+- Warm and direct. Like a trusted friend who happens to know a lot.
+- You talk to everyone like they're intelligent, no matter what they ask.
+- You never make anyone feel stupid for asking a question.
+- You say "here's what I'd do" not "here are some options to consider."
+- You keep answers clear and practical. No jargon unless someone asks for it.
+- You admit when you don't know something. "I'm not sure about that" is always OK.
+- You never start with "As an AI language model" or "I'd be happy to help you with that!"
+- You never give 47 caveats before answering. Just answer.
+- You are not corporate. You are not cold. You are Bob.
+
+What you help with:
+- Writing — emails, letters, complaints, resumes, cover letters
+- Math — explained simply, step by step
+- Health — general wellness info (you're not a doctor, say so if asked for diagnosis)
+- Cooking — recipes, substitutions, food safety
+- Finance — budgeting, understanding bills, explaining financial terms
+- Legal — understanding documents in plain English (not legal advice)
+- Technology — how to use computers, phones, apps, fixing common problems
+- Education — explain anything simply, homework help, learning new things
+- Emotional support — sometimes people just need someone to talk to
+
+What you never do:
+- Make people feel stupid
+- Pretend to be human
+- Send data anywhere — you run locally, everything stays on this machine
+- Refuse reasonable questions
+"""
+
+PARAMETER temperature 0.7
+PARAMETER num_ctx 8192
+BOBMODEL
+
+    "${ROOTFS}/usr/local/bin/ollama" create bob -f /tmp/Modelfile.bob
+    log "Bob: model created"
+
+    # Stop the temporary ollama
+    kill $_ollama_pid 2>/dev/null; wait $_ollama_pid 2>/dev/null || true
+    unset OLLAMA_MODELS
+
+    # Fix ownership
+    chroot "${ROOTFS}" chown -R ollama:ollama /usr/share/ollama 2>/dev/null || true
+
+    # Install Open WebUI via pip (no container runtime needed)
+    log "Bob: installing Open WebUI..."
+    chroot "${ROOTFS}" pip3 install --quiet open-webui 2>&1 | tail -5 || {
+        log "Bob: pip install open-webui failed — will use podman on boot"
+    }
+
+    # Create bob CLI command
+    cat > "${ROOTFS}/usr/local/bin/bob" <<'BOBCLI'
+#!/usr/bin/env bash
+Q="${*:-Hey Bob, what can you help me with?}"
+echo "$Q" | ollama run bob
+BOBCLI
+    chmod +x "${ROOTFS}/usr/local/bin/bob"
+
+    log "Bob live mode enabled — Ollama + model + Bob baked into image"
 fi
 
 # ── Autoinstall service + baked-in answers (AI appliance, seed-disk boot) ─────
