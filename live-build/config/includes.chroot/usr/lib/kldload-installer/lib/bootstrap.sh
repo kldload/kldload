@@ -383,6 +383,9 @@ k_bootstrap_base() {
     arch)
       _k_bootstrap_pacman
       ;;
+    alpine)
+      _k_bootstrap_apk
+      ;;
     *)
       k_die "Unsupported distro: $distro"
       ;;
@@ -581,10 +584,10 @@ RHELREPO
         # Fall back to subscription-manager in the chroot
         k_log_to "$log" "WARNING: No entitlement certs found — falling back to chroot sub-man"
         mkdir -p "${target}/proc" "${target}/sys" "${target}/dev" "${target}/dev/pts" "${target}/run"
-        mount -t proc proc "${target}/proc" 2>/dev/null || true
-        mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
-        mount --bind /dev "${target}/dev" 2>/dev/null || true
-        mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
+        mountpoint -q "${target}/proc" || mount -t proc proc "${target}/proc" 2>/dev/null || true
+        mountpoint -q "${target}/sys" || mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
+        mountpoint -q "${target}/dev" || mount --bind /dev "${target}/dev" 2>/dev/null || true
+        mountpoint -q "${target}/dev/pts" || mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
         mkdir -p "${target}/etc/yum.repos.d"
         # Install sub-man into the installroot via CentOS, then swap to RHEL
         cat > "${target}/etc/yum.repos.d/centos-tmp.repo" <<CTMP
@@ -700,11 +703,11 @@ ZFSREPO
 
   # Mount chroot filesystems BEFORE dnf so postinst scripts (grub, dracut) work
   mkdir -p "${target}/proc" "${target}/sys" "${target}/dev" "${target}/dev/pts" "${target}/run"
-  mount -t proc proc "${target}/proc" 2>/dev/null || true
-  mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
-  mount --bind /dev "${target}/dev" 2>/dev/null || true
-  mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
-  mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
+  mountpoint -q "${target}/proc" || mount -t proc proc "${target}/proc" 2>/dev/null || true
+  mountpoint -q "${target}/sys" || mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
+  mountpoint -q "${target}/dev" || mount --bind /dev "${target}/dev" 2>/dev/null || true
+  mountpoint -q "${target}/dev/pts" || mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
+  mountpoint -q "${target}/run" || mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
 
   # Ensure key directories exist in the installroot BEFORE dnf runs
   mkdir -p "${target}/etc" "${target}/var/cache/dnf" "${target}/var/lib/dnf" \
@@ -727,34 +730,24 @@ ZFSREPO
   if [[ "${KLDLOAD_DISTRO:-centos}" == "fedora" ]]; then
     _darksite_rpm="/root/darksite/fedora/rpm"
   fi
-  local _darksite_mode="${KLDLOAD_DARKSITE_MODE:-0}"
   local _custom_repo="${KLDLOAD_CUSTOM_REPO:-}"
 
-  if [[ "$_darksite_mode" == "1" && -d "${_darksite_rpm}/repodata" ]]; then
-    # Darksite mode: disable ALL internet repos, use only local mirror
-    k_log_to "$log" "DARKSITE MODE: using only local RPM mirror (no internet)"
-    rm -f "${target}"/etc/yum.repos.d/*.repo 2>/dev/null || true
-    cat > "${target}/etc/yum.repos.d/kldload-darksite.repo" <<DSREPO
-[kldload-darksite]
-name=kldload offline RPM mirror
-baseurl=file://${_darksite_rpm}/
-enabled=1
-gpgcheck=0
-DSREPO
-  elif [[ -d "${_darksite_rpm}/repodata" ]]; then
-    # RHEL: do NOT use the CentOS darksite — packages conflict (centos-logos etc.)
-    # CentOS/Rocky: use darksite as supplement
+  if [[ -d "${_darksite_rpm}/repodata" ]]; then
     if [[ "${KLDLOAD_DISTRO:-centos}" == "rhel" ]]; then
-      k_log_to "$log" "RHEL install — skipping CentOS darksite (using Red Hat CDN only)"
+      # RHEL: do NOT use the CentOS darksite — packages conflict (centos-logos etc.)
+      # RHEL requires Red Hat CDN repos
+      k_log_to "$log" "RHEL install — skipping darksite (using Red Hat CDN only)"
     else
-      k_log_to "$log" "Using local RPM darksite + internet repos"
+      # Darksite available: add as high-priority repo, keep internet repos as fallback
+      # cost=1 means dnf prefers darksite packages but falls back to internet if needed
+      k_log_to "$log" "Darksite detected — adding local RPM mirror (internet fallback available)"
       cat > "${target}/etc/yum.repos.d/kldload-darksite.repo" <<DSREPO
 [kldload-darksite]
 name=kldload offline RPM mirror
 baseurl=file://${_darksite_rpm}/
 enabled=1
 gpgcheck=0
-cost=500
+cost=1
 DSREPO
     fi
   fi
@@ -1065,17 +1058,9 @@ _k_bootstrap_pacman() {
   local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
 
   k_log_to "$log" "Bootstrapping Arch Linux -> ${target}"
+  k_log_to "$log" "Arch installs require internet — no darksite available"
 
-  # ── Detect darksite or internet ───────────────────────────────────────────
-  local darksite=""
-  if darksite="$(k_detect_arch_darksite 2>/dev/null)"; then
-    k_log_to "$log" "Using local darksite pacman cache: ${darksite}"
-  else
-    darksite=""
-    k_log_to "$log" "No darksite found — Arch install will use internet mirrors"
-  fi
-
-  # ── Set up pacman.conf for the bootstrap ──────────────────────────────────
+  # ── Set up pacman.conf (internet mirrors + archzfs) ──────────────────────
   local pacman_conf="/tmp/kldload-pacman.conf"
   cat > "${pacman_conf}" <<'PACCONF'
 [options]
@@ -1092,24 +1077,11 @@ Include = /etc/pacman.d/mirrorlist
 
 [multilib]
 Include = /etc/pacman.d/mirrorlist
-PACCONF
-
-  # Add archzfs repo for ZFS packages
-  cat >> "${pacman_conf}" <<'ARCHZFS'
 
 [archzfs]
 Server = https://archzfs.com/$repo/$arch
 SigLevel = Never
-ARCHZFS
-
-  # ── If darksite, set CacheDir so pacman uses cached packages ─────────────
-  # No custom repo — just point pacman's cache at the darksite packages.
-  # Pacman checks the cache before downloading, so pre-cached packages install offline.
-  if [[ -n "$darksite" ]]; then
-    sed -i "s|^#CacheDir.*|CacheDir = ${darksite}/pkg/|" "${pacman_conf}" 2>/dev/null || \
-      sed -i "/^\[options\]/a CacheDir = ${darksite}/pkg/" "${pacman_conf}"
-    k_log_to "$log" "Darksite CacheDir set: ${darksite}/pkg/"
-  fi
+PACCONF
 
   # ── Bootstrap with pacstrap (or manual pacman --root) ────────────────────
   # pacstrap is part of arch-install-scripts. On the CentOS live ISO we don't
@@ -1118,22 +1090,13 @@ ARCHZFS
            "${target}/etc" "${target}/var/log" "${target}/dev" \
            "${target}/proc" "${target}/sys" "${target}/run" "${target}/tmp"
 
-  # Copy darksite packages into the target cache for offline use
-  if [[ -n "$darksite" ]]; then
-    cp "${darksite}/pkg/"*.pkg.tar.* "${target}/var/cache/pacman/pkg/" 2>/dev/null || true
-    # Copy sync databases
-    mkdir -p "${target}/var/lib/pacman/sync"
-    cp "${darksite}/db/"*.db "${target}/var/lib/pacman/sync/" 2>/dev/null || true
-    k_log_to "$log" "Darksite packages cached in target"
-  fi
-
   # Mount chroot filesystems
-  mount --bind /dev "${target}/dev" 2>/dev/null || true
+  mountpoint -q "${target}/dev" || mount --bind /dev "${target}/dev" 2>/dev/null || true
   mkdir -p "${target}/dev/pts"
-  mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
-  mount -t proc proc "${target}/proc" 2>/dev/null || true
-  mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
-  mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
+  mountpoint -q "${target}/dev/pts" || mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
+  mountpoint -q "${target}/proc" || mount -t proc proc "${target}/proc" 2>/dev/null || true
+  mountpoint -q "${target}/sys" || mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
+  mountpoint -q "${target}/run" || mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
 
   # DNS for package downloads
   rm -f "${target}/etc/resolv.conf" 2>/dev/null || true
@@ -1155,9 +1118,10 @@ MIRRORS
   k_log_to "$log" "Initializing pacman database in target..."
 
   # Use pacman with --root to bootstrap (since we don't have pacstrap on CentOS)
-  # First sync the databases
+  # Sync package databases — in darksite mode this reads from local file:// repos
+  # (no internet access), in internet mode from live mirrors
   pacman --root "${target}" --config "${pacman_conf}" -Sy --noconfirm >> "$log" 2>&1 || {
-    k_log_to "$log" "WARNING: pacman -Sy failed — trying with individual repos"
+    k_log_to "$log" "WARNING: pacman -Sy failed"
   }
 
   # Determine the kernel version archzfs supports (AFTER database sync)
@@ -1170,18 +1134,7 @@ MIRRORS
     _zfs_kernel_ver=$(echo "$_zfs_si_output" | grep -oP 'linux=\K[0-9][^\s]*' | head -1 || echo "")
     k_log_to "$log" "pacman -Si zfs-linux output: $(echo "$_zfs_si_output" | grep 'Depends On')"
   fi
-  # Fallback: check darksite for a zfs-linux package filename
-  if [[ -z "$_zfs_kernel_ver" && -n "$darksite" ]]; then
-    local _cached_zfs
-    _cached_zfs=$(ls "${darksite}/pkg/"zfs-linux-*.pkg.tar.* 2>/dev/null | grep -v '\.sig$' | head -1 || echo "")
-    if [[ -n "$_cached_zfs" ]]; then
-      # zfs-linux-2.3.3_6.12.8.arch1.1-1-x86_64.pkg.tar.zst → extract kernel part
-      # Format: zfs-linux-<zfs_ver>_<kernel_ver>-<pkgrel>-<arch>.pkg.tar.zst
-      _zfs_kernel_ver=$(basename "$_cached_zfs" | sed 's/^zfs-linux-[^_]*_//' | sed 's/-[0-9]*-x86_64.*//' | tr '_' '-' || echo "")
-      [[ -n "$_zfs_kernel_ver" ]] && \
-        k_log_to "$log" "Detected zfs-linux kernel version from darksite: ${_zfs_kernel_ver}"
-    fi
-  fi
+  # No darksite fallback needed — Arch uses internet only
   if [[ -n "$_zfs_kernel_ver" ]]; then
     k_log_to "$log" "archzfs requires linux=${_zfs_kernel_ver} — pinning kernel"
   else
@@ -1189,10 +1142,11 @@ MIRRORS
   fi
 
   # Base packages for initial bootstrap
-  # Pin kernel to the version archzfs supports — download from Arch Linux Archive
+  # Pin kernel to the version archzfs supports
   local _linux_pkg="linux"
   local _linux_headers_pkg="linux-headers"
   if [[ -n "${_zfs_kernel_ver:-}" ]]; then
+    # Download pinned kernel from Arch Linux Archive
     local _archive_url="https://archive.archlinux.org/packages"
     local _kpkg="${_archive_url}/l/linux/linux-${_zfs_kernel_ver}-x86_64.pkg.tar.zst"
     local _hpkg="${_archive_url}/l/linux-headers/linux-headers-${_zfs_kernel_ver}-x86_64.pkg.tar.zst"
@@ -1225,9 +1179,10 @@ MIRRORS
     k_log_to "$log" "WARNING: Some base packages failed — continuing"
   }
 
-  # Install kernel — pinned from archive or latest from repos
-  if [[ "${_linux_pkg}" == "${target}/"* ]]; then
-    k_log_to "$log" "Installing pinned kernel from archive..."
+  # Install kernel — pinned from darksite/archive or latest from repos
+  if [[ "${_linux_pkg}" == /* ]]; then
+    # _linux_pkg is a file path (darksite or archive download) — install directly
+    k_log_to "$log" "Installing pinned kernel via pacman -U: ${_linux_pkg}"
     pacman --root "${target}" --config "${pacman_conf}" \
       --noconfirm -U "${_linux_pkg}" "${_linux_headers_pkg}" >> "$log" 2>&1 || {
       k_log_to "$log" "WARNING: Pinned kernel install failed — trying latest"
@@ -1274,51 +1229,85 @@ MIRRORS
       sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block zfs filesystems fsck)/' \
         "${target}/etc/mkinitcpio.conf"
       # Force zfs module into MODULES array — belt-and-suspenders
-      sed -i 's/^MODULES=()/MODULES=(zfs)/' "${target}/etc/mkinitcpio.conf" 2>/dev/null || true
-      k_log_to "$log" "mkinitcpio.conf: udev-based HOOKS with zfs, MODULES=(zfs)"
+      # Handle both empty MODULES=() and non-empty MODULES=(something)
+      if grep -q '^MODULES=()' "${target}/etc/mkinitcpio.conf" 2>/dev/null; then
+        sed -i 's/^MODULES=()/MODULES=(zfs)/' "${target}/etc/mkinitcpio.conf"
+      elif grep -q '^MODULES=' "${target}/etc/mkinitcpio.conf" 2>/dev/null; then
+        sed -i 's/^MODULES=(\(.*\))/MODULES=(zfs \1)/' "${target}/etc/mkinitcpio.conf"
+      fi
+      k_log_to "$log" "mkinitcpio.conf: udev-based HOOKS with zfs, MODULES includes zfs"
+      k_log_to "$log" "mkinitcpio.conf HOOKS: $(grep '^HOOKS=' "${target}/etc/mkinitcpio.conf" 2>/dev/null)"
+      k_log_to "$log" "mkinitcpio.conf MODULES: $(grep '^MODULES=' "${target}/etc/mkinitcpio.conf" 2>/dev/null)"
     fi
 
-    # Try prebuilt zfs-linux first (avoids DKMS compilation from CentOS chroot).
-    # zfs-linux is matched to a specific kernel by archzfs.
+    # ── Strategy for getting zfs.ko into the target ──────────────────────
+    # Priority order:
+    #   1. Pre-built zfs.ko from darksite (built in native Arch container — guaranteed match)
+    #   2. Prebuilt zfs-linux package from archzfs (if available for this kernel)
+    #   3. DKMS fallback (compile in chroot — fragile, last resort)
     local _zfs_installed=false
-    pacman --root "${target}" --config "${pacman_conf}" \
-      --noconfirm --needed -S zfs-linux zfs-utils >> "$log" 2>&1 && {
-      _zfs_installed=true
-      k_log_to "$log" "Prebuilt zfs-linux installed successfully"
-    } || {
-      k_log_to "$log" "Prebuilt zfs-linux failed — falling back to zfs-dkms..."
 
-      # Install DKMS + build dependencies + zfs-dkms
+    # Install zfs-utils first (userspace tools needed regardless of module source)
+    pacman --root "${target}" --config "${pacman_conf}" \
+      --noconfirm --needed -S zfs-utils >> "$log" 2>&1 || \
+      k_log_to "$log" "WARNING: zfs-utils install had errors"
+
+    # Detect kernel version in target
+    local _inst_kver=""
+    local _inst_moddir=""
+    for _inst_moddir in "${target}/usr/lib/modules" "${target}/lib/modules"; do
+      [[ -d "$_inst_moddir" ]] && break
+    done
+    _inst_kver=$(ls "$_inst_moddir/" 2>/dev/null | grep -v '^$' | head -1)
+    k_log_to "$log" "Target kernel version: ${_inst_kver:-UNKNOWN}"
+
+    # ── 1. Prebuilt zfs-linux from archzfs repo ─────────────────────────
+    if [[ "$_zfs_installed" != "true" ]]; then
+      k_log_to "$log" "Trying prebuilt zfs-linux package..."
       pacman --root "${target}" --config "${pacman_conf}" \
-        --noconfirm --needed -S dkms gcc make linux-headers zfs-dkms zfs-utils >> "$log" 2>&1 || {
-        k_log_to "$log" "ERROR: ZFS package install failed — ZFS will not work"
+        --noconfirm --needed -S zfs-linux >> "$log" 2>&1 && {
+        _zfs_installed=true
+        k_log_to "$log" "Prebuilt zfs-linux installed successfully"
+      } || {
+        k_log_to "$log" "Prebuilt zfs-linux not available for this kernel"
+      }
+    fi
+
+    # ── 2. DKMS fallback (last resort) ────────────────────────────────
+    if [[ "$_zfs_installed" != "true" ]]; then
+      k_log_to "$log" "Falling back to DKMS build (compiling in chroot)..."
+      pacman --root "${target}" --config "${pacman_conf}" \
+        --noconfirm --needed -S base-devel dkms gcc make autoconf automake libtool \
+        linux-headers zfs-dkms >> "$log" 2>&1 || {
+        k_log_to "$log" "ERROR: ZFS DKMS package install failed"
       }
 
-      # pacman --root does NOT run hooks in the target chroot, so we must
-      # manually build the DKMS module and run depmod.
-      local _dkms_kver _dkms_moddir
-      for _dkms_moddir in "${target}/usr/lib/modules" "${target}/lib/modules"; do
-        [[ -d "$_dkms_moddir" ]] && break
-      done
-      _dkms_kver=$(ls "$_dkms_moddir/" 2>/dev/null | grep -v '^$' | head -1)
-      if [[ -n "$_dkms_kver" ]]; then
+      k_bind_chroot_mounts
+
+      if [[ -n "$_inst_kver" ]]; then
         local _zfs_dkms_ver
         _zfs_dkms_ver=$(chroot "${target}" pacman -Q zfs-dkms 2>/dev/null | awk '{print $2}' | cut -d- -f1 || echo "")
         if [[ -n "$_zfs_dkms_ver" ]]; then
-          k_log_to "$log" "Building ZFS DKMS ${_zfs_dkms_ver} for kernel ${_dkms_kver}..."
-          if chroot "${target}" dkms build -m zfs -v "$_zfs_dkms_ver" -k "$_dkms_kver" >> "$log" 2>&1 && \
-             chroot "${target}" dkms install -m zfs -v "$_zfs_dkms_ver" -k "$_dkms_kver" >> "$log" 2>&1; then
+          k_log_to "$log" "Building ZFS DKMS ${_zfs_dkms_ver} for kernel ${_inst_kver}..."
+          k_log_to "$log" "  gcc=$(chroot "${target}" which gcc 2>/dev/null || echo 'MISSING') make=$(chroot "${target}" which make 2>/dev/null || echo 'MISSING')"
+          k_log_to "$log" "  Kernel headers: $(ls "${_inst_moddir}/${_inst_kver}/build/Makefile" 2>/dev/null && echo 'present' || echo 'MISSING')"
+          if chroot "${target}" dkms build -m zfs -v "$_zfs_dkms_ver" -k "$_inst_kver" >> "$log" 2>&1 && \
+             chroot "${target}" dkms install -m zfs -v "$_zfs_dkms_ver" -k "$_inst_kver" >> "$log" 2>&1; then
             _zfs_installed=true
-            k_log_to "$log" "ZFS DKMS built and installed for ${_dkms_kver}"
+            k_log_to "$log" "ZFS DKMS built and installed for ${_inst_kver}"
           else
-            k_log_to "$log" "ERROR: ZFS DKMS build failed — check log for details"
+            k_log_to "$log" "ERROR: ZFS DKMS build failed"
+            local _dkms_log="${target}/var/lib/dkms/zfs/${_zfs_dkms_ver}/build/make.log"
+            [[ -f "$_dkms_log" ]] && tail -30 "$_dkms_log" >> "$log" 2>&1
           fi
-        else
-          k_log_to "$log" "ERROR: zfs-dkms package not found in target"
         fi
-        chroot "${target}" depmod -a "$_dkms_kver" 2>/dev/null || true
+        chroot "${target}" depmod -a "$_inst_kver" 2>/dev/null || true
       fi
-    }
+    fi
+
+    if [[ "$_zfs_installed" != "true" ]]; then
+      k_log_to "$log" "CRITICAL: No method succeeded in installing zfs.ko — system WILL NOT boot with ZFS!"
+    fi
 
     # Detect kernel version
     local kver moddir
@@ -1489,6 +1478,346 @@ PACFINAL
 
   mkdir -p "${target}/var/log/kldload"
   k_log_to "$log" "Arch Linux bootstrap complete"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Alpine Linux bootstrap (apk)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# k_detect_alpine_darksite — returns the local darksite apk cache path
+# if packages are available for offline install.
+k_detect_alpine_darksite() {
+  local darksite="/root/darksite/alpine"
+  local count=0
+  [[ -d "${darksite}/apk" ]] && count=$(find "${darksite}/apk" -name '*.apk' -not -name 'APKINDEX*' 2>/dev/null | wc -l)
+  if [[ "$count" -gt 5 ]]; then
+    echo "${darksite}"
+    return 0
+  fi
+  return 1
+}
+
+_k_bootstrap_apk() {
+  local target="${KLDLOAD_TARGET:?}"
+  local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
+
+  k_log_to "$log" "Bootstrapping Alpine Linux -> ${target}"
+
+  # ── Detect darksite or internet ───────────────────────────────────────────
+  local darksite=""
+  if darksite="$(k_detect_alpine_darksite 2>/dev/null)"; then
+    k_log_to "$log" "Using local darksite apk cache: ${darksite}"
+  else
+    darksite=""
+    k_log_to "$log" "No darksite found — Alpine install will use internet mirrors"
+  fi
+
+  # ── Detect Alpine version ─────────────────────────────────────────────────
+  local alpine_ver="${KLDLOAD_ALPINE_RELEASE:-3.21}"
+  if [[ -n "$darksite" && -f "${darksite}/alpine-version" ]]; then
+    alpine_ver="$(cat "${darksite}/alpine-version")"
+  fi
+  k_log_to "$log" "Alpine version: ${alpine_ver}"
+
+  # ── Find apk.static ────────────────────────────────────────────────────────
+  local apk_static=""
+  for _candidate in /usr/local/bin/apk.static /usr/bin/apk.static; do
+    if [[ -x "$_candidate" ]]; then
+      apk_static="$_candidate"
+      break
+    fi
+  done
+  [[ -n "$apk_static" ]] || {
+    k_log_to "$log" "FATAL: apk.static not found — cannot bootstrap Alpine"
+    return 1
+  }
+  k_log_to "$log" "Using apk.static: ${apk_static}"
+
+  # ── Create target directory structure ──────────────────────────────────────
+  mkdir -p "${target}/dev" "${target}/proc" "${target}/sys" "${target}/run" \
+           "${target}/tmp" "${target}/etc/apk" "${target}/var/cache/apk" \
+           "${target}/etc/apk/keys"
+
+  # Mount chroot filesystems
+  mountpoint -q "${target}/dev" || mount --bind /dev "${target}/dev" 2>/dev/null || true
+  mkdir -p "${target}/dev/pts"
+  mountpoint -q "${target}/dev/pts" || mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
+  mountpoint -q "${target}/proc" || mount -t proc proc "${target}/proc" 2>/dev/null || true
+  mountpoint -q "${target}/sys" || mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
+  mountpoint -q "${target}/run" || mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
+
+  # DNS for package downloads
+  rm -f "${target}/etc/resolv.conf" 2>/dev/null || true
+  cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || \
+    echo "nameserver 8.8.8.8" > "${target}/etc/resolv.conf"
+
+  # ── Configure apk repositories ────────────────────────────────────────────
+  if [[ -n "$darksite" ]]; then
+    # Darksite mode: create a proper local repo structure apk expects
+    # apk wants: {repo_url}/{arch}/APKINDEX.tar.gz
+    # Populate target's apk cache with darksite packages so apk installs from cache.
+    # We still need a repositories file pointing to the real Alpine repos so apk
+    # can resolve package metadata, but --cache-dir + pre-populated cache means
+    # no actual downloads happen.
+    mkdir -p "${target}/var/cache/apk"
+    find "${darksite}/apk/" -maxdepth 1 -name '*.apk' -exec cp {} "${target}/var/cache/apk/" \; 2>/dev/null || true
+    cp "${darksite}/apk/APKINDEX.tar.gz" "${target}/var/cache/apk/" 2>/dev/null || true
+    # Copy signing keys
+    if [[ -d "${darksite}/keys" ]]; then
+      cp "${darksite}/keys/"* "${target}/etc/apk/keys/" 2>/dev/null || true
+    fi
+
+    # Read alpine version from darksite
+    cat > "${target}/etc/apk/repositories" <<REPOS
+https://dl-cdn.alpinelinux.org/alpine/v${alpine_ver}/main
+https://dl-cdn.alpinelinux.org/alpine/v${alpine_ver}/community
+REPOS
+    k_log_to "$log" "Darksite: $(ls "${target}/var/cache/apk/"*.apk 2>/dev/null | wc -l) packages cached"
+  else
+    cat > "${target}/etc/apk/repositories" <<REPOS
+https://dl-cdn.alpinelinux.org/alpine/v${alpine_ver}/main
+https://dl-cdn.alpinelinux.org/alpine/v${alpine_ver}/community
+REPOS
+  fi
+
+  # ── Bootstrap with apk.static ─────────────────────────────────────────────
+  k_log_to "$log" "Initializing apk database and installing base system..."
+
+  # apk.static --root bootstraps a minimal system without needing apk in the target
+  if [[ -n "$darksite" ]]; then
+    # Darksite: install ALL cached .apk files directly — bypasses repo index entirely.
+    # This avoids arch-mismatch issues (noarch vs x86_64) in APKINDEX.
+    k_log_to "$log" "Darksite: installing all cached packages from .apk files..."
+    # shellcheck disable=SC2046
+    "$apk_static" --root "${target}" \
+      --initdb \
+      --allow-untrusted \
+      --no-network \
+      --no-cache \
+      add $(find "${target}/var/cache/apk/" -maxdepth 1 -name '*.apk' -not -name 'APKINDEX*' | sort) \
+      >> "$log" 2>&1 || {
+      k_log_to "$log" "WARNING: apk.static base install had errors"
+    }
+  else
+    "$apk_static" --root "${target}" \
+      --initdb \
+      --update-cache \
+      --allow-untrusted \
+      --repositories-file "${target}/etc/apk/repositories" \
+      add alpine-base linux-lts linux-firmware mkinitfs efibootmgr \
+          bash coreutils util-linux shadow grep sed findutils less \
+          sudo openssh openssh-server-pam ca-certificates curl vim \
+          iproute2 nftables wireguard-tools dhcpcd ifupdown-ng \
+          musl musl-utils e2fsprogs dosfstools pv tzdata >> "$log" 2>&1 || {
+      k_log_to "$log" "WARNING: apk.static base install had errors"
+    }
+  fi
+
+  k_log_to "$log" "Base system installed: $(du -sh --exclude="${target}/proc" --exclude="${target}/sys" --exclude="${target}/dev" "${target}" 2>/dev/null | cut -f1 || echo "?")"
+
+  # ── Switch to chroot apk for remaining installs ───────────────────────────
+  # After base bootstrap, /sbin/apk exists inside the target
+
+  # ── Install ZFS ────────────────────────────────────────────────────────────
+  if [[ "${KLDLOAD_STORAGE_MODE:-standard}" == "zfs" ]]; then
+    k_log_to "$log" "Installing ZFS packages..."
+
+    # Generate hostid BEFORE mkinitfs so it gets baked into the initramfs
+    chroot "${target}" zgenhostid -f 2>/dev/null || \
+      dd if=/dev/urandom of="${target}/etc/hostid" bs=4 count=1 status=none
+    k_log_to "$log" "hostid generated: $(xxd -p "${target}/etc/hostid" 2>/dev/null || echo "unknown")"
+
+    # Install ZFS — in darksite mode, all packages were already installed from
+    # cached .apk files in the base step. Verify ZFS is present; if not, try
+    # installing from the cached .apk files directly.
+    if chroot "${target}" apk info -e zfs 2>/dev/null | grep -q zfs; then
+      k_log_to "$log" "ZFS packages already installed from darksite"
+    elif [[ -n "$darksite" ]]; then
+      k_log_to "$log" "Installing ZFS from cached .apk files..."
+      # shellcheck disable=SC2046
+      "$apk_static" --root "${target}" --allow-untrusted --no-network --no-cache \
+        add $(find "${target}/var/cache/apk/" -maxdepth 1 -name 'zfs*.apk' | sort) \
+        >> "$log" 2>&1 || {
+        k_log_to "$log" "ERROR: ZFS install failed — ZFS will not work"
+      }
+    else
+      chroot "${target}" apk add --allow-untrusted zfs zfs-lts zfs-libs zfs-openrc >> "$log" 2>&1 || {
+        k_log_to "$log" "WARNING: ZFS package install had errors — trying with update"
+        chroot "${target}" apk update >> "$log" 2>&1 || true
+        chroot "${target}" apk add --allow-untrusted zfs zfs-lts zfs-libs zfs-openrc >> "$log" 2>&1 || {
+          k_log_to "$log" "ERROR: ZFS install failed — ZFS will not work"
+        }
+      }
+    fi
+
+    # Configure mkinitfs for ZFS — add zfs to the features list
+    local mkinitfs_conf="${target}/etc/mkinitfs/mkinitfs.conf"
+    if [[ -f "$mkinitfs_conf" ]]; then
+      # Add zfs to features if not already present
+      if ! grep -q 'zfs' "$mkinitfs_conf"; then
+        sed -i 's/^features="/features="zfs /' "$mkinitfs_conf" 2>/dev/null || {
+          # If sed fails (different format), append to features line
+          echo 'features="ata base cdrom ext4 keymap kms mmc nvme scsi usb virtio zfs"' > "$mkinitfs_conf"
+        }
+      fi
+      k_log_to "$log" "mkinitfs.conf: $(grep '^features=' "$mkinitfs_conf")"
+    else
+      mkdir -p "${target}/etc/mkinitfs"
+      echo 'features="ata base cdrom ext4 keymap kms mmc nvme scsi usb virtio zfs"' > "$mkinitfs_conf"
+      k_log_to "$log" "mkinitfs.conf created with ZFS feature"
+    fi
+
+    # Rebuild initramfs with ZFS support
+    local kver
+    kver=$(ls "${target}/lib/modules/" 2>/dev/null | grep -v '^$' | head -1)
+    if [[ -n "$kver" ]]; then
+      k_log_to "$log" "Rebuilding initramfs with mkinitfs for ${kver}..."
+      chroot "${target}" mkinitfs -k "$kver" >> "$log" 2>&1 || \
+        k_log_to "$log" "WARNING: mkinitfs rebuild failed"
+
+      # Verify zfs.ko is present
+      if find "${target}/lib/modules/${kver}" -name 'zfs.ko*' 2>/dev/null | grep -q .; then
+        k_log_to "$log" "VERIFIED: zfs.ko found for kernel ${kver}"
+      else
+        k_log_to "$log" "ERROR: zfs.ko NOT found for kernel ${kver} — boot will fail!"
+      fi
+    fi
+
+    # Enable ZFS OpenRC services (per Alpine wiki: default runlevel, not sysinit)
+    chroot "${target}" rc-update add zfs-import boot >> "$log" 2>&1 || true
+    chroot "${target}" rc-update add zfs-load-key boot >> "$log" 2>&1 || true
+    chroot "${target}" rc-update add zfs-mount boot >> "$log" 2>&1 || true
+    chroot "${target}" rc-update add zfs-zed default >> "$log" 2>&1 || true
+    k_log_to "$log" "ZFS OpenRC services enabled (import, load-key, mount, zed)"
+
+    # Install ZFS scrub + trim cron scripts (Alpine doesn't ship these)
+    mkdir -p "${target}/usr/libexec/zfs"
+    cat > "${target}/usr/libexec/zfs/scrub" <<'SCRUBEOF'
+#!/bin/sh -eu
+[ -d /sys/module/zfs ] || exit 0
+PROPERTY_NAME="org.alpine:periodic-scrub"
+get_property () { zfs get -H -o value "${PROPERTY_NAME}" "$1" 2>/dev/null || return 1; }
+scrub_if_not_in_progress () {
+  zpool status "$1" | grep -q "scrub in progress" || zpool scrub "$1" || true
+}
+zpool list -H -o health,name 2>&1 | awk -F'\t' '$1 == "ONLINE" {print $2}' | while read pool; do
+  ret=$(get_property "${pool}")
+  if [ $? -ne 0 ] || [ "disable" = "${ret}" ]; then :
+  elif [ "-" = "${ret}" ] || [ "auto" = "${ret}" ] || [ "enable" = "${ret}" ]; then
+    scrub_if_not_in_progress "${pool}"
+  fi
+done
+SCRUBEOF
+    cat > "${target}/usr/libexec/zfs/trim" <<'TRIMEOF'
+#!/bin/sh -eu
+[ -d /sys/module/zfs ] || exit 0
+PROPERTY_NAME="org.alpine:periodic-trim"
+get_property () { zfs get -H -o value "${PROPERTY_NAME}" "$1" 2>/dev/null || return 1; }
+trim_if_not_trimming () {
+  zpool status "$1" | grep -q "trimming" || zpool trim "$1" || true
+}
+zpool_is_nvme_only () {
+  zpool list -vHPL "$1" | awk -F'\t' '$2 ~ /^\/dev\// { if($2 !~ /^\/dev\/nvme/) exit 1 }'
+}
+zpool list -H -o health,name 2>&1 | awk -F'\t' '$1 == "ONLINE" {print $2}' | while read pool; do
+  ret=$(get_property "${pool}")
+  if [ $? -ne 0 ] || [ "disable" = "${ret}" ]; then :
+  elif [ "enable" = "${ret}" ]; then trim_if_not_trimming "${pool}"
+  elif [ "-" = "${ret}" ] || [ "auto" = "${ret}" ]; then
+    zpool_is_nvme_only "${pool}" && trim_if_not_trimming "${pool}"
+  fi
+done
+TRIMEOF
+    chmod +x "${target}/usr/libexec/zfs/scrub" "${target}/usr/libexec/zfs/trim"
+
+    # Add monthly cron jobs for scrub (2nd Sunday) and trim (1st Sunday)
+    mkdir -p "${target}/var/spool/cron/crontabs"
+    cat > "${target}/var/spool/cron/crontabs/root" <<'CRONEOF'
+# zfs scrub — 2nd Sunday of every month
+24 0 8-14 * * if [ $(date +\%w) -eq 0 ] && [ -x /usr/libexec/zfs/scrub ]; then /usr/libexec/zfs/scrub; fi
+# zfs trim — 1st Sunday of every month
+24 0 1-7 * * if [ $(date +\%w) -eq 0 ] && [ -x /usr/libexec/zfs/trim ]; then /usr/libexec/zfs/trim; fi
+CRONEOF
+    chmod 600 "${target}/var/spool/cron/crontabs/root"
+    chroot "${target}" rc-update add crond default >> "$log" 2>&1 || true
+    k_log_to "$log" "ZFS scrub/trim cron scripts installed"
+  fi
+
+  # ── Profile packages ─────────────────────────────────────────────────────
+  local profile_pkgs profile_opt
+  profile_pkgs="$(k_profile_packages)"
+  profile_opt="$(k_profile_optional_packages)"
+  if [[ -n "${profile_pkgs}${profile_opt}" ]]; then
+    k_log_to "$log" "Installing profile packages..."
+    # shellcheck disable=SC2086
+    chroot "${target}" apk add --allow-untrusted ${profile_pkgs} ${profile_opt} >> "$log" 2>&1 || {
+      k_log_to "$log" "WARNING: Some profile packages failed"
+    }
+  fi
+
+  # ── Locale + timezone + hostname ─────────────────────────────────────────
+  # Alpine/musl has minimal locale support — no locale-gen
+  ln -sf "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE:-UTC}" "${target}/etc/localtime" 2>/dev/null || true
+  echo "${KLDLOAD_TIMEZONE:-UTC}" > "${target}/etc/timezone"
+
+  echo "${KLDLOAD_HOSTNAME:-kldload-node}" > "${target}/etc/hostname"
+  cat > "${target}/etc/hosts" <<EOH
+127.0.0.1 localhost
+127.0.1.1 ${KLDLOAD_HOSTNAME:-kldload-node}
+::1 localhost ip6-localhost ip6-loopback
+EOH
+
+  # ── Users ────────────────────────────────────────────────────────────────
+  k_create_users
+
+  # ── Networking (ifupdown-ng, not NetworkManager) ─────────────────────────
+  cat > "${target}/etc/network/interfaces" <<NET
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+NET
+
+  # ── SSH: enable password auth + generate host keys ───────────────────────
+  local _sshd_conf="${target}/etc/ssh/sshd_config"
+  if [[ -f "$_sshd_conf" ]]; then
+    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$_sshd_conf"
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' "$_sshd_conf"
+  fi
+  chroot "${target}" ssh-keygen -A >> "$log" 2>&1 || true
+  k_log_to "$log" "SSH host keys generated"
+
+  # ── Enable OpenRC services ──────────────────────────────────────────────
+  chroot "${target}" rc-update add sshd default >> "$log" 2>&1 || true
+  chroot "${target}" rc-update add dhcpcd default >> "$log" 2>&1 || true
+  chroot "${target}" rc-update add nftables default >> "$log" 2>&1 || true
+  chroot "${target}" rc-update add networking boot >> "$log" 2>&1 || true
+
+  # Set default runlevel
+  chroot "${target}" rc-update add devfs sysinit >> "$log" 2>&1 || true
+  chroot "${target}" rc-update add dmesg sysinit >> "$log" 2>&1 || true
+  chroot "${target}" rc-update add mdev sysinit >> "$log" 2>&1 || true
+  chroot "${target}" rc-update add hwdrivers sysinit >> "$log" 2>&1 || true
+  chroot "${target}" rc-update add hwclock boot >> "$log" 2>&1 || true
+  chroot "${target}" rc-update add modules boot >> "$log" 2>&1 || true
+  chroot "${target}" rc-update add sysctl boot >> "$log" 2>&1 || true
+  chroot "${target}" rc-update add hostname boot >> "$log" 2>&1 || true
+  chroot "${target}" rc-update add bootmisc boot >> "$log" 2>&1 || true
+  chroot "${target}" rc-update add syslog boot >> "$log" 2>&1 || true
+
+  # ── System files + manifest ──────────────────────────────────────────────
+  k_install_system_files
+  k_write_manifest
+
+  # ── Finalize apk repositories for post-install use ────────────────────────
+  cat > "${target}/etc/apk/repositories" <<REPOS
+https://dl-cdn.alpinelinux.org/alpine/v${alpine_ver}/main
+https://dl-cdn.alpinelinux.org/alpine/v${alpine_ver}/community
+REPOS
+
+  mkdir -p "${target}/var/log/kldload"
+  k_log_to "$log" "Alpine Linux bootstrap complete"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════

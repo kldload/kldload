@@ -11,6 +11,19 @@ k_profile_packages() {
   local _fastfetch="fastfetch"
   [[ "$_distro" == "ubuntu" ]] && _fastfetch=""
 
+  # Alpine Linux — core profile only
+  if [[ "$_distro" == "alpine" ]]; then
+    case "$profile" in
+      core)
+        echo "openssh sudo curl ca-certificates vim less iproute2 nftables wireguard-tools"
+        ;;
+      *)
+        k_die "Alpine only supports 'core' profile (got: $profile)"
+        ;;
+    esac
+    return
+  fi
+
   # Arch Linux uses different package names
   if [[ "$_distro" == "arch" ]]; then
     case "$profile" in
@@ -48,7 +61,7 @@ k_profile_packages() {
 
   case "$profile" in
     server)
-      echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide ${_fastfetch}"
+      echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide podman ${_fastfetch}"
       ;;
     client)
       echo "openssh-server sudo curl ca-certificates vim less network-manager wireguard-tools iproute2"
@@ -70,7 +83,7 @@ k_profile_packages() {
         adwaita-icon-theme fonts-cantarell gvfs gvfs-backends \
         gnome-keyring xserver-xorg \
         ${_browser} \
-        tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide ${_fastfetch}"
+        tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman ${_fastfetch}"
       ;;
 
     # ── kldload templates ────────────────────────────────────────────────────────
@@ -153,7 +166,7 @@ k_profile_packages() {
         wireguard-tools tmux python3 python3-pip jq htop btop fzf bat eza fd-find ripgrep zoxide ${_fastfetch} \
         sanoid cloud-init qemu-guest-agent qemu-utils eject zstd \
         python3-websockets python3-yaml net-tools ethtool tcpdump \
-        alsa-utils pipewire pipewire-utils cmake gcc-c++ make git"
+        alsa-utils pipewire pipewire-utils cmake gcc-c++ make git podman"
       ;;
 
     *)
@@ -175,7 +188,9 @@ k_profile_optional_packages() {
     fi
   fi
   if [[ "${KLDLOAD_ENABLE_ZFS:-0}" == "1" ]]; then
-    if [[ "$_distro" == "arch" ]]; then
+    if [[ "$_distro" == "alpine" ]]; then
+      out+=(zfs zfs-lts zfs-libs zfs-openrc)
+    elif [[ "$_distro" == "arch" ]]; then
       out+=(zfs-dkms zfs-utils)
     else
       out+=(zfsutils-linux zfs-zed zfs-initramfs zfs-dkms sanoid)
@@ -257,6 +272,10 @@ k_install_system_files() {
     [[ -f "/usr/lib/systemd/system/${f}" ]] && \
       cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
   done
+  # Move management webui to port 9000 on installed systems (8080 reserved for Open WebUI)
+  if [[ -f "${target}/usr/lib/systemd/system/kldload-webui.service" ]]; then
+    sed -i 's/--port 8080/--port 9000/' "${target}/usr/lib/systemd/system/kldload-webui.service"
+  fi
 
   # Enable services in the installed system via symlinks (no systemctl in chroot)
   mkdir -p "${target}/etc/systemd/system/timers.target.wants"
@@ -272,6 +291,9 @@ k_install_system_files() {
   # kldload-webui enabled at boot (firstboot also starts it, but enable here for robustness)
   ln -sf "/usr/lib/systemd/system/kldload-webui.service" \
     "${target}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" || true
+
+  # ── Fix websockets version (CentOS 9 RPM is too old for websockets.http11) ──
+  chroot "${target}" pip3 install --quiet "websockets>=11" 2>/dev/null || true
 
   # ── Web UI binary + static files ──────────────────────────────────────────
   [[ -x /usr/local/bin/kldload-webui ]] && \
@@ -350,15 +372,20 @@ OSREL
     cp /etc/dconf/db/gdm.d/00-kldload-login "${target}/etc/dconf/db/gdm.d/00-kldload-login" 2>/dev/null || true
     [[ -f /etc/dconf/profile/gdm ]] && cp /etc/dconf/profile/gdm "${target}/etc/dconf/profile/gdm"
   fi
-  # GDM config: no auto-login on installed system (live has AutomaticLogin=live)
+  # GDM config — auto-login for desktop profile so firstboot show plays automatically
   # Debian/Ubuntu use /etc/gdm3/, Arch/CentOS use /etc/gdm/
   local _gdm_dir="gdm3"
   if [[ "${KLDLOAD_DISTRO:-centos}" == "arch" || "${KLDLOAD_DISTRO:-centos}" == "centos" || "${KLDLOAD_DISTRO:-centos}" == "rocky" || "${KLDLOAD_DISTRO:-centos}" == "rhel" || "${KLDLOAD_DISTRO:-centos}" == "fedora" ]]; then
     _gdm_dir="gdm"
   fi
+  local _install_user="${KLDLOAD_USERNAME:-admin}"
   mkdir -p "${target}/etc/${_gdm_dir}"
-  cat > "${target}/etc/${_gdm_dir}/daemon.conf" <<'EOGDM'
+  # CentOS/RHEL/Fedora use custom.conf, Debian/Ubuntu use daemon.conf — write both
+  for _gdm_conf in custom.conf daemon.conf; do
+  cat > "${target}/etc/${_gdm_dir}/${_gdm_conf}" <<EOGDM
 [daemon]
+AutomaticLoginEnable=True
+AutomaticLogin=${_install_user}
 
 [security]
 
@@ -368,6 +395,7 @@ OSREL
 
 [debug]
 EOGDM
+  done
 
   # Wayland is the default — xserver-xorg is installed as fallback so GDM
   # can fall back to X11 if Wayland fails (older virtual GPUs, etc.)

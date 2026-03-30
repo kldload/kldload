@@ -185,6 +185,16 @@ EOFSTAB
     k_log "Rebuilding initramfs with mkinitcpio..."
     chroot "${target}" mkinitcpio -P >&7 2>&1 || \
       k_log "WARNING: mkinitcpio had errors — check ${KLDLOAD_LOG_DIR}/bootloader.log"
+  elif [[ -x "${target}/sbin/mkinitfs" ]]; then
+    # Alpine Linux uses mkinitfs
+    k_log "Rebuilding initramfs with mkinitfs..."
+    local _akver
+    _akver=$(ls "${target}/lib/modules/" 2>/dev/null | grep lts | head -1)
+    [[ -z "$_akver" ]] && _akver=$(ls "${target}/lib/modules/" 2>/dev/null | grep -v '^$' | head -1)
+    if [[ -n "$_akver" ]]; then
+      chroot "${target}" mkinitfs -k "$_akver" >&7 2>&1 || \
+        k_log "WARNING: mkinitfs had errors — check ${KLDLOAD_LOG_DIR}/bootloader.log"
+    fi
   elif [[ -x "${target}/usr/bin/dracut" ]]; then
     local _kver
     for _kver in "${target}"/usr/lib/modules/*/vmlinuz "${target}"/lib/modules/*/vmlinuz; do
@@ -210,13 +220,24 @@ EOFSTAB
   part_num="${part_num:-1}"
 
   if [[ -n "${disk}" && -b "${disk}" ]]; then
-    # Remove any stale ZFSBootMenu entries first
-    # grep exits 1 when no entries exist — || true prevents pipefail triggering ERR
-    efibootmgr 2>/dev/null | grep -i "ZFSBootMenu" | \
-      awk -F'[^0-9]*' '{print $2}' | \
-      while read -r boot_num; do
-        efibootmgr -b "${boot_num}" -B >&7 2>&1 || true
-      done || true
+    # Remove ALL existing boot entries that point to the target disk.
+    # This ensures stale entries (old OS installs, disconnected drives, etc.)
+    # don't interfere with ZFSBootMenu booting. Only entries on OTHER disks
+    # (e.g. USB boot media) are preserved.
+    local _target_disk_id
+    _target_disk_id=$(lsblk -dno SERIAL,MODEL "${disk}" 2>/dev/null | tr -s ' ' | head -1)
+    k_log "Cleaning EFI boot entries for target disk: ${disk}"
+    efibootmgr -v 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | while read -r _line; do
+      local _bnum
+      _bnum=$(echo "$_line" | grep -oP 'Boot\K[0-9A-Fa-f]+')
+      # Remove entries that reference the target disk's GPT UUID or are stale
+      local _efi_uuid
+      _efi_uuid=$(blkid -s PARTUUID -o value "${efi_part}" 2>/dev/null || true)
+      if echo "$_line" | grep -qi "ZFSBootMenu\|${disk##*/}\|${_efi_uuid:-NOMATCH}"; then
+        efibootmgr -b "${_bnum}" -B >&7 2>&1 || true
+        k_log "  Removed Boot${_bnum}: $(echo "$_line" | sed 's/Boot[0-9A-Fa-f]*.//')"
+      fi
+    done || true
 
     # Register main and backup entries (backup registered first = lower priority)
     efibootmgr \
@@ -230,6 +251,22 @@ EOFSTAB
       -L "ZFSBootMenu" \
       -l '\EFI\zbm\BOOTX64.EFI' >&7 2>&1 || \
       k_log "WARNING: efibootmgr main entry failed"
+
+    # Set the new ZFSBootMenu entry as first in boot order
+    local _zbm_bootnum
+    _zbm_bootnum=$(efibootmgr 2>/dev/null | grep -i 'ZFSBootMenu' | grep -v 'Backup' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
+    if [[ -n "$_zbm_bootnum" ]]; then
+      local _current_order
+      _current_order=$(efibootmgr 2>/dev/null | grep '^BootOrder:' | sed 's/BootOrder: //')
+      # Put ZFSBootMenu first, keep the rest
+      local _new_order="${_zbm_bootnum}"
+      for _entry in ${_current_order//,/ }; do
+        [[ "$_entry" != "$_zbm_bootnum" ]] && _new_order="${_new_order},${_entry}"
+      done
+      efibootmgr -o "${_new_order}" >&7 2>&1 || \
+        k_log "WARNING: Could not set boot order"
+      k_log "Boot order set: ${_new_order} (ZFSBootMenu first)"
+    fi
 
     k_log "EFI boot entries registered: disk=${disk} part=${part_num}"
   else

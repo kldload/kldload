@@ -72,6 +72,14 @@ PKGS=(
     linux-firmware iwl*-firmware
     passwd shadow-utils util-linux procps-ng findutils grep sed gawk
     rootfiles parted gdisk dosfstools
+    # Live environment disk & diagnostic tools
+    hdparm smartmontools nvme-cli
+    lshw dmidecode pciutils usbutils
+    nmap-ncat tcpdump iperf3 ethtool
+    blktrace iotop sysstat strace
+    xfsprogs e2fsprogs btrfs-progs mdadm lvm2 cryptsetup
+    fio bonnie++ stress-ng memtest86+
+    bash-completion hostname
     # ZFS — DKMS build inside chroot against target kernel
     dkms gcc make autoconf automake libtool kernel-devel
     zfs zfs-dkms
@@ -276,6 +284,32 @@ if [[ "$EDITION" != "core" ]]; then
         ln -sf /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem "${ROOTFS}/etc/pki/tls/certs/ca-certificates.crt"
         printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n' > "${ROOTFS}/etc/pacman.d/mirrorlist"
         log "pacman-static installed: $(chroot "$ROOTFS" /usr/bin/pacman --version 2>&1 | head -1)"
+    fi
+fi
+
+# Download apk-tools-static for Alpine Linux bootstrap support
+# (CentOS has no apk package — we need a static binary)
+if [[ "$EDITION" != "core" ]]; then
+    log "Downloading apk-tools-static for Alpine support..."
+    _apk_ver=""
+    _apk_ver="$(curl -sfL 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/x86_64/' \
+        | grep -oP 'apk-tools-static-\K[0-9][^"]*(?=\.apk)' | head -1)" || true
+    if [[ -n "$_apk_ver" ]]; then
+        curl -sfL "https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/x86_64/apk-tools-static-${_apk_ver}.apk" \
+            -o /tmp/apk-tools-static.apk || {
+            log "WARNING: apk-tools-static download failed — Alpine installs will not work"
+        }
+    fi
+    if [[ -f /tmp/apk-tools-static.apk ]]; then
+        tar -xzf /tmp/apk-tools-static.apk -C /tmp/ sbin/apk.static 2>/dev/null || true
+        if [[ -f /tmp/sbin/apk.static ]]; then
+            cp /tmp/sbin/apk.static "${ROOTFS}/usr/local/bin/apk.static"
+            chmod +x "${ROOTFS}/usr/local/bin/apk.static"
+            log "apk-tools-static installed"
+        else
+            log "WARNING: apk.static not found in downloaded package"
+        fi
+        rm -rf /tmp/apk-tools-static.apk /tmp/sbin
     fi
 fi
 
@@ -624,6 +658,25 @@ FEDEOF
 
     chroot "$ROOTFS" systemctl enable kldload-fedora-mirror 2>/dev/null || true
 
+    # Alpine Linux darksite apk mirror service (serves on port 3146)
+    cat > "${ROOTFS}/usr/lib/systemd/system/kldload-apk-mirror.service" << 'ALPEOF'
+[Unit]
+Description=kldload Alpine darksite apk mirror
+After=network.target
+ConditionPathIsDirectory=/root/darksite/alpine/apk
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m http.server 3146 --bind 127.0.0.1 --directory /root/darksite/alpine
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+ALPEOF
+
+    chroot "$ROOTFS" systemctl enable kldload-apk-mirror 2>/dev/null || true
+
     # Copy systemd service units from includes.chroot
     for _svc in kldload-firstboot.service kldload-srv-snapshot.service kldload-srv-snapshot.timer \
                 kldload-snapshot.service kldload-snapshot.timer kldload-export.service; do
@@ -706,15 +759,9 @@ if [[ "$EDITION" != "core" ]]; then
         log "No Ubuntu darksite found — Ubuntu installs will require internet"
     fi
 
-    # Copy Arch Linux darksite pacman cache into the rootfs
-    if [[ -d /build/live-build/darksite-arch-cache/pkg ]]; then
-        mkdir -p "${ROOTFS}/root/darksite/arch/pkg" "${ROOTFS}/root/darksite/arch/db"
-        cp -r /build/live-build/darksite-arch-cache/pkg/. "${ROOTFS}/root/darksite/arch/pkg/"
-        cp -r /build/live-build/darksite-arch-cache/db/. "${ROOTFS}/root/darksite/arch/db/" 2>/dev/null || true
-        log "Arch darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/arch" 2>/dev/null | cut -f1)"
-    else
-        log "No Arch darksite found — Arch installs will require internet"
-    fi
+    # Arch darksite disabled — rolling release causes version drift.
+    # Arch installs pull from live mirrors + archzfs (internet required).
+    log "Arch darksite: skipped (internet required for Arch installs)"
 
     # Copy Fedora darksite RPM repo into the rootfs
     if [[ -d /build/live-build/darksite-fedora-cache/rpm ]]; then
@@ -723,6 +770,23 @@ if [[ "$EDITION" != "core" ]]; then
         log "Fedora darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/fedora" 2>/dev/null | cut -f1)"
     else
         log "No Fedora darksite found — Fedora installs will require internet"
+    fi
+
+    # Copy Alpine darksite apk cache into the rootfs
+    if [[ -d /build/live-build/darksite-alpine-cache/apk ]]; then
+        mkdir -p "${ROOTFS}/root/darksite/alpine"
+        cp -r /build/live-build/darksite-alpine-cache/apk "${ROOTFS}/root/darksite/alpine/"
+        # Copy signing keys
+        if [[ -d /build/live-build/darksite-alpine-cache/keys ]]; then
+            mkdir -p "${ROOTFS}/root/darksite/alpine/keys"
+            cp -r /build/live-build/darksite-alpine-cache/keys/. "${ROOTFS}/root/darksite/alpine/keys/"
+        fi
+        # Copy version file
+        [[ -f /build/live-build/darksite-alpine-cache/alpine-version ]] && \
+            cp /build/live-build/darksite-alpine-cache/alpine-version "${ROOTFS}/root/darksite/alpine/"
+        log "Alpine darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/alpine" 2>/dev/null | cut -f1)"
+    else
+        log "No Alpine darksite found — Alpine installs will require internet"
     fi
 
     # Copy BSD/illumos base sets into the rootfs for offline installs
@@ -755,7 +819,9 @@ KVER=$(ls "${ROOTFS}/lib/modules/" | head -1)
 log "Kernel version: $KVER"
 
 chroot "$ROOTFS" dracut --force --add "dmsquash-live" \
-    --no-hostonly --kver "$KVER" "/boot/initramfs-${KVER}.img" 2>&1 | tee -a "$LOG_FILE" || \
+    --no-hostonly \
+    --force-drivers "xhci_pci xhci_hcd ehci_pci ehci_hcd ohci_pci ohci_hcd uhci_hcd usb_storage uas usbhid hid_generic cdc_ether usbnet r8152 ax88179_178a thunderbolt typec_ucsi ucsi_acpi nvme nvme_core ahci virtio_blk virtio_scsi virtio_net virtio_pci sdhci sdhci_pci mmc_block" \
+    --kver "$KVER" "/boot/initramfs-${KVER}.img" 2>&1 | tee -a "$LOG_FILE" || \
     die "dracut failed"
 
 # ---------------------------------------------------------------------------

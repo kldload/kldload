@@ -2,11 +2,11 @@
 
 ![kldloadOS — Arch Linux on ZFS](arch101.png)
 
-**The base image factory. ZFS + WireGuard + kernel, any distro, any platform. Free.**
+**Build once, deploy anywhere. Your AI platform, your way, for free.**
 
-kldload builds a single bootable ISO that installs CentOS, Debian, Ubuntu, Fedora, Rocky, RHEL, or Arch Linux with ZFS on root. Seven distros, one USB, two minutes. Most install fully offline from embedded darksites.
+kldload builds a single bootable ISO that installs CentOS, Debian, Ubuntu, Fedora, Rocky, RHEL, or Arch Linux with ZFS on root. Seven distros, one USB, two minutes. Most install fully offline from embedded package mirrors.
 
-Build golden images for Packer, Terraform, and cloud deployment — or install directly to bare metal.
+Build golden images for Packer, Terraform, and cloud deployment — or install directly to bare metal. Now with a local AI assistant trained on 1,000+ pages of infrastructure documentation.
 
 **Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Discord:** [discord.gg/tkVN6sSU](https://discord.gg/tkVN6sSU)
 
@@ -38,7 +38,7 @@ Boot the USB → web UI opens at `:8080` → pick distro + profile → install.
 | Fedora 41 | dnf --installroot | Yes (RPM darksite) |
 | Rocky Linux 9 | dnf --installroot | Yes (shared RPM darksite) |
 | RHEL 9 | dnf --installroot | No (Red Hat CDN) |
-| Arch Linux | pacstrap | Yes (pacman darksite) |
+| Arch Linux | pacman --root | No (internet required — rolling release) |
 
 ## 4 Profiles
 
@@ -66,7 +66,11 @@ Everything else follows from these two.
 - **WiFi firmware** — linux-firmware for laptop/Surface hardware support
 - **cloud-init** — Packer/Terraform ready
 - **Modern terminal** — fzf, btop, eza, ripgrep, zoxide, bat
-- **107+ pages of documentation** at [kldload.com](https://kldload.com)
+- **Local AI assistant** — Ollama + llama3.1:8b + Open WebUI, trained on 1,000+ pages of kldload docs
+- **4 AI commands** — `kai`, `kai-voice`, `kai-do`, `kai-remote`
+- **NVIDIA auto-detection** — GPU drivers enabled only when hardware detected
+- **Management dashboard** — web UI on :9000 for ZFS snapshots, rollback, pool status
+- **1,000+ pages of documentation** at [kldload.com](https://kldload.com)
 
 ## deploy.sh
 
@@ -76,7 +80,7 @@ Everything else follows from these two.
 | `build-debian-darksite` | Build Debian APT offline mirror |
 | `build-ubuntu-darksite` | Build Ubuntu APT offline mirror |
 | `build-fedora-darksite` | Build Fedora RPM offline mirror |
-| `build-arch-darksite` | Build Arch pacman offline mirror |
+| `build-arch-darksite` | *(disabled — Arch uses live internet install)* |
 | `builder-image` | Rebuild builder container |
 | `kvm-deploy` | Deploy to local KVM |
 | `proxmox-deploy` | Deploy to Proxmox |

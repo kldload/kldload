@@ -1484,6 +1484,120 @@ main() {
     return
   fi
 
+  # ── AI Assistant setup (if enabled) ──────────────────────────────────────
+  if [[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]; then
+    _info ""
+    _info "Setting up AI Assistant..."
+    (
+      set +e
+      local target="${KLDLOAD_TARGET:?}"
+
+      # Install Ollama into target
+      _info "  Installing Ollama..."
+      curl -fsSL https://ollama.com/install.sh | chroot "${target}" bash >> "${KLDLOAD_LOG_DIR}/ai-setup.log" 2>&1
+      if chroot "${target}" which ollama >/dev/null 2>&1; then
+        _ok "Ollama" "installed"
+      else
+        _warn "Ollama install failed — will retry on first boot"
+      fi
+
+      # Start Ollama temporarily in the chroot to pull model
+      chroot "${target}" bash -c 'ollama serve &>/dev/null &'
+      local _ollama_pid=$!
+      sleep 3
+
+      # Wait for Ollama API
+      local _ready=false
+      for _i in $(seq 1 12); do
+        if chroot "${target}" curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
+          _ready=true
+          break
+        fi
+        sleep 2
+      done
+
+      if [[ "$_ready" == "true" ]]; then
+        # Pull the model
+        _info "  Downloading llama3.1:8b (~4.9 GB)..."
+        if chroot "${target}" ollama pull llama3.1:8b >> "${KLDLOAD_LOG_DIR}/ai-setup.log" 2>&1; then
+          _ok "Model" "llama3.1:8b downloaded"
+
+          # Create kldload-ai trained model using baked-in docs
+          local _ai_docs="${target}/usr/local/share/kldload-ai/kldload-docs.txt"
+          local _ai_manual="${target}/usr/local/share/kldload-ai/kldload-manual.txt"
+          local _corpus=""
+          [[ -f "$_ai_docs" ]] && _corpus="$(head -c 4000 "$_ai_docs")"
+          [[ -f "$_ai_manual" ]] && _corpus="${_corpus}$(head -c 4000 "$_ai_manual")"
+
+          cat > "${target}/tmp/Modelfile.kldload" <<AIMODEL
+FROM llama3.1:8b
+
+SYSTEM """
+You are a Linux infrastructure assistant trained on kldloadOS documentation.
+You know these tools: kst, ksnap, kclone, kdf, kdir, kpkg, kexport, kbe, krecovery, kupgrade, kldload-help, kai.
+You know ZFS deeply: zpool, zfs, sanoid, syncoid, ARC tuning, boot environments via ZFSBootMenu.
+You know WireGuard, eBPF (bcc, bpftrace), Docker on ZFS, KVM/libvirt.
+Give exact commands, not abstract advice. Always recommend a snapshot before changes.
+
+Documentation excerpt:
+${_corpus}
+"""
+
+PARAMETER temperature 0.3
+PARAMETER num_ctx 8192
+AIMODEL
+
+          if chroot "${target}" ollama create kldload-ai -f /tmp/Modelfile.kldload >> "${KLDLOAD_LOG_DIR}/ai-setup.log" 2>&1; then
+            _ok "AI Model" "kldload-ai created with documentation"
+          else
+            _warn "Custom model creation failed — base llama3.1:8b will be available"
+          fi
+          rm -f "${target}/tmp/Modelfile.kldload"
+        else
+          _warn "Model download failed — will retry on first boot"
+        fi
+      else
+        _warn "Ollama API not ready — will complete on first boot"
+      fi
+
+      # Stop Ollama in chroot
+      chroot "${target}" pkill -f 'ollama serve' 2>/dev/null || true
+
+      # Enable Ollama service for boot
+      chroot "${target}" systemctl enable ollama.service 2>/dev/null || true
+
+      # Install Open WebUI via podman if available
+      if chroot "${target}" which podman >/dev/null 2>&1; then
+        _info "  Pulling Open WebUI container..."
+        if chroot "${target}" podman pull ghcr.io/open-webui/open-webui:main >> "${KLDLOAD_LOG_DIR}/ai-setup.log" 2>&1; then
+          _ok "Open WebUI" "container image cached"
+          # Create systemd service for Open WebUI
+          cat > "${target}/etc/systemd/system/open-webui.service" <<'OWSVC'
+[Unit]
+Description=Open WebUI for Ollama
+After=network.target ollama.service
+Requires=ollama.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/podman run --rm --name open-webui --network host -v open-webui:/app/backend/data -e OLLAMA_BASE_URL=http://127.0.0.1:11434 ghcr.io/open-webui/open-webui:main
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+OWSVC
+          chroot "${target}" systemctl enable open-webui.service 2>/dev/null || true
+          _ok "Open WebUI" "service enabled — http://localhost:8080 on boot"
+        else
+          _warn "Open WebUI pull failed — install manually with podman"
+        fi
+      fi
+
+      _ok "AI Setup" "complete"
+    )
+  fi
+
   # ── Finalize — unbind chroot, export pools (LAST step) ─────────────────
   k_finalize_bootloader
   _ok "Finalized"   "Pools exported, ready to reboot"

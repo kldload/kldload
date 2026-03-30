@@ -754,6 +754,56 @@ SALT
     if [[ "$ROLE" == "ai" || "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]; then
       log "AI profile — installing Ollama and kldload-trained model..."
 
+      # Status file — dashboard reads this to show progress
+      _status() {
+        echo "$1" > /tmp/kldload-firstboot-status
+        log "$1"
+      }
+      _status "Starting AI setup..."
+
+      # Desktop progress notifications — let the user know what's happening
+      _notify_desktop() {
+        # Send GNOME desktop notification — must never fail even under set -e
+        local _title="$1" _body="$2"
+        (
+          set +e
+          for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
+            _user=$(id -nu "$_uid" 2>/dev/null) || continue
+            sudo -u "$_user" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
+              notify-send -i dialog-information "$_title" "$_body" 2>/dev/null || true
+          done
+        ) 2>/dev/null
+        return 0
+      }
+
+      _hal_terminal() {
+        # Open a terminal, typewriter-effect the message, pause, close
+        local _msg="$1" _delay="${2:-3}"
+        (
+          set +e
+          for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
+            _user=$(id -nu "$_uid" 2>/dev/null) || continue
+            sudo -u "$_user" \
+              WAYLAND_DISPLAY=wayland-0 \
+              XDG_RUNTIME_DIR="/run/user/${_uid}" \
+              DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
+              gnome-terminal --title="kldload AI" -- bash -c "
+                printf '\e[8;12;80t'
+                printf '\033[1;32m'
+                printf '\n  > '
+                echo '${_msg}' | while IFS= read -r -n1 char; do
+                  printf '%s' \"\$char\"
+                  sleep 0.03
+                done
+                printf '\033[0m\n'
+                sleep ${_delay}
+              " 2>/dev/null &
+          done
+        ) 2>/dev/null
+        return 0
+      }
+      log "AI setup starting — terminal show + Firefox will open when ready"
+
       # Create ZFS dataset for models (compressed, snapshotable)
       zfs create -o compression=zstd -o recordsize=1M rpool/srv 2>/dev/null || true
       zfs create -o compression=zstd -o recordsize=1M rpool/srv/ollama 2>/dev/null || true
@@ -765,6 +815,7 @@ SALT
       # Install Ollama
       if curl -fsSL --connect-timeout 30 https://ollama.com/install.sh | sh >> "${LOG}" 2>&1; then
         ok "Ollama installed"
+        _status "Downloading AI model (~4.9 GB)..."
 
         # Configure Ollama to use ZFS-backed storage
         mkdir -p /etc/systemd/system/ollama.service.d
@@ -795,19 +846,38 @@ OLLAMA
           log "WARNING: Ollama API not responding after 60s — model pull may fail"
         fi
 
-        # Pull a model (8B — runs on 8GB RAM) with retry
-        log "Pulling llama3.1:8b model (this may take several minutes)..."
-        local _pull_ok=0
-        for _attempt in 1 2 3; do
-          if ollama pull llama3.1:8b >> "${LOG}" 2>&1; then
-            _pull_ok=1
-            ok "Model llama3.1:8b pulled (attempt ${_attempt})"
-            break
-          fi
-          log "  Model pull attempt ${_attempt}/3 failed — retrying in 10s..."
-          sleep 10
-        done
-        [[ "${_pull_ok}" -eq 0 ]] && log "WARNING: model pull failed after 3 attempts — run 'ollama pull llama3.1:8b' manually"
+        # Pull selected AI models with retry
+        _pull_model() {
+          local _model="$1" _label="$2"
+          log "Pulling ${_label} (${_model}) — this may take several minutes..."
+          local _pull_ok=0
+          for _attempt in 1 2 3; do
+            if ollama pull "$_model" >> "${LOG}" 2>&1; then
+              _pull_ok=1
+              ok "${_label} (${_model}) pulled (attempt ${_attempt})"
+              log "${_label} downloaded"
+              break
+            fi
+            log "  Pull attempt ${_attempt}/3 failed — retrying in 10s..."
+            sleep 10
+          done
+          [[ "${_pull_ok}" -eq 0 ]] && log "WARNING: ${_model} pull failed — run 'ollama pull ${_model}' manually"
+        }
+
+        # Wrap everything from model pull onward in subshell — no errors kill firstboot
+        (
+        set +e
+
+        # Always pull the base chat model (default)
+        if [[ "${KLDLOAD_AI_MODEL_CHAT:-1}" == "1" ]]; then
+          _pull_model "llama3.1:8b" "General Chat"
+        fi
+        if [[ "${KLDLOAD_AI_MODEL_CODE:-0}" == "1" ]]; then
+          _pull_model "qwen2.5-coder:14b" "Code Assistant"
+        fi
+        if [[ "${KLDLOAD_AI_MODEL_SMART:-0}" == "1" ]]; then
+          _pull_model "llama3.1:70b-q4_K_M" "Smart Chat (70B)"
+        fi
 
         # Create the kldload infrastructure Modelfile
         mkdir -p /srv/ollama
@@ -857,7 +927,7 @@ MODELFILE
 
         # Build the custom model
         ollama create kldload-ai -f /srv/ollama/Modelfile.kldload >> "${LOG}" 2>&1 \
-          && ok "kldload-ai model created" \
+          && { ok "kldload-ai model created"; _status "AI model trained on documentation"; } \
           || log "WARNING: custom model creation failed"
 
         # Scrape kldload.com docs and build knowledge corpus
@@ -981,7 +1051,7 @@ KAI
         chmod +x /usr/local/bin/kai
 
         # ── Voice control: whisper.cpp + kai-voice + kai-do ──────────────
-        log "Installing voice control (whisper.cpp)..."
+        _status "Building voice control (whisper.cpp)..."
         if command -v cmake >/dev/null 2>&1 || dnf install -y cmake gcc-c++ make git 2>/dev/null || apt install -y cmake g++ make git 2>/dev/null; then
           cd /opt
           git clone https://github.com/ggerganov/whisper.cpp.git 2>/dev/null || (cd whisper.cpp && git pull)
@@ -1061,8 +1131,133 @@ KAIREMOTE
         chmod +x /usr/local/bin/kai-remote
 
         ok "Voice control installed: kai-voice, kai-do, kai-remote"
+
+        # ── Open WebUI — ChatGPT-like web interface for Ollama ──────────
+        _status "Installing Open WebUI..."
+        if [[ -x /usr/bin/podman ]] || [[ -x /usr/bin/docker ]]; then
+          local _crt
+          _crt="$([[ -x /usr/bin/podman ]] && echo /usr/bin/podman || echo /usr/bin/docker)"
+          "$_crt" pull ghcr.io/open-webui/open-webui:main >> "${LOG}" 2>&1 && {
+            "$_crt" run -d \
+              --name open-webui \
+              --network host \
+              -v open-webui:/app/backend/data \
+              -e OLLAMA_BASE_URL=http://127.0.0.1:11434 \
+              --restart always \
+              ghcr.io/open-webui/open-webui:main >> "${LOG}" 2>&1 \
+              || log "WARNING: Open WebUI container failed to start"
+
+            # Wait for Open WebUI to be ready — no fancy stuff, just wait
+            _status "Waiting for Open WebUI to start... When ready, refresh the AI Chat tab."
+            local _webui_ready=false
+            for _attempt in $(seq 1 120); do
+              if curl -sf -o /dev/null http://localhost:8080 2>/dev/null; then
+                _webui_ready=true
+                ok "Open WebUI ready on http://$(hostname -I | awk '{print $1}'):8080 (attempt ${_attempt})"
+                break
+              fi
+              sleep 5
+            done
+            if [[ "$_webui_ready" != "true" ]]; then
+              log "WARNING: Open WebUI not responding after 10 minutes — check 'podman logs open-webui'"
+            fi
+          } || log "WARNING: Open WebUI image pull failed — run manually with podman"
+        else
+          log "No container runtime (podman/docker) — skipping Open WebUI"
+          log "Install later: dnf install podman && podman run -d --name open-webui --network host -e OLLAMA_BASE_URL=http://127.0.0.1:11434 --restart always ghcr.io/open-webui/open-webui:main"
+        fi
+
         ok "AI profile ready — commands: kai, kai-voice, kai-do, kai-remote"
-        ok "Trained on $(wc -l < "$_corpus") lines of kldload.com documentation"
+        ok "AI model and knowledge corpus configured"
+
+        # Set Open WebUI as the browser homepage for desktop profiles
+        local _webui_ready="${_webui_ready:-false}"
+        local _webui_url="http://localhost:8080"
+        if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]]; then
+          # Set Firefox homepage for all users
+          mkdir -p /etc/firefox/policies
+          cat > /etc/firefox/policies/policies.json <<FFPOL
+{
+  "policies": {
+    "Homepage": {
+      "URL": "http://localhost:9000",
+      "StartPage": "homepage",
+      "Additional": ["http://localhost:8080"]
+    },
+    "OverrideFirstRunPage": "http://localhost:9000",
+    "Bookmarks": [
+      {"Title": "kldload Dashboard", "URL": "http://localhost:9000", "Placement": "toolbar"},
+      {"Title": "AI Chat", "URL": "http://localhost:8080", "Placement": "toolbar"},
+      {"Title": "kldload Docs", "URL": "https://kldload.com", "Placement": "toolbar"}
+    ],
+    "DisplayBookmarksToolbar": "always",
+    "NoDefaultBookmarks": true,
+    "OverridePostUpdatePage": "",
+    "UserMessaging": {
+      "WhatsNewMessaging": false,
+      "ExtensionRecommendations": false,
+      "SkipOnboarding": true
+    }
+  }
+}
+FFPOL
+          # Auto-open Firefox on login (same as live installer)
+          mkdir -p /etc/xdg/autostart
+          cat > /etc/xdg/autostart/kldload-dashboard.desktop <<AUTOSTART
+[Desktop Entry]
+Type=Application
+Name=kldload Dashboard
+Exec=firefox http://localhost:9000
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+AUTOSTART
+          log "Firefox autostart set to dashboard on :9000"
+
+          # Only open Firefox if Open WebUI is confirmed ready
+          if [[ "$_webui_ready" == "true" ]]; then
+            log "Opening Firefox to Open WebUI..."
+            for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
+              local _user
+              _user=$(id -nu "$_uid" 2>/dev/null || true)
+              if [[ -n "$_user" ]]; then
+                sudo -u "$_user" \
+                  WAYLAND_DISPLAY=wayland-0 \
+                  XDG_RUNTIME_DIR="/run/user/${_uid}" \
+                  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
+                  firefox "${_webui_url}" >/dev/null 2>&1 &
+                log "Opened Firefox to Open WebUI for user ${_user}"
+              fi
+            done
+          fi
+        fi
+        # Desktop notification
+        if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]]; then
+          local _ip
+          _ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+          # Send notification to all logged-in GNOME sessions
+          for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
+            local _user
+            _user=$(id -nu "$_uid" 2>/dev/null || true)
+            if [[ -n "$_user" ]]; then
+              sudo -u "$_user" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
+                notify-send -i dialog-information "kldload AI Ready" \
+                "Open WebUI is running at http://${_ip:-localhost}:8080\nModel: llama3.1:8b\nCommands: kai, kai-voice, kai-do, kai-remote" 2>/dev/null || true
+            fi
+          done
+        fi
+
+        # MOTD for SSH users
+        cat >> /etc/motd <<AIMOTD
+
+  kldload AI Assistant — ready
+  Open WebUI:  http://$(hostname -I 2>/dev/null | awk '{print $1}'):8080
+  Commands:    kai, kai-voice, kai-do, kai-remote
+  Model:       llama3.1:8b ($(curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "import sys,json;m=json.load(sys.stdin)['models'];print(f'{m[0][\"size\"]//1024//1024} MB')" 2>/dev/null || echo "loaded"))
+
+AIMOTD
+
+        ) # end AI subshell — errors above don't kill firstboot
+        ok "AI setup complete"
       else
         log "WARNING: Ollama install failed (no internet?) — run 'curl -fsSL https://ollama.com/install.sh | sh' manually"
       fi
@@ -1076,6 +1271,7 @@ KAIREMOTE
       log "Darksite removed."
     fi
 
+    rm -f /tmp/kldload-firstboot-status
     log "kldload-firstboot complete (free edition)"
     return 0
   fi
@@ -1146,6 +1342,7 @@ KAIREMOTE
   fi
   systemctl disable --now kldload-apt-mirror.service 2>/dev/null || true
 
+  rm -f /tmp/kldload-firstboot-status
   log "kldload-firstboot complete (free edition)"
 }
 

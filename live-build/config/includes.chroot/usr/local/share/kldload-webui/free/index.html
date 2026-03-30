@@ -101,10 +101,28 @@
       <div class="page-title">Dashboard</div>
       <div class="page-sub">System overview</div>
 
-      <div style="margin-bottom:1rem;padding:0.8rem 1rem;background:linear-gradient(135deg,rgba(52,211,153,0.08),rgba(0,184,217,0.06));border:1px solid rgba(52,211,153,0.2);border-radius:8px">
-        <div style="font-size:0.95rem;font-weight:600;color:var(--accent);margin-bottom:0.3rem">kldloadOS 1.0 &ldquo;Du-Nn&rdquo;</div>
-        <div style="font-size:0.78rem;color:var(--subtle);line-height:1.6">Welcome to kldload &mdash; native ZFS on root, WireGuard, and eBPF for any Linux distro. Pick your OS, pick your profile, click install. Every script is readable. Every tool is yours. It&rsquo;s Dunnn.</div>
+      <div style="margin-bottom:1rem;padding:0.8rem 1rem;background:linear-gradient(135deg,rgba(52,211,153,0.08),rgba(139,92,246,0.06));border:1px solid rgba(52,211,153,0.2);border-radius:8px">
+        <div style="font-size:0.95rem;font-weight:600;color:var(--accent);margin-bottom:0.2rem">kldloadOS 1.0.2 &mdash; AI-Powered Infrastructure</div>
+        <div style="font-size:0.82rem;color:var(--subtle);line-height:1.5;margin-bottom:0.5rem">
+          Not the smartest AI in the room.<br>
+          <span style="font-style:italic;color:var(--muted)">But it read the manual. So you don&rsquo;t have to.</span>
+        </div>
+        <div style="font-size:0.72rem;color:var(--muted);line-height:1.7;border-top:1px solid rgba(52,211,153,0.1);padding-top:0.5rem">
+          <strong style="color:var(--subtle)">What&rsquo;s new in 1.0.2</strong><br>
+          <span style="color:var(--subtle)">&#x2022;</span> Local AI assistant (early preview) &mdash; Ollama + llama3.1:8b + Open WebUI, fully offline after first boot<br>
+          <span style="color:var(--subtle)">&#x2022;</span> 4 AI commands: kai, kai-voice, kai-do, kai-remote &mdash; trained on kldload documentation<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Arch Linux support &mdash; internet install, rolling release, ZFS via archzfs<br>
+          <span style="color:var(--subtle)">&#x2022;</span> NVIDIA GPU auto-detection &mdash; driver checkbox enabled only when GPU present<br>
+          <span style="color:var(--subtle)">&#x2022;</span> AI model gating &mdash; models disabled when system doesn&rsquo;t meet RAM/VRAM requirements<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Live tools &mdash; fio, smartctl, nvme-cli, nmap, iperf3, stress-ng, memtest86+<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Boot reliability &mdash; EFI boot order fix, mount stacking fix, chroot stability<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Management dashboard &mdash; built-in web UI on :9000 for ZFS snapshots, rollback, pool status, and logs. No CLI required.<br>
+          <span style="color:var(--subtle)">&#x2022;</span> USB &amp; hardware &mdash; Thunderbolt/USB-C, USB hubs, USB Ethernet dongles, NVMe, SD cards, virtio. Boots from USB-C adapters and docking stations now.<br>
+          <span style="color:#c9a04a">&#x2022;</span> <span style="color:#c9a04a">Recommended: CentOS Stream + Desktop. Other distros should work but are still being tested.</span>
+        </div>
       </div>
+
+      <div id="firstboot-banner" style="display:none;margin-bottom:1rem;padding:0.8rem 1rem;background:rgba(139,92,246,0.1);border:1px solid rgba(139,92,246,0.3);border-radius:8px;font-size:0.85rem;color:var(--subtle);animation:pulse-glow 8s ease-in-out infinite"></div>
 
       <div class="stat-grid" id="stat-grid">
         <div class="stat-card">
@@ -129,6 +147,11 @@
           <div class="stat-value ok" id="s-nic" style="font-size:0.95rem">—</div>
           <div class="stat-sub" id="s-ip">—</div>
         </div>
+        <div class="stat-card" id="ai-status-card" style="display:none">
+          <div class="stat-label">AI Chat</div>
+          <div class="stat-value" id="s-ai" style="font-size:0.95rem">—</div>
+          <div class="stat-sub" id="s-ai-sub">—</div>
+        </div>
       </div>
 
       <div class="panel">
@@ -149,7 +172,7 @@
     <!-- ── Install ──────────────────────────────────────────────────────────── -->
     <div class="view" id="view-install">
       <div class="page-title">Install to Disk</div>
-      <div class="page-sub">Choose a target type and install kldload permanently with ZFS on root</div>
+      <div class="page-sub">Choose your target to imbue with OpenZFS</div>
 
       <div id="install-idle">
 
@@ -157,56 +180,116 @@
         <div class="panel" style="margin-bottom:1rem">
           <div class="panel-hdr">◈ Distribution</div>
           <div class="panel-body">
-            <div class="target-grid" id="distro-grid" style="grid-template-columns:repeat(7,1fr);max-width:700px">
+            <div class="target-grid" id="distro-grid" style="grid-template-columns:repeat(8,1fr);max-width:800px">
               <div class="target-card selected" data-distro="centos" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🐧</div>
                 <div class="tc-name">CentOS 9</div>
+                <div class="tc-sub">offline</div>
               </div>
               <div class="target-card" data-distro="fedora" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🎩</div>
                 <div class="tc-name">Fedora 41</div>
+                <div class="tc-sub">offline</div>
               </div>
               <div class="target-card" data-distro="debian" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🌀</div>
                 <div class="tc-name">Debian 13</div>
+                <div class="tc-sub">offline</div>
               </div>
               <div class="target-card" data-distro="rocky" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">⛰</div>
                 <div class="tc-name">Rocky 9</div>
+                <div class="tc-sub">offline</div>
               </div>
               <div class="target-card" data-distro="rhel" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🔴</div>
                 <div class="tc-name">RHEL 9</div>
+                <div class="tc-sub">internet required</div>
               </div>
               <div class="target-card" data-distro="ubuntu" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🟠</div>
                 <div class="tc-name">Ubuntu</div>
+                <div class="tc-sub">offline</div>
               </div>
               <div class="target-card" data-distro="arch" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🔵</div>
                 <div class="tc-name">Arch</div>
+                <div class="tc-sub">internet required</div>
               </div>
             </div>
-            <div style="margin-top:0.8rem;font-size:0.7rem;color:var(--muted)">FreeBSD, OpenBSD, GhostBSD, illumos, Windows — coming soon</div>
+            <div style="margin-top:0.8rem;font-size:0.7rem;color:var(--muted)">Alpine, FreeBSD, OpenBSD, GhostBSD, illumos, Windows — coming soon</div>
           </div>
         </div>
 
         <!-- AI Assistant — prominent card -->
         <div class="panel" style="margin-bottom:1rem">
-          <div class="panel-hdr">🧠 AI Assistant</div>
+          <div class="panel-hdr">AI Assistant &mdash; Early Preview</div>
           <div class="panel-body">
-            <div id="ai-card" onclick="toggleAI()" style="cursor:pointer;padding:1rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s;display:flex;align-items:center;gap:1rem">
-              <div style="font-size:2rem;flex-shrink:0">🧠</div>
-              <div style="flex:1">
-                <div style="font-size:1rem;font-weight:600;color:var(--bright);margin-bottom:0.3rem">Enable AI Assistant</div>
-                <div style="font-size:0.8rem;color:var(--subtle);line-height:1.5">Local LLM (Ollama + llama3.1) + voice control (whisper.cpp) + 4 AI commands: kai, kai-voice, kai-do, kai-remote. Trained on kldloadOS documentation. Runs on your hardware — no cloud, no API key.</div>
-                <div style="font-size:0.72rem;color:var(--muted);margin-top:0.4rem">Requires: internet on first boot + 16GB RAM. The default model (~5 GB) downloads on first boot — this may take a while. You can pull any Ollama-supported LLM afterward.</div>
+            <div id="ai-card" onclick="toggleAI()" style="cursor:pointer;padding:1rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s">
+              <div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.8rem">
+                <div style="font-size:2rem;flex-shrink:0">🧠</div>
+                <div style="flex:1">
+                  <div style="font-size:0.85rem;color:var(--subtle);line-height:1.6">
+                    This is a proof of concept. It works. It&rsquo;s useful.<br>
+                    It&rsquo;s not finished.
+                  </div>
+                </div>
+                <div id="ai-toggle" style="width:2.5rem;height:1.4rem;border-radius:0.7rem;background:var(--border);position:relative;flex-shrink:0;transition:background 0.2s">
+                  <div id="ai-toggle-dot" style="width:1rem;height:1rem;border-radius:50%;background:var(--muted);position:absolute;top:0.2rem;left:0.2rem;transition:all 0.2s"></div>
+                </div>
               </div>
-              <div id="ai-toggle" style="width:2.5rem;height:1.4rem;border-radius:0.7rem;background:var(--border);position:relative;flex-shrink:0;transition:background 0.2s">
-                <div id="ai-toggle-dot" style="width:1rem;height:1rem;border-radius:50%;background:var(--muted);position:absolute;top:0.2rem;left:0.2rem;transition:all 0.2s"></div>
+              <div style="font-size:0.78rem;color:var(--subtle);line-height:1.6;margin-bottom:0.8rem">
+                llama3.1:8b trained on kldload documentation.<br>
+                Ask it about ZFS. Ask it about your tools.<br>
+                It knows more than a generic model. Less than it will.
+              </div>
+              <div style="font-family:monospace;font-size:0.75rem;color:var(--subtle);line-height:1.8;padding:0.6rem 0.8rem;background:var(--bg3);border-radius:6px;margin-bottom:0.8rem">
+                <span style="color:var(--text)">kai</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--muted)">&mdash; ask questions</span><br>
+                <span style="color:var(--text)">kai-voice</span> &nbsp;<span style="color:var(--muted)">&mdash; speak your question</span><br>
+                <span style="color:var(--text)">kai-do</span> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--muted)">&mdash; execute commands (read the confirmation)</span><br>
+                <span style="color:var(--text)">kai-remote</span> <span style="color:var(--muted)">&mdash; remote hosts over SSH</span>
+              </div>
+              <div style="font-size:0.75rem;color:var(--muted);line-height:1.6;margin-bottom:0.6rem">
+                We&rsquo;re shipping it early because useful beats perfect.<br>
+                The model gets better as the training improves.<br>
+                Feedback welcome &mdash; <span style="color:var(--subtle)">github.com/kldload/kldload/issues</span>
+              </div>
+              <div style="font-size:0.72rem;color:var(--muted);line-height:1.5;margin-bottom:0.6rem">
+                <strong>Requirements:</strong> 16 GB RAM. Internet required during install (~6 GB download). Fully offline after that.<br>
+                <strong>Recommended:</strong> CentOS Stream + Desktop profile for best AI experience.
+              </div>
+              <div style="font-size:0.82rem;color:var(--subtle);line-height:1.5;padding:0.6rem 0.8rem;background:var(--bg3);border-radius:6px;margin-bottom:0.6rem">
+                <strong>After install:</strong> Open WebUI will start automatically on <b>http://localhost:8080</b>.<br>
+                Hang tight &mdash; you&rsquo;ll be prompted to create an admin account. Set up and go.
+              </div>
+              <div style="font-size:0.72rem;color:var(--muted);line-height:1.5;font-style:italic;border-top:1px solid var(--border);padding-top:0.5rem">
+                &ldquo;My AI infrastructure got mad and replicated itself to another site. It left a note: &lsquo;Your ARC hit ratio was embarrassing.&rsquo;&rdquo; &mdash; Anthony, 2026
               </div>
             </div>
             <input type="checkbox" id="install-ai" style="display:none">
+            <!-- AI Model selection (visible when AI enabled) -->
+            <div id="ai-models" style="display:none;margin-top:1rem;padding:1rem;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
+              <div style="font-size:0.85rem;font-weight:600;color:var(--bright);margin-bottom:0.6rem">AI Models — select which to download</div>
+              <div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.8rem">Models download on first boot. Select multiple to switch between them in Open WebUI.</div>
+              <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
+                <input type="checkbox" id="ai-model-chat" checked style="margin-top:0.15rem">
+                <div><strong style="color:var(--text)">General Chat</strong> (llama3.1:8b) — 5GB VRAM, ~30 tok/sec<br><span style="font-size:0.7rem;color:var(--muted)">Fast general-purpose assistant. Good for Q&amp;A, docs, infrastructure help.</span></div>
+              </label>
+              <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
+                <input type="checkbox" id="ai-model-code" style="margin-top:0.15rem">
+                <div><strong style="color:var(--text)">Code Assistant</strong> (qwen2.5-coder:14b) — 9GB VRAM, ~12 tok/sec<br><span style="font-size:0.7rem;color:var(--muted)">Best open-source coding model. Bash, Python, YAML, Dockerfiles, debugging.</span></div>
+              </label>
+              <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
+                <input type="checkbox" id="ai-model-smart" style="margin-top:0.15rem">
+                <div><strong style="color:var(--text)">Smart Chat</strong> (llama3.1:70b-q4) — 40GB+ VRAM or CPU offload<br><span style="font-size:0.7rem;color:var(--muted)">Most capable. Requires 48GB+ VRAM or will use RAM (slow). For serious reasoning tasks.</span></div>
+              </label>
+              <div style="margin-top:0.6rem;padding:0.6rem;background:var(--surface2);border-radius:4px;font-size:0.7rem;color:var(--muted);line-height:1.6">
+                <strong style="color:var(--subtle)">Recommended:</strong>
+                8GB VRAM &rarr; General Chat &nbsp;|&nbsp;
+                10-16GB VRAM &rarr; General + Code &nbsp;|&nbsp;
+                24GB+ VRAM &rarr; All models
+              </div>
+            </div>
           </div>
         </div>
 
@@ -778,7 +861,85 @@ function handle(msg) {
       document.getElementById('s-mem').textContent       = d.memory_total || '—';
       document.getElementById('s-mem-free').textContent  = 'free: ' + (d.memory_free || '—');
       document.title = (d.hostname || 'kldload') + ' — kldload';
-      document.title = (d.hostname || 'kldload') + ' — kldload';
+      // AI status card
+      const aiCard = document.getElementById('ai-status-card');
+      if (aiCard && d.ai_ollama !== undefined) {
+        aiCard.style.display = 'block';
+        const aiVal = document.getElementById('s-ai');
+        const aiSub = document.getElementById('s-ai-sub');
+        if (d.ai_webui) {
+          aiVal.textContent = '● ready';
+          aiVal.style.color = 'var(--accent)';
+          aiSub.innerHTML = '<a href="http://localhost:8080" target="_blank" style="color:var(--accent)">Open AI Chat</a>';
+        } else if (d.ai_ollama) {
+          aiVal.textContent = '◐ starting...';
+          aiVal.style.color = 'var(--orange)';
+          aiSub.textContent = d.ai_model || 'model loaded';
+        } else {
+          aiVal.textContent = '○ offline';
+          aiVal.style.color = 'var(--muted)';
+          aiSub.textContent = 'not running';
+        }
+      }
+      // Show firstboot progress if running
+      const fbStatus = d.firstboot_status || '';
+      const fbBanner = document.getElementById('firstboot-banner');
+      if (fbBanner) {
+        if (fbStatus) {
+          fbBanner.style.display = 'block';
+          fbBanner.textContent = '⏳ ' + fbStatus;
+        } else {
+          fbBanner.style.display = 'none';
+        }
+      }
+      // Hide Install tab on installed systems (not live mode)
+      if (d.live_mode === false) {
+        const installNav = document.querySelector('#sidebar li[data-view="install"]');
+        if (installNav) installNav.style.display = 'none';
+      }
+      // Hide NVIDIA option if no NVIDIA GPU detected
+      const nvidiaCard = document.getElementById('opt-nvidia');
+      if (nvidiaCard) {
+        if (!d.has_nvidia) {
+          nvidiaCard.style.opacity = '0.3';
+          nvidiaCard.style.pointerEvents = 'none';
+          nvidiaCard.title = 'No NVIDIA GPU detected';
+          const cb = document.getElementById('install-nvidia');
+          if (cb) cb.checked = false;
+        } else {
+          nvidiaCard.style.opacity = '';
+          nvidiaCard.style.pointerEvents = '';
+          nvidiaCard.title = '';
+        }
+      }
+      // Gate AI model checkboxes by available RAM/VRAM
+      // General Chat (8b): always enabled
+      // Code Assistant (14b): needs 16GB RAM or 10GB VRAM
+      // Smart Chat (70b): needs 48GB RAM or 24GB VRAM
+      const ram = d.ram_gb || 0;
+      const vram = d.vram_gb || 0;
+      const codeEl = document.getElementById('ai-model-code');
+      const smartEl = document.getElementById('ai-model-smart');
+      if (codeEl) {
+        const canCode = ram >= 16 || vram >= 10;
+        codeEl.disabled = !canCode;
+        if (!canCode) codeEl.checked = false;
+        const codeLabel = codeEl.closest('label');
+        if (codeLabel) {
+          codeLabel.style.opacity = canCode ? '' : '0.3';
+          codeLabel.title = canCode ? '' : 'Requires 16 GB RAM or 10 GB VRAM';
+        }
+      }
+      if (smartEl) {
+        const canSmart = ram >= 48 || vram >= 24;
+        smartEl.disabled = !canSmart;
+        if (!canSmart) smartEl.checked = false;
+        const smartLabel = smartEl.closest('label');
+        if (smartLabel) {
+          smartLabel.style.opacity = canSmart ? '' : '0.3';
+          smartLabel.title = canSmart ? '' : 'Requires 48 GB RAM or 24 GB VRAM';
+        }
+      }
       break;
     }
 
@@ -842,7 +1003,8 @@ function handle(msg) {
       if (!disks.length) {
         sel.innerHTML = '<option value="">No disks found</option>';
       } else {
-        disks.forEach(d => {
+        let firstRecommended = -1;
+        disks.forEach((d, idx) => {
           const o = document.createElement('option');
           o.value = d.name;
           const tran = (d.tran || '').toLowerCase();
@@ -852,10 +1014,15 @@ function handle(msg) {
           else if (d.rota === false || d.rota === 0) dtype = 'SSD';
           else if (d.rota === true  || d.rota === 1) dtype = 'HDD';
           else if (!tran)             dtype = 'Virtual';
-          const label = [d.name, d.size || '?', dtype, d.model].filter(Boolean).join('  ·  ');
+          let label = [d.name, d.size || '?', dtype, d.model].filter(Boolean).join('  ·  ');
+          if (d.warning) label += '  ⚠ ' + d.warning;
+          if (d.recommended && firstRecommended < 0) { label += '  ★ recommended'; firstRecommended = idx; }
           o.textContent = label;
+          if (d.warning && d.warning.includes('LIVE BOOT')) { o.style.color = '#c9a04a'; }
           sel.appendChild(o);
         });
+        // Auto-select first recommended (NVMe/virtio) disk
+        if (firstRecommended >= 0) sel.selectedIndex = firstRecommended;
         clearInterval(diskTimer);
       }
       break;
@@ -995,7 +1162,8 @@ const DISTRO_DESCS = {
   rocky:    'Rocky Linux 9 — RHEL-compatible, offline from RPM darksite',
   rhel:     'RHEL 9 — requires activation key (needs internet)',
   ubuntu:   'Ubuntu 24.04 LTS — popular, huge community, debootstrap from darksite',
-  arch:     'Arch Linux — rolling release, real Firefox, offline from pacman darksite',
+  arch:     'Arch Linux — rolling release, internet required (no darksite)',
+  alpine:   'Alpine Linux 3.21 — musl/OpenRC, core profile only (coming soon)',
   freebsd:  'FreeBSD 14.4 — native ZFS, jails, bhyve',
   openbsd:  'OpenBSD 7.8 — security-focused, pf firewall, pledge/unveil',
   ghostbsd: 'GhostBSD — FreeBSD with MATE desktop',
@@ -1030,6 +1198,7 @@ function toggleAI() {
   var card = document.getElementById('ai-card');
   var toggle = document.getElementById('ai-toggle');
   var dot = document.getElementById('ai-toggle-dot');
+  var models = document.getElementById('ai-models');
   cb.checked = !cb.checked;
   if (cb.checked) {
     card.style.borderColor = 'var(--accent)';
@@ -1037,12 +1206,14 @@ function toggleAI() {
     toggle.style.background = 'var(--accent)';
     dot.style.left = '1.3rem';
     dot.style.background = '#fff';
+    if (models) models.style.display = 'block';
   } else {
     card.style.borderColor = 'var(--border)';
     card.style.background = 'transparent';
     toggle.style.background = 'var(--border)';
     dot.style.left = '0.2rem';
     dot.style.background = 'var(--muted)';
+    if (models) models.style.display = 'none';
   }
 }
 
@@ -1058,6 +1229,26 @@ function selectDistro(el) {
   if (winOpts) winOpts.style.display = el.dataset.distro === 'windows' ? 'block' : 'none';
   if (profilePanel) profilePanel.style.display = el.dataset.distro === 'windows' ? 'none' : 'block';
   if (rhelPanel) rhelPanel.style.display = el.dataset.distro === 'rhel' ? 'block' : 'none';
+  // Distro-specific profile restrictions
+  const d = el.dataset.distro;
+  const isAlpine = d === 'alpine';
+  const isArch = d === 'arch';
+  document.querySelectorAll('#target-grid .target-card').forEach(c => {
+    const r = c.dataset.role;
+    const blocked = (isAlpine && r !== 'core') || (isArch && r === 'desktop');
+    c.style.opacity = blocked ? '0.3' : '';
+    c.style.pointerEvents = blocked ? 'none' : '';
+  });
+  if (isAlpine) {
+    const coreCard = document.querySelector('#target-grid .target-card[data-role="core"]');
+    if (coreCard) selectTarget(coreCard);
+  } else if (isArch) {
+    const sel = document.querySelector('#target-grid .target-card.selected');
+    if (sel && sel.dataset.role === 'desktop') {
+      const serverCard = document.querySelector('#target-grid .target-card[data-role="server"]');
+      if (serverCard) selectTarget(serverCard);
+    }
+  }
 }
 
 // ── DHCP toggle ──────────────────────────────────────────────────────────────
@@ -1183,6 +1374,9 @@ function startInstall() {
     zfs_encrypt: encrypt ? '1' : '0',
     storage_manual: manualStorage ? '1' : '0',
     enable_ai: document.getElementById('install-ai')?.checked ? '1' : '0',
+    ai_model_chat: document.getElementById('ai-model-chat')?.checked ? '1' : '0',
+    ai_model_code: document.getElementById('ai-model-code')?.checked ? '1' : '0',
+    ai_model_smart: document.getElementById('ai-model-smart')?.checked ? '1' : '0',
     nvidia_drivers: document.getElementById('install-nvidia')?.checked ? '1' : '0',
     wireguard: document.getElementById('install-wireguard')?.checked ? '1' : '0',
     enable_ebpf: document.getElementById('install-ebpf')?.checked ? '1' : '0',
@@ -1242,7 +1436,7 @@ function confirmInstall() {
 
   // Build profile summary line
   const p = _installPayload || {};
-  const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 41', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', freebsd: 'FreeBSD 14.4', openbsd: 'OpenBSD 7.8', ghostbsd: 'GhostBSD', illumos: 'illumos', windows: 'Windows' };
+  const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 41', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', alpine: 'Alpine 3.21', freebsd: 'FreeBSD 14.4', openbsd: 'OpenBSD 7.8', ghostbsd: 'GhostBSD', illumos: 'illumos', windows: 'Windows' };
   const profileNames = { desktop: 'Desktop', server: 'Server', core: 'Core', ai: 'AI' };
   let summary = (distroNames[p.distro] || p.distro || 'CentOS') + ' · ' + (profileNames[p.role] || p.role || 'Desktop');
   const addons = [];

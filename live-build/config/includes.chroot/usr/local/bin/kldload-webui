@@ -480,7 +480,7 @@ def get_node_env():
 # ── Disk detection ─────────────────────────────────────────────────────────────
 
 def get_disks():
-    """Return list of usable block devices."""
+    """Return list of usable block devices, NVMe first, USB/removable last."""
     try:
         out = subprocess.check_output(
             ["lsblk", "-J", "-o", "NAME,SIZE,MODEL,TYPE,RM,MOUNTPOINT,ROTA,TRAN"],
@@ -488,17 +488,61 @@ def get_disks():
         )
         data = json.loads(out)
         disks = []
+        # Detect the live boot device so we can flag it
+        live_dev = ""
+        try:
+            with open("/proc/cmdline") as f:
+                cmdline = f.read()
+            # Find the device backing /run/initramfs/live
+            live_mount = subprocess.check_output(
+                ["findmnt", "-n", "-o", "SOURCE", "/run/initramfs/live"],
+                text=True
+            ).strip()  # e.g. /dev/sda or /dev/sda1
+            import re
+            m = re.match(r'(/dev/[a-z]+)', live_mount)
+            if m:
+                live_dev = m.group(1)
+        except Exception:
+            pass
+
         for d in data.get("blockdevices", []):
             if d.get("type") == "disk":
+                dev_path = f'/dev/{d["name"]}'
+                is_removable = bool(d.get("rm", False))
+                is_usb = (d.get("tran") or "").lower() == "usb"
+                is_live = dev_path == live_dev
+                is_nvme = d["name"].startswith("nvme")
+                is_virtio = d["name"].startswith("vd")
+                # Priority: nvme=0, virtio=1, sata/sas=2, usb/removable=3, live_boot=4
+                if is_live:
+                    priority = 4
+                elif is_usb or is_removable:
+                    priority = 3
+                elif is_nvme:
+                    priority = 0
+                elif is_virtio:
+                    priority = 1
+                else:
+                    priority = 2
+                warning = ""
+                if is_live:
+                    warning = "LIVE BOOT DEVICE — do not install here"
+                elif is_usb or is_removable:
+                    warning = "removable / USB"
                 disks.append({
-                    "name":       f'/dev/{d["name"]}',
+                    "name":       dev_path,
                     "size":       d.get("size", "?"),
                     "model":      (d.get("model") or "").strip(),
-                    "removable":  d.get("rm", False),
+                    "removable":  is_removable,
                     "mountpoint": d.get("mountpoint"),
                     "rota":       d.get("rota", None),
                     "tran":       d.get("tran") or "",
+                    "priority":   priority,
+                    "warning":    warning,
+                    "recommended": is_nvme or is_virtio,
                 })
+        # Sort: NVMe first, USB/live last
+        disks.sort(key=lambda x: x["priority"])
         return disks
     except Exception as e:
         LOG.error("lsblk failed: %s", e)
@@ -536,7 +580,58 @@ def get_system_info():
                     info[k.lower()] = v
     except Exception:
         pass
+    # Detect NVIDIA GPU and VRAM
+    try:
+        lspci = subprocess.check_output(["lspci"], text=True, stderr=subprocess.DEVNULL)
+        info["has_nvidia"] = "NVIDIA" in lspci.upper()
+    except Exception:
+        info["has_nvidia"] = False
+    # Total RAM in GB (for AI model gating)
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    info["ram_gb"] = int(line.split()[1]) // (1024 * 1024)
+                    break
+    except Exception:
+        info["ram_gb"] = 0
+    # NVIDIA VRAM via nvidia-smi (if available)
+    info["vram_gb"] = 0
+    if info.get("has_nvidia"):
+        try:
+            nvsmi = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                text=True, stderr=subprocess.DEVNULL).strip()
+            info["vram_gb"] = int(nvsmi.split("\n")[0]) // 1024
+        except Exception:
+            pass
     info["edition"] = EDITION
+    # Firstboot progress status
+    try:
+        with open("/tmp/kldload-firstboot-status") as f:
+            info["firstboot_status"] = f.read().strip()
+    except Exception:
+        info["firstboot_status"] = ""
+    # AI status — check Ollama and Open WebUI
+    info["ai_ollama"] = False
+    info["ai_webui"] = False
+    info["ai_model"] = ""
+    try:
+        import urllib.request
+        r = urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2)
+        if r.status == 200:
+            info["ai_ollama"] = True
+            import json as _json
+            data = _json.loads(r.read())
+            names = [m["name"] for m in data.get("models", [])]
+            info["ai_model"] = ", ".join(names) if names else "no models"
+    except Exception:
+        pass
+    try:
+        r2 = urllib.request.urlopen("http://localhost:8080", timeout=2)
+        info["ai_webui"] = r2.status == 200
+    except Exception:
+        pass
     # Live mode: no KLDLOAD_INSTALLED=1 in manifest
     info["live_mode"] = True
     try:

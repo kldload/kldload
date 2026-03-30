@@ -27,6 +27,7 @@ VM_MEMORY="${VM_MEMORY:-16384}"
 VM_CORES="${VM_CORES:-4}"
 VM_DISK_GB="${VM_DISK_GB:-80}"
 VM_BRIDGE="${VM_BRIDGE:-vmbr0}"
+KVM_VMS="${KVM_VMS:-1}"
 
 USB_DEVICE="${USB_DEVICE:-/dev/sda}"
 USB_BURN_ON_DEPLOY="${USB_BURN_ON_DEPLOY:-no}"
@@ -111,6 +112,22 @@ cmd_build_arch_darksite() {
     log "Arch darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
 }
 
+cmd_build_alpine_darksite() {
+    local runtime
+    runtime="$(detect_runtime)"
+    local darksite_dir="$ROOT/live-build/darksite-alpine-cache"
+    mkdir -p "$darksite_dir"
+    log "Building Alpine Linux darksite apk cache (runs in Alpine container)..."
+    "$runtime" run --rm \
+        -v "$ROOT/build/darksite-alpine:/darksite-build:z,ro" \
+        -v "$darksite_dir:/output:z" \
+        -e ARCH="x86_64" \
+        --name "kldload-darksite-alpine-$$" \
+        alpine:latest \
+        sh /darksite-build/build-darksite-alpine.sh
+    log "Alpine darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
+}
+
 cmd_build_fedora_darksite() {
     local runtime
     runtime="$(detect_runtime)"
@@ -127,6 +144,56 @@ cmd_build_fedora_darksite() {
         fedora:41 \
         bash /darksite-build/build-darksite-fedora.sh
     log "Fedora darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
+}
+
+cmd_build_ai_docs() {
+    local ai_dir="$ROOT/live-build/config/includes.chroot/usr/local/share/kldload-ai"
+    local web_dir="${KLDLOAD_WEB_DIR:-/root/kldload-web}"
+    mkdir -p "$ai_dir"
+
+    log "Building AI knowledge base..."
+
+    # Step 1: Scrape kldload-web HTML to text
+    if [[ -d "$web_dir" ]]; then
+        log "Scraping ${web_dir} HTML pages..."
+        local _docs="$ai_dir/kldload-docs.txt"
+        : > "$_docs"
+        find "$web_dir" -name '*.html' -not -path '*node_modules*' -not -path '*.git*' -not -path '*assets*' | sort | while read -r _f; do
+            local _rel="${_f#${web_dir}/}"
+            echo "=== ${_rel} ===" >> "$_docs"
+            perl -0777 -pe 's/<script[^>]*>.*?<\/script>//gsi; s/<style[^>]*>.*?<\/style>//gsi; s/<[^>]+>//g; s/&nbsp;/ /g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&mdash;/—/g; s/&ndash;/–/g; s/&rsquo;/'"'"'/g; s/&lsquo;/'"'"'/g; s/&rdquo;/"/g; s/&ldquo;/"/g; s/&rarr;/→/g; s/&bull;/•/g; s/&#\d+;//g; s/^\s*$//gm' "$_f" >> "$_docs" 2>/dev/null
+            echo "" >> "$_docs"
+        done
+        local _pages _size
+        _pages=$(grep -c '^===' "$_docs")
+        _size=$(du -sh "$_docs" | cut -f1)
+        log "Site scrape: ${_pages} pages, ${_size}"
+    else
+        log "WARNING: kldload-web not found at ${web_dir} — skipping site scrape"
+    fi
+
+    # Step 2: OCR the PDF manual if available
+    local _pdf
+    _pdf=$(ls "$web_dir"/kldloadOS-documentation-*.pdf 2>/dev/null | sort -V | tail -1)
+    if [[ -n "$_pdf" ]] && command -v ocrmypdf >/dev/null 2>&1; then
+        log "OCR'ing $(basename "$_pdf")..."
+        ocrmypdf --force-ocr "$_pdf" /tmp/kldload-docs-ocr.pdf 2>&1 | tail -3
+        pdftotext /tmp/kldload-docs-ocr.pdf "$ai_dir/kldload-manual.txt" 2>&1
+        rm -f /tmp/kldload-docs-ocr.pdf
+        local _lines
+        _lines=$(wc -l < "$ai_dir/kldload-manual.txt")
+        log "PDF OCR: ${_lines} lines -> kldload-manual.txt"
+    elif [[ -n "$_pdf" ]]; then
+        # Fallback: pdftotext without OCR
+        log "No ocrmypdf — trying pdftotext directly on $(basename "$_pdf")..."
+        pdftotext "$_pdf" "$ai_dir/kldload-manual.txt" 2>&1
+        log "PDF text: $(wc -l < "$ai_dir/kldload-manual.txt") lines"
+    else
+        log "No PDF manual found — skipping"
+    fi
+
+    log "AI docs ready: $(du -sh "$ai_dir" | cut -f1)"
+    ls -lh "$ai_dir/"
 }
 
 cmd_build() {
@@ -150,11 +217,15 @@ cmd_build() {
             log "Ubuntu darksite cached: $(du -sh "$ubuntu_darksite" | cut -f1)"
         fi
 
-        local arch_darksite="$ROOT/live-build/darksite-arch-cache"
-        if [[ ! -d "$arch_darksite/pkg" ]] || [[ "$(find "$arch_darksite/pkg" -name '*.pkg.tar.*' 2>/dev/null | wc -l)" -eq 0 ]]; then
-            cmd_build_arch_darksite
+        # Arch darksite disabled — Arch rolling release causes version drift.
+        # Arch installs require internet (pulls from live mirrors + archzfs).
+        log "Arch darksite: not available (internet required for Arch installs)"
+
+        local alpine_darksite="$ROOT/live-build/darksite-alpine-cache"
+        if [[ ! -d "$alpine_darksite/apk" ]] || [[ "$(find "$alpine_darksite/apk" -name '*.apk' -not -name 'APKINDEX*' 2>/dev/null | wc -l)" -eq 0 ]]; then
+            cmd_build_alpine_darksite
         else
-            log "Arch darksite cached: $(du -sh "$arch_darksite" | cut -f1)"
+            log "Alpine darksite cached: $(du -sh "$alpine_darksite" | cut -f1)"
         fi
 
         local fedora_darksite="$ROOT/live-build/darksite-fedora-cache"
@@ -247,11 +318,20 @@ cmd_kvm_deploy() {
     cp "$iso" /var/lib/libvirt/images/kldload-free-latest.iso
     chown qemu:qemu /var/lib/libvirt/images/kldload-free-latest.iso
 
-    for _name in kldload-test-1 kldload-test-2; do
+    # Shut down any existing kldload-test VMs first
+    for _i in $(seq 1 10); do
+        local _existing="kldload-test-${_i}"
+        if virsh domstate "$_existing" 2>/dev/null | grep -q running; then
+            log "Shutting down ${_existing}..."
+            virsh destroy "$_existing" 2>/dev/null || true
+        fi
+    done
+
+    for _i in $(seq 1 "$KVM_VMS"); do
+        local _name="kldload-test-${_i}"
         local _disk="/var/lib/libvirt/images/${_name}.qcow2"
 
         log "Deploying ${_name}..."
-        virsh destroy "$_name" 2>/dev/null || true
         virsh undefine "$_name" --nvram --remove-all-storage 2>/dev/null || true
         rm -f "$_disk" 2>/dev/null || true
 
@@ -311,7 +391,9 @@ case "${1:-help}" in
     build-bsd-darksite)    bash build/darksite-bsd/build-darksite-bsd.sh "$ROOT/live-build/darksite-bsd-cache" ;;
     build-ubuntu-darksite) cmd_build_ubuntu_darksite ;;
     build-arch-darksite) cmd_build_arch_darksite ;;
+    build-alpine-darksite) cmd_build_alpine_darksite ;;
     build-fedora-darksite) cmd_build_fedora_darksite ;;
+    build-ai-docs)      cmd_build_ai_docs ;;
     builder-image)      cmd_builder_image ;;
     clean)              cmd_clean ;;
     burn)               cmd_burn ;;
@@ -327,6 +409,8 @@ case "${1:-help}" in
         echo "Commands:"
         echo "  full                  Clean + rebuild builder + build ISO"
         echo "  build                 Build ISO only (caches Debian darksite)"
+        echo "  build-ai-docs         Scrape site + OCR PDF for AI knowledge base"
+        echo "  build-alpine-darksite Rebuild Alpine apk darksite cache"
         echo "  build-debian-darksite Rebuild Debian APT darksite cache"
         echo "  builder-image         Rebuild the container builder image"
         echo "  clean                 Remove build artifacts"
