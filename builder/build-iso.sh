@@ -697,9 +697,10 @@ else
 fi
 
 # ── Bob live service (AI appliance live boot) ────────────────────────────────
-_bob_svc="${_ic}/etc/systemd/system/bob-live.service"
-_bob_bin="${_ic}/usr/local/sbin/bob-live"
-_bob_marker="${_ic}/etc/kldload/bob-live"
+_bob_ic="/build/live-build/config/includes.chroot"
+_bob_svc="${_bob_ic}/etc/systemd/system/bob-live.service"
+_bob_bin="${_bob_ic}/usr/local/sbin/bob-live"
+_bob_marker="${_bob_ic}/etc/kldload/bob-live"
 cp "$_bob_svc" "${ROOTFS}/etc/systemd/system/" 2>/dev/null || true
 cp "$_bob_bin" "${ROOTFS}/usr/local/sbin/" 2>/dev/null && chmod +x "${ROOTFS}/usr/local/sbin/bob-live" || true
 if [[ -f "$_bob_marker" ]]; then
