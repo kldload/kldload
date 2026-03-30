@@ -362,6 +362,40 @@ cmd_kvm_deploy() {
     done
 }
 
+cmd_kvm_deploy_bob() {
+    local iso
+    iso="$(latest_iso)"
+    [[ -n "$iso" ]] || die "No ISO found — run build-ai-appliance first"
+
+    cp "$iso" /var/lib/libvirt/images/kldload-bob.iso
+    chown qemu:qemu /var/lib/libvirt/images/kldload-bob.iso
+
+    local _name="bob-1"
+    local _disk="/var/lib/libvirt/images/${_name}.qcow2"
+
+    if virsh domstate "$_name" 2>/dev/null | grep -q running; then
+        log "Shutting down ${_name}..."
+        virsh destroy "$_name" 2>/dev/null || true
+    fi
+
+    log "Deploying ${_name}..."
+    virsh undefine "$_name" --nvram --remove-all-storage 2>/dev/null || true
+    rm -f "$_disk" 2>/dev/null || true
+
+    qemu-img create -f qcow2 "$_disk" "${VM_DISK_GB}G"
+    chown qemu:qemu "$_disk"
+
+    virt-install --name "$_name" --ram "$VM_MEMORY" --vcpus "$VM_CORES" \
+        --disk "path=${_disk},format=qcow2,bus=virtio" \
+        --cdrom /var/lib/libvirt/images/kldload-bob.iso \
+        --os-variant centos-stream9 --network network=default,model=virtio \
+        --graphics vnc,listen=0.0.0.0 \
+        --boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no \
+        --noautoconsole --noreboot
+
+    log "${_name} ready (off) — VNC $(virsh vncdisplay "$_name" 2>/dev/null || echo '?')"
+}
+
 cmd_proxmox_deploy() {
     local iso
     iso="$(latest_iso)"
@@ -412,6 +446,7 @@ case "${1:-help}" in
     burn)               cmd_burn ;;
     full)               cmd_full ;;
     kvm-deploy)         cmd_kvm_deploy ;;
+    kvm-deploy-bob)     cmd_kvm_deploy_bob ;;
     proxmox-deploy)     cmd_proxmox_deploy ;;
     deploy-all)         cmd_deploy_all ;;
     help|*)
@@ -430,6 +465,7 @@ case "${1:-help}" in
         echo "  clean                 Remove build artifacts"
         echo "  burn                  Write ISO to USB (USB_DEVICE=/dev/sda)"
         echo "  kvm-deploy            Deploy ISO to local KVM (virsh)"
+        echo "  kvm-deploy-bob        Deploy Bob AI appliance to KVM (off)"
         echo "  proxmox-deploy        Deploy ISO to Proxmox (VMID=$VMID)"
         echo "  deploy-all            Deploy to KVM + Proxmox + print USB command"
         echo ""
