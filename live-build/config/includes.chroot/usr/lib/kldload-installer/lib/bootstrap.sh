@@ -910,8 +910,18 @@ CUSTOMREPO
   k_install_system_files
   k_write_manifest
 
-  # NVIDIA drivers if requested
-  if [[ "${KLDLOAD_NVIDIA_DRIVERS:-0}" == "1" ]]; then
+  # NVIDIA drivers — auto-detect GPU or honor explicit flag
+  local _nvidia="${KLDLOAD_NVIDIA_DRIVERS:-0}"
+  if [[ "$_nvidia" == "auto" ]]; then
+    if lspci 2>/dev/null | grep -qi nvidia; then
+      _nvidia=1
+      k_log_to "$log" "NVIDIA GPU detected — installing drivers"
+    else
+      _nvidia=0
+      k_log_to "$log" "No NVIDIA GPU detected — skipping drivers"
+    fi
+  fi
+  if [[ "$_nvidia" == "1" ]]; then
     k_log_to "$log" "Installing NVIDIA drivers..."
     # Add NVIDIA CUDA repo — use repo config instead of versioned RPM
     cat > "${target}/etc/yum.repos.d/cuda.repo" <<'CUDAREPO'
@@ -1382,8 +1392,18 @@ MIRRORS
     fi
   fi
 
-  # ── NVIDIA drivers (if requested) ─────────────────────────────────────────
-  if [[ "${KLDLOAD_NVIDIA_DRIVERS:-0}" == "1" ]]; then
+  # ── NVIDIA drivers — auto-detect GPU or honor explicit flag ────────────────
+  local _nvidia_arch="${KLDLOAD_NVIDIA_DRIVERS:-0}"
+  if [[ "$_nvidia_arch" == "auto" ]]; then
+    if lspci 2>/dev/null | grep -qi nvidia; then
+      _nvidia_arch=1
+      k_log_to "$log" "NVIDIA GPU detected — installing drivers"
+    else
+      _nvidia_arch=0
+      k_log_to "$log" "No NVIDIA GPU detected — skipping drivers"
+    fi
+  fi
+  if [[ "$_nvidia_arch" == "1" ]]; then
     k_log_to "$log" "Installing NVIDIA drivers..."
     pacman --root "${target}" --config "${pacman_conf}" \
       --noconfirm --needed -S nvidia nvidia-utils nvidia-settings >> "$log" 2>&1 || {
