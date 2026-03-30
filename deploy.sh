@@ -197,15 +197,14 @@ cmd_build_ai_docs() {
 }
 
 cmd_build_ai_appliance() {
-    local answers_src="$ROOT/live-build/config/includes.chroot/etc/kldload/debz/answers/ai-appliance.env"
-    local answers_dst="$ROOT/live-build/config/includes.chroot/etc/kldload/autoinstall.env"
-    [[ -f "$answers_src" ]] || die "Answers file not found: $answers_src"
-    cp "$answers_src" "$answers_dst"
-    log "AI appliance mode: baked autoinstall.env into ISO"
-    log "  On boot: auto-detects disk, wipes, installs CentOS + Ollama + Open WebUI"
+    local bob_marker="$ROOT/live-build/config/includes.chroot/etc/kldload/bob-live"
+    mkdir -p "$(dirname "$bob_marker")"
+    touch "$bob_marker"
+    log "Bob live mode: AI assistant starts on boot"
+    log "  Boot USB → Ollama + Bob + Open WebUI → Firefox opens → ready to chat"
     ISO_NAME_OVERRIDE="bob-${KLDLOAD_VERSION:-1.0.2}-${ARCH}.iso" PROFILE=desktop cmd_build
     log "Bob ISO ready: $ROOT/live-build/output/bob-${KLDLOAD_VERSION:-1.0.2}-${ARCH}.iso"
-    rm -f "$answers_dst"  # clean up so normal builds aren't affected
+    rm -f "$bob_marker"  # clean up so normal builds aren't affected
 }
 
 cmd_build() {

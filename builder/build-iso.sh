@@ -696,6 +696,21 @@ else
     log "Core edition — no kldload tools, webui, or darksites."
 fi
 
+# ── Bob live service (AI appliance live boot) ────────────────────────────────
+_bob_svc="${_ic}/etc/systemd/system/bob-live.service"
+_bob_bin="${_ic}/usr/local/sbin/bob-live"
+_bob_marker="${_ic}/etc/kldload/bob-live"
+cp "$_bob_svc" "${ROOTFS}/etc/systemd/system/" 2>/dev/null || true
+cp "$_bob_bin" "${ROOTFS}/usr/local/sbin/" 2>/dev/null && chmod +x "${ROOTFS}/usr/local/sbin/bob-live" || true
+if [[ -f "$_bob_marker" ]]; then
+    mkdir -p "${ROOTFS}/etc/kldload"
+    touch "${ROOTFS}/etc/kldload/bob-live"
+    mkdir -p "${ROOTFS}/etc/systemd/system/multi-user.target.wants"
+    ln -sf "/etc/systemd/system/bob-live.service" \
+        "${ROOTFS}/etc/systemd/system/multi-user.target.wants/bob-live.service"
+    log "Bob live mode enabled — AI assistant starts on boot"
+fi
+
 # ── Autoinstall service + baked-in answers (AI appliance, seed-disk boot) ─────
 _ic="/build/live-build/config/includes.chroot"
 mkdir -p "${ROOTFS}/etc/systemd/system/multi-user.target.wants" "${ROOTFS}/usr/local/sbin" "${ROOTFS}/etc/kldload"
