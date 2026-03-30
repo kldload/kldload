@@ -197,14 +197,10 @@ cmd_build_ai_docs() {
 }
 
 cmd_build_ai_appliance() {
-    local bob_marker="$ROOT/live-build/config/includes.chroot/etc/kldload/bob-live"
-    mkdir -p "$(dirname "$bob_marker")"
-    touch "$bob_marker"
     log "Bob live mode: AI assistant starts on boot"
     log "  Boot USB → Ollama + Bob + Open WebUI → Firefox opens → ready to chat"
-    ISO_NAME_OVERRIDE="bob-${KLDLOAD_VERSION:-1.0.2}-${ARCH}.iso" PROFILE=desktop cmd_build
+    BOB_LIVE=1 ISO_NAME_OVERRIDE="bob-${KLDLOAD_VERSION:-1.0.2}-${ARCH}.iso" PROFILE=desktop cmd_build
     log "Bob ISO ready: $ROOT/live-build/output/bob-${KLDLOAD_VERSION:-1.0.2}-${ARCH}.iso"
-    rm -f "$bob_marker"  # clean up so normal builds aren't affected
 }
 
 cmd_build() {
@@ -256,6 +252,7 @@ cmd_build() {
         -e ARCH="$ARCH" \
         -e RELEASE="$RELEASE" \
         -e ISO_NAME_OVERRIDE="${ISO_NAME_OVERRIDE:-}" \
+        -e BOB_LIVE="${BOB_LIVE:-}" \
         --name "$BUILDER_CONTAINER" \
         "$BUILDER_IMAGE" \
         bash /build/builder/build-iso.sh

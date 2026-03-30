@@ -698,17 +698,16 @@ fi
 
 # ── Bob live service (AI appliance live boot) ────────────────────────────────
 _bob_ic="/build/live-build/config/includes.chroot"
-_bob_svc="${_bob_ic}/etc/systemd/system/bob-live.service"
-_bob_bin="${_bob_ic}/usr/local/sbin/bob-live"
-_bob_marker="${_bob_ic}/etc/kldload/bob-live"
-cp "$_bob_svc" "${ROOTFS}/etc/systemd/system/" 2>/dev/null || true
-cp "$_bob_bin" "${ROOTFS}/usr/local/sbin/" 2>/dev/null && chmod +x "${ROOTFS}/usr/local/sbin/bob-live" || true
-if [[ -f "$_bob_marker" ]]; then
+cp "${_bob_ic}/etc/systemd/system/bob-live.service" "${ROOTFS}/etc/systemd/system/" 2>/dev/null || true
+cp "${_bob_ic}/usr/local/sbin/bob-live" "${ROOTFS}/usr/local/sbin/" 2>/dev/null && chmod +x "${ROOTFS}/usr/local/sbin/bob-live" || true
+if [[ "${BOB_LIVE:-}" == "1" ]]; then
     mkdir -p "${ROOTFS}/etc/kldload"
     touch "${ROOTFS}/etc/kldload/bob-live"
     mkdir -p "${ROOTFS}/etc/systemd/system/multi-user.target.wants"
     ln -sf "/etc/systemd/system/bob-live.service" \
         "${ROOTFS}/etc/systemd/system/multi-user.target.wants/bob-live.service"
+    # Disable the kldload installer webui — Bob replaces it
+    rm -f "${ROOTFS}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" 2>/dev/null || true
     log "Bob live mode enabled — AI assistant starts on boot"
 fi
 
