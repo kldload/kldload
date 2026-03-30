@@ -413,6 +413,24 @@ EOGDM
   # Wayland is the default — xserver-xorg is installed as fallback so GDM
   # can fall back to X11 if Wayland fails (older virtual GPUs, etc.)
 
+  # ── Disable screen blanking / power saving (desktop profiles) ────────────────
+  mkdir -p "${target}/etc/dconf/db/local.d"
+  cat > "${target}/etc/dconf/db/local.d/00-kldload-power" <<'DCONF'
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-type='nothing'
+sleep-inactive-battery-type='nothing'
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+idle-activation-enabled=false
+DCONF
+  mkdir -p "${target}/etc/dconf/profile"
+  echo -e "user-db:user\nsystem-db:local" > "${target}/etc/dconf/profile/user"
+  chroot "${target}" dconf update 2>/dev/null || true
+
   # ── Custom .desktop launchers ───────────────────────────────────────────────
   mkdir -p "${target}/usr/share/applications"
   for _dt in vim.desktop kst.desktop kst-dashboard.desktop ksnap.desktop kexport.desktop kldload-terminal.desktop kldload-docs.desktop; do
