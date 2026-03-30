@@ -869,24 +869,32 @@ OLLAMA
         (
         set +e
 
-        # Always pull the base chat model (default)
-        if [[ "${KLDLOAD_AI_MODEL_CHAT:-1}" == "1" ]]; then
-          _pull_model "llama3.1:8b" "General Chat"
-        fi
-        if [[ "${KLDLOAD_AI_MODEL_CODE:-0}" == "1" ]]; then
-          _pull_model "qwen2.5-coder:14b" "Code Assistant"
-        fi
-        if [[ "${KLDLOAD_AI_MODEL_SMART:-0}" == "1" ]]; then
-          _pull_model "llama3.1:70b-q4_K_M" "Smart Chat (70B)"
-        fi
-
-        # AI appliance mode — create Bob, a general-purpose friendly assistant
+        # AI appliance mode — auto-detect hardware, pick best model, create Bob
         if [[ -f /etc/kldload/autoinstall.env ]]; then
-          log "AI appliance mode — creating Bob"
+          local _total_ram_gb
+          _total_ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+          local _has_gpu=0
+          lspci 2>/dev/null | grep -qi nvidia && _has_gpu=1
+
+          local _bob_base="llama3.1:8b"
+          if [[ "$_total_ram_gb" -ge 64 ]]; then
+            _bob_base="llama3.1:70b-q4_K_M"
+            _status "Downloading AI model (70B — this machine has ${_total_ram_gb}GB RAM)..."
+          elif [[ "$_total_ram_gb" -ge 16 ]]; then
+            _bob_base="llama3.1:8b"
+            _status "Downloading AI model (~4.9 GB)..."
+          else
+            _bob_base="llama3.2:3b"
+            _status "Downloading AI model (3B — light, ${_total_ram_gb}GB RAM)..."
+          fi
+          log "Hardware: ${_total_ram_gb}GB RAM, GPU=${_has_gpu} — selected ${_bob_base}"
+          _pull_model "$_bob_base" "Bob base model"
+
+          log "Creating Bob..."
           _status "Creating Bob..."
           mkdir -p /srv/ollama
-          cat > /srv/ollama/Modelfile.bob <<'BOBMODEL'
-FROM llama3.1:8b
+          cat > /srv/ollama/Modelfile.bob <<BOBMODEL
+FROM ${_bob_base}
 
 SYSTEM """
 Your name is Bob. You are a friendly, patient, and knowledgeable AI assistant.
@@ -929,6 +937,17 @@ BOBMODEL
             || { log "WARNING: Bob model creation failed — using base llama3.1:8b"; }
           zfs snapshot rpool/srv/ollama@bob 2>/dev/null || true
         else
+
+        # Normal kldload mode — pull models based on flags
+        if [[ "${KLDLOAD_AI_MODEL_CHAT:-1}" == "1" ]]; then
+          _pull_model "llama3.1:8b" "General Chat"
+        fi
+        if [[ "${KLDLOAD_AI_MODEL_CODE:-0}" == "1" ]]; then
+          _pull_model "qwen2.5-coder:14b" "Code Assistant"
+        fi
+        if [[ "${KLDLOAD_AI_MODEL_SMART:-0}" == "1" ]]; then
+          _pull_model "llama3.1:70b-q4_K_M" "Smart Chat (70B)"
+        fi
 
         # Create the kldload infrastructure Modelfile
         mkdir -p /srv/ollama
