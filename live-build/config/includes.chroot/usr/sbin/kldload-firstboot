@@ -880,6 +880,12 @@ OLLAMA
           _pull_model "llama3.1:70b-q4_K_M" "Smart Chat (70B)"
         fi
 
+        # Skip kldload-specific training for appliance builds (vanilla AI box)
+        if [[ -f /etc/kldload/autoinstall.env ]]; then
+          log "AI appliance mode — skipping kldload training, using vanilla model"
+          ok "llama3.1:8b ready (general purpose)"
+        else
+
         # Create the kldload infrastructure Modelfile
         mkdir -p /srv/ollama
         cat > /srv/ollama/Modelfile.kldload <<'MODELFILE'
@@ -1040,6 +1046,8 @@ MODELFILE2
 
         # Snapshot the trained model state
         zfs snapshot rpool/srv/ollama@trained 2>/dev/null || true
+
+        fi # end non-appliance training block
 
         # Create the 'kai' command — ask the AI with live system context
         cat > /usr/local/bin/kai <<'KAI'
