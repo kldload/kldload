@@ -710,9 +710,9 @@ if [[ "${BOB_LIVE:-}" == "1" ]]; then
     rm -f "${ROOTFS}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" 2>/dev/null || true
 
     # ── Pre-bake Ollama + model + Open WebUI into the image ──────────────
-    log "Bob: downloading Ollama binary..."
-    curl -fL -o "${ROOTFS}/usr/local/bin/ollama" "https://ollama.com/download/ollama-linux-amd64"
-    chmod +x "${ROOTFS}/usr/local/bin/ollama"
+    log "Bob: installing Ollama into rootfs..."
+    BINDIR="${ROOTFS}/usr/local/bin" curl -fsSL https://ollama.com/install.sh | sh >> "$LOG_DIR/bob-build.log" 2>&1
+    log "Bob: Ollama installed to rootfs"
 
     # Create ollama user + service in rootfs
     chroot "${ROOTFS}" useradd -r -s /bin/false -U -m -d /usr/share/ollama ollama 2>/dev/null || true
@@ -735,19 +735,18 @@ OSERVICE
     ln -sf "/etc/systemd/system/ollama.service" \
         "${ROOTFS}/etc/systemd/system/multi-user.target.wants/ollama.service"
 
-    # Pull the model at build time — run ollama temporarily
+    # Pull the model at build time — run ollama from the rootfs temporarily
     log "Bob: pulling llama3.1:8b model (this takes a few minutes)..."
     mkdir -p "${ROOTFS}/usr/share/ollama/.ollama/models"
     export OLLAMA_MODELS="${ROOTFS}/usr/share/ollama/.ollama/models"
-    "${ROOTFS}/usr/local/bin/ollama" serve &
+    # Run ollama serve from rootfs (it's a static binary, works outside chroot)
+    "${ROOTFS}/usr/local/bin/ollama" serve >> "$LOG_DIR/bob-build.log" 2>&1 &
     _ollama_pid=$!
-    sleep 3
-    # Wait for API
     for _try in $(seq 1 20); do
         curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && break
         sleep 2
     done
-    "${ROOTFS}/usr/local/bin/ollama" pull llama3.1:8b
+    "${ROOTFS}/usr/local/bin/ollama" pull llama3.1:8b >> "$LOG_DIR/bob-build.log" 2>&1
     log "Bob: model pulled, creating Bob personality..."
 
     # Create Bob modelfile and build it
