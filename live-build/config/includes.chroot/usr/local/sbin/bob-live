@@ -44,11 +44,10 @@ log "Installing Ollama..."
 _status "Installing Ollama..."
 if ! command -v ollama >/dev/null 2>&1; then
   if [[ -n "$_workspace" ]]; then
-    # Redirect Ollama's lib dir to tmpfs so CUDA libs don't fill rootfs
-    mkdir -p "$_workspace/ollama-lib"
-    rm -rf /usr/local/lib/ollama 2>/dev/null || true
-    ln -sf "$_workspace/ollama-lib" /usr/local/lib/ollama
-    mkdir -p "$_workspace/models"
+    # Mount tmpfs over Ollama's lib dir so CUDA libs don't fill the 3GB rootfs
+    mkdir -p /usr/local/lib/ollama "$_workspace/models"
+    mount -t tmpfs -o size=4G tmpfs /usr/local/lib/ollama
+    log "Mounted tmpfs over /usr/local/lib/ollama (4GB for CUDA libs)"
   fi
   curl -fsSL --connect-timeout 30 https://ollama.com/install.sh | sh >> "$LOG" 2>&1
 fi
