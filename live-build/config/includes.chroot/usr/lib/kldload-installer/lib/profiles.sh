@@ -308,14 +308,45 @@ k_install_system_files() {
   # ── Firefox autostart to dashboard (desktop profiles) ──────────────────────
   if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
     mkdir -p "${target}/etc/xdg/autostart"
+    # Same autostart pattern as the live installer — wait for port, then open Firefox
+    mkdir -p "${target}/etc/xdg/autostart"
     cat > "${target}/etc/xdg/autostart/kldload-dashboard.desktop" <<'DASHSTART'
 [Desktop Entry]
 Type=Application
 Name=kldload Dashboard
-Exec=firefox http://localhost:9000
+Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/9000) 2>/dev/null && break; sleep 1; done; sleep 3; firefox --no-remote http://localhost:9000'
 X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=3
+X-GNOME-Autostart-Delay=8
 DASHSTART
+
+    # Firefox policies — same path as live ISO, suppress first-run junk
+    mkdir -p "${target}/usr/lib64/firefox/distribution"
+    cat > "${target}/usr/lib64/firefox/distribution/policies.json" <<'FFPOLICY'
+{
+  "policies": {
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "DontCheckDefaultBrowser": true,
+    "NoDefaultBookmarks": true,
+    "DisplayBookmarksToolbar": "always",
+    "Homepage": {
+      "URL": "http://localhost:9000",
+      "StartPage": "homepage",
+      "Additional": ["http://localhost:8080"]
+    },
+    "Bookmarks": [
+      {"Title": "Dashboard", "URL": "http://localhost:9000", "Placement": "toolbar"},
+      {"Title": "AI Chat", "URL": "http://localhost:8080", "Placement": "toolbar"},
+      {"Title": "kldload Docs", "URL": "https://kldload.com", "Placement": "toolbar"}
+    ],
+    "UserMessaging": {
+      "WhatsNewMessaging": false,
+      "ExtensionRecommendations": false,
+      "SkipOnboarding": true
+    }
+  }
+}
+FFPOLICY
   fi
 
   fi # end non-core block
