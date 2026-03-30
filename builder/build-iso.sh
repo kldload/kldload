@@ -697,22 +697,22 @@ else
 fi
 
 # ── Autoinstall service + baked-in answers (AI appliance, seed-disk boot) ─────
-_autoinstall_svc="/build/live-build/config/includes.chroot/etc/systemd/system/kldload-autoinstall.service"
-_autoinstall_bin="/build/live-build/config/includes.chroot/usr/local/sbin/kldload-autoinstall"
-_autoinstall_env="/build/live-build/config/includes.chroot/etc/kldload/autoinstall.env"
-if [[ -f "$_autoinstall_svc" ]]; then
-    mkdir -p "${ROOTFS}/etc/systemd/system/multi-user.target.wants"
-    cp "$_autoinstall_svc" "${ROOTFS}/etc/systemd/system/kldload-autoinstall.service"
+_ic="/build/live-build/config/includes.chroot"
+mkdir -p "${ROOTFS}/etc/systemd/system/multi-user.target.wants" "${ROOTFS}/usr/local/sbin" "${ROOTFS}/etc/kldload"
+# Autoinstall service
+cp "${_ic}/etc/systemd/system/kldload-autoinstall.service" "${ROOTFS}/etc/systemd/system/" 2>/dev/null && {
     ln -sf "/etc/systemd/system/kldload-autoinstall.service" \
         "${ROOTFS}/etc/systemd/system/multi-user.target.wants/kldload-autoinstall.service"
-    [[ -f "$_autoinstall_bin" ]] && cp "$_autoinstall_bin" "${ROOTFS}/usr/local/sbin/kldload-autoinstall" && chmod +x "${ROOTFS}/usr/local/sbin/kldload-autoinstall"
     log "Autoinstall service installed"
-fi
-if [[ -f "$_autoinstall_env" ]]; then
-    mkdir -p "${ROOTFS}/etc/kldload"
-    cp "$_autoinstall_env" "${ROOTFS}/etc/kldload/autoinstall.env"
-    log "Baked-in autoinstall.env — this ISO will auto-install on boot"
-fi
+} || true
+# Autoinstall script
+cp "${_ic}/usr/local/sbin/kldload-autoinstall" "${ROOTFS}/usr/local/sbin/" 2>/dev/null && \
+    chmod +x "${ROOTFS}/usr/local/sbin/kldload-autoinstall" || true
+# Baked-in answers file (AI appliance builds only)
+cp "${_ic}/etc/kldload/autoinstall.env" "${ROOTFS}/etc/kldload/autoinstall.env" 2>/dev/null && \
+    log "Baked-in autoinstall.env — this ISO will auto-install on boot" || true
+# Answers templates
+cp -r "${_ic}/etc/kldload/debz" "${ROOTFS}/etc/kldload/" 2>/dev/null || true
 
 # Copy virtio modules config (both editions — needed for VM guests)
 mkdir -p "${ROOTFS}/etc/modules-load.d"
