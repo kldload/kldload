@@ -180,7 +180,7 @@
         <div class="panel" style="margin-bottom:1rem">
           <div class="panel-hdr">◈ Distribution</div>
           <div class="panel-body">
-            <div class="target-grid" id="distro-grid" style="grid-template-columns:repeat(8,1fr);max-width:800px">
+            <div class="target-grid" id="distro-grid" style="grid-template-columns:repeat(9,1fr);max-width:900px">
               <div class="target-card selected" data-distro="centos" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🐧</div>
                 <div class="tc-name">CentOS 9</div>
@@ -216,13 +216,23 @@
                 <div class="tc-name">Arch</div>
                 <div class="tc-sub">internet required</div>
               </div>
+              <div class="target-card" data-distro="freebsd" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">😈</div>
+                <div class="tc-name">FreeBSD</div>
+                <div class="tc-sub">internet required</div>
+              </div>
+              <div class="target-card" data-distro="openbsd" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🐡</div>
+                <div class="tc-name">OpenBSD</div>
+                <div class="tc-sub">experimental</div>
+              </div>
             </div>
-            <div style="margin-top:0.8rem;font-size:0.7rem;color:var(--muted)">Alpine, FreeBSD, OpenBSD, GhostBSD, illumos, Windows — coming soon</div>
+            <div style="margin-top:0.8rem;font-size:0.7rem;color:var(--muted)">Alpine, GhostBSD, illumos, Windows — coming soon</div>
           </div>
         </div>
 
         <!-- AI Assistant — prominent card -->
-        <div class="panel" style="margin-bottom:1rem">
+        <div class="panel" id="ai-panel" style="margin-bottom:1rem">
           <div class="panel-hdr">AI Assistant &mdash; Early Preview</div>
           <div class="panel-body">
             <div id="ai-card" onclick="toggleAI()" style="cursor:pointer;padding:1rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s">
@@ -348,7 +358,7 @@
               <div class="target-card" data-role="kvm" onclick="selectTarget(this)">
                 <div class="tc-icon">🖥</div>
                 <div class="tc-name">KVM Host</div>
-                <div class="tc-sub">Hypervisor + ZFS zvols</div>
+                <div class="tc-sub">Instant clones, snapshots, replication — ZFS-powered hypervisor</div>
               </div>
             </div>
             <div id="role-summary" style="margin-top:0.6rem;font-size:0.8rem;color:var(--accent)">
@@ -467,7 +477,7 @@
         </div>
 
         <!-- Localisation -->
-        <div class="panel" style="margin-bottom:1rem">
+        <div class="panel" id="locale-panel" style="margin-bottom:1rem">
           <div class="panel-hdr">🌐 Localisation</div>
           <div class="panel-body">
             <div class="form-group">
@@ -619,7 +629,7 @@
         </div>
 
         <!-- Network -->
-        <div class="panel" style="margin-bottom:1rem">
+        <div class="panel" id="network-panel" style="margin-bottom:1rem">
           <div class="panel-hdr">⌘ Network</div>
           <div class="panel-body">
             <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
@@ -656,7 +666,7 @@
         </div>
 
         <!-- Platform Options -->
-        <div class="panel" style="margin-bottom:1rem">
+        <div class="panel" id="platform-panel" style="margin-bottom:1rem">
           <div class="panel-hdr">⚙ Platform Options</div>
           <div class="panel-body">
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-bottom:0.8rem">
@@ -1150,7 +1160,7 @@ const ROLE_DESCS = {
   desktop: 'Desktop selected — GNOME workstation + ZFS on root',
   server:  'Server selected — headless SSH node + ZFS on root',
   core:    'Core selected — ZFS on root only, no kldload tools, no extras',
-  kvm:     'KVM Host selected — hypervisor + ZFS zvols + bridge networking + management dashboard',
+  kvm:     'KVM Host selected — ZFS zvols, instant clones, hourly snapshots, DR replication, ARC-tuned, kvm-create/clone/snap/replicate tools',
 };
 function selectTarget(el) {
   document.querySelectorAll('#target-grid .target-card').forEach(c => c.classList.remove('selected'));
@@ -1170,7 +1180,7 @@ const DISTRO_DESCS = {
   ubuntu:   'Ubuntu 24.04 LTS — popular, huge community, debootstrap from darksite',
   arch:     'Arch Linux — rolling release, internet required (no darksite)',
   alpine:   'Alpine Linux 3.21 — musl/OpenRC, core profile only (coming soon)',
-  freebsd:  'FreeBSD 14.4 — native ZFS, jails, bhyve',
+  freebsd:  'FreeBSD 15.0 — native ZFS, jails, bhyve',
   openbsd:  'OpenBSD 7.8 — security-focused, pf firewall, pledge/unveil',
   ghostbsd: 'GhostBSD — FreeBSD with MATE desktop',
   illumos:  'OpenIndiana (illumos) — the original ZFS home',
@@ -1233,19 +1243,27 @@ function selectDistro(el) {
   const profilePanel = document.getElementById('profile-panel');
   const rhelPanel = document.getElementById('rhel-auth-panel');
   if (winOpts) winOpts.style.display = el.dataset.distro === 'windows' ? 'block' : 'none';
-  if (profilePanel) profilePanel.style.display = el.dataset.distro === 'windows' ? 'none' : 'block';
+  const isBSDDistro = el.dataset.distro === 'freebsd' || el.dataset.distro === 'openbsd' || el.dataset.distro === 'ghostbsd';
+  const hideProfFor = el.dataset.distro === 'windows' || isBSDDistro;
+  if (profilePanel) profilePanel.style.display = hideProfFor ? 'none' : 'block';
+  // BSD: hide Linux-specific panels — BSD base sets are complete
+  ['ai-panel','locale-panel','network-panel','platform-panel'].forEach(id => {
+    const p = document.getElementById(id);
+    if (p) p.style.display = isBSDDistro ? 'none' : '';
+  });
   if (rhelPanel) rhelPanel.style.display = el.dataset.distro === 'rhel' ? 'block' : 'none';
   // Distro-specific profile restrictions
   const d = el.dataset.distro;
   const isAlpine = d === 'alpine';
   const isArch = d === 'arch';
+  const isBSD = d === 'freebsd' || d === 'openbsd' || d === 'ghostbsd';
   document.querySelectorAll('#target-grid .target-card').forEach(c => {
     const r = c.dataset.role;
-    const blocked = (isAlpine && r !== 'core') || (isArch && r === 'desktop');
+    const blocked = ((isAlpine || isBSD) && r !== 'core') || (isArch && r === 'desktop');
     c.style.opacity = blocked ? '0.3' : '';
     c.style.pointerEvents = blocked ? 'none' : '';
   });
-  if (isAlpine) {
+  if (isAlpine || isBSD) {
     const coreCard = document.querySelector('#target-grid .target-card[data-role="core"]');
     if (coreCard) selectTarget(coreCard);
   } else if (isArch) {
@@ -1442,7 +1460,7 @@ function confirmInstall() {
 
   // Build profile summary line
   const p = _installPayload || {};
-  const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 41', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', alpine: 'Alpine 3.21', freebsd: 'FreeBSD 14.4', openbsd: 'OpenBSD 7.8', ghostbsd: 'GhostBSD', illumos: 'illumos', windows: 'Windows' };
+  const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 41', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', alpine: 'Alpine 3.21', freebsd: 'FreeBSD 15.0', openbsd: 'OpenBSD 7.8', ghostbsd: 'GhostBSD', illumos: 'illumos', windows: 'Windows' };
   const profileNames = { desktop: 'Desktop', server: 'Server', core: 'Core', ai: 'AI' };
   let summary = (distroNames[p.distro] || p.distro || 'CentOS') + ' · ' + (profileNames[p.role] || p.role || 'Desktop');
   const addons = [];

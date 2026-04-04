@@ -387,6 +387,15 @@ k_bootstrap_base() {
     alpine)
       _k_bootstrap_apk
       ;;
+    freebsd)
+      _k_bootstrap_freebsd
+      ;;
+    openbsd)
+      _k_bootstrap_openbsd
+      ;;
+    ghostbsd)
+      _k_bootstrap_ghostbsd
+      ;;
     *)
       k_die "Unsupported distro: $distro"
       ;;
@@ -1857,15 +1866,39 @@ _k_bootstrap_freebsd() {
   local target="${KLDLOAD_TARGET:?}"
   local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
   local darksite="/root/darksite-bsd/freebsd"
+  local freebsd_ver="${KLDLOAD_FREEBSD_VERSION:-15.0}"
+  local freebsd_arch="${KLDLOAD_ARCH:-amd64}"
+  local freebsd_url="https://download.freebsd.org/releases/${freebsd_arch}/${freebsd_arch}/${freebsd_ver}-RELEASE"
 
-  k_log_to "$log" "FreeBSD bootstrap starting..."
+  k_log_to "$log" "FreeBSD ${freebsd_ver} bootstrap starting..."
+
+  # Download base and kernel on demand if darksite doesn't have them
+  if [[ ! -f "${darksite}/base.txz" ]]; then
+    k_log_to "$log" "Downloading FreeBSD ${freebsd_ver} base.txz..."
+    mkdir -p "${darksite}"
+    curl -fSL --connect-timeout 30 --max-time 600 --retry 3 \
+      -o "${darksite}/base.txz" "${freebsd_url}/base.txz" >> "$log" 2>&1 \
+      || { k_log_to "$log" "FATAL: Failed to download FreeBSD base.txz from ${freebsd_url}"; return 1; }
+    k_log_to "$log" "base.txz downloaded ($(du -h "${darksite}/base.txz" | cut -f1))"
+  fi
+
+  if [[ ! -f "${darksite}/kernel.txz" ]]; then
+    k_log_to "$log" "Downloading FreeBSD ${freebsd_ver} kernel.txz..."
+    curl -fSL --connect-timeout 30 --max-time 300 --retry 3 \
+      -o "${darksite}/kernel.txz" "${freebsd_url}/kernel.txz" >> "$log" 2>&1 \
+      || { k_log_to "$log" "FATAL: Failed to download FreeBSD kernel.txz from ${freebsd_url}"; return 1; }
+    k_log_to "$log" "kernel.txz downloaded ($(du -h "${darksite}/kernel.txz" | cut -f1))"
+  fi
 
   # Extract base and kernel
-  [[ -f "${darksite}/base.txz" ]] || { k_log_to "$log" "FATAL: FreeBSD base.txz not found"; return 1; }
+  # GNU tar warns about BSD-specific SCHILY.fflags and gid mismatches — safe to ignore
   k_log_to "$log" "Extracting FreeBSD base..."
-  tar -xpf "${darksite}/base.txz" -C "${target}" >> "$log" 2>&1
+  tar -xpf "${darksite}/base.txz" -C "${target}" >> "$log" 2>&1 || true
   k_log_to "$log" "Extracting FreeBSD kernel..."
-  tar -xpf "${darksite}/kernel.txz" -C "${target}" >> "$log" 2>&1
+  tar -xpf "${darksite}/kernel.txz" -C "${target}" >> "$log" 2>&1 || true
+
+  # Verify extraction worked
+  [[ -f "${target}/bin/sh" ]] || { k_log_to "$log" "FATAL: FreeBSD base extraction failed — /bin/sh not found"; return 1; }
 
   # Configure rc.conf
   cat > "${target}/etc/rc.conf" <<RCCONF
@@ -1886,14 +1919,55 @@ RCCONF
   # Timezone
   ln -sf "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE:-UTC}" "${target}/etc/localtime" 2>/dev/null || true
 
-  # Create user
+  # Create user — can't chroot into FreeBSD from Linux, so write passwd/group directly
   local user="${KLDLOAD_USERNAME:-admin}"
-  chroot "${target}" pw useradd "${user}" -m -G wheel -s /bin/sh 2>/dev/null || true
-  if [[ -n "${KLDLOAD_PASSWORD:-}" ]]; then
-    echo "${KLDLOAD_PASSWORD}" | chroot "${target}" pw usermod "${user}" -h 0
+  k_log_to "$log" "Creating user ${user} via direct file edits (no chroot — FreeBSD binaries)"
+
+  # Append user to /etc/passwd and /etc/group (FreeBSD format)
+  # UID 1001, GID 1001, member of wheel
+  if ! grep -q "^${user}:" "${target}/etc/passwd" 2>/dev/null; then
+    echo "${user}:*:1001:1001::0:0:${user} User:/home/${user}:/bin/sh" >> "${target}/etc/passwd"
+    echo "${user}:*:1001:" >> "${target}/etc/group"
+    # Add to wheel group
+    sed -i 's/^wheel:\([^:]*\):\([^:]*\):\(.*\)/wheel:\1:\2:\3,'"${user}"'/' "${target}/etc/group"
+    # Clean trailing comma if wheel had no members
+    sed -i 's/^wheel:\([^:]*\):\([^:]*\):,/wheel:\1:\2:/' "${target}/etc/group"
+    mkdir -p "${target}/home/${user}"
   fi
+
+  # Set password via master.passwd if provided (hash with openssl)
+  if [[ -n "${KLDLOAD_PASSWORD:-}" ]]; then
+    local pass_hash
+    pass_hash="$(openssl passwd -6 "${KLDLOAD_PASSWORD}")"
+    # Write master.passwd entry (FreeBSD extended format)
+    if ! grep -q "^${user}:" "${target}/etc/master.passwd" 2>/dev/null; then
+      echo "${user}:${pass_hash}:1001:1001::0:0:${user} User:/home/${user}:/bin/sh" >> "${target}/etc/master.passwd"
+    fi
+    # Set root password too
+    sed -i "s|^root:\*:|root:${pass_hash}:|" "${target}/etc/master.passwd" 2>/dev/null || true
+    k_log_to "$log" "Passwords set for root and ${user}"
+  fi
+
   # Enable root login via SSH (initial setup only)
-  sed -i '' 's/^#PermitRootLogin.*/PermitRootLogin yes/' "${target}/etc/ssh/sshd_config" 2>/dev/null || true
+  sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' "${target}/etc/ssh/sshd_config" 2>/dev/null || true
+
+  # First-boot: rebuild password DB and SSH host keys
+  # pwd_mkdb is a FreeBSD binary — can't run from Linux, so defer to first boot
+  cat > "${target}/etc/rc.local" <<'RCLOCAL'
+#!/bin/sh
+# kldload first-boot — rebuild password DB from master.passwd edits
+if [ -f /etc/master.passwd ]; then
+  /usr/sbin/pwd_mkdb -p /etc/master.passwd
+fi
+# Regenerate SSH host keys if missing
+if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
+  /usr/bin/ssh-keygen -A
+fi
+# Self-destruct — only needed once
+rm -f /etc/rc.local
+RCLOCAL
+  chmod 0755 "${target}/etc/rc.local"
+  k_log_to "$log" "rc.local written for first-boot pwd_mkdb + SSH keygen"
 
   # FreeBSD bootloader EFI
   local efi_mnt="${KLDLOAD_TARGET_MNT:-/target}/boot/efi"
@@ -1905,51 +1979,128 @@ RCCONF
 }
 
 _k_bootstrap_openbsd() {
-  local target="${KLDLOAD_TARGET:?}"
   local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
-  local darksite="/root/darksite-bsd/openbsd"
-  local ver_short
-  ver_short="$(cat "${darksite}/VERSION" 2>/dev/null | tr -d '.')"
-
-  k_log_to "$log" "OpenBSD bootstrap starting..."
-
-  # Extract base sets
-  for f in "base${ver_short}.tgz" "comp${ver_short}.tgz" "man${ver_short}.tgz"; do
-    if [[ -f "${darksite}/${f}" ]]; then
-      k_log_to "$log" "Extracting ${f}..."
-      tar -xzpf "${darksite}/${f}" -C "${target}" >> "$log" 2>&1
-    fi
-  done
-
-  # Copy kernel
-  [[ -f "${darksite}/bsd" ]] && cp "${darksite}/bsd" "${target}/bsd"
-  [[ -f "${darksite}/bsd.rd" ]] && cp "${darksite}/bsd.rd" "${target}/bsd.rd"
-
-  # Configure hostname
-  echo "${KLDLOAD_HOSTNAME:-kldload-node}" > "${target}/etc/myname"
-
-  # Network — DHCP on first interface
-  echo "dhcp" > "${target}/etc/hostname.vio0"
-  echo "dhcp" > "${target}/etc/hostname.em0"
-
-  # Enable SSH
-  echo "sshd_flags=" >> "${target}/etc/rc.conf.local"
-
-  # DNS
-  cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
-
-  # Create user
+  local disk="${KLDLOAD_DISK:?}"
+  local openbsd_ver="${KLDLOAD_OPENBSD_VERSION:-7.8}"
+  local openbsd_url="https://cdn.openbsd.org/pub/OpenBSD/${openbsd_ver}/amd64"
+  local staging="/tmp/openbsd-stage"
   local user="${KLDLOAD_USERNAME:-admin}"
-  chroot "${target}" useradd -m -G wheel -s /bin/ksh "${user}" 2>/dev/null || true
-  if [[ -n "${KLDLOAD_PASSWORD:-}" ]]; then
-    echo "${KLDLOAD_PASSWORD}" | chroot "${target}" chpasswd 2>/dev/null || true
+  local pass="${KLDLOAD_PASSWORD:-admin}"
+  local hostname="${KLDLOAD_HOSTNAME:-kldload-node}"
+
+  k_log_to "$log" "OpenBSD ${openbsd_ver} chain-boot install starting..."
+  k_log_to "$log" "Strategy: stage bsd.rd + autoinstall on EFI, installer pulls sets from cdn.openbsd.org"
+
+  mkdir -p "${staging}"
+
+  # ── Download only bsd.rd (ramdisk installer) — sets pulled by installer ──
+  k_log_to "$log" "Downloading OpenBSD ${openbsd_ver} installer kernel..."
+  curl -fSL --connect-timeout 30 --max-time 120 --retry 3 \
+    -o "${staging}/bsd.rd" "${openbsd_url}/bsd.rd" >> "$log" 2>&1 \
+    || { k_log_to "$log" "FATAL: Failed to download bsd.rd"; return 1; }
+  k_log_to "$log" "bsd.rd downloaded ($(du -h "${staging}/bsd.rd" | cut -f1))"
+
+  # ── Partition the disk ───────────────────────────────────────────────────
+  # EFI (512M) + OpenBSD raw partition (rest of disk)
+  # OpenBSD's installer will create disklabel + FFS inside the raw partition
+  k_log_to "$log" "Partitioning ${disk} for OpenBSD..."
+  sgdisk -Z "${disk}" >> "$log" 2>&1 || true
+  sgdisk -n1:0:+512M -t1:EF00 -c1:EFI "${disk}" >> "$log" 2>&1
+  sgdisk -n2:0:0 -t2:A600 -c2:OpenBSD "${disk}" >> "$log" 2>&1
+  partprobe "${disk}" 2>/dev/null || true
+  sleep 2
+
+  # Determine partition device names
+  local efi_part root_part
+  case "${disk}" in
+    *nvme*|*mmcblk*|*loop*) efi_part="${disk}p1"; root_part="${disk}p2" ;;
+    *) efi_part="${disk}1"; root_part="${disk}2" ;;
+  esac
+
+  # Format EFI partition
+  mkfs.fat -F32 -n EFI "${efi_part}" >> "$log" 2>&1
+  k_log_to "$log" "EFI partition formatted: ${efi_part}"
+
+  # ── Stage bsd.rd and sets on EFI partition ───────────────────────────────
+  local efi_mnt="/tmp/openbsd-efi"
+  mkdir -p "${efi_mnt}"
+  mount "${efi_part}" "${efi_mnt}"
+
+  # OpenBSD EFI bootloader — extract from base set or use bsd.rd directly
+  mkdir -p "${efi_mnt}/EFI/BOOT"
+
+  # bsd.rd IS the installer — copy it as the EFI boot target
+  # OpenBSD's BOOTX64.EFI loads bsd or bsd.rd from the root
+  # We need the actual EFI loader — download it
+  k_log_to "$log" "Downloading OpenBSD BOOTX64.EFI..."
+  curl -fSL --connect-timeout 30 --max-time 60 --retry 3 \
+    -o "${efi_mnt}/EFI/BOOT/BOOTX64.EFI" \
+    "${openbsd_url}/BOOTX64.EFI" >> "$log" 2>&1 \
+    || k_log_to "$log" "WARNING: BOOTX64.EFI download failed"
+
+  # Copy bsd.rd to EFI root — OpenBSD's bootloader looks for it here
+  cp "${staging}/bsd.rd" "${efi_mnt}/bsd.rd"
+  k_log_to "$log" "bsd.rd staged on EFI partition ($(du -h "${efi_mnt}/bsd.rd" | cut -f1))"
+
+  # ── Write auto_install.conf (OpenBSD autoinstall answer file) ────────────
+  cat > "${efi_mnt}/auto_install.conf" <<AUTOINSTALL
+System hostname = ${hostname}
+Password for root = ${pass}
+Setup a user = ${user}
+Password for user = ${pass}
+Allow root ssh login = yes
+What timezone are you in = ${KLDLOAD_TIMEZONE:-UTC}
+Which disk is the root disk = ${disk##*/}
+Use (W)hole disk MBR, whole disk (G)PT or (E)dit? = G
+Use (A)uto layout, (E)dit auto layout, or create (C)ustom layout? = A
+Location of sets = http
+HTTP Server = cdn.openbsd.org
+Server directory = pub/OpenBSD/${openbsd_ver}/amd64
+Set name(s) = done
+AUTOINSTALL
+  k_log_to "$log" "auto_install.conf written"
+
+  # ── Configure EFI boot to load bsd.rd ────────────────────────────────────
+  mkdir -p "${efi_mnt}/etc"
+  cat > "${efi_mnt}/etc/boot.conf" <<'BOOTCONF'
+boot bsd.rd
+BOOTCONF
+
+  # startup.nsh fallback for UEFI shell
+  echo '\EFI\BOOT\BOOTX64.EFI' > "${efi_mnt}/startup.nsh"
+
+  umount "${efi_mnt}"
+  k_log_to "$log" "EFI partition configured for OpenBSD chain-boot"
+
+  # ── Register EFI boot entry ──────────────────────────────────────────────
+  local efi_disk part_num
+  efi_disk="$(lsblk -no PKNAME "${efi_part}" 2>/dev/null | head -n1 || true)"
+  [[ -n "$efi_disk" ]] && efi_disk="/dev/$efi_disk"
+  part_num="$(lsblk -no PARTN "${efi_part}" 2>/dev/null | head -n1 || true)"
+  part_num="${part_num:-1}"
+
+  if [[ -n "${efi_disk}" && -b "${efi_disk}" ]]; then
+    efibootmgr \
+      -c -d "${efi_disk}" -p "${part_num}" \
+      -L "OpenBSD" \
+      -l '\EFI\BOOT\BOOTX64.EFI' >> "$log" 2>&1 || \
+      k_log_to "$log" "WARNING: efibootmgr registration failed"
+    k_log_to "$log" "EFI boot entry registered: OpenBSD on ${efi_disk}"
   fi
 
-  # Enable doas (OpenBSD's sudo)
-  echo "permit persist :wheel" > "${target}/etc/doas.conf"
+  # Export partition vars for the bootloader step (which will be skipped)
+  export KLDLOAD_PART_EFI="${efi_part}"
+  export KLDLOAD_EFI_PART="${efi_part}"
 
-  mkdir -p "${target}/var/log/kldload"
-  k_log_to "$log" "OpenBSD bootstrap complete"
+  k_log_to "$log" ""
+  k_log_to "$log" "══════════════════════════════════════════════════════════════"
+  k_log_to "$log" "  OpenBSD ${openbsd_ver} chain-boot install staged."
+  k_log_to "$log" "  On next reboot, OpenBSD's own installer (bsd.rd) will run."
+  k_log_to "$log" "  auto_install.conf will automate the install."
+  k_log_to "$log" "  User: ${user} / root — Password: (as configured)"
+  k_log_to "$log" "══════════════════════════════════════════════════════════════"
+  k_log_to "$log" ""
+  k_log_to "$log" "OpenBSD bootstrap complete — reboot to begin installation"
 }
 
 _k_bootstrap_ghostbsd() {

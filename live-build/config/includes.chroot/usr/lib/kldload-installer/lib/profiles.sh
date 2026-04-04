@@ -641,5 +641,124 @@ WPEOF
     fi
   fi
 
+  # ── KVM Host profile: ZFS datasets, ARC tuning, sysctl, replication ────────
+  if [[ "$_profile" == "kvm" ]] || [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
+    k_log "Configuring KVM host with ZFS-optimized storage"
+
+    # VM disk images — compression off for raw I/O, 64K recordsize for zvol alignment
+    zfs create -o mountpoint=/var/lib/libvirt/images \
+               -o compression=off \
+               -o recordsize=64K \
+               -o primarycache=metadata \
+               -o atime=off \
+               rpool/vms 2>/dev/null || true
+    zfs create -o mountpoint=/var/lib/libvirt/images \
+               -o compression=off \
+               -o recordsize=64K \
+               -o primarycache=metadata \
+               -o atime=off \
+               rpool/vms/images 2>/dev/null || true
+
+    # ISO storage — compressed, read-mostly
+    zfs create -o mountpoint=/var/lib/libvirt/isos \
+               -o compression=zstd \
+               -o atime=off \
+               rpool/vms/isos 2>/dev/null || true
+
+    # ARC tuning — cap at 50% of system RAM, leave the rest for KVM guests
+    local _total_ram_bytes
+    _total_ram_bytes=$(awk '/MemTotal/{print $2 * 1024}' /proc/meminfo 2>/dev/null || echo 0)
+    local _arc_max=$(( _total_ram_bytes / 2 ))
+    [[ "$_arc_max" -gt 0 ]] || _arc_max=8589934592  # fallback 8GB
+
+    mkdir -p "${target}/etc/modprobe.d"
+    cat > "${target}/etc/modprobe.d/zfs.conf" <<ZFSMOD
+# kldload KVM host — ZFS tuning
+# ARC capped at 50% of RAM to leave memory for KVM guests
+options zfs zfs_arc_max=${_arc_max}
+options zfs zfs_txg_timeout=10
+options zfs zfs_vdev_scheduler=none
+options zfs l2arc_noprefetch=0
+ZFSMOD
+
+    # Kernel VM tuning for ZFS on root + KVM
+    mkdir -p "${target}/etc/sysctl.d"
+    cat > "${target}/etc/sysctl.d/99-zfs-kvm.conf" <<SYSCTL
+# ZFS on root + KVM host — let ARC handle caching, reduce dirty pages
+vm.swappiness = 1
+vm.vfs_cache_pressure = 50
+vm.dirty_ratio = 10
+vm.dirty_background_ratio = 5
+fs.inotify.max_user_watches = 524288
+# Network tuning for bridge/VM traffic
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.ip_forward = 1
+net.bridge.bridge-nf-call-iptables = 0
+net.bridge.bridge-nf-call-ip6tables = 0
+SYSCTL
+
+    # ZFS replication script — send VM snapshots to a remote host over WireGuard
+    mkdir -p "${target}/usr/local/sbin"
+    cat > "${target}/usr/local/sbin/kvm-replicate" <<'REPL'
+#!/bin/bash
+# kvm-replicate — incremental ZFS replication of VM zvols to a remote host
+# Usage: kvm-replicate <dataset> <remote_host> [remote_dataset]
+# Example: kvm-replicate rpool/vms/images/vm1 backup-host rpool/vms/replicas/vm1
+set -euo pipefail
+
+DS="${1:?Usage: kvm-replicate <dataset> <remote_host> [remote_dataset]}"
+REMOTE="${2:?Usage: kvm-replicate <dataset> <remote_host> [remote_dataset]}"
+REMOTE_DS="${3:-${DS}}"
+SNAP="${DS}@repl-$(date -u +%Y%m%dT%H%M%SZ)"
+
+# Create new snapshot
+zfs snapshot "$SNAP"
+
+# Find previous replication snapshot
+PREV=$(zfs list -H -t snapshot -o name "$DS" 2>/dev/null | grep '@repl-' | tail -2 | head -1)
+
+if [[ -n "$PREV" && "$PREV" != "$SNAP" ]]; then
+  echo "Incremental send: $PREV → $SNAP → $REMOTE:$REMOTE_DS"
+  zfs send -i "$PREV" "$SNAP" | ssh "$REMOTE" "zfs recv -F $REMOTE_DS"
+  # Clean old replication snapshots (keep last 2)
+  zfs list -H -t snapshot -o name "$DS" | grep '@repl-' | head -n -2 | xargs -r -n1 zfs destroy
+else
+  echo "Full send: $SNAP → $REMOTE:$REMOTE_DS"
+  zfs send "$SNAP" | ssh "$REMOTE" "zfs recv -F $REMOTE_DS"
+fi
+echo "Replication complete: $SNAP"
+REPL
+    chmod +x "${target}/usr/local/sbin/kvm-replicate"
+
+    # Hourly VM snapshot timer
+    mkdir -p "${target}/etc/systemd/system"
+    cat > "${target}/etc/systemd/system/kvm-snapshot.service" <<'SNAPSVC'
+[Unit]
+Description=ZFS snapshot all VM datasets
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'TS=$(date -u +%%Y%%m%%dT%%H%%M%%SZ); for ds in $(zfs list -H -o name -r rpool/vms | tail -n+2); do zfs snapshot ${ds}@auto-${TS}; done; for ds in $(zfs list -H -o name -r rpool/vms | tail -n+2); do zfs list -H -t snapshot -o name ${ds} 2>/dev/null | grep @auto- | head -n -48 | xargs -r -n1 zfs destroy; done'
+SNAPSVC
+    cat > "${target}/etc/systemd/system/kvm-snapshot.timer" <<'SNAPTMR'
+[Unit]
+Description=Hourly ZFS snapshots for VM datasets
+[Timer]
+OnCalendar=hourly
+Persistent=true
+[Install]
+WantedBy=timers.target
+SNAPTMR
+    ln -sf /etc/systemd/system/kvm-snapshot.timer \
+      "${target}/etc/systemd/system/timers.target.wants/kvm-snapshot.timer" 2>/dev/null || true
+
+    # Enable libvirtd
+    chroot "${target}" systemctl enable libvirtd 2>/dev/null || true
+
+    k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots"
+  fi
+
   k_log "System files installed (root_ds=${root_ds})"
 }

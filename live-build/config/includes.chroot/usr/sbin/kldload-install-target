@@ -500,6 +500,14 @@ if ! k_have_func k_configure_network; then
   k_configure_network() {
     : > "${KLDLOAD_LOG_DIR}/network.log"
     local hostname="${KLDLOAD_HOSTNAME:-kldload}"
+    local distro="${KLDLOAD_DISTRO:-centos}"
+
+    # BSD network config is handled in bootstrap — rc.conf / hostname.* files
+    case "${distro}" in
+      freebsd|openbsd|ghostbsd)
+        k_log "Network: handled by ${distro} bootstrap (rc.conf)"
+        return 0 ;;
+    esac
 
     echo "${hostname}" > "${KLDLOAD_TARGET_MNT}/etc/hostname"
     cat > "${KLDLOAD_TARGET_MNT}/etc/hosts" <<EOS
@@ -566,6 +574,14 @@ if ! k_have_func k_configure_security; then
     : > "${KLDLOAD_LOG_DIR}/security.log"
     local user="${KLDLOAD_USERNAME:-admin}"
     local upass="${KLDLOAD_PASSWORD:-admin}"
+    local distro="${KLDLOAD_DISTRO:-centos}"
+
+    # BSD user creation and SSH config is handled in bootstrap
+    case "${distro}" in
+      freebsd|openbsd|ghostbsd)
+        k_log "Security: handled by ${distro} bootstrap (pw/useradd, sshd_config)"
+        return 0 ;;
+    esac
 
     chroot "${KLDLOAD_TARGET_MNT}" useradd -m -s /bin/bash "${user}" \
       >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
@@ -623,6 +639,13 @@ if ! k_have_func k_apply_profile; then
       k_log "Arch profile packages already installed by bootstrap — skipping fallback"
       return 0
     fi
+
+    # BSD: no package manager available from Linux chroot — base sets are complete
+    case "${distro}" in
+      freebsd|openbsd|ghostbsd)
+        k_log "BSD profile: base sets include everything needed — no extra packages from Linux"
+        return 0 ;;
+    esac
 
     # ── Distro-specific package names ──────────────────────────────────────
     if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
@@ -840,6 +863,15 @@ fi
 if ! k_have_func k_enable_firstboot; then
   k_enable_firstboot() {
     local target="${KLDLOAD_TARGET_MNT}"
+    local distro="${KLDLOAD_DISTRO:-centos}"
+
+    # BSD has no systemd — skip firstboot service
+    case "${distro}" in
+      freebsd|openbsd|ghostbsd)
+        k_log "BSD: no systemd firstboot — skipping"
+        return 0 ;;
+    esac
+
     chroot "${target}" systemctl enable kldload-firstboot.service \
       >> "${KLDLOAD_LOG_DIR}/bootstrap.log" 2>&1 \
       || k_log "WARNING: could not enable kldload-firstboot.service"
@@ -850,7 +882,16 @@ fi
 if ! k_have_func k_seed_ca; then
   k_seed_ca() {
     local target="${KLDLOAD_TARGET_MNT}"
+    local distro="${KLDLOAD_DISTRO:-centos}"
     local iso_ca="/etc/kldload/ca/ca.crt"
+
+    # BSD uses different CA paths — skip for now
+    case "${distro}" in
+      freebsd|openbsd|ghostbsd)
+        k_log "BSD: CA seeding skipped (not yet implemented)"
+        return 0 ;;
+    esac
+
     if [[ -f "${iso_ca}" ]]; then
       mkdir -p "${target}/etc/kldload/ca" "${target}/usr/local/share/ca-certificates"
       cp "${iso_ca}" "${target}/etc/kldload/ca/ca.crt"
@@ -1292,6 +1333,27 @@ main() {
   # ── Installation progress ─────────────────────────────────────────────────
   _hdr "Installing — do not power off"
 
+  # OpenBSD: chain-boot approach — bootstrap handles partitioning, sets staging,
+  # and autoinstall config. Skip ZFS storage, skip all post-bootstrap Linux steps.
+  # On reboot, OpenBSD's bsd.rd installer runs unattended.
+  if [[ "${KLDLOAD_DISTRO:-}" == "openbsd" ]]; then
+    _info "▸  Staging OpenBSD chain-boot installer..."
+    k_bootstrap_base
+    _ok "OpenBSD"    "Chain-boot staged — reboot to install"
+    _hdr ""
+    _info "  ┌─────────────────────────────────────────────────────────┐"
+    _info "  │  OpenBSD install staged successfully.                    │"
+    _info "  │                                                         │"
+    _info "  │  On reboot, OpenBSD's own installer (bsd.rd) will run   │"
+    _info "  │  with auto_install.conf for unattended installation.    │"
+    _info "  │                                                         │"
+    _info "  │  Remove the kldload USB/ISO before rebooting.           │"
+    _info "  └─────────────────────────────────────────────────────────┘"
+    _info ""
+    _ok "Complete"   "Reboot to begin OpenBSD installation"
+    return 0
+  fi
+
   if [[ "${KLDLOAD_STORAGE_MANUAL:-0}" == "1" ]]; then
     # ── Manual shell mode (core profile) ─────────────────────────────────
     # User creates their own ZFS pool and datasets. We just need:
@@ -1417,7 +1479,11 @@ main() {
 
   # ── Bootloader — write EFI files + initramfs (pool still mounted) ──────
   k_install_bootloader
-  _ok "Bootloader"  "ZFSBootMenu + EFI registered"
+  case "${KLDLOAD_DISTRO:-}" in
+    freebsd|ghostbsd) _ok "Bootloader"  "loader.efi + EFI registered" ;;
+    openbsd)          _ok "Bootloader"  "OpenBSD bootloader + EFI registered" ;;
+    *)                _ok "Bootloader"  "ZFSBootMenu + EFI registered" ;;
+  esac
 
   # ── Image export — AFTER bootloader so image includes ZFSBootMenu ──────
   # BEFORE pool finalization so qemu-img can read the block device

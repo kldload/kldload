@@ -106,10 +106,111 @@ k_install_bootloader() {
   [[ -d "${target}/boot/efi" ]] || k_die "EFI mountpoint missing: ${target}/boot/efi"
   [[ -n "${efi_part}" ]]        || k_die "EFI partition variable (KLDLOAD_PART_EFI) is not set"
 
-  k_log "Installing ZFSBootMenu bootloader"
+  k_log "Installing bootloader"
   k_log "  target:   ${target}"
   k_log "  efi_part: ${efi_part}"
   k_log "  root_ds:  ${root_ds}"
+
+  # ── FreeBSD: loader.efi (native ZFS boot — no ZFSBootMenu) ──────────────
+
+  if [[ "${KLDLOAD_DISTRO:-}" == "freebsd" || "${KLDLOAD_DISTRO:-}" == "ghostbsd" ]]; then
+    k_log "FreeBSD bootloader: loader.efi (native ZFS boot)"
+
+    # loader.efi is already copied by bootstrap — verify it's in place
+    local fbsd_efi_dir="${target}/boot/efi/EFI/BOOT"
+    mkdir -p "${fbsd_efi_dir}"
+    if [[ -f "${target}/boot/loader.efi" ]]; then
+      cp "${target}/boot/loader.efi" "${fbsd_efi_dir}/BOOTX64.EFI"
+      k_log "loader.efi installed to ${fbsd_efi_dir}/BOOTX64.EFI"
+    else
+      k_log "WARNING: loader.efi not found in ${target}/boot/"
+    fi
+
+    # startup.nsh for exported images
+    echo '\EFI\BOOT\BOOTX64.EFI' > "${target}/boot/efi/startup.nsh"
+
+    # FreeBSD fstab — no EFI automount (loader handles it)
+    cat > "${target}/etc/fstab" <<EOFSTAB
+# FreeBSD ZFS root — datasets are mounted by loader.efi and zfs
+# EFI partition is not auto-mounted (loader.efi reads it directly)
+EOFSTAB
+
+    # zpool.cache
+    mkdir -p "${target}/etc/zfs"
+    if command -v zpool >/dev/null 2>&1; then
+      zpool set cachefile="${target}/etc/zfs/zpool.cache" rpool >&7 2>&1 || true
+      k_log "zpool.cache written"
+    fi
+
+    # hostid
+    k_zfs_bootloader_write_hostid "${target}" 7
+
+    # Register with efibootmgr (from the Linux live env)
+    local disk
+    disk="$(lsblk -no PKNAME "${efi_part}" 2>/dev/null | head -n1 || true)"
+    [[ -n "$disk" ]] && disk="/dev/$disk"
+    local part_num
+    part_num="$(lsblk -no PARTN "${efi_part}" 2>/dev/null | head -n1 || true)"
+    part_num="${part_num:-1}"
+
+    if [[ -n "${disk}" && -b "${disk}" ]]; then
+      efibootmgr \
+        -c -d "${disk}" -p "${part_num}" \
+        -L "FreeBSD" \
+        -l '\EFI\BOOT\BOOTX64.EFI' >&7 2>&1 || \
+        k_log "WARNING: efibootmgr registration failed"
+      k_log "EFI boot entry registered: FreeBSD on ${disk}"
+    fi
+
+    k_log "FreeBSD bootloader complete (loader.efi + ZFS native)"
+    return 0
+  fi
+
+  # ── OpenBSD: separate boot path (no ZFS) ─────────────────────────────────
+
+  if [[ "${KLDLOAD_DISTRO:-}" == "openbsd" ]]; then
+    k_log "OpenBSD bootloader: BOOTX64.EFI"
+
+    # OpenBSD's BOOTX64.EFI is in the base set at /usr/mdec/BOOTX64.EFI
+    local obsd_efi_dir="${target}/boot/efi/EFI/BOOT"
+    mkdir -p "${obsd_efi_dir}"
+    if [[ -f "${target}/usr/mdec/BOOTX64.EFI" ]]; then
+      cp "${target}/usr/mdec/BOOTX64.EFI" "${obsd_efi_dir}/BOOTX64.EFI"
+      k_log "OpenBSD BOOTX64.EFI installed"
+    else
+      k_log "WARNING: OpenBSD BOOTX64.EFI not found in ${target}/usr/mdec/"
+    fi
+
+    # OpenBSD fstab — FFS root
+    local efi_uuid
+    efi_uuid="$(blkid -s UUID -o value "${efi_part}" 2>/dev/null || true)"
+    cat > "${target}/etc/fstab" <<EOFSTAB
+# OpenBSD — root filesystem is FFS on the target disk
+# EFI partition is not auto-mounted
+EOFSTAB
+
+    # Register with efibootmgr
+    local disk
+    disk="$(lsblk -no PKNAME "${efi_part}" 2>/dev/null | head -n1 || true)"
+    [[ -n "$disk" ]] && disk="/dev/$disk"
+    local part_num
+    part_num="$(lsblk -no PARTN "${efi_part}" 2>/dev/null | head -n1 || true)"
+    part_num="${part_num:-1}"
+
+    if [[ -n "${disk}" && -b "${disk}" ]]; then
+      efibootmgr \
+        -c -d "${disk}" -p "${part_num}" \
+        -L "OpenBSD" \
+        -l '\EFI\BOOT\BOOTX64.EFI' >&7 2>&1 || \
+        k_log "WARNING: efibootmgr registration failed"
+      k_log "EFI boot entry registered: OpenBSD on ${disk}"
+    fi
+
+    k_log "OpenBSD bootloader complete"
+    return 0
+  fi
+
+  # ── Linux: ZFSBootMenu (all Linux distros) ───────────────────────────────
 
   # ── Locate ZFSBootMenu EFI binary ────────────────────────────────────────
 
