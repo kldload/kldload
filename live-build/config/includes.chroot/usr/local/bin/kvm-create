@@ -49,12 +49,24 @@ done
 
 ZVOL="rpool/vms/${NAME}"
 
+# Validate disk size is a positive number
+if ! [[ "$DISK" =~ ^[0-9]+$ ]] || [[ "$DISK" -le 0 ]]; then
+  echo "ERROR: --disk must be a positive integer (got: ${DISK})"
+  exit 1
+fi
+
+# Check if zvol already exists
+if zfs list "${ZVOL}" >/dev/null 2>&1; then
+  echo "ERROR: ZFS zvol '${ZVOL}' already exists. Use a different name or delete first."
+  exit 1
+fi
+
 # Snapshot before creating (safety net)
 zfs snapshot "rpool/vms@pre-create-${NAME}" 2>/dev/null || true
 
-# Create thin-provisioned zvol
+# Create thin-provisioned zvol — compression off, guest manages its own filesystem
 echo "Creating ZFS zvol: ${ZVOL} (${DISK}G, thin provisioned)..."
-zfs create -V "${DISK}G" -s -o compression=lz4 -o volblocksize=64K "${ZVOL}"
+zfs create -V "${DISK}G" -s -o compression=off -o volblocksize=64K "${ZVOL}"
 
 # Build virt-install command
 CMD=(virt-install
@@ -77,7 +89,11 @@ else
 fi
 
 echo "Creating VM: ${NAME} (${RAM}MB RAM, ${CPUS} vCPUs, ${DISK}GB disk)..."
-"${CMD[@]}"
+if ! "${CMD[@]}"; then
+  echo "ERROR: virt-install failed. Cleaning up zvol..."
+  zfs destroy "${ZVOL}" 2>/dev/null
+  exit 1
+fi
 
 echo ""
 echo "✔ VM '${NAME}' created"

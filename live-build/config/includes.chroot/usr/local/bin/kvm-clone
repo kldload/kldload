@@ -65,19 +65,18 @@ fi
 echo "Cloning ${SNAP} → ${DST_ZVOL}..."
 zfs clone "${SNAP}" "${DST_ZVOL}"
 
-# Clone the libvirt domain definition
+# Clone the libvirt domain definition via XML manipulation
 echo "Cloning VM definition..."
-virt-clone --original "${SOURCE}" --name "${DEST}" \
-  --file "/dev/zvol/${DST_ZVOL}" \
-  --preserve-data --check path_in_use=off 2>/dev/null || {
-  # Fallback: dump XML, sed the name/disk, define
-  virsh dumpxml "${SOURCE}" | \
-    sed "s|<name>${SOURCE}</name>|<name>${DEST}</name>|" | \
-    sed "s|${SRC_ZVOL}|${DST_ZVOL}|g" | \
-    sed '/<uuid>/d' | \
-    sed '/<mac address/d' | \
-    virsh define /dev/stdin
-}
+virsh dumpxml "${SOURCE}" | \
+  sed "s|<name>${SOURCE}</name>|<name>${DEST}</name>|" | \
+  sed "s|${SRC_ZVOL}|${DST_ZVOL}|g" | \
+  sed '/<uuid>/d' | \
+  sed '/<mac address/d' | \
+  virsh define /dev/stdin || {
+    echo "ERROR: Failed to define VM ${DEST}"
+    zfs destroy "${DST_ZVOL}" 2>/dev/null
+    exit 1
+  }
 
 echo ""
 echo "✔ Cloned '${SOURCE}' → '${DEST}' (instant, zero bytes copied)"

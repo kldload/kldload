@@ -645,19 +645,14 @@ WPEOF
   if [[ "$_profile" == "kvm" ]] || [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
     k_log "Configuring KVM host with ZFS-optimized storage"
 
-    # VM disk images — compression off for raw I/O, 64K recordsize for zvol alignment
-    zfs create -o mountpoint=/var/lib/libvirt/images \
+    # VM zvol parent — canmount=off, VMs are zvols accessed via /dev/zvol/rpool/vms/
+    zfs create -o canmount=off \
+               -o mountpoint=none \
                -o compression=off \
-               -o recordsize=64K \
                -o primarycache=metadata \
-               -o atime=off \
                rpool/vms 2>/dev/null || true
-    zfs create -o mountpoint=/var/lib/libvirt/images \
-               -o compression=off \
-               -o recordsize=64K \
-               -o primarycache=metadata \
-               -o atime=off \
-               rpool/vms/images 2>/dev/null || true
+    # Create the libvirt images directory for ISO storage and any qcow2 fallback
+    mkdir -p "${target}/var/lib/libvirt/images" 2>/dev/null || true
 
     # ISO storage — compressed, read-mostly
     zfs create -o mountpoint=/var/lib/libvirt/isos \

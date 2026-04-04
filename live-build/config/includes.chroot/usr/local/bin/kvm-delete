@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# kvm-delete — cleanly remove a VM and its ZFS zvol
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: kvm-delete <vm-name> [--force]
+
+Removes a VM and its ZFS zvol. The VM must be shut down first
+unless --force is specified.
+
+Examples:
+  kvm-delete myvm
+  kvm-delete myvm --force    # force-stop if running
+EOF
+  exit 1
+}
+
+[[ $# -lt 1 ]] && usage
+NAME="$1"
+FORCE="${2:-}"
+
+ZVOL="rpool/vms/${NAME}"
+
+# Check VM exists
+if ! virsh dominfo "${NAME}" >/dev/null 2>&1; then
+  echo "Warning: VM '${NAME}' not found in libvirt (removing zvol only)"
+else
+  STATE=$(virsh domstate "${NAME}" 2>/dev/null || echo "unknown")
+  if [[ "$STATE" == "running" ]]; then
+    if [[ "$FORCE" == "--force" ]]; then
+      echo "Force-stopping VM..."
+      virsh destroy "${NAME}" 2>/dev/null || true
+    else
+      echo "ERROR: VM '${NAME}' is running. Stop it first or use --force"
+      exit 1
+    fi
+  fi
+
+  echo "Removing VM definition..."
+  virsh undefine "${NAME}" --nvram 2>/dev/null || \
+    virsh undefine "${NAME}" 2>/dev/null || true
+fi
+
+if zfs list "${ZVOL}" >/dev/null 2>&1; then
+  echo "Destroying ZFS zvol: ${ZVOL}"
+  zfs destroy -r "${ZVOL}"
+else
+  echo "Warning: ZFS zvol '${ZVOL}' not found"
+fi
+
+echo ""
+echo "Deleted '${NAME}'"

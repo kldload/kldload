@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# kvm-list — show all VMs with ZFS zvol status
+set -euo pipefail
+
+printf "%-20s %-12s %-10s %-10s %-10s\n" "NAME" "STATE" "RAM" "VCPUS" "ZVOL USED"
+printf "%-20s %-12s %-10s %-10s %-10s\n" "----" "-----" "---" "-----" "---------"
+
+for vm in $(virsh list --all --name 2>/dev/null | grep -v '^$'); do
+  state=$(virsh domstate "$vm" 2>/dev/null || echo "unknown")
+  ram=$(virsh dominfo "$vm" 2>/dev/null | awk '/Max memory/{printf "%.0fMB", $3/1024}')
+  vcpus=$(virsh dominfo "$vm" 2>/dev/null | awk '/CPU\(s\)/{print $2}')
+  zvol="rpool/vms/${vm}"
+  used=$(zfs list -H -o used "$zvol" 2>/dev/null || echo "n/a")
+  printf "%-20s %-12s %-10s %-10s %-10s\n" "$vm" "$state" "$ram" "$vcpus" "$used"
+done
+
+echo ""
+echo "ZFS pool space:"
+zfs list -o name,used,avail -r rpool/vms 2>/dev/null | head -1
+zfs list -o name,used,avail rpool/vms 2>/dev/null | tail -1
