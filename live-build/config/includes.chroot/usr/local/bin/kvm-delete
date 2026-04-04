@@ -52,18 +52,18 @@ if zfs list "${ZVOL}" >/dev/null 2>&1; then
   echo "Destroying ZFS zvol: ${ZVOL}"
   zfs destroy -r "${ZVOL}"
 
-  # Clean up the origin snapshot if no other clones depend on it
-  if [[ -n "$ORIGIN" && "$ORIGIN" != "-" && "$ORIGIN" != *"@install-"* ]]; then
-    # Check if any other clones still reference this snapshot
-    DEPENDENTS=$(zfs list -H -o name -t volume 2>/dev/null | while read ds; do
-      ds_origin=$(zfs get -H -o value com.kldload:clone-origin "$ds" 2>/dev/null)
-      [[ "$ds_origin" == "$ORIGIN" ]] && echo "$ds"
-    done)
-
-    if [[ -z "$DEPENDENTS" ]]; then
-      echo "Cleaning up orphaned snapshot: ${ORIGIN}"
-      zfs destroy "${ORIGIN}" 2>/dev/null || true
-    fi
+  # Clean up orphaned clone snapshots on the source
+  # Find all clone-* snapshots on the source that have no remaining clones
+  SRC=$(echo "$ORIGIN" | cut -d@ -f1)
+  if [[ -n "$SRC" && "$SRC" != "-" ]]; then
+    zfs list -t snapshot -H -o name "$SRC" 2>/dev/null | grep '@clone-' | while read snap; do
+      # Check if any zvol still uses this snapshot as its origin
+      USED_BY=$(zfs get -H -o value origin -t volume -r rpool/vms 2>/dev/null | grep "^${snap}$")
+      if [[ -z "$USED_BY" ]]; then
+        echo "Cleaning up orphaned snapshot: ${snap}"
+        zfs destroy "${snap}" 2>/dev/null || true
+      fi
+    done
   fi
 else
   echo "Warning: ZFS zvol '${ZVOL}' not found"
