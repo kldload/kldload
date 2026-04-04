@@ -71,11 +71,19 @@ zfs clone "${SNAP}" "${DST_ZVOL}"
 # Tag the clone with its origin snapshot for cleanup tracking
 zfs set com.kldload:clone-origin="${SNAP}" "${DST_ZVOL}"
 
+# Copy UEFI NVRAM file if it exists (each VM needs its own)
+NVRAM_SRC="/var/lib/libvirt/qemu/nvram/${SOURCE}_VARS.fd"
+NVRAM_DST="/var/lib/libvirt/qemu/nvram/${DEST}_VARS.fd"
+if [[ -f "${NVRAM_SRC}" ]]; then
+  cp "${NVRAM_SRC}" "${NVRAM_DST}"
+fi
+
 # Clone the libvirt domain definition via XML manipulation
 echo "Cloning VM definition..."
 virsh dumpxml "${SOURCE}" | \
   sed "s|<name>${SOURCE}</name>|<name>${DEST}</name>|" | \
   sed "s|${SRC_ZVOL}|${DST_ZVOL}|g" | \
+  sed "s|${SOURCE}_VARS.fd|${DEST}_VARS.fd|g" | \
   sed '/<uuid>/d' | \
   sed '/<mac address/d' | \
   virsh define /dev/stdin || {
