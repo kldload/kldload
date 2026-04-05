@@ -102,23 +102,25 @@
       <div class="page-sub">System overview</div>
 
       <div style="margin-bottom:1rem;padding:0.8rem 1rem;background:linear-gradient(135deg,rgba(52,211,153,0.08),rgba(139,92,246,0.06));border:1px solid rgba(52,211,153,0.2);border-radius:8px">
-        <div style="font-size:0.95rem;font-weight:600;color:var(--accent);margin-bottom:0.2rem">kldloadOS 1.0.2 &mdash; AI-Powered Infrastructure</div>
+        <div style="font-size:0.95rem;font-weight:600;color:var(--accent);margin-bottom:0.2rem">kldloadOS 1.0.3 &mdash; ZFS KVM Hypervisor</div>
         <div style="font-size:0.82rem;color:var(--subtle);line-height:1.5;margin-bottom:0.5rem">
-          Not the smartest AI in the room.<br>
-          <span style="font-style:italic;color:var(--muted)">But it read the manual. So you don&rsquo;t have to.</span>
+          The ultimate bare metal hypervisor.<br>
+          <span style="font-style:italic;color:var(--muted)">OpenZFS underneath KVM. Every VM operation is a filesystem primitive.</span>
         </div>
         <div style="font-size:0.72rem;color:var(--muted);line-height:1.7;border-top:1px solid rgba(52,211,153,0.1);padding-top:0.5rem">
-          <strong style="color:var(--subtle)">What&rsquo;s new in 1.0.2</strong><br>
-          <span style="color:var(--subtle)">&#x2022;</span> Local AI assistant (early preview) &mdash; Ollama + llama3.1:8b + Open WebUI, fully offline after first boot<br>
-          <span style="color:var(--subtle)">&#x2022;</span> 4 AI commands: kai, kai-voice, kai-do, kai-remote &mdash; trained on kldload documentation<br>
-          <span style="color:var(--subtle)">&#x2022;</span> Arch Linux support &mdash; internet install, rolling release, ZFS via archzfs<br>
-          <span style="color:var(--subtle)">&#x2022;</span> NVIDIA GPU auto-detection &mdash; driver checkbox enabled only when GPU present<br>
-          <span style="color:var(--subtle)">&#x2022;</span> AI model gating &mdash; models disabled when system doesn&rsquo;t meet RAM/VRAM requirements<br>
-          <span style="color:var(--subtle)">&#x2022;</span> Live tools &mdash; fio, smartctl, nvme-cli, nmap, iperf3, stress-ng, memtest86+<br>
-          <span style="color:var(--subtle)">&#x2022;</span> Boot reliability &mdash; EFI boot order fix, mount stacking fix, chroot stability<br>
-          <span style="color:var(--subtle)">&#x2022;</span> Management dashboard &mdash; built-in web UI on :9000 for ZFS snapshots, rollback, pool status, and logs. No CLI required.<br>
-          <span style="color:var(--subtle)">&#x2022;</span> USB &amp; hardware &mdash; Thunderbolt/USB-C, USB hubs, USB Ethernet dongles, NVMe, SD cards, virtio. Boots from USB-C adapters and docking stations now.<br>
-          <span style="color:#c9a04a">&#x2022;</span> <span style="color:#c9a04a">Recommended: CentOS Stream + Desktop. Other distros should work but are still being tested.</span>
+          <strong style="color:var(--subtle)">What&rsquo;s new in 1.0.3</strong><br>
+          <span style="color:var(--subtle)">&#x2022;</span> <strong style="color:var(--subtle)">KVM Host profile</strong> &mdash; bare metal hypervisor with ZFS-native VM management<br>
+          <span style="color:var(--subtle)">&#x2022;</span> <code style="font-size:0.68rem">kvm-create</code> / <code style="font-size:0.68rem">kvm-clone</code> / <code style="font-size:0.68rem">kvm-snap</code> / <code style="font-size:0.68rem">kvm-delete</code> / <code style="font-size:0.68rem">kvm-list</code> / <code style="font-size:0.68rem">kvm-replicate</code> &mdash; full VM lifecycle on ZFS<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Instant VM cloning (~100ms) via ZFS copy-on-write &mdash; zero disk cost<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Atomic block-level VM snapshots &mdash; not QEMU snapshots, real ZFS snapshots<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Incremental DR replication over WireGuard &mdash; only changed blocks<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Golden image workflow &mdash; cloud image &rarr; ZFS zvol &rarr; clone &rarr; cloud-init per node<br>
+          <span style="color:var(--subtle)">&#x2022;</span> NVIDIA container GPU sharing &mdash; CUDA time-slicing, no vGPU licence needed<br>
+          <span style="color:var(--subtle)">&#x2022;</span> FreeBSD support &mdash; native ZFS, WireGuard<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Podman with ZFS storage driver &mdash; dataset per container, block-level snapshots<br>
+          <span style="color:var(--subtle)">&#x2022;</span> 32 masterclasses, 3,273 pages of documentation<br>
+          <span style="color:var(--subtle)">&#x2022;</span> <code style="font-size:0.68rem">kvm-demo 99</code> &mdash; one-shot screenshot proof of instant cloning + snapshots<br>
+          <span style="color:#c9a04a">&#x2022;</span> <span style="color:#c9a04a">Select KVM Host profile below to install the hypervisor.</span>
         </div>
       </div>
 
@@ -221,18 +223,12 @@
                 <div class="tc-name">FreeBSD</div>
                 <div class="tc-sub">internet required</div>
               </div>
-              <div class="target-card" data-distro="openbsd" onclick="selectDistro(this)">
-                <div class="tc-icon" style="font-size:1.2rem">🐡</div>
-                <div class="tc-name">OpenBSD</div>
-                <div class="tc-sub">experimental</div>
-              </div>
             </div>
-            <div style="margin-top:0.8rem;font-size:0.7rem;color:var(--muted)">Alpine, GhostBSD, illumos, Windows — coming soon</div>
           </div>
         </div>
 
-        <!-- AI Assistant — prominent card -->
-        <div class="panel" id="ai-panel" style="margin-bottom:1rem">
+        <!-- AI Assistant — hidden for 1.0.3, redesigned template coming in future release -->
+        <div class="panel" id="ai-panel" style="margin-bottom:1rem;display:none">
           <div class="panel-hdr">AI Assistant &mdash; Early Preview</div>
           <div class="panel-body">
             <div id="ai-card" onclick="toggleAI()" style="cursor:pointer;padding:1rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s">
@@ -308,8 +304,8 @@
           ✓ CentOS Stream 9 selected
         </div>
 
-        <!-- Windows options (hidden unless Windows selected) -->
-        <div class="panel" id="windows-options" style="margin-bottom:1rem;display:none">
+        <!-- Windows options — removed for 1.0.3 -->
+        <div class="panel" id="windows-options" style="margin-bottom:1rem;display:none;visibility:hidden">
           <div class="panel-hdr">◈ Windows Options</div>
           <div class="panel-body">
             <div class="form-row" style="margin-bottom:0.5rem">
@@ -1181,10 +1177,6 @@ const DISTRO_DESCS = {
   arch:     'Arch Linux — rolling release, internet required (no darksite)',
   alpine:   'Alpine Linux 3.21 — musl/OpenRC, core profile only (coming soon)',
   freebsd:  'FreeBSD 15.0 — native ZFS, jails, bhyve',
-  openbsd:  'OpenBSD 7.8 — security-focused, pf firewall, pledge/unveil',
-  ghostbsd: 'GhostBSD — FreeBSD with MATE desktop',
-  illumos:  'OpenIndiana (illumos) — the original ZFS home',
-  windows:  'Windows — provide your own ISO, installed via WIM extraction',
 };
 function toggleOpt(name) {
   var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm'};
