@@ -71,6 +71,16 @@ zfs snapshot "rpool/vms@pre-create-${NAME}" 2>/dev/null || true
 echo "Creating ZFS zvol: ${ZVOL} (${DISK}G, thin provisioned)..."
 zfs create -V "${DISK}G" -s -o compression=off -o volblocksize=64K "${ZVOL}"
 
+# Wait for zvol device node to appear
+for _i in $(seq 1 30); do
+  [[ -e "/dev/zvol/${ZVOL}" ]] && break
+  sleep 0.1
+done
+if [[ ! -e "/dev/zvol/${ZVOL}" ]]; then
+  echo "ERROR: /dev/zvol/${ZVOL} did not appear after 3 seconds"
+  exit 1
+fi
+
 # Build virt-install command
 CMD=(virt-install
   --name "${NAME}"
