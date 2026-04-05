@@ -703,11 +703,11 @@ USEREOF
 
         # Create cloud-init seed ISO
         genisoimage -output "/tmp/cloud-init-node-$i.iso" -V cidata -r -J \
-          "$CIDIR/meta-data" "$CIDIR/user-data" &>/dev/null 2>&1 || \
+          "$CIDIR/meta-data" "$CIDIR/user-data" >/dev/null 2>&1 || \
         mkisofs -output "/tmp/cloud-init-node-$i.iso" -V cidata -r -J \
-          "$CIDIR/meta-data" "$CIDIR/user-data" &>/dev/null 2>&1 || \
+          "$CIDIR/meta-data" "$CIDIR/user-data" >/dev/null 2>&1 || \
         xorrisofs -output "/tmp/cloud-init-node-$i.iso" -V cidata -r -J \
-          "$CIDIR/meta-data" "$CIDIR/user-data" &>/dev/null 2>&1
+          "$CIDIR/meta-data" "$CIDIR/user-data" >/dev/null 2>&1
 
         echo -e "  ${G}node-$i${N}: hostname=node-$i password=kldload"
       done
@@ -716,7 +716,8 @@ USEREOF
       echo -e "${Y}Step 3: Define and start VMs${N}"
       echo ""
       for i in 1 2 3 4; do
-        virt-install \
+        sleep 0.5
+        if virt-install \
           --name "node-$i" \
           --ram 1024 --vcpus 1 \
           --disk "source.dev=/dev/zvol/rpool/vms/node-$i,type=block,bus=virtio,cache=none" \
@@ -726,9 +727,11 @@ USEREOF
           --graphics vnc,listen=0.0.0.0 \
           --boot hd \
           --noautoconsole \
-          --import &>/dev/null && \
-        echo -e "  ${G}node-$i${N} started" || \
-        echo -e "  ${R}node-$i${N} failed"
+          --import >/dev/null 2>&1; then
+          echo -e "  ${G}node-$i${N} started"
+        else
+          echo -e "  ${R}node-$i${N} failed"
+        fi
       done
 
       sleep 3
