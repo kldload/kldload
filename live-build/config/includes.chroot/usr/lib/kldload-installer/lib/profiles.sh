@@ -212,7 +212,7 @@ k_profile_optional_packages() {
     elif [[ "$_distro" == "ubuntu" || "$_distro" == "debian" ]]; then
       out+=(qemu-kvm libvirt-daemon-system libvirt-clients virtinst bridge-utils ovmf cpu-checker dnsmasq-base)
     else
-      out+=(qemu-kvm libvirt-daemon libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq)
+      out+=(qemu-kvm libvirt-daemon libvirt-daemon-driver-qemu libvirt-daemon-config-network libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq)
     fi
   fi
 
@@ -779,10 +779,23 @@ autoprune  = yes
 KVMSANOID
     fi
 
+    # Configure Podman to use ZFS storage driver
+    mkdir -p "${target}/etc/containers"
+    cat > "${target}/etc/containers/storage.conf" <<'STORAGE'
+[storage]
+driver = "zfs"
+
+[storage.options.zfs]
+fsname = "rpool/var/lib/containers/storage/zfs"
+STORAGE
+
+    # Create the container storage dataset
+    chroot "${target}" bash -c 'zfs create -p -o mountpoint=/var/lib/containers/storage/zfs rpool/var/lib/containers/storage/zfs' 2>/dev/null || true
+
     # Enable libvirtd
     chroot "${target}" systemctl enable libvirtd 2>/dev/null || true
 
-    k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots, kvm-* tools"
+    k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots, kvm-* tools, Podman ZFS driver"
   fi
 
   k_log "System files installed (root_ds=${root_ds})"

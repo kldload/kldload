@@ -942,8 +942,11 @@ gpgcheck=0
 CUDAREPO
     chroot "${target}" dnf install -y --skip-broken \
         nvidia-driver nvidia-driver-libs nvidia-driver-cuda \
+        nvidia-container-toolkit \
         >> "$log" 2>&1 || k_log_to "$log" "WARNING: NVIDIA driver install had issues (no GPU?)"
-    k_log_to "$log" "NVIDIA drivers installed"
+    # Generate CDI spec for container GPU access
+    chroot "${target}" bash -c 'nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' 2>/dev/null || true
+    k_log_to "$log" "NVIDIA drivers + container toolkit installed"
   fi
 
   # BCC tools: symlink into PATH (installed to /usr/share/bcc/tools/ on RPM distros)
