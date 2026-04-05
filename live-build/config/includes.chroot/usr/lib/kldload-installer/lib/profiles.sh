@@ -728,6 +728,15 @@ echo "Replication complete: $SNAP"
 REPL
     chmod +x "${target}/usr/local/sbin/kvm-replicate"
 
+    # Copy KVM management tools from live ISO to target
+    mkdir -p "${target}/usr/local/bin"
+    for tool in kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo; do
+      if [[ -f "/usr/local/bin/${tool}" ]]; then
+        cp "/usr/local/bin/${tool}" "${target}/usr/local/bin/${tool}"
+        chmod +x "${target}/usr/local/bin/${tool}"
+      fi
+    done
+
     # Hourly VM snapshot timer
     mkdir -p "${target}/etc/systemd/system"
     cat > "${target}/etc/systemd/system/kvm-snapshot.service" <<'SNAPSVC'
@@ -749,10 +758,31 @@ SNAPTMR
     ln -sf /etc/systemd/system/kvm-snapshot.timer \
       "${target}/etc/systemd/system/timers.target.wants/kvm-snapshot.timer" 2>/dev/null || true
 
+    # Add VM datasets to sanoid for snapshot management
+    if [[ -f "${target}/etc/sanoid/sanoid.conf" ]]; then
+      cat >> "${target}/etc/sanoid/sanoid.conf" <<'KVMSANOID'
+
+# KVM VM datasets — hourly snapshots for VM zvols
+[rpool/vms]
+use_template = kvm
+recursive = yes
+
+[template_kvm]
+frequently = 0
+hourly     = 48
+daily      = 14
+weekly     = 4
+monthly    = 3
+yearly     = 0
+autosnap   = yes
+autoprune  = yes
+KVMSANOID
+    fi
+
     # Enable libvirtd
     chroot "${target}" systemctl enable libvirtd 2>/dev/null || true
 
-    k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots"
+    k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots, kvm-* tools"
   fi
 
   k_log "System files installed (root_ds=${root_ds})"
