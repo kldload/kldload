@@ -188,11 +188,19 @@ kldload Kubernetes shortcuts:
     hv <rel>        release values
     hh <rel>        release history
 
+  Network:
+    kube-network init <id>     setup WireGuard backplane (mgmt + k8s planes)
+    kube-network add-peer      add peer to mesh
+    kube-network pin-kubelet   pin kubelet to wg-k8s interface
+    kube-network nft           apply K8s firewall rules
+    kube-network status        WireGuard plane status
+
   Cluster:
     kube-setup      install K8s packages
     kube-init       bootstrap control plane + Cilium
     kube-join <ip>  join as worker
     kube-reset      tear down K8s on this node
     kube-status     cluster health dashboard
+    kube-cluster    KVM: golden image → clone CP + workers
 EOF
 }

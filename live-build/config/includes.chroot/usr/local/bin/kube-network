@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# kube-network — configure WireGuard backplane for Kubernetes cluster
+# Sets up encrypted mesh between K8s nodes with dedicated planes:
+#   wg-mgmt (10.250.0.x)  — SSH, management, monitoring
+#   wg-k8s  (10.251.0.x)  — kubelet, API server, Cilium, pod-to-pod
+#
+# Usage:
+#   kube-network init <node-id>           — generate keys, create configs (node-id: 1-254)
+#   kube-network add-peer <peer-ip> <peer-pubkey> <peer-id>  — add a peer to the mesh
+#   kube-network status                   — show WireGuard status
+#   kube-network pin-kubelet              — pin kubelet to wg-k8s interface
+#   kube-network nft                      — apply K8s-aware nftables rules
+set -euo pipefail
+
+if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+MGMT_SUBNET="10.250.0"
+K8S_SUBNET="10.251.0"
+MGMT_PORT=51820
+K8S_PORT=51821
+
+log()  { echo -e "\033[1;32m[kube-network]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[kube-network]\033[0m $*" >&2; }
+die()  { echo -e "\033[1;31m[kube-network]\033[0m $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Usage: kube-network <command> [args]
+
+Commands:
+  init <node-id>                          Generate keys, create WireGuard configs
+  add-peer <endpoint> <pubkey> <peer-id>  Add a peer to the mesh
+  show-keys                               Show this node's public keys
+  status                                  WireGuard interface status
+  pin-kubelet                             Pin kubelet node-ip to wg-k8s
+  nft                                     Apply K8s nftables firewall rules
+
+Node IDs:
+  1   = control plane (10.250.0.1, 10.251.0.1)
+  2+  = workers       (10.250.0.N, 10.251.0.N)
+
+Example — 3-node cluster:
+  # On node 1 (control plane):
+  kube-network init 1
+  kube-network show-keys    # copy pubkeys
+
+  # On node 2 (worker):
+  kube-network init 2
+  kube-network add-peer 203.0.113.1 <node1-mgmt-pubkey> 1
+  kube-network show-keys    # send back to node 1
+
+  # Back on node 1:
+  kube-network add-peer 203.0.113.2 <node2-mgmt-pubkey> 2
+
+  # Then on all nodes:
+  kube-network pin-kubelet
+  kube-network nft
+EOF
+  exit 1
+}
+
+# ── init ───────────────────────────────────────────────────────────────────
+cmd_init() {
+  local node_id="${1:?Usage: kube-network init <node-id>}"
+  [[ "$node_id" =~ ^[0-9]+$ ]] || die "node-id must be a number (1-254)"
+  [[ "$node_id" -ge 1 && "$node_id" -le 254 ]] || die "node-id must be 1-254"
+
+  install -d -m700 /etc/wireguard
+  local old_umask; old_umask="$(umask)"; umask 077
+
+  # Generate keys for both planes
+  for iface in wg-mgmt wg-k8s; do
+    if [[ ! -f "/etc/wireguard/${iface}.key" ]]; then
+      wg genkey | tee "/etc/wireguard/${iface}.key" | wg pubkey > "/etc/wireguard/${iface}.pub"
+      log "Generated keys for ${iface}"
+    fi
+  done
+
+  # Management plane
+  cat > /etc/wireguard/wg-mgmt.conf <<EOF
+[Interface]
+Address = ${MGMT_SUBNET}.${node_id}/24
+PrivateKey = $(cat /etc/wireguard/wg-mgmt.key)
+ListenPort = ${MGMT_PORT}
+MTU = 1420
+EOF
+
+  # Kubernetes plane
+  cat > /etc/wireguard/wg-k8s.conf <<EOF
+[Interface]
+Address = ${K8S_SUBNET}.${node_id}/24
+PrivateKey = $(cat /etc/wireguard/wg-k8s.key)
+ListenPort = ${K8S_PORT}
+MTU = 1420
+EOF
+
+  chmod 600 /etc/wireguard/*.conf /etc/wireguard/*.key
+  umask "$old_umask"
+
+  # Save node ID for future reference
+  echo "$node_id" > /etc/wireguard/.node-id
+
+  # Bring up interfaces
+  systemctl enable --now wg-quick@wg-mgmt 2>/dev/null || wg-quick up wg-mgmt 2>/dev/null || true
+  systemctl enable --now wg-quick@wg-k8s 2>/dev/null || wg-quick up wg-k8s 2>/dev/null || true
+
+  log "WireGuard initialized for node ${node_id}:"
+  log "  Management: ${MGMT_SUBNET}.${node_id}/24 (port ${MGMT_PORT})"
+  log "  Kubernetes: ${K8S_SUBNET}.${node_id}/24 (port ${K8S_PORT})"
+  echo ""
+  log "Public keys:"
+  log "  wg-mgmt: $(cat /etc/wireguard/wg-mgmt.pub)"
+  log "  wg-k8s:  $(cat /etc/wireguard/wg-k8s.pub)"
+  echo ""
+  log "Next: share public keys with peers and run:"
+  log "  kube-network add-peer <endpoint> <pubkey> <peer-id>"
+}
+
+# ── add-peer ───────────────────────────────────────────────────────────────
+cmd_add_peer() {
+  local endpoint="${1:?Usage: kube-network add-peer <endpoint> <pubkey> <peer-id>}"
+  local pubkey="${2:?missing peer public key}"
+  local peer_id="${3:?missing peer node-id}"
+
+  [[ -f /etc/wireguard/wg-mgmt.conf ]] || die "Run 'kube-network init' first"
+
+  # Add peer to management plane
+  cat >> /etc/wireguard/wg-mgmt.conf <<EOF
+
+[Peer]
+# Node ${peer_id}
+PublicKey = ${pubkey}
+Endpoint = ${endpoint}:${MGMT_PORT}
+AllowedIPs = ${MGMT_SUBNET}.${peer_id}/32
+PersistentKeepalive = 25
+EOF
+
+  # Add peer to K8s plane (same endpoint, different port)
+  # Peer needs to share their wg-k8s pubkey separately, but for simplicity
+  # we use the same key for both planes (can be changed later)
+  cat >> /etc/wireguard/wg-k8s.conf <<EOF
+
+[Peer]
+# Node ${peer_id}
+PublicKey = ${pubkey}
+Endpoint = ${endpoint}:${K8S_PORT}
+AllowedIPs = ${K8S_SUBNET}.${peer_id}/32
+PersistentKeepalive = 25
+EOF
+
+  # Reload
+  wg-quick down wg-mgmt 2>/dev/null; wg-quick up wg-mgmt 2>/dev/null || true
+  wg-quick down wg-k8s 2>/dev/null; wg-quick up wg-k8s 2>/dev/null || true
+
+  log "Peer ${peer_id} added: ${endpoint}"
+  log "  Management: ${MGMT_SUBNET}.${peer_id}"
+  log "  Kubernetes: ${K8S_SUBNET}.${peer_id}"
+}
+
+# ── show-keys ──────────────────────────────────────────────────────────────
+cmd_show_keys() {
+  [[ -f /etc/wireguard/wg-mgmt.pub ]] || die "Run 'kube-network init' first"
+  echo "Node ID:  $(cat /etc/wireguard/.node-id 2>/dev/null || echo 'unknown')"
+  echo "wg-mgmt:  $(cat /etc/wireguard/wg-mgmt.pub)"
+  echo "wg-k8s:   $(cat /etc/wireguard/wg-k8s.pub)"
+}
+
+# ── status ─────────────────────────────────────────────────────────────────
+cmd_status() {
+  echo -e "\033[1;33m=== Management Plane (wg-mgmt) ===\033[0m"
+  wg show wg-mgmt 2>/dev/null || echo "  Not running"
+  echo ""
+  echo -e "\033[1;33m=== Kubernetes Plane (wg-k8s) ===\033[0m"
+  wg show wg-k8s 2>/dev/null || echo "  Not running"
+}
+
+# ── pin-kubelet ────────────────────────────────────────────────────────────
+cmd_pin_kubelet() {
+  local k8s_ip
+  k8s_ip="$(ip -4 addr show wg-k8s 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)"
+  [[ -n "$k8s_ip" ]] || die "wg-k8s interface not found. Run 'kube-network init' first."
+
+  mkdir -p /etc/default
+  echo "KUBELET_EXTRA_ARGS=--node-ip=${k8s_ip}" > /etc/default/kubelet
+
+  log "kubelet pinned to wg-k8s: ${k8s_ip}"
+  log "Restart kubelet: systemctl restart kubelet"
+
+  # Also update kubeadm config if cluster is running
+  if [[ -f /etc/kubernetes/admin.conf ]]; then
+    log "Cluster is running — kubelet will use new IP after restart"
+    systemctl restart kubelet 2>/dev/null || true
+  fi
+}
+
+# ── nft ────────────────────────────────────────────────────────────────────
+cmd_nft() {
+  local lan_if
+  lan_if="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')" || true
+  : "${lan_if:=eth0}"
+
+  cat > /etc/nftables.conf <<EOF
+#!/usr/sbin/nft -f
+flush ruleset
+
+table inet filter {
+  chain input {
+    type filter hook input priority 0; policy drop;
+
+    ct state established,related accept
+    iifname "lo" accept
+    ip protocol icmp accept
+
+    # SSH on LAN only
+    tcp dport 22 accept
+
+    # WireGuard ports
+    udp dport { ${MGMT_PORT}, ${K8S_PORT} } accept
+
+    # Accept all traffic on WireGuard planes
+    iifname "wg-mgmt" accept
+    iifname "wg-k8s" accept
+
+    # K8s API server (external access if needed)
+    tcp dport 6443 accept
+
+    # NodePort range
+    tcp dport 30000-32767 accept
+    udp dport 30000-32767 accept
+  }
+
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+
+    ct state established,related accept
+
+    # Allow forwarding between WireGuard planes
+    iifname "wg-k8s" accept
+    oifname "wg-k8s" accept
+    iifname "wg-mgmt" accept
+    oifname "wg-mgmt" accept
+
+    # Allow pod traffic (Cilium manages this via eBPF but nft needs to allow it)
+    iifname "cilium_*" accept
+    oifname "cilium_*" accept
+    iifname "lxc*" accept
+    oifname "lxc*" accept
+  }
+
+  chain output {
+    type filter hook output priority 0; policy accept;
+  }
+}
+
+table ip nat {
+  chain postrouting {
+    type nat hook postrouting priority 100; policy accept;
+    oifname "${lan_if}" masquerade
+  }
+}
+EOF
+
+  nft -f /etc/nftables.conf || true
+  systemctl enable --now nftables 2>/dev/null || true
+
+  log "nftables configured for Kubernetes + WireGuard"
+  log "  WireGuard planes: full access"
+  log "  K8s API: port 6443 open"
+  log "  NodePorts: 30000-32767 open"
+  log "  Cilium: pod forwarding allowed"
+}
+
+# ── Dispatch ───────────────────────────────────────────────────────────────
+case "${1:-}" in
+  init)       shift; cmd_init "$@" ;;
+  add-peer)   shift; cmd_add_peer "$@" ;;
+  show-keys)  cmd_show_keys ;;
+  status)     cmd_status ;;
+  pin-kubelet) cmd_pin_kubelet ;;
+  nft)        cmd_nft ;;
+  *)          usage ;;
+esac

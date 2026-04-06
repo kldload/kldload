@@ -32,8 +32,13 @@ preflight() {
 # ── Detect node IP ─────────────────────────────────────────────────────────
 detect_node_ip() {
   local ip
-  # Prefer WireGuard interface if available
-  ip="$(ip -4 addr show wg0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)" || true
+  # Prefer wg-k8s (Kubernetes backplane) if available
+  ip="$(ip -4 addr show wg-k8s 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)" || true
+  # Fall back to wg0 (legacy single-plane)
+  if [[ -z "$ip" ]]; then
+    ip="$(ip -4 addr show wg0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)" || true
+  fi
+  # Fall back to default route
   if [[ -z "$ip" ]]; then
     ip="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}')" || true
   fi
