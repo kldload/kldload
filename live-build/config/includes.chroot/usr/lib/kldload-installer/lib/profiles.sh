@@ -210,7 +210,7 @@ k_profile_optional_packages() {
     if [[ "$_distro" == "arch" ]]; then
       out+=(qemu-full libvirt virt-install bridge-utils edk2-ovmf dnsmasq)
     elif [[ "$_distro" == "ubuntu" || "$_distro" == "debian" ]]; then
-      out+=(qemu-kvm libvirt-daemon-system libvirt-clients virtinst bridge-utils ovmf cpu-checker dnsmasq-base)
+      out+=(qemu-system-x86 libvirt-daemon-system libvirt-clients virtinst bridge-utils ovmf dnsmasq-base)
     else
       out+=(qemu-kvm libvirt-daemon libvirt-daemon-driver-qemu libvirt-daemon-config-network libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq)
     fi
