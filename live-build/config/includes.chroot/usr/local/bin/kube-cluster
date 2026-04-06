@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# kube-cluster — deploy a Kubernetes cluster on KVM using ZFS clones
+# Creates control plane + worker VMs from a golden image, bootstraps with kubeadm + Cilium
+#
+# Usage:
+#   kube-cluster create [--workers N] [--ram MB] [--cpus N] [--golden NAME]
+#   kube-cluster destroy
+#   kube-cluster status
+#
+# Requires: KVM profile with kvm-clone, a golden image with kube-setup already run
+set -euo pipefail
+
+# Auto-elevate to root
+if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+WORKERS="${WORKERS:-3}"
+RAM="${RAM:-4096}"
+CPUS="${CPUS:-2}"
+GOLDEN="${GOLDEN:-k8s-golden}"
+CLUSTER_NAME="${CLUSTER_NAME:-kldload}"
+POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
+
+C="\033[1;36m"; G="\033[1;32m"; Y="\033[1;33m"; R="\033[1;31m"
+W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"
+
+log()  { echo -e "${G}[kube-cluster]${N} $*"; }
+warn() { echo -e "${Y}[kube-cluster]${N} $*" >&2; }
+die()  { echo -e "${R}[kube-cluster]${N} $*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+Usage: kube-cluster <command> [options]
+
+Commands:
+  create    Create a Kubernetes cluster on KVM
+  destroy   Tear down the cluster (VMs + zvols)
+  status    Show cluster status
+
+Options (create):
+  --workers N      Number of worker nodes (default: 3)
+  --ram MB         RAM per node in MB (default: 4096)
+  --cpus N         vCPUs per node (default: 2)
+  --golden NAME    Golden image name (default: k8s-golden)
+
+The golden image must exist as a ZFS zvol at rpool/vms/<golden>.
+Build it with: kvm-create k8s-golden && kube-setup (inside the VM)
+
+Examples:
+  kube-cluster create
+  kube-cluster create --workers 5 --ram 8192 --cpus 4
+  kube-cluster destroy
+  kube-cluster status
+EOF
+  exit 1
+}
+
+# ── Parse args ─────────────────────────────────────────────────────────────
+CMD="${1:-}"
+[[ -n "$CMD" ]] || usage
+shift
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --workers) WORKERS="$2"; shift 2 ;;
+    --ram)     RAM="$2"; shift 2 ;;
+    --cpus)    CPUS="$2"; shift 2 ;;
+    --golden)  GOLDEN="$2"; shift 2 ;;
+    *)         die "Unknown option: $1" ;;
+  esac
+done
+
+CP_NAME="${CLUSTER_NAME}-cp"
+WORKER_PREFIX="${CLUSTER_NAME}-worker"
+
+# ── Create ─────────────────────────────────────────────────────────────────
+cmd_create() {
+  # Verify golden image exists
+  if ! zfs list "rpool/vms/${GOLDEN}" >/dev/null 2>&1; then
+    die "Golden image rpool/vms/${GOLDEN} not found. Create it first:
+  kvm-create ${GOLDEN} --ram ${RAM} --cpus ${CPUS} --disk 40
+  (install OS, run kube-setup inside the VM, shut down)
+  kvm-snap ${GOLDEN}"
+  fi
+
+  log "Creating Kubernetes cluster: 1 control plane + ${WORKERS} workers"
+  log "  Golden image: rpool/vms/${GOLDEN}"
+  log "  RAM: ${RAM}MB, CPUs: ${CPUS}"
+  echo ""
+
+  # ZFS snapshot before cluster creation
+  zfs snapshot "rpool/vms@pre-kube-cluster-$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || true
+
+  # Clone control plane
+  echo -e "${Y}=== Control Plane ===${N}"
+  echo -ne "  Cloning ${GOLDEN} → ${CP_NAME} ... "
+  S=$(date +%s%N)
+  kvm-clone "${GOLDEN}" "${CP_NAME}" >/dev/null 2>&1
+  E=$(date +%s%N)
+  echo -e "${G}done${N} (${C}$(( (E-S)/1000000 ))ms${N})"
+
+  # Clone workers
+  echo ""
+  echo -e "${Y}=== Workers ===${N}"
+  for i in $(seq 1 "$WORKERS"); do
+    local name="${WORKER_PREFIX}-${i}"
+    echo -ne "  Cloning ${GOLDEN} → ${name} ... "
+    S=$(date +%s%N)
+    kvm-clone "${GOLDEN}" "${name}" >/dev/null 2>&1
+    E=$(date +%s%N)
+    echo -e "${G}done${N} (${C}$(( (E-S)/1000000 ))ms${N})"
+  done
+
+  # Start all VMs
+  echo ""
+  echo -e "${Y}=== Starting VMs ===${N}"
+  virsh start "${CP_NAME}" 2>/dev/null && echo -e "  ${G}${CP_NAME}${N} started" || echo -e "  ${R}${CP_NAME}${N} already running"
+  for i in $(seq 1 "$WORKERS"); do
+    local name="${WORKER_PREFIX}-${i}"
+    virsh start "${name}" 2>/dev/null && echo -e "  ${G}${name}${N} started" || echo -e "  ${R}${name}${N} already running"
+  done
+
+  # Wait for VMs to get IPs
+  echo ""
+  log "Waiting for VMs to boot and get network..."
+  sleep 15
+
+  # Show status
+  echo ""
+  kvm-list
+
+  echo ""
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  Kubernetes Cluster VMs Ready                               ${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "  Control plane:  ${G}${CP_NAME}${N}"
+  echo -e "  Workers:        ${G}${WORKERS}${N} (${WORKER_PREFIX}-1 through ${WORKER_PREFIX}-${WORKERS})"
+  echo -e "  Cloned from:    ${GOLDEN}"
+  echo -e "  Each clone:     ${G}~100ms, 0 bytes${N} (ZFS copy-on-write)"
+  echo ""
+  echo -e "  ${W}Next steps:${N}"
+  echo -e "  1. SSH into ${CP_NAME} and run: ${C}kube-init${N}"
+  echo -e "  2. SSH into each worker and run: ${C}kube-join <cp-ip>${N}"
+  echo -e "  3. On the CP, verify: ${C}kube-status${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+}
+
+# ── Destroy ────────────────────────────────────────────────────────────────
+cmd_destroy() {
+  echo -e "${R}WARNING: This will destroy the entire Kubernetes cluster${N}"
+  echo "  Control plane: ${CP_NAME}"
+  echo "  Workers: ${WORKER_PREFIX}-1 through ${WORKER_PREFIX}-${WORKERS}"
+  echo ""
+  read -r -p "Type 'destroy' to continue: " confirm
+  [[ "$confirm" == "destroy" ]] || { echo "Aborted."; exit 0; }
+
+  log "Destroying cluster..."
+
+  # Destroy control plane
+  kvm-delete "${CP_NAME}" 2>/dev/null || true
+
+  # Destroy workers
+  for i in $(seq 1 "$WORKERS"); do
+    kvm-delete "${WORKER_PREFIX}-${i}" 2>/dev/null || true
+  done
+
+  log "Cluster destroyed"
+}
+
+# ── Status ─────────────────────────────────────────────────────────────────
+cmd_status() {
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  Kubernetes Cluster Status                                  ${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo ""
+
+  echo -e "${Y}VMs:${N}"
+  kvm-list 2>/dev/null | grep -E "${CLUSTER_NAME}|NAME|----" || echo "  No cluster VMs found"
+  echo ""
+
+  echo -e "${Y}ZFS Zvols:${N}"
+  zfs list -o name,used,refer,volsize -r rpool/vms -t volume 2>/dev/null | grep -E "${CLUSTER_NAME}|NAME" || echo "  None"
+  echo ""
+
+  # Try to get K8s status from control plane
+  local cp_ip
+  cp_ip="$(virsh domifaddr "${CP_NAME}" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1)" || true
+  if [[ -n "$cp_ip" ]]; then
+    echo -e "${Y}Kubernetes (via ${CP_NAME} @ ${cp_ip}):${N}"
+    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "root@${cp_ip}" \
+      'kubectl get nodes -o wide 2>/dev/null' 2>/dev/null || echo "  Cannot reach K8s API"
+  fi
+  echo ""
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+}
+
+# ── Dispatch ───────────────────────────────────────────────────────────────
+case "$CMD" in
+  create)  cmd_create ;;
+  destroy) cmd_destroy ;;
+  status)  cmd_status ;;
+  *)       usage ;;
+esac

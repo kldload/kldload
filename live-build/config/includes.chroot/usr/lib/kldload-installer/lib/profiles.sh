@@ -216,6 +216,15 @@ k_profile_optional_packages() {
     fi
   fi
 
+  # Kubernetes (optional checkbox)
+  if [[ "${KLDLOAD_ENABLE_K8S:-0}" == "1" ]]; then
+    if [[ "$_distro" == "ubuntu" || "$_distro" == "debian" ]]; then
+      out+=(containerd conntrack socat ebtables ipset ipvsadm cri-tools)
+    elif [[ "$_distro" != "arch" && "$_distro" != "freebsd" ]]; then
+      out+=(containerd.io conntrack-tools socat ipvsadm)
+    fi
+  fi
+
   # Auto-detect hypervisor and add guest tools
   local virt
   virt="$(systemd-detect-virt 2>/dev/null || true)"
@@ -796,6 +805,77 @@ STORAGE
     chroot "${target}" systemctl enable libvirtd 2>/dev/null || true
 
     k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots, kvm-* tools, Podman ZFS driver"
+  fi
+
+  # ── Kubernetes node setup ──────────────────────────────────────────────
+  if [[ "${KLDLOAD_ENABLE_K8S:-0}" == "1" ]]; then
+    k_log "Configuring Kubernetes node..."
+
+    # Copy kube-* tools from live ISO to target
+    mkdir -p "${target}/usr/local/bin"
+    for tool in kube-setup kube-init kube-join kube-status kube-reset; do
+      if [[ -f "/usr/local/bin/${tool}" ]]; then
+        cp "/usr/local/bin/${tool}" "${target}/usr/local/bin/${tool}"
+        chmod +x "${target}/usr/local/bin/${tool}"
+      fi
+    done
+
+    # Copy kubectl helper functions
+    if [[ -f "/etc/profile.d/kube-helpers.sh" ]]; then
+      cp "/etc/profile.d/kube-helpers.sh" "${target}/etc/profile.d/kube-helpers.sh"
+      chmod +x "${target}/etc/profile.d/kube-helpers.sh"
+    fi
+
+    # Kernel modules for K8s
+    cat > "${target}/etc/modules-load.d/k8s.conf" <<'K8SMOD'
+overlay
+br_netfilter
+ip_vs
+ip_vs_rr
+ip_vs_wrr
+ip_vs_sh
+nf_conntrack
+K8SMOD
+
+    # sysctl for K8s
+    cat > "${target}/etc/sysctl.d/99-kubernetes.conf" <<'K8SSYS'
+net.ipv4.ip_forward = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+K8SSYS
+
+    # Disable swap (kubeadm requires it)
+    sed -ri '/\sswap\s/s/^/#/' "${target}/etc/fstab" 2>/dev/null || true
+
+    # ZFS datasets for K8s components
+    local root_pool
+    root_pool="${root_ds%%/*}"
+    chroot "${target}" bash -c "
+      zfs create -p -o mountpoint=/var/lib/etcd -o recordsize=8K -o compression=lz4 -o atime=off ${root_pool}/var/lib/etcd 2>/dev/null || true
+      zfs create -p -o mountpoint=/var/lib/containerd -o compression=lz4 -o atime=off ${root_pool}/var/lib/containerd 2>/dev/null || true
+      zfs create -p -o mountpoint=/var/lib/kubelet -o compression=lz4 -o atime=off ${root_pool}/var/lib/kubelet 2>/dev/null || true
+    " 2>/dev/null || true
+
+    # containerd config with SystemdCgroup
+    mkdir -p "${target}/etc/containerd"
+    chroot "${target}" bash -c 'containerd config default > /etc/containerd/config.toml 2>/dev/null; sed -i "s/SystemdCgroup = false/SystemdCgroup = true/" /etc/containerd/config.toml 2>/dev/null' || true
+
+    # crictl config
+    cat > "${target}/etc/crictl.yaml" <<'CRICTLCFG'
+runtime-endpoint: unix:///run/containerd/containerd.sock
+image-endpoint: unix:///run/containerd/containerd.sock
+timeout: 10
+debug: false
+CRICTLCFG
+
+    # Enable containerd and kubelet
+    chroot "${target}" systemctl enable containerd 2>/dev/null || true
+    chroot "${target}" systemctl enable kubelet 2>/dev/null || true
+
+    k_log "Kubernetes node configured: containerd, kernel modules, sysctl, ZFS datasets (etcd 8K, containerd, kubelet)"
+    k_log "After boot, run: kube-init (control plane) or kube-join <ip> (worker)"
   fi
 
   k_log "System files installed (root_ds=${root_ds})"

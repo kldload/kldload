@@ -686,11 +686,17 @@
                 <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">ZFS Dedup</div>
                 <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">5GB+ RAM per TB</div>
               </div>
+              <div class="opt-card" id="opt-k8s" onclick="toggleOpt('k8s')" style="cursor:pointer;padding:0.8rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s;text-align:center">
+                <div style="font-size:1.3rem;margin-bottom:0.3rem">☸</div>
+                <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">Kubernetes</div>
+                <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">kubeadm + Cilium CNI</div>
+              </div>
             </div>
             <input type="checkbox" id="install-nvidia" style="display:none">
             <input type="checkbox" id="install-wireguard" checked style="display:none">
             <input type="checkbox" id="install-ebpf" style="display:none">
             <input type="checkbox" id="install-zfs-dedup" style="display:none">
+            <input type="checkbox" id="install-k8s" style="display:none">
             <!-- Export format -->
             <div style="margin-top:0.8rem;padding-top:0.8rem;border-top:1px solid var(--border)">
               <label style="font-size:0.82rem;color:var(--subtle);display:block;margin-bottom:0.3rem">Export image format</label>
@@ -1179,7 +1185,7 @@ const DISTRO_DESCS = {
   freebsd:  'FreeBSD 15.0 — native ZFS, jails, bhyve',
 };
 function toggleOpt(name) {
-  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm'};
+  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s'};
   var cb = document.getElementById(map[name]);
   var card = document.getElementById('opt-' + name);
   if (!cb || !card) return;
@@ -1191,7 +1197,7 @@ function toggleOpt(name) {
 // Init option cards on load
 document.addEventListener('DOMContentLoaded', function() {
   ['wireguard','nvidia','ebpf','dedup'].forEach(function(name) {
-    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm'};
+    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s'};
     var cb = document.getElementById(map[name]);
     var card = document.getElementById('opt-' + name);
     if (cb && card && cb.checked) {
@@ -1397,6 +1403,7 @@ function startInstall() {
     wireguard: document.getElementById('install-wireguard')?.checked ? '1' : '0',
     enable_ebpf: document.getElementById('install-ebpf')?.checked ? '1' : '0',
     zfs_dedup: document.getElementById('install-zfs-dedup')?.checked ? '1' : '0',
+    enable_k8s: document.getElementById('install-k8s')?.checked ? '1' : '0',
     export_format: document.getElementById('install-export-format')?.value || 'none',
     export_scp_host: document.getElementById('export-scp-host')?.value?.trim() || '',
     export_scp_user: document.getElementById('export-scp-user')?.value?.trim() || '',
@@ -1453,13 +1460,14 @@ function confirmInstall() {
   // Build profile summary line
   const p = _installPayload || {};
   const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 41', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', alpine: 'Alpine 3.21', freebsd: 'FreeBSD 15.0', openbsd: 'OpenBSD 7.8', ghostbsd: 'GhostBSD', illumos: 'illumos', windows: 'Windows' };
-  const profileNames = { desktop: 'Desktop', server: 'Server', core: 'Core', ai: 'AI' };
+  const profileNames = { desktop: 'Desktop', server: 'Server', core: 'Core', kvm: 'KVM Host', ai: 'AI' };
   let summary = (distroNames[p.distro] || p.distro || 'CentOS') + ' · ' + (profileNames[p.role] || p.role || 'Desktop');
   const addons = [];
   if (document.getElementById('install-ai')?.checked) addons.push('+AI');
   if (document.getElementById('install-wireguard')?.checked) addons.push('+WireGuard');
   if (document.getElementById('install-nvidia')?.checked) addons.push('+NVIDIA');
   if (document.getElementById('install-ebpf')?.checked) addons.push('+eBPF');
+  if (document.getElementById('install-k8s')?.checked) addons.push('+Kubernetes');
   if (document.getElementById('install-zfs-dedup')?.checked) addons.push('+Dedup');
   if (p.zfs_encrypt === '1') addons.push('+Encrypted');
   if (p.export_format && p.export_format !== 'none') addons.push('→ ' + p.export_format.toUpperCase());
