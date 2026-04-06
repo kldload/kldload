@@ -340,9 +340,10 @@ SSHEOF
 
 # CentOS 9 python3-websockets RPM lacks websockets.http11 module needed by webui.
 # Remove the RPM and install a compatible version via pip at build time.
-# The wheel is downloaded during build (builder container has network access).
+# pip runs inside the chroot — copy resolv.conf so it can reach PyPI.
 if [[ "$EDITION" != "core" ]]; then
     chroot "$ROOTFS" dnf remove -y python3-websockets 2>/dev/null || true
+    cp /etc/resolv.conf "${ROOTFS}/etc/resolv.conf" 2>/dev/null || true
     chroot "$ROOTFS" pip3 install --no-cache-dir websockets 2>&1 | tail -3 || {
         log "WARNING: pip install websockets failed — webui may not start"
     }
