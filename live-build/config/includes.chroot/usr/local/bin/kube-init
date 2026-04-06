@@ -101,12 +101,19 @@ run_kubeadm_init() {
 install_cilium() {
   log "Installing Cilium v${CILIUM_VERSION} as CNI..."
 
-  # Add Cilium Helm repo
-  helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
-  helm repo update >/dev/null 2>&1
+  # Use cached Helm chart from darksite if available
+  local chart_source="cilium/cilium"
+  if [[ -f /root/darksite/helm-charts/cilium.tgz ]]; then
+    chart_source="/root/darksite/helm-charts/cilium.tgz"
+    log "Using cached Cilium chart from darksite"
+  else
+    # Add Cilium Helm repo (needs internet)
+    helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+    helm repo update >/dev/null 2>&1
+  fi
 
   # Install Cilium — replaces kube-proxy with eBPF
-  helm install cilium cilium/cilium \
+  helm install cilium "$chart_source" \
     --version "${CILIUM_VERSION}" \
     --namespace kube-system \
     --set kubeProxyReplacement=true \

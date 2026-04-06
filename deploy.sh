@@ -245,6 +245,35 @@ cmd_build() {
         log "Core edition — skipping darksites."
     fi
 
+    # Pre-pull Kubernetes + Cilium container images for offline deployment
+    local k8s_images_dir="$ROOT/live-build/config/includes.chroot/root/darksite/k8s-images"
+    local k8s_images_list="$ROOT/build/darksite/k8s-images.txt"
+    if [[ -f "$k8s_images_list" ]] && [[ "$EDITION" != "core" ]]; then
+        if [[ ! -d "$k8s_images_dir" ]] || [[ "$(find "$k8s_images_dir" -name '*.tar' 2>/dev/null | wc -l)" -eq 0 ]]; then
+            log "Pre-pulling Kubernetes + Cilium container images for offline deploy..."
+            bash "$ROOT/build/darksite/pull-k8s-images.sh" "$k8s_images_dir"
+        else
+            log "K8s images cached: $(du -sh "$k8s_images_dir" | cut -f1) ($(ls "$k8s_images_dir"/*.tar 2>/dev/null | wc -l) images)"
+        fi
+    fi
+
+    # Cache Cilium Helm chart for offline install
+    local helm_cache="$ROOT/live-build/config/includes.chroot/root/darksite/helm-charts"
+    if [[ ! -f "$helm_cache/cilium.tgz" ]] && [[ "$EDITION" != "core" ]]; then
+        log "Caching Cilium Helm chart..."
+        mkdir -p "$helm_cache"
+        if command -v helm >/dev/null 2>&1; then
+            helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+            helm repo update >/dev/null 2>&1 || true
+            helm pull cilium/cilium --version "${CILIUM_VERSION:-1.16.5}" -d "$helm_cache" 2>/dev/null && \
+                mv "$helm_cache"/cilium-*.tgz "$helm_cache/cilium.tgz" 2>/dev/null || true
+        elif command -v curl >/dev/null 2>&1; then
+            curl -fsSL "https://helm.cilium.io/cilium-${CILIUM_VERSION:-1.16.5}.tgz" \
+                -o "$helm_cache/cilium.tgz" 2>/dev/null || log "WARNING: Could not cache Cilium chart"
+        fi
+        [[ -f "$helm_cache/cilium.tgz" ]] && log "Cilium chart cached: $(du -h "$helm_cache/cilium.tgz" | cut -f1)" || true
+    fi
+
     "$runtime" run --rm --privileged \
         -v "$ROOT:/build:z" \
         -e PROFILE="$PROFILE" \
@@ -436,6 +465,19 @@ case "${1:-help}" in
     build-arch-darksite) cmd_build_arch_darksite ;;
     build-alpine-darksite) cmd_build_alpine_darksite ;;
     build-fedora-darksite) cmd_build_fedora_darksite ;;
+    build-k8s-darksite)
+        log "Building Kubernetes + Cilium offline darksite..."
+        bash "$ROOT/build/darksite/pull-k8s-images.sh" "$ROOT/live-build/config/includes.chroot/root/darksite/k8s-images"
+        mkdir -p "$ROOT/live-build/config/includes.chroot/root/darksite/helm-charts"
+        if command -v helm >/dev/null 2>&1; then
+            helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+            helm repo update >/dev/null 2>&1 || true
+            helm pull cilium/cilium --version "${CILIUM_VERSION:-1.16.5}" -d "/tmp/cilium-chart" 2>/dev/null
+            mv /tmp/cilium-chart/cilium-*.tgz "$ROOT/live-build/config/includes.chroot/root/darksite/helm-charts/cilium.tgz" 2>/dev/null || true
+            rm -rf /tmp/cilium-chart
+        fi
+        log "K8s darksite ready"
+        ;;
     build-ai-docs)      cmd_build_ai_docs ;;
     builder-image)      cmd_builder_image ;;
     clean)              cmd_clean ;;
