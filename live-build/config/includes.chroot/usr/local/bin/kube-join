@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# kube-join — join a worker node to an existing kldload Kubernetes cluster
+# Usage: kube-join <control-plane-ip>
+set -euo pipefail
+
+# Auto-elevate to root
+if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+CONTROL_PLANE="${1:-}"
+
+log()  { echo -e "\033[1;32m[kube-join]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[kube-join]\033[0m $*" >&2; }
+die()  { echo -e "\033[1;31m[kube-join]\033[0m $*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+Usage: kube-join <control-plane-ip>
+
+Joins this node as a worker to the Kubernetes cluster at <control-plane-ip>.
+Requires kube-setup to have been run first on this node.
+
+Example:
+  kube-join 10.100.10.100
+  kube-join 10.250.0.1        # WireGuard backplane IP
+EOF
+  exit 1
+}
+
+[[ -n "$CONTROL_PLANE" ]] || usage
+
+# ── Pre-flight ─────────────────────────────────────────────────────────────
+command -v kubeadm >/dev/null 2>&1 || die "kubeadm not found. Run kube-setup first."
+systemctl is-active containerd >/dev/null 2>&1 || die "containerd is not running"
+
+if kubelet --version >/dev/null 2>&1 && [[ -f /etc/kubernetes/kubelet.conf ]]; then
+  die "This node is already part of a cluster. Use kube-reset to leave first."
+fi
+
+# ── ZFS snapshot before join ───────────────────────────────────────────────
+if command -v zfs >/dev/null 2>&1; then
+  pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
+  if [[ -n "${pool:-}" ]]; then
+    snap="${pool}@pre-kube-join-$(date -u +%Y%m%dT%H%M%SZ)"
+    zfs snapshot -r "$snap" 2>/dev/null || true
+    log "ZFS snapshot: $snap"
+  fi
+fi
+
+# ── Get join command from control plane ────────────────────────────────────
+log "Fetching join command from $CONTROL_PLANE..."
+
+JOIN_CMD=""
+
+# Try fetching via SSH
+if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${CONTROL_PLANE}" \
+    'cat /etc/kubernetes/join-command.sh' >/tmp/kube-join-cmd.sh 2>/dev/null; then
+  JOIN_CMD="$(cat /tmp/kube-join-cmd.sh)"
+  rm -f /tmp/kube-join-cmd.sh
+fi
+
+# If SSH failed, try generating a new token via SSH
+if [[ -z "$JOIN_CMD" ]]; then
+  JOIN_CMD="$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${CONTROL_PLANE}" \
+    'kubeadm token create --print-join-command 2>/dev/null')" 2>/dev/null || true
+fi
+
+if [[ -z "$JOIN_CMD" ]]; then
+  die "Could not get join command from $CONTROL_PLANE. Ensure SSH access is configured."
+fi
+
+log "Join command received"
+
+# ── Join the cluster ───────────────────────────────────────────────────────
+log "Joining cluster at $CONTROL_PLANE..."
+eval "$JOIN_CMD" 2>&1
+
+echo ""
+log "Successfully joined the cluster"
+log "  Control plane: $CONTROL_PLANE"
+log "  This node:     $(hostname) ($(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}'))"
+log ""
+log "Verify on the control plane:"
+log "  kubectl get nodes"

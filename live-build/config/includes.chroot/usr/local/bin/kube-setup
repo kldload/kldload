@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# kube-setup — install Kubernetes packages on any kldload node (apt or dnf)
+# Installs: containerd, kubeadm, kubelet, kubectl, cri-tools, Helm, Cilium CLI
+# Works on: CentOS, RHEL, Rocky, Fedora (dnf) and Debian, Ubuntu (apt)
+set -euo pipefail
+
+# Auto-elevate to root
+if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+K8S_VERSION="${K8S_VERSION:-v1.32}"
+CILIUM_VERSION="${CILIUM_VERSION:-1.16.5}"
+HELM_VERSION="${HELM_VERSION:-v3.17.0}"
+
+log()  { echo -e "\033[1;32m[kube-setup]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[kube-setup]\033[0m $*" >&2; }
+die()  { echo -e "\033[1;31m[kube-setup]\033[0m $*" >&2; exit 1; }
+
+# ── Detect package manager ─────────────────────────────────────────────────
+detect_pm() {
+  if command -v dnf >/dev/null 2>&1; then
+    echo "dnf"
+  elif command -v apt-get >/dev/null 2>&1; then
+    echo "apt"
+  else
+    die "No supported package manager found (need dnf or apt)"
+  fi
+}
+
+PM="$(detect_pm)"
+log "Package manager: $PM"
+log "Kubernetes version: $K8S_VERSION"
+
+# ── Kernel modules & sysctl ────────────────────────────────────────────────
+setup_kernel() {
+  log "Loading kernel modules for Kubernetes..."
+
+  cat >/etc/modules-load.d/k8s.conf <<'EOF'
+overlay
+br_netfilter
+ip_vs
+ip_vs_rr
+ip_vs_wrr
+ip_vs_sh
+nf_conntrack
+EOF
+
+  for m in overlay br_netfilter ip_vs ip_vs_rr ip_vs_wrr ip_vs_sh nf_conntrack; do
+    modprobe "$m" 2>/dev/null || true
+  done
+
+  cat >/etc/sysctl.d/99-kubernetes.conf <<'EOF'
+net.ipv4.ip_forward = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+EOF
+  sysctl --system >/dev/null 2>&1
+
+  # Disable swap (kubeadm requires it)
+  swapoff -a || true
+  sed -ri '/\sswap\s/s/^/#/' /etc/fstab 2>/dev/null || true
+
+  log "Kernel modules and sysctl configured"
+}
+
+# ── Containerd ─────────────────────────────────────────────────────────────
+install_containerd() {
+  log "Installing containerd..."
+
+  if [[ "$PM" == "dnf" ]]; then
+    dnf install -y containerd.io 2>/dev/null || dnf install -y containerd
+  else
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y --no-install-recommends containerd
+  fi
+
+  mkdir -p /etc/containerd
+  containerd config default >/etc/containerd/config.toml 2>/dev/null || true
+  sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml 2>/dev/null || true
+
+  # Use systemd cgroup driver — required for kubeadm
+  systemctl enable --now containerd
+  systemctl restart containerd
+
+  # crictl config
+  cat >/etc/crictl.yaml <<'EOF'
+runtime-endpoint: unix:///run/containerd/containerd.sock
+image-endpoint: unix:///run/containerd/containerd.sock
+timeout: 10
+debug: false
+EOF
+
+  log "containerd installed and configured (SystemdCgroup=true)"
+}
+
+# ── Kubernetes repo + packages ─────────────────────────────────────────────
+install_k8s_packages() {
+  log "Setting up Kubernetes $K8S_VERSION repo..."
+
+  if [[ "$PM" == "dnf" ]]; then
+    cat >/etc/yum.repos.d/kubernetes.repo <<EOF
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/rpm/repodata/repomd.xml.key
+EOF
+    dnf install -y kubelet kubeadm kubectl cri-tools conntrack-tools socat ipvsadm
+    systemctl enable kubelet
+  else
+    apt-get install -y --no-install-recommends apt-transport-https ca-certificates curl gpg
+    install -d -m0755 /etc/apt/keyrings
+    curl -fsSL "https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/Release.key" \
+      | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg 2>/dev/null
+    echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/ /" \
+      > /etc/apt/sources.list.d/kubernetes.list
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y --no-install-recommends kubelet kubeadm kubectl cri-tools \
+      conntrack socat ebtables ipset ipvsadm
+    apt-mark hold kubelet kubeadm kubectl 2>/dev/null || true
+    systemctl enable kubelet
+  fi
+
+  # CNI plugin directory
+  install -d -m0755 /opt/cni/bin /etc/cni/net.d
+  if [[ -d /usr/lib/cni ]]; then
+    ln -sf /usr/lib/cni/* /opt/cni/bin/ 2>/dev/null || true
+  fi
+
+  # Pin kubelet to node IP if detectable
+  local node_ip
+  node_ip="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}')" || true
+  if [[ -n "$node_ip" ]]; then
+    mkdir -p /etc/default
+    echo "KUBELET_EXTRA_ARGS=--node-ip=${node_ip}" > /etc/default/kubelet
+    log "kubelet pinned to node IP: $node_ip"
+  fi
+
+  log "kubeadm $(kubeadm version -o short 2>/dev/null) installed"
+}
+
+# ── Helm ───────────────────────────────────────────────────────────────────
+install_helm() {
+  if command -v helm >/dev/null 2>&1; then
+    log "Helm already installed: $(helm version --short 2>/dev/null)"
+    return 0
+  fi
+
+  log "Installing Helm $HELM_VERSION..."
+  local arch
+  arch="$(uname -m)"
+  [[ "$arch" == "x86_64" ]] && arch="amd64"
+  [[ "$arch" == "aarch64" ]] && arch="arm64"
+
+  curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${arch}.tar.gz" \
+    | tar -xz -C /tmp
+  install -m 755 "/tmp/linux-${arch}/helm" /usr/local/bin/helm
+  rm -rf "/tmp/linux-${arch}"
+
+  log "Helm installed: $(helm version --short 2>/dev/null)"
+}
+
+# ── Cilium CLI ─────────────────────────────────────────────────────────────
+install_cilium_cli() {
+  if command -v cilium >/dev/null 2>&1; then
+    log "Cilium CLI already installed: $(cilium version --client 2>/dev/null | head -1)"
+    return 0
+  fi
+
+  log "Installing Cilium CLI v${CILIUM_VERSION}..."
+  local arch
+  arch="$(uname -m)"
+  [[ "$arch" == "x86_64" ]] && arch="amd64"
+  [[ "$arch" == "aarch64" ]] && arch="arm64"
+
+  curl -fsSL "https://github.com/cilium/cilium-cli/releases/download/v${CILIUM_VERSION}/cilium-linux-${arch}.tar.gz" \
+    | tar -xz -C /usr/local/bin
+  chmod +x /usr/local/bin/cilium
+
+  log "Cilium CLI installed"
+}
+
+# ── ZFS dataset for containerd ─────────────────────────────────────────────
+setup_zfs_for_k8s() {
+  if ! command -v zfs >/dev/null 2>&1; then return 0; fi
+
+  # Create dedicated ZFS datasets for container/K8s storage
+  local pool
+  pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
+  [[ -n "$pool" ]] || return 0
+
+  log "Setting up ZFS datasets for Kubernetes on pool: $pool"
+
+  # etcd data — small recordsize for random I/O
+  zfs create -p -o mountpoint=/var/lib/etcd -o recordsize=8K \
+    -o compression=lz4 -o atime=off "${pool}/var/lib/etcd" 2>/dev/null || true
+
+  # containerd — default recordsize, compression
+  zfs create -p -o mountpoint=/var/lib/containerd \
+    -o compression=lz4 -o atime=off "${pool}/var/lib/containerd" 2>/dev/null || true
+
+  # kubelet state
+  zfs create -p -o mountpoint=/var/lib/kubelet \
+    -o compression=lz4 -o atime=off "${pool}/var/lib/kubelet" 2>/dev/null || true
+
+  log "ZFS datasets created: etcd (8K recordsize), containerd, kubelet"
+}
+
+# ── Main ───────────────────────────────────────────────────────────────────
+main() {
+  log "Setting up Kubernetes node on $(hostname)"
+  echo ""
+
+  setup_kernel
+  install_containerd
+  install_k8s_packages
+  install_helm
+  install_cilium_cli
+  setup_zfs_for_k8s
+
+  echo ""
+  log "Kubernetes node setup complete"
+  log "  kubeadm: $(kubeadm version -o short 2>/dev/null)"
+  log "  kubelet: $(kubelet --version 2>/dev/null | awk '{print $2}')"
+  log "  kubectl: $(kubectl version --client -o yaml 2>/dev/null | grep gitVersion | awk '{print $2}')"
+  log "  helm:    $(helm version --short 2>/dev/null)"
+  log "  cilium:  $(cilium version --client 2>/dev/null | head -1)"
+  log "  containerd: $(containerd --version 2>/dev/null | awk '{print $3}')"
+  echo ""
+  log "Next steps:"
+  log "  Control plane: kube-init"
+  log "  Worker node:   kube-join <control-plane-ip>"
+}
+
+main "$@"

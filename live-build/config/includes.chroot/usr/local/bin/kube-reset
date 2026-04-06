@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# kube-reset — tear down Kubernetes on this node (safely, with ZFS rollback option)
+set -euo pipefail
+
+# Auto-elevate to root
+if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+log()  { echo -e "\033[1;32m[kube-reset]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[kube-reset]\033[0m $*" >&2; }
+die()  { echo -e "\033[1;31m[kube-reset]\033[0m $*" >&2; exit 1; }
+
+echo -e "\033[1;31m"
+echo "WARNING: This will tear down Kubernetes on this node."
+echo "  - kubeadm reset (drains and removes node from cluster)"
+echo "  - Removes /etc/kubernetes, /var/lib/etcd, /var/lib/kubelet state"
+echo "  - Cilium and all pods will be destroyed"
+echo -e "\033[0m"
+
+read -r -p "Type 'reset' to continue: " confirm
+[[ "$confirm" == "reset" ]] || { echo "Aborted."; exit 0; }
+
+# ZFS snapshot before reset
+if command -v zfs >/dev/null 2>&1; then
+  pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
+  if [[ -n "${pool:-}" ]]; then
+    snap="${pool}@pre-kube-reset-$(date -u +%Y%m%dT%H%M%SZ)"
+    zfs snapshot -r "$snap" 2>/dev/null || true
+    log "ZFS snapshot: $snap (rollback with: zfs rollback -r $snap)"
+  fi
+fi
+
+log "Running kubeadm reset..."
+kubeadm reset -f 2>/dev/null || true
+
+log "Cleaning up state..."
+rm -rf /etc/kubernetes/manifests /etc/kubernetes/pki /etc/kubernetes/*.conf
+rm -rf /var/lib/kubelet/* /var/lib/etcd/* 2>/dev/null || true
+rm -f /etc/kubernetes/join-command.sh
+rm -rf /root/.kube/config
+
+# Clean iptables/nftables rules left by kube-proxy or Cilium
+iptables -F 2>/dev/null || true
+iptables -t nat -F 2>/dev/null || true
+iptables -t mangle -F 2>/dev/null || true
+ip6tables -F 2>/dev/null || true
+
+# Remove CNI state
+rm -rf /etc/cni/net.d/* 2>/dev/null || true
+rm -rf /var/run/cilium 2>/dev/null || true
+
+# Restart containerd clean
+systemctl restart containerd 2>/dev/null || true
+
+log "Kubernetes has been removed from this node"
+log "Packages (kubeadm, kubelet, kubectl) are still installed"
+log "To rejoin a cluster: kube-join <control-plane-ip>"
+log "To init a new cluster: kube-init"

@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# kube-init — bootstrap a Kubernetes control plane with Cilium CNI
+# Run on the first control plane node after kube-setup
+set -euo pipefail
+
+# Auto-elevate to root
+if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
+SVC_CIDR="${SVC_CIDR:-10.96.0.0/12}"
+CILIUM_VERSION="${CILIUM_VERSION:-1.16.5}"
+
+log()  { echo -e "\033[1;32m[kube-init]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[kube-init]\033[0m $*" >&2; }
+die()  { echo -e "\033[1;31m[kube-init]\033[0m $*" >&2; exit 1; }
+
+# ── Pre-flight checks ─────────────────────────────────────────────────────
+preflight() {
+  command -v kubeadm >/dev/null 2>&1 || die "kubeadm not found. Run kube-setup first."
+  command -v kubectl >/dev/null 2>&1 || die "kubectl not found. Run kube-setup first."
+  command -v helm >/dev/null 2>&1 || die "helm not found. Run kube-setup first."
+  command -v cilium >/dev/null 2>&1 || die "cilium CLI not found. Run kube-setup first."
+
+  if kubectl cluster-info >/dev/null 2>&1; then
+    die "A Kubernetes cluster is already running on this node. Use kube-reset to tear it down first."
+  fi
+
+  systemctl is-active containerd >/dev/null 2>&1 || die "containerd is not running"
+  log "Pre-flight checks passed"
+}
+
+# ── Detect node IP ─────────────────────────────────────────────────────────
+detect_node_ip() {
+  local ip
+  # Prefer WireGuard interface if available
+  ip="$(ip -4 addr show wg0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)" || true
+  if [[ -z "$ip" ]]; then
+    ip="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}')" || true
+  fi
+  echo "${ip:-$(hostname -I | awk '{print $1}')}"
+}
+
+# ── ZFS snapshot before init ───────────────────────────────────────────────
+snapshot_before_init() {
+  if command -v zfs >/dev/null 2>&1; then
+    local pool
+    pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
+    if [[ -n "$pool" ]]; then
+      local snap="${pool}@pre-kube-init-$(date -u +%Y%m%dT%H%M%SZ)"
+      zfs snapshot -r "$snap" 2>/dev/null || true
+      log "ZFS snapshot created: $snap (rollback point)"
+    fi
+  fi
+}
+
+# ── kubeadm init ───────────────────────────────────────────────────────────
+run_kubeadm_init() {
+  local node_ip
+  node_ip="$(detect_node_ip)"
+  log "Initializing control plane on $node_ip"
+  log "  Pod CIDR:     $POD_CIDR"
+  log "  Service CIDR: $SVC_CIDR"
+
+  kubeadm init \
+    --pod-network-cidr="$POD_CIDR" \
+    --service-cidr="$SVC_CIDR" \
+    --apiserver-advertise-address="$node_ip" \
+    --skip-phases=addon/kube-proxy \
+    --upload-certs \
+    2>&1 | tee /var/log/kubeadm-init.log
+
+  # Set up kubeconfig for root and admin user
+  mkdir -p /root/.kube
+  cp /etc/kubernetes/admin.conf /root/.kube/config
+  chmod 600 /root/.kube/config
+
+  # Copy to admin user if exists
+  if id admin >/dev/null 2>&1; then
+    local admin_home
+    admin_home="$(getent passwd admin | cut -d: -f6)"
+    mkdir -p "${admin_home}/.kube"
+    cp /etc/kubernetes/admin.conf "${admin_home}/.kube/config"
+    chown -R admin:admin "${admin_home}/.kube"
+  fi
+
+  log "Control plane initialized"
+}
+
+# ── Install Cilium CNI ────────────────────────────────────────────────────
+install_cilium() {
+  log "Installing Cilium v${CILIUM_VERSION} as CNI..."
+
+  # Add Cilium Helm repo
+  helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+  helm repo update >/dev/null 2>&1
+
+  # Install Cilium — replaces kube-proxy with eBPF
+  helm install cilium cilium/cilium \
+    --version "${CILIUM_VERSION}" \
+    --namespace kube-system \
+    --set kubeProxyReplacement=true \
+    --set k8sServiceHost="$(detect_node_ip)" \
+    --set k8sServicePort=6443 \
+    --set ipam.operator.clusterPoolIPv4PodCIDRList="${POD_CIDR}" \
+    --set hubble.relay.enabled=true \
+    --set hubble.ui.enabled=true \
+    --set hubble.enabled=true \
+    --set hubble.metrics.enableOpenMetrics=true \
+    --set hubble.metrics.enabled="{dns,drop,tcp,flow,port-distribution,icmp,httpV2:exemplars=true;labelsContext=source_ip\,source_namespace\,source_workload\,destination_ip\,destination_namespace\,destination_workload\,traffic_direction}" \
+    --set operator.replicas=1 \
+    --wait --timeout 300s \
+    2>&1
+
+  log "Cilium installed"
+
+  # Wait for Cilium to be ready
+  log "Waiting for Cilium to become ready..."
+  cilium status --wait --wait-duration 120s 2>/dev/null || true
+
+  log "Cilium CNI is operational"
+}
+
+# ── Generate join command ──────────────────────────────────────────────────
+generate_join_command() {
+  log "Generating worker join command..."
+
+  local join_cmd
+  join_cmd="$(kubeadm token create --print-join-command 2>/dev/null)"
+
+  # Save join command for workers
+  echo "$join_cmd" > /etc/kubernetes/join-command.sh
+  chmod 600 /etc/kubernetes/join-command.sh
+
+  echo ""
+  log "Join command saved to /etc/kubernetes/join-command.sh"
+  log "On worker nodes, run:"
+  echo ""
+  echo "  kube-join $(detect_node_ip)"
+  echo ""
+  log "Or manually:"
+  echo "  $join_cmd"
+  echo ""
+}
+
+# ── Remove default taints (single-node cluster) ───────────────────────────
+remove_control_plane_taint() {
+  # For single-node clusters, allow scheduling on control plane
+  kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true
+  log "Control plane taint removed (workloads can schedule on this node)"
+}
+
+# ── Print cluster status ──────────────────────────────────────────────────
+print_status() {
+  echo ""
+  echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
+  echo -e "\033[1;37m  Kubernetes Cluster Initialized                             \033[0m"
+  echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
+  echo ""
+  echo -e "  API Server:     \033[1;32mhttps://$(detect_node_ip):6443\033[0m"
+  echo -e "  CNI:            \033[1;32mCilium v${CILIUM_VERSION} (eBPF, kube-proxy replacement)\033[0m"
+  echo -e "  Pod CIDR:       $POD_CIDR"
+  echo -e "  Service CIDR:   $SVC_CIDR"
+  echo -e "  Hubble:         \033[1;32menabled (relay + UI)\033[0m"
+  echo ""
+  kubectl get nodes -o wide 2>/dev/null || true
+  echo ""
+  kubectl get pods -A -o wide 2>/dev/null | head -20 || true
+  echo ""
+  echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
+  echo -e "  \033[0;37mAdd workers:  kube-join $(detect_node_ip)\033[0m"
+  echo -e "  \033[0;37mCluster info: kube-status\033[0m"
+  echo -e "  \033[0;37mHubble UI:    kubectl port-forward -n kube-system svc/hubble-ui 12000:80\033[0m"
+  echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
+}
+
+# ── Main ───────────────────────────────────────────────────────────────────
+main() {
+  preflight
+  snapshot_before_init
+  run_kubeadm_init
+  install_cilium
+  remove_control_plane_taint
+  generate_join_command
+  print_status
+}
+
+main "$@"
