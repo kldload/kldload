@@ -966,6 +966,15 @@ chroot "$ROOTFS" dracut --force --add "dmsquash-live" \
 # ---------------------------------------------------------------------------
 # Step 4: Create squashfs
 # ---------------------------------------------------------------------------
+# Final safety: ensure active/ webui has the latest free/ edition
+if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/free ]]; then
+    rm -rf "${ROOTFS}/usr/local/share/kldload-webui/active" 2>/dev/null || true
+    mkdir -p "${ROOTFS}/usr/local/share/kldload-webui/active"
+    cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/free/. \
+          "${ROOTFS}/usr/local/share/kldload-webui/active/"
+    log "Final webui sync: free/ → active/ ($(grep -o 'kldloadOS [0-9.]*' "${ROOTFS}/usr/local/share/kldload-webui/active/index.html" 2>/dev/null || echo 'unknown'))"
+fi
+
 log "Creating squashfs image..."
 
 mkdir -p "$SQUASHFS_DIR"

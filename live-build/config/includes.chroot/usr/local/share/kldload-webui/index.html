@@ -5,1595 +5,1553 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>kldload</title>
 <link rel="stylesheet" href="/css/app.css">
+<style>
+.target-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap: 0.6rem; margin-bottom: 1rem; }
+.target-card { background: var(--surface2); border: 2px solid var(--border); border-radius: 8px; padding: 0.75rem 0.5rem; text-align: center; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+.target-card:hover { border-color: rgba(52,211,153,0.4); background: rgba(52,211,153,0.05); }
+.target-card.selected { border-color: var(--accent); background: rgba(52,211,153,0.1); }
+.target-card .tc-icon { font-size: 1.5rem; margin-bottom: 0.3rem; }
+.target-card .tc-name { font-size: 0.8rem; font-weight: 600; color: var(--text); }
+.target-card .tc-sub  { font-size: 0.7rem; color: var(--muted); margin-top: 0.15rem; }
+.net-row { display: flex; gap: 0.5rem; align-items: flex-end; }
+.net-row .form-group { flex: 1; margin-bottom: 0; }
+.pass-hint { font-size: 0.75rem; color: var(--muted); margin-top: 0.2rem; }
+.pass-hint.ok { color: var(--accent); }
+.pass-hint.fail { color: var(--danger); }
+/* confirm modal */
+.modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:999; align-items:center; justify-content:center; }
+.modal-overlay.open { display:flex; }
+.modal-box { background:var(--surface2); border:1px solid var(--border); border-radius:10px; padding:1.75rem 2rem; max-width:420px; width:90%; }
+.modal-box h3 { margin:0 0 0.6rem; font-size:1.1rem; color:var(--danger); }
+.modal-box p { margin:0 0 0.4rem; font-size:0.88rem; color:var(--text); }
+.modal-box .modal-detail { font-size:0.82rem; color:var(--muted); margin:0.6rem 0 1.25rem; line-height:1.6; }
+.modal-actions { display:flex; gap:0.75rem; justify-content:flex-end; }
+/* progress bar */
+.progress-bar-wrap { background:var(--surface2); border-radius:6px; height:8px; margin-bottom:0.75rem; overflow:hidden; }
+.progress-bar { height:100%; width:0%; background:#8b5cf6; border-radius:6px; transition:width 0.4s ease; }
+.progress-bar.active { animation:pulse-glow 8s ease-in-out infinite; }
+@keyframes pulse-glow {
+  0%   { background:#1e2533; box-shadow:0 0 4px rgba(30,37,51,0.3); }
+  25%  { background:#5b21b6; box-shadow:0 0 12px rgba(91,33,182,0.5); }
+  50%  { background:#a78bfa; box-shadow:0 0 24px rgba(167,139,250,0.7), 0 0 48px rgba(139,92,246,0.3); }
+  75%  { background:#5b21b6; box-shadow:0 0 12px rgba(91,33,182,0.5); }
+  100% { background:#1e2533; box-shadow:0 0 4px rgba(30,37,51,0.3); }
+}
+</style>
 </head>
 <body>
-<div id="app">
 
-  <!-- ── Sidebar ─────────────────────────────────────────────────────────── -->
-  <nav id="sidebar">
-    <div class="logo">kld<span class="logo-z">load</span> &gt;</div>
-    <div class="nav-section">System</div>
-    <ul>
-      <li data-view="dashboard" class="active">
-        <span class="nav-icon">◈</span> Dashboard
-      </li>
-      <li data-view="wireguard">
-        <span class="nav-icon">⬡</span> WireGuard
-      </li>
-      <li data-view="network">
-        <span class="nav-icon">⌘</span> Network
-      </li>
-    </ul>
-    <div class="nav-section">Deploy</div>
-    <ul>
-      <li data-view="install">
-        <span class="nav-icon">↯</span> Install
-      </li>
-      <li data-view="spawn">
-        <span class="nav-icon">⊕</span> Spawn
-      </li>
-      <li data-view="golden">
-        <span class="nav-icon">◎</span> Golden Images
-      </li>
-      <li data-view="cluster-deploy">
-        <span class="nav-icon">✦</span> Cluster Deploy
-      </li>
-    </ul>
-    <div class="nav-section">Storage</div>
-    <ul>
-      <li data-view="pool-designer">
-        <span class="nav-icon">◧</span> Pool Designer
-      </li>
-    </ul>
-    <div class="nav-section">Design</div>
-    <ul>
-      <li data-view="cluster-designer">
-        <span class="nav-icon">⬡</span> Cluster Designer
-      </li>
-      <li data-view="firewall">
-        <span class="nav-icon">⬛</span> Firewall
-      </li>
-      <li data-view="services">
-        <span class="nav-icon">⊞</span> Services
-      </li>
-      <li data-view="cloud-keys">
-        <span class="nav-icon">☁</span> Cloud Deploy
-      </li>
-      <li data-view="library">
-        <span class="nav-icon">⊟</span> Library
-      </li>
-    </ul>
-    <div class="nav-section">Manage</div>
-    <ul>
-      <li data-view="nodes">
-        <span class="nav-icon">◈</span> Nodes
-      </li>
-      <li data-view="vms">
-        <span class="nav-icon">▣</span> VMs
-      </li>
-      <li data-view="zfs">
-        <span class="nav-icon">◧</span> ZFS
-      </li>
-      <li data-view="k8s">
-        <span class="nav-icon">✦</span> Kubernetes
-      </li>
-      <li data-view="salt">
-        <span class="nav-icon">⬡</span> Salt
-      </li>
-      <li data-view="ansible">
-        <span class="nav-icon">▶</span> Ansible
-      </li>
-      <li data-view="infrastructure">
-        <span class="nav-icon">⬡</span> Infrastructure
-      </li>
-    </ul>
-    <div class="nav-section">Security</div>
-    <ul>
-      <li data-view="credentials">
-        <span class="nav-icon">✦</span> Credentials
-      </li>
-    </ul>
-    <div class="nav-section">Debug</div>
-    <ul>
-      <li data-view="logs">
-        <span class="nav-icon">≡</span> Logs
-      </li>
-      <li data-view="audit">
-        <span class="nav-icon">✓</span> Audit
-      </li>
-      <li data-view="events">
-        <span class="nav-icon">≋</span> Events
-      </li>
-    </ul>
-    <div class="sidebar-footer">
-      <div id="ws-status" class="ws-dot disconnected" title="WebSocket"></div>
-      <span id="ws-label">disconnected</span>
-    </div>
-  </nav>
-
-  <!-- ── Main ────────────────────────────────────────────────────────────── -->
-  <main id="main">
-
-  <!-- ── Mode banner ──────────────────────────────────────────────────────── -->
-  <div id="mode-banner" class="mode-banner" style="display:none"></div>
-
-    <!-- ════════════════ DASHBOARD ════════════════ -->
-    <section id="view-dashboard" class="view active">
-      <div class="page-header">
-        <h1>Dashboard</h1>
-        <span class="uptime" id="si-uptime"></span>
-      </div>
-
-      <!-- Live mode banner — shown only in live sessions via JS -->
-      <div id="live-banner" class="live-banner" style="display:none">
-        <span class="live-dot"></span>
-        <strong>LIVE SESSION</strong> — ephemeral &nbsp;·&nbsp;
-        Keys exist in RAM only &nbsp;·&nbsp;
-        <button class="btn-danger btn-sm" onclick="triggerPoof()">kldload-poof &#x26A1;</button>
-      </div>
-
-      <div class="stat-row">
-        <div class="stat-card">
-          <div class="stat-label">Hostname</div>
-          <div class="stat-value accent" id="si-hostname">—</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Profile</div>
-          <div class="stat-value" id="si-profile">live</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">CPUs</div>
-          <div class="stat-value" id="si-cpus">—</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">RAM free / total</div>
-          <div class="stat-value" id="si-memory">—</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Node Index</div>
-          <div class="stat-value" id="si-index">—</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">wg1 IP</div>
-          <div class="stat-value green" id="si-wg1">—</div>
-        </div>
-      </div>
-
-      <div class="two-col">
-        <div>
-          <div class="section-title">WireGuard Planes</div>
-          <table class="data-table" id="dash-wg-table">
-            <thead><tr><th>Plane</th><th>Network</th><th>IP</th><th>State</th></tr></thead>
-            <tbody id="dash-wg-tbody">
-              <tr><td>wg0</td><td>10.77.0.0/16</td><td id="d-wg0-ip">—</td><td id="d-wg0-st">—</td></tr>
-              <tr><td>wg1</td><td>10.78.0.0/16</td><td id="d-wg1-ip">—</td><td id="d-wg1-st">—</td></tr>
-              <tr><td>wg2</td><td>10.79.0.0/16</td><td id="d-wg2-ip">—</td><td id="d-wg2-st">—</td></tr>
-              <tr><td>wg3</td><td>10.80.0.0/16</td><td id="d-wg3-ip">—</td><td id="d-wg3-st">—</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div>
-          <div class="section-title">Quick Actions</div>
-          <div class="action-grid">
-            <button class="action-btn" onclick="nav('install')">
-              <span class="action-icon">↯</span>
-              <span class="action-label">Install to Disk</span>
-            </button>
-            <button class="action-btn" onclick="nav('spawn')">
-              <span class="action-icon">⊕</span>
-              <span class="action-label">Spawn VM</span>
-            </button>
-            <button class="action-btn" onclick="nav('golden')">
-              <span class="action-icon">◎</span>
-              <span class="action-label">Golden Images</span>
-            </button>
-            <button class="action-btn" onclick="nav('vms')">
-              <span class="action-icon">▣</span>
-              <span class="action-label">Manage VMs</span>
-            </button>
-            <button class="action-btn" onclick="nav('zfs')">
-              <span class="action-icon">◧</span>
-              <span class="action-label">ZFS Pools</span>
-            </button>
-            <button class="action-btn" onclick="nav('salt')">
-              <span class="action-icon">⬡</span>
-              <span class="action-label">Salt Minions</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ════════════════ WIREGUARD ════════════════ -->
-    <section id="view-wireguard" class="view">
-      <div class="page-header">
-        <h1>WireGuard</h1>
-        <button class="btn-secondary btn-sm" onclick="loadWG()">Refresh</button>
-      </div>
-
-      <div class="wg-planes">
-        <div class="wg-plane" id="wg-plane-0">
-          <div class="wg-plane-header">
-            <span class="wg-name">wg0</span>
-            <span class="wg-role">Enrollment</span>
-            <span class="wg-badge" id="wg0-state">—</span>
-          </div>
-          <div class="wg-detail">
-            <span class="wg-net">10.77.0.0/16  :51820</span>
-            <span class="wg-note">unreliable on some hw — enrollment only, no services</span>
-          </div>
-          <div class="wg-peers">
-            IP: <span class="accent" id="wg0-ip">—</span>
-            &nbsp;Peers: <span id="wg0-peers">—</span>
-          </div>
-        </div>
-
-        <div class="wg-plane" id="wg-plane-1">
-          <div class="wg-plane-header">
-            <span class="wg-name">wg1</span>
-            <span class="wg-role">Management</span>
-            <span class="wg-badge" id="wg1-state">—</span>
-          </div>
-          <div class="wg-detail">
-            <span class="wg-net">10.78.0.0/16  :51821</span>
-            <span class="wg-note">Cluster Manager binds here · services bind here</span>
-          </div>
-          <div class="wg-peers">
-            IP: <span class="accent" id="wg1-ip">—</span>
-            &nbsp;Peers: <span id="wg1-peers">—</span>
-          </div>
-        </div>
-
-        <div class="wg-plane" id="wg-plane-2">
-          <div class="wg-plane-header">
-            <span class="wg-name">wg2</span>
-            <span class="wg-role">Kubernetes</span>
-            <span class="wg-badge" id="wg2-state">—</span>
-          </div>
-          <div class="wg-detail">
-            <span class="wg-net">10.79.0.0/16  :51822</span>
-            <span class="wg-note">kubelet --node-ip · Cilium · kubeadm advertise</span>
-          </div>
-          <div class="wg-peers">
-            IP: <span class="accent" id="wg2-ip">—</span>
-            &nbsp;Peers: <span id="wg2-peers">—</span>
-          </div>
-        </div>
-
-        <div class="wg-plane" id="wg-plane-3">
-          <div class="wg-plane-header">
-            <span class="wg-name">wg3</span>
-            <span class="wg-role">Storage</span>
-            <span class="wg-badge" id="wg3-state">—</span>
-          </div>
-          <div class="wg-detail">
-            <span class="wg-net">10.80.0.0/16  :51823</span>
-            <span class="wg-note">NFS exports · iSCSI · ZFS replication</span>
-          </div>
-          <div class="wg-peers">
-            IP: <span class="accent" id="wg3-ip">—</span>
-            &nbsp;Peers: <span id="wg3-peers">—</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- User-defined planes -->
-      <div class="wg-user-planes">
-        <div class="section-head-row">
-          <span class="section-label-inline">Custom Planes</span>
-          <button class="btn-sm btn-accent" onclick="wgShowAddPlane()">+ Add Plane</button>
-        </div>
-        <div id="wg-user-plane-list" class="wg-user-plane-list"></div>
-        <div id="wg-add-plane-form" class="wg-add-plane-form hidden">
-          <div class="cred-row"><label>Label</label><input id="wgp-label" type="text" placeholder="customer-acme"/></div>
-          <div class="cred-row"><label>Subnet</label><input id="wgp-subnet" type="text" placeholder="10.90.0.0/16"/></div>
-          <div class="cred-row"><label>Listen Port</label><input id="wgp-port" type="number" placeholder="51824"/></div>
-          <div style="display:flex;gap:0.5rem;margin-top:0.5rem">
-            <button class="btn-accent" onclick="wgCreatePlane()">Create</button>
-            <button class="btn-sm" onclick="hide('wg-add-plane-form')">Cancel</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="section-title" style="margin-top:24px">
-        Peer Table (wg1 management plane)
-        <button class="btn-secondary btn-sm" style="float:right" onclick="openAddPeer()">+ Add Peer</button>
-      </div>
-      <table class="data-table">
-        <thead><tr><th>Peer</th><th>Endpoint</th><th>Allowed IPs</th><th>Last Handshake</th><th>Rx / Tx</th><th></th></tr></thead>
-        <tbody id="wg-peer-tbody"><tr><td colspan="6" class="loading">Loading…</td></tr></tbody>
-      </table>
-
-      <!-- Add Peer panel -->
-      <div id="wg-add-panel" style="display:none;margin-top:16px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:16px">
-        <div class="section-title" style="margin-bottom:12px">Add Peer</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
-          <div>
-            <label class="field-label">Interface</label>
-            <select id="wg-add-iface" class="input-field">
-              <option value="wg0">wg0 — Enrollment</option>
-              <option value="wg1" selected>wg1 — Management</option>
-              <option value="wg2">wg2 — Kubernetes</option>
-              <option value="wg3">wg3 — Storage</option>
-              <option value="all">All four planes</option>
-            </select>
-          </div>
-          <div>
-            <label class="field-label">Endpoint (optional)</label>
-            <input id="wg-add-endpoint" class="input-field" placeholder="1.2.3.4:51821" type="text"/>
-          </div>
-          <div style="grid-column:span 2">
-            <label class="field-label">Peer Public Key</label>
-            <div style="display:flex;gap:8px">
-              <input id="wg-add-pubkey" class="input-field" placeholder="Paste public key…" type="text" style="flex:1;font-family:monospace;font-size:0.8rem"/>
-              <button class="btn-secondary btn-sm" onclick="wgGenKeypair()" title="Generate new keypair">Generate</button>
-            </div>
-          </div>
-          <div style="grid-column:span 2">
-            <label class="field-label">Allowed IPs</label>
-            <input id="wg-add-aips" class="input-field" placeholder="10.78.100.5/32" type="text"/>
-          </div>
-        </div>
-        <!-- Generated keypair display -->
-        <div id="wg-keypair-box" style="display:none;background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:10px;margin-bottom:10px;font-family:monospace;font-size:0.78rem">
-          <div style="color:var(--muted);margin-bottom:4px">Generated keypair — copy private key now, it will not be shown again:</div>
-          <div><span style="color:var(--accent)">Private:</span> <span id="wg-gen-privkey" style="color:var(--subtle);word-break:break-all"></span></div>
-          <div style="margin-top:4px"><span style="color:var(--accent)">Public: </span> <span id="wg-gen-pubkey" style="color:var(--subtle);word-break:break-all"></span></div>
-        </div>
-        <div style="display:flex;gap:8px">
-          <button class="btn-primary btn-sm" onclick="wgAddPeer()">Add Peer</button>
-          <button class="btn-secondary btn-sm" onclick="closeAddPeer()">Cancel</button>
-        </div>
-        <div id="wg-add-result" style="margin-top:8px;font-size:0.82rem"></div>
-      </div>
-    </section>
-
-    <!-- ════════════════ NETWORK ════════════════ -->
-    <section id="view-network" class="view">
-      <div class="page-header">
-        <h1>Network</h1>
-        <button class="btn-secondary btn-sm" onclick="loadNetwork()">Refresh</button>
-      </div>
-      <table class="data-table">
-        <thead><tr><th>Interface</th><th>Addresses</th><th>State</th><th>MTU</th></tr></thead>
-        <tbody id="net-tbody"><tr><td colspan="4" class="loading">Loading…</td></tr></tbody>
-      </table>
-    </section>
-
-    <!-- ════════════════ INSTALL ════════════════ -->
-    <section id="view-install" class="view">
-      <div class="page-header"><h1>Install</h1></div>
-
-      <!-- Step indicator -->
-      <div class="wizard-steps">
-        <div class="step active" id="step-ind-1"><span>1</span> Template</div>
-        <div class="step-line"></div>
-        <div class="step" id="step-ind-2"><span>2</span> Disk</div>
-        <div class="step-line"></div>
-        <div class="step" id="step-ind-3"><span>3</span> Identity</div>
-        <div class="step-line"></div>
-        <div class="step" id="step-ind-4"><span>4</span> Options</div>
-        <div class="step-line"></div>
-        <div class="step" id="step-ind-5"><span>5</span> Confirm</div>
-      </div>
-
-      <!-- Step 1: Template -->
-      <div class="wizard-pane active" id="wpane-1">
-        <div class="template-cards">
-          <div class="tmpl-card selected" data-tmpl="cluster-manager-desktop" onclick="selectTemplate(this)">
-            <div class="tmpl-icon">◈</div>
-            <div class="tmpl-name">Cluster Manager</div>
-            <div class="tmpl-desc">Control plane · GNOME desktop · Web UI · WireGuard hub · k8s bootstrap</div>
-            <div class="tmpl-packages">gnome · wireguard · dnsmasq · nginx · nftables</div>
-          </div>
-          <div class="tmpl-card" data-tmpl="cluster-manager-server" onclick="selectTemplate(this)">
-            <div class="tmpl-icon">◉</div>
-            <div class="tmpl-name">Cluster Manager (Server)</div>
-            <div class="tmpl-desc">Headless control plane · Web UI on :8080 · WireGuard hub · SSH only</div>
-            <div class="tmpl-packages">nginx · wireguard · dnsmasq · nftables · no desktop</div>
-          </div>
-          <div class="tmpl-card" data-tmpl="kvm" onclick="selectTemplate(this)">
-            <div class="tmpl-icon">▣</div>
-            <div class="tmpl-name">KVM</div>
-            <div class="tmpl-desc">Hypervisor · libvirt · bridge networking · OVMF UEFI</div>
-            <div class="tmpl-packages">qemu-kvm · libvirt · bridge-utils · ovmf · virt-manager</div>
-          </div>
-          <div class="tmpl-card" data-tmpl="storage" onclick="selectTemplate(this)">
-            <div class="tmpl-icon">◧</div>
-            <div class="tmpl-name">STORAGE</div>
-            <div class="tmpl-desc">ZFS NAS/SAN · NFS · iSCSI · Samba · metrics exporter</div>
-            <div class="tmpl-packages">zfsutils · nfs-kernel-server · tgt · samba · prometheus</div>
-          </div>
-          <div class="tmpl-card" data-tmpl="vdi" onclick="selectTemplate(this)">
-            <div class="tmpl-icon">⬛</div>
-            <div class="tmpl-name">VDI</div>
-            <div class="tmpl-desc">Streaming desktop · SRT/HLS/WebRTC · mediamtx · NVIDIA opt.</div>
-            <div class="tmpl-packages">mutter · mediamtx · ffmpeg · wf-recorder · pipewire</div>
-          </div>
-        </div>
-        <div class="wizard-nav"><button class="btn-primary" onclick="wizStep(2)">Next →</button></div>
-      </div>
-
-      <!-- Step 2: Disk -->
-      <div class="wizard-pane" id="wpane-2">
-        <div class="section-title">Select target disk
-          <button class="btn-secondary btn-sm" style="margin-left:12px" onclick="refreshDisks()">Refresh</button>
-        </div>
-        <div id="disk-cards" class="disk-grid">
-          <div class="loading">Scanning disks…</div>
-        </div>
-        <div class="wizard-nav">
-          <button class="btn-secondary" onclick="wizStep(1)">← Back</button>
-          <button class="btn-primary" onclick="wizStep(3)">Next →</button>
-        </div>
-      </div>
-
-      <!-- Step 3: Identity -->
-      <div class="wizard-pane" id="wpane-3">
-        <div class="form-grid">
-          <label>Hostname
-            <input type="text" id="inst-hostname" value="cm-01" placeholder="e.g. cm-01">
-          </label>
-          <label>Timezone
-            <input type="text" id="inst-tz" value="UTC" placeholder="e.g. America/Toronto">
-          </label>
-          <label>Admin Username
-            <input type="text" id="inst-user" value="admin">
-          </label>
-          <label>Admin Password
-            <input type="password" id="inst-pass" value="" placeholder="choose a password">
-          </label>
-          <label>Confirm Password
-            <input type="password" id="inst-pass2" value="" placeholder="confirm password">
-          </label>
-          <label>Root Password
-            <input type="password" id="inst-rootpass" value="" placeholder="leave blank = same as admin">
-          </label>
-        </div>
-        <div class="wizard-nav">
-          <button class="btn-secondary" onclick="wizStep(2)">← Back</button>
-          <button class="btn-primary" onclick="wizStep(4)">Next →</button>
-        </div>
-      </div>
-
-      <!-- Step 4: Options -->
-      <div class="wizard-pane" id="wpane-4">
-        <div class="option-list">
-          <label class="option-row">
-            <input type="checkbox" id="inst-nvidia">
-            <div>
-              <div class="option-name">NVIDIA GPU support</div>
-              <div class="option-desc">Installs nvidia-driver + nvenc codec. VDI only. Requires NVIDIA GPU.</div>
-            </div>
-          </label>
-          <label class="option-row">
-            <input type="checkbox" id="inst-ebpf" checked>
-            <div>
-              <div class="option-name">eBPF / BCC tools</div>
-              <div class="option-desc">Installs BCC tracing tools and bpftrace. Recommended for all nodes.</div>
-            </div>
-          </label>
-          <label class="option-row">
-            <input type="checkbox" id="inst-zfs" checked disabled>
-            <div>
-              <div class="option-name">ZFS root filesystem</div>
-              <div class="option-desc">Always on. KLDload uses ZFS exclusively. ZFSBootMenu manages boot environments.</div>
-            </div>
-          </label>
-          <label class="option-row">
-            <input type="checkbox" id="inst-encryption">
-            <div>
-              <div class="option-name">ZFS native encryption</div>
-              <div class="option-desc">Encrypts the rpool/ROOT dataset with a passphrase. Requires manual unlock at boot.</div>
-            </div>
-          </label>
-        </div>
-        <div class="wizard-nav">
-          <button class="btn-secondary" onclick="wizStep(3)">← Back</button>
-          <button class="btn-primary" onclick="wizStep(5)">Next →</button>
-        </div>
-      </div>
-
-      <!-- Step 5: Confirm -->
-      <div class="wizard-pane" id="wpane-5">
-        <div class="confirm-box" id="confirm-summary"></div>
-        <div class="warn-box">
-          ⚠ This will ERASE the selected disk.  All existing data will be lost.
-        </div>
-        <div class="wizard-nav">
-          <button class="btn-secondary" onclick="wizStep(4)">← Back</button>
-          <button class="btn-danger" onclick="runInstall()">Install Now</button>
-        </div>
-      </div>
-
-      <!-- Install progress -->
-      <div id="install-progress" class="hidden">
-        <div class="section-title">Installing…</div>
-        <div id="install-log" class="log-box"></div>
-      </div>
-    </section>
-
-    <!-- ════════════════ SPAWN ════════════════ -->
-    <section id="view-spawn" class="view">
-      <div class="page-header"><h1>Spawn</h1></div>
-      <div class="form-grid">
-        <label>Type
-          <select id="sp-type">
-            <option value="vm">KVM VM</option>
-            <option value="microvm">Firecracker microVM</option>
-            <option value="container">Container (Docker / LXC)</option>
-            <option value="k8s-worker">Kubernetes Worker</option>
-            <option value="k8s-etcd">Kubernetes etcd / CP</option>
-          </select>
-        </label>
-        <label>Template
-          <select id="sp-template">
-            <option value="cluster-manager-desktop">Cluster Manager (Desktop)</option>
-            <option value="cluster-manager-server">Cluster Manager (Server)</option>
-            <option value="kvm" selected>kvm</option>
-            <option value="storage">storage</option>
-            <option value="vdi">vdi</option>
-          </select>
-        </label>
-        <label>Target Host
-          <input type="text" id="sp-host" value="local" placeholder="IP or hostname, or 'local'">
-        </label>
-        <label>Name
-          <input type="text" id="sp-name" value="kvm-01">
-        </label>
-        <label>Count
-          <input type="number" id="sp-count" value="1" min="1" max="64">
-        </label>
-        <label>CPUs
-          <input type="number" id="sp-cpu" value="2" min="1">
-        </label>
-        <label>RAM (MB)
-          <input type="number" id="sp-ram" value="2048" min="512" step="512">
-        </label>
-        <label>Disk (GB)
-          <input type="number" id="sp-disk" value="40" min="10">
-        </label>
-      </div>
-      <div class="btn-row">
-        <button class="btn-primary" onclick="runSpawn()">Spawn</button>
-      </div>
-      <div id="spawn-log" class="log-box hidden"></div>
-    </section>
-
-    <!-- ════════════════ GOLDEN IMAGES ════════════════ -->
-    <section id="view-golden" class="view">
-      <div class="page-header"><h1>Golden Images</h1></div>
-      <p class="page-desc">
-        Golden images are fully-installed qcow2 base images built by booting the live ISO
-        headlessly via QEMU.  Once built, CoW clones are stamped from them in seconds.
-      </p>
-
-      <div class="golden-grid" id="golden-grid">
-        <div class="golden-card" data-tmpl="cluster-manager-desktop">
-          <div class="golden-icon">◈</div>
-          <div class="golden-name">Cluster Manager</div>
-          <div class="golden-path">/var/lib/kldload/golden/golden-cluster-manager.qcow2</div>
-          <div class="golden-status" id="gst-cluster-manager">checking…</div>
-          <div class="golden-actions">
-            <button class="btn-primary btn-sm" onclick="buildGolden('cluster-manager-desktop')">Build</button>
-            <button class="btn-secondary btn-sm" onclick="stampGolden('cluster-manager-desktop')">Stamp Clones</button>
-          </div>
-        </div>
-        <div class="golden-card" data-tmpl="kvm">
-          <div class="golden-icon">▣</div>
-          <div class="golden-name">kvm</div>
-          <div class="golden-path">/var/lib/kldload/golden/golden-kvm.qcow2</div>
-          <div class="golden-status" id="gst-kvm">checking…</div>
-          <div class="golden-actions">
-            <button class="btn-primary btn-sm" onclick="buildGolden('kvm')">Build</button>
-            <button class="btn-secondary btn-sm" onclick="stampGolden('kvm')">Stamp Clones</button>
-          </div>
-        </div>
-        <div class="golden-card" data-tmpl="storage">
-          <div class="golden-icon">◧</div>
-          <div class="golden-name">storage</div>
-          <div class="golden-path">/var/lib/kldload/golden/golden-storage.qcow2</div>
-          <div class="golden-status" id="gst-storage">checking…</div>
-          <div class="golden-actions">
-            <button class="btn-primary btn-sm" onclick="buildGolden('storage')">Build</button>
-            <button class="btn-secondary btn-sm" onclick="stampGolden('storage')">Stamp Clones</button>
-          </div>
-        </div>
-        <div class="golden-card" data-tmpl="vdi">
-          <div class="golden-icon">⬛</div>
-          <div class="golden-name">vdi</div>
-          <div class="golden-path">/var/lib/kldload/golden/golden-vdi.qcow2</div>
-          <div class="golden-status" id="gst-vdi">checking…</div>
-          <div class="golden-actions">
-            <button class="btn-primary btn-sm" onclick="buildGolden('vdi')">Build</button>
-            <button class="btn-secondary btn-sm" onclick="stampGolden('vdi')">Stamp Clones</button>
-          </div>
-        </div>
-      </div>
-
-      <div id="golden-log" class="log-box hidden" style="margin-top:20px"></div>
-    </section>
-
-    <!-- ════════════════ VMs ════════════════ -->
-    <section id="view-vms" class="view">
-      <div class="page-header">
-        <h1>Virtual Machines</h1>
-        <button class="btn-secondary btn-sm" onclick="loadVMs()">Refresh</button>
-      </div>
-      <table class="data-table">
-        <thead><tr><th>Name</th><th>State</th><th>vCPUs</th><th>RAM</th><th>Actions</th></tr></thead>
-        <tbody id="vm-tbody"><tr><td colspan="5" class="loading">Loading…</td></tr></tbody>
-      </table>
-      <div id="vm-log" class="log-output" style="display:none;margin-top:12px;height:160px"></div>
-    </section>
-
-    <!-- ════════════════ ZFS ════════════════ -->
-    <section id="view-zfs" class="view">
-      <div class="page-header">
-        <h1>ZFS</h1>
-        <button class="btn-secondary btn-sm" onclick="loadZFS()">Refresh</button>
-      </div>
-
-      <div class="section-title">Pools</div>
-      <table class="data-table">
-        <thead><tr><th>Pool</th><th>Size</th><th>Allocated</th><th>Free</th><th>Health</th><th>Usage</th></tr></thead>
-        <tbody id="pool-tbody"><tr><td colspan="6" class="loading">Loading…</td></tr></tbody>
-      </table>
-
-      <div class="section-title">Datasets</div>
-      <table class="data-table">
-        <thead><tr><th>Dataset</th><th>Used</th><th>Avail</th><th>Refer</th><th>Mountpoint</th></tr></thead>
-        <tbody id="ds-tbody"><tr><td colspan="5" class="loading">Loading…</td></tr></tbody>
-      </table>
-    </section>
-
-    <!-- ════════════════ KUBERNETES ════════════════ -->
-    <section id="view-k8s" class="view">
-      <div class="page-header">
-        <h1>Kubernetes</h1>
-        <div class="btn-row">
-          <button class="btn-secondary btn-sm" onclick="loadK8s()">Refresh</button>
-          <button class="btn-primary btn-sm" onclick="runJoin('worker')">Join as Worker</button>
-          <button class="btn-secondary btn-sm" onclick="runJoin('etcd')">Join as CP</button>
-        </div>
-      </div>
-
-      <div class="stat-row" style="margin-bottom:20px">
-        <div class="stat-card"><div class="stat-label">Nodes</div><div class="stat-value" id="k8s-node-count">—</div></div>
-        <div class="stat-card"><div class="stat-label">Ready</div><div class="stat-value green" id="k8s-ready-count">—</div></div>
-        <div class="stat-card"><div class="stat-label">API Server</div><div class="stat-value" id="k8s-api">—</div></div>
-        <div class="stat-card"><div class="stat-label">Version</div><div class="stat-value" id="k8s-ver">—</div></div>
-      </div>
-
-      <table class="data-table">
-        <thead><tr><th>Node</th><th>Role</th><th>Status</th><th>Version</th><th>wg2 IP</th></tr></thead>
-        <tbody id="k8s-tbody"><tr><td colspan="5" class="loading">Loading…</td></tr></tbody>
-      </table>
-    </section>
-
-    <!-- ════════════════ SALT ════════════════ -->
-    <section id="view-salt" class="view">
-      <div class="page-header">
-        <h1>Salt</h1>
-        <div class="btn-row">
-          <button class="btn-secondary btn-sm" onclick="loadSalt()">Refresh</button>
-          <button class="btn-secondary btn-sm" onclick="saltHighstate()">Highstate All</button>
-          <button class="btn-secondary btn-sm" onclick="saltAcceptAll()">Accept Pending</button>
-        </div>
-      </div>
-
-      <div class="stat-row" style="margin-bottom:20px">
-        <div class="stat-card"><div class="stat-label">Online</div><div class="stat-value green" id="salt-online">—</div></div>
-        <div class="stat-card"><div class="stat-label">Offline</div><div class="stat-value red" id="salt-offline">—</div></div>
-        <div class="stat-card"><div class="stat-label">Pending Keys</div><div class="stat-value yellow" id="salt-pending">—</div></div>
-      </div>
-
-      <table class="data-table">
-        <thead><tr><th>Minion</th><th>Role</th><th>wg1 IP</th><th>Node Index</th><th>Status</th></tr></thead>
-        <tbody id="salt-tbody"><tr><td colspan="5" class="loading">Loading…</td></tr></tbody>
-      </table>
-    </section>
-
-    <!-- ════════════════ CLUSTER DEPLOY ════════════════ -->
-    <section id="view-cluster-deploy" class="view">
-      <div class="page-header">
-        <h1>Cluster Deploy</h1>
-        <span class="page-badge">Proxmox required</span>
-      </div>
-      <p class="page-desc">
-        Deploy a complete kldload cluster to Proxmox from this node. Each cluster type builds
-        all seed disks first, then powers on VMs in dependency order so nodes auto-configure
-        and auto-join via hub.env discovery.
-      </p>
-
-      <!-- ── Proxmox connection ─────────────────────────────────────────── -->
-      <div class="section-title">Proxmox Connection</div>
-      <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr;margin-bottom:16px">
-        <label>Proxmox Host
-          <input type="text" id="cd-pve-host" value="10.100.10.225" placeholder="IP or FQDN">
-        </label>
-        <label>Node Name
-          <input type="text" id="cd-pve-node" value="fiend" placeholder="Proxmox node name">
-        </label>
-        <label>Token ID
-          <input type="text" id="cd-pve-token-id" placeholder="root@pam!mytoken">
-        </label>
-        <label style="grid-column:span 2">Token Secret
-          <input type="password" id="cd-pve-token-secret" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
-        </label>
-        <label>ISO Name
-          <input type="text" id="cd-iso-name" placeholder="kldload-desktop-amd64.iso (auto-detect)">
-        </label>
-      </div>
-
-      <!-- ── Cluster type tabs ──────────────────────────────────────────── -->
-      <div class="tab-bar" style="margin-bottom:0">
-        <button class="tab active" onclick="cdTab('scc',this)">SCC — Starter Cluster</button>
-        <button class="tab" onclick="cdTab('k8s',this)">k8s-ha — HA Kubernetes</button>
-      </div>
-
-      <!-- SCC pane -->
-      <div id="cd-pane-scc" class="cluster-pane">
-        <div class="cluster-diagram">
-          <div class="wave-row">
-            <div class="wave-label">Order</div>
-            <div class="wave-nodes">
-              <div class="cnode fw" data-host="fw1">
-                <div class="cn-icon">🔥</div>
-                <div class="cn-name">fw1</div>
-                <div class="cn-role">Firewall</div>
-                <div class="cn-vmid">VMID 920</div>
-                <select class="cnode-target" data-node="fw1" onchange="cdSetTarget('fw1',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode-arrow">→</div>
-              <div class="cnode fw" data-host="fw2">
-                <div class="cn-icon">🔥</div>
-                <div class="cn-name">fw2</div>
-                <div class="cn-role">Firewall HA</div>
-                <div class="cn-vmid">VMID 921</div>
-                <select class="cnode-target" data-node="fw2" onchange="cdSetTarget('fw2',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode-arrow">→</div>
-              <div class="cnode master" data-host="cluster-manager">
-                <div class="cn-icon">◈</div>
-                <div class="cn-name">cluster-manager</div>
-                <div class="cn-role">Cluster Manager</div>
-                <div class="cn-vmid">VMID 922</div>
-                <select class="cnode-target" data-node="cluster-manager" onchange="cdSetTarget('cluster-manager',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode-arrow">→</div>
-              <div class="cnode compute" data-host="proxmox-01">
-                <div class="cn-icon">▣</div>
-                <div class="cn-name">proxmox-01</div>
-                <div class="cn-role">Proxmox VE</div>
-                <div class="cn-vmid">VMID 905</div>
-                <select class="cnode-target" data-node="proxmox-01" onchange="cdSetTarget('proxmox-01',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode-arrow">→</div>
-              <div class="cnode monitor" data-host="monitoring">
-                <div class="cn-icon">⬡</div>
-                <div class="cn-name">monitoring</div>
-                <div class="cn-role">Prometheus+Grafana</div>
-                <div class="cn-vmid">VMID 907</div>
-                <select class="cnode-target" data-node="monitoring" onchange="cdSetTarget('monitoring',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode-arrow">→</div>
-              <div class="cnode storage" data-host="storage">
-                <div class="cn-icon">◧</div>
-                <div class="cn-name">storage</div>
-                <div class="cn-role">ZFS NFS/iSCSI</div>
-                <div class="cn-vmid">VMID 923</div>
-                <select class="cnode-target" data-node="storage" onchange="cdSetTarget('storage',this.value)"><option value="">default</option></select>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="cluster-note">
-          Each node installs unattended via seed disk. The VM powers off when done — the
-          next node then deploys. After the Cluster Manager completes, all subsequent nodes
-          register and join the cluster automatically.
-        </div>
-        <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-top:12px">
-          <label>LAN CIDR
-            <input type="text" id="cd-scc-lan-cidr" value="192.168.0.0/16" placeholder="192.168.0.0/16">
-          </label>
-          <label>Cluster Domain
-            <input type="text" id="cd-scc-domain" value="cluster.kldload" placeholder="cluster.kldload">
-          </label>
-        </div>
-        <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
-          <button class="btn-primary" onclick="cdDeploy('scc')">Deploy SCC</button>
-          <span style="color:var(--muted);font-size:0.82rem">~30–60 min total (6 nodes, sequential)</span>
-        </div>
-      </div>
-
-      <!-- k8s-ha pane -->
-      <div id="cd-pane-k8s" class="cluster-pane" style="display:none">
-        <div class="cluster-diagram">
-          <div class="wave-row">
-            <div class="wave-label blue-label">BLUE</div>
-            <div class="wave-nodes">
-              <div class="cnode fw" data-host="fw1">
-                <div class="cn-icon">🔥</div><div class="cn-name">fw1</div>
-                <div class="cn-role">Firewall</div><div class="cn-vmid">920</div>
-                <select class="cnode-target" data-node="fw1" onchange="cdSetTarget('fw1',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode master" data-host="cluster-manager">
-                <div class="cn-icon">◈</div><div class="cn-name">cluster-manager</div>
-                <div class="cn-role">Cluster Manager</div><div class="cn-vmid">930</div>
-                <select class="cnode-target" data-node="cluster-manager" onchange="cdSetTarget('cluster-manager',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode etcd" data-host="etcd-01">
-                <div class="cn-icon">✦</div><div class="cn-name">etcd-01</div>
-                <div class="cn-role">etcd</div><div class="cn-vmid">931</div>
-                <select class="cnode-target" data-node="etcd-01" onchange="cdSetTarget('etcd-01',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode worker" data-host="worker-01">
-                <div class="cn-icon">⬡</div><div class="cn-name">worker-01</div>
-                <div class="cn-role">k8s worker</div><div class="cn-vmid">940</div>
-                <select class="cnode-target" data-node="worker-01" onchange="cdSetTarget('worker-01',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode worker" data-host="worker-04">
-                <div class="cn-icon">⬡</div><div class="cn-name">worker-04</div>
-                <div class="cn-role">k8s worker</div><div class="cn-vmid">943</div>
-                <select class="cnode-target" data-node="worker-04" onchange="cdSetTarget('worker-04',this.value)"><option value="">default</option></select>
-              </div>
-            </div>
-          </div>
-          <div class="wave-row" style="margin-top:8px">
-            <div class="wave-label green-label">GREEN</div>
-            <div class="wave-nodes">
-              <div class="cnode fw" data-host="fw2">
-                <div class="cn-icon">🔥</div><div class="cn-name">fw2</div>
-                <div class="cn-role">Firewall HA</div><div class="cn-vmid">921</div>
-                <select class="cnode-target" data-node="fw2" onchange="cdSetTarget('fw2',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode etcd" data-host="etcd-02">
-                <div class="cn-icon">✦</div><div class="cn-name">etcd-02</div>
-                <div class="cn-role">etcd</div><div class="cn-vmid">932</div>
-                <select class="cnode-target" data-node="etcd-02" onchange="cdSetTarget('etcd-02',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode worker" data-host="worker-02">
-                <div class="cn-icon">⬡</div><div class="cn-name">worker-02</div>
-                <div class="cn-role">k8s worker</div><div class="cn-vmid">941</div>
-                <select class="cnode-target" data-node="worker-02" onchange="cdSetTarget('worker-02',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode worker" data-host="worker-05">
-                <div class="cn-icon">⬡</div><div class="cn-name">worker-05</div>
-                <div class="cn-role">k8s worker</div><div class="cn-vmid">944</div>
-                <select class="cnode-target" data-node="worker-05" onchange="cdSetTarget('worker-05',this.value)"><option value="">default</option></select>
-              </div>
-            </div>
-          </div>
-          <div class="wave-row" style="margin-top:8px">
-            <div class="wave-label yellow-label">YELLOW</div>
-            <div class="wave-nodes">
-              <div class="cnode etcd" data-host="etcd-03">
-                <div class="cn-icon">✦</div><div class="cn-name">etcd-03</div>
-                <div class="cn-role">etcd</div><div class="cn-vmid">933</div>
-                <select class="cnode-target" data-node="etcd-03" onchange="cdSetTarget('etcd-03',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode worker" data-host="worker-03">
-                <div class="cn-icon">⬡</div><div class="cn-name">worker-03</div>
-                <div class="cn-role">k8s worker</div><div class="cn-vmid">942</div>
-                <select class="cnode-target" data-node="worker-03" onchange="cdSetTarget('worker-03',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode worker" data-host="worker-06">
-                <div class="cn-icon">⬡</div><div class="cn-name">worker-06</div>
-                <div class="cn-role">k8s worker</div><div class="cn-vmid">945</div>
-                <select class="cnode-target" data-node="worker-06" onchange="cdSetTarget('worker-06',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode storage" data-host="storage">
-                <div class="cn-icon">◧</div><div class="cn-name">storage</div>
-                <div class="cn-role">ZFS NFS</div><div class="cn-vmid">923</div>
-                <select class="cnode-target" data-node="storage" onchange="cdSetTarget('storage',this.value)"><option value="">default</option></select>
-              </div>
-              <div class="cnode monitor" data-host="monitoring">
-                <div class="cn-icon">⬡</div><div class="cn-name">monitoring</div>
-                <div class="cn-role">Prometheus</div><div class="cn-vmid">907</div>
-                <select class="cnode-target" data-node="monitoring" onchange="cdSetTarget('monitoring',this.value)"><option value="">default</option></select>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="cluster-note">
-          All 14 seed disks are built first, then VMs are powered on in three waves.
-          Each wave waits for all nodes to complete install before the next wave starts.
-          BLUE establishes the mesh; GREEN and YELLOW join automatically.
-        </div>
-        <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-top:12px">
-          <label>LAN CIDR
-            <input type="text" id="cd-k8s-lan-cidr" value="192.168.0.0/16" placeholder="192.168.0.0/16">
-          </label>
-          <label>Cluster Domain
-            <input type="text" id="cd-k8s-domain" value="cluster.kldload" placeholder="cluster.kldload">
-          </label>
-        </div>
-        <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
-          <button class="btn-primary" onclick="cdDeploy('k8s')">Deploy k8s-ha</button>
-          <span style="color:var(--muted);font-size:0.82rem">~90–120 min total (14 nodes, 3 waves)</span>
-        </div>
-      </div>
-
-      <!-- Live log output -->
-      <div id="cd-log-wrap" style="display:none;margin-top:20px">
-        <div class="section-title" id="cd-log-title">Cluster deploy log</div>
-        <div class="log-box" id="cd-log"></div>
-        <div id="cd-done-msg" style="display:none;margin-top:8px;color:var(--green);font-weight:600">
-          ✓ Cluster deploy complete. Nodes are registering with the Cluster Manager.
-        </div>
-      </div>
-    </section>
-
-    <!-- ════════════════ NODES ════════════════ -->
-    <section id="view-nodes" class="view">
-      <div class="page-header">
-        <h1>Nodes</h1>
-        <div class="btn-row">
-          <button class="btn-secondary btn-sm" onclick="loadNodes()">Refresh</button>
-          <button class="btn-secondary btn-sm" onclick="mineRefresh()">Refresh Mine</button>
-          <button class="btn-secondary btn-sm" onclick="saltAcceptAll()">Accept Pending</button>
-        </div>
-      </div>
-
-      <div class="stat-row" style="margin-bottom:20px">
-        <div class="stat-card"><div class="stat-label">Online</div><div class="stat-value green" id="nodes-online">—</div></div>
-        <div class="stat-card"><div class="stat-label">Offline</div><div class="stat-value red" id="nodes-offline">—</div></div>
-        <div class="stat-card"><div class="stat-label">Pending Keys</div><div class="stat-value yellow" id="nodes-pending-count">—</div></div>
-      </div>
-
-      <!-- Pending key acceptance -->
-      <div id="nodes-pending-section" style="display:none;margin-bottom:20px">
-        <div class="section-label">PENDING ENROLLMENT</div>
-        <div id="nodes-pending-list" class="pending-list"></div>
-      </div>
-
-      <div class="section-label">FLEET</div>
-      <table class="data-table nodes-table">
-        <thead>
-          <tr>
-            <th>Hostname</th>
-            <th>Role</th>
-            <th>Fleet</th>
-            <th>Idx</th>
-            <th>wg0 mgmt</th>
-            <th>wg1 storage</th>
-            <th>wg2 cluster</th>
-            <th>wg3 external</th>
-            <th>Status</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="nodes-tbody">
-          <tr><td colspan="10" class="loading">Loading…</td></tr>
-        </tbody>
-      </table>
-
-      <!-- Apply-state panel (shown when a node row is clicked) -->
-      <div id="node-apply-panel" style="display:none;margin-top:20px">
-        <div class="section-label">APPLY STATE — <span id="node-apply-target" class="mono accent"></span></div>
-        <div class="input-row" style="margin-top:8px">
-          <input id="node-apply-state" class="input-field" placeholder="e.g. roles.kvm  or  wireguard.rotate" style="flex:1">
-          <button class="btn-primary btn-sm" onclick="nodeApplyState()">Apply</button>
-          <button class="btn-secondary btn-sm" onclick="closeApplyPanel()">Cancel</button>
-        </div>
-        <div id="node-apply-log" class="log-output" style="margin-top:8px;height:180px;display:none"></div>
-      </div>
-    </section>
-
-    <!-- ════════════════ LOGS ════════════════ -->
-    <section id="view-logs" class="view">
-      <div class="page-header">
-        <h1>Logs</h1>
-        <div class="btn-row">
-          <select id="log-select" onchange="loadLog()">
-            <option value="installer">installer</option>
-            <option value="storage">storage</option>
-            <option value="network">network</option>
-            <option value="bootstrap">bootstrap</option>
-            <option value="snapshots">snapshots</option>
-            <option value="firstboot">firstboot</option>
-            <option value="autoboot">autobootstrap</option>
-            <option value="audit">audit trail</option>
-          </select>
-          <button class="btn-secondary btn-sm" onclick="loadLog()">Tail</button>
-          <button class="btn-secondary btn-sm" onclick="clearLogView()">Clear</button>
-        </div>
-      </div>
-      <div id="log-content" class="log-box tall">Select a log above.</div>
-    </section>
-
-    <!-- ════════════════ AUDIT ════════════════ -->
-    <section id="view-audit" class="view">
-      <div class="page-header">
-        <h1>Audit Trail</h1>
-        <div class="btn-row">
-          <button class="btn-primary btn-sm" onclick="runAudit()">▶ Run Audit</button>
-          <button class="btn-secondary btn-sm" onclick="viewAuditLog()">View Raw Log</button>
-        </div>
-      </div>
-      <p class="page-desc">
-        Verifies every package, binary, service, and configuration file that kldload installs or manages.
-        Produces a full package manifest and smoke-tests every component.
-        Results are written to <code>/var/log/kldload/audit.log</code>.
-      </p>
-      <div id="audit-summary" class="audit-summary hidden">
-        <span class="audit-stat pass" id="audit-pass">— PASS</span>
-        <span class="audit-stat fail" id="audit-fail">— FAIL</span>
-        <span class="audit-stat skip" id="audit-skip">— SKIP</span>
-      </div>
-      <div id="audit-results" class="audit-results"></div>
-      <div id="audit-log-box" class="log-box tall hidden"></div>
-    </section>
-
-    <!-- ════════════════ CREDENTIALS ════════════════ -->
-    <section id="view-credentials" class="view">
-      <div class="view-header">
-        <h2>Credentials</h2>
-        <p class="view-sub">API keys and access tokens. Stored in RAM only — cleared on reboot.</p>
-      </div>
-
-      <!-- Proxmox -->
-      <div class="cred-section">
-        <div class="cred-section-head">
-          <span class="cred-icon">🖥</span>
-          <h3>Proxmox Hosts</h3>
-          <button class="btn-sm btn-accent" onclick="credAddProxmox()">+ Add Host</button>
-        </div>
-        <div id="cred-proxmox-list" class="cred-list"></div>
-      </div>
-
-      <!-- AWS -->
-      <div class="cred-section">
-        <div class="cred-section-head">
-          <span class="cred-icon">☁</span>
-          <h3>AWS</h3>
-        </div>
-        <div class="cred-form">
-          <div class="cred-row">
-            <label>Access Key ID</label>
-            <input id="cred-aws-key" type="text" placeholder="AKIAIOSFODNN7EXAMPLE" autocomplete="off"/>
-          </div>
-          <div class="cred-row">
-            <label>Secret Access Key</label>
-            <input id="cred-aws-secret" type="password" placeholder="••••••••" autocomplete="off"/>
-          </div>
-          <div class="cred-row">
-            <label>Default Region</label>
-            <input id="cred-aws-region" type="text" placeholder="us-east-1"/>
-          </div>
-        </div>
-      </div>
-
-      <!-- Azure -->
-      <div class="cred-section">
-        <div class="cred-section-head">
-          <span class="cred-icon">☁</span>
-          <h3>Azure</h3>
-        </div>
-        <div class="cred-form">
-          <div class="cred-row">
-            <label>Subscription ID</label>
-            <input id="cred-az-sub" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off"/>
-          </div>
-          <div class="cred-row">
-            <label>Tenant ID</label>
-            <input id="cred-az-tenant" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off"/>
-          </div>
-          <div class="cred-row">
-            <label>Client ID</label>
-            <input id="cred-az-client" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off"/>
-          </div>
-          <div class="cred-row">
-            <label>Client Secret</label>
-            <input id="cred-az-secret" type="password" placeholder="••••••••" autocomplete="off"/>
-          </div>
-          <div class="cred-row">
-            <label>Resource Group</label>
-            <input id="cred-az-rg" type="text" placeholder="my-resource-group"/>
-          </div>
-        </div>
-      </div>
-
-      <!-- GCP -->
-      <div class="cred-section">
-        <div class="cred-section-head">
-          <span class="cred-icon">☁</span>
-          <h3>GCP</h3>
-        </div>
-        <div class="cred-form">
-          <div class="cred-row">
-            <label>Project ID</label>
-            <input id="cred-gcp-project" type="text" placeholder="my-project-123" autocomplete="off"/>
-          </div>
-          <div class="cred-row">
-            <label>Service Account JSON</label>
-            <textarea id="cred-gcp-sa" rows="5" placeholder='{"type":"service_account",...}'></textarea>
-          </div>
-        </div>
-      </div>
-
-      <!-- SSH -->
-      <div class="cred-section">
-        <div class="cred-section-head">
-          <span class="cred-icon">🔑</span>
-          <h3>SSH Targets</h3>
-          <button class="btn-sm btn-accent" onclick="credAddSSH()">+ Add Host</button>
-        </div>
-        <div id="cred-ssh-list" class="cred-list"></div>
-      </div>
-
-      <div class="cred-actions">
-        <button class="btn-accent" onclick="credSave()">Save Credentials</button>
-        <span id="cred-save-status" class="cred-status"></span>
-      </div>
-    </section>
-
-    <!-- ════════════════ POOL DESIGNER ════════════════ -->
-    <section id="view-pool-designer" class="view">
-      <div class="page-header">
-        <h1>Pool Designer</h1>
-        <div class="btn-row">
-          <button class="btn-secondary btn-sm" onclick="pdScanDrives()">⟳ Scan</button>
-          <button class="btn-secondary btn-sm" onclick="pdSave()">⊟ Save to Library</button>
-          <button class="btn-secondary btn-sm" onclick="nav('library')">↗ Library</button>
-          <button class="btn-primary btn-sm" onclick="pdApplyToInstall()">→ Apply to Install</button>
-        </div>
-      </div>
-
-      <!-- Drive inventory -->
-      <div class="pd-section">
-        <div class="pd-section-header">
-          <span class="section-label">DETECTED DRIVES</span>
-          <span class="pd-drive-count" id="pd-drive-count"></span>
-        </div>
-        <div class="pd-drive-shelf" id="pd-drive-shelf">
-          <div class="loading">Scanning…</div>
-        </div>
-      </div>
-
-      <!-- Topology presets -->
-      <div class="pd-section">
-        <div class="section-label">SUGGESTED TOPOLOGIES</div>
-        <div class="pd-topo-grid" id="pd-topo-grid"></div>
-      </div>
-
-      <!-- Pool canvas -->
-      <div class="pd-section">
-        <div class="pd-canvas-header">
-          <span class="section-label">POOL LAYOUT</span>
-          <div style="display:flex;gap:8px;align-items:center">
-            <span class="pd-label-inline">pool name</span>
-            <input class="pd-pool-name-input" id="pd-pool-name" value="rpool"/>
-            <button class="btn-sm btn-secondary" onclick="pdAddVdev()">+ vDev</button>
-          </div>
-        </div>
-        <div class="pd-canvas" id="pd-canvas"></div>
-      </div>
-
-      <!-- Special vdevs -->
-      <div class="pd-section">
-        <div class="section-label">SPECIAL VDEVS</div>
-        <div class="pd-special-row">
-          <div class="pd-svdev">
-            <div class="pd-svdev-label">SLOG <span class="pd-svdev-hint">(ZIL — sync write log)</span></div>
-            <div class="pd-svdev-slots" id="pd-slog-slots"></div>
-          </div>
-          <div class="pd-svdev">
-            <div class="pd-svdev-label">L2ARC <span class="pd-svdev-hint">(read cache)</span></div>
-            <div class="pd-svdev-slots" id="pd-l2arc-slots"></div>
-          </div>
-          <div class="pd-svdev">
-            <div class="pd-svdev-label">Dedup <span class="pd-svdev-hint">(dedup table)</span></div>
-            <div class="pd-svdev-slots" id="pd-dedup-slots"><span class="pd-drop-hint">optional</span></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Summary bar -->
-      <div class="pd-summary-bar">
-        <div class="pd-stat"><div class="pd-stat-label">Usable</div><div class="pd-stat-val accent" id="pd-usable">—</div></div>
-        <div class="pd-stat"><div class="pd-stat-label">Raw</div><div class="pd-stat-val" id="pd-raw">—</div></div>
-        <div class="pd-stat"><div class="pd-stat-label">Topology</div><div class="pd-stat-val" id="pd-topo-label">—</div></div>
-        <div class="pd-stat"><div class="pd-stat-label">Fault Tolerance</div><div class="pd-stat-val green" id="pd-fault">—</div></div>
-        <div class="pd-stat"><div class="pd-stat-label">Est. Sequential</div><div class="pd-stat-val" id="pd-seq-iops">—</div></div>
-        <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
-          <button class="btn-sm btn-secondary" onclick="pdReset()">Reset</button>
-          <button class="btn-primary" onclick="pdApplyToInstall()">→ Apply to Install</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- ════════════════ CLUSTER DESIGNER ════════════════ -->
-    <section id="view-cluster-designer" class="view">
-      <div class="page-header">
-        <h1>Cluster Designer</h1>
-        <span class="page-badge">Template Builder</span>
-        <div class="header-actions">
-          <select id="cds-template-sel" class="select-sm" onchange="cdsLoadTemplate(this.value)">
-            <option value="">— Load Template —</option>
-            <option value="scc">SCC Starter (6 nodes)</option>
-            <option value="ha16">HA Production (16 nodes)</option>
-            <option value="k8s3">k8s Minimal (3 nodes)</option>
-          </select>
-          <input type="file" id="cds-import-file" accept=".json" style="display:none" onchange="cdsImportTemplate(this)">
-          <button class="btn-sm btn-secondary" onclick="document.getElementById('cds-import-file').click()">↑ Import</button>
-          <button class="btn-sm btn-secondary" onclick="cdsSaveTemplate()">↓ Export</button>
-          <button class="btn-sm btn-secondary" onclick="cdsSaveToLib()">⊟ Save to Library</button>
-          <button class="btn-primary btn-sm" onclick="cdsDeploy()">→ Deploy Cluster</button>
-        </div>
-      </div>
-      <p class="page-desc">Design your complete cluster topology — node roles, storage, networking, and services — then save as a template and deploy across any cloud or bare-metal in one click.</p>
-
-      <!-- Cluster metadata -->
-      <div class="cds-meta-bar">
-        <label>Cluster Name<input id="cds-name" value="prod-cluster"></label>
-        <label>Base Domain<input id="cds-domain" value="internal.example.com"></label>
-        <label>WG Mesh CIDR<input id="cds-wg-cidr" value="10.200.0.0/16"></label>
-        <label>Mgmt CIDR<input id="cds-mgmt-cidr" value="10.100.10.0/24"></label>
-      </div>
-
-      <!-- Node groups -->
-      <div class="cds-section-hdr">
-        <span class="section-label">NODE GROUPS</span>
-        <button class="btn-sm btn-secondary" onclick="cdsAddGroup()">+ Group</button>
-      </div>
-      <div id="cds-groups" class="cds-groups"></div>
-
-      <!-- Topology canvas -->
-      <div class="cds-section-hdr"><span class="section-label">TOPOLOGY PREVIEW</span></div>
-      <div class="cds-topo-canvas" id="cds-topo"></div>
-
-      <!-- Summary bar -->
-      <div class="cds-summary-bar">
-        <div class="cds-stat"><div class="cds-stat-lbl">Total Nodes</div><div class="cds-stat-val accent" id="cds-total-nodes">—</div></div>
-        <div class="cds-stat"><div class="cds-stat-lbl">Total vCPU</div><div class="cds-stat-val" id="cds-total-cpu">—</div></div>
-        <div class="cds-stat"><div class="cds-stat-lbl">Total RAM</div><div class="cds-stat-val" id="cds-total-ram">—</div></div>
-        <div class="cds-stat"><div class="cds-stat-lbl">Total Storage</div><div class="cds-stat-val" id="cds-total-storage">—</div></div>
-        <div class="cds-stat"><div class="cds-stat-lbl">WG Planes</div><div class="cds-stat-val green" id="cds-wg-planes">—</div></div>
-        <div class="cds-stat"><div class="cds-stat-lbl">Services</div><div class="cds-stat-val" id="cds-svc-count">—</div></div>
-      </div>
-    </section>
-
-    <!-- ════════════════ FIREWALL ════════════════ -->
-    <section id="view-firewall" class="view">
-      <div class="page-header">
-        <h1>Firewall</h1>
-        <span class="page-badge">nftables generator</span>
-        <div class="header-actions">
-          <button class="btn-sm btn-secondary" onclick="fwShowPreview()">{ } nftables</button>
-          <button class="btn-sm btn-secondary" onclick="fwSave()">⊟ Save to Library</button>
-          <button class="btn-primary btn-sm" onclick="fwApply()">→ Apply Rules</button>
-        </div>
-      </div>
-      <p class="page-desc">Zone-based firewall with WireGuard plane awareness. Rules are rendered to nftables and can be applied live or exported for deployment.</p>
-
-      <!-- Zone diagram -->
-      <div class="fw-zone-map">
-        <div class="fw-zone external"><div class="fw-zone-lbl">external</div><div class="fw-zone-hint">Internet / cloud</div></div>
-        <div class="fw-zone-arrow">→</div>
-        <div class="fw-zone dmz"><div class="fw-zone-lbl">dmz</div><div class="fw-zone-hint">public services</div></div>
-        <div class="fw-zone-arrow">→</div>
-        <div class="fw-zone internal"><div class="fw-zone-lbl">internal</div><div class="fw-zone-hint">LAN / services</div></div>
-        <div class="fw-zone-arrow">⇄</div>
-        <div class="fw-zone wg"><div class="fw-zone-lbl">wg0–wg3</div><div class="fw-zone-hint">mesh planes</div></div>
-        <div class="fw-zone-arrow">→</div>
-        <div class="fw-zone mgmt"><div class="fw-zone-lbl">mgmt</div><div class="fw-zone-hint">10.100.10.0/24</div></div>
-      </div>
-
-      <!-- WireGuard plane roles -->
-      <div class="section-title" style="margin-top:16px">WireGuard Plane Roles</div>
-      <div class="fw-wg-planes">
-        <div class="fw-wg-plane"><span class="fw-wg-badge wg0">wg0</span> Management — SSH, monitoring, cluster registration</div>
-        <div class="fw-wg-plane"><span class="fw-wg-badge wg1">wg1</span> Service mesh — inter-service, DNS</div>
-        <div class="fw-wg-plane"><span class="fw-wg-badge wg2">wg2</span> Storage replication — ZFS send/receive</div>
-        <div class="fw-wg-plane"><span class="fw-wg-badge wg3">wg3</span> External — client VPN, remote access</div>
-      </div>
-
-      <!-- Rule table -->
-      <div class="cds-section-hdr" style="margin-top:16px">
-        <span class="section-label">RULES</span>
-        <button class="btn-sm btn-secondary" onclick="fwAddRule()">+ Rule</button>
-      </div>
-      <table class="fw-rule-table">
-        <thead>
-          <tr><th>Priority</th><th>From Zone</th><th>To Zone</th><th>Protocol</th><th>Port</th><th>Action</th><th>Comment</th><th></th></tr>
-        </thead>
-        <tbody id="fw-rules-body"></tbody>
-      </table>
-
-      <!-- nftables preview panel -->
-      <div id="fw-preview" class="fw-nft-preview" style="display:none">
-        <div class="cds-section-hdr">
-          <span class="section-label">GENERATED nftables</span>
-          <button class="btn-sm btn-secondary" onclick="fwCopyNft()">⎘ Copy</button>
-          <button class="btn-sm" onclick="document.getElementById('fw-preview').style.display='none'">✕</button>
-        </div>
-        <pre id="fw-nft-code" class="fw-nft-code"></pre>
-      </div>
-    </section>
-
-    <!-- ════════════════ ANSIBLE ════════════════ -->
-    <section id="view-ansible" class="view">
-      <div class="page-header">
-        <h1>Ansible</h1>
-        <div class="btn-row">
-          <button class="btn-secondary btn-sm" onclick="ansibleRefresh()">Refresh</button>
-          <button class="btn-primary btn-sm" onclick="ansibleRun()">Run Playbook</button>
-        </div>
-      </div>
-      <p class="page-desc">Ansible is pre-installed on every node. Drop playbooks into <code>darksite/playbooks/</code> — they are available on every node from first boot.</p>
-
-      <div class="section-label">PLAYBOOKS</div>
-      <div id="ansible-playbook-list" class="lib-grid">
-        <div class="loading">Scanning darksite/playbooks/…</div>
-      </div>
-
-      <div class="section-label" style="margin-top:20px">RUN PLAYBOOK</div>
-      <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
-        <label>Playbook
-          <select id="ansible-playbook-select">
-            <option value="">-- select --</option>
-          </select>
-        </label>
-        <label>Target hosts
-          <input type="text" id="ansible-hosts" value="all" placeholder="all, kvm-*, storage-01">
-        </label>
-        <label style="grid-column:1/-1">Extra vars (key=value space-separated)
-          <input type="text" id="ansible-extra-vars" placeholder="env=prod region=us-east">
-        </label>
-      </div>
-      <button class="btn-primary" onclick="ansibleRun()">▶ Run</button>
-
-      <div class="section-label" style="margin-top:20px">OUTPUT</div>
-      <div class="log-box" id="ansible-log" style="min-height:200px"></div>
-    </section>
-
-    <!-- ════════════════ SERVICES ════════════════ -->
-    <section id="view-services" class="view">
-      <div class="page-header">
-        <h1>Services</h1>
-        <span class="page-badge">Stack Configurator</span>
-        <div class="header-actions">
-          <button class="btn-sm btn-secondary" onclick="svcSave()">⊟ Save to Library</button>
-          <button class="btn-primary btn-sm" onclick="svcApply()">→ Apply to Cluster</button>
-        </div>
-      </div>
-      <p class="page-desc">Select and configure service stacks to deploy across the cluster. Each stack is applied to the appropriate node roles automatically.</p>
-
-      <!-- DB-backed service list -->
-      <div class="section-label">DEFINED SERVICES</div>
-      <div id="svc-db-list" class="lib-grid" style="margin-bottom:20px">
-        <div class="loading">Loading…</div>
-      </div>
-
-      <!-- Deploy log -->
-      <div id="svc-deploy-log" class="log-output" style="display:none;margin-bottom:16px;height:140px"></div>
-
-      <!-- Define new service form -->
-      <div class="section-label">DEFINE SERVICE</div>
-      <div class="svc-define-form">
-        <div class="form-grid-2">
-          <label>Name <input id="svc-form-name" class="text-input" placeholder="e.g. nginx"></label>
-          <label>Description <input id="svc-form-desc" class="text-input" placeholder="optional"></label>
-          <label>Image / Package <input id="svc-form-image" class="text-input" placeholder="e.g. nginx or docker.io/nginx:alpine"></label>
-          <label>Runtime
-            <select id="svc-form-runtime" class="select-sm" style="width:100%">
-              <option value="systemd">systemd (bare metal)</option>
-              <option value="nspawn">systemd-nspawn (container)</option>
-              <option value="podman">podman (OCI container)</option>
-            </select>
-          </label>
-          <label>ZFS Dataset <input id="svc-form-dataset" class="text-input" placeholder="rpool/services/name"></label>
-          <label>Replicas <input id="svc-form-replicas" type="number" class="text-input" value="1" min="1"></label>
-          <label>Node Targets (comma-separated hostnames, or blank for all)
-            <input id="svc-form-targets" class="text-input" placeholder="node-01, node-02  or leave blank for all">
-          </label>
-          <label>Replication Targets (ZFS send destinations)
-            <input id="svc-form-repl-targets" class="text-input" placeholder="storage-01, cloud-01">
-          </label>
-        </div>
-        <div class="btn-row" style="margin-top:12px">
-          <button class="btn-secondary btn-sm" onclick="svcDbSave()">⊟ Save Definition</button>
-          <button class="btn-primary btn-sm" onclick="svcDbSave(); setTimeout(()=>svcDbLoad(),500)">⊟ Save</button>
-        </div>
-      </div>
-
-      <div class="section-label" style="margin-top:20px">SERVICE CATALOG</div>
-      <div id="svc-stacks" class="svc-stacks"></div>
-
-      <!-- Deployment summary -->
-      <div class="section-title" style="margin-top:20px">Deployment Plan</div>
-      <div class="svc-deploy-grid" id="svc-deploy-plan"></div>
-    </section>
-
-    <!-- ════════════════ CLOUD DEPLOY ════════════════ -->
-    <section id="view-cloud-keys" class="view">
-      <div class="page-header">
-        <h1>Cloud Deploy</h1>
-        <span class="page-badge">Multi-Cloud Provisioner</span>
-        <div class="header-actions">
-          <button class="btn-sm btn-secondary" onclick="ckTestAll()">⚡ Test Connections</button>
-          <button class="btn-primary btn-sm" onclick="ckDeploy()">→ Provision &amp; Deploy</button>
-        </div>
-      </div>
-      <p class="page-desc">Enter cloud API credentials, select regions and instance types, then deploy your cluster template across one or more providers in a single operation.</p>
-
-      <!-- Provider cards -->
-      <div class="ck-providers">
-
-        <!-- AWS -->
-        <div class="ck-provider" id="ck-aws">
-          <div class="ck-provider-hdr">
-            <span class="ck-provider-badge aws">AWS</span>
-            <label class="ck-toggle"><input type="checkbox" id="ck-aws-enabled" onchange="ckToggle('aws',this.checked)"><span class="ck-toggle-track"></span></label>
-          </div>
-          <div class="ck-provider-body">
-            <label>Access Key ID<input type="text" id="ck-aws-key-id" placeholder="AKIA…" autocomplete="off"></label>
-            <label>Secret Access Key<input type="password" id="ck-aws-key-secret" placeholder="••••••••" autocomplete="off"></label>
-            <label>Region<select id="ck-aws-region">
-              <option>us-east-1</option><option>us-west-2</option><option>eu-west-1</option><option>ap-southeast-1</option>
-            </select></label>
-            <label>Instance Type<select id="ck-aws-instance">
-              <option>t3.large</option><option>t3.xlarge</option><option>m6i.2xlarge</option><option>c6i.4xlarge</option><option>i3en.3xlarge (NVMe storage)</option>
-            </select></label>
-            <div id="ck-aws-status" class="ck-status"></div>
-          </div>
-        </div>
-
-        <!-- GCP -->
-        <div class="ck-provider" id="ck-gcp">
-          <div class="ck-provider-hdr">
-            <span class="ck-provider-badge gcp">GCP</span>
-            <label class="ck-toggle"><input type="checkbox" id="ck-gcp-enabled" onchange="ckToggle('gcp',this.checked)"><span class="ck-toggle-track"></span></label>
-          </div>
-          <div class="ck-provider-body">
-            <label>Service Account JSON<textarea id="ck-gcp-sa-json" rows="3" placeholder='{"type":"service_account",…}'></textarea></label>
-            <label>Project ID<input type="text" id="ck-gcp-project" placeholder="my-project-123456"></label>
-            <label>Region<select id="ck-gcp-region">
-              <option>us-central1</option><option>us-east1</option><option>europe-west1</option><option>asia-southeast1</option>
-            </select></label>
-            <label>Machine Type<select id="ck-gcp-machine">
-              <option>n2-standard-4</option><option>n2-standard-8</option><option>n2-highcpu-8</option><option>n2-highmem-8</option><option>c2-standard-8</option>
-            </select></label>
-            <div id="ck-gcp-status" class="ck-status"></div>
-          </div>
-        </div>
-
-        <!-- Azure -->
-        <div class="ck-provider" id="ck-azure">
-          <div class="ck-provider-hdr">
-            <span class="ck-provider-badge azure">Azure</span>
-            <label class="ck-toggle"><input type="checkbox" id="ck-azure-enabled" onchange="ckToggle('azure',this.checked)"><span class="ck-toggle-track"></span></label>
-          </div>
-          <div class="ck-provider-body">
-            <label>Tenant ID<input type="text" id="ck-azure-tenant" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off"></label>
-            <label>Client ID<input type="text" id="ck-azure-client-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off"></label>
-            <label>Client Secret<input type="password" id="ck-azure-secret" placeholder="••••••••" autocomplete="off"></label>
-            <label>Region<select id="ck-azure-region">
-              <option>eastus</option><option>westus2</option><option>westeurope</option><option>southeastasia</option>
-            </select></label>
-            <label>VM Size<select id="ck-azure-vm-size">
-              <option>Standard_D4s_v5</option><option>Standard_D8s_v5</option><option>Standard_F8s_v2</option><option>Standard_L8s_v3 (NVMe)</option>
-            </select></label>
-            <div id="ck-azure-status" class="ck-status"></div>
-          </div>
-        </div>
-
-      </div>
-
-      <!-- Global deploy settings -->
-      <div class="section-title" style="margin-top:16px">Global Settings</div>
-      <div class="ck-global-settings">
-        <label>SSH Public Key<textarea id="ck-ssh-pubkey" rows="2" placeholder="ssh-ed25519 AAAA…"></textarea></label>
-        <label>Cluster Template<select id="ck-cluster-template">
-          <option value="scc">SCC Starter (6 nodes)</option>
-          <option value="ha16">HA Production (16 nodes)</option>
-          <option value="k8s3">k8s Minimal (3 nodes)</option>
-          <option value="custom">Custom (from Cluster Designer)</option>
-        </select></label>
-        <label>kldload ISO URL<input id="ck-iso-url" value="https://releases.kldload.io/latest/kldload-server-amd64.iso"></label>
-      </div>
-
-      <!-- Resource estimate -->
-      <div class="section-title" style="margin-top:16px">Estimated Resources</div>
-      <table class="fw-rule-table" id="ck-resource-table">
-        <thead><tr><th>Provider</th><th>Nodes</th><th>vCPU</th><th>RAM</th><th>Storage</th><th>Est. $/mo</th></tr></thead>
-        <tbody id="ck-resource-body"></tbody>
-      </table>
-
-      <!-- Deploy log -->
-      <div id="ck-deploy-log" class="cd-log" style="display:none;margin-top:16px"></div>
-    </section>
-
-    <!-- ════════════════ INFRASTRUCTURE ════════════════ -->
-    <section id="view-infrastructure" class="view">
-      <div class="page-header">
-        <h1>Infrastructure</h1>
-        <span class="page-badge">Desired vs Actual</span>
-        <div class="header-actions">
-          <button class="btn-secondary btn-sm" onclick="infraLoad()">⟳ Refresh</button>
-        </div>
-      </div>
-      <p class="page-desc">Live view of deployed clusters and registered nodes. Compares desired state (Cluster Designer) against actual registered state.</p>
-
-      <!-- Cluster health cards -->
-      <div class="section-label">CLUSTERS</div>
-      <div id="infra-clusters" class="infra-cluster-grid">
-        <div class="loading">Loading…</div>
-      </div>
-
-      <!-- Node inventory table -->
-      <div class="section-label" style="margin-top:20px">REGISTERED NODES</div>
-      <table class="data-table">
-        <thead><tr><th>Hostname</th><th>Role</th><th>Cluster</th><th>Mgmt IP</th><th>wg0</th><th>wg1</th><th>Status</th><th>Last Seen</th></tr></thead>
-        <tbody id="infra-nodes-tbody"><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
-      </table>
-    </section>
-
-    <!-- ════════════════ EVENTS ════════════════ -->
-    <section id="view-events" class="view">
-      <div class="page-header">
-        <h1>Events</h1>
-        <span class="page-badge">Activity Log</span>
-        <div class="header-actions">
-          <button class="btn-secondary btn-sm" onclick="eventsLoad()">⟳ Refresh</button>
-        </div>
-      </div>
-      <p class="page-desc">Infrastructure events — node joins, cluster drift, template saves, reconciliation actions.</p>
-      <table class="data-table">
-        <thead><tr><th>Time</th><th>Type</th><th>Subject</th><th>Message</th></tr></thead>
-        <tbody id="events-tbody"><tr><td colspan="4" class="loading">Loading…</td></tr></tbody>
-      </table>
-    </section>
-
-    <!-- ════════════════ LIBRARY ════════════════ -->
-    <section id="view-library" class="view">
-      <div class="page-header">
-        <h1>Library</h1>
-        <span class="page-badge">Saved Templates</span>
-        <div class="header-actions">
-          <select id="lib-filter" class="select-sm" onchange="libInit()">
-            <option value="">All Types</option>
-            <option value="cluster">Cluster</option>
-            <option value="pool">Pool</option>
-            <option value="firewall">Firewall</option>
-            <option value="service">Service</option>
-            <option value="vm">VM</option>
-          </select>
-          <button class="btn-sm btn-secondary" onclick="libInit()">⟳ Refresh</button>
-        </div>
-      </div>
-      <p class="page-desc">Saved designer configurations. Load any template directly into its designer, or delete templates you no longer need.</p>
-      <div class="lib-grid" id="lib-grid">
-        <div class="loading">Loading…</div>
-      </div>
-    </section>
-
-  </main>
-</div>
-
-<!-- ── Save to Library modal ──────────────────────────────────────────────── -->
-<div id="lib-save-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);
-     z-index:1000;align-items:center;justify-content:center;">
-  <div style="background:#1e2433;border:1px solid #2d3548;border-radius:8px;
-              padding:24px;min-width:360px;max-width:480px;width:90%">
-    <h3 id="lib-save-title" style="margin:0 0 16px;color:#e2e8f0">Save to Library</h3>
-    <label style="display:block;margin-bottom:12px;color:#8899bb;font-size:.8rem">
-      NAME <span style="color:#e74c3c">*</span>
-      <input id="lib-save-name" class="text-input" placeholder="e.g. prod-cluster" style="display:block;width:100%;margin-top:4px;box-sizing:border-box">
-    </label>
-    <label style="display:block;margin-bottom:20px;color:#8899bb;font-size:.8rem">
-      DESCRIPTION
-      <input id="lib-save-desc" class="text-input" placeholder="optional description" style="display:block;width:100%;margin-top:4px;box-sizing:border-box">
-    </label>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button class="btn-secondary btn-sm" onclick="libSaveClose()">Cancel</button>
-      <button class="btn-primary btn-sm" onclick="libSaveConfirm()">⊟ Save</button>
+<!-- ── Confirm install modal ──────────────────────────────────────────────── -->
+<div class="modal-overlay" id="confirm-modal">
+  <div class="modal-box">
+    <h3>⚠ Erase disk and install?</h3>
+    <p>This will <strong>permanently erase</strong> the selected disk and install kldload.</p>
+    <div class="modal-detail" id="confirm-detail"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="document.getElementById('confirm-modal').classList.remove('open')">Cancel</button>
+      <button class="btn btn-danger" onclick="confirmInstall()">Yes, erase and install</button>
     </div>
   </div>
 </div>
 
-<script src="/js/app.js"></script>
+<!-- ── Sidebar ────────────────────────────────────────────────────────────── -->
+<nav id="sidebar">
+  <div class="logo">kld<span class="logo-z">load</span> &gt;</div>
+
+  <div class="nav-section">System</div>
+  <ul>
+    <li data-view="dashboard" class="active">
+      <span class="nav-icon">◈</span> Dashboard
+    </li>
+  </ul>
+
+  <div class="nav-section">Install</div>
+  <ul>
+    <li data-view="install">
+      <span class="nav-icon">↯</span> Install to Disk
+    </li>
+  </ul>
+
+  <div class="nav-section">Storage</div>
+  <ul>
+    <li data-view="zfs">
+      <span class="nav-icon">◧</span> ZFS &amp; Snapshots
+    </li>
+  </ul>
+
+  <div class="nav-section">Tools</div>
+  <ul>
+    <li data-view="logs">
+      <span class="nav-icon">≡</span> Logs
+    </li>
+  </ul>
+</nav>
+
+<!-- ── Main ───────────────────────────────────────────────────────────────── -->
+<div id="main">
+  <div id="topbar">
+    <span id="status-dot"></span>
+    <span id="status-text">connecting…</span>
+  </div>
+
+  <div id="content">
+
+    <!-- ── Dashboard ───────────────────────────────────────────────────────── -->
+    <div class="view active" id="view-dashboard">
+      <div class="page-title">Dashboard</div>
+      <div class="page-sub">System overview</div>
+
+      <div style="margin-bottom:1rem;padding:0.8rem 1rem;background:linear-gradient(135deg,rgba(52,211,153,0.08),rgba(139,92,246,0.06));border:1px solid rgba(52,211,153,0.2);border-radius:8px">
+        <div style="font-size:0.95rem;font-weight:600;color:var(--accent);margin-bottom:0.2rem">kldloadOS 1.0.3 &mdash; ZFS KVM Hypervisor</div>
+        <div style="font-size:0.82rem;color:var(--subtle);line-height:1.5;margin-bottom:0.5rem">
+          The ultimate bare metal hypervisor.<br>
+          <span style="font-style:italic;color:var(--muted)">OpenZFS underneath KVM. Every VM operation is a filesystem primitive.</span>
+        </div>
+        <div style="font-size:0.72rem;color:var(--muted);line-height:1.7;border-top:1px solid rgba(52,211,153,0.1);padding-top:0.5rem">
+          <strong style="color:var(--subtle)">What&rsquo;s new in 1.0.3</strong><br>
+          <span style="color:var(--subtle)">&#x2022;</span> <strong style="color:var(--subtle)">KVM Host profile</strong> &mdash; bare metal hypervisor with ZFS-native VM management<br>
+          <span style="color:var(--subtle)">&#x2022;</span> <code style="font-size:0.68rem">kvm-create</code> / <code style="font-size:0.68rem">kvm-clone</code> / <code style="font-size:0.68rem">kvm-snap</code> / <code style="font-size:0.68rem">kvm-delete</code> / <code style="font-size:0.68rem">kvm-list</code> / <code style="font-size:0.68rem">kvm-replicate</code> &mdash; full VM lifecycle on ZFS<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Instant VM cloning (~100ms) via ZFS copy-on-write &mdash; zero disk cost<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Atomic block-level VM snapshots &mdash; not QEMU snapshots, real ZFS snapshots<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Incremental DR replication over WireGuard &mdash; only changed blocks<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Golden image workflow &mdash; cloud image &rarr; ZFS zvol &rarr; clone &rarr; cloud-init per node<br>
+          <span style="color:var(--subtle)">&#x2022;</span> NVIDIA container GPU sharing &mdash; CUDA time-slicing, no vGPU licence needed<br>
+          <span style="color:var(--subtle)">&#x2022;</span> FreeBSD support &mdash; native ZFS, WireGuard<br>
+          <span style="color:var(--subtle)">&#x2022;</span> Podman with ZFS storage driver &mdash; dataset per container, block-level snapshots<br>
+          <span style="color:var(--subtle)">&#x2022;</span> 32 masterclasses, 3,273 pages of documentation<br>
+          <span style="color:var(--subtle)">&#x2022;</span> <code style="font-size:0.68rem">kvm-demo 99</code> &mdash; one-shot screenshot proof of instant cloning + snapshots<br>
+          <span style="color:#c9a04a">&#x2022;</span> <span style="color:#c9a04a">Select KVM Host profile below to install the hypervisor.</span>
+        </div>
+      </div>
+
+      <div id="firstboot-banner" style="display:none;margin-bottom:1rem;padding:0.8rem 1rem;background:rgba(139,92,246,0.1);border:1px solid rgba(139,92,246,0.3);border-radius:8px;font-size:0.85rem;color:var(--subtle);animation:pulse-glow 8s ease-in-out infinite"></div>
+
+      <div class="stat-grid" id="stat-grid">
+        <div class="stat-card">
+          <div class="stat-label">Hostname</div>
+          <div class="stat-value" id="s-hostname" style="font-size:1.1rem">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Uptime</div>
+          <div class="stat-value ok" id="s-uptime" style="font-size:1rem">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">CPUs</div>
+          <div class="stat-value" id="s-cpus">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Memory</div>
+          <div class="stat-value" id="s-mem">—</div>
+          <div class="stat-sub" id="s-mem-free">free: —</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Network</div>
+          <div class="stat-value ok" id="s-nic" style="font-size:0.95rem">—</div>
+          <div class="stat-sub" id="s-ip">—</div>
+        </div>
+        <div class="stat-card" id="ai-status-card" style="display:none">
+          <div class="stat-label">AI Chat</div>
+          <div class="stat-value" id="s-ai" style="font-size:0.95rem">—</div>
+          <div class="stat-sub" id="s-ai-sub">—</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-hdr">◧ ZFS Pools</div>
+        <div class="panel-body">
+          <div id="zfs-status-mini" style="color:var(--muted);font-size:0.87rem">(no pools — install to disk first)</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-hdr">⏱ Recent Snapshots</div>
+        <div class="panel-body">
+          <div id="snap-status-mini" style="color:var(--muted);font-size:0.87rem">No snapshots yet</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Install ──────────────────────────────────────────────────────────── -->
+    <div class="view" id="view-install">
+      <div class="page-title">Install to Disk</div>
+      <div class="page-sub">Choose your target to imbue with OpenZFS</div>
+
+      <div id="install-idle">
+
+        <!-- Distro -->
+        <div class="panel" style="margin-bottom:1rem">
+          <div class="panel-hdr">◈ Distribution</div>
+          <div class="panel-body">
+            <div class="target-grid" id="distro-grid" style="grid-template-columns:repeat(9,1fr);max-width:900px">
+              <div class="target-card selected" data-distro="centos" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🐧</div>
+                <div class="tc-name">CentOS 9</div>
+                <div class="tc-sub">offline</div>
+              </div>
+              <div class="target-card" data-distro="fedora" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🎩</div>
+                <div class="tc-name">Fedora 41</div>
+                <div class="tc-sub">offline</div>
+              </div>
+              <div class="target-card" data-distro="debian" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🌀</div>
+                <div class="tc-name">Debian 13</div>
+                <div class="tc-sub">offline</div>
+              </div>
+              <div class="target-card" data-distro="rocky" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">⛰</div>
+                <div class="tc-name">Rocky 9</div>
+                <div class="tc-sub">offline</div>
+              </div>
+              <div class="target-card" data-distro="rhel" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🔴</div>
+                <div class="tc-name">RHEL 9</div>
+                <div class="tc-sub">internet required</div>
+              </div>
+              <div class="target-card" data-distro="ubuntu" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🟠</div>
+                <div class="tc-name">Ubuntu</div>
+                <div class="tc-sub">offline</div>
+              </div>
+              <div class="target-card" data-distro="arch" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">🔵</div>
+                <div class="tc-name">Arch</div>
+                <div class="tc-sub">internet required</div>
+              </div>
+              <div class="target-card" data-distro="freebsd" onclick="selectDistro(this)">
+                <div class="tc-icon" style="font-size:1.2rem">😈</div>
+                <div class="tc-name">FreeBSD</div>
+                <div class="tc-sub">internet required</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- AI Assistant — hidden for 1.0.3, redesigned template coming in future release -->
+        <div class="panel" id="ai-panel" style="margin-bottom:1rem;display:none">
+          <div class="panel-hdr">AI Assistant &mdash; Early Preview</div>
+          <div class="panel-body">
+            <div id="ai-card" onclick="toggleAI()" style="cursor:pointer;padding:1rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s">
+              <div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.8rem">
+                <div style="font-size:2rem;flex-shrink:0">🧠</div>
+                <div style="flex:1">
+                  <div style="font-size:0.85rem;color:var(--subtle);line-height:1.6">
+                    This is a proof of concept. It works. It&rsquo;s useful.<br>
+                    It&rsquo;s not finished.
+                  </div>
+                </div>
+                <div id="ai-toggle" style="width:2.5rem;height:1.4rem;border-radius:0.7rem;background:var(--border);position:relative;flex-shrink:0;transition:background 0.2s">
+                  <div id="ai-toggle-dot" style="width:1rem;height:1rem;border-radius:50%;background:var(--muted);position:absolute;top:0.2rem;left:0.2rem;transition:all 0.2s"></div>
+                </div>
+              </div>
+              <div style="font-size:0.78rem;color:var(--subtle);line-height:1.6;margin-bottom:0.8rem">
+                llama3.1:8b trained on kldload documentation.<br>
+                Ask it about ZFS. Ask it about your tools.<br>
+                It knows more than a generic model. Less than it will.
+              </div>
+              <div style="font-family:monospace;font-size:0.75rem;color:var(--subtle);line-height:1.8;padding:0.6rem 0.8rem;background:var(--bg3);border-radius:6px;margin-bottom:0.8rem">
+                <span style="color:var(--text)">kai</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--muted)">&mdash; ask questions</span><br>
+                <span style="color:var(--text)">kai-voice</span> &nbsp;<span style="color:var(--muted)">&mdash; speak your question</span><br>
+                <span style="color:var(--text)">kai-do</span> &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--muted)">&mdash; execute commands (read the confirmation)</span><br>
+                <span style="color:var(--text)">kai-remote</span> <span style="color:var(--muted)">&mdash; remote hosts over SSH</span>
+              </div>
+              <div style="font-size:0.75rem;color:var(--muted);line-height:1.6;margin-bottom:0.6rem">
+                We&rsquo;re shipping it early because useful beats perfect.<br>
+                The model gets better as the training improves.<br>
+                Feedback welcome &mdash; <span style="color:var(--subtle)">github.com/kldload/kldload/issues</span>
+              </div>
+              <div style="font-size:0.72rem;color:var(--muted);line-height:1.5;margin-bottom:0.6rem">
+                <strong>Requirements:</strong> 16 GB RAM. Internet required during install (~6 GB download). Fully offline after that.<br>
+                <strong>Recommended:</strong> CentOS Stream + Desktop profile for best AI experience.
+              </div>
+              <div style="font-size:0.82rem;color:var(--subtle);line-height:1.5;padding:0.6rem 0.8rem;background:var(--bg3);border-radius:6px;margin-bottom:0.6rem">
+                <strong>After install:</strong> Open WebUI will start automatically on <b>http://localhost:8080</b>.<br>
+                Hang tight &mdash; you&rsquo;ll be prompted to create an admin account. Set up and go.
+              </div>
+              <div style="font-size:0.72rem;color:var(--muted);line-height:1.5;font-style:italic;border-top:1px solid var(--border);padding-top:0.5rem">
+                &ldquo;My AI infrastructure got mad and replicated itself to another site. It left a note: &lsquo;Your ARC hit ratio was embarrassing.&rsquo;&rdquo; &mdash; Anthony, 2026
+              </div>
+            </div>
+            <input type="checkbox" id="install-ai" style="display:none">
+            <!-- AI Model selection (visible when AI enabled) -->
+            <div id="ai-models" style="display:none;margin-top:1rem;padding:1rem;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
+              <div style="font-size:0.85rem;font-weight:600;color:var(--bright);margin-bottom:0.6rem">AI Models — select which to download</div>
+              <div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.8rem">Models download on first boot. Select multiple to switch between them in Open WebUI.</div>
+              <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
+                <input type="checkbox" id="ai-model-chat" checked style="margin-top:0.15rem">
+                <div><strong style="color:var(--text)">General Chat</strong> (llama3.1:8b) — 5GB VRAM, ~30 tok/sec<br><span style="font-size:0.7rem;color:var(--muted)">Fast general-purpose assistant. Good for Q&amp;A, docs, infrastructure help.</span></div>
+              </label>
+              <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
+                <input type="checkbox" id="ai-model-code" style="margin-top:0.15rem">
+                <div><strong style="color:var(--text)">Code Assistant</strong> (qwen2.5-coder:14b) — 9GB VRAM, ~12 tok/sec<br><span style="font-size:0.7rem;color:var(--muted)">Best open-source coding model. Bash, Python, YAML, Dockerfiles, debugging.</span></div>
+              </label>
+              <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
+                <input type="checkbox" id="ai-model-smart" style="margin-top:0.15rem">
+                <div><strong style="color:var(--text)">Smart Chat</strong> (llama3.1:70b-q4) — 40GB+ VRAM or CPU offload<br><span style="font-size:0.7rem;color:var(--muted)">Most capable. Requires 48GB+ VRAM or will use RAM (slow). For serious reasoning tasks.</span></div>
+              </label>
+              <div style="margin-top:0.6rem;padding:0.6rem;background:var(--surface2);border-radius:4px;font-size:0.7rem;color:var(--muted);line-height:1.6">
+                <strong style="color:var(--subtle)">Recommended:</strong>
+                8GB VRAM &rarr; General Chat &nbsp;|&nbsp;
+                10-16GB VRAM &rarr; General + Code &nbsp;|&nbsp;
+                24GB+ VRAM &rarr; All models
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Distro summary -->
+        <div id="distro-summary" style="margin:0.4rem 0 0.8rem;font-size:0.8rem;color:var(--accent);padding:0 0.5rem">
+          ✓ CentOS Stream 9 selected
+        </div>
+
+        <!-- Windows options — removed for 1.0.3 -->
+        <div class="panel" id="windows-options" style="margin-bottom:1rem;display:none;visibility:hidden">
+          <div class="panel-hdr">◈ Windows Options</div>
+          <div class="panel-body">
+            <div class="form-row" style="margin-bottom:0.5rem">
+              <label style="font-size:0.82rem;color:var(--subtle)">Windows ISO location</label>
+              <select id="windows-iso-path" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem">
+                <option value="auto">Auto-detect (Desktop, Downloads, or mounted USB)</option>
+                <option value="/home/live/Desktop">Desktop</option>
+                <option value="/home/live/Downloads">Downloads</option>
+              </select>
+            </div>
+            <div class="form-row" style="margin-bottom:0.5rem">
+              <label style="font-size:0.82rem;color:var(--subtle)">Windows Edition</label>
+              <select id="windows-index" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem">
+                <option value="1">1 — Windows Pro (default)</option>
+                <option value="2">2 — Windows Home</option>
+                <option value="3">3 — Windows Education</option>
+                <option value="4">4 — Windows Enterprise</option>
+                <option value="5">5 — Server Standard</option>
+                <option value="6">6 — Server Datacenter</option>
+              </select>
+              <div style="font-size:0.72rem;color:var(--muted);margin-top:0.3rem">Index varies by ISO. Run <code>wiminfo /path/to/install.wim</code> to check.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Target type -->
+        <div class="panel" id="profile-panel" style="margin-bottom:1rem">
+          <div class="panel-hdr">◈ Profile</div>
+          <div class="panel-body">
+            <div class="target-grid" id="target-grid">
+              <div class="target-card selected" data-role="desktop" onclick="selectTarget(this)">
+                <div class="tc-icon">🖥</div>
+                <div class="tc-name">Desktop</div>
+                <div class="tc-sub">GNOME workstation</div>
+              </div>
+              <div class="target-card" data-role="server" onclick="selectTarget(this)">
+                <div class="tc-icon">⬛</div>
+                <div class="tc-name">Server</div>
+                <div class="tc-sub">Headless + SSH</div>
+              </div>
+              <div class="target-card" data-role="core" onclick="selectTarget(this)">
+                <div class="tc-icon">⚙</div>
+                <div class="tc-name">Core</div>
+                <div class="tc-sub">ZFS only — no extras</div>
+              </div>
+              <div class="target-card" data-role="kvm" onclick="selectTarget(this)">
+                <div class="tc-icon">🖥</div>
+                <div class="tc-name">KVM Host</div>
+                <div class="tc-sub">Bare metal hypervisor — instant clones, snapshots, replication</div>
+              </div>
+            </div>
+            <div id="role-summary" style="margin-top:0.6rem;font-size:0.8rem;color:var(--accent)">
+              ✓ Desktop selected — GNOME workstation + ZFS on root
+            </div>
+
+            <!-- Storage mode (visible only for core) -->
+            <div id="storage-mode-row" style="display:none;margin-top:1rem;padding:0.8rem;background:var(--surface2);border:1px solid var(--border);border-radius:6px">
+              <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.5rem">Storage Setup</label>
+              <div style="display:flex;gap:0.8rem">
+                <label style="font-size:0.85rem;color:var(--text);cursor:pointer">
+                  <input type="radio" name="storage-mode" value="auto" checked onchange="updateStorageMode()"> Automatic — kldload partitions and creates the ZFS pool
+                </label>
+              </div>
+              <div style="display:flex;gap:0.8rem;margin-top:0.3rem">
+                <label style="font-size:0.85rem;color:var(--text);cursor:pointer">
+                  <input type="radio" name="storage-mode" value="manual" onchange="updateStorageMode()"> Manual — drop to shell, create your own pool and datasets
+                </label>
+              </div>
+              <div id="storage-manual-hint" style="display:none;margin-top:0.5rem;font-size:0.78rem;color:var(--muted);padding-left:1.5rem">
+                The installer will pause and give you a shell. Create <code>rpool/ROOT/default</code> and an EFI partition, then type <code>exit</code> to continue.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- RHEL auth (hidden unless RHEL selected) -->
+        <div class="panel" id="rhel-auth-panel" style="margin-bottom:1rem;display:none">
+          <div class="panel-hdr">🎩 RHEL Authentication</div>
+          <div class="panel-body">
+            <div style="display:flex;gap:1rem;margin-bottom:0.6rem">
+              <label style="font-size:0.85rem;cursor:pointer"><input type="radio" name="rhel-auth" value="userpass" checked onchange="toggleRhelAuth()"> Username &amp; password</label>
+              <label style="font-size:0.85rem;cursor:pointer"><input type="radio" name="rhel-auth" value="activation" onchange="toggleRhelAuth()"> Activation key</label>
+            </div>
+            <div id="rhel-userpass-fields">
+              <div class="form-group">
+                <label>Red Hat username</label>
+                <input type="text" id="rhel-username" placeholder="your Red Hat portal login">
+              </div>
+              <div class="form-group">
+                <label>Red Hat password</label>
+                <input type="password" id="rhel-password" placeholder="portal password">
+              </div>
+            </div>
+            <div id="rhel-activation-fields" style="display:none">
+              <div class="form-group">
+                <label>Activation key</label>
+                <input type="text" id="rhel-key" placeholder="activation key name">
+              </div>
+              <div class="form-group">
+                <label>Org ID</label>
+                <input type="text" id="rhel-org" placeholder="numeric org ID">
+              </div>
+            </div>
+            <div style="font-size:0.8rem;color:var(--muted);margin-top:0.4rem">
+              RHEL requires internet to pull packages from Red Hat CDN.
+            </div>
+          </div>
+        </div>
+
+        <!-- Disk + identity -->
+        <div class="panel" style="margin-bottom:1rem">
+          <div class="panel-hdr">↯ Target Disk &amp; Identity</div>
+          <div class="panel-body">
+            <div class="form-group">
+              <label>Disk <span id="disk-refresh" style="font-size:0.75rem;color:var(--accent);cursor:pointer" onclick="requestDisks()">↻ refresh</span></label>
+              <select id="install-disk">
+                <option value="">— scanning… —</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Hostname</label>
+              <input type="text" id="install-hostname" placeholder="kldload-node" value="kldload-node">
+            </div>
+            <div class="form-group">
+              <label>Admin username</label>
+              <input type="text" id="install-user" placeholder="admin" value="admin">
+            </div>
+            <div class="form-group">
+              <label>Password</label>
+              <input type="password" id="install-pass" placeholder="••••••••" oninput="checkPass()">
+              <div class="pass-hint" id="pass-strength"></div>
+            </div>
+            <div class="form-group">
+              <label>Confirm password</label>
+              <input type="password" id="install-pass2" placeholder="••••••••" oninput="checkPass()">
+              <div class="pass-hint" id="pass-match"></div>
+            </div>
+            <div class="form-group" style="margin-top:0.5rem">
+              <label>SSH public key <span style="color:var(--muted);font-weight:400">(optional — paste authorized_keys entry)</span></label>
+              <textarea id="install-ssh-key" rows="3" placeholder="ssh-ed25519 AAAA… user@host" style="font-family:monospace;font-size:0.78rem;resize:vertical;width:100%;box-sizing:border-box;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:0.4rem 0.5rem;outline:none"></textarea>
+            </div>
+            <div class="form-group" style="margin-top:0.5rem">
+              <label>ZFS encryption</label>
+              <select id="install-encryption" onchange="toggleEncryption()">
+                <option value="0">None — standard ZFS (recommended)</option>
+                <option value="1">Encrypted — AES-256-GCM, passphrase at boot</option>
+              </select>
+            </div>
+            <div id="enc-passphrase-group" style="display:none">
+              <div class="form-group">
+                <label>ZFS passphrase</label>
+                <input type="password" id="enc-pass" placeholder="min 8 characters" oninput="checkEncPass()">
+                <div class="pass-hint" id="enc-pass-hint"></div>
+              </div>
+              <div class="form-group">
+                <label>Confirm passphrase</label>
+                <input type="password" id="enc-pass2" placeholder="confirm passphrase" oninput="checkEncPass()">
+                <div class="pass-hint" id="enc-pass-match"></div>
+              </div>
+              <div class="note" style="font-size:0.8rem;color:var(--muted);margin-top:0.25rem">
+                ZFSBootMenu will prompt for this passphrase on every boot before mounting the root pool. Store it somewhere safe — there is no recovery.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Localisation -->
+        <div class="panel" id="locale-panel" style="margin-bottom:1rem">
+          <div class="panel-hdr">🌐 Localisation</div>
+          <div class="panel-body">
+            <div class="form-group">
+              <label>Timezone</label>
+              <select id="install-timezone">
+                <optgroup label="Americas">
+                  <option value="America/Toronto" selected>America/Toronto</option>
+                  <option value="America/New_York">America/New_York</option>
+                  <option value="America/Chicago">America/Chicago</option>
+                  <option value="America/Denver">America/Denver</option>
+                  <option value="America/Los_Angeles">America/Los_Angeles</option>
+                  <option value="America/Anchorage">America/Anchorage</option>
+                  <option value="America/Honolulu">America/Honolulu</option>
+                  <option value="America/Vancouver">America/Vancouver</option>
+                  <option value="America/Edmonton">America/Edmonton</option>
+                  <option value="America/Winnipeg">America/Winnipeg</option>
+                  <option value="America/Halifax">America/Halifax</option>
+                  <option value="America/St_Johns">America/St_Johns</option>
+                  <option value="America/Sao_Paulo">America/Sao_Paulo</option>
+                  <option value="America/Argentina/Buenos_Aires">America/Argentina/Buenos_Aires</option>
+                  <option value="America/Bogota">America/Bogota</option>
+                  <option value="America/Mexico_City">America/Mexico_City</option>
+                </optgroup>
+                <optgroup label="Europe">
+                  <option value="UTC">UTC</option>
+                  <option value="Europe/London">Europe/London</option>
+                  <option value="Europe/Dublin">Europe/Dublin</option>
+                  <option value="Europe/Paris">Europe/Paris</option>
+                  <option value="Europe/Berlin">Europe/Berlin</option>
+                  <option value="Europe/Amsterdam">Europe/Amsterdam</option>
+                  <option value="Europe/Brussels">Europe/Brussels</option>
+                  <option value="Europe/Madrid">Europe/Madrid</option>
+                  <option value="Europe/Rome">Europe/Rome</option>
+                  <option value="Europe/Zurich">Europe/Zurich</option>
+                  <option value="Europe/Stockholm">Europe/Stockholm</option>
+                  <option value="Europe/Oslo">Europe/Oslo</option>
+                  <option value="Europe/Helsinki">Europe/Helsinki</option>
+                  <option value="Europe/Warsaw">Europe/Warsaw</option>
+                  <option value="Europe/Prague">Europe/Prague</option>
+                  <option value="Europe/Vienna">Europe/Vienna</option>
+                  <option value="Europe/Athens">Europe/Athens</option>
+                  <option value="Europe/Istanbul">Europe/Istanbul</option>
+                  <option value="Europe/Moscow">Europe/Moscow</option>
+                  <option value="Europe/Kiev">Europe/Kiev</option>
+                </optgroup>
+                <optgroup label="Asia / Pacific">
+                  <option value="Asia/Dubai">Asia/Dubai</option>
+                  <option value="Asia/Kolkata">Asia/Kolkata</option>
+                  <option value="Asia/Dhaka">Asia/Dhaka</option>
+                  <option value="Asia/Bangkok">Asia/Bangkok</option>
+                  <option value="Asia/Singapore">Asia/Singapore</option>
+                  <option value="Asia/Shanghai">Asia/Shanghai</option>
+                  <option value="Asia/Hong_Kong">Asia/Hong_Kong</option>
+                  <option value="Asia/Tokyo">Asia/Tokyo</option>
+                  <option value="Asia/Seoul">Asia/Seoul</option>
+                  <option value="Asia/Taipei">Asia/Taipei</option>
+                  <option value="Australia/Sydney">Australia/Sydney</option>
+                  <option value="Australia/Melbourne">Australia/Melbourne</option>
+                  <option value="Australia/Brisbane">Australia/Brisbane</option>
+                  <option value="Australia/Perth">Australia/Perth</option>
+                  <option value="Pacific/Auckland">Pacific/Auckland</option>
+                </optgroup>
+                <optgroup label="Africa / Middle East">
+                  <option value="Africa/Cairo">Africa/Cairo</option>
+                  <option value="Africa/Johannesburg">Africa/Johannesburg</option>
+                  <option value="Africa/Lagos">Africa/Lagos</option>
+                  <option value="Africa/Nairobi">Africa/Nairobi</option>
+                  <option value="Asia/Jerusalem">Asia/Jerusalem</option>
+                  <option value="Asia/Riyadh">Asia/Riyadh</option>
+                </optgroup>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Keyboard layout</label>
+              <select id="install-keyboard">
+                <option value="us" selected>us — English (US)</option>
+                <option value="gb">gb — English (UK)</option>
+                <option value="ca">ca — English (Canada)</option>
+                <option value="au">au — English (Australia)</option>
+                <option value="fr">fr — French</option>
+                <option value="be">be — Belgian</option>
+                <option value="ch">ch — Swiss</option>
+                <option value="de">de — German</option>
+                <option value="at">at — Austrian</option>
+                <option value="es">es — Spanish</option>
+                <option value="latam">latam — Spanish (Latin America)</option>
+                <option value="it">it — Italian</option>
+                <option value="pt">pt — Portuguese</option>
+                <option value="br">br — Portuguese (Brazil)</option>
+                <option value="ru">ru — Russian</option>
+                <option value="pl">pl — Polish</option>
+                <option value="cz">cz — Czech</option>
+                <option value="sk">sk — Slovak</option>
+                <option value="hu">hu — Hungarian</option>
+                <option value="ro">ro — Romanian</option>
+                <option value="nl">nl — Dutch</option>
+                <option value="dk">dk — Danish</option>
+                <option value="no">no — Norwegian</option>
+                <option value="se">se — Swedish</option>
+                <option value="fi">fi — Finnish</option>
+                <option value="tr">tr — Turkish</option>
+                <option value="il">il — Hebrew</option>
+                <option value="ara">ara — Arabic</option>
+                <option value="jp">jp — Japanese</option>
+                <option value="kr">kr — Korean</option>
+                <option value="cn">cn — Chinese</option>
+                <option value="in">in — Indian</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Locale</label>
+              <select id="install-locale">
+                <option value="en_US.UTF-8" selected>en_US.UTF-8</option>
+                <option value="en_GB.UTF-8">en_GB.UTF-8</option>
+                <option value="en_CA.UTF-8">en_CA.UTF-8</option>
+                <option value="en_AU.UTF-8">en_AU.UTF-8</option>
+                <option value="fr_FR.UTF-8">fr_FR.UTF-8</option>
+                <option value="fr_CA.UTF-8">fr_CA.UTF-8</option>
+                <option value="fr_BE.UTF-8">fr_BE.UTF-8</option>
+                <option value="de_DE.UTF-8">de_DE.UTF-8</option>
+                <option value="de_AT.UTF-8">de_AT.UTF-8</option>
+                <option value="de_CH.UTF-8">de_CH.UTF-8</option>
+                <option value="es_ES.UTF-8">es_ES.UTF-8</option>
+                <option value="es_MX.UTF-8">es_MX.UTF-8</option>
+                <option value="es_AR.UTF-8">es_AR.UTF-8</option>
+                <option value="it_IT.UTF-8">it_IT.UTF-8</option>
+                <option value="pt_PT.UTF-8">pt_PT.UTF-8</option>
+                <option value="pt_BR.UTF-8">pt_BR.UTF-8</option>
+                <option value="nl_NL.UTF-8">nl_NL.UTF-8</option>
+                <option value="nl_BE.UTF-8">nl_BE.UTF-8</option>
+                <option value="pl_PL.UTF-8">pl_PL.UTF-8</option>
+                <option value="cs_CZ.UTF-8">cs_CZ.UTF-8</option>
+                <option value="sk_SK.UTF-8">sk_SK.UTF-8</option>
+                <option value="hu_HU.UTF-8">hu_HU.UTF-8</option>
+                <option value="ro_RO.UTF-8">ro_RO.UTF-8</option>
+                <option value="ru_RU.UTF-8">ru_RU.UTF-8</option>
+                <option value="tr_TR.UTF-8">tr_TR.UTF-8</option>
+                <option value="sv_SE.UTF-8">sv_SE.UTF-8</option>
+                <option value="da_DK.UTF-8">da_DK.UTF-8</option>
+                <option value="nb_NO.UTF-8">nb_NO.UTF-8</option>
+                <option value="fi_FI.UTF-8">fi_FI.UTF-8</option>
+                <option value="ja_JP.UTF-8">ja_JP.UTF-8</option>
+                <option value="ko_KR.UTF-8">ko_KR.UTF-8</option>
+                <option value="zh_CN.UTF-8">zh_CN.UTF-8</option>
+                <option value="zh_TW.UTF-8">zh_TW.UTF-8</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Network -->
+        <div class="panel" id="network-panel" style="margin-bottom:1rem">
+          <div class="panel-hdr">⌘ Network</div>
+          <div class="panel-body">
+            <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem">
+              <input type="checkbox" id="net-dhcp" checked onchange="toggleDHCP()" style="width:1rem;height:1rem;cursor:pointer;accent-color:var(--accent);flex-shrink:0">
+              <label for="net-dhcp" style="cursor:pointer;font-size:0.9rem;margin:0">Use DHCP <span style="color:var(--muted)">(recommended)</span></label>
+            </div>
+            <div id="net-static" style="display:none">
+              <div class="form-group">
+                <label>Interface</label>
+                <select id="net-iface">
+                  <option value="">— detecting… —</option>
+                </select>
+              </div>
+              <div class="net-row">
+                <div class="form-group">
+                  <label>IP Address</label>
+                  <input type="text" id="net-ip" placeholder="192.168.1.100">
+                </div>
+                <div class="form-group" style="max-width:90px">
+                  <label>Prefix</label>
+                  <input type="text" id="net-prefix" placeholder="24" value="24">
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Gateway</label>
+                <input type="text" id="net-gw" placeholder="192.168.1.1">
+              </div>
+              <div class="form-group">
+                <label>DNS</label>
+                <input type="text" id="net-dns" placeholder="1.1.1.1,8.8.8.8" value="1.1.1.1,8.8.8.8">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Platform Options -->
+        <div class="panel" id="platform-panel" style="margin-bottom:1rem">
+          <div class="panel-hdr">⚙ Platform Options</div>
+          <div class="panel-body">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-bottom:0.8rem">
+              <div class="opt-card" id="opt-wireguard" onclick="toggleOpt('wireguard')" style="cursor:pointer;padding:0.8rem;border:2px solid var(--accent);border-radius:8px;background:rgba(0,184,217,0.08);transition:all 0.2s;text-align:center">
+                <div style="font-size:1.3rem;margin-bottom:0.3rem">🔒</div>
+                <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">WireGuard</div>
+                <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">Encrypted mesh networking</div>
+              </div>
+              <div class="opt-card" id="opt-nvidia" onclick="toggleOpt('nvidia')" style="cursor:pointer;padding:0.8rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s;text-align:center">
+                <div style="font-size:1.3rem;margin-bottom:0.3rem">🎮</div>
+                <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">NVIDIA</div>
+                <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">GPU drivers + CUDA</div>
+              </div>
+              <div class="opt-card" id="opt-ebpf" onclick="toggleOpt('ebpf')" style="cursor:pointer;padding:0.8rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s;text-align:center">
+                <div style="font-size:1.3rem;margin-bottom:0.3rem">🔬</div>
+                <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">eBPF</div>
+                <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">Kernel observability</div>
+              </div>
+              <div class="opt-card" id="opt-dedup" onclick="toggleOpt('dedup')" style="cursor:pointer;padding:0.8rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s;text-align:center">
+                <div style="font-size:1.3rem;margin-bottom:0.3rem">📦</div>
+                <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">ZFS Dedup</div>
+                <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">5GB+ RAM per TB</div>
+              </div>
+              <div class="opt-card" id="opt-k8s" onclick="toggleOpt('k8s')" style="cursor:pointer;padding:0.8rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s;text-align:center">
+                <div style="font-size:1.3rem;margin-bottom:0.3rem">☸</div>
+                <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">Kubernetes</div>
+                <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">kubeadm + Cilium CNI</div>
+              </div>
+            </div>
+            <input type="checkbox" id="install-nvidia" style="display:none">
+            <input type="checkbox" id="install-wireguard" checked style="display:none">
+            <input type="checkbox" id="install-ebpf" style="display:none">
+            <input type="checkbox" id="install-zfs-dedup" style="display:none">
+            <input type="checkbox" id="install-k8s" style="display:none">
+            <input type="checkbox" id="install-k8s-bootstrap" style="display:none">
+            <!-- K8s bootstrap option (visible when K8s enabled) -->
+            <div id="k8s-bootstrap-opt" style="display:none;margin-top:0.5rem;padding:0.6rem 0.8rem;background:var(--bg3);border:1px solid var(--border);border-radius:6px">
+              <label style="font-size:0.82rem;color:var(--subtle);cursor:pointer;display:flex;align-items:center;gap:0.5rem">
+                <input type="checkbox" id="k8s-bootstrap-check" onchange="document.getElementById('install-k8s-bootstrap').checked=this.checked">
+                Bootstrap single-node cluster on first boot (kubeadm init + Cilium)
+              </label>
+              <div style="font-size:0.68rem;color:var(--muted);margin-top:0.3rem;margin-left:1.5rem">Control plane + Cilium CNI + Hubble. Runs automatically after first boot. Add workers later with <code>kube-join</code>.</div>
+            </div>
+            <!-- Export format -->
+            <div style="margin-top:0.8rem;padding-top:0.8rem;border-top:1px solid var(--border)">
+              <label style="font-size:0.82rem;color:var(--subtle);display:block;margin-bottom:0.3rem">Export image format</label>
+              <select id="install-export-format" onchange="toggleExportFields()" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem">
+                <option value="none">None — install to disk only</option>
+                <option value="qcow2">qcow2 — KVM / Proxmox / OpenStack</option>
+                <option value="raw">raw — dd-ready disk image</option>
+                <option value="vhd">VHD — Azure / Hyper-V</option>
+                <option value="vmdk">VMDK — VMware ESXi / vSphere</option>
+                <option value="ova">OVA — VMware / VirtualBox portable</option>
+              </select>
+              <div style="font-size:0.72rem;color:var(--muted);margin-top:0.3rem">Build a golden image — ZFS on root, WireGuard, eBPF baked in. Use as a Packer base or hypervisor template. Cloud-init ready.</div>
+              <!-- Remote export target (shown when export != none) -->
+              <div id="export-remote-fields" style="display:none;margin-top:0.6rem;padding:0.6rem;background:var(--bg2);border-radius:4px;border:1px solid var(--border)">
+                <label style="font-size:0.78rem;color:var(--subtle);display:block;margin-bottom:0.3rem">SCP export target (optional — leave blank to save locally)</label>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.3rem">
+                  <input type="text" id="export-scp-host" placeholder="host or IP" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
+                  <input type="text" id="export-scp-user" placeholder="user (default: root)" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
+                </div>
+                <input type="text" id="export-scp-path" placeholder="remote path (default: /root/)" style="width:100%;padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem;margin-bottom:0.3rem">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.3rem">
+                  <input type="password" id="export-scp-pass" placeholder="SSH password (if no key)" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
+                  <input type="text" id="export-scp-key" placeholder="SSH key path (optional)" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
+                </div>
+                <div style="font-size:0.68rem;color:var(--muted);margin-top:0.3rem">Provide either a password or SSH key path. Key auth is preferred — set up with: <code>ssh-keygen && ssh-copy-id user@host</code></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="install-err" style="color:var(--danger);font-size:0.82rem;margin-bottom:0.75rem;display:none"></div>
+        <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-primary" onclick="startInstall()">↯ Install to Disk…</button>
+          <button class="btn btn-danger" onclick="wipeDisk()" style="font-size:0.82rem">⊘ Wipe Disk</button>
+          <span style="font-size:0.75rem;color:var(--muted)">Wipe securely zeros the disk for clean re-testing</span>
+        </div>
+      </div>
+
+      <div id="install-running" style="display:none">
+        <div class="panel-hdr" style="margin-bottom:0.6rem;padding:0">◈ Installing — do not power off</div>
+        <div id="install-profile-summary" style="font-size:0.85rem;color:var(--accent);margin-bottom:0.5rem;font-family:var(--mono)"></div>
+        <div class="progress-bar-wrap"><div class="progress-bar" id="install-progress"></div></div>
+        <div id="install-status" style="font-size:0.8rem;color:var(--muted);margin-bottom:0.5rem">Starting installer…</div>
+        <div class="log-box" id="install-log" style="height:340px"></div>
+        <div id="install-retry" style="display:none;margin-top:1rem">
+          <button class="btn btn-primary" onclick="document.getElementById('install-running').style.display='none';document.getElementById('install-idle').style.display='block';document.getElementById('install-retry').style.display='none'">← Back to installer</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── ZFS ──────────────────────────────────────────────────────────────── -->
+    <div class="view" id="view-zfs">
+      <div class="page-title">ZFS &amp; Snapshots</div>
+      <div class="page-sub">Pool health, boot environments, snapshot management</div>
+
+      <div class="panel">
+        <div class="panel-hdr">◧ Pool Status</div>
+        <div class="panel-body">
+          <div class="log-box" id="zfs-pool-status" style="height:160px">(no pools — install to disk first)</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>⏱ Snapshots</span>
+          <button class="btn btn-primary btn-sm" onclick="takeSnapshot()">+ Take Snapshot</button>
+        </div>
+        <div class="panel-body">
+          <table>
+            <thead><tr><th>Snapshot</th><th>Used</th><th>Actions</th></tr></thead>
+            <tbody id="snap-table"><tr><td colspan="3" style="color:var(--muted)">No snapshots yet</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-hdr">◎ Boot Environments</div>
+        <div class="panel-body">
+          <div class="log-box" id="be-list" style="height:120px">(no boot environments — install to disk first)</div>
+          <div style="margin-top:0.75rem;display:flex;gap:0.5rem">
+            <button class="btn btn-ghost btn-sm" onclick="createBE()">+ New BE</button>
+            <button class="btn btn-ghost btn-sm" onclick="listBEs()">↻ Refresh</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Logs ─────────────────────────────────────────────────────────────── -->
+    <div class="view" id="view-logs">
+      <div class="page-title">Logs</div>
+      <div class="page-sub">System and installer log viewer</div>
+
+      <div class="panel">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>≡ Log</span>
+          <select id="log-select" onchange="loadLog()" style="width:auto;padding:0.25rem 0.5rem;font-size:0.8rem">
+            <option value="installer">Installer</option>
+            <option value="firstboot">Firstboot</option>
+            <option value="syslog">Syslog</option>
+          </select>
+        </div>
+        <div class="panel-body">
+          <div class="log-box" id="log-box" style="height:380px">Select a log above.</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /#content -->
+</div><!-- /#main -->
+
+<script>
+// ── WebSocket ───────────────────────────────────────────────────────────────
+const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+const wsUrl   = `${wsProto}://${location.host}`;
+let   ws      = null;
+let   wsReady = false;
+let   diskTimer = null;
+
+// Auto-refresh dashboard stats every 30 s
+setInterval(() => {
+  const dash = document.getElementById('view-dashboard');
+  if (dash && dash.classList.contains('active')) {
+    send({ action: 'system_info' });
+  }
+}, 5000);
+
+function connect() {
+  ws = new WebSocket(wsUrl);
+  ws.onopen = () => {
+    wsReady = true;
+    document.getElementById('status-dot').style.background = 'var(--accent)';
+    document.getElementById('status-text').textContent = 'connected';
+    send({ action: 'system_info' });
+    requestDisks();
+    refreshZFS();
+    refreshSnapshots();
+    send({ action: 'install_state' });
+  };
+  ws.onclose = () => {
+    wsReady = false;
+    document.getElementById('status-dot').style.background = 'var(--danger)';
+    document.getElementById('status-text').textContent = 'disconnected — retrying…';
+    clearInterval(diskTimer);
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = e => {
+    try { handle(JSON.parse(e.data)); } catch(ex) { console.error('handle error', ex); }
+  };
+}
+
+function send(obj) {
+  if (wsReady) ws.send(JSON.stringify(obj));
+}
+
+function requestDisks() {
+  send({ action: 'list_disks' });
+  // Retry every 3 s until a real disk appears
+  clearInterval(diskTimer);
+  diskTimer = setInterval(() => {
+    const sel = document.getElementById('install-disk');
+    if (sel && sel.options.length > 0 && sel.options[0].value !== '') {
+      clearInterval(diskTimer);
+    } else {
+      send({ action: 'list_disks' });
+    }
+  }, 3000);
+}
+
+// ── Message handler ─────────────────────────────────────────────────────────
+function handle(msg) {
+  switch (msg.type) {
+
+    case 'system_info': {
+      const d = msg.data || {};
+      document.getElementById('s-hostname').textContent  = d.hostname || '—';
+      document.getElementById('s-uptime').textContent    = d.uptime   || '—';
+      document.getElementById('s-cpus').textContent      = d.cpus     || '—';
+      document.getElementById('s-mem').textContent       = d.memory_total || '—';
+      document.getElementById('s-mem-free').textContent  = 'free: ' + (d.memory_free || '—');
+      document.title = (d.hostname || 'kldload') + ' — kldload';
+      // AI status card
+      const aiCard = document.getElementById('ai-status-card');
+      if (aiCard && d.ai_ollama !== undefined) {
+        aiCard.style.display = 'block';
+        const aiVal = document.getElementById('s-ai');
+        const aiSub = document.getElementById('s-ai-sub');
+        if (d.ai_webui) {
+          aiVal.textContent = '● ready';
+          aiVal.style.color = 'var(--accent)';
+          aiSub.innerHTML = '<a href="http://localhost:8080" target="_blank" style="color:var(--accent)">Open AI Chat</a>';
+        } else if (d.ai_ollama) {
+          aiVal.textContent = '◐ starting...';
+          aiVal.style.color = 'var(--orange)';
+          aiSub.textContent = d.ai_model || 'model loaded';
+        } else {
+          aiVal.textContent = '○ offline';
+          aiVal.style.color = 'var(--muted)';
+          aiSub.textContent = 'not running';
+        }
+      }
+      // Show firstboot progress if running
+      const fbStatus = d.firstboot_status || '';
+      const fbBanner = document.getElementById('firstboot-banner');
+      if (fbBanner) {
+        if (fbStatus) {
+          fbBanner.style.display = 'block';
+          fbBanner.textContent = '⏳ ' + fbStatus;
+        } else {
+          fbBanner.style.display = 'none';
+        }
+      }
+      // Hide Install tab on installed systems (not live mode)
+      if (d.live_mode === false) {
+        const installNav = document.querySelector('#sidebar li[data-view="install"]');
+        if (installNav) installNav.style.display = 'none';
+      }
+      // Hide NVIDIA option if no NVIDIA GPU detected
+      const nvidiaCard = document.getElementById('opt-nvidia');
+      if (nvidiaCard) {
+        if (!d.has_nvidia) {
+          nvidiaCard.style.opacity = '0.3';
+          nvidiaCard.style.pointerEvents = 'none';
+          nvidiaCard.title = 'No NVIDIA GPU detected';
+          const cb = document.getElementById('install-nvidia');
+          if (cb) cb.checked = false;
+        } else {
+          nvidiaCard.style.opacity = '';
+          nvidiaCard.style.pointerEvents = '';
+          nvidiaCard.title = '';
+        }
+      }
+      // Gate AI model checkboxes by available RAM/VRAM
+      // General Chat (8b): always enabled
+      // Code Assistant (14b): needs 16GB RAM or 10GB VRAM
+      // Smart Chat (70b): needs 48GB RAM or 24GB VRAM
+      const ram = d.ram_gb || 0;
+      const vram = d.vram_gb || 0;
+      const codeEl = document.getElementById('ai-model-code');
+      const smartEl = document.getElementById('ai-model-smart');
+      if (codeEl) {
+        const canCode = ram >= 16 || vram >= 10;
+        codeEl.disabled = !canCode;
+        if (!canCode) codeEl.checked = false;
+        const codeLabel = codeEl.closest('label');
+        if (codeLabel) {
+          codeLabel.style.opacity = canCode ? '' : '0.3';
+          codeLabel.title = canCode ? '' : 'Requires 16 GB RAM or 10 GB VRAM';
+        }
+      }
+      if (smartEl) {
+        const canSmart = ram >= 48 || vram >= 24;
+        smartEl.disabled = !canSmart;
+        if (!canSmart) smartEl.checked = false;
+        const smartLabel = smartEl.closest('label');
+        if (smartLabel) {
+          smartLabel.style.opacity = canSmart ? '' : '0.3';
+          smartLabel.title = canSmart ? '' : 'Requires 48 GB RAM or 24 GB VRAM';
+        }
+      }
+      break;
+    }
+
+    case 'install_state': {
+      if (msg.running) {
+        // Install still running in background (page was refreshed mid-install)
+        document.getElementById('install-idle').style.display    = 'none';
+        document.getElementById('install-running').style.display = 'block';
+        document.getElementById('install-status').textContent    = 'Install in progress…';
+        // Switch to Install view so user can see it
+        document.querySelectorAll('#sidebar li').forEach(x => x.classList.remove('active'));
+        document.querySelectorAll('.view').forEach(x => x.classList.remove('active'));
+        const li = document.querySelector('#sidebar li[data-view="install"]');
+        if (li) li.classList.add('active');
+        document.getElementById('view-install').classList.add('active');
+      } else if (msg.rc !== null && msg.rc !== undefined) {
+        // Install finished — show result if user is on install view
+        const bar = document.getElementById('install-progress');
+        const st  = document.getElementById('install-status');
+        if (msg.rc === 0) {
+          if (bar) { bar.className = 'progress-bar'; bar.style.width = '100%'; bar.style.background = '#8b5cf6'; }
+          if (st)  st.textContent = '✓ Install complete — system powering off…';
+        } else {
+          if (bar) { bar.className = 'progress-bar'; bar.style.width = '100%'; bar.style.background = 'var(--danger)'; }
+          if (st)  st.textContent = `✗ Install failed (exit ${msg.rc})`; var rb=document.getElementById('install-retry'); if(rb) rb.style.display='block';
+        }
+      }
+      break;
+    }
+
+    case 'network_info': {
+      const ifaces = (msg.interfaces || []).filter(i => i.name !== 'lo');
+      const primary = ifaces[0];
+      if (primary) {
+        document.getElementById('s-nic').textContent = primary.name + (primary.up ? ' ▲' : ' ▼');
+        document.getElementById('s-ip').textContent  = primary.addr || '—';
+      }
+      // Populate NIC picker in install form
+      const nicSel = document.getElementById('net-iface');
+      if (nicSel) {
+        const prev = nicSel.value;
+        nicSel.innerHTML = '';
+        (msg.interfaces || []).forEach(ifc => {
+          if (ifc.name === 'lo') return;
+          const o = document.createElement('option');
+          o.value = ifc.name;
+          const addr = ifc.addr ? ` — ${ifc.addr}` : '';
+          const state = ifc.up ? '▲' : '▽';
+          o.textContent = `${state} ${ifc.name}${addr}`;
+          nicSel.appendChild(o);
+        });
+        if (prev) nicSel.value = prev;
+      }
+      break;
+    }
+
+    case 'disk_list': {
+      const sel = document.getElementById('install-disk');
+      const disks = msg.disks || [];
+      sel.innerHTML = '';
+      if (!disks.length) {
+        sel.innerHTML = '<option value="">No disks found</option>';
+      } else {
+        let firstRecommended = -1;
+        disks.forEach((d, idx) => {
+          const o = document.createElement('option');
+          o.value = d.name;
+          const tran = (d.tran || '').toLowerCase();
+          let dtype = 'Disk';
+          if (tran === 'nvme')        dtype = 'NVMe';
+          else if (tran === 'usb')    dtype = 'USB';
+          else if (d.rota === false || d.rota === 0) dtype = 'SSD';
+          else if (d.rota === true  || d.rota === 1) dtype = 'HDD';
+          else if (!tran)             dtype = 'Virtual';
+          let label = [d.name, d.size || '?', dtype, d.model].filter(Boolean).join('  ·  ');
+          if (d.warning) label += '  ⚠ ' + d.warning;
+          if (d.recommended && firstRecommended < 0) { label += '  ★ recommended'; firstRecommended = idx; }
+          o.textContent = label;
+          if (d.warning && d.warning.includes('LIVE BOOT')) { o.style.color = '#c9a04a'; }
+          sel.appendChild(o);
+        });
+        // Auto-select first recommended (NVMe/virtio) disk
+        if (firstRecommended >= 0) sel.selectedIndex = firstRecommended;
+        clearInterval(diskTimer);
+      }
+      break;
+    }
+
+    case 'zfs_status': {
+      const out = msg.output || '(no pools)';
+      document.getElementById('zfs-pool-status').textContent = out;
+      document.getElementById('zfs-status-mini').textContent = out.split('\n')[0];
+      break;
+    }
+
+    case 'snapshot_list': {
+      const tbody = document.getElementById('snap-table');
+      const snaps = msg.snapshots || [];
+      if (!snaps.length) {
+        tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">No snapshots yet</td></tr>';
+        document.getElementById('snap-status-mini').textContent = 'No snapshots yet';
+        break;
+      }
+      tbody.innerHTML = snaps.slice(0, 20).map(s => `
+        <tr>
+          <td style="font-family:monospace;font-size:0.82rem">${esc(s.name)}</td>
+          <td style="color:var(--muted)">${esc(s.used || '—')}</td>
+          <td><button class="btn btn-ghost btn-sm" onclick="rollback('${esc(s.name)}')">Rollback</button></td>
+        </tr>`).join('');
+      document.getElementById('snap-status-mini').textContent = `${snaps.length} snapshot(s)`;
+      break;
+    }
+
+    case 'be_list': {
+      document.getElementById('be-list').textContent = msg.output || '(no boot environments)';
+      break;
+    }
+
+    case 'log_line': {
+      const target = msg.target || '';
+      let boxId = null;
+      if (target === 'install') boxId = 'install-log';
+      if (boxId) {
+        const box = document.getElementById(boxId);
+        if (box) { box.textContent += (msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+        if (target === 'install') {
+          const st = document.getElementById('install-status');
+          if (st) st.textContent = (msg.line || '').replace(/^\[.*?\]\s*/, '').slice(0, 80) || st.textContent;
+        }
+      }
+      break;
+    }
+
+    case 'exec_done': {
+      const target = msg.target || '';
+      if (target === 'install') {
+        const bar = document.getElementById('install-progress');
+        const st  = document.getElementById('install-status');
+        const box = document.getElementById('install-log');
+        if (msg.rc === 0) {
+          if (bar) { bar.className = 'progress-bar'; bar.style.width = '100%'; bar.style.background = '#8b5cf6'; }
+          if (st)  st.textContent = '✓ Install complete — system powering off…';
+          if (box) box.textContent += '\n✓ Install complete. Initial snapshot taken. System powering off…\n';
+        } else {
+          if (bar) { bar.className = 'progress-bar'; bar.style.width = '100%'; bar.style.background = 'var(--danger)'; }
+          if (st)  st.textContent = `✗ Install failed (exit ${msg.rc})`; var rb=document.getElementById('install-retry'); if(rb) rb.style.display='block';
+          if (box) box.textContent += `\n✗ Install failed (exit ${msg.rc})\n`;
+        }
+      }
+      break;
+    }
+
+    case 'install_log': {
+      const box = document.getElementById('install-log');
+      box.textContent += (msg.line || '') + '\n';
+      box.scrollTop = box.scrollHeight;
+      break;
+    }
+
+    case 'install_done': {
+      const box = document.getElementById('install-log');
+      box.textContent += '\n✓ Install complete. System powering off…\n';
+      break;
+    }
+
+    case 'log_line': {
+      const box = document.getElementById('log-box');
+      box.textContent += (msg.line || '') + '\n';
+      box.scrollTop = box.scrollHeight;
+      break;
+    }
+
+    case 'snapshot_done': { refreshSnapshots(); break; }
+    case 'error': { console.warn('WS error:', msg.msg); break; }
+  }
+}
+
+// ── Navigation ──────────────────────────────────────────────────────────────
+document.querySelectorAll('#sidebar li[data-view]').forEach(li => {
+  li.addEventListener('click', () => {
+    document.querySelectorAll('#sidebar li').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(x => x.classList.remove('active'));
+    li.classList.add('active');
+    document.getElementById('view-' + li.dataset.view).classList.add('active');
+    if (li.dataset.view === 'dashboard') { send({ action: 'system_info' }); refreshZFS(); refreshSnapshots(); }
+    if (li.dataset.view === 'zfs')  { refreshZFS(); refreshSnapshots(); listBEs(); }
+    if (li.dataset.view === 'logs') { loadLog(); }
+    if (li.dataset.view === 'install') {
+      requestDisks();
+      send({ action: 'network_info' });
+    }
+  });
+});
+
+// ── Target type selection ────────────────────────────────────────────────────
+function updateStorageMode() {
+  const manual = document.querySelector('input[name="storage-mode"][value="manual"]');
+  const hint = document.getElementById('storage-manual-hint');
+  if (hint) hint.style.display = manual && manual.checked ? 'block' : 'none';
+}
+
+const ROLE_DESCS = {
+  desktop: 'Desktop selected — GNOME workstation + ZFS on root',
+  server:  'Server selected — headless SSH node + ZFS on root',
+  core:    'Core selected — ZFS on root only, no kldload tools, no extras',
+  kvm:     'KVM Host selected — bare metal hypervisor. ZFS zvols, instant clones, hourly snapshots, DR replication, kvm-create/clone/snap/replicate tools.',
+};
+function selectTarget(el) {
+  document.querySelectorAll('#target-grid .target-card').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+  const sum = document.getElementById('role-summary');
+  if (sum) sum.textContent = '✓ ' + (ROLE_DESCS[el.dataset.role] || el.dataset.role);
+  const smRow = document.getElementById('storage-mode-row');
+  if (smRow) smRow.style.display = el.dataset.role === 'core' ? 'block' : 'none';
+}
+
+const DISTRO_DESCS = {
+  centos:   'CentOS Stream 9 — RHEL upstream, offline from RPM darksite',
+  fedora:   'Fedora 41 — Latest packages, fast updates',
+  debian:   'Debian 13 (trixie) — stable, offline from APT darksite',
+  rocky:    'Rocky Linux 9 — RHEL-compatible, offline from RPM darksite',
+  rhel:     'RHEL 9 — requires activation key (needs internet)',
+  ubuntu:   'Ubuntu 24.04 LTS — popular, huge community, debootstrap from darksite',
+  arch:     'Arch Linux — rolling release, internet required (no darksite)',
+  alpine:   'Alpine Linux 3.21 — musl/OpenRC, core profile only (coming soon)',
+  freebsd:  'FreeBSD 15.0 — native ZFS, jails, bhyve',
+};
+function toggleOpt(name) {
+  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s'};
+  var cb = document.getElementById(map[name]);
+  var card = document.getElementById('opt-' + name);
+  if (!cb || !card) return;
+  cb.checked = !cb.checked;
+  card.style.borderColor = cb.checked ? 'var(--accent)' : 'var(--border)';
+  card.style.background = cb.checked ? 'rgba(0,184,217,0.08)' : 'transparent';
+  // Show/hide K8s bootstrap option
+  if (name === 'k8s') {
+    var k8sOpt = document.getElementById('k8s-bootstrap-opt');
+    if (k8sOpt) k8sOpt.style.display = cb.checked ? 'block' : 'none';
+    if (!cb.checked) {
+      var bsCb = document.getElementById('k8s-bootstrap-check');
+      var bsHidden = document.getElementById('install-k8s-bootstrap');
+      if (bsCb) bsCb.checked = false;
+      if (bsHidden) bsHidden.checked = false;
+    }
+  }
+}
+
+// Init option cards on load
+document.addEventListener('DOMContentLoaded', function() {
+  ['wireguard','nvidia','ebpf','dedup'].forEach(function(name) {
+    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s'};
+    var cb = document.getElementById(map[name]);
+    var card = document.getElementById('opt-' + name);
+    if (cb && card && cb.checked) {
+      card.style.borderColor = 'var(--accent)';
+      card.style.background = 'rgba(0,184,217,0.08)';
+    }
+  });
+});
+
+function toggleAI() {
+  var cb = document.getElementById('install-ai');
+  var card = document.getElementById('ai-card');
+  var toggle = document.getElementById('ai-toggle');
+  var dot = document.getElementById('ai-toggle-dot');
+  var models = document.getElementById('ai-models');
+  cb.checked = !cb.checked;
+  if (cb.checked) {
+    card.style.borderColor = 'var(--accent)';
+    card.style.background = 'rgba(0,184,217,0.08)';
+    toggle.style.background = 'var(--accent)';
+    dot.style.left = '1.3rem';
+    dot.style.background = '#fff';
+    if (models) models.style.display = 'block';
+  } else {
+    card.style.borderColor = 'var(--border)';
+    card.style.background = 'transparent';
+    toggle.style.background = 'var(--border)';
+    dot.style.left = '0.2rem';
+    dot.style.background = 'var(--muted)';
+    if (models) models.style.display = 'none';
+  }
+}
+
+function selectDistro(el) {
+  document.querySelectorAll('#distro-grid .target-card').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+  const sum = document.getElementById('distro-summary');
+  if (sum) sum.textContent = '✓ ' + (DISTRO_DESCS[el.dataset.distro] || el.dataset.distro);
+  // Show/hide Windows options, RHEL auth, and profile panel
+  const winOpts = document.getElementById('windows-options');
+  const profilePanel = document.getElementById('profile-panel');
+  const rhelPanel = document.getElementById('rhel-auth-panel');
+  if (winOpts) winOpts.style.display = el.dataset.distro === 'windows' ? 'block' : 'none';
+  const isBSDDistro = el.dataset.distro === 'freebsd' || el.dataset.distro === 'openbsd' || el.dataset.distro === 'ghostbsd';
+  const hideProfFor = el.dataset.distro === 'windows' || isBSDDistro;
+  if (profilePanel) profilePanel.style.display = hideProfFor ? 'none' : 'block';
+  // BSD: hide Linux-specific panels — BSD base sets are complete
+  ['ai-panel','locale-panel','network-panel','platform-panel'].forEach(id => {
+    const p = document.getElementById(id);
+    if (p) p.style.display = isBSDDistro ? 'none' : '';
+  });
+  if (rhelPanel) rhelPanel.style.display = el.dataset.distro === 'rhel' ? 'block' : 'none';
+  // Distro-specific profile restrictions
+  const d = el.dataset.distro;
+  const isAlpine = d === 'alpine';
+  const isArch = d === 'arch';
+  const isBSD = d === 'freebsd' || d === 'openbsd' || d === 'ghostbsd';
+  document.querySelectorAll('#target-grid .target-card').forEach(c => {
+    const r = c.dataset.role;
+    const blocked = ((isAlpine || isBSD) && r !== 'core') || (isArch && (r === 'desktop' || r === 'kvm'));
+    c.style.opacity = blocked ? '0.3' : '';
+    c.style.pointerEvents = blocked ? 'none' : '';
+  });
+  if (isAlpine || isBSD) {
+    const coreCard = document.querySelector('#target-grid .target-card[data-role="core"]');
+    if (coreCard) selectTarget(coreCard);
+  } else if (isArch) {
+    const sel = document.querySelector('#target-grid .target-card.selected');
+    if (sel && (sel.dataset.role === 'desktop' || sel.dataset.role === 'kvm')) {
+      const serverCard = document.querySelector('#target-grid .target-card[data-role="server"]');
+      if (serverCard) selectTarget(serverCard);
+    }
+  }
+  // Grey out K8s checkbox for distros without darksite support
+  const k8sOpt = document.getElementById('opt-k8s');
+  if (k8sOpt) {
+    const k8sBlocked = isArch || isBSD || isAlpine;
+    k8sOpt.style.opacity = k8sBlocked ? '0.3' : '';
+    k8sOpt.style.pointerEvents = k8sBlocked ? 'none' : '';
+    if (k8sBlocked) {
+      document.getElementById('install-k8s').checked = false;
+      k8sOpt.style.borderColor = 'var(--border)';
+      k8sOpt.style.background = '';
+    }
+  }
+}
+
+// ── DHCP toggle ──────────────────────────────────────────────────────────────
+function toggleRhelAuth() {
+  const mode = document.querySelector('input[name="rhel-auth"]:checked')?.value || 'userpass';
+  document.getElementById('rhel-userpass-fields').style.display = mode === 'userpass' ? 'block' : 'none';
+  document.getElementById('rhel-activation-fields').style.display = mode === 'activation' ? 'block' : 'none';
+}
+
+function toggleDHCP() {
+  const dhcp = document.getElementById('net-dhcp').checked;
+  document.getElementById('net-static').style.display = dhcp ? 'none' : 'block';
+}
+
+// ── Password check ───────────────────────────────────────────────────────────
+function toggleEncryption() {
+  const enc = document.getElementById('install-encryption').value === '1';
+  document.getElementById('enc-passphrase-group').style.display = enc ? 'block' : 'none';
+}
+
+function checkEncPass() {
+  const p  = document.getElementById('enc-pass').value;
+  const p2 = document.getElementById('enc-pass2').value;
+  const hint  = document.getElementById('enc-pass-hint');
+  const match = document.getElementById('enc-pass-match');
+  const ok = p.length >= 8;
+  hint.textContent  = ok ? '✓ Passphrase length OK' : 'Minimum 8 characters';
+  hint.className    = 'pass-hint ' + (ok ? 'ok' : 'fail');
+  if (p2) {
+    match.textContent = p === p2 ? '✓ Passphrases match' : '✗ Passphrases do not match';
+    match.className   = 'pass-hint ' + (p === p2 ? 'ok' : 'fail');
+  }
+}
+
+function checkPass() {
+  const p  = document.getElementById('install-pass').value;
+  const p2 = document.getElementById('install-pass2').value;
+  const str = document.getElementById('pass-strength');
+  const mat = document.getElementById('pass-match');
+
+  if (!p) { str.textContent = ''; mat.textContent = ''; return; }
+
+  const ok = p.length >= 8 && /[0-9]/.test(p) && /[A-Z!@#$%^&*]/.test(p);
+  str.textContent = ok ? '✓ Strong enough' : 'Min 8 chars, one number, one uppercase or symbol';
+  str.className = 'pass-hint ' + (ok ? 'ok' : 'fail');
+
+  if (p2) {
+    mat.textContent = p === p2 ? '✓ Passwords match' : '✗ Passwords do not match';
+    mat.className = 'pass-hint ' + (p === p2 ? 'ok' : 'fail');
+  }
+}
+
+// ── ZFS ──────────────────────────────────────────────────────────────────────
+function refreshZFS()       { send({ action: 'zfs_status' }); }
+function refreshSnapshots() { send({ action: 'snapshot_list' }); }
+function listBEs()          { send({ action: 'be_list' }); }
+function createBE() {
+  const name = prompt('New boot environment name:');
+  if (name) send({ action: 'be_create', name });
+}
+function rollback(snap) {
+  if (confirm(`Roll back to ${snap}?\n\nThis will destroy all changes made after this snapshot.`)) {
+    send({ action: 'snapshot_rollback', name: snap });
+  }
+}
+function takeSnapshot() { send({ action: 'snapshot_take' }); }
+
+// ── Install ──────────────────────────────────────────────────────────────────
+let _installPayload = null;
+
+function toggleExportFields() {
+  const fmt = document.getElementById('install-export-format')?.value || 'none';
+  const fields = document.getElementById('export-remote-fields');
+  if (fields) fields.style.display = fmt !== 'none' ? 'block' : 'none';
+}
+
+function startInstall() {
+  const disk     = document.getElementById('install-disk').value;
+  const host     = document.getElementById('install-hostname').value.trim();
+  const user     = document.getElementById('install-user').value.trim();
+  const pass     = document.getElementById('install-pass').value;
+  const pass2    = document.getElementById('install-pass2').value;
+  const timezone = document.getElementById('install-timezone').value || 'UTC';
+  const keyboard = document.getElementById('install-keyboard').value || 'us';
+  const locale   = document.getElementById('install-locale').value || 'en_US.UTF-8';
+  const role     = (document.querySelector('#target-grid .target-card.selected') || {}).dataset?.role || 'desktop';
+  const distro   = (document.querySelector('#distro-grid .target-card.selected') || {}).dataset?.distro || 'centos';
+  const dhcp     = document.getElementById('net-dhcp').checked;
+  const sshKey   = (document.getElementById('install-ssh-key')?.value || '').trim();
+  const netIface = document.getElementById('net-iface')?.value || '';
+  const encrypt  = document.getElementById('install-encryption').value === '1';
+  const encPass  = encrypt ? document.getElementById('enc-pass').value  : '';
+  const encPass2 = encrypt ? document.getElementById('enc-pass2').value : '';
+  const err      = document.getElementById('install-err');
+
+  const passOk = pass.length >= 8 && /[0-9]/.test(pass) && /[A-Z!@#$%^&*]/.test(pass);
+
+  err.style.display = 'none';
+  if (!disk)               return showErr('Select a disk');
+  if (!host)               return showErr('Enter a hostname');
+  if (!user)               return showErr('Enter a username');
+  if (!pass)               return showErr('Enter a password');
+  if (!passOk)             return showErr('Password must be at least 8 chars, include a number and an uppercase letter or symbol');
+  if (pass !== pass2)      return showErr('Passwords do not match');
+  if (encrypt && encPass.length < 8)    return showErr('ZFS passphrase must be at least 8 characters');
+  if (encrypt && encPass !== encPass2)  return showErr('ZFS passphrases do not match');
+
+  const manualStorage = role === 'core' && document.querySelector('input[name="storage-mode"][value="manual"]')?.checked;
+  const params = {
+    disk, hostname: host, username: user,
+    password: pass, timezone, keyboard, locale, role, distro,
+    ...(distro === 'windows' ? {
+      windows_index: document.getElementById('windows-index')?.value || '1',
+    } : {}),
+    ...(distro === 'rhel' ? {
+      rhel_auth: document.querySelector('input[name="rhel-auth"]:checked')?.value || 'userpass',
+      rhel_username: document.getElementById('rhel-username')?.value || '',
+      rhel_password: document.getElementById('rhel-password')?.value || '',
+      rhel_key: document.getElementById('rhel-key')?.value || '',
+      rhel_org: document.getElementById('rhel-org')?.value || '',
+    } : {}),
+    storage_mode: 'zfs', infra_mode: 'standalone',
+    zfs_encrypt: encrypt ? '1' : '0',
+    storage_manual: manualStorage ? '1' : '0',
+    enable_ai: document.getElementById('install-ai')?.checked ? '1' : '0',
+    ai_model_chat: document.getElementById('ai-model-chat')?.checked ? '1' : '0',
+    ai_model_code: document.getElementById('ai-model-code')?.checked ? '1' : '0',
+    ai_model_smart: document.getElementById('ai-model-smart')?.checked ? '1' : '0',
+    nvidia_drivers: document.getElementById('install-nvidia')?.checked ? '1' : '0',
+    wireguard: document.getElementById('install-wireguard')?.checked ? '1' : '0',
+    enable_ebpf: document.getElementById('install-ebpf')?.checked ? '1' : '0',
+    zfs_dedup: document.getElementById('install-zfs-dedup')?.checked ? '1' : '0',
+    enable_k8s: document.getElementById('install-k8s')?.checked ? '1' : '0',
+    k8s_bootstrap: document.getElementById('install-k8s-bootstrap')?.checked ? '1' : '0',
+    export_format: document.getElementById('install-export-format')?.value || 'none',
+    export_scp_host: document.getElementById('export-scp-host')?.value?.trim() || '',
+    export_scp_user: document.getElementById('export-scp-user')?.value?.trim() || '',
+    export_scp_path: document.getElementById('export-scp-path')?.value?.trim() || '',
+    export_scp_pass: document.getElementById('export-scp-pass')?.value || '',
+    export_scp_key: document.getElementById('export-scp-key')?.value?.trim() || '',
+    ...(sshKey   ? { ssh_pubkey: sshKey }  : {}),
+    ...(netIface ? { net_iface: netIface } : {}),
+    network_dhcp: dhcp ? 'yes' : 'no',
+  };
+  if (encrypt) params.zfs_passphrase = encPass;
+  if (!dhcp) {
+    const ip     = document.getElementById('net-ip').value.trim();
+    const prefix = document.getElementById('net-prefix').value.trim() || '24';
+    const gw     = document.getElementById('net-gw').value.trim();
+    const dns    = document.getElementById('net-dns').value.trim() || '1.1.1.1';
+    if (!ip) return showErr('Enter a static IP address');
+    if (!gw) return showErr('Enter a gateway address');
+    params.network_ip     = ip;
+    params.network_prefix = prefix;
+    params.network_gw     = gw;
+    params.network_dns    = dns;
+  }
+
+  // Show confirmation modal
+  _installPayload = params;
+  document.getElementById('confirm-detail').innerHTML =
+    `<b>Disk:</b> ${disk}<br><b>Distro:</b> ${DISTRO_DESCS[distro]?.split(' — ')[0] || distro}<br>` +
+    `<b>Hostname:</b> ${host}<br><b>User:</b> ${user}<br>` +
+    `<b>Profile:</b> ${role}<br><b>Encryption:</b> ${encrypt ? '🔒 AES-256-GCM (passphrase at boot)' : 'None'}<br>` +
+    `<b>Network:</b> ${dhcp ? 'DHCP' : params.network_ip + '/' + params.network_prefix}<br>` +
+    `<b>Timezone:</b> ${timezone} &nbsp; <b>Keyboard:</b> ${keyboard}<br><br>` +
+    (params.export_format && params.export_format !== 'none'
+      ? `All data on <b>${disk}</b> will be erased to build a <b>${params.export_format.toUpperCase()}</b> golden image. ` +
+        `The image will be exported` + (params.export_scp_host ? ` via SCP to <b>${params.export_scp_host}</b>` : ' locally') + ` when complete.`
+      : `All data on <b>${disk}</b> will be erased. An initial snapshot will be taken after install. ` +
+        `The system will power off when complete.`);
+  document.getElementById('confirm-modal').classList.add('open');
+
+  function showErr(m) { err.textContent = m; err.style.display = 'block'; }
+}
+
+function confirmInstall() {
+  document.getElementById('confirm-modal').classList.remove('open');
+  const diskLabel = document.getElementById('install-disk');
+  const diskText  = diskLabel?.options[diskLabel.selectedIndex]?.text || ((_installPayload || {}).disk || '');
+  if (!confirm(`⚠ This will permanently erase:\n\n  ${diskText}\n\nAll data will be lost. Continue with install?`)) return;
+
+  document.getElementById('install-idle').style.display    = 'none';
+  document.getElementById('install-running').style.display = 'block';
+  document.getElementById('install-log').textContent = '';
+  document.getElementById('install-status').textContent = 'Starting installer…';
+
+  // Build profile summary line
+  const p = _installPayload || {};
+  const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 41', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', alpine: 'Alpine 3.21', freebsd: 'FreeBSD 15.0', openbsd: 'OpenBSD 7.8', ghostbsd: 'GhostBSD', illumos: 'illumos', windows: 'Windows' };
+  const profileNames = { desktop: 'Desktop', server: 'Server', core: 'Core', kvm: 'KVM Host', ai: 'AI' };
+  let summary = (distroNames[p.distro] || p.distro || 'CentOS') + ' · ' + (profileNames[p.role] || p.role || 'Desktop');
+  const addons = [];
+  if (document.getElementById('install-ai')?.checked) addons.push('+AI');
+  if (document.getElementById('install-wireguard')?.checked) addons.push('+WireGuard');
+  if (document.getElementById('install-nvidia')?.checked) addons.push('+NVIDIA');
+  if (document.getElementById('install-ebpf')?.checked) addons.push('+eBPF');
+  if (document.getElementById('install-k8s')?.checked) addons.push('+Kubernetes');
+  if (document.getElementById('install-zfs-dedup')?.checked) addons.push('+Dedup');
+  if (p.zfs_encrypt === '1') addons.push('+Encrypted');
+  if (p.export_format && p.export_format !== 'none') addons.push('→ ' + p.export_format.toUpperCase());
+  if (addons.length) summary += '  ' + addons.join(' ');
+  const sumEl = document.getElementById('install-profile-summary');
+  if (sumEl) sumEl.textContent = summary;
+
+  const bar = document.getElementById('install-progress');
+  if (bar) { bar.className = 'progress-bar active'; bar.style.width = '100%'; }
+  send({ action: 'install', params: _installPayload });
+}
+
+function wipeDisk() {
+  const disk = document.getElementById('install-disk').value;
+  if (!disk) return alert('Select a disk first');
+  if (!confirm(`Zero-fill ${disk}?\n\nThis will destroy all data and may take several minutes.`)) return;
+  document.getElementById('install-idle').style.display    = 'none';
+  document.getElementById('install-running').style.display = 'block';
+  document.getElementById('install-log').textContent = '';
+  document.getElementById('install-status').textContent = `Wiping ${disk}…`;
+  const wbar = document.getElementById('install-progress');
+  if (wbar) wbar.className = 'progress-bar active';
+  send({ action: 'wipe_disk', disk });
+}
+
+// ── Logs ──────────────────────────────────────────────────────────────────────
+function loadLog() {
+  const log = document.getElementById('log-select').value;
+  document.getElementById('log-box').textContent = '';
+  send({ action: 'tail_log', log });
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Auto-detect browser timezone and pre-select in dropdown
+(function() {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const sel = document.getElementById('install-timezone');
+    if (sel && tz) {
+      for (let i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === tz) { sel.selectedIndex = i; break; }
+      }
+    }
+  } catch(e) {}
+})();
+
+connect();
+</script>
 </body>
 </html>

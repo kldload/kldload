@@ -205,8 +205,8 @@ k_profile_optional_packages() {
     fi
   fi
 
-  # KVM Host (optional checkbox)
-  if [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
+  # KVM Host (profile or optional checkbox)
+  if [[ "$_profile" == "kvm" ]] || [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
     if [[ "$_distro" == "arch" ]]; then
       out+=(qemu-full libvirt virt-install bridge-utils edk2-ovmf dnsmasq)
     elif [[ "$_distro" == "ubuntu" || "$_distro" == "debian" ]]; then
