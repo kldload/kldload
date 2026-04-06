@@ -101,12 +101,9 @@ k_profile_packages() {
       ;;
 
     kvm)
-      # Hypervisor: KVM + libvirt + containerd for microVMs (Firecracker pulled by firstboot)
+      # Hypervisor: KVM + libvirt (KVM packages added by k_profile_optional_packages)
       echo "openssh-server sudo curl ca-certificates vim less iproute2 \
-        qemu-kvm qemu-utils \
-        libvirt-daemon-system libvirt-clients virtinst \
-        bridge-utils ovmf cpu-checker \
-        containerd \
+        qemu-utils \
         nftables chrony \
         wireguard-tools"
       ;;
