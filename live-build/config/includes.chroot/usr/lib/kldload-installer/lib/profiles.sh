@@ -159,10 +159,11 @@ k_profile_packages() {
 
     kvm)
       # KVM Host — hypervisor + ZFS zvols + bridge networking
+      # KVM-specific packages (qemu, libvirt) added by k_profile_optional_packages per-distro
       echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
         wireguard-tools tmux python3 python3-websockets python3-yaml htop btop net-tools ethtool tcpdump \
         fzf bat eza fd-find ripgrep zoxide podman sanoid ${_fastfetch} \
-        qemu-kvm libvirt-daemon-system libvirt-clients virtinst bridge-utils ovmf dnsmasq-base"
+        qemu-utils"
       ;;
 
     ai)
