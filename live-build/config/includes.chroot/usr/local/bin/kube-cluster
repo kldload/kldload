@@ -193,10 +193,149 @@ cmd_status() {
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
 }
 
+# ── Bootstrap — full auto: create VMs + network + init + join ──────────
+cmd_bootstrap() {
+  log "Full automated Kubernetes deployment"
+  log "  1. Clone VMs from golden image"
+  log "  2. Set up WireGuard backplane"
+  log "  3. Bootstrap control plane + Cilium"
+  log "  4. Join workers"
+  log "  5. Smoke test"
+  echo ""
+
+  # Step 1: Create VMs
+  cmd_create
+
+  # Wait for SSH to be available
+  echo ""
+  log "Waiting for SSH on all nodes..."
+  sleep 30
+
+  # Get VM IPs
+  local cp_ip
+  cp_ip="$(virsh domifaddr "${CP_NAME}" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1)" || true
+  [[ -n "$cp_ip" ]] || die "Cannot get IP for ${CP_NAME}. Check VM networking."
+
+  declare -A worker_ips
+  for i in $(seq 1 "$WORKERS"); do
+    local name="${WORKER_PREFIX}-${i}"
+    local wip
+    wip="$(virsh domifaddr "${name}" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1)" || true
+    worker_ips["$name"]="$wip"
+  done
+
+  log "VM IPs:"
+  log "  ${CP_NAME}: ${cp_ip}"
+  for name in "${!worker_ips[@]}"; do
+    log "  ${name}: ${worker_ips[$name]}"
+  done
+
+  # Step 2: Set up WireGuard backplane
+  echo ""
+  echo -e "${Y}=== Setting Up WireGuard Backplane ===${N}"
+
+  # Init WG on control plane (node 1)
+  ssh -o StrictHostKeyChecking=no "root@${cp_ip}" \
+    "kube-network init 1" 2>/dev/null || warn "WG init failed on CP"
+
+  # Init WG on workers
+  local node_id=2
+  for i in $(seq 1 "$WORKERS"); do
+    local name="${WORKER_PREFIX}-${i}"
+    local wip="${worker_ips[$name]}"
+    [[ -n "$wip" ]] || { warn "No IP for $name, skipping WG"; continue; }
+    ssh -o StrictHostKeyChecking=no "root@${wip}" \
+      "kube-network init ${node_id}" 2>/dev/null || warn "WG init failed on $name"
+    ((node_id++))
+  done
+
+  # Exchange WG keys between all nodes
+  local cp_mgmt_pub cp_k8s_pub
+  cp_mgmt_pub="$(ssh -o StrictHostKeyChecking=no "root@${cp_ip}" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)"
+  cp_k8s_pub="$(ssh -o StrictHostKeyChecking=no "root@${cp_ip}" 'cat /etc/wireguard/wg-k8s.pub' 2>/dev/null)"
+
+  node_id=2
+  for i in $(seq 1 "$WORKERS"); do
+    local name="${WORKER_PREFIX}-${i}"
+    local wip="${worker_ips[$name]}"
+    [[ -n "$wip" ]] || continue
+
+    local w_pub
+    w_pub="$(ssh -o StrictHostKeyChecking=no "root@${wip}" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)"
+
+    # Add worker as peer on CP
+    ssh -o StrictHostKeyChecking=no "root@${cp_ip}" \
+      "kube-network add-peer ${wip} ${w_pub} ${node_id}" 2>/dev/null || true
+
+    # Add CP as peer on worker
+    ssh -o StrictHostKeyChecking=no "root@${wip}" \
+      "kube-network add-peer ${cp_ip} ${cp_mgmt_pub} 1" 2>/dev/null || true
+
+    ((node_id++))
+  done
+
+  # Pin kubelet on all nodes
+  ssh -o StrictHostKeyChecking=no "root@${cp_ip}" "kube-network pin-kubelet" 2>/dev/null || true
+  for i in $(seq 1 "$WORKERS"); do
+    local name="${WORKER_PREFIX}-${i}"
+    local wip="${worker_ips[$name]}"
+    [[ -n "$wip" ]] || continue
+    ssh -o StrictHostKeyChecking=no "root@${wip}" "kube-network pin-kubelet" 2>/dev/null || true
+  done
+
+  log "WireGuard backplane configured"
+
+  # Step 3: Bootstrap control plane
+  echo ""
+  echo -e "${Y}=== Bootstrapping Control Plane ===${N}"
+  ssh -o StrictHostKeyChecking=no "root@${cp_ip}" \
+    "kube-init" 2>&1 || die "kube-init failed on control plane"
+
+  # Step 4: Join workers
+  echo ""
+  echo -e "${Y}=== Joining Workers ===${N}"
+  local wg_cp_ip="10.251.0.1"  # CP's wg-k8s IP
+  for i in $(seq 1 "$WORKERS"); do
+    local name="${WORKER_PREFIX}-${i}"
+    local wip="${worker_ips[$name]}"
+    [[ -n "$wip" ]] || continue
+    log "Joining ${name}..."
+    ssh -o StrictHostKeyChecking=no "root@${wip}" \
+      "kube-join ${wg_cp_ip}" 2>&1 || warn "Failed to join $name"
+  done
+
+  # Step 5: Smoke test
+  echo ""
+  echo -e "${Y}=== Smoke Test ===${N}"
+  sleep 10
+  ssh -o StrictHostKeyChecking=no "root@${cp_ip}" \
+    "kube-smoke-test" 2>&1 || warn "Smoke test had failures"
+
+  # Final status
+  echo ""
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  Kubernetes Cluster Deployed                                ${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "  Control plane:  ${G}${CP_NAME}${N} (${cp_ip} / 10.251.0.1)"
+  echo -e "  Workers:        ${G}${WORKERS}${N}"
+  echo -e "  CNI:            ${G}Cilium (eBPF)${N}"
+  echo -e "  Backplane:      ${G}WireGuard (wg-mgmt + wg-k8s)${N}"
+  echo -e "  Storage:        ${G}ZFS on root${N}"
+  echo -e "  Cloned from:    ${GOLDEN} (each clone: ~100ms, 0 bytes)"
+  echo ""
+  echo -e "  Access:"
+  echo -e "    ssh root@${cp_ip}"
+  echo -e "    kubectl get nodes"
+  echo -e "    kube-status"
+  echo -e "    cilium status"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+}
+
 # ── Dispatch ───────────────────────────────────────────────────────────────
 case "$CMD" in
-  create)  cmd_create ;;
-  destroy) cmd_destroy ;;
-  status)  cmd_status ;;
-  *)       usage ;;
+  create)    cmd_create ;;
+  bootstrap) cmd_bootstrap ;;
+  destroy)   cmd_destroy ;;
+  status)    cmd_status ;;
+  *)         usage ;;
 esac

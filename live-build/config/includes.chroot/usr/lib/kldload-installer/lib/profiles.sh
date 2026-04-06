@@ -813,7 +813,7 @@ STORAGE
 
     # Copy kube-* tools from live ISO to target
     mkdir -p "${target}/usr/local/bin"
-    for tool in kube-setup kube-init kube-join kube-status kube-reset kube-network kube-load-images; do
+    for tool in kube-setup kube-init kube-join kube-status kube-reset kube-network kube-load-images kube-smoke-test; do
       if [[ -f "/usr/local/bin/${tool}" ]]; then
         cp "/usr/local/bin/${tool}" "${target}/usr/local/bin/${tool}"
         chmod +x "${target}/usr/local/bin/${tool}"
