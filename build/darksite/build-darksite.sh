@@ -22,6 +22,27 @@ if [[ ! -f /etc/yum.repos.d/zfs.repo ]]; then
         log "WARNING: could not add ZFS repo — ZFS packages may be missing"
 fi
 
+# Add Kubernetes repo (pkgs.k8s.io)
+K8S_MINOR="${K8S_MINOR:-v1.32}"
+if [[ ! -f /etc/yum.repos.d/kubernetes.repo ]]; then
+    log "Adding Kubernetes repo (${K8S_MINOR})..."
+    cat >/etc/yum.repos.d/kubernetes.repo <<EOF
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/${K8S_MINOR}/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/${K8S_MINOR}/rpm/repodata/repomd.xml.key
+EOF
+fi
+
+# Add containerd repo (Docker CE for containerd.io)
+if [[ ! -f /etc/yum.repos.d/docker-ce.repo ]]; then
+    log "Adding Docker CE repo (for containerd.io)..."
+    dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || \
+        log "WARNING: could not add Docker CE repo — containerd.io may be missing"
+fi
+
 # Read package sets
 declare -a PACKAGES=()
 read_package_set() {
@@ -38,6 +59,7 @@ read_package_set() {
 read_package_set "target-base"
 read_package_set "target-server"
 read_package_set "target-desktop"
+read_package_set "target-kubernetes"
 
 # Deduplicate
 declare -A _seen=()

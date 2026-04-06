@@ -50,6 +50,7 @@ read_package_set "target-base"
 read_package_set "target-zfs"
 read_package_set "target-desktop"
 read_package_set "target-server"
+read_package_set "target-kubernetes"
 
 # Enable extra components — Debian needs contrib (ZFS), Ubuntu needs universe (ZFS)
 if [[ "${SUITE}" == "noble" || "${SUITE}" == "jammy" || "${SUITE}" == "mantic" || "${SUITE}" == "oracular" ]]; then

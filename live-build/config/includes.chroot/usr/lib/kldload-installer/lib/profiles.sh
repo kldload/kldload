@@ -739,7 +739,7 @@ REPL
 
     # Copy KVM management tools from live ISO to target
     mkdir -p "${target}/usr/local/bin"
-    for tool in kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo; do
+    for tool in kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo kube-cluster; do
       if [[ -f "/usr/local/bin/${tool}" ]]; then
         cp "/usr/local/bin/${tool}" "${target}/usr/local/bin/${tool}"
         chmod +x "${target}/usr/local/bin/${tool}"
