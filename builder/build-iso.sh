@@ -482,7 +482,9 @@ OSREL
 # ---------------------------------------------------------------------------
 if [[ "$EDITION" != "core" ]]; then
     # Copy kldload tools (short names)
-    for tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kldload-help kldload-test kldload-install-target kldload-webui; do
+    for tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kldload-help kldload-test kldload-install-target kldload-webui \
+                 kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo \
+                 kube-setup kube-init kube-join kube-status kube-reset kube-network kube-load-images kube-smoke-test kube-cluster; do
         src="/build/live-build/config/includes.chroot/usr/local/bin/${tool}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/bin/${tool}" && chmod +x "${ROOTFS}/usr/local/bin/${tool}"
     done
