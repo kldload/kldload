@@ -1062,6 +1062,77 @@ NMCONF
     k_in_chroot "${target}" dconf update 2>/dev/null || true
   fi
 
+  # NVIDIA drivers — only when user selected GPU support in web UI
+  local _nvidia="${KLDLOAD_NVIDIA_DRIVERS:-0}"
+  if [[ "$_nvidia" == "auto" ]]; then
+    if lspci 2>/dev/null | grep -qi nvidia; then
+      _nvidia=1
+      k_log_to "$log" "NVIDIA GPU detected — installing drivers"
+    else
+      _nvidia=0
+      k_log_to "$log" "No NVIDIA GPU detected — skipping drivers"
+    fi
+  fi
+  if [[ "$_nvidia" == "1" ]]; then
+    k_log_to "$log" "Installing NVIDIA drivers for Debian..."
+    # Enable non-free-firmware repo (needed for nvidia-driver)
+    if [[ "$distro" == "debian" ]]; then
+      sed -i 's/main$/main contrib non-free non-free-firmware/' \
+        "${target}/etc/apt/sources.list" 2>/dev/null || true
+      # Also fix sources.list.d if deb822 format
+      for _sl in "${target}"/etc/apt/sources.list.d/*.sources; do
+        [[ -f "$_sl" ]] && sed -i '/^Components:/ s/$/ contrib non-free non-free-firmware/' "$_sl" 2>/dev/null || true
+      done
+    elif [[ "$distro" == "ubuntu" ]]; then
+      # Ubuntu: restricted and multiverse for NVIDIA
+      sed -i 's/main$/main restricted universe multiverse/' \
+        "${target}/etc/apt/sources.list" 2>/dev/null || true
+      for _sl in "${target}"/etc/apt/sources.list.d/*.sources; do
+        [[ -f "$_sl" ]] && sed -i '/^Components:/ s/$/ restricted universe multiverse/' "$_sl" 2>/dev/null || true
+      done
+    fi
+    DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >> "$log" 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y --no-install-recommends \
+      nvidia-driver nvidia-kernel-dkms nvidia-sysctl \
+      pciutils \
+      >> "$log" 2>&1 || k_log_to "$log" "WARNING: NVIDIA driver install had issues"
+    # nvidia-container-toolkit from NVIDIA's own repo
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+      | gpg --batch --yes --dearmor -o "${target}/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg" 2>/dev/null
+    local _nct_dist="debian12"
+    [[ "$distro" == "ubuntu" ]] && _nct_dist="ubuntu22.04"
+    echo "deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/\$(ARCH) /" \
+      > "${target}/etc/apt/sources.list.d/nvidia-container-toolkit.list"
+    DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >> "$log" 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y --no-install-recommends \
+      nvidia-container-toolkit \
+      >> "$log" 2>&1 || k_log_to "$log" "WARNING: nvidia-container-toolkit install failed (optional)"
+    k_in_chroot "${target}" bash -c 'nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' 2>/dev/null || true
+    k_log_to "$log" "NVIDIA drivers + container toolkit installed (Debian/Ubuntu)"
+  fi
+
+  # WireGuard config — only when user selected WireGuard in web UI
+  if [[ "${KLDLOAD_WIREGUARD:-0}" == "1" ]]; then
+    k_log_to "$log" "Generating WireGuard keys..."
+    install -d -m700 "${target}/etc/wireguard"
+    local _wg_privkey _wg_pubkey
+    _wg_privkey="$(wg genkey 2>/dev/null)"
+    _wg_pubkey="$(echo "$_wg_privkey" | wg pubkey 2>/dev/null)"
+    if [[ -n "$_wg_privkey" ]]; then
+      cat > "${target}/etc/wireguard/wg0.conf" <<WGEOF
+[Interface]
+PrivateKey = ${_wg_privkey}
+# Address and peers configured post-install via kube-network or manually
+# Address = 10.250.0.X/24
+# ListenPort = 51820
+WGEOF
+      echo "$_wg_pubkey" > "${target}/etc/wireguard/wg0.pub"
+      chmod 600 "${target}/etc/wireguard/wg0.conf"
+      chmod 600 "${target}/etc/wireguard/wg0.pub"
+      k_log_to "$log" "WireGuard keys generated (configure with kube-network init)"
+    fi
+  fi
+
   k_write_manifest
   k_finalize_sources_list
 

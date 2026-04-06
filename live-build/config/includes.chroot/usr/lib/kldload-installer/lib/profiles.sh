@@ -61,7 +61,7 @@ k_profile_packages() {
 
   case "$profile" in
     server)
-      echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide podman ${_fastfetch}"
+      echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
       ;;
     client)
       echo "openssh-server sudo curl ca-certificates vim less network-manager wireguard-tools iproute2"
@@ -83,7 +83,7 @@ k_profile_packages() {
         adwaita-icon-theme fonts-cantarell gvfs gvfs-backends \
         gnome-keyring xserver-xorg \
         ${_browser} \
-        tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman ${_fastfetch}"
+        tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
       ;;
 
     # ── kldload templates ────────────────────────────────────────────────────────
@@ -104,7 +104,7 @@ k_profile_packages() {
       # Hypervisor: KVM + libvirt (KVM-specific qemu/libvirt added by k_profile_optional_packages per-distro)
       echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
         wireguard-tools tmux python3 python3-websockets python3-yaml htop btop net-tools ethtool tcpdump \
-        fzf bat eza fd-find ripgrep zoxide podman sanoid qemu-utils ${_fastfetch}"
+        fzf bat eza fd-find ripgrep zoxide podman sanoid qemu-utils pciutils ${_fastfetch}"
       ;;
 
     storage)
