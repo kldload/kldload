@@ -874,6 +874,32 @@ CRICTLCFG
     chroot "${target}" systemctl enable containerd 2>/dev/null || true
     chroot "${target}" systemctl enable kubelet 2>/dev/null || true
 
+    # First-boot auto-bootstrap (optional checkbox)
+    if [[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]]; then
+      k_log "Enabling first-boot Kubernetes bootstrap..."
+      cat > "${target}/etc/systemd/system/kube-firstboot.service" <<'KUBEFB'
+[Unit]
+Description=kldload Kubernetes first-boot bootstrap
+After=network-online.target containerd.service
+Wants=network-online.target
+ConditionPathExists=!/etc/kubernetes/admin.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/kube-init
+ExecStartPost=/bin/bash -c 'systemctl disable kube-firstboot.service'
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
+KUBEFB
+      ln -sf /etc/systemd/system/kube-firstboot.service \
+        "${target}/etc/systemd/system/multi-user.target.wants/kube-firstboot.service" 2>/dev/null || true
+      k_log "First-boot bootstrap enabled — kubeadm init + Cilium will run on first boot"
+    fi
+
     k_log "Kubernetes node configured: containerd, kernel modules, sysctl, ZFS datasets (etcd 8K, containerd, kubelet)"
     k_log "After boot, run: kube-init (control plane) or kube-join <ip> (worker)"
   fi

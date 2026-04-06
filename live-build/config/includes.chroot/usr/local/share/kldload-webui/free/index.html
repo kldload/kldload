@@ -697,6 +697,15 @@
             <input type="checkbox" id="install-ebpf" style="display:none">
             <input type="checkbox" id="install-zfs-dedup" style="display:none">
             <input type="checkbox" id="install-k8s" style="display:none">
+            <input type="checkbox" id="install-k8s-bootstrap" style="display:none">
+            <!-- K8s bootstrap option (visible when K8s enabled) -->
+            <div id="k8s-bootstrap-opt" style="display:none;margin-top:0.5rem;padding:0.6rem 0.8rem;background:var(--bg3);border:1px solid var(--border);border-radius:6px">
+              <label style="font-size:0.82rem;color:var(--subtle);cursor:pointer;display:flex;align-items:center;gap:0.5rem">
+                <input type="checkbox" id="k8s-bootstrap-check" onchange="document.getElementById('install-k8s-bootstrap').checked=this.checked">
+                Bootstrap single-node cluster on first boot (kubeadm init + Cilium)
+              </label>
+              <div style="font-size:0.68rem;color:var(--muted);margin-top:0.3rem;margin-left:1.5rem">Control plane + Cilium CNI + Hubble. Runs automatically after first boot. Add workers later with <code>kube-join</code>.</div>
+            </div>
             <!-- Export format -->
             <div style="margin-top:0.8rem;padding-top:0.8rem;border-top:1px solid var(--border)">
               <label style="font-size:0.82rem;color:var(--subtle);display:block;margin-bottom:0.3rem">Export image format</label>
@@ -1192,6 +1201,17 @@ function toggleOpt(name) {
   cb.checked = !cb.checked;
   card.style.borderColor = cb.checked ? 'var(--accent)' : 'var(--border)';
   card.style.background = cb.checked ? 'rgba(0,184,217,0.08)' : 'transparent';
+  // Show/hide K8s bootstrap option
+  if (name === 'k8s') {
+    var k8sOpt = document.getElementById('k8s-bootstrap-opt');
+    if (k8sOpt) k8sOpt.style.display = cb.checked ? 'block' : 'none';
+    if (!cb.checked) {
+      var bsCb = document.getElementById('k8s-bootstrap-check');
+      var bsHidden = document.getElementById('install-k8s-bootstrap');
+      if (bsCb) bsCb.checked = false;
+      if (bsHidden) bsHidden.checked = false;
+    }
+  }
 }
 
 // Init option cards on load
@@ -1416,6 +1436,7 @@ function startInstall() {
     enable_ebpf: document.getElementById('install-ebpf')?.checked ? '1' : '0',
     zfs_dedup: document.getElementById('install-zfs-dedup')?.checked ? '1' : '0',
     enable_k8s: document.getElementById('install-k8s')?.checked ? '1' : '0',
+    k8s_bootstrap: document.getElementById('install-k8s-bootstrap')?.checked ? '1' : '0',
     export_format: document.getElementById('install-export-format')?.value || 'none',
     export_scp_host: document.getElementById('export-scp-host')?.value?.trim() || '',
     export_scp_user: document.getElementById('export-scp-user')?.value?.trim() || '',

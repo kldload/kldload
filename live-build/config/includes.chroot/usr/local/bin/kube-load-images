@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# kube-load-images — import pre-pulled container images from darksite into containerd
+# Run before kube-init on offline/air-gapped systems
+set -euo pipefail
+
+if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+IMAGES_DIR="${1:-/root/darksite/k8s-images}"
+
+log() { echo -e "\033[1;32m[kube-load-images]\033[0m $*"; }
+
+if [[ ! -d "$IMAGES_DIR" ]] || [[ -z "$(ls -A "$IMAGES_DIR" 2>/dev/null)" ]]; then
+  log "No pre-pulled images found at $IMAGES_DIR — will pull from internet"
+  exit 0
+fi
+
+command -v ctr >/dev/null 2>&1 || { log "ctr not found — containerd not installed?"; exit 1; }
+
+count=0
+for tarball in "$IMAGES_DIR"/*.tar; do
+  [[ -f "$tarball" ]] || continue
+  log "Loading: $(basename "$tarball")"
+  ctr -n k8s.io images import "$tarball" 2>/dev/null || true
+  ((count++))
+done
+
+log "Loaded $count container images into containerd"
