@@ -8,11 +8,23 @@ R="\033[1;31m"; W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"
 # ── Platform detection ─────────────────────────────────────
 HAS_NVIDIA=0; command -v nvidia-smi >/dev/null 2>&1 && HAS_NVIDIA=1
 HAS_PODMAN=0; command -v podman >/dev/null 2>&1 && HAS_PODMAN=1
-HAS_EBPF=0; [[ -d /usr/share/bcc/tools ]] || command -v bpftool >/dev/null 2>&1 && HAS_EBPF=1
+HAS_EBPF=0; { [[ -d /usr/share/bcc/tools ]] || compgen -G '/usr/sbin/*-bpfcc' >/dev/null 2>&1 || command -v bpftool >/dev/null 2>&1; } && HAS_EBPF=1
 HAS_GPU_CTK=0; command -v nvidia-ctk >/dev/null 2>&1 && HAS_GPU_CTK=1
 DISTRO="unknown"
 [[ -f /etc/os-release ]] && . /etc/os-release && DISTRO="${ID:-unknown}"
 GPU_NAME="N/A"; [[ "$HAS_NVIDIA" == "1" ]] && GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
+
+# eBPF tool paths: CentOS=/usr/share/bcc/tools/<name>, Debian=/usr/sbin/<name>-bpfcc
+_bcc() {
+  local tool="$1"
+  if [[ -x "/usr/share/bcc/tools/$tool" ]]; then echo "/usr/share/bcc/tools/$tool"
+  elif [[ -x "/usr/sbin/${tool}-bpfcc" ]]; then echo "/usr/sbin/${tool}-bpfcc"
+  else echo "$tool"; fi
+}
+# Resolve VNC IP from default route
+VNC_IP="$(ip -4 route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)"
+[[ -z "$VNC_IP" ]] && VNC_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+[[ -z "$VNC_IP" ]] && VNC_IP="127.0.0.1"
 
 header() {
   clear
@@ -158,7 +170,15 @@ while true; do
       echo ""
       echo -e "${Y}=== Step 1: Create Golden Image ===${N}"
       echo ""
-      kvm-create golden --ram 2048 --cpus 1 --disk 10 --iso /var/lib/libvirt/isos/kldload-1.0.2-x86_64.iso --os centos-stream9
+      # Find the latest kldload ISO
+      DEMO_ISO="$(ls -t /var/lib/libvirt/isos/kldload-*.iso 2>/dev/null | head -1)"
+      if [[ -z "$DEMO_ISO" ]]; then
+        echo -e "${R}No kldload ISO found in /var/lib/libvirt/isos/${N}"
+        echo -e "${D}Upload an ISO: scp kldload-*.iso root@\$(hostname -I | awk '{print \$1}'):/var/lib/libvirt/isos/${N}"
+        pause; continue
+      fi
+      echo -e "  ${D}Using ISO: ${DEMO_ISO}${N}"
+      kvm-create golden --ram 2048 --cpus 1 --disk 10 --iso "$DEMO_ISO" --os centos-stream9
       sleep 1
 
       echo ""
@@ -192,7 +212,7 @@ while true; do
         if [[ -n "$PORT" ]]; then
           NUM=${PORT#:}
           REAL=$((5900 + NUM))
-          echo -e "  ${C}$vm${N}  →  vnc://10.100.10.120:$REAL"
+          echo -e "  ${C}$vm${N}  →  vnc://${VNC_IP}:$REAL"
         fi
       done
 
@@ -552,13 +572,13 @@ while true; do
       echo -e "${Y}=== eBPF — Live TCP Connections (5s) ===${N}"
       echo -e "${D}Tracing kernel — every outbound TCP connection with PID...${N}"
       echo ""
-      timeout 5 /usr/share/bcc/tools/tcpconnect 2>/dev/null || echo "Generate traffic (curl, etc.) to see connections"
+      timeout 5 "$(_bcc tcpconnect)" 2>/dev/null || echo "Generate traffic (curl, etc.) to see connections"
       echo ""
       echo ""
       echo -e "${C}══════════════════════════════════════════════════════════════${N}"
       echo -e "${W}  PROOF: eBPF Kernel Observability${N}"
       echo -e "${C}──────────────────────────────────────────────────────────────${N}"
-      echo -e "  Tool:               /usr/share/bcc/tools/tcpconnect"
+      echo -e "  Tool:               $(_bcc tcpconnect)"
       echo -e "  Runs in:            ${G}kernel space${N} (not userland)"
       echo -e "  Overhead:           ${G}near zero${N}"
       echo -e "  Agents required:    ${G}none${N}"
@@ -575,7 +595,7 @@ while true; do
       echo -e "${Y}=== eBPF — Disk I/O Latency (5s) ===${N}"
       echo -e "${D}Measuring every disk operation in the kernel...${N}"
       echo ""
-      timeout 5 /usr/share/bcc/tools/biolatency 2>/dev/null || echo "biolatency not available"
+      timeout 5 "$(_bcc biolatency)" 2>/dev/null || echo "biolatency not available"
       echo ""
       echo -e "${G}I/O latency histogram. Kernel-native. Zero overhead.${N}"
       pause ;;
@@ -776,7 +796,7 @@ USEREOF
         if [[ -n "$PORT" ]]; then
           NUM=${PORT#:}
           REAL=$((5900 + NUM))
-          echo -e "  ${C}node-$i${N}  →  vnc://10.100.10.120:$REAL"
+          echo -e "  ${C}node-$i${N}  →  vnc://${VNC_IP}:$REAL"
         fi
       done
 
@@ -824,7 +844,7 @@ USEREOF
         if [[ -n "$PORT" ]]; then
           NUM=${PORT#:}
           REAL=$((5900 + NUM))
-          echo -e "  ${C}$vm${N}  →  vnc://10.100.10.120:$REAL"
+          echo -e "  ${C}$vm${N}  →  vnc://${VNC_IP}:$REAL"
         fi
       done
       echo ""
