@@ -180,14 +180,15 @@ fi
 
 # ── 11. Firewall ───────────────────────────────────────────────────────────
 section "Firewall"
-if nft list ruleset 2>/dev/null | grep -q 'chain input'; then
+_nft_rules="$(nft list ruleset 2>/dev/null || true)"
+if echo "$_nft_rules" | grep -q 'chain input'; then
   pass "nftables rules loaded"
-  if nft list ruleset 2>/dev/null | grep -q 'wg-k8s\|wg-mgmt'; then
+  if echo "$_nft_rules" | grep -q 'wg-k8s\|wg-mgmt'; then
     pass "nftables has WireGuard rules"
   else
     warn "nftables missing WireGuard-specific rules"
   fi
-  if nft list ruleset 2>/dev/null | grep -q '6443'; then
+  if echo "$_nft_rules" | grep -q '6443'; then
     pass "K8s API port 6443 allowed"
   else
     warn "K8s API port 6443 not in firewall"
