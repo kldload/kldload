@@ -101,11 +101,10 @@ k_profile_packages() {
       ;;
 
     kvm)
-      # Hypervisor: KVM + libvirt (KVM packages added by k_profile_optional_packages)
-      echo "openssh-server sudo curl ca-certificates vim less iproute2 \
-        qemu-utils \
-        nftables chrony \
-        wireguard-tools"
+      # Hypervisor: KVM + libvirt (KVM-specific qemu/libvirt added by k_profile_optional_packages per-distro)
+      echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
+        wireguard-tools tmux python3 python3-websockets python3-yaml htop btop net-tools ethtool tcpdump \
+        fzf bat eza fd-find ripgrep zoxide podman sanoid qemu-utils ${_fastfetch}"
       ;;
 
     storage)
@@ -155,15 +154,6 @@ k_profile_packages() {
     core)
       # Bare minimum — ZFS on root, SSH, networking, WireGuard. No kldload tools, no sanoid, no webui.
       echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables wireguard-tools"
-      ;;
-
-    kvm)
-      # KVM Host — hypervisor + ZFS zvols + bridge networking
-      # KVM-specific packages (qemu, libvirt) added by k_profile_optional_packages per-distro
-      echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
-        wireguard-tools tmux python3 python3-websockets python3-yaml htop btop net-tools ethtool tcpdump \
-        fzf bat eza fd-find ripgrep zoxide podman sanoid ${_fastfetch} \
-        qemu-utils"
       ;;
 
     ai)
