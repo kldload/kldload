@@ -5,11 +5,23 @@
 B="\033[1;34m"; G="\033[1;32m"; C="\033[1;36m"; Y="\033[1;33m"
 R="\033[1;31m"; W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"
 
+# ── Platform detection ─────────────────────────────────────
+HAS_NVIDIA=0; command -v nvidia-smi >/dev/null 2>&1 && HAS_NVIDIA=1
+HAS_PODMAN=0; command -v podman >/dev/null 2>&1 && HAS_PODMAN=1
+HAS_EBPF=0; [[ -d /usr/share/bcc/tools ]] && HAS_EBPF=1
+HAS_GPU_CTK=0; command -v nvidia-ctk >/dev/null 2>&1 && HAS_GPU_CTK=1
+DISTRO="unknown"
+[[ -f /etc/os-release ]] && . /etc/os-release && DISTRO="${ID:-unknown}"
+GPU_NAME="N/A"; [[ "$HAS_NVIDIA" == "1" ]] && GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
+
 header() {
   clear
+  local gpu_line="OpenZFS + WireGuard"
+  [[ "$HAS_EBPF" == "1" ]] && gpu_line+=" + eBPF"
+  [[ "$HAS_NVIDIA" == "1" ]] && gpu_line+=" + ${GPU_NAME}"
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo -e "${W}   kldload 1.0.3 — KVM Hypervisor with OpenZFS Superpowers  ${N}"
-  echo -e "${D}   OpenZFS + WireGuard + eBPF + NVIDIA RTX 3080             ${N}"
+  echo -e "${D}   ${gpu_line}${N}"
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo ""
 }
@@ -91,6 +103,7 @@ menu() {
   echo -e "  ${G} 4${N}  Rollback a VM"
   echo -e "  ${G} 5${N}  Destroy all VMs (clean)"
   echo ""
+  if [[ "$HAS_NVIDIA" == "1" && "$HAS_PODMAN" == "1" ]]; then
   echo -e "${Y}  GPU SHARING${N}"
   echo -e "  ${G} 6${N}  NVIDIA GPU status"
   echo -e "  ${G} 7${N}  Launch 2 Ollama AI instances on same GPU"
@@ -98,17 +111,22 @@ menu() {
   echo -e "  ${G} 9${N}  Show GPU sharing (all processes)"
   echo -e "  ${G}10${N}  Destroy GPU containers (clean)"
   echo ""
+  fi
+  if [[ "$HAS_PODMAN" == "1" ]]; then
   echo -e "${Y}  CONTAINERS ON ZFS${N}"
   echo -e "  ${G}11${N}  Launch nginx + redis + postgres on ZFS datasets"
   echo -e "  ${G}12${N}  Snapshot the entire container stack"
   echo -e "  ${G}13${N}  Show container ZFS usage"
   echo -e "  ${G}14${N}  Destroy container stack (clean)"
   echo ""
+  fi
   echo -e "${Y}  INFRASTRUCTURE${N}"
   echo -e "  ${G}15${N}  ZFS pool + all datasets"
   echo -e "  ${G}16${N}  WireGuard status"
+  if [[ "$HAS_EBPF" == "1" ]]; then
   echo -e "  ${G}17${N}  eBPF — trace TCP connections (5s)"
   echo -e "  ${G}18${N}  eBPF — disk I/O latency (5s)"
+  fi
   echo -e "  ${G}19${N}  System health (kst)"
   echo -e "  ${G}20${N}  Replication commands"
   echo ""
@@ -262,6 +280,7 @@ while true; do
 
     # ── GPU: status ────────────────────────────────────────
     6)
+      if [[ "$HAS_NVIDIA" != "1" ]]; then echo -e "${R}NVIDIA not available${N}"; pause; continue; fi
       header
       echo -e "${Y}=== NVIDIA RTX 3080 ===${N}"
       echo ""
@@ -270,6 +289,7 @@ while true; do
 
     # ── GPU: launch 2 Ollama ───────────────────────────────
     7)
+      if [[ "$HAS_NVIDIA" != "1" || "$HAS_PODMAN" != "1" ]]; then echo -e "${R}Requires NVIDIA + Podman${N}"; pause; continue; fi
       header
       clean_gpu
       echo ""
@@ -316,6 +336,7 @@ while true; do
 
     # ── GPU: ask both ──────────────────────────────────────
     8)
+      if [[ "$HAS_NVIDIA" != "1" || "$HAS_PODMAN" != "1" ]]; then echo -e "${R}Requires NVIDIA + Podman${N}"; pause; continue; fi
       header
       echo -e "${Y}=== Two AI Models, One GPU, Simultaneous ===${N}"
       echo ""
@@ -387,6 +408,7 @@ while true; do
 
     # ── Containers: launch stack ───────────────────────────
     11)
+      if [[ "$HAS_PODMAN" != "1" ]]; then echo -e "${R}Podman not installed${N}"; pause; continue; fi
       header
       clean_containers
       echo ""
@@ -445,6 +467,7 @@ while true; do
 
     # ── Containers: snapshot ───────────────────────────────
     12)
+      if [[ "$HAS_PODMAN" != "1" ]]; then echo -e "${R}Podman not installed${N}"; pause; continue; fi
       header
       echo -e "${Y}=== Snapshot Container Stack ===${N}"
       echo ""
@@ -473,6 +496,7 @@ while true; do
 
     # ── Containers: ZFS usage ──────────────────────────────
     13)
+      if [[ "$HAS_PODMAN" != "1" ]]; then echo -e "${R}Podman not installed${N}"; pause; continue; fi
       header
       echo -e "${Y}=== Container ZFS Usage ===${N}"
       echo ""
@@ -485,6 +509,7 @@ while true; do
 
     # ── Containers: destroy ────────────────────────────────
     14)
+      if [[ "$HAS_PODMAN" != "1" ]]; then echo -e "${R}Podman not installed${N}"; pause; continue; fi
       header
       clean_containers
       echo ""
@@ -522,6 +547,7 @@ while true; do
 
     # ── Infra: eBPF TCP ────────────────────────────────────
     17)
+      if [[ "$HAS_EBPF" != "1" ]]; then echo -e "${R}eBPF tools not installed${N}"; pause; continue; fi
       header
       echo -e "${Y}=== eBPF — Live TCP Connections (5s) ===${N}"
       echo -e "${D}Tracing kernel — every outbound TCP connection with PID...${N}"
@@ -544,6 +570,7 @@ while true; do
 
     # ── Infra: eBPF I/O ───────────────────────────────────
     18)
+      if [[ "$HAS_EBPF" != "1" ]]; then echo -e "${R}eBPF tools not installed${N}"; pause; continue; fi
       header
       echo -e "${Y}=== eBPF — Disk I/O Latency (5s) ===${N}"
       echo -e "${D}Measuring every disk operation in the kernel...${N}"
