@@ -8,7 +8,7 @@ set -euo pipefail
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 K8S_VERSION="${K8S_VERSION:-v1.32}"
-CILIUM_VERSION="${CILIUM_VERSION:-1.16.5}"
+CILIUM_CLI_VERSION="${CILIUM_CLI_VERSION:-0.19.2}"
 HELM_VERSION="${HELM_VERSION:-v3.17.0}"
 
 log()  { echo -e "\033[1;32m[kube-setup]\033[0m $*"; }
@@ -78,6 +78,8 @@ install_containerd() {
   mkdir -p /etc/containerd
   containerd config default >/etc/containerd/config.toml 2>/dev/null || true
   sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml 2>/dev/null || true
+  # Fix CNI plugin path — Debian defaults to /usr/lib/cni but Cilium installs to /opt/cni/bin
+  sed -i 's|bin_dir = "/usr/lib/cni"|bin_dir = "/opt/cni/bin"|' /etc/containerd/config.toml 2>/dev/null || true
 
   # Use systemd cgroup driver — required for kubeadm
   systemctl enable --now containerd
@@ -113,7 +115,7 @@ EOF
     apt-get install -y --no-install-recommends apt-transport-https ca-certificates curl gpg
     install -d -m0755 /etc/apt/keyrings
     curl -fsSL "https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/Release.key" \
-      | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg 2>/dev/null
+      | gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg 2>/dev/null
     echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/ /" \
       > /etc/apt/sources.list.d/kubernetes.list
     apt-get update -y >/dev/null 2>&1
@@ -169,13 +171,13 @@ install_cilium_cli() {
     return 0
   fi
 
-  log "Installing Cilium CLI v${CILIUM_VERSION}..."
+  log "Installing Cilium CLI v${CILIUM_CLI_VERSION}..."
   local arch
   arch="$(uname -m)"
   [[ "$arch" == "x86_64" ]] && arch="amd64"
   [[ "$arch" == "aarch64" ]] && arch="arm64"
 
-  curl -fsSL "https://github.com/cilium/cilium-cli/releases/download/v${CILIUM_VERSION}/cilium-linux-${arch}.tar.gz" \
+  curl -fsSL "https://github.com/cilium/cilium-cli/releases/download/v${CILIUM_CLI_VERSION}/cilium-linux-${arch}.tar.gz" \
     | tar -xz -C /usr/local/bin
   chmod +x /usr/local/bin/cilium
 
@@ -214,11 +216,11 @@ main() {
   echo ""
 
   setup_kernel
+  setup_zfs_for_k8s
   install_containerd
   install_k8s_packages
   install_helm
   install_cilium_cli
-  setup_zfs_for_k8s
 
   echo ""
   log "Kubernetes node setup complete"

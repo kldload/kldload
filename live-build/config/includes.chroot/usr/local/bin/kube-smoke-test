@@ -11,9 +11,9 @@ W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"
 
 PASS=0; FAIL=0; WARN=0
 
-pass() { echo -e "  ${G}PASS${N}  $*"; ((PASS++)); }
-fail() { echo -e "  ${R}FAIL${N}  $*"; ((FAIL++)); }
-warn() { echo -e "  ${Y}WARN${N}  $*"; ((WARN++)); }
+pass() { echo -e "  ${G}PASS${N}  $*"; ((++PASS)); }
+fail() { echo -e "  ${R}FAIL${N}  $*"; ((++FAIL)); }
+warn() { echo -e "  ${Y}WARN${N}  $*"; ((++WARN)); }
 skip() { echo -e "  ${D}SKIP${N}  $*"; }
 
 section() { echo ""; echo -e "${C}=== $* ===${N}"; }
@@ -49,7 +49,7 @@ section "Sysctl"
 
 # ── 4. Swap ────────────────────────────────────────────────────────────────
 section "Swap"
-if [[ "$(swapon --show --noheadings 2>/dev/null | wc -l)" == "0" ]]; then
+if [[ "$(cat /proc/swaps 2>/dev/null | tail -n +2 | wc -l)" == "0" ]]; then
   pass "Swap disabled"
 else
   fail "Swap is active (kubeadm requires swap off)"
