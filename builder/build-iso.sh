@@ -565,6 +565,12 @@ if [[ "$EDITION" != "core" ]]; then
         cp -r /build/live-build/config/includes.chroot/etc/skel/.vim "${ROOTFS}/home/live/.vim" 2>/dev/null || true
     fi
 
+    # Copy profile.d scripts (shell helpers, environment)
+    mkdir -p "${ROOTFS}/etc/profile.d"
+    for _pd in /build/live-build/config/includes.chroot/etc/profile.d/*.sh; do
+        [[ -f "$_pd" ]] && cp "$_pd" "${ROOTFS}/etc/profile.d/"
+    done
+
     # Create kldload-webui systemd service
     cat > "${ROOTFS}/usr/lib/systemd/system/kldload-webui.service" << 'SVCEOF'
 [Unit]
