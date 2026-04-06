@@ -904,5 +904,15 @@ KUBEFB
     k_log "After boot, run: kube-init (control plane) or kube-join <ip> (worker)"
   fi
 
+  # ── SELinux on ZFS — set permissive and trigger autorelabel ────────────
+  # ZFS creates files with unlabeled_t contexts. SELinux enforcing + unlabeled_t
+  # = login denied, SSH denied, everything denied. Set permissive until relabel
+  # completes on first boot, then the user can switch to enforcing.
+  if [[ -f "${target}/etc/selinux/config" ]]; then
+    sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' "${target}/etc/selinux/config"
+    touch "${target}/.autorelabel"
+    k_log "SELinux set to permissive + autorelabel on first boot (ZFS unlabeled_t workaround)"
+  fi
+
   k_log "System files installed (root_ds=${root_ds})"
 }
