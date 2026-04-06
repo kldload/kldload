@@ -186,6 +186,7 @@ k_profile_packages() {
 k_profile_optional_packages() {
   local out=()
   local _distro="${KLDLOAD_DISTRO:-debian}"
+  local _profile="${KLDLOAD_PROFILE:-server}"
   if [[ "${KLDLOAD_ENABLE_EBPF:-0}" == "1" ]]; then
     if [[ "$_distro" == "arch" ]]; then
       out+=(bcc bcc-tools bpftrace perf)
