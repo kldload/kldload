@@ -210,21 +210,28 @@ META
 #cloud-config
 hostname: ${GOLDEN}
 manage_etc_hosts: true
-ssh_authorized_keys:
-  - ${pubkey}
+disable_root: false
+ssh_pwauth: true
 users:
+  - default
   - name: root
     lock_passwd: false
     ssh_authorized_keys:
       - ${pubkey}
-ssh_pwauth: true
+    shell: /bin/bash
 chpasswd:
   expire: false
-  list:
-    - root:kldload
+  users:
+    - name: root
+      password: kldload
+      type: text
+ssh_authorized_keys:
+  - ${pubkey}
 package_update: false
 runcmd:
-  # Signal that cloud-init is done
+  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - systemctl restart sshd
   - touch /var/lib/cloud/instance/kube-golden-ready
 USERDATA
 
