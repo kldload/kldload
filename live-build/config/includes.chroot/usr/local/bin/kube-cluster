@@ -332,7 +332,7 @@ NETCFG
   log "Sealing golden image for cloning..."
   _ssh_cmd "$golden_ip" "cloud-init clean --logs 2>/dev/null || true"
   _ssh_cmd "$golden_ip" "rm -f /etc/machine-id; touch /etc/machine-id"
-  _ssh_cmd "$golden_ip" "rm -f /etc/ssh/ssh_host_*"
+  # Keep SSH host keys in golden — clones will regenerate via cloud-init runcmd
   _ssh_cmd "$golden_ip" "truncate -s 0 /etc/hostname"
 
   # Shut down
@@ -401,18 +401,25 @@ META
 #cloud-config
 hostname: ${vm}
 manage_etc_hosts: true
+disable_root: false
+ssh_pwauth: true
 ssh_authorized_keys:
   - ${pubkey}
 users:
+  - default
   - name: root
     lock_passwd: false
     ssh_authorized_keys:
       - ${pubkey}
 chpasswd:
   expire: false
-  list:
-    - root:kldload
-ssh_pwauth: true
+  users:
+    - name: root
+      password: kldload
+      type: text
+runcmd:
+  - dpkg-reconfigure openssh-server 2>/dev/null || ssh-keygen -A
+  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
 USERDATA
 
     cat > "${ci_dir}/network-config" <<NETCFG
