@@ -792,8 +792,9 @@ STORAGE
     # Create the container storage dataset
     chroot "${target}" bash -c 'zfs create -p -o mountpoint=/var/lib/containers/storage/zfs rpool/var/lib/containers/storage/zfs' 2>/dev/null || true
 
-    # Enable libvirtd
+    # Enable libvirtd + default network (virbr0)
     chroot "${target}" systemctl enable libvirtd 2>/dev/null || true
+    chroot "${target}" bash -c 'virsh net-autostart default 2>/dev/null || true' 2>/dev/null || true
 
     k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots, kvm-* tools, Podman ZFS driver"
   fi
