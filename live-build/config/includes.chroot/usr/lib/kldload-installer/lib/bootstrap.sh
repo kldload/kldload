@@ -1074,33 +1074,24 @@ NMCONF
     fi
   fi
   if [[ "$_nvidia" == "1" ]]; then
-    k_log_to "$log" "Installing NVIDIA drivers for Debian..."
-    # Enable non-free-firmware repo (needed for nvidia-driver)
+    k_log_to "$log" "Installing NVIDIA drivers for Debian/Ubuntu..."
+    # The darksite mirror only has 'main' — NVIDIA drivers are in non-free.
+    # Add the real Debian/Ubuntu mirror temporarily for NVIDIA packages.
+    local _nvidia_list="${target}/etc/apt/sources.list.d/nvidia-debian.list"
     if [[ "$distro" == "debian" ]]; then
-      sed -i 's/main$/main contrib non-free non-free-firmware/' \
-        "${target}/etc/apt/sources.list" 2>/dev/null || true
-      # Also fix sources.list.d if deb822 format
-      for _sl in "${target}"/etc/apt/sources.list.d/*.sources; do
-        [[ -f "$_sl" ]] && sed -i '/^Components:/ s/$/ contrib non-free non-free-firmware/' "$_sl" 2>/dev/null || true
-      done
+      echo "deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware" \
+        > "$_nvidia_list"
     elif [[ "$distro" == "ubuntu" ]]; then
-      # Ubuntu: restricted and multiverse for NVIDIA
-      sed -i 's/main$/main restricted universe multiverse/' \
-        "${target}/etc/apt/sources.list" 2>/dev/null || true
-      for _sl in "${target}"/etc/apt/sources.list.d/*.sources; do
-        [[ -f "$_sl" ]] && sed -i '/^Components:/ s/$/ restricted universe multiverse/' "$_sl" 2>/dev/null || true
-      done
+      echo "deb http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse" \
+        > "$_nvidia_list"
     fi
     DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >> "$log" 2>&1 || true
     DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y --no-install-recommends \
-      nvidia-driver nvidia-kernel-dkms nvidia-sysctl \
-      pciutils \
+      nvidia-driver firmware-misc-nonfree pciutils \
       >> "$log" 2>&1 || k_log_to "$log" "WARNING: NVIDIA driver install had issues"
     # nvidia-container-toolkit from NVIDIA's own repo
     curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
       | gpg --batch --yes --dearmor -o "${target}/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg" 2>/dev/null
-    local _nct_dist="debian12"
-    [[ "$distro" == "ubuntu" ]] && _nct_dist="ubuntu22.04"
     echo "deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/\$(ARCH) /" \
       > "${target}/etc/apt/sources.list.d/nvidia-container-toolkit.list"
     DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >> "$log" 2>&1 || true
