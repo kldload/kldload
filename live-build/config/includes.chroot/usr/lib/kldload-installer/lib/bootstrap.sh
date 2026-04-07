@@ -1087,7 +1087,7 @@ NMCONF
     fi
     DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >> "$log" 2>&1 || true
     DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y --no-install-recommends \
-      nvidia-driver firmware-misc-nonfree pciutils \
+      nvidia-driver nvidia-smi firmware-misc-nonfree pciutils \
       >> "$log" 2>&1 || k_log_to "$log" "WARNING: NVIDIA driver install had issues"
     # nvidia-container-toolkit from NVIDIA's own repo
     curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
