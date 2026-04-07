@@ -1107,8 +1107,8 @@ NMCONF
     k_log_to "$log" "Generating WireGuard keys..."
     install -d -m700 "${target}/etc/wireguard"
     local _wg_privkey _wg_pubkey
-    _wg_privkey="$(wg genkey 2>/dev/null)"
-    _wg_pubkey="$(echo "$_wg_privkey" | wg pubkey 2>/dev/null)"
+    _wg_privkey="$(k_in_chroot "${target}" wg genkey 2>/dev/null)"
+    _wg_pubkey="$(echo "$_wg_privkey" | k_in_chroot "${target}" wg pubkey 2>/dev/null)"
     if [[ -n "$_wg_privkey" ]]; then
       cat > "${target}/etc/wireguard/wg0.conf" <<WGEOF
 [Interface]
