@@ -9,6 +9,8 @@ if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
 SVC_CIDR="${SVC_CIDR:-10.96.0.0/12}"
 CILIUM_VERSION="${CILIUM_VERSION:-1.16.5}"
+METALLB_VERSION="${METALLB_VERSION:-0.14.9}"
+METALLB_POOL="${METALLB_POOL:-}"  # auto-detect from node subnet if empty
 
 log()  { echo -e "\033[1;32m[kube-init]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[kube-init]\033[0m $*" >&2; }
@@ -126,6 +128,7 @@ install_cilium() {
     --set hubble.metrics.enableOpenMetrics=true \
     --set hubble.metrics.enabled="{dns,drop,tcp,flow,port-distribution,icmp,httpV2:exemplars=true;labelsContext=source_ip\,source_namespace\,source_workload\,destination_ip\,destination_namespace\,destination_workload\,traffic_direction}" \
     --set operator.replicas=1 \
+    --set gatewayAPI.enabled=true \
     --wait --timeout 300s \
     2>&1
 
@@ -136,6 +139,153 @@ install_cilium() {
   cilium status --wait --wait-duration 120s 2>/dev/null || true
 
   log "Cilium CNI is operational"
+}
+
+# ── Install Gateway API CRDs ──────────────────────────────────────────────
+install_gateway_api() {
+  log "Installing Gateway API CRDs..."
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.1/config/crd/standard/gateway.networking.k8s.io_gatewayclasses.yaml 2>/dev/null || true
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.1/config/crd/standard/gateway.networking.k8s.io_gateways.yaml 2>/dev/null || true
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.1/config/crd/standard/gateway.networking.k8s.io_httproutes.yaml 2>/dev/null || true
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.1/config/crd/standard/gateway.networking.k8s.io_referencegrants.yaml 2>/dev/null || true
+
+  # Create default GatewayClass for Cilium
+  kubectl apply -f - <<'GWCLASS' 2>/dev/null || true
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: cilium
+spec:
+  controllerName: io.cilium/gateway-controller
+GWCLASS
+  log "Gateway API CRDs + Cilium GatewayClass installed"
+}
+
+# ── Install MetalLB ──────────────────────────────────────────────────────
+install_metallb() {
+  log "Installing MetalLB v${METALLB_VERSION}..."
+
+  helm repo add metallb https://metallb.github.io/metallb 2>/dev/null || true
+  helm repo update >/dev/null 2>&1
+
+  helm install metallb metallb/metallb \
+    --namespace metallb-system --create-namespace \
+    --version "${METALLB_VERSION}" \
+    --wait --timeout 120s \
+    2>&1
+
+  # Wait for controller to be ready before applying config
+  kubectl rollout status deployment/metallb-controller -n metallb-system --timeout=60s 2>/dev/null || true
+  sleep 5
+
+  # Auto-detect IP pool from node's subnet if not specified
+  local pool="$METALLB_POOL"
+  if [[ -z "$pool" ]]; then
+    local node_ip
+    node_ip="$(detect_node_ip)"
+    local subnet
+    subnet="$(echo "$node_ip" | cut -d. -f1-3)"
+    # Reserve .200-.220 range for LoadBalancer services
+    pool="${subnet}.200-${subnet}.220"
+    log "Auto-detected MetalLB pool: ${pool}"
+  fi
+
+  # Apply L2 advertisement + IP pool
+  kubectl apply -f - <<METALLB_CFG 2>/dev/null
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: default-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - ${pool}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: default-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - default-pool
+METALLB_CFG
+
+  log "MetalLB installed — LoadBalancer pool: ${pool}"
+}
+
+# ── Install OpenEBS ZFS LocalPV CSI ─────────────────────────────────────
+install_zfs_csi() {
+  if ! command -v zfs >/dev/null 2>&1; then
+    log "ZFS not available — skipping ZFS CSI driver"
+    return 0
+  fi
+
+  log "Installing OpenEBS ZFS LocalPV CSI driver..."
+
+  helm repo add openebs-zfslocalpv https://openebs.github.io/zfs-localpv 2>/dev/null || true
+  helm repo update >/dev/null 2>&1
+
+  helm install zfs-localpv openebs-zfslocalpv/zfs-localpv \
+    --namespace openebs --create-namespace \
+    --set zfsNode.encrKeysDir=/etc/openebs \
+    --wait --timeout 120s \
+    2>&1
+
+  # Detect the ZFS pool
+  local pool
+  pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
+  : "${pool:=rpool}"
+
+  # Create the K8s dataset if it doesn't exist
+  zfs create -p -o mountpoint=none -o compression=lz4 "${pool}/k8s-volumes" 2>/dev/null || true
+
+  # Create default StorageClass
+  kubectl apply -f - <<ZFSC 2>/dev/null
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: zfs
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: zfs.csi.openebs.io
+parameters:
+  poolname: "${pool}/k8s-volumes"
+  compression: "lz4"
+  recordsize: "128k"
+  fstype: "zfs"
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: zfs-db
+provisioner: zfs.csi.openebs.io
+parameters:
+  poolname: "${pool}/k8s-volumes"
+  compression: "lz4"
+  recordsize: "8k"
+  fstype: "zfs"
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+ZFSC
+
+  # Create VolumeSnapshotClass
+  kubectl apply -f - <<SNAPC 2>/dev/null || true
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: zfs-snapshot
+  annotations:
+    snapshot.storage.kubernetes.io/is-default-class: "true"
+driver: zfs.csi.openebs.io
+deletionPolicy: Delete
+SNAPC
+
+  log "ZFS CSI installed — StorageClasses: zfs (default, 128k), zfs-db (8k for databases)"
 }
 
 # ── Generate join command ──────────────────────────────────────────────────
@@ -175,19 +325,26 @@ print_status() {
   echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
   echo ""
   echo -e "  API Server:     \033[1;32mhttps://$(detect_node_ip):6443\033[0m"
-  echo -e "  CNI:            \033[1;32mCilium v${CILIUM_VERSION} (eBPF, kube-proxy replacement)\033[0m"
+  echo -e "  CNI:            \033[1;32mCilium v${CILIUM_VERSION} (eBPF, replaces kube-proxy)\033[0m"
+  echo -e "  Ingress:        \033[1;32mCilium Gateway API\033[0m"
+  echo -e "  Load Balancer:  \033[1;32mMetalLB v${METALLB_VERSION} (L2 mode)\033[0m"
+  echo -e "  Storage:        \033[1;32mOpenEBS ZFS LocalPV (default: zfs, db: zfs-db)\033[0m"
+  echo -e "  Observability:  \033[1;32mHubble (relay + UI)\033[0m"
   echo -e "  Pod CIDR:       $POD_CIDR"
   echo -e "  Service CIDR:   $SVC_CIDR"
-  echo -e "  Hubble:         \033[1;32menabled (relay + UI)\033[0m"
   echo ""
   kubectl get nodes -o wide 2>/dev/null || true
   echo ""
-  kubectl get pods -A -o wide 2>/dev/null | head -20 || true
+  kubectl get pods -A 2>/dev/null | head -25 || true
+  echo ""
+  echo -e "  \033[1;33mStorage Classes:\033[0m"
+  kubectl get sc 2>/dev/null | head -5 || true
   echo ""
   echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
   echo -e "  \033[0;37mAdd workers:  kube-join $(detect_node_ip)\033[0m"
   echo -e "  \033[0;37mCluster info: kube-status\033[0m"
   echo -e "  \033[0;37mHubble UI:    kubectl port-forward -n kube-system svc/hubble-ui 12000:80\033[0m"
+  echo -e "  \033[0;37mGateway:      kubectl apply -f my-gateway.yaml\033[0m"
   echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
 }
 
@@ -197,6 +354,9 @@ main() {
   snapshot_before_init
   run_kubeadm_init
   install_cilium
+  install_gateway_api
+  install_metallb
+  install_zfs_csi
   remove_control_plane_taint
   generate_join_command
   print_status
