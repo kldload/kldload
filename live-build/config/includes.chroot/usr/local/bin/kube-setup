@@ -69,6 +69,10 @@ install_containerd() {
   log "Installing containerd..."
 
   if [[ "$PM" == "dnf" ]]; then
+    # Add Docker CE repo for containerd.io (not in default CentOS repos)
+    if ! dnf list containerd.io 2>/dev/null | grep -q containerd; then
+      dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
+    fi
     dnf install -y containerd.io 2>/dev/null || dnf install -y containerd
   else
     apt-get update -y >/dev/null 2>&1
