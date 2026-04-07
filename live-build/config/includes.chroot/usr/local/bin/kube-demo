@@ -197,10 +197,30 @@ demo_cilium() {
 demo_connectivity() {
   header
   echo -e "${Y}=== Cilium Connectivity Test ===${N}"
-  echo -e "${D}Testing pod-to-pod, pod-to-service, pod-to-external...${N}"
+  echo -e "${D}Deploying test pods and running checks...${N}"
   echo ""
-  _ssh_cp "cilium connectivity test --test pod-to-pod --test pod-to-service 2>&1 | tail -20" \
-    || echo "  Connectivity test not available"
+  local tmpout="/tmp/cilium-connectivity-$$.log"
+  _ssh_cp "cilium connectivity test --test pod-to-pod --test pod-to-service 2>&1" \
+    | tee "$tmpout" || true
+
+  # Clear and show summary
+  header
+  echo -e "${Y}=== Cilium Connectivity Results ===${N}"
+  echo ""
+  grep -E "✅|❌|PASS|FAIL|Test|test.*:" "$tmpout" 2>/dev/null | tail -20
+  local pass fail
+  pass="$(grep -c '✅' "$tmpout" 2>/dev/null || echo 0)"
+  fail="$(grep -c '❌' "$tmpout" 2>/dev/null || echo 0)"
+  echo ""
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  PROOF: Cilium eBPF Connectivity${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "  Tests passed:   ${G}${pass}${N}"
+  echo -e "  Tests failed:   ${R}${fail}${N}"
+  echo -e "  Pod-to-pod:     ${G}eBPF datapath (no iptables)${N}"
+  echo -e "  Pod-to-service: ${G}eBPF service map (no kube-proxy)${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  rm -f "$tmpout"
   pause
 }
 

@@ -138,6 +138,15 @@ ensure_ssh_key() {
   fi
 }
 
+# ── Detect host distro ────────────────────────────────────────────────────
+detect_host_distro() {
+  local id=""
+  [[ -f /etc/os-release ]] && id="$(. /etc/os-release && echo "$ID")"
+  echo "${id:-centos}"
+}
+
+HOST_DISTRO="$(detect_host_distro)"
+
 # ── Find cloud image ──────────────────────────────────────────────────────
 find_cloud_image() {
   # Use explicit image if provided
@@ -146,7 +155,7 @@ find_cloud_image() {
     return 0
   fi
 
-  # Search common locations
+  # Search common locations — prefer images matching host distro
   local search_dirs=("/var/lib/libvirt/isos" "/root" "/tmp")
   for dir in "${search_dirs[@]}"; do
     for img in "${dir}"/*-GenericCloud*.qcow2 "${dir}"/*-genericcloud*.qcow2 \
@@ -155,10 +164,26 @@ find_cloud_image() {
     done
   done
 
-  # Download CentOS Stream 9 cloud image
-  local url="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
-  local dest="/var/lib/libvirt/isos/CentOS-Stream-9-GenericCloud.qcow2"
-  warn "No cloud image found. Downloading CentOS Stream 9..."
+  # Download cloud image matching host distro
+  local url dest
+  mkdir -p /var/lib/libvirt/isos
+  case "$HOST_DISTRO" in
+    debian)
+      url="https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-genericcloud-amd64-daily.qcow2"
+      dest="/var/lib/libvirt/isos/debian-13-genericcloud-amd64.qcow2"
+      warn "No cloud image found. Downloading Debian 13 (Trixie)..."
+      ;;
+    ubuntu)
+      url="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+      dest="/var/lib/libvirt/isos/ubuntu-24.04-cloudimg-amd64.qcow2"
+      warn "No cloud image found. Downloading Ubuntu 24.04..."
+      ;;
+    *)
+      url="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
+      dest="/var/lib/libvirt/isos/CentOS-Stream-9-GenericCloud.qcow2"
+      warn "No cloud image found. Downloading CentOS Stream 9..."
+      ;;
+  esac
   curl -fSL -o "$dest" "$url" || die "Failed to download cloud image"
   echo "$dest"
 }
@@ -251,7 +276,7 @@ USERDATA
   virt-install \
     --name "${GOLDEN}" \
     --ram "${RAM}" --vcpus "${CPUS}" \
-    --os-variant centos-stream9 \
+    --os-variant "$(case $HOST_DISTRO in debian) echo debian12;; ubuntu) echo ubuntu24.04;; *) echo centos-stream9;; esac)" \
     --disk "path=${zvol},bus=virtio" \
     --disk "path=${ci_iso},device=cdrom" \
     --network bridge=virbr0,model=virtio \
