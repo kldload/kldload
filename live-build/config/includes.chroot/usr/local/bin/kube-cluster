@@ -105,9 +105,19 @@ wait_for_ssh() {
 get_vm_ip() {
   local vm="$1"
   local ip=""
-  for _ in $(seq 1 30); do
+  local mac=""
+  for _ in $(seq 1 45); do
+    # Method 1: virsh domifaddr (requires qemu-guest-agent)
     ip="$(virsh domifaddr "$vm" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1)"
     [[ -n "$ip" ]] && break
+    # Method 2: match MAC from VM definition to DHCP leases
+    if [[ -z "$mac" ]]; then
+      mac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}')"
+    fi
+    if [[ -n "$mac" ]]; then
+      ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
+      [[ -n "$ip" ]] && break
+    fi
     sleep 2
   done
   echo "$ip"
