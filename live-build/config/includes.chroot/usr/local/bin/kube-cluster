@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
-# kube-cluster — deploy a Kubernetes cluster on KVM using ZFS clones
-# Creates control plane + worker VMs from a golden image, bootstraps with kubeadm + Cilium
+# kube-cluster — deploy a Kubernetes cluster on KVM using ZFS instant clones
+# One command: cloud image → golden → clone N nodes → WireGuard → Cilium → done
 #
 # Usage:
-#   kube-cluster create [--workers N] [--ram MB] [--cpus N] [--golden NAME]
+#   kube-cluster bootstrap [--workers N] [--ram MB] [--cpus N] [--disk GB]
 #   kube-cluster destroy
 #   kube-cluster status
-#
-# Requires: KVM profile with kvm-clone, a golden image with kube-setup already run
+#   kube-cluster golden   (build golden image only, skip cluster deploy)
 set -euo pipefail
 
-# Auto-elevate to root
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 WORKERS="${WORKERS:-3}"
 RAM="${RAM:-4096}"
 CPUS="${CPUS:-2}"
-GOLDEN="${GOLDEN:-k8s-golden}"
+DISK="${DISK:-40}"
+GOLDEN="k8s-golden"
 CLUSTER_NAME="${CLUSTER_NAME:-kldload}"
-POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
+CLOUD_IMAGE="${CLOUD_IMAGE:-}"
+SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
+POOL="rpool"
 
 C="\033[1;36m"; G="\033[1;32m"; Y="\033[1;33m"; R="\033[1;31m"
 W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"
@@ -27,29 +28,47 @@ log()  { echo -e "${G}[kube-cluster]${N} $*"; }
 warn() { echo -e "${Y}[kube-cluster]${N} $*" >&2; }
 die()  { echo -e "${R}[kube-cluster]${N} $*" >&2; exit 1; }
 
+CP_NAME="${CLUSTER_NAME}-cp"
+WORKER_PREFIX="${CLUSTER_NAME}-w"
+
 usage() {
-  cat <<EOF
+  cat <<'EOF'
 Usage: kube-cluster <command> [options]
 
 Commands:
-  create    Create a Kubernetes cluster on KVM
-  destroy   Tear down the cluster (VMs + zvols)
-  status    Show cluster status
+  bootstrap   Build golden image + deploy full cluster (one command)
+  golden      Build golden image only (for manual cluster creation)
+  destroy     Tear down the cluster (VMs + zvols)
+  status      Show cluster status
+  scale N     Add N more workers to existing cluster
 
-Options (create):
+Options:
   --workers N      Number of worker nodes (default: 3)
   --ram MB         RAM per node in MB (default: 4096)
   --cpus N         vCPUs per node (default: 2)
-  --golden NAME    Golden image name (default: k8s-golden)
+  --disk GB        Disk per node in GB (default: 40)
+  --image PATH     Cloud image (qcow2) — auto-detected if omitted
 
-The golden image must exist as a ZFS zvol at rpool/vms/<golden>.
-Build it with: kvm-create k8s-golden && kube-setup (inside the VM)
+Flow:
+  kube-cluster bootstrap --workers 3
+    1. Find/download cloud image (CentOS or Debian qcow2)
+    2. Import to ZFS zvol, boot with cloud-init
+    3. Run kube-setup inside VM (install kubeadm, containerd, etc.)
+    4. Shut down + snapshot = golden image (cached for next time)
+    5. Clone golden → control plane + N workers (~100ms each)
+    6. Boot all, configure WireGuard mesh
+    7. kube-init on CP (Cilium + MetalLB + ZFS CSI + Gateway API + Hubble)
+    8. kube-join on workers
+    9. Smoke test → done
+
+Subsequent runs skip steps 1-4 (golden image is cached).
 
 Examples:
-  kube-cluster create
-  kube-cluster create --workers 5 --ram 8192 --cpus 4
-  kube-cluster destroy
-  kube-cluster status
+  kube-cluster bootstrap                  # 1 CP + 3 workers, 4GB RAM each
+  kube-cluster bootstrap --workers 5      # 1 CP + 5 workers
+  kube-cluster bootstrap --ram 8192       # 8GB RAM per node
+  kube-cluster destroy                    # tear down everything
+  kube-cluster status                     # cluster health
 EOF
   exit 1
 }
@@ -64,83 +83,455 @@ while [[ $# -gt 0 ]]; do
     --workers) WORKERS="$2"; shift 2 ;;
     --ram)     RAM="$2"; shift 2 ;;
     --cpus)    CPUS="$2"; shift 2 ;;
-    --golden)  GOLDEN="$2"; shift 2 ;;
+    --disk)    DISK="$2"; shift 2 ;;
+    --image)   CLOUD_IMAGE="$2"; shift 2 ;;
     *)         die "Unknown option: $1" ;;
   esac
 done
 
-CP_NAME="${CLUSTER_NAME}-cp"
-WORKER_PREFIX="${CLUSTER_NAME}-worker"
+# ── Helpers ────────────────────────────────────────────────────────────────
+wait_for_ssh() {
+  local ip="$1" max="${2:-60}"
+  local i=0
+  while ! ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 -o BatchMode=yes \
+    "root@${ip}" true 2>/dev/null; do
+    ((i++))
+    [[ $i -ge $max ]] && return 1
+    sleep 2
+  done
+  return 0
+}
 
-# ── Create ─────────────────────────────────────────────────────────────────
-cmd_create() {
-  # Verify golden image exists
-  if ! zfs list "rpool/vms/${GOLDEN}" >/dev/null 2>&1; then
-    die "Golden image rpool/vms/${GOLDEN} not found. Create it first:
-  kvm-create ${GOLDEN} --ram ${RAM} --cpus ${CPUS} --disk 40
-  (install OS, run kube-setup inside the VM, shut down)
-  kvm-snap ${GOLDEN}"
+get_vm_ip() {
+  local vm="$1"
+  local ip=""
+  for _ in $(seq 1 30); do
+    ip="$(virsh domifaddr "$vm" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1)"
+    [[ -n "$ip" ]] && break
+    sleep 2
+  done
+  echo "$ip"
+}
+
+ssh_cmd() {
+  local ip="$1"; shift
+  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
+    "root@${ip}" "$@" 2>/dev/null
+}
+
+ensure_ssh_key() {
+  if [[ ! -f "$SSH_KEY" ]]; then
+    log "Generating SSH key for cluster management..."
+    ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
+  fi
+}
+
+# ── Find cloud image ──────────────────────────────────────────────────────
+find_cloud_image() {
+  # Use explicit image if provided
+  if [[ -n "$CLOUD_IMAGE" && -f "$CLOUD_IMAGE" ]]; then
+    echo "$CLOUD_IMAGE"
+    return 0
   fi
 
-  log "Creating Kubernetes cluster: 1 control plane + ${WORKERS} workers"
-  log "  Golden image: rpool/vms/${GOLDEN}"
-  log "  RAM: ${RAM}MB, CPUs: ${CPUS}"
+  # Search common locations
+  local search_dirs=("/var/lib/libvirt/isos" "/root" "/tmp")
+  for dir in "${search_dirs[@]}"; do
+    for img in "${dir}"/*-GenericCloud*.qcow2 "${dir}"/*-genericcloud*.qcow2 \
+               "${dir}"/*-cloud*.qcow2 "${dir}"/*nocloud*.qcow2; do
+      [[ -f "$img" ]] && { echo "$img"; return 0; }
+    done
+  done
+
+  # Download CentOS Stream 9 cloud image
+  local url="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
+  local dest="/var/lib/libvirt/isos/CentOS-Stream-9-GenericCloud.qcow2"
+  log "No cloud image found. Downloading CentOS Stream 9..."
+  curl -fSL -o "$dest" "$url" || die "Failed to download cloud image"
+  echo "$dest"
+}
+
+# ── Build golden image ────────────────────────────────────────────────────
+build_golden() {
+  if zfs list "${POOL}/vms/${GOLDEN}" >/dev/null 2>&1; then
+    log "Golden image ${GOLDEN} already exists — skipping build"
+    log "  (delete with: kvm-delete ${GOLDEN} to force rebuild)"
+    return 0
+  fi
+
+  log "Building golden image: ${GOLDEN}"
+
+  local cloud_img
+  cloud_img="$(find_cloud_image)"
+  log "Using cloud image: ${cloud_img}"
+
+  ensure_ssh_key
+  local pubkey
+  pubkey="$(cat "${SSH_KEY}.pub")"
+
+  # Create ZFS zvol
+  log "Creating ZFS zvol (${DISK}G)..."
+  zfs create -V "${DISK}G" -s -o volblocksize=64k \
+    -o compression=lz4 "${POOL}/vms/${GOLDEN}" 2>/dev/null || true
+
+  # Wait for zvol device
+  local zvol="/dev/zvol/${POOL}/vms/${GOLDEN}"
+  for _ in $(seq 1 10); do [[ -b "$zvol" ]] && break; sleep 1; done
+  [[ -b "$zvol" ]] || die "ZFS zvol device not found: ${zvol}"
+
+  # Import qcow2 to zvol
+  log "Importing cloud image to ZFS zvol..."
+  qemu-img convert -f qcow2 -O raw "$cloud_img" "$zvol"
+
+  # Resize the partition to fill the zvol
+  growpart "$zvol" 1 2>/dev/null || true
+
+  # Create cloud-init ISO
+  log "Creating cloud-init configuration..."
+  local ci_dir
+  ci_dir="$(mktemp -d)"
+
+  cat > "${ci_dir}/meta-data" <<META
+instance-id: ${GOLDEN}
+local-hostname: ${GOLDEN}
+META
+
+  cat > "${ci_dir}/user-data" <<USERDATA
+#cloud-config
+hostname: ${GOLDEN}
+manage_etc_hosts: true
+ssh_authorized_keys:
+  - ${pubkey}
+users:
+  - name: root
+    lock_passwd: false
+    ssh_authorized_keys:
+      - ${pubkey}
+ssh_pwauth: true
+chpasswd:
+  expire: false
+  list:
+    - root:kldload
+package_update: false
+runcmd:
+  # Signal that cloud-init is done
+  - touch /var/lib/cloud/instance/kube-golden-ready
+USERDATA
+
+  local ci_iso="/var/lib/libvirt/isos/${GOLDEN}-cloud-init.iso"
+  genisoimage -output "$ci_iso" -volid cidata -joliet -rock \
+    "${ci_dir}/user-data" "${ci_dir}/meta-data" 2>/dev/null \
+    || mkisofs -output "$ci_iso" -volid cidata -joliet -rock \
+      "${ci_dir}/user-data" "${ci_dir}/meta-data" 2>/dev/null \
+    || xorriso -as mkisofs -o "$ci_iso" -volid cidata -joliet -rock \
+      "${ci_dir}/user-data" "${ci_dir}/meta-data" 2>/dev/null
+  rm -rf "$ci_dir"
+
+  # Create and boot VM with cloud-init
+  log "Booting golden VM..."
+  virt-install \
+    --name "${GOLDEN}" \
+    --ram "${RAM}" --vcpus "${CPUS}" \
+    --os-variant centos-stream9 \
+    --disk "path=${zvol},bus=virtio" \
+    --disk "path=${ci_iso},device=cdrom" \
+    --network bridge=virbr0,model=virtio \
+    --graphics vnc,listen=0.0.0.0 \
+    --noautoconsole \
+    --import \
+    2>&1 || die "Failed to boot golden VM"
+
+  # Wait for VM to boot and get IP
+  log "Waiting for golden VM to boot..."
+  local golden_ip
+  golden_ip="$(get_vm_ip "${GOLDEN}")"
+  [[ -n "$golden_ip" ]] || die "Golden VM did not get an IP"
+  log "Golden VM IP: ${golden_ip}"
+
+  # Wait for SSH
+  log "Waiting for SSH..."
+  wait_for_ssh "$golden_ip" 90 || die "SSH not available on golden VM"
+
+  # Wait for cloud-init to finish
+  log "Waiting for cloud-init..."
+  for _ in $(seq 1 60); do
+    ssh_cmd "$golden_ip" "test -f /var/lib/cloud/instance/kube-golden-ready" && break
+    sleep 5
+  done
+
+  # Install K8s packages via kube-setup
+  log "Running kube-setup in golden VM..."
+  # Copy kube-setup into the VM
+  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
+    /usr/local/bin/kube-setup "root@${golden_ip}:/usr/local/bin/kube-setup" 2>/dev/null
+  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
+    /usr/local/bin/kube-init "root@${golden_ip}:/usr/local/bin/kube-init" 2>/dev/null
+  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
+    /usr/local/bin/kube-join "root@${golden_ip}:/usr/local/bin/kube-join" 2>/dev/null
+  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
+    /usr/local/bin/kube-network "root@${golden_ip}:/usr/local/bin/kube-network" 2>/dev/null
+  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
+    /usr/local/bin/kube-status "root@${golden_ip}:/usr/local/bin/kube-status" 2>/dev/null
+  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
+    /usr/local/bin/kube-reset "root@${golden_ip}:/usr/local/bin/kube-reset" 2>/dev/null
+  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
+    /usr/local/bin/kube-smoke-test "root@${golden_ip}:/usr/local/bin/kube-smoke-test" 2>/dev/null
+  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
+    /usr/local/bin/kube-load-images "root@${golden_ip}:/usr/local/bin/kube-load-images" 2>/dev/null
+
+  ssh_cmd "$golden_ip" "chmod +x /usr/local/bin/kube-*"
+  ssh_cmd "$golden_ip" "kube-setup" || die "kube-setup failed in golden VM"
+
+  # Clean up cloud-init state so clones get fresh identity
+  log "Sealing golden image for cloning..."
+  ssh_cmd "$golden_ip" "cloud-init clean --logs 2>/dev/null || true"
+  ssh_cmd "$golden_ip" "rm -f /etc/machine-id; touch /etc/machine-id"
+  ssh_cmd "$golden_ip" "rm -f /etc/ssh/ssh_host_*"
+  ssh_cmd "$golden_ip" "truncate -s 0 /etc/hostname"
+
+  # Shut down
+  ssh_cmd "$golden_ip" "shutdown -h now" || true
+  log "Waiting for golden VM to shut down..."
+  for _ in $(seq 1 30); do
+    virsh domstate "${GOLDEN}" 2>/dev/null | grep -q "shut off" && break
+    sleep 2
+  done
+
+  # Remove cloud-init ISO
+  virsh detach-disk "${GOLDEN}" "${ci_iso}" --config 2>/dev/null || true
+  rm -f "$ci_iso"
+
+  # Snapshot the golden image
+  zfs snapshot "${POOL}/vms/${GOLDEN}@golden" 2>/dev/null || true
+
+  log "Golden image ready: ${GOLDEN}"
+  log "  ZFS zvol: ${POOL}/vms/${GOLDEN}"
+  log "  Packages: kubeadm, kubelet, kubectl, helm, cilium-cli, containerd"
+  log "  Cached for instant cloning (~100ms per node)"
+}
+
+# ── Clone + boot nodes ────────────────────────────────────────────────────
+clone_and_boot() {
+  local total=$((1 + WORKERS))
+  log "Cloning ${total} nodes from ${GOLDEN} (1 CP + ${WORKERS} workers)"
   echo ""
 
-  # ZFS snapshot before cluster creation
-  zfs snapshot "rpool/vms@pre-kube-cluster-$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || true
+  ensure_ssh_key
+  local pubkey
+  pubkey="$(cat "${SSH_KEY}.pub")"
 
   # Clone control plane
-  echo -e "${Y}=== Control Plane ===${N}"
-  echo -ne "  Cloning ${GOLDEN} → ${CP_NAME} ... "
+  echo -ne "  ${GOLDEN} → ${CP_NAME} ... "
+  local S E
   S=$(date +%s%N)
   kvm-clone "${GOLDEN}" "${CP_NAME}" >/dev/null 2>&1
   E=$(date +%s%N)
   echo -e "${G}done${N} (${C}$(( (E-S)/1000000 ))ms${N})"
 
   # Clone workers
-  echo ""
-  echo -e "${Y}=== Workers ===${N}"
   for i in $(seq 1 "$WORKERS"); do
     local name="${WORKER_PREFIX}-${i}"
-    echo -ne "  Cloning ${GOLDEN} → ${name} ... "
+    echo -ne "  ${GOLDEN} → ${name} ... "
     S=$(date +%s%N)
     kvm-clone "${GOLDEN}" "${name}" >/dev/null 2>&1
     E=$(date +%s%N)
     echo -e "${G}done${N} (${C}$(( (E-S)/1000000 ))ms${N})"
   done
 
-  # Start all VMs
   echo ""
-  echo -e "${Y}=== Starting VMs ===${N}"
-  virsh start "${CP_NAME}" 2>/dev/null && echo -e "  ${G}${CP_NAME}${N} started" || echo -e "  ${R}${CP_NAME}${N} already running"
-  for i in $(seq 1 "$WORKERS"); do
-    local name="${WORKER_PREFIX}-${i}"
-    virsh start "${name}" 2>/dev/null && echo -e "  ${G}${name}${N} started" || echo -e "  ${R}${name}${N} already running"
+  log "All ${total} nodes cloned. Starting VMs..."
+
+  # Create per-node cloud-init ISOs for unique identity
+  for vm in "${CP_NAME}" $(seq -f "${WORKER_PREFIX}-%g" 1 "$WORKERS"); do
+    local ci_dir ci_iso
+    ci_dir="$(mktemp -d)"
+    ci_iso="/var/lib/libvirt/isos/${vm}-ci.iso"
+
+    cat > "${ci_dir}/meta-data" <<META
+instance-id: ${vm}
+local-hostname: ${vm}
+META
+    cat > "${ci_dir}/user-data" <<USERDATA
+#cloud-config
+hostname: ${vm}
+manage_etc_hosts: true
+ssh_authorized_keys:
+  - ${pubkey}
+users:
+  - name: root
+    lock_passwd: false
+    ssh_authorized_keys:
+      - ${pubkey}
+chpasswd:
+  expire: false
+  list:
+    - root:kldload
+ssh_pwauth: true
+USERDATA
+
+    genisoimage -output "$ci_iso" -volid cidata -joliet -rock \
+      "${ci_dir}/user-data" "${ci_dir}/meta-data" 2>/dev/null \
+      || mkisofs -output "$ci_iso" -volid cidata -joliet -rock \
+        "${ci_dir}/user-data" "${ci_dir}/meta-data" 2>/dev/null \
+      || xorriso -as mkisofs -o "$ci_iso" -volid cidata -joliet -rock \
+        "${ci_dir}/user-data" "${ci_dir}/meta-data" 2>/dev/null
+    rm -rf "$ci_dir"
+
+    # Attach cloud-init ISO and start
+    virsh attach-disk "$vm" "$ci_iso" sdb --type cdrom --config 2>/dev/null || true
+    virsh start "$vm" 2>/dev/null && echo -e "  ${G}${vm}${N} started" \
+      || echo -e "  ${Y}${vm}${N} already running"
   done
 
-  # Wait for VMs to get IPs
+  # Wait for IPs
   echo ""
-  log "Waiting for VMs to boot and get network..."
+  log "Waiting for all nodes to get IPs..."
   sleep 15
+}
 
-  # Show status
+# ── Bootstrap: full auto cluster deploy ────────────────────────────────────
+cmd_bootstrap() {
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  kube-cluster bootstrap                                     ${N}"
+  echo -e "${W}  1 control plane + ${WORKERS} workers on ZFS instant clones         ${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo ""
-  kvm-list
 
+  # Step 1: Build or reuse golden image
+  echo -e "${Y}=== Step 1: Golden Image ===${N}"
+  build_golden
+  echo ""
+
+  # Step 2: Clone + boot
+  echo -e "${Y}=== Step 2: Clone + Boot (ZFS instant clone) ===${N}"
+  clone_and_boot
+
+  # Collect IPs
+  local cp_ip
+  cp_ip="$(get_vm_ip "${CP_NAME}")"
+  [[ -n "$cp_ip" ]] || die "Cannot get IP for ${CP_NAME}"
+
+  declare -a worker_names=()
+  declare -a worker_ips=()
+  for i in $(seq 1 "$WORKERS"); do
+    local name="${WORKER_PREFIX}-${i}"
+    local wip
+    wip="$(get_vm_ip "$name")"
+    worker_names+=("$name")
+    worker_ips+=("$wip")
+  done
+
+  echo ""
+  log "Node IPs:"
+  echo -e "  ${C}${CP_NAME}${N}  ${cp_ip}"
+  for i in $(seq 0 $((WORKERS-1))); do
+    echo -e "  ${C}${worker_names[$i]}${N}  ${worker_ips[$i]}"
+  done
+
+  # Wait for SSH on all nodes
+  echo ""
+  log "Waiting for SSH on all nodes..."
+  wait_for_ssh "$cp_ip" 90 || die "SSH not available on ${CP_NAME}"
+  for i in $(seq 0 $((WORKERS-1))); do
+    [[ -n "${worker_ips[$i]}" ]] && wait_for_ssh "${worker_ips[$i]}" 60 || warn "No SSH on ${worker_names[$i]}"
+  done
+  log "All nodes reachable via SSH"
+
+  # Step 3: WireGuard mesh
+  echo ""
+  echo -e "${Y}=== Step 3: WireGuard Encrypted Backplane ===${N}"
+
+  ssh_cmd "$cp_ip" "kube-network init 1"
+  local node_id=2
+  for i in $(seq 0 $((WORKERS-1))); do
+    [[ -n "${worker_ips[$i]}" ]] || continue
+    ssh_cmd "${worker_ips[$i]}" "kube-network init ${node_id}"
+    ((node_id++))
+  done
+
+  # Exchange keys
+  local cp_pub
+  cp_pub="$(ssh_cmd "$cp_ip" 'cat /etc/wireguard/wg-mgmt.pub')"
+
+  node_id=2
+  for i in $(seq 0 $((WORKERS-1))); do
+    local wip="${worker_ips[$i]}"
+    [[ -n "$wip" ]] || continue
+    local w_pub
+    w_pub="$(ssh_cmd "$wip" 'cat /etc/wireguard/wg-mgmt.pub')"
+    # Add worker to CP
+    ssh_cmd "$cp_ip" "kube-network add-peer ${wip} ${w_pub} ${node_id}" || true
+    # Add CP to worker
+    ssh_cmd "$wip" "kube-network add-peer ${cp_ip} ${cp_pub} 1" || true
+    ((node_id++))
+  done
+
+  # Pin kubelet to WireGuard on all nodes
+  ssh_cmd "$cp_ip" "kube-network pin-kubelet"
+  for i in $(seq 0 $((WORKERS-1))); do
+    [[ -n "${worker_ips[$i]}" ]] && ssh_cmd "${worker_ips[$i]}" "kube-network pin-kubelet"
+  done
+  log "WireGuard mesh configured"
+
+  # Step 4: Bootstrap control plane
+  echo ""
+  echo -e "${Y}=== Step 4: Control Plane (Cilium + MetalLB + ZFS CSI + Hubble) ===${N}"
+  ssh_cmd "$cp_ip" "kube-init" || die "kube-init failed"
+
+  # Step 5: Join workers
+  echo ""
+  echo -e "${Y}=== Step 5: Join Workers ===${N}"
+  local wg_cp="10.251.0.1"
+  for i in $(seq 0 $((WORKERS-1))); do
+    local wip="${worker_ips[$i]}"
+    [[ -n "$wip" ]] || continue
+    log "Joining ${worker_names[$i]}..."
+    ssh_cmd "$wip" "kube-join ${wg_cp}" || warn "Failed to join ${worker_names[$i]}"
+  done
+
+  # Step 6: Verify
+  echo ""
+  echo -e "${Y}=== Step 6: Verification ===${N}"
+  sleep 10
+  ssh_cmd "$cp_ip" "kubectl get nodes -o wide" || true
+
+  # Apply nftables on all nodes
+  ssh_cmd "$cp_ip" "kube-network nft" 2>/dev/null || true
+  for i in $(seq 0 $((WORKERS-1))); do
+    [[ -n "${worker_ips[$i]}" ]] && ssh_cmd "${worker_ips[$i]}" "kube-network nft" 2>/dev/null || true
+  done
+
+  # Final status
   echo ""
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
-  echo -e "${W}  Kubernetes Cluster VMs Ready                               ${N}"
-  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
-  echo -e "  Control plane:  ${G}${CP_NAME}${N}"
-  echo -e "  Workers:        ${G}${WORKERS}${N} (${WORKER_PREFIX}-1 through ${WORKER_PREFIX}-${WORKERS})"
-  echo -e "  Cloned from:    ${GOLDEN}"
-  echo -e "  Each clone:     ${G}~100ms, 0 bytes${N} (ZFS copy-on-write)"
+  echo -e "${W}  Kubernetes Cluster Deployed                                ${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo ""
-  echo -e "  ${W}Next steps:${N}"
-  echo -e "  1. SSH into ${CP_NAME} and run: ${C}kube-init${N}"
-  echo -e "  2. SSH into each worker and run: ${C}kube-join <cp-ip>${N}"
-  echo -e "  3. On the CP, verify: ${C}kube-status${N}"
+  echo -e "  ${W}Nodes:${N}"
+  echo -e "    ${C}${CP_NAME}${N}  ${cp_ip} → 10.251.0.1 (control plane)"
+  for i in $(seq 0 $((WORKERS-1))); do
+    echo -e "    ${C}${worker_names[$i]}${N}  ${worker_ips[$i]} → 10.251.0.$((i+2)) (worker)"
+  done
+  echo ""
+  echo -e "  ${W}Stack:${N}"
+  echo -e "    CNI:           ${G}Cilium (eBPF, replaces kube-proxy)${N}"
+  echo -e "    Ingress:       ${G}Cilium Gateway API${N}"
+  echo -e "    Load Balancer: ${G}MetalLB (L2)${N}"
+  echo -e "    Storage:       ${G}OpenEBS ZFS LocalPV${N}"
+  echo -e "    Observability: ${G}Hubble (relay + UI)${N}"
+  echo -e "    Backplane:     ${G}WireGuard (wg-mgmt + wg-k8s)${N}"
+  echo -e "    Hypervisor:    ${G}KVM on ZFS zvols${N}"
+  echo ""
+  echo -e "  ${W}ZFS Superpowers:${N}"
+  echo -e "    Clone time:    ${G}<100ms per node${N}"
+  echo -e "    Disk cost:     ${G}~0 bytes (copy-on-write)${N}"
+  echo -e "    Rebuild:       ${G}kube-cluster destroy && kube-cluster bootstrap${N}"
+  echo ""
+  echo -e "  ${W}Access:${N}"
+  echo -e "    ssh root@${cp_ip}"
+  echo -e "    kubectl get nodes"
+  echo -e "    kube-status"
+  echo -e "    hubble: kubectl port-forward -n kube-system svc/hubble-ui 12000:80"
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
 }
 
@@ -149,6 +540,7 @@ cmd_destroy() {
   echo -e "${R}WARNING: This will destroy the entire Kubernetes cluster${N}"
   echo "  Control plane: ${CP_NAME}"
   echo "  Workers: ${WORKER_PREFIX}-1 through ${WORKER_PREFIX}-${WORKERS}"
+  echo "  (Golden image ${GOLDEN} will be kept for reuse)"
   echo ""
   read -r -p "Type 'destroy' to continue: " confirm
   [[ "$confirm" == "destroy" ]] || { echo "Aborted."; exit 0; }
@@ -156,14 +548,22 @@ cmd_destroy() {
   log "Destroying cluster..."
 
   # Destroy control plane
-  kvm-delete "${CP_NAME}" 2>/dev/null || true
+  virsh destroy "${CP_NAME}" 2>/dev/null || true
+  virsh undefine "${CP_NAME}" --nvram 2>/dev/null || virsh undefine "${CP_NAME}" 2>/dev/null || true
+  zfs destroy -Rf "${POOL}/vms/${CP_NAME}" 2>/dev/null || true
+  rm -f "/var/lib/libvirt/isos/${CP_NAME}-ci.iso" 2>/dev/null
 
   # Destroy workers
   for i in $(seq 1 "$WORKERS"); do
-    kvm-delete "${WORKER_PREFIX}-${i}" 2>/dev/null || true
+    local name="${WORKER_PREFIX}-${i}"
+    virsh destroy "$name" 2>/dev/null || true
+    virsh undefine "$name" --nvram 2>/dev/null || virsh undefine "$name" 2>/dev/null || true
+    zfs destroy -Rf "${POOL}/vms/${name}" 2>/dev/null || true
+    rm -f "/var/lib/libvirt/isos/${name}-ci.iso" 2>/dev/null
   done
 
-  log "Cluster destroyed"
+  log "Cluster destroyed. Golden image ${GOLDEN} preserved."
+  log "Rebuild: kube-cluster bootstrap --workers ${WORKERS}"
 }
 
 # ── Status ─────────────────────────────────────────────────────────────────
@@ -174,167 +574,37 @@ cmd_status() {
   echo ""
 
   echo -e "${Y}VMs:${N}"
-  kvm-list 2>/dev/null | grep -E "${CLUSTER_NAME}|NAME|----" || echo "  No cluster VMs found"
+  kvm-list 2>/dev/null | grep -E "${CLUSTER_NAME}|${GOLDEN}|NAME|----" || echo "  No cluster VMs"
   echo ""
 
-  echo -e "${Y}ZFS Zvols:${N}"
-  zfs list -o name,used,refer,volsize -r rpool/vms -t volume 2>/dev/null | grep -E "${CLUSTER_NAME}|NAME" || echo "  None"
+  echo -e "${Y}ZFS:${N}"
+  zfs list -o name,used,refer,volsize -r "${POOL}/vms" -t volume 2>/dev/null \
+    | grep -E "${CLUSTER_NAME}|${GOLDEN}|NAME" || echo "  No zvols"
   echo ""
 
-  # Try to get K8s status from control plane
   local cp_ip
-  cp_ip="$(virsh domifaddr "${CP_NAME}" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1)" || true
+  cp_ip="$(get_vm_ip "${CP_NAME}" 2>/dev/null)" || true
   if [[ -n "$cp_ip" ]]; then
-    echo -e "${Y}Kubernetes (via ${CP_NAME} @ ${cp_ip}):${N}"
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "root@${cp_ip}" \
-      'kubectl get nodes -o wide 2>/dev/null' 2>/dev/null || echo "  Cannot reach K8s API"
+    echo -e "${Y}Kubernetes (${CP_NAME} @ ${cp_ip}):${N}"
+    ssh_cmd "$cp_ip" "kubectl get nodes -o wide" || echo "  Cannot reach API"
+    echo ""
+    ssh_cmd "$cp_ip" "kubectl get pods -A --no-headers" | awk '{print $1"/"$2, $4}' | head -15 || true
+  else
+    echo -e "${Y}Kubernetes:${N} control plane not running"
   fi
   echo ""
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
 }
 
-# ── Bootstrap — full auto: create VMs + network + init + join ──────────
-cmd_bootstrap() {
-  log "Full automated Kubernetes deployment"
-  log "  1. Clone VMs from golden image"
-  log "  2. Set up WireGuard backplane"
-  log "  3. Bootstrap control plane + Cilium"
-  log "  4. Join workers"
-  log "  5. Smoke test"
-  echo ""
-
-  # Step 1: Create VMs
-  cmd_create
-
-  # Wait for SSH to be available
-  echo ""
-  log "Waiting for SSH on all nodes..."
-  sleep 30
-
-  # Get VM IPs
-  local cp_ip
-  cp_ip="$(virsh domifaddr "${CP_NAME}" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1)" || true
-  [[ -n "$cp_ip" ]] || die "Cannot get IP for ${CP_NAME}. Check VM networking."
-
-  declare -A worker_ips
-  for i in $(seq 1 "$WORKERS"); do
-    local name="${WORKER_PREFIX}-${i}"
-    local wip
-    wip="$(virsh domifaddr "${name}" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1)" || true
-    worker_ips["$name"]="$wip"
-  done
-
-  log "VM IPs:"
-  log "  ${CP_NAME}: ${cp_ip}"
-  for name in "${!worker_ips[@]}"; do
-    log "  ${name}: ${worker_ips[$name]}"
-  done
-
-  # Step 2: Set up WireGuard backplane
-  echo ""
-  echo -e "${Y}=== Setting Up WireGuard Backplane ===${N}"
-
-  # Init WG on control plane (node 1)
-  ssh -o StrictHostKeyChecking=no "root@${cp_ip}" \
-    "kube-network init 1" 2>/dev/null || warn "WG init failed on CP"
-
-  # Init WG on workers
-  local node_id=2
-  for i in $(seq 1 "$WORKERS"); do
-    local name="${WORKER_PREFIX}-${i}"
-    local wip="${worker_ips[$name]}"
-    [[ -n "$wip" ]] || { warn "No IP for $name, skipping WG"; continue; }
-    ssh -o StrictHostKeyChecking=no "root@${wip}" \
-      "kube-network init ${node_id}" 2>/dev/null || warn "WG init failed on $name"
-    ((node_id++))
-  done
-
-  # Exchange WG keys between all nodes
-  local cp_mgmt_pub cp_k8s_pub
-  cp_mgmt_pub="$(ssh -o StrictHostKeyChecking=no "root@${cp_ip}" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)"
-  cp_k8s_pub="$(ssh -o StrictHostKeyChecking=no "root@${cp_ip}" 'cat /etc/wireguard/wg-k8s.pub' 2>/dev/null)"
-
-  node_id=2
-  for i in $(seq 1 "$WORKERS"); do
-    local name="${WORKER_PREFIX}-${i}"
-    local wip="${worker_ips[$name]}"
-    [[ -n "$wip" ]] || continue
-
-    local w_pub
-    w_pub="$(ssh -o StrictHostKeyChecking=no "root@${wip}" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)"
-
-    # Add worker as peer on CP
-    ssh -o StrictHostKeyChecking=no "root@${cp_ip}" \
-      "kube-network add-peer ${wip} ${w_pub} ${node_id}" 2>/dev/null || true
-
-    # Add CP as peer on worker
-    ssh -o StrictHostKeyChecking=no "root@${wip}" \
-      "kube-network add-peer ${cp_ip} ${cp_mgmt_pub} 1" 2>/dev/null || true
-
-    ((node_id++))
-  done
-
-  # Pin kubelet on all nodes
-  ssh -o StrictHostKeyChecking=no "root@${cp_ip}" "kube-network pin-kubelet" 2>/dev/null || true
-  for i in $(seq 1 "$WORKERS"); do
-    local name="${WORKER_PREFIX}-${i}"
-    local wip="${worker_ips[$name]}"
-    [[ -n "$wip" ]] || continue
-    ssh -o StrictHostKeyChecking=no "root@${wip}" "kube-network pin-kubelet" 2>/dev/null || true
-  done
-
-  log "WireGuard backplane configured"
-
-  # Step 3: Bootstrap control plane
-  echo ""
-  echo -e "${Y}=== Bootstrapping Control Plane ===${N}"
-  ssh -o StrictHostKeyChecking=no "root@${cp_ip}" \
-    "kube-init" 2>&1 || die "kube-init failed on control plane"
-
-  # Step 4: Join workers
-  echo ""
-  echo -e "${Y}=== Joining Workers ===${N}"
-  local wg_cp_ip="10.251.0.1"  # CP's wg-k8s IP
-  for i in $(seq 1 "$WORKERS"); do
-    local name="${WORKER_PREFIX}-${i}"
-    local wip="${worker_ips[$name]}"
-    [[ -n "$wip" ]] || continue
-    log "Joining ${name}..."
-    ssh -o StrictHostKeyChecking=no "root@${wip}" \
-      "kube-join ${wg_cp_ip}" 2>&1 || warn "Failed to join $name"
-  done
-
-  # Step 5: Smoke test
-  echo ""
-  echo -e "${Y}=== Smoke Test ===${N}"
-  sleep 10
-  ssh -o StrictHostKeyChecking=no "root@${cp_ip}" \
-    "kube-smoke-test" 2>&1 || warn "Smoke test had failures"
-
-  # Final status
-  echo ""
-  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
-  echo -e "${W}  Kubernetes Cluster Deployed                                ${N}"
-  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
-  echo -e "  Control plane:  ${G}${CP_NAME}${N} (${cp_ip} / 10.251.0.1)"
-  echo -e "  Workers:        ${G}${WORKERS}${N}"
-  echo -e "  CNI:            ${G}Cilium (eBPF)${N}"
-  echo -e "  Backplane:      ${G}WireGuard (wg-mgmt + wg-k8s)${N}"
-  echo -e "  Storage:        ${G}ZFS on root${N}"
-  echo -e "  Cloned from:    ${GOLDEN} (each clone: ~100ms, 0 bytes)"
-  echo ""
-  echo -e "  Access:"
-  echo -e "    ssh root@${cp_ip}"
-  echo -e "    kubectl get nodes"
-  echo -e "    kube-status"
-  echo -e "    cilium status"
-  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+# ── Golden only ────────────────────────────────────────────────────────────
+cmd_golden() {
+  build_golden
 }
 
 # ── Dispatch ───────────────────────────────────────────────────────────────
 case "$CMD" in
-  create)    cmd_create ;;
   bootstrap) cmd_bootstrap ;;
+  golden)    cmd_golden ;;
   destroy)   cmd_destroy ;;
   status)    cmd_status ;;
   *)         usage ;;
