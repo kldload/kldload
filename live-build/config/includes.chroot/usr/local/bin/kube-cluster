@@ -262,13 +262,23 @@ runcmd:
   - touch /var/lib/cloud/instance/kube-golden-ready
 USERDATA
 
+  # Network config — Debian cloud images need explicit DHCP
+  cat > "${ci_dir}/network-config" <<NETCFG
+version: 2
+ethernets:
+  id0:
+    match:
+      name: "en*"
+    dhcp4: true
+NETCFG
+
   local ci_iso="/var/lib/libvirt/isos/${GOLDEN}-cloud-init.iso"
   genisoimage -output "$ci_iso" -volid cidata -joliet -rock \
-    "${ci_dir}/user-data" "${ci_dir}/meta-data" 2>/dev/null \
+    "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null \
     || mkisofs -output "$ci_iso" -volid cidata -joliet -rock \
-      "${ci_dir}/user-data" "${ci_dir}/meta-data" 2>/dev/null \
+      "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null \
     || xorriso -as mkisofs -o "$ci_iso" -volid cidata -joliet -rock \
-      "${ci_dir}/user-data" "${ci_dir}/meta-data" 2>/dev/null
+      "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null
   rm -rf "$ci_dir"
 
   # Create and boot VM with cloud-init
@@ -401,12 +411,21 @@ chpasswd:
 ssh_pwauth: true
 USERDATA
 
+    cat > "${ci_dir}/network-config" <<NETCFG
+version: 2
+ethernets:
+  id0:
+    match:
+      name: "en*"
+    dhcp4: true
+NETCFG
+
     genisoimage -output "$ci_iso" -volid cidata -joliet -rock \
-      "${ci_dir}/user-data" "${ci_dir}/meta-data" 2>/dev/null \
+      "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null \
       || mkisofs -output "$ci_iso" -volid cidata -joliet -rock \
-        "${ci_dir}/user-data" "${ci_dir}/meta-data" 2>/dev/null \
+        "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null \
       || xorriso -as mkisofs -o "$ci_iso" -volid cidata -joliet -rock \
-        "${ci_dir}/user-data" "${ci_dir}/meta-data" 2>/dev/null
+        "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null
     rm -rf "$ci_dir"
 
     # Attach cloud-init ISO and start
