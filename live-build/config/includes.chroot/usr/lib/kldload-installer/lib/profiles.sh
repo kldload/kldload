@@ -208,7 +208,7 @@ k_profile_optional_packages() {
   # Kubernetes (optional checkbox)
   if [[ "${KLDLOAD_ENABLE_K8S:-0}" == "1" ]]; then
     if [[ "$_distro" == "ubuntu" || "$_distro" == "debian" ]]; then
-      out+=(containerd conntrack socat ebtables ipset ipvsadm cri-tools)
+      out+=(containerd conntrack socat ipset ipvsadm nftables)
     elif [[ "$_distro" != "arch" && "$_distro" != "freebsd" ]]; then
       out+=(containerd.io conntrack-tools socat ipvsadm)
     fi

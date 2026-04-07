@@ -329,7 +329,17 @@ k_install_target_packages() {
   profile_pkgs="$(k_profile_packages)"
   profile_opt="$(k_profile_optional_packages)"
   if [[ -n "${profile_pkgs}${profile_opt}" ]]; then
-    k_in_chroot "${target}" bash -lc "apt-get install -y ${profile_pkgs} ${profile_opt}"
+    k_log_to "$log" "Installing profile packages: ${profile_pkgs} ${profile_opt}"
+    DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" \
+      apt-get install -y --no-install-recommends --ignore-missing \
+      ${profile_pkgs} ${profile_opt} 2>&1 | tee -a "$log" || {
+      k_log_to "$log" "WARNING: Some profile packages failed — retrying individually..."
+      for _pkg in ${profile_pkgs} ${profile_opt}; do
+        DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" \
+          apt-get install -y --no-install-recommends "$_pkg" >> "$log" 2>&1 \
+          || k_log_to "$log" "WARNING: package ${_pkg} not available — skipping"
+      done
+    }
   fi
 }
 
