@@ -171,11 +171,11 @@ install_metallb() {
   helm install metallb metallb/metallb \
     --namespace metallb-system --create-namespace \
     --version "${METALLB_VERSION}" \
-    --wait --timeout 120s \
-    2>&1
+    --wait --timeout 300s \
+    2>&1 || warn "MetalLB helm install timed out — pods may still be pulling images"
 
   # Wait for controller to be ready before applying config
-  kubectl rollout status deployment/metallb-controller -n metallb-system --timeout=60s 2>/dev/null || true
+  kubectl rollout status deployment/metallb-controller -n metallb-system --timeout=120s 2>/dev/null || true
   sleep 5
 
   # Auto-detect IP pool from node's subnet if not specified
