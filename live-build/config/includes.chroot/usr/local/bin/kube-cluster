@@ -93,14 +93,15 @@ done
 wait_for_ssh() {
   local ip="$1" max="${2:-60}"
   local i=0
-  while ! ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 -o BatchMode=yes \
-    "root@${ip}" true 2>/dev/null; do
+  while ! __ssh_cmd "$ip" true 2>/dev/null; do
     ((i++))
     [[ $i -ge $max ]] && return 1
     sleep 2
   done
   return 0
 }
+
+# SSH removed — using _ssh_cmd below
 
 get_vm_ip() {
   local vm="$1"
@@ -123,9 +124,12 @@ get_vm_ip() {
   echo "$ip"
 }
 
-ssh_cmd() {
+# SSH with key first, fall back to password "kldload" (cloud-init default)
+_ssh_cmd() {
   local ip="$1"; shift
   ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
+    -i "$SSH_KEY" "root@${ip}" "$@" 2>/dev/null \
+  || sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
     "root@${ip}" "$@" 2>/dev/null
 }
 
@@ -272,42 +276,30 @@ USERDATA
   # Wait for cloud-init to finish
   log "Waiting for cloud-init..."
   for _ in $(seq 1 60); do
-    ssh_cmd "$golden_ip" "test -f /var/lib/cloud/instance/kube-golden-ready" && break
+    _ssh_cmd "$golden_ip" "test -f /var/lib/cloud/instance/kube-golden-ready" && break
     sleep 5
   done
 
   # Install K8s packages via kube-setup
   log "Running kube-setup in golden VM..."
-  # Copy kube-setup into the VM
-  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
-    /usr/local/bin/kube-setup "root@${golden_ip}:/usr/local/bin/kube-setup" 2>/dev/null
-  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
-    /usr/local/bin/kube-init "root@${golden_ip}:/usr/local/bin/kube-init" 2>/dev/null
-  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
-    /usr/local/bin/kube-join "root@${golden_ip}:/usr/local/bin/kube-join" 2>/dev/null
-  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
-    /usr/local/bin/kube-network "root@${golden_ip}:/usr/local/bin/kube-network" 2>/dev/null
-  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
-    /usr/local/bin/kube-status "root@${golden_ip}:/usr/local/bin/kube-status" 2>/dev/null
-  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
-    /usr/local/bin/kube-reset "root@${golden_ip}:/usr/local/bin/kube-reset" 2>/dev/null
-  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
-    /usr/local/bin/kube-smoke-test "root@${golden_ip}:/usr/local/bin/kube-smoke-test" 2>/dev/null
-  scp -o StrictHostKeyChecking=no -o BatchMode=yes \
-    /usr/local/bin/kube-load-images "root@${golden_ip}:/usr/local/bin/kube-load-images" 2>/dev/null
+  # Copy kube-* tools into the VM
+  for _tool in kube-setup kube-init kube-join kube-network kube-status kube-reset kube-smoke-test kube-load-images; do
+    sshpass -p kldload scp -o StrictHostKeyChecking=no \
+      "/usr/local/bin/${_tool}" "root@${golden_ip}:/usr/local/bin/${_tool}" 2>/dev/null || true
+  done
 
-  ssh_cmd "$golden_ip" "chmod +x /usr/local/bin/kube-*"
-  ssh_cmd "$golden_ip" "kube-setup" || die "kube-setup failed in golden VM"
+  _ssh_cmd "$golden_ip" "chmod +x /usr/local/bin/kube-*"
+  _ssh_cmd "$golden_ip" "kube-setup" || die "kube-setup failed in golden VM"
 
   # Clean up cloud-init state so clones get fresh identity
   log "Sealing golden image for cloning..."
-  ssh_cmd "$golden_ip" "cloud-init clean --logs 2>/dev/null || true"
-  ssh_cmd "$golden_ip" "rm -f /etc/machine-id; touch /etc/machine-id"
-  ssh_cmd "$golden_ip" "rm -f /etc/ssh/ssh_host_*"
-  ssh_cmd "$golden_ip" "truncate -s 0 /etc/hostname"
+  _ssh_cmd "$golden_ip" "cloud-init clean --logs 2>/dev/null || true"
+  _ssh_cmd "$golden_ip" "rm -f /etc/machine-id; touch /etc/machine-id"
+  _ssh_cmd "$golden_ip" "rm -f /etc/ssh/ssh_host_*"
+  _ssh_cmd "$golden_ip" "truncate -s 0 /etc/hostname"
 
   # Shut down
-  ssh_cmd "$golden_ip" "shutdown -h now" || true
+  _ssh_cmd "$golden_ip" "shutdown -h now" || true
   log "Waiting for golden VM to shut down..."
   for _ in $(seq 1 30); do
     virsh domstate "${GOLDEN}" 2>/dev/null | grep -q "shut off" && break
@@ -458,42 +450,42 @@ cmd_bootstrap() {
   echo ""
   echo -e "${Y}=== Step 3: WireGuard Encrypted Backplane ===${N}"
 
-  ssh_cmd "$cp_ip" "kube-network init 1"
+  _ssh_cmd "$cp_ip" "kube-network init 1"
   local node_id=2
   for i in $(seq 0 $((WORKERS-1))); do
     [[ -n "${worker_ips[$i]}" ]] || continue
-    ssh_cmd "${worker_ips[$i]}" "kube-network init ${node_id}"
+    _ssh_cmd "${worker_ips[$i]}" "kube-network init ${node_id}"
     ((node_id++))
   done
 
   # Exchange keys
   local cp_pub
-  cp_pub="$(ssh_cmd "$cp_ip" 'cat /etc/wireguard/wg-mgmt.pub')"
+  cp_pub="$(_ssh_cmd "$cp_ip" 'cat /etc/wireguard/wg-mgmt.pub')"
 
   node_id=2
   for i in $(seq 0 $((WORKERS-1))); do
     local wip="${worker_ips[$i]}"
     [[ -n "$wip" ]] || continue
     local w_pub
-    w_pub="$(ssh_cmd "$wip" 'cat /etc/wireguard/wg-mgmt.pub')"
+    w_pub="$(_ssh_cmd "$wip" 'cat /etc/wireguard/wg-mgmt.pub')"
     # Add worker to CP
-    ssh_cmd "$cp_ip" "kube-network add-peer ${wip} ${w_pub} ${node_id}" || true
+    _ssh_cmd "$cp_ip" "kube-network add-peer ${wip} ${w_pub} ${node_id}" || true
     # Add CP to worker
-    ssh_cmd "$wip" "kube-network add-peer ${cp_ip} ${cp_pub} 1" || true
+    _ssh_cmd "$wip" "kube-network add-peer ${cp_ip} ${cp_pub} 1" || true
     ((node_id++))
   done
 
   # Pin kubelet to WireGuard on all nodes
-  ssh_cmd "$cp_ip" "kube-network pin-kubelet"
+  _ssh_cmd "$cp_ip" "kube-network pin-kubelet"
   for i in $(seq 0 $((WORKERS-1))); do
-    [[ -n "${worker_ips[$i]}" ]] && ssh_cmd "${worker_ips[$i]}" "kube-network pin-kubelet"
+    [[ -n "${worker_ips[$i]}" ]] && _ssh_cmd "${worker_ips[$i]}" "kube-network pin-kubelet"
   done
   log "WireGuard mesh configured"
 
   # Step 4: Bootstrap control plane
   echo ""
   echo -e "${Y}=== Step 4: Control Plane (Cilium + MetalLB + ZFS CSI + Hubble) ===${N}"
-  ssh_cmd "$cp_ip" "kube-init" || die "kube-init failed"
+  _ssh_cmd "$cp_ip" "kube-init" || die "kube-init failed"
 
   # Step 5: Join workers
   echo ""
@@ -503,19 +495,19 @@ cmd_bootstrap() {
     local wip="${worker_ips[$i]}"
     [[ -n "$wip" ]] || continue
     log "Joining ${worker_names[$i]}..."
-    ssh_cmd "$wip" "kube-join ${wg_cp}" || warn "Failed to join ${worker_names[$i]}"
+    _ssh_cmd "$wip" "kube-join ${wg_cp}" || warn "Failed to join ${worker_names[$i]}"
   done
 
   # Step 6: Verify
   echo ""
   echo -e "${Y}=== Step 6: Verification ===${N}"
   sleep 10
-  ssh_cmd "$cp_ip" "kubectl get nodes -o wide" || true
+  _ssh_cmd "$cp_ip" "kubectl get nodes -o wide" || true
 
   # Apply nftables on all nodes
-  ssh_cmd "$cp_ip" "kube-network nft" 2>/dev/null || true
+  _ssh_cmd "$cp_ip" "kube-network nft" 2>/dev/null || true
   for i in $(seq 0 $((WORKERS-1))); do
-    [[ -n "${worker_ips[$i]}" ]] && ssh_cmd "${worker_ips[$i]}" "kube-network nft" 2>/dev/null || true
+    [[ -n "${worker_ips[$i]}" ]] && _ssh_cmd "${worker_ips[$i]}" "kube-network nft" 2>/dev/null || true
   done
 
   # Final status
@@ -603,9 +595,9 @@ cmd_status() {
   cp_ip="$(get_vm_ip "${CP_NAME}" 2>/dev/null)" || true
   if [[ -n "$cp_ip" ]]; then
     echo -e "${Y}Kubernetes (${CP_NAME} @ ${cp_ip}):${N}"
-    ssh_cmd "$cp_ip" "kubectl get nodes -o wide" || echo "  Cannot reach API"
+    _ssh_cmd "$cp_ip" "kubectl get nodes -o wide" || echo "  Cannot reach API"
     echo ""
-    ssh_cmd "$cp_ip" "kubectl get pods -A --no-headers" | awk '{print $1"/"$2, $4}' | head -15 || true
+    _ssh_cmd "$cp_ip" "kubectl get pods -A --no-headers" | awk '{print $1"/"$2, $4}' | head -15 || true
   else
     echo -e "${Y}Kubernetes:${N} control plane not running"
   fi
