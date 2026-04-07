@@ -782,6 +782,8 @@ KVMSANOID
     cat > "${target}/etc/containers/storage.conf" <<'STORAGE'
 [storage]
 driver = "zfs"
+runroot = "/run/containers/storage"
+graphroot = "/var/lib/containers/storage"
 
 [storage.options.zfs]
 fsname = "rpool/var/lib/containers/storage/zfs"
