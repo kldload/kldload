@@ -444,6 +444,15 @@ cmd_bootstrap() {
   done
   log "All nodes reachable via SSH"
 
+  # Set unique hostnames (clones inherit golden's hostname)
+  log "Setting unique hostnames..."
+  _ssh_cmd "$cp_ip" "hostnamectl set-hostname ${CP_NAME}; systemd-machine-id-setup 2>/dev/null; systemctl restart systemd-networkd 2>/dev/null || true"
+  for i in $(seq 0 $((WORKERS-1))); do
+    [[ -n "${worker_ips[$i]}" ]] || continue
+    _ssh_cmd "${worker_ips[$i]}" "hostnamectl set-hostname ${worker_names[$i]}; systemd-machine-id-setup 2>/dev/null; systemctl restart systemd-networkd 2>/dev/null || true"
+  done
+  log "Hostnames set"
+
   # Step 3: WireGuard mesh
   echo ""
   echo -e "${Y}=== Step 3: WireGuard Encrypted Backplane ===${N}"
