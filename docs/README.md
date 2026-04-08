@@ -1,13 +1,13 @@
 # kldloadOS Documentation
 
-Single bootable ISO that installs CentOS Stream 9, Debian 13, Ubuntu 24.04, Fedora 41, RHEL 9, Rocky Linux 9, or Arch Linux with ZFS on root. Offline, from USB.
+Single bootable ISO that installs CentOS Stream 9, Debian 13, Ubuntu 24.04, Fedora 41, RHEL 9, Rocky Linux 9, Arch Linux, or Alpine Linux with ZFS on root. Eight distros, one USB, offline.
 
 ## Overview
 
 | Document | Description |
 |----------|-------------|
-| [What is kldloadOS](overview/what-kldload-gives-you.md) | Technical overview -- what it adds to a stock distro |
-| [Editions & Profiles](overview/editions.md) | Core vs Free, Desktop vs Server vs Core profile |
+| [What is kldloadOS](overview/what-kldload-gives-you.md) | Technical overview — what it adds to a stock distro |
+| [Editions & Profiles](overview/editions.md) | Core vs Free, Desktop vs Server vs KVM vs AI profile |
 | [The Bridge](the-bridge.md) | BSD-to-Linux perspective, ZFS on Linux tradeoffs |
 | [Architecture](ARCHITECTURE.md) | Build pipeline, installer internals, ISO assembly |
 | [Known Issues](KNOWN-ISSUES.md) | Compatibility matrix, tested platforms, known bugs |
@@ -110,9 +110,18 @@ Complete build guides: [recipes/README.md](recipes/README.md)
 | [eBPF Reference](reference/ebpf.md) | bpftrace one-liners, BCC tools, kernel tracing |
 | [Monitoring Stack](reference/monitoring-and-observability.md) | Prometheus, Grafana, node_exporter, ZFS alerting rules |
 
+## Kubernetes
+
+| Guide | Description |
+|-------|-------------|
+| [Kubernetes on KVM](tutorials/virtualization/kubernetes-on-kvm.md) | Golden images to K8s cluster, WireGuard pod networking |
+| [kube-cluster](tutorials/virtualization/kube-cluster.md) | One-command cluster: ZFS clones → Cilium → Hubble → MetalLB |
+
 ## Releases
 
 | Release | Description |
 |---------|-------------|
-| [1.0.1](releases/RELEASE-1.0.1.md) | Current release |
+| [1.0.3](releases/RELEASE-1.0.3.md) | KVM hypervisor, NVIDIA GPU sharing, eBPF cross-distro |
+| [1.0.2](releases/RELEASE-1.0.2.md) | AI assistant, Alpine Linux, 12+ profiles |
+| [1.0.1](releases/RELEASE-1.0.1.md) | Fedora, Arch, golden image export |
 | [1.0](releases/RELEASE-1.0.md) | Initial release |
