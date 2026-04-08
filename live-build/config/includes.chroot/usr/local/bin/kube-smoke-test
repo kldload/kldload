@@ -254,13 +254,19 @@ if [[ -f /etc/kubernetes/admin.conf ]]; then
       fail "Could not create test pod"
     fi
 
-    # DNS test
+    # DNS test — use exec into a running pod instead of interactive kubectl run
     echo -e "  ${D}Running DNS test...${N}"
-    dns_result="$(kubectl run dns-test --image=busybox --restart=Never --rm -i --command -- nslookup kubernetes.default.svc.cluster.local 2>/dev/null | grep -c 'Address' || echo 0)"
-    if [[ "$dns_result" -gt 0 ]]; then
-      pass "Cluster DNS resolves kubernetes.default"
+    if kubectl run dns-test --image=busybox --restart=Never --command -- sleep 30 >/dev/null 2>&1; then
+      sleep 5
+      dns_output="$(kubectl exec dns-test -- nslookup kubernetes.default.svc.cluster.local 2>/dev/null || true)"
+      dns_result="$(echo "$dns_output" | grep -c 'Address' || echo 0)"
+      if [[ "$dns_result" -gt 0 ]]; then
+        pass "Cluster DNS resolves kubernetes.default"
+      else
+        warn "DNS test inconclusive (may need more time)"
+      fi
     else
-      warn "DNS test inconclusive (may need more time)"
+      warn "DNS test pod creation failed (non-fatal)"
     fi
     kubectl delete pod dns-test --grace-period=0 --force >/dev/null 2>&1 || true
 

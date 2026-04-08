@@ -794,7 +794,23 @@ STORAGE
 
     # Enable libvirtd + default network (virbr0)
     chroot "${target}" systemctl enable libvirtd 2>/dev/null || true
-    chroot "${target}" bash -c 'virsh net-autostart default 2>/dev/null || true' 2>/dev/null || true
+    # virsh can't run in chroot (no libvirtd) — use a oneshot service for first boot
+    cat > "${target}/etc/systemd/system/kldload-virbr0.service" <<'VIRBR0SVC'
+[Unit]
+Description=Enable libvirt default network (virbr0) autostart
+After=libvirtd.service
+Requires=libvirtd.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'virsh net-autostart default 2>/dev/null; virsh net-start default 2>/dev/null; true'
+ExecStartPost=/bin/systemctl disable kldload-virbr0.service
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+VIRBR0SVC
+    chroot "${target}" systemctl enable kldload-virbr0.service 2>/dev/null || true
 
     k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots, kvm-* tools, Podman ZFS driver"
   fi
