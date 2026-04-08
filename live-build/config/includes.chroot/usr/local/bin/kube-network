@@ -68,13 +68,14 @@ cmd_init() {
   install -d -m700 /etc/wireguard
   local old_umask; old_umask="$(umask)"; umask 077
 
-  # Generate keys for both planes
-  for iface in wg-mgmt wg-k8s; do
-    if [[ ! -f "/etc/wireguard/${iface}.key" ]]; then
-      wg genkey | tee "/etc/wireguard/${iface}.key" | wg pubkey > "/etc/wireguard/${iface}.pub"
-      log "Generated keys for ${iface}"
-    fi
-  done
+  # Generate one key pair shared by both planes — simplifies peer exchange
+  if [[ ! -f "/etc/wireguard/wg-mgmt.key" ]]; then
+    wg genkey | tee "/etc/wireguard/wg-mgmt.key" | wg pubkey > "/etc/wireguard/wg-mgmt.pub"
+    log "Generated WireGuard keys"
+  fi
+  # Both interfaces use the same key pair
+  cp /etc/wireguard/wg-mgmt.key /etc/wireguard/wg-k8s.key
+  cp /etc/wireguard/wg-mgmt.pub /etc/wireguard/wg-k8s.pub
 
   # Management plane
   cat > /etc/wireguard/wg-mgmt.conf <<EOF
