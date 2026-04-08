@@ -464,7 +464,16 @@ fi
 mkdir -p "${ROOTFS}/etc/kldload"
 echo "$EDITION" > "${ROOTFS}/etc/kldload/edition"
 GIT_SHA=$(git -C /build rev-parse --short HEAD 2>/dev/null || echo "unknown")
+# Build number = commits since last version tag (resets each release)
+BUILD_NUM=$(git -C /build log --oneline --grep="^bump.*${VERSION}\|^bump.*version" 2>/dev/null | head -1 | cut -d' ' -f1)
+if [[ -n "$BUILD_NUM" ]]; then
+  BUILD_NUM=$(git -C /build rev-list --count "${BUILD_NUM}..HEAD" 2>/dev/null || echo "0")
+else
+  BUILD_NUM=$(git -C /build rev-list --count HEAD 2>/dev/null || echo "0")
+fi
 echo "$GIT_SHA" > "${ROOTFS}/etc/kldload-build-sha"
+echo "${VERSION}-b${BUILD_NUM}" > "${ROOTFS}/etc/kldload-build-id"
+log "Build ID: ${VERSION}-b${BUILD_NUM} (${GIT_SHA})"
 
 # OS branding
 cat > "${ROOTFS}/etc/os-release" << OSREL
