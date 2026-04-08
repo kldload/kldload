@@ -274,7 +274,8 @@ cmd_build() {
         [[ -f "$helm_cache/cilium.tgz" ]] && log "Cilium chart cached: $(du -h "$helm_cache/cilium.tgz" | cut -f1)" || true
     fi
 
-    "$runtime" run --rm --privileged \
+    # Run container detached to avoid SIGPIPE when stdout pipe fills
+    "$runtime" run -d --privileged \
         -v "$ROOT:/build:z" \
         -e PROFILE="$PROFILE" \
         -e EDITION="$EDITION" \
@@ -284,9 +285,17 @@ cmd_build() {
         -e BOB_LIVE="${BOB_LIVE:-}" \
         --name "$BUILDER_CONTAINER" \
         "$BUILDER_IMAGE" \
-        bash /build/builder/build-iso.sh || {
-        log "WARNING: build container exited non-zero — checking for ISO"
-    }
+        bash /build/builder/build-iso.sh
+
+    # Wait for container to finish
+    log "Build container started — waiting for completion..."
+    "$runtime" wait "$BUILDER_CONTAINER" || true
+    local _rc
+    _rc="$("$runtime" inspect "$BUILDER_CONTAINER" --format '{{.State.ExitCode}}' 2>/dev/null || echo 1)"
+    "$runtime" rm "$BUILDER_CONTAINER" 2>/dev/null || true
+    if [[ "$_rc" != "0" ]]; then
+        log "WARNING: build container exited with code ${_rc} — checking for ISO"
+    fi
 
     local iso
     iso="$(latest_iso)"
