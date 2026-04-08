@@ -35,10 +35,11 @@ mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 LOG_FILE="$LOG_DIR/build-${PROFILE}-${ARCH}-${BUILD_DATE}.log"
 
 # ---------------------------------------------------------------------------
-# Clean previous state
+# Clean previous state — remove old ISO so a failed build can't be mistaken for new
 # ---------------------------------------------------------------------------
 rm -rf "$ROOTFS" "$ISO_STAGING" /var/tmp/kldload-*
-mkdir -p "$ROOTFS" "$ISO_STAGING"
+rm -f "/build/live-build/output/${ISO_NAME}" "/build/live-build/output/${ISO_NAME}.sha256"
+mkdir -p "$ROOTFS" "$ISO_STAGING" "/build/live-build/output"
 
 # ---------------------------------------------------------------------------
 # Build darksite RPM mirror (free edition only)
