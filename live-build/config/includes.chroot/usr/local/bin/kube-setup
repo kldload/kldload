@@ -113,7 +113,12 @@ enabled=1
 gpgcheck=1
 gpgkey=https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/rpm/repodata/repomd.xml.key
 EOF
-    dnf install -y kubelet kubeadm kubectl cri-tools conntrack-tools socat ipvsadm
+    dnf install -y kubelet kubeadm kubectl cri-tools conntrack-tools socat ipvsadm wireguard-tools
+    # Install ZFS if not already present (needed for ZFS CSI inside VMs)
+    if ! command -v zfs >/dev/null 2>&1; then
+      dnf install -y https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm 2>/dev/null || true
+      dnf install -y zfs 2>/dev/null || true
+    fi
     systemctl enable kubelet
   else
     apt-get install -y --no-install-recommends apt-transport-https ca-certificates curl gpg
@@ -124,7 +129,7 @@ EOF
       > /etc/apt/sources.list.d/kubernetes.list
     apt-get update -y >/dev/null 2>&1
     apt-get install -y --no-install-recommends kubelet kubeadm kubectl cri-tools \
-      conntrack socat ebtables ipset ipvsadm
+      conntrack socat ebtables ipset ipvsadm wireguard-tools
     apt-mark hold kubelet kubeadm kubectl 2>/dev/null || true
     systemctl enable kubelet
   fi

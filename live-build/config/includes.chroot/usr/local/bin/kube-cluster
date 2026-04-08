@@ -508,41 +508,49 @@ cmd_bootstrap() {
   done
   log "Hostnames set"
 
-  # Step 3: WireGuard mesh
+  # Step 3: WireGuard mesh (optional — skip if wg not available in VMs)
   echo ""
   echo -e "${Y}=== Step 3: WireGuard Encrypted Backplane ===${N}"
 
-  _ssh_cmd "$cp_ip" "kube-network init 1"
-  local node_id=2
-  for i in $(seq 0 $((WORKERS-1))); do
-    [[ -n "${worker_ips[$i]}" ]] || continue
-    _ssh_cmd "${worker_ips[$i]}" "kube-network init ${node_id}"
-    ((node_id++))
-  done
+  if _ssh_cmd "$cp_ip" "command -v wg >/dev/null 2>&1"; then
+    _ssh_cmd "$cp_ip" "kube-network init 1" || true
+    local node_id=2
+    for i in $(seq 0 $((WORKERS-1))); do
+      [[ -n "${worker_ips[$i]}" ]] || continue
+      _ssh_cmd "${worker_ips[$i]}" "kube-network init ${node_id}" || true
+      ((node_id++))
+    done
 
-  # Exchange keys
-  local cp_pub
-  cp_pub="$(_ssh_cmd "$cp_ip" 'cat /etc/wireguard/wg-mgmt.pub')"
+    # Exchange keys
+    local cp_pub
+    cp_pub="$(_ssh_cmd "$cp_ip" 'cat /etc/wireguard/wg-mgmt.pub')" || true
 
-  node_id=2
-  for i in $(seq 0 $((WORKERS-1))); do
-    local wip="${worker_ips[$i]}"
-    [[ -n "$wip" ]] || continue
-    local w_pub
-    w_pub="$(_ssh_cmd "$wip" 'cat /etc/wireguard/wg-mgmt.pub')"
-    # Add worker to CP
-    _ssh_cmd "$cp_ip" "kube-network add-peer ${wip} ${w_pub} ${node_id}" || true
-    # Add CP to worker
-    _ssh_cmd "$wip" "kube-network add-peer ${cp_ip} ${cp_pub} 1" || true
-    ((node_id++))
-  done
+    if [[ -n "$cp_pub" ]]; then
+      node_id=2
+      for i in $(seq 0 $((WORKERS-1))); do
+        local wip="${worker_ips[$i]}"
+        [[ -n "$wip" ]] || continue
+        local w_pub
+        w_pub="$(_ssh_cmd "$wip" 'cat /etc/wireguard/wg-mgmt.pub')" || true
+        [[ -n "$w_pub" ]] || continue
+        _ssh_cmd "$cp_ip" "kube-network add-peer ${wip} ${w_pub} ${node_id}" || true
+        _ssh_cmd "$wip" "kube-network add-peer ${cp_ip} ${cp_pub} 1" || true
+        ((node_id++))
+      done
 
-  # Pin kubelet to WireGuard on all nodes
-  _ssh_cmd "$cp_ip" "kube-network pin-kubelet"
-  for i in $(seq 0 $((WORKERS-1))); do
-    [[ -n "${worker_ips[$i]}" ]] && _ssh_cmd "${worker_ips[$i]}" "kube-network pin-kubelet"
-  done
-  log "WireGuard mesh configured"
+      # Pin kubelet to WireGuard on all nodes
+      _ssh_cmd "$cp_ip" "kube-network pin-kubelet" || true
+      for i in $(seq 0 $((WORKERS-1))); do
+        [[ -n "${worker_ips[$i]}" ]] && _ssh_cmd "${worker_ips[$i]}" "kube-network pin-kubelet" || true
+      done
+      log "WireGuard mesh configured"
+    else
+      warn "WireGuard key exchange failed — cluster will use LAN networking"
+    fi
+  else
+    warn "WireGuard not installed in VMs — cluster will use LAN networking (unencrypted)"
+    warn "Add wireguard-tools to golden image to enable encrypted backplane"
+  fi
 
   # Step 4: Bootstrap control plane
   echo ""
