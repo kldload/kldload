@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
 # ---------------------------------------------------------------------------
 # build-iso.sh — runs INSIDE the builder container
@@ -255,12 +255,16 @@ fi
 chroot "$ROOTFS" depmod -a "$KVER" 2>/dev/null || true
 
 # Verify
-if find "${ROOTFS}/lib/modules/${KVER}" -name 'zfs.ko*' 2>/dev/null | grep -q .; then
+_zfs_mod="$(find "${ROOTFS}/lib/modules/${KVER}" -name 'zfs.ko*' 2>/dev/null | head -1)" || true
+if [[ -n "$_zfs_mod" ]]; then
     log "ZFS kernel module built successfully for $KVER"
-elif find "${ROOTFS}/lib/modules/" -name 'zfs.ko*' 2>/dev/null | grep -q .; then
-    log "ZFS kernel module found (alternate path)"
 else
-    die "ZFS kernel module NOT found — DKMS build failed for $KVER"
+    _zfs_mod="$(find "${ROOTFS}/lib/modules/" -name 'zfs.ko*' 2>/dev/null | head -1)" || true
+    if [[ -n "$_zfs_mod" ]]; then
+        log "ZFS kernel module found (alternate path)"
+    else
+        die "ZFS kernel module NOT found — DKMS build failed for $KVER"
+    fi
 fi
 
 # Unmount chroot mounts
