@@ -389,7 +389,7 @@ FFPOLICY
       cp /usr/local/bin/eza "${target}/usr/local/bin/eza"
       chmod +x "${target}/usr/local/bin/eza"
     fi
-    for _tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kldload-help; do
+    for _tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kbe krecovery kupgrade kldload-help kldload-overview kube-demo; do
       [[ -x "/usr/local/bin/${_tool}" ]] && \
         cp "/usr/local/bin/${_tool}" "${target}/usr/local/bin/${_tool}" && \
         chmod +x "${target}/usr/local/bin/${_tool}"
