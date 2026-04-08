@@ -186,9 +186,7 @@ install_metallb() {
   fi
 
   # Apply L2 advertisement + IP pool — retry until CRDs are registered
-  for _try in $(seq 1 6); do
-    kubectl apply -f - <<METALLB_CFG 2>/dev/null && break
-
+  cat > /tmp/metallb-pool.yaml <<METALLB_CFG
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
@@ -207,8 +205,13 @@ spec:
   ipAddressPools:
     - default-pool
 METALLB_CFG
-    sleep 10
+
+  for _try in $(seq 1 12); do
+    kubectl apply -f /tmp/metallb-pool.yaml 2>/dev/null && { log "MetalLB pool configured"; break; }
+    log "Waiting for MetalLB CRDs... (attempt ${_try}/12)"
+    sleep 15
   done
+  rm -f /tmp/metallb-pool.yaml
 
   log "MetalLB installed — LoadBalancer pool: ${pool}"
 }
