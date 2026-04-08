@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -e
+trap '' PIPE  # Ignore SIGPIPE — internal pipes kill the container
 
 # ---------------------------------------------------------------------------
 # build-iso.sh — runs INSIDE the builder container
