@@ -34,16 +34,9 @@ preflight() {
 # ── Detect node IP ─────────────────────────────────────────────────────────
 detect_node_ip() {
   local ip
-  # Prefer wg-k8s (Kubernetes backplane) if available
-  ip="$(ip -4 addr show wg-k8s 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)" || true
-  # Fall back to wg0 (legacy single-plane)
-  if [[ -z "$ip" ]]; then
-    ip="$(ip -4 addr show wg0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)" || true
-  fi
-  # Fall back to default route
-  if [[ -z "$ip" ]]; then
-    ip="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}')" || true
-  fi
+  # Use the default route IP (LAN) for API server — WireGuard gets configured after
+  # the cluster is running, so we can't bind the API server to a WG IP during init
+  ip="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}')" || true
   echo "${ip:-$(hostname -I | awk '{print $1}')}"
 }
 
@@ -354,9 +347,9 @@ main() {
   snapshot_before_init
   run_kubeadm_init
   install_cilium
-  install_gateway_api
-  install_metallb
-  install_zfs_csi
+  install_gateway_api || warn "Gateway API install had issues (non-fatal)"
+  install_metallb || warn "MetalLB install had issues — pods may still be pulling"
+  install_zfs_csi || warn "ZFS CSI install had issues (non-fatal)"
   remove_control_plane_taint
   generate_join_command
   print_status
