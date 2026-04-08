@@ -284,7 +284,9 @@ cmd_build() {
         -e BOB_LIVE="${BOB_LIVE:-}" \
         --name "$BUILDER_CONTAINER" \
         "$BUILDER_IMAGE" \
-        bash /build/builder/build-iso.sh
+        bash /build/builder/build-iso.sh || {
+        log "WARNING: build container exited non-zero — checking for ISO"
+    }
 
     local iso
     iso="$(latest_iso)"
