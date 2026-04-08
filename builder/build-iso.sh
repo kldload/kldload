@@ -345,10 +345,11 @@ SSHEOF
 if [[ "$EDITION" != "core" ]]; then
     chroot "$ROOTFS" dnf remove -y python3-websockets 2>/dev/null || true
     cp /etc/resolv.conf "${ROOTFS}/etc/resolv.conf" 2>/dev/null || true
-    set +eo pipefail
-    chroot "$ROOTFS" pip3 install --no-cache-dir websockets 2>/dev/null || \
-        log "WARNING: pip install websockets failed — webui may not start"
-    set -eo pipefail
+    set +euo pipefail
+    chroot "$ROOTFS" pip3 install --no-cache-dir websockets >/dev/null 2>&1
+    _pip_rc=$?
+    set -euo pipefail
+    [[ $_pip_rc -ne 0 ]] && log "WARNING: pip install websockets failed — webui may not start"
 fi
 
 # Enable services
