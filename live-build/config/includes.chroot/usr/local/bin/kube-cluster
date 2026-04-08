@@ -560,13 +560,19 @@ cmd_bootstrap() {
   # Step 5: Join workers
   echo ""
   echo -e "${Y}=== Step 5: Join Workers ===${N}"
-  local wg_cp="10.251.0.1"
-  for i in $(seq 0 $((WORKERS-1))); do
-    local wip="${worker_ips[$i]}"
-    [[ -n "$wip" ]] || continue
-    log "Joining ${worker_names[$i]}..."
-    _ssh_cmd "$wip" "kube-join ${wg_cp}" || warn "Failed to join ${worker_names[$i]}"
-  done
+  # Use LAN IP for join — workers may not have WireGuard routing to CP yet
+  local join_token
+  join_token="$(_ssh_cmd "$cp_ip" 'kubeadm token create --print-join-command 2>/dev/null')" || true
+  if [[ -z "$join_token" ]]; then
+    warn "Could not get join token from CP"
+  else
+    for i in $(seq 0 $((WORKERS-1))); do
+      local wip="${worker_ips[$i]}"
+      [[ -n "$wip" ]] || continue
+      log "Joining ${worker_names[$i]}..."
+      _ssh_cmd "$wip" "$join_token" || warn "Failed to join ${worker_names[$i]}"
+    done
+  fi
 
   # Step 6: Verify
   echo ""

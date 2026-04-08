@@ -51,17 +51,19 @@ log "Fetching join command from $CONTROL_PLANE..."
 
 JOIN_CMD=""
 
-# Try fetching via SSH
-if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${CONTROL_PLANE}" \
-    'cat /etc/kubernetes/join-command.sh' >/tmp/kube-join-cmd.sh 2>/dev/null; then
-  JOIN_CMD="$(cat /tmp/kube-join-cmd.sh)"
-  rm -f /tmp/kube-join-cmd.sh
-fi
+# Try fetching via SSH (key first, then password fallback)
+_ssh_cp() {
+  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
+    "root@${CONTROL_PLANE}" "$@" 2>/dev/null \
+  || sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+    "root@${CONTROL_PLANE}" "$@" 2>/dev/null
+}
 
-# If SSH failed, try generating a new token via SSH
+JOIN_CMD="$(_ssh_cp 'cat /etc/kubernetes/join-command.sh')" 2>/dev/null || true
+
+# If that failed, generate a new token
 if [[ -z "$JOIN_CMD" ]]; then
-  JOIN_CMD="$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${CONTROL_PLANE}" \
-    'kubeadm token create --print-join-command 2>/dev/null')" 2>/dev/null || true
+  JOIN_CMD="$(_ssh_cp 'kubeadm token create --print-join-command')" 2>/dev/null || true
 fi
 
 if [[ -z "$JOIN_CMD" ]]; then
