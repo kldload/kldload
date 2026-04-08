@@ -164,7 +164,7 @@ set +o pipefail
 dnf --installroot="$ROOTFS" --releasever=9 --setopt=install_weak_deps=False \
     --setopt=tsflags=nodocs --nogpgcheck -y install "${PKGS[@]}" 2>&1 | tee -a "$LOG_FILE"
 DNF_RC=${PIPESTATUS[0]}
-set -o pipefail
+# set -o pipefail  # DISABLED — causes SIGPIPE
 # Check if packages actually installed (ignore DKMS scriptlet exit code)
 if ! chroot "$ROOTFS" rpm -q zfs zfs-dkms kernel-core >/dev/null 2>&1; then
     die "dnf --installroot failed — core packages missing"
@@ -353,7 +353,7 @@ if [[ "$EDITION" != "core" ]]; then
     set +euo pipefail
     chroot "$ROOTFS" pip3 install --no-cache-dir websockets >/dev/null 2>&1
     _pip_rc=$?
-    set -euo pipefail
+    set -e  # pipefail disabled
     [[ $_pip_rc -ne 0 ]] && log "WARNING: pip install websockets failed — webui may not start"
 fi
 
