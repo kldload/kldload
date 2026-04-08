@@ -167,9 +167,12 @@ install_metallb() {
     --wait --timeout 300s \
     2>&1 || warn "MetalLB helm install timed out — pods may still be pulling images"
 
-  # Wait for controller to be ready before applying config
-  kubectl rollout status deployment/metallb-controller -n metallb-system --timeout=120s 2>/dev/null || true
-  sleep 5
+  # Wait for controller — retry until ready or 5 min
+  log "Waiting for MetalLB controller..."
+  for _try in $(seq 1 30); do
+    kubectl rollout status deployment/metallb-controller -n metallb-system --timeout=10s 2>/dev/null && break
+    sleep 10
+  done
 
   # Auto-detect IP pool from node's subnet if not specified
   local pool="$METALLB_POOL"
@@ -178,13 +181,14 @@ install_metallb() {
     node_ip="$(detect_node_ip)"
     local subnet
     subnet="$(echo "$node_ip" | cut -d. -f1-3)"
-    # Reserve .200-.220 range for LoadBalancer services
     pool="${subnet}.200-${subnet}.220"
     log "Auto-detected MetalLB pool: ${pool}"
   fi
 
-  # Apply L2 advertisement + IP pool
-  kubectl apply -f - <<METALLB_CFG 2>/dev/null
+  # Apply L2 advertisement + IP pool — retry until CRDs are registered
+  for _try in $(seq 1 6); do
+    kubectl apply -f - <<METALLB_CFG 2>/dev/null && break
+
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
@@ -203,6 +207,8 @@ spec:
   ipAddressPools:
     - default-pool
 METALLB_CFG
+    sleep 10
+  done
 
   log "MetalLB installed — LoadBalancer pool: ${pool}"
 }
