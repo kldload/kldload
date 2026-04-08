@@ -107,15 +107,15 @@ if [[ "$EDITION" != "core" ]]; then
     )
 fi
 
-if [[ "$PROFILE" == "desktop" ]]; then
-    PKGS+=(
-        gnome-shell gnome-session gdm gnome-terminal nautilus
-        gnome-control-center gnome-settings-daemon gedit
-        gnome-keyring firefox mesa-dri-drivers
-        pipewire wireplumber
-        adwaita-icon-theme google-noto-sans-fonts
-    )
-fi
+# GNOME desktop is always needed for the live environment (web UI installer)
+# The PROFILE variable only affects what gets installed on the TARGET system
+PKGS+=(
+    gnome-shell gnome-session gdm gnome-terminal nautilus
+    gnome-control-center gnome-settings-daemon gedit
+    gnome-keyring firefox mesa-dri-drivers
+    pipewire wireplumber
+    adwaita-icon-theme google-noto-sans-fonts
+)
 
 # Set up repos inside the installroot
 mkdir -p "${ROOTFS}/etc/yum.repos.d" "${ROOTFS}/etc/pki/rpm-gpg"
@@ -359,17 +359,13 @@ fi
 
 # Enable services
 chroot "$ROOTFS" systemctl enable NetworkManager sshd 2>/dev/null || true
-if [[ "$PROFILE" == "desktop" ]]; then
-    chroot "$ROOTFS" systemctl enable gdm 2>/dev/null || true
-    chroot "$ROOTFS" systemctl set-default graphical.target 2>/dev/null || true
-else
-    chroot "$ROOTFS" systemctl set-default multi-user.target 2>/dev/null || true
-fi
+# Live environment always boots to GNOME desktop (web UI installer needs it)
+chroot "$ROOTFS" systemctl enable gdm 2>/dev/null || true
+chroot "$ROOTFS" systemctl set-default graphical.target 2>/dev/null || true
 
-# GDM autologin for live session
-if [[ "$PROFILE" == "desktop" ]]; then
-    mkdir -p "${ROOTFS}/etc/gdm"
-    cat > "${ROOTFS}/etc/gdm/custom.conf" << 'GDMCONF'
+# GDM autologin for live session (always — live ISO needs desktop for web UI)
+mkdir -p "${ROOTFS}/etc/gdm"
+cat > "${ROOTFS}/etc/gdm/custom.conf" << 'GDMCONF'
 [daemon]
 AutomaticLoginEnable=True
 AutomaticLogin=live
@@ -382,10 +378,9 @@ AutomaticLogin=live
 
 [debug]
 GDMCONF
-fi
 
 # Auto-launch Firefox to webui on live session login (free edition only, not Bob)
-if [[ "$PROFILE" == "desktop" && "$EDITION" != "core" && "${BOB_LIVE:-}" != "1" ]]; then
+if [[ "$EDITION" != "core" && "${BOB_LIVE:-}" != "1" ]]; then
     # XDG autostart — waits for GNOME Shell to be ready, then opens Firefox
     # PostLogin removed: it raced with the compositor and caused black windows
     mkdir -p "${ROOTFS}/etc/xdg/autostart"
