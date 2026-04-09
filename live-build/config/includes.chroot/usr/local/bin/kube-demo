@@ -598,66 +598,61 @@ demo_add_nodes() {
         || echo -e "  ${Y}${name} join failed${N}"
     fi
 
-    # WireGuard mesh — init on new node, peer with CP and all existing workers
+    # WireGuard — scan all VMs for highest existing node ID to avoid collisions
     if sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${ip}" \
         "command -v wg >/dev/null 2>&1" 2>/dev/null; then
-      # Find next available node_id (highest existing + 1)
-      local max_id=1
-      local cp_ip_wg
-      cp_ip_wg="$(_ssh_cp 'cat /etc/wireguard/wg-mgmt.conf 2>/dev/null | grep "Address" | grep -o "10\\.251\\.[0-9]*\\.[0-9]*"')" || true
-      for node in $(_kctl get nodes --no-headers 2>/dev/null | awk '{print $1}'); do
-        local nip
-        nip="$(_kctl get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)"
-        if [[ "$nip" == 10.251.* ]]; then
-          local nid="${nip##*.}"
-          [[ $nid -gt $max_id ]] && max_id=$nid
-        fi
+      local max_id=0
+      for vm in $(virsh list --name 2>/dev/null | grep -v '^$'); do
+        local vmac vip vid
+        vmac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
+        vip="$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$vmac" '$3 == m {print $5}' | cut -d/ -f1 | head -1)"
+        [[ -z "$vip" ]] && continue
+        vid="$(sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "root@${vip}" \
+          'grep -o "10\.251\.[0-9]*\.[0-9]*" /etc/wireguard/wg-k8s.conf 2>/dev/null | head -1' 2>/dev/null)" || continue
+        vid="${vid##*.}"
+        [[ -n "$vid" && "$vid" -gt "$max_id" ]] && max_id="$vid"
       done
       local new_id=$((max_id + 1))
 
       echo -e "  WireGuard: init node ${C}${new_id}${N} on ${name}..."
       sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" "kube-network init ${new_id}" 2>/dev/null || true
 
-      local new_pub
+      local new_pub cp_pub cp_lan
       new_pub="$(sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)"
-      local cp_pub
       cp_pub="$(_ssh_cp 'cat /etc/wireguard/wg-mgmt.pub 2>/dev/null')"
-      local cp_lan
       cp_lan="$(_ssh_cp 'ip -4 route get 1.1.1.1 2>/dev/null | awk "{print \$7}" | head -1')"
 
       if [[ -n "$new_pub" && -n "$cp_pub" ]]; then
-        # Peer new node ↔ CP
         _ssh_cp "kube-network add-peer ${ip} ${new_pub} ${new_id}" 2>/dev/null || true
         sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
           "kube-network add-peer ${cp_lan} ${cp_pub} 1" 2>/dev/null || true
 
-        # Peer new node ↔ all existing workers
+        # Peer with all existing workers that have WireGuard
         for wnode in $(_kctl get nodes --no-headers 2>/dev/null | grep -v control-plane | awk '{print $1}'); do
           [[ "$wnode" == "$name" ]] && continue
-          local wip_lan wpub wid
-          # Get worker LAN IP from VM
-          local wmac
+          local wmac wip_lan wpub wid
           wmac="$(virsh domiflist "$wnode" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
           wip_lan="$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$wmac" '$3 == m {print $5}' | cut -d/ -f1 | head -1)"
           [[ -z "$wip_lan" ]] && continue
           wpub="$(sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "root@${wip_lan}" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)" || continue
+          [[ -z "$wpub" ]] && continue
           wid="$(sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "root@${wip_lan}" \
-            'grep Address /etc/wireguard/wg-mgmt.conf 2>/dev/null | grep -o "10\\.251\\.[0-9]*\\.[0-9]*"' 2>/dev/null)" || continue
+            'grep -o "10\.251\.[0-9]*\.[0-9]*" /etc/wireguard/wg-k8s.conf 2>/dev/null | head -1' 2>/dev/null)" || continue
           wid="${wid##*.}"
-          [[ -z "$wpub" || -z "$wid" ]] && continue
-          # Peer both directions
+          [[ -z "$wid" ]] && continue
           sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
             "kube-network add-peer ${wip_lan} ${wpub} ${wid}" 2>/dev/null || true
           sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${wip_lan}" \
             "kube-network add-peer ${ip} ${new_pub} ${new_id}" 2>/dev/null || true
         done
 
-        # Pin kubelet to WireGuard
         sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" "kube-network pin-kubelet" 2>/dev/null || true
-        echo -e "  ${G}WireGuard mesh configured for ${name} (10.251.0.${new_id})${N}"
-        ((new_id++))
+        echo -e "  ${G}WireGuard: ${name} → 10.251.0.${new_id}${N}"
       fi
     fi
+
+    # Label as worker
+    _kctl label node "$name" node-role.kubernetes.io/worker= --overwrite 2>/dev/null || true
   done
 
   sleep 10
@@ -1179,17 +1174,19 @@ demo_replace_nodes() {
         || echo -e "    ${Y}${name} join failed${N}"
     fi
 
-    # WireGuard
+    # WireGuard — scan VMs for highest ID to avoid collisions
     if sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${ip}" \
         "command -v wg >/dev/null 2>&1" 2>/dev/null; then
-      local max_id=1
-      for node in $(_kctl get nodes --no-headers 2>/dev/null | awk '{print $1}'); do
-        local nip
-        nip="$(_kctl get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)"
-        if [[ "$nip" == 10.251.* ]]; then
-          local nid="${nip##*.}"
-          [[ $nid -gt $max_id ]] && max_id=$nid
-        fi
+      local max_id=0
+      for vm in $(virsh list --name 2>/dev/null | grep -v '^$'); do
+        local vmac vip vid
+        vmac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
+        vip="$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$vmac" '$3 == m {print $5}' | cut -d/ -f1 | head -1)"
+        [[ -z "$vip" ]] && continue
+        vid="$(sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "root@${vip}" \
+          'grep -o "10\.251\.[0-9]*\.[0-9]*" /etc/wireguard/wg-k8s.conf 2>/dev/null | head -1' 2>/dev/null)" || continue
+        vid="${vid##*.}"
+        [[ -n "$vid" && "$vid" -gt "$max_id" ]] && max_id="$vid"
       done
       local new_id=$((max_id + 1))
 
@@ -1204,9 +1201,11 @@ demo_replace_nodes() {
         sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
           "kube-network add-peer ${cp_lan} ${cp_pub} 1" 2>/dev/null || true
         sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" "kube-network pin-kubelet" 2>/dev/null || true
-        echo -e "    ${G}WireGuard mesh configured (10.251.0.${new_id})${N}"
+        echo -e "    ${G}WireGuard: ${name} → 10.251.0.${new_id}${N}"
       fi
     fi
+
+    _kctl label node "$name" node-role.kubernetes.io/worker= --overwrite 2>/dev/null || true
   done
 
   local END_TIME
