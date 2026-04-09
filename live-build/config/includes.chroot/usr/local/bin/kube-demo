@@ -552,39 +552,51 @@ demo_add_nodes() {
   echo -e "${D}Waiting for workers to boot (30s)...${N}"
   sleep 30
 
-  # Set unique hostnames + machine-id on each clone (critical — golden identity must be replaced)
-  for n in $next1 $next2; do
-    local name="kldload-w-${n}"
-    local mac ip
-    mac="$(virsh domiflist "$name" 2>/dev/null | awk '/bridge/ {print $5}')"
-    ip=""
-    for _ in $(seq 1 15); do
-      ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
-      [[ -n "$ip" ]] && break
+  # Helper: get IP for a VM (domifaddr first, then DHCP lease by exact MAC)
+  _get_vm_ip() {
+    local vm="$1" ip="" mac=""
+    for _ in $(seq 1 20); do
+      # Method 1: qemu guest agent
+      ip="$(virsh domifaddr "$vm" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1)"
+      [[ -n "$ip" ]] && { echo "$ip"; return 0; }
+      # Method 2: match exact MAC in DHCP leases
+      if [[ -z "$mac" ]]; then
+        mac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
+      fi
+      if [[ -n "$mac" ]]; then
+        ip="$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$mac" '$3 == m {print $5}' | cut -d/ -f1 | head -1)"
+        [[ -n "$ip" ]] && { echo "$ip"; return 0; }
+      fi
       sleep 2
     done
-    if [[ -n "$ip" ]]; then
-      echo -e "  Setting hostname on ${G}${name}${N} (${ip})..."
-      sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
-        "hostnamectl set-hostname ${name}; rm -f /etc/machine-id; systemd-machine-id-setup; systemctl restart systemd-networkd 2>/dev/null || true" 2>/dev/null || true
-    fi
-  done
+    return 1
+  }
 
-  # Get join command from CP
+  # Set unique hostnames + machine-id, then join
   local join_cmd
   join_cmd="$(_ssh_cp 'kubeadm token create --print-join-command 2>/dev/null')"
-  if [[ -n "$join_cmd" ]]; then
-    for n in $next1 $next2; do
-      local name="kldload-w-${n}"
-      local mac ip
-      mac="$(virsh domiflist "$name" 2>/dev/null | awk '/bridge/ {print $5}')"
-      ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
-      if [[ -n "$ip" ]]; then
-        echo -e "  Joining ${G}${name}${N} (${ip})..."
-        sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" "$join_cmd" 2>/dev/null || echo -e "  ${Y}Join failed — may need manual intervention${N}"
-      fi
-    done
-  fi
+
+  for n in $next1 $next2; do
+    local name="kldload-w-${n}"
+    local ip
+    ip="$(_get_vm_ip "$name")"
+    if [[ -z "$ip" ]]; then
+      echo -e "  ${Y}${name}: could not get IP${N}"
+      continue
+    fi
+
+    echo -e "  Setting hostname on ${G}${name}${N} (${ip})..."
+    sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@${ip}" \
+      "hostnamectl set-hostname ${name}; rm -f /etc/machine-id; systemd-machine-id-setup; systemctl restart systemd-networkd 2>/dev/null || true" 2>/dev/null || true
+
+    if [[ -n "$join_cmd" ]]; then
+      echo -e "  Joining ${G}${name}${N}..."
+      sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@${ip}" \
+        "kubeadm reset -f 2>/dev/null; ${join_cmd}" 2>/dev/null \
+        && echo -e "  ${G}${name} joined${N}" \
+        || echo -e "  ${Y}${name} join failed${N}"
+    fi
+  done
 
   sleep 10
   echo ""
