@@ -129,8 +129,13 @@ EOF
       > /etc/apt/sources.list.d/kubernetes.list
     apt-get update -y >/dev/null 2>&1
     apt-get install -y --no-install-recommends kubelet kubeadm kubectl cri-tools \
-      conntrack socat ebtables ipset ipvsadm wireguard-tools
+      conntrack socat nftables ipset ipvsadm wireguard-tools
     apt-mark hold kubelet kubeadm kubectl 2>/dev/null || true
+    # Install ZFS if not already present (needed for ZFS CSI inside VMs)
+    if ! command -v zfs >/dev/null 2>&1; then
+      apt-get install -y --no-install-recommends zfsutils-linux zfs-dkms 2>/dev/null || \
+        apt-get install -y --no-install-recommends zfsutils-linux 2>/dev/null || true
+    fi
     systemctl enable kubelet
   fi
 
