@@ -404,7 +404,7 @@ FFPOLICY
       cp /usr/local/bin/eza "${target}/usr/local/bin/eza"
       chmod +x "${target}/usr/local/bin/eza"
     fi
-    for _tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kbe krecovery kupgrade kldload-help kldload-overview kube-demo; do
+    for _tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kbe krecovery kupgrade kldload-help kldload-overview kube-demo kzfs-lab; do
       [[ -x "/usr/local/bin/${_tool}" ]] && \
         cp "/usr/local/bin/${_tool}" "${target}/usr/local/bin/${_tool}" && \
         chmod +x "${target}/usr/local/bin/${_tool}"
@@ -743,7 +743,7 @@ REPL
 
     # Copy KVM management tools from live ISO to target
     mkdir -p "${target}/usr/local/bin"
-    for tool in kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo kube-cluster; do
+    for tool in kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo kube-cluster kzfs-lab; do
       if [[ -f "/usr/local/bin/${tool}" ]]; then
         cp "/usr/local/bin/${tool}" "${target}/usr/local/bin/${tool}"
         chmod +x "${target}/usr/local/bin/${tool}"

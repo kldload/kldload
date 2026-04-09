@@ -1,0 +1,1394 @@
+#!/usr/bin/env bash
+# kzfs-lab — ZFS development lab on KVM with blue-green deployment
+# Deploys 6 Linux distros as VMs on a KVM/ZFS hypervisor, each with ZFS source,
+# test suite, eBPF tools, and dev toolchains. Supports blue-green deployment
+# with instant ZFS rollback.
+#
+# Usage:
+#   kzfs-lab build [distro|all]       Build golden images
+#   kzfs-lab deploy blue|green        Clone goldens to blue or green site
+#   kzfs-lab promote green            Green becomes new blue
+#   kzfs-lab rollback                 Revert blue to previous snapshot
+#   kzfs-lab test [distro|all]        Run zfs-tests.sh in VMs
+#   kzfs-lab status                   Show all VMs, sites, snapshots
+#   kzfs-lab destroy blue|green|all   Tear down
+#   kzfs-lab demo                     Interactive menu
+set -uo pipefail
+
+if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+# ── Configuration ─────────────────────────────────────────────────────────
+POOL="${POOL:-rpool}"
+LAB_PREFIX="zfslab"
+RAM="${RAM:-4096}"
+CPUS="${CPUS:-2}"
+DISK="${DISK:-40}"
+SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
+ISO_DIR="/var/lib/libvirt/isos"
+
+DISTROS=(centos rocky fedora debian ubuntu arch)
+
+declare -A CLOUD_IMAGES=(
+  [centos]="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
+  [rocky]="https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"
+  [fedora]="https://download.fedoraproject.org/pub/fedora/linux/releases/41/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2"
+  [debian]="https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-genericcloud-amd64-daily.qcow2"
+  [ubuntu]="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+  [arch]="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
+)
+
+declare -A OS_VARIANTS=(
+  [centos]="centos-stream9"
+  [rocky]="centos-stream9"
+  [fedora]="fedora-unknown"
+  [debian]="debian12"
+  [ubuntu]="ubuntu24.04"
+  [arch]="archlinux"
+)
+
+declare -A DISTRO_FAMILY=(
+  [centos]="dnf"
+  [rocky]="dnf"
+  [fedora]="dnf"
+  [debian]="apt"
+  [ubuntu]="apt"
+  [arch]="pacman"
+)
+
+# ── Colors ────────────────────────────────────────────────────────────────
+C="\033[1;36m"; G="\033[1;32m"; Y="\033[1;33m"; R="\033[1;31m"
+W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"; B="\033[1;34m"
+
+log()  { echo -e "${G}[kzfs-lab]${N} $*"; }
+warn() { echo -e "${Y}[kzfs-lab]${N} $*" >&2; }
+die()  { echo -e "${R}[kzfs-lab]${N} $*" >&2; exit 1; }
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+_ssh_cmd() {
+  local ip="$1"; shift
+  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
+    -i "$SSH_KEY" "root@${ip}" "$@" 2>/dev/null \
+  || sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+    "root@${ip}" "$@" 2>/dev/null
+}
+
+get_vm_ip() {
+  local vm="$1"
+  local ip="" mac=""
+  for _ in $(seq 1 45); do
+    ip="$(virsh domifaddr "$vm" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1)"
+    [[ -n "$ip" ]] && break
+    if [[ -z "$mac" ]]; then
+      mac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}')"
+    fi
+    if [[ -n "$mac" ]]; then
+      ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
+      [[ -n "$ip" ]] && break
+    fi
+    sleep 2
+  done
+  echo "$ip"
+}
+
+wait_for_ssh() {
+  local ip="$1" max="${2:-150}"
+  local i=0
+  while ! _ssh_cmd "$ip" true 2>/dev/null; do
+    ((i++))
+    [[ $i -ge $max ]] && return 1
+    sleep 2
+  done
+  return 0
+}
+
+ensure_ssh_key() {
+  if [[ ! -f "$SSH_KEY" ]]; then
+    log "Generating SSH key for lab management..."
+    ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
+  fi
+}
+
+timer_start() { date +%s%N; }
+timer_elapsed_ms() {
+  local start="$1"
+  local now
+  now=$(date +%s%N)
+  echo $(( (now - start) / 1000000 ))
+}
+
+# VM naming helpers
+golden_name()  { echo "${LAB_PREFIX}-golden-${1}"; }
+site_name()    { echo "${LAB_PREFIX}-${1}-${2}"; }   # site_name blue centos
+zvol_path()    { echo "${POOL}/vms/${1}"; }
+zvol_dev()     { echo "/dev/zvol/${POOL}/vms/${1}"; }
+
+validate_distro() {
+  local d="$1"
+  for valid in "${DISTROS[@]}"; do
+    [[ "$d" == "$valid" ]] && return 0
+  done
+  die "Unknown distro: ${d}. Valid: ${DISTROS[*]}"
+}
+
+validate_site() {
+  local s="$1"
+  [[ "$s" == "blue" || "$s" == "green" ]] || die "Invalid site: ${s}. Must be blue or green."
+}
+
+# List VMs matching a pattern
+list_site_vms() {
+  local site="$1"
+  for d in "${DISTROS[@]}"; do
+    echo "$(site_name "$site" "$d")"
+  done
+}
+
+# Check if golden exists for distro
+golden_exists() {
+  zfs list "$(zvol_path "$(golden_name "$1")")" >/dev/null 2>&1
+}
+
+# Make a cloud-init ISO
+make_cloud_init_iso() {
+  local name="$1" hostname="$2" ready_marker="${3:-}"
+  local ci_dir ci_iso
+
+  ensure_ssh_key
+  local pubkey
+  pubkey="$(cat "${SSH_KEY}.pub")"
+
+  ci_dir="$(mktemp -d)"
+  ci_iso="${ISO_DIR}/${name}-cloud-init.iso"
+
+  cat > "${ci_dir}/meta-data" <<META
+instance-id: ${name}
+local-hostname: ${hostname}
+META
+
+  local runcmd_extra=""
+  if [[ -n "$ready_marker" ]]; then
+    runcmd_extra="  - touch ${ready_marker}"
+  fi
+
+  cat > "${ci_dir}/user-data" <<USERDATA
+#cloud-config
+hostname: ${hostname}
+manage_etc_hosts: true
+disable_root: false
+ssh_pwauth: true
+users:
+  - default
+  - name: root
+    lock_passwd: false
+    ssh_authorized_keys:
+      - ${pubkey}
+    shell: /bin/bash
+chpasswd:
+  expire: false
+  users:
+    - name: root
+      password: kldload
+      type: text
+ssh_authorized_keys:
+  - ${pubkey}
+package_update: true
+packages:
+  - openssh-server
+  - sudo
+  - curl
+runcmd:
+  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+${runcmd_extra}
+USERDATA
+
+  cat > "${ci_dir}/network-config" <<NETCFG
+version: 2
+ethernets:
+  id0:
+    match:
+      name: "en*"
+    dhcp4: true
+NETCFG
+
+  genisoimage -output "$ci_iso" -volid cidata -joliet -rock \
+    "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null \
+    || mkisofs -output "$ci_iso" -volid cidata -joliet -rock \
+      "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null \
+    || xorriso -as mkisofs -o "$ci_iso" -volid cidata -joliet -rock \
+      "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null
+
+  rm -rf "$ci_dir"
+  echo "$ci_iso"
+}
+
+# ── Per-distro ZFS Dev Setup ─────────────────────────────────────────────
+setup_zfs_dev_vm() {
+  local ip="$1" distro="$2"
+  local family="${DISTRO_FAMILY[$distro]}"
+
+  log "  Installing ZFS dev environment on ${distro}..."
+
+  case "$family" in
+    dnf)
+      _ssh_cmd "$ip" bash -s <<'DNFSETUP'
+set -e
+dnf install -y epel-release 2>/dev/null || true
+dnf install -y \
+  gcc gcc-c++ make autoconf automake libtool git \
+  kernel-devel kernel-headers dkms \
+  python3 python3-devel python3-cffi \
+  libuuid-devel libblkid-devel libtirpc-devel \
+  openssl-devel zlib-devel libaio-devel \
+  bpftrace bcc-tools bpftool perf \
+  sysstat htop iotop strace gdb \
+  nftables wireguard-tools || true
+# Install ZFS from ZoL repo if not already available
+if ! command -v zfs >/dev/null 2>&1; then
+  dnf install -y https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm 2>/dev/null || true
+  dnf install -y zfs zfs-dkms 2>/dev/null || true
+fi
+DNFSETUP
+      ;;
+    apt)
+      _ssh_cmd "$ip" bash -s <<'APTSETUP'
+set -e
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y \
+  build-essential autoconf automake libtool git \
+  linux-headers-$(uname -r) dkms \
+  python3 python3-dev python3-cffi \
+  uuid-dev libblkid-dev libtirpc-dev \
+  libssl-dev zlib1g-dev libaio-dev \
+  bpftrace bpfcc-tools linux-perf bpftool \
+  sysstat htop iotop strace gdb \
+  nftables wireguard-tools \
+  zfsutils-linux zfs-dkms 2>/dev/null || true
+APTSETUP
+      ;;
+    pacman)
+      _ssh_cmd "$ip" bash -s <<'PACSETUP'
+set -e
+pacman -Syu --noconfirm
+pacman -S --noconfirm \
+  base-devel git linux-headers dkms \
+  python python-cffi \
+  bpftrace bcc-tools bpftool perf \
+  sysstat htop iotop strace gdb \
+  nftables wireguard-tools 2>/dev/null || true
+# ZFS from AUR -- skip for golden, let user build
+echo "NOTE: ZFS on Arch requires AUR build (e.g. zfs-dkms). Skipping for golden."
+PACSETUP
+      ;;
+  esac
+
+  # Clone OpenZFS source and verify ZFS module (all distros)
+  _ssh_cmd "$ip" bash -s <<'ZFSCOMMON'
+git clone https://github.com/openzfs/zfs.git /usr/src/zfs 2>/dev/null || true
+modprobe zfs 2>/dev/null || true
+zfs version 2>/dev/null || echo "ZFS not loaded -- DKMS may need rebuild after first boot"
+ZFSCOMMON
+
+  log "  ZFS dev environment installed on ${distro}"
+}
+
+# ── Build Golden Image ───────────────────────────────────────────────────
+build_golden_single() {
+  local distro="$1"
+  validate_distro "$distro"
+
+  local name
+  name="$(golden_name "$distro")"
+  local zpath
+  zpath="$(zvol_path "$name")"
+  local zdev
+  zdev="$(zvol_dev "$name")"
+
+  # Check if golden already exists with snapshot
+  if zfs list "${zpath}@golden" >/dev/null 2>&1; then
+    log "Golden image ${name} already exists -- skipping"
+    log "  (destroy with: zfs destroy -Rf ${zpath} to force rebuild)"
+    return 0
+  fi
+
+  local t_start
+  t_start="$(timer_start)"
+
+  log "Building golden image: ${C}${name}${N}"
+
+  # Download cloud image
+  mkdir -p "$ISO_DIR"
+  local url="${CLOUD_IMAGES[$distro]}"
+  local img_file="${ISO_DIR}/${distro}-cloud.qcow2"
+
+  if [[ ! -f "$img_file" ]]; then
+    log "  Downloading ${distro} cloud image..."
+    curl -fSL -o "$img_file" "$url" || die "Failed to download ${distro} cloud image"
+    log "  Download complete"
+  else
+    log "  Using cached cloud image: ${img_file}"
+  fi
+
+  # Create ZFS zvol (destroy partial if exists without snapshot)
+  if zfs list "$zpath" >/dev/null 2>&1; then
+    log "  Destroying partial golden zvol..."
+    virsh destroy "$name" 2>/dev/null || true
+    virsh undefine "$name" --nvram 2>/dev/null || virsh undefine "$name" 2>/dev/null || true
+    zfs destroy -Rf "$zpath" 2>/dev/null || true
+  fi
+
+  log "  Creating ZFS zvol (${DISK}G, sparse, lz4)..."
+  zfs create -V "${DISK}G" -s -o volblocksize=64k \
+    -o compression=lz4 "$zpath"
+
+  # Wait for zvol device
+  for _ in $(seq 1 15); do [[ -b "$zdev" ]] && break; sleep 1; done
+  [[ -b "$zdev" ]] || die "ZFS zvol device not found: ${zdev}"
+
+  # Import cloud image
+  log "  Importing cloud image to ZFS zvol..."
+  qemu-img convert -f qcow2 -O raw "$img_file" "$zdev"
+
+  # Grow partition
+  growpart "$zdev" 1 2>/dev/null || true
+
+  # Cloud-init ISO
+  log "  Creating cloud-init configuration..."
+  local ci_iso
+  ci_iso="$(make_cloud_init_iso "$name" "$name" "/var/lib/cloud/instance/zfslab-golden-ready")"
+
+  # Boot golden VM
+  log "  Booting golden VM..."
+  virt-install \
+    --name "$name" \
+    --ram "$RAM" --vcpus "$CPUS" \
+    --os-variant "${OS_VARIANTS[$distro]}" \
+    --disk "path=${zdev},bus=virtio" \
+    --disk "path=${ci_iso},device=cdrom" \
+    --network bridge=virbr0,model=virtio \
+    --graphics vnc,listen=0.0.0.0 \
+    --noautoconsole \
+    --import \
+    2>&1 || die "Failed to boot golden VM for ${distro}"
+
+  # Wait for IP
+  log "  Waiting for VM to get IP..."
+  local golden_ip
+  golden_ip="$(get_vm_ip "$name")"
+  [[ -n "$golden_ip" ]] || die "Golden VM ${name} did not get an IP"
+  log "  Golden VM IP: ${golden_ip}"
+
+  # Wait for SSH
+  log "  Waiting for SSH..."
+  wait_for_ssh "$golden_ip" 120 || die "SSH not available on ${name}"
+
+  # Wait for cloud-init ready marker
+  log "  Waiting for cloud-init to finish..."
+  for _ in $(seq 1 90); do
+    _ssh_cmd "$golden_ip" "test -f /var/lib/cloud/instance/zfslab-golden-ready" 2>/dev/null && break
+    sleep 5
+  done
+
+  # Install ZFS dev environment
+  setup_zfs_dev_vm "$golden_ip" "$distro"
+
+  # Seal for cloning
+  log "  Sealing golden image for cloning..."
+  _ssh_cmd "$golden_ip" "cloud-init clean --logs 2>/dev/null || true"
+  _ssh_cmd "$golden_ip" "rm -f /etc/machine-id; touch /etc/machine-id"
+  _ssh_cmd "$golden_ip" "truncate -s 0 /etc/hostname"
+
+  # Shutdown
+  _ssh_cmd "$golden_ip" "shutdown -h now" || true
+  log "  Waiting for shutdown..."
+  for _ in $(seq 1 30); do
+    virsh domstate "$name" 2>/dev/null | grep -q "shut off" && break
+    sleep 2
+  done
+
+  # Remove cloud-init ISO
+  virsh detach-disk "$name" "$ci_iso" --config 2>/dev/null || true
+  rm -f "$ci_iso"
+
+  # Snapshot
+  zfs snapshot "${zpath}@golden"
+
+  local elapsed
+  elapsed="$(timer_elapsed_ms "$t_start")"
+  log "Golden image ready: ${C}${name}${N} (${elapsed}ms)"
+}
+
+build_all_goldens() {
+  local built=0 failed=0
+  local total_start
+  total_start="$(timer_start)"
+
+  for distro in "${DISTROS[@]}"; do
+    if build_golden_single "$distro"; then
+      ((built++))
+    else
+      warn "Failed to build golden for ${distro}"
+      ((failed++))
+    fi
+  done
+
+  local total_elapsed
+  total_elapsed="$(timer_elapsed_ms "$total_start")"
+  echo ""
+  log "Build complete: ${G}${built} succeeded${N}, ${R}${failed} failed${N} (${total_elapsed}ms total)"
+}
+
+# ── Deploy Site ──────────────────────────────────────────────────────────
+deploy_site() {
+  local site="$1"
+  validate_site "$site"
+
+  echo -e "${C}======================================================================${N}"
+  echo -e "${W}  kzfs-lab deploy ${site}                                              ${N}"
+  echo -e "${C}======================================================================${N}"
+  echo ""
+
+  ensure_ssh_key
+  local pubkey
+  pubkey="$(cat "${SSH_KEY}.pub")"
+
+  local deployed=0 skipped=0
+  local total_start
+  total_start="$(timer_start)"
+
+  for distro in "${DISTROS[@]}"; do
+    local gname
+    gname="$(golden_name "$distro")"
+    local gpath
+    gpath="$(zvol_path "$gname")"
+    local sname
+    sname="$(site_name "$site" "$distro")"
+    local spath
+    spath="$(zvol_path "$sname")"
+    local sdev
+    sdev="$(zvol_dev "$sname")"
+
+    # Check golden exists
+    if ! zfs list "${gpath}@golden" >/dev/null 2>&1; then
+      warn "No golden image for ${distro} -- skipping (run: kzfs-lab build ${distro})"
+      ((skipped++))
+      continue
+    fi
+
+    # Check if site VM already exists
+    if zfs list "$spath" >/dev/null 2>&1; then
+      warn "${sname} already exists -- skipping (destroy first to redeploy)"
+      ((skipped++))
+      continue
+    fi
+
+    # Clone golden
+    echo -ne "  ${gname}@golden -> ${sname} ... "
+    local cs
+    cs="$(timer_start)"
+    zfs clone "${gpath}@golden" "$spath"
+    local ce
+    ce="$(timer_elapsed_ms "$cs")"
+    echo -e "${G}done${N} (${C}${ce}ms${N})"
+
+    # Wait for zvol device
+    for _ in $(seq 1 10); do [[ -b "$sdev" ]] && break; sleep 1; done
+    if [[ ! -b "$sdev" ]]; then
+      warn "zvol device not found for ${sname}"
+      continue
+    fi
+
+    # Create per-VM cloud-init ISO
+    local ci_iso
+    ci_iso="$(make_cloud_init_iso "$sname" "${site}-${distro}" "")"
+
+    # Define and boot VM
+    virt-install \
+      --name "$sname" \
+      --ram "$RAM" --vcpus "$CPUS" \
+      --os-variant "${OS_VARIANTS[$distro]}" \
+      --disk "path=${sdev},bus=virtio" \
+      --disk "path=${ci_iso},device=cdrom" \
+      --network bridge=virbr0,model=virtio \
+      --graphics vnc,listen=0.0.0.0 \
+      --noautoconsole \
+      --import \
+      2>&1 || { warn "Failed to boot ${sname}"; continue; }
+
+    echo -e "  ${G}${sname}${N} started"
+    ((deployed++))
+  done
+
+  echo ""
+  log "Waiting for VMs to get IPs..."
+  sleep 15
+
+  # Collect IPs and verify SSH
+  echo ""
+  echo -e "${W}  Site ${site} VMs:${N}"
+  echo -e "  ${D}%-25s %-16s %s${N}" "VM" "IP" "SSH"
+  printf "  %-25s %-16s %s\n" "-------------------------" "----------------" "---"
+
+  for distro in "${DISTROS[@]}"; do
+    local sname
+    sname="$(site_name "$site" "$distro")"
+    if ! virsh domstate "$sname" >/dev/null 2>&1; then
+      continue
+    fi
+
+    local ip
+    ip="$(get_vm_ip "$sname")"
+    local ssh_ok="no"
+    if [[ -n "$ip" ]]; then
+      if wait_for_ssh "$ip" 30; then
+        ssh_ok="yes"
+        # Set hostname
+        _ssh_cmd "$ip" "hostnamectl set-hostname ${site}-${distro}; systemd-machine-id-setup 2>/dev/null" || true
+        # Verify ZFS
+        local zfs_ver
+        zfs_ver="$(_ssh_cmd "$ip" "zfs version 2>/dev/null | head -1" || echo "not loaded")"
+        printf "  ${G}%-25s${N} %-16s ${G}%-5s${N} %s\n" "$sname" "$ip" "$ssh_ok" "$zfs_ver"
+      else
+        printf "  ${Y}%-25s${N} %-16s ${R}%-5s${N}\n" "$sname" "$ip" "$ssh_ok"
+      fi
+    else
+      printf "  ${R}%-25s${N} %-16s ${R}%-5s${N}\n" "$sname" "no IP" "no"
+    fi
+  done
+
+  local total_elapsed
+  total_elapsed="$(timer_elapsed_ms "$total_start")"
+  echo ""
+  log "Deploy complete: ${G}${deployed} deployed${N}, ${Y}${skipped} skipped${N} (${total_elapsed}ms)"
+}
+
+# ── Promote Green to Blue ────────────────────────────────────────────────
+cmd_promote() {
+  local site="${1:-green}"
+  [[ "$site" == "green" ]] || die "Can only promote green to blue"
+
+  log "Promoting green -> blue"
+
+  # Snapshot current blue before destroying
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
+  local had_blue=false
+
+  for distro in "${DISTROS[@]}"; do
+    local bname
+    bname="$(site_name blue "$distro")"
+    local bpath
+    bpath="$(zvol_path "$bname")"
+    if zfs list "$bpath" >/dev/null 2>&1; then
+      had_blue=true
+      log "  Snapshotting ${bname}@pre-promote-${ts}"
+      zfs snapshot "${bpath}@pre-promote-${ts}" 2>/dev/null || true
+    fi
+  done
+
+  # Destroy blue VMs
+  if $had_blue; then
+    log "  Tearing down blue site..."
+    destroy_site "blue" quiet
+  fi
+
+  # Snapshot green, clone to blue, destroy green
+  for distro in "${DISTROS[@]}"; do
+    local gname
+    gname="$(site_name green "$distro")"
+    local gpath
+    gpath="$(zvol_path "$gname")"
+    local bname
+    bname="$(site_name blue "$distro")"
+    local bpath
+    bpath="$(zvol_path "$bname")"
+
+    if ! zfs list "$gpath" >/dev/null 2>&1; then
+      continue
+    fi
+
+    # Shutdown green VM
+    virsh destroy "$gname" 2>/dev/null || true
+    virsh undefine "$gname" --nvram 2>/dev/null || virsh undefine "$gname" 2>/dev/null || true
+
+    # Snapshot green, clone to blue
+    zfs snapshot "${gpath}@promoted-${ts}" 2>/dev/null || true
+    echo -ne "  ${gname} -> ${bname} ... "
+    local cs
+    cs="$(timer_start)"
+    zfs clone "${gpath}@promoted-${ts}" "$bpath"
+    local ce
+    ce="$(timer_elapsed_ms "$cs")"
+    echo -e "${G}done${N} (${C}${ce}ms${N})"
+
+    # Destroy green
+    zfs destroy -Rf "$gpath" 2>/dev/null || true
+    rm -f "${ISO_DIR}/${gname}-cloud-init.iso" 2>/dev/null
+  done
+
+  # Boot new blue site
+  log "Booting new blue site..."
+  deploy_site "blue"
+}
+
+# ── Rollback Blue ────────────────────────────────────────────────────────
+cmd_rollback() {
+  log "Rolling back blue site to previous snapshot..."
+
+  for distro in "${DISTROS[@]}"; do
+    local bname
+    bname="$(site_name blue "$distro")"
+    local bpath
+    bpath="$(zvol_path "$bname")"
+
+    if ! zfs list "$bpath" >/dev/null 2>&1; then
+      continue
+    fi
+
+    # Find latest snapshot
+    local snap
+    snap="$(zfs list -t snapshot -o name -s creation -r "$bpath" 2>/dev/null | tail -1)"
+    if [[ -z "$snap" || "$snap" == "NAME" ]]; then
+      warn "No snapshots for ${bname}"
+      continue
+    fi
+
+    # Shutdown and destroy VM
+    virsh destroy "$bname" 2>/dev/null || true
+    virsh undefine "$bname" --nvram 2>/dev/null || virsh undefine "$bname" 2>/dev/null || true
+
+    # Rollback
+    log "  Rolling back ${bname} to ${snap}"
+    zfs rollback -r "$snap"
+  done
+
+  # Redeploy blue
+  log "Redeploying blue site from rolled-back snapshots..."
+  deploy_site "blue"
+}
+
+# ── Test ─────────────────────────────────────────────────────────────────
+run_test_single() {
+  local distro="$1" site="${2:-blue}"
+
+  # Find running VM
+  local sname
+  sname="$(site_name "$site" "$distro")"
+  local ip
+  ip="$(get_vm_ip "$sname" 2>/dev/null)"
+  [[ -n "$ip" ]] || { warn "Cannot get IP for ${sname} -- is it running?"; return 1; }
+
+  log "Running ZFS tests on ${C}${sname}${N} (${ip})..."
+  local t_start
+  t_start="$(timer_start)"
+
+  _ssh_cmd "$ip" bash -s <<'TESTSCRIPT'
+set -e
+echo "=== ZFS Quick Test ==="
+
+# Check ZFS module
+if ! lsmod | grep -q zfs; then
+  modprobe zfs 2>/dev/null || { echo "FAIL: Cannot load ZFS module"; exit 1; }
+fi
+echo "PASS: ZFS module loaded"
+zfs version
+
+# Create test pool
+TESTPOOL="testpool-$$"
+TESTFILE="/tmp/zfs-test-$$.img"
+truncate -s 1G "$TESTFILE"
+zpool create "$TESTPOOL" "$TESTFILE" || { echo "FAIL: Cannot create pool"; exit 1; }
+echo "PASS: Pool created"
+
+# Create dataset
+zfs create "${TESTPOOL}/data"
+echo "test data" > "/${TESTPOOL}/data/test.txt"
+echo "PASS: Dataset created and writable"
+
+# Snapshot
+zfs snapshot "${TESTPOOL}/data@snap1"
+echo "PASS: Snapshot created"
+
+# Clone
+zfs clone "${TESTPOOL}/data@snap1" "${TESTPOOL}/clone1"
+cat "/${TESTPOOL}/clone1/test.txt" | grep -q "test data"
+echo "PASS: Clone readable"
+
+# Modify clone (COW test)
+echo "modified" > "/${TESTPOOL}/clone1/test.txt"
+cat "/${TESTPOOL}/data/test.txt" | grep -q "test data"
+echo "PASS: COW works (original unchanged)"
+
+# Compression check
+zfs get compression "${TESTPOOL}/data" | grep -q "lz4\|on"
+echo "PASS: Compression enabled"
+
+# Cleanup
+zpool destroy "$TESTPOOL"
+rm -f "$TESTFILE"
+echo ""
+echo "=== All quick tests passed ==="
+TESTSCRIPT
+
+  local elapsed
+  elapsed="$(timer_elapsed_ms "$t_start")"
+  log "Tests complete on ${sname} (${elapsed}ms)"
+}
+
+run_zfs_test_suite() {
+  local distro="$1" site="${2:-blue}"
+
+  local sname
+  sname="$(site_name "$site" "$distro")"
+  local ip
+  ip="$(get_vm_ip "$sname" 2>/dev/null)"
+  [[ -n "$ip" ]] || { warn "Cannot get IP for ${sname}"; return 1; }
+
+  log "Running zfs-tests.sh on ${C}${sname}${N} (${ip}) -- this takes a while..."
+
+  _ssh_cmd "$ip" bash -s <<'FULLTEST'
+cd /usr/src/zfs 2>/dev/null || { echo "OpenZFS source not found at /usr/src/zfs"; exit 1; }
+
+# Build if not already built
+if [[ ! -f ./configure ]]; then
+  echo "Building OpenZFS from source..."
+  sh autogen.sh
+  ./configure --with-config=user
+  make -j$(nproc)
+fi
+
+# Run the test suite
+echo "Running ZFS test suite..."
+scripts/zfs-tests.sh -vx 2>&1 | tail -50
+FULLTEST
+}
+
+run_test_all() {
+  local site="${1:-blue}"
+  local passed=0 failed=0
+
+  echo -e "${C}======================================================================${N}"
+  echo -e "${W}  ZFS Test Matrix -- ${site} site                                      ${N}"
+  echo -e "${C}======================================================================${N}"
+  echo ""
+
+  printf "  ${W}%-15s %-12s %-10s %s${N}\n" "Distro" "Status" "Time" "Details"
+  printf "  %-15s %-12s %-10s %s\n" "---------------" "------------" "----------" "--------"
+
+  for distro in "${DISTROS[@]}"; do
+    local sname
+    sname="$(site_name "$site" "$distro")"
+    if ! virsh domstate "$sname" 2>/dev/null | grep -q "running"; then
+      printf "  %-15s ${Y}%-12s${N}\n" "$distro" "not running"
+      continue
+    fi
+
+    local t_start
+    t_start="$(timer_start)"
+    local output
+    if output="$(run_test_single "$distro" "$site" 2>&1)"; then
+      local elapsed
+      elapsed="$(timer_elapsed_ms "$t_start")"
+      printf "  %-15s ${G}%-12s${N} %-10s %s\n" "$distro" "PASS" "${elapsed}ms" ""
+      ((passed++))
+    else
+      local elapsed
+      elapsed="$(timer_elapsed_ms "$t_start")"
+      printf "  %-15s ${R}%-12s${N} %-10s %s\n" "$distro" "FAIL" "${elapsed}ms" ""
+      ((failed++))
+    fi
+  done
+
+  echo ""
+  log "Test results: ${G}${passed} passed${N}, ${R}${failed} failed${N}"
+}
+
+# ── Destroy ──────────────────────────────────────────────────────────────
+destroy_site() {
+  local site="$1"
+  local quiet="${2:-}"
+
+  for distro in "${DISTROS[@]}"; do
+    local sname
+    sname="$(site_name "$site" "$distro")"
+    local spath
+    spath="$(zvol_path "$sname")"
+
+    virsh destroy "$sname" 2>/dev/null || true
+    virsh undefine "$sname" --nvram 2>/dev/null || virsh undefine "$sname" 2>/dev/null || true
+    zfs destroy -Rf "$spath" 2>/dev/null || true
+    rm -f "${ISO_DIR}/${sname}-cloud-init.iso" 2>/dev/null
+  done
+
+  [[ -n "$quiet" ]] || log "Site ${site} destroyed"
+}
+
+destroy_goldens() {
+  for distro in "${DISTROS[@]}"; do
+    local gname
+    gname="$(golden_name "$distro")"
+    local gpath
+    gpath="$(zvol_path "$gname")"
+
+    virsh destroy "$gname" 2>/dev/null || true
+    virsh undefine "$gname" --nvram 2>/dev/null || virsh undefine "$gname" 2>/dev/null || true
+    zfs destroy -Rf "$gpath" 2>/dev/null || true
+    rm -f "${ISO_DIR}/${gname}-cloud-init.iso" 2>/dev/null
+    rm -f "${ISO_DIR}/${distro}-cloud.qcow2" 2>/dev/null
+  done
+  log "All golden images destroyed"
+}
+
+cmd_destroy() {
+  local target="${1:-}"
+  [[ -n "$target" ]] || die "Usage: kzfs-lab destroy blue|green|all"
+
+  case "$target" in
+    blue|green)
+      echo -e "${R}WARNING: This will destroy the ${target} site (all ${#DISTROS[@]} VMs)${N}"
+      read -r -p "Type 'destroy' to continue: " confirm
+      [[ "$confirm" == "destroy" ]] || { echo "Aborted."; exit 0; }
+      destroy_site "$target"
+      ;;
+    all)
+      echo -e "${R}WARNING: This will destroy ALL lab VMs (blue + green sites)${N}"
+      echo -e "${R}Golden images will be preserved.${N}"
+      read -r -p "Type 'destroy' to continue: " confirm
+      [[ "$confirm" == "destroy" ]] || { echo "Aborted."; exit 0; }
+      destroy_site "blue"
+      destroy_site "green"
+      log "All sites destroyed. Goldens preserved."
+      log "To also destroy goldens: zfs destroy -Rf ${POOL}/vms/${LAB_PREFIX}-golden-*"
+      ;;
+    goldens)
+      echo -e "${R}WARNING: This will destroy ALL golden images and site VMs${N}"
+      read -r -p "Type 'destroy' to continue: " confirm
+      [[ "$confirm" == "destroy" ]] || { echo "Aborted."; exit 0; }
+      destroy_site "blue"
+      destroy_site "green"
+      destroy_goldens
+      ;;
+    *)
+      die "Unknown target: ${target}. Use blue, green, all, or goldens."
+      ;;
+  esac
+}
+
+# ── Status ───────────────────────────────────────────────────────────────
+cmd_status() {
+  echo -e "${C}======================================================================${N}"
+  echo -e "${W}  kzfs-lab Status                                                      ${N}"
+  echo -e "${C}======================================================================${N}"
+  echo ""
+
+  # Golden images
+  echo -e "${Y}Golden Images:${N}"
+  printf "  ${W}%-15s %-10s %-12s %s${N}\n" "Distro" "Status" "Size" "Snapshots"
+  printf "  %-15s %-10s %-12s %s\n" "---------------" "----------" "------------" "---------"
+
+  for distro in "${DISTROS[@]}"; do
+    local gname
+    gname="$(golden_name "$distro")"
+    local gpath
+    gpath="$(zvol_path "$gname")"
+
+    if zfs list "$gpath" >/dev/null 2>&1; then
+      local used
+      used="$(zfs get -H -o value used "$gpath")"
+      local snaps
+      snaps="$(zfs list -t snapshot -o name -r "$gpath" 2>/dev/null | grep -v NAME | wc -l)"
+      printf "  %-15s ${G}%-10s${N} %-12s %s\n" "$distro" "ready" "$used" "${snaps} snap(s)"
+    else
+      printf "  %-15s ${D}%-10s${N}\n" "$distro" "not built"
+    fi
+  done
+
+  # Blue site
+  echo ""
+  echo -e "${Y}Blue Site:${N}"
+  print_site_status "blue"
+
+  # Green site
+  echo ""
+  echo -e "${Y}Green Site:${N}"
+  print_site_status "green"
+
+  # ZFS pool summary
+  echo ""
+  echo -e "${Y}ZFS Summary:${N}"
+  zfs list -o name,used,refer,volsize -r "${POOL}/vms" -t volume 2>/dev/null \
+    | grep -E "${LAB_PREFIX}|NAME" || echo "  No lab zvols"
+
+  echo ""
+  echo -e "${C}======================================================================${N}"
+}
+
+print_site_status() {
+  local site="$1"
+  local count=0
+
+  printf "  ${W}%-25s %-16s %-10s %-10s %s${N}\n" "VM" "IP" "State" "SSH" "ZFS"
+  printf "  %-25s %-16s %-10s %-10s %s\n" "-------------------------" "----------------" "----------" "----------" "---"
+
+  for distro in "${DISTROS[@]}"; do
+    local sname
+    sname="$(site_name "$site" "$distro")"
+    local spath
+    spath="$(zvol_path "$sname")"
+
+    if ! zfs list "$spath" >/dev/null 2>&1; then
+      continue
+    fi
+
+    ((count++))
+    local state
+    state="$(virsh domstate "$sname" 2>/dev/null | head -1)" || state="undefined"
+
+    if [[ "$state" == "running" ]]; then
+      local ip
+      ip="$(get_vm_ip "$sname" 2>/dev/null)" || ip=""
+      local ssh_ok="--"
+      local zfs_ver="--"
+      if [[ -n "$ip" ]]; then
+        if _ssh_cmd "$ip" true 2>/dev/null; then
+          ssh_ok="ok"
+          zfs_ver="$(_ssh_cmd "$ip" "zfs version 2>/dev/null | head -1" 2>/dev/null || echo "n/a")"
+        fi
+      fi
+      printf "  ${G}%-25s${N} %-16s ${G}%-10s${N} %-10s %s\n" "$sname" "${ip:-no IP}" "$state" "$ssh_ok" "$zfs_ver"
+    else
+      printf "  ${D}%-25s${N} %-16s ${Y}%-10s${N}\n" "$sname" "--" "$state"
+    fi
+  done
+
+  if [[ $count -eq 0 ]]; then
+    echo "  (not deployed)"
+  fi
+}
+
+# ── Snapshot All ─────────────────────────────────────────────────────────
+cmd_snapshot_all() {
+  local tag="${1:-checkpoint}"
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
+  local snap_name="${tag}-${ts}"
+
+  log "Creating snapshot @${snap_name} on all lab VMs..."
+
+  local count=0
+  for site in blue green; do
+    for distro in "${DISTROS[@]}"; do
+      local sname
+      sname="$(site_name "$site" "$distro")"
+      local spath
+      spath="$(zvol_path "$sname")"
+
+      if zfs list "$spath" >/dev/null 2>&1; then
+        zfs snapshot "${spath}@${snap_name}"
+        echo -e "  ${G}${spath}@${snap_name}${N}"
+        ((count++))
+      fi
+    done
+  done
+
+  log "Created ${count} snapshots tagged @${snap_name}"
+}
+
+# ── eBPF Observability ───────────────────────────────────────────────────
+cmd_ebpf_latency() {
+  local site="${1:-blue}"
+  log "ZFS I/O latency heatmap across ${site} site (Ctrl+C to stop)..."
+  echo ""
+
+  for distro in "${DISTROS[@]}"; do
+    local sname
+    sname="$(site_name "$site" "$distro")"
+    local ip
+    ip="$(get_vm_ip "$sname" 2>/dev/null)" || continue
+    [[ -n "$ip" ]] || continue
+
+    echo -e "${C}--- ${sname} (${ip}) ---${N}"
+    _ssh_cmd "$ip" "timeout 5 bpftrace -e 'tracepoint:block:block_rq_complete { @usecs = hist(args->nr_sector); }' 2>/dev/null" || \
+      echo "  bpftrace not available or ZFS tracepoints not loaded"
+    echo ""
+  done
+}
+
+cmd_ebpf_arc() {
+  local site="${1:-blue}"
+  log "ARC hit/miss ratios across ${site} site..."
+  echo ""
+
+  for distro in "${DISTROS[@]}"; do
+    local sname
+    sname="$(site_name "$site" "$distro")"
+    local ip
+    ip="$(get_vm_ip "$sname" 2>/dev/null)" || continue
+    [[ -n "$ip" ]] || continue
+
+    echo -e "${C}--- ${sname} (${ip}) ---${N}"
+    _ssh_cmd "$ip" bash -s <<'ARCSTATS'
+if [[ -f /proc/spl/kstat/zfs/arcstats ]]; then
+  hits=$(awk '/^hits/ {print $3}' /proc/spl/kstat/zfs/arcstats)
+  misses=$(awk '/^misses/ {print $3}' /proc/spl/kstat/zfs/arcstats)
+  total=$((hits + misses))
+  if [[ $total -gt 0 ]]; then
+    ratio=$(echo "scale=2; $hits * 100 / $total" | bc 2>/dev/null || echo "N/A")
+    echo "  Hits: $hits  Misses: $misses  Hit ratio: ${ratio}%"
+  else
+    echo "  No ARC activity yet"
+  fi
+  arc_size=$(awk '/^size/ {print $3}' /proc/spl/kstat/zfs/arcstats)
+  echo "  ARC size: $(echo "scale=2; $arc_size / 1048576" | bc 2>/dev/null || echo "N/A") MB"
+else
+  echo "  ZFS ARC stats not available"
+fi
+ARCSTATS
+    echo ""
+  done
+}
+
+# ── Health Dashboard ─────────────────────────────────────────────────────
+cmd_health() {
+  local site="${1:-blue}"
+
+  echo -e "${C}======================================================================${N}"
+  echo -e "${W}  System Health Dashboard -- ${site} site                               ${N}"
+  echo -e "${C}======================================================================${N}"
+  echo ""
+
+  printf "  ${W}%-15s %-8s %-8s %-8s %-10s %-10s %s${N}\n" \
+    "Distro" "CPU%" "Mem%" "Load" "Disk" "ZFS" "Uptime"
+  printf "  %-15s %-8s %-8s %-8s %-10s %-10s %s\n" \
+    "---------------" "--------" "--------" "--------" "----------" "----------" "------"
+
+  for distro in "${DISTROS[@]}"; do
+    local sname
+    sname="$(site_name "$site" "$distro")"
+    local ip
+    ip="$(get_vm_ip "$sname" 2>/dev/null)" || continue
+    [[ -n "$ip" ]] || continue
+
+    if ! _ssh_cmd "$ip" true 2>/dev/null; then
+      printf "  %-15s ${R}unreachable${N}\n" "$distro"
+      continue
+    fi
+
+    local stats
+    stats="$(_ssh_cmd "$ip" bash -s <<'STATS'
+cpu=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{printf "%.0f", $2+$4}' || echo "?")
+mem=$(free 2>/dev/null | awk '/Mem:/ {printf "%.0f", $3/$2*100}' || echo "?")
+load=$(cat /proc/loadavg 2>/dev/null | awk '{print $1}' || echo "?")
+disk=$(df / 2>/dev/null | awk 'NR==2 {print $5}' || echo "?")
+zfs_ok="no"
+lsmod 2>/dev/null | grep -q zfs && zfs_ok="yes"
+uptime=$(uptime -p 2>/dev/null | sed 's/up //' || echo "?")
+echo "${cpu}|${mem}|${load}|${disk}|${zfs_ok}|${uptime}"
+STATS
+    )"
+
+    IFS='|' read -r cpu mem load disk zfs_ok uptime <<< "$stats"
+    local zfs_color="${G}"
+    [[ "$zfs_ok" == "yes" ]] || zfs_color="${R}"
+
+    printf "  %-15s %-8s %-8s %-8s %-10s ${zfs_color}%-10s${N} %s\n" \
+      "$distro" "${cpu}%" "${mem}%" "$load" "$disk" "$zfs_ok" "$uptime"
+  done
+  echo ""
+}
+
+# ── SSH into VM ──────────────────────────────────────────────────────────
+cmd_ssh_select() {
+  echo -e "${W}Select a VM to SSH into:${N}"
+  echo ""
+
+  local vms=()
+  local ips=()
+  local idx=1
+
+  for site in blue green; do
+    for distro in "${DISTROS[@]}"; do
+      local sname
+      sname="$(site_name "$site" "$distro")"
+      if virsh domstate "$sname" 2>/dev/null | grep -q "running"; then
+        local ip
+        ip="$(get_vm_ip "$sname" 2>/dev/null)" || ip=""
+        if [[ -n "$ip" ]]; then
+          vms+=("$sname")
+          ips+=("$ip")
+          printf "  ${G}%2d${N}  %-30s %s\n" "$idx" "$sname" "$ip"
+          ((idx++))
+        fi
+      fi
+    done
+  done
+
+  if [[ ${#vms[@]} -eq 0 ]]; then
+    warn "No running VMs found"
+    return 1
+  fi
+
+  echo ""
+  read -r -p "Enter number (or q to quit): " choice
+  [[ "$choice" == "q" ]] && return 0
+
+  local sel=$((choice - 1))
+  if [[ $sel -ge 0 && $sel -lt ${#vms[@]} ]]; then
+    log "Connecting to ${vms[$sel]} (${ips[$sel]})..."
+    ssh -o StrictHostKeyChecking=no -i "$SSH_KEY" "root@${ips[$sel]}" \
+      || sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ips[$sel]}"
+  else
+    warn "Invalid selection"
+  fi
+}
+
+# ── Interactive Demo Menu ────────────────────────────────────────────────
+cmd_demo() {
+  while true; do
+    # Count available goldens and running VMs
+    local golden_count=0 blue_count=0 green_count=0
+    for distro in "${DISTROS[@]}"; do
+      golden_exists "$distro" && ((golden_count++))
+      virsh domstate "$(site_name blue "$distro")" 2>/dev/null | grep -q "running" && ((blue_count++))
+      virsh domstate "$(site_name green "$distro")" 2>/dev/null | grep -q "running" && ((green_count++))
+    done
+
+    echo ""
+    echo -e "${C}======================================================================${N}"
+    echo -e "${W}   kldload -- ZFS Dev Lab                                              ${N}"
+    echo -e "${W}   ${#DISTROS[@]} distros | eBPF | dev tools | blue-green | instant rollback     ${N}"
+    echo -e "${C}======================================================================${N}"
+    echo ""
+    echo -e "   Goldens: ${G}${golden_count}/${#DISTROS[@]}${N}  Blue: ${G}${blue_count}${N}  Green: ${G}${green_count}${N}"
+    echo ""
+    echo -e "  ${Y}-- Build -------------------------------------------------------${N}"
+    echo -e "   ${W} 1${N}  Build all golden images (downloads + installs)"
+    echo -e "   ${W} 2${N}  Build single golden (select distro)"
+    echo ""
+    echo -e "  ${Y}-- Deploy ------------------------------------------------------${N}"
+    echo -e "   ${W} 3${N}  Deploy blue site (production baseline)"
+    echo -e "   ${W} 4${N}  Deploy green site (staging)"
+    echo -e "   ${W} 5${N}  Status -- all VMs, sites, snapshots"
+    echo ""
+    echo -e "  ${Y}-- Test --------------------------------------------------------${N}"
+    echo -e "   ${W} 6${N}  Run ZFS test suite -- all distros (matrix output)"
+    echo -e "   ${W} 7${N}  Run ZFS test suite -- single distro"
+    echo -e "   ${W} 8${N}  Run quick test (pool create/destroy/snap/clone)"
+    echo ""
+    echo -e "  ${Y}-- Operations --------------------------------------------------${N}"
+    echo -e "   ${W} 9${N}  Promote green -> blue"
+    echo -e "   ${W}10${N}  Rollback blue to previous"
+    echo -e "   ${W}11${N}  Snapshot all VMs (tagged checkpoint)"
+    echo -e "   ${W}12${N}  SSH into a VM (select distro + site)"
+    echo ""
+    echo -e "  ${Y}-- Observability -----------------------------------------------${N}"
+    echo -e "   ${W}13${N}  eBPF: ZFS I/O latency (all VMs)"
+    echo -e "   ${W}14${N}  eBPF: ARC hit/miss ratios"
+    echo -e "   ${W}15${N}  System health dashboard"
+    echo ""
+    echo -e "  ${Y}-- Cleanup -----------------------------------------------------${N}"
+    echo -e "   ${W} 0${N}  Destroy everything (goldens preserved)"
+    echo -e "   ${W} q${N}  Quit"
+    echo ""
+    read -r -p "  Select: " choice
+
+    case "$choice" in
+      1)
+        build_all_goldens
+        ;;
+      2)
+        echo ""
+        echo -e "  Available distros: ${DISTROS[*]}"
+        read -r -p "  Distro: " d
+        build_golden_single "$d"
+        ;;
+      3)
+        deploy_site "blue"
+        ;;
+      4)
+        deploy_site "green"
+        ;;
+      5)
+        cmd_status
+        ;;
+      6)
+        echo ""
+        read -r -p "  Site (blue/green) [blue]: " s
+        run_test_all "${s:-blue}"
+        ;;
+      7)
+        echo ""
+        echo -e "  Available distros: ${DISTROS[*]}"
+        read -r -p "  Distro: " d
+        read -r -p "  Site (blue/green) [blue]: " s
+        run_zfs_test_suite "$d" "${s:-blue}"
+        ;;
+      8)
+        echo ""
+        echo -e "  Available distros: ${DISTROS[*]}"
+        read -r -p "  Distro (or 'all'): " d
+        read -r -p "  Site (blue/green) [blue]: " s
+        if [[ "$d" == "all" ]]; then
+          run_test_all "${s:-blue}"
+        else
+          run_test_single "$d" "${s:-blue}"
+        fi
+        ;;
+      9)
+        cmd_promote "green"
+        ;;
+      10)
+        cmd_rollback
+        ;;
+      11)
+        echo ""
+        read -r -p "  Tag name [checkpoint]: " tag
+        cmd_snapshot_all "${tag:-checkpoint}"
+        ;;
+      12)
+        cmd_ssh_select
+        ;;
+      13)
+        echo ""
+        read -r -p "  Site (blue/green) [blue]: " s
+        cmd_ebpf_latency "${s:-blue}"
+        ;;
+      14)
+        echo ""
+        read -r -p "  Site (blue/green) [blue]: " s
+        cmd_ebpf_arc "${s:-blue}"
+        ;;
+      15)
+        echo ""
+        read -r -p "  Site (blue/green) [blue]: " s
+        cmd_health "${s:-blue}"
+        ;;
+      0)
+        cmd_destroy "all"
+        ;;
+      q|Q)
+        echo "Goodbye."
+        exit 0
+        ;;
+      *)
+        warn "Invalid selection"
+        ;;
+    esac
+  done
+}
+
+# ── Usage ────────────────────────────────────────────────────────────────
+usage() {
+  cat <<'EOF'
+Usage: kzfs-lab <command> [options]
+
+Commands:
+  build [distro|all]       Build golden images (downloads cloud images + installs ZFS dev tools)
+  deploy blue|green        Clone goldens to blue or green site
+  promote green            Promote green to blue (snapshots blue first)
+  rollback                 Revert blue site to previous snapshot
+  test [distro|all]        Run ZFS tests in VMs
+  test-full [distro]       Run full zfs-tests.sh suite (slow)
+  status                   Show all VMs, sites, snapshots
+  destroy blue|green|all   Tear down VMs (goldens preserved unless 'goldens' target)
+  snapshot [tag]           Snapshot all VMs with a tag
+  ssh                      SSH into a VM (interactive selection)
+  health [site]            System health dashboard
+  ebpf-latency [site]      eBPF I/O latency across VMs
+  ebpf-arc [site]          eBPF ARC hit/miss ratios
+  demo                     Interactive menu
+
+Distros: centos rocky fedora debian ubuntu arch
+
+Examples:
+  kzfs-lab build all                  # Build all 6 golden images
+  kzfs-lab build centos               # Build just CentOS golden
+  kzfs-lab deploy blue                # Clone goldens -> blue site
+  kzfs-lab deploy green               # Clone goldens -> green site (staging)
+  kzfs-lab test all                   # Quick ZFS test on all blue VMs
+  kzfs-lab promote green              # Green becomes new blue
+  kzfs-lab rollback                   # Revert blue to last snapshot
+  kzfs-lab demo                       # Interactive menu
+  kzfs-lab destroy all                # Tear down all sites
+
+Blue-Green Workflow:
+  1. kzfs-lab build all               # Build golden images (once)
+  2. kzfs-lab deploy blue             # Production baseline
+  3. kzfs-lab test all                # Verify blue
+  4. kzfs-lab deploy green            # Staging for new changes
+  5. kzfs-lab test all                # Test green
+  6. kzfs-lab promote green           # Green -> blue (instant ZFS clone)
+  7. kzfs-lab rollback                # Revert if needed (instant)
+EOF
+  exit 1
+}
+
+# ── Dispatch ─────────────────────────────────────────────────────────────
+CMD="${1:-}"
+[[ -n "$CMD" ]] || usage
+shift
+
+case "$CMD" in
+  build)
+    target="${1:-all}"
+    if [[ "$target" == "all" ]]; then
+      build_all_goldens
+    else
+      build_golden_single "$target"
+    fi
+    ;;
+  deploy)
+    site="${1:-}"
+    [[ -n "$site" ]] || die "Usage: kzfs-lab deploy blue|green"
+    deploy_site "$site"
+    ;;
+  promote)
+    cmd_promote "${1:-green}"
+    ;;
+  rollback)
+    cmd_rollback
+    ;;
+  test)
+    target="${1:-all}"
+    site="${2:-blue}"
+    if [[ "$target" == "all" ]]; then
+      run_test_all "$site"
+    else
+      run_test_single "$target" "$site"
+    fi
+    ;;
+  test-full)
+    target="${1:-}"
+    [[ -n "$target" ]] || die "Usage: kzfs-lab test-full <distro>"
+    run_zfs_test_suite "$target" "${2:-blue}"
+    ;;
+  status)
+    cmd_status
+    ;;
+  destroy)
+    cmd_destroy "${1:-}"
+    ;;
+  snapshot)
+    cmd_snapshot_all "${1:-checkpoint}"
+    ;;
+  ssh)
+    cmd_ssh_select
+    ;;
+  health)
+    cmd_health "${1:-blue}"
+    ;;
+  ebpf-latency)
+    cmd_ebpf_latency "${1:-blue}"
+    ;;
+  ebpf-arc)
+    cmd_ebpf_arc "${1:-blue}"
+    ;;
+  demo)
+    cmd_demo
+    ;;
+  *)
+    usage
+    ;;
+esac
