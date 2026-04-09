@@ -542,8 +542,8 @@ cmd_bootstrap() {
 
       # CP ↔ Worker peering
       for i in $(seq 0 $((WORKERS-1))); do
-        local wip="${worker_ips[$i]}"
-        [[ -n "$wip" && -n "${w_pubs[$i]}" ]] || continue
+        local wip="${worker_ips[$i]:-}"
+        [[ -n "$wip" && -n "${w_pubs[$i]:-}" ]] || continue
         _ssh_cmd "$cp_ip" "kube-network add-peer ${wip} ${w_pubs[$i]} ${w_ids[$i]}" || true
         _ssh_cmd "$wip" "kube-network add-peer ${cp_ip} ${cp_pub} 1" || true
       done
@@ -552,9 +552,9 @@ cmd_bootstrap() {
       for i in $(seq 0 $((WORKERS-1))); do
         for j in $(seq 0 $((WORKERS-1))); do
           [[ $i -eq $j ]] && continue
-          local wip_i="${worker_ips[$i]}"
-          local wip_j="${worker_ips[$j]}"
-          [[ -n "$wip_i" && -n "$wip_j" && -n "${w_pubs[$j]}" ]] || continue
+          local wip_i="${worker_ips[$i]:-}"
+          local wip_j="${worker_ips[$j]:-}"
+          [[ -n "$wip_i" && -n "$wip_j" && -n "${w_pubs[$j]:-}" ]] || continue
           _ssh_cmd "$wip_i" "kube-network add-peer ${wip_j} ${w_pubs[$j]} ${w_ids[$j]}" || true
         done
       done
