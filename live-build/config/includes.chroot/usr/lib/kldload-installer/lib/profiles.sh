@@ -254,13 +254,26 @@ k_install_system_files() {
     mkdir -p "${target}/etc/sanoid"
     cp /etc/sanoid/sanoid.conf "${target}/etc/sanoid/sanoid.conf"
   fi
-  # Sanoid binaries — Debian installs via apt, but RPM targets need the live copies
-  for _sb in sanoid syncoid findoid; do
-    if [[ -x "/usr/local/sbin/${_sb}" ]] && ! chroot "${target}" command -v "${_sb}" >/dev/null 2>&1; then
-      cp "/usr/local/sbin/${_sb}" "${target}/usr/local/sbin/${_sb}"
-      chmod +x "${target}/usr/local/sbin/${_sb}"
+  # Sanoid binaries — Debian/Ubuntu install via apt; RPM targets need live copies
+  if chroot "${target}" dpkg -s sanoid >/dev/null 2>&1; then
+    # apt-installed sanoid — remove any /usr/local/sbin copies that override it
+    # (apt puts sanoid in /usr/sbin, defaults.conf in /usr/share/sanoid/)
+    for _sb in sanoid syncoid findoid; do
+      rm -f "${target}/usr/local/sbin/${_sb}" 2>/dev/null
+    done
+    # Ensure defaults.conf is findable (apt version looks in /usr/share/sanoid/)
+    if [[ -f "${target}/usr/share/sanoid/sanoid.defaults.conf" ]] && [[ ! -f "${target}/etc/sanoid/sanoid.defaults.conf" ]]; then
+      ln -sf /usr/share/sanoid/sanoid.defaults.conf "${target}/etc/sanoid/sanoid.defaults.conf"
     fi
-  done
+  else
+    # RPM target — copy from live ISO
+    for _sb in sanoid syncoid findoid; do
+      if [[ -x "/usr/local/sbin/${_sb}" ]] && ! chroot "${target}" command -v "${_sb}" >/dev/null 2>&1; then
+        cp "/usr/local/sbin/${_sb}" "${target}/usr/local/sbin/${_sb}"
+        chmod +x "${target}/usr/local/sbin/${_sb}"
+      fi
+    done
+  fi
   # Sanoid systemd units — copy from live if not already on target (RPM)
   for _su in sanoid.service sanoid.timer; do
     if [[ -f "/lib/systemd/system/${_su}" ]] && [[ ! -f "${target}/lib/systemd/system/${_su}" ]]; then
@@ -378,9 +391,10 @@ FFPOLICY
     cp /etc/modules-load.d/virtio.conf "${target}/etc/modules-load.d/virtio.conf"
   fi
 
-  # ── Edition marker ────────────────────────────────────────────────────────
+  # ── Edition + profile markers ──────────────────────────────────────────────
   mkdir -p "${target}/etc/kldload"
   [[ -f /etc/kldload/edition ]] && cp /etc/kldload/edition "${target}/etc/kldload/edition"
+  echo "${_profile}" > "${target}/etc/kldload/profile"
 
   # ── User tools: ZFS helpers + adduser.local hook (skip for core) ─────────────
   mkdir -p "${target}/usr/local/bin" "${target}/usr/local/sbin"
@@ -795,24 +809,31 @@ STORAGE
 
     # Enable libvirtd + default network (virbr0)
     chroot "${target}" systemctl enable libvirtd 2>/dev/null || true
-    # virsh can't run in chroot (no libvirtd) — use a oneshot service for first boot
+    # virsh can't run in chroot (no libvirtd) — use a timer that fires 30s after boot
+    # The oneshot approach fails because libvirtd restarts and loses state
     cat > "${target}/etc/systemd/system/kldload-virbr0.service" <<'VIRBR0SVC'
 [Unit]
 Description=Enable libvirt default network (virbr0) autostart
-After=libvirtd.service libvirtd.socket
-Requires=libvirtd.service
+After=libvirtd.service
 
 [Service]
 Type=oneshot
-ExecStartPre=/bin/sleep 3
-ExecStart=/bin/bash -c 'for i in 1 2 3 4 5; do virsh net-autostart default 2>/dev/null && virsh net-start default 2>/dev/null && break; sleep 2; done'
-ExecStartPost=/bin/systemctl disable kldload-virbr0.service
+ExecStart=/bin/bash -c 'for i in $(seq 1 10); do virsh net-autostart default 2>/dev/null && virsh net-start default 2>/dev/null && exit 0; sleep 3; done; echo "virbr0 setup failed after 10 attempts"'
+ExecStartPost=/bin/bash -c 'systemctl disable kldload-virbr0.timer 2>/dev/null; systemctl disable kldload-virbr0.service 2>/dev/null; true'
 RemainAfterExit=yes
+VIRBR0SVC
+    cat > "${target}/etc/systemd/system/kldload-virbr0.timer" <<'VIRBR0TMR'
+[Unit]
+Description=Delayed virbr0 setup (30s after boot)
+
+[Timer]
+OnBootSec=30s
+Unit=kldload-virbr0.service
 
 [Install]
-WantedBy=multi-user.target
-VIRBR0SVC
-    chroot "${target}" systemctl enable kldload-virbr0.service 2>/dev/null || true
+WantedBy=timers.target
+VIRBR0TMR
+    chroot "${target}" systemctl enable kldload-virbr0.timer 2>/dev/null || true
 
     k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots, kvm-* tools, Podman ZFS driver"
   fi
