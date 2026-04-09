@@ -273,6 +273,11 @@ k_install_system_files() {
         chmod +x "${target}/usr/local/sbin/${_sb}"
       fi
     done
+    # Copy sanoid.defaults.conf (required by GitHub-built sanoid)
+    if [[ -f /etc/sanoid/sanoid.defaults.conf ]] && [[ ! -f "${target}/etc/sanoid/sanoid.defaults.conf" ]]; then
+      mkdir -p "${target}/etc/sanoid"
+      cp /etc/sanoid/sanoid.defaults.conf "${target}/etc/sanoid/sanoid.defaults.conf"
+    fi
   fi
   # Sanoid systemd units — copy from live if not already on target (RPM)
   for _su in sanoid.service sanoid.timer; do

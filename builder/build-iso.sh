@@ -183,6 +183,9 @@ if [[ "$EDITION" != "core" ]]; then
     cp "/tmp/sanoid-${SANOID_VER}/syncoid" "${ROOTFS}/usr/local/sbin/syncoid"
     cp "/tmp/sanoid-${SANOID_VER}/findoid" "${ROOTFS}/usr/local/sbin/findoid"
     chmod +x "${ROOTFS}/usr/local/sbin/sanoid" "${ROOTFS}/usr/local/sbin/syncoid" "${ROOTFS}/usr/local/sbin/findoid"
+    # Copy sanoid.defaults.conf — required by sanoid at runtime
+    mkdir -p "${ROOTFS}/etc/sanoid"
+    cp "/tmp/sanoid-${SANOID_VER}/sanoid.defaults.conf" "${ROOTFS}/etc/sanoid/sanoid.defaults.conf"
     # Sanoid systemd units
     cp "/tmp/sanoid-${SANOID_VER}/packages/debian/sanoid.timer" "${ROOTFS}/usr/lib/systemd/system/"
     cp "/tmp/sanoid-${SANOID_VER}/packages/debian/sanoid.service" "${ROOTFS}/usr/lib/systemd/system/"
