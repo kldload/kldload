@@ -197,11 +197,11 @@ k_profile_optional_packages() {
   # KVM Host (profile or optional checkbox)
   if [[ "$_profile" == "kvm" ]] || [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
     if [[ "$_distro" == "arch" ]]; then
-      out+=(qemu-full libvirt virt-install bridge-utils edk2-ovmf dnsmasq)
+      out+=(qemu-full libvirt virt-install bridge-utils edk2-ovmf dnsmasq sshpass)
     elif [[ "$_distro" == "ubuntu" || "$_distro" == "debian" ]]; then
-      out+=(qemu-system-x86 libvirt-daemon-system libvirt-clients virtinst bridge-utils ovmf dnsmasq-base)
+      out+=(qemu-system-x86 libvirt-daemon-system libvirt-clients virtinst bridge-utils ovmf dnsmasq-base sshpass)
     else
-      out+=(qemu-kvm libvirt-daemon libvirt-daemon-driver-qemu libvirt-daemon-config-network libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq)
+      out+=(qemu-kvm libvirt-daemon libvirt-daemon-driver-qemu libvirt-daemon-config-network libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq sshpass)
     fi
   fi
 
