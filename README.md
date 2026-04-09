@@ -8,6 +8,8 @@ The KVM profile turns a bare-metal machine into a hypervisor that deploys Kubern
 
 **Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Discord:** [discord.gg/tkVN6sSU](https://discord.gg/tkVN6sSU)
 
+![kldloadOS Installer](screenshots/installer-ui.png)
+
 ---
 
 ## Quickstart
@@ -132,10 +134,43 @@ Cat any file and read what it does.
 
 The live environment is always CentOS Stream 9. The user picks their target distro at install time. Future upgrades use the public repos of the distro you chose. There is no kldload repo. There are no kldload updates.
 
+## Releases
+
+### 1.0.3 — Kubernetes on ZFS (current)
+- Full Kubernetes cluster deployment via `kube-cluster bootstrap`
+- Golden image → ZFS clone → 4 nodes in <100ms each
+- Cilium eBPF CNI (replaces kube-proxy), Gateway API, MetalLB, Hubble
+- WireGuard encrypted backplane (dual-plane: management + K8s)
+- OpenEBS ZFS LocalPV CSI — PVCs backed by ZFS with instant snapshots
+- 21-option interactive `kube-demo` — scale nodes, drain, replace, rolling updates
+- K8s bootstrap checkbox: one install, one reboot → production cluster
+- Debian 13 (Trixie) as first-class citizen
+- AI profile: Ollama + Open WebUI + NVIDIA GPU
+- Web UI with 5 profiles: Desktop, Server, Core, KVM, AI
+- Golden image export (qcow2, vmdk, vhd, ova) with cloud-init
+- `kube-smoke-test` — 34-point cluster verification
+
+### 1.0.2 — 8 Distros
+- Added Alpine Linux, FreeBSD 15.0 to installer
+- Ubuntu 24.04 offline darksite
+- Boot environment manager (`kbe`)
+- `kupgrade` with automatic pre-upgrade snapshots
+
+### 1.0.1 — ZFS Everywhere
+- 6 distros: CentOS, Debian, Fedora, RHEL, Rocky, Arch
+- WireGuard + eBPF from first boot
+- `kvm-demo` interactive hypervisor demo
+- Sanoid automatic snapshot scheduling
+
+### 1.0.0 — Initial Release
+- Single ISO, 4 distros, ZFS on root
+- Offline RPM darksite
+- ZFSBootMenu boot environments
+
 ## License
 
 BSD-3-Clause. Free forever. See [LICENSE](LICENSE).
 
 ---
 
-*kldloadOS 1.0.4 — Kubernetes on ZFS*
+*kldloadOS 1.0.3*
