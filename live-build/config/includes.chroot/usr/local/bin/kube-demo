@@ -552,6 +552,24 @@ demo_add_nodes() {
   echo -e "${D}Waiting for workers to boot (30s)...${N}"
   sleep 30
 
+  # Set unique hostnames + machine-id on each clone (critical — golden identity must be replaced)
+  for n in $next1 $next2; do
+    local name="kldload-w-${n}"
+    local mac ip
+    mac="$(virsh domiflist "$name" 2>/dev/null | awk '/bridge/ {print $5}')"
+    ip=""
+    for _ in $(seq 1 15); do
+      ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
+      [[ -n "$ip" ]] && break
+      sleep 2
+    done
+    if [[ -n "$ip" ]]; then
+      echo -e "  Setting hostname on ${G}${name}${N} (${ip})..."
+      sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
+        "hostnamectl set-hostname ${name}; rm -f /etc/machine-id; systemd-machine-id-setup; systemctl restart systemd-networkd 2>/dev/null || true" 2>/dev/null || true
+    fi
+  done
+
   # Get join command from CP
   local join_cmd
   join_cmd="$(_ssh_cp 'kubeadm token create --print-join-command 2>/dev/null')"
@@ -563,7 +581,7 @@ demo_add_nodes() {
       ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
       if [[ -n "$ip" ]]; then
         echo -e "  Joining ${G}${name}${N} (${ip})..."
-        sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" "$join_cmd" 2>/dev/null || echo "  ${Y}Join failed — may need manual intervention${N}"
+        sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" "$join_cmd" 2>/dev/null || echo -e "  ${Y}Join failed — may need manual intervention${N}"
       fi
     done
   fi
