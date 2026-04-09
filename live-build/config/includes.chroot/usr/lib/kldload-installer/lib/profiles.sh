@@ -201,7 +201,7 @@ k_profile_optional_packages() {
     elif [[ "$_distro" == "ubuntu" || "$_distro" == "debian" ]]; then
       out+=(qemu-system-x86 libvirt-daemon-system libvirt-clients virtinst bridge-utils ovmf dnsmasq-base sshpass)
     else
-      out+=(qemu-kvm libvirt-daemon libvirt-daemon-driver-qemu libvirt-daemon-config-network libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq sshpass)
+      out+=(qemu-kvm libvirt-daemon libvirt-daemon-driver-qemu libvirt-daemon-driver-storage libvirt-daemon-config-network libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq sshpass)
     fi
   fi
 
