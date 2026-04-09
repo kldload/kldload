@@ -362,7 +362,53 @@ main() {
   install_metallb || warn "MetalLB install had issues — pods may still be pulling"
   install_zfs_csi || warn "ZFS CSI install had issues (non-fatal)"
   generate_join_command
+  deploy_sample_workload
   print_status
+}
+
+# ── Deploy sample workload to prove the cluster works ────────────────────
+deploy_sample_workload() {
+  log "Deploying sample nginx workload..."
+
+  # Wait for Cilium to be ready (pods need CNI)
+  local attempts=0
+  while [[ $attempts -lt 30 ]]; do
+    if kubectl get ds -n kube-system cilium -o jsonpath='{.status.numberReady}' 2>/dev/null | grep -q '[1-9]'; then
+      break
+    fi
+    sleep 5
+    ((attempts++))
+  done
+
+  # Deploy nginx
+  kubectl create deployment nginx-sample --image=nginx:alpine --replicas=1 2>/dev/null || true
+
+  # Expose via ClusterIP
+  kubectl expose deployment nginx-sample --port=80 --target-port=80 2>/dev/null || true
+
+  # Wait for pod to be ready
+  local ready=false
+  for _ in $(seq 1 30); do
+    if kubectl get pods -l app=nginx-sample --no-headers 2>/dev/null | grep -q Running; then
+      ready=true
+      break
+    fi
+    sleep 3
+  done
+
+  if $ready; then
+    local pod_ip
+    pod_ip="$(kubectl get pods -l app=nginx-sample -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)"
+    local svc_ip
+    svc_ip="$(kubectl get svc nginx-sample -o jsonpath='{.spec.clusterIP}' 2>/dev/null)"
+    log "Sample workload running:"
+    echo -e "    Pod:     \033[1;32mnginx-sample → ${pod_ip}\033[0m"
+    echo -e "    Service: \033[1;32mnginx-sample → ${svc_ip}:80\033[0m"
+    echo -e "    Verify:  \033[0;37mcurl ${svc_ip}\033[0m"
+  else
+    warn "Sample workload not ready yet — images may still be pulling"
+    warn "Check with: kubectl get pods -l app=nginx-sample"
+  fi
 }
 
 main "$@"
