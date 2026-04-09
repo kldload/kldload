@@ -911,17 +911,17 @@ CRICTLCFG
       cat > "${target}/etc/systemd/system/kube-firstboot.service" <<'KUBEFB'
 [Unit]
 Description=kldload Kubernetes first-boot bootstrap
-After=network-online.target containerd.service
+After=network-online.target
 Wants=network-online.target
 ConditionPathExists=!/etc/kubernetes/admin.conf
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/kube-init
+ExecStart=/bin/bash -c '/usr/local/bin/kube-setup && /usr/local/bin/kube-init'
 ExecStartPost=/bin/bash -c 'systemctl disable kube-firstboot.service'
 StandardOutput=journal+console
 StandardError=journal+console
-TimeoutStartSec=600
+TimeoutStartSec=1200
 
 [Install]
 WantedBy=multi-user.target
