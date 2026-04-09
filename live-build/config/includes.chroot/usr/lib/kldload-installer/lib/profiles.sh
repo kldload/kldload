@@ -798,12 +798,13 @@ STORAGE
     cat > "${target}/etc/systemd/system/kldload-virbr0.service" <<'VIRBR0SVC'
 [Unit]
 Description=Enable libvirt default network (virbr0) autostart
-After=libvirtd.service
+After=libvirtd.service libvirtd.socket
 Requires=libvirtd.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'virsh net-autostart default 2>/dev/null; virsh net-start default 2>/dev/null; true'
+ExecStartPre=/bin/sleep 3
+ExecStart=/bin/bash -c 'for i in 1 2 3 4 5; do virsh net-autostart default 2>/dev/null && virsh net-start default 2>/dev/null && break; sleep 2; done'
 ExecStartPost=/bin/systemctl disable kldload-virbr0.service
 RemainAfterExit=yes
 
