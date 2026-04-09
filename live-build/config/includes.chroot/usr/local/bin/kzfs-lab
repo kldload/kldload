@@ -754,10 +754,95 @@ deploy_site() {
     fi
   done
 
+  # ── WireGuard mesh ──────────────────────────────────────────────────────
+  echo ""
+  log "Configuring WireGuard mesh..."
+  local wg_base
+  [[ "$site" == "blue" ]] && wg_base="10.252.0" || wg_base="10.253.0"
+
+  # Collect IPs and init WireGuard on each VM
+  declare -A wg_ips=()
+  declare -A wg_pubs=()
+  local node_id=1
+  for distro in "${DISTROS[@]}"; do
+    local sname
+    sname="$(site_name "$site" "$distro")"
+    virsh domstate "$sname" 2>/dev/null | grep -q running || continue
+    local ip
+    ip="$(get_vm_ip "$sname")"
+    [[ -z "$ip" ]] && continue
+
+    # Check if WireGuard is available
+    _ssh_cmd "$ip" "command -v wg >/dev/null 2>&1" 2>/dev/null || continue
+
+    # Generate WireGuard config
+    _ssh_cmd "$ip" bash -s <<WGINIT 2>/dev/null || true
+mkdir -p /etc/wireguard
+wg genkey > /etc/wireguard/lab.key 2>/dev/null
+chmod 600 /etc/wireguard/lab.key
+wg pubkey < /etc/wireguard/lab.key > /etc/wireguard/lab.pub 2>/dev/null
+
+cat > /etc/wireguard/wg-lab.conf <<WG
+[Interface]
+PrivateKey = \$(cat /etc/wireguard/lab.key)
+Address = ${wg_base}.${node_id}/24
+ListenPort = 51830
+WG
+WGINIT
+
+    local pub
+    pub="$(_ssh_cmd "$ip" 'cat /etc/wireguard/lab.pub 2>/dev/null')"
+    if [[ -n "$pub" ]]; then
+      wg_ips[$distro]="$ip"
+      wg_pubs[$distro]="$pub"
+      echo -e "  ${G}${sname}${N} → ${wg_base}.${node_id} (wg-lab)"
+    fi
+    ((node_id++))
+  done
+
+  # Peer all VMs with each other (full mesh)
+  node_id=1
+  for distro_a in "${DISTROS[@]}"; do
+    [[ -z "${wg_ips[$distro_a]:-}" ]] && { ((node_id++)); continue; }
+    local peer_id=1
+    for distro_b in "${DISTROS[@]}"; do
+      [[ -z "${wg_ips[$distro_b]:-}" ]] && { ((peer_id++)); continue; }
+      [[ "$distro_a" == "$distro_b" ]] && { ((peer_id++)); continue; }
+      _ssh_cmd "${wg_ips[$distro_a]}" bash -s <<WGPEER 2>/dev/null || true
+wg set wg-lab peer ${wg_pubs[$distro_b]} \
+  allowed-ips ${wg_base}.${peer_id}/32 \
+  endpoint ${wg_ips[$distro_b]}:51830 \
+  persistent-keepalive 25
+WGPEER
+      ((peer_id++))
+    done
+
+    # Bring up interface
+    _ssh_cmd "${wg_ips[$distro_a]}" "ip link add dev wg-lab type wireguard 2>/dev/null; wg setconf wg-lab /etc/wireguard/wg-lab.conf 2>/dev/null; ip addr add ${wg_base}.${node_id}/24 dev wg-lab 2>/dev/null; ip link set wg-lab up 2>/dev/null" || true
+    ((node_id++))
+  done
+
+  # Add nftables rules for WireGuard
+  for distro in "${DISTROS[@]}"; do
+    [[ -z "${wg_ips[$distro]:-}" ]] && continue
+    _ssh_cmd "${wg_ips[$distro]}" bash -s <<'NFTRULES' 2>/dev/null || true
+nft add table inet filter 2>/dev/null || true
+nft add chain inet filter input '{ type filter hook input priority 0; policy accept; }' 2>/dev/null || true
+nft add rule inet filter input iifname "wg-lab" accept 2>/dev/null || true
+nft add rule inet filter input udp dport 51830 accept 2>/dev/null || true
+NFTRULES
+  done
+
+  log "WireGuard mesh configured for ${site} site (${wg_base}.0/24)"
+
   local total_elapsed
   total_elapsed="$(timer_elapsed_ms "$total_start")"
   echo ""
   log "Deploy complete: ${G}${deployed} deployed${N}, ${Y}${skipped} skipped${N} (${total_elapsed}ms)"
+  echo ""
+  echo -e "  ${W}WireGuard:${N} ${wg_base}.0/24 (wg-lab interface)"
+  echo -e "  ${W}SSH:${N}       ssh root@<vm-ip> (password: kldload)"
+  echo -e "  ${W}Mesh:${N}      every VM can reach every other VM encrypted"
 }
 
 # ── Promote Green to Blue ────────────────────────────────────────────────
