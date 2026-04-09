@@ -368,8 +368,9 @@ FFPOLICY
 
   fi # end non-core block
 
-  # ── Build SHA marker ──────────────────────────────────────────────────────
+  # ── Build markers ──────────────────────────────────────────────────────
   [[ -f /etc/kldload-build-sha ]] && cp /etc/kldload-build-sha "${target}/etc/kldload-build-sha"
+  [[ -f /etc/kldload-build-id ]]  && cp /etc/kldload-build-id  "${target}/etc/kldload-build-id"
 
   # ── Virtio / VMware kernel modules ──────────────────────────────────────
   if [[ -f /etc/modules-load.d/virtio.conf ]]; then
