@@ -27,6 +27,7 @@ SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
 ISO_DIR="/var/lib/libvirt/isos"
 
 DISTROS=(centos rocky fedora debian ubuntu arch)
+OBS_VM="obs"  # observability VM name suffix
 
 declare -A CLOUD_IMAGES=(
   [centos]="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
@@ -490,6 +491,353 @@ COMMON
   log "  Dev platform installed on ${distro}"
 }
 
+# ── Setup: Observability VM (CentOS Stream 9) ────────────────────────────
+# Prometheus + Grafana + Loki + Alertmanager — auto-discovers all lab VMs
+setup_obs_vm() {
+  local ip="$1" site="$2"
+  local wg_base
+  [[ "$site" == "blue" ]] && wg_base="10.252.0" || wg_base="10.253.0"
+
+  log "  Installing observability stack on obs VM..."
+
+  _ssh_cmd "$ip" bash -s <<OBSSETUP
+set -e
+
+# ── Grafana repo ──
+cat > /etc/yum.repos.d/grafana.repo <<'REPO'
+[grafana]
+name=Grafana OSS
+baseurl=https://rpm.grafana.com
+gpgcheck=1
+gpgkey=https://rpm.grafana.com/gpg.key
+enabled=1
+REPO
+
+dnf install -y epel-release 2>/dev/null || true
+dnf install -y \
+  prometheus2 grafana loki promtail alertmanager \
+  node_exporter \
+  nftables wireguard-tools curl jq htop btop \
+  2>/dev/null || true
+
+# Fallback: install from binary if RPM not available
+if ! command -v prometheus >/dev/null 2>&1; then
+  echo "Installing Prometheus from binary..."
+  curl -fsSL https://github.com/prometheus/prometheus/releases/download/v2.54.1/prometheus-2.54.1.linux-amd64.tar.gz \
+    | tar -xz -C /tmp 2>/dev/null
+  install -m 755 /tmp/prometheus-*/prometheus /usr/local/bin/
+  install -m 755 /tmp/prometheus-*/promtool /usr/local/bin/
+  mkdir -p /etc/prometheus /var/lib/prometheus
+  cp /tmp/prometheus-*/prometheus.yml /etc/prometheus/ 2>/dev/null || true
+  rm -rf /tmp/prometheus-*
+
+  # Systemd unit
+  cat > /etc/systemd/system/prometheus.service <<'SVC'
+[Unit]
+Description=Prometheus
+After=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/prometheus --web.listen-address=0.0.0.0:9090
+Restart=always
+[Install]
+WantedBy=multi-user.target
+SVC
+fi
+
+if ! command -v grafana-server >/dev/null 2>&1; then
+  echo "Installing Grafana from binary..."
+  dnf install -y https://dl.grafana.com/oss/release/grafana-11.4.0-1.x86_64.rpm 2>/dev/null || true
+fi
+
+if ! command -v loki >/dev/null 2>&1; then
+  echo "Installing Loki from binary..."
+  curl -fsSL https://github.com/grafana/loki/releases/download/v3.3.2/loki-linux-amd64.zip \
+    -o /tmp/loki.zip 2>/dev/null && unzip -o /tmp/loki.zip -d /usr/local/bin/ 2>/dev/null || true
+  chmod +x /usr/local/bin/loki 2>/dev/null || true
+  mkdir -p /etc/loki /var/lib/loki
+
+  cat > /etc/loki/loki.yaml <<'LOKICFG'
+auth_enabled: false
+server:
+  http_listen_port: 3100
+common:
+  path_prefix: /var/lib/loki
+  storage:
+    filesystem:
+      chunks_directory: /var/lib/loki/chunks
+      rules_directory: /var/lib/loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+LOKICFG
+
+  cat > /etc/systemd/system/loki.service <<'SVC'
+[Unit]
+Description=Loki
+After=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/loki -config.file=/etc/loki/loki.yaml
+Restart=always
+[Install]
+WantedBy=multi-user.target
+SVC
+fi
+
+if ! command -v alertmanager >/dev/null 2>&1; then
+  echo "Installing Alertmanager from binary..."
+  curl -fsSL https://github.com/prometheus/alertmanager/releases/download/v0.27.0/alertmanager-0.27.0.linux-amd64.tar.gz \
+    | tar -xz -C /tmp 2>/dev/null
+  install -m 755 /tmp/alertmanager-*/alertmanager /usr/local/bin/
+  mkdir -p /etc/alertmanager
+  cp /tmp/alertmanager-*/alertmanager.yml /etc/alertmanager/ 2>/dev/null || true
+  rm -rf /tmp/alertmanager-*
+
+  cat > /etc/systemd/system/alertmanager.service <<'SVC'
+[Unit]
+Description=Alertmanager
+After=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml --storage.path=/var/lib/alertmanager
+Restart=always
+[Install]
+WantedBy=multi-user.target
+SVC
+fi
+
+echo "Observability packages installed"
+OBSSETUP
+
+  # ── Prometheus config — auto-discover all lab VMs ──
+  log "  Configuring Prometheus to scrape all ${site} VMs..."
+  local prom_targets=""
+  local node_id=1
+  for distro in "${DISTROS[@]}"; do
+    prom_targets+="      - '${wg_base}.${node_id}:9100'\n"
+    ((node_id++))
+  done
+  # Add obs VM itself
+  prom_targets+="      - '${wg_base}.${node_id}:9100'\n"
+
+  _ssh_cmd "$ip" bash -s <<PROMCFG
+cat > /etc/prometheus/prometheus.yml <<PROM
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['localhost:9093']
+
+scrape_configs:
+  - job_name: 'kzfs-lab-nodes'
+    static_configs:
+      - targets:
+$(echo -e "$prom_targets")
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: '(.*):\\d+'
+        target_label: instance
+PROM
+
+# ── Alert rules ──
+cat > /etc/prometheus/alerts.yml <<'ALERTS'
+groups:
+  - name: kzfs-lab
+    rules:
+      - alert: NodeDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node {{ \\\$labels.instance }} is down"
+
+      - alert: DiskSpaceHigh
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk >90% on {{ \\\$labels.instance }}"
+
+      - alert: HighMemory
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory >90% on {{ \\\$labels.instance }}"
+
+      - alert: HighCPU
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU >90% on {{ \\\$labels.instance }}"
+ALERTS
+
+echo "Prometheus configured"
+PROMCFG
+
+  # ── Grafana: auto-provision Prometheus datasource + dashboard ──
+  log "  Configuring Grafana..."
+  _ssh_cmd "$ip" bash -s <<'GRAFCFG'
+mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
+
+cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<'DS'
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://localhost:9090
+    isDefault: true
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://localhost:3100
+DS
+
+cat > /etc/grafana/provisioning/dashboards/default.yaml <<'DASH'
+apiVersion: 1
+providers:
+  - name: default
+    folder: kzfs-lab
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
+DASH
+
+# Pre-built node overview dashboard (Grafana ID 1860 — Node Exporter Full)
+curl -fsSL https://grafana.com/api/dashboards/1860/revisions/latest/download \
+  -o /var/lib/grafana/dashboards/node-exporter-full.json 2>/dev/null || true
+
+# Fix datasource in downloaded dashboard
+sed -i 's/"datasource":.*"prometheus"/"datasource": {"type": "prometheus", "uid": "prometheus"}/gi' \
+  /var/lib/grafana/dashboards/node-exporter-full.json 2>/dev/null || true
+
+echo "Grafana configured"
+GRAFCFG
+
+  # ── Start all services ──
+  log "  Starting observability services..."
+  _ssh_cmd "$ip" bash -s <<'STARTSVC'
+systemctl daemon-reload
+for svc in prometheus grafana-server loki alertmanager node_exporter; do
+  systemctl enable "$svc" 2>/dev/null || true
+  systemctl start "$svc" 2>/dev/null || true
+  if systemctl is-active "$svc" >/dev/null 2>&1; then
+    echo "  RUNNING: $svc"
+  else
+    echo "  FAILED:  $svc"
+  fi
+done
+STARTSVC
+
+  local obs_wg_ip="${wg_base}.$((${#DISTROS[@]} + 1))"
+  log "  Observability stack running:"
+  echo -e "    Prometheus:   ${G}http://${ip}:9090${N}  (${obs_wg_ip}:9090)"
+  echo -e "    Grafana:      ${G}http://${ip}:3000${N}  (${obs_wg_ip}:3000)  admin/admin"
+  echo -e "    Loki:         ${G}http://${ip}:3100${N}  (${obs_wg_ip}:3100)"
+  echo -e "    Alertmanager: ${G}http://${ip}:9093${N}  (${obs_wg_ip}:9093)"
+}
+
+# ── Setup: promtail + node_exporter on every lab VM ──────────────────────
+setup_vm_telemetry() {
+  local ip="$1" obs_ip="$2"
+
+  _ssh_cmd "$ip" bash -s <<TELEMETRY
+# node_exporter systemd (may already be installed)
+if ! systemctl is-active node_exporter >/dev/null 2>&1; then
+  if command -v node_exporter >/dev/null 2>&1; then
+    cat > /etc/systemd/system/node_exporter.service <<'SVC'
+[Unit]
+Description=Node Exporter
+After=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/node_exporter
+Restart=always
+[Install]
+WantedBy=multi-user.target
+SVC
+    systemctl daemon-reload
+    systemctl enable --now node_exporter
+  fi
+fi
+
+# Install promtail for centralized logging
+if ! command -v promtail >/dev/null 2>&1; then
+  curl -fsSL https://github.com/grafana/loki/releases/download/v3.3.2/promtail-linux-amd64.zip \
+    -o /tmp/promtail.zip 2>/dev/null && unzip -o /tmp/promtail.zip -d /usr/local/bin/ 2>/dev/null || true
+  chmod +x /usr/local/bin/promtail 2>/dev/null || true
+fi
+
+mkdir -p /etc/promtail
+cat > /etc/promtail/promtail.yaml <<PTCFG
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+positions:
+  filename: /var/lib/promtail/positions.yaml
+clients:
+  - url: http://${obs_ip}:3100/loki/api/v1/push
+scrape_configs:
+  - job_name: system
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: syslog
+          host: \$(hostname)
+          __path__: /var/log/{syslog,messages,*.log}
+  - job_name: journal
+    journal:
+      labels:
+        job: journal
+        host: \$(hostname)
+    relabel_configs:
+      - source_labels: [__journal__systemd_unit]
+        target_label: unit
+PTCFG
+
+mkdir -p /var/lib/promtail
+cat > /etc/systemd/system/promtail.service <<'SVC'
+[Unit]
+Description=Promtail
+After=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/promtail -config.file=/etc/promtail/promtail.yaml
+Restart=always
+[Install]
+WantedBy=multi-user.target
+SVC
+
+systemctl daemon-reload
+systemctl enable --now promtail 2>/dev/null || true
+systemctl enable --now node_exporter 2>/dev/null || true
+echo "Telemetry configured → ${obs_ip}"
+TELEMETRY
+}
+
 # ── Build Golden Image ───────────────────────────────────────────────────
 build_golden_single() {
   local distro="$1"
@@ -835,14 +1183,98 @@ NFTRULES
 
   log "WireGuard mesh configured for ${site} site (${wg_base}.0/24)"
 
+  # ── Deploy observability VM ────────────────────────────────────────────
+  echo ""
+  log "Deploying observability VM..."
+  local obs_sname="${LAB_PREFIX}-${site}-obs"
+  local obs_gname="${LAB_PREFIX}-golden-centos"
+  local obs_gpath="${POOL}/vms/${obs_gname}"
+  local obs_spath="${POOL}/vms/${obs_sname}"
+  local obs_sdev="/dev/zvol/${obs_spath}"
+  local obs_ip=""
+
+  if zfs list "${obs_gpath}@golden" >/dev/null 2>&1 && ! zfs list "${obs_spath}" >/dev/null 2>&1; then
+    zfs clone "${obs_gpath}@golden" "${obs_spath}"
+    for _ in $(seq 1 10); do [[ -b "$obs_sdev" ]] && break; sleep 1; done
+
+    local obs_ci
+    obs_ci="$(make_cloud_init_iso "${obs_sname}" "${site}-obs" "")"
+
+    virt-install \
+      --name "${obs_sname}" \
+      --ram "$RAM" --vcpus "$CPUS" \
+      --os-variant centos-stream9 \
+      --disk "source.dev=${obs_sdev},type=block,bus=virtio,cache=none" \
+      --disk "path=${obs_ci},device=cdrom" \
+      --network bridge=virbr0,model=virtio \
+      --graphics vnc,listen=0.0.0.0 \
+      --noautoconsole \
+      --import 2>&1 || warn "Failed to boot obs VM"
+
+    echo -e "  ${G}${obs_sname}${N} started"
+    sleep 20
+
+    obs_ip="$(get_vm_ip "${obs_sname}")"
+    if [[ -n "$obs_ip" ]] && wait_for_ssh "$obs_ip" 30; then
+      _ssh_cmd "$obs_ip" "hostnamectl set-hostname ${site}-obs; systemd-machine-id-setup 2>/dev/null" || true
+
+      # WireGuard on obs VM
+      local obs_node_id=$(( ${#DISTROS[@]} + 1 ))
+      _ssh_cmd "$obs_ip" bash -s <<OBSWG 2>/dev/null || true
+mkdir -p /etc/wireguard
+wg genkey > /etc/wireguard/lab.key 2>/dev/null
+chmod 600 /etc/wireguard/lab.key
+wg pubkey < /etc/wireguard/lab.key > /etc/wireguard/lab.pub 2>/dev/null
+cat > /etc/wireguard/wg-lab.conf <<WG
+[Interface]
+PrivateKey = \$(cat /etc/wireguard/lab.key)
+Address = ${wg_base}.${obs_node_id}/24
+ListenPort = 51830
+WG
+ip link add dev wg-lab type wireguard 2>/dev/null
+wg setconf wg-lab /etc/wireguard/wg-lab.conf 2>/dev/null
+ip addr add ${wg_base}.${obs_node_id}/24 dev wg-lab 2>/dev/null
+ip link set wg-lab up 2>/dev/null
+OBSWG
+
+      # Setup observability stack
+      setup_obs_vm "$obs_ip" "$site"
+
+      # Point all VMs' telemetry at obs VM
+      log "Configuring telemetry on all VMs → obs (${obs_ip})..."
+      for distro in "${DISTROS[@]}"; do
+        local sname
+        sname="$(site_name "$site" "$distro")"
+        local vm_ip
+        vm_ip="$(get_vm_ip "$sname" 2>/dev/null)"
+        [[ -z "$vm_ip" ]] && continue
+        setup_vm_telemetry "$vm_ip" "$obs_ip" 2>/dev/null &
+      done
+      wait  # parallel telemetry setup
+      log "All VMs reporting to observability stack"
+    else
+      warn "Obs VM not reachable — observability stack skipped"
+    fi
+  elif ! zfs list "${obs_gpath}@golden" >/dev/null 2>&1; then
+    warn "No CentOS golden image — build centos first for observability VM"
+  else
+    warn "Obs VM ${obs_sname} already exists"
+  fi
+
   local total_elapsed
   total_elapsed="$(timer_elapsed_ms "$total_start")"
   echo ""
   log "Deploy complete: ${G}${deployed} deployed${N}, ${Y}${skipped} skipped${N} (${total_elapsed}ms)"
   echo ""
-  echo -e "  ${W}WireGuard:${N} ${wg_base}.0/24 (wg-lab interface)"
-  echo -e "  ${W}SSH:${N}       ssh root@<vm-ip> (password: kldload)"
-  echo -e "  ${W}Mesh:${N}      every VM can reach every other VM encrypted"
+  echo -e "  ${W}WireGuard:${N}    ${wg_base}.0/24 (wg-lab interface)"
+  echo -e "  ${W}SSH:${N}          ssh root@<vm-ip> (password: kldload)"
+  echo -e "  ${W}Mesh:${N}         every VM can reach every other VM encrypted"
+  if [[ -n "$obs_ip" ]]; then
+    echo -e "  ${W}Grafana:${N}      ${G}http://${obs_ip}:3000${N}  (admin/admin)"
+    echo -e "  ${W}Prometheus:${N}   ${G}http://${obs_ip}:9090${N}"
+    echo -e "  ${W}Loki:${N}         ${G}http://${obs_ip}:3100${N}"
+    echo -e "  ${W}Alertmanager:${N} ${G}http://${obs_ip}:9093${N}"
+  fi
 }
 
 # ── Promote Green to Blue ────────────────────────────────────────────────
