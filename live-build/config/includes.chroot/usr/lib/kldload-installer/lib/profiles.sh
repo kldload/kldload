@@ -907,32 +907,32 @@ CRICTLCFG
 
     # First-boot auto-bootstrap (optional checkbox)
     if [[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]]; then
-      k_log "Enabling first-boot Kubernetes bootstrap..."
+      k_log "Enabling first-boot Kubernetes cluster bootstrap..."
       cat > "${target}/etc/systemd/system/kube-firstboot.service" <<'KUBEFB'
 [Unit]
-Description=kldload Kubernetes first-boot bootstrap
-After=network-online.target
+Description=kldload Kubernetes cluster bootstrap — golden image + 3 worker VMs + Cilium + MetalLB + Hubble
+After=network-online.target libvirtd.service
 Wants=network-online.target
 ConditionPathExists=!/etc/kubernetes/admin.conf
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '/usr/local/bin/kube-setup && /usr/local/bin/kube-init'
+ExecStart=/usr/local/bin/kube-cluster bootstrap --workers 3
 ExecStartPost=/bin/bash -c 'systemctl disable kube-firstboot.service'
 StandardOutput=journal+console
 StandardError=journal+console
-TimeoutStartSec=1200
+TimeoutStartSec=3600
 
 [Install]
 WantedBy=multi-user.target
 KUBEFB
       ln -sf /etc/systemd/system/kube-firstboot.service \
         "${target}/etc/systemd/system/multi-user.target.wants/kube-firstboot.service" 2>/dev/null || true
-      k_log "First-boot bootstrap enabled — kubeadm init + Cilium will run on first boot"
+      k_log "First-boot cluster bootstrap enabled — will deploy 1 CP + 3 workers on ZFS instant clones"
     fi
 
     k_log "Kubernetes node configured: containerd, kernel modules, sysctl, ZFS datasets (etcd 8K, containerd, kubelet)"
-    k_log "After boot, run: kube-init (control plane) or kube-join <ip> (worker)"
+    k_log "After boot: kube-cluster bootstrap (auto if checkbox selected), or manual: kube-init / kube-join"
   fi
 
   # ── SELinux on ZFS — set permissive and trigger autorelabel ────────────
