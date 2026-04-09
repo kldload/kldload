@@ -1154,7 +1154,6 @@ const DISTRO_DESCS = {
   rhel:     'RHEL 9 — requires activation key (needs internet)',
   ubuntu:   'Ubuntu 24.04 LTS — popular, huge community, debootstrap from darksite',
   arch:     'Arch Linux — rolling release, internet required (no darksite)',
-  alpine:   'Alpine Linux 3.21 — musl/OpenRC, core profile only (coming soon)',
   freebsd:  'FreeBSD 15.0 — native ZFS, jails, bhyve',
 };
 function toggleOpt(name) {
@@ -1203,7 +1202,7 @@ function selectDistro(el) {
   const profilePanel = document.getElementById('profile-panel');
   const rhelPanel = document.getElementById('rhel-auth-panel');
   if (winOpts) winOpts.style.display = el.dataset.distro === 'windows' ? 'block' : 'none';
-  const isBSDDistro = el.dataset.distro === 'freebsd' || el.dataset.distro === 'openbsd' || el.dataset.distro === 'ghostbsd';
+  const isBSDDistro = el.dataset.distro === 'freebsd';
   const hideProfFor = el.dataset.distro === 'windows' || isBSDDistro;
   if (profilePanel) profilePanel.style.display = hideProfFor ? 'none' : 'block';
   // BSD: hide Linux-specific panels — BSD base sets are complete
@@ -1216,16 +1215,15 @@ function selectDistro(el) {
   if (rhelPanel) rhelPanel.style.display = el.dataset.distro === 'rhel' ? 'block' : 'none';
   // Distro-specific profile restrictions
   const d = el.dataset.distro;
-  const isAlpine = d === 'alpine';
   const isArch = d === 'arch';
-  const isBSD = d === 'freebsd' || d === 'openbsd' || d === 'ghostbsd';
+  const isBSD = d === 'freebsd';
   document.querySelectorAll('#target-grid .target-card').forEach(c => {
     const r = c.dataset.role;
-    const blocked = ((isAlpine || isBSD) && r !== 'core') || (isArch && (r === 'desktop' || r === 'kvm' || r === 'ai'));
+    const blocked = (isBSD && r !== 'core') || (isArch && (r === 'desktop' || r === 'kvm' || r === 'ai'));
     c.style.opacity = blocked ? '0.3' : '';
     c.style.pointerEvents = blocked ? 'none' : '';
   });
-  if (isAlpine || isBSD) {
+  if (isBSD) {
     const coreCard = document.querySelector('#target-grid .target-card[data-role="core"]');
     if (coreCard) selectTarget(coreCard);
   } else if (isArch) {
@@ -1238,7 +1236,7 @@ function selectDistro(el) {
   // Grey out K8s checkbox for distros without darksite support
   const k8sOpt = document.getElementById('opt-k8s');
   if (k8sOpt) {
-    const k8sBlocked = isArch || isBSD || isAlpine;
+    const k8sBlocked = isArch || isBSD;
     k8sOpt.style.opacity = k8sBlocked ? '0.3' : '';
     k8sOpt.style.pointerEvents = k8sBlocked ? 'none' : '';
     if (k8sBlocked) {
@@ -1437,7 +1435,7 @@ function confirmInstall() {
 
   // Build profile summary line
   const p = _installPayload || {};
-  const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 41', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', alpine: 'Alpine 3.21', freebsd: 'FreeBSD 15.0', openbsd: 'OpenBSD 7.8', ghostbsd: 'GhostBSD', illumos: 'illumos', windows: 'Windows' };
+  const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 41', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', freebsd: 'FreeBSD 15.0' };
   const profileNames = { desktop: 'Desktop', server: 'Server', core: 'Core', kvm: 'KVM Host', ai: 'AI' };
   let summary = (distroNames[p.distro] || p.distro || 'CentOS') + ' · ' + (profileNames[p.role] || p.role || 'Desktop');
   const addons = [];
