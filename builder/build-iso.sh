@@ -316,13 +316,13 @@ chmod 0600 "${MOK_DIR}/mok.key" 2>/dev/null || true
 SIGN_FILE="${ROOTFS}/usr/src/kernels/${KVER}/scripts/sign-file"
 if [[ -x "$SIGN_FILE" && -f "${MOK_DIR}/mok.key" ]]; then
     log "Signing ZFS kernel modules with MOK key..."
-    local _signed=0
+_signed=0
     while IFS= read -r _ko; do
         [[ -f "$_ko" ]] || continue
         if [[ "$_ko" == *.xz ]]; then
             # Decompress, sign, recompress
             xz -d "$_ko" 2>/dev/null || true
-            local _ko_plain="${_ko%.xz}"
+            _ko_plain="${_ko%.xz}"
             if [[ -f "$_ko_plain" ]]; then
                 "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko_plain" 2>/dev/null || true
                 xz "$_ko_plain" 2>/dev/null || true
@@ -331,7 +331,7 @@ if [[ -x "$SIGN_FILE" && -f "${MOK_DIR}/mok.key" ]]; then
             fi
         elif [[ "$_ko" == *.zst ]]; then
             zstd -d "$_ko" 2>/dev/null || true
-            local _ko_plain="${_ko%.zst}"
+            _ko_plain="${_ko%.zst}"
             if [[ -f "$_ko_plain" ]]; then
                 "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko_plain" 2>/dev/null || true
                 zstd --rm "$_ko_plain" 2>/dev/null || true
