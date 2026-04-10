@@ -1726,6 +1726,17 @@ OWSVC
     mkdir -p "${target}/root/kldload-install-logs"
     echo "MOK_PASSWORD=${_mok_pass}" > "${target}/root/kldload-install-logs/mok-password.txt"
     chmod 0600 "${target}/root/kldload-install-logs/mok-password.txt"
+
+    # SCP the MOK password to a remote workstation if configured
+    # (env vars from kldload.env: MOK_SCP_USER, MOK_SCP_HOST, MOK_SCP_PATH)
+    if [[ -n "${MOK_SCP_HOST:-}" && -n "${MOK_SCP_USER:-}" ]]; then
+      local _scp_dest="${MOK_SCP_USER}@${MOK_SCP_HOST}:${MOK_SCP_PATH:-~/}"
+      sshpass -p "${MOK_SCP_PASS:-}" scp -o StrictHostKeyChecking=no \
+        "${target}/root/kldload-install-logs/mok-password.txt" \
+        "${_scp_dest}mok-password-$(hostname).txt" 2>/dev/null && \
+        _ok "MOK password" "sent to ${_scp_dest}" || \
+        _ok "MOK password" "SCP failed — read from /root/kldload-install-logs/mok-password.txt"
+    fi
   fi
 
   # ── Copy install logs to target for post-install debugging ──────────────
