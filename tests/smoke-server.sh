@@ -46,6 +46,9 @@ test_cmd "kpkg (package manager)" "kpkg"
 test_cmd "kupgrade (safe upgrade)" "kupgrade"
 test_cmd "kexport (image export)" "kexport"
 test_cmd "krecovery (disaster recovery)" "krecovery"
+test_cmd "kldload-help" "kldload-help"
+test_cmd "kldload-overview" "kldload-overview"
+test_cmd "kube-demo" "kube-demo"
 
 # Test kst runs without error
 test_succeeds "kst executes" "kst >/dev/null 2>&1"
@@ -211,6 +214,8 @@ fi
 _section "System Files"
 
 test_file "Edition marker" "/etc/kldload/edition"
+test_file "Profile marker" "/etc/kldload/profile"
+test_file "Build ID" "/etc/kldload-build-id"
 test_file "Build SHA" "/etc/kldload-build-sha"
 test_file "Boot environment marker" "/etc/kldload/boot-environment"
 
