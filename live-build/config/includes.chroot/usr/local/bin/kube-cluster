@@ -594,17 +594,26 @@ cmd_bootstrap() {
   echo -e "${Y}=== Step 4: Control Plane (Cilium + MetalLB + ZFS CSI + Hubble) ===${N}"
   _ssh_cmd "$cp_ip" "kube-init" || warn "kube-init had errors — some components may still be pulling images"
 
-  # Step 5: Join workers
+  # Start Hubble live stream in background — shows eBPF flows during worker join + pod deploy
   echo ""
+  echo -e "${C}=== Hubble eBPF Live — observing all traffic from this point ===${N}"
+  echo -e "${D}(kernel-level network flows via eBPF — no agents, no config)${N}"
+  echo ""
+  local hubble_pid=""
+  _ssh_cmd "$cp_ip" "nohup hubble observe --follow --output compact 2>/dev/null &" 2>/dev/null &
+  hubble_pid=$!
+  # Give Hubble a moment to start
+  sleep 3
+
+  # Step 5: Join workers (Hubble sees the join handshakes)
   echo -e "${Y}=== Step 5: Join Workers ===${N}"
-  # Use LAN IP for join — workers may not have WireGuard routing to CP yet
   local join_token
   join_token="$(_ssh_cmd "$cp_ip" 'kubeadm token create --print-join-command 2>/dev/null')" || true
   if [[ -z "$join_token" ]]; then
     warn "Could not get join token from CP"
   else
     for i in $(seq 0 $((WORKERS-1))); do
-      local wip="${worker_ips[$i]}"
+      local wip="${worker_ips[$i]:-}"
       [[ -n "$wip" ]] || continue
       log "Joining ${worker_names[$i]}..."
       _ssh_cmd "$wip" "$join_token" || warn "Failed to join ${worker_names[$i]}"
@@ -620,22 +629,25 @@ cmd_bootstrap() {
   # Apply nftables on all nodes
   _ssh_cmd "$cp_ip" "kube-network nft" 2>/dev/null || true
   for i in $(seq 0 $((WORKERS-1))); do
-    [[ -n "${worker_ips[$i]}" ]] && _ssh_cmd "${worker_ips[$i]}" "kube-network nft" 2>/dev/null || true
+    [[ -n "${worker_ips[$i]:-}" ]] && _ssh_cmd "${worker_ips[$i]}" "kube-network nft" 2>/dev/null || true
   done
 
-  # Run smoke test on CP
+  # Step 7: Smoke test
   echo ""
   echo -e "${Y}=== Step 7: Smoke Test ===${N}"
   _ssh_cmd "$cp_ip" "kube-smoke-test" || warn "Smoke test had failures — check output above"
 
-  # Hubble live — show eBPF flows proving observability works from second zero
+  # Stop Hubble background stream
+  kill "$hubble_pid" 2>/dev/null || true
+
+  # Step 8: Final Hubble dump — show what eBPF captured during the entire deployment
   echo ""
-  echo -e "${Y}=== Step 8: Hubble eBPF Live Flows ===${N}"
-  echo -e "${D}Observing real-time kernel-level network traffic (10 seconds)...${N}"
+  echo -e "${Y}=== Step 8: Hubble eBPF — What the kernel saw ===${N}"
+  echo -e "${D}Last 50 flows captured by eBPF during cluster deployment:${N}"
   echo ""
-  _ssh_cmd "$cp_ip" "hubble observe --last 30 2>/dev/null || kubectl -n kube-system exec ds/cilium -- hubble observe --last 30 2>/dev/null" || true
+  _ssh_cmd "$cp_ip" "hubble observe --last 50 2>/dev/null" || true
   echo ""
-  echo -e "${G}Every flow above was captured by eBPF in the kernel — zero agents, zero config.${N}"
+  echo -e "${G}^^^ Every line above was captured in-kernel by eBPF. Zero agents. Zero config. From second zero.${N}"
 
   # Final status
   echo ""
