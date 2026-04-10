@@ -218,18 +218,56 @@ EOFSTAB
   zbm_src="$(k_zbm_find_efi)" || k_die "ZFSBootMenu EFI binary not available"
 
   local zbm_efi_dir="${target}/boot/efi/EFI/zbm"
-  mkdir -p "${zbm_efi_dir}"
-
-  cp "${zbm_src}" "${zbm_efi_dir}/BOOTX64.EFI"
-  cp "${zbm_src}" "${zbm_efi_dir}/BOOTX64-BACKUP.EFI"
-  k_log "ZFSBootMenu EFI installed: ${zbm_efi_dir}/BOOTX64.EFI"
-
-  # Also install to the UEFI fallback path so the firmware finds ZFSBootMenu
-  # even if efibootmgr entries are missing or the boot order is reset.
   local zbm_fallback_dir="${target}/boot/efi/EFI/BOOT"
-  mkdir -p "${zbm_fallback_dir}"
-  cp "${zbm_src}" "${zbm_fallback_dir}/BOOTX64.EFI"
-  k_log "ZFSBootMenu EFI fallback installed: ${zbm_fallback_dir}/BOOTX64.EFI"
+  mkdir -p "${zbm_efi_dir}" "${zbm_fallback_dir}"
+
+  # Sign ZFSBootMenu EFI with our MOK key if Secure Boot tools available
+  local mok_key="${target}/var/lib/dkms/mok.key"
+  local mok_pub="${target}/var/lib/dkms/mok.pub"
+
+  if [[ -f "$mok_key" && -f "$mok_pub" ]] && command -v sbsign >/dev/null 2>&1; then
+    k_log "Signing ZFSBootMenu EFI with MOK key (Secure Boot)..."
+    sbsign --key "$mok_key" --cert "$mok_pub" \
+      --output "${zbm_efi_dir}/BOOTX64.EFI" "$zbm_src" >&7 2>&1 && \
+      k_log "ZFSBootMenu EFI signed with MOK key" || {
+        k_log "WARNING: sbsign failed — installing unsigned ZFSBootMenu"
+        cp "${zbm_src}" "${zbm_efi_dir}/BOOTX64.EFI"
+      }
+  else
+    cp "${zbm_src}" "${zbm_efi_dir}/BOOTX64.EFI"
+    k_log "ZFSBootMenu EFI installed (unsigned — Secure Boot needs MOK enrollment)"
+  fi
+  cp "${zbm_src}" "${zbm_efi_dir}/BOOTX64-BACKUP.EFI"
+
+  # Secure Boot chain: shimx64.efi → grubx64.efi or ZFSBootMenu via MOK
+  # Install shim as the UEFI fallback bootloader (\EFI\BOOT\BOOTX64.EFI)
+  local shim_src=""
+  for _s in "${target}/boot/efi/EFI/centos/shimx64.efi" \
+            "${target}/boot/efi/EFI/debian/shimx64.efi" \
+            "${target}/boot/efi/EFI/ubuntu/shimx64.efi" \
+            "${target}/usr/lib/shim/shimx64.efi.signed" \
+            "${target}/boot/efi/EFI/BOOT/BOOTX64.EFI"; do
+    if [[ -f "$_s" ]]; then shim_src="$_s"; break; fi
+  done
+
+  if [[ -n "$shim_src" ]]; then
+    cp "$shim_src" "${zbm_fallback_dir}/BOOTX64.EFI"
+    k_log "Shim installed as UEFI fallback: ${zbm_fallback_dir}/BOOTX64.EFI"
+    # Copy MokManager for enrollment
+    for _mm in "${target}/boot/efi/EFI/centos/mmx64.efi" \
+               "${target}/boot/efi/EFI/debian/mmx64.efi" \
+               "${target}/usr/lib/shim/mmx64.efi"; do
+      if [[ -f "$_mm" ]]; then
+        cp "$_mm" "${zbm_fallback_dir}/mmx64.efi"
+        cp "$_mm" "${zbm_efi_dir}/mmx64.efi"
+        k_log "MokManager installed"
+        break
+      fi
+    done
+  else
+    cp "${zbm_src}" "${zbm_fallback_dir}/BOOTX64.EFI"
+    k_log "No shim found — ZFSBootMenu installed as direct fallback (Secure Boot may fail)"
+  fi
 
   # startup.nsh — UEFI shell auto-runs this if no boot entries exist (exported images)
   echo '\EFI\BOOT\BOOTX64.EFI' > "${target}/boot/efi/startup.nsh"
