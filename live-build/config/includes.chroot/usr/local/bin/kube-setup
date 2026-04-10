@@ -113,11 +113,18 @@ enabled=1
 gpgcheck=1
 gpgkey=https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/rpm/repodata/repomd.xml.key
 EOF
-    dnf install -y kubelet kubeadm kubectl cri-tools conntrack-tools socat ipvsadm wireguard-tools
+    dnf install -y kubelet kubeadm kubectl cri-tools conntrack-tools socat ipvsadm wireguard-tools || {
+      warn "Some packages failed — retrying with --skip-broken"
+      dnf install -y --skip-broken kubelet kubeadm kubectl cri-tools conntrack-tools socat ipvsadm wireguard-tools || true
+    }
+    # Verify critical packages installed
+    for _pkg in kubeadm kubelet kubectl; do
+      command -v "$_pkg" >/dev/null 2>&1 || die "$_pkg not installed after dnf"
+    done
     # Install ZFS if not already present (needed for ZFS CSI inside VMs)
     if ! command -v zfs >/dev/null 2>&1; then
       dnf install -y https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm 2>/dev/null || true
-      dnf install -y zfs 2>/dev/null || true
+      dnf install -y zfs zfs-dkms 2>/dev/null || dnf install -y zfs 2>/dev/null || true
     fi
     systemctl enable kubelet
   else
