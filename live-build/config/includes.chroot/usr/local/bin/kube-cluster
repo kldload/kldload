@@ -330,7 +330,13 @@ NETCFG
   done
 
   _ssh_cmd "$golden_ip" "chmod +x /usr/local/bin/kube-*"
-  _ssh_cmd "$golden_ip" "kube-setup" || die "kube-setup failed in golden VM"
+  # Wait for cloud-init networking to fully settle before running kube-setup
+  _ssh_cmd "$golden_ip" "sleep 10"
+  _ssh_cmd "$golden_ip" "kube-setup" || {
+    warn "kube-setup failed on first attempt — retrying after 30s..."
+    sleep 30
+    _ssh_cmd "$golden_ip" "kube-setup" || die "kube-setup failed in golden VM"
+  }
 
   # Clean up cloud-init state so clones get fresh identity
   log "Sealing golden image for cloning..."
