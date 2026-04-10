@@ -292,6 +292,9 @@ k_install_target_packages() {
   pkgs+=(
     efibootmgr
     mokutil
+    shim-signed
+    grub-efi-amd64-signed
+    sbsigntool
     kexec-tools
     locales
     keyboard-configuration
