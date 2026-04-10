@@ -234,7 +234,7 @@ k_generate_mok_keys() {
   chmod 0644 "${mok_dir}/mok.pub" "${mok_dir}/mok.der"
 
   # DKMS sign_tool script — called by DKMS as: script KVER MODULE_PATH
-  # Uses the sign-file binary from the matching linux-headers package.
+  # Searches both Debian (linux-headers-) and CentOS (kernels/) paths for sign-file.
   mkdir -p "${target}/etc/dkms"
   cat > "${target}/etc/dkms/sign_helper.sh" <<'EOSIGN'
 #!/bin/bash
@@ -242,7 +242,9 @@ set -euo pipefail
 KVER="${1:?}" MOD="${2:?}"
 KEY=/var/lib/dkms/mok.key
 CERT=/var/lib/dkms/mok.pub
-SIGN_FILE=$(find /usr/src/linux-headers-"${KVER}" \
+# Search both Debian and CentOS/RHEL paths for the kernel sign-file tool
+SIGN_FILE=$(find /usr/src/kernels/"${KVER}" \
+                 /usr/src/linux-headers-"${KVER}" \
                  /usr/lib/linux-kbuild-"${KVER%%.*}"* \
                  -name sign-file -type f 2>/dev/null | head -1 || true)
 [[ -x "${SIGN_FILE}" ]] || { echo "sign-file not found for ${KVER}" >&2; exit 0; }
@@ -250,9 +252,15 @@ exec "${SIGN_FILE}" sha256 "${KEY}" "${CERT}" "${MOD}"
 EOSIGN
   chmod 0755 "${target}/etc/dkms/sign_helper.sh"
 
-  # Wire into DKMS — all future module builds will be signed automatically
-  printf 'sign_tool=/etc/dkms/sign_helper.sh\n' \
-    >> "${target}/etc/dkms/framework.conf"
+  # Configure DKMS to use our MOK keys and sign tool
+  # Use framework.conf.d to avoid overwriting distro defaults
+  mkdir -p "${target}/etc/dkms/framework.conf.d"
+  cat > "${target}/etc/dkms/framework.conf.d/kldload-mok.conf" <<MOKCONF
+# kldload Secure Boot — MOK key paths for DKMS module signing
+mok_signing_key=/var/lib/dkms/mok.key
+mok_certificate=/var/lib/dkms/mok.pub
+sign_tool=/etc/dkms/sign_helper.sh
+MOKCONF
 
   k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "MOK keys ready at /var/lib/dkms/mok.{key,pub,der} — DKMS will sign on install"
 }

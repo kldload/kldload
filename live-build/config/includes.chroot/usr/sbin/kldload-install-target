@@ -353,10 +353,43 @@ ZFSREPO
 
         k_log "Root filesystem bootstrapped: $(du -sh "${target}" | cut -f1)"
 
-        # Build ZFS DKMS module
+        # Generate MOK keys for Secure Boot BEFORE DKMS build so modules get signed
+        k_log "Generating MOK keys for Secure Boot..."
+        if k_have_func k_generate_mok_keys; then
+          KLDLOAD_TARGET="${target}" k_generate_mok_keys || k_log "WARNING: MOK key generation failed — modules won't be signed"
+        else
+          # Inline fallback if lib/bootstrap.sh wasn't loaded
+          local _mok_dir="${target}/var/lib/dkms"
+          mkdir -p "${_mok_dir}" "${target}/etc/dkms/framework.conf.d"
+          openssl req -new -x509 -newkey rsa:2048 \
+            -keyout "${_mok_dir}/mok.key" -out "${_mok_dir}/mok.pub" \
+            -days 3650 -nodes -subj "/CN=kldload Secure Boot MOK/" >> "$log" 2>&1 || true
+          openssl x509 -in "${_mok_dir}/mok.pub" -out "${_mok_dir}/mok.der" -outform DER >> "$log" 2>&1 || true
+          chmod 0600 "${_mok_dir}/mok.key" 2>/dev/null
+          # Sign helper that works on both CentOS and Debian
+          cat > "${target}/etc/dkms/sign_helper.sh" <<'EOSIGN'
+#!/bin/bash
+set -euo pipefail
+KVER="${1:?}" MOD="${2:?}"
+SIGN_FILE=$(find /usr/src/kernels/"${KVER}" /usr/src/linux-headers-"${KVER}" \
+                 /usr/lib/linux-kbuild-"${KVER%%.*}"* \
+                 -name sign-file -type f 2>/dev/null | head -1 || true)
+[[ -x "${SIGN_FILE}" ]] || { echo "sign-file not found for ${KVER}" >&2; exit 0; }
+exec "${SIGN_FILE}" sha256 /var/lib/dkms/mok.key /var/lib/dkms/mok.pub "${MOD}"
+EOSIGN
+          chmod 0755 "${target}/etc/dkms/sign_helper.sh"
+          cat > "${target}/etc/dkms/framework.conf.d/kldload-mok.conf" <<'MOKCONF'
+mok_signing_key=/var/lib/dkms/mok.key
+mok_certificate=/var/lib/dkms/mok.pub
+sign_tool=/etc/dkms/sign_helper.sh
+MOKCONF
+          k_log "MOK keys generated (inline fallback)"
+        fi
+
+        # Build ZFS DKMS module (will be signed with MOK key)
         local kver
         kver=$(ls "${target}/lib/modules/" | grep -v '^$' | head -1)
-        k_log "Building ZFS DKMS module for kernel ${kver}..."
+        k_log "Building ZFS DKMS module for kernel ${kver} (Secure Boot signed)..."
         mount -t proc proc "${target}/proc"
         mount -t sysfs sysfs "${target}/sys"
         mount --bind /dev "${target}/dev"
@@ -1672,6 +1705,24 @@ OWSVC
 
       _ok "AI Setup" "complete"
     )
+  fi
+
+  # ── MOK enrollment for Secure Boot ──────────────────────────────────────
+  if k_have_func k_configure_mok; then
+    k_configure_mok || _ok "MOK enrollment" "skipped (Secure Boot may not be active)"
+  elif [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
+    # Inline MOK enrollment if lib/security.sh didn't load
+    local _mok_pass
+    _mok_pass="$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-20)"
+    if [[ -d /sys/firmware/efi/efivars ]] && chroot "${target}" command -v mokutil >/dev/null 2>&1; then
+      printf '%s\n%s\n' "${_mok_pass}" "${_mok_pass}" | \
+        chroot "${target}" mokutil --import /var/lib/dkms/mok.der 2>/dev/null && \
+        _ok "MOK enrollment" "queued — password: ${_mok_pass}" || \
+        _ok "MOK enrollment" "skipped (mokutil failed)"
+    fi
+    mkdir -p "${target}/root/kldload-install-logs"
+    echo "MOK_PASSWORD=${_mok_pass}" > "${target}/root/kldload-install-logs/mok-password.txt"
+    chmod 0600 "${target}/root/kldload-install-logs/mok-password.txt"
   fi
 
   # ── Copy install logs to target for post-install debugging ──────────────
