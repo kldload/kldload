@@ -1674,6 +1674,35 @@ OWSVC
     )
   fi
 
+  # ── Copy install logs to target for post-install debugging ──────────────
+  if [[ -d /var/log/installer ]]; then
+    mkdir -p "${target}/root/kldload-install-logs"
+    cp -r /var/log/installer/* "${target}/root/kldload-install-logs/" 2>/dev/null || true
+    _ok "Install logs" "copied to /root/kldload-install-logs/"
+  fi
+
+  # ── Schedule firstboot smoke test — runs after first reboot, saves report ──
+  cat > "${target}/etc/systemd/system/kldload-smoke-firstboot.service" <<'SMOKEFB'
+[Unit]
+Description=kldload post-install smoke test
+After=network-online.target multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'if [[ -x /usr/local/share/kldload/tests/smoke-all.sh ]]; then /usr/local/share/kldload/tests/smoke-all.sh > /root/kldload-smoke-report.txt 2>&1; fi'
+ExecStartPost=/bin/bash -c 'systemctl disable kldload-smoke-firstboot.service'
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+SMOKEFB
+  ln -sf /etc/systemd/system/kldload-smoke-firstboot.service \
+    "${target}/etc/systemd/system/multi-user.target.wants/kldload-smoke-firstboot.service" 2>/dev/null || true
+  _ok "Smoke test" "scheduled for first boot → /root/kldload-smoke-report.txt"
+
   # ── Finalize — unbind chroot, export pools (LAST step) ─────────────────
   k_finalize_bootloader
   _ok "Finalized"   "Pools exported, ready to reboot"
