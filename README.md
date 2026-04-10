@@ -136,7 +136,18 @@ The live environment is always CentOS Stream 9. The user picks their target dist
 
 ## Releases
 
-### 1.0.3 — FreeBSD + KVM on ZFS (current)
+### 1.0.4 — Kubernetes on ZFS (current)
+- Full Kubernetes cluster via `kube-cluster bootstrap` — 1 CP + 3 workers on ZFS instant clones
+- Cilium eBPF CNI (replaces kube-proxy), Gateway API, MetalLB, Hubble
+- WireGuard encrypted backplane (dual-plane: management + K8s)
+- ZFS CSI — persistent volumes with instant snapshots
+- 21-option `kube-demo` — add/replace nodes, drain, rolling updates, network policy, self-healing
+- K8s bootstrap checkbox: one install, one reboot → production cluster
+- `kzfs-lab` — 6-distro dev platform with blue-green deployment + observability VM
+- CentOS + Debian fully tested end-to-end
+- 38-point smoke test, nodes are cattle (replace in 52 seconds)
+
+### 1.0.3 — FreeBSD + KVM on ZFS
 - FreeBSD 15.0 added to installer (native ZFS, jails, bhyve)
 - KVM hypervisor profile: ZFS zvols, instant clones (~100ms), golden image workflow
 - `kvm-create`, `kvm-clone`, `kvm-snap`, `kvm-delete`, `kvm-list`, `kvm-demo`
@@ -170,4 +181,4 @@ BSD-3-Clause. Free forever. See [LICENSE](LICENSE).
 
 ---
 
-*kldloadOS 1.0.3*
+*kldloadOS 1.0.4 — Kubernetes on ZFS*
