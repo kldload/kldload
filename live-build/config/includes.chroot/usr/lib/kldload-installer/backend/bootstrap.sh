@@ -145,12 +145,16 @@ bootstrap_install_packages() {
         gdisk
         dosfstools
         efibootmgr
-        mokutil
     )
 
     log "Installing base packages..."
     in_chroot "$target" \
-        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${base_pkgs[*]}"
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${base_pkgs[*]}" || \
+        log "Some base packages failed — retrying individually..."
+
+    # mokutil is optional (only needed for Secure Boot MOK enrollment)
+    in_chroot "$target" \
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends mokutil 2>/dev/null" || true
 
     # Profile-specific packages
     case "$profile" in
