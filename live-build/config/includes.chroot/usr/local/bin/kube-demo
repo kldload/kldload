@@ -241,14 +241,38 @@ demo_hubble() {
   echo -e "${Y}=== Hubble Status ===${N}"
   _ssh_cp "hubble status 2>/dev/null" || _kctl get deploy -n kube-system hubble-relay
   echo ""
-  echo -e "${Y}=== Live Network Flows (5 seconds) ===${N}"
-  echo -e "${D}Watching all pod traffic in real time...${N}"
+
+  echo -e "${Y}=== Hubble Live — deploying pods while watching eBPF flows ===${N}"
+  echo -e "${D}Starting Hubble stream, then deploying 5 nginx pods...${N}"
+  echo -e "${D}Watch the flows light up in real time.${N}"
+  echo -e "${D}(Ctrl+C or wait 30s to stop)${N}"
   echo ""
-  _ssh_cp "timeout 5 hubble observe --last 20 2>/dev/null" || echo "  Hubble CLI not available — use UI instead"
+
+  # Deploy pods in background — Hubble will see them being scheduled
+  (
+    sleep 3
+    _kctl create deployment hubble-watch --image=nginx:alpine --replicas=5 2>/dev/null || true
+    sleep 5
+    # Generate traffic so Hubble sees HTTP + DNS flows
+    _kctl run hubble-curl --image=busybox --restart=Never --command -- \
+      sh -c 'for i in 1 2 3 4 5; do wget -qO- http://hubble-watch 2>/dev/null; sleep 1; done' 2>/dev/null || true
+  ) &
+  local deploy_pid=$!
+
+  # Stream Hubble flows for 30 seconds — user sees pods schedule, DNS resolve, HTTP flow
+  _ssh_cp "timeout 30 hubble observe --follow --output compact 2>/dev/null" || \
+    echo "  Hubble CLI not available — use 'kubectl port-forward -n kube-system svc/hubble-ui 12000:80' for the web UI"
+
+  wait "$deploy_pid" 2>/dev/null || true
+
+  # Clean up
+  _kctl delete deployment hubble-watch --grace-period=0 2>/dev/null || true
+  _kctl delete pod hubble-curl --grace-period=0 --force 2>/dev/null || true
+
   echo ""
   echo -e "${Y}=== Hubble UI ===${N}"
-  echo -e "  ${C}kubectl port-forward -n kube-system svc/hubble-ui 12000:80${N}"
-  echo -e "  Then open: ${G}http://localhost:12000${N}"
+  echo -e "  ${C}kubectl port-forward -n kube-system svc/hubble-ui 12000:80 --address 0.0.0.0${N}"
+  echo -e "  Then open: ${G}http://<host-ip>:12000${N}"
 
   echo ""
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
@@ -259,6 +283,7 @@ demo_hubble() {
   echo -e "  Every TCP flow:     ${G}visible${N}"
   echo -e "  Every policy drop:  ${G}visible${N}"
   echo -e "  Agents required:    ${G}none${N} (kernel-native via eBPF)"
+  echo -e "  How:                ${G}eBPF hooks in the kernel, Cilium reads the maps${N}"
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   pause
 }
