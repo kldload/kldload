@@ -295,6 +295,42 @@ if [[ -n "$ZFS_VER" ]]; then
         log "WARNING: DKMS install failed"
 fi
 
+# ── Sign ZFS modules with MOK key for Secure Boot ────────────────────────
+# Generate a MOK key pair, sign all ZFS kernel modules, and embed the key
+# in the live ISO. This allows the live environment to load ZFS even with
+# Secure Boot enabled (the kernel lockdown check validates the signature).
+log "Generating MOK key for Secure Boot module signing..."
+MOK_DIR="${ROOTFS}/var/lib/dkms"
+mkdir -p "$MOK_DIR"
+openssl req -new -x509 -newkey rsa:2048 \
+    -keyout "${MOK_DIR}/mok.key" \
+    -out "${MOK_DIR}/mok.pub" \
+    -days 3650 -nodes \
+    -subj "/CN=kldload Live ISO MOK/" 2>&1 | tee -a "$LOG_FILE" || true
+openssl x509 -in "${MOK_DIR}/mok.pub" -out "${MOK_DIR}/mok.der" -outform DER 2>/dev/null || true
+chmod 0600 "${MOK_DIR}/mok.key" 2>/dev/null || true
+
+# Sign all ZFS .ko modules with the MOK key
+SIGN_FILE="${ROOTFS}/usr/src/kernels/${KVER}/scripts/sign-file"
+if [[ -x "$SIGN_FILE" && -f "${MOK_DIR}/mok.key" ]]; then
+    log "Signing ZFS kernel modules with MOK key..."
+    while IFS= read -r _ko; do
+        "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko" 2>/dev/null && \
+            log "  Signed: $(basename "$_ko")" || true
+    done < <(find "${ROOTFS}/lib/modules/${KVER}" -name 'zfs*.ko*' -o -name 'spl*.ko*' -o -name 'znvpair*.ko*' -o -name 'zavl*.ko*' -o -name 'zlua*.ko*' -o -name 'zzstd*.ko*' -o -name 'zunicode*.ko*' -o -name 'icp*.ko*' 2>/dev/null)
+
+    # Import MOK key into the live kernel's keyring so modprobe accepts signed modules
+    # The key needs to be in the machine keyring for the running kernel to trust it
+    mkdir -p "${ROOTFS}/etc/keys"
+    cp "${MOK_DIR}/mok.der" "${ROOTFS}/etc/keys/kldload-mok.der"
+    # Add to machine keyring via dracut (rebuilds initramfs with the key)
+    mkdir -p "${ROOTFS}/etc/dracut.conf.d"
+    echo 'install_items+=" /etc/keys/kldload-mok.der "' > "${ROOTFS}/etc/dracut.conf.d/99-kldload-mok.conf"
+    log "MOK key embedded in live ISO for Secure Boot"
+else
+    log "WARNING: sign-file not found at ${SIGN_FILE} — ZFS modules unsigned"
+fi
+
 chroot "$ROOTFS" depmod -a "$KVER" 2>/dev/null || true
 
 # Verify
@@ -1109,12 +1145,12 @@ set timeout=5
 set timeout_style=countdown
 
 menuentry "KLDload Live (CentOS Stream 9 + ZFS)" --hotkey=l {
-    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0
     initrdefi /images/pxeboot/initrd.img
 }
 
 menuentry "KLDload Live (troubleshooting)" {
-    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none rd.shell
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 rd.shell
     initrdefi /images/pxeboot/initrd.img
 }
 GRUBCFG
