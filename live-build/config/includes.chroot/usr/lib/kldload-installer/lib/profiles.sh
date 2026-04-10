@@ -493,6 +493,15 @@ FFPOLICY
     [[ -f /usr/local/sbin/adduser.local ]] && \
       cp /usr/local/sbin/adduser.local "${target}/usr/local/sbin/adduser.local" && \
       chmod +x "${target}/usr/local/sbin/adduser.local"
+
+    # Copy smoke tests to installed system
+    if [[ -d /usr/local/share/kldload/tests ]]; then
+      mkdir -p "${target}/usr/local/share/kldload/tests"
+      cp /usr/local/share/kldload/tests/*.sh "${target}/usr/local/share/kldload/tests/" 2>/dev/null || true
+      chmod +x "${target}/usr/local/share/kldload/tests/"*.sh 2>/dev/null || true
+      # Convenience symlink: kldload-test runs the full report
+      ln -sf /usr/local/share/kldload/tests/smoke-all.sh "${target}/usr/local/bin/kldload-test" 2>/dev/null || true
+    fi
   fi
 
   # ── OS branding ───────────────────────────────────────────────────────────────
