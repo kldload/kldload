@@ -941,12 +941,12 @@ KUBEFB
     k_log "After boot: kube-cluster bootstrap (auto if checkbox selected), or manual: kube-init / kube-join"
   fi
 
-  # ── ZFS Test Lab (profile tile) ──────────────────────────────────────────
+  # ── ZFS Lab (profile tile) ──────────────────────────────────────────
   if [[ "${KLDLOAD_ENABLE_ZFSLAB:-0}" == "1" ]]; then
-    k_log "Enabling ZFS Test Lab first-boot deployment..."
+    k_log "Enabling ZFS Lab first-boot deployment..."
     cat > "${target}/etc/systemd/system/kzfs-lab-firstboot.service" <<'ZFSLABFB'
 [Unit]
-Description=kldload ZFS Test Lab — build 6 distro golden images + deploy blue site
+Description=kldload ZFS Lab — build 6 distro golden images + deploy blue site
 After=network-online.target libvirtd.service
 Wants=network-online.target
 
@@ -965,7 +965,7 @@ WantedBy=multi-user.target
 ZFSLABFB
     ln -sf /etc/systemd/system/kzfs-lab-firstboot.service \
       "${target}/etc/systemd/system/multi-user.target.wants/kzfs-lab-firstboot.service" 2>/dev/null || true
-    k_log "ZFS Test Lab will auto-deploy on first boot (builds 6 golden images + blue site)"
+    k_log "ZFS Lab will auto-deploy on first boot (builds 6 golden images + blue site)"
   fi
 
   # ── SELinux on ZFS — set permissive and trigger autorelabel ────────────
