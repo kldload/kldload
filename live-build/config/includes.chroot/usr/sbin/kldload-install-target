@@ -1712,8 +1712,9 @@ OWSVC
     k_configure_mok || _ok "MOK enrollment" "skipped (Secure Boot may not be active)"
   elif [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
     # Inline MOK enrollment if lib/security.sh didn't load
-    local _mok_pass
-    _mok_pass="$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-20)"
+    # Fixed MOK password — displayed to user during first boot MokManager enrollment.
+    # For enterprise deployments, replace with a corporate policy password.
+    local _mok_pass="kldload"
     if [[ -d /sys/firmware/efi/efivars ]] && chroot "${target}" command -v mokutil >/dev/null 2>&1; then
       printf '%s\n%s\n' "${_mok_pass}" "${_mok_pass}" | \
         chroot "${target}" mokutil --import /var/lib/dkms/mok.der 2>/dev/null && \

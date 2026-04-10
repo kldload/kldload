@@ -23,11 +23,11 @@ k_configure_mok() {
     return 0
   fi
 
-  # Generate a random one-time enrollment password.
-  # Use openssl (finite output) to avoid SIGPIPE from "tr < /dev/urandom | head"
-  # under set -Eeuo pipefail.
-  local mok_pass
-  mok_pass="$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-20)"
+  # Fixed MOK enrollment password — user enters this at the MokManager blue screen
+  # on first boot. Using a fixed well-known password because the web UI installer
+  # can't display random passwords to the user before reboot.
+  # Enterprise: replace with corporate policy password.
+  local mok_pass="kldload"
 
   local enrolled=0
   if chroot "${target}" command -v mokutil >/dev/null 2>&1; then
