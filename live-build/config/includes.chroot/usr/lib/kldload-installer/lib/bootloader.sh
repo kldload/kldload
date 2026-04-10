@@ -279,6 +279,12 @@ EOFSTAB
     cp "${zbm_src}" "${zbm_efi_dir}/BOOTX64.EFI"
     k_log "ZFSBootMenu EFI installed (unsigned — no sbsign or no MOK keys)"
   fi
+  # Shim expects to chain-load "grubx64.efi" in the same directory.
+  # Copy ZFSBootMenu (signed or unsigned) as grubx64.efi so shim finds it.
+  cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_efi_dir}/grubx64.efi"
+  cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_fallback_dir}/grubx64.efi"
+  k_log "ZFSBootMenu copied as grubx64.efi for shim chain-loading"
+
   # Backup copy is always unsigned — used if the signed copy is corrupted.
   # The user can manually re-sign it with: sbsign --key mok.key --cert mok.pub ...
   cp "${zbm_src}" "${zbm_efi_dir}/BOOTX64-BACKUP.EFI"
