@@ -136,23 +136,20 @@ The live environment is always CentOS Stream 9. The user picks their target dist
 
 ## Releases
 
-### 1.0.3 — Kubernetes on ZFS (current)
-- Full Kubernetes cluster deployment via `kube-cluster bootstrap`
-- Golden image → ZFS clone → 4 nodes in <100ms each
-- Cilium eBPF CNI (replaces kube-proxy), Gateway API, MetalLB, Hubble
-- WireGuard encrypted backplane (dual-plane: management + K8s)
-- OpenEBS ZFS LocalPV CSI — PVCs backed by ZFS with instant snapshots
-- 21-option interactive `kube-demo` — scale nodes, drain, replace, rolling updates
-- K8s bootstrap checkbox: one install, one reboot → production cluster
+### 1.0.3 — FreeBSD + KVM on ZFS (current)
+- FreeBSD 15.0 added to installer (native ZFS, jails, bhyve)
+- KVM hypervisor profile: ZFS zvols, instant clones (~100ms), golden image workflow
+- `kvm-create`, `kvm-clone`, `kvm-snap`, `kvm-delete`, `kvm-list`, `kvm-demo`
 - Debian 13 (Trixie) as first-class citizen
 - AI profile: Ollama + Open WebUI + NVIDIA GPU
 - Web UI with 5 profiles: Desktop, Server, Core, KVM, AI
 - Golden image export (qcow2, vmdk, vhd, ova) with cloud-init
-- `kube-smoke-test` — 34-point cluster verification
+- `kexport` CLI for image sealing and export
+- NVIDIA CUDA time-slicing for container GPU sharing
 
-### 1.0.2 — 8 Distros
-- Added Alpine Linux, FreeBSD 15.0 to installer
-- Ubuntu 24.04 offline darksite
+### 1.0.2 — AI + 8 Distros
+- Added Alpine Linux, Ubuntu 24.04 offline darksite
+- AI assistant: Ollama + Open WebUI + local LLM
 - Boot environment manager (`kbe`)
 - `kupgrade` with automatic pre-upgrade snapshots
 
