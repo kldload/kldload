@@ -316,7 +316,7 @@ chmod 0600 "${MOK_DIR}/mok.key" 2>/dev/null || true
 SIGN_FILE="${ROOTFS}/usr/src/kernels/${KVER}/scripts/sign-file"
 if [[ -x "$SIGN_FILE" && -f "${MOK_DIR}/mok.key" ]]; then
     log "Signing ZFS kernel modules with MOK key..."
-_signed=0
+_signed=0 || true
     while IFS= read -r _ko; do
         [[ -f "$_ko" ]] || continue
         if [[ "$_ko" == *.xz ]]; then
@@ -327,7 +327,7 @@ _signed=0
                 "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko_plain" 2>/dev/null || true
                 xz "$_ko_plain" 2>/dev/null || true
                 log "  Signed: $(basename "$_ko")"
-                ((_signed++))
+                ((_signed++)) || true
             fi
         elif [[ "$_ko" == *.zst ]]; then
             zstd -d "$_ko" 2>/dev/null || true
@@ -336,11 +336,11 @@ _signed=0
                 "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko_plain" 2>/dev/null || true
                 zstd --rm "$_ko_plain" 2>/dev/null || true
                 log "  Signed: $(basename "$_ko")"
-                ((_signed++))
+                ((_signed++)) || true
             fi
         else
             "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko" 2>/dev/null && \
-                log "  Signed: $(basename "$_ko")" && ((_signed++)) || true
+                log "  Signed: $(basename "$_ko")" && ((_signed++)) || true || true
         fi
     done < <(find "${ROOTFS}/lib/modules/${KVER}/extra" "${ROOTFS}/lib/modules/${KVER}/weak-updates" \
                    -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' 2>/dev/null)
