@@ -152,9 +152,10 @@ bootstrap_install_packages() {
         "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${base_pkgs[*]}" || \
         log "Some base packages failed — retrying individually..."
 
-    # mokutil is optional (only needed for Secure Boot MOK enrollment)
+    # Secure Boot packages — shim (MS-signed bootloader), mokutil (MOK enrollment), sbsigntool (module signing)
     in_chroot "$target" \
-        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends mokutil 2>/dev/null" || true
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends shim-signed grub-efi-amd64-signed mokutil sbsigntool 2>/dev/null" || \
+        log "WARNING: Secure Boot packages failed — Secure Boot may not work"
 
     # Profile-specific packages
     case "$profile" in
