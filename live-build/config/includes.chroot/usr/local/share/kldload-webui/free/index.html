@@ -288,7 +288,7 @@
         <div class="panel" id="profile-panel" style="margin-bottom:1rem">
           <div class="panel-hdr">◈ Profile</div>
           <div class="panel-body">
-            <div class="target-grid" id="target-grid" style="grid-template-columns:repeat(6,1fr);max-width:900px">
+            <div class="target-grid" id="target-grid" style="grid-template-columns:repeat(7,1fr);max-width:1050px">
               <div class="target-card selected" data-role="desktop" onclick="selectTarget(this)">
                 <div class="tc-icon">🖥</div>
                 <div class="tc-name">Desktop</div>
@@ -308,6 +308,11 @@
                 <div class="tc-icon">🖥</div>
                 <div class="tc-name">KVM Host</div>
                 <div class="tc-sub">Hypervisor + clones</div>
+              </div>
+              <div class="target-card" data-role="k8s" onclick="selectTarget(this)">
+                <div class="tc-icon">☸</div>
+                <div class="tc-name">Kubernetes</div>
+                <div class="tc-sub">Cilium + Hubble + MetalLB</div>
               </div>
               <div class="target-card" data-role="ai" onclick="selectTarget(this)">
                 <div class="tc-icon">🧠</div>
@@ -1135,6 +1140,7 @@ const ROLE_DESCS = {
   server:  'Server selected — headless SSH node + ZFS on root',
   core:    'Core selected — ZFS on root only, no kldload tools, no extras',
   kvm:     'KVM Host selected — bare metal hypervisor + ZFS instant clones + kvm tools',
+  k8s:     'Kubernetes — 1 CP + 3 workers on ZFS clones, Cilium eBPF, Hubble, MetalLB (internet required)',
   ai:      'AI selected — Desktop + Ollama + Open WebUI (internet required for model download)',
   zfslab:  'ZFS Lab — 6 distros with ZFS + eBPF + C toolchain, blue-green deployment (internet required)',
 };
@@ -1225,7 +1231,7 @@ function selectDistro(el) {
   const isBSD = d === 'freebsd';
   document.querySelectorAll('#target-grid .target-card').forEach(c => {
     const r = c.dataset.role;
-    const blocked = (isBSD && r !== 'core') || (isArch && (r === 'desktop' || r === 'kvm' || r === 'ai' || r === 'zfslab'));
+    const blocked = (isBSD && r !== 'core') || (isArch && (r === 'desktop' || r === 'kvm' || r === 'k8s' || r === 'ai' || r === 'zfslab'));
     c.style.opacity = blocked ? '0.3' : '';
     c.style.pointerEvents = blocked ? 'none' : '';
   });
@@ -1337,7 +1343,7 @@ function startInstall() {
   const keyboard = document.getElementById('install-keyboard').value || 'us';
   const locale   = document.getElementById('install-locale').value || 'en_US.UTF-8';
   const roleRaw  = (document.querySelector('#target-grid .target-card.selected') || {}).dataset?.role || 'desktop';
-  const role     = roleRaw === 'ai' ? 'desktop' : (roleRaw === 'zfslab' ? 'kvm' : roleRaw);  // AI = desktop + ai flag, ZFS Lab = kvm + zfslab flag
+  const role     = roleRaw === 'ai' ? 'desktop' : (['k8s','zfslab'].includes(roleRaw) ? 'kvm' : roleRaw);  // AI=desktop, K8s/ZFS Lab=kvm
   const distro   = (document.querySelector('#distro-grid .target-card.selected') || {}).dataset?.distro || 'centos';
   const dhcp     = document.getElementById('net-dhcp').checked;
   const sshKey   = (document.getElementById('install-ssh-key')?.value || '').trim();
@@ -1385,8 +1391,8 @@ function startInstall() {
     wireguard: document.getElementById('install-wireguard')?.checked ? '1' : '0',
     enable_ebpf: document.getElementById('install-ebpf')?.checked ? '1' : '0',
     zfs_dedup: document.getElementById('install-zfs-dedup')?.checked ? '1' : '0',
-    enable_k8s: document.getElementById('install-k8s')?.checked ? '1' : '0',
-    k8s_bootstrap: document.getElementById('install-k8s-bootstrap')?.checked ? '1' : '0',
+    enable_k8s: (document.getElementById('install-k8s')?.checked || roleRaw === 'k8s') ? '1' : '0',
+    k8s_bootstrap: (document.getElementById('install-k8s-bootstrap')?.checked || roleRaw === 'k8s') ? '1' : '0',
     export_format: document.getElementById('install-export-format')?.value || 'none',
     export_scp_host: document.getElementById('export-scp-host')?.value?.trim() || '',
     export_scp_user: document.getElementById('export-scp-user')?.value?.trim() || '',
