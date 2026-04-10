@@ -1036,16 +1036,16 @@ KUBEFB
     k_log "After boot: kube-cluster bootstrap (auto if checkbox selected), or manual: kube-init / kube-join"
   fi
 
-  # ── ZFS Lab (profile tile) ──────────────────────────────────────────
-  # ZFS Lab spawns a fleet of core VMs (one per supported distro) for OpenZFS
+  # ── DevOps Lab (profile tile) ──────────────────────────────────────────
+  # DevOps Lab spawns a fleet of core VMs (one per supported distro) for OpenZFS
   # testing. Like the K8s bootstrap, this runs on first boot because it needs
   # a running libvirtd and network access to download ISOs. The build phase
   # creates golden images, then "deploy blue" instantiates the blue site VMs.
-  if [[ "${KLDLOAD_ENABLE_ZFSLAB:-0}" == "1" ]]; then
-    k_log "Enabling ZFS Lab first-boot deployment..."
-    cat > "${target}/etc/systemd/system/kzfs-lab-firstboot.service" <<'ZFSLABFB'
+  if [[ "${KLDLOAD_ENABLE_DEVOPS:-0}" == "1" ]]; then
+    k_log "Enabling DevOps Lab first-boot deployment..."
+    cat > "${target}/etc/systemd/system/kdevops-firstboot.service" <<'ZFSLABFB'
 [Unit]
-Description=kldload ZFS Lab — build 6 distro golden images + deploy blue site
+Description=kldload DevOps Lab — build 6 distro golden images + deploy blue site
 After=network-online.target libvirtd.service
 Wants=network-online.target
 
@@ -1054,7 +1054,7 @@ Type=oneshot
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do curl -sf --connect-timeout 5 https://cloud.debian.org >/dev/null 2>&1 && exit 0; echo "Waiting for internet ($i/30)..."; sleep 10; done'
 ExecStart=/usr/local/bin/kzfs-lab build all
 ExecStartPost=/usr/local/bin/kzfs-lab deploy blue
-ExecStartPost=/bin/bash -c 'systemctl disable kzfs-lab-firstboot.service'
+ExecStartPost=/bin/bash -c 'systemctl disable kdevops-firstboot.service'
 StandardOutput=journal+console
 StandardError=journal+console
 TimeoutStartSec=7200
@@ -1062,9 +1062,9 @@ TimeoutStartSec=7200
 [Install]
 WantedBy=multi-user.target
 ZFSLABFB
-    ln -sf /etc/systemd/system/kzfs-lab-firstboot.service \
-      "${target}/etc/systemd/system/multi-user.target.wants/kzfs-lab-firstboot.service" 2>/dev/null || true
-    k_log "ZFS Lab will auto-deploy on first boot (builds 6 golden images + blue site)"
+    ln -sf /etc/systemd/system/kdevops-firstboot.service \
+      "${target}/etc/systemd/system/multi-user.target.wants/kdevops-firstboot.service" 2>/dev/null || true
+    k_log "DevOps Lab will auto-deploy on first boot (builds 6 golden images + blue site)"
   fi
 
   # ── SELinux on ZFS — set permissive and trigger autorelabel ────────────
