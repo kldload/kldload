@@ -288,7 +288,7 @@
         <div class="panel" id="profile-panel" style="margin-bottom:1rem">
           <div class="panel-hdr">◈ Profile</div>
           <div class="panel-body">
-            <div class="target-grid" id="target-grid" style="grid-template-columns:repeat(5,1fr);max-width:900px">
+            <div class="target-grid" id="target-grid" style="grid-template-columns:repeat(6,1fr);max-width:900px">
               <div class="target-card selected" data-role="desktop" onclick="selectTarget(this)">
                 <div class="tc-icon">🖥</div>
                 <div class="tc-name">Desktop</div>
@@ -313,6 +313,11 @@
                 <div class="tc-icon">🧠</div>
                 <div class="tc-name">AI</div>
                 <div class="tc-sub">Desktop + Ollama + Open WebUI</div>
+              </div>
+              <div class="target-card" data-role="zfslab" onclick="selectTarget(this)">
+                <div class="tc-icon">🔬</div>
+                <div class="tc-name">ZFS Test Lab</div>
+                <div class="tc-sub">6 distros + eBPF + blue-green</div>
               </div>
             </div>
             <div id="role-summary" style="margin-top:0.6rem;font-size:0.8rem;color:var(--accent)">
@@ -1131,6 +1136,7 @@ const ROLE_DESCS = {
   core:    'Core selected — ZFS on root only, no kldload tools, no extras',
   kvm:     'KVM Host selected — bare metal hypervisor + ZFS instant clones + kvm tools',
   ai:      'AI selected — Desktop + Ollama + Open WebUI (internet required for model download)',
+  zfslab:  'ZFS Test Lab — 6 distros with ZFS + eBPF + C toolchain, blue-green deployment (internet required)',
 };
 function selectTarget(el) {
   document.querySelectorAll('#target-grid .target-card').forEach(c => c.classList.remove('selected'));
@@ -1219,7 +1225,7 @@ function selectDistro(el) {
   const isBSD = d === 'freebsd';
   document.querySelectorAll('#target-grid .target-card').forEach(c => {
     const r = c.dataset.role;
-    const blocked = (isBSD && r !== 'core') || (isArch && (r === 'desktop' || r === 'kvm' || r === 'ai'));
+    const blocked = (isBSD && r !== 'core') || (isArch && (r === 'desktop' || r === 'kvm' || r === 'ai' || r === 'zfslab'));
     c.style.opacity = blocked ? '0.3' : '';
     c.style.pointerEvents = blocked ? 'none' : '';
   });
@@ -1331,7 +1337,7 @@ function startInstall() {
   const keyboard = document.getElementById('install-keyboard').value || 'us';
   const locale   = document.getElementById('install-locale').value || 'en_US.UTF-8';
   const roleRaw  = (document.querySelector('#target-grid .target-card.selected') || {}).dataset?.role || 'desktop';
-  const role     = roleRaw === 'ai' ? 'desktop' : roleRaw;  // AI = desktop + enable_ai flag
+  const role     = roleRaw === 'ai' ? 'desktop' : (roleRaw === 'zfslab' ? 'kvm' : roleRaw);  // AI = desktop + ai flag, ZFS Lab = kvm + zfslab flag
   const distro   = (document.querySelector('#distro-grid .target-card.selected') || {}).dataset?.distro || 'centos';
   const dhcp     = document.getElementById('net-dhcp').checked;
   const sshKey   = (document.getElementById('install-ssh-key')?.value || '').trim();
@@ -1371,6 +1377,7 @@ function startInstall() {
     zfs_encrypt: encrypt ? '1' : '0',
     storage_manual: manualStorage ? '1' : '0',
     enable_ai: document.getElementById('install-ai')?.checked ? '1' : '0',
+    enable_zfslab: roleRaw === 'zfslab' ? '1' : '0',
     ai_model_chat: document.getElementById('ai-model-chat')?.checked ? '1' : '0',
     ai_model_code: document.getElementById('ai-model-code')?.checked ? '1' : '0',
     ai_model_smart: document.getElementById('ai-model-smart')?.checked ? '1' : '0',

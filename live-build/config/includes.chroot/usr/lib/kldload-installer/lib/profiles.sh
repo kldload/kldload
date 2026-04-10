@@ -941,6 +941,33 @@ KUBEFB
     k_log "After boot: kube-cluster bootstrap (auto if checkbox selected), or manual: kube-init / kube-join"
   fi
 
+  # ── ZFS Test Lab (profile tile) ──────────────────────────────────────────
+  if [[ "${KLDLOAD_ENABLE_ZFSLAB:-0}" == "1" ]]; then
+    k_log "Enabling ZFS Test Lab first-boot deployment..."
+    cat > "${target}/etc/systemd/system/kzfs-lab-firstboot.service" <<'ZFSLABFB'
+[Unit]
+Description=kldload ZFS Test Lab — build 6 distro golden images + deploy blue site
+After=network-online.target libvirtd.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do curl -sf --connect-timeout 5 https://cloud.debian.org >/dev/null 2>&1 && exit 0; echo "Waiting for internet ($i/30)..."; sleep 10; done'
+ExecStart=/usr/local/bin/kzfs-lab build all
+ExecStartPost=/usr/local/bin/kzfs-lab deploy blue
+ExecStartPost=/bin/bash -c 'systemctl disable kzfs-lab-firstboot.service'
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=7200
+
+[Install]
+WantedBy=multi-user.target
+ZFSLABFB
+    ln -sf /etc/systemd/system/kzfs-lab-firstboot.service \
+      "${target}/etc/systemd/system/multi-user.target.wants/kzfs-lab-firstboot.service" 2>/dev/null || true
+    k_log "ZFS Test Lab will auto-deploy on first boot (builds 6 golden images + blue site)"
+  fi
+
   # ── SELinux on ZFS — set permissive and trigger autorelabel ────────────
   # ZFS creates files with unlabeled_t contexts. SELinux enforcing + unlabeled_t
   # = login denied, SSH denied, everything denied. Set permissive until relabel
