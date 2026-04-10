@@ -95,57 +95,6 @@ cmd_build_ubuntu_darksite() {
     log "Ubuntu darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
 }
 
-cmd_build_arch_darksite() {
-    local runtime
-    runtime="$(detect_runtime)"
-    local darksite_dir="$ROOT/live-build/darksite-arch-cache"
-    mkdir -p "$darksite_dir"
-    log "Building Arch Linux darksite pacman cache (runs in Arch container)..."
-    "$runtime" run --rm \
-        -v "$ROOT/build/darksite-arch:/darksite-build:z,ro" \
-        -v "$darksite_dir:/output:z" \
-        -e PROFILE="$PROFILE" \
-        -e ARCH="x86_64" \
-        --name "kldload-darksite-arch-$$" \
-        archlinux:latest \
-        bash /darksite-build/build-darksite-arch.sh
-    log "Arch darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
-}
-
-cmd_build_alpine_darksite() {
-    local runtime
-    runtime="$(detect_runtime)"
-    local darksite_dir="$ROOT/live-build/darksite-alpine-cache"
-    mkdir -p "$darksite_dir"
-    log "Building Alpine Linux darksite apk cache (runs in Alpine container)..."
-    "$runtime" run --rm \
-        -v "$ROOT/build/darksite-alpine:/darksite-build:z,ro" \
-        -v "$darksite_dir:/output:z" \
-        -e ARCH="x86_64" \
-        --name "kldload-darksite-alpine-$$" \
-        alpine:latest \
-        sh /darksite-build/build-darksite-alpine.sh
-    log "Alpine darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
-}
-
-cmd_build_fedora_darksite() {
-    local runtime
-    runtime="$(detect_runtime)"
-    local darksite_dir="$ROOT/live-build/darksite-fedora-cache"
-    mkdir -p "$darksite_dir"
-    log "Building Fedora darksite RPM mirror (runs in Fedora container)..."
-    "$runtime" run --rm \
-        -v "$ROOT/build/darksite-fedora:/darksite-build:z,ro" \
-        -v "$darksite_dir:/output:z" \
-        -e PROFILE="$PROFILE" \
-        -e ARCH="x86_64" \
-        -e FEDORA_RELEASE="41" \
-        --name "kldload-darksite-fedora-$$" \
-        fedora:41 \
-        bash /darksite-build/build-darksite-fedora.sh
-    log "Fedora darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
-}
-
 cmd_build_ai_docs() {
     local ai_dir="$ROOT/live-build/config/includes.chroot/usr/local/share/kldload-ai"
     local web_dir="${KLDLOAD_WEB_DIR:-/root/kldload-web}"
@@ -224,23 +173,9 @@ cmd_build() {
             log "Ubuntu darksite cached: $(du -sh "$ubuntu_darksite" | cut -f1)"
         fi
 
-        # Arch darksite disabled — Arch rolling release causes version drift.
-        # Arch installs require internet (pulls from live mirrors + archzfs).
-        log "Arch darksite: not available (internet required for Arch installs)"
-
-        local alpine_darksite="$ROOT/live-build/darksite-alpine-cache"
-        if [[ ! -d "$alpine_darksite/apk" ]] || [[ "$(find "$alpine_darksite/apk" -name '*.apk' -not -name 'APKINDEX*' 2>/dev/null | wc -l)" -eq 0 ]]; then
-            cmd_build_alpine_darksite
-        else
-            log "Alpine darksite cached: $(du -sh "$alpine_darksite" | cut -f1)"
-        fi
-
-        local fedora_darksite="$ROOT/live-build/darksite-fedora-cache"
-        if [[ ! -d "$fedora_darksite/rpm" ]] || [[ "$(find "$fedora_darksite/rpm" -name '*.rpm' 2>/dev/null | wc -l)" -eq 0 ]]; then
-            cmd_build_fedora_darksite
-        else
-            log "Fedora darksite cached: $(du -sh "$fedora_darksite" | cut -f1)"
-        fi
+        # Arch/Alpine/Fedora darksites removed — Arch is rolling (no darksite possible),
+        # Alpine is partial (core-only), Fedora darksite was broken. These distros require internet.
+        log "Note: Arch, Alpine, Fedora installs require internet (no offline darksite)"
     else
         log "Core edition — skipping darksites."
     fi
@@ -471,11 +406,7 @@ case "${1:-help}" in
     build)              cmd_build ;;
     build-ai-appliance) cmd_build_ai_appliance ;;
     build-debian-darksite) cmd_build_debian_darksite ;;
-    build-bsd-darksite)    bash build/darksite-bsd/build-darksite-bsd.sh "$ROOT/live-build/darksite-bsd-cache" ;;
     build-ubuntu-darksite) cmd_build_ubuntu_darksite ;;
-    build-arch-darksite) cmd_build_arch_darksite ;;
-    build-alpine-darksite) cmd_build_alpine_darksite ;;
-    build-fedora-darksite) cmd_build_fedora_darksite ;;
     build-k8s-darksite)
         log "Building Kubernetes + Cilium offline darksite..."
         bash "$ROOT/build/darksite/pull-k8s-images.sh" "$ROOT/live-build/config/includes.chroot/root/darksite/k8s-images"
@@ -508,8 +439,8 @@ case "${1:-help}" in
         echo "  build                 Build ISO only (caches Debian darksite)"
         echo "  build-ai-appliance    Build unattended AI appliance ISO (Ollama + Open WebUI)"
         echo "  build-ai-docs         Scrape site + OCR PDF for AI knowledge base"
-        echo "  build-alpine-darksite Rebuild Alpine apk darksite cache"
         echo "  build-debian-darksite Rebuild Debian APT darksite cache"
+        echo "  build-ubuntu-darksite Rebuild Ubuntu APT darksite cache"
         echo "  builder-image         Rebuild the container builder image"
         echo "  clean                 Remove build artifacts"
         echo "  burn                  Write ISO to USB (USB_DEVICE=/dev/sda)"
