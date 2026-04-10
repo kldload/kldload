@@ -310,25 +310,49 @@ openssl req -new -x509 -newkey rsa:2048 \
 openssl x509 -in "${MOK_DIR}/mok.pub" -out "${MOK_DIR}/mok.der" -outform DER 2>/dev/null || true
 chmod 0600 "${MOK_DIR}/mok.key" 2>/dev/null || true
 
-# Sign all ZFS .ko modules with the MOK key
+# Sign all ZFS kernel modules with the MOK key.
+# Modules may be compressed (.ko.xz) — decompress, sign, recompress.
+# sign-file is in the kernel-devel package under scripts/.
 SIGN_FILE="${ROOTFS}/usr/src/kernels/${KVER}/scripts/sign-file"
 if [[ -x "$SIGN_FILE" && -f "${MOK_DIR}/mok.key" ]]; then
     log "Signing ZFS kernel modules with MOK key..."
+    local _signed=0
     while IFS= read -r _ko; do
-        "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko" 2>/dev/null && \
-            log "  Signed: $(basename "$_ko")" || true
-    done < <(find "${ROOTFS}/lib/modules/${KVER}" -name 'zfs*.ko*' -o -name 'spl*.ko*' -o -name 'znvpair*.ko*' -o -name 'zavl*.ko*' -o -name 'zlua*.ko*' -o -name 'zzstd*.ko*' -o -name 'zunicode*.ko*' -o -name 'icp*.ko*' 2>/dev/null)
+        [[ -f "$_ko" ]] || continue
+        if [[ "$_ko" == *.xz ]]; then
+            # Decompress, sign, recompress
+            xz -d "$_ko" 2>/dev/null || true
+            local _ko_plain="${_ko%.xz}"
+            if [[ -f "$_ko_plain" ]]; then
+                "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko_plain" 2>/dev/null || true
+                xz "$_ko_plain" 2>/dev/null || true
+                log "  Signed: $(basename "$_ko")"
+                ((_signed++))
+            fi
+        elif [[ "$_ko" == *.zst ]]; then
+            zstd -d "$_ko" 2>/dev/null || true
+            local _ko_plain="${_ko%.zst}"
+            if [[ -f "$_ko_plain" ]]; then
+                "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko_plain" 2>/dev/null || true
+                zstd --rm "$_ko_plain" 2>/dev/null || true
+                log "  Signed: $(basename "$_ko")"
+                ((_signed++))
+            fi
+        else
+            "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko" 2>/dev/null && \
+                log "  Signed: $(basename "$_ko")" && ((_signed++)) || true
+        fi
+    done < <(find "${ROOTFS}/lib/modules/${KVER}/extra" "${ROOTFS}/lib/modules/${KVER}/weak-updates" \
+                   -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' 2>/dev/null)
+    log "Signed ${_signed} ZFS/SPL kernel modules"
 
-    # Import MOK key into the live kernel's keyring so modprobe accepts signed modules
-    # The key needs to be in the machine keyring for the running kernel to trust it
+    # Embed MOK public key in the live ISO for the installed system to use
     mkdir -p "${ROOTFS}/etc/keys"
     cp "${MOK_DIR}/mok.der" "${ROOTFS}/etc/keys/kldload-mok.der"
-    # Add to machine keyring via dracut (rebuilds initramfs with the key)
-    mkdir -p "${ROOTFS}/etc/dracut.conf.d"
-    echo 'install_items+=" /etc/keys/kldload-mok.der "' > "${ROOTFS}/etc/dracut.conf.d/99-kldload-mok.conf"
-    log "MOK key embedded in live ISO for Secure Boot"
+    log "MOK key embedded in live ISO"
 else
     log "WARNING: sign-file not found at ${SIGN_FILE} — ZFS modules unsigned"
+    log "  Secure Boot will block ZFS module loading on the live ISO"
 fi
 
 chroot "$ROOTFS" depmod -a "$KVER" 2>/dev/null || true
