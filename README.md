@@ -1,10 +1,10 @@
 # kldloadOS
 
-**One ISO. Eight distros. ZFS on root. Kubernetes in 75 milliseconds.**
+**One ISO. Eight distros. ZFS on root.**
 
 kldloadOS builds a single bootable ISO that installs CentOS, Debian, Ubuntu, Fedora, Rocky, RHEL, Arch, or Alpine Linux with ZFS on root, WireGuard, and eBPF — from one USB drive. Most install fully offline from embedded package mirrors (darksites).
 
-The KVM profile turns a bare-metal machine into a hypervisor that deploys Kubernetes clusters via ZFS instant clones — 4 nodes in under 100ms each, with Cilium eBPF networking, Hubble observability, MetalLB, and Gateway API, all from one command.
+The KVM profile turns a bare-metal machine into a hypervisor with ZFS-native VM management — instant clones (~100ms), atomic snapshots, incremental replication, and golden image workflows.
 
 **Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Discord:** [discord.gg/tkVN6sSU](https://discord.gg/tkVN6sSU)
 
@@ -89,19 +89,6 @@ Golden image → ZFS clone 4 nodes → Cilium CNI → MetalLB → Gateway API �
 | `kvm-list` | List all VMs |
 | `kvm-delete` | Destroy VM + zvol |
 
-### Kubernetes
-| Command | What it does |
-|---|---|
-| `kube-cluster bootstrap` | Deploy full K8s cluster on KVM |
-| `kube-cluster destroy` | Tear down cluster (golden preserved) |
-| `kube-setup` | Install K8s packages on a node |
-| `kube-init` | Bootstrap control plane + Cilium stack |
-| `kube-join` | Join a worker node |
-| `kube-network` | WireGuard mesh between nodes |
-| `kube-status` | Cluster health |
-| `kube-reset` | Tear down K8s on a node |
-| `kube-smoke-test` | 41-point verification |
-
 ### ZFS
 | Command | What it does |
 |---|---|
@@ -136,18 +123,7 @@ The live environment is always CentOS Stream 9. The user picks their target dist
 
 ## Releases
 
-### 1.0.4 — Kubernetes on ZFS (current)
-- Full Kubernetes cluster via `kube-cluster bootstrap` — 1 CP + 3 workers on ZFS instant clones
-- Cilium eBPF CNI (replaces kube-proxy), Gateway API, MetalLB, Hubble
-- WireGuard encrypted backplane (dual-plane: management + K8s)
-- ZFS CSI — persistent volumes with instant snapshots
-- 21-option `kube-demo` — add/replace nodes, drain, rolling updates, network policy, self-healing
-- K8s bootstrap checkbox: one install, one reboot → production cluster
-- `kzfs-lab` — 6-distro dev platform with blue-green deployment + observability VM
-- CentOS + Debian fully tested end-to-end
-- 38-point smoke test, nodes are cattle (replace in 52 seconds)
-
-### 1.0.3 — FreeBSD + KVM on ZFS
+### 1.0.3 — FreeBSD + KVM on ZFS (current)
 - FreeBSD 15.0 added to installer (native ZFS, jails, bhyve)
 - KVM hypervisor profile: ZFS zvols, instant clones (~100ms), golden image workflow
 - `kvm-create`, `kvm-clone`, `kvm-snap`, `kvm-delete`, `kvm-list`, `kvm-demo`
@@ -181,4 +157,4 @@ BSD-3-Clause. Free forever. See [LICENSE](LICENSE).
 
 ---
 
-*kldloadOS 1.0.4 — Kubernetes on ZFS*
+*kldloadOS 1.0.3 — FreeBSD + KVM on ZFS*
