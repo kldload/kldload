@@ -1152,15 +1152,17 @@ mkdir -p "${ISO_STAGING}/EFI/BOOT" "${ISO_STAGING}/images/pxeboot" "${ISO_STAGIN
 cp "${ROOTFS}/boot/vmlinuz-${KVER}" "${ISO_STAGING}/images/pxeboot/vmlinuz"
 cp "${ROOTFS}/boot/initramfs-${KVER}.img" "${ISO_STAGING}/images/pxeboot/initrd.img"
 
-# EFI bootloader
-cp "${ROOTFS}/boot/efi/EFI/centos/shimx64.efi" "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || \
-    cp "${ROOTFS}/boot/efi/EFI/BOOT/BOOTX64.EFI" "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || \
-    cp /boot/efi/EFI/centos/shimx64.efi "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || \
-    find "$ROOTFS" -name 'shimx64.efi' -exec cp {} "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" \; 2>/dev/null || \
-    log "WARNING: shimx64.efi not found"
+# EFI bootloader for the live ISO — use GRUB directly (no shim).
+# Shim on the live USB causes "failed to load image" because the live GRUB
+# isn't signed by the CentOS key that shim expects. The live ISO boots with
+# Secure Boot "Other OS" or disabled, so shim isn't needed here.
+# Shim is only installed on the TARGET system for Secure Boot after install.
+find "$ROOTFS" -name 'grubx64.efi' -exec cp {} "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" \; 2>/dev/null || \
+    find "$ROOTFS" -name 'grubx64.efi' -exec cp {} "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" \; 2>/dev/null || \
+    log "WARNING: grubx64.efi not found — live ISO may not UEFI boot"
 
-find "$ROOTFS" -name 'grubx64.efi' -exec cp {} "${ISO_STAGING}/EFI/BOOT/grubx64.efi" \; 2>/dev/null || \
-    log "WARNING: grubx64.efi not found"
+# Also keep grubx64.efi as itself (some firmware looks for it by name)
+cp "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" "${ISO_STAGING}/EFI/BOOT/grubx64.efi" 2>/dev/null || true
 
 # GRUB config
 cat > "${ISO_STAGING}/EFI/BOOT/grub.cfg" << 'GRUBCFG'
