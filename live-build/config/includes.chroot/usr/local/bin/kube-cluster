@@ -756,24 +756,9 @@ cmd_bootstrap() {
   echo -e "${Y}=== Step 4: Control Plane (Cilium + MetalLB + ZFS CSI + Hubble) ===${N}"
   _ssh_cmd "$cp_ip" "kube-init" || warn "kube-init had errors — some components may still be pulling images"
 
-  # Start Hubble live stream in background so the user can see eBPF-captured
-  # network flows in real time as workers join and pods deploy. This is a
-  # demo feature — it shows that eBPF observability works from second zero
-  # with zero agents and zero configuration.
-  echo ""
-  echo -e "${C}=== Hubble eBPF Live — observing all traffic from this point ===${N}"
-  echo -e "${D}(kernel-level network flows via eBPF — no agents, no config)${N}"
-  echo ""
-  local hubble_pid=""
-  _ssh_cmd "$cp_ip" "nohup hubble observe --follow --output compact 2>/dev/null &" 2>/dev/null &
-  hubble_pid=$!
-  # Give Hubble a moment to start
-  sleep 3
-
   # Step 5: Join workers. The join token is a short-lived bootstrap credential
-  # that lets workers authenticate to the API server. Hubble is streaming in
-  # the background, so the user sees the TLS handshakes and certificate
-  # signing requests as eBPF flows in real time.
+  # that lets workers authenticate to the API server.
+  echo ""
   echo -e "${Y}=== Step 5: Join Workers ===${N}"
   local join_token
   join_token="$(_ssh_cmd "$cp_ip" 'kubeadm token create --print-join-command 2>/dev/null')" || true
@@ -806,17 +791,14 @@ cmd_bootstrap() {
   echo -e "${Y}=== Step 7: Smoke Test ===${N}"
   _ssh_cmd "$cp_ip" "kube-smoke-test" || warn "Smoke test had failures — check output above"
 
-  # Stop Hubble background stream
-  kill "$hubble_pid" 2>/dev/null || true
-
-  # Step 8: Final Hubble dump — show what eBPF captured during the entire deployment
+  # Step 8: Hubble proof of life — show recent eBPF-captured flows
   echo ""
-  echo -e "${Y}=== Step 8: Hubble eBPF — What the kernel saw ===${N}"
-  echo -e "${D}Last 50 flows captured by eBPF during cluster deployment:${N}"
+  echo -e "${Y}=== Step 8: Hubble eBPF — Proof of Life ===${N}"
+  echo -e "${D}Recent flows captured by eBPF (zero agents, zero config):${N}"
   echo ""
-  _ssh_cmd "$cp_ip" "hubble observe --last 50 2>/dev/null" || true
+  _ssh_cmd "$cp_ip" "hubble observe --last 20 2>/dev/null" || true
   echo ""
-  echo -e "${G}^^^ Every line above was captured in-kernel by eBPF. Zero agents. Zero config. From second zero.${N}"
+  echo -e "${G}Run 'hubble observe --follow' on the CP for live streaming.${N}"
 
   # Final status
   echo ""
