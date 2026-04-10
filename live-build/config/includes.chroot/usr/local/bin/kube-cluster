@@ -266,13 +266,17 @@ runcmd:
   - touch /var/lib/cloud/instance/kube-golden-ready
 USERDATA
 
-  # Network config — Debian cloud images need explicit DHCP
+  # Network config — DHCP on all ethernet interfaces (en* for Debian, eth* for CentOS)
   cat > "${ci_dir}/network-config" <<NETCFG
 version: 2
 ethernets:
   id0:
     match:
       name: "en*"
+    dhcp4: true
+  id1:
+    match:
+      name: "eth*"
     dhcp4: true
 NETCFG
 
@@ -343,8 +347,10 @@ NETCFG
     sleep 2
   done
 
-  # Remove cloud-init ISO
-  virsh detach-disk "${GOLDEN}" "${ci_iso}" --config 2>/dev/null || true
+  # Remove ALL CDROMs from golden (critical — clones must not inherit cloud-init ISOs)
+  for target in sda sdb hda hdb; do
+    virsh detach-disk "${GOLDEN}" "${target}" --config 2>/dev/null || true
+  done
   rm -f "$ci_iso"
 
   # Snapshot the golden image
@@ -428,6 +434,10 @@ ethernets:
   id0:
     match:
       name: "en*"
+    dhcp4: true
+  id1:
+    match:
+      name: "eth*"
     dhcp4: true
 NETCFG
 
