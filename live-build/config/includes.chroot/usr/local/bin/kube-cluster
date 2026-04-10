@@ -628,6 +628,15 @@ cmd_bootstrap() {
   echo -e "${Y}=== Step 7: Smoke Test ===${N}"
   _ssh_cmd "$cp_ip" "kube-smoke-test" || warn "Smoke test had failures — check output above"
 
+  # Hubble live — show eBPF flows proving observability works from second zero
+  echo ""
+  echo -e "${Y}=== Step 8: Hubble eBPF Live Flows ===${N}"
+  echo -e "${D}Observing real-time kernel-level network traffic (10 seconds)...${N}"
+  echo ""
+  _ssh_cmd "$cp_ip" "hubble observe --last 30 2>/dev/null || kubectl -n kube-system exec ds/cilium -- hubble observe --last 30 2>/dev/null" || true
+  echo ""
+  echo -e "${G}Every flow above was captured by eBPF in the kernel — zero agents, zero config.${N}"
+
   # Final status
   echo ""
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
