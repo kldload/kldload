@@ -325,6 +325,15 @@ EOFSTAB
         break
       fi
     done
+
+    # Copy MOK DER certificate to EFI partition for "Enroll key from disk" option
+    # in MokManager. This lets the user select the file visually instead of
+    # entering a password — simpler for demos and enterprise deployments.
+    if [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
+      cp "${target}/var/lib/dkms/mok.der" "${zbm_efi_dir}/mok.der"
+      cp "${target}/var/lib/dkms/mok.der" "${zbm_fallback_dir}/mok.der"
+      k_log "MOK certificate (mok.der) copied to EFI partition for enrollment from disk"
+    fi
   else
     # No shim found — install ZFSBootMenu directly as the fallback.
     # This works without Secure Boot but will fail with Secure Boot enabled
