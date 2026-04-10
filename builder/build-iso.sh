@@ -1,12 +1,35 @@
 #!/usr/bin/env bash
 set -e
-trap '' PIPE  # Ignore SIGPIPE — internal pipes kill the container
+# SIGPIPE handling: when piping commands like "dnf ... | tee", if tee exits
+# early (e.g., broken pipe to the log file), the SIGPIPE kills the whole
+# container build. "trap '' PIPE" silences it. We also leave pipefail DISABLED
+# for the same reason — pipefail turns SIGPIPE into a non-zero exit code that
+# "set -e" would catch, aborting the build on harmless pipe closures.
+trap '' PIPE
 
-# ---------------------------------------------------------------------------
-# build-iso.sh — runs INSIDE the builder container
-# Builds a CentOS Stream 9 live ISO using dnf --installroot + squashfs + lorax
-# No anaconda/livemedia-creator — works reliably inside containers.
-# ---------------------------------------------------------------------------
+# =============================================================================
+# build-iso.sh — Stage 5 of the kldload build pipeline (ISO assembly)
+# =============================================================================
+#
+# Runs INSIDE the builder container (CentOS Stream 9 + lorax/squashfs/xorriso).
+# Invoked by deploy.sh after the builder image and darksites are ready.
+#
+# Pipeline overview (all stages are containerized):
+#   Stage 1: builder image     — Dockerfile builds the toolchain container
+#   Stage 2: Debian darksite   — build-darksite-debian.sh resolves APT packages
+#   Stage 3: Ubuntu darksite   — build-darksite-ubuntu.sh resolves APT packages
+#   Stage 4: RPM darksite      — build-darksite.sh downloads RPM packages
+#   Stage 5: ISO assembly      — THIS FILE — bootstraps rootfs, builds ZFS DKMS,
+#                                 embeds all darksites, creates squashfs + EFI + ISO
+#
+# The live ISO is always CentOS Stream 9 regardless of PROFILE. The user picks
+# the target distro (Debian, Ubuntu, Arch, etc.) at install time via the web UI.
+# GNOME is always installed because the live environment needs a desktop session
+# for the web-based installer (Firefox auto-opens to kldload-webui on boot).
+#
+# No anaconda/livemedia-creator — this builds directly with dnf --installroot
+# + squashfs + xorriso, which works reliably inside rootless containers.
+# =============================================================================
 
 PROFILE="${PROFILE:-desktop}"
 EDITION="${EDITION:-free}"
@@ -36,7 +59,9 @@ mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 LOG_FILE="$LOG_DIR/build-${PROFILE}-${ARCH}-${BUILD_DATE}.log"
 
 # ---------------------------------------------------------------------------
-# Clean previous state — remove old ISO so a failed build can't be mistaken for new
+# Clean previous state — delete the old ISO FIRST so that if this build fails
+# partway through, no stale ISO remains that could be mistaken for a successful
+# build. This makes builds atomic: either a new ISO exists or nothing does.
 # ---------------------------------------------------------------------------
 rm -rf "$ROOTFS" "$ISO_STAGING" /var/tmp/kldload-*
 rm -f "/build/live-build/output/${ISO_NAME}" "/build/live-build/output/${ISO_NAME}.sha256"
@@ -107,8 +132,11 @@ if [[ "$EDITION" != "core" ]]; then
     )
 fi
 
-# GNOME desktop is always needed for the live environment (web UI installer)
-# The PROFILE variable only affects what gets installed on the TARGET system
+# GNOME desktop is ALWAYS installed in the live ISO regardless of the PROFILE
+# variable. The live environment boots to a GNOME session with GDM autologin,
+# and Firefox auto-opens the kldload-webui installer. Without GNOME, the user
+# would have no way to interact with the web UI. The PROFILE variable only
+# affects what packages get installed on the TARGET system at install time.
 PKGS+=(
     gnome-shell gnome-session gdm gnome-terminal nautilus
     gnome-control-center gnome-settings-daemon gedit
@@ -160,11 +188,15 @@ ZFSREPO
 # Note: DKMS autoinstall will fail here (host kernel != target kernel).
 # That's expected — we rebuild DKMS explicitly below with --kernelsourcedir.
 # Don't let the scriptlet failure kill the build.
+#
+# pipefail is explicitly disabled here and never re-enabled. Enabling it would
+# cause SIGPIPE from "dnf | tee" to propagate as a non-zero exit, which set -e
+# would turn into a fatal build abort. The SIGPIPE is harmless (just tee closing).
 set +o pipefail
 dnf --installroot="$ROOTFS" --releasever=9 --setopt=install_weak_deps=False \
     --setopt=tsflags=nodocs --nogpgcheck -y install "${PKGS[@]}" 2>&1 | tee -a "$LOG_FILE"
 DNF_RC=${PIPESTATUS[0]}
-# set -o pipefail  # DISABLED — causes SIGPIPE
+# set -o pipefail  # INTENTIONALLY DISABLED — see SIGPIPE note above
 # Check if packages actually installed (ignore DKMS scriptlet exit code)
 if ! chroot "$ROOTFS" rpm -q zfs zfs-dkms kernel-core >/dev/null 2>&1; then
     die "dnf --installroot failed — core packages missing"
@@ -174,6 +206,10 @@ log "dnf completed (exit $DNF_RC — DKMS scriptlet failures are expected and ha
 log "Root filesystem bootstrapped: $(du -sh "$ROOTFS" | cut -f1)"
 
 # Install sanoid from GitHub (free edition only)
+# The CentOS 9 EPEL sanoid package is too old — it lacks features like
+# template inheritance and improved pruning that kldload's snapshot policies
+# rely on. Building from GitHub source gives us the latest stable release
+# and puts binaries in /usr/local/sbin/ (profiles.sh copies them to targets).
 if [[ "$EDITION" != "core" ]]; then
     log "Installing sanoid from GitHub..."
     SANOID_VER="2.2.0"
@@ -222,8 +258,9 @@ mount -t sysfs sysfs "${ROOTFS}/sys" 2>/dev/null || true
 mount --bind /dev "${ROOTFS}/dev" 2>/dev/null || true
 mount --bind /dev/pts "${ROOTFS}/dev/pts" 2>/dev/null || true
 
-# DO NOT mount host /proc — it exposes the host kernel (Fedora 6.18.x).
-# Instead mount a fresh procfs so DKMS doesn't see the wrong kernel version.
+# DO NOT bind-mount /proc from the host — it exposes the host kernel version
+# (e.g., Fedora 6.18.x) which confuses DKMS into building against the wrong
+# kernel. Mount a fresh procfs so DKMS sees the CentOS kernel from the rootfs.
 mount -t proc proc "${ROOTFS}/proc" 2>/dev/null || true
 
 # Ensure the kernel headers symlink is correct
@@ -236,9 +273,11 @@ if [[ -n "$ZFS_VER" ]]; then
     chroot "$ROOTFS" dkms remove -m zfs -v "$ZFS_VER" --all 2>/dev/null || true
     chroot "$ROOTFS" dkms add -m zfs -v "$ZFS_VER" 2>&1 | tee -a "$LOG_FILE" || true
 
-    # Force DKMS to use the CentOS kernel headers, not autodetect from /proc
-    # ARCH=x86_64 prevents "arch/amd64/Makefile: No such file" in cross-arch Docker builds
-    # || true because DKMS may fail — we check for zfs.ko below
+    # Force DKMS to use the CentOS kernel headers via --kernelsourcedir,
+    # bypassing DKMS's /proc-based autodetection (which would find the wrong kernel).
+    # ARCH=x86_64 is required to prevent "arch/amd64/Makefile: No such file" errors
+    # that occur in Docker builds on aarch64 hosts or when uname reports amd64.
+    # || true because DKMS may fail — we verify zfs.ko exists below.
     chroot "$ROOTFS" env ARCH=x86_64 dkms build -m zfs -v "$ZFS_VER" -k "$KVER" \
         --kernelsourcedir "/usr/src/kernels/${KVER}" \
         --force \
@@ -277,8 +316,11 @@ umount "${ROOTFS}/dev" 2>/dev/null || true
 umount "${ROOTFS}/sys" 2>/dev/null || true
 umount "${ROOTFS}/proc" 2>/dev/null || true
 
-# Download pacman-static for Arch Linux bootstrap support
-# (CentOS has no pacman package — we need a static binary)
+# Download pacman-static for Arch Linux bootstrap support.
+# CentOS has no pacman package in any repo, and building from source would pull
+# in Arch-specific dependencies. The pacman-static binary is a fully statically
+# linked build that runs on any x86_64 Linux — it's used by the installer to
+# run "pacstrap" when the user selects Arch as the target distro.
 if [[ "$EDITION" != "core" ]]; then
     log "Downloading pacman-static for Arch support..."
     curl -sfL "https://pkgbuild.com/~morganamilo/pacman-static/x86_64/bin/pacman-static" \
@@ -290,7 +332,7 @@ if [[ "$EDITION" != "core" ]]; then
         ln -sf /usr/local/bin/pacman "${ROOTFS}/usr/bin/pacman"
         mkdir -p "${ROOTFS}/etc/pacman.d"
         # pacman-static looks for /etc/ssl/certs/ca-certificates.crt (Arch path)
-        # CentOS has /etc/ssl/certs -> /etc/pki/tls/certs (symlink), so create the file at the real path
+        # CentOS uses /etc/pki/tls/certs/ — symlink so TLS verification works
         ln -sf /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem "${ROOTFS}/etc/pki/tls/certs/ca-certificates.crt"
         printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n' > "${ROOTFS}/etc/pacman.d/mirrorlist"
         log "pacman-static installed: $(chroot "$ROOTFS" /usr/bin/pacman --version 2>&1 | head -1)"
@@ -347,26 +389,29 @@ PasswordAuthentication yes
 PermitRootLogin yes
 SSHEOF
 
-# CentOS 9 python3-websockets RPM lacks websockets.http11 module needed by webui.
-# Remove the RPM and install a compatible version via pip at build time.
-# pip runs inside the chroot — copy resolv.conf so it can reach PyPI.
+# CentOS 9 python3-websockets RPM ships websockets v10, which lacks the
+# websockets.http11 module that kldload-webui imports. The webui needs the
+# v11+ HTTP/1.1 protocol implementation for its WebSocket upgrade handling.
+# Fix: remove the system RPM and pip-install a compatible version.
+# resolv.conf is copied into the chroot so pip can resolve pypi.org.
 if [[ "$EDITION" != "core" ]]; then
     chroot "$ROOTFS" dnf remove -y python3-websockets 2>/dev/null || true
     cp /etc/resolv.conf "${ROOTFS}/etc/resolv.conf" 2>/dev/null || true
     set +euo pipefail
     chroot "$ROOTFS" pip3 install --no-cache-dir websockets >/dev/null 2>&1
     _pip_rc=$?
-    set -e  # pipefail disabled
+    set -e  # pipefail intentionally left disabled (SIGPIPE)
     [[ $_pip_rc -ne 0 ]] && log "WARNING: pip install websockets failed — webui may not start"
 fi
 
 # Enable services
 chroot "$ROOTFS" systemctl enable NetworkManager sshd 2>/dev/null || true
-# Live environment always boots to GNOME desktop (web UI installer needs it)
+# Live environment always boots to GNOME desktop — the web UI installer is
+# browser-based, so even "server" and "kvm" profile ISOs need a graphical session
 chroot "$ROOTFS" systemctl enable gdm 2>/dev/null || true
 chroot "$ROOTFS" systemctl set-default graphical.target 2>/dev/null || true
 
-# GDM autologin for live session (always — live ISO needs desktop for web UI)
+# GDM autologin for live session — boots straight to desktop with no login prompt
 mkdir -p "${ROOTFS}/etc/gdm"
 cat > "${ROOTFS}/etc/gdm/custom.conf" << 'GDMCONF'
 [daemon]
@@ -466,11 +511,17 @@ XSET
     echo "kernel.consoleblank=0" > "${ROOTFS}/etc/sysctl.d/99-no-blank.conf"
 fi
 
-# Edition marker
+# Edition marker — lets runtime tools distinguish free vs core edition
 mkdir -p "${ROOTFS}/etc/kldload"
 echo "$EDITION" > "${ROOTFS}/etc/kldload/edition"
+
+# Build ID generation — produces a version string like "1.0.4-b47" where:
+#   - VERSION is the release version from kldload.env (e.g., 1.0.4)
+#   - bN is the number of commits since the last "bump version" commit,
+#     which resets to 0 on each release and counts up with each dev build
+# This lets users identify exactly which build they're running (kst shows it).
+# The git SHA is stored separately for precise commit identification.
 GIT_SHA=$(git -C /build rev-parse --short HEAD 2>/dev/null || echo "unknown")
-# Build number = commits since last version tag (resets each release)
 BUILD_NUM=$(git -C /build log --oneline --grep="^bump.*${VERSION}\|^bump.*version" 2>/dev/null | head -1 | cut -d' ' -f1)
 if [[ -n "$BUILD_NUM" ]]; then
   BUILD_NUM=$(git -C /build rev-list --count "${BUILD_NUM}..HEAD" 2>/dev/null || echo "0")
@@ -534,11 +585,17 @@ if [[ "$EDITION" != "core" ]]; then
         cp /build/live-build/config/includes.chroot/etc/sanoid/sanoid.conf "${ROOTFS}/etc/sanoid/"
 
     # Copy webui binary + static files
+    # The webui Python server serves files from /usr/local/share/kldload-webui/.
+    # The source HTML lives in edition-named directories (free/, core/) but the
+    # server always serves from active/. This copy makes free/index.html the
+    # actually-served file by copying it to active/index.html. This indirection
+    # lets us maintain edition-specific UI files in the repo while having a
+    # single WorkingDirectory in the systemd unit.
     if [[ -x /build/live-build/config/includes.chroot/usr/local/bin/kldload-webui ]]; then
         cp /build/live-build/config/includes.chroot/usr/local/bin/kldload-webui \
            "${ROOTFS}/usr/local/bin/kldload-webui"
         chmod +x "${ROOTFS}/usr/local/bin/kldload-webui"
-        # Remove the old active/ UI and replace with the correct edition
+        # Replace active/ with the correct edition's UI files
         rm -rf "${ROOTFS}/usr/local/share/kldload-webui/active" 2>/dev/null || true
         mkdir -p "${ROOTFS}/usr/local/share/kldload-webui/active"
         if [[ "$EDITION" != "core" ]]; then
@@ -607,7 +664,9 @@ SVCEOF
 
     chroot "$ROOTFS" systemctl enable kldload-webui 2>/dev/null || true
 
-    # Debian darksite APT mirror service (serves on port 3142 for debootstrap)
+    # Debian darksite APT mirror service — Python HTTP server on port 3142.
+    # debootstrap on the live ISO is configured to use http://127.0.0.1:3142/apt/
+    # as its mirror, which serves packages from the baked-in darksite directory.
     cat > "${ROOTFS}/usr/lib/systemd/system/kldload-apt-mirror.service" << 'APTEOF'
 [Unit]
 Description=kldload Debian darksite APT mirror
@@ -645,7 +704,9 @@ UAPTEOF
 
     chroot "$ROOTFS" systemctl enable kldload-apt-mirror-ubuntu 2>/dev/null || true
 
-    # Arch Linux darksite pacman mirror service (serves on port 3144)
+    # Arch Linux darksite — note: Arch is a rolling release so the darksite
+    # goes stale quickly. Arch installs actually require internet; this mirror
+    # is a partial cache that supplements live mirrors.
     cat > "${ROOTFS}/usr/lib/systemd/system/kldload-pacman-mirror.service" << 'PACEOF'
 [Unit]
 Description=kldload Arch darksite pacman mirror
@@ -885,6 +946,10 @@ else
 fi
 
 # ZFSBootMenu EFI binary (both editions — needed for ZFS boot)
+# ZFSBootMenu replaces GRUB as the bootloader for ZFS-on-root systems. It's an
+# EFI application that understands ZFS boot environments natively. Downloaded
+# at build time and baked in so installs work offline. If the download fails,
+# the installer will attempt to download it at install time as a fallback.
 mkdir -p "${ROOTFS}/root/darksite/boot"
 log "Downloading ZFSBootMenu EFI binary..."
 curl -sL --connect-timeout 30 --max-time 300 \
@@ -897,6 +962,11 @@ else
 fi
 
 # Offline package darksites (free edition only — core requires internet for installs)
+# Darksites are pre-resolved package mirrors baked into the ISO so target installs
+# work without internet. Each distro's darksite was built in an earlier pipeline
+# stage (stages 2-4) and cached on the host. Here we copy them into the rootfs
+# so they end up inside the squashfs image. On the live ISO, Python HTTP servers
+# expose these as local APT/RPM/pacman mirrors (ports 3142-3146).
 if [[ "$EDITION" != "core" ]]; then
     # Copy darksite RPM repo into the rootfs for offline target installs
     if [[ -d /build/live-build/config/includes.chroot/root/darksite ]]; then
@@ -990,7 +1060,10 @@ chroot "$ROOTFS" dracut --force --add "dmsquash-live" \
 # ---------------------------------------------------------------------------
 # Step 4: Create squashfs
 # ---------------------------------------------------------------------------
-# Final safety: ensure active/ webui has the latest free/ edition
+# Final safety sync: re-copy free/ -> active/ right before squashfs creation.
+# This catches any case where the webui HTML was updated after the initial copy
+# in Step 2 (e.g., if a hook modified it). Belt-and-suspenders — the Step 2 copy
+# should be sufficient, but stale webui in the ISO is a painful debugging session.
 if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/free ]]; then
     rm -rf "${ROOTFS}/usr/local/share/kldload-webui/active" 2>/dev/null || true
     mkdir -p "${ROOTFS}/usr/local/share/kldload-webui/active"
@@ -1046,7 +1119,9 @@ menuentry "KLDload Live (troubleshooting)" {
 }
 GRUBCFG
 
-# Create EFI boot image (using mtools — no loop device needed in containers)
+# Create EFI boot image using mtools (mmd/mcopy) instead of loop-mounting a
+# FAT image. Loop devices require CAP_SYS_ADMIN which rootless containers lack.
+# mtools manipulates FAT filesystems via direct file I/O — no kernel involvement.
 dd if=/dev/zero of="${ISO_STAGING}/images/efiboot.img" bs=1M count=10
 mkfs.vfat "${ISO_STAGING}/images/efiboot.img"
 mmd -i "${ISO_STAGING}/images/efiboot.img" ::EFI
@@ -1055,7 +1130,8 @@ mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/BOOTX64.EF
 mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grubx64.efi" ::EFI/BOOT/ 2>/dev/null || true
 mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grub.cfg" ::EFI/BOOT/
 
-# Build ISO (EFI-only, no legacy BIOS)
+# Build ISO (EFI-only, no legacy BIOS — all modern hardware uses UEFI)
+# -isohybrid-gpt-basdat makes the ISO dd-able to USB (GPT hybrid)
 xorriso -as mkisofs \
     -o "${OUTPUT_DIR}/${ISO_NAME}" \
     -R -J -joliet-long \

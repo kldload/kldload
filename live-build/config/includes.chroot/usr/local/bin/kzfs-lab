@@ -1,8 +1,36 @@
 #!/usr/bin/env bash
-# kzfs-lab — ZFS development lab on KVM with blue-green deployment
-# Deploys 6 Linux distros as VMs on a KVM/ZFS hypervisor, each with ZFS source,
-# test suite, eBPF tools, and dev toolchains. Supports blue-green deployment
-# with instant ZFS rollback.
+# ══════════════════════════════════════════════════════════════════════════
+# kzfs-lab — ZFS Development Lab on KVM with Blue-Green Deployment
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Deploys 6 Linux distros as KVM virtual machines on a ZFS-backed hypervisor,
+# each provisioned with the full OpenZFS source tree, zfs-tests.sh test suite,
+# eBPF tracing tools, and C/kernel dev toolchains.
+#
+# The 6 distros are chosen to cover all three Linux package manager families:
+#   - dnf family:    CentOS Stream 9, Rocky Linux 9, Fedora 41
+#   - apt family:    Debian 13 (Trixie), Ubuntu 24.04 (Noble)
+#   - pacman family: Arch Linux (rolling)
+# This ensures OpenZFS is tested against every major packaging ecosystem —
+# the same kernel module, different userlands, different DKMS integrations.
+#
+# Blue-Green Deployment Concept:
+#   Golden images are base templates built once (download cloud image, install
+#   ZFS + dev tools, seal for cloning). From goldens, two identical "sites"
+#   can be deployed:
+#     - Blue  = production baseline (known-good state)
+#     - Green = staging environment (test changes here)
+#   Promoting green makes it the new blue via ZFS clone (instant, zero-copy).
+#   Rollback reverts blue to its previous snapshot (also instant — ZFS COW).
+#   This pattern lets you test OpenZFS patches across all 6 distros in green,
+#   then atomically swap to blue once validated.
+#
+# Observability VM:
+#   A 7th VM (always CentOS Stream 9 — chosen for stability as infra) runs
+#   Prometheus, Grafana, Loki, and Alertmanager. Every lab VM auto-reports
+#   metrics (node_exporter :9100) and logs (promtail -> Loki) to this VM.
+#   The obs VM is deployed from the CentOS golden image, so it requires
+#   "kzfs-lab build centos" before deploying a site.
 #
 # Usage:
 #   kzfs-lab build [distro|all]       Build golden images
@@ -18,17 +46,20 @@ set -uo pipefail
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 # ── Configuration ─────────────────────────────────────────────────────────
-POOL="${POOL:-rpool}"
-LAB_PREFIX="zfslab"
-RAM="${RAM:-4096}"
-CPUS="${CPUS:-2}"
-DISK="${DISK:-40}"
+POOL="${POOL:-rpool}"             # ZFS pool where golden images and clones live
+LAB_PREFIX="zfslab"              # Naming prefix for all VMs and zvols
+RAM="${RAM:-4096}"                # Per-VM RAM in MB — 4G is enough for ZFS DKMS builds
+CPUS="${CPUS:-2}"                # Per-VM vCPUs
+DISK="${DISK:-40}"               # Golden zvol size in GB — must fit cloud image + ZFS source + tests
 SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
-ISO_DIR="/var/lib/libvirt/isos"
+ISO_DIR="/var/lib/libvirt/isos"  # Where cloud images and cloud-init ISOs are stored
 
 DISTROS=(centos rocky fedora debian ubuntu arch)
-OBS_VM="obs"  # observability VM name suffix
+OBS_VM="obs"  # shellcheck: used in deploy_site  # observability VM name suffix
 
+# Cloud image URLs — official GenericCloud/cloudimg qcow2 images from each distro.
+# These are minimal cloud-init-enabled images (~500MB-2GB) designed for VM deployment.
+# Each vendor publishes at a stable "latest" URL so rebuilds pick up security patches.
 declare -A CLOUD_IMAGES=(
   [centos]="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
   [rocky]="https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"
@@ -38,6 +69,9 @@ declare -A CLOUD_IMAGES=(
   [arch]="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
 )
 
+# virt-install --os-variant values for libvirt optimization hints.
+# Rocky uses centos-stream9 because libvirt has no rocky9 variant.
+# Fedora uses fedora-unknown because the exact release variant may not be installed.
 declare -A OS_VARIANTS=(
   [centos]="centos-stream9"
   [rocky]="centos-stream9"
@@ -47,6 +81,8 @@ declare -A OS_VARIANTS=(
   [arch]="archlinux"
 )
 
+# Maps each distro to its package manager family, used to dispatch
+# per-distro install logic in setup_zfs_dev_vm (dnf vs apt vs pacman).
 declare -A DISTRO_FAMILY=(
   [centos]="dnf"
   [rocky]="dnf"
@@ -65,6 +101,10 @@ warn() { echo -e "${Y}[kzfs-lab]${N} $*" >&2; }
 die()  { echo -e "${R}[kzfs-lab]${N} $*" >&2; exit 1; }
 
 # ── Helpers ───────────────────────────────────────────────────────────────
+
+# SSH with key-based auth, falling back to password auth (kldload).
+# The fallback handles freshly-booted VMs where cloud-init may not have
+# finished injecting the SSH key yet.
 _ssh_cmd() {
   local ip="$1"; shift
   ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
@@ -73,6 +113,10 @@ _ssh_cmd() {
     "root@${ip}" "$@" 2>/dev/null
 }
 
+# Resolve a VM's IP address, polling up to 90 seconds. Tries two methods:
+# 1. virsh domifaddr (QEMU guest agent) — preferred, instant when available
+# 2. virsh net-dhcp-leases (dnsmasq leases) — fallback for VMs without guest agent
+# The MAC lookup is cached after first discovery to avoid repeated virsh calls.
 get_vm_ip() {
   local vm="$1"
   local ip="" mac=""
@@ -109,6 +153,9 @@ ensure_ssh_key() {
   fi
 }
 
+# Nanosecond-precision timer pair for measuring ZFS clone speeds and build times.
+# ZFS clones are near-instant (typically <100ms) so millisecond resolution matters
+# to demonstrate the performance advantage of COW cloning over full copies.
 timer_start() { date +%s%N; }
 timer_elapsed_ms() {
   local start="$1"
@@ -117,7 +164,9 @@ timer_elapsed_ms() {
   echo $(( (now - start) / 1000000 ))
 }
 
-# VM naming helpers
+# VM naming helpers — enforce consistent naming across golden images, site VMs,
+# ZFS datasets, and /dev/zvol block device paths.
+# Examples: zfslab-golden-centos, zfslab-blue-centos, rpool/vms/zfslab-blue-centos
 golden_name()  { echo "${LAB_PREFIX}-golden-${1}"; }
 site_name()    { echo "${LAB_PREFIX}-${1}-${2}"; }   # site_name blue centos
 zvol_path()    { echo "${POOL}/vms/${1}"; }
@@ -149,7 +198,14 @@ golden_exists() {
   zfs list "$(zvol_path "$(golden_name "$1")")" >/dev/null 2>&1
 }
 
-# Make a cloud-init ISO
+# Generate a cloud-init NoCloud ISO for a VM.
+# Cloud-init requires three separate files on a "cidata"-labeled ISO:
+#   - meta-data:       instance identity (used by cloud-init to detect first boot)
+#   - user-data:       #cloud-config YAML (users, packages, SSH keys, runcmd)
+#   - network-config:  v2 netplan-style config (DHCP on first ethernet interface)
+# The ISO is attached as a virtual CDROM — cloud-init auto-detects the "cidata"
+# volume label and consumes the config on first boot. This avoids needing an
+# external metadata service (IMDS) which would require network infrastructure.
 make_cloud_init_iso() {
   local name="$1" hostname="$2" ready_marker="${3:-}"
   local ci_dir ci_iso
@@ -161,16 +217,23 @@ make_cloud_init_iso() {
   ci_dir="$(mktemp -d)"
   ci_iso="${ISO_DIR}/${name}-cloud-init.iso"
 
+  # meta-data: unique instance-id prevents cloud-init from re-running on reboot.
+  # Changing instance-id triggers a fresh cloud-init cycle (used when re-cloning).
   cat > "${ci_dir}/meta-data" <<META
 instance-id: ${name}
 local-hostname: ${hostname}
 META
 
+  # Optional ready marker: golden builds use this to signal that cloud-init
+  # is finished before we start installing ZFS dev tools over SSH.
   local runcmd_extra=""
   if [[ -n "$ready_marker" ]]; then
     runcmd_extra="  - touch ${ready_marker}"
   fi
 
+  # user-data: root access with both SSH key and password auth, plus runcmd
+  # to ensure sshd is configured for root login (some cloud images disable it).
+  # sshd restart uses both names because Debian/Ubuntu call it "ssh", RHEL calls it "sshd".
   cat > "${ci_dir}/user-data" <<USERDATA
 #cloud-config
 hostname: ${hostname}
@@ -204,6 +267,8 @@ runcmd:
 ${runcmd_extra}
 USERDATA
 
+  # network-config: match "en*" to handle both ens3 (KVM virtio) and enp1s0
+  # naming schemes across different distro udev rules. DHCP from virbr0.
   cat > "${ci_dir}/network-config" <<NETCFG
 version: 2
 ethernets:
@@ -213,6 +278,9 @@ ethernets:
     dhcp4: true
 NETCFG
 
+  # Build the ISO with whichever tool is available. The "cidata" volume label
+  # is mandatory — cloud-init's NoCloud datasource identifies config ISOs by it.
+  # Try genisoimage (common on RHEL), then mkisofs (legacy), then xorriso (modern).
   genisoimage -output "$ci_iso" -volid cidata -joliet -rock \
     "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null \
     || mkisofs -output "$ci_iso" -volid cidata -joliet -rock \
@@ -225,6 +293,14 @@ NETCFG
 }
 
 # ── Per-distro ZFS Dev Setup ─────────────────────────────────────────────
+# Installs the full ZFS development environment on a VM over SSH.
+# Dispatches on package manager family because the three families have
+# completely different package names for the same tools:
+#   - dnf (CentOS/Rocky/Fedora): kernel-devel, libuuid-devel, epel-release for extras
+#   - apt (Debian/Ubuntu): linux-headers-$(uname -r), uuid-dev, bpfcc-tools (not bcc-tools)
+#   - pacman (Arch): base-devel meta-package, linux-headers, no ZFS in repos (AUR only)
+# Each family also installs node_exporter from binary — every VM must export
+# metrics on :9100 so the observability VM can auto-discover them via Prometheus.
 setup_zfs_dev_vm() {
   local ip="$1" distro="$2"
   local family="${DISTRO_FAMILY[$distro]}"
@@ -233,6 +309,9 @@ setup_zfs_dev_vm() {
 
   case "$family" in
     dnf)
+      # dnf family: CentOS, Rocky, Fedora
+      # epel-release provides extra packages (bpftrace, bcc-tools) on RHEL clones.
+      # ZFS is installed from the official zfsonlinux.org repo (not in base repos).
       _ssh_cmd "$ip" bash -s <<'DNFSETUP'
 set -e
 dnf install -y epel-release 2>/dev/null || true
@@ -268,6 +347,10 @@ echo "DNF setup complete"
 DNFSETUP
       ;;
     apt)
+      # apt family: Debian, Ubuntu
+      # Package names differ from dnf: uuid-dev (not libuuid-devel), bpfcc-tools
+      # (not bcc-tools), linux-perf (not perf). ZFS is in the main repos for both
+      # Debian and Ubuntu as zfsutils-linux + zfs-dkms.
       _ssh_cmd "$ip" bash -s <<'APTSETUP'
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -303,6 +386,10 @@ echo "APT setup complete"
 APTSETUP
       ;;
     pacman)
+      # pacman family: Arch Linux only.
+      # ZFS is NOT in the official Arch repos — it requires the AUR (zfs-dkms).
+      # We skip automatic ZFS install here; users can build from /usr/src/zfs
+      # or use an AUR helper. Everything else (eBPF, dev tools) is in [extra].
       _ssh_cmd "$ip" bash -s <<'PACSETUP'
 set -e
 pacman -Syu --noconfirm
@@ -320,7 +407,10 @@ PACSETUP
       ;;
   esac
 
-  # Common: clone OpenZFS source, verify ZFS, bpftrace scripts, MOTD
+  # Common setup for all distros regardless of package manager:
+  # 1. Clone the upstream OpenZFS source tree for building/testing
+  # 2. Pre-install bpftrace scripts for ZFS-specific observability
+  # 3. Set a MOTD so users know what tools are available when they SSH in
   _ssh_cmd "$ip" bash -s <<'COMMON'
 git clone https://github.com/openzfs/zfs.git /usr/src/zfs 2>/dev/null || true
 modprobe zfs 2>/dev/null || true
@@ -361,9 +451,22 @@ COMMON
 }
 
 # ── Setup: Observability VM (CentOS Stream 9) ────────────────────────────
-# Prometheus + Grafana + Loki + Alertmanager — auto-discovers all lab VMs
+# Installs the full observability stack on the dedicated obs VM:
+#   - Prometheus (metrics collection, scrapes node_exporter on all lab VMs)
+#   - Grafana (dashboards, pre-provisioned with Prometheus + Loki datasources)
+#   - Loki (log aggregation, receives from promtail on all lab VMs)
+#   - Alertmanager (alerts for node down, high CPU/mem/disk)
+#
+# Always CentOS Stream 9 because it is the most stable RHEL-family distro
+# for long-running infrastructure services — no rolling updates, no EOL surprises.
+# The obs VM is cloned from the CentOS golden image like any other site VM.
+#
+# The stack uses static Prometheus targets on the WireGuard mesh IPs (not
+# service discovery) because the lab has a fixed, known set of VMs.
 setup_obs_vm() {
   local ip="$1" site="$2"
+  # Blue and green sites use separate WireGuard subnets so they can coexist
+  # without IP conflicts (blue = 10.252.0.0/24, green = 10.253.0.0/24)
   local wg_base
   [[ "$site" == "blue" ]] && wg_base="10.252.0" || wg_base="10.253.0"
 
@@ -489,7 +592,10 @@ fi
 echo "Observability packages installed"
 OBSSETUP
 
-  # ── Prometheus config — auto-discover all lab VMs ──
+  # ── Prometheus config — static targets for all lab VMs ──
+  # Each VM gets a deterministic WireGuard IP based on its index in DISTROS[],
+  # so Prometheus targets are generated at deploy time without needing DNS or
+  # service discovery. node_exporter listens on :9100 on every VM.
   log "  Configuring Prometheus to scrape all ${site} VMs..."
   local prom_targets=""
   local node_id=1
@@ -497,7 +603,7 @@ OBSSETUP
     prom_targets+="      - '${wg_base}.${node_id}:9100'\n"
     ((node_id++))
   done
-  # Add obs VM itself
+  # The obs VM itself also runs node_exporter for self-monitoring
   prom_targets+="      - '${wg_base}.${node_id}:9100'\n"
 
   _ssh_cmd "$ip" bash -s <<PROMCFG
@@ -630,6 +736,13 @@ STARTSVC
 }
 
 # ── Setup: promtail + node_exporter on every lab VM ──────────────────────
+# Every lab VM (all 6 distros) gets two telemetry agents:
+#   - node_exporter (:9100) — system metrics (CPU, memory, disk, network)
+#     scraped by Prometheus on the obs VM every 15 seconds
+#   - promtail — ships syslog + journald logs to Loki on the obs VM
+# This gives centralized observability across all distros without any
+# per-distro configuration differences. Both agents are installed as
+# static binaries with systemd units, avoiding package manager differences.
 setup_vm_telemetry() {
   local ip="$1" obs_ip="$2"
 
@@ -708,6 +821,18 @@ TELEMETRY
 }
 
 # ── Build Golden Image ───────────────────────────────────────────────────
+# Builds a single golden image for one distro. The process:
+#   1. Download the official cloud image (qcow2) if not cached
+#   2. Create a thin-provisioned ZFS zvol with 64k volblocksize
+#   3. Import the cloud image into the zvol (qemu-img convert qcow2 -> raw)
+#   4. Boot the VM with a cloud-init ISO for initial configuration
+#   5. Install the full ZFS dev environment over SSH (setup_zfs_dev_vm)
+#   6. Seal for cloning (clear machine-id, clean cloud-init state)
+#   7. Shutdown and snapshot as @golden
+#
+# The @golden snapshot is the immutable base for all site clones.
+# ZFS clones from this snapshot are instant (COW) and initially consume
+# zero additional disk space — only modified blocks are stored.
 build_golden_single() {
   local distro="$1"
   validate_distro "$distro"
@@ -752,6 +877,15 @@ build_golden_single() {
     zfs destroy -Rf "$zpath" 2>/dev/null || true
   fi
 
+  # Create a sparse (thin-provisioned) ZFS zvol. Key parameters:
+  #   -s          sparse allocation — zvol does not reserve its full size upfront,
+  #               so 6 x 40GB goldens do not consume 240GB on creation
+  #   volblocksize=64k  matches the typical VM I/O size and qcow2 cluster size,
+  #               giving good performance without excessive metadata overhead.
+  #               Smaller (8k) wastes space on metadata; larger (128k+) wastes
+  #               space on partial-block writes.
+  #   compression=lz4  transparent compression — cloud images compress well,
+  #               reducing actual disk usage by ~40-60%
   log "  Creating ZFS zvol (${DISK}G, sparse, lz4)..."
   zfs create -V "${DISK}G" -s -o volblocksize=64k \
     -o compression=lz4 "$zpath"
@@ -760,11 +894,14 @@ build_golden_single() {
   for _ in $(seq 1 15); do [[ -b "$zdev" ]] && break; sleep 1; done
   [[ -b "$zdev" ]] || die "ZFS zvol device not found: ${zdev}"
 
-  # Import cloud image
+  # Convert the cloud image from qcow2 to raw and write directly to the zvol.
+  # The zvol appears as /dev/zvol/... block device, so qemu-img writes raw
+  # sectors that ZFS compresses and checksums transparently.
   log "  Importing cloud image to ZFS zvol..."
   qemu-img convert -f qcow2 -O raw "$img_file" "$zdev"
 
-  # Grow partition
+  # Cloud images ship with a small root partition (~2GB). Grow it to fill
+  # the zvol so there is room for ZFS source, build artifacts, and tests.
   growpart "$zdev" 1 2>/dev/null || true
 
   # Cloud-init ISO
@@ -807,7 +944,11 @@ build_golden_single() {
   # Install ZFS dev environment
   setup_zfs_dev_vm "$golden_ip" "$distro"
 
-  # Seal for cloning
+  # Seal the golden image so clones behave as fresh machines.
+  # - cloud-init clean: removes instance data so cloud-init re-runs on next boot
+  #   (picks up new hostname, instance-id from the clone's cloud-init ISO)
+  # - empty machine-id: systemd regenerates a unique ID on next boot
+  # - empty hostname: set per-clone via cloud-init or hostnamectl after boot
   log "  Sealing golden image for cloning..."
   _ssh_cmd "$golden_ip" "cloud-init clean --logs 2>/dev/null || true"
   _ssh_cmd "$golden_ip" "rm -f /etc/machine-id; touch /etc/machine-id"
@@ -825,7 +966,8 @@ build_golden_single() {
   virsh detach-disk "$name" "$ci_iso" --config 2>/dev/null || true
   rm -f "$ci_iso"
 
-  # Snapshot
+  # The @golden snapshot is the immutable base for all future clones.
+  # "zfs clone golden@golden -> site-vm" is O(1) — no data is copied.
   zfs snapshot "${zpath}@golden"
 
   local elapsed
@@ -854,6 +996,14 @@ build_all_goldens() {
 }
 
 # ── Deploy Site ──────────────────────────────────────────────────────────
+# Deploys a full site (blue or green) by cloning all golden images.
+# Each clone is a ZFS instant clone — the timer_elapsed_ms output shows
+# the actual clone time (typically <100ms per VM, vs minutes for a full copy).
+# After cloning, the function:
+#   1. Boots all VMs with per-clone cloud-init ISOs
+#   2. Configures a WireGuard full-mesh VPN across all VMs
+#   3. Deploys an observability VM (Prometheus + Grafana + Loki)
+#   4. Configures telemetry (node_exporter + promtail) on every VM
 deploy_site() {
   local site="$1"
   validate_site "$site"
@@ -897,7 +1047,9 @@ deploy_site() {
       continue
     fi
 
-    # Clone golden
+    # Clone golden — this is the key ZFS operation. "zfs clone" creates a
+    # writable copy that shares all blocks with the golden snapshot via COW.
+    # The timer proves this is near-instant regardless of image size.
     echo -ne "  ${gname}@golden -> ${sname} ... "
     local cs
     cs="$(timer_start)"
@@ -972,12 +1124,17 @@ deploy_site() {
   done
 
   # ── WireGuard mesh ──────────────────────────────────────────────────────
+  # Build a full-mesh WireGuard VPN so every VM can reach every other VM
+  # over encrypted tunnels, independent of the libvirt bridge network.
+  # Blue and green use separate subnets (10.252.0.0/24 vs 10.253.0.0/24)
+  # so both sites can run simultaneously without IP conflicts.
+  # Each VM gets a deterministic IP: 10.25{2,3}.0.{1..N} based on DISTROS[] index.
   echo ""
   log "Configuring WireGuard mesh..."
   local wg_base
   [[ "$site" == "blue" ]] && wg_base="10.252.0" || wg_base="10.253.0"
 
-  # Collect IPs and init WireGuard on each VM
+  # Phase 1: Generate WireGuard keypairs and collect public keys from all VMs
   declare -A wg_ips=()
   declare -A wg_pubs=()
   local node_id=1
@@ -1017,7 +1174,10 @@ WGINIT
     ((node_id++))
   done
 
-  # Peer all VMs with each other (full mesh)
+  # Phase 2: Peer all VMs with each other (full mesh topology).
+  # Every VM gets a peer entry for every other VM. This is O(n^2) but with
+  # only 6 VMs it is 30 peer entries total — trivial. Full mesh means any
+  # VM can directly reach any other VM without routing through a hub.
   node_id=1
   for distro_a in "${DISTROS[@]}"; do
     [[ -z "${wg_ips[$distro_a]:-}" ]] && { ((node_id++)); continue; }
@@ -1039,7 +1199,9 @@ WGPEER
     ((node_id++))
   done
 
-  # Add nftables rules for WireGuard
+  # Allow WireGuard traffic (UDP 51830) and all wg-lab interface traffic
+  # through nftables. Without this, distros with default-deny policies
+  # (like Fedora) would block the WireGuard mesh.
   for distro in "${DISTROS[@]}"; do
     [[ -z "${wg_ips[$distro]:-}" ]] && continue
     _ssh_cmd "${wg_ips[$distro]}" bash -s <<'NFTRULES' 2>/dev/null || true
@@ -1053,6 +1215,10 @@ NFTRULES
   log "WireGuard mesh configured for ${site} site (${wg_base}.0/24)"
 
   # ── Deploy observability VM ────────────────────────────────────────────
+  # The obs VM is always cloned from the CentOS golden image. CentOS was
+  # chosen because it is the most stable platform for long-running infra
+  # services — same base as RHEL, no rolling updates that could break
+  # Prometheus/Grafana during a multi-day test run.
   echo ""
   log "Deploying observability VM..."
   local obs_sname="${LAB_PREFIX}-${site}-obs"
@@ -1109,7 +1275,8 @@ OBSWG
       # Setup observability stack
       setup_obs_vm "$obs_ip" "$site"
 
-      # Point all VMs' telemetry at obs VM
+      # Point all VMs' telemetry at the obs VM. This runs in parallel (&)
+      # because each VM's setup is independent — cuts total time from ~6x to ~1x.
       log "Configuring telemetry on all VMs → obs (${obs_ip})..."
       for distro in "${DISTROS[@]}"; do
         local sname
@@ -1147,13 +1314,23 @@ OBSWG
 }
 
 # ── Promote Green to Blue ────────────────────────────────────────────────
+# The blue-green promotion workflow:
+#   1. Snapshot the current blue site (safety net for rollback)
+#   2. Destroy the blue VMs (but the pre-promote snapshot preserves the data)
+#   3. Snapshot green, clone green -> new blue (instant ZFS clone)
+#   4. Destroy green (its data lives on in the blue clone)
+#   5. Boot the new blue site
+# The entire swap is near-instant because ZFS clones are metadata-only
+# operations — no data is physically copied.
 cmd_promote() {
   local site="${1:-green}"
   [[ "$site" == "green" ]] || die "Can only promote green to blue"
 
   log "Promoting green -> blue"
 
-  # Snapshot current blue before destroying
+  # Snapshot current blue before destroying — this is the rollback point.
+  # If the promoted green turns out to be broken, cmd_rollback can revert
+  # blue to this pre-promote snapshot.
   local ts
   ts="$(date +%Y%m%d-%H%M%S)"
   local had_blue=false
@@ -1216,6 +1393,10 @@ cmd_promote() {
 }
 
 # ── Rollback Blue ────────────────────────────────────────────────────────
+# Reverts the blue site to its most recent snapshot (typically the pre-promote
+# snapshot from cmd_promote). ZFS rollback is instant — it discards all
+# changes since the snapshot by rewinding the block pointer tree.
+# After rollback, the site is redeployed (VMs booted from the reverted zvols).
 cmd_rollback() {
   log "Rolling back blue site to previous snapshot..."
 
@@ -1252,6 +1433,11 @@ cmd_rollback() {
 }
 
 # ── Test ─────────────────────────────────────────────────────────────────
+# Quick ZFS smoke test that verifies the core ZFS operations work on a VM:
+# pool creation, dataset I/O, snapshots, clones, COW semantics, and compression.
+# Uses a loopback file pool (truncate -s 1G) so it does not need extra disks.
+# This is the fast validation path (~10 seconds); run_zfs_test_suite runs the
+# full OpenZFS test suite which can take hours.
 run_test_single() {
   local distro="$1" site="${2:-blue}"
 
@@ -1319,6 +1505,10 @@ TESTSCRIPT
   log "Tests complete on ${sname} (${elapsed}ms)"
 }
 
+# Run the full OpenZFS test suite (zfs-tests.sh) from /usr/src/zfs.
+# This builds OpenZFS from source if not already built, then runs the
+# official test suite. Can take 1-4 hours depending on hardware.
+# The test suite exercises thousands of edge cases across all ZFS subsystems.
 run_zfs_test_suite() {
   local distro="$1" site="${2:-blue}"
 
@@ -1347,6 +1537,10 @@ scripts/zfs-tests.sh -vx 2>&1 | tail -50
 FULLTEST
 }
 
+# Run quick tests across all distros in a site, producing a matrix showing
+# pass/fail status and elapsed time per distro. This is the primary
+# cross-distro validation tool — it shows whether ZFS works identically
+# on all 6 distros in a single view.
 run_test_all() {
   local site="${1:-blue}"
   local passed=0 failed=0
@@ -1388,6 +1582,9 @@ run_test_all() {
 }
 
 # ── Destroy ──────────────────────────────────────────────────────────────
+# Tear down all VMs in a site. Uses zfs destroy -Rf to recursively destroy
+# the zvol and all its snapshots/clones. The golden images are intentionally
+# preserved — they are expensive to rebuild (download + install + seal).
 destroy_site() {
   local site="$1"
   local quiet="${2:-}"
@@ -1551,6 +1748,9 @@ print_site_status() {
 }
 
 # ── Snapshot All ─────────────────────────────────────────────────────────
+# Create a tagged, timestamped snapshot on every lab VM across both sites.
+# Useful as a checkpoint before making changes — ZFS snapshots are instant
+# and consume no space until data diverges from the snapshot point.
 cmd_snapshot_all() {
   local tag="${1:-checkpoint}"
   local ts
@@ -1579,6 +1779,10 @@ cmd_snapshot_all() {
 }
 
 # ── eBPF Observability ───────────────────────────────────────────────────
+# eBPF-based ZFS tracing — runs bpftrace one-liners on each VM to collect
+# kernel-level I/O statistics without modifying ZFS or adding overhead.
+# These complement the Prometheus metrics (which are userspace) with
+# kernel-level tracepoint data.
 cmd_ebpf_latency() {
   local site="${1:-blue}"
   log "ZFS I/O latency heatmap across ${site} site (Ctrl+C to stop)..."
@@ -1598,6 +1802,9 @@ cmd_ebpf_latency() {
   done
 }
 
+# Read ZFS ARC (Adaptive Replacement Cache) statistics from /proc/spl/kstat.
+# ARC hit ratio is the single most important ZFS performance metric — a high
+# ratio means most reads are served from RAM, avoiding disk I/O entirely.
 cmd_ebpf_arc() {
   local site="${1:-blue}"
   log "ARC hit/miss ratios across ${site} site..."
@@ -1633,6 +1840,9 @@ ARCSTATS
 }
 
 # ── Health Dashboard ─────────────────────────────────────────────────────
+# CLI health overview — SSH into each VM and collect CPU, memory, load,
+# disk usage, ZFS module status, and uptime. Provides a quick terminal-based
+# alternative to the Grafana dashboard when you just need a glance.
 cmd_health() {
   local site="${1:-blue}"
 
@@ -1727,6 +1937,10 @@ cmd_ssh_select() {
 }
 
 # ── Interactive Demo Menu ────────────────────────────────────────────────
+# TUI menu for the full blue-green ZFS lab workflow. Designed for live demos
+# where you walk through: build goldens -> deploy blue -> test -> deploy green
+# -> test green -> promote -> rollback. Each step shows timing to demonstrate
+# ZFS clone performance.
 cmd_demo() {
   while true; do
     # Count available goldens and running VMs
@@ -1908,6 +2122,7 @@ EOF
 }
 
 # ── Dispatch ─────────────────────────────────────────────────────────────
+# Route subcommands to their handler functions.
 CMD="${1:-}"
 [[ -n "$CMD" ]] || usage
 shift

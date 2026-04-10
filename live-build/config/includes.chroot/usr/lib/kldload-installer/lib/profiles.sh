@@ -1,17 +1,50 @@
 #!/usr/bin/env bash
-# Sourced by kldload-install-target — k_profile_packages, k_profile_optional_packages, k_install_system_files (called from bootstrap.sh)
+# =============================================================================
+# profiles.sh — profile-aware package lists and system file provisioning
+# =============================================================================
+#
+# Part of the kldload installer pipeline. Sourced by kldload-install-target
+# (via bootstrap.sh) AFTER the target root filesystem has been bootstrapped
+# by debootstrap, dnf --installroot, or pacstrap.
+#
+# Three entry points:
+#   k_profile_packages          — returns the base package list for a profile
+#   k_profile_optional_packages — returns packages gated by checkboxes (eBPF,
+#                                 ZFS, KVM, K8s) and auto-detected hypervisor
+#   k_install_system_files      — copies kldload tools, configs, systemd units,
+#                                 darksites, and desktop branding into the target
+#
+# The live environment is always CentOS Stream 9 — the TARGET distro is set
+# by $KLDLOAD_DISTRO (debian, ubuntu, arch, alpine, centos, rocky, rhel, fedora).
+# Package names differ between distros, so each function has distro-specific
+# branches (e.g., "openssh-server" on Debian vs. "openssh" on Arch).
+#
+# Profiles:
+#   desktop — GNOME + full kldload tooling
+#   server  — headless SSH + full kldload tooling
+#   core    — ZFS on root only, no kldload tools / webui / sanoid / darksites
+#   kvm     — libvirt hypervisor + ZFS storage + K8s tools
+#   ai      — Ollama + Open WebUI + modern CLI
+#   master, storage, vdi, proxmox, monitoring — specialized appliance profiles
+# =============================================================================
 set -Eeuo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
+# k_profile_packages — emit the space-separated list of packages for the
+# selected profile and distro. Called by the bootstrap module to feed into
+# apt-get install, dnf install, or pacman -S. Each profile is a curated
+# bundle — dependencies resolve automatically via the package manager.
 k_profile_packages() {
   local profile="${KLDLOAD_PROFILE:-server}"
   local _distro="${KLDLOAD_DISTRO:-debian}"
 
-  # fastfetch is not in Ubuntu noble repos — skip it there (Fedora has it)
+  # fastfetch is not in Ubuntu noble repos (it landed in oracular) — skip it
+  # for Ubuntu installs. Fedora, Arch, and CentOS EPEL all ship it.
   local _fastfetch="fastfetch"
   [[ "$_distro" == "ubuntu" ]] && _fastfetch=""
 
-  # Alpine Linux — core profile only
+  # Alpine Linux — core profile only (Alpine is a musl-based distro that lacks
+  # the glibc ecosystem needed by GNOME, sanoid, k* tools, etc.)
   if [[ "$_distro" == "alpine" ]]; then
     case "$profile" in
       core)
@@ -24,7 +57,9 @@ k_profile_packages() {
     return
   fi
 
-  # Arch Linux uses different package names
+  # Arch Linux uses different package names (e.g., "openssh" not "openssh-server",
+  # "python" not "python3", no "-find" suffix on fd, etc.). Arch also lacks
+  # sanoid in its repos — it gets installed from GitHub by k_install_system_files.
   if [[ "$_distro" == "arch" ]]; then
     case "$profile" in
       server)
@@ -59,6 +94,9 @@ k_profile_packages() {
     return
   fi
 
+  # ── Debian / Ubuntu / RPM distro package lists ─────────────────────────────
+  # These use Debian-style package names (openssh-server, fd-find, etc.)
+  # which also work on RPM distros via the darksite package sets.
   case "$profile" in
     server)
       echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
@@ -70,8 +108,9 @@ k_profile_packages() {
       local _browser="firefox-esr"
       local _viewer="loupe"
       local _terminal="gnome-terminal"
-      # Ubuntu uses different package names for some GNOME components
-      # Ubuntu's firefox is a snapd transitional package — use GNOME Web instead
+      # Ubuntu uses different package names for some GNOME components.
+      # Ubuntu's firefox package is a snapd transitional stub that pulls in
+      # the snap daemon — use GNOME Web (epiphany) instead to avoid snapd.
       if [[ "$_distro" == "ubuntu" ]]; then
         _browser="epiphany-browser"
         _viewer="eog"
@@ -171,6 +210,11 @@ k_profile_packages() {
   esac
 }
 
+# k_profile_optional_packages — emit additional packages gated by web UI
+# checkboxes (eBPF, ZFS, KVM, K8s) and auto-detected hypervisor guest tools.
+# These are appended to k_profile_packages output before the install command.
+# Package names differ across distros because upstream projects ship under
+# different names (e.g., bpfcc-tools on Debian/Ubuntu vs. bpftool on RHEL).
 k_profile_optional_packages() {
   local out=()
   local _distro="${KLDLOAD_DISTRO:-debian}"
@@ -195,6 +239,11 @@ k_profile_optional_packages() {
   fi
 
   # KVM Host (profile or optional checkbox)
+  # Package names diverge significantly across distros for libvirt/QEMU:
+  #   Arch:         monolithic "qemu-full" + "libvirt" meta-packages
+  #   Debian/Ubuntu: split packages (libvirt-daemon-system, virtinst, ovmf)
+  #   RPM (CentOS/Rocky/RHEL/Fedora): further split — individual driver packages
+  #     must be listed explicitly because the meta-packages don't exist
   if [[ "$_profile" == "kvm" ]] || [[ "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
     if [[ "$_distro" == "arch" ]]; then
       out+=(qemu-full libvirt virt-install bridge-utils edk2-ovmf dnsmasq sshpass)
@@ -206,6 +255,9 @@ k_profile_optional_packages() {
   fi
 
   # Kubernetes (optional checkbox)
+  # Debian/Ubuntu use "containerd" from distro repos; RPM distros use
+  # "containerd.io" from the Docker CE repo (different binary package name).
+  # Arch and FreeBSD are excluded — K8s support not implemented for them yet.
   if [[ "${KLDLOAD_ENABLE_K8S:-0}" == "1" ]]; then
     if [[ "$_distro" == "ubuntu" || "$_distro" == "debian" ]]; then
       out+=(containerd conntrack socat ipset ipvsadm nftables)
@@ -214,7 +266,8 @@ k_profile_optional_packages() {
     fi
   fi
 
-  # Auto-detect hypervisor and add guest tools
+  # Auto-detect hypervisor and add guest tools so the installed system
+  # cooperates with the host (graceful shutdown, time sync, etc.)
   local virt
   virt="$(systemd-detect-virt 2>/dev/null || true)"
   case "${virt}" in
@@ -250,6 +303,15 @@ k_install_system_files() {
   else
 
   # ── Sanoid snapshot automation ─────────────────────────────────────────────
+  # Sanoid provides automated ZFS snapshot scheduling (hourly/daily/weekly/etc.).
+  # The handling differs between APT and RPM targets because:
+  #   - Debian/Ubuntu: sanoid is an apt package that installs to /usr/sbin/ with
+  #     defaults.conf in /usr/share/sanoid/. We must NOT overlay it with the
+  #     GitHub build from the live ISO or paths break.
+  #   - RPM distros (CentOS/Rocky/RHEL/Fedora): the CentOS EPEL sanoid package
+  #     is too old (missing features), so build-iso.sh installs sanoid from
+  #     GitHub into /usr/local/sbin/ on the live ISO. We copy those binaries
+  #     to the target and ship defaults.conf in /etc/sanoid/.
   if [[ -f /etc/sanoid/sanoid.conf ]]; then
     mkdir -p "${target}/etc/sanoid"
     cp /etc/sanoid/sanoid.conf "${target}/etc/sanoid/sanoid.conf"
@@ -261,19 +323,21 @@ k_install_system_files() {
     for _sb in sanoid syncoid findoid; do
       rm -f "${target}/usr/local/sbin/${_sb}" 2>/dev/null
     done
-    # Ensure defaults.conf is findable (apt version looks in /usr/share/sanoid/)
+    # Ensure defaults.conf is findable — apt's sanoid looks in /usr/share/sanoid/
+    # but the config parser also checks /etc/sanoid/, so symlink for compatibility
     if [[ -f "${target}/usr/share/sanoid/sanoid.defaults.conf" ]] && [[ ! -f "${target}/etc/sanoid/sanoid.defaults.conf" ]]; then
       ln -sf /usr/share/sanoid/sanoid.defaults.conf "${target}/etc/sanoid/sanoid.defaults.conf"
     fi
   else
-    # RPM target — copy from live ISO
+    # RPM target — copy GitHub-built sanoid binaries from the live ISO
     for _sb in sanoid syncoid findoid; do
       if [[ -x "/usr/local/sbin/${_sb}" ]] && ! chroot "${target}" command -v "${_sb}" >/dev/null 2>&1; then
         cp "/usr/local/sbin/${_sb}" "${target}/usr/local/sbin/${_sb}"
         chmod +x "${target}/usr/local/sbin/${_sb}"
       fi
     done
-    # Copy sanoid.defaults.conf (required by GitHub-built sanoid)
+    # Copy sanoid.defaults.conf — the GitHub build requires it at runtime in
+    # /etc/sanoid/ (unlike apt which ships it in /usr/share/sanoid/)
     if [[ -f /etc/sanoid/sanoid.defaults.conf ]] && [[ ! -f "${target}/etc/sanoid/sanoid.defaults.conf" ]]; then
       mkdir -p "${target}/etc/sanoid"
       cp /etc/sanoid/sanoid.defaults.conf "${target}/etc/sanoid/sanoid.defaults.conf"
@@ -312,7 +376,9 @@ k_install_system_files() {
     sed -i 's/--port 8080/--port 9000/' "${target}/usr/lib/systemd/system/kldload-webui.service"
   fi
 
-  # Enable services in the installed system via symlinks (no systemctl in chroot)
+  # Enable services in the installed system via symlinks — we can't run
+  # "systemctl enable" because systemd is not running inside the chroot.
+  # Creating the symlinks manually achieves the same effect.
   mkdir -p "${target}/etc/systemd/system/timers.target.wants"
   ln -sf "/usr/lib/systemd/system/kldload-srv-snapshot.timer" \
     "${target}/etc/systemd/system/timers.target.wants/kldload-srv-snapshot.timer" || true
@@ -328,6 +394,10 @@ k_install_system_files() {
     "${target}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" || true
 
   # ── Fix websockets version (CentOS 9 RPM is too old for websockets.http11) ──
+  # The kldload-webui Python server requires websockets.http11 (v11+ API).
+  # The CentOS 9 python3-websockets RPM ships v10 which lacks that module.
+  # pip-install a newer version to overwrite the system package on RPM targets.
+  # (Debian/Ubuntu ship a compatible version, but this is harmless there.)
   chroot "${target}" pip3 install --quiet "websockets>=11" 2>/dev/null || true
 
   # ── Web UI binary + static files ──────────────────────────────────────────
@@ -387,6 +457,9 @@ FFPOLICY
   fi # end non-core block
 
   # ── Build markers ──────────────────────────────────────────────────────
+  # Copy the ISO's build SHA and build ID to the installed target so that
+  # "kst" and the management webui can display which ISO build was used.
+  # These are generated by build-iso.sh from the git commit hash and count.
   [[ -f /etc/kldload-build-sha ]] && cp /etc/kldload-build-sha "${target}/etc/kldload-build-sha"
   [[ -f /etc/kldload-build-id ]]  && cp /etc/kldload-build-id  "${target}/etc/kldload-build-id"
 
@@ -397,6 +470,9 @@ FFPOLICY
   fi
 
   # ── Edition + profile markers ──────────────────────────────────────────────
+  # Written to /etc/kldload/ so runtime tools (kst, kbe, webui) can detect
+  # which edition (free/core) and profile (desktop/server/kvm/...) was installed.
+  # This drives conditional behavior like showing KVM tools only on kvm profile.
   mkdir -p "${target}/etc/kldload"
   [[ -f /etc/kldload/edition ]] && cp /etc/kldload/edition "${target}/etc/kldload/edition"
   echo "${_profile}" > "${target}/etc/kldload/profile"
@@ -814,8 +890,13 @@ STORAGE
 
     # Enable libvirtd + default network (virbr0)
     chroot "${target}" systemctl enable libvirtd 2>/dev/null || true
-    # virsh can't run in chroot (no libvirtd) — use a timer that fires 30s after boot
-    # The oneshot approach fails because libvirtd restarts and loses state
+    # virsh can't run in a chroot because there's no running libvirtd daemon to
+    # connect to. We also can't just run "virsh net-autostart default" in a
+    # firstboot ExecStart because libvirtd takes variable time to initialize
+    # (it must register drivers and create the default network). A simple oneshot
+    # After=libvirtd.service races and fails. Instead, use a systemd timer that
+    # fires 30s after boot, then retry in a loop until libvirtd is actually ready.
+    # The service self-disables after success so it only runs on first boot.
     cat > "${target}/etc/systemd/system/kldload-virbr0.service" <<'VIRBR0SVC'
 [Unit]
 Description=Enable libvirt default network (virbr0) autostart
@@ -911,6 +992,11 @@ CRICTLCFG
     chroot "${target}" systemctl enable kubelet 2>/dev/null || true
 
     # First-boot auto-bootstrap (optional checkbox)
+    # Uses "kube-cluster bootstrap" rather than "kube-init" because kube-cluster
+    # handles the full multi-node workflow: build a golden image, clone it into
+    # 3 worker VMs via ZFS instant clone, kubeadm init on the host, kubeadm join
+    # on each worker, then deploy Cilium + MetalLB + Hubble. kube-init only does
+    # the single-node control plane setup.
     if [[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]]; then
       k_log "Enabling first-boot Kubernetes cluster bootstrap..."
       cat > "${target}/etc/systemd/system/kube-firstboot.service" <<'KUBEFB'
@@ -942,6 +1028,10 @@ KUBEFB
   fi
 
   # ── ZFS Lab (profile tile) ──────────────────────────────────────────
+  # ZFS Lab spawns a fleet of core VMs (one per supported distro) for OpenZFS
+  # testing. Like the K8s bootstrap, this runs on first boot because it needs
+  # a running libvirtd and network access to download ISOs. The build phase
+  # creates golden images, then "deploy blue" instantiates the blue site VMs.
   if [[ "${KLDLOAD_ENABLE_ZFSLAB:-0}" == "1" ]]; then
     k_log "Enabling ZFS Lab first-boot deployment..."
     cat > "${target}/etc/systemd/system/kzfs-lab-firstboot.service" <<'ZFSLABFB'
@@ -969,9 +1059,13 @@ ZFSLABFB
   fi
 
   # ── SELinux on ZFS — set permissive and trigger autorelabel ────────────
-  # ZFS creates files with unlabeled_t contexts. SELinux enforcing + unlabeled_t
-  # = login denied, SSH denied, everything denied. Set permissive until relabel
-  # completes on first boot, then the user can switch to enforcing.
+  # ZFS does not support xattr-based SELinux labels natively. All files on a
+  # ZFS dataset get the unlabeled_t context by default. If SELinux is set to
+  # enforcing, unlabeled_t is denied for virtually everything: login fails,
+  # SSH fails, systemd services fail. Setting permissive + autorelabel lets
+  # the system boot, relabel files on the first boot, and then the user can
+  # manually switch to enforcing if desired. This only applies to RPM distros
+  # (CentOS, RHEL, Rocky, Fedora) — Debian/Ubuntu/Arch don't ship SELinux.
   if [[ -f "${target}/etc/selinux/config" ]]; then
     sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' "${target}/etc/selinux/config"
     touch "${target}/.autorelabel"
