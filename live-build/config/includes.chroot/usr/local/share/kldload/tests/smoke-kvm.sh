@@ -31,6 +31,53 @@ _section "SSH & Network"
 test_service_active "sshd" "sshd"
 test_succeeds "Has IP" "ip -4 addr show | grep -q 'inet '"
 
+# ── Secure Boot ──────────────────────────────────────────────────────────────
+_section "Secure Boot"
+if command -v mokutil >/dev/null 2>&1; then
+  _pass "mokutil installed"
+  local _sb_state
+  _sb_state="$(mokutil --sb-state 2>/dev/null || echo 'unknown')"
+  if echo "$_sb_state" | grep -q "enabled"; then
+    _pass "Secure Boot: ENABLED"
+    # Check MOK enrolled
+    if mokutil --list-enrolled 2>/dev/null | grep -q "kldload"; then
+      _pass "MOK key enrolled (kldload Secure Boot MOK)"
+    else
+      _warn "MOK key" "not enrolled — run mokutil --import /var/lib/dkms/mok.der"
+    fi
+    # Check lockdown
+    local _lockdown
+    _lockdown="$(cat /sys/kernel/security/lockdown 2>/dev/null || echo 'unknown')"
+    _pass "Kernel lockdown: ${_lockdown}"
+  else
+    _pass "Secure Boot: disabled (optional)"
+  fi
+else
+  _warn "mokutil" "not installed"
+fi
+test_file "MOK key (DER)" "/var/lib/dkms/mok.der"
+test_file "MOK key (private)" "/var/lib/dkms/mok.key"
+test_file "MOK key (public)" "/var/lib/dkms/mok.pub"
+if command -v sbsign >/dev/null 2>&1; then
+  _pass "sbsigntool installed"
+else
+  _warn "sbsigntool" "not installed — modules can't be signed locally"
+fi
+# Check shim on EFI partition
+if [[ -f /boot/efi/EFI/BOOT/BOOTX64.EFI ]]; then
+  local _boot_hash _zbm_hash
+  _boot_hash="$(sha256sum /boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
+  _zbm_hash="$(sha256sum /boot/efi/EFI/zbm/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
+  if [[ "$_boot_hash" != "$_zbm_hash" ]]; then
+    _pass "Shim installed as UEFI fallback (different from ZFSBootMenu)"
+  else
+    _warn "BOOT/BOOTX64.EFI" "same as ZFSBootMenu — shim may not be installed"
+  fi
+fi
+test_file "MokManager" "/boot/efi/EFI/BOOT/mmx64.efi"
+test_file "MOK cert on EFI" "/boot/efi/EFI/BOOT/mok.der"
+test_file "grubx64.efi (ZBM for shim)" "/boot/efi/EFI/BOOT/grubx64.efi"
+
 # ── Profile & Edition ────────────────────────────────────────────────────────
 _section "Profile Markers"
 test_file "Edition marker" "/etc/kldload/edition"

@@ -471,20 +471,23 @@ EOFSTAB
       -l '\EFI\zbm\BOOTX64.EFI' >&7 2>&1 || \
       k_log "WARNING: efibootmgr main entry failed"
 
-    # Set the new ZFSBootMenu entry as first in boot order
-    local _zbm_bootnum
+    # Set boot order: UEFI OS (shim) first for Secure Boot, then ZFSBootMenu direct.
+    # Shim at \EFI\BOOT\BOOTX64.EFI chain-loads grubx64.efi (ZFSBootMenu).
+    # If Secure Boot is off, both paths work. If on, only the shim path works.
+    local _uefi_bootnum _zbm_bootnum
+    _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'UEFI OS' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
     _zbm_bootnum=$(efibootmgr 2>/dev/null | grep -i 'ZFSBootMenu' | grep -v 'Backup' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
-    if [[ -n "$_zbm_bootnum" ]]; then
+    local _first="${_uefi_bootnum:-$_zbm_bootnum}"
+    if [[ -n "$_first" ]]; then
       local _current_order
       _current_order=$(efibootmgr 2>/dev/null | grep '^BootOrder:' | sed 's/BootOrder: //')
-      # Put ZFSBootMenu first, keep the rest
-      local _new_order="${_zbm_bootnum}"
+      local _new_order="${_first}"
       for _entry in ${_current_order//,/ }; do
-        [[ "$_entry" != "$_zbm_bootnum" ]] && _new_order="${_new_order},${_entry}"
+        [[ "$_entry" != "$_first" ]] && _new_order="${_new_order},${_entry}"
       done
       efibootmgr -o "${_new_order}" >&7 2>&1 || \
         k_log "WARNING: Could not set boot order"
-      k_log "Boot order set: ${_new_order} (ZFSBootMenu first)"
+      k_log "Boot order set: ${_new_order} (UEFI OS / shim first for Secure Boot)"
     fi
 
     k_log "EFI boot entries registered: disk=${disk} part=${part_num}"

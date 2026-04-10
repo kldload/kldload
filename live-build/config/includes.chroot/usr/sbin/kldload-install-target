@@ -1749,6 +1749,30 @@ OWSVC
     _ok "Install logs" "copied to /root/kldload-install-logs/"
   fi
 
+  # ── Schedule firstboot MOK enrollment — runs on first boot with EFI vars available ──
+  if [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
+    cat > "${target}/etc/systemd/system/kldload-mok-enroll.service" <<'MOKENROLL'
+[Unit]
+Description=kldload MOK key enrollment for Secure Boot
+After=local-fs.target
+ConditionPathExists=/var/lib/dkms/mok.der
+ConditionPathExists=!/var/lib/kldload-mok-enrolled
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'if command -v mokutil >/dev/null 2>&1 && [[ -d /sys/firmware/efi/efivars ]]; then printf "kldload\nkldload\n" | mokutil --import /var/lib/dkms/mok.der 2>/dev/null && echo "MOK enrollment queued — reboot to complete" || echo "mokutil import failed"; touch /var/lib/kldload-mok-enrolled; fi'
+ExecStartPost=/bin/bash -c 'systemctl disable kldload-mok-enroll.service'
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+MOKENROLL
+    ln -sf /etc/systemd/system/kldload-mok-enroll.service \
+      "${target}/etc/systemd/system/multi-user.target.wants/kldload-mok-enroll.service" 2>/dev/null || true
+    _ok "MOK enrollment" "scheduled for first boot (password: kldload)"
+  fi
+
   # ── Schedule firstboot smoke test — runs after first reboot, saves report ──
   cat > "${target}/etc/systemd/system/kldload-smoke-firstboot.service" <<'SMOKEFB'
 [Unit]
