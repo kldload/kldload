@@ -478,10 +478,10 @@ NETCFG
   _ssh_cmd "$golden_ip" "rm -f /var/lib/cloud/seed/nocloud-net/* 2>/dev/null || true"
   # Re-enable cloud-init services so clones re-run cloud-init on next boot.
   _ssh_cmd "$golden_ip" "systemctl enable cloud-init-local cloud-init cloud-config cloud-final 2>/dev/null || true"
-  # Belt-and-suspenders: write a systemd-networkd DHCP config that works even
-  # if cloud-init fails to start. Matches both en* (Debian) and eth* (CentOS).
-  # Cloud-init will overwrite this if it runs, but if it doesn't, networking
-  # still comes up via systemd-networkd.
+  # Write DHCP config for ALL networking backends so clones always get an IP
+  # regardless of which network manager the cloud image uses.
+  #
+  # 1. systemd-networkd (modern Debian/Ubuntu cloud images)
   _ssh_cmd "$golden_ip" "mkdir -p /etc/systemd/network && cat > /etc/systemd/network/10-dhcp.network <<'NETD'
 [Match]
 Name=en* eth*
@@ -493,6 +493,41 @@ DHCP=yes
 UseDomains=yes
 NETD"
   _ssh_cmd "$golden_ip" "systemctl enable systemd-networkd 2>/dev/null || true"
+  #
+  # 2. ifupdown (/etc/network/interfaces — traditional Debian)
+  _ssh_cmd "$golden_ip" "cat > /etc/network/interfaces <<'IFUP'
+auto lo
+iface lo inet loopback
+
+# DHCP on first ethernet — kldload clone networking
+allow-hotplug enp1s0
+iface enp1s0 inet dhcp
+
+allow-hotplug ens3
+iface ens3 inet dhcp
+
+allow-hotplug eth0
+iface eth0 inet dhcp
+IFUP"
+  _ssh_cmd "$golden_ip" "systemctl enable networking 2>/dev/null || true"
+  #
+  # 3. Enable dhclient as a fallback timer — runs 30s after boot if no IP
+  _ssh_cmd "$golden_ip" "cat > /etc/systemd/system/dhcp-fallback.service <<'DHCPFB'
+[Unit]
+Description=DHCP fallback — request IP if no address after boot
+After=network.target
+ConditionPathExists=!/run/dhcp-fallback-done
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 10
+ExecStart=/bin/bash -c 'for iface in /sys/class/net/en* /sys/class/net/eth*; do [ -d \"\$iface\" ] || continue; dev=\$(basename \"\$iface\"); ip addr show \"\$dev\" | grep -q \"inet \" && continue; dhclient -1 -v \"\$dev\" 2>/dev/null || true; done; touch /run/dhcp-fallback-done'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+DHCPFB"
+  _ssh_cmd "$golden_ip" "systemctl enable dhcp-fallback 2>/dev/null || true"
 
   # Shut down
   _ssh_cmd "$golden_ip" "shutdown -h now" || true
