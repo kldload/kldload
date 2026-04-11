@@ -704,6 +704,14 @@ if [[ "$EDITION" != "core" ]]; then
         [[ -f "$_pd" ]] && cp "$_pd" "${ROOTFS}/etc/profile.d/"
     done
 
+    # Copy smoke tests and test framework
+    if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload/tests ]]; then
+        mkdir -p "${ROOTFS}/usr/local/share/kldload/tests"
+        cp /build/live-build/config/includes.chroot/usr/local/share/kldload/tests/*.sh \
+            "${ROOTFS}/usr/local/share/kldload/tests/" 2>/dev/null || true
+        chmod +x "${ROOTFS}/usr/local/share/kldload/tests/"*.sh 2>/dev/null || true
+    fi
+
     # Create kldload-webui systemd service
     cat > "${ROOTFS}/usr/lib/systemd/system/kldload-webui.service" << 'SVCEOF'
 [Unit]

@@ -45,6 +45,7 @@ if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 # Auto-scale VM resources based on host hardware. The CP runs etcd + API
 # server + Cilium + MetalLB + Hubble and needs more RAM/CPU than workers.
 WORKERS="${WORKERS:-3}"
+CILIUM_CLI_VERSION="${CILIUM_CLI_VERSION:-0.19.2}"
 _host_ram_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 16384)
 _host_cpus=$(nproc 2>/dev/null || echo 4)
 if [[ $_host_ram_mb -ge 48000 ]]; then
@@ -192,10 +193,15 @@ get_vm_ip() {
 # fast, letting sshpass handle the password path.
 _ssh_cmd() {
   local ip="$1"; shift
-  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
-    -i "$SSH_KEY" "root@${ip}" "$@" 2>/dev/null \
-  || sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-    "root@${ip}" "$@" 2>/dev/null
+  local attempt
+  for attempt in 1 2 3; do
+    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
+      -o ServerAliveInterval=5 -i "$SSH_KEY" "root@${ip}" "$@" 2>/dev/null && return 0
+    sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+      -o ServerAliveInterval=5 "root@${ip}" "$@" 2>/dev/null && return 0
+    [[ $attempt -lt 3 ]] && sleep 3
+  done
+  return 1
 }
 
 ensure_ssh_key() {
@@ -592,11 +598,18 @@ chpasswd:
       type: text
 runcmd:
   # Regenerate SSH host keys — clones inherited the golden's keys.
-  # Remove old keys first, then regenerate. ssh-keygen -A is universal.
   - rm -f /etc/ssh/ssh_host_*
   - ssh-keygen -A
   - dpkg-reconfigure openssh-server 2>/dev/null || true
-  # Restart SSH with the new keys. Service name varies: sshd (RHEL), ssh (Debian).
+  # Harden sshd for cluster use: allow root, password auth, raise MaxStartups
+  # so the bootstrap script's parallel SSH connections don't get rate-limited.
+  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#*MaxStartups.*/MaxStartups 20:30:60/' /etc/ssh/sshd_config
+  - |
+    if ! grep -q '^MaxStartups' /etc/ssh/sshd_config; then
+      echo 'MaxStartups 20:30:60' >> /etc/ssh/sshd_config
+    fi
   - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 USERDATA
 
@@ -936,12 +949,20 @@ cmd_bootstrap() {
     echo "# end-kldload-k8s-cluster"
   } >> /etc/hosts
 
-  # Copy kubeconfig from CP to host
+  # Copy kubeconfig from CP to host — retry up to 5 times (SSH may be restarting)
   mkdir -p /root/.kube
-  if scp -o StrictHostKeyChecking=no -i "$SSH_KEY" \
-    "root@${cp_ip}:/etc/kubernetes/admin.conf" /root/.kube/config 2>/dev/null \
-  || sshpass -p kldload scp -o StrictHostKeyChecking=no \
-    "root@${cp_ip}:/etc/kubernetes/admin.conf" /root/.kube/config 2>/dev/null; then
+  local _kc_ok=0
+  for _kc_try in $(seq 1 5); do
+    if scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY" \
+      "root@${cp_ip}:/etc/kubernetes/admin.conf" /root/.kube/config 2>/dev/null \
+    || sshpass -p kldload scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+      "root@${cp_ip}:/etc/kubernetes/admin.conf" /root/.kube/config 2>/dev/null; then
+      _kc_ok=1; break
+    fi
+    log "  kubeconfig copy attempt ${_kc_try}/5 failed — retrying in 5s..."
+    sleep 5
+  done
+  if [[ $_kc_ok -eq 1 ]]; then
     # Point kubeconfig at the CP's WireGuard IP (encrypted) if mesh is up
     if ip link show wg-k8s >/dev/null 2>&1; then
       sed -i "s|https://.*:6443|https://10.251.0.1:6443|" /root/.kube/config
