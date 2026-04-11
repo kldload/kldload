@@ -490,36 +490,28 @@ EOFSTAB
       fi
     done || true
 
-    # Register main and backup entries (backup registered first = lower priority)
-    efibootmgr \
-      -c -d "${disk}" -p "${part_num}" \
-      -L "ZFSBootMenu (Backup)" \
-      -l '\EFI\zbm\BOOTX64-BACKUP.EFI' >&7 2>&1 || \
-      k_log "WARNING: efibootmgr backup entry failed"
-
-    efibootmgr \
-      -c -d "${disk}" -p "${part_num}" \
-      -L "ZFSBootMenu" \
-      -l '\EFI\zbm\BOOTX64.EFI' >&7 2>&1 || \
-      k_log "WARNING: efibootmgr main entry failed"
-
-    # Set boot order: UEFI OS (shim) first for Secure Boot, then ZFSBootMenu direct.
-    # Shim at \EFI\BOOT\BOOTX64.EFI chain-loads grubx64.efi (ZFSBootMenu).
-    # If Secure Boot is off, both paths work. If on, only the shim path works.
-    local _uefi_bootnum _zbm_bootnum
+    # Register ONLY the shim path (\EFI\BOOT\BOOTX64.EFI) as the boot entry.
+    # Do NOT register direct ZFSBootMenu entries — with Secure Boot enabled,
+    # firmware rejects unsigned EFI binaries and shows "invalid key" errors
+    # before falling through to shim. Clean boot = shim only.
+    # Chain: firmware → shim → signed GRUB → chainloader → ZFSBootMenu
+    local _uefi_bootnum
     _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'UEFI OS' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
-    _zbm_bootnum=$(efibootmgr 2>/dev/null | grep -i 'ZFSBootMenu' | grep -v 'Backup' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
-    local _first="${_uefi_bootnum:-$_zbm_bootnum}"
-    if [[ -n "$_first" ]]; then
-      local _current_order
-      _current_order=$(efibootmgr 2>/dev/null | grep '^BootOrder:' | sed 's/BootOrder: //')
-      local _new_order="${_first}"
-      for _entry in ${_current_order//,/ }; do
-        [[ "$_entry" != "$_first" ]] && _new_order="${_new_order},${_entry}"
-      done
-      efibootmgr -o "${_new_order}" >&7 2>&1 || \
+    if [[ -z "$_uefi_bootnum" ]]; then
+      # UEFI OS entry doesn't exist — firmware will auto-create it from the
+      # fallback path \EFI\BOOT\BOOTX64.EFI, but register it explicitly to be safe
+      efibootmgr \
+        -c -d "${disk}" -p "${part_num}" \
+        -L "kldload" \
+        -l '\EFI\BOOT\BOOTX64.EFI' >&7 2>&1 || \
+        k_log "WARNING: efibootmgr entry failed"
+      _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'kldload' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
+    fi
+
+    if [[ -n "$_uefi_bootnum" ]]; then
+      efibootmgr -o "${_uefi_bootnum}" >&7 2>&1 || \
         k_log "WARNING: Could not set boot order"
-      k_log "Boot order set: ${_new_order} (UEFI OS / shim first for Secure Boot)"
+      k_log "Boot order set: ${_uefi_bootnum} (shim → signed GRUB → ZFSBootMenu)"
     fi
 
     k_log "EFI boot entries registered: disk=${disk} part=${part_num}"
