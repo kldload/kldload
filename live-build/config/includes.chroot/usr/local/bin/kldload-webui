@@ -1405,12 +1405,31 @@ echo "Step 3/5: Wiping partition table (GPT + MBR)..."
 sgdisk --zap-all "$DISK" 2>/dev/null || true
 echo "  Done"
 
-echo "Step 4/5: Zeroing first and last 10MB (boot sector + backup GPT)..."
+echo "Step 4/6: Zeroing first and last 10MB (boot sector + backup GPT)..."
 dd if=/dev/zero of="$DISK" bs=1M count=10 2>/dev/null || true
 dd if=/dev/zero of="$DISK" bs=1M seek=$((SIZE_GB * 1024 - 10)) count=10 2>/dev/null || true
 echo "  Done"
 
-echo "Step 5/5: Refreshing partition table..."
+echo "Step 5/6: Cleaning UEFI boot entries and MOK keys..."
+# Remove stale UEFI boot entries for this disk
+if command -v efibootmgr >/dev/null 2>&1; then
+    DISK_SHORT="${{DISK##*/}}"
+    for entry in $(efibootmgr 2>/dev/null | grep -i "$DISK_SHORT\|kldload\|ZFSBootMenu\|UEFI OS" | grep -oP 'Boot\K[0-9A-Fa-f]+'); do
+        efibootmgr -b "$entry" -B 2>/dev/null && echo "  Removed Boot$entry" || true
+    done
+fi
+# Delete all pending MOK enrollments
+if command -v mokutil >/dev/null 2>&1; then
+    # Delete all enrolled MOK keys (password: kldload — matches what we enroll with)
+    for key in $(mokutil --list-enrolled 2>/dev/null | grep -c 'SHA1' || echo 0); do
+        printf 'kldload\nkldload\n' | mokutil --delete-all 2>/dev/null && echo "  MOK keys cleared" && break || true
+    done
+    # Also clear any pending enrollments
+    mokutil --revoke-import 2>/dev/null && echo "  Pending MOK enrollments cleared" || true
+fi
+echo "  Done"
+
+echo "Step 6/6: Refreshing partition table..."
 partprobe "$DISK" 2>/dev/null || true
 sync
 echo ""
