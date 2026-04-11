@@ -1060,35 +1060,66 @@ cmd_bootstrap() {
 # download + kube-setup) but cheap to keep (one snapshot + the base zvol).
 # Destroying and re-bootstrapping takes seconds, not minutes, thanks to this.
 cmd_destroy() {
-  echo -e "${R}WARNING: This will destroy the entire Kubernetes cluster${N}"
+  local destroy_all=0
+  [[ "${1:-}" == "--all" ]] && destroy_all=1
+
+  if [[ $destroy_all -eq 1 ]]; then
+    echo -e "${R}WARNING: This will destroy EVERYTHING — cluster + golden image${N}"
+  else
+    echo -e "${R}WARNING: This will destroy the Kubernetes cluster${N}"
+    echo "  (Golden image preserved — use 'destroy --all' to remove it too)"
+  fi
   echo "  Control plane: ${CP_NAME}"
   echo "  Workers: ${WORKER_PREFIX}-1 through ${WORKER_PREFIX}-${WORKERS}"
-  echo "  (Golden image ${GOLDEN} will be kept for reuse)"
   echo ""
   read -r -p "Type 'destroy' to continue: " confirm
   [[ "$confirm" == "destroy" ]] || { echo "Aborted."; exit 0; }
 
   log "Destroying cluster..."
 
-  # Destroy control plane: force-stop VM, remove libvirt definition, destroy
-  # ZFS zvol (clone). -Rf removes the clone even if it has child snapshots.
-  # --nvram removes EFI vars; fallback without it handles BIOS-mode VMs.
+  # Destroy control plane
   virsh destroy "${CP_NAME}" 2>/dev/null || true
   virsh undefine "${CP_NAME}" --nvram 2>/dev/null || virsh undefine "${CP_NAME}" 2>/dev/null || true
   zfs destroy -Rf "${POOL}/vms/${CP_NAME}" 2>/dev/null || true
   rm -f "/var/lib/libvirt/isos/${CP_NAME}-ci.iso" 2>/dev/null
 
-  # Destroy workers
-  for i in $(seq 1 "$WORKERS"); do
-    local name="${WORKER_PREFIX}-${i}"
+  # Destroy workers (scan for any kldload-w-* not just --workers count)
+  for name in $(virsh list --all --name 2>/dev/null | grep "^${WORKER_PREFIX}-" || true) \
+              $(seq -f "${WORKER_PREFIX}-%g" 1 "${WORKERS}"); do
+    [[ -z "$name" ]] && continue
     virsh destroy "$name" 2>/dev/null || true
     virsh undefine "$name" --nvram 2>/dev/null || virsh undefine "$name" 2>/dev/null || true
     zfs destroy -Rf "${POOL}/vms/${name}" 2>/dev/null || true
     rm -f "/var/lib/libvirt/isos/${name}-ci.iso" 2>/dev/null
   done
 
-  log "Cluster destroyed. Golden image ${GOLDEN} preserved."
-  log "Rebuild: kube-cluster bootstrap --workers ${WORKERS}"
+  # Destroy golden if --all
+  if [[ $destroy_all -eq 1 ]]; then
+    virsh destroy "${GOLDEN}" 2>/dev/null || true
+    virsh undefine "${GOLDEN}" --nvram 2>/dev/null || virsh undefine "${GOLDEN}" 2>/dev/null || true
+    zfs destroy -Rf "${POOL}/vms/${GOLDEN}" 2>/dev/null || true
+    rm -f "/var/lib/libvirt/isos/${GOLDEN}-ci.iso" "/var/lib/libvirt/isos/${GOLDEN}-cloud-init.iso" 2>/dev/null
+    log "Golden image destroyed"
+  fi
+
+  # Clean up host WireGuard mesh
+  ip link del wg-mgmt 2>/dev/null || true
+  ip link del wg-k8s 2>/dev/null || true
+  rm -f /etc/wireguard/wg-mgmt.conf /etc/wireguard/wg-k8s.conf 2>/dev/null
+  rm -f /etc/wireguard/wg-mgmt.key /etc/wireguard/wg-mgmt.pub 2>/dev/null
+  rm -f /etc/wireguard/wg-k8s.key /etc/wireguard/wg-k8s.pub 2>/dev/null
+
+  # Clean up host kubeconfig and /etc/hosts entries
+  rm -f /root/.kube/config 2>/dev/null
+  sed -i '/# kldload-k8s-cluster/,/# end-kldload-k8s-cluster/d' /etc/hosts 2>/dev/null || true
+
+  if [[ $destroy_all -eq 1 ]]; then
+    log "Everything destroyed. Run: kube-cluster bootstrap --workers ${WORKERS}"
+  else
+    log "Cluster destroyed. Golden image ${GOLDEN} preserved for fast rebuild."
+    log "Rebuild: kube-cluster bootstrap --workers ${WORKERS}"
+    log "Full wipe: kube-cluster destroy --all"
+  fi
 }
 
 # ── Status ─────────────────────────────────────────────────────────────────
@@ -1132,7 +1163,7 @@ cmd_golden() {
 case "$CMD" in
   bootstrap) cmd_bootstrap ;;
   golden)    cmd_golden ;;
-  destroy)   cmd_destroy ;;
+  destroy)   cmd_destroy "${2:-}" ;;
   status)    cmd_status ;;
   scale)     die "scale not yet implemented — destroy and bootstrap with --workers N" ;;
   *)         usage ;;
