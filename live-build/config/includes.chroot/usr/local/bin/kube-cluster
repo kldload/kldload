@@ -641,36 +641,9 @@ clone_and_boot() {
 
   echo ""
 
-  # Write a unique machine-id to each clone BEFORE booting. The golden was
-  # sealed with an empty machine-id, which means all clones would generate
-  # the same one on first boot (race condition). This causes dnsmasq to hand
-  # out the same DHCP lease to all VMs (client-id collision). Writing a unique
-  # machine-id to the filesystem fixes DHCP and also gives each VM a unique
-  # systemd journal, DBUS identity, etc.
-  log "Writing unique machine-ids to clones..."
-  for vm in "${CP_NAME}" $(seq -f "${WORKER_PREFIX}-%g" 1 "$WORKERS"); do
-    local zvol_dev="/dev/zvol/${POOL}/vms/${vm}"
-    # Wait for zvol device
-    for _ in $(seq 1 10); do [[ -b "$zvol_dev" ]] && break; sleep 1; done
-    if [[ -b "$zvol_dev" ]]; then
-      # Mount the clone's root partition, write machine-id, unmount
-      local _mnt
-      _mnt="$(mktemp -d)"
-      # Debian cloud images: p1 is root, p14 is BIOS, p15 is EFI
-      local _part="${zvol_dev}-part1"
-      [[ -b "$_part" ]] || _part="${zvol_dev}p1"
-      for _ in $(seq 1 5); do [[ -b "$_part" ]] && break; sleep 1; done
-      if mount "$_part" "$_mnt" 2>/dev/null; then
-        # Generate unique machine-id (same format as systemd-machine-id-setup)
-        printf '%s\n' "$(cat /proc/sys/kernel/random/uuid | tr -d '-')" > "$_mnt/etc/machine-id"
-        umount "$_mnt"
-        echo -e "  ${vm}: unique machine-id written"
-      else
-        echo -e "  ${Y}${vm}: could not mount — machine-id will be auto-generated${N}"
-      fi
-      rmdir "$_mnt" 2>/dev/null || true
-    fi
-  done
+  # Machine-id is now handled by cloud-init runcmd (systemd-machine-id-setup)
+  # and DHCP uses ClientIdentifier=mac (baked into golden's networkd config)
+  # so each clone gets a unique IP based on its unique MAC address.
 
   log "All ${total} nodes cloned. Starting VMs..."
 
@@ -707,12 +680,15 @@ chpasswd:
       password: kldload
       type: text
 runcmd:
+  # Generate unique machine-id — clones inherit empty one from golden seal.
+  # Must happen before anything else to avoid DBUS/journal conflicts.
+  - rm -f /etc/machine-id
+  - systemd-machine-id-setup
   # Regenerate SSH host keys — clones inherited the golden's keys.
   - rm -f /etc/ssh/ssh_host_*
   - ssh-keygen -A
   - dpkg-reconfigure openssh-server 2>/dev/null || true
   # Harden sshd for cluster use: allow root, password auth, raise MaxStartups
-  # so the bootstrap script's parallel SSH connections don't get rate-limited.
   - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
   - sed -i 's/^#*MaxStartups.*/MaxStartups 20:30:60/' /etc/ssh/sshd_config
