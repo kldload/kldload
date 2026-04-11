@@ -1725,35 +1725,34 @@ OWSVC
   # Target mount point — needed for MOK enrollment, log copy, and smoke test
   local target="${KLDLOAD_TARGET_MNT:-/target}"
 
-  # ── MOK enrollment for Secure Boot ──────────────────────────────────────
-  if k_have_func k_configure_mok; then
-    k_configure_mok || _ok "MOK enrollment" "skipped (Secure Boot may not be active)"
-  elif [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
-    # Inline MOK enrollment if lib/security.sh didn't load
-    # Random one-time MOK enrollment password — unique per install for security.
-    # Passed back to the web UI via the answers file so it's displayed to the
-    # user before reboot. They enter it at the MokManager blue screen on first boot.
-    local _mok_pass
-    _mok_pass="$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-20)"
-    if [[ -d /sys/firmware/efi/efivars ]] && chroot "${target}" command -v mokutil >/dev/null 2>&1; then
-      printf '%s\n%s\n' "${_mok_pass}" "${_mok_pass}" | \
-        chroot "${target}" mokutil --import /var/lib/dkms/mok.der 2>/dev/null && \
-        _ok "MOK enrollment" "queued — password: ${_mok_pass}" || \
-        _ok "MOK enrollment" "skipped (mokutil failed)"
-    fi
-    mkdir -p "${target}/root/kldload-install-logs"
-    echo "MOK_PASSWORD=${_mok_pass}" > "${target}/root/kldload-install-logs/mok-password.txt"
-    chmod 0600 "${target}/root/kldload-install-logs/mok-password.txt"
+  # ── MOK enrollment for Secure Boot (hardware profiles only) ──────────────
+  # Run mokutil from the LIVE environment (not chroot) — the live ISO has
+  # mokutil and access to EFI vars. The target's mokutil may not be installed
+  # yet but that doesn't matter — MOK enrollment is an EFI firmware operation
+  # that persists in NVRAM, not on disk.
+  if _is_hw_profile && [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
+    if [[ -d /sys/firmware/efi/efivars ]] && command -v mokutil >/dev/null 2>&1; then
+      # Use a fixed password "kldload" — consistent, memorable, documented.
+      # Random passwords caused confusion and required out-of-band password
+      # delivery. The MOK password is only used once at MokManager and the
+      # private key (mok.key) is the real secret, not the enrollment password.
+      local _mok_pass="kldload"
 
-    # SCP the MOK password to a remote workstation if configured
-    # (env vars from kldload.env: MOK_SCP_USER, MOK_SCP_HOST, MOK_SCP_PATH)
-    if [[ -n "${MOK_SCP_HOST:-}" && -n "${MOK_SCP_USER:-}" ]]; then
-      local _scp_dest="${MOK_SCP_USER}@${MOK_SCP_HOST}:${MOK_SCP_PATH:-~/}"
-      sshpass -p "${MOK_SCP_PASS:-}" scp -o StrictHostKeyChecking=no \
-        "${target}/root/kldload-install-logs/mok-password.txt" \
-        "${_scp_dest}mok-password-$(hostname).txt" 2>/dev/null && \
-        _ok "MOK password" "sent to ${_scp_dest}" || \
-        _ok "MOK password" "SCP failed — read from /root/kldload-install-logs/mok-password.txt"
+      # Check if this exact key is already enrolled (re-installs with same ISO)
+      if mokutil --test-key "${target}/var/lib/dkms/mok.der" 2>/dev/null | grep -qi 'already enrolled'; then
+        _ok "MOK enrollment" "key already enrolled — Secure Boot ready"
+      else
+        printf '%s\n%s\n' "${_mok_pass}" "${_mok_pass}" | \
+          mokutil --import "${target}/var/lib/dkms/mok.der" 2>/dev/null && \
+          _ok "MOK enrollment" "queued — on first boot select: Enroll MOK → password: kldload" || \
+          _ok "MOK enrollment" "skipped (mokutil failed — enroll manually after boot)"
+      fi
+
+      mkdir -p "${target}/root/kldload-install-logs"
+      echo "MOK_PASSWORD=${_mok_pass}" > "${target}/root/kldload-install-logs/mok-password.txt"
+      chmod 0600 "${target}/root/kldload-install-logs/mok-password.txt"
+    else
+      _ok "MOK enrollment" "skipped (no EFI vars — non-EFI boot)"
     fi
   fi
 
