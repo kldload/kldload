@@ -67,10 +67,19 @@ run_kubeadm_init() {
     kube-load-images /root/darksite/k8s-images
   fi
 
+  # Include WireGuard IPs in API server cert SANs so kubectl works
+  # over both virbr0 (LAN) and WireGuard (encrypted) from the host.
+  local extra_sans="10.251.0.1,10.250.0.1"
+  # Also add any other WireGuard IPs configured on this node
+  local wg_ip
+  wg_ip="$(ip -4 addr show wg-k8s 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)" || true
+  [[ -n "$wg_ip" && "$wg_ip" != "10.251.0.1" ]] && extra_sans="${extra_sans},${wg_ip}"
+
   kubeadm init \
     --pod-network-cidr="$POD_CIDR" \
     --service-cidr="$SVC_CIDR" \
     --apiserver-advertise-address="$node_ip" \
+    --apiserver-cert-extra-sans="${extra_sans}" \
     --skip-phases=addon/kube-proxy \
     --upload-certs \
     2>&1 | tee /var/log/kubeadm-init.log
