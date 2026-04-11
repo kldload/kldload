@@ -1382,10 +1382,16 @@ if command -v efibootmgr >/dev/null 2>&1; then
         efibootmgr -b "$entry" -B 2>/dev/null && echo "  Removed Boot$entry" || true
     done
 fi
-echo "Resetting MOK keys..."
+echo "Resetting ALL MOK keys..."
 if command -v mokutil >/dev/null 2>&1; then
-    printf 'kldload\\nkldload\\n' | mokutil --delete-all 2>/dev/null && echo "  MOK keys queued for removal" || echo "  No MOK keys to remove"
+    # --reset wipes the entire MOK list on next reboot via MokManager
+    printf 'kldload\\nkldload\\n' | mokutil --reset 2>/dev/null && echo "  MOK reset queued (MokManager will clear on next boot)" || true
+    # Also try with common passwords in case keys were enrolled with a different one
+    printf '\\n\\n' | mokutil --reset 2>/dev/null || true
     mokutil --revoke-import 2>/dev/null && echo "  Pending enrollments cleared" || true
+    mokutil --revoke-delete 2>/dev/null || true
+    ENROLLED=$(mokutil --list-enrolled 2>/dev/null | grep -c 'SHA1' || echo 0)
+    echo "  Currently enrolled: $ENROLLED keys (will be cleared on next boot)"
 fi
 """
 

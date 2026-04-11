@@ -194,28 +194,110 @@ fi
 _section "Containers"
 test_cmd "podman" "podman"
 
+# ── Secure Boot State ────────────────────────────────────────────────────────
+_section "Secure Boot (runtime)"
+if mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
+  _pass "SecureBoot ENABLED"
+  # Verify ZFS loaded under Secure Boot
+  if lsmod | grep -q '^zfs '; then
+    _pass "ZFS module loaded with Secure Boot on"
+  else
+    _fail "ZFS module NOT loaded — MOK enrollment may have failed"
+  fi
+else
+  _warn "SecureBoot" "disabled — enable in BIOS + enroll MOK for verified boot"
+fi
+
 # ── Kubernetes Cluster (if deployed) ─────────────────────────────────────────
 _section "Kubernetes Cluster (if deployed)"
 if virsh list --name 2>/dev/null | grep -q kldload-cp; then
   _pass "Control plane VM running"
-  CP_MAC=$(virsh domiflist kldload-cp 2>/dev/null | awk '/bridge/ {print $5}' | head -1)
-  CP_IP=$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$CP_MAC" '$3 == m {print $5}' | cut -d/ -f1 | head -1)
-  if [[ -n "$CP_IP" ]]; then
-    _pass "CP IP: $CP_IP"
-    if sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@${CP_IP} "kubectl get nodes --no-headers" 2>/dev/null; then
-      _pass "kubectl get nodes works"
-      NODES=$(sshpass -p kldload ssh -o StrictHostKeyChecking=no root@${CP_IP} "kubectl get nodes --no-headers 2>/dev/null | wc -l")
-      READY=$(sshpass -p kldload ssh -o StrictHostKeyChecking=no root@${CP_IP} "kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready'")
-      _pass "Nodes: ${READY}/${NODES} Ready"
-    else
-      _warn "kubectl" "cannot reach API server"
-    fi
-  else
-    _warn "CP IP" "could not determine"
-  fi
 
   WORKER_COUNT=$(virsh list --name 2>/dev/null | grep -c 'kldload-w-')
   _pass "Worker VMs: $WORKER_COUNT"
+
+  # Host management tools
+  _section "Host Management Tools"
+  for tool in kubectl helm k9s cilium hubble; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      _pass "$tool installed"
+    else
+      _fail "$tool NOT installed on host"
+    fi
+  done
+
+  # Kubeconfig
+  if [[ -f /root/.kube/config ]]; then
+    _pass "kubeconfig: /root/.kube/config"
+    export KUBECONFIG=/root/.kube/config
+  else
+    _fail "kubeconfig NOT found on host"
+  fi
+
+  # WireGuard mesh — host as node 100
+  _section "WireGuard Mesh (host)"
+  if ip link show wg-mgmt >/dev/null 2>&1; then
+    _pass "wg-mgmt interface up"
+    HOST_WG_IP=$(ip -4 addr show wg-mgmt 2>/dev/null | awk '/inet / {print $2}')
+    _pass "Host WireGuard IP: $HOST_WG_IP"
+    PEER_COUNT=$(wg show wg-mgmt peers 2>/dev/null | wc -l)
+    _pass "WireGuard peers: $PEER_COUNT"
+  else
+    _warn "wg-mgmt" "not configured — host not in WireGuard mesh"
+  fi
+  if ip link show wg-k8s >/dev/null 2>&1; then
+    _pass "wg-k8s interface up"
+  else
+    _warn "wg-k8s" "not configured"
+  fi
+
+  # K8s cluster health (via local kubectl)
+  _section "K8s Cluster Health"
+  if command -v kubectl >/dev/null 2>&1 && [[ -f "${KUBECONFIG:-/root/.kube/config}" ]]; then
+    NODES=$(kubectl get nodes --no-headers 2>/dev/null | wc -l)
+    READY=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready' || true)
+    if [[ "$NODES" -gt 0 ]]; then
+      _pass "Nodes: ${READY}/${NODES} Ready"
+      kubectl get nodes -o wide --no-headers 2>/dev/null | while read -r line; do
+        _pass "  $line"
+      done
+    else
+      _warn "kubectl" "no nodes returned — cluster may still be initializing"
+    fi
+
+    # Cilium
+    if command -v cilium >/dev/null 2>&1; then
+      if cilium status --wait --wait-duration 5s >/dev/null 2>&1; then
+        _pass "Cilium: healthy"
+      else
+        _warn "Cilium" "not ready"
+      fi
+    fi
+
+    # Hubble
+    if command -v hubble >/dev/null 2>&1; then
+      FLOWS=$(hubble observe --last 5 2>/dev/null | wc -l || true)
+      if [[ "$FLOWS" -gt 0 ]]; then
+        _pass "Hubble: capturing flows ($FLOWS recent)"
+      else
+        _warn "Hubble" "no flows captured"
+      fi
+    fi
+
+    # Pods
+    TOTAL_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | wc -l)
+    RUNNING_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | grep -c 'Running' || true)
+    _pass "Pods: ${RUNNING_PODS}/${TOTAL_PODS} Running"
+
+    # MetalLB
+    if kubectl get pods -n metallb-system --no-headers 2>/dev/null | grep -q 'Running'; then
+      _pass "MetalLB: running"
+    else
+      _warn "MetalLB" "not running"
+    fi
+  else
+    _warn "kubectl" "not available — skipping cluster health checks"
+  fi
 else
   _pass "No cluster deployed (expected — run kube-cluster bootstrap)"
 fi
