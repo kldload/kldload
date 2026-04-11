@@ -1000,40 +1000,34 @@ CRICTLCFG
     chroot "${target}" systemctl enable containerd 2>/dev/null || true
     chroot "${target}" systemctl enable kubelet 2>/dev/null || true
 
-    # First-boot auto-bootstrap (optional checkbox)
-    # Uses "kube-cluster bootstrap" rather than "kube-init" because kube-cluster
-    # handles the full multi-node workflow: build a golden image, clone it into
-    # 3 worker VMs via ZFS instant clone, kubeadm init on the host, kubeadm join
-    # on each worker, then deploy Cilium + MetalLB + Hubble. kube-init only does
-    # the single-node control plane setup.
-    if [[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]]; then
-      k_log "Enabling first-boot Kubernetes cluster bootstrap..."
-      cat > "${target}/etc/systemd/system/kube-firstboot.service" <<'KUBEFB'
-[Unit]
-Description=kldload Kubernetes cluster bootstrap — golden image + 3 worker VMs + Cilium + MetalLB + Hubble
-After=network-online.target libvirtd.service
-Wants=network-online.target
-ConditionPathExists=!/etc/kubernetes/admin.conf
+    # K8s bootstrap is manual — the user runs "kube-cluster bootstrap" after
+    # first login so they can watch the full deployment live: ZFS clones,
+    # WireGuard mesh, Cilium, Hubble, everything streaming to their terminal.
+    # The installer lays down KVM + ZFS + all tools; the user pulls the trigger.
 
-[Service]
-Type=oneshot
-ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do curl -sf --connect-timeout 5 https://cloud.debian.org >/dev/null 2>&1 && exit 0; echo "Waiting for internet ($i/30)..."; sleep 10; done; echo "No internet after 5 minutes — continuing anyway"'
-ExecStart=/usr/local/bin/kube-cluster bootstrap --workers 3
-ExecStartPost=/bin/bash -c 'systemctl disable kube-firstboot.service'
-StandardOutput=journal+console
-StandardError=journal+console
-TimeoutStartSec=3600
-
-[Install]
-WantedBy=multi-user.target
-KUBEFB
-      ln -sf /etc/systemd/system/kube-firstboot.service \
-        "${target}/etc/systemd/system/multi-user.target.wants/kube-firstboot.service" 2>/dev/null || true
-      k_log "First-boot cluster bootstrap enabled — will deploy 1 CP + 3 workers on ZFS instant clones"
-    fi
+    # Login banner telling the user what to do
+    cat > "${target}/etc/profile.d/kube-banner.sh" <<'KUBEBANNER'
+if [[ $EUID -eq 0 ]] && ! [[ -f /etc/kubernetes/admin.conf ]] && command -v kube-cluster >/dev/null 2>&1; then
+  echo ""
+  echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
+  echo -e "\033[1;37m  kldloadOS — Kubernetes Platform Ready                      \033[0m"
+  echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
+  echo ""
+  echo -e "  KVM + ZFS + WireGuard installed. Deploy Kubernetes:"
+  echo ""
+  echo -e "  \033[1;32mkube-cluster bootstrap --workers 3\033[0m"
+  echo ""
+  echo -e "  This will: clone golden image → 4 VMs → WireGuard mesh"
+  echo -e "           → Cilium eBPF → MetalLB → Hubble → kubectl on host"
+  echo ""
+  echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
+  echo ""
+fi
+KUBEBANNER
+    chmod +x "${target}/etc/profile.d/kube-banner.sh"
 
     k_log "Kubernetes node configured: containerd, kernel modules, sysctl, ZFS datasets (etcd 8K, containerd, kubelet)"
-    k_log "After boot: kube-cluster bootstrap (auto if checkbox selected), or manual: kube-init / kube-join"
+    k_log "After boot: run 'kube-cluster bootstrap --workers 3' to deploy the full stack"
   fi
 
   # ── DevOps Lab (profile tile) ──────────────────────────────────────────
