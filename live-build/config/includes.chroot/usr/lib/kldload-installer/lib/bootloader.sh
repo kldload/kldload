@@ -496,7 +496,7 @@ EOFSTAB
     # before falling through to shim. Clean boot = shim only.
     # Chain: firmware → shim → signed GRUB → chainloader → ZFSBootMenu
     local _uefi_bootnum
-    _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'UEFI OS' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
+    _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'UEFI OS' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+' || true)
     if [[ -z "$_uefi_bootnum" ]]; then
       # UEFI OS entry doesn't exist — firmware will auto-create it from the
       # fallback path \EFI\BOOT\BOOTX64.EFI, but register it explicitly to be safe
@@ -505,7 +505,7 @@ EOFSTAB
         -L "kldload" \
         -l '\EFI\BOOT\BOOTX64.EFI' >&7 2>&1 || \
         k_log "WARNING: efibootmgr entry failed"
-      _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'kldload' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
+      _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'kldload' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+' || true)
     fi
 
     if [[ -n "$_uefi_bootnum" ]]; then
