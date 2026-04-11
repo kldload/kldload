@@ -568,6 +568,9 @@ demo_add_nodes() {
   existing="$(virsh list --all --name 2>/dev/null | grep 'kldload-w-' | wc -l)"
   local next1=$((existing + 1))
   local next2=$((existing + 2))
+  local SSH_KEY="/root/.ssh/id_ed25519"
+  local pubkey=""
+  [[ -f "${SSH_KEY}.pub" ]] && pubkey="$(cat "${SSH_KEY}.pub")"
 
   echo -e "${Y}=== Cloning 2 new workers from golden image ===${N}"
   for n in $next1 $next2; do
@@ -580,118 +583,163 @@ demo_add_nodes() {
     echo -e "${G}done${N} (${C}$(( (E-S)/1000000 ))ms${N})"
   done
 
+  # Write unique machine-ids to clones (prevents DHCP collision)
+  echo ""
+  echo -e "${D}Writing unique machine-ids...${N}"
+  for n in $next1 $next2; do
+    local name="kldload-w-${n}"
+    local zvol_dev="/dev/zvol/rpool/vms/${name}"
+    local _part="${zvol_dev}-part1"
+    [[ -b "$_part" ]] || _part="${zvol_dev}p1"
+    for _ in $(seq 1 5); do [[ -b "$_part" ]] && break; sleep 1; done
+    local _mnt
+    _mnt="$(mktemp -d)"
+    if mount "$_part" "$_mnt" 2>/dev/null; then
+      printf '%s\n' "$(cat /proc/sys/kernel/random/uuid | tr -d '-')" > "$_mnt/etc/machine-id"
+      umount "$_mnt"
+      echo -e "  ${name}: ${G}done${N}"
+    fi
+    rmdir "$_mnt" 2>/dev/null || true
+  done
+
   echo ""
   echo -e "${Y}=== Booting new workers ===${N}"
   for n in $next1 $next2; do
-    virsh start "kldload-w-${n}" 2>/dev/null && echo -e "  ${G}kldload-w-${n}${N} started" || true
+    local name="kldload-w-${n}"
+    # Create cloud-init ISO with SSH key + hostname
+    local ci_dir ci_iso
+    ci_dir="$(mktemp -d)"
+    ci_iso="/var/lib/libvirt/isos/${name}-ci.iso"
+    cat > "${ci_dir}/meta-data" <<META
+instance-id: ${name}
+local-hostname: ${name}
+META
+    cat > "${ci_dir}/user-data" <<USERDATA
+#cloud-config
+hostname: ${name}
+manage_etc_hosts: true
+disable_root: false
+ssh_pwauth: true
+${pubkey:+ssh_authorized_keys:}
+${pubkey:+  - ${pubkey}}
+users:
+  - default
+  - name: root
+    lock_passwd: false
+${pubkey:+    ssh_authorized_keys:}
+${pubkey:+      - ${pubkey}}
+chpasswd:
+  expire: false
+  users:
+    - name: root
+      password: kldload
+      type: text
+runcmd:
+  - rm -f /etc/ssh/ssh_host_*
+  - ssh-keygen -A
+  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#*MaxStartups.*/MaxStartups 20:30:60/' /etc/ssh/sshd_config
+  - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+USERDATA
+    cat > "${ci_dir}/network-config" <<NETCFG
+version: 2
+ethernets:
+  id0:
+    match:
+      name: "en*"
+    dhcp4: true
+  id1:
+    match:
+      name: "eth*"
+    dhcp4: true
+NETCFG
+    genisoimage -output "$ci_iso" -volid cidata -joliet -rock \
+      "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null \
+      || mkisofs -output "$ci_iso" -volid cidata -joliet -rock \
+        "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null \
+      || xorriso -as mkisofs -o "$ci_iso" -volid cidata -joliet -rock \
+        "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null
+    rm -rf "$ci_dir"
+    virsh attach-disk "$name" "$ci_iso" sdb --type cdrom --config 2>/dev/null || true
+    virsh start "$name" 2>/dev/null && echo -e "  ${G}${name}${N} started" || true
+    sleep 3
   done
 
-  echo -e "${D}Waiting for workers to boot (30s)...${N}"
-  sleep 30
+  # Wait for IPs
+  echo -e "${D}Waiting for DHCP (45s)...${N}"
+  sleep 45
 
-  # Helper: get IP for a VM (domifaddr first, then DHCP lease by exact MAC)
-  _get_vm_ip() {
-    local vm="$1" ip="" mac=""
-    for _ in $(seq 1 20); do
-      # Method 1: qemu guest agent
-      ip="$(virsh domifaddr "$vm" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1)"
-      [[ -n "$ip" ]] && { echo "$ip"; return 0; }
-      # Method 2: match exact MAC in DHCP leases
-      if [[ -z "$mac" ]]; then
-        mac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
-      fi
-      if [[ -n "$mac" ]]; then
-        ip="$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$mac" '$3 == m {print $5}' | cut -d/ -f1 | head -1)"
-        [[ -n "$ip" ]] && { echo "$ip"; return 0; }
-      fi
-      sleep 2
-    done
-    return 1
-  }
-
-  # Set unique hostnames + machine-id, then join
+  # Get join command from CP
   local join_cmd
   join_cmd="$(_ssh_cp 'kubeadm token create --print-join-command 2>/dev/null')"
 
   for n in $next1 $next2; do
     local name="kldload-w-${n}"
-    local ip
-    ip="$(_get_vm_ip "$name")"
+    local mac ip
+    mac="$(virsh domiflist "$name" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
+    ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1 | head -1)"
     if [[ -z "$ip" ]]; then
-      echo -e "  ${Y}${name}: could not get IP${N}"
+      echo -e "  ${Y}${name}: no IP — skipping${N}"
       continue
     fi
 
-    echo -e "  Setting hostname on ${G}${name}${N} (${ip})..."
-    sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@${ip}" \
-      "hostnamectl set-hostname ${name}; rm -f /etc/machine-id; systemd-machine-id-setup; systemctl restart systemd-networkd 2>/dev/null || true" 2>/dev/null || true
+    echo -e "  ${name}: ${G}${ip}${N}"
 
+    # Wait for SSH
+    for _ in $(seq 1 15); do
+      sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "root@${ip}" true 2>/dev/null && break
+      sleep 2
+    done
+
+    # Set hostname
+    sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
+      "hostnamectl set-hostname ${name}" 2>/dev/null || true
+
+    # Join cluster
     if [[ -n "$join_cmd" ]]; then
-      echo -e "  Joining ${G}${name}${N}..."
-      sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@${ip}" \
-        "kubeadm reset -f 2>/dev/null; ${join_cmd}" 2>/dev/null \
-        && echo -e "  ${G}${name} joined${N}" \
-        || echo -e "  ${Y}${name} join failed${N}"
+      echo -ne "  Joining ${name}... "
+      sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 "root@${ip}" \
+        "${join_cmd}" 2>/dev/null \
+        && echo -e "${G}done${N}" \
+        || echo -e "${Y}failed${N}"
     fi
 
-    # WireGuard — scan all VMs for highest existing node ID to avoid collisions
-    if sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${ip}" \
-        "command -v wg >/dev/null 2>&1" 2>/dev/null; then
-      local max_id=0
-      for vm in $(virsh list --name 2>/dev/null | grep -v '^$'); do
-        local vmac vip vid
-        vmac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
-        vip="$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$vmac" '$3 == m {print $5}' | cut -d/ -f1 | head -1)"
-        [[ -z "$vip" ]] && continue
-        vid="$(sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "root@${vip}" \
-          'grep -o "10\.251\.[0-9]*\.[0-9]*" /etc/wireguard/wg-k8s.conf 2>/dev/null | head -1' 2>/dev/null)" || continue
-        vid="${vid##*.}"
-        [[ -n "$vid" && "$vid" -gt "$max_id" ]] && max_id="$vid"
-      done
-      local new_id=$((max_id + 1))
+    # WireGuard
+    local max_id=0
+    for vm in $(virsh list --name 2>/dev/null | grep -v '^$'); do
+      local vid
+      vid="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
+      vid="$(virsh net-dhcp-leases default 2>/dev/null | grep "$vid" | awk '{print $5}' | cut -d/ -f1 | head -1)"
+      [[ -z "$vid" ]] && continue
+      vid="$(sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "root@${vid}" \
+        'grep -o "10\.251\.[0-9]*\.[0-9]*" /etc/wireguard/wg-k8s.conf 2>/dev/null | head -1' 2>/dev/null)" || continue
+      vid="${vid##*.}"
+      [[ -n "$vid" && "$vid" -gt "$max_id" ]] && max_id="$vid"
+    done
+    local new_id=$((max_id + 1))
 
-      echo -e "  WireGuard: init node ${C}${new_id}${N} on ${name}..."
-      sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" "kube-network init ${new_id}" 2>/dev/null || true
+    sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
+      "kube-network init ${new_id}" 2>/dev/null || true
 
-      local new_pub cp_pub cp_lan
-      new_pub="$(sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)"
-      cp_pub="$(_ssh_cp 'cat /etc/wireguard/wg-mgmt.pub 2>/dev/null')"
-      cp_lan="$(_ssh_cp 'ip -4 route get 1.1.1.1 2>/dev/null | awk "{print \$7}" | head -1')"
+    local new_pub cp_pub
+    new_pub="$(sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)"
+    cp_pub="$(_ssh_cp 'cat /etc/wireguard/wg-mgmt.pub 2>/dev/null')"
 
-      if [[ -n "$new_pub" && -n "$cp_pub" ]]; then
-        _ssh_cp "kube-network add-peer ${ip} ${new_pub} ${new_id}" 2>/dev/null || true
-        sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
-          "kube-network add-peer ${cp_lan} ${cp_pub} 1" 2>/dev/null || true
-
-        # Peer with all existing workers that have WireGuard
-        for wnode in $(_kctl get nodes --no-headers 2>/dev/null | grep -v control-plane | awk '{print $1}'); do
-          [[ "$wnode" == "$name" ]] && continue
-          local wmac wip_lan wpub wid
-          wmac="$(virsh domiflist "$wnode" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
-          wip_lan="$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$wmac" '$3 == m {print $5}' | cut -d/ -f1 | head -1)"
-          [[ -z "$wip_lan" ]] && continue
-          wpub="$(sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "root@${wip_lan}" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)" || continue
-          [[ -z "$wpub" ]] && continue
-          wid="$(sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "root@${wip_lan}" \
-            'grep -o "10\.251\.[0-9]*\.[0-9]*" /etc/wireguard/wg-k8s.conf 2>/dev/null | head -1' 2>/dev/null)" || continue
-          wid="${wid##*.}"
-          [[ -z "$wid" ]] && continue
-          sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
-            "kube-network add-peer ${wip_lan} ${wpub} ${wid}" 2>/dev/null || true
-          sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${wip_lan}" \
-            "kube-network add-peer ${ip} ${new_pub} ${new_id}" 2>/dev/null || true
-        done
-
-        sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" "kube-network pin-kubelet && systemctl restart kubelet" 2>/dev/null || true
-        echo -e "  ${G}WireGuard: ${name} → 10.251.0.${new_id}${N}"
-      fi
+    if [[ -n "$new_pub" && -n "$cp_pub" ]]; then
+      _ssh_cp "kube-network add-peer ${ip} ${new_pub} ${new_id}" 2>/dev/null || true
+      sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
+        "kube-network add-peer ${CP_IP} ${cp_pub} 1" 2>/dev/null || true
+      sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
+        "kube-network pin-kubelet && systemctl restart kubelet" 2>/dev/null || true
+      echo -e "  ${G}WireGuard: ${name} → 10.251.0.${new_id}${N}"
     fi
 
-    # Label as worker
     _kctl label node "$name" node-role.kubernetes.io/worker= --overwrite 2>/dev/null || true
   done
 
-  echo -e "${D}Waiting for nodes to register WireGuard IPs (20s)...${N}"
+  echo ""
+  echo -e "${D}Waiting for nodes to become Ready (20s)...${N}"
   sleep 20
   echo ""
   echo -e "${Y}=== Updated Cluster ===${N}"
