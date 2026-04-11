@@ -747,7 +747,32 @@ cmd_bootstrap() {
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo ""
 
-  # Step 1: Build or reuse golden image
+  # Step 0: Clean slate — destroy any existing cluster + golden
+  # No half-states, no stale VMs, no orphaned zvols. Every bootstrap
+  # starts from zero so the result is always predictable.
+  log "Cleaning up any existing cluster..."
+  systemctl stop sanoid.timer 2>/dev/null || true
+  for vm in $(virsh list --all --name 2>/dev/null | grep -E "^${CLUSTER_NAME}-|^${GOLDEN}" || true); do
+    [[ -z "$vm" ]] && continue
+    virsh destroy "$vm" 2>/dev/null || true
+    virsh undefine "$vm" --nvram 2>/dev/null || virsh undefine "$vm" 2>/dev/null || true
+    rm -f "/var/lib/libvirt/isos/${vm}-ci.iso" "/var/lib/libvirt/isos/${vm}-cloud-init.iso" 2>/dev/null
+  done
+  # Nuke all cluster zvols — -Rf handles snapshots and dependent clones
+  for ds in $(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null | grep -vE "^${POOL}/vms$|/isos$" || true); do
+    zfs destroy -Rf "$ds" 2>/dev/null || true
+  done
+  # Clean host state
+  ip link del wg-mgmt 2>/dev/null || true
+  ip link del wg-k8s 2>/dev/null || true
+  rm -f /etc/wireguard/wg-mgmt.* /etc/wireguard/wg-k8s.* 2>/dev/null
+  rm -f /root/.kube/config 2>/dev/null
+  sed -i '/# kldload-k8s-cluster/,/# end-kldload-k8s-cluster/d' /etc/hosts 2>/dev/null || true
+  systemctl start sanoid.timer 2>/dev/null || true
+  log "Clean slate"
+  echo ""
+
+  # Step 1: Build golden image (always fresh)
   echo -e "${Y}=== Step 1: Golden Image ===${N}"
   build_golden
   echo ""
