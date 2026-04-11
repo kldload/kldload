@@ -78,9 +78,41 @@ POOL="rpool"
 C="\033[1;36m"; G="\033[1;32m"; Y="\033[1;33m"; R="\033[1;31m"
 W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"
 
-log()  { echo -e "${G}[kube-cluster]${N} $*"; }
-warn() { echo -e "${Y}[kube-cluster]${N} $*" >&2; }
-die()  { echo -e "${R}[kube-cluster]${N} $*" >&2; exit 1; }
+# Bootstrap timer — shows elapsed time on every log line
+_BOOT_START=""
+_elapsed() {
+  [[ -z "$_BOOT_START" ]] && echo "00:00" && return
+  local now elapsed m s
+  now=$(date +%s)
+  elapsed=$((now - _BOOT_START))
+  m=$((elapsed / 60))
+  s=$((elapsed % 60))
+  printf '%02d:%02d' "$m" "$s"
+}
+_step_start=""
+_step_elapsed() {
+  [[ -z "$_step_start" ]] && echo "0s" && return
+  local now=$(($(date +%s) - _step_start))
+  if [[ $now -ge 60 ]]; then
+    printf '%dm%ds' $((now/60)) $((now%60))
+  else
+    printf '%ds' "$now"
+  fi
+}
+
+log()  { echo -e "${D}[$(_elapsed)]${N} ${G}[kube-cluster]${N} $*"; }
+warn() { echo -e "${D}[$(_elapsed)]${N} ${Y}[kube-cluster]${N} $*" >&2; }
+die()  { echo -e "${D}[$(_elapsed)]${N} ${R}[kube-cluster]${N} $*" >&2; exit 1; }
+step() {
+  # Print step header with elapsed time and start step timer
+  local num="$1"; shift
+  _step_start=$(date +%s)
+  echo ""
+  echo -e "${D}[$(_elapsed)]${N} ${Y}=== Step ${num}: $* ===${N}"
+}
+step_done() {
+  echo -e "${D}[$(_elapsed)]${N} ${G}  ✓ $* ($(_step_elapsed))${N}"
+}
 
 CP_NAME="${CLUSTER_NAME}-cp"
 WORKER_PREFIX="${CLUSTER_NAME}-w"
@@ -748,6 +780,8 @@ NETCFG
 #   7. Smoke test (deploy nginx, verify pod scheduling)
 #   8. Hubble eBPF flow dump (show what the kernel captured)
 cmd_bootstrap() {
+  _BOOT_START=$(date +%s)
+
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo -e "${W}  kube-cluster bootstrap                                     ${N}"
   echo -e "${W}  1 control plane + ${WORKERS} workers on ZFS instant clones         ${N}"
@@ -776,16 +810,13 @@ cmd_bootstrap() {
   rm -f /root/.kube/config 2>/dev/null
   sed -i '/# kldload-k8s-cluster/,/# end-kldload-k8s-cluster/d' /etc/hosts 2>/dev/null || true
   systemctl start sanoid.timer 2>/dev/null || true
-  log "Clean slate"
-  echo ""
+  step_done "Clean slate"
 
-  # Step 1: Build golden image (always fresh)
-  echo -e "${Y}=== Step 1: Golden Image ===${N}"
+  step 1 "Golden Image"
   build_golden
-  echo ""
+  step_done "Golden image ready"
 
-  # Step 2: Clone + boot
-  echo -e "${Y}=== Step 2: Clone + Boot (ZFS instant clone) ===${N}"
+  step 2 "Clone + Boot (ZFS instant clone)"
   clone_and_boot
 
   # Collect IPs
@@ -844,7 +875,9 @@ cmd_bootstrap() {
   # Node IDs map to WireGuard IPs: node 1 = .1, node 2 = .2, etc.
   # kube-network handles key generation, interface config, and peer setup.
   echo ""
-  echo -e "${Y}=== Step 3: WireGuard Encrypted Backplane ===${N}"
+  step_done "All nodes booted with IPs"
+
+  step 3 "WireGuard Encrypted Backplane"
 
   if _ssh_cmd "$cp_ip" "command -v wg >/dev/null 2>&1"; then
     # Init control plane as node 1 (10.251.0.1 on wg-mgmt, 10.252.0.1 on wg-k8s)
@@ -924,13 +957,17 @@ cmd_bootstrap() {
   #   - Cilium Gateway API (ingress controller using eBPF, no nginx)
   #   - Hubble (eBPF-based network observability — flow logs, UI, CLI)
   echo ""
-  echo -e "${Y}=== Step 4: Control Plane (Cilium + MetalLB + ZFS CSI + Hubble) ===${N}"
+  step_done "WireGuard full mesh configured"
+
+  step 4 "Control Plane (Cilium + MetalLB + Hubble)"
   _ssh_cmd "$cp_ip" "kube-init" || warn "kube-init had errors — some components may still be pulling images"
 
   # Step 5: Join workers. The join token is a short-lived bootstrap credential
   # that lets workers authenticate to the API server.
   echo ""
-  echo -e "${Y}=== Step 5: Join Workers ===${N}"
+  step_done "Control plane initialized"
+
+  step 5 "Join Workers"
   local join_token
   join_token="$(_ssh_cmd "$cp_ip" 'kubeadm token create --print-join-command 2>/dev/null')" || true
   if [[ -z "$join_token" ]]; then
@@ -946,7 +983,9 @@ cmd_bootstrap() {
 
   # Step 6: Verify
   echo ""
-  echo -e "${Y}=== Step 6: Verification ===${N}"
+  step_done "Workers joined"
+
+  step 6 "Verification"
   sleep 10
   _ssh_cmd "$cp_ip" "kubectl get nodes -o wide" || true
 
@@ -959,12 +998,16 @@ cmd_bootstrap() {
 
   # Step 7: Smoke test
   echo ""
-  echo -e "${Y}=== Step 7: Smoke Test ===${N}"
+  step_done "Cluster verified"
+
+  step 7 "Smoke Test"
   _ssh_cmd "$cp_ip" "kube-smoke-test" || warn "Smoke test had failures — check output above"
 
   # Step 8: Hubble proof of life — show recent eBPF-captured flows
   echo ""
-  echo -e "${Y}=== Step 8: Hubble eBPF — Proof of Life ===${N}"
+  step_done "Smoke test complete"
+
+  step 8 "Hubble eBPF — Proof of Life"
   echo -e "${D}Recent flows captured by eBPF (zero agents, zero config):${N}"
   echo ""
   _ssh_cmd "$cp_ip" "hubble observe --last 20 2>/dev/null" || true
@@ -1002,7 +1045,9 @@ cmd_bootstrap() {
   # node 100 so kubectl, k9s, cilium, hubble all talk to the API over
   # WireGuard. Every hop encrypted, including operator→API.
   echo ""
-  echo -e "${Y}=== Step 9: Host Management Plane ===${N}"
+  step_done "Hubble eBPF flows captured"
+
+  step 9 "Host Management Plane"
 
   # Join the host to the WireGuard mesh as node 100 (10.250.0.100 / 10.251.0.100)
   if command -v wg >/dev/null 2>&1 && [[ -n "${cp_pub:-}" ]]; then
@@ -1151,6 +1196,21 @@ cmd_bootstrap() {
   echo -e "    ssh root@${cp_ip}"
   echo -e "    hubble UI: kubectl port-forward -n kube-system svc/hubble-ui 12000:80"
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  step_done "Host management plane ready"
+
+  # Final summary
+  local total_elapsed=$(( $(date +%s) - _BOOT_START ))
+  local total_m=$((total_elapsed / 60))
+  local total_s=$((total_elapsed % 60))
+  echo ""
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${G}  ✓ BOOTSTRAP COMPLETE — ${total_m}m${total_s}s total                     ${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "  ${W}1 control plane + ${WORKERS} workers${N}"
+  echo -e "  ${W}Cilium eBPF + Hubble + MetalLB + WireGuard${N}"
+  echo -e "  ${W}Host: kubectl, k9s, cilium, hubble ready${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo ""
 }
 
 # ── Destroy ────────────────────────────────────────────────────────────────
