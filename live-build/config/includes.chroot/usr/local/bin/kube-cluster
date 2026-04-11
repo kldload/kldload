@@ -1112,30 +1112,44 @@ cmd_destroy() {
 
   log "Destroying cluster..."
 
-  # Destroy control plane
-  virsh destroy "${CP_NAME}" 2>/dev/null || true
-  virsh undefine "${CP_NAME}" --nvram 2>/dev/null || virsh undefine "${CP_NAME}" 2>/dev/null || true
-  zfs destroy -Rf "${POOL}/vms/${CP_NAME}" 2>/dev/null || true
-  rm -f "/var/lib/libvirt/isos/${CP_NAME}-ci.iso" 2>/dev/null
+  # Stop sanoid first — it creates autosnaps that block ZFS destroy
+  systemctl stop sanoid.timer 2>/dev/null || true
 
-  # Destroy workers (scan for any kldload-w-* not just --workers count)
+  # Destroy ALL VMs first (stop + undefine), then ZFS.
+  # Must undefine all VMs before ZFS destroy because libvirt holds references.
+  local _all_vms=("${CP_NAME}")
   for name in $(virsh list --all --name 2>/dev/null | grep "^${WORKER_PREFIX}-" || true) \
-              $(seq -f "${WORKER_PREFIX}-%g" 1 "${WORKERS}"); do
-    [[ -z "$name" ]] && continue
-    virsh destroy "$name" 2>/dev/null || true
-    virsh undefine "$name" --nvram 2>/dev/null || virsh undefine "$name" 2>/dev/null || true
-    zfs destroy -Rf "${POOL}/vms/${name}" 2>/dev/null || true
-    rm -f "/var/lib/libvirt/isos/${name}-ci.iso" 2>/dev/null
+               $(seq -f "${WORKER_PREFIX}-%g" 1 "${WORKERS}"); do
+    [[ -n "$name" ]] && _all_vms+=("$name")
+  done
+  [[ $destroy_all -eq 1 ]] && _all_vms+=("${GOLDEN}")
+
+  for vm in "${_all_vms[@]}"; do
+    virsh destroy "$vm" 2>/dev/null || true
+    virsh undefine "$vm" --nvram 2>/dev/null || virsh undefine "$vm" 2>/dev/null || true
+    rm -f "/var/lib/libvirt/isos/${vm}-ci.iso" "/var/lib/libvirt/isos/${vm}-cloud-init.iso" 2>/dev/null
   done
 
-  # Destroy golden if --all
+  # Now destroy ZFS — use -Rf to handle autosnaps and dependent clones
   if [[ $destroy_all -eq 1 ]]; then
-    virsh destroy "${GOLDEN}" 2>/dev/null || true
-    virsh undefine "${GOLDEN}" --nvram 2>/dev/null || virsh undefine "${GOLDEN}" 2>/dev/null || true
+    # Nuke the entire vms tree except the isos dataset
     zfs destroy -Rf "${POOL}/vms/${GOLDEN}" 2>/dev/null || true
-    rm -f "/var/lib/libvirt/isos/${GOLDEN}-ci.iso" "/var/lib/libvirt/isos/${GOLDEN}-cloud-init.iso" 2>/dev/null
     log "Golden image destroyed"
+  else
+    # Destroy clones only (golden preserved)
+    zfs destroy -Rf "${POOL}/vms/${CP_NAME}" 2>/dev/null || true
+    for name in $(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null | grep "/${WORKER_PREFIX}-" || true); do
+      zfs destroy -Rf "$name" 2>/dev/null || true
+    done
   fi
+
+  # Clean up orphaned snapshots on golden
+  for snap in $(zfs list -H -o name -t snapshot -r "${POOL}/vms/${GOLDEN}" 2>/dev/null | grep "@clone-" || true); do
+    zfs destroy "$snap" 2>/dev/null || true
+  done
+
+  # Restart sanoid
+  systemctl start sanoid.timer 2>/dev/null || true
 
   # Clean up host WireGuard mesh
   ip link del wg-mgmt 2>/dev/null || true
