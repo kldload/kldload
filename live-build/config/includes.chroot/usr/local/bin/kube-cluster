@@ -491,6 +491,7 @@ DHCP=yes
 
 [DHCP]
 UseDomains=yes
+ClientIdentifier=mac
 NETD"
   _ssh_cmd "$golden_ip" "systemctl enable systemd-networkd 2>/dev/null || true"
   #
@@ -528,6 +529,12 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 DHCPFB"
   _ssh_cmd "$golden_ip" "systemctl enable dhcp-fallback 2>/dev/null || true"
+  #
+  # 4. Force DHCP to use MAC-based client-id everywhere (not DUID).
+  # Clones share the same SMBIOS/DMI product_uuid from libvirt, which makes
+  # the default DUID-based client-id identical across all clones. dnsmasq
+  # sees them as the same client and hands out the same IP = collision.
+  _ssh_cmd "$golden_ip" "mkdir -p /etc/dhcp && echo 'send dhcp-client-identifier = hardware;' > /etc/dhcp/dhclient.conf 2>/dev/null || true"
 
   # Shut down
   _ssh_cmd "$golden_ip" "shutdown -h now" || true
