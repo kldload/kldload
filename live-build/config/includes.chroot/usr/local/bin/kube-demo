@@ -11,29 +11,40 @@ R="\033[1;31m"; G="\033[1;32m"; Y="\033[1;33m"; C="\033[1;36m"; W="\033[1;37m"; 
 # ── Detect cluster ─────────────────────────────────────────
 CP_IP=""
 _find_cp() {
+  # Check if we have a local kubeconfig (host is the management plane)
+  if [[ -f /root/.kube/config ]]; then
+    export KUBECONFIG=/root/.kube/config
+    # Determine CP IP for SSH commands — prefer WireGuard
+    if ip link show wg-mgmt >/dev/null 2>&1; then
+      CP_IP="10.250.0.1"
+    else
+      # Fall back to /etc/hosts or DHCP lease lookup
+      CP_IP="$(getent hosts kldload-cp 2>/dev/null | awk '{print $1}')" || true
+      if [[ -z "$CP_IP" ]]; then
+        for vm in $(virsh list --name 2>/dev/null | grep -v '^$'); do
+          local mac ip
+          mac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}')"
+          ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
+          [[ -n "$ip" ]] && CP_IP="$ip" && break
+        done
+      fi
+    fi
+    [[ -n "$CP_IP" ]] && return 0
+  fi
   # Check if we ARE the control plane
   if [[ -f /etc/kubernetes/admin.conf ]]; then
     CP_IP="localhost"
     export KUBECONFIG=/etc/kubernetes/admin.conf
     return 0
   fi
-  # Check VMs for control plane
-  for vm in $(virsh list --name 2>/dev/null | grep -v '^$'); do
-    local mac ip
-    mac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}')"
-    ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
-    if [[ -n "$ip" ]] && sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 \
-      "root@${ip}" "test -f /etc/kubernetes/admin.conf" 2>/dev/null; then
-      CP_IP="$ip"
-      return 0
-    fi
-  done
   return 1
 }
 
-# Run kubectl on CP (local or remote)
+# Run kubectl — always local (kubeconfig points to CP API)
 _kctl() {
-  if [[ "$CP_IP" == "localhost" ]]; then
+  if command -v kubectl >/dev/null 2>&1 && [[ -f "${KUBECONFIG:-/root/.kube/config}" ]]; then
+    kubectl "$@" 2>/dev/null
+  elif [[ "$CP_IP" == "localhost" ]]; then
     kubectl "$@" 2>/dev/null
   else
     sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \

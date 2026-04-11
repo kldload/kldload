@@ -834,12 +834,59 @@ cmd_bootstrap() {
   echo -e "    Disk cost:     ${G}~0 bytes (copy-on-write)${N}"
   echo -e "    Rebuild:       ${G}kube-cluster destroy && kube-cluster bootstrap${N}"
   echo ""
-  # Step 9: Install management tools on the KVM host
-  # The operator runs kubectl/k9s/helm/cilium/hubble from the host, not by
-  # SSH-ing into VMs. Copy kubeconfig and install CLI binaries so "kube-demo"
-  # and day-to-day management work directly from the KVM host.
+  # Step 9: Host joins WireGuard mesh + management tools
+  # The KVM host is the management plane — it joins the encrypted mesh as
+  # node 100 so kubectl, k9s, cilium, hubble all talk to the API over
+  # WireGuard. Every hop encrypted, including operator→API.
   echo ""
-  echo -e "${Y}=== Step 9: Host Management Tools ===${N}"
+  echo -e "${Y}=== Step 9: Host Management Plane ===${N}"
+
+  # Join the host to the WireGuard mesh as node 100 (10.250.0.100 / 10.251.0.100)
+  if command -v wg >/dev/null 2>&1 && [[ -n "${cp_pub:-}" ]]; then
+    log "Joining host to WireGuard mesh as node 100..."
+    kube-network init 100 2>/dev/null || true
+
+    local host_pub
+    host_pub="$(cat /etc/wireguard/wg-mgmt.pub 2>/dev/null || true)"
+
+    if [[ -n "$host_pub" ]]; then
+      # Host ↔ CP peering
+      _ssh_cmd "$cp_ip" "kube-network add-peer ${cp_ip} ${host_pub} 100" || true
+      kube-network add-peer "$cp_ip" "$cp_pub" 1 2>/dev/null || true
+
+      # Host ↔ Worker peering
+      for i in $(seq 0 $((WORKERS-1))); do
+        local wip="${worker_ips[$i]:-}"
+        [[ -n "$wip" && -n "${w_pubs[$i]:-}" ]] || continue
+        _ssh_cmd "$wip" "kube-network add-peer ${cp_ip} ${host_pub} 100" || true
+        kube-network add-peer "$wip" "${w_pubs[$i]}" "${w_ids[$i]}" 2>/dev/null || true
+      done
+
+      log "Host joined WireGuard mesh: 10.250.0.100 (mgmt), 10.251.0.100 (k8s)"
+    else
+      warn "Host WireGuard key generation failed — using virbr0 for management"
+    fi
+  fi
+
+  # /etc/hosts entries — use WireGuard IPs if mesh is up, else virbr0
+  log "Adding cluster DNS entries to /etc/hosts..."
+  sed -i '/# kldload-k8s-cluster/,/# end-kldload-k8s-cluster/d' /etc/hosts 2>/dev/null || true
+  {
+    echo "# kldload-k8s-cluster"
+    if ip link show wg-mgmt >/dev/null 2>&1; then
+      # WireGuard IPs — all management traffic encrypted
+      echo "10.250.0.1 ${CP_NAME}"
+      for i in $(seq 0 $((WORKERS-1))); do
+        echo "10.250.0.$((i+2)) ${worker_names[$i]}"
+      done
+    else
+      echo "${cp_ip} ${CP_NAME}"
+      for i in $(seq 0 $((WORKERS-1))); do
+        [[ -n "${worker_ips[$i]:-}" ]] && echo "${worker_ips[$i]} ${worker_names[$i]}"
+      done
+    fi
+    echo "# end-kldload-k8s-cluster"
+  } >> /etc/hosts
 
   # Copy kubeconfig from CP to host
   mkdir -p /root/.kube
@@ -847,7 +894,7 @@ cmd_bootstrap() {
     "root@${cp_ip}:/etc/kubernetes/admin.conf" /root/.kube/config 2>/dev/null \
   || sshpass -p kldload scp -o StrictHostKeyChecking=no \
     "root@${cp_ip}:/etc/kubernetes/admin.conf" /root/.kube/config 2>/dev/null; then
-    # Point kubeconfig at the CP's WireGuard IP if available, else libvirt IP
+    # Point kubeconfig at the CP's WireGuard IP (encrypted) if mesh is up
     if ip link show wg-k8s >/dev/null 2>&1; then
       sed -i "s|https://.*:6443|https://10.251.0.1:6443|" /root/.kube/config
     else
