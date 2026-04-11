@@ -968,6 +968,18 @@ build_golden_single() {
   _ssh_cmd "$golden_ip" "rm -f /var/lib/cloud/seed/nocloud-net/* 2>/dev/null || true"
   # Re-enable cloud-init services so clones re-run cloud-init on next boot.
   _ssh_cmd "$golden_ip" "systemctl enable cloud-init-local cloud-init cloud-config cloud-final 2>/dev/null || true"
+  # Belt-and-suspenders: systemd-networkd DHCP config that works even without cloud-init
+  _ssh_cmd "$golden_ip" "mkdir -p /etc/systemd/network && cat > /etc/systemd/network/10-dhcp.network <<'NETD'
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+
+[DHCP]
+UseDomains=yes
+NETD"
+  _ssh_cmd "$golden_ip" "systemctl enable systemd-networkd 2>/dev/null || true"
 
   # Shutdown
   _ssh_cmd "$golden_ip" "shutdown -h now" || true

@@ -450,8 +450,22 @@ NETCFG
   _ssh_cmd "$golden_ip" "rm -f /etc/netplan/*.yaml /etc/systemd/network/*.network 2>/dev/null || true"
   _ssh_cmd "$golden_ip" "rm -f /var/lib/cloud/seed/nocloud-net/* 2>/dev/null || true"
   # Re-enable cloud-init services so clones re-run cloud-init on next boot.
-  # cloud-init clean removes instance data but doesn't re-arm the services on Debian.
   _ssh_cmd "$golden_ip" "systemctl enable cloud-init-local cloud-init cloud-config cloud-final 2>/dev/null || true"
+  # Belt-and-suspenders: write a systemd-networkd DHCP config that works even
+  # if cloud-init fails to start. Matches both en* (Debian) and eth* (CentOS).
+  # Cloud-init will overwrite this if it runs, but if it doesn't, networking
+  # still comes up via systemd-networkd.
+  _ssh_cmd "$golden_ip" "mkdir -p /etc/systemd/network && cat > /etc/systemd/network/10-dhcp.network <<'NETD'
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+
+[DHCP]
+UseDomains=yes
+NETD"
+  _ssh_cmd "$golden_ip" "systemctl enable systemd-networkd 2>/dev/null || true"
 
   # Shut down
   _ssh_cmd "$golden_ip" "shutdown -h now" || true
