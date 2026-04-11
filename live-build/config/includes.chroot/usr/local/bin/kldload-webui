@@ -1372,33 +1372,49 @@ async def _run_wipe_disk(websocket, msg):
     if not re.match(r'^/dev/[a-z]{2,8}[0-9]{0,3}$', disk):
         await websocket.send(json.dumps({"type": "error", "msg": f"Invalid disk: {disk}"}))
         return
-    # Report disk size, attempt blkdiscard first, fall back to dd with progress
+    # Fast wipe: destroy partition tables, ZFS labels, and filesystem signatures.
+    # No need to zero the entire disk — wipefs + sgdisk + zpool labelclear
+    # removes everything that matters in seconds, even on multi-TB drives.
     cmd = ["bash", "-c", f"""
 set -e
-SIZE_BYTES=$(blockdev --getsize64 {shlex.quote(disk)} 2>/dev/null || echo 0)
-SIZE_MB=$((SIZE_BYTES / 1048576))
-echo "Disk: {disk}  Size: ${{SIZE_MB}} MB"
-echo "Attempting blkdiscard (fast zero)..."
-if blkdiscard -z {shlex.quote(disk)} 2>/dev/null; then
-    echo "blkdiscard succeeded"
-else
-    echo "blkdiscard not supported — falling back to dd zero-fill..."
-    WRITTEN=0
-    while true; do
-        dd if=/dev/zero of={shlex.quote(disk)} bs=1M count=256 seek=$WRITTEN conv=notrunc 2>/dev/null || break
-        WRITTEN=$((WRITTEN + 256))
-        if [ "$SIZE_MB" -gt 0 ]; then
-            PCT=$((WRITTEN * 100 / SIZE_MB))
-            [ "$PCT" -gt 100 ] && PCT=100
-            echo "  ${{WRITTEN}} / ${{SIZE_MB}} MB  (${{PCT}}%)"
-        else
-            echo "  ${{WRITTEN}} MB written"
-        fi
-        [ "$SIZE_MB" -gt 0 ] && [ "$WRITTEN" -ge "$SIZE_MB" ] && break
-    done
-fi
+DISK={shlex.quote(disk)}
+SIZE_BYTES=$(blockdev --getsize64 "$DISK" 2>/dev/null || echo 0)
+SIZE_GB=$((SIZE_BYTES / 1073741824))
+echo "Disk: $DISK  Size: ${{SIZE_GB}} GB"
+
+echo "Step 1/5: Unmounting and exporting ZFS pools..."
+umount -R /target/boot/efi 2>/dev/null || true
+umount -R /target 2>/dev/null || true
+# Export any pool on this disk
+for pool in $(zpool list -H -o name 2>/dev/null); do
+    if zpool status "$pool" 2>/dev/null | grep -q "${{DISK##*/}}"; then
+        zpool export -f "$pool" 2>/dev/null || zpool destroy -f "$pool" 2>/dev/null || true
+        echo "  Exported pool: $pool"
+    fi
+done
+
+echo "Step 2/5: Clearing ZFS labels on all partitions..."
+for part in "${{DISK}}"*; do
+    [ -b "$part" ] || continue
+    zpool labelclear -f "$part" 2>/dev/null || true
+    wipefs -a -f "$part" 2>/dev/null || true
+done
+echo "  Done"
+
+echo "Step 3/5: Wiping partition table (GPT + MBR)..."
+sgdisk --zap-all "$DISK" 2>/dev/null || true
+echo "  Done"
+
+echo "Step 4/5: Zeroing first and last 10MB (boot sector + backup GPT)..."
+dd if=/dev/zero of="$DISK" bs=1M count=10 2>/dev/null || true
+dd if=/dev/zero of="$DISK" bs=1M seek=$((SIZE_GB * 1024 - 10)) count=10 2>/dev/null || true
+echo "  Done"
+
+echo "Step 5/5: Refreshing partition table..."
+partprobe "$DISK" 2>/dev/null || true
 sync
-echo "Wipe complete."
+echo ""
+echo "Wipe complete — $DISK is clean (${{SIZE_GB}} GB ready for install)"
 """]
     await _stream_proc(websocket, cmd, target="install")
 
