@@ -48,20 +48,24 @@ WORKERS="${WORKERS:-3}"
 CILIUM_CLI_VERSION="${CILIUM_CLI_VERSION:-0.19.2}"
 _host_ram_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 16384)
 _host_cpus=$(nproc 2>/dev/null || echo 4)
-if [[ $_host_ram_mb -ge 48000 ]]; then
-  # 48GB+ host: generous allocation
-  CP_RAM="${CP_RAM:-8192}"
-  RAM="${RAM:-4096}"
-  CP_CPUS="${CP_CPUS:-4}"
-  CPUS="${CPUS:-2}"
-elif [[ $_host_ram_mb -ge 24000 ]]; then
-  # 24-48GB host: moderate
-  CP_RAM="${CP_RAM:-6144}"
-  RAM="${RAM:-3072}"
-  CP_CPUS="${CP_CPUS:-4}"
-  CPUS="${CPUS:-2}"
-else
-  # <24GB host: tight
+# Auto-scale: use ~80% of host RAM for VMs, split between CP and workers.
+# CP gets 2x worker RAM because it runs etcd + API + Cilium + MetalLB + Hubble.
+# Reserve ~12GB for the host OS + ZFS ARC cache.
+_vm_ram_mb=$(( (_host_ram_mb - 12000) ))  # available for VMs
+[[ $_vm_ram_mb -lt 8000 ]] && _vm_ram_mb=8000
+# CP gets 2 shares, each worker gets 1 share. Total shares = 2 + WORKERS
+_shares=$((2 + ${WORKERS:-3}))
+_per_share=$(( _vm_ram_mb / _shares ))
+# Clamp to reasonable bounds
+[[ $_per_share -gt 16384 ]] && _per_share=16384
+[[ $_per_share -lt 2048 ]] && _per_share=2048
+CP_RAM="${CP_RAM:-$(( _per_share * 2 ))}"
+RAM="${RAM:-${_per_share}}"
+# CPUs: CP gets half of host CPUs (min 4), workers get quarter (min 2)
+CP_CPUS="${CP_CPUS:-$(( _host_cpus / 2 > 4 ? _host_cpus / 2 : 4 ))}"
+CPUS="${CPUS:-$(( _host_cpus / 4 > 2 ? _host_cpus / 4 : 2 ))}"
+if [[ $_host_ram_mb -lt 16000 ]]; then
+  # <16GB host: tight — override to minimums
   CP_RAM="${CP_RAM:-4096}"
   RAM="${RAM:-2048}"
   CP_CPUS="${CP_CPUS:-2}"
