@@ -1374,7 +1374,10 @@ async def _run_wipe_disk(websocket, msg):
         await websocket.send(json.dumps({"type": "error", "msg": f"Invalid disk: {disk}"}))
         return
 
-    # Common cleanup: UEFI boot entries + MOK keys (runs for both modes)
+    # Common cleanup: UEFI boot entries only. MOK keys are NOT touched —
+    # wiping MOK breaks Secure Boot on the next install since the new MOK
+    # key can't be enrolled until the OS boots, creating a chicken-and-egg
+    # problem. Stale MOK keys in NVRAM are harmless.
     cleanup_uefi_mok = """
 echo "Cleaning UEFI boot entries..."
 if command -v efibootmgr >/dev/null 2>&1; then
@@ -1382,16 +1385,12 @@ if command -v efibootmgr >/dev/null 2>&1; then
         efibootmgr -b "$entry" -B 2>/dev/null && echo "  Removed Boot$entry" || true
     done
 fi
-echo "Resetting ALL MOK keys..."
+# Clear any pending MOK import/delete requests (but don't wipe enrolled keys)
 if command -v mokutil >/dev/null 2>&1; then
-    # --reset wipes the entire MOK list on next reboot via MokManager
-    printf 'kldload\\nkldload\\n' | mokutil --reset 2>/dev/null && echo "  MOK reset queued (MokManager will clear on next boot)" || true
-    # Also try with common passwords in case keys were enrolled with a different one
-    printf '\\n\\n' | mokutil --reset 2>/dev/null || true
-    mokutil --revoke-import 2>/dev/null && echo "  Pending enrollments cleared" || true
-    mokutil --revoke-delete 2>/dev/null || true
+    mokutil --revoke-import 2>/dev/null && echo "  Pending MOK imports cleared" || true
+    mokutil --revoke-delete 2>/dev/null && echo "  Pending MOK deletes cleared" || true
     ENROLLED=$(mokutil --list-enrolled 2>/dev/null | grep -c 'SHA1' || echo 0)
-    echo "  Currently enrolled: $ENROLLED keys (will be cleared on next boot)"
+    echo "  MOK keys enrolled: $ENROLLED (preserved for Secure Boot)"
 fi
 """
 
