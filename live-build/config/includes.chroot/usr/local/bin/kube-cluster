@@ -334,7 +334,7 @@ packages:
 runcmd:
   - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - systemctl restart sshd
+  - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
   - touch /var/lib/cloud/instance/kube-golden-ready
 USERDATA
 
@@ -549,10 +549,12 @@ chpasswd:
       type: text
 runcmd:
   # Regenerate SSH host keys — clones inherited the golden's keys.
-  # dpkg-reconfigure works on Debian/Ubuntu; ssh-keygen -A on CentOS/RHEL.
-  - dpkg-reconfigure openssh-server 2>/dev/null || ssh-keygen -A
+  # Remove old keys first, then regenerate. ssh-keygen -A is universal.
+  - rm -f /etc/ssh/ssh_host_*
+  - ssh-keygen -A
+  - dpkg-reconfigure openssh-server 2>/dev/null || true
   # Restart SSH with the new keys. Service name varies: sshd (RHEL), ssh (Debian).
-  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+  - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 USERDATA
 
     cat > "${ci_dir}/network-config" <<NETCFG
@@ -827,11 +829,104 @@ cmd_bootstrap() {
   echo -e "    Disk cost:     ${G}~0 bytes (copy-on-write)${N}"
   echo -e "    Rebuild:       ${G}kube-cluster destroy && kube-cluster bootstrap${N}"
   echo ""
-  echo -e "  ${W}Access:${N}"
-  echo -e "    ssh root@${cp_ip}"
+  # Step 9: Install management tools on the KVM host
+  # The operator runs kubectl/k9s/helm/cilium/hubble from the host, not by
+  # SSH-ing into VMs. Copy kubeconfig and install CLI binaries so "kube-demo"
+  # and day-to-day management work directly from the KVM host.
+  echo ""
+  echo -e "${Y}=== Step 9: Host Management Tools ===${N}"
+
+  # Copy kubeconfig from CP to host
+  mkdir -p /root/.kube
+  if scp -o StrictHostKeyChecking=no -i "$SSH_KEY" \
+    "root@${cp_ip}:/etc/kubernetes/admin.conf" /root/.kube/config 2>/dev/null \
+  || sshpass -p kldload scp -o StrictHostKeyChecking=no \
+    "root@${cp_ip}:/etc/kubernetes/admin.conf" /root/.kube/config 2>/dev/null; then
+    # Point kubeconfig at the CP's WireGuard IP if available, else libvirt IP
+    if ip link show wg-k8s >/dev/null 2>&1; then
+      sed -i "s|https://.*:6443|https://10.251.0.1:6443|" /root/.kube/config
+    else
+      sed -i "s|https://.*:6443|https://${cp_ip}:6443|" /root/.kube/config
+    fi
+    chmod 600 /root/.kube/config
+    export KUBECONFIG=/root/.kube/config
+    log "kubeconfig installed → /root/.kube/config"
+  else
+    warn "Could not copy kubeconfig from CP"
+  fi
+
+  # Install kubectl, helm, k9s, cilium-cli, hubble-cli on the host
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64)  arch_dl="amd64"; arch_k9s="amd64" ;;
+    aarch64) arch_dl="arm64"; arch_k9s="arm64" ;;
+    *)       arch_dl="amd64"; arch_k9s="amd64" ;;
+  esac
+
+  # kubectl
+  if ! command -v kubectl >/dev/null 2>&1; then
+    log "Installing kubectl on host..."
+    curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/${arch_dl}/kubectl" \
+      -o /usr/local/bin/kubectl 2>/dev/null && chmod +x /usr/local/bin/kubectl && log "kubectl installed" \
+      || warn "kubectl install failed"
+  fi
+
+  # helm
+  if ! command -v helm >/dev/null 2>&1; then
+    log "Installing helm on host..."
+    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | \
+      HELM_INSTALL_DIR=/usr/local/bin bash 2>/dev/null && log "helm installed" \
+      || warn "helm install failed"
+  fi
+
+  # cilium CLI
+  if ! command -v cilium >/dev/null 2>&1; then
+    log "Installing cilium CLI on host..."
+    curl -fsSL "https://github.com/cilium/cilium-cli/releases/download/v${CILIUM_CLI_VERSION}/cilium-linux-${arch_dl}.tar.gz" \
+      | tar -xz -C /usr/local/bin cilium 2>/dev/null && log "cilium CLI installed" \
+      || warn "cilium CLI install failed"
+  fi
+
+  # hubble CLI
+  if ! command -v hubble >/dev/null 2>&1; then
+    log "Installing hubble CLI on host..."
+    local hubble_ver
+    hubble_ver="$(curl -fsSL https://raw.githubusercontent.com/cilium/hubble/master/stable.txt 2>/dev/null || echo "v1.17.1")"
+    curl -fsSL "https://github.com/cilium/hubble/releases/download/${hubble_ver}/hubble-linux-${arch_dl}.tar.gz" \
+      | tar -xz -C /usr/local/bin hubble 2>/dev/null && log "hubble CLI installed" \
+      || warn "hubble CLI install failed"
+  fi
+
+  # k9s
+  if ! command -v k9s >/dev/null 2>&1; then
+    log "Installing k9s on host..."
+    curl -fsSL "https://github.com/derailed/k9s/releases/latest/download/k9s_Linux_${arch_k9s}.tar.gz" \
+      | tar -xz -C /usr/local/bin k9s 2>/dev/null && log "k9s installed" \
+      || warn "k9s install failed"
+  fi
+
+  # Add KUBECONFIG to root's profile
+  if ! grep -q 'KUBECONFIG' /root/.bashrc 2>/dev/null; then
+    echo 'export KUBECONFIG=/root/.kube/config' >> /root/.bashrc
+  fi
+
+  # Verify
+  if command -v kubectl >/dev/null 2>&1 && [[ -f /root/.kube/config ]]; then
+    echo ""
+    kubectl get nodes 2>/dev/null && log "Host kubectl verified — cluster is accessible" \
+      || warn "kubectl installed but cluster not yet reachable (nodes may still be joining)"
+  fi
+
+  echo ""
+  echo -e "  ${W}Access (from this host):${N}"
   echo -e "    kubectl get nodes"
-  echo -e "    kube-status"
-  echo -e "    hubble: kubectl port-forward -n kube-system svc/hubble-ui 12000:80"
+  echo -e "    k9s"
+  echo -e "    cilium status"
+  echo -e "    hubble observe --follow"
+  echo -e "    kube-demo"
+  echo -e "    ssh root@${cp_ip}"
+  echo -e "    hubble UI: kubectl port-forward -n kube-system svc/hubble-ui 12000:80"
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
 }
 
