@@ -279,11 +279,43 @@ EOFSTAB
     cp "${zbm_src}" "${zbm_efi_dir}/BOOTX64.EFI"
     k_log "ZFSBootMenu EFI installed (unsigned — no sbsign or no MOK keys)"
   fi
-  # Shim expects to chain-load "grubx64.efi" in the same directory.
-  # Copy ZFSBootMenu (signed or unsigned) as grubx64.efi so shim finds it.
-  cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_efi_dir}/grubx64.efi"
-  cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_fallback_dir}/grubx64.efi"
-  k_log "ZFSBootMenu copied as grubx64.efi for shim chain-loading"
+  # Shim chain-loads grubx64.efi, which must be signed by the distro key.
+  # We can't rename ZFSBootMenu as grubx64.efi — shim validates the signature
+  # and rejects unsigned binaries ("security policy violation").
+  # Instead: use the REAL distro-signed GRUB as grubx64.efi, with a grub.cfg
+  # that chainloads ZFSBootMenu. Chain: shim → signed GRUB → ZFSBootMenu.
+  local signed_grub=""
+  for _sg in "${target}/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed" \
+             "${target}/boot/efi/EFI/centos/grubx64.efi" \
+             "${target}/boot/efi/EFI/rocky/grubx64.efi" \
+             "${target}/boot/efi/EFI/fedora/grubx64.efi"; do
+    if [[ -f "$_sg" ]]; then signed_grub="$_sg"; break; fi
+  done
+
+  if [[ -n "$signed_grub" ]]; then
+    cp "$signed_grub" "${zbm_efi_dir}/grubx64.efi"
+    cp "$signed_grub" "${zbm_fallback_dir}/grubx64.efi"
+    k_log "Distro-signed GRUB installed as grubx64.efi (source: ${signed_grub})"
+
+    # GRUB config that chainloads ZFSBootMenu — GRUB searches multiple paths
+    for _gcfg_dir in "${zbm_efi_dir}/grub" "${zbm_fallback_dir}/grub" \
+                     "${zbm_efi_dir}" "${zbm_fallback_dir}" \
+                     "${target}/boot/efi/grub" "${target}/boot/grub"; do
+      mkdir -p "$_gcfg_dir" 2>/dev/null || true
+      cat > "${_gcfg_dir}/grub.cfg" <<'CHAINGRUB'
+set timeout=1
+menuentry "ZFSBootMenu" {
+    chainloader /EFI/zbm/BOOTX64.EFI
+}
+CHAINGRUB
+    done
+    k_log "GRUB chainloader config installed (auto-boots ZFSBootMenu in 1s)"
+  else
+    # No signed GRUB — fall back to ZFSBootMenu as grubx64.efi (won't work with Secure Boot)
+    cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_efi_dir}/grubx64.efi"
+    cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_fallback_dir}/grubx64.efi"
+    k_log "WARNING: No distro-signed GRUB found — ZFSBootMenu used as grubx64.efi (Secure Boot will fail)"
+  fi
 
   # Backup copy is always unsigned — used if the signed copy is corrupted.
   # The user can manually re-sign it with: sbsign --key mok.key --cert mok.pub ...
