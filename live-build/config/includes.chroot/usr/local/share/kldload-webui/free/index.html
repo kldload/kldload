@@ -682,8 +682,9 @@
         <div id="install-err" style="color:var(--danger);font-size:0.82rem;margin-bottom:0.75rem;display:none"></div>
         <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap">
           <button class="btn btn-primary" onclick="startInstall()">↯ Install to Disk…</button>
-          <button class="btn btn-danger" onclick="wipeDisk()" style="font-size:0.82rem">⊘ Wipe Disk</button>
-          <span style="font-size:0.75rem;color:var(--muted)">Wipe securely zeros the disk for clean re-testing</span>
+          <button class="btn btn-danger" onclick="wipeDisk('quick')" style="font-size:0.82rem">⊘ Quick Wipe</button>
+          <button class="btn btn-danger" onclick="wipeDisk('full')" style="font-size:0.82rem">⊘ Full Zero</button>
+          <span style="font-size:0.75rem;color:var(--muted)">Quick: labels + GPT + MOK (seconds) · Full: dd zero-fill (slow)</span>
         </div>
       </div>
 
@@ -1447,17 +1448,21 @@ function confirmInstall() {
   send({ action: 'install', params: _installPayload });
 }
 
-function wipeDisk() {
+function wipeDisk(mode) {
   const disk = document.getElementById('install-disk').value;
   if (!disk) return alert('Select a disk first');
-  if (!confirm(`Zero-fill ${disk}?\n\nThis will destroy all data and may take several minutes.`)) return;
+  const label = mode === 'full' ? 'FULL ZERO-FILL' : 'QUICK WIPE';
+  const warn = mode === 'full'
+    ? `${label} ${disk}?\n\nThis will zero every byte on the disk.\nOn a 2TB drive this takes 15-30 minutes.`
+    : `${label} ${disk}?\n\nClears partition tables, ZFS labels, UEFI boot entries, and MOK keys.\nTakes seconds.`;
+  if (!confirm(warn)) return;
   document.getElementById('install-idle').style.display    = 'none';
   document.getElementById('install-running').style.display = 'block';
   document.getElementById('install-log').textContent = '';
-  document.getElementById('install-status').textContent = `Wiping ${disk}…`;
+  document.getElementById('install-status').textContent = `${label}: ${disk}…`;
   const wbar = document.getElementById('install-progress');
   if (wbar) wbar.className = 'progress-bar active';
-  send({ action: 'wipe_disk', disk });
+  send({ action: 'wipe_disk', disk, mode: mode || 'quick' });
 }
 
 // ── Logs ──────────────────────────────────────────────────────────────────────

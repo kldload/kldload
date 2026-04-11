@@ -1369,30 +1369,93 @@ async def _stream_proc(websocket, cmd, env=None, target="log"):
 
 async def _run_wipe_disk(websocket, msg):
     disk = msg.get("disk", "")
+    mode = msg.get("mode", "quick")
     if not re.match(r'^/dev/[a-z]{2,8}[0-9]{0,3}$', disk):
         await websocket.send(json.dumps({"type": "error", "msg": f"Invalid disk: {disk}"}))
         return
-    # Fast wipe: destroy partition tables, ZFS labels, and filesystem signatures.
-    # No need to zero the entire disk — wipefs + sgdisk + zpool labelclear
-    # removes everything that matters in seconds, even on multi-TB drives.
-    cmd = ["bash", "-c", f"""
+
+    # Common cleanup: UEFI boot entries + MOK keys (runs for both modes)
+    cleanup_uefi_mok = """
+echo "Cleaning UEFI boot entries..."
+if command -v efibootmgr >/dev/null 2>&1; then
+    for entry in $(efibootmgr 2>/dev/null | grep -iE "kldload|ZFSBootMenu|UEFI OS|${DISK##*/}" | grep -oP 'Boot\\K[0-9A-Fa-f]+' || true); do
+        efibootmgr -b "$entry" -B 2>/dev/null && echo "  Removed Boot$entry" || true
+    done
+fi
+echo "Resetting MOK keys..."
+if command -v mokutil >/dev/null 2>&1; then
+    printf 'kldload\\nkldload\\n' | mokutil --delete-all 2>/dev/null && echo "  MOK keys queued for removal" || echo "  No MOK keys to remove"
+    mokutil --revoke-import 2>/dev/null && echo "  Pending enrollments cleared" || true
+fi
+"""
+
+    if mode == "full":
+        # Full dd zero-fill with progress
+        cmd = ["bash", "-c", f"""
+DISK={shlex.quote(disk)}
+SIZE_BYTES=$(blockdev --getsize64 "$DISK" 2>/dev/null || echo 0)
+SIZE_MB=$((SIZE_BYTES / 1048576))
+SIZE_GB=$((SIZE_BYTES / 1073741824))
+echo "══════════════════════════════════════════════════"
+echo "  FULL ZERO-FILL: $DISK (${{SIZE_GB}} GB)"
+echo "══════════════════════════════════════════════════"
+echo ""
+
+echo "Step 1/4: Unmounting and exporting ZFS pools..."
+umount -R /target/boot/efi 2>/dev/null || true
+umount -R /target 2>/dev/null || true
+for pool in $(zpool list -H -o name 2>/dev/null); do
+    zpool status "$pool" 2>/dev/null | grep -q "${{DISK##*/}}" && \
+        {{ zpool export -f "$pool" 2>/dev/null || zpool destroy -f "$pool" 2>/dev/null || true; echo "  Exported: $pool"; }}
+done
+
+echo "Step 2/4: Zero-filling entire disk..."
+WRITTEN=0
+while true; do
+    dd if=/dev/zero of="$DISK" bs=1M count=1024 seek=$WRITTEN conv=notrunc 2>/dev/null || break
+    WRITTEN=$((WRITTEN + 1024))
+    if [ "$SIZE_MB" -gt 0 ]; then
+        PCT=$((WRITTEN * 100 / SIZE_MB))
+        [ "$PCT" -gt 100 ] && PCT=100
+        echo "  ${{WRITTEN}} / ${{SIZE_MB}} MB  (${{PCT}}%)"
+    fi
+    [ "$SIZE_MB" -gt 0 ] && [ "$WRITTEN" -ge "$SIZE_MB" ] && break
+done
+echo "  Done"
+
+echo "Step 3/4: Cleaning UEFI + MOK..."
+{cleanup_uefi_mok}
+echo "  Done"
+
+echo "Step 4/4: Refreshing partition table..."
+partprobe "$DISK" 2>/dev/null || true
+sync
+echo ""
+echo "══════════════════════════════════════════════════"
+echo "  FULL WIPE COMPLETE — $DISK zeroed (${{SIZE_GB}} GB)"
+echo "══════════════════════════════════════════════════"
+"""]
+    else:
+        # Quick wipe: labels + GPT + first/last 10MB + UEFI + MOK
+        cmd = ["bash", "-c", f"""
 DISK={shlex.quote(disk)}
 SIZE_BYTES=$(blockdev --getsize64 "$DISK" 2>/dev/null || echo 0)
 SIZE_GB=$((SIZE_BYTES / 1073741824))
-echo "Disk: $DISK  Size: ${{SIZE_GB}} GB"
+echo "══════════════════════════════════════════════════"
+echo "  QUICK WIPE: $DISK (${{SIZE_GB}} GB)"
+echo "══════════════════════════════════════════════════"
+echo ""
 
-echo "Step 1/5: Unmounting and exporting ZFS pools..."
+echo "Step 1/6: Unmounting and exporting ZFS pools..."
 umount -R /target/boot/efi 2>/dev/null || true
 umount -R /target 2>/dev/null || true
-# Export any pool on this disk
 for pool in $(zpool list -H -o name 2>/dev/null); do
-    if zpool status "$pool" 2>/dev/null | grep -q "${{DISK##*/}}"; then
-        zpool export -f "$pool" 2>/dev/null || zpool destroy -f "$pool" 2>/dev/null || true
-        echo "  Exported pool: $pool"
-    fi
+    zpool status "$pool" 2>/dev/null | grep -q "${{DISK##*/}}" && \
+        {{ zpool export -f "$pool" 2>/dev/null || zpool destroy -f "$pool" 2>/dev/null || true; echo "  Exported: $pool"; }}
 done
+echo "  Done"
 
-echo "Step 2/5: Clearing ZFS labels on all partitions..."
+echo "Step 2/6: Clearing ZFS labels on all partitions..."
 for part in "${{DISK}}"*; do
     [ -b "$part" ] || continue
     zpool labelclear -f "$part" 2>/dev/null || true
@@ -1400,39 +1463,26 @@ for part in "${{DISK}}"*; do
 done
 echo "  Done"
 
-echo "Step 3/5: Wiping partition table (GPT + MBR)..."
+echo "Step 3/6: Wiping partition table (GPT + MBR)..."
 sgdisk --zap-all "$DISK" 2>/dev/null || true
 echo "  Done"
 
-echo "Step 4/6: Zeroing first and last 10MB (boot sector + backup GPT)..."
+echo "Step 4/6: Zeroing first and last 10MB..."
 dd if=/dev/zero of="$DISK" bs=1M count=10 2>/dev/null || true
 dd if=/dev/zero of="$DISK" bs=1M seek=$((SIZE_GB * 1024 - 10)) count=10 2>/dev/null || true
 echo "  Done"
 
-echo "Step 5/6: Cleaning UEFI boot entries and MOK keys..."
-# Remove stale UEFI boot entries for this disk
-if command -v efibootmgr >/dev/null 2>&1; then
-    DISK_SHORT="${{DISK##*/}}"
-    for entry in $(efibootmgr 2>/dev/null | grep -i "$DISK_SHORT\|kldload\|ZFSBootMenu\|UEFI OS" | grep -oP 'Boot\K[0-9A-Fa-f]+'); do
-        efibootmgr -b "$entry" -B 2>/dev/null && echo "  Removed Boot$entry" || true
-    done
-fi
-# Delete all pending MOK enrollments
-if command -v mokutil >/dev/null 2>&1; then
-    # Delete all enrolled MOK keys (password: kldload — matches what we enroll with)
-    for key in $(mokutil --list-enrolled 2>/dev/null | grep -c 'SHA1' || echo 0); do
-        printf 'kldload\nkldload\n' | mokutil --delete-all 2>/dev/null && echo "  MOK keys cleared" && break || true
-    done
-    # Also clear any pending enrollments
-    mokutil --revoke-import 2>/dev/null && echo "  Pending MOK enrollments cleared" || true
-fi
+echo "Step 5/6: Cleaning UEFI + MOK..."
+{cleanup_uefi_mok}
 echo "  Done"
 
 echo "Step 6/6: Refreshing partition table..."
 partprobe "$DISK" 2>/dev/null || true
 sync
 echo ""
-echo "Wipe complete — $DISK is clean (${{SIZE_GB}} GB ready for install)"
+echo "══════════════════════════════════════════════════"
+echo "  QUICK WIPE COMPLETE — $DISK clean (${{SIZE_GB}} GB)"
+echo "══════════════════════════════════════════════════"
 """]
     await _stream_proc(websocket, cmd, target="install")
 
