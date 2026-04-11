@@ -13,6 +13,15 @@ _emergency_cleanup() {
 }
 trap '_emergency_cleanup' ERR EXIT
 
+# Hardware profiles require Secure Boot + MOK for verified boot chain.
+# Desktop/Server/Core users don't need the MOK enrollment friction.
+_is_hw_profile() {
+  case "${KLDLOAD_PROFILE:-server}" in
+    kvm|k8s|devops|ai) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 k_poweroff_after_success() {
   local _fmt="${1:-none}"
   local _name="${2:-}"
@@ -353,8 +362,11 @@ ZFSREPO
 
         k_log "Root filesystem bootstrapped: $(du -sh "${target}" | cut -f1)"
 
-        # Generate MOK keys for Secure Boot BEFORE DKMS build so modules get signed
-        k_log "Generating MOK keys for Secure Boot..."
+        # Generate MOK keys for Secure Boot BEFORE DKMS build so modules get signed.
+        # Only hardware profiles (kvm/k8s/devops/ai) get MOK — they need verified
+        # boot chains for infrastructure trust. Desktop/Server skip the friction.
+        if _is_hw_profile; then
+        k_log "Generating MOK keys for Secure Boot (hardware profile)..."
         if k_have_func k_generate_mok_keys; then
           KLDLOAD_TARGET="${target}" k_generate_mok_keys || k_log "WARNING: MOK key generation failed — modules won't be signed"
         else
@@ -385,8 +397,11 @@ sign_tool=/etc/dkms/sign_helper.sh
 MOKCONF
           k_log "MOK keys generated (inline fallback)"
         fi
+        else
+          k_log "Skipping MOK key generation (${KLDLOAD_PROFILE:-server} profile — Secure Boot optional)"
+        fi  # end _is_hw_profile
 
-        # Build ZFS DKMS module (will be signed with MOK key)
+        # Build ZFS DKMS module (signed with MOK key if hw profile, unsigned otherwise)
         local kver
         kver=$(ls "${target}/lib/modules/" | grep -v '^$' | head -1)
         k_log "Building ZFS DKMS module for kernel ${kver} (Secure Boot signed)..."

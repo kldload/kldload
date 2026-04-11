@@ -272,7 +272,11 @@ k_install_target_packages() {
 
   # Generate MOK keys BEFORE package installation so DKMS signs ZFS modules
   # during build rather than requiring retroactive signing afterward.
-  k_generate_mok_keys
+  # Only hardware profiles (kvm/k8s/devops/ai) need Secure Boot + MOK.
+  case "${KLDLOAD_PROFILE:-server}" in
+    kvm|k8s|devops|ai) k_generate_mok_keys ;;
+    *) k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Skipping MOK keys (${KLDLOAD_PROFILE:-server} profile)" ;;
+  esac
 
   local distro="${KLDLOAD_DISTRO:-debian}"
 
