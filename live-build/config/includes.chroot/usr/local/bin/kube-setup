@@ -351,13 +351,26 @@ WantedBy=multi-user.target
 DHCPFB
   systemctl enable dhcp-fallback 2>/dev/null || true
 
-  # Disable cloud-init networking — it conflicts with our baked-in config.
-  # Cloud-init claims the interface and waits for its own datasource config,
-  # blocking systemd-networkd from bringing up DHCP. By disabling cloud-init's
-  # network module, our 10-dhcp.network + interfaces + dhclient fallback
-  # handle networking without interference.
-  mkdir -p /etc/cloud/cloud.cfg.d
-  echo 'network: {config: disabled}' > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+  # Aggressive DHCP: rc.local script that runs before cloud-init even starts.
+  # This is the nuclear option — bring up every ethernet interface with dhclient
+  # at the earliest possible boot stage, regardless of what cloud-init or
+  # systemd-networkd decide to do later. Belt, suspenders, AND duct tape.
+  cat > /etc/rc.local <<'RCLOCAL'
+#!/bin/bash
+# kldload clone networking — run dhclient on all ethernet interfaces
+for iface in /sys/class/net/en* /sys/class/net/eth*; do
+    [ -d "$iface" ] || continue
+    dev=$(basename "$iface")
+    ip link set "$dev" up 2>/dev/null
+    ip addr show "$dev" | grep -q "inet " && continue
+    dhclient -1 -v "$dev" 2>/dev/null &
+done
+exit 0
+RCLOCAL
+  chmod +x /etc/rc.local
+
+  # Enable rc-local service
+  systemctl enable rc-local 2>/dev/null || true
 
   log "Clone networking configured (baked into golden image)"
 
