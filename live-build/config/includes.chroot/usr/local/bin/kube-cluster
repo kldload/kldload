@@ -507,70 +507,14 @@ NETCFG
   _ssh_cmd "$golden_ip" "cloud-init clean --logs 2>/dev/null || true"
   _ssh_cmd "$golden_ip" "rm -f /etc/machine-id; touch /etc/machine-id"
   _ssh_cmd "$golden_ip" "truncate -s 0 /etc/hostname"
-  # Remove rendered network config so clones get fresh DHCP from their
-  # cloud-init ISO. Without this, clones inherit the golden's static
-  # network config and never request DHCP on virbr0.
-  _ssh_cmd "$golden_ip" "rm -f /etc/netplan/*.yaml /etc/systemd/network/*.network 2>/dev/null || true"
+  # Remove cloud-init rendered network config (netplan/networkd from first boot).
+  # The DHCP config written by kube-setup (10-dhcp.network, interfaces, dhclient)
+  # is already baked into the golden — it survives cloud-init clean because it's
+  # not in cloud-init's managed paths.
+  _ssh_cmd "$golden_ip" "rm -f /etc/netplan/*.yaml 2>/dev/null || true"
   _ssh_cmd "$golden_ip" "rm -f /var/lib/cloud/seed/nocloud-net/* 2>/dev/null || true"
   # Re-enable cloud-init services so clones re-run cloud-init on next boot.
   _ssh_cmd "$golden_ip" "systemctl enable cloud-init-local cloud-init cloud-config cloud-final 2>/dev/null || true"
-  # Write DHCP config for ALL networking backends so clones always get an IP
-  # regardless of which network manager the cloud image uses.
-  #
-  # 1. systemd-networkd (modern Debian/Ubuntu cloud images)
-  _ssh_cmd "$golden_ip" "mkdir -p /etc/systemd/network && cat > /etc/systemd/network/10-dhcp.network <<'NETD'
-[Match]
-Name=en* eth*
-
-[Network]
-DHCP=yes
-
-[DHCP]
-UseDomains=yes
-ClientIdentifier=mac
-NETD"
-  _ssh_cmd "$golden_ip" "systemctl enable systemd-networkd 2>/dev/null || true"
-  #
-  # 2. ifupdown (/etc/network/interfaces — traditional Debian)
-  _ssh_cmd "$golden_ip" "cat > /etc/network/interfaces <<'IFUP'
-auto lo
-iface lo inet loopback
-
-# DHCP on first ethernet — kldload clone networking
-allow-hotplug enp1s0
-iface enp1s0 inet dhcp
-
-allow-hotplug ens3
-iface ens3 inet dhcp
-
-allow-hotplug eth0
-iface eth0 inet dhcp
-IFUP"
-  _ssh_cmd "$golden_ip" "systemctl enable networking 2>/dev/null || true"
-  #
-  # 3. Enable dhclient as a fallback timer — runs 30s after boot if no IP
-  _ssh_cmd "$golden_ip" "cat > /etc/systemd/system/dhcp-fallback.service <<'DHCPFB'
-[Unit]
-Description=DHCP fallback — request IP if no address after boot
-After=network.target
-ConditionPathExists=!/run/dhcp-fallback-done
-
-[Service]
-Type=oneshot
-ExecStartPre=/bin/sleep 10
-ExecStart=/bin/bash -c 'for iface in /sys/class/net/en* /sys/class/net/eth*; do [ -d \"\$iface\" ] || continue; dev=\$(basename \"\$iface\"); ip addr show \"\$dev\" | grep -q \"inet \" && continue; dhclient -1 -v \"\$dev\" 2>/dev/null || true; done; touch /run/dhcp-fallback-done'
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-DHCPFB"
-  _ssh_cmd "$golden_ip" "systemctl enable dhcp-fallback 2>/dev/null || true"
-  #
-  # 4. Force DHCP to use MAC-based client-id everywhere (not DUID).
-  # Clones share the same SMBIOS/DMI product_uuid from libvirt, which makes
-  # the default DUID-based client-id identical across all clones. dnsmasq
-  # sees them as the same client and hands out the same IP = collision.
-  _ssh_cmd "$golden_ip" "mkdir -p /etc/dhcp && echo 'send dhcp-client-identifier = hardware;' > /etc/dhcp/dhclient.conf 2>/dev/null || true"
 
   # Shut down
   _ssh_cmd "$golden_ip" "shutdown -h now" || true
