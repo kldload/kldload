@@ -203,6 +203,9 @@ if [[ -d /root/darksite/k8s-images ]] && [[ -n "$(ls -A /root/darksite/k8s-image
   count="$(ls /root/darksite/k8s-images/*.tar 2>/dev/null | wc -l)"
   size="$(du -sh /root/darksite/k8s-images 2>/dev/null | cut -f1)"
   pass "Pre-pulled images: $count tarballs ($size)"
+elif crictl images 2>/dev/null | grep -q 'registry.k8s.io'; then
+  count="$(crictl images 2>/dev/null | grep -c 'registry.k8s.io' || true)"
+  pass "Pre-pulled images: $count K8s images in containerd"
 else
   warn "No pre-pulled images (will need internet for kube-init)"
 fi
@@ -241,9 +244,14 @@ if [[ -f /etc/kubernetes/admin.conf ]]; then
     # Pod test — create and delete a test pod
     echo ""
     echo -e "  ${D}Running pod test...${N}"
-    if kubectl run smoke-test --image=busybox --restart=Never --command -- sleep 5 >/dev/null 2>&1; then
-      sleep 3
-      pod_status="$(kubectl get pod smoke-test --no-headers 2>/dev/null | awk '{print $3}')"
+    if kubectl run smoke-test --image=busybox --restart=Never --command -- sleep 30 >/dev/null 2>&1; then
+      # Wait up to 30s for pod to start (image pull may take time on first run)
+      pod_status=""
+      for _i in $(seq 1 15); do
+        pod_status="$(kubectl get pod smoke-test --no-headers 2>/dev/null | awk '{print $3}')"
+        [[ "$pod_status" == "Running" || "$pod_status" == "Completed" ]] && break
+        sleep 2
+      done
       if [[ "$pod_status" == "Running" || "$pod_status" == "Completed" ]]; then
         pass "Pod scheduling works (test pod: $pod_status)"
       else

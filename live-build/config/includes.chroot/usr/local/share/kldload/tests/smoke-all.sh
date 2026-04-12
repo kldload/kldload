@@ -68,11 +68,13 @@ run_suite() {
   output=$(bash "$script" 2>&1) || true
   echo "$output" | tee_report
 
-  # Parse results from output
-  local p f w
-  p=$(echo "$output" | grep -c "PASS" || echo 0)
-  f=$(echo "$output" | grep -c "FAIL" || echo 0)
-  w=$(echo "$output" | grep -c "WARN" || echo 0)
+  # Parse results from output (strip ANSI codes first to avoid false matches)
+  local clean p f w
+  clean=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g; s/\x1b\[H\x1b\[2J\x1b\[3J//g')
+  p=$(echo "$clean" | grep -cF "PASS" || true)
+  f=$(echo "$clean" | grep -cF "FAIL" || true)
+  w=$(echo "$clean" | grep -cF "WARN" || true)
+  : "${p:=0}" "${f:=0}" "${w:=0}"
 
   TOTAL_PASS=$((TOTAL_PASS + p))
   TOTAL_FAIL=$((TOTAL_FAIL + f))
@@ -147,7 +149,6 @@ fi
 
   # VMs if KVM
   if command -v virsh >/dev/null 2>&1; then
-    local vm_count
     vm_count=$(virsh list --all --name 2>/dev/null | grep -c -v '^$' || echo 0)
     echo "  VMs:     $vm_count defined"
     virsh list --all 2>/dev/null | grep -v "^$" | sed 's/^/           /'

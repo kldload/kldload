@@ -35,7 +35,6 @@ test_succeeds "Has IP" "ip -4 addr show | grep -q 'inet '"
 _section "Secure Boot"
 if command -v mokutil >/dev/null 2>&1; then
   _pass "mokutil installed"
-  local _sb_state
   _sb_state="$(mokutil --sb-state 2>/dev/null || echo 'unknown')"
   if echo "$_sb_state" | grep -q "enabled"; then
     _pass "Secure Boot: ENABLED"
@@ -46,7 +45,6 @@ if command -v mokutil >/dev/null 2>&1; then
       _warn "MOK key" "not enrolled — run mokutil --import /var/lib/dkms/mok.der"
     fi
     # Check lockdown
-    local _lockdown
     _lockdown="$(cat /sys/kernel/security/lockdown 2>/dev/null || echo 'unknown')"
     _pass "Kernel lockdown: ${_lockdown}"
   else
@@ -65,7 +63,6 @@ else
 fi
 # Check shim on EFI partition
 if [[ -f /boot/efi/EFI/BOOT/BOOTX64.EFI ]]; then
-  local _boot_hash _zbm_hash
   _boot_hash="$(sha256sum /boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
   _zbm_hash="$(sha256sum /boot/efi/EFI/zbm/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
   if [[ "$_boot_hash" != "$_zbm_hash" ]]; then
@@ -134,7 +131,11 @@ done
 
 # ── kzfs-lab ─────────────────────────────────────────────────────────────────
 _section "ZFS Dev Lab"
-test_cmd "kzfs-lab" "kzfs-lab"
+if command -v kzfs-lab >/dev/null 2>&1; then
+  test_cmd "kzfs-lab" "kzfs-lab"
+else
+  _warn "kzfs-lab" "not installed (planned for 1.0.5)"
+fi
 
 # ── Sanoid ───────────────────────────────────────────────────────────────────
 _section "Sanoid"
@@ -274,14 +275,16 @@ if virsh list --name 2>/dev/null | grep -q kldload-cp; then
       fi
     fi
 
-    # Hubble
-    if command -v hubble >/dev/null 2>&1; then
-      FLOWS=$(hubble observe --last 5 2>/dev/null | wc -l || true)
-      if [[ "$FLOWS" -gt 0 ]]; then
-        _pass "Hubble: capturing flows ($FLOWS recent)"
+    # Hubble — check relay is deployed (flows require port-forward)
+    if kubectl get svc -n kube-system hubble-relay >/dev/null 2>&1; then
+      _pass "Hubble relay deployed"
+      if kubectl get pods -n kube-system -l k8s-app=hubble-relay --no-headers 2>/dev/null | grep -q Running; then
+        _pass "Hubble relay running"
       else
-        _warn "Hubble" "no flows captured"
+        _warn "Hubble relay" "pod not yet Running"
       fi
+    else
+      _warn "Hubble" "relay service not found"
     fi
 
     # Pods

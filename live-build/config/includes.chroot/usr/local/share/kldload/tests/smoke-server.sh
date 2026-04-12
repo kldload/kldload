@@ -68,10 +68,14 @@ _section "Web UI"
 test_file "kldload-webui binary" "/usr/local/bin/kldload-webui"
 test_service_enabled "kldload-webui enabled" "kldload-webui"
 
-# Check if webui responds (may be inactive on server profile but should be enabled)
+# Check if webui responds — detect configured port from service file
+_webui_port=8080
+if grep -q '\-\-port 9000' /usr/lib/systemd/system/kldload-webui.service 2>/dev/null; then
+  _webui_port=9000
+fi
 if systemctl is-active kldload-webui >/dev/null 2>&1; then
   _pass "kldload-webui running"
-  test_succeeds "WebUI responds on :8080" "curl -sf http://localhost:8080 >/dev/null 2>&1"
+  test_succeeds "WebUI responds on :${_webui_port}" "curl -sf http://localhost:${_webui_port} >/dev/null 2>&1"
 else
   _warn "kldload-webui running" "service not active (may need manual start)"
 fi
@@ -144,17 +148,17 @@ fi
 kbe delete "$BE_NAME" >/dev/null 2>&1 || true
 
 # ── Darksite ─────────────────────────────────────────────────────────────────
-_section "Darksite"
-
-test_dir "Darksite directory" "/root/darksite"
-
-if [[ "$DISTRO" == "deb" ]]; then
-  test_dir "APT darksite" "/root/darksite/debian/apt"
-  test_file "APT Release file" "/root/darksite/debian/apt/dists/trixie/Release"
+# Darksite only exists on the live ISO; skip on installed systems
+if [[ -d /root/darksite ]]; then
+  _section "Darksite"
+  test_dir "Darksite directory" "/root/darksite"
+  if [[ "$DISTRO" == "deb" ]]; then
+    test_dir "APT darksite" "/root/darksite/debian/apt"
+    test_file "APT Release file" "/root/darksite/debian/apt/dists/trixie/Release"
+  fi
+  test_dir "ZFSBootMenu in darksite" "/root/darksite/boot"
+  test_file "ZFSBootMenu EFI" "/root/darksite/boot/zfsbootmenu.EFI"
 fi
-
-test_dir "ZFSBootMenu in darksite" "/root/darksite/boot"
-test_file "ZFSBootMenu EFI" "/root/darksite/boot/zfsbootmenu.EFI"
 
 # ── eBPF / Observability ──────────────────────────────────────────────────────
 _section "eBPF / Observability"
