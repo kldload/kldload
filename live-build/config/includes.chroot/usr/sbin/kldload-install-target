@@ -611,8 +611,14 @@ EOS
       chmod 0600 "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/kldload-dhcp.nmconnection"
     fi
 
-    chroot "${KLDLOAD_TARGET_MNT}" systemctl enable NetworkManager \
-      >> "${KLDLOAD_LOG_DIR}/network.log" 2>&1 || true
+    # Enable network manager — NetworkManager on most distros, systemd-networkd as fallback
+    if chroot "${KLDLOAD_TARGET_MNT}" systemctl enable NetworkManager >> "${KLDLOAD_LOG_DIR}/network.log" 2>&1; then
+      true  # NetworkManager enabled successfully
+    else
+      # Fallback: enable systemd-networkd (Alpine, minimal installs)
+      chroot "${KLDLOAD_TARGET_MNT}" systemctl enable systemd-networkd >> "${KLDLOAD_LOG_DIR}/network.log" 2>&1 || true
+      chroot "${KLDLOAD_TARGET_MNT}" systemctl enable systemd-resolved >> "${KLDLOAD_LOG_DIR}/network.log" 2>&1 || true
+    fi
     k_log "Network configuration complete"
   }
 fi
@@ -649,7 +655,12 @@ KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
 UsePAM yes
 EOS
-    chroot "${KLDLOAD_TARGET_MNT}" systemctl enable ssh >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
+    # SSH service name differs: 'ssh' on Debian/Ubuntu, 'sshd' on CentOS/RHEL/Rocky/Fedora/Arch
+    local _ssh_svc="ssh"
+    case "${KLDLOAD_DISTRO:-}" in
+      centos|rocky|rhel|fedora|arch|alpine) _ssh_svc="sshd" ;;
+    esac
+    chroot "${KLDLOAD_TARGET_MNT}" systemctl enable "$_ssh_svc" >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
 
     # Install SSH public keys if provided
     if [[ -n "${KLDLOAD_SSH_PUBKEY:-}" ]]; then
