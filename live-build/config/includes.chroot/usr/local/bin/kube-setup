@@ -351,6 +351,14 @@ WantedBy=multi-user.target
 DHCPFB
   systemctl enable dhcp-fallback 2>/dev/null || true
 
+  # Disable cloud-init networking — it conflicts with our baked-in config.
+  # Cloud-init claims the interface and waits for its own datasource config,
+  # blocking systemd-networkd from bringing up DHCP. By disabling cloud-init's
+  # network module, our 10-dhcp.network + interfaces + dhclient fallback
+  # handle networking without interference.
+  mkdir -p /etc/cloud/cloud.cfg.d
+  echo 'network: {config: disabled}' > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+
   log "Clone networking configured (baked into golden image)"
 
   echo ""
