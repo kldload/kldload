@@ -261,6 +261,38 @@ main() {
   install_helm
   install_cilium_cli
 
+  # Pre-pull all container images so clones deploy without internet.
+  # kubeadm images + Cilium + MetalLB + Hubble — everything needed for
+  # a full cluster bootstrap from darksite (zero network dependency).
+  log "Pre-pulling container images (darksite)..."
+
+  # kubeadm images (API server, etcd, coredns, pause, scheduler, controller-manager)
+  kubeadm config images pull 2>/dev/null && log "  kubeadm images pulled" \
+    || log "WARNING: kubeadm image pull failed"
+
+  # Cilium + Hubble (eBPF CNI + observability)
+  local CILIUM_VER="${CILIUM_CLI_VERSION:-0.19.2}"
+  for img in \
+    "quay.io/cilium/cilium:v1.16.5" \
+    "quay.io/cilium/operator-generic:v1.16.5" \
+    "quay.io/cilium/hubble-relay:v1.16.5" \
+    "quay.io/cilium/hubble-ui:v0.13.1" \
+    "quay.io/cilium/hubble-ui-backend:v0.13.1" \
+    "quay.io/cilium/cilium-envoy:v1.30.8-1733837904-eaae5aca0fb988583e5617170a65ac5aa51c0aa8"; do
+    crictl pull "$img" 2>/dev/null && log "  pulled: ${img##*/}" \
+      || log "  WARN: failed to pull ${img##*/}"
+  done
+
+  # MetalLB
+  for img in \
+    "quay.io/metallb/controller:v0.14.9" \
+    "quay.io/metallb/speaker:v0.14.9"; do
+    crictl pull "$img" 2>/dev/null && log "  pulled: ${img##*/}" \
+      || log "  WARN: failed to pull ${img##*/}"
+  done
+
+  log "Container images pre-pulled — clones deploy without internet"
+
   echo ""
   log "Kubernetes node setup complete"
   log "  kubeadm: $(kubeadm version -o short 2>/dev/null)"
