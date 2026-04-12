@@ -297,10 +297,16 @@ EOFSTAB
     cp "$signed_grub" "${zbm_fallback_dir}/grubx64.efi"
     k_log "Distro-signed GRUB installed as grubx64.efi (source: ${signed_grub})"
 
-    # GRUB config that chainloads ZFSBootMenu — GRUB searches multiple paths
+    # GRUB config that chainloads ZFSBootMenu — GRUB searches multiple paths.
+    # CentOS/Rocky/Fedora GRUB looks for /EFI/<distro>/grub.cfg first, so we
+    # must write our chainloader config there too, not just /EFI/BOOT/ and /EFI/zbm/.
     for _gcfg_dir in "${zbm_efi_dir}/grub" "${zbm_fallback_dir}/grub" \
                      "${zbm_efi_dir}" "${zbm_fallback_dir}" \
-                     "${target}/boot/efi/grub" "${target}/boot/grub"; do
+                     "${target}/boot/efi/grub" "${target}/boot/grub" \
+                     "${target}/boot/efi/EFI/centos" "${target}/boot/efi/EFI/rocky" \
+                     "${target}/boot/efi/EFI/fedora" "${target}/boot/efi/EFI/debian" \
+                     "${target}/boot/efi/EFI/ubuntu"; do
+      [[ -d "$(dirname "$_gcfg_dir")" ]] || continue  # skip if parent doesn't exist
       mkdir -p "$_gcfg_dir" 2>/dev/null || true
       cat > "${_gcfg_dir}/grub.cfg" <<'CHAINGRUB'
 set timeout=1
