@@ -623,7 +623,7 @@ if [[ "$EDITION" != "core" ]]; then
     done
 
     # Copy the main installer to /usr/sbin
-    for sbin_tool in kldload-install-target kldload-firstboot kldload-recovery kldload-apply-platform-holds kldload-export-deferred; do
+    for sbin_tool in kldload-install-target kldload-firstboot kldload-recovery kldload-snapshot kldload-apply-platform-holds kldload-export-deferred; do
         src="/build/live-build/config/includes.chroot/usr/sbin/${sbin_tool}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/sbin/${sbin_tool}" && chmod +x "${ROOTFS}/usr/sbin/${sbin_tool}"
     done
