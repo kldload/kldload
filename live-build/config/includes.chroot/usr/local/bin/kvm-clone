@@ -78,11 +78,17 @@ if [[ -f "${NVRAM_SRC}" ]]; then
   cp "${NVRAM_SRC}" "${NVRAM_DST}"
 fi
 
-# Clone the libvirt domain definition via XML manipulation
+# Clone the libvirt domain definition via XML manipulation.
+# The XML may reference the zvol as /dev/zvol/pool/name OR as the resolved
+# /dev/zdN device. We must replace BOTH forms so the clone points to its
+# own zvol, not the source's.
 echo "Cloning VM definition..."
+SRC_DEV="$(readlink -f "/dev/zvol/${SRC_ZVOL}" 2>/dev/null || echo "/dev/zvol/${SRC_ZVOL}")"
+DST_DEV="$(readlink -f "/dev/zvol/${DST_ZVOL}" 2>/dev/null || echo "/dev/zvol/${DST_ZVOL}")"
 virsh dumpxml "${SOURCE}" | \
   sed "s|<name>${SOURCE}</name>|<name>${DEST}</name>|" | \
   sed "s|${SRC_ZVOL}|${DST_ZVOL}|g" | \
+  sed "s|${SRC_DEV}|${DST_DEV}|g" | \
   sed "s|${SOURCE}_VARS.fd|${DEST}_VARS.fd|g" | \
   sed '/<uuid>/d' | \
   sed '/<mac address/d' | \
