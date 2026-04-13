@@ -1228,7 +1228,9 @@ demo_replace_nodes() {
 
   for name in "$w1" "$w2"; do
     local ip
-    ip="$(_get_vm_ip "$name")"
+    local mac
+    mac="$(virsh domiflist "$name" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
+    ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1 | head -1)"
     if [[ -z "$ip" ]]; then
       echo -e "  ${Y}${name}: could not get IP${N}"
       continue
