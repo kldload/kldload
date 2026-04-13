@@ -232,9 +232,9 @@ _ssh_cmd() {
   local attempt
   for attempt in 1 2 3; do
     ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
-      -o ServerAliveInterval=5 -i "$SSH_KEY" "root@${ip}" "$@" 2>/dev/null && return 0
+      -o ServerAliveInterval=30 -i "$SSH_KEY" "root@${ip}" "$@" 2>/dev/null && return 0
     sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-      -o ServerAliveInterval=5 "root@${ip}" "$@" 2>/dev/null && return 0
+      -o ServerAliveInterval=30 "root@${ip}" "$@" 2>/dev/null && return 0
     [[ $attempt -lt 3 ]] && sleep 3
   done
   return 1
@@ -480,7 +480,8 @@ NETCFG
   # Cloud-init may have DHCP but DNS resolution can lag behind — the 10s
   # pause lets systemd-resolved/NetworkManager finish before kube-setup
   # tries to reach package repos (kubernetes.io, docker.io, etc.)
-  _ssh_cmd "$golden_ip" "sleep 10"
+  # Sleep locally — running via SSH times out (ServerAliveInterval < sleep).
+  sleep 10
   # kube-setup installs kubeadm, kubelet, containerd, helm, cilium-cli, etc.
   # Retry once because CentOS cloud images sometimes have transient dnf
   # mirror failures on first boot when metadata caches are cold.
