@@ -1061,18 +1061,16 @@ ZFSLABFB
     k_log "DevOps Lab will auto-deploy on first boot (builds 6 golden images + blue site)"
   fi
 
-  # ── SELinux on ZFS — set permissive and trigger autorelabel ────────────
-  # ZFS does not support xattr-based SELinux labels natively. All files on a
-  # ZFS dataset get the unlabeled_t context by default. If SELinux is set to
-  # enforcing, unlabeled_t is denied for virtually everything: login fails,
-  # SSH fails, systemd services fail. Setting permissive + autorelabel lets
-  # the system boot, relabel files on the first boot, and then the user can
-  # manually switch to enforcing if desired. This only applies to RPM distros
-  # (CentOS, RHEL, Rocky, Fedora) — Debian/Ubuntu/Arch don't ship SELinux.
+  # ── SELinux on ZFS — disabled ─────────────────────────────────────────
+  # ZFS does not support xattr-based SELinux labels. All files get unlabeled_t
+  # which triggers thousands of AVC denials. Permissive still floods the
+  # console and audit log with noise. Disabled is the only clean option until
+  # OpenZFS ships proper SELinux policy modules.
+  # RPM distros only (CentOS, RHEL, Rocky, Fedora) — Debian/Ubuntu/Arch don't ship SELinux.
   if [[ -f "${target}/etc/selinux/config" ]]; then
-    sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' "${target}/etc/selinux/config"
-    touch "${target}/.autorelabel"
-    k_log "SELinux set to permissive + autorelabel on first boot (ZFS unlabeled_t workaround)"
+    sed -i 's/^SELINUX=enforcing/SELINUX=disabled/' "${target}/etc/selinux/config"
+    sed -i 's/^SELINUX=permissive/SELINUX=disabled/' "${target}/etc/selinux/config"
+    k_log "SELinux disabled (ZFS has no SELinux policy — re-enable manually if needed)"
   fi
 
   k_log "System files installed (root_ds=${root_ds})"
