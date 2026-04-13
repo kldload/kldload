@@ -313,8 +313,9 @@ ClientIdentifier=mac
 NETD
   systemctl enable systemd-networkd 2>/dev/null || true
 
-  # ifupdown fallback
-  cat > /etc/network/interfaces <<'IFUP'
+  # ifupdown fallback (Debian/Ubuntu only — CentOS uses NetworkManager)
+  if [[ -d /etc/network ]]; then
+    cat > /etc/network/interfaces <<'IFUP'
 auto lo
 iface lo inet loopback
 
@@ -327,7 +328,18 @@ iface ens3 inet dhcp
 allow-hotplug eth0
 iface eth0 inet dhcp
 IFUP
-  systemctl enable networking 2>/dev/null || true
+    systemctl enable networking 2>/dev/null || true
+  fi
+
+  # NetworkManager DHCP config (CentOS/RHEL/Rocky/Fedora)
+  if command -v nmcli >/dev/null 2>&1; then
+    # Use MAC-based DHCP client ID to prevent clone collisions
+    mkdir -p /etc/NetworkManager/conf.d
+    cat > /etc/NetworkManager/conf.d/99-kldload-dhcp.conf <<'NMDHCP'
+[connection]
+ipv4.dhcp-client-id=mac
+NMDHCP
+  fi
 
   # dhclient config — use MAC not DUID
   mkdir -p /etc/dhcp
