@@ -210,13 +210,13 @@ demo_zfs_clones() {
 demo_cilium() {
   header
   echo -e "${Y}=== Cilium Status ===${N}"
-  _ssh_cp "cilium status" || echo "  cilium CLI not available on CP"
+  _cilium_dbg status || echo "  cilium not available"
   echo ""
   echo -e "${Y}=== Cilium Pods ===${N}"
   _kctl get pods -n kube-system -l k8s-app=cilium -o wide
   echo ""
-  echo -e "${Y}=== eBPF Maps ===${N}"
-  _ssh_cp "cilium bpf endpoint list 2>/dev/null | head -15" || echo "  N/A"
+  echo -e "${Y}=== eBPF Endpoint Map ===${N}"
+  _cilium_dbg bpf endpoint list 2>/dev/null | head -15 || echo "  N/A"
 
   echo ""
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
@@ -234,25 +234,31 @@ demo_cilium() {
 demo_connectivity() {
   header
   echo -e "${Y}=== Cilium Connectivity Test ===${N}"
-  echo -e "${D}Deploying test pods and running checks...${N}"
+  echo -e "${D}Running pod-to-pod and pod-to-service checks via eBPF...${N}"
+  echo -e "${D}This deploys test pods and validates the datapath. Takes ~2 min.${N}"
   echo ""
   local tmpout="/tmp/cilium-connectivity-$$.log"
-  _ssh_cp "cilium connectivity test --test pod-to-pod --test pod-to-service 2>&1" \
+  # Run connectivity test via kubectl exec into cilium pod
+  _kctl exec -n kube-system ds/cilium -c cilium-agent -- \
+    cilium-dbg connectivity test --test pod-to-pod --test pod-to-service 2>&1 \
     | tee "$tmpout" || true
 
-  # Clear and show summary
+  # Parse results — cilium uses [=] for skip, no emoji
   header
   echo -e "${Y}=== Cilium Connectivity Results ===${N}"
   echo ""
-  grep -E "✅|❌|PASS|FAIL|Test|test.*:" "$tmpout" 2>/dev/null | tail -20
-  local pass fail
-  pass="$(grep -c '✅' "$tmpout" 2>/dev/null || echo 0)"
-  fail="$(grep -c '❌' "$tmpout" 2>/dev/null || echo 0)"
+  grep -E "^\[.\].*Test " "$tmpout" 2>/dev/null | tail -20
+  local total skip
+  total="$(grep -cE "^\[.\].*Test " "$tmpout" 2>/dev/null || echo 0)"
+  skip="$(grep -cE "^\[=\].*Test " "$tmpout" 2>/dev/null || echo 0)"
+  local ran=$((total - skip))
+  local fail
+  fail="$(grep -cE "^\[!\]|FAIL" "$tmpout" 2>/dev/null || echo 0)"
   echo ""
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo -e "${W}  PROOF: Cilium eBPF Connectivity${N}"
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
-  echo -e "  Tests passed:   ${G}${pass}${N}"
+  echo -e "  Tests run:      ${G}${ran}${N} (${skip} skipped)"
   echo -e "  Tests failed:   ${R}${fail}${N}"
   echo -e "  Pod-to-pod:     ${G}eBPF datapath (no iptables)${N}"
   echo -e "  Pod-to-service: ${G}eBPF service map (no kube-proxy)${N}"
@@ -265,13 +271,13 @@ demo_connectivity() {
 demo_hubble() {
   header
   echo -e "${Y}=== Hubble Status ===${N}"
-  _ssh_cp "hubble status 2>/dev/null" || _kctl get deploy -n kube-system hubble-relay
+  _kctl get deploy -n kube-system hubble-relay hubble-ui
   echo ""
 
   echo -e "${Y}=== Hubble Live — deploying pods while watching eBPF flows ===${N}"
   echo -e "${D}Starting Hubble stream, then deploying 5 nginx pods...${N}"
   echo -e "${D}Watch the flows light up in real time.${N}"
-  echo -e "${D}(Ctrl+C or wait 30s to stop)${N}"
+  echo -e "${D}(Wait 30s for flows to stream)${N}"
   echo ""
 
   # Deploy pods in background — Hubble will see them being scheduled
@@ -285,9 +291,12 @@ demo_hubble() {
   ) &
   local deploy_pid=$!
 
-  # Stream Hubble flows for 30 seconds — user sees pods schedule, DNS resolve, HTTP flow
-  _ssh_cp "timeout 30 hubble observe --follow --output compact 2>/dev/null" || \
-    echo "  Hubble CLI not available — use 'kubectl port-forward -n kube-system svc/hubble-ui 12000:80' for the web UI"
+  # Stream Hubble flows via kubectl exec into hubble-relay pod
+  _kctl exec -n kube-system deploy/hubble-relay -c hubble-relay -- \
+    hubble observe --follow --output compact --last 50 2>/dev/null | head -40 &
+  local hubble_pid=$!
+  sleep 25
+  kill "$hubble_pid" 2>/dev/null || true
 
   wait "$deploy_pid" 2>/dev/null || true
 
