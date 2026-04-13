@@ -231,10 +231,17 @@ _ssh_cmd() {
   local ip="$1"; shift
   local attempt
   for attempt in 1 2 3; do
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
-      -o ServerAliveInterval=30 -i "$SSH_KEY" "root@${ip}" "$@" 2>/dev/null && return 0
+    # Try key auth first — skip if no key or if key auth already failed for this IP
+    if [[ -f "$SSH_KEY" ]]; then
+      ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
+        -i "$SSH_KEY" "root@${ip}" "$@" 2>/dev/null && return 0
+    fi
+    # Password fallback — always available
     sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-      -o ServerAliveInterval=30 "root@${ip}" "$@" 2>/dev/null && return 0
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
+      -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+      "root@${ip}" "$@" 2>/dev/null && return 0
     [[ $attempt -lt 3 ]] && sleep 3
   done
   return 1
