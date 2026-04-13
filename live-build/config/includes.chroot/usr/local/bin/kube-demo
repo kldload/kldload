@@ -63,6 +63,16 @@ _ssh_cp() {
 
 pause() { echo ""; echo -e "${D}Press Enter...${N}"; read -r; }
 
+# Run a command inside the cilium agent pod (for cilium-dbg, bpf maps, etc.)
+_cilium() {
+  _kctl exec -n kube-system ds/cilium -c cilium-agent -- "$@" 2>/dev/null
+}
+
+# Shorthand for cilium-dbg inside the pod
+_cilium_dbg() {
+  _cilium cilium-dbg "$@"
+}
+
 header() {
   clear
   local nodes
@@ -1319,58 +1329,38 @@ demo_replace_nodes() {
 # ── 22: eBPF Deep Dive ───────────────────────────────────────
 demo_ebpf_deep_dive() {
   header
-  echo -e "${Y}=== eBPF Programs Loaded by Cilium ===${N}"
-  echo -e "${D}Every one of these runs in the kernel — not userland, not a sidecar.${N}"
-  echo ""
-  _ssh_cp "bpftool prog list 2>/dev/null | head -40" || echo "  bpftool not available"
-
-  echo ""
-  echo -e "${Y}=== eBPF Maps (kernel data structures) ===${N}"
-  echo -e "${D}These are the actual data structures Cilium uses — conntrack, NAT, policy, LB — all in kernel memory.${N}"
-  echo ""
-  _ssh_cp "bpftool map list 2>/dev/null | head -30" || echo "  N/A"
-
-  echo ""
   echo -e "${Y}=== Cilium BPF Endpoint Map ===${N}"
   echo -e "${D}Every pod endpoint — tracked in a BPF map, not a userland database.${N}"
   echo ""
-  _ssh_cp "cilium bpf endpoint list 2>/dev/null" || echo "  N/A"
+  _cilium_dbg bpf endpoint list || echo "  N/A"
 
   echo ""
   echo -e "${Y}=== Cilium BPF Conntrack Table ===${N}"
   echo -e "${D}Connection tracking — in the kernel, not conntrack-tools, not iptables.${N}"
   echo ""
-  _ssh_cp "cilium bpf ct list global 2>/dev/null | head -20" || echo "  N/A"
+  _cilium_dbg bpf ct list global 2>/dev/null | head -20 || echo "  N/A"
 
   echo ""
   echo -e "${Y}=== Cilium BPF NAT Table ===${N}"
   echo -e "${D}NAT — in the kernel. No iptables NAT chain. No kube-proxy.${N}"
   echo ""
-  _ssh_cp "cilium bpf nat list 2>/dev/null | head -20" || echo "  N/A"
+  _cilium_dbg bpf nat list 2>/dev/null | head -20 || echo "  N/A"
 
   echo ""
   echo -e "${Y}=== Cilium BPF LB Service Map ===${N}"
   echo -e "${D}Service load balancing — kernel map, not userland proxy.${N}"
   echo ""
-  _ssh_cp "cilium bpf lb list 2>/dev/null | head -20" || echo "  N/A"
+  _cilium_dbg bpf lb list 2>/dev/null | head -20 || echo "  N/A"
 
   echo ""
   echo -e "${Y}=== Cilium BPF Policy Map ===${N}"
   echo -e "${D}Network policy enforcement — BPF map, evaluated per-packet in kernel.${N}"
   echo ""
-  _ssh_cp "cilium bpf policy get --all 2>/dev/null | head -20" || echo "  N/A"
+  _cilium_dbg bpf policy get --all 2>/dev/null | head -20 || echo "  N/A"
 
   echo ""
-  echo -e "${Y}=== TC Filters on Pod veth Interfaces ===${N}"
-  echo -e "${D}eBPF programs attached to veth via tc — this IS the datapath.${N}"
-  echo ""
-  _ssh_cp '
-    for dev in $(ip -o link show type veth 2>/dev/null | awk -F": " "{print \$2}" | cut -d@ -f1 | head -5); do
-      echo "--- $dev ---"
-      tc filter show dev "$dev" ingress 2>/dev/null
-      tc filter show dev "$dev" egress 2>/dev/null
-    done
-  ' || echo "  N/A"
+  echo -e "${Y}=== Cilium Status — Datapath ===${N}"
+  _cilium_dbg status 2>/dev/null | grep -E 'KubeProxy|Datapath|Masq|Host Routing' || echo "  N/A"
 
   echo ""
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
@@ -1443,7 +1433,7 @@ demo_zero_sidecar() {
 
   echo ""
   echo -e "${Y}=== Cilium Status — Datapath Mode ===${N}"
-  _ssh_cp "cilium status 2>/dev/null | grep -E 'KubeProxy|Datapath|Masquerading|Host|Encryption'" || echo "  N/A"
+  _cilium_dbg status 2>/dev/null | grep -E 'KubeProxy|Datapath|Masquerading|Host|Encryption' || echo "  N/A"
 
   echo ""
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
@@ -1482,10 +1472,9 @@ demo_datapath_trace() {
   echo -e "${Y}=== Cilium Endpoint List ===${N}"
   echo -e "${D}Each endpoint has its own BPF program chain:${N}"
   echo ""
-  _ssh_cp "cilium endpoint list 2>/dev/null" || echo "  N/A"
+  _cilium_dbg endpoint list || echo "  N/A"
   echo ""
 
-  # Find the endpoint ID for our trace-web pod
   echo -e "${Y}=== Tracing Live Traffic Through eBPF ===${N}"
   echo -e "${D}Starting cilium monitor (10 seconds) — generating traffic in background...${N}"
   echo ""
@@ -1498,24 +1487,18 @@ demo_datapath_trace() {
   ) &
   local traffic_pid=$!
 
-  # Capture eBPF datapath events
-  _ssh_cp "timeout 10 cilium monitor --type trace --type drop --type debug 2>&1" | head -60 || \
-    _ssh_cp "timeout 10 cilium monitor 2>&1" | head -60 || \
+  # Capture eBPF datapath events via kubectl exec into cilium pod
+  _kctl exec -n kube-system ds/cilium -c cilium-agent -- \
+    timeout 10 cilium-dbg monitor --type trace --type drop 2>&1 | head -60 || \
     echo "  cilium monitor not available"
 
   wait "$traffic_pid" 2>/dev/null || true
 
   echo ""
-  echo -e "${Y}=== BPF Program Stats (per-program packet counts) ===${N}"
-  echo -e "${D}The kernel tracks every packet through every BPF program:${N}"
-  echo ""
-  _ssh_cp "bpftool prog show 2>/dev/null | grep -A2 'sched_cls\|xdp' | head -30" || echo "  N/A"
-
-  echo ""
   echo -e "${Y}=== Cilium BPF Conntrack — Proof These Flows Exist ===${N}"
   echo -e "${D}The connections we just made — tracked in a BPF map, not iptables:${N}"
   echo ""
-  _ssh_cp "cilium bpf ct list global 2>/dev/null | grep ':80' | head -10" || echo "  N/A"
+  _cilium_dbg bpf ct list global 2>/dev/null | grep ':80' | head -10 || echo "  N/A"
 
   # Cleanup
   _kctl delete deployment trace-web --grace-period=0 2>/dev/null || true
