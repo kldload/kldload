@@ -895,6 +895,13 @@ CUSTOMREPO
     [[ -L "${target}/${_d}" ]] || ln -sf "usr/${_d}" "${target}/${_d}"
   done
 
+  # Generate MOK keys BEFORE package installation so DKMS signs ZFS modules
+  # during build. Only hardware profiles need Secure Boot + MOK.
+  case "${KLDLOAD_PROFILE:-server}" in
+    kvm|k8s|devops|ai) k_generate_mok_keys ;;
+    *) k_log_to "$log" "Skipping MOK keys (${KLDLOAD_PROFILE:-server} profile)" ;;
+  esac
+
   k_log_to "$log" "Running dnf --installroot (${#_dnf_pkgs[@]} packages, profile=${_profile})..."
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
