@@ -1,12 +1,16 @@
 # kldloadOS
 
-**One ISO. Eight distros. ZFS on root.**
+**One USB. Any distro. ZFS on root. Production Kubernetes in 20 minutes.**
 
-kldloadOS builds a single bootable ISO that installs CentOS, Debian, Ubuntu, Fedora, Rocky, RHEL, Arch, or Alpine Linux with ZFS on root, WireGuard, and eBPF — from one USB drive. Most install fully offline from embedded package mirrors (darksites).
+kldloadOS assembles any Linux distribution from stock vendor repos (DNF, APT, pacman) with ZFS on root, WireGuard, eBPF, and a complete Kubernetes stack — on a single bootable ISO. Nothing forked, nothing patched. Every package pulled directly from vendor CDNs. Most distros install fully offline from embedded package mirrors (darksites).
 
-The KVM profile turns a bare-metal machine into a hypervisor with ZFS-native VM management — instant clones (~100ms), atomic snapshots, incremental replication, and golden image workflows.
+One command deploys a production Kubernetes cluster with Cilium eBPF, dual WireGuard encrypted backplanes, and ZFS instant-cloned nodes:
 
-**Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Discord:** [discord.gg/tkVN6sSU](https://discord.gg/tkVN6sSU)
+```bash
+kube-cluster bootstrap --workers 5
+```
+
+**Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Demo:** [YouTube](https://www.youtube.com/watch?v=egFffrFa6Ss) | **Discord:** [discord.gg/tkVN6sSU](https://discord.gg/tkVN6sSU)
 
 ![kldloadOS Installer](screenshots/installer-ui.png)
 
@@ -48,6 +52,7 @@ Boot the USB → web UI opens at `:8080` → pick distro + profile → install.
 | **Desktop** | GNOME + ZFS + all kldloadOS tools |
 | **Server** | Headless SSH + ZFS + all kldloadOS tools |
 | **KVM** | KVM hypervisor + ZFS zvols + instant cloning + Kubernetes |
+| **Kubernetes** | KVM + one-command K8s cluster (Cilium eBPF + WireGuard + Hubble) |
 | **Core** | ZFS on root + WireGuard — stock distro, nothing else |
 | **AI** | Desktop + Ollama + local LLM + NVIDIA GPU |
 
@@ -123,7 +128,20 @@ The live environment is always CentOS Stream 9. The user picks their target dist
 
 ## Releases
 
-### 1.0.3 — FreeBSD + KVM on ZFS (current)
+### 1.0.4 — Kubernetes on ZFS (current)
+- **197 commits.** One-command production Kubernetes on bare metal.
+- `kube-cluster bootstrap --workers 5` — full cluster in under 20 minutes
+- Cilium v1.16.5 eBPF CNI — no kube-proxy, no iptables, pure kernel datapath
+- Hubble eBPF observability — L3/L4/L7 flow visibility from first boot
+- Dual WireGuard encrypted backplanes — management + data plane
+- ZFS instant clones — nodes provision in under 100ms via copy-on-write
+- MetalLB + Gateway API + OpenEBS ZFS CSI — full production stack
+- Secure Boot end-to-end — MOK-signed ZFS modules
+- ZFSBootMenu — native boot environments, GRUB eliminated
+- Comprehensive smoke tests — 190+ automated checks
+- [Demo video](https://www.youtube.com/watch?v=egFffrFa6Ss)
+
+### 1.0.3 — FreeBSD + KVM on ZFS
 - FreeBSD 15.0 added to installer (native ZFS, jails, bhyve)
 - KVM hypervisor profile: ZFS zvols, instant clones (~100ms), golden image workflow
 - `kvm-create`, `kvm-clone`, `kvm-snap`, `kvm-delete`, `kvm-list`, `kvm-demo`
@@ -157,4 +175,4 @@ BSD-3-Clause. Free forever. See [LICENSE](LICENSE).
 
 ---
 
-*kldloadOS 1.0.3 — FreeBSD + KVM on ZFS*
+*kldloadOS 1.0.4 — Kubernetes on ZFS*
