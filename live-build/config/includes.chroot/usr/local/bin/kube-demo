@@ -63,14 +63,45 @@ _ssh_cp() {
 
 pause() { echo ""; echo -e "${D}Press Enter...${N}"; read -r; }
 
-# Run a command inside the cilium agent pod (for cilium-dbg, bpf maps, etc.)
+# ── Smart helpers — auto-detect where to run commands ─────────
+# These try: host CLI → kubectl exec → SSH to CP, in that order.
+# Works on both the KVM host and directly on the control plane.
+
+# Run a command inside the cilium agent pod
 _cilium() {
   _kctl exec -n kube-system ds/cilium -c cilium-agent -- "$@" 2>/dev/null
 }
 
-# Shorthand for cilium-dbg inside the pod
+# cilium-dbg inside the pod (BPF maps, endpoint list, status, monitor)
 _cilium_dbg() {
   _cilium cilium-dbg "$@"
+}
+
+# cilium CLI — try host first (connectivity test, hubble enable), then CP
+_cilium_cli() {
+  if command -v cilium >/dev/null 2>&1; then
+    cilium "$@" 2>/dev/null && return 0
+  fi
+  _ssh_cp "cilium $*" 2>/dev/null
+}
+
+# hubble CLI — needs port-forward to hubble-relay
+_hubble_pf_pid=""
+_hubble_start() {
+  _kctl port-forward -n kube-system svc/hubble-relay 4245:80 >/dev/null 2>&1 &
+  _hubble_pf_pid=$!
+  sleep 2
+}
+_hubble_stop() {
+  [[ -n "$_hubble_pf_pid" ]] && kill "$_hubble_pf_pid" 2>/dev/null || true
+  _hubble_pf_pid=""
+}
+_hubble() {
+  if command -v hubble >/dev/null 2>&1; then
+    hubble --server localhost:4245 "$@" 2>/dev/null && return 0
+  fi
+  # Fallback: raw eBPF events via cilium-dbg monitor
+  _cilium_dbg monitor "$@" 2>/dev/null
 }
 
 header() {
@@ -238,11 +269,9 @@ demo_connectivity() {
   echo -e "${D}This deploys test pods and validates the datapath. Takes ~2 min.${N}"
   echo ""
   local tmpout="/tmp/cilium-connectivity-$$.log"
-  # Run via host cilium CLI (connectivity test is a CLI feature, not in cilium-dbg)
-  cilium connectivity test --test pod-to-pod --test pod-to-service 2>&1 \
-    | tee "$tmpout" || \
-  _ssh_cp "cilium connectivity test --test pod-to-pod --test pod-to-service 2>&1" \
-    | tee -a "$tmpout" || true
+  # connectivity test is a cilium CLI feature (host), not cilium-dbg (pod)
+  _cilium_cli connectivity test --test pod-to-pod --test pod-to-service 2>&1 \
+    | tee "$tmpout" || true
 
   # Parse results — cilium uses [=] for skip, no emoji
   header
@@ -292,23 +321,14 @@ demo_hubble() {
   ) &
   local deploy_pid=$!
 
-  # Start hubble port-forward in background, then stream flows
-  _kctl port-forward -n kube-system svc/hubble-relay 4245:80 >/dev/null 2>&1 &
-  local pf_pid=$!
-  sleep 2
+  # Start hubble port-forward, stream flows, clean up
+  _hubble_start
 
-  # Stream flows via host hubble CLI (connected to port-forward)
-  if command -v hubble >/dev/null 2>&1; then
-    timeout 25 hubble observe --server localhost:4245 --follow --output compact 2>/dev/null | head -40 || \
-      echo "  Hubble stream ended"
-  else
-    # Fallback: use cilium-dbg monitor inside the pod for raw eBPF events
-    _kctl exec -n kube-system ds/cilium -c cilium-agent -- \
-      timeout 25 cilium-dbg monitor --type l7 --type trace 2>&1 | head -40 || \
-      echo "  Hubble not available on host — install with: cilium hubble enable"
-  fi
+  timeout 25 hubble --server localhost:4245 observe --follow --output compact 2>/dev/null | head -40 || \
+    _cilium_dbg monitor --type trace --type l7 2>/dev/null | head -40 || \
+    echo "  Hubble stream ended"
 
-  kill "$pf_pid" 2>/dev/null || true
+  _hubble_stop
 
   wait "$deploy_pid" 2>/dev/null || true
 
