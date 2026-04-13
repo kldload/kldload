@@ -323,11 +323,18 @@ find_cloud_image() {
 # near-zero disk cost (copy-on-write), and already has all K8s packages.
 # Each clone gets a fresh cloud-init ISO to establish unique identity.
 build_golden() {
-  # Skip rebuild if golden already exists — it's expensive (downloads, installs)
+  # Skip rebuild if golden zvol AND libvirt domain both exist.
+  # If the zvol exists but the domain was destroyed (e.g. failed previous run),
+  # nuke the orphaned zvol and rebuild from scratch.
   if zfs list "${POOL}/vms/${GOLDEN}" >/dev/null 2>&1; then
-    log "Golden image ${GOLDEN} already exists — skipping build"
-    log "  (delete with: kvm-delete ${GOLDEN} to force rebuild)"
-    return 0
+    if virsh dominfo "${GOLDEN}" >/dev/null 2>&1; then
+      log "Golden image ${GOLDEN} already exists — skipping build"
+      log "  (delete with: kvm-delete ${GOLDEN} to force rebuild)"
+      return 0
+    else
+      warn "Golden zvol exists but VM definition is missing — rebuilding"
+      zfs destroy -Rf "${POOL}/vms/${GOLDEN}" 2>/dev/null || true
+    fi
   fi
 
   log "Building golden image: ${GOLDEN}"
