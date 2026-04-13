@@ -23,11 +23,9 @@ k_configure_mok() {
     return 0
   fi
 
-  # Random one-time MOK enrollment password — unique per install for security.
-  # The web UI displays this to the user before reboot so they can enter it
-  # at the MokManager blue screen on first boot.
-  local mok_pass
-  mok_pass="$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-20)"
+  # TODO: restore random password once web UI displays it before reboot
+  # mok_pass="$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-20)"
+  local mok_pass="kldload"
 
   local enrolled=0
   if chroot "${target}" command -v mokutil >/dev/null 2>&1; then
