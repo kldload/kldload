@@ -231,13 +231,13 @@ _ssh_cmd() {
   local ip="$1"; shift
   local attempt
   for attempt in 1 2 3; do
-    # Try key auth first — skip if no key or if key auth already failed for this IP
-    if [[ -f "$SSH_KEY" ]]; then
+    # Try key auth on first attempt only — if it fails, don't waste auth tries
+    if [[ $attempt -eq 1 && -f "$SSH_KEY" ]]; then
       ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
         -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
         -i "$SSH_KEY" "root@${ip}" "$@" 2>/dev/null && return 0
     fi
-    # Password fallback — always available
+    # Password auth — no pubkey negotiation, goes straight to password
     sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
       -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
       -o PreferredAuthentications=password -o PubkeyAuthentication=no \
