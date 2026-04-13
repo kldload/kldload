@@ -260,6 +260,8 @@ EOSIGN
 mok_signing_key=/var/lib/dkms/mok.key
 mok_certificate=/var/lib/dkms/mok.pub
 sign_tool=/etc/dkms/sign_helper.sh
+# Force signing even inside chroot (default not_in_chroot skips during install)
+try_sign_modules=true
 MOKCONF
 
   k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "MOK keys ready at /var/lib/dkms/mok.{key,pub,der} — DKMS will sign on install"
