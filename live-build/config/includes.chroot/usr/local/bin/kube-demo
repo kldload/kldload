@@ -168,9 +168,11 @@ menu() {
 demo_overview() {
   header
   echo -e "${Y}=== Nodes ===${N}"
+  echo -e "${D}Every node is a ZFS clone — deployed in <100ms, not minutes.${N}"
   _kctl get nodes -o wide
   echo ""
   echo -e "${Y}=== System Pods ===${N}"
+  echo -e "${D}All infrastructure runs as pods — Cilium, CoreDNS, Hubble, MetalLB.${N}"
   _kctl get pods -A -o wide | head -25
   echo ""
   echo -e "${Y}=== Namespaces ===${N}"
@@ -206,6 +208,7 @@ demo_overview() {
 demo_zfs_clones() {
   header
   echo -e "${Y}=== ZFS Zvols (K8s Node Disks) ===${N}"
+  echo -e "${D}Each clone shares the golden image via copy-on-write — only changed blocks use disk.${N}"
   zfs list -o name,used,refer,volsize -r rpool/vms -t all 2>/dev/null || echo "  No rpool/vms"
   echo ""
 
@@ -241,12 +244,15 @@ demo_zfs_clones() {
 demo_cilium() {
   header
   echo -e "${Y}=== Cilium Status ===${N}"
+  echo -e "${D}Cilium replaces kube-proxy entirely — all networking is eBPF in the kernel.${N}"
   _cilium_dbg status || echo "  cilium not available"
   echo ""
   echo -e "${Y}=== Cilium Pods ===${N}"
+  echo -e "${D}One agent per node — it loads BPF programs then gets out of the way.${N}"
   _kctl get pods -n kube-system -l k8s-app=cilium -o wide
   echo ""
   echo -e "${Y}=== eBPF Endpoint Map ===${N}"
+  echo -e "${D}Every pod tracked in a kernel BPF map — not a userland database.${N}"
   _cilium_dbg bpf endpoint list 2>/dev/null | head -15 || echo "  N/A"
 
   echo ""
@@ -301,6 +307,7 @@ demo_connectivity() {
 demo_hubble() {
   header
   echo -e "${Y}=== Hubble Status ===${N}"
+  echo -e "${D}Hubble reads eBPF maps from the kernel — no agents, no sidecars, no log scrapers.${N}"
   _kctl get deploy -n kube-system hubble-relay hubble-ui
   echo ""
 
@@ -359,9 +366,11 @@ demo_hubble() {
 demo_metallb() {
   header
   echo -e "${Y}=== MetalLB Status ===${N}"
+  echo -e "${D}MetalLB gives bare metal real LoadBalancer IPs — no cloud required.${N}"
   _kctl get pods -n metallb-system
   echo ""
   echo -e "${Y}=== IP Address Pool ===${N}"
+  echo -e "${D}L2 advertisement — MetalLB responds to ARP on your LAN for these IPs.${N}"
   _kctl get ipaddresspool -n metallb-system -o yaml 2>/dev/null | grep -A5 "addresses:" || echo "  No pool configured"
   echo ""
 
@@ -398,6 +407,7 @@ demo_metallb() {
 demo_gateway() {
   header
   echo -e "${Y}=== Gateway API CRDs ===${N}"
+  echo -e "${D}Cilium implements Gateway API natively in eBPF — no nginx, no HAProxy.${N}"
   _kctl get gatewayclasses
   echo ""
   echo -e "${Y}=== Deploy HTTP Gateway ===${N}"
@@ -451,9 +461,11 @@ GW
 demo_zfs_pvc() {
   header
   echo -e "${Y}=== Storage Classes ===${N}"
+  echo -e "${D}ZFS CSI — every PV is a real ZFS dataset with compression, checksums, and snapshots.${N}"
   _kctl get sc
   echo ""
   echo -e "${Y}=== Create PVC (50Gi, ZFS-backed) ===${N}"
+  echo -e "${D}Watch a ZFS dataset appear on the node — this IS the persistent volume.${N}"
   _kctl apply -f - <<'PVC' 2>/dev/null
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -510,6 +522,7 @@ PVC
 demo_snapshot() {
   header
   echo -e "${Y}=== Snapshot PVC ===${N}"
+  echo -e "${D}ZFS snapshot — instant, zero disk cost, real point-in-time copy.${N}"
   _kctl apply -f - <<'SNAP' 2>/dev/null
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshot
@@ -538,6 +551,7 @@ SNAP
 demo_nginx() {
   header
   echo -e "${Y}=== Deploy nginx (3 replicas across workers) ===${N}"
+  echo -e "${D}Pods spread across ZFS-cloned workers — each node deployed in <100ms.${N}"
   _kctl create deployment nginx-fleet --image=nginx --replicas=3 2>/dev/null || true
   _kctl expose deployment nginx-fleet --type=LoadBalancer --port=80 2>/dev/null || true
   sleep 8
@@ -562,6 +576,7 @@ demo_nginx() {
 demo_pod_dns() {
   header
   echo -e "${Y}=== Pod Scheduling Test ===${N}"
+  echo -e "${D}Verify the scheduler places pods and CoreDNS resolves service names.${N}"
   _kctl run test-pod --image=busybox --restart=Never --command -- sleep 30 2>/dev/null || true
   sleep 5
   _kctl get pod test-pod -o wide
@@ -587,6 +602,7 @@ demo_pod_dns() {
 demo_scale() {
   header
   echo -e "${Y}=== Scale Test — 20 Pods ===${N}"
+  echo -e "${D}20 pods scheduled across all workers — Cilium eBPF load-balances in kernel.${N}"
   _kctl create deployment scale-test --image=nginx --replicas=20 2>/dev/null || \
     _kctl scale deployment scale-test --replicas=20 2>/dev/null
   echo -e "${D}Waiting for pods to schedule...${N}"
@@ -803,6 +819,7 @@ NETCFG
 demo_coredns() {
   header
   echo -e "${Y}=== CoreDNS Pods ===${N}"
+  echo -e "${D}CoreDNS handles all cluster DNS — service discovery, pod names, external resolution.${N}"
   _kctl get pods -n kube-system -l k8s-app=kube-dns -o wide
   echo ""
   echo -e "${Y}=== CoreDNS Config ===${N}"
@@ -842,6 +859,7 @@ demo_coredns() {
 demo_netpol() {
   header
   echo -e "${Y}=== Network Policy Demo — Block then Allow ===${N}"
+  echo -e "${D}Cilium enforces network policy in the kernel via eBPF — packets are dropped before they exist.${N}"
   echo ""
 
   # Create isolated namespace
@@ -966,6 +984,7 @@ DBPVC
 demo_rolling_update() {
   header
   echo -e "${Y}=== Rolling Update — nginx → httpd (zero downtime) ===${N}"
+  echo -e "${D}Kubernetes replaces pods one at a time — service never goes down.${N}"
   echo ""
 
   _kctl create deployment rolling-demo --image=nginx --replicas=4 2>/dev/null || true
@@ -1044,6 +1063,7 @@ demo_self_heal() {
 demo_drain() {
   header
   echo -e "${Y}=== Drain Worker — Watch Pod Migration ===${N}"
+  echo -e "${D}Pods migrate to surviving nodes before the worker goes down — zero data loss.${N}"
   echo ""
 
   # Pick a worker with pods
