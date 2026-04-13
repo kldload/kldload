@@ -992,6 +992,26 @@ CUDAREPO
     k_log_to "$log" "BCC tools symlinked to /usr/local/bin"
   fi
 
+  # WireGuard key generation — pre-generate keys so kube-network can use them
+  if [[ "${KLDLOAD_WIREGUARD:-0}" == "1" ]]; then
+    k_log_to "$log" "Generating WireGuard keys..."
+    install -d -m700 "${target}/etc/wireguard"
+    local _wg_privkey _wg_pubkey
+    _wg_privkey="$(chroot "${target}" wg genkey 2>/dev/null || true)"
+    _wg_pubkey="$(echo "$_wg_privkey" | chroot "${target}" wg pubkey 2>/dev/null || true)"
+    if [[ -n "$_wg_privkey" ]]; then
+      cat > "${target}/etc/wireguard/wg0.conf" <<WGEOF
+[Interface]
+PrivateKey = ${_wg_privkey}
+# Address and peers configured post-install via kube-network or manually
+WGEOF
+      echo "$_wg_pubkey" > "${target}/etc/wireguard/wg0.pub"
+      chmod 600 "${target}/etc/wireguard/wg0.conf"
+      chmod 600 "${target}/etc/wireguard/wg0.pub"
+      k_log_to "$log" "WireGuard keys generated"
+    fi
+  fi
+
   mkdir -p "${target}/var/log/kldload"
   k_log_to "$log" "${distro} bootstrap complete"
 }
