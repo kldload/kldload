@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # kldload 1.0.4 — Kubernetes Demo
 # Shows the full K8s stack running on ZFS instant clones
+# Usage: kube-demo [--no-pause]
 set -uo pipefail
 
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
+KUBE_DEMO_PAUSE=1
+for _arg in "$@"; do
+  case "$_arg" in
+    --no-pause|--nopause|-n) KUBE_DEMO_PAUSE=0 ;;
+  esac
+done
 
 R="\033[1;31m"; G="\033[1;32m"; Y="\033[1;33m"; C="\033[1;36m"; W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"
 
@@ -61,7 +68,13 @@ _ssh_cp() {
   fi
 }
 
-pause() { echo ""; echo -e "${D}Press Enter...${N}"; read -r; }
+pause() {
+  if [[ "$KUBE_DEMO_PAUSE" -eq 1 ]]; then
+    echo ""; echo -e "${D}Press Enter...${N}"; read -r
+  else
+    echo ""
+  fi
+}
 
 # ── Smart helpers — auto-detect where to run commands ─────────
 # These try: host CLI → kubectl exec → SSH to CP, in that order.
@@ -342,10 +355,12 @@ demo_platform() {
   echo -e "${W}  Step 5: WireGuard mesh${N}"
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
   echo ""
-  echo -e "  ${D}WireGuard provides encrypted tunnels between the host and all${N}"
-  echo -e "  ${D}K8s nodes. Kubernetes API traffic, kubelet heartbeats, and pod${N}"
-  echo -e "  ${D}network traffic all flow over encrypted WireGuard links.${N}"
+  echo -e "  ${D}WireGuard provides encrypted tunnels between K8s nodes.${N}"
+  echo -e "  ${D}API traffic, kubelet heartbeats, and pod traffic all flow${N}"
+  echo -e "  ${D}over encrypted WireGuard links inside the cluster.${N}"
+  echo -e "  ${D}The KVM host sits outside the mesh — it manages VMs over virbr0.${N}"
   echo ""
+  echo -e "  ${W}Host (KVM hypervisor):${N}"
   if command -v wg >/dev/null 2>&1; then
     local wg_ifaces
     wg_ifaces="$(wg show interfaces 2>/dev/null || true)"
@@ -353,11 +368,14 @@ demo_platform() {
       echo -e "  ${G}Active interfaces: ${wg_ifaces}${N}"
       wg show 2>/dev/null | head -15
     else
-      echo -e "  ${W}WireGuard installed, no active tunnels${N}"
+      echo -e "  ${D}  No tunnels (host manages VMs over bridge, not WireGuard)${N}"
     fi
   else
-    echo -e "  ${Y}WireGuard not installed${N}"
+    echo -e "  ${D}  WireGuard not active on host (expected — host is hypervisor)${N}"
   fi
+  echo ""
+  echo -e "  ${W}Inside the cluster (control plane):${N}"
+  _ssh_cp 'wg show 2>/dev/null | head -20 || echo "  WireGuard not configured on CP"'
   pause
 
   # ── Step 6: kube-proxy status ────────────────────────────────
@@ -1191,12 +1209,14 @@ demo_connectivity() {
 
   # Parse results — cilium uses [=] for skip, no emoji
   grep -E "^\[.\].*Test " "$tmpout" 2>/dev/null | tail -20
-  local total skip
-  total="$(grep -cE "^\[.\].*Test " "$tmpout" 2>/dev/null || echo 0)"
-  skip="$(grep -cE "^\[=\].*Test " "$tmpout" 2>/dev/null || echo 0)"
-  local ran=$((total - skip))
-  local fail
-  fail="$(grep -cE "^\[!\]|FAIL" "$tmpout" 2>/dev/null || echo 0)"
+  local total skip ran fail
+  total="$(grep -cE '^\[.\].*Test ' "$tmpout" 2>/dev/null)" || total=0
+  skip="$(grep -cE '^\[=\].*Test ' "$tmpout" 2>/dev/null)" || skip=0
+  fail="$(grep -cE '^\[!\]|FAIL' "$tmpout" 2>/dev/null)" || fail=0
+  [[ "$total" =~ ^[0-9]+$ ]] || total=0
+  [[ "$skip" =~ ^[0-9]+$ ]] || skip=0
+  [[ "$fail" =~ ^[0-9]+$ ]] || fail=0
+  ran=$((total - skip))
 
   # ── Summary ───────────────────────────────────────────────────
   echo ""
@@ -2123,8 +2143,10 @@ demo_scale() {
   _kctl get pods -l app=scale-test -o wide | head -25
 
   local total ready
-  total="$(_kctl get pods -l app=scale-test --no-headers | wc -l)"
-  ready="$(_kctl get pods -l app=scale-test --no-headers | grep -c Running)"
+  total="$(_kctl get pods -l app=scale-test --no-headers 2>/dev/null | wc -l)" || total=0
+  ready="$(_kctl get pods -l app=scale-test --no-headers 2>/dev/null | grep -c Running)" || ready=0
+  [[ "$total" =~ ^[0-9]+$ ]] || total=0
+  [[ "$ready" =~ ^[0-9]+$ ]] || ready=0
 
   # ── Summary ───────────────────────────────────────────────────
   echo ""
