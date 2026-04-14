@@ -4,6 +4,8 @@
 
 kldloadOS assembles any Linux distribution from stock vendor repos (DNF, APT, pacman) with ZFS on root, WireGuard, and eBPF — on a single bootable ISO. Nothing forked, nothing patched. Every package pulled directly from vendor CDNs. Most distros install fully offline from embedded package mirrors (darksites).
 
+Every install is fully auditable — build logs, package manifests, and smoke test results land in `/root/kldload-install-logs/`. kldload does the dirty work of assembling kernel modules, signing for Secure Boot, tuning ZFS datasets, and wiring up services into a cohesive, bootable system — so you don't have to.
+
 Pick a distro, pick a profile, install. Profiles range from minimal ZFS-only (core) to full desktop, headless server, KVM hypervisor with ZFS instant clones (bare metal), Kubernetes with Cilium eBPF networking (bare metal), and AI assistant with local LLM + GPU (bare metal or VM).
 
 **Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Demo:** [YouTube](https://www.youtube.com/watch?v=egFffrFa6Ss) | **Discord:** [discord.gg/tkVN6sSU](https://discord.gg/tkVN6sSU)
