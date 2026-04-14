@@ -94,6 +94,14 @@ bootenv_install() {
         part_num="$(lsblk -no PARTN "$efi_part" 2>/dev/null | head -n1 || true)"
         part_num="${part_num:-1}"
 
+        # Clean stale boot entries from prior installs
+        log "Cleaning stale EFI boot entries..."
+        local _efi_uuid
+        _efi_uuid=$(blkid -s PARTUUID -o value "$efi_part" 2>/dev/null || true)
+        for _bnum in $(efibootmgr 2>/dev/null | grep -iE "kldload|ZFSBootMenu|UEFI OS|RedHat|centos|rocky|fedora|debian|ubuntu|${disk##*/}|${_efi_uuid:-NOMATCH}" | grep -oP 'Boot\K[0-9A-Fa-f]+' || true); do
+            efibootmgr -b "$_bnum" -B 2>/dev/null && log "  Removed Boot${_bnum}" || true
+        done
+
         log "Registering with efibootmgr: disk=$disk part=$part_num"
         run efibootmgr \
             -c \

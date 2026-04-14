@@ -1179,12 +1179,12 @@ set timeout=5
 set timeout_style=countdown
 
 menuentry "KLDload Live (CentOS Stream 9 + ZFS)" --hotkey=l {
-    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0
     initrdefi /images/pxeboot/initrd.img
 }
 
 menuentry "KLDload Live (troubleshooting)" {
-    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 rd.shell
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rd.shell
     initrdefi /images/pxeboot/initrd.img
 }
 GRUBCFG

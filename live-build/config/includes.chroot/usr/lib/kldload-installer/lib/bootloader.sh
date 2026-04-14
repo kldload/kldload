@@ -288,7 +288,8 @@ EOFSTAB
   for _sg in "${target}/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed" \
              "${target}/boot/efi/EFI/centos/grubx64.efi" \
              "${target}/boot/efi/EFI/rocky/grubx64.efi" \
-             "${target}/boot/efi/EFI/fedora/grubx64.efi"; do
+             "${target}/boot/efi/EFI/fedora/grubx64.efi" \
+             "${target}/boot/efi/EFI/redhat/grubx64.efi"; do
     if [[ -f "$_sg" ]]; then signed_grub="$_sg"; break; fi
   done
 
@@ -304,7 +305,8 @@ EOFSTAB
                      "${zbm_efi_dir}" "${zbm_fallback_dir}" \
                      "${target}/boot/efi/grub" "${target}/boot/grub" \
                      "${target}/boot/efi/EFI/centos" "${target}/boot/efi/EFI/rocky" \
-                     "${target}/boot/efi/EFI/fedora" "${target}/boot/efi/EFI/debian" \
+                     "${target}/boot/efi/EFI/fedora" "${target}/boot/efi/EFI/redhat" \
+                     "${target}/boot/efi/EFI/debian" \
                      "${target}/boot/efi/EFI/ubuntu"; do
       [[ -d "$(dirname "$_gcfg_dir")" ]] || continue  # skip if parent doesn't exist
       mkdir -p "$_gcfg_dir" 2>/dev/null || true
@@ -343,6 +345,7 @@ CHAINGRUB
   for _s in "${target}/boot/efi/EFI/centos/shimx64.efi" \
             "${target}/boot/efi/EFI/rocky/shimx64.efi" \
             "${target}/boot/efi/EFI/fedora/shimx64.efi" \
+            "${target}/boot/efi/EFI/redhat/shimx64.efi" \
             "${target}/boot/efi/EFI/debian/shimx64.efi" \
             "${target}/boot/efi/EFI/ubuntu/shimx64.efi" \
             "${target}/usr/lib/shim/shimx64.efi.signed"; do
@@ -359,6 +362,7 @@ CHAINGRUB
     for _mm in "${target}/boot/efi/EFI/centos/mmx64.efi" \
                "${target}/boot/efi/EFI/rocky/mmx64.efi" \
                "${target}/boot/efi/EFI/fedora/mmx64.efi" \
+               "${target}/boot/efi/EFI/redhat/mmx64.efi" \
                "${target}/boot/efi/EFI/debian/mmx64.efi" \
                "${target}/boot/efi/EFI/ubuntu/mmx64.efi" \
                "${target}/usr/lib/shim/mmx64.efi"; do
@@ -490,11 +494,20 @@ EOFSTAB
       # Remove entries that reference the target disk's GPT UUID or are stale
       local _efi_uuid
       _efi_uuid=$(blkid -s PARTUUID -o value "${efi_part}" 2>/dev/null || true)
-      if echo "$_line" | grep -qi "ZFSBootMenu\|${disk##*/}\|${_efi_uuid:-NOMATCH}"; then
+      if echo "$_line" | grep -qi "ZFSBootMenu\|RedHat\|centos\|rocky\|fedora\|debian\|ubuntu\|${disk##*/}\|${_efi_uuid:-NOMATCH}"; then
         efibootmgr -b "${_bnum}" -B >&7 2>&1 || true
         k_log "  Removed Boot${_bnum}: $(echo "$_line" | sed 's/Boot[0-9A-Fa-f]*.//')"
       fi
     done || true
+
+    # Remove BOOTX64.CSV files from distro EFI directories. These files tell
+    # the UEFI firmware to auto-create boot entries on every boot, which
+    # re-creates the distro entry we just deleted and overrides our boot order.
+    for _csv in "${target}/boot/efi/EFI"/*/BOOTX64.CSV; do
+      [[ -f "$_csv" ]] || continue
+      k_log "  Removing firmware auto-discovery file: ${_csv}"
+      rm -f "$_csv"
+    done
 
     # Register ONLY the shim path (\EFI\BOOT\BOOTX64.EFI) as the boot entry.
     # Do NOT register direct ZFSBootMenu entries — with Secure Boot enabled,

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # audit-full.sh — comprehensive post-install audit
 # Usage: audit-full.sh <ip> <password>
-set -euo pipefail
+set -uo pipefail
 
 IP="${1:?Usage: audit-full.sh <ip> <password>}"
 PW="${2:-Passw0rd}"
-SSH="sshpass -p ${PW} ssh -o StrictHostKeyChecking=no admin@${IP}"
+SSH="sshpass -p ${PW} ssh -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no admin@${IP}"
 
 pass=0; fail=0; skip=0
 ok()   { printf '\e[32m  ✓ %-35s %s\e[0m\n' "$1" "$2"; ((pass++)); }
@@ -14,8 +14,17 @@ skp()  { printf '\e[33m  ○ %-35s %s\e[0m\n' "$1" "$2"; ((skip++)); }
 
 check() {
   local name="$1" cmd="$2"
-  local out
-  out="$($SSH "$cmd" 2>&1)" && ok "$name" "$(echo "$out" | head -1)" || bad "$name" "$(echo "$out" | tail -1)"
+  local out rc
+  out="$(set +e; $SSH "$cmd" 2>&1; echo "RC:$?")"
+  rc="${out##*RC:}"; out="${out%RC:*}"
+  out="$(echo "$out" | sed '/^$/d' | head -1)"
+  if [[ "$rc" -eq 0 && -n "$out" ]]; then
+    ok "$name" "$out"
+  elif [[ "$rc" -eq 0 ]]; then
+    ok "$name" "(empty output)"
+  else
+    bad "$name" "${out:-(no output)}"
+  fi
 }
 
 echo ""
@@ -25,9 +34,9 @@ echo "════════════════════════�
 echo ""
 
 echo "── OS ──────────────────────────────────────────────────────"
-check "OS release"          "head -1 /etc/os-release"
+check "OS release"          "sed -n '1p' /etc/os-release"
 check "Kernel"              "uname -r"
-check "Hostname"            "hostname"
+check "Hostname"            "hostname 2>/dev/null || hostnamectl hostname 2>/dev/null || cat /etc/hostname"
 
 echo ""
 echo "── ZFS ─────────────────────────────────────────────────────"

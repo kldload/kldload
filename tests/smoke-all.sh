@@ -21,7 +21,7 @@ PROFILE="$(cat /etc/kldload/profile 2>/dev/null || echo 'unknown')"
 EDITION="$(cat /etc/kldload/edition 2>/dev/null || echo 'unknown')"
 DISTRO_ID="$(. /etc/os-release 2>/dev/null && echo "$ID" || echo 'unknown')"
 KERNEL="$(uname -r)"
-HOSTNAME="$(hostname)"
+HOSTNAME="$(hostname 2>/dev/null || hostnamectl hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo 'unknown')"
 UPTIME="$(uptime -p 2>/dev/null || uptime)"
 
 # ── Header ───────────────────────────────────────────────────────────────────
