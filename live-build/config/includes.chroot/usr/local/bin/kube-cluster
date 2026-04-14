@@ -45,6 +45,7 @@ if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 # Auto-scale VM resources based on host hardware. The CP runs etcd + API
 # server + Cilium + MetalLB + Hubble and needs more RAM/CPU than workers.
 WORKERS="${WORKERS:-3}"
+DESTROY_ALL="${DESTROY_ALL:-0}"
 CILIUM_CLI_VERSION="${CILIUM_CLI_VERSION:-0.19.2}"
 _host_ram_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 16384)
 _host_cpus=$(nproc 2>/dev/null || echo 4)
@@ -175,6 +176,7 @@ while [[ $# -gt 0 ]]; do
     --cpus)    CPUS="$2"; shift 2 ;;
     --disk)    DISK="$2"; shift 2 ;;
     --image)   CLOUD_IMAGE="$2"; shift 2 ;;
+    --all)     DESTROY_ALL=1; shift ;;
     *)         die "Unknown option: $1" ;;
   esac
 done
@@ -1157,8 +1159,7 @@ cmd_bootstrap() {
 # download + kube-setup) but cheap to keep (one snapshot + the base zvol).
 # Destroying and re-bootstrapping takes seconds, not minutes, thanks to this.
 cmd_destroy() {
-  local destroy_all=0
-  [[ "${1:-}" == "--all" ]] && destroy_all=1
+  local destroy_all="${DESTROY_ALL:-0}"
 
   if [[ $destroy_all -eq 1 ]]; then
     echo -e "${R}WARNING: This will destroy EVERYTHING — cluster + golden image${N}"

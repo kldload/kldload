@@ -46,22 +46,39 @@ k_zfs_bootloader_write_hostid() {
 
   if [[ -s "${target}/etc/hostid" ]]; then
     chmod 0644 "${target}/etc/hostid" || true
+    k_log "hostid already exists: $(xxd -p "${target}/etc/hostid" 2>/dev/null)"
     return 0
   fi
 
+  # Try zgenhostid inside chroot first (ZFS provides this)
   if chroot "${target}" command -v zgenhostid >/dev/null 2>&1; then
     chroot "${target}" zgenhostid -f >&"${log_fd}" 2>&1 || true
   fi
 
+  # Fallback: copy from live environment or generate random
   if [[ ! -s "${target}/etc/hostid" ]]; then
     if [[ -s /etc/hostid ]]; then
       cp -f /etc/hostid "${target}/etc/hostid"
     else
-      dd if=/dev/urandom of="${target}/etc/hostid" bs=4 count=1 status=none
+      # Generate a stable 4-byte hostid from /dev/urandom
+      python3 -c "
+import os, struct
+hid = struct.unpack('<I', os.urandom(4))[0] or 1  # never zero
+with open('${target}/etc/hostid', 'wb') as f:
+    f.write(struct.pack('<I', hid))
+" 2>&"${log_fd}" || \
+        dd if=/dev/urandom of="${target}/etc/hostid" bs=4 count=1 status=none 2>&"${log_fd}" || true
     fi
   fi
 
+  # Final safety check — hostid MUST exist for ZFS pool imports
+  if [[ ! -s "${target}/etc/hostid" ]]; then
+    k_log "CRITICAL: Failed to generate /etc/hostid — creating from /dev/urandom"
+    head -c4 /dev/urandom > "${target}/etc/hostid" 2>/dev/null || true
+  fi
+
   chmod 0644 "${target}/etc/hostid" || true
+  k_log "hostid written: $(xxd -p "${target}/etc/hostid" 2>/dev/null)"
 }
 
 # k_zbm_find_efi — locate the ZFSBootMenu EFI binary.
@@ -279,28 +296,74 @@ EOFSTAB
     cp "${zbm_src}" "${zbm_efi_dir}/BOOTX64.EFI"
     k_log "ZFSBootMenu EFI installed (unsigned — no sbsign or no MOK keys)"
   fi
-  # Shim chain-loads grubx64.efi, which must be signed by the distro key.
-  # We can't rename ZFSBootMenu as grubx64.efi — shim validates the signature
-  # and rejects unsigned binaries ("security policy violation").
-  # Instead: use the REAL distro-signed GRUB as grubx64.efi, with a grub.cfg
-  # that chainloads ZFSBootMenu. Chain: shim → signed GRUB → ZFSBootMenu.
-  local signed_grub=""
-  for _sg in "${target}/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed" \
-             "${target}/boot/efi/EFI/centos/grubx64.efi" \
-             "${target}/boot/efi/EFI/rocky/grubx64.efi" \
-             "${target}/boot/efi/EFI/fedora/grubx64.efi" \
-             "${target}/boot/efi/EFI/redhat/grubx64.efi"; do
-    if [[ -f "$_sg" ]]; then signed_grub="$_sg"; break; fi
-  done
+  # ── Install grubx64.efi (shim's second stage) ────────────────────────────
+  #
+  # Shim loads grubx64.efi as its second stage and verifies it against:
+  #   1. Secure Boot db (Microsoft/distro CA)
+  #   2. Shim's built-in certificate
+  #   3. MOK database (enrolled by user)
+  #
+  # With MOK: install MOK-signed ZFSBootMenu directly AS grubx64.efi.
+  #   Chain: shim → ZFSBootMenu (as grubx64.efi, MOK-verified) → kernel
+  #   This is the cleanest path — no GRUB middleman, no chainloader.
+  #   GRUB's chainloader command calls firmware LoadImage() which does NOT
+  #   check MOK, causing "security violation" errors with Secure Boot.
+  #
+  # Without MOK: install distro-signed GRUB as grubx64.efi with a config
+  #   that chainloads ZFSBootMenu from \EFI\zbm\. This only works without
+  #   Secure Boot (unsigned ZFSBootMenu can't be verified).
 
-  if [[ -n "$signed_grub" ]]; then
-    cp "$signed_grub" "${zbm_efi_dir}/grubx64.efi"
-    cp "$signed_grub" "${zbm_fallback_dir}/grubx64.efi"
-    k_log "Distro-signed GRUB installed as grubx64.efi (source: ${signed_grub})"
+  local _zbm_signed="${zbm_efi_dir}/BOOTX64.EFI"
+  local _zbm_is_signed=0
+  if [[ -f "$mok_key" && -f "$mok_pub" ]] && command -v sbverify >/dev/null 2>&1; then
+    sbverify --cert "$mok_pub" "$_zbm_signed" >&7 2>&1 && _zbm_is_signed=1
+  fi
 
-    # GRUB config that chainloads ZFSBootMenu — GRUB searches multiple paths.
-    # CentOS/Rocky/Fedora GRUB looks for /EFI/<distro>/grub.cfg first, so we
-    # must write our chainloader config there too, not just /EFI/BOOT/ and /EFI/zbm/.
+  if [[ "$_zbm_is_signed" -eq 1 ]]; then
+    # MOK-signed ZFSBootMenu — install as grubx64.efi so shim loads it directly.
+    # Shim verifies against MOK → no GRUB chainloader needed → no security violation.
+    cp "$_zbm_signed" "${zbm_fallback_dir}/grubx64.efi"
+    cp "$_zbm_signed" "${zbm_efi_dir}/grubx64.efi"
+    k_log "MOK-signed ZFSBootMenu installed as grubx64.efi (shim → ZFSBootMenu direct, Secure Boot ready)"
+
+    # Also install distro-signed GRUB as a recovery option at \EFI\zbm\grub-recovery.efi
+    for _sg in "${target}/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed" \
+               "${target}/boot/efi/EFI/centos/grubx64.efi" \
+               "${target}/boot/efi/EFI/rocky/grubx64.efi" \
+               "${target}/boot/efi/EFI/fedora/grubx64.efi" \
+               "${target}/boot/efi/EFI/redhat/grubx64.efi"; do
+      if [[ -f "$_sg" ]]; then
+        cp "$_sg" "${zbm_efi_dir}/grub-recovery.efi"
+        k_log "Distro-signed GRUB saved as recovery: ${zbm_efi_dir}/grub-recovery.efi"
+        break
+      fi
+    done
+  else
+    # No MOK signing — fall back to distro-signed GRUB with chainloader config.
+    # This only works without Secure Boot (GRUB chainloader can't verify MOK-signed binaries).
+    k_log "ZFSBootMenu is unsigned — using GRUB chainloader (Secure Boot requires MOK signing)"
+    local signed_grub=""
+    for _sg in "${target}/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed" \
+               "${target}/boot/efi/EFI/centos/grubx64.efi" \
+               "${target}/boot/efi/EFI/rocky/grubx64.efi" \
+               "${target}/boot/efi/EFI/fedora/grubx64.efi" \
+               "${target}/boot/efi/EFI/redhat/grubx64.efi"; do
+      if [[ -f "$_sg" ]]; then signed_grub="$_sg"; break; fi
+    done
+
+    if [[ -n "$signed_grub" ]]; then
+      cp "$signed_grub" "${zbm_efi_dir}/grubx64.efi"
+      cp "$signed_grub" "${zbm_fallback_dir}/grubx64.efi"
+      k_log "Distro-signed GRUB installed as grubx64.efi (source: ${signed_grub})"
+    else
+      cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_efi_dir}/grubx64.efi"
+      cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_fallback_dir}/grubx64.efi"
+      k_log "WARNING: No distro-signed GRUB found — ZFSBootMenu used as grubx64.efi"
+    fi
+
+    # GRUB chainloader config — written to all paths GRUB might search.
+    local _efi_fs_uuid
+    _efi_fs_uuid="$(blkid -s UUID -o value "${efi_part}" 2>/dev/null || true)"
     for _gcfg_dir in "${zbm_efi_dir}/grub" "${zbm_fallback_dir}/grub" \
                      "${zbm_efi_dir}" "${zbm_fallback_dir}" \
                      "${target}/boot/efi/grub" "${target}/boot/grub" \
@@ -308,21 +371,17 @@ EOFSTAB
                      "${target}/boot/efi/EFI/fedora" "${target}/boot/efi/EFI/redhat" \
                      "${target}/boot/efi/EFI/debian" \
                      "${target}/boot/efi/EFI/ubuntu"; do
-      [[ -d "$(dirname "$_gcfg_dir")" ]] || continue  # skip if parent doesn't exist
+      [[ -d "$(dirname "$_gcfg_dir")" ]] || continue
       mkdir -p "$_gcfg_dir" 2>/dev/null || true
-      cat > "${_gcfg_dir}/grub.cfg" <<'CHAINGRUB'
+      cat > "${_gcfg_dir}/grub.cfg" <<CHAINGRUB
+search --no-floppy --fs-uuid --set=root ${_efi_fs_uuid}
 set timeout=1
 menuentry "ZFSBootMenu" {
     chainloader /EFI/zbm/BOOTX64.EFI
 }
 CHAINGRUB
     done
-    k_log "GRUB chainloader config installed (auto-boots ZFSBootMenu in 1s)"
-  else
-    # No signed GRUB — fall back to ZFSBootMenu as grubx64.efi (won't work with Secure Boot)
-    cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_efi_dir}/grubx64.efi"
-    cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_fallback_dir}/grubx64.efi"
-    k_log "WARNING: No distro-signed GRUB found — ZFSBootMenu used as grubx64.efi (Secure Boot will fail)"
+    k_log "GRUB chainloader config installed (EFI UUID: ${_efi_fs_uuid})"
   fi
 
   # Backup copy is always unsigned — used if the signed copy is corrupted.
@@ -457,6 +516,16 @@ EOFSTAB
         k_log "WARNING: mkinitfs had errors — check ${KLDLOAD_LOG_DIR}/bootloader.log"
     fi
   elif [[ -x "${target}/usr/bin/dracut" ]]; then
+    # Verify zfs-dracut is installed — without it, dracut --add "zfs" silently
+    # produces an initramfs that can't import ZFS pools, causing a boot loop.
+    if [[ ! -d "${target}/usr/lib/dracut/modules.d/90zfs" ]]; then
+      k_log "WARNING: dracut ZFS module (90zfs) not found — attempting zfs-dracut install"
+      # Try host-side dnf first (has network), fall back to chroot dnf
+      dnf --installroot="${target}" --releasever="$(rpm -q --qf '%{VERSION}' centos-stream-release 2>/dev/null || echo 9)" \
+        --nogpgcheck --skip-broken -y install zfs-dracut >&7 2>&1 || \
+        chroot "${target}" dnf install -y --nogpgcheck zfs-dracut >&7 2>&1 || \
+        k_log "CRITICAL: zfs-dracut install failed — system may not boot from ZFS"
+    fi
     local _kver
     for _kver in "${target}"/usr/lib/modules/*/vmlinuz "${target}"/lib/modules/*/vmlinuz; do
       [[ -f "$_kver" ]] || continue
@@ -464,6 +533,10 @@ EOFSTAB
       chroot "${target}" dracut --force --add "zfs" --kver "$_kver" >&7 2>&1 || \
         k_log "WARNING: dracut rebuild failed for ${_kver}"
     done
+    # Verify ZFS made it into the initramfs
+    if ! chroot "${target}" lsinitrd "/boot/initramfs-$(ls "${target}"/usr/lib/modules/ 2>/dev/null | head -1).img" 2>/dev/null | grep -q '90zfs'; then
+      k_log "WARNING: ZFS module may not be in initramfs — check bootloader.log"
+    fi
   else
     k_log "WARNING: no initramfs tool found — check ${KLDLOAD_LOG_DIR}/bootloader.log"
   fi
@@ -485,16 +558,16 @@ EOFSTAB
     # This ensures stale entries (old OS installs, disconnected drives, etc.)
     # don't interfere with ZFSBootMenu booting. Only entries on OTHER disks
     # (e.g. USB boot media) are preserved.
-    local _target_disk_id
-    _target_disk_id=$(lsblk -dno SERIAL,MODEL "${disk}" 2>/dev/null | tr -s ' ' | head -1)
-    k_log "Cleaning EFI boot entries for target disk: ${disk}"
+    #
+    # Pattern includes "Red Hat" (with space) because RHEL's efibootmgr entry
+    # is "Red Hat Enterprise Linux" or "RedHat Boot Manager", not "RedHat".
+    local _efi_uuid
+    _efi_uuid=$(blkid -s PARTUUID -o value "${efi_part}" 2>/dev/null || true)
+    k_log "Cleaning EFI boot entries for target disk: ${disk} (PARTUUID: ${_efi_uuid:-unknown})"
     efibootmgr -v 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | while read -r _line; do
       local _bnum
       _bnum=$(echo "$_line" | grep -oP 'Boot\K[0-9A-Fa-f]+')
-      # Remove entries that reference the target disk's GPT UUID or are stale
-      local _efi_uuid
-      _efi_uuid=$(blkid -s PARTUUID -o value "${efi_part}" 2>/dev/null || true)
-      if echo "$_line" | grep -qi "ZFSBootMenu\|RedHat\|centos\|rocky\|fedora\|debian\|ubuntu\|${disk##*/}\|${_efi_uuid:-NOMATCH}"; then
+      if echo "$_line" | grep -qi "ZFSBootMenu\|kldload\|Red.Hat\|RedHat\|centos\|rocky\|fedora\|debian\|ubuntu\|UEFI OS\|${disk##*/}\|${_efi_uuid:-NOMATCH}"; then
         efibootmgr -b "${_bnum}" -B >&7 2>&1 || true
         k_log "  Removed Boot${_bnum}: $(echo "$_line" | sed 's/Boot[0-9A-Fa-f]*.//')"
       fi
@@ -509,24 +582,25 @@ EOFSTAB
       rm -f "$_csv"
     done
 
-    # Register ONLY the shim path (\EFI\BOOT\BOOTX64.EFI) as the boot entry.
-    # Do NOT register direct ZFSBootMenu entries — with Secure Boot enabled,
-    # firmware rejects unsigned EFI binaries and shows "invalid key" errors
-    # before falling through to shim. Clean boot = shim only.
-    # Chain: firmware → shim → signed GRUB → chainloader → ZFSBootMenu
-    local _uefi_bootnum
-    _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'UEFI OS' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+' || true)
-    if [[ -z "$_uefi_bootnum" ]]; then
-      # UEFI OS entry doesn't exist — firmware will auto-create it from the
-      # fallback path \EFI\BOOT\BOOTX64.EFI, but register it explicitly to be safe
-      efibootmgr \
-        -c -d "${disk}" -p "${part_num}" \
-        -L "kldload" \
-        -l '\EFI\BOOT\BOOTX64.EFI' >&7 2>&1 || \
-        k_log "WARNING: efibootmgr entry failed"
-      _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'kldload' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+' || true)
+    # Remove fbx64.efi (RHEL's fallback boot manager). This EFI binary reads
+    # BOOTX64.CSV files and re-creates distro boot entries, which overrides
+    # our boot order. With CSV files removed above, fbx64 is harmless but some
+    # firmware (ASUS, Dell) runs it proactively on boot — remove to be safe.
+    if [[ -f "${target}/boot/efi/EFI/BOOT/fbx64.efi" ]]; then
+      rm -f "${target}/boot/efi/EFI/BOOT/fbx64.efi"
+      k_log "  Removed fbx64.efi (RHEL fallback boot manager)"
     fi
 
+    # Always create a fresh "kldload" boot entry pointing to shim.
+    # Chain: firmware → shim → signed GRUB → chainloader → ZFSBootMenu
+    efibootmgr \
+      -c -d "${disk}" -p "${part_num}" \
+      -L "kldload" \
+      -l '\EFI\BOOT\BOOTX64.EFI' >&7 2>&1 || \
+      k_log "WARNING: efibootmgr entry creation failed"
+
+    local _uefi_bootnum
+    _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'kldload' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+' || true)
     if [[ -n "$_uefi_bootnum" ]]; then
       efibootmgr -o "${_uefi_bootnum}" >&7 2>&1 || \
         k_log "WARNING: Could not set boot order"

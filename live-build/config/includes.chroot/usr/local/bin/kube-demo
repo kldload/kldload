@@ -158,7 +158,8 @@ menu() {
   echo -e "  ${C}── Full Audit ──────────────────────────────────────────${N}"
   echo -e "  ${G}99${N}  Smoke test (all checks)"
   echo ""
-  echo -e "  ${R} 0${N}  Clean up ALL demo resources"
+  echo -e "  ${R} 0${N}  Clean up demo resources (keep cluster)"
+  echo -e "  ${R}00${N}  Destroy EVERYTHING (VMs, zvols, cluster)"
   echo -e "  ${R} q${N}  Quit"
   echo ""
   echo -ne "${W}  Select: ${N}"
@@ -1622,6 +1623,35 @@ demo_cleanup() {
   pause
 }
 
+# ── 00: Destroy Everything ─────────────────────────────────────
+demo_destroy_all() {
+  echo ""
+  echo -e "${R}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${R}  DESTROY ALL — VMs, zvols, golden image, kubeconfig${N}"
+  echo -e "${R}══════════════════════════════════════════════════════════════${N}"
+  echo ""
+  echo -e "${Y}This will:${N}"
+  echo "  • Shut down and delete all K8s VMs"
+  echo "  • Destroy all ZFS zvols under rpool/vms"
+  echo "  • Remove the golden image"
+  echo "  • Remove kubeconfig and SSH keys"
+  echo ""
+  echo -e "${Y}After this, rebuild with:${N}  kube-cluster bootstrap --workers 3"
+  echo ""
+  read -r -p "Type 'destroy' to confirm: " confirm
+  if [[ "$confirm" != "destroy" ]]; then
+    echo -e "${Y}Cancelled${N}"
+    pause
+    return
+  fi
+  echo ""
+  kube-cluster destroy --all
+  echo ""
+  echo -e "${G}Cluster destroyed. Rebuild with:${N}"
+  echo -e "  ${W}kube-cluster bootstrap --workers 3${N}"
+  pause
+}
+
 # ── Main Loop ─────────────────────────────────────────────────
 _find_cp || { echo -e "${R}No Kubernetes control plane found.${N}"; echo "Run: kube-cluster bootstrap --workers 3"; exit 1; }
 
@@ -1655,6 +1685,7 @@ while true; do
     24) demo_datapath_trace ;;
     99) demo_smoke ;;
     0)  demo_cleanup ;;
+    00) demo_destroy_all ;;
     q)  echo ""; exit 0 ;;
     *)  echo -e "${R}Invalid option${N}"; sleep 1 ;;
   esac

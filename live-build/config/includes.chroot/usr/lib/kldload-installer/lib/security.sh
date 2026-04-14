@@ -23,6 +23,23 @@ k_configure_mok() {
     return 0
   fi
 
+  # Skip MOK enrollment when Secure Boot is disabled — no point showing the
+  # MokManager blue screen if the firmware isn't enforcing signatures.
+  # The MOK keys are still generated and ZFSBootMenu is still signed, so if
+  # the user enables Secure Boot later they can enroll via "mokutil --import"
+  # from the installed system or use MokManager's "Enroll key from disk" option
+  # (mok.der is on the EFI partition).
+  if [[ -d /sys/firmware/efi/efivars ]]; then
+    local _sb_state
+    _sb_state="$(mokutil --sb-state 2>/dev/null || true)"
+    if echo "$_sb_state" | grep -qi "disabled"; then
+      k_log "Secure Boot is disabled — skipping MOK enrollment (no MokManager blue screen)"
+      k_log "  MOK keys are on disk; enable Secure Boot + run 'mokutil --import /var/lib/dkms/mok.der' to enroll later"
+      exec 8>&-
+      return 0
+    fi
+  fi
+
   # TODO: restore random password once web UI displays it before reboot
   # mok_pass="$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-20)"
   local mok_pass="kldload"

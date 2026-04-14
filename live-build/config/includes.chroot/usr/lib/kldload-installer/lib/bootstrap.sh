@@ -817,7 +817,7 @@ CUSTOMREPO
     parted gdisk dosfstools
     python3 python3-pip
     dkms gcc make autoconf automake libtool
-    zfs zfs-dkms
+    zfs zfs-dkms zfs-dracut
     # Tools needed for kldloadOS (non-core profiles)
     # NOTE: sanoid is NOT in any RPM repo — installed from GitHub by k_install_system_files
     wireguard-tools ethtool htop pv lzop mbuffer eject
@@ -866,7 +866,7 @@ CUSTOMREPO
         passwd shadow-utils util-linux procps-ng findutils grep sed gawk
         parted gdisk dosfstools
         dkms gcc make autoconf automake libtool
-        zfs zfs-dkms
+        zfs zfs-dkms zfs-dracut
       )
       ;;
   esac
