@@ -117,6 +117,11 @@ header() {
 
 menu() {
   header
+  echo -e "  ${C}── Platform ────────────────────────────────────────────${N}"
+  echo -e "  ${G} p${N}  Host platform (OS, kernel, Secure Boot, ZFS, hardware)"
+  echo -e "  ${G} z${N}  ZFS live demo (snapshot, corrupt, rollback, clone)"
+  echo -e "  ${G} v${N}  VM lifecycle (golden image, clone, boot, destroy, rebuild)"
+  echo ""
   echo -e "  ${C}── Cluster ─────────────────────────────────────────────${N}"
   echo -e "  ${G} 1${N}  Cluster overview (nodes, versions, IPs)"
   echo -e "  ${G} 2${N}  ZFS clone proof (clone times + disk cost)"
@@ -166,6 +171,467 @@ menu() {
 }
 
 # ── 1: Cluster Overview ───────────────────────────────────────
+# ── p: Platform ────────────────────────────────────────────────
+demo_platform() {
+  header
+  echo -e "${Y}=== Host Operating System ===${N}"
+  echo -e "  ${W}Distro:${N}       $(cat /etc/redhat-release 2>/dev/null || cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '"' || echo "unknown")"
+  echo -e "  ${W}Kernel:${N}       $(uname -r)"
+  echo -e "  ${W}Architecture:${N}  $(uname -m)"
+  echo ""
+
+  echo -e "${Y}=== Secure Boot ===${N}"
+  local sb_state
+  sb_state="$(mokutil --sb-state 2>/dev/null || echo "unknown")"
+  if echo "$sb_state" | grep -qi "enabled"; then
+    echo -e "  ${W}Secure Boot:${N}  ${G}ENABLED${N}"
+  else
+    echo -e "  ${W}Secure Boot:${N}  ${Y}${sb_state}${N}"
+  fi
+  local mok_count
+  mok_count="$(mokutil --list-enrolled 2>/dev/null | grep -c 'CN=kldload' || echo 0)"
+  echo -e "  ${W}MOK keys:${N}     ${G}${mok_count} kldload keys enrolled${N}"
+  echo ""
+
+  echo -e "${Y}=== Hardware ===${N}"
+  echo -e "  ${W}CPU:${N}          $(nproc) cores — $(grep 'model name' /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || echo "unknown")"
+  echo -e "  ${W}RAM:${N}          $(free -h | awk '/Mem:/ {print $2}')"
+  echo -e "  ${W}Disk:${N}         $(lsblk -dno NAME,SIZE,MODEL /dev/nvme0n1 2>/dev/null || lsblk -dno NAME,SIZE,MODEL /dev/sda 2>/dev/null || echo "unknown")"
+  echo ""
+
+  echo -e "${Y}=== ZFS ===${N}"
+  echo -e "  ${W}ZFS version:${N}  $(zfs version 2>/dev/null | head -1 || echo "not installed")"
+  echo -e "  ${W}Pool:${N}"
+  zpool status -x 2>/dev/null || echo "  no pools"
+  echo ""
+  echo -e "  ${W}Datasets (top-level):${N}"
+  zfs list -d1 -o name,used,avail,mountpoint rpool 2>/dev/null | head -10
+  echo ""
+  echo -e "  ${W}VM zvols:${N}"
+  zfs list -o name,used,refer,volsize -r rpool/vms -t volume 2>/dev/null | head -10 || echo "  none"
+  echo ""
+  echo -e "  ${W}Snapshots:${N}    $(zfs list -t snapshot -H 2>/dev/null | wc -l) total"
+  echo -e "  ${W}Compression:${N}  $(zfs get -H -o value compressratio rpool 2>/dev/null || echo "n/a")"
+  echo ""
+
+  echo -e "${Y}=== WireGuard ===${N}"
+  if command -v wg >/dev/null 2>&1; then
+    local wg_ifaces
+    wg_ifaces="$(wg show interfaces 2>/dev/null || true)"
+    if [[ -n "$wg_ifaces" ]]; then
+      echo -e "  ${G}Active interfaces: ${wg_ifaces}${N}"
+      wg show 2>/dev/null | head -15
+    else
+      echo -e "  ${W}WireGuard installed, no active tunnels${N}"
+    fi
+  else
+    echo -e "  ${Y}WireGuard not installed${N}"
+  fi
+  echo ""
+
+  echo -e "${Y}=== kube-proxy ===${N}"
+  local kp_pods
+  kp_pods="$(_kctl get pods -n kube-system -l k8s-app=kube-proxy --no-headers 2>/dev/null | wc -l)"
+  if [[ "$kp_pods" -eq 0 ]]; then
+    echo -e "  ${G}kube-proxy: NOT RUNNING (replaced by Cilium eBPF)${N}"
+  else
+    echo -e "  ${R}kube-proxy: ${kp_pods} pods running${N}"
+  fi
+  local ipt_rules
+  ipt_rules="$(iptables -L 2>/dev/null | wc -l || echo 0)"
+  echo -e "  ${W}iptables rules:${N} ${ipt_rules} (near-zero = eBPF datapath)"
+  echo ""
+
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  Platform: bare metal → ZFS on root → Secure Boot → Cilium eBPF${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  pause
+}
+
+# ── v: VM Lifecycle Demo ────────────────────────────────────────
+demo_vm_lifecycle() {
+  header
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  VM Lifecycle — how ZFS clones replace traditional imaging${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo ""
+  echo -e "  ${D}Traditional VM deployment: download image, copy 40GB, boot.${N}"
+  echo -e "  ${D}ZFS clone deployment: point at golden snapshot, done.${N}"
+  echo -e "  ${D}Same result. Milliseconds instead of minutes.${N}"
+  pause
+
+  # ── Step 1: The golden image ──────────────────────────────────
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "${W}  Step 1: The golden image${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo ""
+  echo -e "  ${D}One sealed VM image. CentOS Stream 9 + containerd + kubeadm.${N}"
+  echo -e "  ${D}Built once. Every K8s node is a clone of this.${N}"
+  echo ""
+  zfs list -o name,used,refer,volsize rpool/vms/k8s-golden 2>/dev/null
+  echo ""
+  echo -e "  ${W}Golden snapshots (each clone comes from one of these):${N}"
+  zfs list -t snapshot -o name,used,refer rpool/vms/k8s-golden 2>/dev/null | grep -E "NAME|golden|clone" | head -6
+  pause
+
+  # ── Step 2: Current cluster — all clones ──────────────────────
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "${W}  Step 2: Every VM is a clone — look at the disk cost${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo ""
+  echo -e "  ${D}The golden image is 3.2GB. Each clone stores ONLY the blocks${N}"
+  echo -e "  ${D}that changed since cloning. Most of the disk is shared.${N}"
+  echo ""
+  echo -e "  ${W}  VM               UNIQUE DATA   TOTAL VISIBLE   PROVISIONED${N}"
+  echo -e "  ────────────────   ───────────   ─────────────   ───────────"
+  for vm in k8s-golden kldload-cp kldload-w-1 kldload-w-2 kldload-w-3; do
+    local used refer volsize
+    used="$(zfs get -Hp -o value used rpool/vms/${vm} 2>/dev/null)"
+    refer="$(zfs get -Hp -o value refer rpool/vms/${vm} 2>/dev/null)"
+    volsize="$(zfs get -Hp -o value volsize rpool/vms/${vm} 2>/dev/null)"
+    printf "  %-18s ${G}%-13s${N} %-15s %-11s\n" \
+      "$vm" \
+      "$(numfmt --to=iec $used 2>/dev/null || echo $used)" \
+      "$(numfmt --to=iec $refer 2>/dev/null || echo $refer)" \
+      "$(numfmt --to=iec $volsize 2>/dev/null || echo $volsize)"
+  done
+  echo ""
+  local total_used total_provisioned
+  total_used="$(zfs get -Hp -o value used rpool/vms 2>/dev/null)"
+  total_provisioned=$((40 * 1024 * 1024 * 1024 * 5))  # 5 VMs * 40G each
+  echo -e "  ${W}Total actual disk:${N}     ${G}$(numfmt --to=iec $total_used 2>/dev/null)${N}"
+  echo -e "  ${W}Total provisioned:${N}     ${Y}$(numfmt --to=iec $total_provisioned 2>/dev/null)${N} (if these were full copies)"
+  echo -e "  ${W}Space saved:${N}           ${G}~$(( (total_provisioned - total_used) * 100 / total_provisioned ))%${N}"
+  pause
+
+  # ── Step 3: Clone a new VM — watch the timer ──────────────────
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "${W}  Step 3: Clone a new VM from golden — watch the time${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo ""
+  echo -e "  ${D}This is a 40GB virtual disk. Traditional copy = minutes.${N}"
+  echo -e "  ${D}ZFS clone = pointer change.${N}"
+  echo ""
+
+  # Find a golden snapshot to clone from
+  local golden_snap
+  golden_snap="$(zfs list -t snapshot -H -o name rpool/vms/k8s-golden 2>/dev/null | grep golden | head -1)"
+  if [[ -z "$golden_snap" ]]; then
+    golden_snap="$(zfs list -t snapshot -H -o name rpool/vms/k8s-golden 2>/dev/null | head -1)"
+  fi
+
+  if [[ -n "$golden_snap" ]]; then
+    echo -ne "  ${Y}Cloning 40GB VM disk...${N} "
+    local vm_start vm_end
+    vm_start=$(date +%s%N)
+    zfs clone -o volsize=40G "${golden_snap}" rpool/vms/demo-vm 2>/dev/null
+    vm_end=$(date +%s%N)
+    local ms=$(( (vm_end - vm_start) / 1000000 ))
+    echo -e "${G}done in ${ms}ms${N}"
+    echo ""
+    echo -e "  ${D}A 40GB disk cloned in ${ms} milliseconds.${N}"
+    echo -e "  ${D}Try that with qemu-img copy or dd.${N}"
+    echo ""
+    zfs list -o name,used,refer,volsize rpool/vms/demo-vm 2>/dev/null
+    echo ""
+    echo -e "  ${D}USED = ~0. The clone hasn't diverged from golden yet.${N}"
+    echo -e "  ${D}Disk space is only consumed as the VM writes new data.${N}"
+    pause
+
+    # ── Step 3b: Boot it and prove it's real ──────────────────────
+    echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+    echo -e "${W}  Step 3b: Boot the clone — prove it's a real VM${N}"
+    echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+    echo ""
+    echo -e "  ${D}The clone is a 40GB disk that was created in milliseconds.${N}"
+    echo -e "  ${D}Let's boot it and SSH in to prove it's a full CentOS system.${N}"
+    echo ""
+
+    # Create a minimal VM definition
+    local zvol_dev="/dev/zvol/rpool/vms/demo-vm"
+    if [[ -b "$zvol_dev" ]]; then
+      echo -ne "  ${Y}Booting demo-vm...${N} "
+      virt-install --name demo-vm --ram 2048 --vcpus 2 \
+        --disk path="${zvol_dev}",bus=virtio \
+        --network bridge=virbr0,model=virtio \
+        --os-variant centos-stream9 --graphics none \
+        --import --noautoconsole >/dev/null 2>&1 && \
+        echo -e "${G}started${N}" || echo -e "${Y}already defined${N}"
+
+      echo -e "  ${D}Waiting for VM to boot and get an IP...${N}"
+      local demo_ip="" attempts=0
+      while [[ -z "$demo_ip" && $attempts -lt 30 ]]; do
+        sleep 2
+        demo_ip="$(virsh domifaddr demo-vm 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1)"
+        attempts=$((attempts + 1))
+      done
+
+      if [[ -n "$demo_ip" ]]; then
+        echo -e "  ${G}✓${N} VM is up at ${W}${demo_ip}${N}"
+        echo ""
+        echo -e "  ${W}SSH into the clone to prove it's real:${N}"
+        echo ""
+        sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+          "root@${demo_ip}" '
+          echo "  Hostname:  $(hostname)"
+          echo "  OS:        $(cat /etc/redhat-release 2>/dev/null || echo unknown)"
+          echo "  Kernel:    $(uname -r)"
+          echo "  Uptime:    $(uptime -p)"
+          echo "  containerd: $(containerd --version 2>/dev/null | awk "{print \$3}" || echo "not running yet")"
+        ' 2>/dev/null || echo -e "  ${Y}VM still booting — SSH not ready yet (cloud-init takes ~30s)${N}"
+      else
+        echo -e "  ${Y}VM booting (no IP yet — cloud-init in progress)${N}"
+      fi
+      echo ""
+      echo -e "  ${D}That's a full CentOS VM, cloned in milliseconds, booted from a ZFS zvol.${N}"
+      echo -e "  ${D}Ready for kubeadm join, Cilium agent, containerd — all pre-installed.${N}"
+
+      # Cleanup the demo VM
+      echo ""
+      echo -ne "  ${Y}Cleaning up demo-vm...${N} "
+      virsh destroy demo-vm >/dev/null 2>&1 || true
+      virsh undefine demo-vm >/dev/null 2>&1 || true
+      zfs destroy rpool/vms/demo-vm 2>/dev/null || true
+      echo -e "${G}done${N}"
+    fi
+  else
+    echo -e "  ${R}No golden snapshot found — skipping clone demo${N}"
+  fi
+  pause
+
+  # ── Step 4: Snapshot a running VM ─────────────────────────────
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "${W}  Step 4: Snapshot a running VM — pre-upgrade checkpoint${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo ""
+  echo -e "  ${D}About to upgrade a node? Snapshot it first.${N}"
+  echo -e "  ${D}If the upgrade breaks something, rollback in milliseconds.${N}"
+  echo -e "  ${D}The VM doesn't even know it was snapshotted.${N}"
+  echo ""
+  echo -ne "  ${Y}Snapshotting kldload-w-1 (running, serving pods)...${N} "
+  local s_start s_end
+  s_start=$(date +%s%N)
+  zfs snapshot rpool/vms/kldload-w-1@demo-checkpoint 2>/dev/null || true
+  s_end=$(date +%s%N)
+  echo -e "${G}done in $(( (s_end - s_start) / 1000000 ))ms${N}"
+  echo ""
+  echo -e "  ${D}The VM is still running. No pause, no freeze, no downtime.${N}"
+  echo -e "  ${D}That snapshot is a point-in-time copy of the entire 40GB disk.${N}"
+  echo ""
+  zfs list -t snapshot -o name,used,refer rpool/vms/kldload-w-1@demo-checkpoint 2>/dev/null
+  echo ""
+  echo -e "  ${D}USED = 0B. It costs nothing until the VM writes new blocks.${N}"
+  pause
+
+  # ── Step 5: Destroy + rebuild ─────────────────────────────────
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "${W}  Step 5: Nodes are cattle, not pets${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo ""
+  echo -e "  ${D}In traditional infrastructure, losing a node is a crisis.${N}"
+  echo -e "  ${D}With ZFS clones, losing a node is a 75ms rebuild.${N}"
+  echo ""
+  echo -e "  ${W}Current cluster:${N}"
+  _kctl get nodes --no-headers 2>/dev/null | awk '{printf "    %-16s %s\n", $1, $2}'
+  echo ""
+  echo -e "  ${D}If we needed to replace kldload-w-3:${N}"
+  echo -e "    ${C}virsh destroy kldload-w-3${N}           # kill the VM"
+  echo -e "    ${C}zfs destroy rpool/vms/kldload-w-3${N}   # delete the disk (instant)"
+  echo -e "    ${C}zfs clone golden@snap rpool/vms/kldload-w-3${N}  # new disk (75ms)"
+  echo -e "    ${C}virsh start kldload-w-3${N}             # boot the new clone"
+  echo ""
+  echo -e "  ${D}Total time: seconds. Total disk copied: zero bytes.${N}"
+  pause
+
+  # ── Summary ───────────────────────────────────────────────────
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  VM lifecycle powered by ZFS${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "  Golden image:   ${G}built once, sealed, immutable${N}"
+  echo -e "  Clone VM:       ${G}~75ms for a 40GB disk${N}"
+  echo -e "  Snapshot VM:    ${G}instant, while running, no downtime${N}"
+  echo -e "  Rollback VM:    ${G}instant, entire disk reverts${N}"
+  echo -e "  Rebuild VM:     ${G}destroy + re-clone, seconds${N}"
+  echo -e "  Disk cost:      ${G}only divergent blocks, not full copies${N}"
+  echo ""
+  echo -e "  ${W}4 nodes × 40GB = 160GB provisioned${N}"
+  echo -e "  ${W}Actual disk used: ~7GB (shared golden image + diffs)${N}"
+  echo ""
+  echo -e "  ${D}This is why we can deploy, test, destroy, and rebuild${N}"
+  echo -e "  ${D}an entire Kubernetes cluster in minutes, not hours.${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+
+  # Cleanup
+  zfs destroy rpool/vms/demo-vm 2>/dev/null || true
+  zfs destroy rpool/vms/kldload-w-1@demo-checkpoint 2>/dev/null || true
+  pause
+}
+
+# ── z: ZFS Live Demo ───────────────────────────────────────────
+demo_zfs_live() {
+  header
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  ZFS — the filesystem that powers everything you're about${N}"
+  echo -e "${W}  to see. Every VM in this cluster is a ZFS clone. Every${N}"
+  echo -e "${W}  snapshot is instant. Every rollback is instant. Zero copy.${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo ""
+  echo -e "${D}  If you've never seen ZFS before, watch the timestamps.${N}"
+  pause
+
+  # ── Step 1: Create a dataset ──────────────────────────────────
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "${W}  Step 1: Create a ZFS dataset${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo ""
+  echo -e "  ${D}A dataset is like a directory, but with its own properties —${N}"
+  echo -e "  ${D}compression, quotas, snapshots, replication. All independent.${N}"
+  echo ""
+  zfs create -o mountpoint=/tmp/zfs-demo -o compression=lz4 rpool/demo 2>/dev/null || true
+  echo -e "  ${G}✓${N} Created ${W}rpool/demo${N} → mounted at ${W}/tmp/zfs-demo${N}"
+  echo ""
+  zfs list -o name,used,avail,compress,mountpoint rpool/demo
+  pause
+
+  # ── Step 2: Write a config file ───────────────────────────────
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "${W}  Step 2: Write a config file${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo ""
+  cat > /tmp/zfs-demo/cilium.conf <<'CONF'
+# Cilium Configuration — Production
+# Last verified: working perfectly
+cluster-name: kldload-prod
+kube-proxy-replacement: true
+enable-hubble: true
+tunnel-protocol: disabled
+ipam-mode: kubernetes
+CONF
+  echo -e "  ${W}Contents of /tmp/zfs-demo/cilium.conf:${N}"
+  echo ""
+  cat /tmp/zfs-demo/cilium.conf
+  echo ""
+  echo -e "  ${G}✓${N} Config file written — this represents a known-good state."
+  pause
+
+  # ── Step 3: Snapshot ──────────────────────────────────────────
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "${W}  Step 3: Take a snapshot${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo ""
+  echo -e "  ${D}A ZFS snapshot captures the entire dataset at this exact moment.${N}"
+  echo -e "  ${D}It's not a copy — it's a pointer. Zero disk cost. Instant.${N}"
+  echo ""
+  echo -ne "  ${Y}Snapshotting...${N} "
+  local snap_start snap_end
+  snap_start=$(date +%s%N)
+  zfs snapshot rpool/demo@known-good
+  snap_end=$(date +%s%N)
+  echo -e "${G}done in $(( (snap_end - snap_start) / 1000000 ))ms${N}"
+  echo ""
+  zfs list -t snapshot -o name,used,refer rpool/demo
+  echo ""
+  echo -e "  ${D}Notice: USED = 0B. The snapshot costs nothing until data changes.${N}"
+  pause
+
+  # ── Step 4: Disaster ──────────────────────────────────────────
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "${W}  Step 4: Someone breaks the config${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo ""
+  echo -e "  ${D}Bad deploy. Intern pushed to prod. Config is gone.${N}"
+  echo ""
+  cat > /tmp/zfs-demo/cilium.conf <<'CONF'
+# OOPS — someone overwrote the config
+cluster-name: ???
+kube-proxy-replacement: false
+enable-hubble: false
+tunnel-protocol: vxlan
+ipam-mode: who-knows
+# TODO: fix this before anyone notices
+CONF
+  echo -e "  ${R}Contents of /tmp/zfs-demo/cilium.conf (CORRUPTED):${N}"
+  echo ""
+  cat /tmp/zfs-demo/cilium.conf
+  echo ""
+  echo -e "  ${R}✗${N} Config destroyed. In a traditional filesystem, you'd restore from backup."
+  echo -e "  ${R}  That means: find the backup, copy it over, hope it's recent enough.${N}"
+  echo -e "  ${R}  Minutes to hours. Maybe you don't even have a backup.${N}"
+  pause
+
+  # ── Step 5: Rollback ──────────────────────────────────────────
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "${W}  Step 5: ZFS rollback${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo ""
+  echo -e "  ${D}One command. The entire dataset reverts to the snapshot.${N}"
+  echo -e "  ${D}Not a file copy — a pointer change. Watch the time.${N}"
+  echo ""
+  echo -ne "  ${Y}Rolling back...${N} "
+  local rb_start rb_end
+  rb_start=$(date +%s%N)
+  zfs rollback rpool/demo@known-good
+  rb_end=$(date +%s%N)
+  echo -e "${G}done in $(( (rb_end - rb_start) / 1000000 ))ms${N}"
+  echo ""
+  echo -e "  ${G}Contents of /tmp/zfs-demo/cilium.conf (RESTORED):${N}"
+  echo ""
+  cat /tmp/zfs-demo/cilium.conf
+  echo ""
+  echo -e "  ${G}✓${N} The original config is back. Milliseconds, not minutes."
+  pause
+
+  # ── Step 6: Clone ─────────────────────────────────────────────
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "${W}  Step 6: Clone — zero-cost copy of the entire dataset${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo ""
+  echo -e "  ${D}A clone is a writable copy of a snapshot. It shares all data${N}"
+  echo -e "  ${D}with the original via copy-on-write. 0 bytes until you change something.${N}"
+  echo -e "  ${D}This is how we deploy 6 Kubernetes VMs from one golden image.${N}"
+  echo ""
+  echo -ne "  ${Y}Cloning...${N} "
+  local cl_start cl_end
+  cl_start=$(date +%s%N)
+  zfs clone -o mountpoint=/tmp/zfs-demo-clone rpool/demo@known-good rpool/demo-clone 2>/dev/null || true
+  cl_end=$(date +%s%N)
+  echo -e "${G}done in $(( (cl_end - cl_start) / 1000000 ))ms${N}"
+  echo ""
+  echo -e "  ${W}Original (/tmp/zfs-demo/cilium.conf):${N}"
+  head -3 /tmp/zfs-demo/cilium.conf
+  echo -e "  ${W}Clone (/tmp/zfs-demo-clone/cilium.conf):${N}"
+  head -3 /tmp/zfs-demo-clone/cilium.conf
+  echo ""
+  echo -e "  ${D}Two independent datasets. Same data. Zero disk cost:${N}"
+  echo ""
+  zfs list -o name,used,refer rpool/demo rpool/demo-clone rpool/demo@known-good 2>/dev/null
+  echo ""
+  echo -e "  ${D}The clone uses 0 bytes. Only divergent blocks cost disk space.${N}"
+  pause
+
+  # ── Summary ───────────────────────────────────────────────────
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  ZFS: the filesystem under everything${N}"
+  echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+  echo -e "  Snapshot:     ${G}instant — metadata pointer, 0 bytes${N}"
+  echo -e "  Rollback:     ${G}instant — pointer revert, milliseconds${N}"
+  echo -e "  Clone:        ${G}instant — writable fork, 0 bytes${N}"
+  echo -e "  Compression:  ${G}always on, transparent (lz4)${N}"
+  echo -e "  Checksums:    ${G}every block verified on read${N}"
+  echo ""
+  echo -e "  ${W}This is why kube-cluster deploys 6 VMs in seconds:${N}"
+  echo -e "  ${D}  One golden image → 6 ZFS clones → 6 running VMs.${N}"
+  echo -e "  ${D}  Each clone: ~75ms, 0 bytes, independent writable copy.${N}"
+  echo -e "  ${D}  Destroy all 6 → rebuild all 6: minutes, not hours.${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+
+  # Cleanup
+  zfs destroy rpool/demo-clone 2>/dev/null || true
+  zfs destroy rpool/demo@known-good 2>/dev/null || true
+  zfs destroy rpool/demo 2>/dev/null || true
+  pause
+}
+
 demo_overview() {
   header
   echo -e "${Y}=== Nodes ===${N}"
@@ -1659,6 +2125,9 @@ while true; do
   menu
   read -r c
   case $c in
+    p)  demo_platform ;;
+    z)  demo_zfs_live ;;
+    v)  demo_vm_lifecycle ;;
     1)  demo_overview ;;
     2)  demo_zfs_clones ;;
     3)  demo_add_nodes ;;
