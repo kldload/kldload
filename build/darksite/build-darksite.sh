@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# kldload darksite builder — downloads RPMs for offline install, creates local DNF repo
+# build-darksite.sh — RPM darksite builder
+# Runs inside the builder container. Downloads all RPM packages needed for
+# CentOS/RHEL/Rocky/Fedora offline installs and creates a local DNF repo.
+# Package lists are in config/package-sets/ (one package name per line).
+# Output goes to /root/darksite/rpm/ inside the ISO.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_SETS_DIR="${SCRIPT_DIR}/config/package-sets"
