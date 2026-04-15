@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════
-# kzfs-test — OpenZFS Test Matrix Runner
+# kzfs-test — OpenZFS Test Lab
 # ══════════════════════════════════════════════════════════════════════════
 #
-# Runs the OpenZFS zfs-tests.sh test suite across 7 Linux distros in parallel
+# OpenZFS Test Lab — runs zfs-tests.sh across 7 Linux distros in parallel
 # using ZFS instant clones on KVM. Each distro VM is cloned from a sealed
 # golden image in ~75ms, booted, tested, and destroyed.
 #
@@ -247,6 +247,12 @@ for i in 0 1 2 3; do
   truncate -s 4G /var/tmp/zfs-vdev${i}.img 2>/dev/null || true
 done
 
+echo "=== DNF Setup Validation ==="
+echo "zfs binary: $(command -v zfs 2>/dev/null || echo MISSING)"
+echo "zfs module: $(lsmod | grep -c '^zfs ' || echo 0)"
+echo "zfs-tests:  $(test -f /usr/share/zfs/zfs-tests.sh && echo OK || echo MISSING)"
+echo "ksh:        $(command -v ksh 2>/dev/null || echo MISSING)"
+echo "vdevs:      $(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)/4"
 echo "DNF test setup complete"
 DNFSETUP
       ;;
@@ -271,6 +277,12 @@ for i in 0 1 2 3; do
   truncate -s 4G /var/tmp/zfs-vdev${i}.img 2>/dev/null || true
 done
 
+echo "=== APT Setup Validation ==="
+echo "zfs binary: $(command -v zfs 2>/dev/null || echo MISSING)"
+echo "zfs module: $(lsmod | grep -c '^zfs ' || echo 0)"
+echo "zfs-tests:  $(test -f /usr/share/zfs/zfs-tests.sh && echo OK || echo MISSING)"
+echo "ksh:        $(command -v ksh 2>/dev/null || echo MISSING)"
+echo "vdevs:      $(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)/4"
 echo "APT test setup complete"
 APTSETUP
       ;;
@@ -297,6 +309,12 @@ for i in 0 1 2 3; do
   truncate -s 4G /var/tmp/zfs-vdev${i}.img 2>/dev/null || true
 done
 
+echo "=== Pacman Setup Validation ==="
+echo "zfs binary: $(command -v zfs 2>/dev/null || echo MISSING)"
+echo "zfs module: $(lsmod | grep -c '^zfs ' || echo 0)"
+echo "zfs-tests:  $(test -f /usr/share/zfs/zfs-tests.sh && echo OK || echo MISSING)"
+echo "ksh:        $(command -v ksh 2>/dev/null || echo MISSING)"
+echo "vdevs:      $(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)/4"
 echo "Pacman test setup complete"
 PACSETUP
       ;;
@@ -318,6 +336,12 @@ for i in 0 1 2 3; do
   truncate -s 4G /var/tmp/zfs-vdev${i}.img 2>/dev/null || true
 done
 
+echo "=== APK Setup Validation ==="
+echo "zfs binary: $(command -v zfs 2>/dev/null || echo MISSING)"
+echo "zfs module: $(lsmod | grep -c '^zfs ' || echo 0)"
+echo "zfs-tests:  $(test -f /usr/share/zfs/zfs-tests.sh && echo OK || echo MISSING)"
+echo "ksh:        $(command -v ksh 2>/dev/null || echo MISSING)"
+echo "vdevs:      $(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)/4"
 echo "APK test setup complete"
 APKSETUP
       ;;
@@ -409,6 +433,31 @@ build_golden_single() {
 
   # Install ZFS test suite
   setup_zfs_test_vm "$golden_ip" "$distro"
+
+  # ── Smoke-test the golden before sealing ──
+  log "  Validating golden ${distro}..."
+  local _v_zfs _v_mod _v_tests _v_vdevs _v_ksh _v_ver
+  _v_mod="$(_ssh_cmd "$golden_ip" "lsmod | grep -c '^zfs ' || echo 0")"
+  _v_zfs="$(_ssh_cmd "$golden_ip" "command -v zfs >/dev/null 2>&1 && echo OK || echo MISSING")"
+  _v_ver="$(_ssh_cmd "$golden_ip" "zfs version 2>/dev/null | head -1 || echo unknown")"
+  _v_tests="$(_ssh_cmd "$golden_ip" "test -f /usr/share/zfs/zfs-tests.sh && echo OK || (command -v zfs-tests.sh >/dev/null 2>&1 && echo OK || echo MISSING)")"
+  _v_vdevs="$(_ssh_cmd "$golden_ip" "ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l")"
+  _v_ksh="$(_ssh_cmd "$golden_ip" "command -v ksh >/dev/null 2>&1 && echo OK || echo MISSING")"
+
+  log "    ZFS binary:     ${_v_zfs}"
+  log "    ZFS module:     $([[ $_v_mod -ge 1 ]] && echo "loaded" || echo "NOT LOADED")"
+  log "    ZFS version:    ${_v_ver}"
+  log "    zfs-tests.sh:   ${_v_tests}"
+  log "    vdev images:    ${_v_vdevs}/4"
+  log "    ksh:            ${_v_ksh}"
+
+  if [[ "$_v_zfs" != "OK" || "$_v_mod" -lt 1 ]]; then
+    warn "  FAILED: ZFS not functional on ${distro} — golden will be incomplete"
+    warn "  The golden will still be created but tests will fail on this distro"
+  fi
+  if [[ "$_v_tests" != "OK" ]]; then
+    warn "  WARNING: zfs-tests.sh not found on ${distro} — test runs will skip this distro"
+  fi
 
   # Seal
   log "  Sealing golden..."
@@ -793,7 +842,7 @@ cmd_results() {
   [[ -d "$run_dir" ]] || die "Results not found: ${run_dir}"
 
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
-  echo -e "${W}  ZFS Test Matrix — Run ${run_id}${N}"
+  echo -e "${W}  OpenZFS Test Lab — Run ${run_id}${N}"
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo ""
 
@@ -944,7 +993,7 @@ cmd_destroy() {
 
 usage() {
   cat <<'USAGE'
-kzfs-test — OpenZFS Test Matrix Runner
+kzfs-test — OpenZFS Test Lab
 
 Usage:
   kzfs-test golden [distro|all]            Build golden images (one-time, cached)
