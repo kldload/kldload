@@ -643,6 +643,11 @@ build_golden_single() {
     return 0
   fi
 
+  # Clean up any previous failed/partial build
+  virsh destroy "$name" 2>/dev/null || true
+  virsh undefine "$name" --nvram 2>/dev/null || virsh undefine "$name" 2>/dev/null || true
+  zfs destroy -Rf "$zpath" 2>/dev/null || true
+
   local t_start
   t_start="$(timer_start)"
 
@@ -678,6 +683,11 @@ build_golden_single() {
       warn "RHEL requires CentOS golden — build CentOS first"
       return 1
     fi
+    # Clean up any previous failed RHEL build
+    virsh destroy "$name" 2>/dev/null || true
+    virsh undefine "$name" --nvram 2>/dev/null || virsh undefine "$name" 2>/dev/null || true
+    zfs destroy -Rf "$zpath" 2>/dev/null || true
+
     log "  RHEL: cloning from CentOS golden (same EL9 kernel)..."
     zfs clone "${centos_golden_zpath}@golden" "$zpath" 2>/dev/null || die "Failed to clone CentOS golden for RHEL"
 
@@ -707,11 +717,15 @@ build_golden_single() {
     log "  Waiting for SSH..."
     wait_for_ssh "$golden_ip" 180 || die "SSH timeout on ${name}"
 
-    # Register with subscription-manager and rebrand as RHEL
+    # Install subscription-manager and register as RHEL
+    log "  Installing subscription-manager..."
+    _ssh_cmd "$golden_ip" "dnf install -y subscription-manager 2>&1 | tail -5" 2>&1 | tee -a "$golden_log"
+
     log "  Registering RHEL subscription (credentials redacted)..."
     _ssh_cmd "$golden_ip" bash -c "
       subscription-manager register --username='${RHEL_USERNAME}' --password='${RHEL_PASSWORD}' --auto-attach 2>&1 | sed 's/password=.*/password=REDACTED/g'
       subscription-manager repos --enable codeready-builder-for-rhel-9-x86_64-rpms 2>/dev/null || true
+      subscription-manager identity 2>/dev/null | head -3
       echo 'RHEL registration complete'
     " 2>&1 | sed "s/${RHEL_PASSWORD}/REDACTED/g" | tee -a "$golden_log"
 
