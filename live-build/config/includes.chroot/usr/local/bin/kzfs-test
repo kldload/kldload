@@ -26,7 +26,11 @@ POOL="${POOL:-rpool}"
 PREFIX="kzfstest"
 SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
 ISO_DIR="/var/lib/libvirt/isos"
-RESULTS_DIR="/var/lib/kzfs-test/results"
+RESULTS_DIR="/root/kzfs-test"
+MASTER_LOG="${RESULTS_DIR}/kzfs-test.log"
+
+# ZFS source mode: "repo" (default), "version:X.Y.Z", "git:owner/repo@ref", "tarball:/path"
+ZFS_SOURCE="${ZFS_SOURCE:-repo}"
 
 DISTROS=(centos rocky fedora debian ubuntu arch alpine)
 
@@ -75,9 +79,11 @@ DISK="${DISK:-40}"
 C="\033[1;36m"; G="\033[1;32m"; Y="\033[1;33m"; R="\033[1;31m"
 W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"
 
-log()  { echo -e "${G}[kzfs-test]${N} $*"; }
-warn() { echo -e "${Y}[kzfs-test]${N} $*" >&2; }
-die()  { echo -e "${R}[kzfs-test]${N} $*" >&2; exit 1; }
+_ensure_log_dir() { mkdir -p "$RESULTS_DIR" 2>/dev/null; }
+_ts() { date '+%Y-%m-%d %H:%M:%S'; }
+log()  { _ensure_log_dir; echo -e "${G}[kzfs-test]${N} $*"; echo "[${$}] $(_ts) [INFO] $*" >> "$MASTER_LOG" 2>/dev/null; }
+warn() { _ensure_log_dir; echo -e "${Y}[kzfs-test]${N} $*" >&2; echo "[${$}] $(_ts) [WARN] $*" >> "$MASTER_LOG" 2>/dev/null; }
+die()  { _ensure_log_dir; echo -e "${R}[kzfs-test]${N} $*" >&2; echo "[${$}] $(_ts) [FATAL] $*" >> "$MASTER_LOG" 2>/dev/null; exit 1; }
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -91,7 +97,7 @@ _ssh_cmd() {
 
 get_vm_ip() {
   local vm="$1" ip="" mac=""
-  for _ in $(seq 1 45); do
+  for _ in $(seq 1 90); do
     ip="$(virsh domifaddr "$vm" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1)"
     [[ -n "$ip" ]] && break
     if [[ -z "$mac" ]]; then
@@ -189,6 +195,14 @@ runcmd:
   - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
   - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+  - |
+    # Fallback DHCP for distros where cloud-init network-config doesn't work
+    if ! ip -4 addr show | grep -q 'inet.*scope global'; then
+      for iface in $(ls /sys/class/net/ | grep -v lo); do
+        ip link set "$iface" up 2>/dev/null
+        dhclient "$iface" 2>/dev/null || dhcpcd "$iface" 2>/dev/null || true
+      done
+    fi
 ${runcmd_extra}
 USERDATA
 
@@ -203,6 +217,10 @@ ethernets:
     match:
       name: "eth*"
     dhcp4: true
+  id2:
+    match:
+      driver: "virtio*"
+    dhcp4: true
 NETCFG
 
   genisoimage -output "$ci_iso" -volid cidata -joliet -rock \
@@ -214,15 +232,83 @@ NETCFG
   echo "$ci_iso"
 }
 
+# ── ZFS Build-from-Source ─────────────────────────────────────────────────
+# Builds ZFS from a git ref or tarball inside the VM. Used when ZFS_SOURCE
+# is not "repo". Requires build deps already installed by the distro setup.
+_install_zfs_from_source() {
+  local ip="$1" source="$2"
+  local mode="${source%%:*}"
+  local ref="${source#*:}"
+
+  log "  Building ZFS from source (${source})..."
+
+  # Upload build script
+  _ssh_cmd "$ip" bash -s -- "$mode" "$ref" <<'BUILDZFS'
+set -e
+MODE="$1"
+REF="$2"
+NCPU=$(nproc)
+BUILD_DIR="/tmp/zfs-build"
+rm -rf "$BUILD_DIR"
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
+
+case "$MODE" in
+  version)
+    # Download release tarball
+    echo "Downloading ZFS ${REF}..."
+    curl -fSL -o "zfs-${REF}.tar.gz" \
+      "https://github.com/openzfs/zfs/releases/download/zfs-${REF}/zfs-${REF}.tar.gz"
+    tar xzf "zfs-${REF}.tar.gz"
+    cd "zfs-${REF}"
+    ;;
+  git)
+    # Clone from git — ref format is "owner/repo@branch" or just "@branch" for openzfs/zfs
+    REPO="${REF%%@*}"
+    BRANCH="${REF#*@}"
+    [[ "$REPO" == "$BRANCH" ]] && BRANCH="master"
+    [[ "$REPO" == @* ]] && REPO="openzfs/zfs" && BRANCH="${REF#@}"
+    echo "Cloning https://github.com/${REPO}.git @ ${BRANCH}..."
+    git clone --depth 1 --branch "$BRANCH" "https://github.com/${REPO}.git" zfs-src
+    cd zfs-src
+    ;;
+  tarball)
+    # Local tarball (already on the VM or SCP'd)
+    echo "Extracting ${REF}..."
+    tar xzf "$REF"
+    cd zfs-*/ 2>/dev/null || cd "$(basename "$REF" .tar.gz)"
+    ;;
+  *)
+    echo "ERROR: Unknown ZFS source mode: $MODE"
+    exit 1
+    ;;
+esac
+
+echo "Building ZFS ($(nproc) cores)..."
+[ -f autogen.sh ] && sh autogen.sh
+./configure --with-linux="$(ls -d /usr/src/kernels/$(uname -r) 2>/dev/null || ls -d /usr/lib/modules/$(uname -r)/build 2>/dev/null)" \
+  --enable-debug 2>&1 || ./configure --enable-debug 2>&1
+make -j${NCPU} 2>&1
+make install 2>&1
+
+# Load the just-built module
+depmod -a 2>/dev/null || true
+modprobe -r zfs 2>/dev/null || true
+modprobe zfs 2>/dev/null || true
+
+echo "ZFS version: $(zfs version 2>/dev/null || echo unknown)"
+echo "ZFS from-source build complete"
+BUILDZFS
+}
+
 # ── Per-Distro ZFS Test Setup ────────────────────────────────────────────
-# Installs ZFS + zfs-tests.sh runtime (NOT the full dev environment).
-# Lighter than kzfs-lab — no C toolchain, no source tree, just what's
-# needed to run zfs-tests.sh.
+# Installs ZFS + zfs-tests.sh runtime. When ZFS_SOURCE is "repo", uses
+# distro packages. Otherwise builds from source after installing deps.
 setup_zfs_test_vm() {
   local ip="$1" distro="$2"
   local family="${DISTRO_FAMILY[$distro]}"
 
-  log "  Setting up ZFS test environment on ${distro}..."
+  log "  Setting up ZFS test environment on ${distro} (source: ${ZFS_SOURCE})..."
 
   case "$family" in
     dnf)
@@ -230,17 +316,47 @@ setup_zfs_test_vm() {
 set -e
 dnf install -y epel-release 2>/dev/null || true
 
-# ZFS
+# kernel-devel MUST match running kernel for DKMS
+KVER=$(uname -r)
+dnf install -y kernel-devel-${KVER} dkms gcc make autoconf automake libtool 2>/dev/null || \
+  dnf install -y kernel-devel dkms gcc make autoconf automake libtool 2>/dev/null || true
+
+# Detect distro for correct ZFS repo
+DISTRO_ID=$(. /etc/os-release && echo "$ID")
 if ! command -v zfs >/dev/null 2>&1; then
-  dnf install -y https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm 2>/dev/null || true
-  dnf install -y zfs zfs-dkms 2>/dev/null || true
+  if [ "$DISTRO_ID" = "fedora" ]; then
+    # Fedora uses its own ZFS release RPM
+    FEDORA_VER=$(rpm --eval "%{fedora}")
+    dnf install -y "https://zfsonlinux.org/fedora/zfs-release-2-7.fc${FEDORA_VER}.noarch.rpm" 2>/dev/null || \
+      dnf install -y "https://zfsonlinux.org/fedora/zfs-release-2-6.fc${FEDORA_VER}.noarch.rpm" 2>/dev/null || \
+      dnf install -y "https://zfsonlinux.org/fedora/zfs-release.fc${FEDORA_VER}.noarch.rpm" 2>/dev/null || true
+  else
+    # EL distros (CentOS, Rocky, RHEL)
+    dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm" 2>/dev/null || true
+  fi
+  dnf install -y zfs zfs-dkms zfs-test 2>/dev/null || true
+fi
+
+# If zfs-test didn't install, try again explicitly
+if ! test -f /usr/share/zfs/zfs-tests.sh; then
+  dnf install -y zfs-test 2>/dev/null || true
 fi
 
 # Test suite deps — ksh is required by zfs-tests.sh
 dnf install -y ksh fio parted attr bc acl sysstat \
   bpftrace bcc-tools wireguard-tools curl jq 2>/dev/null || true
 
-modprobe zfs 2>/dev/null || true
+# Load ZFS module
+modprobe zfs || {
+  # DKMS may not have auto-built — try manual build
+  ZFS_VER=$(rpm -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")
+  if [ -n "$ZFS_VER" ]; then
+    dkms build -m zfs -v "$ZFS_VER" -k "$KVER" 2>&1 || true
+    dkms install -m zfs -v "$ZFS_VER" -k "$KVER" 2>&1 || true
+    depmod -a "$KVER" 2>/dev/null || true
+    modprobe zfs 2>/dev/null || true
+  fi
+}
 
 # Create loopback devices for zfs-tests.sh
 for i in 0 1 2 3; do
@@ -249,7 +365,7 @@ done
 
 echo "=== DNF Setup Validation ==="
 echo "zfs binary: $(command -v zfs 2>/dev/null || echo MISSING)"
-echo "zfs module: $(lsmod | grep -c '^zfs ' || echo 0)"
+echo "zfs module: $(lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || echo 0)"
 echo "zfs-tests:  $(test -f /usr/share/zfs/zfs-tests.sh && echo OK || echo MISSING)"
 echo "ksh:        $(command -v ksh 2>/dev/null || echo MISSING)"
 echo "vdevs:      $(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)/4"
@@ -260,9 +376,29 @@ DNFSETUP
       _ssh_cmd "$ip" bash -s <<'APTSETUP'
 set -e
 export DEBIAN_FRONTEND=noninteractive
+
+# Enable contrib + universe repos (ZFS packages live there)
+if [ -f /etc/apt/sources.list ]; then
+  sed -i 's/^\(deb.*\) main$/\1 main contrib/' /etc/apt/sources.list
+  sed -i '/^deb.*main contrib$/ s/$/ non-free/' /etc/apt/sources.list
+fi
+# Debian Trixie uses sources.list.d/debian.sources (DEB822 format)
+if [ -f /etc/apt/sources.list.d/debian.sources ]; then
+  sed -i 's/^Components: main$/Components: main contrib non-free/' /etc/apt/sources.list.d/debian.sources
+fi
+# Ubuntu uses universe
+if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+  sed -i 's/^Components: main restricted$/Components: main restricted universe/' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+fi
+
 apt-get update -y
 
-# ZFS
+# Headers for DKMS
+KVER=$(uname -r)
+apt-get install -y linux-headers-${KVER} dkms gcc make 2>/dev/null || \
+  apt-get install -y linux-headers-generic dkms gcc make 2>/dev/null || true
+
+# ZFS + test suite
 if ! command -v zfs >/dev/null 2>&1; then
   apt-get install -y zfsutils-linux zfs-dkms zfs-test 2>/dev/null || true
 fi
@@ -279,7 +415,7 @@ done
 
 echo "=== APT Setup Validation ==="
 echo "zfs binary: $(command -v zfs 2>/dev/null || echo MISSING)"
-echo "zfs module: $(lsmod | grep -c '^zfs ' || echo 0)"
+echo "zfs module: $(lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || echo 0)"
 echo "zfs-tests:  $(test -f /usr/share/zfs/zfs-tests.sh && echo OK || echo MISSING)"
 echo "ksh:        $(command -v ksh 2>/dev/null || echo MISSING)"
 echo "vdevs:      $(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)/4"
@@ -291,7 +427,8 @@ APTSETUP
 set -e
 pacman -Syu --noconfirm 2>/dev/null || true
 
-pacman -S --noconfirm \
+# Headers + build tools
+pacman -S --noconfirm linux-headers dkms gcc make \
   fio parted attr bc acl sysstat \
   bpftrace bcc-tools wireguard-tools curl jq 2>/dev/null || true
 
@@ -311,7 +448,7 @@ done
 
 echo "=== Pacman Setup Validation ==="
 echo "zfs binary: $(command -v zfs 2>/dev/null || echo MISSING)"
-echo "zfs module: $(lsmod | grep -c '^zfs ' || echo 0)"
+echo "zfs module: $(lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || echo 0)"
 echo "zfs-tests:  $(test -f /usr/share/zfs/zfs-tests.sh && echo OK || echo MISSING)"
 echo "ksh:        $(command -v ksh 2>/dev/null || echo MISSING)"
 echo "vdevs:      $(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)/4"
@@ -322,9 +459,20 @@ PACSETUP
       _ssh_cmd "$ip" sh -s <<'APKSETUP'
 set -e
 apk update
+
+# Enable community + testing repos for ZFS
+if ! grep -q 'community' /etc/apk/repositories 2>/dev/null; then
+  sed -i 's|^#\(.*community\)|\1|' /etc/apk/repositories
+fi
+apk update
+
 apk add bash coreutils util-linux findutils grep sed attr acl bc fio \
-  zfs zfs-lts \
-  bcc-tools bpftrace wireguard-tools curl jq 2>/dev/null || true
+  linux-lts-dev gcc make autoconf automake libtool \
+  wireguard-tools curl jq 2>/dev/null || true
+
+# ZFS — try multiple package names
+apk add zfs zfs-lts zfs-utils 2>/dev/null || true
+apk add zfs-test 2>/dev/null || true
 
 # mksh as ksh substitute (Alpine has no ksh)
 apk add mksh 2>/dev/null || true
@@ -338,7 +486,7 @@ done
 
 echo "=== APK Setup Validation ==="
 echo "zfs binary: $(command -v zfs 2>/dev/null || echo MISSING)"
-echo "zfs module: $(lsmod | grep -c '^zfs ' || echo 0)"
+echo "zfs module: $(lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || echo 0)"
 echo "zfs-tests:  $(test -f /usr/share/zfs/zfs-tests.sh && echo OK || echo MISSING)"
 echo "ksh:        $(command -v ksh 2>/dev/null || echo MISSING)"
 echo "vdevs:      $(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)/4"
@@ -346,6 +494,46 @@ echo "APK test setup complete"
 APKSETUP
       ;;
   esac
+
+  # If building from source, install extra build deps then build
+  if [[ "$ZFS_SOURCE" != "repo" ]]; then
+    log "  Installing build dependencies for from-source ZFS..."
+    case "$family" in
+      dnf)
+        _ssh_cmd "$ip" bash -c 'dnf install -y git libuuid-devel libblkid-devel \
+          openssl-devel libtirpc-devel libffi-devel python3-devel python3-cffi \
+          libaio-devel libattr-devel ncompress elfutils-libelf-devel \
+          zlib-devel 2>/dev/null || true'
+        ;;
+      apt)
+        _ssh_cmd "$ip" bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          git uuid-dev libblkid-dev libssl-dev libtirpc-dev \
+          python3-dev python3-cffi libaio-dev libattr1-dev ncompress \
+          libelf-dev zlib1g-dev autoconf automake libtool 2>/dev/null || true'
+        ;;
+      pacman)
+        _ssh_cmd "$ip" bash -c 'pacman -S --noconfirm git openssl \
+          python python-cffi libtirpc 2>/dev/null || true'
+        ;;
+      apk)
+        _ssh_cmd "$ip" sh -c 'apk add git libuuid libblkid openssl-dev \
+          libtirpc-dev python3-dev py3-cffi linux-headers \
+          autoconf automake libtool 2>/dev/null || true'
+        ;;
+    esac
+
+    # Tarball mode: SCP the file to the VM first
+    if [[ "$ZFS_SOURCE" == tarball:* ]]; then
+      local src_path="${ZFS_SOURCE#tarball:}"
+      if [[ -f "$src_path" ]]; then
+        local remote_path="/tmp/$(basename "$src_path")"
+        scp -o StrictHostKeyChecking=no -i "$SSH_KEY" "$src_path" "root@${ip}:${remote_path}" 2>/dev/null
+        ZFS_SOURCE="tarball:${remote_path}"
+      fi
+    fi
+
+    _install_zfs_from_source "$ip" "$ZFS_SOURCE"
+  fi
 
   log "  ZFS test environment ready on ${distro}"
 }
@@ -369,7 +557,23 @@ build_golden_single() {
   local t_start
   t_start="$(timer_start)"
 
+  # Persistent log for this golden build
+  local golden_log_dir="${RESULTS_DIR}/goldens"
+  mkdir -p "$golden_log_dir"
+  local golden_log="${golden_log_dir}/${distro}-$(date +%Y%m%d-%H%M%S).log"
   log "Building golden: ${C}${name}${N}"
+  log "  Log: ${golden_log}"
+
+  # Log header
+  {
+    echo "═══════════════════════════════════════════════════════════"
+    echo "  OpenZFS Test Lab — Golden Build: ${distro}"
+    echo "  Started: $(date)"
+    echo "  Host: $(uname -n) ($(nproc) cores, $(awk '/MemTotal/ {printf "%.0fGB", $2/1048576}' /proc/meminfo) RAM)"
+    echo "  ZFS Source: ${ZFS_SOURCE}"
+    echo "═══════════════════════════════════════════════════════════"
+    echo ""
+  } | tee "$golden_log"
 
   # Download
   mkdir -p "$ISO_DIR"
@@ -431,22 +635,50 @@ build_golden_single() {
     sleep 5
   done
 
-  # Install ZFS test suite
-  setup_zfs_test_vm "$golden_ip" "$distro"
+  # Install ZFS test suite (tee to log)
+  setup_zfs_test_vm "$golden_ip" "$distro" 2>&1 | tee -a "$golden_log"
 
   # ── Smoke-test the golden before sealing ──
   log "  Validating golden ${distro}..."
-  local _v_zfs _v_mod _v_tests _v_vdevs _v_ksh _v_ver
-  _v_mod="$(_ssh_cmd "$golden_ip" "lsmod | grep -c '^zfs ' || echo 0")"
+  local _v_zfs _v_mod _v_tests _v_vdevs _v_ksh _v_ver _v_kernel _v_dkms
+  _v_mod="$(_ssh_cmd "$golden_ip" "lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || echo 0")"
   _v_zfs="$(_ssh_cmd "$golden_ip" "command -v zfs >/dev/null 2>&1 && echo OK || echo MISSING")"
   _v_ver="$(_ssh_cmd "$golden_ip" "zfs version 2>/dev/null | head -1 || echo unknown")"
   _v_tests="$(_ssh_cmd "$golden_ip" "test -f /usr/share/zfs/zfs-tests.sh && echo OK || (command -v zfs-tests.sh >/dev/null 2>&1 && echo OK || echo MISSING)")"
   _v_vdevs="$(_ssh_cmd "$golden_ip" "ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l")"
   _v_ksh="$(_ssh_cmd "$golden_ip" "command -v ksh >/dev/null 2>&1 && echo OK || echo MISSING")"
+  _v_kernel="$(_ssh_cmd "$golden_ip" "uname -r" || echo "unknown")"
+  _v_dkms="$(_ssh_cmd "$golden_ip" "dkms status 2>/dev/null | head -5" || echo "n/a")"
+
+  # Log validation report
+  {
+    echo ""
+    echo "═══════════════════════════════════════════════════════════"
+    echo "  Golden Validation Report: ${distro}"
+    echo "═══════════════════════════════════════════════════════════"
+    echo "  Kernel:         ${_v_kernel}"
+    echo "  ZFS binary:     ${_v_zfs}"
+    echo "  ZFS module:     $([[ $_v_mod -ge 1 ]] && echo "LOADED" || echo "NOT LOADED")"
+    echo "  ZFS version:    ${_v_ver}"
+    echo "  DKMS status:    ${_v_dkms}"
+    echo "  zfs-tests.sh:   ${_v_tests}"
+    echo "  vdev images:    ${_v_vdevs}/4"
+    echo "  ksh:            ${_v_ksh}"
+    echo "  ZFS source:     ${ZFS_SOURCE}"
+    echo ""
+    local _result="PASS"
+    [[ "$_v_zfs" != "OK" || "$_v_mod" -lt 1 ]] && _result="FAIL"
+    [[ "$_v_tests" != "OK" ]] && _result="PARTIAL (no tests)"
+    echo "  Result:         ${_result}"
+    echo "═══════════════════════════════════════════════════════════"
+    echo ""
+  } | tee -a "$golden_log"
 
   log "    ZFS binary:     ${_v_zfs}"
   log "    ZFS module:     $([[ $_v_mod -ge 1 ]] && echo "loaded" || echo "NOT LOADED")"
   log "    ZFS version:    ${_v_ver}"
+  log "    Kernel:         ${_v_kernel}"
+  log "    DKMS:           ${_v_dkms}"
   log "    zfs-tests.sh:   ${_v_tests}"
   log "    vdev images:    ${_v_vdevs}/4"
   log "    ksh:            ${_v_ksh}"
@@ -458,6 +690,11 @@ build_golden_single() {
   if [[ "$_v_tests" != "OK" ]]; then
     warn "  WARNING: zfs-tests.sh not found on ${distro} — test runs will skip this distro"
   fi
+
+  # Ensure ZFS loads on boot
+  log "  Configuring ZFS autoload..."
+  _ssh_cmd "$golden_ip" "echo zfs > /etc/modules-load.d/zfs.conf"
+  _ssh_cmd "$golden_ip" "depmod -a 2>/dev/null || true"
 
   # Seal
   log "  Sealing golden..."
@@ -487,7 +724,22 @@ NETD"
 
   local elapsed
   elapsed="$(timer_elapsed_ms "$t_start")"
-  log "Golden ready: ${C}${name}${N} (${elapsed}ms)"
+
+  # Log final summary
+  {
+    echo "Golden build complete: ${name}"
+    echo "  Time:     $((elapsed / 1000))s"
+    echo "  Zvol:     ${zpath}"
+    echo "  Snapshot: ${zpath}@golden"
+    echo "  Size:     $(zfs get -Hp -o value used "$zpath" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo "?")"
+    echo "  Finished: $(date)"
+    echo ""
+  } | tee -a "$golden_log"
+
+  # Symlink latest log for this distro
+  ln -sfn "$golden_log" "${golden_log_dir}/${distro}-latest.log"
+
+  log "Golden ready: ${C}${name}${N} ($((elapsed / 1000))s) — log: ${golden_log}"
 }
 
 cmd_golden() {
@@ -597,8 +849,9 @@ cmd_verify() {
       continue
     }
 
-    # Check ZFS
+    # Check ZFS — try to load module if not already loaded
     local zfs_loaded zfs_ver tests_found
+    _ssh_cmd "$vm_ip" "modprobe zfs 2>/dev/null || true"
     zfs_loaded="$(_ssh_cmd "$vm_ip" "lsmod | grep -q '^zfs ' && echo YES || echo NO")"
     zfs_ver="$(_ssh_cmd "$vm_ip" "zfs version 2>/dev/null | head -1 | awk '{print \$NF}'" || echo "?")"
     tests_found="$(_ssh_cmd "$vm_ip" "command -v zfs-tests.sh >/dev/null 2>&1 && echo YES || (test -f /usr/share/zfs/zfs-tests.sh && echo YES || echo NO)")"
@@ -989,6 +1242,304 @@ cmd_destroy() {
   log "Cleanup complete"
 }
 
+# ── Interactive Menu ──────────────────────────────────────────────────────
+
+pause() {
+  echo ""
+  read -r -p "  Press Enter to continue..." _
+}
+
+_count_goldens() {
+  local count=0
+  for d in "${DISTROS[@]}"; do
+    zfs list "$(zvol_path "$(golden_name "$d")")@golden" >/dev/null 2>&1 && ((count++))
+  done
+  echo "$count"
+}
+
+_count_running() {
+  local count=0
+  for d in "${DISTROS[@]}"; do
+    virsh domstate "$(test_vm_name "$d")" 2>/dev/null | grep -q running && ((count++))
+  done
+  echo "$count"
+}
+
+menu_header() {
+  clear
+  local goldens running
+  goldens="$(_count_goldens)"
+  running="$(_count_running)"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}   OpenZFS Test Lab — kldload 1.0.4                         ${N}"
+  echo -e "${D}   ${goldens}/7 goldens • ${running} VMs running • $(nproc) cores • $(awk '/MemTotal/ {printf "%.0fGB", $2/1048576}' /proc/meminfo) RAM${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo ""
+}
+
+menu() {
+  menu_header
+  echo -e "  ${C}── Golden Images ──────────────────────────────────────────${N}"
+  echo -e "  ${G} 1${N}  Build golden — single distro"
+  echo -e "  ${G} 2${N}  Build golden — ALL distros"
+  echo -e "  ${G} 3${N}  Status — show all goldens, VMs, results"
+  echo ""
+  echo -e "  ${C}── Verify ─────────────────────────────────────────────────${N}"
+  echo -e "  ${G} 4${N}  Verify — single distro (boot, check ZFS, check tests)"
+  echo -e "  ${G} 5${N}  Verify — ALL distros"
+  echo ""
+  echo -e "  ${C}── Run Tests ──────────────────────────────────────────────${N}"
+  echo -e "  ${G} 6${N}  Quick test — single distro (~15 min)"
+  echo -e "  ${G} 7${N}  Quick test — ALL distros (~15 min)"
+  echo -e "  ${G} 8${N}  Full test — single distro (~2-4 hours)"
+  echo -e "  ${G} 9${N}  Full test — ALL distros (~2-4 hours)"
+  echo ""
+  echo -e "  ${C}── Results & Logs ─────────────────────────────────────────${N}"
+  echo -e "  ${G}10${N}  Show latest results matrix"
+  echo -e "  ${G}11${N}  Show results by run ID"
+  echo -e "  ${G}12${N}  View golden build log (per distro)"
+  echo -e "  ${G}13${N}  View master log (tail)"
+  echo ""
+  echo -e "  ${C}── ZFS Version ────────────────────────────────────────────${N}"
+  local _src_display="$ZFS_SOURCE"
+  [[ "$ZFS_SOURCE" == "repo" ]] && _src_display="distro default"
+  echo -e "  ${G}zv${N}  Change ZFS version ${D}(current: ${_src_display})${N}"
+  echo -e "  ${D}      Logs: ${RESULTS_DIR}/${N}"
+  echo ""
+  echo -e "  ${C}── Cleanup ────────────────────────────────────────────────${N}"
+  echo -e "  ${R} 0${N}  Destroy test VMs (keep goldens)"
+  echo -e "  ${R}00${N}  Destroy EVERYTHING (VMs + goldens)"
+  echo -e "  ${R} q${N}  Quit"
+  echo ""
+  echo -ne "${W}  Select: ${N}"
+}
+
+menu_pick_distro() {
+  echo ""
+  echo -e "  ${C}── Pick a distro ──────────────────────────────────────────${N}"
+  local i=1
+  for d in "${DISTROS[@]}"; do
+    local status=""
+    if zfs list "$(zvol_path "$(golden_name "$d")")@golden" >/dev/null 2>&1; then
+      status="${G}[golden]${N}"
+    fi
+    printf "  ${G}%d${N}  %-12s %b\n" "$i" "$d" "$status"
+    ((i++))
+  done
+  echo ""
+  echo -ne "${W}  Select (1-${#DISTROS[@]}): ${N}"
+  local choice
+  read -r choice
+  if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#DISTROS[@]} ]]; then
+    PICKED_DISTRO="${DISTROS[$((choice-1))]}"
+    return 0
+  else
+    echo -e "${R}  Invalid selection${N}"
+    return 1
+  fi
+}
+
+menu_pick_zfs_version() {
+  echo ""
+  echo -e "  ${C}── ZFS Version ────────────────────────────────────────────${N}"
+  echo -e "  ${G}1${N}  Distro default (whatever the repo ships)"
+  echo -e "  ${G}2${N}  Release version (e.g., 2.3.0, 2.2.7)"
+  echo -e "  ${G}3${N}  Git branch/PR (e.g., openzfs/zfs@master, openzfs/zfs@fix-deadlock)"
+  echo -e "  ${G}4${N}  Local tarball (path to .tar.gz)"
+  echo ""
+  local _cur="$ZFS_SOURCE"
+  [[ "$_cur" == "repo" ]] && _cur="distro default"
+  echo -e "  ${D}Current: ${_cur}${N}"
+  echo ""
+  echo -ne "${W}  Select (1-4): ${N}"
+  local choice
+  read -r choice
+  case "$choice" in
+    1)
+      ZFS_SOURCE="repo"
+      log "ZFS source: distro default"
+      ;;
+    2)
+      echo -ne "  ${W}Version (e.g., 2.3.0): ${N}"
+      local ver
+      read -r ver
+      if [[ -n "$ver" ]]; then
+        ZFS_SOURCE="version:${ver}"
+        log "ZFS source: release ${ver}"
+      fi
+      ;;
+    3)
+      echo -ne "  ${W}Git ref (e.g., openzfs/zfs@master): ${N}"
+      local ref
+      read -r ref
+      if [[ -n "$ref" ]]; then
+        ZFS_SOURCE="git:${ref}"
+        log "ZFS source: git ${ref}"
+      fi
+      ;;
+    4)
+      echo -ne "  ${W}Path to tarball: ${N}"
+      local path
+      read -r path
+      if [[ -f "$path" ]]; then
+        ZFS_SOURCE="tarball:${path}"
+        log "ZFS source: tarball ${path}"
+      else
+        warn "File not found: ${path}"
+      fi
+      ;;
+    *)
+      echo -e "${R}  Invalid selection${N}"
+      ;;
+  esac
+  echo ""
+  echo -e "  ${W}NOTE:${N} Changing the ZFS version requires rebuilding goldens."
+  echo -e "  ${D}Destroy existing goldens first, then rebuild.${N}"
+}
+
+menu_confirm_destroy() {
+  echo ""
+  echo -e "${R}  This will destroy ALL kzfs-test VMs and golden images.${N}"
+  echo -e "${R}  Cloud images in ${ISO_DIR} will be preserved.${N}"
+  echo ""
+  read -r -p "  Type 'destroy' to confirm: " confirm
+  [[ "$confirm" == "destroy" ]]
+}
+
+interactive_menu() {
+  local PICKED_DISTRO=""
+
+  while true; do
+    menu
+    local choice
+    read -r choice
+    case "$choice" in
+      1)
+        menu_header
+        if menu_pick_distro; then
+          cmd_golden "$PICKED_DISTRO"
+          pause
+        fi
+        ;;
+      2)
+        menu_header
+        cmd_golden all
+        pause
+        ;;
+      3)
+        menu_header
+        cmd_status
+        pause
+        ;;
+      4)
+        menu_header
+        if menu_pick_distro; then
+          cmd_verify "$PICKED_DISTRO"
+          pause
+        fi
+        ;;
+      5)
+        menu_header
+        cmd_verify all
+        pause
+        ;;
+      6)
+        menu_header
+        if menu_pick_distro; then
+          cmd_run --quick --distro "$PICKED_DISTRO"
+          pause
+        fi
+        ;;
+      7)
+        menu_header
+        cmd_run --quick
+        pause
+        ;;
+      8)
+        menu_header
+        if menu_pick_distro; then
+          cmd_run --full --distro "$PICKED_DISTRO"
+          pause
+        fi
+        ;;
+      9)
+        menu_header
+        cmd_run --full
+        pause
+        ;;
+      10)
+        menu_header
+        cmd_results ""
+        pause
+        ;;
+      11)
+        menu_header
+        echo -e "  ${W}Available runs:${N}"
+        ls -1 "$RESULTS_DIR" 2>/dev/null | grep -v latest || echo "  No runs yet"
+        echo ""
+        echo -ne "  ${W}Run ID: ${N}"
+        local run_id
+        read -r run_id
+        [[ -n "$run_id" ]] && cmd_results "$run_id"
+        pause
+        ;;
+      12)
+        menu_header
+        if menu_pick_distro; then
+          local _glog="${RESULTS_DIR}/goldens/${PICKED_DISTRO}-latest.log"
+          if [[ -f "$_glog" ]]; then
+            echo -e "  ${W}Golden build log: ${PICKED_DISTRO}${N}"
+            echo -e "  ${D}${_glog}${N}"
+            echo ""
+            cat "$_glog"
+          else
+            echo -e "  ${Y}No golden build log for ${PICKED_DISTRO}${N}"
+            echo -e "  ${D}Build a golden first: option 1${N}"
+          fi
+          pause
+        fi
+        ;;
+      13)
+        menu_header
+        echo -e "  ${W}Master log (last 50 lines):${N}"
+        echo -e "  ${D}${MASTER_LOG}${N}"
+        echo ""
+        tail -50 "$MASTER_LOG" 2>/dev/null || echo "  No log yet"
+        pause
+        ;;
+      0)
+        menu_header
+        DESTROY_ALL=0
+        cmd_destroy
+        pause
+        ;;
+      00)
+        menu_header
+        if menu_confirm_destroy; then
+          DESTROY_ALL=1
+          cmd_destroy
+        else
+          echo -e "${Y}  Cancelled${N}"
+        fi
+        pause
+        ;;
+      zv|ZV)
+        menu_header
+        menu_pick_zfs_version
+        pause
+        ;;
+      q|Q)
+        echo ""
+        exit 0
+        ;;
+      *)
+        echo -e "${R}  Invalid option${N}"
+        sleep 1
+        ;;
+    esac
+  done
+}
+
 # ── Usage ─────────────────────────────────────────────────────────────────
 
 usage() {
@@ -996,6 +1547,7 @@ usage() {
 kzfs-test — OpenZFS Test Lab
 
 Usage:
+  kzfs-test                                Interactive menu
   kzfs-test golden [distro|all]            Build golden images (one-time, cached)
   kzfs-test verify [distro|all]            Smoke test — boot, check ZFS, check tests
   kzfs-test run [--quick|--full] [--distro d1,d2]  Run zfs-tests.sh across distros
@@ -1005,8 +1557,17 @@ Usage:
 
 Distros: centos rocky fedora debian ubuntu arch alpine
 
+ZFS Version Flags (for golden/run):
+  --zfs-version 2.3.0               Build from release tarball
+  --zfs-git openzfs/zfs@master       Build from git branch
+  --zfs-git @fix-deadlock            Build from openzfs/zfs branch (shorthand)
+  --zfs-tarball /path/to/zfs.tar.gz  Build from local tarball
+
 Examples:
+  kzfs-test                                # Interactive menu
   kzfs-test golden all                     # Build all 7 golden images
+  kzfs-test golden centos --zfs-version 2.3.0  # Golden with specific ZFS
+  kzfs-test golden all --zfs-git @master   # All goldens from git master
   kzfs-test verify                         # Quick check all goldens work
   kzfs-test run --quick                    # ~15 min subset on all distros
   kzfs-test run --full --distro centos,debian  # Full suite on 2 distros
@@ -1020,7 +1581,13 @@ USAGE
 
 DESTROY_ALL=0
 CMD="${1:-}"
-[[ -n "$CMD" ]] || usage
+
+# No args = interactive menu
+if [[ -z "$CMD" ]]; then
+  interactive_menu
+  exit 0
+fi
+
 shift
 
 # Parse global flags
@@ -1028,6 +1595,9 @@ _args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --all) DESTROY_ALL=1; shift ;;
+    --zfs-version) ZFS_SOURCE="version:$2"; shift 2 ;;
+    --zfs-git)     ZFS_SOURCE="git:$2"; shift 2 ;;
+    --zfs-tarball) ZFS_SOURCE="tarball:$2"; shift 2 ;;
     *)     _args+=("$1"); shift ;;
   esac
 done
@@ -1040,6 +1610,7 @@ case "$CMD" in
   status)   cmd_status ;;
   results)  cmd_results "${1:-}" ;;
   destroy)  cmd_destroy ;;
+  menu)     interactive_menu ;;
   help|-h|--help) usage ;;
   *)        usage ;;
 esac
