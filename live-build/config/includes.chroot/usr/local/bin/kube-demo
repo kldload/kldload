@@ -194,7 +194,6 @@ demo_overview() {
   echo -e "  ${D}Every node is a ZFS clone of a single golden image. The entire${N}"
   echo -e "  ${D}network stack — routing, NAT, load balancing, policy — runs in${N}"
   echo -e "  ${D}eBPF inside the kernel. No kube-proxy. No iptables.${N}"
-  pause
 
   # ── Step 1: Nodes ─────────────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -205,7 +204,6 @@ demo_overview() {
   echo -e "  ${D}No ISO installs, no Packer builds, no Terraform provisioning.${N}"
   echo ""
   _kctl get nodes -o wide
-  pause
 
   # ── Step 2: System pods ───────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -217,7 +215,6 @@ demo_overview() {
   echo -e "  ${D}MetalLB for real LoadBalancer IPs on bare metal.${N}"
   echo ""
   _kctl get pods -A -o wide | head -25
-  pause
 
   # ── Step 3: Namespaces ────────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -228,7 +225,6 @@ demo_overview() {
   echo -e "  ${D}CNI (Cilium), DNS (CoreDNS), and observability (Hubble).${N}"
   echo ""
   _kctl get ns
-  pause
 
   # ── Step 4: Versions ──────────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -292,7 +288,6 @@ demo_platform() {
   echo -e "  ${W}Distro:${N}       $(cat /etc/redhat-release 2>/dev/null || cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '"' || echo "unknown")"
   echo -e "  ${W}Kernel:${N}       $(uname -r)"
   echo -e "  ${W}Architecture:${N}  $(uname -m)"
-  pause
 
   # ── Step 2: Secure Boot ──────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -312,7 +307,6 @@ demo_platform() {
   local mok_count
   mok_count="$(mokutil --list-enrolled 2>/dev/null | grep -c 'CN=kldload' || echo 0)"
   echo -e "  ${W}MOK keys:${N}     ${G}${mok_count} kldload keys enrolled${N}"
-  pause
 
   # ── Step 3: Hardware ─────────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -325,7 +319,6 @@ demo_platform() {
   echo -e "  ${W}CPU:${N}          $(nproc) cores — $(grep 'model name' /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || echo "unknown")"
   echo -e "  ${W}RAM:${N}          $(free -h | awk '/Mem:/ {print $2}')"
   echo -e "  ${W}Disk:${N}         $(lsblk -dno NAME,SIZE,MODEL /dev/nvme0n1 2>/dev/null || lsblk -dno NAME,SIZE,MODEL /dev/sda 2>/dev/null || echo "unknown")"
-  pause
 
   # ── Step 4: ZFS ──────────────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -348,7 +341,6 @@ demo_platform() {
   echo ""
   echo -e "  ${W}Snapshots:${N}    $(zfs list -t snapshot -H 2>/dev/null | wc -l) total"
   echo -e "  ${W}Compression:${N}  $(zfs get -H -o value compressratio rpool 2>/dev/null || echo "n/a")"
-  pause
 
   # ── Step 5: WireGuard ────────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -376,7 +368,6 @@ demo_platform() {
   echo ""
   echo -e "  ${W}Inside the cluster (control plane):${N}"
   _ssh_cp 'wg show 2>/dev/null | head -20 || echo "  WireGuard not configured on CP"'
-  pause
 
   # ── Step 6: kube-proxy status ────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -438,7 +429,6 @@ demo_vm_lifecycle() {
   echo ""
   echo -e "  ${W}Golden snapshots (each clone comes from one of these):${N}"
   zfs list -t snapshot -o name,used,refer rpool/vms/k8s-golden 2>/dev/null | grep -E "NAME|golden|clone" | head -6
-  pause
 
   # ── Step 2: Current cluster — all clones ──────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -468,7 +458,6 @@ demo_vm_lifecycle() {
   echo -e "  ${W}Total actual disk:${N}     ${G}$(numfmt --to=iec $total_used 2>/dev/null)${N}"
   echo -e "  ${W}Total provisioned:${N}     ${Y}$(numfmt --to=iec $total_provisioned 2>/dev/null)${N} (if these were full copies)"
   echo -e "  ${W}Space saved:${N}           ${G}~$(( (total_provisioned - total_used) * 100 / total_provisioned ))%${N}"
-  pause
 
   # ── Step 3: Clone a new VM — watch the timer ──────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -587,7 +576,6 @@ demo_vm_lifecycle() {
   zfs list -t snapshot -o name,used,refer rpool/vms/kldload-w-1@demo-checkpoint 2>/dev/null
   echo ""
   echo -e "  ${D}USED = 0B. It costs nothing until the VM writes new blocks.${N}"
-  pause
 
   # ── Step 5: Destroy + rebuild ─────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -607,7 +595,6 @@ demo_vm_lifecycle() {
   echo -e "    ${C}virsh start kldload-w-3${N}             # boot the new clone"
   echo ""
   echo -e "  ${D}Total time: seconds. Total disk copied: zero bytes.${N}"
-  pause
 
   # ── Summary ───────────────────────────────────────────────────
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
@@ -657,7 +644,6 @@ demo_zfs_live() {
   echo -e "  ${G}Created ${W}rpool/demo${N} → mounted at ${W}/tmp/zfs-demo${N}"
   echo ""
   zfs list -o name,used,avail,compress,mountpoint rpool/demo
-  pause
 
   # ── Step 2: Write a config file ───────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -678,7 +664,6 @@ CONF
   cat /tmp/zfs-demo/cilium.conf
   echo ""
   echo -e "  ${G}Config file written — this represents a known-good state."
-  pause
 
   # ── Step 3: Snapshot ──────────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -698,7 +683,6 @@ CONF
   zfs list -t snapshot -o name,used,refer rpool/demo
   echo ""
   echo -e "  ${D}Notice: USED = 0B. The snapshot costs nothing until data changes.${N}"
-  pause
 
   # ── Step 4: Disaster ──────────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -773,7 +757,6 @@ CONF
   zfs list -o name,used,refer rpool/demo rpool/demo-clone rpool/demo@known-good 2>/dev/null
   echo ""
   echo -e "  ${D}The clone uses 0 bytes. Only divergent blocks cost disk space.${N}"
-  pause
 
   # ── Summary ───────────────────────────────────────────────────
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
@@ -809,7 +792,6 @@ demo_zfs_clones() {
   echo -e "  ${D}cloned from a single golden image. Copy-on-write means each${N}"
   echo -e "  ${D}clone only stores blocks that diverged from golden. The rest${N}"
   echo -e "  ${D}is shared — zero duplication.${N}"
-  pause
 
   # ── Step 1: All zvols ────────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -821,7 +803,6 @@ demo_zfs_clones() {
   echo -e "  ${D}vs 'VOLSIZE' — that's copy-on-write in action.${N}"
   echo ""
   zfs list -o name,used,refer,volsize -r rpool/vms -t all 2>/dev/null || echo "  No rpool/vms"
-  pause
 
   # ── Step 2: Per-node disk cost ───────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -873,7 +854,6 @@ demo_add_nodes() {
   echo -e "  ${D}Traditional scale-out: provision hardware, install OS, configure${N}"
   echo -e "  ${D}packages, join cluster. Hours of work.${N}"
   echo -e "  ${D}ZFS scale-out: clone golden image, boot, kubeadm join. Minutes.${N}"
-  pause
 
   # ── Step 1: Current cluster state ────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -883,7 +863,6 @@ demo_add_nodes() {
   echo -e "  ${D}This is what we're starting with. We'll add 2 more workers.${N}"
   echo ""
   _kctl get nodes -o wide
-  pause
 
   local existing
   existing="$(virsh list --all --name 2>/dev/null | grep 'kldload-w-' | wc -l)"
@@ -913,8 +892,6 @@ demo_add_nodes() {
 
   # Machine-id is generated by cloud-init runcmd (systemd-machine-id-setup)
   # DHCP uses ClientIdentifier=mac (baked into golden) — unique per clone
-
-  pause
 
   # ── Step 3: Boot new workers ─────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -992,7 +969,6 @@ NETCFG
   echo ""
   echo -e "  ${D}Waiting for DHCP (45s)...${N}"
   sleep 45
-  pause
 
   # ── Step 4: Join cluster + WireGuard ─────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1075,7 +1051,6 @@ NETCFG
   echo ""
   echo -e "  ${D}Waiting for nodes to become Ready (20s)...${N}"
   sleep 20
-  pause
 
   # ── Step 5: Verify expanded cluster ──────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1115,7 +1090,6 @@ demo_cilium() {
   echo -e "  ${D}eBPF programs loaded directly into the Linux kernel. Service${N}"
   echo -e "  ${D}routing, load balancing, NAT, policy enforcement — all happen${N}"
   echo -e "  ${D}in kernel space. Zero context switches. Zero copies.${N}"
-  pause
 
   # ── Step 1: Cilium agent status ──────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1127,7 +1101,6 @@ demo_cilium() {
   echo -e "  ${D}the kernel handles all traffic without going back to userland.${N}"
   echo ""
   _cilium_dbg status || echo "  cilium not available"
-  pause
 
   # ── Step 2: Cilium pods ──────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1139,7 +1112,6 @@ demo_cilium() {
   echo -e "  ${D}The datapath itself runs in the kernel, independent of the agent.${N}"
   echo ""
   _kctl get pods -n kube-system -l k8s-app=cilium -o wide
-  pause
 
   # ── Step 3: eBPF endpoint map ────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1180,7 +1152,6 @@ demo_connectivity() {
   echo -e "  ${D}and validates every path through the eBPF datapath: pod-to-pod,${N}"
   echo -e "  ${D}pod-to-service, pod-to-external, and cross-node. This is the${N}"
   echo -e "  ${D}same test suite the Cilium CI runs on every commit.${N}"
-  pause
 
   # ── Step 1: Run connectivity tests ───────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1195,7 +1166,6 @@ demo_connectivity() {
   # connectivity test is a cilium CLI feature (host), not cilium-dbg (pod)
   _cilium_cli connectivity test --test pod-to-pod --test pod-to-service 2>&1 \
     | tee "$tmpout" || true
-  pause
 
   # ── Step 2: Results ──────────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1247,7 +1217,6 @@ demo_hubble() {
   echo -e "  ${D}sidecars, no log scrapers, no tcpdump. Every DNS query, every${N}"
   echo -e "  ${D}HTTP request, every TCP connection, every policy drop — visible${N}"
   echo -e "  ${D}in real time, with zero overhead on the datapath.${N}"
-  pause
 
   # ── Step 1: Hubble deployment status ─────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1258,7 +1227,6 @@ demo_hubble() {
   echo -e "  ${D}Hubble UI provides a service dependency graph and flow timeline.${N}"
   echo ""
   _kctl get deploy -n kube-system hubble-relay hubble-ui
-  pause
 
   # ── Step 2: Live flow observation ────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1296,7 +1264,6 @@ demo_hubble() {
   # Clean up
   _kctl delete deployment hubble-watch --grace-period=0 2>/dev/null || true
   _kctl delete pod hubble-curl --grace-period=0 --force 2>/dev/null || true
-  pause
 
   # ── Step 3: Hubble UI access ─────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1338,7 +1305,6 @@ demo_coredns() {
   echo -e "  ${D}Every Service gets a DNS name: my-svc.my-ns.svc.cluster.local.${N}"
   echo -e "  ${D}Pods resolve these names through CoreDNS, which Cilium routes${N}"
   echo -e "  ${D}to via eBPF — no iptables DNAT for the DNS VIP.${N}"
-  pause
 
   # ── Step 1: CoreDNS pods ─────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1349,7 +1315,6 @@ demo_coredns() {
   echo -e "  ${D}map load-balances DNS queries to both replicas in the kernel.${N}"
   echo ""
   _kctl get pods -n kube-system -l k8s-app=kube-dns -o wide
-  pause
 
   # ── Step 2: CoreDNS config ───────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1362,7 +1327,6 @@ demo_coredns() {
   echo ""
   _kctl get configmap -n kube-system coredns -o jsonpath='{.data.Corefile}' 2>/dev/null
   echo ""
-  pause
 
   # ── Step 3: DNS resolution tests ─────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1418,7 +1382,6 @@ demo_netpol() {
   echo -e "  ${D}the kernel before they ever reach the destination pod. Traditional${N}"
   echo -e "  ${D}CNIs use iptables, which means O(n) chain traversal per packet.${N}"
   echo -e "  ${D}Cilium's BPF policy map is O(1) — constant time, any scale.${N}"
-  pause
 
   # ── Step 1: Set up test environment ──────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1439,7 +1402,6 @@ demo_netpol() {
   local result
   result="$(_kctl exec client -n netpol-demo -- wget -qO- --timeout=3 http://web.netpol-demo.svc.cluster.local 2>/dev/null | head -1)"
   [[ -n "$result" ]] && echo -e "  ${G}No policy: client can reach web${N}" || echo -e "  ${Y}Waiting for pods...${N}"
-  pause
 
   # ── Step 2: Apply deny-all ───────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1524,7 +1486,6 @@ demo_metallb() {
   echo -e "  ${D}cloud provider. On bare metal, it stays <pending> forever.${N}"
   echo -e "  ${D}MetalLB fixes this — it assigns IPs from a pool and advertises${N}"
   echo -e "  ${D}them via ARP on your LAN. Real external IPs, no cloud needed.${N}"
-  pause
 
   # ── Step 1: MetalLB status ───────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1535,7 +1496,6 @@ demo_metallb() {
   echo -e "  ${D}responds to ARP requests for assigned VIPs on the local network.${N}"
   echo ""
   _kctl get pods -n metallb-system
-  pause
 
   # ── Step 2: IP address pool ──────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1546,7 +1506,6 @@ demo_metallb() {
   echo -e "  ${D}to ARP on your LAN — any machine on the network can reach these IPs.${N}"
   echo ""
   _kctl get ipaddresspool -n metallb-system -o yaml 2>/dev/null | grep -A5 "addresses:" || echo "  No pool configured"
-  pause
 
   # ── Step 3: Deploy LoadBalancer service ──────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1599,7 +1558,6 @@ demo_gateway() {
   echo -e "  ${D}natively — no nginx-ingress-controller, no HAProxy, no envoy${N}"
   echo -e "  ${D}sidecar. HTTP routing decisions happen in eBPF via Cilium's${N}"
   echo -e "  ${D}L7 proxy, which is part of the Cilium agent — not a sidecar.${N}"
-  pause
 
   # ── Step 1: Gateway API CRDs ─────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1611,7 +1569,6 @@ demo_gateway() {
   echo -e "  ${D}deployment needed.${N}"
   echo ""
   _kctl get gatewayclasses
-  pause
 
   # ── Step 2: Deploy HTTP Gateway ──────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1684,7 +1641,6 @@ demo_zfs_pvc() {
   echo -e "  ${D}directory, with no filesystem-level features. ZFS CSI gives every${N}"
   echo -e "  ${D}PV its own ZFS dataset — compression, checksums, instant snapshots,${N}"
   echo -e "  ${D}clones. All the ZFS primitives, exposed through the CSI API.${N}"
-  pause
 
   # ── Step 1: Storage classes ──────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1696,7 +1652,6 @@ demo_zfs_pvc() {
   echo -e "  ${D}Both get lz4 compression, SHA-256 checksums, and instant snapshots.${N}"
   echo ""
   _kctl get sc
-  pause
 
   # ── Step 2: Create PVC ───────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1738,7 +1693,6 @@ PVC
   echo ""
   echo -e "  ${D}Waiting for PVC to bind...${N}"
   sleep 10
-  pause
 
   # ── Step 3: Verify PVC ───────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1783,7 +1737,6 @@ demo_snapshot_restore() {
   echo -e "  ${D}Traditional PV backup: stop the pod, copy the data, hope nothing${N}"
   echo -e "  ${D}changed. ZFS snapshot: instant, consistent, zero downtime. Then${N}"
   echo -e "  ${D}clone the snapshot into a new PV to restore — also instant.${N}"
-  pause
 
   # Ensure demo-data PVC exists
   if ! _kctl get pvc demo-data --no-headers 2>/dev/null | grep -q Bound; then
@@ -1799,7 +1752,6 @@ demo_snapshot_restore() {
   echo -e "  ${D}Writing a timestamped value so we can prove the restore works.${N}"
   echo ""
   _kctl exec demo-writer -- sh -c 'echo "original data — $(date)" > /data/proof.txt && cat /data/proof.txt' 2>/dev/null
-  pause
 
   # ── Step 2: Snapshot the PVC ─────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1821,7 +1773,6 @@ spec:
 SNAP
   sleep 5
   _kctl get volumesnapshot demo-data-snap 2>/dev/null
-  pause
 
   # ── Step 3: Corrupt the data ─────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1912,7 +1863,6 @@ demo_db_pvc() {
   echo -e "  ${D}uses 16KB. ZFS default recordsize is 128KB, which causes write${N}"
   echo -e "  ${D}amplification for database I/O. The zfs-db storage class uses 8K${N}"
   echo -e "  ${D}recordsize to match the database page size — no amplification.${N}"
-  pause
 
   # ── Step 1: Create database PVC ──────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1954,7 +1904,6 @@ spec:
 DBPVC
   echo -e "  ${D}Waiting for PVC to bind...${N}"
   sleep 15
-  pause
 
   # ── Step 2: Verify PVC and write test ────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -1999,7 +1948,6 @@ demo_nginx() {
   echo -e "  ${D}scheduler spreads pods across worker nodes — each node was cloned${N}"
   echo -e "  ${D}from golden in <100ms. Cilium's eBPF service map load-balances${N}"
   echo -e "  ${D}incoming traffic across all 3 pods in the kernel.${N}"
-  pause
 
   # ── Step 1: Deploy nginx ─────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2013,7 +1961,6 @@ demo_nginx() {
   _kctl expose deployment nginx-fleet --type=LoadBalancer --port=80 2>/dev/null || true
   echo -e "  ${D}Waiting for pods to schedule (8s)...${N}"
   sleep 8
-  pause
 
   # ── Step 2: Verify distribution ──────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2055,7 +2002,6 @@ demo_pod_dns() {
   echo -e "  ${D}The most basic proof: can the scheduler place a pod, and can that${N}"
   echo -e "  ${D}pod resolve DNS? If these work, the control plane, kubelet, Cilium${N}"
   echo -e "  ${D}CNI, and CoreDNS are all functioning correctly.${N}"
-  pause
 
   # ── Step 1: Schedule a pod ───────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2069,7 +2015,6 @@ demo_pod_dns() {
   _kctl run test-pod --image=busybox --restart=Never --command -- sleep 30 2>/dev/null || true
   sleep 5
   _kctl get pod test-pod -o wide
-  pause
 
   # ── Step 2: DNS resolution ──────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2111,7 +2056,6 @@ demo_scale() {
   echo -e "  ${D}map load-balances traffic to all 20 pods in the kernel — O(1) lookup${N}"
   echo -e "  ${D}per packet, regardless of pod count. Traditional kube-proxy would${N}"
   echo -e "  ${D}need 20+ iptables rules for this, evaluated sequentially.${N}"
-  pause
 
   # ── Step 1: Scale deployment ─────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2126,7 +2070,6 @@ demo_scale() {
     _kctl scale deployment scale-test --replicas=20 2>/dev/null
   echo -e "  ${Y}Waiting for pods to schedule (15s)...${N}"
   sleep 15
-  pause
 
   # ── Step 2: Pod distribution ─────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2176,7 +2119,6 @@ demo_rolling_update() {
   echo -e "  ${D}Old pods are terminated only after new pods pass readiness checks.${N}"
   echo -e "  ${D}Cilium's eBPF service map updates atomically — the LB backend list${N}"
   echo -e "  ${D}switches in one BPF map write, not a chain of iptables rule edits.${N}"
-  pause
 
   # ── Step 1: Deploy initial version ──────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2190,7 +2132,6 @@ demo_rolling_update() {
   _kctl expose deployment rolling-demo --type=ClusterIP --port=80 2>/dev/null || true
   sleep 10
   _kctl get pods -l app=rolling-demo -o custom-columns='NAME:.metadata.name,IMAGE:.spec.containers[0].image,STATUS:.status.phase,NODE:.spec.nodeName' --no-headers
-  pause
 
   # ── Step 2: Trigger rolling update ───────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2213,7 +2154,6 @@ demo_rolling_update() {
     [[ "${ready}" == "${total}" ]] && break
     sleep 5
   done
-  pause
 
   # ── Step 3: Verify ───────────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2253,7 +2193,6 @@ demo_self_heal() {
   echo -e "  ${D}If a pod dies, the ReplicaSet controller creates a replacement.${N}"
   echo -e "  ${D}Cilium updates the eBPF service map — the replacement pod is${N}"
   echo -e "  ${D}instantly reachable, no iptables rule propagation delay.${N}"
-  pause
 
   # ── Step 1: Deploy pods ──────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2266,7 +2205,6 @@ demo_self_heal() {
   _kctl create deployment heal-demo --image=nginx --replicas=3 2>/dev/null || true
   sleep 8
   _kctl get pods -l app=heal-demo -o wide --no-headers
-  pause
 
   # ── Step 2: Kill a pod ───────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2316,7 +2254,6 @@ demo_drain() {
   echo -e "  ${D}node. Kubernetes evicts all pods to other nodes first — no traffic${N}"
   echo -e "  ${D}is lost. Cilium's eBPF service map updates as pods migrate,${N}"
   echo -e "  ${D}redirecting traffic to the new locations in the kernel.${N}"
-  pause
 
   # ── Step 1: Show pods on target node ─────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2334,7 +2271,6 @@ demo_drain() {
   echo ""
   echo -e "  ${W}Pods on ${worker} before drain:${N}"
   _kctl get pods -A --field-selector "spec.nodeName=${worker}" --no-headers 2>/dev/null | grep -v kube-system | head -10
-  pause
 
   # ── Step 2: Drain the node ───────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2347,7 +2283,6 @@ demo_drain() {
   echo -e "  ${Y}Draining ${worker}...${N}"
   _kctl drain "$worker" --ignore-daemonsets --delete-emptydir-data --force --timeout=60s 2>/dev/null || true
   sleep 5
-  pause
 
   # ── Step 3: Verify migration ─────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2397,7 +2332,6 @@ demo_node_rollback() {
   echo -e "  ${D}snapshot a running Kubernetes node — its entire disk, OS, packages,${N}"
   echo -e "  ${D}configs, kubelet state — in milliseconds. If an upgrade breaks${N}"
   echo -e "  ${D}something, rollback the entire node to the pre-upgrade state.${N}"
-  pause
 
   # ── Step 1: Snapshot all node zvols ──────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2417,7 +2351,6 @@ demo_node_rollback() {
       echo -e "${G}done in $(( (s_end - s_start) / 1000000 ))ms${N}"
     } || echo -e "${Y}exists${N}"
   done
-  pause
 
   # ── Step 2: Show snapshots ───────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2428,7 +2361,6 @@ demo_node_rollback() {
   echo -e "  ${D}USED = 0B until the VM writes new blocks. Rollback is instant.${N}"
   echo ""
   zfs list -t snapshot -r rpool/vms -o name,used,creation 2>/dev/null | head -20
-  pause
 
   # ── Step 3: Rollback procedure ───────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2474,7 +2406,6 @@ demo_replace_nodes() {
   echo -e "  ${D}or just old — don't fix it, replace it. Drain pods, destroy the${N}"
   echo -e "  ${D}VM, clone a fresh copy from golden, boot, join. The node is brand${N}"
   echo -e "  ${D}new, identical to every other node, in under 2 minutes.${N}"
-  pause
 
   # Pick 2 highest-numbered workers
   local workers=()
@@ -2504,7 +2435,6 @@ demo_replace_nodes() {
   _kctl drain "$w1" --ignore-daemonsets --delete-emptydir-data --force --timeout=60s 2>/dev/null || true
   _kctl drain "$w2" --ignore-daemonsets --delete-emptydir-data --force --timeout=60s 2>/dev/null || true
   echo -e "  ${G}Pods migrated to remaining nodes${N}"
-  pause
 
   # ── Step 2: Remove from cluster ──────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2517,7 +2447,6 @@ demo_replace_nodes() {
   _kctl delete node "$w1" --force 2>/dev/null || true
   _kctl delete node "$w2" --force 2>/dev/null || true
   echo -e "  ${G}Nodes removed from cluster${N}"
-  pause
 
   # ── Step 3: Destroy VMs + ZFS ────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2534,7 +2463,6 @@ demo_replace_nodes() {
   virsh undefine "$w2" 2>/dev/null || true
   zfs destroy -Rf "rpool/vms/${w2}" 2>/dev/null || true
   echo -e "  ${G}VMs and zvols destroyed${N}"
-  pause
 
   # ── Step 4: Clone fresh replacements ─────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2554,7 +2482,6 @@ demo_replace_nodes() {
   kvm-clone k8s-golden "$w2" >/dev/null 2>&1
   E=$(date +%s%N)
   echo -e "  k8s-golden -> ${G}${w2}${N} (${C}$(( (E-S)/1000000 ))ms${N})"
-  pause
 
   # ── Step 5: Boot and join ────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2635,7 +2562,6 @@ demo_replace_nodes() {
   local END_TIME
   END_TIME=$(date +%s)
   local ELAPSED=$(( END_TIME - START_TIME ))
-  pause
 
   # ── Step 6: Verify rebuilt cluster ───────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2681,7 +2607,6 @@ demo_ebpf_deep_dive() {
   echo -e "  ${D}maps that Cilium maintains in the kernel. Every endpoint, every${N}"
   echo -e "  ${D}connection, every NAT entry, every service backend, every policy${N}"
   echo -e "  ${D}rule — stored in kernel hash maps, evaluated per-packet in O(1).${N}"
-  pause
 
   # ── Step 1: Endpoint map ─────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2693,7 +2618,6 @@ demo_ebpf_deep_dive() {
   echo -e "  ${D}O(1), constant time, regardless of cluster size.${N}"
   echo ""
   _cilium_dbg bpf endpoint list || echo "  N/A"
-  pause
 
   # ── Step 2: Connection tracking ──────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2705,7 +2629,6 @@ demo_ebpf_deep_dive() {
   echo -e "  ${D}is faster because it skips the entire netfilter hook chain.${N}"
   echo ""
   _cilium_dbg bpf ct list global 2>/dev/null | head -20 || echo "  N/A"
-  pause
 
   # ── Step 3: NAT table ───────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2717,7 +2640,6 @@ demo_ebpf_deep_dive() {
   echo -e "  ${D}get evaluated linearly. In Cilium, it's a BPF hash map — O(1).${N}"
   echo ""
   _cilium_dbg bpf nat list 2>/dev/null | head -20 || echo "  N/A"
-  pause
 
   # ── Step 4: Service load balancing ───────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2730,7 +2652,6 @@ demo_ebpf_deep_dive() {
   echo -e "  ${D}in kernel space, no kube-proxy involved.${N}"
   echo ""
   _cilium_dbg bpf lb list 2>/dev/null | head -20 || echo "  N/A"
-  pause
 
   # ── Step 5: Policy map ───────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2742,7 +2663,6 @@ demo_ebpf_deep_dive() {
   echo -e "  ${D}can move to any node and keep its identity — the policy follows.${N}"
   echo ""
   _cilium_dbg bpf policy get --all 2>/dev/null | head -20 || echo "  N/A"
-  pause
 
   # ── Step 6: Datapath mode ────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2787,7 +2707,6 @@ demo_zero_sidecar() {
   echo -e "  ${D}Each sidecar adds CPU overhead, memory overhead, and latency (two extra${N}"
   echo -e "  ${D}network hops per request). Cilium achieves the same functionality —${N}"
   echo -e "  ${D}mTLS, L7 policy, observability — with eBPF. Zero sidecars. Zero overhead.${N}"
-  pause
 
   # ── Step 1: Container count per pod ──────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2799,7 +2718,6 @@ demo_zero_sidecar() {
   echo -e "  ${D}No injected proxies, no init containers rewriting iptables rules.${N}"
   echo ""
   _ssh_cp "kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{\"  containers: \"}{range .spec.containers[*]}{.name}{\" \"}{end}{\"\n\"}{end}' 2>/dev/null | head -30" || echo "  N/A"
-  pause
 
   # ── Step 2: kube-proxy check ─────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2817,7 +2735,6 @@ demo_zero_sidecar() {
   else
     echo -e "  kube-proxy pods: ${R}${kp_count} (should be 0)${N}"
   fi
-  pause
 
   # ── Step 3: iptables rules ──────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2839,7 +2756,6 @@ demo_zero_sidecar() {
   echo ""
   echo -e "  ${W}Filter table:${N}"
   _ssh_cp "iptables -t filter -L 2>/dev/null | head -15" || echo "  (clean)"
-  pause
 
   # ── Step 4: Userland processes ───────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2856,7 +2772,6 @@ demo_zero_sidecar() {
   echo ""
   echo -e "  ${D}Note: cilium-envoy is Cilium's L7 proxy DaemonSet — it's part of Cilium,${N}"
   echo -e "  ${D}not a sidecar. It handles Gateway API/L7 policy via eBPF hooks.${N}"
-  pause
 
   # ── Step 5: What IS running ──────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2903,7 +2818,6 @@ demo_datapath_trace() {
   echo -e "  ${D}program chain in real time. From veth ingress, through the BPF${N}"
   echo -e "  ${D}program, conntrack lookup, NAT, policy check, service LB, and${N}"
   echo -e "  ${D}out to the destination — all in kernel space, all observable.${N}"
-  pause
 
   # ── Step 1: Deploy target service ────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2917,7 +2831,6 @@ demo_datapath_trace() {
   _kctl expose deployment trace-web --port=80 2>/dev/null || true
   echo -e "  ${Y}Waiting for trace-web pod to be ready...${N}"
   _kctl wait --for=condition=ready pod -l app=trace-web --timeout=30s 2>/dev/null || true
-  pause
 
   # ── Step 2: Endpoint list ────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2929,7 +2842,6 @@ demo_datapath_trace() {
   echo -e "  ${D}forwarding — all per-endpoint, all in kernel space.${N}"
   echo ""
   _cilium_dbg endpoint list || echo "  N/A"
-  pause
 
   # ── Step 3: Live trace ───────────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -2956,7 +2868,6 @@ demo_datapath_trace() {
     echo "  cilium monitor not available"
 
   wait "$traffic_pid" 2>/dev/null || true
-  pause
 
   # ── Step 4: Conntrack proof ──────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -3006,7 +2917,6 @@ demo_smoke() {
   echo -e "  ${D}Running the comprehensive smoke test on the control plane.${N}"
   echo -e "  ${D}This checks every component: API server, scheduler, kubelet,${N}"
   echo -e "  ${D}Cilium, CoreDNS, Hubble, MetalLB, ZFS CSI — everything.${N}"
-  pause
 
   # ── Step 1: Run smoke test ───────────────────────────────────
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
@@ -3074,7 +2984,6 @@ demo_destroy_all() {
   read -r -p "Type 'destroy' to confirm: " confirm
   if [[ "$confirm" != "destroy" ]]; then
     echo -e "${Y}Cancelled${N}"
-    pause
     return
   fi
   echo ""
