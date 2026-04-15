@@ -911,12 +911,15 @@ build_golden_single() {
     sleep 5
   done
 
-  # Install ZFS test suite (tee to log, redact any RHEL creds)
+  # Install ZFS test suite (log to file, NOT piped — pipe kills heredoc stdin)
+  local _setup_log="/tmp/kzfstest-setup-${distro}.log"
+  setup_zfs_test_vm "$golden_ip" "$distro" > "$_setup_log" 2>&1
   if [[ -n "$RHEL_PASSWORD" ]]; then
-    setup_zfs_test_vm "$golden_ip" "$distro" 2>&1 | sed "s/${RHEL_PASSWORD}/REDACTED/g" | tee -a "$golden_log"
+    sed "s/${RHEL_PASSWORD}/REDACTED/g" "$_setup_log" | tee -a "$golden_log"
   else
-    setup_zfs_test_vm "$golden_ip" "$distro" 2>&1 | tee -a "$golden_log"
+    cat "$_setup_log" | tee -a "$golden_log"
   fi
+  rm -f "$_setup_log"
 
   # ── Smoke-test the golden before sealing ──
   # Run ALL validation in a single SSH call (CentOS network dies between calls)
