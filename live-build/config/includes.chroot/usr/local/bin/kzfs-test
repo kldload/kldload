@@ -912,31 +912,51 @@ build_golden_single() {
   fi
 
   # ── Smoke-test the golden before sealing ──
-  # Re-verify SSH is still reachable after setup (CentOS network drops)
-  log "  Verifying SSH still reachable..."
-  if ! wait_for_ssh "$golden_ip" 30; then
-    warn "  SSH lost after setup — waiting for network recovery..."
-    sleep 10
-    # Try to get new IP in case DHCP renewed
-    local _new_ip
-    _new_ip="$(get_vm_ip "$name")"
-    if [[ -n "$_new_ip" && "$_new_ip" != "$golden_ip" ]]; then
-      log "  IP changed: ${golden_ip} → ${_new_ip}"
-      golden_ip="$_new_ip"
-    fi
-    wait_for_ssh "$golden_ip" 60 || warn "  SSH still unreachable — validation will be incomplete"
-  fi
-
+  # Run ALL validation in a single SSH call (CentOS network dies between calls)
   log "  Validating golden ${distro}..."
-  local _v_zfs _v_mod _v_tests _v_vdevs _v_ksh _v_ver _v_kernel _v_dkms
-  _v_mod="$(_ssh_cmd "$golden_ip" "lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || echo 0")"
-  _v_zfs="$(_ssh_cmd "$golden_ip" "command -v zfs >/dev/null 2>&1 && echo OK || echo MISSING")"
-  _v_ver="$(_ssh_cmd "$golden_ip" "zfs version 2>/dev/null | head -1 || echo unknown")"
-  _v_tests="$(_ssh_cmd "$golden_ip" "test -f /usr/share/zfs/zfs-tests.sh && echo OK || (command -v zfs-tests.sh >/dev/null 2>&1 && echo OK || echo MISSING)")"
-  _v_vdevs="$(_ssh_cmd "$golden_ip" "ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l")"
-  _v_ksh="$(_ssh_cmd "$golden_ip" "command -v ksh >/dev/null 2>&1 && echo OK || echo MISSING")"
-  _v_kernel="$(_ssh_cmd "$golden_ip" "uname -r" || echo "unknown")"
-  _v_dkms="$(_ssh_cmd "$golden_ip" "dkms status 2>/dev/null | head -5" || echo "n/a")"
+  local _val_tmp="/tmp/kzfstest-validate-${distro}.txt"
+  _ssh_cmd "$golden_ip" bash -s <<'VALIDATE' > "$_val_tmp" 2>/dev/null || true
+echo "V_KERNEL=$(uname -r 2>/dev/null || echo unknown)"
+echo "V_ZFS=$(command -v zfs >/dev/null 2>&1 && echo OK || echo MISSING)"
+echo "V_MOD=$(lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || echo 0)"
+echo "V_VER=$(zfs version 2>/dev/null | head -1 || echo unknown)"
+echo "V_DKMS=$(dkms status 2>/dev/null | head -1 || echo n/a)"
+echo "V_TESTS=$(test -f /usr/share/zfs/zfs-tests.sh && echo OK || (command -v zfs-tests.sh >/dev/null 2>&1 && echo OK || echo MISSING))"
+echo "V_VDEVS=$(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)"
+echo "V_KSH=$(command -v ksh >/dev/null 2>&1 && echo OK || echo MISSING)"
+# Configure ZFS autoload + seal in same session (network may die after)
+echo zfs > /etc/modules-load.d/zfs.conf 2>/dev/null || true
+depmod -a 2>/dev/null || true
+cloud-init clean --logs 2>/dev/null || true
+rm -f /etc/machine-id; touch /etc/machine-id
+truncate -s 0 /etc/hostname
+rm -f /etc/netplan/*.yaml /etc/systemd/network/*.network 2>/dev/null || true
+systemctl enable cloud-init-local cloud-init cloud-config cloud-final 2>/dev/null || true
+mkdir -p /etc/systemd/network && cat > /etc/systemd/network/10-dhcp.network <<'NETD'
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+NETD
+echo "V_SEALED=OK"
+shutdown -h now 2>/dev/null || true
+VALIDATE
+
+  # Parse validation results
+  local _v_kernel _v_zfs _v_mod _v_ver _v_dkms _v_tests _v_vdevs _v_ksh
+  _v_kernel="$(grep '^V_KERNEL=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "unknown")"
+  _v_zfs="$(grep '^V_ZFS=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "MISSING")"
+  _v_mod="$(grep '^V_MOD=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "0")"
+  _v_ver="$(grep '^V_VER=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "unknown")"
+  _v_dkms="$(grep '^V_DKMS=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "n/a")"
+  _v_tests="$(grep '^V_TESTS=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "MISSING")"
+  _v_vdevs="$(grep '^V_VDEVS=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "0")"
+  _v_ksh="$(grep '^V_KSH=' "$_val_tmp" 2>/dev/null | cut -d= -f2- || echo "MISSING")"
+  rm -f "$_val_tmp"
+
+  [[ -z "$_v_kernel" ]] && _v_kernel="unknown"
+  [[ -z "$_v_mod" ]] && _v_mod="0"
 
   # Log validation report
   {
@@ -979,26 +999,8 @@ build_golden_single() {
     warn "  WARNING: zfs-tests.sh not found on ${distro} — test runs will skip this distro"
   fi
 
-  # Ensure ZFS loads on boot
-  log "  Configuring ZFS autoload..."
-  _ssh_cmd "$golden_ip" "echo zfs > /etc/modules-load.d/zfs.conf"
-  _ssh_cmd "$golden_ip" "depmod -a 2>/dev/null || true"
-
-  # Seal
-  log "  Sealing golden..."
-  _ssh_cmd "$golden_ip" "cloud-init clean --logs 2>/dev/null || true"
-  _ssh_cmd "$golden_ip" "rm -f /etc/machine-id; touch /etc/machine-id"
-  _ssh_cmd "$golden_ip" "truncate -s 0 /etc/hostname"
-  _ssh_cmd "$golden_ip" "rm -f /etc/netplan/*.yaml /etc/systemd/network/*.network 2>/dev/null || true"
-  _ssh_cmd "$golden_ip" "systemctl enable cloud-init-local cloud-init cloud-config cloud-final 2>/dev/null || true"
-  _ssh_cmd "$golden_ip" "mkdir -p /etc/systemd/network && cat > /etc/systemd/network/10-dhcp.network <<'NETD'
-[Match]
-Name=en* eth*
-
-[Network]
-DHCP=yes
-NETD"
-  _ssh_cmd "$golden_ip" "shutdown -h now" || true
+  # Seal + shutdown already done inside validation heredoc
+  log "  Sealed + shutdown initiated in validation pass"
 
   for _ in $(seq 1 30); do
     virsh domstate "$name" 2>/dev/null | grep -q "shut off" && break
