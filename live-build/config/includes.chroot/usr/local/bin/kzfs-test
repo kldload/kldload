@@ -1202,7 +1202,30 @@ run_tests_on_vm() {
     return 0
   fi
 
-  _ssh_cmd "$ip" "bash -c '${test_cmd}'" > "$log_file" 2>&1 || true
+  # Run tests via heredoc to avoid quoting issues
+  if [[ "$mode" == "quick" ]]; then
+    _ssh_cmd "$ip" bash -s <<'RUNTESTS' > "$log_file" 2>&1 || true
+set +e
+echo "Starting zfs-tests.sh quick mode at $(date)"
+echo "Kernel: $(uname -r)"
+echo "ZFS: $(zfs version 2>/dev/null | head -1)"
+echo ""
+/usr/share/zfs/zfs-tests.sh -vx -T functional -c 2>&1
+echo ""
+echo "Finished at $(date)"
+RUNTESTS
+  else
+    _ssh_cmd "$ip" bash -s <<'RUNTESTS' > "$log_file" 2>&1 || true
+set +e
+echo "Starting zfs-tests.sh full mode at $(date)"
+echo "Kernel: $(uname -r)"
+echo "ZFS: $(zfs version 2>/dev/null | head -1)"
+echo ""
+/usr/share/zfs/zfs-tests.sh -vx 2>&1
+echo ""
+echo "Finished at $(date)"
+RUNTESTS
+  fi
 
   # Parse results
   local total_pass total_fail total_skip
