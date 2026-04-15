@@ -1241,31 +1241,86 @@ cmd_results() {
 # ── Status ────────────────────────────────────────────────────────────────
 
 cmd_status() {
-  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
-  echo -e "${W}  kzfs-test status${N}"
-  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  OpenZFS Test Lab — Status${N}"
+  echo -e "${D}  Host: $(uname -n) • $(nproc) cores • $(awk '/MemTotal/ {printf "%.0fGB", $2/1048576}' /proc/meminfo) RAM • ZFS source: ${ZFS_SOURCE}${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════════════════════════════════════${N}"
   echo ""
 
   echo -e "  ${W}Golden Images:${N}"
-  printf "  %-12s %-10s %-10s %-10s\n" "DISTRO" "STATUS" "SIZE" "SNAP"
-  echo "  ─────────── ────────── ────────── ──────────"
+  echo ""
+  printf "  ${W}%-10s %-8s %-10s %-28s %-16s %-8s %-6s %-6s${N}\n" \
+    "DISTRO" "STATUS" "SIZE" "KERNEL" "ZFS" "DKMS" "TESTS" "KSH"
+  echo "  ────────── ──────── ────────── ──────────────────────────── ──────────────── ──────── ────── ──────"
+
+  local total_ready=0 total_fail=0 total_skip=0
+
   for distro in "${DISTROS[@]}"; do
     local name zpath
     name="$(golden_name "$distro")"
     zpath="$(zvol_path "$name")"
+
     if zfs list "${zpath}@golden" >/dev/null 2>&1; then
-      local used
-      used="$(zfs get -Hp -o value used "$zpath" 2>/dev/null)"
-      printf "  %-12s ${G}%-10s${N} %-10s ${G}%-10s${N}\n" \
-        "$distro" "READY" "$(numfmt --to=iec "$used" 2>/dev/null || echo "$used")" "YES"
+      local used _kernel _zfs_ver _dkms _tests _ksh _result_color
+      used="$(zfs get -Hp -o value used "$zpath" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo "?")"
+
+      # Read details from the latest golden build log
+      local _log="${RESULTS_DIR}/goldens/${distro}-latest.log"
+      if [[ -f "$_log" ]]; then
+        _kernel="$(grep '  Kernel:' "$_log" 2>/dev/null | tail -1 | sed 's/.*Kernel: *//' | head -c 28)"
+        _zfs_ver="$(grep '  ZFS version:' "$_log" 2>/dev/null | tail -1 | sed 's/.*ZFS version: *//' | head -c 16)"
+        _dkms="$(grep '  Result:' "$_log" 2>/dev/null | tail -1 | sed 's/.*Result: *//')"
+        _tests="$(grep '  zfs-tests.sh:' "$_log" 2>/dev/null | tail -1 | sed 's/.*zfs-tests.sh: *//')"
+        _ksh="$(grep '  ksh:' "$_log" 2>/dev/null | tail -1 | sed 's/.*ksh: *//')"
+      else
+        _kernel="-" _zfs_ver="-" _dkms="-" _tests="-" _ksh="-"
+      fi
+
+      [[ -z "$_kernel" ]] && _kernel="-"
+      [[ -z "$_zfs_ver" ]] && _zfs_ver="-"
+      [[ -z "$_tests" ]] && _tests="-"
+      [[ -z "$_ksh" ]] && _ksh="-"
+
+      local _status_color="$G" _status="READY"
+      if [[ "$_dkms" == *"FAIL"* ]]; then
+        _status_color="$R"; _status="FAIL"
+        ((total_fail++))
+      elif [[ "$_dkms" == *"PARTIAL"* ]]; then
+        _status_color="$Y"; _status="PARTIAL"
+        ((total_fail++))
+      else
+        ((total_ready++))
+      fi
+
+      local _tests_color="$G"
+      [[ "$_tests" != "OK" ]] && _tests_color="$R"
+      local _ksh_color="$G"
+      [[ "$_ksh" != "OK" ]] && _ksh_color="$Y"
+
+      printf "  %-10s ${_status_color}%-8s${N} %-10s %-28s %-16s ${G}%-8s${N} ${_tests_color}%-6s${N} ${_ksh_color}%-6s${N}\n" \
+        "$distro" "$_status" "$used" "$_kernel" "$_zfs_ver" "OK" "$_tests" "$_ksh"
+
     elif zfs list "$zpath" >/dev/null 2>&1; then
-      printf "  %-12s ${Y}%-10s${N} %-10s ${R}%-10s${N}\n" \
-        "$distro" "PARTIAL" "-" "NO"
+      printf "  %-10s ${Y}%-8s${N} %-10s %-28s %-16s %-8s %-6s %-6s\n" \
+        "$distro" "PARTIAL" "-" "-" "-" "-" "-" "-"
+      ((total_fail++))
     else
-      printf "  %-12s ${D}%-10s${N} %-10s %-10s\n" \
-        "$distro" "NOT BUILT" "-" "-"
+      printf "  %-10s ${D}%-8s${N} %-10s %-28s %-16s %-8s %-6s %-6s\n" \
+        "$distro" "—" "-" "-" "-" "-" "-" "-"
+      ((total_skip++))
     fi
   done
+
+  echo "  ────────── ──────── ────────── ──────────────────────────── ──────────────── ──────── ────── ──────"
+  echo -e "  ${G}Ready: ${total_ready}${N}  ${R}Failed: ${total_fail}${N}  ${D}Not built: ${total_skip}${N}  Total: ${#DISTROS[@]}"
+  echo ""
+
+  # Storage summary
+  local _total_used
+  _total_used="$(zfs get -Hp -o value used "${POOL}/vms" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo "?")"
+  local _total_avail
+  _total_avail="$(zfs get -Hp -o value available "${POOL}/vms" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo "?")"
+  echo -e "  ${W}Storage:${N} ${_total_used} used / ${_total_avail} available on ${POOL}/vms"
 
   echo ""
   echo -e "  ${W}Test VMs:${N}"
@@ -1293,7 +1348,18 @@ cmd_status() {
     echo -e "    ${D}No test runs yet${N}"
   fi
 
-  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo ""
+  echo -e "  ${W}Logs:${N} ${RESULTS_DIR}/"
+  if [[ -f "$MASTER_LOG" ]]; then
+    local _log_lines
+    _log_lines="$(wc -l < "$MASTER_LOG" 2>/dev/null || echo 0)"
+    echo -e "    Master log: ${MASTER_LOG} (${_log_lines} lines)"
+  fi
+  local _golden_logs
+  _golden_logs="$(ls "${RESULTS_DIR}/goldens/"*-latest.log 2>/dev/null | wc -l)"
+  echo -e "    Golden logs: ${_golden_logs} distros"
+
+  echo -e "${C}══════════════════════════════════════════════════════════════════════════════════════════════${N}"
 }
 
 # ── Destroy ───────────────────────────────────────────────────────────────
