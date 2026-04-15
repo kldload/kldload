@@ -32,7 +32,12 @@ MASTER_LOG="${RESULTS_DIR}/kzfs-test.log"
 # ZFS source mode: "repo" (default), "version:X.Y.Z", "git:owner/repo@ref", "tarball:/path"
 ZFS_SOURCE="${ZFS_SOURCE:-repo}"
 
-DISTROS=(centos rocky fedora debian ubuntu arch alpine)
+DISTROS=(centos rocky fedora debian ubuntu arch alpine rhel)
+
+# RHEL credentials — prompted at runtime, never logged or stored on disk
+RHEL_USERNAME="${RHEL_USERNAME:-}"
+RHEL_PASSWORD="${RHEL_PASSWORD:-}"
+RHEL_CREDS_FILE="/root/.kzfs-rhel-creds"
 
 declare -A CLOUD_IMAGES=(
   [centos]="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
@@ -42,6 +47,7 @@ declare -A CLOUD_IMAGES=(
   [ubuntu]="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
   [arch]="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
   [alpine]="https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.0-x86_64-uefi-cloudinit-r0.qcow2"
+  [rhel]="REQUIRES_MANUAL_DOWNLOAD"
 )
 
 declare -A OS_VARIANTS=(
@@ -52,12 +58,14 @@ declare -A OS_VARIANTS=(
   [ubuntu]="ubuntu24.04"
   [arch]="archlinux"
   [alpine]="alpinelinux"
+  [rhel]="rhel9-unknown"
 )
 
 declare -A DISTRO_FAMILY=(
   [centos]="dnf"
   [rocky]="dnf"
   [fedora]="dnf"
+  [rhel]="dnf"
   [debian]="apt"
   [ubuntu]="apt"
   [arch]="pacman"
@@ -128,6 +136,83 @@ ensure_ssh_key() {
     log "Generating SSH key..."
     ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
   fi
+}
+
+# ── RHEL Credentials ──────────────────────────────────────────────────────
+# Prompted interactively. Stored only in memory and in a 0600 temp file
+# that is deleted after golden build. Never logged.
+
+_rhel_prompt_creds() {
+  # Check env vars first
+  if [[ -n "$RHEL_USERNAME" && -n "$RHEL_PASSWORD" ]]; then
+    log "  Using RHEL credentials from environment"
+    return 0
+  fi
+  # Check cached creds file (0600, root only)
+  if [[ -f "$RHEL_CREDS_FILE" ]]; then
+    source "$RHEL_CREDS_FILE"
+    if [[ -n "$RHEL_USERNAME" && -n "$RHEL_PASSWORD" ]]; then
+      log "  Using cached RHEL credentials"
+      return 0
+    fi
+  fi
+  # Prompt
+  echo ""
+  echo -e "  ${C}── RHEL Subscription Credentials ──────────────────────────${N}"
+  echo -e "  ${D}Required for subscription-manager register.${N}"
+  echo -e "  ${D}Credentials are stored in memory only (never logged).${N}"
+  echo ""
+  echo -ne "  ${W}RHEL Username: ${N}"
+  read -r RHEL_USERNAME
+  echo -ne "  ${W}RHEL Password: ${N}"
+  read -rs RHEL_PASSWORD
+  echo ""
+
+  if [[ -z "$RHEL_USERNAME" || -z "$RHEL_PASSWORD" ]]; then
+    warn "RHEL credentials required — skipping RHEL"
+    return 1
+  fi
+
+  # Cache for this session (0600)
+  umask 077
+  cat > "$RHEL_CREDS_FILE" <<CREDS
+RHEL_USERNAME='${RHEL_USERNAME}'
+RHEL_PASSWORD='${RHEL_PASSWORD}'
+CREDS
+  chmod 600 "$RHEL_CREDS_FILE"
+  log "  Credentials cached at ${RHEL_CREDS_FILE} (0600)"
+  return 0
+}
+
+_rhel_ensure_image() {
+  local img_file="${ISO_DIR}/rhel-cloud.qcow2"
+  if [[ -f "$img_file" ]]; then
+    echo "$img_file"
+    return 0
+  fi
+  echo ""
+  echo -e "  ${C}── RHEL Cloud Image ───────────────────────────────────────${N}"
+  echo -e "  ${D}RHEL cloud images require a Red Hat account to download.${N}"
+  echo -e "  ${D}Download from: https://access.redhat.com/downloads/content/rhel${N}"
+  echo -e "  ${D}Look for: Red Hat Enterprise Linux 9 → KVM Guest Image (qcow2)${N}"
+  echo ""
+  echo -ne "  ${W}Path to RHEL 9 qcow2 image (or URL): ${N}"
+  local src
+  read -r src
+  if [[ -z "$src" ]]; then
+    warn "No RHEL image provided — skipping"
+    return 1
+  fi
+  if [[ "$src" == http* ]]; then
+    log "  Downloading RHEL cloud image..."
+    curl -fSL -o "$img_file" "$src" || { warn "Download failed"; return 1; }
+  elif [[ -f "$src" ]]; then
+    cp "$src" "$img_file"
+  else
+    warn "File not found: ${src}"
+    return 1
+  fi
+  echo "$img_file"
 }
 
 timer_start() { date +%s%N; }
@@ -305,6 +390,12 @@ BUILDZFS
 setup_zfs_test_vm() {
   local ip="$1" distro="$2"
   local family="${DISTRO_FAMILY[$distro]}"
+
+  # RHEL: register subscription before installing packages
+  if [[ "$distro" == "rhel" && -n "$RHEL_USERNAME" && -n "$RHEL_PASSWORD" ]]; then
+    log "  Registering RHEL subscription (credentials redacted)..."
+    _ssh_cmd "$ip" bash -c "subscription-manager register --username='${RHEL_USERNAME}' --password='${RHEL_PASSWORD}' --auto-attach 2>&1 | sed 's/password=.*/password=REDACTED/g'" 2>&1 | sed "s/${RHEL_PASSWORD}/REDACTED/g"
+  fi
 
   log "  Setting up ZFS test environment on ${distro} (source: ${ZFS_SOURCE})..."
 
@@ -573,12 +664,16 @@ build_golden_single() {
     echo ""
   } | tee "$golden_log"
 
-  # Download
+  # Download cloud image
   mkdir -p "$ISO_DIR"
   local url="${CLOUD_IMAGES[$distro]}"
   local img_file="${ISO_DIR}/${distro}-cloud.qcow2"
 
-  if [[ ! -f "$img_file" ]]; then
+  if [[ "$distro" == "rhel" ]]; then
+    # RHEL requires manual download + subscription credentials
+    _rhel_prompt_creds || return 1
+    img_file="$(_rhel_ensure_image)" || return 1
+  elif [[ ! -f "$img_file" ]]; then
     log "  Downloading ${distro} cloud image..."
     curl -fSL -o "$img_file" "$url" || die "Download failed for ${distro}"
   else
@@ -633,8 +728,12 @@ build_golden_single() {
     sleep 5
   done
 
-  # Install ZFS test suite (tee to log)
-  setup_zfs_test_vm "$golden_ip" "$distro" 2>&1 | tee -a "$golden_log"
+  # Install ZFS test suite (tee to log, redact any RHEL creds)
+  if [[ -n "$RHEL_PASSWORD" ]]; then
+    setup_zfs_test_vm "$golden_ip" "$distro" 2>&1 | sed "s/${RHEL_PASSWORD}/REDACTED/g" | tee -a "$golden_log"
+  else
+    setup_zfs_test_vm "$golden_ip" "$distro" 2>&1 | tee -a "$golden_log"
+  fi
 
   # ── Smoke-test the golden before sealing ──
   log "  Validating golden ${distro}..."
@@ -1235,6 +1334,13 @@ cmd_destroy() {
       rm -f "${ISO_DIR}/${name}-cloud-init.iso" 2>/dev/null || true
       log "  Destroyed golden: ${name}"
     done
+  fi
+
+  # Clean up RHEL credentials on full destroy
+  if [[ $destroy_all -eq 1 && -f "$RHEL_CREDS_FILE" ]]; then
+    rm -f "$RHEL_CREDS_FILE"
+    RHEL_USERNAME="" RHEL_PASSWORD=""
+    log "  RHEL credentials removed"
   fi
 
   log "Cleanup complete"
