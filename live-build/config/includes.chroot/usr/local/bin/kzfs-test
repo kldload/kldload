@@ -405,10 +405,18 @@ setup_zfs_test_vm() {
     dnf)
       _ssh_cmd "$ip" bash -s <<'DNFSETUP'
 set -e
-# Disable firewall immediately — CentOS/RHEL cloud images block SSH
+# Disable ALL firewalling — CentOS cloud images block SSH after package installs
 systemctl stop firewalld 2>/dev/null || true
 systemctl disable firewalld 2>/dev/null || true
 systemctl mask firewalld 2>/dev/null || true
+iptables -F 2>/dev/null || true
+iptables -X 2>/dev/null || true
+nft flush ruleset 2>/dev/null || true
+# Ensure sshd stays accessible
+sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true
+mkdir -p /etc/ssh/sshd_config.d
+echo -e 'PermitRootLogin yes\nPasswordAuthentication yes' > /etc/ssh/sshd_config.d/99-kzfstest.conf 2>/dev/null || true
+systemctl restart sshd 2>/dev/null || true
 
 dnf install -y epel-release 2>/dev/null || true
 
