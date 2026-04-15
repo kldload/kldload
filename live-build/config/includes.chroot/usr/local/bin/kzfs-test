@@ -1207,39 +1207,17 @@ run_tests_on_vm() {
     return 0
   fi
 
-  # Write test script to remote, then execute (heredoc doesn't work in background &)
-  local _test_script="/tmp/kzfs-run-tests.sh"
+  # Build test command — simple string, no heredocs
+  local _test_args=""
   if [[ "$mode" == "quick" ]]; then
-    _ssh_cmd "$ip" "cat > ${_test_script} << 'SCRIPT'
-#!/bin/bash
-set +e
-echo \"Starting zfs-tests.sh quick mode at \$(date)\"
-echo \"Kernel: \$(uname -r)\"
-echo \"ZFS: \$(zfs version 2>/dev/null | head -1)\"
-modprobe zfs 2>/dev/null || true
-echo \"\"
-/usr/share/zfs/zfs-tests.sh -vx -T functional -c 2>&1
-echo \"\"
-echo \"Finished at \$(date)\"
-SCRIPT
-chmod +x ${_test_script}"
+    _test_args="-vx -T functional -c"
   else
-    _ssh_cmd "$ip" "cat > ${_test_script} << 'SCRIPT'
-#!/bin/bash
-set +e
-echo \"Starting zfs-tests.sh full mode at \$(date)\"
-echo \"Kernel: \$(uname -r)\"
-echo \"ZFS: \$(zfs version 2>/dev/null | head -1)\"
-modprobe zfs 2>/dev/null || true
-echo \"\"
-/usr/share/zfs/zfs-tests.sh -vx 2>&1
-echo \"\"
-echo \"Finished at \$(date)\"
-SCRIPT
-chmod +x ${_test_script}"
+    _test_args="-vx"
   fi
 
-  _ssh_cmd "$ip" "bash ${_test_script}" > "$log_file" 2>&1 || true
+  log "  [${distro}] Running: zfs-tests.sh ${_test_args}"
+
+  _ssh_cmd "$ip" "modprobe zfs 2>/dev/null; echo '=== ZFS Test Run ==='; echo \"Kernel: \$(uname -r)\"; echo \"ZFS: \$(zfs version 2>/dev/null | head -1)\"; echo ''; /usr/share/zfs/zfs-tests.sh ${_test_args} 2>&1; echo ''; echo \"Finished: \$(date)\"" > "$log_file" 2>&1 || true
 
   # Parse results
   local total_pass total_fail total_skip
