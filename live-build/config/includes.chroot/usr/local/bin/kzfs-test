@@ -1217,7 +1217,27 @@ run_tests_on_vm() {
 
   log "  [${distro}] Running: zfs-tests.sh ${_test_args}"
 
-  _ssh_cmd "$ip" "modprobe zfs 2>/dev/null; echo '=== ZFS Test Run ==='; echo \"Kernel: \$(uname -r)\"; echo \"ZFS: \$(zfs version 2>/dev/null | head -1)\"; echo ''; /usr/share/zfs/zfs-tests.sh ${_test_args} 2>&1; echo ''; echo \"Finished: \$(date)\"" > "$log_file" 2>&1 || true
+  _ssh_cmd "$ip" "
+    echo '=== ZFS Test Run ==='
+    echo \"Kernel: \$(uname -r)\"
+    # Load ZFS — may need DKMS rebuild if kernel changed
+    if ! modprobe zfs 2>/dev/null; then
+      echo 'ZFS module failed to load — rebuilding DKMS...'
+      dkms autoinstall 2>&1 | tail -5
+      depmod -a 2>/dev/null
+      modprobe zfs 2>&1
+    fi
+    echo \"ZFS: \$(zfs version 2>/dev/null | head -1)\"
+    echo \"Module: \$(lsmod | grep -c '^zfs ')\"
+    if ! lsmod | grep -q '^zfs '; then
+      echo 'FATAL: ZFS module not loaded — cannot run tests'
+      exit 1
+    fi
+    echo ''
+    /usr/share/zfs/zfs-tests.sh ${_test_args} 2>&1
+    echo ''
+    echo \"Finished: \$(date)\"
+  " > "$log_file" 2>&1 || true
 
   # Parse results
   local total_pass total_fail total_skip
