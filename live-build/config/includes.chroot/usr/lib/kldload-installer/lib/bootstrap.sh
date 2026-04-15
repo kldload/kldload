@@ -980,6 +980,17 @@ CUDAREPO
         nvidia-driver nvidia-driver-libs nvidia-driver-cuda \
         nvidia-container-toolkit \
         >> "$log" 2>&1 || k_log_to "$log" "WARNING: NVIDIA driver install had issues (no GPU?)"
+    # DKMS build — dnf only registers the module ('added'), it doesn't build in chroot
+    local _nv_ver
+    _nv_ver=$(chroot "${target}" rpm -q --qf '%{VERSION}' kmod-nvidia-open-dkms 2>/dev/null | sed 's/-.*//' || echo "")
+    if [[ -n "$_nv_ver" && -n "$kver" ]]; then
+      k_log_to "$log" "Building NVIDIA DKMS ${_nv_ver} for kernel ${kver}..."
+      chroot "${target}" dkms build -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || \
+        k_log_to "$log" "WARNING: NVIDIA DKMS build failed"
+      chroot "${target}" dkms install -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || \
+        k_log_to "$log" "WARNING: NVIDIA DKMS install failed"
+      chroot "${target}" depmod -a "$kver" 2>/dev/null || true
+    fi
     # Generate CDI spec for container GPU access
     chroot "${target}" bash -c 'nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' 2>/dev/null || true
     k_log_to "$log" "NVIDIA drivers + container toolkit installed"
