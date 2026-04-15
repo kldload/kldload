@@ -58,7 +58,7 @@ declare -A OS_VARIANTS=(
   [ubuntu]="ubuntu24.04"
   [arch]="archlinux"
   [alpine]="alpinelinux"
-  [rhel]="rhel9-unknown"
+  [rhel]="centos-stream9"
 )
 
 declare -A DISTRO_FAMILY=(
@@ -670,9 +670,135 @@ build_golden_single() {
   local img_file="${ISO_DIR}/${distro}-cloud.qcow2"
 
   if [[ "$distro" == "rhel" ]]; then
-    # RHEL requires manual download + subscription credentials
+    # RHEL builds from CentOS golden (same EL9 kernel) + subscription-manager
     _rhel_prompt_creds || return 1
-    img_file="$(_rhel_ensure_image)" || return 1
+    local centos_golden_zpath
+    centos_golden_zpath="$(zvol_path "$(golden_name centos)")"
+    if ! zfs list "${centos_golden_zpath}@golden" >/dev/null 2>&1; then
+      warn "RHEL requires CentOS golden — build CentOS first"
+      return 1
+    fi
+    log "  RHEL: cloning from CentOS golden (same EL9 kernel)..."
+    zfs clone "${centos_golden_zpath}@golden" "$zpath" 2>/dev/null || die "Failed to clone CentOS golden for RHEL"
+
+    # Boot the clone with cloud-init
+    local ci_iso
+    ci_iso="$(make_cloud_init_iso "$name" "$name" "/var/lib/cloud/instance/kzfstest-ready")"
+
+    log "  Booting RHEL golden VM..."
+    virt-install \
+      --name "$name" \
+      --ram "$RAM" --vcpus "$CPUS" \
+      --os-variant "${OS_VARIANTS[$distro]}" \
+      --disk "path=${zdev},bus=virtio" \
+      --disk "path=${ci_iso},device=cdrom" \
+      --network bridge=virbr0,model=virtio \
+      --graphics none \
+      --noautoconsole \
+      --import \
+      2>&1 || die "Failed to boot RHEL golden VM"
+
+    local golden_ip
+    log "  Waiting for IP..."
+    golden_ip="$(get_vm_ip "$name")"
+    [[ -n "$golden_ip" ]] || die "No IP for ${name}"
+    log "  IP: ${golden_ip}"
+
+    log "  Waiting for SSH..."
+    wait_for_ssh "$golden_ip" 180 || die "SSH timeout on ${name}"
+
+    # Register with subscription-manager and rebrand as RHEL
+    log "  Registering RHEL subscription (credentials redacted)..."
+    _ssh_cmd "$golden_ip" bash -c "
+      subscription-manager register --username='${RHEL_USERNAME}' --password='${RHEL_PASSWORD}' --auto-attach 2>&1 | sed 's/password=.*/password=REDACTED/g'
+      subscription-manager repos --enable codeready-builder-for-rhel-9-x86_64-rpms 2>/dev/null || true
+      echo 'RHEL registration complete'
+    " 2>&1 | sed "s/${RHEL_PASSWORD}/REDACTED/g" | tee -a "$golden_log"
+
+    # ZFS is already installed from CentOS golden — just verify
+    log "  Verifying ZFS on RHEL..."
+    _ssh_cmd "$golden_ip" "modprobe zfs 2>/dev/null; zfs version 2>/dev/null; zfs-tests.sh --help >/dev/null 2>&1 && echo 'zfs-tests: OK' || echo 'zfs-tests: MISSING'"
+
+    # Skip the normal download/boot flow — jump to validation
+    # (golden_ip is already set, VM is running)
+
+    # Smoke-test
+    log "  Validating golden ${distro}..."
+    local _v_zfs _v_mod _v_tests _v_vdevs _v_ksh _v_ver _v_kernel _v_dkms
+    _v_mod="$(_ssh_cmd "$golden_ip" "lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || echo 0")"
+    _v_zfs="$(_ssh_cmd "$golden_ip" "command -v zfs >/dev/null 2>&1 && echo OK || echo MISSING")"
+    _v_ver="$(_ssh_cmd "$golden_ip" "zfs version 2>/dev/null | head -1 || echo unknown")"
+    _v_tests="$(_ssh_cmd "$golden_ip" "test -f /usr/share/zfs/zfs-tests.sh && echo OK || (command -v zfs-tests.sh >/dev/null 2>&1 && echo OK || echo MISSING)")"
+    _v_vdevs="$(_ssh_cmd "$golden_ip" "ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l")"
+    _v_ksh="$(_ssh_cmd "$golden_ip" "command -v ksh >/dev/null 2>&1 && echo OK || echo MISSING")"
+    _v_kernel="$(_ssh_cmd "$golden_ip" "uname -r" || echo "unknown")"
+    _v_dkms="$(_ssh_cmd "$golden_ip" "dkms status 2>/dev/null | head -5" || echo "n/a")"
+    local _v_rhel_id
+    _v_rhel_id="$(_ssh_cmd "$golden_ip" "subscription-manager identity 2>/dev/null | head -1" || echo "not registered")"
+
+    {
+      echo ""
+      echo "═══════════════════════════════════════════════════════════"
+      echo "  Golden Validation Report: ${distro}"
+      echo "═══════════════════════════════════════════════════════════"
+      echo "  Kernel:         ${_v_kernel}"
+      echo "  ZFS binary:     ${_v_zfs}"
+      echo "  ZFS module:     $([[ $_v_mod -ge 1 ]] && echo "LOADED" || echo "NOT LOADED")"
+      echo "  ZFS version:    ${_v_ver}"
+      echo "  DKMS status:    ${_v_dkms}"
+      echo "  zfs-tests.sh:   ${_v_tests}"
+      echo "  vdev images:    ${_v_vdevs}/4"
+      echo "  ksh:            ${_v_ksh}"
+      echo "  RHEL sub:       ${_v_rhel_id}"
+      echo "  ZFS source:     ${ZFS_SOURCE}"
+      echo ""
+      local _result="PASS"
+      [[ "$_v_zfs" != "OK" || "$_v_mod" -lt 1 ]] && _result="FAIL"
+      [[ "$_v_tests" != "OK" ]] && _result="PARTIAL (no tests)"
+      echo "  Result:         ${_result}"
+      echo "═══════════════════════════════════════════════════════════"
+      echo ""
+    } | tee -a "$golden_log"
+
+    # Seal
+    log "  Configuring ZFS autoload..."
+    _ssh_cmd "$golden_ip" "echo zfs > /etc/modules-load.d/zfs.conf"
+    _ssh_cmd "$golden_ip" "depmod -a 2>/dev/null || true"
+
+    log "  Sealing golden..."
+    _ssh_cmd "$golden_ip" "cloud-init clean --logs 2>/dev/null || true"
+    _ssh_cmd "$golden_ip" "rm -f /etc/machine-id; touch /etc/machine-id"
+    _ssh_cmd "$golden_ip" "truncate -s 0 /etc/hostname"
+    _ssh_cmd "$golden_ip" "systemctl enable cloud-init-local cloud-init cloud-config cloud-final 2>/dev/null || true"
+    _ssh_cmd "$golden_ip" "shutdown -h now" || true
+
+    for _ in $(seq 1 30); do
+      virsh domstate "$name" 2>/dev/null | grep -q "shut off" && break
+      sleep 2
+    done
+
+    virsh detach-disk "$name" "$ci_iso" --config 2>/dev/null || true
+    rm -f "$ci_iso"
+
+    zfs snapshot "${zpath}@golden"
+
+    local elapsed
+    elapsed="$(timer_elapsed_ms "$t_start")"
+
+    {
+      echo "Golden build complete: ${name}"
+      echo "  Time:     $((elapsed / 1000))s"
+      echo "  Zvol:     ${zpath}"
+      echo "  Snapshot: ${zpath}@golden"
+      echo "  Size:     $(zfs get -Hp -o value used "$zpath" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo "?")"
+      echo "  Method:   CentOS clone + subscription-manager"
+      echo "  Finished: $(date)"
+      echo ""
+    } | tee -a "$golden_log"
+
+    ln -sfn "$golden_log" "${golden_log_dir}/${distro}-latest.log"
+    log "Golden ready: ${C}${name}${N} ($((elapsed / 1000))s) — log: ${golden_log}"
+    return 0
   elif [[ ! -f "$img_file" ]]; then
     log "  Downloading ${distro} cloud image..."
     curl -fSL -o "$img_file" "$url" || die "Download failed for ${distro}"
