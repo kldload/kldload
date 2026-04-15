@@ -123,8 +123,11 @@ EOF
     done
     # Install ZFS if not already present (needed for ZFS CSI inside VMs)
     if ! command -v zfs >/dev/null 2>&1; then
+      dnf install -y epel-release 2>/dev/null || true
+      dnf install -y kernel-devel-$(uname -r) kernel-headers-$(uname -r) dkms gcc make 2>/dev/null || true
       dnf install -y https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm 2>/dev/null || true
       dnf install -y zfs zfs-dkms 2>/dev/null || dnf install -y zfs 2>/dev/null || true
+      modprobe zfs 2>/dev/null || true
     fi
     systemctl enable kubelet
   else

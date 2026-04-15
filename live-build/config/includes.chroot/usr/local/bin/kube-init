@@ -237,9 +237,18 @@ METALLB_CFG
 
 # ── Install OpenEBS ZFS LocalPV CSI ─────────────────────────────────────
 install_zfs_csi() {
+  # Ensure ZFS module is loaded
+  modprobe zfs 2>/dev/null || true
   if ! command -v zfs >/dev/null 2>&1; then
     log "ZFS not available — skipping ZFS CSI driver"
     return 0
+  fi
+
+  # Create a ZFS pool on loopback if none exists (cloud image VMs don't have ZFS root)
+  if ! zpool list rpool >/dev/null 2>&1; then
+    log "Creating ZFS pool for CSI (20G loopback)..."
+    truncate -s 20G /var/lib/zfs-csi-pool.img
+    zpool create -f rpool /var/lib/zfs-csi-pool.img
   fi
 
   log "Installing OpenEBS ZFS LocalPV CSI driver..."
