@@ -97,12 +97,17 @@ die()  { _ensure_log_dir; echo -e "${R}[kzfs-test]${N} $*" >&2; echo "[${$}] $(_
 
 _ssh_cmd() {
   local ip="$1"; shift
-  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
-    -o ServerAliveInterval=30 -o ServerAliveCountMax=120 \
-    -i "$SSH_KEY" "root@${ip}" "$@" 2>/dev/null \
-  || sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-    -o ServerAliveInterval=30 -o ServerAliveCountMax=120 \
-    "root@${ip}" "$@" 2>/dev/null
+  # Try key auth first without consuming stdin, then password fallback
+  if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
+    -i "$SSH_KEY" "root@${ip}" true 2>/dev/null; then
+    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=120 \
+      -i "$SSH_KEY" "root@${ip}" "$@" 2>/dev/null
+  else
+    sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=120 \
+      "root@${ip}" "$@" 2>/dev/null
+  fi
 }
 
 get_vm_ip() {
