@@ -467,12 +467,23 @@ for i in 0 1 2 3; do
   truncate -s 4G /var/tmp/zfs-vdev${i}.img 2>/dev/null || true
 done
 
+# Ensure network stays alive after all package installs
+systemctl restart NetworkManager 2>/dev/null || systemctl restart systemd-networkd 2>/dev/null || true
+# Re-disable firewall in case packages re-enabled it
+systemctl stop firewalld 2>/dev/null || true
+systemctl mask firewalld 2>/dev/null || true
+iptables -F 2>/dev/null || true
+nft flush ruleset 2>/dev/null || true
+# Wait for network to come back
+sleep 5
+
 echo "=== DNF Setup Validation ==="
 echo "zfs binary: $(command -v zfs 2>/dev/null || echo MISSING)"
 echo "zfs module: $(lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || echo 0)"
 echo "zfs-tests:  $(test -f /usr/share/zfs/zfs-tests.sh && echo OK || echo MISSING)"
 echo "ksh:        $(command -v ksh 2>/dev/null || echo MISSING)"
 echo "vdevs:      $(ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l)/4"
+echo "network:    $(ip -4 addr show | grep -c 'inet.*scope global' || echo 0) interfaces"
 echo "DNF test setup complete"
 DNFSETUP
       ;;
@@ -901,6 +912,21 @@ build_golden_single() {
   fi
 
   # ── Smoke-test the golden before sealing ──
+  # Re-verify SSH is still reachable after setup (CentOS network drops)
+  log "  Verifying SSH still reachable..."
+  if ! wait_for_ssh "$golden_ip" 30; then
+    warn "  SSH lost after setup — waiting for network recovery..."
+    sleep 10
+    # Try to get new IP in case DHCP renewed
+    local _new_ip
+    _new_ip="$(get_vm_ip "$name")"
+    if [[ -n "$_new_ip" && "$_new_ip" != "$golden_ip" ]]; then
+      log "  IP changed: ${golden_ip} → ${_new_ip}"
+      golden_ip="$_new_ip"
+    fi
+    wait_for_ssh "$golden_ip" 60 || warn "  SSH still unreachable — validation will be incomplete"
+  fi
+
   log "  Validating golden ${distro}..."
   local _v_zfs _v_mod _v_tests _v_vdevs _v_ksh _v_ver _v_kernel _v_dkms
   _v_mod="$(_ssh_cmd "$golden_ip" "lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || echo 0")"
