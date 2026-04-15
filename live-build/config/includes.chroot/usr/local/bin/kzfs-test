@@ -191,19 +191,11 @@ chpasswd:
 ssh_authorized_keys:
   - ${pubkey}
 package_update: false
-bootcmd:
+runcmd:
   - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - mkdir -p /etc/ssh/sshd_config.d && echo -e 'PermitRootLogin yes\nPasswordAuthentication yes' > /etc/ssh/sshd_config.d/99-kzfstest.conf
   - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-runcmd:
-  - |
-    # Fallback DHCP for distros where cloud-init network-config doesn't work
-    if ! ip -4 addr show | grep -q 'inet.*scope global'; then
-      for nic in \$(ls /sys/class/net/ | grep -v lo); do
-        ip link set "\$nic" up 2>/dev/null
-        dhclient "\$nic" 2>/dev/null || dhcpcd "\$nic" 2>/dev/null || true
-      done
-    fi
 ${runcmd_extra}
 USERDATA
 
