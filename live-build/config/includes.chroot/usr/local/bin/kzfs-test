@@ -654,14 +654,24 @@ build_golden_single() {
   zdev="$(zvol_dev "$name")"
 
   if zfs list "${zpath}@golden" >/dev/null 2>&1; then
-    log "Golden ${name} exists — skipping (destroy with: zfs destroy -Rf ${zpath})"
-    return 0
+    # Check if existing golden is healthy — if log shows PARTIAL/FAIL, rebuild
+    local _existing_log="${RESULTS_DIR}/goldens/${distro}-latest.log"
+    local _existing_result=""
+    [[ -f "$_existing_log" ]] && _existing_result="$(grep '  Result:' "$_existing_log" 2>/dev/null | tail -1 || echo "")"
+    if [[ "$_existing_result" == *"FAIL"* || "$_existing_result" == *"PARTIAL"* ]]; then
+      warn "Golden ${name} exists but validation was: ${_existing_result} — rebuilding"
+    else
+      log "Golden ${name} exists — skipping (destroy with: zfs destroy -Rf ${zpath})"
+      return 0
+    fi
   fi
 
-  # Clean up any previous failed/partial build
+  # Clean up everything — zero to hero, no leftovers
+  log "  Cleaning up previous state..."
   virsh destroy "$name" 2>/dev/null || true
   virsh undefine "$name" --nvram 2>/dev/null || virsh undefine "$name" 2>/dev/null || true
   zfs destroy -Rf "$zpath" 2>/dev/null || true
+  rm -f "${ISO_DIR}/${name}-cloud-init.iso" 2>/dev/null || true
 
   local t_start
   t_start="$(timer_start)"
@@ -695,8 +705,8 @@ build_golden_single() {
     local centos_golden_zpath
     centos_golden_zpath="$(zvol_path "$(golden_name centos)")"
     if ! zfs list "${centos_golden_zpath}@golden" >/dev/null 2>&1; then
-      warn "RHEL requires CentOS golden — build CentOS first"
-      return 1
+      warn "RHEL requires CentOS golden — building CentOS first..."
+      build_golden_single centos || { warn "CentOS build failed — cannot build RHEL"; return 1; }
     fi
     # Clean up any previous failed RHEL build
     virsh destroy "$name" 2>/dev/null || true
