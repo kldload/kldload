@@ -83,6 +83,16 @@ select option:checked { background: #00b8d9; color: #000; }
     </li>
   </ul>
 
+  <div class="nav-section" id="infra-nav-section" style="display:none">Infrastructure</div>
+  <ul id="infra-nav-items" style="display:none">
+    <li data-view="vms">
+      <span class="nav-icon">▣</span> Virtual Machines
+    </li>
+    <li data-view="k8s">
+      <span class="nav-icon">☸</span> Kubernetes
+    </li>
+  </ul>
+
   <div class="nav-section" id="klab-nav-section" style="display:none">klab</div>
   <ul id="klab-nav-items" style="display:none">
     <li data-view="klab">
@@ -773,6 +783,148 @@ select option:checked { background: #00b8d9; color: #000; }
             <button class="btn btn-ghost btn-sm" onclick="createBE()">+ New BE</button>
             <button class="btn btn-ghost btn-sm" onclick="listBEs()">↻ Refresh</button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Virtual Machines ──────────────────────────────────────────────────── -->
+    <div class="view" id="view-vms">
+      <div class="page-title" style="display:flex;justify-content:space-between;align-items:center">
+        <span>Virtual Machines</span>
+        <div style="display:flex;gap:0.4rem">
+          <button class="btn btn-primary btn-sm" onclick="vmShowCreate()">+ Create VM</button>
+          <button class="btn btn-ghost btn-sm" onclick="send({action:'list_vms'})">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="page-sub">KVM virtual machines — create, clone, snapshot, console</div>
+
+      <!-- Create VM form (hidden by default) -->
+      <div id="vm-create-form" style="display:none;margin-bottom:1rem">
+        <div class="panel">
+          <div class="panel-hdr">+ Create New VM</div>
+          <div class="panel-body">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.75rem;margin-bottom:0.75rem">
+              <div class="form-group"><label>Name</label><input type="text" id="vm-new-name" placeholder="my-vm" style="width:100%"></div>
+              <div class="form-group"><label>RAM (MB)</label><input type="number" id="vm-new-ram" value="4096" style="width:100%"></div>
+              <div class="form-group"><label>vCPUs</label><input type="number" id="vm-new-cpus" value="2" style="width:100%"></div>
+              <div class="form-group"><label>Disk (GB)</label><input type="number" id="vm-new-disk" value="40" style="width:100%"></div>
+            </div>
+            <div style="display:flex;gap:0.75rem;align-items:end;margin-bottom:0.75rem">
+              <div class="form-group" style="flex:1"><label>Golden Source (clone from)</label>
+                <select id="vm-new-golden" style="width:100%">
+                  <option value="">— blank disk —</option>
+                  <option value="klab-golden-centos">centos golden</option>
+                  <option value="klab-golden-rocky">rocky golden</option>
+                  <option value="klab-golden-fedora">fedora golden</option>
+                  <option value="klab-golden-debian">debian golden</option>
+                  <option value="klab-golden-ubuntu">ubuntu golden</option>
+                </select>
+              </div>
+              <div class="form-group"><label>Boot ISO (optional)</label><input type="text" id="vm-new-iso" placeholder="/path/to/iso" style="width:100%"></div>
+            </div>
+            <div style="display:flex;gap:0.5rem">
+              <button class="btn btn-primary btn-sm" onclick="vmCreate()">Create</button>
+              <button class="btn btn-ghost btn-sm" onclick="document.getElementById('vm-create-form').style.display='none'">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- VM table -->
+      <div class="panel">
+        <div class="panel-body" style="padding:0">
+          <table>
+            <thead><tr><th>Name</th><th>State</th><th>vCPUs</th><th>RAM</th><th>Disk</th><th>Actions</th></tr></thead>
+            <tbody id="vm-tbody"><tr><td colspan="6" style="color:var(--muted)">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- VM log -->
+      <div class="panel" id="vm-log-panel" style="display:none;margin-top:1rem">
+        <div class="panel-hdr">≡ VM Log</div>
+        <div class="panel-body">
+          <div class="log-box" id="vm-log" style="height:200px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Kubernetes ──────────────────────────────────────────────────────── -->
+    <div class="view" id="view-k8s">
+      <div class="page-title" style="display:flex;justify-content:space-between;align-items:center">
+        <span>Kubernetes</span>
+        <div style="display:flex;gap:0.4rem">
+          <button class="btn btn-ghost btn-sm" onclick="k8sRefresh()">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="page-sub">Kubernetes cluster management — nodes, pods, Cilium, Hubble</div>
+
+      <!-- Bootstrap -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">▶ Cluster Bootstrap</div>
+        <div class="panel-body">
+          <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;margin-bottom:0.5rem">
+            <div class="form-group" style="margin:0"><label style="font-size:0.75rem;color:var(--muted)">Workers</label><input type="number" id="k8s-workers" value="3" min="1" max="10" style="width:60px"></div>
+            <button class="btn btn-primary btn-sm" onclick="k8sBootstrap()">Bootstrap Cluster</button>
+            <button class="btn btn-danger btn-sm" onclick="k8sReset()">Reset Cluster</button>
+            <span style="font-size:0.75rem;color:var(--muted)">1 control plane + N workers on ZFS instant clones. Cilium eBPF + MetalLB.</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stat cards -->
+      <div class="stat-grid" style="margin-bottom:1rem">
+        <div class="stat-card"><div class="stat-label">Nodes</div><div class="stat-value" id="k8s-node-count">—</div></div>
+        <div class="stat-card"><div class="stat-label">Ready</div><div class="stat-value ok" id="k8s-ready-count">—</div></div>
+        <div class="stat-card"><div class="stat-label">API Server</div><div class="stat-value" id="k8s-api">—</div></div>
+        <div class="stat-card"><div class="stat-label">Version</div><div class="stat-value" id="k8s-ver">—</div></div>
+        <div class="stat-card"><div class="stat-label">Pods</div><div class="stat-value" id="k8s-pod-count">—</div></div>
+      </div>
+
+      <!-- Node table -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">◈ Nodes</div>
+        <div class="panel-body" style="padding:0">
+          <table>
+            <thead><tr><th>Node</th><th>Role</th><th>Status</th><th>Version</th><th>IP</th><th>Actions</th></tr></thead>
+            <tbody id="k8s-node-tbody"><tr><td colspan="6" style="color:var(--muted)">No cluster deployed — click Bootstrap to create one</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Pod table -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>⬛ Pods</span>
+          <button class="btn btn-ghost btn-sm" onclick="send({action:'k8s_pods'})">↻</button>
+        </div>
+        <div class="panel-body" style="padding:0">
+          <table>
+            <thead><tr><th>Namespace</th><th>Name</th><th>Ready</th><th>Status</th><th>Restarts</th><th>Age</th></tr></thead>
+            <tbody id="k8s-pod-tbody"><tr><td colspan="6" style="color:var(--muted)">No pods</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Cilium / Hubble status -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>⌁ Cilium &amp; Hubble</span>
+          <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_hubble_status'})">Status</button>
+        </div>
+        <div class="panel-body">
+          <div id="k8s-cilium-status" style="font-size:0.85rem;color:var(--muted)">Click Status to check Cilium/Hubble</div>
+        </div>
+      </div>
+
+      <!-- K8s log -->
+      <div class="panel" id="k8s-log-panel" style="display:none">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>≡ Cluster Log</span>
+          <button class="btn btn-danger btn-sm" onclick="klabCancel()">Cancel</button>
+        </div>
+        <div class="panel-body">
+          <div class="log-box" id="k8s-log" style="height:300px"></div>
         </div>
       </div>
     </div>
@@ -1508,12 +1660,12 @@ function handle(msg) {
         const installNav = document.querySelector('#sidebar li[data-view="install"]');
         if (installNav) installNav.style.display = 'none';
       }
-      // Show klab sidebar section when klab is available
+      // Show Infrastructure + klab sections when klab is available
       const showKlab = d.klab_available || d.kldload_profile === 'devops';
-      const klabNav = document.getElementById('klab-nav-section');
-      const klabItems = document.getElementById('klab-nav-items');
-      if (klabNav) klabNav.style.display = showKlab ? '' : 'none';
-      if (klabItems) klabItems.style.display = showKlab ? '' : 'none';
+      ['klab-nav-section','klab-nav-items','infra-nav-section','infra-nav-items'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = showKlab ? '' : 'none';
+      });
       // Show Bob when Ollama is running (AI profile or manual start)
       const showBob = d.ai_ollama || false;
       const bobNav = document.getElementById('bob-nav-section');
@@ -1691,6 +1843,11 @@ function handle(msg) {
         if (box) { box.textContent += (msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
         const st = document.getElementById('install-status');
         if (st) st.textContent = (msg.line || '').replace(/^\[.*?\]\s*/, '').slice(0, 80) || st.textContent;
+      } else if (target === 'k8s') {
+        const box = document.getElementById('k8s-log');
+        const panel = document.getElementById('k8s-log-panel');
+        if (box) { box.textContent += (msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+        if (panel) panel.style.display = '';
       } else if (target === 'klab') {
         ['klab-log', 'klab-golden-log', 'klab-ops-log', 'klab-test-log'].forEach(id => {
           const box = document.getElementById(id);
@@ -1753,6 +1910,10 @@ function handle(msg) {
       if (box) box.textContent += '\n✓ Install complete. System powering off…\n';
       break;
     }
+
+    case 'vm_list': { renderVMList(msg.vms); break; }
+    case 'k8s_status': { renderK8sStatus(msg); break; }
+    case 'k8s_pods': { renderK8sPods(msg.pods); break; }
 
     case 'snapshot_done': { refreshSnapshots(); break; }
     case 'error': { console.warn('WS error:', msg.msg); break; }
@@ -1958,6 +2119,8 @@ document.querySelectorAll('#sidebar li[data-view]').forEach(li => {
       requestDisks();
       send({ action: 'network_info' });
     }
+    if (li.dataset.view === 'vms')            send({ action: 'list_vms' });
+    if (li.dataset.view === 'k8s')            { send({ action: 'k8s_status' }); send({ action: 'k8s_pods' }); }
     if (li.dataset.view === 'bob')           bobInit();
     if (li.dataset.view === 'klab')         send({ action: 'klab_status' });
     if (li.dataset.view === 'klab-goldens') send({ action: 'klab_status' });
@@ -2334,6 +2497,154 @@ function loadLog() {
   const log = document.getElementById('log-select').value;
   document.getElementById('log-box').textContent = '';
   send({ action: 'tail_log', log });
+}
+
+// ── VM Management ────────────────────────────────────────────────────────────
+
+function vmShowCreate() { document.getElementById('vm-create-form').style.display = ''; }
+
+function vmCreate() {
+  const name = document.getElementById('vm-new-name')?.value?.trim();
+  const ram = document.getElementById('vm-new-ram')?.value || '4096';
+  const cpus = document.getElementById('vm-new-cpus')?.value || '2';
+  const disk = document.getElementById('vm-new-disk')?.value || '40';
+  const golden = document.getElementById('vm-new-golden')?.value || '';
+  const iso = document.getElementById('vm-new-iso')?.value?.trim() || '';
+  if (!name) { alert('Enter a VM name'); return; }
+  if (golden) {
+    send({ action: 'vm_clone', src: golden, dst: name });
+  } else {
+    send({ action: 'spawn', params: { name, ram, cpus, disk, iso } });
+  }
+  document.getElementById('vm-create-form').style.display = 'none';
+  setTimeout(() => send({ action: 'list_vms' }), 3000);
+}
+
+function renderVMList(vms) {
+  const tbody = document.getElementById('vm-tbody');
+  if (!tbody) return;
+  if (!vms || !vms.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No VMs found</td></tr>';
+    return;
+  }
+  tbody.innerHTML = vms.map(v => {
+    const stateColor = v.state === 'running' ? 'var(--accent)' : v.state === 'shut off' ? 'var(--muted)' : '#c9a04a';
+    const isRunning = v.state === 'running';
+    return `<tr>
+      <td style="font-family:monospace;font-weight:600">${esc(v.name)}</td>
+      <td><span style="color:${stateColor}">${esc(v.state)}</span></td>
+      <td>${esc(v.vcpus || '—')}</td>
+      <td>${esc(v.ram || '—')}</td>
+      <td>${esc(v.disk || '—')}</td>
+      <td style="white-space:nowrap">
+        ${isRunning
+          ? `<button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="vmOp('${esc(v.name)}','shutdown')">Stop</button>
+             <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="vmOp('${esc(v.name)}','reboot')">Reboot</button>`
+          : `<button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="vmOp('${esc(v.name)}','start')">Start</button>`}
+        <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="vmSnap('${esc(v.name)}')">Snap</button>
+        <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="vmClone('${esc(v.name)}')">Clone</button>
+        <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="vmDelete('${esc(v.name)}')">Delete</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function vmOp(name, action) {
+  if (action === 'destroy' && !confirm(`Force-stop ${name}?`)) return;
+  send({ action: 'vm_op', vm: name, action });
+  setTimeout(() => send({ action: 'list_vms' }), 2000);
+}
+
+function vmSnap(name) {
+  const snap = name + '-snap-' + Date.now().toString(36);
+  send({ action: 'snapshot_take', path: `rpool/vms/${name}` });
+  setTimeout(() => send({ action: 'list_vms' }), 1000);
+}
+
+function vmClone(name) {
+  const newName = prompt(`Clone ${name} as:`, name + '-clone');
+  if (!newName) return;
+  send({ action: 'vm_clone', src: name, dst: newName });
+  setTimeout(() => send({ action: 'list_vms' }), 3000);
+}
+
+function vmDelete(name) {
+  if (!confirm(`Delete VM ${name}? This destroys the VM and its ZFS zvol.`)) return;
+  send({ action: 'vm_op', vm: name, action: 'destroy' });
+  setTimeout(() => {
+    send({ action: 'vm_op', vm: name, action: 'undefine' });
+    setTimeout(() => send({ action: 'list_vms' }), 2000);
+  }, 1000);
+}
+
+// ── Kubernetes ───────────────────────────────────────────────────────────────
+
+function k8sRefresh() {
+  send({ action: 'k8s_status' });
+  send({ action: 'k8s_pods' });
+}
+
+function k8sBootstrap() {
+  const workers = document.getElementById('k8s-workers')?.value || '3';
+  if (!confirm(`Bootstrap K8s cluster: 1 CP + ${workers} workers?\nThis clones golden images and deploys Cilium.`)) return;
+  send({ action: 'k8s_bootstrap', workers: parseInt(workers) });
+}
+
+function k8sReset() {
+  if (!confirm('Reset K8s cluster? This destroys all K8s VMs and state.')) return;
+  send({ action: 'k8s_reset' });
+}
+
+function renderK8sStatus(data) {
+  if (!data) return;
+  const el = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  el('k8s-node-count', data.node_count || '0');
+  el('k8s-ready-count', data.ready_count || '0');
+  el('k8s-api', data.api_server || '—');
+  el('k8s-ver', data.version || '—');
+
+  const tbody = document.getElementById('k8s-node-tbody');
+  if (tbody && data.nodes?.length) {
+    tbody.innerHTML = data.nodes.map(n => {
+      const ready = (n.status || '').includes('Ready');
+      return `<tr>
+        <td style="font-family:monospace;font-weight:600">${esc(n.name)}</td>
+        <td>${esc(n.role || '—')}</td>
+        <td><span style="color:${ready ? 'var(--accent)' : 'var(--danger)'}">${esc(n.status)}</span></td>
+        <td style="color:var(--muted)">${esc(n.version || '—')}</td>
+        <td style="font-family:monospace;font-size:0.82rem">${esc(n.ip || '—')}</td>
+        <td>
+          <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'k8s_drain',node:'${esc(n.name)}'})">Drain</button>
+          <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'k8s_uncordon',node:'${esc(n.name)}'})">Uncordon</button>
+        </td>
+      </tr>`;
+    }).join('');
+  } else if (tbody) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No cluster deployed — click Bootstrap to create one</td></tr>';
+  }
+}
+
+function renderK8sPods(pods) {
+  const tbody = document.getElementById('k8s-pod-tbody');
+  const countEl = document.getElementById('k8s-pod-count');
+  if (!tbody) return;
+  if (!pods?.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No pods</td></tr>';
+    if (countEl) countEl.textContent = '0';
+    return;
+  }
+  if (countEl) countEl.textContent = pods.length;
+  tbody.innerHTML = pods.map(p => {
+    const statusColor = p.status === 'Running' ? 'var(--accent)' : p.status === 'Pending' ? '#c9a04a' : 'var(--danger)';
+    return `<tr>
+      <td style="color:var(--muted);font-size:0.82rem">${esc(p.namespace)}</td>
+      <td style="font-family:monospace;font-size:0.82rem">${esc(p.name)}</td>
+      <td>${esc(p.ready || '—')}</td>
+      <td><span style="color:${statusColor}">${esc(p.status)}</span></td>
+      <td style="color:var(--muted)">${esc(p.restarts || '0')}</td>
+      <td style="color:var(--muted);font-size:0.82rem">${esc(p.age || '—')}</td>
+    </tr>`;
+  }).join('');
 }
 
 // ── klab functions ───────────────────────────────────────────────────────────

@@ -1292,6 +1292,24 @@ async def ws_handler(websocket):
                         cmd += ["--extra-vars", _json.dumps(extra)]
                     await _stream_proc(websocket, cmd, target="ansible_log")
 
+                # ── K8s extended actions ──────────────────────────────
+                elif action == "k8s_status":
+                    await _k8s_status(websocket)
+                elif action == "k8s_pods":
+                    await _k8s_pods(websocket)
+                elif action == "k8s_bootstrap":
+                    await _k8s_bootstrap(websocket, msg)
+                elif action == "k8s_reset":
+                    await _k8s_reset(websocket)
+                elif action == "k8s_drain":
+                    node = msg.get("node", "")
+                    if node:
+                        await _stream_proc(websocket, ["kubectl", "drain", node, "--ignore-daemonsets", "--delete-emptydir-data"], target="k8s")
+                elif action == "k8s_uncordon":
+                    node = msg.get("node", "")
+                    if node:
+                        await _stream_proc(websocket, ["kubectl", "uncordon", node], target="k8s")
+
                 # ── klab actions ──────────────────────────────────────
                 elif action == "klab_cancel":
                     await _klab_cancel(websocket, msg)
@@ -2556,6 +2574,99 @@ def _get_ssl_context():
     except Exception as e:
         LOG.warning("TLS setup failed, falling back to plain HTTP: %s", e)
         return None
+
+# ── K8s extended handlers ─────────────────────────────────────────────────────
+
+async def _k8s_status(websocket):
+    """Return K8s cluster status: nodes, API server, version."""
+    data = {"node_count": 0, "ready_count": 0, "api_server": "—", "version": "—", "nodes": []}
+    try:
+        # Check if kubectl is available
+        out = subprocess.check_output(
+            ["kubectl", "get", "nodes", "-o", "wide", "--no-headers"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10)
+        nodes = []
+        for line in out.strip().splitlines():
+            parts = line.split()
+            if len(parts) >= 6:
+                nodes.append({
+                    "name": parts[0],
+                    "status": parts[1],
+                    "role": parts[2] if parts[2] != "<none>" else "worker",
+                    "age": parts[3],
+                    "version": parts[4],
+                    "ip": parts[5] if len(parts) > 5 else "",
+                })
+        data["nodes"] = nodes
+        data["node_count"] = len(nodes)
+        data["ready_count"] = sum(1 for n in nodes if "Ready" in n["status"])
+    except Exception:
+        pass
+
+    try:
+        ver = subprocess.check_output(
+            ["kubectl", "version", "--short", "--client=false"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5)
+        for line in ver.strip().splitlines():
+            if "Server" in line:
+                data["version"] = line.split(":")[-1].strip()
+    except Exception:
+        pass
+
+    try:
+        api = subprocess.check_output(
+            ["kubectl", "cluster-info"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5)
+        for line in api.splitlines():
+            if "control plane" in line.lower() or "master" in line.lower():
+                import re as _re
+                m = _re.search(r'https?://[\d.:]+', line)
+                if m:
+                    data["api_server"] = m.group(0)
+    except Exception:
+        pass
+
+    await websocket.send(json.dumps({"type": "k8s_status", **data}))
+
+
+async def _k8s_pods(websocket):
+    """Return pod list from kubectl."""
+    pods = []
+    try:
+        out = subprocess.check_output(
+            ["kubectl", "get", "pods", "-A", "--no-headers"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10)
+        for line in out.strip().splitlines():
+            parts = line.split()
+            if len(parts) >= 5:
+                pods.append({
+                    "namespace": parts[0],
+                    "name": parts[1],
+                    "ready": parts[2],
+                    "status": parts[3],
+                    "restarts": parts[4],
+                    "age": parts[5] if len(parts) > 5 else "",
+                })
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_pods", "pods": pods}))
+
+
+async def _k8s_bootstrap(websocket, msg):
+    """Bootstrap K8s cluster via kube-cluster."""
+    workers = msg.get("workers", 3)
+    await _auto_snapshot(websocket, "k8s-bootstrap")
+    await _stream_proc(websocket,
+        ["kube-cluster", "bootstrap", "--workers", str(workers)],
+        target="k8s")
+    await _k8s_status(websocket)
+
+
+async def _k8s_reset(websocket):
+    """Reset K8s cluster via kube-cluster."""
+    await _auto_snapshot(websocket, "k8s-reset")
+    await _stream_proc(websocket, ["kube-cluster", "reset"], target="k8s")
+
 
 # ── Auto-snapshot safety net ──────────────────────────────────────────────────
 
