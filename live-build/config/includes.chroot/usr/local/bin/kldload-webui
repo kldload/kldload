@@ -1503,6 +1503,7 @@ async def _wg_remove_peer(websocket, msg):
 
 async def _stream_proc(websocket, cmd, env=None, target="log"):
     """Run a command, stream stdout/stderr lines to websocket. Trackable + cancellable."""
+    _ansi_re = re.compile(r'\x1b\[[0-9;]*[mGKHF]')
     await websocket.send(json.dumps({"type": "exec_start", "cmd": str(cmd), "target": target}))
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -1516,7 +1517,7 @@ async def _stream_proc(websocket, cmd, env=None, target="log"):
         async for line in proc.stdout:
             await websocket.send(json.dumps({
                 "type": "log_line",
-                "line": line.decode(errors="replace").rstrip(),
+                "line": _ansi_re.sub('', line.decode(errors="replace").rstrip()),
                 "target": target,
             }))
         rc = await proc.wait()
@@ -1933,7 +1934,7 @@ async def _list_vms(websocket):
             name = name.strip()
             if not name:
                 continue
-            state = "unknown"
+            state, vcpus, ram, disk = "unknown", "—", "—", "—"
             try:
                 s = subprocess.check_output(
                     ["virsh", "domstate", name], text=True,
@@ -1942,21 +1943,62 @@ async def _list_vms(websocket):
                 state = s
             except Exception:
                 pass
-            vms.append({"name": name, "state": state})
+            try:
+                info = subprocess.check_output(
+                    ["virsh", "dominfo", name], text=True,
+                    stderr=subprocess.DEVNULL
+                )
+                for line in info.splitlines():
+                    if line.startswith("CPU(s):"):
+                        vcpus = line.split(":")[-1].strip()
+                    elif line.startswith("Max memory:"):
+                        mem_kb = int(line.split(":")[-1].strip().split()[0])
+                        ram = f"{mem_kb // 1024} MB"
+            except Exception:
+                pass
+            try:
+                blk = subprocess.check_output(
+                    ["virsh", "domblklist", name, "--details"], text=True,
+                    stderr=subprocess.DEVNULL
+                )
+                for line in blk.splitlines():
+                    if "disk" in line and "/dev/zvol/" in line:
+                        disk = "zvol"
+                        break
+                    elif "disk" in line and ".qcow2" in line:
+                        disk = "qcow2"
+                        break
+            except Exception:
+                pass
+            vms.append({"name": name, "state": state, "vcpus": vcpus, "ram": ram, "disk": disk})
     except Exception as e:
         LOG.warning("virsh list failed: %s", e)
     await websocket.send(json.dumps({"type": "vm_list", "vms": vms}))
 
 async def _vm_op(websocket, msg):
-    vm   = msg.get("vm", "")
-    op   = msg.get("op", "")
-    ops  = {"start": "virsh start", "stop": "virsh shutdown",
-            "force-stop": "virsh destroy", "delete": "virsh undefine --nvram"}
+    vm   = msg.get("vm", "") or msg.get("name", "")
+    op   = msg.get("op", "") or msg.get("action", "")
+    ops  = {
+        "start": ["virsh", "start"],
+        "stop": ["virsh", "shutdown"],
+        "shutdown": ["virsh", "shutdown"],
+        "reboot": ["virsh", "reboot"],
+        "force-stop": ["virsh", "destroy"],
+        "destroy": ["virsh", "destroy"],
+        "delete": ["virsh", "undefine", "--nvram"],
+        "undefine": ["virsh", "undefine", "--nvram"],
+    }
     if op not in ops or not re.match(r'^[a-zA-Z0-9_\-]+$', vm):
-        await websocket.send(json.dumps({"type": "error", "msg": "invalid vm op"}))
+        await websocket.send(json.dumps({"type": "error", "msg": f"invalid vm op: {op} on {vm}"}))
         return
-    cmd = shlex.split(f"{ops[op]} {vm}")
-    await _stream_proc(websocket, cmd)
+    cmd = ops[op] + [vm]
+    try:
+        subprocess.check_call(cmd, stderr=subprocess.DEVNULL)
+        await websocket.send(json.dumps({"type": "log_line", "line": f"VM {vm}: {op} OK", "target": "vm-log"}))
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "error", "msg": f"VM {op} failed: {e}"}))
+    # Refresh VM list after operation
+    await _list_vms(websocket)
 
 async def _zfs_list(websocket):
     pools, datasets = [], []
@@ -2663,9 +2705,27 @@ async def _k8s_bootstrap(websocket, msg):
 
 
 async def _k8s_reset(websocket):
-    """Reset K8s cluster via kube-cluster."""
+    """Destroy K8s cluster via kube-cluster."""
     await _auto_snapshot(websocket, "k8s-reset")
-    await _stream_proc(websocket, ["kube-cluster", "reset"], target="k8s")
+    # kube-cluster destroy prompts for confirmation — pipe 'destroy' to stdin
+    await websocket.send(json.dumps({"type": "exec_start", "target": "k8s"}))
+    proc = await asyncio.create_subprocess_exec(
+        "bash", "-c", "echo destroy | kube-cluster destroy",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    RUNNING_PROCS["k8s"] = proc
+    try:
+        async for line in proc.stdout:
+            await websocket.send(json.dumps({
+                "type": "log_line",
+                "line": line.decode(errors="replace").rstrip(),
+                "target": "k8s",
+            }))
+        rc = await proc.wait()
+    finally:
+        RUNNING_PROCS.pop("k8s", None)
+    await websocket.send(json.dumps({"type": "exec_done", "rc": rc, "target": "k8s"}))
 
 
 # ── Auto-snapshot safety net ──────────────────────────────────────────────────
@@ -3544,7 +3604,7 @@ async def _bob_models(websocket):
 
 
 async def _bob_chat(websocket, msg):
-    """Stream a chat response from Ollama. Proxied server-side so browser doesn't need direct access."""
+    """Stream a chat response from Ollama. Runs in thread to avoid blocking async loop."""
     model = msg.get("model", "")
     messages = msg.get("messages", [])
 
@@ -3552,7 +3612,10 @@ async def _bob_chat(websocket, msg):
         await websocket.send(json.dumps({"type": "error", "msg": "model and messages required"}))
         return
 
-    try:
+    import concurrent.futures
+
+    def _ollama_stream():
+        """Synchronous Ollama call in a thread — yields chunks."""
         import urllib.request
         req_data = json.dumps({"model": model, "messages": messages, "stream": True}).encode()
         req = urllib.request.Request(
@@ -3561,14 +3624,13 @@ async def _bob_chat(websocket, msg):
             headers={"Content-Type": "application/json"},
         )
         r = urllib.request.urlopen(req, timeout=120)
-
-        # Stream response chunks
         buffer = b""
+        chunks = []
         while True:
-            chunk = r.read(1024)
-            if not chunk:
+            data = r.read(512)
+            if not data:
                 break
-            buffer += chunk
+            buffer += data
             while b"\n" in buffer:
                 line, buffer = buffer.split(b"\n", 1)
                 if not line.strip():
@@ -3576,16 +3638,23 @@ async def _bob_chat(websocket, msg):
                 try:
                     j = json.loads(line)
                     content = j.get("message", {}).get("content", "")
-                    done = j.get("done", False)
                     if content:
-                        await websocket.send(json.dumps({
-                            "type": "bob_chat_chunk",
-                            "content": content,
-                            "done": done,
-                        }))
+                        chunks.append(content)
                 except Exception:
                     pass
+        return chunks
 
+    try:
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            chunks = await loop.run_in_executor(pool, _ollama_stream)
+        # Send all chunks
+        for chunk in chunks:
+            await websocket.send(json.dumps({
+                "type": "bob_chat_chunk",
+                "content": chunk,
+                "done": False,
+            }))
         await websocket.send(json.dumps({"type": "bob_chat_done"}))
     except Exception as e:
         await websocket.send(json.dumps({"type": "bob_chat_error", "error": str(e)}))

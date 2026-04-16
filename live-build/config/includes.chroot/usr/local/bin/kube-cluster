@@ -486,13 +486,32 @@ NETCFG
   # Copy the kldload K8s toolchain into the golden VM. These scripts handle
   # kubeadm init/join, Cilium install, WireGuard mesh, etc. They're baked
   # into the golden image so every clone inherits them — no SCP at clone time.
-  log "Running kube-setup in golden VM..."
-  for _tool in kube-setup kube-init kube-join kube-network kube-status kube-reset kube-smoke-test kube-load-images; do
+  log "Copying kube tools to golden VM..."
+  # Retry SCP up to 5 times — cloud-init may still be configuring SSH
+  local _scp_ok=0
+  for _attempt in 1 2 3 4 5; do
+    if sshpass -p kldload scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        "/usr/local/bin/kube-setup" "root@${golden_ip}:/usr/local/bin/kube-setup" 2>/dev/null; then
+      _scp_ok=1; break
+    fi
+    # Also try with SSH key
+    if [[ -f "$SSH_KEY" ]]; then
+      scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY" \
+        "/usr/local/bin/kube-setup" "root@${golden_ip}:/usr/local/bin/kube-setup" 2>/dev/null && { _scp_ok=1; break; }
+    fi
+    log "  SCP attempt ${_attempt} failed — retrying in 10s..."
+    sleep 10
+  done
+  [[ $_scp_ok -eq 1 ]] || die "Cannot copy kube-setup to golden VM at ${golden_ip}"
+  # Copy remaining tools
+  for _tool in kube-init kube-join kube-network kube-status kube-reset kube-smoke-test kube-load-images; do
     sshpass -p kldload scp -o StrictHostKeyChecking=no \
       "/usr/local/bin/${_tool}" "root@${golden_ip}:/usr/local/bin/${_tool}" 2>/dev/null || true
   done
 
   _ssh_cmd "$golden_ip" "chmod +x /usr/local/bin/kube-*"
+  # Verify kube-setup exists before proceeding
+  _ssh_cmd "$golden_ip" "test -x /usr/local/bin/kube-setup" || die "kube-setup not found on golden VM after copy"
   # Cloud-init may have DHCP but DNS resolution can lag behind — the 10s
   # pause lets systemd-resolved/NetworkManager finish before kube-setup
   # tries to reach package repos (kubernetes.io, docker.io, etc.)

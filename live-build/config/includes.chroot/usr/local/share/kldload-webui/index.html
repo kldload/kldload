@@ -921,10 +921,13 @@ select option:checked { background: #00b8d9; color: #000; }
       <div class="panel" id="k8s-log-panel" style="display:none">
         <div class="panel-hdr" style="justify-content:space-between">
           <span>≡ Cluster Log</span>
-          <button class="btn btn-danger btn-sm" onclick="klabCancel()">Cancel</button>
+          <div style="display:flex;gap:0.4rem">
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-log').textContent=''">Clear</button>
+            <button class="btn btn-danger btn-sm" onclick="klabCancel()">Cancel</button>
+          </div>
         </div>
-        <div class="panel-body">
-          <div class="log-box" id="k8s-log" style="height:300px"></div>
+        <div class="panel-body" style="padding:0">
+          <div class="log-box" id="k8s-log" style="height:calc(100vh - 500px);min-height:300px"></div>
         </div>
       </div>
     </div>
@@ -1889,6 +1892,10 @@ function handle(msg) {
           if (st)  st.textContent = `✗ Install failed (exit ${msg.rc})`; var rb=document.getElementById('install-retry'); if(rb) rb.style.display='block';
           if (box) box.textContent += `\n✗ Install failed (exit ${msg.rc})\n`;
         }
+      } else if (target === 'k8s') {
+        const box = document.getElementById('k8s-log');
+        if (box) { box.textContent += (msg.rc === 0 ? '\n✓ Done.\n' : `\n✗ Failed (rc=${msg.rc})\n`); box.scrollTop = box.scrollHeight; }
+        k8sRefresh();
       } else if (target === 'klab') {
         const suffix = msg.rc === 0 ? '\n✓ Done.\n' : `\n✗ Failed (rc=${msg.rc})\n`;
         ['klab-log', 'klab-golden-log', 'klab-ops-log', 'klab-test-log'].forEach(id => {
@@ -2530,28 +2537,28 @@ function renderVMList(vms) {
   tbody.innerHTML = vms.map(v => {
     const stateColor = v.state === 'running' ? 'var(--accent)' : v.state === 'shut off' ? 'var(--muted)' : '#c9a04a';
     const isRunning = v.state === 'running';
-    return `<tr>
-      <td style="font-family:monospace;font-weight:600">${esc(v.name)}</td>
-      <td><span style="color:${stateColor}">${esc(v.state)}</span></td>
-      <td>${esc(v.vcpus || '—')}</td>
-      <td>${esc(v.ram || '—')}</td>
-      <td>${esc(v.disk || '—')}</td>
-      <td style="white-space:nowrap">
+    return `<tr style="line-height:2.2">
+      <td style="font-family:monospace;font-weight:600;font-size:0.9rem;padding:0.5rem 0.75rem">${esc(v.name)}</td>
+      <td style="padding:0.5rem"><span style="color:${stateColor};font-weight:600">${esc(v.state)}</span></td>
+      <td style="padding:0.5rem;text-align:center">${esc(v.vcpus || '—')}</td>
+      <td style="padding:0.5rem">${esc(v.ram || '—')}</td>
+      <td style="padding:0.5rem">${esc(v.disk || '—')}</td>
+      <td style="padding:0.5rem 0.75rem;white-space:nowrap">
         ${isRunning
-          ? `<button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="vmOp('${esc(v.name)}','shutdown')">Stop</button>
-             <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="vmOp('${esc(v.name)}','reboot')">Reboot</button>`
-          : `<button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="vmOp('${esc(v.name)}','start')">Start</button>`}
-        <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="vmSnap('${esc(v.name)}')">Snap</button>
-        <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="vmClone('${esc(v.name)}')">Clone</button>
-        <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="vmDelete('${esc(v.name)}')">Delete</button>
+          ? `<button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','shutdown')">Stop</button>
+             <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','reboot')">Reboot</button>`
+          : `<button class="btn btn-primary btn-sm" onclick="vmOp('${esc(v.name)}','start')">Start</button>`}
+        <button class="btn btn-ghost btn-sm" onclick="vmSnap('${esc(v.name)}')">Snap</button>
+        <button class="btn btn-ghost btn-sm" onclick="vmClone('${esc(v.name)}')">Clone</button>
+        <button class="btn btn-danger btn-sm" onclick="vmDelete('${esc(v.name)}')">Delete</button>
       </td>
     </tr>`;
   }).join('');
 }
 
-function vmOp(name, action) {
-  if (action === 'destroy' && !confirm(`Force-stop ${name}?`)) return;
-  send({ action: 'vm_op', vm: name, action });
+function vmOp(name, op) {
+  if (op === 'destroy' && !confirm(`Force-stop ${name}?`)) return;
+  send({ action: 'vm_op', vm: name, op: op });
   setTimeout(() => send({ action: 'list_vms' }), 2000);
 }
 
