@@ -390,31 +390,23 @@ hostname: ${GOLDEN}
 manage_etc_hosts: true
 disable_root: false
 ssh_pwauth: true
-users:
-  - default
-  - name: root
-    lock_passwd: false
-    ssh_authorized_keys:
-      - ${pubkey}
-    shell: /bin/bash
-chpasswd:
-  expire: false
-  users:
-    - name: root
-      password: kldload
-      type: text
-ssh_authorized_keys:
-  - ${pubkey}
-package_update: true
-packages:
-  - openssh-server
-  - sudo
-  - curl
-runcmd:
+package_update: false
+bootcmd:
+  - echo 'root:kldload' | chpasswd
+  - passwd -uf root 2>/dev/null || true
+  - mkdir -p /etc/ssh/sshd_config.d
+  - echo -e 'PermitRootLogin yes\nPasswordAuthentication yes' > /etc/ssh/sshd_config.d/99-klab.conf
   - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
   - touch /var/lib/cloud/instance/kube-golden-ready
+ssh_authorized_keys:
+  - ${pubkey}
+runcmd:
+  - systemctl stop firewalld 2>/dev/null || true
+  - systemctl disable firewalld 2>/dev/null || true
+  - systemctl mask firewalld 2>/dev/null || true
+  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
 USERDATA
 
   # Network config matches both naming conventions: Debian uses predictable

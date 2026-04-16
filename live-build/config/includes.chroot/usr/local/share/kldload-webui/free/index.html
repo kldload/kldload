@@ -1843,18 +1843,18 @@ function handle(msg) {
       const target = msg.target || '';
       if (target === 'install') {
         const box = document.getElementById('install-log');
-        if (box) { box.textContent += (msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+        if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
         const st = document.getElementById('install-status');
         if (st) st.textContent = (msg.line || '').replace(/^\[.*?\]\s*/, '').slice(0, 80) || st.textContent;
       } else if (target === 'k8s') {
         const box = document.getElementById('k8s-log');
         const panel = document.getElementById('k8s-log-panel');
-        if (box) { box.textContent += (msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+        if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
         if (panel) panel.style.display = '';
       } else if (target === 'klab') {
         ['klab-log', 'klab-golden-log', 'klab-ops-log', 'klab-test-log'].forEach(id => {
           const box = document.getElementById(id);
-          if (box) { box.textContent += (msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+          if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
         });
         ['klab-log-panel', 'klab-golden-log-panel', 'klab-ops-log-panel', 'klab-test-log-panel'].forEach(id => {
           const p = document.getElementById(id);
@@ -1862,7 +1862,7 @@ function handle(msg) {
         });
       } else {
         const box = document.getElementById('log-box');
-        if (box) { box.textContent += (msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+        if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
       }
       break;
     }
@@ -1908,7 +1908,7 @@ function handle(msg) {
 
     case 'install_log': {
       const box = document.getElementById('install-log');
-      if (box) { box.textContent += (msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+      if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
       break;
     }
 
@@ -3583,8 +3583,9 @@ function bobAsk(question) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+function stripAnsi(s) { return String(s).replace(/\x1b\[[0-9;]*[mGKHF]/g, ''); }
 function esc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return stripAnsi(String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 // Auto-detect browser timezone and pre-select in dropdown

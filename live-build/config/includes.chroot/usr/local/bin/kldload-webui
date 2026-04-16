@@ -2715,11 +2715,12 @@ async def _k8s_reset(websocket):
         stderr=asyncio.subprocess.STDOUT,
     )
     RUNNING_PROCS["k8s"] = proc
+    _ansi_strip = re.compile(r'\x1b\[[0-9;]*[mGKHF]')
     try:
         async for line in proc.stdout:
             await websocket.send(json.dumps({
                 "type": "log_line",
-                "line": line.decode(errors="replace").rstrip(),
+                "line": _ansi_strip.sub('', line.decode(errors="replace").rstrip()),
                 "target": "k8s",
             }))
         rc = await proc.wait()
