@@ -159,6 +159,160 @@ def collect_metrics():
     healthy = 1 if health == "ONLINE" else 0
     lines.append(f'klab_pool_healthy{{pool="{POOL}"}} {healthy}')
 
+    # Pool compression ratio
+    compratio = run(f"zfs get -Hp -o value compressratio {POOL}")
+    try:
+        lines.append(f'klab_pool_compress_ratio{{pool="{POOL}"}} {float(compratio.replace("x",""))}')
+    except (ValueError, AttributeError):
+        pass
+
+    # Pool fragmentation
+    frag = run(f"zpool list -Hp -o frag {POOL}")
+    try:
+        lines.append(f'klab_pool_fragmentation{{pool="{POOL}"}} {int(frag.replace("%",""))}')
+    except (ValueError, AttributeError):
+        pass
+
+    # ── ZFS ARC stats (from /proc/spl/kstat/zfs/arcstats) ───────────
+    lines.append("")
+    lines.append("# HELP klab_zfs_arc_hits_total ARC cache hits")
+    lines.append("# TYPE klab_zfs_arc_hits_total counter")
+    lines.append("# HELP klab_zfs_arc_misses_total ARC cache misses")
+    lines.append("# TYPE klab_zfs_arc_misses_total counter")
+    lines.append("# HELP klab_zfs_arc_size_bytes Current ARC size")
+    lines.append("# TYPE klab_zfs_arc_size_bytes gauge")
+    lines.append("# HELP klab_zfs_arc_target_bytes ARC target size (c)")
+    lines.append("# TYPE klab_zfs_arc_target_bytes gauge")
+    lines.append("# HELP klab_zfs_arc_max_bytes ARC max size (c_max)")
+    lines.append("# TYPE klab_zfs_arc_max_bytes gauge")
+    lines.append("# HELP klab_zfs_arc_min_bytes ARC min size (c_min)")
+    lines.append("# TYPE klab_zfs_arc_min_bytes gauge")
+    lines.append("# HELP klab_zfs_arc_hit_ratio ARC hit ratio (0-1)")
+    lines.append("# TYPE klab_zfs_arc_hit_ratio gauge")
+    lines.append("# HELP klab_zfs_arc_mru_size_bytes MRU (recently used) size")
+    lines.append("# TYPE klab_zfs_arc_mru_size_bytes gauge")
+    lines.append("# HELP klab_zfs_arc_mfu_size_bytes MFU (frequently used) size")
+    lines.append("# TYPE klab_zfs_arc_mfu_size_bytes gauge")
+    lines.append("# HELP klab_zfs_arc_evict_total Total ARC evictions")
+    lines.append("# TYPE klab_zfs_arc_evict_total counter")
+    lines.append("# HELP klab_zfs_arc_l2_hits_total L2ARC hits")
+    lines.append("# TYPE klab_zfs_arc_l2_hits_total counter")
+    lines.append("# HELP klab_zfs_arc_l2_misses_total L2ARC misses")
+    lines.append("# TYPE klab_zfs_arc_l2_misses_total counter")
+    lines.append("# HELP klab_zfs_arc_demand_hits_total Demand data hits")
+    lines.append("# TYPE klab_zfs_arc_demand_hits_total counter")
+    lines.append("# HELP klab_zfs_arc_prefetch_hits_total Prefetch hits")
+    lines.append("# TYPE klab_zfs_arc_prefetch_hits_total counter")
+
+    arcstats = {}
+    try:
+        with open("/proc/spl/kstat/zfs/arcstats") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) == 3 and parts[1].isdigit():
+                    arcstats[parts[0]] = int(parts[2])
+    except FileNotFoundError:
+        pass
+
+    if arcstats:
+        hits = arcstats.get("hits", 0)
+        misses = arcstats.get("misses", 0)
+        lines.append(f"klab_zfs_arc_hits_total {hits}")
+        lines.append(f"klab_zfs_arc_misses_total {misses}")
+        total = hits + misses
+        if total > 0:
+            lines.append(f"klab_zfs_arc_hit_ratio {hits / total:.4f}")
+
+        for key, metric in [
+            ("size", "klab_zfs_arc_size_bytes"),
+            ("c", "klab_zfs_arc_target_bytes"),
+            ("c_max", "klab_zfs_arc_max_bytes"),
+            ("c_min", "klab_zfs_arc_min_bytes"),
+            ("mru_size", "klab_zfs_arc_mru_size_bytes"),
+            ("mfu_size", "klab_zfs_arc_mfu_size_bytes"),
+            ("evict_l2_eligible", "klab_zfs_arc_evict_total"),
+            ("l2_hits", "klab_zfs_arc_l2_hits_total"),
+            ("l2_misses", "klab_zfs_arc_l2_misses_total"),
+            ("demand_data_hits", "klab_zfs_arc_demand_hits_total"),
+            ("prefetch_data_hits", "klab_zfs_arc_prefetch_hits_total"),
+        ]:
+            if key in arcstats:
+                lines.append(f"{metric} {arcstats[key]}")
+
+    # ── ZFS I/O stats (zpool iostat) ─────────────────────────────────
+    lines.append("")
+    lines.append("# HELP klab_zfs_pool_read_ops Pool read operations per second")
+    lines.append("# TYPE klab_zfs_pool_read_ops gauge")
+    lines.append("# HELP klab_zfs_pool_write_ops Pool write operations per second")
+    lines.append("# TYPE klab_zfs_pool_write_ops gauge")
+    lines.append("# HELP klab_zfs_pool_read_bw_bytes Pool read bandwidth bytes/sec")
+    lines.append("# TYPE klab_zfs_pool_read_bw_bytes gauge")
+    lines.append("# HELP klab_zfs_pool_write_bw_bytes Pool write bandwidth bytes/sec")
+    lines.append("# TYPE klab_zfs_pool_write_bw_bytes gauge")
+
+    iostat = run(f"zpool iostat -Hp {POOL} 1 2 2>/dev/null | tail -1")
+    if iostat:
+        parts = iostat.split()
+        if len(parts) >= 7:
+            try:
+                lines.append(f'klab_zfs_pool_read_ops{{pool="{POOL}"}} {int(parts[3])}')
+                lines.append(f'klab_zfs_pool_write_ops{{pool="{POOL}"}} {int(parts[4])}')
+                lines.append(f'klab_zfs_pool_read_bw_bytes{{pool="{POOL}"}} {int(parts[5])}')
+                lines.append(f'klab_zfs_pool_write_bw_bytes{{pool="{POOL}"}} {int(parts[6])}')
+            except (ValueError, IndexError):
+                pass
+
+    # ── ZFS dataset stats (per-dataset usage) ────────────────────────
+    lines.append("")
+    lines.append("# HELP klab_zfs_dataset_used_bytes Dataset used space")
+    lines.append("# TYPE klab_zfs_dataset_used_bytes gauge")
+    lines.append("# HELP klab_zfs_dataset_refer_bytes Dataset referenced space")
+    lines.append("# TYPE klab_zfs_dataset_refer_bytes gauge")
+    lines.append("# HELP klab_zfs_dataset_compress_ratio Dataset compression ratio")
+    lines.append("# TYPE klab_zfs_dataset_compress_ratio gauge")
+
+    ds_output = run(f"zfs list -Hp -o name,used,refer,compressratio -r {POOL} -t filesystem,volume 2>/dev/null")
+    for line in ds_output.split("\n"):
+        parts = line.split("\t")
+        if len(parts) >= 4:
+            dsname = parts[0]
+            # Only export klab-relevant datasets
+            if "klab" in dsname or dsname == POOL or dsname.startswith(f"{POOL}/ROOT") or dsname.startswith(f"{POOL}/vms"):
+                short = dsname.replace(f"{POOL}/", "")
+                try:
+                    lines.append(f'klab_zfs_dataset_used_bytes{{dataset="{short}"}} {int(parts[1])}')
+                    lines.append(f'klab_zfs_dataset_refer_bytes{{dataset="{short}"}} {int(parts[2])}')
+                    cr = float(parts[3].replace("x", ""))
+                    lines.append(f'klab_zfs_dataset_compress_ratio{{dataset="{short}"}} {cr}')
+                except (ValueError, IndexError):
+                    pass
+
+    # ── ZFS snapshot count per dataset ───────────────────────────────
+    lines.append("")
+    lines.append("# HELP klab_zfs_snapshot_count Number of snapshots per dataset")
+    lines.append("# TYPE klab_zfs_snapshot_count gauge")
+    snap_output = run(f"zfs list -Hp -o name -t snapshot -r {POOL}/vms 2>/dev/null")
+    snap_counts = {}
+    for line in snap_output.split("\n"):
+        if "@" in line:
+            ds = line.split("@")[0].replace(f"{POOL}/", "")
+            snap_counts[ds] = snap_counts.get(ds, 0) + 1
+    for ds, count in snap_counts.items():
+        lines.append(f'klab_zfs_snapshot_count{{dataset="{ds}"}} {count}')
+
+    # ── ZFS txg (transaction group) stats ────────────────────────────
+    lines.append("")
+    lines.append("# HELP klab_zfs_txg_synced_total Total synced transaction groups")
+    lines.append("# TYPE klab_zfs_txg_synced_total counter")
+    try:
+        with open("/proc/spl/kstat/zfs/dmu_tx") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) == 3 and parts[0] == "dmu_tx_assigned":
+                    lines.append(f"klab_zfs_txg_synced_total {int(parts[2])}")
+    except FileNotFoundError:
+        pass
+
     # ── Host info ────────────────────────────────────────────────────
     lines.append("")
     lines.append("# HELP klab_host_cpus Number of host CPUs")
