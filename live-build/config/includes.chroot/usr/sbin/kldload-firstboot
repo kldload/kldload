@@ -1408,18 +1408,23 @@ ZFSPOOL
       log "  Bridge: br0"
       log "  Tools: kvm-create, kvm-snap, kvm-clone"
 
-      # ── Build kzfs-test golden images (all distros except RHEL) ──────────
+      # ── Build klab golden images (all distros except RHEL) ────────────
       # RHEL requires subscription credentials — build via UI or CLI later
-      if command -v kzfs-test >/dev/null 2>&1; then
-        log "Building OpenZFS Test Lab golden images (this takes ~20 minutes)..."
+      if command -v klab >/dev/null 2>&1; then
+        log "Building klab golden images (this takes ~20 minutes)..."
         log "  Distros: centos rocky fedora debian ubuntu"
-        log "  RHEL skipped — requires subscription credentials (use kzfs-test golden rhel)"
+        log "  RHEL skipped — requires subscription credentials (use klab golden rhel)"
         for _distro in centos rocky fedora debian ubuntu; do
           log "  Building golden: ${_distro}..."
-          kzfs-test golden "$_distro" 2>&1 | tee -a "${LOG}" || \
-            log "  WARNING: ${_distro} golden build failed — run 'kzfs-test golden ${_distro}' manually"
+          klab golden "$_distro" 2>&1 | tee -a "${LOG}" || \
+            log "  WARNING: ${_distro} golden build failed — run 'klab golden ${_distro}' manually"
         done
-        ok "OpenZFS Test Lab golden images built — run 'kzfs-test status' to verify"
+        ok "klab golden images built — run 'klab status' to verify"
+      elif command -v kzfs-test >/dev/null 2>&1; then
+        log "Building kzfs-test golden images (this takes ~20 minutes)..."
+        for _distro in centos rocky fedora debian ubuntu; do
+          kzfs-test golden "$_distro" 2>&1 | tee -a "${LOG}" || true
+        done
       fi
     fi
 
