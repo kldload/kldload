@@ -1412,19 +1412,76 @@ ZFSPOOL
       if [[ "${KLDLOAD_ENABLE_DEVOPS:-0}" == "1" ]]; then
         log "Setting up klab observability stack on host..."
 
-        # Install Prometheus + Grafana + node_exporter
-        dnf install -y prometheus2 grafana prometheus-node-exporter 2>/dev/null || \
-          dnf install -y golang-github-prometheus prometheus-node-exporter 2>/dev/null || true
+        # ── Grafana (from official repo — RPM available online) ──
+        if ! command -v grafana >/dev/null 2>&1; then
+          cat > /etc/yum.repos.d/grafana.repo <<'GREPO'
+[grafana]
+name=Grafana OSS
+baseurl=https://rpm.grafana.com
+gpgcheck=1
+gpgkey=https://rpm.grafana.com/gpg.key
+enabled=1
+GREPO
+          dnf install -y grafana 2>/dev/null || true
+        fi
 
-        # Prometheus config — scrapes klab VMs over WireGuard
+        # ── Prometheus (binary — not in CentOS/EPEL repos) ──
+        if ! command -v prometheus >/dev/null 2>&1; then
+          log "  Installing Prometheus from binary..."
+          curl -fsSL https://github.com/prometheus/prometheus/releases/download/v2.54.1/prometheus-2.54.1.linux-amd64.tar.gz \
+            | tar -xz -C /tmp 2>/dev/null
+          install -m 755 /tmp/prometheus-*/prometheus /usr/local/bin/
+          install -m 755 /tmp/prometheus-*/promtool /usr/local/bin/
+          mkdir -p /etc/prometheus /var/lib/prometheus
+          rm -rf /tmp/prometheus-*
+
+          cat > /etc/systemd/system/prometheus.service <<'PROMSVC'
+[Unit]
+Description=Prometheus
+After=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/prometheus --web.listen-address=0.0.0.0:9090
+Restart=always
+[Install]
+WantedBy=multi-user.target
+PROMSVC
+        fi
+
+        # ── node_exporter (binary) ──
+        if ! command -v node_exporter >/dev/null 2>&1; then
+          curl -fsSL https://github.com/prometheus/node_exporter/releases/download/v1.8.2/node_exporter-1.8.2.linux-amd64.tar.gz \
+            | tar -xz -C /tmp 2>/dev/null
+          install -m 755 /tmp/node_exporter-*/node_exporter /usr/local/bin/
+          rm -rf /tmp/node_exporter-*
+
+          cat > /etc/systemd/system/node_exporter.service <<'NESVC'
+[Unit]
+Description=Node Exporter
+After=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/node_exporter
+Restart=always
+[Install]
+WantedBy=multi-user.target
+NESVC
+        fi
+
+        # ── Prometheus config ──
         if [[ -f /usr/local/share/klab/prometheus.yml ]]; then
           cp /usr/local/share/klab/prometheus.yml /etc/prometheus/prometheus.yml
           mkdir -p /etc/prometheus/rules
           ok "Prometheus configured with klab scrape targets"
         fi
 
-        # Grafana datasource provisioning
+        # ── Grafana provisioning ──
         mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
+
+        # Remove default sample configs that conflict
+        rm -f /etc/grafana/provisioning/datasources/sample.yaml 2>/dev/null
+        rm -f /etc/grafana/provisioning/dashboards/sample.yaml 2>/dev/null
+
         cat > /etc/grafana/provisioning/datasources/klab.yaml <<'GRAFDS'
 apiVersion: 1
 datasources:
@@ -1433,10 +1490,9 @@ datasources:
     access: proxy
     url: http://localhost:9090
     isDefault: true
-    editable: false
+    uid: prometheus
 GRAFDS
 
-        # Grafana dashboard provisioning
         cat > /etc/grafana/provisioning/dashboards/klab.yaml <<'GRAFDASH'
 apiVersion: 1
 providers:
@@ -1445,7 +1501,6 @@ providers:
     type: file
     options:
       path: /var/lib/grafana/dashboards
-      foldersFromFilesStructure: false
 GRAFDASH
 
         # Copy pre-built dashboard
@@ -1454,36 +1509,39 @@ GRAFDASH
           ok "Grafana dashboard provisioned"
         fi
 
-        # Grafana: set default home dashboard + anonymous access
-        if [[ -f /etc/grafana/grafana.ini ]]; then
-          sed -i 's/^;*\s*default_home_dashboard_path\s*=.*/default_home_dashboard_path = \/var\/lib\/grafana\/dashboards\/klab-estate.json/' /etc/grafana/grafana.ini
-        fi
+        # ── Grafana anonymous access via systemd env override ──
+        mkdir -p /etc/systemd/system/grafana-server.service.d
+        cat > /etc/systemd/system/grafana-server.service.d/klab.conf <<'GFOVER'
+[Service]
+Environment="GF_AUTH_ANONYMOUS_ENABLED=true"
+Environment="GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer"
+Environment="GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/klab-estate.json"
+Environment="GF_AUTH_DISABLE_LOGIN_FORM=false"
+GFOVER
 
-        # klab-exporter systemd service
+        # ── klab-exporter systemd ──
         cat > /etc/systemd/system/klab-exporter.service <<'KLABEXP'
 [Unit]
 Description=klab Prometheus Exporter
 After=network-online.target
-
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/klab-exporter
 Restart=always
 RestartSec=5
-
 [Install]
 WantedBy=multi-user.target
 KLABEXP
 
-        # Start all observability services
+        # ── Start all services ──
         systemctl daemon-reload
-        for _svc in prometheus prometheus-node-exporter grafana-server klab-exporter; do
+        for _svc in prometheus node_exporter grafana-server klab-exporter; do
           systemctl enable "$_svc" 2>/dev/null || true
           systemctl start "$_svc" 2>/dev/null || true
         done
         ok "klab observability: Prometheus :9090, Grafana :3000, klab-exporter :9101"
 
-        # Set Firefox homepage to Grafana
+        # ── Firefox homepage → Grafana ──
         mkdir -p /etc/firefox/policies
         cat > /etc/firefox/policies/policies.json <<'FFPOL'
 {
