@@ -194,7 +194,7 @@ golden_exists() {
 }
 
 make_cloud_init_iso() {
-  local name="$1" hostname="$2" ready_marker="${3:-}"
+  local name="$1" hostname="$2" ready_marker="${3:-}" static_ip="${4:-}"
 
   ensure_ssh_key
   local pubkey
@@ -249,7 +249,33 @@ runcmd:
 ${runcmd_extra}
 USERDATA
 
-  cat > "${ci_dir}/network-config" <<NETCFG
+  if [[ -n "$static_ip" ]]; then
+    cat > "${ci_dir}/network-config" <<NETCFG
+version: 2
+ethernets:
+  id0:
+    match:
+      name: "en*"
+    addresses:
+      - ${static_ip}/24
+    routes:
+      - to: default
+        via: 192.168.122.1
+    nameservers:
+      addresses: [192.168.122.1, 8.8.8.8]
+  id1:
+    match:
+      name: "eth*"
+    addresses:
+      - ${static_ip}/24
+    routes:
+      - to: default
+        via: 192.168.122.1
+    nameservers:
+      addresses: [192.168.122.1, 8.8.8.8]
+NETCFG
+  else
+    cat > "${ci_dir}/network-config" <<NETCFG
 version: 2
 ethernets:
   id0:
@@ -265,6 +291,7 @@ ethernets:
       driver: "virtio*"
     dhcp4: true
 NETCFG
+  fi
 
   genisoimage -output "$ci_iso" -volid cidata -joliet -rock \
     "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null \
@@ -932,15 +959,23 @@ deploy_site() {
   local deployed=0 skipped=0
   local total_start; total_start="$(timer_start)"
 
+  # Static IP scheme: blue=192.168.122.101-106, green=192.168.122.201-206
+  # First 100 IPs reserved for infrastructure (gateway, DHCP, goldens)
+  local ip_base
+  [[ "$site" == "blue" ]] && ip_base=100 || ip_base=200
+
   log "Deploying ${site} site (${#DISTROS[@]} distros)..."
 
+  local node_idx=0
   for distro in "${DISTROS[@]}"; do
+    ((node_idx++))
     local gname gpath sname spath sdev
     gname="$(golden_name "$distro")"
     gpath="$(zvol_path "$gname")"
     sname="$(site_name "$site" "$distro")"
     spath="$(zvol_path "$sname")"
     sdev="$(zvol_dev "$sname")"
+    local vm_ip="192.168.122.$((ip_base + node_idx))"
 
     if ! zfs list "${gpath}@golden" >/dev/null 2>&1; then
       warn "No golden for ${distro} — skipping"
@@ -951,7 +986,7 @@ deploy_site() {
       ((skipped++)); continue
     fi
 
-    echo -ne "  ${gname}@golden -> ${sname} ... "
+    echo -ne "  ${gname}@golden -> ${sname} (${vm_ip}) ... "
     local cs; cs="$(timer_start)"
     zfs clone "${gpath}@golden" "$spath"
     local ce; ce="$(timer_elapsed_ms "$cs")"
@@ -960,7 +995,7 @@ deploy_site() {
     for _ in $(seq 1 10); do [[ -b "$sdev" ]] && break; sleep 1; done
     [[ -b "$sdev" ]] || { warn "zvol device not found for ${sname}"; continue; }
 
-    local ci_iso; ci_iso="$(make_cloud_init_iso "$sname" "${site}-${distro}")"
+    local ci_iso; ci_iso="$(make_cloud_init_iso "$sname" "${site}-${distro}" "" "$vm_ip")"
     virt-install --name "$sname" --ram "$RAM" --vcpus "$CPUS" \
       --os-variant "${OS_VARIANTS[$distro]}" \
       --disk "path=${sdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
@@ -971,24 +1006,26 @@ deploy_site() {
     ((deployed++))
   done
 
-  log "Waiting for VMs to get IPs..."
-  sleep 15
+  log "Waiting for VMs to boot (static IPs: 192.168.122.$((ip_base+1))-$((ip_base+node_idx)))..."
+  sleep 20
 
   echo ""
   echo -e "${W}  Site ${site} VMs:${N}"
-  printf "  %-25s %-16s %s\n" "VM" "IP" "ZFS"
-  printf "  %-25s %-16s %s\n" "-------------------------" "----------------" "---"
+  printf "  %-25s %-18s %s\n" "VM" "IP" "ZFS"
+  printf "  %-25s %-18s %s\n" "-------------------------" "------------------" "---"
 
+  local vm_idx=0
   for distro in "${DISTROS[@]}"; do
+    ((vm_idx++))
     local sname; sname="$(site_name "$site" "$distro")"
     virsh domstate "$sname" >/dev/null 2>&1 || continue
-    local ip; ip="$(get_vm_ip "$sname")"
-    if [[ -n "$ip" ]] && wait_for_ssh "$ip" 30; then
+    local ip="192.168.122.$((ip_base + vm_idx))"
+    if wait_for_ssh "$ip" 60; then
       _ssh_cmd "$ip" "hostnamectl set-hostname ${site}-${distro}; systemd-machine-id-setup 2>/dev/null" || true
       local zfs_ver; zfs_ver="$(_ssh_cmd "$ip" "zfs version 2>/dev/null | head -1" || echo "n/a")"
-      printf "  ${G}%-25s${N} %-16s %s\n" "$sname" "$ip" "$zfs_ver"
+      printf "  ${G}%-25s${N} %-18s %s\n" "$sname" "$ip" "$zfs_ver"
     else
-      printf "  ${R}%-25s${N} %-16s %s\n" "$sname" "${ip:-no IP}" "no SSH"
+      printf "  ${R}%-25s${N} %-18s %s\n" "$sname" "$ip" "no SSH"
     fi
   done
 
