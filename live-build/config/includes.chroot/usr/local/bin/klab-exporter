@@ -45,6 +45,8 @@ def collect_metrics():
     lines.append("# TYPE klab_golden_ready gauge")
     lines.append("# HELP klab_golden_size_bytes Golden image disk usage in bytes")
     lines.append("# TYPE klab_golden_size_bytes gauge")
+    lines.append("# HELP klab_golden_info Golden image metadata (kernel, ZFS version)")
+    lines.append("# TYPE klab_golden_info gauge")
 
     goldens_ready = 0
     for distro in DISTROS:
@@ -52,34 +54,32 @@ def collect_metrics():
         zpath = f"{POOL}/vms/{name}"
         snap = f"{zpath}@golden"
 
-        # Check if golden exists
         rc = os.system(f"zfs list {snap} >/dev/null 2>&1")
         ready = 1 if rc == 0 else 0
-        lines.append(f'klab_golden_ready{{distro="{distro}"}} {ready}')
 
         if ready:
             goldens_ready += 1
-            # Size
             used = run(f"zfs get -Hp -o value used {zpath}")
-            if used.isdigit():
-                lines.append(f'klab_golden_size_bytes{{distro="{distro}"}} {used}')
-
-            # Parse golden log for kernel + ZFS version
+            kernel = ""
+            zfs_ver = ""
             log_file = f"{RESULTS_DIR}/goldens/{distro}-latest.log"
             if os.path.isfile(log_file):
                 with open(log_file, "r") as f:
-                    content = f.read()
-                kernel = ""
-                zfs_ver = ""
-                for line in content.split("\n"):
-                    if "Kernel:" in line and not kernel:
-                        kernel = line.split("Kernel:")[-1].strip()[:40]
-                    if "ZFS version:" in line and not zfs_ver:
-                        zfs_ver = line.split("ZFS version:")[-1].strip()[:20]
-                if kernel:
-                    lines.append(f'klab_golden_kernel{{distro="{distro}",kernel="{kernel}"}} 1')
-                if zfs_ver:
-                    lines.append(f'klab_golden_zfs_version{{distro="{distro}",version="{zfs_ver}"}} 1')
+                    for line in f:
+                        if "Kernel:" in line and not kernel:
+                            kernel = line.split("Kernel:")[-1].strip()[:40]
+                        if "ZFS version:" in line and not zfs_ver:
+                            zfs_ver = line.split("ZFS version:")[-1].strip()[:20]
+            if not kernel:
+                kernel = "unknown"
+            if not zfs_ver:
+                zfs_ver = "unknown"
+            lines.append(f'klab_golden_ready{{distro="{distro}",kernel="{kernel}",zfs="{zfs_ver}"}} 1')
+            if used.isdigit():
+                lines.append(f'klab_golden_size_bytes{{distro="{distro}"}} {used}')
+            lines.append(f'klab_golden_info{{distro="{distro}",kernel="{kernel}",zfs="{zfs_ver}",size="{used}"}} 1')
+        else:
+            lines.append(f'klab_golden_ready{{distro="{distro}",kernel="",zfs=""}} 0')
 
     lines.append("")
     lines.append("# HELP klab_goldens_ready_total Number of ready golden images")
