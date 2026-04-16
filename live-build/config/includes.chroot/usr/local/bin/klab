@@ -992,10 +992,115 @@ deploy_site() {
     fi
   done
 
+  # ── WireGuard mesh ──────────────────────────────────────────────────
+  echo ""
+  log "Configuring WireGuard mesh..."
+  local wg_base
+  [[ "$site" == "blue" ]] && wg_base="10.252.0" || wg_base="10.253.0"
+
+  # Phase 1: Generate WireGuard keypairs on all VMs
+  declare -A wg_ips=() wg_pubs=()
+  local node_id=1
+  for distro in "${DISTROS[@]}"; do
+    local sname; sname="$(site_name "$site" "$distro")"
+    virsh domstate "$sname" 2>/dev/null | grep -q running || { ((node_id++)); continue; }
+    local ip; ip="$(get_vm_ip "$sname")"; [[ -z "$ip" ]] && { ((node_id++)); continue; }
+    _ssh_cmd "$ip" "command -v wg >/dev/null 2>&1" 2>/dev/null || { ((node_id++)); continue; }
+
+    _ssh_cmd "$ip" bash -s <<WGINIT 2>/dev/null || true
+mkdir -p /etc/wireguard
+wg genkey > /etc/wireguard/lab.key 2>/dev/null
+chmod 600 /etc/wireguard/lab.key
+wg pubkey < /etc/wireguard/lab.key > /etc/wireguard/lab.pub 2>/dev/null
+cat > /etc/wireguard/wg-lab.conf <<WG
+[Interface]
+PrivateKey = \$(cat /etc/wireguard/lab.key)
+Address = ${wg_base}.${node_id}/24
+ListenPort = 51830
+WG
+WGINIT
+
+    local pub; pub="$(_ssh_cmd "$ip" 'cat /etc/wireguard/lab.pub 2>/dev/null')"
+    if [[ -n "$pub" ]]; then
+      wg_ips[$distro]="$ip"; wg_pubs[$distro]="$pub"
+      echo -e "  ${G}${sname}${N} -> ${wg_base}.${node_id}"
+    fi
+    ((node_id++))
+  done
+
+  # Phase 2: Full mesh — peer every VM with every other VM
+  node_id=1
+  for distro_a in "${DISTROS[@]}"; do
+    [[ -z "${wg_ips[$distro_a]:-}" ]] && { ((node_id++)); continue; }
+    local peer_id=1
+    for distro_b in "${DISTROS[@]}"; do
+      [[ -z "${wg_ips[$distro_b]:-}" ]] && { ((peer_id++)); continue; }
+      [[ "$distro_a" == "$distro_b" ]] && { ((peer_id++)); continue; }
+      _ssh_cmd "${wg_ips[$distro_a]}" "wg set wg-lab peer ${wg_pubs[$distro_b]} allowed-ips ${wg_base}.${peer_id}/32 endpoint ${wg_ips[$distro_b]}:51830 persistent-keepalive 25" 2>/dev/null || true
+      ((peer_id++))
+    done
+    _ssh_cmd "${wg_ips[$distro_a]}" "ip link add dev wg-lab type wireguard 2>/dev/null; wg setconf wg-lab /etc/wireguard/wg-lab.conf 2>/dev/null; ip addr add ${wg_base}.${node_id}/24 dev wg-lab 2>/dev/null; ip link set wg-lab up 2>/dev/null" || true
+    # Allow WireGuard traffic through firewall
+    _ssh_cmd "${wg_ips[$distro_a]}" "nft add table inet filter 2>/dev/null; nft add chain inet filter input '{ type filter hook input priority 0; policy accept; }' 2>/dev/null; nft add rule inet filter input iifname wg-lab accept 2>/dev/null; nft add rule inet filter input udp dport 51830 accept 2>/dev/null" || true
+    ((node_id++))
+  done
+
+  # Host joins the mesh as .254 so Prometheus can scrape over WireGuard
+  if command -v wg >/dev/null 2>&1; then
+    local host_wg_ip="${wg_base}.254"
+    mkdir -p /etc/wireguard
+    if [[ ! -f /etc/wireguard/klab-${site}.key ]]; then
+      wg genkey > "/etc/wireguard/klab-${site}.key" 2>/dev/null
+      chmod 600 "/etc/wireguard/klab-${site}.key"
+      wg pubkey < "/etc/wireguard/klab-${site}.key" > "/etc/wireguard/klab-${site}.pub" 2>/dev/null
+    fi
+    local host_pub; host_pub="$(cat "/etc/wireguard/klab-${site}.pub" 2>/dev/null)"
+    local host_priv; host_priv="$(cat "/etc/wireguard/klab-${site}.key" 2>/dev/null)"
+
+    cat > "/etc/wireguard/klab-${site}.conf" <<WG
+[Interface]
+PrivateKey = ${host_priv}
+Address = ${host_wg_ip}/24
+ListenPort = $([[ "$site" == "blue" ]] && echo 51831 || echo 51832)
+WG
+
+    # Add all VM peers to host config
+    node_id=1
+    for distro in "${DISTROS[@]}"; do
+      [[ -z "${wg_ips[$distro]:-}" ]] && { ((node_id++)); continue; }
+      cat >> "/etc/wireguard/klab-${site}.conf" <<PEER
+
+[Peer]
+PublicKey = ${wg_pubs[$distro]}
+AllowedIPs = ${wg_base}.${node_id}/32
+Endpoint = ${wg_ips[$distro]}:51830
+PersistentKeepalive = 25
+PEER
+      # Add host as peer on the VM
+      _ssh_cmd "${wg_ips[$distro]}" "wg set wg-lab peer ${host_pub} allowed-ips ${host_wg_ip}/32 endpoint $(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7}' | head -1):$([[ "$site" == "blue" ]] && echo 51831 || echo 51832) persistent-keepalive 25" 2>/dev/null || true
+      ((node_id++))
+    done
+
+    # Bring up host WireGuard interface
+    ip link del "klab-${site}" 2>/dev/null || true
+    ip link add dev "klab-${site}" type wireguard 2>/dev/null
+    wg setconf "klab-${site}" "/etc/wireguard/klab-${site}.conf" 2>/dev/null
+    ip addr add "${host_wg_ip}/24" dev "klab-${site}" 2>/dev/null
+    ip link set "klab-${site}" up 2>/dev/null
+    log "Host joined ${site} mesh as ${host_wg_ip} (klab-${site})"
+  fi
+
+  log "WireGuard mesh configured (${wg_base}.0/24)"
+
+  # Reload Prometheus if running (picks up new targets)
+  systemctl reload prometheus 2>/dev/null || true
+
   local total_elapsed; total_elapsed="$(timer_elapsed_ms "$total_start")"
   echo ""
   log "Deploy complete: ${G}${deployed} deployed${N}, ${Y}${skipped} skipped${N} ($((total_elapsed / 1000))s)"
-  echo -e "  ${W}SSH:${N} ssh root@<vm-ip> (password: kldload)"
+  echo -e "  ${W}WireGuard:${N}  ${wg_base}.0/24 (all traffic encrypted)"
+  echo -e "  ${W}SSH:${N}        ssh root@<vm-ip> (password: kldload)"
+  echo -e "  ${W}Grafana:${N}    http://localhost:3000 (admin/admin)"
 }
 
 # ── Section 7: Blue-Green Operations ─────────────────────────────────────

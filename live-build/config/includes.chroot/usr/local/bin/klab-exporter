@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""
+klab-exporter — Prometheus metrics exporter for the klab estate.
+
+Serves metrics on :9101 describing golden images, site VMs, test results,
+and ZFS pool health. All data comes from ZFS, libvirt, and klab's results
+directory — no agents needed, pure host-side state.
+
+Scraped by the host Prometheus instance every 30s. Grafana dashboard
+visualizes the estate in real time.
+"""
+
+import http.server
+import os
+import subprocess
+import re
+import time
+import json
+
+PORT = 9101
+POOL = os.environ.get("POOL", "rpool")
+PREFIX = "klab"
+RESULTS_DIR = "/root/klab"
+DISTROS = ["centos", "rocky", "fedora", "debian", "ubuntu", "rhel"]
+
+
+def run(cmd):
+    """Run a shell command, return stdout or empty string on failure."""
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def collect_metrics():
+    lines = []
+    lines.append("# HELP klab_info klab platform info")
+    lines.append('# TYPE klab_info gauge')
+    lines.append(f'klab_info{{pool="{POOL}"}} 1')
+
+    # ── Golden images ────────────────────────────────────────────────
+    lines.append("")
+    lines.append("# HELP klab_golden_ready Whether golden image is ready (1=yes, 0=no)")
+    lines.append("# TYPE klab_golden_ready gauge")
+    lines.append("# HELP klab_golden_size_bytes Golden image disk usage in bytes")
+    lines.append("# TYPE klab_golden_size_bytes gauge")
+
+    goldens_ready = 0
+    for distro in DISTROS:
+        name = f"{PREFIX}-golden-{distro}"
+        zpath = f"{POOL}/vms/{name}"
+        snap = f"{zpath}@golden"
+
+        # Check if golden exists
+        rc = os.system(f"zfs list {snap} >/dev/null 2>&1")
+        ready = 1 if rc == 0 else 0
+        lines.append(f'klab_golden_ready{{distro="{distro}"}} {ready}')
+
+        if ready:
+            goldens_ready += 1
+            # Size
+            used = run(f"zfs get -Hp -o value used {zpath}")
+            if used.isdigit():
+                lines.append(f'klab_golden_size_bytes{{distro="{distro}"}} {used}')
+
+            # Parse golden log for kernel + ZFS version
+            log_file = f"{RESULTS_DIR}/goldens/{distro}-latest.log"
+            if os.path.isfile(log_file):
+                with open(log_file, "r") as f:
+                    content = f.read()
+                kernel = ""
+                zfs_ver = ""
+                for line in content.split("\n"):
+                    if "Kernel:" in line and not kernel:
+                        kernel = line.split("Kernel:")[-1].strip()[:40]
+                    if "ZFS version:" in line and not zfs_ver:
+                        zfs_ver = line.split("ZFS version:")[-1].strip()[:20]
+                if kernel:
+                    lines.append(f'klab_golden_kernel{{distro="{distro}",kernel="{kernel}"}} 1')
+                if zfs_ver:
+                    lines.append(f'klab_golden_zfs_version{{distro="{distro}",version="{zfs_ver}"}} 1')
+
+    lines.append("")
+    lines.append("# HELP klab_goldens_ready_total Number of ready golden images")
+    lines.append("# TYPE klab_goldens_ready_total gauge")
+    lines.append(f"klab_goldens_ready_total {goldens_ready}")
+    lines.append(f"klab_distros_total {len(DISTROS)}")
+
+    # ── Site VMs ─────────────────────────────────────────────────────
+    lines.append("")
+    lines.append("# HELP klab_site_vm_running Whether site VM is running (1=yes, 0=no)")
+    lines.append("# TYPE klab_site_vm_running gauge")
+
+    for site in ["blue", "green"]:
+        for distro in DISTROS:
+            sname = f"{PREFIX}-{site}-{distro}"
+            state = run(f"virsh domstate {sname} 2>/dev/null")
+            running = 1 if state == "running" else 0
+            lines.append(f'klab_site_vm_running{{site="{site}",distro="{distro}"}} {running}')
+
+    # ── Test VMs ─────────────────────────────────────────────────────
+    lines.append("")
+    lines.append("# HELP klab_test_vm_running Whether test VM is running")
+    lines.append("# TYPE klab_test_vm_running gauge")
+    for distro in DISTROS:
+        tname = f"{PREFIX}-test-{distro}"
+        state = run(f"virsh domstate {tname} 2>/dev/null")
+        running = 1 if state == "running" else 0
+        lines.append(f'klab_test_vm_running{{distro="{distro}"}} {running}')
+
+    # ── Test results (latest run) ────────────────────────────────────
+    latest_link = f"{RESULTS_DIR}/latest"
+    if os.path.islink(latest_link):
+        run_dir = os.path.realpath(latest_link)
+        run_id = os.path.basename(run_dir)
+
+        lines.append("")
+        lines.append("# HELP klab_test_pass_total Tests passed in latest run")
+        lines.append("# TYPE klab_test_pass_total gauge")
+        lines.append("# HELP klab_test_fail_total Tests failed in latest run")
+        lines.append("# TYPE klab_test_fail_total gauge")
+        lines.append("# HELP klab_test_skip_total Tests skipped in latest run")
+        lines.append("# TYPE klab_test_skip_total gauge")
+
+        for f in sorted(os.listdir(run_dir)):
+            if f.endswith(".summary"):
+                summary = {}
+                with open(os.path.join(run_dir, f)) as sf:
+                    for line in sf:
+                        if "=" in line:
+                            k, v = line.strip().split("=", 1)
+                            summary[k] = v
+                d = summary.get("distro", f.replace(".summary", ""))
+                lines.append(f'klab_test_pass_total{{distro="{d}",run="{run_id}"}} {summary.get("pass", 0)}')
+                lines.append(f'klab_test_fail_total{{distro="{d}",run="{run_id}"}} {summary.get("fail", 0)}')
+                lines.append(f'klab_test_skip_total{{distro="{d}",run="{run_id}"}} {summary.get("skip", 0)}')
+
+    # ── ZFS pool health ──────────────────────────────────────────────
+    lines.append("")
+    lines.append("# HELP klab_pool_size_bytes Total pool size")
+    lines.append("# TYPE klab_pool_size_bytes gauge")
+    lines.append("# HELP klab_pool_used_bytes Pool used space")
+    lines.append("# TYPE klab_pool_used_bytes gauge")
+    lines.append("# HELP klab_pool_free_bytes Pool free space")
+    lines.append("# TYPE klab_pool_free_bytes gauge")
+
+    pool_size = run(f"zfs get -Hp -o value available {POOL}")
+    pool_used = run(f"zfs get -Hp -o value used {POOL}")
+    if pool_size.isdigit():
+        lines.append(f'klab_pool_free_bytes{{pool="{POOL}"}} {pool_size}')
+    if pool_used.isdigit():
+        lines.append(f'klab_pool_used_bytes{{pool="{POOL}"}} {pool_used}')
+        if pool_size.isdigit():
+            lines.append(f'klab_pool_size_bytes{{pool="{POOL}"}} {int(pool_size) + int(pool_used)}')
+
+    # Pool health
+    health = run(f"zpool get -H -o value health {POOL}")
+    healthy = 1 if health == "ONLINE" else 0
+    lines.append(f'klab_pool_healthy{{pool="{POOL}"}} {healthy}')
+
+    # ── Host info ────────────────────────────────────────────────────
+    lines.append("")
+    lines.append("# HELP klab_host_cpus Number of host CPUs")
+    lines.append("# TYPE klab_host_cpus gauge")
+    cpus = run("nproc")
+    if cpus.isdigit():
+        lines.append(f"klab_host_cpus {cpus}")
+
+    ram_kb = run("awk '/MemTotal/ {print $2}' /proc/meminfo")
+    if ram_kb.isdigit():
+        lines.append(f"klab_host_ram_bytes {int(ram_kb) * 1024}")
+
+    # GPU
+    gpu = run("lspci 2>/dev/null | grep -ci nvidia")
+    lines.append(f"klab_host_gpu_detected {1 if gpu and int(gpu) > 0 else 0}")
+
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+class MetricsHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/metrics" or self.path == "/":
+            body = collect_metrics()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body.encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass  # suppress access logs
+
+
+if __name__ == "__main__":
+    server = http.server.HTTPServer(("0.0.0.0", PORT), MetricsHandler)
+    print(f"klab-exporter serving on :{PORT}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass

@@ -612,10 +612,16 @@ if [[ "$EDITION" != "core" ]]; then
     for tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kldload-help kldload-test kldload-install-target kldload-webui kldload-overview \
                  kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo \
                  kube-setup kube-init kube-join kube-status kube-reset kube-network kube-load-images kube-smoke-test kube-cluster kube-demo \
-                 kzfs-test kzfs-lab klab; do
+                 kzfs-test kzfs-lab klab klab-exporter; do
         src="/build/live-build/config/includes.chroot/usr/local/bin/${tool}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/bin/${tool}" && chmod +x "${ROOTFS}/usr/local/bin/${tool}"
     done
+
+    # Copy klab share files (Prometheus config, Grafana dashboard)
+    if [[ -d /build/live-build/config/includes.chroot/usr/local/share/klab ]]; then
+        mkdir -p "${ROOTFS}/usr/local/share/klab"
+        cp -r /build/live-build/config/includes.chroot/usr/local/share/klab/* "${ROOTFS}/usr/local/share/klab/"
+    fi
 
     # Copy .desktop files for GNOME menu
     for dt in kst.desktop kst-dashboard.desktop ksnap.desktop kexport.desktop kldload-terminal.desktop kldload-docs.desktop vim.desktop; do

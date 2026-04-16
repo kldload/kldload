@@ -1,0 +1,204 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "gridPos": { "h": 3, "w": 4, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Goldens Ready",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "klab_goldens_ready_total", "legendFormat": "ready" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "yellow", "value": 3 },
+            { "color": "green", "value": 5 }
+          ]},
+          "max": 6
+        }
+      },
+      "options": { "graphMode": "none", "textMode": "value_and_name" }
+    },
+    {
+      "gridPos": { "h": 3, "w": 4, "x": 4, "y": 0 },
+      "id": 2,
+      "title": "Blue VMs",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(klab_site_vm_running{site=\"blue\"})", "legendFormat": "running" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [
+        { "color": "dark-blue", "value": null }, { "color": "blue", "value": 1 }
+      ]}}}
+    },
+    {
+      "gridPos": { "h": 3, "w": 4, "x": 8, "y": 0 },
+      "id": 3,
+      "title": "Green VMs",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(klab_site_vm_running{site=\"green\"})", "legendFormat": "running" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [
+        { "color": "dark-green", "value": null }, { "color": "green", "value": 1 }
+      ]}}}
+    },
+    {
+      "gridPos": { "h": 3, "w": 4, "x": 12, "y": 0 },
+      "id": 4,
+      "title": "ZFS Pool Health",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "klab_pool_healthy", "legendFormat": "healthy" }],
+      "fieldConfig": { "defaults": {
+        "mappings": [{ "type": "value", "options": { "0": { "text": "DEGRADED", "color": "red" }, "1": { "text": "ONLINE", "color": "green" }}}],
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }]}
+      }}
+    },
+    {
+      "gridPos": { "h": 3, "w": 4, "x": 16, "y": 0 },
+      "id": 5,
+      "title": "Pool Used",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "klab_pool_used_bytes", "legendFormat": "used" }],
+      "fieldConfig": { "defaults": { "unit": "bytes" }}
+    },
+    {
+      "gridPos": { "h": 3, "w": 4, "x": 20, "y": 0 },
+      "id": 6,
+      "title": "GPU",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "klab_host_gpu_detected", "legendFormat": "gpu" }],
+      "fieldConfig": { "defaults": {
+        "mappings": [{ "type": "value", "options": { "0": { "text": "None", "color": "dark-gray" }, "1": { "text": "NVIDIA", "color": "green" }}}]
+      }}
+    },
+    {
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 3 },
+      "id": 10,
+      "title": "Golden Images",
+      "type": "table",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "klab_golden_ready", "legendFormat": "{{distro}}", "format": "table", "instant": true, "refId": "A" },
+        { "expr": "klab_golden_size_bytes", "legendFormat": "{{distro}}", "format": "table", "instant": true, "refId": "B" },
+        { "expr": "klab_golden_zfs_version", "legendFormat": "{{distro}}", "format": "table", "instant": true, "refId": "C" },
+        { "expr": "klab_golden_kernel", "legendFormat": "{{distro}}", "format": "table", "instant": true, "refId": "D" }
+      ],
+      "transformations": [
+        { "id": "merge", "options": {} },
+        { "id": "organize", "options": {
+          "excludeByName": { "Time": true, "__name__": true },
+          "renameByName": { "distro": "Distro", "Value #A": "Ready", "Value #B": "Size", "version": "ZFS", "kernel": "Kernel" }
+        }}
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [
+        { "matcher": { "id": "byName", "options": "Size" }, "properties": [{ "id": "unit", "value": "bytes" }] },
+        { "matcher": { "id": "byName", "options": "Ready" }, "properties": [
+          { "id": "mappings", "value": [{ "type": "value", "options": { "0": { "text": "NO", "color": "red" }, "1": { "text": "READY", "color": "green" }}}]}
+        ]}
+      ]}
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 11 },
+      "id": 20,
+      "title": "Blue Site — CPU Usage",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "100 - (avg by(distro) (rate(node_cpu_seconds_total{mode=\"idle\",job=\"klab-blue\"}[2m])) * 100)", "legendFormat": "{{distro}}" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "fillOpacity": 20 } }}
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 11 },
+      "id": 21,
+      "title": "Blue Site — Memory Usage",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "(1 - node_memory_MemAvailable_bytes{job=\"klab-blue\"} / node_memory_MemTotal_bytes{job=\"klab-blue\"}) * 100", "legendFormat": "{{distro}}" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "fillOpacity": 20 } }}
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+      "id": 22,
+      "title": "Blue Site — Disk I/O",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "rate(node_disk_read_bytes_total{job=\"klab-blue\",device=~\"vd.*\"}[2m])", "legendFormat": "{{distro}} read" },
+        { "expr": "rate(node_disk_written_bytes_total{job=\"klab-blue\",device=~\"vd.*\"}[2m])", "legendFormat": "{{distro}} write" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "fillOpacity": 10 } }}
+    },
+    {
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+      "id": 23,
+      "title": "Blue Site — Network (WireGuard)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "rate(node_network_receive_bytes_total{job=\"klab-blue\",device=\"wg-lab\"}[2m])", "legendFormat": "{{distro}} rx" },
+        { "expr": "rate(node_network_transmit_bytes_total{job=\"klab-blue\",device=\"wg-lab\"}[2m])", "legendFormat": "{{distro}} tx" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "fillOpacity": 10 } }}
+    },
+    {
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 27 },
+      "id": 30,
+      "title": "Test Results (Latest Run)",
+      "type": "table",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "klab_test_pass_total", "format": "table", "instant": true, "refId": "A" },
+        { "expr": "klab_test_fail_total", "format": "table", "instant": true, "refId": "B" },
+        { "expr": "klab_test_skip_total", "format": "table", "instant": true, "refId": "C" }
+      ],
+      "transformations": [
+        { "id": "merge", "options": {} },
+        { "id": "organize", "options": {
+          "excludeByName": { "Time": true, "__name__": true, "run": true },
+          "renameByName": { "distro": "Distro", "Value #A": "Pass", "Value #B": "Fail", "Value #C": "Skip" }
+        }}
+      ],
+      "fieldConfig": { "overrides": [
+        { "matcher": { "id": "byName", "options": "Fail" }, "properties": [
+          { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }},
+          { "id": "custom.cellOptions", "value": { "type": "color-background" }}
+        ]}
+      ]}
+    },
+    {
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 33 },
+      "id": 40,
+      "title": "Host — CPU",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\",job=\"klab-host\"}[2m])) * 100)", "legendFormat": "cpu%" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "palette-classic" }, "custom": { "fillOpacity": 30 }}}
+    },
+    {
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 33 },
+      "id": 41,
+      "title": "Host — Memory",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "(1 - node_memory_MemAvailable_bytes{job=\"klab-host\"} / node_memory_MemTotal_bytes{job=\"klab-host\"}) * 100", "legendFormat": "mem%" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "palette-classic" }, "custom": { "fillOpacity": 30 }}}
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["klab", "estate"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "klab Estate",
+  "uid": "klab-estate",
+  "version": 1
+}

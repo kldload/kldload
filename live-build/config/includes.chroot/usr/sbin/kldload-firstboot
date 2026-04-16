@@ -1408,6 +1408,103 @@ ZFSPOOL
       log "  Bridge: br0"
       log "  Tools: kvm-create, kvm-snap, kvm-clone"
 
+      # ── klab observability: Prometheus + Grafana + klab-exporter on host ──
+      if [[ "${KLDLOAD_ENABLE_DEVOPS:-0}" == "1" ]]; then
+        log "Setting up klab observability stack on host..."
+
+        # Install Prometheus + Grafana + node_exporter
+        dnf install -y prometheus2 grafana prometheus-node-exporter 2>/dev/null || \
+          dnf install -y golang-github-prometheus prometheus-node-exporter 2>/dev/null || true
+
+        # Prometheus config — scrapes klab VMs over WireGuard
+        if [[ -f /usr/local/share/klab/prometheus.yml ]]; then
+          cp /usr/local/share/klab/prometheus.yml /etc/prometheus/prometheus.yml
+          mkdir -p /etc/prometheus/rules
+          ok "Prometheus configured with klab scrape targets"
+        fi
+
+        # Grafana datasource provisioning
+        mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
+        cat > /etc/grafana/provisioning/datasources/klab.yaml <<'GRAFDS'
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://localhost:9090
+    isDefault: true
+    editable: false
+GRAFDS
+
+        # Grafana dashboard provisioning
+        cat > /etc/grafana/provisioning/dashboards/klab.yaml <<'GRAFDASH'
+apiVersion: 1
+providers:
+  - name: klab
+    folder: klab
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
+GRAFDASH
+
+        # Copy pre-built dashboard
+        if [[ -f /usr/local/share/klab/grafana-dashboard.json ]]; then
+          cp /usr/local/share/klab/grafana-dashboard.json /var/lib/grafana/dashboards/klab-estate.json
+          ok "Grafana dashboard provisioned"
+        fi
+
+        # Grafana: set default home dashboard + anonymous access
+        if [[ -f /etc/grafana/grafana.ini ]]; then
+          sed -i 's/^;*\s*default_home_dashboard_path\s*=.*/default_home_dashboard_path = \/var\/lib\/grafana\/dashboards\/klab-estate.json/' /etc/grafana/grafana.ini
+        fi
+
+        # klab-exporter systemd service
+        cat > /etc/systemd/system/klab-exporter.service <<'KLABEXP'
+[Unit]
+Description=klab Prometheus Exporter
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/klab-exporter
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+KLABEXP
+
+        # Start all observability services
+        systemctl daemon-reload
+        for _svc in prometheus prometheus-node-exporter grafana-server klab-exporter; do
+          systemctl enable "$_svc" 2>/dev/null || true
+          systemctl start "$_svc" 2>/dev/null || true
+        done
+        ok "klab observability: Prometheus :9090, Grafana :3000, klab-exporter :9101"
+
+        # Set Firefox homepage to Grafana
+        mkdir -p /etc/firefox/policies
+        cat > /etc/firefox/policies/policies.json <<'FFPOL'
+{
+  "policies": {
+    "Homepage": {
+      "URL": "http://localhost:3000/d/klab-estate/klab-estate?orgId=1&refresh=30s",
+      "StartPage": "homepage"
+    },
+    "OverrideFirstRunPage": "http://localhost:3000/d/klab-estate/klab-estate?orgId=1&refresh=30s",
+    "Bookmarks": [
+      {"Title": "klab Dashboard", "URL": "http://localhost:3000/d/klab-estate/klab-estate", "Placement": "toolbar"},
+      {"Title": "Prometheus", "URL": "http://localhost:9090", "Placement": "toolbar"},
+      {"Title": "kldload Docs", "URL": "https://kldload.com", "Placement": "toolbar"}
+    ],
+    "DisplayBookmarksToolbar": "always"
+  }
+}
+FFPOL
+        ok "Firefox homepage set to Grafana klab dashboard"
+      fi
+
       # ── Build golden images (skip if klab-firstboot.service handles it) ──
       if [[ "${KLDLOAD_ENABLE_DEVOPS:-0}" != "1" ]]; then
         if command -v klab >/dev/null 2>&1; then
