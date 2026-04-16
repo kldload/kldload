@@ -1,0 +1,30 @@
+[Unit]
+Description=klab Hubble Relay — eBPF network visibility
+Documentation=https://kldload.com
+# Only start after K8s + Cilium are deployed (hubble CLI must exist)
+After=network.target kubelet.service
+ConditionPathExists=/usr/local/bin/klab
+ConditionPathExists=/usr/local/bin/hubble
+
+[Service]
+Type=simple
+ExecStartPre=/bin/bash -c 'mkdir -p /var/log/kldload'
+# hubble observe connects to Cilium's hubble-relay service inside K8s.
+# If Cilium isn't running yet, retry every 30s until it is.
+ExecStart=/bin/bash -c '\
+  while true; do \
+    if hubble observe --server localhost:4245 -o jsonpb >> /var/log/kldload/hubble-flows.jsonl 2>/dev/null; then \
+      true; \
+    elif hubble observe -o jsonpb >> /var/log/kldload/hubble-flows.jsonl 2>/dev/null; then \
+      true; \
+    else \
+      sleep 30; \
+    fi; \
+  done'
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

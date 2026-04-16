@@ -1070,6 +1070,15 @@ KLABFB
     ln -sf /etc/systemd/system/klab-firstboot.service \
       "${target}/etc/systemd/system/multi-user.target.wants/klab-firstboot.service" 2>/dev/null || true
     k_log "klab will auto-build golden images on first boot (centos/rocky/fedora/debian/ubuntu)"
+
+    # Enable klab services: Prometheus exporter + Hubble relay (captures from second zero)
+    for _svc in klab-exporter klab-hubble-relay; do
+      if [[ -f "${target}/usr/lib/systemd/system/${_svc}.service" ]]; then
+        ln -sf "/usr/lib/systemd/system/${_svc}.service" \
+          "${target}/etc/systemd/system/multi-user.target.wants/${_svc}.service" 2>/dev/null || true
+        k_log "Enabled ${_svc}.service"
+      fi
+    done
   fi
 
   # ── SELinux on ZFS — disabled ─────────────────────────────────────────

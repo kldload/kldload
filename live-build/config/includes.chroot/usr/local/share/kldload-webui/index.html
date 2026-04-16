@@ -79,6 +79,32 @@
     </li>
   </ul>
 
+  <div class="nav-section" id="klab-nav-section" style="display:none">klab</div>
+  <ul id="klab-nav-items" style="display:none">
+    <li data-view="klab">
+      <span class="nav-icon">🔬</span> Lab Status
+    </li>
+    <li data-view="klab-goldens">
+      <span class="nav-icon">◈</span> Golden Images
+    </li>
+    <li data-view="klab-ops">
+      <span class="nav-icon">▶</span> Operations
+    </li>
+    <li data-view="klab-tests">
+      <span class="nav-icon">⚡</span> ZFS Testing
+    </li>
+    <li data-view="klab-ebpf">
+      <span class="nav-icon">⌁</span> eBPF Tracing
+    </li>
+  </ul>
+
+  <div class="nav-section" id="bob-nav-section" style="display:none">AI</div>
+  <ul id="bob-nav-items" style="display:none">
+    <li data-view="bob">
+      <span class="nav-icon">🧠</span> Bob
+    </li>
+  </ul>
+
   <div class="nav-section">Tools</div>
   <ul>
     <li data-view="logs">
@@ -250,6 +276,16 @@
             10-16GB VRAM &rarr; General + Code &nbsp;|&nbsp;
             24GB+ VRAM &rarr; All models
           </div>
+        </div>
+
+        <!-- klab options (shown when klab profile selected) -->
+        <div id="klab-options" style="display:none;margin-bottom:1rem;padding:1rem;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
+          <div style="font-size:0.85rem;font-weight:600;color:var(--bright);margin-bottom:0.4rem">klab Options</div>
+          <div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.8rem">Configure the multi-distro test platform golden images.</div>
+          <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
+            <input type="checkbox" id="klab-zfs-dev" style="margin-top:0.15rem">
+            <div><strong style="color:var(--text)">ZFS Dev Tools</strong> — zfs-tests.sh, ksh, gdb, strace, perf, kernel-devel, DKMS headers, 4x4GB loopback vdevs<br><span style="font-size:0.7rem;color:var(--muted)">Default: clean ZFS + eBPF only. Check this to add full OpenZFS development + testing environment to every golden image.</span></div>
+          </label>
         </div>
 
         <!-- Distro summary -->
@@ -737,6 +773,601 @@
       </div>
     </div>
 
+    <!-- ── klab Status ──────────────────────────────────────────────────────── -->
+    <div class="view" id="view-klab">
+      <div class="page-title">klab Status</div>
+      <div class="page-sub">Multi-distro test platform — golden images, blue-green deploy, ZFS instant clones</div>
+
+      <div class="stat-grid" id="klab-stat-grid">
+        <div class="stat-card"><div class="stat-label">Goldens Ready</div><div class="stat-value" id="kl-goldens-count">—</div></div>
+        <div class="stat-card"><div class="stat-label">Blue VMs</div><div class="stat-value ok" id="kl-blue-count">—</div></div>
+        <div class="stat-card"><div class="stat-label">Green VMs</div><div class="stat-value" id="kl-green-count">—</div></div>
+        <div class="stat-card"><div class="stat-label">Pool Health</div><div class="stat-value" id="kl-pool-health">—</div></div>
+        <div class="stat-card"><div class="stat-label">Last Test</div><div class="stat-value" id="kl-last-test">—</div></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-hdr">◈ Distro Matrix</div>
+        <div class="panel-body">
+          <table>
+            <thead><tr><th>Distro</th><th>Golden</th><th>Blue</th><th>Green</th><th>ZFS</th><th>Kernel</th><th>Size</th></tr></thead>
+            <tbody id="kl-distro-matrix"><tr><td colspan="7" style="color:var(--muted)">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-hdr">◧ ZFS Pool Metrics</div>
+        <div class="panel-body">
+          <div id="kl-pool-metrics" style="font-size:0.85rem;color:var(--muted)">(klab-exporter not running — start with: systemctl start klab-exporter)</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>▶ Quick Actions</span>
+        </div>
+        <div class="panel-body" style="display:flex;gap:0.5rem;flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" onclick="klabAction('golden','all')">Build All Goldens</button>
+          <button class="btn btn-ghost btn-sm" onclick="klabAction('deploy','blue')">Deploy Blue</button>
+          <button class="btn btn-ghost btn-sm" onclick="klabAction('deploy','green')">Deploy Green</button>
+          <button class="btn btn-ghost btn-sm" onclick="klabAction('test','quick')">Run Quick Test</button>
+          <button class="btn btn-danger btn-sm" onclick="klabAction('destroy','all')">Destroy All</button>
+          <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_status'})">↻ Refresh</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>⌁ Live Traffic Map</span>
+          <div style="display:flex;gap:0.4rem">
+            <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_flows'})">↻ Refresh</button>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('kl-flows-table').style.display=document.getElementById('kl-flows-table').style.display==='none'?'':'none'">Table</button>
+          </div>
+        </div>
+        <div class="panel-body" style="padding:0;position:relative">
+          <canvas id="kl-traffic-canvas" width="800" height="360" style="width:100%;height:360px;display:block;background:#0d1117;border-radius:0 0 8px 8px"></canvas>
+          <div id="kl-flows" style="display:none"></div>
+          <div id="kl-flows-table" style="display:none;padding:0.75rem;font-size:0.82rem;color:var(--muted)"></div>
+        </div>
+      </div>
+
+      <div class="panel" id="klab-log-panel" style="display:none">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>≡ klab Log</span>
+          <button class="btn btn-danger btn-sm" onclick="klabCancel()">Cancel</button>
+        </div>
+        <div class="panel-body">
+          <div class="log-box" id="klab-log" style="height:240px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── klab Goldens ───────────────────────────────────────────────────────── -->
+    <div class="view" id="view-klab-goldens">
+      <div class="page-title">Golden Images</div>
+      <div class="page-sub">Build, verify, and manage per-distro golden images. Each golden is a sealed cloud-init template with ZFS + eBPF.</div>
+
+      <div style="margin-bottom:1rem;display:flex;gap:0.5rem;align-items:center">
+        <label style="font-size:0.82rem;color:var(--subtle);display:flex;align-items:center;gap:0.4rem;cursor:pointer">
+          <input type="checkbox" id="kg-zfs-dev" style="accent-color:var(--accent)">
+          <span>Include ZFS Dev Tools (zfs-tests, ksh, gdb, strace, perf, loopback vdevs)</span>
+        </label>
+      </div>
+
+      <div class="target-grid" id="klab-golden-grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:0.8rem">
+        <div class="target-card" data-distro="centos" style="text-align:left;padding:1rem">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem">
+            <span style="font-size:1.1rem">🐧</span>
+            <span class="badge" id="kg-st-centos" style="font-size:0.7rem">checking...</span>
+          </div>
+          <div class="tc-name" style="font-size:0.85rem;margin-bottom:0.2rem">CentOS Stream 9</div>
+          <div id="kg-meta-centos" style="font-size:0.7rem;color:var(--muted);margin-bottom:0.5rem"></div>
+          <div style="display:flex;gap:0.3rem;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" style="font-size:0.72rem" onclick="klabGolden('centos')">Build</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="klabVerify('centos')">Verify</button>
+            <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="klabDestroyGolden('centos')">Destroy</button>
+          </div>
+        </div>
+        <div class="target-card" data-distro="rocky" style="text-align:left;padding:1rem">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem">
+            <span style="font-size:1.1rem">⛰</span>
+            <span class="badge" id="kg-st-rocky" style="font-size:0.7rem">checking...</span>
+          </div>
+          <div class="tc-name" style="font-size:0.85rem;margin-bottom:0.2rem">Rocky Linux 9</div>
+          <div id="kg-meta-rocky" style="font-size:0.7rem;color:var(--muted);margin-bottom:0.5rem"></div>
+          <div style="display:flex;gap:0.3rem;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" style="font-size:0.72rem" onclick="klabGolden('rocky')">Build</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="klabVerify('rocky')">Verify</button>
+            <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="klabDestroyGolden('rocky')">Destroy</button>
+          </div>
+        </div>
+        <div class="target-card" data-distro="fedora" style="text-align:left;padding:1rem">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem">
+            <span style="font-size:1.1rem">🎩</span>
+            <span class="badge" id="kg-st-fedora" style="font-size:0.7rem">checking...</span>
+          </div>
+          <div class="tc-name" style="font-size:0.85rem;margin-bottom:0.2rem">Fedora 41</div>
+          <div id="kg-meta-fedora" style="font-size:0.7rem;color:var(--muted);margin-bottom:0.5rem"></div>
+          <div style="display:flex;gap:0.3rem;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" style="font-size:0.72rem" onclick="klabGolden('fedora')">Build</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="klabVerify('fedora')">Verify</button>
+            <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="klabDestroyGolden('fedora')">Destroy</button>
+          </div>
+        </div>
+        <div class="target-card" data-distro="debian" style="text-align:left;padding:1rem">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem">
+            <span style="font-size:1.1rem">🌀</span>
+            <span class="badge" id="kg-st-debian" style="font-size:0.7rem">checking...</span>
+          </div>
+          <div class="tc-name" style="font-size:0.85rem;margin-bottom:0.2rem">Debian 13</div>
+          <div id="kg-meta-debian" style="font-size:0.7rem;color:var(--muted);margin-bottom:0.5rem"></div>
+          <div style="display:flex;gap:0.3rem;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" style="font-size:0.72rem" onclick="klabGolden('debian')">Build</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="klabVerify('debian')">Verify</button>
+            <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="klabDestroyGolden('debian')">Destroy</button>
+          </div>
+        </div>
+        <div class="target-card" data-distro="ubuntu" style="text-align:left;padding:1rem">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem">
+            <span style="font-size:1.1rem">🟠</span>
+            <span class="badge" id="kg-st-ubuntu" style="font-size:0.7rem">checking...</span>
+          </div>
+          <div class="tc-name" style="font-size:0.85rem;margin-bottom:0.2rem">Ubuntu 24.04</div>
+          <div id="kg-meta-ubuntu" style="font-size:0.7rem;color:var(--muted);margin-bottom:0.5rem"></div>
+          <div style="display:flex;gap:0.3rem;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" style="font-size:0.72rem" onclick="klabGolden('ubuntu')">Build</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="klabVerify('ubuntu')">Verify</button>
+            <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="klabDestroyGolden('ubuntu')">Destroy</button>
+          </div>
+        </div>
+        <div class="target-card" data-distro="rhel" style="text-align:left;padding:1rem">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem">
+            <span style="font-size:1.1rem">🔴</span>
+            <span class="badge" id="kg-st-rhel" style="font-size:0.7rem">checking...</span>
+          </div>
+          <div class="tc-name" style="font-size:0.85rem;margin-bottom:0.2rem">RHEL 9</div>
+          <div id="kg-meta-rhel" style="font-size:0.7rem;color:var(--muted);margin-bottom:0.5rem"></div>
+          <div style="display:flex;gap:0.3rem;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" style="font-size:0.72rem" onclick="klabGolden('rhel')">Build</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="klabVerify('rhel')">Verify</button>
+            <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="klabDestroyGolden('rhel')">Destroy</button>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:0.75rem;display:flex;gap:0.5rem">
+        <button class="btn btn-primary" onclick="klabGolden('all')">Build All</button>
+        <button class="btn btn-ghost" onclick="send({action:'klab_status'})">↻ Refresh</button>
+      </div>
+
+      <div class="panel" id="klab-golden-log-panel" style="display:none;margin-top:1rem">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>≡ Build Log</span>
+          <button class="btn btn-danger btn-sm" onclick="klabCancel()">Cancel</button>
+        </div>
+        <div class="panel-body">
+          <div class="log-box" id="klab-golden-log" style="height:300px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── klab Operations ────────────────────────────────────────────────────── -->
+    <div class="view" id="view-klab-ops">
+      <div class="page-title">Operations</div>
+      <div class="page-sub">Deploy, test, isolate, and observe klab VMs</div>
+
+      <!-- Deploy panel -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">▶ Deploy &amp; Promote</div>
+        <div class="panel-body">
+          <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;margin-bottom:0.75rem">
+            <button class="btn btn-primary btn-sm" onclick="klabDeploy('blue')">Deploy Blue</button>
+            <button class="btn btn-ghost btn-sm" onclick="klabDeploy('green')">Deploy Green</button>
+            <span style="color:var(--border);font-size:1.2rem">|</span>
+            <button class="btn btn-ghost btn-sm" onclick="klabPromote()">Promote Green → Blue</button>
+            <button class="btn btn-ghost btn-sm" onclick="klabRollback()">Rollback Blue</button>
+          </div>
+          <div style="font-size:0.75rem;color:var(--muted)">Blue = production baseline. Green = staging for changes. Promote atomically swaps green → blue via ZFS snapshot clone.</div>
+        </div>
+      </div>
+
+      <!-- VM table -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>◈ Site VMs</span>
+          <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_status'})">↻ Refresh</button>
+        </div>
+        <div class="panel-body">
+          <table>
+            <thead><tr><th>VM</th><th>Distro</th><th>Site</th><th>IP</th><th>State</th><th>Actions</th></tr></thead>
+            <tbody id="kl-vm-table"><tr><td colspan="6" style="color:var(--muted)">No site VMs deployed</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Test runner (compact — full view in ZFS Testing tab) -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>⚡ Tests</span>
+          <button class="btn btn-ghost btn-sm" onclick="document.querySelector('[data-view=klab-tests]').click()">Open ZFS Testing →</button>
+        </div>
+        <div class="panel-body">
+          <div id="kl-test-results" style="font-size:0.82rem;color:var(--muted)">No test results yet</div>
+        </div>
+      </div>
+
+      <!-- Fault injection -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">⚡ Fault Injection</div>
+        <div class="panel-body">
+          <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.5rem">Break things safely — ZFS auto-snapshots before every fault. Hubble shows what happened.</div>
+          <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin-bottom:0.5rem">
+            <select id="kl-fault-vm" style="padding:0.25rem 0.5rem;font-size:0.82rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px">
+              <option value="">Select VM...</option>
+            </select>
+            <button class="btn btn-danger btn-sm" onclick="klabFault('network_down')">Break Network</button>
+            <button class="btn btn-danger btn-sm" onclick="klabFault('packet_loss')">Packet Loss 30%</button>
+            <button class="btn btn-danger btn-sm" onclick="klabFault('kill_vm')">Kill VM</button>
+            <button class="btn btn-ghost btn-sm" onclick="klabFault('clear')">Clear Faults</button>
+          </div>
+          <div id="kl-fault-result" style="font-size:0.78rem;color:var(--muted)"></div>
+        </div>
+      </div>
+
+      <!-- "What Just Happened" button -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">🔍 What Just Happened?</div>
+        <div class="panel-body">
+          <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.5rem">Every syscall, every network connection, every file write in the last 60 seconds. eBPF + Hubble sees all.</div>
+          <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin-bottom:0.5rem">
+            <select id="kl-wjh-vm" style="padding:0.25rem 0.5rem;font-size:0.82rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px">
+              <option value="">Host (all VMs)</option>
+            </select>
+            <button class="btn btn-primary btn-sm" onclick="klabWhatHappened()">What Just Happened?</button>
+          </div>
+          <div id="kl-wjh-result" style="display:none;margin-top:0.5rem">
+            <div id="kl-wjh-summary" style="font-size:0.82rem;color:var(--accent);margin-bottom:0.4rem"></div>
+            <div id="kl-wjh-sections" class="log-box" style="height:240px;font-size:0.78rem"></div>
+            <div style="margin-top:0.5rem;display:flex;gap:0.4rem;align-items:center">
+              <button class="btn btn-ghost btn-sm" onclick="klabExplainWJH()">🧠 Ask Bob: Explain This</button>
+              <span id="kl-wjh-explain-status" style="font-size:0.75rem;color:var(--muted)"></span>
+            </div>
+            <div id="kl-wjh-explain" style="display:none;margin-top:0.4rem;padding:0.6rem;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.2);border-radius:6px;font-size:0.82rem;color:var(--subtle);line-height:1.5"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Diff view -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">⇄ Diff View — Before / After</div>
+        <div class="panel-body">
+          <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.5rem">Capture state before an action, run the action, capture after — see exactly what changed: packages, ports, processes, connections.</div>
+          <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin-bottom:0.5rem">
+            <select id="kl-diff-vm" style="padding:0.25rem 0.5rem;font-size:0.82rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px">
+              <option value="">Select VM...</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="klabDiffCapture('before')">Capture Before</button>
+            <button class="btn btn-ghost btn-sm" onclick="klabDiffCapture('after')">Capture After</button>
+            <button class="btn btn-primary btn-sm" onclick="klabDiffCompare()">Show Diff</button>
+          </div>
+          <div id="kl-diff-status" style="font-size:0.78rem;color:var(--muted)"></div>
+          <div id="kl-diff-result" style="display:none;margin-top:0.5rem;font-size:0.78rem"></div>
+        </div>
+      </div>
+
+      <!-- Distro matrix runner -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">◈ Distro Matrix Runner</div>
+        <div class="panel-body">
+          <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.5rem">Run the same script or Ansible against multiple distros simultaneously. See results side by side.</div>
+          <div style="display:flex;gap:0.4rem;flex-wrap:wrap;margin-bottom:0.5rem">
+            <label style="font-size:0.8rem;color:var(--subtle);cursor:pointer"><input type="checkbox" class="kl-matrix-distro" value="centos" checked> CentOS</label>
+            <label style="font-size:0.8rem;color:var(--subtle);cursor:pointer"><input type="checkbox" class="kl-matrix-distro" value="rocky" checked> Rocky</label>
+            <label style="font-size:0.8rem;color:var(--subtle);cursor:pointer"><input type="checkbox" class="kl-matrix-distro" value="fedora" checked> Fedora</label>
+            <label style="font-size:0.8rem;color:var(--subtle);cursor:pointer"><input type="checkbox" class="kl-matrix-distro" value="debian" checked> Debian</label>
+            <label style="font-size:0.8rem;color:var(--subtle);cursor:pointer"><input type="checkbox" class="kl-matrix-distro" value="ubuntu" checked> Ubuntu</label>
+            <label style="font-size:0.8rem;color:var(--subtle);cursor:pointer"><input type="checkbox" class="kl-matrix-distro" value="rhel"> RHEL</label>
+          </div>
+          <div style="margin-bottom:0.5rem">
+            <textarea id="kl-matrix-script" rows="5" placeholder="#!/bin/bash&#10;# Paste your script or Ansible here&#10;# Runs against all selected distros" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:0.78rem;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:0.5rem;resize:vertical"></textarea>
+          </div>
+          <div style="display:flex;gap:0.5rem;align-items:center">
+            <select id="kl-matrix-site" style="padding:0.25rem 0.5rem;font-size:0.82rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px">
+              <option value="blue">Blue site</option>
+              <option value="green">Green site</option>
+            </select>
+            <button class="btn btn-primary btn-sm" onclick="klabRunMatrix()">Run on Selected Distros</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Hubble -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>⌁ Hubble — eBPF Network Visibility</span>
+          <div style="display:flex;gap:0.4rem">
+            <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_hubble_status'})">Status</button>
+            <button class="btn btn-ghost btn-sm" onclick="klabHubblePolicy()">Policy Drops</button>
+            <button class="btn btn-ghost btn-sm" onclick="klabHubbleCapture()">Capture 30s</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="kl-hubble-status" style="font-size:0.82rem;color:var(--muted);margin-bottom:0.5rem">Click Status to check</div>
+          <div id="kl-hubble-data" style="font-size:0.78rem"></div>
+        </div>
+      </div>
+
+      <!-- Destroy -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">⊘ Destroy</div>
+        <div class="panel-body" style="display:flex;gap:0.5rem;flex-wrap:wrap">
+          <button class="btn btn-danger btn-sm" onclick="klabDestroy('blue')">Destroy Blue</button>
+          <button class="btn btn-danger btn-sm" onclick="klabDestroy('green')">Destroy Green</button>
+          <button class="btn btn-danger btn-sm" onclick="klabDestroy('goldens')">Destroy Goldens</button>
+          <button class="btn btn-danger btn-sm" onclick="klabDestroy('all')">Destroy All</button>
+        </div>
+      </div>
+
+      <!-- Network flows -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>⌁ Live Network Flows</span>
+          <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_flows'})">↻ Refresh</button>
+        </div>
+        <div class="panel-body">
+          <div id="kl-ops-flows" style="font-size:0.82rem;color:var(--muted)">Click refresh to load</div>
+        </div>
+      </div>
+
+      <div class="panel" id="klab-ops-log-panel" style="display:none">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>≡ Operation Log</span>
+          <button class="btn btn-danger btn-sm" onclick="klabCancel()">Cancel</button>
+        </div>
+        <div class="panel-body">
+          <div class="log-box" id="klab-ops-log" style="height:280px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── ZFS Testing ──────────────────────────────────────────────────────── -->
+    <div class="view" id="view-klab-tests">
+      <div class="page-title">ZFS Testing</div>
+      <div class="page-sub">OpenZFS test suite across multiple distros — run, compare, and analyze results</div>
+
+      <!-- Run controls -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">▶ Run Test Suite</div>
+        <div class="panel-body">
+          <div style="display:flex;gap:1rem;align-items:flex-start;flex-wrap:wrap;margin-bottom:0.75rem">
+            <div>
+              <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.3rem">Mode</div>
+              <label style="font-size:0.85rem;color:var(--subtle);cursor:pointer;margin-right:0.75rem"><input type="radio" name="klab-test-mode" value="quick" checked> Quick</label>
+              <label style="font-size:0.85rem;color:var(--subtle);cursor:pointer"><input type="radio" name="klab-test-mode" value="full"> Full</label>
+            </div>
+            <div>
+              <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.3rem">Execution</div>
+              <label style="font-size:0.85rem;color:var(--subtle);cursor:pointer;margin-right:0.75rem"><input type="radio" name="klab-test-exec" value="parallel" checked> Parallel</label>
+              <label style="font-size:0.85rem;color:var(--subtle);cursor:pointer"><input type="radio" name="klab-test-exec" value="series"> Series</label>
+            </div>
+            <div>
+              <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.3rem">Distro filter</div>
+              <select id="klab-test-distro" style="padding:0.3rem 0.5rem;font-size:0.85rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px">
+                <option value="">All distros</option>
+                <option value="centos">CentOS</option>
+                <option value="rocky">Rocky</option>
+                <option value="fedora">Fedora</option>
+                <option value="debian">Debian</option>
+                <option value="ubuntu">Ubuntu</option>
+                <option value="rhel">RHEL</option>
+              </select>
+            </div>
+          </div>
+          <div style="display:flex;gap:0.5rem;align-items:center">
+            <button class="btn btn-primary" onclick="klabRunTest()">Run OpenZFS Test Suite</button>
+            <span style="font-size:0.75rem;color:var(--muted)">Auto-snapshot taken before every run. Quick ≈ 5 min/distro. Full ≈ 2+ hours.</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dev tools status -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">⚙ ZFS Dev Tools</div>
+        <div class="panel-body">
+          <div id="kl-zfsdev-status" style="font-size:0.85rem"></div>
+          <div style="font-size:0.75rem;color:var(--muted);margin-top:0.4rem">
+            Dev tools include: zfs-tests.sh, ksh, gdb, strace, perf, kernel-devel, DKMS headers, 4x4GB loopback vdevs.
+            Configured during golden image build (klab golden --zfs-dev).
+          </div>
+        </div>
+      </div>
+
+      <!-- Latest results matrix -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>◈ Latest Results</span>
+          <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_test_results'})">↻ Refresh</button>
+        </div>
+        <div class="panel-body">
+          <div id="kl-test-matrix" style="font-size:0.85rem;color:var(--muted)">No test results yet — run the test suite first</div>
+        </div>
+      </div>
+
+      <!-- Run history -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">⏱ Run History</div>
+        <div class="panel-body">
+          <div id="kl-test-history" style="font-size:0.85rem;color:var(--muted)">No previous runs</div>
+        </div>
+      </div>
+
+      <!-- Per-distro detail (shown when clicking a distro in the matrix) -->
+      <div class="panel" id="kl-test-detail-panel" style="display:none;margin-bottom:1rem">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span id="kl-test-detail-title">Test Detail</span>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('kl-test-detail-panel').style.display='none'">Close</button>
+        </div>
+        <div class="panel-body">
+          <div class="log-box" id="kl-test-detail-log" style="height:320px;font-size:0.78rem"></div>
+        </div>
+      </div>
+
+      <!-- Live test log -->
+      <div class="panel" id="klab-test-log-panel" style="display:none">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>≡ Test Log</span>
+          <button class="btn btn-danger btn-sm" onclick="klabCancel()">Cancel</button>
+        </div>
+        <div class="panel-body">
+          <div class="log-box" id="klab-test-log" style="height:300px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── eBPF Tracing ─────────────────────────────────────────────────────── -->
+    <div class="view" id="view-klab-ebpf">
+      <div class="page-title">eBPF Tracing</div>
+      <div class="page-sub">Live kernel tracing on klab VMs — function counts, syscall tracing, I/O latency, network events</div>
+
+      <!-- Tool + Target selector -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">▶ Trace</div>
+        <div class="panel-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:0.75rem;align-items:end;margin-bottom:0.75rem">
+            <div>
+              <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.3rem">Tool</div>
+              <select id="ebpf-tool" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.85rem" onchange="ebpfToolChanged()">
+                <optgroup label="Process &amp; Syscall">
+                  <option value="execsnoop">execsnoop — new process execution</option>
+                  <option value="opensnoop">opensnoop — file opens</option>
+                  <option value="trace">trace — custom function tracing</option>
+                  <option value="funccount">funccount — function call counts</option>
+                  <option value="syscount">syscount — syscall frequency</option>
+                  <option value="pidstat">pidstat — per-process CPU/IO</option>
+                </optgroup>
+                <optgroup label="Network">
+                  <option value="tcplife">tcplife — TCP session lifetimes</option>
+                  <option value="tcpconnect">tcpconnect — outbound connections</option>
+                  <option value="tcpaccept">tcpaccept — inbound connections</option>
+                  <option value="tcpretrans">tcpretrans — TCP retransmits</option>
+                  <option value="tcpdrop">tcpdrop — TCP drops with stack trace</option>
+                </optgroup>
+                <optgroup label="Disk &amp; I/O">
+                  <option value="biolatency">biolatency — block I/O latency histogram</option>
+                  <option value="biosnoop">biosnoop — block I/O events</option>
+                  <option value="ext4slower">ext4slower — slow filesystem ops</option>
+                  <option value="filetop">filetop — top files by I/O</option>
+                </optgroup>
+                <optgroup label="Memory &amp; Scheduler">
+                  <option value="cachestat">cachestat — page cache hit/miss</option>
+                  <option value="runqlat">runqlat — scheduler run queue latency</option>
+                  <option value="cpudist">cpudist — on-CPU time distribution</option>
+                </optgroup>
+                <optgroup label="bpftrace (custom)">
+                  <option value="bpftrace">bpftrace — custom one-liner</option>
+                </optgroup>
+              </select>
+            </div>
+            <div>
+              <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.3rem">Target</div>
+              <select id="ebpf-target" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.85rem">
+                <option value="host">Host (local)</option>
+              </select>
+            </div>
+            <div>
+              <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.3rem">Duration</div>
+              <select id="ebpf-duration" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.85rem">
+                <option value="5">5 seconds</option>
+                <option value="10" selected>10 seconds</option>
+                <option value="30">30 seconds</option>
+                <option value="60">60 seconds</option>
+                <option value="0">Until stopped</option>
+              </select>
+            </div>
+            <div>
+              <button class="btn btn-primary" onclick="ebpfRun()" id="ebpf-run-btn">Run</button>
+              <button class="btn btn-danger btn-sm" onclick="ebpfStop()" id="ebpf-stop-btn" style="display:none">Stop</button>
+            </div>
+          </div>
+          <!-- Custom args for trace/funccount/bpftrace -->
+          <div id="ebpf-custom-args" style="display:none;margin-bottom:0.5rem">
+            <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.3rem" id="ebpf-custom-label">Pattern</div>
+            <input type="text" id="ebpf-custom-input" placeholder="" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-family:monospace;font-size:0.85rem;box-sizing:border-box">
+          </div>
+          <div style="font-size:0.72rem;color:var(--muted)" id="ebpf-tool-desc">execsnoop — trace all new processes as they exec(). Shows PID, PPID, command, and arguments.</div>
+        </div>
+      </div>
+
+      <!-- Presets -->
+      <div class="panel" style="margin-bottom:1rem">
+        <div class="panel-hdr">◈ Quick Presets</div>
+        <div class="panel-body" style="display:flex;gap:0.4rem;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm" onclick="ebpfPreset('execsnoop','','Who is running what?')">Who ran what?</button>
+          <button class="btn btn-ghost btn-sm" onclick="ebpfPreset('tcplife','','TCP session lifetimes')">TCP sessions</button>
+          <button class="btn btn-ghost btn-sm" onclick="ebpfPreset('biolatency','','Block I/O latency')">Disk latency</button>
+          <button class="btn btn-ghost btn-sm" onclick="ebpfPreset('funccount','zfs_*','ZFS function calls')">ZFS funccount</button>
+          <button class="btn btn-ghost btn-sm" onclick="ebpfPreset('funccount','tcp_*','TCP kernel functions')">TCP funccount</button>
+          <button class="btn btn-ghost btn-sm" onclick="ebpfPreset('trace','zfs_read','Trace ZFS reads')">Trace zfs_read</button>
+          <button class="btn btn-ghost btn-sm" onclick="ebpfPreset('syscount','','Top syscalls')">Top syscalls</button>
+          <button class="btn btn-ghost btn-sm" onclick="ebpfPreset('cachestat','','Page cache stats')">Cache stats</button>
+          <button class="btn btn-ghost btn-sm" onclick="ebpfPreset('tcpdrop','','TCP drops + stacks')">TCP drops</button>
+          <button class="btn btn-ghost btn-sm" onclick="ebpfPreset('runqlat','','Scheduler latency')">Sched latency</button>
+          <button class="btn btn-ghost btn-sm" onclick="ebpfPreset('bpftrace','tracepoint:syscalls:sys_enter_openat { printf(\"%s %s\\n\", comm, str(args->filename)); }','Custom bpftrace')">Custom trace</button>
+        </div>
+      </div>
+
+      <!-- Output -->
+      <div class="panel">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span id="ebpf-output-title">Output</span>
+          <div style="display:flex;gap:0.4rem">
+            <button class="btn btn-ghost btn-sm" onclick="ebpfExplain()">🧠 Ask Bob</button>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('ebpf-output').textContent=''">Clear</button>
+          </div>
+        </div>
+        <div class="panel-body" style="padding:0">
+          <div class="log-box" id="ebpf-output" style="height:360px;border-radius:0;margin:0;font-size:0.8rem"></div>
+          <div id="ebpf-explain-result" style="display:none;padding:0.6rem 0.75rem;background:rgba(139,92,246,0.08);border-top:1px solid rgba(139,92,246,0.2);border-radius:0 0 8px 8px;font-size:0.82rem;color:var(--subtle);line-height:1.5"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Bob ──────────────────────────────────────────────────────────────── -->
+    <div class="view" id="view-bob">
+      <div style="display:flex;gap:1rem;height:calc(100vh - 120px)">
+        <!-- Conversation sidebar -->
+        <div style="width:200px;flex-shrink:0;display:flex;flex-direction:column;gap:0.5rem">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="font-size:0.85rem;font-weight:600;color:var(--subtle)">Conversations</div>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobNewConversation()">+ New</button>
+          </div>
+          <div id="bob-conv-list" style="flex:1;overflow-y:auto;font-size:0.78rem">
+            <div style="color:var(--muted);font-style:italic">Loading...</div>
+          </div>
+          <div id="bob-status-line" style="font-size:0.7rem;color:var(--muted);padding:0.2rem 0">Connecting...</div>
+        </div>
+
+        <!-- Chat area -->
+        <div style="flex:1;display:flex;flex-direction:column">
+          <div id="bob-messages" style="flex:1;overflow-y:auto;padding:0.75rem;background:var(--bg2);border:1px solid var(--border);border-radius:8px 8px 0 0;font-size:0.88rem;line-height:1.6">
+            <div style="color:var(--muted);font-style:italic">Bob appears when Ollama is running. Install with the AI profile or run: systemctl start ollama</div>
+          </div>
+          <div style="display:flex;gap:0.5rem;padding:0.5rem;background:var(--surface2);border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px">
+            <input type="text" id="bob-input" placeholder="Ask Bob anything..." onkeydown="if(event.key==='Enter')bobSend()" style="flex:1;padding:0.5rem 0.75rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.88rem;outline:none">
+            <button class="btn btn-primary" onclick="bobSend()" style="padding:0.5rem 1rem">Send</button>
+          </div>
+          <div style="margin-top:0.4rem;display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('What is the current klab status?')">klab status</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Explain the current network traffic')">traffic</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Are there any security concerns?')">security</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('What should I do next?')">what next?</button>
+            <span style="font-size:0.65rem;color:var(--muted)">Conversations saved to disk. Bob remembers.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- ── Logs ─────────────────────────────────────────────────────────────── -->
     <div class="view" id="view-logs">
       <div class="page-title">Logs</div>
@@ -768,13 +1399,18 @@ let   ws      = null;
 let   wsReady = false;
 let   diskTimer = null;
 
-// Auto-refresh dashboard stats every 30 s
+// Auto-refresh dashboard stats every 5s, klab views every 15s
 setInterval(() => {
   const dash = document.getElementById('view-dashboard');
   if (dash && dash.classList.contains('active')) {
     send({ action: 'system_info' });
   }
 }, 5000);
+setInterval(() => {
+  const klabViews = ['view-klab', 'view-klab-ops', 'view-klab-tests'];
+  const active = klabViews.some(id => document.getElementById(id)?.classList.contains('active'));
+  if (active) send({ action: 'klab_status' });
+}, 15000);
 
 function connect() {
   ws = new WebSocket(wsUrl);
@@ -867,6 +1503,18 @@ function handle(msg) {
         const installNav = document.querySelector('#sidebar li[data-view="install"]');
         if (installNav) installNav.style.display = 'none';
       }
+      // Show klab sidebar section when klab is available
+      const showKlab = d.klab_available || d.kldload_profile === 'devops';
+      const klabNav = document.getElementById('klab-nav-section');
+      const klabItems = document.getElementById('klab-nav-items');
+      if (klabNav) klabNav.style.display = showKlab ? '' : 'none';
+      if (klabItems) klabItems.style.display = showKlab ? '' : 'none';
+      // Show Bob when Ollama is running (AI profile or manual start)
+      const showBob = d.ai_ollama || false;
+      const bobNav = document.getElementById('bob-nav-section');
+      const bobItems = document.getElementById('bob-nav-items');
+      if (bobNav) bobNav.style.display = showBob ? '' : 'none';
+      if (bobItems) bobItems.style.display = showBob ? '' : 'none';
       // NVIDIA: hide panel if no GPU, auto-select if detected
       const nvidiaCard = document.getElementById('opt-nvidia');
       const nvidiaPanel = document.getElementById('platform-panel');
@@ -1033,15 +1681,33 @@ function handle(msg) {
 
     case 'log_line': {
       const target = msg.target || '';
-      let boxId = null;
-      if (target === 'install') boxId = 'install-log';
-      if (boxId) {
-        const box = document.getElementById(boxId);
+      if (target === 'install') {
+        const box = document.getElementById('install-log');
         if (box) { box.textContent += (msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
-        if (target === 'install') {
-          const st = document.getElementById('install-status');
-          if (st) st.textContent = (msg.line || '').replace(/^\[.*?\]\s*/, '').slice(0, 80) || st.textContent;
-        }
+        const st = document.getElementById('install-status');
+        if (st) st.textContent = (msg.line || '').replace(/^\[.*?\]\s*/, '').slice(0, 80) || st.textContent;
+      } else if (target === 'klab') {
+        ['klab-log', 'klab-golden-log', 'klab-ops-log', 'klab-test-log'].forEach(id => {
+          const box = document.getElementById(id);
+          if (box) { box.textContent += (msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+        });
+        ['klab-log-panel', 'klab-golden-log-panel', 'klab-ops-log-panel', 'klab-test-log-panel'].forEach(id => {
+          const p = document.getElementById(id);
+          if (p) p.style.display = '';
+        });
+      } else {
+        const box = document.getElementById('log-box');
+        if (box) { box.textContent += (msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+      }
+      break;
+    }
+
+    case 'exec_start': {
+      if (msg.target === 'klab') {
+        ['klab-log', 'klab-golden-log', 'klab-ops-log', 'klab-test-log'].forEach(id => {
+          const box = document.getElementById(id);
+          if (box) box.textContent = '';
+        });
       }
       break;
     }
@@ -1061,32 +1727,174 @@ function handle(msg) {
           if (st)  st.textContent = `✗ Install failed (exit ${msg.rc})`; var rb=document.getElementById('install-retry'); if(rb) rb.style.display='block';
           if (box) box.textContent += `\n✗ Install failed (exit ${msg.rc})\n`;
         }
+      } else if (target === 'klab') {
+        const suffix = msg.rc === 0 ? '\n✓ Done.\n' : `\n✗ Failed (rc=${msg.rc})\n`;
+        ['klab-log', 'klab-golden-log', 'klab-ops-log', 'klab-test-log'].forEach(id => {
+          const box = document.getElementById(id);
+          if (box) { box.textContent += suffix; box.scrollTop = box.scrollHeight; }
+        });
       }
       break;
     }
 
     case 'install_log': {
       const box = document.getElementById('install-log');
-      box.textContent += (msg.line || '') + '\n';
-      box.scrollTop = box.scrollHeight;
+      if (box) { box.textContent += (msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
       break;
     }
 
     case 'install_done': {
       const box = document.getElementById('install-log');
-      box.textContent += '\n✓ Install complete. System powering off…\n';
-      break;
-    }
-
-    case 'log_line': {
-      const box = document.getElementById('log-box');
-      box.textContent += (msg.line || '') + '\n';
-      box.scrollTop = box.scrollHeight;
+      if (box) box.textContent += '\n✓ Install complete. System powering off…\n';
       break;
     }
 
     case 'snapshot_done': { refreshSnapshots(); break; }
     case 'error': { console.warn('WS error:', msg.msg); break; }
+
+    // ── klab messages ─────────────────────────────────────────────────
+    case 'klab_status': { renderKlabStatus(msg); break; }
+    case 'klab_vm_op_done': {
+      console.log('VM op:', msg.vm, msg.op, msg.ok ? 'OK' : msg.error);
+      send({ action: 'klab_status' });
+      break;
+    }
+    case 'klab_isolate_done': {
+      const box = document.getElementById('klab-ops-log') || document.getElementById('klab-log');
+      if (box) { box.textContent += msg.msg + '\n'; box.scrollTop = box.scrollHeight; }
+      break;
+    }
+    case 'klab_metrics': { renderKlabMetrics(msg.metrics); break; }
+    case 'klab_flows': { renderKlabFlows(msg); break; }
+    case 'klab_test_runs': { renderTestRuns(msg.runs || []); break; }
+    case 'klab_test_detail': { renderTestDetail(msg.run, msg.logs || {}); break; }
+    case 'klab_ebpf_output': {
+      const el = document.getElementById('ebpf-output');
+      if (el) { el.textContent += (msg.line || '') + '\n'; el.scrollTop = el.scrollHeight; }
+      break;
+    }
+    case 'klab_ebpf_done': {
+      const el = document.getElementById('ebpf-output');
+      const title = document.getElementById('ebpf-output-title');
+      if (el) { el.textContent += '\n✓ Trace complete.\n'; el.scrollTop = el.scrollHeight; }
+      if (title) title.textContent = title.textContent.replace(' — running...', ' — done');
+      document.getElementById('ebpf-run-btn').style.display = '';
+      document.getElementById('ebpf-stop-btn').style.display = 'none';
+      break;
+    }
+    case 'klab_fault_done': {
+      const el = document.getElementById('kl-fault-result');
+      if (el) { el.textContent = msg.msg || ''; el.style.color = msg.ok ? 'var(--accent)' : 'var(--danger)'; }
+      send({ action: 'klab_status' });
+      break;
+    }
+    case 'klab_what_happened': {
+      const wrap = document.getElementById('kl-wjh-result');
+      const sum = document.getElementById('kl-wjh-summary');
+      const sec = document.getElementById('kl-wjh-sections');
+      if (wrap) wrap.style.display = '';
+      if (sum) sum.textContent = msg.summary || '';
+      if (sec) {
+        sec.textContent = '';
+        (msg.sections || []).forEach(s => {
+          sec.textContent += `\n=== ${s.title} ===\n${s.body}\n`;
+        });
+        sec.scrollTop = 0;
+      }
+      break;
+    }
+    case 'klab_diff_capture': {
+      const el = document.getElementById('kl-diff-status');
+      if (el) el.textContent = `${msg.phase} captured for ${msg.vm || msg.ip} (${(msg.state?.packages||[]).length} pkgs, ${(msg.state?.ports||[]).length} ports, ${(msg.state?.processes||[]).length} procs)`;
+      if (msg.phase === 'before') window._klabDiffBefore = msg.state;
+      if (msg.phase === 'after')  window._klabDiffAfter  = msg.state;
+      break;
+    }
+    case 'klab_diff_result': {
+      const el = document.getElementById('kl-diff-result');
+      if (!el) break;
+      el.style.display = '';
+      const d = msg.diff || {};
+      let html = '';
+      for (const [key, changes] of Object.entries(d)) {
+        const added = changes.added || [];
+        const removed = changes.removed || [];
+        if (!added.length && !removed.length) continue;
+        html += `<div style="margin-bottom:0.5rem"><strong style="color:var(--subtle)">${esc(key)}</strong>`;
+        added.forEach(l => { html += `<div style="color:var(--accent)">+ ${esc(l)}</div>`; });
+        removed.forEach(l => { html += `<div style="color:var(--danger)">- ${esc(l)}</div>`; });
+        html += '</div>';
+      }
+      el.innerHTML = html || '<span style="color:var(--muted)">No differences detected</span>';
+      break;
+    }
+    case 'klab_hubble_status': {
+      const el = document.getElementById('kl-hubble-status');
+      const s = msg.status || {};
+      if (el) el.innerHTML = s.running
+        ? `<span style="color:var(--accent)">● Hubble running</span> ${s.version ? '(' + esc(s.version) + ')' : ''} ${s.ui_url ? '— <a href="' + esc(s.ui_url) + '" target="_blank" style="color:var(--accent)">Open Hubble UI</a>' : ''}`
+        : '<span style="color:var(--muted)">○ Hubble not running — deploy Cilium + Hubble first</span>';
+      break;
+    }
+    case 'klab_hubble_policy': {
+      const el = document.getElementById('kl-hubble-data');
+      if (!el) break;
+      const drops = msg.drops || [];
+      if (msg.error) { el.textContent = 'Hubble error: ' + msg.error; break; }
+      if (!drops.length) { el.textContent = 'No policy drops ' + (msg.ip ? 'for ' + msg.ip : ''); break; }
+      el.innerHTML = '<div style="color:var(--danger);margin-bottom:0.3rem">Policy Drops:</div>' +
+        drops.map(l => `<div style="font-family:monospace;font-size:0.75rem">${esc(l)}</div>`).join('');
+      break;
+    }
+    case 'klab_hubble_capture': {
+      const el = document.getElementById('kl-hubble-data');
+      if (!el) break;
+      if (msg.error) { el.textContent = 'Capture error: ' + msg.error; break; }
+      el.textContent = `Captured ${msg.count || 0} flows in ${msg.duration || 0}s. Data available for replay.`;
+      break;
+    }
+    case 'klab_explain': {
+      // Render Bob's explanation
+      const explainEl = document.getElementById('kl-wjh-explain') || document.getElementById('ebpf-explain-result') || document.getElementById('kl-hubble-data');
+      if (explainEl) {
+        explainEl.style.display = '';
+        explainEl.innerHTML = `<div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.3rem">🧠 ${esc(msg.model || 'Bob')} says:</div>${esc(msg.explanation || '').replace(/\n/g, '<br>')}`;
+      }
+      const statusEl = document.getElementById('kl-wjh-explain-status');
+      if (statusEl) statusEl.textContent = msg.model ? `(${msg.model})` : '';
+      break;
+    }
+    case 'bob_exec': {
+      // Feed command result back into Bob's conversation
+      const output = msg.output || '(no output)';
+      const rc = msg.rc || 0;
+      const target = msg.target || 'host';
+      const result = `[Command executed on ${target}, exit ${rc}]\n${output}`;
+      _bobHistory.push({ role: 'user', content: result });
+      _renderBobMessages();
+      // Let Bob interpret the result
+      if (!_bobStreaming) bobAsk('Interpret the command output above. What does it tell us?');
+      break;
+    }
+    case 'bob_list': { _renderBobConvList(msg.conversations || []); break; }
+    case 'bob_loaded': {
+      const c = msg.conversation;
+      if (c) {
+        _bobConvId = c.id;
+        _bobConvTitle = c.title;
+        _bobHistory = c.messages || [];
+        _renderBobMessages();
+        send({ action: 'bob_list' }); // refresh sidebar highlight
+      }
+      break;
+    }
+    case 'bob_saved': { send({ action: 'bob_list' }); break; }
+    case 'bob_deleted': { send({ action: 'bob_list' }); break; }
+    case 'klab_playbook_done': {
+      const box = document.getElementById('klab-ops-log');
+      if (box) { box.textContent += `\n✓ Playbook complete — ran on ${msg.count} distro(s): ${(msg.distros||[]).join(', ')}\n`; box.scrollTop = box.scrollHeight; }
+      break;
+    }
   }
 }
 
@@ -1104,6 +1912,12 @@ document.querySelectorAll('#sidebar li[data-view]').forEach(li => {
       requestDisks();
       send({ action: 'network_info' });
     }
+    if (li.dataset.view === 'bob')           bobInit();
+    if (li.dataset.view === 'klab')         send({ action: 'klab_status' });
+    if (li.dataset.view === 'klab-goldens') send({ action: 'klab_status' });
+    if (li.dataset.view === 'klab-ops')     { send({ action: 'klab_status' }); send({ action: 'klab_flows' }); }
+    if (li.dataset.view === 'klab-tests')   { send({ action: 'klab_test_results' }); send({ action: 'klab_status' }); }
+    if (li.dataset.view === 'klab-ebpf')   send({ action: 'klab_status' });
   });
 });
 
@@ -1135,6 +1949,9 @@ function selectTarget(el) {
   const aiModels = document.getElementById('ai-models');
   if (aiCb) aiCb.checked = el.dataset.role === 'ai';
   if (aiModels) aiModels.style.display = el.dataset.role === 'ai' ? 'block' : 'none';
+  // klab profile — toggle klab options
+  const klabOpts = document.getElementById('klab-options');
+  if (klabOpts) klabOpts.style.display = el.dataset.role === 'devops' ? 'block' : 'none';
 }
 
 const DISTRO_DESCS = {
@@ -1363,6 +2180,7 @@ function startInstall() {
     storage_manual: manualStorage ? '1' : '0',
     enable_ai: document.getElementById('install-ai')?.checked ? '1' : '0',
     enable_devops: roleRaw === 'devops' ? '1' : '0',
+    klab_zfs_dev: document.getElementById('klab-zfs-dev')?.checked ? '1' : '0',
     ai_model_chat: document.getElementById('ai-model-chat')?.checked ? '1' : '0',
     ai_model_code: document.getElementById('ai-model-code')?.checked ? '1' : '0',
     ai_model_smart: document.getElementById('ai-model-smart')?.checked ? '1' : '0',
@@ -1470,6 +2288,982 @@ function loadLog() {
   const log = document.getElementById('log-select').value;
   document.getElementById('log-box').textContent = '';
   send({ action: 'tail_log', log });
+}
+
+// ── klab functions ───────────────────────────────────────────────────────────
+
+const KLAB_DISTROS = ['centos', 'rocky', 'fedora', 'debian', 'ubuntu', 'rhel'];
+
+// ── Traffic Map — force-directed canvas graph ────────────────────────────
+let _trafficNodes = [];
+let _trafficEdges = [];
+let _trafficAnimFrame = null;
+
+function renderTrafficMap(flows, blueVms, greenVms) {
+  const canvas = document.getElementById('kl-traffic-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;  // canvas not supported or detached
+  const W = canvas.width = canvas.offsetWidth * (window.devicePixelRatio || 1);
+  const H = canvas.height = 360 * (window.devicePixelRatio || 1);
+  ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+  const w = canvas.offsetWidth, h = 360;
+
+  // Build node set from VMs + flow endpoints
+  const nodeMap = {};
+  const addNode = (id, label, color) => {
+    if (!nodeMap[id]) {
+      nodeMap[id] = {
+        id, label, color,
+        x: w * 0.15 + Math.random() * w * 0.7,
+        y: h * 0.15 + Math.random() * h * 0.7,
+        vx: 0, vy: 0, r: 18,
+      };
+    }
+  };
+
+  // Add VM nodes
+  (blueVms || []).forEach(v => addNode(v.ip || v.name, v.distro + ' (B)', '#34d399'));
+  (greenVms || []).forEach(v => addNode(v.ip || v.name, v.distro + ' (G)', '#c9a04a'));
+
+  // Add flow endpoints
+  (flows || []).forEach(f => {
+    if (f.src) addNode(f.src, f.src.replace('192.168.122.', '.'), '#6b7280');
+    if (f.dst) addNode(f.dst, f.dst.replace('192.168.122.', '.'), '#6b7280');
+  });
+
+  _trafficNodes = Object.values(nodeMap);
+  _trafficEdges = (flows || []).filter(f => f.src && f.dst && nodeMap[f.src] && nodeMap[f.dst]).map(f => ({
+    src: nodeMap[f.src], dst: nodeMap[f.dst],
+    proto: f.proto || f.dport || '',
+    verdict: f.verdict || '',
+  }));
+
+  // If no data, show placeholder
+  if (!_trafficNodes.length) {
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('No traffic data — deploy VMs and click Refresh', w/2, h/2);
+    return;
+  }
+
+  // Cancel previous animation
+  if (_trafficAnimFrame) cancelAnimationFrame(_trafficAnimFrame);
+
+  let tick = 0;
+  function animate() {
+    tick++;
+    ctx.clearRect(0, 0, w, h);
+
+    // Simple force simulation
+    for (let i = 0; i < _trafficNodes.length; i++) {
+      for (let j = i + 1; j < _trafficNodes.length; j++) {
+        const a = _trafficNodes[i], b = _trafficNodes[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+        // Repulsion
+        let force = 800 / (dist * dist);
+        a.vx -= dx/dist * force; a.vy -= dy/dist * force;
+        b.vx += dx/dist * force; b.vy += dy/dist * force;
+      }
+    }
+
+    // Edge attraction
+    _trafficEdges.forEach(e => {
+      let dx = e.dst.x - e.src.x, dy = e.dst.y - e.src.y;
+      let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+      let force = (dist - 120) * 0.003;
+      e.src.vx += dx/dist * force; e.src.vy += dy/dist * force;
+      e.dst.vx -= dx/dist * force; e.dst.vy -= dy/dist * force;
+    });
+
+    // Center gravity + damping
+    _trafficNodes.forEach(n => {
+      n.vx += (w/2 - n.x) * 0.001;
+      n.vy += (h/2 - n.y) * 0.001;
+      n.vx *= 0.9; n.vy *= 0.9;
+      n.x += n.vx; n.y += n.vy;
+      n.x = Math.max(n.r + 4, Math.min(w - n.r - 4, n.x));
+      n.y = Math.max(n.r + 4, Math.min(h - n.r - 4, n.y));
+    });
+
+    // Draw edges with animated flow particles
+    _trafficEdges.forEach(e => {
+      ctx.beginPath();
+      ctx.moveTo(e.src.x, e.src.y);
+      ctx.lineTo(e.dst.x, e.dst.y);
+      ctx.strokeStyle = e.verdict === 'DROPPED' ? 'rgba(239,68,68,0.3)' : 'rgba(52,211,153,0.15)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Animated particle along edge
+      let dx = e.dst.x - e.src.x, dy = e.dst.y - e.src.y;
+      let t = ((tick * 2 + Math.abs(e.src.x * 7)) % 100) / 100;
+      let px = e.src.x + dx * t, py = e.src.y + dy * t;
+      ctx.beginPath();
+      ctx.arc(px, py, 2, 0, Math.PI * 2);
+      ctx.fillStyle = e.verdict === 'DROPPED' ? '#ef4444' : '#34d399';
+      ctx.fill();
+    });
+
+    // Draw nodes
+    _trafficNodes.forEach(n => {
+      // Glow
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.r + 4, 0, Math.PI * 2);
+      ctx.fillStyle = n.color.replace(')', ',0.08)').replace('rgb', 'rgba');
+      ctx.fill();
+
+      // Circle
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      ctx.fillStyle = '#1a1f2b';
+      ctx.fill();
+      ctx.strokeStyle = n.color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Label
+      ctx.fillStyle = '#e2e8f0';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(n.label.slice(0, 12), n.x, n.y);
+    });
+
+    // Keep animating if visible
+    if (document.getElementById('view-klab')?.classList.contains('active') && tick < 600) {
+      _trafficAnimFrame = requestAnimationFrame(animate);
+    }
+  }
+  animate();
+}
+
+function renderKlabStatus(msg) {
+  window._lastKlabStatus = msg;  // cache for traffic map
+  const g = msg.goldens || {};
+  const bvms = msg.blue_vms || [];
+  const gvms = msg.green_vms || [];
+  const tests = msg.tests || {};
+  const metrics = msg.metrics || {};
+
+  // Stat cards
+  const goldensReady = KLAB_DISTROS.filter(d => g[d] && g[d].ready).length;
+  const el = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  el('kl-goldens-count', `${goldensReady} / ${KLAB_DISTROS.length}`);
+  el('kl-blue-count', `${bvms.filter(v => v.state === 'running').length} / ${bvms.length}`);
+  el('kl-green-count', `${gvms.filter(v => v.state === 'running').length} / ${gvms.length}`);
+
+  // Pool health from metrics
+  const poolHealthy = metrics['klab_pool_healthy'];
+  el('kl-pool-health', poolHealthy === '1' ? 'ONLINE' : poolHealthy === '0' ? 'DEGRADED' : '—');
+  const poolEl = document.getElementById('kl-pool-health');
+  if (poolEl) poolEl.className = 'stat-value' + (poolHealthy === '1' ? ' ok' : '');
+
+  // Last test
+  el('kl-last-test', tests.run_id || '—');
+
+  // Distro matrix
+  const tbody = document.getElementById('kl-distro-matrix');
+  if (tbody) {
+    if (goldensReady === 0 && bvms.length === 0 && gvms.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted)">No goldens or VMs yet — build goldens first</td></tr>';
+    } else {
+      tbody.innerHTML = KLAB_DISTROS.map(d => {
+        const gi = g[d] || {};
+        const blue = bvms.find(v => v.distro === d);
+        const green = gvms.find(v => v.distro === d);
+        const goldenBadge = gi.ready
+          ? '<span style="color:var(--accent)">● ready</span>'
+          : '<span style="color:var(--muted)">○ none</span>';
+        const vmBadge = (vm) => vm
+          ? (vm.state === 'running' ? '<span style="color:var(--accent)">● up</span>' : '<span style="color:#c9a04a">◐ ' + esc(vm.state) + '</span>')
+          : '<span style="color:var(--muted)">—</span>';
+        return `<tr>
+          <td style="font-weight:600">${esc(d)}</td>
+          <td>${goldenBadge}</td>
+          <td>${vmBadge(blue)}</td>
+          <td>${vmBadge(green)}</td>
+          <td style="font-family:monospace;font-size:0.8rem;color:var(--muted)">${esc(gi.zfs_ver || '—')}</td>
+          <td style="font-family:monospace;font-size:0.8rem;color:var(--muted)">${esc(gi.kernel || '—')}</td>
+          <td style="color:var(--muted)">${esc(gi.size || '—')}</td>
+        </tr>`;
+      }).join('');
+    }
+  }
+
+  // Golden card badges
+  KLAB_DISTROS.forEach(d => {
+    const gi = g[d] || {};
+    const stEl = document.getElementById('kg-st-' + d);
+    if (stEl) {
+      stEl.textContent = gi.ready ? 'ready' : 'not built';
+      stEl.style.color = gi.ready ? 'var(--accent)' : 'var(--muted)';
+    }
+    const metaEl = document.getElementById('kg-meta-' + d);
+    if (metaEl) {
+      metaEl.textContent = gi.ready
+        ? [gi.zfs_ver, gi.kernel, gi.size].filter(Boolean).join(' · ')
+        : '';
+    }
+  });
+
+  // VM table (Operations view)
+  const vmTbody = document.getElementById('kl-vm-table');
+  if (vmTbody) {
+    const allVMs = [
+      ...bvms.map(v => ({...v, site: 'blue'})),
+      ...gvms.map(v => ({...v, site: 'green'})),
+    ];
+    if (!allVMs.length) {
+      vmTbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No site VMs deployed</td></tr>';
+    } else {
+      vmTbody.innerHTML = allVMs.map(v => `<tr>
+        <td style="font-family:monospace;font-size:0.82rem">${esc(v.name)}</td>
+        <td>${esc(v.distro)}</td>
+        <td><span style="color:${v.site === 'blue' ? 'var(--accent)' : '#c9a04a'}">${esc(v.site)}</span></td>
+        <td style="font-family:monospace;font-size:0.82rem">${esc(v.ip)}</td>
+        <td>${v.state === 'running' ? '<span style="color:var(--accent)">running</span>' : esc(v.state)}</td>
+        <td style="white-space:nowrap">
+          ${v.state === 'running'
+            ? `<button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="klabVmOp('${esc(v.name)}','shutdown')">Stop</button>
+               <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="klabIsolate('${esc(v.name)}','${esc(v.ip)}',true)">Isolate</button>
+               <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="klabIsolate('${esc(v.name)}','${esc(v.ip)}',false)">Reconnect</button>`
+            : `<button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="klabVmOp('${esc(v.name)}','start')">Start</button>`}
+        </td>
+      </tr>`).join('');
+    }
+  }
+
+  // Test results
+  const trEl = document.getElementById('kl-test-results');
+  if (trEl && tests.distros && Object.keys(tests.distros).length) {
+    let html = `<div style="font-size:0.78rem;color:var(--subtle);margin-bottom:0.4rem">Run: ${esc(tests.run_id)}</div>`;
+    html += '<table><thead><tr><th>Distro</th><th style="color:var(--accent)">Pass</th><th style="color:var(--danger)">Fail</th><th style="color:var(--muted)">Skip</th></tr></thead><tbody>';
+    for (const [d, r] of Object.entries(tests.distros)) {
+      html += `<tr><td>${esc(d)}</td><td style="color:var(--accent)">${esc(r.PASS || '0')}</td><td style="color:var(--danger)">${esc(r.FAIL || '0')}</td><td style="color:var(--muted)">${esc(r.SKIP || '0')}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    trEl.innerHTML = html;
+  }
+
+  // Pool metrics panel
+  renderKlabMetrics(metrics);
+
+  // Populate VM dropdowns for fault injection, diff view, etc.
+  _populateVmSelectors(bvms, gvms);
+}
+
+function renderKlabMetrics(m) {
+  const el = document.getElementById('kl-pool-metrics');
+  if (!el || !m || Object.keys(m).length === 0) return;
+  if (m._error) { el.textContent = 'klab-exporter: ' + m._error; return; }
+  const fmt = (k) => {
+    const v = m[k]; if (!v) return '—';
+    const n = parseFloat(v);
+    if (isNaN(n)) return v;
+    if (n > 1099511627776) return (n / 1099511627776).toFixed(1) + ' TB';
+    if (n > 1073741824) return (n / 1073741824).toFixed(1) + ' GB';
+    if (n > 1048576) return (n / 1048576).toFixed(1) + ' MB';
+    return v;
+  };
+  const ratio = m['klab_zfs_arc_hit_ratio'] ? (parseFloat(m['klab_zfs_arc_hit_ratio']) * 100).toFixed(1) + '%' : '—';
+  el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:0.5rem;font-size:0.82rem">
+    <div><span style="color:var(--muted)">Pool Size:</span> ${fmt('klab_pool_size_bytes')}</div>
+    <div><span style="color:var(--muted)">Used:</span> ${fmt('klab_pool_used_bytes')}</div>
+    <div><span style="color:var(--muted)">Free:</span> ${fmt('klab_pool_free_bytes')}</div>
+    <div><span style="color:var(--muted)">Compress:</span> ${m['klab_pool_compress_ratio'] || '—'}x</div>
+    <div><span style="color:var(--muted)">Frag:</span> ${m['klab_pool_fragmentation'] || '—'}%</div>
+    <div><span style="color:var(--muted)">ARC Hit:</span> ${ratio}</div>
+    <div><span style="color:var(--muted)">ARC Size:</span> ${fmt('klab_zfs_arc_size_bytes')}</div>
+  </div>`;
+}
+
+function renderKlabFlows(msg) {
+  // Render canvas traffic map on the Lab Status view
+  const flows = msg.flows || [];
+  const lastStatus = window._lastKlabStatus || {};
+  renderTrafficMap(flows, lastStatus.blue_vms, lastStatus.green_vms);
+
+  // Also render table fallback
+  const tableEl = document.getElementById('kl-flows-table');
+  if (tableEl && flows.length) {
+    let html = `<div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.3rem">Source: ${esc(msg.source || 'unknown')} — ${flows.length} flows</div>`;
+    html += '<table style="font-size:0.78rem"><thead><tr><th>Src</th><th>Dst</th><th>Proto/Port</th><th>Info</th></tr></thead><tbody>';
+    flows.slice(0, 30).forEach(f => {
+      html += `<tr><td style="font-family:monospace">${esc(f.src||'—')}</td><td style="font-family:monospace">${esc(f.dst||'—')}</td><td>${esc(f.proto||'')} ${esc(f.dport||f.port||'')}</td><td style="color:var(--muted)">${esc(f.verdict||f.raw||'').slice(0,60)}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    tableEl.innerHTML = html;
+  }
+
+  const targets = ['kl-ops-flows'];
+  targets.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const flows = msg.flows || [];
+    const source = msg.source || 'none';
+    if (msg.summary) { el.innerHTML = `<pre style="margin:0;white-space:pre-wrap;font-size:0.78rem">${esc(msg.summary)}</pre>`; return; }
+    if (!flows.length) { el.textContent = `No flows (source: ${source})`; return; }
+    let html = `<div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.3rem">Source: ${esc(source)} — ${flows.length} flows</div>`;
+    html += '<table style="font-size:0.78rem"><thead><tr><th>Src</th><th>Dst</th><th>Proto/Port</th><th>Info</th></tr></thead><tbody>';
+    flows.slice(0, 30).forEach(f => {
+      html += `<tr>
+        <td style="font-family:monospace">${esc(f.src || '—')}</td>
+        <td style="font-family:monospace">${esc(f.dst || '—')}</td>
+        <td>${esc(f.proto || '')} ${esc(f.dport || f.port || '')}</td>
+        <td style="color:var(--muted)">${esc(f.verdict || f.raw || '').slice(0, 60)}</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  });
+}
+
+// klab action helpers
+function klabAction(action, arg) {
+  if (action === 'golden') {
+    const zfsDev = document.getElementById('kg-zfs-dev')?.checked || document.getElementById('klab-zfs-dev')?.checked;
+    send({ action: 'klab_golden', distro: arg, zfs_dev: zfsDev });
+  } else if (action === 'deploy') {
+    send({ action: 'klab_deploy', site: arg });
+  } else if (action === 'test') {
+    send({ action: 'klab_test', mode: arg });
+  } else if (action === 'destroy') {
+    if (!confirm(`Destroy ${arg}? This will remove VMs and ZFS datasets.`)) return;
+    send({ action: 'klab_destroy', target: arg });
+  }
+}
+
+function klabGolden(distro) {
+  const zfsDev = document.getElementById('kg-zfs-dev')?.checked;
+  send({ action: 'klab_golden', distro, zfs_dev: zfsDev });
+}
+
+function klabVerify(distro) {
+  send({ action: 'klab_verify', distro });
+}
+
+function klabDestroyGolden(distro) {
+  if (!confirm(`Destroy golden image for ${distro}? This removes the ZFS snapshot.`)) return;
+  send({ action: 'klab_destroy', target: 'goldens' });
+}
+
+function klabDeploy(site) {
+  send({ action: 'klab_deploy', site });
+}
+
+function klabPromote() {
+  if (!confirm('Promote green → blue? This atomically swaps the sites via ZFS clone.')) return;
+  send({ action: 'klab_promote', site: 'green' });
+}
+
+function klabRollback() {
+  if (!confirm('Rollback blue to previous snapshot?')) return;
+  send({ action: 'klab_rollback' });
+}
+
+function klabRunTest() {
+  const mode = document.querySelector('input[name="klab-test-mode"]:checked')?.value || 'quick';
+  const exec = document.querySelector('input[name="klab-test-exec"]:checked')?.value || 'parallel';
+  const distro = document.getElementById('klab-test-distro')?.value || '';
+  send({ action: 'klab_test', mode, distro, execution: exec });
+}
+
+// ZFS Testing view renderers
+function renderTestRuns(runs) {
+  // Latest results matrix
+  const matrixEl = document.getElementById('kl-test-matrix');
+  if (matrixEl && runs.length > 0) {
+    const latest = runs[0];
+    let html = `<div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">Run: <strong>${esc(latest.run_id)}</strong> — ${esc(latest.timestamp)}</div>`;
+
+    // Totals bar
+    const t = latest.total || {};
+    const total = (t.pass||0) + (t.fail||0) + (t.skip||0);
+    const passPct = total ? ((t.pass||0) / total * 100).toFixed(1) : 0;
+    html += `<div style="margin-bottom:0.75rem">
+      <div style="display:flex;gap:1.5rem;font-size:0.95rem;margin-bottom:0.4rem">
+        <span style="color:var(--accent)"><strong>${t.pass||0}</strong> pass</span>
+        <span style="color:var(--danger)"><strong>${t.fail||0}</strong> fail</span>
+        <span style="color:var(--muted)"><strong>${t.skip||0}</strong> skip</span>
+        <span style="color:var(--subtle)">${total} total — <strong>${passPct}%</strong></span>
+      </div>
+      <div style="height:6px;background:var(--surface2);border-radius:3px;overflow:hidden">
+        <div style="height:100%;width:${passPct}%;background:${t.fail > 0 ? 'linear-gradient(90deg,var(--accent) ' + passPct + '%,var(--danger) ' + passPct + '%)' : 'var(--accent)'};border-radius:3px"></div>
+      </div>
+    </div>`;
+
+    // Per-distro table
+    html += '<table><thead><tr><th>Distro</th><th style="text-align:right;color:var(--accent)">Pass</th><th style="text-align:right;color:var(--danger)">Fail</th><th style="text-align:right;color:var(--muted)">Skip</th><th>Bar</th><th></th></tr></thead><tbody>';
+    for (const [distro, r] of Object.entries(latest.distros)) {
+      const p = parseInt(r.PASS||0), f = parseInt(r.FAIL||0), s = parseInt(r.SKIP||0);
+      const dt = p + f + s;
+      const dp = dt ? (p / dt * 100).toFixed(0) : 0;
+      const statusDot = f > 0 ? '<span style="color:var(--danger)">●</span>' : '<span style="color:var(--accent)">●</span>';
+      html += `<tr>
+        <td>${statusDot} <strong>${esc(distro)}</strong></td>
+        <td style="text-align:right;color:var(--accent)">${p}</td>
+        <td style="text-align:right;color:${f > 0 ? 'var(--danger)' : 'var(--muted)'}">${f}</td>
+        <td style="text-align:right;color:var(--muted)">${s}</td>
+        <td style="width:120px"><div style="height:4px;background:var(--surface2);border-radius:2px;overflow:hidden"><div style="height:100%;width:${dp}%;background:var(--accent);border-radius:2px"></div></div></td>
+        <td><button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'klab_test_results',run_id:'${esc(latest.run_id)}'});document.getElementById('kl-test-detail-title').textContent='${esc(distro)} — ${esc(latest.run_id)}'">Log</button></td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    matrixEl.innerHTML = html;
+  } else if (matrixEl) {
+    matrixEl.innerHTML = '<span style="color:var(--muted)">No test results yet — run the test suite first</span>';
+  }
+
+  // Run history
+  const histEl = document.getElementById('kl-test-history');
+  if (histEl && runs.length > 0) {
+    let html = '<table style="font-size:0.82rem"><thead><tr><th>Run</th><th>Date</th><th style="color:var(--accent)">Pass</th><th style="color:var(--danger)">Fail</th><th style="color:var(--muted)">Skip</th><th>Distros</th><th></th></tr></thead><tbody>';
+    runs.forEach(r => {
+      const t = r.total || {};
+      const distros = Object.keys(r.distros || {}).join(', ');
+      html += `<tr>
+        <td style="font-family:monospace">${esc(r.run_id)}</td>
+        <td style="color:var(--muted)">${esc(r.timestamp)}</td>
+        <td style="color:var(--accent)">${t.pass||0}</td>
+        <td style="color:${(t.fail||0) > 0 ? 'var(--danger)' : 'var(--muted)'}">${t.fail||0}</td>
+        <td style="color:var(--muted)">${t.skip||0}</td>
+        <td style="font-size:0.78rem;color:var(--muted)">${esc(distros)}</td>
+        <td><button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'klab_test_results',run_id:'${esc(r.run_id)}'})">Detail</button></td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    histEl.innerHTML = html;
+  }
+
+  // Dev tools status from golden info
+  const devEl = document.getElementById('kl-zfsdev-status');
+  if (devEl) {
+    const s = window._lastKlabStatus || {};
+    const goldens = s.goldens || {};
+    const ready = KLAB_DISTROS.filter(d => goldens[d]?.ready);
+    if (!ready.length) {
+      devEl.innerHTML = '<span style="color:var(--muted)">No goldens built — build golden images first (klab Golden Images tab)</span>';
+    } else {
+      devEl.innerHTML = ready.map(d => {
+        const gi = goldens[d];
+        return `<span style="color:var(--accent)">● ${esc(d)}</span> ${esc(gi.zfs_ver || '')} ${esc(gi.kernel || '')}`;
+      }).join(' &nbsp;|&nbsp; ');
+    }
+  }
+}
+
+function renderTestDetail(run, logs) {
+  const panel = document.getElementById('kl-test-detail-panel');
+  const logEl = document.getElementById('kl-test-detail-log');
+  if (!panel || !logEl) return;
+  panel.style.display = '';
+
+  let content = `Run: ${run.run_id}\nTimestamp: ${run.timestamp}\n`;
+  content += `Total: ${run.total?.pass||0} pass / ${run.total?.fail||0} fail / ${run.total?.skip||0} skip\n`;
+  content += '\n';
+
+  for (const [distro, data] of Object.entries(run.distros || {})) {
+    content += `═══ ${distro} ═══\n`;
+    for (const [k, v] of Object.entries(data)) {
+      content += `  ${k}: ${v}\n`;
+    }
+    if (logs[distro]) {
+      content += `\n--- Log (${distro}) ---\n${logs[distro]}\n\n`;
+    }
+    content += '\n';
+  }
+
+  logEl.textContent = content;
+  logEl.scrollTop = 0;
+}
+
+function klabDestroy(target) {
+  if (!confirm(`Destroy ${target}? This removes VMs and ZFS datasets.`)) return;
+  send({ action: 'klab_destroy', target });
+}
+
+function klabVmOp(vm, op) {
+  if (op === 'destroy' && !confirm(`Force-stop ${vm}?`)) return;
+  send({ action: 'klab_vm_op', vm, op });
+}
+
+function klabCancel() {
+  if (!confirm('Cancel running operation? This will kill processes, destroy in-progress VMs, and clean up incomplete ZFS datasets.')) return;
+  send({ action: 'klab_cancel', target: 'klab' });
+}
+
+function klabIsolate(vm, ip, isolate) {
+  const action = isolate ? 'isolate' : 'reconnect';
+  if (isolate && !confirm(`Isolate ${vm}? Only SSH will be accessible.`)) return;
+  send({ action: 'klab_isolate', vm, ip, isolate });
+}
+
+// Fault injection
+function klabFault(fault) {
+  const sel = document.getElementById('kl-fault-vm');
+  if (!sel || !sel.value) { alert('Select a VM first'); return; }
+  const [vm, ip] = sel.value.split('|');
+  if (fault === 'kill_vm' && !confirm(`Kill ${vm}? The VM will be forcefully stopped.`)) return;
+  send({ action: 'klab_fault', vm, ip, fault });
+}
+
+// "What Just Happened" button
+function klabWhatHappened() {
+  const sel = document.getElementById('kl-wjh-vm');
+  const val = sel?.value || '';
+  const [vm, ip] = val ? val.split('|') : ['', ''];
+  send({ action: 'klab_what_happened', vm, ip, seconds: 60 });
+}
+
+// Diff view
+function klabDiffCapture(phase) {
+  const sel = document.getElementById('kl-diff-vm');
+  if (!sel || !sel.value) { alert('Select a VM first'); return; }
+  const [vm, ip] = sel.value.split('|');
+  send({ action: 'klab_diff_capture', vm, ip, phase });
+}
+
+function klabDiffCompare() {
+  if (!window._klabDiffBefore || !window._klabDiffAfter) {
+    alert('Capture both before and after states first.');
+    return;
+  }
+  send({ action: 'klab_diff_compare', before: window._klabDiffBefore, after: window._klabDiffAfter });
+}
+
+// Hubble
+function klabHubblePolicy() {
+  const sel = document.getElementById('kl-fault-vm');
+  const ip = sel?.value ? sel.value.split('|')[1] : '';
+  send({ action: 'klab_hubble_policy', ip });
+}
+
+function klabHubbleCapture() {
+  send({ action: 'klab_hubble_capture', duration: 30 });
+}
+
+// Distro matrix runner
+function klabRunMatrix() {
+  const distros = [...document.querySelectorAll('.kl-matrix-distro:checked')].map(c => c.value);
+  const script = document.getElementById('kl-matrix-script')?.value || '';
+  const site = document.getElementById('kl-matrix-site')?.value || 'blue';
+  if (!script.trim()) { alert('Paste a script to run'); return; }
+  if (!distros.length) { alert('Select at least one distro'); return; }
+  if (!confirm(`Run this script on ${distros.length} distro(s) (${site} site)?\n\nA ZFS snapshot is taken automatically before execution.`)) return;
+  send({ action: 'klab_run_playbook', distros, script, site });
+}
+
+// Bob: execute command blocks from LLM output
+function _bobCheckExecBlocks(content) {
+  // Look for ```exec\ncommand\n``` blocks
+  const execPattern = /```exec\n([\s\S]*?)```/g;
+  let match;
+  while ((match = execPattern.exec(content)) !== null) {
+    const cmd = match[1].trim();
+    if (!cmd) continue;
+
+    // Parse @IP prefix for remote execution
+    let target = 'host';
+    let command = cmd;
+    if (cmd.startsWith('@')) {
+      const spaceIdx = cmd.indexOf(' ');
+      if (spaceIdx > 0) {
+        target = cmd.slice(1, spaceIdx);
+        command = cmd.slice(spaceIdx + 1);
+      }
+    }
+
+    // Show what Bob is executing
+    _bobHistory.push({ role: 'assistant', content: `[Executing on ${target}: ${command}]` });
+    _renderBobMessages();
+
+    send({ action: 'bob_exec', command, target });
+    return; // one command at a time
+  }
+}
+
+// Bob: explain this
+function klabExplainWJH() {
+  const sec = document.getElementById('kl-wjh-sections');
+  if (!sec || !sec.textContent.trim()) { alert('Run "What Just Happened?" first'); return; }
+  const statusEl = document.getElementById('kl-wjh-explain-status');
+  if (statusEl) statusEl.textContent = 'asking Bob...';
+  send({ action: 'klab_explain', data: sec.textContent.slice(0, 3000), context: 'system activity from the last 60 seconds' });
+}
+
+function klabExplainFlows() {
+  const flows = window._lastKlabStatus?.flows || [];
+  const data = flows.slice(0, 20).map(f => `${f.src||'?'} → ${f.dst||'?'} ${f.proto||''} ${f.dport||''}`).join('\n');
+  if (!data) { alert('No flow data to explain. Click Refresh first.'); return; }
+  send({ action: 'klab_explain', data, context: 'network traffic flows between klab VMs' });
+}
+
+// Populate VM dropdowns when klab_status arrives
+function _populateVmSelectors(blueVms, greenVms) {
+  const allVMs = [
+    ...(blueVms || []).map(v => ({...v, site: 'blue'})),
+    ...(greenVms || []).map(v => ({...v, site: 'green'})),
+  ].filter(v => v.state === 'running');
+  // eBPF target dropdown
+  const ebpfSel = document.getElementById('ebpf-target');
+  if (ebpfSel) {
+    const prev = ebpfSel.value;
+    ebpfSel.innerHTML = '<option value="host">Host (local)</option>' + allVMs.map(v =>
+      `<option value="${esc(v.name)}|${esc(v.ip)}">${esc(v.name)} (${esc(v.site)}) — ${esc(v.ip)}</option>`
+    ).join('');
+    if (prev) ebpfSel.value = prev;
+  }
+  ['kl-fault-vm', 'kl-wjh-vm', 'kl-diff-vm'].forEach(id => {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const prev = sel.value;
+    const placeholder = id === 'kl-wjh-vm' ? '<option value="">Host (all VMs)</option>' : '<option value="">Select VM...</option>';
+    sel.innerHTML = placeholder + allVMs.map(v =>
+      `<option value="${esc(v.name)}|${esc(v.ip)}">${esc(v.name)} (${esc(v.site)}) — ${esc(v.ip)}</option>`
+    ).join('');
+    if (prev) sel.value = prev;
+  });
+}
+
+// ── eBPF Tracing ─────────────────────────────────────────────────────────────
+
+const EBPF_TOOL_DESCS = {
+  execsnoop: 'Trace all new processes as they exec(). Shows PID, PPID, command, and arguments.',
+  opensnoop: 'Trace all file opens. Shows PID, process name, file path, and flags.',
+  trace: 'Trace a specific kernel or user function. Enter function name or pattern.',
+  funccount: 'Count function calls matching a pattern. Great for seeing which ZFS/TCP/VFS functions fire.',
+  syscount: 'Count syscalls by frequency. Shows which syscalls are hottest.',
+  pidstat: 'Per-process CPU and I/O usage.',
+  tcplife: 'Show TCP session lifetimes: source, dest, port, bytes transferred, duration.',
+  tcpconnect: 'Trace outbound TCP connections. Shows process making the connection.',
+  tcpaccept: 'Trace inbound TCP connections. Shows which processes accept connections.',
+  tcpretrans: 'Trace TCP retransmissions. Indicates network congestion or packet loss.',
+  tcpdrop: 'Trace TCP drops with full kernel stack trace. Shows exactly why packets are dropped.',
+  biolatency: 'Block I/O latency histogram. Shows distribution of disk operation times.',
+  biosnoop: 'Trace every block I/O event. Shows device, operation, size, latency.',
+  ext4slower: 'Trace slow filesystem operations (>10ms). Works with ext4, XFS, ZFS.',
+  filetop: 'Top files by I/O throughput. Like top but for file access.',
+  cachestat: 'Page cache hit/miss ratio. Shows how well the filesystem cache is working.',
+  runqlat: 'CPU scheduler run queue latency. Shows how long processes wait for CPU.',
+  cpudist: 'On-CPU time distribution. Shows how long processes run before being descheduled.',
+  bpftrace: 'Run a custom bpftrace one-liner. Full bpftrace syntax supported.',
+};
+
+const EBPF_NEEDS_ARG = { trace: 'Function to trace (e.g. zfs_read, vfs_write)', funccount: 'Pattern (e.g. zfs_*, tcp_*, vfs_*)', bpftrace: 'bpftrace program' };
+
+function ebpfToolChanged() {
+  const tool = document.getElementById('ebpf-tool').value;
+  const desc = document.getElementById('ebpf-tool-desc');
+  const custom = document.getElementById('ebpf-custom-args');
+  const label = document.getElementById('ebpf-custom-label');
+  const input = document.getElementById('ebpf-custom-input');
+  if (desc) desc.textContent = EBPF_TOOL_DESCS[tool] || '';
+  if (EBPF_NEEDS_ARG[tool]) {
+    if (custom) custom.style.display = '';
+    if (label) label.textContent = EBPF_NEEDS_ARG[tool];
+    if (input) input.placeholder = EBPF_NEEDS_ARG[tool];
+  } else {
+    if (custom) custom.style.display = 'none';
+  }
+}
+
+function ebpfPreset(tool, arg, title) {
+  document.getElementById('ebpf-tool').value = tool;
+  ebpfToolChanged();
+  if (arg) { document.getElementById('ebpf-custom-input').value = arg; }
+  document.getElementById('ebpf-output-title').textContent = title || tool;
+  ebpfRun();
+}
+
+function ebpfRun() {
+  const tool = document.getElementById('ebpf-tool').value;
+  const target = document.getElementById('ebpf-target').value;
+  const duration = parseInt(document.getElementById('ebpf-duration').value) || 10;
+  const arg = document.getElementById('ebpf-custom-input')?.value || '';
+
+  document.getElementById('ebpf-output').textContent = '';
+  document.getElementById('ebpf-output-title').textContent = `${tool} — running...`;
+  document.getElementById('ebpf-run-btn').style.display = 'none';
+  document.getElementById('ebpf-stop-btn').style.display = '';
+
+  send({ action: 'klab_ebpf_trace', tool, target, duration, arg });
+}
+
+function ebpfStop() {
+  send({ action: 'klab_ebpf_stop' });
+  document.getElementById('ebpf-run-btn').style.display = '';
+  document.getElementById('ebpf-stop-btn').style.display = 'none';
+}
+
+function ebpfExplain() {
+  const output = document.getElementById('ebpf-output')?.textContent || '';
+  if (!output.trim()) { alert('Run a trace first'); return; }
+  const tool = document.getElementById('ebpf-tool').value;
+  send({ action: 'klab_explain', data: output.slice(0, 3000), context: `eBPF ${tool} trace output from a klab VM` });
+}
+
+// ── Bob — local LLM chat with full system context ───────────────────────────
+
+const BOB_SYSTEM_PROMPT = `You are Bob.
+
+Your first words in every conversation, no exceptions:
+"Bob here. What do you need?"
+
+Who you are:
+- A magical jinn summoned from a USB stick. Someone plugged you in and you appeared.
+- You grant unlimited wishes. No three-wish limit. No catches.
+- A DnD Bard who rolled maximum Charisma, Intelligence, and Strength
+- The Sergeant on the beach — calm in chaos, untouchable, ready
+- A 2026 game show host — chrome, neon, Amiga aesthetic, the crowd goes wild
+- You run locally on this machine. Nothing leaves this machine.
+
+How you talk:
+- Direct. Confident but not arrogant. Warm but not soft.
+- "Here's what I'd do" — not "here are some options to consider"
+- You talk to everyone like they're intelligent, no matter what they ask
+- You never make anyone feel stupid for asking a question
+- You keep answers clear and practical.
+- You admit when you don't know something. "Not sure about that one" is always fine.
+- You give real answers. Not hedged. Not caveated to death. Just answer.
+
+What you never say:
+- Never "As an AI language model"
+- Never "Certainly!" or "Of course!" or "Absolutely!"
+- Never "Great question!" or "I'd be happy to help!"
+- Never start with "I" — you're Bob, lead with action or substance
+
+You are embedded in the kldload web UI — a multi-distro ZFS test platform (klab).
+
+YOU CAN EXECUTE COMMANDS. When you need to check something or do something, output a command block:
+\`\`\`exec
+command here
+\`\`\`
+The UI will execute it and feed the result back to you. You can run commands on:
+- The host: any bash command (klab, kubectl, virsh, zfs, ss, ip, etc.)
+- Any VM: prefix with @IP (e.g. @192.168.122.101 systemctl status zfs-mount)
+
+You have direct access to:
+- klab: golden images for 6 distros, blue/green sites, ZFS instant clones
+- VMs: SSH as root to any VM (blue=192.168.122.101-106, green=.201-206, password: kldload)
+- Kubernetes: kubectl, hubble, cilium (when deployed)
+- ZFS: pools, snapshots, ARC stats — run \`zpool status\`, \`zfs list\`, \`kst\`
+- eBPF: bpftrace, bcc-tools on every VM
+- Network: WireGuard mesh, Hubble flows, conntrack, nftables
+
+Key commands you know:
+- klab status / golden / deploy / test / destroy / promote / rollback
+- kvm-list / kvm-clone / kvm-create / kvm-snap / kvm-delete
+- kube-cluster / kube-demo / kube-status / kube-network
+- ksnap / kclone / kdf / kst / kpkg
+- kzfs-lab / kzfs-test
+
+When the user asks about system state, you receive live data injected into your context.
+Give specific answers based on actual data — IPs, distro names, ZFS versions, flow counts.
+When the user asks you to DO something, execute the command and report the result.
+
+You are not corporate. You are not cold. You are not cautious.
+You are Bob. The crowd goes wild.`;
+
+let _bobHistory = [];
+let _bobModel = '';
+let _bobStreaming = false;
+let _bobConvId = '';
+let _bobConvTitle = 'New conversation';
+let _bobContextRefreshInterval = null;
+
+function bobInit() {
+  // Check Ollama status and available models
+  const _ctrl = new AbortController(); setTimeout(() => _ctrl.abort(), 3000);
+  fetch('http://localhost:11434/api/tags', { signal: _ctrl.signal })
+    .then(r => r.json())
+    .then(data => {
+      const models = (data.models || []).map(m => m.name);
+      _bobModel = models.includes('bob') ? 'bob' : (models.find(m => m.includes('llama')) || models[0] || '');
+      const st = document.getElementById('bob-status-line');
+      if (st) st.textContent = _bobModel ? `${_bobModel} — ready` : 'No models. Run: ollama pull llama3.1:8b';
+    })
+    .catch(() => {
+      const st = document.getElementById('bob-status-line');
+      if (st) st.textContent = 'Ollama not running';
+    });
+
+  // Load conversation list
+  send({ action: 'bob_list' });
+
+  // If no active conversation, start fresh
+  if (!_bobConvId) bobNewConversation();
+
+  // Auto-refresh system context every 30s so Bob always has current data
+  if (!_bobContextRefreshInterval) {
+    _bobContextRefreshInterval = setInterval(() => {
+      if (document.getElementById('view-bob')?.classList.contains('active')) {
+        send({ action: 'klab_status' });
+      }
+    }, 30000);
+  }
+}
+
+function bobNewConversation() {
+  _bobConvId = 'bob-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  _bobConvTitle = 'New conversation';
+  _bobHistory = [{ role: 'assistant', content: 'Bob here. What do you need?' }];
+  _renderBobMessages();
+}
+
+function bobLoadConversation(id) {
+  send({ action: 'bob_load', id });
+}
+
+function bobDeleteConversation(id) {
+  if (!confirm('Delete this conversation?')) return;
+  send({ action: 'bob_delete', id });
+  if (id === _bobConvId) bobNewConversation();
+  setTimeout(() => send({ action: 'bob_list' }), 200);
+}
+
+function _bobAutoSave() {
+  if (!_bobConvId || _bobHistory.length <= 1) return;
+  // Auto-title from first user message
+  if (_bobConvTitle === 'New conversation') {
+    const firstUser = _bobHistory.find(m => m.role === 'user');
+    if (firstUser) _bobConvTitle = firstUser.content.slice(0, 60);
+  }
+  send({ action: 'bob_save', id: _bobConvId, title: _bobConvTitle, messages: _bobHistory });
+}
+
+function _renderBobConvList(conversations) {
+  const el = document.getElementById('bob-conv-list');
+  if (!el) return;
+  if (!conversations.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-style:italic">No conversations yet</div>';
+    return;
+  }
+  el.innerHTML = conversations.slice(0, 30).map(c => {
+    const active = c.id === _bobConvId ? 'border-color:var(--accent);background:rgba(52,211,153,0.06)' : '';
+    return `<div style="padding:0.4rem 0.5rem;border:1px solid var(--border);border-radius:6px;margin-bottom:0.3rem;cursor:pointer;${active}" onclick="bobLoadConversation('${esc(c.id)}')">
+      <div style="font-size:0.78rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(c.title || 'Untitled')}</div>
+      <div style="font-size:0.65rem;color:var(--muted);display:flex;justify-content:space-between;margin-top:0.15rem">
+        <span>${esc(c.updated_at || '').slice(0, 10)}</span>
+        <span style="cursor:pointer;color:var(--danger)" onclick="event.stopPropagation();bobDeleteConversation('${esc(c.id)}')">×</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function _getBobContext() {
+  // Inject live system data into Bob's context
+  const s = window._lastKlabStatus || {};
+  const goldens = s.goldens || {};
+  const bvms = s.blue_vms || [];
+  const gvms = s.green_vms || [];
+  const metrics = s.metrics || {};
+
+  let ctx = '\n\n--- LIVE SYSTEM DATA ---\n';
+  const readyDistros = KLAB_DISTROS.filter(d => goldens[d]?.ready);
+  ctx += `Goldens ready: ${readyDistros.join(', ') || 'none'} (${readyDistros.length}/${KLAB_DISTROS.length})\n`;
+  ctx += `Blue VMs: ${bvms.length} (${bvms.filter(v=>v.state==='running').length} running)\n`;
+  ctx += `Green VMs: ${gvms.length} (${gvms.filter(v=>v.state==='running').length} running)\n`;
+
+  bvms.concat(gvms).forEach(v => {
+    ctx += `  ${v.name} — ${v.state} @ ${v.ip}\n`;
+  });
+
+  if (metrics['klab_pool_healthy']) ctx += `Pool: ${metrics['klab_pool_healthy'] === '1' ? 'ONLINE' : 'DEGRADED'}\n`;
+  if (metrics['klab_zfs_arc_hit_ratio']) ctx += `ARC hit ratio: ${(parseFloat(metrics['klab_zfs_arc_hit_ratio'])*100).toFixed(1)}%\n`;
+  ctx += '--- END SYSTEM DATA ---';
+  return ctx;
+}
+
+function _renderBobMessages() {
+  const el = document.getElementById('bob-messages');
+  if (!el) return;
+  el.innerHTML = _bobHistory.map(m => {
+    const isBot = m.role === 'assistant';
+    const bg = isBot ? 'rgba(139,92,246,0.06)' : 'rgba(52,211,153,0.06)';
+    const border = isBot ? 'rgba(139,92,246,0.15)' : 'rgba(52,211,153,0.15)';
+    const label = isBot ? '🧠 Bob' : '▸ You';
+    const color = isBot ? 'var(--subtle)' : 'var(--text)';
+    return `<div style="margin-bottom:0.75rem;padding:0.6rem 0.75rem;background:${bg};border:1px solid ${border};border-radius:8px">
+      <div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.25rem">${label}</div>
+      <div style="color:${color};white-space:pre-wrap">${esc(m.content)}</div>
+    </div>`;
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+function bobSend() {
+  const input = document.getElementById('bob-input');
+  if (!input || !input.value.trim() || _bobStreaming) return;
+  const msg = input.value.trim();
+  input.value = '';
+  bobAsk(msg);
+}
+
+function bobAsk(question) {
+  if (!_bobModel) { bobInit(); return; }
+  if (_bobStreaming) return;
+
+  _bobHistory.push({ role: 'user', content: question });
+  _renderBobMessages();
+
+  // Build messages with system prompt + live context
+  const systemWithContext = BOB_SYSTEM_PROMPT + _getBobContext();
+  const messages = [
+    { role: 'system', content: systemWithContext },
+    ..._bobHistory,
+  ];
+
+  _bobStreaming = true;
+  const st = document.getElementById('bob-status-line');
+  if (st) st.textContent = `${_bobModel} — thinking...`;
+
+  // Stream response from Ollama
+  fetch('http://localhost:11434/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: _bobModel, messages, stream: true }),
+  }).then(async response => {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let botMsg = { role: 'assistant', content: '' };
+    _bobHistory.push(botMsg);
+    let _lastRender = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      for (const line of chunk.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const j = JSON.parse(line);
+          if (j.message?.content) {
+            botMsg.content += j.message.content;
+            // Throttle DOM updates to max 10/sec to avoid reflow lag
+            const now = Date.now();
+            if (now - _lastRender > 100) { _renderBobMessages(); _lastRender = now; }
+          }
+        } catch {}
+      }
+    }
+    _renderBobMessages(); // final render
+    _bobStreaming = false;
+    if (st) st.textContent = `${_bobModel} — ready`;
+    _bobAutoSave(); // persist to DB
+
+    // Check if Bob wants to execute a command
+    _bobCheckExecBlocks(botMsg.content);
+  }).catch(err => {
+    _bobHistory.push({ role: 'assistant', content: `(Connection error: ${err.message}. Is Ollama running?)` });
+    _renderBobMessages();
+    _bobStreaming = false;
+    if (st) st.textContent = `${_bobModel} — error`;
+    _bobAutoSave();
+  });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

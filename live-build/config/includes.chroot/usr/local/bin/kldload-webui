@@ -156,10 +156,70 @@ def db_init():
         created_at   TEXT NOT NULL,
         updated_at   TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS bob_conversations (
+        id          TEXT PRIMARY KEY,
+        title       TEXT DEFAULT 'New conversation',
+        messages    TEXT NOT NULL DEFAULT '[]',
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
     """)
     con.commit()
     con.close()
     LOG.info("State DB ready: %s", DB_PATH)
+
+# ── Bob conversation persistence ──────────────────────────────────────────────
+
+def db_bob_list():
+    """List all Bob conversations, newest first."""
+    con = _db_connect()
+    rows = con.execute(
+        "SELECT id, title, created_at, updated_at FROM bob_conversations ORDER BY updated_at DESC"
+    ).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+def db_bob_load(conv_id):
+    """Load a Bob conversation by ID."""
+    con = _db_connect()
+    row = con.execute(
+        "SELECT id, title, messages, created_at, updated_at FROM bob_conversations WHERE id=?",
+        (conv_id,)
+    ).fetchone()
+    con.close()
+    if row:
+        result = dict(row)
+        result["messages"] = json.loads(result["messages"])
+        return result
+    return None
+
+def db_bob_save(conv_id, title, messages):
+    """Create or update a Bob conversation."""
+    con = _db_connect()
+    now = _db_now()
+    row = con.execute("SELECT id FROM bob_conversations WHERE id=?", (conv_id,)).fetchone()
+    if row:
+        con.execute(
+            "UPDATE bob_conversations SET title=?, messages=?, updated_at=? WHERE id=?",
+            (title, json.dumps(messages), now, conv_id)
+        )
+    else:
+        con.execute(
+            "INSERT INTO bob_conversations (id, title, messages, created_at, updated_at) VALUES (?,?,?,?,?)",
+            (conv_id, title, json.dumps(messages), now, now)
+        )
+    con.commit()
+    con.close()
+    return conv_id
+
+def db_bob_delete(conv_id):
+    """Delete a Bob conversation."""
+    con = _db_connect()
+    con.execute("DELETE FROM bob_conversations WHERE id=?", (conv_id,))
+    con.commit()
+    con.close()
+
+# ── Template CRUD ─────────────────────────────────────────────────────────────
 
 def db_save_template(type_, name, description, data):
     """Insert or update a template by type+name. Returns the id."""
@@ -667,6 +727,8 @@ def get_system_info():
         except Exception:
             pass
         info["wg"][iface] = entry
+    # klab availability (installed klab profile or klab binary present)
+    info["klab_available"] = os.path.isfile("/usr/local/bin/klab")
     return info
 
 
@@ -1223,11 +1285,81 @@ async def ws_handler(websocket):
                     limit  = msg.get("limit", "localhost")
                     extra  = msg.get("extra_vars", {})
                     import json as _json
+                    await _auto_snapshot(websocket, "ansible")
                     cmd = ["ansible-playbook", pb, "-i", "localhost,",
                            "--connection", "local", "-l", limit]
                     if extra:
                         cmd += ["--extra-vars", _json.dumps(extra)]
                     await _stream_proc(websocket, cmd, target="ansible_log")
+
+                # ── klab actions ──────────────────────────────────────
+                elif action == "klab_cancel":
+                    await _klab_cancel(websocket, msg)
+                elif action == "klab_status":
+                    await _klab_status(websocket)
+                elif action == "klab_golden":
+                    await _klab_golden(websocket, msg)
+                elif action == "klab_verify":
+                    await _klab_verify(websocket, msg)
+                elif action == "klab_deploy":
+                    await _klab_deploy(websocket, msg)
+                elif action == "klab_promote":
+                    await _klab_promote(websocket, msg)
+                elif action == "klab_rollback":
+                    await _klab_rollback(websocket)
+                elif action == "klab_test":
+                    await _klab_test(websocket, msg)
+                elif action == "klab_destroy":
+                    await _klab_destroy(websocket, msg)
+                elif action == "klab_vm_op":
+                    await _klab_vm_op(websocket, msg)
+                elif action == "klab_isolate":
+                    await _klab_isolate(websocket, msg)
+                elif action == "klab_metrics":
+                    await _klab_metrics(websocket)
+                elif action == "klab_flows":
+                    await _klab_flows(websocket)
+                elif action == "klab_test_results":
+                    await _klab_test_results(websocket, msg)
+                elif action == "klab_fault":
+                    await _klab_fault(websocket, msg)
+                elif action == "klab_what_happened":
+                    await _klab_what_happened(websocket, msg)
+                elif action == "klab_diff_capture":
+                    await _klab_diff_capture(websocket, msg)
+                elif action == "klab_diff_compare":
+                    await _klab_diff_compare(websocket, msg)
+                elif action == "klab_hubble_status":
+                    await _klab_hubble_status(websocket)
+                elif action == "klab_hubble_policy":
+                    await _klab_hubble_policy(websocket, msg)
+                elif action == "klab_hubble_capture":
+                    await _klab_hubble_capture(websocket, msg)
+                elif action == "klab_run_playbook":
+                    await _klab_run_playbook(websocket, msg)
+                elif action == "klab_explain":
+                    await _klab_explain(websocket, msg)
+                elif action == "bob_list":
+                    convos = db_bob_list()
+                    await websocket.send(json.dumps({"type": "bob_list", "conversations": convos}))
+                elif action == "bob_load":
+                    conv = db_bob_load(msg.get("id", ""))
+                    if conv:
+                        await websocket.send(json.dumps({"type": "bob_loaded", "conversation": conv}))
+                    else:
+                        await websocket.send(json.dumps({"type": "error", "msg": "conversation not found"}))
+                elif action == "bob_save":
+                    db_bob_save(msg.get("id", str(uuid.uuid4())), msg.get("title", ""), msg.get("messages", []))
+                    await websocket.send(json.dumps({"type": "bob_saved"}))
+                elif action == "bob_delete":
+                    db_bob_delete(msg.get("id", ""))
+                    await websocket.send(json.dumps({"type": "bob_deleted"}))
+                elif action == "bob_exec":
+                    await _bob_execute(websocket, msg)
+                elif action == "klab_ebpf_trace":
+                    await _klab_ebpf_trace(websocket, msg)
+                elif action == "klab_ebpf_stop":
+                    await _klab_ebpf_stop(websocket)
 
                 else:
                     await websocket.send(json.dumps({
@@ -1348,7 +1480,7 @@ async def _wg_remove_peer(websocket, msg):
 
 
 async def _stream_proc(websocket, cmd, env=None, target="log"):
-    """Run a command, stream stdout/stderr lines to websocket."""
+    """Run a command, stream stdout/stderr lines to websocket. Trackable + cancellable."""
     await websocket.send(json.dumps({"type": "exec_start", "cmd": str(cmd), "target": target}))
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -1357,15 +1489,99 @@ async def _stream_proc(websocket, cmd, env=None, target="log"):
         stderr=asyncio.subprocess.STDOUT,
         env={**os.environ, **(env or {})},
     )
-    async for line in proc.stdout:
-        await websocket.send(json.dumps({
-            "type": "log_line",
-            "line": line.decode(errors="replace").rstrip(),
-            "target": target,
-        }))
-    rc = await proc.wait()
+    RUNNING_PROCS[target] = proc
+    try:
+        async for line in proc.stdout:
+            await websocket.send(json.dumps({
+                "type": "log_line",
+                "line": line.decode(errors="replace").rstrip(),
+                "target": target,
+            }))
+        rc = await proc.wait()
+    except Exception:
+        rc = -1
+    finally:
+        RUNNING_PROCS.pop(target, None)
     await websocket.send(json.dumps({"type": "exec_done", "rc": rc, "target": target}))
     return rc
+
+
+async def _klab_cancel(websocket, msg):
+    """Cancel a running klab operation — kill process, destroy VMs, clean ZFS."""
+    target = msg.get("target", "klab")
+    proc = RUNNING_PROCS.get(target)
+
+    await websocket.send(json.dumps({
+        "type": "log_line", "target": target,
+        "line": "\n[cancel] Stopping operation...",
+    }))
+
+    # 1. Kill the tracked process
+    if proc and proc.returncode is None:
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+
+    # 2. Kill any klab child processes
+    for pattern in ["klab golden", "klab deploy", "klab test", "klab destroy",
+                     "virt-install", "qemu-img convert"]:
+        subprocess.call(["pkill", "-f", pattern], stderr=subprocess.DEVNULL)
+
+    # 3. Destroy any in-progress golden VMs
+    try:
+        out = subprocess.check_output(["virsh", "list", "--all", "--name"],
+                                       text=True, stderr=subprocess.DEVNULL)
+        for line in out.strip().splitlines():
+            name = line.strip()
+            if name.startswith("klab-golden-"):
+                subprocess.call(["virsh", "destroy", name], stderr=subprocess.DEVNULL)
+                subprocess.call(["virsh", "undefine", name, "--nvram"],
+                                stderr=subprocess.DEVNULL)
+                await websocket.send(json.dumps({
+                    "type": "log_line", "target": target,
+                    "line": f"[cancel] Destroyed VM: {name}",
+                }))
+    except Exception:
+        pass
+
+    # 4. Clean up incomplete ZFS datasets (golden builds that didn't finish)
+    try:
+        out = subprocess.check_output(["zfs", "list", "-H", "-o", "name"],
+                                       text=True, stderr=subprocess.DEVNULL)
+        for line in out.strip().splitlines():
+            ds = line.strip()
+            if "/vms/klab-golden-" in ds:
+                # Only destroy if no @golden snapshot (incomplete build)
+                snap_check = subprocess.call(
+                    ["zfs", "list", "-t", "snapshot", f"{ds}@golden"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if snap_check != 0:
+                    subprocess.call(["zfs", "destroy", "-Rf", ds],
+                                    stderr=subprocess.DEVNULL)
+                    await websocket.send(json.dumps({
+                        "type": "log_line", "target": target,
+                        "line": f"[cancel] Cleaned up incomplete: {ds}",
+                    }))
+    except Exception:
+        pass
+
+    # 5. Clean up cloud-init ISOs
+    try:
+        import glob as _glob
+        for iso in _glob.glob("/var/lib/libvirt/isos/klab-golden-*-cloud-init.iso"):
+            os.remove(iso)
+    except Exception:
+        pass
+
+    RUNNING_PROCS.pop(target, None)
+    await websocket.send(json.dumps({
+        "type": "log_line", "target": target,
+        "line": "[cancel] Cleanup complete.",
+    }))
+    await websocket.send(json.dumps({"type": "exec_done", "rc": -1, "target": target}))
+    LOG.info("Cancelled and cleaned up: %s", target)
 
 async def _run_wipe_disk(websocket, msg):
     disk = msg.get("disk", "")
@@ -2336,6 +2552,1195 @@ def _get_ssl_context():
     except Exception as e:
         LOG.warning("TLS setup failed, falling back to plain HTTP: %s", e)
         return None
+
+# ── Auto-snapshot safety net ──────────────────────────────────────────────────
+
+async def _auto_snapshot(websocket, label="pre-action"):
+    """Take automatic ZFS snapshot before destructive operations. Safety net."""
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    snap_name = f"rpool@klab-{label}-{ts}"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "zfs", "snapshot", "-r", snap_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        await proc.wait()
+        if proc.returncode == 0:
+            await websocket.send(json.dumps({
+                "type": "log_line", "target": "klab",
+                "line": f"[snapshot] Auto-snapshot: {snap_name}",
+            }))
+            db_log_event("auto_snapshot", snap_name, f"Pre-{label} safety snapshot")
+            return snap_name
+        else:
+            LOG.warning("Auto-snapshot failed (rc=%d) — proceeding anyway", proc.returncode)
+    except Exception as e:
+        LOG.warning("Auto-snapshot failed: %s — proceeding anyway", e)
+    return None
+
+# ── klab handler implementations ──────────────────────────────────────────────
+
+KLAB_DISTROS = ["centos", "rocky", "fedora", "debian", "ubuntu", "rhel"]
+
+def _klab_get_golden_info():
+    """Inspect ZFS snapshots and VM state for all klab golden/site VMs."""
+    pool = "rpool"
+    goldens = {}
+    for distro in KLAB_DISTROS:
+        name = f"klab-golden-{distro}"
+        snap = f"{pool}/vms/{name}@golden"
+        info = {"distro": distro, "ready": False, "size": "", "kernel": "", "zfs_ver": ""}
+        try:
+            out = subprocess.check_output(
+                ["zfs", "list", "-Hp", "-o", "used,referenced", snap],
+                text=True, stderr=subprocess.DEVNULL).strip()
+            parts = out.split('\t')
+            info["ready"] = True
+            info["size"] = _human_size(int(parts[1])) if len(parts) > 1 else "?"
+        except Exception:
+            pass
+        # Read cached golden log for kernel/ZFS version
+        log_path = Path(f"/root/klab/goldens/{distro}-latest.log")
+        if log_path.exists():
+            try:
+                content = log_path.read_text(errors="replace")
+                for line in content.splitlines():
+                    if "Kernel:" in line:
+                        info["kernel"] = line.split("Kernel:")[-1].strip()[:30]
+                    if "ZFS version:" in line:
+                        info["zfs_ver"] = line.split("ZFS version:")[-1].strip()[:30]
+            except Exception:
+                pass
+        goldens[distro] = info
+    return goldens
+
+def _klab_get_site_vms(site):
+    """Get running VMs for a klab site (blue or green)."""
+    vms = []
+    try:
+        out = subprocess.check_output(
+            ["virsh", "list", "--all", "--name"],
+            text=True, stderr=subprocess.DEVNULL)
+        for line in out.strip().splitlines():
+            name = line.strip()
+            if not name or not name.startswith(f"klab-{site}-"):
+                continue
+            distro = name.replace(f"klab-{site}-", "")
+            state = "unknown"
+            ip = ""
+            try:
+                st = subprocess.check_output(
+                    ["virsh", "domstate", name],
+                    text=True, stderr=subprocess.DEVNULL).strip()
+                state = st
+            except Exception:
+                pass
+            # Get IP from static assignment: blue=192.168.122.10x, green=192.168.122.20x
+            try:
+                idx = KLAB_DISTROS.index(distro) + 1
+            except ValueError:
+                idx = 0
+            if idx:
+                base = 100 if site == "blue" else 200
+                ip = f"192.168.122.{base + idx}"
+            vms.append({"name": name, "distro": distro, "state": state, "ip": ip})
+    except Exception:
+        pass
+    return vms
+
+def _klab_get_test_results():
+    """Read latest test results from /root/klab/."""
+    results = {}
+    results_dir = Path("/root/klab")
+    if not results_dir.exists():
+        return results
+    # Find latest run directory
+    runs = sorted([d for d in results_dir.iterdir()
+                   if d.is_dir() and d.name.startswith("run-")],
+                  key=lambda d: d.stat().st_mtime, reverse=True)
+    if not runs:
+        return results
+    latest = runs[0]
+    results["run_id"] = latest.name
+    results["distros"] = {}
+    for f in latest.glob("*.summary"):
+        distro = f.stem
+        data = {}
+        try:
+            for line in f.read_text().splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    data[k.strip()] = v.strip()
+        except Exception:
+            pass
+        results["distros"][distro] = data
+    return results
+
+
+async def _klab_status(websocket):
+    """Return comprehensive klab status: goldens, sites, tests, pool metrics."""
+    try:
+        goldens = _klab_get_golden_info()
+    except Exception as e:
+        LOG.warning("klab_status: golden info failed: %s", e)
+        goldens = {}
+    try:
+        blue_vms = _klab_get_site_vms("blue")
+    except Exception as e:
+        LOG.warning("klab_status: blue VM list failed: %s", e)
+        blue_vms = []
+    try:
+        green_vms = _klab_get_site_vms("green")
+    except Exception as e:
+        LOG.warning("klab_status: green VM list failed: %s", e)
+        green_vms = []
+    try:
+        tests = _klab_get_test_results()
+    except Exception as e:
+        LOG.warning("klab_status: test results failed: %s", e)
+        tests = {}
+
+    # Pool metrics from klab-exporter if running
+    metrics = {}
+    try:
+        import urllib.request
+        r = urllib.request.urlopen("http://localhost:9101/metrics", timeout=2)
+        if r.status == 200:
+            text = r.read().decode(errors="replace")
+            for line in text.splitlines():
+                if line.startswith("#"):
+                    continue
+                if line.startswith("klab_"):
+                    parts = line.split(" ", 1)
+                    if len(parts) == 2:
+                        metrics[parts[0]] = parts[1].strip()
+    except Exception:
+        pass
+
+    await websocket.send(json.dumps({
+        "type": "klab_status",
+        "goldens": goldens,
+        "blue_vms": blue_vms,
+        "green_vms": green_vms,
+        "tests": tests,
+        "metrics": metrics,
+    }))
+
+
+async def _klab_golden(websocket, msg):
+    """Build klab golden image(s). Streams logs."""
+    distro = msg.get("distro", "all")
+    if distro != "all" and distro not in KLAB_DISTROS:
+        await websocket.send(json.dumps({"type": "error", "msg": f"invalid distro: {distro}"}))
+        return
+    env = {}
+    if msg.get("zfs_dev"):
+        env["KLAB_ZFS_DEV"] = "1"
+    zfs_source = msg.get("zfs_source", "")
+    if zfs_source:
+        env["ZFS_SOURCE"] = zfs_source
+    await _stream_proc(websocket, ["klab", "golden", distro], env=env, target="klab")
+    # Refresh status after build
+    await _klab_status(websocket)
+
+
+async def _klab_verify(websocket, msg):
+    """Verify klab golden image(s)."""
+    distro = msg.get("distro", "all")
+    if distro != "all" and distro not in KLAB_DISTROS:
+        await websocket.send(json.dumps({"type": "error", "msg": f"invalid distro: {distro}"}))
+        return
+    await _stream_proc(websocket, ["klab", "verify", distro], target="klab")
+
+
+async def _klab_deploy(websocket, msg):
+    """Deploy klab site (blue or green). Streams logs."""
+    site = msg.get("site", "blue")
+    if site not in ("blue", "green"):
+        await websocket.send(json.dumps({"type": "error", "msg": "site must be 'blue' or 'green'"}))
+        return
+    await _auto_snapshot(websocket, f"deploy-{site}")
+    await _stream_proc(websocket, ["klab", "deploy", site], target="klab")
+    await _klab_status(websocket)
+
+
+async def _klab_promote(websocket, msg):
+    """Promote green to blue."""
+    site = msg.get("site", "green")
+    await _auto_snapshot(websocket, "promote")
+    await _stream_proc(websocket, ["klab", "promote", site], target="klab")
+    await _klab_status(websocket)
+
+
+async def _klab_rollback(websocket):
+    """Rollback blue to previous snapshot."""
+    await _stream_proc(websocket, ["klab", "rollback"], target="klab")
+    await _klab_status(websocket)
+
+
+async def _klab_test(websocket, msg):
+    """Run OpenZFS test suite. Streams logs."""
+    await _auto_snapshot(websocket, "test")
+    cmd = ["klab", "test"]
+    mode = msg.get("mode", "quick")
+    if mode == "full":
+        cmd.append("--full")
+    else:
+        cmd.append("--quick")
+    distro = msg.get("distro", "")
+    if distro and distro in KLAB_DISTROS:
+        cmd += ["--distro", distro]
+    execution = msg.get("execution", "parallel")
+    if execution == "series":
+        cmd.append("--serial")
+    env = {"KLAB_SERIAL": "1"} if execution == "series" else {}
+    await _stream_proc(websocket, cmd, env=env, target="klab")
+    # Send updated test results after run completes
+    await _klab_test_results(websocket, {})
+    await _klab_status(websocket)
+
+
+async def _klab_destroy(websocket, msg):
+    """Destroy klab resources."""
+    target = msg.get("target", "")
+    if target not in ("blue", "green", "all", "goldens"):
+        await websocket.send(json.dumps({"type": "error", "msg": "target must be blue|green|all|goldens"}))
+        return
+    await _auto_snapshot(websocket, f"destroy-{target}")
+    await _stream_proc(websocket, ["klab", "destroy", target], target="klab")
+    await _klab_status(websocket)
+
+
+async def _klab_vm_op(websocket, msg):
+    """Start/stop/force-stop an individual klab VM."""
+    vm = msg.get("vm", "")
+    op = msg.get("op", "")
+    if not vm or not vm.startswith("klab-"):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid VM name"}))
+        return
+    if op not in ("start", "shutdown", "destroy", "reboot"):
+        await websocket.send(json.dumps({"type": "error", "msg": "op must be start|shutdown|destroy|reboot"}))
+        return
+    try:
+        subprocess.check_call(["virsh", op, vm], stderr=subprocess.DEVNULL)
+        await websocket.send(json.dumps({"type": "klab_vm_op_done", "vm": vm, "op": op, "ok": True}))
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "klab_vm_op_done", "vm": vm, "op": op, "ok": False, "error": str(e)}))
+    await _klab_status(websocket)
+
+
+async def _klab_isolate(websocket, msg):
+    """Toggle network isolation for a klab VM using nftables."""
+    vm = msg.get("vm", "")
+    ip = msg.get("ip", "")
+    isolate = msg.get("isolate", True)  # True = isolate, False = reconnect
+
+    if not ip or not vm:
+        await websocket.send(json.dumps({"type": "error", "msg": "vm and ip required"}))
+        return
+
+    try:
+        if isolate:
+            # Drop all forwarded traffic from this VM except SSH (port 22)
+            subprocess.check_call([
+                "nft", "add", "rule", "inet", "filter", "forward",
+                "ip", "saddr", ip, "tcp", "dport", "!=", "22", "drop",
+            ], stderr=subprocess.DEVNULL)
+            subprocess.check_call([
+                "nft", "add", "rule", "inet", "filter", "forward",
+                "ip", "daddr", ip, "tcp", "sport", "!=", "22", "drop",
+            ], stderr=subprocess.DEVNULL)
+            await websocket.send(json.dumps({
+                "type": "klab_isolate_done", "vm": vm, "ip": ip,
+                "isolated": True, "msg": f"Isolated {vm} — SSH only",
+            }))
+        else:
+            # Flush forward chain and re-apply base rules (simplistic — fine for lab)
+            subprocess.check_call(
+                ["nft", "flush", "chain", "inet", "filter", "forward"],
+                stderr=subprocess.DEVNULL)
+            await websocket.send(json.dumps({
+                "type": "klab_isolate_done", "vm": vm, "ip": ip,
+                "isolated": False, "msg": f"Reconnected {vm} — full network",
+            }))
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "error", "msg": f"isolate failed: {e}"}))
+
+
+async def _klab_metrics(websocket):
+    """Fetch Prometheus metrics from klab-exporter (:9101) and return as JSON."""
+    metrics = {}
+    try:
+        import urllib.request
+        r = urllib.request.urlopen("http://localhost:9101/metrics", timeout=3)
+        if r.status == 200:
+            for line in r.read().decode(errors="replace").splitlines():
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.split(" ", 1)
+                if len(parts) == 2:
+                    metrics[parts[0]] = parts[1].strip()
+    except Exception as e:
+        metrics["_error"] = str(e)
+    await websocket.send(json.dumps({"type": "klab_metrics", "metrics": metrics}))
+
+
+async def _klab_flows(websocket):
+    """Get network flow data — try Hubble, fall back to conntrack/ss."""
+    flows = []
+
+    # Try Hubble first (Cilium eBPF flow visibility)
+    try:
+        out = subprocess.check_output(
+            ["hubble", "observe", "--last", "50", "-o", "json"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5)
+        for line in out.strip().splitlines():
+            try:
+                f = json.loads(line)
+                flows.append({
+                    "src": f.get("source", {}).get("identity", ""),
+                    "dst": f.get("destination", {}).get("identity", ""),
+                    "proto": f.get("l4", {}).get("TCP", {}).get("destination_port", ""),
+                    "verdict": f.get("verdict", ""),
+                    "time": f.get("time", ""),
+                    "source": "hubble",
+                })
+            except Exception:
+                pass
+        if flows:
+            await websocket.send(json.dumps({"type": "klab_flows", "flows": flows, "source": "hubble"}))
+            return
+    except Exception:
+        pass
+
+    # Fall back to conntrack
+    try:
+        out = subprocess.check_output(
+            ["conntrack", "-L", "-o", "extended", "--limit", "50"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5)
+        for line in out.strip().splitlines():
+            parts = line.split()
+            flow = {"raw": line.strip(), "source": "conntrack"}
+            for p in parts:
+                if p.startswith("src=") and "src" not in flow:
+                    flow["src"] = p.split("=")[1]
+                elif p.startswith("dst=") and "dst" not in flow:
+                    flow["dst"] = p.split("=")[1]
+                elif p.startswith("sport="):
+                    flow["sport"] = p.split("=")[1]
+                elif p.startswith("dport=") and "dport" not in flow:
+                    flow["dport"] = p.split("=")[1]
+            if len(parts) > 0:
+                flow["proto"] = parts[0] if parts[0] in ("tcp", "udp", "icmp") else ""
+            flows.append(flow)
+        await websocket.send(json.dumps({"type": "klab_flows", "flows": flows, "source": "conntrack"}))
+        return
+    except Exception:
+        pass
+
+    # Fall back to ss summary
+    try:
+        out = subprocess.check_output(["ss", "-s"], text=True, stderr=subprocess.DEVNULL)
+        await websocket.send(json.dumps({
+            "type": "klab_flows", "flows": [], "source": "ss",
+            "summary": out.strip(),
+        }))
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "klab_flows", "flows": [], "source": "none", "error": str(e)}))
+
+
+# ── ZFS Test Results (detailed) ────────────────────────────────────────────────
+
+def _klab_get_all_test_runs():
+    """Return all test runs with summaries, not just latest."""
+    results_dir = Path("/root/klab")
+    if not results_dir.exists():
+        return []
+    runs = sorted([d for d in results_dir.iterdir()
+                   if d.is_dir() and d.name.startswith("run-")],
+                  key=lambda d: d.stat().st_mtime, reverse=True)
+    all_runs = []
+    for run_dir in runs[:20]:  # last 20 runs
+        run = {
+            "run_id": run_dir.name,
+            "timestamp": datetime.datetime.fromtimestamp(
+                run_dir.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            "distros": {},
+        }
+        for f in run_dir.glob("*.summary"):
+            distro = f.stem
+            data = {}
+            try:
+                for line in f.read_text().splitlines():
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        data[k.strip()] = v.strip()
+            except Exception:
+                pass
+            run["distros"][distro] = data
+        # Total pass/fail/skip
+        total_pass = sum(int(d.get("PASS", 0)) for d in run["distros"].values())
+        total_fail = sum(int(d.get("FAIL", 0)) for d in run["distros"].values())
+        total_skip = sum(int(d.get("SKIP", 0)) for d in run["distros"].values())
+        run["total"] = {"pass": total_pass, "fail": total_fail, "skip": total_skip}
+        all_runs.append(run)
+    return all_runs
+
+
+async def _klab_test_results(websocket, msg):
+    """Return detailed test results — all runs or a specific run."""
+    run_id = msg.get("run_id", "")
+    runs = _klab_get_all_test_runs()
+
+    if run_id:
+        # Return detail for a specific run including log content
+        run = next((r for r in runs if r["run_id"] == run_id), None)
+        if not run:
+            await websocket.send(json.dumps({"type": "error", "msg": f"run not found: {run_id}"}))
+            return
+        # Read per-distro log files
+        run_dir = Path(f"/root/klab/{run_id}")
+        logs = {}
+        for f in run_dir.glob("*.log"):
+            try:
+                logs[f.stem] = f.read_text(errors="replace")[-16384:]  # last 16KB
+            except Exception:
+                pass
+        await websocket.send(json.dumps({
+            "type": "klab_test_detail",
+            "run": run,
+            "logs": logs,
+        }))
+    else:
+        await websocket.send(json.dumps({
+            "type": "klab_test_runs",
+            "runs": runs,
+        }))
+
+
+# ── Fault injection ───────────────────────────────────────────────────────────
+
+async def _klab_fault(websocket, msg):
+    """Inject network faults into klab VMs for chaos testing."""
+    vm = msg.get("vm", "")
+    ip = msg.get("ip", "")
+    fault = msg.get("fault", "")
+
+    if not vm or not ip:
+        await websocket.send(json.dumps({"type": "error", "msg": "vm and ip required"}))
+        return
+
+    await _auto_snapshot(websocket, f"fault-{fault}")
+
+    result = {"type": "klab_fault_done", "vm": vm, "fault": fault, "ok": False}
+
+    try:
+        if fault == "network_down":
+            # Drop all traffic to/from this VM
+            subprocess.check_call([
+                "nft", "add", "rule", "inet", "filter", "forward",
+                "ip", "saddr", ip, "drop",
+            ], stderr=subprocess.DEVNULL)
+            subprocess.check_call([
+                "nft", "add", "rule", "inet", "filter", "forward",
+                "ip", "daddr", ip, "drop",
+            ], stderr=subprocess.DEVNULL)
+            result["ok"] = True
+            result["msg"] = f"Network down: {vm} — all traffic dropped"
+
+        elif fault == "packet_loss":
+            # tc netem: 30% packet loss on the bridge for this VM's traffic
+            pct = msg.get("percent", "30")
+            if not re.match(r'^\d{1,3}$', str(pct)):
+                pct = "30"
+            # Find the tap interface for this VM
+            tap = ""
+            try:
+                ifaces = subprocess.check_output(
+                    ["virsh", "domiflist", vm],
+                    text=True, stderr=subprocess.DEVNULL).strip().splitlines()
+                # Skip header lines, find first interface name
+                for line in ifaces:
+                    parts = line.split()
+                    if parts and parts[0].startswith(("vnet", "tap", "macvtap")):
+                        tap = parts[0]; break
+            except Exception:
+                pass
+            if tap:
+                subprocess.check_call([
+                    "tc", "qdisc", "replace", "dev", tap, "root", "netem",
+                    "loss", f"{pct}%", "delay", "50ms",
+                ], stderr=subprocess.DEVNULL)
+                result["ok"] = True
+                result["msg"] = f"Packet loss {pct}% + 50ms delay on {vm} ({tap})"
+            else:
+                result["msg"] = f"Could not find tap interface for {vm}"
+
+        elif fault == "kill_vm":
+            subprocess.check_call(["virsh", "destroy", vm], stderr=subprocess.DEVNULL)
+            result["ok"] = True
+            result["msg"] = f"Killed {vm} — VM forcefully stopped"
+
+        elif fault == "clear":
+            # Remove all faults: flush nft forward chain, remove tc qdisc
+            subprocess.call(
+                ["nft", "flush", "chain", "inet", "filter", "forward"],
+                stderr=subprocess.DEVNULL)
+            try:
+                ifaces = subprocess.check_output(
+                    ["virsh", "domiflist", vm],
+                    text=True, stderr=subprocess.DEVNULL).strip().splitlines()
+                for line in ifaces:
+                    parts = line.split()
+                    if parts and parts[0].startswith(("vnet", "tap", "macvtap")):
+                        subprocess.call(["tc", "qdisc", "del", "dev", parts[0], "root"],
+                                        stderr=subprocess.DEVNULL)
+                        break
+            except Exception:
+                pass
+            result["ok"] = True
+            result["msg"] = f"Faults cleared for {vm}"
+
+        else:
+            result["msg"] = f"Unknown fault type: {fault}"
+
+    except Exception as e:
+        result["msg"] = str(e)
+
+    await websocket.send(json.dumps(result))
+
+
+# ── "What Just Happened" — eBPF + Hubble last 60s summary ────────────────────
+
+async def _klab_what_happened(websocket, msg):
+    """Capture last 60s of system activity: syscalls, network, file writes."""
+    vm = msg.get("vm", "")
+    ip = msg.get("ip", "")
+    seconds = msg.get("seconds", 60)
+    target = "klab"
+
+    await websocket.send(json.dumps({
+        "type": "log_line", "target": target,
+        "line": f"[what-happened] Gathering last {seconds}s of activity" + (f" for {vm}" if vm else "") + "...",
+    }))
+
+    sections = []
+
+    # 1. Hubble flows (if available)
+    try:
+        since = f"{seconds}s"
+        cmd = ["hubble", "observe", "--last", "100", "--since", f"{since}ago", "-o", "compact"]
+        if ip:
+            cmd += ["--ip-filter", ip]
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=10)
+        if out.strip():
+            sections.append(("Network Flows (Hubble)", out.strip()))
+    except Exception:
+        pass
+
+    # 2. Recent connections (conntrack)
+    try:
+        out = subprocess.check_output(
+            ["conntrack", "-L", "-o", "extended", "--limit", "30"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5)
+        if ip:
+            out = "\n".join(l for l in out.splitlines() if ip in l)
+        if out.strip():
+            sections.append(("Active Connections (conntrack)", out.strip()))
+    except Exception:
+        pass
+
+    # 3. Recent file writes (from audit log or find)
+    if vm and ip:
+        try:
+            mmin_val = max(1, seconds // 60 + 1)
+            out = subprocess.check_output(
+                ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+                 f"root@{ip}",
+                 f"find / -maxdepth 4 -mmin -{mmin_val} "
+                 f"-not -path '/proc/*' -not -path '/sys/*' -not -path '/run/*' "
+                 f"-type f 2>/dev/null | head -30"],
+                text=True, stderr=subprocess.DEVNULL, timeout=15)
+            if out.strip():
+                sections.append((f"Recent File Changes ({vm})", out.strip()))
+        except Exception:
+            pass
+
+    # 4. Listening ports
+    if vm and ip:
+        try:
+            out = subprocess.check_output(
+                ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+                 f"root@{ip}", "ss -tlnp 2>/dev/null | head -20"],
+                text=True, stderr=subprocess.DEVNULL, timeout=10)
+            if out.strip():
+                sections.append((f"Listening Ports ({vm})", out.strip()))
+        except Exception:
+            pass
+
+    # 5. Recent systemd journal (last 60s)
+    if vm and ip:
+        try:
+            out = subprocess.check_output(
+                ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+                 f"root@{ip}", f"journalctl --no-pager --since='{seconds} seconds ago' 2>/dev/null | tail -30"],
+                text=True, stderr=subprocess.DEVNULL, timeout=10)
+            if out.strip():
+                sections.append((f"Journal ({vm})", out.strip()))
+        except Exception:
+            pass
+
+    # 6. Host-level: recent dmesg
+    try:
+        out = subprocess.check_output(
+            ["dmesg", "--time-format=reltime", "-T"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5)
+        lines = out.strip().splitlines()[-15:]
+        if lines:
+            sections.append(("Host dmesg (last 15)", "\n".join(lines)))
+    except Exception:
+        pass
+
+    # Format and send
+    if not sections:
+        await websocket.send(json.dumps({
+            "type": "klab_what_happened",
+            "summary": "(No activity captured in the last {seconds}s. Is the VM running?)",
+            "sections": [],
+        }))
+    else:
+        formatted = []
+        for title, body in sections:
+            formatted.append({"title": title, "body": body})
+        summary_lines = [f"=== {s['title']} ===" for s in formatted]
+        await websocket.send(json.dumps({
+            "type": "klab_what_happened",
+            "summary": f"Captured {len(sections)} sections of activity in the last {seconds}s",
+            "sections": formatted,
+        }))
+
+
+# ── Diff view: before/after comparison ────────────────────────────────────────
+
+async def _klab_diff_capture(websocket, msg):
+    """Capture system state for before/after diffing."""
+    vm = msg.get("vm", "")
+    ip = msg.get("ip", "")
+    phase = msg.get("phase", "before")  # "before" or "after"
+
+    if not ip:
+        await websocket.send(json.dumps({"type": "error", "msg": "ip required for diff capture"}))
+        return
+
+    state = {}
+    try:
+        # Installed packages
+        pkgs = subprocess.check_output(
+            ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+             f"root@{ip}",
+             "rpm -qa --qf '%{NAME}\\n' 2>/dev/null || dpkg -l 2>/dev/null | awk '/^ii/{print $2}' || pacman -Qq 2>/dev/null"],
+            text=True, stderr=subprocess.DEVNULL, timeout=15).strip()
+        state["packages"] = sorted(pkgs.splitlines())
+    except Exception:
+        state["packages"] = []
+
+    try:
+        # Listening ports
+        ports = subprocess.check_output(
+            ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+             f"root@{ip}", "ss -tlnp 2>/dev/null"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10).strip()
+        state["ports"] = ports.splitlines()
+    except Exception:
+        state["ports"] = []
+
+    try:
+        # Running processes
+        procs = subprocess.check_output(
+            ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+             f"root@{ip}", "ps -eo comm= 2>/dev/null | sort -u"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10).strip()
+        state["processes"] = sorted(procs.splitlines())
+    except Exception:
+        state["processes"] = []
+
+    try:
+        # Active network connections
+        conns = subprocess.check_output(
+            ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+             f"root@{ip}", "ss -tnp 2>/dev/null | tail -n +2"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10).strip()
+        state["connections"] = conns.splitlines()
+    except Exception:
+        state["connections"] = []
+
+    try:
+        # Enabled systemd services
+        svcs = subprocess.check_output(
+            ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+             f"root@{ip}", "systemctl list-unit-files --state=enabled --no-pager --no-legend 2>/dev/null | awk '{print $1}'"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10).strip()
+        state["services"] = sorted(svcs.splitlines())
+    except Exception:
+        state["services"] = []
+
+    await websocket.send(json.dumps({
+        "type": "klab_diff_capture",
+        "phase": phase,
+        "vm": vm,
+        "ip": ip,
+        "state": state,
+    }))
+
+
+async def _klab_diff_compare(websocket, msg):
+    """Compare two captured states and return the diff."""
+    before = msg.get("before", {})
+    after = msg.get("after", {})
+
+    diff = {}
+    for key in ("packages", "processes", "services"):
+        b = set(before.get(key, []))
+        a = set(after.get(key, []))
+        diff[key] = {
+            "added": sorted(a - b),
+            "removed": sorted(b - a),
+        }
+
+    # Ports: compare raw lines
+    b_ports = set(before.get("ports", []))
+    a_ports = set(after.get("ports", []))
+    diff["ports"] = {
+        "added": sorted(a_ports - b_ports),
+        "removed": sorted(b_ports - a_ports),
+    }
+
+    # Connections: just show new ones
+    b_conns = set(before.get("connections", []))
+    a_conns = set(after.get("connections", []))
+    diff["connections"] = {
+        "added": sorted(a_conns - b_conns),
+        "removed": sorted(b_conns - a_conns),
+    }
+
+    await websocket.send(json.dumps({
+        "type": "klab_diff_result",
+        "diff": diff,
+    }))
+
+
+# ── Hubble integration ───────────────────────────────────────────────────────
+
+async def _klab_hubble_status(websocket):
+    """Check if Hubble is running and return status."""
+    status = {"running": False, "ui_url": "", "version": ""}
+    try:
+        out = subprocess.check_output(
+            ["hubble", "status", "-o", "json"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5)
+        data = json.loads(out)
+        status["running"] = True
+        status["version"] = data.get("version", "")
+        # Hubble UI typically on port 12000
+        status["ui_url"] = "http://localhost:12000"
+    except Exception:
+        pass
+
+    # Check if hubble-ui pod/service is running
+    try:
+        out = subprocess.check_output(
+            ["kubectl", "get", "svc", "-n", "kube-system", "hubble-ui",
+             "-o", "jsonpath={.spec.ports[0].nodePort}"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5)
+        if out.strip():
+            status["ui_url"] = f"http://localhost:{out.strip()}"
+            status["running"] = True
+    except Exception:
+        pass
+
+    await websocket.send(json.dumps({"type": "klab_hubble_status", "status": status}))
+
+
+async def _klab_hubble_policy(websocket, msg):
+    """Get Cilium network policy verdicts for a specific IP or all."""
+    ip = msg.get("ip", "")
+    cmd = ["hubble", "observe", "--verdict", "DROPPED", "--last", "50", "-o", "compact"]
+    if ip:
+        cmd += ["--ip-filter", ip]
+
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=10)
+        await websocket.send(json.dumps({
+            "type": "klab_hubble_policy",
+            "drops": out.strip().splitlines() if out.strip() else [],
+            "ip": ip,
+        }))
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "klab_hubble_policy",
+            "drops": [],
+            "error": str(e),
+        }))
+
+
+async def _klab_hubble_capture(websocket, msg):
+    """Capture Hubble flows to JSON for replay."""
+    duration = msg.get("duration", 30)
+    ip = msg.get("ip", "")
+    cmd = ["hubble", "observe", "--last", str(min(duration * 10, 500)), "-o", "json"]
+    if ip:
+        cmd += ["--ip-filter", ip]
+
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=duration + 5)
+        flows = []
+        for line in out.strip().splitlines():
+            try:
+                flows.append(json.loads(line))
+            except Exception:
+                pass
+        await websocket.send(json.dumps({
+            "type": "klab_hubble_capture",
+            "flows": flows,
+            "count": len(flows),
+            "duration": duration,
+        }))
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "klab_hubble_capture",
+            "flows": [],
+            "error": str(e),
+        }))
+
+
+# ── Bob / LLM "Explain this" ──────────────────────────────────────────────────
+
+async def _bob_execute(websocket, msg):
+    """Bob executes a command on the host or a VM. Returns output."""
+    cmd_str = msg.get("command", "").strip()
+    target = msg.get("target", "host")  # "host" or "vm_ip"
+
+    if not cmd_str:
+        await websocket.send(json.dumps({"type": "bob_exec", "output": "(no command)", "rc": 1}))
+        return
+
+    # Safety: block obviously dangerous commands
+    blocked = ["rm -rf /", "mkfs", "dd if=", ":(){ :|:&", "fork bomb", "> /dev/sd"]
+    if any(b in cmd_str.lower() for b in blocked):
+        await websocket.send(json.dumps({"type": "bob_exec", "output": "Bob won't run that.", "rc": 1}))
+        return
+
+    try:
+        if target == "host":
+            proc = await asyncio.create_subprocess_shell(
+                cmd_str,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            output = stdout.decode(errors="replace")
+            await websocket.send(json.dumps({
+                "type": "bob_exec",
+                "output": output[-4096:],  # last 4KB
+                "rc": proc.returncode,
+                "target": "host",
+            }))
+        else:
+            # Remote VM via SSH
+            ip = target
+            if not re.match(r'^[\d.]+$', ip):
+                await websocket.send(json.dumps({"type": "bob_exec", "output": f"invalid IP: {ip}", "rc": 1}))
+                return
+            proc = await asyncio.create_subprocess_exec(
+                "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+                f"root@{ip}", cmd_str,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            output = stdout.decode(errors="replace")
+            await websocket.send(json.dumps({
+                "type": "bob_exec",
+                "output": output[-4096:],
+                "rc": proc.returncode,
+                "target": ip,
+            }))
+    except asyncio.TimeoutError:
+        await websocket.send(json.dumps({"type": "bob_exec", "output": "(command timed out after 30s)", "rc": 124}))
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "bob_exec", "output": str(e), "rc": 1}))
+
+    db_log_event("bob_exec", cmd_str[:100], f"Bob ran: {cmd_str[:200]} on {target}")
+
+
+async def _klab_explain(websocket, msg):
+    """Send eBPF/flow data to local Ollama LLM and return plain English explanation."""
+    data = msg.get("data", "")
+    context = msg.get("context", "network traffic")
+
+    if not data:
+        await websocket.send(json.dumps({"type": "error", "msg": "no data to explain"}))
+        return
+
+    # Check if Ollama is running
+    try:
+        import urllib.request
+        r = urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2)
+        if r.status != 200:
+            raise Exception("Ollama not responding")
+        tags = json.loads(r.read())
+        models = [m["name"] for m in tags.get("models", [])]
+        if not models:
+            await websocket.send(json.dumps({
+                "type": "klab_explain",
+                "explanation": "(No models loaded in Ollama. Run: ollama pull llama3.1:8b)",
+                "model": "",
+            }))
+            return
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "klab_explain",
+            "explanation": f"(Ollama not available: {e}. Install the AI profile or run: systemctl start ollama)",
+            "model": "",
+        }))
+        return
+
+    # Pick model: prefer bob, then llama3.1:8b, then whatever's loaded
+    model = "bob"
+    if model not in models:
+        model = next((m for m in models if "llama" in m.lower()), models[0])
+
+    prompt = f"""You are a network security analyst on a kldload multi-distro test platform.
+Analyze this {context} and explain in plain English:
+- What is happening
+- Whether it looks normal or suspicious
+- What service or process is likely generating it
+- Any security concerns
+
+Be concise. 3-5 sentences max.
+
+Data:
+{data[:3000]}"""
+
+    await websocket.send(json.dumps({
+        "type": "log_line", "target": "klab",
+        "line": f"[bob] Asking {model} to explain {context}...",
+    }))
+
+    try:
+        req_data = json.dumps({
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+        }).encode()
+        req = urllib.request.Request(
+            "http://localhost:11434/api/generate",
+            data=req_data,
+            headers={"Content-Type": "application/json"},
+        )
+        r = urllib.request.urlopen(req, timeout=60)
+        resp = json.loads(r.read())
+        explanation = resp.get("response", "(no response)")
+
+        await websocket.send(json.dumps({
+            "type": "klab_explain",
+            "explanation": explanation,
+            "model": model,
+        }))
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "klab_explain",
+            "explanation": f"(LLM request failed: {e})",
+            "model": model,
+        }))
+
+
+# ── eBPF Tracing ─────────────────────────────────────────────────────────────
+
+_EBPF_PROC = None
+
+BCC_TOOLS = {
+    "execsnoop", "opensnoop", "funccount", "syscount", "trace",
+    "tcplife", "tcpconnect", "tcpaccept", "tcpretrans", "tcpdrop",
+    "biolatency", "biosnoop", "ext4slower", "filetop",
+    "cachestat", "runqlat", "cpudist", "pidstat",
+}
+
+def _find_bcc_tool(name):
+    """Find a bcc tool binary path."""
+    for path in [f"/usr/share/bcc/tools/{name}",
+                 f"/usr/sbin/{name}-bpfcc",
+                 f"/usr/bin/{name}-bpfcc",
+                 f"/usr/sbin/{name}",
+                 f"/usr/bin/{name}"]:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+async def _klab_ebpf_trace(websocket, msg):
+    """Run a bcc/bpftrace tool on host or remote VM, stream output."""
+    global _EBPF_PROC
+    tool = msg.get("tool", "execsnoop")
+    target = msg.get("target", "host")
+    duration = int(msg.get("duration", 10))
+    arg = msg.get("arg", "")
+
+    # Validate tool
+    if tool != "bpftrace" and tool not in BCC_TOOLS:
+        await websocket.send(json.dumps({"type": "error", "msg": f"unknown tool: {tool}"}))
+        return
+
+    # Build command
+    if target == "host":
+        if tool == "bpftrace":
+            cmd = ["bpftrace", "-e", arg] if arg else ["bpftrace", "-l"]
+        else:
+            bin_path = _find_bcc_tool(tool)
+            if not bin_path:
+                await websocket.send(json.dumps({"type": "error", "msg": f"{tool} not found — install bcc-tools"}))
+                return
+            cmd = [bin_path]
+            if arg and tool in ("funccount", "trace"):
+                cmd.append(arg)
+            if duration > 0 and tool in ("funccount", "biolatency", "runqlat", "cpudist", "cachestat", "syscount"):
+                cmd += [str(duration), "1"]
+    else:
+        # Remote VM via SSH — use argv form to avoid shell injection
+        parts = target.split("|")
+        ip = parts[1] if len(parts) > 1 else parts[0]
+        if not re.match(r'^[\d.]+$', ip):
+            await websocket.send(json.dumps({"type": "error", "msg": f"invalid IP: {ip}"}))
+            return
+        # Build remote command as argv list passed to SSH (no shell interpretation)
+        remote_argv = []
+        if tool == "bpftrace":
+            remote_argv = ["bpftrace", "-e", arg] if arg else ["bpftrace", "-l"]
+        else:
+            remote_argv = [tool]
+            if arg and tool in ("funccount", "trace"):
+                remote_argv.append(shlex.quote(arg))
+            if duration > 0 and tool in ("funccount", "biolatency", "runqlat", "cpudist", "cachestat", "syscount"):
+                remote_argv += [str(duration), "1"]
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+               f"root@{ip}"] + remote_argv
+
+    # Kill any existing trace
+    if _EBPF_PROC and _EBPF_PROC.returncode is None:
+        try:
+            _EBPF_PROC.kill()
+        except Exception:
+            pass
+
+    try:
+        timeout_s = duration + 5 if duration > 0 else 300
+        _EBPF_PROC = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        try:
+            if _EBPF_PROC and _EBPF_PROC.stdout:
+                async for raw_line in _EBPF_PROC.stdout:
+                    if asyncio.get_event_loop().time() > deadline:
+                        break
+                    await websocket.send(json.dumps({
+                        "type": "klab_ebpf_output",
+                        "line": raw_line.decode(errors="replace").rstrip(),
+                    }))
+        except Exception as e:
+            LOG.warning("ebpf stream error: %s", e)
+        finally:
+            # Always clean up the process
+            if _EBPF_PROC and _EBPF_PROC.returncode is None:
+                try:
+                    _EBPF_PROC.kill()
+                    await _EBPF_PROC.wait()
+                except Exception:
+                    pass
+
+        await websocket.send(json.dumps({"type": "klab_ebpf_done", "tool": tool}))
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "error", "msg": f"trace failed: {e}"}))
+
+
+async def _klab_ebpf_stop(websocket):
+    """Stop running eBPF trace."""
+    global _EBPF_PROC
+    if _EBPF_PROC and _EBPF_PROC.returncode is None:
+        try:
+            _EBPF_PROC.kill()
+            await _EBPF_PROC.wait()
+        except Exception:
+            pass
+    await websocket.send(json.dumps({"type": "klab_ebpf_done", "tool": "stopped"}))
+
+
+# ── Distro matrix runner ─────────────────────────────────────────────────────
+
+async def _klab_run_playbook(websocket, msg):
+    """Run a playbook/script against selected klab VMs. Auto-snapshot first."""
+    distros = msg.get("distros", [])  # list of distro names
+    site = msg.get("site", "blue")
+    playbook = msg.get("playbook", "")
+    script = msg.get("script", "")
+
+    if not distros:
+        distros = KLAB_DISTROS
+    if not playbook and not script:
+        await websocket.send(json.dumps({"type": "error", "msg": "playbook or script required"}))
+        return
+
+    await _auto_snapshot(websocket, "playbook")
+
+    # Get VM IPs for selected distros
+    vms = _klab_get_site_vms(site)
+    targets = [v for v in vms if v["distro"] in distros and v["state"] == "running"]
+
+    if not targets:
+        await websocket.send(json.dumps({
+            "type": "error",
+            "msg": f"No running {site} VMs for distros: {', '.join(distros)}",
+        }))
+        return
+
+    # Run against each target
+    for vm in targets:
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": "klab",
+            "line": f"\n{'='*60}\n  Running on {vm['name']} ({vm['distro']}) @ {vm['ip']}\n{'='*60}",
+        }))
+
+        if script:
+            # Inline script — pipe to SSH
+            cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                   f"root@{vm['ip']}", "bash", "-s"]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await proc.communicate(input=script.encode())
+            for line in stdout.decode(errors="replace").splitlines():
+                await websocket.send(json.dumps({
+                    "type": "log_line", "target": "klab", "line": line,
+                }))
+        elif playbook:
+            # Ansible playbook against this host
+            cmd = ["ansible-playbook", playbook, "-i", f"{vm['ip']},",
+                   "--user", "root", "--ssh-extra-args", "-o StrictHostKeyChecking=no"]
+            await _stream_proc(websocket, cmd, target="klab")
+
+    await websocket.send(json.dumps({
+        "type": "klab_playbook_done",
+        "distros": [v["distro"] for v in targets],
+        "count": len(targets),
+    }))
+    await _klab_status(websocket)
+
 
 async def main_async(args):
     import http
