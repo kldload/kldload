@@ -1036,29 +1036,34 @@ KUBEBANNER
   # a running libvirtd and network access to download ISOs. The build phase
   # creates golden images, then "deploy blue" instantiates the blue site VMs.
   if [[ "${KLDLOAD_ENABLE_DEVOPS:-0}" == "1" ]]; then
-    k_log "Enabling DevOps Lab first-boot deployment..."
-    cat > "${target}/etc/systemd/system/kdevops-firstboot.service" <<'ZFSLABFB'
+    k_log "Enabling klab first-boot deployment..."
+    cat > "${target}/etc/systemd/system/klab-firstboot.service" <<'KLABFB'
 [Unit]
-Description=kldload DevOps Lab — build 6 distro golden images + deploy blue site
-After=network-online.target libvirtd.service
+Description=klab — build golden images for all distros
+After=network-online.target libvirtd.service kldload-firstboot.service
 Wants=network-online.target
+ConditionPathExists=!/var/lib/kldload/klab-firstboot-done
 
 [Service]
 Type=oneshot
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do curl -sf --connect-timeout 5 https://cloud.debian.org >/dev/null 2>&1 && exit 0; echo "Waiting for internet ($i/30)..."; sleep 10; done'
-ExecStart=/usr/local/bin/kzfs-lab build all
-ExecStartPost=/usr/local/bin/kzfs-lab deploy blue
-ExecStartPost=/bin/bash -c 'systemctl disable kdevops-firstboot.service'
+ExecStart=/usr/local/bin/klab golden centos
+ExecStart=/usr/local/bin/klab golden rocky
+ExecStart=/usr/local/bin/klab golden fedora
+ExecStart=/usr/local/bin/klab golden debian
+ExecStart=/usr/local/bin/klab golden ubuntu
+ExecStartPost=/bin/mkdir -p /var/lib/kldload
+ExecStartPost=/bin/touch /var/lib/kldload/klab-firstboot-done
 StandardOutput=journal+console
 StandardError=journal+console
 TimeoutStartSec=7200
 
 [Install]
 WantedBy=multi-user.target
-ZFSLABFB
-    ln -sf /etc/systemd/system/kdevops-firstboot.service \
-      "${target}/etc/systemd/system/multi-user.target.wants/kdevops-firstboot.service" 2>/dev/null || true
-    k_log "DevOps Lab will auto-deploy on first boot (builds 6 golden images + blue site)"
+KLABFB
+    ln -sf /etc/systemd/system/klab-firstboot.service \
+      "${target}/etc/systemd/system/multi-user.target.wants/klab-firstboot.service" 2>/dev/null || true
+    k_log "klab will auto-build golden images on first boot (centos/rocky/fedora/debian/ubuntu)"
   fi
 
   # ── SELinux on ZFS — disabled ─────────────────────────────────────────

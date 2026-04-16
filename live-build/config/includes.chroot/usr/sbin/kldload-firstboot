@@ -1408,23 +1408,24 @@ ZFSPOOL
       log "  Bridge: br0"
       log "  Tools: kvm-create, kvm-snap, kvm-clone"
 
-      # ── Build klab golden images (all distros except RHEL) ────────────
-      # RHEL requires subscription credentials — build via UI or CLI later
-      if command -v klab >/dev/null 2>&1; then
-        log "Building klab golden images (this takes ~20 minutes)..."
-        log "  Distros: centos rocky fedora debian ubuntu"
-        log "  RHEL skipped — requires subscription credentials (use klab golden rhel)"
-        for _distro in centos rocky fedora debian ubuntu; do
-          log "  Building golden: ${_distro}..."
-          klab golden "$_distro" 2>&1 | tee -a "${LOG}" || \
-            log "  WARNING: ${_distro} golden build failed — run 'klab golden ${_distro}' manually"
-        done
-        ok "klab golden images built — run 'klab status' to verify"
-      elif command -v kzfs-test >/dev/null 2>&1; then
-        log "Building kzfs-test golden images (this takes ~20 minutes)..."
-        for _distro in centos rocky fedora debian ubuntu; do
-          kzfs-test golden "$_distro" 2>&1 | tee -a "${LOG}" || true
-        done
+      # ── Build golden images (skip if klab-firstboot.service handles it) ──
+      if [[ "${KLDLOAD_ENABLE_DEVOPS:-0}" != "1" ]]; then
+        if command -v klab >/dev/null 2>&1; then
+          log "Building klab golden images (this takes ~20 minutes)..."
+          log "  RHEL skipped — requires subscription credentials"
+          for _distro in centos rocky fedora debian ubuntu; do
+            log "  Building golden: ${_distro}..."
+            klab golden "$_distro" 2>&1 | tee -a "${LOG}" || \
+              log "  WARNING: ${_distro} golden build failed — run 'klab golden ${_distro}' manually"
+          done
+          ok "klab golden images built — run 'klab status' to verify"
+        elif command -v kzfs-test >/dev/null 2>&1; then
+          for _distro in centos rocky fedora debian ubuntu; do
+            kzfs-test golden "$_distro" 2>&1 | tee -a "${LOG}" || true
+          done
+        fi
+      else
+        log "klab golden builds deferred to klab-firstboot.service"
       fi
     fi
 
