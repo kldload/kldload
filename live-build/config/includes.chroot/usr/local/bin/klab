@@ -110,28 +110,20 @@ for f in /usr/share/OVMF/OVMF_CODE.secboot.fd \
 done
 command -v swtpm >/dev/null 2>&1 && SWTPM_AVAILABLE=1
 
-# Golden builds: NO Secure Boot (so DKMS can load modules freely during setup).
-# After golden is sealed with signed modules + MOK keys, clones get Secure Boot.
-# This is the two-phase approach:
-#   Phase 1 (golden build): UEFI only, no SB → install, sign, seal
-#   Phase 2 (clone deploy): UEFI + SB + TPM → MOK auto-enrolled, modules pre-signed
-VIRT_GOLDEN_BOOT_ARGS=(--boot uefi)
+# Golden builds: BIOS boot (cloud images are MBR, no EFI partition).
+# After golden is sealed with signed modules + MOK keys, clones also use BIOS
+# since they inherit the same partition table. Secure Boot requires UEFI which
+# requires EFI-capable images — a future enhancement for custom-built goldens.
+VIRT_GOLDEN_BOOT_ARGS=()
 
-# Clone/site boot args: Secure Boot + TPM when available
+# Clone/site boot args: Cloud images are MBR/BIOS, so clones use BIOS too.
+# Secure Boot + UEFI is for the HOST (installed via kldload), not for klab VMs.
+# klab VMs get security via MOK-signed modules + network isolation instead.
 VIRT_BOOT_ARGS=()
-if [[ $SECBOOT_AVAILABLE -eq 1 ]]; then
-  VIRT_BOOT_ARGS+=(--boot uefi,firmware.feature0.enabled=yes,firmware.feature0.name=secure-boot)
-  echo "[klab] Secure Boot: enabled for clones (OVMF: ${OVMF_SECBOOT})"
-else
-  VIRT_BOOT_ARGS+=(--boot uefi)
-  echo "[klab] Secure Boot: OVMF secboot firmware not found — clones will boot without Secure Boot" >&2
-fi
 VIRT_TPM_ARGS=()
 if [[ $SWTPM_AVAILABLE -eq 1 ]]; then
   VIRT_TPM_ARGS+=(--tpm backend.type=emulator,backend.version=2.0,model=tpm-crb)
   echo "[klab] TPM 2.0: enabled (swtpm)"
-else
-  echo "[klab] TPM 2.0: swtpm not found — VMs will not have virtual TPM" >&2
 fi
 
 # inject_mok_into_nvram — Pre-enroll MOK key into a VM's UEFI NVRAM so Secure Boot
@@ -208,14 +200,26 @@ _ssh_cmd() {
 
 get_vm_ip() {
   local vm="$1" ip="" mac=""
+  # Get MAC address first — needed for ARP + DHCP lease fallbacks
+  mac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge|network/ {print $5}' | head -1)"
   for _ in $(seq 1 90); do
+    # Method 1: QEMU guest agent (requires qemu-guest-agent installed in VM)
     ip="$(virsh domifaddr "$vm" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1)"
     [[ -n "$ip" ]] && break
-    if [[ -z "$mac" ]]; then
-      mac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}')"
-    fi
+    # Method 2: DHCP leases from libvirt
     if [[ -n "$mac" ]]; then
       ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
+      [[ -n "$ip" ]] && break
+    fi
+    # Method 3: ARP table (most reliable for cloud images without guest agent)
+    if [[ -n "$mac" ]]; then
+      ip="$(arp -n 2>/dev/null | grep -i "$mac" | awk '{print $1}')"
+      [[ -n "$ip" ]] && break
+    fi
+    # Method 4: nmap ping sweep of virbr0 subnet to populate ARP
+    if [[ -z "$ip" && -n "$mac" ]]; then
+      nmap -sn 192.168.122.0/24 >/dev/null 2>&1 || ping -c1 -b 192.168.122.255 >/dev/null 2>&1 || true
+      ip="$(arp -n 2>/dev/null | grep -i "$mac" | awk '{print $1}')"
       [[ -n "$ip" ]] && break
     fi
     sleep 2
@@ -289,6 +293,12 @@ META
 
   local runcmd_extra=""
   [[ -n "$ready_marker" ]] && runcmd_extra="  - touch ${ready_marker}"
+  # Static IP fallback via nmcli (cloud-init network-config often ignored on CentOS)
+  local bootcmd_net=""
+  if [[ -n "$static_ip" ]]; then
+    bootcmd_net="  - nmcli con mod 'cloud-init eth0' ipv4.method manual ipv4.addresses ${static_ip}/24 ipv4.gateway 192.168.122.1 ipv4.dns 192.168.122.1 2>/dev/null || nmcli con mod 'System eth0' ipv4.method manual ipv4.addresses ${static_ip}/24 ipv4.gateway 192.168.122.1 ipv4.dns 192.168.122.1 2>/dev/null || ip addr add ${static_ip}/24 dev eth0 2>/dev/null || ip addr add ${static_ip}/24 dev enp1s0 2>/dev/null || true
+  - nmcli con up 'cloud-init eth0' 2>/dev/null || nmcli con up 'System eth0' 2>/dev/null || true"
+  fi
 
   cat > "${ci_dir}/user-data" <<USERDATA
 #cloud-config
@@ -296,35 +306,27 @@ hostname: ${hostname}
 manage_etc_hosts: true
 disable_root: false
 ssh_pwauth: true
-users:
-  - default
-  - name: root
-    lock_passwd: false
-    ssh_authorized_keys:
-      - ${pubkey}
-    shell: /bin/bash
-chpasswd:
-  expire: false
-  users:
-    - name: root
-      password: kldload
-      type: text
-ssh_authorized_keys:
-  - ${pubkey}
+# No 'users' block — avoid distro-specific default user issues.
+# Set root password and SSH via bootcmd + runcmd instead.
 package_update: false
-write_files:
-  - path: /etc/ssh/sshd_config.d/99-klab.conf
-    content: |
-      PermitRootLogin yes
-      PasswordAuthentication yes
-    permissions: '0644'
-runcmd:
+# bootcmd runs early, before user modules — guarantees ready marker + root access
+bootcmd:
+  - echo 'root:kldload' | chpasswd
+  - passwd -uf root 2>/dev/null || true
+  - mkdir -p /etc/ssh/sshd_config.d
+  - echo -e 'PermitRootLogin yes\nPasswordAuthentication yes' > /etc/ssh/sshd_config.d/99-klab.conf
   - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+${bootcmd_net}
+${runcmd_extra}
+ssh_authorized_keys:
+  - ${pubkey}
+runcmd:
   - systemctl stop firewalld 2>/dev/null || true
   - systemctl disable firewalld 2>/dev/null || true
-  - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-${runcmd_extra}
+  - systemctl mask firewalld 2>/dev/null || true
+  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
 USERDATA
 
   if [[ -n "$static_ip" ]]; then
@@ -751,10 +753,10 @@ COMMON
     esac
   fi
 
-  # ── Secure Boot: MOK key generation + DKMS signing ──────────────────────
-  # Generate a per-golden MOK keypair, configure DKMS to sign modules,
-  # re-sign all existing ZFS modules, and queue MOK enrollment.
-  # This ensures klab VMs can boot with Secure Boot enforced.
+  # ── DKMS signing (optional — only if UEFI golden images are used in future) ─
+  # Cloud images are BIOS/MBR — no Secure Boot needed. Skip MOK setup entirely.
+  # When klab switches to installer-based UEFI goldens, re-enable this block.
+  if false; then
   log "  Configuring Secure Boot MOK signing on ${distro}..."
   _ssh_cmd "$ip" bash -s <<'MOKSETUP'
 set -e
@@ -848,6 +850,7 @@ fi
 
 echo "Secure Boot MOK setup complete"
 MOKSETUP
+  fi  # end disabled MOK block
 
   log "  Test environment ready on ${distro}"
 }
@@ -1229,9 +1232,6 @@ deploy_site() {
       --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 \
       "${VIRT_BOOT_ARGS[@]}" "${VIRT_TPM_ARGS[@]}" \
       --noautoconsole --import 2>&1 || { warn "Failed to boot ${sname}"; continue; }
-
-    # Auto-enroll MOK into clone's NVRAM for zero-touch Secure Boot
-    inject_mok_into_nvram "$sname" "$(golden_name "$distro")"
 
     echo -e "  ${G}${sname}${N} started"
     ((deployed++))

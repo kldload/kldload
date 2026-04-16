@@ -936,6 +936,9 @@ WantedBy=timers.target
 VIRBR0TMR
     chroot "${target}" systemctl enable kldload-virbr0.timer 2>/dev/null || true
 
+    # Ensure default libvirt network starts on boot (virbr0 — required for klab VMs)
+    chroot "${target}" bash -c 'virsh net-autostart default 2>/dev/null || true' 2>/dev/null || true
+
     k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots, kvm-* tools, Podman ZFS driver"
   fi
 

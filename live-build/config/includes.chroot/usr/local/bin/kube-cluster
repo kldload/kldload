@@ -499,13 +499,37 @@ NETCFG
   # Sleep locally — running via SSH times out (ServerAliveInterval < sleep).
   sleep 10
   # kube-setup installs kubeadm, kubelet, containerd, helm, cilium-cli, etc.
-  # Retry once because CentOS cloud images sometimes have transient dnf
-  # mirror failures on first boot when metadata caches are cold.
-  _ssh_cmd "$golden_ip" "kube-setup" || {
-    warn "kube-setup failed on first attempt — retrying after 30s..."
-    sleep 30
-    _ssh_cmd "$golden_ip" "kube-setup" || die "kube-setup failed in golden VM"
-  }
+  # Run via nohup inside the VM and poll for completion — avoids SSH timeout
+  # during long package downloads. Output goes to /tmp/kube-setup.log in the VM.
+  log "Running kube-setup in golden VM (background + polling)..."
+  _ssh_cmd "$golden_ip" "nohup kube-setup > /tmp/kube-setup.log 2>&1 &"
+  # Poll for completion: check if kube-setup process is still running
+  local _setup_wait=0
+  while _ssh_cmd "$golden_ip" "pgrep -f kube-setup" >/dev/null 2>&1; do
+    ((_setup_wait++))
+    if ((_setup_wait % 10 == 0)); then
+      local _last; _last="$(_ssh_cmd "$golden_ip" "tail -1 /tmp/kube-setup.log 2>/dev/null" 2>/dev/null || echo "...")"
+      log "  kube-setup running (${_setup_wait}0s)... ${_last}"
+    fi
+    if ((_setup_wait > 120)); then  # 20 min max
+      die "kube-setup timed out after 20 minutes"
+    fi
+    sleep 10
+  done
+  # Check exit status
+  local _setup_rc; _setup_rc="$(_ssh_cmd "$golden_ip" "cat /tmp/kube-setup.rc 2>/dev/null || echo 1" 2>/dev/null)"
+  # kube-setup doesn't write .rc — check if kubeadm got installed
+  if ! _ssh_cmd "$golden_ip" "command -v kubeadm" >/dev/null 2>&1; then
+    warn "kube-setup may have failed — kubeadm not found. Retrying..."
+    _ssh_cmd "$golden_ip" "nohup kube-setup > /tmp/kube-setup.log 2>&1 &"
+    _setup_wait=0
+    while _ssh_cmd "$golden_ip" "pgrep -f kube-setup" >/dev/null 2>&1; do
+      ((_setup_wait++)); sleep 10
+      if ((_setup_wait > 120)); then die "kube-setup retry timed out"; fi
+    done
+    _ssh_cmd "$golden_ip" "command -v kubeadm" >/dev/null 2>&1 || die "kube-setup failed in golden VM"
+  fi
+  log "  kube-setup complete — kubeadm installed"
 
   # Seal the golden image for cloning. This is critical — without it, every
   # clone would have the same machine-id, hostname, and cloud-init instance-id,
