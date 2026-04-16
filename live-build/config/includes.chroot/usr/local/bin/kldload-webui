@@ -1356,6 +1356,10 @@ async def ws_handler(websocket):
                     await websocket.send(json.dumps({"type": "bob_deleted"}))
                 elif action == "bob_exec":
                     await _bob_execute(websocket, msg)
+                elif action == "bob_chat":
+                    await _bob_chat(websocket, msg)
+                elif action == "bob_models":
+                    await _bob_models(websocket)
                 elif action == "klab_ebpf_trace":
                     await _klab_ebpf_trace(websocket, msg)
                 elif action == "klab_ebpf_stop":
@@ -3415,6 +3419,66 @@ async def _klab_hubble_capture(websocket, msg):
 
 
 # ── Bob / LLM "Explain this" ──────────────────────────────────────────────────
+
+async def _bob_models(websocket):
+    """Check Ollama status and return available models."""
+    try:
+        import urllib.request
+        r = urllib.request.urlopen("http://localhost:11434/api/tags", timeout=3)
+        data = json.loads(r.read())
+        models = [m["name"] for m in data.get("models", [])]
+        await websocket.send(json.dumps({"type": "bob_models", "models": models, "ok": True}))
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "bob_models", "models": [], "ok": False, "error": str(e)}))
+
+
+async def _bob_chat(websocket, msg):
+    """Stream a chat response from Ollama. Proxied server-side so browser doesn't need direct access."""
+    model = msg.get("model", "")
+    messages = msg.get("messages", [])
+
+    if not model or not messages:
+        await websocket.send(json.dumps({"type": "error", "msg": "model and messages required"}))
+        return
+
+    try:
+        import urllib.request
+        req_data = json.dumps({"model": model, "messages": messages, "stream": True}).encode()
+        req = urllib.request.Request(
+            "http://localhost:11434/api/chat",
+            data=req_data,
+            headers={"Content-Type": "application/json"},
+        )
+        r = urllib.request.urlopen(req, timeout=120)
+
+        # Stream response chunks
+        buffer = b""
+        while True:
+            chunk = r.read(1024)
+            if not chunk:
+                break
+            buffer += chunk
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                if not line.strip():
+                    continue
+                try:
+                    j = json.loads(line)
+                    content = j.get("message", {}).get("content", "")
+                    done = j.get("done", False)
+                    if content:
+                        await websocket.send(json.dumps({
+                            "type": "bob_chat_chunk",
+                            "content": content,
+                            "done": done,
+                        }))
+                except Exception:
+                    pass
+
+        await websocket.send(json.dumps({"type": "bob_chat_done"}))
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "bob_chat_error", "error": str(e)}))
+
 
 async def _bob_execute(websocket, msg):
     """Bob executes a command on the host or a VM. Returns output."""

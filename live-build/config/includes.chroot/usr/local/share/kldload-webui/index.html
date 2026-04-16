@@ -1881,6 +1881,47 @@ function handle(msg) {
       if (!_bobStreaming) bobAsk('Interpret the command output above. What does it tell us?');
       break;
     }
+    case 'bob_models': {
+      if (msg.ok && msg.models.length) {
+        const models = msg.models;
+        _bobModel = models.includes('bob') ? 'bob' : (models.find(m => m.includes('llama')) || models[0]);
+        const st = document.getElementById('bob-status-line');
+        if (st) st.textContent = `${_bobModel} — ready`;
+      } else {
+        const st = document.getElementById('bob-status-line');
+        if (st) st.textContent = 'Ollama not running. Run: systemctl start ollama';
+      }
+      break;
+    }
+    case 'bob_chat_chunk': {
+      if (_bobCurrentMsg) {
+        _bobCurrentMsg.content += msg.content;
+        const now = Date.now();
+        if (now - (_bobLastRender || 0) > 100) { _renderBobMessages(); _bobLastRender = now; }
+      }
+      break;
+    }
+    case 'bob_chat_done': {
+      _renderBobMessages();
+      _bobStreaming = false;
+      const st = document.getElementById('bob-status-line');
+      if (st) st.textContent = `${_bobModel} — ready`;
+      _bobAutoSave();
+      if (_bobCurrentMsg) _bobCheckExecBlocks(_bobCurrentMsg.content);
+      _bobCurrentMsg = null;
+      break;
+    }
+    case 'bob_chat_error': {
+      if (_bobCurrentMsg) _bobCurrentMsg.content += `\n(Error: ${msg.error})`;
+      else _bobHistory.push({ role: 'assistant', content: `(Error: ${msg.error})` });
+      _renderBobMessages();
+      _bobStreaming = false;
+      const st2 = document.getElementById('bob-status-line');
+      if (st2) st2.textContent = `${_bobModel} — error`;
+      _bobAutoSave();
+      _bobCurrentMsg = null;
+      break;
+    }
     case 'bob_list': { _renderBobConvList(msg.conversations || []); break; }
     case 'bob_loaded': {
       const c = msg.conversation;
@@ -3079,22 +3120,12 @@ let _bobStreaming = false;
 let _bobConvId = '';
 let _bobConvTitle = 'New conversation';
 let _bobContextRefreshInterval = null;
+let _bobCurrentMsg = null;
+let _bobLastRender = 0;
 
 function bobInit() {
-  // Check Ollama status and available models
-  const _ctrl = new AbortController(); setTimeout(() => _ctrl.abort(), 3000);
-  fetch('http://localhost:11434/api/tags', { signal: _ctrl.signal })
-    .then(r => r.json())
-    .then(data => {
-      const models = (data.models || []).map(m => m.name);
-      _bobModel = models.includes('bob') ? 'bob' : (models.find(m => m.includes('llama')) || models[0] || '');
-      const st = document.getElementById('bob-status-line');
-      if (st) st.textContent = _bobModel ? `${_bobModel} — ready` : 'No models. Run: ollama pull llama3.1:8b';
-    })
-    .catch(() => {
-      const st = document.getElementById('bob-status-line');
-      if (st) st.textContent = 'Ollama not running';
-    });
+  // Check Ollama status via WebSocket backend (not direct browser fetch)
+  send({ action: 'bob_models' });
 
   // Load conversation list
   send({ action: 'bob_list' });
@@ -3226,49 +3257,11 @@ function bobAsk(question) {
   const st = document.getElementById('bob-status-line');
   if (st) st.textContent = `${_bobModel} — thinking...`;
 
-  // Stream response from Ollama
-  fetch('http://localhost:11434/api/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: _bobModel, messages, stream: true }),
-  }).then(async response => {
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let botMsg = { role: 'assistant', content: '' };
-    _bobHistory.push(botMsg);
-    let _lastRender = 0;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      for (const line of chunk.split('\n')) {
-        if (!line.trim()) continue;
-        try {
-          const j = JSON.parse(line);
-          if (j.message?.content) {
-            botMsg.content += j.message.content;
-            // Throttle DOM updates to max 10/sec to avoid reflow lag
-            const now = Date.now();
-            if (now - _lastRender > 100) { _renderBobMessages(); _lastRender = now; }
-          }
-        } catch {}
-      }
-    }
-    _renderBobMessages(); // final render
-    _bobStreaming = false;
-    if (st) st.textContent = `${_bobModel} — ready`;
-    _bobAutoSave(); // persist to DB
-
-    // Check if Bob wants to execute a command
-    _bobCheckExecBlocks(botMsg.content);
-  }).catch(err => {
-    _bobHistory.push({ role: 'assistant', content: `(Connection error: ${err.message}. Is Ollama running?)` });
-    _renderBobMessages();
-    _bobStreaming = false;
-    if (st) st.textContent = `${_bobModel} — error`;
-    _bobAutoSave();
-  });
+  // Send chat via WebSocket backend (server-side Ollama proxy)
+  _bobHistory.push({ role: 'assistant', content: '' });
+  _bobCurrentMsg = _bobHistory[_bobHistory.length - 1];
+  _bobLastRender = 0;
+  send({ action: 'bob_chat', model: _bobModel, messages });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
