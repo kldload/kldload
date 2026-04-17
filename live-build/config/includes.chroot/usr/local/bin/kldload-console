@@ -1,0 +1,227 @@
+#!/bin/bash
+# Browser-embedded terminal entry point (ttyd → tmux → operator console).
+# Lives as a persistent tmux session named "kldload" so iframe reloads
+# re-attach instead of losing state. F-keys below are bound without the
+# Ctrl+B prefix so every pane is one keystroke away.
+export KUBECONFIG=/root/.kube/config
+export TERM=xterm-256color
+SESSION=kldload
+
+# ── helpers ────────────────────────────────────────────────────────────
+# k9s wrapper: only run k9s when kubectl is reachable; otherwise print a
+# helpful message and poll. Prevents a crash loop when the cluster isn't
+# bootstrapped yet.
+_k9s_wrap() {
+  while true; do
+    if [ -r "$KUBECONFIG" ] && kubectl --request-timeout=3s get nodes >/dev/null 2>&1; then
+      k9s
+    else
+      echo "▼ k9s waiting for cluster — will start as soon as kubectl is reachable."
+      echo "  (Bootstrap your cluster first: kube-cluster bootstrap --workers 3)"
+      echo ""
+      echo "  Polling every 10s. Ctrl+C to drop to a shell here."
+      sleep 10
+    fi
+  done
+}
+export -f _k9s_wrap
+
+# Helper to spawn a command in a named window, overwriting if it already
+# exists. Used by every F-key-to-content binding so a second press
+# doesn't pile up windows.
+_spawn() {
+  local name="$1"; shift
+  local cmd="$*"
+  tmux kill-window -t "${SESSION}:${name}" 2>/dev/null || true
+  tmux new-window  -t "$SESSION" -n "$name" "$cmd"
+}
+
+_kinspect_picker() {
+  # Interactive picker: list libvirt domains + cluster pods, let the user
+  # type two selections, then launch kinspect.
+  echo "── kinspect: pick two endpoints ───────────────────────────"
+  echo ""
+  echo "-- Running VMs --"
+  virsh list --name 2>/dev/null | awk 'NF'
+  echo ""
+  echo "-- Pods (cluster) --"
+  kubectl get pods -A --no-headers 2>/dev/null | awk '{printf "  %s/%s\n", $1, $2}' | head -40
+  echo ""
+  read -r -p "Endpoint 1 (vm name, ns/pod, or ip): " e1
+  read -r -p "Endpoint 2 (vm name, ns/pod, or ip): " e2
+  if [[ "$e1" == */* ]]; then
+    kinspect --pod "$e1" "$e2"
+  elif [[ "$e1" =~ ^[0-9]+\. ]]; then
+    kinspect --ip "$e1" "$e2"
+  else
+    kinspect "$e1" "$e2"
+  fi
+  echo ""
+  read -r -p "Press Enter to return…" _
+}
+export -f _kinspect_picker
+
+# ── bootstrap the session ──────────────────────────────────────────────
+if ! tmux has-session -t $SESSION 2>/dev/null; then
+  # Start with a single minimal shell as the landing pad — NO panes
+  # pre-loaded. Every F-key brings up its own content window on demand,
+  # and pressing the same key again closes it. User controls what's
+  # running, nothing steals CPU/memory just because the drawer is open.
+  tmux new-session -d -s $SESSION -n home
+  # The home tab greets the user with an ASCII-art cheatsheet covering
+  # every key binding. `menu` is aliased so a user who cleared the screen
+  # can type it to redraw. _kconsole-home uses 256-color ANSI; falls back
+  # to plain text if TERM doesn't support color.
+  tmux send-keys -t $SESSION:home "alias menu='_kconsole-home'; _kconsole-home" Enter
+
+  # ── Primary F-keys (content panes) ────────────────────────────────
+  # Bind by window NAME (=name) not index so closing/reordering doesn't
+  # break the bindings. `_spawn` recreates the window fresh on each
+  # press, so pressing F6 re-seeds htop, pressing F8 reconnects hubble.
+  # Primary panes — each F-key toggles its window on/off. Press F6 once:
+  # htop starts. Press F6 again: htop is killed. No wasteful restart.
+  # F3 (shell) and Shift+F3 (root) are intentionally NOT toggles — every
+  # press spawns a fresh shell so you can keep multiple open.
+  tmux bind -n F2  run-shell "_ktoggle-win k9s    'bash -c _k9s_wrap'"
+  # F3 → kldload-dash: the "is everything OK?" single-pane overview of
+  # host + k8s + zfs + vms + recent warnings, auto-refreshing. Higher
+  # value than a plain shell (Alt+Enter spawns shells); drill-down
+  # targets (htop, k9s, hubble, etc.) all have their own F-keys.
+  tmux bind -n F3  run-shell "_ktoggle-win dash 'kldload-dash'"
+  tmux bind -n F4  run-shell "_ktoggle-win logs   'journalctl -f -u kldload-webui -u ttyd-k9s'"
+  tmux bind -n F5  run-shell "_ktoggle-win live   'bash -c \"journalctl -f -u kldload-* -u klab-* -u libvirtd 2>&1 | sed -u \\\"s/^/[svc] /\\\"\"'"
+  tmux bind -n F6  run-shell "_ktoggle-win htop   'htop || top'"
+  tmux bind -n F7  run-shell "_ktoggle-win events 'kubectl get events -A --watch 2>&1 || (echo no-cluster; sleep 99)'"
+  tmux bind -n F8  run-shell "_ktoggle-win hubble 'kubectl -n kube-system exec ds/cilium -c cilium-agent -- hubble observe --follow --output compact 2>&1 || (echo hubble-unavailable; sleep 99)'"
+  tmux bind -n F9  run-shell "_ktoggle-win zpool  'zpool iostat -vy 2'"
+  tmux bind -n F10 run-shell "_ktoggle-win scratch 'bash'"
+  tmux bind -n F11 run-shell "_ktoggle-win tcplife 'sudo /usr/share/bcc/tools/tcplife 2>/dev/null || sudo tcplife-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
+  tmux bind -n F12 run-shell "_ktoggle-win tcptop  'sudo /usr/share/bcc/tools/tcptop 2>/dev/null || sudo tcptop-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
+
+  # Shift+F<N> — deeper complementary views. Same toggle semantics.
+  tmux bind -n S-F2  run-shell "_ktoggle-win k-evts  'kubectl get events -A --watch --field-selector type=Warning 2>&1 || (echo no-cluster; sleep 99)'"
+  tmux bind -n S-F3  new-window -n root 'sudo -i'   # always-new root shell
+  tmux bind -n S-F4  run-shell "_ktoggle-win dmesg   'sudo dmesg --follow --human --ctime'"
+  tmux bind -n S-F5  run-shell "_ktoggle-win doctor  'while true; do clear; kldload-doctor 2>/dev/null | python3 -m json.tool | head -80; sleep 15; done'"
+  tmux bind -n S-F6  run-shell "_ktoggle-win iotop   'sudo iotop -o -P'"
+  tmux bind -n S-F7  run-shell "_ktoggle-win k-top   'watch -n 3 kubectl top pods -A --sort-by=memory'"
+  tmux bind -n S-F8  run-shell "_ktoggle-win c-drop  'kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg monitor --type drop 2>&1 || (echo cilium-unavailable; sleep 99)'"
+  tmux bind -n S-F9  run-shell "_ktoggle-win zfsio   'zfs iostat -l -v 2'"
+  tmux bind -n S-F10 run-shell "_ktoggle-win kinspect 'bash -c _kinspect_picker'"
+  tmux bind -n S-F11 run-shell "_ktoggle-win retrans 'sudo /usr/share/bcc/tools/tcpretrans 2>/dev/null || sudo tcpretrans-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
+  tmux bind -n S-F12 run-shell "_ktoggle-win connect 'sudo /usr/share/bcc/tools/tcpconnect 2>/dev/null || sudo tcpconnect-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
+
+  # ── Pane manipulation (Alt-shortcuts, no prefix) ──────────────────
+  # Alt+N is captured by browsers for tab switching, so stick to
+  # Alt+arrow / Alt+Enter / Alt+symbol which pass through reliably.
+  # Alt+arrows walk PANES within a window.
+  tmux bind -n M-Left  select-pane -L
+  tmux bind -n M-Right select-pane -R
+  tmux bind -n M-Up    select-pane -U
+  tmux bind -n M-Down  select-pane -D
+  # Shift+arrows walk between WINDOWS (tabs) in order. Lets you flip
+  # through open F-key panes without remembering which key opened which.
+  # Shift+Right = next window, Shift+Left = previous window.
+  tmux bind -n S-Right next-window
+  tmux bind -n S-Left  previous-window
+  # Shift+Up/Down jump to the newest / oldest window.
+  tmux bind -n S-Up    select-window -t :+
+  tmux bind -n S-Down  select-window -t :-
+  tmux bind -n M-Enter new-window
+  tmux bind -n "M-\\"  split-window -h -c "#{pane_current_path}"
+  tmux bind -n M--     split-window -v -c "#{pane_current_path}"
+  tmux bind -n M-x     kill-pane
+  tmux bind -n M-X     kill-window          # Alt+Shift+X — kill the whole window
+  tmux bind -n M-q     kill-window          # Alt+q — shorter alias (q for "quit this")
+  # Ctrl+q closes the current window too (keeps hand on home row if you're
+  # typing). Not using Ctrl+W because the browser eats it.
+  tmux bind -n C-q     kill-window
+
+  # ── bcc-tools "trace" group (Alt+letter) ─────────────────────────
+  # Complements the bcc-tools on F11/F12 (network-focused). These
+  # answer "what is the system actually DOING right now?" — every
+  # exec/open/block-io event with the real command line. Toggle same
+  # as the F-keys: press to open, press again to close.
+  tmux bind -n M-e  run-shell "_ktoggle-win exec   'sudo /usr/share/bcc/tools/execsnoop 2>/dev/null || sudo execsnoop-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
+  tmux bind -n M-o  run-shell "_ktoggle-win open   'sudo /usr/share/bcc/tools/opensnoop 2>/dev/null || sudo opensnoop-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
+  tmux bind -n M-b  run-shell "_ktoggle-win bio    'sudo /usr/share/bcc/tools/biosnoop  2>/dev/null || sudo biosnoop-bpfcc  2>/dev/null || (echo need-bcc-tools; sleep 99)'"
+  tmux bind -n M-k  run-shell "_ktoggle-win ksyms  'sudo /usr/share/bcc/tools/killsnoop 2>/dev/null || sudo killsnoop-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
+
+  # ── Heads-up popups (Alt+letter) ─────────────────────────────────
+  # Quick info overlays — tmux display-popup floats a window over the
+  # current pane, runs the command, waits for Enter, then closes. No
+  # window churn, no context switch: glance → dismiss. For "what's the
+  # state of X right now" questions that don't deserve a full pane.
+  tmux bind -n M-v display-popup -E -w 85% -h 80% "\
+    echo '── VMs & network ──────────────────────────────────────'; \
+    virsh list --all 2>/dev/null; echo; \
+    echo '── DHCP leases (virbr0) ───────────────────────────────'; \
+    virsh net-dhcp-leases default 2>/dev/null; echo; \
+    echo '── Host interfaces ────────────────────────────────────'; \
+    ip -br addr; echo; \
+    echo '── Default gateway ────────────────────────────────────'; \
+    ip route show default; echo; \
+    read -r -p 'Enter to dismiss…' _"
+
+  tmux bind -n M-z display-popup -E -w 85% -h 75% "\
+    echo '── ZFS pools ──────────────────────────────────────────'; \
+    zpool list; echo; \
+    zpool status -x; echo; \
+    echo '── Top datasets by USED ───────────────────────────────'; \
+    zfs list -o name,used,avail,referenced,mountpoint -s used -S 2>/dev/null | head -20; \
+    echo; \
+    echo '── ARC stats ──────────────────────────────────────────'; \
+    awk '/^size/ {printf \"size=%s\\n\",\$3}; /^c_max/ {printf \"max=%s\\n\",\$3}; /^hits/ {h=\$3}; /^misses/ {m=\$3} END {printf \"hits=%d misses=%d ratio=%.1f%%\\n\", h, m, 100*h/(h+m+1)}' /proc/spl/kstat/zfs/arcstats 2>/dev/null; \
+    echo; \
+    read -r -p 'Enter to dismiss…' _"
+
+  tmux bind -n M-w display-popup -E -w 85% -h 65% "\
+    echo '── WireGuard ──────────────────────────────────────────'; \
+    wg show 2>/dev/null || echo '(no wireguard interfaces)'; echo; \
+    echo '── IP interfaces ──────────────────────────────────────'; \
+    ip -br addr; echo; \
+    echo '── Routing table ──────────────────────────────────────'; \
+    ip route; echo; \
+    echo '── Active connections (established) ───────────────────'; \
+    ss -tn state established 2>/dev/null | head -20; \
+    read -r -p 'Enter to dismiss…' _"
+
+  tmux bind -n M-d display-popup -E -w 85% -h 55% "\
+    echo '── Disk usage ─────────────────────────────────────────'; \
+    df -h -x tmpfs -x devtmpfs; echo; \
+    echo '── Memory ─────────────────────────────────────────────'; \
+    free -h; echo; \
+    echo '── CPU ────────────────────────────────────────────────'; \
+    nproc; lscpu | grep -E 'Model name|Socket|Core|Thread'; \
+    read -r -p 'Enter to dismiss…' _"
+
+  tmux bind -n M-u display-popup -E -w 85% -h 45% "\
+    echo '── Uptime & load ──────────────────────────────────────'; \
+    uptime; echo; \
+    echo '── Logged-in users ────────────────────────────────────'; \
+    w -h; echo; \
+    echo '── Recent logins ──────────────────────────────────────'; \
+    last -n 5 2>/dev/null | head -5; \
+    read -r -p 'Enter to dismiss…' _"
+
+  tmux bind -n M-c display-popup -E -w 90% -h 85% "\
+    echo '── Cluster nodes ──────────────────────────────────────'; \
+    kubectl get nodes -o wide 2>/dev/null; echo; \
+    echo '── Pods not Running ───────────────────────────────────'; \
+    kubectl get pods -A 2>/dev/null | awk 'NR==1 || \$4!=\"Running\"' | head -20; echo; \
+    echo '── Recent events (warnings) ───────────────────────────'; \
+    kubectl get events -A --field-selector type=Warning --sort-by=.lastTimestamp 2>/dev/null | tail -10; \
+    read -r -p 'Enter to dismiss…' _"
+
+  # ── Bandwidth top (pftop equivalents) ────────────────────────────
+  # iftop is the closest Linux match for OpenBSD's pftop — top-like
+  # view of connections sorted by bandwidth with per-direction bars.
+  # nethogs shows the same data grouped by PROCESS — "who's eating
+  # the pipe". Default interface is the default-route one.
+  tmux bind -n M-p  run-shell "_ktoggle-win iftop    'sudo iftop -i \$(ip route show default 2>/dev/null | awk \"/default/ {print \\\$5; exit}\") -N -n -P 2>/dev/null || sudo iftop -N -n -P 2>/dev/null || (echo need-iftop; sleep 99)'"
+  tmux bind -n M-n  run-shell "_ktoggle-win nethogs  'sudo nethogs 2>/dev/null || (echo need-nethogs; sleep 99)'"
+
+  tmux set -g default-terminal "xterm-256color"
+  tmux set -g mouse on
+fi
+exec tmux attach-session -t $SESSION

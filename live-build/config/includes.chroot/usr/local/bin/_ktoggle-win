@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Toggle a named tmux window in the kldload session: if it exists, close
+# it; otherwise create it and run the given command. Used by every F-key
+# binding that's supposed to be a single-press on/off (so F6 starts htop,
+# F6 again kills it — no wasteful restart on every press).
+#
+# Usage: _ktoggle-win <name> <command...>
+set -u
+NAME="${1:?window name required}"; shift
+CMD="${*:-bash}"
+SESSION="${KLDLOAD_TMUX_SESSION:-kldload}"
+
+if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$NAME"; then
+    tmux kill-window -t "${SESSION}:=${NAME}"
+else
+    tmux new-window -t "$SESSION" -n "$NAME" "$CMD"
+fi

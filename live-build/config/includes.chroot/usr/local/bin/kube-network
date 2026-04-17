@@ -196,9 +196,18 @@ cmd_pin_kubelet() {
 
 # ── nft ────────────────────────────────────────────────────────────────────
 cmd_nft() {
-  local lan_if
+  local lan_if node_cidr pod_cidr
   lan_if="$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')" || true
   : "${lan_if:=eth0}"
+  # Node subnet — derived from the primary interface. This is the /24 (or
+  # whatever) that all K8s nodes share on the same L2. Used to trust
+  # kubelet:10250, hubble-peer:4244, cilium/tetragon metrics, etc. between
+  # nodes without listing every port. Worker-to-worker east-west would
+  # otherwise hit our drop policy and time out silently.
+  node_cidr="$(ip -o -f inet addr show "${lan_if}" 2>/dev/null | awk '{print $4; exit}')" || true
+  # Pod CIDR — matches the cilium helm install default. Keep in sync with
+  # ipam.operator.clusterPoolIPv4PodCIDRList used by kube-init.
+  pod_cidr="${K8S_POD_CIDR:-10.244.0.0/16}"
 
   cat > /etc/nftables.conf <<EOF
 #!/usr/sbin/nft -f
@@ -221,6 +230,16 @@ table inet filter {
     # Accept all traffic on WireGuard planes
     iifname "wg-mgmt" accept
     iifname "wg-k8s" accept
+
+    # Trust the rest of the cluster — peer K8s nodes sit on this subnet and
+    # need kubelet:10250, hubble-peer:4244, cilium metrics:2112/9962, hubble
+    # metrics:9965, tetragon metrics:2112, cilium health:4240. Listing every
+    # port is fragile; trusting the node subnet is simpler and still drops
+    # WAN traffic (policy drop + NAT on the hypervisor).
+    ${node_cidr:+ip saddr ${node_cidr} accept}
+    # Pod CIDR — hubble-relay lives in a pod and dials hubble-peer from the
+    # pod network, not the node network.
+    ip saddr ${pod_cidr} accept
 
     # K8s API server (external access if needed)
     tcp dport 6443 accept
@@ -246,6 +265,11 @@ table inet filter {
     oifname "cilium_*" accept
     iifname "lxc*" accept
     oifname "lxc*" accept
+
+    # Pod CIDR in either direction — native-routing paths and hostPort
+    # backhauls go through the primary interface, not cilium_*.
+    ip saddr ${pod_cidr} accept
+    ip daddr ${pod_cidr} accept
   }
 
   chain output {

@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# ══════════════════════════════════════════════════════════════════════════════
+# kldload-autodeploy — unattended "bring everything up" orchestrator
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Runs once, after the first boot services have converged. Reads the install
+# manifest to see what the user requested (K8s? AI? klab?), then orchestrates
+# each subsystem in the right order, writes phase-ready marker files, and
+# publishes a final /var/lib/kldload/all-ready flag.
+#
+# The web UI's firstboot_status endpoint reads these markers to drive the
+# Dashboard's Lab Ready banner (green ✅ when everything requested is done).
+#
+# Ordering rules (enforced by this script):
+#   1. AI pull runs FIRST in the background — it's ~5GB download, wants to
+#      overlap with other long work. If AI wasn't requested, skipped.
+#   2. Kubernetes bootstrap runs next (foreground) — ~15 min on fresh build,
+#      ~5 min if golden cached. Blocks until cluster is Ready or fails.
+#   3. klab golden-all runs last (foreground) — ~1hr for 5 distros. Takes
+#      the longest, so we do it last to not block faster phases.
+#   4. AI model gets pre-warmed once its pull completes (24h keepalive).
+#   5. all-ready marker written only when every requested phase has its own
+#      marker. Skipped phases don't block.
+#
+# Run status + current phase is written to /var/lib/kldload/current-phase so
+# the UI can show "Kubernetes: step 4/9 — kubeadm init" instead of a generic
+# spinner.
+#
+# Idempotent — safe to re-run. Won't redo phases that already have markers.
+# Manual trigger: `sudo kldload-autodeploy`
+# ══════════════════════════════════════════════════════════════════════════════
+
+set -uo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+MANIFEST=/etc/kldload/install-manifest.env
+EFFECTIVE=/var/log/installer/effective-config.env
+STATE_DIR=/var/lib/kldload
+LOG_FILE=/var/log/kldload/autodeploy.log
+PHASE_FILE="${STATE_DIR}/current-phase"
+
+mkdir -p "$STATE_DIR" "$(dirname "$LOG_FILE")"
+touch "$LOG_FILE"; chmod 644 "$LOG_FILE"
+
+log()   { printf '[%(%F %T)T] [autodeploy] %s\n' -1 "$*" | tee -a "$LOG_FILE" >&2; }
+phase() { printf '%s\n' "$1" > "$PHASE_FILE"; log "PHASE: $1"; }
+mark()  { touch "${STATE_DIR}/$1-ready"; log "marker: $1-ready"; }
+
+# ── Load install-time flags ───────────────────────────────────────────────────
+# Two files:
+#   /etc/kldload/install-manifest.env         — persisted manifest (user-set)
+#   /var/log/installer/effective-config.env   — computed by installer
+# Manifest is canonical, but K8S_BOOTSTRAP + KLAB_ZFS_DEV may only exist in
+# effective-config depending on installer version. Load both; manifest wins
+# on conflict.
+declare -A WANT=(
+    [k8s]=0 [ai]=0 [klab]=0
+)
+for _src in "$EFFECTIVE" "$MANIFEST"; do
+    if [[ -r "$_src" ]]; then
+        # shellcheck disable=SC1090
+        . "$_src" 2>/dev/null || true
+    fi
+done
+[[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" || "${KLDLOAD_ENABLE_K8S:-0}" == "1" ]] && WANT[k8s]=1
+[[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]] && WANT[ai]=1
+[[ "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" || "${KLDLOAD_PROFILE:-}" == "devops" ]] && WANT[klab]=1
+
+log "Requested: k8s=${WANT[k8s]} ai=${WANT[ai]} klab=${WANT[klab]}"
+
+# Early-out if nothing was requested — avoids a green "ready" banner on a
+# plain install that didn't ask for any of these. The ConditionPathExists
+# in the unit prevents re-firing; create the marker with a distinct name.
+if [[ "${WANT[k8s]}${WANT[ai]}${WANT[klab]}" == "000" ]]; then
+    phase "nothing-requested"
+    touch "${STATE_DIR}/autodeploy-skipped"
+    log "No extended services requested in install manifest — nothing to do."
+    exit 0
+fi
+
+# ── Phase 0: Prereqs ──────────────────────────────────────────────────────────
+phase "prereqs"
+# Wait up to 5 min for network-online (first boot can race here)
+for i in $(seq 1 60); do
+    getent hosts cloud.centos.org >/dev/null 2>&1 && break
+    sleep 5
+done
+# Ensure kldload web UI is up so the UI can watch progress
+systemctl is-active kldload-webui >/dev/null 2>&1 || systemctl start kldload-webui 2>/dev/null || true
+
+# kube-cluster + klab both invoke ansible-playbook for the VM provisioning
+# path (replaces cloud-init runcmd). If the installer didn't install
+# ansible-core (e.g. darksite missed it), install it now so downstream
+# phases don't bail with "ansible-playbook not installed".
+if ! command -v ansible-playbook >/dev/null 2>&1; then
+    log "[prereqs] ansible-playbook missing — installing ansible-core"
+    if command -v dnf >/dev/null 2>&1; then
+        dnf install -y ansible-core >> "$LOG_FILE" 2>&1 || log "[prereqs] ansible-core install failed — K8s phase may fail"
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y ansible-core >> "$LOG_FILE" 2>&1 || log "[prereqs] ansible-core install failed"
+    fi
+fi
+
+# ── Phase 1: AI model pull (background) ───────────────────────────────────────
+# Runs in the background so it overlaps with K8s/klab. Model weights pull is
+# bandwidth-bound; the rest of the work is CPU/disk-bound. Worst case they
+# contend a little, but overall wall-clock is shorter with parallel.
+AI_PID=""
+if [[ "${WANT[ai]}" == "1" ]]; then
+    phase "ai-pull-kicking"
+    (
+        set -e
+        log "[ai] installing ollama + pulling llama3.1:8b"
+        # Install ollama if missing
+        command -v ollama >/dev/null 2>&1 || \
+            curl -fsSL https://ollama.com/install.sh | sh >> "$LOG_FILE" 2>&1
+        systemctl enable --now ollama 2>/dev/null || true
+        # Wait for API
+        for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
+            sleep 2
+        done
+        # Pull + pin (keepalive 24h so first chat is instant)
+        ollama pull llama3.1:8b >> "$LOG_FILE" 2>&1
+        # Pull vision model only if we have GPU + 16GB+ RAM (~8GB VRAM needed)
+        _ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+        if [[ -d /proc/driver/nvidia ]] && [[ $_ram_gb -ge 16 ]]; then
+            ollama pull llama3.2-vision:11b >> "$LOG_FILE" 2>&1 || \
+                log "[ai] vision pull failed — non-fatal"
+        fi
+        # Warm
+        curl -sf -X POST http://127.0.0.1:11434/api/generate \
+            -d '{"model":"llama3.1:8b","prompt":"ok","stream":false,"keep_alive":"24h"}' \
+            >/dev/null 2>&1 || true
+        mark "ai"
+        log "[ai] complete"
+    ) &
+    AI_PID=$!
+    log "[ai] pull running as pid $AI_PID (backgrounded)"
+fi
+
+# ── Phase 2: Kubernetes bootstrap (foreground) ────────────────────────────────
+# Note: `kube-cluster bootstrap` already does clean_slate → golden → clone →
+# wg → kubeadm init → cilium/metallb/hubble/zfs-csi → join → smoke. We just
+# invoke it and it streams to its own log file.
+if [[ "${WANT[k8s]}" == "1" ]]; then
+    phase "k8s-bootstrap"
+    if [[ -f "${STATE_DIR}/k8s-ready" ]]; then
+        log "[k8s] already marked ready — skipping"
+    else
+        log "[k8s] running kube-cluster bootstrap --workers 3"
+        if kube-cluster bootstrap --workers 3 >> /var/log/kldload/kube-bootstrap.log 2>&1; then
+            mark "k8s"
+            log "[k8s] complete"
+
+            # After cluster up, install Tetragon for eBPF syscall/process/file
+            # observability. Installs from the ISO-shipped chart tarball
+            # (/root/darksite/helm-charts/tetragon.tgz) so no internet needed.
+            # Falls back to the helm repo if the tarball is missing (dev builds).
+            log "[k8s] installing Tetragon for syscall-level observability..."
+            export KUBECONFIG=/root/.kube/config
+            _tetragon_tgz="/root/darksite/helm-charts/tetragon.tgz"
+            if [[ -f "$_tetragon_tgz" ]]; then
+                helm install tetragon "$_tetragon_tgz" -n kube-system \
+                    --set tetragon.enableProcessCred=true \
+                    --set tetragon.enableProcessNs=true \
+                    --set tetragonOperator.install=true \
+                    >> "$LOG_FILE" 2>&1 && log "[k8s] Tetragon installed (offline)" \
+                    || log "[k8s] Tetragon install failed — non-fatal"
+            else
+                log "[k8s] Tetragon chart not in darksite — trying online helm repo"
+                helm repo add cilium https://helm.cilium.io/ >> "$LOG_FILE" 2>&1 || true
+                helm repo update >> "$LOG_FILE" 2>&1 || true
+                helm install tetragon cilium/tetragon -n kube-system \
+                    --set tetragon.enableProcessCred=true \
+                    --set tetragon.enableProcessNs=true \
+                    --set tetragonOperator.install=true \
+                    >> "$LOG_FILE" 2>&1 && log "[k8s] Tetragon installed (online)" \
+                    || log "[k8s] Tetragon install skipped — non-fatal"
+            fi
+        else
+            log "[k8s] FAILED — see /var/log/kldload/kube-bootstrap.log"
+        fi
+    fi
+fi
+
+# ── Phase 3: klab goldens (foreground) ────────────────────────────────────────
+# Last because it's the longest (~1hr). RHEL is auto-skipped if no creds
+# in the secrets store.
+if [[ "${WANT[klab]}" == "1" ]]; then
+    phase "klab-goldens"
+    if [[ -f "${STATE_DIR}/klab-ready" ]]; then
+        log "[klab] already marked ready — skipping"
+    else
+        log "[klab] running klab golden all"
+        if klab golden all >> /var/log/kldload/klab-firstboot.log 2>&1; then
+            mark "klab"
+            log "[klab] complete"
+        else
+            log "[klab] FAILED — see /var/log/kldload/klab-firstboot.log"
+        fi
+    fi
+fi
+
+# ── Phase 4: Wait for backgrounded AI ────────────────────────────────────────
+if [[ -n "$AI_PID" ]]; then
+    phase "ai-wait"
+    wait "$AI_PID" 2>/dev/null || true
+fi
+
+# ── Final: overall ready marker ──────────────────────────────────────────────
+# All requested phases must have written their marker. Unrequested phases
+# count as satisfied. This is what firstboot_status keys off.
+_all_ok=1
+for sub in k8s ai klab; do
+    if [[ "${WANT[$sub]}" == "1" ]] && [[ ! -f "${STATE_DIR}/${sub}-ready" ]]; then
+        _all_ok=0
+        log "SKIP all-ready: ${sub} requested but no marker"
+    fi
+done
+if [[ $_all_ok -eq 1 ]]; then
+    mark "all"
+    phase "ready"
+    log "══════════════════════════════════════════════════════════════"
+    log "  kldload is fully deployed. Everything requested is up."
+    log "══════════════════════════════════════════════════════════════"
+else
+    phase "partial"
+    log "autodeploy finished with partial success — see markers in $STATE_DIR"
+fi

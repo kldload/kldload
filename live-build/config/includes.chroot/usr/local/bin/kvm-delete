@@ -71,3 +71,11 @@ fi
 
 echo ""
 echo "Deleted '${NAME}'"
+
+# Soft-delete from the state DB — history survives, dynamic inventory drops it.
+if command -v kldload-db >/dev/null 2>&1; then
+  kldload-db vm-delete --name "${NAME}" 2>/dev/null || true
+  kldload-db node-delete --hostname "${NAME}" 2>/dev/null || true
+  kldload-db event --type "vm" --subject "${NAME}" \
+    --message "kvm-delete" 2>/dev/null || true
+fi

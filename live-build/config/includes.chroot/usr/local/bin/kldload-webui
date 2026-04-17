@@ -163,12 +163,257 @@ def db_init():
         created_at  TEXT NOT NULL,
         updated_at  TEXT NOT NULL
     );
+    -- Deployment ledger: every run of a kldload-shipped playbook against a
+    -- cluster or node lands here. User-uploaded content is NOT tracked —
+    -- the application layer is the user's responsibility.
+    CREATE TABLE IF NOT EXISTS deployments (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        cluster_id  TEXT DEFAULT '',
+        target      TEXT DEFAULT '',
+        playbook    TEXT NOT NULL,
+        extras      TEXT DEFAULT '{}',
+        status      TEXT DEFAULT 'running',
+        rc          INTEGER DEFAULT -1,
+        log_path    TEXT DEFAULT '',
+        started_at  TEXT NOT NULL,
+        finished_at TEXT DEFAULT ''
+    );
+    -- Secrets at rest. value_enc is Fernet-encrypted with the master key at
+    -- /var/lib/kldload/master.key (mode 0600). Used for SSH keys, kubeconfig,
+    -- Helm repo creds, etc. Never log or transmit the decrypted value.
+    CREATE TABLE IF NOT EXISTS secrets (
+        name        TEXT PRIMARY KEY,
+        value_enc   TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
     """)
+    # Additive migrations — ALTER TABLE IF NOT EXISTS isn't a thing in SQLite,
+    # so we inspect pragma_table_info and add missing columns idempotently.
+    def _ensure_col(table, col, decl):
+        cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+        if col not in cols:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    _ensure_col("nodes", "deleted_at", "TEXT DEFAULT ''")
+    _ensure_col("vms",   "deleted_at", "TEXT DEFAULT ''")
     con.commit()
     con.close()
     LOG.info("State DB ready: %s", DB_PATH)
 
 # ── Bob conversation persistence ──────────────────────────────────────────────
+
+# ── Secrets at rest (ZFS native encryption) ───────────────────────────────────
+# Why ZFS and not per-row Fernet: we're already running on ZFS and it provides
+# block-level encryption with key management for free. Secrets live as plain
+# files inside an encrypted dataset at /var/lib/kldload/secrets/. The DB only
+# tracks names + timestamps (never values). On boot, systemd loads the ZFS
+# key and mounts the dataset; the webui just reads/writes normal files.
+#
+# Threat model this handles:
+#   - Disk imaged or stolen → dataset is encrypted, bytes unreadable
+#   - Backup of state.db leaked → DB has names only, no ciphertext even
+#   - Cold boot before key is loaded → files unreadable
+# Threat model this does NOT handle:
+#   - Anyone with root on a running box (can read the loaded key + files)
+#
+# Fallback hierarchy:
+#   1. ZFS encrypted dataset (preferred, proper at-rest)
+#   2. Fernet per-file (if `cryptography` is installed but no ZFS)
+#   3. Plain files mode 0600 (dev / non-ZFS — logs a warning)
+
+# kldload ZFS namespace — parent + 4 purpose-specific datasets. Every dataset
+# carries `com.kldload:*` user properties so `zfs get -r com.kldload:role rpool`
+# shows exactly what belongs to us. Non-kldload datasets are untouched.
+KLDLOAD_ZFS_PARENT   = "rpool/kldload"
+KLDLOAD_ZFS_VERSION  = "1.0.4"
+SECRETS_DIR          = Path("/var/lib/kldload/secrets")
+SECRETS_DATASET      = f"{KLDLOAD_ZFS_PARENT}/secrets"
+STATE_DIR            = Path("/var/lib/kldload")
+STATE_DATASET        = f"{KLDLOAD_ZFS_PARENT}/state"
+PLAYBOOKS_DIR        = Path("/var/lib/kldload/user-playbooks")
+PLAYBOOKS_DATASET    = f"{KLDLOAD_ZFS_PARENT}/playbooks"
+ZFS_KEY_PATH         = Path("/var/lib/kldload/zfs-secrets.key")
+
+def _is_zfs_mount(path: Path) -> bool:
+    try:
+        out = subprocess.check_output(["findmnt", "-n", "-o", "FSTYPE", str(path)],
+                                      text=True, stderr=subprocess.DEVNULL, timeout=3)
+        return out.strip() == "zfs"
+    except Exception:
+        return False
+
+def _dataset_exists(ds: str) -> bool:
+    try:
+        subprocess.check_output(["zfs", "list", "-H", ds],
+                                stderr=subprocess.DEVNULL, timeout=3)
+        return True
+    except Exception:
+        return False
+
+def _have_rpool() -> bool:
+    try:
+        subprocess.check_output(["zpool", "list", "-H", "rpool"],
+                                stderr=subprocess.DEVNULL, timeout=3)
+        return True
+    except Exception:
+        return False
+
+def _zfs_create(ds: str, props: dict, role: str, purpose: str):
+    """Create ds with the given properties plus kldload labels. Idempotent."""
+    if _dataset_exists(ds):
+        return
+    cmd = ["zfs", "create"]
+    for k, v in props.items():
+        cmd += ["-o", f"{k}={v}"]
+    cmd += [
+        "-o", f"com.kldload:role={role}",
+        "-o", f"com.kldload:purpose={purpose}",
+        "-o", f"com.kldload:version={KLDLOAD_ZFS_VERSION}",
+    ]
+    cmd.append(ds)
+    subprocess.run(cmd, check=False, stderr=subprocess.DEVNULL, timeout=15)
+
+def _ensure_kldload_datasets():
+    """Create the full kldload ZFS namespace if we're on rpool. Properties are
+    set at creation time — setuid/exec/devices off on secrets, zstd compression
+    throughout, quotas to prevent disk-full attacks."""
+    if not _have_rpool():
+        return False
+
+    # Parent — canmount=off, so it's a pure namespace, not mounted anywhere.
+    _zfs_create(KLDLOAD_ZFS_PARENT,
+                {"canmount": "off", "mountpoint": "none"},
+                role="root", purpose="kldload application datasets")
+
+    # State — DB + webui bookkeeping. Not encrypted (names + timestamps only,
+    # no values live here). zstd saves space; recordsize tuned for SQLite.
+    _zfs_create(STATE_DATASET,
+                {"compression": "zstd", "atime": "off", "xattr": "sa",
+                 "recordsize": "16K", "mountpoint": str(STATE_DIR),
+                 "com.sun:auto-snapshot": "true"},
+                role="state", purpose="kldload state DB + webui data")
+
+    # Playbooks — user uploads. zstd compresses YAML well. No encryption
+    # (playbooks are operational content, not credentials).
+    _zfs_create(PLAYBOOKS_DATASET,
+                {"compression": "zstd", "atime": "off",
+                 "mountpoint": str(PLAYBOOKS_DIR),
+                 "setuid": "off", "exec": "off", "devices": "off",
+                 "quota": "1G"},
+                role="playbooks", purpose="user-uploaded Ansible playbooks")
+
+    # Secrets — native ZFS encryption. No setuid / exec / device nodes. Hard
+    # quota so a runaway upload can't fill rpool.
+    if not _dataset_exists(SECRETS_DATASET):
+        if not ZFS_KEY_PATH.exists():
+            ZFS_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            ZFS_KEY_PATH.write_bytes(os.urandom(32))
+            os.chmod(ZFS_KEY_PATH, 0o600)
+        _zfs_create(SECRETS_DATASET,
+                    {"encryption": "aes-256-gcm",
+                     "keyformat": "raw",
+                     "keylocation": f"file://{ZFS_KEY_PATH}",
+                     "compression": "zstd",
+                     "atime": "off",
+                     "setuid": "off", "exec": "off", "devices": "off",
+                     "quota": "100M",
+                     "mountpoint": str(SECRETS_DIR)},
+                    role="secrets",
+                    purpose="encrypted credential + key store")
+    # Load key + mount (no-op if already done).
+    subprocess.run(["zfs", "load-key", SECRETS_DATASET],
+                   check=False, stderr=subprocess.DEVNULL, timeout=5)
+    for ds in (STATE_DATASET, PLAYBOOKS_DATASET, SECRETS_DATASET):
+        subprocess.run(["zfs", "mount", ds],
+                       check=False, stderr=subprocess.DEVNULL, timeout=5)
+    return True
+
+def _ensure_secrets_dir():
+    """Initialize the kldload ZFS namespace + fall back to a plain 0700 dir
+    if ZFS isn't available. Idempotent, safe to call repeatedly."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    if _is_zfs_mount(SECRETS_DIR):
+        os.chmod(SECRETS_DIR, 0o700)
+        return "zfs"
+    if _ensure_kldload_datasets() and _is_zfs_mount(SECRETS_DIR):
+        os.chmod(SECRETS_DIR, 0o700)
+        return "zfs"
+    # Non-ZFS fallback (dev, live ISO before install)
+    SECRETS_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(SECRETS_DIR, 0o700)
+    return "plain"
+
+def _safe_secret_path(name: str) -> Path:
+    """Sanitize name — no path traversal, ascii alphanum + dash/underscore/dot."""
+    clean = "".join(c for c in name if c.isalnum() or c in "-_.")
+    if not clean or clean.startswith("."):
+        raise ValueError("invalid secret name")
+    return SECRETS_DIR / clean
+
+def secrets_backend():
+    """Returns 'zfs', 'plain' — what's actually protecting the bytes."""
+    if _is_zfs_mount(SECRETS_DIR):
+        return "zfs"
+    return "plain"
+
+def secret_set(name, value):
+    _ensure_secrets_dir()
+    p = _safe_secret_path(name)
+    # Write atomically + 0600. Never log the value.
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(value)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
+
+    con = _db_connect()
+    now = _db_now()
+    row = con.execute("SELECT name FROM secrets WHERE name=?", (name,)).fetchone()
+    # value_enc column holds the storage path now, not ciphertext. The actual
+    # bytes live on the encrypted dataset.
+    storage = f"file:{p}"
+    if row:
+        con.execute("UPDATE secrets SET value_enc=?, updated_at=? WHERE name=?",
+                    (storage, now, name))
+    else:
+        con.execute("INSERT INTO secrets (name, value_enc, created_at, updated_at) "
+                    "VALUES (?,?,?,?)", (name, storage, now, now))
+    con.commit()
+    con.close()
+
+def secret_get(name):
+    _ensure_secrets_dir()
+    try:
+        p = _safe_secret_path(name)
+    except ValueError:
+        return None
+    if not p.exists():
+        return None
+    try:
+        return p.read_text()
+    except Exception:
+        return None
+
+def secret_list():
+    """Metadata only — names + timestamps + backend indicator. No values."""
+    con = _db_connect()
+    rows = con.execute(
+        "SELECT name, created_at, updated_at FROM secrets ORDER BY name"
+    ).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+def secret_delete(name):
+    try:
+        p = _safe_secret_path(name)
+        if p.exists():
+            p.unlink()
+    except Exception:
+        pass
+    con = _db_connect()
+    con.execute("DELETE FROM secrets WHERE name=?", (name,))
+    con.commit()
+    con.close()
+
 
 def db_bob_list():
     """List all Bob conversations, newest first."""
@@ -672,19 +917,34 @@ def get_system_info():
             info["firstboot_status"] = f.read().strip()
     except Exception:
         info["firstboot_status"] = ""
-    # AI status — check Ollama and Open WebUI
+    # AI status — Ollama API reachable PLUS at least one model loaded into
+    # VRAM/RAM. /api/ps (running models) is the truth. /api/tags only says
+    # "model weights exist on disk" which still leaves a 30s cold-start
+    # when the user first clicks Bob. Sidebar Bob entry and the ready
+    # banner both key off ai_ollama, so gating them on /api/ps means the
+    # UI only reveals Bob once he's genuinely warm.
     info["ai_ollama"] = False
     info["ai_webui"] = False
     info["ai_model"] = ""
+    info["ai_loaded"] = False
     try:
         import urllib.request
         r = urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2)
         if r.status == 200:
-            info["ai_ollama"] = True
             import json as _json
             data = _json.loads(r.read())
             names = [m["name"] for m in data.get("models", [])]
             info["ai_model"] = ", ".join(names) if names else "no models"
+            # Only consider ollama "ready" when a model is resident
+            try:
+                r2 = urllib.request.urlopen("http://localhost:11434/api/ps", timeout=2)
+                if r2.status == 200:
+                    loaded = _json.loads(r2.read()).get("models", [])
+                    if loaded:
+                        info["ai_ollama"] = True
+                        info["ai_loaded"] = True
+            except Exception:
+                pass
     except Exception:
         pass
     try:
@@ -941,6 +1201,14 @@ async def ws_handler(websocket):
                     await _list_vms(websocket)
                 elif action == "vm_op":
                     await _vm_op(websocket, msg)
+                elif action == "vm_networks":
+                    await _vm_networks(websocket)
+                elif action == "vm_pools":
+                    await _vm_pools(websocket)
+                elif action == "vm_snapshots":
+                    await _vm_snapshots(websocket)
+                elif action == "vm_bulk":
+                    await _vm_bulk(websocket, msg)
                 elif action == "zfs_list":
                     await _zfs_list(websocket)
                 elif action == "k8s_nodes":
@@ -1095,6 +1363,42 @@ async def ws_handler(websocket):
                 elif action == "db_events":
                     events = db_list_events(msg.get("limit", 100))
                     await websocket.send(json.dumps({"type": "db_events", "events": events}))
+                elif action == "deploy_list":
+                    await _deploy_list(websocket, msg.get("limit", 50))
+                elif action == "doctor_run":
+                    await _doctor_run(websocket)
+                elif action == "kube_bootstrap_tail":
+                    # Stream the kube-cluster bootstrap log to the K8s panel.
+                    # If kube-cluster is currently running, follow the file;
+                    # otherwise send the last N lines so the user sees the
+                    # tail of the most recent run after a page refresh.
+                    await _kube_bootstrap_tail(websocket, msg.get("follow", True))
+                elif action == "firstboot_status":
+                    await _firstboot_status(websocket)
+                elif action == "secret_list":
+                    await websocket.send(json.dumps({
+                        "type": "secret_list",
+                        "backend": secrets_backend(),  # "zfs" or "plain"
+                        "secrets": secret_list(),
+                    }))
+                elif action == "secret_set":
+                    name  = (msg.get("name") or "").strip()
+                    value = msg.get("value") or ""
+                    if not name or not value:
+                        await websocket.send(json.dumps({
+                            "type": "error", "msg": "secret name and value required"}))
+                    else:
+                        secret_set(name, value)
+                        db_log_event("secret", name, "secret set (value not logged)")
+                        await websocket.send(json.dumps({
+                            "type": "secret_saved", "name": name}))
+                elif action == "secret_delete":
+                    name = (msg.get("name") or "").strip()
+                    if name:
+                        secret_delete(name)
+                        db_log_event("secret", name, "secret deleted")
+                        await websocket.send(json.dumps({
+                            "type": "secret_deleted", "name": name}))
                 elif action == "service_list":
                     svcs = db_list_services(msg.get("cluster_id") or None)
                     await websocket.send(json.dumps({"type": "service_list", "services": svcs}))
@@ -1280,17 +1584,43 @@ async def ws_handler(websocket):
                         pass
                     await websocket.send(json.dumps({"type": "network_info", "interfaces": ifaces}))
 
+                elif action == "ansible_status":
+                    await _ansible_status(websocket)
+                elif action == "ansible_list":
+                    await _ansible_list(websocket)
                 elif action == "ansible_run":
-                    pb     = msg.get("playbook", "")
-                    limit  = msg.get("limit", "localhost")
-                    extra  = msg.get("extra_vars", {})
-                    import json as _json
-                    await _auto_snapshot(websocket, "ansible")
-                    cmd = ["ansible-playbook", pb, "-i", "localhost,",
-                           "--connection", "local", "-l", limit]
-                    if extra:
-                        cmd += ["--extra-vars", _json.dumps(extra)]
-                    await _stream_proc(websocket, cmd, target="ansible_log")
+                    await _ansible_run(websocket, msg)
+                elif action == "ansible_cancel":
+                    _proc = RUNNING_PROCS.get("ansible_log")
+                    if _proc and _proc.returncode is None:
+                        try: _proc.kill()
+                        except Exception: pass
+                    await websocket.send(json.dumps({"type": "log_line", "target": "ansible_log", "line": "[cancel] killed"}))
+                elif action == "playbook_upload":
+                    await _playbook_upload(websocket, msg)
+                elif action == "playbook_delete":
+                    await _playbook_delete(websocket, msg)
+
+                elif action == "helm_status":
+                    await _helm_status(websocket)
+                elif action == "helm_repo_list":
+                    await _helm_repo_list(websocket)
+                elif action == "helm_repo_add":
+                    await _helm_repo_add(websocket, msg)
+                elif action == "helm_repo_remove":
+                    await _helm_repo_remove(websocket, msg)
+                elif action == "helm_repo_update":
+                    await _stream_proc(websocket, ["helm", "repo", "update"], target="helm_log")
+                elif action == "helm_list":
+                    await _helm_list(websocket)
+                elif action == "helm_install":
+                    await _helm_install(websocket, msg, upgrade=False)
+                elif action == "helm_upgrade":
+                    await _helm_install(websocket, msg, upgrade=True)
+                elif action == "helm_uninstall":
+                    await _helm_uninstall(websocket, msg)
+                elif action == "helm_release_status":
+                    await _helm_release_status(websocket, msg)
 
                 # ── K8s extended actions ──────────────────────────────
                 elif action == "k8s_status":
@@ -1309,6 +1639,32 @@ async def ws_handler(websocket):
                     node = msg.get("node", "")
                     if node:
                         await _stream_proc(websocket, ["kubectl", "uncordon", node], target="k8s")
+                elif action == "k8s_inspect":
+                    await _k8s_inspect(websocket, msg)
+                elif action == "k8s_top":
+                    await _k8s_top(websocket)
+                elif action == "k8s_namespaces":
+                    await _k8s_namespaces(websocket)
+                elif action == "k8s_deployments":
+                    await _k8s_deployments(websocket, msg)
+                elif action == "k8s_services":
+                    await _k8s_services(websocket, msg)
+                elif action == "k8s_scale":
+                    await _k8s_scale(websocket, msg)
+                elif action == "k8s_rollout_restart":
+                    await _k8s_rollout_restart(websocket, msg)
+                elif action == "k8s_rollout_undo":
+                    await _k8s_rollout_undo(websocket, msg)
+                elif action == "k8s_delete_pod":
+                    await _k8s_delete_pod(websocket, msg)
+                elif action == "k8s_delete_deployment":
+                    await _k8s_delete_deployment(websocket, msg)
+                elif action == "k8s_apply_yaml":
+                    await _k8s_apply_yaml(websocket, msg)
+                elif action == "k8s_bulk":
+                    await _k8s_bulk(websocket, msg)
+                elif action == "k8s_run_demo":
+                    await _k8s_run_demo(websocket, msg)
 
                 # ── klab actions ──────────────────────────────────────
                 elif action == "klab_cancel":
@@ -1327,6 +1683,9 @@ async def ws_handler(websocket):
                     await _klab_rollback(websocket)
                 elif action == "klab_test":
                     await _klab_test(websocket, msg)
+                elif action == "klab_build_ztest_goldens":
+                    target = msg.get("target", "all")
+                    await _stream_proc(websocket, ["klab", "golden-ztest", target], target="klab")
                 elif action == "klab_destroy":
                     await _klab_destroy(websocket, msg)
                 elif action == "klab_vm_op":
@@ -1376,6 +1735,15 @@ async def ws_handler(websocket):
                     await _bob_execute(websocket, msg)
                 elif action == "bob_chat":
                     await _bob_chat(websocket, msg)
+                elif action == "bob_confirm_response":
+                    cid = msg.get("confirm_id", "")
+                    fut = PENDING_CONFIRMS.get(cid)
+                    if fut and not fut.done():
+                        fut.set_result({
+                            "ok":   bool(msg.get("approved")),
+                            "args": msg.get("args") or {},
+                            "reason": msg.get("reason") or "",
+                        })
                 elif action == "bob_models":
                     await _bob_models(websocket)
                 elif action == "klab_ebpf_trace":
@@ -1388,8 +1756,19 @@ async def ws_handler(websocket):
                         "type": "error",
                         "msg": f"unknown action: {action}",
                     }))
+            except websockets.exceptions.ConnectionClosed:
+                # Browser closed/refreshed mid-flight — not an error, just
+                # let the outer except handle the disconnect cleanly.
+                raise
             except Exception as _action_err:
-                LOG.exception("Error handling action %s", action)
+                # Don't log a traceback if it's just the ws keepalive timing
+                # out — that's noise, not a code bug. Real exceptions still
+                # get the full traceback.
+                _emsg = str(_action_err)
+                if "ConnectionClosed" in _emsg or "keepalive ping timeout" in _emsg:
+                    LOG.info("Action %s skipped: client disconnected", action)
+                else:
+                    LOG.exception("Error handling action %s", action)
                 try:
                     await websocket.send(json.dumps({
                         "type": "error",
@@ -1502,9 +1881,30 @@ async def _wg_remove_peer(websocket, msg):
 
 
 async def _stream_proc(websocket, cmd, env=None, target="log"):
-    """Run a command, stream stdout/stderr lines to websocket. Trackable + cancellable."""
+    """Run a command, stream stdout/stderr lines to websocket AND tee to
+    /var/log/kldload/stream.log so the F5 firehose in the terminal
+    drawer catches every UI-triggered subprocess (kube-cluster,
+    klab, ansible, helm, demos). Also writes a per-target log
+    (/var/log/kldload/<target>.log) so history per subsystem is
+    grep-able. Trackable + cancellable."""
     _ansi_re = re.compile(r'\x1b\[[0-9;]*[mGKHF]')
     await websocket.send(json.dumps({"type": "exec_start", "cmd": str(cmd), "target": target}))
+
+    # File logging — best-effort, never kills the run if /var/log is
+    # read-only or somehow unwritable. Two streams so the firehose
+    # interleaves everything AND per-target history stays clean.
+    _stream_log = None
+    _target_log = None
+    try:
+        os.makedirs("/var/log/kldload", exist_ok=True)
+        _stream_log = open("/var/log/kldload/stream.log", "a", buffering=1)
+        _target_log = open(f"/var/log/kldload/{target}.log", "a", buffering=1)
+        _prefix = f"[{target}]"
+        _stream_log.write(f"# --- exec: {' '.join(map(str, cmd))} ---\n")
+        _target_log.write(f"# --- exec: {' '.join(map(str, cmd))} ---\n")
+    except Exception:
+        pass
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.DEVNULL,
@@ -1515,9 +1915,16 @@ async def _stream_proc(websocket, cmd, env=None, target="log"):
     RUNNING_PROCS[target] = proc
     try:
         async for line in proc.stdout:
+            clean = _ansi_re.sub('', line.decode(errors="replace").rstrip())
+            if _stream_log:
+                try: _stream_log.write(f"{_prefix} {clean}\n")
+                except Exception: pass
+            if _target_log:
+                try: _target_log.write(f"{clean}\n")
+                except Exception: pass
             await websocket.send(json.dumps({
                 "type": "log_line",
-                "line": _ansi_re.sub('', line.decode(errors="replace").rstrip()),
+                "line": clean,
                 "target": target,
             }))
         rc = await proc.wait()
@@ -1525,6 +1932,9 @@ async def _stream_proc(websocket, cmd, env=None, target="log"):
         rc = -1
     finally:
         RUNNING_PROCS.pop(target, None)
+        for _f in (_stream_log, _target_log):
+            try: _f and _f.close()
+            except Exception: pass
     await websocket.send(json.dumps({"type": "exec_done", "rc": rc, "target": target}))
     return rc
 
@@ -1922,6 +2332,118 @@ async def _tail_log(websocket, log_path):
     except Exception as e:
         lines = [f"Error reading log: {e}"]
     await websocket.send(json.dumps({"type": "log_content", "lines": lines}))
+
+async def _vm_networks(websocket):
+    """List libvirt networks for the KVM tab's Networks sub-view. Returns
+    name + state + autostart + bridge name + forward mode + IP range so
+    the user can spot 'is virbr0 up?' without leaving the UI."""
+    nets = []
+    try:
+        out = subprocess.check_output(
+            ["virsh", "net-list", "--all"], text=True, stderr=subprocess.DEVNULL, timeout=5)
+        for line in out.strip().splitlines()[2:]:  # skip header lines
+            parts = line.split()
+            if len(parts) >= 3:
+                name, state, autostart = parts[0], parts[1], parts[2]
+                bridge, mode, ip_range = "—", "—", "—"
+                try:
+                    info = subprocess.check_output(
+                        ["virsh", "net-dumpxml", name], text=True,
+                        stderr=subprocess.DEVNULL, timeout=3)
+                    import re as _re
+                    m = _re.search(r"<bridge name='([^']+)'", info); bridge = m.group(1) if m else "—"
+                    m = _re.search(r"<forward mode='([^']+)'", info); mode = m.group(1) if m else "—"
+                    m = _re.search(r"address='([^']+)'\s+netmask='([^']+)'", info)
+                    if m: ip_range = f"{m.group(1)} ({m.group(2)})"
+                except Exception:
+                    pass
+                nets.append({"name": name, "state": state, "autostart": autostart,
+                             "bridge": bridge, "mode": mode, "ip_range": ip_range})
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "vm_networks", "networks": nets}))
+
+
+async def _vm_pools(websocket):
+    """List libvirt storage pools — name, state, autostart, type, capacity,
+    allocated, available, target path."""
+    pools = []
+    try:
+        out = subprocess.check_output(
+            ["virsh", "pool-list", "--all", "--details"], text=True,
+            stderr=subprocess.DEVNULL, timeout=5)
+        # Header is 2 lines: column names + dashes; data follows.
+        for line in out.strip().splitlines()[2:]:
+            parts = line.split()
+            if len(parts) >= 7:
+                pools.append({"name": parts[0], "state": parts[1], "autostart": parts[2],
+                              "persistent": parts[3], "capacity": parts[4],
+                              "allocation": parts[5], "available": parts[6]})
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "vm_pools", "pools": pools}))
+
+
+async def _vm_snapshots(websocket):
+    """Cross-VM snapshot listing: every domain × every snapshot. Includes
+    parent + creation time so the user can see snapshot trees per VM."""
+    snaps = []
+    try:
+        names = subprocess.check_output(
+            ["virsh", "list", "--all", "--name"], text=True,
+            stderr=subprocess.DEVNULL, timeout=5).split()
+        for vm in names:
+            if not vm.strip():
+                continue
+            try:
+                out = subprocess.check_output(
+                    ["virsh", "snapshot-list", vm, "--no-metadata"],
+                    text=True, stderr=subprocess.DEVNULL, timeout=4)
+                for line in out.strip().splitlines()[2:]:
+                    parts = line.split(None, 3)
+                    if len(parts) >= 1 and parts[0]:
+                        snaps.append({
+                            "vm":      vm,
+                            "name":    parts[0],
+                            "created": " ".join(parts[1:3]) if len(parts) >= 3 else "",
+                            "state":   parts[3] if len(parts) >= 4 else "",
+                        })
+            except Exception:
+                continue
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "vm_snapshots", "snapshots": snaps}))
+
+
+async def _vm_bulk(websocket, msg):
+    """Apply a single virsh op to a list of VM names. Same UX as k8s_bulk —
+    UI sends selection, we loop serially so a failure on one doesn't kill
+    the batch. Supported ops: start, shutdown, reboot, destroy, undefine."""
+    op = msg.get("op", "")
+    targets = msg.get("targets", [])
+    valid = {"start", "shutdown", "reboot", "destroy", "undefine"}
+    if op not in valid or not targets:
+        await websocket.send(json.dumps({"type": "error", "msg": "valid op + targets required"}))
+        return
+    await websocket.send(json.dumps({"type": "vm_log",
+        "line": f"[bulk {op}] starting on {len(targets)} VM(s)..."}))
+    for name in targets:
+        if not name:
+            continue
+        try:
+            out = subprocess.check_output(["virsh", op, name],
+                                          text=True, stderr=subprocess.STDOUT, timeout=60)
+            await websocket.send(json.dumps({"type": "vm_log",
+                "line": f"[{op} {name}] {out.strip()[:200]}"}))
+        except subprocess.CalledProcessError as e:
+            await websocket.send(json.dumps({"type": "vm_log",
+                "line": f"[{op} {name}] FAILED: {(e.output or str(e))[:200]}"}))
+        except Exception as e:
+            await websocket.send(json.dumps({"type": "vm_log",
+                "line": f"[{op} {name}] ERROR: {e}"}))
+    await websocket.send(json.dumps({"type": "vm_log", "line": f"[bulk {op}] complete"}))
+    await _list_vms(websocket)
+
 
 async def _list_vms(websocket):
     vms = []
@@ -2597,6 +3119,59 @@ class WebUIHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/" or self.path == "":
             self.path = "/index.html"
+        # Download endpoint for klab test run bundles. Matches
+        #   /download/klab/<run-id>.tar.gz
+        # Builds the tarball on the fly from /root/klab/<run-id>/ so we
+        # don't leave stale bundles on disk. Safe: run-id must match
+        # the YYYYMMDD-HHMMSS shape — no path traversal.
+        if self.path.startswith("/download/klab/"):
+            import re, tarfile, io, os
+            m = re.match(r"^/download/klab/(\d{8}-\d{6})\.tar\.gz$", self.path)
+            if not m:
+                self.send_error(400, "Invalid run id"); return
+            run_id = m.group(1)
+            run_dir = f"/root/klab/{run_id}"
+            if not os.path.isdir(run_dir):
+                self.send_error(404, f"No run {run_id}"); return
+            try:
+                buf = io.BytesIO()
+                with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+                    tar.add(run_dir, arcname=f"klab-{run_id}")
+                data = buf.getvalue()
+            except Exception as e:
+                self.send_error(500, f"tar failed: {e}"); return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="klab-{run_id}.tar.gz"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        # Plain full.log download — the OpenZFS team can attach this
+        # single file to a bug report without unpacking the tarball.
+        if self.path.startswith("/download/klab-log/"):
+            import re, os
+            m = re.match(r"^/download/klab-log/(\d{8}-\d{6})\.log$", self.path)
+            if not m:
+                self.send_error(400, "Invalid run id"); return
+            run_id = m.group(1)
+            log_path = f"/root/klab/{run_id}/full.log"
+            if not os.path.isfile(log_path):
+                self.send_error(404, f"No log for {run_id}"); return
+            try:
+                with open(log_path, "rb") as f:
+                    data = f.read()
+            except Exception as e:
+                self.send_error(500, f"read failed: {e}"); return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="klab-{run_id}.log"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         super().do_GET()
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -2616,6 +3191,592 @@ def _get_ssl_context():
     except Exception as e:
         LOG.warning("TLS setup failed, falling back to plain HTTP: %s", e)
         return None
+
+# ── Ansible handlers ──────────────────────────────────────────────────────────
+
+ANSIBLE_LIB      = "/usr/local/share/kldload-ansible"
+ANSIBLE_PB_DIR   = f"{ANSIBLE_LIB}/playbooks"
+ANSIBLE_CFG_PATH = f"{ANSIBLE_LIB}/ansible.cfg"
+
+def _ansible_env():
+    """Environment that points ansible at the kldload library."""
+    env = {}
+    if os.path.exists(ANSIBLE_CFG_PATH):
+        env["ANSIBLE_CONFIG"] = ANSIBLE_CFG_PATH
+    return env
+
+async def _ansible_status(websocket):
+    ver = "(not installed)"
+    try:
+        out = subprocess.check_output(["ansible", "--version"], text=True,
+                                      stderr=subprocess.DEVNULL, timeout=5)
+        # First line looks like "ansible [core 2.16.3]"
+        ver = out.splitlines()[0].strip() if out else ver
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "ansible_status", "version": ver}))
+
+USER_PB_DIR = "/var/lib/kldload/user-playbooks"
+
+def _scan_playbooks(directory, origin):
+    """Parse YAML playbooks in a directory and return a list of metadata dicts.
+    `origin` tags each entry so the UI can show system vs user-uploaded."""
+    import glob
+    import yaml as _yaml
+    out = []
+    if not os.path.isdir(directory):
+        return out
+    for path in sorted(glob.glob(f"{directory}/*.yml") +
+                       glob.glob(f"{directory}/*.yaml")):
+        name = os.path.basename(path)
+        hosts, tasks, desc = "—", 0, ""
+        try:
+            with open(path) as f:
+                parsed = _yaml.safe_load(f) or []
+            if isinstance(parsed, list) and parsed:
+                first = parsed[0] or {}
+                hosts = str(first.get("hosts", "—"))
+                desc  = str(first.get("name", ""))
+                tasks = sum(len((p or {}).get("tasks", []) or []) for p in parsed)
+        except Exception:
+            pass
+        out.append({"name": name, "path": path, "origin": origin,
+                    "hosts": hosts, "tasks": tasks, "description": desc})
+    return out
+
+async def _ansible_list(websocket):
+    # System playbooks (shipped with the ISO) + user playbooks (uploaded via
+    # the UI, stored on the encrypted playbooks dataset). Both are runnable
+    # from the same selector — origin is exposed so the UI can badge them.
+    playbooks = _scan_playbooks(ANSIBLE_PB_DIR, "system") \
+              + _scan_playbooks(USER_PB_DIR,    "user")
+    await websocket.send(json.dumps({"type": "ansible_list", "playbooks": playbooks}))
+
+async def _ansible_run(websocket, msg):
+    import json as _json
+    pb       = msg.get("playbook", "")
+    limit    = msg.get("limit", "localhost").strip() or "localhost"
+    user     = msg.get("user", "root").strip() or "root"
+    extra    = msg.get("extra_vars", {}) or {}
+    check    = bool(msg.get("check", False))
+    diff     = bool(msg.get("diff", False))
+    verbose  = bool(msg.get("verbose", False))
+
+    if not pb or not os.path.isfile(pb):
+        await websocket.send(json.dumps({"type": "log_line", "target": "ansible_log",
+                                         "line": f"ERROR: playbook not found: {pb}"}))
+        await websocket.send(json.dumps({"type": "exec_done", "target": "ansible_log", "rc": 2}))
+        return
+
+    # Deployment ledger — only for kldload-shipped playbooks. User-uploaded
+    # content logs an event but is not reconciled. This keeps the "infra
+    # tracked, app layer open" split honest.
+    is_kldload_pb = os.path.abspath(pb).startswith(ANSIBLE_LIB + "/")
+    dep_id = None
+    if is_kldload_pb:
+        try:
+            out = subprocess.check_output(
+                ["kldload-db", "deploy-start",
+                 "--playbook", os.path.basename(pb),
+                 "--target",   limit,
+                 "--extras",   _json.dumps(extra) if extra else "{}"],
+                text=True, stderr=subprocess.DEVNULL, timeout=5,
+            )
+            dep_id = out.strip() or None
+        except Exception:
+            pass
+    db_log_event("ansible", os.path.basename(pb),
+                 f"run against {limit}",
+                 {"check": check, "diff": diff, "user": user})
+
+    # Pre-run snapshot — matches the pattern used for other state-changing ops
+    await _auto_snapshot(websocket, "ansible")
+
+    # Build the inventory argument. "localhost" → ad-hoc local inventory with
+    # --connection=local so we don't need SSH into ourselves. Anything else is
+    # treated as a comma-separated list (trailing comma forces list-not-file).
+    cmd = ["ansible-playbook", pb, "-u", user]
+    if limit == "localhost":
+        cmd += ["-i", "localhost,", "--connection", "local"]
+    else:
+        inv = limit if limit.endswith(",") else f"{limit},"
+        cmd += ["-i", inv]
+        # SSH key path — kube-cluster uses /root/.ssh/id_ed25519; fall back
+        # to ~/.ssh/id_rsa if present.
+        for keypath in ("/root/.ssh/id_ed25519", "/root/.ssh/id_rsa"):
+            if os.path.exists(keypath):
+                cmd += ["--private-key", keypath]
+                break
+        cmd += ["-e", "ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30'"]
+
+    if extra:
+        cmd += ["--extra-vars", _json.dumps(extra)]
+    if check:   cmd += ["--check"]
+    if diff:    cmd += ["--diff"]
+    if verbose: cmd += ["-vv"]
+
+    rc = await _stream_proc(websocket, cmd, env=_ansible_env(), target="ansible_log")
+    # Close the ledger row if we opened one
+    if dep_id:
+        try:
+            subprocess.run(["kldload-db", "deploy-finish",
+                            "--id", str(dep_id), "--rc", str(rc or 0)],
+                           check=False, timeout=5)
+        except Exception:
+            pass
+
+
+async def _playbook_upload(websocket, msg):
+    """Accept a pasted/uploaded Ansible playbook. Stores to the encrypted
+    playbooks dataset (if ZFS) or /var/lib/kldload/user-playbooks/ fallback.
+    Validates the name + YAML before writing. Never modifies system playbooks."""
+    import yaml as _yaml
+    name    = (msg.get("name") or "").strip()
+    content = msg.get("content") or ""
+
+    # Sanitize: alphanum + - _ . only, must end in .yml/.yaml, no traversal.
+    clean = "".join(c for c in name if c.isalnum() or c in "-_.")
+    if not clean or clean.startswith(".") or "/" in name or ".." in name:
+        await websocket.send(json.dumps({
+            "type": "playbook_upload_result", "ok": False,
+            "error": "invalid playbook name (alphanum + -._ only)"}))
+        return
+    if not clean.endswith((".yml", ".yaml")):
+        clean += ".yml"
+    if not content.strip():
+        await websocket.send(json.dumps({
+            "type": "playbook_upload_result", "ok": False,
+            "error": "empty playbook"}))
+        return
+    # Parse — reject before writing if YAML is invalid or not a playbook list.
+    try:
+        parsed = _yaml.safe_load(content)
+    except _yaml.YAMLError as e:
+        await websocket.send(json.dumps({
+            "type": "playbook_upload_result", "ok": False,
+            "error": f"YAML parse error: {e}"}))
+        return
+    if not isinstance(parsed, list) or not parsed:
+        await websocket.send(json.dumps({
+            "type": "playbook_upload_result", "ok": False,
+            "error": "playbook must be a non-empty YAML list of plays"}))
+        return
+
+    # Ensure the directory is the encrypted dataset when possible.
+    _ensure_secrets_dir()  # also creates playbooks dataset via _ensure_kldload_datasets
+    os.makedirs(USER_PB_DIR, exist_ok=True)
+    os.chmod(USER_PB_DIR, 0o750)
+
+    path = os.path.join(USER_PB_DIR, clean)
+    tmp  = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(content)
+    os.chmod(tmp, 0o640)
+    os.replace(tmp, path)
+
+    db_log_event("playbook_upload", clean, f"user playbook uploaded ({len(content)} bytes)")
+    await websocket.send(json.dumps({
+        "type": "playbook_upload_result", "ok": True, "name": clean, "path": path}))
+
+async def _playbook_delete(websocket, msg):
+    """Delete a USER playbook only. System playbooks under ANSIBLE_LIB are
+    read-only on the ISO — attempting to delete them returns an error."""
+    name = (msg.get("name") or "").strip()
+    clean = "".join(c for c in name if c.isalnum() or c in "-_.")
+    if not clean or clean != name or "/" in name:
+        await websocket.send(json.dumps({
+            "type": "playbook_delete_result", "ok": False,
+            "error": "invalid name"}))
+        return
+    path = os.path.join(USER_PB_DIR, clean)
+    if not os.path.isfile(path):
+        await websocket.send(json.dumps({
+            "type": "playbook_delete_result", "ok": False,
+            "error": "not found (system playbooks cannot be deleted)"}))
+        return
+    try:
+        os.unlink(path)
+        db_log_event("playbook_delete", clean, "user playbook deleted")
+        await websocket.send(json.dumps({
+            "type": "playbook_delete_result", "ok": True, "name": clean}))
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "playbook_delete_result", "ok": False, "error": str(e)}))
+
+
+async def _firstboot_status(websocket):
+    """Aggregate readiness across every requested firstboot component.
+
+    Prefers phase-ready marker files written by kldload-autodeploy
+    (/var/lib/kldload/{k8s,ai,klab,all}-ready) — those are the truth. Falls
+    back to probing live state when no markers exist yet (e.g. a manual run
+    outside the orchestrator). Reads install-manifest.env to know what was
+    REQUESTED at install time; unrequested phases count as satisfied.
+    UI uses `ready` to show the green Lab Ready banner.
+    """
+    marker_dir = Path("/var/lib/kldload")
+    current_phase = ""
+    try:
+        pf = marker_dir / "current-phase"
+        if pf.exists():
+            current_phase = pf.read_text().strip()
+    except Exception:
+        pass
+    manifest = {}
+    mf = Path("/etc/kldload/install-manifest.env")
+    if mf.exists():
+        try:
+            for line in mf.read_text().splitlines():
+                if "=" in line and not line.strip().startswith("#"):
+                    k, _, v = line.partition("=")
+                    manifest[k.strip()] = v.strip().strip('"').strip("'")
+        except Exception:
+            pass
+
+    def _bool(name, default="0"):
+        return manifest.get(name, default) in ("1", "yes", "true", "True")
+
+    components = {}
+
+    # Phase-ready markers (written by kldload-autodeploy) short-circuit the
+    # live probe. If the marker is there, the phase is ready — don't re-check.
+    def _marker(name):
+        return (marker_dir / f"{name}-ready").exists()
+
+    # ── klab goldens — expected if KLAB_ZFS_DEV=1 or a klab profile ──────
+    klab_expected = _bool("KLDLOAD_KLAB_ZFS_DEV") or \
+                    manifest.get("KLDLOAD_PROFILE") in ("devops", "klab")
+    if klab_expected and _marker("klab"):
+        components["klab_goldens"] = {"expected": True, "ready": True,
+                                      "detail": "autodeploy marked klab ready"}
+    elif klab_expected:
+        try:
+            out = subprocess.check_output(
+                ["zfs", "list", "-H", "-t", "snapshot", "-o", "name"],
+                text=True, stderr=subprocess.DEVNULL, timeout=5)
+            goldens = [l for l in out.splitlines() if l.endswith("@golden")
+                       and "klab-golden-" in l]
+            # RHEL is optional (needs creds). Mandatory 5 is the baseline.
+            done = sum(1 for g in ("centos","rocky","fedora","debian","ubuntu")
+                       if any(f"klab-golden-{g}@golden" in x for x in goldens))
+            components["klab_goldens"] = {
+                "expected": True, "ready": done >= 5,
+                "detail": f"{done}/5 mandatory goldens + {max(0, len(goldens)-done)} optional",
+            }
+        except Exception:
+            components["klab_goldens"] = {"expected": True, "ready": False,
+                                          "detail": "zfs list failed"}
+    else:
+        components["klab_goldens"] = {"expected": False, "ready": True, "detail": "not requested"}
+
+    # ── Kubernetes cluster — expected if K8S_BOOTSTRAP=1 ─────────────────
+    k8s_expected = _bool("KLDLOAD_K8S_BOOTSTRAP") or _bool("KLDLOAD_ENABLE_K8S")
+    if k8s_expected and _marker("k8s"):
+        components["kubernetes"] = {"expected": True, "ready": True,
+                                    "detail": "autodeploy marked k8s ready"}
+    elif k8s_expected:
+        try:
+            out = subprocess.check_output(
+                ["kubectl", "get", "nodes",
+                 "-o=jsonpath={range .items[*]}{.status.conditions[?(@.type=='Ready')].status} "],
+                text=True, stderr=subprocess.DEVNULL, timeout=10)
+            nodes = out.split()
+            ready = nodes.count("True")
+            total = len(nodes)
+            components["kubernetes"] = {
+                "expected": True, "ready": total >= 1 and ready == total,
+                "detail": f"{ready}/{total} nodes Ready" if total else "no cluster yet",
+            }
+        except Exception:
+            components["kubernetes"] = {"expected": True, "ready": False,
+                                        "detail": "kubectl not reachable"}
+    else:
+        components["kubernetes"] = {"expected": False, "ready": True, "detail": "not requested"}
+
+    # ── AI / Ollama — expected if ENABLE_AI=1 ────────────────────────────
+    # "Ready" means a model is LOADED into VRAM/RAM, not just pulled. /api/ps
+    # lists running models; /api/tags only lists installed weights. A pulled
+    # but unloaded model takes 30s on first chat — that's what made Bob look
+    # "online but laggy". We now report ready only once /api/ps has a model.
+    ai_expected = _bool("KLDLOAD_ENABLE_AI")
+    if ai_expected and _marker("ai"):
+        components["ai"] = {"expected": True, "ready": True,
+                            "detail": "autodeploy marked ai ready"}
+    elif ai_expected:
+        try:
+            import urllib.request
+            r_ps = urllib.request.urlopen("http://127.0.0.1:11434/api/ps", timeout=3)
+            loaded = json.loads(r_ps.read()).get("models", [])
+            if loaded:
+                components["ai"] = {"expected": True, "ready": True,
+                                    "detail": f"{loaded[0]['name']} loaded (warm)"}
+            else:
+                # Fall back: pulled but not loaded
+                r_t = urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=3)
+                tags = json.loads(r_t.read()).get("models", [])
+                components["ai"] = {
+                    "expected": True, "ready": False,
+                    "detail": (f"{len(tags)} model(s) pulled, none loaded — first chat will take ~30s"
+                               if tags else "Ollama up, no models yet"),
+                }
+        except Exception:
+            components["ai"] = {"expected": True, "ready": False,
+                                "detail": "Ollama not reachable"}
+    else:
+        components["ai"] = {"expected": False, "ready": True, "detail": "not requested"}
+
+    # Overall = every *expected* component is ready
+    all_ready = all(c["ready"] for c in components.values() if c["expected"])
+    any_expected = any(c["expected"] for c in components.values())
+
+    await websocket.send(json.dumps({
+        "type": "firstboot_status",
+        "ready": bool(all_ready and any_expected) or _marker("all"),
+        "current_phase": current_phase,
+        "autodeploy_running": current_phase not in ("", "ready", "partial"),
+        "components": components,
+    }))
+
+
+async def _kube_bootstrap_tail(websocket, follow=True):
+    """Stream (or replay the tail of) /var/log/kldload/kube-bootstrap.log to
+    the K8s log panel. Used after a page refresh so the user can see what's
+    currently happening even though the in-memory WS log box cleared."""
+    log_path = "/var/log/kldload/kube-bootstrap.log"
+    import re as _re
+    ansi = _re.compile(r"\x1b\[[0-9;]*[mGKHF]")
+    target = "k8s"
+    if not os.path.exists(log_path):
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": target,
+            "line": "[no kube-bootstrap.log yet — nothing running]",
+        }))
+        return
+    # Send last 200 lines of existing content so the user sees history
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            chunk = 64 * 1024
+            f.seek(max(0, size - chunk))
+            tail = f.read().decode(errors="replace")
+            for line in tail.splitlines()[-200:]:
+                await websocket.send(json.dumps({
+                    "type": "log_line", "target": target,
+                    "line": ansi.sub("", line),
+                }))
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": target, "line": f"[tail error: {e}]",
+        }))
+        return
+    if not follow:
+        return
+    # Follow mode: poll for new lines until the process exits.
+    # Only follow if kube-cluster bootstrap is actually running.
+    async def _is_running():
+        try:
+            subprocess.check_call(["pgrep", "-f", "kube-cluster bootstrap"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except Exception:
+            return False
+    if not await _is_running():
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": target,
+            "line": "[bootstrap process has exited — tail above is the final state]",
+        }))
+        return
+    try:
+        with open(log_path, "r", errors="replace") as f:
+            f.seek(0, 2)  # end
+            for _ in range(600):  # 10 min cap per follow request
+                line = f.readline()
+                if line:
+                    await websocket.send(json.dumps({
+                        "type": "log_line", "target": target,
+                        "line": ansi.sub("", line.rstrip()),
+                    }))
+                else:
+                    if not await _is_running():
+                        break
+                    await asyncio.sleep(1)
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": target, "line": f"[follow error: {e}]",
+        }))
+
+
+async def _doctor_run(websocket):
+    """Run kldload-doctor and stream the JSON back. Takes ~1-2s with checks
+    timing out at 5-10s each worst-case, so we fire-and-wait."""
+    try:
+        loop = asyncio.get_event_loop()
+        def _sync():
+            p = subprocess.run(["kldload-doctor"], capture_output=True,
+                               text=True, timeout=30)
+            try:    return json.loads(p.stdout)
+            except Exception: return {"error": p.stderr or "doctor failed",
+                                      "results": []}
+        data = await loop.run_in_executor(None, _sync)
+        await websocket.send(json.dumps({"type": "doctor_report", **data}))
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "doctor_report",
+                                         "error": str(e), "results": []}))
+
+
+async def _deploy_list(websocket, limit=50):
+    """Return the deployment ledger — kldload-shipped playbook runs only."""
+    rows = []
+    try:
+        con = _db_connect()
+        cur = con.execute(
+            "SELECT d.id, d.cluster_id, d.target, d.playbook, d.extras, d.status, "
+            "d.rc, d.started_at, d.finished_at, c.name AS cluster_name "
+            "FROM deployments d LEFT JOIN clusters c ON c.id = d.cluster_id "
+            "ORDER BY d.id DESC LIMIT ?", (int(limit),)
+        )
+        for r in cur.fetchall():
+            d = dict(r)
+            try: d["extras"] = json.loads(d.get("extras") or "{}")
+            except Exception: d["extras"] = {}
+            rows.append(d)
+        con.close()
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "deploy_list", "deployments": rows}))
+
+
+# ── Helm handlers ─────────────────────────────────────────────────────────────
+
+def _helm_env():
+    """Prefer the kube-cluster admin kubeconfig when present."""
+    env = {}
+    for kc in ("/root/.kube/config", "/etc/kubernetes/admin.conf"):
+        if os.path.exists(kc):
+            env["KUBECONFIG"] = kc
+            break
+    return env
+
+async def _helm_status(websocket):
+    ver = "(not installed)"
+    try:
+        out = subprocess.check_output(["helm", "version", "--short"], text=True,
+                                      stderr=subprocess.DEVNULL, timeout=5)
+        ver = out.strip()
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "helm_status", "version": ver}))
+
+async def _helm_repo_list(websocket):
+    repos = []
+    try:
+        out = subprocess.check_output(["helm", "repo", "list", "-o", "json"],
+                                      text=True, stderr=subprocess.DEVNULL, timeout=10,
+                                      env={**os.environ, **_helm_env()})
+        data = json.loads(out) if out.strip() else []
+        for r in data:
+            repos.append({"name": r.get("name", ""), "url": r.get("url", "")})
+    except subprocess.CalledProcessError:
+        pass  # "Error: no repositories to show" — treated as empty list
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "helm_repo_list", "repos": repos}))
+
+async def _helm_repo_add(websocket, msg):
+    name = (msg.get("name") or "").strip()
+    url  = (msg.get("url") or "").strip()
+    if not name or not url:
+        return
+    await _stream_proc(websocket,
+                       ["helm", "repo", "add", name, url, "--force-update"],
+                       env=_helm_env(), target="helm_log")
+
+async def _helm_repo_remove(websocket, msg):
+    name = (msg.get("name") or "").strip()
+    if not name: return
+    await _stream_proc(websocket, ["helm", "repo", "remove", name],
+                       env=_helm_env(), target="helm_log")
+
+async def _helm_list(websocket):
+    releases = []
+    try:
+        out = subprocess.check_output(["helm", "list", "-A", "-o", "json"],
+                                      text=True, stderr=subprocess.DEVNULL, timeout=15,
+                                      env={**os.environ, **_helm_env()})
+        data = json.loads(out) if out.strip() else []
+        for r in data:
+            releases.append({
+                "name":        r.get("name", ""),
+                "namespace":   r.get("namespace", ""),
+                "chart":       r.get("chart", ""),
+                "app_version": r.get("app_version", ""),
+                "status":      r.get("status", ""),
+                "updated":     (r.get("updated", "") or "")[:19],
+            })
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "helm_list", "releases": releases}))
+
+async def _helm_install(websocket, msg, upgrade=False):
+    import tempfile
+    name    = (msg.get("name") or "").strip()
+    chart   = (msg.get("chart") or "").strip()
+    version = (msg.get("version") or "").strip()
+    ns      = (msg.get("namespace") or "default").strip()
+    values  = msg.get("values") or ""
+    create  = bool(msg.get("create_namespace", True))
+    waitfor = bool(msg.get("wait", False))
+    db_log_event("helm", name,
+                 f"{'upgrade' if upgrade else 'install'} chart={chart} ns={ns}",
+                 {"version": version, "chart": chart, "namespace": ns})
+
+    if not name or not chart:
+        await websocket.send(json.dumps({"type": "log_line", "target": "helm_log",
+                                         "line": "ERROR: release name and chart are required"}))
+        await websocket.send(json.dumps({"type": "exec_done", "target": "helm_log", "rc": 2}))
+        return
+
+    if upgrade:
+        cmd = ["helm", "upgrade", "--install", name, chart]
+    else:
+        cmd = ["helm", "install", name, chart]
+    cmd += ["--namespace", ns]
+    if create:  cmd += ["--create-namespace"]
+    if version: cmd += ["--version", version]
+    if waitfor: cmd += ["--wait", "--timeout", "10m"]
+
+    vf = None
+    if values.strip():
+        vf = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
+        vf.write(values)
+        vf.flush()
+        vf.close()
+        cmd += ["-f", vf.name]
+    try:
+        await _stream_proc(websocket, cmd, env=_helm_env(), target="helm_log")
+    finally:
+        if vf and os.path.exists(vf.name):
+            try: os.unlink(vf.name)
+            except Exception: pass
+
+async def _helm_uninstall(websocket, msg):
+    name = (msg.get("name") or "").strip()
+    ns   = (msg.get("namespace") or "default").strip()
+    if not name: return
+    db_log_event("helm", name, f"uninstall ns={ns}", {"namespace": ns})
+    await _stream_proc(websocket,
+                       ["helm", "uninstall", name, "--namespace", ns],
+                       env=_helm_env(), target="helm_log")
+
+async def _helm_release_status(websocket, msg):
+    name = (msg.get("name") or "").strip()
+    ns   = (msg.get("namespace") or "default").strip()
+    if not name: return
+    await _stream_proc(websocket,
+                       ["helm", "status", name, "--namespace", ns],
+                       env=_helm_env(), target="helm_log")
+
 
 # ── K8s extended handlers ─────────────────────────────────────────────────────
 
@@ -2692,6 +3853,333 @@ async def _k8s_pods(websocket):
     except Exception:
         pass
     await websocket.send(json.dumps({"type": "k8s_pods", "pods": pods}))
+
+
+async def _k8s_inspect(websocket, msg):
+    """Return hover/click detail for a node or pod: describe + events + (for
+    pods) recent logs and container summary, (for nodes) top pods by CPU.
+    Feeds the inline detail drawer the UI expands under each row."""
+    kind = msg.get("kind", "pod")  # node | pod
+    name = msg.get("name", "")
+    namespace = msg.get("namespace", "")
+    if not name:
+        await websocket.send(json.dumps({"type": "k8s_inspect", "error": "missing name"}))
+        return
+
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    def _run(cmd, timeout=8):
+        try:
+            return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT,
+                                           timeout=timeout, env=env)
+        except subprocess.CalledProcessError as e:
+            return (e.output or "")[:4000]
+        except Exception as e:
+            return f"(error: {e})"
+
+    result = {"type": "k8s_inspect", "kind": kind, "name": name, "namespace": namespace}
+
+    if kind == "node":
+        # Metrics from metrics-server — gracefully degrade if not installed.
+        top = _run(["kubectl", "top", "node", name, "--no-headers"], timeout=5)
+        result["top"] = top.strip()
+        # Events for this node (last few).
+        ev = _run(["kubectl", "get", "events", "--all-namespaces",
+                   "--field-selector", f"involvedObject.name={name},involvedObject.kind=Node",
+                   "--sort-by=.lastTimestamp", "--no-headers"], timeout=5)
+        result["events"] = ev.strip().splitlines()[-15:]
+        # Pods currently on this node — most useful hover info.
+        pods = _run(["kubectl", "get", "pods", "-A", "--field-selector",
+                     f"spec.nodeName={name}", "--no-headers", "-o",
+                     "custom-columns=NS:.metadata.namespace,NAME:.metadata.name,STATUS:.status.phase"],
+                    timeout=5)
+        result["pods_on_node"] = pods.strip().splitlines()[:30]
+        # Capacity summary from the node object.
+        cap = _run(["kubectl", "get", "node", name, "-o",
+                    "jsonpath={.status.capacity.cpu}|{.status.capacity.memory}|"
+                    "{.status.allocatable.cpu}|{.status.allocatable.memory}"], timeout=4)
+        result["capacity"] = cap.strip()
+    else:
+        ns_args = ["-n", namespace] if namespace else []
+        # Container status + images in one quick jsonpath.
+        c = _run(["kubectl", "get", "pod", name, *ns_args, "-o",
+                  "jsonpath={range .status.containerStatuses[*]}{.name} "
+                  "{.image} ready={.ready} restarts={.restartCount}\\n{end}"],
+                 timeout=5)
+        result["containers"] = c.strip().splitlines()
+        # Pod-level IP, node, QoS.
+        meta = _run(["kubectl", "get", "pod", name, *ns_args, "-o",
+                     "jsonpath={.status.podIP}|{.spec.nodeName}|{.status.qosClass}"],
+                    timeout=4)
+        result["meta"] = meta.strip()
+        # Events on this pod (namespace-scoped).
+        ev = _run(["kubectl", "get", "events", *ns_args,
+                   "--field-selector", f"involvedObject.name={name}",
+                   "--sort-by=.lastTimestamp", "--no-headers"], timeout=5)
+        result["events"] = ev.strip().splitlines()[-15:]
+        # Log tail — best-effort, first container only. Keep small.
+        logs = _run(["kubectl", "logs", name, *ns_args, "--tail=40",
+                     "--all-containers=true", "--prefix=true"], timeout=6)
+        result["logs"] = logs[-6000:] if logs else ""
+        # Metrics for this specific pod.
+        top = _run(["kubectl", "top", "pod", name, *ns_args, "--no-headers"], timeout=5)
+        result["top"] = top.strip()
+
+    await websocket.send(json.dumps(result))
+
+
+async def _k8s_namespaces(websocket):
+    """Return namespaces so the UI can populate a filter dropdown."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    try:
+        out = subprocess.check_output(
+            ["kubectl", "get", "namespaces", "-o", "jsonpath={.items[*].metadata.name}"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5, env=env)
+        ns = sorted(out.split())
+    except Exception:
+        ns = []
+    await websocket.send(json.dumps({"type": "k8s_namespaces", "namespaces": ns}))
+
+
+async def _k8s_deployments(websocket, msg):
+    """List deployments with ready / available / age / image for the
+    Deployments panel. Namespace filter supported."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    ns = msg.get("namespace", "")
+    cmd = ["kubectl", "get", "deployments"]
+    if ns and ns != "all":
+        cmd.extend(["-n", ns])
+    else:
+        cmd.append("-A")
+    cmd.extend(["--no-headers", "-o",
+                "custom-columns=NS:.metadata.namespace,NAME:.metadata.name,"
+                "READY:.status.readyReplicas,DESIRED:.spec.replicas,"
+                "AVAILABLE:.status.availableReplicas,AGE:.metadata.creationTimestamp,"
+                "IMAGE:.spec.template.spec.containers[0].image"])
+    deploys = []
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL,
+                                      timeout=8, env=env)
+        for line in out.strip().splitlines():
+            parts = line.split(None, 6)
+            if len(parts) >= 7:
+                deploys.append({"namespace": parts[0], "name": parts[1],
+                                "ready": parts[2], "desired": parts[3],
+                                "available": parts[4], "age": parts[5],
+                                "image": parts[6]})
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_deployments", "deployments": deploys}))
+
+
+async def _k8s_services(websocket, msg):
+    """List services with cluster-ip / external-ip / ports for the
+    Services panel. Important for spotting LoadBalancer + NodePort state."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    ns = msg.get("namespace", "")
+    cmd = ["kubectl", "get", "svc", "--no-headers"]
+    if ns and ns != "all":
+        cmd.extend(["-n", ns])
+    else:
+        cmd.append("-A")
+    svcs = []
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL,
+                                      timeout=8, env=env)
+        for line in out.strip().splitlines():
+            parts = line.split()
+            # -A layout: NS NAME TYPE CLUSTER-IP EXTERNAL-IP PORT(S) AGE
+            if len(parts) >= 7:
+                svcs.append({"namespace": parts[0], "name": parts[1], "type": parts[2],
+                             "cluster_ip": parts[3], "external_ip": parts[4],
+                             "ports": parts[5], "age": parts[6]})
+            # -n <ns> layout (6 cols — no namespace column): NAME TYPE CLUSTER-IP EXTERNAL-IP PORT(S) AGE
+            elif len(parts) >= 6 and ns and ns != "all":
+                svcs.append({"namespace": ns, "name": parts[0], "type": parts[1],
+                             "cluster_ip": parts[2], "external_ip": parts[3],
+                             "ports": parts[4], "age": parts[5]})
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_services", "services": svcs}))
+
+
+async def _k8s_scale(websocket, msg):
+    """Scale a deployment. Streams the scale output + a status refresh."""
+    ns = msg.get("namespace", "")
+    name = msg.get("name", "")
+    replicas = int(msg.get("replicas", 1))
+    if not ns or not name:
+        await websocket.send(json.dumps({"type": "error", "msg": "namespace+name required"}))
+        return
+    await _stream_proc(websocket,
+        ["kubectl", "-n", ns, "scale", f"deploy/{name}", f"--replicas={replicas}"],
+        target="k8s")
+    await _k8s_deployments(websocket, {"namespace": ns})
+
+
+async def _k8s_rollout_restart(websocket, msg):
+    """Rollout-restart a deployment — the idiomatic way to force pod restart
+    without deleting pods (respects PDBs)."""
+    ns = msg.get("namespace", "")
+    name = msg.get("name", "")
+    if not ns or not name:
+        await websocket.send(json.dumps({"type": "error", "msg": "namespace+name required"}))
+        return
+    await _stream_proc(websocket,
+        ["kubectl", "-n", ns, "rollout", "restart", f"deploy/{name}"],
+        target="k8s")
+
+
+async def _k8s_rollout_undo(websocket, msg):
+    """Roll back a deployment to the previous revision."""
+    ns = msg.get("namespace", "")
+    name = msg.get("name", "")
+    if not ns or not name:
+        await websocket.send(json.dumps({"type": "error", "msg": "namespace+name required"}))
+        return
+    await _stream_proc(websocket,
+        ["kubectl", "-n", ns, "rollout", "undo", f"deploy/{name}"],
+        target="k8s")
+
+
+async def _k8s_delete_pod(websocket, msg):
+    """Delete a single pod — useful for force-restarting a stuck pod. The
+    Deployment/DS/RS will recreate it; we don't force --grace-period=0
+    unless the user says so (force is in the bulk action)."""
+    ns = msg.get("namespace", "")
+    name = msg.get("name", "")
+    force = bool(msg.get("force"))
+    if not ns or not name:
+        await websocket.send(json.dumps({"type": "error", "msg": "namespace+name required"}))
+        return
+    cmd = ["kubectl", "-n", ns, "delete", "pod", name]
+    if force:
+        cmd.extend(["--grace-period=0", "--force"])
+    await _stream_proc(websocket, cmd, target="k8s")
+
+
+async def _k8s_delete_deployment(websocket, msg):
+    """Delete a deployment — destructive, logged, no silent success."""
+    ns = msg.get("namespace", "")
+    name = msg.get("name", "")
+    if not ns or not name:
+        await websocket.send(json.dumps({"type": "error", "msg": "namespace+name required"}))
+        return
+    await _stream_proc(websocket,
+        ["kubectl", "-n", ns, "delete", "deploy", name],
+        target="k8s")
+    await _k8s_deployments(websocket, {"namespace": ns})
+
+
+async def _k8s_apply_yaml(websocket, msg):
+    """Apply a YAML blob. We write it to a temp file and kubectl apply -f,
+    streaming the result. This is the most-requested "deploy something
+    quickly" escape hatch."""
+    yaml_text = msg.get("yaml", "")
+    if not yaml_text.strip():
+        await websocket.send(json.dumps({"type": "error", "msg": "empty YAML"}))
+        return
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        f.write(yaml_text)
+        path = f.name
+    try:
+        await _stream_proc(websocket, ["kubectl", "apply", "-f", path], target="k8s")
+    finally:
+        try: os.unlink(path)
+        except Exception: pass
+
+
+async def _k8s_bulk(websocket, msg):
+    """Apply a single action to a list of targets. The UI sends the
+    selection from a multi-select table; we loop kubectl serially so
+    errors on one item don't kill the batch. Supported ops:
+      drain, uncordon, cordon      — node targets
+      delete_pod, restart_pod      — pod targets (restart via delete,
+                                      deployment/ds recreates it)"""
+    op = msg.get("op", "")
+    targets = msg.get("targets", [])   # list of {name, namespace?}
+    if not op or not targets:
+        await websocket.send(json.dumps({"type": "error", "msg": "op+targets required"}))
+        return
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    await websocket.send(json.dumps({"type": "k8s_log", "line":
+        f"[bulk {op}] starting on {len(targets)} target(s)..."}))
+    for t in targets:
+        name = t.get("name", "")
+        ns   = t.get("namespace", "")
+        if not name:
+            continue
+        if op == "drain":
+            cmd = ["kubectl", "drain", name, "--ignore-daemonsets",
+                   "--delete-emptydir-data", "--force", "--timeout=120s"]
+        elif op == "uncordon":
+            cmd = ["kubectl", "uncordon", name]
+        elif op == "cordon":
+            cmd = ["kubectl", "cordon", name]
+        elif op in ("delete_pod", "restart_pod"):
+            if not ns:
+                continue
+            cmd = ["kubectl", "-n", ns, "delete", "pod", name]
+        else:
+            await websocket.send(json.dumps({"type": "k8s_log", "line":
+                f"[bulk] unknown op '{op}'"}))
+            return
+        try:
+            out = subprocess.check_output(cmd, text=True,
+                                          stderr=subprocess.STDOUT, timeout=150, env=env)
+            await websocket.send(json.dumps({"type": "k8s_log",
+                "line": f"[{op} {name}] {out.strip()[:300]}"}))
+        except subprocess.CalledProcessError as e:
+            await websocket.send(json.dumps({"type": "k8s_log",
+                "line": f"[{op} {name}] FAILED: {(e.output or str(e))[:300]}"}))
+        except Exception as e:
+            await websocket.send(json.dumps({"type": "k8s_log",
+                "line": f"[{op} {name}] ERROR: {e}"}))
+    await websocket.send(json.dumps({"type": "k8s_log", "line":
+        f"[bulk {op}] complete"}))
+    await _k8s_status(websocket)
+
+
+async def _k8s_run_demo(websocket, msg):
+    """Run a named demo from kube-demo / kvm-demo / kzfs-lab. The 'script'
+    arg picks which demo script (kube-demo | kvm-demo | kzfs-lab), 'name'
+    is the CLI arg we pass to it. Output streams to the k8s log target so
+    users see it live in the log panel."""
+    script = msg.get("script", "kube-demo")
+    demo   = msg.get("name", "")
+    if not demo:
+        await websocket.send(json.dumps({"type": "error", "msg": "demo name required"}))
+        return
+    if script not in ("kube-demo", "kvm-demo", "kzfs-lab"):
+        await websocket.send(json.dumps({"type": "error", "msg": "unknown script"}))
+        return
+    await _stream_proc(websocket, [script, demo], target="k8s")
+
+
+async def _k8s_top(websocket):
+    """Whole-cluster metrics snapshot — nodes and namespaces. Used to
+    decorate the node/pod tables with CPU% / Memory% without needing to
+    click each row. metrics-server must be installed; returns empty if not."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    def _run(cmd):
+        try:
+            return subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL,
+                                           timeout=5, env=env)
+        except Exception:
+            return ""
+
+    nodes = {}
+    for line in _run(["kubectl", "top", "node", "--no-headers"]).strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 5:
+            nodes[parts[0]] = {"cpu": parts[1], "cpu_pct": parts[2],
+                               "mem": parts[3], "mem_pct": parts[4]}
+    pods = {}
+    for line in _run(["kubectl", "top", "pod", "-A", "--no-headers"]).strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 4:
+            pods[f"{parts[0]}/{parts[1]}"] = {"cpu": parts[2], "mem": parts[3]}
+    await websocket.send(json.dumps({"type": "k8s_top", "nodes": nodes, "pods": pods}))
 
 
 async def _k8s_bootstrap(websocket, msg):
@@ -3129,12 +4617,21 @@ async def _klab_flows(websocket):
 # ── ZFS Test Results (detailed) ────────────────────────────────────────────────
 
 def _klab_get_all_test_runs():
-    """Return all test runs with summaries, not just latest."""
+    """Return all test runs with summaries. Two bugs were silently hiding
+    every run's results in the UI:
+      1) the dir-name filter required `run-` prefix but klab writes
+         timestamped dirs (20260417-081234) and an optional `latest`
+         symlink — neither matched. Now we accept any directory that
+         looks like a YYYYMMDD-HHMMSS stamp.
+      2) the summary file uses lowercase keys (pass=, fail=, skip=,
+         total=) but the read here looked up uppercase. Fixed to match."""
+    import re
     results_dir = Path("/root/klab")
     if not results_dir.exists():
         return []
+    _stamp_re = re.compile(r"^\d{8}-\d{6}$")
     runs = sorted([d for d in results_dir.iterdir()
-                   if d.is_dir() and d.name.startswith("run-")],
+                   if d.is_dir() and _stamp_re.match(d.name)],
                   key=lambda d: d.stat().st_mtime, reverse=True)
     all_runs = []
     for run_dir in runs[:20]:  # last 20 runs
@@ -3154,11 +4651,17 @@ def _klab_get_all_test_runs():
                         data[k.strip()] = v.strip()
             except Exception:
                 pass
+            # Also include per-distro status (pass/fail/skip/running) if
+            # the .status sidecar file exists.
+            status_f = run_dir / f"{distro}.status"
+            if status_f.exists():
+                try: data["status"] = status_f.read_text().strip()
+                except Exception: pass
             run["distros"][distro] = data
-        # Total pass/fail/skip
-        total_pass = sum(int(d.get("PASS", 0)) for d in run["distros"].values())
-        total_fail = sum(int(d.get("FAIL", 0)) for d in run["distros"].values())
-        total_skip = sum(int(d.get("SKIP", 0)) for d in run["distros"].values())
+        # Total pass/fail/skip — summary keys are lowercase (pass=/fail=/skip=).
+        total_pass = sum(int(d.get("pass", 0) or 0) for d in run["distros"].values())
+        total_fail = sum(int(d.get("fail", 0) or 0) for d in run["distros"].values())
+        total_skip = sum(int(d.get("skip", 0) or 0) for d in run["distros"].values())
         run["total"] = {"pass": total_pass, "fail": total_fail, "skip": total_skip}
         all_runs.append(run)
     return all_runs
@@ -3604,58 +5107,786 @@ async def _bob_models(websocket):
         await websocket.send(json.dumps({"type": "bob_models", "models": [], "ok": False, "error": str(e)}))
 
 
+# ── Bob infra tools ────────────────────────────────────────────────────────
+# Read-only tools that let Bob answer questions about the fleet without
+# needing the user to paste output. Writes (running playbooks, destroying
+# VMs) are intentionally NOT exposed — Bob can recommend a playbook, the
+# user clicks the button. Keeps the blast radius of a hallucinated tool
+# call to zero.
+# Execute tools live here — calling one triggers the confirmation flow in
+# _bob_chat. Add to this set when exposing a new destructive capability.
+# bpftrace is gated because while it's typically read-only, malformed
+# scripts can hang the kernel on older versions and a bad kprobe filter
+# can produce terabytes of output.
+BOB_EXECUTE_TOOLS = {"run_playbook", "bpftrace_oneliner"}
+
+# Pending confirmations: confirm_id → asyncio.Future. The WS handler's
+# `bob_confirm_response` action resolves them.
+PENDING_CONFIRMS: "dict[str, asyncio.Future]" = {}
+
+BOB_TOOLS = [
+    {"type": "function", "function": {
+        "name": "list_nodes",
+        "description": "List kldload nodes (VMs registered in the state DB): hostname, role, cluster, IP, status.",
+        "parameters": {"type": "object", "properties": {
+            "cluster": {"type": "string", "description": "Optional cluster name or id to filter by"},
+            "role":    {"type": "string", "description": "Optional role filter (control_plane, worker, etc.)"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "list_clusters",
+        "description": "List all clusters known to the state DB with their current status.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "list_vms",
+        "description": "List all VMs (including those without a node registration yet).",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "list_deployments",
+        "description": "List recent runs of kldload-shipped Ansible playbooks (the deployment ledger).",
+        "parameters": {"type": "object", "properties": {
+            "limit": {"type": "integer", "description": "Max rows to return, default 20"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "list_events",
+        "description": "List recent events (VM lifecycle, ansible runs, helm ops, cluster transitions).",
+        "parameters": {"type": "object", "properties": {
+            "limit": {"type": "integer", "description": "Max events, default 50"},
+            "type":  {"type": "string", "description": "Optional type filter (ansible, helm, vm, cluster)"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "list_playbooks",
+        "description": "List the kldload-shipped Ansible playbooks available to run.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    # ── Execute tools (require user confirmation) ───────────────────────
+    {"type": "function", "function": {
+        "name": "run_playbook",
+        "description": "Run an Ansible playbook against a target. REQUIRES HUMAN APPROVAL before executing — the user sees a confirmation card and must click Approve. Prefer this over shelling out.",
+        "parameters": {"type": "object", "properties": {
+            "playbook": {"type": "string", "description": "Playbook filename from list_playbooks (e.g. 'smoke-test.yml')"},
+            "limit":    {"type": "string", "description": "Ansible limit pattern (e.g. 'localhost', 'kube_workers', '10.0.0.5')"},
+            "extras":   {"type": "object", "description": "Optional extra_vars JSON object"},
+            "check":    {"type": "boolean", "description": "Dry-run (check mode) — set true for a preview without changes"},
+        }, "required": ["playbook", "limit"]},
+    }},
+    # ── Live observability (read-only, no confirm) ───────────────────────
+    # These expose kubectl / prometheus / zfs / systemd to Bob so it can
+    # actually answer "what's going on with X" instead of saying it has
+    # no access. All read-only; destructive ops stay behind run_playbook.
+    {"type": "function", "function": {
+        "name": "k8s_get_pods",
+        "description": "List Kubernetes pods across the cluster. Returns namespace, name, ready, status, restarts, node.",
+        "parameters": {"type": "object", "properties": {
+            "namespace": {"type": "string", "description": "Optional namespace filter (default: all)"},
+            "status":    {"type": "string", "description": "Optional status filter (Running, Pending, Failed, CrashLoopBackOff)"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "k8s_get_nodes",
+        "description": "List Kubernetes nodes with status, role, version, IP, and live CPU/memory usage from metrics-server.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "k8s_describe",
+        "description": "Describe a Kubernetes resource — events, status, labels, container images. Use this to diagnose pod problems.",
+        "parameters": {"type": "object", "properties": {
+            "kind":      {"type": "string", "description": "Resource kind: pod, node, deployment, service, etc."},
+            "name":      {"type": "string", "description": "Resource name"},
+            "namespace": {"type": "string", "description": "Namespace (required for namespaced resources)"},
+        }, "required": ["kind", "name"]},
+    }},
+    {"type": "function", "function": {
+        "name": "k8s_logs",
+        "description": "Fetch the last N lines of logs for a pod. Use this to look at what a container is actually doing.",
+        "parameters": {"type": "object", "properties": {
+            "name":      {"type": "string", "description": "Pod name"},
+            "namespace": {"type": "string", "description": "Pod namespace"},
+            "tail":      {"type": "integer", "description": "Lines to return (default 80, max 500)"},
+            "container": {"type": "string", "description": "Optional container name (default: first)"},
+        }, "required": ["name", "namespace"]},
+    }},
+    {"type": "function", "function": {
+        "name": "k8s_events",
+        "description": "Recent Kubernetes events (warnings, pulls, schedules, failures). Best first check for 'why is X broken'.",
+        "parameters": {"type": "object", "properties": {
+            "namespace": {"type": "string", "description": "Optional namespace filter"},
+            "warnings_only": {"type": "boolean", "description": "Only Warning events (default false)"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "prom_query",
+        "description": "Run an instant PromQL query against the local Prometheus. Use for metrics like node_load1, node_memory_MemAvailable_bytes, cilium_drop_count_total, tetragon_events_total, hubble_flows_processed_total.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "PromQL expression"},
+        }, "required": ["query"]},
+    }},
+    {"type": "function", "function": {
+        "name": "zfs_status",
+        "description": "Return `zpool status` + pool-level stats so Bob can answer storage questions.",
+        "parameters": {"type": "object", "properties": {
+            "pool": {"type": "string", "description": "Optional pool name; omit for all pools"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "host_vitals",
+        "description": "Quick host vitals: load avg, memory free/total, disk free, uptime, running VM count, kernel.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "doctor_check",
+        "description": "Run the kldload-doctor compliance profiler and return pass/fail across ZFS, network, Kubernetes, and service health. Use this when the user asks 'is everything working'.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    # ── RCA / deep observability (read-only) ─────────────────────────────
+    # These are the tools to reach for when the user asks "why is this slow"
+    # or "what's dropping packets" — they capture a short bounded window
+    # of datapath events, syscall events, kernel messages, or process
+    # state. All have hard timeouts so a bad filter can't burn context.
+    {"type": "function", "function": {
+        "name": "hubble_observe",
+        "description": "Snapshot Hubble flows with filters. Best tool for 'which packets are dropping'. Returns a short capture.",
+        "parameters": {"type": "object", "properties": {
+            "verdict":   {"type": "string", "description": "Filter by verdict: DROPPED, FORWARDED, ERROR (omit for all)"},
+            "namespace": {"type": "string", "description": "Filter to a k8s namespace"},
+            "pod":       {"type": "string", "description": "Filter to a pod name (matches source or dest)"},
+            "limit":     {"type": "integer", "description": "Max flows to return (default 50, max 200)"},
+            "seconds":   {"type": "integer", "description": "Capture window in seconds (default 5, max 30)"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "cilium_monitor",
+        "description": "Capture cilium datapath events (drops, traces, policy verdicts) from a cilium-agent ring buffer. Use this to correlate a dropped packet to the BPF program or policy that dropped it.",
+        "parameters": {"type": "object", "properties": {
+            "type":    {"type": "string", "description": "Event type: drop, trace, policy-verdict, debug (default: drop)"},
+            "seconds": {"type": "integer", "description": "Capture window (default 5, max 20)"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "tetragon_watch",
+        "description": "Tail Tetragon syscall/exec/file events for N seconds. Use when you need to see which syscalls a pod is actually making.",
+        "parameters": {"type": "object", "properties": {
+            "seconds":   {"type": "integer", "description": "Capture window (default 5, max 20)"},
+            "namespace": {"type": "string", "description": "Namespace filter"},
+            "pod":       {"type": "string", "description": "Pod name filter"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "cilium_status",
+        "description": "Full cilium-agent status dump: datapath health, KVstore, IPAM, controllers, routing mode, envoy. Best 'is the CNI healthy' signal.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "cilium_endpoint_list",
+        "description": "List Cilium endpoints (pods as Cilium sees them) with identity, policy, ingress/egress enforcement state.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "kernel_dmesg",
+        "description": "Return the last N lines of the kernel ring buffer. Use when you suspect a driver/module/OOM issue or want to see cgroup/nft/cilium BPF verifier errors.",
+        "parameters": {"type": "object", "properties": {
+            "tail":    {"type": "integer", "description": "Lines (default 100, max 500)"},
+            "grep":    {"type": "string", "description": "Filter regex (grep -E)"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "top_procs",
+        "description": "Top CPU- or memory-hungry processes on the host. Use for 'why is the host slow' or 'what's eating memory'.",
+        "parameters": {"type": "object", "properties": {
+            "by":    {"type": "string", "description": "'cpu' or 'mem' (default cpu)"},
+            "count": {"type": "integer", "description": "Number of rows (default 15)"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "ss_sockets",
+        "description": "Network socket summary on the host — listening ports, established connections, counts per state. Use when diagnosing 'is the port open' or 'who is the client'.",
+        "parameters": {"type": "object", "properties": {
+            "state": {"type": "string", "description": "listening | established | all (default listening)"},
+            "port":  {"type": "integer", "description": "Filter to a specific port"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "zfs_arc_stats",
+        "description": "ZFS ARC cache statistics: hit/miss ratios, size, memory pressure. Use for storage-bound performance questions.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "bpftrace_oneliner",
+        "description": "Run a short bpftrace one-liner for N seconds. REQUIRES HUMAN APPROVAL. Use only for advanced tracing (syscall latency histograms, tcp retransmits, block IO latency). Example: 'kprobe:tcp_retransmit_skb { @[comm] = count(); }'.",
+        "parameters": {"type": "object", "properties": {
+            "script":  {"type": "string", "description": "bpftrace script body — keep it under 10 lines"},
+            "seconds": {"type": "integer", "description": "Duration (default 5, max 30)"},
+        }, "required": ["script"]},
+    }},
+]
+
+async def _bob_request_confirm(websocket, tool, args, timeout=120):
+    """Ask the UI to approve an execute tool. Returns dict with ok + (optional)
+    edits (user may tweak args before approving). Timeout yields {"ok": False,
+    "reason": "timeout"}.
+
+    Pairs with the `bob_confirm_response` WS action, which looks up the
+    confirm_id and resolves the Future with the user's choice."""
+    confirm_id = uuid.uuid4().hex
+    loop = asyncio.get_event_loop()
+    fut = loop.create_future()
+    PENDING_CONFIRMS[confirm_id] = fut
+    await websocket.send(json.dumps({
+        "type": "bob_confirm_request",
+        "confirm_id": confirm_id,
+        "tool": tool,
+        "args": args,
+        "timeout_s": timeout,
+    }))
+    try:
+        return await asyncio.wait_for(fut, timeout=timeout)
+    except asyncio.TimeoutError:
+        return {"ok": False, "reason": "timeout"}
+    finally:
+        PENDING_CONFIRMS.pop(confirm_id, None)
+
+
+async def _bob_run_playbook(websocket, args):
+    """Execute `run_playbook` after the user has approved it. Streams output
+    to the ansible log panel so the user sees the same thing the manual UI
+    would. Returns a short summary string for Bob's context."""
+    # Resolve playbook name to a full path — search system then user dirs.
+    pb_name = (args.get("playbook") or "").strip()
+    if not pb_name:
+        return "error: no playbook specified"
+    pb_name_yml = pb_name if pb_name.endswith((".yml", ".yaml")) else f"{pb_name}.yml"
+    candidates = [
+        os.path.join(ANSIBLE_PB_DIR, pb_name_yml),
+        os.path.join(USER_PB_DIR,    pb_name_yml),
+    ]
+    pb_path = next((p for p in candidates if os.path.isfile(p)), None)
+    if not pb_path:
+        return f"error: playbook not found: {pb_name}"
+
+    # Build the same msg shape _ansible_run expects so we reuse all its logic
+    # (ledger rows, snapshot, stream).
+    await _ansible_run(websocket, {
+        "playbook":   pb_path,
+        "limit":      args.get("limit") or "localhost",
+        "extra_vars": args.get("extras") or {},
+        "check":      bool(args.get("check")),
+        "user":       "root",
+    })
+    return f"playbook {pb_name} dispatched (see ansible log for streaming output)"
+
+
+def _bob_tool_exec(name, args):
+    """Execute a Bob tool call. Returns a string (tool message content)."""
+    args = args or {}
+    try:
+        if name == "list_nodes":
+            nodes = db_list_nodes()
+            if args.get("cluster"):
+                nodes = [n for n in nodes if args["cluster"] in
+                         (n.get("cluster_id") or "") or
+                         args["cluster"] == (n.get("cluster_id") or "")]
+            if args.get("role"):
+                nodes = [n for n in nodes if n.get("role") == args["role"]]
+            # Trim to essentials so Bob's context doesn't blow up on huge facts.
+            slim = [{k: n.get(k) for k in ("hostname","role","cluster_id","ip_mgmt","status")} for n in nodes]
+            return json.dumps(slim)
+        if name == "list_clusters":
+            return json.dumps(db_list_clusters())
+        if name == "list_vms":
+            return json.dumps(db_list_vms())
+        if name == "list_deployments":
+            limit = int(args.get("limit") or 20)
+            con = _db_connect()
+            rows = con.execute(
+                "SELECT id, playbook, target, cluster_id, status, rc, started_at, finished_at "
+                "FROM deployments ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            con.close()
+            return json.dumps([dict(r) for r in rows])
+        if name == "list_events":
+            limit = int(args.get("limit") or 50)
+            events = db_list_events(limit)
+            if args.get("type"):
+                events = [e for e in events if e.get("type") == args["type"]]
+            return json.dumps(events[:limit])
+        if name == "list_playbooks":
+            import glob as _glob
+            pbs = []
+            for p in sorted(_glob.glob(f"{ANSIBLE_PB_DIR}/*.yml")):
+                pbs.append({"name": os.path.basename(p), "path": p})
+            return json.dumps(pbs)
+
+        # ── Live observability tools ─────────────────────────────────
+        # All of the below wrap read-only shell commands with hard
+        # timeouts and trimmed output so Bob's context doesn't explode
+        # on a verbose kubectl or a noisy event stream. JSON-stringified
+        # so llama3.1 can reason over structured data.
+        k8s_env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+        def _sh(cmd, timeout=8, env=None):
+            try:
+                return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT,
+                                               timeout=timeout, env=env or os.environ)
+            except subprocess.CalledProcessError as e:
+                return (e.output or "")[:3000]
+            except subprocess.TimeoutExpired:
+                return "(timed out)"
+            except Exception as e:
+                return f"(error: {e})"
+
+        if name == "k8s_get_pods":
+            cmd = ["kubectl", "get", "pods", "-o", "wide", "--no-headers"]
+            if args.get("namespace"):
+                cmd.extend(["-n", args["namespace"]])
+            else:
+                cmd.append("-A")
+            out = _sh(cmd, env=k8s_env)
+            rows = []
+            for line in out.strip().splitlines()[:80]:
+                parts = line.split()
+                # -A adds namespace as first col; -n <ns> doesn't.
+                has_ns = bool(args.get("namespace")) is False
+                try:
+                    if has_ns and len(parts) >= 8:
+                        rows.append({"ns": parts[0], "name": parts[1], "ready": parts[2],
+                                     "status": parts[3], "restarts": parts[4],
+                                     "age": parts[5], "node": parts[7] if len(parts) > 7 else "?"})
+                    elif not has_ns and len(parts) >= 7:
+                        rows.append({"ns": args["namespace"], "name": parts[0], "ready": parts[1],
+                                     "status": parts[2], "restarts": parts[3],
+                                     "age": parts[4], "node": parts[6] if len(parts) > 6 else "?"})
+                except Exception:
+                    continue
+            if args.get("status"):
+                s = args["status"].lower()
+                rows = [r for r in rows if s in r.get("status", "").lower()]
+            return json.dumps({"count": len(rows), "pods": rows[:60]})
+
+        if name == "k8s_get_nodes":
+            out = _sh(["kubectl", "get", "nodes", "-o", "wide", "--no-headers"], env=k8s_env)
+            top = _sh(["kubectl", "top", "nodes", "--no-headers"], env=k8s_env)
+            top_map = {}
+            for ln in top.strip().splitlines():
+                parts = ln.split()
+                if len(parts) >= 5:
+                    top_map[parts[0]] = {"cpu": parts[1], "cpu_pct": parts[2],
+                                         "mem": parts[3], "mem_pct": parts[4]}
+            nodes = []
+            for line in out.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 6:
+                    nodes.append({"name": parts[0], "status": parts[1], "role": parts[2],
+                                  "age": parts[3], "version": parts[4], "ip": parts[5],
+                                  "metrics": top_map.get(parts[0], {})})
+            return json.dumps({"nodes": nodes})
+
+        if name == "k8s_describe":
+            kind = args.get("kind", "").lower()
+            rn   = args.get("name", "")
+            ns   = args.get("namespace", "")
+            if not kind or not rn:
+                return json.dumps({"error": "kind and name required"})
+            cmd = ["kubectl", "describe", kind, rn]
+            if ns:
+                cmd.extend(["-n", ns])
+            out = _sh(cmd, timeout=10, env=k8s_env)
+            # Trim to the interesting chunk — Events section is almost
+            # always what matters, plus Conditions/Containers. Keep the
+            # first 4KB so Bob's context stays lean.
+            return out[:4000]
+
+        if name == "k8s_logs":
+            rn   = args.get("name", "")
+            ns   = args.get("namespace", "")
+            tail = min(int(args.get("tail") or 80), 500)
+            if not rn or not ns:
+                return json.dumps({"error": "name and namespace required"})
+            cmd = ["kubectl", "logs", rn, "-n", ns, f"--tail={tail}", "--prefix=true"]
+            if args.get("container"):
+                cmd.extend(["-c", args["container"]])
+            else:
+                cmd.append("--all-containers=true")
+            out = _sh(cmd, timeout=10, env=k8s_env)
+            return out[-6000:]
+
+        if name == "k8s_events":
+            cmd = ["kubectl", "get", "events", "--sort-by=.lastTimestamp", "--no-headers"]
+            if args.get("namespace"):
+                cmd.extend(["-n", args["namespace"]])
+            else:
+                cmd.append("-A")
+            if args.get("warnings_only"):
+                cmd.extend(["--field-selector", "type=Warning"])
+            out = _sh(cmd, env=k8s_env)
+            lines = out.strip().splitlines()[-40:]
+            return json.dumps({"count": len(lines), "events": lines})
+
+        if name == "prom_query":
+            import urllib.parse, urllib.request
+            q = args.get("query", "")
+            if not q:
+                return json.dumps({"error": "query required"})
+            try:
+                url = f"http://localhost:9090/api/v1/query?query={urllib.parse.quote(q)}"
+                with urllib.request.urlopen(url, timeout=5) as r:
+                    data = json.loads(r.read().decode())
+                # Compact result — label set + value only.
+                result = []
+                for s in data.get("data", {}).get("result", [])[:30]:
+                    result.append({"labels": s.get("metric", {}), "value": s.get("value", [None, None])[1]})
+                return json.dumps({"series": len(result), "result": result})
+            except Exception as e:
+                return json.dumps({"error": f"prometheus query failed: {e}"})
+
+        if name == "zfs_status":
+            pool = args.get("pool", "")
+            cmd = ["zpool", "status"]
+            if pool:
+                cmd.append(pool)
+            out = _sh(cmd, timeout=6)
+            list_out = _sh(["zpool", "list", "-o", "name,size,allocated,free,health,frag,capacity"], timeout=4)
+            return f"{list_out}\n\n{out[:3000]}"
+
+        if name == "host_vitals":
+            load = _sh(["cat", "/proc/loadavg"], timeout=2).strip()
+            mem = _sh(["free", "-h"], timeout=2)
+            disk = _sh(["df", "-h", "/", "/var", "/home"], timeout=3)
+            up = _sh(["uptime", "-p"], timeout=2).strip()
+            ker = _sh(["uname", "-sr"], timeout=2).strip()
+            vms = _sh(["virsh", "list", "--name"], timeout=4).strip().splitlines()
+            vms = [v for v in vms if v]
+            return json.dumps({
+                "loadavg": load, "memory": mem.strip(), "disk": disk.strip(),
+                "uptime": up, "kernel": ker, "running_vms": len(vms), "vm_names": vms,
+            })
+
+        if name == "doctor_check":
+            out = _sh(["kldload-doctor", "--json"], timeout=30)
+            try:
+                return out  # already JSON if --json supported
+            except Exception:
+                return _sh(["kldload-doctor"], timeout=30)[:4000]
+
+        # ── RCA / deep observability implementations ─────────────────
+        # Each caps output with a time window + line limit so a verbose
+        # filter can't burn Bob's context. All log their invocation to
+        # /root/bob-rca.log so the user can see what Bob traced.
+        def _rca_log(tool, argv, summary):
+            try:
+                from datetime import datetime
+                with open("/root/bob-rca.log", "a") as f:
+                    f.write(f"# {datetime.now().isoformat()} {tool} {json.dumps(argv)}\n"
+                            f"  → {summary[:200]}\n")
+            except Exception:
+                pass
+
+        if name == "hubble_observe":
+            secs = min(int(args.get("seconds") or 5), 30)
+            lim  = min(int(args.get("limit") or 50), 200)
+            cmd = ["kubectl", "-n", "kube-system", "exec", "ds/cilium", "-c", "cilium-agent",
+                   "--", "hubble", "observe", "--output", "compact",
+                   "--follow", "--since", f"{secs}s"]
+            if args.get("verdict"):   cmd.extend(["--verdict", args["verdict"]])
+            if args.get("namespace"): cmd.extend(["--namespace", args["namespace"]])
+            if args.get("pod"):       cmd.extend(["--pod", args["pod"]])
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, env=k8s_env)
+                import time as _t
+                deadline = _t.time() + secs + 2
+                lines = []
+                while _t.time() < deadline and len(lines) < lim:
+                    line = p.stdout.readline()
+                    if not line: break
+                    lines.append(line.rstrip())
+                p.terminate()
+                out = "\n".join(lines[-lim:])
+            except Exception as e:
+                out = f"(error: {e})"
+            _rca_log("hubble_observe", args, f"{len(out.splitlines())} flows captured")
+            return out or "(no flows matched — try widening the filter or increasing seconds)"
+
+        if name == "cilium_monitor":
+            secs = min(int(args.get("seconds") or 5), 20)
+            mtype = args.get("type") or "drop"
+            cmd = ["kubectl", "-n", "kube-system", "exec", "ds/cilium", "-c", "cilium-agent",
+                   "--", "timeout", str(secs), "cilium-dbg", "monitor", "--type", mtype]
+            out = _sh(cmd, timeout=secs + 10, env=k8s_env)
+            _rca_log("cilium_monitor", args, f"type={mtype} captured")
+            return out[-6000:] or "(no events — zero drops in window is actually good)"
+
+        if name == "tetragon_watch":
+            secs = min(int(args.get("seconds") or 5), 20)
+            cmd = ["kubectl", "-n", "kube-system", "exec", "ds/tetragon", "-c", "tetragon",
+                   "--", "timeout", str(secs), "tetra", "getevents", "-o", "compact"]
+            if args.get("namespace"): cmd.extend(["--namespace", args["namespace"]])
+            if args.get("pod"):       cmd.extend(["--pod", args["pod"]])
+            out = _sh(cmd, timeout=secs + 10, env=k8s_env)
+            _rca_log("tetragon_watch", args, "captured")
+            return out[-6000:] or "(no events captured — window may be too short)"
+
+        if name == "cilium_status":
+            out = _sh(["kubectl", "-n", "kube-system", "exec", "ds/cilium",
+                       "-c", "cilium-agent", "--", "cilium-dbg", "status", "--verbose"],
+                      timeout=15, env=k8s_env)
+            return out[:5000]
+
+        if name == "cilium_endpoint_list":
+            out = _sh(["kubectl", "-n", "kube-system", "exec", "ds/cilium",
+                       "-c", "cilium-agent", "--", "cilium-dbg", "endpoint", "list"],
+                      timeout=10, env=k8s_env)
+            return out[:5000]
+
+        if name == "kernel_dmesg":
+            tail = min(int(args.get("tail") or 100), 500)
+            out = _sh(["dmesg", "--human", "--ctime"], timeout=4)
+            lines = out.splitlines()
+            if args.get("grep"):
+                import re as _re
+                try:
+                    rx = _re.compile(args["grep"])
+                    lines = [ln for ln in lines if rx.search(ln)]
+                except Exception:
+                    pass
+            return "\n".join(lines[-tail:])[-6000:]
+
+        if name == "top_procs":
+            by = args.get("by", "cpu").lower()
+            n = min(int(args.get("count") or 15), 50)
+            sort = "-%cpu" if by != "mem" else "-%mem"
+            out = _sh(["ps", "-eo", "pid,user,%cpu,%mem,rss,comm,cmd", "--sort", sort],
+                      timeout=3)
+            lines = out.splitlines()
+            return "\n".join([lines[0]] + lines[1:1 + n]) if lines else out
+
+        if name == "ss_sockets":
+            state = args.get("state", "listening")
+            flag  = {"listening": "-tln", "established": "-tn", "all": "-tan"}.get(state, "-tln")
+            out = _sh(["ss", flag, "-p"], timeout=3)
+            if args.get("port"):
+                port = str(args["port"])
+                all_lines = out.splitlines()
+                header = all_lines[0] if all_lines else ""
+                matches = [ln for ln in all_lines[1:] if f":{port}" in ln]
+                out = "\n".join([header] + matches) if header else "\n".join(matches)
+            return out[:5000]
+
+        if name == "zfs_arc_stats":
+            # Pull the most human-useful fields from arcstats. Raw file is
+            # huge; we cherry-pick hit rate, size, max, and memory pressure.
+            out = _sh(["cat", "/proc/spl/kstat/zfs/arcstats"], timeout=3)
+            if not out or "error" in out.lower():
+                return "(arcstats unavailable — is ZFS loaded?)"
+            keys = {"size": 0, "c": 0, "c_max": 0, "hits": 0, "misses": 0,
+                    "mfu_hits": 0, "mru_hits": 0, "prefetch_data_hits": 0,
+                    "memory_throttle_count": 0}
+            for ln in out.splitlines():
+                parts = ln.split()
+                if len(parts) >= 3 and parts[0] in keys:
+                    try: keys[parts[0]] = int(parts[2])
+                    except Exception: pass
+            total = keys["hits"] + keys["misses"]
+            hit_pct = round((keys["hits"] / total) * 100, 2) if total else 0.0
+            def _fmt(n):
+                for unit in ("", "K", "M", "G", "T"):
+                    if abs(n) < 1024: return f"{n:.1f}{unit}"
+                    n /= 1024
+                return f"{n:.1f}P"
+            return json.dumps({
+                "size":      _fmt(keys["size"]),
+                "target":    _fmt(keys["c"]),
+                "max":       _fmt(keys["c_max"]),
+                "hit_ratio": f"{hit_pct}%",
+                "hits":      keys["hits"],
+                "misses":    keys["misses"],
+                "mfu_hits":  keys["mfu_hits"],
+                "mru_hits":  keys["mru_hits"],
+                "throttle":  keys["memory_throttle_count"],
+            })
+
+        if name == "bpftrace_oneliner":
+            # NOTE: gated through BOB_EXECUTE_TOOLS. This branch only
+            # runs after the user approves in the confirm card. Script is
+            # passed via stdin so we don't have to worry about shell
+            # escaping a BPF program body.
+            script = args.get("script", "")
+            secs = min(int(args.get("seconds") or 5), 30)
+            if not script:
+                return json.dumps({"error": "script required"})
+            try:
+                p = subprocess.Popen(["timeout", str(secs), "bpftrace", "-e", script],
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                out, _ = p.communicate(timeout=secs + 5)
+            except Exception as e:
+                out = f"(error: {e})"
+            _rca_log("bpftrace_oneliner", args, f"{len(out.splitlines())} lines captured")
+            return out[-6000:]
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps({"error": f"unknown tool: {name}"})
+
+
 async def _bob_chat(websocket, msg):
-    """Stream a chat response from Ollama. Runs in thread to avoid blocking async loop."""
-    model = msg.get("model", "")
-    messages = msg.get("messages", [])
+    """Chat with Bob, with optional infra tool calling.
+
+    Protocol: if Ollama returns tool_calls in its response, we execute each
+    tool locally, append the result as a tool message, and re-query Ollama.
+    Loop caps at 5 rounds to keep a runaway tool binge from burning the
+    conversation. User text (the actual answer) streams back at the end.
+    """
+    model    = msg.get("model", "")
+    messages = list(msg.get("messages", []))
+    use_tools = bool(msg.get("tools", True))   # UI can disable if desired
 
     if not model or not messages:
         await websocket.send(json.dumps({"type": "error", "msg": "model and messages required"}))
         return
 
-    import concurrent.futures
+    import concurrent.futures, urllib.request, queue, threading
 
-    def _ollama_stream():
-        """Synchronous Ollama call in a thread — yields chunks."""
-        import urllib.request
-        req_data = json.dumps({"model": model, "messages": messages, "stream": True}).encode()
-        req = urllib.request.Request(
-            "http://localhost:11434/api/chat",
-            data=req_data,
-            headers={"Content-Type": "application/json"},
-        )
-        r = urllib.request.urlopen(req, timeout=120)
-        buffer = b""
-        chunks = []
+    def _ollama_chat_stream(msgs, msg_queue):
+        """Stream chunks from Ollama to a queue. Non-blocking from asyncio's
+        POV — runs in a thread. Each queued item is either:
+          ('chunk', content_str)   — token(s) from the assistant
+          ('done',  {tool_calls: [...], content: full_content})
+          ('error', exception_str)
+        """
+        payload = {"model": model, "messages": msgs, "stream": True}
+        if use_tools:
+            payload["tools"] = BOB_TOOLS
+        try:
+            req = urllib.request.Request(
+                "http://localhost:11434/api/chat",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            r = urllib.request.urlopen(req, timeout=300)
+            buffer = b""
+            accumulated_content = ""
+            accumulated_tools = []
+            while True:
+                chunk = r.read(512)
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    if not line.strip():
+                        continue
+                    try:
+                        j = json.loads(line)
+                    except Exception:
+                        continue
+                    m = j.get("message", {}) or {}
+                    c = m.get("content", "") or ""
+                    tc = m.get("tool_calls") or []
+                    if c:
+                        accumulated_content += c
+                        msg_queue.put(("chunk", c))
+                    if tc:
+                        accumulated_tools.extend(tc)
+                    if j.get("done"):
+                        msg_queue.put(("done", {
+                            "content": accumulated_content,
+                            "tool_calls": accumulated_tools,
+                        }))
+                        return
+            # EOF without explicit done — treat as done
+            msg_queue.put(("done", {
+                "content": accumulated_content,
+                "tool_calls": accumulated_tools,
+            }))
+        except Exception as e:
+            msg_queue.put(("error", str(e)))
+
+    async def _run_one_round(msgs):
+        """Start streaming chat, forward chunks to the client in real time,
+        return (content, tool_calls) when the stream completes."""
+        q: "queue.Queue" = queue.Queue()
+        t = threading.Thread(target=_ollama_chat_stream, args=(msgs, q), daemon=True)
+        t.start()
+        loop = asyncio.get_event_loop()
         while True:
-            data = r.read(512)
-            if not data:
-                break
-            buffer += data
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                if not line.strip():
-                    continue
-                try:
-                    j = json.loads(line)
-                    content = j.get("message", {}).get("content", "")
-                    if content:
-                        chunks.append(content)
-                except Exception:
-                    pass
-        return chunks
+            kind, payload = await loop.run_in_executor(None, q.get)
+            if kind == "chunk":
+                await websocket.send(json.dumps({
+                    "type": "bob_chat_chunk", "content": payload, "done": False,
+                }))
+            elif kind == "done":
+                return payload.get("content", ""), payload.get("tool_calls", [])
+            elif kind == "error":
+                raise RuntimeError(payload)
 
     try:
-        loop = asyncio.get_event_loop()
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            chunks = await loop.run_in_executor(pool, _ollama_stream)
-        # Send all chunks
-        for chunk in chunks:
-            await websocket.send(json.dumps({
-                "type": "bob_chat_chunk",
-                "content": chunk,
-                "done": False,
-            }))
+        # Always stream, even with tools. Tool_calls arrive in the final
+        # "done" chunk — Ollama sends content tokens first, then the tool
+        # request at the end if the model wants to call one. User sees
+        # live typing for plain chats; tool rounds still gate correctly.
+        if use_tools:
+            for _round in range(5):
+                content, tcalls = await _run_one_round(messages)
+                if not tcalls:
+                    break
+                messages.append({"role": "assistant",
+                                 "content": content or "",
+                                 "tool_calls": tcalls})
+                for tc in tcalls:
+                        fn   = (tc.get("function") or {})
+                        nm   = fn.get("name", "")
+                        argv = fn.get("arguments") or {}
+                        if isinstance(argv, str):
+                            try: argv = json.loads(argv)
+                            except Exception: argv = {}
+                        db_log_event("bob_tool", nm, f"Bob called {nm}", {"args": argv})
+                        await websocket.send(json.dumps({
+                            "type": "bob_chat_chunk",
+                            "content": f"\n[tool: {nm}({json.dumps(argv)})]\n",
+                            "done": False,
+                        }))
+                        # Gate: execute tools need a human OK first.
+                        if nm in BOB_EXECUTE_TOOLS:
+                            decision = await _bob_request_confirm(websocket, nm, argv)
+                            if not decision.get("ok"):
+                                reason = decision.get("reason") or "user rejected"
+                                await websocket.send(json.dumps({
+                                    "type": "bob_chat_chunk",
+                                    "content": f"  → {reason}\n",
+                                    "done": False,
+                                }))
+                                result = json.dumps({"rejected": True, "reason": reason})
+                            else:
+                                # User may have edited args before approving
+                                final_args = decision.get("args") or argv
+                                await websocket.send(json.dumps({
+                                    "type": "bob_chat_chunk",
+                                    "content": "  → approved, executing…\n",
+                                    "done": False,
+                                }))
+                                if nm == "run_playbook":
+                                    summary = await _bob_run_playbook(websocket, final_args)
+                                    result = json.dumps({"ok": True, "summary": summary})
+                                else:
+                                    result = json.dumps({"error": f"no handler for {nm}"})
+                        else:
+                            result = _bob_tool_exec(nm, argv)
+                        messages.append({"role": "tool", "name": nm, "content": result})
+                else:
+                    await websocket.send(json.dumps({
+                        "type": "bob_chat_chunk",
+                        "content": "\n[tool loop capped at 5 rounds]\n",
+                        "done": False,
+                    }))
+            else:
+                # Classic streaming path — no tools
+                chunks = await loop.run_in_executor(pool, _stream_call, messages)
+                for c in chunks:
+                    await websocket.send(json.dumps({
+                        "type": "bob_chat_chunk", "content": c, "done": False,
+                    }))
+
         await websocket.send(json.dumps({"type": "bob_chat_done"}))
     except Exception as e:
         await websocket.send(json.dumps({"type": "bob_chat_error", "error": str(e)}))
@@ -3994,6 +6225,14 @@ async def main_async(args):
     from websockets.datastructures import Headers as WsHeaders
 
     db_init()
+    # Make sure the encrypted secrets dataset is mounted before we accept
+    # requests. Lazy creation on first write is fine but loading the ZFS key
+    # at startup gives a clean error surface if the key is missing.
+    try:
+        backend = _ensure_secrets_dir()
+        LOG.info("Secrets backend: %s", backend)
+    except Exception as e:
+        LOG.warning("Secrets backend init failed: %s", e)
     ssl_ctx = _get_ssl_context()
     scheme    = "https" if ssl_ctx else "http"
 

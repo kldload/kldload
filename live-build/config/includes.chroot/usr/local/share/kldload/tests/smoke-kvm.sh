@@ -88,7 +88,7 @@ fi
 
 # ── kldloadOS Tools ──────────────────────────────────────────────────────────
 _section "kldloadOS Tools"
-for tool in kst ksnap kbe kclone kdf kdir kpkg kupgrade kexport krecovery kldload-help kldload-overview kube-demo; do
+for tool in kst ksnap kbe kclone kdf kdir kpkg kupgrade kexport krecovery kldload-help kube-demo; do
   test_cmd "$tool" "$tool"
 done
 

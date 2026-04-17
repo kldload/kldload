@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+# ══════════════════════════════════════════════════════════════════════════════
+# kldload-db — thin CLI over /var/lib/kldload/state.db
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Lets bash scripts (kube-cluster, kvm-create, kvm-delete, kvm-clone…) keep
+# the infra inventory in sync without embedding Python. All subcommands are
+# idempotent upserts so scripts can call them repeatedly without guarding.
+#
+# Subcommands:
+#   node-register  --hostname H [--role R] [--ip-mgmt IP] [--ip-wg0 IP]
+#                  [--cluster CID_OR_NAME] [--status S] [--wg-pubkey K]
+#   node-status    --hostname H --status S
+#   node-delete    --hostname H
+#   vm-register    --name N --cluster CID_OR_NAME [--role R] [--ip IP]
+#                  [--cpu N] [--ram-gb N] [--disk-gb N] [--golden-src G]
+#                  [--status S]
+#   vm-status      --name N --status S [--ip IP]
+#   vm-delete      --name N
+#   cluster-upsert --name N [--template T] [--status S] [--data JSON]
+#   event          --type T --subject S --message M [--data JSON]
+#   deploy-start   --playbook P [--cluster C] [--target T] [--extras JSON]
+#     → prints the new deployment id
+#   deploy-finish  --id N --rc RC [--status S] [--log PATH]
+#   dump           (json of all tables for debugging)
+#
+# Exit code is 0 on success. Errors go to stderr; SQL layer is tolerant —
+# unknown columns or missing tables print a warning, do not die. Scripts can
+# safely `kldload-db node-register ... || true` during bootstrap.
+# ══════════════════════════════════════════════════════════════════════════════
+
+from __future__ import annotations
+import argparse
+import datetime
+import json
+import os
+import sqlite3
+import sys
+import uuid
+from pathlib import Path
+
+DB_PATH = Path(os.environ.get("KLDLOAD_DB", "/var/lib/kldload/state.db"))
+
+
+def _now():
+    # timezone-aware — utcnow() is deprecated in Python 3.12+
+    try:
+        return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except AttributeError:
+        return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _connect():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(DB_PATH))
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    return con
+
+
+def _resolve_cluster_id(con, cluster):
+    """Accept either a cluster id or a cluster name; return id, creating a
+    shell row if the name is new. Empty input returns ''."""
+    if not cluster:
+        return ""
+    row = con.execute(
+        "SELECT id FROM clusters WHERE id=? OR name=?", (cluster, cluster)
+    ).fetchone()
+    if row:
+        return row["id"]
+    cid = str(uuid.uuid4())
+    con.execute(
+        "INSERT INTO clusters (id,name,template_id,status,data,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (cid, cluster, "", "designing", "{}", _now(), _now()),
+    )
+    return cid
+
+
+# ── Subcommands ───────────────────────────────────────────────────────────
+
+def cmd_node_register(args):
+    con = _connect()
+    cid = _resolve_cluster_id(con, args.cluster)
+    row = con.execute("SELECT id FROM nodes WHERE hostname=?", (args.hostname,)).fetchone()
+    now = _now()
+    if row:
+        # Build UPDATE dynamically so empty args don't overwrite good data.
+        sets, vals = [], []
+        for col, val in [
+            ("role",       args.role),
+            ("ip_mgmt",    args.ip_mgmt),
+            ("ip_wg0",     args.ip_wg0),
+            ("ip_wg1",     args.ip_wg1),
+            ("wg_pubkey",  args.wg_pubkey),
+            ("cluster_id", cid if args.cluster else None),
+            ("status",     args.status),
+        ]:
+            if val:
+                sets.append(f"{col}=?")
+                vals.append(val)
+        sets.append("last_seen=?")
+        vals.append(now)
+        sets.append("deleted_at=''")
+        vals.append(args.hostname)
+        con.execute(f"UPDATE nodes SET {', '.join(sets)} WHERE hostname=?", vals)
+    else:
+        nid = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO nodes (id,hostname,role,ip_mgmt,ip_wg0,ip_wg1,ip_wg2,ip_wg3,"
+            "wg_pubkey,cluster_id,status,last_seen,facts,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (nid, args.hostname, args.role or "unknown", args.ip_mgmt,
+             args.ip_wg0, args.ip_wg1, "", "",
+             args.wg_pubkey, cid, args.status or "booting", now, "{}", now),
+        )
+    con.commit()
+    con.close()
+
+
+def cmd_node_status(args):
+    con = _connect()
+    con.execute("UPDATE nodes SET status=?, last_seen=? WHERE hostname=?",
+                (args.status, _now(), args.hostname))
+    con.commit()
+    con.close()
+
+
+def cmd_node_delete(args):
+    """Soft-delete: mark deleted_at + set status='deleted'. History survives."""
+    con = _connect()
+    con.execute("UPDATE nodes SET deleted_at=?, status='deleted' WHERE hostname=?",
+                (_now(), args.hostname))
+    con.commit()
+    con.close()
+
+
+def cmd_vm_register(args):
+    con = _connect()
+    cid = _resolve_cluster_id(con, args.cluster)
+    row = con.execute("SELECT id FROM vms WHERE name=?", (args.name,)).fetchone()
+    now = _now()
+    if row:
+        sets, vals = [], []
+        for col, val in [
+            ("role",       args.role),
+            ("ip_addr",    args.ip),
+            ("cpu",        args.cpu),
+            ("ram_gb",     args.ram_gb),
+            ("disk_gb",    args.disk_gb),
+            ("golden_src", args.golden_src),
+            ("status",     args.status),
+            ("cluster_id", cid if args.cluster else None),
+        ]:
+            if val not in (None, "", 0):
+                sets.append(f"{col}=?")
+                vals.append(val)
+        sets.append("last_seen=?"); vals.append(now)
+        sets.append("deleted_at=''"); vals.append(args.name)
+        con.execute(f"UPDATE vms SET {', '.join(sets)} WHERE name=?", vals)
+    else:
+        vid = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO vms (id,cluster_id,node_id,name,role,cpu,ram_gb,disk_gb,"
+            "status,golden_src,ip_addr,wg_pubkey,last_seen,data,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (vid, cid, "", args.name, args.role or "unknown",
+             args.cpu or 2, args.ram_gb or 4, args.disk_gb or 64,
+             args.status or "defined", args.golden_src or "",
+             args.ip or "", "", now, "{}", now),
+        )
+    con.commit()
+    con.close()
+
+
+def cmd_vm_status(args):
+    con = _connect()
+    sets = ["status=?", "last_seen=?"]
+    vals = [args.status, _now()]
+    if args.ip:
+        sets.append("ip_addr=?"); vals.append(args.ip)
+    vals.append(args.name)
+    con.execute(f"UPDATE vms SET {', '.join(sets)} WHERE name=?", vals)
+    con.commit()
+    con.close()
+
+
+def cmd_vm_delete(args):
+    con = _connect()
+    con.execute("UPDATE vms SET deleted_at=?, status='deleted' WHERE name=?",
+                (_now(), args.name))
+    con.commit()
+    con.close()
+
+
+def cmd_cluster_upsert(args):
+    con = _connect()
+    now = _now()
+    row = con.execute("SELECT id FROM clusters WHERE name=?", (args.name,)).fetchone()
+    if row:
+        sets, vals = [], []
+        if args.template: sets.append("template_id=?"); vals.append(args.template)
+        if args.status:   sets.append("status=?");      vals.append(args.status)
+        if args.data:     sets.append("data=?");        vals.append(args.data)
+        sets.append("updated_at=?"); vals.append(now)
+        vals.append(args.name)
+        con.execute(f"UPDATE clusters SET {', '.join(sets)} WHERE name=?", vals)
+    else:
+        cid = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO clusters (id,name,template_id,status,data,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (cid, args.name, args.template or "", args.status or "designing",
+             args.data or "{}", now, now),
+        )
+    con.commit()
+    con.close()
+
+
+def cmd_event(args):
+    con = _connect()
+    con.execute(
+        "INSERT INTO events (ts,type,subject,message,data) VALUES (?,?,?,?,?)",
+        (_now(), args.type, args.subject or "", args.message, args.data or "{}"),
+    )
+    con.commit()
+    con.close()
+
+
+def cmd_deploy_start(args):
+    con = _connect()
+    cid = _resolve_cluster_id(con, args.cluster) if args.cluster else ""
+    cur = con.execute(
+        "INSERT INTO deployments (cluster_id,target,playbook,extras,status,rc,started_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (cid, args.target or "", args.playbook, args.extras or "{}",
+         "running", -1, _now()),
+    )
+    dep_id = cur.lastrowid
+    con.commit()
+    con.close()
+    print(dep_id)
+
+
+def cmd_deploy_finish(args):
+    con = _connect()
+    con.execute(
+        "UPDATE deployments SET rc=?, status=?, log_path=?, finished_at=? WHERE id=?",
+        (args.rc,
+         args.status or ("ok" if args.rc == 0 else "failed"),
+         args.log or "",
+         _now(), args.id),
+    )
+    con.commit()
+    con.close()
+
+
+def cmd_dump(args):
+    con = _connect()
+    result = {}
+    for tbl in ("nodes", "vms", "clusters", "deployments", "events", "services"):
+        try:
+            rows = con.execute(f"SELECT * FROM {tbl}").fetchall()
+            result[tbl] = [dict(r) for r in rows]
+        except sqlite3.Error:
+            result[tbl] = []
+    con.close()
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+# ── argparse ──────────────────────────────────────────────────────────────
+
+def main(argv):
+    p = argparse.ArgumentParser(prog="kldload-db", description="kldload state DB CLI")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("node-register");  s.set_defaults(fn=cmd_node_register)
+    s.add_argument("--hostname", required=True)
+    s.add_argument("--role", default="")
+    s.add_argument("--ip-mgmt",  dest="ip_mgmt",  default="")
+    s.add_argument("--ip-wg0",   dest="ip_wg0",   default="")
+    s.add_argument("--ip-wg1",   dest="ip_wg1",   default="")
+    s.add_argument("--cluster",  default="")
+    s.add_argument("--status",   default="")
+    s.add_argument("--wg-pubkey",dest="wg_pubkey",default="")
+
+    s = sub.add_parser("node-status");    s.set_defaults(fn=cmd_node_status)
+    s.add_argument("--hostname", required=True); s.add_argument("--status", required=True)
+
+    s = sub.add_parser("node-delete");    s.set_defaults(fn=cmd_node_delete)
+    s.add_argument("--hostname", required=True)
+
+    s = sub.add_parser("vm-register");    s.set_defaults(fn=cmd_vm_register)
+    s.add_argument("--name", required=True)
+    s.add_argument("--cluster", default="")
+    s.add_argument("--role", default="")
+    s.add_argument("--ip", default="")
+    s.add_argument("--cpu", type=int, default=0)
+    s.add_argument("--ram-gb", dest="ram_gb", type=int, default=0)
+    s.add_argument("--disk-gb", dest="disk_gb", type=int, default=0)
+    s.add_argument("--golden-src", dest="golden_src", default="")
+    s.add_argument("--status", default="")
+
+    s = sub.add_parser("vm-status");      s.set_defaults(fn=cmd_vm_status)
+    s.add_argument("--name", required=True)
+    s.add_argument("--status", required=True)
+    s.add_argument("--ip", default="")
+
+    s = sub.add_parser("vm-delete");      s.set_defaults(fn=cmd_vm_delete)
+    s.add_argument("--name", required=True)
+
+    s = sub.add_parser("cluster-upsert"); s.set_defaults(fn=cmd_cluster_upsert)
+    s.add_argument("--name", required=True)
+    s.add_argument("--template", default="")
+    s.add_argument("--status", default="")
+    s.add_argument("--data", default="")
+
+    s = sub.add_parser("event");          s.set_defaults(fn=cmd_event)
+    s.add_argument("--type", required=True)
+    s.add_argument("--subject", default="")
+    s.add_argument("--message", required=True)
+    s.add_argument("--data", default="")
+
+    s = sub.add_parser("deploy-start");   s.set_defaults(fn=cmd_deploy_start)
+    s.add_argument("--playbook", required=True)
+    s.add_argument("--cluster", default="")
+    s.add_argument("--target", default="")
+    s.add_argument("--extras", default="")
+
+    s = sub.add_parser("deploy-finish");  s.set_defaults(fn=cmd_deploy_finish)
+    s.add_argument("--id", type=int, required=True)
+    s.add_argument("--rc", type=int, required=True)
+    s.add_argument("--status", default="")
+    s.add_argument("--log", default="")
+
+    s = sub.add_parser("dump");           s.set_defaults(fn=cmd_dump)
+
+    args = p.parse_args(argv)
+    try:
+        args.fn(args)
+    except sqlite3.Error as e:
+        sys.stderr.write(f"kldload-db: {e}\n")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,48 @@
+---
+# Runs right before the golden is shut down and snapshotted. Clears identity
+# that MUST be regenerated on each clone — otherwise every clone shares a
+# machine-id, SSH host keys, and hostname (systemd journal + DHCP conflicts).
+
+- name: Seal kldload golden for cloning
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Clear machine-id
+      # /var/lib/dbus/ doesn't exist on stock CentOS cloud images; only
+      # created after dbus-daemon fully runs. mkdir -p is idempotent so
+      # safe on distros where it already exists (Debian/Ubuntu).
+      shell: |
+        : > /etc/machine-id
+        mkdir -p /var/lib/dbus
+        rm -f /var/lib/dbus/machine-id
+        ln -sf /etc/machine-id /var/lib/dbus/machine-id
+      changed_when: false
+
+    - name: Clear hostname
+      copy:
+        dest: /etc/hostname
+        content: ""
+        mode: "0644"
+
+    - name: Remove SSH host keys (clones regenerate on first boot)
+      shell: rm -f /etc/ssh/ssh_host_*
+      changed_when: false
+
+    - name: Clean cloud-init state
+      shell: |
+        cloud-init clean --logs 2>/dev/null || true
+        rm -rf /var/lib/cloud/instances/* /var/lib/cloud/data/* 2>/dev/null || true
+        rm -f /var/lib/cloud/seed/nocloud-net/* 2>/dev/null || true
+      changed_when: false
+
+    - name: Truncate journal
+      shell: journalctl --rotate && journalctl --vacuum-time=1s
+      failed_when: false
+      changed_when: false
+
+    - name: Truncate bash history
+      shell: |
+        rm -f /root/.bash_history /home/*/.bash_history 2>/dev/null || true
+      changed_when: false

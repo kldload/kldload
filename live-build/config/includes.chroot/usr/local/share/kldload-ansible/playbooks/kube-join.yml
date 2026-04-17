@@ -1,0 +1,35 @@
+---
+# Joins workers to an existing control plane. The control plane must already
+# be initialised — kube-cluster runs kubeadm init on the CP directly, then
+# invokes this playbook to join workers with the generated token.
+
+- name: Join workers to Kubernetes control plane
+  hosts: kube_workers
+  become: true
+  gather_facts: false
+  vars:
+    # These three are supplied via --extra-vars from kube-cluster.
+    kube_join_cmd: ""           # full "kubeadm join ... --token ..." string
+    kube_cp_endpoint: ""        # host:port
+    kube_discovery_hash: ""
+
+  tasks:
+    - name: Fail if join command missing
+      fail:
+        msg: "kube_join_cmd extra-var is required"
+      when: kube_join_cmd | length == 0
+
+    - name: Check if already in cluster
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_conf
+
+    - name: Run kubeadm join
+      shell: "{{ kube_join_cmd }}"
+      when: not kubelet_conf.stat.exists
+      register: join_result
+
+    - name: Show join output on failure
+      debug:
+        var: join_result
+      when: join_result is defined and join_result.rc is defined and join_result.rc != 0

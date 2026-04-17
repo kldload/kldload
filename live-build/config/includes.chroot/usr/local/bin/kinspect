@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# kinspect — 3-pane tmux layout for watching communications between two
+# endpoints. Resolves libvirt VMs or K8s pods to IPs, SSH's into each for
+# a live watch view, and tails the flow stream between them in a third
+# pane. The tmux work targets the kldload session (same one used by the
+# web UI's terminal drawer) so the layout appears the moment the user
+# opens the drawer.
+#
+# Usage:
+#   kinspect <vm1> <vm2>                      # libvirt domains by name
+#   kinspect --pod ns/pod1 ns/pod2            # k8s pods
+#   kinspect --ip 192.168.122.10 192.168.122.11  # raw IPs (bypass lookup)
+#
+# Layout:
+#   ┌─────────────┬─────────────┐
+#   │ vm1: watch  │ vm2: watch  │
+#   │ ss -tn + io │ ss -tn + io │
+#   ├─────────────┴─────────────┤
+#   │ flows between them        │
+#   │ (hubble or tcpdump)       │
+#   └───────────────────────────┘
+set -uo pipefail
+
+SESSION="${KLDLOAD_TMUX_SESSION:-kldload}"
+WINDOW="inspect"
+SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
+SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+          -o LogLevel=ERROR -o ConnectTimeout=5)
+
+die() { echo "kinspect: $*" >&2; exit 1; }
+
+mode="vm"
+case "${1:-}" in
+    --pod) mode="pod"; shift ;;
+    --ip)  mode="ip";  shift ;;
+    -h|--help|"")
+        sed -n 's/^# \{0,1\}//; 1,/^$/p' "$0" | head -30
+        exit 0 ;;
+esac
+[[ $# -eq 2 ]] || die "need two ${mode}s (got $#)"
+t1="$1"; t2="$2"
+
+# ── Resolve to IPs ─────────────────────────────────────────────────────
+resolve_vm_ip() {
+    local name="$1" ip
+    ip="$(virsh domifaddr "$name" 2>/dev/null | awk '/ipv4/ {split($4,a,"/"); print a[1]; exit}')"
+    [[ -z "$ip" ]] && ip="$(virsh net-dhcp-leases default 2>/dev/null | awk -v n="$name" '$NF==n || $6==n {print $5}' | head -1 | cut -d/ -f1)"
+    echo "$ip"
+}
+resolve_pod_ip() {
+    local nspod="$1" ns="${nspod%%/*}" pod="${nspod##*/}"
+    kubectl -n "$ns" get pod "$pod" -o jsonpath='{.status.podIP}' 2>/dev/null
+}
+
+case "$mode" in
+    vm)
+        ip1="$(resolve_vm_ip "$t1")" || true
+        ip2="$(resolve_vm_ip "$t2")" || true ;;
+    pod)
+        ip1="$(resolve_pod_ip "$t1")" || true
+        ip2="$(resolve_pod_ip "$t2")" || true ;;
+    ip)
+        ip1="$t1"; ip2="$t2" ;;
+esac
+[[ -n "$ip1" ]] || die "could not resolve $t1 to an IP"
+[[ -n "$ip2" ]] || die "could not resolve $t2 to an IP"
+
+echo "kinspect: $t1 ($ip1)  ↔  $t2 ($ip2)"
+
+# ── Build watch + flows commands ───────────────────────────────────────
+# Top panes — SSH into each endpoint and run a rotating watch that shows
+# established TCP connections, link counters, and top 5 processes. 'watch
+# -t' keeps the header hidden; -n 1 refreshes every second.
+_watch_cmd() {
+    local ip="$1" label="$2"
+    cat <<WATCH
+clear
+echo "─── ${label} (${ip}) ─────────────────────────────────────"
+watch -t -n 1 'echo "=== TCP sessions ==="; ss -tnp 2>/dev/null | head -30; echo ""; echo "=== Link counters ==="; ip -s link show 2>/dev/null | grep -A 1 eth0 | head -8; echo ""; echo "=== Load / Top ==="; uptime; echo ""; ps -eo pid,%cpu,%mem,comm --sort=-%cpu | head -6'
+WATCH
+}
+
+# Bottom pane — prefer hubble (cilium clusters) since it's pod-aware and
+# emits both L3/L4 and L7 (HTTP, DNS). Falls back to tcpdump on the host
+# bridge (virbr0) when hubble isn't available or the targets aren't pods.
+_flows_cmd() {
+    cat <<'FLOWS'
+clear
+if kubectl -n kube-system exec ds/cilium -c cilium-agent -- hubble --help >/dev/null 2>&1; then
+    echo "─── Hubble flows ${IP1} ↔ ${IP2} ───────────────────────"
+    kubectl -n kube-system exec ds/cilium -c cilium-agent -- \
+        hubble observe --follow --output compact \
+            --ip "${IP1}" --ip "${IP2}"
+else
+    echo "─── tcpdump virbr0 ${IP1} ↔ ${IP2} ───────────────────────"
+    sudo tcpdump -i virbr0 -nn -l "host ${IP1} and host ${IP2}"
+fi
+FLOWS
+}
+
+# ── Drive tmux ─────────────────────────────────────────────────────────
+# Start (or attach to) the kldload session, blow away any previous
+# inspect window, create fresh, split into the 3-pane layout, and send
+# the commands to each pane.
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux new-session -d -s "$SESSION" -n shell
+fi
+tmux kill-window -t "${SESSION}:${WINDOW}" 2>/dev/null || true
+tmux new-window -t "$SESSION" -n "$WINDOW"
+
+# Pane layout:
+#   0 (top-left) → pane 0 at start
+#   split-window -h from pane 0 → pane 1 (top-right)
+#   split-window -v from pane 0 → pane 2 (bottom, full-width-ish)
+# Then resize pane 2 to take ~55% vertical so flows are the focal point.
+tmux split-window -h -t "${SESSION}:${WINDOW}"          # pane 1 (top-right)
+tmux split-window -v -t "${SESSION}:${WINDOW}.0"        # pane 2 (bottom-left)
+tmux select-layout -t "${SESSION}:${WINDOW}" main-horizontal
+# The main-horizontal layout: one big pane on top, smaller panes below.
+# We want flows BIG and watches small, so swap: promote pane 2 to main.
+tmux swap-pane -s "${SESSION}:${WINDOW}.2" -t "${SESSION}:${WINDOW}.0"
+tmux select-layout -t "${SESSION}:${WINDOW}" main-horizontal
+
+# Send commands. IP1/IP2 must be exported for the flows heredoc's expansion.
+tmux send-keys -t "${SESSION}:${WINDOW}.1" "$(_watch_cmd "$ip1" "$t1")" Enter
+tmux send-keys -t "${SESSION}:${WINDOW}.2" "$(_watch_cmd "$ip2" "$t2")" Enter
+tmux send-keys -t "${SESSION}:${WINDOW}.0" \
+    "export IP1='$ip1'; export IP2='$ip2'; $(_flows_cmd)" Enter
+
+tmux select-pane -t "${SESSION}:${WINDOW}.0"
+tmux select-window -t "${SESSION}:${WINDOW}"
+
+echo "kinspect: tmux window '${WINDOW}' ready."
+echo "  In the drawer: Ctrl+B w (window list) or Ctrl+B n/p."
+echo "  Keyboard shortcut: bind one of the F-keys to this window if you like."

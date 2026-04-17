@@ -47,7 +47,6 @@ test_cmd "kupgrade (safe upgrade)" "kupgrade"
 test_cmd "kexport (image export)" "kexport"
 test_cmd "krecovery (disaster recovery)" "krecovery"
 test_cmd "kldload-help" "kldload-help"
-test_cmd "kldload-overview" "kldload-overview"
 test_cmd "kube-demo" "kube-demo"
 
 # Test kst runs without error

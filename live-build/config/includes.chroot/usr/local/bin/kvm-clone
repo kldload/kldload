@@ -104,3 +104,24 @@ echo "  Source: /dev/zvol/${SRC_ZVOL}"
 echo "  Clone:  /dev/zvol/${DST_ZVOL}"
 echo "  Start:  virsh start ${DEST}"
 echo "  Snap:   kvm-snap ${DEST}"
+
+# Register the clone so dynamic inventory picks it up immediately. Role and
+# cluster are inferred from the naming convention kube-cluster uses:
+#   <cluster>-cp-*    → control_plane
+#   <cluster>-worker-* → worker
+if command -v kldload-db >/dev/null 2>&1; then
+  _role="clone"; _cluster=""
+  case "$DEST" in
+    *-cp|*-cp-*)         _role="control_plane" ;;
+    *-worker-*|*worker*) _role="worker" ;;
+  esac
+  # Extract cluster prefix (everything before the first role suffix)
+  if [[ "$DEST" == *-cp* || "$DEST" == *-worker* ]]; then
+    _cluster="${DEST%%-cp*}"
+    _cluster="${_cluster%%-worker*}"
+  fi
+  kldload-db vm-register --name "$DEST" --role "$_role" \
+    --cluster "$_cluster" --golden-src "$SOURCE" --status "cloned" 2>/dev/null || true
+  kldload-db event --type "vm" --subject "$DEST" \
+    --message "cloned from ${SOURCE}" 2>/dev/null || true
+fi

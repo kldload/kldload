@@ -1,0 +1,235 @@
+---
+# Convert a stock Fedora Asahi Remix install (Apple Silicon) into a kldload
+# node. Layers kldload tools + ZFS (DKMS against the Asahi kernel) + web UI
+# on top of a vanilla Asahi install. Does NOT touch macOS — Asahi's installer
+# did that — and does NOT migrate the root filesystem to ZFS. ZFS goes on a
+# secondary dataset that kldload owns; Asahi's btrfs/ext4 root stays intact.
+#
+# Usage (from the Mac, after Fedora Asahi is installed):
+#   dnf install -y ansible-core git
+#   git clone https://github.com/kldload/kldload-free /tmp/kldload
+#   ansible-playbook /tmp/kldload/live-build/config/includes.chroot/\
+#     usr/local/share/kldload-ansible/playbooks/asahi-convert.yml
+#
+# Safety:
+#   - Only installs/enables; never repartitions, never touches /boot/efi
+#   - ZFS DKMS build is tried but non-fatal — if the Asahi kernel doesn't
+#     compile cleanly, kldload still installs and runs, just without ZFS.
+#   - WireGuard, Cilium, Bob, webui — all optional sub-roles via tags.
+
+- name: Convert Fedora Asahi Remix to kldload
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    kldload_repo:         "https://github.com/kldload/kldload-free"
+    kldload_workdir:      /var/cache/kldload-convert
+    enable_zfs:           true
+    enable_webui:         true
+    enable_wireguard:     true
+    enable_bob:           false   # Ollama pulls GB of models — opt-in only
+    zfs_pool_device:      ""      # empty = use a file-backed pool for now
+
+  tasks:
+    - name: Refuse if this isn't an aarch64 Fedora Asahi system
+      fail:
+        msg: "This playbook only runs on aarch64 Fedora Asahi Remix. Detected: {{ ansible_architecture }} / {{ ansible_distribution }}"
+      when: ansible_architecture not in ['aarch64', 'arm64']
+            or ansible_distribution != 'Fedora'
+
+    - name: Install base packages (Ansible, git, build chain)
+      dnf:
+        name:
+          - ansible-core
+          - git
+          - curl
+          - jq
+          - dkms
+          - kernel-devel
+          - kernel-headers
+          - gcc
+          - make
+          - python3
+          - python3-pip
+          - python3-websockets
+          - sqlite
+          - wireguard-tools
+          - qemu-kvm
+          - libvirt
+          - libvirt-daemon-kvm
+          - virt-install
+          - cockpit-machines
+        state: present
+
+    - name: Clone kldload-free repo
+      git:
+        repo: "{{ kldload_repo }}"
+        dest: "{{ kldload_workdir }}"
+        update: true
+        version: main
+      tags: [kldload-src]
+
+    - name: Copy kldload tools into /usr/local/bin
+      copy:
+        src: "{{ kldload_workdir }}/live-build/config/includes.chroot/usr/local/bin/"
+        dest: /usr/local/bin/
+        remote_src: true
+        mode: "0755"
+
+    - name: Copy kldload Ansible library
+      copy:
+        src: "{{ kldload_workdir }}/live-build/config/includes.chroot/usr/local/share/kldload-ansible/"
+        dest: /usr/local/share/kldload-ansible/
+        remote_src: true
+        mode: preserve
+
+    - name: Copy webui assets
+      when: enable_webui
+      copy:
+        src: "{{ kldload_workdir }}/live-build/config/includes.chroot/usr/local/share/kldload-webui/"
+        dest: /usr/local/share/kldload-webui/
+        remote_src: true
+        mode: preserve
+      tags: [webui]
+
+    - name: pip install websockets (Fedora's RPM is sometimes too old)
+      pip:
+        name: websockets
+        state: present
+      tags: [webui]
+
+    # ── ZFS on Asahi ─────────────────────────────────────────────────────────
+    # Fedora Asahi uses kernel-asahi (heavily patched). Upstream zfs-dkms builds
+    # against it in most recent OpenZFS releases. If it fails, the rest of
+    # kldload still works — just without the ZFS runtime. Keep going.
+    - name: Enable RPM Fusion free repo (for zfs-dkms)
+      when: enable_zfs
+      dnf:
+        name: "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-{{ ansible_distribution_major_version }}.noarch.rpm"
+        state: present
+        disable_gpg_check: true
+      tags: [zfs]
+
+    - name: Enable zfsonlinux repo
+      when: enable_zfs
+      shell: |
+        dnf install -y https://zfsonlinux.org/fedora/zfs-release-2-{{ ansible_distribution_major_version }}.noarch.rpm || true
+      args:
+        creates: /etc/yum.repos.d/zfs.repo
+      tags: [zfs]
+
+    - name: Install ZFS DKMS (non-fatal — Asahi kernel compat varies)
+      when: enable_zfs
+      dnf:
+        name:
+          - zfs
+          - zfs-dkms
+        state: present
+      register: zfs_install
+      failed_when: false
+      tags: [zfs]
+
+    - name: Load ZFS module
+      when: enable_zfs and zfs_install is succeeded
+      modprobe:
+        name: zfs
+        state: present
+      register: zfs_load
+      failed_when: false
+      tags: [zfs]
+
+    - name: Report ZFS status
+      when: enable_zfs
+      debug:
+        msg: >-
+          ZFS: {{ 'LOADED' if (zfs_load is defined and zfs_load is succeeded)
+                 else 'FAILED (Asahi kernel compat — kldload still works without)' }}
+      tags: [zfs]
+
+    # ── WireGuard ────────────────────────────────────────────────────────────
+    - name: Load wireguard module (mainline kernel — Asahi inherits)
+      when: enable_wireguard
+      modprobe:
+        name: wireguard
+        state: present
+      tags: [wireguard]
+
+    # ── Services ─────────────────────────────────────────────────────────────
+    - name: Install kldload-webui systemd unit
+      when: enable_webui
+      copy:
+        src: "{{ kldload_workdir }}/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-webui.service"
+        dest: /etc/systemd/system/kldload-webui.service
+        remote_src: true
+      tags: [webui]
+      failed_when: false
+
+    - name: Enable kldload-webui
+      when: enable_webui
+      systemd:
+        name: kldload-webui
+        enabled: true
+        state: started
+        daemon_reload: true
+      failed_when: false
+      tags: [webui]
+
+    - name: Enable libvirtd (for kvm/kube-cluster)
+      systemd:
+        name: libvirtd
+        enabled: true
+        state: started
+      failed_when: false
+
+    # ── Bob (optional) ───────────────────────────────────────────────────────
+    - name: Install Ollama (Apple Silicon — llama.cpp arm64 works natively)
+      when: enable_bob
+      shell: |
+        curl -fsSL https://ollama.com/install.sh | sh
+      args:
+        creates: /usr/local/bin/ollama
+      tags: [bob]
+
+    - name: Pull llama3.1:8b for Bob
+      when: enable_bob
+      shell: ollama pull llama3.1:8b
+      args:
+        creates: /root/.ollama/models/manifests/registry.ollama.ai/library/llama3.1/8b
+      tags: [bob]
+
+    # ── State DB init ────────────────────────────────────────────────────────
+    - name: Ensure /var/lib/kldload exists
+      file:
+        path: /var/lib/kldload
+        state: directory
+        mode: "0750"
+
+    - name: Initialize state DB via kldload-db
+      command: kldload-db cluster-upsert --name asahi-local --status ready
+      changed_when: false
+
+    - name: Register this host as a node
+      command: >-
+        kldload-db node-register
+        --hostname {{ ansible_hostname }}
+        --role standalone
+        --ip-mgmt {{ ansible_default_ipv4.address | default('127.0.0.1') }}
+        --cluster asahi-local
+        --status ready
+      changed_when: false
+
+    - name: Log conversion event
+      command: >-
+        kldload-db event --type install --subject asahi-convert
+        --message "Fedora Asahi converted to kldload"
+      changed_when: false
+
+    - name: Final report
+      debug:
+        msg:
+          - "kldload is installed on this Fedora Asahi Remix host."
+          - "Web UI:  http://{{ ansible_default_ipv4.address | default('localhost') }}:8080"
+          - "ZFS:     {{ 'active' if (enable_zfs and zfs_load is defined and zfs_load is succeeded) else 'not loaded' }}"
+          - "Next:    create a ZFS pool with kldload-db + zpool create, or skip and use kvm/kube on the existing FS."

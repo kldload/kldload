@@ -1,0 +1,30 @@
+---
+# Quick health-check playbook — useful as a "hello ansible" target from the
+# web UI's Ansible tab. Runs against any inventory.
+
+- name: kldload smoke test
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Ping
+      ping:
+
+    - name: Report uptime
+      command: uptime
+      register: up
+      changed_when: false
+
+    - name: Disk free
+      command: df -h /
+      register: df
+      changed_when: false
+
+    - name: Summary
+      debug:
+        msg:
+          - "host:   {{ inventory_hostname }}"
+          - "os:     {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "kernel: {{ ansible_kernel }}"
+          - "uptime: {{ up.stdout }}"
+          - "df:     {{ df.stdout_lines[-1] }}"

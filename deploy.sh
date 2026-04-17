@@ -91,8 +91,25 @@ latest_iso() {
 cmd_builder_image() {
     local runtime
     runtime="$(detect_runtime)"
-    log "Building kldload builder image: $BUILDER_IMAGE"
-    "$runtime" build -t "$BUILDER_IMAGE" -f "$ROOT/builder/Dockerfile" "$ROOT/builder/"
+    # aarch64 builds use a separately-tagged builder image so it lives alongside
+    # the x86 one in local storage (quay.io/centos/centos:stream9 resolves to
+    # whichever arch we pull, but we don't want them clobbering each other).
+    local tag="$BUILDER_IMAGE"
+    local platform=""
+    case "$ARCH" in
+        aarch64|arm64)
+            tag="${BUILDER_IMAGE%:*}:aarch64"
+            platform="--platform linux/arm64"
+            ;;
+        *)
+            platform="--platform linux/amd64"
+            ;;
+    esac
+    log "Building kldload builder image: $tag (${ARCH})"
+    "$runtime" build $platform -t "$tag" -f "$ROOT/builder/Dockerfile" "$ROOT/builder/"
+    # Keep BUILDER_IMAGE pointing at the arch-specific tag for the rest of
+    # this run so downstream cmd_build picks it up automatically.
+    BUILDER_IMAGE="$tag"
     log "Builder image ready: $BUILDER_IMAGE"
 }
 
@@ -103,14 +120,21 @@ cmd_builder_image() {
 cmd_build_debian_darksite() {
     local runtime
     runtime="$(detect_runtime)"
-    local darksite_dir="$ROOT/live-build/darksite-debian-cache"
+    # Darksite cache is arch-scoped — aarch64 and amd64 packages don't mix.
+    local darksite_dir
+    case "$ARCH" in
+        x86_64|amd64) _deb_arch="amd64"; darksite_dir="$ROOT/live-build/darksite-debian-cache" ;;
+        aarch64|arm64) _deb_arch="arm64"; darksite_dir="$ROOT/live-build/darksite-debian-cache-arm64" ;;
+        *) die "unsupported ARCH=$ARCH" ;;
+    esac
     mkdir -p "$darksite_dir"
-    log "Building Debian darksite APT mirror (runs in Debian container)..."
+    log "Building Debian darksite APT mirror (${_deb_arch})..."
     "$runtime" run --rm \
+        --platform "linux/${_deb_arch}" \
         -v "$ROOT/build/darksite-debian:/darksite-build:z,ro" \
         -v "$darksite_dir:/output:z" \
         -e PROFILE="$PROFILE" \
-        -e ARCH="amd64" \
+        -e ARCH="${_deb_arch}" \
         -e SUITE="trixie" \
         --name "kldload-darksite-deb-$$" \
         debian:trixie-slim \
@@ -125,15 +149,21 @@ cmd_build_debian_darksite() {
 cmd_build_ubuntu_darksite() {
     local runtime
     runtime="$(detect_runtime)"
-    local darksite_dir="$ROOT/live-build/darksite-ubuntu-cache"
+    local darksite_dir
+    case "$ARCH" in
+        x86_64|amd64) _deb_arch="amd64"; darksite_dir="$ROOT/live-build/darksite-ubuntu-cache" ;;
+        aarch64|arm64) _deb_arch="arm64"; darksite_dir="$ROOT/live-build/darksite-ubuntu-cache-arm64" ;;
+        *) die "unsupported ARCH=$ARCH" ;;
+    esac
     mkdir -p "$darksite_dir"
-    log "Building Ubuntu darksite APT mirror (runs in Ubuntu container)..."
+    log "Building Ubuntu darksite APT mirror (${_deb_arch})..."
     "$runtime" run --rm \
+        --platform "linux/${_deb_arch}" \
         -v "$ROOT/build/darksite-debian:/darksite-build:z,ro" \
         -v "$ROOT/build/darksite-ubuntu:/darksite-ubuntu:z,ro" \
         -v "$darksite_dir:/output:z" \
         -e PROFILE="$PROFILE" \
-        -e ARCH="amd64" \
+        -e ARCH="${_deb_arch}" \
         -e SUITE="noble" \
         --name "kldload-darksite-ubuntu-$$" \
         ubuntu:noble \
@@ -216,6 +246,13 @@ cmd_build_ai_appliance() {
 cmd_build() {
     local runtime
     runtime="$(detect_runtime)"
+    # Switch to the arch-specific builder tag if we're not building x86_64,
+    # so `./deploy.sh build` "just works" after the builder image is present.
+    case "$ARCH" in
+        aarch64|arm64)
+            BUILDER_IMAGE="${BUILDER_IMAGE%:*}:aarch64"
+            ;;
+    esac
     log "Building kldload ISO (PROFILE=$PROFILE EDITION=$EDITION ARCH=$ARCH RELEASE=$RELEASE)"
 
     # ── Stage 1: APT darksites (Debian + Ubuntu) ─────────────────────────
@@ -258,22 +295,66 @@ cmd_build() {
         fi
     fi
 
-    # ── Stage 3: Cilium Helm chart ───────────────────────────────────────
-    # Cached so kube-init can install Cilium without internet.
+    # ── Stage 3: Helm charts + Grafana dashboards (all darksite-baked) ───
+    # Every helm chart + dashboard the autodeploy path needs has to live
+    # on the ISO so first boot works fully offline. Downloads happen HERE
+    # at build time, files ship inside /root/darksite/ on the live ISO.
     local helm_cache="$ROOT/live-build/config/includes.chroot/root/darksite/helm-charts"
-    if [[ ! -f "$helm_cache/cilium.tgz" ]] && [[ "$EDITION" != "core" ]]; then
-        log "Caching Cilium Helm chart..."
-        mkdir -p "$helm_cache"
-        if command -v helm >/dev/null 2>&1; then
-            helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
-            helm repo update >/dev/null 2>&1 || true
-            helm pull cilium/cilium --version "${CILIUM_VERSION:-1.16.5}" -d "$helm_cache" 2>/dev/null && \
-                mv "$helm_cache"/cilium-*.tgz "$helm_cache/cilium.tgz" 2>/dev/null || true
-        elif command -v curl >/dev/null 2>&1; then
-            curl -fsSL "https://helm.cilium.io/cilium-${CILIUM_VERSION:-1.16.5}.tgz" \
-                -o "$helm_cache/cilium.tgz" 2>/dev/null || log "WARNING: Could not cache Cilium chart"
+    local dash_cache="$ROOT/live-build/config/includes.chroot/usr/local/share/klab/grafana-dashboards"
+    local k8s_manifests="$ROOT/live-build/config/includes.chroot/root/darksite/k8s-manifests"
+    if [[ "$EDITION" != "core" ]]; then
+        mkdir -p "$helm_cache" "$dash_cache" "$k8s_manifests"
+        # metrics-server YAML — feeds `kubectl top` and the web UI's
+        # live CPU/memory overlay on the K8s tab. kube-init applies this
+        # after Cilium is up. Offline-first; falls back to upstream URL.
+        if [[ ! -f "$k8s_manifests/metrics-server.yaml" ]] && command -v curl >/dev/null 2>&1; then
+            curl -fsSL "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml" \
+                -o "$k8s_manifests/metrics-server.yaml" 2>/dev/null \
+                && log "metrics-server manifest cached" \
+                || log "WARNING: could not cache metrics-server manifest"
         fi
-        [[ -f "$helm_cache/cilium.tgz" ]] && log "Cilium chart cached: $(du -h "$helm_cache/cilium.tgz" | cut -f1)" || true
+        # Cilium chart
+        if [[ ! -f "$helm_cache/cilium.tgz" ]]; then
+            log "Caching Cilium Helm chart..."
+            if command -v helm >/dev/null 2>&1; then
+                helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+                helm repo update >/dev/null 2>&1 || true
+                helm pull cilium/cilium --version "${CILIUM_VERSION:-1.16.5}" -d "$helm_cache" 2>/dev/null && \
+                    mv "$helm_cache"/cilium-*.tgz "$helm_cache/cilium.tgz" 2>/dev/null || true
+            elif command -v curl >/dev/null 2>&1; then
+                curl -fsSL "https://helm.cilium.io/cilium-${CILIUM_VERSION:-1.16.5}.tgz" \
+                    -o "$helm_cache/cilium.tgz" 2>/dev/null || log "WARNING: Could not cache Cilium chart"
+            fi
+            [[ -f "$helm_cache/cilium.tgz" ]] && log "Cilium chart cached: $(du -h "$helm_cache/cilium.tgz" | cut -f1)"
+        fi
+        # Tetragon chart — Cilium's syscall/process/file eBPF observability.
+        # Autodeploy installs this once the cluster is up. Must be offline.
+        if [[ ! -f "$helm_cache/tetragon.tgz" ]]; then
+            log "Caching Tetragon Helm chart..."
+            if command -v helm >/dev/null 2>&1; then
+                helm pull cilium/tetragon -d "$helm_cache" 2>/dev/null && \
+                    mv "$helm_cache"/tetragon-*.tgz "$helm_cache/tetragon.tgz" 2>/dev/null || \
+                    log "WARNING: Could not cache Tetragon chart"
+            fi
+            [[ -f "$helm_cache/tetragon.tgz" ]] && log "Tetragon chart cached: $(du -h "$helm_cache/tetragon.tgz" | cut -f1)"
+        fi
+        # Grafana dashboards (pre-fetched so firstboot never needs internet)
+        # 1860  = Node Exporter Full
+        # 16611 = Cilium Metrics
+        # 16612 = Cilium Policy Verdict
+        # 16613 = Hubble Flows
+        # Tetragon ships as a bundled JSON at
+        # includes.chroot/usr/local/share/klab/grafana-dashboards/tetragon.json
+        # — Grafana.com has no Tetragon dashboard under a stable ID.
+        for id in 1860 16611 16612 16613; do
+            local dash_file="$dash_cache/grafana-${id}.json"
+            if [[ ! -f "$dash_file" ]] && command -v curl >/dev/null 2>&1; then
+                curl -fsSL "https://grafana.com/api/dashboards/${id}/revisions/latest/download" \
+                    -o "$dash_file" 2>/dev/null \
+                    && log "Grafana dashboard ${id} cached" \
+                    || log "WARNING: Could not cache Grafana dashboard ${id}"
+            fi
+        done
     fi
 
     # ── Stage 4: ISO assembly (runs inside builder container) ────────────
@@ -284,7 +365,17 @@ cmd_build() {
     #   - Creates squashfs, EFI boot image, and final ISO via xorriso
     #
     # Runs detached to avoid SIGPIPE when stdout pipe fills up.
+    # On non-native architectures, pass --platform so podman/docker uses the
+    # right container variant. Relies on qemu-user-static + binfmt_misc being
+    # registered on the host for cross-arch execution (ships with most distros
+    # as qemu-user-binfmt or qemu-user-static packages).
+    local _platform=""
+    case "$ARCH" in
+        x86_64|amd64) _platform="linux/amd64" ;;
+        aarch64|arm64) _platform="linux/arm64" ;;
+    esac
     "$runtime" run -d --privileged \
+        --platform "$_platform" \
         -v "$ROOT:/build:z" \
         -e PROFILE="$PROFILE" \
         -e EDITION="$EDITION" \

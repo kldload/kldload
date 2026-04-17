@@ -1,0 +1,19 @@
+[Unit]
+Description=ttyd — kldload browser console (k9s + shell + logs via tmux)
+After=network.target
+
+[Service]
+Type=simple
+Environment=HOME=/root
+Environment=KUBECONFIG=/root/.kube/config
+Environment=TERM=xterm-256color
+# -W = writable (keyboard input). Session lives inside tmux so iframe
+# reloads reattach instead of losing state. Bound to 0.0.0.0 so both LAN
+# and WireGuard mesh can reach it. Tighten to a specific interface by
+# changing -i 0.0.0.0 if needed.
+ExecStart=/usr/local/bin/ttyd -W -i 0.0.0.0 -p 7681 -t fontSize=14 /usr/local/bin/kldload-console
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

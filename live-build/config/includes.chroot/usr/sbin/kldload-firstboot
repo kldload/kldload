@@ -334,13 +334,50 @@ setup_kvm() {
     nmcli con up br0 2>/dev/null || true
   fi
 
-  # libvirt default pool
+  # libvirt default pool + default NAT network (virbr0). libvirtd's socket
+  # can take a few seconds after `systemctl enable --now` to accept virsh
+  # commands — on a freshly installed box the define calls silently fail
+  # if we don't wait for the socket. 1.0.4 regressed on both:
+  #   1. pool-define-as raced libvirtd → "missing storage pool target path"
+  #   2. the previous net-destroy+undefine block left NO default network
+  #      behind → klab-firstboot could not attach VMs to virbr0.
   systemctl enable --now libvirtd
-  virsh net-destroy  default 2>/dev/null || true
-  virsh net-undefine default 2>/dev/null || true
+  mkdir -p /var/lib/libvirt/images
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    virsh list >/dev/null 2>&1 && break
+    sleep 1
+  done
+  # Storage pool — images directory.
   virsh pool-define-as default dir --target /var/lib/libvirt/images 2>/dev/null || true
   virsh pool-autostart default 2>/dev/null || true
   virsh pool-start    default 2>/dev/null || true
+  if ! virsh pool-info default >/dev/null 2>&1; then
+    log "WARNING: libvirt default pool not defined — klab VM builds will fail"
+  fi
+  # Default NAT network — klab and kube-cluster both need virbr0 on
+  # 192.168.122.0/24. libvirt usually ships this pre-defined but a fresh
+  # CentOS9 image sometimes doesn't; recreate it if missing.
+  if ! virsh net-info default >/dev/null 2>&1; then
+    cat > /tmp/libvirt-default-net.xml <<'VNETDEF'
+<network>
+  <name>default</name>
+  <forward mode='nat'/>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.122.2' end='192.168.122.254'/>
+    </dhcp>
+  </ip>
+</network>
+VNETDEF
+    virsh net-define /tmp/libvirt-default-net.xml 2>/dev/null || true
+    rm -f /tmp/libvirt-default-net.xml
+  fi
+  virsh net-autostart default 2>/dev/null || true
+  virsh net-start    default 2>/dev/null || true
+  if ! virsh net-info default >/dev/null 2>&1; then
+    log "WARNING: libvirt default network not defined — klab VMs will fail to boot"
+  fi
 
   printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/99-kldload-kvm.conf
   sysctl -p /etc/sysctl.d/99-kldload-kvm.conf
@@ -751,7 +788,13 @@ SALT
     systemctl start  kldload-webui 2>/dev/null || true
 
     # ── AI profile: install Ollama + pull model + create kldload-trained assistant ──
-    if [[ "$ROLE" == "ai" || "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]; then
+    # Skip if kldload-autodeploy is present — it owns the AI phase now, runs
+    # it in the background so other phases overlap. Without this gate, both
+    # would race to install ollama and pull the same model.
+    if [[ -x /usr/sbin/kldload-autodeploy ]] \
+       && ([[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]] || [[ "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ]] || [[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]); then
+      log "autodeploy is present — skipping firstboot's AI block (autodeploy will handle it)"
+    elif [[ "$ROLE" == "ai" || "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]; then
       log "AI profile — installing Ollama and kldload-trained model..."
 
       # Status file — dashboard reads this to show progress
@@ -863,6 +906,17 @@ OLLAMA
             sleep 10
           done
           [[ "${_pull_ok}" -eq 0 ]] && log "WARNING: ${_model} pull failed — run 'ollama pull ${_model}' manually"
+
+          # Pre-warm the model and pin it in VRAM for 24h. Without this the
+          # first chat has a 30s cold-start that makes Bob look unresponsive
+          # right when the user first clicks on him. keep_alive=24h keeps
+          # the weights resident across idle periods.
+          if [[ "${_pull_ok}" -eq 1 ]]; then
+            log "  Pre-warming ${_model} (keep_alive=24h)..."
+            curl -sf -X POST http://127.0.0.1:11434/api/generate \
+              -d "{\"model\":\"${_model}\",\"prompt\":\"ok\",\"stream\":false,\"keep_alive\":\"24h\"}" \
+              >/dev/null 2>&1 && ok "${_label} warm" || log "  warmup skipped"
+          fi
         }
 
         # Wrap everything from model pull onward in subshell — no errors kill firstboot
@@ -889,6 +943,16 @@ OLLAMA
           fi
           log "Hardware: ${_total_ram_gb}GB RAM, GPU=${_has_gpu} — selected ${_bob_base}"
           _pull_model "$_bob_base" "Bob base model"
+
+          # Vision model — only pull if we have the VRAM for it. llama3.2-vision:11b
+          # is ~8GB VRAM at Q4 quant. Skip on low-end CPU-only hosts so we don't
+          # block firstboot with a multi-GB download that can't load anyway.
+          if [[ "${_has_gpu}" -eq 1 ]] && [[ "${_total_ram_gb}" -ge 16 ]]; then
+            _status "Downloading vision model (~5.4 GB, lets Bob see images)..."
+            _pull_model "llama3.2-vision:11b" "Bob vision model"
+          else
+            log "Skipping vision model (needs GPU + 16GB+ RAM to run usefully)"
+          fi
 
           log "Creating Bob..."
           _status "Creating Bob..."
@@ -1507,6 +1571,114 @@ GRAFDASH
         if [[ -f /usr/local/share/klab/grafana-dashboard.json ]]; then
           cp /usr/local/share/klab/grafana-dashboard.json /var/lib/grafana/dashboards/klab-estate.json
           ok "Grafana dashboard provisioned"
+        fi
+
+        # Additional community dashboards — node_exporter full + Cilium +
+        # Hubble + Tetragon. Deploy.sh pre-fetches them into
+        # /usr/local/share/klab/grafana-dashboards/ at build time so firstboot
+        # is fully offline. Fall back to online fetch if the cache is empty
+        # (dev or old builds only).
+        for id in 1860 16611 16612 16613; do
+          _cached="/usr/local/share/klab/grafana-dashboards/grafana-${id}.json"
+          _target="/var/lib/grafana/dashboards/grafana-${id}.json"
+          if [[ -f "$_cached" ]]; then
+            cp "$_cached" "$_target"
+            ok "Grafana dashboard ${id} provisioned (offline)"
+          else
+            curl -fsSL "https://grafana.com/api/dashboards/${id}/revisions/latest/download" \
+              -o "$_target" 2>/dev/null \
+              && ok "Grafana dashboard ${id} provisioned (online)" || true
+          fi
+        done
+
+        # Tetragon dashboard — bundled (no Grafana.com ID exists). Ships in
+        # the ISO. This one is required for the Observability group in the
+        # web UI's Metrics tab.
+        if [[ -f /usr/local/share/klab/grafana-dashboards/tetragon.json ]]; then
+          cp /usr/local/share/klab/grafana-dashboards/tetragon.json \
+             /var/lib/grafana/dashboards/tetragon.json
+          ok "Grafana dashboard Tetragon eBPF provisioned"
+        fi
+
+        # Pin Node Exporter Full (1860) default "job" to node_exporter.
+        # Upstream ships with no default, so Grafana picks alphabetically —
+        # which means if klab-blue / klab-green scrapes also exist, those
+        # get selected first and every panel shows "No data" (those klab
+        # target IPs are empty until klab VMs are actually running).
+        python3 - <<'PYFIX' 2>/dev/null || true
+import json, os, glob, re
+# Two fixes applied to every provisioned dashboard:
+#   1) Strip __inputs / __requires / __elements and rewrite any
+#      ${DS_PROMETHEUS*} placeholder to our real datasource UID
+#      "prometheus". Grafana.com dashboards ship packaged for UI import
+#      where the user maps the placeholder at import time — file-drop
+#      provisioning has no such step, so panels silently query a
+#      non-existent datasource and show "No data".
+#   2) Pin Node Exporter Full (1860) default job to node_exporter,
+#      otherwise Grafana picks the first job alphabetically and lands
+#      on stale klab-blue targets with no data.
+TARGET_DS = {"type": "prometheus", "uid": "prometheus"}
+def walk(o):
+    if isinstance(o, dict):
+        ds = o.get("datasource")
+        if isinstance(ds, str) and ds.startswith("${"):
+            o["datasource"] = dict(TARGET_DS)
+        elif isinstance(ds, dict):
+            uid = ds.get("uid", "")
+            if uid.startswith("${") or uid in ("", "$datasource"):
+                o["datasource"] = dict(TARGET_DS)
+        for v in o.values(): walk(v)
+    elif isinstance(o, list):
+        for v in o: walk(v)
+for p in glob.glob("/var/lib/grafana/dashboards/*.json"):
+    try: d = json.load(open(p))
+    except Exception: continue
+    d.pop("__inputs", None); d.pop("__requires", None); d.pop("__elements", None)
+    walk(d)
+    for v in d.get("templating", {}).get("list", []):
+        if v.get("name") == "job" and "node" in p.lower():
+            v["current"] = {"selected": True, "text": "node_exporter", "value": "node_exporter"}
+    txt = json.dumps(d, indent=2)
+    txt = re.sub(r'"\$\{DS_PROMETHEUS[^"}]*\}"', '"prometheus"', txt)
+    txt = txt.replace("${DS_PROMETHEUS}", "prometheus")
+    open(p, "w").write(txt)
+PYFIX
+        chown -R grafana:grafana /var/lib/grafana/dashboards 2>/dev/null || true
+
+        # Anonymous Viewer + iframe embedding — required for the Metrics tab
+        # in the kldload web UI to embed Grafana without a login redirect.
+        if ! grep -q "^\[auth.anonymous\]" /etc/grafana/grafana.ini 2>/dev/null \
+           || ! grep -A2 "^\[auth.anonymous\]" /etc/grafana/grafana.ini | grep -q "^enabled = true"; then
+          cat >> /etc/grafana/grafana.ini <<'GRAFEMBED'
+
+[auth.anonymous]
+enabled = true
+org_name = Main Org.
+org_role = Viewer
+
+[security]
+allow_embedding = true
+cookie_samesite = none
+
+[users]
+default_theme = dark
+GRAFEMBED
+          ok "Grafana anonymous + iframe embedding enabled"
+        fi
+
+        # Prometheus: add localhost:9100 (host node_exporter) scrape if
+        # not already there. The klab prometheus.yml may list VM targets
+        # but skip the host.
+        if [[ -f /etc/prometheus/prometheus.yml ]] && ! grep -q "kldload-host\|localhost:9100" /etc/prometheus/prometheus.yml; then
+          cat >> /etc/prometheus/prometheus.yml <<'PROMHOST'
+
+  - job_name: kldload-host
+    static_configs:
+      - targets: [localhost:9100]
+        labels:
+          instance: kldload-host
+PROMHOST
+          ok "Prometheus: added kldload-host scrape"
         fi
 
         # ── Grafana anonymous access via systemd env override ──

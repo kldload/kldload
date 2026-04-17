@@ -1,7 +1,13 @@
+/* Dark theme (default). Toggle via [data-theme="light"] on <html>.
+ * Everything else in the app uses var(--...) so a one-element flip
+ * reskins the entire UI without touching component styles. */
 :root {
   --bg:       #0f1117;
   --surface:  #161b25;
   --surface2: #1e2533;
+  --surface3: #14171d;   /* deepest background (log boxes, code blocks) */
+  --bg3:      #0a0d13;   /* even deeper — active inputs */
+  --subtle:   #cbd5e0;   /* text that's not main but still readable */
   --border:   rgba(255,255,255,0.07);
   --accent:   #34d399;
   --accent2:  #60a5fa;
@@ -10,6 +16,25 @@
   --text:     #e2e8f0;
   --muted:    #8892a4;
   --radius:   8px;
+}
+
+/* Light theme — applied when the user toggles. WCAG AA-friendly contrast
+ * (muted/text separation, accent darkened slightly for white-background
+ * buttons to remain legible). */
+[data-theme="light"] {
+  --bg:       #f5f6f8;
+  --surface:  #ffffff;
+  --surface2: #f0f2f5;
+  --surface3: #e5e8ed;
+  --bg3:      #ffffff;
+  --subtle:   #334155;
+  --border:   rgba(0,0,0,0.09);
+  --accent:   #059669;
+  --accent2:  #2563eb;
+  --warn:     #b45309;
+  --danger:   #dc2626;
+  --text:     #1a202c;
+  --muted:    #64748b;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -22,6 +47,23 @@ body {
   line-height: 1.5;
   display: flex;
   min-height: 100vh;
+}
+
+/* #app wraps sidebar + main. Body's flex only makes #app a flex item — we
+ * need #app itself to be a flex container so sidebar and main sit side by
+ * side instead of stacking. Without this the sidebar ends up on top of the
+ * content, which is the bug shown when someone adds a wrapper without
+ * reviewing the CSS. */
+#app {
+  display: flex;
+  flex: 1;
+  /* Whole UI (sidebar + main) shrinks to leave room for the terminal
+     drawer at the bottom. --term-h is updated live by termOpen/
+     termClose/termResize in index.html. Default 0 = full viewport. */
+  height: calc(100vh - var(--term-h, 0px));
+  min-height: calc(100vh - var(--term-h, 0px));
+  width: 100%;
+  transition: height 0s;
 }
 
 /* ── Sidebar ─────────────────────────────────────────────────────── */

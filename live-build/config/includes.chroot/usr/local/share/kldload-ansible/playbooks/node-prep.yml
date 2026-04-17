@@ -1,0 +1,66 @@
+---
+# Runs against each ZFS clone (CP + workers) after first boot. Regenerates
+# identity that was cleared by seal-golden.yml. Cloud-init only sets the
+# hostname and unlocks root — Ansible does the rest.
+
+- name: Prepare cloned kube node
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Force-regenerate machine-id
+      # Unconditionally wipe and regenerate. Even if the golden was sealed
+      # correctly, the seal could have been skipped (e.g. if we reused a
+      # golden from an earlier partial run). Regenerating is cheap and
+      # guarantees no two clones share the same machine-id.
+      shell: |
+        rm -f /etc/machine-id /var/lib/dbus/machine-id
+        systemd-machine-id-setup
+        mkdir -p /var/lib/dbus
+        ln -sf /etc/machine-id /var/lib/dbus/machine-id
+      changed_when: false
+
+    - name: Regenerate SSH host keys if missing
+      shell: |
+        if ! ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1; then
+          ssh-keygen -A
+          systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+        fi
+      changed_when: false
+
+    - name: Set hostname
+      hostname:
+        name: "{{ inventory_hostname_short }}"
+      when: inventory_hostname_short is defined
+
+    - name: Ensure kernel modules for Kubernetes
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          br_netfilter
+          overlay
+        mode: "0644"
+
+    - name: Load modules now
+      shell: modprobe br_netfilter && modprobe overlay
+      changed_when: false
+
+    - name: Kubernetes sysctls
+      copy:
+        dest: /etc/sysctl.d/99-k8s.conf
+        content: |
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                  = 1
+        mode: "0644"
+
+    - name: Apply sysctls
+      command: sysctl --system
+      changed_when: false
+
+    - name: Disable swap
+      shell: |
+        swapoff -a || true
+        sed -i.bak -E 's@^([^#].*\sswap\s.*)$@#\1@' /etc/fstab || true
+      changed_when: false

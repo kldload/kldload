@@ -285,6 +285,112 @@ else
   skip "No cluster running (admin.conf not found)"
 fi
 
+# ── Observability pipeline ─────────────────────────────────────────────────
+# Added after the "no data in Cilium/Tetragon dashboards" incident. Each
+# check validates one layer of the chain: metrics-server (powers kubectl
+# top + web UI overlays), Prometheus scrape state (cilium/hubble/tetragon
+# all "up"), label synthesis (dashboards query {k8s_app="cilium"}),
+# Grafana dashboards actually rendering (no unresolved ${DS_PROMETHEUS}),
+# inter-node firewall (policy drop was silently eating metrics traffic).
+if [[ -f /etc/kubernetes/admin.conf ]]; then
+  section "Observability pipeline"
+
+  # metrics-server → kubectl top
+  if kubectl top node --no-headers >/dev/null 2>&1; then
+    pass "metrics-server: kubectl top node returns data"
+  else
+    fail "metrics-server: kubectl top node not responding (install or --kubelet-insecure-tls)"
+  fi
+
+  # Prometheus reachable
+  if curl -fsS -m4 http://localhost:9090/-/ready >/dev/null 2>&1; then
+    pass "prometheus: /ready on :9090"
+  else
+    warn "prometheus: /ready not reachable on localhost:9090"
+  fi
+
+  # Expected scrape jobs present with at least one target up
+  for job in cilium-agent hubble-metrics tetragon node_exporter; do
+    up_count="$(curl -fsS -m4 "http://localhost:9090/api/v1/targets" 2>/dev/null \
+      | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for t in d['data']['activeTargets'] if t['labels'].get('job')=='${job}' and t['health']=='up'))" 2>/dev/null || echo 0)"
+    if [[ "$up_count" -gt 0 ]]; then
+      pass "prometheus scrape: ${job} (${up_count} targets up)"
+    else
+      fail "prometheus scrape: ${job} has zero up targets"
+    fi
+  done
+
+  # Cilium label synthesis — dashboards won't render without this
+  cilium_series="$(curl -fsS -m4 -G http://localhost:9090/api/v1/query \
+    --data-urlencode 'query=cilium_version{k8s_app="cilium"}' 2>/dev/null \
+    | python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']['result']))" 2>/dev/null || echo 0)"
+  if [[ "$cilium_series" -gt 0 ]]; then
+    pass "cilium scrape labels: {k8s_app=cilium} resolves (${cilium_series} agents)"
+  else
+    fail "cilium scrape labels: no series — dashboards 16611/16613 won't render"
+  fi
+
+  # Tetragon emitting events
+  tg_series="$(curl -fsS -m4 -G http://localhost:9090/api/v1/query \
+    --data-urlencode 'query=tetragon_events_total' 2>/dev/null \
+    | python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']['result']))" 2>/dev/null || echo 0)"
+  if [[ "$tg_series" -gt 0 ]]; then
+    pass "tetragon scrape: tetragon_events_total has ${tg_series} series"
+  else
+    warn "tetragon scrape: no series (tetragon may still be starting)"
+  fi
+
+  # Grafana dashboards clean of DS_PROMETHEUS placeholders
+  dash_dir="/var/lib/grafana/dashboards"
+  if [[ -d "$dash_dir" ]]; then
+    bad_dash="$(grep -l 'DS_PROMETHEUS\|"__inputs"' "$dash_dir"/*.json 2>/dev/null | wc -l)"
+    if [[ "$bad_dash" -eq 0 ]]; then
+      n_dash="$(ls "$dash_dir"/*.json 2>/dev/null | wc -l)"
+      pass "grafana dashboards: ${n_dash} provisioned, all datasource refs resolved"
+    else
+      fail "grafana dashboards: ${bad_dash} still have \${DS_PROMETHEUS} — panels will show 'No data'"
+    fi
+  else
+    skip "grafana dashboards: no dashboards dir"
+  fi
+
+  # Inter-node firewall — kubelet:10250 and hubble-peer:4244 reachable
+  if grep -qE 'ip saddr.*192\.168\.122|ip saddr.*10\.244' /etc/nftables.conf 2>/dev/null; then
+    pass "cluster firewall: node subnet or pod CIDR trusted in nft input chain"
+  else
+    warn "cluster firewall: no node-subnet trust rule (kube-network nft may be stale)"
+  fi
+fi
+
+# ── Bob / webui tooling ────────────────────────────────────────────────────
+section "Bob + web UI tooling"
+
+# Ollama reachable and at least one model in memory
+if curl -fsS -m3 http://localhost:11434/api/ps >/dev/null 2>&1; then
+  n_models="$(curl -fsS -m3 http://localhost:11434/api/ps 2>/dev/null \
+    | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('models',[])))" 2>/dev/null || echo 0)"
+  if [[ "$n_models" -gt 0 ]]; then
+    pass "ollama: reachable, ${n_models} model(s) resident"
+  else
+    warn "ollama: reachable but no models loaded (Bob will be slow on first prompt)"
+  fi
+else
+  warn "ollama: not reachable on localhost:11434"
+fi
+
+# Bob observability tools present in the webui
+if [[ -f /usr/local/bin/kldload-webui ]]; then
+  missing=""
+  for tool in k8s_get_pods k8s_describe k8s_logs k8s_events prom_query zfs_status host_vitals doctor_check; do
+    grep -q "\"${tool}\"" /usr/local/bin/kldload-webui 2>/dev/null || missing+="${tool} "
+  done
+  if [[ -z "$missing" ]]; then
+    pass "webui: all 8 Bob observability tools registered"
+  else
+    fail "webui: missing Bob tools:${missing}"
+  fi
+fi
+
 # ── Summary ────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${C}══════════════════════════════════════════════════════════════${N}"
@@ -294,6 +400,15 @@ echo -e "  ${G}PASS: $PASS${N}"
 echo -e "  ${R}FAIL: $FAIL${N}"
 echo -e "  ${Y}WARN: $WARN${N}"
 echo ""
+
+# Append summary + timestamp to /root/kube-smoke-test.log so humans and Bob
+# can grep history of smoke runs. Rotates at ~2MB.
+{
+  printf "# %s  pass=%d fail=%d warn=%d\n" "$(date -Iseconds)" "$PASS" "$FAIL" "$WARN"
+} >> /root/kube-smoke-test.log 2>/dev/null || true
+if [[ -f /root/kube-smoke-test.log && $(stat -c%s /root/kube-smoke-test.log 2>/dev/null || echo 0) -gt 2000000 ]]; then
+  mv /root/kube-smoke-test.log /root/kube-smoke-test.log.old 2>/dev/null || true
+fi
 
 if [[ $FAIL -eq 0 ]]; then
   echo -e "  ${G}All critical checks passed.${N}"

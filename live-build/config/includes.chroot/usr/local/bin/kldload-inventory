@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+# ══════════════════════════════════════════════════════════════════════════════
+# kldload-inventory — dynamic Ansible inventory from the kldload state DB
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Reads /var/lib/kldload/state.db and emits Ansible JSON inventory. Every VM,
+# cluster member, and registered host ends up in the right group automatically
+# as the fleet grows or shrinks. No hand-edited hosts file, no stale IPs.
+#
+# Groups produced:
+#   all                — every node with a usable IP
+#   cluster:<name>     — all members of a cluster (e.g. cluster:k8s-lab)
+#   role:<role>        — by role column (control_plane, worker, site_blue, ...)
+#   status:<status>    — online, booting, draining, offline
+#   kube               — alias for role:control_plane + role:worker
+#   kube_control_plane — role:control_plane
+#   kube_workers       — role:worker
+#   ungrouped          — nodes without a cluster
+#
+# Host vars (under _meta.hostvars):
+#   ansible_host       — ip_mgmt if set, else ip_wg0, else hostname
+#   ansible_user       — "root"
+#   ansible_ssh_private_key_file — /root/.ssh/id_ed25519 if present
+#   kldload_role, kldload_cluster, kldload_wg_ips, kldload_facts
+#
+# Usage:
+#   kldload-inventory --list                  # full inventory
+#   kldload-inventory --host <hostname>       # per-host vars (Ansible < 2.0 compat)
+#   kldload-inventory --dump                  # pretty-print, for humans
+#
+# Wired into ansible.cfg: inventory = /usr/local/bin/kldload-inventory
+# ══════════════════════════════════════════════════════════════════════════════
+
+from __future__ import annotations
+import argparse
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+DB_PATH   = Path(os.environ.get("KLDLOAD_DB", "/var/lib/kldload/state.db"))
+SSH_KEY   = os.environ.get("KLDLOAD_SSH_KEY", "/root/.ssh/id_ed25519")
+SSH_USER  = os.environ.get("KLDLOAD_SSH_USER", "root")
+
+
+def _connect():
+    """Read-only connection. Using the sqlite3 URI with mode=ro lets non-root
+    users (like `admin` running ansible) read the inventory without needing
+    write access to the DB or its WAL journal files."""
+    if not DB_PATH.exists():
+        return None
+    uri = f"file:{DB_PATH}?mode=ro&immutable=1"
+    con = sqlite3.connect(uri, uri=True)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _fetch_nodes(con):
+    """Nodes table is the primary inventory source."""
+    # Some older DBs may not have deleted_at — fall back gracefully.
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(nodes)").fetchall()}
+    del_clause = "AND (deleted_at IS NULL OR deleted_at = '')" if "deleted_at" in cols else ""
+    try:
+        rows = con.execute(
+            "SELECT hostname, role, ip_mgmt, ip_wg0, ip_wg1, ip_wg2, ip_wg3, "
+            f"cluster_id, status, facts FROM nodes WHERE 1=1 {del_clause}"
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["facts"] = json.loads(d.get("facts") or "{}")
+        except Exception:
+            d["facts"] = {}
+        out.append(d)
+    return out
+
+
+def _fetch_vms(con):
+    """VMs that aren't registered as nodes yet (still booting) still
+    belong in the inventory so Ansible can reach them by IP."""
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(vms)").fetchall()}
+    del_clause = "AND (deleted_at IS NULL OR deleted_at = '')" if "deleted_at" in cols else ""
+    try:
+        rows = con.execute(
+            "SELECT name, role, cluster_id, ip_addr, status FROM vms "
+            f"WHERE ip_addr != '' AND ip_addr IS NOT NULL {del_clause}"
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [dict(r) for r in rows]
+
+
+def _cluster_name_map(con):
+    try:
+        rows = con.execute("SELECT id, name FROM clusters").fetchall()
+        return {r["id"]: r["name"] for r in rows}
+    except sqlite3.Error:
+        return {}
+
+
+def build_inventory():
+    inv = {
+        "all":                {"hosts": [], "vars": {}},
+        "ungrouped":          {"hosts": []},
+        "kube":               {"children": ["kube_control_plane", "kube_workers"]},
+        "kube_control_plane": {"hosts": []},
+        "kube_workers":       {"hosts": []},
+        "_meta":              {"hostvars": {}},
+    }
+    con = _connect()
+    if con is None:
+        return inv
+
+    cluster_names = _cluster_name_map(con)
+    nodes = _fetch_nodes(con)
+    vms   = _fetch_vms(con)
+    con.close()
+
+    seen = set()
+
+    def add(host, hv, role, cluster_id, status):
+        if not host or host in seen:
+            return
+        seen.add(host)
+        inv["all"]["hosts"].append(host)
+        inv["_meta"]["hostvars"][host] = hv
+
+        # Role group
+        if role:
+            g = f"role:{role}"
+            inv.setdefault(g, {"hosts": []})["hosts"].append(host)
+            if role == "control_plane":
+                inv["kube_control_plane"]["hosts"].append(host)
+            elif role == "worker":
+                inv["kube_workers"]["hosts"].append(host)
+
+        # Status group
+        if status:
+            g = f"status:{status}"
+            inv.setdefault(g, {"hosts": []})["hosts"].append(host)
+
+        # Cluster group (by human name when available)
+        if cluster_id:
+            cname = cluster_names.get(cluster_id, cluster_id)
+            g = f"cluster:{cname}"
+            inv.setdefault(g, {"hosts": []})["hosts"].append(host)
+        else:
+            inv["ungrouped"]["hosts"].append(host)
+
+    # Nodes first (richer metadata).
+    # Connection priority: wg0 (mgmt WireGuard plane) > wg1 > ip_mgmt bridge
+    # > hostname. This keeps all Ansible/SSH traffic inside the encrypted
+    # mesh whenever the mesh is up, without needing per-run overrides.
+    for n in nodes:
+        host = n["hostname"]
+        ip = n["ip_wg0"] or n["ip_wg1"] or n["ip_mgmt"] or host
+        hv = {
+            "ansible_host": ip,
+            "ansible_user": SSH_USER,
+            "kldload_role":    n["role"] or "",
+            "kldload_cluster": cluster_names.get(n["cluster_id"], n["cluster_id"] or ""),
+            "kldload_status":  n["status"] or "",
+            "kldload_wg_ips": {
+                "wg0": n["ip_wg0"], "wg1": n["ip_wg1"],
+                "wg2": n["ip_wg2"], "wg3": n["ip_wg3"],
+            },
+            "kldload_facts": n.get("facts") or {},
+        }
+        if Path(SSH_KEY).exists():
+            hv["ansible_ssh_private_key_file"] = SSH_KEY
+        add(host, hv, n["role"], n["cluster_id"], n["status"])
+
+    # VMs that don't have a node row yet — still reachable by IP
+    for v in vms:
+        host = v["name"]
+        if host in seen:
+            continue
+        hv = {
+            "ansible_host":   v["ip_addr"],
+            "ansible_user":   SSH_USER,
+            "kldload_role":   v["role"] or "",
+            "kldload_cluster": cluster_names.get(v["cluster_id"], v["cluster_id"] or ""),
+            "kldload_status": v["status"] or "",
+        }
+        if Path(SSH_KEY).exists():
+            hv["ansible_ssh_private_key_file"] = SSH_KEY
+        add(host, hv, v["role"], v["cluster_id"], v["status"])
+
+    # Prune empty groups so -i output stays readable
+    for k in list(inv.keys()):
+        if k in ("_meta", "all", "ungrouped"):
+            continue
+        v = inv[k]
+        if isinstance(v, dict) and not v.get("hosts") and not v.get("children"):
+            del inv[k]
+
+    return inv
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(description="kldload dynamic Ansible inventory")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--list", action="store_true",
+                   help="emit full inventory as JSON (Ansible default)")
+    g.add_argument("--host", metavar="HOST",
+                   help="per-host vars (legacy mode — we return {} since --list has _meta)")
+    g.add_argument("--dump", action="store_true",
+                   help="pretty-print inventory for humans")
+    args = ap.parse_args(argv)
+
+    if args.host:
+        # All vars already in --list _meta.hostvars, so this is just a stub.
+        print(json.dumps({}))
+        return 0
+
+    inv = build_inventory()
+    if args.dump:
+        print(json.dumps(inv, indent=2, sort_keys=True))
+    else:
+        # Default: --list (Ansible invokes with no args when executable)
+        print(json.dumps(inv))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Exception as e:
+        # Ansible expects valid JSON even on error — emit empty inventory + stderr msg
+        sys.stderr.write(f"kldload-inventory error: {e}\n")
+        print(json.dumps({"all": {"hosts": []}, "_meta": {"hostvars": {}}}))
+        sys.exit(1)

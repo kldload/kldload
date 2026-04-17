@@ -34,6 +34,29 @@ trap '' PIPE
 PROFILE="${PROFILE:-desktop}"
 EDITION="${EDITION:-free}"
 ARCH="${ARCH:-x86_64}"
+
+# Derive arch-specific names used by different upstream projects. EFI, Debian,
+# Helm, Go releases, Alpine repos all spell "aarch64" differently — centralise
+# the translation so the rest of the script stays readable.
+case "$ARCH" in
+    x86_64)
+        ARCH_EFI="x64"         # grub2-efi-x64, shim-x64, BOOTX64.EFI
+        ARCH_DEB="amd64"       # helm linux-amd64.tar.gz, Debian arm64 vs amd64
+        ARCH_DKMS="x86_64"     # kernel DKMS ARCH= value
+        ARCH_ALPINE="x86_64"
+        ;;
+    aarch64|arm64)
+        ARCH="aarch64"         # canonical name inside the script
+        ARCH_EFI="aa64"        # grub2-efi-aa64, shim-aa64, BOOTAA64.EFI
+        ARCH_DEB="arm64"
+        ARCH_DKMS="arm64"
+        ARCH_ALPINE="aarch64"
+        ;;
+    *)
+        echo "ERROR: unsupported ARCH=$ARCH (x86_64 or aarch64 only)" >&2
+        exit 1
+        ;;
+esac
 OUTPUT_DIR="${OUTPUT_DIR:-/build/live-build/output}"
 LOG_DIR="${LOG_DIR:-/build/live-build/logs}"
 BUILD_ROOT="/build"
@@ -42,7 +65,7 @@ BUILD_DATE="$(date +%Y%m%d)"
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
 DISTRO_TAG="${DISTRO:-centos}"
-VERSION="${KLDLOAD_VERSION:-1.0.4}"
+VERSION="${KLDLOAD_VERSION:-1.0.5}"
 ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
@@ -92,7 +115,7 @@ PKGS=(
     dnf rpm coreutils bash glibc glibc-langpack-en
     systemd systemd-udev dbus-daemon
     kernel kernel-core kernel-modules kernel-devel dracut dracut-live dracut-squash
-    grub2-efi-x64 grub2-tools shim-x64 efibootmgr mokutil pesign sbsigntools
+    grub2-efi-${ARCH_EFI} grub2-tools shim-${ARCH_EFI} efibootmgr mokutil pesign sbsigntools
     NetworkManager NetworkManager-wifi wpa_supplicant openssh-server openssh-clients sudo
     vim-enhanced tmux curl wget rsync jq less tar gzip
     iproute iputils net-tools nftables chrony
@@ -129,6 +152,9 @@ if [[ "$EDITION" != "core" ]]; then
         qemu-guest-agent qemu-img open-vm-tools-desktop sshpass
         # Windows installer support (WIM image extraction)
         wimlib-utils ntfs-3g ntfsprogs
+        # Ansible — replaces cloud-init runcmd for golden VM provisioning
+        # and powers the web UI's Ansible tab
+        ansible-core
     )
 fi
 
@@ -230,17 +256,70 @@ if [[ "$EDITION" != "core" ]]; then
     rm -rf "/tmp/sanoid-${SANOID_VER}"
     log "Sanoid ${SANOID_VER} installed."
 
-    # Install eza from GitHub (not in EPEL)
+    # Install eza from GitHub (not in EPEL). Eza publishes both x86_64 and
+    # aarch64 "unknown-linux-gnu" release tarballs — naming matches rustc
+    # targets exactly, so $ARCH works as-is.
     log "Installing eza from GitHub..."
     EZA_VER="$(curl -fsSL https://api.github.com/repos/eza-community/eza/releases/latest 2>/dev/null \
         | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/')" || true
     if [[ -n "$EZA_VER" ]]; then
-        curl -fsSL "https://github.com/eza-community/eza/releases/download/v${EZA_VER}/eza_x86_64-unknown-linux-gnu.tar.gz" \
-            | tar xz -C "${ROOTFS}/usr/local/bin/"
-        chmod +x "${ROOTFS}/usr/local/bin/eza"
+        curl -fsSL "https://github.com/eza-community/eza/releases/download/v${EZA_VER}/eza_${ARCH}-unknown-linux-gnu.tar.gz" \
+            | tar xz -C "${ROOTFS}/usr/local/bin/" 2>/dev/null || \
+            log "WARNING: eza ${EZA_VER} download failed for ${ARCH} — skipping"
+        chmod +x "${ROOTFS}/usr/local/bin/eza" 2>/dev/null || true
         log "eza ${EZA_VER} installed."
     else
         log "WARNING: could not fetch eza version — skipping"
+    fi
+
+    # Install helm on the live host so the Helm tab + kube-cluster can
+    # manage the bootstrapped cluster from the installer environment.
+    # Helm publishes linux-amd64 and linux-arm64 tarballs (their naming,
+    # not ours). Goldens still install their own copy via kube-setup.
+    # ttyd — browser terminal daemon, drives the k9s console iframe on :7681.
+    # Tiny static binary from upstream releases. Non-fatal if download fails
+    # (console tab just won't work).
+    log "Installing ttyd (browser terminal) from GitHub..."
+    case "$ARCH" in
+        x86_64)  _ttyd_arch="x86_64" ;;
+        aarch64) _ttyd_arch="aarch64" ;;
+    esac
+    if curl -fsSL "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.${_ttyd_arch}" \
+        -o "${ROOTFS}/usr/local/bin/ttyd" 2>/dev/null; then
+        chmod +x "${ROOTFS}/usr/local/bin/ttyd"
+        log "ttyd installed."
+    else
+        log "WARNING: ttyd download failed — k9s console tab will not work"
+    fi
+
+    # k9s — terminal-based k8s UI, runs inside ttyd's tmux session. Same
+    # lazy fallback: console page shows a shell if k9s is missing.
+    log "Installing k9s from GitHub..."
+    K9S_VERSION="$(curl -fsSL https://api.github.com/repos/derailed/k9s/releases/latest 2>/dev/null \
+        | grep '"tag_name"' | head -1 | sed 's/.*"\([^"]*\)".*/\1/')" || true
+    case "$ARCH" in
+        x86_64)  _k9s_arch="amd64" ;;
+        aarch64) _k9s_arch="arm64" ;;
+    esac
+    if [[ -n "$K9S_VERSION" ]]; then
+        curl -fsSL "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_${_k9s_arch}.tar.gz" \
+            2>/dev/null | tar xz -C "${ROOTFS}/usr/local/bin/" k9s 2>/dev/null && \
+            chmod +x "${ROOTFS}/usr/local/bin/k9s" && log "k9s ${K9S_VERSION} installed." || \
+            log "WARNING: k9s extract failed"
+    else
+        log "WARNING: could not resolve k9s version — skipping"
+    fi
+
+    log "Installing helm (live host) from get.helm.sh..."
+    HELM_VERSION="${HELM_VERSION:-v3.16.2}"
+    if curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH_DEB}.tar.gz" \
+        -o /tmp/helm.tar.gz 2>/dev/null; then
+        tar -xzf /tmp/helm.tar.gz -C /tmp/
+        install -m 755 "/tmp/linux-${ARCH_DEB}/helm" "${ROOTFS}/usr/local/bin/helm"
+        rm -rf /tmp/helm.tar.gz "/tmp/linux-${ARCH_DEB}"
+        log "helm ${HELM_VERSION} installed on live host (${ARCH_DEB})."
+    else
+        log "WARNING: helm download failed — Helm tab will show 'not installed'"
     fi
 else
     log "Core edition — skipping sanoid."
@@ -275,10 +354,12 @@ if [[ -n "$ZFS_VER" ]]; then
 
     # Force DKMS to use the CentOS kernel headers via --kernelsourcedir,
     # bypassing DKMS's /proc-based autodetection (which would find the wrong kernel).
-    # ARCH=x86_64 is required to prevent "arch/amd64/Makefile: No such file" errors
-    # that occur in Docker builds on aarch64 hosts or when uname reports amd64.
+    # ARCH= is required to prevent "arch/amd64/Makefile: No such file" errors
+    # that occur in Docker builds where uname reports a different arch than
+    # what we're building for. Kernel Makefile expects x86_64 or arm64 (the
+    # kernel's short name for aarch64), NOT the canonical aarch64 string.
     # || true because DKMS may fail — we verify zfs.ko exists below.
-    chroot "$ROOTFS" env ARCH=x86_64 dkms build -m zfs -v "$ZFS_VER" -k "$KVER" \
+    chroot "$ROOTFS" env ARCH=${ARCH_DKMS} dkms build -m zfs -v "$ZFS_VER" -k "$KVER" \
         --kernelsourcedir "/usr/src/kernels/${KVER}" \
         --force \
         2>&1 | tee -a "$LOG_FILE" || true
@@ -381,7 +462,11 @@ umount "${ROOTFS}/proc" 2>/dev/null || true
 # in Arch-specific dependencies. The pacman-static binary is a fully statically
 # linked build that runs on any x86_64 Linux — it's used by the installer to
 # run "pacstrap" when the user selects Arch as the target distro.
-if [[ "$EDITION" != "core" ]]; then
+#
+# Arch Linux ARM (aarch64) is unofficial and not shipped by archlinux.org, so
+# we skip pacman on aarch64 builds. The Arch install target is x86_64-only;
+# users on aarch64 can still install any other distro.
+if [[ "$EDITION" != "core" && "$ARCH" == "x86_64" ]]; then
     log "Downloading pacman-static for Arch support..."
     curl -sfL "https://pkgbuild.com/~morganamilo/pacman-static/x86_64/bin/pacman-static" \
         -o "${ROOTFS}/usr/local/bin/pacman" || {
@@ -397,17 +482,21 @@ if [[ "$EDITION" != "core" ]]; then
         printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n' > "${ROOTFS}/etc/pacman.d/mirrorlist"
         log "pacman-static installed: $(chroot "$ROOTFS" /usr/bin/pacman --version 2>&1 | head -1)"
     fi
+elif [[ "$ARCH" != "x86_64" ]]; then
+    log "Skipping pacman-static (Arch Linux target not available for ${ARCH})"
 fi
 
-# Download apk-tools-static for Alpine Linux bootstrap support
-# (CentOS has no apk package — we need a static binary)
+# Download apk-tools-static for Alpine Linux bootstrap support.
+# CentOS has no apk package — we need a static binary. Alpine publishes for
+# both x86_64 and aarch64 in the same repo layout, so the only change across
+# arches is the URL path component.
 if [[ "$EDITION" != "core" ]]; then
-    log "Downloading apk-tools-static for Alpine support..."
+    log "Downloading apk-tools-static for Alpine support (${ARCH_ALPINE})..."
     _apk_ver=""
-    _apk_ver="$(curl -sfL 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/x86_64/' \
+    _apk_ver="$(curl -sfL "https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/${ARCH_ALPINE}/" \
         | grep -oP 'apk-tools-static-\K[0-9][^"]*(?=\.apk)' | head -1)" || true
     if [[ -n "$_apk_ver" ]]; then
-        curl -sfL "https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/x86_64/apk-tools-static-${_apk_ver}.apk" \
+        curl -sfL "https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/${ARCH_ALPINE}/apk-tools-static-${_apk_ver}.apk" \
             -o /tmp/apk-tools-static.apk || {
             log "WARNING: apk-tools-static download failed — Alpine installs will not work"
         }
@@ -1150,8 +1239,12 @@ fi
 log "Creating squashfs image..."
 
 mkdir -p "$SQUASHFS_DIR"
+# x86-specific BCJ filter boosts compression on x86 binaries ~5-10%; on
+# aarch64 it doesn't apply, so use arm filter there (or leave it off).
+SQFS_BCJ=(-Xbcj x86)
+[[ "$ARCH" == "aarch64" ]] && SQFS_BCJ=(-Xbcj arm)
 mksquashfs "$ROOTFS" "${SQUASHFS_DIR}/squashfs.img" \
-    -comp xz -Xbcj x86 -b 1M -noappend 2>&1 | tail -5
+    -comp xz "${SQFS_BCJ[@]}" -b 1M -noappend 2>&1 | tail -5
 
 log "Squashfs: $(du -sh "${SQUASHFS_DIR}/squashfs.img" | cut -f1)"
 
@@ -1172,12 +1265,19 @@ cp "${ROOTFS}/boot/initramfs-${KVER}.img" "${ISO_STAGING}/images/pxeboot/initrd.
 # isn't signed by the CentOS key that shim expects. The live ISO boots with
 # Secure Boot "Other OS" or disabled, so shim isn't needed here.
 # Shim is only installed on the TARGET system for Secure Boot after install.
-find "$ROOTFS" -name 'grubx64.efi' -exec cp {} "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" \; 2>/dev/null || \
-    find "$ROOTFS" -name 'grubx64.efi' -exec cp {} "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" \; 2>/dev/null || \
-    log "WARNING: grubx64.efi not found — live ISO may not UEFI boot"
+#
+# UEFI bootloader names are arch-specific:
+#   x86_64 → grubx64.efi + BOOTX64.EFI (default per EFI spec)
+#   aarch64 → grubaa64.efi + BOOTAA64.EFI
+case "$ARCH_EFI" in
+    x64)  GRUB_EFI="grubx64.efi";  BOOT_EFI="BOOTX64.EFI"  ;;
+    aa64) GRUB_EFI="grubaa64.efi"; BOOT_EFI="BOOTAA64.EFI" ;;
+esac
+find "$ROOTFS" -name "$GRUB_EFI" -exec cp {} "${ISO_STAGING}/EFI/BOOT/${BOOT_EFI}" \; 2>/dev/null || \
+    log "WARNING: ${GRUB_EFI} not found — live ISO may not UEFI boot"
 
-# Also keep grubx64.efi as itself (some firmware looks for it by name)
-cp "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" "${ISO_STAGING}/EFI/BOOT/grubx64.efi" 2>/dev/null || true
+# Also keep the arch-named copy as itself (some firmware looks for it by name)
+cp "${ISO_STAGING}/EFI/BOOT/${BOOT_EFI}" "${ISO_STAGING}/EFI/BOOT/${GRUB_EFI}" 2>/dev/null || true
 
 # GRUB config
 cat > "${ISO_STAGING}/EFI/BOOT/grub.cfg" << 'GRUBCFG'
@@ -1203,8 +1303,8 @@ dd if=/dev/zero of="${ISO_STAGING}/images/efiboot.img" bs=1M count=10
 mkfs.vfat "${ISO_STAGING}/images/efiboot.img"
 mmd -i "${ISO_STAGING}/images/efiboot.img" ::EFI
 mmd -i "${ISO_STAGING}/images/efiboot.img" ::EFI/BOOT
-mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/BOOTX64.EFI" ::EFI/BOOT/ 2>/dev/null || true
-mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grubx64.efi" ::EFI/BOOT/ 2>/dev/null || true
+mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/${BOOT_EFI}" ::EFI/BOOT/ 2>/dev/null || true
+mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/${GRUB_EFI}" ::EFI/BOOT/ 2>/dev/null || true
 mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grub.cfg" ::EFI/BOOT/
 
 # Build ISO (EFI-only, no legacy BIOS — all modern hardware uses UEFI)

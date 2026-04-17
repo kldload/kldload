@@ -1,0 +1,786 @@
+#!/usr/bin/env python3
+# ══════════════════════════════════════════════════════════════════════════════
+# kldload-doctor — diagnose a kldload host and prescribe fixes
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Like `brew doctor` or `rustup doctor`: runs a suite of known-good checks
+# and tells you which subsystems are healthy, which are drifting, and the
+# exact command to run to fix each one. The opposite of a status board —
+# a status board reports state; this profiles state against a baseline
+# and answers "is this right?" plus "if not, do this".
+#
+# Output: JSON to stdout. Consumed by the web UI dashboard and by CI.
+# Exit code: 0 if all checks pass, 1 if any fail, 2 if any crash.
+#
+# Each check is a callable that returns a dict:
+#   {
+#     "subsystem": "zfs",           # grouping in UI
+#     "name":      "pool online",
+#     "status":    "ok|fail|warn|skip",
+#     "expected":  "rpool ONLINE with 0 errors",
+#     "actual":    "rpool ONLINE, errors=0",
+#     "severity":  "critical|high|medium|low",
+#     "remediation": "zpool clear rpool; zpool scrub rpool"
+#   }
+#
+# Add checks at the bottom — they're just functions that return a dict.
+# ══════════════════════════════════════════════════════════════════════════════
+
+from __future__ import annotations
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _run(cmd, timeout=5):
+    """Return (rc, stdout, stderr). Never raises — subprocess failures
+    surface as rc != 0 with empty stdout; that's what checks expect."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except Exception as e:
+        return -1, "", str(e)
+
+
+def _has(cmd):
+    """True if a binary is on PATH."""
+    rc, _, _ = _run(["which", cmd])
+    return rc == 0
+
+
+def _result(subsystem, name, status, expected, actual,
+            severity="medium", remediation=""):
+    return {
+        "subsystem":   subsystem, "name": name, "status": status,
+        "expected":    expected, "actual": actual,
+        "severity":    severity, "remediation": remediation,
+    }
+
+
+# ── ZFS checks ────────────────────────────────────────────────────────────────
+
+def check_zfs_pool():
+    rc, out, _ = _run(["zpool", "list", "-H", "-o", "health", "rpool"])
+    if rc != 0:
+        return _result("zfs", "rpool exists", "fail",
+                       "rpool imported and ONLINE",
+                       "rpool not imported",
+                       severity="critical",
+                       remediation="zpool import rpool")
+    if out == "ONLINE":
+        return _result("zfs", "rpool health", "ok",
+                       "ONLINE", out, severity="critical")
+    return _result("zfs", "rpool health", "fail",
+                   "ONLINE", out, severity="critical",
+                   remediation="zpool status rpool; resilver or replace failed vdev")
+
+def check_zfs_errors():
+    rc, out, _ = _run(["zpool", "status", "-x"])
+    if rc != 0:
+        return _result("zfs", "pool errors", "skip", "", "zpool missing")
+    if "all pools are healthy" in out.lower():
+        return _result("zfs", "pool errors", "ok",
+                       "all pools healthy", "all pools healthy")
+    return _result("zfs", "pool errors", "warn",
+                   "all pools healthy", out.splitlines()[0] if out else "unknown",
+                   severity="high",
+                   remediation="zpool status; zpool clear <pool> after review")
+
+def check_zfs_arc_target():
+    """ARC should be sized sensibly — not eating all RAM, not starved."""
+    try:
+        arc = Path("/proc/spl/kstat/zfs/arcstats").read_text()
+    except Exception:
+        return _result("zfs", "arc sized", "skip", "", "arcstats missing")
+    stats = {}
+    for line in arc.splitlines()[2:]:
+        parts = line.split()
+        if len(parts) >= 3:
+            stats[parts[0]] = int(parts[2])
+    size  = stats.get("size", 0)
+    tgt   = stats.get("c", 0)
+    mem   = int(subprocess.check_output(
+        ["awk", "/MemTotal/ {print $2*1024}", "/proc/meminfo"]).strip())
+    actual = f"ARC {size//2**20}M / target {tgt//2**20}M / ram {mem//2**20}M"
+    # Rough sanity: ARC should be < 80% of RAM on a live host
+    if mem and size / mem > 0.8:
+        return _result("zfs", "arc sized", "warn",
+                       "ARC < 80% of RAM", actual, severity="medium",
+                       remediation="echo $((RAM*2/3)) > /sys/module/zfs/parameters/zfs_arc_max")
+    return _result("zfs", "arc sized", "ok", "ARC within bounds", actual)
+
+def check_sanoid_timer():
+    rc, out, _ = _run(["systemctl", "is-active", "sanoid.timer"])
+    if rc == 0 and out == "active":
+        return _result("zfs", "sanoid timer", "ok",
+                       "active", out, severity="medium")
+    return _result("zfs", "sanoid timer", "warn",
+                   "active", out or "inactive", severity="medium",
+                   remediation="systemctl enable --now sanoid.timer")
+
+
+# ── kldload ZFS namespace (secrets + state + playbooks datasets) ──────────────
+
+def check_kldload_datasets():
+    expected = ["rpool/kldload", "rpool/kldload/secrets",
+                "rpool/kldload/state", "rpool/kldload/playbooks"]
+    rc, out, _ = _run(["zfs", "list", "-H", "-o", "name", "-r", "rpool/kldload"])
+    if rc != 0:
+        return _result("kldload-zfs", "namespace exists", "warn",
+                       "rpool/kldload namespace",
+                       "not created (will auto-create on first webui run)",
+                       severity="low",
+                       remediation="restart kldload-webui — it creates the namespace lazily")
+    present = set(out.splitlines())
+    missing = [d for d in expected if d not in present]
+    if not missing:
+        return _result("kldload-zfs", "namespace exists", "ok",
+                       "4/4 datasets", "4/4 datasets", severity="medium")
+    return _result("kldload-zfs", "namespace exists", "warn",
+                   "4/4 datasets", f"missing: {','.join(missing)}",
+                   severity="medium",
+                   remediation="restart kldload-webui to recreate missing datasets")
+
+def check_secrets_encryption():
+    rc, out, _ = _run(["zfs", "get", "-H", "-o", "value", "encryption",
+                       "rpool/kldload/secrets"])
+    if rc != 0:
+        return _result("kldload-zfs", "secrets encrypted", "skip",
+                       "aes-256-gcm", "dataset missing")
+    if "aes" in out.lower():
+        return _result("kldload-zfs", "secrets encrypted", "ok",
+                       "aes-256-gcm", out, severity="high")
+    return _result("kldload-zfs", "secrets encrypted", "fail",
+                   "aes-256-gcm", out or "off", severity="high",
+                   remediation="Dataset lost encryption — destroy and recreate")
+
+
+# ── Network / WireGuard ───────────────────────────────────────────────────────
+
+def check_wireguard_module():
+    rc, out, _ = _run(["lsmod"])
+    if "wireguard" in out:
+        return _result("network", "wireguard module", "ok",
+                       "loaded", "loaded")
+    return _result("network", "wireguard module", "warn",
+                   "loaded", "not loaded",
+                   severity="medium",
+                   remediation="modprobe wireguard")
+
+def check_wg_interfaces():
+    """If we're on a K8s CP, wg-mgmt should be up."""
+    rc, out, _ = _run(["ip", "-br", "link", "show", "type", "wireguard"])
+    if rc != 0 or not out:
+        return _result("network", "wireguard mesh", "skip",
+                       "wg interfaces when clustered",
+                       "no WireGuard mesh yet")
+    ifaces = [line.split()[0] for line in out.splitlines()]
+    return _result("network", "wireguard mesh", "ok",
+                   "mesh interfaces present", f"{len(ifaces)} ifaces: {','.join(ifaces)}")
+
+def check_virbr0():
+    rc, out, _ = _run(["ip", "-br", "link", "show", "virbr0"])
+    if rc == 0 and "UP" in out:
+        return _result("network", "virbr0 up", "ok", "UP", out.split()[1])
+    if rc != 0:
+        return _result("network", "virbr0 up", "skip",
+                       "libvirt default bridge",
+                       "not configured (OK if no libvirt yet)")
+    return _result("network", "virbr0 up", "warn", "UP",
+                   out.split()[1] if len(out.split()) > 1 else "unknown",
+                   severity="medium",
+                   remediation="virsh net-start default; virsh net-autostart default")
+
+
+# ── Kubernetes ────────────────────────────────────────────────────────────────
+
+def check_k8s_nodes():
+    if not _has("kubectl"):
+        return _result("kubernetes", "nodes ready", "skip",
+                       "all nodes Ready", "kubectl not installed")
+    rc, out, _ = _run(["kubectl", "get", "nodes",
+                       "-o=jsonpath={.items[*].status.conditions[?(@.type==\"Ready\")].status}"],
+                      timeout=10)
+    if rc != 0:
+        return _result("kubernetes", "nodes ready", "skip",
+                       "all nodes Ready",
+                       "no cluster or no kubeconfig")
+    statuses = out.split() if out else []
+    ready = statuses.count("True")
+    total = len(statuses)
+    if total == 0:
+        return _result("kubernetes", "nodes ready", "skip",
+                       "nodes registered", "no nodes")
+    if ready == total:
+        return _result("kubernetes", "nodes ready", "ok",
+                       f"{total}/{total} Ready", f"{ready}/{total} Ready",
+                       severity="critical")
+    return _result("kubernetes", "nodes ready", "fail",
+                   f"{total}/{total} Ready", f"{ready}/{total} Ready",
+                   severity="critical",
+                   remediation="kubectl get nodes -o wide; kube-status")
+
+def check_cilium():
+    # Rather than depending on the `cilium` CLI (not always installed on the
+    # host, and needs KUBECONFIG env which subprocess sometimes loses),
+    # just count the Cilium agent daemon pods via kubectl — same signal.
+    if not _has("kubectl"):
+        return _result("kubernetes", "cilium healthy", "skip",
+                       "cilium daemon Running", "no kubectl")
+    ready, total = _pods_ready("kube-system", "k8s-app=cilium")
+    if total == 0:
+        return _result("kubernetes", "cilium healthy", "skip", "", "no cilium pods")
+    ok = ready == total
+    return _result("kubernetes", "cilium healthy",
+                   "ok" if ok else "fail",
+                   f"{total}/{total} daemon Ready",
+                   f"{ready}/{total} daemon Ready",
+                   severity="critical" if not ok else "medium",
+                   remediation="kubectl -n kube-system get po -l k8s-app=cilium")
+
+
+# ── kldload services ─────────────────────────────────────────────────────────
+
+def check_webui_running():
+    rc, out, _ = _run(["systemctl", "is-active", "kldload-webui"])
+    if rc == 0 and out == "active":
+        return _result("services", "kldload-webui", "ok", "active", "active",
+                       severity="high")
+    return _result("services", "kldload-webui", "warn",
+                   "active", out or "inactive",
+                   severity="high",
+                   remediation="systemctl start kldload-webui; journalctl -u kldload-webui -n 50")
+
+def check_libvirtd():
+    rc, out, _ = _run(["systemctl", "is-active", "libvirtd"])
+    state = "active" if (rc == 0 and out == "active") else (out or "inactive")
+    return _result("services", "libvirtd",
+                   "ok" if state == "active" else "warn",
+                   "active", state,
+                   severity="medium",
+                   remediation="systemctl enable --now libvirtd")
+
+def check_kldload_tools():
+    """Verify the core CLI set is present."""
+    expected = ["kvm-create", "kvm-clone", "kube-cluster", "kldload-db",
+                "kldload-inventory", "kldload-doctor", "kexport"]
+    missing = [t for t in expected if not _has(t)]
+    if not missing:
+        return _result("services", "cli tools",
+                       "ok", f"{len(expected)} tools", f"{len(expected)} tools")
+    return _result("services", "cli tools", "warn",
+                   f"{len(expected)} tools",
+                   f"missing: {','.join(missing)}", severity="medium",
+                   remediation="Run install-on-target or reboot into the live ISO")
+
+
+# ── Runner ───────────────────────────────────────────────────────────────────
+
+# ── kldload-internal stack (Cilium, MetalLB, Hubble, ZFS CSI, Gateway) ───────
+# These only exist after a kube-cluster bootstrap. They each report SKIP when
+# there's no cluster (kubectl unreachable), and ok/fail when there is.
+
+def _kubectl_json(args, default=None):
+    # Force KUBECONFIG so it works even when run via subprocess from a
+    # service that inherited a minimal env (webui, systemd oneshot, etc.).
+    env = dict(os.environ)
+    env.setdefault("KUBECONFIG", "/root/.kube/config")
+    env.setdefault("HOME", "/root")
+    try:
+        out = subprocess.check_output(["kubectl"] + args + ["-o", "json"],
+                                      text=True, stderr=subprocess.DEVNULL,
+                                      timeout=8, env=env)
+        return json.loads(out)
+    except Exception:
+        return default
+
+def _pods_ready(namespace, selector):
+    d = _kubectl_json(["get", "pods", "-n", namespace, "-l", selector], default={"items": []})
+    pods = d.get("items", [])
+    ready = 0
+    for p in pods:
+        conds = {c["type"]: c["status"] for c in p.get("status", {}).get("conditions", [])}
+        if conds.get("Ready") == "True":
+            ready += 1
+    return ready, len(pods)
+
+def check_cilium_pods():
+    if not _has("kubectl"):
+        return _result("k8s-stack", "cilium agents", "skip", "", "no kubectl")
+    ready, total = _pods_ready("kube-system", "k8s-app=cilium")
+    if total == 0:
+        return _result("k8s-stack", "cilium agents", "skip",
+                       "Cilium DaemonSet pods Ready", "no Cilium pods — is kube-cluster bootstrapped?")
+    ok = ready == total
+    return _result("k8s-stack", "cilium agents", "ok" if ok else "fail",
+                   f"{total}/{total} Ready", f"{ready}/{total} Ready",
+                   severity="critical" if not ok else "medium",
+                   remediation="kubectl -n kube-system get po -l k8s-app=cilium; cilium status --verbose")
+
+def check_cilium_operator():
+    if not _has("kubectl"):
+        return _result("k8s-stack", "cilium operator", "skip", "", "no kubectl")
+    ready, total = _pods_ready("kube-system", "io.cilium/app=operator")
+    if total == 0:
+        return _result("k8s-stack", "cilium operator", "skip", "", "not deployed")
+    return _result("k8s-stack", "cilium operator",
+                   "ok" if ready == total and total > 0 else "fail",
+                   "operator Ready", f"{ready}/{total} Ready")
+
+def check_hubble_relay():
+    if not _has("kubectl"):
+        return _result("k8s-stack", "hubble relay", "skip", "", "no kubectl")
+    ready, total = _pods_ready("kube-system", "k8s-app=hubble-relay")
+    if total == 0:
+        return _result("k8s-stack", "hubble relay", "skip", "", "not deployed — enable via kube-cluster")
+    return _result("k8s-stack", "hubble relay",
+                   "ok" if ready == total else "fail",
+                   "relay Ready", f"{ready}/{total} Ready")
+
+def check_hubble_ui():
+    if not _has("kubectl"):
+        return _result("k8s-stack", "hubble ui", "skip", "", "no kubectl")
+    ready, total = _pods_ready("kube-system", "k8s-app=hubble-ui")
+    if total == 0:
+        return _result("k8s-stack", "hubble ui", "skip", "", "not deployed")
+    return _result("k8s-stack", "hubble ui",
+                   "ok" if ready == total else "warn",
+                   "UI Ready", f"{ready}/{total} Ready", severity="low")
+
+def check_metallb():
+    if not _has("kubectl"):
+        return _result("k8s-stack", "metallb", "skip", "", "no kubectl")
+    # metallb helm chart uses app.kubernetes.io/name=metallb (newer),
+    # older charts used app=metallb. Try new first, fall back.
+    ready, total = _pods_ready("metallb-system", "app.kubernetes.io/name=metallb")
+    if total == 0:
+        ready, total = _pods_ready("metallb-system", "app=metallb")
+    if total == 0:
+        return _result("k8s-stack", "metallb", "skip", "", "not deployed")
+    return _result("k8s-stack", "metallb",
+                   "ok" if ready == total else "fail",
+                   "speaker + controller Ready", f"{ready}/{total} Ready",
+                   severity="high",
+                   remediation="kubectl -n metallb-system get po")
+
+def check_zfs_csi():
+    if not _has("kubectl"):
+        return _result("k8s-stack", "zfs csi", "skip", "", "no kubectl")
+    # openebs-zfs-localpv chart labels pods app=openebs-zfs-controller and
+    # app=openebs-zfs-node. Count both as "zfs csi" being up.
+    r1, t1 = _pods_ready("openebs", "app=openebs-zfs-controller")
+    r2, t2 = _pods_ready("openebs", "app=openebs-zfs-node")
+    ready, total = r1 + r2, t1 + t2
+    if total == 0:
+        return _result("k8s-stack", "zfs csi", "skip", "", "not deployed")
+    return _result("k8s-stack", "zfs csi",
+                   "ok" if ready == total else "fail",
+                   "CSI driver + node agents Ready", f"{ready}/{total} Ready",
+                   severity="high")
+
+def check_gateway_api():
+    if not _has("kubectl"):
+        return _result("k8s-stack", "gateway api", "skip", "", "no kubectl")
+    # CRDs present?
+    d = _kubectl_json(["get", "crd"], default={"items": []})
+    has_crd = any(i.get("metadata", {}).get("name", "").endswith("gateways.gateway.networking.k8s.io")
+                  for i in d.get("items", []))
+    if not has_crd:
+        return _result("k8s-stack", "gateway api", "skip", "", "CRDs not installed")
+    return _result("k8s-stack", "gateway api", "ok", "CRDs present", "CRDs present")
+
+def check_helm_releases():
+    if not _has("helm"):
+        return _result("helm", "helm CLI", "skip", "", "helm not installed")
+    try:
+        out = subprocess.check_output(["helm", "list", "-A", "-o", "json"],
+                                      text=True, stderr=subprocess.DEVNULL, timeout=8)
+        releases = json.loads(out)
+        if not releases:
+            return _result("helm", "releases", "skip", "", "no releases")
+        bad = [r for r in releases if r.get("status") not in ("deployed", "superseded")]
+        if bad:
+            names = ", ".join(r.get("name", "?") for r in bad[:3])
+            return _result("helm", "releases", "fail",
+                           "all releases deployed",
+                           f"{len(bad)}/{len(releases)} in bad state: {names}",
+                           severity="high",
+                           remediation=f"helm status {bad[0].get('name', '')} -n {bad[0].get('namespace', '')}")
+        return _result("helm", "releases", "ok",
+                       f"{len(releases)} deployed", f"{len(releases)} deployed")
+    except Exception:
+        return _result("helm", "releases", "skip", "", "helm unreachable")
+
+
+# ── Observability pipeline (metrics-server, prometheus, scrape labels, grafana)
+# Added after the "no data in cilium/tetragon dashboards" incident. These
+# catch the specific regressions we fixed: unresolved DS_PROMETHEUS in
+# dashboards, missing k8s_app labels on cilium metrics, firewall dropping
+# inter-node metrics scrape, no metrics-server installed.
+
+def check_metrics_server():
+    if not _has("kubectl"):
+        return _result("observability", "metrics-server", "skip", "", "no kubectl")
+    ready, total = _pods_ready("kube-system", "k8s-app=metrics-server")
+    if total == 0:
+        return _result("observability", "metrics-server", "fail",
+                       "metrics-server deploy Ready — powers kubectl top + web UI CPU%/Mem% overlay",
+                       "not installed",
+                       severity="medium",
+                       remediation="kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml")
+    if ready < total:
+        return _result("observability", "metrics-server", "fail",
+                       f"{total}/{total} Ready", f"{ready}/{total} Ready",
+                       severity="medium",
+                       remediation="kubectl -n kube-system logs deploy/metrics-server | tail -20")
+    # Also verify the API actually works — "Ready" isn't enough if certs fail.
+    rc, _, _ = _run(["kubectl", "top", "node", "--no-headers"], timeout=6)
+    if rc != 0:
+        return _result("observability", "metrics-server", "warn",
+                       "kubectl top returns data",
+                       "pods Ready but API not responding yet (may need --kubelet-insecure-tls)",
+                       severity="medium",
+                       remediation='kubectl -n kube-system patch deploy metrics-server --type=json -p=\'[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]\'')
+    return _result("observability", "metrics-server", "ok",
+                   "Ready + kubectl top works", "Ready + kubectl top works")
+
+def _prom_query(q, timeout=4):
+    """Return parsed Prometheus instant query result or None."""
+    import urllib.parse, urllib.request
+    try:
+        url = f"http://localhost:9090/api/v1/query?query={urllib.parse.quote(q)}"
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return json.loads(r.read().decode()).get("data", {}).get("result", [])
+    except Exception:
+        return None
+
+def check_prometheus_running():
+    rc, out, _ = _run(["systemctl", "is-active", "prometheus"])
+    if rc == 0 and "active" in out:
+        return _result("observability", "prometheus", "ok",
+                       "prometheus.service active", out)
+    return _result("observability", "prometheus", "fail",
+                   "prometheus.service active", out or "inactive",
+                   severity="high",
+                   remediation="systemctl start prometheus && journalctl -u prometheus -n 30")
+
+def check_prometheus_targets():
+    # All scrape targets should be 'up'. Downs that are expected (operator on
+    # non-host-port nodes, klab VMs that aren't running) are tolerated by
+    # requiring that AT LEAST ONE node in each cluster job is up.
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://localhost:9090/api/v1/targets", timeout=4) as r:
+            data = json.loads(r.read().decode())
+    except Exception:
+        return _result("observability", "prometheus targets", "skip",
+                       "", "prometheus API unreachable")
+    jobs_up = {}
+    for t in data.get("data", {}).get("activeTargets", []):
+        j = t.get("labels", {}).get("job", "?")
+        jobs_up.setdefault(j, []).append(t.get("health") == "up")
+    # Required jobs are satisfied by ANY of the listed aliases — different
+    # firstboot paths / klab vs kldload templates use different job names
+    # for the same underlying scrape (host node_exporter especially).
+    required_groups = {
+        "cilium-agent":   ["cilium-agent"],
+        "hubble-metrics": ["hubble-metrics"],
+        "tetragon":       ["tetragon"],
+        "host node_exporter": ["node_exporter", "kldload-host", "klab-host", "node"],
+    }
+    missing, broken = [], []
+    for label, aliases in required_groups.items():
+        present = [a for a in aliases if a in jobs_up]
+        if not present:
+            missing.append(label)
+        elif not any(any(jobs_up[a]) for a in present):
+            broken.append(label)
+    if missing:
+        return _result("observability", "prometheus scrape", "fail",
+                       "cilium-agent, hubble-metrics, tetragon, node_exporter all present",
+                       f"missing jobs: {', '.join(missing)}",
+                       severity="high",
+                       remediation="add missing scrape jobs to /etc/prometheus/prometheus.yml and restart prometheus")
+    if broken:
+        return _result("observability", "prometheus scrape", "fail",
+                       "at least one target up per required job",
+                       f"all targets down for: {', '.join(broken)}",
+                       severity="high",
+                       remediation="curl http://<node>:<port>/metrics from the host — likely a firewall drop (see kube-network nft)")
+    return _result("observability", "prometheus scrape", "ok",
+                   "cilium/hubble/tetragon/node_exporter all scraping",
+                   f"{len(jobs_up)} jobs, all have ≥1 up target")
+
+def check_cilium_scrape_labels():
+    # Stock grafana.com Cilium dashboards filter by {k8s_app="cilium"} and
+    # {pod=~"$pod"}. This verifies our synthesized labels are actually stamped.
+    r = _prom_query('cilium_version{k8s_app="cilium"}')
+    if r is None:
+        return _result("observability", "cilium scrape labels", "skip", "", "prometheus unreachable")
+    if not r:
+        return _result("observability", "cilium scrape labels", "fail",
+                       'cilium_version{k8s_app="cilium"} returns ≥1 series (needed for dashboard 16611)',
+                       "no series — synthesized labels missing from scrape config",
+                       severity="high",
+                       remediation="edit /etc/prometheus/prometheus.yml, add labels: {k8s_app: cilium, pod: cilium-<node>} to each cilium-agent target")
+    return _result("observability", "cilium scrape labels", "ok",
+                   "cilium_version{k8s_app=\"cilium\"} resolves",
+                   f"{len(r)} agents reporting")
+
+def check_tetragon_scrape():
+    r = _prom_query("tetragon_events_total")
+    if r is None:
+        return _result("observability", "tetragon scrape", "skip", "", "prometheus unreachable")
+    if not r:
+        return _result("observability", "tetragon scrape", "fail",
+                       "tetragon_events_total > 0 series",
+                       "no data — tetragon not scraped or not generating events",
+                       severity="medium",
+                       remediation="curl http://<node>:2112/metrics and add to prometheus.yml scrape_configs")
+    total = sum(float(s.get("value", [0, 0])[1] or 0) for s in r)
+    return _result("observability", "tetragon scrape", "ok",
+                   "tetragon_events_total > 0",
+                   f"{len(r)} series, Σ events = {int(total)}")
+
+def check_hubble_scrape():
+    r = _prom_query("hubble_flows_processed_total")
+    if r is None:
+        return _result("observability", "hubble scrape", "skip", "", "prometheus unreachable")
+    if not r:
+        return _result("observability", "hubble scrape", "fail",
+                       "hubble_flows_processed_total > 0 series",
+                       "no data — hubble metrics port 9965 not scraped or firewall drop",
+                       severity="medium",
+                       remediation="kube-network nft (reapply firewall with node subnet trust)")
+    return _result("observability", "hubble scrape", "ok",
+                   "hubble flows recorded", f"{len(r)} series")
+
+def check_grafana_dashboards():
+    # Provisioned dashboards must have no unresolved ${DS_PROMETHEUS}
+    # placeholders, otherwise every panel renders "No data". Regression
+    # source: grafana.com dashboards ship packaged for UI import.
+    import glob
+    dash_dir = "/var/lib/grafana/dashboards"
+    if not os.path.isdir(dash_dir):
+        return _result("observability", "grafana dashboards", "skip", "", "no dashboards provisioned")
+    bad = []
+    for p in glob.glob(f"{dash_dir}/*.json"):
+        try:
+            with open(p) as f:
+                txt = f.read()
+            if "${DS_PROMETHEUS" in txt or '"__inputs"' in txt:
+                bad.append(os.path.basename(p))
+        except Exception:
+            continue
+    if bad:
+        return _result("observability", "grafana dashboards", "fail",
+                       "no unresolved ${DS_PROMETHEUS} placeholders",
+                       f"{len(bad)} dashboards still template-unresolved: {', '.join(bad[:3])}",
+                       severity="high",
+                       remediation="rerun the DS_PROMETHEUS strip in kldload-firstboot or re-provision from cache")
+    n = len(glob.glob(f"{dash_dir}/*.json"))
+    return _result("observability", "grafana dashboards", "ok",
+                   "all dashboards have resolved datasource refs",
+                   f"{n} dashboards provisioned cleanly")
+
+def check_grafana_running():
+    rc, out, _ = _run(["systemctl", "is-active", "grafana-server"])
+    if rc == 0 and "active" in out:
+        return _result("observability", "grafana", "ok",
+                       "grafana-server active", out)
+    return _result("observability", "grafana", "fail",
+                   "grafana-server active", out or "inactive",
+                   severity="medium",
+                   remediation="systemctl start grafana-server")
+
+def check_cluster_firewall():
+    # Validates the regression fix where kube-network's policy-drop nft
+    # chain was blocking kubelet:10250 / hubble-peer:4244 / metrics ports
+    # between K8s nodes. Requires node subnet trust rule to be present.
+    if not os.path.exists("/etc/nftables.conf"):
+        return _result("observability", "cluster firewall", "skip", "", "no /etc/nftables.conf")
+    try:
+        with open("/etc/nftables.conf") as f:
+            conf = f.read()
+    except Exception:
+        return _result("observability", "cluster firewall", "skip", "", "unreadable")
+    # Heuristics: either a "ip saddr <subnet> accept" rule, or explicit port
+    # opens for 10250/4244.
+    has_subnet = "ip saddr" in conf and ("192.168.122" in conf or "node_cidr" in conf or "/24" in conf)
+    has_pod_cidr = "10.244" in conf or "pod_cidr" in conf
+    has_kubelet = "10250" in conf
+    has_hubble = "4244" in conf
+    if not (has_subnet or has_kubelet):
+        return _result("observability", "cluster firewall", "fail",
+                       "inet filter trusts node subnet OR opens kubelet:10250",
+                       "no such rule — hubble-relay and metrics scrape will timeout",
+                       severity="high",
+                       remediation="kube-network nft (reapply with updated template)")
+    if not has_pod_cidr:
+        return _result("observability", "cluster firewall", "warn",
+                       "pod CIDR (10.244.0.0/16) accepted on input",
+                       "no pod CIDR rule — pod-to-node scrape won't work",
+                       severity="medium",
+                       remediation="add 'ip saddr 10.244.0.0/16 accept' to inet filter input chain")
+    return _result("observability", "cluster firewall", "ok",
+                   "node subnet + pod CIDR trusted, key ports open",
+                   "firewall permits metrics + kubelet + hubble-peer")
+
+
+# ── Bob / webui tooling ──────────────────────────────────────────────────────
+# Bob can only diagnose the cluster if Ollama is reachable AND the webui
+# exposes the observability tools. These catch "Bob says I can't see
+# anything" regressions.
+
+def check_ollama():
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://localhost:11434/api/ps", timeout=3) as r:
+            data = json.loads(r.read().decode())
+    except Exception as e:
+        return _result("bob", "ollama", "fail",
+                       "http://localhost:11434/api/ps responds",
+                       f"unreachable: {e}",
+                       severity="medium",
+                       remediation="systemctl start ollama")
+    models = data.get("models", [])
+    if not models:
+        return _result("bob", "ollama model loaded", "warn",
+                       "at least one model in memory",
+                       "no models loaded — Bob will be slow on first prompt",
+                       severity="low",
+                       remediation="ollama run llama3.1:8b 'hi' to warm")
+    return _result("bob", "ollama", "ok",
+                   "reachable + model in VRAM",
+                   ", ".join(m.get("name", "?") for m in models))
+
+def check_install_artifacts():
+    """Verify the install-time artifacts that profiles.sh should have
+    dropped on the target. Silent cp failures in profiles.sh were the
+    common root cause across 1.0.4 regressions: autodeploy binary
+    missing, ansible playbook dir missing, ttyd-k9s unit missing."""
+    want = {
+        "/usr/sbin/kldload-autodeploy":                        "autodeploy orchestrator binary",
+        "/usr/lib/systemd/system/kldload-autodeploy.service":  "autodeploy systemd unit",
+        "/usr/lib/systemd/system/ttyd-k9s.service":            "terminal drawer unit",
+        "/usr/local/share/kldload-ansible/playbooks/provision-golden.yml": "ansible playbook library",
+        "/usr/local/bin/kube-cluster":                         "kube-cluster tool",
+        "/usr/local/bin/kldload-doctor":                       "doctor tool (self)",
+    }
+    missing = [desc for path, desc in want.items() if not os.path.exists(path)]
+    if missing:
+        return _result("installer", "artifacts", "fail",
+                       "all install-time artifacts present",
+                       f"missing: {', '.join(missing[:3])}" + (" …" if len(missing) > 3 else ""),
+                       severity="high",
+                       remediation="re-run: kldload-install-target profile=<your-profile>, or rebuild the ISO")
+    return _result("installer", "artifacts", "ok",
+                   f"{len(want)} artifacts checked", "all present")
+
+
+def check_bob_tools_present():
+    # Simply greps the webui for the new tool names. If any are missing,
+    # the build regressed.
+    p = "/usr/local/bin/kldload-webui"
+    if not os.path.isfile(p):
+        return _result("bob", "webui tools", "skip", "", "webui not installed")
+    try:
+        with open(p) as f:
+            src = f.read()
+    except Exception:
+        return _result("bob", "webui tools", "skip", "", "unreadable")
+    expected = ["k8s_get_pods", "k8s_describe", "k8s_logs", "k8s_events",
+                "prom_query", "zfs_status", "host_vitals", "doctor_check"]
+    missing = [t for t in expected if t not in src]
+    if missing:
+        return _result("bob", "webui tools", "fail",
+                       "all observability tools present",
+                       f"missing from kldload-webui: {', '.join(missing)}",
+                       severity="high",
+                       remediation="reinstall kldload-webui from the fresh ISO")
+    return _result("bob", "webui tools", "ok",
+                   "8 observability tools registered",
+                   "k8s_*, prom_query, zfs_status, host_vitals, doctor_check")
+
+
+CHECKS = [
+    check_zfs_pool, check_zfs_errors, check_zfs_arc_target, check_sanoid_timer,
+    check_kldload_datasets, check_secrets_encryption,
+    check_wireguard_module, check_wg_interfaces, check_virbr0,
+    check_k8s_nodes, check_cilium,
+    check_cilium_pods, check_cilium_operator,
+    check_hubble_relay, check_hubble_ui,
+    check_metallb, check_zfs_csi, check_gateway_api,
+    check_helm_releases,
+    check_metrics_server,
+    check_prometheus_running, check_prometheus_targets,
+    check_cilium_scrape_labels, check_tetragon_scrape, check_hubble_scrape,
+    check_grafana_running, check_grafana_dashboards,
+    check_cluster_firewall,
+    check_ollama, check_bob_tools_present,
+    check_install_artifacts,
+    check_webui_running, check_libvirtd, check_kldload_tools,
+]
+
+
+def _log_run(payload):
+    """Append each Doctor run to /root/kldload-doctor.log for auditability.
+    Keeps the last ~50 runs rolling so humans (and Bob) can grep history:
+        grep -A5 "ts=" /root/kldload-doctor.log | tail -100"""
+    from datetime import datetime
+    try:
+        line = (f"# ts={datetime.now().isoformat()} "
+                f"ok={payload['summary']['ok']} fail={payload['summary']['fail']} "
+                f"warn={payload['summary']['warn']} skip={payload['summary']['skip']}")
+        with open("/root/kldload-doctor.log", "a") as f:
+            f.write(line + "\n")
+            for r in payload["results"]:
+                if r["status"] in ("fail", "warn"):
+                    f.write(f"  [{r['status'].upper():4}] {r['subsystem']}/{r['name']}: {r['actual']}\n")
+        # Rotate at 2MB — doctor runs can be frequent.
+        if os.path.exists("/root/kldload-doctor.log") and \
+           os.path.getsize("/root/kldload-doctor.log") > 2_000_000:
+            os.rename("/root/kldload-doctor.log", "/root/kldload-doctor.log.old")
+    except Exception:
+        pass
+
+
+def main():
+    results = []
+    crashed = 0
+    for fn in CHECKS:
+        try:
+            r = fn()
+            if isinstance(r, dict):
+                results.append(r)
+        except Exception as e:
+            crashed += 1
+            results.append(_result(
+                "runner", fn.__name__, "fail",
+                "check runs cleanly", f"crashed: {e}",
+                severity="low",
+                remediation=f"Fix {fn.__name__} in kldload-profile"))
+    # Summary + grouped output
+    by_subsystem = {}
+    for r in results:
+        by_subsystem.setdefault(r["subsystem"], []).append(r)
+    counts = {"ok": 0, "fail": 0, "warn": 0, "skip": 0}
+    for r in results:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    out = {
+        "version":    "1.0",
+        "summary":    counts,
+        "subsystems": by_subsystem,
+        "results":    results,
+    }
+    print(json.dumps(out, indent=2, sort_keys=True))
+    _log_run(out)
+    if crashed:
+        return 2
+    return 0 if counts["fail"] == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

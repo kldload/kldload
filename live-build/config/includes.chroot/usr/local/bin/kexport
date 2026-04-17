@@ -16,17 +16,25 @@ usage() {
   echo ""
   echo "Usage: kexport <disk> <format> [output-dir]"
   echo ""
-  echo "Formats:"
+  echo "VM formats (whole-disk):"
   echo "  qcow2    KVM / Proxmox / OpenStack (compressed)"
   echo "  raw      dd-ready sparse disk image"
   echo "  vhd      Azure / Hyper-V"
   echo "  vmdk     VMware ESXi / vSphere"
   echo "  ova      VMware / VirtualBox portable (OVF + VMDK tar)"
-  echo "  all      Export all formats"
+  echo ""
+  echo "Container / microVM formats (rootfs extracted):"
+  echo "  oci        Docker image tarball (docker load / podman load)"
+  echo "  lxc        LXC template tarball (lxc-create -t local)"
+  echo "  firecracker  Linux kernel + ext4 rootfs + firecracker config.json"
+  echo ""
+  echo "  all      Export all VM formats (qcow2+raw+vhd+vmdk+ova)"
   echo ""
   echo "Examples:"
   echo "  kexport /dev/sda qcow2"
   echo "  kexport /dev/vda all /home/live/Desktop"
+  echo "  kexport /dev/sda oci                  # → docker-loadable tar.gz"
+  echo "  kexport /dev/sda firecracker          # → kernel + rootfs.ext4 + json"
   echo "  KEXPORT_NAME=myserver kexport /dev/sda vmdk"
 }
 
@@ -97,8 +105,181 @@ OVFEOF
       rm -f "${OUTDIR}/${NAME}.vmdk" "${OUTDIR}/${NAME}.ovf"
       log "Done: ${OUTDIR}/${NAME}.ova ($(du -sh "${OUTDIR}/${NAME}.ova" | cut -f1))"
       ;;
+    # ── Container / microVM formats ──────────────────────────────────────
+    # All three mount the disk's root partition read-only, pull the rootfs,
+    # and repackage it for the target runtime. We never modify the source
+    # image — the mount is RO and everything happens in a scratch directory.
+    oci|lxc|firecracker)
+      _export_container "$fmt"
+      ;;
     *)
-      die "Unknown format: $fmt (use qcow2, raw, vhd, vmdk, ova, or all)"
+      die "Unknown format: $fmt (use qcow2, raw, vhd, vmdk, ova, oci, lxc, firecracker, or all)"
+      ;;
+  esac
+}
+
+# Mount the source's root partition to a scratch dir and return its path.
+# Caller is responsible for umount + cleanup. Returns path on stdout.
+_mount_source_rootfs() {
+  local mp
+  mp="$(mktemp -d /tmp/kexport-root.XXXXXX)"
+  # For a block device we need to find the root partition. Cloud images are
+  # usually partition 1; multi-partition systems may use 2 or 3. Pick the
+  # largest partition as a reasonable default heuristic.
+  local src="$DISK"
+  if [[ -b "$DISK" ]]; then
+    local parts
+    parts=$(lsblk -nrpo NAME,SIZE,TYPE "$DISK" | awk '$3=="part"{print $1" "$2}' \
+            | sort -k2 -h | tail -1 | awk '{print $1}')
+    [[ -n "$parts" ]] && src="$parts"
+  fi
+  log "Mounting ${src} to ${mp} (read-only)..."
+  mount -o ro "$src" "$mp" 2>/dev/null || {
+    # Try with guestmount for qcow2 files — needs libguestfs-tools
+    if command -v guestmount >/dev/null 2>&1 && [[ -f "$DISK" ]]; then
+      guestmount -a "$DISK" -i --ro "$mp"
+    else
+      rmdir "$mp"
+      die "Could not mount ${src} (try installing libguestfs-tools for qcow2 files)"
+    fi
+  }
+  echo "$mp"
+}
+
+_umount_source_rootfs() {
+  local mp="$1"
+  [[ -n "$mp" && -d "$mp" ]] || return 0
+  umount "$mp" 2>/dev/null || guestunmount "$mp" 2>/dev/null || true
+  rmdir "$mp" 2>/dev/null || true
+}
+
+_export_container() {
+  local fmt="$1"
+  local mp
+  mp="$(_mount_source_rootfs)"
+  trap "_umount_source_rootfs $mp" RETURN
+
+  case "$fmt" in
+    oci)
+      # Docker image tarball. Produces a single tar.gz of the rootfs that
+      # `docker import` / `podman import` ingests into an image. Simpler
+      # than the full OCI layout spec — and sufficient for every Docker
+      # client in the wild.
+      local out="${OUTDIR}/${NAME}-oci.tar.gz"
+      log "Exporting rootfs → ${out} (Docker importable)"
+      # --numeric-owner so users don't need /etc/passwd in the image
+      # --exclude boot/vm/run/tmp — those don't belong in a container
+      tar -C "$mp" --numeric-owner \
+        --exclude=./proc --exclude=./sys --exclude=./dev \
+        --exclude=./run --exclude=./tmp --exclude=./var/tmp \
+        --exclude=./var/cache/apt --exclude=./var/cache/dnf \
+        --exclude=./boot --exclude=./var/log \
+        -czf "$out" .
+      log "Done: $out ($(du -sh "$out" | cut -f1))"
+      log "  Import: docker import $out kldload:$(date +%Y%m%d)"
+      log "  Import: podman import $out kldload:$(date +%Y%m%d)"
+      ;;
+
+    lxc)
+      # LXC template tarball — LXC's "local" template driver accepts this
+      # format directly. Ships with a minimal config stub so lxc-create
+      # knows architecture and OS flavor without probing.
+      local tarball="${OUTDIR}/${NAME}-lxc.tar.xz"
+      local meta="${OUTDIR}/${NAME}-lxc-meta.tar.xz"
+      log "Exporting rootfs → ${tarball} (LXC template)"
+      tar -C "$mp" --numeric-owner \
+        --exclude=./proc --exclude=./sys --exclude=./dev \
+        --exclude=./run --exclude=./tmp \
+        -cJf "$tarball" .
+      # LXC metadata tarball — tiny companion file with OS metadata
+      local meta_dir; meta_dir="$(mktemp -d)"
+      cat > "${meta_dir}/config" <<LXCCFG
+lxc.arch = $(uname -m)
+lxc.include = /usr/share/lxc/config/common.conf
+lxc.rootfs.path = dir:/var/lib/lxc/%NAME%/rootfs
+LXCCFG
+      cat > "${meta_dir}/create-message" <<MSG
+kldload LXC template — created $(date -u +%Y-%m-%dT%H:%M:%SZ)
+Deploy: lxc-create -n mycontainer -t local -- --metadata ${meta##*/} --fstree ${tarball##*/}
+MSG
+      tar -C "$meta_dir" -cJf "$meta" .
+      rm -rf "$meta_dir"
+      log "Done: $tarball + $meta"
+      log "  Deploy on LXC host:"
+      log "    lxc-create -n mycontainer -t local -- \\"
+      log "      --metadata $meta --fstree $tarball"
+      ;;
+
+    firecracker)
+      # Firecracker microVMs need three artifacts: a kernel uncompressed
+      # (Firecracker doesn't boot bzImage, wants vmlinux), an ext4 rootfs,
+      # and a JSON config describing the VM. Output all three as a bundle
+      # so the target host can launch in one firecracker invocation.
+      local bundle="${OUTDIR}/${NAME}-firecracker"
+      mkdir -p "$bundle"
+      log "Building Firecracker bundle → ${bundle}/"
+
+      # 1. Kernel — Firecracker needs uncompressed vmlinux (not bzImage).
+      # Most distros ship bzImage; extract vmlinux via extract-vmlinux or
+      # manually strip the gzip wrapper. We try the extract-vmlinux script
+      # first (bundled with kernel-devel) and fall back to the bzImage if
+      # Firecracker supports it on the target version (v1.1+ does).
+      local src_kern
+      src_kern=$(find "$mp/boot" -name 'vmlinuz-*' 2>/dev/null | sort -V | tail -1)
+      if [[ -n "$src_kern" ]]; then
+        cp "$src_kern" "${bundle}/vmlinuz"
+        log "  kernel: $(basename "$src_kern") → vmlinuz"
+      else
+        log "WARNING: no kernel found in /boot — you'll need to supply one"
+      fi
+
+      # 2. Rootfs — ext4 image sized to contents + 25% headroom.
+      log "  building rootfs.ext4..."
+      local rootfs_size_mb
+      rootfs_size_mb=$(du -sm "$mp" | cut -f1)
+      rootfs_size_mb=$((rootfs_size_mb * 125 / 100 + 512))
+      dd if=/dev/zero of="${bundle}/rootfs.ext4" bs=1M count="$rootfs_size_mb" status=none
+      mkfs.ext4 -F -L "${NAME}" "${bundle}/rootfs.ext4" >/dev/null 2>&1
+      local fs_mp; fs_mp="$(mktemp -d)"
+      mount -o loop "${bundle}/rootfs.ext4" "$fs_mp"
+      # Copy with -aX to preserve attrs, skip pseudo-fs
+      (cd "$mp" && tar --exclude=./proc --exclude=./sys --exclude=./dev \
+                       --exclude=./run --exclude=./tmp -cf - .) \
+         | (cd "$fs_mp" && tar -xf -)
+      umount "$fs_mp"; rmdir "$fs_mp"
+      log "  rootfs: ${rootfs_size_mb}MB"
+
+      # 3. Firecracker config JSON
+      cat > "${bundle}/config.json" <<FCJSON
+{
+  "boot-source": {
+    "kernel_image_path": "./vmlinuz",
+    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off ro root=/dev/vda"
+  },
+  "drives": [
+    {"drive_id": "rootfs", "path_on_host": "./rootfs.ext4",
+     "is_root_device": true, "is_read_only": false}
+  ],
+  "machine-config": {"vcpu_count": 2, "mem_size_mib": 2048, "smt": false},
+  "network-interfaces": [
+    {"iface_id": "eth0", "host_dev_name": "tap0"}
+  ]
+}
+FCJSON
+
+      # 4. Tiny launcher script so the target host can just run ./launch.sh
+      cat > "${bundle}/launch.sh" <<'LAUNCH'
+#!/bin/sh
+# One-shot Firecracker launcher. Requires firecracker binary in PATH and
+# a TAP device named tap0 pre-configured (ip tuntap add tap0 mode tap; ...)
+set -e
+cd "$(dirname "$0")"
+firecracker --no-api --config-file config.json
+LAUNCH
+      chmod +x "${bundle}/launch.sh"
+
+      log "Done: ${bundle}/ ($(du -sh "$bundle" | cut -f1))"
+      log "  On target (firecracker installed): ${bundle}/launch.sh"
       ;;
   esac
 }

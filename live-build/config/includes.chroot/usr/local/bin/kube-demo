@@ -2995,6 +2995,47 @@ demo_destroy_all() {
   pause
 }
 
+# ── CLI dispatch (headless / UI-driven) ────────────────────────
+# Invocation patterns:
+#   kube-demo                  → interactive menu (original behaviour)
+#   kube-demo --list           → print every demo name the UI can run
+#   kube-demo <name>           → run one demo and exit (no pause)
+# Used by the web UI's Demos panel via the k8s_run_demo WS action. The
+# implicit KUBE_DEMO_PAUSE=0 keeps the log stream from hanging on
+# "Press Enter" prompts when there's no interactive user.
+_DEMO_NAMES=(
+  platform zfs_live vm_lifecycle
+  overview zfs_clones add_nodes cilium connectivity hubble coredns
+  netpol metallb gateway zfs_pvc snapshot_restore db_pvc nginx
+  pod_dns scale rolling_update self_heal drain node_rollback
+  replace_nodes ebpf_deep_dive zero_sidecar datapath_trace smoke
+  cleanup
+)
+if [[ "${1:-}" == "--list" ]]; then
+  printf "%s\n" "${_DEMO_NAMES[@]}"
+  exit 0
+fi
+_DEMO_TARGET=""
+for _arg in "$@"; do
+  case "$_arg" in
+    --*|-*) ;;
+    *) _DEMO_TARGET="$_arg"; break ;;
+  esac
+done
+if [[ -n "$_DEMO_TARGET" ]]; then
+  KUBE_DEMO_PAUSE=0
+  _find_cp || { echo -e "${R}No Kubernetes control plane found.${N}"; exit 1; }
+  _fn="demo_${_DEMO_TARGET}"
+  if declare -F "$_fn" >/dev/null 2>&1; then
+    "$_fn"
+    exit $?
+  else
+    echo -e "${R}Unknown demo: $_DEMO_TARGET${N}"
+    echo "Available: ${_DEMO_NAMES[*]}"
+    exit 2
+  fi
+fi
+
 # ── Main Loop ─────────────────────────────────────────────────
 _find_cp || { echo -e "${R}No Kubernetes control plane found.${N}"; echo "Run: kube-cluster bootstrap --workers 3"; exit 1; }
 

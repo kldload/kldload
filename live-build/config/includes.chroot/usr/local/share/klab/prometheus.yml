@@ -90,3 +90,51 @@ scrape_configs:
         regex: '192\.168\.122\.206:.*'
         target_label: distro
         replacement: rhel
+
+  # ── Kubernetes cluster observability ──────────────────────────────────
+  # kube-cluster lays VMs down on 192.168.122.206 (cp) and .135/.187/.224
+  # (workers) using a deterministic DHCP reservation map. Port map:
+  #   9962 = cilium-agent    (needs prometheus.enabled=true in helm values)
+  #   9963 = cilium-operator (hostPort, only up on the pod's node)
+  #   9965 = hubble metrics  (needs hubble.metrics.enabled + a metrics list)
+  #   2112 = tetragon metrics
+  #
+  # Stock grafana.com dashboards (16611/16612/16613) filter by
+  # {k8s_app="cilium"} and {pod=~"$pod"} / {io_cilium_app="operator"}.
+  # Because we scrape static hostPort targets (not ServiceMonitor CRDs),
+  # those labels aren't populated automatically — synthesize them here so
+  # every panel lights up without touching the upstream dashboard JSON.
+  - job_name: cilium-agent
+    static_configs:
+      - targets: ['192.168.122.206:9962']
+        labels: {k8s_app: cilium, pod: cilium-kldload-cp, node: kldload-cp}
+      - targets: ['192.168.122.135:9962']
+        labels: {k8s_app: cilium, pod: cilium-kldload-w-1, node: kldload-w-1}
+      - targets: ['192.168.122.224:9962']
+        labels: {k8s_app: cilium, pod: cilium-kldload-w-2, node: kldload-w-2}
+      - targets: ['192.168.122.187:9962']
+        labels: {k8s_app: cilium, pod: cilium-kldload-w-3, node: kldload-w-3}
+  - job_name: cilium-operator
+    static_configs:
+      - targets: ['192.168.122.206:9963', '192.168.122.135:9963', '192.168.122.224:9963', '192.168.122.187:9963']
+        labels: {io_cilium_app: operator, k8s_app: cilium-operator}
+  - job_name: hubble-metrics
+    static_configs:
+      - targets: ['192.168.122.206:9965']
+        labels: {k8s_app: cilium, pod: cilium-kldload-cp, node: kldload-cp}
+      - targets: ['192.168.122.135:9965']
+        labels: {k8s_app: cilium, pod: cilium-kldload-w-1, node: kldload-w-1}
+      - targets: ['192.168.122.224:9965']
+        labels: {k8s_app: cilium, pod: cilium-kldload-w-2, node: kldload-w-2}
+      - targets: ['192.168.122.187:9965']
+        labels: {k8s_app: cilium, pod: cilium-kldload-w-3, node: kldload-w-3}
+  - job_name: tetragon
+    static_configs:
+      - targets: ['192.168.122.206:2112']
+        labels: {pod: tetragon-kldload-cp, node: kldload-cp}
+      - targets: ['192.168.122.135:2112']
+        labels: {pod: tetragon-kldload-w-1, node: kldload-w-1}
+      - targets: ['192.168.122.224:2112']
+        labels: {pod: tetragon-kldload-w-2, node: kldload-w-2}
+      - targets: ['192.168.122.187:2112']
+        labels: {pod: tetragon-kldload-w-3, node: kldload-w-3}

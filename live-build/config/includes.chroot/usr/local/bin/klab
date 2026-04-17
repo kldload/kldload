@@ -55,7 +55,10 @@ RHEL_CREDS_FILE="/root/.klab-rhel-creds"
 declare -A CLOUD_IMAGES=(
   [centos]="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
   [rocky]="https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"
-  [fedora]="https://download.fedoraproject.org/pub/fedora/linux/releases/41/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2"
+  # Fedora 43 — bumped from 41. F43 released Oct 2025 is the current
+  # stable; kernel 6.14+, glibc 2.40+. Change this URL + the os-variant
+  # below when moving to F44/F45.
+  [fedora]="https://download.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.1.x86_64.qcow2"
   [debian]="https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-genericcloud-amd64-daily.qcow2"
   [ubuntu]="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
   [arch]="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
@@ -66,7 +69,7 @@ declare -A CLOUD_IMAGES=(
 declare -A OS_VARIANTS=(
   [centos]="centos-stream9"
   [rocky]="centos-stream9"
-  [fedora]="fedora-unknown"
+  [fedora]="fedora43"
   [debian]="debian12"
   [ubuntu]="ubuntu24.04"
   [arch]="archlinux"
@@ -184,17 +187,28 @@ pause() { echo ""; echo -ne "${D}  Press Enter to continue...${N}"; read -r; }
 
 _ssh_cmd() {
   local ip="$1"; shift
+  # SSH options shared by both auth paths.
+  #   StrictHostKeyChecking=no — allow first connection
+  #   UserKnownHostsFile=/dev/null — IPs get reused across test runs and
+  #     each new VM has a fresh host key; without this, the second run
+  #     hits "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED" and the
+  #     SSH command is refused outright.
+  #   LogLevel=ERROR — suppress the "Permanently added" warning that
+  #     would otherwise pollute every test stream line.
+  local _opts=(
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o LogLevel=ERROR
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=120
+  )
   # Try key auth first — probe stdin must be /dev/null so it never consumes
   # the caller's heredoc stdin (the bug that broke Fedora/Debian/Ubuntu goldens)
-  if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
+  if ssh "${_opts[@]}" -o ConnectTimeout=5 -o BatchMode=yes \
     -i "$SSH_KEY" "root@${ip}" true </dev/null 2>/dev/null; then
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-      -o ServerAliveInterval=30 -o ServerAliveCountMax=120 \
-      -i "$SSH_KEY" "root@${ip}" "$@"
+    ssh "${_opts[@]}" -o ConnectTimeout=10 -i "$SSH_KEY" "root@${ip}" "$@"
   else
-    sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-      -o ServerAliveInterval=30 -o ServerAliveCountMax=120 \
-      "root@${ip}" "$@"
+    sshpass -p kldload ssh "${_opts[@]}" -o ConnectTimeout=10 "root@${ip}" "$@"
   fi
 }
 
@@ -252,7 +266,18 @@ timer_elapsed_ms() {
   echo $(( (now - start) / 1000000 ))
 }
 
-golden_name()  { echo "${PREFIX}-golden-${1}"; }
+# Golden naming honors KLAB_GOLDEN_KIND env:
+#   unset / "regular" → klab-golden-<distro>   (lean, blue-green)
+#   "ztest"           → klab-ztest-<distro>    (full ZFS test deps)
+# Each distro has exactly one version at a time (CentOS 9 Stream,
+# Fedora 43, Debian 13, Ubuntu 24.04, Rocky 9) — no versioned slug.
+golden_name() {
+  if [[ "${KLAB_GOLDEN_KIND:-regular}" == "ztest" ]]; then
+    echo "${PREFIX}-ztest-${1}"
+  else
+    echo "${PREFIX}-golden-${1}"
+  fi
+}
 site_name()    { echo "${PREFIX}-${1}-${2}"; }  # site_name blue centos
 test_vm_name() { echo "${PREFIX}-test-${1}"; }
 zvol_path()    { echo "${POOL}/vms/${1}"; }
@@ -306,27 +331,33 @@ hostname: ${hostname}
 manage_etc_hosts: true
 disable_root: false
 ssh_pwauth: true
-# No 'users' block — avoid distro-specific default user issues.
-# Set root password and SSH via bootcmd + runcmd instead.
 package_update: false
-# bootcmd runs early, before user modules — guarantees ready marker + root access
+# CRITICAL ORDERING NOTE:
+#   bootcmd runs BEFORE sshd.service fully comes up. firewalld (CentOS/Rocky/
+#   Fedora) and ufw (Debian/Ubuntu) block port 22 by default on cloud images;
+#   if we wait until runcmd to kill them, klab's wait_for_ssh times out.
+#   So: firewall kill + sshd config BOTH go in bootcmd. sshd will pick up
+#   the drop-in config when cloud-init finishes bootcmd and sshd starts.
+chpasswd:
+  expire: false
+  list: |
+    root:kldload
 bootcmd:
-  - echo 'root:kldload' | chpasswd
-  - passwd -uf root 2>/dev/null || true
-  - mkdir -p /etc/ssh/sshd_config.d
-  - echo -e 'PermitRootLogin yes\nPasswordAuthentication yes' > /etc/ssh/sshd_config.d/99-klab.conf
-  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+  # Open the door BEFORE sshd gets a chance to sit behind a closed firewall
+  - [ sh, -c, "systemctl stop firewalld 2>/dev/null; systemctl disable firewalld 2>/dev/null; systemctl mask firewalld 2>/dev/null; true" ]
+  - [ sh, -c, "systemctl stop ufw 2>/dev/null; systemctl disable ufw 2>/dev/null; ufw --force disable 2>/dev/null; true" ]
+  # Unlock root + write sshd drop-in. No restart needed — sshd reads
+  # sshd_config.d/*.conf on its first start after cloud-init.
+  - [ sh, -c, "passwd -uf root 2>/dev/null; true" ]
+  - [ sh, -c, "mkdir -p /etc/ssh/sshd_config.d && printf 'PermitRootLogin yes\\nPasswordAuthentication yes\\n' > /etc/ssh/sshd_config.d/99-klab.conf" ]
 ${bootcmd_net}
 ${runcmd_extra}
 ssh_authorized_keys:
   - ${pubkey}
 runcmd:
-  - systemctl stop firewalld 2>/dev/null || true
-  - systemctl disable firewalld 2>/dev/null || true
-  - systemctl mask firewalld 2>/dev/null || true
-  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+  # Belt-and-suspenders — if bootcmd failed somehow, fire these late too.
+  - [ sh, -c, "systemctl stop firewalld 2>/dev/null; systemctl mask firewalld 2>/dev/null; true" ]
+  - [ sh, -c, "systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true" ]
 USERDATA
 
   if [[ -n "$static_ip" ]]; then
@@ -385,6 +416,13 @@ NETCFG
 # ── Section 3: RHEL Credentials ──────────────────────────────────────────
 
 _rhel_prompt_creds() {
+  # Credential source priority (all non-interactive — firstboot-safe):
+  #   1. Env vars set by caller
+  #   2. Legacy RHEL_CREDS_FILE on disk
+  #   3. ZFS-encrypted secrets dataset via `kldload-db` (the dashboard UI
+  #      writes there — "rhel-username" / "rhel-password" / "rhel-activation-key")
+  #   4. Nothing → skip RHEL gracefully (exit 0 so klab golden all keeps going)
+  # Interactive prompting was removed — it broke unattended firstboot.
   if [[ -n "$RHEL_USERNAME" && -n "$RHEL_PASSWORD" ]]; then
     log "  Using RHEL credentials from environment"
     return 0
@@ -396,26 +434,24 @@ _rhel_prompt_creds() {
       return 0
     fi
   fi
-  echo ""
-  echo -e "  ${C}── RHEL Subscription Credentials ──────────────────────────${N}"
-  echo -e "  ${D}Required for subscription-manager register.${N}"
-  echo -e "  ${D}Credentials are stored in memory only (never logged).${N}"
-  echo ""
-  echo -ne "  ${W}RHEL Username: ${N}"
-  read -r RHEL_USERNAME
-  echo -ne "  ${W}RHEL Password: ${N}"
-  read -rs RHEL_PASSWORD
-  echo ""
-  if [[ -z "$RHEL_USERNAME" || -z "$RHEL_PASSWORD" ]]; then
-    warn "RHEL credentials required — skipping RHEL"
-    return 1
+  # Try the encrypted secrets dataset (set from the web UI dashboard panel)
+  local _sec_dir="/var/lib/kldload/secrets"
+  if [[ -r "${_sec_dir}/rhel-username" && -r "${_sec_dir}/rhel-password" ]]; then
+    RHEL_USERNAME="$(cat "${_sec_dir}/rhel-username")"
+    RHEL_PASSWORD="$(cat "${_sec_dir}/rhel-password")"
+    log "  Using RHEL credentials from encrypted secrets store"
+    return 0
   fi
-  umask 077
-  cat > "$RHEL_CREDS_FILE" <<CREDS
-RHEL_USERNAME='${RHEL_USERNAME}'
-RHEL_PASSWORD='${RHEL_PASSWORD}'
-CREDS
-  chmod 600 "$RHEL_CREDS_FILE"
+  # Activation key variant — still counts as "have creds"
+  if [[ -r "${_sec_dir}/rhel-activation-key" ]]; then
+    RHEL_USERNAME=""
+    RHEL_PASSWORD=""
+    RHEL_ACTIVATION_KEY="$(cat "${_sec_dir}/rhel-activation-key")"
+    log "  Using RHEL activation key from encrypted secrets store"
+    return 0
+  fi
+  warn "  No RHEL credentials — skipping RHEL golden (add creds via Dashboard → RHEL Subscription)"
+  return 2   # non-zero but distinct from hard failure; caller should skip not abort
   log "  Credentials cached at ${RHEL_CREDS_FILE} (0600)"
   return 0
 }
@@ -427,8 +463,12 @@ CREDS
 setup_vm_golden() {
   local ip="$1" distro="$2"
   local family="${DISTRO_FAMILY[$distro]}"
-  # KLAB_ZFS_DEV: "1" = include full dev/test tools (default), "0" = clean ZFS + eBPF only
-  local dev_tools="${KLAB_ZFS_DEV:-1}"
+  # KLAB_ZFS_DEV: "1" = include full dev/test tools (ksh, zfs-tests,
+  # fio, pamtester, pax, cryptsetup, loopback vdevs, …). Default is "0"
+  # so regular klab goldens stay small. The ZFS Test Suite has its own
+  # `klab golden-ztest` command that sets this to "1" and produces
+  # klab-ztest-<distro> images separate from klab-golden-<distro>.
+  local dev_tools="${KLAB_ZFS_DEV:-0}"
 
   # RHEL: register subscription before installing packages
   if [[ "$distro" == "rhel" && -n "$RHEL_USERNAME" && -n "$RHEL_PASSWORD" ]]; then
@@ -485,11 +525,19 @@ fi
 # eBPF + essentials (always)
 dnf install -y bpftrace bcc-tools wireguard-tools curl jq 2>/dev/null || true
 
-# Test suite deps + dev tools (only when KLAB_ZFS_DEV=1)
+# Test suite deps + dev tools (only when KLAB_ZFS_DEV=1).
+# The full OpenZFS test suite needs: ksh (run), fio/parted/attr/bc/acl
+# (zpool ops), sysstat (mpstat for perf tests), net-tools (the `net`
+# cmd tests reference), cryptsetup (native-encryption tests),
+# nfs-utils (exportfs/nfs tests), bzip2 (bunzip2/bzcat used in log
+# compression tests), xxhash (xxh128sum checksum tests), util-linux
+# (pax equivalents). pamtester is rarely packaged; optional.
 if [ "$KLAB_ZFS_DEV" = "1" ]; then
   dnf install -y ksh fio parted attr bc acl sysstat \
     gdb strace perf openssl-devel zlib-devel \
-    libuuid-devel libblkid-devel libtirpc-devel 2>/dev/null || true
+    libuuid-devel libblkid-devel libtirpc-devel \
+    net-tools nfs-utils cryptsetup bzip2 xxhash python3 \
+    util-linux 2>/dev/null || true
 fi
 
 # Load ZFS module
@@ -577,10 +625,14 @@ fi
 # eBPF + essentials (always)
 apt-get install -y bpftrace bpfcc-tools wireguard-tools curl jq 2>/dev/null || true
 
-# Test suite deps + dev tools (only when KLAB_ZFS_DEV=1)
+# Test suite deps + dev tools (only when KLAB_ZFS_DEV=1).
+# See the dnf branch for the rationale — full OpenZFS test suite
+# prerequisites. apt package names differ slightly from rpm.
 if [ "$KLAB_ZFS_DEV" = "1" ]; then
   apt-get install -y ksh fio parted attr bc acl sysstat \
-    gdb strace uuid-dev libblkid-dev libssl-dev 2>/dev/null || true
+    gdb strace linux-perf uuid-dev libblkid-dev libssl-dev \
+    net-tools nfs-kernel-server cryptsetup bzip2 xxhash \
+    python3 util-linux pax 2>/dev/null || true
 fi
 
 modprobe zfs 2>/dev/null || true
@@ -937,7 +989,18 @@ build_golden_single() {
 
   # RHEL: clone from CentOS golden instead of downloading
   if [[ "$distro" == "rhel" ]]; then
-    _rhel_prompt_creds || return 1
+    # Return code 2 from _rhel_prompt_creds = "no creds, skip gracefully".
+    # Return 0 = success. Anything else = hard error. "klab golden all"
+    # must treat a missing-creds RHEL as skip (rc=0), not fail (rc=1),
+    # so the rest of the distros still build.
+    _rhel_prompt_creds
+    local _rc=$?
+    if [[ $_rc -eq 2 ]]; then
+      log "  Skipping RHEL — no credentials (set them in the web UI Dashboard)"
+      return 0
+    elif [[ $_rc -ne 0 ]]; then
+      return 1
+    fi
     local centos_golden_zpath
     centos_golden_zpath="$(zvol_path "$(golden_name centos)")"
     if ! zfs list "${centos_golden_zpath}@golden" >/dev/null 2>&1; then
@@ -1068,13 +1131,28 @@ build_golden_single() {
     sleep 5
   done
 
-  # Install test environment (log to file, NOT piped — pipe kills heredoc stdin)
+  # Install test environment. setup_vm_golden can run 5-15 minutes silently
+  # (package install + zfs-dkms compile). Run it in the background and
+  # heartbeat the last log line every 15s so the user isn't staring at a
+  # frozen terminal. Output still lands in $_setup_log verbatim — we just
+  # surface it periodically rather than all-or-nothing at the end.
+  # NOTE: piping kills the heredoc stdin inside setup_vm_golden, which is
+  # why we redirect to a file instead of `| tee`.
   local _setup_log="/tmp/klab-setup-${distro}.log"
-  setup_vm_golden "$golden_ip" "$distro" > "$_setup_log" 2>&1
+  : > "$_setup_log"
+  setup_vm_golden "$golden_ip" "$distro" > "$_setup_log" 2>&1 &
+  local _setup_pid=$!
+  local _tick=0
+  while kill -0 "$_setup_pid" 2>/dev/null; do
+    sleep 15; _tick=$((_tick + 1))
+    local _last; _last="$(tail -1 "$_setup_log" 2>/dev/null | tr -cd '[:print:]' | cut -c1-100)"
+    log "  setup [${distro} t+$((_tick*15))s] ${_last:-<no output yet>}"
+  done
+  wait "$_setup_pid"
   if [[ -n "$RHEL_PASSWORD" ]]; then
-    sed "s/${RHEL_PASSWORD}/REDACTED/g" "$_setup_log" | tee -a "$golden_log"
+    sed "s/${RHEL_PASSWORD}/REDACTED/g" "$_setup_log" >> "$golden_log"
   else
-    cat "$_setup_log" | tee -a "$golden_log"
+    cat "$_setup_log" >> "$golden_log"
   fi
   rm -f "$_setup_log"
 
@@ -1177,6 +1255,27 @@ cmd_golden() {
   else
     build_golden_single "$target"
   fi
+}
+
+# Build the ZFS-test-dedicated golden lineage. Exports:
+#   KLAB_GOLDEN_KIND=ztest   → golden_name() returns klab-ztest-<distro>
+#   KLAB_ZFS_DEV=1           → setup_vm_golden() installs full test deps
+# Produces klab-ztest-<distro> images independently of the blue-green
+# klab-golden-<distro> set. Idempotent — if the ztest golden already
+# exists, build_golden_single skips it (same as regular).
+cmd_golden_ztest() {
+  local target="${1:-all}"
+  export KLAB_GOLDEN_KIND=ztest
+  export KLAB_ZFS_DEV=1
+  log "Building ZFS test goldens (target=${target}) — these are separate from blue-green goldens."
+  if [[ "$target" == "all" ]]; then
+    for distro in "${DISTROS[@]}"; do
+      build_golden_single "$distro" || warn "Failed to build ZTEST golden for ${distro}"
+    done
+  else
+    build_golden_single "$target"
+  fi
+  log "ZFS test goldens ready. Names: klab-ztest-<distro>"
 }
 
 # ── Section 6: Site Deploy (Blue-Green) ──────────────────────────────────
@@ -1452,8 +1551,18 @@ run_tests_on_vm() {
   echo "running" > "$progress_file"
   log "  [${distro}] Starting ${mode} tests on ${ip}..."
 
+  # zfs-tests.sh args. Quick mode runs a small tag set that finishes in
+  # ~3-5 min per distro. Full mode runs the entire functional suite (~2h).
+  # The previous "-c" was wrong — it expects a config file and consumed
+  # the next arg, silently exiting before any test ran. Tags are
+  # comma-separated; "fault,zpool" gives broad cli + fault coverage in
+  # under 5 min and produces real PASS/FAIL output.
   local _test_args=""
-  [[ "$mode" == "quick" ]] && _test_args="-vx -T functional -c" || _test_args="-vx"
+  if [[ "$mode" == "quick" ]]; then
+    _test_args="-vx -T fault,zpool"
+  else
+    _test_args="-vx"
+  fi
 
   local tests_path
   tests_path="$(_ssh_cmd "$ip" "command -v zfs-tests.sh 2>/dev/null || echo /usr/share/zfs/zfs-tests.sh")"
@@ -1463,6 +1572,16 @@ run_tests_on_vm() {
     return 0
   fi
 
+  # Stream test output AND capture it. Without tee the test runner's
+  # PASS/FAIL/SKIP lines disappear into the log file and the UI's stream
+  # panel only sees "Starting" and "Done" — making it impossible to verify
+  # the test is actually running. stdbuf -oL keeps lines flushing instead
+  # of buffering until the test ends. Prefix every line with [distro] so
+  # parallel runs interleave readably.
+  #
+  # zfs-tests.sh refuses to run as root by design (it has to create test
+  # pools as a normal user that escalates with sudo). We create a
+  # 'zfstest' user with passwordless sudo on the test VM, then su to it.
   _ssh_cmd "$ip" "
     echo '=== ZFS Test Run ==='
     echo \"Kernel: \$(uname -r)\"
@@ -1473,9 +1592,19 @@ run_tests_on_vm() {
     fi
     echo \"ZFS: \$(zfs version 2>/dev/null | head -1)\"
     if ! lsmod | grep -q '^zfs '; then echo 'FATAL: ZFS module not loaded'; exit 1; fi
-    /usr/share/zfs/zfs-tests.sh ${_test_args} 2>&1
+    # Create the test user if missing — same pattern as upstream's
+    # ./scripts/zfs-tests.sh in CI. Passwordless sudo so the test runner
+    # can escalate for zpool create / mount / etc.
+    if ! id zfstest >/dev/null 2>&1; then
+      useradd -m -s /bin/bash zfstest 2>&1 || true
+      echo 'zfstest ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/zfstest
+      chmod 440 /etc/sudoers.d/zfstest
+    fi
+    # Some loop devices may need creating before tests run.
+    modprobe loop 2>/dev/null || true
+    su - zfstest -c \"stdbuf -oL /usr/share/zfs/zfs-tests.sh ${_test_args}\" 2>&1
     echo \"Finished: \$(date)\"
-  " > "$log_file" 2>&1 || true
+  " 2>&1 | stdbuf -oL sed -u "s/^/[${distro}] /" | tee "$log_file" || true
 
   local total_pass total_fail total_skip
   total_pass="$(grep -c '\[PASS\]' "$log_file" 2>/dev/null)" || total_pass=0
@@ -1492,8 +1621,18 @@ fail=${total_fail}
 skip=${total_skip}
 total=$((total_pass + total_fail + total_skip))
 SUMMARY
-  [[ $total_fail -eq 0 ]] && echo "pass" > "$progress_file" || echo "fail" > "$progress_file"
-  log "  [${distro}] Done: ${total_pass} pass, ${total_fail} fail, ${total_skip} skip"
+  # Status sidecar: "pass" only if tests actually ran AND none failed.
+  # "empty" when nothing was recorded (early exit, bad args, etc.) —
+  # previously reported "pass" which masked broken runs in the UI.
+  local _total=$((total_pass + total_fail + total_skip))
+  if [[ "$total_fail" -gt 0 ]]; then
+    echo "fail" > "$progress_file"
+  elif [[ "$_total" -eq 0 ]]; then
+    echo "empty" > "$progress_file"
+  else
+    echo "pass" > "$progress_file"
+  fi
+  log "  [${distro}] Done: ${total_pass} pass, ${total_fail} fail, ${total_skip} skip ($(cat "$progress_file"))"
 }
 
 cmd_test() {
@@ -1514,14 +1653,56 @@ cmd_test() {
     selected_distros=("${DISTROS[@]}")
   fi
 
+  # Use the dedicated ZFS test goldens — these carry all the required
+  # zfs-tests.sh prerequisites (ksh, fio, pamtester, pax, etc.). Regular
+  # blue-green goldens are lean by design and WOULD skip 46+ tests.
+  export KLAB_GOLDEN_KIND=ztest
+  local _missing=()
+  for _d in "${selected_distros[@]}"; do
+    local _g; _g="$(golden_name "$_d")"
+    zfs list "$(zvol_path "${_g}")@golden" >/dev/null 2>&1 || _missing+=("$_d")
+  done
+  if (( ${#_missing[@]} > 0 )); then
+    warn "ZFS test goldens missing for: ${_missing[*]}"
+    warn "  Build them first:  klab golden-ztest all"
+    warn "  Or pick existing:  klab test --full --distro centos"
+    [[ "${#_missing[@]}" == "${#selected_distros[@]}" ]] && die "No ZFS test goldens exist."
+    log "Proceeding with only the distros that have ztest goldens."
+    selected_distros=()
+    for _d in "${DISTROS[@]}"; do
+      local _g; _g="$(golden_name "$_d")"
+      zfs list "$(zvol_path "${_g}")@golden" >/dev/null 2>&1 && selected_distros+=("$_d")
+    done
+  fi
+
   ensure_ssh_key
   local run_id; run_id="$(date +%Y%m%d-%H%M%S)"
   local run_dir="${RESULTS_DIR}/${run_id}"
   mkdir -p "$run_dir"
 
+  # Consolidated run log — the single file the OpenZFS team can grep or
+  # attach to a bug report. Every line streamed to the user during this
+  # test also lands here, interleaved with [distro] prefixes. The
+  # individual ${distro}.log files keep per-distro views for focused
+  # review. A .manifest records the run config so the audit is complete.
+  exec > >(tee -a "${run_dir}/full.log") 2>&1
+  cat > "${run_dir}/manifest.txt" <<MANIFEST
+run_id:       ${run_id}
+mode:         ${mode}
+distros:      ${selected_distros[*]}
+serial:       ${KLAB_SERIAL:-0}
+date_start:   $(date -Iseconds)
+host:         $(hostname)
+host_kernel:  $(uname -r)
+host_zfs:     $(zfs version 2>/dev/null | head -1)
+kldload_ver:  $(cat /etc/kldload/version 2>/dev/null || echo "?")
+MANIFEST
+
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo -e "${W}  klab test — ${mode} mode${N}"
   echo -e "${D}  Distros: ${selected_distros[*]}${N}"
+  echo -e "${D}  Run ID:  ${run_id}${N}"
+  echo -e "${D}  Full log: ${run_dir}/full.log${N}"
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
 
   local t_start; t_start="$(timer_start)"
@@ -1534,9 +1715,23 @@ cmd_test() {
     golden_zpath="$(zvol_path "$(golden_name "$distro")")"
     zfs list "${golden_zpath}@golden" >/dev/null 2>&1 || { warn "No golden for ${distro}"; continue; }
     virsh destroy "$name" 2>/dev/null || true; virsh undefine "$name" 2>/dev/null || true
-    zfs destroy -Rf "$zpath" 2>/dev/null || true
+    # Wait for libvirt to release the zvol before destroying the dataset.
+    # virsh destroy returns synchronously but the qemu process may still
+    # have the zvol open for a beat — without this, zfs destroy fails
+    # silently and the next zfs clone hits "dataset already exists".
+    for _i in 1 2 3 4 5; do
+      zfs destroy -Rf "$zpath" 2>/dev/null && break
+      sleep 1
+    done
+    if zfs list "$zpath" >/dev/null 2>&1; then
+      warn "  ${distro}: could not free old zvol ${zpath} — skipping"
+      continue
+    fi
     local ct; ct="$(timer_start)"
-    zfs clone "${golden_zpath}@golden" "$zpath"
+    if ! zfs clone "${golden_zpath}@golden" "$zpath" 2>&1; then
+      warn "  ${distro}: clone failed — skipping"
+      continue
+    fi
     log "  Cloned ${distro} in $(timer_elapsed_ms "$ct")ms"
     local ci_iso zdev; zdev="$(zvol_dev "$name")"
     ci_iso="$(make_cloud_init_iso "$name" "${PREFIX}-test-${distro}")"
@@ -1548,16 +1743,30 @@ cmd_test() {
       >/dev/null 2>&1 || { warn "Failed to boot ${distro}"; continue; }
   done
 
-  log "Waiting for SSH..."
+  log "Waiting for SSH (parallel)..."
+  # Wait for each VM's SSH in parallel — was sequential, where one slow
+  # cold-boot (e.g. fedora) made every later distro queue behind it.
+  # Each background task writes its result to a tmp file the parent then
+  # collects. wait_for_ssh polls every 2s up to 300s.
+  local _ssh_tmp; _ssh_tmp="$(mktemp -d)"
   for distro in "${selected_distros[@]}"; do
     local name; name="$(test_vm_name "$distro")"
     virsh domstate "$name" 2>/dev/null | grep -q running || continue
-    local ip; ip="$(get_vm_ip "$name")"
-    if [[ -n "$ip" ]] && wait_for_ssh "$ip" 300; then
-      vm_ips[$distro]="$ip"
-      log "  ${distro}: ${ip} (SSH OK)"
-    fi
+    (
+      local _ip; _ip="$(get_vm_ip "$name")"
+      if [[ -n "$_ip" ]] && wait_for_ssh "$_ip" 300; then
+        echo "$_ip" > "${_ssh_tmp}/${distro}"
+        log "  ${distro}: ${_ip} (SSH OK)"
+      else
+        log "  ${distro}: SSH timeout"
+      fi
+    ) &
   done
+  wait
+  for distro in "${selected_distros[@]}"; do
+    [[ -s "${_ssh_tmp}/${distro}" ]] && vm_ips[$distro]="$(cat "${_ssh_tmp}/${distro}")"
+  done
+  rm -rf "$_ssh_tmp"
 
   local serial="${KLAB_SERIAL:-0}"
   if [[ "$serial" == "1" ]]; then
@@ -1567,12 +1776,45 @@ cmd_test() {
       run_tests_on_vm "$distro" "$mode" "$run_dir" "${vm_ips[$distro]}"
     done
   else
-    log "Running ${mode} tests in parallel..."
+    # Parallel, but cap concurrency at 80% of host cores so the test
+    # run doesn't starve the host (web UI, libvirt, Prometheus, Bob).
+    # Each test VM consumes ~$CPUS vCPUs at peak (DKMS compile, zpool
+    # stress, etc.). max_concurrent = floor(cores * 0.8 / CPUS).
+    # KLAB_MAX_CONCURRENT env overrides if user wants a different cap.
+    local _host_cores _max
+    _host_cores="$(nproc 2>/dev/null || echo 4)"
+    if [[ -n "${KLAB_MAX_CONCURRENT:-}" ]]; then
+      _max="${KLAB_MAX_CONCURRENT}"
+    else
+      _max=$(( (_host_cores * 8 / 10) / CPUS ))
+      (( _max < 1 )) && _max=1
+      (( _max > ${#vm_ips[@]} )) && _max=${#vm_ips[@]}
+    fi
+    log "Running ${mode} tests in parallel (concurrency=${_max}, host=${_host_cores} cores, ${CPUS} vCPU/VM, 80% cap)..."
     declare -A pids=()
+    local _running=0
     for distro in "${!vm_ips[@]}"; do
+      # If we're already at the cap, wait for any one to finish.
+      while (( _running >= _max )); do
+        local _who=""
+        for _d in "${!pids[@]}"; do
+          if ! kill -0 "${pids[$_d]}" 2>/dev/null; then
+            _who="$_d"; break
+          fi
+        done
+        if [[ -n "$_who" ]]; then
+          wait "${pids[$_who]}" 2>/dev/null || true
+          unset 'pids[$_who]'
+          ((_running--))
+        else
+          sleep 2
+        fi
+      done
       run_tests_on_vm "$distro" "$mode" "$run_dir" "${vm_ips[$distro]}" &
       pids[$distro]=$!
+      ((_running++))
     done
+    # Drain remaining.
     for distro in "${!pids[@]}"; do wait "${pids[$distro]}" || true; done
   fi
 
@@ -1580,6 +1822,23 @@ cmd_test() {
   cmd_results "$run_id"
   log "Total time: $((elapsed / 1000))s"
   ln -sfn "$run_dir" "${RESULTS_DIR}/latest"
+
+  # Append completion block to the manifest so audit has the final picture.
+  {
+    echo ""
+    echo "date_end:     $(date -Iseconds)"
+    echo "elapsed_sec:  $((elapsed / 1000))"
+    echo ""
+    echo "=== Per-distro summary ==="
+    for _d in "${selected_distros[@]}"; do
+      if [[ -f "${run_dir}/${_d}.summary" ]]; then
+        echo "--- ${_d} ---"
+        cat "${run_dir}/${_d}.summary"
+      fi
+    done
+  } >> "${run_dir}/manifest.txt"
+  log "Audit log: ${run_dir}/full.log"
+  log "Manifest:  ${run_dir}/manifest.txt"
 
   log "Cleaning up test VMs..."
   for distro in "${selected_distros[@]}"; do
@@ -2039,6 +2298,7 @@ set -- "${_args[@]+"${_args[@]}"}"
 
 case "$CMD" in
   golden)       cmd_golden "${1:-all}" ;;
+  golden-ztest) cmd_golden_ztest "${1:-all}" ;;
   deploy)       deploy_site "${1:-blue}" ;;
   promote)      cmd_promote "${1:-green}" ;;
   rollback)     cmd_rollback ;;

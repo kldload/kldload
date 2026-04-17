@@ -1,0 +1,21 @@
+[Unit]
+# Top-level unattended deployment orchestrator. Runs after firstboot,
+# invokes K8s bootstrap + klab goldens + AI pull in the right order,
+# writes phase-ready markers that the web UI reads to show green.
+Description=kldload unattended deployment (K8s + AI + klab)
+After=network-online.target kldload-firstboot.service libvirtd.service kldload-webui.service
+Wants=network-online.target kldload-firstboot.service
+ConditionPathExists=!/var/lib/kldload/all-ready
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/kldload-autodeploy
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+# 6-hour cap — klab + k8s + ai should fit in ~1.5hr worst case; padding for
+# slow mirrors. systemd will SIGTERM after this if something hangs.
+TimeoutStartSec=21600
+
+[Install]
+WantedBy=multi-user.target

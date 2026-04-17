@@ -1,0 +1,96 @@
+---
+# Runs against a freshly booted cloud image VM. Does the work that used to
+# sit inside cloud-init runcmd — which was unreliable across distros.
+#
+# Preconditions (handled by minimal cloud-init):
+#   - SSH is up, root password is kldload, PermitRootLogin yes
+#   - Host has DHCP
+#
+# After this play: kube-setup has run, firewalld is off, /tmp/kube-golden-ready
+# exists. The caller (kube-cluster) then seals the image.
+
+- name: Provision kldload golden VM
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    kube_setup_timeout: 1500  # 25 min for package installs across slow mirrors
+
+  tasks:
+    - name: Detect distro family
+      set_fact:
+        is_deb: "{{ ansible_os_family == 'Debian' }}"
+        is_rpm: "{{ ansible_os_family in ['RedHat', 'Rocky', 'AlmaLinux'] }}"
+
+    - name: Disable firewalld (RPM)
+      when: is_rpm
+      systemd:
+        name: firewalld
+        state: stopped
+        enabled: false
+        masked: true
+      failed_when: false
+
+    - name: Disable ufw (Debian/Ubuntu)
+      when: is_deb
+      systemd:
+        name: ufw
+        state: stopped
+        enabled: false
+        masked: true
+      failed_when: false
+
+    - name: Ensure SSH hardening drop-in exists
+      copy:
+        dest: /etc/ssh/sshd_config.d/99-kldload.conf
+        content: |
+          PermitRootLogin yes
+          PasswordAuthentication yes
+          MaxStartups 20:30:60
+        mode: "0644"
+
+    - name: Reload sshd
+      systemd:
+        name: "{{ 'ssh' if is_deb else 'sshd' }}"
+        state: reloaded
+      failed_when: false
+
+    - name: Disable swap (Kubernetes requirement)
+      shell: |
+        swapoff -a || true
+        sed -i.bak -E 's@^([^#].*\sswap\s.*)$@#\1@' /etc/fstab || true
+      changed_when: false
+
+    - name: Copy kube-* tools into the VM
+      copy:
+        src: "/usr/local/bin/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        mode: "0755"
+      loop:
+        - kube-setup
+        - kube-init
+        - kube-join
+        - kube-network
+        - kube-status
+        - kube-reset
+        - kube-smoke-test
+        - kube-load-images
+      failed_when: false
+
+    - name: Run kube-setup (installs kubeadm, kubelet, containerd, helm, cilium-cli)
+      shell: /usr/local/bin/kube-setup
+      args:
+        creates: /usr/bin/kubeadm
+      async: "{{ kube_setup_timeout }}"
+      poll: 20
+      register: kube_setup_result
+
+    - name: Verify kubeadm present
+      command: which kubeadm
+      changed_when: false
+
+    - name: Write golden-ready marker
+      copy:
+        dest: /var/lib/cloud/instance/kube-golden-ready
+        content: "ready {{ ansible_date_time.iso8601 }}\n"
+        mode: "0644"

@@ -367,9 +367,29 @@ k_install_system_files() {
 
   # ── Systemd units ──────────────────────────────────────────────────────────
   mkdir -p "${target}/usr/lib/systemd/system"
-  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-export.service; do
+  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service; do
     [[ -f "/usr/lib/systemd/system/${f}" ]] && \
       cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
+  done
+  # Ship orchestrator + console scripts alongside the units. Ensure
+  # /usr/sbin exists on the bootstrap — a minimal dnf install may not
+  # create it before this function runs, and a silent cp failure here
+  # was the 1.0.4 regression where kldload-autodeploy.service had a
+  # symlink in multi-user.target.wants but no binary behind it.
+  mkdir -p "${target}/usr/sbin"
+  for bin in kldload-autodeploy; do
+    if [[ -f "/usr/sbin/${bin}" ]]; then
+      cp "/usr/sbin/${bin}" "${target}/usr/sbin/${bin}" && \
+        chmod +x "${target}/usr/sbin/${bin}" && \
+        k_log "installed /usr/sbin/${bin}"
+    else
+      k_log "WARNING: /usr/sbin/${bin} missing in live root — autodeploy will not run"
+    fi
+  done
+  for bin in kldload-console ttyd k9s; do
+    [[ -f "/usr/local/bin/${bin}" ]] && \
+      cp "/usr/local/bin/${bin}" "${target}/usr/local/bin/${bin}" && \
+      chmod +x "${target}/usr/local/bin/${bin}"
   done
   # Move management webui to port 9000 on installed systems (8080 reserved for Open WebUI)
   if [[ -f "${target}/usr/lib/systemd/system/kldload-webui.service" ]]; then
@@ -392,6 +412,17 @@ k_install_system_files() {
   # kldload-webui enabled at boot (firstboot also starts it, but enable here for robustness)
   ln -sf "/usr/lib/systemd/system/kldload-webui.service" \
     "${target}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" || true
+  # Autodeploy orchestrator — runs once after firstboot, invokes AI pull
+  # + K8s bootstrap + klab goldens in dependency order, writes phase-ready
+  # markers the UI reads to turn the Lab Ready banner green.
+  ln -sf "/usr/lib/systemd/system/kldload-autodeploy.service" \
+    "${target}/etc/systemd/system/multi-user.target.wants/kldload-autodeploy.service" || true
+  # ttyd — browser terminal (k9s + shell + logs inside a tmux session),
+  # iframe'd from the Kubernetes tab. Enable at boot so the console panel
+  # works as soon as the webui is reachable.
+  [[ -f "${target}/usr/lib/systemd/system/ttyd-k9s.service" ]] && \
+    ln -sf "/usr/lib/systemd/system/ttyd-k9s.service" \
+      "${target}/etc/systemd/system/multi-user.target.wants/ttyd-k9s.service" || true
 
   # ── Fix websockets version (CentOS 9 RPM is too old for websockets.http11) ──
   # The kldload-webui Python server requires websockets.http11 (v11+ API).
@@ -485,11 +516,55 @@ FFPOLICY
       cp /usr/local/bin/eza "${target}/usr/local/bin/eza"
       chmod +x "${target}/usr/local/bin/eza"
     fi
-    for _tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kbe krecovery kupgrade kldload-help kldload-overview kube-demo kzfs-lab kzfs-test klab klab-exporter; do
-      [[ -x "/usr/local/bin/${_tool}" ]] && \
-        cp "/usr/local/bin/${_tool}" "${target}/usr/local/bin/${_tool}" && \
-        chmod +x "${target}/usr/local/bin/${_tool}"
+    # Wholesale copy of kldload CLI tools — anything matching k* in
+    # /usr/local/bin except the installer-only helpers. This replaces the
+    # prior hand-maintained list which kept missing new tools (kldload-doctor,
+    # kldload-db, kldload-inventory, kube-setup etc. weren't in it).
+    _skip_tools="kldload-install-target kldload-overview"
+    for _src in /usr/local/bin/k*; do
+      [[ -x "$_src" ]] || continue
+      _name="$(basename "$_src")"
+      # Skip installer internals and the webui (handled separately above)
+      case " $_skip_tools kldload-webui " in *" $_name "*) continue ;; esac
+      cp "$_src" "${target}/usr/local/bin/${_name}"
+      chmod +x "${target}/usr/local/bin/${_name}"
     done
+
+    # ── Install ansible-core NOW, at install time, not first boot. ──
+    # Autodeploy + kube-cluster + klab all call ansible-playbook for
+    # provisioning. If it's missing when autodeploy fires, the first-boot
+    # orchestration dies. We install eagerly here so it's baked in.
+    # Works offline via the darksite repo — the package is listed in
+    # target-base.txt for every supported distro.
+    case "${KLDLOAD_DISTRO:-centos}" in
+      centos|rocky|rhel|fedora)
+        chroot "${target}" dnf install -y ansible-core >/dev/null 2>&1 \
+          || k_log "WARNING: ansible-core install failed — autodeploy may retry at first boot"
+        ;;
+      debian|ubuntu)
+        chroot "${target}" apt-get install -y ansible-core >/dev/null 2>&1 \
+          || k_log "WARNING: ansible-core install failed — autodeploy may retry at first boot"
+        ;;
+    esac
+    # Verify — if this fails the install is broken and should not claim success
+    if chroot "${target}" command -v ansible-playbook >/dev/null 2>&1; then
+      k_log "ansible-playbook present on target: $(chroot "${target}" ansible --version 2>&1 | head -1)"
+    else
+      k_log "WARNING: ansible-playbook MISSING on target — autodeploy will try to self-install at first boot"
+    fi
+
+    # Ship the Ansible playbook library — provision-golden, seal-golden,
+    # node-prep, kube-join, smoke-test, asahi-convert plus ansible.cfg and
+    # the default inventory. Required by kube-cluster and the Ansible tab.
+    # Silent copy failures here were the root cause of kube-cluster
+    # dying with "playbook not found" on fresh 1.0.4 installs.
+    mkdir -p "${target}/usr/local/share/kldload-ansible"
+    if [[ -d /usr/local/share/kldload-ansible ]]; then
+      cp -r /usr/local/share/kldload-ansible/. "${target}/usr/local/share/kldload-ansible/" \
+        && k_log "installed kldload-ansible ($(find /usr/local/share/kldload-ansible/playbooks -name '*.yml' 2>/dev/null | wc -l) playbooks)"
+    else
+      k_log "WARNING: /usr/local/share/kldload-ansible missing in live root — kube-cluster + Ansible tab will fail"
+    fi
     [[ -f /usr/local/sbin/adduser.local ]] && \
       cp /usr/local/sbin/adduser.local "${target}/usr/local/sbin/adduser.local" && \
       chmod +x "${target}/usr/local/sbin/adduser.local"

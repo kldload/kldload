@@ -115,3 +115,12 @@ echo "  Console: virsh console ${NAME}"
 echo "  VNC:     virsh vncdisplay ${NAME}"
 echo "  Snap:    kvm-snap ${NAME}"
 echo "  Clone:   kvm-clone ${NAME} <new-name>"
+
+# Register with kldload state DB so the dynamic Ansible inventory sees it.
+# Soft-fail — a missing kldload-db must not block a working virt-install.
+if command -v kldload-db >/dev/null 2>&1; then
+  kldload-db vm-register --name "${NAME}" --cpu "${CPUS}" --ram-gb "$(( RAM / 1024 ))" \
+    --disk-gb "${DISK}" --status "defined" 2>/dev/null || true
+  kldload-db event --type "vm" --subject "${NAME}" \
+    --message "kvm-create: ${RAM}MB / ${CPUS}vCPU / ${DISK}GB disk" 2>/dev/null || true
+fi

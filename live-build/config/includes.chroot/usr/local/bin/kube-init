@@ -139,6 +139,8 @@ install_cilium() {
     --set hubble.enabled=true \
     --set hubble.metrics.enableOpenMetrics=true \
     --set hubble.metrics.enabled="{dns,drop,tcp,flow,port-distribution,icmp,httpV2:exemplars=true;labelsContext=source_ip\,source_namespace\,source_workload\,destination_ip\,destination_namespace\,destination_workload\,traffic_direction}" \
+    --set prometheus.enabled=true \
+    --set operator.prometheus.enabled=true \
     --set operator.replicas=1 \
     --set gatewayAPI.enabled=true \
     --wait --timeout 300s \
@@ -174,6 +176,24 @@ GWCLASS
 }
 
 # ── Install MetalLB ──────────────────────────────────────────────────────
+install_metrics_server() {
+  # metrics-server powers `kubectl top` and the web UI's live CPU/memory
+  # overlays on node/pod rows. Applied from the darksite YAML if cached,
+  # else falls back to the upstream release. --kubelet-insecure-tls is
+  # required because kubelet certs are self-signed in this setup.
+  log "Installing metrics-server..."
+  local _yaml="/root/darksite/k8s-manifests/metrics-server.yaml"
+  if [[ -f "$_yaml" ]]; then
+    kubectl apply -f "$_yaml" 2>&1 | tail -3
+  else
+    kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml 2>&1 | tail -3
+  fi
+  kubectl -n kube-system patch deploy metrics-server --type=json \
+    -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]' \
+    2>/dev/null || true
+  log "metrics-server installed (powers kubectl top + web UI live stats)"
+}
+
 install_metallb() {
   log "Installing MetalLB v${METALLB_VERSION}..."
 
@@ -388,6 +408,7 @@ main() {
   install_gateway_api || warn "Gateway API install had issues (non-fatal)"
   install_metallb || warn "MetalLB install had issues — pods may still be pulling"
   install_zfs_csi || warn "ZFS CSI install had issues (non-fatal)"
+  install_metrics_server || warn "metrics-server install had issues (non-fatal)"
   generate_join_command
   deploy_sample_workload
   print_status

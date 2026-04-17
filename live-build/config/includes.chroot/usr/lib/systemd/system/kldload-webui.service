@@ -5,6 +5,12 @@ Wants=systemd-modules-load.service
 
 [Service]
 Type=simple
+# HOME is required so kubectl finds ~/.kube/config and the Ansible code
+# path resolves /root/.ansible/. Without it systemd starts services with
+# HOME unset and kubectl looks in "/" — webui sees 0 nodes even when
+# the cluster is fine.
+Environment=HOME=/root
+Environment=KUBECONFIG=/root/.kube/config
 ExecStart=/usr/local/bin/kldload-webui --port 8080 --no-browser
 Restart=on-failure
 RestartSec=5

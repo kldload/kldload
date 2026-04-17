@@ -157,10 +157,30 @@ menu() {
   echo -ne "${W}  Select: ${N}"
 }
 
+# ── CLI dispatch (headless / UI-driven) ────────────────────────
+# kvm-demo with a numeric/letter argument runs that single demo and
+# exits — lets the web UI's Demos panel invoke specific scenarios
+# without the interactive menu loop. Pause becomes a no-op so the
+# stream doesn't hang on "Press Enter".
+if [[ $# -gt 0 && "$1" != "--" ]]; then
+  case "$1" in
+    --list) echo "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 c g x q"; exit 0 ;;
+  esac
+  KVM_DEMO_TARGET="$1"
+  pause() { :; }   # disable blocking prompts
+  _ONESHOT=1
+else
+  _ONESHOT=0
+fi
+
 # ── MAIN LOOP ──────────────────────────────────────────────
 while true; do
-  menu
-  read -r c
+  if [[ "$_ONESHOT" -eq 1 ]]; then
+    c="$KVM_DEMO_TARGET"
+  else
+    menu
+    read -r c
+  fi
   case $c in
 
     # ── VM: full demo ──────────────────────────────────────
@@ -970,6 +990,7 @@ USEREOF
       pause ;;
 
     q|Q) echo ""; exit 0 ;;
-    *) ;;
+    *) [[ "$_ONESHOT" -eq 1 ]] && { echo "Unknown demo: $c"; exit 2; } ;;
   esac
+  [[ "$_ONESHOT" -eq 1 ]] && exit 0
 done

@@ -256,6 +256,86 @@ ensure_ssh_key() {
   fi
 }
 
+# ── State DB helpers ──────────────────────────────────────────────────────
+# Thin wrappers around kldload-db so missing binary is non-fatal. All of
+# these must NEVER block the bootstrap path — they're inventory hygiene,
+# not control flow. Failures go to /dev/null and the build continues.
+_db() {
+  command -v kldload-db >/dev/null 2>&1 || return 0
+  kldload-db "$@" 2>/dev/null || true
+}
+_db_register_node() {
+  # Args: hostname role ip cluster status
+  _db node-register --hostname "$1" --role "$2" --ip-mgmt "$3" \
+    --cluster "$4" --status "$5"
+}
+_db_event() {
+  # Args: type subject message
+  _db event --type "$1" --subject "$2" --message "$3"
+}
+
+# ── Ansible wrapper ───────────────────────────────────────────────────────
+# Runs a playbook from the kldload library against one or more IPs as root.
+# Falls back from key-based auth (cloud-init has already seeded ~/.ssh/
+# authorized_keys with our pubkey) to sshpass password auth for the very
+# first golden boot. ANSIBLE_CONFIG is forced to kldload's copy so roles_path
+# and callback formatting stay consistent with the web UI's Ansible tab.
+ANSIBLE_LIB="/usr/local/share/kldload-ansible"
+run_ansible_against_vm() {
+  # Args: <ip-or-comma-list> <playbook> [extra ansible args...]
+  local targets="$1" playbook="$2"; shift 2 || true
+  command -v ansible-playbook >/dev/null 2>&1 \
+    || { warn "ansible-playbook not installed on host — skipping ${playbook}"; return 1; }
+  ensure_ssh_key
+  local pb="${ANSIBLE_LIB}/playbooks/${playbook}"
+  [[ -f "$pb" ]] || { warn "playbook not found: ${pb}"; return 1; }
+
+  # Inventory: comma-separated list forces ad-hoc inventory. Trailing comma
+  # tells ansible "this is a list, not a file".
+  local inv="${targets}"
+  [[ "$inv" == *, ]] || inv="${inv},"
+
+  # Deployment ledger — only tracked for kldload-shipped playbooks. The
+  # application layer (user-uploaded content) is intentionally NOT tracked
+  # here; see project memory for the infra/app split.
+  local _dep_id=""
+  if command -v kldload-db >/dev/null 2>&1; then
+    _dep_id="$(kldload-db deploy-start \
+      --playbook "${playbook}" --cluster "${CLUSTER_NAME:-}" --target "${targets}" \
+      2>/dev/null || echo "")"
+  fi
+
+  # Prefer key auth; if it fails (first boot), retry with sshpass password.
+  local rc=0
+  ANSIBLE_CONFIG="${ANSIBLE_LIB}/ansible.cfg" \
+    ansible-playbook "$pb" \
+      -i "$inv" \
+      -u root \
+      --private-key "$SSH_KEY" \
+      -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30'" \
+      "$@" || rc=$?
+
+  if [[ $rc -ne 0 ]] && command -v sshpass >/dev/null 2>&1; then
+    log "  Ansible key-auth failed (rc=${rc}) — retrying with password auth..."
+    rc=0
+    ANSIBLE_CONFIG="${ANSIBLE_LIB}/ansible.cfg" \
+      sshpass -p kldload \
+      ansible-playbook "$pb" \
+        -i "$inv" \
+        -u root \
+        -e "ansible_password=kldload" \
+        -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no -o PreferredAuthentications=password -o ConnectTimeout=30'" \
+        "$@" || rc=$?
+  fi
+
+  # Close out the ledger row
+  if [[ -n "$_dep_id" ]]; then
+    kldload-db deploy-finish --id "$_dep_id" --rc "$rc" 2>/dev/null || true
+  fi
+  _db_event "ansible" "${playbook}" "target=${targets} rc=${rc}"
+  return $rc
+}
+
 # ── Detect Host Distro ────────────────────────────────────────────────────
 # The golden image must match the host distro so kube-setup installs the
 # correct package manager repos (dnf for CentOS/RHEL, apt for Debian/Ubuntu).
@@ -289,24 +369,39 @@ find_cloud_image() {
     done
   done
 
-  # Download cloud image matching host distro
+  # Download cloud image matching host distro AND host arch. aarch64 cloud
+  # images are published in the same layout but under arch-specific paths —
+  # we translate once and feed the right URL.
+  local host_arch _arch_rpm _arch_deb
+  host_arch="$(uname -m)"
+  case "$host_arch" in
+    aarch64|arm64) _arch_rpm="aarch64"; _arch_deb="arm64" ;;
+    *)             _arch_rpm="x86_64";  _arch_deb="amd64" ;;
+  esac
+
   local url dest
   mkdir -p /var/lib/libvirt/isos
   case "$HOST_DISTRO" in
     debian)
-      url="https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-genericcloud-amd64-daily.qcow2"
-      dest="/var/lib/libvirt/isos/debian-13-genericcloud-amd64.qcow2"
-      warn "No cloud image found. Downloading Debian 13 (Trixie)..."
+      url="https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-genericcloud-${_arch_deb}-daily.qcow2"
+      dest="/var/lib/libvirt/isos/debian-13-genericcloud-${_arch_deb}.qcow2"
+      warn "No cloud image found. Downloading Debian 13 (Trixie, ${_arch_deb})..."
       ;;
     ubuntu)
-      url="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
-      dest="/var/lib/libvirt/isos/ubuntu-24.04-cloudimg-amd64.qcow2"
-      warn "No cloud image found. Downloading Ubuntu 24.04..."
+      url="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-${_arch_deb}.img"
+      dest="/var/lib/libvirt/isos/ubuntu-24.04-cloudimg-${_arch_deb}.qcow2"
+      warn "No cloud image found. Downloading Ubuntu 24.04 (${_arch_deb})..."
+      ;;
+    fedora)
+      # Asahi hosts often pick fedora — grab Fedora Cloud's arch-appropriate qcow2.
+      url="https://download.fedoraproject.org/pub/fedora/linux/releases/41/Cloud/${_arch_rpm}/images/Fedora-Cloud-Base-Generic-41-1.4.${_arch_rpm}.qcow2"
+      dest="/var/lib/libvirt/isos/Fedora-Cloud-Base-41-${_arch_rpm}.qcow2"
+      warn "No cloud image found. Downloading Fedora 41 Cloud (${_arch_rpm})..."
       ;;
     *)
-      url="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
-      dest="/var/lib/libvirt/isos/CentOS-Stream-9-GenericCloud.qcow2"
-      warn "No cloud image found. Downloading CentOS Stream 9..."
+      url="https://cloud.centos.org/centos/9-stream/${_arch_rpm}/images/CentOS-Stream-GenericCloud-9-latest.${_arch_rpm}.qcow2"
+      dest="/var/lib/libvirt/isos/CentOS-Stream-9-GenericCloud-${_arch_rpm}.qcow2"
+      warn "No cloud image found. Downloading CentOS Stream 9 (${_arch_rpm})..."
       ;;
   esac
   curl -fSL -o "$dest" "$url" || die "Failed to download cloud image"
@@ -372,10 +467,15 @@ build_golden() {
   # fill the entire zvol so the VM has usable disk space.
   growpart "$zvol" 1 2>/dev/null || true
 
-  # Cloud-init drives the golden VM's first-boot configuration. The ISO
-  # (labeled "cidata") is attached as a virtual CDROM — cloud-init's NoCloud
-  # datasource auto-detects it by volume label and applies the config.
-  log "Creating cloud-init configuration..."
+  # Cloud-init does the absolute minimum needed to reach SSH:
+  #   1. Set hostname
+  #   2. Unlock root + set password to kldload
+  #   3. Authorise our SSH key
+  #   4. Make sshd accept password + root logins
+  # That's it. Everything else (firewall, kube-setup, sealing) is handled
+  # from the host via Ansible — which is idempotent, observable, and does
+  # not suffer from cloud-init's per-distro bootcmd/runcmd ordering quirks.
+  log "Creating minimal cloud-init configuration..."
   local ci_dir
   ci_dir="$(mktemp -d)"
 
@@ -391,22 +491,20 @@ manage_etc_hosts: true
 disable_root: false
 ssh_pwauth: true
 package_update: false
-bootcmd:
-  - echo 'root:kldload' | chpasswd
-  - passwd -uf root 2>/dev/null || true
-  - mkdir -p /etc/ssh/sshd_config.d
-  - echo -e 'PermitRootLogin yes\nPasswordAuthentication yes' > /etc/ssh/sshd_config.d/99-klab.conf
-  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
-  - touch /var/lib/cloud/instance/kube-golden-ready
+package_upgrade: false
+chpasswd:
+  expire: false
+  list: |
+    root:kldload
 ssh_authorized_keys:
   - ${pubkey}
-runcmd:
-  - systemctl stop firewalld 2>/dev/null || true
-  - systemctl disable firewalld 2>/dev/null || true
-  - systemctl mask firewalld 2>/dev/null || true
-  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+bootcmd:
+  # Kill firewalld/ufw FIRST so port 22 is open as soon as sshd starts —
+  # otherwise wait_for_ssh times out before runcmd even runs.
+  - [ sh, -c, "systemctl stop firewalld 2>/dev/null; systemctl disable firewalld 2>/dev/null; systemctl mask firewalld 2>/dev/null; true" ]
+  - [ sh, -c, "systemctl stop ufw 2>/dev/null; systemctl disable ufw 2>/dev/null; ufw --force disable 2>/dev/null; true" ]
+  - [ sh, -c, "passwd -uf root 2>/dev/null || true" ]
+  - [ sh, -c, "mkdir -p /etc/ssh/sshd_config.d && printf 'PermitRootLogin yes\\nPasswordAuthentication yes\\n' > /etc/ssh/sshd_config.d/99-kldload.conf" ]
 USERDATA
 
   # Network config matches both naming conventions: Debian uses predictable
@@ -465,107 +563,20 @@ NETCFG
   log "Waiting for SSH..."
   wait_for_ssh "$golden_ip" 90 || die "SSH not available on golden VM"
 
-  # Wait for cloud-init to finish all runcmd stages. The sentinel file
-  # kube-golden-ready is created as the last runcmd step in user-data above.
-  # This ensures SSH config changes and package installs have completed
-  # before we run kube-setup. Timeout: 5 minutes (60 * 5s).
-  log "Waiting for cloud-init..."
-  for _ in $(seq 1 60); do
-    _ssh_cmd "$golden_ip" "test -f /var/lib/cloud/instance/kube-golden-ready" && break
-    sleep 5
-  done
+  # Hand off to Ansible. provision-golden.yml does everything that cloud-init
+  # runcmd used to do — disable firewall, harden sshd, copy kube-* tools,
+  # run kube-setup, write the ready marker. It is idempotent and distro-aware
+  # (Ansible's os_family detection handles CentOS/Debian/Ubuntu branches).
+  log "Running Ansible provision-golden against ${golden_ip}..."
+  run_ansible_against_vm "$golden_ip" provision-golden.yml \
+    || die "ansible provision-golden failed"
+  log "  provision-golden complete — kubeadm, helm, cilium-cli installed"
 
-  # Copy the kldload K8s toolchain into the golden VM. These scripts handle
-  # kubeadm init/join, Cilium install, WireGuard mesh, etc. They're baked
-  # into the golden image so every clone inherits them — no SCP at clone time.
-  log "Copying kube tools to golden VM..."
-  # Retry SCP up to 5 times — cloud-init may still be configuring SSH
-  local _scp_ok=0
-  for _attempt in 1 2 3 4 5; do
-    if sshpass -p kldload scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-        "/usr/local/bin/kube-setup" "root@${golden_ip}:/usr/local/bin/kube-setup" 2>/dev/null; then
-      _scp_ok=1; break
-    fi
-    # Also try with SSH key
-    if [[ -f "$SSH_KEY" ]]; then
-      scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY" \
-        "/usr/local/bin/kube-setup" "root@${golden_ip}:/usr/local/bin/kube-setup" 2>/dev/null && { _scp_ok=1; break; }
-    fi
-    log "  SCP attempt ${_attempt} failed — retrying in 10s..."
-    sleep 10
-  done
-  [[ $_scp_ok -eq 1 ]] || die "Cannot copy kube-setup to golden VM at ${golden_ip}"
-  # Copy remaining tools
-  for _tool in kube-init kube-join kube-network kube-status kube-reset kube-smoke-test kube-load-images; do
-    sshpass -p kldload scp -o StrictHostKeyChecking=no \
-      "/usr/local/bin/${_tool}" "root@${golden_ip}:/usr/local/bin/${_tool}" 2>/dev/null || true
-  done
-
-  _ssh_cmd "$golden_ip" "chmod +x /usr/local/bin/kube-*"
-  # Verify kube-setup exists before proceeding
-  _ssh_cmd "$golden_ip" "test -x /usr/local/bin/kube-setup" || die "kube-setup not found on golden VM after copy"
-  # Cloud-init may have DHCP but DNS resolution can lag behind — the 10s
-  # pause lets systemd-resolved/NetworkManager finish before kube-setup
-  # tries to reach package repos (kubernetes.io, docker.io, etc.)
-  # Sleep locally — running via SSH times out (ServerAliveInterval < sleep).
-  sleep 10
-  # kube-setup installs kubeadm, kubelet, containerd, helm, cilium-cli, etc.
-  # Run via nohup inside the VM and poll for completion — avoids SSH timeout
-  # during long package downloads. Output goes to /tmp/kube-setup.log in the VM.
-  log "Running kube-setup in golden VM (background + polling)..."
-  _ssh_cmd "$golden_ip" "nohup kube-setup > /tmp/kube-setup.log 2>&1 &"
-  # Poll for completion: check if kube-setup process is still running
-  local _setup_wait=0
-  while _ssh_cmd "$golden_ip" "pgrep -f kube-setup" >/dev/null 2>&1; do
-    ((_setup_wait++))
-    if ((_setup_wait % 10 == 0)); then
-      local _last; _last="$(_ssh_cmd "$golden_ip" "tail -1 /tmp/kube-setup.log 2>/dev/null" 2>/dev/null || echo "...")"
-      log "  kube-setup running (${_setup_wait}0s)... ${_last}"
-    fi
-    if ((_setup_wait > 120)); then  # 20 min max
-      die "kube-setup timed out after 20 minutes"
-    fi
-    sleep 10
-  done
-  # Check exit status
-  local _setup_rc; _setup_rc="$(_ssh_cmd "$golden_ip" "cat /tmp/kube-setup.rc 2>/dev/null || echo 1" 2>/dev/null)"
-  # kube-setup doesn't write .rc — check if kubeadm got installed
-  if ! _ssh_cmd "$golden_ip" "command -v kubeadm" >/dev/null 2>&1; then
-    warn "kube-setup may have failed — kubeadm not found. Retrying..."
-    _ssh_cmd "$golden_ip" "nohup kube-setup > /tmp/kube-setup.log 2>&1 &"
-    _setup_wait=0
-    while _ssh_cmd "$golden_ip" "pgrep -f kube-setup" >/dev/null 2>&1; do
-      ((_setup_wait++)); sleep 10
-      if ((_setup_wait > 120)); then die "kube-setup retry timed out"; fi
-    done
-    _ssh_cmd "$golden_ip" "command -v kubeadm" >/dev/null 2>&1 || die "kube-setup failed in golden VM"
-  fi
-  log "  kube-setup complete — kubeadm installed"
-
-  # Seal the golden image for cloning. This is critical — without it, every
-  # clone would have the same machine-id, hostname, and cloud-init instance-id,
-  # causing systemd journal collisions, DHCP conflicts, and cloud-init refusing
-  # to re-run (it thinks it already ran for this instance).
-  #
-  # What we clear:
-  #   - cloud-init state: so clones re-run cloud-init with their own ISO
-  #   - machine-id: systemd regenerates a unique one on next boot
-  #   - hostname: cloud-init sets it from the clone's meta-data
-  # What we keep:
-  #   - SSH host keys: clones regenerate them via cloud-init runcmd (see
-  #     clone_and_boot's user-data which runs dpkg-reconfigure/ssh-keygen -A)
-  #   - K8s packages: the whole point — clones inherit them instantly
-  log "Sealing golden image for cloning..."
-  # Batch all seal commands into one SSH call — CentOS sshd rate-limits rapid
-  # connections, causing individual _ssh_cmd calls to fail after 3-4 in a row.
-  _ssh_cmd "$golden_ip" "
-    cloud-init clean --logs 2>/dev/null || true
-    rm -f /etc/machine-id; touch /etc/machine-id
-    truncate -s 0 /etc/hostname
-    rm -f /etc/netplan/*.yaml 2>/dev/null || true
-    rm -f /var/lib/cloud/seed/nocloud-net/* 2>/dev/null || true
-    systemctl enable cloud-init-local cloud-init cloud-config cloud-final 2>/dev/null || true
-  "
+  # Seal via Ansible as well. One SSH transport, one idempotent playbook,
+  # no per-command sshd rate-limit grief from CentOS.
+  log "Sealing golden image for cloning (Ansible)..."
+  run_ansible_against_vm "$golden_ip" seal-golden.yml \
+    || die "ansible seal-golden failed"
 
   # Shut down
   _ssh_cmd "$golden_ip" "shutdown -h now" || true
@@ -662,36 +673,22 @@ disable_root: false
 ssh_pwauth: true
 ssh_authorized_keys:
   - ${pubkey}
-users:
-  - default
-  - name: root
-    lock_passwd: false
-    ssh_authorized_keys:
-      - ${pubkey}
 chpasswd:
   expire: false
-  users:
-    - name: root
-      password: kldload
-      type: text
-runcmd:
-  # Generate unique machine-id — clones inherit empty one from golden seal.
-  # Must happen before anything else to avoid DBUS/journal conflicts.
-  - rm -f /etc/machine-id
-  - systemd-machine-id-setup
-  # Regenerate SSH host keys — clones inherited the golden's keys.
-  - rm -f /etc/ssh/ssh_host_*
-  - ssh-keygen -A
-  - dpkg-reconfigure openssh-server 2>/dev/null || true
-  # Harden sshd for cluster use: allow root, password auth, raise MaxStartups
-  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#*MaxStartups.*/MaxStartups 20:30:60/' /etc/ssh/sshd_config
-  - |
-    if ! grep -q '^MaxStartups' /etc/ssh/sshd_config; then
-      echo 'MaxStartups 20:30:60' >> /etc/ssh/sshd_config
-    fi
-  - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+  list: |
+    root:kldload
+bootcmd:
+  # Minimum viable first-boot: regenerate unique identity and unlock SSH.
+  # Firewall kill MUST be first — sshd comes up after these commands so
+  # port 22 is open from the instant sshd binds. Everything else (kernel
+  # sysctls, br_netfilter, swap off, kube-* install) is done by Ansible
+  # node-prep.yml from the host.
+  - [ sh, -c, "systemctl stop firewalld 2>/dev/null; systemctl mask firewalld 2>/dev/null; true" ]
+  - [ sh, -c, "systemctl stop ufw 2>/dev/null; ufw --force disable 2>/dev/null; true" ]
+  - [ sh, -c, "rm -f /etc/machine-id && systemd-machine-id-setup" ]
+  - [ sh, -c, "rm -f /etc/ssh/ssh_host_* && ssh-keygen -A" ]
+  - [ sh, -c, "passwd -uf root 2>/dev/null || true" ]
+  - [ sh, -c, "mkdir -p /etc/ssh/sshd_config.d && printf 'PermitRootLogin yes\\nPasswordAuthentication yes\\nMaxStartups 20:30:60\\n' > /etc/ssh/sshd_config.d/99-kldload.conf" ]
 USERDATA
 
     cat > "${ci_dir}/network-config" <<NETCFG
@@ -773,8 +770,11 @@ cmd_bootstrap() {
     virsh undefine "$vm" --nvram 2>/dev/null || virsh undefine "$vm" 2>/dev/null || true
     rm -f "/var/lib/libvirt/isos/${vm}-ci.iso" "/var/lib/libvirt/isos/${vm}-cloud-init.iso" 2>/dev/null
   done
-  # Nuke all cluster zvols — -Rf handles snapshots and dependent clones
-  for ds in $(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null | grep -vE "^${POOL}/vms$|/isos$" || true); do
+  # Nuke ONLY this cluster's zvols — match the cluster prefix + golden name.
+  # Previous version nuked every zvol under rpool/vms, taking out klab goldens
+  # and any other non-kube VMs. -Rf handles snapshots and dependent clones.
+  for ds in $(zfs list -H -o name -r "${POOL}/vms" 2>/dev/null \
+              | grep -E "^${POOL}/vms/(${CLUSTER_NAME}-|${GOLDEN}\$)" || true); do
     zfs destroy -Rf "$ds" 2>/dev/null || true
   done
   # Clean host state
@@ -785,6 +785,11 @@ cmd_bootstrap() {
   sed -i '/# kldload-k8s-cluster/,/# end-kldload-k8s-cluster/d' /etc/hosts 2>/dev/null || true
   systemctl start sanoid.timer 2>/dev/null || true
   step_done "Clean slate"
+
+  # Register the cluster in the state DB. This is the anchor every node and
+  # deployment will link to — created first so later upserts can reference it.
+  _db cluster-upsert --name "${CLUSTER_NAME}" --status "bootstrapping"
+  _db_event "cluster" "${CLUSTER_NAME}" "bootstrap started (${WORKERS} workers)"
 
   step 1 "Golden Image"
   build_golden
@@ -824,17 +829,46 @@ cmd_bootstrap() {
   done
   log "All nodes reachable via SSH"
 
-  # Clones inherit the golden's empty hostname. Set unique hostnames now so
-  # kubelet registers each node with the correct name. Also regenerate
-  # machine-id (systemd uses it for journal dedup, DHCP client-id, etc.)
-  # and restart networkd to pick up the new machine-id for DHCP.
-  log "Setting unique hostnames..."
-  _ssh_cmd "$cp_ip" "hostnamectl set-hostname ${CP_NAME}; systemd-machine-id-setup 2>/dev/null; systemctl restart systemd-networkd 2>/dev/null || true"
+  # Populate the state DB now that IPs are known and reachable. Dynamic
+  # inventory picks these rows up immediately, so subsequent Ansible runs
+  # can target "cluster:${CLUSTER_NAME}" or "role:control_plane" by name
+  # instead of pasting IPs.
+  _db_register_node "${CP_NAME}" "control_plane" "${cp_ip}" "${CLUSTER_NAME}" "ready"
   for i in $(seq 0 $((WORKERS-1))); do
     [[ -n "${worker_ips[$i]}" ]] || continue
-    _ssh_cmd "${worker_ips[$i]}" "hostnamectl set-hostname ${worker_names[$i]}; systemd-machine-id-setup 2>/dev/null; systemctl restart systemd-networkd 2>/dev/null || true"
+    _db_register_node "${worker_names[$i]}" "worker" "${worker_ips[$i]}" "${CLUSTER_NAME}" "ready"
   done
-  log "Hostnames set"
+  _db_event "cluster" "${CLUSTER_NAME}" "all nodes booted and reachable"
+
+  # Run node-prep.yml against every clone in parallel. This handles the work
+  # that cloud-init runcmd used to do per-node: unique hostname, regenerated
+  # SSH host keys / machine-id, br_netfilter/overlay modules, K8s sysctls,
+  # swap off. Ansible's os_family detection takes care of CentOS vs Debian.
+  log "Running Ansible node-prep against all clones..."
+  local _all_ips="${cp_ip}"
+  for i in $(seq 0 $((WORKERS-1))); do
+    [[ -n "${worker_ips[$i]}" ]] || continue
+    _all_ips="${_all_ips},${worker_ips[$i]}"
+  done
+  # Per-host variables: set inventory_hostname so node-prep can assign unique
+  # hostnames. host_vars get built as --extra-vars in a JSON blob.
+  local _host_vars="{\"${cp_ip}\":{\"inventory_hostname_short\":\"${CP_NAME}\"}"
+  for i in $(seq 0 $((WORKERS-1))); do
+    [[ -n "${worker_ips[$i]}" ]] || continue
+    _host_vars+=",\"${worker_ips[$i]}\":{\"inventory_hostname_short\":\"${worker_names[$i]}\"}"
+  done
+  _host_vars+="}"
+  # Ansible doesn't read per-host JSON from --extra-vars natively, so we
+  # fall back to running the playbook once per host with a targeted extra.
+  run_ansible_against_vm "$cp_ip" node-prep.yml -e "inventory_hostname_short=${CP_NAME}" \
+    || warn "node-prep failed on ${CP_NAME} — continuing"
+  for i in $(seq 0 $((WORKERS-1))); do
+    [[ -n "${worker_ips[$i]}" ]] || continue
+    run_ansible_against_vm "${worker_ips[$i]}" node-prep.yml \
+      -e "inventory_hostname_short=${worker_names[$i]}" \
+      || warn "node-prep failed on ${worker_names[$i]} — continuing"
+  done
+  log "node-prep complete across ${_all_ips//,/ + }"
 
   # Step 3: WireGuard mesh
   # Two WireGuard interfaces per node form independent encrypted planes:
@@ -988,6 +1022,17 @@ cmd_bootstrap() {
   _ssh_cmd "$cp_ip" "hubble observe --last 20 2>/dev/null" || true
   echo ""
   echo -e "${G}Run 'hubble observe --follow' on the CP for live streaming.${N}"
+
+  # Mark cluster + nodes ready in the state DB. This is the "good" terminal
+  # state — further Ansible runs will land against role:control_plane /
+  # role:worker groups from the dynamic inventory.
+  _db cluster-upsert --name "${CLUSTER_NAME}" --status "ready"
+  _db node-status --hostname "${CP_NAME}" --status "ready"
+  for i in $(seq 0 $((WORKERS-1))); do
+    [[ -n "${worker_ips[$i]}" ]] || continue
+    _db node-status --hostname "${worker_names[$i]}" --status "ready"
+  done
+  _db_event "cluster" "${CLUSTER_NAME}" "bootstrap complete"
 
   # Final status
   echo ""

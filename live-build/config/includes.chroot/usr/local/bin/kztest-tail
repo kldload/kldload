@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# kztest-tail — follow the latest ZFS test run's consolidated log.
+# klab writes full.log into /root/klab/<run-id>/ and symlinks
+# /root/klab/latest → the newest run. This script tails that symlink
+# (or waits for a run to appear) so you can watch the whole suite from
+# any shell pane. Perfect companion to "klab test --full".
+set -u
+latest="/root/klab/latest"
+echo "── kztest-tail — following ${latest}/full.log ──"
+if [[ ! -L "$latest" && ! -d "$latest" ]]; then
+    echo "waiting for a test run to start..."
+    while [[ ! -e "${latest}/full.log" ]]; do sleep 2; done
+fi
+# -F follows across rotation, -n0 starts from current EOF (no scroll
+# through megabytes of old history). --retry survives the symlink
+# being updated mid-run if klab rotates it.
+exec tail --follow=name --retry -n 0 "${latest}/full.log"
