@@ -92,6 +92,11 @@ if command -v kubectl >/dev/null 2>&1 && [[ -r /root/.kube/config || -n "${KUBEC
     export KUBECONFIG="${KUBECONFIG:-/root/.kube/config}"
     # Robust-to-timeout: single get-nodes call, parse locally.
     _nodes_raw="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{","}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' 2>/dev/null)"
+    # Resolve the single node where cilium-operator currently runs. The
+    # operator is a Deployment with replicas=1; scraping all nodes on 9963
+    # leaves 3 of 4 targets permanently DOWN and the Grafana dashboard
+    # looks empty on every panel that aggregates across targets.
+    _operator_node="$(kubectl -n kube-system get pod -l io.cilium/app=operator -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null)"
     cilium_agent='['    ; _first_ca=1
     cilium_operator='['; _first_co=1
     hubble='['         ; _first_hb=1
@@ -112,8 +117,13 @@ if command -v kubectl >/dev/null 2>&1 && [[ -r /root/.kube/config || -n "${KUBEC
         [[ -z "$name" || -z "$ip" ]] && continue
         # cilium-agent
         _append cilium_agent    _first_ca "$(printf '{"targets":["%s:9962"],"labels":{"k8s_app":"cilium","pod":"cilium-%s","node":"%s"}}' "$ip" "$name" "$name")"
-        # cilium-operator (hostPort, only on the node running the operator — but include all, down ones will just be DOWN)
-        _append cilium_operator _first_co "$(printf '{"targets":["%s:9963"],"labels":{"k8s_app":"cilium-operator","io_cilium_app":"operator","node":"%s"}}' "$ip" "$name")"
+        # cilium-operator — emit only for the node the operator pod is
+        # scheduled on. Fall back to every node if kubectl couldn't tell
+        # us (early boot) so a freshly bootstrapped cluster still shows
+        # something once the scheduler places the operator.
+        if [[ -z "$_operator_node" || "$_operator_node" == "$name" ]]; then
+            _append cilium_operator _first_co "$(printf '{"targets":["%s:9963"],"labels":{"k8s_app":"cilium-operator","io_cilium_app":"operator","node":"%s"}}' "$ip" "$name")"
+        fi
         # hubble metrics
         _append hubble          _first_hb "$(printf '{"targets":["%s:9965"],"labels":{"k8s_app":"cilium","pod":"cilium-%s","node":"%s"}}' "$ip" "$name" "$name")"
         # tetragon
