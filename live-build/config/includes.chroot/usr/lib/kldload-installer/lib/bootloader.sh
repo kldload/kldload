@@ -313,76 +313,146 @@ EOFSTAB
   #   that chainloads ZFSBootMenu from \EFI\zbm\. This only works without
   #   Secure Boot (unsigned ZFSBootMenu can't be verified).
 
-  local _zbm_signed="${zbm_efi_dir}/BOOTX64.EFI"
-  local _zbm_is_signed=0
-  if [[ -f "$mok_key" && -f "$mok_pub" ]] && command -v sbverify >/dev/null 2>&1; then
-    sbverify --cert "$mok_pub" "$_zbm_signed" >&7 2>&1 && _zbm_is_signed=1
+  # ── Secure-Boot-compatible boot path: distro-signed GRUB → CentOS kernel ──
+  # Prior versions made MOK-signed ZFSBootMenu THE grubx64.efi that shim
+  # loads. That broke on CentOS shim v15.8 with "Verification failed":
+  # shim's SBAT enforcement (SbatLevelRT=sbat,1,2021030218) rejects ZBM
+  # regardless of MOK enrollment because ZBM's embedded .sbat section
+  # declares only systemd-stub components, not a shim-trust entry.
+  #
+  # The reliable SB path:
+  #   shim (MS-signed) → distro GRUB (CentOS/Rocky/Fedora-signed, in db) →
+  #   distro kernel (signed) → zfs.ko (MOK-signed, MOK enrolled)
+  #
+  # To let GRUB load the kernel/initramfs without a grub-zfs module on the
+  # ESP (grub2-efi-x64-modules isn't shipped by default and building a
+  # custom signed grubx64.efi would break the signing chain), we copy
+  # vmlinuz + initramfs to the FAT32 ESP and point grub.cfg at them with
+  # plain paths. GRUB's built-in FAT driver handles this; no zfs.mod
+  # required. A kernel-install hook keeps them in sync after yum updates.
+  #
+  # ZBM stays at /EFI/zbm/BOOTX64.EFI — MOK-signed for non-SB boots (user
+  # can also try it under SB via firmware boot menu; MokManager confirms).
+  # Boot env selection via ZBM remains available; it's just not the
+  # primary SB path.
+  local signed_grub=""
+  for _sg in "${target}/boot/efi/EFI/centos/grubx64.efi" \
+             "${target}/boot/efi/EFI/rocky/grubx64.efi" \
+             "${target}/boot/efi/EFI/fedora/grubx64.efi" \
+             "${target}/boot/efi/EFI/redhat/grubx64.efi" \
+             "${target}/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed" \
+             "${target}/usr/lib/grub/x86_64-efi/monolithic/grubx64.efi"; do
+    if [[ -f "$_sg" ]]; then signed_grub="$_sg"; break; fi
+  done
+
+  if [[ -n "$signed_grub" ]]; then
+    cp "$signed_grub" "${zbm_fallback_dir}/grubx64.efi"
+    k_log "Distro-signed GRUB installed as \\EFI\\BOOT\\grubx64.efi (source: ${signed_grub})"
+  else
+    # Truly no distro grub on the target — fall back to unsigned ZBM as
+    # grubx64.efi. SB will refuse; user has to disable SB to boot.
+    cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_fallback_dir}/grubx64.efi"
+    k_log "WARNING: no distro-signed GRUB on target — ZBM installed as grubx64.efi (SB won't work)"
   fi
 
-  if [[ "$_zbm_is_signed" -eq 1 ]]; then
-    # MOK-signed ZFSBootMenu — install as grubx64.efi so shim loads it directly.
-    # Shim verifies against MOK → no GRUB chainloader needed → no security violation.
-    cp "$_zbm_signed" "${zbm_fallback_dir}/grubx64.efi"
-    cp "$_zbm_signed" "${zbm_efi_dir}/grubx64.efi"
-    k_log "MOK-signed ZFSBootMenu installed as grubx64.efi (shim → ZFSBootMenu direct, Secure Boot ready)"
-
-    # Also install distro-signed GRUB as a recovery option at \EFI\zbm\grub-recovery.efi
-    for _sg in "${target}/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed" \
-               "${target}/boot/efi/EFI/centos/grubx64.efi" \
-               "${target}/boot/efi/EFI/rocky/grubx64.efi" \
-               "${target}/boot/efi/EFI/fedora/grubx64.efi" \
-               "${target}/boot/efi/EFI/redhat/grubx64.efi"; do
-      if [[ -f "$_sg" ]]; then
-        cp "$_sg" "${zbm_efi_dir}/grub-recovery.efi"
-        k_log "Distro-signed GRUB saved as recovery: ${zbm_efi_dir}/grub-recovery.efi"
-        break
-      fi
-    done
-  else
-    # No MOK signing — fall back to distro-signed GRUB with chainloader config.
-    # This only works without Secure Boot (GRUB chainloader can't verify MOK-signed binaries).
-    k_log "ZFSBootMenu is unsigned — using GRUB chainloader (Secure Boot requires MOK signing)"
-    local signed_grub=""
-    for _sg in "${target}/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed" \
-               "${target}/boot/efi/EFI/centos/grubx64.efi" \
-               "${target}/boot/efi/EFI/rocky/grubx64.efi" \
-               "${target}/boot/efi/EFI/fedora/grubx64.efi" \
-               "${target}/boot/efi/EFI/redhat/grubx64.efi"; do
-      if [[ -f "$_sg" ]]; then signed_grub="$_sg"; break; fi
-    done
-
-    if [[ -n "$signed_grub" ]]; then
-      cp "$signed_grub" "${zbm_efi_dir}/grubx64.efi"
-      cp "$signed_grub" "${zbm_fallback_dir}/grubx64.efi"
-      k_log "Distro-signed GRUB installed as grubx64.efi (source: ${signed_grub})"
+  # Copy kernel + initramfs to the ESP so GRUB can boot without zfs.mod.
+  local _kver _kpath _ipath _zfs_root
+  _kver="$(ls "${target}/boot" 2>/dev/null | grep -oP '^vmlinuz-\K[^ ]+' | sort -V | tail -1 || true)"
+  _zfs_root="$(zfs list -H -o name,mountpoint 2>/dev/null | awk '$2=="/"{print $1; exit}')"
+  if [[ -z "$_zfs_root" ]]; then
+    _zfs_root="$(zfs list -H -o name 2>/dev/null | grep -E 'ROOT/[^/]+$' | head -1)"
+  fi
+  if [[ -n "$_kver" ]]; then
+    _kpath="${target}/boot/vmlinuz-${_kver}"
+    _ipath="${target}/boot/initramfs-${_kver}.img"
+    [[ -f "$_ipath" ]] || _ipath="${target}/boot/initrd.img-${_kver}"
+    if [[ -f "$_kpath" && -f "$_ipath" ]]; then
+      mkdir -p "${zbm_fallback_dir}"
+      cp "$_kpath" "${zbm_fallback_dir}/vmlinuz"
+      cp "$_ipath" "${zbm_fallback_dir}/initrd.img"
+      k_log "Kernel + initramfs copied to \\EFI\\BOOT\\ (kver=${_kver}, root=${_zfs_root:-rpool/ROOT/default})"
     else
-      cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_efi_dir}/grubx64.efi"
-      cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_fallback_dir}/grubx64.efi"
-      k_log "WARNING: No distro-signed GRUB found — ZFSBootMenu used as grubx64.efi"
+      k_log "WARNING: kernel or initramfs not found on target — SB boot won't work"
     fi
+  fi
 
-    # GRUB chainloader config — written to all paths GRUB might search.
-    local _efi_fs_uuid
-    _efi_fs_uuid="$(blkid -s UUID -o value "${efi_part}" 2>/dev/null || true)"
-    for _gcfg_dir in "${zbm_efi_dir}/grub" "${zbm_fallback_dir}/grub" \
-                     "${zbm_efi_dir}" "${zbm_fallback_dir}" \
-                     "${target}/boot/efi/grub" "${target}/boot/grub" \
-                     "${target}/boot/efi/EFI/centos" "${target}/boot/efi/EFI/rocky" \
-                     "${target}/boot/efi/EFI/fedora" "${target}/boot/efi/EFI/redhat" \
-                     "${target}/boot/efi/EFI/debian" \
-                     "${target}/boot/efi/EFI/ubuntu"; do
-      [[ -d "$(dirname "$_gcfg_dir")" ]] || continue
-      mkdir -p "$_gcfg_dir" 2>/dev/null || true
-      cat > "${_gcfg_dir}/grub.cfg" <<CHAINGRUB
-search --no-floppy --fs-uuid --set=root ${_efi_fs_uuid}
-set timeout=1
-menuentry "ZFSBootMenu" {
+  # Write grub.cfg at both paths the distro GRUB might look for:
+  # CentOS/Rocky/Fedora grubx64.efi is built with prefix \EFI\<vendor>\,
+  # so it reads \EFI\<vendor>\grub.cfg first. The copy we installed at
+  # \EFI\BOOT\grubx64.efi keeps that embedded prefix, so it ALSO reads
+  # \EFI\centos\grub.cfg (or rocky/fedora). Write both dirs' grub.cfg to
+  # the same content so whichever path runs, the menu shows up.
+  local _grub_cfg=""
+  read -r -d '' _grub_cfg <<GRUBCFG || true
+# kldload — auto-generated at install time
+set timeout=5
+set default=0
+
+menuentry "kldload — ${KLDLOAD_DISTRO:-linux} kernel ${_kver:-unknown}" --id=kldload {
+    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro rhgb quiet spl_hostid=\${spl_hostid}
+    initrd /EFI/BOOT/initrd.img
+}
+
+menuentry "ZFSBootMenu (boot-env selector)" --id=zbm {
     chainloader /EFI/zbm/BOOTX64.EFI
 }
-CHAINGRUB
-    done
-    k_log "GRUB chainloader config installed (EFI UUID: ${_efi_fs_uuid})"
-  fi
+
+menuentry "kldload — rescue (single-user)" --id=rescue {
+    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro single
+    initrd /EFI/BOOT/initrd.img
+}
+GRUBCFG
+
+  for _gcfg_dir in "${target}/boot/efi/EFI/centos" \
+                   "${target}/boot/efi/EFI/rocky" \
+                   "${target}/boot/efi/EFI/fedora" \
+                   "${target}/boot/efi/EFI/redhat" \
+                   "${target}/boot/efi/EFI/debian" \
+                   "${target}/boot/efi/EFI/ubuntu" \
+                   "${zbm_fallback_dir}"; do
+    if [[ -d "$_gcfg_dir" ]]; then
+      printf '%s\n' "$_grub_cfg" > "${_gcfg_dir}/grub.cfg"
+    fi
+  done
+  k_log "grub.cfg installed — direct kernel boot (no ZFS grub module needed)"
+
+  # Keep ZBM at \EFI\zbm\ as an alternate boot target; don't promote it to
+  # grubx64.efi any more (causes SBAT rejection under CentOS shim).
+  k_log "ZFSBootMenu kept at \\EFI\\zbm\\BOOTX64.EFI for non-SB / MOK-chain use"
+
+  # Install a kernel-install hook so the ESP copies stay in sync when
+  # yum/dnf/apt upgrades the kernel. Without this the ESP boots a stale
+  # kernel after the first kernel update.
+  mkdir -p "${target}/etc/kernel/install.d"
+  cat > "${target}/etc/kernel/install.d/99-kldload-esp.install" <<'ESPHOOK'
+#!/bin/bash
+# kldload — copy new kernel + initramfs to the ESP so the SB GRUB path
+# (grubx64.efi + /EFI/BOOT/vmlinuz + /EFI/BOOT/initrd.img) boots the
+# latest kernel instead of the install-time one. Runs for every
+# add/remove kernel event from kernel-install(8) and systemd's dkms hooks.
+set -e
+COMMAND="${1:-}"
+KVER="${2:-}"
+ESP=/boot/efi/EFI/BOOT
+[[ -d "$ESP" ]] || exit 0
+case "$COMMAND" in
+    add)
+        [[ -f /boot/vmlinuz-"$KVER" ]]                         && cp -f /boot/vmlinuz-"$KVER"           "$ESP/vmlinuz"
+        [[ -f /boot/initramfs-"$KVER".img ]]                   && cp -f /boot/initramfs-"$KVER".img     "$ESP/initrd.img"
+        [[ -f /boot/initrd.img-"$KVER" ]]                      && cp -f /boot/initrd.img-"$KVER"        "$ESP/initrd.img"
+        ;;
+    remove)
+        # If this was the kernel whose initramfs lives on ESP, point back
+        # at the newest remaining one.
+        newest="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)"
+        [[ -n "$newest" ]] && cp -f "$newest" "$ESP/vmlinuz"
+        newer_ir="$(ls -1 /boot/initramfs-*.img /boot/initrd.img-* 2>/dev/null | sort -V | tail -1)"
+        [[ -n "$newer_ir" ]] && cp -f "$newer_ir" "$ESP/initrd.img"
+        ;;
+esac
+ESPHOOK
+  chmod 0755 "${target}/etc/kernel/install.d/99-kldload-esp.install"
+  k_log "Kernel-install ESP sync hook installed (keeps /EFI/BOOT/vmlinuz fresh on kernel updates)"
 
   # Backup copy is always unsigned — used if the signed copy is corrupted.
   # The user can manually re-sign it with: sbsign --key mok.key --cert mok.pub ...
