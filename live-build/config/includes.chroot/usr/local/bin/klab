@@ -581,12 +581,27 @@ dnf install -y bpftrace bcc-tools wireguard-tools curl jq 2>/dev/null || true
 # nfs-utils (exportfs/nfs tests), bzip2 (bunzip2/bzcat used in log
 # compression tests), xxhash (xxh128sum checksum tests), util-linux
 # (pax equivalents). pamtester is rarely packaged; optional.
+#
+# Install per-package. Batching everything in one `dnf install` caused
+# the whole transaction to abort (leaving ~everything uninstalled) the
+# moment a single pkg was missing from the enabled repos — e.g. xxhash
+# isn't in CentOS 9 base, so gdb/strace/net-tools etc. all vanished
+# silently under the `|| true`. perf comes from kernel-tools on the
+# rpm-based distros.
 if [ "$KLAB_ZFS_DEV" = "1" ]; then
-  dnf install -y ksh fio parted attr bc acl sysstat \
-    gdb strace perf openssl-devel zlib-devel \
-    libuuid-devel libblkid-devel libtirpc-devel \
-    net-tools nfs-utils cryptsetup bzip2 xxhash python3 \
-    util-linux 2>/dev/null || true
+  # perf actually lives in kernel-tools on RHEL/CentOS/Rocky/Fedora
+  for _p in ksh fio parted attr bc acl sysstat \
+            gdb strace kernel-tools openssl-devel zlib-devel \
+            libuuid-devel libblkid-devel libtirpc-devel \
+            net-tools nfs-utils cryptsetup bzip2 xxhash python3 \
+            util-linux pamtester; do
+    dnf install -y "$_p" 2>/dev/null || true
+  done
+  # xxhash may require EPEL — enable and retry if still missing on EL9
+  if ! command -v xxh128sum >/dev/null 2>&1 && ! rpm -q xxhash >/dev/null 2>&1; then
+    dnf install -y epel-release 2>/dev/null || true
+    dnf install -y xxhash 2>/dev/null || true
+  fi
 fi
 
 # Load ZFS module
@@ -677,11 +692,20 @@ apt-get install -y bpftrace bpfcc-tools wireguard-tools curl jq 2>/dev/null || t
 # Test suite deps + dev tools (only when KLAB_ZFS_DEV=1).
 # See the dnf branch for the rationale — full OpenZFS test suite
 # prerequisites. apt package names differ slightly from rpm.
+#
+# Per-package install: a single `apt-get install A B C…` aborts the
+# whole transaction if even one pkg name isn't in the indexes
+# (xxhash, linux-perf, etc. vary by Ubuntu/Debian release) and
+# leaves the rest uninstalled. Loop each one so a missing pkg is
+# a single-line skip instead of a silent blanket failure.
 if [ "$KLAB_ZFS_DEV" = "1" ]; then
-  apt-get install -y ksh fio parted attr bc acl sysstat \
-    gdb strace linux-perf uuid-dev libblkid-dev libssl-dev \
-    net-tools nfs-kernel-server cryptsetup bzip2 xxhash \
-    python3 util-linux pax 2>/dev/null || true
+  for _p in ksh fio parted attr acl bc sysstat \
+            gdb strace linux-perf linux-tools-common linux-tools-generic \
+            uuid-dev libblkid-dev libssl-dev libtirpc-dev zlib1g-dev \
+            net-tools nfs-kernel-server cryptsetup bzip2 xxhash \
+            python3 util-linux pax pamtester; do
+    apt-get install -y "$_p" 2>/dev/null || true
+  done
 fi
 
 modprobe zfs 2>/dev/null || true
