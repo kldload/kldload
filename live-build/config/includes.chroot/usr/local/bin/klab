@@ -1128,10 +1128,16 @@ build_golden_single() {
     return 0
   fi
 
-  # Normal distros: download cloud image
+  # Normal distros: download cloud image.
+  # Atomic rename: curl writes to .partial and we mv on success. Without this,
+  # a concurrent reader (e.g. kube-cluster picking up the first *-cloud.qcow2
+  # it finds) sees the in-flight file and qemu-img fails with "Input/output
+  # error" on sectors past the current download head.
   if [[ ! -f "$img_file" ]]; then
     log "  Downloading ${distro} cloud image..."
-    curl -fSL -o "$img_file" "$url" || die "Download failed for ${distro}"
+    curl -fSL -o "${img_file}.partial" "$url" \
+      || { rm -f "${img_file}.partial"; die "Download failed for ${distro}"; }
+    mv -f "${img_file}.partial" "$img_file"
   else
     log "  Using cached: ${img_file}"
   fi

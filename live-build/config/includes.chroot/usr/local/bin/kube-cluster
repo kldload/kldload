@@ -404,7 +404,11 @@ find_cloud_image() {
       warn "No cloud image found. Downloading CentOS Stream 9 (${_arch_rpm})..."
       ;;
   esac
-  curl -fSL -o "$dest" "$url" || die "Failed to download cloud image"
+  # Atomic rename — same race fix as klab. Readers must only see completed
+  # files, otherwise qemu-img hits "Input/output error" past the download head.
+  curl -fSL -o "${dest}.partial" "$url" \
+    || { rm -f "${dest}.partial"; die "Failed to download cloud image"; }
+  mv -f "${dest}.partial" "$dest"
   echo "$dest"
 }
 
