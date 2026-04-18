@@ -589,19 +589,43 @@ dnf install -y bpftrace bcc-tools wireguard-tools curl jq 2>/dev/null || true
 # silently under the `|| true`. perf comes from kernel-tools on the
 # rpm-based distros.
 if [ "$KLAB_ZFS_DEV" = "1" ]; then
-  # perf actually lives in kernel-tools on RHEL/CentOS/Rocky/Fedora
-  for _p in ksh fio parted attr bc acl sysstat \
-            gdb strace kernel-tools openssl-devel zlib-devel \
-            libuuid-devel libblkid-devel libtirpc-devel \
-            net-tools nfs-utils cryptsetup bzip2 xxhash python3 \
-            util-linux pamtester; do
+  # Enable EPEL up front on EL so xxhash / sg3_utils / pamtester / lsscsi
+  # etc. all resolve in a single transaction below instead of silently
+  # skipping. On Fedora epel-release is a no-op (no matching pkg) and
+  # |true handles it.
+  dnf install -y epel-release 2>/dev/null || true
+
+  # Full OpenZFS test-suite dependency set — auditable, no SKIP-on-
+  # missing-binary. Every pkg is installed individually so one missing
+  # name on one distro never kills the rest. Per openzfs/zfs
+  # tests/README.md + scripts/zfs-tests.sh runtime probes.
+  for _p in \
+      ksh \
+      fio \
+      parted \
+      attr acl bc sysstat \
+      gdb strace \
+      kernel-tools \
+      openssl openssl-devel zlib-devel \
+      libuuid-devel libblkid-devel libtirpc-devel \
+      net-tools nmap-ncat \
+      nfs-utils rpcbind \
+      cryptsetup \
+      bzip2 xxhash \
+      python3 \
+      util-linux \
+      pamtester \
+      e2fsprogs xfsprogs dosfstools \
+      rsync \
+      samba samba-common samba-client \
+      iscsi-initiator-utils targetcli \
+      lsscsi sg3_utils \
+      kpartx mdadm \
+      procps-ng which \
+      make gcc autoconf automake libtool \
+      git; do
     dnf install -y "$_p" 2>/dev/null || true
   done
-  # xxhash may require EPEL — enable and retry if still missing on EL9
-  if ! command -v xxh128sum >/dev/null 2>&1 && ! rpm -q xxhash >/dev/null 2>&1; then
-    dnf install -y epel-release 2>/dev/null || true
-    dnf install -y xxhash 2>/dev/null || true
-  fi
 fi
 
 # Load ZFS module
@@ -699,11 +723,35 @@ apt-get install -y bpftrace bpfcc-tools wireguard-tools curl jq 2>/dev/null || t
 # leaves the rest uninstalled. Loop each one so a missing pkg is
 # a single-line skip instead of a silent blanket failure.
 if [ "$KLAB_ZFS_DEV" = "1" ]; then
-  for _p in ksh fio parted attr acl bc sysstat \
-            gdb strace linux-perf linux-tools-common linux-tools-generic \
-            uuid-dev libblkid-dev libssl-dev libtirpc-dev zlib1g-dev \
-            net-tools nfs-kernel-server cryptsetup bzip2 xxhash \
-            python3 util-linux pax pamtester; do
+  # Full OpenZFS test-suite dependency set on Debian/Ubuntu — mirrors
+  # the dnf loop so every quick + full suite tag actually executes
+  # instead of SKIPping on a missing binary. Per-pkg install so one
+  # name mismatch doesn't cascade.
+  for _p in \
+      ksh \
+      fio \
+      parted \
+      attr acl bc sysstat \
+      gdb strace \
+      linux-perf linux-tools-common linux-tools-generic \
+      openssl libssl-dev zlib1g-dev \
+      uuid-dev libblkid-dev libtirpc-dev \
+      net-tools ncat \
+      nfs-kernel-server rpcbind \
+      cryptsetup \
+      bzip2 xxhash \
+      python3 \
+      util-linux pax \
+      pamtester \
+      e2fsprogs xfsprogs dosfstools \
+      rsync \
+      samba samba-common-bin smbclient \
+      open-iscsi targetcli-fb \
+      lsscsi sg3-utils \
+      kpartx mdadm \
+      procps debianutils \
+      make gcc autoconf automake libtool \
+      git; do
     apt-get install -y "$_p" 2>/dev/null || true
   done
 fi
