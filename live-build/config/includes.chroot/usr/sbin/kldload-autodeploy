@@ -64,7 +64,21 @@ for _src in "$EFFECTIVE" "$MANIFEST"; do
 done
 [[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" || "${KLDLOAD_ENABLE_K8S:-0}" == "1" ]] && WANT[k8s]=1
 [[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]] && WANT[ai]=1
-[[ "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" || "${KLDLOAD_PROFILE:-}" == "devops" ]] && WANT[klab]=1
+
+# klab goldens — build all 5 ZFS-test-lab goldens automatically on any
+# KVM-capable profile so "install completes" means "every lab distro is
+# snapshot-ready for instant clone, no manual click". The user can still
+# opt out with KLDLOAD_KLAB_NO_AUTO=1 in the install manifest.
+# Explicit enable via KLDLOAD_KLAB_ZFS_DEV=1 still works for compatibility.
+if [[ "${KLDLOAD_KLAB_NO_AUTO:-0}" != "1" ]]; then
+    if [[ "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ]]; then
+        WANT[klab]=1
+    else
+        case "${KLDLOAD_PROFILE:-}" in
+            kvm|k8s|devops|ai) WANT[klab]=1 ;;
+        esac
+    fi
+fi
 
 log "Requested: k8s=${WANT[k8s]} ai=${WANT[ai]} klab=${WANT[klab]}"
 
@@ -206,12 +220,22 @@ if [[ "${WANT[klab]}" == "1" ]]; then
     if [[ -f "${STATE_DIR}/klab-ready" ]]; then
         log "[klab] already marked ready — skipping"
     else
-        log "[klab] running klab golden all"
-        if klab golden all >> /var/log/kldload/klab-firstboot.log 2>&1; then
+        # Build BOTH golden lineages so the install is "complete":
+        #   klab golden all         — blue-green goldens (site simulation, fault injection)
+        #   klab golden-ztest all   — ZFS-test-lab goldens (zfs-tests.sh runners)
+        # Both are needed for the full feature set of the web UI to work
+        # out-of-the-box (blue-green tile, ZFS Test Lab tile). Running them
+        # sequentially is ~2 hr on fresh build; subsequent boots are cached.
+        _klab_ok=1
+        log "[klab] running klab golden all (blue-green lineage)"
+        klab golden all >> /var/log/kldload/klab-firstboot.log 2>&1 \
+            || { _klab_ok=0; log "[klab] blue-green FAILED — see klab-firstboot.log"; }
+        log "[klab] running klab golden-ztest all (ZFS test-lab lineage)"
+        klab golden-ztest all >> /var/log/kldload/klab-firstboot.log 2>&1 \
+            || { _klab_ok=0; log "[klab] ztest FAILED — see klab-firstboot.log"; }
+        if [[ "$_klab_ok" -eq 1 ]]; then
             mark "klab"
-            log "[klab] complete"
-        else
-            log "[klab] FAILED — see /var/log/kldload/klab-firstboot.log"
+            log "[klab] complete (blue-green + ztest goldens built)"
         fi
 
         # ZFS test goldens (separate lineage with zfs-tests.sh deps).
