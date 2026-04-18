@@ -213,6 +213,22 @@ if [[ "${WANT[klab]}" == "1" ]]; then
         else
             log "[klab] FAILED — see /var/log/kldload/klab-firstboot.log"
         fi
+
+        # ZFS test goldens (separate lineage with zfs-tests.sh deps).
+        # Gated on KLDLOAD_BUILD_ZTEST_GOLDENS: 1 during integration
+        # testing (verify every pipeline builds end-to-end), 0 for
+        # release (users trigger via the UI tile when they want them).
+        if [[ "${KLDLOAD_BUILD_ZTEST_GOLDENS:-1}" == "1" ]]; then
+            log "[klab] running klab golden-ztest all (test-mode flag ON)"
+            if klab golden-ztest all >> /var/log/kldload/klab-firstboot.log 2>&1; then
+                mark "klab-ztest"
+                log "[klab] ztest goldens complete"
+            else
+                log "[klab] ztest FAILED — see /var/log/kldload/klab-firstboot.log (non-fatal)"
+            fi
+        else
+            log "[klab] ztest goldens skipped (KLDLOAD_BUILD_ZTEST_GOLDENS=0 — use UI to build)"
+        fi
     fi
 fi
 
