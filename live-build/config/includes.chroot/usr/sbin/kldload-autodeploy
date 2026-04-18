@@ -231,22 +231,30 @@ if [[ "${WANT[klab]}" == "1" ]]; then
     if [[ -f "${STATE_DIR}/klab-ready" ]]; then
         log "[klab] already marked ready — skipping"
     else
-        # Build BOTH golden lineages so the install is "complete":
-        #   klab golden all         — blue-green goldens (site simulation, fault injection)
-        #   klab golden-ztest all   — ZFS-test-lab goldens (zfs-tests.sh runners)
-        # Both are needed for the full feature set of the web UI to work
-        # out-of-the-box (blue-green tile, ZFS Test Lab tile). Running them
-        # sequentially is ~2 hr on fresh build; subsequent boots are cached.
+        # Always build the blue-green golden lineage (klab-golden-<distro>).
+        # These power the Lab tile / blue-green deploy and are what every
+        # hardware profile needs.
         _klab_ok=1
         log "[klab] running klab golden all (blue-green lineage)"
         klab golden all >> /var/log/kldload/klab-firstboot.log 2>&1 \
             || { _klab_ok=0; log "[klab] blue-green FAILED — see klab-firstboot.log"; }
-        log "[klab] running klab golden-ztest all (ZFS test-lab lineage)"
-        klab golden-ztest all >> /var/log/kldload/klab-firstboot.log 2>&1 \
-            || { _klab_ok=0; log "[klab] ztest FAILED — see klab-firstboot.log"; }
+
+        # ZFS test-lab goldens (klab-ztest-<distro>) are a SEPARATE lineage
+        # with the full OpenZFS test-suite dep set baked in. They add ~1 hr
+        # to install time, so only build them when the user actually picked
+        # the ZFS Lab profile (zfslab tile in the installer UI, which sets
+        # KLDLOAD_KLAB_ZFS_DEV=1 or KLDLOAD_ZFSLAB_MODE=1).
+        if [[ "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" || "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" ]]; then
+            log "[klab] running klab golden-ztest all (ZFS test-lab lineage)"
+            klab golden-ztest all >> /var/log/kldload/klab-firstboot.log 2>&1 \
+                || { _klab_ok=0; log "[klab] ztest FAILED — see klab-firstboot.log"; }
+        else
+            log "[klab] skipping ztest goldens (not a ZFS Lab install)"
+        fi
+
         if [[ "$_klab_ok" -eq 1 ]]; then
             mark "klab"
-            log "[klab] complete (blue-green + ztest goldens built)"
+            log "[klab] complete"
         fi
 
         # ZFS test goldens (separate lineage with zfs-tests.sh deps).
