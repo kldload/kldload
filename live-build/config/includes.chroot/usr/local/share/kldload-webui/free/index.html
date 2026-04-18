@@ -3473,7 +3473,12 @@ function startInstall() {
     // have to also tick each individual box — that's what "template"
     // means. Individual checkboxes can still turn features OFF if
     // needed (AND'd with the explicit choice) but default to ON.
-    enable_ai: (roleRaw === 'devops' || document.getElementById('install-ai')?.checked) ? '1' : '0',
+    // AI (Ollama + Bob) is part of the baseline experience for every hw
+    // profile — k8s, kvm, zfslab, devops all assume Bob is available out
+    // of the box. Only the minimal profiles (desktop/server/core) leave
+    // it off unless the user explicitly ticks the install-ai checkbox.
+    enable_ai: (['devops','k8s','kvm','zfslab','ai'].includes(roleRaw)
+                || document.getElementById('install-ai')?.checked) ? '1' : '0',
     enable_devops: roleRaw === 'devops' ? '1' : '0',
     // ZFS dev-tools goldens are now a separate on-demand lineage
     // (klab-ztest-<distro>) built from the ZFS Test Lab tile. Installer
@@ -6324,6 +6329,7 @@ function showBobConfirmCard(msg) {
 }
 
 function bobConfirmRespond(confirm_id, approved, args) {
+  console.log('[bob] confirm response', { confirm_id, approved, args });
   const card = document.getElementById(`bob-confirm-${confirm_id}`);
   if (card) {
     // Replace card with a status line so the user sees their choice in-line.
@@ -6331,12 +6337,18 @@ function bobConfirmRespond(confirm_id, approved, args) {
     card.style.borderColor = approved ? 'rgba(52,211,153,0.4)' : 'rgba(239,68,68,0.4)';
     card.innerHTML = `<div style="font-size:0.78rem;color:${approved?'var(--accent)':'var(--danger)'}">${approved ? '✓ Approved' : '✗ Rejected'}</div>`;
   }
-  send({
+  const payload = {
     action:     'bob_confirm_response',
     confirm_id: confirm_id,
     approved:   !!approved,
     args:       args || {},
-  });
+  };
+  try {
+    send(payload);
+    console.log('[bob] confirm response sent', payload);
+  } catch (e) {
+    console.error('[bob] confirm send failed', e);
+  }
 }
 
 function _renderBobMessages() {
