@@ -1477,27 +1477,38 @@ AIMOTD
       zfs create -o compression=lz4 -o recordsize=64K -o primarycache=metadata rpool/vms 2>/dev/null || true
       ok "ZFS dataset rpool/vms created (compressed, 64K recordsize)"
 
-      # Configure libvirt to use ZFS
-      mkdir -p /etc/libvirt/storage
-      cat > /tmp/zfs-vms-pool.xml <<'ZFSPOOL'
-<pool type='zfs'>
-  <name>zfs-vms</name>
-  <source>
-    <name>rpool/vms</name>
-  </source>
-</pool>
-ZFSPOOL
-
-      # Enable and start libvirtd
+      # libvirt storage pool for the ZFS zvols — DON'T DEFINE ONE.
+      #
+      # Three approaches that all fail on CentOS Stream 9:
+      #
+      #   1. <pool type='zfs'>  → libvirt is built without the zfs
+      #      storage backend on CentOS 9; rejects with "missing
+      #      backend for pool type 12 (zfs)".
+      #
+      #   2. <pool type='dir' target=/dev/zvol/rpool/vms> → libvirt
+      #      defines it, but now virt-install sees /dev/zvol paths
+      #      as "volumes inside a dir pool" and passes them to qemu
+      #      with driver='file'. qemu then rejects: "'file' driver
+      #      requires /dev/zvol/… to be a regular file". The symlinks
+      #      under /dev/zvol point at block devices (/dev/zdN) but
+      #      the dir-pool path treats them as files.
+      #
+      #   3. No pool at all → virt-install treats /dev/zvol/rpool/vms/<name>
+      #      as an absolute path, stats it (S_ISBLK true on the
+      #      underlying /dev/zdN), hands it to qemu with the correct
+      #      driver='host_device'. This WORKS on every distro we ship.
+      #
+      # Approach 3 is what the klab golden build chain actually relies
+      # on. We used to write a broken zfs-type pool XML and swallow
+      # the error with 2>/dev/null, which happened to leave us in
+      # approach-3 state by accident. Making that explicit here.
+      #
+      # libvirtd itself still needs to be up for virsh / virt-install,
+      # and the 'isos' pool (cloud-init ISOs) is still useful — both
+      # are set up elsewhere in firstboot.
       systemctl enable libvirtd 2>/dev/null || true
       systemctl start libvirtd 2>/dev/null || true
-
-      # Define and start the ZFS storage pool
-      virsh pool-define /tmp/zfs-vms-pool.xml 2>/dev/null || true
-      virsh pool-autostart zfs-vms 2>/dev/null || true
-      virsh pool-start zfs-vms 2>/dev/null || true
-      rm -f /tmp/zfs-vms-pool.xml
-      ok "libvirt ZFS storage pool configured"
+      ok "libvirt ready — zvols accessed as raw /dev/zvol/… paths (no pool needed)"
 
       # Set up bridge networking
       local _primary_nic
