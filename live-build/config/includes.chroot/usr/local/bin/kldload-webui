@@ -6725,15 +6725,16 @@ async def main_async(args):
     from websockets.http11 import Response as WsResponse
     from websockets.datastructures import Headers as WsHeaders
 
-    db_init()
-    # Make sure the encrypted secrets dataset is mounted before we accept
-    # requests. Lazy creation on first write is fine but loading the ZFS key
-    # at startup gives a clean error surface if the key is missing.
+    # Order matters: _ensure_secrets_dir() creates rpool/kldload/state and
+    # mounts it on /var/lib/kldload. If db_init() runs first, its state.db
+    # lands on the underlying rootfs and the ZFS mount hides it — every
+    # subsequent reader sees a fresh empty mount and "no such table" errors.
     try:
         backend = _ensure_secrets_dir()
         LOG.info("Secrets backend: %s", backend)
     except Exception as e:
         LOG.warning("Secrets backend init failed: %s", e)
+    db_init()
     ssl_ctx = _get_ssl_context()
     scheme    = "https" if ssl_ctx else "http"
 
