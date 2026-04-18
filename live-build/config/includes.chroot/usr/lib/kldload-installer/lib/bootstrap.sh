@@ -221,7 +221,7 @@ k_generate_mok_keys() {
     -keyout "${mok_dir}/mok.key" \
     -out    "${mok_dir}/mok.pub" \
     -days 3650 -nodes \
-    -subj "/CN=kldload Secure Boot MOK/" \
+    -subj "/CN=kldload Secure Boot MOK $(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d%H%M%S)-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')/" \
     >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
 
   # DER format required by mokutil --import

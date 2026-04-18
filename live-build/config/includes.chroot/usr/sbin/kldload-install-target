@@ -375,7 +375,7 @@ ZFSREPO
           mkdir -p "${_mok_dir}" "${target}/etc/dkms/framework.conf.d"
           openssl req -new -x509 -newkey rsa:2048 \
             -keyout "${_mok_dir}/mok.key" -out "${_mok_dir}/mok.pub" \
-            -days 3650 -nodes -subj "/CN=kldload Secure Boot MOK/" >> "$log" 2>&1 || true
+            -days 3650 -nodes -subj "/CN=kldload Secure Boot MOK $(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d%H%M%S)-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')/" >> "$log" 2>&1 || true
           openssl x509 -in "${_mok_dir}/mok.pub" -out "${_mok_dir}/mok.der" -outform DER >> "$log" 2>&1 || true
           chmod 0600 "${_mok_dir}/mok.key" 2>/dev/null
           # Sign helper that works on both CentOS and Debian
@@ -1725,7 +1725,7 @@ main() {
         _ok "MOK enrollment" "key already enrolled — Secure Boot ready"
       else
         printf '%s\n%s\n' "${_mok_pass}" "${_mok_pass}" | \
-          mokutil --import "${target}/var/lib/dkms/mok.der" 2>/dev/null && \
+          mokutil --ignore-keyring --import "${target}/var/lib/dkms/mok.der" 2>/dev/null && \
           _ok "MOK enrollment" "queued — on first boot select: Enroll MOK → password: kldload" || \
           _ok "MOK enrollment" "skipped (mokutil failed — enroll manually after boot)"
       fi
@@ -1756,7 +1756,7 @@ ConditionPathExists=!/var/lib/kldload-mok-enrolled
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'if command -v mokutil >/dev/null 2>&1 && [[ -d /sys/firmware/efi/efivars ]]; then printf "kldload\nkldload\n" | mokutil --import /var/lib/dkms/mok.der 2>/dev/null && echo "MOK enrollment queued — reboot to complete" || echo "mokutil import failed"; touch /var/lib/kldload-mok-enrolled; fi'
+ExecStart=/bin/bash -c 'if command -v mokutil >/dev/null 2>&1 && [[ -d /sys/firmware/efi/efivars ]]; then printf "kldload\nkldload\n" | mokutil --ignore-keyring --import /var/lib/dkms/mok.der 2>/dev/null && echo "MOK enrollment queued — reboot to complete" || echo "mokutil import failed"; touch /var/lib/kldload-mok-enrolled; fi'
 ExecStartPost=/bin/bash -c 'systemctl disable kldload-mok-enroll.service'
 StandardOutput=journal+console
 StandardError=journal+console

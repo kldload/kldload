@@ -47,8 +47,12 @@ k_configure_mok() {
   local enrolled=0
   if chroot "${target}" command -v mokutil >/dev/null 2>&1; then
     if [[ -d /sys/firmware/efi/efivars ]]; then
+      # --ignore-keyring: don't skip when a prior cert with the same CA is
+      #   already trusted (we generate a new key+subject per install; mokutil
+      #   without this flag sees "CA already enrolled" and silently skips,
+      #   leaving SB boot broken when the new ZFS module is loaded).
       if printf '%s\n%s\n' "${mok_pass}" "${mok_pass}" | \
-           chroot "${target}" mokutil --import /var/lib/dkms/mok.der >&8 2>&1
+           chroot "${target}" mokutil --ignore-keyring --import /var/lib/dkms/mok.der >&8 2>&1
       then
         enrolled=1
         k_log "MOK enrollment queued via mokutil"
