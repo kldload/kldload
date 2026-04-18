@@ -546,8 +546,18 @@ DISTRO_ID=$(. /etc/os-release && echo "$ID")
 if ! command -v zfs >/dev/null 2>&1; then
   if [ "$DISTRO_ID" = "fedora" ]; then
     FEDORA_VER=$(rpm --eval "%{fedora}")
-    dnf install -y "https://zfsonlinux.org/fedora/zfs-release-2-7.fc${FEDORA_VER}.noarch.rpm" 2>/dev/null || \
-      dnf install -y "https://zfsonlinux.org/fedora/zfs-release-2-6.fc${FEDORA_VER}.noarch.rpm" 2>/dev/null || true
+    # zfsonlinux.org/fedora publishes one zfs-release rpm per supported
+    # Fedora version with its own pkg revision, and the revision number
+    # is not stable across releases (e.g. fc42 is still on 2-8 while
+    # fc43 jumped to 3-0). Try the known good revisions newest first so
+    # we don't silently ship a Fedora golden with no ZFS installed.
+    _ok=0
+    for _rev in 3-0 2-10 2-9 2-8 2-7 2-6; do
+      if dnf install -y "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${FEDORA_VER}.noarch.rpm" 2>/dev/null; then
+        _ok=1; break
+      fi
+    done
+    [ $_ok -eq 1 ] || echo "WARNING: no zfs-release rpm found for fc${FEDORA_VER} — ZFS will not install"
   else
     dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm" 2>/dev/null || true
   fi
