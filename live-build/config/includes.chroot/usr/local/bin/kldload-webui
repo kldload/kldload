@@ -1739,7 +1739,15 @@ async def ws_handler(websocket):
                 elif action == "bob_exec":
                     await _bob_execute(websocket, msg)
                 elif action == "bob_chat":
-                    await _bob_chat(websocket, msg)
+                    # Spawn as a task so this handler stays free to read the
+                    # follow-up `bob_confirm_response` from the SAME
+                    # connection while _bob_chat awaits the confirm Future.
+                    # Awaiting _bob_chat here deadlocks the per-connection
+                    # handler: it blocks on the confirm future; the user's
+                    # Approve click reaches the socket but can't be read
+                    # because the handler is still inside _bob_chat →
+                    # future never resolves → 120s timeout fires.
+                    asyncio.create_task(_bob_chat(websocket, msg))
                 elif action == "bob_confirm_response":
                     cid = msg.get("confirm_id", "")
                     fut = PENDING_CONFIRMS.get(cid)
@@ -5777,8 +5785,8 @@ def _bob_tool_exec(name, args):
             # The corpus lives at /usr/local/share/kldload-ai/ and ships
             # with every ISO (kldload-docs.txt = scraped site HTML to
             # text, kldload-manual.txt = OCR'd PDF manual).
-            query = (arguments.get("query") or "").strip()
-            max_hits = max(1, min(20, int(arguments.get("max_hits") or 5)))
+            query = (args.get("query") or "").strip()
+            max_hits = max(1, min(20, int(args.get("max_hits") or 5)))
             if not query:
                 return json.dumps({"error": "query required"})
             corpus_paths = [
@@ -5879,9 +5887,9 @@ def _bob_tool_exec(name, args):
 
         if name == "shell_run":
             import shlex
-            cmd = (arguments.get("command") or "").strip()
-            cwd = arguments.get("cwd") or "/root"
-            timeout = max(1, min(120, int(arguments.get("timeout") or 30)))
+            cmd = (args.get("command") or "").strip()
+            cwd = args.get("cwd") or "/root"
+            timeout = max(1, min(120, int(args.get("timeout") or 30)))
             if not cmd:
                 return json.dumps({"error": "command required"})
             if BOB_SHELL_DANGEROUS.search(cmd):
@@ -5918,9 +5926,9 @@ def _bob_tool_exec(name, args):
 
         if name == "shell_run_async":
             import shlex, uuid
-            cmd = (arguments.get("command") or "").strip()
-            cwd = arguments.get("cwd") or "/root"
-            ttl = max(1, min(1800, int(arguments.get("ttl") or 300)))
+            cmd = (args.get("command") or "").strip()
+            cwd = args.get("cwd") or "/root"
+            ttl = max(1, min(1800, int(args.get("ttl") or 300)))
             if not cmd:
                 return json.dumps({"error": "command required"})
             if BOB_SHELL_DANGEROUS.search(cmd):
@@ -5965,8 +5973,8 @@ def _bob_tool_exec(name, args):
             })
 
         if name == "shell_poll":
-            job_id = arguments.get("job_id") or ""
-            tail = max(1, min(500, int(arguments.get("tail") or 40)))
+            job_id = args.get("job_id") or ""
+            tail = max(1, min(500, int(args.get("tail") or 40)))
             job = BOB_SHELL_JOBS.get(job_id)
             if not job:
                 return json.dumps({"error": f"no such job: {job_id}"})
@@ -5985,9 +5993,9 @@ def _bob_tool_exec(name, args):
 
         if name == "terminal_send":
             import shlex
-            keys = arguments.get("keys") or ""
-            window = arguments.get("window") or ""
-            no_enter = bool(arguments.get("no_enter"))
+            keys = args.get("keys") or ""
+            window = args.get("window") or ""
+            no_enter = bool(args.get("no_enter"))
             target = "ttyd-k9s:" + window if window else "ttyd-k9s:"
             args = ["tmux", "-L", "ttyd-k9s", "send-keys", "-t", target, keys]
             if not no_enter:
