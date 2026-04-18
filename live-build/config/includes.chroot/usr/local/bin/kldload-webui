@@ -6295,7 +6295,14 @@ async def _bob_chat(websocket, msg):
                                     summary = await _bob_run_playbook(websocket, final_args)
                                     result = json.dumps({"ok": True, "summary": summary})
                                 else:
-                                    result = json.dumps({"error": f"no handler for {nm}"})
+                                    # Everything else in BOB_EXECUTE_TOOLS (shell_run,
+                                    # shell_run_async, terminal_send, bpftrace_oneliner)
+                                    # shares the same implementation as the non-execute
+                                    # tools — it's just gated by the confirm card. Run
+                                    # the normal dispatcher once the user approved so
+                                    # the tool actually fires instead of returning
+                                    # "no handler for …" back into Bob's context.
+                                    result = _bob_tool_exec(nm, final_args)
                         else:
                             result = _bob_tool_exec(nm, argv)
                         messages.append({"role": "tool", "name": nm, "content": result})

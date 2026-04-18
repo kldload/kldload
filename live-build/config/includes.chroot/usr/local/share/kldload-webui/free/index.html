@@ -6389,6 +6389,15 @@ function _bobStartRecog() {
     if (mic) { mic.textContent = '🔴'; mic.title = 'Open mic — click to stop'; mic.style.animation = 'pulse-glow 1s ease-in-out infinite'; }
   };
   _bobRecog.onresult = (e) => {
+    // Self-feedback guard: when Bob is streaming a reply OR TTS is
+    // speaking, the mic is almost certainly capturing Bob's own voice,
+    // not the user. Discarding those transcripts is what makes open-mic
+    // + voice-out coexist without Bob looping on its last response.
+    const ttsActive = !!(window.speechSynthesis && window.speechSynthesis.speaking);
+    if (_bobStreaming || ttsActive) {
+      if (input) input.value = '';
+      return;
+    }
     let interim = '', final = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const t = e.results[i][0].transcript;
