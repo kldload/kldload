@@ -502,14 +502,14 @@ select option:checked { background: #00b8d9; color: #000; }
         <div class="panel" id="profile-panel" style="margin-bottom:1rem">
           <div class="panel-hdr">◈ Profile</div>
           <div class="panel-body">
-            <div class="target-grid" id="target-grid" style="grid-template-columns:repeat(7,1fr);max-width:1050px">
-              <div class="target-card selected" data-role="desktop" onclick="selectTarget(this)">
+            <div class="target-grid" id="target-grid" style="grid-template-columns:repeat(8,1fr);max-width:1200px">
+              <div class="target-card" data-role="desktop" onclick="selectTarget(this)">
                 <div class="tc-icon">🖥</div>
                 <div class="tc-name">Desktop</div>
                 <div class="tc-sub">GNOME workstation</div>
               </div>
               <div class="target-card" data-role="server" onclick="selectTarget(this)">
-                <div class="tc-icon">⬛</div>
+                <div class="tc-icon">🗄</div>
                 <div class="tc-name">Server</div>
                 <div class="tc-sub">Headless + SSH</div>
               </div>
@@ -519,11 +519,11 @@ select option:checked { background: #00b8d9; color: #000; }
                 <div class="tc-sub">ZFS only — no extras</div>
               </div>
               <div class="target-card" data-role="kvm" onclick="selectTarget(this)">
-                <div class="tc-icon">🖥</div>
+                <div class="tc-icon">📦</div>
                 <div class="tc-name">KVM Host</div>
                 <div class="tc-sub">Hypervisor + clones</div>
               </div>
-              <div class="target-card" data-role="k8s" onclick="selectTarget(this)">
+              <div class="target-card selected" data-role="k8s" onclick="selectTarget(this)">
                 <div class="tc-icon">☸</div>
                 <div class="tc-name">Kubernetes</div>
                 <div class="tc-sub">Cilium + Hubble + MetalLB</div>
@@ -538,9 +538,14 @@ select option:checked { background: #00b8d9; color: #000; }
                 <div class="tc-name">kldlab</div>
                 <div class="tc-sub">Multi-distro test platform</div>
               </div>
+              <div class="target-card" data-role="zfslab" onclick="selectTarget(this)">
+                <div class="tc-icon">🧪</div>
+                <div class="tc-name">ZFS Lab</div>
+                <div class="tc-sub">Test suite first, K8s lean</div>
+              </div>
             </div>
             <div id="role-summary" style="margin-top:0.6rem;font-size:0.8rem;color:var(--accent)">
-              ✓ Desktop selected — GNOME workstation + ZFS on root
+              ✓ Kubernetes — 1 CP + 3 workers on ZFS clones, Cilium eBPF, Hubble, MetalLB (internet required)
             </div>
 
             <!-- Storage mode (visible only for core) -->
@@ -3219,6 +3224,7 @@ const ROLE_DESCS = {
   k8s:     'Kubernetes — 1 CP + 3 workers on ZFS clones, Cilium eBPF, Hubble, MetalLB (internet required)',
   ai:      'AI selected — Desktop + Ollama + Open WebUI (internet required for model download)',
   devops:  'klab — Multi-distro test platform. KVM host + K8s tools + golden images for 7 distros. ZFS instant clones, blue-green deploy, eBPF, NVIDIA.',
+  zfslab:  'ZFS Lab — KVM + klab only, NO Kubernetes. Full host RAM/CPU for the 5 ztest goldens + parallel zfs-tests.sh across centos/rocky/fedora/debian/ubuntu.',
 };
 function selectTarget(el) {
   document.querySelectorAll('#target-grid .target-card').forEach(c => c.classList.remove('selected'));
@@ -3419,8 +3425,11 @@ function startInstall() {
   const timezone = document.getElementById('install-timezone').value || 'UTC';
   const keyboard = document.getElementById('install-keyboard').value || 'us';
   const locale   = document.getElementById('install-locale').value || 'en_US.UTF-8';
-  const roleRaw  = (document.querySelector('#target-grid .target-card.selected') || {}).dataset?.role || 'desktop';
-  const role     = roleRaw === 'ai' ? 'desktop' : (['k8s','devops'].includes(roleRaw) ? 'kvm' : roleRaw);  // AI=desktop, K8s/DevOps=kvm
+  const roleRaw  = (document.querySelector('#target-grid .target-card.selected') || {}).dataset?.role || 'k8s';
+  // zfslab is the "K8s lean + ZFS test suite first" variant of the kvm stack.
+  // Installed packages are identical to kvm/k8s — only resources reprovision.
+  const role     = roleRaw === 'ai' ? 'desktop'
+                 : (['k8s','devops','zfslab'].includes(roleRaw) ? 'kvm' : roleRaw);
   const distro   = (document.querySelector('#distro-grid .target-card.selected') || {}).dataset?.distro || 'centos';
   const dhcp     = document.getElementById('net-dhcp').checked;
   const sshKey   = (document.getElementById('install-ssh-key')?.value || '').trim();
@@ -3468,8 +3477,11 @@ function startInstall() {
     enable_devops: roleRaw === 'devops' ? '1' : '0',
     // ZFS dev-tools goldens are now a separate on-demand lineage
     // (klab-ztest-<distro>) built from the ZFS Test Lab tile. Installer
-    // never sets KLAB_ZFS_DEV=1 — keeps regular goldens lean.
-    klab_zfs_dev: '0',
+    // only sets KLAB_ZFS_DEV=1 when the user explicitly picks the ZFS Lab
+    // profile — then autodeploy auto-builds all 5 ztest goldens and
+    // reprovisions the K8s cluster smaller so resources favour the tests.
+    klab_zfs_dev: roleRaw === 'zfslab' ? '1' : '0',
+    zfslab_mode:  roleRaw === 'zfslab' ? '1' : '0',
     ai_model_chat: document.getElementById('ai-model-chat')?.checked ? '1' : '0',
     ai_model_code: document.getElementById('ai-model-code')?.checked ? '1' : '0',
     ai_model_smart: document.getElementById('ai-model-smart')?.checked ? '1' : '0',
@@ -3477,12 +3489,14 @@ function startInstall() {
     wireguard: document.getElementById('install-wireguard')?.checked ? '1' : '0',
     enable_ebpf: document.getElementById('install-ebpf')?.checked ? '1' : '0',
     zfs_dedup: document.getElementById('install-zfs-dedup')?.checked ? '1' : '0',
-    // devops bundles full Kubernetes (CP + workers + Cilium + MetalLB
-    // + Hubble + ZFS CSI) by default. Explicit k8s role also enables.
-    enable_k8s: (document.getElementById('install-k8s')?.checked || roleRaw === 'k8s' || roleRaw === 'devops') ? '1' : '0',
-    k8s_bootstrap: (document.getElementById('install-k8s-bootstrap')?.checked || roleRaw === 'k8s' || roleRaw === 'devops') ? '1' : '0',
-    // KVM is implied by both k8s and devops roles (cluster lives in VMs).
-    enable_kvm: (document.getElementById('install-kvm')?.checked || ['kvm','k8s','devops'].includes(roleRaw)) ? '1' : '0',
+    // zfslab intentionally SKIPS K8s — the tile is test-suite-first, so
+    // the host keeps all its RAM/CPU for the ztest goldens and the parallel
+    // zfs-tests.sh runs that clone from them. devops + k8s still pull K8s.
+    enable_k8s: (document.getElementById('install-k8s')?.checked || ['k8s','devops'].includes(roleRaw)) ? '1' : '0',
+    k8s_bootstrap: (document.getElementById('install-k8s-bootstrap')?.checked || ['k8s','devops'].includes(roleRaw)) ? '1' : '0',
+    // KVM is implied by every profile whose cluster/goldens live in VMs,
+    // including zfslab (its goldens are VMs).
+    enable_kvm: (document.getElementById('install-kvm')?.checked || ['kvm','k8s','devops','zfslab'].includes(roleRaw)) ? '1' : '0',
     export_format: document.getElementById('install-export-format')?.value || 'none',
     export_scp_host: document.getElementById('export-scp-host')?.value?.trim() || '',
     export_scp_user: document.getElementById('export-scp-user')?.value?.trim() || '',
