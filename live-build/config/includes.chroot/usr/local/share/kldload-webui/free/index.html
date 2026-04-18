@@ -2376,7 +2376,7 @@ select option:checked { background: #00b8d9; color: #000; }
           <!-- Attached image preview strip — appears when one is staged -->
           <div id="bob-img-strip" style="display:none;padding:0.4rem 0.5rem;background:var(--surface2);border:1px solid var(--border);border-top:none;border-bottom:none;display:none;gap:0.4rem;flex-wrap:wrap"></div>
           <div style="display:flex;gap:0.5rem;padding:0.5rem;background:var(--surface2);border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;align-items:center">
-            <button id="bob-mic" class="btn btn-ghost" onclick="bobVoiceToggle()" title="Hold to dictate (or click to toggle)" style="padding:0.5rem 0.75rem;font-size:1.1rem">🎤</button>
+            <button id="bob-mic" class="btn btn-ghost" onclick="bobVoiceToggle()" title="Open mic — click to start (auto-sends each phrase, click again to stop)" style="padding:0.5rem 0.75rem;font-size:1.1rem">🎤</button>
             <button class="btn btn-ghost" onclick="document.getElementById('bob-img-input').click()" title="Attach image (auto-switches to vision model)" style="padding:0.5rem 0.75rem;font-size:1.1rem">📎</button>
             <input type="file" id="bob-img-input" accept="image/*" multiple style="display:none" onchange="bobImagesSelected(this.files)">
             <input type="text" id="bob-input" placeholder="Ask Bob anything — mic, or 📎 for an image" onkeydown="if(event.key==='Enter')bobSend()" onpaste="bobPasteImage(event)" style="flex:1;padding:0.5rem 0.75rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.88rem;outline:none">
@@ -6364,31 +6364,29 @@ function bobSend() {
   bobAsk(msg);
 }
 
-// ── Voice input (speech-to-text via Web Speech API) ────────────────────────
-// Browser-native, no server calls. Works in Chrome, Edge, Firefox (with
-// about:config speech enabled). Click mic to toggle continuous dictation —
-// interim results fill the input field live, final result auto-submits.
-let _bobRecog = null;
-let _bobListening = false;
-function bobVoiceToggle() {
-  const mic = document.getElementById('bob-mic');
-  const input = document.getElementById('bob-input');
+// ── Voice input (open-mic speech-to-text via Web Speech API) ──────────────
+// Toggle the 🎤 once and the mic stays live: every phrase you speak is
+// auto-sent on its final result, then recognition keeps running for the
+// next utterance. Click again to turn it off. Chrome silently ends a
+// recognition session every ~60 s, so onend auto-restarts it whenever the
+// toggle is still "on". Preference persists across reloads via localStorage.
+let _bobRecog     = null;
+let _bobListening = false;    // browser SR session alive right now
+let _bobOpenMic   = false;    // user-level toggle (survives session restarts)
+const _BOB_MIC_KEY = 'kldload:bob:openmic';
+
+function _bobStartRecog() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) {
-    alert('Speech recognition not available in this browser. Try Chrome/Edge.');
-    return;
-  }
-  if (_bobListening) {
-    _bobRecog?.stop();
-    return;
-  }
+  if (!SR) return false;
+  const mic   = document.getElementById('bob-mic');
+  const input = document.getElementById('bob-input');
   _bobRecog = new SR();
-  _bobRecog.continuous = false;      // stop on silence — simpler UX
-  _bobRecog.interimResults = true;   // live typing in the input
+  _bobRecog.continuous     = true;
+  _bobRecog.interimResults = true;
   _bobRecog.lang = navigator.language || 'en-US';
   _bobRecog.onstart = () => {
     _bobListening = true;
-    if (mic) { mic.textContent = '🔴'; mic.style.animation = 'pulse-glow 1s ease-in-out infinite'; }
+    if (mic) { mic.textContent = '🔴'; mic.title = 'Open mic — click to stop'; mic.style.animation = 'pulse-glow 1s ease-in-out infinite'; }
   };
   _bobRecog.onresult = (e) => {
     let interim = '', final = '';
@@ -6397,19 +6395,60 @@ function bobVoiceToggle() {
       if (e.results[i].isFinal) final += t; else interim += t;
     }
     if (input) input.value = (final + interim).trim();
+    // Auto-send the moment we get a finalized phrase, then clear so the
+    // next utterance starts fresh. interim-only updates just preview live.
+    if (final.trim() && input) {
+      input.value = final.trim();
+      bobSend();
+      input.value = '';
+    }
   };
   _bobRecog.onerror = (e) => {
     console.warn('speech recog error:', e.error);
-    if (e.error === 'not-allowed') alert('Microphone access denied. Allow mic in browser settings.');
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      _bobOpenMic = false;
+      try { localStorage.setItem(_BOB_MIC_KEY, '0'); } catch (err) {}
+      alert('Microphone access denied. Allow mic for this site in your browser (🔒 icon → Site settings → Microphone → Allow).');
+    }
   };
   _bobRecog.onend = () => {
     _bobListening = false;
-    if (mic) { mic.textContent = '🎤'; mic.style.animation = ''; }
-    // Auto-send if we captured anything
-    if (input && input.value.trim()) bobSend();
+    // If the user hasn't turned open-mic off, restart immediately — Chrome
+    // times the session out after ~60 s of listening, we want continuous.
+    if (_bobOpenMic) {
+      setTimeout(() => { try { _bobRecog?.start(); } catch (err) { _bobStartRecog(); } }, 250);
+    } else {
+      if (mic) { mic.textContent = '🎤'; mic.title = 'Open mic — click to start'; mic.style.animation = ''; }
+    }
   };
-  _bobRecog.start();
+  try { _bobRecog.start(); return true; } catch (err) { return false; }
 }
+
+function bobVoiceToggle() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    alert('Speech recognition not available in this browser. Try Chrome/Edge.');
+    return;
+  }
+  _bobOpenMic = !_bobOpenMic;
+  try { localStorage.setItem(_BOB_MIC_KEY, _bobOpenMic ? '1' : '0'); } catch (err) {}
+  if (_bobOpenMic) {
+    _bobStartRecog();
+  } else {
+    try { _bobRecog?.stop(); } catch (err) {}
+  }
+}
+
+// Restore open-mic preference on load — user shouldn't have to re-toggle
+// every time they refresh the UI.
+document.addEventListener('DOMContentLoaded', () => {
+  try {
+    if (localStorage.getItem(_BOB_MIC_KEY) === '1') {
+      _bobOpenMic = true;
+      _bobStartRecog();
+    }
+  } catch (err) {}
+});
 
 // ── Voice output (text-to-speech via SpeechSynthesis) ──────────────────────
 // Speaks Bob's assistant replies when the 🔊 checkbox is ticked. Chunked so
