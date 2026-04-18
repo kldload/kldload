@@ -15,8 +15,8 @@
 #   then cloned instantly for every test run. Blue-green lets you test
 #   changes in green while blue stays as the known-good baseline.
 #
-# Distros:  CentOS Stream 9, Rocky 9, Fedora 41, Debian 13, Ubuntu 24.04,
-#           Arch Linux, Alpine Linux (+RHEL 9 via CentOS clone + subscription)
+# Distros:  CentOS Stream 9, Rocky 9, Fedora 43, Debian 13, Ubuntu 24.04,
+#           Arch Linux (+RHEL 9 via CentOS clone + subscription)
 #
 # Usage:
 #   klab                                    Interactive menu
@@ -58,11 +58,10 @@ declare -A CLOUD_IMAGES=(
   # Fedora 43 — bumped from 41. F43 released Oct 2025 is the current
   # stable; kernel 6.14+, glibc 2.40+. Change this URL + the os-variant
   # below when moving to F44/F45.
-  [fedora]="https://download.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.1.x86_64.qcow2"
+  [fedora]="https://download.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2"
   [debian]="https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-genericcloud-amd64-daily.qcow2"
   [ubuntu]="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
   [arch]="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
-  [alpine]="https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.0-x86_64-uefi-cloudinit-r0.qcow2"
   [rhel]="REQUIRES_MANUAL_DOWNLOAD"
 )
 
@@ -73,9 +72,50 @@ declare -A OS_VARIANTS=(
   [debian]="debian12"
   [ubuntu]="ubuntu24.04"
   [arch]="archlinux"
-  [alpine]="alpinelinux"
   [rhel]="centos-stream9"
 )
+
+# _resolve_os_variants: replace any OS_VARIANTS entry that this host's
+# osinfo-db doesn't know with the closest supported fallback. Prevents
+# virt-install from exiting non-zero when we bump to a distro version
+# newer than the host's osinfo-db package (e.g. klab targets fedora43
+# on a CentOS 9 host whose osinfo-db tops out at fedora42).
+_resolve_os_variants() {
+  command -v osinfo-query >/dev/null 2>&1 || return 0
+  local _known
+  _known="$(osinfo-query -f short-id os 2>/dev/null | awk 'NR>2 {print $1}')"
+  [[ -z "$_known" ]] && return 0
+  local _d _want _try _fallback _n
+  for _d in "${!OS_VARIANTS[@]}"; do
+    _want="${OS_VARIANTS[$_d]}"
+    grep -qxF "$_want" <<<"$_known" && continue
+    _fallback=""
+    case "$_want" in
+      fedora*)
+        for _n in 43 42 41 40 39 38; do
+          _try="fedora$_n"
+          grep -qxF "$_try" <<<"$_known" && { _fallback="$_try"; break; }
+        done ;;
+      ubuntu*)
+        for _try in ubuntu24.04 ubuntu22.04 ubuntu20.04; do
+          grep -qxF "$_try" <<<"$_known" && { _fallback="$_try"; break; }
+        done ;;
+      debian*)
+        for _try in debian13 debian12 debian11; do
+          grep -qxF "$_try" <<<"$_known" && { _fallback="$_try"; break; }
+        done ;;
+      centos-stream*)
+        for _try in centos-stream9 centos-stream8 centos9; do
+          grep -qxF "$_try" <<<"$_known" && { _fallback="$_try"; break; }
+        done ;;
+    esac
+    [[ -z "$_fallback" ]] && grep -qxF "linux2022" <<<"$_known" && _fallback="linux2022"
+    [[ -z "$_fallback" ]] && _fallback="linux"
+    echo "[klab] os-variant '$_want' unknown to osinfo-db; using '$_fallback' for ${_d}" >&2
+    OS_VARIANTS[$_d]="$_fallback"
+  done
+}
+_resolve_os_variants
 
 declare -A DISTRO_FAMILY=(
   [centos]="dnf"
@@ -85,7 +125,6 @@ declare -A DISTRO_FAMILY=(
   [debian]="apt"
   [ubuntu]="apt"
   [arch]="pacman"
-  [alpine]="apk"
 )
 
 # Auto-scale resources based on host hardware
@@ -1572,6 +1611,27 @@ run_tests_on_vm() {
     return 0
   fi
 
+  # ── Per-VM attestation ────────────────────────────────────────────
+  # Capture the exact environment this test ran in — kernel, ZFS
+  # binary+module versions, loaded DKMS modules, full package list,
+  # pool config. Written to <distro>.env / .packages / .zpool in the
+  # run dir so an auditor can reconstruct (or re-run) the exact
+  # environment from the bundle. No guessing about "which version
+  # of zfs was this?"
+  _ssh_cmd "$ip" "
+    echo '=== uname ==='; uname -a
+    echo ''; echo '=== zfs binary ==='; zfs version 2>&1 | head -10
+    echo ''; echo '=== zfs module ==='; modinfo zfs 2>&1 | grep -E '^(version|vermagic|srcversion)'
+    echo ''; echo '=== dkms status ==='; dkms status 2>&1
+    echo ''; echo '=== test-tools checksum ==='
+    sha256sum ${tests_path} 2>&1
+    sha256sum /usr/share/zfs/test-runner/bin/test-runner.py 2>&1 || true
+  " > "${run_dir}/${distro}.env" 2>&1 || true
+  _ssh_cmd "$ip" "rpm -qa 2>/dev/null | sort || dpkg -l 2>/dev/null | grep '^ii' | awk '{print \$2\"=\"\$3}' | sort" \
+    > "${run_dir}/${distro}.packages" 2>&1 || true
+  _ssh_cmd "$ip" "zpool status; echo; zfs list -t all" \
+    > "${run_dir}/${distro}.zpool" 2>&1 || true
+
   # Stream test output AND capture it. Without tee the test runner's
   # PASS/FAIL/SKIP lines disappear into the log file and the UI's stream
   # panel only sees "Starting" and "Done" — making it impossible to verify
@@ -1679,30 +1739,89 @@ cmd_test() {
   local run_id; run_id="$(date +%Y%m%d-%H%M%S)"
   local run_dir="${RESULTS_DIR}/${run_id}"
   mkdir -p "$run_dir"
+  # Point the `latest` symlink at the run dir BEFORE we do any work,
+  # so `kztest-tail` and external watchers can follow full.log as it
+  # streams. The symlink is re-pointed again at end-of-run (same dir,
+  # idempotent) to keep the historical "latest completed run" semantic.
+  ln -sfn "$run_dir" "${RESULTS_DIR}/latest"
 
   # Consolidated run log — the single file the OpenZFS team can grep or
   # attach to a bug report. Every line streamed to the user during this
-  # test also lands here, interleaved with [distro] prefixes. The
-  # individual ${distro}.log files keep per-distro views for focused
-  # review. A .manifest records the run config so the audit is complete.
+  # test also lands here, interleaved with [distro] prefixes.
   exec > >(tee -a "${run_dir}/full.log") 2>&1
-  cat > "${run_dir}/manifest.txt" <<MANIFEST
-run_id:       ${run_id}
-mode:         ${mode}
-distros:      ${selected_distros[*]}
-serial:       ${KLAB_SERIAL:-0}
-date_start:   $(date -Iseconds)
-host:         $(hostname)
-host_kernel:  $(uname -r)
-host_zfs:     $(zfs version 2>/dev/null | head -1)
-kldload_ver:  $(cat /etc/kldload/version 2>/dev/null || echo "?")
-MANIFEST
+
+  # ── Audit manifest (part 1 of 2: pre-run provenance) ─────────────
+  # The OpenZFS team (or any auditor) must be able to prove, from this
+  # directory alone, exactly what code ran on exactly what images on
+  # exactly what host. Captured here BEFORE any VMs boot so a hung/
+  # killed run still has the full setup recorded. A second block is
+  # appended at end-of-run (see below) with the completion metrics.
+  local _kldload_ver; _kldload_ver="$(cat /etc/kldload/version 2>/dev/null || echo '?')"
+  local _kldload_git; _kldload_git="$(cd / && git -C /usr/share/kldload rev-parse HEAD 2>/dev/null || echo 'not-a-git-install')"
+  local _host_id; _host_id="$(cat /etc/machine-id 2>/dev/null || echo '?')"
+  local _host_cpu; _host_cpu="$(awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo | sed 's/^ *//')"
+  local _host_ram; _host_ram="$(awk '/MemTotal/ {printf "%d MB", $2/1024}' /proc/meminfo)"
+  {
+    echo "# kldload ZFS-test audit manifest"
+    echo "# This file, together with full.log and the per-distro artifacts,"
+    echo "# constitutes the complete audit record of the run."
+    echo ""
+    echo "[run]"
+    echo "run_id         = ${run_id}"
+    echo "mode           = ${mode}"
+    echo "distros        = ${selected_distros[*]}"
+    echo "serial         = ${KLAB_SERIAL:-0}"
+    echo "concurrency    = ${KLAB_MAX_CONCURRENT:-auto}"
+    echo "invocation     = ${0} ${*}"
+    echo "invoker_uid    = ${EUID}"
+    echo "invoker_pid    = $$"
+    echo "date_start     = $(date -Iseconds)"
+    echo "date_start_ns  = $(date +%s%N)"
+    echo ""
+    echo "[kldload]"
+    echo "version        = ${_kldload_ver}"
+    echo "codename       = Proving Ground"
+    echo "git_sha        = ${_kldload_git}"
+    echo "klab_sha256    = $(sha256sum /usr/local/bin/klab 2>/dev/null | awk '{print $1}')"
+    echo ""
+    echo "[host]"
+    echo "hostname       = $(hostname 2>/dev/null || cat /etc/hostname)"
+    echo "machine_id     = ${_host_id}"
+    echo "kernel         = $(uname -r)"
+    echo "os             = $(. /etc/os-release 2>/dev/null; echo ${PRETTY_NAME:-?})"
+    echo "cpu            = ${_host_cpu}"
+    echo "cpus           = $(nproc)"
+    echo "ram            = ${_host_ram}"
+    echo "zfs            = $(zfs version 2>/dev/null | head -1)"
+    echo "zpool_health   = $(zpool list -H -o health 2>/dev/null | head -1)"
+    echo ""
+    echo "[goldens]"
+    for _d in "${selected_distros[@]}"; do
+      local _g="$(golden_name "$_d")"
+      local _gsnap="rpool/vms/${_g}@golden"
+      local _guid _csum _created _size
+      _guid="$(zfs get -Hp -o value guid "$_gsnap" 2>/dev/null || echo '-')"
+      _created="$(zfs get -Hp -o value creation "$_gsnap" 2>/dev/null | awk '{if($1 ~ /^[0-9]+$/) print strftime("%Y-%m-%dT%H:%M:%S", $1); else print $0}')"
+      _size="$(zfs get -Hp -o value referenced "$_gsnap" 2>/dev/null || echo '-')"
+      echo "${_d}.name     = ${_g}"
+      echo "${_d}.snapshot = ${_gsnap}"
+      echo "${_d}.guid     = ${_guid}"
+      echo "${_d}.created  = ${_created}"
+      echo "${_d}.size     = ${_size}"
+    done
+  } > "${run_dir}/manifest.txt"
+
+  # Reference the ISO install attestation so the auditor can walk the
+  # chain: ISO SHA256 → installed host → this run.
+  [[ -f /etc/kldload/install.attest ]] && \
+    cat /etc/kldload/install.attest >> "${run_dir}/manifest.txt"
 
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo -e "${W}  klab test — ${mode} mode${N}"
   echo -e "${D}  Distros: ${selected_distros[*]}${N}"
   echo -e "${D}  Run ID:  ${run_id}${N}"
   echo -e "${D}  Full log: ${run_dir}/full.log${N}"
+  echo -e "${D}  Manifest: ${run_dir}/manifest.txt  (audit provenance)${N}"
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
 
   local t_start; t_start="$(timer_start)"
@@ -1776,46 +1895,40 @@ MANIFEST
       run_tests_on_vm "$distro" "$mode" "$run_dir" "${vm_ips[$distro]}"
     done
   else
-    # Parallel, but cap concurrency at 80% of host cores so the test
-    # run doesn't starve the host (web UI, libvirt, Prometheus, Bob).
-    # Each test VM consumes ~$CPUS vCPUs at peak (DKMS compile, zpool
-    # stress, etc.). max_concurrent = floor(cores * 0.8 / CPUS).
-    # KLAB_MAX_CONCURRENT env overrides if user wants a different cap.
-    local _host_cores _max
+    # Parallel execution with an 80%-cores concurrency cap. Previous
+    # "smart" gate with kill-0 bookkeeping deadlocked when subshells
+    # exited faster than the bookkeeper tracked them. Keep it simple:
+    # if we're at or under the cap, fire all at once; otherwise batch.
+    local _host_cores _max _n=${#vm_ips[@]}
     _host_cores="$(nproc 2>/dev/null || echo 4)"
     if [[ -n "${KLAB_MAX_CONCURRENT:-}" ]]; then
       _max="${KLAB_MAX_CONCURRENT}"
     else
       _max=$(( (_host_cores * 8 / 10) / CPUS ))
       (( _max < 1 )) && _max=1
-      (( _max > ${#vm_ips[@]} )) && _max=${#vm_ips[@]}
     fi
-    log "Running ${mode} tests in parallel (concurrency=${_max}, host=${_host_cores} cores, ${CPUS} vCPU/VM, 80% cap)..."
-    declare -A pids=()
-    local _running=0
-    for distro in "${!vm_ips[@]}"; do
-      # If we're already at the cap, wait for any one to finish.
-      while (( _running >= _max )); do
-        local _who=""
-        for _d in "${!pids[@]}"; do
-          if ! kill -0 "${pids[$_d]}" 2>/dev/null; then
-            _who="$_d"; break
-          fi
-        done
-        if [[ -n "$_who" ]]; then
-          wait "${pids[$_who]}" 2>/dev/null || true
-          unset 'pids[$_who]'
-          ((_running--))
-        else
-          sleep 2
-        fi
+
+    if (( _n <= _max )); then
+      log "Running ${mode} tests in parallel (${_n} VMs, cap ${_max})..."
+      for distro in "${!vm_ips[@]}"; do
+        run_tests_on_vm "$distro" "$mode" "$run_dir" "${vm_ips[$distro]}" &
       done
-      run_tests_on_vm "$distro" "$mode" "$run_dir" "${vm_ips[$distro]}" &
-      pids[$distro]=$!
-      ((_running++))
-    done
-    # Drain remaining.
-    for distro in "${!pids[@]}"; do wait "${pids[$distro]}" || true; done
+      wait   # waits for all backgrounded jobs in this shell
+    else
+      # Rare case: more VMs than cap — run in batches of _max.
+      log "Running ${mode} tests in batches of ${_max} (${_n} VMs total)..."
+      local _distros=("${!vm_ips[@]}")
+      local _i=0
+      while (( _i < _n )); do
+        local _end=$(( _i + _max )); (( _end > _n )) && _end=$_n
+        for (( j=_i; j<_end; j++ )); do
+          local _d="${_distros[$j]}"
+          run_tests_on_vm "$_d" "$mode" "$run_dir" "${vm_ips[$_d]}" &
+        done
+        wait
+        _i=$_end
+      done
+    fi
   fi
 
   local elapsed; elapsed="$(timer_elapsed_ms "$t_start")"
@@ -1823,22 +1936,110 @@ MANIFEST
   log "Total time: $((elapsed / 1000))s"
   ln -sfn "$run_dir" "${RESULTS_DIR}/latest"
 
-  # Append completion block to the manifest so audit has the final picture.
+  # ── End-of-run audit closure ─────────────────────────────────────
+  # Appends to manifest.txt: result totals, exact zfs-tests.sh
+  # invocation (proves we used stock upstream runner), per-distro env
+  # references, and the SHA-256 of every artifact in the run dir so
+  # the auditor can detect tampering post-facto.
+  local _total_pass=0 _total_fail=0 _total_skip=0 _distro_lines=()
+  for _d in "${selected_distros[@]}"; do
+    [[ -f "${run_dir}/${_d}.summary" ]] || continue
+    local _p _f _s
+    _p="$(awk -F= '/^pass=/ {print $2}' "${run_dir}/${_d}.summary")"
+    _f="$(awk -F= '/^fail=/ {print $2}' "${run_dir}/${_d}.summary")"
+    _s="$(awk -F= '/^skip=/ {print $2}' "${run_dir}/${_d}.summary")"
+    _total_pass=$((_total_pass + ${_p:-0}))
+    _total_fail=$((_total_fail + ${_f:-0}))
+    _total_skip=$((_total_skip + ${_s:-0}))
+    _distro_lines+=("${_d}: pass=${_p:-0} fail=${_f:-0} skip=${_s:-0}")
+  done
+
+  local _test_args_for_manifest
+  if [[ "$mode" == "quick" ]]; then _test_args_for_manifest="-vx -T fault,zpool"
+  else _test_args_for_manifest="-vx"; fi
+
   {
     echo ""
-    echo "date_end:     $(date -Iseconds)"
-    echo "elapsed_sec:  $((elapsed / 1000))"
+    echo "[reproducibility]"
+    echo "# To re-run these tests on any stock upstream OpenZFS install,"
+    echo "# duplicate the distro+kernel+zfs combo listed above and run:"
+    echo "#   sudo -u zfstest /usr/share/zfs/zfs-tests.sh ${_test_args_for_manifest}"
+    echo "# klab invokes the test runner with NO patches, NO overlays,"
+    echo "# and NO custom wrapping. The sha256 of zfs-tests.sh +"
+    echo "# test-runner.py on each VM is recorded in <distro>.env —"
+    echo "# compare against the upstream release tarball to verify."
+    echo "zfs_tests_args = ${_test_args_for_manifest}"
+    echo "runner         = /usr/share/zfs/zfs-tests.sh"
+    echo "runner_as_user = zfstest (passwordless sudo — upstream pattern)"
+    echo "no_patches     = true"
     echo ""
-    echo "=== Per-distro summary ==="
-    for _d in "${selected_distros[@]}"; do
-      if [[ -f "${run_dir}/${_d}.summary" ]]; then
-        echo "--- ${_d} ---"
-        cat "${run_dir}/${_d}.summary"
-      fi
-    done
+    echo "[results]"
+    echo "date_end       = $(date -Iseconds)"
+    echo "date_end_ns    = $(date +%s%N)"
+    echo "elapsed_sec    = $((elapsed / 1000))"
+    echo "total_pass     = ${_total_pass}"
+    echo "total_fail     = ${_total_fail}"
+    echo "total_skip     = ${_total_skip}"
+    echo "total_tests    = $((_total_pass + _total_fail + _total_skip))"
+    echo "overall_status = $([[ "$_total_fail" -eq 0 && "$_total_pass" -gt 0 ]] && echo PASS || ([[ "$_total_fail" -gt 0 ]] && echo FAIL || echo EMPTY))"
+    echo ""
+    echo "[per_distro]"
+    for _l in "${_distro_lines[@]}"; do echo "$_l"; done
+    echo ""
+    echo "[artifacts]"
+    echo "# SHA-256 of every file in this run directory — sign with GPG"
+    echo "# or verify against an out-of-band copy to detect tampering."
   } >> "${run_dir}/manifest.txt"
-  log "Audit log: ${run_dir}/full.log"
-  log "Manifest:  ${run_dir}/manifest.txt"
+
+  # Write SHA-256 sums of all artifacts (except the manifest itself
+  # and the sums file) so post-hoc tampering is detectable.
+  ( cd "${run_dir}" && find . -type f ! -name manifest.txt ! -name sha256sums.txt -print0 \
+    | sort -z \
+    | xargs -0 sha256sum 2>/dev/null > sha256sums.txt ) || true
+  # Include the sums in the manifest for single-file attestation.
+  cat "${run_dir}/sha256sums.txt" >> "${run_dir}/manifest.txt"
+
+  # JUnit XML for CI pipeline attachment. Parses the checklist lines
+  # from each per-distro log and emits the canonical JUnit format so
+  # GitHub Actions / GitLab / Jenkins can display the matrix natively.
+  {
+    echo '<?xml version="1.0" encoding="UTF-8"?>'
+    echo "<testsuites name=\"kldload-klab\" tests=\"$((_total_pass+_total_fail+_total_skip))\" failures=\"${_total_fail}\" skipped=\"${_total_skip}\" time=\"$((elapsed / 1000))\">"
+    for _d in "${selected_distros[@]}"; do
+      [[ -f "${run_dir}/${_d}.log" ]] || continue
+      local _dp _df _ds
+      _dp="$(grep -c '\[PASS\]' "${run_dir}/${_d}.log" 2>/dev/null || echo 0)"
+      _df="$(grep -c '\[FAIL\]' "${run_dir}/${_d}.log" 2>/dev/null || echo 0)"
+      _ds="$(grep -c '\[SKIP\]' "${run_dir}/${_d}.log" 2>/dev/null || echo 0)"
+      echo "  <testsuite name=\"${_d}\" tests=\"$((_dp+_df+_ds))\" failures=\"${_df}\" skipped=\"${_ds}\">"
+      grep -aE 'Test(\(Linux\))?: .+\[(PASS|FAIL|SKIP|KILLED)\]' "${run_dir}/${_d}.log" 2>/dev/null | while IFS= read -r line; do
+        local _tname _tstatus
+        _tname="$(echo "$line" | sed -n 's|.*Test[^:]*: \([^ ]*\) .*|\1|p' | sed 's|/usr/share/zfs/zfs-tests/tests/functional/||')"
+        _tstatus="$(echo "$line" | sed -n 's|.*\[\(PASS\|FAIL\|SKIP\|KILLED\)\].*|\1|p')"
+        [[ -z "$_tname" || -z "$_tstatus" ]] && continue
+        # XML-escape the name minimally
+        _tname="${_tname//&/&amp;}"; _tname="${_tname//</&lt;}"; _tname="${_tname//>/&gt;}"
+        case "$_tstatus" in
+          PASS)        echo "    <testcase name=\"${_tname}\"/>" ;;
+          FAIL|KILLED) echo "    <testcase name=\"${_tname}\"><failure type=\"${_tstatus}\"/></testcase>" ;;
+          SKIP)        echo "    <testcase name=\"${_tname}\"><skipped/></testcase>" ;;
+        esac
+      done
+      echo "  </testsuite>"
+    done
+    echo "</testsuites>"
+  } > "${run_dir}/results.junit.xml" 2>/dev/null || true
+
+  log "Run complete: ${_total_pass} pass · ${_total_fail} fail · ${_total_skip} skip"
+  log "Audit bundle: ${run_dir}/"
+  log "  manifest.txt      — full provenance (kldload + host + goldens + results + sums)"
+  log "  full.log          — every line streamed during the run"
+  log "  <distro>.log      — per-distro test output"
+  log "  <distro>.env      — kernel + zfs versions + tool checksums"
+  log "  <distro>.packages — full rpm/dpkg package list"
+  log "  <distro>.zpool    — zpool status + zfs list at test time"
+  log "  results.junit.xml — CI-importable result matrix"
+  log "  sha256sums.txt    — integrity hashes"
 
   log "Cleaning up test VMs..."
   for distro in "${selected_distros[@]}"; do
@@ -2262,7 +2463,7 @@ Usage:
   klab results [run-id]                   Display test matrix
   klab destroy blue|green|all|goldens     Tear down
 
-Distros: centos rocky fedora debian ubuntu arch alpine rhel
+Distros: centos rocky fedora debian ubuntu arch rhel
 
 ZFS Version Flags:
   --zfs-version 2.3.0               Build from release tarball

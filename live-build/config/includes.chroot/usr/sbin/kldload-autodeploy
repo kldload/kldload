@@ -110,27 +110,41 @@ if [[ "${WANT[ai]}" == "1" ]]; then
     phase "ai-pull-kicking"
     (
         set -e
-        log "[ai] installing ollama + pulling llama3.1:8b"
-        # Install ollama if missing
+        # Ollama CLI panics with "$HOME is not defined" when systemd execs
+        # us without a login environment (which is always). Every ollama
+        # invocation below needs HOME set so envconfig.Models() can find
+        # the model store. Must come BEFORE any `ollama` call.
+        export HOME="${HOME:-/root}"
+        export OLLAMA_MODELS="${OLLAMA_MODELS:-/srv/ollama/models}"
+        # qwen2.5:14b is the only chat model we ship. Better reasoning
+        # and tool-calling than llama3.1:8b. On weak GPUs/CPU-only, falls
+        # through to CPU inference — slower but still works. Override
+        # with KLDLOAD_AI_MODEL=<name> if you want something different.
+        _chat_model="${KLDLOAD_AI_MODEL:-qwen2.5:14b}"
+        _vram_gb=0
+        if command -v nvidia-smi >/dev/null 2>&1; then
+            _vram_gb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)
+            _vram_gb=$(( ${_vram_gb:-0} / 1024 ))
+        fi
+        log "[ai] VRAM=${_vram_gb}GB → chat model: ${_chat_model}"
+        log "[ai] installing ollama + pulling ${_chat_model}"
         command -v ollama >/dev/null 2>&1 || \
             curl -fsSL https://ollama.com/install.sh | sh >> "$LOG_FILE" 2>&1
         systemctl enable --now ollama 2>/dev/null || true
-        # Wait for API
         for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
             sleep 2
         done
-        # Pull + pin (keepalive 24h so first chat is instant)
-        ollama pull llama3.1:8b >> "$LOG_FILE" 2>&1
-        # Pull vision model only if we have GPU + 16GB+ RAM (~8GB VRAM needed)
+        ollama pull "${_chat_model}" >> "$LOG_FILE" 2>&1
+        # Vision model only for 10GB+ VRAM hosts
         _ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
-        if [[ -d /proc/driver/nvidia ]] && [[ $_ram_gb -ge 16 ]]; then
+        if [[ $_vram_gb -ge 10 ]] && [[ $_ram_gb -ge 16 ]]; then
             ollama pull llama3.2-vision:11b >> "$LOG_FILE" 2>&1 || \
                 log "[ai] vision pull failed — non-fatal"
         fi
-        # Warm
+        # Warm (keepalive 24h so first chat is instant)
         curl -sf -X POST http://127.0.0.1:11434/api/generate \
-            -d '{"model":"llama3.1:8b","prompt":"ok","stream":false,"keep_alive":"24h"}' \
+            -d "{\"model\":\"${_chat_model}\",\"prompt\":\"ok\",\"stream\":false,\"keep_alive\":\"24h\"}" \
             >/dev/null 2>&1 || true
         mark "ai"
         log "[ai] complete"

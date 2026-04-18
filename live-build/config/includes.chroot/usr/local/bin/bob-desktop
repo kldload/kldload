@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# bob-desktop — GNOME desktop control via natural language
+# Spawns terminals, opens apps, sends notifications, controls volume,
+# takes screenshots, sets reminders.
+#
+# Usage: bob-desktop "open a terminal"
+#        bob-desktop "remind me in 10 minutes about the oven"
+#        bob-desktop "take a screenshot"
+#        bob-desktop "set volume to 50"
+#        bob-desktop "open firefox"
+set -euo pipefail
+
+export DISPLAY="${DISPLAY:-:0}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+
+# Get DBUS session for the live user
+for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus"
+  export XDG_RUNTIME_DIR="/run/user/${_uid}"
+  break
+done
+
+# ── Colors ───────────────────────────────────────────────────────────────────
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+NC='\033[0m'
+
+if [[ $# -eq 0 ]]; then
+  echo "bob-desktop — control the desktop"
+  echo ""
+  echo "Usage: bob-desktop \"your command\""
+  echo ""
+  echo "Examples:"
+  echo "  bob-desktop \"open a terminal\""
+  echo "  bob-desktop \"open htop in a terminal\""
+  echo "  bob-desktop \"take a screenshot\""
+  echo "  bob-desktop \"set volume to 30\""
+  echo "  bob-desktop \"mute\""
+  echo "  bob-desktop \"send notification: dinner is ready\""
+  echo "  bob-desktop \"remind me in 5 minutes: check the oven\""
+  echo "  bob-desktop \"open firefox\""
+  echo "  bob-desktop \"open file manager\""
+  exit 0
+fi
+
+REQUEST=$(echo "$*" | tr '[:upper:]' '[:lower:]')
+
+# ── Pattern matching — fast path for common actions ──────────────────────────
+
+# Terminal
+if echo "$REQUEST" | grep -qE 'open.*(terminal|console|shell)'; then
+  _cmd=$(echo "$REQUEST" | sed -n 's/.*running \(.*\)/\1/p; s/.*with \(.*\)/\1/p')
+  if [[ -n "$_cmd" ]]; then
+    gnome-terminal --title="Bob Terminal" -- bash -c "$_cmd; exec bash" &
+    echo -e "${GREEN}✔${NC} Terminal opened running: ${_cmd}"
+  else
+    gnome-terminal --title="Bob Terminal" &
+    echo -e "${GREEN}✔${NC} Terminal opened"
+  fi
+  exit 0
+fi
+
+# Screenshot
+if echo "$REQUEST" | grep -qE 'screenshot|screen.?shot|capture.?screen'; then
+  _file="/tmp/bob-screenshot-$(date +%Y%m%d-%H%M%S).png"
+  gnome-screenshot -f "$_file" 2>/dev/null || import -window root "$_file" 2>/dev/null
+  echo -e "${GREEN}✔${NC} Screenshot saved: ${_file}"
+  exit 0
+fi
+
+# Volume
+if echo "$REQUEST" | grep -qE 'volume|sound'; then
+  if echo "$REQUEST" | grep -qE 'mute'; then
+    pactl set-sink-mute @DEFAULT_SINK@ 1 2>/dev/null
+    echo -e "${GREEN}✔${NC} Muted"
+    exit 0
+  fi
+  if echo "$REQUEST" | grep -qE 'unmute'; then
+    pactl set-sink-mute @DEFAULT_SINK@ 0 2>/dev/null
+    echo -e "${GREEN}✔${NC} Unmuted"
+    exit 0
+  fi
+  _vol=$(echo "$REQUEST" | grep -oE '[0-9]+' | head -1)
+  if [[ -n "$_vol" ]]; then
+    _vol=$(( _vol > 100 ? 100 : _vol ))
+    pactl set-sink-volume @DEFAULT_SINK@ "${_vol}%" 2>/dev/null
+    echo -e "${GREEN}✔${NC} Volume set to ${_vol}%"
+    exit 0
+  fi
+fi
+
+# Notification
+if echo "$REQUEST" | grep -qE 'notify|notification|alert|send.*message'; then
+  _msg=$(echo "$*" | sed -E 's/.*(notify|notification|alert|send.*message)[: ]*//')
+  [[ -z "$_msg" ]] && _msg="Bob says hello"
+  notify-send "Bob" "$_msg" 2>/dev/null
+  echo -e "${GREEN}✔${NC} Notification sent: ${_msg}"
+  exit 0
+fi
+
+# Reminder
+if echo "$REQUEST" | grep -qE 'remind|reminder'; then
+  _mins=$(echo "$REQUEST" | grep -oE '[0-9]+' | head -1)
+  [[ -z "$_mins" ]] && _mins=10
+  _msg=$(echo "$*" | sed -E 's/.*(remind|reminder).*[0-9]+ *(min|minute|sec|second|hour)s?[: ]*//')
+  [[ -z "$_msg" ]] && _msg="Time's up!"
+  (sleep $((_mins * 60)) && notify-send --urgency=critical "Bob Reminder" "$_msg") &
+  echo -e "${GREEN}✔${NC} Reminder set: \"${_msg}\" in ${_mins} minutes"
+  exit 0
+fi
+
+# Open apps
+if echo "$REQUEST" | grep -qE 'open.*(firefox|browser|web)'; then
+  _url=$(echo "$REQUEST" | grep -oE 'https?://[^ ]+' || true)
+  firefox ${_url:+"$_url"} 2>/dev/null &
+  echo -e "${GREEN}✔${NC} Firefox opened${_url:+ to $_url}"
+  exit 0
+fi
+
+if echo "$REQUEST" | grep -qE 'open.*(file|nautilus|folder)'; then
+  _dir=$(echo "$REQUEST" | sed -n 's/.*open.*files\? \(.*\)/\1/p; s/.*open.*folder \(.*\)/\1/p')
+  nautilus "${_dir:-.}" 2>/dev/null &
+  echo -e "${GREEN}✔${NC} File manager opened"
+  exit 0
+fi
+
+if echo "$REQUEST" | grep -qE 'open.*(settings|preferences|control)'; then
+  gnome-control-center 2>/dev/null &
+  echo -e "${GREEN}✔${NC} Settings opened"
+  exit 0
+fi
+
+if echo "$REQUEST" | grep -qE 'open.*(editor|text|gedit)'; then
+  gedit 2>/dev/null &
+  echo -e "${GREEN}✔${NC} Text editor opened"
+  exit 0
+fi
+
+# Generic open — try xdg-open or direct launch
+if echo "$REQUEST" | grep -qE '^open '; then
+  _app=$(echo "$*" | sed 's/open //')
+  if command -v "$_app" &>/dev/null; then
+    "$_app" 2>/dev/null &
+    echo -e "${GREEN}✔${NC} Opened: ${_app}"
+  else
+    xdg-open "$_app" 2>/dev/null &
+    echo -e "${GREEN}✔${NC} Opened: ${_app}"
+  fi
+  exit 0
+fi
+
+# ── Fallback — ask Bob to figure it out ──────────────────────────────────────
+echo -e "${DIM}Bob is figuring out what to do...${NC}"
+
+_result=$(echo "You are a desktop control assistant. The user wants: $REQUEST
+
+Available commands:
+- gnome-terminal (open terminal)
+- gnome-terminal -- bash -c 'COMMAND' (terminal with command)
+- notify-send TITLE MESSAGE (notification)
+- gnome-screenshot -f FILE (screenshot)
+- pactl set-sink-volume @DEFAULT_SINK@ PERCENT% (volume)
+- firefox URL (browser)
+- nautilus PATH (file manager)
+- xdg-open FILE (open anything)
+
+Output ONLY the shell command to execute. Nothing else." | ollama run "${BOB_MODEL:-bob}" 2>/dev/null)
+
+# Clean it up
+_result=$(echo "$_result" | sed '/^```/d' | sed 's/^[[:space:]]*//' | head -1)
+
+if [[ -n "$_result" ]]; then
+  echo -e "${CYAN}\$ ${_result}${NC}"
+  eval "$_result" 2>/dev/null &
+  echo -e "${GREEN}✔${NC} Done"
+else
+  echo "Bob couldn't figure that one out. Try being more specific."
+fi

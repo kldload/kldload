@@ -1686,6 +1686,11 @@ async def ws_handler(websocket):
                 elif action == "klab_build_ztest_goldens":
                     target = msg.get("target", "all")
                     await _stream_proc(websocket, ["klab", "golden-ztest", target], target="klab")
+                elif action == "klab_ztest_goldens":
+                    await websocket.send(json.dumps({
+                        "type": "klab_ztest_goldens",
+                        "goldens": _klab_get_ztest_goldens(),
+                    }))
                 elif action == "klab_destroy":
                     await _klab_destroy(websocket, msg)
                 elif action == "klab_vm_op":
@@ -1750,6 +1755,12 @@ async def ws_handler(websocket):
                     await _klab_ebpf_trace(websocket, msg)
                 elif action == "klab_ebpf_stop":
                     await _klab_ebpf_stop(websocket)
+                elif action == "vm_console_open":
+                    await _vm_console_open(websocket, msg)
+                elif action == "vm_console_close":
+                    await _vm_console_close(websocket, msg)
+                elif action == "vm_console_list":
+                    await _vm_console_list(websocket)
 
                 else:
                     await websocket.send(json.dumps({
@@ -1957,18 +1968,28 @@ async def _klab_cancel(websocket, msg):
         except Exception:
             pass
 
-    # 2. Kill any klab child processes
-    for pattern in ["klab golden", "klab deploy", "klab test", "klab destroy",
+    # 2. Kill any klab child processes — SIGTERM then SIGKILL after a beat.
+    # `klab golden-ztest` contains the substring "klab golden" so the pattern
+    # below catches both regular and ztest golden builds.
+    for pattern in ["klab golden", "klab golden-ztest", "klab deploy",
+                     "klab test", "klab destroy", "klab kubernetes",
                      "virt-install", "qemu-img convert"]:
-        subprocess.call(["pkill", "-f", pattern], stderr=subprocess.DEVNULL)
+        subprocess.call(["pkill", "-TERM", "-f", pattern], stderr=subprocess.DEVNULL)
+    await asyncio.sleep(1.5)
+    for pattern in ["klab golden", "klab golden-ztest", "klab deploy",
+                     "klab test", "klab destroy", "klab kubernetes"]:
+        subprocess.call(["pkill", "-KILL", "-f", pattern], stderr=subprocess.DEVNULL)
 
-    # 3. Destroy any in-progress golden VMs
+    # 3. Destroy any in-progress golden/ztest/test VMs. Previously this only
+    # matched klab-golden-* so ztest runs left behind a shut-off VM and a
+    # stranded zvol, which made the UI cancel button look like it did nothing.
+    _vm_prefixes = ("klab-golden-", "klab-ztest-", "klab-test-", "kspawn-")
     try:
         out = subprocess.check_output(["virsh", "list", "--all", "--name"],
                                        text=True, stderr=subprocess.DEVNULL)
         for line in out.strip().splitlines():
             name = line.strip()
-            if name.startswith("klab-golden-"):
+            if name and name.startswith(_vm_prefixes):
                 subprocess.call(["virsh", "destroy", name], stderr=subprocess.DEVNULL)
                 subprocess.call(["virsh", "undefine", name, "--nvram"],
                                 stderr=subprocess.DEVNULL)
@@ -1979,24 +2000,37 @@ async def _klab_cancel(websocket, msg):
     except Exception:
         pass
 
-    # 4. Clean up incomplete ZFS datasets (golden builds that didn't finish)
+    # 4. Clean up incomplete ZFS datasets (golden/ztest builds that didn't
+    # finish, and any kspawn clones). A completed regular golden keeps its
+    # @golden snapshot; ztest keeps @ztest-golden — leave those intact.
+    _zvol_prefixes = ("/vms/klab-golden-", "/vms/klab-ztest-",
+                      "/vms/klab-test-", "/vms/kspawn-")
+    _keep_snaps = {"@golden", "@ztest-golden"}
     try:
         out = subprocess.check_output(["zfs", "list", "-H", "-o", "name"],
                                        text=True, stderr=subprocess.DEVNULL)
         for line in out.strip().splitlines():
             ds = line.strip()
-            if "/vms/klab-golden-" in ds:
-                # Only destroy if no @golden snapshot (incomplete build)
-                snap_check = subprocess.call(
-                    ["zfs", "list", "-t", "snapshot", f"{ds}@golden"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if snap_check != 0:
-                    subprocess.call(["zfs", "destroy", "-Rf", ds],
-                                    stderr=subprocess.DEVNULL)
-                    await websocket.send(json.dumps({
-                        "type": "log_line", "target": target,
-                        "line": f"[cancel] Cleaned up incomplete: {ds}",
-                    }))
+            if not any(p in ds for p in _zvol_prefixes):
+                continue
+            # Preserve datasets that have a completion snapshot — those are
+            # finished artifacts, not leftovers from a cancelled run.
+            has_completion_snap = False
+            for snap in _keep_snaps:
+                if subprocess.call(
+                    ["zfs", "list", "-t", "snapshot", f"{ds}{snap}"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL) == 0:
+                    has_completion_snap = True
+                    break
+            if has_completion_snap:
+                continue
+            subprocess.call(["zfs", "destroy", "-Rf", ds],
+                            stderr=subprocess.DEVNULL)
+            await websocket.send(json.dumps({
+                "type": "log_line", "target": target,
+                "line": f"[cancel] Cleaned up incomplete: {ds}",
+            }))
     except Exception:
         pass
 
@@ -4279,6 +4313,53 @@ def _klab_get_golden_info():
         goldens[distro] = info
     return goldens
 
+def _klab_get_ztest_goldens():
+    """Status of the ZFS-test-specific goldens (klab-ztest-<distro>).
+    Parallel to _klab_get_golden_info but inspects the ztest lineage —
+    these are the images that carry the full zfs-tests.sh dependency
+    set (ksh, fio, pamtester, pax, cryptsetup, loopback vdevs, …).
+    Returns per-distro readiness + size + built-at timestamp so the UI
+    can show a 'what's ready' matrix."""
+    pool = "rpool"
+    goldens = {}
+    for distro in KLAB_DISTROS:
+        name = f"klab-ztest-{distro}"
+        snap = f"{pool}/vms/{name}@golden"
+        info = {"distro": distro, "name": name, "ready": False,
+                "size": "", "built": "", "kernel": "", "zfs_ver": ""}
+        try:
+            out = subprocess.check_output(
+                ["zfs", "list", "-Hp", "-o", "used,referenced,creation", snap],
+                text=True, stderr=subprocess.DEVNULL).strip()
+            parts = out.split("\t")
+            info["ready"] = True
+            if len(parts) > 1:
+                info["size"] = _human_size(int(parts[1]))
+            if len(parts) > 2:
+                # creation is unix seconds — convert to ISO-ish
+                try:
+                    info["built"] = datetime.datetime.fromtimestamp(int(parts[2])).strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Same sidecar log source as regular goldens.
+        log_path = Path(f"/root/klab/goldens/ztest-{distro}-latest.log")
+        if not log_path.exists():
+            log_path = Path(f"/root/klab/goldens/{distro}-latest.log")
+        if log_path.exists():
+            try:
+                for line in log_path.read_text(errors="replace").splitlines():
+                    if "Kernel:" in line:
+                        info["kernel"] = line.split("Kernel:")[-1].strip()[:40]
+                    if "ZFS version:" in line or "ZFS:" in line:
+                        info["zfs_ver"] = line.split(":", 1)[-1].strip()[:40]
+            except Exception:
+                pass
+        goldens[distro] = info
+    return goldens
+
+
 def _klab_get_site_vms(site):
     """Get running VMs for a klab site (blue or green)."""
     vms = []
@@ -4468,8 +4549,34 @@ async def _klab_test(websocket, msg):
 async def _klab_destroy(websocket, msg):
     """Destroy klab resources."""
     target = msg.get("target", "")
+    # Special form: "ztest:<distro>" destroys a single ZFS test golden so
+    # the user can rebuild it fresh without nuking the others.
+    if target.startswith("ztest:"):
+        distro = target.split(":", 1)[1]
+        if distro not in KLAB_DISTROS:
+            await websocket.send(json.dumps({"type": "error", "msg": f"unknown distro: {distro}"}))
+            return
+        vm = f"klab-ztest-{distro}"
+        zpath = f"rpool/vms/{vm}"
+        await websocket.send(json.dumps({"type": "klab_log", "line": f"Destroying {vm}..."}))
+        for cmd in (
+            ["virsh", "destroy", vm],
+            ["virsh", "undefine", vm, "--nvram"],
+            ["zfs", "destroy", "-Rf", zpath],
+        ):
+            try:
+                subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=30)
+            except Exception:
+                pass
+        await websocket.send(json.dumps({"type": "klab_log", "line": f"{vm} gone."}))
+        # Refresh ztest goldens matrix
+        await websocket.send(json.dumps({
+            "type": "klab_ztest_goldens",
+            "goldens": _klab_get_ztest_goldens(),
+        }))
+        return
     if target not in ("blue", "green", "all", "goldens"):
-        await websocket.send(json.dumps({"type": "error", "msg": "target must be blue|green|all|goldens"}))
+        await websocket.send(json.dumps({"type": "error", "msg": "target must be blue|green|all|goldens|ztest:<distro>"}))
         return
     await _auto_snapshot(websocket, f"destroy-{target}")
     await _stream_proc(websocket, ["klab", "destroy", target], target="klab")
@@ -5118,11 +5225,61 @@ async def _bob_models(websocket):
 # bpftrace is gated because while it's typically read-only, malformed
 # scripts can hang the kernel on older versions and a bad kprobe filter
 # can produce terabytes of output.
-BOB_EXECUTE_TOOLS = {"run_playbook", "bpftrace_oneliner"}
+BOB_EXECUTE_TOOLS = {"run_playbook", "bpftrace_oneliner",
+                     "shell_run", "shell_run_async", "terminal_send"}
 
 # Pending confirmations: confirm_id → asyncio.Future. The WS handler's
 # `bob_confirm_response` action resolves them.
 PENDING_CONFIRMS: "dict[str, asyncio.Future]" = {}
+
+# Bob autonomous-shell plumbing ─────────────────────────────────────────────
+# Background job registry for shell_run_async → shell_poll. Keyed by job_id.
+# Each entry: {"popen": Popen, "stdout": list[str], "stderr": list[str],
+#              "started": float, "command": str, "cwd": str, "ttl": int}
+BOB_SHELL_JOBS: "dict[str, dict]" = {}
+
+# Command prefixes considered safe to run without a human-in-the-loop popup
+# when Bob is in "safe" mode. Intentionally conservative — read-only or
+# clearly-bounded. Fall through to approval for anything else.
+BOB_SHELL_SAFE_PREFIXES = (
+    "ls ", "cat ", "head ", "tail ", "wc ", "grep ", "awk ", "sed ", "cut ",
+    "sort ", "uniq ", "tr ", "find ", "stat ", "file ", "du ", "df ", "free",
+    "uptime", "uname", "whoami", "id", "groups", "hostname", "hostnamectl",
+    "date", "echo ", "printf ", "env", "which ", "command -v",
+    "ps ", "top -b -n 1", "htop -C -b", "pstree",
+    "ip ", "ss ", "ping -c ", "dig ", "host ",
+    "systemctl status", "systemctl is-active", "systemctl is-enabled",
+    "systemctl list-units", "journalctl -n", "journalctl -u",
+    "zfs list", "zfs get", "zpool list", "zpool status", "zpool iostat",
+    "virsh list", "virsh dominfo", "virsh domstate", "virsh net-list",
+    "virsh pool-list", "virsh domiflist", "virsh vol-list",
+    "kubectl get", "kubectl describe", "kubectl logs",
+    "kubectl top", "kubectl explain", "kubectl api-resources",
+    "helm list", "helm status", "helm history",
+    "cilium status", "cilium version", "hubble observe --last",
+    "klab status", "klab list", "kspawn list", "kspawn status",
+    "kldload-doctor", "kldload-help",
+)
+
+# Absolute-no regex: these always require the UNLEASHED mode toggle,
+# even with approval. Every one wipes data or takes the host down.
+import re as _re
+BOB_SHELL_DANGEROUS = _re.compile(
+    r"\b("
+    r"rm\s+-[rRfF]|"
+    r"mkfs(\.[a-z0-9]+)?|"
+    r"dd\s+[^|]*of=/dev/|"
+    r"shred\s+|"
+    r"reboot\b|shutdown\b|halt\b|poweroff\b|"
+    r"zpool\s+(destroy|remove|offline|detach|export)|"
+    r"zfs\s+(destroy|rollback|send\s.*-F|receive\s.*-F)|"
+    r"virsh\s+(destroy|undefine|pool-destroy|net-destroy|vol-delete)|"
+    r"kubectl\s+delete\b|"
+    r"systemctl\s+(stop|disable|mask)\b|"
+    r"iptables\s+-F|nft\s+flush|"
+    r">\s*/dev/sd[a-z]"
+    r")\b"
+)
 
 BOB_TOOLS = [
     {"type": "function", "function": {
@@ -5321,6 +5478,49 @@ BOB_TOOLS = [
             "script":  {"type": "string", "description": "bpftrace script body — keep it under 10 lines"},
             "seconds": {"type": "integer", "description": "Duration (default 5, max 30)"},
         }, "required": ["script"]},
+    }},
+    {"type": "function", "function": {
+        "name": "docs_search",
+        "description": "Search the kldload documentation corpus (scraped kldload.com + OCR'd PDF manual, ~3 MB). Use this for questions about kldload-specific tools, commands, flags, or concepts — klab, kspawn, kube-cluster, kldload-webui, kst, ksnap, kclone, kexport, ZFS-on-root specifics, darksite format, Bob itself, etc. You DO NOT know these without calling this tool — your base weights have zero kldload training.",
+        "parameters": {"type": "object", "properties": {
+            "query":   {"type": "string", "description": "Search terms. Keywords work better than full sentences. Example: 'klab golden build' not 'how do I build a golden image'"},
+            "max_hits": {"type": "integer", "description": "Top N matches to return (default 5, max 20)"},
+        }, "required": ["query"]},
+    }},
+    {"type": "function", "function": {
+        "name": "shell_run",
+        "description": "Run a shell command and return stdout+stderr+exit. Use this to inspect the system, verify hypotheses, trace problems — basically anything a human operator would type. The command also mirrors into the user's live ttyd terminal in the Kubernetes tab, so the user sees every command you run and can Ctrl-C at any time. 30 second timeout per call. Destructive commands (rm, dd, mkfs, reboot, zfs destroy, virsh destroy) are blocked unless the user flips Bob into UNLEASHED mode. Prefer short, single-purpose commands so you can chain reasoning.",
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string", "description": "Shell command to run. Single line preferred. Pipelines allowed."},
+            "cwd":     {"type": "string", "description": "Optional working directory (default: /root)"},
+            "timeout": {"type": "integer", "description": "Seconds (default 30, max 120)"},
+        }, "required": ["command"]},
+    }},
+    {"type": "function", "function": {
+        "name": "shell_run_async",
+        "description": "Start a long-running command in the background (traces, tails, installs). Returns a job_id. Use shell_poll to read progress. Use when the command takes longer than 30 seconds (e.g. `bpftrace ...`, `tail -f ...`, `helm install ...`). Runs in the same mirrored terminal so the user can watch.",
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string", "description": "Shell command to run in the background"},
+            "cwd":     {"type": "string", "description": "Optional working directory"},
+            "ttl":     {"type": "integer", "description": "Kill after N seconds if still running (default 300, max 1800)"},
+        }, "required": ["command"]},
+    }},
+    {"type": "function", "function": {
+        "name": "shell_poll",
+        "description": "Read the current output + exit status of an async shell job started with shell_run_async. Returns the last N lines of stdout/stderr and whether the job is still running. Poll every few seconds while a trace is gathering data.",
+        "parameters": {"type": "object", "properties": {
+            "job_id": {"type": "string", "description": "The job id returned by shell_run_async"},
+            "tail":   {"type": "integer", "description": "Last N lines to return (default 40)"},
+        }, "required": ["job_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "terminal_send",
+        "description": "Type a string of keystrokes directly into the user's ttyd terminal (Kubernetes tab). Fire-and-forget — you don't get output back. Use for demos where you want the user to see you typing something they will run themselves (e.g. preloading a command they can edit, sending Ctrl-C, switching tmux windows). For anything you need to read the output of, use shell_run instead.",
+        "parameters": {"type": "object", "properties": {
+            "keys":   {"type": "string", "description": "Text to type. Will be sent verbatim followed by Enter unless no_enter=true."},
+            "window": {"type": "string", "description": "tmux window name (default: current)"},
+            "no_enter": {"type": "boolean", "description": "If true, does not append Enter — useful for pre-loading an editable command"},
+        }, "required": ["keys"]},
     }},
 ]
 
@@ -5569,6 +5769,232 @@ def _bob_tool_exec(name, args):
                 return out  # already JSON if --json supported
             except Exception:
                 return _sh(["kldload-doctor"], timeout=30)[:4000]
+
+        if name == "docs_search":
+            # Grep-based docs retrieval over the scraped kldload corpus.
+            # No vector DB, no embedding model — just ranked substring
+            # matches with surrounding context. Fast, reliable, no setup.
+            # The corpus lives at /usr/local/share/kldload-ai/ and ships
+            # with every ISO (kldload-docs.txt = scraped site HTML to
+            # text, kldload-manual.txt = OCR'd PDF manual).
+            query = (arguments.get("query") or "").strip()
+            max_hits = max(1, min(20, int(arguments.get("max_hits") or 5)))
+            if not query:
+                return json.dumps({"error": "query required"})
+            corpus_paths = [
+                "/usr/local/share/kldload-ai/kldload-docs.txt",
+                "/usr/local/share/kldload-ai/kldload-manual.txt",
+            ]
+            # Split query into keyword terms; rank by how many terms hit.
+            terms = [t for t in query.lower().split() if len(t) >= 2]
+            if not terms:
+                terms = [query.lower()]
+            hits = []
+            for path in corpus_paths:
+                try:
+                    with open(path, "r", errors="replace") as f:
+                        text = f.read()
+                except OSError:
+                    continue
+                # Chunk by blank-line-separated paragraphs; section
+                # headers in the scrape look like "=== path/to/page ===".
+                para = []
+                para_start = 0
+                cur_section = "(root)"
+                source = path.split("/")[-1]
+                for i, line in enumerate(text.splitlines()):
+                    if line.startswith("=== ") and line.rstrip().endswith(" ==="):
+                        cur_section = line.strip("= ").strip()
+                        continue
+                    if line.strip():
+                        if not para:
+                            para_start = i
+                        para.append(line)
+                        continue
+                    if para:
+                        blob = " ".join(para)
+                        low = blob.lower()
+                        score = sum(1 for t in terms if t in low)
+                        if score:
+                            hits.append((score, len(blob), source,
+                                         cur_section, blob[:600]))
+                        para = []
+                if para:
+                    blob = " ".join(para)
+                    low = blob.lower()
+                    score = sum(1 for t in terms if t in low)
+                    if score:
+                        hits.append((score, len(blob), source,
+                                     cur_section, blob[:600]))
+            # Rank: more matching terms first, shorter blobs tiebreak
+            # (denser relevance).
+            hits.sort(key=lambda h: (-h[0], h[1]))
+            top = []
+            for score, _size, source, section, blob in hits[:max_hits]:
+                top.append({
+                    "source": source,
+                    "section": section,
+                    "matched_terms": score,
+                    "excerpt": blob,
+                })
+            return json.dumps({
+                "query": query,
+                "terms": terms,
+                "total_matches": len(hits),
+                "returned": len(top),
+                "results": top,
+            })
+
+        # ── Bob's autonomous-shell handlers ──────────────────────────
+        # shell_run, shell_run_async, shell_poll, terminal_send.
+        # Approval (via _bob_request_confirm) is handled by the caller
+        # for BOB_EXECUTE_TOOLS — by the time we reach this handler,
+        # either the user clicked approve or UNLEASHED mode is on.
+        def _bob_mirror_to_tmux(text):
+            """Echo text into the ttyd-k9s:bob window if it exists so the
+            user can watch Bob work in the Kubernetes tab's terminal."""
+            try:
+                # Ensure the 'bob' window exists (no-op if already there)
+                subprocess.call(
+                    ["tmux", "-L", "ttyd-k9s", "new-window",
+                     "-d", "-t", "ttyd-k9s:", "-n", "bob"],
+                    stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+                # Append a display-only echo (literal, no re-exec)
+                subprocess.call(
+                    ["tmux", "-L", "ttyd-k9s", "send-keys",
+                     "-t", "ttyd-k9s:bob",
+                     f"printf '%s\\n' {shlex.quote(text)}", "Enter"],
+                    stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+        def _bob_log_activity(kind, payload):
+            try:
+                from datetime import datetime
+                with open("/root/bob-activity.log", "a") as f:
+                    f.write(f"{datetime.now().isoformat()} {kind} "
+                            f"{json.dumps(payload)[:2000]}\n")
+            except Exception:
+                pass
+
+        if name == "shell_run":
+            import shlex
+            cmd = (arguments.get("command") or "").strip()
+            cwd = arguments.get("cwd") or "/root"
+            timeout = max(1, min(120, int(arguments.get("timeout") or 30)))
+            if not cmd:
+                return json.dumps({"error": "command required"})
+            if BOB_SHELL_DANGEROUS.search(cmd):
+                # Even UNLEASHED mode requires an extra nudge on these
+                return json.dumps({
+                    "error": "command matches dangerous pattern — refused",
+                    "command": cmd,
+                    "hint": "If you really need this, ask the user to run it manually.",
+                })
+            _bob_log_activity("shell_run_start", {"cmd": cmd, "cwd": cwd, "timeout": timeout})
+            _bob_mirror_to_tmux(f"[bob] $ {cmd}")
+            try:
+                proc = subprocess.run(
+                    cmd, shell=True, cwd=cwd, capture_output=True,
+                    text=True, timeout=timeout,
+                )
+                out = (proc.stdout or "")[:8000]
+                err = (proc.stderr or "")[:4000]
+                rc = proc.returncode
+            except subprocess.TimeoutExpired as e:
+                out = (e.stdout or "")[:8000] if hasattr(e, "stdout") and e.stdout else ""
+                err = f"TIMEOUT after {timeout}s"
+                rc = -1
+            except Exception as e:
+                out, err, rc = "", f"exec error: {e}", -1
+            # Mirror summary (first 10 lines of stdout) into the terminal
+            _lines = out.splitlines()[:10]
+            if _lines:
+                _bob_mirror_to_tmux("\n".join(_lines))
+            if rc != 0 and err.strip():
+                _bob_mirror_to_tmux(f"[bob] stderr: {err.splitlines()[0] if err.splitlines() else err}")
+            _bob_log_activity("shell_run_end", {"rc": rc, "stdout_bytes": len(out), "stderr_bytes": len(err)})
+            return json.dumps({"exit": rc, "stdout": out, "stderr": err, "command": cmd})
+
+        if name == "shell_run_async":
+            import shlex, uuid
+            cmd = (arguments.get("command") or "").strip()
+            cwd = arguments.get("cwd") or "/root"
+            ttl = max(1, min(1800, int(arguments.get("ttl") or 300)))
+            if not cmd:
+                return json.dumps({"error": "command required"})
+            if BOB_SHELL_DANGEROUS.search(cmd):
+                return json.dumps({"error": "command matches dangerous pattern — refused", "command": cmd})
+            job_id = uuid.uuid4().hex[:12]
+            _bob_log_activity("shell_run_async_start", {"job": job_id, "cmd": cmd, "ttl": ttl})
+            _bob_mirror_to_tmux(f"[bob]async({job_id}) $ {cmd}")
+            try:
+                popen = subprocess.Popen(
+                    cmd, shell=True, cwd=cwd,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, bufsize=1,
+                )
+            except Exception as e:
+                return json.dumps({"error": f"spawn failed: {e}"})
+            import threading, time as _time
+            stdout_buf: list = []
+            stderr_buf: list = []
+            def _drain(stream, buf):
+                try:
+                    for line in stream:
+                        buf.append(line)
+                        if len(buf) > 2000:
+                            del buf[:1000]  # ring-trim to keep memory bounded
+                except Exception:
+                    pass
+            threading.Thread(target=_drain, args=(popen.stdout, stdout_buf), daemon=True).start()
+            threading.Thread(target=_drain, args=(popen.stderr, stderr_buf), daemon=True).start()
+            def _ttl_killer(p, delay, jid):
+                _time.sleep(delay)
+                if p.poll() is None:
+                    p.kill()
+                    _bob_log_activity("shell_run_async_ttl_kill", {"job": jid})
+            threading.Thread(target=_ttl_killer, args=(popen, ttl, job_id), daemon=True).start()
+            BOB_SHELL_JOBS[job_id] = {
+                "popen": popen, "stdout": stdout_buf, "stderr": stderr_buf,
+                "started": _time.time(), "command": cmd, "cwd": cwd, "ttl": ttl,
+            }
+            return json.dumps({
+                "job_id": job_id, "pid": popen.pid, "started": True,
+                "poll_with": "shell_poll",
+            })
+
+        if name == "shell_poll":
+            job_id = arguments.get("job_id") or ""
+            tail = max(1, min(500, int(arguments.get("tail") or 40)))
+            job = BOB_SHELL_JOBS.get(job_id)
+            if not job:
+                return json.dumps({"error": f"no such job: {job_id}"})
+            popen = job["popen"]
+            rc = popen.poll()
+            import time as _time
+            return json.dumps({
+                "job_id": job_id,
+                "command": job["command"],
+                "running": rc is None,
+                "exit": rc,
+                "elapsed_sec": round(_time.time() - job["started"], 1),
+                "stdout_tail": "".join(job["stdout"][-tail:])[:8000],
+                "stderr_tail": "".join(job["stderr"][-tail:])[:4000],
+            })
+
+        if name == "terminal_send":
+            import shlex
+            keys = arguments.get("keys") or ""
+            window = arguments.get("window") or ""
+            no_enter = bool(arguments.get("no_enter"))
+            target = "ttyd-k9s:" + window if window else "ttyd-k9s:"
+            args = ["tmux", "-L", "ttyd-k9s", "send-keys", "-t", target, keys]
+            if not no_enter:
+                args.append("Enter")
+            rc = subprocess.call(args, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            _bob_log_activity("terminal_send", {"target": target, "keys": keys[:200], "rc": rc})
+            return json.dumps({"ok": rc == 0, "target": target, "sent": keys[:200]})
 
         # ── RCA / deep observability implementations ─────────────────
         # Each caps output with a time window + line limit so a verbose
@@ -6152,6 +6578,81 @@ async def _klab_ebpf_stop(websocket):
         except Exception:
             pass
     await websocket.send(json.dumps({"type": "klab_ebpf_done", "tool": "stopped"}))
+
+
+# ── Per-VM console in the UI ─────────────────────────────────────────────────
+# Each VM gets its own tmux window inside the ttyd-k9s session running
+# `virsh console <vm>`. The browser iframes ttyd with #<window-name> so
+# switching VMs in the UI just switches tmux windows — no extra ports,
+# no websockify, no auth complexity. Works for any VM that has a serial
+# device (klab/kspawn both configure one via virt-install).
+def _vm_console_window_name(vm):
+    # tmux window names can't have dots or colons — sanitise
+    import re as _re_vm
+    return "vm-" + _re_vm.sub(r"[^A-Za-z0-9_-]", "-", vm)[:60]
+
+async def _vm_console_open(websocket, msg):
+    """Ensure a 'virsh console <vm>' tmux window exists inside ttyd-k9s.
+    Frontend embeds ttyd with arg target-window=<returned-name>."""
+    vm = (msg.get("vm") or "").strip()
+    if not vm:
+        await websocket.send(json.dumps({"type": "error", "msg": "vm name required"}))
+        return
+    # Validate VM exists
+    try:
+        out = subprocess.check_output(["virsh", "list", "--all", "--name"],
+                                       text=True, stderr=subprocess.DEVNULL)
+        if vm not in out.strip().splitlines():
+            await websocket.send(json.dumps({"type": "vm_console_error",
+                                              "vm": vm,
+                                              "error": f"VM not found: {vm}"}))
+            return
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "vm_console_error", "vm": vm,
+                                          "error": f"virsh failed: {e}"}))
+        return
+    wname = _vm_console_window_name(vm)
+    # Create the tmux window if it doesn't exist. `virsh console` needs
+    # to be force-acquired in case another session is attached (which
+    # happens after a VM hot-reboot or a second browser tab).
+    cmd = f"exec bash -lc 'echo Connecting to {vm} — Ctrl-] to detach; exec virsh console --force {vm}'"
+    # -t ttyd-k9s: means "session ttyd-k9s, any window" — kill-if-exists pattern
+    subprocess.call(
+        ["tmux", "kill-window", "-t", f"ttyd-k9s:{wname}"],
+        stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    rc = subprocess.call(
+        ["tmux", "new-window", "-d", "-t", "ttyd-k9s:", "-n", wname, cmd],
+        stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    await websocket.send(json.dumps({
+        "type": "vm_console_opened",
+        "vm": vm, "window": wname, "ok": rc == 0,
+        "hint": "Ctrl-] detaches from the VM console; tmux window stays.",
+    }))
+
+async def _vm_console_close(websocket, msg):
+    """Kill a VM's console tmux window."""
+    vm = (msg.get("vm") or "").strip()
+    if not vm:
+        await websocket.send(json.dumps({"type": "error", "msg": "vm name required"}))
+        return
+    wname = _vm_console_window_name(vm)
+    rc = subprocess.call(
+        ["tmux", "kill-window", "-t", f"ttyd-k9s:{wname}"],
+        stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    await websocket.send(json.dumps({
+        "type": "vm_console_closed", "vm": vm, "window": wname, "ok": rc == 0,
+    }))
+
+async def _vm_console_list(websocket):
+    """List currently-open VM console windows."""
+    try:
+        out = subprocess.check_output(
+            ["tmux", "list-windows", "-t", "ttyd-k9s", "-F", "#{window_name}"],
+            text=True, stderr=subprocess.DEVNULL)
+        windows = [w for w in out.strip().splitlines() if w.startswith("vm-")]
+    except Exception:
+        windows = []
+    await websocket.send(json.dumps({"type": "vm_console_list", "windows": windows}))
 
 
 # ── Distro matrix runner ─────────────────────────────────────────────────────

@@ -367,7 +367,7 @@ k_install_system_files() {
 
   # ── Systemd units ──────────────────────────────────────────────────────────
   mkdir -p "${target}/usr/lib/systemd/system"
-  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service; do
+  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service klab-prom-targets.service klab-prom-targets.timer; do
     [[ -f "/usr/lib/systemd/system/${f}" ]] && \
       cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
   done
@@ -391,6 +391,34 @@ k_install_system_files() {
       cp "/usr/local/bin/${bin}" "${target}/usr/local/bin/${bin}" && \
       chmod +x "${target}/usr/local/bin/${bin}"
   done
+  # sbin-level CLI tools (kspawn — ZFS-native cluster spawner)
+  mkdir -p "${target}/usr/local/sbin"
+  for bin in kspawn; do
+    [[ -f "/usr/local/sbin/${bin}" ]] && \
+      cp "/usr/local/sbin/${bin}" "${target}/usr/local/sbin/${bin}" && \
+      chmod +x "${target}/usr/local/sbin/${bin}" && \
+      k_log "installed /usr/local/sbin/${bin}"
+  done
+
+  # Bob configs (personas.json + Modelfile.bob + Modelfile.bash). Without
+  # these on target, firstboot's `ollama create bob` fails with "no
+  # Modelfile found" and Bob never appears in the sidebar (the frontend
+  # keys off having a "bob" model in ollama's list).
+  if [[ -d /etc/bob ]]; then
+    mkdir -p "${target}/etc/bob"
+    cp -r /etc/bob/. "${target}/etc/bob/"
+    k_log "Bob configs copied to target ($(ls "${target}/etc/bob" | tr '\n' ' '))"
+  fi
+
+  # Bob's knowledge corpus (scraped kldload.com docs + OCR'd PDF manual,
+  # ~3.3 MB). Consumed by the docs_search WS tool — without this on
+  # target, every kldload-specific Bob answer is pure confabulation
+  # since the base model has zero kldload training.
+  if [[ -d /usr/local/share/kldload-ai ]]; then
+    mkdir -p "${target}/usr/local/share/kldload-ai"
+    cp /usr/local/share/kldload-ai/*.txt "${target}/usr/local/share/kldload-ai/" 2>/dev/null || true
+    k_log "Bob docs corpus copied to target ($(du -sh "${target}/usr/local/share/kldload-ai" 2>/dev/null | cut -f1))"
+  fi
   # Move management webui to port 9000 on installed systems (8080 reserved for Open WebUI)
   if [[ -f "${target}/usr/lib/systemd/system/kldload-webui.service" ]]; then
     sed -i 's/--port 8080/--port 9000/' "${target}/usr/lib/systemd/system/kldload-webui.service"
@@ -405,6 +433,9 @@ k_install_system_files() {
   # Sanoid scheduled snapshots (daily/weekly/monthly/yearly)
   ln -sf "/lib/systemd/system/sanoid.timer" \
     "${target}/etc/systemd/system/timers.target.wants/sanoid.timer" || true
+  # Prometheus file_sd target regeneration (every 30s, zero hardcoded IPs)
+  ln -sf "/usr/lib/systemd/system/klab-prom-targets.timer" \
+    "${target}/etc/systemd/system/timers.target.wants/klab-prom-targets.timer" || true
 
   mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
   ln -sf "/usr/lib/systemd/system/kldload-firstboot.service" \
@@ -516,19 +547,20 @@ FFPOLICY
       cp /usr/local/bin/eza "${target}/usr/local/bin/eza"
       chmod +x "${target}/usr/local/bin/eza"
     fi
-    # Wholesale copy of kldload CLI tools — anything matching k* in
-    # /usr/local/bin except the installer-only helpers. This replaces the
-    # prior hand-maintained list which kept missing new tools (kldload-doctor,
-    # kldload-db, kldload-inventory, kube-setup etc. weren't in it).
+    # Wholesale copy of kldload CLI tools — everything matching k* or _k*
+    # in /usr/local/bin. The `_` prefix tools (_ktoggle-win, _kconsole-home)
+    # are helpers called from kldload-console's tmux keybindings; missing
+    # them makes every F-key return 127. Skip installer-only internals.
     _skip_tools="kldload-install-target kldload-overview"
-    for _src in /usr/local/bin/k*; do
+    shopt -s nullglob
+    for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/bob /usr/local/bin/bob-*; do
       [[ -x "$_src" ]] || continue
       _name="$(basename "$_src")"
-      # Skip installer internals and the webui (handled separately above)
       case " $_skip_tools kldload-webui " in *" $_name "*) continue ;; esac
       cp "$_src" "${target}/usr/local/bin/${_name}"
       chmod +x "${target}/usr/local/bin/${_name}"
     done
+    shopt -u nullglob
 
     # ── Install ansible-core NOW, at install time, not first boot. ──
     # Autodeploy + kube-cluster + klab all call ansible-playbook for
@@ -790,6 +822,17 @@ WPEOF
     for f in kldload-syscheck.sh audit.sh; do
       [[ -f "/root/darksite/${f}" ]] && cp "/root/darksite/${f}" "${darksite_tgt}/${f}" && chmod +x "${darksite_tgt}/${f}"
     done
+
+    # Ollama model darksite — distro-independent. kldload-firstboot
+    # rsyncs from here to /srv/ollama/models so Bob is chat-ready
+    # without an internet roundtrip. Missing this copy was the reason
+    # Bob fell back to online pulls on installed systems even though
+    # the ISO had the weights baked in.
+    if [[ -d /root/darksite/ollama/models ]]; then
+      mkdir -p "${darksite_tgt}/ollama"
+      rsync -a --exclude='*.lock' /root/darksite/ollama/ "${darksite_tgt}/ollama/"
+      k_log "Ollama darksite installed to target: $(du -sh "${darksite_tgt}/ollama" 2>/dev/null | cut -f1)"
+    fi
   else
     k_log "Skipping darksite copy (profile=${_profile}, distro=${_distro})"
   fi
@@ -908,7 +951,7 @@ REPL
 
     # Copy KVM management tools from live ISO to target
     mkdir -p "${target}/usr/local/bin"
-    for tool in kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo kube-cluster kzfs-lab kzfs-test klab klab-exporter; do
+    for tool in kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo kube-cluster kzfs-lab kzfs-test klab klab-exporter klab-prom-targets; do
       if [[ -f "/usr/local/bin/${tool}" ]]; then
         cp "/usr/local/bin/${tool}" "${target}/usr/local/bin/${tool}"
         chmod +x "${target}/usr/local/bin/${tool}"

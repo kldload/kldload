@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# bob-sys — color bar dashboard: CPU, RAM, disk, GPU, services
+# Usage: bob-sys             (show dashboard)
+#        bob-sys --ask       (show dashboard then ask Bob about it)
+#        bob-sys --watch     (live refresh every 2 seconds)
+set -euo pipefail
+
+# ── Colors ───────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+ASK_BOB=false
+WATCH=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --ask) ASK_BOB=true ;;
+    --watch|-w) WATCH=true ;;
+  esac
+done
+
+# ── Bar renderer ─────────────────────────────────────────────────────────────
+bar() {
+  local pct=$1 width=30 color label
+  label="${2:-}"
+
+  if (( pct >= 90 )); then color="$RED"
+  elif (( pct >= 70 )); then color="$YELLOW"
+  else color="$GREEN"
+  fi
+
+  local filled=$(( pct * width / 100 ))
+  local empty=$(( width - filled ))
+  local bar_str=""
+
+  for ((i=0; i<filled; i++)); do bar_str+="█"; done
+  for ((i=0; i<empty; i++)); do bar_str+="░"; done
+
+  printf "  %-12s ${color}%s${NC} %3d%% %s\n" "$label" "$bar_str" "$pct" "${3:-}"
+}
+
+# ── Dashboard ────────────────────────────────────────────────────────────────
+render() {
+  # CPU
+  _cpu_model=$(grep 'model name' /proc/cpuinfo 2>/dev/null | head -1 | sed 's/.*: //' | sed 's/(R)//g;s/(TM)//g;s/CPU //g;s/ @.*//;s/  / /g')
+  _cores=$(nproc 2>/dev/null || echo "?")
+  _load=$(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1)
+  _cpu_pct=$(awk "BEGIN{v=int(${_load:-0}/${_cores:-1}*100); if(v>100)v=100; print v}")
+
+  # RAM
+  _ram_total=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null)
+  _ram_avail=$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null)
+  _ram_used=$(( (_ram_total - _ram_avail) ))
+  _ram_pct=$(( _ram_used * 100 / _ram_total ))
+  _ram_total_gb=$(awk "BEGIN{printf \"%.1f\", ${_ram_total}/1024/1024}")
+  _ram_used_gb=$(awk "BEGIN{printf \"%.1f\", ${_ram_used}/1024/1024}")
+
+  # Disk
+  _disk_line=$(df -h / 2>/dev/null | awk 'NR==2{print}')
+  _disk_pct=$(echo "$_disk_line" | awk '{gsub(/%/,""); print $5}')
+  _disk_used=$(echo "$_disk_line" | awk '{print $3}')
+  _disk_total=$(echo "$_disk_line" | awk '{print $2}')
+
+  # GPU
+  _gpu=""
+  _gpu_info=""
+  if command -v nvidia-smi &>/dev/null; then
+    _gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+    _gpu_mem_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
+    _gpu_mem_total=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
+    _gpu_util=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1)
+    _gpu_info="${_gpu_mem_used}/${_gpu_mem_total}MB"
+  else
+    _gpu=$(lspci 2>/dev/null | grep -iE 'vga|3d' | head -1 | sed 's/.*: //' | sed 's/ \[.*//')
+  fi
+
+  # Uptime
+  _uptime=$(uptime -p 2>/dev/null | sed 's/up //')
+
+  # Services
+  _failed=$(systemctl --failed --no-legend 2>/dev/null)
+  _svc_count=$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | wc -l)
+
+  # ── Print ────────────────────────────────────────────────────────────────
+  echo ""
+  echo -e "${BOLD}  BOB SYSTEM DASHBOARD${NC}  ${DIM}$(date '+%H:%M:%S')${NC}"
+  echo -e "  ${DIM}${_cpu_model} · ${_cores} cores · up ${_uptime}${NC}"
+  echo ""
+
+  bar "$_cpu_pct" "CPU" "load ${_load}"
+  bar "$_ram_pct" "RAM" "${_ram_used_gb}/${_ram_total_gb} GB"
+  bar "${_disk_pct:-0}" "Disk" "${_disk_used}/${_disk_total}"
+
+  if [[ -n "$_gpu" ]]; then
+    if [[ -n "${_gpu_util:-}" ]]; then
+      bar "${_gpu_util:-0}" "GPU" "${_gpu_info}"
+    else
+      printf "  %-12s ${DIM}%s${NC}\n" "GPU" "$_gpu"
+    fi
+  fi
+
+  echo ""
+  printf "  ${DIM}Services: ${_svc_count} running${NC}\n"
+
+  if [[ -n "$_failed" ]]; then
+    echo ""
+    echo -e "  ${RED}${BOLD}Failed services:${NC}"
+    echo "$_failed" | while read -r line; do
+      echo -e "  ${RED}●${NC} ${line}"
+    done
+  fi
+
+  echo ""
+}
+
+# ── Watch mode ───────────────────────────────────────────────────────────────
+if [[ "$WATCH" == true ]]; then
+  while true; do
+    clear
+    render
+    sleep 2
+  done
+fi
+
+# ── Single render ────────────────────────────────────────────────────────────
+render
+
+# ── Ask Bob ──────────────────────────────────────────────────────────────────
+if [[ "$ASK_BOB" == true ]]; then
+  echo -e "${DIM}Asking Bob about your system...${NC}"
+  echo ""
+  bob "Based on the system status, is everything healthy? Any concerns? Keep it brief."
+fi

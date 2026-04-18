@@ -169,6 +169,14 @@ PKGS+=(
     gnome-keyring firefox mesa-dri-drivers
     pipewire wireplumber
     adwaita-icon-theme google-noto-sans-fonts
+    # Bob's voice/audio stack (from bob-ai). pipewire is already above;
+    # these add pulseaudio shims for apps that speak PA, sox for audio
+    # pipeline helpers, espeak-ng as a fallback TTS, alsa-utils for
+    # arecord (which bob-voice uses), and cmake + gcc-c++ to compile
+    # whisper.cpp below. wl-clipboard for Wayland clipboard access.
+    pipewire-pulseaudio pulseaudio-utils
+    alsa-utils espeak-ng sox wl-clipboard
+    cmake gcc-c++
 )
 
 # Set up repos inside the installroot
@@ -698,15 +706,113 @@ OSREL
 # ---------------------------------------------------------------------------
 if [[ "$EDITION" != "core" ]]; then
     # Copy kldload tools (short names)
-    for tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kldload-help kldload-test kldload-install-target kldload-webui kldload-overview \
+    for tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kldload-help kldload-test kldload-install-target kldload-webui kldload-overview kldload-doctor kldload-db kldload-inventory kldload-console kldload-dash \
+                 kinspect kztest-tail _ktoggle-win _kconsole-home \
                  kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo \
                  kube-setup kube-init kube-join kube-status kube-reset kube-network kube-load-images kube-smoke-test kube-cluster kube-demo \
-                 kzfs-test kzfs-lab klab klab-exporter; do
+                 kzfs-test kzfs-lab klab klab-exporter klab-prom-targets \
+                 bob bob-agent bob-bash bob-desktop bob-do bob-home bob-model bob-remote bob-sys bob-voice; do
         src="/build/live-build/config/includes.chroot/usr/local/bin/${tool}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/bin/${tool}" && chmod +x "${ROOTFS}/usr/local/bin/${tool}"
     done
 
+    # Bob's sbin tools — boot splash (hardware detect + progress + quotes)
+    # and the appliance UI launcher. These live at /usr/local/sbin.
+    for _sb_bob in bob-splash bob-ui; do
+        src="/build/live-build/config/includes.chroot/usr/local/sbin/${_sb_bob}"
+        [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/sbin/${_sb_bob}" && chmod +x "${ROOTFS}/usr/local/sbin/${_sb_bob}"
+    done
+
+    # Bob config files — personas (64 greetings × N personas) + Modelfiles.
+    # bob-ui reads /etc/bob/personas.json on startup; the rotating greeting
+    # system depends on this existing.
+    if [[ -d /build/live-build/config/includes.chroot/etc/bob ]]; then
+        mkdir -p "${ROOTFS}/etc/bob"
+        cp -r /build/live-build/config/includes.chroot/etc/bob/. "${ROOTFS}/etc/bob/"
+        log "Bob configs installed: $(ls "${ROOTFS}/etc/bob" | tr '\n' ' ')"
+    fi
+
+    # ── whisper.cpp — speech-to-text for bob-voice ──────────────────────
+    # Ported from bob-ai/builder/bob-build-iso.sh. Clones upstream,
+    # builds inside the ROOTFS chroot (needs cmake + gcc-c++ from PKGS),
+    # downloads the ~150 MB base.en model. Non-fatal if network fails —
+    # bob-voice will just be absent, rest of Bob still works.
+    log "Bob: building whisper.cpp (voice input)..."
+    _whisper_tmp="$(mktemp -d)"
+    if git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git \
+            "${_whisper_tmp}/whisper.cpp" >> "$LOG_FILE" 2>&1; then
+        cp -a "${_whisper_tmp}/whisper.cpp" "${ROOTFS}/opt/whisper.cpp"
+        mount --bind /proc "${ROOTFS}/proc" 2>/dev/null || true
+        mount --bind /sys  "${ROOTFS}/sys"  2>/dev/null || true
+        mount --bind /dev  "${ROOTFS}/dev"  2>/dev/null || true
+        if chroot "${ROOTFS}" bash -c \
+            "cd /opt/whisper.cpp && cmake -B build && cmake --build build --config Release -j\$(nproc)" \
+            >> "$LOG_FILE" 2>&1; then
+            log "Bob: whisper.cpp built"
+        else
+            log "Bob: WARNING — whisper.cpp build failed (voice input disabled)"
+        fi
+        umount "${ROOTFS}/proc" 2>/dev/null || true
+        umount "${ROOTFS}/sys"  2>/dev/null || true
+        umount "${ROOTFS}/dev"  2>/dev/null || true
+        # Download base.en model (~150 MB)
+        mkdir -p "${ROOTFS}/opt/whisper.cpp/models"
+        curl -fsSL -o "${ROOTFS}/opt/whisper.cpp/models/ggml-base.en.bin" \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
+            >> "$LOG_FILE" 2>&1 \
+            && log "Bob: whisper model downloaded" \
+            || log "Bob: WARNING — whisper model download failed"
+    else
+        log "Bob: WARNING — whisper.cpp clone failed (offline build?)"
+    fi
+    rm -rf "${_whisper_tmp}"
+
+    # ── piper — text-to-speech for Bob's voice output ────────────────────
+    log "Bob: installing piper TTS..."
+    _piper_tmp="$(mktemp -d)"
+    if curl -fsSL -o "${_piper_tmp}/piper.tar.gz" \
+         "https://github.com/rhasspy/piper/releases/latest/download/piper_linux_x86_64.tar.gz" \
+         >> "$LOG_FILE" 2>&1; then
+        tar xf "${_piper_tmp}/piper.tar.gz" -C "${ROOTFS}/opt/" >> "$LOG_FILE" 2>&1
+        mkdir -p "${ROOTFS}/opt/piper/models"
+        curl -fsSL -o "${ROOTFS}/opt/piper/models/en_US-lessac-medium.onnx" \
+            "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" \
+            >> "$LOG_FILE" 2>&1 || log "Bob: WARNING piper voice onnx download failed"
+        curl -fsSL -o "${ROOTFS}/opt/piper/models/en_US-lessac-medium.onnx.json" \
+            "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" \
+            >> "$LOG_FILE" 2>&1 || true
+        [[ -x "${ROOTFS}/opt/piper/piper" ]] \
+            && log "Bob: piper TTS installed" \
+            || log "Bob: WARNING piper binary not found after extract"
+    else
+        log "Bob: WARNING — piper download failed (offline build?)"
+    fi
+    rm -rf "${_piper_tmp}"
+
     # Copy klab share files (Prometheus config, Grafana dashboard)
+    # Ansible playbook library — consumed by kube-cluster, klab, and
+    # the Ansible tab in the web UI. profiles.sh expects it at
+    # /usr/local/share/kldload-ansible/ in the live root; build-iso.sh
+    # has to put it there explicitly because the rootfs is assembled
+    # from a whitelist, not a wholesale copy of includes.chroot.
+    if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-ansible ]]; then
+        mkdir -p "${ROOTFS}/usr/local/share/kldload-ansible"
+        cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-ansible/. \
+              "${ROOTFS}/usr/local/share/kldload-ansible/"
+        log "Ansible playbook library installed: $(find "${ROOTFS}/usr/local/share/kldload-ansible/playbooks" -name '*.yml' 2>/dev/null | wc -l) playbooks"
+    fi
+
+    # Bob's docs corpus — scraped kldload.com HTML-to-text + OCR'd PDF
+    # manual. The web UI's docs_search tool greps this at query time
+    # to give Bob actual kldload knowledge (the base llama3.1 model has
+    # none). ~3.3 MB total.
+    if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-ai ]]; then
+        mkdir -p "${ROOTFS}/usr/local/share/kldload-ai"
+        cp /build/live-build/config/includes.chroot/usr/local/share/kldload-ai/*.txt \
+              "${ROOTFS}/usr/local/share/kldload-ai/" 2>/dev/null || true
+        log "Bob docs corpus installed: $(du -sh "${ROOTFS}/usr/local/share/kldload-ai" 2>/dev/null | cut -f1)"
+    fi
+
     if [[ -d /build/live-build/config/includes.chroot/usr/local/share/klab ]]; then
         mkdir -p "${ROOTFS}/usr/local/share/klab"
         cp -r /build/live-build/config/includes.chroot/usr/local/share/klab/* "${ROOTFS}/usr/local/share/klab/"
@@ -718,10 +824,22 @@ if [[ "$EDITION" != "core" ]]; then
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/share/applications/${dt}"
     done
 
-    # Copy the main installer to /usr/sbin
-    for sbin_tool in kldload-install-target kldload-firstboot kldload-recovery kldload-snapshot kldload-apply-platform-holds kldload-export-deferred; do
+    # Copy the main installer + orchestrator scripts to /usr/sbin.
+    # kldload-autodeploy is the post-install orchestrator (K8s + AI + klab
+    # goldens). Without it on the live ISO the installer's cp to target is
+    # a silent no-op, which is the 1.0.4/1.0.5 root cause for installs
+    # finishing but never building goldens, K8s, or AI.
+    for sbin_tool in kldload-install-target kldload-firstboot kldload-autodeploy kldload-recovery kldload-snapshot kldload-apply-platform-holds kldload-export-deferred; do
         src="/build/live-build/config/includes.chroot/usr/sbin/${sbin_tool}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/sbin/${sbin_tool}" && chmod +x "${ROOTFS}/usr/sbin/${sbin_tool}"
+    done
+
+    # Copy the sbin-level CLI tools users invoke directly. kspawn (new in
+    # 1.0.5) is the ZFS-native cluster spawner; kldload-autoinstall lives
+    # at /usr/local/sbin/ (handled separately in the live-ISO path).
+    for _lsbin in kspawn; do
+        _src="/build/live-build/config/includes.chroot/usr/local/sbin/${_lsbin}"
+        [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/local/sbin/${_lsbin}" && chmod +x "${ROOTFS}/usr/local/sbin/${_lsbin}"
     done
 
     # Copy installer library files
@@ -927,9 +1045,14 @@ ALPEOF
 
     chroot "$ROOTFS" systemctl enable kldload-apk-mirror 2>/dev/null || true
 
-    # Copy systemd service units from includes.chroot
-    for _svc in kldload-firstboot.service kldload-srv-snapshot.service kldload-srv-snapshot.timer \
-                kldload-snapshot.service kldload-snapshot.timer kldload-export.service; do
+    # Copy systemd service units from includes.chroot. Every unit the
+    # installer's profiles.sh tries to symlink needs to live here first
+    # (otherwise the `[[ -f ... ]] && cp` in profiles.sh silently skips).
+    for _svc in kldload-firstboot.service kldload-autodeploy.service kldload-webui.service \
+                kldload-srv-snapshot.service kldload-srv-snapshot.timer \
+                kldload-snapshot.service kldload-snapshot.timer kldload-export.service \
+                ttyd-k9s.service \
+                klab-prom-targets.service klab-prom-targets.timer; do
         _src="/build/live-build/config/includes.chroot/usr/lib/systemd/system/${_svc}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/lib/systemd/system/${_svc}"
     done
@@ -1169,6 +1292,19 @@ if [[ "$EDITION" != "core" ]]; then
         log "No Fedora darksite found — Fedora installs will require internet"
     fi
 
+    # Copy Ollama model darksite (llama3.1:8b + Bob personality) into rootfs.
+    # Firstboot's AI setup path rsyncs this into /usr/share/ollama/.ollama/
+    # so Bob is chat-ready without pulling ~5 GB from Ollama's registry
+    # on first boot. Adds ~5 GB per model to the ISO; gate with
+    # KLDLOAD_SKIP_OLLAMA_DARKSITE=1 if you don't want AI baked in.
+    if [[ -d /build/live-build/darksite-ollama-cache/models ]]; then
+        mkdir -p "${ROOTFS}/root/darksite/ollama"
+        cp -r /build/live-build/darksite-ollama-cache/models "${ROOTFS}/root/darksite/ollama/"
+        log "Ollama darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/ollama" 2>/dev/null | cut -f1)"
+    else
+        log "No Ollama darksite found — Bob will pull model at firstboot (needs internet)"
+    fi
+
     # Copy Alpine darksite apk cache into the rootfs
     if [[ -d /build/live-build/darksite-alpine-cache/apk ]]; then
         mkdir -p "${ROOTFS}/root/darksite/alpine"
@@ -1306,6 +1442,33 @@ mmd -i "${ISO_STAGING}/images/efiboot.img" ::EFI/BOOT
 mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/${BOOT_EFI}" ::EFI/BOOT/ 2>/dev/null || true
 mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/${GRUB_EFI}" ::EFI/BOOT/ 2>/dev/null || true
 mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grub.cfg" ::EFI/BOOT/
+
+# Write version metadata into the ISO so installers / diagnostics can
+# identify which build a running system came from. Three locations:
+#   .disk/info      — Debian-live convention (single-line "Name Version")
+#   /VERSION        — top-level, trivially `cat`-able
+#   /etc/kldload/VERSION — lives inside the eventual rootfs path too
+# The installer prefers .disk/info but falls back to /VERSION.
+_iso_label="kldload ${VERSION} x86_64"
+_iso_built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+mkdir -p "${ISO_STAGING}/.disk" "${ISO_STAGING}/etc/kldload"
+printf '%s\n' "${_iso_label}" > "${ISO_STAGING}/.disk/info"
+cat > "${ISO_STAGING}/VERSION" <<VERSIONEOF
+kldload_version = ${VERSION}
+iso_name        = ${ISO_NAME}
+built_at        = ${_iso_built_at}
+edition         = ${EDITION:-free}
+profile         = ${PROFILE:-desktop}
+arch            = ${ARCH:-x86_64}
+release         = ${RELEASE:-9}
+VERSIONEOF
+cp "${ISO_STAGING}/VERSION" "${ISO_STAGING}/etc/kldload/VERSION"
+# CRITICAL: also write VERSION into the ROOTFS so the running live
+# system (kldload-install-target reads /etc/kldload/VERSION) can pick
+# it up. Without this, files under ISO_STAGING only exist on the
+# ISO medium, not inside the squashfs'd rootfs that boots.
+mkdir -p "${ROOTFS}/etc/kldload"
+cp "${ISO_STAGING}/VERSION" "${ROOTFS}/etc/kldload/VERSION"
 
 # Build ISO (EFI-only, no legacy BIOS — all modern hardware uses UEFI)
 # -isohybrid-gpt-basdat makes the ISO dd-able to USB (GPT hybrid)

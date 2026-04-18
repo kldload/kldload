@@ -382,6 +382,21 @@ VNETDEF
   printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/99-kldload-kvm.conf
   sysctl -p /etc/sysctl.d/99-kldload-kvm.conf
 
+  # BCC eBPF tools ship in /usr/share/bcc/tools/ (RHEL) or /usr/sbin/ (Ubuntu)
+  # instead of $PATH. The tmux F-key bindings in kldload-console call them
+  # by short name (`execsnoop`, `tcplife`, etc.) — without these symlinks,
+  # every F-key trace returns exit 127.
+  if [[ -d /usr/share/bcc/tools ]]; then
+    for _bcc in execsnoop tcplife tcptop opensnoop biolatency biosnoop \
+                killsnoop tcpretrans tcpconnect tcptracer funccount \
+                argdist stackcount slabratetop; do
+      _src="/usr/share/bcc/tools/${_bcc}"
+      [[ -x "$_src" ]] && [[ ! -e "/usr/local/bin/${_bcc}" ]] && \
+        ln -sf "$_src" "/usr/local/bin/${_bcc}"
+    done
+    log "BCC tools symlinked into /usr/local/bin"
+  fi
+
   # ── Install Firecracker + jailer + firectl from darksite binaries ────────────
   local darksite_bins="/root/darksite/binaries"
   local bin_dest="/usr/local/bin"
@@ -870,6 +885,21 @@ Environment="OLLAMA_HOST=0.0.0.0:11434"
 OLLAMA
         # Fix ownership — Ollama installer creates 'ollama' user
         chown -R ollama:ollama /srv/ollama 2>/dev/null || true
+
+        # If the ISO baked an Ollama darksite (llama3.1:8b weights) into
+        # /root/darksite/ollama/models/, rsync it into place BEFORE
+        # starting Ollama. The subsequent `ollama pull` is then a local
+        # no-op (hash match). Without this, first-boot has to pull ~5 GB
+        # from ollama.com which breaks air-gapped installs.
+        if [[ -d /root/darksite/ollama/models ]]; then
+          mkdir -p /srv/ollama/models
+          log "Rehydrating Ollama models from darksite..."
+          rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ >>"${LOG}" 2>&1 \
+            && ok "Darksite models copied to /srv/ollama/models" \
+            || log "WARNING: darksite rehydrate failed — will pull from internet"
+          chown -R ollama:ollama /srv/ollama 2>/dev/null || true
+        fi
+
         systemctl daemon-reload
         systemctl enable --now ollama
 
@@ -923,25 +953,41 @@ OLLAMA
         (
         set +e
 
-        # AI appliance mode — auto-detect hardware, pick best model, create Bob
+        # AI appliance mode — auto-detect hardware, pick best model, create Bob.
+        # VRAM-driven selection: bigger/smarter models need more GPU memory,
+        # and the old RAM-based heuristic picked laughably small models on
+        # boxes with a 10-12GB GPU (e.g. RTX 3080). We now query nvidia-smi
+        # directly and fall back to RAM tiers only for CPU-only hosts.
         if [[ -f /etc/kldload/autoinstall.env ]]; then
-          local _total_ram_gb
+          local _total_ram_gb _vram_gb=0
           _total_ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
           local _has_gpu=0
           lspci 2>/dev/null | grep -qi nvidia && _has_gpu=1
+          if [[ "$_has_gpu" -eq 1 ]] && command -v nvidia-smi >/dev/null 2>&1; then
+            # Largest GPU's VRAM in GB (handles multi-GPU by picking max)
+            _vram_gb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
+                       | sort -n | tail -1)
+            _vram_gb=$(( ${_vram_gb:-0} / 1024 ))
+          fi
 
-          local _bob_base="llama3.1:8b"
-          if [[ "$_total_ram_gb" -ge 64 ]]; then
-            _bob_base="llama3.1:70b-q4_K_M"
-            _status "Downloading AI model (70B — this machine has ${_total_ram_gb}GB RAM)..."
+          local _bob_base="llama3.1:8b"   # fallback for no-GPU / weak GPU
+          if   [[ "$_vram_gb" -ge 40 ]]; then
+            _bob_base="llama3.1:70b-q4_K_M"   # 70B Q4 — ~40GB, fits A100/H100
+            _status "Downloading AI model (70B — ${_vram_gb}GB VRAM detected)..."
+          elif [[ "$_vram_gb" -ge 10 ]]; then
+            _bob_base="qwen2.5:14b"           # 14B Q4_K_M — ~8.5GB weights
+            _status "Downloading AI model (qwen2.5:14b — ${_vram_gb}GB VRAM, ~8.5GB weights)..."
+          elif [[ "$_vram_gb" -ge 6 ]]; then
+            _bob_base="llama3.1:8b"           # 8B Q4 — ~4.9GB weights
+            _status "Downloading AI model (llama3.1:8b — ${_vram_gb}GB VRAM)..."
           elif [[ "$_total_ram_gb" -ge 16 ]]; then
             _bob_base="llama3.1:8b"
-            _status "Downloading AI model (~4.9 GB)..."
+            _status "Downloading AI model (~4.9 GB, CPU inference, ${_total_ram_gb}GB RAM)..."
           else
             _bob_base="llama3.2:3b"
             _status "Downloading AI model (3B — light, ${_total_ram_gb}GB RAM)..."
           fi
-          log "Hardware: ${_total_ram_gb}GB RAM, GPU=${_has_gpu} — selected ${_bob_base}"
+          log "Hardware: ${_total_ram_gb}GB RAM, GPU=${_has_gpu} VRAM=${_vram_gb}GB — selected ${_bob_base}"
           _pull_model "$_bob_base" "Bob base model"
 
           # Vision model — only pull if we have the VRAM for it. llama3.2-vision:11b
@@ -1002,9 +1048,21 @@ BOBMODEL
           zfs snapshot rpool/srv/ollama@bob 2>/dev/null || true
         else
 
-        # Normal kldload mode — pull models based on flags
+        # Normal kldload mode — pull models based on flags + VRAM-aware
+        # default. KLDLOAD_AI_MODEL_CHAT_NAME overrides everything.
         if [[ "${KLDLOAD_AI_MODEL_CHAT:-1}" == "1" ]]; then
-          _pull_model "llama3.1:8b" "General Chat"
+          local _chat_model="${KLDLOAD_AI_MODEL_CHAT_NAME:-}"
+          if [[ -z "$_chat_model" ]]; then
+            local _v=0
+            if command -v nvidia-smi >/dev/null 2>&1; then
+              _v=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)
+              _v=$(( ${_v:-0} / 1024 ))
+            fi
+            if   [[ "$_v" -ge 10 ]]; then _chat_model="qwen2.5:14b"
+            else                          _chat_model="llama3.1:8b"
+            fi
+          fi
+          _pull_model "$_chat_model" "General Chat"
         fi
         if [[ "${KLDLOAD_AI_MODEL_CODE:-0}" == "1" ]]; then
           _pull_model "qwen2.5-coder:14b" "Code Assistant"
@@ -1463,11 +1521,17 @@ ZFSPOOL
       echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-kvm-forward.conf
       sysctl -p /etc/sysctl.d/99-kvm-forward.conf 2>/dev/null || true
 
-      # Disable default NAT network (we use bridge)
-      virsh net-destroy default 2>/dev/null || true
-      virsh net-autostart default --disable 2>/dev/null || true
+      # Keep default NAT network (virbr0) AND the host bridge (br0) both
+      # alive. Previously we destroyed virbr0 here "because we use br0",
+      # but klab, kspawn, kube-cluster, and the ZFS test lab all attach
+      # their test VMs to virbr0 on 192.168.122.0/24 — destroying it
+      # made `klab golden` fail with "Cannot get interface MTU on virbr0".
+      # The two bridges coexist cleanly: br0 for user-facing VMs with
+      # LAN-routable IPs, virbr0 for klab/internal lab VMs with NAT.
+      virsh net-autostart default 2>/dev/null || true
+      virsh net-start default 2>/dev/null || true
 
-      ok "KVM Host ready — use kvm-create, kvm-snap, kvm-clone"
+      ok "KVM Host ready — use kvm-create, kvm-snap, kvm-clone (br0 for LAN VMs, virbr0 for klab)"
       log "  Storage pool: zfs-vms (rpool/vms)"
       log "  Bridge: br0"
       log "  Tools: kvm-create, kvm-snap, kvm-clone"
@@ -1758,6 +1822,16 @@ FFPOL
 
     # Remove darksite APT mirror (~1.8G) — not needed after install
     if [[ -d /root/darksite ]]; then
+      # Rehydrate ollama weights OUT of the darksite BEFORE nuking the
+      # darksite. Without this, Bob falls back to pulling from ollama.com
+      # on first boot even though the ISO shipped with the model baked in.
+      if [[ -d /root/darksite/ollama/models ]] && [[ ! -f /srv/ollama/models/manifests/registry.ollama.ai/library/qwen2.5/14b && ! -f /srv/ollama/models/manifests/registry.ollama.ai/library/llama3.1/8b ]]; then
+        mkdir -p /srv/ollama/models
+        log "Rehydrating Ollama models from darksite (before darksite removal)..."
+        rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ 2>&1 | tail -3
+        chown -R ollama:ollama /srv/ollama 2>/dev/null || true
+        log "Ollama models rehydrated: $(du -sh /srv/ollama/models 2>/dev/null | cut -f1)"
+      fi
       log "Removing darksite directory (~1.8G)..."
       rm -rf /root/darksite
       rm -f /etc/yum.repos.d/kldload-darksite.repo 2>/dev/null

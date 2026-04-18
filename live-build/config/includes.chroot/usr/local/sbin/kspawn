@@ -1,0 +1,494 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# kspawn — ZFS-native multi-runtime cluster spawner
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Spawns N nodes from klab's golden images using ZFS instant clones. Every
+# node gets a cloud-init seed (hostname + SSH key), boots, and registers in
+# a per-cluster manifest (/var/lib/kspawn/clusters/<name>/manifest.json).
+#
+# v1 runtime: KVM via virt-install.  v1.1 planned: Firecracker microVMs.
+# Remote hosts, Docker/Podman, and k8s role-aware provisioning: v2.
+#
+# Depends on klab goldens being present (rpool/vms/klab-golden-<distro>@golden).
+# Run `sudo klab golden all` first if you don't have them.
+#
+# Usage:
+#   kspawn spawn --name <cluster> --distro <d> --count N [...]
+#   kspawn list
+#   kspawn status <cluster>
+#   kspawn ssh <cluster> [node-index]
+#   kspawn destroy <cluster>
+#
+# Examples:
+#   kspawn spawn --name web --distro debian --count 5 --cpu 2 --ram 4096
+#   kspawn spawn --name db --distro rocky --count 3 --role storage --disk 80
+#   kspawn destroy web
+#
+# ═══════════════════════════════════════════════════════════════════════════
+set -uo pipefail
+
+if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+# ── Config ───────────────────────────────────────────────────────────────
+POOL="${POOL:-rpool}"
+PREFIX="kspawn"
+SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
+STATE_DIR="/var/lib/kspawn"
+CLUSTERS_DIR="${STATE_DIR}/clusters"
+ISO_DIR="/var/lib/libvirt/isos"
+NETWORK="${NETWORK:-default}"
+SSH_TIMEOUT="${SSH_TIMEOUT:-300}"
+
+mkdir -p "$CLUSTERS_DIR" "$ISO_DIR"
+
+# ── Logging ──────────────────────────────────────────────────────────────
+C_RED=$'\033[1;31m'; C_GRN=$'\033[1;32m'; C_YEL=$'\033[1;33m'
+C_CYN=$'\033[1;36m'; C_DIM=$'\033[0;37m'; C_RST=$'\033[0m'
+log()  { printf '%s[kspawn]%s %s\n' "$C_GRN" "$C_RST" "$*" >&2; }
+warn() { printf '%s[kspawn]%s %s\n' "$C_YEL" "$C_RST" "$*" >&2; }
+err()  { printf '%s[kspawn]%s %s\n' "$C_RED" "$C_RST" "$*" >&2; }
+die()  { err "FATAL: $*"; exit 1; }
+
+# ── SSH key setup ─────────────────────────────────────────────────────────
+ensure_ssh_key() {
+  if [[ ! -f "$SSH_KEY" ]]; then
+    log "Generating SSH key at $SSH_KEY..."
+    ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -C "kspawn@$(hostname)" >/dev/null
+  fi
+}
+
+_ssh_cmd() {
+  local ip="$1"; shift
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR -o ConnectTimeout=5 "root@$ip" "$@"
+}
+
+# ── VM IP discovery via virsh DHCP leases ────────────────────────────────
+get_vm_ip() {
+  local name="$1"
+  virsh -q net-dhcp-leases "$NETWORK" 2>/dev/null \
+    | awk -v n="$name" '$6 == n || $NF ~ n { split($5, a, "/"); print a[1]; exit }'
+}
+
+wait_for_ssh() {
+  local ip="$1" timeout="${2:-$SSH_TIMEOUT}"
+  local deadline=$(( $(date +%s) + timeout ))
+  while (( $(date +%s) < deadline )); do
+    if _ssh_cmd "$ip" "true" 2>/dev/null; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+
+wait_for_ip() {
+  local name="$1" timeout="${2:-120}"
+  local deadline=$(( $(date +%s) + timeout ))
+  local ip=""
+  while (( $(date +%s) < deadline )); do
+    ip="$(get_vm_ip "$name")"
+    [[ -n "$ip" ]] && { echo "$ip"; return 0; }
+    sleep 2
+  done
+  return 1
+}
+
+# ── Golden image discovery (borrows klab naming) ─────────────────────────
+golden_snapshot() {
+  local distro="$1"
+  echo "${POOL}/vms/klab-golden-${distro}@golden"
+}
+
+check_golden_exists() {
+  local distro="$1" snap
+  snap="$(golden_snapshot "$distro")"
+  zfs list -H -t snapshot "$snap" &>/dev/null || \
+    die "Golden snapshot missing: $snap
+     Run:  sudo klab golden ${distro}"
+}
+
+list_goldens() {
+  zfs list -H -t snapshot 2>/dev/null \
+    | awk '$1 ~ /klab-golden-[a-z]+@golden$/ { sub(/.*klab-golden-/,"",$1); sub(/@.*/,"",$1); print $1 }' \
+    | sort -u
+}
+
+# ── Cloud-init seed ISO ───────────────────────────────────────────────────
+make_cloudinit_seed() {
+  local hostname="$1" seed_iso="$2" ssh_pub
+  ssh_pub="$(cat "${SSH_KEY}.pub")"
+
+  local tmp
+  tmp="$(mktemp -d)"
+  cat >"${tmp}/meta-data" <<META
+instance-id: ${hostname}
+local-hostname: ${hostname}
+META
+
+  cat >"${tmp}/user-data" <<USER
+#cloud-config
+hostname: ${hostname}
+fqdn: ${hostname}.kspawn.local
+manage_etc_hosts: true
+users:
+  - name: root
+    ssh-authorized-keys:
+      - ${ssh_pub}
+ssh_pwauth: false
+disable_root: false
+runcmd:
+  - [ systemctl, enable, --now, ssh.service ]
+  - [ systemctl, enable, --now, sshd.service ]
+USER
+
+  genisoimage -output "$seed_iso" -volid cidata -joliet -rock \
+    "${tmp}/user-data" "${tmp}/meta-data" >/dev/null 2>&1 \
+    || die "genisoimage failed for $hostname"
+  rm -rf "$tmp"
+}
+
+# ── OS variant resolver (ported from klab) ───────────────────────────────
+declare -A OS_VARIANTS=(
+  [centos]="centos-stream9"
+  [rocky]="centos-stream9"
+  [fedora]="fedora43"
+  [debian]="debian12"
+  [ubuntu]="ubuntu24.04"
+  [rhel]="centos-stream9"
+)
+
+_resolve_os_variants() {
+  command -v osinfo-query >/dev/null 2>&1 || return 0
+  local _known
+  _known="$(osinfo-query -f short-id os 2>/dev/null | awk 'NR>2 {print $1}')"
+  [[ -z "$_known" ]] && return 0
+  local _d _want _try _fallback _n
+  for _d in "${!OS_VARIANTS[@]}"; do
+    _want="${OS_VARIANTS[$_d]}"
+    grep -qxF "$_want" <<<"$_known" && continue
+    _fallback=""
+    case "$_want" in
+      fedora*)
+        for _n in 43 42 41 40; do
+          _try="fedora$_n"
+          grep -qxF "$_try" <<<"$_known" && { _fallback="$_try"; break; }
+        done ;;
+    esac
+    [[ -z "$_fallback" ]] && _fallback="linux"
+    OS_VARIANTS[$_d]="$_fallback"
+  done
+}
+_resolve_os_variants
+
+# ── KVM runtime: spawn one node ──────────────────────────────────────────
+spawn_kvm_node() {
+  local cluster="$1" idx="$2" distro="$3" cpu="$4" ram="$5" disk_gb="$6"
+
+  local node_name="${PREFIX}-${cluster}-$(printf '%02d' "$idx")"
+  local zvol="${POOL}/vms/${node_name}"
+  local golden_snap
+  golden_snap="$(golden_snapshot "$distro")"
+
+  log "  [${node_name}] cloning from ${golden_snap}..."
+  zfs clone "$golden_snap" "$zvol" 2>&1 | grep -v "^$" \
+    || die "zfs clone failed for $node_name"
+
+  # Optional: resize the zvol for this node (ZFS grows the backing,
+  # guest filesystem still needs `growpart` on first boot which cloud-init
+  # handles when the disk reports larger).
+  if [[ -n "$disk_gb" ]] && (( disk_gb > 0 )); then
+    local current_bytes
+    current_bytes="$(zfs get -H -p -o value volsize "$zvol")"
+    local wanted_bytes=$(( disk_gb * 1024 * 1024 * 1024 ))
+    if (( wanted_bytes > current_bytes )); then
+      zfs set volsize="${disk_gb}G" "$zvol" 2>/dev/null \
+        && log "  [${node_name}] volsize grown to ${disk_gb}G"
+    fi
+  fi
+
+  local seed_iso="${ISO_DIR}/${node_name}-seed.iso"
+  make_cloudinit_seed "$node_name" "$seed_iso"
+
+  local os_variant="${OS_VARIANTS[$distro]:-linux}"
+
+  log "  [${node_name}] virt-install (${cpu} CPU, ${ram}MB, ${os_variant})..."
+  virt-install \
+    --connect qemu:///system \
+    --name "$node_name" \
+    --memory "$ram" \
+    --vcpus "$cpu" \
+    --os-variant "$os_variant" \
+    --disk "path=/dev/zvol/${zvol},format=raw,bus=virtio,cache=none" \
+    --disk "path=${seed_iso},device=cdrom,bus=ide" \
+    --network "network=${NETWORK},model=virtio" \
+    --graphics none \
+    --console pty,target_type=serial \
+    --noautoconsole \
+    --import >/dev/null 2>&1 \
+    || { warn "  [${node_name}] virt-install failed"; return 1; }
+
+  local ip
+  if ! ip="$(wait_for_ip "$node_name" 180)"; then
+    warn "  [${node_name}] never got a DHCP lease"
+    ip=""
+  fi
+  echo "${node_name}|${zvol}|${seed_iso}|${ip}"
+}
+
+# ── Manifest write ──────────────────────────────────────────────────────
+write_manifest() {
+  local cluster="$1" distro="$2" runtime="$3" role="$4"
+  local dir="${CLUSTERS_DIR}/${cluster}"
+  mkdir -p "$dir"
+  shift 4
+  local -a nodes=("$@")
+
+  {
+    echo '{'
+    printf '  "cluster": "%s",\n' "$cluster"
+    printf '  "distro": "%s",\n' "$distro"
+    printf '  "runtime": "%s",\n' "$runtime"
+    printf '  "role": "%s",\n' "$role"
+    printf '  "created": "%s",\n' "$(date -Iseconds)"
+    printf '  "nodes": [\n'
+    local first=1
+    for entry in "${nodes[@]}"; do
+      IFS='|' read -r n zvol seed ip <<<"$entry"
+      [[ $first -eq 1 ]] && first=0 || echo ','
+      printf '    {"name":"%s","zvol":"%s","seed":"%s","ip":"%s"}' \
+        "$n" "$zvol" "$seed" "$ip"
+    done
+    echo
+    echo '  ]'
+    echo '}'
+  } >"${dir}/manifest.json"
+}
+
+# ── spawn: top-level command ────────────────────────────────────────────
+cmd_spawn() {
+  local cluster="" distro="" count=3 cpu=2 ram=2048 disk=0 role="worker"
+  local runtime="kvm"
+  while (( $# )); do
+    case "$1" in
+      --name)    cluster="$2"; shift 2 ;;
+      --distro)  distro="$2"; shift 2 ;;
+      --count)   count="$2"; shift 2 ;;
+      --cpu)     cpu="$2"; shift 2 ;;
+      --ram)     ram="$2"; shift 2 ;;
+      --disk)    disk="$2"; shift 2 ;;
+      --role)    role="$2"; shift 2 ;;
+      --runtime) runtime="$2"; shift 2 ;;
+      -h|--help) show_spawn_help; exit 0 ;;
+      *) die "unknown flag: $1" ;;
+    esac
+  done
+
+  [[ -n "$cluster" ]] || die "--name required"
+  [[ -n "$distro"  ]] || die "--distro required (one of: $(list_goldens | tr '\n' ' '))"
+  [[ "$runtime" == "kvm" ]] || die "v1 supports --runtime kvm only (firecracker coming)"
+
+  check_golden_exists "$distro"
+  ensure_ssh_key
+
+  [[ -d "${CLUSTERS_DIR}/${cluster}" ]] && \
+    die "cluster '$cluster' already exists — destroy first: kspawn destroy ${cluster}"
+
+  log "${C_CYN}══ Spawning cluster '${cluster}' ══${C_RST}"
+  log "  distro=${distro} runtime=${runtime} role=${role}"
+  log "  nodes=${count} cpu=${cpu} ram=${ram}MB disk=${disk}GB"
+
+  local -a nodes=()
+  local -a pids=()
+  local tmpf
+  tmpf="$(mktemp -d)"
+
+  # Fire all spawns in parallel — ZFS clone is instant so the bottleneck
+  # is virt-install + cloud-init boot, which parallelises cleanly.
+  local i
+  for ((i=1; i<=count; i++)); do
+    (
+      spawn_kvm_node "$cluster" "$i" "$distro" "$cpu" "$ram" "$disk" \
+        >"${tmpf}/node-${i}.out" 2>>"${tmpf}/node-${i}.err"
+    ) &
+    pids+=($!)
+  done
+
+  # Wait for all
+  local exit_code=0
+  for pid in "${pids[@]}"; do
+    wait "$pid" || exit_code=1
+  done
+
+  # Collect results
+  for ((i=1; i<=count; i++)); do
+    if [[ -s "${tmpf}/node-${i}.out" ]]; then
+      nodes+=("$(cat "${tmpf}/node-${i}.out")")
+    else
+      warn "  node-${i}: no output — check ${tmpf}/node-${i}.err"
+    fi
+  done
+
+  write_manifest "$cluster" "$distro" "$runtime" "$role" "${nodes[@]}"
+
+  log "${C_CYN}══ Cluster '${cluster}' ready ══${C_RST}"
+  printf '%b\n' "$C_DIM"
+  for entry in "${nodes[@]}"; do
+    IFS='|' read -r n _zvol _seed ip <<<"$entry"
+    printf '  %-32s %s\n' "$n" "${ip:-<no-ip>}"
+  done
+  printf '%b\n' "$C_RST"
+  log "Manifest: ${CLUSTERS_DIR}/${cluster}/manifest.json"
+  log "SSH into a node: kspawn ssh ${cluster} 1"
+
+  rm -rf "$tmpf"
+  return $exit_code
+}
+
+# ── list: all clusters ──────────────────────────────────────────────────
+cmd_list() {
+  local found=0
+  local m cluster created nodes runtime distro
+  for m in "${CLUSTERS_DIR}"/*/manifest.json; do
+    [[ -f "$m" ]] || continue
+    found=1
+    cluster="$(basename "$(dirname "$m")")"
+    created="$(awk -F'"' '/"created":/{print $4}' "$m")"
+    runtime="$(awk -F'"' '/"runtime":/{print $4}' "$m")"
+    distro="$(awk -F'"' '/"distro":/{print $4}' "$m")"
+    nodes="$(grep -c '"name"' "$m" || echo 0)"
+    printf '  %-20s %-10s %-10s %3s nodes   %s\n' \
+      "$cluster" "$distro" "$runtime" "$nodes" "$created"
+  done
+  [[ $found -eq 0 ]] && log "No clusters. Try: kspawn spawn --name demo --distro centos --count 3"
+}
+
+# ── status: one cluster ─────────────────────────────────────────────────
+cmd_status() {
+  local cluster="${1:-}"
+  [[ -n "$cluster" ]] || die "usage: kspawn status <cluster>"
+  local m="${CLUSTERS_DIR}/${cluster}/manifest.json"
+  [[ -f "$m" ]] || die "no such cluster: $cluster"
+
+  log "${C_CYN}Cluster: ${cluster}${C_RST}"
+  cat "$m" | sed 's/^/  /'
+  echo
+  log "Live node state:"
+
+  # Parse nodes out of manifest
+  local names
+  names="$(awk -F'"' '/"name":/{print $4}' "$m")"
+  local n state ip
+  while IFS= read -r n; do
+    [[ -z "$n" ]] && continue
+    state="$(virsh domstate "$n" 2>/dev/null || echo 'unknown')"
+    ip="$(get_vm_ip "$n")"
+    printf '  %-32s %-12s %s\n' "$n" "$state" "${ip:-no-ip}"
+  done <<<"$names"
+}
+
+# ── ssh: into a node ────────────────────────────────────────────────────
+cmd_ssh() {
+  local cluster="${1:-}" idx="${2:-1}"
+  [[ -n "$cluster" ]] || die "usage: kspawn ssh <cluster> [index]"
+  local m="${CLUSTERS_DIR}/${cluster}/manifest.json"
+  [[ -f "$m" ]] || die "no such cluster: $cluster"
+
+  local node_name="${PREFIX}-${cluster}-$(printf '%02d' "$idx")"
+  local ip
+  ip="$(awk -F'"' -v n="$node_name" '
+    /"name":/ { in_node = ($4 == n) }
+    in_node && /"ip":/ { print $4; exit }
+  ' "$m")"
+  [[ -n "$ip" ]] || ip="$(get_vm_ip "$node_name")"
+  [[ -n "$ip" ]] || die "no IP known for $node_name — try: kspawn status $cluster"
+  exec ssh -i "$SSH_KEY" \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "root@$ip"
+}
+
+# ── destroy: tear down a cluster ────────────────────────────────────────
+cmd_destroy() {
+  local cluster="${1:-}"
+  [[ -n "$cluster" ]] || die "usage: kspawn destroy <cluster>"
+  local dir="${CLUSTERS_DIR}/${cluster}"
+  [[ -d "$dir" ]] || die "no such cluster: $cluster"
+
+  log "Destroying cluster '${cluster}'..."
+  local m="${dir}/manifest.json"
+  local -a names=() zvols=() seeds=()
+  while IFS= read -r line; do
+    [[ "$line" =~ \"name\":\"([^\"]+)\" ]] && names+=("${BASH_REMATCH[1]}")
+    [[ "$line" =~ \"zvol\":\"([^\"]+)\" ]] && zvols+=("${BASH_REMATCH[1]}")
+    [[ "$line" =~ \"seed\":\"([^\"]+)\" ]] && seeds+=("${BASH_REMATCH[1]}")
+  done <<<"$(tr ',' '\n' <"$m")"
+
+  local n z s
+  for n in "${names[@]}"; do
+    log "  destroying VM $n..."
+    virsh destroy "$n" 2>/dev/null | head -1 || true
+    virsh undefine "$n" --nvram 2>/dev/null | head -1 || true
+  done
+  # give libvirt a beat to release zvol handles
+  sleep 2
+  for z in "${zvols[@]}"; do
+    log "  destroying zvol $z..."
+    # -r to handle any autosnapshots sanoid may have made
+    zfs destroy -rf "$z" 2>&1 | head -3 || warn "  zfs destroy $z failed"
+  done
+  for s in "${seeds[@]}"; do
+    [[ -f "$s" ]] && rm -f "$s"
+  done
+  rm -rf "$dir"
+  log "Cluster '${cluster}' destroyed."
+}
+
+# ── help ────────────────────────────────────────────────────────────────
+show_spawn_help() {
+  cat <<EOF
+kspawn spawn — spawn a cluster of VMs from a klab golden
+
+Required flags:
+  --name <cluster>     Cluster name (becomes prefix of VM names)
+  --distro <d>         Distro (centos|rocky|fedora|debian|ubuntu)
+
+Optional:
+  --count N            Number of nodes (default 3)
+  --cpu N              vCPUs per node (default 2)
+  --ram N              RAM MB per node (default 2048)
+  --disk N             Disk GB per node (default: inherit from golden)
+  --role <r>           Role tag in manifest (default worker)
+  --runtime <r>        kvm (default). firecracker/docker planned.
+
+Examples:
+  kspawn spawn --name web --distro debian --count 5
+  kspawn spawn --name db --distro rocky --count 3 --role storage --ram 8192
+EOF
+}
+
+show_help() {
+  cat <<EOF
+kspawn — ZFS-native multi-runtime cluster spawner (v1)
+
+Usage:
+  kspawn spawn [flags]       Spawn a new cluster   (see: kspawn spawn -h)
+  kspawn list                List all clusters
+  kspawn status <cluster>    Show one cluster's live state
+  kspawn ssh <cluster> [N]   SSH to node N (default 1) in a cluster
+  kspawn destroy <cluster>   Tear down a cluster + all its zvols
+
+Backend: ZFS instant clones from klab goldens at rpool/vms/klab-golden-<d>@golden.
+State:   /var/lib/kspawn/clusters/<cluster>/manifest.json
+
+See: https://kldload.com/kspawn  (coming)
+EOF
+}
+
+# ── Dispatch ────────────────────────────────────────────────────────────
+case "${1:-help}" in
+  spawn)    shift; cmd_spawn "$@" ;;
+  list)     shift; cmd_list "$@" ;;
+  status)   shift; cmd_status "$@" ;;
+  ssh)      shift; cmd_ssh "$@" ;;
+  destroy)  shift; cmd_destroy "$@" ;;
+  -h|--help|help|*) show_help ;;
+esac

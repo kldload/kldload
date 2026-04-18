@@ -2,139 +2,87 @@ global:
   scrape_interval: 30s
   evaluation_interval: 30s
 
+# Zero hardcoded IPs. All dynamic target sets live in /etc/prometheus/targets/
+# as JSON, populated by klab-prom-targets (systemd timer, runs every 30s).
+# Prometheus file_sd watches the directory for changes — new VMs, new K8s
+# nodes, DHCP re-lease, scale events all reflect without reload/restart.
+#
+# Generators (klab-prom-targets writes these):
+#   targets/klab-blue.json           — klab blue-site VMs
+#   targets/klab-green.json          — klab green-site VMs
+#   targets/klab-kspawn.json         — any cluster spawned via kspawn
+#   targets/cilium-agent.json        — cilium metrics per K8s node (9962)
+#   targets/cilium-operator.json     — cilium-operator hostPort (9963)
+#   targets/hubble-metrics.json      — hubble flow metrics (9965)
+#   targets/tetragon.json            — tetragon syscall metrics (2112)
+#   targets/kubelet.json             — kubelet metrics (10250)
+#
+# To add a new target type, extend klab-prom-targets to write one more
+# JSON file. No edits to this YAML needed.
+
 scrape_configs:
-  # Host system metrics
-  - job_name: 'klab-host'
+  # Host system metrics (localhost — the one IP that can't lie)
+  - job_name: klab-host
     static_configs:
       - targets: ['localhost:9100']
         labels:
           role: host
 
   # klab estate metrics (golden status, VM state, test results, ZFS pool)
-  - job_name: 'klab-exporter'
+  - job_name: klab-exporter
     static_configs:
       - targets: ['localhost:9101']
 
-  # Blue site VMs — static IPs 192.168.122.101-106
-  - job_name: 'klab-blue'
-    static_configs:
-      - targets:
-          - '192.168.122.101:9100'
-          - '192.168.122.102:9100'
-          - '192.168.122.103:9100'
-          - '192.168.122.104:9100'
-          - '192.168.122.105:9100'
-          - '192.168.122.106:9100'
-        labels:
-          site: blue
-    relabel_configs:
-      - source_labels: [__address__]
-        regex: '192\.168\.122\.101:.*'
-        target_label: distro
-        replacement: centos
-      - source_labels: [__address__]
-        regex: '192\.168\.122\.102:.*'
-        target_label: distro
-        replacement: rocky
-      - source_labels: [__address__]
-        regex: '192\.168\.122\.103:.*'
-        target_label: distro
-        replacement: fedora
-      - source_labels: [__address__]
-        regex: '192\.168\.122\.104:.*'
-        target_label: distro
-        replacement: debian
-      - source_labels: [__address__]
-        regex: '192\.168\.122\.105:.*'
-        target_label: distro
-        replacement: ubuntu
-      - source_labels: [__address__]
-        regex: '192\.168\.122\.106:.*'
-        target_label: distro
-        replacement: rhel
-
-  # Green site VMs — static IPs 192.168.122.201-206
-  - job_name: 'klab-green'
-    static_configs:
-      - targets:
-          - '192.168.122.201:9100'
-          - '192.168.122.202:9100'
-          - '192.168.122.203:9100'
-          - '192.168.122.204:9100'
-          - '192.168.122.205:9100'
-          - '192.168.122.206:9100'
-        labels:
-          site: green
-    relabel_configs:
-      - source_labels: [__address__]
-        regex: '192\.168\.122\.201:.*'
-        target_label: distro
-        replacement: centos
-      - source_labels: [__address__]
-        regex: '192\.168\.122\.202:.*'
-        target_label: distro
-        replacement: rocky
-      - source_labels: [__address__]
-        regex: '192\.168\.122\.203:.*'
-        target_label: distro
-        replacement: fedora
-      - source_labels: [__address__]
-        regex: '192\.168\.122\.204:.*'
-        target_label: distro
-        replacement: debian
-      - source_labels: [__address__]
-        regex: '192\.168\.122\.205:.*'
-        target_label: distro
-        replacement: ubuntu
-      - source_labels: [__address__]
-        regex: '192\.168\.122\.206:.*'
-        target_label: distro
-        replacement: rhel
+  # ── klab VMs (blue/green/kspawn) ────────────────────────────────────────
+  # Each target file carries per-VM labels (site, distro, cluster, name)
+  # that klab-prom-targets synthesizes from `virsh` + klab state DB.
+  - job_name: klab-blue
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/klab-blue.json']
+        refresh_interval: 30s
+  - job_name: klab-green
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/klab-green.json']
+        refresh_interval: 30s
+  - job_name: klab-kspawn
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/klab-kspawn.json']
+        refresh_interval: 30s
 
   # ── Kubernetes cluster observability ──────────────────────────────────
-  # kube-cluster lays VMs down on 192.168.122.206 (cp) and .135/.187/.224
-  # (workers) using a deterministic DHCP reservation map. Port map:
-  #   9962 = cilium-agent    (needs prometheus.enabled=true in helm values)
-  #   9963 = cilium-operator (hostPort, only up on the pod's node)
-  #   9965 = hubble metrics  (needs hubble.metrics.enabled + a metrics list)
-  #   2112 = tetragon metrics
+  # kube-cluster used to hardcode cp/worker IPs here. Broke on every
+  # install because node IPs come from DHCP. Now the target JSONs are
+  # regenerated from `kubectl get nodes -o wide` after cluster bootstrap
+  # (and every 30s thereafter by klab-prom-targets).
   #
   # Stock grafana.com dashboards (16611/16612/16613) filter by
   # {k8s_app="cilium"} and {pod=~"$pod"} / {io_cilium_app="operator"}.
-  # Because we scrape static hostPort targets (not ServiceMonitor CRDs),
-  # those labels aren't populated automatically — synthesize them here so
-  # every panel lights up without touching the upstream dashboard JSON.
+  # Those labels are synthesized into each JSON target by
+  # klab-prom-targets so the upstream dashboards light up unchanged.
   - job_name: cilium-agent
-    static_configs:
-      - targets: ['192.168.122.206:9962']
-        labels: {k8s_app: cilium, pod: cilium-kldload-cp, node: kldload-cp}
-      - targets: ['192.168.122.135:9962']
-        labels: {k8s_app: cilium, pod: cilium-kldload-w-1, node: kldload-w-1}
-      - targets: ['192.168.122.224:9962']
-        labels: {k8s_app: cilium, pod: cilium-kldload-w-2, node: kldload-w-2}
-      - targets: ['192.168.122.187:9962']
-        labels: {k8s_app: cilium, pod: cilium-kldload-w-3, node: kldload-w-3}
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/cilium-agent.json']
+        refresh_interval: 30s
   - job_name: cilium-operator
-    static_configs:
-      - targets: ['192.168.122.206:9963', '192.168.122.135:9963', '192.168.122.224:9963', '192.168.122.187:9963']
-        labels: {io_cilium_app: operator, k8s_app: cilium-operator}
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/cilium-operator.json']
+        refresh_interval: 30s
   - job_name: hubble-metrics
-    static_configs:
-      - targets: ['192.168.122.206:9965']
-        labels: {k8s_app: cilium, pod: cilium-kldload-cp, node: kldload-cp}
-      - targets: ['192.168.122.135:9965']
-        labels: {k8s_app: cilium, pod: cilium-kldload-w-1, node: kldload-w-1}
-      - targets: ['192.168.122.224:9965']
-        labels: {k8s_app: cilium, pod: cilium-kldload-w-2, node: kldload-w-2}
-      - targets: ['192.168.122.187:9965']
-        labels: {k8s_app: cilium, pod: cilium-kldload-w-3, node: kldload-w-3}
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/hubble-metrics.json']
+        refresh_interval: 30s
   - job_name: tetragon
-    static_configs:
-      - targets: ['192.168.122.206:2112']
-        labels: {pod: tetragon-kldload-cp, node: kldload-cp}
-      - targets: ['192.168.122.135:2112']
-        labels: {pod: tetragon-kldload-w-1, node: kldload-w-1}
-      - targets: ['192.168.122.224:2112']
-        labels: {pod: tetragon-kldload-w-2, node: kldload-w-2}
-      - targets: ['192.168.122.187:2112']
-        labels: {pod: tetragon-kldload-w-3, node: kldload-w-3}
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/tetragon.json']
+        refresh_interval: 30s
+  - job_name: kubelet
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/kubelet.json']
+        refresh_interval: 30s
+    # kubelet serves metrics over HTTPS with a self-signed cert; skip
+    # verify inside the lab (prometheus doesn't have the kube CA chain).
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    authorization:
+      credentials_file: /var/lib/kldload/kubelet-token

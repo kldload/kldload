@@ -143,7 +143,6 @@ The live environment is always CentOS Stream 9. The user picks their target dist
 ## Releases
 
 ### 1.0.4 — Kubernetes on ZFS (current)
-- **200+ commits.** Kubernetes templates for the KVM profile.
 - `kube-cluster bootstrap --workers N` — golden image → ZFS clones → full cluster
 - Cilium eBPF CNI — no kube-proxy, no iptables, pure kernel datapath
 - Hubble eBPF observability — L3/L4/L7 flow visibility from first boot

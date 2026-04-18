@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# bob — main CLI with live system context injection
+# Usage: bob "why is my system slow"
+#        bob --model deepseek-r1:7b "explain kubernetes"
+#        bob --no-context "tell me a joke"
+#        bob --list-models
+set -euo pipefail
+
+BOB_MODEL="${BOB_MODEL:-bob}"
+BOB_CONTEXT="${BOB_CONTEXT:-true}"
+BOB_HISTORY="${BOB_HISTORY:-$HOME/.bob/history}"
+
+# ── Parse flags ──────────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --model) BOB_MODEL="$2"; shift 2 ;;
+    --no-context) BOB_CONTEXT=false; shift ;;
+    --list-models) ollama list 2>/dev/null; exit 0 ;;
+    --help|-h)
+      echo "bob — talk to Bob with live system context"
+      echo ""
+      echo "Usage: bob \"your question\""
+      echo "       bob --model deepseek-r1:7b \"your question\""
+      echo "       bob --no-context \"just chat\""
+      echo "       bob --list-models"
+      exit 0
+      ;;
+    *) break ;;
+  esac
+done
+
+Q="${*:-Hey Bob, what can you help me with?}"
+
+# ── Gather system context ────────────────────────────────────────────────────
+CTX=""
+if [[ "$BOB_CONTEXT" == "true" ]]; then
+  # Always include basics
+  _cpu=$(grep 'model name' /proc/cpuinfo 2>/dev/null | head -1 | sed 's/.*: //')
+  _cores=$(nproc 2>/dev/null || echo "?")
+  _ram=$(awk '/MemTotal/{printf "%.1f", $2/1024/1024}' /proc/meminfo 2>/dev/null)
+  _ram_free=$(awk '/MemAvailable/{printf "%.1f", $2/1024/1024}' /proc/meminfo 2>/dev/null)
+  _disk=$(df -h / 2>/dev/null | awk 'NR==2{print $3"/"$2" ("$5" used)"}')
+  _load=$(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1-3)
+  _uptime=$(uptime -p 2>/dev/null | sed 's/up //')
+  _os=$(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')
+  _gpu=$(lspci 2>/dev/null | grep -iE 'vga|3d|display' | head -1 | sed 's/.*: //' | sed 's/ \[.*//')
+  _hostname=$(hostname 2>/dev/null)
+
+  CTX="[System context — ${_hostname}]
+OS: ${_os}
+CPU: ${_cpu} (${_cores} cores)
+RAM: ${_ram_free}GB free / ${_ram}GB total
+Disk: ${_disk}
+GPU: ${_gpu:-none}
+Load: ${_load}
+Uptime: ${_uptime}"
+
+  # Failed services
+  _failed=$(systemctl --failed --no-legend 2>/dev/null | head -5)
+  if [[ -n "$_failed" ]]; then
+    CTX="${CTX}
+Failed services:
+${_failed}"
+  fi
+
+  # Smart context — add more info based on question keywords
+  _q_lower=$(echo "$Q" | tr '[:upper:]' '[:lower:]')
+
+  if echo "$_q_lower" | grep -qE 'slow|hang|freeze|lag|performance|cpu|load'; then
+    _top=$(ps aux --sort=-%cpu 2>/dev/null | head -8)
+    CTX="${CTX}
+
+Top processes by CPU:
+${_top}"
+  fi
+
+  if echo "$_q_lower" | grep -qE 'network|internet|wifi|dns|ip|ping|connect|ssh|port'; then
+    _net=$(ip -br addr 2>/dev/null | grep -v '^lo')
+    _dns=$(cat /etc/resolv.conf 2>/dev/null | grep nameserver | head -3)
+    CTX="${CTX}
+
+Network interfaces:
+${_net}
+DNS: ${_dns}"
+  fi
+
+  if echo "$_q_lower" | grep -qE 'disk|storage|space|full|mount'; then
+    _mounts=$(df -h 2>/dev/null | grep -v tmpfs | grep -v overlay)
+    CTX="${CTX}
+
+Disk usage:
+${_mounts}"
+  fi
+
+  if echo "$_q_lower" | grep -qE 'memory|ram|oom|swap'; then
+    _mem=$(free -h 2>/dev/null)
+    CTX="${CTX}
+
+Memory:
+${_mem}"
+  fi
+
+  if echo "$_q_lower" | grep -qE 'service|systemd|unit|daemon|running'; then
+    _svcs=$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | head -15 | awk '{print $1}')
+    CTX="${CTX}
+
+Running services:
+${_svcs}"
+  fi
+
+  if echo "$_q_lower" | grep -qE 'gpu|nvidia|amd|cuda|graphics'; then
+    if command -v nvidia-smi &>/dev/null; then
+      _nv=$(nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu --format=csv,noheader 2>/dev/null)
+      CTX="${CTX}
+
+GPU (nvidia-smi):
+${_nv}"
+    fi
+  fi
+fi
+
+# ── Build prompt and send to Ollama ──────────────────────────────────────────
+if [[ -n "$CTX" ]]; then
+  PROMPT="${CTX}
+
+User question: ${Q}"
+else
+  PROMPT="$Q"
+fi
+
+# Log query
+mkdir -p "$(dirname "$BOB_HISTORY")"
+echo "[$(date '+%F %T')] Q: ${Q}" >> "${BOB_HISTORY}.log" 2>/dev/null || true
+
+echo "$PROMPT" | ollama run "$BOB_MODEL"

@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""Bob splash page — hardware detection, progress stages, quotes."""
+import http.server
+import json
+import threading
+import time
+import urllib.request
+import os
+
+OPEN_WEBUI_PORT = 8080
+SPLASH_PORT = 9090
+ready = False
+
+HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Bob</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0a0a0a;
+  color: #e0e0e0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  flex-direction: column;
+  overflow: hidden;
+}
+.container {
+  text-align: center;
+  max-width: 580px;
+  padding: 2rem;
+}
+.logo {
+  font-size: 5rem;
+  font-weight: 200;
+  letter-spacing: -0.05em;
+  color: #fff;
+  margin-bottom: 0.2rem;
+  text-shadow: 0 0 40px rgba(52,211,153,0.15);
+}
+.tagline {
+  font-size: 1.05rem;
+  color: #666;
+  margin-bottom: 2.5rem;
+  font-weight: 300;
+}
+
+/* Hardware dashboard */
+.hw-panel {
+  position: fixed;
+  bottom: 3rem;
+  left: 2rem;
+  text-align: left;
+  opacity: 0;
+  transition: opacity 1s;
+}
+.hw-panel.show { opacity: 1; }
+.hw-title {
+  font-size: 0.65rem;
+  color: #34d399;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  margin-bottom: 0.5rem;
+}
+.hw-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.75rem;
+  color: #555;
+}
+.hw-icon {
+  width: 14px;
+  text-align: center;
+  color: #34d399;
+  font-size: 0.7rem;
+}
+.hw-val { color: #888; }
+.hw-badge {
+  display: inline-block;
+  font-size: 0.6rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  margin-left: 0.3rem;
+  font-weight: 600;
+}
+.badge-fast { background: rgba(52,211,153,0.15); color: #34d399; }
+.badge-ok { background: rgba(250,204,21,0.15); color: #facc15; }
+.badge-slow { background: rgba(239,68,68,0.15); color: #ef4444; }
+
+/* Progress bar */
+.progress-wrap {
+  width: 100%;
+  max-width: 400px;
+  margin: 0 auto 1.5rem;
+}
+.progress-bar {
+  height: 4px;
+  background: #1a1a1a;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 1rem;
+  position: relative;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #34d399, #22d3ee);
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.8s ease;
+}
+.progress-pulse {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(90deg, transparent, rgba(52,211,153,0.3), transparent);
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.stages {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.7rem;
+  color: #444;
+  margin-bottom: 2rem;
+}
+.stages span { transition: color 0.5s; }
+.stages span.active { color: #34d399; }
+.stages span.done { color: #666; }
+
+.status {
+  font-size: 0.95rem;
+  color: #34d399;
+  min-height: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+.quote {
+  font-size: 0.8rem;
+  color: #555;
+  font-style: italic;
+  min-height: 1.2rem;
+  margin-bottom: 2rem;
+  transition: opacity 0.5s;
+}
+
+/* First-use notice */
+.notice {
+  font-size: 0.75rem;
+  color: #888;
+  background: #111;
+  border: 1px solid #222;
+  border-radius: 8px;
+  padding: 0.8rem 1.2rem;
+  margin-bottom: 2rem;
+  display: none;
+  line-height: 1.5;
+}
+.notice.show {
+  display: block;
+  animation: fadeIn 0.6s;
+}
+.notice strong { color: #34d399; }
+
+.ready { display: none; }
+.ready.show {
+  display: block;
+  animation: fadeIn 0.6s;
+}
+.ready a {
+  display: inline-block;
+  background: linear-gradient(135deg, #34d399, #22d3ee);
+  color: #0a0a0a;
+  text-decoration: none;
+  padding: 0.9rem 2.5rem;
+  border-radius: 10px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: 0 4px 24px rgba(52,211,153,0.2);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.ready a:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 32px rgba(52,211,153,0.3);
+}
+
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+.footer {
+  position: fixed;
+  bottom: 1.2rem;
+  right: 2rem;
+  font-size: 0.65rem;
+  color: #2a2a2a;
+  letter-spacing: 0.05em;
+  text-align: right;
+}
+</style>
+<script>
+const quotes = [
+  "Warming up the neurons...",
+  "Loading my thoughts...",
+  "Organizing my brain...",
+  "Stretching my circuits...",
+  "Brewing a fresh pot of knowledge...",
+  "Dusting off the encyclopedia...",
+  "Sharpening my pencils...",
+  "Finding my reading glasses...",
+  "Untangling my neural pathways...",
+  "Almost there, just thinking about thinking...",
+  "Calibrating friendliness levels...",
+  "Remembering everything I know...",
+  "Preparing to be helpful...",
+  "Making myself comfortable..."
+];
+
+const stageKeys = [
+  ["Starting", 5, 0], ["NVIDIA", 15, 0], ["AMD", 15, 0], ["Intel", 15, 0],
+  ["No dedicated", 15, 0], ["Loading NVIDIA", 15, 0],
+  ["Starting Ollama", 30, 1], ["Ollama ready", 45, 1],
+  ["Starting Bob UI", 50, 2], ["Loading Bob UI", 60, 2],
+  ["Bob UI started", 70, 2], ["Loading AI model", 85, 3],
+  ["Almost ready", 90, 3], ["Bob is ready", 100, 3]
+];
+
+let quoteIdx = Math.floor(Math.random() * quotes.length);
+
+function rotateQuote() {
+  const el = document.getElementById('quote');
+  if (!el || ready) return;
+  el.style.opacity = 0;
+  setTimeout(() => {
+    quoteIdx = (quoteIdx + 1) % quotes.length;
+    el.textContent = '\u201c' + quotes[quoteIdx] + '\u201d';
+    el.style.opacity = 1;
+  }, 400);
+}
+
+function updateStages(n) {
+  document.querySelectorAll('.stages span').forEach((el, i) => {
+    el.className = i < n ? 'done' : i === n ? 'active' : '';
+  });
+}
+
+function renderHardware(hw) {
+  const panel = document.getElementById('hw-panel');
+  if (!hw || !hw.cpu) return;
+
+  let gpuText = hw.gpu || 'No dedicated GPU';
+  let badge = '';
+  if (hw.gpu_type === 'nvidia') {
+    badge = '<span class="hw-badge badge-fast">GPU Accelerated</span>';
+  } else if (hw.gpu_type === 'amd' || hw.gpu_type === 'intel') {
+    badge = '<span class="hw-badge badge-ok">Integrated</span>';
+  } else {
+    badge = '<span class="hw-badge badge-slow">CPU Only</span>';
+    gpuText = 'None detected';
+  }
+
+  let ramBadge = '';
+  if (hw.ram_gb >= 32) ramBadge = '<span class="hw-badge badge-fast">Excellent</span>';
+  else if (hw.ram_gb >= 16) ramBadge = '<span class="hw-badge badge-ok">Good</span>';
+  else ramBadge = '<span class="hw-badge badge-slow">Limited</span>';
+
+  // Shorten CPU name
+  let cpu = hw.cpu.replace(/\(R\)|\(TM\)|CPU|Processor|@ .*/gi, '').trim();
+
+  panel.innerHTML = `
+    <div class="hw-title">Bob detected your hardware</div>
+    <div class="hw-row"><span class="hw-icon">\u25A0</span> <span class="hw-val">${cpu} &middot; ${hw.cores} cores</span></div>
+    <div class="hw-row"><span class="hw-icon">\u25A0</span> <span class="hw-val">${hw.ram_gb} GB RAM ${ramBadge}</span></div>
+    <div class="hw-row"><span class="hw-icon">\u25A0</span> <span class="hw-val">${gpuText} ${badge}</span></div>
+  `;
+  panel.classList.add('show');
+}
+
+let ready = false;
+
+function checkReady() {
+  fetch('/status')
+    .then(r => r.json())
+    .then(d => {
+      document.getElementById('status').textContent = d.status;
+
+      // Hardware
+      if (d.hardware) renderHardware(d.hardware);
+
+      // Progress
+      for (const [key, pct, stage] of stageKeys) {
+        if (d.status.includes(key)) {
+          document.getElementById('progress-fill').style.width = pct + '%';
+          updateStages(stage);
+          break;
+        }
+      }
+
+      if (d.ready) {
+        ready = true;
+        document.getElementById('progress-fill').style.width = '100%';
+        document.querySelector('.progress-pulse').style.display = 'none';
+        updateStages(4);
+        document.getElementById('quote').style.display = 'none';
+        document.querySelector('.notice').classList.add('show');
+        document.querySelector('.ready').classList.add('show');
+        // First boot → builder, configured → chat
+        fetch('http://localhost:OPEN_WEBUI_PORT/api/configured')
+          .then(r => r.json())
+          .then(d => {
+            const dest = d.configured ? 'http://localhost:OPEN_WEBUI_PORT' : 'http://localhost:OPEN_WEBUI_PORT/builder';
+            setTimeout(() => { window.location.href = dest; }, 4000);
+          })
+          .catch(() => {
+            setTimeout(() => { window.location.href = 'http://localhost:OPEN_WEBUI_PORT/builder'; }, 6000);
+          });
+      } else {
+        setTimeout(checkReady, 1500);
+      }
+    })
+    .catch(() => setTimeout(checkReady, 2000));
+}
+
+window.onload = () => {
+  checkReady();
+  rotateQuote();
+  setInterval(rotateQuote, 4000);
+};
+</script>
+</head>
+<body>
+<div class="container">
+  <div class="logo">Bob</div>
+  <p class="tagline">A friend who knows a lot.</p>
+
+  <div class="progress-wrap">
+    <div class="progress-bar">
+      <div class="progress-fill" id="progress-fill"></div>
+      <div class="progress-pulse"></div>
+    </div>
+    <div class="stages">
+      <span class="active">Hardware</span>
+      <span>Ollama</span>
+      <span>Bob UI</span>
+      <span>AI Model</span>
+      <span>Ready</span>
+    </div>
+  </div>
+
+  <p class="status" id="status">Starting up...</p>
+  <p class="quote" id="quote">&ldquo;Warming up the neurons...&rdquo;</p>
+
+  <div class="notice">
+    <strong>Bob adapts to your hardware.</strong>
+    With a GPU, responses are near-instant.
+    On CPU, Bob is still helpful &mdash; just needs a moment to think.
+    The first message after boot loads the AI model into memory.
+  </div>
+
+  <div class="ready">
+    <a href="http://localhost:OPEN_WEBUI_PORT">Talk to Bob</a>
+  </div>
+</div>
+
+<div class="hw-panel" id="hw-panel"></div>
+
+<p class="footer">Runs on your hardware &middot; Nothing leaves this machine &middot; bob-ai.ca</p>
+</body>
+</html>""".replace("OPEN_WEBUI_PORT", str(OPEN_WEBUI_PORT))
+
+
+def check_openwebui():
+    global ready
+    while not ready:
+        try:
+            with open('/tmp/bob-status') as f:
+                status = f.read().strip()
+            if status == "Bob is ready":
+                ready = True
+                break
+        except Exception:
+            pass
+        time.sleep(2)
+
+
+def get_hardware():
+    try:
+        with open('/tmp/bob-hardware.json') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+class SplashHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/status':
+            try:
+                with open('/tmp/bob-status') as f:
+                    status = f.read().strip()
+            except Exception:
+                status = "Starting up..."
+            hw = get_hardware()
+            resp = {"ready": ready, "status": status}
+            if hw:
+                resp["hardware"] = hw
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(resp).encode())
+        else:
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.end_headers()
+            self.wfile.write(HTML.encode())
+
+    def log_message(self, *args):
+        pass
+
+
+if __name__ == '__main__':
+    threading.Thread(target=check_openwebui, daemon=True).start()
+    server = http.server.HTTPServer(('0.0.0.0', SPLASH_PORT), SplashHandler)
+    print(f"Bob splash on :{SPLASH_PORT}")
+    server.serve_forever()

@@ -886,6 +886,15 @@ if ! k_have_func k_write_install_manifest; then
   k_write_install_manifest() {
     local target="${KLDLOAD_TARGET_MNT}"
     mkdir -p "${target}/etc/kldload"
+
+    # For non-core profiles, default the autodeploy-driven subsystems
+    # (K8s cluster, klab goldens, AI) to ON so the UX is "install, reboot,
+    # watch the UI indicator, come back to a running cluster." Core
+    # profile is bare ZFS only and stays opt-in. Individual flags can
+    # still be overridden by the installer env or web UI.
+    local _kld_heavy=1
+    [[ "${KLDLOAD_PROFILE:-server}" == "core" ]] && _kld_heavy=0
+
     cat > "${target}/etc/kldload/install-manifest.env" <<EOF
 # KLDload Install Manifest — written by installer $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 KLDLOAD_INSTALL_DATE="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -904,11 +913,18 @@ KLDLOAD_STORAGE_MODE="${KLDLOAD_STORAGE_MODE:-zfs}"
 KLDLOAD_ZFS_TOPOLOGY="${KLDLOAD_ZFS_TOPOLOGY:-single}"
 KLDLOAD_ZFS_ENCRYPT="${KLDLOAD_ZFS_ENCRYPT:-0}"
 KLDLOAD_DEBIAN_RELEASE="${KLDLOAD_DEBIAN_RELEASE:-trixie}"
-KLDLOAD_INSTALLER_VERSION="1.0.0"
+# Prefer the ISO's build-time version (written to /etc/kldload/VERSION by
+# builder/build-iso.sh) so the attestation reports the real shipped version
+# rather than a hardcoded string that drifts. Fall back to a sentinel if
+# the file is missing (e.g. running this script outside a kldload live env).
+KLDLOAD_INSTALLER_VERSION="${KLDLOAD_INSTALLER_VERSION:-$(
+    awk -F'[[:space:]]*=[[:space:]]*' '/^kldload_version/{print $2; exit}' \
+        /etc/kldload/VERSION 2>/dev/null || echo '1.0.5'
+)}"
 # Deployment intent: standalone | cluster-manager | join
 KLDLOAD_INFRA_MODE="${KLDLOAD_INFRA_MODE:-standalone}"
 KLDLOAD_DISTRO="${KLDLOAD_DISTRO:-centos}"
-KLDLOAD_ENABLE_AI="${KLDLOAD_ENABLE_AI:-0}"
+KLDLOAD_ENABLE_AI="${KLDLOAD_ENABLE_AI:-${_kld_heavy}}"
 KLDLOAD_ENABLE_EBPF="${KLDLOAD_ENABLE_EBPF:-0}"
 KLDLOAD_NVIDIA_DRIVERS="${KLDLOAD_NVIDIA_DRIVERS:-0}"
 KLDLOAD_WIREGUARD="${KLDLOAD_WIREGUARD:-0}"
@@ -918,14 +934,61 @@ KLDLOAD_EXPORT_FORMAT="${KLDLOAD_EXPORT_FORMAT:-none}"
 # firstboot orchestrator doesn't know what the user picked in the UI.
 KLDLOAD_ENABLE_KVM="${KLDLOAD_ENABLE_KVM:-0}"
 KLDLOAD_ENABLE_K8S="${KLDLOAD_ENABLE_K8S:-0}"
-KLDLOAD_K8S_BOOTSTRAP="${KLDLOAD_K8S_BOOTSTRAP:-0}"
-KLDLOAD_ENABLE_DEVOPS="${KLDLOAD_ENABLE_DEVOPS:-0}"
-KLDLOAD_KLAB_ZFS_DEV="${KLDLOAD_KLAB_ZFS_DEV:-0}"
+KLDLOAD_K8S_BOOTSTRAP="${KLDLOAD_K8S_BOOTSTRAP:-${_kld_heavy}}"
+KLDLOAD_ENABLE_DEVOPS="${KLDLOAD_ENABLE_DEVOPS:-${_kld_heavy}}"
+KLDLOAD_KLAB_ZFS_DEV="${KLDLOAD_KLAB_ZFS_DEV:-${_kld_heavy}}"
 # For join mode: LAN IP of the Cluster Manager to connect to at first boot
 KLDLOAD_HUB_LAN="${KLDLOAD_HUB_LAN:-}"
 EOF
     chmod 0640 "${target}/etc/kldload/install-manifest.env"
     k_log "Install manifest written: ${target}/etc/kldload/install-manifest.env"
+
+    # ── ISO install attestation ──────────────────────────────────────
+    # Writes /etc/kldload/install.attest on the target with the exact
+    # ISO SHA-256 + version + date that produced this install. Later
+    # `klab test` runs reference this file so the audit bundle links
+    # back to the original ISO artifact — closing the proof chain:
+    #   ISO (known SHA) → installer run → test run → results.
+    local _iso_path _iso_sha _iso_ver _iso_build
+    # Live ISO is mounted at /run/live/medium (debian-live) or
+    # /run/initramfs/live (dracut). Try both.
+    for _p in /run/live/medium /run/initramfs/live /lib/live/mount/medium; do
+      [[ -f "${_p}/.disk/info" || -f "${_p}/LiveOS/squashfs.img" || -f "${_p}/VERSION" ]] \
+          && { _iso_path="$_p"; break; }
+    done
+    # Prefer .disk/info (Debian-live convention), fall back to /VERSION
+    # (kldload-native format written by builder/build-iso.sh), then any
+    # embedded /etc/kldload/VERSION from the rootfs tree on the ISO.
+    if [[ -n "${_iso_path:-}" && -f "${_iso_path}/.disk/info" ]]; then
+      _iso_ver="$(head -1 "${_iso_path}/.disk/info" 2>/dev/null || echo unknown)"
+    elif [[ -n "${_iso_path:-}" && -f "${_iso_path}/VERSION" ]]; then
+      _iso_ver="$(awk -F'= ' '/^kldload_version/{print "kldload " $2 " " ENVIRON["_arch"]}' \
+                        "${_iso_path}/VERSION" _arch="$(uname -m)" 2>/dev/null \
+                  || head -1 "${_iso_path}/VERSION")"
+    elif [[ -n "${_iso_path:-}" && -f "${_iso_path}/etc/kldload/VERSION" ]]; then
+      _iso_ver="$(head -1 "${_iso_path}/etc/kldload/VERSION" 2>/dev/null)"
+    fi
+    # SHA-256 of the squashfs is stable per-ISO; we pin that rather
+    # than the whole ISO file which may not be mounted read-back-able.
+    if [[ -n "${_iso_path:-}" && -f "${_iso_path}/LiveOS/squashfs.img" ]]; then
+      _iso_sha="$(sha256sum "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null | awk '{print $1}')"
+    fi
+    _iso_build="$(stat -c '%y' "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null || date -Iseconds)"
+    cat > "${target}/etc/kldload/install.attest" <<ATTEST
+
+[install_attestation]
+iso_version    = ${_iso_ver:-?}
+iso_sha256     = ${_iso_sha:-?}
+iso_built_at   = ${_iso_build}
+install_date   = $(date -Iseconds)
+install_host   = $(hostname 2>/dev/null || cat /etc/hostname)
+install_disk   = ${KLDLOAD_INSTALL_DISK:-?}
+installer_ver  = ${KLDLOAD_INSTALLER_VERSION:-?}
+target_distro  = ${KLDLOAD_DISTRO:-?}
+target_profile = ${KLDLOAD_PROFILE:-?}
+ATTEST
+    chmod 0644 "${target}/etc/kldload/install.attest"
+    k_log "Install attestation written: ${target}/etc/kldload/install.attest"
   }
 fi
 
@@ -1630,117 +1693,15 @@ main() {
   fi
 
   # ── AI Assistant setup (if enabled) ──────────────────────────────────────
+  # Install-time Ollama setup has been removed. Running curl|chroot bash
+  # from the installer fails on real hardware because the target chroot
+  # lacks /etc/resolv.conf and a fully-wired dynamic linker path (exit 127
+  # "bash: No such file or directory"). Defer the whole AI bring-up to
+  # kldload-firstboot — it runs after the target has booted into a real
+  # kernel with networking, systemd, DNS, and full libc. The Ollama
+  # darksite (when present) makes firstboot essentially offline too.
   if [[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]; then
-    _info ""
-    _info "Setting up AI Assistant..."
-    (
-      set +e
-      local target="${KLDLOAD_TARGET:?}"
-
-      # Install Ollama into target
-      _info "  Installing Ollama..."
-      curl -fsSL https://ollama.com/install.sh | chroot "${target}" bash >> "${KLDLOAD_LOG_DIR}/ai-setup.log" 2>&1
-      if chroot "${target}" which ollama >/dev/null 2>&1; then
-        _ok "Ollama" "installed"
-      else
-        _warn "Ollama install failed — will retry on first boot"
-      fi
-
-      # Start Ollama temporarily in the chroot to pull model
-      chroot "${target}" bash -c 'ollama serve &>/dev/null &'
-      local _ollama_pid=$!
-      sleep 3
-
-      # Wait for Ollama API
-      local _ready=false
-      for _i in $(seq 1 12); do
-        if chroot "${target}" curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
-          _ready=true
-          break
-        fi
-        sleep 2
-      done
-
-      if [[ "$_ready" == "true" ]]; then
-        # Pull the model
-        _info "  Downloading llama3.1:8b (~4.9 GB)..."
-        if chroot "${target}" ollama pull llama3.1:8b >> "${KLDLOAD_LOG_DIR}/ai-setup.log" 2>&1; then
-          _ok "Model" "llama3.1:8b downloaded"
-
-          # Create kldload-ai trained model using baked-in docs
-          local _ai_docs="${target}/usr/local/share/kldload-ai/kldload-docs.txt"
-          local _ai_manual="${target}/usr/local/share/kldload-ai/kldload-manual.txt"
-          local _corpus=""
-          [[ -f "$_ai_docs" ]] && _corpus="$(head -c 4000 "$_ai_docs")"
-          [[ -f "$_ai_manual" ]] && _corpus="${_corpus}$(head -c 4000 "$_ai_manual")"
-
-          cat > "${target}/tmp/Modelfile.kldload" <<AIMODEL
-FROM llama3.1:8b
-
-SYSTEM """
-You are a Linux infrastructure assistant trained on kldloadOS documentation.
-You know these tools: kst, ksnap, kclone, kdf, kdir, kpkg, kexport, kbe, krecovery, kupgrade, kldload-help, kai.
-You know ZFS deeply: zpool, zfs, sanoid, syncoid, ARC tuning, boot environments via ZFSBootMenu.
-You know WireGuard, eBPF (bcc, bpftrace), Docker on ZFS, KVM/libvirt.
-Give exact commands, not abstract advice. Always recommend a snapshot before changes.
-
-Documentation excerpt:
-${_corpus}
-"""
-
-PARAMETER temperature 0.3
-PARAMETER num_ctx 8192
-AIMODEL
-
-          if chroot "${target}" ollama create kldload-ai -f /tmp/Modelfile.kldload >> "${KLDLOAD_LOG_DIR}/ai-setup.log" 2>&1; then
-            _ok "AI Model" "kldload-ai created with documentation"
-          else
-            _warn "Custom model creation failed — base llama3.1:8b will be available"
-          fi
-          rm -f "${target}/tmp/Modelfile.kldload"
-        else
-          _warn "Model download failed — will retry on first boot"
-        fi
-      else
-        _warn "Ollama API not ready — will complete on first boot"
-      fi
-
-      # Stop Ollama in chroot
-      chroot "${target}" pkill -f 'ollama serve' 2>/dev/null || true
-
-      # Enable Ollama service for boot
-      chroot "${target}" systemctl enable ollama.service 2>/dev/null || true
-
-      # Install Open WebUI via podman if available
-      if chroot "${target}" which podman >/dev/null 2>&1; then
-        _info "  Pulling Open WebUI container..."
-        if chroot "${target}" podman pull ghcr.io/open-webui/open-webui:main >> "${KLDLOAD_LOG_DIR}/ai-setup.log" 2>&1; then
-          _ok "Open WebUI" "container image cached"
-          # Create systemd service for Open WebUI
-          cat > "${target}/etc/systemd/system/open-webui.service" <<'OWSVC'
-[Unit]
-Description=Open WebUI for Ollama
-After=network.target ollama.service
-Requires=ollama.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/podman run --rm --name open-webui --network host -v open-webui:/app/backend/data -e OLLAMA_BASE_URL=http://127.0.0.1:11434 ghcr.io/open-webui/open-webui:main
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-OWSVC
-          chroot "${target}" systemctl enable open-webui.service 2>/dev/null || true
-          _ok "Open WebUI" "service enabled — http://localhost:8080 on boot"
-        else
-          _warn "Open WebUI pull failed — install manually with podman"
-        fi
-      fi
-
-      _ok "AI Setup" "complete"
-    )
+    k_log "AI setup deferred to first boot (kldload-firstboot handles Ollama install + model pull + Bob creation)"
   fi
 
   # Target mount point — needed for MOK enrollment, log copy, and smoke test

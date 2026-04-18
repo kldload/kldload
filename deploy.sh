@@ -171,6 +171,64 @@ cmd_build_ubuntu_darksite() {
     log "Ubuntu darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
 }
 
+# Build the Fedora RPM offline mirror (darksite).
+# Runs inside a fedora:<RELEASE> container (default fedora:43) and downloads
+# all packages needed for Fedora offline installs. Cached at
+# live-build/darksite-fedora-cache/. Slow on first run, incremental after.
+cmd_build_fedora_darksite() {
+    local runtime
+    runtime="$(detect_runtime)"
+    local darksite_dir
+    local _fed_arch
+    case "$ARCH" in
+        x86_64|amd64) _fed_arch="x86_64"; darksite_dir="$ROOT/live-build/darksite-fedora-cache" ;;
+        aarch64|arm64) _fed_arch="aarch64"; darksite_dir="$ROOT/live-build/darksite-fedora-cache-arm64" ;;
+        *) die "unsupported ARCH=$ARCH" ;;
+    esac
+    mkdir -p "$darksite_dir"
+    local fed_release="${FEDORA_RELEASE:-43}"
+    log "Building Fedora ${fed_release} darksite RPM mirror (${_fed_arch})..."
+    "$runtime" run --rm \
+        --platform "linux/amd64" \
+        -v "$ROOT/build/darksite-fedora:/darksite-build:z,ro" \
+        -v "$ROOT/build/darksite:/darksite-el:z,ro" \
+        -v "$darksite_dir:/output:z" \
+        -e ARCH="${_fed_arch}" \
+        -e RELEASE="${fed_release}" \
+        -e K8S_MINOR="${K8S_MINOR:-v1.32}" \
+        --name "kldload-darksite-fedora-$$" \
+        "fedora:${fed_release}" \
+        bash /darksite-build/build-darksite-fedora.sh
+    log "Fedora darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
+}
+
+# Build the Ollama model darksite. Pulls the LLM weights into a host
+# cache so every ISO ships Bob chat-ready without an internet roundtrip.
+# Default model set via OLLAMA_MODELS (comma-sep); adds ~5GB per model.
+cmd_build_ollama_darksite() {
+    local runtime
+    runtime="$(detect_runtime)"
+    local darksite_dir="$ROOT/live-build/darksite-ollama-cache"
+    mkdir -p "$darksite_dir"
+    # Bake qwen2.5:14b only. It's strictly better than llama3.1:8b at
+    # tool calling + reasoning, and one model keeps the ISO ~5 GB smaller.
+    # Users with weaker GPUs can manually `ollama pull llama3.1:8b` post-
+    # install if they prefer the smaller model. Override with
+    # OLLAMA_MODELS=... to bake anything else.
+    local models="${OLLAMA_MODELS:-qwen2.5:14b}"
+    log "Building Ollama model darksite (models=${models})..."
+    "$runtime" run --rm \
+        --platform linux/amd64 \
+        -v "$ROOT/build/darksite-ollama:/darksite-build:z,ro" \
+        -v "$darksite_dir:/output:z" \
+        -e OLLAMA_MODELS="${models}" \
+        --entrypoint bash \
+        --name "kldload-darksite-ollama-$$" \
+        docker.io/ollama/ollama:latest \
+        /darksite-build/build-darksite-ollama.sh
+    log "Ollama darksite ready: $(du -sh "$darksite_dir" 2>/dev/null | cut -f1)"
+}
+
 # Build the AI knowledge base for the local assistant.
 # Scrapes kldload-web HTML pages to text and OCRs the PDF manual.
 # Output goes to the ISO at /usr/local/share/kldload-ai/.
@@ -272,11 +330,34 @@ cmd_build() {
             log "Ubuntu darksite cached: $(du -sh "$ubuntu_darksite" | cut -f1)"
         fi
 
-        # Arch, Alpine, Fedora have no darksites:
-        #   Arch = rolling release (no point caching)
-        #   Alpine = partial apk cache only
-        #   Fedora = separate RPM darksite built inside the builder container
-        log "Note: Arch, Alpine, Fedora installs require internet (no offline darksite)"
+        # Fedora RPM darksite — built in a fedora:<RELEASE> container, cached
+        # at live-build/darksite-fedora-cache/. Marker file is the createrepo
+        # repomd.xml — its presence means the repo was built successfully.
+        local fedora_darksite="$ROOT/live-build/darksite-fedora-cache"
+        if [[ ! -f "$fedora_darksite/rpm/repodata/repomd.xml" ]]; then
+            cmd_build_fedora_darksite
+        else
+            log "Fedora darksite cached: $(du -sh "$fedora_darksite" | cut -f1)"
+        fi
+
+        # Ollama model darksite — pulls llama3.1:8b once and bakes the
+        # weights into every ISO so Bob is chat-ready on first boot
+        # without hitting the internet. Set KLDLOAD_SKIP_OLLAMA_DARKSITE=1
+        # to skip (saves ~5 GB ISO size for server/headless builds).
+        if [[ "${KLDLOAD_SKIP_OLLAMA_DARKSITE:-0}" != "1" ]]; then
+            local ollama_darksite="$ROOT/live-build/darksite-ollama-cache"
+            # Marker: at least one manifest exists under the models tree.
+            if ! ls "$ollama_darksite"/models/manifests/registry.ollama.ai/library/*/* >/dev/null 2>&1; then
+                cmd_build_ollama_darksite
+            else
+                log "Ollama darksite cached: $(du -sh "$ollama_darksite" | cut -f1)"
+            fi
+        else
+            log "Skipping Ollama darksite (KLDLOAD_SKIP_OLLAMA_DARKSITE=1)"
+        fi
+
+        # Arch has no darksite — rolling release, not worth caching.
+        log "Note: Arch installs require internet (rolling release, no darksite)"
     else
         log "Core edition — skipping darksites."
     fi
@@ -598,6 +679,8 @@ case "${1:-help}" in
     build-ai-appliance) cmd_build_ai_appliance ;;
     build-debian-darksite) cmd_build_debian_darksite ;;
     build-ubuntu-darksite) cmd_build_ubuntu_darksite ;;
+    build-fedora-darksite) cmd_build_fedora_darksite ;;
+    build-ollama-darksite) cmd_build_ollama_darksite ;;
     build-k8s-darksite)
         # Build Kubernetes + Cilium offline image cache separately.
         # Normally this runs as part of `build`, but can be triggered
@@ -635,6 +718,8 @@ Build:
   builder-image          Rebuild the CentOS 9 builder container image
   build-debian-darksite  Rebuild the Debian APT offline mirror cache
   build-ubuntu-darksite  Rebuild the Ubuntu APT offline mirror cache
+  build-fedora-darksite  Rebuild the Fedora RPM offline mirror cache
+  build-ollama-darksite  Pre-pull Ollama LLM models (llama3.1:8b by default) for offline Bob
   build-k8s-darksite     Pre-pull Kubernetes + Cilium container images
   build-ai-docs          Scrape website + OCR PDF for AI knowledge base
   build-ai-appliance     Build self-contained Bob AI appliance ISO

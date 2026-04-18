@@ -399,7 +399,7 @@ select option:checked { background: #00b8d9; color: #000; }
               </div>
               <div class="target-card" data-distro="fedora" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🎩</div>
-                <div class="tc-name">Fedora 41</div>
+                <div class="tc-name">Fedora 43</div>
                 <div class="tc-sub">offline</div>
               </div>
               <div class="target-card" data-distro="debian" onclick="selectDistro(this)">
@@ -461,15 +461,10 @@ select option:checked { background: #00b8d9; color: #000; }
           </div>
         </div>
 
-        <!-- klab options (shown when klab profile selected) -->
-        <div id="klab-options" style="display:none;margin-bottom:1rem;padding:1rem;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
-          <div style="font-size:0.85rem;font-weight:600;color:var(--bright);margin-bottom:0.4rem">klab Options</div>
-          <div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.8rem">Configure the multi-distro test platform golden images.</div>
-          <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
-            <input type="checkbox" id="klab-zfs-dev" style="margin-top:0.15rem">
-            <div><strong style="color:var(--text)">ZFS Dev Tools</strong> — zfs-tests.sh, ksh, gdb, strace, perf, kernel-devel, DKMS headers, 4x4GB loopback vdevs<br><span style="font-size:0.7rem;color:var(--muted)">Default: clean ZFS + eBPF only. Check this to add full OpenZFS development + testing environment to every golden image.</span></div>
-          </label>
-        </div>
+        <!-- klab options panel removed. ZFS dev-tools goldens are a
+             separate lineage now (klab-ztest-<distro>) that's built on
+             demand from the ZFS Test Lab tile in the dashboard. Regular
+             klab goldens always stay lean. -->
 
         <!-- Distro summary -->
         <div id="distro-summary" style="margin:0.4rem 0 0.8rem;font-size:0.8rem;color:var(--accent);padding:0 0.5rem">
@@ -540,7 +535,7 @@ select option:checked { background: #00b8d9; color: #000; }
               </div>
               <div class="target-card" data-role="devops" onclick="selectTarget(this)">
                 <div class="tc-icon">🔬</div>
-                <div class="tc-name">klab</div>
+                <div class="tc-name">kldlab</div>
                 <div class="tc-sub">Multi-distro test platform</div>
               </div>
             </div>
@@ -1837,7 +1832,7 @@ select option:checked { background: #00b8d9; color: #000; }
             <span style="font-size:1.1rem">🎩</span>
             <span class="badge" id="kg-st-fedora" style="font-size:0.7rem">checking...</span>
           </div>
-          <div class="tc-name" style="font-size:0.85rem;margin-bottom:0.2rem">Fedora 41</div>
+          <div class="tc-name" style="font-size:0.85rem;margin-bottom:0.2rem">Fedora 43</div>
           <div id="kg-meta-fedora" style="font-size:0.7rem;color:var(--muted);margin-bottom:0.5rem"></div>
           <div style="display:flex;gap:0.3rem;flex-wrap:wrap">
             <button class="btn btn-primary btn-sm" style="font-size:0.72rem" onclick="klabGolden('fedora')">Build</button>
@@ -2235,7 +2230,7 @@ select option:checked { background: #00b8d9; color: #000; }
                   <option value="">All distros</option>
                   <option value="centos">CentOS Stream 9</option>
                   <option value="rocky">Rocky 9</option>
-                  <option value="fedora">Fedora 41</option>
+                  <option value="fedora">Fedora 43</option>
                   <option value="debian">Debian 13</option>
                   <option value="ubuntu">Ubuntu 24.04</option>
                   <option value="rhel">RHEL 9</option>
@@ -2268,8 +2263,26 @@ select option:checked { background: #00b8d9; color: #000; }
             <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
               <button class="btn btn-primary btn-sm" onclick="klabBuildZtestGoldens()">Build all ZFS test goldens</button>
               <button class="btn btn-ghost btn-sm" onclick="klabBuildZtestGolden()">Build one (pick distro)</button>
-              <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_status'})">↻ Refresh status</button>
+              <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_ztest_goldens'})">↻ Refresh</button>
             </div>
+
+            <!-- ZFS test golden matrix: which ones exist, how big they
+                 are, when they were built. Populated by the
+                 klab_ztest_goldens WS message (renderZtestGoldens). -->
+            <table style="margin-top:0.9rem;font-size:0.82rem">
+              <thead><tr>
+                <th style="text-align:left">Distro</th>
+                <th style="text-align:left">Status</th>
+                <th style="text-align:left">Built</th>
+                <th style="text-align:right">Size</th>
+                <th style="text-align:left">Kernel</th>
+                <th style="text-align:left">ZFS</th>
+                <th></th>
+              </tr></thead>
+              <tbody id="zfstest-goldens-tbody">
+                <tr><td colspan="7" style="color:var(--muted);padding:0.6rem 0.75rem">Click ↻ Refresh to check.</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -2900,6 +2913,7 @@ function handle(msg) {
     case 'klab_metrics': { renderKlabMetrics(msg.metrics); break; }
     case 'klab_flows': { renderKlabFlows(msg); break; }
     case 'klab_test_runs': { renderTestRuns(msg.runs || []); break; }
+    case 'klab_ztest_goldens': { renderZtestGoldens(msg.goldens || {}); break; }
     case 'klab_test_detail': { renderTestDetail(msg.run, msg.logs || {}); break; }
     case 'klab_ebpf_output': {
       const el = document.getElementById('ebpf-output');
@@ -3012,10 +3026,27 @@ function handle(msg) {
     case 'bob_models': {
       if (msg.ok && msg.models.length) {
         const models = msg.models;
-        // Pick default chat model — preference: 'bob' custom model → any llama text model
+        // Pick default chat model. Preference order:
+        //   1. Anything named "bob" — for hand-built classic Bob appliance builds
+        //   2. "kldload-ai" (this is what builder/build-iso.sh actually creates —
+        //      the llama3.1:8b base with Bob's SYSTEM prompt + tool calling).
+        //      Falling through past this was the reason Bob looked "dumb" — the
+        //      frontend picked bare llama3.1 which has no Bob persona and unreliable
+        //      tool-call behaviour at 8B params.
+        //   3. Any llama-named text model
+        //   4. First text model
         const textCandidates = models.filter(m => !/(vision|llava)/i.test(m));
-        _bobModel = models.includes('bob') ? 'bob'
-                  : (textCandidates.find(m => /llama/i.test(m)) || textCandidates[0] || models[0]);
+        const matchPrefix = (prefix) => textCandidates.find(
+          m => m === prefix || m.toLowerCase().startsWith(prefix.toLowerCase() + ':'));
+        _bobModel = matchPrefix('bob')
+                  || matchPrefix('kldload-ai')
+                  || matchPrefix('qwen2.5')
+                  || matchPrefix('qwen2.5-coder')
+                  || matchPrefix('phi4')
+                  || matchPrefix('deepseek-r1')
+                  || textCandidates.find(m => /llama/i.test(m))
+                  || textCandidates[0]
+                  || models[0];
         // Pick a vision model if one is available (for image-bearing turns)
         _bobVisionModel = models.find(m => /(vision|llava)/i.test(m)) || '';
         const st = document.getElementById('bob-status-line');
@@ -3166,7 +3197,8 @@ document.querySelectorAll('#sidebar li[data-view]').forEach(li => {
     if (li.dataset.view === 'tests-zfs') {
       // Dedicated OpenZFS test suite workspace.
       send({ action: 'klab_test_results' });
-      send({ action: 'klab_status' });   // needed for dev-tools status box
+      send({ action: 'klab_status' });          // for dev-tools status box
+      send({ action: 'klab_ztest_goldens' });   // matrix of built ztest goldens
       _zfstestRestoreTab();
     }
   });
@@ -3200,14 +3232,12 @@ function selectTarget(el) {
   const aiModels = document.getElementById('ai-models');
   if (aiCb) aiCb.checked = el.dataset.role === 'ai';
   if (aiModels) aiModels.style.display = el.dataset.role === 'ai' ? 'block' : 'none';
-  // klab profile — toggle klab options
-  const klabOpts = document.getElementById('klab-options');
-  if (klabOpts) klabOpts.style.display = el.dataset.role === 'devops' ? 'block' : 'none';
+  // klab options panel no longer exists (ZFS dev tools moved to ztest lineage).
 }
 
 const DISTRO_DESCS = {
   centos:   'CentOS Stream 9 — RHEL upstream, offline from RPM darksite',
-  fedora:   'Fedora 41 — Latest packages, fast updates',
+  fedora:   'Fedora 43 — Latest packages, fast updates',
   debian:   'Debian 13 (trixie) — stable, offline from APT darksite',
   rocky:    'Rocky Linux 9 — RHEL-compatible, offline from RPM darksite',
   rhel:     'RHEL 9 — requires activation key (needs internet)',
@@ -3436,7 +3466,10 @@ function startInstall() {
     // needed (AND'd with the explicit choice) but default to ON.
     enable_ai: (roleRaw === 'devops' || document.getElementById('install-ai')?.checked) ? '1' : '0',
     enable_devops: roleRaw === 'devops' ? '1' : '0',
-    klab_zfs_dev: (roleRaw === 'devops' || document.getElementById('klab-zfs-dev')?.checked) ? '1' : '0',
+    // ZFS dev-tools goldens are now a separate on-demand lineage
+    // (klab-ztest-<distro>) built from the ZFS Test Lab tile. Installer
+    // never sets KLAB_ZFS_DEV=1 — keeps regular goldens lean.
+    klab_zfs_dev: '0',
     ai_model_chat: document.getElementById('ai-model-chat')?.checked ? '1' : '0',
     ai_model_code: document.getElementById('ai-model-code')?.checked ? '1' : '0',
     ai_model_smart: document.getElementById('ai-model-smart')?.checked ? '1' : '0',
@@ -3505,7 +3538,7 @@ function confirmInstall() {
 
   // Build profile summary line
   const p = _installPayload || {};
-  const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 41', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', freebsd: 'FreeBSD 15.0' };
+  const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 43', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', freebsd: 'FreeBSD 15.0' };
   const profileNames = { desktop: 'Desktop', server: 'Server', core: 'Core', kvm: 'KVM Host', ai: 'AI' };
   let summary = (distroNames[p.distro] || p.distro || 'CentOS') + ' · ' + (profileNames[p.role] || p.role || 'Desktop');
   const addons = [];
@@ -4224,6 +4257,53 @@ function klabBuildZtestGoldens() {
   if (!confirm('Build ZFS test goldens for all distros? Takes ~10 min each. They are reusable across test runs.')) return;
   send({action: 'klab_build_ztest_goldens', target: 'all'});
   zfsTestSubTab('log');
+  // Kick a status refresh after a beat so the matrix updates when
+  // builds finish (the poll also runs on tab activation).
+  setTimeout(() => send({action: 'klab_ztest_goldens'}), 5000);
+}
+function renderZtestGoldens(goldens) {
+  const tb = document.getElementById('zfstest-goldens-tbody');
+  if (!tb) return;
+  const rows = Object.values(goldens || {});
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="7" style="color:var(--muted);padding:0.6rem 0.75rem">No ZFS test goldens built yet.</td></tr>';
+    return;
+  }
+  // Summary counts for the header
+  const built = rows.filter(g => g.ready).length;
+  const pending = rows.length - built;
+  tb.innerHTML = rows.map(g => {
+    const badge = g.ready
+      ? '<span class="chip chip-ok">built</span>'
+      : '<span class="chip" style="background:var(--surface2);color:var(--muted)">not built</span>';
+    const name = `<span style="font-family:monospace;font-weight:600">${esc(g.distro)}</span>
+                  <span style="color:var(--muted);font-size:0.72rem;margin-left:0.4rem">${esc(g.name || '')}</span>`;
+    return `<tr>
+      <td>${name}</td>
+      <td>${badge}</td>
+      <td style="color:var(--subtle);font-family:monospace;font-size:0.76rem">${esc(g.built || '—')}</td>
+      <td style="text-align:right;color:var(--subtle)">${esc(g.size || '—')}</td>
+      <td style="color:var(--muted);font-size:0.76rem">${esc(g.kernel || '—')}</td>
+      <td style="color:var(--muted);font-size:0.76rem">${esc(g.zfs_ver || '—')}</td>
+      <td style="text-align:right">
+        ${g.ready
+          ? `<button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="klabDestroyZtestGolden('${esc(g.distro)}')" title="Destroy + rebuild">✕ rebuild</button>`
+          : `<button class="btn btn-primary btn-sm" style="font-size:0.72rem" onclick="send({action:'klab_build_ztest_goldens', target:'${esc(g.distro)}'});zfsTestSubTab('log')">▶ build</button>`}
+      </td>
+    </tr>`;
+  }).join('');
+  // Header status line
+  const hdr = document.getElementById('zfstest-header-status');
+  if (hdr) hdr.textContent = `OpenZFS functional + performance suite · ${built}/${rows.length} ztest goldens built`;
+}
+function klabDestroyZtestGolden(distro) {
+  if (!confirm(`Destroy the klab-ztest-${distro} golden? Next test run will need to rebuild it (~10 min).`)) return;
+  // No dedicated destroy endpoint yet — use a shell command via a
+  // throwaway stream_proc invocation through the backend's standard
+  // helper channel.  Simplest: pipe through klab_destroy which already
+  // knows how to nuke a VM + its zvol.
+  send({action: 'klab_destroy', target: `ztest:${distro}`});
+  setTimeout(() => send({action: 'klab_ztest_goldens'}), 2000);
 }
 function klabBuildZtestGolden() {
   const pick = prompt('Which distro? (centos, rocky, fedora, debian, ubuntu, rhel)', 'centos');
@@ -5501,6 +5581,10 @@ function klabRunTest() {
   const exec = document.querySelector('input[name="klab-test-exec"]:checked')?.value || 'parallel';
   const distro = document.getElementById('klab-test-distro')?.value || '';
   send({ action: 'klab_test', mode, distro, execution: exec });
+  // Jump to the live log so the user sees output flow immediately —
+  // without this the Run tab stays focused and the test appears to be
+  // doing nothing for the first 30-60s of VM clone + SSH wait.
+  if (typeof zfsTestSubTab === 'function') zfsTestSubTab('log');
 }
 
 // ZFS Testing view renderers
@@ -6049,10 +6133,84 @@ function bobInit() {
   }
 }
 
+// Bob's greeting rotation — 64 variants, casual/warm/infra-flavoured,
+// randomly picked per new conversation so he doesn't feel like a chatbot
+// reading the same card every time. Tone: trusted friend with root
+// access, not a corporate assistant.
+const BOB_GREETINGS = [
+  "Bob here. What do you need?",
+  "Hey — Bob. What's up?",
+  "Bob on the line. What are we doing?",
+  "Hi. Bob. Ready when you are.",
+  "Ok, Bob's here. Hit me.",
+  "Bob reporting. What's the problem?",
+  "Hey there — what can I help with?",
+  "Bob at your service. What's going on?",
+  "Morning (or whenever it is). What do you need?",
+  "Hi, Bob. What's broken, and how broken?",
+  "Bob online. What are we working on?",
+  "Hey — fire away.",
+  "Bob here. Ask me anything.",
+  "Yo. What's the situation?",
+  "Bob checking in. Where do you need me?",
+  "Hey boss. What's the play?",
+  "Bob ready. Give me the shape of the problem.",
+  "Hi — what can I look at?",
+  "Bob here. What are we debugging today?",
+  "Hey. Need a set of eyes on something?",
+  "Bob reporting for duty. What's first?",
+  "Hi — what's the story?",
+  "Bob here. Let's figure it out.",
+  "Hey, I'm around. What's up?",
+  "Bob — what's the ask?",
+  "Hi. Got a task for me?",
+  "Bob. Ready to dig in.",
+  "Hey — what do you want to know?",
+  "Bob here. Keep it short or go long — either works.",
+  "Hi — where do you want to start?",
+  "Bob on deck. Let's go.",
+  "Hey. What needs figuring out?",
+  "Bob here. Show me what you're seeing.",
+  "Hi, hi — what's the question?",
+  "Bob. What can I run, check, or explain?",
+  "Hey — talk to me.",
+  "Bob ready. What's today's weirdness?",
+  "Hi. What are you trying to get done?",
+  "Bob on standby. Your move.",
+  "Hey — what's odd?",
+  "Bob here. What's the blast radius?",
+  "Hi — what would you like a second opinion on?",
+  "Bob. I can trace, diag, or explain. Which?",
+  "Hey — what's misbehaving?",
+  "Bob reporting. Got something strange?",
+  "Hi — let's see what we can figure out.",
+  "Bob here. What would you like me to look at first?",
+  "Hey. Let's get into it.",
+  "Bob. Hand me something to look at.",
+  "Hi — just ask. I'll do my best.",
+  "Bob ready. No judgment, any question.",
+  "Hey — lab's running, Bob's running. Let's go.",
+  "Bob checking in. Tell me what you know, I'll tell you what I can find.",
+  "Hi — let's make the problem smaller.",
+  "Bob here. Point me at something.",
+  "Hey, welcome back. What now?",
+  "Bob. What are we profiling today?",
+  "Hi — something slow? something broken? something curious?",
+  "Bob online. Nothing to hide; ask away.",
+  "Hey — I've got eyes on the kernel, the cluster, and the pools. What first?",
+  "Bob reporting. Give me a symptom.",
+  "Hi. Need a command, a trace, or a sanity check?",
+  "Bob here. Let's make today's lab a good one.",
+  "Hey — what's the hypothesis?",
+];
+function _bobPickGreeting() {
+  return BOB_GREETINGS[Math.floor(Math.random() * BOB_GREETINGS.length)];
+}
+
 function bobNewConversation() {
   _bobConvId = 'bob-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   _bobConvTitle = 'New conversation';
-  _bobHistory = [{ role: 'assistant', content: 'Bob here. What do you need?' }];
+  _bobHistory = [{ role: 'assistant', content: _bobPickGreeting() }];
   _renderBobMessages();
 }
 
