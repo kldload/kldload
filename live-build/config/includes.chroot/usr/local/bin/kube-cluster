@@ -44,6 +44,18 @@ if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 # All overridable via environment variables or --flags.
 # Auto-scale VM resources based on host hardware. The CP runs etcd + API
 # server + Cilium + MetalLB + Hubble and needs more RAM/CPU than workers.
+#
+# ZFS Lab mode: if KLDLOAD_ZFSLAB_MODE=1 is set via the install manifest,
+# bootstrap a minimal observability-only cluster — 1 CP (2 GB / 1 vCPU),
+# 0 workers. Just enough for Hubble + Tetragon; the rest of the host
+# stays free for klab ztest goldens + zfs-tests.sh runs.
+if [[ "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" ]]; then
+    : "${WORKERS:=0}"
+    : "${CP_RAM:=2048}"
+    : "${CP_CPUS:=1}"
+    : "${RAM:=2048}"
+    : "${CPUS:=1}"
+fi
 WORKERS="${WORKERS:-3}"
 DESTROY_ALL="${DESTROY_ALL:-0}"
 CILIUM_CLI_VERSION="${CILIUM_CLI_VERSION:-0.19.2}"

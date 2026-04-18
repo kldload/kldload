@@ -176,8 +176,19 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
     if [[ -f "${STATE_DIR}/k8s-ready" ]]; then
         log "[k8s] already marked ready — skipping"
     else
-        log "[k8s] running kube-cluster bootstrap --workers 3"
-        if kube-cluster bootstrap --workers 3 >> /var/log/kldload/kube-bootstrap.log 2>&1; then
+        # ZFS-Lab mode bootstraps a 1-CP / 0-worker cluster (just enough
+        # for Hubble + Tetragon visibility while the test suite runs).
+        # kube-cluster reads KLDLOAD_ZFSLAB_MODE=1 and sets sensible
+        # lean defaults, so we don't pass --workers on the CLI here.
+        if [[ "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" ]]; then
+            log "[k8s] ZFS Lab mode → lean cluster (1 CP, 0 workers)"
+            export KLDLOAD_ZFSLAB_MODE=1
+            _kube_args=()
+        else
+            _kube_args=(--workers 3)
+        fi
+        log "[k8s] running kube-cluster bootstrap ${_kube_args[*]:-(defaults)}"
+        if kube-cluster bootstrap "${_kube_args[@]}" >> /var/log/kldload/kube-bootstrap.log 2>&1; then
             mark "k8s"
             log "[k8s] complete"
 

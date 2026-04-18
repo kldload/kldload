@@ -3224,7 +3224,7 @@ const ROLE_DESCS = {
   k8s:     'Kubernetes — 1 CP + 3 workers on ZFS clones, Cilium eBPF, Hubble, MetalLB (internet required)',
   ai:      'AI selected — Desktop + Ollama + Open WebUI (internet required for model download)',
   devops:  'klab — Multi-distro test platform. KVM host + K8s tools + golden images for 7 distros. ZFS instant clones, blue-green deploy, eBPF, NVIDIA.',
-  zfslab:  'ZFS Lab — KVM + klab only, NO Kubernetes. Full host RAM/CPU for the 5 ztest goldens + parallel zfs-tests.sh across centos/rocky/fedora/debian/ubuntu.',
+  zfslab:  'ZFS Lab — lean K8s (1 CP, 2 GB, 0 workers) for Hubble + Tetragon visibility; full remaining host RAM/CPU to the 5 ztest goldens + parallel zfs-tests.sh across centos/rocky/fedora/debian/ubuntu.',
 };
 function selectTarget(el) {
   document.querySelectorAll('#target-grid .target-card').forEach(c => c.classList.remove('selected'));
@@ -3489,11 +3489,13 @@ function startInstall() {
     wireguard: document.getElementById('install-wireguard')?.checked ? '1' : '0',
     enable_ebpf: document.getElementById('install-ebpf')?.checked ? '1' : '0',
     zfs_dedup: document.getElementById('install-zfs-dedup')?.checked ? '1' : '0',
-    // zfslab intentionally SKIPS K8s — the tile is test-suite-first, so
-    // the host keeps all its RAM/CPU for the ztest goldens and the parallel
-    // zfs-tests.sh runs that clone from them. devops + k8s still pull K8s.
-    enable_k8s: (document.getElementById('install-k8s')?.checked || ['k8s','devops'].includes(roleRaw)) ? '1' : '0',
-    k8s_bootstrap: (document.getElementById('install-k8s-bootstrap')?.checked || ['k8s','devops'].includes(roleRaw)) ? '1' : '0',
+    // zfslab bootstraps a LEAN K8s — 1 CP (2 GB, 1 vCPU), 0 workers —
+    // just enough to host Hubble + Tetragon so you have syscall-level
+    // visibility during the ZFS test runs. Resource footprint ~6% of
+    // host RAM; the rest stays with the ztest goldens. kube-cluster
+    // reads KLDLOAD_ZFSLAB_MODE and overrides its sizing defaults.
+    enable_k8s: (document.getElementById('install-k8s')?.checked || ['k8s','devops','zfslab'].includes(roleRaw)) ? '1' : '0',
+    k8s_bootstrap: (document.getElementById('install-k8s-bootstrap')?.checked || ['k8s','devops','zfslab'].includes(roleRaw)) ? '1' : '0',
     // KVM is implied by every profile whose cluster/goldens live in VMs,
     // including zfslab (its goldens are VMs).
     enable_kvm: (document.getElementById('install-kvm')?.checked || ['kvm','k8s','devops','zfslab'].includes(roleRaw)) ? '1' : '0',
