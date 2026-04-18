@@ -1548,7 +1548,16 @@ AIMOTD
       log "  Tools: kvm-create, kvm-snap, kvm-clone"
 
       # ── klab observability: Prometheus + Grafana + klab-exporter on host ──
-      if [[ "${KLDLOAD_ENABLE_DEVOPS:-0}" == "1" ]]; then
+      # Any hw profile that has klab goldens / K8s / KVM on it benefits
+      # from the obs stack — Prometheus scrapes cilium-agent, cilium-operator,
+      # hubble-metrics, tetragon, kubelet on the cluster AND node_exporter
+      # on every klab golden. Gating behind DEVOPS=1 alone meant the K8s
+      # tile and the ZFS Lab tile shipped with no metrics plane at all.
+      if [[ "${KLDLOAD_ENABLE_DEVOPS:-0}" == "1" \
+         || "${KLDLOAD_ENABLE_K8S:-0}"    == "1" \
+         || "${KLDLOAD_ENABLE_KVM:-0}"    == "1" \
+         || "${KLDLOAD_KLAB_ZFS_DEV:-0}"  == "1" \
+         || "${KLDLOAD_ZFSLAB_MODE:-0}"   == "1" ]]; then
         log "Setting up klab observability stack on host..."
 
         # ── Grafana (from official repo — RPM available online) ──
