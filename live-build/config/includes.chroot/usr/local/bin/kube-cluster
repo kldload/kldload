@@ -1222,6 +1222,35 @@ cmd_bootstrap() {
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   step_done "Host management plane ready"
 
+  # ── Tetragon (syscall/process/file eBPF observability) ──────────────────
+  # Prom scrape jobs + Grafana dashboards for tetragon ship baked into the
+  # image; without installing the Helm release the dashboards sit empty and
+  # all tetragon scrape targets show DOWN. Chart is shipped offline in the
+  # darksite; we fall through to the Cilium helm repo on dev builds.
+  local _tg_tgz="/root/darksite/helm-charts/tetragon.tgz"
+  if ! helm --kubeconfig /root/.kube/config list -n kube-system 2>/dev/null | grep -q '^tetragon\b'; then
+    log "Installing Tetragon for syscall-level observability..."
+    if [[ -f "$_tg_tgz" ]]; then
+      helm --kubeconfig /root/.kube/config install tetragon "$_tg_tgz" -n kube-system \
+        --set tetragon.enableProcessCred=true \
+        --set tetragon.enableProcessNs=true \
+        --set tetragonOperator.install=true \
+        >/dev/null 2>&1 && log "Tetragon installed (offline)" \
+        || warn "Tetragon install failed — non-fatal"
+    else
+      helm --kubeconfig /root/.kube/config repo add cilium https://helm.cilium.io/ >/dev/null 2>&1 || true
+      helm --kubeconfig /root/.kube/config repo update >/dev/null 2>&1 || true
+      helm --kubeconfig /root/.kube/config install tetragon cilium/tetragon -n kube-system \
+        --set tetragon.enableProcessCred=true \
+        --set tetragon.enableProcessNs=true \
+        --set tetragonOperator.install=true \
+        >/dev/null 2>&1 && log "Tetragon installed (online)" \
+        || warn "Tetragon install skipped — non-fatal"
+    fi
+  else
+    log "Tetragon already installed — skipping"
+  fi
+
   # Final summary
   local total_elapsed=$(( $(date +%s) - _BOOT_START ))
   local total_m=$((total_elapsed / 60))

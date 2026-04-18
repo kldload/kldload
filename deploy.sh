@@ -409,15 +409,37 @@ cmd_build() {
             [[ -f "$helm_cache/cilium.tgz" ]] && log "Cilium chart cached: $(du -h "$helm_cache/cilium.tgz" | cut -f1)"
         fi
         # Tetragon chart — Cilium's syscall/process/file eBPF observability.
-        # Autodeploy installs this once the cluster is up. Must be offline.
+        # Autodeploy + kube-cluster both install this once the cluster is up.
+        # Must be offline-available or the prom scrape + Grafana dashboards
+        # sit empty. The build host often has no helm binary (CentOS Stream 9
+        # doesn't ship one) so the pre-existing `helm pull` path silently
+        # skipped and shipped a broken ISO — prefer curl against the chart's
+        # direct URL so this works out of the box.
         if [[ ! -f "$helm_cache/tetragon.tgz" ]]; then
             log "Caching Tetragon Helm chart..."
             if command -v helm >/dev/null 2>&1; then
                 helm pull cilium/tetragon -d "$helm_cache" 2>/dev/null && \
-                    mv "$helm_cache"/tetragon-*.tgz "$helm_cache/tetragon.tgz" 2>/dev/null || \
-                    log "WARNING: Could not cache Tetragon chart"
+                    mv "$helm_cache"/tetragon-*.tgz "$helm_cache/tetragon.tgz" 2>/dev/null || true
             fi
-            [[ -f "$helm_cache/tetragon.tgz" ]] && log "Tetragon chart cached: $(du -h "$helm_cache/tetragon.tgz" | cut -f1)"
+            if [[ ! -f "$helm_cache/tetragon.tgz" ]] && command -v curl >/dev/null 2>&1; then
+                # Resolve the latest chart version from the Cilium helm repo
+                # index and download the tgz directly — no helm CLI required.
+                local _tg_ver
+                _tg_ver="$(curl -fsSL --max-time 10 https://helm.cilium.io/index.yaml 2>/dev/null \
+                    | awk '/^  - name: tetragon$/{f=1;next} f && /version: /{print $2; exit}' \
+                    | tr -d '\r')"
+                if [[ -n "$_tg_ver" ]]; then
+                    curl -fsSL --max-time 60 \
+                        -o "$helm_cache/tetragon.tgz" \
+                        "https://helm.cilium.io/tetragon-${_tg_ver}.tgz" 2>/dev/null \
+                        || log "WARNING: Could not download Tetragon chart via curl"
+                else
+                    log "WARNING: Could not resolve Tetragon chart version from helm.cilium.io"
+                fi
+            fi
+            [[ -f "$helm_cache/tetragon.tgz" ]] \
+                && log "Tetragon chart cached: $(du -h "$helm_cache/tetragon.tgz" | cut -f1)" \
+                || log "WARNING: Tetragon chart not cached — autodeploy will fall back to online install"
         fi
         # Grafana dashboards (pre-fetched so firstboot never needs internet)
         # 1860  = Node Exporter Full
