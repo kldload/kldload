@@ -1837,25 +1837,21 @@ FFPOL
         ok "Firefox homepage set to Grafana klab dashboard"
       fi
 
-      # ── Build golden images (skip if klab-firstboot.service handles it) ──
-      if [[ "${KLDLOAD_ENABLE_DEVOPS:-0}" != "1" ]]; then
-        if command -v klab >/dev/null 2>&1; then
-          log "Building klab golden images (this takes ~20 minutes)..."
-          log "  RHEL skipped — requires subscription credentials"
-          for _distro in centos rocky fedora debian ubuntu; do
-            log "  Building golden: ${_distro}..."
-            klab golden "$_distro" 2>&1 | tee -a "${LOG}" || \
-              log "  WARNING: ${_distro} golden build failed — run 'klab golden ${_distro}' manually"
-          done
-          ok "klab golden images built — run 'klab status' to verify"
-        elif command -v kzfs-test >/dev/null 2>&1; then
-          for _distro in centos rocky fedora debian ubuntu; do
-            kzfs-test golden "$_distro" 2>&1 | tee -a "${LOG}" || true
-          done
-        fi
-      else
-        log "klab golden builds deferred to klab-firstboot.service"
-      fi
+      # klab golden builds are owned by kldload-autodeploy.service — NOT
+      # firstboot. Prior versions had firstboot do a blocking for-loop
+      # through every distro here, which:
+      #   - held firstboot-done off for ~1 hr, blocking autodeploy
+      #     (and therefore Ollama / Bob) from starting
+      #   - raced with autodeploy if anything re-triggered a golden
+      #     build while firstboot was still looping (partial cloud-image
+      #     downloads, VM name collisions, parallel qemu on the same
+      #     zvol)
+      #   - duplicated work: autodeploy already runs `klab golden all`
+      #     and, on ZFS-Lab mode, `klab golden-ztest all` in the klab
+      #     phase after K8s is up.
+      # Leaving a log breadcrumb so someone reading the firstboot log
+      # knows where the builds moved to.
+      log "klab golden builds deferred to kldload-autodeploy.service (runs after firstboot-done)"
     fi
 
     # Remove darksite APT mirror (~1.8G) — not needed after install
