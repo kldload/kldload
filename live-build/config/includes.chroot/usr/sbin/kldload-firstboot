@@ -354,6 +354,24 @@ setup_kvm() {
   if ! virsh pool-info default >/dev/null 2>&1; then
     log "WARNING: libvirt default pool not defined — klab VM builds will fail"
   fi
+
+  # ISOs pool — covers /var/lib/libvirt/isos where klab drops cloud-init
+  # ISOs and cloud qcow2s. Without this, virt-install auto-creates a
+  # transient pool whenever it sees a --disk path in that directory and
+  # generates an XML without a target-path element, which libvirt rejects
+  # with the maddening "Could not define storage pool: XML error: missing
+  # storage pool target path" on every golden build. The resulting error
+  # gets (wrongly) blamed on the cdrom disk in the message. On older
+  # CentOS installs this pool was shipped by libvirt's default state; on
+  # Stream 9 fresh boxes it's missing, so klab VM creation fails until
+  # firstboot defines it.
+  mkdir -p /var/lib/libvirt/isos
+  virsh pool-define-as isos dir --target /var/lib/libvirt/isos 2>/dev/null || true
+  virsh pool-autostart isos 2>/dev/null || true
+  virsh pool-start    isos 2>/dev/null || true
+  if ! virsh pool-info isos >/dev/null 2>&1; then
+    log "WARNING: libvirt isos pool not defined — klab golden builds will fail with 'missing storage pool target path'"
+  fi
   # Default NAT network — klab and kube-cluster both need virbr0 on
   # 192.168.122.0/24. libvirt usually ships this pre-defined but a fresh
   # CentOS9 image sometimes doesn't; recreate it if missing.
