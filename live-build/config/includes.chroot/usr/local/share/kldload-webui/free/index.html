@@ -2376,6 +2376,7 @@ select option:checked { background: #00b8d9; color: #000; }
           <!-- Attached image preview strip — appears when one is staged -->
           <div id="bob-img-strip" style="display:none;padding:0.4rem 0.5rem;background:var(--surface2);border:1px solid var(--border);border-top:none;border-bottom:none;display:none;gap:0.4rem;flex-wrap:wrap"></div>
           <div style="display:flex;gap:0.5rem;padding:0.5rem;background:var(--surface2);border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;align-items:center">
+            <button id="bob-mic-allow" class="btn btn-ghost" onclick="bobRequestMicPermission()" title="Grant microphone access (only needed once per browser)" style="padding:0.5rem 0.5rem;font-size:0.9rem">🔓</button>
             <button id="bob-mic" class="btn btn-ghost" onclick="bobVoiceToggle()" title="Open mic — click to start (auto-sends each phrase, click again to stop)" style="padding:0.5rem 0.75rem;font-size:1.1rem">🎤</button>
             <button class="btn btn-ghost" onclick="document.getElementById('bob-img-input').click()" title="Attach image (auto-switches to vision model)" style="padding:0.5rem 0.75rem;font-size:1.1rem">📎</button>
             <input type="file" id="bob-img-input" accept="image/*" multiple style="display:none" onchange="bobImagesSelected(this.files)">
@@ -6374,6 +6375,55 @@ function bobSend() {
   const msg = input.value.trim();
   input.value = '';
   bobAsk(msg);
+}
+
+// Explicit microphone permission trigger. Chrome + Firefox only ask for
+// mic access when a user gesture triggers getUserMedia — NOT when the
+// speech-recognition API starts. If the page served over plain HTTP the
+// ask is also suppressed until unsafely-treat-insecure-origin-as-secure
+// is set. This button forces the ask and gives the user a clear, actionable
+// error if the browser blocked it, rather than silently failing later.
+async function bobRequestMicPermission() {
+  const btn = document.getElementById('bob-mic-allow');
+  const isInsecure = location.protocol !== 'https:'
+                     && !['localhost','127.0.0.1','[::1]'].includes(location.hostname);
+  // Chrome removes navigator.mediaDevices entirely on insecure origins,
+  // so `navigator.mediaDevices.getUserMedia` throws a "cannot read
+  // properties of undefined" before we even call it. Handle that
+  // explicitly with the user-facing fix — don't let Chrome's cryptic
+  // error propagate.
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+    alert(
+      'Microphone access is not available in this tab.\n\n' +
+      (isInsecure
+        ? 'Chrome disables the microphone API on insecure (http://) origins.\n' +
+          'The current URL is ' + location.origin + '.\n\n' +
+          'Three fixes — pick one:\n\n' +
+          '  1) Add this origin to Chrome\'s secure-origin allowlist:\n' +
+          '     Open   chrome://flags/#unsafely-treat-insecure-origin-as-secure\n' +
+          '     Add    ' + location.origin + '\n' +
+          '     Click  Relaunch\n\n' +
+          '  2) Tunnel via localhost (Chrome treats it as secure):\n' +
+          '     ssh -L 9000:localhost:9000 ' + location.hostname + '\n' +
+          '     then browse http://localhost:9000\n\n' +
+          '  3) Install from the latest ISO — its webui serves HTTPS by\n' +
+          '     default (self-signed cert) and the mic works out of the box.'
+        : 'Your browser does not expose navigator.mediaDevices. Try Chrome, Edge or Firefox.')
+    );
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => t.stop());    // release immediately
+    if (btn) { btn.textContent = '🔒'; btn.title = 'Microphone access granted'; btn.style.color = 'var(--accent)'; }
+    alert('Microphone access granted. You can now click the 🎤 to talk to Bob.');
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    alert(
+      'Microphone access was denied.\n\nReason: ' + msg + '\n\n' +
+      'Click the 🔒 icon in the URL bar → Site settings → Microphone → Allow, then reload.'
+    );
+  }
 }
 
 // ── Voice input (open-mic speech-to-text via Web Speech API) ──────────────

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# kldload-tls-cert — print a self-signed TLS cert + key on stdout for the
+# kldload webui. kldload-webui calls this via subprocess and feeds the
+# output to Python's ssl.SSLContext. Printing stdout (not writing files)
+# keeps key material out of the filesystem — it lives only in the webui
+# process's memory.
+#
+# Cert covers every hostname / IP the webui is likely reachable on so
+# Chrome's SAN check doesn't bounce mic/camera permissions. Browsers
+# will still show a one-time "certificate not trusted" warning — that's
+# expected for self-signed. getUserMedia works once the user clicks
+# through the warning.
+set -euo pipefail
+
+CERT_DIR="${KLDLOAD_TLS_CERT_DIR:-/var/lib/kldload/tls}"
+KEY="${CERT_DIR}/webui.key"
+CRT="${CERT_DIR}/webui.crt"
+
+# Generate once, reuse on every subsequent call. Regenerate if the cert
+# has expired.
+_regen=0
+if [[ ! -f "$CRT" || ! -f "$KEY" ]]; then
+    _regen=1
+elif ! openssl x509 -in "$CRT" -noout -checkend 86400 >/dev/null 2>&1; then
+    _regen=1
+fi
+
+if [[ "$_regen" -eq 1 ]]; then
+    mkdir -p "$CERT_DIR"
+    chmod 0700 "$CERT_DIR"
+
+    # Collect every SAN the webui might serve under: hostname, short
+    # hostname, every non-loopback IP. DNS / IP SANs both matter —
+    # Chrome and Firefox won't accept a cert that only has CN.
+    _hostname="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo kldload-node)"
+    _short="$(hostname -s 2>/dev/null || echo kldload)"
+    _ips=()
+    while IFS= read -r ip; do
+        [[ -n "$ip" ]] && _ips+=("$ip")
+    done < <(ip -4 -o addr show 2>/dev/null \
+                | awk '{print $4}' \
+                | cut -d/ -f1 \
+                | grep -v '^127\.' || true)
+
+    {
+        echo "[req]"
+        echo "distinguished_name = dn"
+        echo "x509_extensions    = v3_ca"
+        echo "prompt             = no"
+        echo "[dn]"
+        echo "CN = ${_hostname}"
+        echo "O  = kldload"
+        echo "[v3_ca]"
+        echo "subjectAltName = @alt"
+        echo "basicConstraints = critical,CA:FALSE"
+        echo "keyUsage         = digitalSignature,keyEncipherment"
+        echo "extendedKeyUsage = serverAuth"
+        echo "[alt]"
+        echo "DNS.1 = ${_hostname}"
+        echo "DNS.2 = ${_short}"
+        echo "DNS.3 = localhost"
+        echo "DNS.4 = kldload.local"
+        echo "IP.1  = 127.0.0.1"
+        echo "IP.2  = ::1"
+        local _i=3
+        for ip in "${_ips[@]}"; do
+            echo "IP.${_i} = ${ip}"
+            _i=$((_i + 1))
+        done
+    } > "${CERT_DIR}/webui.cnf"
+
+    openssl req -x509 -nodes -newkey rsa:2048 \
+        -keyout "$KEY" -out "$CRT" \
+        -days 3650 \
+        -config "${CERT_DIR}/webui.cnf" >&2
+
+    rm -f "${CERT_DIR}/webui.cnf"
+    chmod 0600 "$KEY" "$CRT"
+fi
+
+# Emit cert + key on stdout as one blob. kldload-webui splits it.
+cat "$CRT"
+cat "$KEY"
