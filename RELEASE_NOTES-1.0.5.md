@@ -381,6 +381,11 @@ Shim v15.8 policy 2021030218 now accepts it — no more
 per install (prevents key conflicts) and `--ignore-keyring` skips a
 stale kernel keyring.
 
+Full chain-of-trust walkthrough (shim → ZBM → kernel → ZFS kmod, with
+SBAT policy, MOK enrollment, and the troubleshooting matrix) is
+documented at
+[kldload.com/learn/secure-boot-chain](https://kldload.com/learn/secure-boot-chain).
+
 ### New operator tools
 
 Full inventory of tools added since 1.0.4:
