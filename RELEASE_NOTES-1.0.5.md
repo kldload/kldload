@@ -93,8 +93,57 @@ across reloads.
   checklist parser), Live log stream, `.tar.gz` + plain `full.log`
   download endpoints.
 - **Ansible** / **Helm** / **ZFS**: all sub-tabbed with the same pattern.
+  Workload-ingress intent for Ansible + Helm is detailed in its own
+  section below — they're the tabs where *your* workloads land.
 - Grafana iframe in the Observability tab renders with `kiosk=1` so the
   sidebar is fully hidden.
+
+### Workload ingress — Ansible + Helm tabs (WIP)
+
+The Ansible and Helm workspaces are still work-in-progress in 1.0.5 —
+the upload + run flows work today, but the polish lands across 1.0.5.x
+and 1.0.6. The design intent is the part worth internalizing now:
+
+**Deploy your real workloads the way you already deploy them — and
+get kernel-level x-ray vision you don't have anywhere else.**
+
+You bring your own Ansible playbook or Helm chart, target a kldload
+node (or a fleet of ZFS-cloned VMs spawned via `kspawn`), and kldload
+runs it straight. No lab-specific packaging. No instrumentation in
+your binary. Nothing custom in your chart.
+
+The value comes from Cilium + Hubble + Tetragon being wired **100%
+in-kernel** (eBPF, not userspace sidecars). Your deployment looks flat
+from kldload's vantage point, which means:
+
+- **Every packet between every container, pod, CNI endpoint, and host
+  interface sits on one timeline** — ingress → policy → service →
+  storage, no per-service spans, no service-mesh stitching, no
+  sidecars.
+- **No guesswork across layers.** When a request disappears,
+  eBPF/Hubble/Tetragon can tell you whether the CNI dropped it on
+  policy, the storage layer blocked on a slow zio, the kernel killed
+  the process on OOM, or the app answered `500` — without
+  cross-referencing four different dashboards.
+- **Zero changes to the workload.** Your chart is your chart, your
+  image is your image. The visibility lives in the kernel, outside
+  your binary.
+
+The point: ship a chart into kldload, watch every packet it emits,
+every syscall it makes, every zpool operation it triggers. Root-cause
+in minutes what takes hours on a busy prod cluster with 20 sidecars.
+
+**Current state (1.0.5):**
+- **Ansible tab** — playbook upload dropzone + dynamic inventory
+  over the WireGuard mesh via `kldload-inventory`, manual run. Template
+  library, scheduled execution, and node-facts gathering land in 1.0.6.
+- **Helm tab** — chart upload, repo add, one-click deploy to the local
+  cluster. Release-to-service linking in the Services panel, upgrade /
+  rollback UX, and chart-to-kubectl-YAML export land in 1.0.6.
+
+This is the "lab you build everything on" thesis in action: the
+observability stack isn't just for kldload-the-platform, it's for
+*your* workload, running inside kldload.
 
 ### Encrypted credentials store (webui)
 
