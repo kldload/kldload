@@ -277,6 +277,16 @@ def _ensure_kldload_datasets():
     """Create the full kldload ZFS namespace if we're on rpool. Properties are
     set at creation time — setuid/exec/devices off on secrets, zstd compression
     throughout, quotas to prevent disk-full attacks."""
+    # Never adopt a target-disk rpool from the live ISO. If the user previously
+    # installed (or partially installed) kldload, sda will have rpool/kldload/*
+    # datasets; auto-importing them and remounting over /var/lib/kldload leaves
+    # the live webui owning stale, possibly encrypted, root-owned state and
+    # locks out non-root shells. Live ISO always runs plain-mode.
+    if is_live_mode():
+        if _have_rpool():
+            LOG.warning("Live ISO boot detected a pre-existing rpool — "
+                        "ignoring rpool/kldload state, using plain-mode secrets")
+        return False
     if not _have_rpool():
         return False
 
@@ -7600,6 +7610,19 @@ def main():
     parser.add_argument("--bind",       default="0.0.0.0",       help="Bind address (default 0.0.0.0)")
     parser.add_argument("--no-browser", action="store_true",     help="Don't open browser")
     args = parser.parse_args()
+
+    # webui needs root: it chmod()s /var/lib/kldload/secrets to 0700, creates
+    # ZFS datasets, generates TLS certs, and drives installer subprocesses.
+    # Running as the 'live' user silently EPERM-cascades through init and
+    # lands on "readonly database" — point the operator at the right fix
+    # up-front.
+    if os.geteuid() != 0:
+        sys.stderr.write(
+            "kldload-webui must run as root.\n"
+            "  Systemd-managed:  systemctl status kldload-webui\n"
+            "  Manual:           sudo kldload-webui [args]\n"
+        )
+        sys.exit(2)
 
     try:
         asyncio.run(main_async(args))
