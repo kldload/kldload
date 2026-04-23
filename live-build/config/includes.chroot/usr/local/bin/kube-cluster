@@ -1013,6 +1013,39 @@ cmd_bootstrap() {
   echo ""
   step_done "Cluster verified"
 
+  # ── Publish cluster access to the host EARLY ───────────────────────────
+  # The full kubeconfig+kubectl+helm+cilium+hubble block lives near the end
+  # of this function (after Steps 7/8/9). Problem: if any of those steps
+  # fails hard (observed: kubelet-token RBAC apply silently kills the
+  # script on some clusters), the host ends up with no kubectl and no
+  # kubeconfig, and the kldload webui's K8s tab shows empty because it
+  # has no way to reach the API server inside the CP VM. Everything runs
+  # fine INSIDE the cluster — host just can't see it.
+  #
+  # Fix: publish kubeconfig + kubectl to the host IMMEDIATELY after the
+  # cluster verifies, before any optional observability glue runs. This
+  # block is minimal and idempotent — the fuller end-of-function block
+  # (helm/cilium/hubble CLIs, /etc/hosts, WG IP rewrite) still runs and
+  # overwrites the same files with the same content, which is fine.
+  mkdir -p /root/.kube
+  if scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY" \
+      "root@${cp_ip}:/etc/kubernetes/admin.conf" /root/.kube/config 2>/dev/null; then
+    sed -i "s|https://.*:6443|https://${cp_ip}:6443|" /root/.kube/config
+    chmod 600 /root/.kube/config
+    log "  kubeconfig → /root/.kube/config (early publish, cp=${cp_ip})"
+  else
+    warn "  early kubeconfig publish failed — retrying at end of bootstrap"
+  fi
+  if ! command -v kubectl >/dev/null 2>&1; then
+    if scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY" \
+        "root@${cp_ip}:/usr/bin/kubectl" /usr/local/bin/kubectl 2>/dev/null; then
+      chmod 0755 /usr/local/bin/kubectl
+      log "  kubectl → /usr/local/bin/kubectl (scp'd from CP — no internet needed)"
+    else
+      warn "  early kubectl scp failed — will retry via dl.k8s.io at end of bootstrap"
+    fi
+  fi
+
   # Provision kubelet-token for Prometheus kubelet scrape. The /etc/prometheus/
   # prometheus.yml config refers to /var/lib/kldload/kubelet-token (bearer
   # token for the kubelet's :10250 metrics endpoint). Without this file, all
@@ -1021,6 +1054,15 @@ cmd_bootstrap() {
   # ServiceAccount with nodes/metrics + nodes/proxy + nodes/stats RBAC,
   # mint a 1-year JWT, write to the expected path with world-readable perms
   # (prometheus runs as its own user, not root).
+  #
+  # Whole block wrapped in a subshell so nothing here can terminate the
+  # parent script — observed on some clusters that the RBAC apply heredoc
+  # silently kills the script mid-flight, leaving the downstream host-side
+  # tooling unconfigured. This block is best-effort; if any step fails,
+  # the operator can re-run `kube-cluster bootstrap --workers N` to retry,
+  # or apply manually. Prometheus kubelet scrapes staying 401 is a
+  # degraded-observability condition, not a cluster-broken condition.
+  (
   step 7 "Prometheus kubelet-scrape credentials"
   KUBECONFIG=/root/.kube/config kubectl apply -f - <<'KBYAML' >/dev/null 2>&1 || warn "kubelet-token RBAC apply failed"
 apiVersion: v1
@@ -1087,6 +1129,7 @@ KBYAML
     fi
   fi
   step_done "kubelet-token + tetragon policy ready"
+  ) || warn "  Prometheus kubelet-scrape credentials step had issues (non-fatal)"
 
   step 8 "Smoke Test"
   _ssh_cmd "$cp_ip" "kube-smoke-test" || warn "Smoke test had failures — check output above"
