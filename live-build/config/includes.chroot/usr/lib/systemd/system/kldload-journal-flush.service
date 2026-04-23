@@ -1,0 +1,27 @@
+[Unit]
+Description=kldload — ensure systemd journal is persistent on first boot
+# Our /etc/systemd/journald.conf.d/persistent.conf sets Storage=persistent,
+# but systemd-journal-flush.service runs too early — before journald
+# re-reads its drop-in on first boot. Result: /var/log/journal exists
+# but is never populated, and promtail can't scrape kernel messages.
+# This oneshot explicitly forces rotate+flush once everything's stable.
+After=systemd-journal-flush.service systemd-tmpfiles-setup.service
+ConditionPathExists=/etc/systemd/journald.conf.d/persistent.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/bin/sh -c 'mkdir -p /var/log/journal'
+ExecStart=/bin/systemd-tmpfiles --create --prefix /var/log/journal
+# If no journal file has been written to persistent storage yet, force
+# journald to flush.
+ExecStart=/bin/sh -c '\
+    if ! ls /var/log/journal/*/*.journal >/dev/null 2>&1; then \
+      systemctl restart systemd-journald; \
+      sleep 2; \
+      journalctl --rotate; \
+      journalctl --flush; \
+    fi'
+
+[Install]
+WantedBy=multi-user.target

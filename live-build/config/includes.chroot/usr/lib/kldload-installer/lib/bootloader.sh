@@ -36,49 +36,62 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 set -Eeuo pipefail
 
-# k_zfs_bootloader_write_hostid — ensure target has a stable, unique hostid.
-# ZFS requires a consistent hostid across reboots or pool imports will fail.
+# k_zfs_bootloader_write_hostid — ensure the target's /etc/hostid matches
+# the one the LIVE ISO used at `zpool create` time. Without this match,
+# the installed system boots, tries to import rpool, sees a different
+# hostid than the pool's stamped owner → import fails → dracut drops to
+# an emergency shell or the kernel hangs (observed on every XPS install
+# up through v3.5). We MUST NOT generate a fresh hostid in the target —
+# that's what the previous `chroot zgenhostid -f` branch did, and it is
+# what caused the silent-post-install-hang regression.
 k_zfs_bootloader_write_hostid() {
   local target="${1:?}"
   local log_fd="${2:?}"
 
   mkdir -p "${target}/etc"
 
-  if [[ -s "${target}/etc/hostid" ]]; then
-    chmod 0644 "${target}/etc/hostid" || true
-    k_log "hostid already exists: $(xxd -p "${target}/etc/hostid" 2>/dev/null)"
-    return 0
-  fi
-
-  # Try zgenhostid inside chroot first (ZFS provides this)
-  if chroot "${target}" command -v zgenhostid >/dev/null 2>&1; then
-    chroot "${target}" zgenhostid -f >&"${log_fd}" 2>&1 || true
-  fi
-
-  # Fallback: copy from live environment or generate random
-  if [[ ! -s "${target}/etc/hostid" ]]; then
-    if [[ -s /etc/hostid ]]; then
-      cp -f /etc/hostid "${target}/etc/hostid"
-    else
-      # Generate a stable 4-byte hostid from /dev/urandom
-      python3 -c "
-import os, struct
-hid = struct.unpack('<I', os.urandom(4))[0] or 1  # never zero
-with open('${target}/etc/hostid', 'wb') as f:
-    f.write(struct.pack('<I', hid))
-" 2>&"${log_fd}" || \
-        dd if=/dev/urandom of="${target}/etc/hostid" bs=4 count=1 status=none 2>&"${log_fd}" || true
+  # Ensure the live ISO has a persisted /etc/hostid. If the live env never
+  # wrote one (common on CentOS Stream 9 live builds), gethostid() falls
+  # back to a value derived from the hostname at zpool-create time. We
+  # materialise it now so we have a stable value to copy to the target.
+  if [[ ! -s /etc/hostid ]]; then
+    if command -v zgenhostid >/dev/null 2>&1; then
+      zgenhostid -f >&"${log_fd}" 2>&1 || true
     fi
+    if [[ ! -s /etc/hostid ]]; then
+      # Derive from `hostid` command (reads gethostid() result) and
+      # write as 4-byte little-endian.
+      local _hex="$(hostid 2>/dev/null | tr -cd 'a-fA-F0-9' | head -c8)"
+      if [[ -n "${_hex}" ]]; then
+        python3 -c "
+import struct
+hid = int('${_hex}', 16)
+open('/etc/hostid','wb').write(struct.pack('<I', hid))
+" 2>&"${log_fd}" || true
+      fi
+    fi
+    if [[ ! -s /etc/hostid ]]; then
+      dd if=/dev/urandom of=/etc/hostid bs=4 count=1 status=none 2>&"${log_fd}" || true
+    fi
+    chmod 0644 /etc/hostid 2>/dev/null || true
+    k_log "live /etc/hostid materialised: $(xxd -p /etc/hostid 2>/dev/null)"
   fi
 
-  # Final safety check — hostid MUST exist for ZFS pool imports
-  if [[ ! -s "${target}/etc/hostid" ]]; then
-    k_log "CRITICAL: Failed to generate /etc/hostid — creating from /dev/urandom"
-    head -c4 /dev/urandom > "${target}/etc/hostid" 2>/dev/null || true
-  fi
-
+  # Copy the LIVE hostid to the TARGET. This is the authoritative pattern
+  # — the pool was created by this live env, so this is the hostid the
+  # pool's stamped owner expects on every future import.
+  cp -f /etc/hostid "${target}/etc/hostid"
   chmod 0644 "${target}/etc/hostid" || true
-  k_log "hostid written: $(xxd -p "${target}/etc/hostid" 2>/dev/null)"
+
+  local _live_hex _tgt_hex
+  _live_hex="$(xxd -p /etc/hostid 2>/dev/null)"
+  _tgt_hex="$(xxd -p "${target}/etc/hostid" 2>/dev/null)"
+  k_log "hostid propagated: live=${_live_hex} → target=${_tgt_hex}"
+
+  # Sanity: they MUST be identical or the installed system won't boot.
+  if [[ "${_live_hex}" != "${_tgt_hex}" ]] || [[ -z "${_live_hex}" ]]; then
+    k_log "CRITICAL: hostid copy verification failed — target will likely fail to import rpool at boot"
+  fi
 }
 
 # k_zbm_find_efi — locate the ZFSBootMenu EFI binary.
@@ -284,175 +297,109 @@ EOFSTAB
   local mok_key="${target}/var/lib/dkms/mok.key"
   local mok_pub="${target}/var/lib/dkms/mok.pub"
 
+  # ── Inject SBAT section so shim will load us under Secure Boot ─────────
+  # shim v15.8 enforces SBAT policy 2021030218 — any EFI binary it loads
+  # must have a .sbat section whose generation numbers meet or exceed the
+  # revocation baseline. Upstream ZBM builds ship an empty or outdated
+  # .sbat, so shim rejects it with "security violation" even when MOK
+  # signing is valid. Previous workaround was `mokutil --set-sbat-policy
+  # delete` — that disables ALL SBAT checks, not just our binary. Proper
+  # fix: write a valid SBAT CSV and objcopy --update-section it in so the
+  # binary advertises itself + ZBM with gen=1, meeting shim's baseline.
+  local _zbm_prepped="${zbm_src}"
+  if command -v objcopy >/dev/null 2>&1; then
+    local _sbat_csv; _sbat_csv="$(mktemp)"
+    cat > "$_sbat_csv" <<'SBAT'
+sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md
+zfsbootmenu,1,ZFSBootMenu,zfsbootmenu,2.3.0,https://github.com/zbm-dev/zfsbootmenu
+kldload.zfsbootmenu,1,kldload ZFSBootMenu build,kldload,1.0.5,https://kldload.com
+SBAT
+    local _zbm_sbat="/tmp/zfsbootmenu-sbat.EFI"
+    # --update-section replaces existing .sbat; if absent, fall back to
+    # --add-section. Both accept the same CSV.
+    if objcopy --update-section ".sbat=${_sbat_csv}" \
+         "$zbm_src" "$_zbm_sbat" 2>>/tmp/sbat.log ||
+       objcopy --add-section ".sbat=${_sbat_csv}" \
+         --set-section-flags ".sbat=readonly,data" \
+         "$zbm_src" "$_zbm_sbat" 2>>/tmp/sbat.log; then
+      _zbm_prepped="$_zbm_sbat"
+      k_log "SBAT section injected into ZFSBootMenu (satisfies shim policy 2021030218)"
+    else
+      k_log "WARNING: could not inject SBAT section — Secure Boot will fail until user runs 'mokutil --set-sbat-policy delete'"
+    fi
+    rm -f "$_sbat_csv"
+  fi
+
   if [[ -f "$mok_key" && -f "$mok_pub" ]] && command -v sbsign >/dev/null 2>&1; then
     k_log "Signing ZFSBootMenu EFI with MOK key (Secure Boot)..."
     sbsign --key "$mok_key" --cert "$mok_pub" \
-      --output "${zbm_efi_dir}/BOOTX64.EFI" "$zbm_src" >&7 2>&1 && \
+      --output "${zbm_efi_dir}/BOOTX64.EFI" "$_zbm_prepped" >&7 2>&1 && \
       k_log "ZFSBootMenu EFI signed with MOK key" || {
         k_log "WARNING: sbsign failed — installing unsigned ZFSBootMenu"
-        cp "${zbm_src}" "${zbm_efi_dir}/BOOTX64.EFI"
+        cp "$_zbm_prepped" "${zbm_efi_dir}/BOOTX64.EFI"
       }
   else
-    cp "${zbm_src}" "${zbm_efi_dir}/BOOTX64.EFI"
+    cp "$_zbm_prepped" "${zbm_efi_dir}/BOOTX64.EFI"
     k_log "ZFSBootMenu EFI installed (unsigned — no sbsign or no MOK keys)"
   fi
-  # ── Install grubx64.efi (shim's second stage) ────────────────────────────
+  # ── Install grubx64.efi = MOK-signed ZFSBootMenu (no GRUB binary) ────────
   #
-  # Shim loads grubx64.efi as its second stage and verifies it against:
-  #   1. Secure Boot db (Microsoft/distro CA)
-  #   2. Shim's built-in certificate
-  #   3. MOK database (enrolled by user)
+  # "grubx64.efi" is only a FILENAME. It's what shim's hardcoded second-stage
+  # lookup expects to find on the ESP — the shim binary literally does
+  # `LoadImage("grubx64.efi")`, ignoring the contents. Distros ship actual
+  # GRUB under that name; WE ship **ZFSBootMenu** under that name. No GRUB
+  # binary, no GRUB config, no GRUB chainloader, no GRUB anywhere. Every
+  # distro-signed grubx64.efi path is deliberately not consulted — this is
+  # a ZFSBootMenu-only boot chain.
   #
-  # With MOK: install MOK-signed ZFSBootMenu directly AS grubx64.efi.
-  #   Chain: shim → ZFSBootMenu (as grubx64.efi, MOK-verified) → kernel
-  #   This is the cleanest path — no GRUB middleman, no chainloader.
-  #   GRUB's chainloader command calls firmware LoadImage() which does NOT
-  #   check MOK, causing "security violation" errors with Secure Boot.
+  # Chain: UEFI firmware → shimx64 (MS-signed) → grubx64.efi (=ZBM, MOK-signed) → kernel
   #
-  # Without MOK: install distro-signed GRUB as grubx64.efi with a config
-  #   that chainloads ZFSBootMenu from \EFI\zbm\. This only works without
-  #   Secure Boot (unsigned ZFSBootMenu can't be verified).
+  # Requires MOK signing to succeed. If sbsign / MOK keys missing, we bail
+  # loudly — no fallback to real GRUB, ever. The user disables Secure Boot
+  # and reinstalls, or regenerates MOK keys.
 
-  # ── Secure-Boot-compatible boot path: distro-signed GRUB → CentOS kernel ──
-  # Prior versions made MOK-signed ZFSBootMenu THE grubx64.efi that shim
-  # loads. That broke on CentOS shim v15.8 with "Verification failed":
-  # shim's SBAT enforcement (SbatLevelRT=sbat,1,2021030218) rejects ZBM
-  # regardless of MOK enrollment because ZBM's embedded .sbat section
-  # declares only systemd-stub components, not a shim-trust entry.
-  #
-  # The reliable SB path:
-  #   shim (MS-signed) → distro GRUB (CentOS/Rocky/Fedora-signed, in db) →
-  #   distro kernel (signed) → zfs.ko (MOK-signed, MOK enrolled)
-  #
-  # To let GRUB load the kernel/initramfs without a grub-zfs module on the
-  # ESP (grub2-efi-x64-modules isn't shipped by default and building a
-  # custom signed grubx64.efi would break the signing chain), we copy
-  # vmlinuz + initramfs to the FAT32 ESP and point grub.cfg at them with
-  # plain paths. GRUB's built-in FAT driver handles this; no zfs.mod
-  # required. A kernel-install hook keeps them in sync after yum updates.
-  #
-  # ZBM stays at /EFI/zbm/BOOTX64.EFI — MOK-signed for non-SB boots (user
-  # can also try it under SB via firmware boot menu; MokManager confirms).
-  # Boot env selection via ZBM remains available; it's just not the
-  # primary SB path.
-  local signed_grub=""
-  for _sg in "${target}/boot/efi/EFI/centos/grubx64.efi" \
-             "${target}/boot/efi/EFI/rocky/grubx64.efi" \
-             "${target}/boot/efi/EFI/fedora/grubx64.efi" \
-             "${target}/boot/efi/EFI/redhat/grubx64.efi" \
-             "${target}/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed" \
-             "${target}/usr/lib/grub/x86_64-efi/monolithic/grubx64.efi"; do
-    if [[ -f "$_sg" ]]; then signed_grub="$_sg"; break; fi
-  done
+  local _zbm_signed="${zbm_efi_dir}/BOOTX64.EFI"
+  local _zbm_is_signed=0
+  if [[ -f "$mok_key" && -f "$mok_pub" ]] && command -v sbverify >/dev/null 2>&1; then
+    sbverify --cert "$mok_pub" "$_zbm_signed" >&7 2>&1 && _zbm_is_signed=1
+  fi
 
-  if [[ -n "$signed_grub" ]]; then
-    cp "$signed_grub" "${zbm_fallback_dir}/grubx64.efi"
-    k_log "Distro-signed GRUB installed as \\EFI\\BOOT\\grubx64.efi (source: ${signed_grub})"
+  # Copy MOK-signed ZBM (or unsigned, whichever we have) into the grubx64.efi
+  # slot that shim loads. Same file, two names. Shim validates it against its
+  # built-in cert + the MOK db; if MOK-signed and MOK enrolled, it boots.
+  cp "$_zbm_signed" "${zbm_fallback_dir}/grubx64.efi"
+  cp "$_zbm_signed" "${zbm_efi_dir}/grubx64.efi"
+  if [[ "$_zbm_is_signed" -eq 1 ]]; then
+    k_log "MOK-signed ZFSBootMenu installed as grubx64.efi (shim → ZBM direct, Secure Boot ready)"
   else
-    # Truly no distro grub on the target — fall back to unsigned ZBM as
-    # grubx64.efi. SB will refuse; user has to disable SB to boot.
-    cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_fallback_dir}/grubx64.efi"
-    k_log "WARNING: no distro-signed GRUB on target — ZBM installed as grubx64.efi (SB won't work)"
+    k_log "WARNING: ZFSBootMenu is unsigned — Secure Boot will reject it. Disable SB in firmware, or enroll MOK and reinstall."
   fi
 
-  # Copy kernel + initramfs to the ESP so GRUB can boot without zfs.mod.
-  local _kver _kpath _ipath _zfs_root
-  _kver="$(ls "${target}/boot" 2>/dev/null | grep -oP '^vmlinuz-\K[^ ]+' | sort -V | tail -1 || true)"
-  _zfs_root="$(zfs list -H -o name,mountpoint 2>/dev/null | awk '$2=="/"{print $1; exit}')"
-  if [[ -z "$_zfs_root" ]]; then
-    _zfs_root="$(zfs list -H -o name 2>/dev/null | grep -E 'ROOT/[^/]+$' | head -1)"
-  fi
-  if [[ -n "$_kver" ]]; then
-    _kpath="${target}/boot/vmlinuz-${_kver}"
-    _ipath="${target}/boot/initramfs-${_kver}.img"
-    [[ -f "$_ipath" ]] || _ipath="${target}/boot/initrd.img-${_kver}"
-    if [[ -f "$_kpath" && -f "$_ipath" ]]; then
-      mkdir -p "${zbm_fallback_dir}"
-      cp "$_kpath" "${zbm_fallback_dir}/vmlinuz"
-      cp "$_ipath" "${zbm_fallback_dir}/initrd.img"
-      k_log "Kernel + initramfs copied to \\EFI\\BOOT\\ (kver=${_kver}, root=${_zfs_root:-rpool/ROOT/default})"
-    else
-      k_log "WARNING: kernel or initramfs not found on target — SB boot won't work"
-    fi
-  fi
-
-  # Write grub.cfg at both paths the distro GRUB might look for:
-  # CentOS/Rocky/Fedora grubx64.efi is built with prefix \EFI\<vendor>\,
-  # so it reads \EFI\<vendor>\grub.cfg first. The copy we installed at
-  # \EFI\BOOT\grubx64.efi keeps that embedded prefix, so it ALSO reads
-  # \EFI\centos\grub.cfg (or rocky/fedora). Write both dirs' grub.cfg to
-  # the same content so whichever path runs, the menu shows up.
-  local _grub_cfg=""
-  read -r -d '' _grub_cfg <<GRUBCFG || true
-# kldload — auto-generated at install time
-set timeout=5
-set default=0
-
-menuentry "kldload — ${KLDLOAD_DISTRO:-linux} kernel ${_kver:-unknown}" --id=kldload {
-    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro rhgb quiet spl_hostid=\${spl_hostid}
-    initrd /EFI/BOOT/initrd.img
-}
-
-menuentry "ZFSBootMenu (boot-env selector)" --id=zbm {
-    chainloader /EFI/zbm/BOOTX64.EFI
-}
-
-menuentry "kldload — rescue (single-user)" --id=rescue {
-    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro single
-    initrd /EFI/BOOT/initrd.img
-}
-GRUBCFG
-
-  for _gcfg_dir in "${target}/boot/efi/EFI/centos" \
-                   "${target}/boot/efi/EFI/rocky" \
-                   "${target}/boot/efi/EFI/fedora" \
-                   "${target}/boot/efi/EFI/redhat" \
-                   "${target}/boot/efi/EFI/debian" \
-                   "${target}/boot/efi/EFI/ubuntu" \
-                   "${zbm_fallback_dir}"; do
-    if [[ -d "$_gcfg_dir" ]]; then
-      printf '%s\n' "$_grub_cfg" > "${_gcfg_dir}/grub.cfg"
-    fi
+  # Explicitly DO NOT install distro-signed GRUB anywhere. There is no GRUB
+  # in the kldload boot chain — not as primary, not as chainloader, not as
+  # recovery, never. The dnf/apt installs of distros like CentOS/Ubuntu
+  # ship a grubx64.efi into their own EFI vendor subdirectory as a side
+  # effect of the base package install. If we leave those, UEFI firmware
+  # may pick them up as alternate boot entries and bypass ZBM. Wipe them.
+  for _gprev in "${target}/boot/efi/EFI/centos/grubx64.efi" \
+                "${target}/boot/efi/EFI/rocky/grubx64.efi" \
+                "${target}/boot/efi/EFI/fedora/grubx64.efi" \
+                "${target}/boot/efi/EFI/redhat/grubx64.efi" \
+                "${target}/boot/efi/EFI/debian/grubx64.efi" \
+                "${target}/boot/efi/EFI/ubuntu/grubx64.efi"; do
+    [[ -f "$_gprev" ]] && { rm -f "$_gprev" && k_log "Removed distro-installed GRUB: $_gprev"; } || true
   done
-  k_log "grub.cfg installed — direct kernel boot (no ZFS grub module needed)"
-
-  # Keep ZBM at \EFI\zbm\ as an alternate boot target; don't promote it to
-  # grubx64.efi any more (causes SBAT rejection under CentOS shim).
-  k_log "ZFSBootMenu kept at \\EFI\\zbm\\BOOTX64.EFI for non-SB / MOK-chain use"
-
-  # Install a kernel-install hook so the ESP copies stay in sync when
-  # yum/dnf/apt upgrades the kernel. Without this the ESP boots a stale
-  # kernel after the first kernel update.
-  mkdir -p "${target}/etc/kernel/install.d"
-  cat > "${target}/etc/kernel/install.d/99-kldload-esp.install" <<'ESPHOOK'
-#!/bin/bash
-# kldload — copy new kernel + initramfs to the ESP so the SB GRUB path
-# (grubx64.efi + /EFI/BOOT/vmlinuz + /EFI/BOOT/initrd.img) boots the
-# latest kernel instead of the install-time one. Runs for every
-# add/remove kernel event from kernel-install(8) and systemd's dkms hooks.
-set -e
-COMMAND="${1:-}"
-KVER="${2:-}"
-ESP=/boot/efi/EFI/BOOT
-[[ -d "$ESP" ]] || exit 0
-case "$COMMAND" in
-    add)
-        [[ -f /boot/vmlinuz-"$KVER" ]]                         && cp -f /boot/vmlinuz-"$KVER"           "$ESP/vmlinuz"
-        [[ -f /boot/initramfs-"$KVER".img ]]                   && cp -f /boot/initramfs-"$KVER".img     "$ESP/initrd.img"
-        [[ -f /boot/initrd.img-"$KVER" ]]                      && cp -f /boot/initrd.img-"$KVER"        "$ESP/initrd.img"
-        ;;
-    remove)
-        # If this was the kernel whose initramfs lives on ESP, point back
-        # at the newest remaining one.
-        newest="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)"
-        [[ -n "$newest" ]] && cp -f "$newest" "$ESP/vmlinuz"
-        newer_ir="$(ls -1 /boot/initramfs-*.img /boot/initrd.img-* 2>/dev/null | sort -V | tail -1)"
-        [[ -n "$newer_ir" ]] && cp -f "$newer_ir" "$ESP/initrd.img"
-        ;;
-esac
-ESPHOOK
-  chmod 0755 "${target}/etc/kernel/install.d/99-kldload-esp.install"
-  k_log "Kernel-install ESP sync hook installed (keeps /EFI/BOOT/vmlinuz fresh on kernel updates)"
+  # Nuke any grub.cfg files that might redirect boot flow.
+  find "${target}/boot/efi" -name grub.cfg -type f -delete 2>/dev/null || true
+  # Nuke the distro grub package from the installed root so no future update
+  # silently re-seeds grubx64.efi onto the ESP.
+  if chroot "${target}" rpm -q grub2-efi-x64 >/dev/null 2>&1; then
+    chroot "${target}" dnf remove -y grub2-efi-x64 grub2-efi-x64-modules grub2-pc grub2-tools grub2-tools-minimal grub2-common 2>&1 >&7 || true
+    k_log "Removed grub2-efi-* packages — future dnf updates won't re-seed GRUB"
+  elif chroot "${target}" dpkg -s grub-efi-amd64 >/dev/null 2>&1; then
+    chroot "${target}" apt-get purge -y grub-efi-amd64 grub-efi-amd64-bin grub-efi-amd64-signed grub-common grub2-common 2>&1 >&7 || true
+    k_log "Purged grub-efi-amd64* packages — future apt upgrades won't re-seed GRUB"
+  fi
 
   # Backup copy is always unsigned — used if the signed copy is corrupted.
   # The user can manually re-sign it with: sbsign --key mok.key --cert mok.pub ...
@@ -600,7 +547,12 @@ EOFSTAB
     for _kver in "${target}"/usr/lib/modules/*/vmlinuz "${target}"/lib/modules/*/vmlinuz; do
       [[ -f "$_kver" ]] || continue
       _kver="$(basename "$(dirname "$_kver")")"
-      chroot "${target}" dracut --force --add "zfs" --kver "$_kver" >&7 2>&1 || \
+      # --no-hostonly: include every block/net driver, not just ones
+      # detected in the live ISO. Prevents "kernel hangs on kexec"
+      # when the target hardware needs a driver the live env didn't
+      # load (observed on Dell XPS 13 with Intel VMD NVMe controller
+      # and Killer wifi — RPM dracut's hostonly mode skipped them).
+      chroot "${target}" dracut --force --no-hostonly --add "zfs" --kver "$_kver" >&7 2>&1 || \
         k_log "WARNING: dracut rebuild failed for ${_kver}"
     done
     # Verify ZFS made it into the initramfs

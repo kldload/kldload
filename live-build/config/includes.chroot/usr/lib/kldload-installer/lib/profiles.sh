@@ -105,22 +105,41 @@ k_profile_packages() {
       echo "openssh-server sudo curl ca-certificates vim less network-manager wireguard-tools iproute2"
       ;;
     desktop)
+      # Desktop package names diverge sharply between Debian/Ubuntu
+      # and RPM distros. The previous single package list used Debian
+      # names (`network-manager`, `gdm3`, `fonts-cantarell`) which
+      # silently no-op'd on Fedora/Rocky/CentOS/RHEL — installs
+      # "succeeded" with no NetworkManager, no display manager,
+      # dropping Fedora users into a wifi-less terminal on first boot.
       local _browser="firefox-esr"
       local _viewer="loupe"
       local _terminal="gnome-terminal"
-      # Ubuntu uses different package names for some GNOME components.
-      # Ubuntu's firefox package is a snapd transitional stub that pulls in
-      # the snap daemon — use GNOME Web (epiphany) instead to avoid snapd.
+      local _nm="network-manager"
+      local _gdm="gdm3"
+      local _fonts="fonts-cantarell"
+      local _gvfs_extra="gvfs-backends"
+      local _xsrv="xserver-xorg"
+      local _netools_extra="iputils-ping"
       if [[ "$_distro" == "ubuntu" ]]; then
         _browser="epiphany-browser"
         _viewer="eog"
+      elif [[ "$_distro" == "centos" || "$_distro" == "rocky" || "$_distro" == "rhel" || "$_distro" == "fedora" ]]; then
+        # RPM branch — match package naming on those ecosystems.
+        _browser="firefox"
+        _viewer="eog"
         _terminal="gnome-terminal"
+        _nm="NetworkManager NetworkManager-wifi NetworkManager-tui"
+        _gdm="gdm"
+        _fonts="cantarell-fonts"
+        _gvfs_extra="gvfs-mtp gvfs-smb gvfs-archive"
+        _xsrv="xorg-x11-server-Xorg xorg-x11-xauth"
+        _netools_extra="iputils"
       fi
-      echo "openssh-server sudo curl ca-certificates vim less network-manager \
+      echo "openssh-server sudo curl ca-certificates vim less ${_nm} \
         gnome-shell gnome-session gnome-control-center gnome-settings-daemon \
-        gdm3 nautilus ${_terminal} ${_viewer} \
-        adwaita-icon-theme fonts-cantarell gvfs gvfs-backends \
-        gnome-keyring xserver-xorg \
+        ${_gdm} nautilus ${_terminal} ${_viewer} \
+        adwaita-icon-theme ${_fonts} gvfs ${_gvfs_extra} \
+        gnome-keyring ${_xsrv} ${_netools_extra} \
         ${_browser} \
         tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
       ;;
@@ -367,7 +386,7 @@ k_install_system_files() {
 
   # ── Systemd units ──────────────────────────────────────────────────────────
   mkdir -p "${target}/usr/lib/systemd/system"
-  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service klab-prom-targets.service klab-prom-targets.timer; do
+  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer; do
     [[ -f "/usr/lib/systemd/system/${f}" ]] && \
       cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
   done
@@ -386,14 +405,20 @@ k_install_system_files() {
       k_log "WARNING: /usr/sbin/${bin} missing in live root — autodeploy will not run"
     fi
   done
-  for bin in kldload-console ttyd k9s; do
+  # Explicit bin copies — tools whose names don't match the `k*` wholesale
+  # glob below. `lh` (LogHog, C binary compiled at build time) is the one
+  # that slips through the glob. Without this, `kldload-lh` calls lh and
+  # gets "command not found" on the installed target.
+  for bin in kldload-console ttyd k9s lh; do
     [[ -f "/usr/local/bin/${bin}" ]] && \
       cp "/usr/local/bin/${bin}" "${target}/usr/local/bin/${bin}" && \
       chmod +x "${target}/usr/local/bin/${bin}"
   done
-  # sbin-level CLI tools (kspawn — ZFS-native cluster spawner)
+  # sbin-level CLI tools:
+  #   kspawn            — ZFS-native cluster spawner
+  #   kldload-tls-cert  — self-signed TLS cert script for webui HTTPS
   mkdir -p "${target}/usr/local/sbin"
-  for bin in kspawn; do
+  for bin in kspawn kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services; do
     [[ -f "/usr/local/sbin/${bin}" ]] && \
       cp "/usr/local/sbin/${bin}" "${target}/usr/local/sbin/${bin}" && \
       chmod +x "${target}/usr/local/sbin/${bin}" && \
@@ -419,10 +444,10 @@ k_install_system_files() {
     cp /usr/local/share/kldload-ai/*.txt "${target}/usr/local/share/kldload-ai/" 2>/dev/null || true
     k_log "Bob docs corpus copied to target ($(du -sh "${target}/usr/local/share/kldload-ai" 2>/dev/null | cut -f1))"
   fi
-  # Move management webui to port 9000 on installed systems (8080 reserved for Open WebUI)
-  if [[ -f "${target}/usr/lib/systemd/system/kldload-webui.service" ]]; then
-    sed -i 's/--port 8080/--port 9000/' "${target}/usr/lib/systemd/system/kldload-webui.service"
-  fi
+  # webui service already ships with --port 8443 baked into its unit file
+  # (see builder/build-iso.sh). No post-install sed needed — removed the
+  # empty if/fi block that used to flip the port, which was an install-
+  # time syntax error ("bash: line 428: syntax error near unexpected token `fi`").
 
   # Enable services in the installed system via symlinks — we can't run
   # "systemctl enable" because systemd is not running inside the chroot.
@@ -481,7 +506,7 @@ k_install_system_files() {
 [Desktop Entry]
 Type=Application
 Name=kldload Dashboard
-Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/9000) 2>/dev/null && break; sleep 1; done; sleep 3; firefox --no-remote http://localhost:9000'
+Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/9000) 2>/dev/null && break; sleep 1; done; sleep 3; firefox --no-remote https://localhost:8443'
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=8
 DASHSTART
@@ -497,12 +522,12 @@ DASHSTART
     "NoDefaultBookmarks": true,
     "DisplayBookmarksToolbar": "always",
     "Homepage": {
-      "URL": "http://localhost:9000",
+      "URL": "https://localhost:8443",
       "StartPage": "homepage",
       "Additional": ["http://localhost:8080"]
     },
     "Bookmarks": [
-      {"Title": "Dashboard", "URL": "http://localhost:9000", "Placement": "toolbar"},
+      {"Title": "Dashboard", "URL": "https://localhost:8443", "Placement": "toolbar"},
       {"Title": "AI Chat", "URL": "http://localhost:8080", "Placement": "toolbar"},
       {"Title": "kldload Docs", "URL": "https://kldload.com", "Placement": "toolbar"}
     ],
@@ -619,7 +644,7 @@ FFPOLICY
     centos)  _target_suite="stream9" ;;
     rocky)   _target_suite="9" ;;
     rhel)    _target_suite="9" ;;
-    fedora)  _target_suite="${KLDLOAD_FEDORA_RELEASE:-41}" ;;
+    fedora)  _target_suite="${KLDLOAD_FEDORA_RELEASE:-43}" ;;
     debian)  _target_suite="${KLDLOAD_SUITE:-trixie}" ;;
     ubuntu)  _target_suite="${KLDLOAD_SUITE:-noble}" ;;
     arch)    _target_suite="rolling" ;;
@@ -951,7 +976,8 @@ REPL
 
     # Copy KVM management tools from live ISO to target
     mkdir -p "${target}/usr/local/bin"
-    for tool in kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo kube-cluster kzfs-lab kzfs-test klab klab-exporter klab-prom-targets; do
+    for tool in kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo kube-cluster kzfs-lab kzfs-test klab klab-exporter klab-prom-targets \
+                zfs_exporter smartctl_exporter loki promtail ebpf_exporter zpool-scrub-exporter klab-vm-debug-bundle; do
       if [[ -f "/usr/local/bin/${tool}" ]]; then
         cp "/usr/local/bin/${tool}" "${target}/usr/local/bin/${tool}"
         chmod +x "${target}/usr/local/bin/${tool}"
@@ -962,6 +988,114 @@ REPL
     if [[ -d /usr/local/share/klab ]]; then
       mkdir -p "${target}/usr/local/share/klab"
       cp -r /usr/local/share/klab/* "${target}/usr/local/share/klab/"
+    fi
+
+    # ── observability-stack: configs, dashboards, enable services ─────
+    # ── Observability unit + timer copy (glob-driven, not hardcoded) ─────
+    # Lesson from pass-21/22: hardcoded lists of unit filenames repeatedly
+    # missed new units (smartctl_exporter, ebpf_exporter, zpool-scrub-
+    # exporter all skipped at least once). Now we glob the live rootfs's
+    # systemd dir for observability units by naming-convention and copy
+    # everything matched. Adding a new obs unit = drop a file in
+    # includes.chroot/usr/lib/systemd/system/ with a matching name and
+    # it's picked up automatically.
+    #
+    # Matched patterns:
+    #   *_exporter.service / *_exporter.timer  (loki, promtail, zfs, ebpf)
+    #   *-exporter.service / *-exporter.timer  (arcstats, zpool-scrub,
+    #                                            smartctl, klab)
+    #   loki.service, promtail.service         (named exceptions)
+    mkdir -p "${target}/usr/lib/systemd/system" \
+             "${target}/etc/systemd/system/multi-user.target.wants" \
+             "${target}/etc/systemd/system/timers.target.wants"
+    shopt -s nullglob
+    for _unit_path in \
+        /usr/lib/systemd/system/*_exporter.service \
+        /usr/lib/systemd/system/*-exporter.service \
+        /usr/lib/systemd/system/*_exporter.timer \
+        /usr/lib/systemd/system/*-exporter.timer \
+        /usr/lib/systemd/system/loki.service \
+        /usr/lib/systemd/system/promtail.service; do
+      [[ -f "$_unit_path" ]] || continue
+      _u="$(basename "$_unit_path")"
+      install -m 0644 "$_unit_path" "${target}/usr/lib/systemd/system/${_u}"
+      # Enable: services whose companion .timer exists are driven BY the
+      # timer — only enable the timer (systemd auto-pulls the .service).
+      # Services without a timer get enabled directly at multi-user.
+      if [[ "$_u" == *.timer ]]; then
+        ln -sfn "/usr/lib/systemd/system/${_u}" \
+          "${target}/etc/systemd/system/timers.target.wants/${_u}"
+      elif [[ -f "/usr/lib/systemd/system/${_u%.service}.timer" ]]; then
+        continue  # driven by its timer, don't enable .service directly
+      else
+        ln -sfn "/usr/lib/systemd/system/${_u}" \
+          "${target}/etc/systemd/system/multi-user.target.wants/${_u}"
+      fi
+    done
+    shopt -u nullglob
+    # ebpf_exporter configs (biolatency, bio-trace yaml + .bpf.o)
+    if [[ -d /etc/ebpf_exporter ]]; then
+      mkdir -p "${target}/etc/ebpf_exporter"
+      cp -r /etc/ebpf_exporter/* "${target}/etc/ebpf_exporter/" 2>/dev/null || true
+    fi
+    # zed → Loki event shipping script
+    if [[ -f /etc/zfs/zed.d/all-loki.sh ]]; then
+      mkdir -p "${target}/etc/zfs/zed.d"
+      install -m 0755 /etc/zfs/zed.d/all-loki.sh \
+        "${target}/etc/zfs/zed.d/all-loki.sh"
+    fi
+    # NetworkManager dispatcher hook for TLS cert regen on IP change
+    if [[ -f /etc/NetworkManager/dispatcher.d/99-kldload-tls-cert ]]; then
+      mkdir -p "${target}/etc/NetworkManager/dispatcher.d"
+      install -m 0755 /etc/NetworkManager/dispatcher.d/99-kldload-tls-cert \
+        "${target}/etc/NetworkManager/dispatcher.d/99-kldload-tls-cert"
+    fi
+    # Admin-editable TLS extra-SANs config (custom DNS names / VIPs)
+    if [[ -d /etc/kldload ]]; then
+      mkdir -p "${target}/etc/kldload"
+      cp /etc/kldload/*.txt "${target}/etc/kldload/" 2>/dev/null || true
+    fi
+    # node_exporter override (disable broken zfs collector, enable textfile)
+    if [[ -f /etc/systemd/system/node_exporter.service.d/textfile.conf ]]; then
+      mkdir -p "${target}/etc/systemd/system/node_exporter.service.d"
+      install -m 0644 /etc/systemd/system/node_exporter.service.d/textfile.conf \
+        "${target}/etc/systemd/system/node_exporter.service.d/textfile.conf"
+    fi
+    # arcstats-exporter binary
+    if [[ -x /usr/local/bin/arcstats-exporter ]]; then
+      cp /usr/local/bin/arcstats-exporter "${target}/usr/local/bin/arcstats-exporter"
+      chmod +x "${target}/usr/local/bin/arcstats-exporter"
+    fi
+    # textfile collector dir
+    mkdir -p "${target}/var/lib/node_exporter/textfile_collector"
+    # configs
+    mkdir -p "${target}/etc/loki" "${target}/etc/promtail" \
+             "${target}/etc/systemd/journald.conf.d" \
+             "${target}/var/lib/loki" "${target}/var/lib/promtail" \
+             "${target}/var/log/journal"
+    [[ -f /etc/loki/loki.yaml ]] && \
+      cp /etc/loki/loki.yaml "${target}/etc/loki/loki.yaml"
+    [[ -f /etc/promtail/promtail.yaml ]] && \
+      cp /etc/promtail/promtail.yaml "${target}/etc/promtail/promtail.yaml"
+    [[ -f /etc/systemd/journald.conf.d/persistent.conf ]] && \
+      cp /etc/systemd/journald.conf.d/persistent.conf \
+         "${target}/etc/systemd/journald.conf.d/persistent.conf"
+    # Grafana Loki datasource + dashboards (firstboot also copies the
+    # dashboards to /var/lib/grafana/dashboards — belt + suspenders)
+    if [[ -f /etc/grafana/provisioning/datasources/loki.yaml ]]; then
+      mkdir -p "${target}/etc/grafana/provisioning/datasources"
+      cp /etc/grafana/provisioning/datasources/loki.yaml \
+         "${target}/etc/grafana/provisioning/datasources/loki.yaml"
+    fi
+    # Copy ALL dashboards from the live ISO — not a hardcoded list. New
+    # dashboards added to live-build/config/includes.chroot/var/lib/
+    # grafana/dashboards/ pick up automatically; no profile.sh edit
+    # required each time. Previous hardcoded-3-entries loop was missing
+    # 5 of 8 dashboards baked into pass-22.
+    if [[ -d /var/lib/grafana/dashboards ]]; then
+      mkdir -p "${target}/var/lib/grafana/dashboards"
+      cp /var/lib/grafana/dashboards/*.json \
+         "${target}/var/lib/grafana/dashboards/" 2>/dev/null || true
     fi
 
     # Hourly VM snapshot timer

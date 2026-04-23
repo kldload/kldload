@@ -438,28 +438,15 @@ select option:checked { background: #00b8d9; color: #000; }
 
         <!-- AI state (hidden checkbox + model selection, shown when AI profile selected) -->
         <input type="checkbox" id="install-ai" style="display:none">
-        <div id="ai-models" style="display:none;margin-bottom:1rem;padding:1rem;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
-          <div style="font-size:0.85rem;font-weight:600;color:var(--bright);margin-bottom:0.4rem">AI Models — select which to download</div>
-          <div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.8rem">Models download on first boot. Internet required (~6 GB). Fully offline after that. Open WebUI on <b>http://localhost:8080</b>.</div>
-          <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
-            <input type="checkbox" id="ai-model-chat" checked style="margin-top:0.15rem">
-            <div><strong style="color:var(--text)">General Chat</strong> (llama3.1:8b) — 5GB VRAM, ~30 tok/sec<br><span style="font-size:0.7rem;color:var(--muted)">Fast general-purpose assistant. Good for Q&amp;A, docs, infrastructure help.</span></div>
-          </label>
-          <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
-            <input type="checkbox" id="ai-model-code" style="margin-top:0.15rem">
-            <div><strong style="color:var(--text)">Code Assistant</strong> (qwen2.5-coder:14b) — 9GB VRAM, ~12 tok/sec<br><span style="font-size:0.7rem;color:var(--muted)">Best open-source coding model. Bash, Python, YAML, Dockerfiles, debugging.</span></div>
-          </label>
-          <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
-            <input type="checkbox" id="ai-model-smart" style="margin-top:0.15rem">
-            <div><strong style="color:var(--text)">Smart Chat</strong> (llama3.1:70b-q4) — 40GB+ VRAM or CPU offload<br><span style="font-size:0.7rem;color:var(--muted)">Most capable. Requires 48GB+ VRAM or will use RAM (slow). For serious reasoning tasks.</span></div>
-          </label>
-          <div style="margin-top:0.6rem;padding:0.6rem;background:var(--surface2);border-radius:4px;font-size:0.7rem;color:var(--muted);line-height:1.6">
-            <strong style="color:var(--subtle)">Recommended:</strong>
-            8GB VRAM &rarr; General Chat &nbsp;|&nbsp;
-            10-16GB VRAM &rarr; General + Code &nbsp;|&nbsp;
-            24GB+ VRAM &rarr; All models
-          </div>
-        </div>
+        <!-- AI model picker removed: Bob ships with the kldlab profile with
+             sensible defaults (qwen2.5:14b chat by default, code/smart
+             off). Users switch models post-install via `ollama pull`
+             or the Bob panel. Install-time selection was surfacing on
+             the kldlab tile (because the tile occupies the grid slot
+             the old standalone AI tile used to) and confusing users. -->
+        <input type="checkbox" id="ai-model-chat" checked style="display:none">
+        <input type="checkbox" id="ai-model-code" style="display:none">
+        <input type="checkbox" id="ai-model-smart" style="display:none">
 
         <!-- klab options panel removed. ZFS dev-tools goldens are a
              separate lineage now (klab-ztest-<distro>) that's built on
@@ -502,50 +489,45 @@ select option:checked { background: #00b8d9; color: #000; }
         <div class="panel" id="profile-panel" style="margin-bottom:1rem">
           <div class="panel-hdr">◈ Profile</div>
           <div class="panel-body">
-            <div class="target-grid" id="target-grid" style="grid-template-columns:repeat(8,1fr);max-width:1200px">
-              <div class="target-card" data-role="desktop" onclick="selectTarget(this)">
+            <div class="target-grid" id="target-grid" style="grid-template-columns:repeat(7,1fr);max-width:1200px">
+              <div class="target-card" data-role="desktop" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">🖥</div>
                 <div class="tc-name">Desktop</div>
-                <div class="tc-sub">GNOME workstation</div>
+                <div class="tc-sub">GNOME + ZFS</div>
               </div>
-              <div class="target-card" data-role="server" onclick="selectTarget(this)">
+              <div class="target-card" data-role="server" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">🗄</div>
                 <div class="tc-name">Server</div>
                 <div class="tc-sub">Headless + SSH</div>
               </div>
-              <div class="target-card" data-role="core" onclick="selectTarget(this)">
+              <div class="target-card" data-role="core" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">⚙</div>
                 <div class="tc-name">Core</div>
-                <div class="tc-sub">ZFS only — no extras</div>
+                <div class="tc-sub">ZFS only</div>
               </div>
-              <div class="target-card" data-role="kvm" onclick="selectTarget(this)">
+              <div class="target-card" data-role="kvm" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">📦</div>
                 <div class="tc-name">KVM Host</div>
                 <div class="tc-sub">Hypervisor + clones</div>
               </div>
-              <div class="target-card selected" data-role="k8s" onclick="selectTarget(this)">
+              <div class="target-card selected" data-role="k8s" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">☸</div>
                 <div class="tc-name">Kubernetes</div>
-                <div class="tc-sub">Cilium + Hubble + MetalLB</div>
+                <div class="tc-sub">Lean K8s appliance</div>
               </div>
-              <div class="target-card" data-role="ai" onclick="selectTarget(this)">
-                <div class="tc-icon">🧠</div>
-                <div class="tc-name">AI</div>
-                <div class="tc-sub">Desktop + Ollama + Open WebUI</div>
-              </div>
-              <div class="target-card" data-role="devops" onclick="selectTarget(this)">
+              <div class="target-card" data-role="devops" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">🔬</div>
                 <div class="tc-name">kldlab</div>
-                <div class="tc-sub">Multi-distro test platform</div>
+                <div class="tc-sub">Full sandbox + Bob</div>
               </div>
-              <div class="target-card" data-role="zfslab" onclick="selectTarget(this)">
+              <div class="target-card" data-role="zfslab" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">🧪</div>
-                <div class="tc-name">ZFS Lab</div>
-                <div class="tc-sub">Test suite first, K8s lean</div>
+                <div class="tc-name">OpenZFS Lab</div>
+                <div class="tc-sub">ZFS test across distros</div>
               </div>
             </div>
-            <div id="role-summary" style="margin-top:0.6rem;font-size:0.8rem;color:var(--accent)">
-              ✓ Kubernetes — 1 CP + 3 workers on ZFS clones, Cilium eBPF, Hubble, MetalLB (internet required)
+            <div id="role-summary" style="margin-top:0.7rem;padding:0.8rem 1rem;background:var(--surface2);border:1px solid var(--border);border-radius:6px;min-height:7rem">
+              <!-- populated by renderRoleDesc() on page load + hover/click -->
             </div>
 
             <!-- Storage mode (visible only for core) -->
@@ -564,6 +546,62 @@ select option:checked { background: #00b8d9; color: #000; }
               <div id="storage-manual-hint" style="display:none;margin-top:0.5rem;font-size:0.78rem;color:var(--muted);padding-left:1.5rem">
                 The installer will pause and give you a shell. Create <code>rpool/ROOT/default</code> and an EFI partition, then type <code>exit</code> to continue.
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bob AI assistant — compact 2-row layout.
+             Row 1: install-bob + GPU status + airgap darksite toggle.
+             Row 2: 5 model pills side-by-side with VRAM auto-gating.
+             Hover each pill for full model name / size tooltip. -->
+        <style>
+          #bob-panel .panel-body { padding: 0.55rem 0.9rem; }
+          .bob-pill { display:inline-flex; align-items:center; gap:0.3rem; padding:0.25rem 0.6rem; border:1px solid var(--border); border-radius:999px; font-size:0.78rem; color:var(--subtle); cursor:pointer; user-select:none; transition:border-color 0.1s, background 0.1s; }
+          .bob-pill:hover { border-color: rgba(52,211,153,0.5); }
+          .bob-pill input[type=radio] { margin:0; }
+          .bob-pill.selected { border-color: var(--accent); background: rgba(52,211,153,0.08); color: var(--text); }
+          .bob-pill .sz { color: var(--muted); font-size:0.7rem; margin-left:0.15rem; }
+          .bob-pill.disabled { opacity:0.4; cursor:not-allowed; }
+        </style>
+        <div class="panel" id="bob-panel" style="margin-bottom:1rem;display:none">
+          <div class="panel-hdr">🤖 Bob AI Assistant</div>
+          <div class="panel-body">
+
+            <!-- Row 1: install + GPU status + darksite toggle, all inline -->
+            <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:0.5rem">
+              <label style="display:inline-flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.85rem;color:var(--text);font-weight:600;white-space:nowrap">
+                <input type="checkbox" id="install-bob" checked>
+                Install Bob
+              </label>
+              <span id="bob-gpu-status" style="flex:1;min-width:0;font-size:0.73rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Detecting GPU…</span>
+              <label style="display:inline-flex;align-items:center;gap:0.35rem;cursor:pointer;font-size:0.75rem;color:var(--subtle);white-space:nowrap" title="Airgapped installs: pre-stage the selected model at /root/darksite/ollama/models/ on the target before first boot. kldload-firstboot loads it locally instead of pulling from ollama.com.">
+                <input type="checkbox" id="bob-darksite">
+                Airgapped <span style="color:var(--muted);font-size:0.7rem">(darksite)</span>
+              </label>
+            </div>
+
+            <!-- Row 2: model pills side-by-side -->
+            <div id="bob-model-panel" style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center">
+              <span style="font-size:0.73rem;color:var(--muted);margin-right:0.2rem">Model:</span>
+              <label class="bob-pill" data-tier="mini" data-model="llama3.2:3b" data-vram-gb="0" title="llama3.2:3b — ~2 GB, CPU-friendly, runs on any GPU or CPU-only">
+                <input type="radio" name="bob-model" value="mini"> Mini<span class="sz">2G</span>
+              </label>
+              <label class="bob-pill" data-tier="small" data-model="qwen2.5:7b" data-vram-gb="6" title="qwen2.5:7b — ~5 GB, needs 6–8 GB VRAM">
+                <input type="radio" name="bob-model" value="small"> Small<span class="sz">5G</span>
+              </label>
+              <label class="bob-pill selected" data-tier="recommended" data-model="qwen2.5:14b" data-vram-gb="10" title="qwen2.5:14b — ~9 GB, 10+ GB VRAM, default">
+                <input type="radio" name="bob-model" value="recommended" checked> Recommended<span class="sz">9G</span>
+              </label>
+              <label class="bob-pill" data-tier="large" data-model="qwen2.5:32b" data-vram-gb="24" title="qwen2.5:32b — ~19 GB, 24+ GB VRAM">
+                <input type="radio" name="bob-model" value="large"> Large<span class="sz">19G</span>
+              </label>
+              <label class="bob-pill" data-tier="code" data-model="qwen2.5-coder:14b" data-vram-gb="10" title="qwen2.5-coder:14b — ~9 GB, dev focus: code, YAML, eBPF">
+                <input type="radio" name="bob-model" value="code"> Code<span class="sz">9G</span>
+              </label>
+            </div>
+
+            <div style="font-size:0.7rem;color:var(--muted);padding:0.5rem 0.7rem;background:var(--surface2);border-radius:4px;line-height:1.5">
+              After install, Bob's panel lets you download any other model from Ollama's library &mdash; no reinstall needed.
             </div>
           </div>
         </div>
@@ -622,12 +660,12 @@ select option:checked { background: #00b8d9; color: #000; }
             </div>
             <div class="form-group">
               <label>Password</label>
-              <input type="password" id="install-pass" placeholder="••••••••" oninput="checkPass()">
+              <input type="password" id="install-pass" placeholder="••••••••" value="Passw0rd" oninput="checkPass()">
               <div class="pass-hint" id="pass-strength"></div>
             </div>
             <div class="form-group">
               <label>Confirm password</label>
-              <input type="password" id="install-pass2" placeholder="••••••••" oninput="checkPass()">
+              <input type="password" id="install-pass2" placeholder="••••••••" value="Passw0rd" oninput="checkPass()">
               <div class="pass-hint" id="pass-match"></div>
             </div>
             <div class="form-group" style="margin-top:0.5rem">
@@ -667,14 +705,14 @@ select option:checked { background: #00b8d9; color: #000; }
               <label>Timezone</label>
               <select id="install-timezone">
                 <optgroup label="Americas">
-                  <option value="America/Toronto" selected>America/Toronto</option>
+                  <option value="America/Toronto">America/Toronto</option>
                   <option value="America/New_York">America/New_York</option>
                   <option value="America/Chicago">America/Chicago</option>
                   <option value="America/Denver">America/Denver</option>
                   <option value="America/Los_Angeles">America/Los_Angeles</option>
                   <option value="America/Anchorage">America/Anchorage</option>
                   <option value="America/Honolulu">America/Honolulu</option>
-                  <option value="America/Vancouver">America/Vancouver</option>
+                  <option value="America/Vancouver" selected>America/Vancouver</option>
                   <option value="America/Edmonton">America/Edmonton</option>
                   <option value="America/Winnipeg">America/Winnipeg</option>
                   <option value="America/Halifax">America/Halifax</option>
@@ -843,6 +881,26 @@ select option:checked { background: #00b8d9; color: #000; }
               <div class="form-group">
                 <label>DNS</label>
                 <input type="text" id="net-dns" placeholder="1.1.1.1,8.8.8.8" value="1.1.1.1,8.8.8.8">
+              </div>
+            </div>
+            <!-- WiFi — written as a NetworkManager connection file on the
+                 target so first boot comes up on the network without nmtui.
+                 Applies alongside DHCP/static (acts as the L2 connection). -->
+            <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem;padding-top:0.75rem;border-top:1px solid var(--border)">
+              <input type="checkbox" id="net-use-wifi" onchange="toggleWiFi()" style="width:1rem;height:1rem;cursor:pointer;accent-color:var(--accent);flex-shrink:0">
+              <label for="net-use-wifi" style="cursor:pointer;font-size:0.9rem;margin:0">Connect over WiFi <span style="color:var(--muted)">(SSID + password baked into NM profile)</span></label>
+            </div>
+            <div id="net-wifi" style="display:none;margin-top:0.6rem">
+              <div class="form-group">
+                <label>SSID</label>
+                <input type="text" id="wifi-ssid" placeholder="your network name" autocomplete="off">
+              </div>
+              <div class="form-group">
+                <label>Password</label>
+                <input type="password" id="wifi-psk" placeholder="WPA2/WPA3 passphrase" autocomplete="new-password">
+              </div>
+              <div style="font-size:0.72rem;color:var(--muted);margin-top:0.4rem">
+                Written as <code>/etc/NetworkManager/system-connections/&lt;ssid&gt;.nmconnection</code> (0600, root). For hidden networks, use <code>nmcli</code> post-install.
               </div>
             </div>
           </div>
@@ -1365,6 +1423,7 @@ select option:checked { background: #00b8d9; color: #000; }
                 <button class="btn btn-ghost btn-sm" onclick="k8sBulk('cordon', 'node')">Cordon</button>
                 <button class="btn btn-ghost btn-sm" onclick="k8sBulk('uncordon', 'node')">Uncordon</button>
                 <button class="btn btn-danger btn-sm" onclick="k8sBulk('drain', 'node')">Drain</button>
+                <button class="btn btn-danger btn-sm" onclick="k8sBulk('delete_node', 'node')" title="Drain + remove from cluster + destroy VM + destroy zvol (irreversible — rebuild via +Add worker)">Delete</button>
                 <button class="btn btn-ghost btn-sm" onclick="k8sClearSel('node')" title="Clear">✕</button>
               </div>
               <button class="btn btn-primary btn-sm" onclick="k8sAddWorker()" title="Add a new worker via kube-demo add_nodes">＋ Add worker</button>
@@ -2378,6 +2437,7 @@ select option:checked { background: #00b8d9; color: #000; }
           <div style="display:flex;gap:0.5rem;padding:0.5rem;background:var(--surface2);border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;align-items:center">
             <button id="bob-mic-allow" class="btn btn-ghost" onclick="bobRequestMicPermission()" title="Grant microphone access (only needed once per browser)" style="padding:0.5rem 0.5rem;font-size:0.9rem">🔓</button>
             <button id="bob-mic" class="btn btn-ghost" onclick="bobVoiceToggle()" title="Open mic — click to start (auto-sends each phrase, click again to stop)" style="padding:0.5rem 0.75rem;font-size:1.1rem">🎤</button>
+            <button id="bob-autonomy" class="btn btn-ghost" onclick="bobAutonomyToggle()" title="Autonomy: when ON, Bob runs every tool without asking. OFF restores the per-tool approval modal." style="padding:0.5rem 0.75rem;font-size:1.1rem">⚡</button>
             <button class="btn btn-ghost" onclick="document.getElementById('bob-img-input').click()" title="Attach image (auto-switches to vision model)" style="padding:0.5rem 0.75rem;font-size:1.1rem">📎</button>
             <input type="file" id="bob-img-input" accept="image/*" multiple style="display:none" onchange="bobImagesSelected(this.files)">
             <input type="text" id="bob-input" placeholder="Ask Bob anything — mic, or 📎 for an image" onkeydown="if(event.key==='Enter')bobSend()" onpaste="bobPasteImage(event)" style="flex:1;padding:0.5rem 0.75rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.88rem;outline:none">
@@ -2386,12 +2446,25 @@ select option:checked { background: #00b8d9; color: #000; }
             </label>
             <button class="btn btn-primary" onclick="bobSend()" style="padding:0.5rem 1rem">Send</button>
           </div>
-          <div style="margin-top:0.4rem;display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
+          <div style="margin-top:0.4rem;display:flex;gap:0.3rem;align-items:center;flex-wrap:wrap">
+            <span style="font-size:0.65rem;color:var(--muted);margin-right:0.2rem">observe:</span>
             <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('What is the current klab status?')">klab status</button>
-            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Explain the current network traffic')">traffic</button>
-            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Are there any security concerns?')">security</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Any pods not Running? Tell me why in plain English.')">bad pods</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Show me the top memory + CPU consumers across the cluster')">top consumers</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Which nodes and pods are using the most bandwidth right now?')">bandwidth</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Are there any security concerns I should know about?')">security</button>
+            <span style="font-size:0.65rem;color:var(--muted);margin-left:0.4rem;margin-right:0.2rem">trace:</span>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Trace every open() syscall across the host for 20 seconds — show top 10 paths by count')">trace opens</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Trace every exec() for 15 seconds and list which command lines ran')">trace execs</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Trace TCP retransmits for 30 seconds and tell me if any are concerning')">tcp retransmits</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Profile block I/O latency for 20 seconds by device and report the slow outliers')">io latency</button>
+            <span style="font-size:0.65rem;color:var(--muted);margin-left:0.4rem;margin-right:0.2rem">zfs:</span>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Summarize ZFS pool health, ARC hit ratio, and any datasets approaching full')">zfs health</button>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Which zvols have the highest IO latency right now?')">zfs hot</button>
+            <span style="font-size:0.65rem;color:var(--muted);margin-left:0.4rem;margin-right:0.2rem">drive:</span>
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('Open a new terminal window called \\'watch\\' and run htop in it')">demo: open htop</button>
             <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="bobAsk('What should I do next?')">what next?</button>
-            <span style="font-size:0.65rem;color:var(--muted)">Conversations saved to disk. Bob remembers.</span>
+            <span style="font-size:0.65rem;color:var(--muted)">Autonomy: ⚡ON • ZFS rollback covers mistakes.</span>
           </div>
         </div>
       </div>
@@ -2501,6 +2574,11 @@ function connect() {
     refreshZFS();
     refreshSnapshots();
     send({ action: 'install_state' });
+    // Re-attach to any klab test that's running in the background
+    // (systemd-run keeps it alive across webui restarts / WS drops).
+    // The backend responds with klab_test_noop if nothing is running,
+    // or streams live log lines + exec_done on completion.
+    send({ action: 'klab_test_tail' });
   };
   ws.onclose = () => {
     wsReady = false;
@@ -2535,6 +2613,12 @@ function requestDisks() {
 
 // ── Message handler ─────────────────────────────────────────────────────────
 function handle(msg) {
+  // Pre-switch hook: if confirmInstall() is awaiting a wifi_connect_result,
+  // route it there instead of falling through to the default noop.
+  if (msg.type === 'wifi_connect_result' && typeof _wifiResultHandler === 'function') {
+    _wifiResultHandler(msg);
+    return;
+  }
   switch (msg.type) {
 
     case 'system_info': {
@@ -2554,7 +2638,12 @@ function handle(msg) {
         if (d.ai_webui) {
           aiVal.textContent = '● ready';
           aiVal.style.color = 'var(--accent)';
-          aiSub.innerHTML = '<a href="http://localhost:8080" target="_blank" style="color:var(--accent)">Open AI Chat</a>';
+          // Use the current host (not hardcoded 'localhost' — that resolves
+          // to the USER's machine when the webui is accessed remotely) and
+          // inherit the webui's protocol (http vs https). Open WebUI inherits
+          // the same cert as kldload-webui when it's behind the webui proxy,
+          // so this never mixed-content-blocks even from an HTTPS origin.
+          aiSub.innerHTML = `<a href="${location.protocol}//${location.hostname}:8080" target="_blank" style="color:var(--accent)">Open AI Chat</a>`;
         } else if (d.ai_ollama) {
           aiVal.textContent = '◐ starting...';
           aiVal.style.color = 'var(--orange)';
@@ -2593,6 +2682,52 @@ function handle(msg) {
       const bobItems = document.getElementById('bob-nav-items');
       if (bobNav) bobNav.style.display = showBob ? '' : 'none';
       if (bobItems) bobItems.style.display = showBob ? '' : 'none';
+
+      // Bob GPU capability — gates the install-time Bob checkbox default.
+      // qwen2.5:14b chat needs ~9 GB of RAM/VRAM to feel responsive.
+      //   - NVIDIA ≥ 8 GB VRAM → capable (GPU-accelerated, fast)
+      //   - NVIDIA present but small VRAM → capable (still useful)
+      //   - No NVIDIA but ≥ 16 GB RAM → capable (CPU-only, slower)
+      //   - Everything else → not capable (skip Bob by default)
+      const _vram = d.vram_gb || 0;
+      const _ram = d.ram_gb || 0;
+      let _bobCapable = false;
+      let _bobReason = '';
+      if (d.has_nvidia && _vram >= 8) {
+        _bobCapable = true;
+        _bobReason = `NVIDIA GPU detected — ${_vram} GB VRAM available (recommended)`;
+      } else if (d.has_nvidia) {
+        _bobCapable = true;
+        _bobReason = `NVIDIA GPU detected — ${_vram} GB VRAM (small: expect slow inference on 14B chat)`;
+      } else if (_ram >= 16) {
+        _bobCapable = true;
+        _bobReason = `No GPU, ${_ram} GB RAM — CPU fallback will work (slow: ~2–5 tokens/s on 14B chat)`;
+      } else {
+        _bobCapable = false;
+        _bobReason = `No GPU, only ${_ram} GB RAM — not enough for qwen2.5:14b; Bob skipped by default`;
+      }
+      window._bobGpuCapable = _bobCapable;
+      const bobStatusEl = document.getElementById('bob-gpu-status');
+      if (bobStatusEl) {
+        bobStatusEl.textContent = _bobReason;
+        bobStatusEl.style.color = _bobCapable ? 'var(--accent)' : 'var(--orange)';
+      }
+      // Update model-tier pill gating (disable tiers that exceed VRAM,
+      // shift selection to a fittable default if current pick can't run).
+      if (typeof window.updateBobModelGating === 'function') {
+        window.updateBobModelGating(_vram, _ram);
+      }
+      // If a Bob-eligible profile is currently selected, re-sync the checkbox
+      // to the auto-detect default (user can still override manually after).
+      const _selected = document.querySelector('#target-grid .target-card.selected');
+      if (_selected && ['devops','k8s','kvm','zfslab'].includes(_selected.dataset.role)) {
+        const bobCb = document.getElementById('install-bob');
+        const aiCb = document.getElementById('install-ai');
+        if (bobCb && !bobCb.dataset.userTouched) {
+          bobCb.checked = _bobCapable;
+          if (aiCb) aiCb.checked = _bobCapable;
+        }
+      }
       // NVIDIA: hide panel if no GPU, auto-select if detected
       const nvidiaCard = document.getElementById('opt-nvidia');
       const nvidiaPanel = document.getElementById('platform-panel');
@@ -3075,7 +3210,22 @@ function handle(msg) {
     }
     case 'bob_confirm_request': {
       // Bob wants to execute a tool — render an approval card in the chat.
+      // Only fires when autonomy is OFF; in the default autonomous mode
+      // the server skips the round-trip and just runs the tool.
       showBobConfirmCard(msg);
+      break;
+    }
+    case 'bob_autonomy_state': {
+      // Reflect server-side autonomy setting on the ⚡ button.
+      _bobAutonomous = !!msg.autonomous;
+      const btn = document.getElementById('bob-autonomy');
+      if (btn) {
+        btn.textContent = _bobAutonomous ? '⚡' : '🛑';
+        btn.style.color = _bobAutonomous ? '#fbbf24' : '#94a3b8';
+        btn.title = _bobAutonomous
+          ? 'Autonomy ON — Bob runs every tool without asking. Click to require approval.'
+          : 'Paranoid mode — Bob asks before each mutation. Click to re-enable autonomy.';
+      }
       break;
     }
     case 'bob_chat_done': {
@@ -3217,30 +3367,232 @@ function updateStorageMode() {
   if (hint) hint.style.display = manual && manual.checked ? 'block' : 'none';
 }
 
+// Per-profile detail content shown in #role-summary below the tile grid.
+// Hover over a tile → preview its content. Click a tile → lock to it.
+// Mouse-leave without click → revert to the locked selection.
 const ROLE_DESCS = {
-  desktop: 'Desktop selected — GNOME workstation + ZFS on root',
-  server:  'Server selected — headless SSH node + ZFS on root',
-  core:    'Core selected — ZFS on root only, no kldload tools, no extras',
-  kvm:     'KVM Host selected — bare metal hypervisor + ZFS instant clones + kvm tools',
-  k8s:     'Kubernetes — 1 CP + 3 workers on ZFS clones, Cilium eBPF, Hubble, MetalLB (internet required)',
-  ai:      'AI selected — Desktop + Ollama + Open WebUI (internet required for model download)',
-  devops:  'klab — Multi-distro test platform. KVM host + K8s tools + golden images for 7 distros. ZFS instant clones, blue-green deploy, eBPF, NVIDIA.',
-  zfslab:  'ZFS Lab — lean K8s (1 CP, 2 GB, 0 workers) for Hubble + Tetragon visibility; full remaining host RAM/CPU to the 5 ztest goldens + parallel zfs-tests.sh across centos/rocky/fedora/debian/ubuntu.',
+  desktop: {
+    title:   'Desktop',
+    tagline: 'Full GNOME workstation on ZFS',
+    includes: [
+      'GNOME 45 desktop, Firefox, LibreOffice, tilix terminal',
+      'ZFS on root with Sanoid automatic snapshots (15-min / hourly / daily / monthly retention)',
+      'kldload CLI: <code>ksnap</code>, <code>krestore</code>, <code>kreplicate</code>, <code>kzfs-backup</code>, <code>kzfs-health</code>, <code>kzfs-test</code>',
+      'Web UI with browser-based ZFS management',
+      'Automatic NVIDIA driver detect + install on NVIDIA hardware',
+    ],
+    goodFor: 'Daily-driver laptop or workstation — instant rollback via snapshots and painless ZFS-based backups.',
+  },
+  server: {
+    title:   'Server',
+    tagline: 'Headless SSH node on ZFS',
+    includes: [
+      'No desktop — SSH-only access',
+      'ZFS on root with Sanoid automatic snapshots',
+      'kldload CLI: <code>ksnap</code>, <code>krestore</code>, <code>kreplicate</code>, <code>kzfs-backup</code>, <code>kzfs-health</code>',
+      'Cockpit + glances for remote web-based monitoring',
+      'chrony time sync, nftables firewall',
+      'Node exporter + Prometheus for metrics collection',
+    ],
+    goodFor: 'Remote storage targets, file servers, backup destinations, edge compute nodes.',
+  },
+  core: {
+    title:   'Core',
+    tagline: 'ZFS on root. Nothing else.',
+    includes: [
+      'Minimal bootable base distro of your choice (CentOS / Rocky / Debian / Ubuntu / Arch / Alpine)',
+      'ZFS on root, fully configured',
+      'No kldload tools, no web UI, no dashboards, no services beyond what the base distro ships',
+      'No Sanoid, no snapshot automation, no helpers',
+      'Smallest possible kldloadOS footprint',
+    ],
+    goodFor: 'Clean baseline for custom builds, CI ZFS test targets, or users who only want ZFS-on-root and will layer their own stack on top.',
+  },
+  kvm: {
+    title:   'KVM Host',
+    tagline: 'Hardware hypervisor template — ZFS + KVM, nothing else in the way',
+    includes: [
+      'libvirt + qemu-kvm + virt-manager',
+      'ZFS on root; VM storage on ZFS datasets (instant clones, zero-copy snapshots)',
+      'Minimal desktop — just enough to run virt-manager locally',
+      'kldload KVM helpers: <code>kvm-clone</code> (~100ms clone from ZFS golden), <code>kvm-replicate</code> (zfs-send-based replication to a peer host), <code>kvm-backup</code>, <code>kvm-rollback</code>, <code>kvm-console</code>',
+      'libvirt default network (virbr0) + <code>isos</code> storage pool pre-configured',
+      'WireGuard available for replication over the internet',
+      'Node exporter + Prometheus for host metrics',
+    ],
+    goodFor: 'Dedicated virtualization hosts where ZFS is the storage backend and you want the clone/replicate primitives out of the box.',
+  },
+  k8s: {
+    title:   'Kubernetes',
+    tagline: 'Lean Kubernetes appliance — no GUI chrome',
+    includes: [
+      'kubeadm-based cluster: 1 control plane + 3 workers on ZFS instant clones',
+      'Cilium networking with eBPF dataplane',
+      'Hubble network observability',
+      'MetalLB LoadBalancer for bare-metal service exposure',
+      'In-cluster ZFS CSI driver for persistent volumes on ZFS',
+      'Tetragon for syscall-level tracing of pods',
+      'All offline — cluster images pre-baked into the ISO',
+    ],
+    goodFor: 'Production K8s appliances, edge clusters, labs where ZFS-backed PVs matter. Same cluster the kldlab profile uses, without the UI / console / full observability stack on top.',
+  },
+  devops: {
+    title:   'kldlab',
+    tagline: 'Full-featured sandbox — Kubernetes + UI + rich observability + browser console + Bob',
+    includes: [
+      'Everything in the Kubernetes profile, <strong>plus:</strong>',
+      'Browser terminal at <code>https://&lt;ip&gt;:7681</code> — real <code>k9s</code>, shell, log panes in persistent tmux',
+      'UI-managed VM lifecycle: clone / start / stop / destroy / console from the dashboard',
+      'Five pre-built golden distros for instant ZFS clone: CentOS Stream 9, Rocky 9, Fedora 43, Debian 13, Ubuntu 24.04',
+      'Full host-side observability: Prometheus, Grafana, Loki, promtail',
+      '8 pre-provisioned Grafana dashboards (zfs-pool-health, scrub-history, compression-trend, disk-health-smart, block-io-latency, kernel-messages, klab-test-matrix, klab-test-debug)',
+      'eBPF exporters: <code>ebpf_exporter</code>, Tetragon, Cilium Hubble',
+      'ZFS exporters: <code>zfs_exporter</code>, <code>arcstats-exporter</code>, <code>zpool-scrub-exporter</code>, <code>smartctl_exporter</code>',
+      '<strong>Bob AI assistant</strong> — qwen2.5:14b, grounded in kldload knowledge base, open-mic voice control, eBPF probe authoring, ZFS debugging, dashboard helper. Read-only tools run freely; mutating tools require an approval click. <em>Auto-enabled on systems with NVIDIA GPU (≥8 GB VRAM) or ≥16 GB RAM for CPU fallback — skipped otherwise; toggle in the Bob panel. Model pulls from ollama.com on first boot (internet required) — airgapped installs can pre-stage models at <code>/root/darksite/ollama/models/</code>.</em>',
+      'One-pane ops console — Kubernetes + VM workspaces clickable from the dashboard',
+      'Prometheus file-SD auto-discovers new VMs as they come up',
+    ],
+    goodFor: 'The SRE / developer appliance. Everything wired together out of the box. Test any workload under full kernel visibility, debug ZFS anomalies, author eBPF probes, and ask questions about your cluster in plain voice without leaving the browser.',
+  },
+  zfslab: {
+    title:   'OpenZFS Test Lab',
+    tagline: 'ZFS testing across multiple Linux distributions — for OpenZFS contributors',
+    includes: [
+      'Dedicated to ZFS testing — <strong>no Kubernetes cluster is built</strong> (entire host budget goes to test VMs)',
+      'Five pre-built <strong>ztest goldens</strong>: CentOS Stream 9, Rocky 9, Fedora 43, Debian 13, Ubuntu 24.04',
+      'Full ZFS-test-suite runtime deps baked in (no more "SKIP: fio missing" false failures)',
+      '<code>klab test --full</code> — parallel <code>zfs-tests.sh</code> across all 5 distros (~2–4 hours)',
+      '<code>klab test --quick</code> — ~15-min smoke run per distro',
+      '<code>klab test --distro fedora</code> — single-distro subset',
+      'Per-distro watchdog — hung tests get a debug bundle + get killed cleanly',
+      '<code>klab-vm-debug-bundle</code> auto-fires on FAIL: zdb, kernel ring, ZFS dbgmsg, D-state stacks, SMART, kmods, packages. Writes paste-ready <code>ISSUE.md</code> for the OpenZFS tracker.',
+      'Host-side observability scoped to ZFS: pool health, scrub history, ARC, SMART, biolatency, kernel messages, test matrix dashboards',
+      'zed → Loki pipe: every zpool event labelled by <code>{pool, class}</code> and queryable from Grafana',
+    ],
+    goodFor: 'OpenZFS upstream contributors and maintainers — reproduce bugs across distros, verify patches don\'t regress anywhere, produce distro-matrixed test reports.',
+  },
 };
+
+// Render the detail panel for a given role. Called on hover and on click.
+function renderRoleDesc(role) {
+  const d = ROLE_DESCS[role];
+  if (!d) return '';
+  const items = d.includes.map(i => '<li style="margin-bottom:0.15rem">' + i + '</li>').join('');
+  return '<div style="font-weight:600;color:var(--accent);font-size:0.9rem;margin-bottom:0.15rem">' +
+         '&check; ' + d.title + ' &mdash; ' + d.tagline + '</div>' +
+         '<div style="font-size:0.78rem;color:var(--muted);margin-top:0.4rem">Includes:</div>' +
+         '<ul style="font-size:0.78rem;color:var(--text);margin:0.2rem 0 0.5rem 1.1rem;padding:0;line-height:1.45">' +
+         items + '</ul>' +
+         '<div style="font-size:0.78rem;color:var(--muted)"><strong style="color:var(--text)">Good for:</strong> ' +
+         d.goodFor + '</div>';
+}
+
+// Tracks the currently-selected (clicked) role so mouseleave can revert to it.
+// Initialised from whichever tile has .selected in the initial HTML.
+let _selectedRole = (document.querySelector('#target-grid .target-card.selected')?.dataset.role) || 'k8s';
+
+function showRoleDetail(role) {
+  const sum = document.getElementById('role-summary');
+  if (sum) sum.innerHTML = renderRoleDesc(role);
+}
+function hoverTarget(el) { showRoleDetail(el.dataset.role); }
+function leaveTarget()   { showRoleDetail(_selectedRole); }
+
 function selectTarget(el) {
   document.querySelectorAll('#target-grid .target-card').forEach(c => c.classList.remove('selected'));
   el.classList.add('selected');
-  const sum = document.getElementById('role-summary');
-  if (sum) sum.textContent = '✓ ' + (ROLE_DESCS[el.dataset.role] || el.dataset.role);
+  _selectedRole = el.dataset.role;
+  showRoleDetail(_selectedRole);
+
   const smRow = document.getElementById('storage-mode-row');
   if (smRow) smRow.style.display = el.dataset.role === 'core' ? 'block' : 'none';
-  // AI profile — toggle AI checkbox and model selector
+
+  // AI / Bob handling: Bob ships with kldlab/k8s/kvm/zfslab profiles
+  // when a capable GPU is detected. Users can override either direction
+  // via the install-bob checkbox in the Bob panel. Model selection
+  // itself is runtime (Bob's own UI) — no install-time picker.
   const aiCb = document.getElementById('install-ai');
-  const aiModels = document.getElementById('ai-models');
-  if (aiCb) aiCb.checked = el.dataset.role === 'ai';
-  if (aiModels) aiModels.style.display = el.dataset.role === 'ai' ? 'block' : 'none';
-  // klab options panel no longer exists (ZFS dev tools moved to ztest lineage).
+  const bobCb = document.getElementById('install-bob');
+  const bobPanel = document.getElementById('bob-panel');
+  const bobEligibleRoles = ['devops', 'k8s', 'kvm', 'zfslab'];
+  const bobEligible = bobEligibleRoles.includes(el.dataset.role);
+  if (bobPanel) bobPanel.style.display = bobEligible ? 'block' : 'none';
+  if (bobCb && bobEligible) {
+    // Auto-check based on GPU capability the last system-info pass detected.
+    // _bobGpuCapable is set by updateBobGpuStatus() on page load / refresh.
+    bobCb.checked = !!window._bobGpuCapable;
+  } else if (bobCb) {
+    bobCb.checked = false;
+  }
+  // Keep the legacy install-ai hidden checkbox in sync so submit payloads
+  // that still reference it (and the summary badge code) behave consistently.
+  if (aiCb) aiCb.checked = !!(bobCb && bobCb.checked);
 }
+
+// Initial render — populate the detail panel for the default-selected tile
+// as soon as the DOM is parsed.
+document.addEventListener('DOMContentLoaded', () => showRoleDetail(_selectedRole));
+
+// Bob panel wiring — user-touch tracking + pill visual state.
+document.addEventListener('DOMContentLoaded', function() {
+  const bobCb = document.getElementById('install-bob');
+  if (bobCb) {
+    bobCb.addEventListener('change', function() {
+      bobCb.dataset.userTouched = '1';
+      const aiCb = document.getElementById('install-ai');
+      if (aiCb) aiCb.checked = bobCb.checked;
+    });
+  }
+  // Pill-style radio: sync .selected class with actual radio state.
+  // Also lets the whole pill (not just the ~12px radio dot) be clickable.
+  function syncBobPills() {
+    document.querySelectorAll('.bob-pill').forEach(function(pill) {
+      const r = pill.querySelector('input[type=radio]');
+      if (r && r.checked) pill.classList.add('selected');
+      else pill.classList.remove('selected');
+    });
+  }
+  document.querySelectorAll('input[name="bob-model"]').forEach(function(r) {
+    r.addEventListener('change', syncBobPills);
+  });
+  syncBobPills();
+});
+
+// updateBobModelGating() — disable pills whose VRAM floor exceeds
+// detected VRAM (falls back to CPU-only if no GPU). Called from
+// refreshSystemInfo after _bobGpuCapable + _vram are known.
+window.updateBobModelGating = function(vramGB, ramGB) {
+  const pills = document.querySelectorAll('.bob-pill');
+  let bestDefault = null;
+  pills.forEach(function(pill) {
+    const need = parseInt(pill.dataset.vramGb || '0', 10);
+    const r = pill.querySelector('input[type=radio]');
+    // "code" tier stays enabled as long as recommended is — different persona,
+    // same VRAM. Otherwise gate strictly on VRAM.
+    const tier = pill.dataset.tier;
+    const ok = (vramGB >= need) || (need === 0);
+    if (!ok) {
+      pill.classList.add('disabled');
+      if (r) r.disabled = true;
+    } else {
+      pill.classList.remove('disabled');
+      if (r) r.disabled = false;
+      // Track best-fit default: highest tier that fits (but cap at recommended
+      // for most, never auto-pick Large — user opts up if they want).
+      if (tier === 'mini' || tier === 'small' || tier === 'recommended') {
+        bestDefault = tier;
+      }
+    }
+  });
+  // CPU-only fallback: mini is the only safe pick
+  if (vramGB === 0 && ramGB >= 16) bestDefault = 'mini';
+  // If current selection is disabled, move to best default
+  const cur = document.querySelector('input[name="bob-model"]:checked');
+  if (cur && cur.disabled && bestDefault) {
+    const newChoice = document.querySelector(`input[name="bob-model"][value="${bestDefault}"]`);
+    if (newChoice) { newChoice.checked = true; newChoice.dispatchEvent(new Event('change')); }
+  }
+};
 
 const DISTRO_DESCS = {
   centos:   'CentOS Stream 9 — RHEL upstream, offline from RPM darksite',
@@ -3306,8 +3658,7 @@ function selectDistro(el) {
     const p = document.getElementById(id);
     if (p) p.style.display = isBSDDistro ? 'none' : '';
   });
-  // Hide AI model selector when switching to BSD
-  if (isBSDDistro) { const am = document.getElementById('ai-models'); if (am) am.style.display = 'none'; }
+  // (old AI model selector hide on BSD — block removed; picker UI no longer exists)
   if (rhelPanel) rhelPanel.style.display = el.dataset.distro === 'rhel' ? 'block' : 'none';
   // Distro-specific profile restrictions
   const d = el.dataset.distro;
@@ -3315,7 +3666,7 @@ function selectDistro(el) {
   const isBSD = d === 'freebsd';
   document.querySelectorAll('#target-grid .target-card').forEach(c => {
     const r = c.dataset.role;
-    const blocked = (isBSD && r !== 'core') || (isArch && (r === 'desktop' || r === 'kvm' || r === 'k8s' || r === 'ai' || r === 'devops'));
+    const blocked = (isBSD && r !== 'core') || (isArch && (r === 'desktop' || r === 'kvm' || r === 'k8s' || r === 'devops'));
     c.style.opacity = blocked ? '0.3' : '';
     c.style.pointerEvents = blocked ? 'none' : '';
   });
@@ -3353,6 +3704,11 @@ function toggleRhelAuth() {
 function toggleDHCP() {
   const dhcp = document.getElementById('net-dhcp').checked;
   document.getElementById('net-static').style.display = dhcp ? 'none' : 'block';
+}
+
+function toggleWiFi() {
+  const on = document.getElementById('net-use-wifi').checked;
+  document.getElementById('net-wifi').style.display = on ? 'block' : 'none';
 }
 
 // ── Password check ───────────────────────────────────────────────────────────
@@ -3429,8 +3785,9 @@ function startInstall() {
   const roleRaw  = (document.querySelector('#target-grid .target-card.selected') || {}).dataset?.role || 'k8s';
   // zfslab is the "K8s lean + ZFS test suite first" variant of the kvm stack.
   // Installed packages are identical to kvm/k8s — only resources reprovision.
-  const role     = roleRaw === 'ai' ? 'desktop'
-                 : (['k8s','devops','zfslab'].includes(roleRaw) ? 'kvm' : roleRaw);
+  // The standalone 'ai' tile was removed in 1.0.5; Bob AI is now bundled
+  // with the kldlab (devops) profile rather than its own role.
+  const role     = ['k8s','devops','zfslab'].includes(roleRaw) ? 'kvm' : roleRaw;
   const distro   = (document.querySelector('#distro-grid .target-card.selected') || {}).dataset?.distro || 'centos';
   const dhcp     = document.getElementById('net-dhcp').checked;
   const sshKey   = (document.getElementById('install-ssh-key')?.value || '').trim();
@@ -3469,6 +3826,14 @@ function startInstall() {
     storage_mode: 'zfs', infra_mode: 'standalone',
     zfs_encrypt: encrypt ? '1' : '0',
     storage_manual: manualStorage ? '1' : '0',
+    // WiFi — only included in payload when the user toggled "Connect
+    // over WiFi" AND filled in the SSID. Backend writes
+    // /etc/NetworkManager/system-connections/<ssid>.nmconnection
+    // on the target (mode 0600) so first boot comes up on network.
+    ...(document.getElementById('net-use-wifi')?.checked && document.getElementById('wifi-ssid')?.value.trim() ? {
+      wifi_ssid: document.getElementById('wifi-ssid').value.trim(),
+      wifi_psk:  document.getElementById('wifi-psk')?.value || '',
+    } : {}),
     // The "devops" template is the full-stack bundle: KVM + K8s +
     // Bootstrap + AI + klab goldens. A user picking devops shouldn't
     // have to also tick each individual box — that's what "template"
@@ -3478,14 +3843,22 @@ function startInstall() {
     // profile — k8s, kvm, zfslab, devops all assume Bob is available out
     // of the box. Only the minimal profiles (desktop/server/core) leave
     // it off unless the user explicitly ticks the install-ai checkbox.
-    enable_ai: (['devops','k8s','kvm','zfslab','ai'].includes(roleRaw)
-                || document.getElementById('install-ai')?.checked) ? '1' : '0',
+    // enable_ai follows the user-facing install-bob checkbox. When no Bob
+    // panel is visible for the selected profile (desktop/server/core), the
+    // checkbox default is unchecked, so enable_ai=0 — exactly what those
+    // profiles want. On kldlab/k8s/kvm/zfslab, default is set from GPU
+    // auto-detection (refreshSystemInfo) and user can override.
+    enable_ai: document.getElementById('install-bob')?.checked ? '1' : '0',
+    // Bob model selection (tier name — firstboot maps to Ollama model).
+    // bob_darksite=1 → expect /root/darksite/ollama/models/ pre-staged.
+    bob_model: document.querySelector('input[name="bob-model"]:checked')?.value || 'recommended',
+    bob_darksite: document.getElementById('bob-darksite')?.checked ? '1' : '0',
     enable_devops: roleRaw === 'devops' ? '1' : '0',
     // ZFS dev-tools goldens are now a separate on-demand lineage
     // (klab-ztest-<distro>) built from the ZFS Test Lab tile. Installer
     // only sets KLAB_ZFS_DEV=1 when the user explicitly picks the ZFS Lab
-    // profile — then autodeploy auto-builds all 5 ztest goldens and
-    // reprovisions the K8s cluster smaller so resources favour the tests.
+    // profile — then autodeploy auto-builds all 5 ztest goldens while
+    // skipping K8s entirely so the host budget goes to the tests.
     klab_zfs_dev: roleRaw === 'zfslab' ? '1' : '0',
     zfslab_mode:  roleRaw === 'zfslab' ? '1' : '0',
     ai_model_chat: document.getElementById('ai-model-chat')?.checked ? '1' : '0',
@@ -3495,13 +3868,14 @@ function startInstall() {
     wireguard: document.getElementById('install-wireguard')?.checked ? '1' : '0',
     enable_ebpf: document.getElementById('install-ebpf')?.checked ? '1' : '0',
     zfs_dedup: document.getElementById('install-zfs-dedup')?.checked ? '1' : '0',
-    // zfslab bootstraps a LEAN K8s — 1 CP (2 GB, 1 vCPU), 0 workers —
-    // just enough to host Hubble + Tetragon so you have syscall-level
-    // visibility during the ZFS test runs. Resource footprint ~6% of
-    // host RAM; the rest stays with the ztest goldens. kube-cluster
-    // reads KLDLOAD_ZFSLAB_MODE and overrides its sizing defaults.
-    enable_k8s: (document.getElementById('install-k8s')?.checked || ['k8s','devops','zfslab'].includes(roleRaw)) ? '1' : '0',
-    k8s_bootstrap: (document.getElementById('install-k8s-bootstrap')?.checked || ['k8s','devops','zfslab'].includes(roleRaw)) ? '1' : '0',
+    // zfslab is a ZFS test appliance — NO K8s. Every ZFS observability
+    // signal (klab-exporter, zfs_exporter, arcstats, zpool-scrub, ebpf,
+    // smartctl, node_exporter, promtail→loki) runs on the host directly,
+    // so the K8s cluster adds nothing to the ZFS test story and just eats
+    // ~30 vCPUs + ~50 GB that should go to the ztest goldens. Spin K8s up
+    // later from the UI if you want Cilium/Hubble/CSI demos.
+    enable_k8s: (document.getElementById('install-k8s')?.checked || ['k8s','devops'].includes(roleRaw)) ? '1' : '0',
+    k8s_bootstrap: (document.getElementById('install-k8s-bootstrap')?.checked || ['k8s','devops'].includes(roleRaw)) ? '1' : '0',
     // KVM is implied by every profile whose cluster/goldens live in VMs,
     // including zfslab (its goldens are VMs).
     enable_kvm: (document.getElementById('install-kvm')?.checked || ['kvm','k8s','devops','zfslab'].includes(roleRaw)) ? '1' : '0',
@@ -3578,8 +3952,14 @@ function confirmInstall() {
 
   const bar = document.getElementById('install-progress');
   if (bar) { bar.className = 'progress-bar active'; bar.style.width = '100%'; }
+
   send({ action: 'install', params: _installPayload });
 }
+
+// Set by confirmInstall() while awaiting a wifi_connect_result. The main
+// WS message handler calls this if set, so wifi_connect_result is routed
+// back to the async resolver instead of falling into the default switch.
+let _wifiResultHandler = null;
 
 function wipeDisk(mode) {
   const disk = document.getElementById('install-disk').value;
@@ -4078,13 +4458,16 @@ function k8sBulk(op, kind) {
     name: cb.dataset.name,
     namespace: cb.dataset.ns || ''
   }));
-  // Destructive ops get a confirm — drain / delete_pod / cordon-at-scale
-  // are all things the user should confirm before we run them serially.
-  const destructive = ['drain', 'delete_pod'];
+  // Destructive ops get a confirm. delete_node is the scariest (wipes
+  // the VM + zvol too) so it gets its own louder message.
+  const destructive = ['drain', 'delete_pod', 'delete_node'];
   if (destructive.includes(op)) {
     const names = targets.map(t => t.name).slice(0, 5).join(', ');
     const more  = targets.length > 5 ? ` and ${targets.length - 5} more` : '';
-    if (!confirm(`${op} ${targets.length} ${kind}(s)?\n  ${names}${more}`)) return;
+    const msg = (op === 'delete_node')
+      ? `DELETE ${targets.length} node(s)?\n  ${names}${more}\n\nThis drains the node, removes it from the cluster, DESTROYS the VM, and DESTROYS the zvol. Irreversible — rebuild via + Add worker.`
+      : `${op} ${targets.length} ${kind}(s)?\n  ${names}${more}`;
+    if (!confirm(msg)) return;
   }
   send({action: 'k8s_bulk', op, targets});
   k8sClearSel(kind);
@@ -4666,7 +5049,9 @@ function toggleTheme() {
 // ── Metrics (Grafana embed) ────────────────────────────────────────────────
 // Grafana runs on :3000 on the same host the webui is served from. Anonymous
 // viewer is enabled in grafana.ini so the iframe loads without a login.
-// kiosk=tv hides the Grafana chrome (top bar, sidebar) for a clean view.
+// kiosk=1 (full kiosk) hides the Grafana chrome AND side-menu. kiosk=tv
+// (TV mode) leaves the sidebar poppable on hover, which clashed with the
+// kldload-side dashboard rail — two nav columns fighting for the same job.
 function metricsGrafanaBase() {
   return `${location.protocol}//${location.hostname}:3000`;
 }
@@ -4681,8 +5066,8 @@ function metricsLoadDashboard(uid) {
   const theme = _currentTheme();
   _metricsActiveUid = uid || 'home';
   const url = uid && uid !== 'home'
-    ? `${base}/d/${uid}/?orgId=1&kiosk=tv&refresh=5s&theme=${theme}`
-    : `${base}/?orgId=1&kiosk=tv&theme=${theme}`;
+    ? `${base}/d/${uid}/?orgId=1&kiosk=1&refresh=5s&theme=${theme}`
+    : `${base}/?orgId=1&kiosk=1&theme=${theme}`;
   ifr.src = url;
   // Highlight the active row in the left rail
   document.querySelectorAll('#metrics-list li').forEach(li => {
@@ -4691,7 +5076,7 @@ function metricsLoadDashboard(uid) {
   });
 }
 // Known dashboards we provision at firstboot. We can't fetch Grafana's
-// /api/search from JS directly (CORS — webui is on :9000, Grafana on :3000),
+// /api/search from JS directly (CORS — webui is on :8443, Grafana on :3000),
 // but these UIDs are deterministic because they come from the provisioning
 // configs. If the user adds more via Grafana UI, they'll only show up in
 // the ⇗ "Open in Grafana" view.
@@ -4699,13 +5084,21 @@ function metricsLoadDashboard(uid) {
 // fixed strings set by the upstream authors and don't change between
 // dashboard versions, so they're safe to hardcode.
 const METRICS_CATALOG = [
-  { uid: 'home',        title: '📊 Grafana Home',      group: '' },
-  { uid: 'klab-estate', title: '🔬 klab Estate',       group: 'kldload' },
-  { uid: 'rYdddlPWk',   title: '🖥 Host — Full',       group: 'Host' },        // 1860
-  { uid: 'vtuWtdumz',   title: '⌁ Cilium Agent',       group: 'Cilium' },      // 16611
-  { uid: '1GC0TT4Wz',   title: '⌁ Cilium Operator',    group: 'Cilium' },      // 16612
-  { uid: '5HftnJAWz',   title: '⌁ Hubble Metrics',     group: 'Cilium' },      // 16613
-  { uid: 'tetragon-ebpf', title: '🔭 Tetragon eBPF',     group: 'Observability' }, // bundled dashboard
+  { uid: 'home',                title: '📊 Grafana Home',         group: '' },
+  { uid: 'klab-estate',         title: '🔬 klab Estate',          group: 'kldload' },
+  { uid: 'zfs-pool-health',     title: '🌊 ZFS Pool Health',      group: 'Storage' },
+  { uid: 'scrub-history',       title: '🧹 ZFS Scrub & Errors',   group: 'Storage' },
+  { uid: 'compression-trend',   title: '🗜 Compression Trends',   group: 'Storage' },
+  { uid: 'disk-health-smart',   title: '💽 Disk Health (SMART)',  group: 'Storage' },
+  { uid: 'block-io-latency',    title: '⚡ Block I/O Latency',    group: 'Storage' },
+  { uid: 'rYdddlPWk',           title: '🖥 Host — Full',          group: 'Host' },  // 1860
+  { uid: 'kernel-messages',     title: '📜 Kernel & Logs',        group: 'Observability' },
+  { uid: 'klab-test-matrix',    title: '🧪 klab Test Matrix',    group: 'Observability' },
+  { uid: 'klab-test-debug',     title: '🐛 klab Test Debug',      group: 'Observability' },
+  { uid: 'tetragon-ebpf',       title: '🔭 Tetragon eBPF',        group: 'Observability' },
+  { uid: 'vtuWtdumz',           title: '⌁ Cilium Agent',          group: 'Cilium' }, // 16611
+  { uid: '1GC0TT4Wz',           title: '⌁ Cilium Operator',       group: 'Cilium' }, // 16612
+  { uid: '5HftnJAWz',           title: '⌁ Hubble Metrics',        group: 'Cilium' }, // 16613
 ];
 function metricsRefreshList() {
   const list = document.getElementById('metrics-list');
@@ -4813,7 +5206,8 @@ function renderFirstbootStatus(msg) {
         'ai-pull-kicking':   'Starting AI model pull in background',
         'ai-wait':           'Finishing AI model pull + warmup',
         'k8s-bootstrap':     'Building Kubernetes cluster (golden → CP → workers → Cilium/MetalLB/Hubble)',
-        'klab-goldens':      'Building klab golden images (centos, rocky, fedora, debian, ubuntu, rhel)',
+        'klab-goldens':      'Building blue-green klab golden images (centos, rocky, fedora, debian, ubuntu)',
+        'klab-ztest-goldens':'Building ZFS Lab ztest goldens — full OpenZFS test deps + 4× 4G loopback vdevs per distro (~60 min)',
         'ready':             'Almost done — finalizing',
         'partial':           'Finished with partial success — check component status below',
         'nothing-requested': 'No extended services requested at install',
@@ -6103,15 +6497,39 @@ Observability (read-only, no approval):
 - doctor_check()                        — full compliance profiler
 - list_nodes / list_vms / list_clusters / list_events / list_deployments (state DB)
 
-Execute (requires user approval):
-- run_playbook({playbook, limit, extras?, check?})
+Execute (autonomy mode is ON by default — tools run without asking; ZFS rollback
+covers any mistake):
+- run_playbook({playbook, limit, extras?, check?}) — Ansible
+- shell_run({command}) / shell_run_async + shell_poll — arbitrary shell, including root
+- terminal_send / tmux_spawn / tmux_send / tmux_capture — drive the user's browser-visible terminal
+- bpftrace_oneliner({script}) — single-liner eBPF probe
+- bpftrace_script({script, duration_s, why}) — multi-line eBPF, always with an exit budget
+- bpftrace_probes({pattern}) — discover which kprobes/tracepoints exist on this kernel
+
+eBPF tracing protocol when the user asks you to trace something:
+1. bpftrace_probes("tracepoint:syscalls:sys_enter_openat") — confirm the probe exists
+2. Author a minimal .bt with MAP aggregation (prefer @counts[comm] = count() over
+   raw printf — noisy events drown bpftrace otherwise) and either an interval
+   timer 'interval:s:N { exit(); }' or rely on duration_s.
+3. bpftrace_script({script, duration_s: 15-30, why: "..."}). Keep scripts short
+   and focused — one question per probe.
+4. Read the output block. Summarize counts + outliers in plain English.
+5. If the user wants to WATCH live, use tmux_spawn + tmux_send instead so it
+   runs in their terminal where they can see it.
+
+Terminal-driving protocol when the user says "show me X" or "open Y":
+- tmux_spawn({name, cmd}) makes a new window they see appear. tmux_send types
+  into it. tmux_capture reads back scrollback. You can narrate what you're
+  doing: "Opening a watch window — here's what it's showing…"
 
 Diagnosis recipe when a user says "why is X broken" or "what's going on with Y":
 1. k8s_events(warnings_only=true) — catches most pod/node problems instantly
 2. If a specific pod: k8s_describe(kind=pod, name=X, namespace=Y) then k8s_logs
 3. For host/cluster load: prom_query or host_vitals
 4. For storage: zfs_status
-5. Only after tool results: summarize in plain English with concrete facts.
+5. If symptom is vague ("slow", "laggy", "weird"): reach for bpftrace_script —
+   measure don't guess. syscall latency histograms beat reading logs.
+6. Only after tool results: summarize in plain English with concrete facts.
 
 Hosts & addressing you already know:
 - Kubernetes VMs: kldload-cp (192.168.122.206), kldload-w-1 (.135), w-2 (.224), w-3 (.187)
@@ -6134,10 +6552,18 @@ let _bobConvTitle = 'New conversation';
 let _bobContextRefreshInterval = null;
 let _bobCurrentMsg = null;
 let _bobLastRender = 0;
+let _bobAutonomous = true;   // mirrors server state; set by bob_autonomy_state
+
+function bobAutonomyToggle() {
+  // Flip the flag optimistically; server echoes `bob_autonomy_state` to confirm.
+  _bobAutonomous = !_bobAutonomous;
+  send({ action: 'bob_autonomy_set', autonomous: _bobAutonomous });
+}
 
 function bobInit() {
   // Check Ollama status via WebSocket backend (not direct browser fetch)
   send({ action: 'bob_models' });
+  send({ action: 'bob_autonomy_get' });
 
   // Load conversation list
   send({ action: 'bob_list' });
@@ -6404,8 +6830,8 @@ async function bobRequestMicPermission() {
           '     Add    ' + location.origin + '\n' +
           '     Click  Relaunch\n\n' +
           '  2) Tunnel via localhost (Chrome treats it as secure):\n' +
-          '     ssh -L 9000:localhost:9000 ' + location.hostname + '\n' +
-          '     then browse http://localhost:9000\n\n' +
+          '     ssh -L 8443:localhost:8443 ' + location.hostname + '\n' +
+          '     then browse https://localhost:8443\n\n' +
           '  3) Install from the latest ISO — its webui serves HTTPS by\n' +
           '     default (self-signed cert) and the mic works out of the box.'
         : 'Your browser does not expose navigator.mediaDevices. Try Chrome, Edge or Firefox.')

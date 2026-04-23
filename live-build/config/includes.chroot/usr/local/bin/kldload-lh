@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# kldload-lh — launch LogHog (lh) with cluster-wide log stitching.
+#
+# Best-effort mounts /var/log from every registered kldload node via
+# SSHFS under /mnt/cluster-logs/<hostname>/var/log, then launches lh.
+# lh's default log_search_path already includes /mnt/cluster-logs, so
+# the remote logs get folded into every mode (Live All, Auth, Errors,
+# Network, RegEX, IP search) automatically, stitched by timestamp.
+#
+# Graceful degradation: any node that fails to mount (network down,
+# no SSH key, target offline) is skipped with a warning — lh runs on
+# whatever remote logs did mount plus local logs.
+#
+# Exit: unmounts everything, leaves no orphan SSHFS processes behind.
+# If SSHFS is unavailable, falls through to lh on local paths only.
+set -u
+
+MOUNT_ROOT="/mnt/cluster-logs"
+STATE_DB="${KLDLOAD_DB:-/var/lib/kldload/state.db}"
+SSH_USER="${KLDLOAD_CLUSTER_SSH_USER:-root}"
+# SSH opts: short connect timeout so a dead node doesn't block the whole
+# launch; batch mode so we don't prompt for passwords; strict=no because
+# /mnt/cluster-logs is an admin-controlled tree and we trust WG-mesh IPs.
+SSH_OPTS=(-o ConnectTimeout=4 -o BatchMode=yes -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+# Mount options: allow_other so non-root users can read (lh may run as
+# non-root); ro because we never write remote logs; reconnect so a
+# transient network blip doesn't kill the mount; cache_timeout for
+# readdir speed; no attr caching because logs rotate.
+SSHFS_OPTS="ro,allow_other,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache_timeout=20,attr_timeout=0"
+
+C_G=$'\033[32m'; C_Y=$'\033[33m'; C_R=$'\033[31m'; C_D=$'\033[2m'; C_N=$'\033[0m'
+log()  { printf "%b[lh-cluster]%b %s\n" "$C_G" "$C_N" "$*" >&2; }
+warn() { printf "%b[lh-cluster]%b %s\n" "$C_Y" "$C_N" "$*" >&2; }
+
+# ── Node discovery ─────────────────────────────────────────────────────
+# Pull (hostname, ip) tuples from state.db. Filter to rows with a
+# routable IP so we don't try to SSHFS a VM that never finished join.
+# Schema fallback: if the DB is missing, fall back to `kldload-db` CLI
+# if it exists, otherwise to an empty list (local-only run).
+_discover_nodes() {
+    local sql="SELECT hostname, ip_mgmt FROM nodes WHERE ip_mgmt IS NOT NULL AND ip_mgmt != '' ORDER BY hostname"
+    if command -v sqlite3 >/dev/null 2>&1 && [[ -r "$STATE_DB" ]]; then
+        sqlite3 -separator $'\t' "$STATE_DB" "$sql" 2>/dev/null
+    elif command -v kldload-db >/dev/null 2>&1; then
+        # CLI fallback — the tool shipped in the ISO can dump nodes as
+        # whitespace-separated rows we can tab-ify.
+        kldload-db list-nodes 2>/dev/null | awk 'NR>1 && $2 != "" {print $1 "\t" $2}'
+    fi
+}
+
+# ── Mount management ───────────────────────────────────────────────────
+_mount_node() {
+    local host="$1" ip="$2"
+    local mp="${MOUNT_ROOT}/${host}"
+    mkdir -p "${mp}/var/log" 2>/dev/null || return 1
+
+    # Skip if already mounted — idempotent relaunch.
+    if mountpoint -q "${mp}/var/log"; then
+        return 0
+    fi
+
+    # Probe SSH reachability first so a down node fails fast with a
+    # clear message instead of hanging sshfs for its whole timeout.
+    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" true 2>/dev/null; then
+        warn "skip ${host} (${ip}): ssh unreachable or no key"
+        rmdir "${mp}/var/log" "${mp}" 2>/dev/null || true
+        return 1
+    fi
+
+    if sshfs -o "${SSHFS_OPTS}" "${SSH_USER}@${ip}:/var/log" "${mp}/var/log" 2>/dev/null; then
+        log "mounted ${host} → ${mp}/var/log"
+        return 0
+    fi
+    warn "sshfs ${host} failed"
+    rmdir "${mp}/var/log" "${mp}" 2>/dev/null || true
+    return 1
+}
+
+_unmount_all() {
+    if [[ -d "$MOUNT_ROOT" ]]; then
+        for d in "$MOUNT_ROOT"/*/var/log; do
+            [[ -d "$d" ]] || continue
+            fusermount -u "$d" 2>/dev/null \
+                || umount "$d" 2>/dev/null \
+                || umount -l "$d" 2>/dev/null
+            rmdir "$d" "$(dirname "$d")" 2>/dev/null || true
+        done
+    fi
+}
+
+# Always cleanup on exit — SIGINT (Ctrl-C from lh), normal lh quit, errors.
+trap '_unmount_all' EXIT INT TERM HUP
+
+# ── Main ───────────────────────────────────────────────────────────────
+# Skip cluster mounting entirely if:
+#   --local flag passed (user just wants this node)
+#   sshfs binary isn't installed
+if [[ "${1:-}" == "--local" ]]; then
+    shift
+    log "cluster mounts disabled (--local)"
+elif ! command -v sshfs >/dev/null 2>&1; then
+    warn "sshfs not installed — running lh on local logs only"
+else
+    mkdir -p "$MOUNT_ROOT" 2>/dev/null || true
+    _nodes="$(_discover_nodes || true)"
+    if [[ -z "$_nodes" ]]; then
+        warn "no cluster nodes registered — running lh on local logs only"
+    else
+        printf "%b[lh-cluster]%b stitching logs from:%b\n" "$C_G" "$C_D" "$C_N" >&2
+        while IFS=$'\t' read -r _host _ip; do
+            [[ -z "$_host" || -z "$_ip" ]] && continue
+            # Skip ourselves — we already see local /var/log.
+            if [[ "$_host" == "$(hostname -s)" ]] || [[ "$_ip" == "127.0.0.1" ]]; then
+                continue
+            fi
+            _mount_node "$_host" "$_ip" &
+        done <<< "$_nodes"
+        # Parallel mount so one slow node doesn't delay the rest.
+        wait
+    fi
+fi
+
+# Hand off to lh. User's (S)et Log Paths inside lh can still override.
+exec /usr/local/bin/lh "$@"

@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+# klab-vm-debug-bundle — snapshot a klab test VM for OpenZFS bug reports.
+#
+# Usage:  klab-vm-debug-bundle <distro> <run_id> [<vm_ip>] [--deep]
+#
+# Produces /root/klab/<run_id>/<distro>-debug-bundle.tar.gz + an
+# OpenZFS-ready issue template at /root/klab/<run_id>/<distro>-ISSUE.md.
+#
+# ─ Tier-1 contents (always captured) ─
+#   env.txt              uname, kernel cmdline, modules, dkms, uptime, vmstat
+#   zfs.txt              zfs version, zpool list/status/events, zfs list, history
+#   zfs-get-all.txt      zfs get -p all for every dataset
+#   zpool-iostat.txt     zpool iostat -vyH 5 3 (15s sample, per-vdev)
+#   zdb-C.txt            zdb -C <pool>  (pool config, feature flags)
+#   zdb-h.txt            zdb -h <pool>  (full history including internal)
+#   zfs-tunables.txt     /sys/module/zfs/parameters/* — all current tunables
+#   kstat/               /proc/spl/kstat/zfs/*  — arcstats, dbgmsg, per-pool io/txgs/state
+#   dmesg.log            full kernel ring with -T timestamps
+#   journal.log          systemd journal last 2h
+#   processes.txt        ps -eLf
+#   stacks/d-state.txt   /proc/<pid>/stack + wchan + status for every D-state task
+#   stacks/all-tasks.txt Kernel stacks of every process (for context)
+#   disks.txt            lsblk -tf, smartctl -a, nvme smart-log for every disk
+#   packages.txt         rpm -qa / dpkg -l sorted
+#   test.log             host-side klab test stream
+#   host-*.txt           attestation / zpool / status / summary from host
+#   meta.json            structured metadata (distro, kernel, zfs_version, ...)
+#   ISSUE.md             pre-filled GitHub issue template, copy-paste ready
+#
+# ─ Tier-2 (with --deep) ─
+#   perf.data / flame    30s perf record + folded stacks
+#   trace/               zfs:* tracepoint capture (30s)
+#
+# Designed to fail safely — every command has a timeout, per-section
+# errors don't break the bundle. A partial bundle is more useful than
+# none. Commands run in parallel where safe to keep total time < 60s.
+
+set -uo pipefail
+# Guard against bash parse failure corrupting the log — fail early.
+
+DEEP=0
+_args=()
+for a in "$@"; do
+    [[ "$a" == "--deep" ]] && DEEP=1 || _args+=("$a")
+done
+set -- "${_args[@]}"
+
+distro="${1:?usage: klab-vm-debug-bundle <distro> <run_id> [vm_ip] [--deep]}"
+run_id="${2:?usage: klab-vm-debug-bundle <distro> <run_id> [vm_ip] [--deep]}"
+vm_ip="${3:-}"
+
+vm_name="klab-test-${distro}"
+run_dir="/root/klab/${run_id}"
+out_dir="${run_dir}/${distro}-debug-bundle"
+out_tgz="${run_dir}/${distro}-debug-bundle.tar.gz"
+issue_md="${run_dir}/${distro}-ISSUE.md"
+mkdir -p "$out_dir/stacks" "$out_dir/kstat" "$out_dir/trace"
+
+_log() { echo "[$(date -u +%H:%M:%S)] $*" >&2; }
+
+if [[ -z "$vm_ip" ]]; then
+    vm_ip="$(virsh domifaddr "$vm_name" --source agent 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1 | head -1)"
+    [[ -z "$vm_ip" ]] && vm_ip="$(virsh domifaddr "$vm_name" 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1 | head -1)"
+fi
+if [[ -z "$vm_ip" ]]; then
+    _log "FATAL: cannot resolve IP for $vm_name"
+    cat > "$out_dir/meta.json" <<META
+{"error":"vm_ip_not_found","distro":"${distro}","run_id":"${run_id}"}
+META
+    tar czf "$out_tgz" -C "$run_dir" "${distro}-debug-bundle"
+    rm -rf "$out_dir"
+    echo "$out_tgz"
+    exit 1
+fi
+
+_sh="sshpass -p kldload ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -o LogLevel=ERROR root@${vm_ip}"
+
+# Run a remote command with a per-op timeout. Use SIGKILL --kill-after
+# so if timeout+TERM doesn't reap, we still shoot it. Output "<<timeout>>"
+# on failure so callers see the gap without the file being empty.
+_run() {
+    local t="${_TMO:-20}"
+    timeout --kill-after=5s "$t" $_sh "$@" 2>&1 || echo "<<timeout or ssh error (timeout=${t}s)>>"
+}
+
+# ═════════════════════ ENV ═════════════════════
+_log "[$distro] env.txt"
+{
+    echo "=== uname ==="; _run "uname -a"
+    echo; echo "=== cmdline ==="; _run "cat /proc/cmdline"
+    echo; echo "=== loaded zfs modules ==="; _run "lsmod | grep -E '^(zfs|spl|zavl|znvpair|zunicode|zcommon|zlua|icp) '"
+    echo; echo "=== dkms status ==="; _TMO=5 _run "dkms status 2>/dev/null || echo no-dkms"
+    echo; echo "=== uptime ==="; _run "uptime; cat /proc/loadavg"
+    echo; echo "=== meminfo (key) ==="; _run "grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Slab|SReclaimable|SUnreclaim|Committed_AS):' /proc/meminfo"
+    echo; echo "=== vmstat ==="; _TMO=5 _run "vmstat 1 3 2>/dev/null"
+} > "$out_dir/env.txt"
+
+# ═════════════════════ ZFS CORE ═════════════════════
+# Run these in parallel with short TOs — hung pool can block individual
+# commands but others still succeed.
+_log "[$distro] zfs.txt (parallel, 30s budget each)"
+{
+    echo "=== zfs version ==="; _run "zfs version 2>&1 | head -10"
+    echo; echo "=== zpool list (30s) ==="; _TMO=30 _run "zpool list"
+    echo; echo "=== zpool status -v (30s) ==="; _TMO=30 _run "zpool status -v"
+    echo; echo "=== zpool events -v last 300 ==="; _TMO=30 _run "zpool events -v 2>/dev/null | tail -300"
+    echo; echo "=== zpool history -il (30s) ==="; _TMO=30 _run "zpool history -il 2>/dev/null | tail -200"
+    echo; echo "=== zfs list -t all (30s) ==="; _TMO=30 _run "zfs list -t all"
+    echo; echo "=== zfs mount ==="; _run "zfs mount 2>/dev/null | head -30"
+} > "$out_dir/zfs.txt"
+
+_log "[$distro] zfs-get-all.txt"
+_TMO=30 _run "zfs get -p all 2>/dev/null" > "$out_dir/zfs-get-all.txt"
+
+_log "[$distro] zpool iostat (15s sample, 3×5s)"
+_TMO=25 _run "zpool iostat -vyH 5 3 2>/dev/null" > "$out_dir/zpool-iostat.txt"
+
+_log "[$distro] zdb (per-pool)"
+# zdb -C is usually fast; zdb -h can be slow on big pools. Per-pool so if
+# one pool is stuck, others still capture. Filter out the "<<timeout...>>"
+# placeholder — previously it got word-split into fake pools "or", "ssh",
+# "error" and wasted 60s per fake pool.
+_pools_raw="$(_TMO=10 _run "zpool list -Ho name 2>/dev/null")"
+_pools=""
+while IFS= read -r _ln; do
+    # Valid zpool names start with a letter/number and contain only
+    # [A-Za-z0-9_.:-]. Skip everything else (timeouts, errors, blanks).
+    [[ "$_ln" =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]*$ ]] && _pools+="${_ln} "
+done <<<"$_pools_raw"
+{
+    for _p in $_pools; do
+        echo "# pool=$_p"
+        echo "--- zdb -C $_p ---"
+        _TMO=20 _run "zdb -C '$_p' 2>&1"
+        echo
+        echo "--- zdb -h $_p (history from labels) ---"
+        _TMO=20 _run "zdb -h '$_p' 2>&1"
+        echo
+        echo "--- zdb -b $_p (blockpointer sanity, first 50 lines) ---"
+        _TMO=30 _run "zdb -b '$_p' 2>&1 | head -50 || true"
+        echo
+    done
+    echo "(pools scanned: ${_pools:-<none>})"
+    [[ -z "$_pools" ]] && {
+        echo "raw zpool list output (for debugging the parse):"
+        printf '%s\n' "$_pools_raw"
+    }
+} > "$out_dir/zdb.txt" 2>&1
+
+# ═════════════════════ KSTAT + TUNABLES ═════════════════════
+_log "[$distro] /sys/module/zfs/parameters/*"
+_TMO=10 _run "for f in /sys/module/zfs/parameters/*; do printf '%s=%s\n' \"\${f##*/}\" \"\$(cat \"\$f\" 2>/dev/null)\"; done | sort" \
+    > "$out_dir/zfs-tunables.txt"
+
+_log "[$distro] /proc/spl/kstat/zfs/*"
+# Capture every readable file — includes per-pool io/txgs/state subdirs.
+# This is the single richest internal-state snapshot ZFS provides.
+_TMO=15 _run "find /proc/spl/kstat/zfs -type f 2>/dev/null | while read f; do
+  echo '=== '\"\$f\"' ==='
+  cat \"\$f\" 2>/dev/null
+  echo
+done" > "$out_dir/kstat/all-kstats.txt"
+# Also capture individual core files for convenience
+for f in arcstats dbgmsg dmu_tx dnodestats fletcher_4_bench vdev_cache_stats zfetchstats zil; do
+    _TMO=5 _run "cat /proc/spl/kstat/zfs/${f} 2>/dev/null" > "$out_dir/kstat/${f}" || true
+done
+# spl kmem allocator inventory (memory leak diagnosis)
+_TMO=5 _run "cat /proc/spl/kmem/slab 2>/dev/null" > "$out_dir/kstat/spl-slab.txt"
+
+# ═════════════════════ KERNEL + LOGS ═════════════════════
+_log "[$distro] dmesg + journal"
+_TMO=15 _run "dmesg -T" > "$out_dir/dmesg.log"
+_TMO=30 _run "journalctl --no-pager --output=short-iso --since '3 hours ago'" > "$out_dir/journal.log"
+
+# ═════════════════════ PROCESSES + STACKS ═════════════════════
+_log "[$distro] processes.txt"
+_TMO=10 _run "ps -eLf --sort state" > "$out_dir/processes.txt"
+
+_log "[$distro] D-state stacks"
+_dstate_pids="$(_TMO=10 _run "ps -eLo pid,stat,comm | awk '\$2 ~ /D/ {print \$1}' | sort -u | head -50")"
+{
+    echo "=== D-state PIDs ==="
+    echo "$_dstate_pids"
+    echo
+    for pid in $_dstate_pids; do
+        [[ -z "$pid" || "$pid" == "<<timeout"* ]] && continue
+        echo "--- pid=$pid ---"
+        _TMO=5 _run "cat /proc/$pid/comm 2>/dev/null; cat /proc/$pid/status 2>/dev/null | grep -E '^(State|Name|Pid|PPid|VmRSS|Threads|voluntary)'; echo '- stack -'; cat /proc/$pid/stack 2>/dev/null; echo; echo '- wchan -'; cat /proc/$pid/wchan 2>/dev/null; echo"
+        echo
+    done
+} > "$out_dir/stacks/d-state.txt"
+
+_log "[$distro] all-task kernel stacks"
+# Full stacks for every kernel-visible task. Cheap (sysrq-style) but
+# highly useful when a bug isn't isolated to D-state.
+_TMO=30 _run "for s in /proc/*/stack; do
+  pid=\${s#/proc/}; pid=\${pid%/stack}
+  [[ ! \"\$pid\" =~ ^[0-9]+\$ ]] && continue
+  comm=\$(cat /proc/\$pid/comm 2>/dev/null)
+  state=\$(awk '/^State:/ {print \$2}' /proc/\$pid/status 2>/dev/null)
+  printf '--- pid=%s state=%s comm=%s ---\n' \"\$pid\" \"\$state\" \"\$comm\"
+  cat \"\$s\" 2>/dev/null
+  echo
+done" > "$out_dir/stacks/all-tasks.txt"
+
+# ═════════════════════ DISK LAYER ═════════════════════
+_log "[$distro] physical disks (lsblk + smart)"
+{
+    echo "=== lsblk -tf ==="; _run "lsblk -tf"
+    echo; echo "=== lsblk -O ==="; _TMO=10 _run "lsblk -O 2>/dev/null"
+    echo; echo "=== smartctl --scan-open ==="; _run "smartctl --scan-open 2>/dev/null || echo no-smartctl"
+    echo; echo "=== per-device SMART ==="
+    # Iterate real block devices
+    _disks=$(_TMO=5 _run "lsblk -dn -o NAME,TYPE 2>/dev/null | awk '\$2==\"disk\"{print \$1}'")
+    for d in $_disks; do
+        [[ "$d" == "<<timeout"* ]] && continue
+        [[ -z "$d" ]] && continue
+        echo "--- /dev/$d ---"
+        _TMO=10 _run "smartctl -ax /dev/$d 2>/dev/null || echo '(no SMART — virtio?)'"
+        # NVMe specific
+        if [[ "$d" == nvme* ]]; then
+            _TMO=5 _run "nvme smart-log /dev/$d 2>/dev/null"
+        fi
+        echo
+    done
+} > "$out_dir/disks.txt"
+
+# ═════════════════════ PACKAGES + HOST-SIDE ═════════════════════
+_log "[$distro] packages.txt"
+_TMO=15 _run "rpm -qa 2>/dev/null | sort" > "$out_dir/packages.txt"
+if [[ ! -s "$out_dir/packages.txt" ]] || grep -q timeout "$out_dir/packages.txt"; then
+    _TMO=15 _run "dpkg -l 2>/dev/null | awk '/^ii/ {print \$2\"=\"\$3}' | sort" > "$out_dir/packages.txt"
+fi
+
+_log "[$distro] copying host-side files"
+[[ -f "${run_dir}/${distro}.log" ]]     && cp "${run_dir}/${distro}.log"     "$out_dir/test.log"
+[[ -f "${run_dir}/${distro}.env" ]]     && cp "${run_dir}/${distro}.env"     "$out_dir/host-attestation.txt"
+[[ -f "${run_dir}/${distro}.zpool" ]]   && cp "${run_dir}/${distro}.zpool"   "$out_dir/host-zpool.txt"
+[[ -f "${run_dir}/${distro}.status" ]]  && cp "${run_dir}/${distro}.status"  "$out_dir/host-status.txt"
+[[ -f "${run_dir}/${distro}.summary" ]] && cp "${run_dir}/${distro}.summary" "$out_dir/host-summary.txt"
+
+# ═════════════════════ TIER-2 (--deep) ═════════════════════
+if [[ $DEEP -eq 1 ]]; then
+    _log "[$distro] deep: 30s perf record (if perf available)"
+    _TMO=40 _run "command -v perf >/dev/null && perf record -o /tmp/perf.data -F 99 -a -g sleep 30 && perf script -i /tmp/perf.data 2>/dev/null | head -10000 || echo 'no perf on VM'" \
+        > "$out_dir/perf-script.txt"
+
+    _log "[$distro] deep: zfs:* tracepoints 30s"
+    _TMO=40 _run "
+      if [[ -d /sys/kernel/debug/tracing/events/zfs ]]; then
+        echo 1 > /sys/kernel/debug/tracing/events/zfs/enable 2>/dev/null
+        timeout 30 cat /sys/kernel/debug/tracing/trace_pipe 2>/dev/null | head -5000
+        echo 0 > /sys/kernel/debug/tracing/events/zfs/enable 2>/dev/null
+      else
+        echo 'zfs tracepoints not available (kernel built without CONFIG_TRACEPOINTS?)'
+      fi
+    " > "$out_dir/trace/zfs-events.txt"
+fi
+
+# ═════════════════════ META + ISSUE TEMPLATE ═════════════════════
+_log "[$distro] meta.json + ISSUE.md"
+_kernel="$(head -1 "$out_dir/env.txt" 2>/dev/null; _TMO=5 _run 'uname -r' | head -1)"
+_kernel="$(_TMO=5 _run 'uname -r' | head -1 | tr -d '\n')"
+_zfsv="$(grep -A1 '=== zfs version ===' "$out_dir/zfs.txt" | head -2 | tail -1 | tr -d '\n')"
+_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+_ts_epoch="$(date +%s)"
+_dstate_count="$(grep -c '^[0-9]' <<<"$_dstate_pids" 2>/dev/null || echo 0)"
+_fail_count="$(grep -c '\[FAIL\]' "$out_dir/test.log" 2>/dev/null || echo 0)"
+_pass_count="$(grep -c '\[PASS\]' "$out_dir/test.log" 2>/dev/null || echo 0)"
+_last_test="$(tac "$out_dir/test.log" 2>/dev/null | grep -m1 '/functional/' | sed -E 's|.*/functional/([^ ]+).*|\1|' || echo unknown)"
+_status="$(cat "$out_dir/host-status.txt" 2>/dev/null || echo unknown)"
+
+cat > "$out_dir/meta.json" <<META
+{
+  "distro": "${distro}",
+  "run_id": "${run_id}",
+  "vm_name": "${vm_name}",
+  "vm_ip": "${vm_ip}",
+  "collected_at": "${_ts}",
+  "collected_at_epoch": ${_ts_epoch},
+  "kernel": "${_kernel}",
+  "zfs_version": "${_zfsv}",
+  "dstate_pid_count": ${_dstate_count:-0},
+  "test_pass": ${_pass_count},
+  "test_fail": ${_fail_count},
+  "last_test": "${_last_test}",
+  "status": "${_status}",
+  "bundle_path": "${out_tgz}",
+  "deep_mode": ${DEEP}
+}
+META
+
+# OpenZFS GitHub issue template — paste into
+# https://github.com/openzfs/zfs/issues/new
+cat > "$out_dir/ISSUE.md" <<ISSUE
+<!-- Generated by klab-vm-debug-bundle — paste into OpenZFS issue tracker.
+     Attach the full bundle: ${out_tgz} -->
+
+### System information
+
+| | |
+|---|---|
+| **Distribution** | ${distro} |
+| **Kernel** | ${_kernel} |
+| **Architecture** | x86_64 |
+| **ZFS version** | ${_zfsv} |
+| **SPL version** | (same as ZFS — bundled) |
+
+### Describe the problem you're observing
+
+<!-- FILL ME IN: one-paragraph summary. Examples:
+     • Kernel deadlock during \`zpool_add\` tests with hung_task warnings
+     • Checksum errors appearing after N hours of mixed rw workload
+     • Panic in dsl_destroy_head when destroying dedup'd dataset
+-->
+
+**Test status:** ${_status}
+**Last test before failure:** \`${_last_test}\`
+**Test totals:** ${_pass_count} PASS / ${_fail_count} FAIL / ${_dstate_count} D-state processes at capture
+
+### Describe how to reproduce the problem
+
+\`\`\`
+# On a fresh klab ztest golden (matching the above kernel + ZFS version):
+klab clone-test ${distro}
+sshpass -p kldload ssh root@<vm-ip> /usr/share/zfs/zfs-tests.sh -vx -T functional -r ${_last_test}
+\`\`\`
+
+### Include any warning/errors/backtraces from the system logs
+
+See attached bundle for full kernel ring + D-state stacks. Key excerpt:
+
+\`\`\`
+$(grep -E 'hung_task|blocked for more than|Call Trace|BUG:|WARN:|panic|oops' "$out_dir/dmesg.log" 2>/dev/null | head -30 | sed 's/^/    /')
+\`\`\`
+
+### D-state kernel stacks (from bundle stacks/d-state.txt)
+
+\`\`\`
+$(head -60 "$out_dir/stacks/d-state.txt" 2>/dev/null | sed 's/^/    /')
+\`\`\`
+
+### Attached bundle
+
+\`${out_tgz}\`
+
+Contains: env.txt, zfs.txt, zfs-get-all.txt, zpool-iostat.txt, zdb.txt, zfs-tunables.txt, kstat/*, dmesg.log, journal.log, processes.txt, stacks/d-state.txt, stacks/all-tasks.txt, disks.txt, packages.txt, test.log, host-*, meta.json.
+$([[ $DEEP -eq 1 ]] && echo "Deep mode: perf-script.txt, trace/zfs-events.txt.")
+ISSUE
+
+# Copy the issue template to a sibling file for easy find (outside tarball).
+cp "$out_dir/ISSUE.md" "$issue_md"
+
+# ═════════════════════ PACKAGE ═════════════════════
+_log "[$distro] taring bundle"
+tar czf "$out_tgz" -C "$run_dir" "${distro}-debug-bundle"
+rm -rf "$out_dir"
+
+# Ship a summary line to Loki so the dashboard shows bundle availability
+if command -v curl >/dev/null 2>&1; then
+    _size=$(stat -c%s "$out_tgz" 2>/dev/null || echo 0)
+    _line="bundle=${out_tgz} issue_md=${issue_md} size=${_size} kernel=${_kernel} zfs=${_zfsv} dstate=${_dstate_count} fail=${_fail_count} last=${_last_test}"
+    _esc="$(printf '%s' "$_line" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+    curl -s -m 5 -XPOST -H 'Content-Type: application/json' \
+        http://127.0.0.1:3100/loki/api/v1/push \
+        -d "{\"streams\":[{\"stream\":{\"job\":\"klab-bundle\",\"host\":\"kldload-node\",\"vm\":\"${distro}\",\"run_id\":\"${run_id}\"},\"values\":[[\"$(date +%s%N)\",\"${_esc}\"]]}]}" \
+        >/dev/null 2>&1 || true
+fi
+
+echo "$out_tgz"
+_log "done: $out_tgz ($(du -h "$out_tgz" | awk '{print $1}')), issue: $issue_md"

@@ -1185,6 +1185,8 @@ async def ws_handler(websocket):
                     }))
                 elif action == "install":
                     await _run_install(websocket, msg)
+                elif action == "wifi_connect":
+                    await _wifi_connect(websocket, msg)
                 elif action == "test_rhel_cdn":
                     await _test_rhel_cdn(websocket, msg)
                 elif action == "wipe_disk":
@@ -1683,6 +1685,12 @@ async def ws_handler(websocket):
                     await _klab_rollback(websocket)
                 elif action == "klab_test":
                     await _klab_test(websocket, msg)
+                elif action == "klab_test_tail":
+                    # Reconnecting client asking to re-attach to an already-
+                    # running klab test — reads /var/run/klab/current-run.env
+                    # and tails the live log back to this WS until the unit
+                    # exits or this WS closes.
+                    await _klab_test_reattach(websocket)
                 elif action == "klab_build_ztest_goldens":
                     target = msg.get("target", "all")
                     await _stream_proc(websocket, ["klab", "golden-ztest", target], target="klab")
@@ -1757,6 +1765,17 @@ async def ws_handler(websocket):
                             "args": msg.get("args") or {},
                             "reason": msg.get("reason") or "",
                         })
+                elif action == "bob_autonomy_get":
+                    await websocket.send(json.dumps({
+                        "type": "bob_autonomy_state",
+                        "autonomous": _bob_autonomy_get(),
+                    }))
+                elif action == "bob_autonomy_set":
+                    _bob_autonomy_set(bool(msg.get("autonomous", True)))
+                    await websocket.send(json.dumps({
+                        "type": "bob_autonomy_state",
+                        "autonomous": _bob_autonomy_get(),
+                    }))
                 elif action == "bob_models":
                     await _bob_models(websocket)
                 elif action == "klab_ebpf_trace":
@@ -1924,12 +1943,18 @@ async def _stream_proc(websocket, cmd, env=None, target="log"):
     except Exception:
         pass
 
+    # start_new_session=True detaches the child into its own session +
+    # process group so a webui restart (systemd SIGTERM cascade) does
+    # NOT kill long-running orchestrators like `klab test --full` that
+    # we launched on a websocket. The stream is lost on disconnect,
+    # but state is still on disk and the UI re-reads it on reconnect.
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         env={**os.environ, **(env or {})},
+        start_new_session=True,
     )
     RUNNING_PROCS[target] = proc
     try:
@@ -1976,17 +2001,42 @@ async def _klab_cancel(websocket, msg):
         except Exception:
             pass
 
-    # 2. Kill any klab child processes — SIGTERM then SIGKILL after a beat.
-    # `klab golden-ztest` contains the substring "klab golden" so the pattern
-    # below catches both regular and ztest golden builds.
+    # 2a. If the current-run.env has a systemd unit, stop that — it's
+    # cleaner than pkill -f (which can match other SSH sessions that
+    # happen to mention "klab test" in their argv).
+    run_state = "/var/run/klab/current-run.env"
+    _current_unit = ""
+    if os.path.exists(run_state):
+        try:
+            for line in open(run_state):
+                if line.startswith("unit="):
+                    _current_unit = line.split("=", 1)[1].strip()
+                    break
+        except Exception:
+            pass
+    if _current_unit:
+        subprocess.call(["systemctl", "stop", _current_unit], stderr=subprocess.DEVNULL)
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": target,
+            "line": f"[cancel] stopped {_current_unit}",
+        }))
+
+    # 2b. Fall back to pattern kills for older state / goldens / demos.
+    # `klab golden-ztest` contains "klab golden" so matches both.
     for pattern in ["klab golden", "klab golden-ztest", "klab deploy",
-                     "klab test", "klab destroy", "klab kubernetes",
+                     "klab destroy", "klab kubernetes",
                      "virt-install", "qemu-img convert"]:
         subprocess.call(["pkill", "-TERM", "-f", pattern], stderr=subprocess.DEVNULL)
     await asyncio.sleep(1.5)
     for pattern in ["klab golden", "klab golden-ztest", "klab deploy",
-                     "klab test", "klab destroy", "klab kubernetes"]:
+                     "klab destroy", "klab kubernetes"]:
         subprocess.call(["pkill", "-KILL", "-f", pattern], stderr=subprocess.DEVNULL)
+    # Clear detached-run state file so the next `klab_test` doesn't
+    # see a stale pid and refuse to launch.
+    try:
+        os.remove(run_state)
+    except (FileNotFoundError, PermissionError):
+        pass
 
     # 3. Destroy any in-progress golden/ztest/test VMs. Previously this only
     # matched klab-golden-* so ztest runs left behind a shut-off VM and a
@@ -2248,6 +2298,105 @@ async def _test_rhel_cdn(websocket, msg):
         }))
 
 
+async def _wifi_connect(websocket, msg):
+    """Join the LIVE installer to a WiFi network via NetworkManager so
+    subsequent install steps (dnf --installroot, debootstrap, zfs-release
+    retry) have internet. Separate from writing the nmconnection profile
+    for the target — that only helps first-boot, not the installer itself.
+
+    Expected msg: {"action": "wifi_connect", "ssid": "...", "psk": "..."}.
+    Streams progress + emits final {"type":"wifi_connect_result","ok":..}."""
+    ssid = (msg.get("ssid") or "").strip()
+    psk  = msg.get("psk") or ""
+    if not ssid:
+        await websocket.send(json.dumps({
+            "type": "wifi_connect_result", "ok": False,
+            "error": "SSID is required",
+        }))
+        return
+    # Preflight: make sure NetworkManager + a wifi device exist in the live env.
+    try:
+        _p = await asyncio.create_subprocess_exec(
+            "nmcli", "-t", "-f", "TYPE,STATE", "device",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _out, _err = await asyncio.wait_for(_p.communicate(), timeout=10)
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "wifi_connect_result", "ok": False,
+            "error": f"nmcli unavailable: {e}",
+        }))
+        return
+    devices = (_out or b"").decode(errors="replace")
+    if "wifi:" not in devices:
+        await websocket.send(json.dumps({
+            "type": "wifi_connect_result", "ok": False,
+            "error": "no wifi device found on the live installer",
+        }))
+        return
+    await websocket.send(json.dumps({
+        "type": "log_line", "target": "install",
+        "line": f"[wifi] connecting live installer to '{ssid}'...",
+    }))
+    # Force a rescan so new SSIDs are seen immediately.
+    try:
+        _rs = await asyncio.create_subprocess_exec(
+            "nmcli", "device", "wifi", "rescan",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(_rs.wait(), timeout=8)
+    except Exception:
+        pass
+    # Connect with a reasonable timeout. nmcli connect blocks until the
+    # connection is up OR fails, so we bound it ourselves.
+    cmd = ["nmcli", "device", "wifi", "connect", ssid]
+    if psk:
+        cmd += ["password", psk]
+    try:
+        _p = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _out, _err = await asyncio.wait_for(_p.communicate(), timeout=45)
+        rc = _p.returncode
+        out_msg = (_out or b"").decode(errors="replace").strip()
+        err_msg = (_err or b"").decode(errors="replace").strip()
+    except asyncio.TimeoutError:
+        try: _p.kill()
+        except Exception: pass
+        await websocket.send(json.dumps({
+            "type": "wifi_connect_result", "ok": False,
+            "error": "timed out after 45s — wrong password or no signal?",
+        }))
+        return
+    if rc != 0:
+        await websocket.send(json.dumps({
+            "type": "wifi_connect_result", "ok": False,
+            "error": (err_msg or out_msg or f"nmcli exited {rc}"),
+        }))
+        return
+    # Verify we got an IPv4. Some APs accept the PSK but DHCP stalls;
+    # don't call it "connected" if there's no IP yet.
+    for _ in range(15):
+        try:
+            _q = await asyncio.create_subprocess_exec(
+                "ip", "-4", "-o", "addr", "show",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            _qout, _ = await _q.communicate()
+            addrs = (_qout or b"").decode(errors="replace")
+            non_loop = [l for l in addrs.splitlines() if l and " 127." not in l and "inet " in l]
+            if non_loop:
+                break
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+    await websocket.send(json.dumps({
+        "type": "wifi_connect_result", "ok": True,
+        "msg": out_msg or f"connected to {ssid}",
+    }))
+
+
 async def _run_install(websocket, msg):
     params = msg.get("params", {})
     # Map frontend 'role' → KLDLOAD_PROFILE (installer key)
@@ -2273,10 +2422,84 @@ async def _run_install(websocket, msg):
     INSTALL_STATE_PATH.write_text(json.dumps({"running": True, "rc": None}))
 
     target = msg.get("_target", "install")
-    rc = await _stream_proc(websocket,
-        ["/usr/local/bin/kldload-install-target", "--config", answers_path],
-        target=target)
+
+    # Spawn install-target in its own systemd transient unit so a webui
+    # restart (e.g. kldload-tls-cert regen bouncing us via
+    # kldload-bounce-tls-services) CAN'T kill the install subprocess.
+    # Same cgroup-isolation pattern _klab_test uses. ExecStart stream
+    # goes to /var/log/kldload/install-direct.log — we tail that back
+    # to the WS so the user still sees live output while the actual
+    # work runs independently.
+    log_path = "/var/log/kldload/install-direct.log"
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    try:
+        with open(log_path, "ab") as _lfh:
+            _lfh.write(f"\n\n# === install run {datetime.datetime.now().isoformat()} ===\n".encode())
+    except Exception:
+        pass
+
+    unit_name = f"kldinstall-{int(datetime.datetime.now().timestamp())}.service"
+    systemd_cmd = [
+        "systemd-run",
+        f"--unit={unit_name}",
+        "--collect",
+        "--no-block",
+        "--property=Type=simple",
+        f"--property=StandardOutput=append:{log_path}",
+        "--property=StandardError=inherit",
+        "--",
+        "/usr/local/bin/kldload-install-target",
+        "--config", answers_path,
+    ]
+    _p = await asyncio.create_subprocess_exec(
+        *systemd_cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, _stderr = await _p.communicate()
+    if _p.returncode != 0:
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": target,
+            "line": f"[install] systemd-run failed rc={_p.returncode}: {(_stderr or b'').decode(errors='replace')[:500]}",
+        }))
+        INSTALL_STATE_PATH.write_text(json.dumps({"running": False, "rc": -1}))
+        return
+
+    # Resolve MainPID for the log-tailer
+    main_pid = 0
+    for _ in range(20):
+        _q = await asyncio.create_subprocess_exec(
+            "systemctl", "show", unit_name, "--property=MainPID", "--value",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        _out, _ = await _q.communicate()
+        out = (_out or b"").decode().strip()
+        if out and out.isdigit() and int(out) > 0:
+            main_pid = int(out)
+            break
+        await asyncio.sleep(0.25)
+
+    await websocket.send(json.dumps({
+        "type": "exec_start", "cmd": str(systemd_cmd), "target": target,
+    }))
+    # Stream the install log to the WS in real time. Reuses the klab
+    # test tailer — same behavior (reads last ~400 lines on attach,
+    # then live-tails; exits when PID dies or WS drops).
+    await _klab_test_tail(websocket, main_pid, log_path, target=target)
+    # When the tailer returns, the install has exited (or WS died).
+    # Read the unit's exit status for the client.
+    try:
+        _qr = await asyncio.create_subprocess_exec(
+            "systemctl", "show", unit_name, "--property=ExecMainStatus", "--value",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        _out, _ = await _qr.communicate()
+        rc = int((_out or b"0").decode().strip() or "0")
+    except Exception:
+        rc = -1
     INSTALL_STATE_PATH.write_text(json.dumps({"running": False, "rc": rc}))
+    await websocket.send(json.dumps({"type": "exec_done", "rc": rc, "target": target}))
 
 async def _run_spawn(websocket, msg):
     params = msg.get("params", {})
@@ -3219,13 +3442,28 @@ class WebUIHandler(SimpleHTTPRequestHandler):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def _get_ssl_context():
-    """Try to generate a per-boot TLS cert and return an SSLContext.
-    Returns None if the CA is not present (falls back to plain HTTP)."""
+    """Generate a per-host TLS cert and return an SSLContext.
+    Returns None on any failure (falls back to plain HTTP).
+
+    kldload-tls-cert writes webui.crt + webui.key to /var/lib/kldload/tls/
+    and echoes the concatenated PEM blocks on stdout. The script's side
+    effect is what we care about — we load straight from the on-disk
+    files, which is simpler and avoids trying to split `-----BEGIN …`
+    blocks out of the echo'd blob. (The previous logic tried to parse
+    stdout as `key_path crt_path` which never matched — kldload-tls-cert
+    prints PEM content, not paths — so every boot silently fell back to
+    HTTP and the browser could not connect after caching the https URL.)
+    """
+    crt_dir = os.environ.get("KLDLOAD_TLS_CERT_DIR", "/var/lib/kldload/tls")
+    crt_path = f"{crt_dir}/webui.crt"
+    key_path = f"{crt_dir}/webui.key"
     try:
-        result = subprocess.check_output(
-            ["/usr/local/sbin/kldload-tls-cert"], text=True
-        ).strip()
-        key_path, crt_path = result.split()
+        # Invoke script to (re)generate if missing/expired. Output is
+        # discarded — the script persists the cert/key to disk.
+        subprocess.check_call(
+            ["/usr/local/sbin/kldload-tls-cert"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(certfile=crt_path, keyfile=key_path)
         LOG.info("TLS cert loaded: %s", crt_path)
@@ -3510,6 +3748,37 @@ async def _firstboot_status(websocket):
                                           "detail": "zfs list failed"}
     else:
         components["klab_goldens"] = {"expected": False, "ready": True, "detail": "not requested"}
+
+    # ── klab ztest goldens — expected if ZFS Lab mode is on ──────────────
+    # This is the PHASE that used to get missed: the installer UI flipped
+    # to "finished" after the 5 blue-green @golden snapshots landed, even
+    # though autodeploy was still running `klab golden-ztest all` in the
+    # background for another ~60 min. Users kept asking "where are my ZFS
+    # test goldens?" because the UI told them the install was done. Now
+    # ztest is its own gate: all-ready waits until every requested ztest
+    # golden has a @golden snapshot.
+    ztest_expected = _bool("KLDLOAD_KLAB_ZFS_DEV") or _bool("KLDLOAD_ZFSLAB_MODE")
+    if ztest_expected and _marker("klab-ztest"):
+        components["klab_ztest"] = {"expected": True, "ready": True,
+                                    "detail": "autodeploy marked klab-ztest ready"}
+    elif ztest_expected:
+        try:
+            out = subprocess.check_output(
+                ["zfs", "list", "-H", "-t", "snapshot", "-o", "name"],
+                text=True, stderr=subprocess.DEVNULL, timeout=5)
+            ztest_goldens = [l for l in out.splitlines() if l.endswith("@golden")
+                             and "klab-ztest-" in l]
+            done = sum(1 for g in ("centos","rocky","fedora","debian","ubuntu")
+                       if any(f"klab-ztest-{g}@golden" in x for x in ztest_goldens))
+            components["klab_ztest"] = {
+                "expected": True, "ready": done >= 5,
+                "detail": f"{done}/5 ZFS-test goldens ready (~12 min each while building)",
+            }
+        except Exception:
+            components["klab_ztest"] = {"expected": True, "ready": False,
+                                        "detail": "zfs list failed"}
+    else:
+        components["klab_ztest"] = {"expected": False, "ready": True, "detail": "not requested"}
 
     # ── Kubernetes cluster — expected if K8S_BOOTSTRAP=1 ─────────────────
     k8s_expected = _bool("KLDLOAD_K8S_BOOTSTRAP") or _bool("KLDLOAD_ENABLE_K8S")
@@ -4158,6 +4427,14 @@ async def _k8s_bulk(websocket, msg):
             cmd = ["kubectl", "uncordon", name]
         elif op == "cordon":
             cmd = ["kubectl", "cordon", name]
+        elif op == "delete_node":
+            # Full teardown: kube-demo remove_nodes handles drain, delete
+            # from cluster, virsh destroy+undefine, zfs destroy, cloud-init
+            # ISO cleanup, state.db row removal, /etc/hosts cleanup.
+            # KUBE_DEMO_PAUSE=0 suppresses the y/N confirm — the UI already
+            # confirmed when the user clicked Delete.
+            cmd = ["kube-demo", "remove_nodes", name]
+            env = {**env, "KUBE_DEMO_PAUSE": "0"}
         elif op in ("delete_pod", "restart_pod"):
             if not ns:
                 continue
@@ -4403,22 +4680,38 @@ def _klab_get_site_vms(site):
     return vms
 
 def _klab_get_test_results():
-    """Read latest test results from /root/klab/."""
+    """Read latest test results from /root/klab/.
+
+    Prefers authoritative <distro>.summary files (written when klab finishes
+    a distro) but falls back to parsing the live <distro>.log so the UI
+    shows progress counts while a run is still in flight.
+    """
     results = {}
     results_dir = Path("/root/klab")
     if not results_dir.exists():
         return results
-    # Find latest run directory
-    runs = sorted([d for d in results_dir.iterdir()
-                   if d.is_dir() and d.name.startswith("run-")],
-                  key=lambda d: d.stat().st_mtime, reverse=True)
-    if not runs:
-        return results
-    latest = runs[0]
+    latest = results_dir / "latest"
+    if latest.is_symlink() or latest.is_dir():
+        try:
+            latest = latest.resolve()
+        except Exception:
+            pass
+    else:
+        # Fallback: any YYYYMMDD-HHMMSS dir, newest wins
+        runs = sorted(
+            [d for d in results_dir.iterdir()
+             if d.is_dir() and re.match(r"^\d{8}-\d{6}$", d.name)],
+            key=lambda d: d.stat().st_mtime, reverse=True,
+        )
+        if not runs:
+            return results
+        latest = runs[0]
     results["run_id"] = latest.name
     results["distros"] = {}
+
+    # Authoritative per-distro summaries first.
+    summaries = {}
     for f in latest.glob("*.summary"):
-        distro = f.stem
         data = {}
         try:
             for line in f.read_text().splitlines():
@@ -4427,7 +4720,40 @@ def _klab_get_test_results():
                     data[k.strip()] = v.strip()
         except Exception:
             pass
-        results["distros"][distro] = data
+        summaries[f.stem] = data
+
+    for log_file in sorted(latest.glob("*.log")):
+        distro = log_file.stem
+        if distro == "full":
+            continue
+        entry = {}
+        status_file = latest / f"{distro}.status"
+        if status_file.is_file():
+            try:
+                entry["status"] = status_file.read_text().strip()
+            except Exception:
+                pass
+        if distro in summaries:
+            entry.update(summaries[distro])
+        else:
+            try:
+                text = log_file.read_text(errors="replace")
+                entry["pass"] = str(text.count("[PASS]"))
+                entry["fail"] = str(text.count("[FAIL]"))
+                entry["skip"] = str(text.count("[SKIP]"))
+                for line in reversed(text.splitlines()):
+                    if "/functional/" in line and "run as root" in line:
+                        frag = line.split("/functional/", 1)[1]
+                        entry["current"] = frag.split(" (run as root)", 1)[0][:80]
+                        break
+                entry["live"] = "1"
+            except Exception:
+                pass
+        results["distros"][distro] = entry
+
+    # Include summaries that had no matching .log (defensive).
+    for d, data in summaries.items():
+        results["distros"].setdefault(d, data)
     return results
 
 
@@ -4533,7 +4859,23 @@ async def _klab_rollback(websocket):
 
 
 async def _klab_test(websocket, msg):
-    """Run OpenZFS test suite. Streams logs."""
+    """Run OpenZFS test suite. DETACHED via plain Popen + setsid so the
+    run survives websocket disconnects / browser reloads / webui restarts.
+
+    Before this the test was piped through asyncio _stream_proc with
+    start_new_session=True, which DID detach the process group — but
+    when the websocket died, Python's asyncio transport GC'd the pipe
+    and the subprocess got SIGKILL'd silently (observed: centos cloned,
+    then klab vanishes with no log). Plain subprocess.Popen with
+    start_new_session and stdout→file has no such coupling: the child
+    is adopted by PID 1 and runs to completion regardless of what the
+    webui does.
+
+    The UI keeps its live feel by tailing /var/log/kldload/klab.log
+    (webui's own "log tail" facility already shows that file). The run
+    state is written to /var/run/klab/current-run.env so a reconnecting
+    client can see "test is already running, started at T+NN".
+    """
     await _auto_snapshot(websocket, "test")
     cmd = ["klab", "test"]
     mode = msg.get("mode", "quick")
@@ -4547,11 +4889,268 @@ async def _klab_test(websocket, msg):
     execution = msg.get("execution", "parallel")
     if execution == "series":
         cmd.append("--serial")
-    env = {"KLAB_SERIAL": "1"} if execution == "series" else {}
-    await _stream_proc(websocket, cmd, env=env, target="klab")
-    # Send updated test results after run completes
-    await _klab_test_results(websocket, {})
+    env = {**os.environ}
+    if execution == "series":
+        env["KLAB_SERIAL"] = "1"
+
+    # Refuse overlap — only one klab test at a time. Prior run's PID
+    # lives in /var/run/klab/current-run.env; if it's still alive,
+    # report that instead of launching a duplicate.
+    run_state = "/var/run/klab/current-run.env"
+    os.makedirs("/var/run/klab", exist_ok=True)
+    if os.path.exists(run_state):
+        try:
+            prior = {}
+            for line in open(run_state):
+                if "=" in line:
+                    k, v = line.rstrip().split("=", 1)
+                    prior[k] = v
+            prior_pid = int(prior.get("pid", "0"))
+            if prior_pid > 0:
+                try:
+                    os.kill(prior_pid, 0)  # signal 0 = check-alive
+                    await websocket.send(json.dumps({
+                        "type": "klab_test_already_running",
+                        "pid": prior_pid,
+                        "started": prior.get("started", "?"),
+                        "cmd": prior.get("cmd", "?"),
+                        "msg": "klab test already running in background — tailing existing run",
+                    }))
+                    return
+                except ProcessLookupError:
+                    pass  # stale pid file, fine to restart
+        except Exception:
+            pass  # corrupt/unreadable pid file — proceed with fresh launch
+
+    log_path = "/var/log/kldload/klab-test-live.log"
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    # Append a run-separator to the live log so successive runs are
+    # visually distinguishable when tailing the file.
+    try:
+        with open(log_path, "ab") as _lfh:
+            _lfh.write(f"\n\n# === klab test run {datetime.datetime.now().isoformat()} ===\n".encode())
+            _lfh.write(f"# cmd: {' '.join(cmd)}\n".encode())
+    except Exception:
+        pass
+
+    # Spawn klab in its own systemd transient unit — critical for
+    # surviving webui restarts. Previously we used subprocess.Popen +
+    # start_new_session=True which creates a new *session* but keeps
+    # the child in the webui's *cgroup* (/system.slice/kldload-webui.service).
+    # systemd's default KillMode=control-group means every webui restart
+    # SIGKILLs the entire cgroup — our "detached" klab died silently after
+    # centos clone because the webui was pushing status updates that
+    # occasionally triggered restarts. The only correct fix is to move
+    # the child into its OWN cgroup via systemd-run.
+    #
+    # --collect     — auto-clean the transient unit when it exits
+    # --no-block    — systemd-run returns immediately; don't wait for start
+    # --unit=<name> — stable name so cancel/status can reference it
+    # StandardOutput=append: — systemd 240+ direct-to-file output
+    unit_name = f"klab-test-{int(datetime.datetime.now().timestamp())}.service"
+    systemd_cmd = [
+        "systemd-run",
+        f"--unit={unit_name}",
+        "--collect",
+        "--no-block",
+        "--property=Type=simple",
+        f"--property=StandardOutput=append:{log_path}",
+        "--property=StandardError=inherit",
+        "--",
+    ] + cmd
+    # Include the env vars klab expects (KLAB_SERIAL, etc.) as
+    # --setenv flags so they land inside the transient unit.
+    for k, v in env.items():
+        if k.startswith(("KLAB_", "KLDLOAD_", "RHEL_")):
+            systemd_cmd.insert(-len(cmd) - 1, f"--setenv={k}={v}")
+    # Use asyncio subprocess so we don't block the WS event loop while
+    # systemd-run does its thing (was causing WS disconnects because the
+    # ping-pong heartbeat couldn't fire while we blocked).
+    _p = await asyncio.create_subprocess_exec(
+        *systemd_cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, _stderr = await _p.communicate()
+    if _p.returncode != 0:
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": "klab",
+            "line": f"[klab] systemd-run failed rc={_p.returncode}: {(_stderr or b'').decode(errors='replace')[:500]}",
+        }))
+        return
+    # Resolve the unit's MainPID (async) so we don't block on systemctl.
+    main_pid = 0
+    for _ in range(20):
+        _q = await asyncio.create_subprocess_exec(
+            "systemctl", "show", unit_name, "--property=MainPID", "--value",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        _out, _ = await _q.communicate()
+        out = (_out or b"").decode().strip()
+        if out and out.isdigit() and int(out) > 0:
+            main_pid = int(out)
+            break
+        await asyncio.sleep(0.25)
+
+    # Persist run state for UI reconnects + cancel/status endpoints.
+    try:
+        with open(run_state, "w") as f:
+            f.write(f"pid={main_pid}\n")
+            f.write(f"unit={unit_name}\n")
+            f.write(f"started={datetime.datetime.now().isoformat()}\n")
+            f.write(f"cmd={' '.join(cmd)}\n")
+            f.write(f"log={log_path}\n")
+            f.write(f"mode={mode}\n")
+            if distro:
+                f.write(f"distro={distro}\n")
+    except Exception:
+        pass
+
+    await websocket.send(json.dumps({
+        "type": "klab_test_started",
+        "pid": main_pid,
+        "unit": unit_name,
+        "mode": mode,
+        "log": log_path,
+        "msg": f"klab test {mode} started as {unit_name} (pid {main_pid}); survives webui restart",
+    }))
+    # Status refresh so the UI flips to "running" immediately.
     await _klab_status(websocket)
+    # Tail the detached log back to this WS so the user sees live
+    # output while connected. The tail exits when the subprocess
+    # dies OR the WS fails — neither kills the subprocess, which
+    # continues writing to log_path until it exits naturally.
+    await _klab_test_tail(websocket, proc.pid, log_path, target="klab")
+
+
+async def _klab_test_reattach(websocket):
+    """Re-attach a reconnecting client to an already-running klab test.
+    Reads /var/run/klab/current-run.env for pid+log, then hands off to
+    _klab_test_tail. If no run is in flight, reports 'no active run'."""
+    run_state = "/var/run/klab/current-run.env"
+    if not os.path.exists(run_state):
+        await websocket.send(json.dumps({
+            "type": "klab_test_noop",
+            "msg": "no klab test currently running",
+        }))
+        return
+    info = {}
+    try:
+        for line in open(run_state):
+            if "=" in line:
+                k, v = line.rstrip().split("=", 1)
+                info[k] = v
+    except Exception:
+        pass
+    pid = int(info.get("pid", "0") or 0)
+    log_path = info.get("log", "/var/log/kldload/klab-test-live.log")
+    if pid <= 0:
+        await websocket.send(json.dumps({
+            "type": "klab_test_noop",
+            "msg": "no klab test currently running",
+        }))
+        return
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        # stale state; clean it up so next klab_test doesn't trip over it
+        try: os.remove(run_state)
+        except Exception: pass
+        await websocket.send(json.dumps({
+            "type": "klab_test_noop",
+            "msg": "prior run exited; state cleared",
+        }))
+        return
+    await websocket.send(json.dumps({
+        "type": "klab_test_reattached",
+        "pid": pid,
+        "unit": info.get("unit", ""),
+        "started": info.get("started", ""),
+        "log": log_path,
+    }))
+    await _klab_test_tail(websocket, pid, log_path, target="klab")
+
+
+async def _klab_test_tail(websocket, pid, log_path, target="klab"):
+    """Stream new lines from the detached klab-test log to the WS
+    until the PID exits or the WS closes. Never kills the subprocess.
+
+    Called automatically from _klab_test after spawn, and also
+    on-demand (action 'klab_test_tail') so a reconnecting client
+    can re-attach to an already-running test."""
+    _ansi_re = re.compile(r'\x1b\[[0-9;]*[mGKHF]')
+    # Wait up to 10s for the log file to appear (the child writes
+    # the header during initial start; first reads can race).
+    for _ in range(20):
+        if os.path.exists(log_path):
+            break
+        await asyncio.sleep(0.5)
+    if not os.path.exists(log_path):
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": target,
+            "line": f"[tail] log file never appeared: {log_path}",
+        }))
+        return
+    try:
+        f = open(log_path, "r", errors="replace")
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": target,
+            "line": f"[tail] open failed: {e}",
+        }))
+        return
+    # Start at beginning-of-this-run by reading the last ~400 lines first,
+    # then tail forward. 400 covers the run-header + a few distro entries.
+    try:
+        all_lines = f.readlines()
+        for line in all_lines[-400:]:
+            await websocket.send(json.dumps({
+                "type": "log_line", "target": target,
+                "line": _ansi_re.sub('', line.rstrip()),
+            }))
+    except Exception:
+        return
+    # Now live-tail
+    while True:
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except (ProcessLookupError, PermissionError):
+            alive = False
+        line = f.readline()
+        if line:
+            try:
+                await websocket.send(json.dumps({
+                    "type": "log_line", "target": target,
+                    "line": _ansi_re.sub('', line.rstrip()),
+                }))
+            except Exception:
+                f.close()
+                return  # WS dead; leave subprocess alone
+        elif not alive:
+            # Drain anything left written between readline() returning ''
+            # and the liveness check flipping to false.
+            trailing = f.read()
+            if trailing:
+                for t in trailing.splitlines():
+                    try:
+                        await websocket.send(json.dumps({
+                            "type": "log_line", "target": target,
+                            "line": _ansi_re.sub('', t),
+                        }))
+                    except Exception:
+                        break
+            try:
+                await websocket.send(json.dumps({
+                    "type": "exec_done", "rc": 0, "target": target,
+                }))
+            except Exception:
+                pass
+            f.close()
+            return
+        else:
+            await asyncio.sleep(0.4)
 
 
 async def _klab_destroy(websocket, msg):
@@ -5228,17 +5827,37 @@ async def _bob_models(websocket):
 # VMs) are intentionally NOT exposed — Bob can recommend a playbook, the
 # user clicks the button. Keeps the blast radius of a hallucinated tool
 # call to zero.
-# Execute tools live here — calling one triggers the confirmation flow in
-# _bob_chat. Add to this set when exposing a new destructive capability.
-# bpftrace is gated because while it's typically read-only, malformed
-# scripts can hang the kernel on older versions and a bad kprobe filter
-# can produce terabytes of output.
-BOB_EXECUTE_TOOLS = {"run_playbook", "bpftrace_oneliner",
-                     "shell_run", "shell_run_async", "terminal_send"}
+# Execute tools used to require per-call approval — now gated by BOB_AUTONOMOUS.
+# When autonomous (default), these run without a modal. The set stays around
+# so paranoid mode can still gate on them if the user ever flips autonomy off.
+BOB_EXECUTE_TOOLS = {"run_playbook", "bpftrace_oneliner", "bpftrace_script",
+                     "shell_run", "shell_run_async", "terminal_send",
+                     "tmux_spawn", "tmux_send"}
 
 # Pending confirmations: confirm_id → asyncio.Future. The WS handler's
-# `bob_confirm_response` action resolves them.
+# `bob_confirm_response` action resolves them. Only used when BOB_AUTONOMOUS=0.
 PENDING_CONFIRMS: "dict[str, asyncio.Future]" = {}
+
+# Autonomy: when True (default), Bob runs every tool call immediately with no
+# modal. When False, the old per-call approval flow kicks in. Persisted so the
+# choice survives a webui restart. Rollback via ZFS covers the "oops" case —
+# the user has been clear they don't want safety theatre.
+BOB_AUTONOMY_FILE = "/var/lib/kldload/bob-autonomy.json"
+
+def _bob_autonomy_get():
+    try:
+        with open(BOB_AUTONOMY_FILE) as f:
+            return bool(json.load(f).get("autonomous", True))
+    except Exception:
+        return True   # default on
+
+def _bob_autonomy_set(on: bool):
+    try:
+        os.makedirs(os.path.dirname(BOB_AUTONOMY_FILE), exist_ok=True)
+        with open(BOB_AUTONOMY_FILE, "w") as f:
+            json.dump({"autonomous": bool(on)}, f)
+    except Exception as e:
+        LOG.warning("failed to persist bob autonomy: %s", e)
 
 # Bob autonomous-shell plumbing ─────────────────────────────────────────────
 # Background job registry for shell_run_async → shell_poll. Keyed by job_id.
@@ -5529,6 +6148,59 @@ BOB_TOOLS = [
             "window": {"type": "string", "description": "tmux window name (default: current)"},
             "no_enter": {"type": "boolean", "description": "If true, does not append Enter — useful for pre-loading an editable command"},
         }, "required": ["keys"]},
+    }},
+    # ── tmux driving — Bob drives the browser-visible terminal ──────────
+    # The ttyd terminal in the Kubernetes tab runs a persistent tmux session
+    # on socket `ttyd-k9s`. These three tools let Bob spawn a named window,
+    # type commands into it, and read back the scrollback — so the user
+    # literally watches Bob work instead of seeing opaque tool output.
+    {"type": "function", "function": {
+        "name": "tmux_spawn",
+        "description": "Open a new named tmux window in the user's terminal and optionally run a command in it. The user sees the window appear in their browser terminal immediately. Use this when you want the user to observe something over time (a log tail, a trace, a watch loop). Pair with tmux_capture to read the output back into your reasoning.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Window name (becomes the tab label, e.g. 'trace-opens')"},
+            "cmd":  {"type": "string", "description": "Command to run in the new window. Defaults to 'bash'."},
+        }, "required": ["name"]},
+    }},
+    {"type": "function", "function": {
+        "name": "tmux_send",
+        "description": "Type text into an existing tmux window. Distinct from terminal_send in that the window name is required (no ambiguity about which pane receives the keys).",
+        "parameters": {"type": "object", "properties": {
+            "name":     {"type": "string", "description": "Window name (the one passed to tmux_spawn, or an existing window)"},
+            "keys":     {"type": "string", "description": "Text to type"},
+            "no_enter": {"type": "boolean", "description": "If true, do not append Enter"},
+        }, "required": ["name", "keys"]},
+    }},
+    {"type": "function", "function": {
+        "name": "tmux_capture",
+        "description": "Read the last N lines of scrollback from an existing tmux window. Use this after tmux_send to inspect what ran. Returns up to 4 KB of text — ask for fewer lines if the output is dense.",
+        "parameters": {"type": "object", "properties": {
+            "name":  {"type": "string", "description": "Window name"},
+            "lines": {"type": "integer", "description": "Last N lines to capture, default 60, max 400"},
+        }, "required": ["name"]},
+    }},
+    # ── Multi-line bpftrace authoring ───────────────────────────────────
+    # bpftrace_oneliner handles single-liner probes; bpftrace_script lets
+    # Bob author a full multi-statement .bt program (BEGIN/END blocks,
+    # multiple probes, maps, interval timers). Runs async so Bob can poll
+    # results without blocking the chat, and has a hard time budget so a
+    # runaway probe cannot burn CPU forever.
+    {"type": "function", "function": {
+        "name": "bpftrace_probes",
+        "description": "List available bpftrace probes matching a pattern. Use this BEFORE writing a script so you target a probe that actually exists on this kernel. Common patterns: 'kprobe:tcp_v4_*', 'tracepoint:syscalls:sys_enter_openat', 'kprobe:do_sys_open', 'tracepoint:sched:*'. Returns up to 300 probes.",
+        "parameters": {"type": "object", "properties": {
+            "pattern": {"type": "string", "description": "Probe pattern. Supports glob-style wildcards (* and ?)."},
+            "limit":   {"type": "integer", "description": "Max probes to return (default 80)"},
+        }, "required": ["pattern"]},
+    }},
+    {"type": "function", "function": {
+        "name": "bpftrace_script",
+        "description": "Author and run a multi-line bpftrace program. Use for anything beyond a one-liner: multiple probes, map aggregation, BEGIN/END blocks, interval timers. ALWAYS include either `interval:s:N { exit(); }` or a duration_s parameter so the probe stops on its own — never leave it running indefinitely. Returns the captured output (maps + printf lines) after the probe exits. Prefer aggregation (@count[comm] = count()) over raw printf for events with high rates.",
+        "parameters": {"type": "object", "properties": {
+            "script":     {"type": "string", "description": "Full bpftrace program text. Include BEGIN/END and any interval timers."},
+            "duration_s": {"type": "integer", "description": "Force-exit after N seconds if the script hasn't already (default 15, max 120)"},
+            "why":        {"type": "string", "description": "One-sentence explanation of what this script measures (logged to bob-rca.log for the user)"},
+        }, "required": ["script"]},
     }},
 ]
 
@@ -5997,12 +6669,131 @@ def _bob_tool_exec(name, args):
             window = args.get("window") or ""
             no_enter = bool(args.get("no_enter"))
             target = "ttyd-k9s:" + window if window else "ttyd-k9s:"
-            args = ["tmux", "-L", "ttyd-k9s", "send-keys", "-t", target, keys]
+            tmux_args = ["tmux", "-L", "ttyd-k9s", "send-keys", "-t", target, keys]
             if not no_enter:
-                args.append("Enter")
-            rc = subprocess.call(args, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+                tmux_args.append("Enter")
+            rc = subprocess.call(tmux_args, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             _bob_log_activity("terminal_send", {"target": target, "keys": keys[:200], "rc": rc})
             return json.dumps({"ok": rc == 0, "target": target, "sent": keys[:200]})
+
+        # ── tmux driving (Bob-in-the-terminal) ───────────────────────
+        # All three target the same ttyd-k9s socket/session that the
+        # browser terminal is attached to, so the user sees everything
+        # happen live in their tab.
+        if name == "tmux_spawn":
+            win = (args.get("name") or "").strip() or "bob"
+            cmd = args.get("cmd") or "bash"
+            # Kill any stale window by the same name so spawn is idempotent.
+            subprocess.call(["tmux", "-L", "ttyd-k9s", "kill-window",
+                             "-t", f"ttyd-k9s:{win}"],
+                            stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            rc = subprocess.call(["tmux", "-L", "ttyd-k9s", "new-window",
+                                  "-t", "ttyd-k9s", "-n", win, cmd],
+                                 stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            _bob_log_activity("tmux_spawn", {"window": win, "cmd": cmd[:200], "rc": rc})
+            return json.dumps({"ok": rc == 0, "window": win, "cmd": cmd[:200]})
+
+        if name == "tmux_send":
+            win = (args.get("name") or "").strip()
+            if not win:
+                return json.dumps({"ok": False, "error": "name required"})
+            keys = args.get("keys") or ""
+            no_enter = bool(args.get("no_enter"))
+            tmux_args = ["tmux", "-L", "ttyd-k9s", "send-keys",
+                         "-t", f"ttyd-k9s:{win}", keys]
+            if not no_enter:
+                tmux_args.append("Enter")
+            rc = subprocess.call(tmux_args, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            _bob_log_activity("tmux_send", {"window": win, "keys": keys[:200], "rc": rc})
+            return json.dumps({"ok": rc == 0, "window": win, "sent": keys[:200]})
+
+        if name == "tmux_capture":
+            win = (args.get("name") or "").strip()
+            if not win:
+                return json.dumps({"ok": False, "error": "name required"})
+            lines = min(max(int(args.get("lines") or 60), 1), 400)
+            try:
+                out = subprocess.check_output(
+                    ["tmux", "-L", "ttyd-k9s", "capture-pane",
+                     "-t", f"ttyd-k9s:{win}", "-p", "-S", f"-{lines}"],
+                    stderr=subprocess.STDOUT, timeout=5, text=True,
+                )
+                # Cap at ~4KB so a verbose log doesn't blow context.
+                out = out[-4096:]
+                return json.dumps({"ok": True, "window": win, "output": out})
+            except subprocess.CalledProcessError as e:
+                return json.dumps({"ok": False, "window": win, "error": (e.output or "")[:500]})
+            except subprocess.TimeoutExpired:
+                return json.dumps({"ok": False, "window": win, "error": "capture timeout"})
+
+        # ── Multi-line bpftrace ──────────────────────────────────────
+        # bpftrace_probes: discovery wrapper so Bob picks probes that
+        # actually exist on this kernel instead of guessing and failing.
+        if name == "bpftrace_probes":
+            pat = args.get("pattern") or ""
+            lim = min(max(int(args.get("limit") or 80), 1), 300)
+            if not pat:
+                return json.dumps({"ok": False, "error": "pattern required"})
+            try:
+                out = subprocess.check_output(
+                    ["bpftrace", "-l", pat],
+                    stderr=subprocess.STDOUT, timeout=10, text=True,
+                )
+                probes = [p for p in out.strip().split("\n") if p.strip()]
+                truncated = len(probes) > lim
+                return json.dumps({
+                    "ok": True, "pattern": pat,
+                    "count": len(probes),
+                    "truncated": truncated,
+                    "probes": probes[:lim],
+                })
+            except subprocess.CalledProcessError as e:
+                return json.dumps({"ok": False, "error": (e.output or "bpftrace error")[:500]})
+            except subprocess.TimeoutExpired:
+                return json.dumps({"ok": False, "error": "bpftrace -l timed out"})
+            except FileNotFoundError:
+                return json.dumps({"ok": False, "error": "bpftrace binary not found"})
+
+        # bpftrace_script: write a .bt file and run it with a hard
+        # duration ceiling. Runs synchronously with timeout — the user
+        # has already indicated they want results right in the chat,
+        # not an async job id. duration_s is the model's "I'll need
+        # this long"; timeout is duration_s + 5s grace.
+        if name == "bpftrace_script":
+            script = args.get("script") or ""
+            dur = min(max(int(args.get("duration_s") or 15), 1), 120)
+            why = (args.get("why") or "").strip()
+            if not script.strip():
+                return json.dumps({"ok": False, "error": "script required"})
+            import tempfile as _tf
+            fd, path = _tf.mkstemp(prefix="bob-", suffix=".bt", dir="/tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(script)
+                # Log for user audit before we run — so they can find the
+                # script even if bpftrace crashes the kernel.
+                _rca_log = globals().get("_rca_log")
+                try:
+                    with open("/root/bob-rca.log", "a") as lf:
+                        lf.write(f"# bpftrace_script duration={dur}s why={why}\n")
+                        lf.write(f"# path={path}\n---\n{script}\n---\n")
+                except Exception:
+                    pass
+                out = subprocess.check_output(
+                    ["bpftrace", path],
+                    stderr=subprocess.STDOUT, timeout=dur + 5, text=True,
+                )
+                return json.dumps({"ok": True, "duration_s": dur,
+                                   "script_path": path,
+                                   "output": out[-8000:]})
+            except subprocess.TimeoutExpired:
+                return json.dumps({"ok": False, "error": "bpftrace exceeded duration budget",
+                                   "script_path": path})
+            except subprocess.CalledProcessError as e:
+                return json.dumps({"ok": False, "error": (e.output or "bpftrace error")[:1200],
+                                   "script_path": path})
+            except FileNotFoundError:
+                return json.dumps({"ok": False, "error": "bpftrace binary not found"})
 
         # ── RCA / deep observability implementations ─────────────────
         # Each caps output with a time window + line limit so a verbose
@@ -6280,8 +7071,14 @@ async def _bob_chat(websocket, msg):
                             "content": f"\n[tool: {nm}({json.dumps(argv)})]\n",
                             "done": False,
                         }))
-                        # Gate: execute tools need a human OK first.
-                        if nm in BOB_EXECUTE_TOOLS:
+                        # Gate: when BOB_AUTONOMOUS (default), every tool runs
+                        # immediately — no modal, no confirm future round-trip.
+                        # Audit is still full: every call is logged to state.db
+                        # above and ZFS snapshots make any action rollback-able.
+                        # Paranoid mode (autonomy off) restores the old approval
+                        # flow for tools in BOB_EXECUTE_TOOLS.
+                        autonomous = _bob_autonomy_get()
+                        if (not autonomous) and nm in BOB_EXECUTE_TOOLS:
                             decision = await _bob_request_confirm(websocket, nm, argv)
                             if not decision.get("ok"):
                                 reason = decision.get("reason") or "user rejected"
@@ -6292,7 +7089,6 @@ async def _bob_chat(websocket, msg):
                                 }))
                                 result = json.dumps({"rejected": True, "reason": reason})
                             else:
-                                # User may have edited args before approving
                                 final_args = decision.get("args") or argv
                                 await websocket.send(json.dumps({
                                     "type": "bob_chat_chunk",
@@ -6303,16 +7099,14 @@ async def _bob_chat(websocket, msg):
                                     summary = await _bob_run_playbook(websocket, final_args)
                                     result = json.dumps({"ok": True, "summary": summary})
                                 else:
-                                    # Everything else in BOB_EXECUTE_TOOLS (shell_run,
-                                    # shell_run_async, terminal_send, bpftrace_oneliner)
-                                    # shares the same implementation as the non-execute
-                                    # tools — it's just gated by the confirm card. Run
-                                    # the normal dispatcher once the user approved so
-                                    # the tool actually fires instead of returning
-                                    # "no handler for …" back into Bob's context.
                                     result = _bob_tool_exec(nm, final_args)
                         else:
-                            result = _bob_tool_exec(nm, argv)
+                            # Autonomous path OR non-execute tool: just fire.
+                            if nm == "run_playbook":
+                                summary = await _bob_run_playbook(websocket, argv)
+                                result = json.dumps({"ok": True, "summary": summary})
+                            else:
+                                result = _bob_tool_exec(nm, argv)
                         messages.append({"role": "tool", "name": nm, "content": result})
                 else:
                     await websocket.send(json.dumps({

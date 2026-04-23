@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# kldload-obs-check — end-to-end validation of the observability stack.
+#
+# Usage:
+#   kldload-obs-check              # run all checks, exit non-zero on fail
+#   kldload-obs-check --fix        # attempt auto-fix (regen cert, restart svcs)
+#   kldload-obs-check --vm ubuntu  # also validate a specific klab test VM
+#
+# What it proves, in order, so the operator sees WHERE things break:
+#
+#   [1] 4 exporter services are active (zfs, smartctl, loki, promtail)
+#   [2] Each exporter listens on its expected port
+#   [3] Prometheus can scrape each target (health=up)
+#   [4] zfs_exporter emits pool metrics (not just build_info)
+#   [5] smartctl_exporter has at least one device
+#   [6] Loki is ready and receiving logs
+#   [7] Promtail has non-zero sent_bytes in the last minute
+#   [8] Persistent journal is enabled
+#   [9] Grafana is up and has Loki datasource configured
+#  [10] All 4 observability dashboards are loaded
+#  [11] (--vm X) Test VM is shipping logs to host Loki
+#
+# Output is human-readable + each failure points at the exact command to
+# reproduce + a suggested fix. Exits 0 on all-green, 1 otherwise.
+
+set -uo pipefail
+
+RED="$(tput setaf 1 2>/dev/null || true)"
+GRN="$(tput setaf 2 2>/dev/null || true)"
+YLW="$(tput setaf 3 2>/dev/null || true)"
+DIM="$(tput dim 2>/dev/null || true)"
+RST="$(tput sgr0 2>/dev/null || true)"
+
+FAIL=0
+FIX=0
+VM=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fix) FIX=1 ; shift ;;
+        --vm) VM="$2" ; shift 2 ;;
+        -h|--help) sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#$//' ; exit 0 ;;
+        *) echo "unknown arg: $1" >&2 ; exit 2 ;;
+    esac
+done
+
+_pass() { printf '  %s[OK]%s   %s\n' "$GRN" "$RST" "$1" ; }
+_fail() { printf '  %s[FAIL]%s %s\n' "$RED" "$RST" "$1" ; FAIL=$((FAIL+1)) ; }
+_warn() { printf '  %s[WARN]%s %s\n' "$YLW" "$RST" "$1" ; }
+_hint() { printf '         %s%s%s\n' "$DIM" "$1" "$RST" ; }
+
+# ─── [1] services active ──────────────────────────────────────────────
+echo "[1] systemd services"
+for svc in zfs_exporter smartctl_exporter loki promtail grafana-server prometheus ebpf_exporter; do
+    _state="$(systemctl is-active "$svc" 2>/dev/null || echo missing)"
+    if [[ "$_state" == "active" ]]; then
+        _pass "$svc active"
+    else
+        _fail "$svc not active (state: $_state)"
+        _hint "  systemctl status $svc"
+        _hint "  journalctl -u $svc --no-pager -n 20"
+        [[ $FIX -eq 1 ]] && { systemctl restart "$svc" 2>/dev/null && _warn "restarted $svc"; }
+    fi
+done
+
+# ─── [2] listening ports ──────────────────────────────────────────────
+echo
+echo "[2] listening ports"
+declare -A _ports=( [zfs_exporter]=9134 [smartctl_exporter]=9633 [loki]=3100 [promtail]=9080 [grafana]=3000 [prometheus]=9090 [ebpf_exporter]=9435 )
+for name in "${!_ports[@]}"; do
+    _port="${_ports[$name]}"
+    if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE ":${_port}$"; then
+        _pass "$name listening on :$_port"
+    else
+        _fail "$name NOT listening on :$_port"
+        _hint "  ss -tlnp | grep :$_port"
+    fi
+done
+
+# ─── [3] prometheus targets health ────────────────────────────────────
+echo
+echo "[3] Prometheus scrape health"
+_targets_json="$(curl -s --max-time 5 http://localhost:9090/api/v1/targets 2>/dev/null)"
+if [[ -z "$_targets_json" ]]; then
+    _fail "cannot reach http://localhost:9090/api/v1/targets"
+else
+    for job in zfs-exporter smartctl-exporter promtail ebpf-exporter klab-exporter klab-host; do
+        _h="$(echo "$_targets_json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for t in d['data']['activeTargets']:
+    if t['labels'].get('job')=='$job':
+        print(t['health']); break
+" 2>/dev/null)"
+        case "$_h" in
+            up)   _pass "scrape $job → up" ;;
+            down) _fail "scrape $job → down"
+                  _hint "  curl http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.labels.job==\"$job\")'" ;;
+            *)    _warn "scrape $job → not configured ($_h)" ;;
+        esac
+    done
+fi
+
+# ─── [4] zfs_exporter pool metrics ────────────────────────────────────
+echo
+echo "[4] zfs_exporter pool metrics"
+_pools=$(curl -s --max-time 5 http://localhost:9134/metrics | grep -c "^zfs_pool_health")
+if [[ "$_pools" -gt 0 ]]; then
+    _pass "$_pools pool health series exposed"
+    curl -s http://localhost:9134/metrics | grep "^zfs_pool_health" | sed 's/^/    /'
+else
+    _fail "no zfs_pool_* metrics — exporter is up but not emitting"
+    _hint "  curl http://localhost:9134/metrics | head"
+    _hint "  known cause: passing --pool=* as literal flag (use no --pool for all)"
+fi
+
+# ─── [5] smartctl devices ─────────────────────────────────────────────
+echo
+echo "[5] smartctl_exporter devices"
+_dev_count=$(curl -s --max-time 5 http://localhost:9633/metrics | awk '/^smartctl_devices /{print $2}')
+if [[ "${_dev_count:-0}" -gt 0 ]]; then
+    _pass "${_dev_count%.*} SMART device(s) monitored"
+    curl -s http://localhost:9633/metrics | grep "^smartctl_device_available_spare{" | sed 's/^/    /'
+elif [[ "${_dev_count:-0}" == "0" ]]; then
+    _warn "smartctl reports 0 devices (normal in VMs without passthrough disks)"
+    _hint "  /usr/sbin/smartctl --scan-open"
+else
+    _fail "cannot read smartctl_exporter"
+fi
+
+# ─── [6] Loki ready + has data ────────────────────────────────────────
+echo
+echo "[6] Loki"
+if curl -s --max-time 5 http://localhost:3100/ready | grep -q ready; then
+    _pass "Loki /ready = ready"
+    _labels=$(curl -s "http://localhost:3100/loki/api/v1/labels" | python3 -c "import json,sys; print(','.join(json.load(sys.stdin)['data']))" 2>/dev/null || echo ERR)
+    _pass "Loki labels: $_labels"
+else
+    _fail "Loki not ready at http://localhost:3100/ready"
+    _hint "  journalctl -u loki --no-pager -n 20"
+fi
+
+# ─── [7] promtail actively shipping ───────────────────────────────────
+echo
+echo "[7] promtail shipping rate"
+_sent=$(curl -s --max-time 5 http://localhost:9080/metrics | awk '/^promtail_sent_bytes_total/{s+=$2} END{print s+0}')
+if [[ "${_sent:-0}" -gt 0 ]]; then
+    _pass "promtail has shipped $_sent bytes total"
+else
+    _fail "promtail has shipped 0 bytes — nothing flowing"
+    _hint "  tail /var/lib/promtail/positions.yaml"
+    _hint "  journalctl -u promtail --no-pager -n 20"
+fi
+
+# ─── [8] persistent journal ───────────────────────────────────────────
+echo
+echo "[8] persistent journal"
+_jstorage=$(journalctl --disk-usage 2>&1 | head -1)
+if [[ -d /var/log/journal ]] && ls /var/log/journal/*/*.journal 2>/dev/null | head -1 | grep -q journal; then
+    _pass "persistent journal active — $_jstorage"
+else
+    _fail "journal is volatile — promtail loses events on reboot"
+    _hint "  mkdir -p /var/log/journal && systemd-tmpfiles --create --prefix /var/log/journal && systemctl restart systemd-journald"
+fi
+
+# ─── [9] Grafana healthy + Loki datasource ───────────────────────────
+echo
+echo "[9] Grafana"
+_gh=$(curl -sk --max-time 5 https://localhost:3000/api/health 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['database'])" 2>/dev/null)
+if [[ "$_gh" == "ok" ]]; then
+    _pass "Grafana database=ok"
+else
+    _fail "Grafana /api/health returned '$_gh'"
+fi
+if [[ -f /etc/grafana/provisioning/datasources/loki.yaml ]]; then
+    _pass "Loki datasource provisioned"
+else
+    _fail "/etc/grafana/provisioning/datasources/loki.yaml missing"
+fi
+
+# ─── [10] observability dashboards loaded ─────────────────────────────
+echo
+echo "[10] Grafana dashboards"
+for uid in zfs-pool-health disk-health-smart kernel-messages klab-test-debug scrub-history compression-trend block-io-latency klab-test-matrix; do
+    _code=$(curl -sk -u admin:admin --max-time 5 -o /dev/null -w "%{http_code}" "https://localhost:3000/api/dashboards/uid/$uid" 2>/dev/null)
+    if [[ "$_code" == "200" ]]; then
+        _pass "dashboard $uid → 200"
+    else
+        _fail "dashboard $uid → http=$_code"
+        _hint "  ls /var/lib/grafana/dashboards/${uid}.json"
+    fi
+done
+
+# ─── [11] per-VM shipping (optional) ──────────────────────────────────
+if [[ -n "$VM" ]]; then
+    echo
+    echo "[11] VM '$VM' shipping to host Loki"
+    # 1 hour window — the VM's kernel may be hung (common for tests), so
+    # new entries won't keep arriving; we just want to see ANY historical
+    # shipping activity to confirm the pipeline is wired.
+    _n=$(curl -sG "http://localhost:3100/loki/api/v1/query_range" \
+        --data-urlencode "query={vm=\"$VM\"}" \
+        --data-urlencode "start=$(date -d '1 hour ago' +%s)000000000" \
+        --data-urlencode 'end='"$(date +%s)000000000" \
+        --data-urlencode 'limit=100' 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(sum(len(s.get('values',[])) for s in d.get('data',{}).get('result',[])))" 2>/dev/null)
+    if [[ "${_n:-0}" -gt 0 ]]; then
+        _pass "$_n log entries from vm=$VM in last 1h"
+    else
+        _fail "no logs from vm=$VM — VM promtail down or not pointing at 192.168.122.1:3100"
+        _hint "  sshpass -p kldload ssh root@<vm-ip> systemctl status promtail"
+    fi
+fi
+
+# ─── summary ──────────────────────────────────────────────────────────
+echo
+if [[ $FAIL -eq 0 ]]; then
+    printf '%s✓ ALL CHECKS PASSED%s — observability stack healthy\n' "$GRN" "$RST"
+    _ip=$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -vE '^127\.|^192\.168\.122\.|^10\.25[01]\.' | head -1)
+    [[ -z "$_ip" ]] && _ip="$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\.' | head -1)"
+    [[ -z "$_ip" ]] && _ip="localhost"
+    printf '\nDashboards:\n'
+    for _uid in zfs-pool-health disk-health-smart kernel-messages klab-test-debug scrub-history compression-trend block-io-latency klab-test-matrix; do
+        printf '  https://%s:3000/d/%s/\n' "$_ip" "$_uid"
+    done
+    exit 0
+else
+    printf '%s✗ %d CHECK(S) FAILED%s\n' "$RED" "$FAIL" "$RST"
+    printf '\nRe-run with --fix to auto-restart services where safe.\n'
+    exit 1
+fi

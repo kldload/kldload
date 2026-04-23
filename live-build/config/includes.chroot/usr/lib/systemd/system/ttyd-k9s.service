@@ -2,7 +2,8 @@
 Description=ttyd — kldload browser console (k9s + shell + logs via tmux)
 # Same priority ordering as kldload-webui: start BEFORE any long-running
 # firstboot/autodeploy so the browser terminal is usable immediately.
-After=network.target
+After=network-online.target
+Wants=network-online.target
 Before=kldload-firstboot.service kldload-autodeploy.service klab-firstboot.service
 
 [Service]
@@ -14,7 +15,33 @@ Environment=TERM=xterm-256color
 # reloads reattach instead of losing state. Bound to 0.0.0.0 so both LAN
 # and WireGuard mesh can reach it. Tighten to a specific interface by
 # changing -i 0.0.0.0 if needed.
-ExecStart=/usr/local/bin/ttyd -W -i 0.0.0.0 -p 7681 -t fontSize=14 /usr/local/bin/kldload-console
+# TLS: ttyd must speak HTTPS so the webui (https://…:8443) can iframe
+# it without triggering the browser's mixed-content block. Generate/reuse
+# the same self-signed cert kldload-tls-cert produces for the webui. The
+# pre-start hook runs the cert script (idempotent — only regen if expired)
+# and makes the files readable by the ttyd user. If cert generation fails
+# we still start ttyd on HTTP and let the user see the failure in the
+# webui (terminal shows mixed-content error with actionable guidance).
+ExecStartPre=/bin/sh -c '/usr/local/sbin/kldload-tls-cert >/dev/null 2>&1 || true; chmod 0644 /var/lib/kldload/tls/webui.crt 2>/dev/null || true; chmod 0640 /var/lib/kldload/tls/webui.key 2>/dev/null || true'
+
+# Clipboard: xterm.js copies the selection to the browser's clipboard
+# automatically (copyOnSelect=true) — drag to select, no key press
+# needed. Paste with Ctrl+Shift+V (browser-level). Combined with tmux's
+# `set-clipboard on` inside kldload-console, this covers both "grab
+# text from a pane" and "paste a URL into a shell".
+#
+# disableLeaveAlert=true so the browser doesn't prompt on page close.
+# rendererType=webgl for smoother scrolling on big live log streams.
+# scrollback=10000 lets you scroll back further in panes like hubble.
+ExecStart=/usr/local/bin/ttyd -W -i 0.0.0.0 -p 7681 \
+    --ssl --ssl-cert /var/lib/kldload/tls/webui.crt \
+    --ssl-key /var/lib/kldload/tls/webui.key \
+    -t fontSize=14 \
+    -t copyOnSelect=true \
+    -t disableLeaveAlert=true \
+    -t 'rendererType=webgl' \
+    -t scrollback=10000 \
+    /usr/local/bin/kldload-console
 Restart=on-failure
 RestartSec=5
 

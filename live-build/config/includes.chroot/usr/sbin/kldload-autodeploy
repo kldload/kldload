@@ -65,6 +65,14 @@ done
 [[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" || "${KLDLOAD_ENABLE_K8S:-0}" == "1" ]] && WANT[k8s]=1
 [[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]] && WANT[ai]=1
 
+# ZFS Lab is the ZFS test appliance, not a K8s lab — skip the cluster
+# entirely so the whole host budget goes to the klab test VMs. K8s
+# dashboards (Cilium/Hubble/Tetragon/CSI) show no data under this mode,
+# which is correct: ZFS test observability lives on host-side exporters.
+if [[ "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" ]]; then
+    WANT[k8s]=0
+fi
+
 # klab goldens — build all 5 ZFS-test-lab goldens automatically on any
 # KVM-capable profile so "install completes" means "every lab distro is
 # snapshot-ready for instant clone, no manual click". The user can still
@@ -130,31 +138,124 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         # the model store. Must come BEFORE any `ollama` call.
         export HOME="${HOME:-/root}"
         export OLLAMA_MODELS="${OLLAMA_MODELS:-/srv/ollama/models}"
-        # qwen2.5:14b is the only chat model we ship. Better reasoning
-        # and tool-calling than llama3.1:8b. On weak GPUs/CPU-only, falls
-        # through to CPU inference — slower but still works. Override
-        # with KLDLOAD_AI_MODEL=<name> if you want something different.
-        _chat_model="${KLDLOAD_AI_MODEL:-qwen2.5:14b}"
+        # Chat model resolution (in priority order):
+        #   1. KLDLOAD_AI_MODEL — legacy direct-name override (kickstart flows)
+        #   2. KLDLOAD_BOB_MODEL — tier name from the Bob panel radio
+        #      (mini/small/recommended/large/code). Mapped to an Ollama
+        #      model name via the case below.
+        #   3. Default → qwen2.5:14b (matches the UI's "Recommended" pill).
+        _chat_model="${KLDLOAD_AI_MODEL:-}"
+        if [[ -z "$_chat_model" ]]; then
+          case "${KLDLOAD_BOB_MODEL:-recommended}" in
+            mini)        _chat_model="llama3.2:3b" ;;
+            small)       _chat_model="qwen2.5:7b" ;;
+            recommended) _chat_model="qwen2.5:14b" ;;
+            large)       _chat_model="qwen2.5:32b" ;;
+            code)        _chat_model="qwen2.5-coder:14b" ;;
+            *)           _chat_model="qwen2.5:14b" ;;
+          esac
+        fi
+        # VRAM probe. Try nvidia-smi (dedicated NVIDIA GPU), fall back to
+        # rocminfo (AMD), then DRM sysfs (Intel Arc / fallback). 0 GB means
+        # no GPU or an unrecognisable one → Bob is CPU-bound.
         _vram_gb=0
         if command -v nvidia-smi >/dev/null 2>&1; then
             _vram_gb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)
             _vram_gb=$(( ${_vram_gb:-0} / 1024 ))
+        elif command -v rocminfo >/dev/null 2>&1; then
+            # rocminfo prints bytes; take the largest local memory pool.
+            _bytes=$(rocminfo 2>/dev/null | awk '/Size:.*\(.*\)/ {gsub(/[^0-9]/,"",$2); if ($2+0 > max) max=$2+0} END {print max+0}')
+            _vram_gb=$(( _bytes / 1024 / 1024 / 1024 ))
         fi
-        log "[ai] VRAM=${_vram_gb}GB → chat model: ${_chat_model}"
-        log "[ai] installing ollama + pulling ${_chat_model}"
+        # Minimum VRAM to host Bob usably. qwen2.5:14b is ~9 GB quantised and
+        # barely fits in 10 GB; below 8 GB the model won't load and CPU-fallback
+        # inference is ~30 tok/min — unusable. Gracefully skip Bob entirely so
+        # firstboot doesn't wedge on a 5 GB pull for a model that can't run.
+        # Override via KLDLOAD_FORCE_AI=1 (user explicitly wants CPU inference).
+        _min_vram_gb="${KLDLOAD_MIN_AI_VRAM_GB:-8}"
+        if [[ "$_vram_gb" -lt "$_min_vram_gb" && "${KLDLOAD_FORCE_AI:-0}" != "1" ]]; then
+            log "[ai] SKIP — insufficient VRAM (${_vram_gb}GB < ${_min_vram_gb}GB minimum). Bob will not be installed."
+            log "[ai] To override: KLDLOAD_FORCE_AI=1 kldload-autodeploy (CPU inference, very slow)."
+            log "[ai] Or manually later: ollama pull ${_chat_model}  (once you know your hardware can handle it)."
+            mark "ai-skipped"
+            exit 0
+        fi
+        log "[ai] VRAM=${_vram_gb}GB (ok, minimum ${_min_vram_gb}GB) → chat model: ${_chat_model}"
+        # Darksite-vs-internet branch. KLDLOAD_BOB_DARKSITE=1 comes from the
+        # Bob panel "use darksite" checkbox. We still need the ollama binary
+        # itself — darksite only ships model weights, not the runtime — so
+        # the install.sh path runs either way. But if the darksite has the
+        # selected model's manifest, rehydrate /srv/ollama/models/ BEFORE
+        # starting ollama. The subsequent `ollama pull` then hash-matches
+        # every blob and is a no-op — no internet touched for weights.
+        _bob_darksite="${KLDLOAD_BOB_DARKSITE:-0}"
+        _darksite_has_model=0
+        if [[ "$_bob_darksite" == "1" ]]; then
+            _model_name="${_chat_model%%:*}"
+            _model_tag="${_chat_model##*:}"
+            if [[ -d /root/darksite/ollama/models ]] && \
+               compgen -G "/root/darksite/ollama/models/manifests/registry.ollama.ai/library/${_model_name}/${_model_tag}" >/dev/null; then
+                _darksite_has_model=1
+                log "[ai] darksite HIT: ${_chat_model} weights present under /root/darksite/ollama/"
+            else
+                log "[ai] darksite MISS: ${_chat_model} not in /root/darksite/ollama/models/ — falling back to internet pull"
+            fi
+        fi
+        log "[ai] installing ollama runtime"
         command -v ollama >/dev/null 2>&1 || \
             curl -fsSL https://ollama.com/install.sh | sh >> "$LOG_FILE" 2>&1
+        # Rehydrate from darksite BEFORE first ollama start so the models
+        # are already visible in /api/tags when serve comes up.
+        if [[ "$_darksite_has_model" == "1" ]]; then
+            mkdir -p /srv/ollama/models
+            log "[ai] rehydrating /srv/ollama/models/ from darksite (air-gap path)"
+            rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ >>"$LOG_FILE" 2>&1 \
+                && log "[ai] darksite rehydrate ok" \
+                || log "[ai] WARNING: darksite rehydrate failed — ollama pull will need internet"
+            chown -R ollama:ollama /srv/ollama 2>/dev/null || true
+        fi
         systemctl enable --now ollama 2>/dev/null || true
         for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
             sleep 2
         done
-        ollama pull "${_chat_model}" >> "$LOG_FILE" 2>&1
-        # Vision model only for 10GB+ VRAM hosts
-        _ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
-        if [[ $_vram_gb -ge 10 ]] && [[ $_ram_gb -ge 16 ]]; then
-            ollama pull llama3.2-vision:11b >> "$LOG_FILE" 2>&1 || \
-                log "[ai] vision pull failed — non-fatal"
+        # Pull with retry + verification. `ollama pull` can silently exit 0 on
+        # transient network issues, leaving no model loaded. Check /api/tags
+        # afterward; retry up to 3 times if the model didn't land. Without this,
+        # the ai-ready marker gets set on a Bob that has no model, and the chat
+        # tab opens to an empty model dropdown.
+        _pull_ok=0
+        for _try in 1 2 3; do
+            ollama pull "${_chat_model}" >> "$LOG_FILE" 2>&1 || true
+            if curl -sf http://127.0.0.1:11434/api/tags 2>/dev/null | grep -q "\"name\":\"${_chat_model}\""; then
+                _pull_ok=1
+                log "[ai] model ${_chat_model} confirmed loaded (try ${_try})"
+                break
+            fi
+            log "[ai] model ${_chat_model} not in /api/tags after pull — retrying (try ${_try}/3)"
+            sleep 10
+        done
+        if [[ "$_pull_ok" != "1" ]]; then
+            log "[ai] FAILED to pull ${_chat_model} after 3 tries — Bob will have no model. Check network + /srv/ollama/models/. Marking ai-failed."
+            mark "ai-failed"
+            exit 0
+        fi
+        # Vision model (llama3.2-vision:11b) is NO LONGER auto-pulled — it's
+        # 6 GB of weights and ~8 GB of VRAM for a capability used on <5% of
+        # Bob sessions (pasted screenshots of non-text images). Text models
+        # plus tesseract OCR cover screenshots-of-logs/errors in 30 MB, and
+        # the user can opt in to the vision model via the Bob panel
+        # ("Install vision model") if they really want photo analysis.
+        # Gate with KLDLOAD_PULL_VISION_MODEL=1 if you need it from autodeploy.
+        if [[ "${KLDLOAD_PULL_VISION_MODEL:-0}" == "1" ]]; then
+            _ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+            if [[ $_vram_gb -ge 10 ]] && [[ $_ram_gb -ge 16 ]]; then
+                log "[ai] KLDLOAD_PULL_VISION_MODEL=1 — pulling llama3.2-vision:11b"
+                ollama pull llama3.2-vision:11b >> "$LOG_FILE" 2>&1 || \
+                    log "[ai] vision pull failed — non-fatal"
+            fi
+        else
+            log "[ai] vision model skipped (opt in via Bob panel or set KLDLOAD_PULL_VISION_MODEL=1)"
         fi
         # Warm (keepalive 24h so first chat is instant)
         curl -sf -X POST http://127.0.0.1:11434/api/generate \
@@ -176,9 +277,6 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
     if [[ -f "${STATE_DIR}/k8s-ready" ]]; then
         log "[k8s] already marked ready — skipping"
     else
-        # Both default K8s and ZFS Lab get a full 4-node cluster (1 CP + 3
-        # workers). The ZFS Lab tile only changes what comes AFTER the
-        # cluster is up — it adds the ztest golden lineage in the klab phase.
         log "[k8s] running kube-cluster bootstrap --workers 3"
         if kube-cluster bootstrap --workers 3 >> /var/log/kldload/kube-bootstrap.log 2>&1; then
             mark "k8s"
@@ -219,51 +317,50 @@ fi
 # Last because it's the longest (~1hr). RHEL is auto-skipped if no creds
 # in the secrets store.
 if [[ "${WANT[klab]}" == "1" ]]; then
+    # ── 3a: blue-green goldens ────────────────────────────────────────
     phase "klab-goldens"
     if [[ -f "${STATE_DIR}/klab-ready" ]]; then
-        log "[klab] already marked ready — skipping"
+        log "[klab] blue-green already marked ready — skipping"
+        _klab_ok=1
     else
-        # Always build the blue-green golden lineage (klab-golden-<distro>).
-        # These power the Lab tile / blue-green deploy and are what every
-        # hardware profile needs.
         _klab_ok=1
         log "[klab] running klab golden all (blue-green lineage)"
-        klab golden all >> /var/log/kldload/klab-firstboot.log 2>&1 \
-            || { _klab_ok=0; log "[klab] blue-green FAILED — see klab-firstboot.log"; }
-
-        # ZFS test-lab goldens (klab-ztest-<distro>) are a SEPARATE lineage
-        # with the full OpenZFS test-suite dep set baked in. They add ~1 hr
-        # to install time, so only build them when the user actually picked
-        # the ZFS Lab profile (zfslab tile in the installer UI, which sets
-        # KLDLOAD_KLAB_ZFS_DEV=1 or KLDLOAD_ZFSLAB_MODE=1).
-        if [[ "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" || "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" ]]; then
-            log "[klab] running klab golden-ztest all (ZFS test-lab lineage)"
-            klab golden-ztest all >> /var/log/kldload/klab-firstboot.log 2>&1 \
-                || { _klab_ok=0; log "[klab] ztest FAILED — see klab-firstboot.log"; }
-        else
-            log "[klab] skipping ztest goldens (not a ZFS Lab install)"
-        fi
-
-        if [[ "$_klab_ok" -eq 1 ]]; then
+        if klab golden all >> /var/log/kldload/klab-firstboot.log 2>&1; then
             mark "klab"
-            log "[klab] complete"
+            log "[klab] blue-green complete"
+        else
+            _klab_ok=0
+            log "[klab] blue-green FAILED — see klab-firstboot.log"
         fi
+    fi
 
-        # ZFS test goldens (separate lineage with zfs-tests.sh deps).
-        # Gated on KLDLOAD_BUILD_ZTEST_GOLDENS: 1 during integration
-        # testing (verify every pipeline builds end-to-end), 0 for
-        # release (users trigger via the UI tile when they want them).
-        if [[ "${KLDLOAD_BUILD_ZTEST_GOLDENS:-1}" == "1" ]]; then
-            log "[klab] running klab golden-ztest all (test-mode flag ON)"
+    # ── 3b: ztest goldens (separate phase so the installer UI can
+    #       distinguish the two and not flip to "finished" while the
+    #       ztest lineage is still building for another ~60 min) ─────
+    # Run ztest only when the user actually asked for ZFS Lab mode
+    # (KLDLOAD_KLAB_ZFS_DEV / KLDLOAD_ZFSLAB_MODE) OR when the
+    # integration-test override KLDLOAD_BUILD_ZTEST_GOLDENS=1 is set.
+    # Removed the duplicate ztest invocation that used to run twice.
+    _ztest_requested=0
+    [[ "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ]] && _ztest_requested=1
+    [[ "${KLDLOAD_ZFSLAB_MODE:-0}"  == "1" ]] && _ztest_requested=1
+    [[ "${KLDLOAD_BUILD_ZTEST_GOLDENS:-0}" == "1" ]] && _ztest_requested=1
+
+    if [[ "$_ztest_requested" == "1" ]]; then
+        phase "klab-ztest-goldens"
+        if [[ -f "${STATE_DIR}/klab-ztest-ready" ]]; then
+            log "[klab] ztest already marked ready — skipping"
+        else
+            log "[klab] running klab golden-ztest all (ZFS test-lab lineage, ~60 min)"
             if klab golden-ztest all >> /var/log/kldload/klab-firstboot.log 2>&1; then
                 mark "klab-ztest"
                 log "[klab] ztest goldens complete"
             else
                 log "[klab] ztest FAILED — see /var/log/kldload/klab-firstboot.log (non-fatal)"
             fi
-        else
-            log "[klab] ztest goldens skipped (KLDLOAD_BUILD_ZTEST_GOLDENS=0 — use UI to build)"
         fi
+    else
+        log "[klab] ztest goldens skipped (not a ZFS Lab install)"
     fi
 fi
 

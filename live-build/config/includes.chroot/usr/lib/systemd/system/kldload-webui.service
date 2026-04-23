@@ -2,12 +2,12 @@
 Description=kldload Web UI (installer + management frontend)
 # Start as early as possible. The UI is how the user tracks every other
 # slow boot-time operation (firstboot, autodeploy, klab goldens, K8s
-# bootstrap). Gate on only the minimal network.target, and explicitly
-# order BEFORE the heavy units so systemd brings the UI up first even
-# under load. Users get a working dashboard + browser terminal within
-# ~10 seconds of boot; heavy work runs in parallel behind.
-After=network.target systemd-modules-load.service
-Wants=systemd-modules-load.service
+# bootstrap). Gate on network-online.target (NOT network.target) because
+# ExecStartPre runs kldload-tls-cert which needs the LAN IP assigned to
+# build correct SANs. Ordering before the heavy units still holds — the
+# UI comes up ~seconds after DHCP completes; heavy work runs in parallel.
+After=network-online.target systemd-modules-load.service
+Wants=network-online.target systemd-modules-load.service
 Before=kldload-firstboot.service kldload-autodeploy.service klab-firstboot.service
 
 [Service]
@@ -18,7 +18,21 @@ Type=simple
 # the cluster is fine.
 Environment=HOME=/root
 Environment=KUBECONFIG=/root/.kube/config
-ExecStart=/usr/local/bin/kldload-webui --port 8080 --no-browser
+# Generate the self-signed TLS cert BEFORE binding the port. Without
+# this the Python server exits ("certfile not found") and systemd
+# retries it 5×, leaving Firefox staring at connection-refused for
+# ~25s even though everything else is up. The oneshot
+# kldload-tls-cert.service regenerates later with DHCP SAN, but this
+# ensures there's ALWAYS a valid cert at startup.
+ExecStartPre=/usr/local/sbin/kldload-tls-cert
+ExecStart=/usr/local/bin/kldload-webui --port 8443 --no-browser
+# After ExecStart returns success, probe port 8443 until it answers
+# HTTPS. This doesn't gate Type=simple's "started" state (systemd 240+
+# would need Type=exec for that) but it DOES block RestartSec loops
+# from racing a slow TLS init, and gives any downstream service that
+# issues `systemctl start kldload-webui` a post-condition they can
+# trust before launching Firefox etc.
+ExecStartPost=/bin/bash -c 'for i in $(seq 1 60); do ss -ltn 2>/dev/null | grep -q ":8443 " && exit 0; sleep 1; done; exit 1'
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

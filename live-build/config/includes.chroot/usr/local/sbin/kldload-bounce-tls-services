@@ -1,0 +1,37 @@
+#!/bin/bash
+# Post-cert-regen: chmod the cert + bounce the services that use it.
+#
+# BUT: skip the bounce entirely if the installer or a klab run is in
+# flight. Restarting webui during those operations kills the subprocess
+# tree (webui cgroup). Observed failure: wifi join → NM fires
+# network-online → kldload-tls-cert.service re-runs (it has
+# Wants=network-online.target) → this script runs → webui restarts mid
+# install-target → install dies with zero log output and a confused
+# user staring at a blank browser tab.
+#
+# Flag files written by:
+#   /var/run/kldload/installer-busy   — kldload-install-target on start,
+#                                       removed on exit (trap)
+#   /var/run/klab/current-run.env     — klab_test action in webui
+#
+# Skip conditions are cheap stat() calls, zero dependency. The cert
+# regen itself still runs (fast) — we just defer the noisy bounce.
+set -u
+
+CERT=/var/lib/kldload/tls/webui.crt
+KEY=/var/lib/kldload/tls/webui.key
+[[ -e "$CERT" ]] && chmod 0644 "$CERT" 2>/dev/null || true
+[[ -e "$KEY"  ]] && chmod 0640 "$KEY"  2>/dev/null || true
+
+if [[ -e /var/run/kldload/installer-busy ]]; then
+    logger -t kldload-bounce-tls-services "installer busy — skipping webui/ttyd/grafana restart"
+    exit 0
+fi
+if [[ -e /var/run/klab/current-run.env ]]; then
+    logger -t kldload-bounce-tls-services "klab run in flight — skipping webui/ttyd/grafana restart"
+    exit 0
+fi
+
+for svc in ttyd-k9s kldload-webui grafana-server; do
+    systemctl --no-block try-restart "$svc" 2>/dev/null || true
+done

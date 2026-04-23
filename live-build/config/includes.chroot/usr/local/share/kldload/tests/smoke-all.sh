@@ -68,11 +68,16 @@ run_suite() {
   output=$(bash "$script" 2>&1) || true
   echo "$output" | tee_report
 
-  # Parse results from output
+  # Parse results from output. `grep -c` always prints a single integer
+  # (including "0" on no match) but exits 1 when it matches nothing. The
+  # previous `|| echo 0` fallback then ADDED a second "0" line, making
+  # the variable "0\n0" and crashing $((TOTAL_PASS + p)) with bash
+  # "error token is 0". Just accept grep's own "0" output; use ${var:-0}
+  # only to defend against a completely empty capture (process crashed).
   local p f w
-  p=$(echo "$output" | grep -c "PASS" || echo 0)
-  f=$(echo "$output" | grep -c "FAIL" || echo 0)
-  w=$(echo "$output" | grep -c "WARN" || echo 0)
+  p=$(echo "$output" | grep -c "PASS" 2>/dev/null); p=${p:-0}
+  f=$(echo "$output" | grep -c "FAIL" 2>/dev/null); f=${f:-0}
+  w=$(echo "$output" | grep -c "WARN" 2>/dev/null); w=${w:-0}
 
   TOTAL_PASS=$((TOTAL_PASS + p))
   TOTAL_FAIL=$((TOTAL_FAIL + f))
@@ -145,10 +150,12 @@ fi
   ip -4 addr show 2>/dev/null | grep 'inet ' | grep -v 127.0.0 | awk '{print "           " $NF ": " $2}'
   echo ""
 
-  # VMs if KVM
+  # VMs if KVM. This block is inside a `{ ... } | tee_report` group, not
+  # a function, so `local` is illegal here — bash would abort the whole
+  # piped block with "local: can only be used in a function". Use plain
+  # variable assignment and defend against empty grep output explicitly.
   if command -v virsh >/dev/null 2>&1; then
-    local vm_count
-    vm_count=$(virsh list --all --name 2>/dev/null | grep -c -v '^$' || echo 0)
+    vm_count=$(virsh list --all --name 2>/dev/null | grep -c -v '^$'); vm_count=${vm_count:-0}
     echo "  VMs:     $vm_count defined"
     virsh list --all 2>/dev/null | grep -v "^$" | sed 's/^/           /'
     echo ""

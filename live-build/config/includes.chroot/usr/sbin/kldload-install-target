@@ -13,14 +13,35 @@ _emergency_cleanup() {
 }
 trap '_emergency_cleanup' ERR EXIT
 
-# Hardware profiles require Secure Boot + MOK for verified boot chain.
-# Desktop/Server/Core users don't need the MOK enrollment friction.
-_is_hw_profile() {
-  case "${KLDLOAD_PROFILE:-server}" in
-    kvm|k8s|devops|ai) return 0 ;;
-    *) return 1 ;;
-  esac
+# Secure Boot + MOK is OPT-IN as of 1.0.5. Default OFF — the MOK
+# enrollment dance (MokManager blue screen, password typing, distinct-
+# per-install cert, ZFS module signing) was the single biggest source of
+# "installed but won't boot" reports. Most kldload use cases (home lab,
+# ZFS test appliance, K8s dev box) don't have a threat model that SB
+# actually protects against; the cost of the feature was higher than
+# the value delivered. Flipping to opt-in means:
+#
+#   - default install: ZBM installed unsigned at \EFI\BOOT\BOOTX64.EFI,
+#     firmware boots it directly, no shim, no MOK, no MokManager,
+#     no verification failures at reboot-with-SB-on
+#   - opt-in install (`KLDLOAD_ENABLE_SECURE_BOOT=1`): full existing
+#     pipeline — generate MOK, sign ZBM + ZFS kmod, install shim as
+#     fallback, queue mokutil --import for MokManager enrollment
+#
+# Users who need SB later can flip it on post-install via a dedicated
+# `kldload-secure-boot enable` tool (runs k_generate_mok_keys against
+# the installed system, re-signs the ZBM that's already on disk, queues
+# MOK enrollment). Opt-in path still supported; opt-out path is now the
+# default.
+_secure_boot_enabled() {
+  [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]]
 }
+
+# Back-compat alias — existing callers inside this script still use the
+# old name. Same semantics now (user-intent SB), not the old profile
+# gate. If anything downstream expected the old `hw profile` meaning,
+# switch it to the explicit KLDLOAD_ENABLE_SECURE_BOOT check.
+_is_hw_profile() { _secure_boot_enabled; }
 
 k_poweroff_after_success() {
   local _fmt="${1:-none}"
@@ -362,11 +383,12 @@ ZFSREPO
 
         k_log "Root filesystem bootstrapped: $(du -sh "${target}" | cut -f1)"
 
-        # Generate MOK keys for Secure Boot BEFORE DKMS build so modules get signed.
-        # Only hardware profiles (kvm/k8s/devops/ai) get MOK — they need verified
-        # boot chains for infrastructure trust. Desktop/Server skip the friction.
-        if _is_hw_profile; then
-        k_log "Generating MOK keys for Secure Boot (hardware profile)..."
+        # Generate MOK keys + DKMS sign helper only if the user explicitly
+        # opted in to Secure Boot. Default is OFF — see _secure_boot_enabled()
+        # comment at top of this script for why. SB users get the full
+        # pipeline; everyone else gets a clean unsigned ZBM → direct boot.
+        if _secure_boot_enabled; then
+        k_log "Generating MOK keys for Secure Boot (KLDLOAD_ENABLE_SECURE_BOOT=1)..."
         if k_have_func k_generate_mok_keys; then
           KLDLOAD_TARGET="${target}" k_generate_mok_keys || k_log "WARNING: MOK key generation failed — modules won't be signed"
         else
@@ -400,8 +422,8 @@ MOKCONF
           k_log "MOK keys generated (inline fallback)"
         fi
         else
-          k_log "Skipping MOK key generation (${KLDLOAD_PROFILE:-server} profile — Secure Boot optional)"
-        fi  # end _is_hw_profile
+          k_log "Skipping MOK key generation (Secure Boot disabled — set KLDLOAD_ENABLE_SECURE_BOOT=1 at install time to enable)"
+        fi  # end _secure_boot_enabled
 
         # Build ZFS DKMS module (signed with MOK key if hw profile, unsigned otherwise)
         local kver
@@ -525,7 +547,7 @@ EOS
     k_log "Timezone: ${tz}"
 
     # Hostname
-    echo "${KLDLOAD_HOSTNAME:-kldload-node}" > "${target}/etc/hostname"
+    echo "${KLDLOAD_HOSTNAME:-kldload}" > "${target}/etc/hostname"
 
     # Extra packages
     if [[ -n "${KLDLOAD_EXTRA_PACKAGES:-}" ]]; then
@@ -611,6 +633,42 @@ method=auto
 method=auto
 EOS
       chmod 0600 "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/kldload-dhcp.nmconnection"
+    fi
+
+    # ── WiFi connection — optional, written alongside ethernet config ──
+    # The ethernet profile above covers wired fallback; this WiFi profile
+    # comes up when the wired cable isn't plugged in (autoconnect=true,
+    # autoconnect-priority higher than ethernet). Set via the installer
+    # UI's "Connect over WiFi" checkbox → KLDLOAD_WIFI_SSID/KLDLOAD_WIFI_PSK.
+    if [[ -n "${KLDLOAD_WIFI_SSID:-}" ]]; then
+      local _wifi_id
+      _wifi_id="$(printf '%s' "${KLDLOAD_WIFI_SSID}" | tr -cd 'A-Za-z0-9._ -')"
+      [[ -z "${_wifi_id}" ]] && _wifi_id="kldload-wifi"
+      k_log "WiFi: writing NM profile for SSID='${KLDLOAD_WIFI_SSID}'"
+      cat > "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/${_wifi_id}.nmconnection" <<EOS
+[connection]
+id=${_wifi_id}
+type=wifi
+autoconnect=true
+autoconnect-priority=10
+
+[wifi]
+mode=infrastructure
+ssid=${KLDLOAD_WIFI_SSID}
+
+[wifi-security]
+key-mgmt=wpa-psk
+auth-alg=open
+psk=${KLDLOAD_WIFI_PSK:-}
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+EOS
+      chmod 0600 "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/${_wifi_id}.nmconnection"
+      k_log "WiFi profile saved: ${_wifi_id}.nmconnection (0600)"
     fi
 
     # Enable network manager — NetworkManager on most distros, systemd-networkd as fallback
@@ -897,6 +955,10 @@ if ! k_have_func k_write_install_manifest; then
 
     cat > "${target}/etc/kldload/install-manifest.env" <<EOF
 # KLDload Install Manifest — written by installer $(date -u '+%Y-%m-%dT%H:%M:%SZ')
+# KLDLOAD_INSTALLED=1 is the canonical "came from installer, not live ISO"
+# flag. kldload-webui's is_live_mode() reads this; without it the webui
+# keeps serving the pre-install installer UI on every boot of a disk install.
+KLDLOAD_INSTALLED=1
 KLDLOAD_INSTALL_DATE="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 KLDLOAD_INSTALL_DISK="${KLDLOAD_DISK:-}"
 KLDLOAD_PROFILE="${KLDLOAD_PROFILE:-server}"
@@ -1453,6 +1515,17 @@ main() {
     esac
   done
 
+  # Drop "installer busy" flag so kldload-bounce-tls-services skips
+  # the webui/ttyd/grafana restart cycle during the install. Without
+  # this, wifi reconnect → network-online.target re-fires →
+  # kldload-tls-cert.service re-runs → bounce script restarts webui
+  # → kills our install subprocess tree (webui cgroup) → user sees
+  # blank browser with zero install progress. Trap ensures the flag
+  # is removed on ANY exit path — success, failure, Ctrl-C, OOM.
+  mkdir -p /var/run/kldload 2>/dev/null
+  : > /var/run/kldload/installer-busy
+  trap 'rm -f /var/run/kldload/installer-busy' EXIT INT TERM HUP
+
   mkdir -p "${KLDLOAD_LOG_DIR}"
   for _l in kldload-installer storage zfs security network bootstrap bootloader; do
     : > "${KLDLOAD_LOG_DIR}/${_l}.log"
@@ -1460,7 +1533,49 @@ main() {
 
   [[ "${mode}" == "config" ]] && k_answers_load_env_file "${cfg}" || guided_prompt
 
-  k_save_effective_config
+  # ── Hostname validation + normalization ──────────────────────────────────
+  # Previously users hit unbootable installs when they set a hostname with
+  # mixed case, underscores, or trailing dashes — ZFS dataset name validators
+  # and systemd-hostname validators disagree. Normalize to lowercase, strip
+  # invalid chars, enforce length+start-char rules, and fail loudly if the
+  # input can't be sanitized into something legal. Then force-export to
+  # every env consumer so no subshell can fall through to a default.
+  : "${KLDLOAD_HOSTNAME:=kldload}"
+  _kh_in="${KLDLOAD_HOSTNAME}"
+  # Lowercase + replace underscore/space with hyphen + strip anything
+  # that's not [a-z0-9-], then strip leading/trailing hyphens.
+  _kh="$(printf '%s' "${_kh_in}" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--' | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//')"
+  if [[ -z "${_kh}" ]] || (( ${#_kh} > 63 )) || [[ "${_kh}" =~ ^[0-9]+$ ]]; then
+    k_die "invalid hostname '${_kh_in}' — must be 1-63 chars of [a-z0-9-], start with a letter, not all-numeric"
+  fi
+  KLDLOAD_HOSTNAME="${_kh}"
+  export KLDLOAD_HOSTNAME
+  if [[ "${_kh_in}" != "${_kh}" ]]; then
+    k_log "Hostname normalized: '${_kh_in}' → '${_kh}'"
+  fi
+  k_log "Hostname: ${KLDLOAD_HOSTNAME} (export propagated to all subshells)"
+  k_log "ZFS BE will be: rpool/ROOT/${KLDLOAD_HOSTNAME}"
+
+  # ── Timezone validation + force-export ───────────────────────────────────
+  # Same drift pattern as hostname — pre-XPS-v3.4 installs reported clock
+  # stuck on UTC despite user picking America/Vancouver in the UI. The zone
+  # file must exist on the *live ISO* at install time (we ln -sf into the
+  # target path). If the user picks an invalid zone, fall back to UTC with
+  # a loud log instead of silently breaking /etc/localtime.
+  : "${KLDLOAD_TIMEZONE:=UTC}"
+  if [[ ! -f "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE}" ]]; then
+    k_log "WARNING: Timezone '${KLDLOAD_TIMEZONE}' not in /usr/share/zoneinfo — falling back to UTC"
+    KLDLOAD_TIMEZONE="UTC"
+  fi
+  export KLDLOAD_TIMEZONE
+  k_log "Timezone: ${KLDLOAD_TIMEZONE} (zoneinfo file verified)"
+
+  # k_save_effective_config writes an advisory log file; a failure here is
+  # not a reason to abort the whole install. Earlier pass-29 installs hit
+  # a bash process-substitution race inside this function that killed the
+  # entire run before the preflight even started. Wrapping in || true so
+  # any transient logging-side failure degrades to a warning, not a fatal.
+  k_save_effective_config || k_log "WARNING: k_save_effective_config failed — continuing install without effective-config.env"
   k_preflight
 
   # ── Installation progress ─────────────────────────────────────────────────
@@ -1707,12 +1822,14 @@ main() {
   # Target mount point — needed for MOK enrollment, log copy, and smoke test
   local target="${KLDLOAD_TARGET_MNT:-/target}"
 
-  # ── MOK enrollment for Secure Boot (hardware profiles only) ──────────────
+  # ── MOK enrollment for Secure Boot (opt-in only) ─────────────────────────
   # Run mokutil from the LIVE environment (not chroot) — the live ISO has
   # mokutil and access to EFI vars. The target's mokutil may not be installed
   # yet but that doesn't matter — MOK enrollment is an EFI firmware operation
-  # that persists in NVRAM, not on disk.
-  if _is_hw_profile && [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
+  # that persists in NVRAM, not on disk. Gated on KLDLOAD_ENABLE_SECURE_BOOT
+  # AND the presence of mok.der (belt + suspenders: if SB wasn't opted in,
+  # MOK generation was skipped above, so mok.der won't exist anyway).
+  if _secure_boot_enabled && [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
     if [[ -d /sys/firmware/efi/efivars ]] && command -v mokutil >/dev/null 2>&1; then
       # Use a fixed password "kldload" — consistent, memorable, documented.
       # Random passwords caused confusion and required out-of-band password

@@ -1079,6 +1079,128 @@ NETCFG
   pause
 }
 
+# ── 3b: Remove Worker Nodes (inverse of add_nodes) ────────────
+# Drains + deletes from the cluster, then destroys the VM + zvol.
+# Arg: count of workers to remove (default 1). Always picks the
+# HIGHEST-NUMBERED workers first so we don't accidentally nuke
+# kldload-w-1 while leaving orphans like kldload-w-7. The control
+# plane is never touched. Safe to re-run — idempotent on orphans.
+demo_remove_nodes() {
+  header
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  Live Scale-In — drain + remove workers${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo ""
+
+  # Two invocation forms:
+  #   kube-demo remove_nodes            → remove 1 (highest-numbered)
+  #   kube-demo remove_nodes 3          → remove the 3 highest-numbered
+  #   kube-demo remove_nodes kldload-w-5 kldload-w-7  → remove by name
+  # The webui's Delete-button handler uses the by-name form so the user
+  # can nuke specific selected rows; the count form is for the CLI
+  # "shrink by N" case where you don't care which ones go.
+  local victims=""
+  if [[ $# -eq 0 ]]; then
+    local count="${KUBE_DEMO_COUNT:-1}"
+    victims=""  # will pick highest-numbered below
+  elif [[ $# -eq 1 && "$1" =~ ^[0-9]+$ ]]; then
+    local count="$1"
+  else
+    # Args are node names — use them directly.
+    local n
+    for n in "$@"; do
+      [[ "$n" == "remove_nodes" ]] && continue
+      victims+="$n"$'\n'
+    done
+    victims="$(echo "$victims" | awk 'NF' | sort -u)"
+  fi
+
+  if [[ -z "$victims" ]]; then
+    # Count-based path: build worker list from cluster + hypervisor.
+    local cluster_workers hv_workers all_workers
+    cluster_workers="$(_kctl get nodes --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null \
+                         | grep '^kldload-w-' | sort -t- -k3 -n)"
+    hv_workers="$(virsh list --all --name 2>/dev/null \
+                    | grep '^kldload-w-' | sort -t- -k3 -n)"
+    all_workers="$(printf '%s\n%s\n' "$cluster_workers" "$hv_workers" \
+                     | awk 'NF' | sort -u -t- -k3 -n)"
+    if [[ -z "$all_workers" ]]; then
+      echo -e "${Y}  No workers to remove.${N}"
+      return 0
+    fi
+    victims="$(echo "$all_workers" | tail -n "$count")"
+    local vic_count
+    vic_count=$(echo "$victims" | wc -l)
+    if [[ "$vic_count" -lt "$count" ]]; then
+      echo -e "${Y}  Only ${vic_count} workers exist — removing all of them.${N}"
+    fi
+  fi
+
+  echo -e "${W}  Will remove:${N}"
+  echo "$victims" | sed 's/^/    /'
+  echo ""
+  if [[ "${KUBE_DEMO_PAUSE:-1}" == "1" ]]; then
+    read -r -p "  Proceed? [y/N] " _ans
+    case "${_ans,,}" in y|yes) ;; *) echo "  Aborted."; return 0 ;; esac
+  fi
+
+  local node
+  while IFS= read -r node; do
+    [[ -z "$node" ]] && continue
+    echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+    echo -e "${W}  Removing ${node}${N}"
+    echo -e "${C}──────────────────────────────────────────────────────────────${N}"
+
+    # 1. Cordon + drain (best-effort — skip if node no longer in cluster).
+    if _kctl get node "$node" >/dev/null 2>&1; then
+      echo -e "  ${D}cordon + drain...${N}"
+      _kctl cordon "$node" >/dev/null 2>&1 || true
+      _kctl drain "$node" --ignore-daemonsets --delete-emptydir-data \
+              --force --timeout=60s 2>&1 | grep -v '^WARNING\|evicting\|error' | tail -3 || true
+      _kctl delete node "$node" >/dev/null 2>&1 || true
+      echo -e "  ${G}✓ removed from cluster${N}"
+    else
+      echo -e "  ${D}(not in cluster — VM-only cleanup)${N}"
+    fi
+
+    # 2. Destroy the VM (if running) and undefine (UEFI nvram too).
+    if virsh dominfo "$node" >/dev/null 2>&1; then
+      virsh destroy  "$node" >/dev/null 2>&1 || true
+      virsh undefine "$node" --nvram --remove-all-storage >/dev/null 2>&1 \
+        || virsh undefine "$node" --nvram >/dev/null 2>&1 \
+        || virsh undefine "$node" >/dev/null 2>&1 || true
+      echo -e "  ${G}✓ VM destroyed${N}"
+    fi
+
+    # 3. Destroy the zvol (and any snapshots/clones under it).
+    if zfs list "rpool/vms/${node}" >/dev/null 2>&1; then
+      zfs destroy -r "rpool/vms/${node}" 2>/dev/null \
+        && echo -e "  ${G}✓ zvol destroyed${N}" \
+        || echo -e "  ${Y}✗ zvol destroy failed (holds?)${N}"
+    fi
+
+    # 4. cloud-init ISO leftover.
+    rm -f "/var/lib/libvirt/isos/${node}-ci.iso" 2>/dev/null || true
+
+    # 5. state.db row, if tooling is available.
+    if command -v kldload-db >/dev/null 2>&1; then
+      kldload-db node-remove --hostname "$node" >/dev/null 2>&1 || true
+    fi
+
+    # 6. Clear local /etc/hosts line if one was added.
+    sed -i "/\\s${node}\$/d" /etc/hosts 2>/dev/null || true
+
+    echo ""
+  done <<< "$victims"
+
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  Scale-in complete${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo ""
+  _kctl get nodes -o wide 2>/dev/null | head -20
+  pause
+}
+
 # ── 4: Cilium Status ──────────────────────────────────────────
 demo_cilium() {
   header
@@ -3005,7 +3127,7 @@ demo_destroy_all() {
 # "Press Enter" prompts when there's no interactive user.
 _DEMO_NAMES=(
   platform zfs_live vm_lifecycle
-  overview zfs_clones add_nodes cilium connectivity hubble coredns
+  overview zfs_clones add_nodes remove_nodes cilium connectivity hubble coredns
   netpol metallb gateway zfs_pvc snapshot_restore db_pvc nginx
   pod_dns scale rolling_update self_heal drain node_rollback
   replace_nodes ebpf_deep_dive zero_sidecar datapath_trace smoke
@@ -3016,10 +3138,21 @@ if [[ "${1:-}" == "--list" ]]; then
   exit 0
 fi
 _DEMO_TARGET=""
+_DEMO_ARGS=()
+# First non-flag arg is the target; remaining non-flag args get forwarded
+# to the demo function. Enables `kube-demo remove_nodes 3` (count=3) and
+# similar multi-arg subcommands without clobbering existing single-arg
+# flows.
 for _arg in "$@"; do
   case "$_arg" in
     --*|-*) ;;
-    *) _DEMO_TARGET="$_arg"; break ;;
+    *)
+      if [[ -z "$_DEMO_TARGET" ]]; then
+        _DEMO_TARGET="$_arg"
+      else
+        _DEMO_ARGS+=("$_arg")
+      fi
+      ;;
   esac
 done
 if [[ -n "$_DEMO_TARGET" ]]; then
@@ -3027,7 +3160,7 @@ if [[ -n "$_DEMO_TARGET" ]]; then
   _find_cp || { echo -e "${R}No Kubernetes control plane found.${N}"; exit 1; }
   _fn="demo_${_DEMO_TARGET}"
   if declare -F "$_fn" >/dev/null 2>&1; then
-    "$_fn"
+    "$_fn" "${_DEMO_ARGS[@]}"
     exit $?
   else
     echo -e "${R}Unknown demo: $_DEMO_TARGET${N}"

@@ -190,13 +190,23 @@ k_write_manifest() {
   mkdir -p "${target}/etc/kldload"
 
   cat > "${target}/etc/kldload/install-manifest.env" <<EOM
+# KLDLOAD_INSTALLED=1 is the canonical "this box came out of the installer,
+# it is not the live ISO" flag. kldload-webui's is_live_mode() reads this —
+# without it the webui keeps serving the INSTALLER UI on every boot, which
+# makes installed machines look identical to the pre-install screen (no
+# dashboard, no VMs/K8s/klab tabs, etc.). Must be set by every code path
+# that finalises an install.
+KLDLOAD_INSTALLED=1
 KLDLOAD_PROFILE=${KLDLOAD_PROFILE:-server}
 KLDLOAD_STORAGE_MODE=${KLDLOAD_STORAGE_MODE:-standard}
 KLDLOAD_ENABLE_ZFS=${KLDLOAD_ENABLE_ZFS:-0}
 KLDLOAD_ENABLE_EBPF=${KLDLOAD_ENABLE_EBPF:-0}
 KLDLOAD_SECURE_BOOT=${KLDLOAD_SECURE_BOOT:-0}
+KLDLOAD_ENABLE_SECURE_BOOT=${KLDLOAD_ENABLE_SECURE_BOOT:-0}
 KLDLOAD_TPM_PRESENT=${KLDLOAD_TPM_PRESENT:-0}
 KLDLOAD_ENABLE_AI=${KLDLOAD_ENABLE_AI:-0}
+KLDLOAD_BOB_MODEL=${KLDLOAD_BOB_MODEL:-recommended}
+KLDLOAD_BOB_DARKSITE=${KLDLOAD_BOB_DARKSITE:-0}
 KLDLOAD_ENABLE_KVM=${KLDLOAD_ENABLE_KVM:-0}
 KLDLOAD_ENABLE_K8S=${KLDLOAD_ENABLE_K8S:-0}
 KLDLOAD_K8S_BOOTSTRAP=${KLDLOAD_K8S_BOOTSTRAP:-0}
@@ -214,19 +224,62 @@ k_generate_mok_keys() {
   local target="${KLDLOAD_TARGET:?}"
   local mok_dir="${target}/var/lib/dkms"
 
-  k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Generating MOK key pair for DKMS module signing"
-
   mkdir -p "${mok_dir}"
 
-  # RSA-2048 key + self-signed cert — 10-year validity, no passphrase
-  openssl req -new -x509 -newkey rsa:2048 \
-    -keyout "${mok_dir}/mok.key" \
-    -out    "${mok_dir}/mok.pub" \
-    -days 3650 -nodes \
-    -subj "/CN=kldload Secure Boot MOK $(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d%H%M%S)-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')/" \
-    >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
+  # ─── Bring Your Own Key (BYOK) — honour caller-supplied key paths ───────
+  #
+  # Most users who actually want Secure Boot already have their own MOK
+  # (org-issued cert, existing linux-tools keyring, HSM-backed key, …).
+  # A throwaway per-install self-signed cert is only useful when the user
+  # has no existing PKI story — and in that case they usually don't
+  # need SB in the first place.
+  #
+  # Supported BYOK paths, in order of precedence:
+  #
+  #   1. Caller sets KLDLOAD_MOK_KEY_FILE + KLDLOAD_MOK_CERT_FILE before
+  #      running the installer. Both files must be readable on the live
+  #      environment; we copy them into the target. PEM private key +
+  #      PEM X.509 cert — standard `openssl req -x509 -newkey` output.
+  #
+  #   2. Caller pre-populates /var/lib/dkms/mok.{key,pub} INSIDE THE
+  #      TARGET before this function runs (e.g. via an answers-file hook
+  #      that does a curl or scp). Useful when the key only exists on a
+  #      pre-provisioned image that writes it during first-boot staging.
+  #
+  #   3. Nothing supplied → we generate a throwaway RSA-2048 self-signed
+  #      cert with a timestamped+random CN so multiple installs don't
+  #      accidentally share a subject. See warning in release notes.
+  #
+  # In all three cases we also generate the DER form (required by
+  # `mokutil --import` for MokManager enrollment) and write the DKMS
+  # sign_helper + framework config so kernel module signing just works.
+  #
+  # If you're writing deployment automation, path (1) is the right
+  # answer — keeps your signing key out of every install log and lets
+  # you enroll ONE cert on every box in the fleet instead of N certs.
 
-  # DER format required by mokutil --import
+  if [[ -n "${KLDLOAD_MOK_KEY_FILE:-}" && -n "${KLDLOAD_MOK_CERT_FILE:-}" \
+        && -r "${KLDLOAD_MOK_KEY_FILE}" && -r "${KLDLOAD_MOK_CERT_FILE}" ]]; then
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Using caller-supplied MOK keypair:"
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "  key:  ${KLDLOAD_MOK_KEY_FILE}"
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "  cert: ${KLDLOAD_MOK_CERT_FILE}"
+    cp "${KLDLOAD_MOK_KEY_FILE}"  "${mok_dir}/mok.key"
+    cp "${KLDLOAD_MOK_CERT_FILE}" "${mok_dir}/mok.pub"
+  elif [[ -f "${mok_dir}/mok.key" && -f "${mok_dir}/mok.pub" ]]; then
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Using pre-staged MOK keypair in ${mok_dir} (caller put it there before install)"
+  else
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Generating per-install MOK key pair (no BYOK key supplied)"
+    # RSA-2048 self-signed, 10-year validity, no passphrase, unique CN
+    openssl req -new -x509 -newkey rsa:2048 \
+      -keyout "${mok_dir}/mok.key" \
+      -out    "${mok_dir}/mok.pub" \
+      -days 3650 -nodes \
+      -subj "/CN=kldload Secure Boot MOK $(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d%H%M%S)-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')/" \
+      >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
+  fi
+
+  # Always (re)generate the DER form from whichever .pub we ended up with —
+  # mokutil --import only accepts DER, not PEM.
   openssl x509 \
     -in "${mok_dir}/mok.pub" \
     -out "${mok_dir}/mok.der" \
@@ -277,11 +330,15 @@ k_install_target_packages() {
 
   # Generate MOK keys BEFORE package installation so DKMS signs ZFS modules
   # during build rather than requiring retroactive signing afterward.
-  # Only hardware profiles (kvm/k8s/devops/ai) need Secure Boot + MOK.
-  case "${KLDLOAD_PROFILE:-server}" in
-    kvm|k8s|devops|ai) k_generate_mok_keys ;;
-    *) k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Skipping MOK keys (${KLDLOAD_PROFILE:-server} profile)" ;;
-  esac
+  # Secure Boot is OPT-IN as of 1.0.5 — default off, set
+  # KLDLOAD_ENABLE_SECURE_BOOT=1 at install time to enable the full
+  # MOK + signed-ZBM + shim pipeline. See the big comment on
+  # _secure_boot_enabled() in kldload-install-target for rationale.
+  if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]]; then
+    k_generate_mok_keys
+  else
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Skipping MOK keys (Secure Boot disabled; set KLDLOAD_ENABLE_SECURE_BOOT=1 to enable)"
+  fi
 
   local distro="${KLDLOAD_DISTRO:-debian}"
 
@@ -443,7 +500,7 @@ _k_bootstrap_dnf() {
 
   # Fedora uses its own release version (41), not the EL release (9)
   if [[ "${distro}" == "fedora" ]]; then
-    release="${KLDLOAD_FEDORA_RELEASE:-41}"
+    release="${KLDLOAD_FEDORA_RELEASE:-43}"
   fi
 
   k_log_to "$log" "Bootstrapping ${distro} ${release} → ${target}"
@@ -672,7 +729,7 @@ CTMP
       fi
       ;;
     fedora)
-      local fedora_release="${KLDLOAD_FEDORA_RELEASE:-41}"
+      local fedora_release="${KLDLOAD_FEDORA_RELEASE:-43}"
       cat > "${target}/etc/yum.repos.d/fedora.repo" <<FEDORAREPO
 [fedora]
 name=Fedora ${fedora_release} - \$basearch
@@ -723,17 +780,13 @@ skip_if_unavailable=1
 EPELREPO
   fi
 
-  # ZFS repo — Fedora uses /fedora/$releasever, EL uses /epel/$releasever
-  if [[ "${distro}" == "fedora" ]]; then
-    local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-41}"
-    cat > "${target}/etc/yum.repos.d/zfs.repo" <<ZFSREPO
-[zfs]
-name=ZFS on Linux for Fedora ${_fedora_rel}
-baseurl=http://download.zfsonlinux.org/fedora/${_fedora_rel}/\$basearch/
-enabled=1
-gpgcheck=0
-ZFSREPO
-  else
+  # ZFS repo — EL writes a static zfs.repo; Fedora defers to the
+  # zfs-release RPM installed below (it ships its own repo config
+  # with the matching gpg key + URL for that Fedora version).
+  # Prior behaviour hardcoded /fedora/41/ which shipped ZFS 2.2.7 —
+  # a version that doesn't compile against Fedora 43's 6.19 kernel,
+  # causing silent DKMS failure and unbootable ZFS-root installs.
+  if [[ "${distro}" != "fedora" ]]; then
     cat > "${target}/etc/yum.repos.d/zfs.repo" <<ZFSREPO
 [zfs]
 name=ZFS on Linux for EL${release}
@@ -742,6 +795,8 @@ enabled=1
 gpgcheck=0
 ZFSREPO
   fi
+  # NB: for Fedora, zfs-release is installed inside the chroot
+  # after package base setup — see k_install_zfs_release_fedora() below.
 
   # Mount chroot filesystems BEFORE dnf so postinst scripts (grub, dracut) work
   mkdir -p "${target}/proc" "${target}/sys" "${target}/dev" "${target}/dev/pts" "${target}/run"
@@ -813,7 +868,29 @@ CUSTOMREPO
     systemd systemd-udev dbus-common
     kernel kernel-core kernel-modules kernel-devel
     dracut grub2-efi-x64 grub2-tools shim-x64 efibootmgr mokutil
-    NetworkManager openssh-server openssh-clients sudo
+    # NetworkManager needs its wifi plugin AND wpa_supplicant to see
+    # any wifi device — without wifi plugin, nmcli reports "no wifi
+    # device found" even when the hardware + driver are fine. Also
+    # install NetworkManager-tui so nmtui works at the console for
+    # post-install wifi config.
+    NetworkManager NetworkManager-wifi NetworkManager-tui wpa_supplicant
+    # ── Firmware BLOBS (Fedora 43 split `linux-firmware` into many
+    #    sub-packages — the bare `linux-firmware` rpm now carries only
+    #    licenses, NOT the .ucode files). Without the explicit iwlwifi
+    #    sub-packages, Intel wifi cards (AX201 / AX1650s / Killer 6E /
+    #    BE200 …) fail `iwlwifi-QuZ-a0-hr-b0-77 is required` at boot
+    #    and nmcli reports "no wifi device". MUST ship all three
+    #    (dvm=old, mvm=current, mld=newest) to cover every chip.
+    linux-firmware linux-firmware-whence
+    iwlwifi-dvm-firmware iwlwifi-mvm-firmware iwlwifi-mld-firmware
+    iwlegacy-firmware
+    # Realtek / Atheros coverage (other common laptop/AP chips)
+    realtek-firmware atheros-firmware libertas-firmware
+    # Intel GPU firmware (i915 DMC blobs) — without this, modern Intel
+    # integrated GPUs complain `Direct firmware load for i915/*_dmc*
+    # failed` and fall back to unaccelerated framebuffer.
+    amd-gpu-firmware nvidia-gpu-firmware
+    openssh-server openssh-clients sudo
     vim-enhanced tmux curl wget rsync jq less
     iproute iputils net-tools nftables chrony
     passwd shadow-utils util-linux procps-ng findutils grep sed gawk
@@ -824,7 +901,29 @@ CUSTOMREPO
     # Tools needed for kldloadOS (non-core profiles)
     # NOTE: sanoid is NOT in any RPM repo — installed from GitHub by k_install_system_files
     wireguard-tools ethtool htop pv lzop mbuffer eject
-    qemu-guest-agent qemu-img open-vm-tools zstd
+    qemu-guest-agent qemu-img open-vm-tools spice-vdagent zstd
+    # ── Universal storage + disk diagnostics (every profile benefits)
+    #    nvme-cli: NVMe SMART + identify + format (90% of modern boxes)
+    #    smartmontools: SATA SMART + scheduled self-tests
+    #    hyperv-daemons: Hyper-V guest integration if running as VM
+    nvme-cli smartmontools
+    # ── Font bundle (all profiles) — stock distro ships basically nothing.
+    #    This set covers: doc compat (Liberation = Arial/Times/Courier metrics),
+    #    UI (Noto + Inter + Roboto), programming ligatures (Cascadia, Fira,
+    #    JetBrains, Source Code Pro), design (Source Sans/Serif, Open Sans),
+    #    emoji (color), CJK (Noto CJK for international users), math
+    #    (STIX Two). Adds ~350MB but transforms the "it looks like a Linux
+    #    install" first-boot feel into a modern type experience.
+    liberation-fonts liberation-mono-fonts liberation-serif-fonts
+    dejavu-sans-fonts dejavu-serif-fonts dejavu-sans-mono-fonts
+    google-noto-sans-fonts google-noto-serif-fonts
+    google-noto-sans-mono-fonts google-noto-emoji-color-fonts
+    google-noto-sans-cjk-fonts google-noto-serif-cjk-fonts
+    cascadia-code-fonts jetbrains-mono-fonts fira-code-fonts
+    adobe-source-sans-pro-fonts adobe-source-serif-pro-fonts
+    adobe-source-code-pro-fonts
+    rsms-inter-fonts google-roboto-fonts open-sans-fonts
+    stix-fonts
     # Modern CLI tools + cloud + container runtime for Open WebUI
     fzf btop fd-find ripgrep zoxide fastfetch cloud-init podman
     # Sanoid Perl deps (sanoid binary copied by k_install_system_files)
@@ -843,6 +942,61 @@ CUSTOMREPO
         adwaita-icon-theme google-noto-sans-fonts firefox
         mesa-dri-drivers pipewire wireplumber
         podman
+        # ── Laptop hardware essentials — critical for XPS / ThinkPad /
+        #    any modern Intel laptop. Without these: no sound (Intel SOF
+        #    DSP), broken touchpad, hot+loud fans, dead Bluetooth, can't
+        #    read exFAT USB sticks or NTFS disks, stale CPU microcode.
+        microcode_ctl
+        alsa-sof-firmware alsa-ucm
+        xorg-x11-drv-libinput
+        bluez bluez-tools
+        exfatprogs ntfs-3g cifs-utils fuse3 fuse-common
+        thermald tlp tlp-rdw
+        tpm2-tools
+        # ── GPU / Vulkan / hardware video decode — without these, modern
+        #    Firefox/Chrome/Steam/Teams pin the CPU on any HW-accelerated
+        #    video, Vulkan-only apps crash at startup, YouTube 4K chugs.
+        mesa-vulkan-drivers mesa-va-drivers
+        vulkan-loader vulkan-tools
+        intel-media-driver
+        libva libva-utils
+        # ── Audio + codec coverage (free/open stack)
+        pipewire-pulseaudio pipewire-alsa pipewire-codec-aptx
+        pipewire-gstreamer pipewire-libcamera
+        gstreamer1-plugins-good gstreamer1-plugins-bad-free
+        gstreamer1-plugins-base gstreamer1-libav
+        gstreamer1-plugin-openh264 mozilla-openh264
+        # ── Desktop portal — mandatory for Wayland screen-sharing in
+        #    Zoom, Teams (web), Discord, Firefox getDisplayMedia, OBS.
+        #    Without these, any "Share Screen" button shows a black
+        #    rectangle or errors out. pipewire-gstreamer encodes the
+        #    captured frames via H.264 for the WebRTC consumer.
+        xdg-desktop-portal xdg-desktop-portal-gnome
+        xdg-desktop-portal-gtk
+        # Webcam: modern Intel laptops (IPU6) use libcamera; v4l-utils
+        # covers legacy UVC webcams. Both together = every webcam works.
+        libcamera libcamera-tools v4l-utils
+        # ── Print + scan — cups-filters fixes ~40% of printers that
+        #    otherwise silently fail on PostScript conversion. hplip
+        #    covers HP-specific protocols; sane + simple-scan for
+        #    all-in-one device scanner heads.
+        cups cups-filters cups-pk-helper system-config-printer
+        hplip sane-backends simple-scan
+        # ── Network: VPN plugins + cellular modems. Laptops bought
+        #    in the last 10 years commonly have WWAN slots; corp
+        #    deployments almost always need openvpn/openconnect.
+        ModemManager NetworkManager-wwan NetworkManager-ppp
+        NetworkManager-openvpn NetworkManager-openvpn-gnome
+        NetworkManager-openconnect NetworkManager-openconnect-gnome
+        # ── Auth: smartcards / yubikey / FIDO2
+        pcsc-lite opensc libfido2 libfido2-devel
+        # ── Input extras: Wacom + displays
+        libwacom xorg-x11-drv-wacom ddcutil
+        # ── Firmware-update daemon (fwupd) — handles BIOS/EC updates
+        #    via LVFS. Dell + Lenovo + System76 all publish here.
+        fwupd
+        # ── Power / backlight helpers
+        powertop brightnessctl
       )
       ;;
     server)
@@ -864,7 +1018,11 @@ CUSTOMREPO
         systemd systemd-udev dbus-common
         kernel kernel-core kernel-modules kernel-devel
         dracut grub2-efi-x64 grub2-tools shim-x64 efibootmgr mokutil
-        NetworkManager openssh-server openssh-clients sudo
+        NetworkManager NetworkManager-wifi NetworkManager-tui wpa_supplicant
+        linux-firmware linux-firmware-whence
+        iwlwifi-dvm-firmware iwlwifi-mvm-firmware iwlwifi-mld-firmware
+        iwlegacy-firmware realtek-firmware atheros-firmware
+        openssh-server openssh-clients sudo
         vim-enhanced curl less iproute iputils nftables chrony wireguard-tools
         passwd shadow-utils util-linux procps-ng findutils grep sed gawk
         parted gdisk dosfstools
@@ -901,11 +1059,39 @@ CUSTOMREPO
   done
 
   # Generate MOK keys BEFORE package installation so DKMS signs ZFS modules
-  # during build. Only hardware profiles need Secure Boot + MOK.
-  case "${KLDLOAD_PROFILE:-server}" in
-    kvm|k8s|devops|ai) k_generate_mok_keys ;;
-    *) k_log_to "$log" "Skipping MOK keys (${KLDLOAD_PROFILE:-server} profile)" ;;
-  esac
+  # during build. Secure Boot is OPT-IN as of 1.0.5 — default off; set
+  # KLDLOAD_ENABLE_SECURE_BOOT=1 at install time to enable.
+  if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]]; then
+    k_generate_mok_keys
+  else
+    k_log_to "$log" "Skipping MOK keys (Secure Boot disabled; set KLDLOAD_ENABLE_SECURE_BOOT=1 to enable)"
+  fi
+
+  # For Fedora: install the zfs-release RPM BEFORE the main transaction
+  # so the zfs-dkms pull resolves against the correct per-release repo
+  # (F43 needs OpenZFS 2.3.x for kernel 6.19). Previously we hardcoded
+  # /fedora/41/ in a static zfs.repo — that shipped ZFS 2.2.7 which
+  # does not compile against 6.19, producing silent DKMS failure and
+  # unbootable ZFS-root Fedora installs. Pattern mirrors klab's proven
+  # loop: try known revisions newest-first until one resolves.
+  if [[ "${distro}" == "fedora" ]]; then
+    local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-43}"
+    local _zfsrel_ok=0
+    for _rev in 3-0 2-10 2-9 2-8 2-7; do
+      if dnf --installroot="${target}" --releasever="${_fedora_rel}" \
+           --setopt=cachedir="${target}/var/cache/dnf" \
+           --disableplugin=subscription-manager --disableplugin=product-id \
+           --nogpgcheck --skip-broken -y install \
+           "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_fedora_rel}.noarch.rpm" \
+           >> "$log" 2>&1; then
+        _zfsrel_ok=1
+        k_log_to "$log" "Fedora ZFS repo enabled via zfs-release-${_rev}.fc${_fedora_rel}"
+        break
+      fi
+    done
+    [[ "$_zfsrel_ok" == "1" ]] || \
+      k_log_to "$log" "WARNING: could not install zfs-release for fc${_fedora_rel} — ZFS will likely fail to install"
+  fi
 
   k_log_to "$log" "Running dnf --installroot (${#_dnf_pkgs[@]} packages, profile=${_profile})..."
   dnf --installroot="${target}" --releasever="${release}" \
@@ -943,7 +1129,15 @@ CUSTOMREPO
 
   # Rebuild initramfs with ZFS support so the installed system can boot from ZFS root
   k_log_to "$log" "Rebuilding initramfs with ZFS module for ${kver}..."
-  chroot "${target}" dracut --force --add "zfs" --kver "$kver" 2>>"$log" || \
+  # --no-hostonly: ship every block/net driver, not just ones visible in
+  # the live ISO. Without this, dracut's default hostonly mode omits
+  # drivers the ACTUAL target hardware needs (Dell XPS 13's Intel VMD
+  # NVMe controller, Killer wifi, newer Thunderbolt), producing an
+  # initramfs that hangs instantly after kexec on "silent-freeze"
+  # hardware. ~20MB initramfs bloat; worth it for universal bootability.
+  # --add "zfs" is still required — dracut-zfs isn't auto-detected in
+  # no-hostonly mode because there's no host pool to probe.
+  chroot "${target}" dracut --force --no-hostonly --add "zfs" --kver "$kver" 2>>"$log" || \
     k_log_to "$log" "WARNING: dracut rebuild failed"
 
   # Chroot mounts stay up for the rest of the install
@@ -952,7 +1146,7 @@ CUSTOMREPO
   echo "LANG=${KLDLOAD_LOCALE:-en_US.UTF-8}" > "${target}/etc/locale.conf"
   echo "KEYMAP=${KLDLOAD_KEYBOARD_LAYOUT:-us}" > "${target}/etc/vconsole.conf"
   ln -sf "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE:-UTC}" "${target}/etc/localtime" 2>/dev/null || true
-  echo "${KLDLOAD_HOSTNAME:-kldload-node}" > "${target}/etc/hostname"
+  echo "${KLDLOAD_HOSTNAME:-kldload}" > "${target}/etc/hostname"
 
   k_create_users
   k_install_system_files
@@ -1566,10 +1760,10 @@ MIRRORS
 
   ln -sf "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE:-UTC}" "${target}/etc/localtime" 2>/dev/null || true
 
-  echo "${KLDLOAD_HOSTNAME:-kldload-node}" > "${target}/etc/hostname"
+  echo "${KLDLOAD_HOSTNAME:-kldload}" > "${target}/etc/hostname"
   cat > "${target}/etc/hosts" <<EOH
 127.0.0.1 localhost
-127.0.1.1 ${KLDLOAD_HOSTNAME:-kldload-node}
+127.0.1.1 ${KLDLOAD_HOSTNAME:-kldload}
 ::1 localhost ip6-localhost ip6-loopback
 EOH
 
@@ -1933,10 +2127,10 @@ CRONEOF
   ln -sf "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE:-UTC}" "${target}/etc/localtime" 2>/dev/null || true
   echo "${KLDLOAD_TIMEZONE:-UTC}" > "${target}/etc/timezone"
 
-  echo "${KLDLOAD_HOSTNAME:-kldload-node}" > "${target}/etc/hostname"
+  echo "${KLDLOAD_HOSTNAME:-kldload}" > "${target}/etc/hostname"
   cat > "${target}/etc/hosts" <<EOH
 127.0.0.1 localhost
-127.0.1.1 ${KLDLOAD_HOSTNAME:-kldload-node}
+127.0.1.1 ${KLDLOAD_HOSTNAME:-kldload}
 ::1 localhost ip6-localhost ip6-loopback
 EOH
 
@@ -2037,7 +2231,7 @@ _k_bootstrap_freebsd() {
 
   # Configure rc.conf
   cat > "${target}/etc/rc.conf" <<RCCONF
-hostname="${KLDLOAD_HOSTNAME:-kldload-node}"
+hostname="${KLDLOAD_HOSTNAME:-kldload}"
 ifconfig_DEFAULT="DHCP"
 sshd_enable="YES"
 zfs_enable="YES"
@@ -2046,7 +2240,7 @@ RCCONF
 
   # Enable ZFS boot
   echo 'zfs_load="YES"' > "${target}/boot/loader.conf"
-  echo "vfs.root.mountfrom=\"zfs:rpool/ROOT/${KLDLOAD_HOSTNAME:-kldload-node}\"" >> "${target}/boot/loader.conf"
+  echo "vfs.root.mountfrom=\"zfs:rpool/ROOT/${KLDLOAD_HOSTNAME:-kldload}\"" >> "${target}/boot/loader.conf"
 
   # DNS
   cp /etc/resolv.conf "${target}/etc/resolv.conf" 2>/dev/null || true
@@ -2121,7 +2315,7 @@ _k_bootstrap_openbsd() {
   local staging="/tmp/openbsd-stage"
   local user="${KLDLOAD_USERNAME:-admin}"
   local pass="${KLDLOAD_PASSWORD:-admin}"
-  local hostname="${KLDLOAD_HOSTNAME:-kldload-node}"
+  local hostname="${KLDLOAD_HOSTNAME:-kldload}"
 
   k_log_to "$log" "OpenBSD ${openbsd_ver} chain-boot install starting..."
   k_log_to "$log" "Strategy: stage bsd.rd + autoinstall on EFI, installer pulls sets from cdn.openbsd.org"

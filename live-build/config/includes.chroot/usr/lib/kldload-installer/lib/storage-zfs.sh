@@ -59,6 +59,78 @@ k_zfs_cleanup_old() {
   umount -R "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
   umount -R "${KLDLOAD_TARGET_MNT}" 2>/dev/null || true
 
+  # ── Defensive: release anything holding the target disk ───────────────────
+  # Most real-world installs aren't replacing a prior kldload — the target
+  # disk has Windows, stock Linux, LVM, mdraid, or auto-mounted partitions
+  # that will refuse to wipe until deactivated. Do everything with `|| true`
+  # so a box with none of these still breezes through.
+  local _disk_basename="${KLDLOAD_DISK##*/}"
+
+  # 1. Unmount every filesystem currently mounted from this disk (auto-mount
+  #    daemons, leftover /mnt entries, etc.). Iterate child partitions too.
+  lsblk -ln -o NAME,MOUNTPOINT "${KLDLOAD_DISK}" 2>/dev/null | \
+    awk 'NF==2 && $2!="[SWAP]" {print $2}' | \
+    while read -r _mp; do
+      [[ -n "${_mp}" ]] && umount -R "${_mp}" 2>/dev/null || true
+    done
+
+  # 2. Deactivate any LVM volume groups that include a PV on this disk.
+  if command -v pvs >/dev/null 2>&1; then
+    pvs --noheadings -o pv_name,vg_name 2>/dev/null | \
+      awk -v d="${_disk_basename}" '$1 ~ d {print $2}' | sort -u | \
+      while read -r _vg; do
+        [[ -n "${_vg}" ]] && { vgchange -a n "${_vg}" 2>/dev/null || true; k_zfs_log "  Deactivated LVM VG: ${_vg}"; }
+      done
+  fi
+
+  # 3. Stop any mdraid arrays that include this disk as a member.
+  if [[ -e /proc/mdstat ]] && command -v mdadm >/dev/null 2>&1; then
+    awk '/^md/ {print $1}' /proc/mdstat 2>/dev/null | \
+      while read -r _md; do
+        if grep -q "${_disk_basename}" "/sys/block/${_md}/md/dev-"*/block/dev 2>/dev/null \
+           || ls -l "/sys/block/${_md}/slaves/" 2>/dev/null | grep -q "${_disk_basename}"; then
+          mdadm --stop "/dev/${_md}" 2>/dev/null || true
+          k_zfs_log "  Stopped mdraid array: /dev/${_md}"
+        fi
+      done
+  fi
+
+  # 4. Close any LUKS/dm-crypt mappings backed by this disk.
+  if command -v dmsetup >/dev/null 2>&1; then
+    dmsetup ls --target crypt 2>/dev/null | awk '{print $1}' | \
+      while read -r _dm; do
+        [[ -z "${_dm}" || "${_dm}" == "No" ]] && continue
+        if dmsetup deps "${_dm}" 2>/dev/null | grep -q "${_disk_basename}"; then
+          cryptsetup close "${_dm}" 2>/dev/null || dmsetup remove "${_dm}" 2>/dev/null || true
+          k_zfs_log "  Closed LUKS mapping: ${_dm}"
+        fi
+      done
+  fi
+
+  # 5. Destroy any ZFS pool (not just 'rpool') that has a vdev on this disk.
+  #    zpool import with no args lists importable pools; running pools show in
+  #    `zpool status`. Destroy imported first, then try to import + destroy.
+  if command -v zpool >/dev/null 2>&1; then
+    zpool status 2>/dev/null | awk '/pool:/ {print $2}' | \
+      while read -r _pool; do
+        if zpool status "${_pool}" 2>/dev/null | grep -q "${_disk_basename}"; then
+          zpool destroy -f "${_pool}" 2>/dev/null || true
+          k_zfs_log "  Destroyed imported ZFS pool on this disk: ${_pool}"
+        fi
+      done
+    zpool import 2>/dev/null | awk '/pool:/ {print $2}' | \
+      while read -r _pool; do
+        zpool import -f -N "${_pool}" 2>/dev/null || continue
+        if zpool status "${_pool}" 2>/dev/null | grep -q "${_disk_basename}"; then
+          zpool destroy -f "${_pool}" 2>/dev/null || true
+          k_zfs_log "  Destroyed exported-then-imported pool: ${_pool}"
+        else
+          zpool export "${_pool}" 2>/dev/null || true
+        fi
+      done
+  fi
+
+  # Legacy rpool-specific cleanup (redundant with #5 but kept for belt-and-suspenders)
   zpool export rpool 2>/dev/null || true
   zpool destroy -f rpool 2>/dev/null || true
 
@@ -117,6 +189,39 @@ k_zfs_create_rpool() {
   local -a enc_opts=() rpool_vdevs=()
 
   root_ds="$(k_zfs_root_dataset_name "${KLDLOAD_HOSTNAME}")"
+
+  # Materialise /etc/hostid on the live env BEFORE zpool create. ZFS stamps
+  # the pool's owner with gethostid() at create time — if /etc/hostid
+  # doesn't exist, glibc falls back to a value derived from the hostname,
+  # and that derived value then does NOT match whatever the installed
+  # system ends up with post-boot → rpool import fails silently → dracut
+  # hangs. Writing /etc/hostid now pins the value, and the bootloader
+  # step later copies this same file into target/etc/hostid so both ends
+  # of the chain agree. Classic ZFS-on-root footgun; bit every XPS install
+  # up through v3.5.
+  if [[ ! -s /etc/hostid ]]; then
+    if command -v zgenhostid >/dev/null 2>&1; then
+      zgenhostid -f 2>/dev/null || true
+    fi
+    if [[ ! -s /etc/hostid ]]; then
+      local _hex
+      _hex="$(hostid 2>/dev/null | tr -cd 'a-fA-F0-9' | head -c8)"
+      if [[ -n "${_hex}" ]]; then
+        python3 -c "
+import struct
+hid = int('${_hex}', 16)
+open('/etc/hostid','wb').write(struct.pack('<I', hid))
+" 2>/dev/null || true
+      fi
+    fi
+    if [[ ! -s /etc/hostid ]]; then
+      dd if=/dev/urandom of=/etc/hostid bs=4 count=1 status=none 2>/dev/null || true
+    fi
+    chmod 0644 /etc/hostid 2>/dev/null || true
+    k_zfs_log "live /etc/hostid pinned for zpool create: $(xxd -p /etc/hostid 2>/dev/null)"
+  else
+    k_zfs_log "live /etc/hostid already present: $(xxd -p /etc/hostid 2>/dev/null)"
+  fi
 
   if [[ "${KLDLOAD_ZFS_ENCRYPT}" == "1" ]]; then
     : "${KLDLOAD_ZFS_PASSPHRASE:?KLDLOAD_ZFS_PASSPHRASE required when encryption is enabled}"

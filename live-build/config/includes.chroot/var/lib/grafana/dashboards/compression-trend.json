@@ -1,0 +1,45 @@
+{
+  "title": "ZFS Compression Ratio Trends",
+  "uid": "compression-trend",
+  "tags": ["zfs","kldload","compression"],
+  "timezone": "",
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "time": {"from": "now-24h", "to": "now"},
+  "templating": {"list": [{
+    "name": "pool", "type": "query",
+    "datasource": {"type":"prometheus","uid":"prometheus"},
+    "query": "label_values(zfs_pool_health, pool)",
+    "refresh": 2, "multi": false, "includeAll": false,
+    "current": {"text":"rpool","value":"rpool"}
+  }]},
+  "panels": [
+    {"id":1,"title":"Pool-wide compression ratio","type":"stat","gridPos":{"x":0,"y":0,"w":6,"h":5},
+     "datasource":{"type":"prometheus","uid":"prometheus"},
+     "targets":[{"expr":"sum(zfs_dataset_logical_used_bytes{pool=\"$pool\"}) / sum(zfs_dataset_used_bytes{pool=\"$pool\"})","refId":"A"}],
+     "fieldConfig":{"defaults":{"unit":"none","decimals":2}}},
+    {"id":2,"title":"Total logical (before compression)","type":"stat","gridPos":{"x":6,"y":0,"w":6,"h":5},
+     "datasource":{"type":"prometheus","uid":"prometheus"},
+     "targets":[{"expr":"sum(zfs_dataset_logical_used_bytes{pool=\"$pool\"})","refId":"A"}],
+     "fieldConfig":{"defaults":{"unit":"bytes"}}},
+    {"id":3,"title":"Total physical (after compression)","type":"stat","gridPos":{"x":12,"y":0,"w":6,"h":5},
+     "datasource":{"type":"prometheus","uid":"prometheus"},
+     "targets":[{"expr":"sum(zfs_dataset_used_bytes{pool=\"$pool\"})","refId":"A"}],
+     "fieldConfig":{"defaults":{"unit":"bytes"}}},
+    {"id":4,"title":"Bytes saved by compression","type":"stat","gridPos":{"x":18,"y":0,"w":6,"h":5},
+     "datasource":{"type":"prometheus","uid":"prometheus"},
+     "targets":[{"expr":"sum(zfs_dataset_logical_used_bytes{pool=\"$pool\"}) - sum(zfs_dataset_used_bytes{pool=\"$pool\"})","refId":"A"}],
+     "fieldConfig":{"defaults":{"unit":"bytes"}}},
+    {"id":5,"title":"Compression ratio — top 10 datasets (time series)","type":"timeseries","gridPos":{"x":0,"y":5,"w":24,"h":11},
+     "datasource":{"type":"prometheus","uid":"prometheus"},
+     "targets":[{"expr":"topk(10, zfs_dataset_logical_used_bytes{pool=\"$pool\"} / ignoring(__name__) zfs_dataset_used_bytes{pool=\"$pool\"})","refId":"A","legendFormat":"{{name}}"}],
+     "fieldConfig":{"defaults":{"unit":"none","decimals":2}}},
+    {"id":6,"title":"Dataset logical vs physical (top 10 by logical)","type":"timeseries","gridPos":{"x":0,"y":16,"w":24,"h":11},
+     "datasource":{"type":"prometheus","uid":"prometheus"},
+     "targets":[
+       {"expr":"topk(10, zfs_dataset_logical_used_bytes{pool=\"$pool\"})","refId":"A","legendFormat":"{{name}} logical"},
+       {"expr":"topk(10, zfs_dataset_used_bytes{pool=\"$pool\"})","refId":"B","legendFormat":"{{name}} physical"}
+     ],
+     "fieldConfig":{"defaults":{"unit":"bytes"}}}
+  ]
+}

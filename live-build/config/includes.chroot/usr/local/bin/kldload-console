@@ -83,13 +83,19 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   # F3 (shell) and Shift+F3 (root) are intentionally NOT toggles — every
   # press spawns a fresh shell so you can keep multiple open.
   tmux bind -n F2  run-shell "_ktoggle-win k9s    'bash -c _k9s_wrap'"
-  # F3 → kldload-dash: the "is everything OK?" single-pane overview of
-  # host + k8s + zfs + vms + recent warnings, auto-refreshing. Higher
-  # value than a plain shell (Alt+Enter spawns shells); drill-down
-  # targets (htop, k9s, hubble, etc.) all have their own F-keys.
-  tmux bind -n F3  run-shell "_ktoggle-win dash 'kldload-dash'"
+  # F3 → kldload-doctor: structured, one-shot compliance / sanity report
+  # (JSON piped through jq / json.tool so it reads). Old kldload-dash was
+  # too flickery; the doctor output is a static scroll that you can walk
+  # through without chasing refreshes. S-F5 still runs it in a 15s loop
+  # if you want continuous updates.
+  tmux bind -n F3  run-shell "_ktoggle-win doctor-once 'kldload-doctor 2>/dev/null | python3 -m json.tool | less -R'"
   tmux bind -n F4  run-shell "_ktoggle-win logs   'journalctl -f -u kldload-webui -u ttyd-k9s'"
-  tmux bind -n F5  run-shell "_ktoggle-win live   'bash -c \"journalctl -f -u kldload-* -u klab-* -u libvirtd 2>&1 | sed -u \\\"s/^/[svc] /\\\"\"'"
+  # F5 → kldload-lh: LogHog with cluster-wide SSHFS stitching. Launches
+  # the interactive menu (Live All / Auth / Errors / Network / RegEX / IP
+  # search / JSON export) on every /var/log + /var/log/kldload + klab +
+  # libvirt + audit file across the whole cluster, ordered by timestamp.
+  # Much faster and more useful than the old journalctl firehose.
+  tmux bind -n F5  run-shell "_ktoggle-win live   'kldload-lh'"
   tmux bind -n F6  run-shell "_ktoggle-win htop   'htop || top'"
   tmux bind -n F7  run-shell "_ktoggle-win events 'kubectl get events -A --watch 2>&1 || (echo no-cluster; sleep 99)'"
   tmux bind -n F8  run-shell "_ktoggle-win hubble 'kubectl -n kube-system exec ds/cilium -c cilium-agent -- hubble observe --follow --output compact 2>&1 || (echo hubble-unavailable; sleep 99)'"
@@ -223,5 +229,38 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
 
   tmux set -g default-terminal "xterm-256color"
   tmux set -g mouse on
+  # ── Clipboard bridge (browser ⇄ tmux) ─────────────────────────────
+  # set-clipboard on tells tmux to emit OSC 52 escapes when copying
+  # from copy-mode; ttyd + xterm.js intercept OSC 52 and write to the
+  # browser's clipboard. Without this, mouse-drag selections are lost
+  # the moment you release the button.
+  tmux set -g set-clipboard on
+  # Make tmux advertise itself as OSC-52-capable so clients (xterm.js
+  # inside ttyd) trust the sequence. xterm-256color sometimes trips up
+  # the permission check; the `Ms` terminfo override makes it explicit.
+  tmux set -ag terminal-overrides ',xterm*:Ms=\E]52;c;%p2%s\007'
+  # vi keys in copy-mode (Prefix [ to enter, then v to start selection,
+  # y to yank). Also bind mouse-drag to auto-copy on release: no need
+  # to enter copy-mode manually — highlight with the mouse, let go,
+  # text is in the system clipboard. Middle-click to paste.
+  tmux set -g mode-keys vi
+  tmux bind-key -T copy-mode-vi v send-keys -X begin-selection
+  tmux bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+  tmux bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-selection-and-cancel
+  # Paste: Ctrl+Shift+V at the browser level pastes the system
+  # clipboard directly into the PTY. For tmux's own buffer, Prefix + ]
+  # still works (Ctrl+B ]). No-prefix Alt+V pastes tmux buffer too.
+  tmux bind-key -n M-V paste-buffer
+
+  # Right-click menus: tmux 3.2+ ships a built-in context menu on
+  # MouseDown3Pane (Copy Line / Horizontal Split / Kill / etc.) that
+  # was stacking underneath the browser's own right-click menu, which
+  # looked visually broken. Unbind all three right-click surfaces so
+  # the browser's context menu appears alone. Users who want to paste
+  # just use middle-click (classic X11 primary-selection paste) or
+  # Ctrl+Shift+V — both already work.
+  tmux unbind -n MouseDown3Pane 2>/dev/null || true
+  tmux unbind -n MouseDown3Status 2>/dev/null || true
+  tmux unbind -n MouseDown3StatusLeft 2>/dev/null || true
 fi
 exec tmux attach-session -t $SESSION

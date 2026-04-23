@@ -820,6 +820,45 @@ SALT
     systemctl enable kldload-webui 2>/dev/null || true
     systemctl start  kldload-webui 2>/dev/null || true
 
+    # Enable the hourly TLS-cert drift-check timer. The cert is generated
+    # for the first time via ttyd-k9s.service's ExecStartPre, now ordered
+    # After=network-online.target so the LAN IP is present. The timer is
+    # belt-and-suspenders: catches later IP changes (DHCP lease renew,
+    # second NIC coming up, user setting a static IP) by re-running the
+    # drift check every hour. The script short-circuits when SANs already
+    # cover all current IPs, so the extra firings cost ~zero.
+    systemctl enable --now kldload-tls-cert.timer 2>/dev/null || true
+
+    # ── MOK self-heal: make sure THIS install's signing cert is staged ──
+    # The install-time mokutil --import (security.sh) can silently fail if
+    # efivars aren't writable in the chroot, the live-USB's mokutil has
+    # quirks, or NVRAM is out of space. Result: ZBM is MOK-signed but
+    # the key isn't queued, MokManager never shows it, user enables SB
+    # later and grubx64.efi fails signature verification.
+    #
+    # On every first boot, check whether our current mok.der is already
+    # enrolled (--list-enrolled) or staged (--list-new). If not, stage
+    # it now using the well-known password ("kldload") so MokManager
+    # picks it up next reboot with SB on. Idempotent: if already
+    # enrolled/staged, do nothing. Non-fatal: logs warning and moves on.
+    if [[ -f /var/lib/dkms/mok.der ]] && command -v mokutil >/dev/null 2>&1; then
+      _mok_fp="$(openssl x509 -in /var/lib/dkms/mok.pub -noout -fingerprint -sha1 2>/dev/null \
+                  | awk -F= '{print $2}' | tr -d ':' | tr 'A-Z' 'a-z' || echo '')"
+      if [[ -n "$_mok_fp" ]]; then
+        _enrolled="$(mokutil --list-enrolled 2>/dev/null | tr -d ':' | tr 'A-Z' 'a-z' | grep -c "$_mok_fp" || echo 0)"
+        _pending="$(mokutil --list-new 2>/dev/null | tr -d ':' | tr 'A-Z' 'a-z' | grep -c "$_mok_fp" || echo 0)"
+        if [[ "$_enrolled" == "0" && "$_pending" == "0" ]]; then
+          log "MOK self-heal: current signing cert is neither enrolled nor staged — staging now"
+          if printf '%s\n%s\n' "kldload" "kldload" | mokutil --ignore-keyring --import /var/lib/dkms/mok.der >/dev/null 2>&1; then
+            log "MOK staged via mokutil — reboot with Secure Boot ON to enroll via MokManager (password: kldload)"
+          else
+            log "WARNING: MOK staging failed — run 'sudo mokutil --import /var/lib/dkms/mok.der' manually"
+          fi
+        fi
+      fi
+      unset _mok_fp _enrolled _pending
+    fi
+
     # ── AI profile: install Ollama + pull model + create kldload-trained assistant ──
     # Skip if kldload-autodeploy is present — it owns the AI phase now, runs
     # it in the background so other phases overlap. Without this gate, both
@@ -1066,22 +1105,56 @@ BOBMODEL
           zfs snapshot rpool/srv/ollama@bob 2>/dev/null || true
         else
 
-        # Normal kldload mode — pull models based on flags + VRAM-aware
-        # default. KLDLOAD_AI_MODEL_CHAT_NAME overrides everything.
+        # Normal kldload mode — installer picks a model tier via the Bob
+        # panel radio (KLDLOAD_BOB_MODEL). Tier → Ollama model map below.
+        # Legacy KLDLOAD_AI_MODEL_CHAT_NAME still wins if set, for CLI /
+        # kickstart overrides. VRAM-aware auto-fallback only kicks in if
+        # neither is specified (shouldn't happen via the UI, but covers
+        # manifest-less installs).
+        local _chat_model="${KLDLOAD_AI_MODEL_CHAT_NAME:-}"
+        if [[ -z "$_chat_model" ]]; then
+          case "${KLDLOAD_BOB_MODEL:-recommended}" in
+            mini)        _chat_model="llama3.2:3b" ;;
+            small)       _chat_model="qwen2.5:7b" ;;
+            recommended) _chat_model="qwen2.5:14b" ;;
+            large)       _chat_model="qwen2.5:32b" ;;
+            code)        _chat_model="qwen2.5-coder:14b" ;;
+            *)           _chat_model="" ;;  # fall through to VRAM detect
+          esac
+        fi
+        if [[ -z "$_chat_model" ]]; then
+          local _v=0
+          if command -v nvidia-smi >/dev/null 2>&1; then
+            _v=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)
+            _v=$(( ${_v:-0} / 1024 ))
+          fi
+          if   [[ "$_v" -ge 24 ]]; then _chat_model="qwen2.5:32b"
+          elif [[ "$_v" -ge 10 ]]; then _chat_model="qwen2.5:14b"
+          elif [[ "$_v" -ge 6 ]];  then _chat_model="qwen2.5:7b"
+          else                          _chat_model="llama3.2:3b"
+          fi
+        fi
         if [[ "${KLDLOAD_AI_MODEL_CHAT:-1}" == "1" ]]; then
-          local _chat_model="${KLDLOAD_AI_MODEL_CHAT_NAME:-}"
-          if [[ -z "$_chat_model" ]]; then
-            local _v=0
-            if command -v nvidia-smi >/dev/null 2>&1; then
-              _v=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)
-              _v=$(( ${_v:-0} / 1024 ))
-            fi
-            if   [[ "$_v" -ge 10 ]]; then _chat_model="qwen2.5:14b"
-            else                          _chat_model="llama3.1:8b"
+          # Honour KLDLOAD_BOB_DARKSITE=1 — caller must pre-stage the
+          # model at /root/darksite/ollama/models/ BEFORE first boot.
+          # If the darksite is empty and the flag is set, fail loud
+          # rather than silently hitting ollama.com. Otherwise (flag=0),
+          # use the normal `ollama pull` path (requires internet).
+          if [[ "${KLDLOAD_BOB_DARKSITE:-0}" == "1" ]]; then
+            if [[ -d /root/darksite/ollama/models ]] && \
+               ls /root/darksite/ollama/models/manifests/registry.ollama.ai/library/"${_chat_model%%:*}"/*/*[!.json] >/dev/null 2>&1; then
+              log "Using pre-staged darksite model: ${_chat_model} (KLDLOAD_BOB_DARKSITE=1)"
+              # rsync happens upstream in the Ollama setup phase; this
+              # branch just logs that darksite was the source of truth.
+            else
+              log "ERROR: KLDLOAD_BOB_DARKSITE=1 but no pre-staged model for ${_chat_model} found."
+              log "       Expected: /root/darksite/ollama/models/manifests/registry.ollama.ai/library/${_chat_model%%:*}/"
+              log "       Falling back to internet pull so Bob still works."
             fi
           fi
-          _pull_model "$_chat_model" "General Chat"
+          _pull_model "$_chat_model" "Bob chat model (${_chat_model})"
         fi
+        # Legacy code/smart flags still work for kickstart installs
         if [[ "${KLDLOAD_AI_MODEL_CODE:-0}" == "1" ]]; then
           _pull_model "qwen2.5-coder:14b" "Code Assistant"
         fi
@@ -1404,13 +1477,13 @@ KAIREMOTE
 {
   "policies": {
     "Homepage": {
-      "URL": "http://localhost:9000",
+      "URL": "http://localhost:8443",
       "StartPage": "homepage",
       "Additional": ["http://localhost:8080"]
     },
-    "OverrideFirstRunPage": "http://localhost:9000",
+    "OverrideFirstRunPage": "http://localhost:8443",
     "Bookmarks": [
-      {"Title": "kldload Dashboard", "URL": "http://localhost:9000", "Placement": "toolbar"},
+      {"Title": "kldload Dashboard", "URL": "http://localhost:8443", "Placement": "toolbar"},
       {"Title": "AI Chat", "URL": "http://localhost:8080", "Placement": "toolbar"},
       {"Title": "kldload Docs", "URL": "https://kldload.com", "Placement": "toolbar"}
     ],
@@ -1431,11 +1504,11 @@ FFPOL
 [Desktop Entry]
 Type=Application
 Name=kldload Dashboard
-Exec=firefox http://localhost:9000
+Exec=firefox http://localhost:8443
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=3
 AUTOSTART
-          log "Firefox autostart set to dashboard on :9000"
+          log "Firefox autostart set to dashboard on :8443"
 
           # Only open Firefox if Open WebUI is confirmed ready
           if [[ "$_webui_ready" == "true" ]]; then
@@ -1747,11 +1820,25 @@ for p in glob.glob("/var/lib/grafana/dashboards/*.json"):
 PYFIX
         chown -R grafana:grafana /var/lib/grafana/dashboards 2>/dev/null || true
 
-        # Anonymous Viewer + iframe embedding — required for the Metrics tab
-        # in the kldload web UI to embed Grafana without a login redirect.
+        # Anonymous Viewer + iframe embedding + HTTPS — required for the
+        # Metrics tab in the kldload web UI to embed Grafana from an HTTPS
+        # origin without a mixed-content block or login redirect. Uses the
+        # same self-signed cert as the webui so no second cert prompt.
         if ! grep -q "^\[auth.anonymous\]" /etc/grafana/grafana.ini 2>/dev/null \
            || ! grep -A2 "^\[auth.anonymous\]" /etc/grafana/grafana.ini | grep -q "^enabled = true"; then
+          # Copy the webui cert into grafana's dir so it can read it as the
+          # grafana user (webui.crt is 0600 root:root by default).
+          cp /var/lib/kldload/tls/webui.crt /etc/grafana/webui.crt 2>/dev/null || true
+          cp /var/lib/kldload/tls/webui.key /etc/grafana/webui.key 2>/dev/null || true
+          chown grafana:grafana /etc/grafana/webui.crt /etc/grafana/webui.key 2>/dev/null || true
+          chmod 0640 /etc/grafana/webui.crt /etc/grafana/webui.key 2>/dev/null || true
           cat >> /etc/grafana/grafana.ini <<'GRAFEMBED'
+
+[server]
+protocol = https
+cert_file = /etc/grafana/webui.crt
+cert_key = /etc/grafana/webui.key
+http_port = 3000
 
 [auth.anonymous]
 enabled = true
@@ -1765,7 +1852,8 @@ cookie_samesite = none
 [users]
 default_theme = dark
 GRAFEMBED
-          ok "Grafana anonymous + iframe embedding enabled"
+          systemctl restart grafana-server 2>/dev/null || true
+          ok "Grafana anonymous + iframe embedding + HTTPS enabled"
         fi
 
         # Prometheus: add localhost:9100 (host node_exporter) scrape if

@@ -1,0 +1,28 @@
+[Unit]
+Description=kldload TLS cert — regen after network is up (captures DHCP IP in SAN)
+After=network-online.target
+Wants=network-online.target
+
+# On first boot, ttyd-k9s / kldload-webui / grafana-server start BEFORE
+# DHCP assigns a real IP. Their ExecStartPre runs kldload-tls-cert which
+# writes a cert whose SAN only has 127.0.0.1 — the browser refuses to
+# iframe https://<real-ip>:7681/ from https://<real-ip>:8443/ with a
+# silent "page may be down" error.
+#
+# This unit re-runs the cert generator once network-online fires AND a
+# non-loopback IPv4 is actually bound, then bounces the dependent
+# services asynchronously (--no-block) so they pick up the regenerated
+# cert without deadlocking on each other.
+#
+# NO Before= — that would make dependent services wait on our
+# ExecStartPost, which itself restarts those services → circular wait.
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStartPre=/usr/local/sbin/kldload-wait-for-ip
+ExecStart=/usr/local/sbin/kldload-tls-cert
+ExecStartPost=/usr/local/sbin/kldload-bounce-tls-services
+
+[Install]
+WantedBy=multi-user.target

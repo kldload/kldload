@@ -23,22 +23,20 @@ k_configure_mok() {
     return 0
   fi
 
-  # Skip MOK enrollment when Secure Boot is disabled — no point showing the
-  # MokManager blue screen if the firmware isn't enforcing signatures.
-  # The MOK keys are still generated and ZFSBootMenu is still signed, so if
-  # the user enables Secure Boot later they can enroll via "mokutil --import"
-  # from the installed system or use MokManager's "Enroll key from disk" option
-  # (mok.der is on the EFI partition).
-  if [[ -d /sys/firmware/efi/efivars ]]; then
-    local _sb_state
-    _sb_state="$(mokutil --sb-state 2>/dev/null || true)"
-    if echo "$_sb_state" | grep -qi "disabled"; then
-      k_log "Secure Boot is disabled — skipping MOK enrollment (no MokManager blue screen)"
-      k_log "  MOK keys are on disk; enable Secure Boot + run 'mokutil --import /var/lib/dkms/mok.der' to enroll later"
-      exec 8>&-
-      return 0
-    fi
-  fi
+  # ALWAYS stage the MOK via mokutil --import, regardless of the live
+  # environment's Secure Boot state. Users commonly install with SB off,
+  # and the old "skip if SB disabled" short-circuit meant the NEW per-
+  # install MOK never got queued for MokManager. Users who later enabled
+  # SB saw MokManager (from a stale enrollment queue left by a previous
+  # install) and "enrolled" an old cert that didn't match the current
+  # install's signed grubx64.efi — shim then rejected grubx64.efi on
+  # every boot under SB with "signature failed". Always staging means:
+  # MokManager always prompts for THIS install's key on first boot after
+  # the user enables SB, and the key it enrolls always matches the ZBM
+  # signature sbsign just produced in bootloader.sh.
+  #
+  # If efivars aren't mounted (running in a non-EFI container or similar)
+  # we skip — mokutil cannot write staging variables without them.
 
   # TODO: restore random password once web UI displays it before reboot
   # mok_pass="$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-20)"

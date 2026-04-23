@@ -86,3 +86,36 @@ scrape_configs:
       insecure_skip_verify: true
     authorization:
       credentials_file: /var/lib/kldload/kubelet-token
+
+  # ── observability-stack ──────────────────────────────────────────────
+  # zfs_exporter — per-pool/dataset ARC, fragmentation, compression
+  - job_name: zfs-exporter
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['localhost:9134']
+        labels:
+          instance: kldload-node
+
+  # smartctl_exporter — SMART attributes per physical disk
+  - job_name: smartctl-exporter
+    scrape_interval: 60s
+    static_configs:
+      - targets: ['localhost:9633']
+        labels:
+          instance: kldload-node
+
+  # promtail self-metrics (log-shipper health)
+  - job_name: promtail
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['localhost:9080']
+        labels:
+          instance: kldload-node
+
+  # ebpf_exporter — per-device block I/O latency histograms
+  - job_name: ebpf-exporter
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:9435']
+        labels:
+          instance: kldload-node

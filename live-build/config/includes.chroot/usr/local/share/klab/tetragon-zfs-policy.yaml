@@ -1,0 +1,43 @@
+---
+# Tetragon tracing policy for ZFS activity in K8s workloads.
+#
+# NOTE on scope: tetragon sees syscalls INSIDE K8s pods, not on the host
+# kernel that runs the hypervisor. For HOST-level ZFS tracing during klab
+# tests (where the test VM's kernel is what we care about), see:
+#   • ebpf_exporter (biolatency histograms per device)   → :9435
+#   • klab-vm-debug-bundle (kernel stacks + dbgmsg)      → /root/klab/*/
+#   • promtail in test VMs (kernel ring + zfs-dbgmsg)    → host Loki
+#
+# What this policy IS for: auditing ZFS command execution inside any
+# K8s pod that uses ZFS CSI. Catches a rogue pod exec'ing zfs/zpool/zdb
+# (credential theft via zdb -U, etc.) or CSI-driver activity we want
+# to correlate with pod events.
+#
+# kprobes section was removed — they fire in host kernel context which
+# tetragon-in-K8s can't observe, and tetragon 1.4 doesn't allow mixing
+# kprobes + tracepoints in a single policy anyway.
+
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: zfs-execs
+spec:
+  tracepoints:
+    - subsystem: "syscalls"
+      event: "sys_enter_execve"
+      args:
+        - index: 0
+          type: "string"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Postfix"
+              values:
+                - "/zfs"
+                - "/zpool"
+                - "/zdb"
+                - "/ztest"
+                - "/zfs-tests.sh"
+                - "/test-runner.py"
+          matchActions:
+            - action: Post

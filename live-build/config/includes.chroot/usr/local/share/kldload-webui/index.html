@@ -267,30 +267,13 @@ select option:checked { background: #00b8d9; color: #000; }
           </div>
         </div>
 
-        <!-- AI state (hidden checkbox + model selection, shown when AI profile selected) -->
+        <!-- AI state: hidden checkboxes with defaults (chat on, code/smart off).
+             The visible model-picker UI was removed — Bob ships with the kldlab
+             profile, defaults are sensible, users switch models post-install. -->
         <input type="checkbox" id="install-ai" style="display:none">
-        <div id="ai-models" style="display:none;margin-bottom:1rem;padding:1rem;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
-          <div style="font-size:0.85rem;font-weight:600;color:var(--bright);margin-bottom:0.4rem">AI Models — select which to download</div>
-          <div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.8rem">Models download on first boot. Internet required (~6 GB). Fully offline after that. Open WebUI on <b>http://localhost:8080</b>.</div>
-          <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
-            <input type="checkbox" id="ai-model-chat" checked style="margin-top:0.15rem">
-            <div><strong style="color:var(--text)">General Chat</strong> (llama3.1:8b) — 5GB VRAM, ~30 tok/sec<br><span style="font-size:0.7rem;color:var(--muted)">Fast general-purpose assistant. Good for Q&amp;A, docs, infrastructure help.</span></div>
-          </label>
-          <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
-            <input type="checkbox" id="ai-model-code" style="margin-top:0.15rem">
-            <div><strong style="color:var(--text)">Code Assistant</strong> (qwen2.5-coder:14b) — 9GB VRAM, ~12 tok/sec<br><span style="font-size:0.7rem;color:var(--muted)">Best open-source coding model. Bash, Python, YAML, Dockerfiles, debugging.</span></div>
-          </label>
-          <label style="display:flex;align-items:flex-start;gap:0.6rem;margin-bottom:0.6rem;cursor:pointer;font-size:0.82rem;color:var(--subtle)">
-            <input type="checkbox" id="ai-model-smart" style="margin-top:0.15rem">
-            <div><strong style="color:var(--text)">Smart Chat</strong> (llama3.1:70b-q4) — 40GB+ VRAM or CPU offload<br><span style="font-size:0.7rem;color:var(--muted)">Most capable. Requires 48GB+ VRAM or will use RAM (slow). For serious reasoning tasks.</span></div>
-          </label>
-          <div style="margin-top:0.6rem;padding:0.6rem;background:var(--surface2);border-radius:4px;font-size:0.7rem;color:var(--muted);line-height:1.6">
-            <strong style="color:var(--subtle)">Recommended:</strong>
-            8GB VRAM &rarr; General Chat &nbsp;|&nbsp;
-            10-16GB VRAM &rarr; General + Code &nbsp;|&nbsp;
-            24GB+ VRAM &rarr; All models
-          </div>
-        </div>
+        <input type="checkbox" id="ai-model-chat" checked style="display:none">
+        <input type="checkbox" id="ai-model-code" style="display:none">
+        <input type="checkbox" id="ai-model-smart" style="display:none">
 
         <!-- klab options (shown when klab profile selected) -->
         <div id="klab-options" style="display:none;margin-bottom:1rem;padding:1rem;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
@@ -2160,11 +2143,12 @@ function selectTarget(el) {
   if (sum) sum.textContent = '✓ ' + (ROLE_DESCS[el.dataset.role] || el.dataset.role);
   const smRow = document.getElementById('storage-mode-row');
   if (smRow) smRow.style.display = el.dataset.role === 'core' ? 'block' : 'none';
-  // AI profile — toggle AI checkbox and model selector
+  // AI checkbox auto-enables on profiles that ship Bob. Model-picker UI
+  // was removed (defaults handled by backend); only the hidden input
+  // remains for payload compatibility.
   const aiCb = document.getElementById('install-ai');
-  const aiModels = document.getElementById('ai-models');
-  if (aiCb) aiCb.checked = el.dataset.role === 'ai';
-  if (aiModels) aiModels.style.display = el.dataset.role === 'ai' ? 'block' : 'none';
+  const aiRoles = ['devops', 'k8s', 'kvm', 'zfslab'];
+  if (aiCb) aiCb.checked = aiRoles.includes(el.dataset.role);
   // klab profile — toggle klab options
   const klabOpts = document.getElementById('klab-options');
   if (klabOpts) klabOpts.style.display = el.dataset.role === 'devops' ? 'block' : 'none';
@@ -2235,7 +2219,7 @@ function selectDistro(el) {
     if (p) p.style.display = isBSDDistro ? 'none' : '';
   });
   // Hide AI model selector when switching to BSD
-  if (isBSDDistro) { const am = document.getElementById('ai-models'); if (am) am.style.display = 'none'; }
+  // (old AI model selector hide on BSD — block removed; picker UI no longer exists)
   if (rhelPanel) rhelPanel.style.display = el.dataset.distro === 'rhel' ? 'block' : 'none';
   // Distro-specific profile restrictions
   const d = el.dataset.distro;

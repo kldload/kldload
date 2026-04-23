@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# NetworkManager dispatcher hook — re-run kldload-tls-cert whenever a
+# network interface's IP situation changes. Keeps the webui/ttyd/grafana
+# TLS cert SAN in sync with the actual IPs of the box, without needing
+# a reboot or periodic timer.
+#
+# NM calls dispatchers with $1=iface $2=action. Actions of interest:
+#   up            iface gained link
+#   dhcp4-change  DHCPv4 lease renewed with potentially new IP
+#   dhcp6-change  DHCPv6 lease renewed
+#   vpn-up        WireGuard / OpenVPN came up → new tunnel IP
+#   connectivity-change  rare, fires on route changes
+#
+# All other actions are no-op.
+
+set -u
+
+IFACE="${1:-}"
+ACTION="${2:-}"
+
+case "$ACTION" in
+    up|dhcp4-change|dhcp6-change|vpn-up|connectivity-change)
+        # Run async (--no-block) so the dispatcher returns quickly. The
+        # kldload-tls-cert.service is idempotent — drift-check short-circuits
+        # when SAN already covers current IPs.
+        systemctl --no-block try-restart kldload-tls-cert.service 2>/dev/null || true
+        ;;
+esac
+exit 0

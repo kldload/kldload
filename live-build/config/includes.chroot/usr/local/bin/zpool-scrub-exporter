@@ -1,0 +1,96 @@
+#!/bin/bash
+# zpool-scrub-exporter — write Prometheus textfile with scrub + scan state
+# for every imported pool. Run via systemd timer every 60s; node_exporter's
+# textfile collector picks it up.
+#
+# Parses `zpool status` output per pool:
+#   scan: scrub repaired 0B in 00:01:29 with 0 errors on Tue Apr 21 08:50:41 2026
+#   scan: scrub in progress since Tue Apr 21 ..., 1.23G scanned out of 5.00G, 25.1% done, ...
+#   scan: resilvered 12G in 00:05:00 with 0 errors on ...
+#
+# Emits:
+#   zpool_scrub_last_timestamp{pool=}         Unix epoch of last completed scrub
+#   zpool_scrub_last_duration_seconds{pool=}  Duration of last scrub
+#   zpool_scrub_last_errors{pool=}            Errors reported by last scrub
+#   zpool_scrub_in_progress{pool=}            0 or 1
+#   zpool_scrub_progress_ratio{pool=}         0..1 (only set while in progress)
+#   zpool_read_errors{pool=,vdev=}            Per-vdev read error count
+#   zpool_write_errors{pool=,vdev=}           Per-vdev write error count
+#   zpool_checksum_errors{pool=,vdev=}        Per-vdev checksum error count
+#
+# Designed to fail safely — malformed parse emits nothing rather than
+# breaking the scrape.
+
+set -u
+OUT=/var/lib/node_exporter/textfile_collector/zpool-scrub.prom
+TMP=${OUT}.tmp
+mkdir -p "$(dirname "$OUT")"
+
+{
+  echo "# HELP zpool_scrub_last_timestamp Unix epoch of last completed scrub per pool"
+  echo "# TYPE zpool_scrub_last_timestamp gauge"
+  echo "# HELP zpool_scrub_last_duration_seconds Duration of last completed scrub"
+  echo "# TYPE zpool_scrub_last_duration_seconds gauge"
+  echo "# HELP zpool_scrub_last_errors Errors reported by last scrub"
+  echo "# TYPE zpool_scrub_last_errors gauge"
+  echo "# HELP zpool_scrub_in_progress 1 if a scrub is currently running"
+  echo "# TYPE zpool_scrub_in_progress gauge"
+  echo "# HELP zpool_scrub_progress_ratio Scrub progress 0..1 (only set while in progress)"
+  echo "# TYPE zpool_scrub_progress_ratio gauge"
+  echo "# HELP zpool_read_errors Read errors per vdev"
+  echo "# TYPE zpool_read_errors gauge"
+  echo "# HELP zpool_write_errors Write errors per vdev"
+  echo "# TYPE zpool_write_errors gauge"
+  echo "# HELP zpool_checksum_errors Checksum errors per vdev"
+  echo "# TYPE zpool_checksum_errors gauge"
+
+  for pool in $(zpool list -Ho name 2>/dev/null); do
+    _status=$(zpool status "$pool" 2>/dev/null) || continue
+    _scan=$(printf '%s' "$_status" | awk '/^  scan:/{sub(/^  scan: */,""); print; exit}')
+
+    # ── completed scrub: "scrub repaired 0B in H:M:S with N errors on <date>"
+    if printf '%s' "$_scan" | grep -qE 'scrub repaired .* with [0-9]+ errors on '; then
+      _dur=$(printf '%s' "$_scan" | sed -nE 's/.* in ([0-9]+):([0-9]+):([0-9]+) with.*/\1 \2 \3/p')
+      _errs=$(printf '%s' "$_scan" | sed -nE 's/.*with ([0-9]+) errors.*/\1/p')
+      _date=$(printf '%s' "$_scan" | sed -nE 's/.*errors on (.*)$/\1/p')
+      _ts=$(date -d "$_date" +%s 2>/dev/null || echo 0)
+      if [[ -n "$_dur" ]]; then
+        # Force base-10 — leading zeros like "00:01:29" otherwise trip
+        # bash into parsing as octal and choking on "08"/"09".
+        read -r _h _m _s <<<"$_dur"
+        _secs=$((10#$_h*3600 + 10#$_m*60 + 10#$_s))
+        echo "zpool_scrub_last_duration_seconds{pool=\"$pool\"} $_secs"
+      fi
+      echo "zpool_scrub_last_timestamp{pool=\"$pool\"} $_ts"
+      echo "zpool_scrub_last_errors{pool=\"$pool\"} ${_errs:-0}"
+      echo "zpool_scrub_in_progress{pool=\"$pool\"} 0"
+
+    # ── in progress: "scrub in progress since <date> ... N% done ..."
+    elif printf '%s' "$_scan" | grep -qE 'scrub in progress'; then
+      _pct=$(printf '%s' "$_status" | sed -nE 's/.*([0-9]+\.[0-9]+)% done.*/\1/p' | head -1)
+      echo "zpool_scrub_in_progress{pool=\"$pool\"} 1"
+      [[ -n "$_pct" ]] && echo "zpool_scrub_progress_ratio{pool=\"$pool\"} $(awk -v p="$_pct" 'BEGIN{print p/100}')"
+    else
+      echo "zpool_scrub_in_progress{pool=\"$pool\"} 0"
+    fi
+
+    # ── per-vdev error counts ──────────────────────────────────────
+    # zpool status output after "config:" has lines like:
+    #   <vdev-name>  <state>  <read>  <write>  <cksum>
+    # We skip the pool name line and blank lines, keep leaf vdevs.
+    printf '%s' "$_status" | awk -v p="$pool" '
+      /^config:/ {in_cfg=1; next}
+      /^errors:/ {in_cfg=0}
+      in_cfg && NF>=5 && $1!="NAME" && $1!=p {
+        name=$1; state=$2; r=$3; w=$4; c=$5
+        # Only digits allowed for error counts
+        if (r~/^[0-9]+$/ && w~/^[0-9]+$/ && c~/^[0-9]+$/) {
+          gsub(/"/,"\\\"",name)
+          print "zpool_read_errors{pool=\"" p "\",vdev=\"" name "\"} " r
+          print "zpool_write_errors{pool=\"" p "\",vdev=\"" name "\"} " w
+          print "zpool_checksum_errors{pool=\"" p "\",vdev=\"" name "\"} " c
+        }
+      }'
+  done
+} > "$TMP"
+mv -f "$TMP" "$OUT"

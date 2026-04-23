@@ -110,6 +110,9 @@ def collect_metrics():
         lines.append(f'klab_test_vm_running{{distro="{distro}"}} {running}')
 
     # ── Test results (latest run) ────────────────────────────────────
+    # While a run is in progress we parse <distro>.log live so the UI
+    # shows progressing counts instead of zeros; once klab writes the
+    # final <distro>.summary those authoritative values win.
     latest_link = f"{RESULTS_DIR}/latest"
     if os.path.islink(latest_link):
         run_dir = os.path.realpath(latest_link)
@@ -122,19 +125,67 @@ def collect_metrics():
         lines.append("# TYPE klab_test_fail_total gauge")
         lines.append("# HELP klab_test_skip_total Tests skipped in latest run")
         lines.append("# TYPE klab_test_skip_total gauge")
+        lines.append("# HELP klab_test_status Current per-distro run status (1=active for this value)")
+        lines.append("# TYPE klab_test_status gauge")
+        lines.append("# HELP klab_test_last_test_info Label with the most recent test seen for a distro")
+        lines.append("# TYPE klab_test_last_test_info gauge")
 
+        summaries = {}
         for f in sorted(os.listdir(run_dir)):
             if f.endswith(".summary"):
-                summary = {}
+                s = {}
                 with open(os.path.join(run_dir, f)) as sf:
                     for line in sf:
                         if "=" in line:
                             k, v = line.strip().split("=", 1)
-                            summary[k] = v
-                d = summary.get("distro", f.replace(".summary", ""))
-                lines.append(f'klab_test_pass_total{{distro="{d}",run="{run_id}"}} {summary.get("pass", 0)}')
-                lines.append(f'klab_test_fail_total{{distro="{d}",run="{run_id}"}} {summary.get("fail", 0)}')
-                lines.append(f'klab_test_skip_total{{distro="{d}",run="{run_id}"}} {summary.get("skip", 0)}')
+                            s[k] = v
+                summaries[s.get("distro", f.replace(".summary", ""))] = s
+
+        for d in DISTROS:
+            status_file = os.path.join(run_dir, f"{d}.status")
+            log_file = os.path.join(run_dir, f"{d}.log")
+            status = ""
+            if os.path.isfile(status_file):
+                try:
+                    with open(status_file) as sf:
+                        status = sf.read().strip()
+                except Exception:
+                    status = ""
+
+            # Counts: prefer .summary; fall back to live log parse.
+            p = f_ = s_ = 0
+            last_test = ""
+            if d in summaries:
+                try:
+                    p = int(summaries[d].get("pass", 0))
+                    f_ = int(summaries[d].get("fail", 0))
+                    s_ = int(summaries[d].get("skip", 0))
+                except ValueError:
+                    pass
+            elif os.path.isfile(log_file):
+                try:
+                    with open(log_file, "rb") as lf:
+                        data = lf.read()
+                    text = data.decode("utf-8", errors="replace")
+                    p = text.count("[PASS]")
+                    f_ = text.count("[FAIL]")
+                    s_ = text.count("[SKIP]")
+                    for line in reversed(text.splitlines()):
+                        if "/functional/" in line and "run as root" in line:
+                            frag = line.split("/functional/", 1)[1]
+                            last_test = frag.split(" (run as root)", 1)[0][:80]
+                            break
+                except Exception:
+                    pass
+
+            if status or p or f_ or s_ or d in summaries:
+                lines.append(f'klab_test_pass_total{{distro="{d}",run="{run_id}"}} {p}')
+                lines.append(f'klab_test_fail_total{{distro="{d}",run="{run_id}"}} {f_}')
+                lines.append(f'klab_test_skip_total{{distro="{d}",run="{run_id}"}} {s_}')
+            if status:
+                lines.append(f'klab_test_status{{distro="{d}",status="{status}"}} 1')
+            if last_test:
+                lines.append(f'klab_test_last_test_info{{distro="{d}",test="{last_test}"}} 1')
 
     # ── ZFS pool health ──────────────────────────────────────────────
     lines.append("")

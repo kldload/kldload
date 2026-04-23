@@ -1013,14 +1013,89 @@ cmd_bootstrap() {
   echo ""
   step_done "Cluster verified"
 
-  step 7 "Smoke Test"
+  # Provision kubelet-token for Prometheus kubelet scrape. The /etc/prometheus/
+  # prometheus.yml config refers to /var/lib/kldload/kubelet-token (bearer
+  # token for the kubelet's :10250 metrics endpoint). Without this file, all
+  # kubelet scrapes fail "unable to read authorization" and the cluster-wide
+  # dashboards show 0 data for CPU/memory/network per-node. Provision a
+  # ServiceAccount with nodes/metrics + nodes/proxy + nodes/stats RBAC,
+  # mint a 1-year JWT, write to the expected path with world-readable perms
+  # (prometheus runs as its own user, not root).
+  step 7 "Prometheus kubelet-scrape credentials"
+  KUBECONFIG=/root/.kube/config kubectl apply -f - <<'KBYAML' >/dev/null 2>&1 || warn "kubelet-token RBAC apply failed"
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: prometheus-kubelet, namespace: kube-system }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: prometheus-kubelet }
+rules:
+- apiGroups: [""]
+  resources: [nodes/metrics, nodes/proxy, nodes/stats]
+  verbs: [get]
+- nonResourceURLs: [/metrics]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: prometheus-kubelet }
+subjects:
+- kind: ServiceAccount
+  name: prometheus-kubelet
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: prometheus-kubelet
+  apiGroup: rbac.authorization.k8s.io
+KBYAML
+  mkdir -p /var/lib/kldload
+  # Retry token generation — RBAC propagation + apiserver readiness can
+  # race in the first seconds after apply. Previous single-shot attempt
+  # left a 0-byte token file when the first kubectl call returned EOF.
+  _token_ok=0
+  for _try in 1 2 3 4 5; do
+    _token="$(KUBECONFIG=/root/.kube/config kubectl create token prometheus-kubelet \
+                -n kube-system --duration=8760h 2>/dev/null)"
+    if [[ -n "$_token" && ${#_token} -gt 20 ]]; then
+      printf '%s' "$_token" > /var/lib/kldload/kubelet-token
+      chmod 0644 /var/lib/kldload/kubelet-token
+      _token_ok=1
+      log "  kubelet-token provisioned (${#_token} bytes, try ${_try}, 1-year validity)"
+      break
+    fi
+    sleep 3
+  done
+  if [[ $_token_ok -eq 1 ]]; then
+    systemctl reload prometheus 2>/dev/null || systemctl restart prometheus 2>/dev/null || true
+  else
+    warn "kubelet-token mint failed after 5 tries — Prometheus kubelet scrapes will 401"
+    # Leave a marker file so an operator can re-run later
+    echo "# kubelet-token provisioning failed at $(date -Iseconds); re-run via: kube-cluster bootstrap --workers 3" \
+      > /var/lib/kldload/kubelet-token
+  fi
+
+  # Apply Tetragon ZFS tracing policy if shipped (audits zfs/zpool/zdb
+  # execve across K8s pods). Non-fatal — skipped if tetragon not ready
+  # or yaml missing.
+  if [[ -f /usr/local/share/klab/tetragon-zfs-policy.yaml ]]; then
+    if KUBECONFIG=/root/.kube/config kubectl apply \
+          -f /usr/local/share/klab/tetragon-zfs-policy.yaml >/dev/null 2>&1; then
+      log "  tetragon zfs-execs tracing policy applied"
+    else
+      log "  tetragon policy apply skipped (tetragon may not be ready yet)"
+    fi
+  fi
+  step_done "kubelet-token + tetragon policy ready"
+
+  step 8 "Smoke Test"
   _ssh_cmd "$cp_ip" "kube-smoke-test" || warn "Smoke test had failures — check output above"
 
   # Step 8: Hubble proof of life — show recent eBPF-captured flows
   echo ""
   step_done "Smoke test complete"
 
-  step 8 "Hubble eBPF — Proof of Life"
+  step 9 "Hubble eBPF — Proof of Life"
   echo -e "${D}Recent flows captured by eBPF (zero agents, zero config):${N}"
   echo ""
   _ssh_cmd "$cp_ip" "hubble observe --last 20 2>/dev/null" || true
@@ -1071,7 +1146,7 @@ cmd_bootstrap() {
   echo ""
   step_done "Hubble eBPF flows captured"
 
-  step 9 "Host Management Plane"
+  step 10 "Host Management Plane"
 
   # Join the host to the WireGuard mesh as node 100 (10.250.0.100 / 10.251.0.100)
   if command -v wg >/dev/null 2>&1 && [[ -n "${cp_pub:-}" ]]; then

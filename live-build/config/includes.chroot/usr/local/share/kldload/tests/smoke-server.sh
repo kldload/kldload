@@ -67,14 +67,22 @@ _section "Web UI"
 test_file "kldload-webui binary" "/usr/local/bin/kldload-webui"
 test_service_enabled "kldload-webui enabled" "kldload-webui"
 
-# Check if webui responds — detect configured port from service file
-_webui_port=8080
-if grep -q '\-\-port 9000' /usr/lib/systemd/system/kldload-webui.service 2>/dev/null; then
-  _webui_port=9000
+# Check if webui responds. The unit file may list several ports (HTTP
+# 8080, HTTPS 8443); probe in priority order and use the right scheme
+# for each — kldload-webui moved to HTTPS-by-default with self-signed
+# cert, so HTTP on 8080 is a legacy fallback only. curl -k tolerates
+# the self-signed cert which is legitimate during a fresh install.
+_webui_scheme="https"
+_webui_port=8443
+if ! grep -q '\-\-port 8443' /usr/lib/systemd/system/kldload-webui.service 2>/dev/null \
+   && grep -qE '\-\-port (8080|80)' /usr/lib/systemd/system/kldload-webui.service 2>/dev/null; then
+  _webui_scheme="http"
+  _webui_port=8080
 fi
 if systemctl is-active kldload-webui >/dev/null 2>&1; then
   _pass "kldload-webui running"
-  test_succeeds "WebUI responds on :${_webui_port}" "curl -sf http://localhost:${_webui_port} >/dev/null 2>&1"
+  test_succeeds "WebUI responds on :${_webui_port}" \
+    "curl -sfk --max-time 5 ${_webui_scheme}://localhost:${_webui_port}/ >/dev/null 2>&1"
 else
   _warn "kldload-webui running" "service not active (may need manual start)"
 fi

@@ -22,15 +22,19 @@ fi
 clear
 
 # ── Banner (full width) ────────────────────────────────────────────────
+# Box inner width = 72 cols (matches top/bottom ───). Each banner line is
+# 2sp + KLDLAB(48) + 2sp + tagline-area(20) = 72 inner. The right │ now
+# lines up with ┐ — the old layout had 78-wide banner lines in a 72-wide
+# box, so the right border was 4 cols past the corner.
 cat <<BANNER
-${D}┌────────────────────────────────────────────────────────────────────────┐${N}
-${D}│${N}  ${W}██╗  ██╗██╗     ██████╗ ██╗      ██████╗  █████╗ ██████╗ ${N}  ${C}c o n s o l e${N}  ${D}│${N}
-${D}│${N}  ${W}██║ ██╔╝██║     ██╔══██╗██║     ██╔═══██╗██╔══██╗██╔══██╗${N}                 ${D}│${N}
-${D}│${N}  ${W}█████╔╝ ██║     ██║  ██║██║     ██║   ██║███████║██║  ██║${N}  ${G}one-pane ops${N}   ${D}│${N}
-${D}│${N}  ${W}██╔═██╗ ██║     ██║  ██║██║     ██║   ██║██╔══██║██║  ██║${N}  ${G}console${N}        ${D}│${N}
-${D}│${N}  ${W}██║  ██╗███████╗██████╔╝███████╗╚██████╔╝██║  ██║██████╔╝${N}                 ${D}│${N}
-${D}│${N}  ${W}╚═╝  ╚═╝╚══════╝╚═════╝ ╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═════╝ ${N}                 ${D}│${N}
-${D}└────────────────────────────────────────────────────────────────────────┘${N}
+${D}┌────────────────────────────────────────────────────────────────────┐${N}
+${D}│${N}  ${W}██╗  ██╗██╗     ██████╗ ██╗      █████╗ ██████╗ ${N}  ${C}c o n s o l e${N}     ${D}│${N}
+${D}│${N}  ${W}██║ ██╔╝██║     ██╔══██╗██║     ██╔══██╗██╔══██╗${N}                    ${D}│${N}
+${D}│${N}  ${W}█████╔╝ ██║     ██║  ██║██║     ███████║██████╔╝${N}  ${G}one-pane ops${N}      ${D}│${N}
+${D}│${N}  ${W}██╔═██╗ ██║     ██║  ██║██║     ██╔══██║██╔══██╗${N}  ${G}lab + operator${N}    ${D}│${N}
+${D}│${N}  ${W}██║  ██╗███████╗██████╔╝███████╗██║  ██║██████╔╝${N}                    ${D}│${N}
+${D}│${N}  ${W}╚═╝  ╚═╝╚══════╝╚═════╝ ╚══════╝╚═╝  ╚═╝╚═════╝ ${N}                    ${D}│${N}
+${D}└────────────────────────────────────────────────────────────────────┘${N}
 BANNER
 
 printf "\n${M}  F-keys toggle watch windows — press to open, press again to close.${N}\n"
@@ -61,9 +65,13 @@ _emit() {
 }
 
 _head() {
+    # Pad header to exactly 64 visible cols: 2sp + title(20) + 2sp + hint(40)
+    # so every LEFT row — header, _emit, or blank — starts RIGHT at col 64.
+    # %-22s (not %-20s) because every title starts with `▸` — 3 bytes for
+    # 1 visible col, so we pad 2 extra bytes to land on 20 visible cols.
     local side="$1" title="$2" hint="$3" color="$4"
     local row
-    row="  ${color}${B}${title}${N}  ${D}${hint}${N}"
+    row="  ${color}${B}$(printf '%-22s' "$title")${N}  ${D}$(printf '%-40s' "$hint")${N}"
     if [[ "$side" == "L" ]]; then LEFT+=("$row"); else RIGHT+=("$row"); fi
 }
 
@@ -74,15 +82,15 @@ _blank() {
 # ── LEFT column: Primary panes + Bandwidth top + Trace group ──────────
 _head  L "▸ Primary panes" "(F2-F12, toggle)" "$C"
 _emit  L "F2"  "k9s"               "cluster-at-a-glance"          "$G"
-_emit  L "F3"  "kldload-dash"      "is-everything-OK overview"    "$G"
+_emit  L "F3"  "doctor (once)"     "compliance + sanity report"   "$G"
 _emit  L "F4"  "logs"              "webui + ttyd journal"         "$G"
-_emit  L "F5"  "live firehose"     "all kldload events"           "$G"
+_emit  L "F5"  "lh (cluster logs)" "LogHog menu, all nodes"       "$G"
 _emit  L "F6"  "htop"              "host CPU / mem / procs"       "$G"
 _emit  L "F7"  "k8s events"        "kubectl get events --watch"   "$G"
 _emit  L "F8"  "hubble observe"    "live pod packet flows"        "$G"
 _emit  L "F9"  "zpool iostat"      "ZFS per-vdev latency"         "$G"
 _emit  L "F10" "scratch"           "throwaway shell"              "$G"
-_emit  L "F11" "tcplife"           "TCP sessions src→dst"         "$G"
+_emit  L "F11" "tcplife"           "TCP sessions src->dst"        "$G"
 _emit  L "F12" "tcptop"            "top active TCP conns"         "$G"
 _blank L
 _head  L "▸ HUD popups" "(Alt+letter, auto-dismiss)" "$C"
@@ -126,15 +134,19 @@ _emit  R "Alt+q"   "close window"    "kill current window"        "$C"
 _emit  R "Ctrl+q"  "close window"    "alias for Alt+q"            "$C"
 _blank R
 _head  R "▸ Navigation" "(Shift+Arrow, Alt+Arrow)" "$C"
-_emit  R "Alt+↔↕"   "walk panes"     "move focus between panes"   "$C"
-_emit  R "Shift+→" "next window"    "F-key tab forward"          "$C"
-_emit  R "Shift+←" "prev window"    "F-key tab back"             "$C"
+_emit  R "Alt+arrow" "walk panes"    "move focus between panes"   "$C"
+_emit  R "S-Right"  "next window"    "F-key tab forward"          "$C"
+_emit  R "S-Left"   "prev window"    "F-key tab back"             "$C"
 
 # ── Print columns side by side ─────────────────────────────────────────
+# Every LEFT row is exactly 64 visible cols (matches _emit/_head padding).
+# Empty rows get a 64-space fallback so RIGHT starts at the same column
+# whether LEFT has a row, header, or blank.
+_blankL=$(printf '%.0s ' {1..64})
 max=${#LEFT[@]}
 (( ${#RIGHT[@]} > max )) && max=${#RIGHT[@]}
 for ((i=0; i<max; i++)); do
-    printf "%s%s\n" "${LEFT[i]:-$(printf '%0.s ' {1..68})}" "${RIGHT[i]:-}"
+    printf "%s%s\n" "${LEFT[i]:-$_blankL}" "${RIGHT[i]:-}"
 done
 
 printf "\n${D}   ${G}kztest-tail${D} follows the latest zfs test run's full.log.${N}\n"

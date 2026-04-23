@@ -39,6 +39,16 @@ k_save_effective_config() {
   local out="${KLDLOAD_LOG_DIR:-/var/log/installer}/effective-config.env"
   mkdir -p "$(dirname "${out}")"
 
+  # Snapshot env to a temp file first, then read it back. The previous
+  # `done < <(env | sort)` process-substitution pattern races with the
+  # child's exit under `set -Eeuo pipefail`: bash opens /dev/fd/63 AFTER
+  # the child closes, yielding "/dev/fd/63: No such file or directory"
+  # and aborting the whole install. Observed on CentOS 9 and Fedora
+  # desktop-profile installs where the env set is larger (more exported
+  # vars) and the timing window widens. Temp-file roundtrip can't race.
+  local _envfile; _envfile="$(mktemp 2>/dev/null || echo /tmp/k_env.$$)"
+  env | sort > "${_envfile}" || true
+
   {
     echo "# kldload effective config"
     echo "# generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -46,13 +56,14 @@ k_save_effective_config() {
     while IFS='=' read -r name _; do
       [[ "${name}" == KLDLOAD_* ]] || continue
       case "${name}" in
-        KLDLOAD_PASSWORD|KLDLOAD_ROOT_PASSWORD|KLDLOAD_ZFS_PASSPHRASE|KLDLOAD_WIREGUARD_PRIVATE_KEY|KLDLOAD_WIREGUARD_PRESHARED_KEY)
+        KLDLOAD_PASSWORD|KLDLOAD_ROOT_PASSWORD|KLDLOAD_ZFS_PASSPHRASE|KLDLOAD_WIREGUARD_PRIVATE_KEY|KLDLOAD_WIREGUARD_PRESHARED_KEY|KLDLOAD_WIFI_PSK|KLDLOAD_RHEL_PASSWORD|KLDLOAD_RHEL_ACTIVATION_KEY)
           printf '%s=%q\n' "${name}" "__REDACTED__"
           ;;
         *)
           printf '%s=%q\n' "${name}" "${!name:-}"
           ;;
       esac
-    done < <(env | sort)
+    done < "${_envfile}"
   } > "${out}"
+  rm -f "${_envfile}"
 }

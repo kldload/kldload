@@ -340,20 +340,33 @@ cmd_build() {
             log "Fedora darksite cached: $(du -sh "$fedora_darksite" | cut -f1)"
         fi
 
-        # Ollama model darksite — pulls llama3.1:8b once and bakes the
-        # weights into every ISO so Bob is chat-ready on first boot
-        # without hitting the internet. Set KLDLOAD_SKIP_OLLAMA_DARKSITE=1
-        # to skip (saves ~5 GB ISO size for server/headless builds).
-        if [[ "${KLDLOAD_SKIP_OLLAMA_DARKSITE:-0}" != "1" ]]; then
+        # Ollama model darksite — opt-IN as of 1.0.5. By default the ISO
+        # ships WITHOUT baked-in LLM weights (saves ~9 GB / ~46% of the
+        # ISO). On first boot with Bob enabled, kldload-firstboot falls
+        # back to pulling qwen2.5:14b from ollama.com — same model,
+        # ~5 min on a typical home connection. Users who need offline
+        # AI (air-gapped labs, classified networks) have two options:
+        #
+        #   1. Build the darksite in: KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1
+        #      on the deploy.sh build command — rebuilds the ISO with
+        #      the weights embedded (~17 GB total).
+        #
+        #   2. BYOM (Bring Your Own Models) after install — drop the
+        #      Ollama model tree into /root/darksite/ollama/models/ on
+        #      the installed target (rsync from a box that already
+        #      pulled it, or copy from a pre-populated USB). On next
+        #      boot kldload-firstboot detects the directory and
+        #      rsyncs it into /srv/ollama/models/ before starting
+        #      Ollama — same offline behaviour, no rebuild.
+        if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" == "1" ]]; then
             local ollama_darksite="$ROOT/live-build/darksite-ollama-cache"
-            # Marker: at least one manifest exists under the models tree.
             if ! ls "$ollama_darksite"/models/manifests/registry.ollama.ai/library/*/* >/dev/null 2>&1; then
                 cmd_build_ollama_darksite
             else
                 log "Ollama darksite cached: $(du -sh "$ollama_darksite" | cut -f1)"
             fi
         else
-            log "Skipping Ollama darksite (KLDLOAD_SKIP_OLLAMA_DARKSITE=1)"
+            log "Skipping Ollama darksite (opt-in: KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1)"
         fi
 
         # Arch has no darksite — rolling release, not worth caching.
@@ -486,6 +499,7 @@ cmd_build() {
         -e RELEASE="$RELEASE" \
         -e ISO_NAME_OVERRIDE="${ISO_NAME_OVERRIDE:-}" \
         -e BOB_LIVE="${BOB_LIVE:-}" \
+        -e KLDLOAD_INCLUDE_OLLAMA_DARKSITE="${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" \
         --name "$BUILDER_CONTAINER" \
         "$BUILDER_IMAGE" \
         bash /build/builder/build-iso.sh

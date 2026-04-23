@@ -1,0 +1,69 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  filename: /var/lib/promtail/positions.yaml
+
+clients:
+  - url: http://127.0.0.1:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: journal
+    journal:
+      max_age: 12h
+      labels:
+        job: systemd-journal
+        host: kldload-node
+    relabel_configs:
+      - source_labels: [__journal__systemd_unit]
+        target_label: unit
+      - source_labels: [__journal__transport]
+        target_label: transport
+      - source_labels: [__journal_priority_keyword]
+        target_label: severity
+      - source_labels: [__journal_syslog_identifier]
+        target_label: syslog_id
+
+  - job_name: zfs-dbgmsg
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: zfs-dbgmsg
+          host: kldload-node
+          __path__: /proc/spl/kstat/zfs/dbgmsg
+
+  - job_name: kldload-apps
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: kldload-apps
+          host: kldload-node
+          __path__: /var/log/kldload/*.log
+
+  - job_name: kldload-installer
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: kldload-installer
+          host: kldload-node
+          __path__: /var/log/installer/*.log
+
+  # ── klab test output (pre-digested, 1 file per distro) ─────────────
+  # klab writes /root/klab/<run-id>/<distro>.log during test runs. Tail
+  # all of them with vm label extracted from the filename so the klab
+  # Test Debug dashboard can correlate on {vm=<distro>}.
+  - job_name: klab-test-logs
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: klab-test-logs
+          host: kldload-node
+          __path__: /root/klab/*/*.log
+    pipeline_stages:
+      - regex:
+          source: filename
+          expression: '/root/klab/[^/]+/(?P<vm>[a-z]+)\.log'
+      - labels:
+          vm:

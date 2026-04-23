@@ -589,11 +589,16 @@ if [[ "$EDITION" != "core" && "${BOB_LIVE:-}" != "1" ]]; then
     # XDG autostart — waits for GNOME Shell to be ready, then opens Firefox
     # PostLogin removed: it raced with the compositor and caused black windows
     mkdir -p "${ROOTFS}/etc/xdg/autostart"
+    # webui runs on HTTPS :8443 (self-signed cert via kldload-tls-cert).
+    # Port 8080 was Bob's Open WebUI — not the installer. Pre-import the
+    # cert into Firefox's NSS DB (via certutil from nss-tools) so the
+    # installer page loads without a "Warning: Potential Security Risk"
+    # prompt. Falls back silently if certutil or cert are missing.
     cat > "${ROOTFS}/etc/xdg/autostart/kldload-webui.desktop" << 'AUTOSTART'
 [Desktop Entry]
 Type=Application
 Name=kldload Web UI
-Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/8080) 2>/dev/null && break; sleep 1; done; sleep 3; firefox --no-remote http://localhost:8080'
+Exec=bash -c 'for i in $(seq 1 60); do curl -sk -o /dev/null https://localhost:8443/ 2>/dev/null && break; sleep 1; done; PROF="$HOME/.mozilla/firefox/kldload.default"; mkdir -p "$PROF"; if command -v certutil >/dev/null 2>&1 && [[ -f /var/lib/kldload/tls/webui.crt ]]; then [[ -f "$PROF/cert9.db" ]] || timeout 5 firefox --headless --profile "$PROF" about:blank >/dev/null 2>&1; certutil -A -n kldload-webui-selfsigned -t "CT,," -i /var/lib/kldload/tls/webui.crt -d sql:"$PROF" 2>/dev/null; fi; sleep 2; firefox --no-remote --profile "$PROF" https://localhost:8443'
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=8
 AUTOSTART
@@ -608,8 +613,15 @@ AUTOSTART
     "DontCheckDefaultBrowser": true,
     "DisablePrivateBrowsing": false,
     "NoDefaultBookmarks": true,
+    "PasswordManagerEnabled": false,
+    "OfferToSaveLogins": false,
+    "DisableFormHistory": true,
+    "DisableTelemetry": true,
+    "DisableFirefoxAccounts": true,
+    "DisableFirefoxStudies": true,
+    "DisablePocket": true,
     "Homepage": {
-      "URL": "http://localhost:8080",
+      "URL": "https://localhost:8443",
       "StartPage": "homepage"
     }
   }
@@ -705,12 +717,14 @@ OSREL
 # Core edition: skip all of this — just ZFS on root with stock tools
 # ---------------------------------------------------------------------------
 if [[ "$EDITION" != "core" ]]; then
-    # Copy kldload tools (short names)
-    for tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kldload-help kldload-test kldload-install-target kldload-webui kldload-overview kldload-doctor kldload-db kldload-inventory kldload-console kldload-dash \
+    # Copy kldload tools (short names). Added for pass-12:
+    #   kldload-lh — LogHog cluster-wide wrapper (F5 in tmux console)
+    for tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kldload-help kldload-test kldload-install-target kldload-webui kldload-overview kldload-doctor kldload-db kldload-inventory kldload-console kldload-dash kldload-lh \
                  kinspect kztest-tail _ktoggle-win _kconsole-home \
                  kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo \
                  kube-setup kube-init kube-join kube-status kube-reset kube-network kube-load-images kube-smoke-test kube-cluster kube-demo \
-                 kzfs-test kzfs-lab klab klab-exporter klab-prom-targets \
+                 kzfs-test kzfs-lab klab klab-exporter klab-prom-targets klab-vm-debug-bundle \
+                 kldload-obs-check arcstats-exporter zpool-scrub-exporter \
                  bob bob-agent bob-bash bob-desktop bob-do bob-home bob-model bob-remote bob-sys bob-voice; do
         src="/build/live-build/config/includes.chroot/usr/local/bin/${tool}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/bin/${tool}" && chmod +x "${ROOTFS}/usr/local/bin/${tool}"
@@ -718,7 +732,8 @@ if [[ "$EDITION" != "core" ]]; then
 
     # Bob's sbin tools — boot splash (hardware detect + progress + quotes)
     # and the appliance UI launcher. These live at /usr/local/sbin.
-    for _sb_bob in bob-splash bob-ui; do
+    # kldload-tls-cert added for pass-12 — self-signed TLS for webui HTTPS.
+    for _sb_bob in bob-splash bob-ui kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services; do
         src="/build/live-build/config/includes.chroot/usr/local/sbin/${_sb_bob}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/sbin/${_sb_bob}" && chmod +x "${ROOTFS}/usr/local/sbin/${_sb_bob}"
     done
@@ -766,6 +781,267 @@ if [[ "$EDITION" != "core" ]]; then
         log "Bob: WARNING — whisper.cpp clone failed (offline build?)"
     fi
     rm -rf "${_whisper_tmp}"
+
+    # ── LogHog (lh) — multi-source log stitcher, wired to F5 ────────────
+    # Source tree is shipped at /opt/lh/src via includes.chroot. We compile
+    # it inside the rootfs chroot so the binary links against the target
+    # system's json-c / readline / ncurses (not the builder container's),
+    # then strip and install to /usr/local/bin/lh. kldload-lh wraps it for
+    # cluster-wide SSHFS mounts.
+    # build-iso.sh uses a whitelist-copy (not a wholesale includes.chroot
+    # mirror), so the /opt/lh/src tree has to be copied in explicitly
+    # before the compile-guard below can find it.
+    if [[ -d /build/live-build/config/includes.chroot/opt/lh/src ]]; then
+        mkdir -p "${ROOTFS}/opt/lh"
+        cp -r /build/live-build/config/includes.chroot/opt/lh/src \
+              "${ROOTFS}/opt/lh/src"
+    fi
+    if [[ -d "${ROOTFS}/opt/lh/src" ]]; then
+        log "Building LogHog (lh)..."
+        mount --bind /proc "${ROOTFS}/proc" 2>/dev/null || true
+        mount --bind /sys  "${ROOTFS}/sys"  2>/dev/null || true
+        mount --bind /dev  "${ROOTFS}/dev"  2>/dev/null || true
+        if chroot "${ROOTFS}" bash -c "
+            set -e
+            # json-c-devel + readline-devel + ncurses-devel are in the
+            # ISO's base package set. gcc/make come from the toolchain
+            # group installed by the rootfs bootstrap step above.
+            dnf install -y json-c-devel readline-devel ncurses-devel gcc make >/dev/null 2>&1 || true
+            cd /opt/lh/src
+            make clean >/dev/null 2>&1 || true
+            make >/dev/null
+            install -m 0755 lh /usr/local/bin/lh
+            strip /usr/local/bin/lh 2>/dev/null || true
+        " >> "$LOG_FILE" 2>&1; then
+            log "  lh installed: $(stat -c '%s bytes' "${ROOTFS}/usr/local/bin/lh" 2>/dev/null)"
+        else
+            log "  WARNING: lh build failed — F5 will fall back to journalctl"
+        fi
+        umount "${ROOTFS}/proc" 2>/dev/null || true
+        umount "${ROOTFS}/sys"  2>/dev/null || true
+        umount "${ROOTFS}/dev"  2>/dev/null || true
+    fi
+
+    # ── Observability stack — zfs_exporter, smartctl_exporter, loki, promtail ─
+    # These are Go binaries downloaded from GitHub releases and installed to
+    # /usr/local/bin in the rootfs. Systemd units + configs come in via
+    # includes.chroot, so everything is wired up at first boot automatically.
+    # Dashboards (Grafana provisioning) also ship via includes.chroot under
+    # /var/lib/grafana/dashboards and are picked up by the klab.yaml
+    # provisioning config that's already there.
+    log "Observability: downloading exporters (zfs, smartctl, loki, promtail)..."
+    _obs_tmp="$(mktemp -d)"
+    _obs_ok=1
+    # zfs_exporter
+    if curl -fsSL -o "${_obs_tmp}/zfs_exporter.tgz" \
+        "https://github.com/pdf/zfs_exporter/releases/download/v2.3.8/zfs_exporter-2.3.8.linux-amd64.tar.gz" \
+        >> "$LOG_FILE" 2>&1; then
+        tar xzf "${_obs_tmp}/zfs_exporter.tgz" -C "${_obs_tmp}" >> "$LOG_FILE" 2>&1
+        install -m 0755 "${_obs_tmp}"/zfs_exporter-*/zfs_exporter "${ROOTFS}/usr/local/bin/zfs_exporter"
+    else
+        log "  WARNING zfs_exporter download failed"; _obs_ok=0
+    fi
+    # smartctl_exporter
+    if curl -fsSL -o "${_obs_tmp}/smartctl_exporter.tgz" \
+        "https://github.com/prometheus-community/smartctl_exporter/releases/download/v0.14.0/smartctl_exporter-0.14.0.linux-amd64.tar.gz" \
+        >> "$LOG_FILE" 2>&1; then
+        tar xzf "${_obs_tmp}/smartctl_exporter.tgz" -C "${_obs_tmp}" >> "$LOG_FILE" 2>&1
+        install -m 0755 "${_obs_tmp}"/smartctl_exporter-*/smartctl_exporter "${ROOTFS}/usr/local/bin/smartctl_exporter"
+    else
+        log "  WARNING smartctl_exporter download failed"; _obs_ok=0
+    fi
+    # loki (single binary, zip archive)
+    if curl -fsSL -o "${_obs_tmp}/loki.zip" \
+        "https://github.com/grafana/loki/releases/download/v3.3.2/loki-linux-amd64.zip" \
+        >> "$LOG_FILE" 2>&1; then
+        (cd "${_obs_tmp}" && unzip -o loki.zip >> "$LOG_FILE" 2>&1)
+        install -m 0755 "${_obs_tmp}/loki-linux-amd64" "${ROOTFS}/usr/local/bin/loki"
+    else
+        log "  WARNING loki download failed"; _obs_ok=0
+    fi
+    # promtail (same release)
+    if curl -fsSL -o "${_obs_tmp}/promtail.zip" \
+        "https://github.com/grafana/loki/releases/download/v3.3.2/promtail-linux-amd64.zip" \
+        >> "$LOG_FILE" 2>&1; then
+        (cd "${_obs_tmp}" && unzip -o promtail.zip >> "$LOG_FILE" 2>&1)
+        install -m 0755 "${_obs_tmp}/promtail-linux-amd64" "${ROOTFS}/usr/local/bin/promtail"
+    else
+        log "  WARNING promtail download failed"; _obs_ok=0
+    fi
+    rm -rf "${_obs_tmp}"
+    # Enable the 4 services in the live ISO rootfs so they start at first
+    # boot on the installed target too (profiles.sh copies these). Persistent
+    # journal is enabled via includes.chroot/etc/systemd/journald.conf.d.
+    for _svc in zfs_exporter smartctl_exporter loki promtail; do
+        if [[ -f "${ROOTFS}/usr/lib/systemd/system/${_svc}.service" ]]; then
+            chroot "${ROOTFS}" systemctl enable "${_svc}.service" >> "$LOG_FILE" 2>&1 || true
+        fi
+    done
+    # Pre-create Loki + promtail state dirs so services come up clean.
+    mkdir -p "${ROOTFS}/var/lib/loki" "${ROOTFS}/var/lib/promtail" "${ROOTFS}/var/log/journal"
+
+    # ── Tetragon helm chart (for eBPF syscall policies in K8s) ──────────
+    # autodeploy looks for /root/darksite/helm-charts/tetragon.tgz. Without
+    # this, pass-20 install said "Tetragon chart not in darksite —
+    # trying online helm repo" and skipped because cluster had no internet
+    # during bootstrap. Download once into the rootfs so every installed
+    # target has it ready.
+    mkdir -p "${ROOTFS}/root/darksite/helm-charts"
+    _helm_tmp="$(mktemp -d)"
+    if curl -fsSL -o "${_helm_tmp}/helm.tgz" \
+        "https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz" >> "$LOG_FILE" 2>&1; then
+        tar xzf "${_helm_tmp}/helm.tgz" -C "${_helm_tmp}" >> "$LOG_FILE" 2>&1 || true
+    fi
+    # Pull tetragon chart directly from the cilium oci registry via HTTPS
+    if curl -fsSL -o "${ROOTFS}/root/darksite/helm-charts/tetragon.tgz" \
+        "https://helm.cilium.io/tetragon-1.4.1.tgz" >> "$LOG_FILE" 2>&1; then
+        log "Observability: tetragon chart downloaded to darksite"
+    else
+        # Fallback: try the latest release
+        if curl -fsSL -o "${ROOTFS}/root/darksite/helm-charts/tetragon.tgz" \
+            "https://github.com/cilium/tetragon/releases/download/tetragon-1.4.1/tetragon-1.4.1.tgz" \
+            >> "$LOG_FILE" 2>&1; then
+            log "Observability: tetragon chart (from github) downloaded"
+        else
+            log "  WARNING tetragon chart download failed — will skip during install"
+        fi
+    fi
+    rm -rf "${_helm_tmp}"
+    # smartmontools (smartctl CLI) — required at runtime by smartctl_exporter
+    chroot "${ROOTFS}" dnf install -y smartmontools >> "$LOG_FILE" 2>&1 || \
+        log "  WARNING smartmontools install failed"
+
+    # ebpf_exporter (Cloudflare) — per-device block I/O latency histograms.
+    # BPF programs + yaml configs ship via includes.chroot/etc/ebpf_exporter.
+    _ebpf_tmp="$(mktemp -d)"
+    if curl -fsSL -o "${_ebpf_tmp}/ebpf.tgz" \
+        "https://github.com/cloudflare/ebpf_exporter/releases/download/v2.5.1/ebpf_exporter_with_examples.x86_64.tar.gz" \
+        >> "$LOG_FILE" 2>&1; then
+        tar xzf "${_ebpf_tmp}/ebpf.tgz" -C "${_ebpf_tmp}" --strip-components=1 >> "$LOG_FILE" 2>&1
+        install -m 0755 "${_ebpf_tmp}/ebpf_exporter" "${ROOTFS}/usr/local/bin/ebpf_exporter"
+        log "Observability: ebpf_exporter installed"
+    else
+        log "  WARNING ebpf_exporter download failed"
+    fi
+    rm -rf "${_ebpf_tmp}"
+    # Enable ebpf_exporter at boot
+    if [[ -f "${ROOTFS}/usr/lib/systemd/system/ebpf_exporter.service" ]]; then
+        chroot "${ROOTFS}" systemctl enable ebpf_exporter.service >> "$LOG_FILE" 2>&1 || true
+    fi
+    # Enable zpool-scrub-exporter timer (scrub state textfile collector)
+    if [[ -f "${ROOTFS}/usr/lib/systemd/system/zpool-scrub-exporter.timer" ]]; then
+        chroot "${ROOTFS}" systemctl enable zpool-scrub-exporter.timer >> "$LOG_FILE" 2>&1 || true
+    fi
+    # Enable arcstats-exporter timer
+    if [[ -f "${ROOTFS}/usr/lib/systemd/system/arcstats-exporter.timer" ]]; then
+        chroot "${ROOTFS}" systemctl enable arcstats-exporter.timer >> "$LOG_FILE" 2>&1 || true
+    fi
+    [[ $_obs_ok -eq 1 ]] && log "Observability: stack installed (4 exporters + smartctl)" \
+        || log "Observability: PARTIAL — some downloads failed, check log"
+
+    # Copy Grafana dashboards + datasource + other observability configs
+    # from includes.chroot explicitly (whitelist-copy, same pattern as
+    # Bob configs above). These would otherwise not land because the
+    # build uses explicit copies, not a full includes.chroot mirror.
+    if [[ -d /build/live-build/config/includes.chroot/var/lib/grafana/dashboards ]]; then
+        mkdir -p "${ROOTFS}/var/lib/grafana/dashboards"
+        cp /build/live-build/config/includes.chroot/var/lib/grafana/dashboards/*.json \
+           "${ROOTFS}/var/lib/grafana/dashboards/" 2>>"$LOG_FILE" || true
+        log "Observability: $(ls "${ROOTFS}/var/lib/grafana/dashboards/" | wc -l) dashboards provisioned"
+    fi
+    if [[ -f /build/live-build/config/includes.chroot/etc/grafana/provisioning/datasources/loki.yaml ]]; then
+        mkdir -p "${ROOTFS}/etc/grafana/provisioning/datasources"
+        cp /build/live-build/config/includes.chroot/etc/grafana/provisioning/datasources/loki.yaml \
+           "${ROOTFS}/etc/grafana/provisioning/datasources/loki.yaml"
+    fi
+    if [[ -d /build/live-build/config/includes.chroot/etc/loki ]]; then
+        mkdir -p "${ROOTFS}/etc/loki"
+        cp /build/live-build/config/includes.chroot/etc/loki/*.yaml "${ROOTFS}/etc/loki/" 2>/dev/null || true
+    fi
+    if [[ -d /build/live-build/config/includes.chroot/etc/promtail ]]; then
+        mkdir -p "${ROOTFS}/etc/promtail"
+        cp /build/live-build/config/includes.chroot/etc/promtail/*.yaml "${ROOTFS}/etc/promtail/" 2>/dev/null || true
+    fi
+    if [[ -d /build/live-build/config/includes.chroot/etc/ebpf_exporter ]]; then
+        mkdir -p "${ROOTFS}/etc/ebpf_exporter"
+        cp /build/live-build/config/includes.chroot/etc/ebpf_exporter/* "${ROOTFS}/etc/ebpf_exporter/" 2>/dev/null || true
+    fi
+    if [[ -f /build/live-build/config/includes.chroot/etc/zfs/zed.d/all-loki.sh ]]; then
+        mkdir -p "${ROOTFS}/etc/zfs/zed.d"
+        install -m 0755 /build/live-build/config/includes.chroot/etc/zfs/zed.d/all-loki.sh \
+            "${ROOTFS}/etc/zfs/zed.d/all-loki.sh"
+    fi
+    if [[ -d /build/live-build/config/includes.chroot/etc/systemd/journald.conf.d ]]; then
+        mkdir -p "${ROOTFS}/etc/systemd/journald.conf.d"
+        cp /build/live-build/config/includes.chroot/etc/systemd/journald.conf.d/*.conf \
+           "${ROOTFS}/etc/systemd/journald.conf.d/" 2>/dev/null || true
+    fi
+    if [[ -d /build/live-build/config/includes.chroot/etc/systemd/system/node_exporter.service.d ]]; then
+        mkdir -p "${ROOTFS}/etc/systemd/system/node_exporter.service.d"
+        cp /build/live-build/config/includes.chroot/etc/systemd/system/node_exporter.service.d/*.conf \
+           "${ROOTFS}/etc/systemd/system/node_exporter.service.d/" 2>/dev/null || true
+    fi
+    # Copy systemd units from the live-build tree — glob pattern so new
+    # units added to includes.chroot/usr/lib/systemd/system/ get picked
+    # up automatically. Previous hardcoded list repeatedly missed units
+    # (kldload-tls-cert.service, kldload-tls-cert.timer most recently).
+    shopt -s nullglob
+    for _unit_path in \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/*_exporter.service \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/*-exporter.service \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/*_exporter.timer \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/*-exporter.timer \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/loki.service \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/promtail.service \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-tls-cert.service \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-tls-cert.timer; do
+        [[ -f "$_unit_path" ]] && cp "$_unit_path" "${ROOTFS}/usr/lib/systemd/system/$(basename "$_unit_path")"
+    done
+    shopt -u nullglob
+    # Enable kldload-tls-cert.timer at boot (fires cert-drift check hourly)
+    if [[ -f "${ROOTFS}/usr/lib/systemd/system/kldload-tls-cert.timer" ]]; then
+        chroot "${ROOTFS}" systemctl enable kldload-tls-cert.timer >> "$LOG_FILE" 2>&1 || true
+    fi
+    # Enable kldload-tls-cert.service at boot (regenerates cert once
+    # network is up — handles the DHCP race)
+    if [[ -f "${ROOTFS}/usr/lib/systemd/system/kldload-tls-cert.service" ]]; then
+        chroot "${ROOTFS}" systemctl enable kldload-tls-cert.service >> "$LOG_FILE" 2>&1 || true
+    fi
+    # Enable kldload-journal-flush on first boot — ensures persistent
+    # journal actually gets populated so promtail can scrape kernel logs
+    if [[ -f "${ROOTFS}/usr/lib/systemd/system/kldload-journal-flush.service" ]]; then
+        # Copy the unit in first (wasn't caught by the exporter glob)
+        :
+    fi
+    # Explicitly copy kldload-journal-flush.service (doesn't match the
+    # *-exporter glob)
+    if [[ -f /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-journal-flush.service ]]; then
+        cp /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-journal-flush.service \
+           "${ROOTFS}/usr/lib/systemd/system/kldload-journal-flush.service"
+        chroot "${ROOTFS}" systemctl enable kldload-journal-flush.service >> "$LOG_FILE" 2>&1 || true
+    fi
+
+    # NetworkManager dispatcher hook — fires on IP change events so the
+    # TLS cert gets regen'd without waiting for next reboot/timer.
+    if [[ -f /build/live-build/config/includes.chroot/etc/NetworkManager/dispatcher.d/99-kldload-tls-cert ]]; then
+        mkdir -p "${ROOTFS}/etc/NetworkManager/dispatcher.d"
+        install -m 0755 \
+            /build/live-build/config/includes.chroot/etc/NetworkManager/dispatcher.d/99-kldload-tls-cert \
+            "${ROOTFS}/etc/NetworkManager/dispatcher.d/99-kldload-tls-cert"
+    fi
+
+    # /etc/kldload — admin-editable config dir (tls-extra-sans.txt etc.)
+    if [[ -d /build/live-build/config/includes.chroot/etc/kldload ]]; then
+        mkdir -p "${ROOTFS}/etc/kldload"
+        cp /build/live-build/config/includes.chroot/etc/kldload/*.txt \
+           "${ROOTFS}/etc/kldload/" 2>/dev/null || true
+    fi
+    # tetragon zfs tracing policy
+    if [[ -f /build/live-build/config/includes.chroot/usr/local/share/klab/tetragon-zfs-policy.yaml ]]; then
+        mkdir -p "${ROOTFS}/usr/local/share/klab"
+        cp /build/live-build/config/includes.chroot/usr/local/share/klab/tetragon-zfs-policy.yaml \
+           "${ROOTFS}/usr/local/share/klab/tetragon-zfs-policy.yaml"
+    fi
 
     # ── piper — text-to-speech for Bob's voice output ────────────────────
     log "Bob: installing piper TTS..."
@@ -935,7 +1211,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/kldload-webui --port 8080 --no-browser
+ExecStart=/usr/local/bin/kldload-webui --port 8443 --no-browser
 WorkingDirectory=/usr/local/share/kldload-webui
 Restart=on-failure
 RestartSec=5
@@ -1293,16 +1569,19 @@ if [[ "$EDITION" != "core" ]]; then
     fi
 
     # Copy Ollama model darksite (llama3.1:8b + Bob personality) into rootfs.
-    # Firstboot's AI setup path rsyncs this into /usr/share/ollama/.ollama/
-    # so Bob is chat-ready without pulling ~5 GB from Ollama's registry
-    # on first boot. Adds ~5 GB per model to the ISO; gate with
-    # KLDLOAD_SKIP_OLLAMA_DARKSITE=1 if you don't want AI baked in.
-    if [[ -d /build/live-build/darksite-ollama-cache/models ]]; then
+    # Ollama darksite is OPT-IN — the ISO defaults to no baked-in model,
+    # which keeps it at ~8 GB instead of ~17 GB. First boot with Bob
+    # enabled pulls from ollama.com (internet required). Users who want
+    # offline AI set KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1 on deploy.sh and
+    # the ~9 GB model tree gets baked in. Users who want BYOM drop the
+    # tree into /root/darksite/ollama/models/ on the target before first
+    # boot — kldload-firstboot honours it either way.
+    if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" == "1" ]] && [[ -d /build/live-build/darksite-ollama-cache/models ]]; then
         mkdir -p "${ROOTFS}/root/darksite/ollama"
         cp -r /build/live-build/darksite-ollama-cache/models "${ROOTFS}/root/darksite/ollama/"
         log "Ollama darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/ollama" 2>/dev/null | cut -f1)"
     else
-        log "No Ollama darksite found — Bob will pull model at firstboot (needs internet)"
+        log "Ollama darksite NOT baked in (opt-in via KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1). Bob pulls model at firstboot (internet required)."
     fi
 
     # Copy Alpine darksite apk cache into the rootfs
@@ -1421,6 +1700,16 @@ set default=0
 set timeout=5
 set timeout_style=countdown
 
+# When booting from a USB stick with the new GPT+ESP hybrid layout, GRUB
+# starts with $root set to the EFI System Partition — which does NOT
+# contain the kernel. The kernel lives in the ISO9660 filesystem on the
+# appended partition (labelled "KLDLOAD"). Without this search line, GRUB
+# looks for /images/pxeboot/vmlinuz in the ESP, doesn't find it, and the
+# boot aborts with "file not found". The CD-ROM boot path happens to
+# work without this because emulated-CD firmware sets $root to the
+# ISO9660 volume naturally.
+search --no-floppy --set=root --label 'KLDLOAD'
+
 menuentry "KLDload Live (CentOS Stream 9 + ZFS)" --hotkey=l {
     linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0
     initrdefi /images/pxeboot/initrd.img
@@ -1470,8 +1759,26 @@ cp "${ISO_STAGING}/VERSION" "${ISO_STAGING}/etc/kldload/VERSION"
 mkdir -p "${ROOTFS}/etc/kldload"
 cp "${ISO_STAGING}/VERSION" "${ROOTFS}/etc/kldload/VERSION"
 
-# Build ISO (EFI-only, no legacy BIOS — all modern hardware uses UEFI)
-# -isohybrid-gpt-basdat makes the ISO dd-able to USB (GPT hybrid)
+# Build ISO with UEFI boot that works from USB *and* CD-ROM emulation.
+#
+# Two boot paths need to coexist:
+#   1. CD-ROM / emulated-CD (KVM, Proxmox, libvirt) — firmware reads El
+#      Torito catalog and loads the EFI image pointed to by -e.
+#   2. Bare-metal USB UEFI — firmware scans the device for GPT with an
+#      EFI System Partition. El Torito alone is NOT enough; most UEFI
+#      firmware will not list the USB as bootable without a real GPT.
+#
+# -isohybrid-gpt-basdat only TAGS the EFI image as a GPT basic-data
+# partition entry — it does not synthesize the protective MBR or GPT
+# header, so the first 32 KiB of the ISO stays empty and USB UEFI
+# firmware sees no partition table (issue that broke 1.0.4 downloads).
+#
+# The -append_partition + -appended_part_as_gpt combination appends the
+# efiboot.img as GPT partition 2 with the EFI System Partition GUID
+# (C12A7328-F81F-11D2-BA4B-00A0C93EC93B). xorriso then writes a real
+# protective MBR + GPT so UEFI firmware on any modern machine detects
+# the USB and boots /EFI/BOOT/BOOTX64.EFI. Same pattern as the
+# Fedora/Debian/Arch installer ISOs.
 xorriso -as mkisofs \
     -o "${OUTPUT_DIR}/${ISO_NAME}" \
     -R -J -joliet-long \
@@ -1479,7 +1786,9 @@ xorriso -as mkisofs \
     -V "KLDLOAD" \
     -e images/efiboot.img \
     -no-emul-boot \
-    -isohybrid-gpt-basdat \
+    -appended_part_as_gpt \
+    -append_partition 2 C12A7328-F81F-11D2-BA4B-00A0C93EC93B \
+        "${ISO_STAGING}/images/efiboot.img" \
     "$ISO_STAGING" 2>&1 | tee -a "$LOG_FILE" || \
     die "xorriso failed"
 

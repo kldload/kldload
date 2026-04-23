@@ -53,27 +53,41 @@ if command -v mokutil >/dev/null 2>&1; then
 else
   _warn "mokutil" "not installed"
 fi
-test_file "MOK key (DER)" "/var/lib/dkms/mok.der"
-test_file "MOK key (private)" "/var/lib/dkms/mok.key"
-test_file "MOK key (public)" "/var/lib/dkms/mok.pub"
-if command -v sbsign >/dev/null 2>&1; then
-  _pass "sbsigntool installed"
-else
-  _warn "sbsigntool" "not installed — modules can't be signed locally"
+# MOK / shim / signing checks only apply when the user explicitly opted
+# into Secure Boot at install time. Default is opt-out, so the absence
+# of mok.{key,pub,der} is correct behaviour — not a failure. The install
+# manifest records whether SB was requested.
+_sb_requested=0
+if [[ -f /etc/kldload/install-manifest.env ]] && \
+   grep -q '^KLDLOAD_ENABLE_SECURE_BOOT="\?1"\?' /etc/kldload/install-manifest.env 2>/dev/null; then
+  _sb_requested=1
 fi
-# Check shim on EFI partition
-if [[ -f /boot/efi/EFI/BOOT/BOOTX64.EFI ]]; then
-  _boot_hash="$(sha256sum /boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
-  _zbm_hash="$(sha256sum /boot/efi/EFI/zbm/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
-  if [[ "$_boot_hash" != "$_zbm_hash" ]]; then
-    _pass "Shim installed as UEFI fallback (different from ZFSBootMenu)"
+
+if [[ "${_sb_requested}" == "1" ]]; then
+  test_file "MOK key (DER)" "/var/lib/dkms/mok.der"
+  test_file "MOK key (private)" "/var/lib/dkms/mok.key"
+  test_file "MOK key (public)" "/var/lib/dkms/mok.pub"
+  if command -v sbsign >/dev/null 2>&1; then
+    _pass "sbsigntool installed"
   else
-    _warn "BOOT/BOOTX64.EFI" "same as ZFSBootMenu — shim may not be installed"
+    _warn "sbsigntool" "not installed — modules can't be signed locally"
   fi
+  # Check shim on EFI partition
+  if [[ -f /boot/efi/EFI/BOOT/BOOTX64.EFI ]]; then
+    _boot_hash="$(sha256sum /boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
+    _zbm_hash="$(sha256sum /boot/efi/EFI/zbm/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
+    if [[ "$_boot_hash" != "$_zbm_hash" ]]; then
+      _pass "Shim installed as UEFI fallback (different from ZFSBootMenu)"
+    else
+      _warn "BOOT/BOOTX64.EFI" "same as ZFSBootMenu — shim may not be installed"
+    fi
+  fi
+  test_file "MokManager" "/boot/efi/EFI/BOOT/mmx64.efi"
+  test_file "MOK cert on EFI" "/boot/efi/EFI/BOOT/mok.der"
+  test_file "grubx64.efi (ZBM for shim)" "/boot/efi/EFI/BOOT/grubx64.efi"
+else
+  _pass "Secure Boot: opt-in default (SB off — MOK/shim/signing checks skipped)"
 fi
-test_file "MokManager" "/boot/efi/EFI/BOOT/mmx64.efi"
-test_file "MOK cert on EFI" "/boot/efi/EFI/BOOT/mok.der"
-test_file "grubx64.efi (ZBM for shim)" "/boot/efi/EFI/BOOT/grubx64.efi"
 
 # ── Profile & Edition ────────────────────────────────────────────────────────
 _section "Profile Markers"

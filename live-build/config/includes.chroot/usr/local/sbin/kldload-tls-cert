@@ -16,13 +16,87 @@ CERT_DIR="${KLDLOAD_TLS_CERT_DIR:-/var/lib/kldload/tls}"
 KEY="${CERT_DIR}/webui.key"
 CRT="${CERT_DIR}/webui.crt"
 
-# Generate once, reuse on every subsequent call. Regenerate if the cert
-# has expired.
+# Extra-SANs file — one entry per line (e.g. "DNS:kldload.example.com" or
+# "IP:203.0.113.42"). Lets admins pin a stable DNS name or VIP that isn't
+# auto-discoverable from `ip -4 -o addr show`. Blank lines + # comments
+# ignored. File may not exist on fresh installs — that's fine.
+EXTRA_SANS_FILE="${KLDLOAD_TLS_EXTRA_SANS:-/etc/kldload/tls-extra-sans.txt}"
+
+# Generate once, reuse on every subsequent call. Regenerate if:
+#   1. cert/key missing
+#   2. cert expires within 24h
+#   3. the machine has gained a non-loopback IP that isn't in the SAN
+#      (e.g. fresh install: cert was created before DHCP completed, so
+#      the SAN only has 127.0.0.1 — after the IP comes up, browsers
+#      hitting :7681 or :3000 on that IP would get cert-mismatch and
+#      the terminal iframe fails to load with no visible error)
 _regen=0
 if [[ ! -f "$CRT" || ! -f "$KEY" ]]; then
     _regen=1
 elif ! openssl x509 -in "$CRT" -noout -checkend 86400 >/dev/null 2>&1; then
     _regen=1
+else
+    _san="$(openssl x509 -in "$CRT" -noout -ext subjectAltName 2>/dev/null || true)"
+    # 1. drift on current non-loopback IPs
+    while IFS= read -r _cur_ip; do
+        [[ -z "$_cur_ip" ]] && continue
+        if ! grep -qF "IP Address:${_cur_ip}" <<<"$_san"; then
+            _regen=1
+            break
+        fi
+    done < <(ip -4 -o addr show 2>/dev/null \
+                | awk '{print $4}' \
+                | cut -d/ -f1 \
+                | grep -v '^127\.' || true)
+    # 2. drift on IPv6 non-loopback addresses
+    if [[ "$_regen" -eq 0 ]]; then
+        while IFS= read -r _cur_ip6; do
+            [[ -z "$_cur_ip6" ]] && continue
+            # Skip link-local fe80::/10
+            [[ "$_cur_ip6" == fe80:* ]] && continue
+            if ! grep -qF "IP Address:${_cur_ip6}" <<<"$_san"; then
+                _regen=1
+                break
+            fi
+        done < <(ip -6 -o addr show 2>/dev/null \
+                    | awk '{print $4}' \
+                    | cut -d/ -f1 \
+                    | grep -v '^::1$' || true)
+    fi
+    # 3. drift on hostname (handles hostname change via hostnamectl)
+    if [[ "$_regen" -eq 0 ]]; then
+        _cur_host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo kldload-node)"
+        if ! grep -qF "DNS:${_cur_host}" <<<"$_san"; then
+            _regen=1
+        fi
+    fi
+    # 4. drift on admin-supplied extra SANs
+    if [[ "$_regen" -eq 0 && -r "$EXTRA_SANS_FILE" ]]; then
+        while IFS= read -r _line; do
+            # strip comments + whitespace, skip blanks
+            _line="${_line%%#*}"
+            _line="${_line## }"; _line="${_line%% }"
+            [[ -z "$_line" ]] && continue
+            # Line may be "DNS:foo.example.com" or "IP:203.0.113.1"
+            # Convert to the SAN-check form that openssl emits
+            if [[ "$_line" == DNS:* ]]; then
+                _check="DNS:${_line#DNS:}"
+            elif [[ "$_line" == IP:* ]]; then
+                _check="IP Address:${_line#IP:}"
+            else
+                # Bare — guess by format
+                if [[ "$_line" =~ ^[0-9a-fA-F:.]+$ ]]; then
+                    _check="IP Address:${_line}"
+                else
+                    _check="DNS:${_line}"
+                fi
+            fi
+            if ! grep -qF "$_check" <<<"$_san"; then
+                _regen=1
+                break
+            fi
+        done < "$EXTRA_SANS_FILE"
+    fi
 fi
 
 if [[ "$_regen" -eq 1 ]]; then
@@ -41,6 +115,35 @@ if [[ "$_regen" -eq 1 ]]; then
                 | awk '{print $4}' \
                 | cut -d/ -f1 \
                 | grep -v '^127\.' || true)
+    # IPv6 — link-local (fe80::/10) excluded; they rotate + don't help
+    _ips6=()
+    while IFS= read -r ip6; do
+        [[ -z "$ip6" ]] && continue
+        [[ "$ip6" == fe80:* ]] && continue
+        _ips6+=("$ip6")
+    done < <(ip -6 -o addr show 2>/dev/null \
+                | awk '{print $4}' \
+                | cut -d/ -f1 \
+                | grep -v '^::1$' || true)
+
+    # Extra SANs from admin file
+    _extra_dns=()
+    _extra_ips=()
+    if [[ -r "$EXTRA_SANS_FILE" ]]; then
+        while IFS= read -r _line; do
+            _line="${_line%%#*}"; _line="${_line## }"; _line="${_line%% }"
+            [[ -z "$_line" ]] && continue
+            if [[ "$_line" == DNS:* ]]; then
+                _extra_dns+=("${_line#DNS:}")
+            elif [[ "$_line" == IP:* ]]; then
+                _extra_ips+=("${_line#IP:}")
+            elif [[ "$_line" =~ ^[0-9a-fA-F:.]+$ ]]; then
+                _extra_ips+=("$_line")
+            else
+                _extra_dns+=("$_line")
+            fi
+        done < "$EXTRA_SANS_FILE"
+    fi
 
     {
         echo "[req]"
@@ -60,10 +163,25 @@ if [[ "$_regen" -eq 1 ]]; then
         echo "DNS.2 = ${_short}"
         echo "DNS.3 = localhost"
         echo "DNS.4 = kldload.local"
+        _dns_i=5
+        for _d in "${_extra_dns[@]}"; do
+            echo "DNS.${_dns_i} = ${_d}"
+            _dns_i=$((_dns_i + 1))
+        done
         echo "IP.1  = 127.0.0.1"
         echo "IP.2  = ::1"
-        local _i=3
+        # Not inside a function, so `local` is illegal under set -euo
+        # pipefail — was aborting the whole script before openssl ran.
+        _i=3
         for ip in "${_ips[@]}"; do
+            echo "IP.${_i} = ${ip}"
+            _i=$((_i + 1))
+        done
+        for ip6 in "${_ips6[@]}"; do
+            echo "IP.${_i} = ${ip6}"
+            _i=$((_i + 1))
+        done
+        for ip in "${_extra_ips[@]}"; do
             echo "IP.${_i} = ${ip}"
             _i=$((_i + 1))
         done
@@ -76,6 +194,15 @@ if [[ "$_regen" -eq 1 ]]; then
 
     rm -f "${CERT_DIR}/webui.cnf"
     chmod 0600 "$KEY" "$CRT"
+
+    # Cert just rotated. Try-restart every service that loaded the old
+    # cert into memory — ttyd-k9s, kldload-webui, grafana-server — so the
+    # browser sees the new SANs on next connect. Silent on services that
+    # aren't installed (grafana-server only exists on obs profiles).
+    # --no-block so we don't block boot if one of them is sluggish.
+    if [[ -x /usr/local/sbin/kldload-bounce-tls-services ]]; then
+        /usr/local/sbin/kldload-bounce-tls-services >/dev/null 2>&1 || true
+    fi
 fi
 
 # Emit cert + key on stdout as one blob. kldload-webui splits it.
