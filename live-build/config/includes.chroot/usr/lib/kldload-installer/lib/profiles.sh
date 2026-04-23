@@ -396,10 +396,20 @@ k_install_system_files() {
 
   # ── Systemd units ──────────────────────────────────────────────────────────
   mkdir -p "${target}/usr/lib/systemd/system"
-  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer; do
+  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer; do
     [[ -f "/usr/lib/systemd/system/${f}" ]] && \
       cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
   done
+  # Ensure the proxy BINARY is present on target. Its systemd unit above
+  # is useless without the script. build-iso.sh copies to the live ISO's
+  # /usr/local/sbin but the target-side installer path doesn't always
+  # mirror that — explicit copy here plugs the gap (same pattern used for
+  # kldload-autodeploy just below).
+  if [[ -f /usr/local/sbin/kldload-proxy ]]; then
+    mkdir -p "${target}/usr/local/sbin"
+    cp /usr/local/sbin/kldload-proxy "${target}/usr/local/sbin/kldload-proxy"
+    chmod +x "${target}/usr/local/sbin/kldload-proxy"
+  fi
   # Ship orchestrator + console scripts alongside the units. Ensure
   # /usr/sbin exists on the bootstrap — a minimal dnf install may not
   # create it before this function runs, and a silent cp failure here
@@ -478,6 +488,12 @@ k_install_system_files() {
   # kldload-webui enabled at boot (firstboot also starts it, but enable here for robustness)
   ln -sf "/usr/lib/systemd/system/kldload-webui.service" \
     "${target}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" || true
+  # kldload-proxy — the ONLY thing binding :8443 now (webui moved to
+  # loopback :8444, fronted by this proxy). Without this symlink,
+  # nothing answers TLS at boot and the browser sees "unable to
+  # connect". Mirrors the webui enable above exactly.
+  ln -sf "/usr/lib/systemd/system/kldload-proxy.service" \
+    "${target}/etc/systemd/system/multi-user.target.wants/kldload-proxy.service" || true
   # Autodeploy orchestrator — runs once after firstboot, invokes AI pull
   # + K8s bootstrap + klab goldens in dependency order, writes phase-ready
   # markers the UI reads to turn the Lab Ready banner green.
