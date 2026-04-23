@@ -2643,7 +2643,7 @@ function handle(msg) {
           // inherit the webui's protocol (http vs https). Open WebUI inherits
           // the same cert as kldload-webui when it's behind the webui proxy,
           // so this never mixed-content-blocks even from an HTTPS origin.
-          aiSub.innerHTML = `<a href="${location.protocol}//${location.hostname}:8080" target="_blank" style="color:var(--accent)">Open AI Chat</a>`;
+          aiSub.innerHTML = `<a href="/bob/" target="_blank" style="color:var(--accent)">Open AI Chat</a>`;
         } else if (d.ai_ollama) {
           aiVal.textContent = '◐ starting...';
           aiVal.style.color = 'var(--orange)';
@@ -3441,7 +3441,7 @@ const ROLE_DESCS = {
     tagline: 'Full-featured sandbox — Kubernetes + UI + rich observability + browser console + Bob',
     includes: [
       'Everything in the Kubernetes profile, <strong>plus:</strong>',
-      'Browser terminal at <code>https://&lt;ip&gt;:7681</code> — real <code>k9s</code>, shell, log panes in persistent tmux',
+      'Browser terminal at <code>https://&lt;ip&gt;:8443/k9s/</code> — real <code>k9s</code>, shell, log panes in persistent tmux',
       'UI-managed VM lifecycle: clone / start / stop / destroy / console from the dashboard',
       'Five pre-built golden distros for instant ZFS clone: CentOS Stream 9, Rocky 9, Fedora 43, Debian 13, Ubuntu 24.04',
       'Full host-side observability: Prometheus, Grafana, Loki, promtail',
@@ -4252,11 +4252,12 @@ function k8sRefresh() {
   k8sRefreshAll();
 }
 
-// k9s console — ttyd runs on port 7681 on the same host the webui is served
-// from, so we just swap the port. Lazy-load the iframe until the user opens
-// the panel (avoids eating a terminal session on every page load).
+// k9s console — ttyd is fronted by kldload-proxy at /k9s on the same
+// origin as this page. Relative URL means the iframe inherits the
+// proxy's TLS cert (one prompt) and avoids the cross-origin iframe
+// block that kills direct-:7681 embeds.
 function k9sUrl() {
-  return `${location.protocol}//${location.hostname}:7681/`;
+  return `/k9s/`;
 }
 function k8sConsoleToggle() {
   const body = document.getElementById('k8s-console-body');
@@ -4890,7 +4891,7 @@ const TERM_HEIGHT_KEY = 'kldload:term:height';
 const TERM_OPEN_KEY   = 'kldload:term:open';
 
 function termUrl() {
-  return `${location.protocol}//${location.hostname}:7681/`;
+  return `/k9s/`;
 }
 // Push main content up by the drawer's height so the terminal never
 // overlays the active view. Sets a CSS variable on <html> that
@@ -5047,13 +5048,14 @@ function toggleTheme() {
 (function _initTheme() { _applyTheme(_currentTheme()); })();
 
 // ── Metrics (Grafana embed) ────────────────────────────────────────────────
-// Grafana runs on :3000 on the same host the webui is served from. Anonymous
-// viewer is enabled in grafana.ini so the iframe loads without a login.
-// kiosk=1 (full kiosk) hides the Grafana chrome AND side-menu. kiosk=tv
-// (TV mode) leaves the sidebar poppable on hover, which clashed with the
-// kldload-side dashboard rail — two nav columns fighting for the same job.
+// Grafana is fronted by kldload-proxy at /grafana on the same origin.
+// The relative URL inherits the proxy's TLS cert, skipping the
+// browser's cross-origin iframe block that kills direct-:3000 embeds.
+// Anonymous viewer is enabled in grafana.ini so the iframe loads
+// without a login. kiosk=1 (full kiosk) hides the Grafana chrome AND
+// side-menu.
 function metricsGrafanaBase() {
-  return `${location.protocol}//${location.hostname}:3000`;
+  return `/grafana`;
 }
 // Populated by metricsRefreshList() from Grafana's /api/search.
 let _metricsDashboards = [];

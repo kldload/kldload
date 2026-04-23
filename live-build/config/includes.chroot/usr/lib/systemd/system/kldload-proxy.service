@@ -1,0 +1,30 @@
+[Unit]
+Description=kldload single-port TLS reverse proxy (one cert prompt for every browser-facing service)
+# Must be ordered BEFORE kldload-webui so the webui can bind its
+# loopback backend port (8444) before anything tries to hit :8443.
+# network-online.target is required because kldload-tls-cert captures
+# the DHCP-assigned LAN IP in the cert's SAN.
+After=network-online.target
+Wants=network-online.target
+# Downstream services (grafana, ttyd-k9s, webui) are started in parallel;
+# the proxy 502s gracefully if any backend is slow, and clients retry.
+Before=kldload-webui.service grafana-server.service ttyd-k9s.service
+
+[Service]
+Type=simple
+# Generate the self-signed TLS cert BEFORE binding :8443. Cert is
+# regenerated periodically by kldload-tls-cert.timer to track DHCP IP
+# changes; the proxy reloads it on SIGHUP (future — today we restart).
+ExecStartPre=/usr/local/sbin/kldload-tls-cert
+ExecStart=/usr/local/sbin/kldload-proxy
+# Post-start: wait for :8443 to actually answer TLS. Matches the pattern
+# from the old kldload-webui.service ExecStartPost — downstream services
+# that issue `systemctl start kldload-proxy` get a trustworthy done-marker.
+ExecStartPost=/bin/bash -c 'for i in $(seq 1 30); do ss -ltn 2>/dev/null | grep -q ":8443 " && exit 0; sleep 1; done; exit 1'
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

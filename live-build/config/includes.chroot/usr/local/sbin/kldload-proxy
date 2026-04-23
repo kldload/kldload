@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+# kldload-proxy — single-port TLS reverse proxy for every browser-facing
+# service on a kldload host.
+#
+# Why this exists: browsers anchor cert trust to (scheme, host, port). If
+# the user accepts the kldload self-signed cert on https://host:8443 for
+# the webui, their browser still treats https://host:3000 (Grafana) as a
+# separate origin and shows another cert prompt. Iframes cross-origin to
+# an untrusted cert are blocked outright, so the Metrics tab and the K8s
+# browser-terminal tab silently appear "broken" out of the box.
+#
+# Fix: one TLS listener on :8443 that terminates the kldload cert once,
+# then proxies path-prefixed traffic to plain-HTTP loopback backends.
+#   /grafana/* → 127.0.0.1:3000  (Grafana, HTTP + serve_from_sub_path)
+#   /k9s/*     → 127.0.0.1:7681  (ttyd-k9s, HTTP + -b /k9s)
+#   /bob/*     → 127.0.0.1:8080  (Bob / Open WebUI, HTTP — best effort)
+#   everything else → 127.0.0.1:8444 (kldload-webui, HTTP)
+#
+# The cert prompt the user accepts for :8443 now covers every iframe,
+# every WebSocket (k9s terminal, Grafana Live), every new-tab link.
+#
+# stdlib only. Threaded — one thread per client connection. WebSocket
+# upgrades switch to raw-bytes bi-directional pipe mode.
+import os
+import re
+import select
+import socket
+import ssl
+import sys
+import threading
+
+LISTEN_HOST = "0.0.0.0"
+LISTEN_PORT = 8443
+CERT_FILE   = "/var/lib/kldload/tls/webui.crt"
+KEY_FILE    = "/var/lib/kldload/tls/webui.key"
+
+# Route table. Each entry: (prefix, (host, port), strip_prefix).
+# strip_prefix=True means remove the prefix before forwarding — for
+# backends that expect to be at their own root (Grafana with
+# `serve_from_sub_path = true` strips the configured sub-path
+# internally, so the proxy hands it the already-stripped request).
+# strip_prefix=False keeps the prefix — ttyd with `-b /k9s` serves
+# content ONLY at that prefix and 404s requests without it.
+# Open WebUI (Bob) doesn't natively support sub-paths; we forward
+# unmodified and rely on the fact that Bob is opened in a new tab
+# (not iframed), so the same-origin invariant isn't required for it
+# — but the cert prompt is still avoided because the proxy is.
+ROUTES = [
+    # Grafana with `serve_from_sub_path = true` + `root_url = /grafana/`
+    # expects URLs to INCLUDE the /grafana prefix. Stripping it makes
+    # Grafana issue canonicalization redirects back to /grafana/, which
+    # loops. Forward unchanged.
+    ("/grafana", ("127.0.0.1", 3000), False),
+    # ttyd -b /k9s also keeps the prefix in inbound requests. Same pattern.
+    ("/k9s",     ("127.0.0.1", 7681), False),
+    # Open WebUI (Bob) doesn't natively grok sub-paths. Forward as-is;
+    # opened in a new tab, not iframed, so cross-origin quirks don't
+    # matter much. TLS is still through the proxy.
+    ("/bob",     ("127.0.0.1", 8080), False),
+    ("/",        ("127.0.0.1", 8444), False),  # webui default
+]
+
+# HTTP/1.1 hop-by-hop headers. Never forward these verbatim between
+# client and backend — they describe the current hop's behavior.
+HOP_BY_HOP = {b"connection", b"keep-alive", b"proxy-authenticate",
+              b"proxy-authorization", b"te", b"trailers",
+              b"transfer-encoding", b"upgrade"}
+
+BUF = 65536
+IDLE_TIMEOUT = 600  # seconds; long WS sessions (k9s, hubble stream) need this
+
+def log(msg):
+    sys.stderr.write(f"[kldload-proxy] {msg}\n")
+    sys.stderr.flush()
+
+def pick_backend(path_bytes):
+    """Return (backend, strip_prefix_str) for the given path, where
+    strip_prefix_str is the literal prefix to strip (e.g. '/grafana')
+    or '' to forward the path unchanged."""
+    path = path_bytes.decode("latin1", "replace")
+    for prefix, backend, strip in ROUTES:
+        if prefix == "/":
+            return backend, ""   # default webui — pass through
+        if path == prefix or path.startswith(prefix + "/") or path.startswith(prefix + "?"):
+            return backend, (prefix if strip else "")
+    return ROUTES[-1][1], ""  # fallback: webui
+
+def read_until(sock, delim, limit=65536):
+    """Read from sock until delim is found or limit exceeded. Returns
+    (everything_read, bytes_after_delim). Used to grab the HTTP header
+    block without over-reading into the body."""
+    buf = bytearray()
+    while delim not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > limit:
+            raise ValueError("header block too large")
+    idx = buf.find(delim)
+    if idx < 0:
+        return bytes(buf), b""
+    return bytes(buf[:idx + len(delim)]), bytes(buf[idx + len(delim):])
+
+def parse_headers(header_block):
+    """Parse an HTTP/1.x header block into (request_line, [(name_lower, value), ...])."""
+    lines = header_block.split(b"\r\n")
+    if not lines:
+        raise ValueError("empty header block")
+    request_line = lines[0]
+    headers = []
+    for line in lines[1:]:
+        if not line:
+            continue
+        if b":" not in line:
+            continue
+        name, _, value = line.partition(b":")
+        headers.append((name.strip().lower(), value.strip()))
+    return request_line, headers
+
+def find_header(headers, name_lower):
+    name = name_lower if isinstance(name_lower, bytes) else name_lower.encode()
+    for n, v in headers:
+        if n == name:
+            return v
+    return None
+
+def is_websocket_upgrade(headers):
+    upgrade = find_header(headers, b"upgrade") or b""
+    connection = find_header(headers, b"connection") or b""
+    return (b"websocket" in upgrade.lower()
+            and b"upgrade" in connection.lower())
+
+def rewrite_request(request_line, headers, strip_prefix, backend_host, backend_port):
+    """Rebuild the request to send upstream. Strips our path prefix,
+    replaces Host header, drops hop-by-hop headers except when we're
+    passing through a WS upgrade (where Upgrade + Connection ARE the
+    payload and must be preserved)."""
+    parts = request_line.split(b" ", 2)
+    if len(parts) != 3:
+        raise ValueError("malformed request line")
+    method, path, version = parts
+
+    # Split query from path for safe prefix strip
+    if b"?" in path:
+        path_only, _, query = path.partition(b"?")
+        query = b"?" + query
+    else:
+        path_only, query = path, b""
+
+    if strip_prefix:
+        pfx = strip_prefix.encode()
+        if path_only == pfx:
+            path_only = b"/"
+        elif path_only.startswith(pfx + b"/"):
+            path_only = path_only[len(pfx):]
+        # else leave alone (shouldn't happen — pick_backend already matched)
+    new_path = path_only + query
+
+    new_request_line = b" ".join([method, new_path, version])
+
+    is_ws = is_websocket_upgrade(headers)
+    keep_hop = {b"upgrade", b"connection"} if is_ws else set()
+
+    out_headers = []
+    seen_host = False
+    for n, v in headers:
+        if n == b"host":
+            seen_host = True
+            out_headers.append((b"Host", f"{backend_host}:{backend_port}".encode()))
+            continue
+        if n in HOP_BY_HOP and n not in keep_hop:
+            continue
+        # Re-case for readability in logs; HTTP names are case-insensitive.
+        pretty = b"-".join(p.capitalize() for p in n.split(b"-"))
+        out_headers.append((pretty, v))
+    if not seen_host:
+        out_headers.append((b"Host", f"{backend_host}:{backend_port}".encode()))
+
+    # Forwarded-for trail so backends can log the real client IP.
+    out_headers.append((b"X-Forwarded-Proto", b"https"))
+    out_headers.append((b"X-Forwarded-Host", find_header(headers, b"host") or b""))
+
+    out = new_request_line + b"\r\n"
+    for n, v in out_headers:
+        out += n + b": " + v + b"\r\n"
+    out += b"\r\n"
+    return out, is_ws, method
+
+def rewrite_response_headers(header_block):
+    """Strip hop-by-hop response headers. Keep everything else as-is —
+    Set-Cookie, Content-Type, redirects, all pass straight through. The
+    backend is responsible for generating sub-path-aware Location: URLs
+    via its root_url / base-path settings; we don't rewrite bodies."""
+    try:
+        status_line, rest = header_block.split(b"\r\n", 1)
+    except ValueError:
+        return header_block
+    lines = rest.split(b"\r\n")
+    out_lines = [status_line]
+    for line in lines:
+        if not line:
+            continue
+        if b":" not in line:
+            out_lines.append(line)
+            continue
+        name, _, _value = line.partition(b":")
+        if name.strip().lower() in HOP_BY_HOP:
+            continue
+        out_lines.append(line)
+    out_lines.append(b"")
+    out_lines.append(b"")
+    return b"\r\n".join(out_lines)
+
+def pipe_bidirectional(a, b):
+    """Both sockets speak raw bytes now (WebSocket payload). Copy each
+    direction until one side EOFs or errors, then shut down the other
+    direction so the peer sees a clean close."""
+    done = threading.Event()
+    def copy(src, dst, tag):
+        try:
+            while not done.is_set():
+                r, _, _ = select.select([src], [], [], IDLE_TIMEOUT)
+                if not r:
+                    break
+                chunk = src.recv(BUF)
+                if not chunk:
+                    break
+                dst.sendall(chunk)
+        except Exception:
+            pass
+        finally:
+            done.set()
+            try: dst.shutdown(socket.SHUT_WR)
+            except Exception: pass
+    t1 = threading.Thread(target=copy, args=(a, b, "c→s"), daemon=True)
+    t2 = threading.Thread(target=copy, args=(b, a, "s→c"), daemon=True)
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+
+def forward_body(src, dst, headers):
+    """Forward the request body (or entire response) respecting
+    Content-Length or chunked encoding. For chunked: just stream bytes
+    until the terminal 0-length chunk. For Content-Length: stream N
+    bytes. For neither: read to EOF (close-delimited)."""
+    cl = find_header(headers, b"content-length")
+    te = find_header(headers, b"transfer-encoding")
+    if te and b"chunked" in te.lower():
+        # Let the backend/client parse chunks themselves — we're a
+        # byte pipe. Read until we see "0\r\n\r\n" which terminates
+        # the chunked body. Imperfect (may over-read into next request
+        # on keep-alive) but we close the connection after anyway.
+        tail = b""
+        while True:
+            chunk = src.recv(BUF)
+            if not chunk:
+                break
+            dst.sendall(chunk)
+            tail = (tail + chunk)[-5:]
+            if b"0\r\n\r\n" in tail:
+                break
+    elif cl is not None:
+        try:
+            n = int(cl)
+        except ValueError:
+            return
+        while n > 0:
+            chunk = src.recv(min(BUF, n))
+            if not chunk:
+                break
+            dst.sendall(chunk)
+            n -= len(chunk)
+    else:
+        # No length — close-delimited. Read to EOF.
+        while True:
+            chunk = src.recv(BUF)
+            if not chunk:
+                break
+            dst.sendall(chunk)
+
+def handle(client_sock, client_addr):
+    try:
+        client_sock.settimeout(60)
+
+        # Read request head
+        head, leftover = read_until(client_sock, b"\r\n\r\n")
+        header_block = head[:-4] if head.endswith(b"\r\n\r\n") else head
+        try:
+            request_line, headers = parse_headers(header_block)
+        except Exception as e:
+            client_sock.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+            return
+
+        parts = request_line.split(b" ", 2)
+        if len(parts) != 3:
+            client_sock.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+            return
+        method, path, _version = parts
+
+        (be_host, be_port), strip_prefix = pick_backend(path)
+
+        # Connect upstream
+        try:
+            backend = socket.create_connection((be_host, be_port), timeout=10)
+        except Exception as e:
+            log(f"backend {be_host}:{be_port} unreachable: {e}")
+            client_sock.sendall(
+                b"HTTP/1.1 502 Bad Gateway\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Content-Length: 32\r\n\r\n"
+                b"kldload-proxy: backend offline\n")
+            return
+        backend.settimeout(60)
+
+        # Rewrite + send request head
+        new_head, is_ws, _method = rewrite_request(
+            request_line, headers, strip_prefix, be_host, be_port)
+        backend.sendall(new_head)
+
+        # Forward any client body bytes we already read past the headers
+        if leftover:
+            backend.sendall(leftover)
+
+        if is_ws:
+            # Forward the backend's 101 response headers back to client,
+            # then enter raw-bytes pipe mode. The WS handshake finishes
+            # only after the 101 is seen; do NOT call forward_body here.
+            resp_head, resp_leftover = read_until(backend, b"\r\n\r\n")
+            if resp_leftover:
+                # Any early backend WS frames: buffer them for the pipe.
+                pass
+            client_sock.sendall(rewrite_response_headers(resp_head))
+            if resp_leftover:
+                client_sock.sendall(resp_leftover)
+            # Remove socket timeouts so idle WS sessions don't get killed.
+            client_sock.settimeout(None)
+            backend.settimeout(None)
+            pipe_bidirectional(client_sock, backend)
+            return
+
+        # Regular HTTP: finish forwarding request body
+        if method not in (b"GET", b"HEAD", b"DELETE", b"OPTIONS"):
+            forward_body(client_sock, backend, headers)
+
+        # Read + forward response
+        resp_head, resp_leftover = read_until(backend, b"\r\n\r\n")
+        try:
+            resp_line, resp_headers = parse_headers(
+                resp_head[:-4] if resp_head.endswith(b"\r\n\r\n") else resp_head)
+        except Exception:
+            client_sock.sendall(resp_head)
+            return
+        # Parse the status code so we can skip body-reading on no-body responses
+        try:
+            status_code = int(resp_line.split(b" ", 2)[1])
+        except Exception:
+            status_code = 200
+        client_sock.sendall(rewrite_response_headers(resp_head))
+        if resp_leftover:
+            client_sock.sendall(resp_leftover)
+        # HEAD, 1xx, 204, 304 responses have no body regardless of headers
+        # (see RFC 7230 §3.3.3). If we try to read one, we block forever.
+        no_body = (method == b"HEAD"
+                   or 100 <= status_code < 200
+                   or status_code in (204, 304))
+        if not no_body:
+            forward_body(backend, client_sock, resp_headers)
+
+    except Exception as e:
+        try: log(f"conn {client_addr}: {e}")
+        except Exception: pass
+    finally:
+        try: client_sock.close()
+        except Exception: pass
+
+def main():
+    if not os.path.exists(CERT_FILE) or not os.path.exists(KEY_FILE):
+        log(f"missing cert ({CERT_FILE}) or key ({KEY_FILE}); run kldload-tls-cert first")
+        sys.exit(1)
+
+    ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ctx.load_cert_chain(CERT_FILE, KEY_FILE)
+    # Permissive so older browsers still connect. Self-signed — user
+    # has already chosen to trust it.
+    ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((LISTEN_HOST, LISTEN_PORT))
+    srv.listen(128)
+    log(f"listening on {LISTEN_HOST}:{LISTEN_PORT} (TLS)")
+    log(f"routes: grafana:3000, k9s:7681, bob:8080, webui:8444")
+
+    while True:
+        raw, addr = srv.accept()
+        try:
+            tls = ctx.wrap_socket(raw, server_side=True)
+        except ssl.SSLError as e:
+            log(f"TLS handshake from {addr} failed: {e}")
+            try: raw.close()
+            except Exception: pass
+            continue
+        except Exception as e:
+            log(f"accept {addr} failed: {e}")
+            try: raw.close()
+            except Exception: pass
+            continue
+        t = threading.Thread(target=handle, args=(tls, addr), daemon=True)
+        t.start()
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

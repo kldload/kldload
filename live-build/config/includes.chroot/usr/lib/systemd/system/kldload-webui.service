@@ -6,8 +6,8 @@ Description=kldload Web UI (installer + management frontend)
 # ExecStartPre runs kldload-tls-cert which needs the LAN IP assigned to
 # build correct SANs. Ordering before the heavy units still holds — the
 # UI comes up ~seconds after DHCP completes; heavy work runs in parallel.
-After=network-online.target systemd-modules-load.service
-Wants=network-online.target systemd-modules-load.service
+After=network-online.target systemd-modules-load.service kldload-proxy.service
+Wants=network-online.target systemd-modules-load.service kldload-proxy.service
 Before=kldload-firstboot.service kldload-autodeploy.service klab-firstboot.service
 
 [Service]
@@ -18,21 +18,15 @@ Type=simple
 # the cluster is fine.
 Environment=HOME=/root
 Environment=KUBECONFIG=/root/.kube/config
-# Generate the self-signed TLS cert BEFORE binding the port. Without
-# this the Python server exits ("certfile not found") and systemd
-# retries it 5×, leaving Firefox staring at connection-refused for
-# ~25s even though everything else is up. The oneshot
-# kldload-tls-cert.service regenerates later with DHCP SAN, but this
-# ensures there's ALWAYS a valid cert at startup.
-ExecStartPre=/usr/local/sbin/kldload-tls-cert
-ExecStart=/usr/local/bin/kldload-webui --port 8443 --no-browser
-# After ExecStart returns success, probe port 8443 until it answers
-# HTTPS. This doesn't gate Type=simple's "started" state (systemd 240+
-# would need Type=exec for that) but it DOES block RestartSec loops
-# from racing a slow TLS init, and gives any downstream service that
-# issues `systemctl start kldload-webui` a post-condition they can
-# trust before launching Firefox etc.
-ExecStartPost=/bin/bash -c 'for i in $(seq 1 60); do ss -ltn 2>/dev/null | grep -q ":8443 " && exit 0; sleep 1; done; exit 1'
+# TLS is now terminated by kldload-proxy on :8443 — the webui runs as
+# plain HTTP on loopback :8444 and the proxy forwards to it. This is
+# what lets ONE cert prompt (the proxy's) cover the webui + every
+# iframed service (Grafana, ttyd-k9s, Bob) as a single origin. If the
+# proxy is down, :8443 is simply unreachable — no half-working state.
+ExecStart=/usr/local/bin/kldload-webui --port 8444 --bind 127.0.0.1 --no-tls --no-browser
+# Post-condition: backend port actually answering. Keeps systemd from
+# marking the unit "started" before the HTTP server is accept()-ing.
+ExecStartPost=/bin/bash -c 'for i in $(seq 1 60); do ss -ltn 2>/dev/null | grep -q "127.0.0.1:8444 " && exit 0; sleep 1; done; exit 1'
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

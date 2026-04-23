@@ -1820,25 +1820,30 @@ for p in glob.glob("/var/lib/grafana/dashboards/*.json"):
 PYFIX
         chown -R grafana:grafana /var/lib/grafana/dashboards 2>/dev/null || true
 
-        # Anonymous Viewer + iframe embedding + HTTPS — required for the
-        # Metrics tab in the kldload web UI to embed Grafana from an HTTPS
-        # origin without a mixed-content block or login redirect. Uses the
-        # same self-signed cert as the webui so no second cert prompt.
+        # Anonymous Viewer + iframe embedding — grafana binds loopback HTTP
+        # only. kldload-proxy on :8443 terminates TLS and exposes grafana
+        # at https://<host>:8443/grafana/. One cert prompt (proxy's)
+        # covers the webui + grafana + ttyd-k9s as a single origin; no
+        # second prompt, no cross-origin iframe block.
         if ! grep -q "^\[auth.anonymous\]" /etc/grafana/grafana.ini 2>/dev/null \
            || ! grep -A2 "^\[auth.anonymous\]" /etc/grafana/grafana.ini | grep -q "^enabled = true"; then
-          # Copy the webui cert into grafana's dir so it can read it as the
-          # grafana user (webui.crt is 0600 root:root by default).
-          cp /var/lib/kldload/tls/webui.crt /etc/grafana/webui.crt 2>/dev/null || true
-          cp /var/lib/kldload/tls/webui.key /etc/grafana/webui.key 2>/dev/null || true
-          chown grafana:grafana /etc/grafana/webui.crt /etc/grafana/webui.key 2>/dev/null || true
-          chmod 0640 /etc/grafana/webui.crt /etc/grafana/webui.key 2>/dev/null || true
           cat >> /etc/grafana/grafana.ini <<'GRAFEMBED'
 
 [server]
-protocol = https
-cert_file = /etc/grafana/webui.crt
-cert_key = /etc/grafana/webui.key
+protocol = http
+http_addr = 127.0.0.1
 http_port = 3000
+# Host-agnostic URL: no scheme, no domain, just the sub-path. This
+# lets Grafana generate redirects like "Location: /grafana/login"
+# which the browser resolves against its current origin (the proxy
+# on :8443), so the URL works whether the user typed the LAN IP,
+# the WireGuard IP, the hostname, or localhost. Setting a concrete
+# domain = X here would pin it to one host and break the others.
+root_url = /grafana/
+serve_from_sub_path = true
+# Stop Grafana enforcing its configured domain for redirects — with
+# an empty domain, a redirect-auth-mismatch would otherwise 404.
+enforce_domain = false
 
 [auth.anonymous]
 enabled = true
@@ -1853,7 +1858,7 @@ cookie_samesite = none
 default_theme = dark
 GRAFEMBED
           systemctl restart grafana-server 2>/dev/null || true
-          ok "Grafana anonymous + iframe embedding + HTTPS enabled"
+          ok "Grafana anonymous + iframe embedding via proxy (/grafana) enabled"
         fi
 
         # Prometheus: add localhost:9100 (host node_exporter) scrape if

@@ -7554,7 +7554,10 @@ async def main_async(args):
     except Exception as e:
         LOG.warning("Secrets backend init failed: %s", e)
     db_init()
-    ssl_ctx = _get_ssl_context()
+    # --no-tls is set by kldload-webui.service when kldload-proxy is fronting
+    # us on :8443; we bind 127.0.0.1:8444 plain HTTP so one cert prompt on
+    # the proxy covers the entire origin (webui + grafana + k9s iframes).
+    ssl_ctx = None if args.no_tls else _get_ssl_context()
     scheme    = "https" if ssl_ctx else "http"
 
     async def process_request(connection, request):
@@ -7609,6 +7612,7 @@ def main():
     parser.add_argument("--port",       type=int, default=8080,  help="HTTP + WebSocket port (default 8080)")
     parser.add_argument("--bind",       default="0.0.0.0",       help="Bind address (default 0.0.0.0)")
     parser.add_argument("--no-browser", action="store_true",     help="Don't open browser")
+    parser.add_argument("--no-tls",     action="store_true",     help="Serve plain HTTP — used when fronted by kldload-proxy")
     args = parser.parse_args()
 
     # webui needs root: it chmod()s /var/lib/kldload/secrets to 0700, creates

@@ -12,17 +12,13 @@ Environment=HOME=/root
 Environment=KUBECONFIG=/root/.kube/config
 Environment=TERM=xterm-256color
 # -W = writable (keyboard input). Session lives inside tmux so iframe
-# reloads reattach instead of losing state. Bound to 0.0.0.0 so both LAN
-# and WireGuard mesh can reach it. Tighten to a specific interface by
-# changing -i 0.0.0.0 if needed.
-# TLS: ttyd must speak HTTPS so the webui (https://…:8443) can iframe
-# it without triggering the browser's mixed-content block. Generate/reuse
-# the same self-signed cert kldload-tls-cert produces for the webui. The
-# pre-start hook runs the cert script (idempotent — only regen if expired)
-# and makes the files readable by the ttyd user. If cert generation fails
-# we still start ttyd on HTTP and let the user see the failure in the
-# webui (terminal shows mixed-content error with actionable guidance).
-ExecStartPre=/bin/sh -c '/usr/local/sbin/kldload-tls-cert >/dev/null 2>&1 || true; chmod 0644 /var/lib/kldload/tls/webui.crt 2>/dev/null || true; chmod 0640 /var/lib/kldload/tls/webui.key 2>/dev/null || true'
+# reloads reattach instead of losing state.
+# Bind 127.0.0.1 only — kldload-proxy on :8443 fronts us at /k9s/*
+# over TLS using the same cert that covers the webui. Speaking plain
+# HTTP on loopback means one browser cert prompt covers every origin.
+# -b /k9s tells ttyd its URLs are under the /k9s sub-path so all
+# generated hrefs/websocket URLs match what the browser requests
+# through the proxy.
 
 # Clipboard: xterm.js copies the selection to the browser's clipboard
 # automatically (copyOnSelect=true) — drag to select, no key press
@@ -33,9 +29,7 @@ ExecStartPre=/bin/sh -c '/usr/local/sbin/kldload-tls-cert >/dev/null 2>&1 || tru
 # disableLeaveAlert=true so the browser doesn't prompt on page close.
 # rendererType=webgl for smoother scrolling on big live log streams.
 # scrollback=10000 lets you scroll back further in panes like hubble.
-ExecStart=/usr/local/bin/ttyd -W -i 0.0.0.0 -p 7681 \
-    --ssl --ssl-cert /var/lib/kldload/tls/webui.crt \
-    --ssl-key /var/lib/kldload/tls/webui.key \
+ExecStart=/usr/local/bin/ttyd -W -i 127.0.0.1 -p 7681 -b /k9s \
     -t fontSize=14 \
     -t copyOnSelect=true \
     -t disableLeaveAlert=true \
