@@ -733,7 +733,10 @@ if [[ "$EDITION" != "core" ]]; then
     # Bob's sbin tools — boot splash (hardware detect + progress + quotes)
     # and the appliance UI launcher. These live at /usr/local/sbin.
     # kldload-tls-cert added for pass-12 — self-signed TLS for webui HTTPS.
-    for _sb_bob in bob-splash bob-ui kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services; do
+    # kldload-proxy is the :8443 reverse proxy that fronts webui, grafana,
+    # ttyd-k9s and Bob behind a single cert — without it, nothing answers
+    # on :8443 because the webui binds loopback :8444 now.
+    for _sb_bob in bob-splash bob-ui kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-proxy; do
         src="/build/live-build/config/includes.chroot/usr/local/sbin/${_sb_bob}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/sbin/${_sb_bob}" && chmod +x "${ROOTFS}/usr/local/sbin/${_sb_bob}"
     done
@@ -994,10 +997,18 @@ if [[ "$EDITION" != "core" ]]; then
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/loki.service \
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/promtail.service \
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-tls-cert.service \
-        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-tls-cert.timer; do
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-tls-cert.timer \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-proxy.service; do
         [[ -f "$_unit_path" ]] && cp "$_unit_path" "${ROOTFS}/usr/lib/systemd/system/$(basename "$_unit_path")"
     done
     shopt -u nullglob
+    # Enable kldload-proxy at boot — terminates TLS on :8443 and routes
+    # to webui/grafana/ttyd/bob on loopback. If this doesn't start,
+    # the browser sees "unable to connect" because nothing else binds
+    # :8443 in this architecture.
+    if [[ -f "${ROOTFS}/usr/lib/systemd/system/kldload-proxy.service" ]]; then
+        chroot "${ROOTFS}" systemctl enable kldload-proxy.service >> "$LOG_FILE" 2>&1 || true
+    fi
     # Enable kldload-tls-cert.timer at boot (fires cert-drift check hourly)
     if [[ -f "${ROOTFS}/usr/lib/systemd/system/kldload-tls-cert.timer" ]]; then
         chroot "${ROOTFS}" systemctl enable kldload-tls-cert.timer >> "$LOG_FILE" 2>&1 || true
