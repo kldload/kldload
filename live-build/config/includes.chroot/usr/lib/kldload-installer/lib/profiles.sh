@@ -315,6 +315,16 @@ k_install_system_files() {
     > "${target}/etc/sudoers.d/kldload-path"
   chmod 440 "${target}/etc/sudoers.d/kldload-path"
 
+  # Ghostty terminfo — applies to every profile, including core. Upstream ncurses
+  # has not yet picked up xterm-ghostty, and no distro we target ships it in
+  # their base ncurses-term, so SSH-in from Ghostty lands on a broken TERM.
+  # The two files are 4KB combined and purely additive (no-op for non-Ghostty).
+  for _ti in x/xterm-ghostty g/ghostty; do
+    if [[ -f "/usr/share/terminfo/${_ti}" ]]; then
+      install -Dm 0644 "/usr/share/terminfo/${_ti}" "${target}/usr/share/terminfo/${_ti}"
+    fi
+  done
+
   # ── Core profile: skip all kldload tools, sanoid, webui, snapshot hooks ────
   # Core gets ZFS on root + boot environments + stock distro. Nothing else.
   if [[ "$_profile" == "core" ]]; then
