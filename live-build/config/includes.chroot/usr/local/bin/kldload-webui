@@ -769,15 +769,31 @@ def db_import_all(data, merge=True):
     return counts
 
 def is_live_mode():
-    """Return True if running on the live ISO (not installed system)."""
+    """Return True if running on the live ISO (not installed system).
+
+    Canonical signal is KLDLOAD_INSTALLED=1 in /etc/kldload/install-manifest.env
+    (written by the installer on target finalize). The older check was for
+    /etc/kldload/node.env which the installer has never actually written,
+    so every installed kldload system wrongly reported "live mode" and the
+    webui served the stripped-down install sidebar forever (no K8s / KVM /
+    klab / Helm / Ansible / Bob / Metrics tabs ever appeared)."""
     try:
         cmdline = Path("/proc/cmdline").read_text()
         if "boot=live" in cmdline:
             return True
     except Exception:
         pass
-    node_env = Path("/etc/kldload/node.env")
-    return not node_env.exists()
+    try:
+        mf = Path("/etc/kldload/install-manifest.env").read_text()
+        for line in mf.splitlines():
+            if line.strip().startswith("KLDLOAD_INSTALLED="):
+                # Strip quotes + whitespace; treat any non-"0" value as truthy
+                val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if val and val != "0":
+                    return False
+    except Exception:
+        pass
+    return True
 
 def get_node_env():
     """Return dict of key=value pairs from /etc/kldload/node.env, or {} if absent."""
