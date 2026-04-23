@@ -8,7 +8,7 @@ Every install is fully auditable — build logs, package manifests, and smoke te
 
 Pick a distro, pick a profile, install. Profiles range from minimal ZFS-only (core) to full desktop, headless server, KVM hypervisor with ZFS instant clones (bare metal), Kubernetes with Cilium eBPF networking (bare metal), and AI assistant with local LLM + GPU (bare metal or VM).
 
-**Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Demo:** [YouTube](https://www.youtube.com/watch?v=egFffrFa6Ss) | **Discord:** [discord.gg/tkVN6sSU](https://discord.gg/tkVN6sSU)
+**Website:** [kldload.com](https://kldload.com) | **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) | **Demo:** [YouTube](https://www.youtube.com/watch?v=egFffrFa6Ss) | **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
 
 ![kldloadOS Installer](screenshots/installer-ui.png)
 
