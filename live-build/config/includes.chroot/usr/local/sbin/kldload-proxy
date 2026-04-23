@@ -322,14 +322,17 @@ def handle(client_sock, client_addr):
             backend.sendall(leftover)
 
         if is_ws:
-            # Forward the backend's 101 response headers back to client,
-            # then enter raw-bytes pipe mode. The WS handshake finishes
-            # only after the 101 is seen; do NOT call forward_body here.
+            # Forward the backend's 101 response headers back to client
+            # VERBATIM — do NOT run through rewrite_response_headers()
+            # because that strips Connection + Upgrade as hop-by-hop, but
+            # for a WS 101 those headers ARE the payload (per RFC 6455,
+            # the 101 MUST carry `Connection: Upgrade` + `Upgrade: websocket`
+            # — strip them and the browser's WS client rejects with
+            # `InvalidUpgrade: missing Connection header` and every piece
+            # of real-time UI data stalls silently). After the 101 we
+            # enter raw-bytes pipe mode; do NOT call forward_body here.
             resp_head, resp_leftover = read_until(backend, b"\r\n\r\n")
-            if resp_leftover:
-                # Any early backend WS frames: buffer them for the pipe.
-                pass
-            client_sock.sendall(rewrite_response_headers(resp_head))
+            client_sock.sendall(resp_head)
             if resp_leftover:
                 client_sock.sendall(resp_leftover)
             # Remove socket timeouts so idle WS sessions don't get killed.

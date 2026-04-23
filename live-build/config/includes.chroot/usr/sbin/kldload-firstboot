@@ -1467,25 +1467,26 @@ KAIREMOTE
         ok "AI profile ready — commands: kai, kai-voice, kai-do, kai-remote"
         ok "AI model and knowledge corpus configured"
 
-        # Set Open WebUI as the browser homepage for desktop profiles
+        # Firefox policy — bookmarks + first-run suppression on EVERY GUI
+        # profile. Only LAB profiles (kvm / ai / zfslab) also get Homepage
+        # + autostart to auto-open the webui at login; workstation
+        # (desktop) and server users keep their chosen homepage.
         local _webui_ready="${_webui_ready:-false}"
-        local _webui_url="http://localhost:8080"
-        if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]]; then
-          # Set Firefox homepage for all users
-          mkdir -p /etc/firefox/policies
-          cat > /etc/firefox/policies/policies.json <<FFPOL
+        local _prof="${ROLE:-${KLDLOAD_PROFILE:-server}}"
+        case "${_prof}" in
+          kvm|ai|zfslab)
+            mkdir -p /etc/firefox/policies
+            cat > /etc/firefox/policies/policies.json <<FFPOL
 {
   "policies": {
     "Homepage": {
-      "URL": "http://localhost:8443",
-      "StartPage": "homepage",
-      "Additional": ["http://localhost:8080"]
+      "URL": "https://localhost:8443",
+      "StartPage": "homepage"
     },
-    "OverrideFirstRunPage": "http://localhost:8443",
+    "OverrideFirstRunPage": "https://localhost:8443",
     "Bookmarks": [
-      {"Title": "kldload Dashboard", "URL": "http://localhost:8443", "Placement": "toolbar"},
-      {"Title": "AI Chat", "URL": "http://localhost:8080", "Placement": "toolbar"},
-      {"Title": "kldload Docs", "URL": "https://kldload.com", "Placement": "toolbar"}
+      {"Title": "kldload Web UI", "URL": "https://localhost:8443", "Placement": "toolbar"},
+      {"Title": "kldload Docs",   "URL": "https://kldload.com",    "Placement": "toolbar"}
     ],
     "DisplayBookmarksToolbar": "always",
     "NoDefaultBookmarks": true,
@@ -1498,35 +1499,48 @@ KAIREMOTE
   }
 }
 FFPOL
-          # Auto-open Firefox on login (same as live installer)
-          mkdir -p /etc/xdg/autostart
-          cat > /etc/xdg/autostart/kldload-dashboard.desktop <<AUTOSTART
+            mkdir -p /etc/xdg/autostart
+            cat > /etc/xdg/autostart/kldload-dashboard.desktop <<AUTOSTART
 [Desktop Entry]
 Type=Application
 Name=kldload Dashboard
-Exec=firefox http://localhost:8443
+Comment=Auto-open the kldload ops console at login (lab profile)
+Exec=bash -c 'for i in \$(seq 1 60); do (echo >/dev/tcp/localhost/8443) 2>/dev/null && break; sleep 1; done; sleep 3; firefox --no-remote https://localhost:8443'
 X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=3
+X-GNOME-Autostart-Delay=8
 AUTOSTART
-          log "Firefox autostart set to dashboard on :8443"
-
-          # Only open Firefox if Open WebUI is confirmed ready
-          if [[ "$_webui_ready" == "true" ]]; then
-            log "Opening Firefox to Open WebUI..."
-            for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
-              local _user
-              _user=$(id -nu "$_uid" 2>/dev/null || true)
-              if [[ -n "$_user" ]]; then
-                sudo -u "$_user" \
-                  WAYLAND_DISPLAY=wayland-0 \
-                  XDG_RUNTIME_DIR="/run/user/${_uid}" \
-                  DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
-                  firefox "${_webui_url}" >/dev/null 2>&1 &
-                log "Opened Firefox to Open WebUI for user ${_user}"
-              fi
-            done
-          fi
-        fi
+            log "Lab profile (${_prof}): Firefox homepage + autostart set to webui on :8443"
+            ;;
+          desktop)
+            # Workstation — bookmarks + first-run suppression, NO homepage
+            # override, NO autostart. User's daily driver is theirs.
+            mkdir -p /etc/firefox/policies
+            cat > /etc/firefox/policies/policies.json <<FFPOL
+{
+  "policies": {
+    "DontCheckDefaultBrowser": true,
+    "DisplayBookmarksToolbar": "always",
+    "Bookmarks": [
+      {"Title": "kldload Web UI", "URL": "https://localhost:8443", "Placement": "toolbar"},
+      {"Title": "kldload Docs",   "URL": "https://kldload.com",    "Placement": "toolbar"}
+    ],
+    "UserMessaging": {
+      "WhatsNewMessaging": false,
+      "ExtensionRecommendations": false,
+      "SkipOnboarding": true
+    }
+  }
+}
+FFPOL
+            log "Workstation profile: Firefox bookmarks set (no homepage override, no autostart)"
+            # Ensure stale lab-profile autostart from a prior install is
+            # removed if the user re-profiled to desktop.
+            rm -f /etc/xdg/autostart/kldload-dashboard.desktop 2>/dev/null || true
+            ;;
+          *)
+            log "Profile '${_prof}' is headless/stripped — no Firefox policy applied"
+            ;;
+        esac
         # Desktop notification
         if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]]; then
           local _ip

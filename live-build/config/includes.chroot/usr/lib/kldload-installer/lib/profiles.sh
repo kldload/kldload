@@ -507,23 +507,36 @@ k_install_system_files() {
     cp -r /usr/local/share/kldload-webui/active/. "${target}/usr/local/share/kldload-webui/"
   fi
 
-  # ── Firefox autostart to dashboard (desktop profiles) ──────────────────────
-  if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
-    mkdir -p "${target}/etc/xdg/autostart"
-    # Same autostart pattern as the live installer — wait for port, then open Firefox
-    mkdir -p "${target}/etc/xdg/autostart"
-    cat > "${target}/etc/xdg/autostart/kldload-dashboard.desktop" <<'DASHSTART'
+  # ── Firefox autostart to dashboard — LAB profiles only ────────────────────
+  # Workstation users (desktop profile) and headless (server) installs
+  # should NOT have Firefox auto-open to the kldload dashboard on every
+  # login — that's a daily driver, the user's homepage is theirs. Only
+  # lab-focused profiles (kvm / ai / zfslab), where the user explicitly
+  # booted kldload FOR the UI, get the auto-open.
+  case "${KLDLOAD_PROFILE:-server}" in
+    kvm|ai|zfslab)
+      mkdir -p "${target}/etc/xdg/autostart"
+      cat > "${target}/etc/xdg/autostart/kldload-dashboard.desktop" <<'DASHSTART'
 [Desktop Entry]
 Type=Application
 Name=kldload Dashboard
-Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/9000) 2>/dev/null && break; sleep 1; done; sleep 3; firefox --no-remote https://localhost:8443'
+Comment=Auto-open the kldload ops console at login (lab profile)
+Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/8443) 2>/dev/null && break; sleep 1; done; sleep 3; firefox --no-remote https://localhost:8443'
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=8
 DASHSTART
+      ;;
+  esac
 
-    # Firefox policies — same path as live ISO, suppress first-run junk
+  # Firefox policies — ALL GUI profiles get the bookmarks (discovery) and
+  # first-run-junk suppression. Only lab profiles get Homepage set, so
+  # workstation users land on their default new-tab page at launch.
+  if [[ "${KLDLOAD_PROFILE:-server}" != "core" && "${KLDLOAD_PROFILE:-server}" != "server" ]]; then
     mkdir -p "${target}/usr/lib64/firefox/distribution"
-    cat > "${target}/usr/lib64/firefox/distribution/policies.json" <<'FFPOLICY'
+    case "${KLDLOAD_PROFILE:-server}" in
+      kvm|ai|zfslab)
+        # Lab profile — autoload webui as homepage too
+        cat > "${target}/usr/lib64/firefox/distribution/policies.json" <<'FFPOLICY_LAB'
 {
   "policies": {
     "OverrideFirstRunPage": "",
@@ -533,13 +546,11 @@ DASHSTART
     "DisplayBookmarksToolbar": "always",
     "Homepage": {
       "URL": "https://localhost:8443",
-      "StartPage": "homepage",
-      "Additional": ["http://localhost:8080"]
+      "StartPage": "homepage"
     },
     "Bookmarks": [
-      {"Title": "Dashboard", "URL": "https://localhost:8443", "Placement": "toolbar"},
-      {"Title": "AI Chat", "URL": "http://localhost:8080", "Placement": "toolbar"},
-      {"Title": "kldload Docs", "URL": "https://kldload.com", "Placement": "toolbar"}
+      {"Title": "kldload Web UI", "URL": "https://localhost:8443", "Placement": "toolbar"},
+      {"Title": "kldload Docs",   "URL": "https://kldload.com",    "Placement": "toolbar"}
     ],
     "UserMessaging": {
       "WhatsNewMessaging": false,
@@ -548,8 +559,64 @@ DASHSTART
     }
   }
 }
-FFPOLICY
+FFPOLICY_LAB
+        ;;
+      desktop)
+        # Workstation profile — NO Homepage override. Still show the
+        # bookmark on the toolbar so one click reaches the Web UI.
+        cat > "${target}/usr/lib64/firefox/distribution/policies.json" <<'FFPOLICY_WS'
+{
+  "policies": {
+    "DontCheckDefaultBrowser": true,
+    "DisplayBookmarksToolbar": "always",
+    "Bookmarks": [
+      {"Title": "kldload Web UI", "URL": "https://localhost:8443", "Placement": "toolbar"},
+      {"Title": "kldload Docs",   "URL": "https://kldload.com",    "Placement": "toolbar"}
+    ],
+    "UserMessaging": {
+      "WhatsNewMessaging": false,
+      "ExtensionRecommendations": false,
+      "SkipOnboarding": true
+    }
+  }
+}
+FFPOLICY_WS
+        ;;
+    esac
   fi
+
+  # Desktop shortcut in the apps menu — every non-core GUI profile gets this
+  # so users can always find the webui even when it's not their homepage.
+  # Ships in the live ISO at /usr/share/applications/kldload-webui.desktop;
+  # copy it to the target.
+  if [[ "${KLDLOAD_PROFILE:-server}" != "core" ]]; then
+    if [[ -f /usr/share/applications/kldload-webui.desktop ]]; then
+      mkdir -p "${target}/usr/share/applications"
+      install -m 0644 /usr/share/applications/kldload-webui.desktop \
+        "${target}/usr/share/applications/kldload-webui.desktop"
+    fi
+  fi
+
+  # ── Service auto-start gate ────────────────────────────────────────────────
+  # Lab profiles (kvm / ai / zfslab) auto-start the webui + proxy + ttyd
+  # so the operator lands on the UI at first boot. Workstation / server /
+  # core profiles: services are installed and working but NOT enabled at
+  # boot — the user's daily-driver shouldn't spend RAM/CPU on an ops UI
+  # they may never open. To turn it on:
+  #     sudo systemctl enable --now kldload-proxy kldload-webui ttyd-k9s
+  # The desktop shortcut + the "kldload Web UI" bookmark point at
+  # https://localhost:8443/ so the discovery path is intact.
+  case "${KLDLOAD_PROFILE:-server}" in
+    kvm|ai|zfslab)
+      : # keep defaults — enabled in the unit's [Install] WantedBy
+      ;;
+    *)
+      # desktop / server / core — disable on target, keep installed.
+      chroot "${target}" systemctl disable kldload-webui.service 2>/dev/null || true
+      chroot "${target}" systemctl disable kldload-proxy.service 2>/dev/null || true
+      chroot "${target}" systemctl disable ttyd-k9s.service 2>/dev/null || true
+      ;;
+  esac
 
   fi # end non-core block
 
