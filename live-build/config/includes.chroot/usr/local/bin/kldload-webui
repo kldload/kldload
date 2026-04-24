@@ -2047,15 +2047,25 @@ async def _klab_cancel(websocket, msg):
             "line": f"[cancel] stopped {_current_unit}",
         }))
 
-    # 2b. Fall back to pattern kills for older state / goldens / demos.
-    # `klab golden-ztest` contains "klab golden" so matches both.
-    for pattern in ["klab golden", "klab golden-ztest", "klab deploy",
-                     "klab destroy", "klab kubernetes",
-                     "virt-install", "qemu-img convert"]:
+    # 2b. Fall back to pattern kills for older state / goldens / demos
+    # / CLI-started runs that aren't tracked via RUNNING_PROCS or
+    # systemd-run units.
+    #
+    # IMPORTANT — `klab test` is the longest-running, most-cancellable
+    # workload (ztest runs go 8+ hours). Not including it meant the UI
+    # cancel button fired, killed nothing, and the run kept going —
+    # exactly what Todd reported. Match both `klab test` and the
+    # shorter `klab test-suite` variant.
+    # `klab golden-ztest` contains "klab golden" so the existing
+    # pattern covers both golden modes.
+    for pattern in ["klab test", "klab golden", "klab golden-ztest",
+                     "klab deploy", "klab destroy", "klab kubernetes",
+                     "zfs-tests.sh", "virt-install", "qemu-img convert"]:
         subprocess.call(["pkill", "-TERM", "-f", pattern], stderr=subprocess.DEVNULL)
     await asyncio.sleep(1.5)
-    for pattern in ["klab golden", "klab golden-ztest", "klab deploy",
-                     "klab destroy", "klab kubernetes"]:
+    for pattern in ["klab test", "klab golden", "klab golden-ztest",
+                     "klab deploy", "klab destroy", "klab kubernetes",
+                     "zfs-tests.sh"]:
         subprocess.call(["pkill", "-KILL", "-f", pattern], stderr=subprocess.DEVNULL)
     # Clear detached-run state file so the next `klab_test` doesn't
     # see a stale pid and refuse to launch.
