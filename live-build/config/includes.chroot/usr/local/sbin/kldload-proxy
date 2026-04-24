@@ -82,9 +82,21 @@ HOP_BY_HOP = {b"connection", b"keep-alive", b"proxy-authenticate",
 BUF = 65536
 IDLE_TIMEOUT = 600  # seconds; long WS sessions (k9s, hubble stream) need this
 
+_LOG_FH = None
 def log(msg):
-    sys.stderr.write(f"[kldload-proxy] {msg}\n")
-    sys.stderr.flush()
+    global _LOG_FH
+    try:
+        if _LOG_FH is None:
+            _LOG_FH = open("/var/log/kldload-proxy.log", "a", buffering=1)  # line buffered
+        import time
+        _LOG_FH.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
+    try:
+        sys.stderr.write(f"[kldload-proxy] {msg}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 def pick_backend(path_bytes):
     """Return (backend, strip_prefix_str) for the given path, where
@@ -301,6 +313,10 @@ def forward_body(src, dst, headers, already=0):
             dst.sendall(chunk)
 
 def handle(client_sock, client_addr):
+    _req_method = b"?"
+    _req_path = b"?"
+    _status_seen = 0
+    _bytes_out = 0
     try:
         client_sock.settimeout(60)
 
@@ -318,6 +334,8 @@ def handle(client_sock, client_addr):
             client_sock.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
             return
         method, path, _version = parts
+        _req_method = method
+        _req_path = path
 
         (be_host, be_port), strip_prefix = pick_backend(path)
 
@@ -385,6 +403,7 @@ def handle(client_sock, client_addr):
             status_code = int(resp_line.split(b" ", 2)[1])
         except Exception:
             status_code = 200
+        _status_seen = status_code
         client_sock.sendall(rewrite_response_headers(resp_head))
         resp_already = 0
         if resp_leftover:
@@ -399,9 +418,12 @@ def handle(client_sock, client_addr):
             forward_body(backend, client_sock, resp_headers, already=resp_already)
 
     except Exception as e:
-        try: log(f"conn {client_addr}: {e}")
+        try: log(f"conn {client_addr} {_req_method.decode('latin1','replace')} {_req_path.decode('latin1','replace')}: {e}")
         except Exception: pass
     finally:
+        try:
+            log(f"{_req_method.decode('latin1','replace'):6s} {_req_path.decode('latin1','replace')[:80]:80s} -> {_status_seen or '?'}")
+        except Exception: pass
         try: client_sock.close()
         except Exception: pass
 

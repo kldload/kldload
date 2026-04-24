@@ -1847,16 +1847,17 @@ PYFIX
 protocol = http
 http_addr = 127.0.0.1
 http_port = 3000
-# Host-agnostic URL: no scheme, no domain, just the sub-path. This
-# lets Grafana generate redirects like "Location: /grafana/login"
-# which the browser resolves against its current origin (the proxy
-# on :8443), so the URL works whether the user typed the LAN IP,
-# the WireGuard IP, the hostname, or localhost. Setting a concrete
-# domain = X here would pin it to one host and break the others.
-root_url = /grafana/
+# Sub-path hosting + explicit proxy-facing URL. Grafana 13's preloader
+# rejects the config if root_url doesn't resolve to a full URL, so we
+# hardcode it — %(domain)s is populated below from the primary LAN
+# IP (or a stable DNS entry via KLDLOAD_DOMAIN env). 8443 is the
+# proxy port. If the user hits Grafana via a DIFFERENT origin
+# (WireGuard IP, hostname), asset loads still work because appSubUrl
+# comes out as /grafana and the browser resolves relative URLs
+# against its current origin.
+root_url = https://%(domain)s:8443/grafana/
+domain = __KLDLOAD_LAN_IP__
 serve_from_sub_path = true
-# Stop Grafana enforcing its configured domain for redirects — with
-# an empty domain, a redirect-auth-mismatch would otherwise 404.
 enforce_domain = false
 
 [auth.anonymous]
@@ -1867,18 +1868,31 @@ org_role = Viewer
 [security]
 allow_embedding = true
 cookie_samesite = none
+# SameSite=None cookies REQUIRE Secure=true per browser policy
+# (Chrome 84+, Firefox 79+). Without this, the browser silently
+# drops the Grafana session cookie, Grafana can't establish
+# anonymous-viewer state, the app's init hangs and the preloader
+# times out to its "failed to load application files" fallback.
+# Safe to set true because the proxy terminates TLS on :8443.
+cookie_secure = true
 # CSRF: the proxy terminates TLS with an origin that differs from what
-# grafana sees internally (https://host:8443 vs http://127.0.0.1:3000).
-# Without trusting any origin, POST /api/ds/query (every panel's data
-# fetch) fails with "request origin is not authorized" and the Metrics
-# tab shows the spinning logo forever. '*' is fine here — the proxy
-# is the only thing that can reach grafana's loopback port anyway.
+# grafana sees internally. Trust any origin — the proxy is literally
+# the only thing that can reach grafana on 127.0.0.1:3000 anyway.
 csrf_trusted_origins = *
 csrf_additional_headers = X-Forwarded-For
 
 [users]
 default_theme = dark
 GRAFEMBED
+          # Substitute the real LAN IP for the %(domain)s placeholder in
+          # root_url. Using the placeholder lets the heredoc stay static
+          # while a per-install IP is baked in at firstboot time.
+          _lan_ip="$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
+          if [[ -n "$_lan_ip" ]]; then
+            sed -i "s|__KLDLOAD_LAN_IP__|${_lan_ip}|" /etc/grafana/grafana.ini
+          else
+            sed -i "s|__KLDLOAD_LAN_IP__|localhost|" /etc/grafana/grafana.ini
+          fi
           systemctl restart grafana-server 2>/dev/null || true
           ok "Grafana anonymous + iframe embedding via proxy (/grafana) enabled"
         fi
