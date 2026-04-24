@@ -742,7 +742,7 @@ if [[ "$EDITION" != "core" ]]; then
     # kldload-proxy is the :8443 reverse proxy that fronts webui, grafana,
     # ttyd-k9s and Bob behind a single cert — without it, nothing answers
     # on :8443 because the webui binds loopback :8444 now.
-    for _sb_bob in bob-splash bob-ui kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-proxy kldload-session kldload-headlamp-install; do
+    for _sb_bob in bob-splash bob-ui kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-proxy kldload-session kldload-headlamp-install kldload-secure-boot; do
         src="/build/live-build/config/includes.chroot/usr/local/sbin/${_sb_bob}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/sbin/${_sb_bob}" && chmod +x "${ROOTFS}/usr/local/sbin/${_sb_bob}"
     done

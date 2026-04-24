@@ -13,28 +13,37 @@ _emergency_cleanup() {
 }
 trap '_emergency_cleanup' ERR EXIT
 
-# Secure Boot + MOK is OPT-IN as of 1.0.5. Default OFF — the MOK
-# enrollment dance (MokManager blue screen, password typing, distinct-
-# per-install cert, ZFS module signing) was the single biggest source of
-# "installed but won't boot" reports. Most kldload use cases (home lab,
-# ZFS test appliance, K8s dev box) don't have a threat model that SB
-# actually protects against; the cost of the feature was higher than
-# the value delivered. Flipping to opt-in means:
+# Secure Boot + MOK is ON by default as of 1.0.6. 1.0.5 briefly flipped
+# it to opt-in while we chased MOK-enrollment failures that were causing
+# "installed but won't boot" reports. Those root causes (non-unique MOK
+# subjects, DKMS never signing inside chroot, efivars-not-writable silent
+# fails, stale proxy cert drift) are all fixed, and with the kldload-ca
+# unification the MOK cert IS the TLS CA root — one enrollment covers
+# TLS, kernel module signing, and (soon) K8s intra-cluster trust.
 #
-#   - default install: ZBM installed unsigned at \EFI\BOOT\BOOTX64.EFI,
-#     firmware boots it directly, no shim, no MOK, no MokManager,
-#     no verification failures at reboot-with-SB-on
-#   - opt-in install (`KLDLOAD_ENABLE_SECURE_BOOT=1`): full existing
-#     pipeline — generate MOK, sign ZBM + ZFS kmod, install shim as
-#     fallback, queue mokutil --import for MokManager enrollment
+# Three supported paths:
 #
-# Users who need SB later can flip it on post-install via a dedicated
-# `kldload-secure-boot enable` tool (runs k_generate_mok_keys against
-# the installed system, re-signs the ZBM that's already on disk, queues
-# MOK enrollment). Opt-in path still supported; opt-out path is now the
-# default.
+#   - default install (the 95% case): KLDLOAD_ENABLE_SECURE_BOOT=1.
+#     kldload-ca root generated, MOK = CA DER, mokutil --import queued,
+#     ZBM signed with the CA key, shim installed as fallback. On first
+#     reboot firmware drops into MokManager: user enrolls (password
+#     printed in the installer log by security.sh), reboots, SB boots
+#     clean.
+#
+#   - explicit opt-out: KLDLOAD_ENABLE_SECURE_BOOT=0 at install time, OR
+#     checkbox unchecked in the web UI. ZBM installed unsigned at
+#     \EFI\BOOT\BOOTX64.EFI, firmware boots it direct, no MOK prompt.
+#     Use this on boxes whose firmware can't enroll MOK cleanly (some
+#     old UEFI, certain VMs without MokManager, testing without reboot).
+#
+#   - post-install toggle: /usr/local/sbin/kldload-secure-boot
+#     {enable|disable|status|reenroll} — a real tool, not a comment
+#     pointing at vapor. `enable` re-signs ZBM + ZFS kmod against the
+#     existing kldload-ca root (which is generated at install time
+#     regardless of SB state — it's also the TLS CA) and queues
+#     mokutil --import. Reboot to complete enrollment in MokManager.
 _secure_boot_enabled() {
-  [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]]
+  [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]]
 }
 
 # Back-compat alias — existing callers inside this script still use the

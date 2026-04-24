@@ -201,8 +201,8 @@ KLDLOAD_PROFILE=${KLDLOAD_PROFILE:-server}
 KLDLOAD_STORAGE_MODE=${KLDLOAD_STORAGE_MODE:-standard}
 KLDLOAD_ENABLE_ZFS=${KLDLOAD_ENABLE_ZFS:-0}
 KLDLOAD_ENABLE_EBPF=${KLDLOAD_ENABLE_EBPF:-0}
-KLDLOAD_SECURE_BOOT=${KLDLOAD_SECURE_BOOT:-0}
-KLDLOAD_ENABLE_SECURE_BOOT=${KLDLOAD_ENABLE_SECURE_BOOT:-0}
+KLDLOAD_SECURE_BOOT=${KLDLOAD_SECURE_BOOT:-1}
+KLDLOAD_ENABLE_SECURE_BOOT=${KLDLOAD_ENABLE_SECURE_BOOT:-1}
 KLDLOAD_TPM_PRESENT=${KLDLOAD_TPM_PRESENT:-0}
 KLDLOAD_ENABLE_AI=${KLDLOAD_ENABLE_AI:-0}
 KLDLOAD_BOB_MODEL=${KLDLOAD_BOB_MODEL:-recommended}
@@ -258,33 +258,88 @@ k_generate_mok_keys() {
   # answer — keeps your signing key out of every install log and lets
   # you enroll ONE cert on every box in the fleet instead of N certs.
 
+  # ── kldload-ca unification (1.0.6) ──────────────────────────────────
+  # One trust root per install. kldload-ca init creates the per-install
+  # RSA-4096 root used for BOTH TLS leaf issuance AND kernel module
+  # signing / MOK enrollment. Same key; same cert; same firmware trust
+  # decision covers browsers AND `zfs.ko`. Eliminates the 1.0.5 class
+  # of "three independent self-signed keys drifting" bugs.
+  #
+  # BYOK path still supported: if the caller supplies
+  # KLDLOAD_MOK_KEY_FILE + KLDLOAD_MOK_CERT_FILE (e.g. org PKI, HSM),
+  # we honour those as the MOK and skip CA init. DKMS signs with
+  # them; TLS still uses the fresh kldload-ca root for serving certs
+  # because an HSM-backed code-signing key isn't appropriate for TLS
+  # terminator rotation.
+  #
+  # CA init target is the INSTALLED system's /var/lib/kldload/ca/ — we
+  # set KLDLOAD_CA_DIR so kldload-ca writes into the chroot's filesystem
+  # directly. Running from the live ISO as root, writing target paths
+  # below. The same root will be reachable post-install via the normal
+  # default path.
+  local ca_dir="${target}/var/lib/kldload/ca"
+  local ca_crt="${ca_dir}/root/ca.crt"
+  local ca_key="${ca_dir}/root/ca.key"
+  local ca_der="${ca_dir}/root/ca.der"
+
   if [[ -n "${KLDLOAD_MOK_KEY_FILE:-}" && -n "${KLDLOAD_MOK_CERT_FILE:-}" \
         && -r "${KLDLOAD_MOK_KEY_FILE}" && -r "${KLDLOAD_MOK_CERT_FILE}" ]]; then
-    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Using caller-supplied MOK keypair:"
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Using caller-supplied MOK keypair (BYOK):"
     k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "  key:  ${KLDLOAD_MOK_KEY_FILE}"
     k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "  cert: ${KLDLOAD_MOK_CERT_FILE}"
     cp "${KLDLOAD_MOK_KEY_FILE}"  "${mok_dir}/mok.key"
     cp "${KLDLOAD_MOK_CERT_FILE}" "${mok_dir}/mok.pub"
-  elif [[ -f "${mok_dir}/mok.key" && -f "${mok_dir}/mok.pub" ]]; then
-    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Using pre-staged MOK keypair in ${mok_dir} (caller put it there before install)"
   else
-    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Generating per-install MOK key pair (no BYOK key supplied)"
-    # RSA-2048 self-signed, 10-year validity, no passphrase, unique CN
-    openssl req -new -x509 -newkey rsa:2048 \
-      -keyout "${mok_dir}/mok.key" \
-      -out    "${mok_dir}/mok.pub" \
-      -days 3650 -nodes \
-      -subj "/CN=kldload Secure Boot MOK $(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d%H%M%S)-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')/" \
-      >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Generating kldload-ca root (doubles as MOK signing key)"
+    if [[ -x /usr/local/sbin/kldload-ca ]]; then
+      # kldload-ca init is idempotent — if an earlier pass wrote the
+      # root, we reuse it. --force would rotate but we never want that
+      # mid-install.
+      KLDLOAD_CA_DIR="${ca_dir}" /usr/local/sbin/kldload-ca init \
+        >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
+    fi
+
+    if [[ -f "${ca_key}" && -f "${ca_crt}" ]]; then
+      # Copy (not symlink) so DKMS framework.conf.d paths + sign-file
+      # calls work without dereferencing logic, and so a later SB
+      # disable/re-enable doesn't have to chase symlinks. Hardlinks
+      # would work too but break if admin ever rotates the CA with
+      # --force; copy is the simpler contract.
+      cp "${ca_key}" "${mok_dir}/mok.key"
+      cp "${ca_crt}" "${mok_dir}/mok.pub"
+      k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
+        "MOK material sourced from kldload-ca root at ${ca_crt}"
+    elif [[ -f "${mok_dir}/mok.key" && -f "${mok_dir}/mok.pub" ]]; then
+      k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
+        "Using pre-staged MOK at ${mok_dir} (kldload-ca unavailable)"
+    else
+      # Last-resort fallback — kldload-ca missing AND no pre-staged key.
+      # Keeps installs that hit an unusual live-ISO state from failing
+      # outright; behaves like the 1.0.5 path.
+      k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
+        "WARNING: kldload-ca not available, falling back to self-signed MOK"
+      openssl req -new -x509 -newkey rsa:2048 \
+        -keyout "${mok_dir}/mok.key" \
+        -out    "${mok_dir}/mok.pub" \
+        -days 3650 -nodes \
+        -subj "/CN=kldload MOK fallback $(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d%H%M%S)-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')/" \
+        >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
+    fi
   fi
 
-  # Always (re)generate the DER form from whichever .pub we ended up with —
-  # mokutil --import only accepts DER, not PEM.
-  openssl x509 \
-    -in "${mok_dir}/mok.pub" \
-    -out "${mok_dir}/mok.der" \
-    -outform DER \
-    >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
+  # Always (re)generate the DER form — mokutil --import only accepts
+  # DER. Prefer the CA's pre-generated ca.der when available to
+  # guarantee byte-for-byte identity with the TLS trust chain the
+  # browser sees.
+  if [[ -f "${ca_der}" ]]; then
+    cp "${ca_der}" "${mok_dir}/mok.der"
+  else
+    openssl x509 \
+      -in "${mok_dir}/mok.pub" \
+      -out "${mok_dir}/mok.der" \
+      -outform DER \
+      >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
+  fi
 
   chmod 0600 "${mok_dir}/mok.key"
   chmod 0644 "${mok_dir}/mok.pub" "${mok_dir}/mok.der"
@@ -334,7 +389,7 @@ k_install_target_packages() {
   # KLDLOAD_ENABLE_SECURE_BOOT=1 at install time to enable the full
   # MOK + signed-ZBM + shim pipeline. See the big comment on
   # _secure_boot_enabled() in kldload-install-target for rationale.
-  if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]]; then
+  if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]]; then
     k_generate_mok_keys
   else
     k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Skipping MOK keys (Secure Boot disabled; set KLDLOAD_ENABLE_SECURE_BOOT=1 to enable)"
@@ -1061,7 +1116,7 @@ CUSTOMREPO
   # Generate MOK keys BEFORE package installation so DKMS signs ZFS modules
   # during build. Secure Boot is OPT-IN as of 1.0.5 — default off; set
   # KLDLOAD_ENABLE_SECURE_BOOT=1 at install time to enable.
-  if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]]; then
+  if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]]; then
     k_generate_mok_keys
   else
     k_log_to "$log" "Skipping MOK keys (Secure Boot disabled; set KLDLOAD_ENABLE_SECURE_BOOT=1 to enable)"
@@ -1112,7 +1167,14 @@ CUSTOMREPO
     [[ -d "$moddir" ]] && break
   done
   kver=$(ls "$moddir/" 2>/dev/null | grep -v '^$' | head -1)
-  k_log_to "$log" "Building ZFS DKMS for kernel ${kver}..."
+  # NOTE: the dkms/depmod commands below may emit warnings of the form
+  # "zfs not found in initramfs" while they work. Those are expected —
+  # we rebuild the initramfs to include ZFS in the step immediately
+  # below ("Rebuilding initramfs with ZFS module..."). If you're
+  # reading the install log and you see those warnings, keep reading;
+  # the rebuild step resolves them. Only a FATAL error on the
+  # "Rebuilding initramfs" line indicates a real problem.
+  k_log_to "$log" "Compiling ZFS kernel module via DKMS for ${kver} (initramfs rebuild follows)..."
 
   local zfs_ver
   zfs_ver=$(chroot "${target}" rpm -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")

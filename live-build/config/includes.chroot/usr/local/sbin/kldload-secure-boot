@@ -1,0 +1,333 @@
+#!/usr/bin/env bash
+# kldload-secure-boot — post-install toggle for Secure Boot + MOK on
+# a kldload machine. Replaces the vaporware comment from 1.0.5 that
+# pointed at a non-existent tool.
+#
+# What it does:
+#   enable    — ensure kldload-ca root exists; materialize MOK from the
+#               CA root; re-sign loaded ZFS kernel module for current
+#               kernel; re-sign ZBM if on disk; queue mokutil --import
+#               so firmware drops into MokManager on next reboot.
+#   disable   — un-stage any pending MOK enrollment; remove DKMS
+#               sign_tool config so future kernel builds don't sign.
+#               Note: DOES NOT toggle firmware Secure Boot state —
+#               that's a BIOS/UEFI setting the user controls.
+#   status    — report firmware SB state (via mokutil), kldload-ca
+#               fingerprint, MOK enrolled/pending state, ZFS module
+#               signature presence. Human-readable.
+#   reenroll  — re-queue mokutil --import (e.g. user said "No" at
+#               MokManager by accident, or NVRAM was cleared).
+#
+# The CA root (/var/lib/kldload/ca/root/ca.*) is the authoritative
+# source. This tool does NOT generate its own keys — if the CA is
+# missing we run `kldload-ca init` to create one, which is the same
+# path a default install already took.
+#
+# Run as root. Operates on the running installed system (not a chroot).
+set -euo pipefail
+
+CA="/var/lib/kldload/ca/root/ca.crt"
+CA_KEY="/var/lib/kldload/ca/root/ca.key"
+CA_DER="/var/lib/kldload/ca/root/ca.der"
+MOK_DIR="/var/lib/dkms"
+MOK_PW="${KLDLOAD_MOK_PASSWORD:-kldload}"
+
+log()  { echo "[kldload-secure-boot] $*" >&2; }
+die()  { log "error: $*"; exit 1; }
+need_root() { [[ $EUID -eq 0 ]] || die "must run as root"; }
+
+# ──────────────────────────────────────────────────────────────────────
+# Internal helpers
+# ──────────────────────────────────────────────────────────────────────
+
+_ensure_ca() {
+  if [[ ! -f "${CA_KEY}" || ! -f "${CA}" ]]; then
+    log "kldload-ca root not found — initializing now"
+    /usr/local/sbin/kldload-ca init || die "kldload-ca init failed"
+  fi
+}
+
+_materialize_mok_from_ca() {
+  # Copy CA material into the legacy MOK paths so DKMS framework.conf.d
+  # and existing consumers work without editing their configs.
+  mkdir -p "${MOK_DIR}"
+  cp "${CA_KEY}" "${MOK_DIR}/mok.key"
+  cp "${CA}"     "${MOK_DIR}/mok.pub"
+  cp "${CA_DER}" "${MOK_DIR}/mok.der"
+  chmod 0600 "${MOK_DIR}/mok.key"
+  chmod 0644 "${MOK_DIR}/mok.pub" "${MOK_DIR}/mok.der"
+  log "MOK materialized from kldload-ca root at ${MOK_DIR}/mok.{key,pub,der}"
+}
+
+_install_dkms_sign_helper() {
+  install -d -m 0755 /etc/dkms
+  cat > /etc/dkms/sign_helper.sh <<'EOSIGN'
+#!/bin/bash
+# kldload DKMS sign helper — signs every built module with the kldload
+# CA root (which is also enrolled as MOK). Called by DKMS as:
+#   sign_helper.sh KVER MODULE_PATH
+set -euo pipefail
+KVER="${1:?}" MOD="${2:?}"
+KEY=/var/lib/dkms/mok.key
+CERT=/var/lib/dkms/mok.pub
+SIGN_FILE=$(find /usr/src/kernels/"${KVER}" \
+                 /usr/src/linux-headers-"${KVER}" \
+                 /usr/lib/linux-kbuild-"${KVER%%.*}"* \
+                 -name sign-file -type f 2>/dev/null | head -1 || true)
+[[ -x "${SIGN_FILE}" ]] || { echo "sign-file not found for ${KVER}" >&2; exit 0; }
+exec "${SIGN_FILE}" sha256 "${KEY}" "${CERT}" "${MOD}"
+EOSIGN
+  chmod 0755 /etc/dkms/sign_helper.sh
+
+  install -d -m 0755 /etc/dkms/framework.conf.d
+  cat > /etc/dkms/framework.conf.d/kldload-mok.conf <<'MOKCONF'
+# kldload Secure Boot — MOK key paths for DKMS module signing.
+# Managed by kldload-secure-boot. Remove this file (or run
+# `kldload-secure-boot disable`) to stop signing future builds.
+mok_signing_key=/var/lib/dkms/mok.key
+mok_certificate=/var/lib/dkms/mok.pub
+sign_tool=/etc/dkms/sign_helper.sh
+try_sign_modules=true
+MOKCONF
+  log "DKMS sign helper installed at /etc/dkms/sign_helper.sh"
+}
+
+_resign_loaded_zfs() {
+  # Re-sign the currently-loaded zfs.ko against the current kernel
+  # using the kldload CA key. If the sign-file tool or module isn't
+  # found we skip — the user can still enable SB, it just won't cover
+  # zfs until the module is rebuilt (next dkms run or kernel update).
+  local kver mod sign_file
+  kver="$(uname -r)"
+  sign_file=$(find /usr/src/kernels/"${kver}" \
+                   /usr/src/linux-headers-"${kver}" \
+                   /usr/lib/linux-kbuild-"${kver%%.*}"* \
+                   -name sign-file -type f 2>/dev/null | head -1 || true)
+  if [[ -z "${sign_file}" || ! -x "${sign_file}" ]]; then
+    log "no sign-file tool for kernel ${kver} — ZFS module not re-signed (kernel-devel missing?)"
+    return 0
+  fi
+  mod="$(modinfo -n zfs 2>/dev/null || true)"
+  if [[ -z "${mod}" || ! -f "${mod}" ]]; then
+    log "zfs module not installed — skipping re-sign"
+    return 0
+  fi
+  # sign-file rewrites in place. If the module is under /lib/modules,
+  # that's fine — it's already the on-disk canonical path.
+  if "${sign_file}" sha256 "${CA_KEY}" "${CA}" "${mod}" 2>/dev/null; then
+    log "re-signed ZFS module at ${mod} for kernel ${kver}"
+  else
+    log "WARNING: sign-file returned non-zero on ${mod}"
+  fi
+}
+
+_resign_zbm() {
+  # sbsign the ZFSBootMenu binary on the EFI partition so firmware
+  # running with SB on accepts it. kldload installs ZBM at
+  # \EFI\kldload\zbm.EFI with a fallback copy at \EFI\BOOT\BOOTX64.EFI.
+  # Re-sign both if found.
+  local target signed
+  if ! command -v sbsign >/dev/null 2>&1; then
+    log "sbsign not installed — cannot re-sign ZBM. Install 'sbsigntools' and retry."
+    return 0
+  fi
+
+  for target in /boot/efi/EFI/kldload/zbm.EFI \
+                /boot/efi/EFI/BOOT/BOOTX64.EFI \
+                /boot/efi/EFI/kldload/BOOTX64.EFI; do
+    [[ -f "${target}" ]] || continue
+    signed="${target}.signed"
+    if sbsign --key "${CA_KEY}" --cert "${CA}" --output "${signed}" "${target}" 2>/dev/null; then
+      mv "${signed}" "${target}"
+      log "re-signed ${target}"
+    else
+      log "WARNING: sbsign failed on ${target}"
+      rm -f "${signed}"
+    fi
+  done
+}
+
+_queue_mok_enrollment() {
+  if ! command -v mokutil >/dev/null 2>&1; then
+    log "mokutil not installed — cannot queue MOK enrollment"
+    return 1
+  fi
+  if [[ ! -d /sys/firmware/efi/efivars ]]; then
+    log "not booted via UEFI / efivars not mounted — MOK enrollment requires EFI"
+    return 1
+  fi
+
+  # Already enrolled with this exact cert? Short-circuit.
+  if mokutil --test-key "${CA_DER}" 2>/dev/null | grep -qi 'is already enrolled'; then
+    log "kldload CA already enrolled in MOK list — nothing to queue"
+    return 0
+  fi
+
+  # Already queued and waiting for MokManager? Surface that.
+  if mokutil --list-new 2>/dev/null | grep -q "$(openssl x509 -in "${CA}" -noout -subject_hash 2>/dev/null)"; then
+    log "enrollment already pending — reboot to complete in MokManager (password: ${MOK_PW})"
+    return 0
+  fi
+
+  if printf '%s\n%s\n' "${MOK_PW}" "${MOK_PW}" | \
+       mokutil --ignore-keyring --import "${CA_DER}" >/dev/null 2>&1; then
+    log "MOK enrollment queued"
+    log "Password for MokManager on next reboot: ${MOK_PW}"
+    log "Reboot. At the blue MokManager screen: Enroll MOK → Continue → password → Yes → reboot"
+  else
+    log "ERROR: mokutil --import failed"
+    return 1
+  fi
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# Subcommands
+# ──────────────────────────────────────────────────────────────────────
+
+cmd_enable() {
+  need_root
+  log "Enabling kldload Secure Boot integration"
+  _ensure_ca
+  _materialize_mok_from_ca
+  _install_dkms_sign_helper
+  _resign_loaded_zfs
+  _resign_zbm
+  _queue_mok_enrollment || log "MOK queue step failed — see above"
+  log "Done. Reboot to complete MokManager enrollment, then enable Secure Boot in firmware."
+}
+
+cmd_disable() {
+  need_root
+  log "Disabling kldload Secure Boot integration"
+
+  # Un-stage any pending enrollment (best-effort; mokutil --revoke-import
+  # needs the same password used to queue).
+  if command -v mokutil >/dev/null 2>&1 && [[ -d /sys/firmware/efi/efivars ]]; then
+    printf '%s\n%s\n' "${MOK_PW}" "${MOK_PW}" | \
+      mokutil --revoke-import >/dev/null 2>&1 || \
+      log "(no pending enrollment to revoke, or password differs — skipping)"
+  fi
+
+  # Stop future DKMS builds from signing.
+  rm -f /etc/dkms/framework.conf.d/kldload-mok.conf
+  rm -f /etc/dkms/sign_helper.sh
+  log "DKMS sign config removed — future kernel builds won't sign modules"
+
+  log "Note: the CA root and enrolled-in-MokManager cert remain. Turn off"
+  log "Secure Boot in firmware if you want the box to boot unsigned images."
+}
+
+cmd_status() {
+  # Does not require root for most of these checks — run it anywhere.
+  local sb_state mok_enrolled mok_pending
+  local zfs_mod zfs_sig
+
+  echo "─── Firmware Secure Boot ─────────────────────────────────────────"
+  if command -v mokutil >/dev/null 2>&1; then
+    sb_state="$(mokutil --sb-state 2>/dev/null | head -1 || echo '(unknown)')"
+    echo "  ${sb_state}"
+  else
+    echo "  mokutil not installed (can't query)"
+  fi
+
+  echo ""
+  echo "─── kldload CA root ──────────────────────────────────────────────"
+  if [[ -f "${CA}" ]]; then
+    echo "  cert:        ${CA}"
+    echo "  fingerprint: $(openssl x509 -in "${CA}" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//' || echo '(read error)')"
+    echo "  validity:"
+    openssl x509 -in "${CA}" -noout -dates 2>/dev/null | sed 's/^/    /'
+  else
+    echo "  (not initialized — run: sudo kldload-ca init)"
+  fi
+
+  echo ""
+  echo "─── MOK enrollment ───────────────────────────────────────────────"
+  if command -v mokutil >/dev/null 2>&1 && [[ -f "${CA_DER}" ]]; then
+    if mokutil --test-key "${CA_DER}" 2>/dev/null | grep -qi 'is already enrolled'; then
+      echo "  kldload CA: ENROLLED in firmware MOK list ✓"
+    else
+      echo "  kldload CA: not enrolled"
+    fi
+    if mokutil --list-new 2>/dev/null | grep -q .; then
+      echo "  enrollment pending (reboot to complete via MokManager)"
+    fi
+  else
+    echo "  (can't query — mokutil missing or CA not initialized)"
+  fi
+
+  echo ""
+  echo "─── ZFS kernel module signing ────────────────────────────────────"
+  zfs_mod="$(modinfo -n zfs 2>/dev/null || true)"
+  if [[ -n "${zfs_mod}" && -f "${zfs_mod}" ]]; then
+    zfs_sig="$(modinfo zfs 2>/dev/null | awk -F: '/^signer/{print $2; exit}' | sed 's/^ *//')"
+    if [[ -n "${zfs_sig}" ]]; then
+      echo "  module:  ${zfs_mod}"
+      echo "  signer:  ${zfs_sig}"
+    else
+      echo "  module:  ${zfs_mod}"
+      echo "  signer:  (unsigned)"
+    fi
+  else
+    echo "  zfs module not installed"
+  fi
+
+  echo ""
+  echo "─── DKMS sign config ─────────────────────────────────────────────"
+  if [[ -f /etc/dkms/framework.conf.d/kldload-mok.conf ]]; then
+    echo "  /etc/dkms/framework.conf.d/kldload-mok.conf  present ✓"
+  else
+    echo "  DKMS sign config not installed — future module builds won't sign"
+  fi
+}
+
+cmd_reenroll() {
+  need_root
+  log "Re-queuing MOK enrollment"
+  _ensure_ca
+  [[ -f "${MOK_DIR}/mok.der" ]] || _materialize_mok_from_ca
+  _queue_mok_enrollment
+}
+
+usage() {
+  cat <<'EOUSE'
+kldload-secure-boot — post-install Secure Boot management
+
+Usage:
+  kldload-secure-boot enable
+      Ensure kldload CA exists, materialize MOK from CA root, install
+      DKMS sign config, re-sign loaded ZFS module + ZBM, queue mokutil
+      enrollment. Reboot to complete MokManager enrollment.
+
+  kldload-secure-boot disable
+      Remove DKMS sign config + revoke any pending mokutil enrollment.
+      Does NOT touch firmware Secure Boot state (that's a BIOS/UEFI
+      setting). Does NOT uninstall the CA root (it's also the TLS CA).
+
+  kldload-secure-boot status
+      Report firmware SB state, CA fingerprint, MOK enrollment state,
+      ZFS module signer.
+
+  kldload-secure-boot reenroll
+      Re-queue mokutil --import (e.g. after accidental "No" at
+      MokManager, or NVRAM reset). Does not re-sign ZBM or modules.
+
+Environment:
+  KLDLOAD_MOK_PASSWORD  MokManager password (default: kldload)
+EOUSE
+}
+
+main() {
+  local cmd="${1:-}"
+  [[ $# -ge 1 ]] && shift || true
+  case "$cmd" in
+    enable)    cmd_enable ;;
+    disable)   cmd_disable ;;
+    status)    cmd_status ;;
+    reenroll)  cmd_reenroll ;;
+    -h|--help|help|"") usage ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+main "$@"

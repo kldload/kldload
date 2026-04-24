@@ -911,13 +911,18 @@ select option:checked { background: #00b8d9; color: #000; }
           <div class="panel-hdr">⚙ Platform Options</div>
           <div class="panel-body">
             <div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
-              ZFS, WireGuard, and eBPF are included on all profiles (except Core). Toggle NVIDIA if you have a GPU.
+              ZFS, WireGuard, and eBPF are included on all profiles (except Core). Toggle NVIDIA if you have a GPU. Secure Boot is on by default — uncheck only if your firmware can't enroll MOK.
             </div>
-            <div style="display:grid;grid-template-columns:1fr;gap:0.5rem;margin-bottom:0.8rem;max-width:300px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-bottom:0.8rem;max-width:420px">
               <div class="opt-card" id="opt-nvidia" onclick="toggleOpt('nvidia')" style="cursor:pointer;padding:0.8rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s;text-align:center">
                 <div style="font-size:1.3rem;margin-bottom:0.3rem">🎮</div>
                 <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">NVIDIA GPU</div>
                 <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">Drivers + CUDA + container toolkit</div>
+              </div>
+              <div class="opt-card selected" id="opt-secure-boot" onclick="toggleOpt('secure-boot')" style="cursor:pointer;padding:0.8rem;border:2px solid var(--accent);border-radius:8px;transition:all 0.2s;text-align:center;background:rgba(125,200,255,0.06)">
+                <div style="font-size:1.3rem;margin-bottom:0.3rem">🔒</div>
+                <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">Secure Boot</div>
+                <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">kldload CA → MOK → signed ZFS kmod + ZBM</div>
               </div>
             </div>
             <input type="checkbox" id="install-nvidia" style="display:none">
@@ -926,6 +931,7 @@ select option:checked { background: #00b8d9; color: #000; }
             <input type="checkbox" id="install-zfs-dedup" style="display:none">
             <input type="checkbox" id="install-k8s" style="display:none">
             <input type="checkbox" id="install-k8s-bootstrap" style="display:none">
+            <input type="checkbox" id="install-secure-boot" checked style="display:none">
             <!-- Export format -->
             <div style="margin-top:0.8rem;padding-top:0.8rem;border-top:1px solid var(--border)">
               <label style="font-size:0.82rem;color:var(--subtle);display:block;margin-bottom:0.3rem">Export image format</label>
@@ -3605,7 +3611,7 @@ const DISTRO_DESCS = {
   freebsd:  'FreeBSD 15.0 — native ZFS, jails, bhyve',
 };
 function toggleOpt(name) {
-  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s'};
+  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot'};
   var cb = document.getElementById(map[name]);
   var card = document.getElementById('opt-' + name);
   if (!cb || !card) return;
@@ -3627,8 +3633,8 @@ function toggleOpt(name) {
 
 // Init option cards on load
 document.addEventListener('DOMContentLoaded', function() {
-  ['wireguard','nvidia','ebpf','dedup'].forEach(function(name) {
-    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s'};
+  ['wireguard','nvidia','ebpf','dedup','secure-boot'].forEach(function(name) {
+    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot'};
     var cb = document.getElementById(map[name]);
     var card = document.getElementById('opt-' + name);
     if (cb && card && cb.checked) {
@@ -3867,6 +3873,12 @@ function startInstall() {
     nvidia_drivers: document.getElementById('install-nvidia')?.checked ? '1' : '0',
     wireguard: document.getElementById('install-wireguard')?.checked ? '1' : '0',
     enable_ebpf: document.getElementById('install-ebpf')?.checked ? '1' : '0',
+    // Secure Boot + MOK — default CHECKED in the UI (1.0.6). Installer
+    // generates the kldload CA root, enrolls it as MOK on first boot
+    // via MokManager, signs the ZFS kmod + ZBM with the CA key.
+    // Uncheck for boxes that can't enroll MOK (old UEFI, certain VMs,
+    // quick test installs where a reboot-to-MokManager isn't acceptable).
+    enable_secure_boot: document.getElementById('install-secure-boot')?.checked ? '1' : '0',
     zfs_dedup: document.getElementById('install-zfs-dedup')?.checked ? '1' : '0',
     // zfslab is a ZFS test appliance — NO K8s. Every ZFS observability
     // signal (klab-exporter, zfs_exporter, arcstats, zpool-scrub, ebpf,
