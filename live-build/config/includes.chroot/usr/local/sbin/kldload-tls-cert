@@ -16,6 +16,17 @@ CERT_DIR="${KLDLOAD_TLS_CERT_DIR:-/var/lib/kldload/tls}"
 KEY="${CERT_DIR}/webui.key"
 CRT="${CERT_DIR}/webui.crt"
 
+# Serialize the entire script. Multiple callers (boot service,
+# kldload-proxy ExecStartPre, kldload-webui subprocess on cert miss) can
+# race: one's openssl-req mid-flight overwrites the leaf key while
+# another is mid-cp from leaf_crt → on-disk modulus mismatch → proxy
+# crashes with X509:KEY_VALUES_MISMATCH. Holding a flock the entire
+# duration means callers either observe a pre-regen consistent pair or
+# wait for the post-regen pair, never an in-between split.
+mkdir -p "$CERT_DIR"
+exec 9>"${CERT_DIR}/.tls-cert.lock"
+flock 9
+
 # Extra-SANs file — one entry per line (e.g. "DNS:kldload.example.com" or
 # "IP:203.0.113.42"). Lets admins pin a stable DNS name or VIP that isn't
 # auto-discoverable from `ip -4 -o addr show`. Blank lines + # comments
@@ -212,19 +223,30 @@ if [[ "$_regen" -eq 1 ]]; then
             for ip6 in "${_ips6[@]}";      do _ca_args+=(--ip "${ip6}"); done
             for ip  in "${_extra_ips[@]}"; do _ca_args+=(--ip "${ip}");  done
             if /usr/local/sbin/kldload-ca "${_ca_args[@]}" >&2; then
-                cp /etc/kldload/ca/leaves/webui.key "$KEY"
-                cp /etc/kldload/ca/leaves/webui.crt "$CRT"
+                # Atomic install: stage to .tmp then rename. Defends
+                # against post-flock script kills (OOM, ctrl-c) leaving
+                # KEY from new run paired with CRT from old run on disk.
+                cp /etc/kldload/ca/leaves/webui.key "${KEY}.tmp"
+                cp /etc/kldload/ca/leaves/webui.crt "${CRT}.tmp"
+                chmod 0600 "${KEY}.tmp" "${CRT}.tmp"
+                mv -f "${KEY}.tmp" "$KEY"
+                mv -f "${CRT}.tmp" "$CRT"
                 _issued_via_ca=1
             fi
         fi
     fi
     if [[ "$_issued_via_ca" -eq 0 ]]; then
         # Fallback — self-signed leaf. Preserves prior behavior on any
-        # path where kldload-ca isn't yet installed or failed.
+        # path where kldload-ca isn't yet installed or failed. Atomic
+        # install via .tmp + rename, same reasoning as the kldload-ca
+        # path above.
         openssl req -x509 -nodes -newkey rsa:2048 \
-            -keyout "$KEY" -out "$CRT" \
+            -keyout "${KEY}.tmp" -out "${CRT}.tmp" \
             -days 3650 \
             -config "${CERT_DIR}/webui.cnf" >&2
+        chmod 0600 "${KEY}.tmp" "${CRT}.tmp"
+        mv -f "${KEY}.tmp" "$KEY"
+        mv -f "${CRT}.tmp" "$CRT"
     fi
 
     rm -f "${CERT_DIR}/webui.cnf"
