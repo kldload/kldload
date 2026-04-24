@@ -64,9 +64,20 @@ ROUTES = [
 
 # HTTP/1.1 hop-by-hop headers. Never forward these verbatim between
 # client and backend — they describe the current hop's behavior.
+#
+# NOTE on transfer-encoding: spec-wise it IS hop-by-hop, and a
+# correct proxy dechunks + re-encodes. We don't transform bodies —
+# we byte-pipe them — so stripping `Transfer-Encoding: chunked`
+# while still forwarding chunked bytes produces a broken response:
+# the client sees chunk-length hex prefixes as body data. Keeping
+# the header intact lets the client dechunk correctly. Observed
+# symptom without this: Grafana /api/search returned JSON prefixed
+# with `17ae\r\n` (chunk length), JSON.parse failed, the Metrics
+# tab in kldload-webui showed an empty dashboard list even though
+# Grafana itself was perfectly healthy. Same issue would bite any
+# backend that uses chunked responses — including ttyd and Loki.
 HOP_BY_HOP = {b"connection", b"keep-alive", b"proxy-authenticate",
-              b"proxy-authorization", b"te", b"trailers",
-              b"transfer-encoding", b"upgrade"}
+              b"proxy-authorization", b"te", b"trailers", b"upgrade"}
 
 BUF = 65536
 IDLE_TIMEOUT = 600  # seconds; long WS sessions (k9s, hubble stream) need this
