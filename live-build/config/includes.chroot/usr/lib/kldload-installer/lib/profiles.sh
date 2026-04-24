@@ -532,8 +532,16 @@ k_install_system_files() {
   # Enable nginx at boot.
   ln -sf "/usr/lib/systemd/system/nginx.service" \
     "${target}/etc/systemd/system/multi-user.target.wants/nginx.service" || true
-  # kldload-proxy kept on disk for rollback, but NOT enabled.
+  # kldload-proxy kept on disk for rollback, but NOT enabled AND MASKED
+  # so systemd won't auto-restart-loop it against nginx (it'll keep
+  # failing with port-in-use since nginx already owns :8443). Masking
+  # is a hard-disable: systemd refuses to start it even on explicit
+  # `systemctl start kldload-proxy` until an admin `systemctl unmask`s
+  # it. Rollback path: `systemctl unmask kldload-proxy; systemctl
+  # disable nginx; systemctl start kldload-proxy`.
   rm -f "${target}/etc/systemd/system/multi-user.target.wants/kldload-proxy.service" 2>/dev/null || true
+  mkdir -p "${target}/etc/systemd/system"
+  ln -sf /dev/null "${target}/etc/systemd/system/kldload-proxy.service" 2>/dev/null || true
   # Autodeploy orchestrator — runs once after firstboot, invokes AI pull
   # + K8s bootstrap + klab goldens in dependency order, writes phase-ready
   # markers the UI reads to turn the Lab Ready banner green.

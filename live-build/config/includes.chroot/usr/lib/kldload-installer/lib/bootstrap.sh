@@ -272,12 +272,12 @@ k_generate_mok_keys() {
   # because an HSM-backed code-signing key isn't appropriate for TLS
   # terminator rotation.
   #
-  # CA init target is the INSTALLED system's /var/lib/kldload/ca/ — we
+  # CA init target is the INSTALLED system's /etc/kldload/ca/ — we
   # set KLDLOAD_CA_DIR so kldload-ca writes into the chroot's filesystem
   # directly. Running from the live ISO as root, writing target paths
   # below. The same root will be reachable post-install via the normal
   # default path.
-  local ca_dir="${target}/var/lib/kldload/ca"
+  local ca_dir="${target}/etc/kldload/ca"
   local ca_crt="${ca_dir}/root/ca.crt"
   local ca_key="${ca_dir}/root/ca.key"
   local ca_der="${ca_dir}/root/ca.der"

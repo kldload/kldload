@@ -270,6 +270,49 @@ if [[ "$EDITION" != "core" ]]; then
     rm -rf "/tmp/sanoid-${SANOID_VER}"
     log "Sanoid ${SANOID_VER} installed."
 
+    # ── Build sbsigntools 0.9.6+ from source (SB-critical) ────────────────
+    # CentOS 9's EPEL ships sbsigntools-0.9.5-3 which has a hash-computation
+    # bug: for any PE binary with section gaps (shim, grub, ZFSBootMenu —
+    # all of them), the Authenticode hash sbsign computes does NOT match
+    # the hash sbverify + shim later compute from the on-disk bytes. End
+    # result: sbsign reports success, every verifier rejects the sig, shim
+    # throws 0x1a EFI_SECURITY_VIOLATION on every SB-on boot. Reproduced
+    # live on 10.100.10.131 with:
+    #   sbsign --key mok.key --cert mok.pub --output out.efi in.efi   # OK
+    #   sbverify --cert mok.pub out.efi                               # FAIL
+    # Tested against fresh shim.efi, fresh grubx64.efi, ZBM — all fail.
+    # Fixed upstream in 0.9.6+. Build from Jeremy Kerr's git snapshot.
+    log "Installing sbsigntools 0.9.6 from source (CentOS 9's 0.9.5 is broken)..."
+    SBSIGN_VER="0.9.6"
+    chroot "$ROOTFS" dnf install -y --quiet \
+        gnu-efi-devel pkgconfig libuuid-devel help2man autoconf automake \
+        libtool openssl-devel gcc make >/dev/null 2>&1 || \
+        log "WARNING: sbsigntools build deps install hit an error"
+    if curl -fsSL "https://git.kernel.org/pub/scm/linux/kernel/git/jejb/sbsigntools.git/snapshot/sbsigntools-${SBSIGN_VER}.tar.gz" \
+         -o /tmp/sbsigntools.tar.gz 2>/dev/null; then
+        mkdir -p /tmp/sbsign-build
+        tar xzf /tmp/sbsigntools.tar.gz -C /tmp/sbsign-build --strip-components=1
+        # Build INSIDE the ROOTFS chroot so it links against the target
+        # ld.so + openssl; prevents "GLIBC_x.yz not found" at install time.
+        mkdir -p "${ROOTFS}/tmp/sbsign-build"
+        cp -a /tmp/sbsign-build/. "${ROOTFS}/tmp/sbsign-build/"
+        chroot "$ROOTFS" bash -c "
+            cd /tmp/sbsign-build
+            # Submodules embedded in the snapshot tarball
+            git init -q 2>/dev/null || true
+            ./autogen.sh >/dev/null 2>&1 && \
+            ./configure --prefix=/usr --disable-man >/dev/null 2>&1 && \
+            make -j\$(nproc) >/dev/null 2>&1 && \
+            make install >/dev/null 2>&1
+        " && log "sbsigntools ${SBSIGN_VER} installed at ${ROOTFS}/usr/bin/sbsign" || \
+          log "WARNING: sbsigntools ${SBSIGN_VER} build failed — falling back to EPEL 0.9.5"
+        # Confirm we got the newer version
+        chroot "$ROOTFS" /usr/bin/sbsign --version 2>&1 | head -1 | tee -a "$LOG_FILE"
+        rm -rf "${ROOTFS}/tmp/sbsign-build" /tmp/sbsign-build /tmp/sbsigntools.tar.gz
+    else
+        log "WARNING: sbsigntools source fetch failed — SB signing will use broken 0.9.5"
+    fi
+
     # Install eza from GitHub (not in EPEL). Eza publishes both x86_64 and
     # aarch64 "unknown-linux-gnu" release tarballs — naming matches rustc
     # targets exactly, so $ARCH works as-is.

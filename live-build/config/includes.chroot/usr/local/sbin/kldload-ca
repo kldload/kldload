@@ -28,7 +28,14 @@
 # Exit codes: 0 ok, 1 generic error, 2 wrong args.
 set -euo pipefail
 
-CA_DIR="${KLDLOAD_CA_DIR:-/var/lib/kldload/ca}"
+# CA default path is /etc/kldload/ca — on the ROOT ZFS dataset, never
+# shadowed by child dataset mounts. The 1.0.5-b303 installs put CA under
+# /var/lib/kldload/ca which IS a mount point of rpool/kldload/state: at
+# install time writes land on the parent dataset, at firstboot the child
+# mounts and hides them, so kldload-tls-cert sees empty CA dir and
+# regenerates a fresh root — different from the MOK that got signed at
+# install time. Moving the CA to /etc avoids the dataset-shadow entirely.
+CA_DIR="${KLDLOAD_CA_DIR:-/etc/kldload/ca}"
 ROOT_DIR="${CA_DIR}/root"
 LEAF_DIR="${CA_DIR}/leaves"
 ROOT_KEY="${ROOT_DIR}/ca.key"
@@ -404,12 +411,12 @@ kldload-ca — per-install PKI root
 
 Usage:
   kldload-ca init [--force]
-      Generate a root CA at /var/lib/kldload/ca/root/. Idempotent.
+      Generate a root CA at /etc/kldload/ca/root/. Idempotent.
       --force archives the existing root and rotates in a new one.
 
   kldload-ca issue <name> [--dns HOST]... [--ip ADDR]... [--days N] [--eku EKU]
       Issue a leaf cert signed by the root. Writes:
-        /var/lib/kldload/ca/leaves/<name>.{key,crt}
+        /etc/kldload/ca/leaves/<name>.{key,crt}
       Default --days 90, default --eku serverAuth,clientAuth.
 
   kldload-ca renew <name>
