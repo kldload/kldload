@@ -32,6 +32,16 @@ if [[ -e /var/run/klab/current-run.env ]]; then
     exit 0
 fi
 
-for svc in ttyd-k9s kldload-webui grafana-server; do
+# IMPORTANT: kldload-proxy must restart too. It's the ONLY thing now
+# terminating TLS on :8443 (webui + grafana + ttyd all run plain HTTP
+# on loopback behind it), so it holds the cert in its SSLContext. If
+# cert regens happen while the proxy keeps serving the pre-regen cert
+# from memory, browsers see SSLV3_ALERT_CERTIFICATE_UNKNOWN on
+# new connections and the Grafana iframe shows "failed to load" or
+# "charts for 10 seconds then dead" (first wave of connections was
+# from before the drift, subsequent refresh waves hit the new cert
+# and fail). Observed live on .121/.122/.127 all three times until
+# this fix landed.
+for svc in kldload-proxy ttyd-k9s kldload-webui grafana-server; do
     systemctl --no-block try-restart "$svc" 2>/dev/null || true
 done
