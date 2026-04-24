@@ -829,6 +829,17 @@ SALT
     # cover all current IPs, so the extra firings cost ~zero.
     systemctl enable --now kldload-tls-cert.timer 2>/dev/null || true
 
+    # ── kldload CA: install the per-install root into the system trust ──
+    # store so local consumers (curl, kubectl, ansible, prometheus scrapes)
+    # trust webui/proxy/grafana without --insecure. Idempotent: skipped
+    # if the CA hasn't been initialized yet (kldload-tls-cert ensures
+    # init runs before any leaf is issued). Any failure is non-fatal.
+    if [[ -x /usr/local/sbin/kldload-ca && -f /var/lib/kldload/ca/root/ca.crt ]]; then
+      log "installing kldload CA into system trust store"
+      /usr/local/sbin/kldload-ca trust-install >/dev/null 2>&1 || \
+        log "WARNING: kldload-ca trust-install failed (non-fatal)"
+    fi
+
     # ── MOK self-heal: make sure THIS install's signing cert is staged ──
     # The install-time mokutil --import (security.sh) can silently fail if
     # efivars aren't writable in the chroot, the live-USB's mokutil has

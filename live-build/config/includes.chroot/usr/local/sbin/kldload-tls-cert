@@ -196,10 +196,36 @@ if [[ "$_regen" -eq 1 ]]; then
         done
     } > "${CERT_DIR}/webui.cnf"
 
-    openssl req -x509 -nodes -newkey rsa:2048 \
-        -keyout "$KEY" -out "$CRT" \
-        -days 3650 \
-        -config "${CERT_DIR}/webui.cnf" >&2
+    # Prefer the kldload CA when present — every service on the box
+    # chains to one root, which the system trust store + (optionally) the
+    # user's browser trust ONCE. Falls back to the old self-signed path
+    # if kldload-ca is missing or fails, so the boot path never regresses.
+    _issued_via_ca=0
+    if [[ -x /usr/local/sbin/kldload-ca ]]; then
+        /usr/local/sbin/kldload-ca init >&2 2>/dev/null || true
+        if [[ -f /var/lib/kldload/ca/root/ca.crt ]]; then
+            _ca_args=(issue webui --days 365)
+            _ca_args+=(--dns "${_hostname}" --dns "${_short}" --dns localhost --dns kldload.local)
+            for _d in "${_extra_dns[@]}"; do _ca_args+=(--dns "${_d}"); done
+            _ca_args+=(--ip 127.0.0.1 --ip ::1)
+            for ip  in "${_ips[@]}";       do _ca_args+=(--ip "${ip}");  done
+            for ip6 in "${_ips6[@]}";      do _ca_args+=(--ip "${ip6}"); done
+            for ip  in "${_extra_ips[@]}"; do _ca_args+=(--ip "${ip}");  done
+            if /usr/local/sbin/kldload-ca "${_ca_args[@]}" >&2; then
+                cp /var/lib/kldload/ca/leaves/webui.key "$KEY"
+                cp /var/lib/kldload/ca/leaves/webui.crt "$CRT"
+                _issued_via_ca=1
+            fi
+        fi
+    fi
+    if [[ "$_issued_via_ca" -eq 0 ]]; then
+        # Fallback — self-signed leaf. Preserves prior behavior on any
+        # path where kldload-ca isn't yet installed or failed.
+        openssl req -x509 -nodes -newkey rsa:2048 \
+            -keyout "$KEY" -out "$CRT" \
+            -days 3650 \
+            -config "${CERT_DIR}/webui.cnf" >&2
+    fi
 
     rm -f "${CERT_DIR}/webui.cnf"
     chmod 0600 "$KEY" "$CRT"

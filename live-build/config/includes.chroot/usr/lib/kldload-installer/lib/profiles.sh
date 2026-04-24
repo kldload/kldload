@@ -438,7 +438,7 @@ k_install_system_files() {
   #   kspawn            — ZFS-native cluster spawner
   #   kldload-tls-cert  — self-signed TLS cert script for webui HTTPS
   mkdir -p "${target}/usr/local/sbin"
-  for bin in kspawn kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services; do
+  for bin in kspawn kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services; do
     [[ -f "/usr/local/sbin/${bin}" ]] && \
       cp "/usr/local/sbin/${bin}" "${target}/usr/local/sbin/${bin}" && \
       chmod +x "${target}/usr/local/sbin/${bin}" && \
