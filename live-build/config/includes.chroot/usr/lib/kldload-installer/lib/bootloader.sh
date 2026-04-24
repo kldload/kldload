@@ -297,47 +297,54 @@ EOFSTAB
   local mok_key="${target}/var/lib/dkms/mok.key"
   local mok_pub="${target}/var/lib/dkms/mok.pub"
 
-  # ── Inject SBAT section so shim will load us under Secure Boot ─────────
-  # shim v15.8 enforces SBAT policy 2021030218 — any EFI binary it loads
-  # must have a .sbat section whose generation numbers meet or exceed the
-  # revocation baseline. Upstream ZBM builds ship an empty or outdated
-  # .sbat, so shim rejects it with "security violation" even when MOK
-  # signing is valid. Previous workaround was `mokutil --set-sbat-policy
-  # delete` — that disables ALL SBAT checks, not just our binary. Proper
-  # fix: write a valid SBAT CSV and objcopy --update-section it in so the
-  # binary advertises itself + ZBM with gen=1, meeting shim's baseline.
+  # ── ZBM SBAT handling — intentionally NOT done here ────────────────────
+  # An earlier 1.0.5 patch injected a .sbat section into the ZBM PE via
+  # `objcopy --update-section/--add-section` BEFORE sbsign. That works
+  # on paper; in practice GNU binutils' PE writer rearranges section
+  # layout in ways that cause the Authenticode hash sbsign computes to
+  # DIFFER from the hash sbverify/shim recompute on the written file.
+  # Result: sbsign reports success, but sbverify returns "Signature
+  # verification failed" and shim throws 0x1a EFI_SECURITY_VIOLATION
+  # when the user enables SB and reboots.
+  #
+  # Observed on 10.100.10.131 (1.0.5-b303 install, 2026-04-24):
+  #   sbverify --cert /var/lib/dkms/mok.pub /boot/efi/EFI/BOOT/grubx64.efi
+  #   → PKCS7 verification failed; Signature verification failed
+  # No matter what cert you pass, the hash no longer matches — because
+  # objcopy moved bytes after sbsign already hashed the layout-as-written.
+  #
+  # Until ZBM is pre-built with SBAT baked in (zfsbootmenu 2.3+ supports
+  # --sbat-file on generate-zbm — kldload-free should adopt this at build
+  # time, not install time), we skip objcopy entirely. shim's default
+  # SbatLevelRT (sbat,1,2021030218) is lenient about binaries that don't
+  # declare .sbat — it only rejects ones that do and fall below the
+  # revocation level. A ZBM with NO .sbat passes baseline shim policy.
+  # If a future shim tightens that, the sbat-baked-at-build-time path
+  # is ready to plug in.
   local _zbm_prepped="${zbm_src}"
-  if command -v objcopy >/dev/null 2>&1; then
-    local _sbat_csv; _sbat_csv="$(mktemp)"
-    cat > "$_sbat_csv" <<'SBAT'
-sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md
-zfsbootmenu,1,ZFSBootMenu,zfsbootmenu,2.3.0,https://github.com/zbm-dev/zfsbootmenu
-kldload.zfsbootmenu,1,kldload ZFSBootMenu build,kldload,1.0.5,https://kldload.com
-SBAT
-    local _zbm_sbat="/tmp/zfsbootmenu-sbat.EFI"
-    # --update-section replaces existing .sbat; if absent, fall back to
-    # --add-section. Both accept the same CSV.
-    if objcopy --update-section ".sbat=${_sbat_csv}" \
-         "$zbm_src" "$_zbm_sbat" 2>>/tmp/sbat.log ||
-       objcopy --add-section ".sbat=${_sbat_csv}" \
-         --set-section-flags ".sbat=readonly,data" \
-         "$zbm_src" "$_zbm_sbat" 2>>/tmp/sbat.log; then
-      _zbm_prepped="$_zbm_sbat"
-      k_log "SBAT section injected into ZFSBootMenu (satisfies shim policy 2021030218)"
-    else
-      k_log "WARNING: could not inject SBAT section — Secure Boot will fail until user runs 'mokutil --set-sbat-policy delete'"
-    fi
-    rm -f "$_sbat_csv"
-  fi
 
   if [[ -f "$mok_key" && -f "$mok_pub" ]] && command -v sbsign >/dev/null 2>&1; then
     k_log "Signing ZFSBootMenu EFI with MOK key (Secure Boot)..."
-    sbsign --key "$mok_key" --cert "$mok_pub" \
-      --output "${zbm_efi_dir}/BOOTX64.EFI" "$_zbm_prepped" >&7 2>&1 && \
-      k_log "ZFSBootMenu EFI signed with MOK key" || {
-        k_log "WARNING: sbsign failed — installing unsigned ZFSBootMenu"
+    if sbsign --key "$mok_key" --cert "$mok_pub" \
+         --output "${zbm_efi_dir}/BOOTX64.EFI" "$_zbm_prepped" >&7 2>&1; then
+      # POST-SIGN VERIFY: catch the bug class above at install time, not
+      # at first-SB-boot. If sbverify can't verify the just-signed binary
+      # against the signing cert, that's a guaranteed 0x1a at next reboot
+      # under SB. Better to log it loud and fall back to unsigned (user
+      # must disable SB) than let them flip SB on and get a dead box.
+      if command -v sbverify >/dev/null 2>&1 && \
+         sbverify --cert "$mok_pub" "${zbm_efi_dir}/BOOTX64.EFI" >&7 2>&1; then
+        k_log "ZFSBootMenu EFI signed with MOK key (verified)"
+      else
+        k_log "ERROR: sbsign reported success but sbverify cannot verify the result."
+        k_log "       This would cause EFI_SECURITY_VIOLATION (0x1a) under Secure Boot."
+        k_log "       Installing the UNSIGNED ZBM instead — you MUST keep SB disabled."
         cp "$_zbm_prepped" "${zbm_efi_dir}/BOOTX64.EFI"
-      }
+      fi
+    else
+      k_log "WARNING: sbsign failed — installing unsigned ZFSBootMenu"
+      cp "$_zbm_prepped" "${zbm_efi_dir}/BOOTX64.EFI"
+    fi
   else
     cp "$_zbm_prepped" "${zbm_efi_dir}/BOOTX64.EFI"
     k_log "ZFSBootMenu EFI installed (unsigned — no sbsign or no MOK keys)"
