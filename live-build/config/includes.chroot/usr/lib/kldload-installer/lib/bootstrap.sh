@@ -1137,7 +1137,12 @@ CUSTOMREPO
   # hardware. ~20MB initramfs bloat; worth it for universal bootability.
   # --add "zfs" is still required — dracut-zfs isn't auto-detected in
   # no-hostonly mode because there's no host pool to probe.
-  chroot "${target}" dracut --force --no-hostonly --add "zfs" --kver "$kver" 2>>"$log" || \
+  # Belt-and-suspender against the dracut-live bug: even if the package
+  # sneaks back in via a dep chain, --omit explicitly drops the live/
+  # livenet modules from the initramfs build. Without this, the target
+  # initramfs waits forever for /dev/disk/by-label/KLDLOAD (the LIVE
+  # USB label) at boot and dracut hangs the install.
+  chroot "${target}" dracut --force --no-hostonly --add "zfs" --omit "dracut-live livenet" --kver "$kver" 2>>"$log" || \
     k_log_to "$log" "WARNING: dracut rebuild failed"
 
   # Chroot mounts stay up for the rest of the install
