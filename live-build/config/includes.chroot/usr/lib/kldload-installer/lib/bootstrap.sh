@@ -426,6 +426,10 @@ k_install_target_packages() {
     openssh-server
     network-manager
     qemu-guest-agent
+    # nginx — single TLS reverse proxy on :8443 with HTTP/2 (1.0.6).
+    # Must be in this hardcoded array — target-base.txt drives the
+    # darksite download manifest only, not the actual target install.
+    nginx-light
   )
 
   if [[ "${KLDLOAD_STORAGE_MODE:-standard}" == "zfs" ]]; then
@@ -985,6 +989,18 @@ CUSTOMREPO
     perl-Config-IniFiles perl-Capture-Tiny
     # Web UI + kldload tools backend
     python3 python3-websockets python3-pyyaml tmux
+    # nginx — single TLS reverse proxy on :8443 with HTTP/2. Replaces
+    # the hand-rolled Python kldload-proxy. Must be in this hardcoded
+    # list (not only target-base.txt) — bootstrap.sh installs from this
+    # array, target-base.txt only drives the darksite builder's download
+    # manifest. The two lists drifted apart in 1.0.6 testing when nginx
+    # was added to target-base.txt but not here — result was nginx in
+    # the darksite mirror but not on the installed target.
+    nginx
+    # sbsigntools — needed for sbsign in kldload-secure-boot enable
+    # (re-signing ZFSBootMenu against the CA key). Usually pulled in
+    # already via the MOK flow, but explicit is safer.
+    sbsigntools
   )
 
   # Profile-specific packages for DNF-based distros
