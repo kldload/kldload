@@ -444,6 +444,18 @@ k_install_system_files() {
       chmod +x "${target}/usr/local/sbin/${bin}" && \
       k_log "installed /usr/local/sbin/${bin}"
   done
+  # /usr/libexec/ — argv-safe helper for kldload-session@.service.
+  # Missing this on target = nginx drop-in writes OK but systemd unit
+  # fails on ExecStart (no wrapper to invoke).
+  mkdir -p "${target}/usr/libexec"
+  shopt -s nullglob
+  for lx in /usr/libexec/kldload-*; do
+    [[ -f "$lx" ]] || continue
+    cp "$lx" "${target}/usr/libexec/$(basename "$lx")"
+    chmod +x "${target}/usr/libexec/$(basename "$lx")"
+    k_log "installed /usr/libexec/$(basename "$lx")"
+  done
+  shopt -u nullglob
 
   # Bob configs (personas.json + Modelfile.bob + Modelfile.bash). Without
   # these on target, firstboot's `ollama create bob` fails with "no

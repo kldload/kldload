@@ -742,10 +742,22 @@ if [[ "$EDITION" != "core" ]]; then
     # kldload-proxy is the :8443 reverse proxy that fronts webui, grafana,
     # ttyd-k9s and Bob behind a single cert — without it, nothing answers
     # on :8443 because the webui binds loopback :8444 now.
-    for _sb_bob in bob-splash bob-ui kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-proxy; do
+    for _sb_bob in bob-splash bob-ui kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-proxy kldload-session kldload-headlamp-install; do
         src="/build/live-build/config/includes.chroot/usr/local/sbin/${_sb_bob}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/sbin/${_sb_bob}" && chmod +x "${ROOTFS}/usr/local/sbin/${_sb_bob}"
     done
+
+    # /usr/libexec/ helpers — kldload-session@.service calls
+    # kldload-session-run, an argv-safe wrapper that sources the
+    # session env file and execs ttyd. Without this copy the
+    # session unit starts but ttyd never binds (no wrapper found).
+    mkdir -p "${ROOTFS}/usr/libexec"
+    shopt -s nullglob
+    for _libex in /build/live-build/config/includes.chroot/usr/libexec/*; do
+        cp "$_libex" "${ROOTFS}/usr/libexec/$(basename "$_libex")"
+        chmod +x "${ROOTFS}/usr/libexec/$(basename "$_libex")"
+    done
+    shopt -u nullglob
 
     # Bob config files — personas (64 greetings × N personas) + Modelfiles.
     # bob-ui reads /etc/bob/personas.json on startup; the rotating greeting
