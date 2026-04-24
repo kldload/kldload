@@ -1,0 +1,71 @@
+# kldload session template — one instance per short-lived terminal /
+# console session spawned via `kldload-session open`.
+#
+# The instance name (%i) is the session id. Metadata lives at
+# /var/lib/kldload/sessions/%i.env — picked up as EnvironmentFile= so
+# this unit body stays generic. kldload-session owns writing that env
+# file before `systemctl start kldload-session@<id>.service` runs.
+#
+# Each session wraps ttyd so the caller's command (virsh console,
+# kubectl exec, ssh, klab tail, …) is reachable via a browser-native
+# WebSocket. nginx fronts this at /s/<id>/ via the matching drop-in
+# at /etc/nginx/conf.d/kldload-dyn/<id>.conf.
+
+[Unit]
+Description=kldload session %i (%I)
+Documentation=man:ttyd(1)
+After=network-online.target
+PartOf=nginx.service
+
+[Service]
+Type=simple
+
+# The env file is read by the wrapper below (not by systemd directly)
+# so values with spaces/special chars don't fall afoul of systemd's
+# whitespace-split of ExecStart=. The wrapper builds argv as a bash
+# array and execs ttyd — clean and debuggable.
+ExecStart=/usr/libexec/kldload-session-run %i
+
+# Low-noise restart policy: if the user's command exits (they typed
+# `exit`), let the unit die — kldload-session prune reaps the metadata
+# next time it runs. Don't auto-restart; that would paper over broken
+# pod-exec invocations etc.
+Restart=no
+
+# Hard limits: session can't eat more than 256MB RAM or fork a swarm.
+MemoryMax=256M
+TasksMax=64
+
+# ttyd runs as the `nginx` user when possible so it can share the
+# loopback with other proxied services. Fall back to root if the
+# specific command genuinely needs it (virsh console needs libvirt
+# socket access which requires root or libvirt group membership;
+# kubectl needs kubeconfig readable by the user). For the MVP,
+# run as root — kldload is a single-user appliance. Revisit when
+# OIDC + per-user RBAC lands.
+User=root
+Group=root
+
+# Security hardening — still meaningful even as root.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/log /var/lib/kldload /run /tmp
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @resources
+SystemCallErrorNumber=EPERM
+
+# Journal gets the session stdout/stderr — searchable via
+# `journalctl -u kldload-session@<id>` for post-mortem.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+# Sessions are not enabled at boot; kldload-session manages lifecycle
+# directly. This WantedBy is here just so `systemctl list-units` picks
+# up the unit template cleanly for visibility.
+WantedBy=multi-user.target

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# kldload-session-run — argv-safe launcher for kldload-session@.service.
+#
+# systemd's ExecStart= splits on whitespace; ttyd's -t titleFixed=...
+# and sh -c "..." both want values that can contain spaces and special
+# chars. Rather than fight systemd quoting rules, the session template
+# calls this script, which sources the session env file and execs ttyd
+# with properly-constructed argv. Simpler, debuggable, works every time.
+#
+# Invoked by: kldload-session@<id>.service
+# Env:        sources /var/lib/kldload/sessions/<id>.env before exec
+set -euo pipefail
+
+id="${1:?session id required}"
+env_file="/var/lib/kldload/sessions/${id}.env"
+[[ -r "$env_file" ]] || { echo "no env file at $env_file" >&2; exit 2; }
+
+# shellcheck disable=SC1090
+source "$env_file"
+
+: "${KLDLOAD_SESSION_PORT:?port missing from env file}"
+: "${KLDLOAD_SESSION_CMD:?cmd missing from env file}"
+: "${KLDLOAD_SESSION_TITLE:=kldload session}"
+
+# Argv built as an array — each element a single argv slot regardless
+# of embedded spaces / quotes / braces.
+args=(
+  --writable
+  -p "${KLDLOAD_SESSION_PORT}"
+  -i 127.0.0.1
+  -b "/s/${id}"
+  -t "titleFixed=${KLDLOAD_SESSION_TITLE}"
+  -t 'fontFamily=JetBrains Mono,Menlo,Consolas,monospace'
+  sh -c "${KLDLOAD_SESSION_CMD}"
+)
+
+exec /usr/local/bin/ttyd "${args[@]}"

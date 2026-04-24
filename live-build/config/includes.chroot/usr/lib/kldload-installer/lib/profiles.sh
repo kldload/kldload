@@ -396,7 +396,7 @@ k_install_system_files() {
 
   # ── Systemd units ──────────────────────────────────────────────────────────
   mkdir -p "${target}/usr/lib/systemd/system"
-  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer; do
+  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service; do
     [[ -f "/usr/lib/systemd/system/${f}" ]] && \
       cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
   done
@@ -438,7 +438,7 @@ k_install_system_files() {
   #   kspawn            — ZFS-native cluster spawner
   #   kldload-tls-cert  — self-signed TLS cert script for webui HTTPS
   mkdir -p "${target}/usr/local/sbin"
-  for bin in kspawn kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services; do
+  for bin in kspawn kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-session kldload-headlamp-install; do
     [[ -f "/usr/local/sbin/${bin}" ]] && \
       cp "/usr/local/sbin/${bin}" "${target}/usr/local/sbin/${bin}" && \
       chmod +x "${target}/usr/local/sbin/${bin}" && \
@@ -488,12 +488,40 @@ k_install_system_files() {
   # kldload-webui enabled at boot (firstboot also starts it, but enable here for robustness)
   ln -sf "/usr/lib/systemd/system/kldload-webui.service" \
     "${target}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" || true
-  # kldload-proxy — the ONLY thing binding :8443 now (webui moved to
-  # loopback :8444, fronted by this proxy). Without this symlink,
-  # nothing answers TLS at boot and the browser sees "unable to
-  # connect". Mirrors the webui enable above exactly.
-  ln -sf "/usr/lib/systemd/system/kldload-proxy.service" \
-    "${target}/etc/systemd/system/multi-user.target.wants/kldload-proxy.service" || true
+  # ── 1.0.6 TLS-terminator: nginx ─────────────────────────────────────
+  # nginx replaces the Python kldload-proxy as the :8443 listener.
+  # HTTP/2 + graceful SIGHUP reload + drop-in dir pattern. The old
+  # kldload-proxy unit is NOT symlinked into multi-user.target.wants —
+  # nginx owns :8443 now. The unit file is kept on-disk for one release
+  # as a rollback path: `systemctl enable kldload-proxy && systemctl
+  # disable nginx` reverts cleanly.
+  #
+  # nginx config tree (/etc/nginx/conf.d/kldload.conf + helpers) was
+  # copied into the live ISO rootfs via build-iso.sh; mirror it to the
+  # target here so the installed system has the same config.
+  if [[ -d /etc/nginx ]]; then
+    mkdir -p "${target}/etc/nginx"
+    # Preserve anything the target's nginx RPM/DEB shipped that our
+    # includes.chroot tree doesn't touch (e.g. mime.types, modules-*).
+    cp -r /etc/nginx/conf.d  "${target}/etc/nginx/" 2>/dev/null || true
+    cp -r /etc/nginx/kldload "${target}/etc/nginx/" 2>/dev/null || true
+    cp /etc/nginx/nginx.conf "${target}/etc/nginx/nginx.conf" 2>/dev/null || true
+    mkdir -p "${target}/etc/nginx/conf.d/kldload-dyn"
+    k_log "nginx config tree copied to target"
+  fi
+  # systemd drop-in for nginx.service (ExecStartPre kldload-tls-cert).
+  mkdir -p "${target}/etc/systemd/system/nginx.service.d"
+  if [[ -d /etc/systemd/system/nginx.service.d ]]; then
+    cp /etc/systemd/system/nginx.service.d/*.conf \
+       "${target}/etc/systemd/system/nginx.service.d/" 2>/dev/null || true
+  fi
+  # Session metadata dir (kldload-session writes here).
+  mkdir -p "${target}/var/lib/kldload/sessions"
+  # Enable nginx at boot.
+  ln -sf "/usr/lib/systemd/system/nginx.service" \
+    "${target}/etc/systemd/system/multi-user.target.wants/nginx.service" || true
+  # kldload-proxy kept on disk for rollback, but NOT enabled.
+  rm -f "${target}/etc/systemd/system/multi-user.target.wants/kldload-proxy.service" 2>/dev/null || true
   # Autodeploy orchestrator — runs once after firstboot, invokes AI pull
   # + K8s bootstrap + klab goldens in dependency order, writes phase-ready
   # markers the UI reads to turn the Lab Ready banner green.

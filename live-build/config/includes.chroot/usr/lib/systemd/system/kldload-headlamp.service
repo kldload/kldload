@@ -1,0 +1,51 @@
+# kldload-headlamp.service — web K8s GUI on 127.0.0.1:4466, fronted by
+# nginx at https://<host>:8443/k8s/.
+#
+# Headlamp runs read-only unless the user provides a service-account
+# token. We generate that SA + ClusterRoleBinding during `kube-init` on
+# kubernetes-profile installs (created by kldload-kube-headlamp-token).
+# For non-k8s profiles headlamp-server still runs, but just shows a
+# kubeconfig picker UI (no cluster auto-wired).
+
+[Unit]
+Description=kldload Headlamp — full-service Kubernetes GUI
+Documentation=https://headlamp.dev
+After=network-online.target
+Wants=network-online.target
+# If nginx is enabled, Headlamp should start with the system so it's
+# reachable through /k8s/ immediately. nginx doesn't require headlamp
+# though (a 502 on /k8s/ is recoverable and nginx proceeds serving
+# the rest of the site).
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/sbin/kldload-headlamp-install
+ExecStart=/var/lib/kldload/headlamp/headlamp-server \
+    --base-url=/k8s \
+    --listen-addr=127.0.0.1 \
+    --port=4466 \
+    --plugins-dir=/var/lib/kldload/headlamp/plugins \
+    --in-cluster=false \
+    --kubeconfig=/var/lib/kldload/headlamp/kubeconfig
+
+Restart=on-failure
+RestartSec=10s
+
+# Headlamp is a static Go binary; it reads kubeconfig, writes no state
+# outside its data dir, and spawns no children. Lock it down.
+User=root
+Group=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/kldload/headlamp /tmp
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# kldload-headlamp-install — idempotent Headlamp binary bootstrap.
+#
+# Headlamp (https://headlamp.dev, CNCF Sandbox) is the full-service web
+# K8s GUI kldload ships for the kubernetes profile. It's ~45 MB of
+# statically-linked Go — too big to bake into every ISO variant, so we
+# fetch on first use and cache under /var/lib/kldload/headlamp.
+#
+# Idempotent: if the binary is already in place and matches the pinned
+# version, exit 0 without touching the network. This runs from the
+# headlamp.service ExecStartPre, so boot-time contention is fine.
+#
+# Darksite path: if /var/lib/kldload/headlamp-cache/ already has a
+# pre-pulled binary (added in a later darksite pass), use that. Keeps
+# fully-offline installs working once we bake the binary in.
+set -euo pipefail
+
+HEADLAMP_VER="${HEADLAMP_VER:-0.26.0}"
+DEST_DIR="/var/lib/kldload/headlamp"
+BIN="${DEST_DIR}/headlamp-server"
+CACHE="/var/lib/kldload/headlamp-cache/headlamp-server-${HEADLAMP_VER}"
+
+log() { echo "[kldload-headlamp-install] $*" >&2; }
+
+mkdir -p "${DEST_DIR}"
+
+# Already installed and right version? Short-circuit.
+if [[ -x "${BIN}" ]] && \
+   "${BIN}" --version 2>/dev/null | grep -q "${HEADLAMP_VER}"; then
+    log "Headlamp ${HEADLAMP_VER} already installed at ${BIN}"
+    exit 0
+fi
+
+# Offline darksite path.
+if [[ -f "${CACHE}" ]]; then
+    log "Installing Headlamp ${HEADLAMP_VER} from local cache"
+    install -m 0755 "${CACHE}" "${BIN}"
+    exit 0
+fi
+
+# Online fallback — GitHub release. arch-aware (amd64/arm64 only for now).
+arch="$(uname -m)"
+case "${arch}" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) log "unsupported arch: ${arch}"; exit 1 ;;
+esac
+
+url="https://github.com/headlamp-k8s/headlamp/releases/download/v${HEADLAMP_VER}/headlamp-server-linux-${arch}.tar.gz"
+tmp="$(mktemp -d)"
+trap 'rm -rf "${tmp}"' EXIT
+
+log "Fetching Headlamp ${HEADLAMP_VER} from ${url}"
+if ! curl -fsSL -o "${tmp}/headlamp.tgz" "${url}"; then
+    log "download failed — Headlamp not installed. Retry after network is up."
+    exit 1
+fi
+
+tar -xzf "${tmp}/headlamp.tgz" -C "${tmp}"
+# Release tarball structure varies by version; find the server binary.
+src="$(find "${tmp}" -type f -name 'headlamp-server*' -perm -u+x | head -1)"
+[[ -n "${src}" ]] || { log "headlamp-server binary not found in tarball"; exit 1; }
+
+install -m 0755 "${src}" "${BIN}"
+log "Headlamp ${HEADLAMP_VER} installed at ${BIN}"

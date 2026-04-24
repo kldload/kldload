@@ -123,6 +123,12 @@ PKGS=(
     linux-firmware iwl*-firmware
     passwd shadow-utils util-linux procps-ng findutils grep sed gawk
     rootfiles parted gdisk dosfstools
+    # nginx — single TLS reverse proxy on :8443 for every browser-facing
+    # service. Needed on the LIVE ISO too, not just the target, so the
+    # installer webui is reachable at https://<host>:8443/ from first boot
+    # without waiting for a dnf install. Replaces the 1.0.5 Python
+    # kldload-proxy; HTTP/2 eliminates the cert-trust flicker class.
+    nginx
     # Live environment disk & diagnostic tools
     hdparm smartmontools nvme-cli
     lshw dmidecode pciutils usbutils
@@ -998,17 +1004,45 @@ if [[ "$EDITION" != "core" ]]; then
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/promtail.service \
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-tls-cert.service \
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-tls-cert.timer \
-        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-proxy.service; do
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-proxy.service \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-headlamp.service \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-session@.service; do
         [[ -f "$_unit_path" ]] && cp "$_unit_path" "${ROOTFS}/usr/lib/systemd/system/$(basename "$_unit_path")"
     done
     shopt -u nullglob
-    # Enable kldload-proxy at boot — terminates TLS on :8443 and routes
-    # to webui/grafana/ttyd/bob on loopback. If this doesn't start,
-    # the browser sees "unable to connect" because nothing else binds
-    # :8443 in this architecture.
-    if [[ -f "${ROOTFS}/usr/lib/systemd/system/kldload-proxy.service" ]]; then
-        chroot "${ROOTFS}" systemctl enable kldload-proxy.service >> "$LOG_FILE" 2>&1 || true
+    # ── 1.0.6 TLS-terminator swap: nginx replaces kldload-proxy ────────
+    # nginx on :8443 with HTTP/2 + ALPN + drop-in dir pattern. Graceful
+    # SIGHUP reload means cert rotations + session adds don't drop any
+    # in-flight WebSockets. kldload-proxy is kept on-disk for one release
+    # as a rollback path but is NOT enabled at boot.
+    #
+    # Copy nginx config tree into rootfs. /etc/nginx/ is created by the
+    # nginx RPM install; our files overlay onto it. conf.d/kldload.conf,
+    # kldload/proxy-common.conf + ws-upgrade.conf, conf.d/kldload-dyn/
+    # (empty drop-in dir).
+    if [[ -d /build/live-build/config/includes.chroot/etc/nginx ]]; then
+        mkdir -p "${ROOTFS}/etc/nginx"
+        cp -r /build/live-build/config/includes.chroot/etc/nginx/. "${ROOTFS}/etc/nginx/"
+        log "nginx config tree installed from includes.chroot"
     fi
+    # Drop-in dir needs to exist even when empty — nginx `include` on an
+    # empty glob is fine, but the directory itself must be present.
+    mkdir -p "${ROOTFS}/etc/nginx/conf.d/kldload-dyn"
+
+    # systemd drop-in for nginx.service (ExecStartPre cert ensure).
+    if [[ -d /build/live-build/config/includes.chroot/etc/systemd/system/nginx.service.d ]]; then
+        mkdir -p "${ROOTFS}/etc/systemd/system/nginx.service.d"
+        cp /build/live-build/config/includes.chroot/etc/systemd/system/nginx.service.d/*.conf \
+           "${ROOTFS}/etc/systemd/system/nginx.service.d/" 2>/dev/null || true
+    fi
+
+    # Session session-dir scaffold (owned by root, readable).
+    mkdir -p "${ROOTFS}/var/lib/kldload/sessions"
+
+    # Enable nginx at boot — the new :8443 TLS terminator. Disable
+    # kldload-proxy explicitly so only one thing binds :8443.
+    chroot "${ROOTFS}" systemctl enable  nginx.service          >> "$LOG_FILE" 2>&1 || true
+    chroot "${ROOTFS}" systemctl disable kldload-proxy.service  >> "$LOG_FILE" 2>&1 || true
     # Enable kldload-tls-cert.timer at boot (fires cert-drift check hourly)
     if [[ -f "${ROOTFS}/usr/lib/systemd/system/kldload-tls-cert.timer" ]]; then
         chroot "${ROOTFS}" systemctl enable kldload-tls-cert.timer >> "$LOG_FILE" 2>&1 || true

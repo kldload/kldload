@@ -32,16 +32,43 @@ if [[ -e /var/run/klab/current-run.env ]]; then
     exit 0
 fi
 
-# IMPORTANT: kldload-proxy must restart too. It's the ONLY thing now
-# terminating TLS on :8443 (webui + grafana + ttyd all run plain HTTP
-# on loopback behind it), so it holds the cert in its SSLContext. If
-# cert regens happen while the proxy keeps serving the pre-regen cert
-# from memory, browsers see SSLV3_ALERT_CERTIFICATE_UNKNOWN on
-# new connections and the Grafana iframe shows "failed to load" or
-# "charts for 10 seconds then dead" (first wave of connections was
-# from before the drift, subsequent refresh waves hit the new cert
-# and fail). Observed live on .121/.122/.127 all three times until
-# this fix landed.
-for svc in kldload-proxy ttyd-k9s kldload-webui grafana-server; do
+# TLS-terminating and TLS-consuming services need to re-read the cert
+# after kldload-tls-cert regenerates it. There are two bounce modes:
+#
+#   1. RELOAD (graceful): nginx handles this via SIGHUP. New worker
+#      processes spawn with the new cert, old workers drain in-flight
+#      requests (including long-lived WebSockets — Grafana Live, ttyd
+#      terminals, Headlamp exec streams don't drop). This is the
+#      right move for 1.0.6.
+#
+#   2. RESTART (full): used for kldload-webui because it loads the
+#      cert via kldload-tls-cert stdin and has no reload signal. Also
+#      for ttyd-k9s / grafana-server on 1.0.5 images where the Python
+#      kldload-proxy was the :8443 terminator.
+#
+# 1.0.6 rollout preserves rollback: we bounce BOTH kldload-proxy
+# (1.0.5 path) and nginx (1.0.6 path). Whichever is running picks up
+# the new cert; the other is a no-op. Keeps the upgrade safe.
+#
+# Observed drift-race history: on 1.0.5 .121/.122/.127 the old
+# kldload-proxy held a stale cert in its SSLContext after kldload-tls-cert
+# regenerated for the post-DHCP libvirt IP, and concurrent browser
+# connections saw SSLV3_ALERT_CERTIFICATE_UNKNOWN. nginx's SIGHUP
+# reload makes that class of bug structurally impossible.
+
+# 1. Graceful nginx reload (1.0.6 path). `reload` ~= SIGHUP.
+if systemctl is-active nginx >/dev/null 2>&1; then
+    logger -t kldload-bounce-tls-services "nginx active — reloading gracefully"
+    systemctl --no-block reload nginx 2>/dev/null || true
+fi
+
+# 2. Legacy kldload-proxy restart (1.0.5 rollback path). No-op if the
+# service is not present or disabled on this install.
+if systemctl list-unit-files kldload-proxy.service >/dev/null 2>&1; then
+    systemctl --no-block try-restart kldload-proxy 2>/dev/null || true
+fi
+
+# 3. Services that consume the cert directly (not through nginx).
+for svc in ttyd-k9s kldload-webui grafana-server; do
     systemctl --no-block try-restart "$svc" 2>/dev/null || true
 done
