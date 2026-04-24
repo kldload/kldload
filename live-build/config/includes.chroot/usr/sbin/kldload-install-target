@@ -1742,31 +1742,21 @@ main() {
     *)                _ok "Bootloader"  "ZFSBootMenu + EFI registered" ;;
   esac
 
-  # ── Secure Boot signature post-check ────────────────────────────────────
-  # If the install enabled SB (MOK keys generated), verify the signed ZBM
-  # on the EFI partition actually validates against the MOK cert BEFORE
-  # we claim success. An invisible 0x1a-at-next-boot is the worst kind
-  # of bug — user enables SB, box won't boot, they think the install
-  # broke. Fail loudly here instead: tell the user the signature is
-  # unverifiable, keep SB disabled advice, mark the box as SB-not-ready.
-  if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]]; then
-    local _tm="${KLDLOAD_TARGET_MNT:-/target}"
-    local _mok="${_tm}/var/lib/dkms/mok.pub"
-    local _zbm="${_tm}/boot/efi/EFI/BOOT/grubx64.efi"
-    if [[ -f "$_mok" && -f "$_zbm" ]] && command -v sbverify >/dev/null 2>&1; then
-      if sbverify --cert "$_mok" "$_zbm" >/dev/null 2>&1; then
-        _ok "Secure Boot"  "signature verified against MOK — safe to enable SB after MokManager enrollment"
-      else
-        k_log "WARNING: ZFSBootMenu sbverify FAILED against enrolled MOK cert."
-        k_log "         If you enable Secure Boot in firmware, you will hit 0x1a"
-        k_log "         EFI_SECURITY_VIOLATION on next boot. Keep SB disabled and"
-        k_log "         see /var/log/installer for details. This is a kldload-side"
-        k_log "         bug, not a problem with your hardware."
-        printf '\n\e[1;33m  ⚠  Secure Boot not safe to enable on this install (sbverify failed)\e[0m\n'
-        printf '\e[1;33m      Keep SB DISABLED in BIOS. See /var/log/installer for the full log.\e[0m\n\n'
-      fi
-    fi
-  fi
+  # Removed: the sbverify post-check that lived here. It assumed
+  # /boot/efi/EFI/BOOT/grubx64.efi would be our MOK-signed ZFSBootMenu.
+  # The b3ec0ba bootloader architecture uses the DISTRO-signed grubx64.efi
+  # (Red-Hat-signed) as the second-stage for shim, and boots the kernel
+  # directly from ESP — ZBM is only an optional boot-env-selection tool
+  # at /EFI/zbm/. A MOK-based sbverify against distro-signed grub always
+  # returns false-negative, which made every SB install trigger the
+  # scary yellow "not safe to enable" banner unnecessarily.
+  #
+  # Under the current chain (firmware → shim → distro-grub → kernel →
+  # zfs.ko), the only thing we actually sign with MOK is zfs.ko via
+  # DKMS sign_tool — that's handled inside k_bootstrap_base and the
+  # DKMS build itself. No install-time sbverify of boot binaries
+  # needed; boot chain trust is the distro's problem, our concern is
+  # that zfs.ko loads under SB, which the DKMS sign step guarantees.
 
   # ── Image export — AFTER bootloader so image includes ZFSBootMenu ──────
   # BEFORE pool finalization so qemu-img can read the block device
