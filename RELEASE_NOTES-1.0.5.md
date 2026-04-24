@@ -421,19 +421,102 @@ stock `ncurses-term` ships it, so SSH-in from Ghostty (Hashimoto's
 terminal) used to land on a broken TERM — now it just works. Purely
 additive for non-Ghostty users; ~4 KB on disk.
 
-### Secure Boot — SBAT CSV for ZFSBootMenu
+### Secure Boot — back to default-ON, with the toolchain actually fixed
 
-`bootloader.sh` now injects an SBAT CSV (`zfsbootmenu,1,...`) into the
-ZBM EFI with `objcopy --update-section .sbat=` before MOK-signing.
-Shim v15.8 policy 2021030218 now accepts it — no more
-`mokutil --set-sbat-policy delete` workaround. MOK subject is unique
-per install (prevents key conflicts) and `--ignore-keyring` skips a
-stale kernel keyring.
+Honest history: 1.0.5 went out with Secure Boot quietly flipped to
+opt-in. The intent was "revisit once the UI stops thrashing." The
+`kldload-secure-boot enable` tool the code comments pointed at didn't
+exist, which became a visible rug-pull in field testing (kldload/kldload#3).
+The late-1.0.5 revision ships what 1.0.5 should always have been:
+
+**Default:** Secure Boot is ON unless the user unticks the **🔒 Secure
+Boot** checkbox in the installer's Platform Options panel.
+
+**What was actually wrong and got fixed in this cycle:**
+
+Three latent bugs had been hiding under the "MOK enrollment is flaky"
+headline all along. Field testing forced each one out:
+
+1. **`objcopy --update-section .sbat=…` before sbsign corrupted the PE.**
+   GNU binutils' PE writer rearranges section layout in ways the
+   Authenticode hash sbsign precomputes does not reflect. sbsign
+   reported success; every verifier rejected the sig; shim threw
+   `0x1a EFI_SECURITY_VIOLATION` on every SB-on boot. **Fix:** don't
+   inject SBAT at install time. Upstream ZFSBootMenu already ships
+   the SBAT section we need (`sbat,1,SBAT Version,...`), which meets
+   shim v15.8's `2021030218` baseline unmodified. Installer now sbsigns
+   the unmodified upstream binary — hash chain intact.
+
+2. **sbsigntools 0.9.5 on CentOS 9 has broken PE hash computation.**
+   The EPEL-shipped `sbsigntools-0.9.5-3.el9` mis-hashes PE binaries
+   that have gaps between COFF sections — which is every EFI binary
+   we care about (shim, grub, ZBM). Even round-tripping a known-valid
+   shim.efi (strip, re-sign, verify) fails under 0.9.5. **Fix:** the
+   ISO builder now compiles `sbsigntools 0.9.6` from source (Jeremy
+   Kerr's git snapshot), same pattern we use for sanoid. The target
+   ships the newer binary at `/usr/bin/sbsign`; hash computation is
+   correct; signatures actually verify.
+
+3. **CA dir was shadowed by a ZFS sub-dataset mount at first boot.**
+   `/var/lib/kldload` is the mount point of `rpool/kldload/state`.
+   Install-time writes to `/target/var/lib/kldload/ca/` landed on the
+   parent dataset because the child wasn't mounted into `/target`
+   yet. At first boot the child dataset mounted on top and hid the
+   install-time CA. `kldload-tls-cert` saw an empty CA dir and ran
+   `kldload-ca init`, generating a **fresh** root different from the
+   MOK that got enrolled. The "unified trust root" design collapsed
+   silently. **Fix:** moved the CA to `/etc/kldload/ca/` — on the
+   root dataset, never shadowed by sub-dataset mounts. Install-time
+   writes persist to first boot; MOK == CA; truly unified.
+
+**Post-sign `sbverify` gate.** `k_install_bootloader` now runs
+`sbverify` against the just-signed ZBM BEFORE considering the install
+complete. If verification fails (any future signing regression), the
+installer refuses to deploy the bad-signature binary, falls back to
+installing the unsigned copy, and surfaces a yellow TTY banner:
+
+```
+⚠  Secure Boot not safe to enable on this install (sbverify failed)
+   Keep SB DISABLED in BIOS. See /var/log/installer for the full log.
+```
+
+No more "enable SB in BIOS, reboot, brick, wtf just happened" loops.
+
+**Real post-install tool** — `/usr/local/sbin/kldload-secure-boot`
+(`enable | disable | status | reenroll`) replaces the vaporware
+comment. Uses the kldload-ca root as MOK signing key, re-signs loaded
+`zfs.ko`, sbsigns the ZFSBootMenu binary, queues `mokutil --import`.
+
+**Web UI checkbox** — Platform Options panel has a 🔒 Secure Boot
+card (default checked). Unchecking writes `KLDLOAD_ENABLE_SECURE_BOOT=0`
+into the answers file. No more `export KLDLOAD_ENABLE_SECURE_BOOT=1`
+shell-gymnastics to opt in via the web installer.
+
+**Unified trust root.** The kldload CA at `/etc/kldload/ca/root/ca.{crt,key,der}`
+signs TLS certs for webui/grafana/k9s AND is enrolled as the MOK
+signing key. One cert, one fingerprint covers browser trust and
+kernel module signing. No more three-trust-roots-drifting-silently.
+
+**Expected MOK-enrollment flow** (default install):
+
+1. BIOS: Secure Boot OFF (live USB can't SB-boot yet — see "Known Gaps")
+2. Install via web UI, leave Secure Boot checkbox ON
+3. Install completes, auto-reboots (pull USB)
+4. Optional: flip BIOS Secure Boot ON during reboot
+5. MokManager blue screen: `Enroll MOK → Continue → kldload → Yes → reboot`
+6. Boots clean under Secure Boot. Browser trusts TLS. ZFS loads.
 
 Full chain-of-trust walkthrough (shim → ZBM → kernel → ZFS kmod, with
 SBAT policy, MOK enrollment, and the troubleshooting matrix) is
 documented at
 [kldload.com/learn/secure-boot-chain](https://kldload.com/learn/secure-boot-chain).
+
+**Known gap** (queued, not yet fixed): the live ISO's own
+`\EFI\BOOT\BOOTX64.EFI` is raw GRUB, not shim. Users with SB ON in
+firmware must turn SB OFF to boot the installer USB (the installed
+system then enables SB properly). Integrating MS-signed shim into the
+live ISO boot chain is a separate workstream; the installer-side flow
+is fixed independently.
 
 ### New operator tools
 
