@@ -421,71 +421,85 @@ stock `ncurses-term` ships it, so SSH-in from Ghostty (Hashimoto's
 terminal) used to land on a broken TERM — now it just works. Purely
 additive for non-Ghostty users; ~4 KB on disk.
 
-### Secure Boot — back to default-ON, with the toolchain actually fixed
+### Secure Boot — distro-signed boot chain, MOK-signed kernel modules
 
 Honest history: 1.0.5 went out with Secure Boot quietly flipped to
 opt-in. The intent was "revisit once the UI stops thrashing." The
 `kldload-secure-boot enable` tool the code comments pointed at didn't
 exist, which became a visible rug-pull in field testing (kldload/kldload#3).
-The late-1.0.5 revision ships what 1.0.5 should always have been:
+The late-1.0.5 revision lands what 1.0.5 should always have been —
+plus a fundamental rethink of the boot chain after a multi-day chase.
 
 **Default:** Secure Boot is ON unless the user unticks the **🔒 Secure
 Boot** checkbox in the installer's Platform Options panel.
 
-**What was actually wrong and got fixed in this cycle:**
+**The boot chain we ship (and why it's this and not what we tried first):**
 
-Three latent bugs had been hiding under the "MOK enrollment is flaky"
-headline all along. Field testing forced each one out:
+```
+firmware
+  └─ shim.efi          (Microsoft-signed, distro-shipped)
+       └─ grubx64.efi  (RH/CentOS/Rocky/Fedora distro-signed —
+                        already trusted by shim's embedded vendor cert)
+            └─ vmlinuz (distro-signed by the same vendor cert)
+                 └─ zfs.ko (MOK-signed via DKMS sign_tool, MOK enrolled
+                            via MokManager on first SB boot)
+```
 
-1. **`objcopy --update-section .sbat=…` before sbsign corrupted the PE.**
+The only thing **we** sign is `zfs.ko`, with the kldload MOK key. Everything
+else is already signed by trusted vendor certs that shim accepts out of the
+box. This is the smallest possible Secure Boot trust footprint for a ZFS-on-root
+distro — and it's the architecture that's actually been working since b3ec0ba.
+
+**The detour we took (and undid):** an interim approach signed
+ZFSBootMenu ourselves with the MOK key and dropped it in as the
+primary `grubx64.efi`. That approach surfaced two real, gnarly bugs
+in the SB toolchain that ate days of investigation — both still
+documented because they'll bite anyone who tries the same path:
+
+1. **`objcopy --update-section .sbat=…` before sbsign corrupts the PE.**
    GNU binutils' PE writer rearranges section layout in ways the
-   Authenticode hash sbsign precomputes does not reflect. sbsign
-   reported success; every verifier rejected the sig; shim threw
-   `0x1a EFI_SECURITY_VIOLATION` on every SB-on boot. **Fix:** don't
-   inject SBAT at install time. Upstream ZFSBootMenu already ships
-   the SBAT section we need (`sbat,1,SBAT Version,...`), which meets
-   shim v15.8's `2021030218` baseline unmodified. Installer now sbsigns
-   the unmodified upstream binary — hash chain intact.
+   Authenticode hash sbsign precomputes doesn't reflect. sbsign
+   reports success; every verifier rejects the signature; shim
+   throws `0x1a EFI_SECURITY_VIOLATION` on every SB-on boot. If you
+   ever need to inject an SBAT section into a PE binary you intend
+   to sign, do it BEFORE you compute the hash, not after. Or — better —
+   don't inject; ZBM already ships a usable SBAT section upstream.
 
 2. **sbsigntools 0.9.5 on CentOS 9 has broken PE hash computation.**
-   The EPEL-shipped `sbsigntools-0.9.5-3.el9` mis-hashes PE binaries
-   that have gaps between COFF sections — which is every EFI binary
-   we care about (shim, grub, ZBM). Even round-tripping a known-valid
-   shim.efi (strip, re-sign, verify) fails under 0.9.5. **Fix:** the
-   ISO builder now compiles `sbsigntools 0.9.6` from source (Jeremy
-   Kerr's git snapshot), same pattern we use for sanoid. The target
-   ships the newer binary at `/usr/bin/sbsign`; hash computation is
-   correct; signatures actually verify.
+   `sbsigntools-0.9.5-3.el9` from EPEL mis-hashes PE binaries with
+   gaps between COFF sections — which is every EFI binary that matters
+   (shim, grub, ZBM). Round-tripping a known-valid `shim.efi` (strip,
+   re-sign, verify) fails under 0.9.5. Fixed upstream in 0.9.6+.
+
+The lesson from chasing both: **don't sign the boot chain yourself when
+shim already trusts the distro vendor certs.** Bowing out of the
+verification path entirely is more reliable than getting the signing
+toolchain bug-free.
 
 3. **CA dir was shadowed by a ZFS sub-dataset mount at first boot.**
-   `/var/lib/kldload` is the mount point of `rpool/kldload/state`.
-   Install-time writes to `/target/var/lib/kldload/ca/` landed on the
-   parent dataset because the child wasn't mounted into `/target`
-   yet. At first boot the child dataset mounted on top and hid the
-   install-time CA. `kldload-tls-cert` saw an empty CA dir and ran
-   `kldload-ca init`, generating a **fresh** root different from the
-   MOK that got enrolled. The "unified trust root" design collapsed
-   silently. **Fix:** moved the CA to `/etc/kldload/ca/` — on the
-   root dataset, never shadowed by sub-dataset mounts. Install-time
-   writes persist to first boot; MOK == CA; truly unified.
+   This bug stands independently of the boot-chain rethink — it
+   would have broken unified-trust-root regardless. `/var/lib/kldload`
+   is the mount point of `rpool/kldload/state`. Install-time writes
+   to `/target/var/lib/kldload/ca/` landed on the parent dataset
+   because the child wasn't mounted into `/target` yet. At first boot
+   the child mounted on top and hid the install-time CA.
+   `kldload-tls-cert` saw an empty CA dir and ran `kldload-ca init`,
+   generating a **fresh** root different from the MOK that got
+   enrolled. The "unified trust root" design collapsed silently.
+   **Fix:** moved the CA to `/etc/kldload/ca/` — on the root dataset,
+   never shadowed by sub-dataset mounts. MOK == CA; truly unified.
 
-**Post-sign `sbverify` gate.** `k_install_bootloader` now runs
-`sbverify` against the just-signed ZBM BEFORE considering the install
-complete. If verification fails (any future signing regression), the
-installer refuses to deploy the bad-signature binary, falls back to
-installing the unsigned copy, and surfaces a yellow TTY banner:
-
-```
-⚠  Secure Boot not safe to enable on this install (sbverify failed)
-   Keep SB DISABLED in BIOS. See /var/log/installer for the full log.
-```
-
-No more "enable SB in BIOS, reboot, brick, wtf just happened" loops.
+**ZFSBootMenu is still here, just not in the SB-critical path.**
+ZBM ships at `/EFI/zbm/BOOTX64.EFI`, MOK-signed when sbsign is
+available, for users who want boot-environment selection. Primary
+boot uses distro grub via shim's vendor-cert trust path. Best of
+both — operational ZBM boot menus on systems where you want them,
+zero shim-rejection risk on the default path.
 
 **Real post-install tool** — `/usr/local/sbin/kldload-secure-boot`
 (`enable | disable | status | reenroll`) replaces the vaporware
 comment. Uses the kldload-ca root as MOK signing key, re-signs loaded
-`zfs.ko`, sbsigns the ZFSBootMenu binary, queues `mokutil --import`.
+`zfs.ko`, queues `mokutil --import`.
 
 **Web UI checkbox** — Platform Options panel has a 🔒 Secure Boot
 card (default checked). Unchecking writes `KLDLOAD_ENABLE_SECURE_BOOT=0`
@@ -506,9 +520,9 @@ kernel module signing. No more three-trust-roots-drifting-silently.
 5. MokManager blue screen: `Enroll MOK → Continue → kldload → Yes → reboot`
 6. Boots clean under Secure Boot. Browser trusts TLS. ZFS loads.
 
-Full chain-of-trust walkthrough (shim → ZBM → kernel → ZFS kmod, with
-SBAT policy, MOK enrollment, and the troubleshooting matrix) is
-documented at
+Full chain-of-trust walkthrough (shim → distro grub → kernel → ZFS
+kmod, with SBAT policy, MOK enrollment, and the troubleshooting matrix)
+is documented at
 [kldload.com/learn/secure-boot-chain](https://kldload.com/learn/secure-boot-chain).
 
 **Known gap** (queued, not yet fixed): the live ISO's own
@@ -517,6 +531,12 @@ firmware must turn SB OFF to boot the installer USB (the installed
 system then enables SB properly). Integrating MS-signed shim into the
 live ISO boot chain is a separate workstream; the installer-side flow
 is fixed independently.
+
+**Follow-up to drop:** the build-iso.sh step that compiles
+`sbsigntools 0.9.6` from source is no longer load-bearing (we don't
+sign the boot chain ourselves) and its source URL currently 404s. It
+will be removed in a follow-up patch — flagging it here so anyone
+reading the build log doesn't think it's load-bearing.
 
 ### New operator tools
 
