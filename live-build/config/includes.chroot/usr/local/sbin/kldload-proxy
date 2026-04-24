@@ -251,11 +251,18 @@ def pipe_bidirectional(a, b):
     t1.start(); t2.start()
     t1.join(); t2.join()
 
-def forward_body(src, dst, headers):
+def forward_body(src, dst, headers, already=0):
     """Forward the request body (or entire response) respecting
     Content-Length or chunked encoding. For chunked: just stream bytes
     until the terminal 0-length chunk. For Content-Length: stream N
-    bytes. For neither: read to EOF (close-delimited)."""
+    bytes, minus `already` bytes that the caller already drained out of
+    the read-ahead buffer when parsing headers (HTTP clients commonly
+    pipeline headers + body in the same TCP write, so the recv() that
+    found \\r\\n\\r\\n will have already pulled some or all of the
+    body past the delimiter — the caller must send that prefix to dst
+    BEFORE calling us, and pass its length as `already` so we don't
+    over-read from src waiting for bytes that were already consumed).
+    For neither CL nor TE: read to EOF (close-delimited)."""
     cl = find_header(headers, b"content-length")
     te = find_header(headers, b"transfer-encoding")
     if te and b"chunked" in te.lower():
@@ -274,8 +281,10 @@ def forward_body(src, dst, headers):
                 break
     elif cl is not None:
         try:
-            n = int(cl)
+            n = int(cl) - already
         except ValueError:
+            return
+        if n <= 0:
             return
         while n > 0:
             chunk = src.recv(min(BUF, n))
@@ -330,9 +339,14 @@ def handle(client_sock, client_addr):
             request_line, headers, strip_prefix, be_host, be_port)
         backend.sendall(new_head)
 
-        # Forward any client body bytes we already read past the headers
+        # Forward any client body bytes we already read past the headers.
+        # Track the length so forward_body() doesn't double-count them
+        # against Content-Length and end up blocking waiting for bytes
+        # that were already consumed.
+        req_already = 0
         if leftover:
             backend.sendall(leftover)
+            req_already = len(leftover)
 
         if is_ws:
             # Forward the backend's 101 response headers back to client
@@ -356,7 +370,7 @@ def handle(client_sock, client_addr):
 
         # Regular HTTP: finish forwarding request body
         if method not in (b"GET", b"HEAD", b"DELETE", b"OPTIONS"):
-            forward_body(client_sock, backend, headers)
+            forward_body(client_sock, backend, headers, already=req_already)
 
         # Read + forward response
         resp_head, resp_leftover = read_until(backend, b"\r\n\r\n")
@@ -372,15 +386,17 @@ def handle(client_sock, client_addr):
         except Exception:
             status_code = 200
         client_sock.sendall(rewrite_response_headers(resp_head))
+        resp_already = 0
         if resp_leftover:
             client_sock.sendall(resp_leftover)
+            resp_already = len(resp_leftover)
         # HEAD, 1xx, 204, 304 responses have no body regardless of headers
         # (see RFC 7230 §3.3.3). If we try to read one, we block forever.
         no_body = (method == b"HEAD"
                    or 100 <= status_code < 200
                    or status_code in (204, 304))
         if not no_body:
-            forward_body(backend, client_sock, resp_headers)
+            forward_body(backend, client_sock, resp_headers, already=resp_already)
 
     except Exception as e:
         try: log(f"conn {client_addr}: {e}")
