@@ -109,12 +109,21 @@ if [[ "$_regen" -eq 1 ]]; then
     _hostname="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo kldload-node)"
     _short="$(hostname -s 2>/dev/null || echo kldload)"
     _ips=()
+    # libvirt default network (virbr0) is deterministically 192.168.122.1
+    # on every kldload install — add it unconditionally so the cert is
+    # complete even if libvirtd hasn't finished starting yet when this
+    # script first runs. Without this, a race between boot, tls-cert,
+    # libvirtd and kldload-proxy leaves the proxy holding a pre-libvirt
+    # cert while later browsers fetch a drifted one, causing
+    # SSLV3_ALERT_CERTIFICATE_UNKNOWN on concurrent connections.
+    _ips+=("192.168.122.1")
     while IFS= read -r ip; do
         [[ -n "$ip" ]] && _ips+=("$ip")
     done < <(ip -4 -o addr show 2>/dev/null \
                 | awk '{print $4}' \
                 | cut -d/ -f1 \
-                | grep -v '^127\.' || true)
+                | grep -v '^127\.' \
+                | grep -v '^192\.168\.122\.1$' || true)
     # IPv6 — link-local (fe80::/10) excluded; they rotate + don't help
     _ips6=()
     while IFS= read -r ip6; do
