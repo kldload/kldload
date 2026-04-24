@@ -28,7 +28,7 @@ ROLE="${KLDLOAD_PROFILE:-server}"
 HOSTNAME="$(cat /etc/hostname | tr -d '[:space:]')"
 LAN_IP="$(ip route get 1.1.1.1 2>/dev/null \
   | awk '/src/{print $7}' | head -1 \
-  || hostname -I | awk '{print $1}')"
+  || ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
 
 log "Node: ${HOSTNAME}  role: ${ROLE}  lan_ip: ${LAN_IP}"
 
@@ -1450,7 +1450,7 @@ KAIREMOTE
             for _attempt in $(seq 1 120); do
               if curl -sf -o /dev/null http://localhost:8080 2>/dev/null; then
                 _webui_ready=true
-                ok "Open WebUI ready on http://$(hostname -I | awk '{print $1}'):8080 (attempt ${_attempt})"
+                ok "Open WebUI ready on http://$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1):8080 (attempt ${_attempt})"
                 break
               fi
               sleep 5
@@ -1544,7 +1544,7 @@ FFPOL
         # Desktop notification
         if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]]; then
           local _ip
-          _ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+          _ip=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
           # Send notification to all logged-in GNOME sessions
           for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
             local _user
@@ -1561,7 +1561,7 @@ FFPOL
         cat >> /etc/motd <<AIMOTD
 
   kldload AI Assistant — ready
-  Open WebUI:  http://$(hostname -I 2>/dev/null | awk '{print $1}'):8080
+  Open WebUI:  http://$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1):8080
   Commands:    kai, kai-voice, kai-do, kai-remote
   Model:       llama3.1:8b ($(curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "import sys,json;m=json.load(sys.stdin)['models'];print(f'{m[0][\"size\"]//1024//1024} MB')" 2>/dev/null || echo "loaded"))
 
