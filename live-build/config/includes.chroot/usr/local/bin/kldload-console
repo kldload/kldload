@@ -83,12 +83,13 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   # F3 (shell) and Shift+F3 (root) are intentionally NOT toggles — every
   # press spawns a fresh shell so you can keep multiple open.
   tmux bind -n F2  run-shell "_ktoggle-win k9s    'bash -c _k9s_wrap'"
-  # F3 → kldload-doctor: structured, one-shot compliance / sanity report
-  # (JSON piped through jq / json.tool so it reads). Old kldload-dash was
-  # too flickery; the doctor output is a static scroll that you can walk
-  # through without chasing refreshes. S-F5 still runs it in a 15s loop
-  # if you want continuous updates.
-  tmux bind -n F3  run-shell "_ktoggle-win doctor-once 'kldload-doctor 2>/dev/null | python3 -m json.tool | less -R'"
+  # F3 → kztest-tail: follows the live ZFS test run. When nothing's
+  # running it waits for /root/klab/latest/full.log to appear, then
+  # tails it forever. Hit it right after `klab test --full` and you
+  # see every [PASS]/[FAIL]/[SKIP] stream by in real time, prefixed
+  # by [distro]. Pair with S-F5 (doctor loop) for system-health
+  # correlation when a test flakes.
+  tmux bind -n F3  run-shell "_ktoggle-win ztest-tail 'kztest-tail'"
   tmux bind -n F4  run-shell "_ktoggle-win logs   'journalctl -f -u kldload-webui -u ttyd-k9s'"
   # F5 → kldload-lh: LogHog with cluster-wide SSHFS stitching. Launches
   # the interactive menu (Live All / Auth / Errors / Network / RegEX / IP

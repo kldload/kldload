@@ -173,7 +173,7 @@ so panels, VMs, logs never hide behind it. Every key is a toggle —
 press to open, same key to close.
 
 **Primary panes (F2-F12):**
-- F2 k9s · F3 kldload-dash · F4 logs · F5 live firehose (loghog / `lh`)
+- F2 k9s · F3 ZFS test tail (`kztest-tail`) · F4 logs · F5 live firehose (loghog / `lh`)
 - F6 htop · F7 k8s events · F8 hubble observe · F9 zpool iostat
 - F10 scratch · F11 tcplife · F12 tcptop
 
