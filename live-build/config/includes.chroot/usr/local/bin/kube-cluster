@@ -190,15 +190,23 @@ NETXML
       || die "Failed to start libvirt default network. Run: sudo virsh net-start default"
   fi
 
-  # Final gate: virbr0 must be present and up before virt-install runs,
-  # otherwise virt-install bails with "Cannot get interface MTU on virbr0".
+  # Final gate: virbr0 must EXIST + be administratively UP before
+  # virt-install runs. We do NOT require `state UP` — a fresh libvirt
+  # bridge with no VMs attached reports "<NO-CARRIER,...,UP> state DOWN"
+  # because no TAP is plugged into it yet. virt-install will attach the
+  # VM's TAP, carrier will come up, VM will boot. The earlier check for
+  # `state UP` was a false negative that bricked first-time bootstraps.
+  #
+  # The real signal virt-install needs: the link layer admin flag is UP
+  # (the `<...,UP>` pattern in `ip link`), which means the kernel will
+  # accept TAP attachments.
   for _i in 1 2 3 4 5 6 7 8 9 10; do
-    if ip link show virbr0 2>/dev/null | grep -qE 'state UP|UP,LOWER_UP'; then
+    if ip -o link show virbr0 2>/dev/null | grep -qE '[<,]UP[,>]'; then
       return 0
     fi
     sleep 1
   done
-  die "virbr0 still not up after starting default network. \
+  die "virbr0 still missing or admin-down after starting default network. \
 Check: sudo virsh net-info default && ip link show virbr0"
 }
 
