@@ -382,19 +382,29 @@ EOFSTAB
   # \EFI\BOOT\grubx64.efi keeps that embedded prefix, so it ALSO reads
   # \EFI\centos\grub.cfg (or rocky/fedora). Write both dirs' grub.cfg to
   # the same content so whichever path runs, the menu shows up.
+  # Default UX: silent chainload to ZFSBootMenu — preserves the boot-env
+  # selector users expect from kldload, while keeping shim's vendor-cert
+  # trust chain (firmware → MS-signed shim → distro-signed grub → ZBM).
+  # ZBM is MOK-signed by us (when sbsign available); shim's MOK
+  # verification approves it on the chainload.
+  #
+  # timeout=0 + timeout_style=hidden = no menu UI on a normal boot. ESC
+  # at boot interrupts and shows the alternate entries (direct kernel
+  # boot, single-user rescue) for the rare case ZBM itself is broken.
   local _grub_cfg=""
   read -r -d '' _grub_cfg <<GRUBCFG || true
 # kldload — auto-generated at install time
-set timeout=5
-set default=0
+set timeout=0
+set timeout_style=hidden
+set default=zbm
 
-menuentry "kldload — ${KLDLOAD_DISTRO:-linux} kernel ${_kver:-unknown}" --id=kldload {
-    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro rhgb quiet spl_hostid=\${spl_hostid}
-    initrd /EFI/BOOT/initrd.img
+menuentry "kldload (ZFSBootMenu — boot-env selector)" --id=zbm {
+    chainloader /EFI/zbm/BOOTX64.EFI
 }
 
-menuentry "ZFSBootMenu (boot-env selector)" --id=zbm {
-    chainloader /EFI/zbm/BOOTX64.EFI
+menuentry "kldload — direct kernel boot (skip ZBM)" --id=direct {
+    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro rhgb quiet spl_hostid=\${spl_hostid}
+    initrd /EFI/BOOT/initrd.img
 }
 
 menuentry "kldload — rescue (single-user)" --id=rescue {
@@ -453,6 +463,89 @@ esac
 ESPHOOK
   chmod 0755 "${target}/etc/kernel/install.d/99-kldload-esp.install"
   k_log "Kernel-install ESP sync hook installed (keeps /EFI/BOOT/vmlinuz fresh on kernel updates)"
+
+  # ── Auto-refresh /EFI/BOOT/grubx64.efi from distro updates ──────────────
+  # Defends against BootHole-class CVEs where shim ships a new SBAT level
+  # that revokes old grub signatures. The distro updates
+  # /boot/efi/EFI/{centos,rocky,fedora,redhat,debian,ubuntu}/grubx64.efi
+  # via dnf/apt; our copy at /EFI/BOOT/grubx64.efi goes stale and the next
+  # SBAT-aware shim run rejects it under SB.
+  #
+  # Mechanism: systemd path unit watches every distro grub source path,
+  # fires the .service which re-copies to /EFI/BOOT/ if the bytes drifted.
+  # Distro-agnostic — no dnf-plugin / apt-trigger to maintain per package
+  # manager. Runs on FS-level mtime change, so any package upgrade that
+  # touches the source binary triggers exactly one refresh.
+  cat > "${target}/usr/local/sbin/kldload-grub-refresh" <<'GRUBREFRESH'
+#!/usr/bin/env bash
+# kldload-grub-refresh — sync /EFI/BOOT/grubx64.efi from the distro's
+# signed copy after a package update. Needed because shim's SBAT
+# enforcement bumps periodically (BootHole, ESET, etc.) and a stale
+# on-ESP grub binary will fail verification under SB.
+set -euo pipefail
+
+ESP_BOOT="/boot/efi/EFI/BOOT/grubx64.efi"
+
+[[ -d "$(dirname "$ESP_BOOT")" ]] || exit 0
+
+for src in /boot/efi/EFI/centos/grubx64.efi \
+           /boot/efi/EFI/rocky/grubx64.efi \
+           /boot/efi/EFI/fedora/grubx64.efi \
+           /boot/efi/EFI/redhat/grubx64.efi \
+           /boot/efi/EFI/debian/grubx64.efi \
+           /boot/efi/EFI/ubuntu/grubx64.efi; do
+    [[ -f "$src" ]] || continue
+    if ! cmp -s "$src" "$ESP_BOOT" 2>/dev/null; then
+        cp -f "$src" "${ESP_BOOT}.tmp"
+        sync
+        mv -f "${ESP_BOOT}.tmp" "$ESP_BOOT"
+        sync
+        logger -t kldload-grub-refresh "refreshed ${ESP_BOOT} from ${src}"
+        break
+    fi
+done
+GRUBREFRESH
+  chmod 0755 "${target}/usr/local/sbin/kldload-grub-refresh"
+
+  cat > "${target}/usr/lib/systemd/system/kldload-grub-refresh.service" <<'GRUBREFRESHSVC'
+[Unit]
+Description=kldload — refresh /EFI/BOOT/grubx64.efi from distro update
+ConditionPathIsMountPoint=/boot/efi
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kldload-grub-refresh
+GRUBREFRESHSVC
+
+  cat > "${target}/usr/lib/systemd/system/kldload-grub-refresh.path" <<'GRUBREFRESHPATH'
+[Unit]
+Description=kldload — watch for distro grubx64.efi updates
+After=local-fs.target
+
+[Path]
+PathChanged=/boot/efi/EFI/centos/grubx64.efi
+PathChanged=/boot/efi/EFI/rocky/grubx64.efi
+PathChanged=/boot/efi/EFI/fedora/grubx64.efi
+PathChanged=/boot/efi/EFI/redhat/grubx64.efi
+PathChanged=/boot/efi/EFI/debian/grubx64.efi
+PathChanged=/boot/efi/EFI/ubuntu/grubx64.efi
+
+[Install]
+WantedBy=multi-user.target
+GRUBREFRESHPATH
+
+  # Enable inside chroot so it activates on first boot. Use --no-reload
+  # because target systemd isn't running.
+  if chroot "${target}" systemctl enable kldload-grub-refresh.path \
+        >/dev/null 2>&1; then
+    k_log "kldload-grub-refresh.path enabled (auto-refreshes ESP grubx64.efi on distro updates)"
+  else
+    # Fallback: hand-create the wants symlink.
+    mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
+    ln -sf /usr/lib/systemd/system/kldload-grub-refresh.path \
+        "${target}/etc/systemd/system/multi-user.target.wants/kldload-grub-refresh.path"
+    k_log "kldload-grub-refresh.path enabled via wants symlink (chroot systemctl unavailable)"
+  fi
 
   # Backup copy is always unsigned — used if the signed copy is corrupted.
   # The user can manually re-sign it with: sbsign --key mok.key --cert mok.pub ...
