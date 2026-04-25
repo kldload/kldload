@@ -122,6 +122,87 @@ step_done() {
 CP_NAME="${CLUSTER_NAME}-cp"
 WORKER_PREFIX="${CLUSTER_NAME}-w"
 
+# ── Pre-flight: libvirt default network must be up ────────────────────────
+# Symptom this guards against:
+#   ERROR  Cannot get interface MTU on 'virbr0': No such device
+#   Domain installation does not appear to have been successful.
+# Triggered when kube-cluster runs before virtnetworkd has activated the
+# default network (race on first boot, or after `virsh net-destroy default`,
+# or any host where the default network was customized away). We detect,
+# auto-recover, and only fail if recovery itself fails.
+_ensure_libvirt_default_net() {
+  # Make sure the daemons that own networks are running. libvirtd modular
+  # split (RHEL 9+, CentOS Stream 9+, Debian 12+) puts networks under
+  # virtnetworkd; older monolithic libvirtd handles it itself. Try modular
+  # first, fall back to monolithic — both is_active && start are no-ops on
+  # the wrong daemon.
+  for _svc in virtnetworkd libvirtd; do
+    if systemctl list-unit-files "${_svc}.service" >/dev/null 2>&1; then
+      systemctl is-active --quiet "$_svc" || systemctl start "$_svc" 2>/dev/null || true
+    fi
+  done
+
+  # Wait briefly for virsh socket to be ready — start is async on slow boots.
+  for _i in 1 2 3 4 5; do
+    virsh -q net-list --all >/dev/null 2>&1 && break
+    sleep 1
+  done
+
+  # If the default net isn't defined at all (rare — happens when someone
+  # ran `virsh net-undefine default` or installed without the libvirt
+  # network XML), recreate from the stock template before trying to start.
+  if ! virsh -q net-list --all 2>/dev/null | awk '{print $1}' | grep -qx default; then
+    local _xml=""
+    for _candidate in /usr/share/libvirt/networks/default.xml \
+                      /etc/libvirt/qemu/networks/default.xml.bak; do
+      [[ -r "$_candidate" ]] && _xml="$_candidate" && break
+    done
+    if [[ -n "$_xml" ]]; then
+      log "libvirt default network is missing — defining from ${_xml}"
+      virsh net-define "$_xml" >/dev/null 2>&1 || true
+    else
+      # Last-resort inline definition. Subnet 192.168.122.0/24 is the
+      # libvirt default and is what every kldload tool assumes.
+      log "libvirt default network is missing — defining inline"
+      virsh net-define /dev/stdin >/dev/null 2>&1 <<'NETXML' || true
+<network>
+  <name>default</name>
+  <forward mode='nat'/>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.122.2' end='192.168.122.254'/>
+    </dhcp>
+  </ip>
+</network>
+NETXML
+    fi
+  fi
+
+  # Make sure it's autostarted on every reboot — fixes the "first boot
+  # works, second boot fails" class of report.
+  virsh net-autostart default >/dev/null 2>&1 || true
+
+  # Activate it now if it isn't already.
+  if ! virsh -q net-list 2>/dev/null | awk '{print $1}' | grep -qx default; then
+    log "Starting libvirt default network..."
+    virsh net-start default >/dev/null 2>&1 \
+      || die "Failed to start libvirt default network. Run: sudo virsh net-start default"
+  fi
+
+  # Final gate: virbr0 must be present and up before virt-install runs,
+  # otherwise virt-install bails with "Cannot get interface MTU on virbr0".
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    if ip link show virbr0 2>/dev/null | grep -qE 'state UP|UP,LOWER_UP'; then
+      return 0
+    fi
+    sleep 1
+  done
+  die "virbr0 still not up after starting default network. \
+Check: sudo virsh net-info default && ip link show virbr0"
+}
+
+
 usage() {
   cat <<'EOF'
 Usage: kube-cluster <command> [options]
@@ -762,6 +843,8 @@ cmd_bootstrap() {
   echo -e "${W}  1 control plane + ${WORKERS} workers on ZFS instant clones         ${N}"
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo ""
+
+  _ensure_libvirt_default_net
 
   # Step 0: Clean slate — destroy any existing cluster + golden
   # No half-states, no stale VMs, no orphaned zvols. Every bootstrap
@@ -1499,6 +1582,8 @@ cmd_status() {
 
 # ── Golden only ────────────────────────────────────────────────────────────
 cmd_golden() {
+  _BOOT_START=$(date +%s)
+  _ensure_libvirt_default_net
   build_golden
 }
 
