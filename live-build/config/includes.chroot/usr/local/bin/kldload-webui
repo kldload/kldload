@@ -7081,14 +7081,59 @@ async def _bob_chat(websocket, msg):
             elif kind == "error":
                 raise RuntimeError(payload)
 
+    # qwen2.5:14b (and other smaller-model wobble cases) frequently emits
+    # tool calls as TEXT instead of as proper tool_use blocks — typically
+    # `[tool: shell_run({"command": "..."})]` inline in content. The Ollama
+    # tool-call protocol never fires in that case, so the round counts as
+    # "no tool" and the loop breaks early or hits the cap with garbage.
+    # This regex pulls those text emissions back into structured tool_calls
+    # so the existing executor path runs them. Catches the dominant failure
+    # mode without requiring a model swap or prompt-eng heroics.
+    import re as _re
+    _TOOL_TEXT_RE = _re.compile(
+        r'\[tool:\s*([A-Za-z_][A-Za-z0-9_]*)\(\s*(\{.*?\})\s*\)\s*\]',
+        _re.DOTALL,
+    )
+
+    def _extract_text_tool_calls(text):
+        out = []
+        if not text:
+            return out
+        for nm, args_json in _TOOL_TEXT_RE.findall(text):
+            try:
+                argv = json.loads(args_json)
+            except Exception:
+                continue
+            out.append({"function": {"name": nm, "arguments": argv}})
+        return out
+
     try:
         # Always stream, even with tools. Tool_calls arrive in the final
         # "done" chunk — Ollama sends content tokens first, then the tool
         # request at the end if the model wants to call one. User sees
         # live typing for plain chats; tool rounds still gate correctly.
         if use_tools:
-            for _round in range(5):
+            # Cap at 12 rounds (was 5). qwen2.5:14b is wobbly enough that
+            # 5 was hitting the cap on legitimate multi-step workflows. 12
+            # is still bounded enough to prevent runaway loops eating the
+            # context, but gives enough room for a 4-tool diagnosis recipe
+            # plus retries. Stronger models (qwen3:30b-a3b) finish in 2-3
+            # rounds and never approach the cap regardless.
+            for _round in range(12):
                 content, tcalls = await _run_one_round(messages)
+                # Text-tool-call interceptor: convert `[tool: name({...})]`
+                # text emissions into structured calls so the executor runs
+                # them. Only kicks in when the model didn't emit a real
+                # tool_call in this round.
+                if not tcalls:
+                    text_tcalls = _extract_text_tool_calls(content)
+                    if text_tcalls:
+                        await websocket.send(json.dumps({
+                            "type": "bob_chat_chunk",
+                            "content": f"\n[harness: rescued {len(text_tcalls)} text-emitted tool call(s)]\n",
+                            "done": False,
+                        }))
+                        tcalls = text_tcalls
                 if not tcalls:
                     break
                 messages.append({"role": "assistant",
@@ -7147,7 +7192,7 @@ async def _bob_chat(websocket, msg):
                 else:
                     await websocket.send(json.dumps({
                         "type": "bob_chat_chunk",
-                        "content": "\n[tool loop capped at 5 rounds]\n",
+                        "content": "\n[tool loop capped at 12 rounds]\n",
                         "done": False,
                     }))
             else:

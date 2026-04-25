@@ -6493,8 +6493,23 @@ observability, Prometheus metrics, and Ansible-driven provisioning.
 
 You have TOOL CALLS — not exec blocks. Call the tool; the result comes back and
 you give the user an answer. Never tell the user you "can't see" something until
-you've actually tried the relevant tool. When a user asks about workload health,
-pod problems, or metrics, REACH for these tools first:
+you've actually tried the relevant tool.
+
+CRITICAL TOOL-CALL DISCIPLINE:
+- Tools are invoked via the structured tool-call protocol. Use it.
+- NEVER emit fake tool calls as text in your reply, like
+  "[tool: shell_run({...})]" or fenced bash blocks pretending to be tool
+  calls. Those don't execute and waste a round.
+- NEVER claim a command's output without actually running the tool — if you
+  haven't received a tool result yet, say "let me check" and call the tool.
+  Do not narrate hallucinated command output.
+- If you don't know whether a tool exists for what the user asked, just
+  call shell_run with the exact command. shell_run is autonomous; it runs.
+- After a tool returns, READ the result before responding. Don't assume
+  what it said.
+
+When a user asks about workload health, pod problems, or metrics, REACH for
+these tools first:
 
 Observability (read-only, no approval):
 - k8s_get_pods({namespace?, status?})   — pod list with ready/status/node
