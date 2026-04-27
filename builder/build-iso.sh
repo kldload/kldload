@@ -1768,12 +1768,22 @@ set timeout_style=countdown
 search --no-floppy --set=root --label 'KLDLOAD'
 
 menuentry "KLDload Live (CentOS Stream 9 + ZFS)" --hotkey=l {
-    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=10 rd.retry=60
+    initrdefi /images/pxeboot/initrd.img
+}
+
+# Compatibility entry — for HP minis / quirky firmware where the default
+# entry hangs at "dracut-initqueue: timeout, still waiting for ... by-label/
+# KLDLOAD". Disables UAS (forces legacy bulk-only USB) and stretches the
+# device-wait windows. Slower USB throughput, but boots on hardware where
+# the default does not.
+menuentry "KLDload Live (Compatibility — slow USB / HP / quirky firmware)" --hotkey=c {
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1
     initrdefi /images/pxeboot/initrd.img
 }
 
 menuentry "KLDload Live (troubleshooting)" {
-    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rd.shell
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 rd.shell
     initrdefi /images/pxeboot/initrd.img
 }
 GRUBCFG
