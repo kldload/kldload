@@ -1767,23 +1767,50 @@ set timeout_style=countdown
 # ISO9660 volume naturally.
 search --no-floppy --set=root --label 'KLDLOAD'
 
-menuentry "KLDload Live (CentOS Stream 9 + ZFS)" --hotkey=l {
-    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=10 rd.retry=60
-    initrdefi /images/pxeboot/initrd.img
-}
-
-# Compatibility entry — for HP minis / quirky firmware where the default
-# entry hangs at "dracut-initqueue: timeout, still waiting for ... by-label/
-# KLDLOAD". Disables UAS (forces legacy bulk-only USB) and stretches the
-# device-wait windows. Slower USB throughput, but boots on hardware where
-# the default does not.
-menuentry "KLDload Live (Compatibility — slow USB / HP / quirky firmware)" --hotkey=c {
+# Default entry uses the broadly-compatible cmdline that was previously a
+# fallback "Compatibility" entry. Trade is ~5 seconds of extra boot time
+# on healthy hardware in exchange for booting reliably on HP minis, AMD
+# Ryzen mini-PCs (Beelink/Minisforum/GMKtec/etc), and any USB stick whose
+# controller has UAS quirks. The headline failure mode this avoids is
+# "dracut-initqueue: timeout, still waiting for /dev/disk/by-label/KLDLOAD".
+menuentry "kldloadOS Live (CentOS Stream 9 + ZFS)" --hotkey=l {
     linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1
     initrdefi /images/pxeboot/initrd.img
 }
 
-menuentry "KLDload Live (troubleshooting)" {
-    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 rd.shell
+# Safe graphics — generic nomodeset. For any GPU init issue (Nvidia black
+# screen, Intel/AMD garbled output) where the user just needs the EFI
+# framebuffer to come up. Inherits the default USB compat settings.
+menuentry "kldloadOS Live (safe graphics — nomodeset)" --hotkey=g {
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1 nomodeset
+    initrdefi /images/pxeboot/initrd.img
+}
+
+# AMD mini-PC compatibility — for Beelink SER5/SER6/SER8, Minisforum UM
+# series, GMKtec, ACEMagic, NiPoGi and other AMD Phoenix / Hawk Point /
+# Cezanne mini PCs where the 5.14 kernel's amdgpu driver stalls on Radeon
+# 780M / Vega init and the dracut initqueue times out behind it.
+# Blacklists amdgpu+radeon, forces efifb, longer device-wait windows.
+menuentry "kldloadOS Live (AMD mini-PC — Beelink/Minisforum/GMKtec)" --hotkey=a {
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=60 rd.retry=120 modprobe.blacklist=amdgpu,radeon,uas usbcore.autosuspend=-1 nomodeset video=efifb:on
+    initrdefi /images/pxeboot/initrd.img
+}
+
+# Maximum compatibility — last-resort kitchen sink. Use only when every
+# other entry has timed out. Blacklists all GPU drivers and unreliable USB
+# layers, pre-loads usb-storage early, delays storage probe, sets IOMMU
+# passthrough, stretches all dracut waits to ~3 minutes. Slow boot, but
+# if the hardware can boot Linux at all, this entry should get there.
+menuentry "kldloadOS Live (maximum compatibility — last resort)" --hotkey=m {
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=120 rd.retry=180 modprobe.blacklist=amdgpu,radeon,nouveau,uas usbcore.autosuspend=-1 nomodeset video=efifb:on iommu=pt usb-storage.delay_use=15 rd.driver.pre=usb-storage,sd_mod,vfat,iso9660
+    initrdefi /images/pxeboot/initrd.img
+}
+
+# Troubleshooting — drops to a dracut emergency shell after device-waits
+# expire. Use to inspect why the live label isn't appearing: lsblk,
+# ls /dev/disk/by-label/, dmesg | grep -i usb. Inherits compat USB delays.
+menuentry "kldloadOS Live (troubleshooting — dracut shell)" --hotkey=t {
+    linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1 rd.shell
     initrdefi /images/pxeboot/initrd.img
 }
 GRUBCFG
