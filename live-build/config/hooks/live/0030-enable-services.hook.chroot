@@ -75,8 +75,18 @@ enable_if_present "kldload-webui.service"
 # ---------------------------------------------------------------------------
 enable_if_present "kldload-live-ssh-init.service"
 enable_if_present "kldload-live-log-ship.timer"
-# Secure Boot MOK enrollment — runs before GDM on first live boot when SB is active
-enable_if_present "kldload-live-mok-enroll.service"
+# kldload-live-mok-enroll.service is intentionally NOT enabled (and its unit
+# file has been removed). It used to queue a MOK from the live env and then
+# `systemctl reboot` the live ISO 15s after first boot — which produced the
+# "boots once, never again" UX on every Secure-Boot-on machine, especially
+# AMD mini-PCs (Beelink/Minisforum/etc) where the warm reboot triggered xHCI
+# enumeration races and the user landed in dracut errors. MOK enrollment is
+# already queued correctly by the installer at end-of-install (see
+# kldload-install-target's k_configure_mok / inline mokutil block, plus the
+# kldload-mok-enroll.service it drops on the target). The live ISO must
+# remain SB-blind: it never touches NVRAM, never reboots itself.
+log "Masking kldload-live-mok-enroll.service (replaced by installer-driven enrollment)"
+systemctl mask kldload-live-mok-enroll.service 2>/dev/null || true
 # kldload-reconcile.service is NOT enabled on live ISO — enabled by installer on master nodes only
 # kldload-node-register runs on installed nodes via firstboot/systemd timer
 
