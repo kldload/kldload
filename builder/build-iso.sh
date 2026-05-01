@@ -202,16 +202,21 @@ gpgcheck=0
 enabled=1
 FEDOREPO
 
-# ZFS source — see task #4 in TASKS. fc44 prebuilt RPMs from
-# zfsonlinux.org may not exist yet (Fedora 44 GA was 2026-04-28). The
-# EL9 baseurl below WILL fail on a fresh F44 install — task #4 picks
-# the real source (zfsonlinux fc44 once published, or DKMS-from-SRPM
-# in the meantime). Leaving the placeholder here so the repo file is
-# present for whichever path we land on.
+# ZFS source — OpenZFS 2.4 from zfsonlinux.org.
+#
+# zfsonlinux.org publishes fc41/fc42/fc43 but not fc44 yet (Fedora 44
+# GA was 2026-04-28). zfs-dkms is a noarch source package that DKMS
+# rebuilds against the running kernel — so the fc43 tag is purely
+# cosmetic for it. The userspace libs (libzfs7/libnvpair3/libzpool7)
+# are fc43-built but glibc forward-compat means they run fine on fc44.
+#
+# The hardcoded `fedora/43/` path is intentional and stays until
+# zfsonlinux publishes fc44 binaries — at which point flip to
+# `fedora/$releasever/`.
 cat > "${ROOTFS}/etc/yum.repos.d/zfs.repo" << 'ZFSREPO'
 [zfs]
-name=OpenZFS for Fedora (placeholder — see task #4)
-baseurl=https://download.zfsonlinux.org/fedora/$releasever/$basearch/
+name=OpenZFS 2.4 for Fedora (using fc43 packages — fc44 not yet published)
+baseurl=http://download.zfsonlinux.org/2.4/fedora/43/$basearch/
 enabled=1
 gpgcheck=0
 
