@@ -113,7 +113,7 @@ log "Bootstrapping CentOS Stream 9 root filesystem..."
 PKGS=(
     basesystem filesystem setup
     dnf rpm coreutils bash glibc glibc-langpack-en
-    systemd systemd-udev dbus-daemon
+    systemd systemd-pam systemd-udev dbus-broker
     kernel kernel-core kernel-modules kernel-devel dracut dracut-live dracut-squash
     grub2-efi-${ARCH_EFI} grub2-tools shim-${ARCH_EFI} efibootmgr mokutil pesign sbsigntools
     NetworkManager NetworkManager-wifi wpa_supplicant openssh-server openssh-clients sudo
