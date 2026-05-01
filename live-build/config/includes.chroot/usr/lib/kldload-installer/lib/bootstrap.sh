@@ -557,9 +557,9 @@ _k_bootstrap_dnf() {
 
   local distro="${KLDLOAD_DISTRO:-centos}"
 
-  # Fedora uses its own release version (41), not the EL release (9)
+  # Fedora uses its own release version (44), not the EL release (9)
   if [[ "${distro}" == "fedora" ]]; then
-    release="${KLDLOAD_FEDORA_RELEASE:-43}"
+    release="${KLDLOAD_FEDORA_RELEASE:-44}"
   fi
 
   k_log_to "$log" "Bootstrapping ${distro} ${release} → ${target}"
@@ -788,7 +788,7 @@ CTMP
       fi
       ;;
     fedora)
-      local fedora_release="${KLDLOAD_FEDORA_RELEASE:-43}"
+      local fedora_release="${KLDLOAD_FEDORA_RELEASE:-44}"
       cat > "${target}/etc/yum.repos.d/fedora.repo" <<FEDORAREPO
 [fedora]
 name=Fedora ${fedora_release} - \$basearch
@@ -843,7 +843,7 @@ EPELREPO
   # zfs-release RPM installed below (it ships its own repo config
   # with the matching gpg key + URL for that Fedora version).
   # Prior behaviour hardcoded /fedora/41/ which shipped ZFS 2.2.7 —
-  # a version that doesn't compile against Fedora 43's 6.19 kernel,
+  # a version that doesn't compile against Fedora 44's 6.19 kernel,
   # causing silent DKMS failure and unbootable ZFS-root installs.
   if [[ "${distro}" != "fedora" ]]; then
     cat > "${target}/etc/yum.repos.d/zfs.repo" <<ZFSREPO
@@ -933,7 +933,7 @@ CUSTOMREPO
     # install NetworkManager-tui so nmtui works at the console for
     # post-install wifi config.
     NetworkManager NetworkManager-wifi NetworkManager-tui wpa_supplicant
-    # ── Firmware BLOBS (Fedora 43 split `linux-firmware` into many
+    # ── Firmware BLOBS (Fedora 44 split `linux-firmware` into many
     #    sub-packages — the bare `linux-firmware` rpm now carries only
     #    licenses, NOT the .ucode files). Without the explicit iwlwifi
     #    sub-packages, Intel wifi cards (AX201 / AX1650s / Killer 6E /
@@ -1146,30 +1146,41 @@ CUSTOMREPO
   # unbootable ZFS-root Fedora installs. Pattern mirrors klab's proven
   # loop: try known revisions newest-first until one resolves.
   if [[ "${distro}" == "fedora" ]]; then
-    local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-43}"
+    local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-44}"
+    # zfsonlinux publishes fc41/42/43 but not fc44 yet (F44 GA was 2026-04-28).
+    # Try the requested release first, then fall back to fc43 — the userspace
+    # RPMs are glibc-forward-compatible across one Fedora release, and
+    # zfs-dkms is noarch source so DKMS rebuilds against whatever kernel
+    # gets installed. Same fc43-bridge trick the live env uses.
     local _zfsrel_ok=0
-    for _rev in 3-0 2-10 2-9 2-8 2-7; do
-      if dnf --installroot="${target}" --releasever="${_fedora_rel}" \
-           --setopt=cachedir="${target}/var/cache/dnf" \
-           --disableplugin=subscription-manager --disableplugin=product-id \
-           --nogpgcheck --skip-broken -y install \
-           "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_fedora_rel}.noarch.rpm" \
-           >> "$log" 2>&1; then
-        _zfsrel_ok=1
-        k_log_to "$log" "Fedora ZFS repo enabled via zfs-release-${_rev}.fc${_fedora_rel}"
-        break
-      fi
+    for _rel in "${_fedora_rel}" 43; do
+      for _rev in 3-0 2-10 2-9 2-8 2-7; do
+        # dnf5 syntax: --skip-broken must come AFTER the subcommand.
+        if dnf --installroot="${target}" --releasever="${_fedora_rel}" \
+             --setopt=cachedir="${target}/var/cache/dnf" \
+             --disableplugin=subscription-manager --disableplugin=product-id \
+             --nogpgcheck -y install --skip-broken \
+             "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_rel}.noarch.rpm" \
+             >> "$log" 2>&1; then
+          _zfsrel_ok=1
+          k_log_to "$log" "Fedora ZFS repo enabled via zfs-release-${_rev}.fc${_rel} (target=fc${_fedora_rel})"
+          break 2
+        fi
+      done
     done
     [[ "$_zfsrel_ok" == "1" ]] || \
       k_log_to "$log" "WARNING: could not install zfs-release for fc${_fedora_rel} — ZFS will likely fail to install"
   fi
 
   k_log_to "$log" "Running dnf --installroot (${#_dnf_pkgs[@]} packages, profile=${_profile})..."
+  # dnf5 syntax: --skip-broken goes AFTER the subcommand, not before.
+  # The outer dnf here is the live env's dnf5 (F44+), even though the
+  # target may be F44/F43/RHEL/Rocky/etc.
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
       --setopt=cachedir="${target}/var/cache/dnf" \
       --disableplugin=subscription-manager --disableplugin=product-id \
-      --nogpgcheck --skip-broken -y install \
+      --nogpgcheck -y install --skip-broken \
       "${_dnf_pkgs[@]}" \
       >> "$log" 2>&1 \
       || { k_log_to "$log" "dnf --installroot failed"; return 1; }

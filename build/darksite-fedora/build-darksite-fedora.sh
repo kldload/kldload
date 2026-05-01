@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # build-darksite-fedora.sh — Fedora RPM darksite builder
-# Runs inside a fedora:RELEASE container (default: fedora:43). Downloads all
+# Runs inside a fedora:RELEASE container (default: fedora:44). Downloads all
 # RPMs needed for Fedora offline installs + creates a createrepo repo.
 # Output goes to /output/rpm/, which the caller mounts to
 # live-build/darksite-fedora-cache/rpm/ on the host.
@@ -16,7 +16,7 @@ PKG_SETS_DIR_FED="${PKG_SETS_DIR_FED:-${SCRIPT_DIR}/config/package-sets}"
 PKG_SETS_DIR_EL="${PKG_SETS_DIR_EL:-/darksite-el/config/package-sets}"
 
 ARCH="${ARCH:-x86_64}"
-RELEASE="${RELEASE:-43}"
+RELEASE="${RELEASE:-44}"
 DARKSITE_OUT="${DARKSITE_OUT:-/output}"
 REPO_DIR="${DARKSITE_OUT}/rpm"
 
@@ -36,16 +36,26 @@ if ! rpm -q rpmfusion-free-release 2>/dev/null >/dev/null; then
         log "NOTE: RPMFusion free release for fc${RELEASE} not available — may limit package coverage"
 fi
 
-# Add OpenZFS for Fedora if available. F43 is brand-new (Oct 2025); the
-# zfsonlinux.org project may not have a release RPM yet — in that case we
-# install nothing here and rely on the target building ZFS from source via
-# DKMS at first boot (kldload-install-target already has that fallback).
+# Add OpenZFS for Fedora if available. F44 is brand-new (Apr 2026) — the
+# zfsonlinux.org project hasn't published fc44 binaries yet. fc43 is
+# available with OpenZFS 2.4.1, and fc43 userspace RPMs are
+# glibc-forward-compatible to fc44; zfs-dkms is noarch source so DKMS
+# rebuilds the kmod against whatever target kernel gets installed. So
+# we try fc${RELEASE} first, then fall back to fc43.
 if ! rpm -q zfs-release 2>/dev/null >/dev/null; then
-    log "Adding OpenZFS repo for Fedora ${RELEASE}..."
-    dnf install -y "https://zfsonlinux.org/fedora/zfs-release-2-5.fc${RELEASE}.noarch.rpm" 2>/dev/null || \
-    dnf install -y "https://zfsonlinux.org/fedora/zfs-release-2-4.fc${RELEASE}.noarch.rpm" 2>/dev/null || \
-    dnf install -y "https://zfsonlinux.org/fedora/zfs-release-2-3.fc${RELEASE}.noarch.rpm" 2>/dev/null || \
-        log "NOTE: no zfs-release RPM for fc${RELEASE} yet — target will DKMS-build ZFS from source"
+    log "Adding OpenZFS repo for Fedora ${RELEASE} (with fc43 bridge fallback)..."
+    _zfsrel_ok=0
+    for _rel in "${RELEASE}" 43; do
+        for _rev in 3-0 2-10 2-9 2-8 2-7 2-5 2-4 2-3; do
+            if dnf install -y "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_rel}.noarch.rpm" 2>/dev/null; then
+                log "OpenZFS repo enabled via zfs-release-${_rev}.fc${_rel}"
+                _zfsrel_ok=1
+                break 2
+            fi
+        done
+    done
+    [[ "$_zfsrel_ok" == "1" ]] || \
+        log "NOTE: no zfs-release RPM available for fc${RELEASE} or fc43 — target will DKMS-build ZFS from source"
 fi
 
 # Add Kubernetes repo (pkgs.k8s.io)

@@ -172,7 +172,7 @@ cmd_build_ubuntu_darksite() {
 }
 
 # Build the Fedora RPM offline mirror (darksite).
-# Runs inside a fedora:<RELEASE> container (default fedora:43) and downloads
+# Runs inside a fedora:<RELEASE> container (default fedora:44) and downloads
 # all packages needed for Fedora offline installs. Cached at
 # live-build/darksite-fedora-cache/. Slow on first run, incremental after.
 cmd_build_fedora_darksite() {
@@ -186,7 +186,7 @@ cmd_build_fedora_darksite() {
         *) die "unsupported ARCH=$ARCH" ;;
     esac
     mkdir -p "$darksite_dir"
-    local fed_release="${FEDORA_RELEASE:-43}"
+    local fed_release="${FEDORA_RELEASE:-44}"
     log "Building Fedora ${fed_release} darksite RPM mirror (${_fed_arch})..."
     "$runtime" run --rm \
         --platform "linux/amd64" \

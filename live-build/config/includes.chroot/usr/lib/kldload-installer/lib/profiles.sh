@@ -785,7 +785,7 @@ FFPOLICY_WS
     centos)  _target_suite="stream9" ;;
     rocky)   _target_suite="9" ;;
     rhel)    _target_suite="9" ;;
-    fedora)  _target_suite="${KLDLOAD_FEDORA_RELEASE:-43}" ;;
+    fedora)  _target_suite="${KLDLOAD_FEDORA_RELEASE:-44}" ;;
     debian)  _target_suite="${KLDLOAD_SUITE:-trixie}" ;;
     ubuntu)  _target_suite="${KLDLOAD_SUITE:-noble}" ;;
     arch)    _target_suite="rolling" ;;
