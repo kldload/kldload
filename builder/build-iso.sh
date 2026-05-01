@@ -175,6 +175,11 @@ PKGS+=(
     gnome-keyring firefox mesa-dri-drivers
     pipewire wireplumber
     adwaita-icon-theme google-noto-sans-fonts
+    # Monospace fonts — without these, fc-match monospace falls back to
+    # NotoSans (proportional), and the GNOME Terminal renders with
+    # variable-width glyphs. F44 + GNOME 50 doesn't pull these as weak
+    # deps when --setopt=install_weak_deps=False is set.
+    dejavu-sans-mono-fonts liberation-mono-fonts google-noto-sans-mono-fonts
     # Bob's voice/audio stack (from bob-ai). pipewire is already above;
     # these add pulseaudio shims for apps that speak PA, sox for audio
     # pipeline helpers, espeak-ng as a fallback TTS, alsa-utils for
