@@ -412,12 +412,17 @@ _signed=0 || true
     while IFS= read -r _ko; do
         [[ -f "$_ko" ]] || continue
         if [[ "$_ko" == *.xz ]]; then
-            # Decompress, sign, recompress
+            # Decompress, sign, recompress.
+            # --check=crc32 is REQUIRED: the kernel module decompressor
+            # only accepts CRC32-checksummed xz streams. Default xz uses
+            # CRC64, which produces files the kernel rejects with
+            # "decompression failed with status 6" / modprobe "Invalid
+            # argument" — silently breaking ZFS load on boot.
             xz -d "$_ko" 2>/dev/null || true
             _ko_plain="${_ko%.xz}"
             if [[ -f "$_ko_plain" ]]; then
                 "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko_plain" 2>/dev/null || true
-                xz "$_ko_plain" 2>/dev/null || true
+                xz --check=crc32 "$_ko_plain" 2>/dev/null || true
                 log "  Signed: $(basename "$_ko")"
                 ((_signed++)) || true
             fi
