@@ -1,16 +1,19 @@
-FROM quay.io/centos/centos:stream9
+FROM fedora:44
 
 # ---------------------------------------------------------------------------
-# KLDload live ISO builder image
-# Base: CentOS Stream 9
+# kldload live ISO builder image
+# Base: Fedora 44 (kernel ~6.14)
 # Purpose: Provides the lorax/livemedia-creator toolchain for building the
-#          KLDload live ISO. ZFS packages are installed INTO the ISO via
+#          kldload live ISO. ZFS packages are installed INTO the ISO via
 #          kickstart — NOT here in the builder.
+#
+# Migrated from CentOS Stream 9 (kernel 5.14) → Fedora 44 to pick up modern
+# kernel hardware support (Wi-Fi, NVMe, GPU, USB boot quirks on XPS/HP) and
+# the latest lorax/dracut. Fedora has EPEL/CRB equivalents in its default
+# repos so no extra repo enable step is needed.
 # ---------------------------------------------------------------------------
 
-RUN dnf install -y epel-release && \
-    /usr/bin/crb enable && \
-    dnf install -y --allowerasing \
+RUN dnf install -y --allowerasing \
         lorax \
         createrepo_c \
         rpm-build \
