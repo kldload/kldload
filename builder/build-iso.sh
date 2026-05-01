@@ -549,21 +549,6 @@ PasswordAuthentication yes
 PermitRootLogin yes
 SSHEOF
 
-# CentOS 9 python3-websockets RPM ships websockets v10, which lacks the
-# websockets.http11 module that kldload-webui imports. The webui needs the
-# v11+ HTTP/1.1 protocol implementation for its WebSocket upgrade handling.
-# Fix: remove the system RPM and pip-install a compatible version.
-# resolv.conf is copied into the chroot so pip can resolve pypi.org.
-if [[ "$EDITION" != "core" ]]; then
-    chroot "$ROOTFS" dnf remove -y python3-websockets 2>/dev/null || true
-    cp /etc/resolv.conf "${ROOTFS}/etc/resolv.conf" 2>/dev/null || true
-    set +euo pipefail
-    chroot "$ROOTFS" pip3 install --no-cache-dir websockets >/dev/null 2>&1
-    _pip_rc=$?
-    set -e  # pipefail intentionally left disabled (SIGPIPE)
-    [[ $_pip_rc -ne 0 ]] && log "WARNING: pip install websockets failed — webui may not start"
-fi
-
 # Enable services
 chroot "$ROOTFS" systemctl enable NetworkManager sshd 2>/dev/null || true
 # Live environment always boots to GNOME desktop — the web UI installer is
