@@ -64,7 +64,7 @@ BUILD_DATE="$(date +%Y%m%d)"
 
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
-DISTRO_TAG="${DISTRO:-centos}"
+DISTRO_TAG="${DISTRO:-fedora}"
 VERSION="${KLDLOAD_VERSION:-1.1.0-dev}"
 ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
@@ -188,38 +188,30 @@ PKGS+=(
 # Set up repos inside the installroot
 mkdir -p "${ROOTFS}/etc/yum.repos.d" "${ROOTFS}/etc/pki/rpm-gpg"
 
-cat > "${ROOTFS}/etc/yum.repos.d/centos.repo" << 'CENTREPO'
-[baseos]
-name=CentOS Stream 9 - BaseOS
-metalink=https://mirrors.centos.org/metalink?repo=centos-baseos-9-stream&arch=$basearch&protocol=https
+cat > "${ROOTFS}/etc/yum.repos.d/fedora.repo" << 'FEDOREPO'
+[fedora]
+name=Fedora 44 - $basearch
+metalink=https://mirrors.fedoraproject.org/metalink?repo=fedora-$releasever&arch=$basearch
 gpgcheck=0
 enabled=1
 
-[appstream]
-name=CentOS Stream 9 - AppStream
-metalink=https://mirrors.centos.org/metalink?repo=centos-appstream-9-stream&arch=$basearch&protocol=https
+[updates]
+name=Fedora 44 - $basearch - Updates
+metalink=https://mirrors.fedoraproject.org/metalink?repo=updates-released-f$releasever&arch=$basearch
 gpgcheck=0
 enabled=1
+FEDOREPO
 
-[crb]
-name=CentOS Stream 9 - CRB
-metalink=https://mirrors.centos.org/metalink?repo=centos-crb-9-stream&arch=$basearch&protocol=https
-gpgcheck=0
-enabled=1
-CENTREPO
-
-cat > "${ROOTFS}/etc/yum.repos.d/epel.repo" << 'EPELREPO'
-[epel]
-name=EPEL 9
-metalink=https://mirrors.fedoraproject.org/metalink?repo=epel-9&arch=$basearch
-gpgcheck=0
-enabled=1
-EPELREPO
-
+# ZFS source — see task #4 in TASKS. fc44 prebuilt RPMs from
+# zfsonlinux.org may not exist yet (Fedora 44 GA was 2026-04-28). The
+# EL9 baseurl below WILL fail on a fresh F44 install — task #4 picks
+# the real source (zfsonlinux fc44 once published, or DKMS-from-SRPM
+# in the meantime). Leaving the placeholder here so the repo file is
+# present for whichever path we land on.
 cat > "${ROOTFS}/etc/yum.repos.d/zfs.repo" << 'ZFSREPO'
 [zfs]
-name=ZFS on Linux for EL9 - dkms
-baseurl=http://download.zfsonlinux.org/epel/9/$basearch/
+name=OpenZFS for Fedora (placeholder — see task #4)
+baseurl=https://download.zfsonlinux.org/fedora/$releasever/$basearch/
 enabled=1
 gpgcheck=0
 
@@ -233,7 +225,7 @@ ZFSREPO
 # cause SIGPIPE from "dnf | tee" to propagate as a non-zero exit, which set -e
 # would turn into a fatal build abort. The SIGPIPE is harmless (just tee closing).
 set +o pipefail
-dnf --installroot="$ROOTFS" --releasever=9 --setopt=install_weak_deps=False \
+dnf --installroot="$ROOTFS" --releasever=44 --setopt=install_weak_deps=False \
     --setopt=tsflags=nodocs --nogpgcheck -y install "${PKGS[@]}" 2>&1 | tee -a "$LOG_FILE"
 DNF_RC=${PIPESTATUS[0]}
 # set -o pipefail  # INTENTIONALLY DISABLED — see SIGPIPE note above
@@ -709,11 +701,12 @@ log "Build ID: ${VERSION}-b${BUILD_NUM} (${GIT_SHA})"
 
 # OS branding
 cat > "${ROOTFS}/etc/os-release" << OSREL
-PRETTY_NAME="kldload (stream9)"
+PRETTY_NAME="kldload (Fedora 44)"
 NAME="kldload"
-VERSION_ID="9"
-VERSION="9 (stream9)"
-ID=centos
+VERSION_ID="44"
+VERSION="44 (fedora)"
+ID=fedora
+ID_LIKE=fedora
 HOME_URL="https://kldload.ca"
 SUPPORT_URL="https://kldload.ca"
 OSREL
