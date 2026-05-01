@@ -11,7 +11,7 @@ trap '' PIPE
 # build-iso.sh — Stage 5 of the kldload build pipeline (ISO assembly)
 # =============================================================================
 #
-# Runs INSIDE the builder container (CentOS Stream 9 + lorax/squashfs/xorriso).
+# Runs INSIDE the builder container (Fedora 44 + lorax/squashfs/xorriso).
 # Invoked by deploy.sh after the builder image and darksites are ready.
 #
 # Pipeline overview (all stages are containerized):
@@ -22,7 +22,7 @@ trap '' PIPE
 #   Stage 5: ISO assembly      — THIS FILE — bootstraps rootfs, builds ZFS DKMS,
 #                                 embeds all darksites, creates squashfs + EFI + ISO
 #
-# The live ISO is always CentOS Stream 9 regardless of PROFILE. The user picks
+# The live ISO is always Fedora 44 regardless of PROFILE. The user picks
 # the target distro (Debian, Ubuntu, Arch, etc.) at install time via the web UI.
 # GNOME is always installed because the live environment needs a desktop session
 # for the web-based installer (Firefox auto-opens to kldload-webui on boot).
@@ -106,7 +106,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 1: Bootstrap CentOS root filesystem with dnf --installroot
 # ---------------------------------------------------------------------------
-log "Bootstrapping CentOS Stream 9 root filesystem..."
+log "Bootstrapping Fedora 44 root filesystem..."
 
 # Install base + profile packages
 # Core packages: minimal OS + ZFS on root (both editions)
@@ -1761,7 +1761,7 @@ search --no-floppy --set=root --label 'KLDLOAD'
 # Ryzen mini-PCs (Beelink/Minisforum/GMKtec/etc), and any USB stick whose
 # controller has UAS quirks. The headline failure mode this avoids is
 # "dracut-initqueue: timeout, still waiting for /dev/disk/by-label/KLDLOAD".
-menuentry "kldloadOS Live (CentOS Stream 9 + ZFS)" --hotkey=l {
+menuentry "kldloadOS Live (Fedora 44 + ZFS)" --hotkey=l {
     linuxefi /images/pxeboot/vmlinuz root=live:CDLABEL=KLDLOAD rd.live.image rd.live.overlay.size=10240 lockdown=none module.sig_enforce=0 selinux=0 rootdelay=30 rd.retry=120 modprobe.blacklist=uas usbcore.autosuspend=-1
     initrdefi /images/pxeboot/initrd.img
 }
