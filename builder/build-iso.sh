@@ -707,8 +707,8 @@ VERSION_ID="44"
 VERSION="44 (fedora)"
 ID=fedora
 ID_LIKE=fedora
-HOME_URL="https://kldload.ca"
-SUPPORT_URL="https://kldload.ca"
+HOME_URL="https://kldload.com"
+SUPPORT_URL="https://kldload.com"
 OSREL
 
 # ---------------------------------------------------------------------------
