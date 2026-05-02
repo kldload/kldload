@@ -169,8 +169,14 @@ k_create_users() {
   local target="${KLDLOAD_TARGET:?}"
   local user="${KLDLOAD_USERNAME:-admin}"
 
+  # chpasswd lives in /usr/sbin/ on every supported target. Bare
+  # `chroot $target chpasswd` doesn't go through bash, so PATH inside
+  # the chroot is whatever the caller had — which on a fresh Debian
+  # debootstrap target may not include /usr/sbin and chroot then errors
+  # "failed to run command 'chpasswd': No such file or directory".
+  # Use absolute path; works on Debian/Ubuntu/CentOS/Fedora identically.
   if [[ -n "${KLDLOAD_ROOT_PASSWORD:-}" ]]; then
-    echo "root:${KLDLOAD_ROOT_PASSWORD}" | chroot "${target}" chpasswd
+    echo "root:${KLDLOAD_ROOT_PASSWORD}" | chroot "${target}" /usr/sbin/chpasswd
   fi
 
   if ! chroot "${target}" id "${user}" >/dev/null 2>&1; then
@@ -181,7 +187,7 @@ k_create_users() {
   fi
 
   if [[ -n "${KLDLOAD_PASSWORD:-}" ]]; then
-    echo "${user}:${KLDLOAD_PASSWORD}" | chroot "${target}" chpasswd
+    echo "${user}:${KLDLOAD_PASSWORD}" | chroot "${target}" /usr/sbin/chpasswd
   fi
 }
 
