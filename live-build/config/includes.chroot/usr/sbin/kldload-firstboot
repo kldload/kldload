@@ -790,6 +790,20 @@ main() {
   # Always enable snapshot timer
   systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
 
+  # ── /root convenience symlinks ────────────────────────────────────────────
+  # Surface the install / runtime logs from /var/log under /root alongside
+  # the kldload-debug-bundle output. Standard log handling (logrotate,
+  # journal, syslog) still lives in /var/log; these are read-only pointers
+  # so an admin who logs in fresh sees everything in $HOME without having
+  # to remember the canonical paths. Idempotent: `ln -sfn` replaces
+  # whatever was there before.
+  if [[ -d /var/log/installer ]]; then
+    ln -sfn /var/log/installer /root/install-logs 2>/dev/null || true
+  fi
+  if [[ -d /var/log/kldload ]] || mkdir -p /var/log/kldload 2>/dev/null; then
+    ln -sfn /var/log/kldload /root/kldload-logs 2>/dev/null || true
+  fi
+
   # ── NVIDIA DKMS first-boot retry ──────────────────────────────────────────
   # NVIDIA's kernel-open module reliably FAILS to build inside the install
   # chroot (we don't yet know exactly why — conftest.sh runs sub-processes
