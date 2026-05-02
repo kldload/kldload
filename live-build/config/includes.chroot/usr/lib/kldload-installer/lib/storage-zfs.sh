@@ -287,28 +287,65 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
   esac
 
   # Compatibility: live env runs OpenZFS 2.4 (Fedora 44), but target
-  # distros use older ZFS (CentOS 9 / Rocky 9 / RHEL 9 ship 2.2). If we
-  # let zpool create enable the full 2.4 feature set, the pool gets
-  # features like raidz_expansion / longname / zilsaxattr / etc. that
-  # the target's 2.2 doesn't understand, and the target boots into
-  # "pool can only be accessed in read-only mode" — dracut fails to
-  # mount /sysroot read-write, drops to emergency mode.
+  # distros ship a range of older ZFS versions. If we let zpool create
+  # enable the full 2.4 feature set, the pool gets features like
+  # raidz_expansion / longname / zilsaxattr that older ZFS doesn't
+  # understand. Target boots into "pool can only be accessed in
+  # read-only mode" — dracut fails to mount /sysroot r/w, drops to
+  # emergency mode.
   #
-  # Map target distro → most compatible profile. openzfs-2.2-linux is
-  # the "intersection" feature set both live (2.4) and target (2.2)
-  # support, so the pool works natively from either.
-  local _compat="off"  # default: don't restrict (Fedora target = same major as live)
+  # Map (distro, release) → known ZFS major version → profile name.
+  # The profile is a curated feature subset; both live (2.4) and target
+  # honor it so pools created here work natively on either side.
+  local _zfs_compat_target="" _zfs_compat_reason=""
+  local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-44}"
   case "${KLDLOAD_DISTRO:-centos}" in
     centos|rocky|rhel)
-      # EL9 ships zfs 2.2 — cap at 2.2-linux profile
-      if [[ -f /usr/share/zfs/compatibility.d/openzfs-2.2-linux ]]; then
-        _compat="openzfs-2.2-linux"
-      elif [[ -f /usr/share/zfs/compatibility.d/openzfs-2.1-linux ]]; then
-        _compat="openzfs-2.1-linux"
+      # EL9 = zfs 2.2 ; EL10 (when it lands) likely 2.3
+      _zfs_compat_target="openzfs-2.2-linux"
+      _zfs_compat_reason="EL9 (centos/rocky/rhel 9) ships zfs 2.2"
+      ;;
+    fedora)
+      if [[ "${_fedora_rel}" -ge 44 ]]; then
+        _zfs_compat_target=""    # F44+ = zfs 2.4, matches live
+        _zfs_compat_reason="Fedora ${_fedora_rel} ships zfs 2.4 — same as live, no restriction"
+      else
+        _zfs_compat_target="openzfs-2.3-linux"
+        _zfs_compat_reason="Fedora ${_fedora_rel} ships zfs 2.3"
       fi
-      k_zfs_log "Using ZFS feature compatibility profile: ${_compat} (target=${KLDLOAD_DISTRO} uses zfs 2.2)"
+      ;;
+    debian)
+      # Debian 12 bookworm = 2.1, 13 trixie = 2.3
+      case "${KLDLOAD_SUITE:-trixie}" in
+        bookworm) _zfs_compat_target="openzfs-2.1-linux"; _zfs_compat_reason="Debian 12 bookworm ships zfs 2.1" ;;
+        *)        _zfs_compat_target="openzfs-2.3-linux"; _zfs_compat_reason="Debian 13 trixie ships zfs 2.3" ;;
+      esac
+      ;;
+    ubuntu)
+      # Ubuntu 22.04 jammy = 2.1, 24.04 noble = 2.2
+      case "${KLDLOAD_SUITE:-noble}" in
+        jammy) _zfs_compat_target="openzfs-2.1-linux"; _zfs_compat_reason="Ubuntu 22.04 jammy ships zfs 2.1" ;;
+        *)     _zfs_compat_target="openzfs-2.2-linux"; _zfs_compat_reason="Ubuntu 24.04 noble ships zfs 2.2" ;;
+      esac
+      ;;
+    arch|alpine|*)
+      _zfs_compat_target=""
+      _zfs_compat_reason="${KLDLOAD_DISTRO} ships rolling/unconstrained zfs"
       ;;
   esac
+
+  # Resolve the chosen profile name; fall back to next-lower if unavailable.
+  local _compat="off"
+  if [[ -n "$_zfs_compat_target" ]]; then
+    for _candidate in "$_zfs_compat_target" \
+                      openzfs-2.3-linux openzfs-2.2-linux openzfs-2.1-linux; do
+      if [[ -f "/usr/share/zfs/compatibility.d/${_candidate}" ]]; then
+        _compat="$_candidate"
+        break
+      fi
+    done
+  fi
+  k_zfs_log "ZFS feature compat: ${_compat} (${_zfs_compat_reason})"
   local _compat_opt=()
   [[ "$_compat" != "off" ]] && _compat_opt=(-o "compatibility=${_compat}")
 
