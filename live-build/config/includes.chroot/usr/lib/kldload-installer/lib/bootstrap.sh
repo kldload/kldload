@@ -1210,9 +1210,23 @@ CUSTOMREPO
   #     (/etc, /usr/bin, /usr/sbin, /usr/lib).
   # The outer dnf here is the live env's dnf5 (F44+), even though the
   # target may be F44/F43/RHEL/Rocky/etc.
+  # tsflags=noscripts skips ALL scriptlets (pre/post/preun/postun/
+  # pretrans/posttrans). dnf5's tsflags setopt only accepts a subset
+  # of rpm's tsflags — noposttrans alone isn't valid ("Invalid tsflag:
+  # noposttrans"), so noscripts is the only knob available. We re-run
+  # the essential bits explicitly after install:
+  #   - systemd-sysusers : create system users/groups (gdm, polkitd, etc.)
+  #   - systemd-tmpfiles : create runtime dirs declared in tmpfiles.d
+  #   - systemctl preset-all : apply distro service preset defaults
+  #   - ldconfig + depmod : refresh shared lib + module caches
+  # Skipping scriptlets dodges EL9 grub2-common's posttrans, which runs
+  # grub2-mkconfig → grub2-probe and fails with "unknown filesystem"
+  # on /target/boot (a ZFS dataset; EL9 grub2 has no ZFS module). Our
+  # bootloader.sh installs ZFSBootMenu later — that stage replaces the
+  # grub config dnf would have written.
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False \
-      --setopt=tsflags=nodocs,noposttrans \
+      --setopt=tsflags=nodocs,noscripts \
       --setopt=cachedir="${target}/var/cache/dnf" \
       --setopt=optional_metadata_types=filelists \
       --disableplugin=subscription-manager --disableplugin=product-id \
@@ -1221,17 +1235,14 @@ CUSTOMREPO
       >> "$log" 2>&1 \
       || { k_log_to "$log" "dnf --installroot failed"; return 1; }
 
-  # Re-run posttrans-equivalent steps manually since we set noposttrans
-  # above. The skipped hooks were mainly grub2-common/kernel-core's
-  # grub2-mkconfig (which fails because EL9 grub2 doesn't know ZFS) plus
-  # glibc's ld.so.cache rebuild and depmod. We'd be re-running those
-  # ourselves anyway during bootloader.sh / the kernel module signing
-  # phase, but make sure ldconfig + depmod run NOW so anything that
-  # depends on them in the rest of bootstrap.sh is fine.
-  k_in_chroot "${target}" /usr/sbin/ldconfig 2>/dev/null || true
+  k_log_to "$log" "Catching up post-install setup (sysusers/tmpfiles/preset/ldconfig/depmod)..."
+  k_in_chroot "${target}" /usr/bin/systemd-sysusers 2>/dev/null >> "$log" || true
+  k_in_chroot "${target}" /usr/bin/systemd-tmpfiles --create 2>/dev/null >> "$log" || true
+  k_in_chroot "${target}" /usr/bin/systemctl preset-all 2>/dev/null >> "$log" || true
+  k_in_chroot "${target}" /usr/sbin/ldconfig 2>/dev/null >> "$log" || true
   for kver in "${target}"/lib/modules/*; do
     [[ -d "$kver" ]] || continue
-    k_in_chroot "${target}" /usr/sbin/depmod -a "$(basename "$kver")" 2>/dev/null || true
+    k_in_chroot "${target}" /usr/sbin/depmod -a "$(basename "$kver")" 2>/dev/null >> "$log" || true
   done
 
   k_log_to "$log" "Root filesystem: $(du -sh --exclude="${target}/proc" --exclude="${target}/sys" --exclude="${target}/dev" "${target}" 2>/dev/null | cut -f1 || echo "?")"
