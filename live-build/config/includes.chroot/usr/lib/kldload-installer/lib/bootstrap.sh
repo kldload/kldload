@@ -1195,6 +1195,13 @@ CUSTOMREPO
   k_log_to "$log" "Running dnf --installroot (${#_dnf_pkgs[@]} packages, profile=${_profile})..."
   # dnf5 syntax notes:
   #   - --skip-broken goes AFTER the subcommand, not before.
+  #   - --skip-unavailable also AFTER the subcommand. dnf4's --skip-broken
+  #     did both (broken deps AND missing packages); dnf5 split them.
+  #     Without --skip-unavailable, the package list (which is F44-tuned)
+  #     fails on CentOS 9 / Rocky 9 because Fedora-only or RPMFusion-only
+  #     packages aren't in EL9 repos (e.g. iwlwifi-mvm-firmware was split
+  #     out of linux-firmware on F43+, mesa-va-drivers, intel-media-driver,
+  #     pipewire-codec-aptx, mozilla-openh264, etc.).
   #   - --setopt=optional_metadata_types=filelists makes dnf5 load filelists
   #     metadata so file-Requires (e.g. gnome-keyring needing
   #     /usr/libexec/gcr-ssh-askpass from gcr) resolve. Default dnf5
@@ -1208,7 +1215,7 @@ CUSTOMREPO
       --setopt=cachedir="${target}/var/cache/dnf" \
       --setopt=optional_metadata_types=filelists \
       --disableplugin=subscription-manager --disableplugin=product-id \
-      --nogpgcheck -y install --skip-broken \
+      --nogpgcheck -y install --skip-broken --skip-unavailable \
       "${_dnf_pkgs[@]}" \
       >> "$log" 2>&1 \
       || { k_log_to "$log" "dnf --installroot failed"; return 1; }
