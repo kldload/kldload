@@ -1211,7 +1211,8 @@ CUSTOMREPO
   # The outer dnf here is the live env's dnf5 (F44+), even though the
   # target may be F44/F43/RHEL/Rocky/etc.
   dnf --installroot="${target}" --releasever="${release}" \
-      --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+      --setopt=install_weak_deps=False \
+      --setopt=tsflags=nodocs,noposttrans \
       --setopt=cachedir="${target}/var/cache/dnf" \
       --setopt=optional_metadata_types=filelists \
       --disableplugin=subscription-manager --disableplugin=product-id \
@@ -1219,6 +1220,19 @@ CUSTOMREPO
       "${_dnf_pkgs[@]}" \
       >> "$log" 2>&1 \
       || { k_log_to "$log" "dnf --installroot failed"; return 1; }
+
+  # Re-run posttrans-equivalent steps manually since we set noposttrans
+  # above. The skipped hooks were mainly grub2-common/kernel-core's
+  # grub2-mkconfig (which fails because EL9 grub2 doesn't know ZFS) plus
+  # glibc's ld.so.cache rebuild and depmod. We'd be re-running those
+  # ourselves anyway during bootloader.sh / the kernel module signing
+  # phase, but make sure ldconfig + depmod run NOW so anything that
+  # depends on them in the rest of bootstrap.sh is fine.
+  k_in_chroot "${target}" /usr/sbin/ldconfig 2>/dev/null || true
+  for kver in "${target}"/lib/modules/*; do
+    [[ -d "$kver" ]] || continue
+    k_in_chroot "${target}" /usr/sbin/depmod -a "$(basename "$kver")" 2>/dev/null || true
+  done
 
   k_log_to "$log" "Root filesystem: $(du -sh --exclude="${target}/proc" --exclude="${target}/sys" --exclude="${target}/dev" "${target}" 2>/dev/null | cut -f1 || echo "?")"
 
