@@ -1290,14 +1290,31 @@ CUSTOMREPO
     cp -p "${target}/usr/lib/sysimage/rpm/rpmdb.sqlite" "${target}/var/lib/rpm/rpmdb.sqlite"
     cp -p "${target}/usr/lib/sysimage/rpm/rpmdb.sqlite-shm" "${target}/var/lib/rpm/rpmdb.sqlite-shm" 2>/dev/null || true
     cp -p "${target}/usr/lib/sysimage/rpm/rpmdb.sqlite-wal" "${target}/var/lib/rpm/rpmdb.sqlite-wal" 2>/dev/null || true
-    k_log_to "$log" "  rpm db: $(${target}/usr/bin/rpm --root "${target}" --dbpath /var/lib/rpm -qa 2>/dev/null | wc -l) packages tracked in /var/lib/rpm"
+    # Non-fatal verification — set -Eeuo pipefail would propagate any
+    # 127 from a missing rpm binary if we ran it inline in a $(...)
+    local _pkg_count=0
+    if [[ -x "${target}/usr/bin/rpm" ]]; then
+      _pkg_count=$(chroot "${target}" /usr/bin/rpm --dbpath /var/lib/rpm -qa 2>/dev/null | wc -l) || _pkg_count=0
+    fi
+    k_log_to "$log" "  rpm db: ${_pkg_count} packages tracked in /var/lib/rpm"
   fi
 
   k_log_to "$log" "Catching up post-install setup (sysusers/tmpfiles/preset/ldconfig/depmod/kernel/dracut)..."
-  k_in_chroot "${target}" /usr/bin/systemd-sysusers 2>/dev/null >> "$log" || true
-  k_in_chroot "${target}" /usr/bin/systemd-tmpfiles --create 2>/dev/null >> "$log" || true
-  k_in_chroot "${target}" /usr/bin/systemctl preset-all 2>/dev/null >> "$log" || true
-  k_in_chroot "${target}" /usr/sbin/ldconfig 2>/dev/null >> "$log" || true
+  # Wrap the whole catchup in `set +e` since these commands are all
+  # nice-to-have — a single failure in here should NOT kill the install.
+  # set -Eeuo pipefail outside makes any unswallowed non-zero fatal,
+  # and the `|| true` on individual lines isn't enough if the compound
+  # `cmd1 && cmd2 || cmd3` returns non-zero (set -e then trips on the
+  # COMPOUND, not the inner `||`).
+  set +e
+  # systemd-sysusers / systemd-tmpfiles location varies (F has /usr/bin,
+  # EL9 has /usr/lib/systemd/) — try the common locations.
+  k_in_chroot "${target}" /usr/bin/systemd-sysusers 2>/dev/null >> "$log"
+  k_in_chroot "${target}" /usr/lib/systemd/systemd-sysusers 2>/dev/null >> "$log"
+  k_in_chroot "${target}" /usr/bin/systemd-tmpfiles --create 2>/dev/null >> "$log"
+  k_in_chroot "${target}" /usr/lib/systemd/systemd-tmpfiles --create 2>/dev/null >> "$log"
+  k_in_chroot "${target}" /usr/bin/systemctl preset-all 2>/dev/null >> "$log"
+  k_in_chroot "${target}" /usr/sbin/ldconfig 2>/dev/null >> "$log"
   # depmod + place kernel in /boot + build initramfs.
   # tsflags=noscripts skipped kernel-core's posttrans, which is what
   # normally copies vmlinuz to /boot and runs dracut. ZFSBootMenu reads
@@ -1306,22 +1323,27 @@ CUSTOMREPO
   # ZBM can't actually boot the kernel.
   for kver_path in "${target}"/lib/modules/*; do
     [[ -d "$kver_path" ]] || continue
-    local kver; kver="$(basename "$kver_path")"
-    k_in_chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null >> "$log" || true
+    local _kver; _kver="$(basename "$kver_path")"
+    k_in_chroot "${target}" /usr/sbin/depmod -a "$_kver" 2>/dev/null >> "$log"
     # Copy the bundled vmlinuz into /boot if kernel-install didn't
-    if [[ -f "${target}/usr/lib/modules/${kver}/vmlinuz" && ! -f "${target}/boot/vmlinuz-${kver}" ]]; then
-      cp -p "${target}/usr/lib/modules/${kver}/vmlinuz" "${target}/boot/vmlinuz-${kver}"
-      k_log_to "$log" "  copied vmlinuz-${kver} into /boot"
+    if [[ -f "${target}/usr/lib/modules/${_kver}/vmlinuz" && ! -f "${target}/boot/vmlinuz-${_kver}" ]]; then
+      mkdir -p "${target}/boot"
+      cp -p "${target}/usr/lib/modules/${_kver}/vmlinuz" "${target}/boot/vmlinuz-${_kver}" \
+        && k_log_to "$log" "  copied vmlinuz-${_kver} into /boot" \
+        || k_log_to "$log" "  WARNING: failed to copy vmlinuz-${_kver}"
     fi
     # Build initramfs via dracut. --no-hostonly per kldload policy
     # (universal initramfs covering all hardware, not just this VM/box).
-    if [[ ! -f "${target}/boot/initramfs-${kver}.img" ]]; then
-      k_in_chroot "${target}" /usr/bin/dracut --force --no-hostonly \
-        --kver "${kver}" "/boot/initramfs-${kver}.img" >> "$log" 2>&1 \
-        && k_log_to "$log" "  built initramfs-${kver}.img" \
-        || k_log_to "$log" "  WARNING: dracut failed for ${kver}"
+    if [[ ! -f "${target}/boot/initramfs-${_kver}.img" ]]; then
+      if k_in_chroot "${target}" /usr/bin/dracut --force --no-hostonly \
+           --kver "${_kver}" "/boot/initramfs-${_kver}.img" >> "$log" 2>&1; then
+        k_log_to "$log" "  built initramfs-${_kver}.img"
+      else
+        k_log_to "$log" "  WARNING: dracut failed for ${_kver}"
+      fi
     fi
   done
+  set -e
 
   k_log_to "$log" "Root filesystem: $(du -sh --exclude="${target}/proc" --exclude="${target}/sys" --exclude="${target}/dev" "${target}" 2>/dev/null | cut -f1 || echo "?")"
 
@@ -1344,8 +1366,8 @@ CUSTOMREPO
   local zfs_ver
   zfs_ver=$(chroot "${target}" rpm -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")
   if [[ -n "$zfs_ver" ]]; then
-    chroot "${target}" dkms build -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
-    chroot "${target}" dkms install -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
+    chroot "${target}" /usr/sbin/dkms build -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
+    chroot "${target}" /usr/sbin/dkms install -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
   fi
   chroot "${target}" depmod -a "$kver" 2>/dev/null || true
 
@@ -1414,9 +1436,9 @@ CUDAREPO
     _nv_ver=$(chroot "${target}" rpm -q --qf '%{VERSION}' kmod-nvidia-open-dkms 2>/dev/null | sed 's/-.*//' || echo "")
     if [[ -n "$_nv_ver" && -n "$kver" ]]; then
       k_log_to "$log" "Building NVIDIA DKMS ${_nv_ver} for kernel ${kver}..."
-      chroot "${target}" dkms build -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || \
+      chroot "${target}" /usr/sbin/dkms build -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || \
         k_log_to "$log" "WARNING: NVIDIA DKMS build failed"
-      chroot "${target}" dkms install -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || \
+      chroot "${target}" /usr/sbin/dkms install -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || \
         k_log_to "$log" "WARNING: NVIDIA DKMS install failed"
       chroot "${target}" depmod -a "$kver" 2>/dev/null || true
     fi
@@ -1880,8 +1902,8 @@ MIRRORS
           k_log_to "$log" "Building ZFS DKMS ${_zfs_dkms_ver} for kernel ${_inst_kver}..."
           k_log_to "$log" "  gcc=$(chroot "${target}" which gcc 2>/dev/null || echo 'MISSING') make=$(chroot "${target}" which make 2>/dev/null || echo 'MISSING')"
           k_log_to "$log" "  Kernel headers: $(ls "${_inst_moddir}/${_inst_kver}/build/Makefile" 2>/dev/null && echo 'present' || echo 'MISSING')"
-          if chroot "${target}" dkms build -m zfs -v "$_zfs_dkms_ver" -k "$_inst_kver" >> "$log" 2>&1 && \
-             chroot "${target}" dkms install -m zfs -v "$_zfs_dkms_ver" -k "$_inst_kver" >> "$log" 2>&1; then
+          if chroot "${target}" /usr/sbin/dkms build -m zfs -v "$_zfs_dkms_ver" -k "$_inst_kver" >> "$log" 2>&1 && \
+             chroot "${target}" /usr/sbin/dkms install -m zfs -v "$_zfs_dkms_ver" -k "$_inst_kver" >> "$log" 2>&1; then
             _zfs_installed=true
             k_log_to "$log" "ZFS DKMS built and installed for ${_inst_kver}"
           else
