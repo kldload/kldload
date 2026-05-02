@@ -765,14 +765,14 @@ CTMP
           subscription-manager ca-certificates >> "$log" 2>&1 || true
         rm -f "${target}/etc/yum.repos.d/centos-tmp.repo"
         # Remove ALL CentOS packages to avoid version conflicts with RHEL
-        chroot "${target}" rpm -e --nodeps --allmatches \
-          $(chroot "${target}" rpm -qa 'centos-*' 2>/dev/null) 2>>"$log" || true
+        chroot "${target}" /usr/bin/rpm -e --nodeps --allmatches \
+          $(chroot "${target}" /usr/bin/rpm -qa 'centos-*' 2>/dev/null) 2>>"$log" || true
         # Install redhat-release
         local rhel_rpms="/root/darksite/rhel-release"
         [[ -d "$rhel_rpms" ]] || rhel_rpms="/usr/share/kldload/rhel-release"
         if [[ -d "$rhel_rpms" ]]; then
           cp "$rhel_rpms"/redhat-release*.rpm "${target}/tmp/"
-          chroot "${target}" rpm -ivh --force --nodeps /tmp/redhat-release*.rpm 2>>"$log" || true
+          chroot "${target}" /usr/bin/rpm -ivh --force --nodeps /tmp/redhat-release*.rpm 2>>"$log" || true
           rm -f "${target}"/tmp/redhat-release*.rpm
         fi
         # Register in the chroot
@@ -1369,16 +1369,16 @@ CUSTOMREPO
   k_log_to "$log" "Compiling ZFS kernel module via DKMS for ${kver} (initramfs rebuild follows)..."
 
   local zfs_ver
-  zfs_ver=$(chroot "${target}" rpm -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")
+  zfs_ver=$(chroot "${target}" /usr/bin/rpm -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")
   if [[ -n "$zfs_ver" ]]; then
     chroot "${target}" /usr/sbin/dkms build -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
     chroot "${target}" /usr/sbin/dkms install -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
   fi
-  chroot "${target}" depmod -a "$kver" 2>/dev/null || true
+  chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null || true
 
   # Install zfs-dracut inside the chroot where the ZFS repo is local
   k_log_to "$log" "Installing zfs-dracut in chroot..."
-  chroot "${target}" dnf install -y --nogpgcheck zfs-dracut >> "$log" 2>&1 || \
+  chroot "${target}" /usr/bin/dnf install -y --nogpgcheck zfs-dracut >> "$log" 2>&1 || \
     k_log_to "$log" "WARNING: zfs-dracut install failed"
 
   # Rebuild initramfs with ZFS support so the installed system can boot from ZFS root
@@ -1396,7 +1396,7 @@ CUSTOMREPO
   # livenet modules from the initramfs build. Without this, the target
   # initramfs waits forever for /dev/disk/by-label/KLDLOAD (the LIVE
   # USB label) at boot and dracut hangs the install.
-  chroot "${target}" dracut --force --no-hostonly --add "zfs" --omit "dracut-live livenet" --kver "$kver" 2>>"$log" || \
+  chroot "${target}" /usr/bin/dracut --force --no-hostonly --add "zfs" --omit "dracut-live livenet" --kver "$kver" 2>>"$log" || \
     k_log_to "$log" "WARNING: dracut rebuild failed"
 
   # Chroot mounts stay up for the rest of the install
@@ -1432,20 +1432,20 @@ baseurl=https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/
 enabled=1
 gpgcheck=0
 CUDAREPO
-    chroot "${target}" dnf install -y --skip-broken \
+    chroot "${target}" /usr/bin/dnf install -y --skip-broken \
         nvidia-driver nvidia-driver-libs nvidia-driver-cuda \
         nvidia-container-toolkit \
         >> "$log" 2>&1 || k_log_to "$log" "WARNING: NVIDIA driver install had issues (no GPU?)"
     # DKMS build — dnf only registers the module ('added'), it doesn't build in chroot
     local _nv_ver
-    _nv_ver=$(chroot "${target}" rpm -q --qf '%{VERSION}' kmod-nvidia-open-dkms 2>/dev/null | sed 's/-.*//' || echo "")
+    _nv_ver=$(chroot "${target}" /usr/bin/rpm -q --qf '%{VERSION}' kmod-nvidia-open-dkms 2>/dev/null | sed 's/-.*//' || echo "")
     if [[ -n "$_nv_ver" && -n "$kver" ]]; then
       k_log_to "$log" "Building NVIDIA DKMS ${_nv_ver} for kernel ${kver}..."
       chroot "${target}" /usr/sbin/dkms build -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || \
         k_log_to "$log" "WARNING: NVIDIA DKMS build failed"
       chroot "${target}" /usr/sbin/dkms install -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || \
         k_log_to "$log" "WARNING: NVIDIA DKMS install failed"
-      chroot "${target}" depmod -a "$kver" 2>/dev/null || true
+      chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null || true
     fi
     # Generate CDI spec for container GPU access
     chroot "${target}" bash -c 'nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' 2>/dev/null || true
@@ -1917,7 +1917,7 @@ MIRRORS
             [[ -f "$_dkms_log" ]] && tail -30 "$_dkms_log" >> "$log" 2>&1
           fi
         fi
-        chroot "${target}" depmod -a "$_inst_kver" 2>/dev/null || true
+        chroot "${target}" /usr/sbin/depmod -a "$_inst_kver" 2>/dev/null || true
       fi
     fi
 
@@ -1934,7 +1934,7 @@ MIRRORS
 
     # Verify zfs.ko is actually present before rebuilding initramfs
     if [[ -n "$kver" ]]; then
-      chroot "${target}" depmod -a "$kver" 2>/dev/null || true
+      chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null || true
       if find "${target}/usr/lib/modules/${kver}" -name 'zfs.ko*' 2>/dev/null | grep -q .; then
         k_log_to "$log" "VERIFIED: zfs.ko found for kernel ${kver}"
       else
