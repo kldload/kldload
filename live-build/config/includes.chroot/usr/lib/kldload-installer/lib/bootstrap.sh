@@ -1227,18 +1227,19 @@ CUSTOMREPO
   # installed system reports `rpm -qa` empty even though all the
   # packages are on disk, breaking dkms / dracut / pretty much
   # everything that consults the package db.
-  # Pass 1 excludes:
-  #   - grub2* / shim* — installed in pass 2 with noscripts (skip the
-  #     EL9 grub2-mkconfig posttrans that fails on ZFS /boot)
-  #   - kernel*  — installed in pass 2 with noscripts (kernel-core
-  #     posttrans triggers DKMS autoinstall for zfs which is fragile +
-  #     redundant; we run dkms ourselves later)
-  #   - kernel-debug* — debug variants get pulled transitively (e.g.
-  #     by some perf/bcc/bpftool dependency chain). Their posttrans
-  #     tries DKMS autoinstall against /lib/modules/$kver+debug/ whose
-  #     configure script fails, returning exit 1 and aborting the
-  #     whole rpm transaction. Explicit exclude prevents the chain
-  #     from pulling them in.
+  # THREE-PASS install:
+  #   Pass 1 — main (scripts ON). Excludes kernel*/grub2*/shim*/zfs*.
+  #     Excluding zfs/zfs-dkms here is REQUIRED: zfs-dkms has
+  #     `Requires: kernel-uname-r >= 4.18`, and pass 1 has no kernel,
+  #     so without this exclude --skip-broken silently drops zfs-dkms
+  #     and the install ends up with no ZFS at all.
+  #   Pass 2 — kernel + grub2 + shim (scripts OFF). Skips EL9 grub2-
+  #     mkconfig posttrans that fails on ZFS /boot, and skips kernel-
+  #     core's BLS-path-write posttrans.
+  #   Pass 3 — zfs + zfs-dkms (scripts ON). The kernel from pass 2 is
+  #     now installed, so zfs-dkms's Requires resolves. zfs-dkms's
+  #     posttrans triggers DKMS autoinstall against the kernel modules
+  #     dir → builds + signs + installs zfs.ko + spl.ko.
   local _exclude_scripts=(
       '--exclude=grub2*' '--exclude=shim*'
       '--exclude=kernel' '--exclude=kernel-core'
@@ -1246,6 +1247,7 @@ CUSTOMREPO
       '--exclude=kernel-debug' '--exclude=kernel-debug-core'
       '--exclude=kernel-debug-modules' '--exclude=kernel-debug-modules-core'
       '--exclude=kernel-debug-modules-extra' '--exclude=kernel-debug-devel'
+      '--exclude=zfs' '--exclude=zfs-dkms' '--exclude=zfs-dracut'
   )
   k_log_to "$log" "Running dnf --installroot pass 1 (main, ${#_dnf_pkgs[@]} packages, profile=${_profile})..."
   dnf --installroot="${target}" --releasever="${release}" \
@@ -1274,6 +1276,24 @@ CUSTOMREPO
       "${_boot_pkgs[@]}" \
       >> "$log" 2>&1 \
       || k_log_to "$log" "dnf pass 2 had issues (continuing)"
+
+  # Pass 3 — zfs + zfs-dkms with scripts ON now that pass 2 has
+  # installed a kernel. zfs-dkms's posttrans does the DKMS autoinstall
+  # build against the kernel modules dir, signs the .ko's, and places
+  # them at /usr/lib/modules/$kver/extra/. zfs-dracut is included here
+  # so the dracut zfs module is available for our initramfs rebuild.
+  k_log_to "$log" "Running dnf --installroot pass 3 (zfs + zfs-dkms + zfs-dracut, scripts on)..."
+  local _zfs_pkgs=( zfs zfs-dkms zfs-dracut )
+  dnf --installroot="${target}" --releasever="${release}" \
+      --setopt=install_weak_deps=False \
+      --setopt=tsflags=nodocs \
+      --setopt=cachedir="${target}/var/cache/dnf" \
+      --setopt=optional_metadata_types=filelists \
+      --disableplugin=subscription-manager --disableplugin=product-id \
+      --nogpgcheck -y install --skip-broken --skip-unavailable \
+      "${_zfs_pkgs[@]}" \
+      >> "$log" 2>&1 \
+      || k_log_to "$log" "dnf pass 3 had issues (continuing — DKMS may not have built)"
 
   # dnf5 writes the rpm db to /usr/lib/sysimage/rpm (modern Fedora
   # default). EL9's rpm config still reads /var/lib/rpm. Sync them so
@@ -1321,23 +1341,45 @@ CUSTOMREPO
   # /boot/vmlinuz-$kver and /boot/initramfs-$kver.img out of the BE, so
   # if we don't put them there explicitly the install completes but
   # ZBM can't actually boot the kernel.
-  for kver_path in "${target}"/lib/modules/*; do
+  # EL9 with merged-usr stores kernel modules at /usr/lib/modules.
+  # /lib/modules is normally a symlink to /usr/lib/modules but the
+  # symlink-creating package's post script may not have run with
+  # tsflags=noscripts, so /lib/modules might not exist in the target.
+  # Try both paths; usr/lib/modules first (EL9 canonical location).
+  local _moddir_glob_a="${target}/usr/lib/modules"
+  local _moddir_glob_b="${target}/lib/modules"
+  local _kver_globs=()
+  [[ -d "$_moddir_glob_a" ]] && _kver_globs+=("$_moddir_glob_a"/*)
+  [[ -d "$_moddir_glob_b" ]] && _kver_globs+=("$_moddir_glob_b"/*)
+  for kver_path in "${_kver_globs[@]}"; do
     [[ -d "$kver_path" ]] || continue
     local _kver; _kver="$(basename "$kver_path")"
+    # Skip if we already processed this kver via the other path
+    [[ -f "${target}/boot/initramfs-${_kver}.img" ]] && continue
     k_in_chroot "${target}" /usr/sbin/depmod -a "$_kver" 2>/dev/null >> "$log"
-    # Copy the bundled vmlinuz into /boot if kernel-install didn't
-    if [[ -f "${target}/usr/lib/modules/${_kver}/vmlinuz" && ! -f "${target}/boot/vmlinuz-${_kver}" ]]; then
+    # Copy the bundled vmlinuz into /boot if kernel-install didn't.
+    # Look at both /usr/lib/modules (EL9 merged-usr canonical) and
+    # /lib/modules (Debian/legacy) — vmlinuz can live in either.
+    local _vmlinuz_src=""
+    for _src in "${target}/usr/lib/modules/${_kver}/vmlinuz" \
+                "${target}/lib/modules/${_kver}/vmlinuz"; do
+      if [[ -f "$_src" ]]; then _vmlinuz_src="$_src"; break; fi
+    done
+    if [[ -n "$_vmlinuz_src" && ! -f "${target}/boot/vmlinuz-${_kver}" ]]; then
       mkdir -p "${target}/boot"
-      cp -p "${target}/usr/lib/modules/${_kver}/vmlinuz" "${target}/boot/vmlinuz-${_kver}" \
-        && k_log_to "$log" "  copied vmlinuz-${_kver} into /boot" \
+      cp -p "$_vmlinuz_src" "${target}/boot/vmlinuz-${_kver}" \
+        && k_log_to "$log" "  copied vmlinuz-${_kver} into /boot from $_vmlinuz_src" \
         || k_log_to "$log" "  WARNING: failed to copy vmlinuz-${_kver}"
     fi
-    # Build initramfs via dracut. --no-hostonly per kldload policy
-    # (universal initramfs covering all hardware, not just this VM/box).
+    # Build initramfs via dracut WITH ZFS support. --add zfs picks up
+    # the zfs-dracut module so the rootfs can be mounted at boot.
+    # --no-hostonly per kldload policy (universal initramfs covering
+    # all hardware, not just this VM/box).
     if [[ ! -f "${target}/boot/initramfs-${_kver}.img" ]]; then
       if k_in_chroot "${target}" /usr/bin/dracut --force --no-hostonly \
+           --add "zfs" --omit "dracut-live livenet" \
            --kver "${_kver}" "/boot/initramfs-${_kver}.img" >> "$log" 2>&1; then
-        k_log_to "$log" "  built initramfs-${_kver}.img"
+        k_log_to "$log" "  built initramfs-${_kver}.img (with zfs)"
       else
         k_log_to "$log" "  WARNING: dracut failed for ${_kver}"
       fi

@@ -1742,16 +1742,23 @@ main() {
   # ── Bootloader — write EFI files + initramfs (pool still mounted) ──────
   # Defensive: ensure /target/boot/efi exists and is mounted. Some
   # earlier stage (zfs-dracut install / chroot dnf / snapshot) may have
-  # dropped the EFI mount, leaving k_install_bootloader's `[[ -d
-  # /target/boot/efi ]]` check to fail with "EFI mountpoint missing"
-  # at the very last step of the install.
+  # dropped the EFI mount. WITHOUT a real mount, bootloader.sh writes
+  # would land in the regular /target/boot/efi directory inside the
+  # rpool dataset and never make it onto the actual EFI partition —
+  # the install reports ✔ but the EFI ESP is empty at boot time.
   mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
   if ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
     if [[ -n "${KLDLOAD_PART_EFI:-}" && -b "${KLDLOAD_PART_EFI}" ]]; then
       k_log "Re-mounting EFI partition (${KLDLOAD_PART_EFI}) at ${KLDLOAD_TARGET_MNT}/boot/efi for bootloader stage"
-      mount "${KLDLOAD_PART_EFI}" "${KLDLOAD_TARGET_MNT}/boot/efi" 2>&1 \
-        || k_log "WARNING: re-mount EFI partition failed — bootloader will likely die"
+      mount "${KLDLOAD_PART_EFI}" "${KLDLOAD_TARGET_MNT}/boot/efi" 2>&1 || true
     fi
+  fi
+  # Verify — if we couldn't actually mount, bail early instead of
+  # writing files into the rpool dataset (which never makes it to the
+  # ESP and produces an "install completed but won't boot" outcome).
+  if ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
+    _err "EFI partition is NOT mounted at ${KLDLOAD_TARGET_MNT}/boot/efi — refusing to write boot files into the rpool dataset"
+    return 1
   fi
   k_install_bootloader
   case "${KLDLOAD_DISTRO:-}" in
