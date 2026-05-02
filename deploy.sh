@@ -742,6 +742,18 @@ case "${1:-help}" in
     kvm-deploy-bob)     cmd_kvm_deploy_bob ;;
     proxmox-deploy)     cmd_proxmox_deploy ;;
     deploy-all)         cmd_deploy_all ;;
+    smoke-test)
+        # Full-loop install smoke test in KVM (boot ISO → headless install
+        # → reboot → run tests/smoke-auto.sh on the installed target).
+        # Closes the gap between `build` and `tests/smoke-*.sh`.
+        shift
+        [[ $# -eq 2 ]] || { echo "usage: $0 smoke-test <distro> <profile>" >&2; exit 64; }
+        bash "$ROOT/tests/lifecycle.sh" "$@"
+        ;;
+    smoke-build)
+        # Static checks on the just-built ISO (file exists, fresh, sane size).
+        bash "$ROOT/tests/smoke-build.sh"
+        ;;
     help|*)
         cat <<EOF
 kldload deploy.sh — build + deploy pipeline for kldloadOS
@@ -767,6 +779,16 @@ Deploy:
   proxmox-deploy         Deploy ISO to remote Proxmox (SSH + qm API)
   deploy-all             Deploy to KVM + Proxmox + print USB command
   burn                   Write ISO to USB drive
+
+Test:
+  smoke-build            Validate the just-built ISO (size, freshness, structure)
+  smoke-test <distro> <profile>
+                         End-to-end install smoke in KVM: boot ISO →
+                         headless install → reboot → run smoke-auto.sh on
+                         the installed system. Distros: centos|debian|
+                         ubuntu|fedora|rocky|rhel|arch|alpine. Profiles:
+                         core|server|desktop|kvm. Set KEEP_VM=1 to leave
+                         the VM around on success for inspection.
 
 Environment (override via env vars or kldload.env):
   PROFILE         Install profile: desktop, server, kvm, ai, core (default: desktop)
