@@ -706,10 +706,15 @@ if ! k_have_func k_configure_security; then
         return 0 ;;
     esac
 
-    chroot "${KLDLOAD_TARGET_MNT}" useradd -m -s /bin/bash "${user}" \
+    # Bare `chroot $target $cmd` doesn't go through bash, so PATH inside
+    # the chroot is whatever the caller had (often without /usr/sbin),
+    # and chroot fails with "failed to run command '$cmd'". Absolute
+    # paths sidestep that — useradd/chpasswd/usermod live in /usr/sbin
+    # on every supported target.
+    chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/useradd -m -s /bin/bash "${user}" \
       >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
-    echo "${user}:${upass}" | chroot "${KLDLOAD_TARGET_MNT}" chpasswd >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1
-    chroot "${KLDLOAD_TARGET_MNT}" usermod -aG sudo "${user}" >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
+    echo "${user}:${upass}" | chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/chpasswd >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1
+    chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/usermod -aG sudo "${user}" >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
 
     # Passwordless sudo for the admin user
     printf '%s ALL=(ALL) NOPASSWD: ALL\n' "${user}" \
@@ -729,7 +734,7 @@ EOS
     case "${KLDLOAD_DISTRO:-}" in
       centos|rocky|rhel|fedora|arch|alpine) _ssh_svc="sshd" ;;
     esac
-    chroot "${KLDLOAD_TARGET_MNT}" systemctl enable "$_ssh_svc" >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
+    chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/systemctl enable "$_ssh_svc" >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
 
     # Install SSH public keys if provided
     if [[ -n "${KLDLOAD_SSH_PUBKEY:-}" ]]; then
