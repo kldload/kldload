@@ -1234,7 +1234,6 @@ CUSTOMREPO
       --setopt=tsflags=nodocs \
       --setopt=cachedir="${target}/var/cache/dnf" \
       --setopt=optional_metadata_types=filelists \
-      --setopt=_dbpath=/var/lib/rpm \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
       "${_exclude_scripts[@]}" \
@@ -1251,12 +1250,29 @@ CUSTOMREPO
       --setopt=tsflags=nodocs,noscripts \
       --setopt=cachedir="${target}/var/cache/dnf" \
       --setopt=optional_metadata_types=filelists \
-      --setopt=_dbpath=/var/lib/rpm \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
       "${_boot_pkgs[@]}" \
       >> "$log" 2>&1 \
       || k_log_to "$log" "dnf pass 2 had issues (continuing)"
+
+  # dnf5 writes the rpm db to /usr/lib/sysimage/rpm (modern Fedora
+  # default). EL9's rpm config still reads /var/lib/rpm. Sync them so
+  # the installed system's rpm can find what dnf wrote — without this,
+  # `rpm -qa` returns 0 packages on EL targets, dkms can't find its
+  # source pkgs, and everything else that consults the rpm db breaks.
+  # For Fedora targets the dirs end up identical (or symlinked); for
+  # EL targets we replace the empty /var/lib/rpm with the real db.
+  if [[ -f "${target}/usr/lib/sysimage/rpm/rpmdb.sqlite" ]]; then
+    k_log_to "$log" "Syncing rpm db to /var/lib/rpm for EL-style targets..."
+    rm -f "${target}/var/lib/rpm/rpmdb.sqlite" \
+          "${target}/var/lib/rpm/rpmdb.sqlite-shm" \
+          "${target}/var/lib/rpm/rpmdb.sqlite-wal" 2>/dev/null
+    cp -p "${target}/usr/lib/sysimage/rpm/rpmdb.sqlite" "${target}/var/lib/rpm/rpmdb.sqlite"
+    cp -p "${target}/usr/lib/sysimage/rpm/rpmdb.sqlite-shm" "${target}/var/lib/rpm/rpmdb.sqlite-shm" 2>/dev/null || true
+    cp -p "${target}/usr/lib/sysimage/rpm/rpmdb.sqlite-wal" "${target}/var/lib/rpm/rpmdb.sqlite-wal" 2>/dev/null || true
+    k_log_to "$log" "  rpm db: $(${target}/usr/bin/rpm --root "${target}" --dbpath /var/lib/rpm -qa 2>/dev/null | wc -l) packages tracked in /var/lib/rpm"
+  fi
 
   k_log_to "$log" "Catching up post-install setup (sysusers/tmpfiles/preset/ldconfig/depmod/kernel/dracut)..."
   k_in_chroot "${target}" /usr/bin/systemd-sysusers 2>/dev/null >> "$log" || true
