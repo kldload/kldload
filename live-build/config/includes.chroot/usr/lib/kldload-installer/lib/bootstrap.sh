@@ -1347,12 +1347,15 @@ CUSTOMREPO
   set +e
   # systemd-sysusers / systemd-tmpfiles location varies (F has /usr/bin,
   # EL9 has /usr/lib/systemd/) — try the common locations.
-  k_in_chroot "${target}" /usr/bin/systemd-sysusers 2>/dev/null >> "$log"
-  k_in_chroot "${target}" /usr/lib/systemd/systemd-sysusers 2>/dev/null >> "$log"
-  k_in_chroot "${target}" /usr/bin/systemd-tmpfiles --create 2>/dev/null >> "$log"
-  k_in_chroot "${target}" /usr/lib/systemd/systemd-tmpfiles --create 2>/dev/null >> "$log"
-  k_in_chroot "${target}" /usr/bin/systemctl preset-all 2>/dev/null >> "$log"
-  k_in_chroot "${target}" /usr/sbin/ldconfig 2>/dev/null >> "$log"
+  # _ensure_target_mounted before every chroot call: pass 3's zfs-dkms
+  # %post somehow exports rpool mid-catchup (~1 sec window), so we
+  # check + re-import before each command actually touches /target.
+  _ensure_target_mounted; k_in_chroot "${target}" /usr/bin/systemd-sysusers 2>/dev/null >> "$log"
+  _ensure_target_mounted; k_in_chroot "${target}" /usr/lib/systemd/systemd-sysusers 2>/dev/null >> "$log"
+  _ensure_target_mounted; k_in_chroot "${target}" /usr/bin/systemd-tmpfiles --create 2>/dev/null >> "$log"
+  _ensure_target_mounted; k_in_chroot "${target}" /usr/lib/systemd/systemd-tmpfiles --create 2>/dev/null >> "$log"
+  _ensure_target_mounted; k_in_chroot "${target}" /usr/bin/systemctl preset-all 2>/dev/null >> "$log"
+  _ensure_target_mounted; k_in_chroot "${target}" /usr/sbin/ldconfig 2>/dev/null >> "$log"
   # depmod + place kernel in /boot + build initramfs.
   # tsflags=noscripts skipped kernel-core's posttrans, which is what
   # normally copies vmlinuz to /boot and runs dracut. ZFSBootMenu reads

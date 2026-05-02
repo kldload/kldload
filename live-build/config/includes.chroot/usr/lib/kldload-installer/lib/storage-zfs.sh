@@ -61,6 +61,17 @@ k_zfs_cleanup_old() {
   # reboot when the new system comes up. Idempotent.
   systemctl stop zfs-zed.service 2>/dev/null || true
   systemctl stop zfs-import-cache.service 2>/dev/null || true
+  # Mask the F44 zfs udev rule too — it auto-runs `zpool import`
+  # without altroot when udev sees ZFS module load events, which the
+  # chroot's zfs-dkms %post triggers. udev import overrides our
+  # altroot=/target setup → /target unmounts mid-install, every chroot
+  # call against /target then fails with "command not found".
+  # Move the rule out of the way; restore on reboot via tmpfs reset.
+  if [[ -f /usr/lib/udev/rules.d/90-zfs.rules ]]; then
+    mv -f /usr/lib/udev/rules.d/90-zfs.rules /usr/lib/udev/rules.d/90-zfs.rules.kldload-disabled 2>/dev/null || \
+      ln -sf /dev/null /etc/udev/rules.d/90-zfs.rules 2>/dev/null || true
+    udevadm control --reload-rules 2>/dev/null || true
+  fi
 
   sync || true
   swapoff -a || true
