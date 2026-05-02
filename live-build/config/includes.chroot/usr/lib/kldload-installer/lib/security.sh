@@ -50,7 +50,7 @@ k_configure_mok() {
       #   without this flag sees "CA already enrolled" and silently skips,
       #   leaving SB boot broken when the new ZFS module is loaded).
       if printf '%s\n%s\n' "${mok_pass}" "${mok_pass}" | \
-           chroot "${target}" mokutil --ignore-keyring --import /var/lib/dkms/mok.der >&8 2>&1
+           chroot "${target}" /usr/bin/mokutil --ignore-keyring --import /var/lib/dkms/mok.der >&8 2>&1
       then
         enrolled=1
         k_log "MOK enrollment queued via mokutil"
