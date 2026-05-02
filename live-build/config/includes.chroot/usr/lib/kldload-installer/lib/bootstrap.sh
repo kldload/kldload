@@ -1173,12 +1173,20 @@ CUSTOMREPO
   fi
 
   k_log_to "$log" "Running dnf --installroot (${#_dnf_pkgs[@]} packages, profile=${_profile})..."
-  # dnf5 syntax: --skip-broken goes AFTER the subcommand, not before.
+  # dnf5 syntax notes:
+  #   - --skip-broken goes AFTER the subcommand, not before.
+  #   - --setopt=optional_metadata_types=filelists makes dnf5 load filelists
+  #     metadata so file-Requires (e.g. gnome-keyring needing
+  #     /usr/libexec/gcr-ssh-askpass from gcr) resolve. Default dnf5
+  #     skips filelists, breaking depsolving for any package whose
+  #     Requires references a file outside the auto-Provides paths
+  #     (/etc, /usr/bin, /usr/sbin, /usr/lib).
   # The outer dnf here is the live env's dnf5 (F44+), even though the
   # target may be F44/F43/RHEL/Rocky/etc.
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
       --setopt=cachedir="${target}/var/cache/dnf" \
+      --setopt=optional_metadata_types=filelists \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken \
       "${_dnf_pkgs[@]}" \
