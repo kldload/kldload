@@ -1227,7 +1227,26 @@ CUSTOMREPO
   # installed system reports `rpm -qa` empty even though all the
   # packages are on disk, breaking dkms / dracut / pretty much
   # everything that consults the package db.
-  local _exclude_scripts=( '--exclude=grub2*' '--exclude=shim*' '--exclude=kernel' '--exclude=kernel-core' '--exclude=kernel-modules' '--exclude=kernel-modules-core' '--exclude=kernel-modules-extra' )
+  # Pass 1 excludes:
+  #   - grub2* / shim* — installed in pass 2 with noscripts (skip the
+  #     EL9 grub2-mkconfig posttrans that fails on ZFS /boot)
+  #   - kernel*  — installed in pass 2 with noscripts (kernel-core
+  #     posttrans triggers DKMS autoinstall for zfs which is fragile +
+  #     redundant; we run dkms ourselves later)
+  #   - kernel-debug* — debug variants get pulled transitively (e.g.
+  #     by some perf/bcc/bpftool dependency chain). Their posttrans
+  #     tries DKMS autoinstall against /lib/modules/$kver+debug/ whose
+  #     configure script fails, returning exit 1 and aborting the
+  #     whole rpm transaction. Explicit exclude prevents the chain
+  #     from pulling them in.
+  local _exclude_scripts=(
+      '--exclude=grub2*' '--exclude=shim*'
+      '--exclude=kernel' '--exclude=kernel-core'
+      '--exclude=kernel-modules' '--exclude=kernel-modules-core' '--exclude=kernel-modules-extra'
+      '--exclude=kernel-debug' '--exclude=kernel-debug-core'
+      '--exclude=kernel-debug-modules' '--exclude=kernel-debug-modules-core'
+      '--exclude=kernel-debug-modules-extra' '--exclude=kernel-debug-devel'
+  )
   k_log_to "$log" "Running dnf --installroot pass 1 (main, ${#_dnf_pkgs[@]} packages, profile=${_profile})..."
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False \
