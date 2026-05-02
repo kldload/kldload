@@ -1539,6 +1539,14 @@ CUDAREPO
           break
         fi
         k_log_to "$log" "  NVIDIA DKMS attempt ${_attempt} failed — cleaning + retrying"
+        # Preserve make.log before `dkms remove` blows away the build dir,
+        # so the failure is debuggable post-install. Later /var/log/installer
+        # rsync (if any) picks this up; otherwise it lives on the target.
+        if [[ -f "${target}/var/lib/dkms/nvidia/${_nv_ver}/build/make.log" ]]; then
+          mkdir -p "${target}/var/log/kldload" 2>/dev/null || true
+          cp -f "${target}/var/lib/dkms/nvidia/${_nv_ver}/build/make.log" \
+                "${target}/var/log/kldload/nvidia-dkms-attempt-${_attempt}-make.log" 2>/dev/null || true
+        fi
         # On retry, fully unregister so `dkms add` next iteration is clean.
         chroot "${target}" /usr/sbin/dkms remove -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || true
         chroot "${target}" /usr/sbin/dkms add -m nvidia -v "$_nv_ver" >> "$log" 2>&1 || true
