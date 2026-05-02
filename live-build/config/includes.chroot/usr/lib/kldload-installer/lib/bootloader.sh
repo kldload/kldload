@@ -384,29 +384,47 @@ EOFSTAB
   # \EFI\BOOT\grubx64.efi keeps that embedded prefix, so it ALSO reads
   # \EFI\centos\grub.cfg (or rocky/fedora). Write both dirs' grub.cfg to
   # the same content so whichever path runs, the menu shows up.
-  # Default UX: silent chainload to ZFSBootMenu — preserves the boot-env
-  # selector users expect from kldload, while keeping shim's vendor-cert
-  # trust chain (firmware → MS-signed shim → distro-signed grub → ZBM).
-  # ZBM is MOK-signed by us (when sbsign available); shim's MOK
-  # verification approves it on the chainload.
+  #
+  # Default = `direct` (boot the kernel directly via GRUB's `linux`
+  # command). This works under Secure Boot because:
+  #   firmware → shim (MS-signed, in db)
+  #          → grubx64.efi (CentOS-CA-signed, MOK-enrolled)
+  #          → vmlinuz (CentOS-CA-signed, in db)
+  #          → ZFS module (MOK-signed by our per-install MOK)
+  #
+  # Why NOT default to ZBM: GRUB's `chainloader /EFI/zbm/BOOTX64.EFI`
+  # would invoke shim's Verify() on ZBM. Even though we sbsign ZBM with
+  # the per-install MOK and that MOK is enrolled, shim rejects it with
+  # "bad shim status" — sbsign-on-systemd-stub-UKI binaries produce
+  # Authenticode signatures that shim's verifier doesn't accept (the
+  # signature's pubkey matches the cert in the MOK list, but the
+  # underlying Authenticode hash check fails). Reproduces with sbverify
+  # too — `sbverify --cert mok.pub /EFI/zbm/BOOTX64.EFI` always fails,
+  # even after a clean re-sign of an unsigned input. Until that's
+  # diagnosed properly, ZBM-under-SB is broken; direct kernel boot
+  # bypasses the issue.
+  #
+  # ZBM is still installed at /EFI/zbm/BOOTX64.EFI for:
+  #   - non-SB boots (signature ignored)
+  #   - manual selection from GRUB menu when user wants the boot-env
+  #     selector (with SB off, or once we fix the signing path)
   #
   # timeout=0 + timeout_style=hidden = no menu UI on a normal boot. ESC
-  # at boot interrupts and shows the alternate entries (direct kernel
-  # boot, single-user rescue) for the rare case ZBM itself is broken.
+  # at boot interrupts and shows the alternate entries.
   local _grub_cfg=""
   read -r -d '' _grub_cfg <<GRUBCFG || true
 # kldload — auto-generated at install time
 set timeout=0
 set timeout_style=hidden
-set default=zbm
+set default=direct
 
-menuentry "kldload (ZFSBootMenu — boot-env selector)" --id=zbm {
-    chainloader /EFI/zbm/BOOTX64.EFI
-}
-
-menuentry "kldload — direct kernel boot (skip ZBM)" --id=direct {
+menuentry "kldload — direct kernel boot (Secure Boot compatible)" --id=direct {
     linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro rhgb quiet spl_hostid=\${spl_hostid}
     initrd /EFI/BOOT/initrd.img
+}
+
+menuentry "kldload (ZFSBootMenu — boot-env selector, requires SB off)" --id=zbm {
+    chainloader /EFI/zbm/BOOTX64.EFI
 }
 
 menuentry "kldload — rescue (single-user)" --id=rescue {
