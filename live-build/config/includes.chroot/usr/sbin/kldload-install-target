@@ -1748,11 +1748,19 @@ main() {
   # Without re-importing, bootloader.sh writes land into the live env's
   # filesystem instead of the target's, and the install reports ✔ but
   # the disk is empty at boot.
+  # Two cases to handle:
+  #   (a) rpool exported entirely — `zpool list rpool` returns non-zero
+  #   (b) rpool imported but BE dataset NOT mounted at /target — pool
+  #       is listed but mountpoint -q /target returns non-zero
   if ! zpool list rpool >/dev/null 2>&1; then
     k_log "rpool got exported during install — re-importing with altroot=${KLDLOAD_TARGET_MNT}"
     zpool import -f -N -R "${KLDLOAD_TARGET_MNT}" rpool 2>&1 || true
-    zfs mount rpool/ROOT/"${KLDLOAD_HOSTNAME:-kldload}" 2>&1 || \
-      zfs mount "$(zfs list -H -o name | grep -E '^rpool/ROOT/' | head -1)" 2>&1 || true
+  fi
+  if ! mountpoint -q "${KLDLOAD_TARGET_MNT}" 2>/dev/null; then
+    k_log "BE dataset not mounted at ${KLDLOAD_TARGET_MNT} — mounting now"
+    local _be
+    _be=$(zfs list -H -o name 2>/dev/null | grep -E '^rpool/ROOT/[^/]+$' | head -1)
+    [[ -n "$_be" ]] && zfs mount "$_be" 2>&1 || true
     zfs mount -a 2>&1 || true
   fi
   mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
