@@ -714,7 +714,15 @@ if ! k_have_func k_configure_security; then
     chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/useradd -m -s /bin/bash "${user}" \
       >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
     echo "${user}:${upass}" | chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/chpasswd >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1
-    chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/usermod -aG sudo "${user}" >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
+    # The sudoers group is named differently per distro: `wheel` on RPM
+    # (CentOS/Fedora/RHEL/Rocky), `sudo` on Debian/Ubuntu. Add to whichever
+    # exists. Harmless if neither does — sudoers.d/kldload-admin below
+    # grants NOPASSWD ALL directly to the user.
+    for _grp in wheel sudo; do
+      if chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/getent group "${_grp}" >/dev/null 2>&1; then
+        chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/usermod -aG "${_grp}" "${user}" >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
+      fi
+    done
 
     # Passwordless sudo for the admin user
     printf '%s ALL=(ALL) NOPASSWD: ALL\n' "${user}" \

@@ -1518,6 +1518,14 @@ CUDAREPO
     _nv_ver=$(chroot "${target}" /usr/bin/rpm -q --qf '%{VERSION}' kmod-nvidia-open-dkms 2>/dev/null | sed 's/-.*//' || echo "")
     if [[ -n "$_nv_ver" && -n "$kver" ]]; then
       k_log_to "$log" "Building NVIDIA DKMS ${_nv_ver} for kernel ${kver}..."
+      # `dkms build` requires the module to be present in the DKMS tree
+      # (`dkms add` registers /usr/src/<name>-<ver> with /var/lib/dkms).
+      # The kmod-nvidia-open-dkms %post normally does this, but its
+      # scriptlet often no-ops inside a chroot (no proc/dev/sys context),
+      # so the source ends up in /usr/src but DKMS has no record of it.
+      # Calling `dkms add` explicitly here is idempotent (errors if
+      # already added — we ignore that).
+      chroot "${target}" /usr/sbin/dkms add -m nvidia -v "$_nv_ver" >> "$log" 2>&1 || true
       # Build with retry — some chroot timing/parallel-make issues cause
       # transient failures on first try (observed: missing va_list include
       # error that resolves on retry after dkms remove + dkms build). Up
@@ -1531,20 +1539,33 @@ CUDAREPO
           break
         fi
         k_log_to "$log" "  NVIDIA DKMS attempt ${_attempt} failed — cleaning + retrying"
+        # On retry, fully unregister so `dkms add` next iteration is clean.
         chroot "${target}" /usr/sbin/dkms remove -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || true
+        chroot "${target}" /usr/sbin/dkms add -m nvidia -v "$_nv_ver" >> "$log" 2>&1 || true
       done
       chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null || true
 
       # Critical fallback: if DKMS still failed after retries, NVIDIA's
       # userspace driver is installed but nvidia.ko isn't on disk. Xorg
       # tries to load NVIDIA at boot, fails, GDM core-dumps in a loop,
-      # user sees blank screen instead of GNOME login. Disable the
-      # Xorg NVIDIA config to force fallback to mesa-dri so the system
-      # at least reaches a usable login screen.
+      # user sees blank screen instead of GNOME login.
+      #
+      # Two things must be undone to recover:
+      #   1. Disable /etc/X11/xorg.conf.d/10-nvidia.conf — otherwise Xorg
+      #      keeps probing the missing nvidia driver.
+      #   2. Disable /usr/lib/modprobe.d/nvidia.conf which contains
+      #      "blacklist nouveau". With nvidia.ko missing AND nouveau
+      #      blacklisted, the GPU loads no driver → /sys/class/drm has
+      #      no card[0-9] → udev never tags master-of-seat → logind has
+      #      no graphical seat → gdm-session-worker aborts with
+      #      "GdmSession: no session desktop files installed". Letting
+      #      nouveau load instead gives a usable (if slower) GNOME.
       if [[ "$_nv_built" != "1" ]]; then
-        k_log_to "$log" "  WARNING: NVIDIA DKMS failed after retries — disabling /usr/share/X11/xorg.conf.d/10-nvidia.conf to prevent GDM crash loop"
+        k_log_to "$log" "  WARNING: NVIDIA DKMS failed after retries — disabling Xorg nvidia.conf and modprobe nouveau-blacklist so nouveau can take over"
         for _conf in "${target}/usr/share/X11/xorg.conf.d/"nvidia*.conf \
-                     "${target}/etc/X11/xorg.conf.d/"nvidia*.conf; do
+                     "${target}/etc/X11/xorg.conf.d/"nvidia*.conf \
+                     "${target}/usr/lib/modprobe.d/"nvidia*.conf \
+                     "${target}/etc/modprobe.d/"nvidia*.conf; do
           [[ -f "$_conf" ]] && mv -f "$_conf" "${_conf}.kldload-disabled-no-dkms" 2>/dev/null || true
         done
       fi
