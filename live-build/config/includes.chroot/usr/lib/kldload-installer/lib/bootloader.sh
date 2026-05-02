@@ -44,30 +44,32 @@ k_zfs_bootloader_write_hostid() {
 
   mkdir -p "${target}/etc"
 
-  if [[ -s "${target}/etc/hostid" ]]; then
-    chmod 0644 "${target}/etc/hostid" || true
-    k_log "hostid already exists: $(xxd -p "${target}/etc/hostid" 2>/dev/null)"
-    return 0
-  fi
-
-  # Try zgenhostid inside chroot first (ZFS provides this)
-  if chroot "${target}" command -v zgenhostid >/dev/null 2>&1; then
-    chroot "${target}" zgenhostid -f >&"${log_fd}" 2>&1 || true
-  fi
-
-  # Fallback: copy from live environment or generate random
-  if [[ ! -s "${target}/etc/hostid" ]]; then
-    if [[ -s /etc/hostid ]]; then
-      cp -f /etc/hostid "${target}/etc/hostid"
-    else
-      # Generate a stable 4-byte hostid from /dev/urandom
-      python3 -c "
-import os, struct
-hid = struct.unpack('<I', os.urandom(4))[0] or 1  # never zero
-with open('${target}/etc/hostid', 'wb') as f:
-    f.write(struct.pack('<I', hid))
-" 2>&"${log_fd}" || \
-        dd if=/dev/urandom of="${target}/etc/hostid" bs=4 count=1 status=none 2>&"${log_fd}" || true
+  # ALWAYS overwrite from live env's /etc/hostid — pool was created
+  # with that hostid, target initramfs MUST match it. dnf install /
+  # zfs-dkms's zgenhostid / systemd-machine-id-setup may have written
+  # a different /etc/hostid into target during install. Check explicitly:
+  #
+  #   live hostid    : $(hostid) — matches pool stamp
+  #   target hostid  : different value if any package set it
+  #   pool stamp     : matches live hostid (set at zpool create time)
+  #
+  # If target's hostid != pool's hostid, `zpool import` at boot fails
+  # silently, dracut goes to "emergency mode generating
+  # /run/initramfs/rdsosreport.txt." Always copy live → target so they
+  # match by definition.
+  if [[ -s /etc/hostid ]]; then
+    cp -f /etc/hostid "${target}/etc/hostid"
+    k_log "hostid pinned to live env's value: $(xxd -p /etc/hostid 2>/dev/null) → ${target}/etc/hostid"
+  else
+    # Live env should always have /etc/hostid (storage stage wrote it).
+    # If it doesn't, we're in trouble — pool stamp is unknown. Fall
+    # back to zgenhostid in target chroot, but warn loudly.
+    k_log "WARNING: live /etc/hostid is empty — falling back to zgenhostid in target"
+    if chroot "${target}" command -v zgenhostid >/dev/null 2>&1; then
+      chroot "${target}" zgenhostid -f >&"${log_fd}" 2>&1 || true
+    fi
+    if [[ ! -s "${target}/etc/hostid" ]]; then
+      dd if=/dev/urandom of="${target}/etc/hostid" bs=4 count=1 status=none 2>&"${log_fd}" || true
     fi
   fi
 

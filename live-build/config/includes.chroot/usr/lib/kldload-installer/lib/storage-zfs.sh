@@ -379,19 +379,24 @@ k_zfs_write_cachefile() {
 }
 
 k_zfs_write_target_hostid() {
-  k_zfs_log "Writing stable target hostid"
+  k_zfs_log "Writing stable target hostid (matching live env's pool-create hostid)"
 
   mkdir -p "${KLDLOAD_TARGET_MNT}/etc"
 
-  if [[ -s "${KLDLOAD_TARGET_MNT}/etc/hostid" ]]; then
-    chmod 0644 "${KLDLOAD_TARGET_MNT}/etc/hostid" || true
-    return 0
-  fi
-
+  # ALWAYS overwrite — the pool was created with the live env's hostid,
+  # and the installed system MUST match it for `zpool import` to succeed
+  # at boot. If we early-return here when /target/etc/hostid already
+  # exists (which dnf / zfs-dkms's zgenhostid / systemd-machine-id may
+  # have populated with a DIFFERENT random value during install), the
+  # target's initramfs reads its own hostid, sees the pool was last
+  # touched by a different hostid, refuses to import, and dracut drops
+  # to "emergency mode generating /run/initramfs/rdsosreport.txt".
   if [[ -s /etc/hostid ]]; then
     cp -f /etc/hostid "${KLDLOAD_TARGET_MNT}/etc/hostid"
+    k_zfs_log "  copied live /etc/hostid → ${KLDLOAD_TARGET_MNT}/etc/hostid: $(xxd -p /etc/hostid 2>/dev/null)"
   else
     dd if=/dev/urandom of="${KLDLOAD_TARGET_MNT}/etc/hostid" bs=4 count=1 status=none
+    k_zfs_log "  WARNING: live /etc/hostid was empty — wrote random hostid (pool may not import on boot)"
   fi
 
   chmod 0644 "${KLDLOAD_TARGET_MNT}/etc/hostid" || true
