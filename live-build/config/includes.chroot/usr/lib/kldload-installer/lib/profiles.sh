@@ -360,7 +360,16 @@ k_install_system_files() {
   else
     # RPM target — copy GitHub-built sanoid binaries from the live ISO
     for _sb in sanoid syncoid findoid; do
-      if [[ -x "/usr/local/sbin/${_sb}" ]] && ! chroot "${target}" command -v "${_sb}" >/dev/null 2>&1; then
+      # `command -v` is a bash builtin, NOT a binary in $target's PATH, so
+      # `chroot $target command -v X` always returns non-zero (chroot
+      # can't find a `command` executable). The `!` flips that to "true"
+      # and the copy happens unconditionally — broken-but-benign on a
+      # fresh install. Test for the binary on disk instead, which is
+      # what we actually mean.
+      if [[ -x "/usr/local/sbin/${_sb}" ]] \
+         && [[ ! -x "${target}/usr/sbin/${_sb}" ]] \
+         && [[ ! -x "${target}/usr/local/sbin/${_sb}" ]] \
+         && [[ ! -x "${target}/usr/bin/${_sb}" ]]; then
         cp "/usr/local/sbin/${_sb}" "${target}/usr/local/sbin/${_sb}"
         chmod +x "${target}/usr/local/sbin/${_sb}"
       fi
@@ -708,8 +717,13 @@ FFPOLICY_WS
   # ── User tools: ZFS helpers + adduser.local hook (skip for core) ─────────────
   mkdir -p "${target}/usr/local/bin" "${target}/usr/local/sbin"
   if [[ "$_profile" != "core" ]]; then
-    # eza not in EPEL — copy from live if target doesn't have it
-    if [[ -x /usr/local/bin/eza ]] && ! chroot "${target}" command -v eza >/dev/null 2>&1; then
+    # eza not in EPEL — copy from live if target doesn't have it.
+    # See sanoid loop above for why we test paths instead of `chroot
+    # ... command -v` (the latter doesn't work; `command` is a bash
+    # builtin, not in PATH).
+    if [[ -x /usr/local/bin/eza ]] \
+       && [[ ! -x "${target}/usr/bin/eza" ]] \
+       && [[ ! -x "${target}/usr/local/bin/eza" ]]; then
       cp /usr/local/bin/eza "${target}/usr/local/bin/eza"
       chmod +x "${target}/usr/local/bin/eza"
     fi
@@ -744,9 +758,12 @@ FFPOLICY_WS
           || k_log "WARNING: ansible-core install failed — autodeploy may retry at first boot"
         ;;
     esac
-    # Verify — if this fails the install is broken and should not claim success
-    if chroot "${target}" command -v ansible-playbook >/dev/null 2>&1; then
-      k_log "ansible-playbook present on target: $(chroot "${target}" ansible --version 2>&1 | head -1)"
+    # Verify — if this fails the install is broken and should not claim
+    # success. Test paths directly (see eza/sanoid blocks above for why
+    # `chroot ... command -v` doesn't work).
+    if [[ -x "${target}/usr/bin/ansible-playbook" ]] \
+       || [[ -x "${target}/usr/local/bin/ansible-playbook" ]]; then
+      k_log "ansible-playbook present on target: $(chroot "${target}" /usr/bin/ansible --version 2>&1 | head -1)"
     else
       k_log "WARNING: ansible-playbook MISSING on target — autodeploy will try to self-install at first boot"
     fi

@@ -622,10 +622,14 @@ cmd_kvm_deploy() {
         qemu-img create -f qcow2 "$_disk" "${VM_DISK_GB}G"
         chown qemu:qemu "$_disk"
 
+        # os-variant matches the LIVE env (Fedora 44 since the cutover from
+        # CentOS Stream 9). osinfo-db doesn't ship a fedora44 entry yet, so
+        # use fedora-unknown — picks correct virtio drivers, clock policy,
+        # and memory ballooning defaults for a recent Fedora kernel.
         virt-install --name "$_name" --ram "$VM_MEMORY" --vcpus "$VM_CORES" \
             --disk "path=${_disk},format=qcow2,bus=virtio" \
             --cdrom /var/lib/libvirt/images/kldload-free-latest.iso \
-            --os-variant centos-stream9 --network network=default,model=virtio \
+            --os-variant fedora-unknown --network network=default,model=virtio \
             --graphics vnc,listen=0.0.0.0 \
             --boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no \
             --noautoconsole

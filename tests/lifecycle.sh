@@ -105,7 +105,7 @@ log "creating VM $VM_NAME (mem=${VM_MEMORY}M cores=${VM_CORES} disk=${VM_DISK_GB
 virt-install --name "$VM_NAME" --ram "$VM_MEMORY" --vcpus "$VM_CORES" \
   --disk "path=${DISK},format=qcow2,bus=virtio" \
   --disk "path=${ISO_DST},device=cdrom,bus=sata,readonly=on" \
-  --os-variant centos-stream9 \
+  --os-variant fedora-unknown \
   --network network=default,model=virtio \
   --graphics vnc,listen=0.0.0.0 \
   --boot "uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=${SB_ENABLED}" \
