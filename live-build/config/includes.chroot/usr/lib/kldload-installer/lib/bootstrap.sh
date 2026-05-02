@@ -1518,11 +1518,36 @@ CUDAREPO
     _nv_ver=$(chroot "${target}" /usr/bin/rpm -q --qf '%{VERSION}' kmod-nvidia-open-dkms 2>/dev/null | sed 's/-.*//' || echo "")
     if [[ -n "$_nv_ver" && -n "$kver" ]]; then
       k_log_to "$log" "Building NVIDIA DKMS ${_nv_ver} for kernel ${kver}..."
-      chroot "${target}" /usr/sbin/dkms build -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || \
-        k_log_to "$log" "WARNING: NVIDIA DKMS build failed"
-      chroot "${target}" /usr/sbin/dkms install -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || \
-        k_log_to "$log" "WARNING: NVIDIA DKMS install failed"
+      # Build with retry — some chroot timing/parallel-make issues cause
+      # transient failures on first try (observed: missing va_list include
+      # error that resolves on retry after dkms remove + dkms build). Up
+      # to 2 attempts before falling back to disabling Xorg config.
+      local _nv_built=0
+      for _attempt in 1 2; do
+        if chroot "${target}" /usr/sbin/dkms build -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 && \
+           chroot "${target}" /usr/sbin/dkms install -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1; then
+          _nv_built=1
+          k_log_to "$log" "  NVIDIA DKMS built + signed (attempt ${_attempt})"
+          break
+        fi
+        k_log_to "$log" "  NVIDIA DKMS attempt ${_attempt} failed — cleaning + retrying"
+        chroot "${target}" /usr/sbin/dkms remove -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 || true
+      done
       chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null || true
+
+      # Critical fallback: if DKMS still failed after retries, NVIDIA's
+      # userspace driver is installed but nvidia.ko isn't on disk. Xorg
+      # tries to load NVIDIA at boot, fails, GDM core-dumps in a loop,
+      # user sees blank screen instead of GNOME login. Disable the
+      # Xorg NVIDIA config to force fallback to mesa-dri so the system
+      # at least reaches a usable login screen.
+      if [[ "$_nv_built" != "1" ]]; then
+        k_log_to "$log" "  WARNING: NVIDIA DKMS failed after retries — disabling /usr/share/X11/xorg.conf.d/10-nvidia.conf to prevent GDM crash loop"
+        for _conf in "${target}/usr/share/X11/xorg.conf.d/"nvidia*.conf \
+                     "${target}/etc/X11/xorg.conf.d/"nvidia*.conf; do
+          [[ -f "$_conf" ]] && mv -f "$_conf" "${_conf}.kldload-disabled-no-dkms" 2>/dev/null || true
+        done
+      fi
     fi
     # Generate CDI spec for container GPU access
     chroot "${target}" bash -c 'nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' 2>/dev/null || true
