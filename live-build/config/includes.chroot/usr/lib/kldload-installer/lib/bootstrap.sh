@@ -1459,6 +1459,20 @@ CUSTOMREPO
   # livenet modules from the initramfs build. Without this, the target
   # initramfs waits forever for /dev/disk/by-label/KLDLOAD (the LIVE
   # USB label) at boot and dracut hangs the install.
+  #
+  # CRITICAL: ensure /target/etc/hostid matches live's hostid + pool
+  # stamp BEFORE dracut runs. dracut bakes the chroot's /etc/hostid
+  # into the initramfs at /etc/hostid; that value is what zpool import
+  # uses at boot time. If /target/etc/hostid drifted from the live
+  # env (e.g. zfs-dkms's zgenhostid wrote a fresh random one during
+  # pass 3), the target initramfs reads the wrong hostid and the
+  # pool import at boot fails silently — dracut drops to "emergency
+  # mode generating /run/initramfs/rdsosreport.txt." Force-sync.
+  if [[ -s /etc/hostid ]]; then
+    cp -f /etc/hostid "${target}/etc/hostid"
+    chmod 0644 "${target}/etc/hostid"
+    k_log_to "$log" "  /target/etc/hostid pinned to live value before dracut: $(xxd -p /etc/hostid)"
+  fi
   chroot "${target}" /usr/bin/dracut --force --no-hostonly --add "zfs" --omit "dracut-live livenet" --kver "$kver" 2>>"$log" || \
     k_log_to "$log" "WARNING: dracut rebuild failed"
 
