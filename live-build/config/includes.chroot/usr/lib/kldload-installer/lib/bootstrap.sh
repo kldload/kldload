@@ -1192,48 +1192,71 @@ CUSTOMREPO
       k_log_to "$log" "WARNING: could not install zfs-release for fc${_fedora_rel} — ZFS will likely fail to install"
   fi
 
-  k_log_to "$log" "Running dnf --installroot (${#_dnf_pkgs[@]} packages, profile=${_profile})..."
+  # Two-pass install:
+  #   Pass 1 (this one) — main install with scripts ENABLED, but excludes
+  #     grub2* / shim* / kernel*. Scripts run normally so binutils
+  #     update-alternatives sets up /usr/bin/ld → ld.bfd, zfs-dkms
+  #     posttrans triggers DKMS autoinstall, systemd-sysusers/tmpfiles
+  #     run for new users, etc. This is "normal" rpm behavior.
+  #   Pass 2 (below) — install grub2*/shim*/kernel* with noscripts.
+  #     Skips EL9 grub2-common's posttrans (which calls
+  #     grub2-mkconfig → grub2-probe and fails on a ZFS /boot with
+  #     "unknown filesystem") and kernel-core's posttrans (which writes
+  #     to /boot/efi/Default/$kver — a BLS path that doesn't exist in
+  #     our EFI layout). We do our own kernel placement + ZFSBootMenu
+  #     install in bootloader.sh.
+  #
   # dnf5 syntax notes:
-  #   - --skip-broken goes AFTER the subcommand, not before.
-  #   - --skip-unavailable also AFTER the subcommand. dnf4's --skip-broken
-  #     did both (broken deps AND missing packages); dnf5 split them.
-  #     Without --skip-unavailable, the package list (which is F44-tuned)
-  #     fails on CentOS 9 / Rocky 9 because Fedora-only or RPMFusion-only
-  #     packages aren't in EL9 repos (e.g. iwlwifi-mvm-firmware was split
-  #     out of linux-firmware on F43+, mesa-va-drivers, intel-media-driver,
-  #     pipewire-codec-aptx, mozilla-openh264, etc.).
-  #   - --setopt=optional_metadata_types=filelists makes dnf5 load filelists
-  #     metadata so file-Requires (e.g. gnome-keyring needing
-  #     /usr/libexec/gcr-ssh-askpass from gcr) resolve. Default dnf5
-  #     skips filelists, breaking depsolving for any package whose
-  #     Requires references a file outside the auto-Provides paths
-  #     (/etc, /usr/bin, /usr/sbin, /usr/lib).
+  #   - --skip-broken / --skip-unavailable go AFTER the subcommand.
+  #     dnf4's --skip-broken did both (broken deps AND missing
+  #     packages); dnf5 split them. Without --skip-unavailable, the
+  #     F44-tuned package list fails on EL9 because of Fedora-only /
+  #     RPMFusion-only entries (iwlwifi-*-firmware splits, mesa-va-
+  #     drivers, intel-media-driver, etc.).
+  #   - --setopt=optional_metadata_types=filelists makes dnf5 load
+  #     filelists metadata so file-Requires (e.g. gnome-keyring needing
+  #     /usr/libexec/gcr-ssh-askpass from gcr) resolve. dnf5 default
+  #     is to skip filelists.
   # The outer dnf here is the live env's dnf5 (F44+), even though the
   # target may be F44/F43/RHEL/Rocky/etc.
-  # tsflags=noscripts skips ALL scriptlets (pre/post/preun/postun/
-  # pretrans/posttrans). dnf5's tsflags setopt only accepts a subset
-  # of rpm's tsflags — noposttrans alone isn't valid ("Invalid tsflag:
-  # noposttrans"), so noscripts is the only knob available. We re-run
-  # the essential bits explicitly after install:
-  #   - systemd-sysusers : create system users/groups (gdm, polkitd, etc.)
-  #   - systemd-tmpfiles : create runtime dirs declared in tmpfiles.d
-  #   - systemctl preset-all : apply distro service preset defaults
-  #   - ldconfig + depmod : refresh shared lib + module caches
-  # Skipping scriptlets dodges EL9 grub2-common's posttrans, which runs
-  # grub2-mkconfig → grub2-probe and fails with "unknown filesystem"
-  # on /target/boot (a ZFS dataset; EL9 grub2 has no ZFS module). Our
-  # bootloader.sh installs ZFSBootMenu later — that stage replaces the
-  # grub config dnf would have written.
+  #
+  # ALSO IMPORTANT: pass --setopt=_dbpath=/var/lib/rpm so dnf writes
+  # the rpm db to where EL-class targets expect it. dnf5 default is
+  # /usr/lib/sysimage/rpm (modern Fedora moved there); EL9's rpm
+  # config still reads /var/lib/rpm. Without this override the
+  # installed system reports `rpm -qa` empty even though all the
+  # packages are on disk, breaking dkms / dracut / pretty much
+  # everything that consults the package db.
+  local _exclude_scripts=( '--exclude=grub2*' '--exclude=shim*' '--exclude=kernel' '--exclude=kernel-core' '--exclude=kernel-modules' '--exclude=kernel-modules-core' '--exclude=kernel-modules-extra' )
+  k_log_to "$log" "Running dnf --installroot pass 1 (main, ${#_dnf_pkgs[@]} packages, profile=${_profile})..."
+  dnf --installroot="${target}" --releasever="${release}" \
+      --setopt=install_weak_deps=False \
+      --setopt=tsflags=nodocs \
+      --setopt=cachedir="${target}/var/cache/dnf" \
+      --setopt=optional_metadata_types=filelists \
+      --setopt=_dbpath=/var/lib/rpm \
+      --disableplugin=subscription-manager --disableplugin=product-id \
+      --nogpgcheck -y install --skip-broken --skip-unavailable \
+      "${_exclude_scripts[@]}" \
+      "${_dnf_pkgs[@]}" \
+      >> "$log" 2>&1 \
+      || { k_log_to "$log" "dnf --installroot pass 1 failed"; return 1; }
+
+  k_log_to "$log" "Running dnf --installroot pass 2 (grub2/shim/kernel, scripts skipped)..."
+  local _boot_pkgs=( grub2-common grub2-tools grub2-tools-minimal grub2-pc-modules
+                     grub2-efi-x64 grub2-efi-x64-modules shim-x64
+                     kernel kernel-core kernel-modules kernel-modules-core )
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False \
       --setopt=tsflags=nodocs,noscripts \
       --setopt=cachedir="${target}/var/cache/dnf" \
       --setopt=optional_metadata_types=filelists \
+      --setopt=_dbpath=/var/lib/rpm \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
-      "${_dnf_pkgs[@]}" \
+      "${_boot_pkgs[@]}" \
       >> "$log" 2>&1 \
-      || { k_log_to "$log" "dnf --installroot failed"; return 1; }
+      || k_log_to "$log" "dnf pass 2 had issues (continuing)"
 
   k_log_to "$log" "Catching up post-install setup (sysusers/tmpfiles/preset/ldconfig/depmod/kernel/dracut)..."
   k_in_chroot "${target}" /usr/bin/systemd-sysusers 2>/dev/null >> "$log" || true
