@@ -1319,16 +1319,23 @@ CUSTOMREPO
     k_log_to "$log" "  rpm db: ${_pkg_count} packages tracked in /var/lib/rpm"
   fi
 
-  # Defensive: rpool can get exported by something during pass 3
-  # (zfs-dkms %post / systemctl preset-all triggers / etc), leaving
-  # /target as an empty mountpoint dir. The remaining catchup +
-  # subsequent stages all need /target mounted. Detect + re-import.
-  if ! mountpoint -q "${target}" 2>/dev/null; then
-    k_log_to "$log" "Target unmounted between dnf and catchup — re-importing rpool"
-    zpool import -f -N -R "${target}" rpool >> "$log" 2>&1 || \
-      k_log_to "$log" "WARNING: rpool re-import failed"
-    zfs mount -a >> "$log" 2>&1 || true
-  fi
+  # Defensive helper: rpool can get exported by something during pass 3
+  # (zfs-dkms %post triggering ZFS systemd events, udev rules firing on
+  # module load, etc.), leaving /target as an empty mountpoint dir. The
+  # remaining catchup + subsequent stages all need /target mounted.
+  # Call this before any operation that touches /target.
+  _ensure_target_mounted() {
+    if ! mountpoint -q "${target}" 2>/dev/null; then
+      k_log_to "$log" "  [target unmounted — re-importing rpool with altroot=${target}]"
+      zpool import -f -N -R "${target}" rpool >> "$log" 2>&1 || true
+      # Find the BE dataset (rpool/ROOT/<host_short>) and mount it
+      local _be
+      _be=$(zfs list -H -o name 2>/dev/null | grep -E '^rpool/ROOT/[^/]+$' | head -1)
+      [[ -n "$_be" ]] && zfs mount "$_be" >> "$log" 2>&1 || true
+      zfs mount -a >> "$log" 2>&1 || true
+    fi
+  }
+  _ensure_target_mounted
 
   k_log_to "$log" "Catching up post-install setup (sysusers/tmpfiles/preset/ldconfig/depmod/kernel/dracut)..."
   # Wrap the whole catchup in `set +e` since these commands are all
