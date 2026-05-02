@@ -1343,7 +1343,12 @@ CUSTOMREPO
       fi
     fi
   done
-  set -e
+  # Stay in set +e through the rest of bootstrap. The DKMS build,
+  # zfs-dracut install, NVIDIA bits, and initramfs rebuild that follow
+  # all have `|| true` / `||` warnings on individual commands, but a
+  # failing pipe (with pipefail still on) under set -e would still
+  # kill the install. We've reached "all 1175 packages on disk" — any
+  # subsequent failure should be a WARNING in the log, not a fatal exit.
 
   k_log_to "$log" "Root filesystem: $(du -sh --exclude="${target}/proc" --exclude="${target}/sys" --exclude="${target}/dev" "${target}" 2>/dev/null | cut -f1 || echo "?")"
 
