@@ -137,5 +137,14 @@ else
   _fail "Can create snapshot" "zfs snapshot failed"
 fi
 
+# ── Debug bundle tool ────────────────────────────────────────────────────────
+# kldload-debug-bundle ships with every install for fast post-mortem
+# capture. Verify it's on PATH and at least responds to --help, so a
+# future regression that drops it from includes.chroot or loses the
+# +x bit is caught before a user actually needs the tool.
+_section "Debug Bundle Tool"
+test_cmd       "kldload-debug-bundle present"      "kldload-debug-bundle"
+test_succeeds  "kldload-debug-bundle --help works" "kldload-debug-bundle --help >/dev/null 2>&1"
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 summary

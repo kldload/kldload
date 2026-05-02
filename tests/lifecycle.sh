@@ -191,6 +191,18 @@ for i in $(seq 1 360); do
       log "installer exited without success marker — last 40 lines:"
       ssh_live 'sudo tail -40 /var/log/installer/kldload-installer.log /var/log/installer/bootstrap.log 2>/dev/null' \
         | tee -a "$LOG" || true
+      # Auto-bundle the live env's state so the failure is debuggable
+      # without ssh'ing back in. The tool ships in the live ISO itself,
+      # so it's available even before the install completes.
+      log "running kldload-debug-bundle on the live env"
+      if ssh_live 'sudo kldload-debug-bundle --quiet --out /tmp >/dev/null 2>&1'; then
+        local _bundle
+        _bundle="$(ssh_live 'ls -t /tmp/kldload-debug-*.tar.gz 2>/dev/null | head -1')"
+        if [[ -n "$_bundle" ]]; then
+          scp "${SSH_OPTS[@]}" "live@${VM_IP}:${_bundle}" "/tmp/" >>"$LOG" 2>&1 \
+            && ok "debug bundle saved → /tmp/$(basename "$_bundle")"
+        fi
+      fi
       fail "installer aborted"
     fi
   fi
