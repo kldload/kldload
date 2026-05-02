@@ -1740,12 +1740,21 @@ main() {
   _ok "Snapshot"    "rpool@install-${_snap_ts}"
 
   # ── Bootloader — write EFI files + initramfs (pool still mounted) ──────
-  # Defensive: ensure /target/boot/efi exists and is mounted. Some
-  # earlier stage (zfs-dracut install / chroot dnf / snapshot) may have
-  # dropped the EFI mount. WITHOUT a real mount, bootloader.sh writes
-  # would land in the regular /target/boot/efi directory inside the
-  # rpool dataset and never make it onto the actual EFI partition —
-  # the install reports ✔ but the EFI ESP is empty at boot time.
+  # Defensive remount: something during pass 3 / catchup sometimes
+  # exports rpool — possibly zfs-dkms's %post triggering systemd zfs
+  # services, or systemctl preset-all enabling zfs-import-cache that
+  # re-imports without altroot. By the time we reach the bootloader
+  # stage rpool may be exported and /target is just an empty mountpoint.
+  # Without re-importing, bootloader.sh writes land into the live env's
+  # filesystem instead of the target's, and the install reports ✔ but
+  # the disk is empty at boot.
+  if ! zpool list rpool >/dev/null 2>&1; then
+    k_log "rpool got exported during install — re-importing with altroot=${KLDLOAD_TARGET_MNT}"
+    zpool import -f -N -R "${KLDLOAD_TARGET_MNT}" rpool 2>&1 || true
+    zfs mount rpool/ROOT/"${KLDLOAD_HOSTNAME:-kldload}" 2>&1 || \
+      zfs mount "$(zfs list -H -o name | grep -E '^rpool/ROOT/' | head -1)" 2>&1 || true
+    zfs mount -a 2>&1 || true
+  fi
   mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
   if ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
     if [[ -n "${KLDLOAD_PART_EFI:-}" && -b "${KLDLOAD_PART_EFI}" ]]; then
@@ -1753,9 +1762,13 @@ main() {
       mount "${KLDLOAD_PART_EFI}" "${KLDLOAD_TARGET_MNT}/boot/efi" 2>&1 || true
     fi
   fi
-  # Verify — if we couldn't actually mount, bail early instead of
-  # writing files into the rpool dataset (which never makes it to the
-  # ESP and produces an "install completed but won't boot" outcome).
+  # Hard verify — refuse to proceed if either the pool isn't mounted
+  # at /target OR the EFI partition isn't really mounted at /target/
+  # boot/efi. Both must hold or bootloader writes go nowhere useful.
+  if ! mountpoint -q "${KLDLOAD_TARGET_MNT}" 2>/dev/null; then
+    _err "Target rpool is NOT mounted at ${KLDLOAD_TARGET_MNT} — install state corrupt, aborting"
+    return 1
+  fi
   if ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
     _err "EFI partition is NOT mounted at ${KLDLOAD_TARGET_MNT}/boot/efi — refusing to write boot files into the rpool dataset"
     return 1

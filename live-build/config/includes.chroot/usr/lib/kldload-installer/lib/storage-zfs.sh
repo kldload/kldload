@@ -53,6 +53,15 @@ k_zfs_disk_prefix() {
 k_zfs_cleanup_old() {
   k_zfs_log "Cleaning previous mounts/pools on ${KLDLOAD_DISK}"
 
+  # Stop zfs-zed + zfs-import-cache.service on the LIVE env so they
+  # don't race the install — zed reacts to DKMS load events / pool
+  # state changes triggered during pass 3 install scripts and can
+  # `zpool export` rpool mid-install, leaving /target as an empty
+  # mountpoint dir for everything downstream. We re-enable on
+  # reboot when the new system comes up. Idempotent.
+  systemctl stop zfs-zed.service 2>/dev/null || true
+  systemctl stop zfs-import-cache.service 2>/dev/null || true
+
   sync || true
   swapoff -a || true
 
