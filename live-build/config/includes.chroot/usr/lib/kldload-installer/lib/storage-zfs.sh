@@ -286,9 +286,36 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
       ;;
   esac
 
+  # Compatibility: live env runs OpenZFS 2.4 (Fedora 44), but target
+  # distros use older ZFS (CentOS 9 / Rocky 9 / RHEL 9 ship 2.2). If we
+  # let zpool create enable the full 2.4 feature set, the pool gets
+  # features like raidz_expansion / longname / zilsaxattr / etc. that
+  # the target's 2.2 doesn't understand, and the target boots into
+  # "pool can only be accessed in read-only mode" — dracut fails to
+  # mount /sysroot read-write, drops to emergency mode.
+  #
+  # Map target distro → most compatible profile. openzfs-2.2-linux is
+  # the "intersection" feature set both live (2.4) and target (2.2)
+  # support, so the pool works natively from either.
+  local _compat="off"  # default: don't restrict (Fedora target = same major as live)
+  case "${KLDLOAD_DISTRO:-centos}" in
+    centos|rocky|rhel)
+      # EL9 ships zfs 2.2 — cap at 2.2-linux profile
+      if [[ -f /usr/share/zfs/compatibility.d/openzfs-2.2-linux ]]; then
+        _compat="openzfs-2.2-linux"
+      elif [[ -f /usr/share/zfs/compatibility.d/openzfs-2.1-linux ]]; then
+        _compat="openzfs-2.1-linux"
+      fi
+      k_zfs_log "Using ZFS feature compatibility profile: ${_compat} (target=${KLDLOAD_DISTRO} uses zfs 2.2)"
+      ;;
+  esac
+  local _compat_opt=()
+  [[ "$_compat" != "off" ]] && _compat_opt=(-o "compatibility=${_compat}")
+
   zpool create -f \
     -o ashift=12 \
     -o autotrim=on \
+    "${_compat_opt[@]}" \
     -O acltype=posixacl \
     -O canmount=off \
     -O compression=lz4 \
