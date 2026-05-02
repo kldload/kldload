@@ -1235,14 +1235,34 @@ CUSTOMREPO
       >> "$log" 2>&1 \
       || { k_log_to "$log" "dnf --installroot failed"; return 1; }
 
-  k_log_to "$log" "Catching up post-install setup (sysusers/tmpfiles/preset/ldconfig/depmod)..."
+  k_log_to "$log" "Catching up post-install setup (sysusers/tmpfiles/preset/ldconfig/depmod/kernel/dracut)..."
   k_in_chroot "${target}" /usr/bin/systemd-sysusers 2>/dev/null >> "$log" || true
   k_in_chroot "${target}" /usr/bin/systemd-tmpfiles --create 2>/dev/null >> "$log" || true
   k_in_chroot "${target}" /usr/bin/systemctl preset-all 2>/dev/null >> "$log" || true
   k_in_chroot "${target}" /usr/sbin/ldconfig 2>/dev/null >> "$log" || true
-  for kver in "${target}"/lib/modules/*; do
-    [[ -d "$kver" ]] || continue
-    k_in_chroot "${target}" /usr/sbin/depmod -a "$(basename "$kver")" 2>/dev/null >> "$log" || true
+  # depmod + place kernel in /boot + build initramfs.
+  # tsflags=noscripts skipped kernel-core's posttrans, which is what
+  # normally copies vmlinuz to /boot and runs dracut. ZFSBootMenu reads
+  # /boot/vmlinuz-$kver and /boot/initramfs-$kver.img out of the BE, so
+  # if we don't put them there explicitly the install completes but
+  # ZBM can't actually boot the kernel.
+  for kver_path in "${target}"/lib/modules/*; do
+    [[ -d "$kver_path" ]] || continue
+    local kver; kver="$(basename "$kver_path")"
+    k_in_chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null >> "$log" || true
+    # Copy the bundled vmlinuz into /boot if kernel-install didn't
+    if [[ -f "${target}/usr/lib/modules/${kver}/vmlinuz" && ! -f "${target}/boot/vmlinuz-${kver}" ]]; then
+      cp -p "${target}/usr/lib/modules/${kver}/vmlinuz" "${target}/boot/vmlinuz-${kver}"
+      k_log_to "$log" "  copied vmlinuz-${kver} into /boot"
+    fi
+    # Build initramfs via dracut. --no-hostonly per kldload policy
+    # (universal initramfs covering all hardware, not just this VM/box).
+    if [[ ! -f "${target}/boot/initramfs-${kver}.img" ]]; then
+      k_in_chroot "${target}" /usr/bin/dracut --force --no-hostonly \
+        --kver "${kver}" "/boot/initramfs-${kver}.img" >> "$log" 2>&1 \
+        && k_log_to "$log" "  built initramfs-${kver}.img" \
+        || k_log_to "$log" "  WARNING: dracut failed for ${kver}"
+    fi
   done
 
   k_log_to "$log" "Root filesystem: $(du -sh --exclude="${target}/proc" --exclude="${target}/sys" --exclude="${target}/dev" "${target}" 2>/dev/null | cut -f1 || echo "?")"
