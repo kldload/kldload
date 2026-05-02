@@ -1010,9 +1010,23 @@ CUSTOMREPO
       _dnf_pkgs+=(
         gnome-shell gnome-session gnome-control-center gnome-settings-daemon
         gdm nautilus gnome-terminal gedit gnome-keyring
+        # gcr provides /usr/libexec/gcr-ssh-askpass (file-Required by
+        # gnome-keyring). dnf5 doesn't auto-load filelists metadata so
+        # the file-Require can't resolve via Provides alone — explicit
+        # install side-steps the issue. Same on CentOS Stream 9 + Fedora.
+        gcr
         adwaita-icon-theme google-noto-sans-fonts firefox
         mesa-dri-drivers pipewire wireplumber
         podman
+        # systemd-pam — F43+ split this out of systemd; without it
+        # /usr/lib64/security/pam_systemd.so is missing on the target
+        # and user sessions silently never register. Same bug we hit
+        # in the live env (commit 9e93f4f).
+        systemd-pam
+        # dbus-broker — F44 default replacing dbus-daemon. Without one
+        # of them as the active dbus.service, the system bus doesn't
+        # come up. dbus-common alone (line 927) is just config files.
+        dbus-broker
         # ── Laptop hardware essentials — critical for XPS / ThinkPad /
         #    any modern Intel laptop. Without these: no sound (Intel SOF
         #    DSP), broken touchpad, hot+loud fans, dead Bluetooth, can't
