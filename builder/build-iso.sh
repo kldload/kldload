@@ -120,7 +120,17 @@ PKGS=(
     vim-enhanced tmux curl wget rsync jq less tar gzip
     iproute iputils net-tools nftables chrony
     # Hardware support — WiFi firmware, storage controllers, USB, etc.
-    linux-firmware iwl*-firmware
+    # F43+ split linux-firmware: bare `linux-firmware` carries only licenses,
+    # actual blobs live in per-vendor sub-packages. `iwl*-firmware` glob
+    # catches iwlwifi-{dvm,mvm,mld}-firmware + iwlegacy-firmware on F44, but
+    # we also need realtek/atheros explicitly (don't start with `iwl`).
+    # Without these, modern Intel AX/BE wifi cards and any Realtek/Atheros
+    # chipset boot the live env with no wifi device — `nmcli device` is empty
+    # even though the card is in lspci. See feedback_fedora_firmware_split.md.
+    linux-firmware
+    iwlwifi-dvm-firmware iwlwifi-mvm-firmware iwlwifi-mld-firmware
+    iwlegacy-firmware
+    realtek-firmware atheros-firmware
     passwd shadow-utils util-linux procps-ng findutils grep sed gawk
     rootfiles parted gdisk dosfstools
     # nginx — single TLS reverse proxy on :8443 for every browser-facing
@@ -136,6 +146,17 @@ PKGS=(
     blktrace iotop sysstat strace
     xfsprogs e2fsprogs btrfs-progs mdadm lvm2 cryptsetup
     fio bonnie++ stress-ng memtest86+
+    # Rescue / repair toolset — for fixing kldload boxes that won't boot
+    # (broken initramfs, corrupted GPT, dead BE, accidentally-wiped ESP).
+    # Without these, a user has to boot a separate rescue USB to recover.
+    # ~30MB total, fits the use case where the kldload USB IS the rescue
+    # USB. gparted brings the GTK partition GUI; testdisk includes
+    # photorec for data recovery; ddrescue is the canonical bad-block
+    # cloner; fsarchiver does compressed filesystem snapshots.
+    gparted testdisk ddrescue fsarchiver
+    # File restoration helpers (exfat/ntfs read-write for cross-OS rescue,
+    # 7zip/p7zip for extracting Windows recovery images).
+    exfatprogs ntfsprogs p7zip p7zip-plugins
     bash-completion hostname
     # ZFS — DKMS build inside chroot against target kernel
     dkms gcc make autoconf automake libtool kernel-devel
@@ -1160,10 +1181,14 @@ if [[ "$EDITION" != "core" ]]; then
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/sbin/${sbin_tool}" && chmod +x "${ROOTFS}/usr/sbin/${sbin_tool}"
     done
 
-    # Copy the sbin-level CLI tools users invoke directly. kspawn (new in
-    # 1.0.5) is the ZFS-native cluster spawner; kldload-autoinstall lives
-    # at /usr/local/sbin/ (handled separately in the live-ISO path).
-    for _lsbin in kspawn; do
+    # Copy the sbin-level CLI tools users invoke directly.
+    #   kspawn               — ZFS-native cluster spawner (new in 1.0.5)
+    #   kldload-debug-bundle — post-mortem state collector — needs to ship
+    #     in the LIVE ISO so the lifecycle smoke harness + manual repro on
+    #     a stuck install can capture state from the live env, AND so
+    #     profiles.sh's per-binary copy list can find it as a source when
+    #     installing onto the target.
+    for _lsbin in kspawn kldload-debug-bundle; do
         _src="/build/live-build/config/includes.chroot/usr/local/sbin/${_lsbin}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/local/sbin/${_lsbin}" && chmod +x "${ROOTFS}/usr/local/sbin/${_lsbin}"
     done
