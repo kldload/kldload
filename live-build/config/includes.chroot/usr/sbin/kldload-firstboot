@@ -821,28 +821,54 @@ main() {
   # once and gets the NVIDIA driver. If it fails again, we leave nouveau
   # in place — desktop still works, just without proprietary acceleration.
   if compgen -G '/usr/src/nvidia-*' >/dev/null 2>&1 \
-     && command -v dkms >/dev/null 2>&1 \
-     && ! compgen -G "/lib/modules/$(uname -r)/extra/nvidia.ko*" >/dev/null 2>&1; then
+     && command -v dkms >/dev/null 2>&1; then
     _nv_src="$(ls -d /usr/src/nvidia-* 2>/dev/null | head -1)"
     _nv_ver="${_nv_src##*/nvidia-}"
-    log "NVIDIA DKMS not built (chroot install failed) — retrying on running kernel ${_nv_ver}"
-    dkms add -m nvidia -v "$_nv_ver" >/dev/null 2>&1 || true
-    if dkms autoinstall -k "$(uname -r)" >/dev/null 2>&1 \
-       && [[ -e "/lib/modules/$(uname -r)/extra/nvidia.ko" \
-          || -e "/lib/modules/$(uname -r)/extra/nvidia.ko.xz" ]]; then
-      ok "NVIDIA DKMS built — restoring nvidia modprobe + Xorg configs"
+    _nv_ko_present=0
+    compgen -G "/lib/modules/$(uname -r)/extra/nvidia.ko*" >/dev/null 2>&1 \
+      && _nv_ko_present=1
+
+    if [[ $_nv_ko_present -eq 0 ]]; then
+      # Build hasn't happened yet (chroot install failed AND distro
+      # dkms.service hasn't fired). Try once via dkms autoinstall on
+      # the running kernel — that path works reliably even when the
+      # chroot path doesn't.
+      log "NVIDIA DKMS not built (chroot install failed) — retrying on running kernel ${_nv_ver}"
+      dkms add -m nvidia -v "$_nv_ver" >/dev/null 2>&1 || true
+      if dkms autoinstall -k "$(uname -r)" >/dev/null 2>&1; then
+        compgen -G "/lib/modules/$(uname -r)/extra/nvidia.ko*" >/dev/null 2>&1 \
+          && _nv_ko_present=1
+      fi
+    fi
+
+    # Whenever nvidia.ko IS present, restore any parked configs from
+    # the install-time fallback. Don't gate this on whether *firstboot*
+    # did the build — on Fedora 44 the distro's dkms.service auto-fires
+    # at first boot before kldload-firstboot runs and leaves nvidia.ko
+    # in /lib/modules/.../extra/. Without this catch-all restore, the
+    # nouveau-blacklist stays disabled, nouveau grabs the GPU on next
+    # boot, and `modprobe nvidia` errors with "No such device" because
+    # nouveau already owns the card.
+    if [[ $_nv_ko_present -eq 1 ]]; then
+      _nv_restored=0
       for _disabled in /usr/lib/modprobe.d/*.kldload-disabled-no-dkms \
                        /etc/modprobe.d/*.kldload-disabled-no-dkms \
                        /usr/share/X11/xorg.conf.d/*.kldload-disabled-no-dkms \
                        /etc/X11/xorg.conf.d/*.kldload-disabled-no-dkms; do
-        [[ -f "$_disabled" ]] && mv -f "$_disabled" "${_disabled%.kldload-disabled-no-dkms}" 2>/dev/null || true
+        if [[ -f "$_disabled" ]]; then
+          mv -f "$_disabled" "${_disabled%.kldload-disabled-no-dkms}" 2>/dev/null || true
+          _nv_restored=1
+        fi
       done
-      depmod -a 2>/dev/null || true
-      log "NVIDIA driver will load after next reboot (nouveau is currently driving the GPU)"
+      if [[ $_nv_restored -eq 1 ]]; then
+        ok "NVIDIA DKMS built — restored nvidia modprobe + Xorg configs"
+        depmod -a 2>/dev/null || true
+        log "NVIDIA driver will load after next reboot (nouveau is currently driving the GPU)"
+      fi
     else
       log "WARNING: NVIDIA DKMS still failing on running system — staying on nouveau"
     fi
-    unset _nv_src _nv_ver _disabled
+    unset _nv_src _nv_ver _nv_ko_present _nv_restored _disabled
   fi
 
   # ── FREE edition: standalone only ─────────────────────────────────────────
