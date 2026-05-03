@@ -135,11 +135,26 @@ k_profile_packages() {
         _xsrv="xorg-x11-server-Xorg xorg-x11-xauth"
         _netools_extra="iputils"
       fi
+      # Debian/Ubuntu split PAM modules into separate libpam-* packages
+      # (libpam-gnome-keyring provides /usr/lib/.../security/pam_gnome_keyring.so;
+      # libpam-systemd is required by user session activation; etc.).
+      # gnome-keyring without libpam-gnome-keyring = GDM autologin PAM
+      # warns "PAM unable to dlopen(pam_gnome_keyring.so)" then GDM
+      # session worker aborts. RPM bundles these into the parent package.
+      # xdg-desktop-portal-gnome is the Wayland portal backend gnome-session
+      # needs to launch the user shell — without it Debian Trixie GDM 48
+      # fails session enumeration.
+      local _pam_extras=""
+      local _portal_extras="xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk"
+      if [[ "$_distro" == "debian" || "$_distro" == "ubuntu" ]]; then
+        _pam_extras="libpam-gnome-keyring libpam-systemd"
+      fi
       echo "openssh-server sudo curl ca-certificates vim less ${_nm} \
         gnome-shell gnome-session gnome-control-center gnome-settings-daemon \
         ${_gdm} nautilus ${_terminal} ${_viewer} \
         adwaita-icon-theme ${_fonts} gvfs ${_gvfs_extra} \
-        gnome-keyring ${_xsrv} ${_netools_extra} \
+        gnome-keyring ${_pam_extras} ${_portal_extras} \
+        ${_xsrv} ${_netools_extra} \
         ${_browser} \
         tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
       ;;
@@ -528,6 +543,17 @@ k_install_system_files() {
     cp -r /etc/nginx/kldload "${target}/etc/nginx/" 2>/dev/null || true
     cp /etc/nginx/nginx.conf "${target}/etc/nginx/nginx.conf" 2>/dev/null || true
     mkdir -p "${target}/etc/nginx/conf.d/kldload-dyn"
+    # Nginx system user differs by distro: RHEL/Fedora ship `nginx`,
+    # Debian/Ubuntu ship `www-data`. Our shipped nginx.conf uses
+    # `user nginx;` which works on RPM but on Debian fails with
+    # `getpwnam("nginx") failed`, nginx -t errors, service crash-loops.
+    # Patch the user line to match the target's package.
+    case "${KLDLOAD_DISTRO:-centos}" in
+      debian|ubuntu)
+        sed -i 's|^[[:space:]]*user[[:space:]]\+nginx;|user www-data;|' \
+          "${target}/etc/nginx/nginx.conf" 2>/dev/null || true
+        ;;
+    esac
     k_log "nginx config tree copied to target"
   fi
   # systemd drop-in for nginx.service (ExecStartPre kldload-tls-cert).
