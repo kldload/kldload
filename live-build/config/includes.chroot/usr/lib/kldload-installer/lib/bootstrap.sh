@@ -1529,31 +1529,13 @@ CUDAREPO
       # Calling `dkms add` explicitly here is idempotent (errors if
       # already added — we ignore that).
       chroot "${target}" /usr/sbin/dkms add -m nvidia -v "$_nv_ver" >> "$log" 2>&1 || true
-      # Force-include linux/stdarg.h via KCFLAGS to fix the chroot DKMS
-      # build. Root cause: NVIDIA's `kernel-open/conftest.sh` runs sub-
-      # processes in the chroot whose /proc + /sys + uname see the LIVE
-      # env's running kernel (F44 6.19), not the target's headers (EL9
-      # 5.14). conftest's stdarg.h-presence test produces the wrong
-      # result, so nv-linux.h falls back to `<stdarg.h>` (glibc) instead
-      # of `<linux/stdarg.h>` (kernel). Kernel module builds run with
-      # `-nostdinc` and don't see glibc, so `va_list` is undefined →
-      # seq_file.h:116 errors → build fails with "unknown type name
-      # 'va_list'". Same source builds fine post-reboot via
-      # `dkms autoinstall` because the running kernel context isn't
-      # mismatched.
-      #
-      # The KCFLAGS injection bypasses conftest's bad answer entirely:
-      # `-include linux/stdarg.h` forces the right header before any
-      # other source. Path is shipped by every CentOS Stream 9
-      # kernel-devel since 5.14.0-200, and harmless on kernels that
-      # already include it transitively.
-      local _nv_kcflags='-include linux/stdarg.h'
-      # Build with retry — kept the retry harness for resilience against
-      # transient parallel-make issues, but with KCFLAGS injection the
-      # first attempt should succeed.
+      # Build with retry — some chroot timing/parallel-make issues cause
+      # transient failures on first try (observed: missing va_list include
+      # error that resolves on retry after dkms remove + dkms build). Up
+      # to 2 attempts before falling back to disabling Xorg config.
       local _nv_built=0
       for _attempt in 1 2; do
-        if KCFLAGS="${_nv_kcflags}" chroot "${target}" /usr/bin/env "KCFLAGS=${_nv_kcflags}" /usr/sbin/dkms build -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 && \
+        if chroot "${target}" /usr/sbin/dkms build -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1 && \
            chroot "${target}" /usr/sbin/dkms install -m nvidia -v "$_nv_ver" -k "$kver" >> "$log" 2>&1; then
           _nv_built=1
           k_log_to "$log" "  NVIDIA DKMS built + signed (attempt ${_attempt})"
