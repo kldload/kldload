@@ -863,6 +863,19 @@ main() {
       if [[ $_nv_restored -eq 1 ]]; then
         ok "NVIDIA DKMS built — restored nvidia modprobe + Xorg configs"
         depmod -a 2>/dev/null || true
+        # Regenerate initramfs to pick up the now-restored nouveau-blacklist
+        # in /usr/lib/modprobe.d/nvidia.conf. Without this, the existing
+        # initramfs (built at install time when nvidia.conf was parked as
+        # `.kldload-disabled-no-dkms`) still has no blacklist; nouveau
+        # loads from initramfs before systemd runs userspace modprobe,
+        # nouveau grabs the GPU, and `modprobe nvidia` on next boot
+        # errors with "No such device" — the symptom that bit F44 desktop
+        # installs even after firstboot's restore ran.
+        if command -v dracut >/dev/null 2>&1; then
+          log "regenerating initramfs so nouveau-blacklist applies on next boot"
+          dracut --force --regenerate-all >/dev/null 2>&1 || \
+            log "WARNING: dracut --regenerate-all failed — nvidia may not load until manual rebuild"
+        fi
         log "NVIDIA driver will load after next reboot (nouveau is currently driving the GPU)"
       fi
     else
