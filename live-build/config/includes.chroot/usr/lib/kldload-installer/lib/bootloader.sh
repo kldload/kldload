@@ -385,44 +385,49 @@ EOFSTAB
   # \EFI\centos\grub.cfg (or rocky/fedora). Write both dirs' grub.cfg to
   # the same content so whichever path runs, the menu shows up.
   #
-  # Default = `zbm`: silent chainload to ZFSBootMenu, the proper boot
-  # path for kldload — gives the user the boot-environment selector,
-  # snapshot rollback at boot time, kexec into the chosen BE's kernel,
-  # and reads kernel cmdline from the BE rather than baked into grub.cfg.
+  # Default = `direct` — the canonical Linux SB path:
+  #   firmware → shim (MS db) → grubx64 (CentOS CA in MokListRT)
+  #          → vmlinuz (CentOS CA, db) → zfs.ko (per-install MOK leaf, enrolled)
   #
-  # Why this works under Secure Boot now (was broken pre-1.1.0-dev):
-  # the failure cause was traced to our MOK cert template, NOT to ZBM
-  # or sbsign. Earlier installs reused the kldload-ca root cert as the
-  # MOK — that cert has X509v3 Basic Constraints CA:TRUE, multi-EKU
-  # (TLS Web Server/Client + Code Signing), critical Key Usage (Cert
-  # Sign + CRL Sign). EFI Authenticode requires a CODE-SIGNING LEAF
-  # cert; signatures made with a CA-style cert get accepted by the
-  # signing tool but rejected by sbverify and shim's verifier. Fix
-  # landed in bootstrap.sh `k_generate_mok_keys` — generate a separate
-  # leaf cert for MOK use, leave kldload-ca for TLS only.
+  # Same chain RHEL/CentOS/Rocky/Alma/Debian/Ubuntu use in production —
+  # every link signed by a CA shim trusts. Boots in 5-7s.
   #
-  # Boot path under SB:
-  #   firmware → shim (MS db) → grubx64 (CentOS CA, db)
-  #          → ZFSBootMenu (MOK leaf, enrolled via mokutil)
-  #          → kexec target kernel (CentOS CA)
-  #          → ZFS module (same MOK leaf, enrolled)
+  # Why NOT default to ZBM under SB: ZBM upstream ships zero SB
+  # integration. Their releases aren't signed; their `.sbat` section
+  # has no `shim` component (only `sbat,1` + `systemd-stub`); shim
+  # 15.8's SBAT enforcement rejects the chainload regardless of cert
+  # validity. We diagnosed this by:
+  #   - swapping our MOK from a CA-style cert to a code-signing leaf
+  #     (commit 1d9c05c) — `sbverify --cert mok.pub /EFI/zbm/...`
+  #     went from "Signature verification failed" to "OK"
+  #   - re-signing ZBM with sbctl instead of sbsign — same shim
+  #     "bad shim signature" rejection
+  #   - bit-comparing the cert in the ZBM signature with the enrolled
+  #     MOK in MokListRT — exact match
+  # Conclusion: the rejection isn't crypto, it's SBAT policy. Real fix
+  # would require ZBM upstream to add a `shim,X` SBAT entry, or for us
+  # to fork/patch ZBM. See project_sb_roadmap.md for the 1.2.0 plan
+  # to drop grub entirely in favor of systemd-boot + UKI.
   #
-  # `direct` and `rescue` remain as fallbacks (ESC at boot to access).
-  # timeout=0 + timeout_style=hidden = no menu UI on a normal boot.
+  # ZBM stays at /EFI/zbm/ as a menu choice for non-SB use (snapshot
+  # picker / boot-env selector at boot when SB is off).
+  #
+  # timeout=0 + timeout_style=hidden = silent direct boot. ESC at
+  # boot interrupts and exposes the menu for ZBM/rescue.
   local _grub_cfg=""
   read -r -d '' _grub_cfg <<GRUBCFG || true
 # kldload — auto-generated at install time
 set timeout=0
 set timeout_style=hidden
-set default=zbm
+set default=direct
 
-menuentry "kldload (ZFSBootMenu — boot-env selector)" --id=zbm {
-    chainloader /EFI/zbm/BOOTX64.EFI
-}
-
-menuentry "kldload — direct kernel boot (skip ZBM)" --id=direct {
+menuentry "kldload — direct kernel boot (Secure Boot compatible)" --id=direct {
     linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro rhgb quiet spl_hostid=\${spl_hostid}
     initrd /EFI/BOOT/initrd.img
+}
+
+menuentry "kldload (ZFSBootMenu — boot-env selector, SB OFF only)" --id=zbm {
+    chainloader /EFI/zbm/BOOTX64.EFI
 }
 
 menuentry "kldload — rescue (single-user)" --id=rescue {
