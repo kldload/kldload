@@ -296,56 +296,59 @@ k_generate_mok_keys() {
     cp "${KLDLOAD_MOK_KEY_FILE}"  "${mok_dir}/mok.key"
     cp "${KLDLOAD_MOK_CERT_FILE}" "${mok_dir}/mok.pub"
   else
-    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Generating kldload-ca root (doubles as MOK signing key)"
+    # Always generate a dedicated EFI code-signing leaf cert for the MOK,
+    # SEPARATE from the kldload-ca root (which is a CA cert used for TLS).
+    #
+    # Why: kldload-ca's root has X509v3 Basic Constraints CA:TRUE, multiple
+    # EKUs (TLS Web Server Auth, TLS Web Client Auth, Code Signing), and
+    # other CA-style extensions. Microsoft Authenticode + shim's PE
+    # signature verifier expect a CODE-SIGNING LEAF cert: no CA flag,
+    # codeSigning EKU only, minimal extensions. Signing with a CA-style
+    # cert produces signatures that sbsign/pesign/sbctl all output
+    # successfully but that sbverify and shim REJECT — symptom: ZBM
+    # fails under SB with "bad shim status", `sbverify --cert mok.pub
+    # <signed>` always returns "Signature verification failed" even
+    # though the keys match. Verified empirically against ZBM 3.1.0 +
+    # CentOS shim 15.8 + sbctl 0.18 — only LEAF certs validate.
+    #
+    # Pre-1.1.0-dev installs reused the CA root as the MOK; that's why
+    # ZBM-under-SB never actually worked, only direct kernel boot did.
+    #
+    # The cert template here matches what `sbctl create-keys` produces:
+    # bare self-signed RSA-4096 with no extensions. shim accepts it
+    # via the MOK list; sign-file accepts any (key, cert) pair for
+    # module signing; mokutil's import only cares about DER format.
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Generating MOK code-signing leaf (separate from TLS CA)"
     if [[ -x /usr/local/sbin/kldload-ca ]]; then
-      # kldload-ca init is idempotent — if an earlier pass wrote the
-      # root, we reuse it. --force would rotate but we never want that
-      # mid-install.
+      # Still init the kldload-ca for TLS purposes — it just no longer
+      # supplies the MOK material.
       KLDLOAD_CA_DIR="${ca_dir}" /usr/local/sbin/kldload-ca init \
         >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
     fi
 
-    if [[ -f "${ca_key}" && -f "${ca_crt}" ]]; then
-      # Copy (not symlink) so DKMS framework.conf.d paths + sign-file
-      # calls work without dereferencing logic, and so a later SB
-      # disable/re-enable doesn't have to chase symlinks. Hardlinks
-      # would work too but break if admin ever rotates the CA with
-      # --force; copy is the simpler contract.
-      cp "${ca_key}" "${mok_dir}/mok.key"
-      cp "${ca_crt}" "${mok_dir}/mok.pub"
-      k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
-        "MOK material sourced from kldload-ca root at ${ca_crt}"
-    elif [[ -f "${mok_dir}/mok.key" && -f "${mok_dir}/mok.pub" ]]; then
-      k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
-        "Using pre-staged MOK at ${mok_dir} (kldload-ca unavailable)"
-    else
-      # Last-resort fallback — kldload-ca missing AND no pre-staged key.
-      # Keeps installs that hit an unusual live-ISO state from failing
-      # outright; behaves like the 1.0.5 path.
-      k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
-        "WARNING: kldload-ca not available, falling back to self-signed MOK"
-      openssl req -new -x509 -newkey rsa:2048 \
-        -keyout "${mok_dir}/mok.key" \
-        -out    "${mok_dir}/mok.pub" \
-        -days 3650 -nodes \
-        -subj "/CN=kldload MOK fallback $(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d%H%M%S)-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')/" \
-        >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
-    fi
+    # Generate per-install MOK leaf. RSA-4096 to match common SB key
+    # strength (sbctl, shim's vendor_cert, MS db keys are 2048+; 4096
+    # matches the kldload-ca root). Self-signed — no chain to verify.
+    # Subject is unique per install so multiple boxes' enrollments
+    # don't collide in MokListRT (mokutil keys by subject hash).
+    local _mok_cn="kldload-mok-$(date -u +%Y%m%d%H%M%S)-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    openssl req -new -x509 -newkey rsa:4096 \
+      -keyout "${mok_dir}/mok.key" \
+      -out    "${mok_dir}/mok.pub" \
+      -days 3650 -nodes \
+      -subj "/CN=${_mok_cn}" \
+      >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "MOK leaf generated: CN=${_mok_cn}"
   fi
 
-  # Always (re)generate the DER form — mokutil --import only accepts
-  # DER. Prefer the CA's pre-generated ca.der when available to
-  # guarantee byte-for-byte identity with the TLS trust chain the
-  # browser sees.
-  if [[ -f "${ca_der}" ]]; then
-    cp "${ca_der}" "${mok_dir}/mok.der"
-  else
-    openssl x509 \
-      -in "${mok_dir}/mok.pub" \
-      -out "${mok_dir}/mok.der" \
-      -outform DER \
-      >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
-  fi
+  # DER form for `mokutil --import`. Generate from mok.pub (PEM cert)
+  # — do NOT reuse ca.der from the kldload-ca root anymore; that's the
+  # bug class this rewrite is fixing.
+  openssl x509 \
+    -in "${mok_dir}/mok.pub" \
+    -out "${mok_dir}/mok.der" \
+    -outform DER \
+    >> "${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
 
   chmod 0600 "${mok_dir}/mok.key"
   chmod 0644 "${mok_dir}/mok.pub" "${mok_dir}/mok.der"
