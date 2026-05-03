@@ -337,14 +337,44 @@ EOFSTAB
   # can also try it under SB via firmware boot menu; MokManager confirms).
   # Boot env selection via ZBM remains available; it's just not the
   # primary SB path.
+  # Find distro-signed shim + grubx64. Most distros drop these at
+  # /boot/efi/EFI/<distro>/ via RPM/dpkg post-install scriptlets that
+  # write directly to the mounted ESP. Fedora 44+ moved to a `bootupd`
+  # model: shim/grub2 RPMs ship reference files at /usr/lib/efi/ for
+  # `bootupctl update` to copy onto the ESP later. If we don't search
+  # both locations, the F44+ ESP looks empty even though the packages
+  # are installed, the fallback ("install ZBM as grubx64") fires, and
+  # SB refuses to boot — exactly the failure mode kldload 1.1.0-dev
+  # hit on Fedora 44 desktop installs.
+  #
+  # Globs catch versioned subdirs under /usr/lib/efi/{shim,grub2}/
+  # (e.g. /usr/lib/efi/shim/16.1-5/EFI/fedora/shim.efi). We pick the
+  # newest one if multiple are present (sort -V | tail).
   local signed_grub=""
   for _sg in "${target}/boot/efi/EFI/centos/grubx64.efi" \
              "${target}/boot/efi/EFI/rocky/grubx64.efi" \
              "${target}/boot/efi/EFI/fedora/grubx64.efi" \
              "${target}/boot/efi/EFI/redhat/grubx64.efi" \
+             "${target}/usr/lib/efi/grub2/"*/EFI/fedora/grubx64.efi \
+             "${target}/usr/lib/efi/grub2/"*/EFI/redhat/grubx64.efi \
              "${target}/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed" \
              "${target}/usr/lib/grub/x86_64-efi/monolithic/grubx64.efi"; do
     if [[ -f "$_sg" ]]; then signed_grub="$_sg"; break; fi
+  done
+
+  # Same for shim — used a bit later in the function but resolve here so
+  # the bootupd-glob logic lives in one place.
+  local signed_shim=""
+  for _ss in "${target}/boot/efi/EFI/centos/shimx64.efi" \
+             "${target}/boot/efi/EFI/rocky/shimx64.efi" \
+             "${target}/boot/efi/EFI/fedora/shimx64.efi" \
+             "${target}/boot/efi/EFI/fedora/shim.efi" \
+             "${target}/boot/efi/EFI/redhat/shimx64.efi" \
+             "${target}/usr/lib/efi/shim/"*/EFI/fedora/shimx64.efi \
+             "${target}/usr/lib/efi/shim/"*/EFI/fedora/shim.efi \
+             "${target}/usr/lib/efi/shim/"*/EFI/redhat/shimx64.efi \
+             "${target}/usr/lib/shim/shimx64.efi.signed"; do
+    if [[ -f "$_ss" ]]; then signed_shim="$_ss"; break; fi
   done
 
   if [[ -n "$signed_grub" ]]; then
@@ -355,6 +385,23 @@ EOFSTAB
     # grubx64.efi. SB will refuse; user has to disable SB to boot.
     cp "${zbm_efi_dir}/BOOTX64.EFI" "${zbm_fallback_dir}/grubx64.efi"
     k_log "WARNING: no distro-signed GRUB on target — ZBM installed as grubx64.efi (SB won't work)"
+  fi
+
+  # F44+ also expects an /EFI/fedora/ directory on the ESP (firmware
+  # boot manager often looks there directly). Stage shim+grub there so
+  # both shim's lookup and the bootupd model land in the same place.
+  if [[ -n "$signed_shim" && "$signed_shim" =~ /usr/lib/efi/shim/ ]]; then
+    local _esp_distro_dir="${target}/boot/efi/EFI/fedora"
+    [[ "$signed_shim" =~ /redhat/ ]] && _esp_distro_dir="${target}/boot/efi/EFI/redhat"
+    mkdir -p "$_esp_distro_dir"
+    cp "$signed_shim" "${_esp_distro_dir}/shimx64.efi"
+    cp "$signed_shim" "${_esp_distro_dir}/shim.efi"
+    [[ -n "$signed_grub" ]] && cp "$signed_grub" "${_esp_distro_dir}/grubx64.efi"
+    # bootupd ships mmx64.efi alongside shim — copy it too so MokManager
+    # works on first SB-on boot.
+    local _mm_src="${signed_shim%/shim*.efi}/mmx64.efi"
+    [[ -f "$_mm_src" ]] && cp "$_mm_src" "${_esp_distro_dir}/mmx64.efi"
+    k_log "F44 bootupd-style: staged $(basename "$_esp_distro_dir") to ESP from /usr/lib/efi/"
   fi
 
   # Copy kernel + initramfs to the ESP so GRUB can boot without zfs.mod.
@@ -706,10 +753,23 @@ EOFSTAB
     # produces an initramfs that can't import ZFS pools, causing a boot loop.
     if [[ ! -d "${target}/usr/lib/dracut/modules.d/90zfs" ]]; then
       k_log "WARNING: dracut ZFS module (90zfs) not found — attempting zfs-dracut install"
-      # Try host-side dnf first (has network), fall back to chroot dnf
-      dnf --installroot="${target}" --releasever="$(rpm -q --qf '%{VERSION}' centos-stream-release 2>/dev/null || echo 9)" \
-        --nogpgcheck --skip-broken -y install zfs-dracut >&7 2>&1 || \
-        chroot "${target}" dnf install -y --nogpgcheck zfs-dracut >&7 2>&1 || \
+      # Two issues to handle here:
+      #   1. dnf5 (Fedora 44) requires --skip-broken AFTER `install`, not
+      #      before. Older dnf4 (CentOS 9 etc) accepts both. We use the
+      #      post-subcommand position which is valid for both.
+      #   2. The host-side --installroot dnf inherits the BUILD HOST's
+      #      --releasever default, not the target's. Hardcoding "9"
+      #      worked when live env was CentOS 9; on F44 live env this
+      #      now defaults to 44, which 404s for zfs-on-linux. Read the
+      #      target's actual release file to get the right value.
+      local _tgt_rel
+      _tgt_rel="$(rpm --root="${target}" -q --qf '%{VERSION}' system-release 2>/dev/null \
+                  || rpm --root="${target}" -q --qf '%{VERSION}' centos-stream-release 2>/dev/null \
+                  || rpm --root="${target}" -q --qf '%{VERSION}' fedora-release 2>/dev/null \
+                  || echo 9)"
+      dnf --installroot="${target}" --releasever="${_tgt_rel}" \
+        --nogpgcheck -y install zfs-dracut --skip-broken >&7 2>&1 || \
+        chroot "${target}" dnf install -y --nogpgcheck zfs-dracut --skip-broken >&7 2>&1 || \
         k_log "CRITICAL: zfs-dracut install failed — system may not boot from ZFS"
     fi
     local _kver

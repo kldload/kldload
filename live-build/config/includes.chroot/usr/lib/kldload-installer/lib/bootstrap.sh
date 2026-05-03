@@ -1176,6 +1176,7 @@ CUSTOMREPO
     # zfs-dkms is noarch source so DKMS rebuilds against whatever kernel
     # gets installed. Same fc43-bridge trick the live env uses.
     local _zfsrel_ok=0
+    local _zfsrel_actual=""
     for _rel in "${_fedora_rel}" 43; do
       for _rev in 3-0 2-10 2-9 2-8 2-7; do
         # dnf5 syntax: --skip-broken must come AFTER the subcommand.
@@ -1186,6 +1187,7 @@ CUSTOMREPO
              "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_rel}.noarch.rpm" \
              >> "$log" 2>&1; then
           _zfsrel_ok=1
+          _zfsrel_actual="${_rel}"
           k_log_to "$log" "Fedora ZFS repo enabled via zfs-release-${_rev}.fc${_rel} (target=fc${_fedora_rel})"
           break 2
         fi
@@ -1193,6 +1195,22 @@ CUSTOMREPO
     done
     [[ "$_zfsrel_ok" == "1" ]] || \
       k_log_to "$log" "WARNING: could not install zfs-release for fc${_fedora_rel} — ZFS will likely fail to install"
+
+    # Hardcode the actual release we landed on into the repo file.
+    # zfs-release-3-0.fc43.rpm drops /etc/yum.repos.d/zfs.repo with
+    # `baseurl=https://download.zfsonlinux.org/fedora/$releasever/...`
+    # and $releasever on a Fedora 44 target expands to "44" — but
+    # zfsonlinux only publishes through fc43. Result: every subsequent
+    # `dnf install zfs-*` 404s, including the install-time pass 3 and
+    # bootloader.sh's late zfs-dracut install. Hardcoding the path
+    # eliminates the macro expansion mismatch.
+    if [[ "$_zfsrel_ok" == "1" && "$_zfsrel_actual" != "${_fedora_rel}" ]]; then
+      local _zfs_repo="${target}/etc/yum.repos.d/zfs.repo"
+      if [[ -f "$_zfs_repo" ]]; then
+        sed -i "s|fedora/\\\$releasever|fedora/${_zfsrel_actual}|g" "$_zfs_repo"
+        k_log_to "$log" "Hardcoded zfs.repo to fedora/${_zfsrel_actual} (target releasever ${_fedora_rel} has no zfsonlinux build)"
+      fi
+    fi
   fi
 
   # Two-pass install:
