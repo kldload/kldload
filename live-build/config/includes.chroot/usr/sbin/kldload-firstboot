@@ -2049,23 +2049,37 @@ FFPOL
       log "klab golden builds deferred to kldload-autodeploy.service (runs after firstboot-done)"
     fi
 
-    # Remove darksite APT mirror (~1.8G) — not needed after install
+    # Darksite cleanup vs LAN-mirror opt-in.
+    #
+    # Default: rehydrate Ollama weights OUT, then remove /root/darksite
+    # (~1.8G) — install is done, the mirror just costs disk.
+    # Opt-in: if /etc/kldload/keep-darksite exists (set at install time
+    # via the web UI "keep darksite as LAN mirror" toggle, or manually
+    # by `touch /etc/kldload/keep-darksite` before firstboot runs),
+    # we leave the tree in place AND keep kldload-apt-mirror.service
+    # so other machines on the LAN can use this box as their offline
+    # package mirror. The repo file in /etc/yum.repos.d is removed
+    # either way — `dnf` on this host should hit upstream once it has
+    # internet, not the local mirror — but the mirror dir itself stays
+    # so other machines can point at it.
     if [[ -d /root/darksite ]]; then
-      # Rehydrate ollama weights OUT of the darksite BEFORE nuking the
-      # darksite. Without this, Bob falls back to pulling from ollama.com
-      # on first boot even though the ISO shipped with the model baked in.
       if [[ -d /root/darksite/ollama/models ]] && [[ ! -f /srv/ollama/models/manifests/registry.ollama.ai/library/qwen2.5/14b && ! -f /srv/ollama/models/manifests/registry.ollama.ai/library/llama3.1/8b ]]; then
         mkdir -p /srv/ollama/models
-        log "Rehydrating Ollama models from darksite (before darksite removal)..."
+        log "Rehydrating Ollama models from darksite (before darksite cleanup)..."
         rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ 2>&1 | tail -3
         chown -R ollama:ollama /srv/ollama 2>/dev/null || true
         log "Ollama models rehydrated: $(du -sh /srv/ollama/models 2>/dev/null | cut -f1)"
       fi
-      log "Removing darksite directory (~1.8G)..."
-      rm -rf /root/darksite
       rm -f /etc/yum.repos.d/kldload-darksite.repo 2>/dev/null
-      systemctl disable --now kldload-apt-mirror.service 2>/dev/null || true
-      log "Darksite removed."
+      if [[ -f /etc/kldload/keep-darksite ]]; then
+        log "LAN-mirror mode: keeping /root/darksite ($(du -sh /root/darksite 2>/dev/null | cut -f1)) and enabling kldload-apt-mirror.service"
+        systemctl enable --now kldload-apt-mirror.service 2>/dev/null || true
+      else
+        log "Removing darksite directory ($(du -sh /root/darksite 2>/dev/null | cut -f1)) — touch /etc/kldload/keep-darksite before firstboot to retain as a LAN mirror"
+        rm -rf /root/darksite
+        systemctl disable --now kldload-apt-mirror.service 2>/dev/null || true
+        log "Darksite removed."
+      fi
     fi
 
     rm -f /tmp/kldload-firstboot-status

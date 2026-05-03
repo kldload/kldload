@@ -144,17 +144,32 @@ fi
 kbe delete "$BE_NAME" >/dev/null 2>&1 || true
 
 # ── Darksite ─────────────────────────────────────────────────────────────────
-_section "Darksite"
-
-test_dir "Darksite directory" "/root/darksite"
-
-if [[ "$DISTRO" == "deb" ]]; then
-  test_dir "APT darksite" "/root/darksite/debian/apt"
-  test_file "APT Release file" "/root/darksite/debian/apt/dists/trixie/Release"
+# Darksite is intentionally REMOVED on first boot by kldload-firstboot
+# (lines 2052-2068 in /usr/sbin/kldload-firstboot) to reclaim ~1.8G —
+# only the install phase needs it. ZFSBootMenu binary lives at
+# /boot/efi/EFI/zbm/ (signed, MOK-verified), NOT inside the darksite
+# tree (that was an old layout). So presence here is a regression.
+_section "Darksite (post-firstboot cleanup)"
+test_succeeds "darksite removed from /root (firstboot reclaim)" \
+  "[[ ! -d /root/darksite ]]"
+test_succeeds "darksite repo file removed" \
+  "[[ ! -f /etc/yum.repos.d/kldload-darksite.repo ]]"
+# LAN mirror opt-in: when /etc/kldload/keep-darksite exists, the admin
+# kept darksite at install time as a network-accessible package mirror
+# for other machines. In that case it SHOULD still be there and the
+# service active.
+if [[ -f /etc/kldload/keep-darksite ]]; then
+  test_dir "LAN mirror mode: darksite kept" "/root/darksite"
+  test_service_active "LAN mirror service" "kldload-apt-mirror"
+  if [[ "$DISTRO" == "deb" ]]; then
+    test_dir "APT darksite" "/root/darksite/debian/apt"
+    test_file "APT Release file" "/root/darksite/debian/apt/dists/trixie/Release"
+  fi
 fi
-
-test_dir "ZFSBootMenu in darksite" "/root/darksite/boot"
-test_file "ZFSBootMenu EFI" "/root/darksite/boot/zfsbootmenu.EFI"
+# ZBM EFI lives at the canonical EFI System Partition path, not inside
+# /root/darksite (old layout). Verify it's where the bootloader actually
+# expects to find it.
+test_file "ZFSBootMenu EFI on ESP" "/boot/efi/EFI/zbm/BOOTX64.EFI"
 
 # ── eBPF / Observability ──────────────────────────────────────────────────────
 _section "eBPF / Observability"

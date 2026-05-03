@@ -47,6 +47,7 @@ test_cmd "kupgrade (safe upgrade)" "kupgrade"
 test_cmd "kexport (image export)" "kexport"
 test_cmd "krecovery (disaster recovery)" "krecovery"
 test_cmd "kldload-help" "kldload-help"
+test_cmd "kldload-overview" "kldload-overview"
 test_cmd "kube-demo" "kube-demo"
 
 # Test kst runs without error
@@ -67,22 +68,10 @@ _section "Web UI"
 test_file "kldload-webui binary" "/usr/local/bin/kldload-webui"
 test_service_enabled "kldload-webui enabled" "kldload-webui"
 
-# Check if webui responds. The unit file may list several ports (HTTP
-# 8080, HTTPS 8443); probe in priority order and use the right scheme
-# for each — kldload-webui moved to HTTPS-by-default with self-signed
-# cert, so HTTP on 8080 is a legacy fallback only. curl -k tolerates
-# the self-signed cert which is legitimate during a fresh install.
-_webui_scheme="https"
-_webui_port=8443
-if ! grep -q '\-\-port 8443' /usr/lib/systemd/system/kldload-webui.service 2>/dev/null \
-   && grep -qE '\-\-port (8080|80)' /usr/lib/systemd/system/kldload-webui.service 2>/dev/null; then
-  _webui_scheme="http"
-  _webui_port=8080
-fi
+# Check if webui responds (may be inactive on server profile but should be enabled)
 if systemctl is-active kldload-webui >/dev/null 2>&1; then
   _pass "kldload-webui running"
-  test_succeeds "WebUI responds on :${_webui_port}" \
-    "curl -sfk --max-time 5 ${_webui_scheme}://localhost:${_webui_port}/ >/dev/null 2>&1"
+  test_succeeds "WebUI responds on :8080" "curl -sf http://localhost:8080 >/dev/null 2>&1"
 else
   _warn "kldload-webui running" "service not active (may need manual start)"
 fi
@@ -155,17 +144,32 @@ fi
 kbe delete "$BE_NAME" >/dev/null 2>&1 || true
 
 # ── Darksite ─────────────────────────────────────────────────────────────────
-# Darksite only exists on the live ISO; skip on installed systems
-if [[ -d /root/darksite ]]; then
-  _section "Darksite"
-  test_dir "Darksite directory" "/root/darksite"
+# Darksite is intentionally REMOVED on first boot by kldload-firstboot
+# (lines 2052-2068 in /usr/sbin/kldload-firstboot) to reclaim ~1.8G —
+# only the install phase needs it. ZFSBootMenu binary lives at
+# /boot/efi/EFI/zbm/ (signed, MOK-verified), NOT inside the darksite
+# tree (that was an old layout). So presence here is a regression.
+_section "Darksite (post-firstboot cleanup)"
+test_succeeds "darksite removed from /root (firstboot reclaim)" \
+  "[[ ! -d /root/darksite ]]"
+test_succeeds "darksite repo file removed" \
+  "[[ ! -f /etc/yum.repos.d/kldload-darksite.repo ]]"
+# LAN mirror opt-in: when /etc/kldload/keep-darksite exists, the admin
+# kept darksite at install time as a network-accessible package mirror
+# for other machines. In that case it SHOULD still be there and the
+# service active.
+if [[ -f /etc/kldload/keep-darksite ]]; then
+  test_dir "LAN mirror mode: darksite kept" "/root/darksite"
+  test_service_active "LAN mirror service" "kldload-apt-mirror"
   if [[ "$DISTRO" == "deb" ]]; then
     test_dir "APT darksite" "/root/darksite/debian/apt"
     test_file "APT Release file" "/root/darksite/debian/apt/dists/trixie/Release"
   fi
-  test_dir "ZFSBootMenu in darksite" "/root/darksite/boot"
-  test_file "ZFSBootMenu EFI" "/root/darksite/boot/zfsbootmenu.EFI"
 fi
+# ZBM EFI lives at the canonical EFI System Partition path, not inside
+# /root/darksite (old layout). Verify it's where the bootloader actually
+# expects to find it.
+test_file "ZFSBootMenu EFI on ESP" "/boot/efi/EFI/zbm/BOOTX64.EFI"
 
 # ── eBPF / Observability ──────────────────────────────────────────────────────
 _section "eBPF / Observability"

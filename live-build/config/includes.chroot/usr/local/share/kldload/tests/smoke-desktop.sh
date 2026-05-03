@@ -117,13 +117,26 @@ else
 fi
 
 # ── Darksite ─────────────────────────────────────────────────────────────────
-_section "Darksite"
-
-test_dir "Darksite present" "/root/darksite"
-test_file "ZFSBootMenu EFI" "/root/darksite/boot/zfsbootmenu.EFI"
-
-if [[ "$DISTRO" == "deb" ]]; then
-  test_dir "APT darksite" "/root/darksite/debian/apt"
+# Darksite is intentionally REMOVED on first boot by kldload-firstboot
+# (lines 2052-2068 in /usr/sbin/kldload-firstboot) to reclaim ~1.8G —
+# it's only needed during the install. So presence at smoke-time would
+# actually be a regression (firstboot didn't run, or something kept
+# the dir alive). Two markers we DO want post-install:
+#   - /etc/yum.repos.d/kldload-darksite.repo is gone (cleaned up too)
+#   - If admin opted into LAN mirror mode, kldload-apt-mirror.service
+#     is enabled and /root/darksite/<distro>/apt persists.
+# For default installs, just verify the rehydrated outputs landed.
+_section "Darksite (post-firstboot cleanup)"
+test_succeeds "darksite removed from /root (firstboot reclaim)" \
+  "[[ ! -d /root/darksite ]]"
+test_succeeds "darksite repo file removed" \
+  "[[ ! -f /etc/yum.repos.d/kldload-darksite.repo ]]"
+# When KLDLOAD_KEEP_DARKSITE=1 was set at install (LAN mirror mode),
+# the dir SHOULD persist. Check that case explicitly so an admin who
+# enabled it doesn't get a false PASS from the cleanup check above.
+if [[ -f /etc/kldload/keep-darksite ]]; then
+  test_dir "LAN mirror mode: darksite kept" "/root/darksite"
+  test_service_active "LAN mirror service" "kldload-apt-mirror"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
