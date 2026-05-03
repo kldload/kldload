@@ -101,16 +101,41 @@ k_bind_chroot_mounts() {
     mountpoint -q "${target}/sys/firmware/efi/efivars" || \
       mount --bind /sys/firmware/efi/efivars "${target}/sys/firmware/efi/efivars" || true
   fi
+  # Make the live env's darksite reachable from inside the chroot at
+  # the SAME absolute path the host sees, so dnf's file:// URLs in
+  # /target/etc/yum.repos.d/kldload-darksite.repo resolve identically
+  # whether dnf runs as the host (`dnf --installroot=`) or inside the
+  # target via `chroot $target dnf install …` (the late zfs-dracut
+  # path).
+  #
+  # We bind-mount onto /run/kldload-darksite (NOT /target/root/darksite
+  # directly) — profiles.sh later does a real rsync of the live env's
+  # /root/darksite/ into ${target}/root/darksite/ to persist the offline
+  # mirror on the installed system, and binding to that destination
+  # would have rsync copying to itself. /run is a tmpfs in the live
+  # env AND in the booted target; the bind is install-time-only and
+  # leaves no trace post-reboot.
+  #
+  # The kldload-darksite.repo URL writes are updated to point here.
+  if [[ -d /root/darksite ]]; then
+    mkdir -p /run/kldload-darksite "${target}/run/kldload-darksite"
+    mountpoint -q /run/kldload-darksite || \
+      mount --bind /root/darksite /run/kldload-darksite 2>/dev/null || true
+    mountpoint -q "${target}/run/kldload-darksite" || \
+      mount --bind /run/kldload-darksite "${target}/run/kldload-darksite" 2>/dev/null || true
+  fi
 }
 
 k_unbind_chroot_mounts() {
   local target="${KLDLOAD_TARGET:?}"
+  k_umount_if_mounted "${target}/run/kldload-darksite"
   k_umount_if_mounted "${target}/sys/firmware/efi/efivars"
   k_umount_if_mounted "${target}/run"
   k_umount_if_mounted "${target}/sys"
   k_umount_if_mounted "${target}/proc"
   k_umount_if_mounted "${target}/dev/pts"
   k_umount_if_mounted "${target}/dev"
+  k_umount_if_mounted /run/kldload-darksite
 }
 
 k_write_hostname() {
@@ -890,10 +915,32 @@ ZFSREPO
   echo -e "[main]\nenabled=0" > "${target}/etc/dnf/plugins/subscription-manager.conf"
 
   # Repo configuration — darksite mode vs internet
-  # Fedora has its own darksite; CentOS/Rocky share one
-  local _darksite_rpm="/root/darksite/rpm"
+  # Fedora has its own darksite; CentOS/Rocky share one.
+  #
+  # We use /run/kldload-darksite (bound by k_bind_chroot_mounts to
+  # /root/darksite on the live env, also bound INTO the target's
+  # /run/kldload-darksite at the same path). This makes file:// URLs
+  # in /target/etc/yum.repos.d/kldload-darksite.repo resolve identically
+  # whether dnf runs as the host (`dnf --installroot=`) or inside the
+  # chroot. /root/darksite alone fails: dnf --installroot resolves it
+  # against the install root → /target/root/darksite which doesn't
+  # exist until profiles.sh's late-stage rsync (after pass-1 already
+  # needed it).
+  #
+  # Ensure the bind is up — k_bind_chroot_mounts is normally called
+  # earlier but may not have run yet for partial-install code paths.
+  if [[ -d /root/darksite ]] && ! mountpoint -q /run/kldload-darksite; then
+    mkdir -p /run/kldload-darksite
+    mount --bind /root/darksite /run/kldload-darksite 2>/dev/null || true
+  fi
+  if mountpoint -q /run/kldload-darksite && ! mountpoint -q "${target}/run/kldload-darksite"; then
+    mkdir -p "${target}/run/kldload-darksite"
+    mount --bind /run/kldload-darksite "${target}/run/kldload-darksite" 2>/dev/null || true
+  fi
+
+  local _darksite_rpm="/run/kldload-darksite/rpm"
   if [[ "${KLDLOAD_DISTRO:-centos}" == "fedora" ]]; then
-    _darksite_rpm="/root/darksite/fedora/rpm"
+    _darksite_rpm="/run/kldload-darksite/fedora/rpm"
   fi
   local _custom_repo="${KLDLOAD_CUSTOM_REPO:-}"
 
