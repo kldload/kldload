@@ -166,14 +166,22 @@ k_profile_packages() {
       # fails session enumeration.
       local _pam_extras=""
       local _portal_extras="xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk"
+      local _dbus_extras=""
       if [[ "$_distro" == "debian" || "$_distro" == "ubuntu" ]]; then
+        # libpam-gnome-keyring + libpam-systemd: split-out PAM modules.
+        # dbus-x11: provides /usr/bin/dbus-launch which gnome-session
+        # invokes when not under systemd-managed user login. Without
+        # it the user gets bounced back to the lightdm greeter on
+        # login (gnome-session-binary errors "Failed to execute child
+        # process dbus-launch").
         _pam_extras="libpam-gnome-keyring libpam-systemd"
+        _dbus_extras="dbus-x11"
       fi
       echo "openssh-server sudo curl ca-certificates vim less ${_nm} \
         gnome-shell gnome-session gnome-control-center gnome-settings-daemon \
         ${_gdm} nautilus ${_terminal} ${_viewer} \
         adwaita-icon-theme ${_fonts} gvfs ${_gvfs_extra} \
-        gnome-keyring ${_pam_extras} ${_portal_extras} \
+        gnome-keyring ${_pam_extras} ${_portal_extras} ${_dbus_extras} \
         ${_xsrv} ${_netools_extra} \
         ${_browser} \
         tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
