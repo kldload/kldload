@@ -115,7 +115,20 @@ k_profile_packages() {
       local _viewer="loupe"
       local _terminal="gnome-terminal"
       local _nm="network-manager"
-      local _gdm="gdm3"
+      # Debian/Ubuntu desktop profile uses LightDM, NOT gdm3. GDM 48 on
+      # Debian Trixie has a systemd-integration bug where it can't pass
+      # the session type to gnome-session — gnome-session-binary errors:
+      #   "Unit name gnome-session-(null)@gnome.target is not valid"
+      # — and GDM aborts with "GdmSession: no session desktop files
+      # installed". Reproduces consistently even with all PAM modules
+      # (libpam-gnome-keyring, libpam-systemd) and xdg portals
+      # (xdg-desktop-portal-gnome) installed. The user-shell GNOME
+      # session itself works fine — just GDM 48's per-session systemd
+      # unit naming is broken on Trixie. LightDM bypasses that path
+      # entirely (no systemd-managed session unit), launches gnome-
+      # session via Xsession scripts, lands in a working GNOME desktop.
+      # Lose the GDM greeter chrome, gain a working desktop.
+      local _gdm="lightdm"
       local _fonts="fonts-cantarell"
       local _gvfs_extra="gvfs-backends"
       local _xsrv="xserver-xorg"
@@ -123,12 +136,19 @@ k_profile_packages() {
       if [[ "$_distro" == "ubuntu" ]]; then
         _browser="epiphany-browser"
         _viewer="eog"
+        # Ubuntu 24.04 LTS ships GDM 46, not affected by the GDM 48
+        # systemd-integration bug we hit on Debian Trixie. Keep gdm3
+        # there. (Switch to lightdm if/when Ubuntu lands GDM 48 with
+        # the same bug.)
+        _gdm="gdm3"
       elif [[ "$_distro" == "centos" || "$_distro" == "rocky" || "$_distro" == "rhel" || "$_distro" == "fedora" ]]; then
         # RPM branch — match package naming on those ecosystems.
         _browser="firefox"
         _viewer="eog"
         _terminal="gnome-terminal"
         _nm="NetworkManager NetworkManager-wifi NetworkManager-tui"
+        # GDM works fine on RPM distros (CentOS Stream 9, Fedora 44).
+        # Only Debian/Ubuntu hit the GDM 48 systemd integration bug.
         _gdm="gdm"
         _fonts="cantarell-fonts"
         _gvfs_extra="gvfs-mtp gvfs-smb gvfs-archive"

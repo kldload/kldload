@@ -5,7 +5,15 @@ gnome-shell
 gnome-session
 gnome-control-center
 gnome-settings-daemon
-gdm3
+# Display manager: LightDM (NOT gdm3). GDM 48 on Debian Trixie has a
+# systemd-integration bug where gnome-session-binary errors with
+# "Unit name gnome-session-(null)@gnome.target is not valid" and GDM
+# aborts with "GdmSession: no session desktop files installed" — even
+# with libpam-gnome-keyring + libpam-systemd + xdg-desktop-portal-gnome
+# all installed. LightDM bypasses systemd-managed session units, runs
+# gnome-session via Xsession scripts, lands in working GNOME desktop.
+# See profiles.sh _gdm logic + project_f44_cutover_findings.md.
+lightdm
 nautilus
 gnome-terminal
 gnome-text-editor
@@ -18,6 +26,20 @@ fonts-cantarell
 gvfs
 gvfs-backends
 gnome-keyring
+# PAM modules — Debian splits these out from the parent packages.
+# libpam-gnome-keyring provides /usr/lib/.../security/pam_gnome_keyring.so.
+# libpam-systemd is required by user-session/cgroup integration.
+# Without these, GDM autologin warns "PAM unable to dlopen" and session
+# worker gets confused — fixing the underlying GDM 48 bug is upstream's
+# problem, but we install these regardless so the future GDM-fixed
+# Debian release works without re-darksiting.
+libpam-gnome-keyring
+libpam-systemd
+# xdg-desktop-portal — Wayland portal backends GNOME 46+ needs to
+# launch the user shell (file pickers, screenshots, screen sharing).
+xdg-desktop-portal
+xdg-desktop-portal-gnome
+xdg-desktop-portal-gtk
 firefox-esr
 # Xorg fallback — Wayland fails on virtual GPUs (KVM, VMware)
 xserver-xorg
