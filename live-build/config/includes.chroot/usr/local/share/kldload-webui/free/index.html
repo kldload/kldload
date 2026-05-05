@@ -10,6 +10,8 @@
 .target-card { background: var(--surface2); border: 2px solid var(--border); border-radius: 8px; padding: 0.75rem 0.5rem; text-align: center; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
 .target-card:hover { border-color: rgba(52,211,153,0.4); background: rgba(52,211,153,0.05); }
 .target-card.selected { border-color: var(--accent); background: rgba(52,211,153,0.1); }
+.target-card.disabled { opacity: 0.35; pointer-events: none; cursor: not-allowed; filter: grayscale(0.6); }
+.target-card.disabled::after { content: ' (untested for this profile)'; font-size: 0.7em; color: var(--muted); display: block; margin-top: 0.2rem; }
 .target-card .tc-icon { font-size: 1.5rem; margin-bottom: 0.3rem; }
 .target-card .tc-name { font-size: 0.8rem; font-weight: 600; color: var(--text); }
 .target-card .tc-sub  { font-size: 0.7rem; color: var(--muted); margin-top: 0.15rem; }
@@ -3509,24 +3511,52 @@ function selectTarget(el) {
   _selectedRole = el.dataset.role;
   showRoleDetail(_selectedRole);
 
-  // Auto-pick the distro the role is designed for. The default-selected
-  // tile (CentOS) was the stable baseline for the 1.0.x line; with the
-  // F44 cutover and OpenZFS 2.4.1 in the live env, ZFS Lab MUST run on
-  // Fedora 44 — that's the test platform's whole point (kernel 6.19,
-  // current OpenZFS). Users reported that picking ZFS Lab installed
-  // CentOS because the distro picker stayed on its initial selection.
-  // Bug seen 2026-05-04: ZFS Lab tile selected, distro picker silently
-  // remained centos, install completed on the wrong distro.
-  // Other tiles (k8s, kvm, devops, server, desktop, core) leave the
-  // distro alone — the user's pick is intentional for those.
-  const _roleDistroDefault = {
-    zfslab: 'fedora',
+  // Profile-distro allowlist. Generic profiles (server / desktop / core)
+  // accept every distro the kldload installer supports — that's the
+  // multi-distro value prop. Workload profiles (kvm / k8s / zfslab / ai)
+  // are tied to specific kernel/userland features (eBPF, modern KVM,
+  // newest OpenZFS, libvirt 10+) and are only validated on a small set —
+  // exposing the others would invite "kvm-on-Rocky kinda works but breaks
+  // when X" reports. The allowlist is the UI guard, NOT a code lock:
+  // bootstrap.sh + profiles.sh keep every distro path in case someone
+  // forks and tests one. To add a distro to a profile here, validate
+  // end-to-end (install + smoke + matrix) then add the slug.
+  const PROFILE_DISTROS = {
+    core:    ['centos','rocky','rhel','fedora','debian','ubuntu','arch','alpine'],
+    server:  ['centos','rocky','rhel','fedora','debian','ubuntu','arch'],
+    desktop: ['centos','rocky','rhel','fedora','debian','ubuntu','arch'],
+    kvm:     ['fedora','debian'],
+    k8s:     ['fedora','debian'],
+    zfslab:  ['fedora','debian'],
+    ai:      ['fedora','debian'],
+    devops:  ['fedora','debian'],
   };
-  const _wantDistro = _roleDistroDefault[el.dataset.role];
-  if (_wantDistro) {
-    const _card = document.querySelector('#distro-grid .target-card[data-distro="' + _wantDistro + '"]');
-    if (_card && typeof selectDistro === 'function') {
-      selectDistro(_card);
+  const _allowed = PROFILE_DISTROS[el.dataset.role] || PROFILE_DISTROS.server;
+
+  // Apply allowlist: gray out distro cards not on the list. The card
+  // gets a 'disabled' class — pointer-events:none + opacity 0.4 in CSS,
+  // and selectDistro() short-circuits on disabled before doing anything.
+  document.querySelectorAll('#distro-grid .target-card').forEach(_card => {
+    if (_allowed.includes(_card.dataset.distro)) {
+      _card.classList.remove('disabled');
+      _card.title = '';
+    } else {
+      _card.classList.add('disabled');
+      _card.title = 'Not validated for the ' + el.dataset.role + ' profile yet';
+    }
+  });
+
+  // If the currently-selected distro is no longer in the allowlist
+  // (user just switched from server→kvm and was on Rocky), jump-select
+  // the first allowlisted distro so the form stays internally
+  // consistent. Pick Fedora when available — that's the test platform.
+  const _curSelected = document.querySelector('#distro-grid .target-card.selected');
+  const _curDistro = _curSelected ? _curSelected.dataset.distro : null;
+  if (!_allowed.includes(_curDistro)) {
+    const _preferred = _allowed.includes('fedora') ? 'fedora' : _allowed[0];
+    const _newCard = document.querySelector('#distro-grid .target-card[data-distro="' + _preferred + '"]');
+    if (_newCard && typeof selectDistro === 'function') {
+      selectDistro(_newCard);
     }
   }
 
@@ -3667,6 +3697,13 @@ document.addEventListener('DOMContentLoaded', function() {
 // toggleAI removed — AI is now a profile tile, selectTarget handles it
 
 function selectDistro(el) {
+  // Refuse the click on a card that's been disabled by the profile
+  // allowlist. Without this guard, a user clicking a grayed-out distro
+  // would still set it as the selected target — defeats the purpose.
+  // The auto-jump in selectTarget() will pick a valid one if needed.
+  if (el.classList.contains('disabled')) {
+    return;
+  }
   document.querySelectorAll('#distro-grid .target-card').forEach(c => c.classList.remove('selected'));
   el.classList.add('selected');
   const sum = document.getElementById('distro-summary');
