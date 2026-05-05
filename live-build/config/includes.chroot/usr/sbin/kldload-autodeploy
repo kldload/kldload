@@ -203,7 +203,12 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         # VRAM probe. Try nvidia-smi (dedicated NVIDIA GPU), fall back to
         # rocminfo (AMD), then DRM sysfs (Intel Arc / fallback). 0 GB means
         # no GPU or an unrecognisable one → Bob is CPU-bound.
+        # Wrap in `set +e` because nvidia-smi/rocminfo legitimately exit
+        # non-zero on hosts without their respective GPU. Without this the
+        # ERR trap above marks the entire AI subshell as failed when there's
+        # just no GPU to probe — bug seen 2026-05-05 on .113 (no GPU box).
         _vram_gb=0
+        set +e
         if command -v nvidia-smi >/dev/null 2>&1; then
             _vram_gb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)
             _vram_gb=$(( ${_vram_gb:-0} / 1024 ))
@@ -212,6 +217,7 @@ if [[ "${WANT[ai]}" == "1" ]]; then
             _bytes=$(rocminfo 2>/dev/null | awk '/Size:.*\(.*\)/ {gsub(/[^0-9]/,"",$2); if ($2+0 > max) max=$2+0} END {print max+0}')
             _vram_gb=$(( _bytes / 1024 / 1024 / 1024 ))
         fi
+        set -e
         # Minimum VRAM to host Bob usably. qwen2.5:14b is ~9 GB quantised and
         # barely fits in 10 GB; below 8 GB the model won't load and CPU-fallback
         # inference is ~30 tok/min — unusable. Gracefully skip Bob entirely so
