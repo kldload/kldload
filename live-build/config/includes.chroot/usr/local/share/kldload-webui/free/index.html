@@ -3509,6 +3509,27 @@ function selectTarget(el) {
   _selectedRole = el.dataset.role;
   showRoleDetail(_selectedRole);
 
+  // Auto-pick the distro the role is designed for. The default-selected
+  // tile (CentOS) was the stable baseline for the 1.0.x line; with the
+  // F44 cutover and OpenZFS 2.4.1 in the live env, ZFS Lab MUST run on
+  // Fedora 44 — that's the test platform's whole point (kernel 6.19,
+  // current OpenZFS). Users reported that picking ZFS Lab installed
+  // CentOS because the distro picker stayed on its initial selection.
+  // Bug seen 2026-05-04: ZFS Lab tile selected, distro picker silently
+  // remained centos, install completed on the wrong distro.
+  // Other tiles (k8s, kvm, devops, server, desktop, core) leave the
+  // distro alone — the user's pick is intentional for those.
+  const _roleDistroDefault = {
+    zfslab: 'fedora',
+  };
+  const _wantDistro = _roleDistroDefault[el.dataset.role];
+  if (_wantDistro) {
+    const _card = document.querySelector('#distro-grid .target-card[data-distro="' + _wantDistro + '"]');
+    if (_card && typeof selectDistro === 'function') {
+      selectDistro(_card);
+    }
+  }
+
   const smRow = document.getElementById('storage-mode-row');
   if (smRow) smRow.style.display = el.dataset.role === 'core' ? 'block' : 'none';
 
