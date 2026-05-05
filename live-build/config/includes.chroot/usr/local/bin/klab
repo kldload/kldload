@@ -614,7 +614,26 @@ if ! command -v zfs >/dev/null 2>&1; then
         _ok=1; break
       fi
     done
-    [ $_ok -eq 1 ] || echo "WARNING: no zfs-release rpm found for fc${FEDORA_VER} — ZFS will not install"
+    # zfsonlinux.org typically lags Fedora releases by ~6 months —
+    # fc44 (released April 2026) has no zfs-release rpm yet, only
+    # fc43/fc42. Fall back to fc(N-1) → fc(N-2), then pin the .repo
+    # file to that releasever so dnf doesn't expand $releasever to
+    # the running fcN and 404 on missing-repo. Bug seen 2026-05-04
+    # on fiend's klab golden fedora build: tried fc44 across all 6
+    # revisions, all 404'd, golden built without ZFS — exact same
+    # reason the kldload installer hardcodes the repo to fedora/43.
+    if [ $_ok -eq 0 ]; then
+      for _fb in $((FEDORA_VER - 1)) $((FEDORA_VER - 2)); do
+        for _rev in 3-0 2-10 2-9 2-8; do
+          if dnf install -y "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_fb}.noarch.rpm" 2>/dev/null; then
+            sed -i "s|\$releasever|${_fb}|g" /etc/yum.repos.d/zfs.repo 2>/dev/null
+            echo "klab: zfs-release pinned to fc${_fb} (no zfs-release rpm exists for fc${FEDORA_VER} yet)"
+            _ok=1; break 2
+          fi
+        done
+      done
+    fi
+    [ $_ok -eq 1 ] || echo "WARNING: no zfs-release rpm found — ZFS will not install"
   else
     dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm" 2>/dev/null || true
   fi
