@@ -240,7 +240,16 @@ W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"; B="\033[1;34m"
 
 _ensure_log_dir() { mkdir -p "$RESULTS_DIR" 2>/dev/null; }
 _ts() { date '+%Y-%m-%d %H:%M:%S'; }
-log()  { _ensure_log_dir; echo -e "${G}[klab]${N} $*"; echo "[${$}] $(_ts) [INFO] $*" >> "$MASTER_LOG" 2>/dev/null; }
+# log() writes to stderr — NOT stdout — because helper functions
+# (ensure_ssh_key, make_cloud_init_iso, …) call log() and are themselves
+# captured via $(...) at call sites. With log to stdout the captured
+# variable contained "[klab] Generating SSH key.../var/lib/libvirt/isos/…"
+# which leaked into virt-install's --disk path= argument. libvirt's XML
+# parser then choked on the embedded ANSI codes and reported a misleading
+# "Could not define storage pool: missing storage pool target path".
+# Bug seen 2026-05-04 on .109 fiend klab golden centos build. warn() and
+# die() already write to stderr — log() now matches.
+log()  { _ensure_log_dir; echo -e "${G}[klab]${N} $*" >&2; echo "[${$}] $(_ts) [INFO] $*" >> "$MASTER_LOG" 2>/dev/null; }
 warn() { _ensure_log_dir; echo -e "${Y}[klab]${N} $*" >&2; echo "[${$}] $(_ts) [WARN] $*" >> "$MASTER_LOG" 2>/dev/null; }
 die()  { _ensure_log_dir; echo -e "${R}[klab]${N} $*" >&2; echo "[${$}] $(_ts) [FATAL] $*" >> "$MASTER_LOG" 2>/dev/null; exit 1; }
 pause() { echo ""; echo -ne "${D}  Press Enter to continue...${N}"; read -r; }
