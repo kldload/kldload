@@ -42,7 +42,9 @@ RHEL_CREDS_FILE="/root/.kzfs-rhel-creds"
 declare -A CLOUD_IMAGES=(
   [centos]="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
   [rocky]="https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"
-  [fedora]="https://download.fedoraproject.org/pub/fedora/linux/releases/41/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2"
+  # Fallback only — actual URL is dynamically resolved at use site
+  # (Fedora bumps build numbers: 44-1.6 → 1.7 → …, no .latest. symlink).
+  [fedora]="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
   [debian]="https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-genericcloud-amd64-daily.qcow2"
   [ubuntu]="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
   [arch]="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
@@ -716,6 +718,22 @@ build_golden_single() {
   # Download cloud image
   mkdir -p "$ISO_DIR"
   local url="${CLOUD_IMAGES[$distro]}"
+
+  # Fedora cloud images bump build numbers (44-1.6 → 1.7 → …) and there's
+  # no .latest. symlink. Resolve dynamically. See klab for the bug history.
+  if [[ "$distro" == "fedora" ]] && command -v curl >/dev/null 2>&1; then
+    local _ver _latest _base="https://download.fedoraproject.org/pub/fedora/linux/releases"
+    for _ver in 44 43 42; do
+      _latest=$(curl -sfL --max-time 10 "${_base}/${_ver}/Cloud/x86_64/images/" 2>/dev/null \
+                 | grep -oE "Fedora-Cloud-Base-Generic-${_ver}-[0-9.]+\.x86_64\.qcow2" \
+                 | sort -V -u | tail -1)
+      if [[ -n "$_latest" ]]; then
+        url="${_base}/${_ver}/Cloud/x86_64/images/${_latest}"
+        break
+      fi
+    done
+  fi
+
   local img_file="${ISO_DIR}/${distro}-cloud.qcow2"
 
   if [[ "$distro" == "rhel" ]]; then
