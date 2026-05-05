@@ -91,11 +91,27 @@ net.ipv4.conf.default.rp_filter = 0
 EOF
   sysctl --system >/dev/null 2>&1
 
-  # Disable swap (kubeadm requires it)
+  # Disable swap (kubeadm requires it). Fedora 44 cloud images ship
+  # zram-generator-defaults which creates /dev/zram0 swap on every boot
+  # via systemd-zram-setup@zram0.service. swapoff handles the live
+  # instance, but without removing the generator, the next boot brings
+  # it right back — kubelet refuses to start with swap on, leading to
+  # the cascade: kubelet fails → kubeadm init retries → second init
+  # fails on already-existing manifests → cluster never converges.
+  # Bug seen 2026-05-05 on F44 K8s golden VMs. Fix: also mask the
+  # generator unit AND nuke /etc/systemd/zram-generator.conf so the
+  # next boot stays swap-free.
   swapoff -a || true
   sed -ri '/\sswap\s/s/^/#/' /etc/fstab 2>/dev/null || true
+  systemctl disable --now 'systemd-zram-setup@*.service' 2>/dev/null || true
+  systemctl mask 'systemd-zram-setup@zram0.service' 2>/dev/null || true
+  rm -f /etc/systemd/zram-generator.conf /usr/lib/systemd/zram-generator.conf 2>/dev/null || true
+  # Defensive: the package itself if it exists (Fedora-only).
+  if command -v dnf >/dev/null 2>&1; then
+    dnf remove -y zram-generator zram-generator-defaults 2>/dev/null || true
+  fi
 
-  log "Kernel modules and sysctl configured"
+  log "Kernel modules and sysctl configured (swap + zram disabled)"
 }
 
 # ── Containerd ─────────────────────────────────────────────────────────────
