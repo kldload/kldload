@@ -133,6 +133,11 @@ k_profile_packages() {
       local _gvfs_extra="gvfs-backends"
       local _xsrv="xserver-xorg"
       local _netools_extra="iputils-ping"
+      # gnome-session-xsession is a separate sub-package on EL9 that
+      # ships /usr/share/xsessions/gnome.desktop. Without it, GDM 40
+      # crashes on NVIDIA hardware. Empty for distros where gnome-session
+      # already includes the X session entries (Debian/Ubuntu/Arch).
+      local _xsession_pkg=""
       if [[ "$_distro" == "ubuntu" ]]; then
         _browser="epiphany-browser"
         _viewer="eog"
@@ -147,13 +152,29 @@ k_profile_packages() {
         _viewer="eog"
         _terminal="gnome-terminal"
         _nm="NetworkManager NetworkManager-wifi NetworkManager-tui"
-        # GDM works fine on RPM distros (CentOS Stream 9, Fedora 44).
-        # Only Debian/Ubuntu hit the GDM 48 systemd integration bug.
+        # GDM works on RPM distros once the right session-files package
+        # is present. The bug seen on Rocky 9 desktop install 2026-05-04:
+        #   "Gdm: GdmSession: no session desktop files installed, aborting"
+        # core-dumped 8x then gave up. Root cause was a missing sub-package:
+        #   gnome-session ships at minimum, but on EL9 the X session entry
+        #   files (/usr/share/xsessions/*.desktop) live in a SEPARATE
+        #   sub-package: `gnome-session-xsession`. Without it, that dir
+        #   is empty. NVIDIA proprietary blocks Wayland → GDM falls back
+        #   to xsessions → empty → SIGTRAP loop.
+        # Validated fix on .109 (2026-05-04): `dnf install -y
+        # gnome-session-xsession` populates /usr/share/xsessions with
+        # gnome.desktop + gnome-xorg.desktop + gnome-custom-session.desktop;
+        # `systemctl restart gdm` → active, GNOME login works.
+        # We also tried switching RHEL/Rocky to lightdm but Rocky's stock
+        # repo ships lightdm in EPEL only (not in our darksite), so dnf
+        # quietly fell back to gdm without lightdm. Sticking with gdm +
+        # the missing sub-package is simpler and avoids EPEL.
         _gdm="gdm"
         _fonts="cantarell-fonts"
         _gvfs_extra="gvfs-mtp gvfs-smb gvfs-archive"
         _xsrv="xorg-x11-server-Xorg xorg-x11-xauth"
         _netools_extra="iputils"
+        _xsession_pkg="gnome-session-xsession"
       fi
       # Debian/Ubuntu split PAM modules into separate libpam-* packages
       # (libpam-gnome-keyring provides /usr/lib/.../security/pam_gnome_keyring.so;
@@ -178,7 +199,7 @@ k_profile_packages() {
         _dbus_extras="dbus-x11"
       fi
       echo "openssh-server sudo curl ca-certificates vim less ${_nm} \
-        gnome-shell gnome-session gnome-control-center gnome-settings-daemon \
+        gnome-shell gnome-session ${_xsession_pkg} gnome-control-center gnome-settings-daemon \
         ${_gdm} nautilus ${_terminal} ${_viewer} \
         adwaita-icon-theme ${_fonts} gvfs ${_gvfs_extra} \
         gnome-keyring ${_pam_extras} ${_portal_extras} ${_dbus_extras} \

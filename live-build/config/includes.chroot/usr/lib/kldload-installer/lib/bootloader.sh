@@ -405,24 +405,103 @@ EOFSTAB
   fi
 
   # Copy kernel + initramfs to the ESP so GRUB can boot without zfs.mod.
-  local _kver _kpath _ipath _zfs_root
-  _kver="$(ls "${target}/boot" 2>/dev/null | grep -oP '^vmlinuz-\K[^ ]+' | sort -V | tail -1 || true)"
+  #
+  # Pick the highest-versioned kernel that has BOTH a vmlinuz AND a matching
+  # initramfs — NOT just `sort -V | tail -1`. Multi-kernel installs (dnf can
+  # pull in both base and update kernel as a side-effect of dependency
+  # resolution) routinely leave one kernel without a usable initramfs:
+  # DKMS only builds zfs.ko for the kernel matching the chroot's running
+  # headers, so dracut's `installkernel` for the OTHER kernel fails inside
+  # `*** Including module: zfs ***` and skips the .img write entirely.
+  #
+  # Old code blindly picked the highest version, found vmlinuz, found NO
+  # initramfs, logged a warning, left /EFI/BOOT/ empty of kernel files —
+  # `set default=direct` in grub.cfg then dropped to dracut emergency shell
+  # at boot. ZBM still worked (kexecs the BLS-default kernel from inside
+  # the imported rpool, doesn't depend on /EFI/BOOT/ contents).
+  #
+  # Bug seen Rocky 9 desktop install 2026-05-03: dnf installed kernel-697.el9
+  # AND kernel-611.49.1.el9_7. Only 611 had zfs.ko (DKMS built it for the
+  # 611 chroot kernel). 697 was higher version, picked, no initramfs,
+  # silent fail. See project_f44_cutover_findings.md.
+  local _kver _kpath _ipath _zfs_root _kv _kp _ip
   _zfs_root="$(zfs list -H -o name,mountpoint 2>/dev/null | awk '$2=="/"{print $1; exit}')"
   if [[ -z "$_zfs_root" ]]; then
     _zfs_root="$(zfs list -H -o name 2>/dev/null | grep -E 'ROOT/[^/]+$' | head -1)"
   fi
-  if [[ -n "$_kver" ]]; then
-    _kpath="${target}/boot/vmlinuz-${_kver}"
-    _ipath="${target}/boot/initramfs-${_kver}.img"
-    [[ -f "$_ipath" ]] || _ipath="${target}/boot/initrd.img-${_kver}"
-    if [[ -f "$_kpath" && -f "$_ipath" ]]; then
-      mkdir -p "${zbm_fallback_dir}"
-      cp "$_kpath" "${zbm_fallback_dir}/vmlinuz"
-      cp "$_ipath" "${zbm_fallback_dir}/initrd.img"
-      k_log "Kernel + initramfs copied to \\EFI\\BOOT\\ (kver=${_kver}, root=${_zfs_root:-rpool/ROOT/default})"
-    else
-      k_log "WARNING: kernel or initramfs not found on target — SB boot won't work"
+  while read -r _kv; do
+    [[ -z "$_kv" ]] && continue
+    _kp="${target}/boot/vmlinuz-${_kv}"
+    _ip="${target}/boot/initramfs-${_kv}.img"
+    [[ -f "$_ip" ]] || _ip="${target}/boot/initrd.img-${_kv}"
+    if [[ -f "$_kp" && -f "$_ip" ]]; then
+      _kver="$_kv"; _kpath="$_kp"; _ipath="$_ip"
+      break
     fi
+    k_log "skipping kernel ${_kv} — vmlinuz=$([[ -f $_kp ]] && echo present || echo MISSING) initramfs=$([[ -f $_ip ]] && echo present || echo MISSING)"
+  done < <(ls "${target}/boot" 2>/dev/null | grep -oP '^vmlinuz-\K[^ ]+' | sort -V -r)
+
+  if [[ -n "${_kver:-}" ]]; then
+    mkdir -p "${zbm_fallback_dir}"
+    cp "$_kpath" "${zbm_fallback_dir}/vmlinuz"
+    cp "$_ipath" "${zbm_fallback_dir}/initrd.img"
+    k_log "Kernel + initramfs copied to \\EFI\\BOOT\\ (kver=${_kver}, root=${_zfs_root:-rpool/ROOT/default})"
+
+    # Re-sign the staged kernel with the kldload MOK private key so it
+    # verifies under Secure Boot. Without this, distros whose kernel-
+    # signing key isn't shim's compiled-in vendor cert AND isn't enrolled
+    # in MokListRT will fail at GRUB's load-kernel step with:
+    #   grub-core/kern/efi/sb.c:182  bad shim signature
+    #   grub-core/loader/i386/efi/linux.c:260  you need to load the kernel
+    #
+    # Bug seen Rocky 9 desktop install 2026-05-04 (.109/.128) under SB:
+    # Rocky kernel signed by Rocky CA, shim's vendor cert is CentOS Secure
+    # Boot CA 2 (we use CentOS-shipped shim because Rocky's RPMs install
+    # to /EFI/centos/), MokListRT has only the kldload per-install leaf →
+    # zero overlap, shim returns SECURITY_VIOLATION, GRUB throws the above.
+    #
+    # Fix: sbsign the staged kernel with kldload's MOK key so its sig
+    # chains to the leaf already in MokListRT. Same trick we use on
+    # zfs.ko, ZFSBootMenu, and (where applicable) the bootloader chain.
+    # Only signs the COPY in /EFI/BOOT/, not the original on /boot — the
+    # original stays distro-signed for any kernel-install or in-place
+    # upgrade flow that expects vendor signatures.
+    local _mok_key="${target}/var/lib/dkms/mok.key"
+    local _mok_pub="${target}/var/lib/dkms/mok.pub"
+    if [[ -f "$_mok_key" && -f "$_mok_pub" ]] && command -v sbsign >/dev/null 2>&1; then
+      local _signed="${zbm_fallback_dir}/vmlinuz.signed"
+      # Strip the distro-supplied signature first so we ship a SINGLE
+      # signature on the staged kernel. sbsign appends rather than
+      # replaces — leaving Rocky's sig in front of ours produces a
+      # multi-signature PE. Some shim versions iterate properly and
+      # accept; some only check the first sig and reject. Single-sig
+      # is portable and avoids that question entirely. `sbattach
+      # --remove` strips one sig per call — Rocky kernels ship with
+      # exactly one, so a single call is enough. If sbattach is
+      # unavailable, fall through and live with multi-sig.
+      if command -v sbattach >/dev/null 2>&1; then
+        sbattach --remove "${zbm_fallback_dir}/vmlinuz" >&7 2>&1 || true
+      fi
+      # NB: redirect to fd 7 (the bootloader.log), NOT ${log_fd} —
+      # k_install_bootloader() doesn't take log_fd as a parameter; the
+      # ZBM sbsign at line ~292 uses literal `>&7` for the same reason.
+      # First version of this block used `>&"${log_fd}"` — bash saw an
+      # empty redirect target, refused to run sbsign, fell into the
+      # failure branch silently. Bug seen Rocky 9 .109 install
+      # 2026-05-04: WARNING logged but no actual sbsign error captured.
+      if sbsign --key "$_mok_key" --cert "$_mok_pub" \
+                --output "$_signed" "${zbm_fallback_dir}/vmlinuz" >&7 2>&1; then
+        mv -f "$_signed" "${zbm_fallback_dir}/vmlinuz"
+        k_log "/EFI/BOOT/vmlinuz re-signed with kldload MOK leaf (SB-validated via MokListRT)"
+      else
+        rm -f "$_signed" 2>/dev/null
+        k_log "WARNING: sbsign failed for /EFI/BOOT/vmlinuz — SB direct-boot will fail until manually signed"
+      fi
+    else
+      k_log "INFO: skipping kernel re-sign (no MOK key at ${_mok_key} or sbsign missing) — SB direct-boot will need distro-signed kernel + matching shim vendor cert"
+    fi
+  else
+    k_log "WARNING: no kernel with matching initramfs found on target — direct-boot path will fail (ZBM still usable)"
   fi
 
   # Write grub.cfg at both paths the distro GRUB might look for:
@@ -772,10 +851,30 @@ EOFSTAB
         chroot "${target}" dnf install -y --nogpgcheck zfs-dracut --skip-broken >&7 2>&1 || \
         k_log "CRITICAL: zfs-dracut install failed — system may not boot from ZFS"
     fi
-    local _kver
+    # Rebuild initramfs PER kernel that actually has zfs.ko.
+    # Skip kernels with no zfs.ko — dracut's `*** Including module: zfs ***`
+    # step calls dracut-install -m zfs, which fails when no zfs.ko exists
+    # for that kernel, and the whole initramfs build aborts. Multi-kernel
+    # installs commonly leave one kernel without zfs.ko (DKMS only builds
+    # for the kernel matching chroot's running headers — see Rocky 9
+    # kernel-697 vs kernel-611 split, project_f44_cutover_findings.md).
+    # No point trying to build that initramfs anyway; the staged direct-
+    # boot path already filters to a kernel that HAS zfs.ko.
+    local _kver _kdir _zfsko
     for _kver in "${target}"/usr/lib/modules/*/vmlinuz "${target}"/lib/modules/*/vmlinuz; do
       [[ -f "$_kver" ]] || continue
-      _kver="$(basename "$(dirname "$_kver")")"
+      _kdir="$(dirname "$_kver")"
+      _kver="$(basename "$_kdir")"
+      # zfs.ko may be at extra/zfs.ko or extra/zfs.ko.xz depending on packager
+      _zfsko=""
+      for _candidate in "$_kdir/extra/zfs.ko" "$_kdir/extra/zfs.ko.xz" \
+                        "$_kdir/extra/zfs/zfs.ko" "$_kdir/extra/zfs/zfs.ko.xz"; do
+        [[ -f "$_candidate" ]] && { _zfsko="$_candidate"; break; }
+      done
+      if [[ -z "$_zfsko" ]]; then
+        k_log "skipping initramfs build for ${_kver} — no zfs.ko (DKMS didn't build for this kernel)"
+        continue
+      fi
       chroot "${target}" dracut --force --add "zfs" --kver "$_kver" >&7 2>&1 || \
         k_log "WARNING: dracut rebuild failed for ${_kver}"
     done
