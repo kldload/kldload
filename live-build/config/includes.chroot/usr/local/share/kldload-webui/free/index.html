@@ -3846,11 +3846,15 @@ function startInstall() {
   const keyboard = document.getElementById('install-keyboard').value || 'us';
   const locale   = document.getElementById('install-locale').value || 'en_US.UTF-8';
   const roleRaw  = (document.querySelector('#target-grid .target-card.selected') || {}).dataset?.role || 'k8s';
-  // zfslab is the "K8s lean + ZFS test suite first" variant of the kvm stack.
-  // Installed packages are identical to kvm/k8s — only resources reprovision.
-  // The standalone 'ai' tile was removed in 1.0.5; Bob AI is now bundled
-  // with the kldlab (devops) profile rather than its own role.
-  const role     = ['k8s','devops','zfslab'].includes(roleRaw) ? 'kvm' : roleRaw;
+  // 4-template architecture (1.1.0+): kvm/k8s/klab/zfslab tiles all share
+  // the kvm package set (libvirt + ZFS + K8s tooling) — KLDLOAD_PROFILE
+  // collapses to 'kvm' so profiles.sh installs the same packages. The tile
+  // identity travels in a separate field (template, → KLDLOAD_TEMPLATE) so
+  // autodeploy can dispatch the right firstboot phases.
+  // Legacy 'devops'/'ai' role names still flow through as 'klab' for
+  // backward compat with any pinned URL or saved kickstart.
+  const templateRaw = ({devops:'klab', ai:'klab'}[roleRaw]) || roleRaw;
+  const role        = ['k8s','klab','devops','zfslab','ai'].includes(roleRaw) ? 'kvm' : roleRaw;
   const distro   = (document.querySelector('#distro-grid .target-card.selected') || {}).dataset?.distro || 'centos';
   const dhcp     = document.getElementById('net-dhcp').checked;
   const sshKey   = (document.getElementById('install-ssh-key')?.value || '').trim();
@@ -3875,7 +3879,7 @@ function startInstall() {
   const manualStorage = role === 'core' && document.querySelector('input[name="storage-mode"][value="manual"]')?.checked;
   const params = {
     disk, hostname: host, username: user,
-    password: pass, timezone, keyboard, locale, role, distro,
+    password: pass, timezone, keyboard, locale, role, template: templateRaw, distro,
     ...(distro === 'windows' ? {
       windows_index: document.getElementById('windows-index')?.value || '1',
     } : {}),

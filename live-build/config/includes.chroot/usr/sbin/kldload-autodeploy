@@ -62,33 +62,70 @@ for _src in "$EFFECTIVE" "$MANIFEST"; do
         . "$_src" 2>/dev/null || true
     fi
 done
-[[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" || "${KLDLOAD_ENABLE_K8S:-0}" == "1" ]] && WANT[k8s]=1
-[[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]] && WANT[ai]=1
 
-# ZFS Lab is the ZFS test appliance, not a K8s lab — skip the cluster
-# entirely so the whole host budget goes to the klab test VMs. K8s
-# dashboards (Cilium/Hubble/Tetragon/CSI) show no data under this mode,
-# which is correct: ZFS test observability lives on host-side exporters.
-if [[ "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" ]]; then
-    WANT[k8s]=0
-fi
-
-# klab goldens — build all 5 ZFS-test-lab goldens automatically on any
-# KVM-capable profile so "install completes" means "every lab distro is
-# snapshot-ready for instant clone, no manual click". The user can still
-# opt out with KLDLOAD_KLAB_NO_AUTO=1 in the install manifest.
-# Explicit enable via KLDLOAD_KLAB_ZFS_DEV=1 still works for compatibility.
-if [[ "${KLDLOAD_KLAB_NO_AUTO:-0}" != "1" ]]; then
-    if [[ "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ]]; then
-        WANT[klab]=1
-    else
-        case "${KLDLOAD_PROFILE:-}" in
-            kvm|k8s|devops|ai) WANT[klab]=1 ;;
-        esac
+# ── 4-template architecture (1.1.0+) ────────────────────────────────────
+# KLDLOAD_TEMPLATE is the tile the user picked — drives autodeploy phases.
+# (KLDLOAD_PROFILE is the package set; all four workload tiles share the
+# kvm package set, so KLDLOAD_PROFILE alone can't distinguish them. The UI
+# emits KLDLOAD_TEMPLATE in addition for tile-level dispatch.)
+#
+#   kvm    — libvirt + ZFS + OS lean goldens (5 distros). NO K8s.
+#   k8s    — lean K8s (1 CP + 3 workers locked) + full obs stack. NO goldens.
+#   klab   — kvm + K8s (1 CP + 0 workers, scalable post-install) + obs.
+#            "Everything sandbox" — all goldens except ZFS-test variant.
+#   zfslab — K8s (1 CP + 0 workers, fixed) + obs + ZFS-test goldens.
+#            No OS lean goldens (host budget for ZFS test runs).
+#
+# Legacy compat: devops + ai TEMPLATE values map to klab. Pre-1.1.0 installs
+# only have KLDLOAD_PROFILE + the ENABLE_* / *_MODE flags; we infer the
+# template from those when KLDLOAD_TEMPLATE is unset.
+TEMPLATE="${KLDLOAD_TEMPLATE:-}"
+if [[ -z "$TEMPLATE" ]]; then
+    # Legacy fall-back: reconstruct the template from the old env-var
+    # combination so an existing 1.0.x install upgrading in place still
+    # gets the right phases on the next autodeploy run.
+    if   [[ "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" || "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ]]; then
+        TEMPLATE="zfslab"
+    elif [[ "${KLDLOAD_ENABLE_K8S:-0}"  == "1" || "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]]; then
+        TEMPLATE="k8s"
+    elif [[ "${KLDLOAD_PROFILE:-}" == "kvm" ]]; then
+        TEMPLATE="kvm"
     fi
 fi
 
-log "Requested: k8s=${WANT[k8s]} ai=${WANT[ai]} klab=${WANT[klab]}"
+case "$TEMPLATE" in
+    k8s|klab|zfslab|devops|ai) WANT[k8s]=1 ;;
+esac
+case "$TEMPLATE" in
+    kvm|klab|zfslab|devops|ai) WANT[klab]=1 ;;
+esac
+
+# Explicit env-var overrides (still honored for kickstart / smoke-test flows)
+[[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]] && WANT[ai]=1
+[[ "${KLDLOAD_KLAB_NO_AUTO:-0}" == "1" ]] && WANT[klab]=0
+
+# K8s cluster sizing — k8s tile is the production-reference (3 workers
+# locked at install). klab/zfslab start with 0 workers; klab scales via
+# the post-install UI, zfslab stays put so the host budget goes to ZFS
+# test VMs instead of empty K8s nodes. Override via KLDLOAD_K8S_WORKERS.
+case "$TEMPLATE" in
+    k8s)         K8S_WORKERS_DEFAULT=3 ;;
+    *)           K8S_WORKERS_DEFAULT=0 ;;
+esac
+K8S_WORKERS="${KLDLOAD_K8S_WORKERS:-$K8S_WORKERS_DEFAULT}"
+
+# klab golden flavor — zfslab template builds ZFS-test goldens (with
+# zfs-tests.sh + ksh + vdev images); everything else builds lean OS
+# goldens. KLAB_GOLDEN_KIND used by phase 3 below to pick the right
+# subcommand and skip the irrelevant lineage.
+KLAB_GOLDEN_KIND="lean"
+if [[ "$TEMPLATE" == "zfslab" \
+      || "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" \
+      || "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" ]]; then
+    KLAB_GOLDEN_KIND="ztest"
+fi
+
+log "Template: ${TEMPLATE:-<none>} → k8s=${WANT[k8s]}(workers=${K8S_WORKERS}) ai=${WANT[ai]} klab=${WANT[klab]}(${KLAB_GOLDEN_KIND})"
 
 # Early-out if nothing was requested — avoids a green "ready" banner on a
 # plain install that didn't ask for any of these. The ConditionPathExists
@@ -131,6 +168,14 @@ AI_PID=""
 if [[ "${WANT[ai]}" == "1" ]]; then
     phase "ai-pull-kicking"
     (
+        # ERR trap before set -e: without this the subshell exits on the
+        # first non-zero command and the parent never knows which line.
+        # Symptom seen 2026-05-05 on .109: autodeploy log had only
+        # "[ai] pull running as pid X (backgrounded)" and then silence —
+        # ai-pull subshell died somewhere with no trace. The trap names
+        # the failing LINENO + BASH_COMMAND so we can fix the next one.
+        set -E
+        trap 'log "[ai] FAILED at line ${LINENO}: ${BASH_COMMAND} (exit $?)"; mark "ai-failed"; exit 1' ERR
         set -e
         # Ollama CLI panics with "$HOME is not defined" when systemd execs
         # us without a login environment (which is always). Every ollama
@@ -277,16 +322,15 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
     if [[ -f "${STATE_DIR}/k8s-ready" ]]; then
         log "[k8s] already marked ready — skipping"
     else
-        # autodeploy spins a minimal cluster: 1 CP, 0 workers. CP runs
-        # all platform pods (Tetragon, Hubble, Cilium operator, Prometheus,
-        # MetalLB) — that's all the cluster's job in the appliance.
-        # Users who want a real multi-node cluster scale workers up via:
-        #   sudo kube-cluster bootstrap --workers 3
-        # Bug seen 2026-05-05 on fiend: --workers 3 default consumed
-        # 30 vCPU / 51 GB on a 24-core / 63 GB host (every K8s pod
-        # auto-scaled to a third of host RAM). Lean default fixes that.
-        log "[k8s] running kube-cluster bootstrap --workers 0 (lean — CP runs platform pods)"
-        if kube-cluster bootstrap --workers 0 >> /var/log/kldload/kube-bootstrap.log 2>&1; then
+        # Worker count picked by profile above:
+        #   k8s tile     → 3 workers (production-reference cluster)
+        #   klab tile    → 0 workers (user scales via post-install UI)
+        #   zfslab tile  → 0 workers (host budget reserved for ZFS test VMs)
+        # Bug seen 2026-05-05 on fiend: pre-1.1.0 auto-scaled cluster pods
+        # to a third of host RAM each, hitting 30 vCPU / 51 GB on a 24-core
+        # / 63 GB host. Fixed defaults in kube-cluster keep this bounded.
+        log "[k8s] running kube-cluster bootstrap --workers ${K8S_WORKERS}"
+        if kube-cluster bootstrap --workers "${K8S_WORKERS}" >> /var/log/kldload/kube-bootstrap.log 2>&1; then
             mark "k8s"
             log "[k8s] complete"
 
@@ -323,35 +367,40 @@ fi
 
 # ── Phase 3: klab goldens (foreground) ────────────────────────────────────────
 # Last because it's the longest (~1hr). RHEL is auto-skipped if no creds
-# in the secrets store.
+# in the secrets store. KLAB_GOLDEN_KIND (set above from PROFILE):
+#   lean  → run 3a only (kvm/klab/devops/ai)
+#   ztest → run 3b only (zfslab) — saves ~30 min by skipping the lean
+#           lineage that zfslab doesn't use.
 if [[ "${WANT[klab]}" == "1" ]]; then
-    # ── 3a: blue-green goldens ────────────────────────────────────────
-    phase "klab-goldens"
-    if [[ -f "${STATE_DIR}/klab-ready" ]]; then
-        log "[klab] blue-green already marked ready — skipping"
-        _klab_ok=1
-    else
-        _klab_ok=1
-        log "[klab] running klab golden all (blue-green lineage)"
-        if klab golden all >> /var/log/kldload/klab-firstboot.log 2>&1; then
-            mark "klab"
-            log "[klab] blue-green complete"
+    # ── 3a: blue-green lean OS goldens (skip when zfslab — saves disk + time) ──
+    if [[ "${KLAB_GOLDEN_KIND}" == "lean" ]]; then
+        phase "klab-goldens"
+        if [[ -f "${STATE_DIR}/klab-ready" ]]; then
+            log "[klab] blue-green already marked ready — skipping"
+            _klab_ok=1
         else
-            _klab_ok=0
-            log "[klab] blue-green FAILED — see klab-firstboot.log"
+            _klab_ok=1
+            log "[klab] running klab golden all (blue-green lineage)"
+            if klab golden all >> /var/log/kldload/klab-firstboot.log 2>&1; then
+                mark "klab"
+                log "[klab] blue-green complete"
+            else
+                _klab_ok=0
+                log "[klab] blue-green FAILED — see klab-firstboot.log"
+            fi
         fi
+    else
+        log "[klab] KLAB_GOLDEN_KIND=ztest — skipping lean OS goldens (zfslab profile)"
+        _klab_ok=1
     fi
 
     # ── 3b: ztest goldens (separate phase so the installer UI can
     #       distinguish the two and not flip to "finished" while the
     #       ztest lineage is still building for another ~60 min) ─────
-    # Run ztest only when the user actually asked for ZFS Lab mode
-    # (KLDLOAD_KLAB_ZFS_DEV / KLDLOAD_ZFSLAB_MODE) OR when the
+    # Runs when KLAB_GOLDEN_KIND=ztest (zfslab profile) OR the
     # integration-test override KLDLOAD_BUILD_ZTEST_GOLDENS=1 is set.
-    # Removed the duplicate ztest invocation that used to run twice.
     _ztest_requested=0
-    [[ "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ]] && _ztest_requested=1
-    [[ "${KLDLOAD_ZFSLAB_MODE:-0}"  == "1" ]] && _ztest_requested=1
+    [[ "${KLAB_GOLDEN_KIND}" == "ztest" ]] && _ztest_requested=1
     [[ "${KLDLOAD_BUILD_ZTEST_GOLDENS:-0}" == "1" ]] && _ztest_requested=1
 
     if [[ "$_ztest_requested" == "1" ]]; then

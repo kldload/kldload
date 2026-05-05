@@ -448,12 +448,13 @@ run_ansible_against_vm() {
 
 # ── Detect Host Distro ────────────────────────────────────────────────────
 # The golden image must match the host distro so kube-setup installs the
-# correct package manager repos (dnf for CentOS/RHEL, apt for Debian/Ubuntu).
-# Falls back to centos since that's the kldloadOS live environment.
+# correct package manager repos (dnf for Fedora/CentOS/RHEL/Rocky, apt for
+# Debian/Ubuntu). Falls back to fedora since 1.1.0+ ships a Fedora 44 live
+# environment (was centos pre-1.1.0).
 detect_host_distro() {
   local id=""
   [[ -f /etc/os-release ]] && id="$(. /etc/os-release && echo "$ID")"
-  echo "${id:-centos}"
+  echo "${id:-fedora}"
 }
 
 HOST_DISTRO="$(detect_host_distro)"
@@ -677,7 +678,7 @@ NETCFG
   virt-install \
     --name "${GOLDEN}" \
     --ram "${RAM}" --vcpus "${CPUS}" \
-    --os-variant "$(case $HOST_DISTRO in debian) echo debian12;; ubuntu) echo ubuntu24.04;; *) echo centos-stream9;; esac)" \
+    --os-variant "$(case $HOST_DISTRO in debian) echo debian12;; ubuntu) echo ubuntu24.04;; centos) echo centos-stream9;; rhel) echo rhel9.0;; rocky) echo centos-stream9;; *) echo fedora-unknown;; esac)" \
     --disk "$(readlink -f "${zvol}"),bus=virtio,cache=none" \
     --disk "${ci_iso},device=cdrom" \
     --network bridge=virbr0,model=virtio \

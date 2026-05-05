@@ -229,6 +229,15 @@ k_write_manifest() {
 # that finalises an install.
 KLDLOAD_INSTALLED=1
 KLDLOAD_PROFILE=${KLDLOAD_PROFILE:-server}
+# KLDLOAD_TEMPLATE — 4-template architecture (1.1.0+). One of:
+#   kvm    → libvirt + ZFS + OS lean goldens, no K8s
+#   k8s    → lean K8s (1 CP + 3 workers) + obs, no goldens
+#   klab   → kvm + K8s (1 CP + 0 workers, scalable) + obs
+#   zfslab → K8s (1 CP + 0 workers) + obs + ZFS-test goldens
+# Workload tiles all share KLDLOAD_PROFILE=kvm for the package set; the
+# template field is the tile-level identity that drives autodeploy phases.
+# Empty on plain server/desktop/core installs (no autodeploy).
+KLDLOAD_TEMPLATE=${KLDLOAD_TEMPLATE:-}
 KLDLOAD_STORAGE_MODE=${KLDLOAD_STORAGE_MODE:-standard}
 KLDLOAD_ENABLE_ZFS=${KLDLOAD_ENABLE_ZFS:-0}
 KLDLOAD_ENABLE_EBPF=${KLDLOAD_ENABLE_EBPF:-0}

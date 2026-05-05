@@ -30,6 +30,40 @@ PM="$(detect_pm)"
 log "Package manager: $PM"
 log "Kubernetes version: $K8S_VERSION"
 
+# ── RPM family detection ───────────────────────────────────────────────────
+# Fedora vs EL (CentOS/RHEL/Rocky) diverge on three things kube-setup hits:
+#   1. Docker CE repo path:   /linux/fedora/  vs  /linux/centos/
+#   2. ZFS release URL path:  /fedora/        vs  /epel/
+#   3. EPEL: doesn't exist on Fedora — skip it
+# Detect once here so each install_* function can branch cleanly. dnf5 (F41+)
+# also needs different `config-manager` invocation; that's handled by
+# _dnf_addrepo below.
+RPM_ID=""
+RPM_VER=""
+if [[ "$PM" == "dnf" && -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    RPM_ID="${ID:-}"
+    RPM_VER="${VERSION_ID:-}"
+    log "RPM family: ${RPM_ID} ${RPM_VER}"
+fi
+
+# Fedora rev (44 → 44) used for zfs-release fc-N fallback. Empty on EL.
+RPM_FEDORA_VER=""
+[[ "$RPM_ID" == "fedora" ]] && RPM_FEDORA_VER="$RPM_VER"
+
+# dnf4 vs dnf5: F41+ ships dnf5 by default, which moved `config-manager
+# --add-repo URL` to `config-manager addrepo --from-repofile=URL`. Old form
+# still works as a compat shim on most builds but throws warnings. Try the
+# new form first, fall back to the old. Returns 0 either way (callers gate
+# on the resulting repo file existing, not on this exit code).
+_dnf_addrepo() {
+    local url="$1"
+    dnf -y config-manager addrepo --from-repofile="$url" 2>/dev/null \
+      || dnf -y config-manager --add-repo "$url" 2>/dev/null \
+      || true
+}
+
 # ── Kernel modules & sysctl ────────────────────────────────────────────────
 setup_kernel() {
   log "Loading kernel modules for Kubernetes..."
@@ -69,9 +103,16 @@ install_containerd() {
   log "Installing containerd..."
 
   if [[ "$PM" == "dnf" ]]; then
-    # Add Docker CE repo for containerd.io (not in default CentOS repos)
+    # Docker CE repo provides containerd.io (not in default EL/Fedora repos).
+    # download.docker.com publishes per-distro repo files at /linux/<id>/ —
+    # path differs for fedora vs centos/rhel/rocky. Get the right one.
     if ! dnf list containerd.io 2>/dev/null | grep -q containerd; then
-      dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
+      local _docker_path
+      case "$RPM_ID" in
+        fedora)              _docker_path="fedora" ;;
+        centos|rhel|rocky|*) _docker_path="centos" ;;
+      esac
+      _dnf_addrepo "https://download.docker.com/linux/${_docker_path}/docker-ce.repo"
     fi
     dnf install -y containerd.io 2>/dev/null || dnf install -y containerd
   else
@@ -121,11 +162,41 @@ EOF
     for _pkg in kubeadm kubelet kubectl; do
       command -v "$_pkg" >/dev/null 2>&1 || die "$_pkg not installed after dnf"
     done
-    # Install ZFS if not already present (needed for ZFS CSI inside VMs)
+    # Install ZFS if not already present (needed for ZFS CSI inside VMs).
+    # zfsonlinux.org publishes per-distro release RPMs at two URL trees:
+    #   /epel/zfs-release-2-3.elN.noarch.rpm   for EL (CentOS/RHEL/Rocky)
+    #   /fedora/zfs-release-2-3.fcN.noarch.rpm for Fedora
+    # Fedora releases ship fast — fcN may not yet exist when the OS does.
+    # Same fc-N fallback klab uses for goldens: try fcN, then fc(N-1), then
+    # fc(N-2). DKMS will still build against the running kernel even with
+    # an "older" repo, since the userland tooling just needs zfs-dkms +
+    # the kmod build deps.
     if ! command -v zfs >/dev/null 2>&1; then
-      dnf install -y epel-release 2>/dev/null || true
-      dnf install -y kernel-devel-$(uname -r) kernel-headers-$(uname -r) dkms gcc make 2>/dev/null || true
-      dnf install -y https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm 2>/dev/null || true
+      # EPEL is EL-only; Fedora pretends it doesn't exist (and dnf install
+      # epel-release on Fedora throws "no match for argument: epel-release"
+      # noise). Skip on Fedora.
+      if [[ "$RPM_ID" != "fedora" ]]; then
+        dnf install -y epel-release 2>/dev/null || true
+      fi
+      dnf install -y "kernel-devel-$(uname -r)" "kernel-headers-$(uname -r)" dkms gcc make 2>/dev/null || true
+
+      local _zfs_url=""
+      if [[ -n "$RPM_FEDORA_VER" ]]; then
+        local _try
+        for _try in "$RPM_FEDORA_VER" "$((RPM_FEDORA_VER-1))" "$((RPM_FEDORA_VER-2))"; do
+          local _candidate="https://zfsonlinux.org/fedora/zfs-release-2-3.fc${_try}.noarch.rpm"
+          if curl -sfLI --max-time 10 "$_candidate" >/dev/null 2>&1; then
+            _zfs_url="$_candidate"
+            log "  zfs-release: using fc${_try} (host is fc${RPM_FEDORA_VER})"
+            break
+          fi
+        done
+      else
+        # EL family — single canonical path
+        _zfs_url="https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval '%{dist}').noarch.rpm"
+      fi
+      [[ -n "$_zfs_url" ]] && dnf install -y "$_zfs_url" 2>/dev/null || true
+
       dnf install -y zfs zfs-dkms 2>/dev/null || dnf install -y zfs 2>/dev/null || true
       modprobe zfs 2>/dev/null || true
     fi
@@ -316,7 +387,7 @@ ClientIdentifier=mac
 NETD
   systemctl enable systemd-networkd 2>/dev/null || true
 
-  # ifupdown fallback (Debian/Ubuntu only — CentOS uses NetworkManager)
+  # ifupdown fallback (Debian/Ubuntu only — RPM family uses NetworkManager)
   if [[ -d /etc/network ]]; then
     cat > /etc/network/interfaces <<'IFUP'
 auto lo

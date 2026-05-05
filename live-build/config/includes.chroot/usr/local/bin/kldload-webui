@@ -3759,9 +3759,14 @@ async def _firstboot_status(websocket):
     def _marker(name):
         return (marker_dir / f"{name}-ready").exists()
 
-    # ── klab goldens — expected if KLAB_ZFS_DEV=1 or a klab profile ──────
+    # ── klab goldens — expected when the template builds them ────────────
+    # 1.1.0+: template-driven. kvm/klab/zfslab build goldens; k8s does not.
+    # KLDLOAD_PROFILE collapses all four workload tiles to "kvm", so the
+    # legacy check on PROFILE in (devops, klab) was wrong — we look at
+    # KLDLOAD_TEMPLATE instead. Legacy fallback for 1.0.x manifests still
+    # honors KLDLOAD_KLAB_ZFS_DEV.
     klab_expected = _bool("KLDLOAD_KLAB_ZFS_DEV") or \
-                    manifest.get("KLDLOAD_PROFILE") in ("devops", "klab")
+                    manifest.get("KLDLOAD_TEMPLATE") in ("kvm", "klab", "zfslab", "devops", "ai")
     if klab_expected and _marker("klab"):
         components["klab_goldens"] = {"expected": True, "ready": True,
                                       "detail": "autodeploy marked klab ready"}
@@ -3793,7 +3798,8 @@ async def _firstboot_status(websocket):
     # test goldens?" because the UI told them the install was done. Now
     # ztest is its own gate: all-ready waits until every requested ztest
     # golden has a @golden snapshot.
-    ztest_expected = _bool("KLDLOAD_KLAB_ZFS_DEV") or _bool("KLDLOAD_ZFSLAB_MODE")
+    ztest_expected = _bool("KLDLOAD_KLAB_ZFS_DEV") or _bool("KLDLOAD_ZFSLAB_MODE") \
+                     or manifest.get("KLDLOAD_TEMPLATE") == "zfslab"
     if ztest_expected and _marker("klab-ztest"):
         components["klab_ztest"] = {"expected": True, "ready": True,
                                     "detail": "autodeploy marked klab-ztest ready"}
@@ -3816,8 +3822,11 @@ async def _firstboot_status(websocket):
     else:
         components["klab_ztest"] = {"expected": False, "ready": True, "detail": "not requested"}
 
-    # ── Kubernetes cluster — expected if K8S_BOOTSTRAP=1 ─────────────────
-    k8s_expected = _bool("KLDLOAD_K8S_BOOTSTRAP") or _bool("KLDLOAD_ENABLE_K8S")
+    # ── Kubernetes cluster — expected if template runs a cluster ─────────
+    # 1.1.0+: k8s/klab/zfslab templates all bootstrap a cluster. Legacy
+    # K8S_BOOTSTRAP/ENABLE_K8S still honored for kickstart flows.
+    k8s_expected = _bool("KLDLOAD_K8S_BOOTSTRAP") or _bool("KLDLOAD_ENABLE_K8S") \
+                   or manifest.get("KLDLOAD_TEMPLATE") in ("k8s", "klab", "zfslab", "devops", "ai")
     if k8s_expected and _marker("k8s"):
         components["kubernetes"] = {"expected": True, "ready": True,
                                     "detail": "autodeploy marked k8s ready"}
