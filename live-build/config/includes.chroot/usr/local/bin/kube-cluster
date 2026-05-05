@@ -44,33 +44,54 @@ if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 # All overridable via environment variables or --flags.
 # Auto-scale VM resources based on host hardware. The CP runs etcd + API
 # server + Cilium + MetalLB + Hubble and needs more RAM/CPU than workers.
-WORKERS="${WORKERS:-3}"
+# Default = 0 workers. The K8s cluster's job in the kldload appliance
+# is to host the observability/security plumbing (Tetragon, Hubble,
+# Cilium operator, Prometheus pods) — *not* to be the workload itself.
+# A single CP with the control-plane taint removed runs everything
+# the platform needs and saves three whole VMs. Users who actually
+# want a multi-node cluster spin workers up explicitly:
+#   kube-cluster bootstrap --workers 3
+# The release notes called this out for the zfslab profile already;
+# making it the global default brings every K8s install in line and
+# stops the 30-vCPU / 51-GB cluster eating the entire dev box.
+WORKERS="${WORKERS:-0}"
 DESTROY_ALL="${DESTROY_ALL:-0}"
 CILIUM_CLI_VERSION="${CILIUM_CLI_VERSION:-0.19.2}"
 _host_ram_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 16384)
 _host_cpus=$(nproc 2>/dev/null || echo 4)
-# Auto-scale: use ~80% of host RAM for VMs, split between CP and workers.
-# CP gets 2x worker RAM because it runs etcd + API + Cilium + MetalLB + Hubble.
-# Reserve ~12GB for the host OS + ZFS ARC cache.
-_vm_ram_mb=$(( (_host_ram_mb - 12000) ))  # available for VMs
-[[ $_vm_ram_mb -lt 8000 ]] && _vm_ram_mb=8000
-# CP gets 2 shares, each worker gets 1 share. Total shares = 2 + WORKERS
-_shares=$((2 + ${WORKERS:-3}))
-_per_share=$(( _vm_ram_mb / _shares ))
-# Clamp to reasonable bounds
-[[ $_per_share -gt 16384 ]] && _per_share=16384
-[[ $_per_share -lt 2048 ]] && _per_share=2048
-CP_RAM="${CP_RAM:-$(( _per_share * 2 ))}"
-RAM="${RAM:-${_per_share}}"
-# CPUs: CP gets half of host CPUs (min 4), workers get quarter (min 2)
-CP_CPUS="${CP_CPUS:-$(( _host_cpus / 2 > 4 ? _host_cpus / 2 : 4 ))}"
-CPUS="${CPUS:-$(( _host_cpus / 4 > 2 ? _host_cpus / 4 : 2 ))}"
-if [[ $_host_ram_mb -lt 16000 ]]; then
-  # <16GB host: tight — override to minimums
-  CP_RAM="${CP_RAM:-4096}"
-  RAM="${RAM:-2048}"
-  CP_CPUS="${CP_CPUS:-2}"
-  CPUS="${CPUS:-2}"
+# Sane fixed defaults — a bootstrap K8s cluster needs surprisingly little
+# at idle: kubeadm + apiserver + etcd + scheduler + controller-manager +
+# Cilium operator + Hubble agent on the CP, plus kubelet + Cilium agent
+# on workers. Stuffing 30 vCPU and 51 GB into the cluster (the 80%-host
+# auto-scale we shipped pre-2026-05-05) hogged the entire dev box,
+# leaving no room for klab goldens or the user's own workloads — bug
+# seen on fiend (24 cores / 63 GB) where kldload-cp was 12 vCPU / 20 GB
+# and three workers were 6 vCPU / 10 GB each (30 vCPU + 51 GB total).
+#
+# New defaults are fixed and predictable:
+#   CP:      4 vCPU / 8 GB   (fits etcd + api + control-plane + Cilium)
+#   Workers: 2 vCPU / 4 GB   (fits kubelet + Cilium agent + light pods)
+#   1 CP + 3 workers = 10 vCPU / 20 GB total — fits any modern dev box.
+#
+# Big-host users with real workloads override via env:
+#   CP_RAM=16384 CP_CPUS=8 RAM=8192 CPUS=4 kube-cluster bootstrap
+# Or via a future web-UI scaler. Auto-scaling DOWN is preserved for
+# tight hosts so a 16 GB laptop still boots a runnable cluster.
+CP_CPUS="${CP_CPUS:-4}"
+CP_RAM="${CP_RAM:-8192}"
+CPUS="${CPUS:-2}"
+RAM="${RAM:-4096}"
+# Auto-scale DOWN on tight hosts so we don't OOM the box. Threshold:
+# total RAM the K8s cluster will consume vs host RAM minus 8 GB host-
+# reserve. (host - 8GB > CP_RAM + WORKERS*RAM)
+_workers=${WORKERS:-3}
+_cluster_ram=$(( CP_RAM + _workers * RAM ))
+_host_budget=$(( _host_ram_mb - 8000 ))
+if [[ $_host_budget -lt $_cluster_ram ]]; then
+  CP_RAM=4096
+  RAM=2048
+  CP_CPUS=2
+  CPUS=2
 fi
 DISK="${DISK:-40}"
 GOLDEN="k8s-golden"
@@ -223,7 +244,7 @@ Commands:
   scale N     Add N more workers to existing cluster
 
 Options:
-  --workers N      Number of worker nodes (default: 3)
+  --workers N      Number of worker nodes (default: 0 — CP runs all platform pods)
   --ram MB         RAM per node in MB (default: 4096)
   --cpus N         vCPUs per node (default: 2)
   --disk GB        Disk per node in GB (default: 40)

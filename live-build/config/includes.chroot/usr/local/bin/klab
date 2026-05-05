@@ -154,10 +154,21 @@ declare -A DISTRO_FAMILY=(
 _host_ram_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 32768)
 _host_cpus=$(nproc 2>/dev/null || echo 8)
 _max_vms=${#DISTROS[@]}
-RAM="${RAM:-$(( (_host_ram_mb - 12000) / _max_vms ))}"
-[[ $RAM -lt 2048 ]] && RAM=2048
-[[ $RAM -gt 8192 ]] && RAM=8192
-CPUS="${CPUS:-$(( _host_cpus / _max_vms > 2 ? _host_cpus / _max_vms : 2 ))}"
+# Sane fixed defaults for klab VMs. Goldens just install ZFS once and
+# shut down — they don't need 8 GB. Test VMs running zfs-tests.sh
+# don't use much memory either; the test suite is mostly disk + small
+# in-kernel ZFS structures. Bug seen 2026-05-05: auto-scale was
+# allocating up to 8 GB / 4 vCPU per golden which wasted host budget
+# without any benefit. Override with RAM=8192 CPUS=4 klab golden ...
+# if your test load actually needs it.
+RAM="${RAM:-4096}"
+CPUS="${CPUS:-2}"
+# Auto-scale DOWN on tight hosts so we still boot. Reserve 8 GB for
+# the host + N×RAM for the VMs we plan to run.
+if [[ $(( _host_ram_mb - 8000 )) -lt $(( _max_vms * RAM )) ]]; then
+  RAM=2048
+  CPUS=2
+fi
 DISK="${DISK:-40}"
 
 # Hardware detection
