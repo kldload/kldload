@@ -483,9 +483,29 @@ find_cloud_image() {
       ;;
     fedora)
       # Asahi hosts often pick fedora — grab Fedora Cloud's arch-appropriate qcow2.
-      url="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/${_arch_rpm}/images/Fedora-Cloud-Base-Generic-44-1.6.${_arch_rpm}.qcow2"
-      dest="/var/lib/libvirt/isos/Fedora-Cloud-Base-44-${_arch_rpm}.qcow2"
-      warn "No cloud image found. Downloading Fedora 44 Cloud (${_arch_rpm})..."
+      # Fedora cloud images bump build numbers (44-1.6 → 1.7 → …) without a
+      # .latest. symlink. Resolve dynamically from the directory listing;
+      # fall back through F44 → F43 → F42 if newer is missing. Bug seen
+      # 2026-05-04: hardcoded -44-1.6 silently 404'd after Fedora published
+      # -1.7, kube-cluster bootstrap dead in the water.
+      local _ver _latest _base="https://download.fedoraproject.org/pub/fedora/linux/releases"
+      url=""
+      for _ver in 44 43 42; do
+        _latest=$(curl -sfL --max-time 10 "${_base}/${_ver}/Cloud/${_arch_rpm}/images/" 2>/dev/null \
+                   | grep -oE "Fedora-Cloud-Base-Generic-${_ver}-[0-9.]+\.${_arch_rpm}\.qcow2" \
+                   | sort -V -u | tail -1)
+        if [[ -n "$_latest" ]]; then
+          url="${_base}/${_ver}/Cloud/${_arch_rpm}/images/${_latest}"
+          dest="/var/lib/libvirt/isos/Fedora-Cloud-Base-${_ver}-${_arch_rpm}.qcow2"
+          warn "No cloud image found. Downloading: ${_latest}"
+          break
+        fi
+      done
+      if [[ -z "$url" ]]; then
+        url="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/${_arch_rpm}/images/Fedora-Cloud-Base-Generic-44-1.6.${_arch_rpm}.qcow2"
+        dest="/var/lib/libvirt/isos/Fedora-Cloud-Base-44-${_arch_rpm}.qcow2"
+        warn "Fedora cloud directory listing failed — using hardcoded fallback (may 404)"
+      fi
       ;;
     *)
       url="https://cloud.centos.org/centos/9-stream/${_arch_rpm}/images/CentOS-Stream-GenericCloud-9-latest.${_arch_rpm}.qcow2"

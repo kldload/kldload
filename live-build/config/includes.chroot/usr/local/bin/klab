@@ -1216,6 +1216,30 @@ build_golden_single() {
 
   mkdir -p "$ISO_DIR"
   local url="${CLOUD_IMAGES[$distro]}"
+
+  # Fedora cloud images bump their build number in the filename every
+  # ~2-3 weeks (Fedora-Cloud-Base-Generic-44-1.6 → 1.7 → 1.8 …) and
+  # there's no `.latest.` symlink on dl.fedoraproject.org. Hardcoding
+  # one specific build number means every Fedora cloud bump silently
+  # 404s the next golden build until someone notices and patches the
+  # script. Resolve dynamically: parse the directory listing, take the
+  # highest version-sorted filename. Falls back to the hardcoded URL
+  # if the listing fetch fails (offline / DNS down). If the F44 dir
+  # itself goes empty (e.g. mid-F45-transition), drops to F43.
+  if [[ "$distro" == "fedora" ]] && command -v curl >/dev/null 2>&1; then
+    local _ver _latest _base="https://download.fedoraproject.org/pub/fedora/linux/releases"
+    for _ver in 44 43 42; do
+      _latest=$(curl -sfL --max-time 10 "${_base}/${_ver}/Cloud/x86_64/images/" 2>/dev/null \
+                 | grep -oE "Fedora-Cloud-Base-Generic-${_ver}-[0-9.]+\.x86_64\.qcow2" \
+                 | sort -V -u | tail -1)
+      if [[ -n "$_latest" ]]; then
+        url="${_base}/${_ver}/Cloud/x86_64/images/${_latest}"
+        log "  Resolved fedora cloud image: ${_latest}"
+        break
+      fi
+    done
+  fi
+
   local img_file="${ISO_DIR}/${distro}-cloud.qcow2"
 
   # RHEL: clone from CentOS golden instead of downloading
