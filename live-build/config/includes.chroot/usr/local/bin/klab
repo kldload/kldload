@@ -1297,11 +1297,17 @@ build_golden_single() {
     local ci_iso
     ci_iso="$(make_cloud_init_iso "$name" "$name" "/var/lib/cloud/instance/klab-ready")"
 
+    local _console_log="/var/log/klab/${name}-console.log"
+    mkdir -p /var/log/klab
+    : > "$_console_log"
+
     log "  Booting RHEL golden VM (Secure Boot: OFF during build, ON for clones)..."
+    log "  Console log: tail -f ${_console_log}"
     virt-install --name "$name" --ram "$RAM" --vcpus "$CPUS" \
       --os-variant "${OS_VARIANTS[$distro]}" \
       --disk "path=${zdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
       --network bridge=virbr0,model=virtio --graphics none --noautoconsole --import \
+      --console "pty,log.file=${_console_log},log.append=on" \
       "${VIRT_GOLDEN_BOOT_ARGS[@]}" \
       2>&1 || die "Failed to boot RHEL golden VM"
 
@@ -1403,11 +1409,23 @@ build_golden_single() {
   local ci_iso
   ci_iso="$(make_cloud_init_iso "$name" "$name" "/var/lib/cloud/instance/klab-ready")"
 
+  # Capture serial console to a file so the user (and the wait loops
+  # below) can see exactly what the VM is doing — kernel boot messages,
+  # cloud-init output, dnf transactions, the actual reason it's stuck.
+  # Without this, klab just sees timeouts and prints `<no output yet>`
+  # while the VM might be deep in a dnf retry loop or waiting on a 404.
+  # User-side equivalent: `sudo virsh console ${name}` (Esc+] to detach).
+  local _console_log="/var/log/klab/${name}-console.log"
+  mkdir -p /var/log/klab
+  : > "$_console_log"
+
   log "  Booting golden VM (Secure Boot: OFF during build, ON for clones)..."
+  log "  Console log: tail -f ${_console_log}"
   virt-install --name "$name" --ram "$RAM" --vcpus "$CPUS" \
     --os-variant "${OS_VARIANTS[$distro]}" \
     --disk "path=${zdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
     --network bridge=virbr0,model=virtio --graphics none --noautoconsole --import \
+    --console "pty,log.file=${_console_log},log.append=on" \
     "${VIRT_GOLDEN_BOOT_ARGS[@]}" \
     2>&1 || die "Failed to boot golden VM for ${distro}"
 
@@ -1420,8 +1438,21 @@ build_golden_single() {
   wait_for_ssh "$golden_ip" 300 || die "SSH timeout on ${name}"
 
   log "  Waiting for cloud-init..."
-  for _ in $(seq 1 90); do
+  local _ci_seen=0 _i
+  for _i in $(seq 1 90); do
     _ssh_cmd "$golden_ip" "test -f /var/lib/cloud/instance/klab-ready" 2>/dev/null && break
+    # every 30s (6 sleeps of 5s) show the new lines from the console log
+    # so the operator sees what the VM is actually doing (dnf retries,
+    # kernel oopses, etc.) instead of staring at silence.
+    if (( _i % 6 == 0 )) && [[ -r "$_console_log" ]]; then
+      local _sz; _sz=$(wc -l < "$_console_log" 2>/dev/null || echo 0)
+      if (( _sz > _ci_seen )); then
+        tail -n $((_sz - _ci_seen)) "$_console_log" 2>/dev/null \
+          | tr -cd '[:print:]\n' | tail -4 \
+          | while IFS= read -r _ln; do echo -e "  ${C}[console]${N}  ${_ln}" >&2; done
+        _ci_seen=$_sz
+      fi
+    fi
     sleep 5
   done
 
