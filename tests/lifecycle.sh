@@ -205,13 +205,15 @@ ssh_live 'sudo bash -c "setsid nohup /usr/sbin/kldload-install-target --config /
 # Poll until the install-target process exits. Ceiling 60 min.
 for i in $(seq 1 360); do
   sleep 10
-  # Anchor on the full path so pgrep doesn't match its own SSH session.
-  # Bug seen 2026-05-06: `pgrep -f kldload-install-target` matched the
-  # parent bash invoked by sshd (whose cmdline contained the pattern as
-  # a literal arg), so the loop never saw the install exit and ran out
-  # the 60-min ceiling instead. Real install cmdline starts with the
-  # absolute path; SSH session's cmdline does not.
-  if ! ssh_live 'pgrep -f /usr/sbin/kldload-install-target >/dev/null' 2>/dev/null; then
+  # Use the bracket trick so pgrep doesn't match its own SSH session.
+  # `pgrep -f kldload-install-target` matched the parent bash whose argv
+  # contained the literal pattern; switching to /usr/sbin/... didn't help
+  # because the SSH session's argv has the full path verbatim too. The
+  # bracket form (regex char class) keeps matching the real process
+  # (whose cmdline is /usr/sbin/...) while NOT matching the literal
+  # argv `[/]usr/sbin/...` of the SSH bash session. Bug took two passes
+  # to nail down — fiend CI runs 2026-05-06-015029 and -021928.
+  if ! ssh_live 'pgrep -f "[/]usr/sbin/kldload-install-target" >/dev/null' 2>/dev/null; then
     if ssh_live 'sudo grep -q "Install completed successfully" /var/log/installer/kldload-installer.log 2>/dev/null' 2>/dev/null; then
       ok "install completed (after ~$((i*10/60)) min)"
       break

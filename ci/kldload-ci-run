@@ -76,6 +76,22 @@ log()  { printf '[%(%F %T)T] [ci] %s\n' -1 "$*"; }
 warn() { printf '[%(%F %T)T] [ci] WARN: %s\n' -1 "$*" >&2; }
 die()  { printf '[%(%F %T)T] [ci] FATAL: %s\n' -1 "$*" >&2; exit 3; }
 
+# ── Concurrency guard ─────────────────────────────────────────────────────
+# Bug seen 2026-05-06: kldload-ci.timer fired at 03:00 while a manual
+# --skip-build run was still polling — both raced for the
+# kldload-smoke-fedora-core VM name and stomped on each other's results.
+# Use flock against a fixed lockfile; if held, refuse to start. The
+# --status / --report / --diff-last query subcommands skip this gate
+# (they exit before reaching here, see top of script).
+LOCK_FILE="${CI_ROOT}/.run.lock"
+exec 9>"$LOCK_FILE" || die "cannot open lock file ${LOCK_FILE}"
+if ! flock -n 9; then
+    holder="$(cat "${CI_ROOT}/.run.holder" 2>/dev/null || echo unknown)"
+    die "another kldload-ci-run is in progress (holder: ${holder}) — refusing to start"
+fi
+echo "$$ $(date -u +%FT%TZ)" > "${CI_ROOT}/.run.holder"
+trap 'rm -f "${CI_ROOT}/.run.holder"' EXIT
+
 # ── SQLite schema ─────────────────────────────────────────────────────────
 init_db() {
   sqlite3 "$DB_FILE" <<'SQL'
