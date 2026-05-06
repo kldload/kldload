@@ -389,6 +389,20 @@ k_install_system_files() {
     fi
   done
 
+  # ── Universal install markers (every profile, including core) ─────────────
+  # These three files identify the install to runtime tools and the smoke
+  # test suite. They are NOT kldload-feature artifacts — they're "this box
+  # came from the kldload installer, build X, edition Y, BE Z" metadata
+  # that even a stock-distro core install should ship. Bug seen 2026-05-06
+  # by fiend CI: smoke-core.sh fails 3 tests on every distro because the
+  # markers were written further down inside the non-core branch.
+  mkdir -p "${target}/etc/kldload"
+  [[ -f /etc/kldload-build-sha ]] && cp /etc/kldload-build-sha "${target}/etc/kldload-build-sha"
+  [[ -f /etc/kldload-build-id  ]] && cp /etc/kldload-build-id  "${target}/etc/kldload-build-id"
+  [[ -f /etc/kldload/edition   ]] && cp /etc/kldload/edition   "${target}/etc/kldload/edition"
+  echo "${_profile}" > "${target}/etc/kldload/profile"
+  printf '%s\n' "${root_ds}" > "${target}/etc/kldload/boot-environment"
+
   # ── Core profile: skip all kldload tools, sanoid, webui, snapshot hooks ────
   # Core gets ZFS on root + boot environments + stock distro. Nothing else.
   # Bug seen 2026-05-06 (caught by fiend CI): the original if/else

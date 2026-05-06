@@ -901,6 +901,22 @@ if ! k_have_func k_install_tools; then
   k_install_tools() {
     local target="${KLDLOAD_TARGET_MNT}"
     local log="${KLDLOAD_LOG_DIR}/bootstrap.log"
+    local _profile="${KLDLOAD_PROFILE:-server}"
+
+    # Core profile: ZFS-on-root + stock distro + nothing kldload-specific.
+    # The non-core branch below copies kldload-firstboot, kldload-webui (via
+    # the kldload-* glob), snapshot scripts, APT snapshot hooks, and the
+    # full systemd unit set — none of which belong on a core install per
+    # CLAUDE.md spec ("no k* tools/webui/sanoid/darksites").
+    # Bug seen 2026-05-06 by fiend CI matrix: kldload-webui leaked into
+    # /usr/local/sbin on every core combo because the kldload-* glob at
+    # the bottom of this function fires unconditionally. Companion fix
+    # to commit 5f211cb (the profiles.sh early-return for core).
+    if [[ "$_profile" == "core" ]]; then
+      k_log "Core profile — skipping kldload management tools install."
+      return 0
+    fi
+
     k_log "Installing management tools to target"
 
     # /usr/sbin management binaries

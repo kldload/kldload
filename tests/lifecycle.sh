@@ -218,9 +218,21 @@ for i in $(seq 1 360); do
       ok "install completed (after ~$((i*10/60)) min)"
       break
     else
-      log "installer exited without success marker — last 40 lines:"
-      ssh_live 'sudo tail -40 /var/log/installer/kldload-installer.log /var/log/installer/bootstrap.log 2>/dev/null' \
-        | tee -a "$LOG" || true
+      # Capture all relevant install logs — not just kldload-installer.log,
+      # which may not exist yet if the installer aborted in pre-flight.
+      # /tmp/install.log is the smoke-test's stdout redirect — captures
+      # the very earliest output. Bug seen 2026-05-06: ubuntu installs
+      # aborted at ~50s and the original tail returned empty (logs not
+      # yet created), so the smoke log had nothing to triage from.
+      log "installer exited without success marker — debug:"
+      ssh_live 'sudo bash -c "
+        echo === FILES === ;
+        ls -la /tmp/install.log /var/log/installer/*.log /var/log/kldload/*.log 2>/dev/null ;
+        for f in /tmp/install.log /var/log/installer/kldload-installer.log /var/log/installer/bootstrap.log /var/log/installer/storage.log /var/log/installer/zfs.log ; do
+          [[ -s \$f ]] || continue ;
+          echo === tail \$f === ;
+          tail -60 \$f ;
+        done"' 2>&1 | tee -a "$LOG" || true
       # Auto-bundle the live env's state so the failure is debuggable
       # without ssh'ing back in. The tool ships in the live ISO itself,
       # so it's available even before the install completes.
