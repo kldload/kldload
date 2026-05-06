@@ -115,10 +115,24 @@ virt-install --name "$VM_NAME" --ram "$VM_MEMORY" --vcpus "$VM_CORES" \
 # Tries qemu-guest-agent first (most reliable when present), then DHCP lease,
 # then a MAC-based ARP lookup as a last resort.
 get_vm_ip() {
+  # Three sources, in order of preference:
+  #   1. qemu-guest-agent (if running in the guest) — fastest, but emits
+  #      ALL interfaces including lo (127.0.0.1) and link-local — those
+  #      MUST be filtered out, otherwise the function returns 127.0.0.1
+  #      and the caller endlessly fails ssh against loopback. Bug seen
+  #      2026-05-05 on fiend's first CI run: smoke-test waited 23 min,
+  #      ssh'd to 127.0.0.1 every iteration, declared "live env never
+  #      came up" while the VM had been ssh-reachable on its real IP.
+  #   2. virsh net-dhcp-leases — authoritative when libvirt's default
+  #      network's dnsmasq leased the address (i.e. the VM is on virbr0).
+  #   3. fail.
   local mac ip
   mac="$(virsh domiflist "$VM_NAME" 2>/dev/null | awk 'NR>2 && $1!="" {print $5; exit}')"
   ip="$(virsh domifaddr "$VM_NAME" --source agent 2>/dev/null \
-          | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1)"
+          | awk '/ipv4/ {print $4}' \
+          | cut -d/ -f1 \
+          | grep -vE '^(127\.|169\.254\.|0\.0\.0\.0$)' \
+          | head -1)"
   [[ -n "$ip" ]] && { echo "$ip"; return 0; }
   ip="$(virsh net-dhcp-leases default 2>/dev/null \
           | awk -v m="$mac" 'tolower($3)==tolower(m) {print $5}' | cut -d/ -f1 | head -1)"
