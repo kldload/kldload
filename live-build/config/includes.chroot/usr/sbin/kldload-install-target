@@ -903,17 +903,28 @@ if ! k_have_func k_install_tools; then
     local log="${KLDLOAD_LOG_DIR}/bootstrap.log"
     local _profile="${KLDLOAD_PROFILE:-server}"
 
-    # Core profile: ZFS-on-root + stock distro + nothing kldload-specific.
-    # The non-core branch below copies kldload-firstboot, kldload-webui (via
-    # the kldload-* glob), snapshot scripts, APT snapshot hooks, and the
-    # full systemd unit set — none of which belong on a core install per
-    # CLAUDE.md spec ("no k* tools/webui/sanoid/darksites").
-    # Bug seen 2026-05-06 by fiend CI matrix: kldload-webui leaked into
-    # /usr/local/sbin on every core combo because the kldload-* glob at
-    # the bottom of this function fires unconditionally. Companion fix
-    # to commit 5f211cb (the profiles.sh early-return for core).
+    # ── Universal diagnostic tools (every profile, including core) ────────
+    # kldload-debug-bundle is a diagnostic harvester — collects journals,
+    # dmesg, ZFS state, etc. into a tarball for support. It's NOT a
+    # kldload feature, it's incident-response plumbing that any kldload
+    # install should ship. Install it before the core early-return.
+    # Bug seen 2026-05-06 (matrix run #2): smoke-core expected
+    # kldload-debug-bundle present, my earlier core-skip stripped it.
+    local lsbin_dst="${target}/usr/local/sbin"
+    mkdir -p "${lsbin_dst}"
+    for f in kldload-debug-bundle kldload-recovery; do
+      [[ -f "/usr/local/sbin/${f}" ]] && \
+        install -m 0755 "/usr/local/sbin/${f}" "${lsbin_dst}/${f}"
+    done
+
+    # Core profile: ZFS-on-root + stock distro + nothing kldload-specific
+    # (beyond the diagnostic tools above). The non-core branch below
+    # copies kldload-firstboot, kldload-webui (via the kldload-* glob),
+    # snapshot scripts, APT snapshot hooks, and the full systemd unit
+    # set — none belong on a core install per CLAUDE.md spec ("no k*
+    # tools/webui/sanoid/darksites").
     if [[ "$_profile" == "core" ]]; then
-      k_log "Core profile — skipping kldload management tools install."
+      k_log "Core profile — skipping kldload management tools (debug-bundle + recovery installed)."
       return 0
     fi
 
