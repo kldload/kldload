@@ -34,7 +34,13 @@ test_succeeds "Pool scrub runs" "zpool scrub rpool"
 _section "ZFS Datasets"
 
 test_dataset "rpool/ROOT exists" "rpool/ROOT"
-test_output_contains "Root dataset mounted at /" "zfs get -H -o value mountpoint rpool/ROOT/*" "/"
+# rpool/ROOT/* is NOT a valid zfs dataset name — `zfs get rpool/ROOT/*`
+# fails with "invalid character '*' in name". Use -r to recurse into
+# rpool/ROOT/<BE> children. Bug seen 2026-05-06 on fiend CI: the eval
+# failure inside test_output_contains cascaded through set -e and
+# halted smoke-core.sh after the rpool/ROOT exists check, with no
+# FAIL line printed (silent abort).
+test_output_contains "Root dataset mounted at /" "zfs get -rH -o value mountpoint rpool/ROOT" "/"
 test_dataset "rpool/home exists" "rpool/home"
 test_dataset "rpool/var exists" "rpool/var"
 test_dataset "rpool/var/log exists" "rpool/var/log"
