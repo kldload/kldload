@@ -190,7 +190,9 @@ KLDLOAD_ENABLE_KVM=$([[ "$PROFILE" == "kvm" ]] && echo 1 || echo 0)
 KLDLOAD_TIMEZONE=UTC
 EOF
 
-scp "${SSH_OPTS[@]}" "$ANSWERS" "live@${VM_IP}:/tmp/answers.env" >>"$LOG" 2>&1 \
+# scp without sshpass falls back to pubkey auth (no key installed in the
+# live ISO) and fails silently. Bug seen 2026-05-05 on fiend's CI run.
+sshpass -p live scp "${SSH_OPTS[@]}" "$ANSWERS" "live@${VM_IP}:/tmp/answers.env" >>"$LOG" 2>&1 \
   || fail "couldn't scp answers to live env"
 ok "answers staged → /tmp/answers.env"
 
@@ -219,7 +221,7 @@ for i in $(seq 1 360); do
         local _bundle
         _bundle="$(ssh_live 'ls -t /tmp/kldload-debug-*.tar.gz 2>/dev/null | head -1')"
         if [[ -n "$_bundle" ]]; then
-          scp "${SSH_OPTS[@]}" "live@${VM_IP}:${_bundle}" "/tmp/" >>"$LOG" 2>&1 \
+          sshpass -p live scp "${SSH_OPTS[@]}" "live@${VM_IP}:${_bundle}" "/tmp/" >>"$LOG" 2>&1 \
             && ok "debug bundle saved → /tmp/$(basename "$_bundle")"
         fi
       fi
@@ -253,7 +255,7 @@ ssh_admin() { sshpass -p admin ssh "${SSH_OPTS[@]}" "admin@${VM_IP_NEW}" "$@"; }
 
 # ── Upload + run the existing post-install smoke suite ───────────────────────
 log "uploading tests/ to installed target"
-scp "${SSH_OPTS[@]}" -r "$ROOT/tests" "admin@${VM_IP_NEW}:/tmp/" >>"$LOG" 2>&1 \
+sshpass -p admin scp "${SSH_OPTS[@]}" -r "$ROOT/tests" "admin@${VM_IP_NEW}:/tmp/" >>"$LOG" 2>&1 \
   || fail "couldn't upload tests/ to installed target"
 
 log "running smoke-auto.sh on the installed target"
