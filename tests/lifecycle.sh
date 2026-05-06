@@ -127,7 +127,13 @@ get_vm_ip() {
 }
 
 wait_for_ssh() {
-  local who="$1" pass="$2" max="${3:-60}"  # max iterations of 5s = 5 min default
+  # Default max=180 iterations × 5s = 15 min. The kldload live ISO is
+  # ~5 GB squashfs + ZFS rootfs init + all the kldload tools loading.
+  # On a 4-core VM backed by qcow2-on-ZFS (smoke-test default) the live
+  # env routinely needs 7-10 min from -boot to ssh-ready. 5 min was too
+  # tight — caused spurious "live env never came up" failures in CI.
+  # Bug seen 2026-05-05 on fiend's first CI run (smoke-test fedora-core).
+  local who="$1" pass="$2" max="${3:-180}"
   local ip
   for _ in $(seq 1 "$max"); do
     ip="$(get_vm_ip 2>/dev/null || true)"
@@ -143,7 +149,7 @@ wait_for_ssh() {
 }
 
 log "waiting for live env DHCP + sshd"
-VM_IP="$(wait_for_ssh live live 60)" \
+VM_IP="$(wait_for_ssh live live 180)" \
   || fail "live env never came up — VNC: $(virsh vncdisplay "$VM_NAME" 2>/dev/null || echo n/a)"
 ok "live env up at $VM_IP"
 
@@ -225,7 +231,7 @@ virt-xml "$VM_NAME" --edit --boot hd,cdrom >>"$LOG" 2>&1 \
 virsh start "$VM_NAME" >>"$LOG" 2>&1 || fail "VM didn't restart after shutdown"
 
 log "waiting for installed-target sshd"
-VM_IP_NEW="$(wait_for_ssh admin admin 60)" \
+VM_IP_NEW="$(wait_for_ssh admin admin 180)" \
   || fail "installed system never came up — VNC: $(virsh vncdisplay "$VM_NAME" 2>/dev/null || echo n/a)"
 ok "installed target up at $VM_IP_NEW"
 
