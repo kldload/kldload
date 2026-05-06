@@ -391,8 +391,15 @@ k_install_system_files() {
 
   # ── Core profile: skip all kldload tools, sanoid, webui, snapshot hooks ────
   # Core gets ZFS on root + boot environments + stock distro. Nothing else.
+  # Bug seen 2026-05-06 (caught by fiend CI): the original if/else
+  # structure here protected only the immediate next stanza — the
+  # kldload-webui copy + service enable + dozens of other steps farther
+  # down ran for ALL profiles including core. The smoke-test correctly
+  # caught a kldload-webui binary in /usr/local/bin on a core install.
+  # Belt-and-suspenders: early-return for core in addition to the else.
   if [[ "$_profile" == "core" ]]; then
     k_log "Core profile — skipping kldload tools, sanoid, webui, snapshot hooks."
+    return 0
   else
 
   # ── Sanoid snapshot automation ─────────────────────────────────────────────
