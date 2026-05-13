@@ -55,15 +55,45 @@ test_file "Boot environment marker" "/etc/kldload/boot-environment"
 # ── EFI / Bootloader ────────────────────────────────────────────────────────
 _section "EFI / Bootloader"
 
-test_succeeds "EFI partition mounted" "mountpoint -q /boot/efi"
-test_dir "EFI directory exists" "/boot/efi/EFI"
-
-# Check for ZFSBootMenu
-if find /boot/efi -name "zfsbootmenu*" -o -name "ZFSBootMenu*" -o -name "vmlinuz*" 2>/dev/null | grep -q .; then
-  _pass "ZFSBootMenu/kernel in EFI"
-else
-  _warn "ZFSBootMenu in EFI" "no ZFSBootMenu or kernel found in /boot/efi"
-fi
+# Note: kldload deliberately does NOT keep /boot/efi mounted at runtime —
+# the kernel-install hook mounts it on demand during kernel updates and
+# unmounts immediately. So checking "is /boot/efi mounted right now" gives
+# a false negative on a healthy idle system. We validate the ESP exists
+# and contains the expected EFI tree by mounting read-only into a tmp dir
+# for the duration of the checks. Caught 2026-05-13 on first clean F44
+# install where the old "mountpoint -q /boot/efi" check was the only FAIL
+# in an otherwise-green run.
+# Wrap in set +e so a quirk of the discovery commands (findmnt return
+# codes, pipefail interactions) can't take down the script itself.
+(
+  set +e
+  _esp_dev=$(findmnt -no SOURCE /boot/efi 2>/dev/null)
+  if [[ -z "$_esp_dev" ]]; then
+    _esp_dev=$(lsblk -lno NAME,PARTTYPE 2>/dev/null \
+               | awk 'tolower($2)=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"{print "/dev/"$1; exit}')
+  fi
+  if [[ -n "$_esp_dev" && -b "$_esp_dev" ]]; then
+    _pass "ESP partition exists: $_esp_dev"
+    _esp_mnt=$(mktemp -d)
+    if mount -o ro "$_esp_dev" "$_esp_mnt" 2>/dev/null; then
+      if [[ -d "$_esp_mnt/EFI" ]]; then _pass "EFI/ tree present on ESP"
+      else _fail "EFI/ tree on ESP" "no EFI/ directory found on $_esp_dev"; fi
+      if find "$_esp_mnt" -maxdepth 4 \
+              \( -name 'zfsbootmenu*' -o -name 'ZFSBootMenu*' -o -name 'vmlinuz*' \) \
+              2>/dev/null | grep -q .; then
+        _pass "ZFSBootMenu/kernel on ESP"
+      else
+        _warn "ZFSBootMenu on ESP" "no kernel/ZBM found on $_esp_dev"
+      fi
+      umount "$_esp_mnt" 2>/dev/null
+    else
+      _fail "ESP mountable" "could not read-only mount $_esp_dev"
+    fi
+    rmdir "$_esp_mnt" 2>/dev/null
+  else
+    _fail "ESP partition exists" "no EFI System Partition found via findmnt or lsblk"
+  fi
+)
 
 test_file "Hostid configured" "/etc/hostid"
 

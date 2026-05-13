@@ -300,10 +300,20 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
   local _zfs_compat_target="" _zfs_compat_reason=""
   local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-44}"
   case "${KLDLOAD_DISTRO:-centos}" in
-    centos|rocky|rhel)
-      # EL9 = zfs 2.2 ; EL10 (when it lands) likely 2.3
+    centos|rocky)
+      # EL9 = zfs 2.2 (Rocky 9 + CentOS Stream 9 stay on this branch).
       _zfs_compat_target="openzfs-2.2-linux"
-      _zfs_compat_reason="EL9 (centos/rocky/rhel 9) ships zfs 2.2"
+      _zfs_compat_reason="EL9 (centos/rocky 9) ships zfs 2.2"
+      ;;
+    rhel)
+      # RHEL 10 (GA May 2025, kernel 6.12) — OpenZFS publishes 2.3.x for el10.
+      # If 2.3 DKMS won't build against the running kernel, the resolver loop
+      # at line ~340 falls back through openzfs-2.2-linux. KLDLOAD_RELEASE=9
+      # users get the EL9 profile anyway (we map by distro, not release here —
+      # if someone pins KLDLOAD_RELEASE=9 with distro=rhel the resolver still
+      # picks a working profile, just a more conservative one).
+      _zfs_compat_target="openzfs-2.3-linux"
+      _zfs_compat_reason="RHEL 10 ships zfs 2.3 (el10 OpenZFS repos)"
       ;;
     fedora)
       if [[ "${_fedora_rel}" -ge 44 ]]; then

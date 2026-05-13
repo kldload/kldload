@@ -29,11 +29,33 @@ log "Installing build tooling (createrepo_c, dnf-plugins-core)..."
 dnf install -y --setopt=install_weak_deps=False createrepo_c dnf-plugins-core >/dev/null 2>&1 || \
     log "WARNING: could not install createrepo_c — repo metadata step will fail"
 
-# Enable RPMFusion (ZFS and other multimedia/kernel modules often live here on Fedora).
+# Enable RPMFusion free + nonfree.
+#   free    — ZFS-adjacent, multimedia codecs, ffmpeg with full codec list
+#   nonfree — akmod-nvidia (the canonical Fedora NVIDIA driver path; NVIDIA's
+#             own CUDA repo lags Fedora releases by 6-12 months and serves
+#             404 for fedora44 as of 2026-05-13. RPM Fusion is the only
+#             reliable source of akmod-nvidia for current Fedora.)
 if ! rpm -q rpmfusion-free-release 2>/dev/null >/dev/null; then
     log "Adding RPMFusion free repo..."
     dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${RELEASE}.noarch.rpm" 2>/dev/null || \
         log "NOTE: RPMFusion free release for fc${RELEASE} not available — may limit package coverage"
+fi
+if ! rpm -q rpmfusion-nonfree-release 2>/dev/null >/dev/null; then
+    log "Adding RPMFusion nonfree repo (for akmod-nvidia)..."
+    dnf install -y "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${RELEASE}.noarch.rpm" 2>/dev/null || \
+        log "NOTE: RPMFusion nonfree release for fc${RELEASE} not available — NVIDIA darksite path unavailable"
+fi
+
+# NVIDIA container toolkit repo (distro-agnostic, always current, no version lag).
+# Used for GPU passthrough into pods on the K8s template. Separate from the
+# CUDA driver repo (which is the unreliable one). This one just ships
+# userspace tooling: nvidia-container-runtime + libnvidia-container, both
+# of which CRI-O / containerd hook into to mount /dev/nvidia* into containers.
+if [[ ! -f /etc/yum.repos.d/nvidia-container-toolkit.repo ]]; then
+    log "Adding NVIDIA Container Toolkit repo (distro-agnostic)..."
+    curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
+        > /etc/yum.repos.d/nvidia-container-toolkit.repo 2>/dev/null \
+      || log "NOTE: could not fetch nvidia-container-toolkit.repo — GPU-in-container path will fall back to internet at install time"
 fi
 
 # Add OpenZFS for Fedora if available. F44 is brand-new (Apr 2026) — the
@@ -47,7 +69,18 @@ if ! rpm -q zfs-release 2>/dev/null >/dev/null; then
     _zfsrel_ok=0
     for _rel in "${RELEASE}" 43; do
         for _rev in 3-0 2-10 2-9 2-8 2-7 2-5 2-4 2-3; do
-            if dnf install -y "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_rel}.noarch.rpm" 2>/dev/null; then
+            # IMPORTANT: --setopt=install_weak_deps=False is load-bearing.
+            # zfs-release-2-3.fc43 has a `Recommends: zfs` that triggers
+            # autoinstall of zfs+zfs-dkms when weak deps are on (default).
+            # zfs-dkms-2.4.1.fc43 carries `Conflicts: kernel-uname-r > 6.19.999`
+            # so when Fedora 44 updates to kernel 7.0.x (which it did 2026-05-07,
+            # right when matrix #4 went red), this dnf invocation fails the
+            # whole build — even though we only wanted the repo metadata, not
+            # the packages. We pull zfs at darksite-download time via the
+            # explicit PKGS_AVAILABLE list, not via Recommends from the repo
+            # config RPM. Without this flag, every fresh F44 build fails.
+            if dnf install -y --setopt=install_weak_deps=False \
+                   "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_rel}.noarch.rpm" 2>/dev/null; then
                 log "OpenZFS repo enabled via zfs-release-${_rev}.fc${_rel}"
                 _zfsrel_ok=1
                 break 2
@@ -104,6 +137,7 @@ read_package_set "target-base"
 read_package_set "target-server"
 read_package_set "target-desktop"
 read_package_set "target-kubernetes"
+read_package_set "target-nvidia"
 
 # Fedora-specific additions (DKMS toolchain + ZFS build deps + Fedora-
 # namespace replacements for EL-only names). This set is only looked up

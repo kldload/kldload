@@ -68,11 +68,41 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   # and pressing the same key again closes it. User controls what's
   # running, nothing steals CPU/memory just because the drawer is open.
   tmux new-session -d -s $SESSION -n home
+  # Session-level survivability:
+  #   destroy-unattached off — when ttyd's browser tab disconnects momentarily
+  #     (network blip, iframe reload, F-key window churn under load), tmux
+  #     would otherwise destroy the session as soon as the last client
+  #     detaches. That's what caused the 2026-05-12 "press enter to reconnect"
+  #     → hard-refresh-required loop on F11+shift-arrow navigation: tcplife
+  #     exited fast, last client detached during the race, session GC'd,
+  #     reconnect found nothing to attach to.
+  #   remain-on-exit on — when an F-key window's command exits (bcc tool
+  #     fails on a missing tracepoint, htop dies on OOM, etc.) the window
+  #     stays with the last screen of output visible. Without this, the
+  #     window closes silently and the operator never sees WHY a tool
+  #     failed; they just see the window disappear.
+  tmux set-option -g destroy-unattached off
+  tmux set-option -g remain-on-exit on
   # The home tab greets the user with an ASCII-art cheatsheet covering
   # every key binding. `menu` is aliased so a user who cleared the screen
   # can type it to redraw. _kconsole-home uses 256-color ANSI; falls back
   # to plain text if TERM doesn't support color.
-  tmux send-keys -t $SESSION:home "alias menu='_kconsole-home'; _kconsole-home" Enter
+  tmux send-keys -t $SESSION:home "alias menu='_kconsole-home'; alias help='kldload-help'; _kconsole-home" Enter
+
+  # Help is delivered as a F1-toggled popup rather than a permanent window.
+  # The earlier design used a separate `help` window (2:help in the tab
+  # strip) which (a) took up window slot, (b) required prefix+2 / S-Right
+  # navigation to reach, (c) couldn't easily be dismissed once open. A
+  # tmux 3.2+ display-popup gives us the right UX: one keystroke opens the
+  # operator catalog over the current pane, Ctrl-D / exit closes it back
+  # to wherever you were. The popup is 90%×90% so kldload-mgmt's command
+  # reference is fully visible; `kldload-help` and `help <topic>` work
+  # inside the bash that runs after the catalog renders.
+  #
+  # On tmux 3.4+ pressing F1 while a popup is open auto-closes it (true
+  # toggle); on 3.2/3.3 a second F1 would open a stacked popup, which is
+  # ugly but not broken. The live env (tmux 3.6a) has the toggle natively.
+  tmux bind -n F1 display-popup -E -w 90% -h 90% -d /root "/usr/local/bin/kldload-mgmt"
 
   # ── Primary F-keys (content panes) ────────────────────────────────
   # Bind by window NAME (=name) not index so closing/reordering doesn't

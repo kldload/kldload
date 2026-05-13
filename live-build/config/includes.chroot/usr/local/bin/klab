@@ -85,7 +85,14 @@ declare -A CLOUD_IMAGES=(
   [debian]="https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-genericcloud-amd64-daily.qcow2"
   [ubuntu]="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
   [arch]="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
-  [rhel]="REQUIRES_MANUAL_DOWNLOAD"
+  # RHEL 10 KVM Guest Image: Red Hat doesn't publish an anonymous URL —
+  # the user provides one of (in precedence order):
+  #   1. KLAB_RHEL_IMAGE=/path/to/qcow2   (local file)
+  #   2. /var/lib/klab/images/rhel-10-cloud.qcow2   (canonical drop-in)
+  #   3. KLAB_RHEL_IMAGE_URL=<one-shot Customer Portal URL>   (we curl it)
+  # See build_golden_single() rhel branch. Sentinel kept for any caller
+  # iterating CLOUD_IMAGES.
+  [rhel]="REQUIRES_USER_PROVIDED_IMAGE"
 )
 
 declare -A OS_VARIANTS=(
@@ -95,7 +102,9 @@ declare -A OS_VARIANTS=(
   [debian]="debian12"
   [ubuntu]="ubuntu24.04"
   [arch]="archlinux"
-  [rhel]="centos-stream9"
+  # RHEL 10 first; older osinfo-dbs (CentOS 9 host, Fedora <43) won't know
+  # rhel10.0 — the resolver below picks the closest available alternative.
+  [rhel]="rhel10.0"
 )
 
 # _resolve_os_variants: replace any OS_VARIANTS entry that this host's
@@ -129,6 +138,13 @@ _resolve_os_variants() {
         done ;;
       centos-stream*)
         for _try in centos-stream9 centos-stream8 centos9; do
+          grep -qxF "$_try" <<<"$_known" && { _fallback="$_try"; break; }
+        done ;;
+      rhel*)
+        # RHEL 10 → 9.4 → CentOS Stream 10 → CentOS Stream 9 — close enough
+        # for virtio/UEFI hints. The guest still self-identifies correctly
+        # via /etc/redhat-release; os-variant only affects libvirt defaults.
+        for _try in rhel10.0 rhel9.4 rhel9.0 centos-stream10 centos-stream9; do
           grep -qxF "$_try" <<<"$_known" && { _fallback="$_try"; break; }
         done ;;
     esac
@@ -1281,12 +1297,22 @@ build_golden_single() {
 
   local img_file="${ISO_DIR}/${distro}-cloud.qcow2"
 
-  # RHEL: clone from CentOS golden instead of downloading
+  # RHEL 10: boot a user-provided RHEL 10 KVM Guest Image, then register
+  # against the customer's subscription. We can't clone-from-CentOS like
+  # the pre-1.2 path used to — RHEL is on 10 (kernel 6.12) while CentOS
+  # Stream stays on 9, so the "clone + subscription-manager overlay"
+  # trick now produces a semantically broken golden (registered as RHEL
+  # but running EL9 binaries underneath).
+  #
+  # Red Hat doesn't publish an anonymous cloud-image URL. The user
+  # supplies one of (in precedence order):
+  #   1. KLAB_RHEL_IMAGE=/abs/path/to/your.qcow2  (local file)
+  #   2. /var/lib/klab/images/rhel-10-cloud.qcow2  (canonical drop-in)
+  #   3. KLAB_RHEL_IMAGE_URL=<one-shot Customer Portal URL>  (we curl it)
+  # If none are present, we skip gracefully (rc=0) so `klab golden all`
+  # still finishes the other distros — same contract as the missing-creds
+  # case.
   if [[ "$distro" == "rhel" ]]; then
-    # Return code 2 from _rhel_prompt_creds = "no creds, skip gracefully".
-    # Return 0 = success. Anything else = hard error. "klab golden all"
-    # must treat a missing-creds RHEL as skip (rc=0), not fail (rc=1),
-    # so the rest of the distros still build.
     _rhel_prompt_creds
     local _rc=$?
     if [[ $_rc -eq 2 ]]; then
@@ -1295,15 +1321,48 @@ build_golden_single() {
     elif [[ $_rc -ne 0 ]]; then
       return 1
     fi
-    local centos_golden_zpath
-    centos_golden_zpath="$(zvol_path "$(golden_name centos)")"
-    if ! zfs list "${centos_golden_zpath}@golden" >/dev/null 2>&1; then
-      warn "RHEL requires CentOS golden — building CentOS first..."
-      build_golden_single centos || { warn "CentOS build failed"; return 1; }
+
+    local rhel_img=""
+    mkdir -p /var/lib/klab/images
+    if [[ -n "${KLAB_RHEL_IMAGE:-}" && -f "${KLAB_RHEL_IMAGE}" ]]; then
+      rhel_img="${KLAB_RHEL_IMAGE}"
+      log "  Using KLAB_RHEL_IMAGE: ${rhel_img}"
+    elif [[ -f /var/lib/klab/images/rhel-10-cloud.qcow2 ]]; then
+      rhel_img=/var/lib/klab/images/rhel-10-cloud.qcow2
+      log "  Using cached: ${rhel_img}"
+    elif [[ -n "${KLAB_RHEL_IMAGE_URL:-}" ]]; then
+      log "  Downloading RHEL 10 cloud image from KLAB_RHEL_IMAGE_URL..."
+      # URL may contain a one-shot auth token; do NOT log it.
+      if curl -fSL --retry 5 --retry-delay 10 --retry-all-errors \
+              -C - -o /var/lib/klab/images/rhel-10-cloud.qcow2.partial \
+              "${KLAB_RHEL_IMAGE_URL}" >/dev/null 2>&1; then
+        mv -f /var/lib/klab/images/rhel-10-cloud.qcow2.partial \
+              /var/lib/klab/images/rhel-10-cloud.qcow2
+        rhel_img=/var/lib/klab/images/rhel-10-cloud.qcow2
+      else
+        rm -f /var/lib/klab/images/rhel-10-cloud.qcow2.partial
+        warn "RHEL 10 image download failed (KLAB_RHEL_IMAGE_URL); skipping"
+        return 0
+      fi
     fi
 
-    log "  RHEL: cloning from CentOS golden (same EL9 kernel)..."
-    zfs clone "${centos_golden_zpath}@golden" "$zpath" 2>/dev/null || die "Failed to clone CentOS golden for RHEL"
+    if [[ -z "$rhel_img" ]]; then
+      log "  Skipping RHEL — no image. Provide one of:"
+      log "    1. Drop qcow2 at /var/lib/klab/images/rhel-10-cloud.qcow2"
+      log "    2. Set KLAB_RHEL_IMAGE=/abs/path/to/your.qcow2"
+      log "    3. Set KLAB_RHEL_IMAGE_URL=<one-shot Customer Portal URL>"
+      log "  Get the RHEL 10 KVM Guest Image from access.redhat.com"
+      return 0
+    fi
+
+    log "  Creating zvol (${DISK}G, sparse, lz4)..."
+    zfs create -V "${DISK}G" -s -o volblocksize=64k -o compression=lz4 "$zpath"
+    for _ in $(seq 1 15); do [[ -b "$zdev" ]] && break; sleep 1; done
+    [[ -b "$zdev" ]] || die "zvol device not found: ${zdev}"
+
+    log "  Importing RHEL 10 image into zvol..."
+    qemu-img convert -O raw "$rhel_img" "$zdev" || die "qemu-img convert failed"
+    growpart "$zdev" 1 2>/dev/null || true
 
     local ci_iso
     ci_iso="$(make_cloud_init_iso "$name" "$name" "/var/lib/cloud/instance/klab-ready")"
@@ -1312,7 +1371,7 @@ build_golden_single() {
     mkdir -p /var/log/klab
     : > "$_console_log"
 
-    log "  Booting RHEL golden VM (Secure Boot: OFF during build, ON for clones)..."
+    log "  Booting RHEL 10 golden VM (Secure Boot: OFF during build)..."
     log "  Console log: tail -f ${_console_log}"
     virt-install --name "$name" --ram "$RAM" --vcpus "$CPUS" \
       --os-variant "${OS_VARIANTS[$distro]}" \
@@ -1330,50 +1389,48 @@ build_golden_single() {
     log "  Waiting for SSH..."
     wait_for_ssh "$golden_ip" 300 || die "SSH timeout on ${name}"
 
-    log "  Installing subscription-manager..."
-    _ssh_cmd "$golden_ip" "dnf install -y subscription-manager 2>&1 | tail -5" 2>&1 | tee -a "$golden_log"
-
-    log "  Registering RHEL subscription (credentials redacted)..."
+    log "  Registering RHEL 10 subscription (credentials redacted)..."
+    # subscription-manager is part of the RHEL 10 KVM Guest Image base —
+    # no need to install it like the old CentOS-clone path did.
+    # `release --set=10` pins the content set so dnf only sees RHEL 10
+    # repos (defensive against the guest auto-following a release move).
     _ssh_cmd "$golden_ip" bash -c "
       subscription-manager register --username='${RHEL_USERNAME}' --password='${RHEL_PASSWORD}' --auto-attach 2>&1 | sed 's/password=.*/password=REDACTED/g'
-      subscription-manager repos --enable codeready-builder-for-rhel-9-x86_64-rpms 2>/dev/null || true
+      subscription-manager release --set=10 2>/dev/null || true
+      subscription-manager repos --enable codeready-builder-for-rhel-10-x86_64-rpms 2>/dev/null || true
       subscription-manager identity 2>/dev/null | head -3
       echo 'RHEL registration complete'
     " 2>&1 | sed "s/${RHEL_PASSWORD}/REDACTED/g" | tee -a "$golden_log"
 
-    log "  Verifying ZFS on RHEL..."
-    _ssh_cmd "$golden_ip" "modprobe zfs 2>/dev/null; zfs version 2>/dev/null; test -f /usr/share/zfs/zfs-tests.sh && echo 'zfs-tests: OK' || echo 'zfs-tests: MISSING'"
-
-    # Validate + seal + snapshot (inline for RHEL)
+    # Validate + seal + snapshot. Note: the RHEL 10 golden does NOT carry
+    # ZFS (no anonymous OpenZFS-on-RHEL10 install path that doesn't go
+    # through DKMS + matched kernel-devel). Users who want ZFS inside the
+    # RHEL guest can layer it after the clone — for klab's primary
+    # purpose (have a RHEL 10 env available), an unmodified RHEL guest
+    # registered against the customer's subscription is what's expected.
     log "  Validating golden ${distro}..."
-    local _v_zfs _v_mod _v_ver _v_tests _v_vdevs _v_ksh _v_kernel _v_dkms _v_rhel_id
-    _v_mod="$(_ssh_cmd "$golden_ip" "lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || echo 0")"
-    _v_zfs="$(_ssh_cmd "$golden_ip" "command -v zfs >/dev/null 2>&1 && echo OK || echo MISSING")"
-    _v_ver="$(_ssh_cmd "$golden_ip" "zfs version 2>/dev/null | head -1 || echo unknown")"
-    _v_tests="$(_ssh_cmd "$golden_ip" "test -f /usr/share/zfs/zfs-tests.sh && echo OK || echo MISSING")"
-    _v_vdevs="$(_ssh_cmd "$golden_ip" "ls /var/tmp/zfs-vdev*.img 2>/dev/null | wc -l")"
-    _v_ksh="$(_ssh_cmd "$golden_ip" "command -v ksh >/dev/null 2>&1 && echo OK || echo MISSING")"
+    local _v_kernel _v_redhat _v_rhel_id _v_dnf_repos
     _v_kernel="$(_ssh_cmd "$golden_ip" "uname -r" || echo "unknown")"
-    _v_dkms="$(_ssh_cmd "$golden_ip" "dkms status 2>/dev/null | head -5" || echo "n/a")"
+    _v_redhat="$(_ssh_cmd "$golden_ip" "cat /etc/redhat-release 2>/dev/null || echo unknown")"
     _v_rhel_id="$(_ssh_cmd "$golden_ip" "subscription-manager identity 2>/dev/null | head -1" || echo "not registered")"
+    _v_dnf_repos="$(_ssh_cmd "$golden_ip" "dnf -q repolist 2>/dev/null | grep -c '^rhel-10-' || echo 0")"
 
     {
       echo ""; echo "═══════════════════════════════════════════════════════════"
       echo "  Golden Validation Report: ${distro}"
       echo "═══════════════════════════════════════════════════════════"
-      echo "  Kernel:         ${_v_kernel}"; echo "  ZFS binary:     ${_v_zfs}"
-      echo "  ZFS module:     $([[ $_v_mod -ge 1 ]] && echo "LOADED" || echo "NOT LOADED")"
-      echo "  ZFS version:    ${_v_ver}"; echo "  DKMS status:    ${_v_dkms}"
-      echo "  zfs-tests.sh:   ${_v_tests}"; echo "  vdev images:    ${_v_vdevs}/4"
-      echo "  ksh:            ${_v_ksh}"; echo "  RHEL sub:       ${_v_rhel_id}"
+      echo "  Kernel:         ${_v_kernel}"
+      echo "  Release:        ${_v_redhat}"
+      echo "  RHEL sub:       ${_v_rhel_id}"
+      echo "  RHEL 10 repos:  ${_v_dnf_repos} enabled"
+      echo "  ZFS:            not installed (RHEL 10 golden — bring-your-own DKMS)"
       local _result="PASS"
-      [[ "$_v_zfs" != "OK" || "$_v_mod" -lt 1 ]] && _result="FAIL"
-      [[ "$_v_tests" != "OK" ]] && _result="PARTIAL (no tests)"
+      [[ "${_v_redhat}" != *"Red Hat"* ]] && _result="FAIL (not RHEL?)"
+      [[ "${_v_rhel_id}" == *"not registered"* ]] && _result="FAIL (no subscription)"
       echo "  Result:         ${_result}"
       echo "═══════════════════════════════════════════════════════════"; echo ""
     } | tee -a "$golden_log"
 
-    _ssh_cmd "$golden_ip" "echo zfs > /etc/modules-load.d/zfs.conf; depmod -a 2>/dev/null || true"
     _ssh_cmd "$golden_ip" "cloud-init clean --logs 2>/dev/null || true; rm -f /etc/machine-id; touch /etc/machine-id; truncate -s 0 /etc/hostname"
     _ssh_cmd "$golden_ip" "systemctl enable cloud-init-local cloud-init cloud-config cloud-final 2>/dev/null || true"
     _ssh_cmd "$golden_ip" "shutdown -h now" || true
@@ -1383,7 +1440,7 @@ build_golden_single() {
     zfs snapshot "${zpath}@golden"
 
     local elapsed; elapsed="$(timer_elapsed_ms "$t_start")"
-    { echo "Golden build complete: ${name}"; echo "  Time: $((elapsed / 1000))s"; echo "  Size: $(zfs get -Hp -o value used "$zpath" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo "?")"; echo "  Method: CentOS clone + subscription-manager"; } | tee -a "$golden_log"
+    { echo "Golden build complete: ${name}"; echo "  Time: $((elapsed / 1000))s"; echo "  Size: $(zfs get -Hp -o value used "$zpath" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo "?")"; echo "  Method: RHEL 10 KVM Guest Image + subscription-manager"; } | tee -a "$golden_log"
     ln -sfn "$golden_log" "${golden_log_dir}/${distro}-latest.log"
     log "Golden ready: ${C}${name}${N} ($((elapsed / 1000))s) — log: ${golden_log}"
     return 0

@@ -505,21 +505,36 @@ cmd_build() {
         bash /build/builder/build-iso.sh
 
     log "Build container started — waiting for completion..."
+    local _build_start_epoch
+    _build_start_epoch="$(date +%s)"
     "$runtime" wait "$BUILDER_CONTAINER" || true
     local _rc
     _rc="$("$runtime" inspect "$BUILDER_CONTAINER" --format '{{.State.ExitCode}}' 2>/dev/null || echo 1)"
     "$runtime" rm "$BUILDER_CONTAINER" 2>/dev/null || true
-    if [[ "$_rc" != "0" ]]; then
-        log "WARNING: build container exited with code ${_rc} — checking for ISO"
-    fi
 
     local iso
     iso="$(latest_iso)"
+    # Stale-ISO guard: previously we accepted ANY iso in output/ as success
+    # even when the container exited non-zero — a build that failed in the
+    # darksite phase would silently get rebranded as "ISO built" using last
+    # week's file. Now we require the ISO mtime to be >= when this build
+    # started. Without this, real failures (matrix #4 nightly regression,
+    # 2026-05-07) look green and ship broken bits.
     if [[ -n "$iso" ]]; then
+        local _iso_mtime
+        _iso_mtime="$(stat -c %Y "$iso" 2>/dev/null || echo 0)"
+        if (( _iso_mtime < _build_start_epoch )); then
+            log "ERROR: build container exited ${_rc} and no fresh ISO produced"
+            log "       latest ISO (${iso}) is older than build start — refusing to claim success"
+            die "Build failed — see live-build/logs/build-${PROFILE}-${ARCH}-*.log"
+        fi
+        if [[ "$_rc" != "0" ]]; then
+            log "WARNING: build container exited with code ${_rc} but ISO is fresh — continuing"
+        fi
         log "ISO built: $iso ($(du -sh "$iso" | cut -f1))"
         sha256sum "$iso" > "${iso}.sha256"
     else
-        die "No ISO found after build"
+        die "No ISO found after build (container exit code ${_rc})"
     fi
 }
 

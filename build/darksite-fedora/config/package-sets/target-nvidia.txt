@@ -1,0 +1,40 @@
+# target-nvidia.txt — NVIDIA driver + GPU passthrough packages for Fedora
+#
+# Sourced when building the offline darksite mirror, so installs to
+# Fedora targets with NVIDIA hardware can complete with zero internet.
+#
+# Why these specific packages and not the CUDA-repo route:
+#
+#   akmod-nvidia (RPM Fusion nonfree) is the canonical Fedora NVIDIA path.
+#   It ships the same proprietary driver source NVIDIA publishes, packaged
+#   to build via `akmods` on first boot against the target's actual kernel.
+#   NVIDIA's CUDA repo (developer.download.nvidia.com) lags Fedora releases
+#   by 6-12 months and serves 404 for fedora44 as of 2026-05-13 — making
+#   it unreliable for the air-gapped install flow we need.
+#
+#   nvidia-container-toolkit lives in NVIDIA's libnvidia-container repo,
+#   which IS distro-agnostic and always current. CRI-O and containerd use
+#   it to mount /dev/nvidia* into containers — required for GPU pods on
+#   the K8s template.
+#
+# Driver
+akmod-nvidia
+xorg-x11-drv-nvidia
+xorg-x11-drv-nvidia-cuda
+xorg-x11-drv-nvidia-libs
+xorg-x11-drv-nvidia-power
+nvidia-settings
+
+# Build deps for akmods at first boot (without these, akmod-nvidia's
+# kernel module build silently fails on the booted system and we end up
+# back on nouveau — exactly the failure mode the darksite is meant to
+# prevent. kernel-devel is already pulled by target-base/target-server
+# but it's worth being explicit here so a future refactor can't drop it.
+kernel-devel
+gcc
+make
+
+# GPU passthrough into containers (K8s template)
+nvidia-container-toolkit
+libnvidia-container1
+libnvidia-container-tools

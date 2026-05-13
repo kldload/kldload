@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# kldload-mgmt — operator management console.
+#
+# Wraps kldload-help so the operator lands in a shell with the command
+# reference rendered at the top of the pane. Designed for the "help" tmux
+# window in kldload-console — that window opens here by default, so the
+# moment the operator opens the browser terminal they see the full command
+# catalog and can immediately run anything from a prompt below it.
+#
+# Plain shell + good docs > a custom REPL. Everything you can do here you
+# can do in any bash. The value-add is just that the reference is *right*
+# *there* and `help` works the way you'd expect.
+
+# Make `help` resolve to kldload-help inside this shell session. The bash
+# builtin `help` (which describes builtins) is shadowed by an alias here —
+# users on this management pane almost never want the builtin, and if they
+# do they can `builtin help` to reach it.
+export BASH_ENV=/tmp/kldload-mgmt-rc.$$
+cat > "$BASH_ENV" <<'BASHRC'
+# kldload-mgmt session rc — sourced by every bash spawned here
+alias help='kldload-help'
+alias topics='kldload-help'
+# Quick aliases for the most-typed prefixes — saves a few keystrokes
+alias k='kubectl'
+alias kc='kube-cluster'
+alias kn='kvm-list'
+alias kh='kldload-help'
+# Prompt: distinguish the mgmt console from a regular shell
+PS1='\[\e[38;5;85m\][kldload]\[\e[0m\] \w \$ '
+# History on disk so commands persist across pane re-opens
+HISTFILE=/root/.bash_history_mgmt
+HISTSIZE=10000
+HISTFILESIZE=20000
+shopt -s histappend
+BASHRC
+
+# Header banner, then full help, then prompt.
+clear
+kldload-help
+
+cat <<'BANNER'
+
+──────────────────────────────────────────────────────────────────────────
+  type `help <topic>` for any of: status storage vms k8s klab
+                                  replication export backup ai
+                                  observability firstboot recipes
+  type `help recipes` for end-to-end workflows ("clone, replicate, ship")
+  type `help all` to print every topic at once (pipe to less)
+──────────────────────────────────────────────────────────────────────────
+
+BANNER
+
+# Drop into bash with our env loaded. exec to avoid stacking shells.
+exec /bin/bash --rcfile "$BASH_ENV" -i

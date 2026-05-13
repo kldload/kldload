@@ -29,7 +29,7 @@ or VNC (`virsh vncdisplay <name>`). On success it's destroyed unless
 
 ## Test matrix
 
-| | CentOS 9 | Debian 13 | Ubuntu 24.04 | Fedora 44 | Rocky 9 | RHEL 9 | Arch |
+| | CentOS 9 | Debian 13 | Ubuntu 24.04 | Fedora 44 | Rocky 9 | RHEL 10 | Arch |
 |---|---|---|---|---|---|---|---|
 | **Desktop** | smoke-desktop.sh | smoke-desktop.sh | smoke-desktop.sh | smoke-desktop.sh | smoke-desktop.sh | smoke-desktop.sh | smoke-desktop.sh |
 | **Server**  | smoke-server.sh  | smoke-server.sh  | smoke-server.sh  | smoke-server.sh  | smoke-server.sh  | smoke-server.sh  | smoke-server.sh  |

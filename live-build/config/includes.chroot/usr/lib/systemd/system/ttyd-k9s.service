@@ -5,6 +5,17 @@ Description=ttyd — kldload browser console (k9s + shell + logs via tmux)
 After=network-online.target
 Wants=network-online.target
 Before=kldload-firstboot.service kldload-autodeploy.service klab-firstboot.service
+# Systemd default StartLimitBurst=5 inside StartLimitIntervalSec=10s is too
+# tight for firstboot — observed 2026-05-12 RHEL 10 install: ttyd exited
+# cleanly (status=0) in 44ms five times during the busy first-30-seconds
+# of boot (port :7681 ephemeral conflict / tmux socket not yet writable /
+# kldload-console exiting fast under contention) and hit the rate-limit
+# circuit-breaker before the system settled down. Manual `systemctl start`
+# 90 seconds later worked first try. Widen the budget to 10 attempts in
+# 5 minutes — enough to ride through firstboot races without losing the
+# protection against truly broken units.
+StartLimitBurst=10
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
@@ -37,7 +48,10 @@ ExecStart=/usr/local/bin/ttyd -W -i 127.0.0.1 -p 7681 -b /k9s \
     -t scrollback=10000 \
     /usr/local/bin/kldload-console
 Restart=on-failure
-RestartSec=5
+# 15s between retries is long enough that whatever transient (port reuse,
+# tmux socket racing kldload-tls-cert, etc.) had time to clear, but short
+# enough that 10 retries fits in the StartLimitIntervalSec=300s window.
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target

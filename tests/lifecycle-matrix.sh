@@ -14,7 +14,9 @@
 #
 # Env knobs:
 #   DISTROS    default: centos rocky fedora debian ubuntu
-#              (RHEL skipped — needs subscription cert)
+#              (+rhel if KLDLOAD_RHEL_USERNAME or KLDLOAD_RHEL_ORG is set —
+#               RHEL needs a Customer Portal sub to register at install time;
+#               fiend's default CI box doesn't have one so it's opt-in)
 #              (Arch/Alpine skipped — separate failure modes, not in default)
 #   PROFILES   default: core server kvm desktop
 #   PARALLEL   default: 2 (each VM = 8GB RAM + 4 cores; 2 fits 21GB host)
@@ -32,7 +34,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ $# -gt 0 ]]; then
   DISTROS=("$@")
 else
-  read -ra DISTROS <<<"${DISTROS:-centos rocky fedora debian ubuntu}"
+  # Opt-in rhel: only include if the runner has either subscription auth path
+  # exported (username/password or activation key/org). lifecycle.sh re-checks
+  # these inside the VM, so adding rhel without creds would just produce a
+  # full-matrix-fail row on every nightly. Keep CI green by default.
+  _default_distros="centos rocky fedora debian ubuntu"
+  if [[ -n "${KLDLOAD_RHEL_USERNAME:-}" || -n "${KLDLOAD_RHEL_ORG:-}" ]]; then
+    _default_distros="${_default_distros} rhel"
+  fi
+  read -ra DISTROS <<<"${DISTROS:-${_default_distros}}"
 fi
 read -ra PROFILES <<<"${PROFILES:-core server kvm desktop}"
 PARALLEL="${PARALLEL:-2}"

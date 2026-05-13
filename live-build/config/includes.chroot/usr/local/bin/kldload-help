@@ -1,130 +1,553 @@
 #!/usr/bin/env bash
-# kldload-help — command reference with examples
+# kldload-help — operator command reference + workflow recipes.
+#
+# Topic dispatch:
+#   kldload-help                  — overview + topic list
+#   kldload-help <topic>          — deep-dive on one topic with examples
+#   kldload-help recipes          — "I want to ..." workflow cookbook
+#   kldload-help all              — print every topic (long; pipe to less)
+#
+# Each topic prints its full content with worked examples so you can copy-
+# paste a command and have it work the first time. Run `kldload-help recipes`
+# for end-to-end workflows (deploy → clone → replicate → export to AWS).
 
-G='\033[0;32m'
-C='\033[0;36m'
-Y='\033[0;33m'
-B='\033[1m'
-D='\033[2m'
-N='\033[0m'
+set -u
 
+if [[ -t 1 ]] && [[ "${TERM:-}" != "dumb" ]]; then
+    G=$'\e[38;5;85m'      # accent green
+    C=$'\e[38;5;117m'     # accent cyan
+    Y=$'\e[38;5;221m'     # warn amber
+    P=$'\e[38;5;177m'     # accent purple
+    M=$'\e[38;5;245m'     # muted
+    W=$'\e[1;38;5;255m'   # bright white
+    D=$'\e[38;5;240m'     # dim
+    N=$'\e[0m'
+    B=$'\e[1m'
+else
+    G= C= Y= P= M= W= D= N= B=
+fi
+
+# ── helper: render a single topic block ───────────────────────────────────
+_t_overview() {
 cat <<EOF
 
-${B}${G} ╔═══════════════════════════════════════════════════════════════════════════╗${N}
-${B}${G} ║${N}${B}  kldloadOS — Command Reference                                          ${G}║${N}
-${B}${G} ╚═══════════════════════════════════════════════════════════════════════════╝${N}
+${B}${G}kldloadOS — operator command reference${N}
 
-${B}${G} ── kldload Tools ───────────────────────────────────────────────────────────${N}
+  Type ${C}kldload-help <topic>${N} for a topic, or ${C}kldload-help recipes${N}
+  for end-to-end workflows ("I want to clone, replicate, ship to AWS").
 
-${B}${C} kst${N} — System health at a glance
-    ${D}Pool health, disk usage, snapshots, boot environments, services.${N}
-    ${Y}\$ ${N}kst
+${B}${G}Topics${N}
+  ${C}status${N}        what's running, what's healthy, where to look
+  ${C}storage${N}       ZFS pools, datasets, snapshots
+  ${C}vms${N}           create, clone, snap, list, console, delete VMs
+  ${C}k8s${N}           bootstrap a Kubernetes cluster, scale, status, reset
+  ${C}klab${N}          multi-distro test lab (CentOS/Rocky/Fedora/Debian/Ubuntu/RHEL)
+  ${C}replication${N}   ZFS send/recv between datasets and between hosts
+  ${C}export${N}        ship VMs as qcow2/vmdk/vhd/ova/raw to disk or AWS
+  ${C}backup${N}        sanoid snapshots, boot environments, recovery
+  ${C}ai${N}            Bob (local LLM), model swap, voice, agentic mode
+  ${C}observability${N} Grafana, Hubble, Tetragon, klab dashboards
+  ${C}firstboot${N}     what runs unattended at first boot, where the logs are
+  ${C}recipes${N}       end-to-end workflows with worked examples
+  ${C}all${N}           print every topic (for grep / less)
 
-${B}${C} kst-dashboard${N} — Live tmux monitoring dashboard
-    ${D}Four-pane view: health, pools, btop, services. Auto-refreshes.${N}
-    ${Y}\$ ${N}kst-dashboard                 ${D}# launch and attach${N}
-    ${Y}\$ ${N}kst-dashboard --kill          ${D}# stop the dashboard${N}
+${B}${G}Five commands to know first${N}
+  ${C}kst${N}                                              system health one-pager
+  ${C}kldload-overview${N}                                 unified status (ZFS + VMs + K8s + AI)
+  ${C}kvm-list${N}                                         every VM with state
+  ${C}KUBECONFIG=/root/.kube/config kubectl get nodes${N}  cluster nodes (or use ${C}k9s${N})
+  ${C}klab status${N}                                      which goldens are built
 
-${B}${C} ksnap${N} — ZFS snapshot manager
-    ${D}Create, list, rollback, and destroy snapshots in one command.${N}
-    ${Y}\$ ${N}ksnap                         ${D}# snapshot all key datasets${N}
-    ${Y}\$ ${N}ksnap list                    ${D}# show all snapshots with ages${N}
-    ${Y}\$ ${N}ksnap /home/admin             ${D}# snapshot a specific path${N}
-    ${Y}\$ ${N}ksnap rollback /home/admin    ${D}# roll back to last snapshot${N}
-
-${B}${C} kclone${N} — Instant CoW clone
-    ${D}Clone a dataset in milliseconds. Zero extra space until divergence.${N}
-    ${Y}\$ ${N}kclone /home/admin /home/admin-backup
-    ${Y}\$ ${N}kclone /srv/database /srv/database-test
-
-${B}${C} kdf${N} — ZFS-aware disk usage
-    ${D}Shows compression ratios, quotas, and real space usage.${N}
-    ${Y}\$ ${N}kdf
-
-${B}${C} kdir${N} — Create ZFS datasets (not directories)
-    ${D}Every directory can be a dataset — separate snapshots, quotas, compression.${N}
-    ${Y}\$ ${N}kdir /home/alice               ${D}# new user dataset${N}
-    ${Y}\$ ${N}kdir -p /srv/app/data          ${D}# create parents too${N}
-    ${Y}\$ ${N}kdir -o quota=50G /home/bob    ${D}# with a 50G quota${N}
-
-${B}${C} kpkg${N} — Universal package manager
-    ${D}Auto-detects apt, dnf, or pacman. Takes a ZFS snapshot before changes.${N}
-    ${Y}\$ ${N}kpkg install nginx             ${D}# snapshot → install${N}
-    ${Y}\$ ${N}kpkg remove nginx              ${D}# snapshot → remove${N}
-    ${Y}\$ ${N}kpkg upgrade                   ${D}# snapshot → full upgrade${N}
-    ${Y}\$ ${N}kpkg search vim                ${D}# search packages${N}
-
-${B}${C} kexport${N} — Export disk to VM image
-    ${D}Convert this system to qcow2, VMDK, VHD, OVA, or raw.${N}
-    ${Y}\$ ${N}sudo kexport /dev/vda qcow2              ${D}# KVM/Proxmox${N}
-    ${Y}\$ ${N}sudo kexport /dev/vda vmdk ~/Desktop      ${D}# VMware${N}
-    ${Y}\$ ${N}sudo kexport /dev/sda all                 ${D}# all formats${N}
-
-${B}${G} ── Terminal Tools ──────────────────────────────────────────────────────────${N}
-
-${B}${C} tmux${N} — Terminal multiplexer   ${D}(prefix: Ctrl-a)${N}
-    ${Y}C-a |${N}     split horizontal      ${Y}C-a -${N}     split vertical
-    ${Y}Alt+←→↑↓${N}  move between panes    ${Y}Shift+←→↑↓${N} resize panes
-    ${Y}Alt+1-9${N}   switch windows        ${Y}Alt+h/l${N}   prev/next window
-    ${Y}C-a z${N}     zoom pane (toggle)    ${Y}C-a d${N}     detach session
-    ${Y}C-a S${N}     kst health            ${Y}C-a D${N}     launch dashboard
-    ${Y}C-a H${N}     this help             ${Y}C-a r${N}     reload config
-
-${B}${C} fzf${N} — Fuzzy finder   ${D}(the most useful tool you've never used)${N}
-    ${Y}Ctrl-R${N}    fuzzy history search   ${D}# type any fragment, it finds the command${N}
-    ${Y}Ctrl-T${N}    fuzzy file finder      ${D}# find files without remembering the path${N}
-    ${Y}Alt-C${N}     fuzzy cd               ${D}# jump to any directory${N}
-    ${Y}\$ ${N}vim \$(fzf)                    ${D}# pipe into any command${N}
-    ${Y}\$ ${N}kpkg install \$(apt list 2>/dev/null | fzf)  ${D}# pick a package${N}
-
-${B}${C} bat${N} — cat with syntax highlighting
-    ${D}Aliased to 'cat'. Shows line numbers, git diff markers, and syntax colors.${N}
-    ${Y}\$ ${N}bat /etc/fstab                ${D}# highlighted config${N}
-    ${Y}\$ ${N}bat --diff file.conf          ${D}# show git changes inline${N}
-    ${Y}\$ ${N}catp script.sh                ${D}# bat with pager (scrollable)${N}
-
-${B}${C} eza${N} — Modern ls replacement
-    ${D}Aliased to 'ls'. Git status, file icons, tree view built in.${N}
-    ${Y}\$ ${N}ll                            ${D}# long list with git status${N}
-    ${Y}\$ ${N}tree                          ${D}# recursive tree view${N}
-    ${Y}\$ ${N}eza --git --long --header     ${D}# full details${N}
-
-${B}${C} zoxide${N} — Smart cd   ${D}(learns your directories)${N}
-    ${Y}\$ ${N}z logs                        ${D}# jumps to /var/log (most visited match)${N}
-    ${Y}\$ ${N}z kld                         ${D}# jumps to whatever matches 'kld'${N}
-    ${Y}\$ ${N}zi                            ${D}# interactive picker with fzf${N}
-
-${B}${C} fd${N} — Modern find
-    ${Y}\$ ${N}fd '\.conf\$'                  ${D}# find all .conf files${N}
-    ${Y}\$ ${N}fd nginx /etc                 ${D}# find files matching 'nginx' in /etc${N}
-
-${B}${C} rg${N} — ripgrep (fast grep)
-    ${Y}\$ ${N}rg 'listen 80' /etc           ${D}# search file contents${N}
-    ${Y}\$ ${N}rg -l TODO                    ${D}# list files containing TODO${N}
-
-${B}${C} btop${N} — System monitor   ${D}(CPU, memory, disk, network, GPU in one TUI)${N}
-    ${Y}\$ ${N}btop
-
-${B}${C} fastfetch${N} — System info banner   ${D}(shows on login)${N}
-    ${Y}\$ ${N}fastfetch
-
-${B}${G} ── ZFS Essentials ─────────────────────────────────────────────────────────${N}
-    ${D}Everything above is built on ZFS. Learn these and you own your data.${N}
-
-    ${Y}\$ ${N}zpool status                  ${D}# pool health + errors${N}
-    ${Y}\$ ${N}zfs list                      ${D}# all datasets${N}
-    ${Y}\$ ${N}zfs list -t snapshot          ${D}# all snapshots${N}
-    ${Y}\$ ${N}zfs snapshot rpool/home@now   ${D}# manual snapshot${N}
-    ${Y}\$ ${N}zfs rollback rpool/home@now   ${D}# revert to snapshot${N}
-    ${Y}\$ ${N}zfs send rpool@snap | ssh box2 zfs recv tank  ${D}# replicate${N}
-    ${Y}\$ ${N}syncoid rpool/home remote:tank/home           ${D}# easy replication${N}
-
-${B}${G} ── Aliases ─────────────────────────────────────────────────────────────────${N}
-    ${C}zls${N}  zfs list          ${C}zsnap${N}  zfs list -t snapshot   ${C}ports${N}  ss -tuln
-    ${C}ll${N}   eza long list     ${C}tree${N}   eza --tree             ${C}catp${N}   bat with pager
-    ${C}z${N}    smart cd          ${C}zi${N}     interactive cd         ${C}e${N}      vim
-${B}${G}═════════════════════════════════════════════════════════════════════════════${N}
-${D} Docs: https://kldload.com/docs${N}
-${D} Learn the primitives — they'll outlast any product.${N}
+${B}${G}Web UI${N}
+  ${C}https://<host>:8443/${N}              kldload Dashboard
+  ${C}https://<host>:8443/grafana/${N}      metrics + flow logs
+  ${C}https://<host>:8443/k9s/${N}          browser terminal (tmux + F-keys)
+  Login on installed system: ${Y}admin / Passw0rd${N}   |   Live ISO: ${Y}live / live${N}
 
 EOF
+}
+
+_t_status() {
+cat <<EOF
+
+${B}${G}── status — what's running, what's healthy ─────────────────────────────────${N}
+
+  ${C}kst${N}                          one-page health: pool, disks, snapshots, services
+  ${C}kst-dashboard${N}                live four-pane tmux (refresh every 5s)
+  ${C}kldload-overview${N}             unified status across all subsystems
+  ${C}kldload-doctor${N}               run diagnostics, output JSON
+  ${C}kldload-inventory${N}            list every kldload-managed asset
+  ${C}kldload-lh${N}                   log hunter — interactive multi-source log search
+
+${B}${Y}Examples${N}
+  ${D}# Is the system healthy?${N}
+  ${C}kst${N}
+
+  ${D}# Watch health live${N}
+  ${C}kst-dashboard${N}
+
+  ${D}# Find errors across every log file on the box${N}
+  ${C}kldload-lh${N}
+
+EOF
+}
+
+_t_storage() {
+cat <<EOF
+
+${B}${G}── storage — ZFS pools, datasets, snapshots ────────────────────────────────${N}
+
+  ${C}kdf${N}                          disk usage, ZFS-aware
+  ${C}ksnap${N}                        snapshot manager (list / create / destroy / rollback)
+  ${C}kclone${N}                       clone a dataset or zvol
+  ${C}zpool list ; zpool status${N}    raw ZFS tools also available
+  ${C}zfs list -t snapshot${N}         every snapshot
+  ${C}sanoid${N}                       runs hourly via timer; policy in /etc/sanoid/
+
+${B}${Y}Examples${N}
+  ${D}# Snapshot everything important right now${N}
+  ${C}ksnap${N}
+
+  ${D}# List recent snapshots of one dataset${N}
+  ${C}zfs list -t snapshot rpool/root | tail -10${N}
+
+  ${D}# Rollback to a snapshot (DESTRUCTIVE — destroys newer snaps too)${N}
+  ${C}zfs rollback -r rpool/root@autosnap_2026-05-12_16:00:02_hourly${N}
+
+  ${D}# Clone a snapshot to a new dataset (cheap, copy-on-write)${N}
+  ${C}zfs clone rpool/vms/klab-golden-centos@golden rpool/vms/my-test${N}
+
+  ${D}# Find what's eating space${N}
+  ${C}zfs list -o name,used,refer -s used${N}
+
+EOF
+}
+
+_t_vms() {
+cat <<EOF
+
+${B}${G}── vms — create, clone, snap, console, delete ─────────────────────────────${N}
+
+  ${C}kvm-create <name> [--ram MB] [--cpus N] [--disk GB] [--os <variant>]${N}
+                                  create a VM on a ZFS zvol
+  ${C}kvm-clone <src> <dst>${N}         instant copy-on-write clone (~100ms, zero bytes)
+  ${C}kvm-snap <vm> [--name <s>]${N}    snapshot a VM
+  ${C}kvm-list${N}                      every VM with state + size
+  ${C}kvm-delete <vm>${N}               destroy VM + zvol (irreversible)
+  ${C}virsh console <vm>${N}            serial console (Ctrl-] to detach)
+
+${B}${Y}Examples${N}
+  ${D}# Create a generic 4G/2cpu/40G VM${N}
+  ${C}kvm-create webserver-01${N}
+
+  ${D}# Create a fat VM${N}
+  ${C}kvm-create db-master --ram 16384 --cpus 8 --disk 200 --os centos-stream9${N}
+
+  ${D}# Clone instantly (CoW)${N}
+  ${C}kvm-clone webserver-01 webserver-02${N}        ${D}# 100ms, no bytes copied${N}
+
+  ${D}# Snapshot before risky change${N}
+  ${C}kvm-snap webserver-01 --name pre-upgrade${N}
+
+  ${D}# List everything${N}
+  ${C}kvm-list${N}
+
+  ${D}# Open the console (Ctrl-] to exit)${N}
+  ${C}virsh console webserver-01${N}
+
+  ${D}# Destroy${N}
+  ${C}kvm-delete webserver-02${N}
+
+${B}${Y}Run a demo${N}
+  ${C}kvm-demo${N}                      interactive demo of clones + zfs + containers
+
+EOF
+}
+
+_t_k8s() {
+cat <<EOF
+
+${B}${G}── k8s — Kubernetes cluster ────────────────────────────────────────────────${N}
+
+  ${C}kube-cluster bootstrap [--workers N]${N}    build golden + deploy cluster (one cmd)
+  ${C}kube-cluster scale N${N}                   add N more workers
+  ${C}kube-cluster status${N}                    cluster state
+  ${C}kube-cluster destroy${N}                   tear down everything
+  ${C}kube-cluster golden${N}                    build only the golden image
+  ${C}kubectl <args>${N}                         standard kubectl on the host
+  ${C}k9s${N}                                    full-screen TUI for the cluster
+  ${C}kube-init${N}                              kubeadm init + Cilium + MetalLB + ZFS-CSI
+  ${C}kube-demo${N}                              24 interactive demos
+  ${C}kube-smoke-test${N}                        automated cluster verification
+
+${B}${Y}Examples${N}
+  ${D}# Build a full cluster: 1 CP + 3 workers (~12 min)${N}
+  ${C}kube-cluster bootstrap --workers 3${N}
+
+  ${D}# Add 2 more workers later${N}
+  ${C}kube-cluster scale 2${N}
+
+  ${D}# Status${N}
+  ${C}kube-cluster status${N}
+  ${C}kubectl get nodes -o wide${N}
+  ${C}kubectl get pods -A${N}
+
+  ${D}# Watch flows in real time${N}
+  ${C}hubble observe --follow --output compact${N}
+
+  ${D}# Tear it all down${N}
+  ${C}kube-cluster destroy${N}
+
+${B}${Y}Per-worker join logs live at${N}
+  ${C}/var/log/kldload/kube-join-<name>.log${N}
+
+EOF
+}
+
+_t_klab() {
+cat <<EOF
+
+${B}${G}── klab — multi-distro test lab on ZFS clones ─────────────────────────────${N}
+
+  ${C}klab golden <distro>${N}          build one golden (centos|rocky|fedora|debian|ubuntu|rhel)
+  ${C}klab golden all${N}               build every supported golden
+  ${C}klab status${N}                   show which goldens are ready
+  ${C}klab deploy blue|green${N}        spin up a colored test environment from goldens
+  ${C}klab test --full${N}              run zfs-tests.sh across every golden
+  ${C}kztest-tail${N}                   tail the current klab test run
+
+${B}${Y}Examples${N}
+  ${D}# Show which goldens are present${N}
+  ${C}klab status${N}
+
+  ${D}# Build just the Fedora golden (faster than 'all')${N}
+  ${C}klab golden fedora${N}
+
+  ${D}# Deploy a green test environment (clones from goldens)${N}
+  ${C}klab deploy green${N}
+
+  ${D}# Tail the live klab test log${N}
+  ${C}kztest-tail${N}
+
+${B}${Y}RHEL note${N}
+  RHEL golden needs both ${C}/var/lib/klab/images/rhel-10-cloud.qcow2${N} (or ${C}KLAB_RHEL_IMAGE_URL${N}
+  env var) AND credentials. Without those, ${C}klab golden rhel${N} skips silently (rc=0).
+  Add credentials via webui Dashboard → RHEL Subscription panel.
+
+${B}${Y}Where klab logs go${N}
+  ${C}/root/klab/goldens/<distro>-<ts>.log${N}     ${D}# klab driver log per attempt${N}
+  ${C}/var/log/klab/klab-golden-<distro>-console.log${N}  ${D}# VM serial output${N}
+
+EOF
+}
+
+_t_replication() {
+cat <<EOF
+
+${B}${G}── replication — ZFS send/recv between datasets and hosts ─────────────────${N}
+
+  ${C}zfs send / zfs receive${N}        the bedrock primitives
+  ${C}ksnap${N}                         takes snapshots that you replicate
+  ${C}sanoid + syncoid${N}              policy-driven snapshot + replicate (in repo)
+
+${B}${Y}Examples${N}
+  ${D}# Snapshot then send a dataset to another pool, locally${N}
+  ${C}zfs snapshot rpool/data@before-move${N}
+  ${C}zfs send rpool/data@before-move | zfs receive tank/data${N}
+
+  ${D}# Incremental followup (only changed blocks)${N}
+  ${C}zfs snapshot rpool/data@after-edit${N}
+  ${C}zfs send -i @before-move rpool/data@after-edit | zfs receive tank/data${N}
+
+  ${D}# Send to another host over SSH (compression in flight)${N}
+  ${C}zfs send -c rpool/vms/web-01@today | ssh root@dr-host \\${N}
+  ${C}  'zfs receive -F backup/vms/web-01'${N}
+
+  ${D}# Resumable streams (survive network blips on large datasets)${N}
+  ${C}zfs send -c rpool/vms/web-01@today | mbuffer -s 128k -m 1G | \\${N}
+  ${C}  ssh root@dr-host 'mbuffer -s 128k -m 1G | zfs receive -s -F backup/vms/web-01'${N}
+
+  ${D}# Replicate hourly via sanoid+syncoid${N}
+  ${C}syncoid rpool/vms/web-01 root@dr-host:backup/vms/web-01${N}
+
+${B}${Y}Sanoid is already snapshot-cycling${N}
+  Hourly timer. To list what it's taken:
+  ${C}zfs list -t snapshot | grep autosnap${N}
+
+EOF
+}
+
+_t_export() {
+cat <<EOF
+
+${B}${G}── export — ship VMs as qcow2 / vmdk / vhd / ova / raw / AMI ──────────────${N}
+
+  ${C}kexport <vm> [--format <fmt>] [--scp <host>:<path>]${N}
+                                  export a VM into a portable image
+  Formats: ${C}qcow2${N} (default) ${C}raw${N} ${C}vmdk${N} ${C}vhd${N} ${C}ova${N}
+  Output:  ${C}/var/lib/libvirt/images/exports/${N}
+
+${B}${Y}Examples${N}
+  ${D}# Default export (qcow2)${N}
+  ${C}kexport webserver-01${N}
+
+  ${D}# Export as raw + scp to a remote host${N}
+  ${C}kexport webserver-01 --format raw --scp ops@bastion:/tank/images/${N}
+
+  ${D}# Export as VMDK for VMware import${N}
+  ${C}kexport webserver-01 --format vmdk${N}
+
+  ${D}# Export as OVA (packages disk + manifest, broadest hypervisor support)${N}
+  ${C}kexport webserver-01 --format ova${N}
+
+${B}${Y}Push the resulting raw image to AWS as an AMI${N}
+  ${C}kexport webserver-01 --format raw${N}
+  ${C}aws s3 cp /var/lib/libvirt/images/exports/webserver-01.raw s3://my-bucket/${N}
+  ${C}aws ec2 import-snapshot --disk-container \\${N}
+  ${C}    'Format=raw,UserBucket={S3Bucket=my-bucket,S3Key=webserver-01.raw}'${N}
+  ${C}aws ec2 register-image --name webserver-01 ...${N}
+
+${B}${Y}Image sealing${N}
+  Before exporting a VM you plan to redeploy: kexport runs the seal step
+  for you (clears machine-id, regenerates SSH host keys on first boot,
+  enables cloud-init for multi-datasource).
+
+EOF
+}
+
+_t_backup() {
+cat <<EOF
+
+${B}${G}── backup — sanoid policy, boot environments, recovery ────────────────────${N}
+
+${B}${C}Snapshots${N}
+  Sanoid runs hourly and keeps a policy-driven retention.
+  Config: ${C}/etc/sanoid/sanoid.conf${N}
+
+  ${C}zfs list -t snapshot${N}        list every snapshot
+  ${C}ksnap${N}                       interactive snapshot tool
+  ${C}sanoid --cron${N}               run sanoid on demand
+
+${B}${C}Boot environments${N}
+  Every kldload install can host multiple bootable system states.
+  ${C}kbe${N}                          list / activate / destroy boot environments
+  ${C}kbe create <name>${N}            snapshot the current root and make it bootable
+  ${C}kbe activate <name>${N}          flip the next-boot target
+  ${C}kbe rollback${N}                 emergency: revert to the previous BE
+
+${B}${C}Disaster recovery${N}
+  ${C}krecovery${N}                    interactive recovery wizard (boot from rescue ISO)
+
+${B}${Y}Example: snapshot before a risky upgrade${N}
+  ${C}kbe create pre-kernel-bump${N}
+  ${C}# do dnf upgrade${N}
+  ${C}# if it blows up:${N}
+  ${C}kbe activate pre-kernel-bump${N}
+  ${C}reboot${N}
+
+EOF
+}
+
+_t_ai() {
+cat <<EOF
+
+${B}${G}── ai — Bob (local LLM), models, voice ────────────────────────────────────${N}
+
+  Bob is a local AI assistant on Ollama + qwen2.5:14b by default.
+  No data leaves the box. The webui hosts a chat panel.
+
+  ${C}bob${N}                          interactive CLI session
+  ${C}bob-do "<task>"${N}              one-shot: ask Bob to do something
+  ${C}bob-voice${N}                    voice-driven Bob (whisper.cpp transcription)
+  ${C}bob-model${N}                    list / swap LLM models
+  ${C}bob-agent${N}                    agentic mode: Bob runs shell tools autonomously
+  ${C}ollama list${N}                  every model on disk
+  ${C}ollama pull <model>${N}          download another model
+
+${B}${Y}Examples${N}
+  ${D}# Ask Bob a question${N}
+  ${C}bob${N}
+
+  ${D}# One-shot${N}
+  ${C}bob-do "investigate disk usage and report"${N}
+
+  ${D}# Switch to a smaller model on a small machine${N}
+  ${C}ollama pull qwen2.5:7b${N}
+  ${C}bob-model qwen2.5:7b${N}
+
+  ${D}# See model size + VRAM use${N}
+  ${C}ollama ps${N}
+
+${B}${Y}Bob in the webui${N}
+  Open ${C}https://<host>:8443/${N} and click the Bob panel (right side).
+
+EOF
+}
+
+_t_observability() {
+cat <<EOF
+
+${B}${G}── observability — Grafana / Prometheus / Hubble / Tetragon ──────────────${N}
+
+${B}${C}Web UIs${N}
+  ${C}https://<host>:8443/grafana/${N}     dashboards
+  ${C}https://<host>:8443/${N}             kldload Dashboard (overview)
+  ${C}https://<host>:8443/k9s/${N}         browser terminal (F1-F12 = panes)
+
+${B}${C}CLI${N}
+  ${C}cilium status${N}                Cilium + Hubble health
+  ${C}hubble observe --follow${N}      live flow tap (L3/L4/L7)
+  ${C}hubble observe --port 443 -f${N} filter by port
+  ${C}cilium policy get${N}            installed network policies
+  ${C}kubectl top nodes${N}            node resource usage
+  ${C}kubectl top pods -A${N}          pod resource usage
+
+${B}${C}eBPF tools (on the host)${N}
+  ${C}bpftrace -l 'tracepoint:*'${N}      list every available tracepoint
+  ${C}/usr/share/bcc/tools/execsnoop${N}  every exec system-wide
+  ${C}/usr/share/bcc/tools/tcplife${N}    TCP session summaries
+  ${C}/usr/share/bcc/tools/biolatency${N} block-layer latency histograms
+
+${B}${C}Tetragon (in-cluster syscall observability)${N}
+  ${C}kubectl -n kube-system logs ds/tetragon -c tetragon -f${N}
+
+${B}${Y}Grafana login${N}
+  user ${Y}admin${N}, pass ${Y}kldload${N} (or anonymous via proxy passthrough)
+
+EOF
+}
+
+_t_firstboot() {
+cat <<EOF
+
+${B}${G}── firstboot — what runs after install, where the logs are ────────────────${N}
+
+${B}${C}Service order${N}
+  1. ${C}kldload-firstboot.service${N}    — Prometheus, Grafana, dashboards (oneshot)
+  2. ${C}klab-firstboot.service${N}       — build all distro goldens (~30-60 min)
+  3. ${C}kldload-autodeploy.service${N}   — AI + K8s + observability (parallel where safe)
+
+${B}${C}Where to look${N}
+  ${C}/var/log/kldload/firstboot.log${N}        kldload-firstboot output
+  ${C}/var/log/kldload/autodeploy.log${N}       autodeploy phases + AI + K8s
+  ${C}/var/log/kldload/kube-bootstrap.log${N}   K8s cluster build
+  ${C}/var/log/kldload/kube-join-<n>.log${N}    per-worker join (one per worker)
+  ${C}/root/klab/goldens/<distro>-<ts>.log${N}  klab per-distro build driver
+  ${C}/var/log/klab/<vm>-console.log${N}        VM serial output
+
+${B}${C}Marker files (read by webui to flip status banners)${N}
+  ${C}/var/lib/kldload/firstboot-done${N}       kldload-firstboot finished
+  ${C}/var/lib/kldload/ai-ready${N}             Ollama + model loaded
+  ${C}/var/lib/kldload/k8s-ready${N}            cluster up + Cilium rolled out
+  ${C}/var/lib/kldload/klab-firstboot-done${N}  every klab golden attempted
+
+${B}${C}Forcing a re-run${N}
+  ${D}# Re-run autodeploy${N}
+  ${C}sudo rm /var/lib/kldload/{ai,k8s,klab}-ready${N}
+  ${C}sudo systemctl restart kldload-autodeploy${N}
+
+EOF
+}
+
+_t_recipes() {
+cat <<EOF
+
+${B}${G}── recipes — "I want to ..." workflows ────────────────────────────────────${N}
+
+${B}${P}❶ Deploy a single VM${N}
+  ${C}kvm-create webapp-01 --ram 4096 --cpus 4 --disk 60${N}
+  ${C}virsh console webapp-01${N}   ${D}# Ctrl-] to detach${N}
+
+${B}${P}❷ Clone a VM (instant, copy-on-write)${N}
+  ${C}kvm-clone webapp-01 webapp-02${N}
+  ${C}virsh start webapp-02${N}
+
+${B}${P}❸ Snapshot, modify, rollback if it broke${N}
+  ${C}kvm-snap webapp-01 --name pre-deploy${N}
+  ${C}ssh root@webapp-01 'systemctl stop nginx && ./bad-upgrade.sh'${N}
+  ${C}# It broke. Roll back:${N}
+  ${C}zfs rollback -r rpool/vms/webapp-01@pre-deploy${N}
+  ${C}virsh reboot webapp-01${N}
+
+${B}${P}❹ Replicate a VM to another kldload host${N}
+  ${C}kvm-snap webapp-01 --name 2026-05-12${N}
+  ${C}zfs send -c rpool/vms/webapp-01@2026-05-12 | \\${N}
+  ${C}    ssh root@dr-host 'zfs receive -F backup/vms/webapp-01'${N}
+
+${B}${P}❺ Build a Kubernetes cluster${N}
+  ${C}kube-cluster bootstrap --workers 3${N}   ${D}# ~12 min for 1 CP + 3 workers${N}
+  ${C}kubectl get nodes -o wide${N}
+  ${C}k9s${N}                                  ${D}# browse the cluster${N}
+
+${B}${P}❻ Add more workers later${N}
+  ${C}kube-cluster scale 2${N}
+
+${B}${P}❼ Tear down K8s, build it fresh${N}
+  ${C}kube-cluster destroy${N}
+  ${C}kube-cluster bootstrap --workers 5${N}
+
+${B}${P}❽ Build a multi-distro test lab${N}
+  ${C}klab golden all${N}                      ${D}# build every distro golden${N}
+  ${C}klab status${N}
+  ${C}klab deploy blue${N}
+
+${B}${P}❾ Ship a VM to AWS as an AMI${N}
+  ${C}kexport webapp-01 --format raw${N}
+  ${C}aws s3 cp /var/lib/libvirt/images/exports/webapp-01.raw s3://mybucket/${N}
+  ${C}aws ec2 import-snapshot --disk-container \\${N}
+  ${C}    'Format=raw,UserBucket={S3Bucket=mybucket,S3Key=webapp-01.raw}'${N}
+  ${C}aws ec2 register-image --name webapp-01 ...${N}
+
+${B}${P}❿ Run zfs-tests across every distro${N}
+  ${C}klab golden all${N}
+  ${C}klab test --full${N}
+  ${C}kztest-tail${N}
+
+${B}${P}⓫ Recover when the system won't boot${N}
+  ${C}# Boot the kldload ISO again, choose "Recovery"${N}
+  ${C}krecovery${N}
+  ${C}kbe activate <previous-be>${N}
+  ${C}reboot${N}
+
+EOF
+}
+
+_t_all() {
+  _t_overview
+  _t_status
+  _t_storage
+  _t_vms
+  _t_k8s
+  _t_klab
+  _t_replication
+  _t_export
+  _t_backup
+  _t_ai
+  _t_observability
+  _t_firstboot
+  _t_recipes
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────────
+topic="${1:-overview}"
+case "$topic" in
+    overview|"")                          _t_overview ;;
+    status)                               _t_status ;;
+    storage|zfs)                          _t_storage ;;
+    vms|vm|kvm)                           _t_vms ;;
+    k8s|kube|kubernetes)                  _t_k8s ;;
+    klab|lab)                             _t_klab ;;
+    replication|replicate|repl|send|recv) _t_replication ;;
+    export|kexport|aws|ami)               _t_export ;;
+    backup|snapshot|be|rollback|recovery) _t_backup ;;
+    ai|bob|ollama)                        _t_ai ;;
+    observability|obs|grafana|hubble|tetragon|metrics) _t_observability ;;
+    firstboot|fb|autodeploy)              _t_firstboot ;;
+    recipes|howto|examples)               _t_recipes ;;
+    all|full|everything)                  _t_all ;;
+    *)
+        _t_overview
+        echo "${Y}Unknown topic '${topic}'. Try one of the topics above.${N}"
+        exit 1
+        ;;
+esac

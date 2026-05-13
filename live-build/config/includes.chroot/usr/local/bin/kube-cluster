@@ -359,6 +359,110 @@ _ssh_cmd() {
   return 1
 }
 
+# _ssh_cmd_logged — like _ssh_cmd but writes stderr/stdout to a per-node log
+# instead of discarding it. Used by the join path so we can see WHY kubeadm
+# join failed (token expired, network unreachable, container runtime not
+# running, etc.) instead of just a silent "Failed to join" message.
+# Returns the underlying ssh exit code.
+_ssh_cmd_logged() {
+  local ip="$1" logfile="$2"; shift 2
+  local attempt rc
+  for attempt in 1 2 3; do
+    if [[ $attempt -eq 1 && -f "$SSH_KEY" ]]; then
+      ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
+        -i "$SSH_KEY" "root@${ip}" "$@" >> "$logfile" 2>&1
+      rc=$?
+      [[ $rc -eq 0 ]] && return 0
+    fi
+    sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=6 \
+      -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+      "root@${ip}" "$@" >> "$logfile" 2>&1
+    rc=$?
+    [[ $rc -eq 0 ]] && return 0
+    [[ $attempt -lt 3 ]] && sleep 3
+  done
+  return $rc
+}
+
+# _kube_join_one — drive a single worker into the cluster with one retry and
+# real diagnostics. Returns 0 on success (the node entered the apiserver's
+# node list and reported Ready). Caller is responsible for the kubectl wait
+# (done in batch after all joins so we don't re-pay the apiserver round-trip
+# cost per node).
+#
+# Failure modes this catches that the old single-line `_ssh_cmd $wip $token`
+# swallowed:
+#   - Stale or expired join token (token TTL is 24h; re-mint per attempt)
+#   - Container runtime not running on the worker (containerd not started yet)
+#   - kubelet config left over from a previous half-join (reset first)
+#   - Transient network blip (one retry, fresh token)
+_kube_join_one() {
+  local cp_ip="$1" worker_ip="$2" worker_name="$3"
+  local logdir="/var/log/kldload"
+  mkdir -p "$logdir"
+  local logfile="${logdir}/kube-join-${worker_name}.log"
+  : > "$logfile"
+  echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) joining ${worker_name} (${worker_ip}) ===" >> "$logfile"
+
+  local attempt rc=0
+  for attempt in 1 2; do
+    echo "--- attempt ${attempt} ---" >> "$logfile"
+    # Always mint a FRESH token per attempt — tokens are 24h-default but
+    # `kubeadm token create` is cheap (~100ms), and re-using a token across
+    # retries hides the "expired token" failure mode behind a misleading
+    # "connection refused" or "TLS handshake" error on the second try.
+    local join_token
+    join_token="$(_ssh_cmd "$cp_ip" 'kubeadm token create --ttl=15m --print-join-command' 2>/dev/null)" || join_token=""
+    if [[ -z "$join_token" ]]; then
+      echo "[fail] CP did not return a join token" >> "$logfile"
+      rc=2
+      [[ $attempt -lt 2 ]] && sleep 5 && continue
+      return 2
+    fi
+    # If this is attempt 2, reset any half-state kubelet config left from
+    # attempt 1 — otherwise kubeadm join refuses with "config already exists".
+    if [[ $attempt -ge 2 ]]; then
+      _ssh_cmd_logged "$worker_ip" "$logfile" "kubeadm reset -f >/dev/null 2>&1 || true; rm -rf /etc/kubernetes/* /var/lib/kubelet/* /etc/cni/net.d/* 2>/dev/null || true" || true
+    fi
+    # Run the join. --v=5 gives enough output to diagnose without flooding.
+    if _ssh_cmd_logged "$worker_ip" "$logfile" "${join_token} --v=5"; then
+      echo "[ok] join completed on attempt ${attempt}" >> "$logfile"
+      # Tag as worker on the CP side. Not fatal if it fails — the node is
+      # still in the cluster, just unlabeled.
+      _ssh_cmd "$cp_ip" "kubectl label node ${worker_name} node-role.kubernetes.io/worker= --overwrite" >/dev/null 2>&1 || true
+      return 0
+    fi
+    rc=$?
+    echo "[fail] join attempt ${attempt} exited rc=${rc}" >> "$logfile"
+    [[ $attempt -lt 2 ]] && sleep 10
+  done
+  return $rc
+}
+
+# _kube_wait_ready — block until the listed node names are all Ready, or
+# return non-zero with the un-ready set. Used after a batch of joins.
+# Names are space-separated.
+_kube_wait_ready() {
+  local cp_ip="$1"; shift
+  local names=("$@")
+  [[ ${#names[@]} -eq 0 ]] && return 0
+  local deadline=$(( $(date +%s) + 240 ))   # 4 minutes — Cilium agent has to
+                                            # come up on each new node first.
+  while (( $(date +%s) < deadline )); do
+    local missing=0 n
+    for n in "${names[@]}"; do
+      local cond
+      cond="$(_ssh_cmd "$cp_ip" "kubectl get node ${n} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null")" || cond=""
+      [[ "$cond" == "True" ]] || missing=$((missing + 1))
+    done
+    [[ $missing -eq 0 ]] && return 0
+    sleep 5
+  done
+  return 1
+}
+
 ensure_ssh_key() {
   if [[ ! -f "$SSH_KEY" ]]; then
     log "Generating SSH key for cluster management..."
@@ -679,7 +783,7 @@ NETCFG
     --name "${GOLDEN}" \
     --ram "${RAM}" --vcpus "${CPUS}" \
     --os-variant "$(case $HOST_DISTRO in debian) echo debian12;; ubuntu) echo ubuntu24.04;; centos) echo centos-stream9;; rhel) echo rhel9.0;; rocky) echo centos-stream9;; *) echo fedora-unknown;; esac)" \
-    --disk "$(readlink -f "${zvol}"),bus=virtio,cache=none" \
+    --disk "${zvol},bus=virtio,cache=none" \
     --disk "${ci_iso},device=cdrom" \
     --network bridge=virbr0,model=virtio \
     --graphics vnc,listen=0.0.0.0 \
@@ -1113,26 +1217,55 @@ cmd_bootstrap() {
   step_done "Control plane initialized"
 
   step 5 "Join Workers"
-  local join_token
-  join_token="$(_ssh_cmd "$cp_ip" 'kubeadm token create --print-join-command 2>/dev/null')" || true
-  if [[ -z "$join_token" ]]; then
-    warn "Could not get join token from CP"
-  else
+  # Track joins honestly so the bootstrap summary reflects reality. The old
+  # path looped through workers calling `_ssh_cmd "$wip" "$token"` with
+  # stderr → /dev/null, then declared "Workers joined" regardless of actual
+  # outcome — observed 2026-05-12 leaving k8s template installs with 1 CP
+  # and N orphan VMs whose kubelet crash-looped because /var/lib/kubelet/
+  # config.yaml was never written. Now each worker goes through _kube_join_one
+  # (mint fresh token per attempt, capture stderr to /var/log/kldload/kube-
+  # join-${name}.log, retry once with kubeadm reset between, --v=5 verbosity)
+  # and we count what actually succeeded.
+  local joined=0 failed_workers=()
+  for i in $(seq 0 $((WORKERS-1))); do
+    local wip="${worker_ips[$i]:-}"
+    local wname="${worker_names[$i]}"
+    [[ -n "$wip" ]] || { failed_workers+=("$wname(no-ip)"); continue; }
+    log "Joining ${wname} (${wip}) — log: /var/log/kldload/kube-join-${wname}.log"
+    if _kube_join_one "$cp_ip" "$wip" "$wname"; then
+      joined=$((joined + 1))
+    else
+      warn "Join failed for ${wname} — see /var/log/kldload/kube-join-${wname}.log"
+      failed_workers+=("$wname")
+    fi
+  done
+
+  # Wait for the joined nodes to actually go Ready (Cilium agent needs to
+  # roll out to each new node). 4-minute budget total across the batch.
+  if [[ $joined -gt 0 ]]; then
+    local ready_names=()
     for i in $(seq 0 $((WORKERS-1))); do
-      local wip="${worker_ips[$i]:-}"
-      [[ -n "$wip" ]] || continue
-      log "Joining ${worker_names[$i]}..."
-      _ssh_cmd "$wip" "$join_token" || warn "Failed to join ${worker_names[$i]}"
-      _ssh_cmd "$cp_ip" "kubectl label node ${worker_names[$i]} node-role.kubernetes.io/worker= --overwrite" 2>/dev/null || true
+      local wn="${worker_names[$i]}"
+      [[ " ${failed_workers[*]} " == *" ${wn} "* ]] && continue
+      [[ " ${failed_workers[*]} " == *" ${wn}(no-ip) "* ]] && continue
+      ready_names+=("$wn")
     done
+    log "Waiting for ${#ready_names[@]} joined node(s) to report Ready..."
+    if ! _kube_wait_ready "$cp_ip" "${ready_names[@]}"; then
+      warn "Some nodes did not reach Ready within 4 minutes — kubectl get nodes below shows current state"
+    fi
+  fi
+
+  if [[ ${#failed_workers[@]} -gt 0 ]]; then
+    warn "Workers that failed to join: ${failed_workers[*]}"
+    warn "Cluster came up with ${joined}/${WORKERS} workers."
   fi
 
   # Step 6: Verify
   echo ""
-  step_done "Workers joined"
+  step_done "Workers joined: ${joined}/${WORKERS}"
 
   step 6 "Verification"
-  sleep 10
   _ssh_cmd "$cp_ip" "kubectl get nodes -o wide" || true
 
   # Apply nftables firewall rules. This locks down each node to only accept
@@ -1637,12 +1770,244 @@ cmd_golden() {
   build_golden
 }
 
+# ── Scale: add N more workers to an existing cluster ──────────────────────
+# Replaces the 1.1.0 stub that just died. Mirrors the bootstrap join path
+# but skips the golden build, CP setup, and clean-slate destroy — assumes
+# a healthy cluster already exists with kubectl reachable from the host.
+#
+# Worker-numbering rule: scan existing kldload-w-* VMs, pick the next free
+# index. So if you have w-1, w-2, w-5 (because w-3, w-4 were destroyed),
+# you get w-6, w-7. This avoids reusing names that may still have stale
+# entries in the apiserver's node list.
+cmd_scale() {
+  local N="${1:-${WORKERS:-1}}"
+  [[ "$N" =~ ^[0-9]+$ ]] || die "scale: N must be a non-negative integer (got '$N')"
+  [[ "$N" -gt 0 ]] || die "scale: nothing to do (N=0)"
+
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  kube-cluster scale — add ${N} worker(s) to ${CLUSTER_NAME} ${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+
+  _ensure_libvirt_default_net
+
+  # Verify the cluster exists. We need (a) the CP VM running, (b) a reachable
+  # API server (either via kubectl on the host or via SSH-to-CP). Without
+  # either, scale is meaningless — error out fast rather than clone VMs that
+  # have nowhere to join.
+  if ! virsh dominfo "${CP_NAME}" >/dev/null 2>&1; then
+    die "scale: control plane '${CP_NAME}' not found. Run kube-cluster bootstrap first."
+  fi
+  if ! virsh list --state-running --name 2>/dev/null | grep -qx "${CP_NAME}"; then
+    log "Starting ${CP_NAME}..."
+    virsh start "${CP_NAME}" 2>&1 | head -1
+    sleep 5
+  fi
+
+  local cp_ip
+  cp_ip="$(get_vm_ip "${CP_NAME}")"
+  [[ -n "$cp_ip" ]] || die "scale: cannot resolve IP for ${CP_NAME}"
+  log "Control plane: ${CP_NAME} (${cp_ip})"
+  wait_for_ssh "$cp_ip" 60 || die "scale: SSH not reachable on ${CP_NAME}"
+
+  # Verify the golden snapshot is present — without it, kvm-clone has nothing
+  # to clone from (would fall back to a full copy, defeating the point).
+  local golden_zpath
+  golden_zpath="${POOL}/vms/${GOLDEN}"
+  if ! zfs list -H "${golden_zpath}@golden" >/dev/null 2>&1; then
+    die "scale: golden snapshot ${golden_zpath}@golden missing — re-run kube-cluster golden"
+  fi
+
+  # Find next free worker indices. Match kldload-w-N for any VM defined on
+  # this host, regardless of running/stopped/orphaned. Then pick the lowest
+  # N gaps that don't collide. This way an orphan kldload-w-3 from a prior
+  # failed scale doesn't get re-stomped — operator can clean it up first.
+  local existing_max=0 v
+  while IFS= read -r v; do
+    [[ -z "$v" ]] && continue
+    if [[ "$v" =~ ^${WORKER_PREFIX}-([0-9]+)$ ]]; then
+      local idx="${BASH_REMATCH[1]}"
+      (( idx > existing_max )) && existing_max=$idx
+    fi
+  done < <(virsh list --all --name 2>/dev/null)
+
+  declare -a new_ids=()
+  for i in $(seq 1 "$N"); do new_ids+=($((existing_max + i))); done
+  log "Adding workers: ${new_ids[*]/#/${WORKER_PREFIX}-}"
+
+  ensure_ssh_key
+  local pubkey
+  pubkey="$(cat "${SSH_KEY}.pub")"
+
+  declare -a new_names=()
+  declare -a new_ips=()
+  declare -a failed=()
+
+  # Phase 1: clone + boot + wait for SSH
+  for idx in "${new_ids[@]}"; do
+    local name="${WORKER_PREFIX}-${idx}"
+    new_names+=("$name")
+    echo -ne "  ${GOLDEN} → ${name} ... "
+    local S E
+    S=$(date +%s%N)
+    if ! kvm-clone "${GOLDEN}" "$name" >/dev/null 2>&1; then
+      E=$(date +%s%N)
+      echo -e "${R:-${Y}}clone-failed${N}"
+      failed+=("$name(clone)")
+      new_ips+=("")
+      continue
+    fi
+    E=$(date +%s%N)
+    echo -e "${G}cloned${N} (${C}$(( (E-S)/1000000 ))ms${N})"
+
+    # Cloud-init: hostname + SSH key + cleanup. Same shape as demo_add_nodes
+    # uses, but ours sets root password from cloud-init too so password-auth
+    # SSH still works (matches kldload-w-* host key cycling on first boot).
+    local ci_dir ci_iso
+    ci_dir="$(mktemp -d)"
+    ci_iso="/var/lib/libvirt/isos/${name}-ci.iso"
+    cat > "${ci_dir}/meta-data" <<META
+instance-id: ${name}
+local-hostname: ${name}
+META
+    cat > "${ci_dir}/user-data" <<USERDATA
+#cloud-config
+hostname: ${name}
+manage_etc_hosts: true
+disable_root: false
+ssh_pwauth: true
+ssh_authorized_keys:
+  - ${pubkey}
+users:
+  - default
+  - name: root
+    lock_passwd: false
+    ssh_authorized_keys:
+      - ${pubkey}
+chpasswd:
+  expire: false
+  users:
+    - name: root
+      password: kldload
+      type: text
+runcmd:
+  - rm -f /etc/machine-id
+  - systemd-machine-id-setup
+  - rm -f /etc/ssh/ssh_host_*
+  - ssh-keygen -A
+  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+USERDATA
+    cat > "${ci_dir}/network-config" <<NETCFG
+version: 2
+ethernets:
+  id0:
+    match: { name: "en*" }
+    dhcp4: true
+NETCFG
+    genisoimage -output "$ci_iso" -volid cidata -joliet -rock \
+      "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null \
+      || xorriso -as mkisofs -o "$ci_iso" -volid cidata -joliet -rock \
+        "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null
+    rm -rf "$ci_dir"
+    virsh attach-disk "$name" "$ci_iso" sdb --type cdrom --config 2>/dev/null || true
+    virsh start "$name" >/dev/null 2>&1 || warn "${name}: virsh start failed"
+    new_ips+=("")  # filled in next pass
+  done
+
+  # Phase 2: wait for DHCP leases, then SSH
+  log "Waiting for new workers to take DHCP leases (90s budget)..."
+  local deadline_ip=$(( $(date +%s) + 90 ))
+  while (( $(date +%s) < deadline_ip )); do
+    local pending=0
+    for i in "${!new_names[@]}"; do
+      [[ -n "${new_ips[$i]}" ]] && continue
+      local n="${new_names[$i]}"
+      local mac ip
+      mac="$(virsh domiflist "$n" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
+      ip="$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$mac" '$3=="ipv4" && $0 ~ m {split($5,a,"/"); print a[1]; exit}')"
+      if [[ -n "$ip" ]]; then
+        new_ips[$i]="$ip"
+        log "  ${n}: ${ip}"
+      else
+        pending=$((pending + 1))
+      fi
+    done
+    [[ $pending -eq 0 ]] && break
+    sleep 3
+  done
+
+  # Phase 3: per-worker node-prep + WireGuard + join. node-prep is best-
+  # effort (network/hostname/sysctls); the join is the gate that determines
+  # whether this worker counts as added.
+  local joined=0
+  for i in "${!new_names[@]}"; do
+    local name="${new_names[$i]}"
+    local ip="${new_ips[$i]}"
+    if [[ -z "$ip" ]]; then
+      failed+=("$name(no-ip)")
+      continue
+    fi
+    wait_for_ssh "$ip" 60 || { failed+=("$name(no-ssh)"); continue; }
+    run_ansible_against_vm "$ip" node-prep.yml \
+        -e "inventory_hostname_short=${name}" >/dev/null 2>&1 \
+      || warn "${name}: node-prep failed — continuing"
+
+    # WireGuard: add as a new node — use a high ID derived from the worker
+    # index so it doesn't collide with bootstrap-time IDs (CP=1, original
+    # workers=2..N+1). Scale-out workers get IDs starting at 100.
+    local wg_id=$((100 + new_ids[i]))
+    _ssh_cmd "$ip" "kube-network init ${wg_id}" >/dev/null 2>&1 || true
+    local cp_pub new_pub
+    cp_pub="$(_ssh_cmd "$cp_ip" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)" || cp_pub=""
+    new_pub="$(_ssh_cmd "$ip" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)" || new_pub=""
+    if [[ -n "$cp_pub" && -n "$new_pub" ]]; then
+      _ssh_cmd "$cp_ip" "kube-network add-peer ${ip} ${new_pub} ${wg_id}" >/dev/null 2>&1 || true
+      _ssh_cmd "$ip" "kube-network add-peer ${cp_ip} ${cp_pub} 1" >/dev/null 2>&1 || true
+      _ssh_cmd "$ip" "kube-network pin-kubelet && systemctl restart kubelet" >/dev/null 2>&1 || true
+    fi
+
+    if _kube_join_one "$cp_ip" "$ip" "$name"; then
+      joined=$((joined + 1))
+    else
+      failed+=("$name(join)")
+    fi
+  done
+
+  # Phase 4: wait for the joined nodes to actually go Ready before claiming
+  # success. Without this we'd repeat the original bug (claim "N added" but
+  # kubelet might still be crash-looping because Cilium hasn't rolled out).
+  if [[ $joined -gt 0 ]]; then
+    declare -a wait_for=()
+    for n in "${new_names[@]}"; do
+      local skip=0
+      for f in "${failed[@]}"; do
+        [[ "$f" == "${n}"* ]] && skip=1
+      done
+      [[ $skip -eq 0 ]] && wait_for+=("$n")
+    done
+    log "Waiting for ${#wait_for[@]} node(s) to report Ready..."
+    _kube_wait_ready "$cp_ip" "${wait_for[@]}" || warn "Some nodes did not become Ready in time"
+  fi
+
+  echo ""
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  if [[ ${#failed[@]} -eq 0 ]]; then
+    echo -e "${G}  ✓ Added ${joined}/${N} workers, all Ready${N}"
+  else
+    echo -e "${Y}  Added ${joined}/${N} workers — failures: ${failed[*]}${N}"
+    echo -e "${Y}  Per-worker logs: /var/log/kldload/kube-join-<name>.log${N}"
+  fi
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  _ssh_cmd "$cp_ip" "kubectl get nodes -o wide" 2>/dev/null || true
+}
+
 # ── Dispatch ───────────────────────────────────────────────────────────────
 case "$CMD" in
   bootstrap) cmd_bootstrap ;;
   golden)    cmd_golden ;;
   destroy)   cmd_destroy "${2:-}" ;;
   status)    cmd_status ;;
-  scale)     die "scale not yet implemented — destroy and bootstrap with --workers N" ;;
+  scale)     cmd_scale "${2:-1}" ;;
   *)         usage ;;
 esac

@@ -1006,13 +1006,38 @@ NETCFG
     sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
       "hostnamectl set-hostname ${name}" 2>/dev/null || true
 
-    # Join cluster
+    # Join cluster. Capture stderr to a per-worker log so a failure is
+    # diagnosable instead of just "failed" in yellow with no detail (the old
+    # 2>/dev/null swallowed every clue, leading to the 2026-05-12 cluster
+    # where w-1..w-4 were cloned but never joined and kubelet crash-looped
+    # for lack of /var/lib/kubelet/config.yaml). On failure, retry once with
+    # a fresh token + kubeadm reset to clear any half-state.
     if [[ -n "$join_cmd" ]]; then
       echo -ne "  Joining ${name}... "
-      sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 "root@${ip}" \
-        "${join_cmd}" 2>/dev/null \
-        && echo -e "${G}done${N}" \
-        || echo -e "${Y}failed${N}"
+      local _join_log="/var/log/kldload/kube-join-${name}.log"
+      mkdir -p /var/log/kldload
+      : > "$_join_log"
+      local _try _rc=1
+      for _try in 1 2; do
+        echo "=== attempt ${_try} ===" >> "$_join_log"
+        if sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
+            "root@${ip}" "${join_cmd}" >> "$_join_log" 2>&1; then
+          _rc=0
+          break
+        fi
+        # Re-mint token + reset stale state before attempt 2
+        if [[ $_try -eq 1 ]]; then
+          join_cmd="$(_ssh_cp 'kubeadm token create --ttl=15m --print-join-command 2>/dev/null')"
+          sshpass -p kldload ssh -o StrictHostKeyChecking=no "root@${ip}" \
+            "kubeadm reset -f >/dev/null 2>&1 || true; rm -rf /etc/kubernetes/* /var/lib/kubelet/* /etc/cni/net.d/* 2>/dev/null || true" >> "$_join_log" 2>&1 || true
+          sleep 5
+        fi
+      done
+      if [[ $_rc -eq 0 ]]; then
+        echo -e "${G}done${N}"
+      else
+        echo -e "${Y}failed${N} (see ${_join_log})"
+      fi
     fi
 
     # WireGuard
@@ -1048,28 +1073,55 @@ NETCFG
     _kctl label node "$name" node-role.kubernetes.io/worker= --overwrite 2>/dev/null || true
   done
 
-  echo ""
-  echo -e "  ${D}Waiting for nodes to become Ready (20s)...${N}"
-  sleep 20
-
-  # ── Step 5: Verify expanded cluster ──────────────────────────
+  # ── Step 5: Wait for the new workers to actually be Ready ─────
+  # Was previously a flat 20s sleep + an honest-looking `kubectl get nodes`
+  # but then the summary hardcoded "Nodes added: 2" regardless of outcome.
+  # Now we poll up to 4 minutes (Cilium agent rollout time on a new node)
+  # and only count workers that actually entered Ready state.
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
-  echo -e "${W}  Step 5: Verify expanded cluster${N}"
+  echo -e "${W}  Step 5: Wait for new workers to become Ready${N}"
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
   echo ""
-  echo -e "  ${D}The new workers should appear as Ready nodes. Cilium agents${N}"
-  echo -e "  ${D}deployed automatically via the DaemonSet.${N}"
+  echo -e "  ${D}A worker is only really 'added' when its kubelet has registered${N}"
+  echo -e "  ${D}with the apiserver and Cilium has deployed an agent to it.${N}"
+  echo -e "  ${D}Polling for Ready (4 min budget)...${N}"
   echo ""
+  local _target_names=("kldload-w-${next1}" "kldload-w-${next2}")
+  local _deadline=$(( $(date +%s) + 240 ))
+  local _ready_count=0
+  while (( $(date +%s) < _deadline )); do
+    _ready_count=0
+    for _tn in "${_target_names[@]}"; do
+      local _cond
+      _cond="$(_kctl get node "$_tn" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)"
+      [[ "$_cond" == "True" ]] && _ready_count=$((_ready_count + 1))
+    done
+    (( _ready_count >= ${#_target_names[@]} )) && break
+    sleep 5
+  done
   _kctl get nodes -o wide
 
-  # ── Summary ───────────────────────────────────────────────────
+  # ── Summary — honest about what actually happened ─────────────
   echo ""
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo -e "${W}  Live cluster scale-out — ZFS clone to running K8s node${N}"
   echo -e "${C}──────────────────────────────────────────────────────────────${N}"
-  echo -e "  Nodes added:    ${G}2 (kldload-w-${next1}, kldload-w-${next2})${N}"
+  if (( _ready_count == ${#_target_names[@]} )); then
+    echo -e "  Nodes added:    ${G}${_ready_count}/${#_target_names[@]} (kldload-w-${next1}, kldload-w-${next2})${N}"
+  else
+    echo -e "  Nodes added:    ${Y}${_ready_count}/${#_target_names[@]} Ready — check /var/log/kldload/kube-join-kldload-w-*.log${N}"
+    # List which workers we expected vs which actually came Ready
+    for _tn in "${_target_names[@]}"; do
+      local _cond
+      _cond="$(_kctl get node "$_tn" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)"
+      if [[ "$_cond" == "True" ]]; then
+        echo -e "    ${G}✓${N} $_tn"
+      else
+        echo -e "    ${Y}✗${N} $_tn  (not Ready)"
+      fi
+    done
+  fi
   echo -e "  Clone time:     ${G}<100ms each${N}"
-  echo -e "  Join time:      ${G}~30 seconds${N}"
   echo -e "  Downtime:       ${G}zero${N}"
   echo ""
   echo -e "  ${D}What this proves: scaling a bare-metal K8s cluster is as fast${N}"

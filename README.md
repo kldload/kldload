@@ -39,7 +39,7 @@ Boot the USB → web UI opens at `:8080` → pick distro + profile → install.
 | Ubuntu 24.04 (Noble) | debootstrap | Yes (APT darksite) |
 | Fedora 41 | dnf --installroot | Yes (RPM darksite) |
 | Rocky Linux 9 | dnf --installroot | Yes (shared RPM darksite) |
-| RHEL 9 | dnf --installroot | No (Red Hat CDN) |
+| RHEL 10 | dnf --installroot | No (Red Hat CDN) |
 | Arch Linux | pacman --root | No (rolling release) |
 | Alpine Linux | apk add --root | Partial (apk cache) |
 
@@ -153,7 +153,7 @@ The live environment is always CentOS Stream 9. The user picks their target dist
 - Secure Boot — MOK-signed ZFS modules, end-to-end verified boot
 - ZFSBootMenu — native boot environments, GRUB eliminated
 - 190+ automated smoke test checks
-- CentOS Stream 9 and RHEL 9 tested with full K8s stack
+- CentOS Stream 9 and RHEL 10 tested with full K8s stack
 - [Demo video](https://www.youtube.com/watch?v=egFffrFa6Ss)
 
 ### 1.0.3 — KVM on ZFS

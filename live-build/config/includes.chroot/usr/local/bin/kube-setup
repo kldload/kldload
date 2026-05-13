@@ -120,13 +120,17 @@ install_containerd() {
 
   if [[ "$PM" == "dnf" ]]; then
     # Docker CE repo provides containerd.io (not in default EL/Fedora repos).
-    # download.docker.com publishes per-distro repo files at /linux/<id>/ —
-    # path differs for fedora vs centos/rhel/rocky. Get the right one.
+    # download.docker.com publishes per-distro repo files at /linux/<id>/.
+    # Pre-RHEL-10 we mapped rhel→centos because RHEL 9 was binary-compatible
+    # with CentOS Stream 9. That breaks for RHEL 10 (different kernel + libc
+    # transition), so RHEL gets its own /linux/rhel/ path. Rocky stays on the
+    # centos path until Rocky 10 ships.
     if ! dnf list containerd.io 2>/dev/null | grep -q containerd; then
       local _docker_path
       case "$RPM_ID" in
-        fedora)              _docker_path="fedora" ;;
-        centos|rhel|rocky|*) _docker_path="centos" ;;
+        fedora)               _docker_path="fedora" ;;
+        rhel)                 _docker_path="rhel" ;;
+        centos|rocky|*)       _docker_path="centos" ;;
       esac
       _dnf_addrepo "https://download.docker.com/linux/${_docker_path}/docker-ce.repo"
     fi
@@ -208,8 +212,21 @@ EOF
           fi
         done
       else
-        # EL family — single canonical path
-        _zfs_url="https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval '%{dist}').noarch.rpm"
+        # EL family — try the host's %{dist} first, then fall back to el9.
+        # `rpm --eval '%{dist}'` returns ".el10" on RHEL 10, ".el9" on Stream/Rocky 9.
+        # zfsonlinux.org publishes both, but el10 lagged el10's GA by a few
+        # weeks — the fallback keeps install_k8s_packages green during that gap.
+        local _dist _suffix
+        _dist="$(rpm --eval '%{dist}' 2>/dev/null)"
+        for _suffix in "$_dist" ".el9"; do
+          [[ -z "$_suffix" ]] && continue
+          local _candidate="https://zfsonlinux.org/epel/zfs-release-2-3${_suffix}.noarch.rpm"
+          if curl -sfLI --max-time 10 "$_candidate" >/dev/null 2>&1; then
+            _zfs_url="$_candidate"
+            log "  zfs-release: using ${_suffix#.} (host is ${_dist#.})"
+            break
+          fi
+        done
       fi
       [[ -n "$_zfs_url" ]] && dnf install -y "$_zfs_url" 2>/dev/null || true
 

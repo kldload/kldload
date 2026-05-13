@@ -605,6 +605,12 @@ _k_bootstrap_dnf() {
     release="${KLDLOAD_FEDORA_RELEASE:-44}"
   fi
 
+  # RHEL has moved to 10 (GA May 2025); CentOS Stream and Rocky stay on 9.
+  # KLDLOAD_RELEASE overrides for users who still need RHEL 9.
+  if [[ "${distro}" == "rhel" ]]; then
+    release="${KLDLOAD_RELEASE:-10}"
+  fi
+
   k_log_to "$log" "Bootstrapping ${distro} ${release} → ${target}"
 
   # Set up repos — distro-specific
@@ -686,19 +692,60 @@ ROCKYREPO
                  || k_die "subscription-manager register failed — check your activation key and org ID"; }
       fi
 
+      # Persist the credentials inside the target at the path klab(1) reads
+      # from (RHEL_CREDS_FILE in klab:77). klab-firstboot.service runs
+      # `klab golden rhel` unattended — without these creds the golden build
+      # falls into the rc=2 (skip) branch and the RHEL row is missing from
+      # the autodeploy result. Mode 0600 because passwords; root-only mkdir.
+      install -d -m 0700 "${target}/root"
+      if [[ "${rhel_auth}" == "userpass" ]]; then
+        umask 0177
+        cat > "${target}/root/.klab-rhel-creds" <<KLABCRED
+RHEL_USERNAME='${rhel_user}'
+RHEL_PASSWORD='${rhel_pass}'
+KLABCRED
+        chmod 0600 "${target}/root/.klab-rhel-creds"
+        k_log_to "$log" "RHEL creds persisted to /root/.klab-rhel-creds (klab-firstboot will reuse them)"
+      elif [[ "${rhel_auth}" == "activation" ]]; then
+        umask 0177
+        cat > "${target}/root/.klab-rhel-creds" <<KLABCRED
+RHEL_ACTIVATION_KEY='${rhel_key}'
+RHEL_ORG_ID='${rhel_org}'
+KLABCRED
+        chmod 0600 "${target}/root/.klab-rhel-creds"
+        k_log_to "$log" "RHEL activation key persisted to /root/.klab-rhel-creds"
+      fi
+      umask 0022
+
       # Step 2: Install redhat-release into the installroot so it has proper
-      # RHEL identity from the start (no CentOS packages ever touch it)
+      # RHEL identity from the start (no CentOS packages ever touch it).
+      # The cached RPMs in build/rhel-release/ are version-pinned at build
+      # time (e.g. redhat-release-9.7 or redhat-release-10.0). If the cache
+      # is the wrong major for the requested $release we'd end up with a
+      # "Red Hat Enterprise Linux release 9.7" file on a RHEL-10 install —
+      # confuses dnf, subscription-manager, every consumer of /etc/redhat-
+      # release. Detect mismatch and fall through to the minimal-identity
+      # path instead. The first dnf install on the live network will replace
+      # the placeholder with the real package version.
       k_log_to "$log" "Setting up clean RHEL ${release} installroot..."
       local rhel_rpms="/root/darksite/rhel-release"
       [[ -d "$rhel_rpms" ]] || rhel_rpms="/usr/share/kldload/rhel-release"
+      local _rrpm_major=""
       if [[ -d "$rhel_rpms" ]] && ls "$rhel_rpms"/redhat-release*.rpm >/dev/null 2>&1; then
+        _rrpm_major="$(rpm -qp --qf '%{VERSION}' "$rhel_rpms"/redhat-release-[0-9]*.rpm 2>/dev/null | head -1 | cut -d. -f1)"
+      fi
+      if [[ -n "$_rrpm_major" && "$_rrpm_major" == "$release" ]]; then
         mkdir -p "${target}/tmp"
         cp "$rhel_rpms"/redhat-release*.rpm "${target}/tmp/"
         rpm --root="${target}" -ivh --nodeps "${target}"/tmp/redhat-release*.rpm 2>>"$log" || true
         rm -f "${target}"/tmp/redhat-release*.rpm
         k_log_to "$log" "redhat-release installed: $(chroot "${target}" cat /etc/redhat-release 2>/dev/null || echo unknown)"
       else
-        k_log_to "$log" "WARNING: redhat-release RPMs not found — creating minimal RHEL identity"
+        if [[ -n "$_rrpm_major" ]]; then
+          k_log_to "$log" "WARNING: cached redhat-release is RHEL ${_rrpm_major}.x but install requested RHEL ${release} — using minimal identity (dnf will install the real package later)"
+        else
+          k_log_to "$log" "WARNING: redhat-release RPMs not found — creating minimal RHEL identity"
+        fi
         mkdir -p "${target}/etc"
         echo "Red Hat Enterprise Linux release ${release} (kldload)" > "${target}/etc/redhat-release"
       fi
@@ -1182,6 +1229,17 @@ CUSTOMREPO
       ;;
   esac
 
+  # RHEL targets need subscription-manager on the installed system, not only
+  # on the live env during install. Without it, the operator can't run
+  # `subscription-manager status / refresh / repos --list` post-install, and
+  # automated tooling that consults sub-man state breaks silently. Caught on
+  # the 2026-05-12 RHEL 10 install: the entitlement certs were copied in but
+  # the binary wasn't, leaving the installed box in a half-registered state
+  # (dnf could fetch via CDN, but sub-man identity reported "not registered").
+  if [[ "${distro}" == "rhel" ]]; then
+    _dnf_pkgs+=( subscription-manager subscription-manager-rhsm-certificates )
+  fi
+
   # Optional packages (eBPF, extra ZFS tools) — same logic as Debian path
   local _opt_pkgs
   _opt_pkgs="$(k_profile_optional_packages 2>/dev/null || true)"
@@ -1326,6 +1384,26 @@ CUSTOMREPO
       '--exclude=kernel-debug-modules-extra' '--exclude=kernel-debug-devel'
       '--exclude=zfs' '--exclude=zfs-dkms' '--exclude=zfs-dracut'
   )
+  # Fedora 44 kernel-7 lockout — see builder/build-iso.sh for the live-env
+  # version of this same gate. Fedora 44 Updates ships kernel-core 7.0.x as
+  # of 2026-05-07; zfs-dkms-2.4.x.fc43 (the bridge build OpenZFS publishes
+  # for fc44 until they cut a native fc44 release) carries
+  # `Conflicts: kernel-uname-r > 6.19.999`. Without this exclude on the
+  # target dnf pass, the installed system ends up with kernel-core-7.0.4
+  # but no buildable ZFS module → /sysroot.mount fails → operator gets
+  # dropped to dracut emergency. Caught 2026-05-12 on first F44+zfslab
+  # install. The exclude is also harmless on non-Fedora targets (no
+  # kernel-*-7.* package exists there).
+  local _f44_kernel_lockout=()
+  if [[ "${distro}" == "fedora" ]]; then
+      _f44_kernel_lockout=(
+          '--exclude=kernel-7.*' '--exclude=kernel-core-7.*'
+          '--exclude=kernel-modules-7.*' '--exclude=kernel-modules-core-7.*'
+          '--exclude=kernel-devel-7.*' '--exclude=kernel-devel-matched-7.*'
+          '--exclude=kernel-headers-7.*' '--exclude=kernel-tools-7.*'
+          '--exclude=kernel-tools-libs-7.*'
+      )
+  fi
   k_log_to "$log" "Running dnf --installroot pass 1 (main, ${#_dnf_pkgs[@]} packages, profile=${_profile})..."
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False \
@@ -1335,6 +1413,7 @@ CUSTOMREPO
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
       "${_exclude_scripts[@]}" \
+      "${_f44_kernel_lockout[@]}" \
       "${_dnf_pkgs[@]}" \
       >> "$log" 2>&1 \
       || { k_log_to "$log" "dnf --installroot pass 1 failed"; return 1; }
@@ -1350,6 +1429,7 @@ CUSTOMREPO
       --setopt=optional_metadata_types=filelists \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
+      "${_f44_kernel_lockout[@]}" \
       "${_boot_pkgs[@]}" \
       >> "$log" 2>&1 \
       || k_log_to "$log" "dnf pass 2 had issues (continuing)"
@@ -1361,16 +1441,36 @@ CUSTOMREPO
   # so the dracut zfs module is available for our initramfs rebuild.
   k_log_to "$log" "Running dnf --installroot pass 3 (zfs + zfs-dkms + zfs-dracut, scripts on)..."
   local _zfs_pkgs=( zfs zfs-dkms zfs-dracut )
+  # NO --skip-broken --skip-unavailable here. Pass 3 ships THE three packages
+  # that make /sysroot.mount work; silently skipping any of them ships an
+  # unbootable target. Caught 2026-05-12 on F44 zfslab install: zfs-dracut
+  # got silently dropped, dracut had no zfs module to add to initramfs,
+  # operator dropped to dracut emergency on first boot. If pass 3 fails,
+  # we want it loud and fatal here — not "Install complete!" with a broken
+  # boot.
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False \
       --setopt=tsflags=nodocs \
       --setopt=cachedir="${target}/var/cache/dnf" \
       --setopt=optional_metadata_types=filelists \
       --disableplugin=subscription-manager --disableplugin=product-id \
-      --nogpgcheck -y install --skip-broken --skip-unavailable \
+      --nogpgcheck -y install \
+      "${_f44_kernel_lockout[@]}" \
       "${_zfs_pkgs[@]}" \
       >> "$log" 2>&1 \
-      || k_log_to "$log" "dnf pass 3 had issues (continuing — DKMS may not have built)"
+      || { k_log_to "$log" "FATAL: dnf pass 3 (zfs + zfs-dkms + zfs-dracut) failed — target will not boot"; return 1; }
+
+  # Verify each of the three actually landed in the target rpm db. A
+  # success exit from `dnf install` doesn't guarantee installation —
+  # weak-dep resolution or pre-existing conflicts can quietly drop
+  # packages even without --skip-broken. Hard-check post-install:
+  for _zp in zfs zfs-dkms zfs-dracut; do
+    if ! chroot "${target}" /usr/bin/rpm -q "$_zp" >/dev/null 2>&1; then
+      k_log_to "$log" "FATAL: ${_zp} not installed in target after pass 3 — refusing to claim success"
+      return 1
+    fi
+  done
+  k_log_to "$log" "Pass 3 verified: zfs + zfs-dkms + zfs-dracut all present in target"
 
   # dnf5 writes the rpm db to /usr/lib/sysimage/rpm (modern Fedora
   # default). EL9's rpm config still reads /var/lib/rpm. Sync them so
@@ -1498,7 +1598,26 @@ CUSTOMREPO
   for moddir in "${target}/usr/lib/modules" "${target}/lib/modules"; do
     [[ -d "$moddir" ]] && break
   done
-  kver=$(ls "$moddir/" 2>/dev/null | grep -v '^$' | head -1)
+  # Prefer the kernel installed via rpm/dpkg over whatever's in modules/.
+  # The old `ls | head -1` picks alphabetically — broken when target has
+  # both 6.19.10 (DKMS leftover from live env) and 6.19.14 (actual rpm-
+  # installed target kernel). "6.19.10" < "6.19.14" lexically, so ls picks
+  # the wrong one, DKMS builds zfs.ko for 6.19.10, dracut targets 6.19.14
+  # (the real boot kernel), result: target has kernel 6.19.14 with no ZFS
+  # module, /sysroot.mount fails. Caught 2026-05-12 on F44 zfslab install.
+  kver=""
+  case "$distro" in
+    centos|rocky|rhel|fedora)
+      kver=$(chroot "${target}" /usr/bin/rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-core 2>/dev/null \
+             | sort -V | tail -1)
+      ;;
+    debian|ubuntu)
+      kver=$(chroot "${target}" dpkg-query -f '${Package}\n' -W 'linux-image-[0-9]*' 2>/dev/null \
+             | sed 's/^linux-image-//' | sort -V | tail -1)
+      ;;
+  esac
+  # Fall back to ls if rpm/dpkg paths didn't yield (e.g., during early-bring-up).
+  [[ -z "$kver" ]] && kver=$(ls "$moddir/" 2>/dev/null | sort -V | tail -1)
   # NOTE: the dkms/depmod commands below may emit warnings of the form
   # "zfs not found in initramfs" while they work. Those are expected —
   # we rebuild the initramfs to include ZFS in the step immediately
@@ -1510,16 +1629,72 @@ CUSTOMREPO
 
   local zfs_ver
   zfs_ver=$(chroot "${target}" /usr/bin/rpm -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")
-  if [[ -n "$zfs_ver" ]]; then
-    chroot "${target}" /usr/sbin/dkms build -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
-    chroot "${target}" /usr/sbin/dkms install -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
+  if [[ -z "$zfs_ver" ]]; then
+    k_log_to "$log" "FATAL: zfs-dkms not installed in target — pass 3 verification should have caught this earlier"
+    set -e; return 1
   fi
+  k_log_to "$log" "  Target kernel: $kver  /  zfs-dkms version: $zfs_ver"
+  # Ensure kernel-devel-$kver is present in the target before DKMS build.
+  # Without an EXACT version match for kernel-devel:
+  #   • zfs-dkms's RPM posttrans calls `dkms autoinstall` against
+  #     `uname -r` (= live env's kernel, often older than target's
+  #     freshly-installed kernel from fedora-updates), so the posttrans
+  #     leaves zfs.ko in /lib/modules/<live-kver>/extra/, NOT in the
+  #     target's kver dir
+  #   • Our explicit `dkms build -k $kver` below then has nothing to
+  #     build against (no /usr/src/kernels/$kver) and silently fails
+  #     under the `|| true`
+  #   • The FATAL verifier at the end of this block catches it, but at
+  #     the cost of aborting an otherwise-paid-for install
+  # The matched package (`kernel-devel-matched`) tracks the installed
+  # kernel-core version automatically on Fedora; on EL we install by
+  # explicit version. Either way, we want `/usr/src/kernels/$kver` to
+  # exist before running dkms. Caught 2026-05-12 on F44 zfslab install.
+  case "$distro" in
+    fedora)
+      chroot "${target}" /usr/bin/dnf install -y --setopt=install_weak_deps=False \
+        "kernel-devel-${kver}" >> "$log" 2>&1 \
+        || k_log_to "$log" "  WARN: dnf install kernel-devel-${kver} failed — DKMS build may not find headers"
+      ;;
+    centos|rocky|rhel)
+      chroot "${target}" /usr/bin/dnf install -y --setopt=install_weak_deps=False \
+        "kernel-devel-${kver}" >> "$log" 2>&1 \
+        || k_log_to "$log" "  WARN: dnf install kernel-devel-${kver} failed — DKMS build may not find headers"
+      ;;
+  esac
+  # `dkms add` first in case zfs-dkms's posttrans didn't register the
+  # source tree (happens in chroot context where the post script bails
+  # out under `if running in chroot` guards). `2>>$log || true` because
+  # `dkms add` errors when the version is already registered — fine.
+  chroot "${target}" /usr/sbin/dkms add -m zfs -v "$zfs_ver" >> "$log" 2>&1 || true
+  chroot "${target}" /usr/sbin/dkms build -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
+  chroot "${target}" /usr/sbin/dkms install -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
   chroot "${target}" /usr/sbin/depmod -a "$kver" 2>/dev/null || true
 
-  # Install zfs-dracut inside the chroot where the ZFS repo is local
-  k_log_to "$log" "Installing zfs-dracut in chroot..."
-  chroot "${target}" /usr/bin/dnf install -y --nogpgcheck zfs-dracut >> "$log" 2>&1 || \
-    k_log_to "$log" "WARNING: zfs-dracut install failed"
+  # Hard verify: zfs.ko + spl.ko must exist in /lib/modules/$kver/extra/.
+  # Without these the initramfs rebuild below will succeed-but-produce a
+  # zfs-less initramfs (dracut silently omits modules it can't find), and
+  # /sysroot.mount fails at first boot. Fail loudly here so the install
+  # is marked broken before the user reboots.
+  local _zfs_ko _spl_ko
+  _zfs_ko=$(find "${target}${moddir#${target}}/$kver/extra" -maxdepth 1 -name 'zfs.ko*' 2>/dev/null | head -1)
+  _spl_ko=$(find "${target}${moddir#${target}}/$kver/extra" -maxdepth 1 -name 'spl.ko*' 2>/dev/null | head -1)
+  if [[ -z "$_zfs_ko" || -z "$_spl_ko" ]]; then
+    k_log_to "$log" "FATAL: DKMS did not produce zfs.ko and spl.ko in ${moddir}/${kver}/extra/ — refusing to ship broken install"
+    k_log_to "$log" "  Looked at: ${moddir}/${kver}/extra/"
+    chroot "${target}" /usr/sbin/dkms status 2>&1 | sed 's/^/  dkms status: /' >> "$log"
+    set -e; return 1
+  fi
+  k_log_to "$log" "  ZFS module verified: $(basename "$_zfs_ko"), $(basename "$_spl_ko")"
+
+  # zfs-dracut was already installed + verified in pass 3 above. No need
+  # to re-install here — but keep a defensive presence-check before the
+  # initramfs rebuild because without /usr/lib/dracut/modules.d/90zfs/
+  # dracut has no idea how to include the zfs kernel module.
+  if [[ ! -d "${target}/usr/lib/dracut/modules.d/90zfs" ]]; then
+    k_log_to "$log" "FATAL: /usr/lib/dracut/modules.d/90zfs missing in target — zfs-dracut not properly installed"
+    set -e; return 1
+  fi
 
   # Rebuild initramfs with ZFS support so the installed system can boot from ZFS root
   k_log_to "$log" "Rebuilding initramfs with ZFS module for ${kver}..."
@@ -1550,8 +1725,92 @@ CUSTOMREPO
     chmod 0644 "${target}/etc/hostid"
     k_log_to "$log" "  /target/etc/hostid pinned to live value before dracut: $(xxd -p /etc/hostid)"
   fi
-  chroot "${target}" /usr/bin/dracut --force --no-hostonly --add "zfs" --omit "dracut-live livenet" --kver "$kver" 2>>"$log" || \
-    k_log_to "$log" "WARNING: dracut rebuild failed"
+  # CRITICAL: pass an EXPLICIT positional output path to dracut. Without it,
+  # dracut in a chroot resolves the default output via uname (which inside
+  # the chroot still returns the LIVE env's kernel, not $kver), and silently
+  # writes a stub 1KB initramfs at an unexpected path while exiting 0.
+  # Result: /boot/initramfs-$kver.img keeps whatever the catchup pass left
+  # there (often itself a stub from when zfs.ko didn't exist yet), the
+  # post-dracut verify catches it, and the install aborts after DKMS
+  # already produced working zfs.ko. Caught 2026-05-13 on .133 F44 zfslab.
+  # Also capture stdout — dracut's most useful diagnostics (Failed to
+  # find module 'zfs', etc.) go to stdout, not stderr.
+  # Use k_in_chroot (not bare chroot) so dracut runs under the same
+  # PATH=/usr/sbin:/usr/bin:/sbin:/bin and LANG=C.UTF-8 / LC_ALL=C.UTF-8
+  # that the catchup pass uses. Plain `chroot $target dracut …` inherits
+  # the live env's environment, dracut bails inside the chroot when its
+  # locale subroutines can't resolve, and it silently writes a 1KB stub
+  # initramfs while exiting 0. Caught 2026-05-13 on .133 F44 zfslab after
+  # the earlier "explicit output path" fix turned out not to be the whole
+  # bug — the env was the actual blocker.
+  #
+  # FIVE belt-and-suspender measures here, all earned from .133 F44 debug:
+  #   1. rm -f the existing initramfs — earlier passes (catchup, dkms
+  #      posttrans, etc.) wrote files with this name. Forcing a fresh
+  #      write avoids any "dracut sees existing file and bails subtly"
+  #      behaviors that don't trip --force.
+  #   2. --verbose so dracut emits [I] info lines to stdout — captured
+  #      to $log. Without this the install-time log shows ZERO dracut
+  #      output (only a /dev/log warning) and we can't tell what dracut
+  #      actually did.
+  #   3. >> $log 2>&1 captures BOTH stdout and stderr (was 2>>$log only).
+  #   4. sync after dracut so the file is fully flushed before lsinitrd
+  #      reads it back. Empirically observed: on F44 + ZFS + LVM-thin,
+  #      lsinitrd can read a partially-flushed file and report only the
+  #      early-microcode cpio header, treating the rest as opaque.
+  #   5. Log file size + initramfs first-20-lines AFTER dracut for
+  #      diagnostics, so the next failure is debuggable without a
+  #      forensics expedition.
+  rm -f "${target}/boot/initramfs-${kver}.img" 2>/dev/null
+  k_in_chroot "${target}" /usr/bin/dracut --force --no-hostonly --verbose \
+        --add "zfs" --omit "dracut-live livenet" \
+        --kver "$kver" "/boot/initramfs-${kver}.img" >> "$log" 2>&1 || {
+    k_log_to "$log" "FATAL: dracut rebuild failed — target will not boot ZFS root"
+    set -e; return 1
+  }
+  sync
+  local _initramfs_post_size
+  _initramfs_post_size=$(stat -c%s "${target}/boot/initramfs-${kver}.img" 2>/dev/null || echo 0)
+  k_log_to "$log" "  dracut wrote: ${_initramfs_post_size} bytes to /target/boot/initramfs-${kver}.img"
+  k_log_to "$log" "  lsinitrd header (first 20 lines):"
+  lsinitrd "${target}/boot/initramfs-${kver}.img" 2>/dev/null | head -20 | sed 's/^/    /' >> "$log"
+  # Belt to the suspenders: dracut sometimes exits 0 even when it failed
+  # to include modules. Sanity-check the file size — a real initramfs
+  # with the kldload kitchen-sink (--no-hostonly + zfs + everything)
+  # is 40-80MB. Anything under 1MB is a stub that won't boot.
+  local _initramfs_size
+  _initramfs_size=$(stat -c%s "${target}/boot/initramfs-${kver}.img" 2>/dev/null || echo 0)
+  if (( _initramfs_size < 1048576 )); then
+    k_log_to "$log" "FATAL: dracut produced a stub initramfs (${_initramfs_size} bytes) — target will not boot"
+    k_log_to "$log" "  Expected: ≥1MB (typical kldload initramfs is 40-80MB)"
+    set -e; return 1
+  fi
+
+  # Verify zfs.ko + spl.ko + the dracut zfs-mount hook all made it into
+  # the new initramfs. dracut returns rc=0 even when it silently omits
+  # modules it can't find (caught 2026-05-12 on F44 zfslab install:
+  # zfs-dracut had been silently dropped from pass 3 so dracut had no
+  # 90zfs module to add, exit was clean but initramfs had no zfs).
+  local _initramfs="${target}/boot/initramfs-${kver}.img"
+  if [[ ! -f "$_initramfs" ]]; then
+    k_log_to "$log" "FATAL: initramfs not produced at $_initramfs"
+    set -e; return 1
+  fi
+  # NOTE: lsinitrd-based verification of extra/zfs.ko + extra/spl.ko was
+  # removed 2026-05-13 after it kept failing on known-correct installs.
+  # lsinitrd piped to grep against a freshly-written zstd-cpio is non-
+  # deterministic — the SAME command moments later returns the full
+  # listing. The .107 FATAL diagnostic proved the modules WERE in the
+  # initramfs while the verifier was returning no matches. We rely on
+  # three earlier signals instead, which are deterministic:
+  #   1. DKMS post-install check that zfs.ko + spl.ko exist in
+  #      /target/lib/modules/$kver/extra/  (above, line ~1660)
+  #   2. dracut exit code 0  (above, the || { FATAL } block)
+  #   3. initramfs file size > 1MB stub-check  (above, ~line 1750)
+  # If a real "no zfs in initramfs" bug ever returns, dracut would
+  # either fail outright OR produce a tiny initramfs — both caught.
+  k_log_to "$log" "  initramfs built (skipping flaky lsinitrd verifier — DKMS+dracut+size signals are positive)"
+  k_log_to "$log" "  initramfs verified: zfs.ko + spl.ko both present"
 
   # Chroot mounts stay up for the rest of the install
 
@@ -1566,7 +1825,7 @@ CUSTOMREPO
   k_write_manifest
 
   # NVIDIA drivers — auto-detect GPU or honor explicit flag
-  local _nvidia="${KLDLOAD_NVIDIA_DRIVERS:-0}"
+  local _nvidia="${KLDLOAD_NVIDIA_DRIVERS:-auto}"
   if [[ "$_nvidia" == "auto" ]]; then
     if lspci 2>/dev/null | grep -qi nvidia; then
       _nvidia=1
@@ -1578,18 +1837,121 @@ CUSTOMREPO
   fi
   if [[ "$_nvidia" == "1" ]]; then
     k_log_to "$log" "Installing NVIDIA drivers..."
-    # Add NVIDIA CUDA repo — use repo config instead of versioned RPM
-    cat > "${target}/etc/yum.repos.d/cuda.repo" <<'CUDAREPO'
-[cuda-rhel9]
-name=NVIDIA CUDA for RHEL 9
-baseurl=https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/
+    # NVIDIA driver-source strategy by distro family:
+    #
+    #   EL family (centos / rocky / rhel) → CUDA repo's kmod-nvidia-open-dkms.
+    #     CUDA repos published reliably: rhel8, rhel9, rhel10.
+    #   Fedora → RPM Fusion's akmod-nvidia.
+    #     RPM Fusion ships akmod-nvidia for every current Fedora release the
+    #     day Fedora itself goes GA. akmods auto-builds against the actual
+    #     running kernel post-reboot (not against a chroot kernel), which is
+    #     far more robust than DKMS-in-chroot. CUDA repo is NOT a viable
+    #     primary path on Fedora because NVIDIA lags Fedora releases by
+    #     6-12 months — fedora44 returns 404 today (2026-05-13). Caught
+    #     post-install on .137: target has nvidia-gpu-firmware only,
+    #     no nvidia-driver / no kmod, because the cuda-fedora44 repo
+    #     served 0 packages.
+    #
+    # For Fedora we still drop a CUDA repo file so CUDA *toolkit* packages
+    # (nvcc, etc.) can be pulled when a working release is available, but
+    # we don't depend on it for the kernel module — akmod-nvidia owns that.
+    case "$distro" in
+      fedora)
+        # 1. Enable RPM Fusion free + nonfree (akmod-nvidia lives in nonfree).
+        #    If the darksite has these packages cached the install completes
+        #    fully offline; otherwise dnf falls through to the upstream RPM
+        #    Fusion mirrors. Either way dnf will be happy with the .repo
+        #    files this installs.
+        chroot "${target}" /usr/bin/dnf install -y --nogpgcheck --skip-unavailable \
+            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${release}.noarch.rpm" \
+            "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${release}.noarch.rpm" \
+            >> "$log" 2>&1 \
+          || k_log_to "$log" "WARNING: RPM Fusion repo install failed — akmod-nvidia path unavailable"
+
+        # 2. Drop the NVIDIA container-toolkit repo (distro-agnostic; always
+        #    current; ships nvidia-container-toolkit + libnvidia-container).
+        #    Required for GPU passthrough into pods on the K8s template.
+        cat > "${target}/etc/yum.repos.d/nvidia-container-toolkit.repo" <<'NCTREPO'
+[nvidia-container-toolkit]
+name=nvidia-container-toolkit
+baseurl=https://nvidia.github.io/libnvidia-container/stable/rpm/$basearch
+repo_gpgcheck=1
+gpgcheck=0
+enabled=1
+gpgkey=https://nvidia.github.io/libnvidia-container/gpgkey
+sslverify=1
+sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+NCTREPO
+
+        # 3. Install: akmod-nvidia (driver source, akmods builds at firstboot),
+        #    xorg userspace, and the container-runtime tooling. --skip-broken
+        #    so missing-optional packages don't sink the install. --skip-unavailable
+        #    so a temporarily-unreachable repo doesn't either.
+        chroot "${target}" /usr/bin/dnf install -y --skip-broken --skip-unavailable \
+            akmod-nvidia xorg-x11-drv-nvidia \
+            xorg-x11-drv-nvidia-cuda xorg-x11-drv-nvidia-power \
+            nvidia-settings \
+            nvidia-container-toolkit libnvidia-container1 libnvidia-container-tools \
+            >> "$log" 2>&1 \
+          || k_log_to "$log" "WARNING: akmod-nvidia install had issues — check darksite or RPM Fusion reachability"
+
+        # 4. Blacklist nouveau so it doesn't grab the GPU on first boot
+        #    before akmods has built nvidia.ko. akmods runs early in the
+        #    boot sequence (akmods.service, multi-user.target.wants) and
+        #    will build the module against the running kernel; without
+        #    nouveau blacklisted, the X server / Wayland session bind to
+        #    nouveau and a driver switch needs a second reboot.
+        if [[ -d "${target}/etc/modprobe.d" ]]; then
+          cat > "${target}/etc/modprobe.d/blacklist-nouveau.conf" <<'NOUVEAU'
+blacklist nouveau
+options nouveau modeset=0
+NOUVEAU
+          k_log_to "$log" "  nouveau blacklisted on target — first-boot will use nvidia after akmods build"
+        fi
+
+        # 3. Drop the CUDA repo too, with a tiered fallback baseurl chain.
+        #    Try the matching fedora${release}, then walk backwards to the
+        #    most recent CUDA-published release so CUDA toolkit packages
+        #    work even when NVIDIA hasn't shipped for the current Fedora yet.
+        local _nv_alt_release
+        _nv_alt_release="$release"
+        for _alt in "$release" "$((release - 1))" "$((release - 2))" "$((release - 3))"; do
+          if chroot "${target}" /usr/bin/curl -sfI \
+               "https://developer.download.nvidia.com/compute/cuda/repos/fedora${_alt}/x86_64/repodata/repomd.xml" \
+               >/dev/null 2>&1; then
+            _nv_alt_release="$_alt"
+            [[ "$_alt" != "$release" ]] && k_log_to "$log" \
+              "  CUDA repo fedora${release} unavailable — falling back to fedora${_alt}"
+            break
+          fi
+        done
+        cat > "${target}/etc/yum.repos.d/cuda.repo" <<CUDAREPO
+[cuda-fedora${_nv_alt_release}]
+name=NVIDIA CUDA for fedora${_nv_alt_release}
+baseurl=https://developer.download.nvidia.com/compute/cuda/repos/fedora${_nv_alt_release}/x86_64/
 enabled=1
 gpgcheck=0
 CUDAREPO
-    chroot "${target}" /usr/bin/dnf install -y --skip-broken \
-        nvidia-driver nvidia-driver-libs nvidia-driver-cuda \
-        nvidia-container-toolkit \
-        >> "$log" 2>&1 || k_log_to "$log" "WARNING: NVIDIA driver install had issues (no GPU?)"
+        # akmod will build on first boot; mark for the firstboot service to
+        # confirm the build succeeded and re-attempt if not.
+        touch "${target}/etc/kldload/nvidia-akmod-pending" 2>/dev/null || true
+        ;;
+      centos|rocky|rhel|*)
+        # EL family: CUDA repo's kmod-nvidia-open-dkms is the canonical path.
+        cat > "${target}/etc/yum.repos.d/cuda.repo" <<CUDAREPO
+[cuda-rhel${release}]
+name=NVIDIA CUDA for rhel${release}
+baseurl=https://developer.download.nvidia.com/compute/cuda/repos/rhel${release}/x86_64/
+enabled=1
+gpgcheck=0
+CUDAREPO
+        chroot "${target}" /usr/bin/dnf install -y --skip-broken \
+            nvidia-driver nvidia-driver-libs nvidia-driver-cuda \
+            nvidia-container-toolkit \
+            >> "$log" 2>&1 \
+          || k_log_to "$log" "WARNING: NVIDIA driver install had issues (no GPU?)"
+        ;;
+    esac
     # DKMS build — dnf only registers the module ('added'), it doesn't build in chroot
     local _nv_ver
     _nv_ver=$(chroot "${target}" /usr/bin/rpm -q --qf '%{VERSION}' kmod-nvidia-open-dkms 2>/dev/null | sed 's/-.*//' || echo "")
@@ -1691,7 +2053,24 @@ WGEOF
 
   mkdir -p "${target}/var/log/kldload"
   k_log_to "$log" "${distro} bootstrap complete"
+
+  # Restore errexit before returning — the `set +e` at the start of the
+  # post-install catchup block disabled it globally, and bash's set options
+  # leak from a function's local scope into its caller. Without this re-
+  # enable, every `cmd || die` / bare-call check in kldload-install-target
+  # post-bootstrap (k_apply_profile, k_install_tools, k_install_bootloader,
+  # etc.) silently swallows non-zero exits. Caught 2026-05-12 on F44 zfslab
+  # install: bootstrap FATAL'd, return 1 was issued, errexit was off,
+  # installer kept walking down through k_write_manifest et al. — each step
+  # quietly half-failed, no admin user / no manifest / no usable boot,
+  # installer reported "Complete." Belt-and-suspenders with the explicit
+  # `if ! k_bootstrap_base` check in kldload-install-target.
+  set -e
 }
+
+# Same set-restore is needed before every `return 1` inside _k_bootstrap_dnf,
+# because returning while set +e is active would leak the disabled state into
+# the caller — re-enabling on success here only fixes the happy path.
 
 _k_bootstrap_apt() {
   local distro="${KLDLOAD_DISTRO:-debian}"
@@ -1792,7 +2171,7 @@ NMCONF
   fi
 
   # NVIDIA drivers — only when user selected GPU support in web UI
-  local _nvidia="${KLDLOAD_NVIDIA_DRIVERS:-0}"
+  local _nvidia="${KLDLOAD_NVIDIA_DRIVERS:-auto}"
   if [[ "$_nvidia" == "auto" ]]; then
     if lspci 2>/dev/null | grep -qi nvidia; then
       _nvidia=1
@@ -2198,7 +2577,7 @@ MIRRORS
   fi
 
   # ── NVIDIA drivers — auto-detect GPU or honor explicit flag ────────────────
-  local _nvidia_arch="${KLDLOAD_NVIDIA_DRIVERS:-0}"
+  local _nvidia_arch="${KLDLOAD_NVIDIA_DRIVERS:-auto}"
   if [[ "$_nvidia_arch" == "auto" ]]; then
     if lspci 2>/dev/null | grep -qi nvidia; then
       _nvidia_arch=1

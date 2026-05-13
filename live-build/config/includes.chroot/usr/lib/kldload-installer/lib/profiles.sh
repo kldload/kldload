@@ -400,6 +400,11 @@ k_install_system_files() {
   [[ -f /etc/kldload-build-sha ]] && cp /etc/kldload-build-sha "${target}/etc/kldload-build-sha"
   [[ -f /etc/kldload-build-id  ]] && cp /etc/kldload-build-id  "${target}/etc/kldload-build-id"
   [[ -f /etc/kldload/edition   ]] && cp /etc/kldload/edition   "${target}/etc/kldload/edition"
+  # Propagate VERSION from the live env so installed boxes can self-report
+  # which kldload ISO built them — without this the target has no record
+  # of its provenance, and tools (kst-summary, attestation, support
+  # bug reports) fall back to a hardcoded placeholder string.
+  [[ -f /etc/kldload/VERSION   ]] && cp /etc/kldload/VERSION   "${target}/etc/kldload/VERSION"
   echo "${_profile}" > "${target}/etc/kldload/profile"
   printf '%s\n' "${root_ds}" > "${target}/etc/kldload/boot-environment"
 
@@ -897,7 +902,7 @@ FFPOLICY_WS
   case "$_target_distro" in
     centos)  _target_suite="stream9" ;;
     rocky)   _target_suite="9" ;;
-    rhel)    _target_suite="9" ;;
+    rhel)    _target_suite="10" ;;
     fedora)  _target_suite="${KLDLOAD_FEDORA_RELEASE:-44}" ;;
     debian)  _target_suite="${KLDLOAD_SUITE:-trixie}" ;;
     ubuntu)  _target_suite="${KLDLOAD_SUITE:-noble}" ;;
@@ -1562,11 +1567,27 @@ ConditionPathExists=!/var/lib/kldload/klab-firstboot-done
 [Service]
 Type=oneshot
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do curl -sf --connect-timeout 5 https://cloud.debian.org >/dev/null 2>&1 && exit 0; echo "Waiting for internet ($i/30)..."; sleep 10; done'
-ExecStart=/usr/local/bin/klab golden centos
-ExecStart=/usr/local/bin/klab golden rocky
-ExecStart=/usr/local/bin/klab golden fedora
-ExecStart=/usr/local/bin/klab golden debian
-ExecStart=/usr/local/bin/klab golden ubuntu
+# Per-distro `-` prefix makes systemd ignore non-zero exits — without it,
+# the first failing distro aborts the unit and the rest never run. Caught
+# 2026-05-12 on the first RHEL 10 install: rocky golden failed silently
+# (zero-byte console log) at the IP-wait step, klab exit=1, and fedora /
+# debian / ubuntu / rhel were skipped by systemd. Each distro is now
+# independently allowed to fail; the unit ends in `success` overall and
+# operator inspects per-golden logs at /root/klab/goldens/<distro>-*.log
+# to see which built and which didn't.
+ExecStart=-/usr/local/bin/klab golden centos
+ExecStart=-/usr/local/bin/klab golden rocky
+ExecStart=-/usr/local/bin/klab golden fedora
+ExecStart=-/usr/local/bin/klab golden debian
+ExecStart=-/usr/local/bin/klab golden ubuntu
+# RHEL 10 golden: builds only if both (1) RHEL creds are present in the
+# secrets store (webui Dashboard → RHEL Subscription panel writes them to
+# /var/lib/kldload/secrets/rhel-{username,password}) AND (2) a RHEL 10
+# KVM Guest Image is available — either at /var/lib/klab/images/rhel-10-
+# cloud.qcow2, via KLAB_RHEL_IMAGE=/path, or KLAB_RHEL_IMAGE_URL=<one-shot
+# Customer Portal URL>. Either condition missing → klab returns 0 (skip)
+# so this service still goes green for the other five distros.
+ExecStart=-/usr/local/bin/klab golden rhel
 ExecStartPost=/bin/mkdir -p /var/lib/kldload
 ExecStartPost=/bin/touch /var/lib/kldload/klab-firstboot-done
 StandardOutput=journal+console
@@ -1578,7 +1599,7 @@ WantedBy=multi-user.target
 KLABFB
     ln -sf /etc/systemd/system/klab-firstboot.service \
       "${target}/etc/systemd/system/multi-user.target.wants/klab-firstboot.service" 2>/dev/null || true
-    k_log "klab will auto-build golden images on first boot (centos/rocky/fedora/debian/ubuntu)"
+    k_log "klab will auto-build golden images on first boot (centos/rocky/fedora/debian/ubuntu/rhel — RHEL skipped if creds+image unavailable)"
 
     # Enable klab services: Prometheus exporter + Hubble relay (captures from second zero)
     for _svc in klab-exporter klab-hubble-relay; do

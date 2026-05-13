@@ -415,7 +415,7 @@ select option:checked { background: #00b8d9; color: #000; }
               </div>
               <div class="target-card" data-distro="rhel" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🔴</div>
-                <div class="tc-name">RHEL 9</div>
+                <div class="tc-name">RHEL 10</div>
                 <div class="tc-sub">internet required</div>
               </div>
               <div class="target-card" data-distro="ubuntu" onclick="selectDistro(this)">
@@ -1942,7 +1942,7 @@ select option:checked { background: #00b8d9; color: #000; }
             <span style="font-size:1.1rem">🔴</span>
             <span class="badge" id="kg-st-rhel" style="font-size:0.7rem">checking...</span>
           </div>
-          <div class="tc-name" style="font-size:0.85rem;margin-bottom:0.2rem">RHEL 9</div>
+          <div class="tc-name" style="font-size:0.85rem;margin-bottom:0.2rem">RHEL 10</div>
           <div id="kg-meta-rhel" style="font-size:0.7rem;color:var(--muted);margin-bottom:0.5rem"></div>
           <div style="display:flex;gap:0.3rem;flex-wrap:wrap">
             <button class="btn btn-primary btn-sm" style="font-size:0.72rem" onclick="klabGolden('rhel')">Build</button>
@@ -2304,7 +2304,7 @@ select option:checked { background: #00b8d9; color: #000; }
                   <option value="fedora">Fedora 44</option>
                   <option value="debian">Debian 13</option>
                   <option value="ubuntu">Ubuntu 24.04</option>
-                  <option value="rhel">RHEL 9</option>
+                  <option value="rhel">RHEL 10</option>
                 </select>
               </div>
             </div>
@@ -3522,14 +3522,27 @@ function selectTarget(el) {
   // forks and tests one. To add a distro to a profile here, validate
   // end-to-end (install + smoke + matrix) then add the slug.
   const PROFILE_DISTROS = {
-    core:    ['centos','rocky','rhel','fedora','debian','ubuntu','arch','alpine'],
-    server:  ['centos','rocky','rhel','fedora','debian','ubuntu','arch'],
-    desktop: ['centos','rocky','rhel','fedora','debian','ubuntu','arch'],
-    kvm:     ['fedora','debian'],
-    k8s:     ['fedora','debian'],
-    zfslab:  ['fedora','debian'],
-    ai:      ['fedora','debian'],
-    devops:  ['fedora','debian'],
+    // core / server: every supported distro. desktop drops arch + alpine
+    // because neither one of them carries the GNOME stack kldload's desktop
+    // profile pulls — arch has GNOME but not in the same package shape we
+    // assume, alpine is musl/uClibc and the desktop bits never made sense
+    // there. freebsd stays in all three for selection-gating; selectDistro()
+    // hides the profile panel and skips the profile concept for freebsd
+    // entirely (its base sets are complete on their own).
+    core:    ['centos','rocky','rhel','fedora','debian','ubuntu','arch','alpine','freebsd'],
+    server:  ['centos','rocky','rhel','fedora','debian','ubuntu','arch','alpine','freebsd'],
+    desktop: ['centos','rocky','rhel','fedora','debian','ubuntu','freebsd'],
+    // Workload templates (kvm/k8s/zfslab/ai/devops/klab) are intentionally
+    // narrow: Fedora 44, Debian 13, RHEL 10 — the latest releases of the
+    // three most-deployed distros. Adding centos/rocky/ubuntu/arch/alpine
+    // here would be a UX promise we don't validate end-to-end (the workload
+    // templates depend on libvirt/containerd/cilium/kubelet versions that
+    // ship at different cadences on different distros).
+    kvm:     ['fedora','debian','rhel'],
+    k8s:     ['fedora','debian','rhel'],
+    zfslab:  ['fedora','debian','rhel'],
+    ai:      ['fedora','debian','rhel'],
+    devops:  ['fedora','debian','rhel'],
   };
   const _allowed = PROFILE_DISTROS[el.dataset.role] || PROFILE_DISTROS.server;
 
@@ -3655,7 +3668,7 @@ const DISTRO_DESCS = {
   fedora:   'Fedora 44 — Latest packages, fast updates',
   debian:   'Debian 13 (trixie) — stable, offline from APT darksite',
   rocky:    'Rocky Linux 9 — RHEL-compatible, offline from RPM darksite',
-  rhel:     'RHEL 9 — requires activation key (needs internet)',
+  rhel:     'RHEL 10 — requires activation key (needs internet)',
   ubuntu:   'Ubuntu 24.04 LTS — popular, huge community, debootstrap from darksite',
   arch:     'Arch Linux — rolling release, internet required (no darksite)',
   freebsd:  'FreeBSD 15.0 — native ZFS, jails, bhyve',
@@ -4007,7 +4020,7 @@ function confirmInstall() {
 
   // Build profile summary line
   const p = _installPayload || {};
-  const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 44', debian: 'Debian 13', rhel: 'RHEL 9', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', freebsd: 'FreeBSD 15.0' };
+  const distroNames = { centos: 'CentOS Stream 9', fedora: 'Fedora 44', debian: 'Debian 13', rhel: 'RHEL 10', rocky: 'Rocky Linux 9', ubuntu: 'Ubuntu 24.04', arch: 'Arch Linux', freebsd: 'FreeBSD 15.0' };
   const profileNames = { desktop: 'Desktop', server: 'Server', core: 'Core', kvm: 'KVM Host', ai: 'AI' };
   let summary = (distroNames[p.distro] || p.distro || 'CentOS') + ' · ' + (profileNames[p.role] || p.role || 'Desktop');
   const addons = [];

@@ -22,7 +22,7 @@ then cloned instantly for every test run. Blue-green lets you test
 changes in green while blue stays as the known-good baseline.
 
 Distros:  CentOS Stream 9, Rocky 9, Fedora 41, Debian 13, Ubuntu 24.04,
-Arch Linux, Alpine Linux (+RHEL 9 via CentOS clone + subscription)
+Arch Linux, Alpine Linux (+RHEL 10 via Red Hat CDN + subscription)
 
 Usage:
   - klab 00
@@ -461,7 +461,7 @@ VMs, containers, K8s cluster, ZFS, GPU, networking
 - devops/klab: Multi-distro test platform
 
 ## Supported Distros
-CentOS Stream 9, Rocky Linux 9, Fedora 41, Debian 13, Ubuntu 24.04, Arch Linux, Alpine Linux, RHEL 9, FreeBSD 15
+CentOS Stream 9, Rocky Linux 9, Fedora 41, Debian 13, Ubuntu 24.04, Arch Linux, Alpine Linux, RHEL 10, FreeBSD 15
 
 ## Key Architecture
 - Golden images: ZFS snapshots, clone in ~75ms

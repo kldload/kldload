@@ -256,7 +256,22 @@ ZFSREPO
 # cause SIGPIPE from "dnf | tee" to propagate as a non-zero exit, which set -e
 # would turn into a fatal build abort. The SIGPIPE is harmless (just tee closing).
 set +o pipefail
+# IMPORTANT: --exclude='kernel-*-7.*' pins the F44 live env to kernel 6.19.x.
+# Fedora 44 updates pushed kernel-core-7.0.4 around 2026-05-07 (the day matrix
+# #4 went 0/15 from 3/15 — exactly the regression session handoff predicted).
+# The fc43 zfs-dkms-2.4.1 carries `Conflicts: kernel-uname-r > 6.19.999`, so
+# pulling kernel 7.0 alongside zfs-dkms fails dependency resolution and aborts
+# the whole build. We pin updates kernels at 6.19.x until either:
+#   (a) zfsonlinux.org publishes an fc44 build for OpenZFS 2.4 or 2.5, OR
+#   (b) we ship our own zfs-dkms rebuild that drops the kernel-uname-r cap.
+# When that happens, remove the --exclude flags here. Until then, 6.19.x is
+# the highest kernel the live ISO can carry.
 dnf --installroot="$ROOTFS" --releasever=44 --setopt=install_weak_deps=False \
+    --exclude='kernel-7.*' --exclude='kernel-core-7.*' \
+    --exclude='kernel-modules-7.*' --exclude='kernel-modules-core-7.*' \
+    --exclude='kernel-devel-7.*' --exclude='kernel-devel-matched-7.*' \
+    --exclude='kernel-headers-7.*' --exclude='kernel-tools-7.*' \
+    --exclude='kernel-tools-libs-7.*' \
     --setopt=tsflags=nodocs --nogpgcheck -y install "${PKGS[@]}" 2>&1 | tee -a "$LOG_FILE"
 DNF_RC=${PIPESTATUS[0]}
 # set -o pipefail  # INTENTIONALLY DISABLED — see SIGPIPE note above

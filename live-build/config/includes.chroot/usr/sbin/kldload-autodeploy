@@ -208,7 +208,36 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         # ERR trap above marks the entire AI subshell as failed when there's
         # just no GPU to probe — bug seen 2026-05-05 on .113 (no GPU box).
         _vram_gb=0
+        # Disable the ERR trap during the probe. `set +e` alone isn't enough
+        # under `set -E` (errtrace) — the ERR trap inherits into command
+        # substitutions and subshells, so a failing pipe stage inside
+        # $(nvidia-smi | sort | tail) fires the trap even when errexit is off
+        # in the parent. Caught 2026-05-13 on .109 F44 zfslab install:
+        # nvidia-smi didn't exist yet at firstboot (akmod-nvidia takes
+        # ~30-90 sec to build), the pipe failed, ERR trap marked
+        # ai-failed-ready, the AI phase gave up — even though the GPU was
+        # fully functional 90 seconds later. The fix is two-part:
+        #   1. Save + disable the ERR trap during probe (so transient
+        #      failures don't kill the AI install).
+        #   2. Wait for nvidia-smi to become available if NVIDIA hardware
+        #      is present per lspci. Bounded wait, up to 3 minutes.
+        local _saved_err_trap
+        _saved_err_trap=$(trap -p ERR 2>/dev/null)
+        trap - ERR
         set +e
+        if lspci 2>/dev/null | grep -qi nvidia; then
+            log "[ai] NVIDIA hardware detected — waiting up to 3 min for nvidia-smi (akmod-nvidia build)"
+            for _i in $(seq 1 36); do
+                command -v nvidia-smi >/dev/null 2>&1 && \
+                    nvidia-smi -L 2>/dev/null | grep -q GPU && break
+                sleep 5
+            done
+            if command -v nvidia-smi >/dev/null 2>&1; then
+                log "[ai] nvidia-smi available after ${_i} probes (~$((_i * 5))s)"
+            else
+                log "[ai] WARN: nvidia-smi never appeared — akmod-nvidia may have failed; treating as no-GPU"
+            fi
+        fi
         if command -v nvidia-smi >/dev/null 2>&1; then
             _vram_gb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)
             _vram_gb=$(( ${_vram_gb:-0} / 1024 ))
@@ -218,6 +247,9 @@ if [[ "${WANT[ai]}" == "1" ]]; then
             _vram_gb=$(( _bytes / 1024 / 1024 / 1024 ))
         fi
         set -e
+        # Restore ERR trap (only if we actually had one saved — fresh shells
+        # without an ERR trap return empty from `trap -p ERR`).
+        [[ -n "$_saved_err_trap" ]] && eval "$_saved_err_trap"
         # Minimum VRAM to host Bob usably. qwen2.5:14b is ~9 GB quantised and
         # barely fits in 10 GB; below 8 GB the model won't load and CPU-fallback
         # inference is ~30 tok/min — unusable. Gracefully skip Bob entirely so
@@ -378,21 +410,46 @@ fi
 #   ztest → run 3b only (zfslab) — saves ~30 min by skipping the lean
 #           lineage that zfslab doesn't use.
 if [[ "${WANT[klab]}" == "1" ]]; then
-    # ── 3a: blue-green lean OS goldens (skip when zfslab — saves disk + time) ──
+    # ── 3a: blue-green lean OS goldens — DEFERRED to klab-firstboot.service ────
+    # klab-firstboot.service has its own per-distro ExecStart lines, each with
+    # the `-` prefix that lets one distro failure not abort the rest. Running
+    # `klab golden all` from here too was a leftover from the pre-systemd
+    # orchestration era and caused two parallel klab pipelines fighting over
+    # the same zvols (caught 2026-05-12: TWO klab-golden-centos process trees
+    # at the same time during firstboot, each clobbering the other's zvol).
+    # Wait for klab-firstboot.service to complete instead.
     if [[ "${KLAB_GOLDEN_KIND}" == "lean" ]]; then
         phase "klab-goldens"
         if [[ -f "${STATE_DIR}/klab-ready" ]]; then
             log "[klab] blue-green already marked ready — skipping"
             _klab_ok=1
         else
+            log "[klab] waiting for klab-firstboot.service to finish lean goldens..."
             _klab_ok=1
-            log "[klab] running klab golden all (blue-green lineage)"
-            if klab golden all >> /var/log/kldload/klab-firstboot.log 2>&1; then
+            # Poll for klab-firstboot-done up to 2 hours (per-distro timeout in
+            # the unit is 7200s; full sequence takes ~30-60 min on typical hw).
+            # 1-hour poll budget here covers a reasonable real run; longer than
+            # that and the operator should investigate manually.
+            _deadline=$(( $(date +%s) + 7200 ))
+            while (( $(date +%s) < _deadline )); do
+                [[ -f /var/lib/kldload/klab-firstboot-done ]] && break
+                # If klab-firstboot.service is no longer activating AND the
+                # done-marker hasn't appeared, the unit must have failed —
+                # don't poll forever. Check unit state every 30s.
+                if ! systemctl is-active --quiet klab-firstboot.service \
+                     && ! systemctl is-failed --quiet klab-firstboot.service \
+                     && [[ "$(systemctl is-active klab-firstboot.service 2>/dev/null)" != "activating" ]]; then
+                    log "[klab] klab-firstboot.service not running — proceeding without it"
+                    break
+                fi
+                sleep 30
+            done
+            if [[ -f /var/lib/kldload/klab-firstboot-done ]]; then
                 mark "klab"
-                log "[klab] blue-green complete"
+                log "[klab] klab-firstboot.service finished — blue-green ready"
             else
                 _klab_ok=0
-                log "[klab] blue-green FAILED — see klab-firstboot.log"
+                log "[klab] klab-firstboot.service did not complete within timeout — see /var/log/klab/"
             fi
         fi
     else

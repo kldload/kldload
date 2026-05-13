@@ -1030,14 +1030,20 @@ KLDLOAD_DEBIAN_RELEASE="${KLDLOAD_DEBIAN_RELEASE:-trixie}"
 # the file is missing (e.g. running this script outside a kldload live env).
 KLDLOAD_INSTALLER_VERSION="${KLDLOAD_INSTALLER_VERSION:-$(
     awk -F'[[:space:]]*=[[:space:]]*' '/^kldload_version/{print $2; exit}' \
-        /etc/kldload/VERSION 2>/dev/null || echo '1.0.5'
+        /etc/kldload/VERSION 2>/dev/null || echo '1.1.0'
 )}"
+# Bumped fallback from 1.0.5 → 1.1.0 (2026-05-12): the awk parse silently
+# returned empty on a kldload 1.1.0 install (root cause TBD — VERSION file
+# present in live ISO per build-iso.sh:1887, but `awk … exit` was returning
+# nothing in some boot paths) so the manifest got stamped with the literal
+# fallback string. Bumping the fallback at least keeps the manifest version
+# string from being years stale even when the parse fails.
 # Deployment intent: standalone | cluster-manager | join
 KLDLOAD_INFRA_MODE="${KLDLOAD_INFRA_MODE:-standalone}"
 KLDLOAD_DISTRO="${KLDLOAD_DISTRO:-centos}"
 KLDLOAD_ENABLE_AI="${KLDLOAD_ENABLE_AI:-${_kld_heavy}}"
 KLDLOAD_ENABLE_EBPF="${KLDLOAD_ENABLE_EBPF:-0}"
-KLDLOAD_NVIDIA_DRIVERS="${KLDLOAD_NVIDIA_DRIVERS:-0}"
+KLDLOAD_NVIDIA_DRIVERS="${KLDLOAD_NVIDIA_DRIVERS:-auto}"
 KLDLOAD_WIREGUARD="${KLDLOAD_WIREGUARD:-0}"
 KLDLOAD_EXPORT_FORMAT="${KLDLOAD_EXPORT_FORMAT:-none}"
 # ── Runtime requests — kldload-autodeploy reads these to decide which
@@ -1734,7 +1740,46 @@ main() {
   fi
 
   _info "▸  Bootstrapping ${KLDLOAD_DISTRO:-centos} base system (this takes a few minutes)..."
-  k_bootstrap_base
+  # Explicit return-code check — _k_bootstrap_dnf disables errexit (set +e) inside
+  # the chroot catchup block and never restores it, so a bare `k_bootstrap_base`
+  # call would silently swallow FATAL `return 1` paths and let the installer
+  # report "Complete" while the target is half-built (no admin user, no manifest,
+  # no zfs module for the boot kernel). Caught 2026-05-12 on F44 zfslab install:
+  # DKMS verify fired correctly, return-code was lost, install "succeeded",
+  # target refused to boot. Two layers of belt-and-suspenders here so a future
+  # regression in either lib- or script-side errexit handling can't reintroduce
+  # the silent-success failure mode.
+  if ! k_bootstrap_base; then
+    # Persist the bootstrap log into the target rpool BEFORE dying, so the
+    # diagnostics survive the live env's volatile rootfs (every reboot wipes
+    # /var/log/installer on the live ISO). Without this step we have no
+    # forensic trail of which FATAL guard fired — exactly what bit us on
+    # 2026-05-12. Two destinations: rpool root (for SREs probing from a
+    # rescue boot) and a fixed path under /target/root for ssh-from-the-
+    # live-env access without re-mounting.
+    if [[ -d "${KLDLOAD_TARGET_MNT}" ]]; then
+      mkdir -p "${KLDLOAD_TARGET_MNT}/root/kldload-install-logs" 2>/dev/null
+      cp -a "${KLDLOAD_LOG_DIR}"/. "${KLDLOAD_TARGET_MNT}/root/kldload-install-logs/" 2>/dev/null || true
+      cp -a "${KLDLOAD_LOG_DIR}/bootstrap.log" "${KLDLOAD_TARGET_MNT}/bootstrap.log.failure" 2>/dev/null || true
+    fi
+    _info ""
+    _info "  ╔═══════════════════════════════════════════════════════════╗"
+    _info "  ║  BOOTSTRAP FAILED — install ABORTED before finalization   ║"
+    _info "  ║                                                           ║"
+    _info "  ║  Logs preserved at:                                       ║"
+    _info "  ║    • /var/log/installer/bootstrap.log    (live ISO)       ║"
+    _info "  ║    • /target/root/kldload-install-logs/  (target rpool)   ║"
+    _info "  ║    • /target/bootstrap.log.failure       (target rpool)   ║"
+    _info "  ║                                                           ║"
+    _info "  ║  Common FATAL causes (search the log for 'FATAL'):        ║"
+    _info "  ║    • ZFS DKMS build for target kernel failed              ║"
+    _info "  ║    • dnf pass 3 (zfs / zfs-dkms / zfs-dracut) failed      ║"
+    _info "  ║    • initramfs rebuild missing extra/zfs.ko               ║"
+    _info "  ║                                                           ║"
+    _info "  ║  Do NOT reboot — the target will not boot.                ║"
+    _info "  ╚═══════════════════════════════════════════════════════════╝"
+    k_die "Bootstrap failed — install aborted (see /var/log/installer/bootstrap.log)"
+  fi
   _ok "Bootstrap"   "${KLDLOAD_DISTRO:-centos} base installed"
 
   # Write install manifest via the k_write_manifest function (defined earlier)
@@ -1996,16 +2041,37 @@ MOKENROLL
   cat > "${target}/etc/systemd/system/kldload-smoke-firstboot.service" <<'SMOKEFB'
 [Unit]
 Description=kldload post-install smoke test
-After=network-online.target multi-user.target
-Wants=network-online.target
+# Run AFTER autodeploy + klab-firstboot finish, not in parallel with them.
+# Pre-2026-05-12 the unit ordered only against multi-user.target, which
+# fires the moment systemd launches the long-running firstboot services —
+# so smoke ran against an unfinished system and flagged "FAIL" on every
+# scrape target that hadn't started yet (cilium, hubble, tetragon, ollama,
+# node_exporters in not-yet-built VMs). Real failures got buried under the
+# noise. Wait for the markers that say firstboot orchestration is done.
+After=network-online.target multi-user.target kldload-autodeploy.service klab-firstboot.service
+Wants=network-online.target kldload-autodeploy.service
 
 [Service]
 Type=oneshot
+# Marker-gated wait: even with After=, oneshot units report "active (exited)"
+# as soon as their main ExecStart returns, but the WORK they kicked off in
+# the background (kube-cluster bootstrap, ollama pull) is still running.
+# Block here until the actual readiness markers appear OR a generous
+# timeout elapses (90 min covers a slow box with klab golden builds).
+ExecStartPre=/bin/bash -c '\
+    deadline=$(($(date +%%s) + 5400)); \
+    while (( $(date +%%s) < deadline )); do \
+        [[ -f /var/lib/kldload/k8s-ready ]] && \
+        [[ -f /var/lib/kldload/ai-ready ]] && exit 0; \
+        [[ -f /var/lib/kldload/autodeploy-skipped ]] && exit 0; \
+        sleep 30; \
+    done; \
+    echo "smoke: readiness markers not present after 90 min — running anyway"'
 ExecStart=/bin/bash -c 'if [[ -x /usr/local/share/kldload/tests/smoke-all.sh ]]; then /usr/local/share/kldload/tests/smoke-all.sh > /root/kldload-smoke-report.txt 2>&1; fi'
 ExecStartPost=/bin/bash -c 'systemctl disable kldload-smoke-firstboot.service'
 StandardOutput=journal
 StandardError=journal
-TimeoutStartSec=300
+TimeoutStartSec=6000
 
 [Install]
 WantedBy=multi-user.target
