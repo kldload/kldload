@@ -754,7 +754,7 @@ OSREL
 if [[ "$EDITION" != "core" ]]; then
     # Copy kldload tools (short names). Added for pass-12:
     #   kldload-lh — LogHog cluster-wide wrapper (F5 in tmux console)
-    for tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kldload-help kldload-test kldload-install-target kldload-webui kldload-overview kldload-doctor kldload-db kldload-inventory kldload-console kldload-dash kldload-lh \
+    for tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kldload-help kldload-mgmt kldload-test kldload-install-target kldload-webui kldload-overview kldload-doctor kldload-db kldload-inventory kldload-console kldload-dash kldload-lh \
                  kinspect kztest-tail _ktoggle-win _kconsole-home \
                  kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo \
                  kube-setup kube-init kube-join kube-status kube-reset kube-network kube-load-images kube-smoke-test kube-cluster kube-demo \
