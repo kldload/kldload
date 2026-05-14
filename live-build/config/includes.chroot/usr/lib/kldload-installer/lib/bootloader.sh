@@ -625,6 +625,16 @@ ESPHOOK
   # Distro-agnostic — no dnf-plugin / apt-trigger to maintain per package
   # manager. Runs on FS-level mtime change, so any package upgrade that
   # touches the source binary triggers exactly one refresh.
+  #
+  # Defensive mkdir: profiles.sh:819 normally creates ${target}/usr/local/sbin
+  # earlier in the install. Caught 2026-05-14 on .113 F44 desktop install:
+  # the cat heredoc below failed with set -e because the directory wasn't
+  # present (likely a chroot/mount transient — dataset auto-unmount, or the
+  # profile stage took a different path for desktop). Without this mkdir,
+  # the failure halts bootloader.sh BEFORE the shim install at line ~727,
+  # leaving the target with no BOOTX64.EFI in /EFI/BOOT/ and a broken
+  # boot chain. Cheap to make this idempotent.
+  mkdir -p "${target}/usr/local/sbin"
   cat > "${target}/usr/local/sbin/kldload-grub-refresh" <<'GRUBREFRESH'
 #!/usr/bin/env bash
 # kldload-grub-refresh — sync /EFI/BOOT/grubx64.efi from the distro's
