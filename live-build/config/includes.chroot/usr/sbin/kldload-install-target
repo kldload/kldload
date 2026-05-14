@@ -1002,6 +1002,23 @@ if ! k_have_func k_write_install_manifest; then
     local _kld_heavy=1
     [[ "${KLDLOAD_PROFILE:-server}" == "core" ]] && _kld_heavy=0
 
+    # Compute the ISO version OUTSIDE the heredoc. Previously this was a
+    # nested $() inside the cat heredoc — under set -Eeuo pipefail +
+    # inherit_errexit, a failing awk inside a $() can propagate exit 1
+    # despite the `|| echo` fallback and trip the parent script. Caught
+    # 2026-05-14 on .113 RHEL 10 desktop install where gawk reported
+    # "invalid char in expression" (probably a UTF-8 byte from a
+    # locale-sensitive context), the heredoc-embedded $() returned non-
+    # zero, and install-target's k_die path halted the install. Pulling
+    # the computation OUT into a plain variable assignment guarantees
+    # the heredoc itself never references a failing subprocess. Safe by
+    # construction.
+    local _kld_iso_ver=""
+    _kld_iso_ver="$(awk -F'[[:space:]]*=[[:space:]]*' \
+                         '/^kldload_version/{print $2; exit}' \
+                         /etc/kldload/VERSION 2>/dev/null || true)"
+    [[ -z "${_kld_iso_ver}" ]] && _kld_iso_ver="1.1.0"
+
     cat > "${target}/etc/kldload/install-manifest.env" <<EOF
 # KLDload Install Manifest — written by installer $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 # KLDLOAD_INSTALLED=1 is the canonical "came from installer, not live ISO"
@@ -1028,10 +1045,7 @@ KLDLOAD_DEBIAN_RELEASE="${KLDLOAD_DEBIAN_RELEASE:-trixie}"
 # builder/build-iso.sh) so the attestation reports the real shipped version
 # rather than a hardcoded string that drifts. Fall back to a sentinel if
 # the file is missing (e.g. running this script outside a kldload live env).
-KLDLOAD_INSTALLER_VERSION="${KLDLOAD_INSTALLER_VERSION:-$(
-    awk -F'[[:space:]]*=[[:space:]]*' '/^kldload_version/{print $2; exit}' \
-        /etc/kldload/VERSION 2>/dev/null || echo '1.1.0'
-)}"
+KLDLOAD_INSTALLER_VERSION="${KLDLOAD_INSTALLER_VERSION:-${_kld_iso_ver}}"
 # Bumped fallback from 1.0.5 → 1.1.0 (2026-05-12): the awk parse silently
 # returned empty on a kldload 1.1.0 install (root cause TBD — VERSION file
 # present in live ISO per build-iso.sh:1887, but `awk … exit` was returning
