@@ -221,7 +221,11 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         #      failures don't kill the AI install).
         #   2. Wait for nvidia-smi to become available if NVIDIA hardware
         #      is present per lspci. Bounded wait, up to 3 minutes.
-        local _saved_err_trap
+        # NOTE: bare assignment, NOT `local`. The AI phase runs in a
+        # subshell (backgrounded), not a function — `local` errors out
+        # with exit 1 outside a function. Caught 2026-05-14 on .111 when
+        # this fix shipped and immediately produced the same ai-failed-ready
+        # marker it was supposed to prevent.
         _saved_err_trap=$(trap -p ERR 2>/dev/null)
         trap - ERR
         set +e
