@@ -148,9 +148,18 @@ k_profile_packages() {
         _gdm="gdm3"
       elif [[ "$_distro" == "centos" || "$_distro" == "rocky" || "$_distro" == "rhel" || "$_distro" == "fedora" ]]; then
         # RPM branch — match package naming on those ecosystems.
+        # Note: on RHEL 10+ and Fedora 41+, Red Hat dropped gnome-terminal
+        # and eog from AppStream in favor of modern GNOME 47 replacements
+        # (ptyxis + loupe). dnf without --skip-broken errors out if the
+        # package list contains a name that's not in any enabled repo.
+        # Ship BOTH the legacy and the modern names so dnf installs
+        # whichever is available — gnome-terminal/eog on older releases,
+        # ptyxis/loupe on RHEL 10 / Fedora 41+. Caught 2026-05-14 on .143
+        # RHEL 10 desktop install: gnome-terminal silently dropped,
+        # operator booted into a desktop with no terminal app.
         _browser="firefox"
-        _viewer="eog"
-        _terminal="gnome-terminal"
+        _viewer="eog loupe"
+        _terminal="gnome-terminal ptyxis"
         _nm="NetworkManager NetworkManager-wifi NetworkManager-tui"
         # GDM works on RPM distros once the right session-files package
         # is present. The bug seen on Rocky 9 desktop install 2026-05-04:
