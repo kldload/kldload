@@ -1166,10 +1166,11 @@ PRO_ONLY_ACTIONS = {
     "spawn", "golden", "cluster_deploy", "wg_peer_add", "wg_peer_remove",
     "wg_info", "node_list", "node_register", "node_poof", "apply_role",
     "salt_highstate", "salt_apply", "ansible_run", "k8s_join",
-    "vm_list", "vm_start", "vm_stop", "vm_destroy", "vm_clone",
-    # NOTE: vm_create_cloud is intentionally free — it's the core
-    # "spin up a Linux VM in one click" experience and Pro-gating it
-    # would gut the value proposition vs. virt-manager/Proxmox.
+    # NOTE: All VM lifecycle ops (list/start/stop/destroy/clone/create_cloud/
+    # delete_full/op/bulk) are intentionally FREE — they're the core hypervisor
+    # experience and Pro-gating them gutted the value proposition vs.
+    # virt-manager/Proxmox. Pro-tier differentiators live elsewhere (fleet
+    # ops, salt highstate, ansible runs, cluster_info, etc.).
     "service_action", "credential_list", "credential_add",
     "proxmox_list", "firewall_rule", "cluster_info",
 }
@@ -1521,6 +1522,8 @@ async def ws_handler(websocket):
                     await _vm_replace(websocket, msg)
                 elif action == "vm_create_cloud":
                     await _vm_create_cloud(websocket, msg)
+                elif action == "vm_delete_full":
+                    await _vm_delete_full(websocket, msg)
 
                 # ── Free-edition actions (ZFS / snapshots / logs) ──────────────
                 elif action == "zfs_status":
@@ -3487,6 +3490,64 @@ async def _vm_create_cloud(websocket, msg):
                f"Desktop install takes ~5-10 min after first boot.")
     await websocket.send(json.dumps({"type": "exec_done", "rc": 0, "target": "vm-log",
                                       "vm_created": name}))
+
+async def _vm_delete_full(websocket, msg):
+    """Full VM teardown: virsh destroy + undefine + zfs destroy zvol + rm seed.
+
+    The legacy vm_op delete only ran `virsh undefine --nvram`, leaving the
+    backing zvol and the cloud-init seed ISO behind. Operators thought the
+    VM was gone but the zvol kept consuming space, and the next create with
+    the same name failed with "zvol already exists". This action does the
+    full teardown the UI's confirm dialog already promises ("destroys the
+    VM and its ZFS zvol")."""
+    import os as _os
+    vm = (msg.get("vm") or "").strip()
+    if not _VM_NAME_RE.match(vm):
+        await websocket.send(json.dumps({"type": "error", "msg": f"invalid VM name: {vm!r}"}))
+        return
+
+    async def _log(line):
+        await websocket.send(json.dumps({"type": "log_line", "line": line, "target": "vm-log"}))
+
+    await _log(f"[delete] {vm} — force-stop + undefine + zvol destroy")
+
+    # Force-stop (ok if already stopped) + undefine (with NVRAM so UEFI vars
+    # don't linger). Both are best-effort — if the domain doesn't exist we
+    # still want to clean up the zvol.
+    subprocess.call(["virsh", "destroy", vm],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    rc_undef = subprocess.call(["virsh", "undefine", "--nvram", vm],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if rc_undef == 0:
+        await _log(f"[delete] {vm}: libvirt domain undefined")
+    else:
+        await _log(f"[delete] {vm}: no libvirt domain (or undefine failed) — continuing")
+
+    # Destroy the zvol. -r picks up any snapshots+clones we created during
+    # vm_create_cloud (each spawn snaps the golden first). Without -r the
+    # destroy fails when the zvol has a snapshot, which it usually does.
+    zvol = f"rpool/vms/{vm}"
+    rc_zfs = subprocess.call(["zfs", "destroy", "-r", zvol],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if rc_zfs == 0:
+        await _log(f"[delete] {vm}: zvol {zvol} destroyed")
+    else:
+        await _log(f"[delete] {vm}: zvol {zvol} not present (or destroy failed)")
+
+    # Cloud-init seed iso (best-effort cleanup of files vm_create_cloud
+    # leaves behind).
+    seed = f"/var/lib/libvirt/images/{vm}-seed.iso"
+    if _os.path.exists(seed):
+        try:
+            _os.unlink(seed); await _log(f"[delete] {vm}: removed seed iso")
+        except OSError as e:
+            await _log(f"[delete] {vm}: failed to remove {seed}: {e}")
+
+    db_log_event("vm_delete_full", vm, "VM + zvol + seed removed")
+    await _log(f"[delete] {vm}: done")
+    await websocket.send(json.dumps({"type": "exec_done", "rc": 0, "target": "vm-log"}))
+    await _list_vms(websocket)
+
 
 def _vm_cloud_os_variant(distro: str) -> str:
     """Best-effort os-variant for virt-install. Recent libosinfo on F44

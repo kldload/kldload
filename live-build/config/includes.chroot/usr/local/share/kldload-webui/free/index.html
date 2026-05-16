@@ -306,7 +306,7 @@ select option:checked { background: #00b8d9; color: #000; }
         <div style="display:flex;align-items:center;gap:1rem">
           <div style="font-size:2.5rem">✅</div>
           <div style="flex:1">
-            <div style="font-size:1.15rem;font-weight:700;color:var(--accent);margin-bottom:0.2rem">kldload is ready.</div>
+            <div style="font-size:1.15rem;font-weight:700;color:var(--good);margin-bottom:0.2rem">kldload is ready.</div>
             <div id="lab-ready-detail" style="font-size:0.85rem;color:var(--subtle)">All goldens built. Cluster up. Bob online. Go.</div>
           </div>
         </div>
@@ -1305,7 +1305,67 @@ select option:checked { background: #00b8d9; color: #000; }
       .ws-tab:hover{color:var(--text)}
       .ws-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
       .ws-tab .tab-count{display:inline-block;margin-left:0.4rem;padding:0.05em 0.5em;font-size:0.7rem;background:var(--surface2);color:var(--muted);border-radius:10px}
-      .ws-tab.active .tab-count{background:rgba(52,211,153,0.16);color:var(--accent)}
+      .ws-tab.active .tab-count{background:rgba(52,211,153,0.16);color:var(--good)}
+      /* Custom table-row checkboxes — overrides browser default white box.
+       * Unchecked: muted grey-on-grey, blends with surface but visibly present.
+       * Checked: emerald fill matching the running/healthy status palette.
+       * appearance:none strips the OS-native look (which on most platforms
+       * is a hard white square, jarring against the dark canvas). The
+       * !important is needed because the inline style attributes on the
+       * elements still carry the legacy accent-color hint we shipped first;
+       * letting the cascade win cleanly here saves rewriting every cell. */
+      input[type="checkbox"].vm-sel,
+      input[type="checkbox"].k8s-sel-pod,
+      input[type="checkbox"].k8s-sel-node,
+      .ws-row input[type="checkbox"],
+      thead input[type="checkbox"][onchange*="SelectAll"]{
+        -webkit-appearance:none;appearance:none;
+        /* box-sizing:border-box so the 1px border is INSIDE the 14px footprint
+         * — without it, total rendered size = 14px content + 2px borders = 16px,
+         * which visually doubled vs. the native 13px box the page used before. */
+        box-sizing:border-box;
+        width:14px;height:14px;
+        border:1px solid var(--border);
+        background:var(--surface3) !important;
+        border-radius:3px;
+        cursor:pointer;
+        vertical-align:middle;
+        transition:background-color .1s, border-color .1s;
+        margin:0;padding:0;
+        position:relative;
+        flex:0 0 auto;
+      }
+      input[type="checkbox"].vm-sel:hover,
+      input[type="checkbox"].k8s-sel-pod:hover,
+      input[type="checkbox"].k8s-sel-node:hover,
+      .ws-row input[type="checkbox"]:hover,
+      thead input[type="checkbox"][onchange*="SelectAll"]:hover{
+        border-color:var(--good);
+      }
+      input[type="checkbox"].vm-sel:checked,
+      input[type="checkbox"].k8s-sel-pod:checked,
+      input[type="checkbox"].k8s-sel-node:checked,
+      .ws-row input[type="checkbox"]:checked,
+      thead input[type="checkbox"][onchange*="SelectAll"]:checked{
+        background:var(--good) !important;
+        border-color:var(--good);
+      }
+      /* Checkmark glyph — drawn with two CSS borders forming an inverted-L,
+       * rotated 45°. No font dependency, scales cleanly at any size. */
+      input[type="checkbox"].vm-sel:checked::after,
+      input[type="checkbox"].k8s-sel-pod:checked::after,
+      input[type="checkbox"].k8s-sel-node:checked::after,
+      .ws-row input[type="checkbox"]:checked::after,
+      thead input[type="checkbox"][onchange*="SelectAll"]:checked::after{
+        /* Checkmark glyph — scaled to the 14px box (was 15px before). */
+        content:"";
+        position:absolute;
+        left:3px;top:0;
+        width:4px;height:8px;
+        border:solid #0b1220;
+        border-width:0 2px 2px 0;
+        transform:rotate(45deg);
+      }
       .ws-subview{display:none;animation:ws-fade .15s ease}
       .ws-subview.active{display:block}
       @keyframes ws-fade{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
@@ -1340,7 +1400,7 @@ select option:checked { background: #00b8d9; color: #000; }
         #view-k8s .k8s-tab:hover{color:var(--text)}
         #view-k8s .k8s-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
         #view-k8s .k8s-tab .tab-count{display:inline-block;margin-left:0.4rem;padding:0.05em 0.5em;font-size:0.7rem;background:var(--surface2);color:var(--muted);border-radius:10px}
-        #view-k8s .k8s-tab.active .tab-count{background:rgba(52,211,153,0.16);color:var(--accent)}
+        #view-k8s .k8s-tab.active .tab-count{background:rgba(52,211,153,0.16);color:var(--good)}
         #view-k8s .k8s-subview{display:none;animation:k8s-fade .15s ease}
         #view-k8s .k8s-subview.active{display:block}
         @keyframes k8s-fade{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
@@ -1852,7 +1912,7 @@ select option:checked { background: #00b8d9; color: #000; }
         <div style="display:flex;align-items:center;gap:1rem">
           <div style="font-size:2.5rem">✅</div>
           <div style="flex:1">
-            <div style="font-size:1.15rem;font-weight:700;color:var(--accent);margin-bottom:0.2rem">kldload is ready.</div>
+            <div style="font-size:1.15rem;font-weight:700;color:var(--good);margin-bottom:0.2rem">kldload is ready.</div>
             <div id="lab-ready-detail-klab" style="font-size:0.85rem;color:var(--subtle)"></div>
           </div>
         </div>
@@ -2652,7 +2712,13 @@ function connect() {
   ws = new WebSocket(wsUrl);
   ws.onopen = () => {
     wsReady = true;
-    document.getElementById('status-dot').style.background = 'var(--accent)';
+    // Connected = healthy. Use --good (emerald) per the UI's status palette
+    // convention (green=healthy/red=danger/amber=warn, same in dark+light
+    // themes). --accent is royal blue — reserved for primary actions and
+    // active nav, not status. The CSS default for #status-dot is already
+    // green; this JS line was overriding it to blue, which read as "active
+    // action" rather than "connection healthy".
+    document.getElementById('status-dot').style.background = 'var(--good)';
     document.getElementById('status-text').textContent = 'connected';
     send({ action: 'system_info' });
     requestDisks();
@@ -3259,7 +3325,7 @@ function handle(msg) {
       const el = document.getElementById('kl-hubble-status');
       const s = msg.status || {};
       if (el) el.innerHTML = s.running
-        ? `<span style="color:var(--accent)">● Hubble running</span> ${s.version ? '(' + esc(s.version) + ')' : ''} ${s.ui_url ? '— <a href="' + esc(s.ui_url) + '" target="_blank" style="color:var(--accent)">Open Hubble UI</a>' : ''}`
+        ? `<span style="color:var(--good)">● Hubble running</span> ${s.version ? '(' + esc(s.version) + ')' : ''} ${s.ui_url ? '— <a href="' + esc(s.ui_url) + '" target="_blank" style="color:var(--accent2)">Open Hubble UI</a>' : ''}`
         : '<span style="color:var(--muted)">○ Hubble not running — deploy Cilium + Hubble first</span>';
       break;
     }
@@ -4251,9 +4317,9 @@ function renderVMList(vms) {
     const stateChip = v.state === 'running' ? 'chip-ok' : v.state === 'shut off' ? '' : 'chip-warn';
     const isRunning = v.state === 'running';
     return `<tr class="ws-row" data-name="${esc(v.name)}">
-      <td onclick="event.stopPropagation()" style="padding:0.5rem"><input type="checkbox" class="vm-sel" data-name="${esc(v.name)}" onchange="vmUpdateSelCount()"></td>
-      <td style="font-family:monospace;font-weight:600">${esc(v.name)}</td>
-      <td><span class="chip ${stateChip}" style="background:${stateChip ? '' : 'var(--surface2)'};color:${isRunning ? 'var(--accent)' : v.state === 'shut off' ? 'var(--muted)' : 'var(--warn)'}">${esc(v.state)}</span></td>
+      <td onclick="event.stopPropagation()" style="padding:0.5rem"><input type="checkbox" class="vm-sel" data-name="${esc(v.name)}" ${_vmSelectedNames.has(v.name) ? 'checked' : ''} onchange="vmToggleSel('${esc(v.name)}', this.checked)"></td>
+      <td style="font-family:monospace;font-weight:600;color:var(--accent2)">${esc(v.name)}</td>
+      <td><span class="chip ${stateChip}" style="background:${stateChip ? '' : 'var(--surface2)'};color:${isRunning ? 'var(--good)' : v.state === 'shut off' ? 'var(--muted)' : 'var(--warn)'}">${esc(v.state)}</span></td>
       <td style="text-align:center;color:var(--subtle)">${esc(v.vcpus || '—')}</td>
       <td style="color:var(--subtle)">${esc(v.ram || '—')}</td>
       <td style="color:var(--muted);font-size:0.78rem">${esc(v.disk || '—')}</td>
@@ -4423,23 +4489,51 @@ function vmMoreDemos() {
 }
 
 // Bulk select / actions — same pattern as K8s.
+//
+// Selection state lives in a Set keyed by VM name, NOT in the DOM. The
+// VM list re-renders on every list_vms response (which happens after
+// every vm_op + on the periodic refresh — every few seconds), so storing
+// checked state only on the <input> elements meant every refresh wiped
+// selections mid-action. The render function reads from this Set to
+// re-apply the `checked` attribute, keeping selection persistent across
+// arbitrary re-renders.
+const _vmSelectedNames = new Set();
+
+function vmToggleSel(name, checked) {
+  if (checked) _vmSelectedNames.add(name);
+  else _vmSelectedNames.delete(name);
+  vmUpdateSelCount();
+}
 function vmSelectAll(checked) {
-  document.querySelectorAll('.vm-sel').forEach(cb => cb.checked = checked);
+  document.querySelectorAll('.vm-sel').forEach(cb => {
+    cb.checked = checked;
+    if (checked) _vmSelectedNames.add(cb.dataset.name);
+    else _vmSelectedNames.delete(cb.dataset.name);
+  });
   vmUpdateSelCount();
 }
 function vmClearSel() {
+  _vmSelectedNames.clear();
   document.querySelectorAll('.vm-sel').forEach(cb => cb.checked = false);
   vmUpdateSelCount();
 }
 function vmUpdateSelCount() {
-  const n = document.querySelectorAll('.vm-sel:checked').length;
+  // Prefer the Set as source of truth — DOM might be mid-render. Filter
+  // by currently-rendered VMs to drop names that have since been deleted.
+  const present = new Set(Array.from(document.querySelectorAll('.vm-sel')).map(cb => cb.dataset.name));
+  for (const n of Array.from(_vmSelectedNames)) {
+    if (!present.has(n)) _vmSelectedNames.delete(n);
+  }
+  const n = _vmSelectedNames.size;
   const bar = document.getElementById('vm-bulk-bar');
   const cnt = document.getElementById('vm-selcount');
   if (bar) bar.style.display = n > 0 ? 'flex' : 'none';
   if (cnt) cnt.textContent = `${n} selected`;
 }
 function vmBulk(op) {
-  const targets = Array.from(document.querySelectorAll('.vm-sel:checked')).map(c => c.dataset.name);
+  // Source of truth is the persistent Set, not the DOM (DOM may be mid-
+  // re-render when bulk button is clicked).
+  const targets = Array.from(_vmSelectedNames);
   if (!targets.length) return;
   const destructive = ['destroy', 'shutdown', 'reboot'];
   if (destructive.includes(op)) {
@@ -4470,11 +4564,14 @@ function vmClone(name) {
 
 function vmDelete(name) {
   if (!confirm(`Delete VM ${name}? This destroys the VM and its ZFS zvol.`)) return;
-  send({ action: 'vm_op', vm: name, action: 'destroy' });
-  setTimeout(() => {
-    send({ action: 'vm_op', vm: name, action: 'undefine' });
-    setTimeout(() => send({ action: 'list_vms' }), 2000);
-  }, 1000);
+  // Single-action full teardown — was previously two vm_op calls with a
+  // colliding `action` key inside the message, so the dispatcher saw
+  // action='destroy' (no such handler) and silently dropped both.
+  // vm_delete_full destroys the libvirt domain, zfs destroys the zvol
+  // (with snapshots), and removes the cloud-init seed ISO — what the
+  // confirm dialog has always promised but never actually did.
+  send({ action: 'vm_delete_full', vm: name });
+  vmSubTab('log');
 }
 
 // ── VM serial console ───────────────────────────────────────────────────────
@@ -4639,9 +4736,9 @@ function renderK8sStatus(data) {
       const topCell = top ? `<span style="color:var(--muted);font-size:0.75rem" title="CPU: ${esc(top.cpu)} (${esc(top.cpu_pct)})  Memory: ${esc(top.mem)} (${esc(top.mem_pct)})">${esc(top.cpu_pct)} / ${esc(top.mem_pct)}</span>` : '';
       return `<tr class="k8s-row" data-kind="node" data-name="${esc(n.name)}" onclick="k8sRowClick(this)" style="cursor:pointer" title="Click for events, pods on this node, capacity">
         <td onclick="event.stopPropagation()" style="padding:0.55rem 0.5rem"><input type="checkbox" class="k8s-sel-node" data-name="${esc(n.name)}" onchange="k8sUpdateSelCount('node')"></td>
-        <td style="font-family:monospace;font-weight:600">${esc(n.name)} ${topCell}</td>
+        <td style="font-family:monospace;font-weight:600;color:var(--accent2)">${esc(n.name)} ${topCell}</td>
         <td>${esc(n.role || '—')}</td>
-        <td><span style="color:${ready ? 'var(--accent)' : 'var(--danger)'}">${esc(n.status)}</span></td>
+        <td><span style="color:${ready ? 'var(--good)' : 'var(--danger)'}">${esc(n.status)}</span></td>
         <td style="color:var(--muted)">${esc(n.version || '—')}</td>
         <td style="font-family:monospace;font-size:0.82rem">${esc(n.ip || '—')}</td>
         <td>
@@ -4674,13 +4771,13 @@ function renderK8sPods(pods) {
   window._k8sCount.pods = pods.length;
   _k8sUpdateTabBadges();
   tbody.innerHTML = pods.map(p => {
-    const statusColor = p.status === 'Running' ? 'var(--accent)' : p.status === 'Pending' ? '#c9a04a' : 'var(--danger)';
+    const statusColor = p.status === 'Running' ? 'var(--good)' : p.status === 'Pending' ? '#c9a04a' : 'var(--danger)';
     const top = (window._k8sTopPods || {})[`${p.namespace}/${p.name}`];
     const topCell = top ? ` <span style="color:var(--muted);font-size:0.7rem" title="CPU: ${esc(top.cpu)}  Memory: ${esc(top.mem)}">[${esc(top.cpu)} ${esc(top.mem)}]</span>` : '';
     return `<tr class="k8s-row" data-kind="pod" data-name="${esc(p.name)}" data-ns="${esc(p.namespace)}" onclick="k8sRowClick(this)" style="cursor:pointer" title="Click for events, containers, logs, live metrics">
       <td onclick="event.stopPropagation()" style="padding:0.55rem 0.5rem"><input type="checkbox" class="k8s-sel-pod" data-name="${esc(p.name)}" data-ns="${esc(p.namespace)}" onchange="k8sUpdateSelCount('pod')"></td>
       <td style="color:var(--muted);font-size:0.82rem">${esc(p.namespace)}</td>
-      <td style="font-family:monospace;font-size:0.82rem">${esc(p.name)}${topCell}</td>
+      <td style="font-family:monospace;font-size:0.82rem;color:var(--accent2);font-weight:600">${esc(p.name)}${topCell}</td>
       <td>${esc(p.ready || '—')}</td>
       <td><span style="color:${statusColor}">${esc(p.status)}</span></td>
       <td style="color:var(--muted)">${esc(p.restarts || '0')}</td>
@@ -5144,8 +5241,8 @@ function renderK8sDeployments(deploys) {
     const imgShort = (d.image || '').split('/').pop().slice(0, 40);
     return `<tr>
       <td style="color:var(--muted);font-size:0.82rem">${esc(d.namespace)}</td>
-      <td style="font-family:monospace;font-size:0.82rem;font-weight:600">${esc(d.name)}</td>
-      <td><span style="color:${healthy ? 'var(--accent)' : 'var(--warn)'}">${esc(ready)}/${esc(desired)}</span></td>
+      <td style="font-family:monospace;font-size:0.82rem;font-weight:600;color:var(--accent2)">${esc(d.name)}</td>
+      <td><span style="color:${healthy ? 'var(--good)' : 'var(--warn)'}">${esc(ready)}/${esc(desired)}</span></td>
       <td style="color:var(--muted);font-family:monospace;font-size:0.75rem" title="${esc(d.image)}">${esc(imgShort)}</td>
       <td style="color:var(--muted);font-size:0.78rem">${esc((d.age || '').slice(0, 10))}</td>
       <td style="white-space:nowrap">
@@ -5194,7 +5291,7 @@ function renderK8sServices(svcs) {
     const extIp = s.external_ip && s.external_ip !== '<none>' ? s.external_ip : '—';
     return `<tr>
       <td style="color:var(--muted);font-size:0.82rem">${esc(s.namespace)}</td>
-      <td style="font-family:monospace;font-size:0.82rem;font-weight:600">${esc(s.name)}</td>
+      <td style="font-family:monospace;font-size:0.82rem;font-weight:600;color:var(--accent2)">${esc(s.name)}</td>
       <td><span style="color:${typeColor}">${esc(s.type)}</span></td>
       <td style="color:var(--muted);font-family:monospace;font-size:0.8rem">${esc(s.cluster_ip)}</td>
       <td style="font-family:monospace;font-size:0.8rem">${esc(extIp)}</td>
@@ -6136,10 +6233,10 @@ function renderKlabStatus(msg) {
         const blue = bvms.find(v => v.distro === d);
         const green = gvms.find(v => v.distro === d);
         const goldenBadge = gi.ready
-          ? '<span style="color:var(--accent)">● ready</span>'
+          ? '<span style="color:var(--good)">● ready</span>'
           : '<span style="color:var(--muted)">○ none</span>';
         const vmBadge = (vm) => vm
-          ? (vm.state === 'running' ? '<span style="color:var(--accent)">● up</span>' : '<span style="color:#c9a04a">◐ ' + esc(vm.state) + '</span>')
+          ? (vm.state === 'running' ? '<span style="color:var(--good)">● up</span>' : '<span style="color:#c9a04a">◐ ' + esc(vm.state) + '</span>')
           : '<span style="color:var(--muted)">—</span>';
         return `<tr>
           <td style="font-weight:600">${esc(d)}</td>
@@ -6181,11 +6278,11 @@ function renderKlabStatus(msg) {
       vmTbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No site VMs deployed</td></tr>';
     } else {
       vmTbody.innerHTML = allVMs.map(v => `<tr>
-        <td style="font-family:monospace;font-size:0.82rem">${esc(v.name)}</td>
+        <td style="font-family:monospace;font-size:0.82rem;color:var(--accent2);font-weight:600">${esc(v.name)}</td>
         <td>${esc(v.distro)}</td>
         <td><span style="color:${v.site === 'blue' ? 'var(--accent)' : '#c9a04a'}">${esc(v.site)}</span></td>
         <td style="font-family:monospace;font-size:0.82rem">${esc(v.ip)}</td>
-        <td>${v.state === 'running' ? '<span style="color:var(--accent)">running</span>' : esc(v.state)}</td>
+        <td>${v.state === 'running' ? '<span style="color:var(--good)">running</span>' : esc(v.state)}</td>
         <td style="white-space:nowrap">
           ${v.state === 'running'
             ? `<button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="klabVmOp('${esc(v.name)}','shutdown')">Stop</button>
@@ -6201,9 +6298,9 @@ function renderKlabStatus(msg) {
   const trEl = document.getElementById('kl-test-results');
   if (trEl && tests.distros && Object.keys(tests.distros).length) {
     let html = `<div style="font-size:0.78rem;color:var(--subtle);margin-bottom:0.4rem">Run: ${esc(tests.run_id)}</div>`;
-    html += '<table><thead><tr><th>Distro</th><th style="color:var(--accent)">Pass</th><th style="color:var(--danger)">Fail</th><th style="color:var(--muted)">Skip</th></tr></thead><tbody>';
+    html += '<table><thead><tr><th>Distro</th><th style="color:var(--good)">Pass</th><th style="color:var(--danger)">Fail</th><th style="color:var(--muted)">Skip</th></tr></thead><tbody>';
     for (const [d, r] of Object.entries(tests.distros)) {
-      html += `<tr><td>${esc(d)}</td><td style="color:var(--accent)">${esc(r.PASS || '0')}</td><td style="color:var(--danger)">${esc(r.FAIL || '0')}</td><td style="color:var(--muted)">${esc(r.SKIP || '0')}</td></tr>`;
+      html += `<tr><td>${esc(d)}</td><td style="color:var(--good)">${esc(r.PASS || '0')}</td><td style="color:var(--danger)">${esc(r.FAIL || '0')}</td><td style="color:var(--muted)">${esc(r.SKIP || '0')}</td></tr>`;
     }
     html += '</tbody></table>';
     trEl.innerHTML = html;
@@ -6352,18 +6449,18 @@ function renderTestRuns(runs) {
     const passPct = total ? ((t.pass||0) / total * 100).toFixed(1) : 0;
     html += `<div style="margin-bottom:0.75rem">
       <div style="display:flex;gap:1.5rem;font-size:0.95rem;margin-bottom:0.4rem">
-        <span style="color:var(--accent)"><strong>${t.pass||0}</strong> pass</span>
+        <span style="color:var(--good)"><strong>${t.pass||0}</strong> pass</span>
         <span style="color:var(--danger)"><strong>${t.fail||0}</strong> fail</span>
         <span style="color:var(--muted)"><strong>${t.skip||0}</strong> skip</span>
         <span style="color:var(--subtle)">${total} total — <strong>${passPct}%</strong></span>
       </div>
       <div style="height:6px;background:var(--surface2);border-radius:3px;overflow:hidden">
-        <div style="height:100%;width:${passPct}%;background:${t.fail > 0 ? 'linear-gradient(90deg,var(--accent) ' + passPct + '%,var(--danger) ' + passPct + '%)' : 'var(--accent)'};border-radius:3px"></div>
+        <div style="height:100%;width:${passPct}%;background:${t.fail > 0 ? 'linear-gradient(90deg,var(--good) ' + passPct + '%,var(--danger) ' + passPct + '%)' : 'var(--good)'};border-radius:3px"></div>
       </div>
     </div>`;
 
     // Per-distro table
-    html += '<table><thead><tr><th>Distro</th><th style="text-align:right;color:var(--accent)">Pass</th><th style="text-align:right;color:var(--danger)">Fail</th><th style="text-align:right;color:var(--muted)">Skip</th><th>Bar</th><th></th></tr></thead><tbody>';
+    html += '<table><thead><tr><th>Distro</th><th style="text-align:right;color:var(--good)">Pass</th><th style="text-align:right;color:var(--danger)">Fail</th><th style="text-align:right;color:var(--muted)">Skip</th><th>Bar</th><th></th></tr></thead><tbody>';
     for (const [distro, r] of Object.entries(latest.distros)) {
       // Summary file writes lowercase keys (pass=, fail=, skip=, total=).
       // The old UI read uppercase and always rendered 0/0/0 — that's why
@@ -6377,14 +6474,14 @@ function renderTestRuns(runs) {
       const statusKey = r.status || (f > 0 ? 'fail' : (p > 0 ? 'pass' : (dt > 0 ? 'skip' : 'empty')));
       const statusDot = f > 0 ? '<span style="color:var(--danger)" title="failed">●</span>'
                       : statusKey === 'running' ? '<span style="color:var(--warn)" title="running">◐</span>'
-                      : p > 0 ? '<span style="color:var(--accent)" title="passed">●</span>'
+                      : p > 0 ? '<span style="color:var(--good)" title="passed">●</span>'
                       : '<span style="color:var(--muted)" title="no data">○</span>';
       html += `<tr>
         <td>${statusDot} <strong>${esc(distro)}</strong></td>
-        <td style="text-align:right;color:var(--accent)">${p}</td>
+        <td style="text-align:right;color:var(--good)">${p}</td>
         <td style="text-align:right;color:${f > 0 ? 'var(--danger)' : 'var(--muted)'}">${f}</td>
         <td style="text-align:right;color:var(--muted)">${s}</td>
-        <td style="width:120px"><div style="height:4px;background:var(--surface2);border-radius:2px;overflow:hidden"><div style="height:100%;width:${dp}%;background:var(--accent);border-radius:2px"></div></div></td>
+        <td style="width:120px"><div style="height:4px;background:var(--surface2);border-radius:2px;overflow:hidden"><div style="height:100%;width:${dp}%;background:var(--good);border-radius:2px"></div></div></td>
         <td><button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'klab_test_results',run_id:'${esc(latest.run_id)}'});document.getElementById('kl-test-detail-title').textContent='${esc(distro)} — ${esc(latest.run_id)}'">Log</button></td>
       </tr>`;
     }
@@ -6397,14 +6494,14 @@ function renderTestRuns(runs) {
   // Run history
   const histEl = document.getElementById('kl-test-history');
   if (histEl && runs.length > 0) {
-    let html = '<table style="font-size:0.82rem"><thead><tr><th>Run</th><th>Date</th><th style="color:var(--accent)">Pass</th><th style="color:var(--danger)">Fail</th><th style="color:var(--muted)">Skip</th><th>Distros</th><th></th></tr></thead><tbody>';
+    let html = '<table style="font-size:0.82rem"><thead><tr><th>Run</th><th>Date</th><th style="color:var(--good)">Pass</th><th style="color:var(--danger)">Fail</th><th style="color:var(--muted)">Skip</th><th>Distros</th><th></th></tr></thead><tbody>';
     runs.forEach(r => {
       const t = r.total || {};
       const distros = Object.keys(r.distros || {}).join(', ');
       html += `<tr>
         <td style="font-family:monospace">${esc(r.run_id)}</td>
         <td style="color:var(--muted)">${esc(r.timestamp)}</td>
-        <td style="color:var(--accent)">${t.pass||0}</td>
+        <td style="color:var(--good)">${t.pass||0}</td>
         <td style="color:${(t.fail||0) > 0 ? 'var(--danger)' : 'var(--muted)'}">${t.fail||0}</td>
         <td style="color:var(--muted)">${t.skip||0}</td>
         <td style="font-size:0.78rem;color:var(--muted)">${esc(distros)}</td>
@@ -6516,7 +6613,7 @@ function klabTestShowDistro(distro) {
     if (items.length) {
       header = `<div style="padding:0.5rem 0.75rem;background:var(--surface2);border-bottom:1px solid var(--border);display:flex;gap:1rem;font-size:0.78rem;flex-wrap:wrap">
         <strong>Checklist:</strong>
-        <span style="color:var(--accent)">✓ ${counts.PASS} passed</span>
+        <span style="color:var(--good)">✓ ${counts.PASS} passed</span>
         <span style="color:var(--danger)">✗ ${counts.FAIL} failed</span>
         <span style="color:var(--muted)">∅ ${counts.SKIP} skipped</span>
         ${counts.KILLED ? `<span style="color:var(--warn)">⚠ ${counts.KILLED} killed</span>` : ''}
