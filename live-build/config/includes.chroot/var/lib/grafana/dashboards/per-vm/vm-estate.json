@@ -1,0 +1,411 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "title": "VM Estate \u2014 Every VM as a Virtual Host",
+  "uid": "klab-vm-estate",
+  "tags": [
+    "klab",
+    "vms",
+    "kldload",
+    "estate"
+  ],
+  "schemaVersion": 39,
+  "timezone": "",
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "description": "Per-VM hypervisor-view metrics from libvirt-exporter. Treat each VM as a virtual host \u2014 pick one from the dropdown to see its baseline (CPU/RAM/disk/net/state) without needing any agent inside the guest. Pairs with klab-vm-ebpf-deep for kernel-level drill-down.",
+  "templating": {
+    "list": [
+      {
+        "name": "vm",
+        "type": "query",
+        "label": "VM",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values(libvirt_domain_info_cpu_time_seconds_total, domain)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": false,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "VMs on host",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "count(libvirt_domain_info_state)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Running",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "count(libvirt_domain_info_state == 1)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Shut off / Paused",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "count(libvirt_domain_info_state != 1)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "All VMs \u2014 overview",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "description": "Every libvirt domain on the host. Click a row to filter dashboards. State 1=running, 5=shut-off, 3=paused.",
+      "targets": [
+        {
+          "expr": "libvirt_domain_info_virtual_cpus",
+          "refId": "A",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{domain}}"
+        },
+        {
+          "expr": "libvirt_domain_info_maximum_memory_bytes / 1024 / 1024",
+          "refId": "B",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "expr": "rate(libvirt_domain_info_cpu_time_seconds_total[1m])",
+          "refId": "C",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "expr": "libvirt_domain_info_state",
+          "refId": "D",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "domain",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "domain": "VM",
+              "Value #A": "vCPUs",
+              "Value #B": "RAM (MB)",
+              "Value #C": "CPU (cores)",
+              "Value #D": "State"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "CPU usage \u2014 $vm",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "description": "vCPU seconds per second = effective cores in use. 2.0 = 2 vCPUs fully pinned.",
+      "targets": [
+        {
+          "expr": "rate(libvirt_domain_info_cpu_time_seconds_total{domain=~\"$vm\"}[1m])",
+          "legendFormat": "{{domain}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Memory used \u2014 $vm",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "description": "Actual memory in use by the qemu process, not allocation ceiling.",
+      "targets": [
+        {
+          "expr": "libvirt_domain_info_memory_usage_bytes{domain=~\"$vm\"}",
+          "legendFormat": "{{domain}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Disk I/O bytes \u2014 $vm",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "description": "Per-virtual-disk read/write throughput from libvirt's view. Catches storage-thrashing test VMs at a glance.",
+      "targets": [
+        {
+          "expr": "rate(libvirt_domain_block_stats_read_bytes_total{domain=~\"$vm\"}[1m])",
+          "legendFormat": "{{domain}} {{target_device}} read",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(libvirt_domain_block_stats_write_bytes_total{domain=~\"$vm\"}[1m])",
+          "legendFormat": "{{domain}} {{target_device}} write",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Disk IOPS \u2014 $vm",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "description": "Read + write operations per second. ZFS test runs spike here during txg syncs and zfs-recv.",
+      "targets": [
+        {
+          "expr": "rate(libvirt_domain_block_stats_read_requests_total{domain=~\"$vm\"}[1m])",
+          "legendFormat": "{{domain}} {{target_device}} reads",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(libvirt_domain_block_stats_write_requests_total{domain=~\"$vm\"}[1m])",
+          "legendFormat": "{{domain}} {{target_device}} writes",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "iops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      }
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "Network bytes \u2014 $vm",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "description": "Per-vNIC rx/tx throughput. Watch for stuck/silent VMs during deploys.",
+      "targets": [
+        {
+          "expr": "rate(libvirt_domain_interface_stats_receive_bytes_total{domain=~\"$vm\"}[1m])",
+          "legendFormat": "{{domain}} {{target_device}} rx",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(libvirt_domain_interface_stats_transmit_bytes_total{domain=~\"$vm\"}[1m])",
+          "legendFormat": "{{domain}} {{target_device}} tx",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      }
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Network packets \u2014 $vm",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "targets": [
+        {
+          "expr": "rate(libvirt_domain_interface_stats_receive_packets_total{domain=~\"$vm\"}[1m])",
+          "legendFormat": "{{domain}} {{target_device}} rx pkts",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(libvirt_domain_interface_stats_transmit_packets_total{domain=~\"$vm\"}[1m])",
+          "legendFormat": "{{domain}} {{target_device}} tx pkts",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "id": 99,
+      "type": "row",
+      "title": "Cross-link",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "collapsed": false
+    },
+    {
+      "id": 100,
+      "type": "text",
+      "title": "Kernel-level drill-down",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Need to see *inside* a VM at kernel level \u2014 exec events, syscalls, network flows, capabilities, file ops \u2014 that no Splunk/Loki can capture? \u2192 **[klab VM eBPF Deep Dive](/grafana/d/klab-vm-ebpf-deep/klab-vm-ebpf-deep-dive)**. Shares the `$vm` variable from this dashboard."
+      }
+    }
+  ]
+}

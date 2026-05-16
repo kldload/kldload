@@ -1,0 +1,37 @@
+[Unit]
+Description=Prometheus libvirt-exporter — per-VM metrics from hypervisor (no in-guest agent needed)
+Documentation=https://github.com/inovex/prometheus-libvirt-exporter
+After=libvirtd.service network-online.target
+Wants=libvirtd.service
+ConditionPathExists=/usr/local/bin/libvirt-exporter
+ConditionPathExists=/var/run/libvirt/libvirt-sock
+
+[Service]
+Type=simple
+# Listens on 127.0.0.1 only; Prometheus scrapes localhost. No exposure to LAN.
+# --libvirt.uri=qemu:///system uses the local libvirt socket (default).
+# Runs as root because the libvirt socket is root-owned on most distros;
+# the alternative (adding a libvirt-exporter user to the libvirt group)
+# introduces a long-lived service-account risk for marginal benefit.
+# v2.3.1 CLI semantics: --libvirt.uri = socket PATH (not qemu URI),
+# --libvirt.driver = the qemu URI. Earlier docs (and many third-party
+# tutorials) show --libvirt.uri=qemu:///system which silently no-ops and
+# leaves the exporter unable to enumerate domains — /metrics returns only
+# Go-runtime metrics, no libvirt_domain_*. Caught on .127 2026-05-16.
+ExecStart=/usr/local/bin/libvirt-exporter \
+    --web.listen-address=127.0.0.1:9177 \
+    --libvirt.uri=/var/run/libvirt/libvirt-sock \
+    --libvirt.driver=qemu:///system
+Restart=on-failure
+RestartSec=10
+# Hardening: no network beyond the libvirt socket + Prometheus scrape.
+# Can't read/write outside /var/run/libvirt and its own scrape socket.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,98 @@
+{
+  "annotations": {"list": []},
+  "title": "kldload Home",
+  "uid": "kldload-home",
+  "tags": ["kldload", "home"],
+  "schemaVersion": 39,
+  "timezone": "",
+  "refresh": "10s",
+  "time": {"from": "now-30m", "to": "now"},
+  "description": "kldload home dashboard. Fleet overview + drill-down links to specialized views. VMs auto-appear here as libvirt creates them.",
+  "panels": [
+    {
+      "id": 1, "type": "row", "title": "Fleet at a glance",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0}, "collapsed": false
+    },
+    {
+      "id": 10, "type": "stat", "title": "VMs",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "targets": [{"expr": "count(libvirt_domain_info_state)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 11, "type": "stat", "title": "Running",
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
+      "targets": [{"expr": "count(libvirt_domain_info_state == 1)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}]}}},
+      "options": {"colorMode": "background"}
+    },
+    {
+      "id": 12, "type": "stat", "title": "Host CPU",
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 1},
+      "targets": [{"expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "decimals": 1, "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 70}, {"color": "red", "value": 90}]}}},
+      "options": {"colorMode": "background"}
+    },
+    {
+      "id": 13, "type": "stat", "title": "Host RAM used",
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 1},
+      "targets": [{"expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "decimals": 1, "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 70}, {"color": "red", "value": 90}]}}}
+    },
+    {
+      "id": 14, "type": "stat", "title": "rpool health",
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 1},
+      "targets": [{"expr": "zfs_pool_health{pool=\"rpool\"}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"mappings": [{"options": {"0": {"text": "ONLINE", "color": "green"}, "1": {"text": "DEGRADED", "color": "yellow"}, "2": {"text": "FAULTED", "color": "red"}}, "type": "value"}]}},
+      "options": {"colorMode": "background"}
+    },
+    {
+      "id": 15, "type": "stat", "title": "Uptime",
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 1},
+      "targets": [{"expr": "(time() - node_boot_time_seconds)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 20, "type": "row", "title": "Every VM (click name → metrics for that VM)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5}, "collapsed": false
+    },
+    {
+      "id": 30, "type": "table", "title": "VM Estate — auto-discovered, click to drill down",
+      "description": "Every libvirt VM. Click a row → opens that VM's metrics dashboard. New VMs appear within 15s of klab/kube-cluster spawning them.",
+      "gridPos": {"h": 14, "w": 24, "x": 0, "y": 6},
+      "targets": [
+        {"expr": "libvirt_domain_info_state", "refId": "A", "format": "table", "instant": true},
+        {"expr": "libvirt_domain_info_virtual_cpus", "refId": "B", "format": "table", "instant": true},
+        {"expr": "libvirt_domain_info_maximum_memory_bytes/1024/1024", "refId": "C", "format": "table", "instant": true},
+        {"expr": "rate(libvirt_domain_info_cpu_time_seconds_total[1m])", "refId": "D", "format": "table", "instant": true},
+        {"expr": "libvirt_domain_info_memory_usage_bytes", "refId": "E", "format": "table", "instant": true}
+      ],
+      "transformations": [
+        {"id": "joinByField", "options": {"byField": "domain", "mode": "outer"}},
+        {"id": "organize", "options": {"renameByName": {
+          "domain": "VM",
+          "state_desc": "State",
+          "Value #A": "state_code",
+          "Value #B": "vCPUs",
+          "Value #C": "RAM (MB)",
+          "Value #D": "CPU (cores)",
+          "Value #E": "RAM used (bytes)"
+        }, "excludeByName": {"state_code": true, "__name__": true, "Value": true, "instance": true, "job": true, "source_host_name": true}}}
+      ],
+      "fieldConfig": {"defaults": {}, "overrides": [
+        {"matcher": {"id": "byName", "options": "VM"}, "properties": [
+          {"id": "links", "value": [
+            {"title": "Drill down — $__value.text metrics", "url": "/grafana/d/klab-vm-estate/?var-vm=${__value.text}"}
+          ]}
+        ]},
+        {"matcher": {"id": "byName", "options": "RAM used (bytes)"}, "properties": [{"id": "unit", "value": "bytes"}]},
+        {"matcher": {"id": "byName", "options": "CPU (cores)"}, "properties": [{"id": "unit", "value": "short"}, {"id": "decimals", "value": 2}]}
+      ]}
+    },
+    {
+      "id": 100, "type": "text", "title": "Specialized dashboards",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 20},
+      "options": {"mode": "markdown", "content": "### Drill in\n\n- **[Host Full](/grafana/d/rYdddlPWk/node-exporter-full)** — every CPU/RAM/disk/network metric the kernel exposes\n- **[Storage / ZFS Pool Health](/grafana/d/zfs-pool-health)** + scrub + compression\n- **[Per-VM — VM Estate](/grafana/d/klab-vm-estate)** — pick a VM, see its baseline\n- **[ZFS Test Lab — Run Matrix](/grafana/d/klab-test-matrix)** — every test run + pass/fail by distro\n- **[ZFS Test Lab — VM Debug](/grafana/d/klab-test-debug)** — drill into one test VM during a failed run\n- **[Kubernetes — Cilium Hubble](/grafana/d/5HftnJAWz/cilium-v1-12-hubble-metrics)** — L4-L7 network flow\n- **[Kubernetes — Tetragon Security](/grafana/d/tetragon-ebpf)** — eBPF security events"}
+    }
+  ]
+}

@@ -473,6 +473,14 @@ k_install_target_packages() {
     # Must be in this hardcoded array — target-base.txt drives the
     # darksite download manifest only, not the actual target install.
     nginx-light
+    # noVNC + websockify — graphical "View" console for libvirt VMs in
+    # the kldload web UI. websockify on Debian pulls in
+    # python3-websockify as a dep; novnc ships the HTML5 bundle at
+    # /usr/share/novnc. Same lesson learned 2026-05-16 on the Fedora
+    # side (see _dnf_pkgs novnc entry): adding only to target-base.txt
+    # leaves the darksite mirror correct but the installed target
+    # missing the package, View button silently does nothing.
+    novnc websockify
   )
 
   if [[ "${KLDLOAD_STORAGE_MODE:-standard}" == "zfs" ]]; then
@@ -1113,6 +1121,16 @@ CUSTOMREPO
     # (re-signing ZFSBootMenu against the CA key). Usually pulled in
     # already via the MOK flow, but explicit is safer.
     sbsigntools
+    # noVNC + websockify — graphical "View" console for libvirt VMs in
+    # the kldload web UI. _vm_display_open in kldload-webui spawns
+    # websockify pointing at qemu's VNC port and serves noVNC's HTML
+    # bundle through the same /s/<id>/ nginx drop-in pattern. Without
+    # these the View button silently does nothing — hit on .127 fresh
+    # Fedora install 2026-05-16 because the packages were in
+    # target-base.txt (darksite mirror) but NOT in this hardcoded list
+    # (what actually gets dnf-installed on the target). Same trap as
+    # nginx in 1.0.6 — same warning, same line above.
+    novnc python3-websockify
   )
 
   # Profile-specific packages for DNF-based distros

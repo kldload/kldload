@@ -373,6 +373,54 @@ if [[ "$EDITION" != "core" ]]; then
     else
         log "WARNING: helm download failed — Helm tab will show 'not installed'"
     fi
+
+    # process-exporter — per-process CPU/RSS/IO grouped by binary name.
+    # node_exporter only exposes aggregate process counts; process-exporter
+    # gives "which specific process is hogging" — essential for finding the
+    # rogue qemu-kvm, the stuck zfs send, the misbehaving kubelet, etc.
+    # Static Go binary from ncabatoff/process-exporter releases.
+    log "Installing process-exporter from GitHub..."
+    PROCESS_EXPORTER_VERSION="${PROCESS_EXPORTER_VERSION:-0.8.7}"
+    case "$ARCH" in
+        x86_64)  _pe_arch="amd64" ;;
+        aarch64) _pe_arch="arm64" ;;
+    esac
+    if curl -fsSL "https://github.com/ncabatoff/process-exporter/releases/download/v${PROCESS_EXPORTER_VERSION}/process-exporter-${PROCESS_EXPORTER_VERSION}.linux-${_pe_arch}.tar.gz" \
+        -o /tmp/process-exporter.tar.gz 2>/dev/null; then
+        tar -xzf /tmp/process-exporter.tar.gz -C /tmp/
+        install -m 755 /tmp/process-exporter-*/process-exporter "${ROOTFS}/usr/local/bin/process-exporter" 2>/dev/null \
+            || log "WARNING: process-exporter extract failed"
+        rm -rf /tmp/process-exporter.tar.gz /tmp/process-exporter-*
+        log "process-exporter ${PROCESS_EXPORTER_VERSION} installed."
+    else
+        log "WARNING: process-exporter download failed — per-process drill-downs will be unavailable"
+    fi
+
+    # libvirt-exporter — Prometheus exporter for libvirt-managed VMs.
+    # Agentless: queries libvirt API on the host, emits per-VM (per-domain)
+    # CPU/RAM/disk/network metrics without needing anything inside guests.
+    # Powers the klab-vm-estate Grafana dashboard's "every VM is a virtual
+    # host" view. Critical for ZFS test forensics — operators can see which
+    # test VM is CPU-starved or disk-thrashed without SSH'ing into each one.
+    # Static Go binary from inovex/prometheus-libvirt-exporter releases.
+    log "Installing libvirt-exporter from GitHub..."
+    LIBVIRT_EXPORTER_VERSION="${LIBVIRT_EXPORTER_VERSION:-2.3.1}"
+    case "$ARCH" in
+        x86_64)  _lvexp_arch="amd64" ;;
+        aarch64) _lvexp_arch="arm64" ;;
+    esac
+    if curl -fsSL "https://github.com/inovex/prometheus-libvirt-exporter/releases/download/v${LIBVIRT_EXPORTER_VERSION}/prometheus-libvirt-exporter-${LIBVIRT_EXPORTER_VERSION}.linux-${_lvexp_arch}.tar.gz" \
+        -o /tmp/libvirt-exporter.tar.gz 2>/dev/null; then
+        tar -xzf /tmp/libvirt-exporter.tar.gz -C /tmp/
+        # Tarball ships the binary as `prometheus-libvirt-exporter` at top-level.
+        install -m 755 /tmp/prometheus-libvirt-exporter "${ROOTFS}/usr/local/bin/libvirt-exporter" 2>/dev/null \
+            || install -m 755 /tmp/prometheus-libvirt-exporter-*/prometheus-libvirt-exporter "${ROOTFS}/usr/local/bin/libvirt-exporter" 2>/dev/null \
+            || log "WARNING: libvirt-exporter extract layout unexpected — check release tarball"
+        rm -rf /tmp/libvirt-exporter.tar.gz /tmp/prometheus-libvirt-exporter*
+        log "libvirt-exporter ${LIBVIRT_EXPORTER_VERSION} installed."
+    else
+        log "WARNING: libvirt-exporter download failed — klab-vm-estate dashboard will be empty"
+    fi
 else
     log "Core edition — skipping sanoid."
 fi

@@ -119,3 +119,27 @@ scrape_configs:
       - targets: ['localhost:9435']
         labels:
           instance: kldload-node
+
+  # libvirt-exporter — per-VM CPU/RAM/disk/network from the HYPERVISOR's view.
+  # Agentless: no guest install needed. Discovers every libvirt domain on the
+  # host automatically (running, paused, shut-off). Pairs with the klab-vm-
+  # estate Grafana dashboard for the "every VM is a virtual host" UX. The ZFS
+  # team needs this to see what's happening inside klab ZFS test runs without
+  # having to SSH into each VM and poll iostat.
+  - job_name: libvirt-vms
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:9177']
+        labels:
+          instance: kldload-node
+
+  # process-exporter — per-process CPU/RSS/IO grouped by binary name.
+  # node_exporter only gives aggregate process counts; this gives the
+  # specific process (qemu-kvm, zfs send, kubelet, etc.) consuming
+  # resources. Powers the per-VM and per-test drill-downs.
+  - job_name: process-exporter
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["localhost:9256"]
+        labels:
+          instance: kldload-node

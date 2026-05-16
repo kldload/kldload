@@ -1,0 +1,190 @@
+{
+  "title": "Storage \u2014 Block I/O Latency (eBPF)",
+  "uid": "block-io-latency",
+  "tags": [
+    "disk",
+    "ebpf",
+    "kldload"
+  ],
+  "timezone": "",
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "device",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values(ebpf_exporter_bio_latency_seconds_bucket, device)",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "p50 latency per device",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (device, operation, le) (rate(ebpf_exporter_bio_latency_seconds_bucket{device=~\"$device\"}[2m])))",
+          "refId": "A",
+          "legendFormat": "{{device}} {{operation}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "p99 latency per device",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (device, operation, le) (rate(ebpf_exporter_bio_latency_seconds_bucket{device=~\"$device\"}[2m])))",
+          "refId": "A",
+          "legendFormat": "{{device}} {{operation}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "p99.9 (tail latency)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.999, sum by (device, operation, le) (rate(ebpf_exporter_bio_latency_seconds_bucket{device=~\"$device\"}[2m])))",
+          "refId": "A",
+          "legendFormat": "{{device}} {{operation}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "IOPS (rate of completions)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (device, operation) (rate(ebpf_exporter_bio_latency_seconds_count{device=~\"$device\"}[2m]))",
+          "refId": "A",
+          "legendFormat": "{{device}} {{operation}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "iops"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Latency heatmap (reads)",
+      "type": "heatmap",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{device=~\"$device\",operation=\"read\"}[1m]))",
+          "refId": "A",
+          "format": "heatmap"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Latency heatmap (writes)",
+      "type": "heatmap",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{device=~\"$device\",operation=\"write\"}[1m]))",
+          "refId": "A",
+          "format": "heatmap"
+        }
+      ]
+    }
+  ]
+}
