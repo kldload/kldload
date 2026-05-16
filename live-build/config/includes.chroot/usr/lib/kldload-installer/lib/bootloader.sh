@@ -468,7 +468,20 @@ EOFSTAB
     # upgrade flow that expects vendor signatures.
     local _mok_key="${target}/var/lib/dkms/mok.key"
     local _mok_pub="${target}/var/lib/dkms/mok.pub"
-    if [[ -f "$_mok_key" && -f "$_mok_pub" ]] && command -v sbsign >/dev/null 2>&1; then
+    # Gate the kernel re-sign on the user's SB intent. When SB is OFF (the
+    # default for most installs), the staged kernel will be booted via ZBM
+    # chainload (no SB verification involved) — re-signing is dead work AND
+    # actively harmful: it strips the distro signature and replaces it with a
+    # per-install MOK leaf signature that shim rejects if the user later
+    # toggles SB on in firmware without enrolling the leaf (shim "signature
+    # error" on every GRUB kernel entry — exact failure mode seen on .119
+    # 2026-05-15 after a user enrolled MOK and flipped SB on post-install).
+    # SB-on installs keep the re-sign because some distros (notably Rocky 9
+    # under a CentOS-built shim whose vendor_cert doesn't chain to Rocky's CA)
+    # still need it for the direct-kernel grub entry to verify.
+    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]] \
+       && [[ -f "$_mok_key" && -f "$_mok_pub" ]] \
+       && command -v sbsign >/dev/null 2>&1; then
       local _signed="${zbm_fallback_dir}/vmlinuz.signed"
       # Strip the distro-supplied signature first so we ship a SINGLE
       # signature on the staged kernel. sbsign appends rather than
@@ -497,6 +510,8 @@ EOFSTAB
         rm -f "$_signed" 2>/dev/null
         k_log "WARNING: sbsign failed for /EFI/BOOT/vmlinuz — SB direct-boot will fail until manually signed"
       fi
+    elif [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" != "1" ]]; then
+      k_log "Kernel re-sign skipped — SB off (ZBM is the default boot target; staged kernel kept with distro-signed vmlinuz for direct-boot fallback)"
     else
       k_log "INFO: skipping kernel re-sign (no MOK key at ${_mok_key} or sbsign missing) — SB direct-boot will need distro-signed kernel + matching shim vendor cert"
     fi
@@ -511,49 +526,55 @@ EOFSTAB
   # \EFI\centos\grub.cfg (or rocky/fedora). Write both dirs' grub.cfg to
   # the same content so whichever path runs, the menu shows up.
   #
-  # Default = `direct` — the canonical Linux SB path:
-  #   firmware → shim (MS db) → grubx64 (CentOS CA in MokListRT)
-  #          → vmlinuz (CentOS CA, db) → zfs.ko (per-install MOK leaf, enrolled)
+  # Default depends on the user's Secure Boot intent:
   #
-  # Same chain RHEL/CentOS/Rocky/Alma/Debian/Ubuntu use in production —
-  # every link signed by a CA shim trusts. Boots in 5-7s.
+  #   SB OFF (KLDLOAD_ENABLE_SECURE_BOOT=0, the majority install case):
+  #     default = `zbm`. GRUB silently chainloads ZFSBootMenu, which is
+  #     the canonical kldload boot UX — boot-env picker, snapshot rollback,
+  #     read-only recovery shell. This is what users see in production.
   #
-  # Why NOT default to ZBM under SB: ZBM upstream ships zero SB
-  # integration. Their releases aren't signed; their `.sbat` section
-  # has no `shim` component (only `sbat,1` + `systemd-stub`); shim
-  # 15.8's SBAT enforcement rejects the chainload regardless of cert
-  # validity. We diagnosed this by:
-  #   - swapping our MOK from a CA-style cert to a code-signing leaf
-  #     (commit 1d9c05c) — `sbverify --cert mok.pub /EFI/zbm/...`
-  #     went from "Signature verification failed" to "OK"
-  #   - re-signing ZBM with sbctl instead of sbsign — same shim
-  #     "bad shim signature" rejection
-  #   - bit-comparing the cert in the ZBM signature with the enrolled
-  #     MOK in MokListRT — exact match
-  # Conclusion: the rejection isn't crypto, it's SBAT policy. Real fix
-  # would require ZBM upstream to add a `shim,X` SBAT entry, or for us
-  # to fork/patch ZBM. See project_sb_roadmap.md for the 1.2.0 plan
-  # to drop grub entirely in favor of systemd-boot + UKI.
+  #   SB ON (KLDLOAD_ENABLE_SECURE_BOOT=1):
+  #     default = `direct`. Canonical Linux SB path:
+  #       shim (MS db) → grubx64 (distro CA, db) → vmlinuz (distro CA, db)
+  #                   → zfs.ko (per-install MOK leaf, MokListRT)
+  #     ZBM is NOT the default under SB because shim 15.8's SBAT enforcement
+  #     rejects ZBM's chainload regardless of cert validity (upstream gap —
+  #     ZBM's `.sbat` declares only `sbat,1` + `systemd-stub`, no `shim,X`
+  #     entry). Diagnosed end-to-end in commits 06fd6f2 + ccae3d3. Real fix
+  #     is upstream or via 1.2.0's sd-boot+UKI replacement plan.
   #
-  # ZBM stays at /EFI/zbm/ as a menu choice for non-SB use (snapshot
-  # picker / boot-env selector at boot when SB is off).
+  # ZBM stays installed at /EFI/zbm/ in both cases — SB users can pick it
+  # from the GRUB menu (ESC at boot) after disabling SB in firmware to reach
+  # the boot-env selector for rollback.
   #
-  # timeout=0 + timeout_style=hidden = silent direct boot. ESC at
-  # boot interrupts and exposes the menu for ZBM/rescue.
+  # Why this matters: from kldload 1.0.5 through 1.1.0 the default was
+  # `direct` unconditionally, which silently hid ZBM from EVERY install —
+  # SB users (small minority) AND non-SB users (the majority). Users
+  # reported "ZBM has been gone for a week." Restoring SB-state-aware
+  # default brings the boot-env UX back for the 95% case without breaking
+  # SB users' chain.
+  #
+  # timeout=0 + timeout_style=hidden = silent boot to default. ESC during
+  # boot interrupts and exposes the full menu (ZBM + direct + rescue).
+  local _grub_default="zbm"
+  [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]] && _grub_default="direct"
   local _grub_cfg=""
   read -r -d '' _grub_cfg <<GRUBCFG || true
 # kldload — auto-generated at install time
+# default boot target depends on Secure Boot intent at install time:
+#   SB off → zbm (boot-env picker, the kldload UX)
+#   SB on  → direct (signed chain — ZBM cannot chainload under shim 15.8)
 set timeout=0
 set timeout_style=hidden
-set default=direct
+set default=${_grub_default}
+
+menuentry "kldload — ZFS Boot Menu (boot environments + snapshot rollback)" --id=zbm {
+    chainloader /EFI/zbm/BOOTX64.EFI
+}
 
 menuentry "kldload — direct kernel boot (Secure Boot compatible)" --id=direct {
     linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro rhgb quiet spl_hostid=\${spl_hostid}
     initrd /EFI/BOOT/initrd.img
-}
-
-menuentry "kldload (ZFSBootMenu — boot-env selector, SB OFF only)" --id=zbm {
-    chainloader /EFI/zbm/BOOTX64.EFI
 }
 
 menuentry "kldload — rescue (single-user)" --id=rescue {
@@ -589,6 +610,19 @@ GRUBCFG
 # (grubx64.efi + /EFI/BOOT/vmlinuz + /EFI/BOOT/initrd.img) boots the
 # latest kernel instead of the install-time one. Runs for every
 # add/remove kernel event from kernel-install(8) and systemd's dkms hooks.
+#
+# NB: this hook uses if/elif rather than the ergonomic `[[ -f X ]] && cmd`
+# chain because `set -e` treats a failed test as a script-aborting error
+# (the test itself returns 1 when the file is absent, and the AND-list's
+# exit propagates). On Fedora, the Debian-style /boot/initrd.img-$KVER
+# never exists; under the old `&&` form the hook copied the real Fedora
+# initramfs successfully, then tested for the Debian path, failed the
+# test, and exited 1 — making dnf report a phantom kernel-install
+# failure on every kernel update. Caught on .107 XPS 2026-05-16 after a
+# routine `dnf update` pulled kernel 7.0.8. The actual ESP sync had
+# already succeeded; the warning was cosmetic noise. if/elif also short-
+# circuits the second copy cleanly so we don't overwrite the just-copied
+# Fedora initramfs with a (non-existent) Debian one.
 set -e
 COMMAND="${1:-}"
 KVER="${2:-}"
@@ -596,19 +630,29 @@ ESP=/boot/efi/EFI/BOOT
 [[ -d "$ESP" ]] || exit 0
 case "$COMMAND" in
     add)
-        [[ -f /boot/vmlinuz-"$KVER" ]]                         && cp -f /boot/vmlinuz-"$KVER"           "$ESP/vmlinuz"
-        [[ -f /boot/initramfs-"$KVER".img ]]                   && cp -f /boot/initramfs-"$KVER".img     "$ESP/initrd.img"
-        [[ -f /boot/initrd.img-"$KVER" ]]                      && cp -f /boot/initrd.img-"$KVER"        "$ESP/initrd.img"
+        if [[ -f /boot/vmlinuz-"$KVER" ]]; then
+            cp -f /boot/vmlinuz-"$KVER" "$ESP/vmlinuz"
+        fi
+        if   [[ -f /boot/initramfs-"$KVER".img ]]; then
+            cp -f /boot/initramfs-"$KVER".img "$ESP/initrd.img"
+        elif [[ -f /boot/initrd.img-"$KVER" ]]; then
+            cp -f /boot/initrd.img-"$KVER" "$ESP/initrd.img"
+        fi
         ;;
     remove)
         # If this was the kernel whose initramfs lives on ESP, point back
         # at the newest remaining one.
         newest="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)"
-        [[ -n "$newest" ]] && cp -f "$newest" "$ESP/vmlinuz"
+        if [[ -n "$newest" ]]; then
+            cp -f "$newest" "$ESP/vmlinuz"
+        fi
         newer_ir="$(ls -1 /boot/initramfs-*.img /boot/initrd.img-* 2>/dev/null | sort -V | tail -1)"
-        [[ -n "$newer_ir" ]] && cp -f "$newer_ir" "$ESP/initrd.img"
+        if [[ -n "$newer_ir" ]]; then
+            cp -f "$newer_ir" "$ESP/initrd.img"
+        fi
         ;;
 esac
+exit 0
 ESPHOOK
   chmod 0755 "${target}/etc/kernel/install.d/99-kldload-esp.install"
   k_log "Kernel-install ESP sync hook installed (keeps /EFI/BOOT/vmlinuz fresh on kernel updates)"

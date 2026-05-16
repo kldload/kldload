@@ -664,12 +664,45 @@ FFPOLICY
 
     # Disable screensaver / screen blank / auto-lock on live session
     # Method 1: dconf system database (GNOME settings)
+    #
+    # Two-layer config:
+    #   00-kldload-desktop          → full desktop dconf from source
+    #                                 (theme, fonts, terminal profile, idle policy)
+    #   01-kldload-terminal-default → terminal profile + default font/colors
+    #                                 (font = "Monospace 12" — explicit so dconf
+    #                                 doesn't fall back to GNOME's variable-pitch
+    #                                 "Adwaita Mono" which renders weird in a
+    #                                 terminal; bug seen on .107 XPS 2026-05-16)
+    #   99-kldload-live-session     → live-ISO-only overrides (idle=0, etc.)
+    #
+    # Previous revision had a single inline heredoc here that wrote a STRIPPED
+    # 00-kldload-desktop with no font / terminal settings — clobbering the
+    # source file in includes.chroot AND never shipping 01-kldload-terminal-default
+    # at all. Result: every install on F44+ inherited "Adwaita Mono 11" from
+    # the GNOME system default. Fixed by copying from source and writing the
+    # live-session quirks as a separate file with a higher numeric prefix.
     mkdir -p "${ROOTFS}/etc/dconf/db/local.d" "${ROOTFS}/etc/dconf/profile"
     cat > "${ROOTFS}/etc/dconf/profile/user" << 'DCONFPROFILE'
 user-db:user
 system-db:local
 DCONFPROFILE
-    cat > "${ROOTFS}/etc/dconf/db/local.d/00-kldload-desktop" << 'DCONF'
+    # Copy the real desktop + terminal-default files from source.
+    if [[ -f /build/live-build/config/includes.chroot/etc/dconf/db/local.d/00-kldload-desktop ]]; then
+        cp /build/live-build/config/includes.chroot/etc/dconf/db/local.d/00-kldload-desktop \
+           "${ROOTFS}/etc/dconf/db/local.d/00-kldload-desktop"
+    fi
+    if [[ -f /build/live-build/config/includes.chroot/etc/dconf/db/local.d/01-kldload-terminal-default ]]; then
+        cp /build/live-build/config/includes.chroot/etc/dconf/db/local.d/01-kldload-terminal-default \
+           "${ROOTFS}/etc/dconf/db/local.d/01-kldload-terminal-default"
+    fi
+    # Live-ISO-only overrides — idle=0 to keep the session up indefinitely
+    # during install, no auto-lock, suppress GNOME welcome dialog. These
+    # ride alongside (not on top of) the source files thanks to the 99-
+    # prefix; dconf merges them at db build time.
+    cat > "${ROOTFS}/etc/dconf/db/local.d/99-kldload-live-session" << 'DCONFLIVE'
+# kldload — live-ISO-only quirks. Suppresses idle, lock, welcome dialog
+# so the operator can leave the live session open while watching a long
+# install. Installed-system overrides live in 00-kldload-desktop.
 [org/gnome/desktop/session]
 idle-delay=uint32 0
 
@@ -684,7 +717,7 @@ sleep-inactive-battery-type='nothing'
 
 [org/gnome/shell]
 welcome-dialog-last-shown-version='99'
-DCONF
+DCONFLIVE
     # Lock these settings so the user can't accidentally re-enable
     mkdir -p "${ROOTFS}/etc/dconf/db/local.d/locks"
     cat > "${ROOTFS}/etc/dconf/db/local.d/locks/kldload-live" << 'LOCKS'
