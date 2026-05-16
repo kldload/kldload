@@ -766,7 +766,7 @@ NETCFG
   # because different distros ship different ones (genisoimage on RHEL/CentOS,
   # mkisofs on some Debian, xorriso on minimal installs). The "cidata" volume
   # label is what cloud-init's NoCloud datasource keys on.
-  local ci_iso="/var/lib/libvirt/isos/${GOLDEN}-cloud-init.iso"
+  local ci_iso="/var/lib/kldload/cloud-init/${GOLDEN}-cloud-init.iso"
   genisoimage -output "$ci_iso" -volid cidata -joliet -rock \
     "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null \
     || mkisofs -output "$ci_iso" -volid cidata -joliet -rock \
@@ -898,7 +898,7 @@ clone_and_boot() {
   for vm in "${CP_NAME}" $(seq -f "${WORKER_PREFIX}-%g" 1 "$WORKERS"); do
     local ci_dir ci_iso
     ci_dir="$(mktemp -d)"
-    ci_iso="/var/lib/libvirt/isos/${vm}-ci.iso"
+    ci_iso="/var/lib/kldload/cloud-init/${vm}-ci.iso"
 
     cat > "${ci_dir}/meta-data" <<META
 instance-id: ${vm}
@@ -1009,7 +1009,7 @@ cmd_bootstrap() {
     [[ -z "$vm" ]] && continue
     virsh destroy "$vm" 2>/dev/null || true
     virsh undefine "$vm" --nvram 2>/dev/null || virsh undefine "$vm" 2>/dev/null || true
-    rm -f "/var/lib/libvirt/isos/${vm}-ci.iso" "/var/lib/libvirt/isos/${vm}-cloud-init.iso" 2>/dev/null
+    rm -f "/var/lib/kldload/cloud-init/${vm}-ci.iso" "/var/lib/kldload/cloud-init/${vm}-cloud-init.iso" 2>/dev/null
   done
   # Nuke ONLY this cluster's zvols — match the cluster prefix + golden name.
   # Previous version nuked every zvol under rpool/vms, taking out klab goldens
@@ -1687,7 +1687,7 @@ cmd_destroy() {
   for vm in "${_all_vms[@]}"; do
     virsh destroy "$vm" 2>/dev/null || true
     virsh undefine "$vm" --nvram 2>/dev/null || virsh undefine "$vm" 2>/dev/null || true
-    rm -f "/var/lib/libvirt/isos/${vm}-ci.iso" "/var/lib/libvirt/isos/${vm}-cloud-init.iso" 2>/dev/null
+    rm -f "/var/lib/kldload/cloud-init/${vm}-ci.iso" "/var/lib/kldload/cloud-init/${vm}-cloud-init.iso" 2>/dev/null
   done
 
   # Now destroy ZFS — use -Rf to handle autosnaps and dependent clones
@@ -1864,7 +1864,7 @@ cmd_scale() {
     # SSH still works (matches kldload-w-* host key cycling on first boot).
     local ci_dir ci_iso
     ci_dir="$(mktemp -d)"
-    ci_iso="/var/lib/libvirt/isos/${name}-ci.iso"
+    ci_iso="/var/lib/kldload/cloud-init/${name}-ci.iso"
     cat > "${ci_dir}/meta-data" <<META
 instance-id: ${name}
 local-hostname: ${name}
@@ -1911,7 +1911,23 @@ NETCFG
         "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null
     rm -rf "$ci_dir"
     virsh attach-disk "$name" "$ci_iso" sdb --type cdrom --config 2>/dev/null || true
-    virsh start "$name" >/dev/null 2>&1 || warn "${name}: virsh start failed"
+    # Retry virsh start once after a brief pause — back-to-back virsh start
+    # calls during a multi-VM scale can hit libvirtd lock contention and the
+    # first call returns non-zero silently. Caught during scale on .127
+    # 2026-05-16: kldload-w-1 came up, kldload-w-2 hit the race and stayed
+    # shut-off; Phase 2 then waited 90s for a DHCP lease that never came.
+    # Surfacing the error to the log too so this never gets diagnosed in
+    # silence again.
+    local _start_err
+    if ! _start_err="$(virsh start "$name" 2>&1)"; then
+      sleep 2
+      if ! _start_err="$(virsh start "$name" 2>&1)"; then
+        warn "${name}: virsh start failed after retry: ${_start_err}"
+        failed+=("${name}(start)")
+        new_ips+=("")
+        continue
+      fi
+    fi
     new_ips+=("")  # filled in next pass
   done
 

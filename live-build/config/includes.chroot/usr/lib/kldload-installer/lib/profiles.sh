@@ -115,11 +115,6 @@ k_profile_packages() {
       local _viewer="loupe"
       local _terminal="gnome-terminal"
       local _nm="network-manager"
-      # Cockpit — RHEL's native OS dashboard at :9090. Same upstream
-      # project across all distros; package name varies slightly.
-      # Default to the Debian/Ubuntu name set here; the RPM branch
-      # below overrides for RHEL-family targets.
-      local _cockpit="cockpit cockpit-networkmanager cockpit-storaged cockpit-podman"
       # Debian/Ubuntu desktop profile uses LightDM, NOT gdm3. GDM 48 on
       # Debian Trixie has a systemd-integration bug where it can't pass
       # the session type to gnome-session — gnome-session-binary errors:
@@ -165,13 +160,6 @@ k_profile_packages() {
         _browser="firefox"
         _viewer="eog loupe"
         _terminal="gnome-terminal ptyxis"
-        # Cockpit — the RHEL-native system management dashboard at :9090.
-        # kldload-webui targets appliance profiles (kvm/k8s/zfslab) and is
-        # explicitly disabled on desktop/server installs (see service
-        # auto-start gate at line 783+). RHEL operators expect Cockpit
-        # as the OS-level dashboard, so ship it on desktop + enable
-        # cockpit.socket at install time.
-        _cockpit="cockpit cockpit-system cockpit-networkmanager cockpit-storaged cockpit-podman"
         _nm="NetworkManager NetworkManager-wifi NetworkManager-tui"
         # GDM works on RPM distros once the right session-files package
         # is present. The bug seen on Rocky 9 desktop install 2026-05-04:
@@ -225,7 +213,7 @@ k_profile_packages() {
         adwaita-icon-theme ${_fonts} gvfs ${_gvfs_extra} \
         gnome-keyring ${_pam_extras} ${_portal_extras} ${_dbus_extras} \
         ${_xsrv} ${_netools_extra} \
-        ${_browser} ${_cockpit} \
+        ${_browser} \
         tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
       ;;
 
@@ -657,6 +645,8 @@ k_install_system_files() {
     esac
     k_log "nginx config tree copied to target"
   fi
+
+
   # systemd drop-in for nginx.service (ExecStartPre kldload-tls-cert).
   mkdir -p "${target}/etc/systemd/system/nginx.service.d"
   if [[ -d /etc/systemd/system/nginx.service.d ]]; then
@@ -811,18 +801,14 @@ FFPOLICY_WS
       : # keep defaults — enabled in the unit's [Install] WantedBy
       ;;
     desktop|server)
-      # Workstation / server — kldload-webui disabled (operator brings
-      # it up manually if they want it). Enable Cockpit instead — RHEL/
-      # Debian's native OS dashboard at :9090 is the appropriate ops
-      # UI for daily-driver installs that aren't kldload appliances.
+      # Workstation / server — kldload-webui disabled by default (the
+      # operator brings it up manually if they want it). No alternative
+      # web dashboard auto-enabled — the kldload-webui is the unified
+      # UI; running a second OS-management dashboard alongside it
+      # duplicates the surface and confuses operators.
       chroot "${target}" systemctl disable kldload-webui.service 2>/dev/null || true
       chroot "${target}" systemctl disable kldload-proxy.service 2>/dev/null || true
       chroot "${target}" systemctl disable ttyd-k9s.service 2>/dev/null || true
-      # cockpit.socket activates cockpit-tls.service on first :9090 connect.
-      # Enabling .socket (not .service) means zero RAM cost until accessed.
-      chroot "${target}" systemctl enable cockpit.socket 2>/dev/null \
-        && k_log "  Cockpit enabled at https://<host>:9090 (socket-activated)" \
-        || k_log "  WARN: cockpit.socket not present — Cockpit not installed (likely a distro package gap)"
       ;;
     *)
       # core — bare ZFS only, no UI of any kind
@@ -1607,6 +1593,13 @@ ConditionPathExists=!/var/lib/kldload/klab-firstboot-done
 [Service]
 Type=oneshot
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do curl -sf --connect-timeout 5 https://cloud.debian.org >/dev/null 2>&1 && exit 0; echo "Waiting for internet ($i/30)..."; sleep 10; done'
+# Bridge webui-stored RHEL creds (/var/lib/kldload/secrets/rhel-{username,
+# password}) → klab's expected /root/.klab-rhel-creds env-file format.
+# klab CLI reads RHEL_CREDS_FILE=/root/.klab-rhel-creds (klab:77) but the
+# webui's secret_set action writes to the secrets dataset only. Without
+# this bridge step, `klab golden rhel` skips with rc=2 even though the
+# operator entered creds at install time. Bug caught .111 2026-05-16.
+ExecStartPre=/bin/bash -c 'U=$(cat /var/lib/kldload/secrets/rhel-username 2>/dev/null); P=$(cat /var/lib/kldload/secrets/rhel-password 2>/dev/null); if [[ -n "$U" && -n "$P" ]]; then umask 0177; printf "RHEL_USERNAME=\"%s\"\nRHEL_PASSWORD=\"%s\"\n" "$U" "$P" > /root/.klab-rhel-creds; chmod 0600 /root/.klab-rhel-creds; echo "klab-firstboot: bridged RHEL creds for user $U"; else echo "klab-firstboot: no RHEL creds in /var/lib/kldload/secrets/ — rhel golden will skip"; fi'
 # Per-distro `-` prefix makes systemd ignore non-zero exits — without it,
 # the first failing distro aborts the unit and the rest never run. Caught
 # 2026-05-12 on the first RHEL 10 install: rocky golden failed silently

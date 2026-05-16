@@ -372,6 +372,47 @@ setup_kvm() {
   if ! virsh pool-info isos >/dev/null 2>&1; then
     log "WARNING: libvirt isos pool not defined — klab golden builds will fail with 'missing storage pool target path'"
   fi
+
+  # kldload-managed storage pools — fixed UUIDs shipped in
+  # /etc/libvirt/storage/kldload-*.xml. Each tool (kube-cluster, klab,
+  # webui vm_create_cloud) writes cloud-init ISOs to /var/lib/kldload/
+  # cloud-init/ — owned by the kldload-cloud-init pool. Without this,
+  # virt-install hits the "pool 'isos' already exists with uuid X" race
+  # when two tools write to the SHARED /var/lib/libvirt/isos/ path in
+  # quick succession (caught .111 2026-05-16 — kube-cluster after a klab
+  # golden rocky build, both touching /var/lib/libvirt/isos/).
+  #
+  # Reconciler: ensure target dirs exist + each pool is defined with the
+  # fixed UUID + started. Idempotent — re-runs are no-ops when state is
+  # already correct.
+  log "Reconciling kldload-managed libvirt storage pools..."
+  for _pool_xml in /etc/libvirt/storage/kldload-cloud-init.xml \
+                   /etc/libvirt/storage/kldload-cloud-images.xml \
+                   /etc/libvirt/storage/kldload-vm-iso.xml; do
+    [[ -f "$_pool_xml" ]] || continue
+    _pool_name="$(basename "$_pool_xml" .xml)"
+    _pool_path="$(grep -oP '(?<=<path>)[^<]+' "$_pool_xml")"
+    _pool_uuid="$(grep -oP '(?<=<uuid>)[^<]+' "$_pool_xml")"
+    mkdir -p "$_pool_path"
+    # If a pool with this name exists but with a DIFFERENT uuid, nuke it
+    # and let our XML take over. Drift typically happens after a previous
+    # kldload-firstboot ran on an older build where the pool was defined
+    # via pool-define-as (random uuid).
+    _existing_uuid="$(virsh pool-uuid "$_pool_name" 2>/dev/null || true)"
+    if [[ -n "$_existing_uuid" && "$_existing_uuid" != "$_pool_uuid" ]]; then
+      log "  pool $_pool_name has uuid $_existing_uuid (expected $_pool_uuid) — resetting"
+      virsh pool-destroy   "$_pool_name" 2>/dev/null || true
+      virsh pool-undefine  "$_pool_name" 2>/dev/null || true
+    fi
+    if ! virsh pool-uuid "$_pool_name" >/dev/null 2>&1; then
+      virsh pool-define "$_pool_xml" 2>/dev/null || log "  WARNING: pool-define $_pool_name failed"
+    fi
+    virsh pool-autostart "$_pool_name" 2>/dev/null || true
+    virsh pool-start     "$_pool_name" 2>/dev/null || true
+  done
+  if virsh pool-info kldload-cloud-init >/dev/null 2>&1; then
+    log "kldload storage pools ready: kldload-cloud-init, kldload-cloud-images, kldload-vm-iso"
+  fi
   # Default NAT network — klab and kube-cluster both need virbr0 on
   # 192.168.122.0/24. libvirt usually ships this pre-defined but a fresh
   # CentOS9 image sometimes doesn't; recreate it if missing.
