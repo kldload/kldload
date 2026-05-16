@@ -1167,6 +1167,9 @@ PRO_ONLY_ACTIONS = {
     "wg_info", "node_list", "node_register", "node_poof", "apply_role",
     "salt_highstate", "salt_apply", "ansible_run", "k8s_join",
     "vm_list", "vm_start", "vm_stop", "vm_destroy", "vm_clone",
+    # NOTE: vm_create_cloud is intentionally free — it's the core
+    # "spin up a Linux VM in one click" experience and Pro-gating it
+    # would gut the value proposition vs. virt-manager/Proxmox.
     "service_action", "credential_list", "credential_add",
     "proxmox_list", "firewall_rule", "cluster_info",
 }
@@ -1516,6 +1519,8 @@ async def ws_handler(websocket):
                     await _vm_clone(websocket, msg)
                 elif action == "vm_replace":
                     await _vm_replace(websocket, msg)
+                elif action == "vm_create_cloud":
+                    await _vm_create_cloud(websocket, msg)
 
                 # ── Free-edition actions (ZFS / snapshots / logs) ──────────────
                 elif action == "zfs_status":
@@ -1814,6 +1819,12 @@ async def ws_handler(websocket):
                     await _vm_console_close(websocket, msg)
                 elif action == "vm_console_list":
                     await _vm_console_list(websocket)
+                elif action == "vm_ssh_open":
+                    await _vm_ssh_open(websocket, msg)
+                elif action == "vm_display_open":
+                    await _vm_display_open(websocket, msg)
+                elif action == "vm_display_close":
+                    await _vm_display_close(websocket, msg)
 
                 else:
                     await websocket.send(json.dumps({
@@ -3292,6 +3303,202 @@ async def _vm_replace(websocket, msg):
         await websocket.send(json.dumps({"type": "log_line", "line": f"[replace] WARNING: destroy failed: {e}", "target": "vm-log"}))
     db_log_event("vm_replace", vm, f"Replaced {vm} with {new_name}")
     await websocket.send(json.dumps({"type": "log_line", "line": f"[replace] Done. New VM: {new_name}", "target": "vm-log"}))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Cloud-image VM create (server / desktop flavor)
+#
+# Clones a `rpool/vms/klab-golden-<distro>` zvol, builds a cloud-init
+# seed ISO (NoCloud datasource), and `virt-install --import`s the
+# resulting domain. Replaces the old qcow2-based _vm_clone path which
+# assumed images at /var/lib/kldload/golden/*.qcow2 — kldload F44 stores
+# goldens as zvols, so that branch was effectively dead.
+#
+# Two flavors:
+#   server   — headless. Cloud-init enables root/kldload + ssh.
+#   desktop  — server + dnf/apt installs xfce-desktop + lightdm,
+#              autologins root into xfce. View button shows the desktop.
+#
+# Distro-aware install line: dnf for centos/rocky/fedora,
+# apt-get for debian/ubuntu. Single runcmd with a `command -v dnf`
+# probe keeps the userdata one template.
+# ─────────────────────────────────────────────────────────────────────
+
+_VM_CLOUD_DISTROS = ("centos", "rocky", "fedora", "debian", "ubuntu")
+_VM_CLOUD_FLAVORS = ("server", "desktop")
+
+# DKMS makes the cloud-image boot slow (rebuilds zfs against the live
+# kernel before getty starts). Cloud users almost never need zfs in the
+# guest — they're using ZFS on the host for the zvol-backed disk. Masking
+# dkms in cloud-init shaves 2-5 min off first boot.
+_VM_CLOUD_BASE_BOOTCMD = (
+    "  - [ sh, -c, \"systemctl stop firewalld 2>/dev/null; systemctl mask firewalld 2>/dev/null; true\" ]\n"
+    "  - [ sh, -c, \"systemctl stop ufw 2>/dev/null; systemctl mask ufw 2>/dev/null; ufw --force disable 2>/dev/null; true\" ]\n"
+    "  - [ sh, -c, \"systemctl mask dkms.service 2>/dev/null; true\" ]\n"
+    "  - [ sh, -c, \"passwd -uf root 2>/dev/null; true\" ]\n"
+    "  - [ sh, -c, \"mkdir -p /etc/ssh/sshd_config.d && printf 'PermitRootLogin yes\\\\nPasswordAuthentication yes\\\\n' > /etc/ssh/sshd_config.d/99-kldload.conf\" ]\n"
+)
+
+# Desktop runcmd: install XFCE + lightdm with autologin. Cross-distro by
+# probing dnf vs apt-get at runtime. xfce chosen over GNOME because
+# it's lighter (~200MB vs ~1.5GB), boots in under 30s, and renders well
+# over qxl/spice without 3D accel.
+_VM_CLOUD_DESKTOP_RUNCMD = (
+    "runcmd:\n"
+    "  - [ sh, -c, \"if command -v dnf >/dev/null 2>&1; then dnf -y install @xfce-desktop xorg-x11-drv-qxl >> /var/log/kldload-desktop.log 2>&1; elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update >> /var/log/kldload-desktop.log 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies lightdm xserver-xorg-video-qxl >> /var/log/kldload-desktop.log 2>&1; fi\" ]\n"
+    "  - [ sh, -c, \"systemctl set-default graphical.target\" ]\n"
+    "  - [ sh, -c, \"mkdir -p /etc/lightdm/lightdm.conf.d && printf '[Seat:*]\\\\nautologin-user=root\\\\nautologin-session=xfce\\\\nautologin-user-timeout=0\\\\n' > /etc/lightdm/lightdm.conf.d/50-kldload-autologin.conf\" ]\n"
+    "  - [ sh, -c, \"systemctl enable lightdm.service 2>/dev/null || systemctl enable gdm.service 2>/dev/null || true\" ]\n"
+    "  - [ sh, -c, \"systemctl isolate graphical.target || systemctl start lightdm\" ]\n"
+)
+
+_VM_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,62}$")
+
+def _vm_cloud_userdata(name: str, flavor: str) -> str:
+    """Compose the cloud-init userdata for a server/desktop flavor."""
+    body = (
+        "#cloud-config\n"
+        f"hostname: {name}\n"
+        "manage_etc_hosts: true\n"
+        "disable_root: false\n"
+        "ssh_pwauth: true\n"
+        "package_update: false\n"
+        "chpasswd:\n"
+        "  expire: false\n"
+        "  list: |\n"
+        "    root:kldload\n"
+        "bootcmd:\n"
+        f"{_VM_CLOUD_BASE_BOOTCMD}"
+    )
+    if flavor == "desktop":
+        body += _VM_CLOUD_DESKTOP_RUNCMD
+    return body
+
+async def _vm_create_cloud(websocket, msg):
+    """Deploy a cloud-init VM (server or desktop) from a klab golden zvol."""
+    import tempfile, time as _time, os as _os
+    distro = (msg.get("distro") or "").strip().lower()
+    flavor = (msg.get("flavor") or "server").strip().lower()
+    name   = (msg.get("name")   or "").strip()
+    ram    = int(msg.get("ram")  or 4096)
+    cpus   = int(msg.get("cpus") or 2)
+
+    async def _log(line):
+        await websocket.send(json.dumps({"type": "log_line", "line": line, "target": "vm-log"}))
+    async def _err(line):
+        await websocket.send(json.dumps({"type": "error", "msg": line}))
+
+    if distro not in _VM_CLOUD_DISTROS:
+        await _err(f"unknown distro {distro!r} (supported: {', '.join(_VM_CLOUD_DISTROS)})")
+        return
+    if flavor not in _VM_CLOUD_FLAVORS:
+        await _err(f"unknown flavor {flavor!r} (supported: {', '.join(_VM_CLOUD_FLAVORS)})")
+        return
+    if not name:
+        name = f"{distro}-{flavor}-{int(_time.time()) % 10000:04d}"
+    if not _VM_NAME_RE.match(name):
+        await _err(f"invalid VM name {name!r} (letters/digits/dash/underscore, ≤63 chars, must start alnum)")
+        return
+
+    src_zvol = f"rpool/vms/klab-golden-{distro}"
+    dst_zvol = f"rpool/vms/{name}"
+    seed_iso = f"/var/lib/libvirt/images/{name}-seed.iso"
+
+    await _log(f"[create-cloud] {distro}/{flavor} → {name} ({ram}MB / {cpus} vCPU)")
+
+    # Preflight: golden zvol exists?
+    if subprocess.call(["zfs", "list", src_zvol],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+        await _err(f"golden zvol {src_zvol} not found — build it first via klab golden {distro}")
+        return
+    # And no existing domain or zvol with the target name?
+    if subprocess.call(["virsh", "dominfo", name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+        await _err(f"VM {name} already exists — pick a different name or destroy the existing one")
+        return
+    if subprocess.call(["zfs", "list", dst_zvol],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+        await _err(f"zvol {dst_zvol} already exists — destroy it first")
+        return
+
+    # Snapshot + clone the golden zvol
+    snap = f"{src_zvol}@create-{name}-{int(_time.time())}"
+    try:
+        subprocess.check_call(["zfs", "snapshot", snap])
+        subprocess.check_call(["zfs", "clone", snap, dst_zvol])
+    except subprocess.CalledProcessError as e:
+        await _err(f"zfs clone failed: {e}")
+        return
+    await _log(f"[create-cloud] cloned {src_zvol} → {dst_zvol}")
+
+    # Wait for the /dev/zvol/... node — udev fires async after zfs clone.
+    # Without this wait, virt-install races and fails with "no such block
+    # device". 5s budget at 100ms is enough on every box we've tested.
+    dev_path = f"/dev/zvol/{dst_zvol}"
+    for _ in range(50):
+        if _os.path.exists(dev_path):
+            break
+        await asyncio.sleep(0.1)
+    else:
+        await _err(f"timeout waiting for {dev_path} to appear after zfs clone")
+        return
+
+    # Build the cloud-init NoCloud seed (mkisofs is in the base image —
+    # genisoimage isn't on F44).
+    with tempfile.TemporaryDirectory() as work:
+        with open(_os.path.join(work, "meta-data"), "w") as f:
+            f.write(f"instance-id: {name}\nlocal-hostname: {name}\n")
+        with open(_os.path.join(work, "user-data"), "w") as f:
+            f.write(_vm_cloud_userdata(name, flavor))
+        try:
+            subprocess.check_call(
+                ["mkisofs", "-output", seed_iso, "-volid", "cidata",
+                 "-joliet", "-rock",
+                 _os.path.join(work, "user-data"),
+                 _os.path.join(work, "meta-data")],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError as e:
+            await _err(f"mkisofs failed: {e}")
+            return
+    await _log(f"[create-cloud] cloud-init seed → {seed_iso}")
+
+    # virt-install --import with VNC + qxl so the noVNC View button
+    # renders a usable framebuffer (qxl > vga for desktop; even server
+    # benefits from the higher resolution at the boot console).
+    # --noautoconsole because we're a daemon, not a TTY.
+    cmd = [
+        "virt-install",
+        "--name", name,
+        "--memory", str(ram),
+        "--vcpus", str(cpus),
+        "--disk", f"path={dev_path},bus=virtio,format=raw",
+        "--disk", f"path={seed_iso},device=cdrom,bus=sata",
+        "--import",
+        "--os-variant", _vm_cloud_os_variant(distro),
+        "--network", "network=default,model=virtio",
+        "--graphics", "vnc,listen=0.0.0.0",
+        "--video", "qxl",
+        "--noautoconsole",
+    ]
+    await _stream_proc(websocket, cmd, target="vm-log")
+    db_log_event("vm_create_cloud", name, f"{distro}/{flavor} VM created")
+    await _log(f"[create-cloud] Done. Use View on '{name}' to watch boot. "
+               f"Desktop install takes ~5-10 min after first boot.")
+    await websocket.send(json.dumps({"type": "exec_done", "rc": 0, "target": "vm-log",
+                                      "vm_created": name}))
+
+def _vm_cloud_os_variant(distro: str) -> str:
+    """Best-effort os-variant for virt-install. Recent libosinfo on F44
+    knows these; older boxes fall back via virt-install's auto-detect."""
+    return {
+        "centos": "centos-stream9",
+        "rocky":  "rocky9",
+        "fedora": "fedora43",
+        "debian": "debian13",
+        "ubuntu": "ubuntu24.04",
+    }.get(distro, "linux2024")
+
 
 async def _service_deploy(websocket, msg):
     """Deploy a service to target nodes via Salt highstate.
@@ -7490,14 +7697,254 @@ def _vm_console_window_name(vm):
     import re as _re_vm
     return "vm-" + _re_vm.sub(r"[^A-Za-z0-9_-]", "-", vm)[:60]
 
-async def _vm_console_open(websocket, msg):
-    """Ensure a 'virsh console <vm>' tmux window exists inside ttyd-k9s.
-    Frontend embeds ttyd with arg target-window=<returned-name>."""
+
+def _vm_lookup_ip(vm):
+    """Return first usable IPv4 for a libvirt domain, or None.
+
+    Tries `virsh domifaddr --source lease` first (works as long as the VM
+    got DHCP from a libvirt-managed network like virbr0), then falls back
+    to the qemu-guest-agent source for VMs on external networks. Skips
+    loopback and link-local. Returns None if no IP is discoverable — the
+    caller surfaces a friendly "VM still booting" error to the UI."""
+    import re as _re_ipv4
+    _IP_RE = _re_ipv4.compile(r"\b(\d+\.\d+\.\d+\.\d+)(?:/\d+)?\b")
+    for src in ("lease", "agent"):
+        try:
+            out = subprocess.check_output(
+                ["virsh", "domifaddr", vm, "--source", src],
+                text=True, stderr=subprocess.DEVNULL, timeout=5)
+        except Exception:
+            continue
+        for line in out.splitlines():
+            parts = line.split()
+            # Format: "name mac protocol address"  e.g. "vnet0 52:54... ipv4 192.168.122.45/24"
+            if len(parts) >= 4 and parts[2] == "ipv4":
+                m = _IP_RE.search(parts[3])
+                if not m:
+                    continue
+                ip = m.group(1)
+                if ip.startswith(("127.", "169.254.", "0.")):
+                    continue
+                return ip
+    return None
+
+
+async def _vm_ssh_open(websocket, msg):
+    """Open an SSH session into a running VM — kldload-session vm-ssh kind.
+
+    Looks up the VM's IP via libvirt DHCP-lease/guest-agent, hands the IP
+    to kldload-session which wraps `ssh -i /root/.ssh/id_ed25519 admin@IP`
+    in ttyd behind nginx at /s/<id>/. The UI iframes that URL. Cert auth
+    only — admin user on the VM is expected to have this host's public
+    key in authorized_keys (klab/zfslab goldens get this at golden-build
+    time; user-built VMs need ssh-copy-id once)."""
     vm = (msg.get("vm") or "").strip()
     if not vm:
         await websocket.send(json.dumps({"type": "error", "msg": "vm name required"}))
         return
-    # Validate VM exists
+    ip = _vm_lookup_ip(vm)
+    if not ip:
+        await websocket.send(json.dumps({
+            "type": "vm_console_error", "vm": vm,
+            "error": "Couldn't find an IPv4 for this VM yet — still booting / no DHCP lease / no guest agent.",
+        }))
+        return
+    try:
+        url_out = subprocess.check_output(
+            ["/usr/local/sbin/kldload-session", "open", "vm-ssh", ip,
+             "--title", f"SSH: {vm} ({ip})"],
+            text=True, stderr=subprocess.STDOUT, timeout=15)
+    except subprocess.CalledProcessError as e:
+        await websocket.send(json.dumps({
+            "type": "vm_console_error", "vm": vm,
+            "error": f"kldload-session vm-ssh failed (rc={e.returncode}): {(e.output or '').strip()[:300]}",
+        }))
+        return
+    import re as _re_vs
+    url_line = next((l.strip() for l in url_out.strip().splitlines() if "/s/" in l), "")
+    m_path = _re_vs.search(r'(/s/[A-Za-z0-9_-]+/)', url_line)
+    m_sid  = _re_vs.search(r'/s/([A-Za-z0-9_-]+)/', url_line)
+    if not m_path:
+        await websocket.send(json.dumps({
+            "type": "vm_console_error", "vm": vm,
+            "error": f"could not parse kldload-session URL: {url_out.strip()[:200]}",
+        }))
+        return
+    await websocket.send(json.dumps({
+        "type": "vm_console_opened",   # reuse the SSH/serial modal handler
+        "vm": vm, "ip": ip,
+        "url": m_path.group(1),
+        "session_id": m_sid.group(1) if m_sid else None,
+        "kind": "ssh",
+        "label": f"SSH: admin@{ip}",
+        "ok": True,
+    }))
+
+
+async def _vm_display_open(websocket, msg):
+    """Spawn a websockify+noVNC bridge to a running VM's graphical VNC port.
+
+    Doesn't go through kldload-session (which is ttyd-only); instead writes
+    its own systemd-run unit for websockify and a matching nginx drop-in
+    at /s/<id>/. websockify serves noVNC's HTML bundle as static content
+    from --web=/usr/share/novnc, AND upgrades the same path's WebSocket to
+    the VM's VNC TCP port. The UI iframe loads .../vnc.html which calls
+    back into .../websockify for the WS — both same-origin, no CORS."""
+    import os as _os, secrets as _secrets, socket as _sock, re as _re_disp
+    vm = (msg.get("vm") or "").strip()
+    if not vm:
+        await websocket.send(json.dumps({"type": "error", "msg": "vm name required"}))
+        return
+    # Resolve VNC display → port
+    try:
+        disp = subprocess.check_output(
+            ["virsh", "vncdisplay", vm],
+            text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "vm_console_error", "vm": vm,
+            "error": f"virsh vncdisplay {vm} failed: {e} — does the VM have a VNC graphics device?",
+        }))
+        return
+    m_disp = _re_disp.match(r":(\d+)", disp)
+    if not m_disp:
+        await websocket.send(json.dumps({
+            "type": "vm_console_error", "vm": vm,
+            "error": f"VM has no VNC graphics device (vncdisplay output: {disp!r}). Add <graphics type='vnc'/> to its XML.",
+        }))
+        return
+    vnc_port = 5900 + int(m_disp.group(1))
+    # noVNC HTML bundle has to be present — installed as `novnc` rpm/deb
+    novnc_web = "/usr/share/novnc"
+    if not _os.path.isdir(novnc_web):
+        await websocket.send(json.dumps({
+            "type": "vm_console_error", "vm": vm,
+            "error": "noVNC not installed on this host (package `novnc` missing). Will be in the next ISO build.",
+        }))
+        return
+    # Pick a free localhost port for websockify
+    _s = _sock.socket(); _s.bind(("127.0.0.1", 0))
+    listen_port = _s.getsockname()[1]; _s.close()
+    # Short hex session id — same shape as kldload-session uses so they
+    # cohabit in /etc/nginx/conf.d/kldload-dyn/ without naming clashes.
+    sid = _secrets.token_hex(6)
+    unit = f"kldload-vnc-{sid}.service"
+    try:
+        subprocess.check_call([
+            "systemd-run", "--unit", unit, "--collect", "--",
+            "/usr/bin/websockify",
+            f"--web={novnc_web}",
+            f"127.0.0.1:{listen_port}",
+            f"localhost:{vnc_port}",
+        ], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=10)
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "vm_console_error", "vm": vm,
+            "error": f"websockify systemd-run failed: {e}",
+        }))
+        return
+    # nginx drop-in. websockify serves both static and WS on the same port,
+    # so one location block covers both. WS upgrade headers are mandatory.
+    ngx_dyn = "/etc/nginx/conf.d/kldload-dyn"
+    _os.makedirs(ngx_dyn, exist_ok=True)
+    drop_in = _os.path.join(ngx_dyn, f"vnc-{sid}.conf")
+    with open(drop_in, "w") as f:
+        f.write(
+            f"# kldload VNC session {sid} for {vm} (websockify→{vnc_port})\n"
+            f"location /s/{sid}/ {{\n"
+            f"    proxy_pass http://127.0.0.1:{listen_port}/;\n"
+            f"    proxy_http_version 1.1;\n"
+            f"    proxy_set_header Upgrade $http_upgrade;\n"
+            f"    proxy_set_header Connection \"upgrade\";\n"
+            f"    proxy_set_header Host $host;\n"
+            f"    proxy_buffering off;\n"
+            f"    proxy_read_timeout 24h;\n"
+            f"    proxy_send_timeout 24h;\n"
+            f"}}\n"
+        )
+    subprocess.call(["nginx", "-s", "reload"],
+                     stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    # nginx -s reload is async (SIGHUP) — workers swap configs ~50-200ms
+    # later. Returning the URL immediately races the browser iframe load
+    # against the worker swap, and the iframe lands on the catch-all
+    # webui location → 404. Poll the new location until non-404 (or 3s
+    # timeout) so the URL we return is guaranteed live.
+    import urllib.request as _urlreq, ssl as _ssl_, time as _time_
+    _ctx = _ssl_.create_default_context(); _ctx.check_hostname=False; _ctx.verify_mode=_ssl_.CERT_NONE
+    for _ in range(30):
+        try:
+            req = _urlreq.Request(f"https://127.0.0.1:8443/s/{sid}/vnc.html", method="HEAD")
+            with _urlreq.urlopen(req, timeout=1, context=_ctx) as resp:
+                if resp.status != 404:
+                    break
+        except Exception:
+            pass
+        _time_.sleep(0.1)
+    # noVNC client entry — autoconnect via websockify same-origin path.
+    # show_dot=1: VMs often don't send a cursor image (blank GNOME cursor
+    # over black framebuffer until the desktop fully paints), and noVNC
+    # hides the local cursor inside the canvas — so the mouse visually
+    # vanishes the moment it enters the iframe. show_dot paints a small
+    # dot at the pointer position when the remote cursor is null. Without
+    # this the operator thinks the console is broken.
+    # reconnect=1: auto-rejoin on transient WS drops (VM reboots, network
+    # hiccups). Cheaper than re-clicking View.
+    url = f"/s/{sid}/vnc.html?autoconnect=1&resize=scale&show_dot=1&reconnect=1&path=s/{sid}/websockify"
+    await websocket.send(json.dumps({
+        "type": "vm_display_opened",
+        "vm": vm,
+        "url": url,
+        "session_id": sid,
+        "kind": "vnc",
+        "vnc_port": vnc_port,
+        "ok": True,
+    }))
+
+
+async def _vm_display_close(websocket, msg):
+    """Stop the websockify unit + remove its nginx drop-in (paired with
+    _vm_display_open)."""
+    import os as _os
+    vm  = (msg.get("vm") or "").strip()
+    sid = (msg.get("session_id") or "").strip()
+    if not sid:
+        await websocket.send(json.dumps({"type": "error", "msg": "session_id required"}))
+        return
+    subprocess.call(["systemctl", "stop", f"kldload-vnc-{sid}.service"],
+                     stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    try:
+        _os.remove(f"/etc/nginx/conf.d/kldload-dyn/vnc-{sid}.conf")
+    except OSError:
+        pass
+    subprocess.call(["nginx", "-s", "reload"],
+                     stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    await websocket.send(json.dumps({
+        "type": "vm_display_closed",
+        "vm": vm, "session_id": sid, "ok": True,
+    }))
+
+async def _vm_console_open(websocket, msg):
+    """Open a dedicated ttyd → virsh console session for a VM, behind nginx.
+
+    Rewritten 2026-05-16 to use kldload-session. The previous implementation
+    tried to short-circuit through the shared ttyd-k9s tmux session (with
+    target session named "ttyd-k9s") but two issues compounded: (a) the
+    actual tmux session created by kldload-console is named "kldload",
+    not "ttyd-k9s", so every tmux new-window failed with rc=1; (b) even
+    if the window existed, ttyd doesn't pass URL ?target-window=X into
+    its spawned command, so the iframe landed on the default home window
+    showing k9s, not the VM serial — the symptom on .127 2026-05-16 was
+    "modal opens with a black screen." Switching to kldload-session means
+    each VM console gets its OWN ttyd process bound to its OWN port,
+    nginx routes /s/<id>/ to it, and the iframe loads that URL directly —
+    no shared tmux to bridge, the URL IS the console.
+    """
+    vm = (msg.get("vm") or "").strip()
+    if not vm:
+        await websocket.send(json.dumps({"type": "error", "msg": "vm name required"}))
+        return
+    # Validate VM exists (cheap libvirt round-trip; clearer error than waiting
+    # for kldload-session's ttyd to fail with virsh "domain not found")
     try:
         out = subprocess.check_output(["virsh", "list", "--all", "--name"],
                                        text=True, stderr=subprocess.DEVNULL)
@@ -7510,36 +7957,95 @@ async def _vm_console_open(websocket, msg):
         await websocket.send(json.dumps({"type": "vm_console_error", "vm": vm,
                                           "error": f"virsh failed: {e}"}))
         return
-    wname = _vm_console_window_name(vm)
-    # Create the tmux window if it doesn't exist. `virsh console` needs
-    # to be force-acquired in case another session is attached (which
-    # happens after a VM hot-reboot or a second browser tab).
-    cmd = f"exec bash -lc 'echo Connecting to {vm} — Ctrl-] to detach; exec virsh console --force {vm}'"
-    # -t ttyd-k9s: means "session ttyd-k9s, any window" — kill-if-exists pattern
-    subprocess.call(
-        ["tmux", "kill-window", "-t", f"ttyd-k9s:{wname}"],
-        stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-    rc = subprocess.call(
-        ["tmux", "new-window", "-d", "-t", "ttyd-k9s:", "-n", wname, cmd],
-        stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    # Spawn a dedicated ttyd-on-virsh-console session via kldload-session.
+    # Kind "vm-serial" is defined at kldload-session:87 — it runs
+    # /usr/bin/virsh console --force <target>. kldload-session prints
+    # the URL on stdout, writes /etc/nginx/conf.d/kldload-dyn/<id>.conf,
+    # and reloads nginx — all the boilerplate we'd otherwise inline.
+    try:
+        url_out = subprocess.check_output(
+            ["/usr/local/sbin/kldload-session", "open", "vm-serial", vm,
+             "--title", f"VM Console: {vm}"],
+            text=True, stderr=subprocess.STDOUT, timeout=15
+        )
+    except subprocess.CalledProcessError as e:
+        await websocket.send(json.dumps({
+            "type": "vm_console_error",
+            "vm": vm,
+            "error": f"kldload-session open failed (rc={e.returncode}): {e.output.strip() if e.output else ''}",
+        }))
+        return
+    except subprocess.TimeoutExpired:
+        await websocket.send(json.dumps({
+            "type": "vm_console_error",
+            "vm": vm,
+            "error": "kldload-session open timed out after 15s",
+        }))
+        return
+    # kldload-session prints "https://host:8443/s/<id>/" on stdout — extract
+    # the path part for the iframe (same-origin), and the session id for
+    # the future close.
+    import re as _re_vc
+    url_line = ""
+    for line in url_out.strip().splitlines():
+        if "/s/" in line:
+            url_line = line.strip()
+            break
+    m_path = _re_vc.search(r'(/s/[A-Za-z0-9_-]+/)', url_line)
+    m_sid  = _re_vc.search(r'/s/([A-Za-z0-9_-]+)/', url_line)
+    if not m_path or not m_sid:
+        await websocket.send(json.dumps({
+            "type": "vm_console_error",
+            "vm": vm,
+            "error": f"could not parse kldload-session output: {url_out.strip()[:200]}",
+        }))
+        return
     await websocket.send(json.dumps({
         "type": "vm_console_opened",
-        "vm": vm, "window": wname, "ok": rc == 0,
-        "hint": "Ctrl-] detaches from the VM console; tmux window stays.",
+        "vm": vm,
+        "url": m_path.group(1),
+        "session_id": m_sid.group(1),
+        "ok": True,
+        "hint": "Ctrl-] inside the terminal detaches from virsh console without killing the VM.",
     }))
 
 async def _vm_console_close(websocket, msg):
-    """Kill a VM's console tmux window."""
+    """Close a VM console session — stops the ttyd unit and removes the
+    nginx drop-in via kldload-session close. Prefers the explicit
+    session_id the UI tracked from _open; falls back to enumerating
+    active sessions and matching by vm name if the UI lost track
+    (e.g., browser refresh)."""
     vm = (msg.get("vm") or "").strip()
-    if not vm:
-        await websocket.send(json.dumps({"type": "error", "msg": "vm name required"}))
+    sid = (msg.get("session_id") or "").strip()
+    if not vm and not sid:
+        await websocket.send(json.dumps({"type": "error", "msg": "vm name or session_id required"}))
         return
-    wname = _vm_console_window_name(vm)
-    rc = subprocess.call(
-        ["tmux", "kill-window", "-t", f"ttyd-k9s:{wname}"],
-        stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    if not sid and vm:
+        # Find sid by enumerating sessions and matching kind=vm-serial + target=vm
+        try:
+            j = subprocess.check_output(
+                ["/usr/local/sbin/kldload-session", "list"],
+                text=True, stderr=subprocess.DEVNULL, timeout=5)
+            import re as _re_vcl
+            for line in j.splitlines():
+                if "vm-serial" in line and vm in line:
+                    m = _re_vcl.search(r'\b([0-9a-f]{8,})\b', line)
+                    if m:
+                        sid = m.group(1)
+                        break
+        except Exception:
+            pass
+    ok = False
+    if sid:
+        rc = subprocess.call(
+            ["/usr/local/sbin/kldload-session", "close", sid],
+            stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        ok = (rc == 0)
     await websocket.send(json.dumps({
-        "type": "vm_console_closed", "vm": vm, "window": wname, "ok": rc == 0,
+        "type": "vm_console_closed",
+        "vm": vm,
+        "session_id": sid,
+        "ok": ok,
     }))
 
 async def _vm_console_list(websocket):

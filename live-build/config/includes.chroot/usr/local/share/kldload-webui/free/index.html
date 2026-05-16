@@ -7,11 +7,25 @@
 <link rel="stylesheet" href="/css/app.css">
 <style>
 .target-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap: 0.6rem; margin-bottom: 1rem; }
-.target-card { background: var(--surface2); border: 2px solid var(--border); border-radius: 8px; padding: 0.75rem 0.5rem; text-align: center; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
-.target-card:hover { border-color: rgba(52,211,153,0.4); background: rgba(52,211,153,0.05); }
-.target-card.selected { border-color: var(--accent); background: rgba(52,211,153,0.1); }
+/* Target-card states — make the SELECTED card unmistakably distinct.
+ * Pre-1.1.0 the un-selected default used --surface2 (a brighter blue
+ * tone) + 2px border, which against the new slate-navy canvas made
+ * EVERY card pop as if "highlighted" — operator couldn't tell which
+ * card was actually selected until they clicked. Fix: drop un-selected
+ * to a subtle transparent fill with a thin border; selected gets a
+ * filled accent-bg + 2px royal-blue border + soft elevation shadow.
+ * Visual contrast is now 1:5 instead of 1:1.05. */
+.target-card { background: transparent; border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 0.5rem; text-align: center; cursor: pointer; transition: border-color 0.15s, background 0.15s, box-shadow 0.15s; }
+.target-card:hover { border-color: var(--accent); background: rgba(59,130,246,0.04); }
+.target-card.selected { border: 2px solid var(--accent); background: rgba(59,130,246,0.12); box-shadow: 0 0 0 1px rgba(59,130,246,0.15); padding: calc(0.75rem - 1px) calc(0.5rem - 1px); }
+/* Disabled (untested-for-profile) cards: grayscale + low opacity + tooltip.
+ * Why no ::after text: the inline message used to render as a third line
+ * inside the card, making disabled cards taller than the enabled ones.
+ * CSS grid stretches every row to match the tallest cell, so a single
+ * disabled card on the row produced visible empty space under EVERY
+ * other distro's name. The graying + JS-set `title=` tooltip already
+ * convey "this isn't supported here" — explicit text was redundant. */
 .target-card.disabled { opacity: 0.35; pointer-events: none; cursor: not-allowed; filter: grayscale(0.6); }
-.target-card.disabled::after { content: ' (untested for this profile)'; font-size: 0.7em; color: var(--muted); display: block; margin-top: 0.2rem; }
 .target-card .tc-icon { font-size: 1.5rem; margin-bottom: 0.3rem; }
 .target-card .tc-name { font-size: 0.8rem; font-weight: 600; color: var(--text); }
 .target-card .tc-sub  { font-size: 0.7rem; color: var(--muted); margin-top: 0.15rem; }
@@ -31,6 +45,21 @@ select option:checked { background: #00b8d9; color: #000; }
 .modal-box p { margin:0 0 0.4rem; font-size:0.88rem; color:var(--text); }
 .modal-box .modal-detail { font-size:0.82rem; color:var(--muted); margin:0.6rem 0 1.25rem; line-height:1.6; }
 .modal-actions { display:flex; gap:0.75rem; justify-content:flex-end; }
+/* VM serial console modal — full-window terminal embed.
+ * Rides on the existing ttyd-k9s tmux session: backend creates a tmux
+ * window running `virsh console --force <vm>` and returns its name;
+ * the iframe loads /k9s/?target-window=<name> which is the same ttyd
+ * already proxied at the same origin. No new ports, no new auth. */
+.vm-console-modal { display:none; position:fixed; inset:0; z-index:1100; background:rgba(0,0,0,0.78); }
+.vm-console-modal.open { display:flex; align-items:center; justify-content:center; }
+.vm-console-modal-inner { width:min(92vw,1300px); height:min(86vh,860px); background:var(--bg2); border:1px solid var(--border); border-radius:8px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 12px 48px rgba(0,0,0,0.6); }
+.vm-console-modal-hdr { padding:0.5rem 0.9rem; background:var(--surface); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; font-size:0.88rem; gap:0.5rem; }
+.vm-console-modal-hdr .lhs { display:flex; align-items:center; gap:0.5rem; color:var(--subtle); }
+.vm-console-modal-hdr .lhs strong { color:var(--bright); font-family:var(--mono); }
+.vm-console-modal-tip { padding:0.4rem 0.9rem; font-size:0.74rem; color:var(--muted); background:var(--bg3); border-bottom:1px solid var(--border); font-family:var(--mono); }
+.vm-console-modal-tip code { background:var(--bg2); padding:0.05rem 0.35rem; border-radius:3px; color:var(--accent2); font-size:0.74rem; }
+.vm-console-modal-iframe { flex:1; width:100%; border:0; background:#0a0d13; }
+
 /* progress bar */
 .progress-bar-wrap { background:var(--surface2); border-radius:6px; height:8px; margin-bottom:0.75rem; overflow:hidden; }
 .progress-bar { height:100%; width:0%; background:#8b5cf6; border-radius:6px; transition:width 0.4s ease; }
@@ -45,6 +74,33 @@ select option:checked { background: #00b8d9; color: #000; }
 </style>
 </head>
 <body>
+
+<!-- ── VM serial console modal ─────────────────────────────────────────────
+     Reuses the existing ttyd-k9s tmux session — backend's vm_console_open
+     spawns/refreshes a tmux window running `virsh console --force <vm>`
+     and returns its window name. The iframe loads /k9s/?target-window=NAME
+     which is the SAME ttyd already proxied at /k9s/ for the K8s terminal.
+     No new ports, no per-VM nginx drop-ins, no extra auth surface. Close
+     button kills the tmux window via vm_console_close. -->
+<div class="vm-console-modal" id="vm-console-modal">
+  <div class="vm-console-modal-inner">
+    <div class="vm-console-modal-hdr">
+      <div class="lhs">
+        <span class="nav-icon"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></span>
+        <span>Console &mdash; <strong id="vm-console-name">&mdash;</strong></span>
+      </div>
+      <div style="display:flex;gap:0.4rem">
+        <button class="btn btn-ghost btn-sm" onclick="vmConsoleReload()" title="Re-attach to the VM serial">&#8634; Reattach</button>
+        <button class="btn btn-ghost btn-sm" onclick="vmConsoleOpenInNew()" title="Open this console in a new browser tab">&#8599; New tab</button>
+        <button class="btn btn-danger btn-sm" onclick="vmConsoleClose()" title="Close console + kill tmux window">&#10005; Close</button>
+      </div>
+    </div>
+    <div class="vm-console-modal-tip">
+      Press <code>Ctrl-]</code> inside the terminal to detach from <code>virsh console</code> without killing the VM &middot; closing this window also kills the tmux session
+    </div>
+    <iframe id="vm-console-iframe" class="vm-console-modal-iframe" src="about:blank" title="VM serial console"></iframe>
+  </div>
+</div>
 
 <!-- ── Confirm install modal ──────────────────────────────────────────────── -->
 <div class="modal-overlay" id="confirm-modal">
@@ -67,47 +123,47 @@ select option:checked { background: #00b8d9; color: #000; }
   <div class="nav-section">System</div>
   <ul>
     <li data-view="dashboard" class="active">
-      <span class="nav-icon">◈</span> Dashboard
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></span> Dashboard
     </li>
   </ul>
 
   <div class="nav-section">Install</div>
   <ul>
     <li data-view="install">
-      <span class="nav-icon">↯</span> Install to Disk
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span> Install to Disk
     </li>
   </ul>
 
   <div class="nav-section">Storage</div>
   <ul>
     <li data-view="zfs">
-      <span class="nav-icon">◧</span> ZFS &amp; Snapshots
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg></span> ZFS &amp; Snapshots
     </li>
   </ul>
 
   <div class="nav-section" id="infra-nav-section" style="display:none">Infrastructure</div>
   <ul id="infra-nav-items" style="display:none">
     <li data-view="vms">
-      <span class="nav-icon">▣</span> Virtual Machines
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></span> Virtual Machines
     </li>
     <li data-view="k8s">
-      <span class="nav-icon">☸</span> Kubernetes
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><polygon points="12 2 21 7 21 17 12 22 3 17 3 7"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="5" x2="12" y2="9"/><line x1="12" y1="15" x2="12" y2="19"/><line x1="5" y1="9" x2="9" y2="11"/><line x1="15" y1="13" x2="19" y2="15"/><line x1="19" y1="9" x2="15" y2="11"/><line x1="9" y1="13" x2="5" y2="15"/></svg></span> Kubernetes
     </li>
     <li data-view="ansible">
-      <span class="nav-icon">▲</span> Ansible
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span> Ansible
     </li>
     <li data-view="helm">
-      <span class="nav-icon">⎈</span> Helm
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/><line x1="4.9" y1="4.9" x2="7" y2="7"/><line x1="17" y1="17" x2="19.1" y2="19.1"/><line x1="4.9" y1="19.1" x2="7" y2="17"/><line x1="17" y1="7" x2="19.1" y2="4.9"/></svg></span> Helm
     </li>
     <li data-view="metrics">
-      <span class="nav-icon">📊</span> Metrics
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></span> Metrics
     </li>
   </ul>
 
   <div class="nav-section" id="klab-nav-section" style="display:none">klab</div>
   <ul id="klab-nav-items" style="display:none">
     <li data-view="klab">
-      <span class="nav-icon">🔬</span> klab
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M10 2v8.5L4.5 19a2 2 0 0 0 1.7 3h11.6a2 2 0 0 0 1.7-3L14 10.5V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></svg></span> klab
     </li>
   </ul>
 
@@ -118,21 +174,21 @@ select option:checked { background: #00b8d9; color: #000; }
   <div class="nav-section" id="tests-nav-section" style="display:none">Tests</div>
   <ul id="tests-nav-items" style="display:none">
     <li data-view="tests-zfs">
-      <span class="nav-icon">⚡</span> ZFS Suite
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span> ZFS Suite
     </li>
   </ul>
 
   <div class="nav-section" id="bob-nav-section" style="display:none">AI</div>
   <ul id="bob-nav-items" style="display:none">
     <li data-view="bob">
-      <span class="nav-icon">🧠</span> Bob
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="m12 3-1.91 5.09L5 10l5.09 1.91L12 17l1.91-5.09L19 10l-5.09-1.91z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/></svg></span> Bob
     </li>
   </ul>
 
   <div class="nav-section">Tools</div>
   <ul>
     <li data-view="logs">
-      <span class="nav-icon">≡</span> Logs
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span> Logs
     </li>
   </ul>
 </nav>
@@ -393,12 +449,12 @@ select option:checked { background: #00b8d9; color: #000; }
           <div class="panel-hdr">◈ Distribution</div>
           <div class="panel-body">
             <div class="target-grid" id="distro-grid" style="grid-template-columns:repeat(9,1fr);max-width:900px">
-              <div class="target-card selected" data-distro="centos" onclick="selectDistro(this)">
+              <div class="target-card" data-distro="centos" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🐧</div>
                 <div class="tc-name">CentOS 9</div>
                 <div class="tc-sub">offline</div>
               </div>
-              <div class="target-card" data-distro="fedora" onclick="selectDistro(this)">
+              <div class="target-card selected" data-distro="fedora" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🎩</div>
                 <div class="tc-name">Fedora 44</div>
                 <div class="tc-sub">offline</div>
@@ -491,7 +547,7 @@ select option:checked { background: #00b8d9; color: #000; }
           <div class="panel-hdr">◈ Profile</div>
           <div class="panel-body">
             <div class="target-grid" id="target-grid" style="grid-template-columns:repeat(7,1fr);max-width:1200px">
-              <div class="target-card" data-role="desktop" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
+              <div class="target-card selected" data-role="desktop" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">🖥</div>
                 <div class="tc-name">Desktop</div>
                 <div class="tc-sub">GNOME + ZFS</div>
@@ -511,7 +567,7 @@ select option:checked { background: #00b8d9; color: #000; }
                 <div class="tc-name">KVM Host</div>
                 <div class="tc-sub">Hypervisor + clones</div>
               </div>
-              <div class="target-card selected" data-role="k8s" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
+              <div class="target-card" data-role="k8s" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">☸</div>
                 <div class="tc-name">Kubernetes</div>
                 <div class="tc-sub">Lean K8s appliance</div>
@@ -920,7 +976,15 @@ select option:checked { background: #00b8d9; color: #000; }
                 <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">NVIDIA GPU</div>
                 <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">Drivers + CUDA + container toolkit</div>
               </div>
-              <div class="opt-card selected" id="opt-secure-boot" onclick="toggleOpt('secure-boot')" style="cursor:pointer;padding:0.8rem;border:2px solid var(--accent);border-radius:8px;transition:all 0.2s;text-align:center;background:rgba(125,200,255,0.06)">
+              <!-- Secure Boot default = OFF as of 1.1.0 polish pass.
+                   Reason: SB end-to-end on F44 + shim 15.8 is gated by an
+                   upstream ZBM SBAT gap (no `shim,X` SBAT entry, shim
+                   rejects chainload regardless of MOK enrollment — see
+                   project_sb_roadmap.md). With SB off, ZBM becomes the
+                   default boot target (firmware-time snapshot rollback +
+                   boot-env picker) — the kldload customer feature.
+                   Operators who want SB can opt in by clicking this card. -->
+              <div class="opt-card" id="opt-secure-boot" onclick="toggleOpt('secure-boot')" style="cursor:pointer;padding:0.8rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s;text-align:center">
                 <div style="font-size:1.3rem;margin-bottom:0.3rem">🔒</div>
                 <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">Secure Boot</div>
                 <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">kldload CA → MOK → signed ZFS kmod + ZBM</div>
@@ -932,7 +996,7 @@ select option:checked { background: #00b8d9; color: #000; }
             <input type="checkbox" id="install-zfs-dedup" style="display:none">
             <input type="checkbox" id="install-k8s" style="display:none">
             <input type="checkbox" id="install-k8s-bootstrap" style="display:none">
-            <input type="checkbox" id="install-secure-boot" checked style="display:none">
+            <input type="checkbox" id="install-secure-boot" style="display:none">
             <!-- Export format -->
             <div style="margin-top:0.8rem;padding-top:0.8rem;border-top:1px solid var(--border)">
               <label style="font-size:0.82rem;color:var(--subtle);display:block;margin-bottom:0.3rem">Export image format</label>
@@ -1054,13 +1118,27 @@ select option:checked { background: #00b8d9; color: #000; }
           <div class="ws-dropdown" id="vm-create-dd">
             <button class="btn btn-primary btn-sm" onclick="vmToggleCreateMenu(event)">＋ Create ▾</button>
             <div class="ws-dropdown-menu">
-              <div class="ws-dropdown-label">New VM</div>
+              <div class="ws-dropdown-label">📡 Cloud Server (headless, fast)</div>
+              <button class="ws-dropdown-item" onclick="vmCreateCloud('centos','server');vmCloseCreateMenu()">🐧 CentOS Stream — Server</button>
+              <button class="ws-dropdown-item" onclick="vmCreateCloud('rocky','server');vmCloseCreateMenu()">🪨 Rocky Linux — Server</button>
+              <button class="ws-dropdown-item" onclick="vmCreateCloud('fedora','server');vmCloseCreateMenu()">🎩 Fedora — Server</button>
+              <button class="ws-dropdown-item" onclick="vmCreateCloud('debian','server');vmCloseCreateMenu()">🌀 Debian — Server</button>
+              <button class="ws-dropdown-item" onclick="vmCreateCloud('ubuntu','server');vmCloseCreateMenu()">🟠 Ubuntu — Server</button>
+              <div class="ws-dropdown-sep"></div>
+              <div class="ws-dropdown-label">🖥 Cloud Desktop (XFCE + autologin)</div>
+              <button class="ws-dropdown-item" onclick="vmCreateCloud('centos','desktop');vmCloseCreateMenu()">🐧 CentOS Stream — Desktop</button>
+              <button class="ws-dropdown-item" onclick="vmCreateCloud('rocky','desktop');vmCloseCreateMenu()">🪨 Rocky Linux — Desktop</button>
+              <button class="ws-dropdown-item" onclick="vmCreateCloud('fedora','desktop');vmCloseCreateMenu()">🎩 Fedora — Desktop</button>
+              <button class="ws-dropdown-item" onclick="vmCreateCloud('debian','desktop');vmCloseCreateMenu()">🌀 Debian — Desktop</button>
+              <button class="ws-dropdown-item" onclick="vmCreateCloud('ubuntu','desktop');vmCloseCreateMenu()">🟠 Ubuntu — Desktop</button>
+              <div class="ws-dropdown-sep"></div>
+              <div class="ws-dropdown-label">⚙️ Advanced</div>
               <button class="ws-dropdown-item" onclick="vmShowCreate();vmCloseCreateMenu()">📀 Custom (RAM/CPU/disk)…</button>
-              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('centos');vmCloseCreateMenu()">🐧 Clone CentOS golden</button>
-              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('rocky');vmCloseCreateMenu()">🪨 Clone Rocky golden</button>
-              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('debian');vmCloseCreateMenu()">🌀 Clone Debian golden</button>
-              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('ubuntu');vmCloseCreateMenu()">🟠 Clone Ubuntu golden</button>
-              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('fedora');vmCloseCreateMenu()">🎩 Clone Fedora golden</button>
+              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('centos');vmCloseCreateMenu()">📋 Direct clone — CentOS golden</button>
+              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('rocky');vmCloseCreateMenu()">📋 Direct clone — Rocky golden</button>
+              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('fedora');vmCloseCreateMenu()">📋 Direct clone — Fedora golden</button>
+              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('debian');vmCloseCreateMenu()">📋 Direct clone — Debian golden</button>
+              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('ubuntu');vmCloseCreateMenu()">📋 Direct clone — Ubuntu golden</button>
               <div class="ws-dropdown-sep"></div>
               <div class="ws-dropdown-label">Demo</div>
               <button class="ws-dropdown-item" onclick="vmRunDemo(1);vmCloseCreateMenu()">▶ Full demo (golden + 4 clones)</button>
@@ -2930,6 +3008,15 @@ function handle(msg) {
           const p = document.getElementById(id);
           if (p) p.style.display = '';
         });
+      } else if (target === 'vm-log' || target === 'vm_log') {
+        // VM operation log — every vm_clone / vm_create_cloud / vm_replace
+        // streams here. Backend uses target="vm-log" (with dash) for
+        // consistency with the HTML element id. Without this case the
+        // events fell through to the global #log-box on the dashboard,
+        // making the VMs > Log subtab appear empty even when operations
+        // were succeeding. Same flush behaviour as other targets.
+        const box = document.getElementById('vm-log');
+        if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
       } else {
         const box = document.getElementById('log-box');
         if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
@@ -3009,6 +3096,51 @@ function handle(msg) {
     case 'vm_networks':  { renderVmNetworks(msg.networks); break; }
     case 'vm_pools':     { renderVmPools(msg.pools); break; }
     case 'vm_snapshots': { renderVmSnapshots(msg.snapshots); break; }
+    // VM serial console — backend (via kldload-session) spawns a
+    // dedicated ttyd-on-virsh-console behind nginx and returns a URL
+    // we can iframe directly.
+    case 'vm_console_opened': {
+      if (msg.ok && msg.url) {
+        const ifr = document.getElementById('vm-console-iframe');
+        if (ifr) ifr.src = msg.url;
+        // Remember the session_id so close can reference it (more
+        // reliable than re-deriving from the VM name on the backend).
+        if (msg.session_id) _vmConsoleSessionId = msg.session_id;
+      } else {
+        console.warn('vm_console_open failed', msg);
+        const tip = document.querySelector('.vm-console-modal-tip');
+        if (tip) tip.textContent = 'Failed to open console: ' + (msg.error || 'unknown');
+      }
+      break;
+    }
+    case 'vm_console_error': {
+      console.warn('VM console error:', msg.error);
+      const tip = document.querySelector('.vm-console-modal-tip');
+      if (tip) tip.textContent = 'Error: ' + (msg.error || 'unknown');
+      break;
+    }
+    case 'vm_console_closed': {
+      // Backend confirmed kldload-session close — nothing UI to do.
+      break;
+    }
+    // Graphical noVNC display (vm_display_*) — same modal handling,
+    // different backend dispatch (websockify + dedicated nginx drop-in).
+    case 'vm_display_opened': {
+      if (msg.ok && msg.url) {
+        const ifr = document.getElementById('vm-console-iframe');
+        if (ifr) ifr.src = msg.url;
+        if (msg.session_id) _vmConsoleSessionId = msg.session_id;
+      } else {
+        console.warn('vm_display_open failed', msg);
+        const tip = document.querySelector('.vm-console-modal-tip');
+        if (tip) tip.textContent = 'Failed to open display: ' + (msg.error || 'unknown');
+      }
+      break;
+    }
+    case 'vm_display_closed': {
+      // Backend confirmed websockify stop + nginx drop-in removed.
+      break;
+    }
     case 'vm_log':       { const b = document.getElementById('vm-log'); if (b) { b.textContent += msg.line + '\n'; b.scrollTop = b.scrollHeight; } break; }
     case 'k8s_status': { renderK8sStatus(msg); break; }
     case 'k8s_pods': { renderK8sPods(msg.pods); break; }
@@ -3397,7 +3529,7 @@ const ROLE_DESCS = {
       'No desktop — SSH-only access',
       'ZFS on root with Sanoid automatic snapshots',
       'kldload CLI: <code>ksnap</code>, <code>krestore</code>, <code>kreplicate</code>, <code>kzfs-backup</code>, <code>kzfs-health</code>',
-      'Cockpit + glances for remote web-based monitoring',
+      'kldload-webui for remote web-based monitoring + management',
       'chrony time sync, nftables firewall',
       'Node exporter + Prometheus for metrics collection',
     ],
@@ -3496,7 +3628,7 @@ function renderRoleDesc(role) {
 
 // Tracks the currently-selected (clicked) role so mouseleave can revert to it.
 // Initialised from whichever tile has .selected in the initial HTML.
-let _selectedRole = (document.querySelector('#target-grid .target-card.selected')?.dataset.role) || 'k8s';
+let _selectedRole = (document.querySelector('#target-grid .target-card.selected')?.dataset.role) || 'desktop';
 
 function showRoleDetail(role) {
   const sum = document.getElementById('role-summary');
@@ -3858,7 +3990,7 @@ function startInstall() {
   const timezone = document.getElementById('install-timezone').value || 'UTC';
   const keyboard = document.getElementById('install-keyboard').value || 'us';
   const locale   = document.getElementById('install-locale').value || 'en_US.UTF-8';
-  const roleRaw  = (document.querySelector('#target-grid .target-card.selected') || {}).dataset?.role || 'k8s';
+  const roleRaw  = (document.querySelector('#target-grid .target-card.selected') || {}).dataset?.role || 'desktop';
   // 4-template architecture (1.1.0+): kvm/k8s/klab/zfslab tiles all share
   // the kvm package set (libvirt + ZFS + K8s tooling) — KLDLOAD_PROFILE
   // collapses to 'kvm' so profiles.sh installs the same packages. The tile
@@ -4127,7 +4259,9 @@ function renderVMList(vms) {
       <td style="color:var(--muted);font-size:0.78rem">${esc(v.disk || '—')}</td>
       <td style="white-space:nowrap;text-align:right">
         ${isRunning
-          ? `<button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','shutdown')">Stop</button>
+          ? `<button class="btn btn-ghost btn-sm" onclick="vmSsh('${esc(v.name)}')" title="SSH into the VM as admin (cert auth)">⌨ SSH</button>
+             <button class="btn btn-ghost btn-sm" onclick="vmView('${esc(v.name)}')" title="View the VM desktop / login screen (noVNC)">🖼 View</button>
+             <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','shutdown')">Stop</button>
              <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','reboot')">Reboot</button>`
           : `<button class="btn btn-primary btn-sm" onclick="vmOp('${esc(v.name)}','start')">Start</button>`}
         <button class="btn btn-ghost btn-sm" onclick="vmSnap('${esc(v.name)}')">Snap</button>
@@ -4260,6 +4394,20 @@ function vmCloneFromGolden(distro) {
   send({action: 'vm_clone', src: `klab-golden-${distro}`, dst: name});
   vmSubTab('log');
 }
+
+// Cloud-init VM create: server (headless) or desktop (xfce + lightdm
+// autologin). Clones the klab-golden-<distro> zvol on the host and
+// generates a fresh cloud-init seed ISO server-side. The UI just sends
+// the distro + flavor + optional name; backend does the zfs clone +
+// mkisofs + virt-install dance. Output streams to the VMs > Log subtab.
+function vmCreateCloud(distro, flavor) {
+  const flavLabel = flavor === 'desktop' ? 'Desktop' : 'Server';
+  const dflt = `${distro}-${flavor}-${Date.now().toString(36).slice(-4)}`;
+  const name = prompt(`Name for the new ${distro} ${flavLabel} VM?`, dflt);
+  if (!name) return;
+  send({action: 'vm_create_cloud', distro: distro, flavor: flavor, name: name});
+  vmSubTab('log');
+}
 function vmRunDemo(num) {
   if (!confirm(`Run kvm-demo ${num}? Builds a golden VM and clones 4 copies.`)) return;
   send({action: 'k8s_run_demo', script: 'kvm-demo', name: String(num)});
@@ -4328,6 +4476,105 @@ function vmDelete(name) {
     setTimeout(() => send({ action: 'list_vms' }), 2000);
   }, 1000);
 }
+
+// ── VM serial console ───────────────────────────────────────────────────────
+// Open a per-VM tmux window inside the existing ttyd-k9s session running
+// `virsh console --force <vm>`. Backend's vm_console_open does the tmux
+// work and tells us which window name to point the iframe at. The iframe
+// loads /k9s/?target-window=<name> which is the SAME ttyd already proxied
+// at /k9s/ for the K8s terminal — no new ports, no extra auth.
+let _vmConsoleCurrent = null;
+let _vmConsoleSessionId = null;
+let _vmConsoleKind = null;  // 'ssh' | 'vnc' — determines which close action to fire
+
+function _vmOpenModalShell(name, headerText, tipText) {
+  _vmConsoleCurrent = name;
+  _vmConsoleSessionId = null;
+  const nm = document.getElementById('vm-console-name');
+  if (nm) nm.textContent = headerText;
+  const tip = document.querySelector('.vm-console-modal-tip');
+  if (tip) tip.innerHTML = tipText;
+  const ifr = document.getElementById('vm-console-iframe');
+  if (ifr) ifr.src = 'about:blank';
+  const modal = document.getElementById('vm-console-modal');
+  if (modal) modal.classList.add('open');
+}
+
+// SSH: terminal session into the VM as admin (cert auth)
+function vmSsh(name) {
+  if (!name) return;
+  _vmConsoleKind = 'ssh';
+  _vmOpenModalShell(name,
+    name + ' — SSH',
+    'Cert-auth as <code>admin</code> &middot; press <code>Ctrl-D</code> to exit cleanly &middot; closing this window tears down the ttyd session');
+  send({ action: 'vm_ssh_open', vm: name });
+}
+
+// View: graphical noVNC session (sees the actual desktop / login screen)
+function vmView(name) {
+  if (!name) return;
+  _vmConsoleKind = 'vnc';
+  _vmOpenModalShell(name,
+    name + ' — Display',
+    'noVNC graphical session &middot; click inside to grab keyboard &middot; Esc grabs the modal keys back &middot; closing this window stops websockify');
+  send({ action: 'vm_display_open', vm: name });
+}
+
+// Backwards-compat — legacy single Console button (older HTML still in
+// some places). Routes to SSH by default since that's the most useful.
+function vmConsole(name) { vmSsh(name); }
+
+function vmConsoleClose() {
+  const modal = document.getElementById('vm-console-modal');
+  if (modal) modal.classList.remove('open');
+  const ifr = document.getElementById('vm-console-iframe');
+  if (ifr) ifr.src = 'about:blank';
+  // Dispatch the right close action based on which kind opened the modal.
+  // SSH/serial flow through vm_console_close → kldload-session close.
+  // VNC flows through vm_display_close → systemctl stop + remove nginx drop-in.
+  if (_vmConsoleCurrent) {
+    const closeAction = (_vmConsoleKind === 'vnc') ? 'vm_display_close' : 'vm_console_close';
+    send({ action: closeAction, vm: _vmConsoleCurrent,
+           session_id: _vmConsoleSessionId || '' });
+    _vmConsoleCurrent = null;
+    _vmConsoleSessionId = null;
+    _vmConsoleKind = null;
+  }
+}
+
+function vmConsoleReload() {
+  // Tear down + re-spawn: backend closes the existing kldload-session
+  // and opens a fresh one. Useful when virsh got wedged after a VM
+  // hot-reboot or another client grabbed the serial.
+  if (!_vmConsoleCurrent) return;
+  const name = _vmConsoleCurrent;
+  const oldSid = _vmConsoleSessionId;
+  if (oldSid) {
+    send({ action: 'vm_console_close', vm: name, session_id: oldSid });
+  }
+  _vmConsoleSessionId = null;
+  const ifr = document.getElementById('vm-console-iframe');
+  if (ifr) ifr.src = 'about:blank';
+  // Small delay so the backend close finishes before the reopen — avoids
+  // racing nginx -s reload against itself.
+  setTimeout(() => send({ action: 'vm_console_open', vm: name }), 300);
+}
+
+function vmConsoleOpenInNew() {
+  // Pop the console into a standalone tab — same /s/<id>/ URL the iframe
+  // is using. Useful to keep a console open while doing other UI work.
+  const ifr = document.getElementById('vm-console-iframe');
+  if (!ifr || !ifr.src || ifr.src === 'about:blank') return;
+  window.open(ifr.src, '_blank');
+}
+
+// Esc to close — same convention as the install confirm modal
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    const m = document.getElementById('vm-console-modal');
+    if (m && m.classList.contains('open')) vmConsoleClose();
+  }
+});
 
 // ── Kubernetes ───────────────────────────────────────────────────────────────
 

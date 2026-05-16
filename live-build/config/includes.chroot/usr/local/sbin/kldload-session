@@ -122,6 +122,32 @@ cmd_open() {
       [[ "$target" =~ ^[a-zA-Z0-9._-]+$ ]] || die "invalid VM name: $target"
       cmd="/usr/bin/virsh console --force ${target}"
       ;;
+    vm-ssh)
+      # SSH into a running VM using the kldload host's keypair. Target
+      # is an IP (the webui resolves VM-name -> IP via libvirt DHCP
+      # leases before calling us).
+      #
+      # User selection: try root first, fall back to admin. Why:
+      #   - klab cloud-image VMs (centos/debian/fedora/ubuntu/rocky
+      #     goldens, ztest, kube-cluster nodes) have cloud-init enable
+      #     root + import kldload's pubkey. No admin user exists.
+      #   - kldload-installed VMs (rare under libvirt, since kldload
+      #     usually installs to bare metal) have admin/Passw0rd and
+      #     root disabled. root SSH will fail fast (Permission denied)
+      #     and we fall through to admin.
+      # Without the fallback, hardcoded admin@ hung on every klab VM
+      # because cloud images don't have admin and the iframe just sat
+      # at "Permission denied" for ConnectTimeout=5s with no terminal
+      # echo to indicate the failure.
+      #
+      # StrictHostKeyChecking=accept-new auto-accepts new host keys;
+      # UserKnownHostsFile pinned to a kldload-managed file so session
+      # churn doesn't litter /root/.ssh/known_hosts.
+      [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$target" =~ ^[a-zA-Z0-9._-]+$ ]] \
+        || die "invalid vm-ssh target: $target (expected IP or hostname)"
+      local _ssh_opts="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/var/lib/kldload/known_hosts.vm -o ConnectTimeout=5 -o NumberOfPasswordPrompts=0 -i /root/.ssh/id_ed25519"
+      cmd="/bin/sh -c 'echo \"[kldload] connecting to ${target} as root…\"; /usr/bin/ssh ${_ssh_opts} root@${target} || { echo; echo \"[kldload] root failed, trying admin…\"; /usr/bin/ssh ${_ssh_opts} admin@${target}; } || { echo; echo \"[kldload] both root and admin failed. The VM may not have either user set up, or kldload host key isnt authorized. Try the View button for graphical access.\"; sleep 8; }'"
+      ;;
     pod-exec)
       [[ "$target" =~ ^[a-z0-9-]+/[a-z0-9-]+(/[a-z0-9-]+)?$ ]] \
         || die "pod-exec target must be <namespace>/<pod>[/<container>]"
@@ -137,7 +163,7 @@ cmd_open() {
       [[ "$target" =~ ^[a-zA-Z0-9._-]+$ ]] || die "invalid klab run name: $target"
       cmd="/usr/local/bin/klab tail ${target}"
       ;;
-    *) die "unsupported kind: $kind (supported: shell vm-serial pod-exec node-ssh klab-tail)" ;;
+    *) die "unsupported kind: $kind (supported: shell vm-serial vm-ssh pod-exec node-ssh klab-tail)" ;;
   esac
 
   # Persist session metadata for list/close + audit. Values are
@@ -195,6 +221,43 @@ EOCONF
 
   # Graceful reload — no dropped WS on existing sessions.
   systemctl reload nginx
+
+  # Wait until nginx actually has the new drop-in live before returning.
+  #
+  # `systemctl reload nginx` (and `nginx -s reload`) are ASYNC — they
+  # signal the nginx master via SIGHUP, which then quietly shuts down
+  # old workers and starts new ones with the new config. Returns
+  # immediately to the caller. The new config isn't actually serving
+  # requests until the new workers finish their startup, typically
+  # 50-200ms but occasionally longer under load.
+  #
+  # If we return the URL to the webui before the new workers are live,
+  # the browser's iframe load races in and gets a 404 — the OLD config
+  # (without our /s/<id>/ block) falls through to the catch-all
+  # location which proxies to kldload-webui, which doesn't have that
+  # route either, so the webui returns its own 404. The user sees a
+  # blank "404 not found" iframe and the experience is broken.
+  #
+  # Caught 2026-05-16 on .127: every Console click produced a fresh
+  # session id (cc117731, b1b82d72, etc.) that all returned 404 to the
+  # browser — because the iframe load won the race against nginx
+  # reload every single time. Manual `nginx -s reload` afterwards made
+  # the URL work, confirming the only issue was timing.
+  #
+  # Poll the local URL until it returns non-404 (the actual ttyd HTML
+  # is a 200, the WS-upgrade upgrade arc is a 101 — either is fine,
+  # both prove the location block is live). 100ms × 30 = 3s ceiling.
+  local _i
+  for _i in $(seq 1 30); do
+    local _code
+    _code="$(curl -ks --connect-timeout 1 \
+                  -o /dev/null -w '%{http_code}' \
+                  "https://127.0.0.1:8443/s/${id}/" 2>/dev/null || echo 000)"
+    if [[ -n "$_code" && "$_code" != "404" && "$_code" != "000" ]]; then
+      break
+    fi
+    sleep 0.1
+  done
 
   audit open "$id" "$kind" "$target" "$user"
 
