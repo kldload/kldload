@@ -1665,6 +1665,8 @@ async def ws_handler(websocket):
                     await _k8s_pods(websocket)
                 elif action == "k8s_bootstrap":
                     await _k8s_bootstrap(websocket, msg)
+                elif action == "k8s_cluster_scale":
+                    await _k8s_cluster_scale(websocket, msg)
                 elif action == "k8s_reset":
                     await _k8s_reset(websocket)
                 elif action == "k8s_drain":
@@ -4815,11 +4817,54 @@ async def _k8s_top(websocket):
 
 
 async def _k8s_bootstrap(websocket, msg):
-    """Bootstrap K8s cluster via kube-cluster."""
-    workers = msg.get("workers", 3)
-    await _auto_snapshot(websocket, "k8s-bootstrap")
+    """Bootstrap K8s cluster via kube-cluster — or scale-up if already
+    bootstrapped. Detection: if `kldload-cp` VM exists, the cluster is
+    already there and bootstrap would no-op (or fail). Route to scale
+    instead so the operator's intent ("I want N total workers") is honored
+    either way.
+
+    Without this dual behavior, clicking Bootstrap with workers=N on a
+    box where the autodeploy already ran `kube-cluster bootstrap
+    --workers 0` does nothing visible — the user sees no progress and
+    assumes the button is broken. Caught on .127 2026-05-16."""
+    workers = int(msg.get("workers", 3))
+    # Probe: does kldload-cp libvirt domain already exist?
+    rc = subprocess.call(["virsh", "dominfo", "kldload-cp"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if rc == 0:
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": "k8s",
+            "line": f"[k8s] Existing cluster detected (kldload-cp present). Scaling to {workers} workers instead of re-bootstrapping.",
+        }))
+        await _auto_snapshot(websocket, f"k8s-scale-to-{workers}")
+        await _stream_proc(websocket,
+            ["kube-cluster", "scale", str(workers)],
+            target="k8s")
+    else:
+        await _auto_snapshot(websocket, "k8s-bootstrap")
+        await _stream_proc(websocket,
+            ["kube-cluster", "bootstrap", "--workers", str(workers)],
+            target="k8s")
+    await _k8s_status(websocket)
+
+
+async def _k8s_cluster_scale(websocket, msg):
+    """Explicit cluster scale — add workers to an existing K8s cluster.
+    Pairs with a dedicated 'Add Workers' button. Differs from _k8s_bootstrap
+    in that it requires the cluster to exist and never tries to bootstrap.
+    """
+    workers = int(msg.get("workers", 1))
+    rc = subprocess.call(["virsh", "dominfo", "kldload-cp"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if rc != 0:
+        await websocket.send(json.dumps({
+            "type": "error",
+            "msg": "Can't scale — no kldload-cp control plane VM found. Bootstrap the cluster first.",
+        }))
+        return
+    await _auto_snapshot(websocket, f"k8s-scale-{workers}")
     await _stream_proc(websocket,
-        ["kube-cluster", "bootstrap", "--workers", str(workers)],
+        ["kube-cluster", "scale", str(workers)],
         target="k8s")
     await _k8s_status(websocket)
 

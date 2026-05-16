@@ -4327,6 +4327,7 @@ function renderVMList(vms) {
         ${isRunning
           ? `<button class="btn btn-ghost btn-sm" onclick="vmSsh('${esc(v.name)}')" title="SSH into the VM as admin (cert auth)">⌨ SSH</button>
              <button class="btn btn-ghost btn-sm" onclick="vmView('${esc(v.name)}')" title="View the VM desktop / login screen (noVNC)">🖼 View</button>
+             <button class="btn btn-ghost btn-sm" onclick="vmMetrics('${esc(v.name)}')" title="Open this VM's Grafana dashboard — pre-filtered for this domain">📊 Metrics</button>
              <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','shutdown')">Stop</button>
              <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','reboot')">Reboot</button>`
           : `<button class="btn btn-primary btn-sm" onclick="vmOp('${esc(v.name)}','start')">Start</button>`}
@@ -4605,6 +4606,16 @@ function vmSsh(name) {
     name + ' — SSH',
     'Cert-auth as <code>admin</code> &middot; press <code>Ctrl-D</code> to exit cleanly &middot; closing this window tears down the ttyd session');
   send({ action: 'vm_ssh_open', vm: name });
+}
+
+// Metrics: open this VM's Grafana dashboard, pre-filtered by var-vm.
+// One generic dashboard, infinite per-VM views. Opens in a new tab so the
+// user keeps their kldload-webui session intact — and the new tab inherits
+// the same TLS trust (same cert, same kldload CA, no Accept-prompt).
+function vmMetrics(name) {
+  if (!name) return;
+  const u = `/grafana/d/klab-vm-estate/?var-vm=${encodeURIComponent(name)}&kiosk=tv&refresh=10s`;
+  window.open(u, '_blank');
 }
 
 // View: graphical noVNC session (sees the actual desktop / login screen)
@@ -5516,21 +5527,29 @@ function metricsLoadDashboard(uid) {
 // fixed strings set by the upstream authors and don't change between
 // dashboard versions, so they're safe to hardcode.
 const METRICS_CATALOG = [
-  { uid: 'home',                title: '📊 Grafana Home',         group: '' },
-  { uid: 'klab-estate',         title: '🔬 klab Estate',          group: 'kldload' },
+  // No standalone "Home" entry — Grafana's default_home_dashboard_uid auto-loads
+  // the Estate dashboard at /grafana/ root. Top of menu is Estate + VMs.
+  { uid: 'kldload-estate',      title: '🏛 Estate',               group: 'Overview' },
+  { uid: 'klab-vm-estate',      title: '🖧 Virtual Machines',     group: 'Overview' },
   { uid: 'zfs-pool-health',     title: '🌊 ZFS Pool Health',      group: 'Storage' },
   { uid: 'scrub-history',       title: '🧹 ZFS Scrub & Errors',   group: 'Storage' },
   { uid: 'compression-trend',   title: '🗜 Compression Trends',   group: 'Storage' },
   { uid: 'disk-health-smart',   title: '💽 Disk Health (SMART)',  group: 'Storage' },
   { uid: 'block-io-latency',    title: '⚡ Block I/O Latency',    group: 'Storage' },
   { uid: 'rYdddlPWk',           title: '🖥 Host — Full',          group: 'Host' },  // 1860
-  { uid: 'kernel-messages',     title: '📜 Kernel & Logs',        group: 'Observability' },
-  { uid: 'klab-test-matrix',    title: '🧪 klab Test Matrix',    group: 'Observability' },
-  { uid: 'klab-test-debug',     title: '🐛 klab Test Debug',      group: 'Observability' },
-  { uid: 'tetragon-ebpf',       title: '🔭 Tetragon eBPF',        group: 'Observability' },
-  { uid: 'vtuWtdumz',           title: '⌁ Cilium Agent',          group: 'Cilium' }, // 16611
-  { uid: '1GC0TT4Wz',           title: '⌁ Cilium Operator',       group: 'Cilium' }, // 16612
-  { uid: '5HftnJAWz',           title: '⌁ Hubble Metrics',        group: 'Cilium' }, // 16613
+  { uid: 'kernel-messages',     title: '📜 Kernel & Logs',        group: 'Host' },
+  { uid: 'klab-test-matrix',    title: '🧪 ZFS Test Matrix',     group: 'ZFS Test Lab' },
+  { uid: 'klab-test-debug',     title: '🐛 ZFS Test VM Debug',   group: 'ZFS Test Lab' },
+  // Kubernetes / Cilium entries: these dashboards are auto-provisioned by
+  // the Cilium + Tetragon helm charts at the END of kube-cluster bootstrap.
+  // They appear here as "not yet" entries until helm catches up — clicking
+  // them shows "Dashboard not found" until then. Hidden via __wait_for so
+  // they don't clutter the UI when the cluster isn't deployed.
+  { uid: 'kldload-ebpf-deep',   title: '🧬 eBPF Deep Dive',       group: 'Kubernetes' },
+  { uid: 'tetragon-ebpf',       title: '🔭 Tetragon eBPF',        group: 'Kubernetes', __wait_for: 'cluster' },
+  { uid: 'vtuWtdumz',           title: '⌁ Cilium Agent',          group: 'Kubernetes', __wait_for: 'cluster' }, // 16611
+  { uid: '1GC0TT4Wz',           title: '⌁ Cilium Operator',       group: 'Kubernetes', __wait_for: 'cluster' }, // 16612
+  { uid: '5HftnJAWz',           title: '⌁ Hubble Metrics',        group: 'Kubernetes', __wait_for: 'cluster' }, // 16613
 ];
 function metricsRefreshList() {
   const list = document.getElementById('metrics-list');
@@ -5552,7 +5571,7 @@ function metricsRefreshList() {
     });
   });
   list.innerHTML = html;
-  if (!_metricsActiveUid) metricsLoadDashboard('rYdddlPWk'); // Host by default
+  if (!_metricsActiveUid) metricsLoadDashboard('kldload-estate'); // Estate is the default landing — fleet overview
 }
 function metricsReload() {
   const ifr = document.getElementById('metrics-iframe');
@@ -6411,16 +6430,40 @@ function klabDestroyGolden(distro) {
 }
 
 function klabDeploy(site) {
+  // Surface IMMEDIATE feedback. Backend takes 1-3s to emit the first
+  // log_line (auto-snapshot fires first), and the ops log panel is
+  // display:none until log events arrive — so without this, clicking
+  // Deploy looks silent for the first few seconds.
+  _klabOpsLogShow(`[deploy] starting klab deploy ${site} — snapshotting then cloning goldens…`);
   send({ action: 'klab_deploy', site });
+}
+
+// Force the ops-log panel visible + append a status line in one call.
+// Reused by klabDeploy / klabPromote / klabRollback / klabFault for the
+// "click → instant feedback" UX. Without this every long-running klab
+// action looks silent until the first backend log_line arrives.
+function _klabOpsLogShow(line) {
+  const panel = document.getElementById('klab-ops-log-panel');
+  const box   = document.getElementById('klab-ops-log');
+  if (panel) panel.style.display = '';
+  if (box)   {
+    box.textContent += (line || '') + '\n';
+    box.scrollTop = box.scrollHeight;
+    // Scroll the panel into view so the user can see it even if they
+    // were focused on the deploy buttons at the top of the subtab.
+    panel.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
 }
 
 function klabPromote() {
   if (!confirm('Promote green → blue? This atomically swaps the sites via ZFS clone.')) return;
+  _klabOpsLogShow('[promote] green → blue — snapshotting blue, cloning green over…');
   send({ action: 'klab_promote', site: 'green' });
 }
 
 function klabRollback() {
   if (!confirm('Rollback blue to previous snapshot?')) return;
+  _klabOpsLogShow('[rollback] reverting blue to previous snapshot…');
   send({ action: 'klab_rollback' });
 }
 
