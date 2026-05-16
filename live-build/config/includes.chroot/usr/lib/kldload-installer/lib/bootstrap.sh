@@ -1423,11 +1423,20 @@ CUSTOMREPO
       )
   fi
   k_log_to "$log" "Running dnf --installroot pass 1 (main, ${#_dnf_pkgs[@]} packages, profile=${_profile})..."
+  # Mirror-resilience: skip_if_unavailable=True so one broken upstream mirror
+  # (e.g. iweb.com returning 404/corrupt repodata, observed 2026-05-16 on .111)
+  # doesn't tank the install. retries=10 + timeout=60 + minrate=1024 fail fast
+  # on a stalled mirror so dnf moves to the next one in the mirrorlist.
+  # Our local darksite is file:// — skip_if_unavailable cannot drop it.
   dnf --installroot="${target}" --releasever="${release}" \
       --setopt=install_weak_deps=False \
       --setopt=tsflags=nodocs \
       --setopt=cachedir="${target}/var/cache/dnf" \
       --setopt=optional_metadata_types=filelists \
+      --setopt='*.skip_if_unavailable=True' \
+      --setopt='*.retries=10' \
+      --setopt='*.timeout=60' \
+      --setopt='*.minrate=1024' \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
       "${_exclude_scripts[@]}" \
@@ -1445,6 +1454,10 @@ CUSTOMREPO
       --setopt=tsflags=nodocs,noscripts \
       --setopt=cachedir="${target}/var/cache/dnf" \
       --setopt=optional_metadata_types=filelists \
+      --setopt='*.skip_if_unavailable=True' \
+      --setopt='*.retries=10' \
+      --setopt='*.timeout=60' \
+      --setopt='*.minrate=1024' \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
       "${_f44_kernel_lockout[@]}" \
@@ -1471,6 +1484,10 @@ CUSTOMREPO
       --setopt=tsflags=nodocs \
       --setopt=cachedir="${target}/var/cache/dnf" \
       --setopt=optional_metadata_types=filelists \
+      --setopt='*.skip_if_unavailable=True' \
+      --setopt='*.retries=10' \
+      --setopt='*.timeout=60' \
+      --setopt='*.minrate=1024' \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install \
       "${_f44_kernel_lockout[@]}" \
