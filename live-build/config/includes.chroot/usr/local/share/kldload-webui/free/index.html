@@ -3049,13 +3049,16 @@ function handle(msg) {
         document.getElementById('snap-status-mini').textContent = 'No snapshots yet';
         break;
       }
-      tbody.innerHTML = snaps.slice(0, 20).map(s => `
+      // Show first 100 (sorted newest-first by backend). 20 was too few
+      // when 400+ snaps exist — newest manual snaps got cut. Operator
+      // can drill via Storage > ZFS Snapshots for the full list.
+      tbody.innerHTML = snaps.slice(0, 100).map(s => `
         <tr>
           <td style="font-family:monospace;font-size:0.82rem">${esc(s.name)}</td>
           <td style="color:var(--muted)">${esc(s.used || '—')}</td>
           <td><button class="btn btn-ghost btn-sm" onclick="rollback('${esc(s.name)}')">Rollback</button></td>
         </tr>`).join('');
-      document.getElementById('snap-status-mini').textContent = `${snaps.length} snapshot(s)`;
+      document.getElementById('snap-status-mini').textContent = `${snaps.length} snapshot(s) — showing 100 newest`;
       break;
     }
 
@@ -4355,7 +4358,7 @@ function renderVMList(vms) {
              <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','reboot')">Reboot</button>`
           : `<button class="btn btn-primary btn-sm" onclick="vmOp('${esc(v.name)}','start')">Start</button>`}
         <button class="btn btn-ghost btn-sm" onclick="vmSnap('${esc(v.name)}')" title="Snapshot this VM's dataset (rpool/vms/${esc(v.name)})">Snap</button>
-        <button class="btn btn-ghost btn-sm" onclick="vmRollback('${esc(v.name)}')" title="Rollback this VM to a prior snapshot (stops + restarts the VM)">Rollback</button>
+        <button class="btn btn-ghost btn-sm" onclick="vmRollback('${esc(v.name)}', event)" title="Rollback this VM to a prior snapshot (stops + restarts the VM)">Rollback</button>
         <button class="btn btn-ghost btn-sm" onclick="vmClone('${esc(v.name)}')">Clone</button>
         <button class="btn btn-danger btn-sm" onclick="vmDelete('${esc(v.name)}')">Delete</button>
       </td>
@@ -4579,33 +4582,72 @@ function vmSnap(name) {
   setTimeout(() => send({ action: 'list_vms' }), 1000);
 }
 
-// Rollback flow: ask backend for this VM's snapshots, render a picker,
-// confirm, then send vm_rollback. The picker is a window.prompt for now
-// (lightweight). Backend validates snap belongs to this VM.
+// Rollback flow: clicking the Rollback button asks backend for this VM's
+// snapshots and renders a click-pick dropdown positioned beneath the
+// button. Each row triggers a confirm + vm_rollback. Backend validates
+// the snap belongs to the named VM regardless of what the UI sent.
 let _vmRollbackTargetVM = null;
-function vmRollback(name) {
+let _vmRollbackAnchorEl = null;
+function vmRollback(name, ev) {
   _vmRollbackTargetVM = name;
+  _vmRollbackAnchorEl = ev && ev.currentTarget ? ev.currentTarget : null;
+  _closeRollbackMenu();  // close any previous menu
   send({ action: 'vm_snaps', vm: name });
+}
+function _closeRollbackMenu() {
+  const old = document.getElementById('vm-rollback-menu');
+  if (old) old.remove();
 }
 function _handleVmSnaps(msg) {
   if (!msg || !msg.snaps) return;
   if (msg.vm !== _vmRollbackTargetVM) return;
   if (!msg.snaps.length) {
-    alert(`No snapshots found for ${msg.vm}. Take one first with the Snap button.`);
-    _vmRollbackTargetVM = null;
+    alert(`No snapshots for ${msg.vm}. Click Snap first.`);
     return;
   }
-  const lines = msg.snaps.map((s, i) =>
-    `${i + 1}. ${s.name.split('@').pop()}   (used ${s.used}, ${s.creation})`).join('\n');
-  const picked = prompt(`Rollback ${msg.vm} to which snapshot?\n\n${lines}\n\nEnter number 1-${msg.snaps.length}:`);
-  const n = parseInt(picked, 10);
-  if (!n || n < 1 || n > msg.snaps.length) { _vmRollbackTargetVM = null; return; }
-  const snap = msg.snaps[n - 1].name;
-  if (!confirm(`Rollback ${msg.vm} to ${snap}?\n\nThis stops the VM, runs zfs rollback -r (destroys newer snapshots), and restarts.`)) {
-    _vmRollbackTargetVM = null; return;
+  // Build a floating menu anchored under the button.
+  const menu = document.createElement('div');
+  menu.id = 'vm-rollback-menu';
+  menu.style.cssText = 'position:absolute;z-index:9999;background:var(--surface);border:1px solid var(--border);border-radius:6px;box-shadow:0 6px 24px rgba(0,0,0,0.4);min-width:340px;max-height:320px;overflow-y:auto;padding:0.25rem 0';
+  const header = document.createElement('div');
+  header.style.cssText = 'padding:0.4rem 0.75rem;color:var(--muted);font-size:0.75rem;border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:0.05em';
+  header.textContent = `Rollback ${msg.vm} — pick snapshot`;
+  menu.appendChild(header);
+  msg.snaps.forEach(s => {
+    const row = document.createElement('div');
+    // Drop the @manual- prefix in the dropdown — operator already knows
+    // they're picking a user-snap; the timestamp alone reads cleaner.
+    const shortName = s.name.split('@').pop().replace(/^manual-/, '');
+    row.style.cssText = 'padding:0.5rem 0.75rem;cursor:pointer;display:flex;justify-content:space-between;gap:0.75rem;font-size:0.85rem';
+    row.onmouseenter = () => row.style.background = 'var(--surface2)';
+    row.onmouseleave = () => row.style.background = '';
+    row.innerHTML = `<span style="font-family:monospace;color:var(--accent2)">${shortName}</span><span style="color:var(--muted);font-size:0.78rem">${s.creation} · ${s.used}</span>`;
+    row.onclick = () => {
+      _closeRollbackMenu();
+      if (!confirm(`Rollback ${msg.vm} to ${shortName}?\n\nStops VM, zfs rollback -r ${s.name}, restarts.`)) return;
+      send({ action: 'vm_rollback', vm: msg.vm, snap: s.name });
+    };
+    menu.appendChild(row);
+  });
+  // Anchor positioning — drop the menu below the button.
+  if (_vmRollbackAnchorEl) {
+    const rect = _vmRollbackAnchorEl.getBoundingClientRect();
+    menu.style.top  = `${rect.bottom + window.scrollY + 4}px`;
+    menu.style.left = `${Math.max(8, rect.right - 340 + window.scrollX)}px`;
+  } else {
+    menu.style.top  = '20%';
+    menu.style.left = '40%';
   }
-  send({ action: 'vm_rollback', vm: msg.vm, snap });
-  _vmRollbackTargetVM = null;
+  document.body.appendChild(menu);
+  // Click-outside to close.
+  setTimeout(() => {
+    document.addEventListener('click', function _h(e) {
+      if (!menu.contains(e.target)) {
+        _closeRollbackMenu();
+        document.removeEventListener('click', _h);
+      }
+    });
+  }, 50);
 }
 
 function vmClone(name) {

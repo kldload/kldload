@@ -1539,15 +1539,24 @@ async def ws_handler(websocket):
                     await websocket.send(json.dumps({"type": "zfs_status", "output": out}))
 
                 elif action == "snapshot_list":
+                    # Sort newest-first (-S creation) so the most recent
+                    # snaps land at the top of the panel. Previously
+                    # zfs returned creation-ascending and the JS sliced
+                    # to first 20 — newest manual snaps got cut off.
                     try:
                         out = subprocess.check_output(
-                            ["zfs", "list", "-t", "snapshot", "-o", "name,used", "-H"],
+                            ["zfs", "list", "-t", "snapshot", "-o", "name,used,creation",
+                             "-S", "creation", "-H"],
                             text=True, stderr=subprocess.STDOUT)
                         snaps = []
                         for line in out.strip().splitlines():
                             parts = line.split('\t')
                             if len(parts) >= 2:
-                                snaps.append({"name": parts[0], "used": parts[1]})
+                                snaps.append({
+                                    "name":     parts[0],
+                                    "used":     parts[1],
+                                    "creation": parts[2] if len(parts) >= 3 else "",
+                                })
                     except Exception:
                         snaps = []
                     await websocket.send(json.dumps({"type": "snapshot_list", "snapshots": snaps}))
@@ -1562,7 +1571,9 @@ async def ws_handler(websocket):
                     # like a no-op because the snap landed at rpool level, not
                     # per-VM. Caught .133 2026-05-16.
                     import datetime as _dt
-                    ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                    # ISO-ish timestamp — readable in the rollback dropdown.
+                    # ZFS allows ':' in snap names; sanoid uses the same style.
+                    ts = _dt.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
                     _ds = msg.get("path") or "rpool"
                     if not re.match(r'^[A-Za-z0-9_/.\-]+$', _ds):
                         await websocket.send(json.dumps({"type": "error", "msg": "invalid snapshot path"}))
@@ -1571,6 +1582,29 @@ async def ws_handler(websocket):
                         subprocess.check_call(
                             ["zfs", "snapshot", "-r", f"{_ds}@manual-{ts}"],
                             stderr=subprocess.DEVNULL)
+                        # Retention: when snapping a specific dataset (not the
+                        # whole rpool), keep only the 5 newest @manual-* snaps
+                        # so the Rollback dropdown stays bounded. Pool-wide
+                        # snaps (the global takeSnapshot button) skip pruning —
+                        # those are explicit operator action with their own
+                        # cadence and may matter for cross-dataset rollback.
+                        if msg.get("path"):
+                            try:
+                                _snap_list = subprocess.check_output(
+                                    ["zfs", "list", "-H", "-t", "snapshot",
+                                     "-o", "name", "-s", "creation", _ds],
+                                    text=True, stderr=subprocess.DEVNULL
+                                ).strip().splitlines()
+                                _manual = [s for s in _snap_list if "@manual-" in s]
+                                # Drop oldest until at most 5 remain.
+                                for _old in _manual[:-5]:
+                                    subprocess.call(
+                                        ["zfs", "destroy", "-r", _old],
+                                        stderr=subprocess.DEVNULL)
+                            except Exception:
+                                # Prune failure is non-fatal — the snap was
+                                # taken, retention just didn't run this round.
+                                pass
                         await websocket.send(json.dumps({"type": "snapshot_done", "ts": ts, "dataset": _ds}))
                     except Exception as e:
                         await websocket.send(json.dumps({"type": "error", "msg": str(e)}))
@@ -2718,31 +2752,44 @@ async def _vm_pools(websocket):
 
 
 async def _vm_snapshots(websocket):
-    """Cross-VM snapshot listing: every domain × every snapshot. Includes
-    parent + creation time so the user can see snapshot trees per VM."""
+    """Cross-VM snapshot listing — sourced from ZFS, NOT libvirt.
+
+    Previous version called `virsh snapshot-list` which returns libvirt's
+    saved-state snapshots — a completely different concept than the ZFS
+    snapshots our Snap button creates (zfs snapshot rpool/vms/<vm>@...).
+    Result: the Snapshots tab was always empty, even when the operator
+    had clicked Snap dozens of times. Caught .133 2026-05-16.
+
+    Source of truth is `zfs list -t snapshot -r rpool/vms`. We derive vm
+    name from the dataset path's second segment; only snaps under
+    rpool/vms/<vmname>/* (a real per-VM dataset) get surfaced. The parent
+    rpool/vms@... recursive snaps are filtered out — they're created by
+    the global Snapshot button and don't belong on a per-VM listing.
+    """
     snaps = []
     try:
-        names = subprocess.check_output(
-            ["virsh", "list", "--all", "--name"], text=True,
-            stderr=subprocess.DEVNULL, timeout=5).split()
-        for vm in names:
-            if not vm.strip():
+        out = subprocess.check_output(
+            ["zfs", "list", "-H", "-t", "snapshot", "-o", "name,creation,used",
+             "-S", "creation", "-r", "rpool/vms"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10
+        )
+        for line in out.strip().splitlines():
+            parts = line.split('\t')
+            if len(parts) < 3 or '@' not in parts[0]:
                 continue
-            try:
-                out = subprocess.check_output(
-                    ["virsh", "snapshot-list", vm, "--no-metadata"],
-                    text=True, stderr=subprocess.DEVNULL, timeout=4)
-                for line in out.strip().splitlines()[2:]:
-                    parts = line.split(None, 3)
-                    if len(parts) >= 1 and parts[0]:
-                        snaps.append({
-                            "vm":      vm,
-                            "name":    parts[0],
-                            "created": " ".join(parts[1:3]) if len(parts) >= 3 else "",
-                            "state":   parts[3] if len(parts) >= 4 else "",
-                        })
-            except Exception:
+            ds, sname = parts[0].split('@', 1)
+            # ds = "rpool/vms" → skip (top-level); ds = "rpool/vms/<vm>" → include.
+            ds_parts = ds.split('/')
+            if len(ds_parts) != 3:
                 continue
+            vm = ds_parts[2]
+            snaps.append({
+                "vm":      vm,
+                "name":    sname,
+                "created": parts[1],
+                "state":   parts[2],   # repurpose state column to show 'used' (renderer
+                                        # writes it into the State column verbatim)
+            })
     except Exception:
         pass
     await websocket.send(json.dumps({"type": "vm_snapshots", "snapshots": snaps}))
@@ -3334,7 +3381,16 @@ async def _vm_clone(websocket, msg):
     await websocket.send(json.dumps({"type": "exec_done", "rc": 0, "target": "vm-log"}))
 
 async def _vm_snaps(websocket, msg):
-    """List snapshots for a single VM (used by Rollback picker)."""
+    """List user-initiated (@manual-*) snapshots for a single VM — used by
+    the Rollback dropdown. Filters out:
+      - @autosnap_*           (sanoid hourly/daily/weekly/monthly)
+      - @klab-k8s-bootstrap-* (klab automatic pre-cluster snaps)
+      - @golden               (klab post-build marker)
+      - @install-*            (install-time baseline)
+    Operator only ever rolls back to snaps they explicitly created — auto
+    snaps are visible in Storage > ZFS Snapshots for awareness but aren't
+    candidates here (rolling back to one would silently revert to a sanoid
+    cadence snap, almost never what the operator intended)."""
     vm = msg.get("vm", "")
     if not re.match(r'^[a-zA-Z0-9_\-]+$', vm):
         await websocket.send(json.dumps({"type": "error", "msg": "invalid vm name"}))
@@ -3348,8 +3404,13 @@ async def _vm_snaps(websocket, msg):
         )
         for line in out.strip().splitlines():
             parts = line.split('\t')
-            if len(parts) >= 3 and '@' in parts[0]:
-                snaps.append({"name": parts[0], "creation": parts[1], "used": parts[2]})
+            if len(parts) < 3 or '@' not in parts[0]:
+                continue
+            _sname = parts[0].split('@', 1)[1]
+            # Only user-initiated snaps reach the rollback dropdown.
+            if not _sname.startswith("manual-"):
+                continue
+            snaps.append({"name": parts[0], "creation": parts[1], "used": parts[2]})
     except Exception:
         # No snapshots, or dataset missing — return empty list, not error.
         pass
@@ -3364,7 +3425,9 @@ async def _vm_rollback(websocket, msg):
     if not re.match(r'^[a-zA-Z0-9_\-]+$', vm):
         await websocket.send(json.dumps({"type": "error", "msg": "invalid vm name"}))
         return
-    # snap should look like rpool/vms/<vm>@<snapname>
+    # snap should look like rpool/vms/<vm>@<snapname>. New @manual-* names
+    # use ISO-ish format (manual-2026-05-16_17:57:37) — `:` is a valid
+    # ZFS snap char, so the regex below allows it explicitly.
     if not re.match(r'^rpool/vms/[a-zA-Z0-9_\-]+@[A-Za-z0-9_:.\-]+$', snap):
         await websocket.send(json.dumps({"type": "error", "msg": "invalid snapshot path"}))
         return
