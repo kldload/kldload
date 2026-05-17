@@ -414,6 +414,12 @@ k_install_system_files() {
   # of its provenance, and tools (kst-summary, attestation, support
   # bug reports) fall back to a hardcoded placeholder string.
   [[ -f /etc/kldload/VERSION   ]] && cp /etc/kldload/VERSION   "${target}/etc/kldload/VERSION"
+  # process-exporter config — kldload-process-exporter.service
+  # ConditionPathExists on this file, so without it the unit silently
+  # skips and the per-process Grafana dashboards stay empty on the target.
+  # Caught .113 2026-05-16 alongside the missing exporter binaries.
+  [[ -f /etc/kldload/process-exporter.yml ]] && \
+    cp /etc/kldload/process-exporter.yml "${target}/etc/kldload/process-exporter.yml"
   echo "${_profile}" > "${target}/etc/kldload/profile"
   printf '%s\n' "${root_ds}" > "${target}/etc/kldload/boot-environment"
 
@@ -1351,6 +1357,22 @@ REPL
       cp /usr/local/bin/arcstats-exporter "${target}/usr/local/bin/arcstats-exporter"
       chmod +x "${target}/usr/local/bin/arcstats-exporter"
     fi
+    # libvirt-exporter + process-exporter — downloaded at ISO build time by
+    # builder/build-iso.sh into /usr/local/bin/. Without copying these into
+    # the target, kldload-libvirt-exporter.service and kldload-process-
+    # exporter.service both ConditionPathExists-fail at first boot and the
+    # per-VM + per-process Grafana dashboards stay empty forever. Bug
+    # caught on .113 2026-05-16 — install of build #20 had loud download
+    # of binaries into the live ISO, but install-target never copied them
+    # to /target so the installed system had no exporters.
+    for _exp in libvirt-exporter process-exporter; do
+      if [[ -x "/usr/local/bin/${_exp}" ]]; then
+        cp "/usr/local/bin/${_exp}" "${target}/usr/local/bin/${_exp}"
+        chmod +x "${target}/usr/local/bin/${_exp}"
+      else
+        k_log "WARNING: /usr/local/bin/${_exp} missing from live env — ${_exp} dashboards will be empty on target"
+      fi
+    done
     # textfile collector dir
     mkdir -p "${target}/var/lib/node_exporter/textfile_collector"
     # configs
