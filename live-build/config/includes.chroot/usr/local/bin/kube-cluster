@@ -1941,7 +1941,11 @@ NETCFG
       local n="${new_names[$i]}"
       local mac ip
       mac="$(virsh domiflist "$n" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
-      ip="$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$mac" '$3=="ipv4" && $0 ~ m {split($5,a,"/"); print a[1]; exit}')"
+      # virsh net-dhcp-leases columns: Expiry-date Expiry-time MAC Protocol IP-CIDR Hostname Client-ID
+      # That's 7 fields; protocol="ipv4" is $4, not $3 (older versions had a
+      # different column layout). Caught .142 2026-05-17 — worker MAC had a
+      # lease but the awk-parser returned empty and reported no-ip.
+      ip="$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$mac" '$4=="ipv4" && $0 ~ m {split($5,a,"/"); print a[1]; exit}')"
       if [[ -n "$ip" ]]; then
         new_ips[$i]="$ip"
         log "  ${n}: ${ip}"
@@ -2024,6 +2028,6 @@ case "$CMD" in
   golden)    cmd_golden ;;
   destroy)   cmd_destroy "${2:-}" ;;
   status)    cmd_status ;;
-  scale)     cmd_scale "${2:-1}" ;;
+  scale)     cmd_scale "${WORKERS:-1}" ;;
   *)         usage ;;
 esac

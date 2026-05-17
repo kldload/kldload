@@ -26,5 +26,22 @@ RestartSec=3
 StandardOutput=journal
 StandardError=journal
 
-[Install]
-WantedBy=multi-user.target
+# [Install] WantedBy intentionally removed as of 1.1.0.
+#
+# Background: kldload-proxy is the predecessor of nginx as the :8443 TLS
+# terminator. nginx replaced it in 1.0.6+. The unit file stays in tree
+# because some downstream deployment tools / docs still reference
+# `systemctl start kldload-proxy` as a fallback recovery path.
+#
+# Without [Install], `systemctl preset-all` cannot re-enable the unit
+# even if a vendor preset says `enable kldload-proxy.service`. That
+# closed the door on the boot-time regression seen 2026-05-15 on the
+# live ISO .101 boot: build-iso.sh's `systemctl disable kldload-proxy`
+# was being undone at boot because kldload-webui.service had
+# `Wants=kldload-proxy.service` (since cleaned up) AND the unit
+# was preset-enabled. Both routes are now closed: webui no longer
+# wants it, and absent [Install] systemd refuses to symlink it into
+# any target.wants directory.
+#
+# To bring it up by hand: `systemctl start kldload-proxy.service` — the
+# unit is still launchable, just not auto-started.

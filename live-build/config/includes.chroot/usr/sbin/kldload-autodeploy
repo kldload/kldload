@@ -104,13 +104,16 @@ esac
 [[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]] && WANT[ai]=1
 [[ "${KLDLOAD_KLAB_NO_AUTO:-0}" == "1" ]] && WANT[klab]=0
 
-# K8s cluster sizing — k8s tile is the production-reference (3 workers
-# locked at install). klab/zfslab start with 0 workers; klab scales via
-# the post-install UI, zfslab stays put so the host budget goes to ZFS
-# test VMs instead of empty K8s nodes. Override via KLDLOAD_K8S_WORKERS.
+# K8s cluster sizing — klab and k8s templates both land with a fully
+# bootstrapped 4-node cluster (1 CP + 3 workers). zfslab stays at 0
+# workers so the host budget goes to ZFS test VMs instead of empty
+# K8s nodes. Override via KLDLOAD_K8S_WORKERS.
+# Caught 2026-05-17 on .142 — klab landed with 0 workers because the
+# prior default was conservative; user expected the full cluster.
 case "$TEMPLATE" in
-    k8s)         K8S_WORKERS_DEFAULT=3 ;;
-    *)           K8S_WORKERS_DEFAULT=0 ;;
+    k8s|klab|devops|ai)  K8S_WORKERS_DEFAULT=3 ;;
+    zfslab)              K8S_WORKERS_DEFAULT=0 ;;
+    *)                   K8S_WORKERS_DEFAULT=0 ;;
 esac
 K8S_WORKERS="${KLDLOAD_K8S_WORKERS:-$K8S_WORKERS_DEFAULT}"
 
@@ -382,6 +385,12 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
             # Falls back to the helm repo if the tarball is missing (dev builds).
             log "[k8s] installing Tetragon for syscall-level observability..."
             export KUBECONFIG=/root/.kube/config
+            # Make install idempotent — kube-cluster bootstrap may have already
+            # installed Tetragon (line 380 of bootstrap), in which case the
+            # autodeploy step here would fail with "cannot re-use a name".
+            # Pre-uninstall (best-effort) so a re-run lands cleanly. Caught
+            # .142 2026-05-17.
+            helm uninstall tetragon -n kube-system >> "$LOG_FILE" 2>&1 || true
             _tetragon_tgz="/root/darksite/helm-charts/tetragon.tgz"
             if [[ -f "$_tetragon_tgz" ]]; then
                 helm install tetragon "$_tetragon_tgz" -n kube-system \

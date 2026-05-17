@@ -6,8 +6,16 @@ Description=kldload Web UI (installer + management frontend)
 # ExecStartPre runs kldload-tls-cert which needs the LAN IP assigned to
 # build correct SANs. Ordering before the heavy units still holds — the
 # UI comes up ~seconds after DHCP completes; heavy work runs in parallel.
-After=network-online.target systemd-modules-load.service kldload-proxy.service
-Wants=network-online.target systemd-modules-load.service kldload-proxy.service
+# nginx (NOT kldload-proxy) is the TLS terminator at :8443 since 1.0.6.
+# Wanting it here was harmless on the old setup; under nginx it's the
+# OPPOSITE of harmless — `Wants=kldload-proxy.service` revives a unit
+# the build-iso.sh `systemctl disable` deliberately turned off, and
+# kldload-proxy then races nginx for :8443 and wins because it starts
+# first. Caught 2026-05-15 on live ISO .101 boot: nginx in restart loop
+# with "Address already in use" while kldload-proxy held the port.
+# Don't reference kldload-proxy.service here — nginx fronts the webui.
+After=network-online.target systemd-modules-load.service nginx.service
+Wants=network-online.target systemd-modules-load.service
 Before=kldload-firstboot.service kldload-autodeploy.service klab-firstboot.service
 
 [Service]
@@ -18,11 +26,12 @@ Type=simple
 # the cluster is fine.
 Environment=HOME=/root
 Environment=KUBECONFIG=/root/.kube/config
-# TLS is now terminated by kldload-proxy on :8443 — the webui runs as
-# plain HTTP on loopback :8444 and the proxy forwards to it. This is
-# what lets ONE cert prompt (the proxy's) cover the webui + every
-# iframed service (Grafana, ttyd-k9s, Bob) as a single origin. If the
-# proxy is down, :8443 is simply unreachable — no half-working state.
+# TLS is terminated by nginx on :8443 — the webui runs as plain HTTP
+# on loopback :8444 and nginx forwards to it. This is what lets ONE
+# cert prompt (nginx's) cover the webui + every iframed service
+# (Grafana, ttyd-k9s, Bob) as a single origin. If nginx is down, :8443
+# is unreachable — no half-working state. The hand-rolled kldload-proxy
+# was the predecessor of nginx and is now disabled at build time.
 ExecStart=/usr/local/bin/kldload-webui --port 8444 --bind 127.0.0.1 --no-tls --no-browser
 # Post-condition: backend port actually answering. Keeps systemd from
 # marking the unit "started" before the HTTP server is accept()-ing.

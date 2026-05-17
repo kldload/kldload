@@ -1,52 +1,104 @@
-/* Dark theme (default). Toggle via [data-theme="light"] on <html>.
- * Everything else in the app uses var(--...) so a one-element flip
- * reskins the entire UI without touching component styles. */
+/* Dark theme (default) — Sophos-soft palette.
+ *
+ * Elite system-management aesthetic (Tailscale admin / Linear / Stripe /
+ * Sophos UTM): warm slate-navy canvas, royal-blue accent (one primary
+ * colour, restrained), emerald success / amber warning / coral danger
+ * as flat status fills (no neon halos). Whisper-thin borders;
+ * elevation lives in soft layered shadows, not glow.
+ *
+ * Toggle light theme via [data-theme="light"] on <html>. */
 :root {
-  --bg:       #0f1117;
-  --surface:  #161b25;
-  --surface2: #1e2533;
-  --surface3: #14171d;   /* deepest background (log boxes, code blocks) */
-  --bg3:      #0a0d13;   /* even deeper — active inputs */
-  --subtle:   #cbd5e0;   /* text that's not main but still readable */
+  --bg:       #0c1422;   /* slate-navy canvas */
+  --surface:  #131c2e;   /* cards / panels */
+  --surface2: #1a2440;   /* nested elevation */
+  --surface3: #0a1019;   /* deepest (log boxes, sidebar) */
+  --bg3:      #0a1220;   /* active inputs */
+  --subtle:   #aab7d4;   /* readable secondary text */
   --border:   rgba(255,255,255,0.07);
-  --accent:   #34d399;
-  --accent2:  #60a5fa;
+  --accent:   #3b82f6;   /* royal blue — primary action, focus, active nav */
+  --accent2:  #60a5fa;   /* sky — gradient endpoint + secondary highlight */
+  /* Status colours are GREEN / RED / AMBER, same in both themes so the
+   * operator never has to relearn "what does green mean here." Matches
+   * Proxmox + every other enterprise admin UI. */
+  --good:     #10b981;   /* emerald — success / healthy */
   --warn:     #fbbf24;
   --danger:   #f87171;
-  --text:     #e2e8f0;
-  --muted:    #8892a4;
+  --text:     #e6ebf5;
+  --muted:    #6b7896;
   --radius:   8px;
+  /* Soft elevation shadows replace neon glow. shadow-sm for cards,
+   * shadow for raised elements, shadow-lg for floating overlays.
+   * 1-2-8 layered pattern (sm = subtle press, default = standard card,
+   * lg = floating menu / modal) — same scale Linear/Vercel use. */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.22);
+  --shadow:    0 2px 8px rgba(0,0,0,0.32), 0 1px 2px rgba(0,0,0,0.18);
+  --shadow-lg: 0 8px 24px rgba(0,0,0,0.42);
+  /* Inter for everything readable — same font Linear/Vercel/Stripe ship.
+   * System fallbacks so air-gapped boxes still render cleanly if the
+   * woff load fails / isn't bundled. JetBrains Mono for code+logs. */
+  --font-sans: "Inter", "Inter Variable", system-ui, -apple-system, "Segoe UI", Cantarell, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "Fira Code", ui-monospace, monospace;
 }
 
-/* Light theme — applied when the user toggles. WCAG AA-friendly contrast
- * (muted/text separation, accent darkened slightly for white-background
- * buttons to remain legible). */
+/* Light theme — enterprise-admin clean (Proxmox-family without the steal).
+ *
+ * Canvas is a soft light gray (NOT stark white — eyes need a non-glaring
+ * baseline); cards lift to pure white with thin gray borders; sidebar
+ * sits a shade lighter than the canvas; accent is sky-blue (lighter +
+ * friendlier than Proxmox's deep cobalt, distinct enough to avoid
+ * colour-theft). Green/red/amber status colours match dark mode so
+ * operators don't context-switch when they flip themes.
+ *
+ * Reference: the user's Proxmox light-mode screenshots (2026-05-14).
+ * Family resemblance to those, but proportions tuned for the kldload
+ * UI grid + Inter typography. */
 [data-theme="light"] {
-  --bg:       #f5f6f8;
-  --surface:  #ffffff;
-  --surface2: #f0f2f5;
-  --surface3: #e5e8ed;
-  --bg3:      #ffffff;
-  --subtle:   #334155;
-  --border:   rgba(0,0,0,0.09);
-  --accent:   #059669;
-  --accent2:  #2563eb;
-  --warn:     #b45309;
+  --bg:       #f4f5f7;   /* soft light gray — the "paper" canvas */
+  --surface:  #ffffff;   /* cards / panels — pure white, lifted */
+  --surface2: #fafbfc;   /* subtle elevation step */
+  --surface3: #ebedf0;   /* sidebar / nested panels — slightly deeper */
+  --bg3:      #ffffff;   /* input fields */
+  --subtle:   #4b5563;   /* dark slate for readable secondary text */
+  --border:   #e4e7ec;   /* thin gray — the panel/card edge */
+  /* Accent — sky-500. Lighter and friendlier than royal blue, distinct
+   * from Proxmox's deeper cobalt, but in the same "enterprise blue"
+   * family so it reads as "infrastructure I trust." */
+  --accent:   #0ea5e9;
+  --accent2:  #38bdf8;   /* sky-400 — gradient endpoint */
+  /* Status — match dark-mode hues at slightly darker shades for
+   * legibility against white backgrounds. Same semantics in both
+   * themes: green = healthy, red = danger, amber = warn. */
+  --good:     #16a34a;
+  --warn:     #d97706;
   --danger:   #dc2626;
-  --text:     #1a202c;
-  --muted:    #64748b;
+  --text:     #1f2937;   /* slate-800 — body text */
+  --muted:    #9ca3af;   /* slate-400 — quiet labels */
+  --shadow-sm: 0 1px 2px rgba(15,23,42,0.05);
+  --shadow:    0 2px 8px rgba(15,23,42,0.07), 0 1px 2px rgba(15,23,42,0.04);
+  --shadow-lg: 0 8px 24px rgba(15,23,42,0.10);
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-family: var(--font-sans);
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
   line-height: 1.5;
+  letter-spacing: -0.005em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
   display: flex;
   min-height: 100vh;
+}
+
+/* Headings get semibold + tight tracking — same convention Linear /
+ * Vercel / Stripe use for hierarchy. Subtle but unmistakable polish. */
+h1, h2, h3, h4, .page-title, .panel-hdr {
+  font-weight: 600;
+  letter-spacing: -0.015em;
 }
 
 /* #app wraps sidebar + main. Body's flex only makes #app a flex item — we
@@ -107,14 +159,29 @@ body {
   transition: color 0.15s, background 0.15s;
   font-size: 0.88rem;
 }
-#sidebar li:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+/* Sidebar hover/active — use accent (royal blue). Previously green;
+ * dropped because green carries "healthy / passed" semantics elsewhere
+ * in the UI and double-duty creates ambiguity ("is this nav selected
+ * or is this nav healthy?"). Accent = "this is active across the
+ * whole UI" — single rule. */
+#sidebar li:hover {
+  color: var(--text);
+  background: rgba(59,130,246,0.06);
+}
 #sidebar li.active {
   color: var(--accent);
   border-left-color: var(--accent);
-  background: rgba(52,211,153,0.08);
+  background: rgba(59,130,246,0.12);
   font-weight: 600;
 }
-.nav-icon { font-size: 0.85rem; opacity: 0.7; }
+/* Nav icons — Lucide-style inline SVGs (24 viewBox, 2px stroke).
+ * currentColor inherits the link's text colour so hover/active state
+ * recolours the icon for free. 18px display keeps them readable at the
+ * sidebar density without overpowering the label. */
+.nav-icon { font-size: 0.85rem; opacity: 0.7; display: inline-flex; align-items: center; }
+.nav-icon svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+#sidebar li:hover .nav-icon { opacity: 1; }
+#sidebar li.active .nav-icon { opacity: 1; }
 
 .upgrade-box {
   margin: auto 1rem 0;
@@ -164,16 +231,19 @@ body {
   text-transform: uppercase;
   padding: 0.15rem 0.5rem;
   border-radius: 20px;
-  background: rgba(52,211,153,0.12);
+  background: rgba(59,130,246,0.12);
   color: var(--accent);
-  border: 1px solid rgba(52,211,153,0.3);
+  border: 1px solid rgba(59,130,246,0.25);
 }
+/* Status dot — emerald with a subtle ring (no neon halo) when healthy.
+ * Same convention Tailscale / Datadog use for the WebSocket / agent
+ * status pip. */
 #status-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
-  background: var(--accent);
+  background: #10b981;
   margin-left: auto;
-  box-shadow: 0 0 6px var(--accent);
+  box-shadow: 0 0 0 3px rgba(16,185,129,0.15);
 }
 #status-text { font-size: 0.78rem; color: var(--muted); }
 
@@ -187,10 +257,21 @@ body {
 .view { display: none; }
 .view.active { display: block; }
 
+/* Page title — accent→accent2 gradient text-clip (Linear / Vercel /
+ * Tailscale admin convention). Pure white reads "default browser h1";
+ * a gradient ties the title visually to the brand accent without
+ * shouting. -webkit-background-clip + transparent color is the
+ * portable way; Firefox supports background-clip:text since 89. */
 .page-title {
-  font-size: 1.2rem;
+  font-size: 1.35rem;
   font-weight: 700;
+  letter-spacing: -0.02em;
   margin-bottom: 0.25rem;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  display: inline-block;
 }
 .page-sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.5rem; }
 

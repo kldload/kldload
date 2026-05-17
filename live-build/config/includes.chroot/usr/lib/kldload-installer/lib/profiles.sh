@@ -1401,8 +1401,25 @@ REPL
     # 5 of 8 dashboards baked into pass-22.
     if [[ -d /var/lib/grafana/dashboards ]]; then
       mkdir -p "${target}/var/lib/grafana/dashboards"
-      cp /var/lib/grafana/dashboards/*.json \
-         "${target}/var/lib/grafana/dashboards/" 2>/dev/null || true
+      # Recursive copy so subfolder dashboards (host/, storage/,
+      # kubernetes/, zfs-test-lab/, virtual-machines/, estate/) land
+      # too — the kldload.yaml provisioner has 7 per-folder providers
+      # that expect subdir-based grouping. Previous flat `*.json` copy
+      # only caught 6 top-level files (~6 dashboards), losing all 16
+      # in subfolders. Caught .142 2026-05-17.
+      cp -r /var/lib/grafana/dashboards/. \
+            "${target}/var/lib/grafana/dashboards/" 2>/dev/null || true
+    fi
+    # Provisioner config — kldload.yaml has the per-folder provider
+    # mapping; without it Grafana falls back to a stub klab.yaml (or
+    # nothing) and the folder structure breaks.
+    if [[ -d /etc/grafana/provisioning ]]; then
+      mkdir -p "${target}/etc/grafana/provisioning/dashboards" \
+               "${target}/etc/grafana/provisioning/datasources"
+      cp -r /etc/grafana/provisioning/dashboards/. \
+            "${target}/etc/grafana/provisioning/dashboards/" 2>/dev/null || true
+      cp -r /etc/grafana/provisioning/datasources/. \
+            "${target}/etc/grafana/provisioning/datasources/" 2>/dev/null || true
     fi
 
     # Hourly VM snapshot timer
@@ -1643,18 +1660,13 @@ ExecStart=-/usr/local/bin/klab golden ubuntu
 # Customer Portal URL>. Either condition missing → klab returns 0 (skip)
 # so this service still goes green for the other five distros.
 ExecStart=-/usr/local/bin/klab golden rhel
-# After all distro goldens are built, auto-bootstrap a 4-node kubernetes
-# cluster (1 control plane + 3 workers) off the k8s-golden. kube-cluster
-# bootstrap creates k8s-golden first if it doesn't exist, then deploys the
-# cluster on virbr0 with WireGuard + Cilium + Hubble. With klab template
-# the user expects "everything that can be built IS built" — leaving
-# kube-cluster manual means /var/lib/libvirt has no running cluster on
-# first boot and the user has to remember to run it. `-` prefix so a
-# kube-cluster bootstrap failure doesn't fail the unit (operator can
-# retry from the webui Kubernetes tab). Time budget: ~10-12 min on top
-# of ~15 min of golden builds — still well under TimeoutStartSec=7200.
-# Added 2026-05-16 per user request: "klab should build everything".
-ExecStart=-/usr/local/bin/kube-cluster bootstrap --workers 3
+# K8s bootstrap is OWNED BY kldload-autodeploy (single orchestrator).
+# Previously had a duplicate `kube-cluster bootstrap --workers 3` here
+# which raced autodeploy's K8s phase — both tried to bootstrap, second
+# one hit "cluster already exists" and was no-op'd, plus the half-built
+# state confused the operator. Removed 2026-05-17. autodeploy's K8S_WORKERS
+# default is now 3 for klab template (was 0), so the cluster lands with
+# workers without this duplicate ExecStart.
 ExecStartPost=/bin/mkdir -p /var/lib/kldload
 ExecStartPost=/bin/touch /var/lib/kldload/klab-firstboot-done
 StandardOutput=journal+console

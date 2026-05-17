@@ -1897,15 +1897,16 @@ datasources:
     uid: prometheus
 GRAFDS
 
-        cat > /etc/grafana/provisioning/dashboards/klab.yaml <<'GRAFDASH'
-apiVersion: 1
-providers:
-  - name: klab
-    folder: klab
-    type: file
-    options:
-      path: /var/lib/grafana/dashboards
-GRAFDASH
+        # NB: do NOT write a klab.yaml provisioner here — the rich
+        # kldload.yaml (shipped via includes.chroot/etc/grafana/
+        # provisioning/dashboards/kldload.yaml) has 7 folder-providers
+        # (Estate / Host / Storage / Virtual Machines / klab Operations
+        # / ZFS Test Lab / Kubernetes) each pointing at the right
+        # subdirectory. The old klab.yaml stomped it with a single
+        # top-level provider, so subfolders weren't traversed and only
+        # the 6 top-level JSONs landed. Caught .142 2026-05-17.
+        # Remove any stale klab.yaml that pre-existed.
+        rm -f /etc/grafana/provisioning/dashboards/klab.yaml 2>/dev/null || true
 
         # Copy pre-built dashboard
         if [[ -f /usr/local/share/klab/grafana-dashboard.json ]]; then
@@ -2046,6 +2047,26 @@ GRAFEMBED
           fi
           systemctl restart grafana-server 2>/dev/null || true
           ok "Grafana anonymous + iframe embedding via proxy (/grafana) enabled"
+        fi
+
+        # Grafana 11+ default-enables kubernetesDashboards + dashboardsV2,
+        # which route every dashboard read through the K8s-style API at
+        # /apis/dashboard.grafana.app/v2/. We don't expose dashboards via
+        # any K8s apiserver — they're file-provisioned into SQLite via
+        # provisioning/dashboards/kldload.yaml. With the toggles on, the
+        # UI hits the v2 endpoint, gets a 403, and shows "Failed to load
+        # dashboard {status 403}" for Tetragon/Cilium/Host-Full/etc.
+        # Disabling both toggles forces the classic /api/dashboards/uid/
+        # path which our provisioning serves correctly.
+        if ! grep -q "^\[feature_toggles\]" /etc/grafana/grafana.ini 2>/dev/null; then
+          cat >> /etc/grafana/grafana.ini <<'GRAFTOGGLES'
+
+[feature_toggles]
+kubernetesDashboards = false
+dashboardsV2 = false
+GRAFTOGGLES
+          systemctl restart grafana-server 2>/dev/null || true
+          ok "Grafana feature_toggles: kubernetesDashboards/dashboardsV2 off (avoids dashboardsV2 403 on Tetragon/Cilium/Host-Full)"
         fi
 
         # Prometheus: add localhost:9100 (host node_exporter) scrape if

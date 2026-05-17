@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Emergency cleanup — unmount /target if we abort mid-install
+# Emergency cleanup — unmount /target if we abort mid-install.
+#
+# Trap is EXIT-only, intentionally NOT ERR. With `set -E` + nested $(...)
+# command substitutions, ERR fires inside subshells even when the outer
+# caller handles the failure via `|| true` / `|| fallback` — that produced
+# a spurious "Installation failed (exit 1)" line mid-install while the
+# script kept running to completion (verified .119 install 2026-05-15:
+# log showed "Installation failed" at 02:39:59 but install finished at
+# 02:46:35, fully functional). Operators read the false marker and aborted
+# perfectly good installs. EXIT-only fires once, when bash actually exits,
+# with the real final rc — no false alarms.
 _emergency_cleanup() {
   local exit_code=$?
   [[ $exit_code -eq 0 ]] && return
@@ -11,7 +21,7 @@ _emergency_cleanup() {
   umount -R "${mnt}" 2>/dev/null || true
   zpool export rpool 2>/dev/null || true
 }
-trap '_emergency_cleanup' ERR EXIT
+trap '_emergency_cleanup' EXIT
 
 # Secure Boot + MOK is ON by default as of 1.0.6. 1.0.5 briefly flipped
 # it to opt-in while we chased MOK-enrollment failures that were causing
@@ -1046,12 +1056,19 @@ KLDLOAD_DEBIAN_RELEASE="${KLDLOAD_DEBIAN_RELEASE:-trixie}"
 # rather than a hardcoded string that drifts. Fall back to a sentinel if
 # the file is missing (e.g. running this script outside a kldload live env).
 KLDLOAD_INSTALLER_VERSION="${KLDLOAD_INSTALLER_VERSION:-${_kld_iso_ver}}"
-# Bumped fallback from 1.0.5 → 1.1.0 (2026-05-12): the awk parse silently
-# returned empty on a kldload 1.1.0 install (root cause TBD — VERSION file
-# present in live ISO per build-iso.sh:1887, but `awk … exit` was returning
-# nothing in some boot paths) so the manifest got stamped with the literal
-# fallback string. Bumping the fallback at least keeps the manifest version
-# string from being years stale even when the parse fails.
+# Fallback bumped from 1.0.5 to 1.1.0 on 2026-05-12 because the version
+# parse was silently returning empty on some boot paths and the manifest
+# got stamped with the literal fallback string. NB: this comment block
+# lives INSIDE an unquoted heredoc (cat ^^EOF ... EOF) which means bash
+# expands backticks and dollar-substitutions in the body as it writes
+# the file. Earlier revisions had backticks-around-awk-here, and bash
+# was running that as a command substitution -- producing the cosmetic
+# "awk: cmd. line:1: ..." error in install-direct.log on every install
+# from 1.1.0 through 2026-05-15. Caught when the same error fired on
+# every test box for two months with the actual installer-side awk
+# calls all 2-redirected. Lesson: an unquoted heredoc is bash code,
+# not a string -- never put backticks or dollar-paren in comments
+# inside one unless you mean it.
 # Deployment intent: standalone | cluster-manager | join
 KLDLOAD_INFRA_MODE="${KLDLOAD_INFRA_MODE:-standalone}"
 KLDLOAD_DISTRO="${KLDLOAD_DISTRO:-centos}"
@@ -1102,7 +1119,14 @@ EOF
     # SHA-256 of the squashfs is stable per-ISO; we pin that rather
     # than the whole ISO file which may not be mounted read-back-able.
     if [[ -n "${_iso_path:-}" && -f "${_iso_path}/LiveOS/squashfs.img" ]]; then
-      _iso_sha="$(sha256sum "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null | awk '{print $1}')"
+      # Belt+suspenders: 2>/dev/null on BOTH sides of the pipe + || true on the
+      # whole substitution. gawk's stderr falls through to install-direct.log
+      # via systemd's StandardError=inherit, so any parse-time error here used
+      # to surface as a scary log line during the 5-min sha256sum window. Even
+      # if the pipe somehow malfunctions, the worst outcome is an empty _iso_sha
+      # which gets the `?` fallback in the attestation file.
+      _iso_sha="$(sha256sum "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null \
+                  | awk '{print $1}' 2>/dev/null || true)"
     fi
     _iso_build="$(stat -c '%y' "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null || date -Iseconds)"
     cat > "${target}/etc/kldload/install.attest" <<ATTEST
