@@ -565,22 +565,22 @@ select option:checked { background: #00b8d9; color: #000; }
               <div class="target-card" data-role="kvm" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">📦</div>
                 <div class="tc-name">KVM Host</div>
-                <div class="tc-sub">Hypervisor + clones</div>
+                <div class="tc-sub">A hypervisor</div>
               </div>
               <div class="target-card" data-role="k8s" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">☸</div>
                 <div class="tc-name">Kubernetes</div>
-                <div class="tc-sub">Lean K8s appliance</div>
+                <div class="tc-sub">Auto 4-node cluster</div>
               </div>
               <div class="target-card" data-role="devops" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">🔬</div>
-                <div class="tc-name">kldlab</div>
-                <div class="tc-sub">Full sandbox + Bob</div>
+                <div class="tc-name">klab</div>
+                <div class="tc-sub">Everything wired up</div>
               </div>
               <div class="target-card" data-role="zfslab" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">🧪</div>
                 <div class="tc-name">OpenZFS Lab</div>
-                <div class="tc-sub">ZFS test across distros</div>
+                <div class="tc-sub">For OpenZFS devs</div>
               </div>
             </div>
             <div id="role-summary" style="margin-top:0.7rem;padding:0.8rem 1rem;background:var(--surface2);border:1px solid var(--border);border-radius:6px;min-height:7rem">
@@ -2686,6 +2686,285 @@ select option:checked { background: #00b8d9; color: #000; }
 </div><!-- /#app -->
 
 <script>
+// ── Command Palette + Action Registry ───────────────────────────────────────
+// The UI should be equally usable by mouse and keyboard. Every operator
+// action that's worth a button is also worth a typed command. The registry
+// below is the single source of truth: each entry has a stable id, a
+// human-readable label, fuzzy-search keywords, the CLI equivalent (so
+// operators learn it by reading the echo footer), the optional arg schema
+// (for arg-prompting in the palette), and a handler() that does the work.
+//
+// Cmd+K (or Ctrl+K) opens the palette. Type to filter. Arrow keys + Enter
+// to dispatch. Esc to dismiss. The CLI-echo footer at the bottom of the
+// page logs every dispatched command — copy/paste-able, doubles as audit.
+//
+// Adding entries: append to ACTION_REGISTRY. No central registration call.
+// Legacy onclick handlers keep working untouched; gradually migrate them
+// to dispatch('id', {…args}) so they participate in the echo + palette.
+const ACTION_REGISTRY = [
+  // ── Virtual Machines ──────────────────────────────────────────────────
+  { id: 'vm.list',     section: 'VMs', label: 'List VMs',          keywords: ['vm','list','show','virsh'],
+    cli: 'virsh list --all',                       handler: () => send({action:'list_vms'}) },
+  { id: 'vm.start',    section: 'VMs', label: 'Start a VM',         keywords: ['vm','start','boot','power on'],
+    cli: 'virsh start <vm>',     args: [{name:'vm', prompt:'VM name to start'}],
+    handler: (a) => send({action:'vm_op', vm:a.vm, op:'start'}) },
+  { id: 'vm.stop',     section: 'VMs', label: 'Stop a VM',          keywords: ['vm','stop','shutdown','power off'],
+    cli: 'virsh shutdown <vm>',  args: [{name:'vm', prompt:'VM name to stop'}],
+    handler: (a) => send({action:'vm_op', vm:a.vm, op:'shutdown'}) },
+  { id: 'vm.reboot',   section: 'VMs', label: 'Reboot a VM',        keywords: ['vm','reboot','restart'],
+    cli: 'virsh reboot <vm>',    args: [{name:'vm', prompt:'VM name to reboot'}],
+    handler: (a) => send({action:'vm_op', vm:a.vm, op:'reboot'}) },
+  { id: 'vm.snap',     section: 'VMs', label: 'Snapshot a VM',      keywords: ['vm','snap','snapshot','backup'],
+    cli: 'zfs snapshot -r rpool/vms/<vm>@manual-$(date +%F_%T)', args: [{name:'vm', prompt:'VM to snapshot'}],
+    handler: (a) => send({action:'snapshot_take', path:`rpool/vms/${a.vm}`}) },
+  { id: 'vm.rollback', section: 'VMs', label: 'Rollback a VM (opens picker)', keywords: ['vm','rollback','restore','revert'],
+    cli: 'zfs rollback -r rpool/vms/<vm>@<snap>', args: [{name:'vm', prompt:'VM to rollback'}],
+    handler: (a) => { if (typeof vmRollback === 'function') vmRollback(a.vm, null); } },
+  { id: 'vm.clone',    section: 'VMs', label: 'Clone a VM',         keywords: ['vm','clone','copy','duplicate'],
+    cli: 'kvm-clone <src> <dst>', args: [{name:'src', prompt:'Source VM'}, {name:'dst', prompt:'New VM name'}],
+    handler: (a) => send({action:'vm_clone', src:a.src, dst:a.dst}) },
+  { id: 'vm.delete',   section: 'VMs', label: 'Delete a VM',        keywords: ['vm','delete','destroy','remove'],
+    cli: 'virsh destroy <vm> && virsh undefine --nvram <vm>', args: [{name:'vm', prompt:'VM to delete (irreversible)', confirm:true}],
+    handler: (a) => { send({action:'vm_op', vm:a.vm, action:'destroy'}); setTimeout(()=>send({action:'vm_op', vm:a.vm, action:'undefine'}), 1000); } },
+
+  // ── Snapshots / Storage ───────────────────────────────────────────────
+  { id: 'snap.take',     section: 'Storage', label: 'Snapshot the whole pool (rpool)',
+    keywords: ['snapshot','snap','rpool','backup','all'],
+    cli: 'zfs snapshot -r rpool@manual-$(date +%F_%T)',
+    handler: () => send({action:'snapshot_take'}) },
+  { id: 'snap.list',     section: 'Storage', label: 'List snapshots',
+    keywords: ['snapshot','list','zfs'],
+    cli: 'zfs list -t snapshot -o name,used,creation -S creation',
+    handler: () => send({action:'snapshot_list'}) },
+  { id: 'zpool.status',  section: 'Storage', label: 'Pool health (zpool status)',
+    keywords: ['zpool','status','health','pool'],
+    cli: 'zpool status -v',
+    handler: () => send({action:'zfs_status'}) },
+
+  // ── Boot Environments ─────────────────────────────────────────────────
+  { id: 'be.list',   section: 'Boot Environments', label: 'List boot environments',
+    keywords: ['boot','environment','be','kbe','beadm'],
+    cli: 'kbe list',
+    handler: () => send({action:'be_list'}) },
+  { id: 'be.create', section: 'Boot Environments', label: 'Create a new boot environment',
+    keywords: ['boot','environment','be','kbe','create','snapshot'],
+    cli: 'kbe create <name>',   args: [{name:'name', prompt:'BE name (e.g. before-upgrade)'}],
+    handler: (a) => send({action:'be_create', name:a.name}) },
+
+  // ── Kubernetes ────────────────────────────────────────────────────────
+  { id: 'k8s.nodes',     section: 'Kubernetes', label: 'List cluster nodes',
+    keywords: ['k8s','kubernetes','nodes','kubectl'],
+    cli: 'kubectl get nodes -o wide',
+    handler: () => send({action:'k8s_status'}) },
+  { id: 'k8s.pods',      section: 'Kubernetes', label: 'List all pods',
+    keywords: ['k8s','pods','kubectl','all'],
+    cli: 'kubectl get pods -A',
+    handler: () => send({action:'k8s_pods'}) },
+  { id: 'k8s.bootstrap', section: 'Kubernetes', label: 'Bootstrap a cluster',
+    keywords: ['k8s','bootstrap','cluster','install','kubeadm'],
+    cli: 'kube-cluster bootstrap --workers <n>', args: [{name:'workers', prompt:'Worker count (e.g. 3)', default:'3'}],
+    handler: (a) => send({action:'kube_bootstrap', workers:parseInt(a.workers,10)||3}) },
+  { id: 'k8s.scale',     section: 'Kubernetes', label: 'Scale cluster workers',
+    keywords: ['k8s','scale','workers','resize'],
+    cli: 'kube-cluster scale --workers <n>', args: [{name:'workers', prompt:'New worker count'}],
+    handler: (a) => send({action:'kube_scale', workers:parseInt(a.workers,10)}) },
+  { id: 'k8s.destroy',   section: 'Kubernetes', label: 'Destroy the cluster',
+    keywords: ['k8s','destroy','delete','reset','clean'],
+    cli: 'kube-cluster destroy', args: [{name:'confirm', prompt:'Type "destroy" to confirm', confirm:true}],
+    handler: () => send({action:'kube_destroy'}) },
+
+  // ── klab ──────────────────────────────────────────────────────────────
+  { id: 'klab.goldens',     section: 'klab', label: 'List golden images',
+    keywords: ['klab','golden','list','images'],
+    cli: 'klab status',
+    handler: () => send({action:'klab_status'}) },
+  { id: 'klab.golden_one',  section: 'klab', label: 'Build a single golden',
+    keywords: ['klab','golden','build','distro'],
+    cli: 'klab golden <distro>', args: [{name:'distro', prompt:'Distro (centos|rocky|fedora|debian|ubuntu|rhel)'}],
+    handler: (a) => send({action:'klab_golden_one', distro:a.distro}) },
+  { id: 'klab.test_quick',  section: 'klab', label: 'Run quick ZFS smoke test',
+    keywords: ['klab','test','quick','zfs','smoke'],
+    cli: 'klab test --quick',
+    handler: () => send({action:'klab_test', mode:'quick'}) },
+  { id: 'klab.test_full',   section: 'klab', label: 'Run full ZFS test matrix (hours)',
+    keywords: ['klab','test','full','zfs','matrix'],
+    cli: 'klab test --full',
+    handler: () => send({action:'klab_test', mode:'full'}) },
+
+  // ── Bob (AI) ──────────────────────────────────────────────────────────
+  { id: 'bob.models',   section: 'Bob', label: 'List loaded models',
+    keywords: ['bob','ai','models','ollama','list'],
+    cli: 'curl -s http://127.0.0.1:11434/api/tags | jq',
+    handler: () => send({action:'bob_models'}) },
+  { id: 'bob.chat',     section: 'Bob', label: 'Open Bob chat',
+    keywords: ['bob','chat','ai','assistant'],
+    cli: '(navigate to /bob/)',
+    handler: () => { if (typeof showTab === 'function') showTab('bob'); else location.hash = '#bob'; } },
+
+  // ── Navigation ────────────────────────────────────────────────────────
+  { id: 'nav.dashboard',  section: 'Navigation', label: 'Go to Dashboard',
+    keywords: ['nav','dashboard','home','overview'],
+    cli: '(navigate)',
+    handler: () => { if (typeof showTab === 'function') showTab('dashboard'); } },
+  { id: 'nav.vms',        section: 'Navigation', label: 'Go to Virtual Machines',
+    keywords: ['nav','vms','virtual','machines'],
+    cli: '(navigate)',
+    handler: () => { if (typeof showTab === 'function') showTab('vms'); } },
+  { id: 'nav.k8s',        section: 'Navigation', label: 'Go to Kubernetes',
+    keywords: ['nav','k8s','kubernetes'],
+    cli: '(navigate)',
+    handler: () => { if (typeof showTab === 'function') showTab('k8s'); } },
+  { id: 'nav.klab',       section: 'Navigation', label: 'Go to klab',
+    keywords: ['nav','klab','lab'],
+    cli: '(navigate)',
+    handler: () => { if (typeof showTab === 'function') showTab('klab'); } },
+  { id: 'nav.storage',    section: 'Navigation', label: 'Go to Storage / ZFS',
+    keywords: ['nav','storage','zfs','snapshots'],
+    cli: '(navigate)',
+    handler: () => { if (typeof showTab === 'function') showTab('storage'); } },
+  { id: 'nav.logs',       section: 'Navigation', label: 'Go to Logs',
+    keywords: ['nav','logs','journal'],
+    cli: '(navigate)',
+    handler: () => { if (typeof showTab === 'function') showTab('logs'); } },
+];
+
+// dispatch — single entry point: echoes CLI to footer, then runs handler.
+function dispatch(actionId, args) {
+  const a = ACTION_REGISTRY.find(x => x.id === actionId);
+  if (!a) { console.warn('dispatch: unknown action', actionId); return; }
+  args = args || {};
+  // Build the echoed CLI by substituting <placeholders> with the args we have.
+  const cli = (a.cli || '').replace(/<([^>]+)>/g, (_, key) => args[key] != null ? args[key] : `<${key}>`);
+  cliEcho(cli, a.label);
+  try { a.handler(args); } catch (e) { console.error('dispatch error', e); cliEcho(`ERROR: ${e.message}`, a.label); }
+}
+
+// CLI echo footer — minimal, low-noise, last 12 commands.
+function cliEcho(cli, label) {
+  let pane = document.getElementById('cli-echo');
+  if (!pane) {
+    pane = document.createElement('div');
+    pane.id = 'cli-echo';
+    pane.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:rgba(20,22,28,0.96);border-top:1px solid var(--border);padding:0.3rem 0.9rem;font-family:var(--mono);font-size:0.74rem;color:var(--muted);max-height:120px;overflow-y:auto;z-index:998;display:none';
+    pane.innerHTML = '<div id="cli-echo-list"></div>';
+    document.body.appendChild(pane);
+  }
+  const list = pane.querySelector('#cli-echo-list');
+  const ts = new Date().toTimeString().slice(0, 8);
+  const line = document.createElement('div');
+  line.style.cssText = 'padding:0.1rem 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+  line.innerHTML = `<span style="color:var(--muted);margin-right:0.6rem">${ts}</span><span style="color:var(--accent2)">$</span> <span style="color:var(--text)">${escapeHtml(cli)}</span>${label ? `<span style="color:var(--muted);margin-left:0.7rem">// ${escapeHtml(label)}</span>` : ''}`;
+  list.appendChild(line);
+  while (list.children.length > 12) list.removeChild(list.firstChild);
+  pane.style.display = 'block';
+  pane.scrollTop = pane.scrollHeight;
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ── Command Palette UI ─────────────────────────────────────────────────
+let _paletteOpen = false;
+let _paletteSelected = 0;
+let _paletteFiltered = [];
+
+function openPalette() {
+  if (_paletteOpen) return;
+  _paletteOpen = true;
+  let modal = document.getElementById('cmd-palette');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'cmd-palette';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding-top:12vh';
+    modal.innerHTML = `
+      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;box-shadow:0 12px 60px rgba(0,0,0,0.6);width:min(640px,92vw);max-height:70vh;display:flex;flex-direction:column;overflow:hidden">
+        <input id="cmd-search" type="text" placeholder="Type a command (e.g. snapshot vm, scale workers, bob)..." autocomplete="off" spellcheck="false"
+          style="background:transparent;border:none;border-bottom:1px solid var(--border);padding:1rem 1.2rem;font-size:1rem;color:var(--text);font-family:inherit;outline:none">
+        <div id="cmd-results" style="overflow-y:auto;flex:1;padding:0.4rem 0"></div>
+        <div style="padding:0.5rem 1.2rem;border-top:1px solid var(--border);color:var(--muted);font-size:0.74rem;font-family:var(--mono);display:flex;justify-content:space-between">
+          <span>↑↓ navigate &middot; Enter run &middot; Esc close</span>
+          <span>${ACTION_REGISTRY.length} actions</span>
+        </div>
+      </div>`;
+    modal.addEventListener('click', e => { if (e.target === modal) closePalette(); });
+    document.body.appendChild(modal);
+  }
+  modal.style.display = 'flex';
+  const inp = modal.querySelector('#cmd-search');
+  inp.value = '';
+  inp.focus();
+  _paletteSelected = 0;
+  renderPalette('');
+}
+function closePalette() {
+  _paletteOpen = false;
+  const modal = document.getElementById('cmd-palette');
+  if (modal) modal.style.display = 'none';
+}
+function renderPalette(query) {
+  const q = (query || '').trim().toLowerCase();
+  _paletteFiltered = ACTION_REGISTRY.filter(a => {
+    if (!q) return true;
+    const hay = (a.label + ' ' + (a.keywords || []).join(' ') + ' ' + a.cli + ' ' + a.section).toLowerCase();
+    // All tokens must match (AND-search)
+    return q.split(/\s+/).every(tok => hay.includes(tok));
+  });
+  if (_paletteSelected >= _paletteFiltered.length) _paletteSelected = Math.max(0, _paletteFiltered.length - 1);
+  const list = document.getElementById('cmd-results');
+  if (!list) return;
+  if (!_paletteFiltered.length) {
+    list.innerHTML = '<div style="padding:1rem 1.2rem;color:var(--muted);font-style:italic">No matching actions.</div>';
+    return;
+  }
+  list.innerHTML = _paletteFiltered.map((a, i) => `
+    <div class="cmd-row" data-i="${i}" style="padding:0.55rem 1.2rem;cursor:pointer;display:flex;justify-content:space-between;gap:1rem;${i === _paletteSelected ? 'background:rgba(50,108,229,0.18)' : ''}">
+      <div style="min-width:0">
+        <div style="color:var(--text);font-size:0.92rem">${escapeHtml(a.label)}</div>
+        <div style="color:var(--muted);font-family:var(--mono);font-size:0.74rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(a.cli)}</div>
+      </div>
+      <div style="color:var(--accent2);font-size:0.72rem;font-family:var(--mono);align-self:center">${escapeHtml(a.section)}</div>
+    </div>`).join('');
+  list.querySelectorAll('.cmd-row').forEach(row => {
+    row.addEventListener('click', () => { _paletteSelected = parseInt(row.dataset.i, 10); runSelected(); });
+    row.addEventListener('mouseenter', () => { _paletteSelected = parseInt(row.dataset.i, 10); renderPalette(document.getElementById('cmd-search').value); });
+  });
+}
+async function runSelected() {
+  const a = _paletteFiltered[_paletteSelected];
+  if (!a) return;
+  closePalette();
+  // Prompt for args if needed (sequential).
+  const collected = {};
+  for (const arg of (a.args || [])) {
+    const val = prompt(`${a.label}\n\n${arg.prompt}${arg.default ? ` (default: ${arg.default})` : ''}:`, arg.default || '');
+    if (val == null) return;                 // user cancelled
+    if (arg.confirm && val !== 'destroy' && val.toLowerCase() !== 'yes') {
+      cliEcho(`(cancelled: confirmation not given)`, a.label);
+      return;
+    }
+    collected[arg.name] = val;
+  }
+  dispatch(a.id, collected);
+}
+
+// Keyboard bindings: Cmd+K / Ctrl+K open, Esc close.
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    _paletteOpen ? closePalette() : openPalette();
+    return;
+  }
+  if (!_paletteOpen) return;
+  if (e.key === 'Escape') { e.preventDefault(); closePalette(); return; }
+  if (e.key === 'ArrowDown') { e.preventDefault(); _paletteSelected = Math.min(_paletteFiltered.length - 1, _paletteSelected + 1); renderPalette(document.getElementById('cmd-search').value); return; }
+  if (e.key === 'ArrowUp')   { e.preventDefault(); _paletteSelected = Math.max(0, _paletteSelected - 1); renderPalette(document.getElementById('cmd-search').value); return; }
+  if (e.key === 'Enter')     { e.preventDefault(); runSelected(); return; }
+});
+document.addEventListener('input', (e) => {
+  if (e.target && e.target.id === 'cmd-search') {
+    _paletteSelected = 0;
+    renderPalette(e.target.value);
+  }
+});
+
 // ── WebSocket ───────────────────────────────────────────────────────────────
 const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
 const wsUrl   = `${wsProto}://${location.host}`;
@@ -3640,66 +3919,51 @@ const ROLE_DESCS = {
   },
   kvm: {
     title:   'KVM Host',
-    tagline: 'Hardware hypervisor template — ZFS + KVM, nothing else in the way',
+    tagline: 'Pick this if you want a hypervisor.',
     includes: [
-      'libvirt + qemu-kvm + virt-manager',
-      'ZFS on root; VM storage on ZFS datasets (instant clones, zero-copy snapshots)',
-      'Minimal desktop — just enough to run virt-manager locally',
-      'kldload KVM helpers: <code>kvm-clone</code> (~100ms clone from ZFS golden), <code>kvm-replicate</code> (zfs-send-based replication to a peer host), <code>kvm-backup</code>, <code>kvm-rollback</code>, <code>kvm-console</code>',
-      'libvirt default network (virbr0) + <code>isos</code> storage pool pre-configured',
-      'WireGuard available for replication over the internet',
-      'Node exporter + Prometheus for host metrics',
+      'ZFS on root + libvirt + qemu-kvm',
+      'VMs live on ZFS datasets — instant clones, zero-copy snapshots',
+      '<code>kvm-clone</code> / <code>kvm-replicate</code> / <code>kvm-backup</code> / <code>kvm-rollback</code> helpers',
+      'Nothing auto-starts — clean hypervisor, you decide what to run',
     ],
-    goodFor: 'Dedicated virtualization hosts where ZFS is the storage backend and you want the clone/replicate primitives out of the box.',
+    goodFor: 'A dedicated virtualization host. ZFS-backed VM storage with the clone and replicate primitives ready to go.',
   },
   k8s: {
     title:   'Kubernetes',
-    tagline: 'Lean Kubernetes appliance — no GUI chrome',
+    tagline: 'Pick this if you want full-on Kubernetes.',
     includes: [
-      'kubeadm-based cluster: 1 control plane + 3 workers on ZFS instant clones',
-      'Cilium networking with eBPF dataplane',
-      'Hubble network observability',
-      'MetalLB LoadBalancer for bare-metal service exposure',
-      'In-cluster ZFS CSI driver for persistent volumes on ZFS',
-      'Tetragon for syscall-level tracing of pods',
-      'All offline — cluster images pre-baked into the ISO',
+      'kubeadm-based 4-node cluster (1 CP + 3 workers) auto-bootstrapped on first boot',
+      'Cilium CNI with eBPF dataplane, Hubble flow visibility',
+      'WireGuard mesh on 10.250/10.251 — VMs talk privately',
+      'ZFS CSI for persistent volumes',
+      'No webui chrome — straight cluster, scale with <code>kube-cluster scale N</code>',
     ],
-    goodFor: 'Production K8s appliances, edge clusters, labs where ZFS-backed PVs matter. Same cluster the kldlab profile uses, without the UI / console / full observability stack on top.',
+    goodFor: 'Real Kubernetes appliance. Test workloads on a cluster that boots itself.',
   },
   devops: {
-    title:   'kldlab',
-    tagline: 'Full-featured sandbox — Kubernetes + UI + rich observability + browser console + Bob',
+    title:   'klab',
+    tagline: 'Cross-distro testing, build VM templates, do whatever you\'d like. The kitchen-sink option.',
     includes: [
-      'Everything in the Kubernetes profile, <strong>plus:</strong>',
-      'Browser terminal at <code>https://&lt;ip&gt;:8443/k9s/</code> — real <code>k9s</code>, shell, log panes in persistent tmux',
-      'UI-managed VM lifecycle: clone / start / stop / destroy / console from the dashboard',
-      'Five pre-built golden distros for instant ZFS clone: CentOS Stream 9, Rocky 9, Fedora 44, Debian 13, Ubuntu 24.04',
-      'Full host-side observability: Prometheus, Grafana, Loki, promtail',
-      '8 pre-provisioned Grafana dashboards (zfs-pool-health, scrub-history, compression-trend, disk-health-smart, block-io-latency, kernel-messages, klab-test-matrix, klab-test-debug)',
-      'eBPF exporters: <code>ebpf_exporter</code>, Tetragon, Cilium Hubble',
-      'ZFS exporters: <code>zfs_exporter</code>, <code>arcstats-exporter</code>, <code>zpool-scrub-exporter</code>, <code>smartctl_exporter</code>',
-      '<strong>Bob AI assistant</strong> — qwen2.5:14b, grounded in kldload knowledge base, open-mic voice control, eBPF probe authoring, ZFS debugging, dashboard helper. Read-only tools run freely; mutating tools require an approval click. <em>Auto-enabled on systems with NVIDIA GPU (≥8 GB VRAM) or ≥16 GB RAM for CPU fallback — skipped otherwise; toggle in the Bob panel. Model pulls from ollama.com on first boot (internet required) — airgapped installs can pre-stage models at <code>/root/darksite/ollama/models/</code>.</em>',
-      'One-pane ops console — Kubernetes + VM workspaces clickable from the dashboard',
-      'Prometheus file-SD auto-discovers new VMs as they come up',
+      'Everything kvm + k8s give you, <strong>plus auto-built on first boot:</strong>',
+      '6 distro goldens: centos / rocky / fedora / debian / ubuntu / rhel — ZFS-clone in seconds',
+      'A running 4-node Kubernetes cluster (CP + 3 workers)',
+      'Full observability stack: Prometheus + Grafana + Loki + Cilium + Hubble + Tetragon',
+      '<strong>Bob AI</strong> — voice-controlled SRE assistant grounded in kldload knowledge (auto-enabled with GPU or ≥16 GB RAM)',
+      'Browser terminal (k9s in tmux at <code>https://&lt;ip&gt;:8443/k9s/</code>)',
     ],
-    goodFor: 'The SRE / developer appliance. Everything wired together out of the box. Test any workload under full kernel visibility, debug ZFS anomalies, author eBPF probes, and ask questions about your cluster in plain voice without leaving the browser.',
+    goodFor: 'If you don\'t know yet what you want to test, pick klab. ~25-minute first boot lands you on a host with everything wired together.',
   },
   zfslab: {
     title:   'OpenZFS Test Lab',
-    tagline: 'ZFS testing across multiple Linux distributions — for OpenZFS contributors',
+    tagline: 'Literally for OpenZFS devs — but anyone can install it. A good example deployment pattern for your own dedicated-purpose projects.',
     includes: [
-      'Dedicated to ZFS testing — <strong>no Kubernetes cluster is built</strong> (entire host budget goes to test VMs)',
-      'Five pre-built <strong>ztest goldens</strong>: CentOS Stream 9, Rocky 9, Fedora 44, Debian 13, Ubuntu 24.04',
-      'Full ZFS-test-suite runtime deps baked in (no more "SKIP: fio missing" false failures)',
-      '<code>klab test --full</code> — parallel <code>zfs-tests.sh</code> across all 5 distros (~2–4 hours)',
-      '<code>klab test --quick</code> — ~15-min smoke run per distro',
-      '<code>klab test --distro fedora</code> — single-distro subset',
-      'Per-distro watchdog — hung tests get a debug bundle + get killed cleanly',
-      '<code>klab-vm-debug-bundle</code> auto-fires on FAIL: zdb, kernel ring, ZFS dbgmsg, D-state stacks, SMART, kmods, packages. Writes paste-ready <code>ISSUE.md</code> for the OpenZFS tracker.',
-      'Host-side observability scoped to ZFS: pool health, scrub history, ARC, SMART, biolatency, kernel messages, test matrix dashboards',
-      'zed → Loki pipe: every zpool event labelled by <code>{pool, class}</code> and queryable from Grafana',
+      'Resources dedicated to ZFS testing — <strong>no Kubernetes cluster</strong> (more host budget for test VMs)',
+      'ztest goldens across 5 distros with the full ZFS test-suite toolchain inside',
+      '<code>klab test --full</code> runs <code>zfs-tests.sh</code> across all distros in parallel',
+      'Hung tests killed cleanly, debug bundle auto-written with paste-ready issue template',
+      'Observability scoped to ZFS: pool health, scrub history, ARC, SMART, biolatency, zed → Loki',
     ],
-    goodFor: 'OpenZFS upstream contributors and maintainers — reproduce bugs across distros, verify patches don\'t regress anywhere, produce distro-matrixed test reports.',
+    goodFor: 'OpenZFS upstream contributors who need a cross-distro test rig. Also a useful reference for any "single-purpose deeply-observed appliance" pattern you might want to build for your own projects.',
   },
 };
 
