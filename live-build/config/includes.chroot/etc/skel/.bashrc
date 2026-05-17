@@ -380,7 +380,7 @@ fi
 
 # ── ZFS / kldload ────────────────────────────────────────────────────────────────
 alias zls='zfs list'
-alias zbe='kldload-be list'
+alias zbe='kbe list'
 alias zsnap='zfs list -t snapshot'
 alias deploy='kldload-deploy-tui'
 __have kldload-spawn && alias spawn='kldload-spawn'

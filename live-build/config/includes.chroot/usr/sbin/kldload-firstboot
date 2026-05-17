@@ -373,22 +373,27 @@ setup_kvm() {
     log "WARNING: libvirt isos pool not defined — klab golden builds will fail with 'missing storage pool target path'"
   fi
 
-  # kldload-managed storage pools — fixed UUIDs shipped in
-  # /etc/libvirt/storage/kldload-*.xml. Each tool (kube-cluster, klab,
+  # kldload-managed storage pools — fixed UUIDs shipped as
+  # /etc/libvirt/storage/<name>.xml. Each tool (kube-cluster, klab,
   # webui vm_create_cloud) writes cloud-init ISOs to /var/lib/kldload/
-  # cloud-init/ — owned by the kldload-cloud-init pool. Without this,
-  # virt-install hits the "pool 'isos' already exists with uuid X" race
-  # when two tools write to the SHARED /var/lib/libvirt/isos/ path in
-  # quick succession (caught .111 2026-05-16 — kube-cluster after a klab
-  # golden rocky build, both touching /var/lib/libvirt/isos/).
+  # cloud-init/ — owned by the `cloud-init` pool. Without this,
+  # virt-install hits "pool 'cloud-init' already exists with uuid X"
+  # race when one tool writes there after another (caught .111
+  # 2026-05-16 and .133 2026-05-16).
   #
-  # Reconciler: ensure target dirs exist + each pool is defined with the
-  # fixed UUID + started. Idempotent — re-runs are no-ops when state is
-  # already correct.
+  # Pool name MUST match the path's leaf directory name — virt-install
+  # derives the auto-define name from the leaf, so /var/lib/kldload/
+  # cloud-init/foo.iso → it expects a pool named `cloud-init`. Naming it
+  # `kldload-cloud-init` defeats the lookup and virt-install still
+  # tries to auto-define `cloud-init`, conflicting with our pool.
+  #
+  # Reconciler: glob every XML in /etc/libvirt/storage/ that we own
+  # (anything but the libvirt-shipped `default`/`isos` legacy pools).
+  # Idempotent — re-runs are no-ops when state is already correct.
   log "Reconciling kldload-managed libvirt storage pools..."
-  for _pool_xml in /etc/libvirt/storage/kldload-cloud-init.xml \
-                   /etc/libvirt/storage/kldload-cloud-images.xml \
-                   /etc/libvirt/storage/kldload-vm-iso.xml; do
+  for _pool_xml in /etc/libvirt/storage/cloud-init.xml \
+                   /etc/libvirt/storage/cloud-images.xml \
+                   /etc/libvirt/storage/vm-iso.xml; do
     [[ -f "$_pool_xml" ]] || continue
     _pool_name="$(basename "$_pool_xml" .xml)"
     _pool_path="$(grep -oP '(?<=<path>)[^<]+' "$_pool_xml")"
@@ -410,8 +415,8 @@ setup_kvm() {
     virsh pool-autostart "$_pool_name" 2>/dev/null || true
     virsh pool-start     "$_pool_name" 2>/dev/null || true
   done
-  if virsh pool-info kldload-cloud-init >/dev/null 2>&1; then
-    log "kldload storage pools ready: kldload-cloud-init, kldload-cloud-images, kldload-vm-iso"
+  if virsh pool-info cloud-init >/dev/null 2>&1; then
+    log "kldload storage pools ready: cloud-init, cloud-images, vm-iso"
   fi
   # Default NAT network — klab and kube-cluster both need virbr0 on
   # 192.168.122.0/24. libvirt usually ships this pre-defined but a fresh

@@ -374,6 +374,24 @@ if [[ "$EDITION" != "core" ]]; then
         log "WARNING: helm download failed — Helm tab will show 'not installed'"
     fi
 
+    # Download helper: retry up to 3 times on failure, then FAIL the build.
+    # Silent warnings here used to ship ISOs with missing exporter binaries
+    # (observed on .133 2026-05-16: libvirt-exporter + process-exporter both
+    # missing, observability dashboards empty). If GitHub is unreachable at
+    # build time the operator needs to know — not discover it post-install.
+    _fetch_with_retry() {
+        local _url="$1" _out="$2" _what="$3"
+        local _i
+        for _i in 1 2 3; do
+            if curl -fsSL --connect-timeout 15 --max-time 120 "$_url" -o "$_out"; then
+                return 0
+            fi
+            log "  ${_what} download attempt $_i/3 failed (curl rc=$?), retrying in 5s..."
+            sleep 5
+        done
+        return 1
+    }
+
     # process-exporter — per-process CPU/RSS/IO grouped by binary name.
     # node_exporter only exposes aggregate process counts; process-exporter
     # gives "which specific process is hogging" — essential for finding the
@@ -385,15 +403,16 @@ if [[ "$EDITION" != "core" ]]; then
         x86_64)  _pe_arch="amd64" ;;
         aarch64) _pe_arch="arm64" ;;
     esac
-    if curl -fsSL "https://github.com/ncabatoff/process-exporter/releases/download/v${PROCESS_EXPORTER_VERSION}/process-exporter-${PROCESS_EXPORTER_VERSION}.linux-${_pe_arch}.tar.gz" \
-        -o /tmp/process-exporter.tar.gz 2>/dev/null; then
+    if _fetch_with_retry \
+        "https://github.com/ncabatoff/process-exporter/releases/download/v${PROCESS_EXPORTER_VERSION}/process-exporter-${PROCESS_EXPORTER_VERSION}.linux-${_pe_arch}.tar.gz" \
+        /tmp/process-exporter.tar.gz "process-exporter"; then
         tar -xzf /tmp/process-exporter.tar.gz -C /tmp/
-        install -m 755 /tmp/process-exporter-*/process-exporter "${ROOTFS}/usr/local/bin/process-exporter" 2>/dev/null \
-            || log "WARNING: process-exporter extract failed"
+        install -m 755 /tmp/process-exporter-*/process-exporter "${ROOTFS}/usr/local/bin/process-exporter" \
+            || die "process-exporter extract failed — tarball layout changed?"
         rm -rf /tmp/process-exporter.tar.gz /tmp/process-exporter-*
         log "process-exporter ${PROCESS_EXPORTER_VERSION} installed."
     else
-        log "WARNING: process-exporter download failed — per-process drill-downs will be unavailable"
+        die "process-exporter download failed after 3 retries — check network or GitHub status. Observability stack would ship broken."
     fi
 
     # libvirt-exporter — Prometheus exporter for libvirt-managed VMs.
@@ -409,17 +428,18 @@ if [[ "$EDITION" != "core" ]]; then
         x86_64)  _lvexp_arch="amd64" ;;
         aarch64) _lvexp_arch="arm64" ;;
     esac
-    if curl -fsSL "https://github.com/inovex/prometheus-libvirt-exporter/releases/download/v${LIBVIRT_EXPORTER_VERSION}/prometheus-libvirt-exporter-${LIBVIRT_EXPORTER_VERSION}.linux-${_lvexp_arch}.tar.gz" \
-        -o /tmp/libvirt-exporter.tar.gz 2>/dev/null; then
+    if _fetch_with_retry \
+        "https://github.com/inovex/prometheus-libvirt-exporter/releases/download/v${LIBVIRT_EXPORTER_VERSION}/prometheus-libvirt-exporter-${LIBVIRT_EXPORTER_VERSION}.linux-${_lvexp_arch}.tar.gz" \
+        /tmp/libvirt-exporter.tar.gz "libvirt-exporter"; then
         tar -xzf /tmp/libvirt-exporter.tar.gz -C /tmp/
         # Tarball ships the binary as `prometheus-libvirt-exporter` at top-level.
         install -m 755 /tmp/prometheus-libvirt-exporter "${ROOTFS}/usr/local/bin/libvirt-exporter" 2>/dev/null \
             || install -m 755 /tmp/prometheus-libvirt-exporter-*/prometheus-libvirt-exporter "${ROOTFS}/usr/local/bin/libvirt-exporter" 2>/dev/null \
-            || log "WARNING: libvirt-exporter extract layout unexpected — check release tarball"
+            || die "libvirt-exporter extract layout unexpected — release tarball may have changed"
         rm -rf /tmp/libvirt-exporter.tar.gz /tmp/prometheus-libvirt-exporter*
         log "libvirt-exporter ${LIBVIRT_EXPORTER_VERSION} installed."
     else
-        log "WARNING: libvirt-exporter download failed — klab-vm-estate dashboard will be empty"
+        die "libvirt-exporter download failed after 3 retries — check network or GitHub status. Per-VM metrics would be missing."
     fi
 else
     log "Core edition — skipping sanoid."
