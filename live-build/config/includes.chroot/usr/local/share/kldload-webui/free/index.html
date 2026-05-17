@@ -71,6 +71,11 @@ select option:checked { background: #00b8d9; color: #000; }
   75%  { background:#5b21b6; box-shadow:0 0 12px rgba(91,33,182,0.5); }
   100% { background:#1e2533; box-shadow:0 0 4px rgba(30,37,51,0.3); }
 }
+/* Simple opacity pulse for VM readiness indicator dots (booting / starting). */
+@keyframes pulse {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1; }
+}
 </style>
 </head>
 <body>
@@ -3044,6 +3049,47 @@ function connect() {
   };
 }
 
+// ── Busy cursor / spinner badge ────────────────────────────────────────────
+// Some actions (Snap, Clone, Delete, Rollback, Create-Cloud) take 1-5s for
+// the backend to respond. Without feedback the operator double-clicks and
+// gets confused. Show a "wait" cursor + small floating "⏳ working…" badge
+// while a slow action is in flight; auto-clear after timeout OR when the
+// vm_list / vm_log signal arrives.
+let _busyCount = 0;
+const _busyHide = () => {
+  _busyCount = Math.max(0, _busyCount - 1);
+  if (_busyCount === 0) {
+    document.body.style.cursor = '';
+    const b = document.getElementById('busy-badge');
+    if (b) b.style.display = 'none';
+  }
+};
+const _busyShow = (label, autoMs) => {
+  _busyCount++;
+  document.body.style.cursor = 'progress';
+  let b = document.getElementById('busy-badge');
+  if (!b) {
+    b = document.createElement('div');
+    b.id = 'busy-badge';
+    b.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:9000;background:rgba(20,22,28,0.96);border:1px solid var(--accent2);border-radius:6px;padding:0.5rem 0.9rem;font-family:var(--mono);font-size:0.82rem;color:var(--accent2);box-shadow:0 4px 14px rgba(0,0,0,0.4);pointer-events:none;display:none';
+    b.innerHTML = `<span id="busy-spin" style="display:inline-block;margin-right:0.4rem">⏳</span><span id="busy-text"></span>`;
+    document.body.appendChild(b);
+    // Animate the spinner with a simple symbol rotation.
+    setInterval(() => {
+      const s = document.getElementById('busy-spin');
+      if (!s || document.getElementById('busy-badge').style.display === 'none') return;
+      const frames = ['⏳','⌛','💤','⌛'];
+      s.textContent = frames[(parseInt(s.dataset.i||'0',10)+1) % frames.length];
+      s.dataset.i = String((parseInt(s.dataset.i||'0',10)+1) % frames.length);
+    }, 400);
+  }
+  document.getElementById('busy-text').textContent = label || 'working…';
+  b.style.display = 'block';
+  // Safety: auto-hide after autoMs (default 10s) so a hung backend doesn't
+  // leave the operator staring at a stuck spinner forever.
+  setTimeout(_busyHide, autoMs || 10000);
+};
+
 function send(obj) {
   if (wsReady) ws.send(JSON.stringify(obj));
 }
@@ -4646,12 +4692,26 @@ function renderVMList(vms) {
     return;
   }
   tbody.innerHTML = vms.map(v => {
-    const stateChip = v.state === 'running' ? 'chip-ok' : v.state === 'shut off' ? '' : 'chip-warn';
-    const isRunning = v.state === 'running';
+    // Display state: only show "building" for VMs the backend marked as
+    // freshly-provisioning (v.building flag set during cloud-init). Plain
+    // start/stop of an existing VM stays as just "running" — earlier
+    // override on QGA-ready was too aggressive (existing VMs without QGA
+    // installed showed "building" forever; cold-started VMs flashed
+    // "building" for the QGA startup window).
+    const isRunning   = v.state === 'running';
+    const isBuilding  = !!v.building;
+    const displayState = isBuilding ? 'building' : v.state;
+    const stateChip = isBuilding ? 'chip-warn'
+                     : isRunning ? 'chip-ok'
+                     : v.state === 'shut off' ? '' : 'chip-warn';
+    const stateColor = isBuilding ? 'var(--warn)'
+                     : isRunning ? 'var(--good)'
+                     : v.state === 'shut off' ? 'var(--muted)' : 'var(--warn)';
+    const stateAnim  = isBuilding ? 'animation:pulse 1.2s infinite;' : '';
     return `<tr class="ws-row" data-name="${esc(v.name)}">
       <td onclick="event.stopPropagation()" style="padding:0.5rem"><input type="checkbox" class="vm-sel" data-name="${esc(v.name)}" ${_vmSelectedNames.has(v.name) ? 'checked' : ''} onchange="vmToggleSel('${esc(v.name)}', this.checked)"></td>
       <td style="font-family:monospace;font-weight:600;color:var(--accent2)">${esc(v.name)}</td>
-      <td><span class="chip ${stateChip}" style="background:${stateChip ? '' : 'var(--surface2)'};color:${isRunning ? 'var(--good)' : v.state === 'shut off' ? 'var(--muted)' : 'var(--warn)'}">${esc(v.state)}</span></td>
+      <td><span class="chip ${stateChip}" style="background:${stateChip ? '' : 'var(--surface2)'};color:${stateColor};${stateAnim}" title="${isBuilding ? 'OS still initializing (cloud-init / SELinux relabel / GDM). Wait for ready.' : ''}">${esc(displayState)}</span></td>
       <td style="text-align:center;color:var(--subtle)">${esc(v.vcpus || '—')}</td>
       <td style="color:var(--subtle)">${esc(v.ram || '—')}</td>
       <td style="color:var(--muted);font-size:0.78rem">${esc(v.disk || '—')}</td>
@@ -4660,7 +4720,7 @@ function renderVMList(vms) {
         ${isRunning
           ? `<button class="btn btn-ghost btn-sm" onclick="vmSsh('${esc(v.name)}')" title="SSH into the VM as admin (cert auth)">⌨ SSH</button>
              <button class="btn btn-ghost btn-sm" onclick="vmView('${esc(v.name)}')" title="View the VM desktop / login screen (noVNC)">🖼 View</button>
-             <button class="btn btn-ghost btn-sm" onclick="vmMetrics('${esc(v.name)}')" title="Open this VM's Grafana dashboard — pre-filtered for this domain">📊 Metrics</button>
+             <button class="btn btn-ghost btn-sm" onclick="vmMetrics('${esc(v.name)}')" title="Open this VM's Grafana dashboard — pre-filtered for this domain"><span style="filter:grayscale(1) brightness(0.65);margin-right:0.15rem">📊</span>Metrics</button>
              <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','shutdown')">Stop</button>
              <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','reboot')">Reboot</button>`
           : `<button class="btn btn-primary btn-sm" onclick="vmOp('${esc(v.name)}','start')">Start</button>`}
@@ -4672,6 +4732,24 @@ function renderVMList(vms) {
     </tr>`;
   }).join('');
   vmUpdateSelCount();
+  // If we're waiting on a newly-created VM, flash + scroll its row when it
+  // first appears in the list. Stops the polling and clears the pending flag.
+  if (_vmCreatePending) {
+    const row = tbody.querySelector(`tr[data-name="${CSS.escape(_vmCreatePending)}"]`);
+    if (row) {
+      if (_vmCreatePollId) { clearInterval(_vmCreatePollId); _vmCreatePollId = null; }
+      _vmCreatePending = null;
+      _busyHide();
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      row.style.transition = 'background 0.4s';
+      row.style.background = 'rgba(52, 211, 153, 0.25)';
+      setTimeout(() => { row.style.background = ''; }, 2400);
+    }
+  } else if (_busyCount > 0) {
+    // Any vm_list refresh while busy = the op (delete/snap/clone) likely
+    // settled. Clear one busy level so the spinner doesn't run to timeout.
+    _busyHide();
+  }
 }
 
 // ── Networks / Pools / Snapshots renders ────────────────────────────────────
@@ -4792,8 +4870,14 @@ document.addEventListener('click', e => {
 function vmCloneFromGolden(distro) {
   const name = prompt(`Name for the new ${distro} VM?`, `${distro}-${Date.now().toString(36).slice(-4)}`);
   if (!name) return;
+  // Mark pending so vm_list render flashes the row when it appears.
+  _vmCreatePending = name;
   send({action: 'vm_clone', src: `klab-golden-${distro}`, dst: name});
-  vmSubTab('log');
+  vmSubTab('vms');
+  // Poll list every 2s until the VM appears (max ~30s).
+  let tries = 0;
+  if (_vmCreatePollId) clearInterval(_vmCreatePollId);
+  _vmCreatePollId = setInterval(() => { send({action: 'list_vms'}); if (++tries >= 15) { clearInterval(_vmCreatePollId); _vmCreatePollId = null; } }, 2000);
 }
 
 // Cloud-init VM create: server (headless) or desktop (xfce + lightdm
@@ -4806,9 +4890,26 @@ function vmCreateCloud(distro, flavor) {
   const dflt = `${distro}-${flavor}-${Date.now().toString(36).slice(-4)}`;
   const name = prompt(`Name for the new ${distro} ${flavLabel} VM?`, dflt);
   if (!name) return;
+  // Mark this name so vm_list render scrolls + flashes the row when it appears.
+  // Previously this function hopped to the log tab — operators wanted to see
+  // the new VM in the list, not the streaming log. Log is still visible by
+  // clicking the Log tab; this just keeps focus where the result lands.
+  _vmCreatePending = name;
+  _busyShow(`creating ${name} (${distro} ${flavor})…`, 20000);
   send({action: 'vm_create_cloud', distro: distro, flavor: flavor, name: name});
-  vmSubTab('log');
+  vmSubTab('vms');
+  // Trigger a refresh on a short cadence until the new VM appears (max 30s).
+  let tries = 0;
+  const id = setInterval(() => {
+    tries++;
+    send({action: 'list_vms'});
+    if (tries >= 15) clearInterval(id);
+  }, 2000);
+  // Stash the interval so the vm_list handler can clear it on first sighting.
+  _vmCreatePollId = id;
 }
+let _vmCreatePending = null;
+let _vmCreatePollId = null;
 function vmRunDemo(num) {
   if (!confirm(`Run kvm-demo ${num}? Builds a golden VM and clones 4 copies.`)) return;
   send({action: 'k8s_run_demo', script: 'kvm-demo', name: String(num)});
@@ -4885,6 +4986,7 @@ function vmOp(name, op) {
 }
 
 function vmSnap(name) {
+  _busyShow(`snapshotting ${name}…`, 6000);
   send({ action: 'snapshot_take', path: `rpool/vms/${name}` });
   setTimeout(() => send({ action: 'list_vms' }), 1000);
 }
@@ -4960,6 +5062,8 @@ function _handleVmSnaps(msg) {
 function vmClone(name) {
   const newName = prompt(`Clone ${name} as:`, name + '-clone');
   if (!newName) return;
+  _busyShow(`cloning ${name} → ${newName}…`, 15000);
+  _vmCreatePending = newName;
   send({ action: 'vm_clone', src: name, dst: newName });
   setTimeout(() => send({ action: 'list_vms' }), 3000);
 }
@@ -4972,8 +5076,14 @@ function vmDelete(name) {
   // vm_delete_full destroys the libvirt domain, zfs destroys the zvol
   // (with snapshots), and removes the cloud-init seed ISO — what the
   // confirm dialog has always promised but never actually did.
+  _busyShow(`deleting ${name}…`, 10000);
   send({ action: 'vm_delete_full', vm: name });
-  vmSubTab('log');
+  // Stay on the VMs list (was hopping to log). The VM will vanish from the
+  // list once delete completes — better UX than being moved away. Poll a
+  // few times to catch the disappearance promptly.
+  vmSubTab('vms');
+  let tries = 0;
+  const id = setInterval(() => { send({action: 'list_vms'}); if (++tries >= 8) clearInterval(id); }, 1500);
 }
 
 // ── VM serial console ───────────────────────────────────────────────────────

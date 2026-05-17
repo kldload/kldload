@@ -2897,7 +2897,41 @@ async def _list_vms(websocket):
                             break
                     except Exception:
                         continue
-            vms.append({"name": name, "state": state, "vcpus": vcpus, "ram": ram, "disk": disk, "ip": ip})
+            # Readiness probe for running VMs: ping the qemu-guest-agent.
+            # Cheap (~50ms when agent responds, 1s when not).
+            #   starting: running but no IP yet
+            #   booting:  has IP but QGA not yet responding (cloud-init still
+            #             setting things up; SSH may already work but the GUI
+            #             might not be at GDM yet)
+            #   ready:    QGA replied → guest OS is up + responsive
+            #   —:        not running
+            ready = "—"
+            if state == "running":
+                ready = "starting"
+                if ip != "—":
+                    ready = "booting"
+                    try:
+                        out = subprocess.check_output(
+                            ["virsh", "qemu-agent-command", name,
+                             '{"execute":"guest-ping"}'],
+                            text=True, stderr=subprocess.DEVNULL, timeout=2
+                        )
+                        if '"return"' in out:
+                            ready = "ready"
+                    except Exception:
+                        pass
+            # "building" flag — true only when a fresh _vm_create_cloud is
+            # mid-provisioning (cloud-init still running). Cleared as soon
+            # as QGA first responds (ready == "ready"). Without this gate
+            # the UI used to label every cold-started existing VM "building"
+            # while QGA spun up, which is wrong. Caught .113 2026-05-16.
+            _build_mark = Path(f"/var/lib/kldload/vm-build-pending/{name}")
+            building = _build_mark.exists()
+            if building and ready == "ready":
+                try: _build_mark.unlink()
+                except Exception: pass
+                building = False
+            vms.append({"name": name, "state": state, "vcpus": vcpus, "ram": ram, "disk": disk, "ip": ip, "ready": ready, "building": building})
     except Exception as e:
         LOG.warning("virsh list failed: %s", e)
     await websocket.send(json.dumps({"type": "vm_list", "vms": vms}))
@@ -3359,6 +3393,12 @@ async def _vm_clone(websocket, msg):
         import time as _time
         new_name = f"{src_vm}-clone-{int(_time.time()) % 100000}"
     await websocket.send(json.dumps({"type": "log_line", "line": f"[clone] Cloning {src_vm} → {new_name}", "target": "vm-log"}))
+    # Drop "building" marker — cleared by _list_vms when QGA first responds.
+    try:
+        Path("/var/lib/kldload/vm-build-pending").mkdir(parents=True, exist_ok=True)
+        Path(f"/var/lib/kldload/vm-build-pending/{new_name}").touch()
+    except Exception:
+        pass
     golden_dir = Path("/var/lib/kldload/golden")
     image_path = golden_dir / f"{src_vm}.qcow2"
     if not image_path.exists():
@@ -3559,11 +3599,23 @@ _VM_CLOUD_BASE_BOOTCMD = (
 # over qxl/spice without 3D accel.
 _VM_CLOUD_DESKTOP_RUNCMD = (
     "runcmd:\n"
-    "  - [ sh, -c, \"if command -v dnf >/dev/null 2>&1; then dnf -y install @xfce-desktop xorg-x11-drv-qxl >> /var/log/kldload-desktop.log 2>&1; elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update >> /var/log/kldload-desktop.log 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies lightdm xserver-xorg-video-qxl >> /var/log/kldload-desktop.log 2>&1; fi\" ]\n"
-    "  - [ sh, -c, \"systemctl set-default graphical.target\" ]\n"
+    # Distro-aware desktop install. The previous one-liner shipped two
+    # bugs that made "Rocky Desktop" land at a CLI prompt (caught on .113
+    # 2026-05-16):
+    #   1. xorg-x11-drv-qxl was removed from Rocky 9 (qxl driver deprecated).
+    #      It also fails the whole transaction — so @xfce-desktop never
+    #      installed either, even though dnf had a working repo for it.
+    #   2. Rocky 9 doesn't ship XFCE in the default repos at all; needs
+    #      EPEL first. Fedora's group is named differently too.
+    # Now qxl is gone (virtio-gpu uses Xorg's built-in modesetting driver,
+    # no extra package needed), each distro family has its own resilient
+    # install sequence, and failures log to /var/log/kldload-desktop.log
+    # for after-the-fact triage.
+    "  - [ sh, -c, \"set -x; { . /etc/os-release; case \\\"$ID\\\" in rocky|rhel|centos|almalinux) dnf -y install epel-release && dnf -y groupinstall xfce && dnf -y install lightdm xfce4-session ;; fedora) dnf -y groupinstall xfce-desktop-environment && dnf -y install lightdm ;; debian|ubuntu) DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies lightdm ;; esac; } >> /var/log/kldload-desktop.log 2>&1\" ]\n"
+    "  - [ sh, -c, \"systemctl set-default graphical.target >> /var/log/kldload-desktop.log 2>&1\" ]\n"
     "  - [ sh, -c, \"mkdir -p /etc/lightdm/lightdm.conf.d && printf '[Seat:*]\\\\nautologin-user=root\\\\nautologin-session=xfce\\\\nautologin-user-timeout=0\\\\n' > /etc/lightdm/lightdm.conf.d/50-kldload-autologin.conf\" ]\n"
     "  - [ sh, -c, \"systemctl enable lightdm.service 2>/dev/null || systemctl enable gdm.service 2>/dev/null || true\" ]\n"
-    "  - [ sh, -c, \"systemctl isolate graphical.target || systemctl start lightdm\" ]\n"
+    "  - [ sh, -c, \"systemctl isolate graphical.target || systemctl start lightdm || true\" ]\n"
 )
 
 _VM_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,62}$")
@@ -3619,6 +3671,14 @@ async def _vm_create_cloud(websocket, msg):
     seed_iso = f"/var/lib/libvirt/images/{name}-seed.iso"
 
     await _log(f"[create-cloud] {distro}/{flavor} → {name} ({ram}MB / {cpus} vCPU)")
+
+    # Drop "building" marker so the VM list shows building until QGA responds.
+    # _list_vms removes it once ready. Marker dir is volatile (tmpfs ok).
+    try:
+        Path("/var/lib/kldload/vm-build-pending").mkdir(parents=True, exist_ok=True)
+        Path(f"/var/lib/kldload/vm-build-pending/{name}").touch()
+    except Exception:
+        pass
 
     # Preflight: golden zvol exists?
     if subprocess.call(["zfs", "list", src_zvol],
@@ -3692,7 +3752,13 @@ async def _vm_create_cloud(websocket, msg):
         "--os-variant", _vm_cloud_os_variant(distro),
         "--network", "network=default,model=virtio",
         "--graphics", "vnc,listen=0.0.0.0",
-        "--video", "qxl",
+        # virtio-gpu is the modern paravirt GPU. qxl was the prior choice but
+        # produces vertical-stripe + red-block framebuffer corruption on
+        # Ubuntu 24.04 / Fedora-Wayland desktops — the qxl driver mishandles
+        # GBM/Wayland buffer flips. Caught .113 ubuntu-desktop-o819 2026-05-16.
+        # virtio works on all current distros (Linux kernel has virtio_gpu
+        # since forever, no extra config in the guest).
+        "--video", "virtio",
         "--noautoconsole",
     ]
     await _stream_proc(websocket, cmd, target="vm-log")
