@@ -3377,6 +3377,16 @@ async def _vm_clone(websocket, msg):
             return
         cmd = ["kldload-stamp-identity", "--hostname", new_name, "--image", str(clone_path), "--start"]
     await _stream_proc(websocket, cmd, target="vm-log")
+    # Persist the cloned domain — same bug as vm_create_cloud: virt-install/
+    # virt-clone may produce a transient domain that auto-undefines on
+    # shutdown. dumpxml | define is idempotent.
+    try:
+        _xml = subprocess.check_output(
+            ["virsh", "dumpxml", new_name], text=True, stderr=subprocess.DEVNULL, timeout=5)
+        subprocess.run(["virsh", "define", "/dev/stdin"], input=_xml, text=True,
+                       check=False, capture_output=True, timeout=5)
+    except Exception:
+        pass
     db_log_event("vm_clone", src_vm, f"Cloned {src_vm} → {new_name}")
     await websocket.send(json.dumps({"type": "exec_done", "rc": 0, "target": "vm-log"}))
 
@@ -3435,6 +3445,20 @@ async def _vm_rollback(websocket, msg):
         await websocket.send(json.dumps({"type": "error", "msg": "snapshot does not belong to this VM"}))
         return
     await websocket.send(json.dumps({"type": "log_line", "line": f"[rollback] {vm} → {snap}", "target": "vm-log"}))
+    # Defensive: stash the domain XML BEFORE destroy. If the domain happens
+    # to be transient (cloud-created VMs sometimes come up transient — see
+    # _vm_create_cloud notes), `virsh destroy` would auto-undefine it.
+    # We re-define from the saved XML after rollback so the VM never
+    # vanishes. Harmless for persistent domains (define is idempotent).
+    # Bug story: caught .113 2026-05-16 — user clicked Rollback on a
+    # cloud-created fedora-desktop, virsh destroy nuked the libvirt domain,
+    # ZFS data survived but the VM was gone from the list.
+    saved_xml = None
+    try:
+        saved_xml = subprocess.check_output(
+            ["virsh", "dumpxml", vm], text=True, stderr=subprocess.DEVNULL, timeout=5)
+    except Exception:
+        pass
     # Stop the VM if running (rollback on a live dataset would corrupt).
     was_running = False
     try:
@@ -3447,6 +3471,13 @@ async def _vm_rollback(websocket, msg):
             await websocket.send(json.dumps({"type": "log_line", "line": f"[rollback] stopped {vm}", "target": "vm-log"}))
     except Exception:
         pass
+    # If destroy undefined a transient domain, re-define from saved XML.
+    if saved_xml:
+        try:
+            subprocess.run(["virsh", "define", "/dev/stdin"], input=saved_xml, text=True,
+                           check=False, capture_output=True, timeout=5)
+        except Exception:
+            pass
     # zfs rollback -r — discards any snapshots/datasets newer than the target.
     # Required if the user wants to revert past an intermediate snap.
     try:
@@ -3665,6 +3696,23 @@ async def _vm_create_cloud(websocket, msg):
         "--noautoconsole",
     ]
     await _stream_proc(websocket, cmd, target="vm-log")
+    # CRITICAL — make the domain persistent. virt-install in some libvirt
+    # builds creates the initial domain as transient even without
+    # --transient — possibly an interaction with --import + --noautoconsole
+    # in newer libvirt-python. Without this re-define, the domain
+    # auto-undefines on the first `virsh shutdown` or `virsh destroy`,
+    # leaving the ZFS dataset orphaned and the VM gone from the list.
+    # Operator sees "I shut it down and it vanished" — caught .113 multiple
+    # times 2026-05-16. dumpxml | define is idempotent (no-op if already
+    # persistent) so it's safe to always run.
+    try:
+        _xml = subprocess.check_output(
+            ["virsh", "dumpxml", name], text=True, stderr=subprocess.DEVNULL, timeout=5)
+        subprocess.run(
+            ["virsh", "define", "/dev/stdin"], input=_xml, text=True,
+            check=False, capture_output=True, timeout=5)
+    except Exception as e:
+        await _log(f"[create-cloud] WARNING: persist-domain step failed: {e} — VM will vanish on shutdown")
     db_log_event("vm_create_cloud", name, f"{distro}/{flavor} VM created")
     await _log(f"[create-cloud] Done. Use View on '{name}' to watch boot. "
                f"Desktop install takes ~5-10 min after first boot.")
