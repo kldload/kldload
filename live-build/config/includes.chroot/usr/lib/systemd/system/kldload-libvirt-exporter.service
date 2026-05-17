@@ -4,23 +4,28 @@ Documentation=https://github.com/inovex/prometheus-libvirt-exporter
 After=libvirtd.service network-online.target
 Wants=libvirtd.service
 ConditionPathExists=/usr/local/bin/libvirt-exporter
-ConditionPathExists=/var/run/libvirt/libvirt-sock
+ConditionPathExists=/var/run/libvirt/libvirt-sock-ro
 
 [Service]
 Type=simple
 # Listens on 127.0.0.1 only; Prometheus scrapes localhost. No exposure to LAN.
-# --libvirt.uri=qemu:///system uses the local libvirt socket (default).
-# Runs as root because the libvirt socket is root-owned on most distros;
+# Runs as root because the libvirt sockets are root-owned on most distros;
 # the alternative (adding a libvirt-exporter user to the libvirt group)
 # introduces a long-lived service-account risk for marginal benefit.
+#
 # v2.3.1 CLI semantics: --libvirt.uri = socket PATH (not qemu URI),
 # --libvirt.driver = the qemu URI. Earlier docs (and many third-party
-# tutorials) show --libvirt.uri=qemu:///system which silently no-ops and
-# leaves the exporter unable to enumerate domains — /metrics returns only
-# Go-runtime metrics, no libvirt_domain_*. Caught on .127 2026-05-16.
+# tutorials) show --libvirt.uri=qemu:///system which silently no-ops.
+#
+# MUST be the READ-ONLY socket (-ro suffix). With the RW socket (no
+# suffix) the exporter connects but enumerate-domains returns nothing
+# and /metrics ships only Go-runtime metrics — no libvirt_domain_*
+# data, the klab-vm-estate dashboard stays "No data" forever. Confirmed
+# on .113 2026-05-16: same binary + same flags, ONLY difference is the
+# socket path, only -ro yields libvirt_domain_block_stats_*, etc.
 ExecStart=/usr/local/bin/libvirt-exporter \
     --web.listen-address=127.0.0.1:9177 \
-    --libvirt.uri=/var/run/libvirt/libvirt-sock \
+    --libvirt.uri=/var/run/libvirt/libvirt-sock-ro \
     --libvirt.driver=qemu:///system
 Restart=on-failure
 RestartSec=10
