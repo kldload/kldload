@@ -1621,6 +1621,18 @@ ExecStart=-/usr/local/bin/klab golden ubuntu
 # Customer Portal URL>. Either condition missing → klab returns 0 (skip)
 # so this service still goes green for the other five distros.
 ExecStart=-/usr/local/bin/klab golden rhel
+# After all distro goldens are built, auto-bootstrap a 4-node kubernetes
+# cluster (1 control plane + 3 workers) off the k8s-golden. kube-cluster
+# bootstrap creates k8s-golden first if it doesn't exist, then deploys the
+# cluster on virbr0 with WireGuard + Cilium + Hubble. With klab template
+# the user expects "everything that can be built IS built" — leaving
+# kube-cluster manual means /var/lib/libvirt has no running cluster on
+# first boot and the user has to remember to run it. `-` prefix so a
+# kube-cluster bootstrap failure doesn't fail the unit (operator can
+# retry from the webui Kubernetes tab). Time budget: ~10-12 min on top
+# of ~15 min of golden builds — still well under TimeoutStartSec=7200.
+# Added 2026-05-16 per user request: "klab should build everything".
+ExecStart=-/usr/local/bin/kube-cluster bootstrap --workers 3
 ExecStartPost=/bin/mkdir -p /var/lib/kldload
 ExecStartPost=/bin/touch /var/lib/kldload/klab-firstboot-done
 StandardOutput=journal+console
