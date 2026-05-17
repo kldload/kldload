@@ -1517,15 +1517,24 @@ async def ws_handler(websocket):
                     db_log_event("cluster_save", id_, f"Cluster saved: {msg.get('name')}")
                     await websocket.send(json.dumps({"type": "cluster_saved", "id": id_}))
                 elif action == "vm_clone":
-                    await _vm_clone(websocket, msg)
+                    # Backgrounded — virt-install/qemu-img take 5-10s of
+                    # SYNC subprocess work that would block the recv loop
+                    # and starve the WS heartbeat. Running as a task lets
+                    # the recv loop keep accepting more messages (so
+                    # qty=N from the Create form actually fires N times
+                    # concurrently instead of timing out the connection
+                    # after the first). Caught .113 2026-05-17.
+                    asyncio.create_task(_vm_clone(websocket, msg))
                 elif action == "vm_snaps":
                     await _vm_snaps(websocket, msg)
                 elif action == "vm_rollback":
                     await _vm_rollback(websocket, msg)
                 elif action == "vm_replace":
-                    await _vm_replace(websocket, msg)
+                    asyncio.create_task(_vm_replace(websocket, msg))
                 elif action == "vm_create_cloud":
-                    await _vm_create_cloud(websocket, msg)
+                    # Same reason as vm_clone — back-to-back create
+                    # requests would block the connection serially.
+                    asyncio.create_task(_vm_create_cloud(websocket, msg))
                 elif action == "vm_delete_full":
                     await _vm_delete_full(websocket, msg)
 
@@ -2927,10 +2936,77 @@ async def _list_vms(websocket):
             # while QGA spun up, which is wrong. Caught .113 2026-05-16.
             _build_mark = Path(f"/var/lib/kldload/vm-build-pending/{name}")
             building = _build_mark.exists()
+            # Clear the "building" marker only when cloud-init has actually
+            # FINISHED (runcmd done, desktop installed). QGA ping alone is
+            # too eager — qemu-guest-agent comes up early in boot while
+            # cloud-init's runcmd is still doing `dnf install @xfce-desktop`
+            # in the background. Operator sees state="running" while desktop
+            # install is mid-flight → looks like a CLI VM. Caught .113
+            # 2026-05-16.
+            #
+            # cloud-init status --format=json returns:
+            #   {"status": "done", ...}   when fully finished
+            #   {"status": "running", ...} while runcmd is going
+            # If guest-exec isn't available (older QGA, non-cloud-init VM)
+            # we keep the QGA-ready fallback so the marker eventually clears.
+            #
+            # Failsafe: any marker older than 15 min gets cleared anyway —
+            # never leave a VM permanently in "building".
             if building and ready == "ready":
-                try: _build_mark.unlink()
-                except Exception: pass
-                building = False
+                cloud_init_done = False
+                try:
+                    _ci = subprocess.check_output(
+                        ["virsh", "qemu-agent-command", name,
+                         '{"execute":"guest-exec","arguments":{"path":"/usr/bin/cloud-init","arg":["status","--format=json"],"capture-output":true}}'],
+                        text=True, stderr=subprocess.DEVNULL, timeout=2
+                    )
+                    import json as _j
+                    _pid = _j.loads(_ci).get("return", {}).get("pid")
+                    if _pid:
+                        # Give it a moment to finish
+                        for _ in range(8):
+                            _st = subprocess.check_output(
+                                ["virsh", "qemu-agent-command", name,
+                                 f'{{"execute":"guest-exec-status","arguments":{{"pid":{_pid}}}}}'],
+                                text=True, stderr=subprocess.DEVNULL, timeout=2
+                            )
+                            _r = _j.loads(_st).get("return", {})
+                            if _r.get("exited"):
+                                import base64
+                                _out = base64.b64decode(_r.get("out-data") or "").decode(errors="replace")
+                                cloud_init_done = '"status": "done"' in _out or '"status":"done"' in _out
+                                break
+                except Exception:
+                    pass
+                # Failsafe: mark older than 15 min → clear regardless.
+                try:
+                    _age_min = (time.time() - _build_mark.stat().st_mtime) / 60.0
+                    if _age_min > 15:
+                        cloud_init_done = True
+                except Exception:
+                    pass
+                if cloud_init_done:
+                    try: _build_mark.unlink()
+                    except Exception: pass
+                    building = False
+                # If there's a kexport queued for this VM, fire it now —
+                # backgrounded so it doesn't block the list response.
+                _exp_mark = Path(f"/var/lib/kldload/vm-export-pending/{name}")
+                if _exp_mark.exists():
+                    try:
+                        _fmt, _dir = _exp_mark.read_text().strip().split("\n", 1)
+                        _zvol = f"/dev/zvol/rpool/vms/{name}"
+                        _exp_log = f"/var/log/kldload/kexport-{name}.log"
+                        Path("/var/log/kldload").mkdir(parents=True, exist_ok=True)
+                        Path(_dir).mkdir(parents=True, exist_ok=True)
+                        # Background — operator can tail the log; result lands in _dir
+                        subprocess.Popen(
+                            ["bash", "-c",
+                             f"KEXPORT_NAME={name} kexport {_zvol} {_fmt} {_dir} > {_exp_log} 2>&1"],
+                            start_new_session=True)
+                        _exp_mark.unlink()
+                    except Exception:
+                        pass
             vms.append({"name": name, "state": state, "vcpus": vcpus, "ram": ram, "disk": disk, "ip": ip, "ready": ready, "building": building})
     except Exception as e:
         LOG.warning("virsh list failed: %s", e)
@@ -3597,30 +3673,84 @@ _VM_CLOUD_BASE_BOOTCMD = (
 # probing dnf vs apt-get at runtime. xfce chosen over GNOME because
 # it's lighter (~200MB vs ~1.5GB), boots in under 30s, and renders well
 # over qxl/spice without 3D accel.
-_VM_CLOUD_DESKTOP_RUNCMD = (
-    "runcmd:\n"
-    # Distro-aware desktop install. The previous one-liner shipped two
-    # bugs that made "Rocky Desktop" land at a CLI prompt (caught on .113
-    # 2026-05-16):
-    #   1. xorg-x11-drv-qxl was removed from Rocky 9 (qxl driver deprecated).
-    #      It also fails the whole transaction — so @xfce-desktop never
-    #      installed either, even though dnf had a working repo for it.
-    #   2. Rocky 9 doesn't ship XFCE in the default repos at all; needs
-    #      EPEL first. Fedora's group is named differently too.
-    # Now qxl is gone (virtio-gpu uses Xorg's built-in modesetting driver,
-    # no extra package needed), each distro family has its own resilient
-    # install sequence, and failures log to /var/log/kldload-desktop.log
-    # for after-the-fact triage.
-    "  - [ sh, -c, \"set -x; { . /etc/os-release; case \\\"$ID\\\" in rocky|rhel|centos|almalinux) dnf -y install epel-release && dnf -y groupinstall xfce && dnf -y install lightdm xfce4-session ;; fedora) dnf -y groupinstall xfce-desktop-environment && dnf -y install lightdm ;; debian|ubuntu) DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies lightdm ;; esac; } >> /var/log/kldload-desktop.log 2>&1\" ]\n"
-    "  - [ sh, -c, \"systemctl set-default graphical.target >> /var/log/kldload-desktop.log 2>&1\" ]\n"
-    "  - [ sh, -c, \"mkdir -p /etc/lightdm/lightdm.conf.d && printf '[Seat:*]\\\\nautologin-user=root\\\\nautologin-session=xfce\\\\nautologin-user-timeout=0\\\\n' > /etc/lightdm/lightdm.conf.d/50-kldload-autologin.conf\" ]\n"
-    "  - [ sh, -c, \"systemctl enable lightdm.service 2>/dev/null || systemctl enable gdm.service 2>/dev/null || true\" ]\n"
-    "  - [ sh, -c, \"systemctl isolate graphical.target || systemctl start lightdm || true\" ]\n"
-)
+def _vm_cloud_desktop_runcmd(de: str) -> str:
+    """Build the cloud-init runcmd block for desktop install.
+
+    de = 'xfce' | 'cinnamon' | 'gnome'
+
+    Why a function instead of a constant: previously hardcoded to XFCE +
+    used `dnf groupinstall` which dnf5 (Fedora 44 default) removed —
+    "groupinstall" → "Unknown argument" → desktop_pkgs=0. The `@group`
+    install spec works on both dnf4 and dnf5, so all dnf paths now use
+    that form. Per-DE branches honor the operator's choice from the
+    Create form's Desktop env picker. Caught on .113 fedora-desktop-01
+    2026-05-17 — cloud-init reported done but zero desktop packages.
+    """
+    # autologin session name varies by DE
+    _session = {"xfce": "xfce", "cinnamon": "cinnamon", "gnome": "gnome"}.get(de, "xfce")
+    # Per-distro × per-DE install commands. `@group` prefix is dnf4 + dnf5
+    # compatible (`dnf install @group` works on both; `groupinstall` is
+    # dnf4-only and dropped from dnf5).
+    if de == "xfce":
+        _install = (
+            'case "$ID" in '
+              'rocky|rhel|centos|almalinux) '
+                'dnf -y install epel-release && '
+                'dnf -y install @xfce lightdm xfce4-session ;; '
+              'fedora) '
+                'dnf -y install @xfce-desktop-environment lightdm ;; '
+              'debian|ubuntu) '
+                'DEBIAN_FRONTEND=noninteractive apt-get update && '
+                'DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies lightdm ;; '
+            'esac'
+        )
+    elif de == "cinnamon":
+        # Cinnamon ("Mint-style"). Best on Ubuntu (where Mint lives) but
+        # we support it across the board where packages exist.
+        _install = (
+            'case "$ID" in '
+              'rocky|rhel|centos|almalinux) '
+                'dnf -y install epel-release && '
+                'dnf -y install cinnamon-session cinnamon lightdm ;; '
+              'fedora) '
+                'dnf -y install @cinnamon-desktop-environment lightdm ;; '
+              'debian|ubuntu) '
+                'DEBIAN_FRONTEND=noninteractive apt-get update && '
+                'DEBIAN_FRONTEND=noninteractive apt-get install -y cinnamon-desktop-environment lightdm ;; '
+            'esac'
+        )
+    elif de == "gnome":
+        # GNOME is heaviest. Fedora's path is cleanest (native); for
+        # Ubuntu use ubuntu-gnome-desktop minus snaps via --no-install-recommends.
+        _install = (
+            'case "$ID" in '
+              'rocky|rhel|centos|almalinux) '
+                'dnf -y install @gnome lightdm ;; '
+              'fedora) '
+                'dnf -y install @gnome-desktop-environment ;; '
+              'debian|ubuntu) '
+                'DEBIAN_FRONTEND=noninteractive apt-get update && '
+                'DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ubuntu-desktop-minimal gdm3 ;; '
+            'esac'
+        )
+    else:
+        _install = 'true'   # unknown DE → no-op
+    return (
+        "runcmd:\n"
+        f"  - [ sh, -c, \"set -x; {{ . /etc/os-release; {_install}; }} >> /var/log/kldload-desktop.log 2>&1\" ]\n"
+        "  - [ sh, -c, \"systemctl set-default graphical.target >> /var/log/kldload-desktop.log 2>&1\" ]\n"
+        f"  - [ sh, -c, \"mkdir -p /etc/lightdm/lightdm.conf.d && printf '[Seat:*]\\\\nautologin-user=root\\\\nautologin-session={_session}\\\\nautologin-user-timeout=0\\\\n' > /etc/lightdm/lightdm.conf.d/50-kldload-autologin.conf\" ]\n"
+        "  - [ sh, -c, \"systemctl enable lightdm.service 2>/dev/null || systemctl enable gdm.service 2>/dev/null || systemctl enable gdm3.service 2>/dev/null || true\" ]\n"
+        "  - [ sh, -c, \"systemctl isolate graphical.target || systemctl start lightdm || systemctl start gdm || true\" ]\n"
+    )
+
+# Legacy constant kept as no-op for any code that still imports it; real
+# build now uses _vm_cloud_desktop_runcmd(de) per-request.
+_VM_CLOUD_DESKTOP_RUNCMD = ""
 
 _VM_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,62}$")
 
-def _vm_cloud_userdata(name: str, flavor: str) -> str:
+def _vm_cloud_userdata(name: str, flavor: str, de: str = "xfce") -> str:
     """Compose the cloud-init userdata for a server/desktop flavor."""
     body = (
         "#cloud-config\n"
@@ -3637,7 +3767,7 @@ def _vm_cloud_userdata(name: str, flavor: str) -> str:
         f"{_VM_CLOUD_BASE_BOOTCMD}"
     )
     if flavor == "desktop":
-        body += _VM_CLOUD_DESKTOP_RUNCMD
+        body += _vm_cloud_desktop_runcmd(de)
     return body
 
 async def _vm_create_cloud(websocket, msg):
@@ -3645,6 +3775,7 @@ async def _vm_create_cloud(websocket, msg):
     import tempfile, time as _time, os as _os
     distro = (msg.get("distro") or "").strip().lower()
     flavor = (msg.get("flavor") or "server").strip().lower()
+    de     = (msg.get("desktop_env") or "xfce").strip().lower()
     name   = (msg.get("name")   or "").strip()
     ram    = int(msg.get("ram")  or 4096)
     cpus   = int(msg.get("cpus") or 2)
@@ -3679,6 +3810,23 @@ async def _vm_create_cloud(websocket, msg):
         Path(f"/var/lib/kldload/vm-build-pending/{name}").touch()
     except Exception:
         pass
+
+    # Optional: queue a post-ready kexport. Write a marker file with the
+    # requested format + output dir; a background watcher (started below)
+    # polls until QGA reports ready, then runs `kexport <zvol> <fmt> <dir>`.
+    # All export formats kexport supports are accepted: qcow2|raw|vhd|vmdk|
+    # ova|oci|lxc|firecracker|all.
+    _export_fmt = (msg.get("export_format") or "").strip().lower()
+    _export_dir = (msg.get("export_dir") or "/var/lib/kldload/exports").strip()
+    if _export_fmt and re.match(r'^(qcow2|raw|vhd|vmdk|ova|oci|lxc|firecracker|all)$', _export_fmt):
+        try:
+            Path("/var/lib/kldload/vm-export-pending").mkdir(parents=True, exist_ok=True)
+            Path(f"/var/lib/kldload/vm-export-pending/{name}").write_text(
+                f"{_export_fmt}\n{_export_dir}\n")
+        except Exception as e:
+            await _log(f"[create-cloud] WARNING: couldn't queue export ({e})")
+        else:
+            await _log(f"[create-cloud] queued kexport → {_export_fmt} (will fire after VM is ready)")
 
     # Preflight: golden zvol exists?
     if subprocess.call(["zfs", "list", src_zvol],
@@ -3723,7 +3871,7 @@ async def _vm_create_cloud(websocket, msg):
         with open(_os.path.join(work, "meta-data"), "w") as f:
             f.write(f"instance-id: {name}\nlocal-hostname: {name}\n")
         with open(_os.path.join(work, "user-data"), "w") as f:
-            f.write(_vm_cloud_userdata(name, flavor))
+            f.write(_vm_cloud_userdata(name, flavor, de))
         try:
             subprocess.check_call(
                 ["mkisofs", "-output", seed_iso, "-volid", "cidata",
@@ -5076,10 +5224,14 @@ async def _k8s_run_demo(websocket, msg):
     if not demo:
         await websocket.send(json.dumps({"type": "error", "msg": "demo name required"}))
         return
-    if script not in ("kube-demo", "kvm-demo", "kzfs-lab"):
+    # kube-cluster takes a sub-command + optional integer arg ("scale 3");
+    # split on whitespace so each token becomes its own argv entry.
+    # Other scripts take a single demo-name arg.
+    if script not in ("kube-demo", "kvm-demo", "kzfs-lab", "kube-cluster"):
         await websocket.send(json.dumps({"type": "error", "msg": "unknown script"}))
         return
-    await _stream_proc(websocket, [script, demo], target="k8s")
+    argv = [script] + demo.split()
+    await _stream_proc(websocket, argv, target="k8s")
 
 
 async def _k8s_top(websocket):
@@ -5155,8 +5307,11 @@ async def _k8s_cluster_scale(websocket, msg):
         }))
         return
     await _auto_snapshot(websocket, f"k8s-scale-{workers}")
+    # kube-cluster's arg parser expects --workers N (flag), not positional.
+    # Positional argument hit `die "Unknown option: <N>"` and the scale
+    # request silently dropped. Caught .113 + .137 2026-05-17.
     await _stream_proc(websocket,
-        ["kube-cluster", "scale", str(workers)],
+        ["kube-cluster", "scale", "--workers", str(workers)],
         target="k8s")
     await _k8s_status(websocket)
 

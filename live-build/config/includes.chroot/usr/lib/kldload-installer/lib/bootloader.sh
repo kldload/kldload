@@ -860,6 +860,32 @@ EOFSTAB
   done
   k_log "ZFS services enabled"
 
+  # ── Force-include hostid + zpool.cache in the initramfs ──────────────────
+  #
+  # The 90zfs dracut module SHOULD pick up /etc/zfs/zpool.cache automatically,
+  # but in practice depends on the cache file existing AT THE TIME dracut
+  # runs AND on the module version being current. /etc/hostid is NOT
+  # auto-included by 90zfs in some Fedora/Rocky packagings, leading to a
+  # mismatch between the initramfs hostid and the pool's stamped hostid →
+  # zpool import retries with timeout → boot freezes for 60+s on first boot,
+  # appears to "fix itself" by the time the operator power-cycles.
+  # Caught on Dell XPS 13 (.137) 2026-05-17. Confirmed missing via:
+  #   lsinitrd /boot/initramfs-*.img | grep -E 'hostid|zpool.cache'  → empty.
+  #
+  # Drop an explicit dracut config that:
+  #   - Forces both files into the initramfs unconditionally
+  #   - Forces 90zfs module (belt + suspenders)
+  #   - Disables hostonly so the initramfs is portable across hardware
+  mkdir -p "${target}/etc/dracut.conf.d"
+  cat > "${target}/etc/dracut.conf.d/90-kldload-zfs.conf" <<'DRACUT'
+# kldload — explicit hostid + zpool.cache include so first-boot import
+# succeeds without retry. hostonly=no makes the initramfs portable.
+add_dracutmodules+=" zfs "
+install_items+=" /etc/hostid /etc/zfs/zpool.cache "
+hostonly="no"
+DRACUT
+  k_log "Wrote /etc/dracut.conf.d/90-kldload-zfs.conf (hostid + cachefile in initramfs)"
+
   # ── Rebuild initramfs (picks up ZFS + hostid) ─────────────────────────────
 
   if [[ -x "${target}/usr/bin/update-initramfs" ]]; then

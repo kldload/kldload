@@ -1120,32 +1120,10 @@ select option:checked { background: #00b8d9; color: #000; }
           <span style="flex:1"></span>
           <input id="vm-search-global" class="ws-search" placeholder="Search VMs / nets / pools…"
                  oninput="vmGlobalFilter(this.value)" title="Filters every table below by name">
-          <div class="ws-dropdown" id="vm-create-dd">
-            <button class="btn btn-primary btn-sm" onclick="vmToggleCreateMenu(event)">＋ Create ▾</button>
+          <button class="btn btn-primary btn-sm" onclick="vmShowCreate()">＋ Create VM</button>
+          <div class="ws-dropdown" id="vm-create-dd" style="display:none">
+            <!-- Legacy dropdown preserved for any pinned shortcut; not surfaced. -->
             <div class="ws-dropdown-menu">
-              <div class="ws-dropdown-label">📡 Cloud Server (headless, fast)</div>
-              <button class="ws-dropdown-item" onclick="vmCreateCloud('centos','server');vmCloseCreateMenu()">🐧 CentOS Stream — Server</button>
-              <button class="ws-dropdown-item" onclick="vmCreateCloud('rocky','server');vmCloseCreateMenu()">🪨 Rocky Linux — Server</button>
-              <button class="ws-dropdown-item" onclick="vmCreateCloud('fedora','server');vmCloseCreateMenu()">🎩 Fedora — Server</button>
-              <button class="ws-dropdown-item" onclick="vmCreateCloud('debian','server');vmCloseCreateMenu()">🌀 Debian — Server</button>
-              <button class="ws-dropdown-item" onclick="vmCreateCloud('ubuntu','server');vmCloseCreateMenu()">🟠 Ubuntu — Server</button>
-              <div class="ws-dropdown-sep"></div>
-              <div class="ws-dropdown-label">🖥 Cloud Desktop (XFCE + autologin)</div>
-              <button class="ws-dropdown-item" onclick="vmCreateCloud('centos','desktop');vmCloseCreateMenu()">🐧 CentOS Stream — Desktop</button>
-              <button class="ws-dropdown-item" onclick="vmCreateCloud('rocky','desktop');vmCloseCreateMenu()">🪨 Rocky Linux — Desktop</button>
-              <button class="ws-dropdown-item" onclick="vmCreateCloud('fedora','desktop');vmCloseCreateMenu()">🎩 Fedora — Desktop</button>
-              <button class="ws-dropdown-item" onclick="vmCreateCloud('debian','desktop');vmCloseCreateMenu()">🌀 Debian — Desktop</button>
-              <button class="ws-dropdown-item" onclick="vmCreateCloud('ubuntu','desktop');vmCloseCreateMenu()">🟠 Ubuntu — Desktop</button>
-              <div class="ws-dropdown-sep"></div>
-              <div class="ws-dropdown-label">⚙️ Advanced</div>
-              <button class="ws-dropdown-item" onclick="vmShowCreate();vmCloseCreateMenu()">📀 Custom (RAM/CPU/disk)…</button>
-              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('centos');vmCloseCreateMenu()">📋 Direct clone — CentOS golden</button>
-              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('rocky');vmCloseCreateMenu()">📋 Direct clone — Rocky golden</button>
-              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('fedora');vmCloseCreateMenu()">📋 Direct clone — Fedora golden</button>
-              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('debian');vmCloseCreateMenu()">📋 Direct clone — Debian golden</button>
-              <button class="ws-dropdown-item" onclick="vmCloneFromGolden('ubuntu');vmCloseCreateMenu()">📋 Direct clone — Ubuntu golden</button>
-              <div class="ws-dropdown-sep"></div>
-              <div class="ws-dropdown-label">Demo</div>
               <button class="ws-dropdown-item" onclick="vmRunDemo(1);vmCloseCreateMenu()">▶ Full demo (golden + 4 clones)</button>
               <button class="ws-dropdown-item" onclick="vmMoreDemos()">⋯ More VM demos…</button>
             </div>
@@ -1162,27 +1140,80 @@ select option:checked { background: #00b8d9; color: #000; }
           <button class="ws-tab"        data-sub="log"       onclick="vmSubTab('log')">Log</button>
         </div>
 
-        <!-- Custom create form — slides in only when opened from the menu. -->
-        <div id="vm-create-form" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0.75rem;margin-bottom:0.9rem">
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.75rem;margin-bottom:0.75rem">
-            <div class="form-group"><label>Name</label><input type="text" id="vm-new-name" placeholder="my-vm" style="width:100%"></div>
-            <div class="form-group"><label>RAM (MB)</label><input type="number" id="vm-new-ram" value="4096" style="width:100%"></div>
-            <div class="form-group"><label>vCPUs</label><input type="number" id="vm-new-cpus" value="2" style="width:100%"></div>
-            <div class="form-group"><label>Disk (GB)</label><input type="number" id="vm-new-disk" value="40" style="width:100%"></div>
-          </div>
-          <div style="display:flex;gap:0.75rem;align-items:end;margin-bottom:0.75rem">
-            <div class="form-group" style="flex:1"><label>Clone from golden</label>
-              <select id="vm-new-golden" style="width:100%">
-                <option value="">— blank disk —</option>
-                <option value="klab-golden-centos">centos golden</option>
-                <option value="klab-golden-rocky">rocky golden</option>
-                <option value="klab-golden-fedora">fedora golden</option>
-                <option value="klab-golden-debian">debian golden</option>
-                <option value="klab-golden-ubuntu">ubuntu golden</option>
+        <!-- Unified create form — single window with all options. -->
+        <div id="vm-create-form" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:0.9rem">
+          <div style="font-size:0.95rem;font-weight:600;margin-bottom:0.75rem;color:var(--bright)">Create VM</div>
+          <!-- Row 1: flavor toggle + distro + DE (DE only when desktop) -->
+          <div style="display:grid;grid-template-columns:auto 1fr 1fr;gap:0.75rem;margin-bottom:0.75rem;align-items:end">
+            <div class="form-group"><label>Type</label>
+              <div style="display:flex;gap:0.3rem">
+                <button type="button" id="vm-flavor-server"  class="btn btn-sm" onclick="vmSetFlavor('server')" style="padding:0.4rem 0.9rem">Server</button>
+                <button type="button" id="vm-flavor-desktop" class="btn btn-sm" onclick="vmSetFlavor('desktop')" style="padding:0.4rem 0.9rem">Desktop</button>
+              </div>
+            </div>
+            <div class="form-group"><label>Distro</label>
+              <select id="vm-new-distro" onchange="vmFormSync()" style="width:100%">
+                <option value="centos">CentOS Stream 9</option>
+                <option value="rocky">Rocky Linux 9</option>
+                <option value="fedora">Fedora 44</option>
+                <option value="debian">Debian 13</option>
+                <option value="ubuntu">Ubuntu 24.04</option>
+                <option value="rhel">RHEL 10 (needs subscription)</option>
               </select>
             </div>
-            <div class="form-group"><label>Boot ISO (optional)</label><input type="text" id="vm-new-iso" placeholder="/path/to/iso" style="width:100%"></div>
+            <div class="form-group" id="vm-new-de-wrap" style="display:none"><label>Desktop env</label>
+              <select id="vm-new-de" onchange="vmFormSync()" style="width:100%">
+                <option value="xfce">XFCE — lightest</option>
+                <option value="cinnamon">Mint (Cinnamon) — familiar</option>
+                <option value="gnome">GNOME — full-featured</option>
+              </select>
+            </div>
           </div>
+          <!-- Row 1b: name (gets its own line so the toggle row stays clean) -->
+          <div style="display:grid;grid-template-columns:1fr;gap:0.75rem;margin-bottom:0.75rem">
+            <div class="form-group"><label>Name <span style="color:var(--muted);font-weight:400">(auto-fills from selections)</span></label><input type="text" id="vm-new-name" placeholder="centos-server-x4y2" style="width:100%"></div>
+          </div>
+          <!-- Row 2: sizing + qty -->
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.75rem;margin-bottom:0.75rem">
+            <div class="form-group"><label>vCPUs</label><input type="number" id="vm-new-cpus" value="2" min="1" max="64" style="width:100%"></div>
+            <div class="form-group"><label>RAM (MB)</label><input type="number" id="vm-new-ram" value="4096" min="512" step="512" style="width:100%"></div>
+            <div class="form-group"><label>Disk (GB)</label><input type="number" id="vm-new-disk" value="40" min="10" max="2000" style="width:100%"></div>
+            <div class="form-group"><label>Qty <span style="color:var(--muted);font-weight:400">(1-10)</span></label><input type="number" id="vm-new-qty" value="1" min="1" max="10" style="width:100%"></div>
+          </div>
+          <!-- Advanced (collapsible) — source override + export -->
+          <details style="margin-bottom:0.75rem">
+            <summary style="cursor:pointer;color:var(--muted);font-size:0.82rem">Advanced — boot source override / export image</summary>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-top:0.5rem">
+              <div class="form-group"><label>Source override</label>
+                <select id="vm-new-golden" style="width:100%">
+                  <option value="">— use selected distro's golden —</option>
+                  <option value="__blank__">Blank disk (boot from ISO)</option>
+                  <option value="klab-golden-centos">klab-golden-centos</option>
+                  <option value="klab-golden-rocky">klab-golden-rocky</option>
+                  <option value="klab-golden-fedora">klab-golden-fedora</option>
+                  <option value="klab-golden-debian">klab-golden-debian</option>
+                  <option value="klab-golden-ubuntu">klab-golden-ubuntu</option>
+                </select>
+              </div>
+              <div class="form-group"><label>Boot ISO path (blank-disk only)</label><input type="text" id="vm-new-iso" placeholder="/var/lib/kldload/vm-iso/your.iso" style="width:100%"></div>
+              <div class="form-group"><label>Export when ready</label>
+                <select id="vm-new-export" style="width:100%">
+                  <option value="">— don't export —</option>
+                  <option value="qcow2">qcow2 — KVM / Proxmox / OpenStack</option>
+                  <option value="raw">raw — dd / cloud import</option>
+                  <option value="vmdk">vmdk — VMware / vSphere</option>
+                  <option value="vhd">vhd — Azure / Hyper-V</option>
+                  <option value="ova">ova — VMware / VirtualBox portable</option>
+                  <option value="oci">oci — Docker / Podman tarball</option>
+                  <option value="lxc">lxc — LXC container template</option>
+                  <option value="firecracker">firecracker — microVM rootfs.ext4 + kernel</option>
+                  <option value="all">all VM formats (qcow2 + raw + vhd + vmdk + ova)</option>
+                </select>
+              </div>
+              <div class="form-group"><label>Export output dir</label><input type="text" id="vm-new-export-dir" value="/var/lib/kldload/exports" style="width:100%"></div>
+            </div>
+          </details>
+          <!-- Buttons -->
           <div style="display:flex;gap:0.5rem">
             <button class="btn btn-primary btn-sm" onclick="vmCreate()">Create</button>
             <button class="btn btn-ghost btn-sm" onclick="document.getElementById('vm-create-form').style.display='none'">Cancel</button>
@@ -4649,22 +4680,102 @@ function loadLog() {
 
 // ── VM Management ────────────────────────────────────────────────────────────
 
-function vmShowCreate() { document.getElementById('vm-create-form').style.display = ''; }
+// Form state — flavor lives in this var (not a DOM control); distro + de
+// are <select> elements. _vmParseType returns the current triple.
+let _vmFlavor = 'server';
+let _vmNameTouched = false;
+
+function _vmParseType() {
+  return {
+    flavor: _vmFlavor,
+    distro: document.getElementById('vm-new-distro')?.value || 'centos',
+    de:     document.getElementById('vm-new-de')?.value     || 'xfce',
+  };
+}
+
+// Toggle between Server and Desktop. Updates button visuals, shows/hides
+// the DE selector, re-syncs the auto-name.
+function vmSetFlavor(f) {
+  _vmFlavor = f;
+  const sBtn = document.getElementById('vm-flavor-server');
+  const dBtn = document.getElementById('vm-flavor-desktop');
+  if (sBtn) sBtn.className = 'btn btn-sm ' + (f === 'server'  ? 'btn-primary' : 'btn-ghost');
+  if (dBtn) dBtn.className = 'btn btn-sm ' + (f === 'desktop' ? 'btn-primary' : 'btn-ghost');
+  const deWrap = document.getElementById('vm-new-de-wrap');
+  if (deWrap) deWrap.style.display = (f === 'desktop') ? '' : 'none';
+  vmFormSync();
+}
+
+function vmShowCreate() {
+  document.getElementById('vm-create-form').style.display = '';
+  _vmNameTouched = false;
+  vmSetFlavor(_vmFlavor || 'server');   // sets buttons + DE visibility + name
+}
+
+function vmFormSync() {
+  const { distro, flavor } = _vmParseType();
+  const nameEl = document.getElementById('vm-new-name');
+  if (nameEl && !_vmNameTouched) {
+    nameEl.value = `${distro}-${flavor}-${Date.now().toString(36).slice(-4)}`;
+  }
+}
+
+// Mark name as user-touched the moment they type in it.
+document.addEventListener('DOMContentLoaded', () => {
+  const n = document.getElementById('vm-new-name');
+  if (n) n.addEventListener('input', () => { _vmNameTouched = true; });
+});
 
 function vmCreate() {
-  const name = document.getElementById('vm-new-name')?.value?.trim();
-  const ram = document.getElementById('vm-new-ram')?.value || '4096';
-  const cpus = document.getElementById('vm-new-cpus')?.value || '2';
-  const disk = document.getElementById('vm-new-disk')?.value || '40';
-  const golden = document.getElementById('vm-new-golden')?.value || '';
-  const iso = document.getElementById('vm-new-iso')?.value?.trim() || '';
-  if (!name) { alert('Enter a VM name'); return; }
-  if (golden) {
-    send({ action: 'vm_clone', src: golden, dst: name });
+  const { distro, flavor, de } = _vmParseType();
+  const baseName = document.getElementById('vm-new-name')?.value?.trim();
+  const ram      = parseInt(document.getElementById('vm-new-ram')?.value, 10) || 4096;
+  const cpus     = parseInt(document.getElementById('vm-new-cpus')?.value, 10) || 2;
+  const disk     = parseInt(document.getElementById('vm-new-disk')?.value, 10) || 40;
+  const qty      = Math.max(1, Math.min(10, parseInt(document.getElementById('vm-new-qty')?.value, 10) || 1));
+  const goldenOverride = document.getElementById('vm-new-golden')?.value || '';
+  const iso      = document.getElementById('vm-new-iso')?.value?.trim() || '';
+  const exportFmt = document.getElementById('vm-new-export')?.value || '';
+  const exportDir = document.getElementById('vm-new-export-dir')?.value?.trim() || '/var/lib/kldload/exports';
+  if (!baseName) { alert('Enter a VM name'); return; }
+  if (goldenOverride === '__blank__' && qty > 1) {
+    alert('Qty > 1 only works for cloud-init clones (not blank-disk + ISO).');
+    return;
+  }
+
+  // Strip trailing -<4-char-hash> from the auto-name when qty > 1 so we can
+  // append a clean -NN suffix per clone (e.g. fedora-desktop-01, -02, -03).
+  // If operator typed a custom name, append numeric suffix verbatim.
+  const namesFor = (n) => {
+    if (n === 1) return [baseName];
+    const stripped = baseName.replace(/-[a-z0-9]{4}$/, '');
+    return Array.from({ length: n }, (_, i) => `${stripped}-${String(i + 1).padStart(2, '0')}`);
+  };
+  const names = namesFor(qty);
+
+  _vmCreatePending = names[0];   // flash the first one when it appears
+  _busyShow(`creating ${qty}× ${distro} ${flavor}${flavor==='desktop'?' / '+de:''}…`, 30000 + qty * 5000);
+
+  if (goldenOverride === '__blank__') {
+    if (!iso) { alert('Boot ISO path required when using blank disk.'); _busyHide(); return; }
+    send({ action: 'spawn', params: { name: names[0], ram, cpus, disk, iso } });
   } else {
-    send({ action: 'spawn', params: { name, ram, cpus, disk, iso } });
+    let useDistro = distro;
+    if (goldenOverride) {
+      const m = goldenOverride.match(/^klab-golden-(.+)$/);
+      if (m) useDistro = m[1];
+    }
+    // Fire all N requests back-to-back; backend handles each independently.
+    // ZFS clones are instant so 5-10 in a row finishes well under a minute.
+    names.forEach((n) => {
+      const msg = { action: 'vm_create_cloud', distro: useDistro, flavor, name: n, ram, cpus, disk_gb: disk };
+      if (flavor === 'desktop') msg.desktop_env = de;
+      if (exportFmt)            { msg.export_format = exportFmt; msg.export_dir = exportDir; }
+      send(msg);
+    });
   }
   document.getElementById('vm-create-form').style.display = 'none';
+  vmSubTab('vms');
   setTimeout(() => send({ action: 'list_vms' }), 3000);
 }
 
@@ -5237,8 +5348,10 @@ function k8sAddNodes() {
   if (!n || n < 1) return alert('Pick a count >= 1');
   if (kind === 'cp') return alert('Multi-CP HA coming in 1.2 — workers only for now');
   if (!confirm(`Add ${n} worker node(s) to the running cluster?\n\nEach worker clones from the kubernetes golden zvol, boots, and joins via kubeadm. ~3-5 min per node.`)) return;
+  _busyShow(`scaling cluster +${n} worker(s)…`, 30000);
   send({ action: 'k8s_cluster_scale', workers: n });
-  k8sSubTab('logs'); // jump to log view so the operator sees the kube-cluster output
+  // Tab is 'log' (singular) — earlier 'logs' typo was a silent no-op.
+  k8sSubTab('log');
 }
 
 function k8sReset() {
@@ -5737,12 +5850,18 @@ function _klabRestoreTab() {
 }
 
 // ── Add worker ──────────────────────────────────────────────────────────────
-// Uses the existing kube-demo add_nodes flow — builds a new VM from the
-// k8s golden, runs kube-join against the CP, and adds the worker. Output
-// streams to the Log tab.
+// Uses `kube-cluster scale N` — Phase-1-4 orchestration with per-worker
+// kube-join logs at /var/log/kldload/kube-join-<name>.log, retries on the
+// virsh start race, and Failure tracking so the operator sees which workers
+// joined and which didn't. Replaces the old `kube-demo add_nodes` path
+// which hardcoded count=2 and silently failed the join step (caught .113
+// 2026-05-17 — w-4 cloned + booted but kubelet never joined, no log).
 function k8sAddWorker() {
-  if (!confirm('Add a new worker node? This clones the k8s golden, boots a VM, joins it to the cluster (~60-90s).')) return;
-  send({action: 'k8s_run_demo', script: 'kube-demo', name: 'add_nodes'});
+  const n = prompt('Add how many workers?', '1');
+  const count = parseInt(n, 10);
+  if (!count || count < 1 || count > 10) return;
+  if (!confirm(`Add ${count} new worker node(s)? Each one: clones k8s golden, boots VM, runs kubeadm join. ~60-90s each.`)) return;
+  send({action: 'k8s_run_demo', script: 'kube-cluster', name: `scale --workers ${count}`});
   k8sSubTab('log');
 }
 
