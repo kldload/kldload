@@ -1599,7 +1599,17 @@ function requestDisks() {
 }
 
 // ── Message handler ─────────────────────────────────────────────────────────
+// Set by confirmInstall() while awaiting a wifi_connect_result before
+// kicking the installer. If set, the WS handler routes the result here
+// instead of falling through. See free/index.html for full notes.
+let _wifiResultHandler = null;
+
 function handle(msg) {
+  // Pre-switch hook: route wifi_connect_result to the install-blocking promise.
+  if (msg.type === 'wifi_connect_result' && typeof _wifiResultHandler === 'function') {
+    _wifiResultHandler(msg);
+    return;
+  }
   switch (msg.type) {
 
     case 'system_info': {
@@ -2433,7 +2443,7 @@ function startInstall() {
   function showErr(m) { err.textContent = m; err.style.display = 'block'; }
 }
 
-function confirmInstall() {
+async function confirmInstall() {
   document.getElementById('confirm-modal').classList.remove('open');
   const diskLabel = document.getElementById('install-disk');
   const diskText  = diskLabel?.options[diskLabel.selectedIndex]?.text || ((_installPayload || {}).disk || '');
@@ -2464,6 +2474,37 @@ function confirmInstall() {
 
   const bar = document.getElementById('install-progress');
   if (bar) { bar.className = 'progress-bar active'; bar.style.width = '100%'; }
+
+  // WiFi gate: join live installer to WiFi BEFORE starting install.
+  // Without this, WiFi-only systems hit "BOOTSTRAP FAILED" because dnf
+  // can't reach any external mirror. See free/index.html for full notes.
+  const useWifi = document.getElementById('net-use-wifi')?.checked;
+  if (useWifi) {
+    const ssid = document.getElementById('wifi-ssid')?.value?.trim() || '';
+    const psk  = document.getElementById('wifi-psk')?.value  || '';
+    if (!ssid) {
+      alert('WiFi enabled but no SSID entered.');
+      document.getElementById('install-idle').style.display    = 'block';
+      document.getElementById('install-running').style.display = 'none';
+      return;
+    }
+    document.getElementById('install-status').textContent = `Joining WiFi '${ssid}'…`;
+    const result = await new Promise((resolve) => {
+      _wifiResultHandler = (m) => { _wifiResultHandler = null; resolve(m); };
+      send({ action: 'wifi_connect', ssid, psk });
+      setTimeout(() => { if (_wifiResultHandler) { _wifiResultHandler = null; resolve({ ok: false, error: 'wifi_connect timed out (60s)' }); } }, 60000);
+    });
+    if (!result.ok) {
+      document.getElementById('install-status').textContent = `WiFi connect failed: ${result.error || 'unknown'} — install NOT started.`;
+      document.getElementById('install-idle').style.display    = 'block';
+      document.getElementById('install-running').style.display = 'none';
+      const bar2 = document.getElementById('install-progress');
+      if (bar2) bar2.className = 'progress-bar';
+      return;
+    }
+    document.getElementById('install-status').textContent = 'WiFi up — starting installer…';
+  }
+
   send({ action: 'install', params: _installPayload });
 }
 

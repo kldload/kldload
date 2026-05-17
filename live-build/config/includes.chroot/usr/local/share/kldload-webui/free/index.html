@@ -4494,7 +4494,7 @@ function startInstall() {
   function showErr(m) { err.textContent = m; err.style.display = 'block'; }
 }
 
-function confirmInstall() {
+async function confirmInstall() {
   document.getElementById('confirm-modal').classList.remove('open');
   const diskLabel = document.getElementById('install-disk');
   const diskText  = diskLabel?.options[diskLabel.selectedIndex]?.text || ((_installPayload || {}).disk || '');
@@ -4525,6 +4525,49 @@ function confirmInstall() {
 
   const bar = document.getElementById('install-progress');
   if (bar) { bar.className = 'progress-bar active'; bar.style.width = '100%'; }
+
+  // ── WiFi gate ─────────────────────────────────────────────────────────
+  // If operator entered WiFi creds, join the LIVE installer to the network
+  // BEFORE kicking the installer. Without this, the install would proceed
+  // with no network, and any package fetch that misses the darksite tanks
+  // the run. Bug caught 2026-05-16 — confirmInstall used to send 'install'
+  // directly, even though _wifiResultHandler infrastructure was present.
+  const useWifi = document.getElementById('net-use-wifi')?.checked;
+  if (useWifi) {
+    const ssid = document.getElementById('wifi-ssid')?.value?.trim() || '';
+    const psk  = document.getElementById('wifi-psk')?.value  || '';
+    if (!ssid) {
+      alert('WiFi enabled but no SSID entered.');
+      document.getElementById('install-idle').style.display    = 'block';
+      document.getElementById('install-running').style.display = 'none';
+      return;
+    }
+    document.getElementById('install-status').textContent = `Joining WiFi '${ssid}' on live installer…`;
+    const appendLog = (line) => {
+      const el = document.getElementById('install-log');
+      if (el) { el.textContent += line + '\n'; el.scrollTop = el.scrollHeight; }
+    };
+    appendLog(`[wifi] connecting live installer to '${ssid}' (must succeed before install starts)`);
+    const result = await new Promise((resolve) => {
+      _wifiResultHandler = (m) => { _wifiResultHandler = null; resolve(m); };
+      send({ action: 'wifi_connect', ssid, psk });
+      // Safety timeout in case backend never replies (60s).
+      setTimeout(() => {
+        if (_wifiResultHandler) { _wifiResultHandler = null; resolve({ ok: false, error: 'wifi_connect timed out (60s)' }); }
+      }, 60000);
+    });
+    if (!result.ok) {
+      appendLog(`[wifi] FAILED: ${result.error || 'unknown'}`);
+      document.getElementById('install-status').textContent = `WiFi connect failed — install NOT started. Fix the SSID/PSK and retry.`;
+      document.getElementById('install-idle').style.display    = 'block';
+      document.getElementById('install-running').style.display = 'none';
+      const bar2 = document.getElementById('install-progress');
+      if (bar2) bar2.className = 'progress-bar';
+      return;
+    }
+    appendLog(`[wifi] connected — live installer has IP, install can proceed`);
+    document.getElementById('install-status').textContent = 'WiFi up — starting installer…';
+  }
 
   send({ action: 'install', params: _installPayload });
 }
