@@ -1518,6 +1518,10 @@ async def ws_handler(websocket):
                     await websocket.send(json.dumps({"type": "cluster_saved", "id": id_}))
                 elif action == "vm_clone":
                     await _vm_clone(websocket, msg)
+                elif action == "vm_snaps":
+                    await _vm_snaps(websocket, msg)
+                elif action == "vm_rollback":
+                    await _vm_rollback(websocket, msg)
                 elif action == "vm_replace":
                     await _vm_replace(websocket, msg)
                 elif action == "vm_create_cloud":
@@ -1549,13 +1553,25 @@ async def ws_handler(websocket):
                     await websocket.send(json.dumps({"type": "snapshot_list", "snapshots": snaps}))
 
                 elif action == "snapshot_take":
+                    # `path` is optional — if present, snapshot that dataset
+                    # specifically (e.g. rpool/vms/<name> from the VM Snap
+                    # button). If absent, snapshot the whole rpool recursively
+                    # (the global Take-Snapshot button). Both produce a
+                    # snapshot tagged @manual-<ts>. Previously this ignored
+                    # `path` and always snapped rpool — VM Snap button looked
+                    # like a no-op because the snap landed at rpool level, not
+                    # per-VM. Caught .133 2026-05-16.
                     import datetime as _dt
                     ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                    _ds = msg.get("path") or "rpool"
+                    if not re.match(r'^[A-Za-z0-9_/.\-]+$', _ds):
+                        await websocket.send(json.dumps({"type": "error", "msg": "invalid snapshot path"}))
+                        continue
                     try:
                         subprocess.check_call(
-                            ["zfs", "snapshot", "-r", f"rpool@manual-{ts}"],
+                            ["zfs", "snapshot", "-r", f"{_ds}@manual-{ts}"],
                             stderr=subprocess.DEVNULL)
-                        await websocket.send(json.dumps({"type": "snapshot_done", "ts": ts}))
+                        await websocket.send(json.dumps({"type": "snapshot_done", "ts": ts, "dataset": _ds}))
                     except Exception as e:
                         await websocket.send(json.dumps({"type": "error", "msg": str(e)}))
 
@@ -2809,7 +2825,32 @@ async def _list_vms(websocket):
                         break
             except Exception:
                 pass
-            vms.append({"name": name, "state": state, "vcpus": vcpus, "ram": ram, "disk": disk})
+            # IP discovery (running VMs only) — try lease first (works for any
+            # NAT-attached VM with DHCP), fall back to qemu-guest-agent if
+            # installed inside the guest. Both calls are cheap and idempotent;
+            # silent on shut-off VMs. Returns "—" if no answer.
+            ip = "—"
+            if state == "running":
+                for src in ("lease", "agent"):
+                    try:
+                        out = subprocess.check_output(
+                            ["virsh", "domifaddr", name, "--source", src],
+                            text=True, stderr=subprocess.DEVNULL, timeout=3
+                        )
+                        # Format: Name MAC Protocol Address
+                        # Pick the first ipv4 we see, skip loopback/link-local.
+                        for line in out.splitlines():
+                            parts = line.split()
+                            if len(parts) >= 4 and parts[2] == "ipv4":
+                                addr = parts[3].split("/")[0]
+                                if not addr.startswith(("127.", "169.254.")):
+                                    ip = addr
+                                    break
+                        if ip != "—":
+                            break
+                    except Exception:
+                        continue
+            vms.append({"name": name, "state": state, "vcpus": vcpus, "ram": ram, "disk": disk, "ip": ip})
     except Exception as e:
         LOG.warning("virsh list failed: %s", e)
     await websocket.send(json.dumps({"type": "vm_list", "vms": vms}))
@@ -3258,8 +3299,12 @@ async def _run_audit(websocket):
 
 async def _vm_clone(websocket, msg):
     """Clone a VM from its golden image and stamp a new identity."""
-    src_vm   = msg.get("vm", "")
-    new_name = msg.get("new_name", "")
+    # Accept both key shapes — JS sends src/dst (5 call sites), older
+    # callers may still send vm/new_name. Without this, every Clone
+    # button click in the VM list silently failed with "invalid vm name"
+    # because msg keys didn't match. Caught .133 2026-05-16.
+    src_vm   = msg.get("src") or msg.get("vm", "")
+    new_name = msg.get("dst") or msg.get("new_name", "")
     if not re.match(r'^[a-zA-Z0-9_\-]+$', src_vm):
         await websocket.send(json.dumps({"type": "error", "msg": "invalid vm name"}))
         return
@@ -3287,6 +3332,76 @@ async def _vm_clone(websocket, msg):
     await _stream_proc(websocket, cmd, target="vm-log")
     db_log_event("vm_clone", src_vm, f"Cloned {src_vm} → {new_name}")
     await websocket.send(json.dumps({"type": "exec_done", "rc": 0, "target": "vm-log"}))
+
+async def _vm_snaps(websocket, msg):
+    """List snapshots for a single VM (used by Rollback picker)."""
+    vm = msg.get("vm", "")
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', vm):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid vm name"}))
+        return
+    snaps = []
+    try:
+        out = subprocess.check_output(
+            ["zfs", "list", "-t", "snapshot", "-H", "-o", "name,creation,used",
+             "-S", "creation", "-r", f"rpool/vms/{vm}"],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        for line in out.strip().splitlines():
+            parts = line.split('\t')
+            if len(parts) >= 3 and '@' in parts[0]:
+                snaps.append({"name": parts[0], "creation": parts[1], "used": parts[2]})
+    except Exception:
+        # No snapshots, or dataset missing — return empty list, not error.
+        pass
+    await websocket.send(json.dumps({"type": "vm_snaps", "vm": vm, "snaps": snaps}))
+
+
+async def _vm_rollback(websocket, msg):
+    """Rollback a VM to a snapshot. Stops the VM if running, runs zfs
+    rollback -r (destroys snapshots newer than the target), restarts."""
+    vm   = msg.get("vm", "")
+    snap = msg.get("snap", "")
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', vm):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid vm name"}))
+        return
+    # snap should look like rpool/vms/<vm>@<snapname>
+    if not re.match(r'^rpool/vms/[a-zA-Z0-9_\-]+@[A-Za-z0-9_:.\-]+$', snap):
+        await websocket.send(json.dumps({"type": "error", "msg": "invalid snapshot path"}))
+        return
+    if not snap.startswith(f"rpool/vms/{vm}@"):
+        await websocket.send(json.dumps({"type": "error", "msg": "snapshot does not belong to this VM"}))
+        return
+    await websocket.send(json.dumps({"type": "log_line", "line": f"[rollback] {vm} → {snap}", "target": "vm-log"}))
+    # Stop the VM if running (rollback on a live dataset would corrupt).
+    was_running = False
+    try:
+        state = subprocess.check_output(
+            ["virsh", "domstate", vm], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        if state == "running":
+            was_running = True
+            subprocess.call(["virsh", "destroy", vm], stderr=subprocess.DEVNULL)
+            await websocket.send(json.dumps({"type": "log_line", "line": f"[rollback] stopped {vm}", "target": "vm-log"}))
+    except Exception:
+        pass
+    # zfs rollback -r — discards any snapshots/datasets newer than the target.
+    # Required if the user wants to revert past an intermediate snap.
+    try:
+        subprocess.check_call(["zfs", "rollback", "-r", snap], stderr=subprocess.STDOUT)
+        await websocket.send(json.dumps({"type": "log_line", "line": f"[rollback] zfs rollback OK", "target": "vm-log"}))
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "error", "msg": f"zfs rollback failed: {e}"}))
+        return
+    if was_running:
+        try:
+            subprocess.check_call(["virsh", "start", vm], stderr=subprocess.STDOUT)
+            await websocket.send(json.dumps({"type": "log_line", "line": f"[rollback] restarted {vm}", "target": "vm-log"}))
+        except Exception as e:
+            await websocket.send(json.dumps({"type": "log_line", "line": f"[rollback] WARNING restart failed: {e}", "target": "vm-log"}))
+    db_log_event("vm_rollback", vm, f"Rolled back {vm} to {snap}")
+    await websocket.send(json.dumps({"type": "exec_done", "rc": 0, "target": "vm-log"}))
+    await _list_vms(websocket)
+
 
 async def _vm_replace(websocket, msg):
     """Replace a VM: clone it, then destroy the original."""

@@ -1224,8 +1224,8 @@ select option:checked { background: #00b8d9; color: #000; }
           </div>
           <input class="ws-table-search" placeholder="Filter VMs…" oninput="vmTableFilter('vm-tbody', this.value)">
           <table>
-            <thead><tr><th style="width:28px"><input type="checkbox" onchange="vmSelectAll(this.checked)" title="Select all"></th><th>Name</th><th>State</th><th>vCPUs</th><th>RAM</th><th>Disk</th><th style="text-align:right">Actions</th></tr></thead>
-            <tbody id="vm-tbody"><tr><td colspan="7" style="color:var(--muted);padding:1rem">Loading…</td></tr></tbody>
+            <thead><tr><th style="width:28px"><input type="checkbox" onchange="vmSelectAll(this.checked)" title="Select all"></th><th>Name</th><th>State</th><th>vCPUs</th><th>RAM</th><th>Disk</th><th>IP</th><th style="text-align:right">Actions</th></tr></thead>
+            <tbody id="vm-tbody"><tr><td colspan="8" style="color:var(--muted);padding:1rem">Loading…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -1504,6 +1504,27 @@ select option:checked { background: #00b8d9; color: #000; }
             <label style="font-size:0.75rem;color:var(--muted)">Workers <input type="number" id="k8s-workers" value="3" min="1" max="10" style="width:60px;margin-left:0.4rem"></label>
             <button class="btn btn-primary btn-sm" onclick="k8sBootstrap()">Bootstrap cluster</button>
             <button class="btn btn-danger btn-sm" onclick="k8sReset()">Reset cluster</button>
+          </div>
+        </div>
+
+        <!-- Scale existing cluster — separate from Bootstrap so the action
+             is unambiguous. Workers = add N more worker VMs to the running
+             cluster, joined via kubeadm join. Control planes intentionally
+             disabled today: multi-CP HA needs etcd-quorum config that
+             kube-cluster CLI doesn't expose yet (1.2 feature). -->
+        <div class="k8s-panel" style="margin-top:0.75rem">
+          <div class="k8s-panel-hdr">
+            <span>⇅ Scale existing cluster</span>
+            <span class="k8s-panel-hdr-muted">Add nodes to the running cluster — kube-cluster scale handles cloning + cloud-init + kubeadm join</span>
+          </div>
+          <div style="padding:0.9rem 1rem;display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap">
+            <label style="font-size:0.75rem;color:var(--muted)">Add <input type="number" id="k8s-scale-count" value="1" min="1" max="20" style="width:60px;margin:0 0.4rem"> </label>
+            <select id="k8s-scale-kind" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.85rem">
+              <option value="worker">Worker node(s)</option>
+              <option value="cp" disabled>Control plane (HA — coming in 1.2)</option>
+            </select>
+            <button class="btn btn-primary btn-sm" onclick="k8sAddNodes()">Add</button>
+            <span class="k8s-panel-hdr-muted" style="margin-left:auto">Existing nodes auto-populate the dashboards within 30s of joining</span>
           </div>
         </div>
       </div>
@@ -3159,6 +3180,7 @@ function handle(msg) {
     }
 
     case 'vm_list': { renderVMList(msg.vms); break; }
+    case 'vm_snaps': { _handleVmSnaps(msg); break; }
     case 'vm_networks':  { renderVmNetworks(msg.networks); break; }
     case 'vm_pools':     { renderVmPools(msg.pools); break; }
     case 'vm_snapshots': { renderVmSnapshots(msg.snapshots); break; }
@@ -4310,7 +4332,7 @@ function renderVMList(vms) {
   if (hdr) hdr.textContent = vms.length ? `${running} running · ${stopped} stopped · ${vms.length} total` : 'no VMs yet';
 
   if (!vms.length) {
-    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted);padding:1rem">No VMs found</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted);padding:1rem">No VMs found</td></tr>';
     return;
   }
   tbody.innerHTML = vms.map(v => {
@@ -4323,6 +4345,7 @@ function renderVMList(vms) {
       <td style="text-align:center;color:var(--subtle)">${esc(v.vcpus || '—')}</td>
       <td style="color:var(--subtle)">${esc(v.ram || '—')}</td>
       <td style="color:var(--muted);font-size:0.78rem">${esc(v.disk || '—')}</td>
+      <td style="font-family:monospace;font-size:0.82rem;color:${(v.ip && v.ip !== '—') ? 'var(--accent2)' : 'var(--muted)'}">${esc(v.ip || '—')}</td>
       <td style="white-space:nowrap;text-align:right">
         ${isRunning
           ? `<button class="btn btn-ghost btn-sm" onclick="vmSsh('${esc(v.name)}')" title="SSH into the VM as admin (cert auth)">⌨ SSH</button>
@@ -4331,7 +4354,8 @@ function renderVMList(vms) {
              <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','shutdown')">Stop</button>
              <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','reboot')">Reboot</button>`
           : `<button class="btn btn-primary btn-sm" onclick="vmOp('${esc(v.name)}','start')">Start</button>`}
-        <button class="btn btn-ghost btn-sm" onclick="vmSnap('${esc(v.name)}')">Snap</button>
+        <button class="btn btn-ghost btn-sm" onclick="vmSnap('${esc(v.name)}')" title="Snapshot this VM's dataset (rpool/vms/${esc(v.name)})">Snap</button>
+        <button class="btn btn-ghost btn-sm" onclick="vmRollback('${esc(v.name)}')" title="Rollback this VM to a prior snapshot (stops + restarts the VM)">Rollback</button>
         <button class="btn btn-ghost btn-sm" onclick="vmClone('${esc(v.name)}')">Clone</button>
         <button class="btn btn-danger btn-sm" onclick="vmDelete('${esc(v.name)}')">Delete</button>
       </td>
@@ -4551,9 +4575,37 @@ function vmOp(name, op) {
 }
 
 function vmSnap(name) {
-  const snap = name + '-snap-' + Date.now().toString(36);
   send({ action: 'snapshot_take', path: `rpool/vms/${name}` });
   setTimeout(() => send({ action: 'list_vms' }), 1000);
+}
+
+// Rollback flow: ask backend for this VM's snapshots, render a picker,
+// confirm, then send vm_rollback. The picker is a window.prompt for now
+// (lightweight). Backend validates snap belongs to this VM.
+let _vmRollbackTargetVM = null;
+function vmRollback(name) {
+  _vmRollbackTargetVM = name;
+  send({ action: 'vm_snaps', vm: name });
+}
+function _handleVmSnaps(msg) {
+  if (!msg || !msg.snaps) return;
+  if (msg.vm !== _vmRollbackTargetVM) return;
+  if (!msg.snaps.length) {
+    alert(`No snapshots found for ${msg.vm}. Take one first with the Snap button.`);
+    _vmRollbackTargetVM = null;
+    return;
+  }
+  const lines = msg.snaps.map((s, i) =>
+    `${i + 1}. ${s.name.split('@').pop()}   (used ${s.used}, ${s.creation})`).join('\n');
+  const picked = prompt(`Rollback ${msg.vm} to which snapshot?\n\n${lines}\n\nEnter number 1-${msg.snaps.length}:`);
+  const n = parseInt(picked, 10);
+  if (!n || n < 1 || n > msg.snaps.length) { _vmRollbackTargetVM = null; return; }
+  const snap = msg.snaps[n - 1].name;
+  if (!confirm(`Rollback ${msg.vm} to ${snap}?\n\nThis stops the VM, runs zfs rollback -r (destroys newer snapshots), and restarts.`)) {
+    _vmRollbackTargetVM = null; return;
+  }
+  send({ action: 'vm_rollback', vm: msg.vm, snap });
+  _vmRollbackTargetVM = null;
 }
 
 function vmClone(name) {
@@ -4714,6 +4766,20 @@ function k8sBootstrap() {
   const workers = document.getElementById('k8s-workers')?.value || '3';
   if (!confirm(`Bootstrap K8s cluster: 1 CP + ${workers} workers?\nThis clones golden images and deploys Cilium.`)) return;
   send({ action: 'k8s_bootstrap', workers: parseInt(workers) });
+}
+
+// Add nodes to an existing cluster. Routes to k8s_cluster_scale which
+// requires the cluster to exist (kldload-cp present). Worker-only today
+// because multi-CP HA needs etcd quorum + kube-apiserver LB plumbing
+// that kube-cluster CLI doesn't expose yet — 1.2 feature.
+function k8sAddNodes() {
+  const n = parseInt(document.getElementById('k8s-scale-count')?.value || '1');
+  const kind = document.getElementById('k8s-scale-kind')?.value || 'worker';
+  if (!n || n < 1) return alert('Pick a count >= 1');
+  if (kind === 'cp') return alert('Multi-CP HA coming in 1.2 — workers only for now');
+  if (!confirm(`Add ${n} worker node(s) to the running cluster?\n\nEach worker clones from the kubernetes golden zvol, boots, and joins via kubeadm. ~3-5 min per node.`)) return;
+  send({ action: 'k8s_cluster_scale', workers: n });
+  k8sSubTab('logs'); // jump to log view so the operator sees the kube-cluster output
 }
 
 function k8sReset() {
