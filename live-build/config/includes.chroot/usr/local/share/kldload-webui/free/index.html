@@ -451,7 +451,7 @@ select option:checked { background: #00b8d9; color: #000; }
                 <div class="tc-name">CentOS 9</div>
                 <div class="tc-sub">offline</div>
               </div>
-              <div class="target-card selected" data-distro="fedora" onclick="selectDistro(this)">
+              <div class="target-card" data-distro="fedora" onclick="selectDistro(this)">
                 <div class="tc-icon" style="font-size:1.2rem">🎩</div>
                 <div class="tc-name">Fedora 44</div>
                 <div class="tc-sub">offline</div>
@@ -544,7 +544,7 @@ select option:checked { background: #00b8d9; color: #000; }
           <div class="panel-hdr">◈ Profile</div>
           <div class="panel-body">
             <div class="target-grid" id="target-grid" style="grid-template-columns:repeat(7,1fr);max-width:1200px">
-              <div class="target-card selected" data-role="desktop" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
+              <div class="target-card" data-role="desktop" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
                 <div class="tc-icon">🖥</div>
                 <div class="tc-name">Desktop</div>
                 <div class="tc-sub">GNOME + ZFS</div>
@@ -4766,6 +4766,13 @@ function startInstall() {
 
   err.style.display = 'none';
   if (!disk)               return showErr('Select a disk');
+  // Distro + profile are no longer pre-selected — verify both before
+  // submitting. selectedDistro / selectedRole probes use the .selected
+  // class on the grid cards; null means the user didn't click anything.
+  const selectedDistroEl = document.querySelector('#distro-grid .target-card.selected');
+  const selectedRoleEl   = document.querySelector('#target-grid .target-card.selected');
+  if (!selectedDistroEl)   return showErr('Pick a distro (Fedora 44 is the default test target)');
+  if (!selectedRoleEl)     return showErr('Pick a profile (Desktop / Server / Core / KVM / Kubernetes / klab / OpenZFS Lab)');
   if (!host)               return showErr('Enter a hostname');
   if (!user)               return showErr('Enter a username');
   if (!pass)               return showErr('Enter a password');
