@@ -18,6 +18,20 @@ set -u
 IFACE="${1:-}"
 ACTION="${2:-}"
 
+# Skip interfaces that NEVER affect the webui/ttyd cert SAN. libvirt's
+# vnet*/virbr*/br-* interfaces fire NM events every time klab or kvm-*
+# boots a VM (qemu's tap device joining the bridge). Without this
+# filter, each VM start used to trigger cert regen → bounce-tls-services
+# → ttyd + kldload-webui restart → operator's browser console got
+# disconnected. Observed .133 2026-05-18 during klab golden builds:
+# every VM boot kicked the terminal session. WireGuard wg-* and the
+# host's primary nic are still in scope.
+case "$IFACE" in
+    vnet*|virbr*|br-*|veth*|tap*|lo|cilium_*|lxc*|docker*|podman*)
+        exit 0
+        ;;
+esac
+
 case "$ACTION" in
     up|dhcp4-change|dhcp6-change|vpn-up|connectivity-change)
         # Run async (--no-block) so the dispatcher returns quickly. The
