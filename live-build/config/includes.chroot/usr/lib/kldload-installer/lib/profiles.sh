@@ -794,33 +794,28 @@ FFPOLICY_WS
   fi
 
   # ── Service auto-start gate ────────────────────────────────────────────────
-  # Lab profiles (kvm / ai / zfslab) auto-start the webui + proxy + ttyd
-  # so the operator lands on the UI at first boot. Workstation / server /
-  # core profiles: services are installed and working but NOT enabled at
-  # boot — the user's daily-driver shouldn't spend RAM/CPU on an ops UI
-  # they may never open. To turn it on:
-  #     sudo systemctl enable --now kldload-proxy kldload-webui ttyd-k9s
-  # The desktop shortcut + the "kldload Web UI" bookmark point at
-  # https://localhost:8443/ so the discovery path is intact.
+  # All non-core profiles auto-start the webui + proxy + ttyd at boot —
+  # the UI doubles as an in-place reinstall path (workstation → klab
+  # conversion, server → kvm conversion, etc.) and a daily-driver
+  # toolkit (VM panel, ZFS panel, K8s panel, Doctor). Pre-2026-05-18 we
+  # disabled it for desktop+server to spare RAM/CPU on machines whose
+  # operator might not care, but that hid the conversion path and the
+  # Doctor/diagnostics. The webui process is ~30 MB resident — well
+  # under the noise floor on any machine with a GUI. Operators who
+  # genuinely don't want it can `systemctl disable --now kldload-*` at
+  # any time; the binary still ships so they can flip it back without a
+  # reinstall.
   case "${KLDLOAD_PROFILE:-server}" in
-    kvm|ai|zfslab)
-      : # keep defaults — enabled in the unit's [Install] WantedBy
-      ;;
-    desktop|server)
-      # Workstation / server — kldload-webui disabled by default (the
-      # operator brings it up manually if they want it). No alternative
-      # web dashboard auto-enabled — the kldload-webui is the unified
-      # UI; running a second OS-management dashboard alongside it
-      # duplicates the surface and confuses operators.
+    core)
+      # core — bare ZFS only, no UI of any kind
       chroot "${target}" systemctl disable kldload-webui.service 2>/dev/null || true
       chroot "${target}" systemctl disable kldload-proxy.service 2>/dev/null || true
       chroot "${target}" systemctl disable ttyd-k9s.service 2>/dev/null || true
       ;;
     *)
-      # core — bare ZFS only, no UI of any kind
-      chroot "${target}" systemctl disable kldload-webui.service 2>/dev/null || true
-      chroot "${target}" systemctl disable kldload-proxy.service 2>/dev/null || true
-      chroot "${target}" systemctl disable ttyd-k9s.service 2>/dev/null || true
+      # desktop / server / kvm / ai / zfslab / klab — keep defaults
+      # (enabled in each unit's [Install] WantedBy=multi-user.target).
+      :
       ;;
   esac
 
