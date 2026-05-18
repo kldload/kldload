@@ -1757,6 +1757,105 @@ async def ws_handler(websocket):
                     node = msg.get("node", "")
                     if node:
                         await _stream_proc(websocket, ["kubectl", "uncordon", node], target="k8s")
+                elif action == "k8s_cordon":
+                    # Single-node cordon — bulk version exists in k8sBulk but
+                    # the per-row UI needs an inline action. cordon blocks new
+                    # pods without evicting existing ones (vs drain which does
+                    # both).
+                    node = msg.get("node", "")
+                    if node:
+                        await _stream_proc(websocket, ["kubectl", "cordon", node], target="k8s")
+                elif action == "k8s_node_reboot":
+                    # Graceful node reboot: cordon → virsh reboot (klab VMs)
+                    # → uncordon once kubelet re-registers. We don't await the
+                    # uncordon here because the node will be unreachable
+                    # during boot; let the user re-uncordon manually or use
+                    # a follow-up timer if needed.
+                    node = msg.get("node", "")
+                    if node:
+                        await _stream_proc(websocket, ["kubectl", "cordon", node], target="k8s")
+                        # klab VMs run on this host — virsh sees them by name.
+                        # Falls back to SSH if not a libvirt domain.
+                        check = await asyncio.create_subprocess_exec(
+                            "virsh", "list", "--all", "--name",
+                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                        out, _ = await check.communicate()
+                        vm_names = (out.decode() if out else "").split()
+                        if node in vm_names:
+                            await _stream_proc(websocket, ["virsh", "reboot", node], target="k8s")
+                        else:
+                            # Non-klab node — SSH reboot via the install key
+                            await _stream_proc(websocket, [
+                                "ssh", "-i", "/root/.ssh/id_kldload",
+                                "-o", "StrictHostKeyChecking=no",
+                                "-o", "UserKnownHostsFile=/dev/null",
+                                f"admin@{node}", "sudo systemctl reboot"
+                            ], target="k8s")
+                elif action == "k8s_kubelet_restart":
+                    # Targeted recovery — restart just kubelet without a full
+                    # VM reboot. Useful when kubelet is wedged but the rest of
+                    # the node is fine. SSH-based; node must have the install
+                    # admin key (klab/kube-cluster set this up automatically).
+                    node = msg.get("node", "")
+                    if node:
+                        await _stream_proc(websocket, [
+                            "ssh", "-i", "/root/.ssh/id_kldload",
+                            "-o", "StrictHostKeyChecking=no",
+                            "-o", "UserKnownHostsFile=/dev/null",
+                            f"admin@{node}", "sudo systemctl restart kubelet"
+                        ], target="k8s")
+                elif action == "k8s_node_label":
+                    # Add / remove labels on a node. msg.labels is a dict
+                    # {key: value}; an empty value removes the label
+                    # (`kubectl label node X key-`). Existing labels are
+                    # overwritten with --overwrite to avoid the "already set"
+                    # error.
+                    node = msg.get("node", "")
+                    labels = msg.get("labels", {})
+                    if node and isinstance(labels, dict):
+                        for k, v in labels.items():
+                            if v == "" or v is None:
+                                await _stream_proc(websocket, ["kubectl", "label", "node", node, f"{k}-"], target="k8s")
+                            else:
+                                await _stream_proc(websocket, ["kubectl", "label", "node", node, f"{k}={v}", "--overwrite"], target="k8s")
+                elif action == "k8s_node_taint":
+                    # Add / remove taints. msg.taints = list of dicts:
+                    #   [{"key": "dedicated", "value": "gpu", "effect": "NoSchedule"}, ...]
+                    # An item with no "value" / "effect" but a key alone
+                    # removes that taint (`kubectl taint node X key-`).
+                    node = msg.get("node", "")
+                    taints = msg.get("taints", [])
+                    if node and isinstance(taints, list):
+                        for t in taints:
+                            key = t.get("key", "")
+                            if not key:
+                                continue
+                            value = t.get("value", "")
+                            effect = t.get("effect", "")
+                            if t.get("remove") or not effect:
+                                await _stream_proc(websocket, ["kubectl", "taint", "node", node, f"{key}-"], target="k8s")
+                            else:
+                                spec = f"{key}={value}:{effect}" if value else f"{key}:{effect}"
+                                await _stream_proc(websocket, ["kubectl", "taint", "node", node, spec, "--overwrite"], target="k8s")
+                elif action == "k8s_node_shell_info":
+                    # Returns SSH info for the frontend to display in a
+                    # "Shell" modal. The frontend shows the command + a
+                    # copy button + an embedded /k9s/ iframe so the user
+                    # can paste-and-go without leaving the webui.
+                    node = msg.get("node", "")
+                    if node:
+                        # Look up node IP from kubectl
+                        proc = await asyncio.create_subprocess_exec(
+                            "kubectl", "get", "node", node,
+                            "-o", "jsonpath={.status.addresses[?(@.type=='InternalIP')].address}",
+                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                        out, _ = await proc.communicate()
+                        ip = (out.decode() if out else "").strip() or node
+                        cmd = f"ssh -i /root/.ssh/id_kldload admin@{ip}"
+                        await websocket.send(json.dumps({
+                            "type": "k8s_node_shell",
+                            "node": node, "ip": ip, "cmd": cmd
+                        }))
                 elif action == "k8s_inspect":
                     await _k8s_inspect(websocket, msg)
                 elif action == "k8s_top":

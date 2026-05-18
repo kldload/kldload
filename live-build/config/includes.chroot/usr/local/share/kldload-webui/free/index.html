@@ -3638,6 +3638,7 @@ function handle(msg) {
     case 'k8s_pods': { renderK8sPods(msg.pods); break; }
     case 'k8s_top': { renderK8sTop(msg); break; }
     case 'k8s_inspect': { renderK8sInspect(msg); break; }
+    case 'k8s_node_shell': { k8sShowNodeShell(msg); break; }
     case 'k8s_namespaces': { renderK8sNamespaces(msg.namespaces); break; }
     case 'k8s_deployments': { renderK8sDeployments(msg.deployments); break; }
     case 'k8s_services': { renderK8sServices(msg.services); break; }
@@ -5435,9 +5436,25 @@ function renderK8sStatus(data) {
         <td><span style="color:${ready ? 'var(--good)' : 'var(--danger)'}">${esc(n.status)}</span></td>
         <td style="color:var(--muted)">${esc(n.version || '—')}</td>
         <td style="font-family:monospace;font-size:0.82rem">${esc(n.ip || '—')}</td>
-        <td>
-          <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'k8s_drain',node:'${esc(n.name)}'})">Drain</button>
-          <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'k8s_uncordon',node:'${esc(n.name)}'})">Uncordon</button>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap">
+          <!-- Cordon/Uncordon as a single smart-toggle button based on
+               current state. cordoned nodes have either status "SchedulingDisabled"
+               or unschedulable=true; we check for "SchedulingDisabled" in
+               n.status as a substring (kubectl can emit "Ready,SchedulingDisabled"). -->
+          ${(n.status||'').includes('SchedulingDisabled')
+            ? `<button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'k8s_uncordon',node:'${esc(n.name)}'})" title="Mark schedulable — new pods will land here again">Uncordon</button>`
+            : `<button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'k8s_cordon',node:'${esc(n.name)}'})" title="Block new pods (existing pods stay)">Cordon</button>`}
+          <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'k8s_drain',node:'${esc(n.name)}'})" title="Cordon + evict all pods — node ends up empty but still in cluster">Drain</button>
+          <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sNodeReboot('${esc(n.name)}')" title="Graceful reboot — cordon then virsh reboot the VM">Reboot</button>
+          <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="k8sNodeDelete('${esc(n.name)}')" title="Decommission — drain + remove from cluster + destroy VM + destroy zvol (irreversible)">Delete</button>
+          <button class="btn btn-ghost btn-sm" style="font-size:0.72rem;padding:0.2rem 0.4rem" onclick="k8sNodeMenuToggle('${esc(n.name)}', this)" title="More node actions">⋮</button>
+          <div class="k8s-node-menu" id="k8s-node-menu-${esc(n.name)}" style="display:none;position:absolute;background:var(--card-bg);border:1px solid var(--border);border-radius:6px;box-shadow:var(--shadow);z-index:100;min-width:180px;font-size:0.78rem">
+            <button class="k8s-node-menu-item" onclick="k8sNodeShell('${esc(n.name)}')">Shell (SSH)</button>
+            <button class="k8s-node-menu-item" onclick="send({action:'k8s_kubelet_restart',node:'${esc(n.name)}'});k8sNodeMenuClose()">Restart kubelet</button>
+            <button class="k8s-node-menu-item" onclick="k8sNodeEditLabels('${esc(n.name)}')">Edit labels…</button>
+            <button class="k8s-node-menu-item" onclick="k8sNodeEditTaints('${esc(n.name)}')">Edit taints…</button>
+            <button class="k8s-node-menu-item" onclick="send({action:'k8s_inspect',target:'node',name:'${esc(n.name)}'});k8sNodeMenuClose()">View events / inspect</button>
+          </div>
         </td>
       </tr>`;
     }).join('');
@@ -5576,6 +5593,164 @@ function k8sUpdateSelCount(kind) {
   if (bar) bar.style.display = n > 0 ? 'flex' : 'none';
   if (cnt) cnt.textContent = `${n} selected`;
 }
+// ── Per-row node actions (Cordon / Drain / Reboot / Delete / overflow menu) ─
+// Cordon/Uncordon/Drain are simple send() calls inlined in the row template.
+// The rest need confirms, modals, or follow-up work, so they get helpers.
+
+function k8sNodeReboot(node) {
+  if (!confirm(`Reboot node ${node}?\n\nThis cordons the node, reboots the VM via virsh, then leaves it cordoned until kubelet re-registers.\nPods will be evicted from the node briefly. Uncordon manually once the node is back to Ready.`)) return;
+  send({ action: 'k8s_node_reboot', node });
+}
+
+function k8sNodeDelete(node) {
+  if (!confirm(`DELETE node ${node}?\n\nThis drains the node, removes it from the cluster, DESTROYS the VM, and DESTROYS the underlying zvol.\n\nIrreversible — rebuild with + Add worker.`)) return;
+  // Reuses the bulk delete_node path so the same destructive flow is exercised.
+  send({ action: 'k8s_bulk', op: 'delete_node', kind: 'node', targets: [node] });
+}
+
+let _k8sOpenMenu = null;
+function k8sNodeMenuClose() {
+  if (_k8sOpenMenu) { _k8sOpenMenu.style.display = 'none'; _k8sOpenMenu = null; }
+}
+function k8sNodeMenuToggle(node, btn) {
+  const menu = document.getElementById(`k8s-node-menu-${node}`);
+  if (!menu) return;
+  if (_k8sOpenMenu === menu) { k8sNodeMenuClose(); return; }
+  k8sNodeMenuClose();
+  // Position the menu just below+right of the trigger button.
+  const rect = btn.getBoundingClientRect();
+  menu.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+  menu.style.left = Math.max(rect.right + window.scrollX - 180, 8) + 'px';
+  menu.style.display = 'block';
+  _k8sOpenMenu = menu;
+}
+// Close menu on outside click
+document.addEventListener('click', e => {
+  if (!_k8sOpenMenu) return;
+  if (e.target.closest('.k8s-node-menu')) return;
+  if (e.target.matches('button[onclick*="k8sNodeMenuToggle"]')) return;
+  k8sNodeMenuClose();
+});
+
+// Shell (SSH) modal — backend returns the ssh command + IP; we show it
+// with a copy button. v1 doesn't auto-spawn a per-node ttyd; the user
+// either copies+pastes into the /k9s/ console (linked below the command)
+// or runs from their own terminal.
+function k8sNodeShell(node) {
+  k8sNodeMenuClose();
+  send({ action: 'k8s_node_shell_info', node });
+}
+
+function k8sNodeEditLabels(node) {
+  k8sNodeMenuClose();
+  k8sLabelTaintModal('labels', node);
+}
+function k8sNodeEditTaints(node) {
+  k8sNodeMenuClose();
+  k8sLabelTaintModal('taints', node);
+}
+
+// Combined modal — used for both labels and taints since the UX is
+// nearly identical (key/value rows; taints also have effect).
+function k8sLabelTaintModal(kind, node) {
+  const isTaint = kind === 'taints';
+  const modal = document.createElement('div');
+  modal.id = 'k8s-label-taint-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:10000;display:flex;align-items:center;justify-content:center;padding:1rem';
+  modal.innerHTML = `
+    <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.4rem;max-width:640px;width:100%;box-shadow:var(--shadow-lg)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.8rem">
+        <div style="font-size:1rem;font-weight:600;color:var(--text-bright)">Edit ${isTaint?'taints':'labels'} — ${node}</div>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-label-taint-modal').remove()">✕</button>
+      </div>
+      <div style="font-size:0.78rem;color:var(--text-dim);margin-bottom:0.8rem">
+        ${isTaint
+          ? 'Taints repel pods that don\\'t tolerate them. Effect = NoSchedule (new pods) / PreferNoSchedule / NoExecute (also evict existing).'
+          : 'Labels target workloads to specific nodes via nodeSelector / affinity. Leave value empty to remove an existing label.'}
+      </div>
+      <div id="kt-rows" style="display:flex;flex-direction:column;gap:0.4rem;margin-bottom:0.8rem"></div>
+      <button class="btn btn-ghost btn-sm" onclick="k8sLabelTaintAddRow(${isTaint?'true':'false'})" style="margin-bottom:0.8rem">+ Add row</button>
+      <div style="display:flex;justify-content:flex-end;gap:0.5rem">
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-label-taint-modal').remove()">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="k8sLabelTaintApply('${node}', ${isTaint?'true':'false'})">Apply</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  k8sLabelTaintAddRow(isTaint);
+}
+function k8sLabelTaintAddRow(isTaint, key='', value='', effect='NoSchedule') {
+  const rows = document.getElementById('kt-rows');
+  if (!rows) return;
+  const row = document.createElement('div');
+  row.className = 'kt-row';
+  row.style.cssText = 'display:flex;gap:0.4rem;align-items:center';
+  const inputStyle = 'flex:1;padding:0.3rem 0.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem;font-family:monospace';
+  row.innerHTML = `
+    <input type="text" placeholder="key"   class="kt-key"   value="${key}"   style="${inputStyle}">
+    <input type="text" placeholder="value" class="kt-value" value="${value}" style="${inputStyle}">
+    ${isTaint
+      ? `<select class="kt-effect" style="padding:0.3rem 0.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem">
+           <option value="NoSchedule"       ${effect==='NoSchedule'?'selected':''}>NoSchedule</option>
+           <option value="PreferNoSchedule" ${effect==='PreferNoSchedule'?'selected':''}>PreferNoSchedule</option>
+           <option value="NoExecute"        ${effect==='NoExecute'?'selected':''}>NoExecute</option>
+         </select>`
+      : ''}
+    <button class="btn btn-ghost btn-sm" onclick="this.parentNode.remove()" title="Remove this row">✕</button>`;
+  rows.appendChild(row);
+}
+function k8sLabelTaintApply(node, isTaint) {
+  const rows = document.querySelectorAll('#kt-rows .kt-row');
+  if (isTaint) {
+    const taints = [];
+    rows.forEach(r => {
+      const key = r.querySelector('.kt-key').value.trim();
+      if (!key) return;
+      const value = r.querySelector('.kt-value').value.trim();
+      const effect = r.querySelector('.kt-effect').value;
+      taints.push({ key, value, effect });
+    });
+    send({ action: 'k8s_node_taint', node, taints });
+  } else {
+    const labels = {};
+    rows.forEach(r => {
+      const key = r.querySelector('.kt-key').value.trim();
+      if (!key) return;
+      labels[key] = r.querySelector('.kt-value').value.trim();
+    });
+    send({ action: 'k8s_node_label', node, labels });
+  }
+  document.getElementById('k8s-label-taint-modal').remove();
+}
+
+// Backend response handler for k8s_node_shell_info — pops a modal with
+// the SSH command + a Copy button + a link to /k9s/ where the user can
+// paste it into the embedded terminal.
+function k8sShowNodeShell(msg) {
+  const cmd = msg.cmd || '';
+  const node = msg.node || '';
+  const ip = msg.ip || '';
+  const modal = document.createElement('div');
+  modal.id = 'k8s-node-shell-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:10000;display:flex;align-items:center;justify-content:center;padding:1rem';
+  modal.innerHTML = `
+    <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.4rem;max-width:680px;width:100%;box-shadow:var(--shadow-lg)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.8rem">
+        <div style="font-size:1rem;font-weight:600;color:var(--text-bright)">Shell — ${node} <span style="color:var(--text-dim);font-weight:400;font-size:0.85rem">(${ip})</span></div>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-node-shell-modal').remove()">✕</button>
+      </div>
+      <div style="font-size:0.78rem;color:var(--text-dim);margin-bottom:0.6rem">
+        SSH command (uses the install admin key — works on any klab worker):
+      </div>
+      <div style="display:flex;gap:0.4rem;margin-bottom:1rem">
+        <code id="kss-cmd" style="flex:1;padding:0.45rem 0.7rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:0.82rem;font-family:monospace;color:var(--accent2);user-select:all">${cmd}</code>
+        <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('kss-cmd').textContent);this.textContent='✓ Copied'">Copy</button>
+      </div>
+      <div style="font-size:0.78rem;color:var(--text-dim);margin-bottom:0.4rem">Then paste into the embedded terminal:</div>
+      <iframe src="/k9s/" style="width:100%;height:340px;border:1px solid var(--border);border-radius:4px;background:#000"></iframe>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
 function k8sBulk(op, kind) {
   const checked = Array.from(document.querySelectorAll(`.k8s-sel-${kind}:checked`));
   if (!checked.length) return;
