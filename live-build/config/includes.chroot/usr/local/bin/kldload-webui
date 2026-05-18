@@ -1684,6 +1684,56 @@ async def ws_handler(websocket):
                     except Exception:
                         pass
                     await websocket.send(json.dumps({"type": "install_state", **state}))
+                elif action == "install_reattach":
+                    # Page refreshed mid-install — find the active kldinstall-*
+                    # unit, grab its MainPID, and resume tailing the install
+                    # log to this socket. Without this the UI shows the
+                    # "Installing — do not power off" panel but the log box
+                    # stays empty because the tail handler from the original
+                    # _install() call died when the prior WS dropped.
+                    log_path = "/var/log/kldload/install-direct.log"
+                    main_pid = 0
+                    unit_name = ""
+                    try:
+                        _q = await asyncio.create_subprocess_exec(
+                            "systemctl", "list-units", "--no-legend",
+                            "--state=active", "kldinstall-*.service",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        _out, _ = await _q.communicate()
+                        for ln in (_out or b"").decode().splitlines():
+                            parts = ln.strip().split()
+                            if parts and parts[0].startswith("kldinstall-"):
+                                unit_name = parts[0]
+                                break
+                    except Exception:
+                        unit_name = ""
+                    if unit_name:
+                        try:
+                            _q = await asyncio.create_subprocess_exec(
+                                "systemctl", "show", unit_name,
+                                "--property=MainPID", "--value",
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.DEVNULL,
+                            )
+                            _out, _ = await _q.communicate()
+                            out = (_out or b"").decode().strip()
+                            if out.isdigit():
+                                main_pid = int(out)
+                        except Exception:
+                            pass
+                    if main_pid > 0:
+                        await websocket.send(json.dumps({
+                            "type": "install_reattached",
+                            "pid": main_pid, "unit": unit_name, "log": log_path,
+                        }))
+                        await _klab_test_tail(websocket, main_pid, log_path, target="install")
+                    else:
+                        await websocket.send(json.dumps({
+                            "type": "install_reattach_noop",
+                            "msg": "no active install unit found",
+                        }))
 
                 elif action == "network_info":
                     ifaces = []

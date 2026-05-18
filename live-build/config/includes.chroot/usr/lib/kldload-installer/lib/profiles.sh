@@ -794,30 +794,33 @@ FFPOLICY_WS
   fi
 
   # ── Service auto-start gate ────────────────────────────────────────────────
-  # Lab profiles (kvm / ai / zfslab) auto-start the webui + proxy + ttyd
-  # so the operator lands on the UI at first boot. Workstation / server /
-  # core profiles: services are installed and working but NOT enabled at
-  # boot — the user's daily-driver shouldn't spend RAM/CPU on an ops UI
-  # they may never open. To turn it on:
+  # Lab profiles (kvm / ai / zfslab / klab) auto-start the webui + proxy +
+  # ttyd so the operator lands on the UI at first boot.
+  # Workstation / server: opt-in. The installer's Platform Options panel
+  # has a "Web ops console" card that sets KLDLOAD_ENABLE_WEBUI=1 when
+  # checked. Default unchecked → binaries still copied (so the operator
+  # can flip it on later) but the systemd units are disabled at boot to
+  # spare RAM/CPU on machines whose user may never open the UI. Manual
+  # enable:
   #     sudo systemctl enable --now kldload-proxy kldload-webui ttyd-k9s
-  # The desktop shortcut + the "kldload Web UI" bookmark point at
-  # https://localhost:8443/ so the discovery path is intact.
+  # core: always disabled — bare ZFS only, no UI of any kind.
   case "${KLDLOAD_PROFILE:-server}" in
-    kvm|ai|zfslab)
-      : # keep defaults — enabled in the unit's [Install] WantedBy
+    kvm|ai|zfslab|klab)
+      : # keep defaults — enabled in each unit's [Install] WantedBy
       ;;
     desktop|server)
-      # Workstation / server — kldload-webui disabled by default (the
-      # operator brings it up manually if they want it). No alternative
-      # web dashboard auto-enabled — the kldload-webui is the unified
-      # UI; running a second OS-management dashboard alongside it
-      # duplicates the surface and confuses operators.
-      chroot "${target}" systemctl disable kldload-webui.service 2>/dev/null || true
-      chroot "${target}" systemctl disable kldload-proxy.service 2>/dev/null || true
-      chroot "${target}" systemctl disable ttyd-k9s.service 2>/dev/null || true
+      if [[ "${KLDLOAD_ENABLE_WEBUI:-0}" == "1" ]]; then
+        # Operator opted in via the Platform Options card. Leave the
+        # default WantedBy enable intact.
+        k_log "Web ops console: enabled at boot (opt-in via Platform Options)."
+      else
+        chroot "${target}" systemctl disable kldload-webui.service 2>/dev/null || true
+        chroot "${target}" systemctl disable kldload-proxy.service 2>/dev/null || true
+        chroot "${target}" systemctl disable ttyd-k9s.service 2>/dev/null || true
+      fi
       ;;
     *)
-      # core — bare ZFS only, no UI of any kind
+      # core (and any unknown profile) — disable.
       chroot "${target}" systemctl disable kldload-webui.service 2>/dev/null || true
       chroot "${target}" systemctl disable kldload-proxy.service 2>/dev/null || true
       chroot "${target}" systemctl disable ttyd-k9s.service 2>/dev/null || true

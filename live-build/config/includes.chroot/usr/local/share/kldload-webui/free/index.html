@@ -965,7 +965,7 @@ select option:checked { background: #00b8d9; color: #000; }
           <div class="panel-hdr">⚙ Platform Options</div>
           <div class="panel-body">
             <div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
-              ZFS, WireGuard, and eBPF are included on all profiles (except Core). Toggle NVIDIA if you have a GPU. Secure Boot is on by default — uncheck only if your firmware can't enroll MOK.
+              ZFS, WireGuard, and eBPF are included on all profiles (except Core). Toggle NVIDIA if you have a GPU. Secure Boot is <strong>off</strong> by default — enable only if your firmware can enroll MOK. Web ops console is <strong>off</strong> on server/workstation by default — enable to use the dashboard as an in-place toolkit (Doctor / VM / K8s / Install). Lab profiles (kvm / ai / zfslab / klab) always auto-start it.
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-bottom:0.8rem;max-width:420px">
               <div class="opt-card" id="opt-nvidia" onclick="toggleOpt('nvidia')" style="cursor:pointer;padding:0.8rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s;text-align:center">
@@ -986,6 +986,20 @@ select option:checked { background: #00b8d9; color: #000; }
                 <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">Secure Boot</div>
                 <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">kldload CA → MOK → signed ZFS kmod + ZBM</div>
               </div>
+              <!-- Web ops console at boot — opt-in.
+                   Lab profiles (kvm/ai/zfslab/klab) auto-enable the webui
+                   regardless of this toggle since the operator booted
+                   kldload FOR the UI. desktop/server profiles install the
+                   binary either way; this toggle decides whether the
+                   service starts at boot. Lets a workstation become a
+                   self-converting host (in-place reinstall to klab,
+                   diagnostics via Doctor, etc.) without forcing the cost
+                   on operators who'd rather keep it cold. -->
+              <div class="opt-card" id="opt-webui" onclick="toggleOpt('webui')" style="cursor:pointer;padding:0.8rem;border:2px solid var(--border);border-radius:8px;transition:all 0.2s;text-align:center">
+                <div style="font-size:1.3rem;margin-bottom:0.3rem">🖥</div>
+                <div style="font-size:0.82rem;font-weight:600;color:var(--bright)">Web ops console</div>
+                <div style="font-size:0.68rem;color:var(--muted);margin-top:0.2rem">Auto-start kldload-webui on boot (Doctor + Install + VM panel)</div>
+              </div>
             </div>
             <input type="checkbox" id="install-nvidia" style="display:none">
             <input type="checkbox" id="install-wireguard" checked style="display:none">
@@ -994,6 +1008,7 @@ select option:checked { background: #00b8d9; color: #000; }
             <input type="checkbox" id="install-k8s" style="display:none">
             <input type="checkbox" id="install-k8s-bootstrap" style="display:none">
             <input type="checkbox" id="install-secure-boot" style="display:none">
+            <input type="checkbox" id="install-webui" style="display:none">
             <!-- Export format -->
             <div style="margin-top:0.8rem;padding-top:0.8rem;border-top:1px solid var(--border)">
               <label style="font-size:0.82rem;color:var(--subtle);display:block;margin-bottom:0.3rem">Export image format</label>
@@ -3507,6 +3522,14 @@ function handle(msg) {
         const li = document.querySelector('#sidebar li[data-view="install"]');
         if (li) li.classList.add('active');
         document.getElementById('view-install').classList.add('active');
+        // Re-attach the live log tail. Backend finds the active
+        // kldinstall-* systemd unit and streams /var/log/kldload/
+        // install-direct.log back via target="install" log_line events
+        // (same handler that the original startInstall() click uses),
+        // so the in-flight progress shows up immediately instead of an
+        // empty box. Without this the user got a "do not power off"
+        // banner with no visible activity after a refresh.
+        send({ action: 'install_reattach' });
       } else if (msg.rc !== null && msg.rc !== undefined) {
         // Install finished — show result if user is on install view
         const bar = document.getElementById('install-progress');
@@ -4535,7 +4558,7 @@ const DISTRO_DESCS = {
   freebsd:  'FreeBSD 15.0 — native ZFS, jails, bhyve',
 };
 function toggleOpt(name) {
-  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot'};
+  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui'};
   var cb = document.getElementById(map[name]);
   var card = document.getElementById('opt-' + name);
   if (!cb || !card) return;
@@ -4557,8 +4580,8 @@ function toggleOpt(name) {
 
 // Init option cards on load
 document.addEventListener('DOMContentLoaded', function() {
-  ['wireguard','nvidia','ebpf','dedup','secure-boot'].forEach(function(name) {
-    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot'};
+  ['wireguard','nvidia','ebpf','dedup','secure-boot','webui'].forEach(function(name) {
+    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui'};
     var cb = document.getElementById(map[name]);
     var card = document.getElementById('opt-' + name);
     if (cb && card && cb.checked) {
@@ -4814,6 +4837,12 @@ function startInstall() {
     // Uncheck for boxes that can't enroll MOK (old UEFI, certain VMs,
     // quick test installs where a reboot-to-MokManager isn't acceptable).
     enable_secure_boot: document.getElementById('install-secure-boot')?.checked ? '1' : '0',
+    // Web ops console auto-start gate — opt-in for desktop/server profiles
+    // (binary always copied; this decides whether the systemd unit starts
+    // at boot). Lab profiles ignore this and always auto-start. Default
+    // unchecked so a workstation/server stays lean unless the operator
+    // explicitly wants the UI as a toolkit.
+    enable_webui: document.getElementById('install-webui')?.checked ? '1' : '0',
     zfs_dedup: document.getElementById('install-zfs-dedup')?.checked ? '1' : '0',
     // zfslab is a ZFS test appliance — NO K8s. Every ZFS observability
     // signal (klab-exporter, zfs_exporter, arcstats, zpool-scrub, ebpf,
