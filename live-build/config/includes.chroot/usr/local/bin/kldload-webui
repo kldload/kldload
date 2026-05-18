@@ -8648,14 +8648,16 @@ def _vm_lookup_ip(vm):
 
 
 async def _vm_ssh_open(websocket, msg):
-    """Open an SSH session into a running VM — kldload-session vm-ssh kind.
+    """Open an SSH session into a running VM via the kldload tmux session
+    (same pattern as the K8s node/pod shell). One ttyd-k9s at /k9s/ multiplexes
+    every shell session via tmux windows — the iframe just shows /k9s/ and the
+    user lands inside the SSH session.
 
-    Looks up the VM's IP via libvirt DHCP-lease/guest-agent, hands the IP
-    to kldload-session which wraps `ssh -i /root/.ssh/id_ed25519 admin@IP`
-    in ttyd behind nginx at /s/<id>/. The UI iframes that URL. Cert auth
-    only — admin user on the VM is expected to have this host's public
-    key in authorized_keys (klab/zfslab goldens get this at golden-build
-    time; user-built VMs need ssh-copy-id once)."""
+    Tries cert auth first (admin@IP with /root/.ssh/id_ed25519, which klab/
+    zfslab goldens accept), then password fallback (root@IP password=kldload,
+    which kube-cluster-spawned cluster nodes accept). The hold-on-exit
+    wrapper keeps the tmux pane visible if SSH fails so the user can read
+    the error instead of seeing a vanished window."""
     vm = (msg.get("vm") or "").strip()
     if not vm:
         await websocket.send(json.dumps({"type": "error", "msg": "vm name required"}))
@@ -8667,35 +8669,77 @@ async def _vm_ssh_open(websocket, msg):
             "error": "Couldn't find an IPv4 for this VM yet — still booting / no DHCP lease / no guest agent.",
         }))
         return
+    # Try admin@ with key first, fall back to root@ with password. The `||`
+    # is a real shell-level fallback — if the first ssh exits nonzero
+    # within 3 seconds (auth failure), the second runs.
+    ssh_admin = (
+        f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+        f"-o ConnectTimeout=5 -o PasswordAuthentication=no "
+        f"-i /root/.ssh/id_ed25519 admin@{ip}"
+    )
+    ssh_root = (
+        f"sshpass -p kldload ssh -o StrictHostKeyChecking=no "
+        f"-o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "
+        f"-o PreferredAuthentications=password root@{ip}"
+    )
+    tmux_cmd = (
+        f"echo '── ssh → {vm} ({ip}) ──'; "
+        f"echo 'trying admin@ with key …'; "
+        f"{ssh_admin} || (echo; echo 'admin@ failed, trying root@ with password kldload …'; {ssh_root}); "
+        "rc=$?; "
+        "echo; echo \"[ssh exited rc=$rc] press Enter to close\"; "
+        "read"
+    )
+    window_name = f"vm-{vm}"[:40]
+    auto_ok = False
+    err_msg = ""
     try:
-        url_out = subprocess.check_output(
-            ["/usr/local/sbin/kldload-session", "open", "vm-ssh", ip,
-             "--title", f"SSH: {vm} ({ip})"],
-            text=True, stderr=subprocess.STDOUT, timeout=15)
-    except subprocess.CalledProcessError as e:
-        await websocket.send(json.dumps({
-            "type": "vm_console_error", "vm": vm,
-            "error": f"kldload-session vm-ssh failed (rc={e.returncode}): {(e.output or '').strip()[:300]}",
-        }))
-        return
-    import re as _re_vs
-    url_line = next((l.strip() for l in url_out.strip().splitlines() if "/s/" in l), "")
-    m_path = _re_vs.search(r'(/s/[A-Za-z0-9_-]+/)', url_line)
-    m_sid  = _re_vs.search(r'/s/([A-Za-z0-9_-]+)/', url_line)
-    if not m_path:
-        await websocket.send(json.dumps({
-            "type": "vm_console_error", "vm": vm,
-            "error": f"could not parse kldload-session URL: {url_out.strip()[:200]}",
-        }))
-        return
+        # Bootstrap kldload tmux session if missing (ttyd-k9s creates it lazily)
+        hs = await asyncio.create_subprocess_exec(
+            "tmux", "has-session", "-t", "kldload",
+            stderr=asyncio.subprocess.DEVNULL)
+        if (await hs.wait()) != 0:
+            await (await asyncio.create_subprocess_exec(
+                "tmux", "new-session", "-d", "-s", "kldload", "-n", "home",
+                stderr=asyncio.subprocess.DEVNULL)).wait()
+        check = await asyncio.create_subprocess_exec(
+            "tmux", "list-windows", "-t", "kldload", "-F", "#{window_name}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+        wout, _ = await check.communicate()
+        windows = (wout.decode() if wout else "").split()
+        if window_name in windows:
+            p = await asyncio.create_subprocess_exec(
+                "tmux", "select-window", "-t", f"kldload:{window_name}",
+                stderr=asyncio.subprocess.PIPE)
+            _, err = await p.communicate()
+            if p.returncode != 0:
+                err_msg = f"select-window: {err.decode()[:200]}"
+            else:
+                auto_ok = True
+        else:
+            p = await asyncio.create_subprocess_exec(
+                "tmux", "new-window", "-t", "kldload",
+                "-n", window_name, tmux_cmd,
+                stderr=asyncio.subprocess.PIPE)
+            _, err = await p.communicate()
+            if p.returncode != 0:
+                err_msg = f"new-window: {err.decode()[:200]}"
+            else:
+                p2 = await asyncio.create_subprocess_exec(
+                    "tmux", "select-window", "-t", f"kldload:{window_name}",
+                    stderr=asyncio.subprocess.DEVNULL)
+                await p2.wait()
+                auto_ok = True
+    except Exception as ex:
+        err_msg = f"exception: {ex}"
     await websocket.send(json.dumps({
-        "type": "vm_console_opened",   # reuse the SSH/serial modal handler
+        "type": "vm_ssh_shell",
         "vm": vm, "ip": ip,
-        "url": m_path.group(1),
-        "session_id": m_sid.group(1) if m_sid else None,
-        "kind": "ssh",
-        "label": f"SSH: admin@{ip}",
-        "ok": True,
+        "auto": auto_ok,
+        "window": window_name,
+        "cmd_display": f"ssh -i /root/.ssh/id_ed25519 admin@{ip}  (or root@{ip} pw=kldload)",
+        "error": err_msg,
     }))
 
 

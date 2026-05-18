@@ -3640,6 +3640,7 @@ function handle(msg) {
     case 'k8s_inspect': { renderK8sInspect(msg); break; }
     case 'k8s_node_shell': { k8sShowNodeShell(msg); break; }
     case 'k8s_pod_shell':  { k8sShowPodShell(msg); break; }
+    case 'vm_ssh_shell':   { vmShowSshShell(msg); break; }
     case 'k8s_logs':       { k8sShowLogs(msg); break; }
     case 'k8s_describe':   { k8sShowDescribe(msg); break; }
     case 'k8s_namespaces': { renderK8sNamespaces(msg.namespaces); break; }
@@ -4879,15 +4880,15 @@ function renderVMList(vms) {
       <td style="white-space:nowrap;text-align:right">
         ${isRunning
           ? `<button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','shutdown')" title="Graceful ACPI shutdown">Stop</button>
-             <button class="btn btn-ghost btn-sm" onclick="vmSsh('${esc(v.name)}')" title="SSH into the VM (cert auth)">⌨ SSH</button>
+             <button class="btn btn-ghost btn-sm" onclick="vmSsh('${esc(v.name)}')" title="SSH into the VM (cert auth, root-password fallback)">SSH</button>
+             <button class="btn btn-ghost btn-sm" onclick="vmView('${esc(v.name)}')" title="noVNC graphical console — see what's on the VM's screen">Console</button>
              <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','reboot')" title="virsh reboot">Reboot</button>`
           : `<button class="btn btn-primary btn-sm" onclick="vmOp('${esc(v.name)}','start')" title="virsh start">Start</button>`}
         <button class="btn btn-danger btn-sm" onclick="vmDelete('${esc(v.name)}')" title="Destroy + undefine + zfs destroy zvol (irreversible)">Delete</button>
         <button class="btn btn-ghost btn-sm" style="padding:0.2rem 0.4rem" onclick="vmMenuToggle('${esc(v.name)}', this)" title="More VM actions">⋮</button>
         <div class="k8s-node-menu" id="vm-menu-${esc(v.name)}" style="display:none;position:absolute;background:var(--card-bg);border:1px solid var(--border);border-radius:6px;box-shadow:var(--shadow);z-index:100;min-width:200px;font-size:0.78rem">
           ${isRunning
-            ? `<button class="k8s-node-menu-item" onclick="vmView('${esc(v.name)}');vmMenuClose()">View console (noVNC)</button>
-               <button class="k8s-node-menu-item" onclick="vmMetrics('${esc(v.name)}');vmMenuClose()">Open metrics dashboard</button>`
+            ? `<button class="k8s-node-menu-item" onclick="vmMetrics('${esc(v.name)}');vmMenuClose()">Open metrics dashboard</button>`
             : ''}
           <button class="k8s-node-menu-item" onclick="vmSnap('${esc(v.name)}');vmMenuClose()">Snapshot now</button>
           <button class="k8s-node-menu-item" onclick="vmRollback('${esc(v.name)}', event);vmMenuClose()">Rollback to snapshot…</button>
@@ -5484,11 +5485,11 @@ function renderK8sStatus(data) {
             ? `<button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'k8s_uncordon',node:'${esc(n.name)}'})" title="Mark schedulable — new pods will land here again">Uncordon</button>`
             : `<button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'k8s_cordon',node:'${esc(n.name)}'})" title="Block new pods (existing pods stay)">Cordon</button>`}
           <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="send({action:'k8s_drain',node:'${esc(n.name)}'})" title="Cordon + evict all pods — node ends up empty but still in cluster">Drain</button>
+          <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sNodeShell('${esc(n.name)}')" title="SSH into the node via the kldload tmux session">SSH</button>
           <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sNodeReboot('${esc(n.name)}')" title="Graceful reboot — cordon then virsh reboot the VM">Reboot</button>
           <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="k8sNodeDelete('${esc(n.name)}')" title="Decommission — drain + remove from cluster + destroy VM + destroy zvol (irreversible)">Delete</button>
           <button class="btn btn-ghost btn-sm" style="font-size:0.72rem;padding:0.2rem 0.4rem" onclick="k8sNodeMenuToggle('${esc(n.name)}', this)" title="More node actions">⋮</button>
           <div class="k8s-node-menu" id="k8s-node-menu-${esc(n.name)}" style="display:none;position:absolute;background:var(--card-bg);border:1px solid var(--border);border-radius:6px;box-shadow:var(--shadow);z-index:100;min-width:180px;font-size:0.78rem">
-            <button class="k8s-node-menu-item" onclick="k8sNodeShell('${esc(n.name)}')">Shell (SSH)</button>
             <button class="k8s-node-menu-item" onclick="send({action:'k8s_kubelet_restart',node:'${esc(n.name)}'});k8sNodeMenuClose()">Restart kubelet</button>
             <button class="k8s-node-menu-item" onclick="k8sNodeEditLabels('${esc(n.name)}')">Edit labels…</button>
             <button class="k8s-node-menu-item" onclick="k8sNodeEditTaints('${esc(n.name)}')">Edit taints…</button>
@@ -5643,6 +5644,39 @@ function k8sUpdateSelCount(kind) {
   if (bar) bar.style.display = n > 0 ? 'flex' : 'none';
   if (cnt) cnt.textContent = `${n} selected`;
 }
+// VM SSH shell — backend opens a new window in the kldload tmux session
+// running `ssh admin@<ip>` (cert auth first, root-password fallback). The
+// iframe shows /k9s/ which renders the running tmux session — same UX as
+// the K8s pod-shell modal.
+function vmShowSshShell(msg) {
+  const vm = msg.vm || '';
+  const ip = msg.ip || '';
+  const auto = msg.auto;
+  const win = msg.window || '';
+  const cmd = msg.cmd_display || '';
+  const err = msg.error || '';
+  const modal = document.createElement('div');
+  modal.id = 'vm-ssh-shell-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:10000;display:flex;align-items:center;justify-content:center;padding:1rem';
+  const note = auto
+    ? `<div style="font-size:0.78rem;color:var(--good);margin-bottom:0.6rem">✓ Connected via SSH — tmux window <code style="background:var(--bg);padding:0.1rem 0.35rem;border-radius:3px">${esc(win)}</code> is the active shell. Type as if you're on the VM.</div>`
+    : `<div style="font-size:0.78rem;color:var(--warn);margin-bottom:0.6rem">tmux automation failed${err?' ('+esc(err)+')':''} — paste this command into the terminal below:</div>
+       <div style="display:flex;gap:0.4rem;margin-bottom:1rem">
+         <code id="vse-cmd" style="flex:1;padding:0.45rem 0.7rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:0.82rem;font-family:monospace;color:var(--accent2);user-select:all">${esc(cmd)}</code>
+         <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('vse-cmd').textContent);this.textContent='✓ Copied'">Copy</button>
+       </div>`;
+  modal.innerHTML = `
+    <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.4rem;max-width:900px;width:100%;box-shadow:var(--shadow-lg);max-height:90vh;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem">
+        <div style="font-size:1rem;font-weight:600;color:var(--text-bright)">SSH — ${esc(vm)} <span style="color:var(--text-dim);font-weight:400;font-size:0.85rem">(${esc(ip)})</span></div>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('vm-ssh-shell-modal').remove()">✕</button>
+      </div>
+      ${note}
+      <iframe src="/k9s/" style="width:100%;flex:1;min-height:520px;border:1px solid var(--border);border-radius:4px;background:#000"></iframe>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
 // ── Per-row VM overflow menu ───────────────────────────────────────────────
 // Same pattern as the K8s node menu (.k8s-node-menu class is generic enough
 // to reuse — visual styling is identical).
