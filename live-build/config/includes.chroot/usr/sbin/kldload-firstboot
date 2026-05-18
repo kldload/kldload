@@ -833,6 +833,25 @@ main() {
 
   log "kldload-firstboot start — role=${ROLE} hostname=${HOSTNAME} edition=${_edition}"
 
+  # ── Persistent journal directory ──────────────────────────────────────────
+  # The installer creates /var/log/journal/ but the per-machine-id sub-dir
+  # has to be created on the actual target (the live env's machine-id is
+  # cleared during install for golden-image cloning, so the real one only
+  # exists at first boot). Without that sub-dir, systemd-journald falls
+  # back to /run/log/journal (volatile) AND every journalctl invocation
+  # writes "No journal files were found" to stderr — which shows up on
+  # the console screen and looks scary. Caught .133 RHEL10 2026-05-18.
+  if [[ -s /etc/machine-id ]]; then
+    local _mid; _mid="$(cat /etc/machine-id)"
+    if [[ -d /var/log/journal ]] && [[ ! -d "/var/log/journal/${_mid}" ]]; then
+      mkdir -p "/var/log/journal/${_mid}"
+      chgrp systemd-journal "/var/log/journal/${_mid}" 2>/dev/null || true
+      chmod 2755 "/var/log/journal/${_mid}"
+      systemctl restart systemd-journald 2>/dev/null || true
+      log "  created persistent journal dir for machine-id ${_mid}"
+    fi
+  fi
+
   # Always enable snapshot timer
   systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
 
