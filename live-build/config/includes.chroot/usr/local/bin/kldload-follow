@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# kldload-follow — unified live log viewer for the entire post-install +
+# firstboot + autodeploy + klab golden-build + test-run pipeline.
+#
+# F3 in the embedded terminal launches this (replaces the older
+# zfs-test-only kztest-tail). Single screen of color-prefixed lines from
+# every log stream that matters during a fresh boot:
+#
+#   [autodeploy] orchestrator phase transitions (ai → klab → k8s → smoke)
+#   [klab]       master klab driver log — VM build phases, setup output,
+#                FATAL/WARN/INFO with pid prefix
+#   [<distro>]   per-VM serial console for every klab golden / ztest /
+#                blue-green / test VM that exists or appears
+#   [k8s]        kube-cluster bootstrap and scale logs
+#   [firstboot]  kldload-firstboot orchestrator output
+#
+# Implementation: `tail -F` (capital F = follow-by-name, survives file
+# rotation AND opens files that don't exist yet, retrying every second).
+# Combined with --max-unchanged-stats=2 so polling intervals stay snappy.
+# A small awk filter color-prefixes each line by source file so the
+# operator can tell which subsystem is talking when streams interleave.
+#
+# Why not just multitail / lnav? Both are great but neither is installed
+# by default on RHEL 10. tail is in coreutils — guaranteed everywhere.
+
+set -uo pipefail
+
+# Colors — ANSI 256. Falls through to no-color if TERM is dumb.
+if [[ -t 1 ]] && [[ "${TERM:-}" != "dumb" ]]; then
+  C_RESET=$'\e[0m'
+  C_AUTO=$'\e[38;5;45m'     # blue   — autodeploy
+  C_KLAB=$'\e[38;5;46m'     # green  — klab driver
+  C_FB=$'\e[38;5;220m'      # yellow — firstboot
+  C_K8S=$'\e[38;5;141m'     # purple — kube-cluster
+  C_CON=$'\e[38;5;245m'     # grey   — VM consoles (verbose, de-emphasize)
+  C_TEST=$'\e[38;5;208m'    # orange — test run
+else
+  C_RESET=""; C_AUTO=""; C_KLAB=""; C_FB=""; C_K8S=""; C_CON=""; C_TEST=""
+fi
+
+# Paths to follow.
+#
+# kldload-webui's _stream_proc_detached writes EVERY long-running op
+# the operator triggers (golden build, ztest, kube-cluster scale, klab
+# deploy, VM clone, helm install, ansible playbook, demos, ...) to
+# /var/log/kldload/<target>-<ts>.log. /var/log/kldload/ also carries
+# the install-time + firstboot-time logs (autodeploy.log,
+# klab-firstboot.log, kube-bootstrap.log, install-direct.log). So
+# tailing the whole directory + the per-distro klab logs +
+# every VM serial console covers basically every line of meaningful
+# kldload activity. Static names listed first for header readability;
+# the dir-glob picks up everything else including future names we
+# haven't thought of yet.
+declare -a STATIC_LOGS=(
+  /var/log/kldload/autodeploy.log
+  /var/log/kldload/install-direct.log
+  /var/log/kldload/klab-firstboot.log
+  /var/log/kldload/kube-bootstrap.log
+  /root/klab/klab.log
+)
+
+# Helper: snapshot all existing dir-glob matches.
+_glob_logs() {
+  shopt -s nullglob
+  printf '%s\n' /var/log/kldload/*.log /var/log/klab/*.log /root/klab/*.log 2>/dev/null
+  shopt -u nullglob
+}
+
+# Background watcher: re-exec the tail when ANY new log file appears so
+# operator sees it the moment a new op fires (a webui-triggered klab
+# golden, a kube-cluster scale, a VM clone, ...). Cheap count-based
+# check — no inotify dependency, works on every distro. 2-second poll
+# keeps the UI snappy without burning cycles.
+(
+  prev_count=$(_glob_logs | wc -l)
+  while sleep 2; do
+    cur_count=$(_glob_logs | wc -l)
+    if [[ "$cur_count" != "$prev_count" ]]; then
+      pkill -P $$ -f "^tail -F" 2>/dev/null
+      prev_count=$cur_count
+    fi
+  done
+) &
+WATCHER=$!
+trap 'kill $WATCHER 2>/dev/null; exit 0' INT TERM EXIT
+
+# Header line so the operator knows what they're looking at.
+echo "${C_AUTO}══════════════════════════════════════════════════════════════${C_RESET}"
+echo "${C_AUTO} kldload-follow${C_RESET} — unified live tail (Ctrl-C to exit)"
+echo " Streams: autodeploy / klab driver / firstboot / kube-bootstrap"
+echo "          + every VM console under /var/log/klab/"
+echo "${C_AUTO}══════════════════════════════════════════════════════════════${C_RESET}"
+
+while true; do
+  # Re-glob each iteration so the watcher's restart picks up new files.
+  declare -a DIR_LOGS
+  mapfile -t DIR_LOGS < <(_glob_logs)
+  # Static names first (so the head-of-output -n30 prefers them when
+  # tail batches the initial read) then dir-globbed additions, with
+  # duplicates removed.
+  declare -a ALL
+  declare -A SEEN
+  for f in "${STATIC_LOGS[@]}" "${DIR_LOGS[@]}"; do
+    if [[ -z "${SEEN[$f]:-}" ]]; then
+      ALL+=("$f"); SEEN[$f]=1
+    fi
+  done
+  unset SEEN
+
+  # tail -F with --max-unchanged-stats=2 to react fast to new lines
+  # (default is 5 seconds between stat polls; 2 keeps the UI responsive
+  # without being expensive). awk prefixes each line with a colored tag
+  # derived from the path tail reports in its `==> file <==` headers.
+  tail -F --max-unchanged-stats=2 -n 30 "${ALL[@]}" 2>/dev/null | awk -v ca="$C_AUTO" \
+                                              -v ck="$C_KLAB" \
+                                              -v cf="$C_FB" \
+                                              -v c8="$C_K8S" \
+                                              -v cc="$C_CON" \
+                                              -v ct="$C_TEST" \
+                                              -v cr="$C_RESET" '
+    /^==> .* <==$/ {
+      # Extract the path between "==> " and " <=="
+      cur = $0
+      sub(/^==> /, "", cur); sub(/ <==$/, "", cur)
+      tag = "?"; col = cr
+      if (cur ~ /autodeploy\.log$/)             { tag = "deploy "; col = ca }
+      else if (cur ~ /install-direct\.log$/)    { tag = "install"; col = ca }
+      else if (cur ~ /klab-firstboot\.log$/)    { tag = "firstbt"; col = cf }
+      else if (cur ~ /kube-bootstrap\.log$/)    { tag = "k8s-bs "; col = c8 }
+      else if (cur ~ /\/root\/klab\/klab\.log$/){ tag = "klab   "; col = ck }
+      else if (cur ~ /klab-(ztest|test)-.*console/){ tag = "ztest  "; col = ct }
+      else if (cur ~ /klab-.*-console\.log/)    { tag = "console"; col = cc }
+      else if (cur ~ /\/k8s-[0-9]+\.log/)       { tag = "k8s-op "; col = c8 }
+      else if (cur ~ /\/k8s\.log/)              { tag = "k8s    "; col = c8 }
+      else if (cur ~ /\/klab-[0-9]+\.log/)      { tag = "klab-op"; col = ck }
+      else if (cur ~ /\/ansible-/)              { tag = "ansible"; col = ct }
+      else if (cur ~ /\/helm-/)                 { tag = "helm   "; col = ct }
+      else if (cur ~ /\/vm-log-/)               { tag = "vm-op  "; col = cc }
+      else if (cur ~ /\/cluster-deploy-/)       { tag = "cluster"; col = c8 }
+      else if (cur ~ /\/kube-join-/)            { tag = "k8s-jn "; col = c8 }
+      else if (cur ~ /\/root\/klab\/.*\.log/)   { tag = "klab-d "; col = ck }
+      else { tag = "other  " }
+      printf "\n%s── %s ──%s\n", col, cur, cr
+      next
+    }
+    { printf "%s%s%s | %s\n", col, tag, cr, $0 }
+  '
+
+  # If tail exited (watcher restart, file vanished, etc.) loop and respawn.
+  echo "${C_AUTO}[kldload-follow] respawning tail to pick up new logs…${C_RESET}"
+  sleep 1
+done

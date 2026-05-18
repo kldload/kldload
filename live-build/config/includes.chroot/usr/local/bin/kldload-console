@@ -138,7 +138,14 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   # see every [PASS]/[FAIL]/[SKIP] stream by in real time, prefixed
   # by [distro]. Pair with S-F5 (doctor loop) for system-health
   # correlation when a test flakes.
-  tmux bind -n F3  run-shell "_ktoggle-win ztest-tail 'kztest-tail'"
+  # F3 = unified live tail across every post-install log stream
+  # (autodeploy + klab driver + firstboot + kube-bootstrap + every VM
+  # console under /var/log/klab/). Replaces the older ztest-only
+  # kztest-tail because the ztest-only view was only useful during a
+  # `klab test` run — operators kept asking "what's actually happening
+  # right now?" during the goldens / kube / firstboot phases and the
+  # answer was "tail four different files". Single command, all of it.
+  tmux bind -n F3  run-shell "_ktoggle-win follow 'kldload-follow'"
   tmux bind -n F4  run-shell "_ktoggle-win logs   'journalctl -f -u kldload-webui -u ttyd-k9s'"
   # F5 → kldload-lh: LogHog with cluster-wide SSHFS stitching. Launches
   # the interactive menu (Live All / Auth / Errors / Network / RegEX / IP
