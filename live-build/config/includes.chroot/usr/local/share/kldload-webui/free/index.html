@@ -1570,26 +1570,8 @@ select option:checked { background: #00b8d9; color: #000; }
           </div>
         </div>
 
-        <!-- Scale existing cluster — separate from Bootstrap so the action
-             is unambiguous. Workers = add N more worker VMs to the running
-             cluster, joined via kubeadm join. Control planes intentionally
-             disabled today: multi-CP HA needs etcd-quorum config that
-             kube-cluster CLI doesn't expose yet (1.2 feature). -->
-        <div class="k8s-panel" style="margin-top:0.75rem">
-          <div class="k8s-panel-hdr">
-            <span>⇅ Scale existing cluster</span>
-            <span class="k8s-panel-hdr-muted">Add nodes to the running cluster — kube-cluster scale handles cloning + cloud-init + kubeadm join</span>
-          </div>
-          <div style="padding:0.9rem 1rem;display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap">
-            <label style="font-size:0.75rem;color:var(--muted)">Add <input type="number" id="k8s-scale-count" value="1" min="1" max="20" style="width:60px;margin:0 0.4rem"> </label>
-            <select id="k8s-scale-kind" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.85rem">
-              <option value="worker">Worker node(s)</option>
-              <option value="cp" disabled>Control plane (HA — coming in 1.2)</option>
-            </select>
-            <button class="btn btn-primary btn-sm" onclick="k8sAddNodes()">Add</button>
-            <span class="k8s-panel-hdr-muted" style="margin-left:auto">Existing nodes auto-populate the dashboards within 30s of joining</span>
-          </div>
-        </div>
+        <!-- Scale moved to the Nodes tab 2026-05-17 — it lives next to the
+             node table where you can see what you're scaling against. -->
       </div>
 
       <!-- ── Workloads (Deployments + Pods) ────────────────────────────── -->
@@ -1643,6 +1625,27 @@ select option:checked { background: #00b8d9; color: #000; }
 
       <!-- ── Nodes ─────────────────────────────────────────────────────── -->
       <div class="k8s-subview" id="k8s-sub-nodes">
+
+        <!-- Scale strip — qty + kind picker. Moved from Overview 2026-05-17
+             so node scaling lives next to the table you're scaling against.
+             Replaces the standalone "+ Add worker" button (which was just
+             a less-capable version of this form). -->
+        <div class="k8s-panel" style="margin-bottom:0.9rem">
+          <div class="k8s-panel-hdr">
+            <span>⇅ Scale cluster</span>
+            <span class="k8s-panel-hdr-muted">add nodes — handles clone + cloud-init + kubeadm join</span>
+          </div>
+          <div style="padding:0.7rem 1rem;display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
+            <label style="font-size:0.78rem;color:var(--text-dim)">Add <input type="number" id="k8s-scale-count" value="1" min="1" max="20" style="width:55px;margin:0 0.4rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:0.2rem 0.4rem"></label>
+            <select id="k8s-scale-kind" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.82rem">
+              <option value="worker">Worker node(s)</option>
+              <option value="cp" disabled>Control plane (HA — 1.2 feature, requires etcd quorum)</option>
+            </select>
+            <button class="btn btn-primary btn-sm" onclick="k8sAddNodes()">Add</button>
+            <span class="k8s-panel-hdr-muted" style="margin-left:auto;font-size:0.75rem">~2 min per node — DHCP + cloud-init + kubeadm join</span>
+          </div>
+        </div>
+
         <div class="k8s-panel">
           <div class="k8s-panel-hdr">
             <span>◈ Nodes</span>
@@ -1652,10 +1655,9 @@ select option:checked { background: #00b8d9; color: #000; }
                 <button class="btn btn-ghost btn-sm" onclick="k8sBulk('cordon', 'node')">Cordon</button>
                 <button class="btn btn-ghost btn-sm" onclick="k8sBulk('uncordon', 'node')">Uncordon</button>
                 <button class="btn btn-danger btn-sm" onclick="k8sBulk('drain', 'node')">Drain</button>
-                <button class="btn btn-danger btn-sm" onclick="k8sBulk('delete_node', 'node')" title="Drain + remove from cluster + destroy VM + destroy zvol (irreversible — rebuild via +Add worker)">Delete</button>
+                <button class="btn btn-danger btn-sm" onclick="k8sBulk('delete_node', 'node')" title="Drain + remove from cluster + destroy VM + destroy zvol (irreversible — rebuild via Scale ↑)">Delete</button>
                 <button class="btn btn-ghost btn-sm" onclick="k8sClearSel('node')" title="Clear">✕</button>
               </div>
-              <button class="btn btn-primary btn-sm" onclick="k8sAddWorker()" title="Add a new worker via kube-demo add_nodes">＋ Add worker</button>
               <button class="btn btn-ghost btn-sm" onclick="send({action:'k8s_top'});send({action:'k8s_status'})">↻</button>
             </div>
           </div>
