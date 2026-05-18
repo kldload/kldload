@@ -2001,6 +2001,63 @@ NETCFG
     fi
   done
 
+  # Phase 3.5: rescue late-DHCP orphans. Fedora cloud-init under parallel-
+  # clone load occasionally takes longer than the 240s Phase 2 budget — the
+  # VM gets DHCP at 250-300s, AFTER the scale loop already gave up. Result
+  # was orphaned VMs (running, SSH-able, but kubelet never configured)
+  # that the operator had to rescue manually. Re-poll DHCP for any
+  # no-ip workers for one more minute; if their lease arrives, finish
+  # the join. Caught on .131 2026-05-17 — w-6 in a 2-node scale missed
+  # the original 90s budget AND the bumped 240s budget but joined fine
+  # at minute 4.
+  local rescue_deadline=$(( $(date +%s) + 60 ))
+  while (( $(date +%s) < rescue_deadline )); do
+    local any_rescued=0
+    for i in "${!new_names[@]}"; do
+      [[ -n "${new_ips[$i]}" ]] && continue
+      local n="${new_names[$i]}"
+      local mac ip
+      mac="$(virsh domiflist "$n" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
+      ip="$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$mac" '$4=="ipv4" && $0 ~ m {split($5,a,"/"); print a[1]; exit}')"
+      [[ -z "$ip" ]] && continue
+      log "rescue: ${n} late-DHCP at ${ip}, running deferred join"
+      new_ips[$i]="$ip"
+      any_rescued=1
+      # Drop the no-ip failure marker if present
+      local _refilt=()
+      for f in "${failed[@]+"${failed[@]}"}"; do
+        [[ "$f" == "${n}(no-ip)" ]] || _refilt+=("$f")
+      done
+      failed=("${_refilt[@]+"${_refilt[@]}"}")
+      # Full Phase-3 sequence for this rescued worker
+      if ! wait_for_ssh "$ip" 30; then
+        failed+=("${n}(rescue-no-ssh)"); continue
+      fi
+      run_ansible_against_vm "$ip" node-prep.yml \
+          -e "inventory_hostname_short=${n}" >/dev/null 2>&1 || true
+      local wg_id=$((100 + new_ids[i]))
+      _ssh_cmd "$ip" "kube-network init ${wg_id}" >/dev/null 2>&1 || true
+      local cp_pub new_pub
+      cp_pub="$(_ssh_cmd "$cp_ip" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)" || cp_pub=""
+      new_pub="$(_ssh_cmd "$ip" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)" || new_pub=""
+      if [[ -n "$cp_pub" && -n "$new_pub" ]]; then
+        _ssh_cmd "$cp_ip" "kube-network add-peer ${ip} ${new_pub} ${wg_id}" >/dev/null 2>&1 || true
+        _ssh_cmd "$ip" "kube-network add-peer ${cp_ip} ${cp_pub} 1" >/dev/null 2>&1 || true
+        _ssh_cmd "$ip" "kube-network pin-kubelet && systemctl restart kubelet" >/dev/null 2>&1 || true
+      fi
+      if _kube_join_one "$cp_ip" "$ip" "$n"; then
+        joined=$((joined + 1))
+      else
+        failed+=("${n}(rescue-join)")
+      fi
+    done
+    # Stop the rescue loop early if everyone has an IP now
+    local still_orphan=0
+    for i in "${!new_names[@]}"; do [[ -z "${new_ips[$i]}" ]] && still_orphan=$((still_orphan + 1)); done
+    [[ $still_orphan -eq 0 ]] && break
+    sleep 5
+  done
+
   # Phase 4: wait for the joined nodes to actually go Ready before claiming
   # success. Without this we'd repeat the original bug (claim "N added" but
   # kubelet might still be crash-looping because Cilium hasn't rolled out).
