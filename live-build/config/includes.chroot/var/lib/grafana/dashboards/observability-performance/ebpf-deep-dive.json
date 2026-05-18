@@ -1,150 +1,830 @@
 {
-  "annotations": {"list": []},
-  "title": "Observability — eBPF Deep Dive",
+  "annotations": {
+    "list": []
+  },
+  "title": "Observability \u2014 eBPF Deep Dive",
   "uid": "kldload-ebpf-deep",
-  "tags": ["ebpf", "tetragon", "hubble", "security", "kldload"],
+  "tags": [
+    "ebpf",
+    "tetragon",
+    "hubble",
+    "security",
+    "kldload"
+  ],
   "schemaVersion": 39,
   "refresh": "15s",
-  "time": {"from": "now-30m", "to": "now"},
-  "description": "Kernel-level observability: every syscall, every flow, every block I/O, every policy hit — captured by BPF programs running inside the kernel itself. Headline row shows signal volume and the in-kernel CPU/RAM cost of capturing it.",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "description": "Kernel-level observability: every syscall, every flow, every block I/O, every policy hit \u2014 captured by BPF programs running inside the kernel itself. Headline row shows signal volume and the in-kernel CPU/RAM cost of capturing it.",
   "panels": [
-
-    {"id":1,"type":"row","title":"Signal volume + cost of capture","gridPos":{"h":1,"w":24,"x":0,"y":0},"collapsed":false},
-
-    {"id":10,"type":"stat","title":"Kernel events/sec captured","gridPos":{"h":5,"w":6,"x":0,"y":1},
-     "description":"Total events per second captured directly from kernel BPF programs (Tetragon process/policy events + Hubble network flows). This is the raw signal volume the kernel sees — not log lines an agent has to ship.",
-     "targets":[{"expr":"sum(rate(tetragon_events_total[5m])) + sum(rate(hubble_flows_processed_total[5m]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","decimals":0,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"}]}}},
-     "options":{"colorMode":"background","graphMode":"area","textMode":"value_and_name"}},
-
-    {"id":11,"type":"stat","title":"If this were Splunk — $/day ingest","gridPos":{"h":5,"w":6,"x":6,"y":1},
-     "description":"Assumes 300 bytes/event (conservative — typical Tetragon JSON event is 200-500B) and Splunk Cloud's published $5/GB/day ingest rate. This is what you'd pay just to receive these same events as forwarder traffic. We never ship them — we filter in-kernel and emit only what matches a policy.",
-     "targets":[{"expr":"( sum(rate(tetragon_events_total[5m])) + sum(rate(hubble_flows_processed_total[5m])) ) * 300 * 86400 / 1073741824 * 5","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"currencyUSD","decimals":2,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"yellow","value":50},{"color":"orange","value":250},{"color":"red","value":1000}]}}},
-     "options":{"colorMode":"background","textMode":"value_and_name"}},
-
-    {"id":12,"type":"stat","title":"BPF CPU overhead (% of one core)","gridPos":{"h":5,"w":6,"x":12,"y":1},
-     "description":"Total CPU time spent inside Tetragon's BPF programs, expressed as a fraction of one core. eBPF runs in-kernel and is the cheapest observation point in the system — typical overhead is 1-3% of one core for hundreds of thousands of events/sec.",
-     "targets":[{"expr":"sum(rate(tetragon_overhead_program_seconds_total[5m])) * 100","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"percent","decimals":2,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"yellow","value":5},{"color":"red","value":15}]}}},
-     "options":{"colorMode":"background"}},
-
-    {"id":13,"type":"stat","title":"BPF data-plane memory (MB)","gridPos":{"h":5,"w":6,"x":18,"y":1},
-     "description":"Memory used by Cilium's BPF maps + program text. The entire kernel-side data plane for routing + L7 policy + observability — fits in a few hundred MB. Compare to your Splunk forwarder's RSS.",
-     "targets":[{"expr":"( sum(cilium_bpf_maps_virtual_memory_max_bytes) + sum(cilium_bpf_progs_virtual_memory_max_bytes) ) / 1024 / 1024","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"decmbytes","decimals":1,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"}]}}},
-     "options":{"colorMode":"background"}},
-
-    {"id":14,"type":"text","title":"","gridPos":{"h":3,"w":24,"x":0,"y":6},
-     "options":{"mode":"markdown","content":"**Why eBPF wins vs log-shipping:** every event above was observed in the kernel, filtered against active policies, and exported only when it mattered. Splunk's model is the inverse — agents tail logs, ship every line over the network, then a backend indexer parses them. You pay 4× for the same data: agent CPU, network bandwidth, indexer CPU, license/storage. And you still miss everything that never made it into a log — privilege use, file opens, syscall errors, in-pod traffic between containers. The dollar figure above is just the ingest tax; the visibility gap is what we actually fix."}},
-
-    {"id":20,"type":"row","title":"Tetragon — process + policy observability","gridPos":{"h":1,"w":24,"x":0,"y":9}},
-
-    {"id":21,"type":"stat","title":"Events emitted/sec (Tetragon)","gridPos":{"h":5,"w":6,"x":0,"y":10},
-     "description":"Tetragon events that matched a policy and were forwarded — execve, capability use, file ops, network ops. Kernel-observed, filtered in-kernel, structured at emission.",
-     "targets":[{"expr":"sum(rate(tetragon_events_total[1m]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","decimals":1,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"}]}}},
-     "options":{"colorMode":"background","graphMode":"area"}},
-
-    {"id":22,"type":"stat","title":"Ring buffer overrun (lost/sec)","gridPos":{"h":5,"w":6,"x":6,"y":10},
-     "description":"Events dropped because the kernel-to-userspace ring buffer overflowed. Sustained non-zero = need a bigger ring or lower event volume. Should be 0 in steady state.",
-     "targets":[{"expr":"sum(rate(tetragon_observer_ringbuf_events_lost_total[1m]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","decimals":2,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"red","value":1}]}}},
-     "options":{"colorMode":"background"}},
-
-    {"id":23,"type":"stat","title":"Tracing policies loaded","gridPos":{"h":5,"w":6,"x":12,"y":10},
-     "description":"Active Tetragon TracingPolicies. Each policy is a set of kprobes/uprobes/tracepoints with filters. More policies = deeper coverage; each adds a few KB of BPF program text.",
-     "targets":[{"expr":"sum(tetragon_tracingpolicy_loaded)","refId":"A"}],
-     "options":{"colorMode":"background"}},
-
-    {"id":24,"type":"stat","title":"Process cache size","gridPos":{"h":5,"w":6,"x":18,"y":10},
-     "description":"Processes Tetragon is tracking. Each entry holds the binary, args, parent chain, container/pod identity, capabilities — so every event can be enriched at emission without a userspace lookup.",
-     "targets":[{"expr":"sum(tetragon_process_cache_size)","refId":"A"}],
-     "options":{"colorMode":"background"}},
-
-    {"id":30,"type":"row","title":"Event flow — what the kernel is reporting","gridPos":{"h":1,"w":24,"x":0,"y":15}},
-
-    {"id":31,"type":"timeseries","title":"Events received from kernel vs exported (showing in-kernel filter)","gridPos":{"h":7,"w":12,"x":0,"y":16},
-     "description":"`received` = raw events from the BPF programs. `exported` = events that survived in-kernel + userspace filtering. The gap is what Splunk would have to ship and you would have to pay to index — and discard.",
-     "targets":[{"expr":"sum(rate(tetragon_observer_ringbuf_events_received_total[1m]))","legendFormat":"received from kernel","refId":"A"},
-                {"expr":"sum(rate(tetragon_events_exported_total[1m]))","legendFormat":"exported (post-filter)","refId":"B"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15}}}},
-
-    {"id":32,"type":"timeseries","title":"Events by msg_op (13=EXECVE, 14=EXIT, 15=KPROBE, 16=TRACEPOINT, 23=TEST)","gridPos":{"h":7,"w":12,"x":12,"y":16},
-     "description":"The kind of event firing. EXECVE / EXIT chains let you reconstruct every process tree. KPROBE / TRACEPOINT are policy-defined: file opens, network ops, capability use — whatever you wrote a TracingPolicy for.",
-     "targets":[{"expr":"sum by (msg_op) (rate(tetragon_msg_op_total[1m]))","legendFormat":"msg_op {{msg_op}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15,"stacking":{"mode":"normal"}}}}},
-
-    {"id":33,"type":"timeseries","title":"Tetragon errors/sec","gridPos":{"h":6,"w":12,"x":0,"y":23},
-     "description":"Categories of internal errors (event cache misses, ringbuf full, exporter timeouts). Should trend to zero in steady state.",
-     "targets":[{"expr":"sum by (type) (rate(tetragon_errors_total[5m]))","legendFormat":"{{type}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15}}}},
-
-    {"id":34,"type":"heatmap","title":"Event handling latency (kernel-to-userspace)","gridPos":{"h":6,"w":12,"x":12,"y":23},
-     "description":"Distribution of how long Tetragon takes to handle each event end-to-end. Hot top of histogram = falling behind, you need more userspace workers.",
-     "targets":[{"expr":"sum by (le) (rate(tetragon_handling_latency_bucket[5m]))","format":"heatmap","refId":"A"}],
-     "options":{"calculate":false,"yAxis":{"unit":"ns"}}},
-
-    {"id":40,"type":"row","title":"Block I/O latency — the kernel's view, not iostat's","gridPos":{"h":1,"w":24,"x":0,"y":29}},
-
-    {"id":41,"type":"heatmap","title":"Block read latency (ebpf_exporter — kernel block layer)","gridPos":{"h":8,"w":12,"x":0,"y":30},
-     "description":"Latency distribution of every block layer read, captured by a BPF kprobe on block_rq_issue/block_rq_complete. Bypasses iostat's averaging — you see the tail. ZFS performance forensics gold: split by operation + device label.",
-     "targets":[{"expr":"sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"read\"}[1m]))","format":"heatmap","refId":"A"}],
-     "options":{"calculate":false,"yAxis":{"unit":"s"}}},
-
-    {"id":42,"type":"heatmap","title":"Block write latency (ebpf_exporter — kernel block layer)","gridPos":{"h":8,"w":12,"x":12,"y":30},
-     "description":"Same as read latency but for writes. Tail latency here = fsync stalls = upper-layer app latency. ZIL/SLOG sizing decisions live in this heatmap.",
-     "targets":[{"expr":"sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"write\"}[1m]))","format":"heatmap","refId":"A"}],
-     "options":{"calculate":false,"yAxis":{"unit":"s"}}},
-
-    {"id":50,"type":"row","title":"Network — Hubble's L3/L4/L7 eBPF view of every pod-to-pod flow","gridPos":{"h":1,"w":24,"x":0,"y":38}},
-
-    {"id":51,"type":"timeseries","title":"Flows processed/sec","gridPos":{"h":6,"w":8,"x":0,"y":39},
-     "description":"Every TCP/UDP/ICMP flow between pods, observed in-kernel via Cilium's eBPF datapath. No app cooperation needed. No sidecar. No log line on either end. Just the kernel.",
-     "targets":[{"expr":"sum(rate(hubble_flows_processed_total[1m]))","legendFormat":"flows/s","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15}}}},
-
-    {"id":52,"type":"timeseries","title":"Network drops/sec — what NetworkPolicy enforced","gridPos":{"h":6,"w":8,"x":8,"y":39},
-     "description":"Packets dropped by Cilium's eBPF data plane, by reason. This IS the access log for in-cluster traffic — every deny was made by a BPF program running at line rate, with zero userspace involvement.",
-     "targets":[{"expr":"sum by (reason) (rate(hubble_drop_total[1m]))","legendFormat":"{{reason}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15,"stacking":{"mode":"normal"}}}}},
-
-    {"id":53,"type":"timeseries","title":"TCP flags distribution — connection lifecycle visibility","gridPos":{"h":6,"w":8,"x":16,"y":39},
-     "description":"SYN/RST/FIN/ACK rate. SYN spikes = new connections. RST = connection reset (interesting — app crash? policy deny? network blip?). FIN = clean close. The shape of these curves tells you the kind of traffic you're dealing with, no app instrumentation required.",
-     "targets":[{"expr":"sum by (flag) (rate(hubble_tcp_flags_total[1m]))","legendFormat":"{{flag}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15}}}},
-
-    {"id":54,"type":"timeseries","title":"Hubble events lost (ring buffer health)","gridPos":{"h":6,"w":12,"x":0,"y":45},
-     "description":"Hubble equivalent of the Tetragon ringbuf-lost stat. Sustained non-zero = Hubble ringbuf is overflowing under flow rate; tune `hubble.eventBufferCapacity`.",
-     "targets":[{"expr":"sum(rate(hubble_lost_events_total[1m]))","legendFormat":"lost/s","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15}}}},
-
-    {"id":55,"type":"timeseries","title":"ICMP rate (reachability probes + diagnostics)","gridPos":{"h":6,"w":12,"x":12,"y":45},
-     "description":"ICMP echo/unreachable/redirect rate. Useful for spotting Kubelet liveness-probe storms, ARP-equivalent in IPv6, and network-tier debugging.",
-     "targets":[{"expr":"sum by (type) (rate(hubble_icmp_total[1m]))","legendFormat":"{{type}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15}}}},
-
-    {"id":60,"type":"row","title":"BPF program overhead — the cost of observation","gridPos":{"h":1,"w":24,"x":0,"y":51}},
-
-    {"id":61,"type":"timeseries","title":"Tetragon BPF program time/sec (top 10 by kernel CPU)","gridPos":{"h":7,"w":12,"x":0,"y":52},
-     "description":"Time the kernel spent executing each Tetragon BPF program, per second. This is the literal CPU cost of observability, measured by the kernel itself — no estimation, no sampling.",
-     "targets":[{"expr":"topk(10, sum by (program) (rate(tetragon_overhead_program_seconds_total[1m])))","legendFormat":"{{program}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"s","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15}}}},
-
-    {"id":62,"type":"timeseries","title":"BPF program runs/sec (top 10 by call frequency)","gridPos":{"h":7,"w":12,"x":12,"y":52},
-     "description":"How often each BPF program fires. Cross-reference with the time/sec panel to spot expensive hooks: high runs + low time = cheap; low runs + high time = needs tuning.",
-     "targets":[{"expr":"topk(10, sum by (program) (rate(tetragon_overhead_program_runs_total[1m])))","legendFormat":"{{program}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15}}}},
-
-    {"id":70,"type":"row","title":"Cilium BPF data plane — map pressure (sizing health)","gridPos":{"h":1,"w":24,"x":0,"y":59}},
-
-    {"id":71,"type":"timeseries","title":"BPF map pressure — fullness ratio (top 15 maps)","gridPos":{"h":7,"w":24,"x":0,"y":60},
-     "description":"Fullness ratio per BPF map. Approaching 1.0 = the map is about to start evicting entries (connection state, identity cache, NAT entries). Sustained near-full = sizing problem; pump `bpfMapSize` for the relevant map type.",
-     "targets":[{"expr":"topk(15, cilium_bpf_map_pressure)","legendFormat":"{{map_name}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"percentunit","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15}}}},
-
-    {"id":99,"type":"text","title":"","gridPos":{"h":6,"w":24,"x":0,"y":67},
-     "options":{"mode":"markdown","content":"### What this dashboard proves\n\n| Layer | What you see here | What a log-based stack would show |\n|---|---|---|\n| **Process** | Every `execve` chain with parent/container identity (Tetragon) | What the app chose to log |\n| **Capabilities / policy** | Every `cap_use`, every TracingPolicy hit | Not at all (kernel doesn't log this) |\n| **Network** | Every flow, every drop, every TCP flag (Hubble) | TCP retransmits if you ran tcpdump; otherwise blind |\n| **Block I/O** | Real per-request latency from kernel block layer | iostat averages; you miss the tail |\n| **BPF cost** | Exact CPU time spent in each BPF program | Forwarder agent RSS + indexer CPU — and you still can't see the kernel layer |\n\n### The Splunk-equivalent cost number is conservative\n\nThe `$/day` stat above assumes **300 bytes/event and Splunk Cloud's published $5/GB/day**. Real-world numbers are usually worse:\n\n- Tetragon JSON events average **400-600 bytes** with full pod/container enrichment\n- Enterprise Splunk indexes typically run **$3-15/GB/day** depending on tier + retention\n- Forwarder CPU + network bandwidth not included — those are real money too\n- This number **does not** include the in-pod / sidecar visibility we get for free (Hubble L7) that a log-based stack would need a service mesh sidecar or per-app instrumentation to even approximate\n\n### What the kernel-level approach buys you\n\n1. **Filter at source.** A TracingPolicy decides what's interesting *before* the event leaves the kernel. Splunk's model is ship-everything-then-discard.\n2. **Structured at emission.** Events are protobuf with typed fields — no regex parsing at ingest, no schema drift.\n3. **No app cooperation.** Visibility doesn't depend on an app remembering to log, or logging correctly. The kernel is the source of truth.\n4. **Sub-percent CPU.** The cost panel above is real measured CPU time, not vendor marketing.\n5. **One agent for everything.** Same eBPF infrastructure observes processes, network, block I/O, and security events. No Splunk Forwarder + nxlog + tcpdump-cron + iostat-collector zoo."}}
-
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Signal volume + cost of capture",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 10,
+          "type": "stat",
+          "title": "Kernel events/sec captured",
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 0,
+            "y": 1
+          },
+          "description": "Total events per second captured directly from kernel BPF programs (Tetragon process/policy events + Hubble network flows). This is the raw signal volume the kernel sees \u2014 not log lines an agent has to ship.",
+          "targets": [
+            {
+              "expr": "sum(rate(tetragon_events_total[5m])) + sum(rate(hubble_flows_processed_total[5m]))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "decimals": 0,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "steps": [
+                  {
+                    "color": "green"
+                  }
+                ]
+              }
+            }
+          },
+          "options": {
+            "colorMode": "background",
+            "graphMode": "area",
+            "textMode": "value_and_name"
+          }
+        },
+        {
+          "id": 11,
+          "type": "stat",
+          "title": "If this were Splunk \u2014 $/day ingest",
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 6,
+            "y": 1
+          },
+          "description": "Assumes 300 bytes/event (conservative \u2014 typical Tetragon JSON event is 200-500B) and Splunk Cloud's published $5/GB/day ingest rate. This is what you'd pay just to receive these same events as forwarder traffic. We never ship them \u2014 we filter in-kernel and emit only what matches a policy.",
+          "targets": [
+            {
+              "expr": "( sum(rate(tetragon_events_total[5m])) + sum(rate(hubble_flows_processed_total[5m])) ) * 300 * 86400 / 1073741824 * 5",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 2,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 50
+                  },
+                  {
+                    "color": "orange",
+                    "value": 250
+                  },
+                  {
+                    "color": "red",
+                    "value": 1000
+                  }
+                ]
+              }
+            }
+          },
+          "options": {
+            "colorMode": "background",
+            "textMode": "value_and_name"
+          }
+        },
+        {
+          "id": 12,
+          "type": "stat",
+          "title": "BPF CPU overhead (% of one core)",
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 12,
+            "y": 1
+          },
+          "description": "Total CPU time spent inside Tetragon's BPF programs, expressed as a fraction of one core. eBPF runs in-kernel and is the cheapest observation point in the system \u2014 typical overhead is 1-3% of one core for hundreds of thousands of events/sec.",
+          "targets": [
+            {
+              "expr": "sum(rate(tetragon_overhead_program_seconds_total[5m])) * 100",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "decimals": 2,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 5
+                  },
+                  {
+                    "color": "red",
+                    "value": 15
+                  }
+                ]
+              }
+            }
+          },
+          "options": {
+            "colorMode": "background"
+          }
+        },
+        {
+          "id": 13,
+          "type": "stat",
+          "title": "BPF data-plane memory (MB)",
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 18,
+            "y": 1
+          },
+          "description": "Memory used by Cilium's BPF maps + program text. The entire kernel-side data plane for routing + L7 policy + observability \u2014 fits in a few hundred MB. Compare to your Splunk forwarder's RSS.",
+          "targets": [
+            {
+              "expr": "( sum(cilium_bpf_maps_virtual_memory_max_bytes) + sum(cilium_bpf_progs_virtual_memory_max_bytes) ) / 1024 / 1024",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "decmbytes",
+              "decimals": 1,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "steps": [
+                  {
+                    "color": "green"
+                  }
+                ]
+              }
+            }
+          },
+          "options": {
+            "colorMode": "background"
+          }
+        },
+        {
+          "id": 14,
+          "type": "text",
+          "title": "",
+          "gridPos": {
+            "h": 3,
+            "w": 24,
+            "x": 0,
+            "y": 6
+          },
+          "options": {
+            "mode": "markdown",
+            "content": "**Why eBPF wins vs log-shipping:** every event above was observed in the kernel, filtered against active policies, and exported only when it mattered. Splunk's model is the inverse \u2014 agents tail logs, ship every line over the network, then a backend indexer parses them. You pay 4\u00d7 for the same data: agent CPU, network bandwidth, indexer CPU, license/storage. And you still miss everything that never made it into a log \u2014 privilege use, file opens, syscall errors, in-pod traffic between containers. The dollar figure above is just the ingest tax; the visibility gap is what we actually fix."
+          }
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Tetragon \u2014 process + policy observability",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      }
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Events emitted/sec (Tetragon)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 10
+      },
+      "description": "Tetragon events that matched a policy and were forwarded \u2014 execve, capability use, file ops, network ops. Kernel-observed, filtered in-kernel, structured at emission.",
+      "targets": [
+        {
+          "expr": "sum(rate(tetragon_events_total[1m]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Ring buffer overrun (lost/sec)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 10
+      },
+      "description": "Events dropped because the kernel-to-userspace ring buffer overflowed. Sustained non-zero = need a bigger ring or lower event volume. Should be 0 in steady state.",
+      "targets": [
+        {
+          "expr": "sum(rate(tetragon_observer_ringbuf_events_lost_total[1m]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Tracing policies loaded",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 10
+      },
+      "description": "Active Tetragon TracingPolicies. Each policy is a set of kprobes/uprobes/tracepoints with filters. More policies = deeper coverage; each adds a few KB of BPF program text.",
+      "targets": [
+        {
+          "expr": "sum(tetragon_tracingpolicy_loaded)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Process cache size",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 10
+      },
+      "description": "Processes Tetragon is tracking. Each entry holds the binary, args, parent chain, container/pod identity, capabilities \u2014 so every event can be enriched at emission without a userspace lookup.",
+      "targets": [
+        {
+          "expr": "sum(tetragon_process_cache_size)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Event flow \u2014 what the kernel is reporting",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Events received from kernel vs exported (showing in-kernel filter)",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "description": "`received` = raw events from the BPF programs. `exported` = events that survived in-kernel + userspace filtering. The gap is what Splunk would have to ship and you would have to pay to index \u2014 and discard.",
+      "targets": [
+        {
+          "expr": "sum(rate(tetragon_observer_ringbuf_events_received_total[1m]))",
+          "legendFormat": "received from kernel",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(tetragon_events_exported_total[1m]))",
+          "legendFormat": "exported (post-filter)",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Events by msg_op (13=EXECVE, 14=EXIT, 15=KPROBE, 16=TRACEPOINT, 23=TEST)",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "description": "The kind of event firing. EXECVE / EXIT chains let you reconstruct every process tree. KPROBE / TRACEPOINT are policy-defined: file opens, network ops, capability use \u2014 whatever you wrote a TracingPolicy for.",
+      "targets": [
+        {
+          "expr": "sum by (msg_op) (rate(tetragon_msg_op_total[1m]))",
+          "legendFormat": "msg_op {{msg_op}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Tetragon errors/sec",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 23
+      },
+      "description": "Categories of internal errors (event cache misses, ringbuf full, exporter timeouts). Should trend to zero in steady state.",
+      "targets": [
+        {
+          "expr": "sum by (type) (rate(tetragon_errors_total[5m]))",
+          "legendFormat": "{{type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      }
+    },
+    {
+      "id": 34,
+      "type": "heatmap",
+      "title": "Event handling latency (kernel-to-userspace)",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
+      "description": "Distribution of how long Tetragon takes to handle each event end-to-end. Hot top of histogram = falling behind, you need more userspace workers.",
+      "targets": [
+        {
+          "expr": "sum by (le) (rate(tetragon_handling_latency_bucket[5m]))",
+          "format": "heatmap",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "ns"
+        }
+      }
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Block I/O latency \u2014 the kernel's view, not iostat's",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      }
+    },
+    {
+      "id": 41,
+      "type": "heatmap",
+      "title": "Block read latency (ebpf_exporter \u2014 kernel block layer)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "description": "Latency distribution of every block layer read, captured by a BPF kprobe on block_rq_issue/block_rq_complete. Bypasses iostat's averaging \u2014 you see the tail. ZFS performance forensics gold: split by operation + device label.",
+      "targets": [
+        {
+          "expr": "sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"read\"}[1m]))",
+          "format": "heatmap",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "id": 42,
+      "type": "heatmap",
+      "title": "Block write latency (ebpf_exporter \u2014 kernel block layer)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "description": "Same as read latency but for writes. Tail latency here = fsync stalls = upper-layer app latency. ZIL/SLOG sizing decisions live in this heatmap.",
+      "targets": [
+        {
+          "expr": "sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"write\"}[1m]))",
+          "format": "heatmap",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Network \u2014 Hubble's L3/L4/L7 eBPF view of every pod-to-pod flow",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      }
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "Flows processed/sec",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 39
+      },
+      "description": "Every TCP/UDP/ICMP flow between pods, observed in-kernel via Cilium's eBPF datapath. No app cooperation needed. No sidecar. No log line on either end. Just the kernel.",
+      "targets": [
+        {
+          "expr": "sum(rate(hubble_flows_processed_total[1m]))",
+          "legendFormat": "flows/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      }
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "Network drops/sec \u2014 what NetworkPolicy enforced",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 39
+      },
+      "description": "Packets dropped by Cilium's eBPF data plane, by reason. This IS the access log for in-cluster traffic \u2014 every deny was made by a BPF program running at line rate, with zero userspace involvement.",
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(hubble_drop_total[1m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "TCP flags distribution \u2014 connection lifecycle visibility",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 39
+      },
+      "description": "SYN/RST/FIN/ACK rate. SYN spikes = new connections. RST = connection reset (interesting \u2014 app crash? policy deny? network blip?). FIN = clean close. The shape of these curves tells you the kind of traffic you're dealing with, no app instrumentation required.",
+      "targets": [
+        {
+          "expr": "sum by (flag) (rate(hubble_tcp_flags_total[1m]))",
+          "legendFormat": "{{flag}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      }
+    },
+    {
+      "id": 54,
+      "type": "timeseries",
+      "title": "Hubble events lost (ring buffer health)",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 45
+      },
+      "description": "Hubble equivalent of the Tetragon ringbuf-lost stat. Sustained non-zero = Hubble ringbuf is overflowing under flow rate; tune `hubble.eventBufferCapacity`.",
+      "targets": [
+        {
+          "expr": "sum(rate(hubble_lost_events_total[1m]))",
+          "legendFormat": "lost/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      }
+    },
+    {
+      "id": 55,
+      "type": "timeseries",
+      "title": "ICMP rate (reachability probes + diagnostics)",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 45
+      },
+      "description": "ICMP echo/unreachable/redirect rate. Useful for spotting Kubelet liveness-probe storms, ARP-equivalent in IPv6, and network-tier debugging.",
+      "targets": [
+        {
+          "expr": "sum by (type) (rate(hubble_icmp_total[1m]))",
+          "legendFormat": "{{type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      }
+    },
+    {
+      "id": 60,
+      "type": "row",
+      "title": "BPF program overhead \u2014 the cost of observation",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 51
+      }
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "Tetragon BPF program time/sec (top 10 by kernel CPU)",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "description": "Time the kernel spent executing each Tetragon BPF program, per second. This is the literal CPU cost of observability, measured by the kernel itself \u2014 no estimation, no sampling.",
+      "targets": [
+        {
+          "expr": "topk(10, sum by (program) (rate(tetragon_overhead_program_seconds_total[1m])))",
+          "legendFormat": "{{program}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      }
+    },
+    {
+      "id": 62,
+      "type": "timeseries",
+      "title": "BPF program runs/sec (top 10 by call frequency)",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "description": "How often each BPF program fires. Cross-reference with the time/sec panel to spot expensive hooks: high runs + low time = cheap; low runs + high time = needs tuning.",
+      "targets": [
+        {
+          "expr": "topk(10, sum by (program) (rate(tetragon_overhead_program_runs_total[1m])))",
+          "legendFormat": "{{program}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      }
+    },
+    {
+      "id": 70,
+      "type": "row",
+      "title": "Cilium BPF data plane \u2014 map pressure (sizing health)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 59
+      }
+    },
+    {
+      "id": 71,
+      "type": "timeseries",
+      "title": "BPF map pressure \u2014 fullness ratio (top 15 maps)",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "description": "Fullness ratio per BPF map. Approaching 1.0 = the map is about to start evicting entries (connection state, identity cache, NAT entries). Sustained near-full = sizing problem; pump `bpfMapSize` for the relevant map type.",
+      "targets": [
+        {
+          "expr": "topk(15, cilium_bpf_map_pressure)",
+          "legendFormat": "{{map_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      }
+    },
+    {
+      "id": 99,
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 67
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### What this dashboard proves\n\n| Layer | What you see here | What a log-based stack would show |\n|---|---|---|\n| **Process** | Every `execve` chain with parent/container identity (Tetragon) | What the app chose to log |\n| **Capabilities / policy** | Every `cap_use`, every TracingPolicy hit | Not at all (kernel doesn't log this) |\n| **Network** | Every flow, every drop, every TCP flag (Hubble) | TCP retransmits if you ran tcpdump; otherwise blind |\n| **Block I/O** | Real per-request latency from kernel block layer | iostat averages; you miss the tail |\n| **BPF cost** | Exact CPU time spent in each BPF program | Forwarder agent RSS + indexer CPU \u2014 and you still can't see the kernel layer |\n\n### The Splunk-equivalent cost number is conservative\n\nThe `$/day` stat above assumes **300 bytes/event and Splunk Cloud's published $5/GB/day**. Real-world numbers are usually worse:\n\n- Tetragon JSON events average **400-600 bytes** with full pod/container enrichment\n- Enterprise Splunk indexes typically run **$3-15/GB/day** depending on tier + retention\n- Forwarder CPU + network bandwidth not included \u2014 those are real money too\n- This number **does not** include the in-pod / sidecar visibility we get for free (Hubble L7) that a log-based stack would need a service mesh sidecar or per-app instrumentation to even approximate\n\n### What the kernel-level approach buys you\n\n1. **Filter at source.** A TracingPolicy decides what's interesting *before* the event leaves the kernel. Splunk's model is ship-everything-then-discard.\n2. **Structured at emission.** Events are protobuf with typed fields \u2014 no regex parsing at ingest, no schema drift.\n3. **No app cooperation.** Visibility doesn't depend on an app remembering to log, or logging correctly. The kernel is the source of truth.\n4. **Sub-percent CPU.** The cost panel above is real measured CPU time, not vendor marketing.\n5. **One agent for everything.** Same eBPF infrastructure observes processes, network, block I/O, and security events. No Splunk Forwarder + nxlog + tcpdump-cron + iostat-collector zoo."
+      }
+    }
   ]
 }
