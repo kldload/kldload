@@ -1716,6 +1716,28 @@ async def ws_handler(websocket):
                         "key":      secret_get("rhel-activation-key") or "",
                         "org":      secret_get("rhel-organization") or "",
                     }))
+                elif action == "install_reboot":
+                    # Reboot the host into the installed system. Fires
+                    # `systemctl reboot` via systemd-run so the command
+                    # survives the webui's own SIGTERM during shutdown.
+                    # 2-second delay so this WS reply can flush before
+                    # the network goes down.
+                    await websocket.send(json.dumps({
+                        "type": "log_line", "target": "install",
+                        "line": "[reboot] firing systemctl reboot in 2s — webui going down…",
+                    }))
+                    try:
+                        await asyncio.create_subprocess_exec(
+                            "systemd-run", "--on-active=2s", "--unit=kldload-postinstall-reboot",
+                            "systemctl", "reboot",
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                    except Exception as e:
+                        await websocket.send(json.dumps({
+                            "type": "error",
+                            "msg": f"reboot failed to schedule: {e}",
+                        }))
                 elif action == "install_abort":
                     # Stop the active kldinstall-* systemd unit. The
                     # subprocess is in its own cgroup so systemctl stop

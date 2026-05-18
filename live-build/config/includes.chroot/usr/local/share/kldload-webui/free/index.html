@@ -1059,7 +1059,10 @@ select option:checked { background: #00b8d9; color: #000; }
       <div id="install-running" style="display:none">
         <div class="panel-hdr" style="margin-bottom:0.6rem;padding:0;display:flex;justify-content:space-between;align-items:center">
           <span>◈ Installing — do not power off</span>
-          <button class="btn btn-danger btn-sm" onclick="abortInstall()" title="Stop the in-flight installer (kills the kldinstall-* systemd unit). Partially-written disks will need a Quick Wipe before retrying.">✗ Abort install</button>
+          <span style="display:flex;gap:0.5rem">
+            <button id="install-abort-btn" class="btn btn-danger btn-sm" onclick="abortInstall()" title="Stop the in-flight installer (kills the kldinstall-* systemd unit). Partially-written disks will need a Quick Wipe before retrying.">✗ Abort install</button>
+            <button id="install-reboot-btn" class="btn btn-primary btn-sm" onclick="installReboot()" title="Reboot the host into the installed system. Pull the USB before clicking if you want to boot from the installed disk on next power-up." style="display:none">↻ Reboot now</button>
+          </span>
         </div>
         <div id="install-profile-summary" style="font-size:0.85rem;color:var(--accent);margin-bottom:0.5rem;font-family:var(--mono)"></div>
         <div class="progress-bar-wrap"><div class="progress-bar" id="install-progress"></div></div>
@@ -3793,12 +3796,55 @@ function handle(msg) {
         const box = document.getElementById('install-log');
         if (msg.rc === 0) {
           if (bar) { bar.className = 'progress-bar'; bar.style.width = '100%'; bar.style.background = '#8b5cf6'; }
-          if (st)  st.textContent = '✓ Install complete — system powering off…';
-          appendLog(box, '✓ Install complete. Initial snapshot taken. System powering off…');
+          appendLog(box, '✓ Install complete. Initial snapshot taken.');
+          appendLog(box, '↻ Auto-rebooting in 10 seconds — pull the USB now if you want to boot from the installed disk.');
+          // Reveal reboot button, hide abort (no longer abortable).
+          const ab = document.getElementById('install-abort-btn');
+          const rb2 = document.getElementById('install-reboot-btn');
+          if (ab) ab.style.display = 'none';
+          if (rb2) { rb2.style.display = ''; rb2.textContent = '↻ Reboot now'; }
+          // 10-second auto-reboot countdown. Operator can cancel by clicking
+          // the "Cancel auto-reboot" button OR by clicking "Reboot now" to
+          // fire immediately.
+          window._installRebootRemaining = 10;
+          window._installAutoRebootTimer && clearInterval(window._installAutoRebootTimer);
+          window._installAutoRebootTimer = setInterval(() => {
+            window._installRebootRemaining--;
+            if (st) st.textContent = `✓ Install complete — auto-rebooting in ${window._installRebootRemaining}s… (Cancel to keep webui open)`;
+            if (window._installRebootRemaining <= 0) {
+              clearInterval(window._installAutoRebootTimer);
+              window._installAutoRebootTimer = null;
+              if (st) st.textContent = '↻ Rebooting…';
+              appendLog(box, '↻ Auto-reboot firing now.');
+              send({ action: 'install_reboot' });
+            }
+          }, 1000);
+          // Swap "Reboot now" semantics for a cancel option so operator can
+          // hold the system on the live installer (e.g. to inspect logs).
+          // The existing button is repurposed via a sibling Cancel button.
+          if (rb2 && !document.getElementById('install-cancel-reboot-btn')) {
+            const cancel = document.createElement('button');
+            cancel.id = 'install-cancel-reboot-btn';
+            cancel.className = 'btn btn-ghost btn-sm';
+            cancel.textContent = '✗ Cancel auto-reboot';
+            cancel.title = 'Stay on the live installer instead of rebooting into the installed disk';
+            cancel.onclick = function() {
+              if (window._installAutoRebootTimer) {
+                clearInterval(window._installAutoRebootTimer);
+                window._installAutoRebootTimer = null;
+              }
+              if (st) st.textContent = '✓ Install complete — auto-reboot cancelled. Reboot manually when ready.';
+              cancel.remove();
+              appendLog(box, '✗ Auto-reboot cancelled by operator. System stays on live installer.');
+            };
+            rb2.parentNode.insertBefore(cancel, rb2);
+          }
         } else {
           if (bar) { bar.className = 'progress-bar'; bar.style.width = '100%'; bar.style.background = 'var(--danger)'; }
           if (st)  st.textContent = `✗ Install failed (exit ${msg.rc})`; var rb=document.getElementById('install-retry'); if(rb) rb.style.display='block';
           appendLog(box, `✗ Install failed (exit ${msg.rc})`);
+          const ab2 = document.getElementById('install-abort-btn');
+          if (ab2) ab2.style.display = 'none';
         }
       } else if (target === 'k8s') {
         appendLog(document.getElementById('k8s-log'), msg.rc === 0 ? '✓ Done.' : `✗ Failed (rc=${msg.rc})`);
@@ -4799,6 +4845,19 @@ function toggleExportFields() {
   const fmt = document.getElementById('install-export-format')?.value || 'none';
   const fields = document.getElementById('export-remote-fields');
   if (fields) fields.style.display = fmt !== 'none' ? 'block' : 'none';
+}
+
+// Reboot the host into the freshly-installed system. Backend fires
+// `systemctl reboot` with a short delay so this WS message can be
+// flushed back to the client before the network goes down. Confirm
+// dialog warns the operator to pull the USB first if they want the
+// installed disk to be the next boot target (otherwise the live ISO
+// boots again on most BIOS configs).
+function installReboot() {
+  if (!confirm('Reboot now?\n\nPull the USB / ISO first if you want to boot from the newly-installed disk on next power-up. With the USB still inserted, most BIOSes will reboot back into the live installer.')) return;
+  const st = document.getElementById('install-status');
+  if (st) st.textContent = '↻ Rebooting…';
+  send({ action: 'install_reboot' });
 }
 
 // Abort the in-flight install. Stops the kldinstall-*.service via the
