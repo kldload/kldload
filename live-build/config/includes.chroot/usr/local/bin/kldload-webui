@@ -978,7 +978,8 @@ def get_system_info():
         info["ai_webui"] = r2.status == 200
     except Exception:
         pass
-    # Live mode: no KLDLOAD_INSTALLED=1 in manifest
+    # Live mode: no KLDLOAD_INSTALLED=1 in manifest. Used elsewhere in the
+    # UI to gate live-only / installed-only features.
     info["live_mode"] = True
     try:
         with open("/etc/kldload/install-manifest.env") as f:
@@ -986,6 +987,26 @@ def get_system_info():
                 info["live_mode"] = False
     except Exception:
         pass
+    # Install panel visibility — separated from `live_mode` 2026-05-17.
+    # Why: hiding the Install tab forever after first install is a UX trap.
+    # Re-install, golden-image refresh, recovery from a botched first install,
+    # and demo iteration all want the tab back. Default is now ALWAYS visible.
+    # Set KLDLOAD_HIDE_INSTALL=1 in /etc/kldload/webui.conf (or as an env var)
+    # to restore the legacy "hide after install" behavior. Same flag governs
+    # the export-as-image workflow, which lives inside the install view.
+    info["show_install_panel"] = True
+    _hide_install = os.environ.get("KLDLOAD_HIDE_INSTALL", "0") == "1"
+    try:
+        with open("/etc/kldload/webui.conf") as f:
+            for _line in f:
+                _line = _line.strip()
+                if _line.startswith("KLDLOAD_HIDE_INSTALL="):
+                    _hide_install = _line.split("=", 1)[1].strip().strip('"').strip("'") == "1"
+                    break
+    except Exception:
+        pass
+    if _hide_install and not info["live_mode"]:
+        info["show_install_panel"] = False
     # Grains: node_index, wg1_ip
     try:
         grains_path = "/etc/salt/grains"
