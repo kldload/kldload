@@ -5442,7 +5442,13 @@ function renderK8sStatus(data) {
     tbody.innerHTML = data.nodes.map(n => {
       const ready = (n.status || '').includes('Ready');
       const top = (window._k8sTopNodes || {})[n.name];
-      const topCell = top ? `<span style="color:var(--muted);font-size:0.75rem" title="CPU: ${esc(top.cpu)} (${esc(top.cpu_pct)})  Memory: ${esc(top.mem)} (${esc(top.mem_pct)})">${esc(top.cpu_pct)} / ${esc(top.mem_pct)}</span>` : '';
+      // Suppress the topCell if metrics-server hasn't observed this node
+      // yet — kubectl top emits "<unknown>" for the values, which is uglier
+      // than just not showing them at all. Common right after a new node
+      // joins (~30-60s lag before metrics-server scrapes it).
+      const _hasTop = top && top.cpu_pct && !String(top.cpu_pct).includes('unknown')
+                          && top.mem_pct && !String(top.mem_pct).includes('unknown');
+      const topCell = _hasTop ? `<span style="color:var(--muted);font-size:0.75rem" title="CPU: ${esc(top.cpu)} (${esc(top.cpu_pct)})  Memory: ${esc(top.mem)} (${esc(top.mem_pct)})">${esc(top.cpu_pct)} / ${esc(top.mem_pct)}</span>` : '';
       // Compact labels/taints subtitle. Show only the keys the user
       // probably cares about — non-built-in labels (i.e. not the
       // kubernetes.io/* / node-role.kubernetes.io/* defaults). Taints
@@ -5458,17 +5464,18 @@ function renderK8sStatus(data) {
         .map(([k,v]) => `${k}=${v}`).join('\n');
       const taintTooltip = taints
         .map(t => `${t.key}${t.value?'='+t.value:''}:${t.effect}`).join('\n');
-      const labelChips = userLabels.length
-        ? userLabels.slice(0, 3).map(([k,v]) =>
+      // Don't render anything when there are no user labels AND no taints —
+      // the "no labels" filler was just noise on every row.
+      let subtitle = '';
+      if (userLabels.length || taints.length) {
+        const labelChips = userLabels.slice(0, 3).map(([k,v]) =>
             `<span style="display:inline-block;background:var(--accent-bg);color:var(--accent);padding:0.05em 0.4em;border-radius:8px;font-size:0.7rem;font-family:monospace;margin-right:0.25rem" title="${esc(k)}=${esc(v)}">${esc(k.split('/').pop())}</span>`
-          ).join('') + (userLabels.length > 3 ? `<span style="color:var(--text-dim);font-size:0.7rem">+${userLabels.length-3}</span>` : '')
-        : `<span style="color:var(--text-dim);font-size:0.7rem">no labels</span>`;
-      const taintChips = taints.length
-        ? taints.slice(0, 2).map(t =>
+          ).join('') + (userLabels.length > 3 ? `<span style="color:var(--text-dim);font-size:0.7rem">+${userLabels.length-3}</span>` : '');
+        const taintChips = taints.slice(0, 2).map(t =>
             `<span style="display:inline-block;background:var(--warn-bg);color:var(--warn);padding:0.05em 0.4em;border-radius:8px;font-size:0.7rem;font-family:monospace;margin-right:0.25rem" title="${esc(t.key)}${t.value?'='+esc(t.value):''}:${esc(t.effect)}">⛔ ${esc(t.key)}</span>`
-          ).join('') + (taints.length > 2 ? `<span style="color:var(--warn);font-size:0.7rem">+${taints.length-2}</span>` : '')
-        : '';
-      const subtitle = `<div style="font-size:0.7rem;margin-top:0.15rem;font-family:var(--font-sans);font-weight:400" title="${esc(labelTooltip)}${taintTooltip?' \\u2014 taints:\\n'+esc(taintTooltip):''}">${labelChips}${taintChips}</div>`;
+          ).join('') + (taints.length > 2 ? `<span style="color:var(--warn);font-size:0.7rem">+${taints.length-2}</span>` : '');
+        subtitle = `<div style="font-size:0.7rem;margin-top:0.15rem;font-family:var(--font-sans);font-weight:400" title="${esc(labelTooltip)}${taintTooltip?' \\u2014 taints:\\n'+esc(taintTooltip):''}">${labelChips}${taintChips}</div>`;
+      }
       return `<tr class="k8s-row" data-kind="node" data-name="${esc(n.name)}" onclick="k8sRowClick(this)" style="cursor:pointer" title="Click for events, pods on this node, capacity">
         <td onclick="event.stopPropagation()" style="padding:0.55rem 0.5rem"><input type="checkbox" class="k8s-sel-node" data-name="${esc(n.name)}" onchange="k8sUpdateSelCount('node')"></td>
         <td style="font-family:monospace;font-weight:600;color:var(--accent2)">${esc(n.name)} ${topCell}${subtitle}</td>

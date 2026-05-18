@@ -1931,9 +1931,16 @@ NETCFG
     new_ips+=("")  # filled in next pass
   done
 
-  # Phase 2: wait for DHCP leases, then SSH
-  log "Waiting for new workers to take DHCP leases (90s budget)..."
-  local deadline_ip=$(( $(date +%s) + 90 ))
+  # Phase 2: wait for DHCP leases, then SSH. Bumped 90 → 240 on 2026-05-17
+  # after .131 reproduced the same orphan-VM bug from earlier: Fedora cloud-
+  # init on freshly-cloned VMs, when several parallel clones are booting
+  # under host load, can take 100-180s to acquire a lease + run all the
+  # init phases (machine-id reset, hostname set, ssh-key install, SELinux
+  # relabel). When the 90s budget expired the worker was marked no-ip and
+  # phase 3 silently skipped its join — leaving an orphan VM with no
+  # kubelet config that the user has to either rescue manually or destroy.
+  log "Waiting for new workers to take DHCP leases (240s budget)..."
+  local deadline_ip=$(( $(date +%s) + 240 ))
   while (( $(date +%s) < deadline_ip )); do
     local pending=0
     for i in "${!new_names[@]}"; do
