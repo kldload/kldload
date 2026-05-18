@@ -4440,31 +4440,20 @@ function selectTarget(el) {
     }
   });
 
-  // Distro selection on profile change:
-  //   Workload profiles (kvm/k8s/zfslab/ai/devops) — ALWAYS re-select the
-  //   preferred distro (Fedora 44, our test target). The "always" matters:
-  //   if the user already had Fedora selected and clicks KVM, the
-  //   selected-class would otherwise just stay on the same card with no
-  //   visual feedback — operators read that as "did anything happen?"
-  //   Re-applying the selection produces a brief border-flash via the
-  //   transition declared in .target-card.selected and answers the
-  //   question. Plus it forces the role-summary / form to recompute
-  //   from a known-good state.
-  //   Generic profiles (core/server/desktop) — only switch when the
-  //   current distro isn't on the allowlist. No need to override the
-  //   user's free choice across compatible distros.
-  const _workloadRoles = ['kvm','k8s','zfslab','ai','devops'];
-  const _isWorkload = _workloadRoles.includes(el.dataset.role);
+  // Distro selection on profile change: only switch when the currently-
+  // selected distro is no longer in the new profile's allowlist (e.g.
+  // user picked Rocky on server, then clicked KVM — Rocky isn't on
+  // kvm's allowlist, so jump-pick the first allowed). Otherwise leave
+  // the user's choice alone. Tried a re-flash-Fedora-every-time
+  // approach for visual confirmation — turned out to be more annoying
+  // than helpful: clicking KVM after deliberately picking RHEL
+  // stomped the choice back to Fedora.
   const _curSelected = document.querySelector('#distro-grid .target-card.selected');
   const _curDistro = _curSelected ? _curSelected.dataset.distro : null;
-  if (_isWorkload || !_allowed.includes(_curDistro)) {
+  if (!_allowed.includes(_curDistro)) {
     const _preferred = _allowed.includes('fedora') ? 'fedora' : _allowed[0];
     const _newCard = document.querySelector('#distro-grid .target-card[data-distro="' + _preferred + '"]');
     if (_newCard && typeof selectDistro === 'function') {
-      // Brief flash to draw the eye even when the same card stays selected.
-      _newCard.style.transition = 'border-color 0.15s, background 0.15s, box-shadow 0.15s';
-      _newCard.style.boxShadow = '0 0 0 3px rgba(59,130,246,0.45)';
-      setTimeout(() => { _newCard.style.boxShadow = ''; }, 300);
       selectDistro(_newCard);
     }
   }
