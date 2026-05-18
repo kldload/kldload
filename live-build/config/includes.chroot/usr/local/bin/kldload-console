@@ -76,13 +76,28 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   #     → hard-refresh-required loop on F11+shift-arrow navigation: tcplife
   #     exited fast, last client detached during the race, session GC'd,
   #     reconnect found nothing to attach to.
-  #   remain-on-exit on — when an F-key window's command exits (bcc tool
-  #     fails on a missing tracepoint, htop dies on OOM, etc.) the window
-  #     stays with the last screen of output visible. Without this, the
-  #     window closes silently and the operator never sees WHY a tool
-  #     failed; they just see the window disappear.
+  #   remain-on-exit failed — when an F-key tool exits with NON-ZERO status
+  #     (bcc tool fails on a missing tracepoint, htop dies on OOM, kubectl
+  #     can't reach the cluster, etc.) the window stays open with the
+  #     last screen of output visible so the operator can read the
+  #     error. On CLEAN exit (status 0 — e.g. Ctrl+C of an execsnoop run
+  #     reading from stdout) the window auto-closes; otherwise the dead
+  #     "Pane is dead (status 0…)" message strands the operator with no
+  #     intuitive way to dismiss it. Caught 2026-05-18: user pressed
+  #     Alt+E → execsnoop streamed live → Ctrl+C → pane went dead and
+  #     "couldn't be closed" because operator didn't know Alt+X / Alt+Q
+  #     existed. `failed` keeps the safety net for the error case while
+  #     making the success case do-the-right-thing.
   tmux set-option -g destroy-unattached off
-  tmux set-option -g remain-on-exit on
+  tmux set-option -g remain-on-exit failed
+  # `remain-on-exit failed` + the standard kill-pane bindings (Alt+X /
+  # Alt+Q / Ctrl+Q already defined below) handle the dead-pane dismiss
+  # case. We don't bind "Any" globally to kill-pane because that would
+  # eat every keystroke in every pane including live ones (catastrophic
+  # for the shell window). Operators can still close a dead pane with
+  # Alt+X (kill-pane), Alt+Q (kill-window), or just re-press the same
+  # F-key / Alt-letter that opened it — _ktoggle-win sees the named
+  # window and closes it.
   # The home tab greets the user with an ASCII-art cheatsheet covering
   # every key binding. `menu` is aliased so a user who cleared the screen
   # can type it to redraw. _kconsole-home uses 256-color ANSI; falls back
