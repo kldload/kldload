@@ -3087,12 +3087,18 @@ async def _run_install(websocket, msg):
     if "distro" not in params:
         params["distro"] = _detect_distro()
     # RHEL credentials fallback — if the operator saved creds in the
-    # Dashboard's RHEL Credentials panel (rhel-username / rhel-password /
-    # rhel-activation-key secrets) but left the Install-to-Disk RHEL
-    # fields blank, pull from secrets instead of failing the install
-    # with "no RHEL creds provided". Only fires for the rhel distro;
-    # other distros never look at these fields. Form values always win
-    # if the operator explicitly typed them.
+    # Dashboard's RHEL Credentials panel but left the Install-to-Disk
+    # RHEL fields blank, pull from the secrets store. Only fires for
+    # the rhel distro; other distros never look at these fields. Form
+    # values always win when present.
+    #
+    # CRITICAL: parameter names MUST match the install form's payload
+    # exactly because the answers-file builder upper-cases them and
+    # prefixes KLDLOAD_. The install form sends rhel_username /
+    # rhel_password / rhel_key / rhel_org → KLDLOAD_RHEL_USERNAME etc.
+    # An earlier rev used rhel_user / rhel_pass which produced
+    # KLDLOAD_RHEL_USER / KLDLOAD_RHEL_PASS — installer rejected with
+    # "ERROR: RHEL install requires KLDLOAD_RHEL_USERNAME...".
     if params.get("distro") == "rhel":
         if not (params.get("rhel_key") or "").strip():
             _saved_key = secret_get("rhel-activation-key") or ""
@@ -3102,21 +3108,42 @@ async def _run_install(websocket, msg):
                     "type": "log_line", "target": "install",
                     "line": "[rhel] using activation-key from saved Dashboard credentials",
                 }))
-        # Username + password (alternative to activation key). Empty
-        # values stay empty so the installer's preflight knows to skip
-        # the username/password code path.
-        if not (params.get("rhel_user") or "").strip():
+        if not (params.get("rhel_org") or "").strip():
+            _saved_org = secret_get("rhel-organization") or ""
+            if _saved_org:
+                params["rhel_org"] = _saved_org
+        if not (params.get("rhel_username") or "").strip():
             _saved_user = secret_get("rhel-username") or ""
             if _saved_user:
-                params["rhel_user"] = _saved_user
-        if not (params.get("rhel_pass") or "").strip():
+                params["rhel_username"] = _saved_user
+        if not (params.get("rhel_password") or "").strip():
             _saved_pass = secret_get("rhel-password") or ""
             if _saved_pass:
-                params["rhel_pass"] = _saved_pass
+                params["rhel_password"] = _saved_pass
                 await websocket.send(json.dumps({
                     "type": "log_line", "target": "install",
                     "line": "[rhel] using username/password from saved Dashboard credentials",
                 }))
+        # Hard preflight here so the operator gets a clear error in the
+        # webui log instead of waiting for the installer to bail with a
+        # generic message buried 200 lines deep.
+        _have_userpass = (params.get("rhel_username") or "").strip() and (params.get("rhel_password") or "").strip()
+        _have_keyorg   = (params.get("rhel_key")      or "").strip() and (params.get("rhel_org")      or "").strip()
+        if not (_have_userpass or _have_keyorg):
+            _missing = []
+            if not (params.get("rhel_username") or "").strip(): _missing.append("Username")
+            if not (params.get("rhel_password") or "").strip(): _missing.append("Password")
+            if not (params.get("rhel_key")      or "").strip(): _missing.append("Activation key")
+            if not (params.get("rhel_org")      or "").strip(): _missing.append("Org ID")
+            await websocket.send(json.dumps({
+                "type": "log_line", "target": "install",
+                "line": f"[rhel] missing credentials — need Username+Password OR Activation-key+Org. Missing: {', '.join(_missing)}",
+            }))
+            await websocket.send(json.dumps({
+                "type": "exec_done", "target": "install", "rc": 2,
+            }))
+            INSTALL_STATE_PATH.write_text(json.dumps({"running": False, "rc": 2}))
+            return
     answers = []
     for k, v in params.items():
         key = k.upper()
