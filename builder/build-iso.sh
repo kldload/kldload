@@ -866,15 +866,17 @@ OSREL
 if [[ "$EDITION" != "core" ]]; then
     # Copy kldload tools (short names). Added for pass-12:
     #   kldload-lh — LogHog cluster-wide wrapper (F5 in tmux console)
-    for tool in kst kst-dashboard ksnap kclone kdf kdir kpkg kexport kldload-help kldload-mgmt kldload-test kldload-install-target kldload-webui kldload-overview kldload-doctor kldload-db kldload-inventory kldload-console kldload-dash kldload-lh kldload-follow \
-                 kinspect kztest-tail _ktoggle-win _kconsole-home \
-                 kvm-create kvm-clone kvm-snap kvm-delete kvm-list kvm-demo \
-                 kube-setup kube-init kube-join kube-status kube-reset kube-network kube-load-images kube-smoke-test kube-cluster kube-demo \
-                 kzfs-test kzfs-lab klab klab-exporter klab-prom-targets klab-vm-debug-bundle \
-                 kldload-obs-check arcstats-exporter zpool-scrub-exporter \
-                 bob bob-agent bob-bash bob-desktop bob-do bob-home bob-model bob-remote bob-sys bob-voice; do
-        src="/build/live-build/config/includes.chroot/usr/local/bin/${tool}"
-        [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/local/bin/${tool}" && chmod +x "${ROOTFS}/usr/local/bin/${tool}"
+    # Wholesale-copy /usr/local/bin/ from includes.chroot — the includes
+    # tree is the curated source of truth, so anything that lands there
+    # should reach the rootfs without an allow-list maintenance burden.
+    # Previous opt-in list silently dropped new tools (caught build #33
+    # 2026-05-18: kldload-follow was added for F3 but never copied →
+    # operator hit F3 and got "command not found"). chmod +x preserves
+    # the +x bit; cp -p keeps mtimes for debug correlation.
+    for src in /build/live-build/config/includes.chroot/usr/local/bin/*; do
+        [[ -f "$src" ]] || continue
+        cp -p "$src" "${ROOTFS}/usr/local/bin/"
+        chmod +x "${ROOTFS}/usr/local/bin/$(basename "$src")"
     done
 
     # Bob's sbin tools — boot splash (hardware detect + progress + quotes)
