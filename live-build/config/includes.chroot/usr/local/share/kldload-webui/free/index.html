@@ -95,6 +95,18 @@ select option:checked { background: #00b8d9; color: #000; }
         <span>Console &mdash; <strong id="vm-console-name">&mdash;</strong></span>
       </div>
       <div style="display:flex;gap:0.4rem">
+        <!-- Same Pull-selection bridge as the main terminal drawer. Pulls
+             tmux's paste-buffer (filled by copy-selection-no-clear on
+             mouse-drag-release) into a real DOM textarea so Cmd+C / Ctrl+C
+             native copy works regardless of cert/clipboard-API state.
+             Buffer is session-global so a selection made in this VM
+             console reads correctly here. -->
+        <button class="btn btn-primary btn-sm" onclick="termPullBuffer()" title="Pull last terminal selection into a copy-friendly modal">&#128203; Pull selection</button>
+        <!-- vncMode-only: swap to SSH so the operator gets a real xterm.js
+             where text can be highlighted + copied. noVNC is a pixel stream
+             so there is no text concept — confusing for new users. Button
+             is hidden unless we're in vnc kind (set in _vmOpenModalShell). -->
+        <button class="btn btn-ghost btn-sm" id="vm-console-switch-ssh" onclick="vmConsoleSwitchToSsh()" title="Close the graphical Display and open a real SSH terminal where you can copy text" style="display:none">&#8633; Switch to SSH</button>
         <button class="btn btn-ghost btn-sm" onclick="vmConsoleReload()" title="Re-attach to the VM serial">&#8634; Reattach</button>
         <button class="btn btn-ghost btn-sm" onclick="vmConsoleOpenInNew()" title="Open this console in a new browser tab">&#8599; New tab</button>
         <button class="btn btn-danger btn-sm" onclick="vmConsoleClose()" title="Close console + kill tmux window">&#10005; Close</button>
@@ -2505,6 +2517,7 @@ select option:checked { background: #00b8d9; color: #000; }
           <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_test_results'})" title="Reload results">↻</button>
         </div>
         <div class="ws-tabs" role="tablist">
+          <button class="ws-tab"        data-sub="dash"    onclick="zfsTestSubTab('dash')">Dashboards</button>
           <button class="ws-tab active" data-sub="run"     onclick="zfsTestSubTab('run')">Run</button>
           <button class="ws-tab"        data-sub="results" onclick="zfsTestSubTab('results')">Results</button>
           <button class="ws-tab"        data-sub="history" onclick="zfsTestSubTab('history')">History</button>
@@ -2634,6 +2647,37 @@ select option:checked { background: #00b8d9; color: #000; }
         </div>
       </div>
 
+      <!-- ── Dashboards ────────────────────────────────────────────────
+           Moved from the standalone Metrics catalog (formerly under
+           "ZFS Test Lab" group) so test runs + observability live in
+           one place. Two Grafana dashboards iframe-embedded; refreshes
+           every 5s while the tab is active. Each iframe lazy-loads on
+           first tab open so the Run/Results tabs aren't slowed by
+           Grafana websocket churn before the user actually wants it. -->
+      <div class="ws-subview" id="zfstest-sub-dash">
+        <div class="ws-panel">
+          <div class="ws-panel-hdr">
+            <span>🧪 ZFS Test Matrix</span>
+            <a class="btn btn-ghost btn-sm" href="/grafana/d/klab-test-matrix?kiosk=1&refresh=10s" target="_blank" rel="noopener">⇗ Open in Grafana</a>
+          </div>
+          <!-- Fixed pixel height matches the dashboard's actual content
+               (36 grid-rows × 30px + chrome ≈ 1180px for Matrix). With
+               an exact-fit height the iframe never renders its own
+               scrollbar, so the user gets one clean outer scroll on the
+               page and the dashboard reads as a continuous panel. -->
+          <iframe id="zfstest-dash-matrix" data-src="/grafana/d/klab-test-matrix?kiosk=1&refresh=10s" src="about:blank" style="width:100%;height:1180px;border:0;background:var(--bg);border-radius:0 0 8px 8px"></iframe>
+        </div>
+        <div class="ws-panel" style="margin-top:0.9rem">
+          <div class="ws-panel-hdr">
+            <span>🐛 ZFS Test VM Debug</span>
+            <a class="btn btn-ghost btn-sm" href="/grafana/d/klab-test-debug?kiosk=1&refresh=10s" target="_blank" rel="noopener">⇗ Open in Grafana</a>
+          </div>
+          <!-- 41 grid-rows × 30px + chrome ≈ 1340px for Debug. Same
+               exact-fit principle as Matrix above. -->
+          <iframe id="zfstest-dash-debug" data-src="/grafana/d/klab-test-debug?kiosk=1&refresh=10s" src="about:blank" style="width:100%;height:1340px;border:0;background:var(--bg);border-radius:0 0 8px 8px"></iframe>
+        </div>
+      </div>
+
       <!-- ── Live log ──────────────────────────────────────────────────── -->
       <div class="ws-subview" id="zfstest-sub-log">
         <div class="ws-panel" id="klab-test-log-panel">
@@ -2747,6 +2791,11 @@ select option:checked { background: #00b8d9; color: #000; }
     <div style="display:flex;gap:0.25rem">
       <button onclick="termSend('k9s')" title="Switch to k9s window" style="background:transparent;border:1px solid var(--border);color:var(--subtle);font-size:0.7rem;padding:0 0.4rem;border-radius:3px;cursor:pointer">k9s</button>
       <button onclick="termSend('shell')" title="Switch to shell window" style="background:transparent;border:1px solid var(--border);color:var(--subtle);font-size:0.7rem;padding:0 0.4rem;border-radius:3px;cursor:pointer">shell</button>
+      <!-- Copy bridge: pull the tmux paste-buffer (filled whenever you
+           drag-select text in the terminal) into a real DOM textarea so
+           you can Cmd+C/Ctrl+C natively. Workaround for browsers that
+           silently drop OSC 52 on self-signed-cert origins. -->
+      <button onclick="termPullBuffer()" title="Show last terminal selection in a copy-friendly modal" style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-size:0.7rem;padding:0 0.5rem;border-radius:3px;cursor:pointer;font-weight:600">📋 Pull selection</button>
       <button onclick="termToggleFullscreen()" title="Toggle full-screen" style="background:transparent;border:1px solid var(--border);color:var(--subtle);font-size:0.72rem;padding:0 0.5rem;border-radius:3px;cursor:pointer">⛶</button>
       <button onclick="termClose()" title="Hide (session persists)" style="background:transparent;border:1px solid var(--border);color:var(--subtle);font-size:0.72rem;padding:0 0.5rem;border-radius:3px;cursor:pointer">×</button>
     </div>
@@ -3083,10 +3132,73 @@ setInterval(() => {
   if (active) send({ action: 'klab_status' });
 }, 15000);
 
+// Refresh whatever the user is currently looking at. Called on (re)connect
+// and on tab-visibility-change so the UI catches up after a websocket stall
+// without the user having to hard-reload.
+//
+// Why this is needed: when the server event loop is starved (heavy scale,
+// long install), pushes back to the client queue up server-side and can
+// arrive coalesced or get dropped if the WS half-closes. The 10s auto-poll
+// is also gated on "no drawer + no selection", so a single open detail row
+// can leave the view frozen for an arbitrarily long time. Forcing a refresh
+// at the moments when freshness matters most (reconnect, tab-foreground)
+// cuts the brownout window from "until hard refresh" to "next tick".
+function _refreshActiveView() {
+  const isActive = id => !!document.getElementById(id)?.classList.contains('active');
+  if (isActive('view-dashboard')) {
+    send({ action: 'system_info' });
+    send({ action: 'klab_status' });
+  }
+  if (isActive('view-vms')) {
+    send({ action: 'list_vms' });
+    send({ action: 'detached_reattach', target: 'vm-log' });
+  }
+  if (isActive('view-k8s')) {
+    send({ action: 'k8s_status' });
+    send({ action: 'k8s_pods' });
+    send({ action: 'k8s_top' });
+    send({ action: 'detached_reattach', target: 'k8s' });
+  }
+  if (isActive('view-klab')) {
+    send({ action: 'klab_status' });
+    // Re-attach to any in-flight klab golden/ztest/deploy/destroy build
+    // so the live log resumes streaming after a webui restart or WS drop.
+    send({ action: 'detached_reattach', target: 'klab' });
+  }
+  if (isActive('view-install')) send({ action: 'install_state' });
+}
+
+// Client-side WS heartbeat. The server uses `websockets`'s built-in ping
+// timer, but if the python asyncio loop is starved (long blocking
+// subprocess in an async handler) it can't service its own pings, and
+// neither side notices the socket is half-closed for tens of seconds.
+// Sending an application-level ping every 8s and force-reconnecting if no
+// pong arrives within 12s closes that gap. Pong is set by handle() when it
+// receives {type:'pong'}.
+let _lastPongAt = Date.now();
+let _hbInterval = null;
+function _startHeartbeat() {
+  if (_hbInterval) clearInterval(_hbInterval);
+  _lastPongAt = Date.now();
+  _hbInterval = setInterval(() => {
+    if (!wsReady) return;
+    const silentMs = Date.now() - _lastPongAt;
+    if (silentMs > 20000) {
+      // Server hasn't responded to ping for 20s — assume the socket is
+      // wedged and force a reconnect. The 3s reconnect delay in onclose
+      // gives the server a moment to drain whatever stalled it.
+      try { ws.close(); } catch (e) {}
+      return;
+    }
+    try { ws.send(JSON.stringify({ action: 'ping' })); } catch (e) {}
+  }, 8000);
+}
+
 function connect() {
   ws = new WebSocket(wsUrl);
   ws.onopen = () => {
     wsReady = true;
+    _lastPongAt = Date.now();
     // Connected = healthy. Use --good (emerald) per the UI's status palette
     // convention (green=healthy/red=danger/amber=warn, same in dark+light
     // themes). --accent is royal blue — reserved for primary actions and
@@ -3105,12 +3217,19 @@ function connect() {
     // The backend responds with klab_test_noop if nothing is running,
     // or streams live log lines + exec_done on completion.
     send({ action: 'klab_test_tail' });
+    // Reconnect-aware: refetch whatever view the user is on. Without this,
+    // a brief WS drop during a busy run leaves k8s/vm tables showing the
+    // pre-drop snapshot until the next 10s auto-poll fires (and even then,
+    // any open drawer or selection blocks the poll).
+    _refreshActiveView();
+    _startHeartbeat();
   };
   ws.onclose = () => {
     wsReady = false;
     document.getElementById('status-dot').style.background = 'var(--danger)';
     document.getElementById('status-text').textContent = 'disconnected — retrying…';
     clearInterval(diskTimer);
+    if (_hbInterval) { clearInterval(_hbInterval); _hbInterval = null; }
     setTimeout(connect, 3000);
   };
   ws.onerror = () => ws.close();
@@ -3118,6 +3237,14 @@ function connect() {
     try { handle(JSON.parse(e.data)); } catch(ex) { console.error('handle error', ex); }
   };
 }
+
+// Refresh when the user returns to the tab. Covers the case where the WS
+// stayed open but the server event loop was so busy that pushes piled up
+// and the view shows stale state — when the tab is foregrounded again it
+// catches up immediately instead of waiting for the next auto-poll tick.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && wsReady) _refreshActiveView();
+});
 
 // ── Busy cursor / spinner badge ────────────────────────────────────────────
 // Some actions (Snap, Clone, Delete, Rollback, Create-Cloud) take 1-5s for
@@ -3180,6 +3307,12 @@ function requestDisks() {
 
 // ── Message handler ─────────────────────────────────────────────────────────
 function handle(msg) {
+  // Any inbound message proves the socket is alive. The heartbeat watchdog
+  // checks _lastPongAt and force-reconnects on long silence; updating it on
+  // every message (not just type:'pong') means a busy stream of log_line
+  // events also counts as a heartbeat.
+  _lastPongAt = Date.now();
+  if (msg.type === 'pong') return;
   // Pre-switch hook: if confirmInstall() is awaiting a wifi_connect_result,
   // route it there instead of falling through to the default noop.
   if (msg.type === 'wifi_connect_result' && typeof _wifiResultHandler === 'function') {
@@ -3483,25 +3616,21 @@ function handle(msg) {
     case 'log_line': {
       const target = msg.target || '';
       if (target === 'install') {
-        const box = document.getElementById('install-log');
-        if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+        appendLog(document.getElementById('install-log'), stripAnsi(msg.line || ''));
         const st = document.getElementById('install-status');
         if (st) st.textContent = (msg.line || '').replace(/^\[.*?\]\s*/, '').slice(0, 80) || st.textContent;
       } else if (target === 'ansible_log' || target === 'ansible') {
-        const box = document.getElementById('ansible-log');
+        appendLog(document.getElementById('ansible-log'), stripAnsi(msg.line || ''));
         const panel = document.getElementById('ansible-log-panel');
-        if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
         if (panel) panel.style.display = '';
       } else if (target === 'helm_log' || target === 'helm') {
-        const box = document.getElementById('helm-log');
+        appendLog(document.getElementById('helm-log'), stripAnsi(msg.line || ''));
         const panel = document.getElementById('helm-log-panel');
-        if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
         if (panel) panel.style.display = '';
       } else if (target === 'k8s') {
         const line = stripAnsi(msg.line || '');
-        const box = document.getElementById('k8s-log');
+        appendLog(document.getElementById('k8s-log'), line);
         const panel = document.getElementById('k8s-log-panel');
-        if (box) { box.textContent += line + '\n'; box.scrollTop = box.scrollHeight; }
         if (panel) panel.style.display = '';
         // Mirror to the Nodes-tab inline progress panel — gated on
         // _k8sScaleActive flag so backlog/replay traffic doesn't pollute
@@ -3509,8 +3638,7 @@ function handle(msg) {
         const progBox = document.getElementById('k8s-node-progress-log');
         const progPanel = document.getElementById('k8s-node-progress');
         if (progBox && progPanel && progPanel.style.display !== 'none' && window._k8sScaleActive) {
-          progBox.textContent += line + '\n';
-          progBox.scrollTop = progBox.scrollHeight;
+          appendLog(progBox, line);
           // ── Live placeholder rows ────────────────────────────────────
           // Parse phase transitions from the scale output so the Nodes
           // table shows in-flight VMs immediately instead of waiting for
@@ -3538,7 +3666,10 @@ function handle(msg) {
                 slot: existing?.slot,
               };
             });
-            send({ action: 'k8s_status' });
+            // Throttled — phase markers can fire dozens/sec under heavy
+            // scale output and each unthrottled k8s_status round-trip
+            // adds load to a webui that's already streaming the log.
+            throttleStatus('k8s_status', 1500);
           }
           // 2) Per-VM phase markers — best-effort string-match
           const phaseMatchers = [
@@ -3565,7 +3696,7 @@ function handle(msg) {
                 if (mm[2]) window._k8sPending[nm].ip = mm[2];   // dhcp-ok carries IP
               }
             }
-            send({ action: 'k8s_status' });
+            throttleStatus('k8s_status', 1500);
           });
           // 3) Completion markers — re-enable Add + drop placeholders. Match
           // ONLY scale-specific lines. Dropped "BOOTSTRAP COMPLETE" from the
@@ -3588,9 +3719,9 @@ function handle(msg) {
           }
         }
       } else if (target === 'klab') {
+        const klabLine = stripAnsi(msg.line || '');
         ['klab-log', 'klab-golden-log', 'klab-ops-log', 'klab-test-log'].forEach(id => {
-          const box = document.getElementById(id);
-          if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+          appendLog(document.getElementById(id), klabLine);
         });
         ['klab-log-panel', 'klab-golden-log-panel', 'klab-ops-log-panel', 'klab-test-log-panel'].forEach(id => {
           const p = document.getElementById(id);
@@ -3603,11 +3734,9 @@ function handle(msg) {
         // events fell through to the global #log-box on the dashboard,
         // making the VMs > Log subtab appear empty even when operations
         // were succeeding. Same flush behaviour as other targets.
-        const box = document.getElementById('vm-log');
-        if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+        appendLog(document.getElementById('vm-log'), stripAnsi(msg.line || ''));
       } else {
-        const box = document.getElementById('log-box');
-        if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+        appendLog(document.getElementById('log-box'), stripAnsi(msg.line || ''));
       }
       break;
     }
@@ -3631,36 +3760,29 @@ function handle(msg) {
         if (msg.rc === 0) {
           if (bar) { bar.className = 'progress-bar'; bar.style.width = '100%'; bar.style.background = '#8b5cf6'; }
           if (st)  st.textContent = '✓ Install complete — system powering off…';
-          if (box) box.textContent += '\n✓ Install complete. Initial snapshot taken. System powering off…\n';
+          appendLog(box, '✓ Install complete. Initial snapshot taken. System powering off…');
         } else {
           if (bar) { bar.className = 'progress-bar'; bar.style.width = '100%'; bar.style.background = 'var(--danger)'; }
           if (st)  st.textContent = `✗ Install failed (exit ${msg.rc})`; var rb=document.getElementById('install-retry'); if(rb) rb.style.display='block';
-          if (box) box.textContent += `\n✗ Install failed (exit ${msg.rc})\n`;
+          appendLog(box, `✗ Install failed (exit ${msg.rc})`);
         }
       } else if (target === 'k8s') {
-        const box = document.getElementById('k8s-log');
-        if (box) { box.textContent += (msg.rc === 0 ? '\n✓ Done.\n' : `\n✗ Failed (rc=${msg.rc})\n`); box.scrollTop = box.scrollHeight; }
+        appendLog(document.getElementById('k8s-log'), msg.rc === 0 ? '✓ Done.' : `✗ Failed (rc=${msg.rc})`);
         k8sRefresh();
       } else if (target === 'klab') {
-        const suffix = msg.rc === 0 ? '\n✓ Done.\n' : `\n✗ Failed (rc=${msg.rc})\n`;
+        const suffix = msg.rc === 0 ? '✓ Done.' : `✗ Failed (rc=${msg.rc})`;
         ['klab-log', 'klab-golden-log', 'klab-ops-log', 'klab-test-log'].forEach(id => {
-          const box = document.getElementById(id);
-          if (box) { box.textContent += suffix; box.scrollTop = box.scrollHeight; }
+          appendLog(document.getElementById(id), suffix);
         });
+        // Reset Run-Test button label/state and clear the "test running" toast.
+        if (typeof _klabTestRunButtonReset === 'function') _klabTestRunButtonReset();
+        if (typeof _busyHide === 'function') _busyHide();
       } else if (target === 'ansible_log' || target === 'ansible') {
-        const box = document.getElementById('ansible-log');
-        if (box) {
-          box.textContent += (msg.rc === 0 ? '\n✓ Done.\n' : `\n✗ Failed (rc=${msg.rc})\n`);
-          box.scrollTop = box.scrollHeight;
-        }
+        appendLog(document.getElementById('ansible-log'), msg.rc === 0 ? '✓ Done.' : `✗ Failed (rc=${msg.rc})`);
         const last = document.getElementById('ansible-last');
         if (last) last.textContent = msg.rc === 0 ? 'ok' : `fail rc=${msg.rc}`;
       } else if (target === 'helm_log' || target === 'helm') {
-        const box = document.getElementById('helm-log');
-        if (box) {
-          box.textContent += (msg.rc === 0 ? '\n✓ Done.\n' : `\n✗ Failed (rc=${msg.rc})\n`);
-          box.scrollTop = box.scrollHeight;
-        }
+        appendLog(document.getElementById('helm-log'), msg.rc === 0 ? '✓ Done.' : `✗ Failed (rc=${msg.rc})`);
         // Refresh releases + repos after any helm op
         send({ action: 'helm_list' });
         send({ action: 'helm_repo_list' });
@@ -3669,14 +3791,12 @@ function handle(msg) {
     }
 
     case 'install_log': {
-      const box = document.getElementById('install-log');
-      if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+      appendLog(document.getElementById('install-log'), stripAnsi(msg.line || ''));
       break;
     }
 
     case 'install_done': {
-      const box = document.getElementById('install-log');
-      if (box) box.textContent += '\n✓ Install complete. System powering off…\n';
+      appendLog(document.getElementById('install-log'), '✓ Install complete. System powering off…');
       break;
     }
 
@@ -3730,7 +3850,7 @@ function handle(msg) {
       // Backend confirmed websockify stop + nginx drop-in removed.
       break;
     }
-    case 'vm_log':       { const b = document.getElementById('vm-log'); if (b) { b.textContent += msg.line + '\n'; b.scrollTop = b.scrollHeight; } break; }
+    case 'vm_log':       { appendLog(document.getElementById('vm-log'), msg.line); break; }
     case 'k8s_status': { renderK8sStatus(msg); break; }
     case 'k8s_pods': { renderK8sPods(msg.pods); break; }
     case 'k8s_top': { renderK8sTop(msg); break; }
@@ -3774,14 +3894,46 @@ function handle(msg) {
 
     // ── klab messages ─────────────────────────────────────────────────
     case 'klab_status': { renderKlabStatus(msg); break; }
+    case 'tmux_buffer': {
+      _termShowBufferModal(msg.text || '');
+      break;
+    }
+    case 'detached_reattach_noop': {
+      // No active detached job for this target — quietly ignore.
+      break;
+    }
+    case 'detached_reattach_start': {
+      // Server is about to start streaming a detached job's log to us.
+      // Make the relevant log panel visible so the user sees the catch-up
+      // immediately, and clear any stale "complete" badge.
+      const targetPanelMap = {
+        'klab':   ['klab-log-panel', 'klab-golden-log-panel', 'klab-ops-log-panel'],
+        'k8s':    ['k8s-log-panel'],
+        'vm-log': null,
+      };
+      const panels = targetPanelMap[msg.target] || [];
+      (panels || []).forEach(id => {
+        const p = document.getElementById(id);
+        if (p) p.style.display = '';
+      });
+      // Show a small banner so the operator knows what's happening.
+      const banner = document.createElement('div');
+      banner.style.cssText = 'padding:0.4rem 0.7rem;background:var(--surface2);border-left:3px solid var(--accent);color:var(--subtle);font-size:0.78rem;margin:0.3rem 0';
+      banner.textContent = `↺ Re-attached to in-flight ${msg.target} build (started ${new Date((msg.started||0)*1000).toLocaleTimeString()})`;
+      const where =
+        msg.target === 'klab' ? document.getElementById('klab-log') :
+        msg.target === 'k8s'  ? document.getElementById('k8s-log')  :
+        null;
+      if (where && where.parentNode) where.parentNode.insertBefore(banner, where);
+      break;
+    }
     case 'klab_vm_op_done': {
       console.log('VM op:', msg.vm, msg.op, msg.ok ? 'OK' : msg.error);
       send({ action: 'klab_status' });
       break;
     }
     case 'klab_isolate_done': {
-      const box = document.getElementById('klab-ops-log') || document.getElementById('klab-log');
-      if (box) { box.textContent += msg.msg + '\n'; box.scrollTop = box.scrollHeight; }
+      appendLog(document.getElementById('klab-ops-log') || document.getElementById('klab-log'), msg.msg);
       break;
     }
     case 'klab_metrics': { renderKlabMetrics(msg.metrics); break; }
@@ -3790,14 +3942,13 @@ function handle(msg) {
     case 'klab_ztest_goldens': { renderZtestGoldens(msg.goldens || {}); break; }
     case 'klab_test_detail': { renderTestDetail(msg.run, msg.logs || {}); break; }
     case 'klab_ebpf_output': {
-      const el = document.getElementById('ebpf-output');
-      if (el) { el.textContent += (msg.line || '') + '\n'; el.scrollTop = el.scrollHeight; }
+      appendLog(document.getElementById('ebpf-output'), msg.line || '');
       break;
     }
     case 'klab_ebpf_done': {
       const el = document.getElementById('ebpf-output');
       const title = document.getElementById('ebpf-output-title');
-      if (el) { el.textContent += '\n✓ Trace complete.\n'; el.scrollTop = el.scrollHeight; }
+      appendLog(el, '✓ Trace complete.');
       if (title) title.textContent = title.textContent.replace(' — running...', ' — done');
       document.getElementById('ebpf-run-btn').style.display = '';
       document.getElementById('ebpf-stop-btn').style.display = 'none';
@@ -3998,8 +4149,7 @@ function handle(msg) {
     case 'bob_saved': { send({ action: 'bob_list' }); break; }
     case 'bob_deleted': { send({ action: 'bob_list' }); break; }
     case 'klab_playbook_done': {
-      const box = document.getElementById('klab-ops-log');
-      if (box) { box.textContent += `\n✓ Playbook complete — ran on ${msg.count} distro(s): ${(msg.distros||[]).join(', ')}\n`; box.scrollTop = box.scrollHeight; }
+      appendLog(document.getElementById('klab-ops-log'), `✓ Playbook complete — ran on ${msg.count} distro(s): ${(msg.distros||[]).join(', ')}`);
       break;
     }
   }
@@ -4767,11 +4917,8 @@ async function confirmInstall() {
       return;
     }
     document.getElementById('install-status').textContent = `Joining WiFi '${ssid}' on live installer…`;
-    const appendLog = (line) => {
-      const el = document.getElementById('install-log');
-      if (el) { el.textContent += line + '\n'; el.scrollTop = el.scrollHeight; }
-    };
-    appendLog(`[wifi] connecting live installer to '${ssid}' (must succeed before install starts)`);
+    const wifiLog = (line) => appendLog(document.getElementById('install-log'), line);
+    wifiLog(`[wifi] connecting live installer to '${ssid}' (must succeed before install starts)`);
     const result = await new Promise((resolve) => {
       _wifiResultHandler = (m) => { _wifiResultHandler = null; resolve(m); };
       send({ action: 'wifi_connect', ssid, psk });
@@ -4781,7 +4928,7 @@ async function confirmInstall() {
       }, 60000);
     });
     if (!result.ok) {
-      appendLog(`[wifi] FAILED: ${result.error || 'unknown'}`);
+      wifiLog(`[wifi] FAILED: ${result.error || 'unknown'}`);
       document.getElementById('install-status').textContent = `WiFi connect failed — install NOT started. Fix the SSID/PSK and retry.`;
       document.getElementById('install-idle').style.display    = 'block';
       document.getElementById('install-running').style.display = 'none';
@@ -4789,7 +4936,7 @@ async function confirmInstall() {
       if (bar2) bar2.className = 'progress-bar';
       return;
     }
-    appendLog(`[wifi] connected — live installer has IP, install can proceed`);
+    wifiLog(`[wifi] connected — live installer has IP, install can proceed`);
     document.getElementById('install-status').textContent = 'WiFi up — starting installer…';
   }
 
@@ -5370,6 +5517,27 @@ function _vmOpenModalShell(name, headerText, tipText) {
   if (ifr) ifr.src = 'about:blank';
   const modal = document.getElementById('vm-console-modal');
   if (modal) modal.classList.add('open');
+  // Show "Switch to SSH" only when we're on the VNC display — text-mode
+  // sessions (ssh/serial console) already have the copy-paste binds via
+  // xterm.js + tmux. Caller sets _vmConsoleKind before us; defer the
+  // visibility update one tick so the caller's assignment lands first.
+  setTimeout(() => {
+    const sw = document.getElementById('vm-console-switch-ssh');
+    if (sw) sw.style.display = (_vmConsoleKind === 'vnc') ? '' : 'none';
+  }, 0);
+}
+
+// Close the current VNC Display session and reopen the same VM as an
+// SSH terminal in the same modal. One click instead of "close → find
+// row → click SSH".
+function vmConsoleSwitchToSsh() {
+  if (!_vmConsoleCurrent) return;
+  const name = _vmConsoleCurrent;
+  // Tear down whatever was open (vm_display_close if vnc, vm_console_close otherwise).
+  vmConsoleClose();
+  // 300ms gap matches vmConsoleReload — gives the backend close handler
+  // time to nginx-reload before vm_ssh_open fires its own reload.
+  setTimeout(() => vmSsh(name), 300);
 }
 
 // SSH: terminal session into the VM as admin (cert auth)
@@ -5388,7 +5556,7 @@ function vmSsh(name) {
 // the same TLS trust (same cert, same kldload CA, no Accept-prompt).
 function vmMetrics(name) {
   if (!name) return;
-  const u = `/grafana/d/klab-vm-estate/?var-vm=${encodeURIComponent(name)}&kiosk=tv&refresh=10s`;
+  const u = `/grafana/d/klab-vm-estate/?var-vm=${encodeURIComponent(name)}&kiosk=1&refresh=10s`;
   window.open(u, '_blank');
 }
 
@@ -6524,6 +6692,16 @@ function zfsTestSubTab(name) {
   try { localStorage.setItem(ZFSTEST_TAB_KEY, name); } catch (e) {}
   // Auto-refresh results/history when those tabs activate.
   if (name === 'results' || name === 'history') send({action: 'klab_test_results'});
+  // Lazy-load Grafana iframes only when the Dashboards tab is opened.
+  // The dashboards open a WebSocket back to Grafana for live tile refresh
+  // and that's wasteful when the user is on Run/Results/Audit/Log. Setting
+  // src here makes the load happen exactly once per page lifetime.
+  if (name === 'dash') {
+    ['zfstest-dash-matrix', 'zfstest-dash-debug'].forEach(id => {
+      const f = document.getElementById(id);
+      if (f && f.dataset.src && f.src === 'about:blank') f.src = f.dataset.src;
+    });
+  }
 }
 function _zfstestRestoreTab() {
   try { const t = localStorage.getItem(ZFSTEST_TAB_KEY); if (t) zfsTestSubTab(t); } catch (e) {}
@@ -6747,6 +6925,75 @@ function termToggleFullscreen() {
 // Bob (or a "run in terminal" button) can drop the user straight into
 // k9s from anywhere. The ttyd terminal only accepts keystrokes, but we
 // can send the tmux prefix + window selector via iframe focus + key event.
+// termPullBuffer — bridge tmux paste-buffer → DOM textarea → user copies.
+//
+// Why this exists: xterm.js (inside ttyd) tries to write the selection
+// to navigator.clipboard.writeText() on mouseup. On HTTPS origins with
+// a self-signed cert that the browser does not "fully trust" (Chrome's
+// stricter rules), that API call is rejected silently — no exception,
+// no log, the highlight just disappears and the user has nothing to
+// paste. The OSC 52 escape ALSO emits but the same Clipboard API
+// rejection applies.
+//
+// What ALWAYS works in this scenario: tmux's own paste-buffer (tmux-
+// internal, independent of any browser API). copy-selection on mouse
+// release fills it; we read it back over WS, dump it into a real DOM
+// textarea, auto-select, and let the operator Cmd+C / Ctrl+C natively.
+function termPullBuffer() {
+  send({ action: 'tmux_pull_buffer' });
+}
+
+// Server replies with type:'tmux_buffer' carrying { text, lines }.
+function _termShowBufferModal(text) {
+  let modal = document.getElementById('term-buffer-modal');
+  if (modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'term-buffer-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100;display:flex;align-items:center;justify-content:center;padding:2rem';
+  const lines = (text || '').split('\n').length;
+  modal.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;max-width:80vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.6)">
+      <div style="padding:0.7rem 1rem;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <span style="font-weight:600;color:var(--text)">📋 Terminal selection (${lines} line${lines===1?'':'s'})</span>
+        <div style="display:flex;gap:0.4rem">
+          <button class="btn btn-primary btn-sm" id="term-buffer-copy">Copy to clipboard</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('term-buffer-modal').remove()">Close</button>
+        </div>
+      </div>
+      <div style="padding:0.5rem 1rem 0.3rem;font-size:0.72rem;color:var(--muted)">
+        Pre-selected — Cmd+C / Ctrl+C copies. If browser blocks the copy button, drag-select inside the textarea and copy natively.
+      </div>
+      <textarea id="term-buffer-ta" readonly style="flex:1;margin:0.5rem 1rem 1rem;padding:0.6rem;font-family:var(--mono);font-size:0.82rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;min-height:300px;min-width:60vw;resize:both"></textarea>
+    </div>`;
+  document.body.appendChild(modal);
+  const ta = document.getElementById('term-buffer-ta');
+  ta.value = text || '(tmux buffer is empty — drag-select some text in the terminal first, then click Pull selection again)';
+  // Auto-select all so the user can just hit Cmd+C / Ctrl+C immediately.
+  setTimeout(() => { ta.focus(); ta.select(); }, 0);
+  // Copy button — tries navigator.clipboard first, falls back to
+  // execCommand('copy') after manual selection (this fallback works
+  // even on origins where the modern API is blocked, because the
+  // textarea is a real DOM element with a user-gesture event chain).
+  document.getElementById('term-buffer-copy').onclick = async () => {
+    ta.focus(); ta.select();
+    let ok = false;
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(ta.value); ok = true; } catch (e) { ok = false; }
+    }
+    if (!ok) {
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    }
+    const btn = document.getElementById('term-buffer-copy');
+    if (btn) {
+      btn.textContent = ok ? '✓ Copied' : 'Cmd+C now';
+      btn.style.background = ok ? 'var(--good)' : 'var(--warn)';
+      setTimeout(() => { if (btn) { btn.textContent = 'Copy to clipboard'; btn.style.background = ''; } }, 2000);
+    }
+  };
+  // Esc closes
+  modal.addEventListener('keydown', (e) => { if (e.key === 'Escape') modal.remove(); });
+}
+
 function termSend(window) {
   termOpen();
   const ifr = document.getElementById('term-iframe');
@@ -6912,8 +7159,12 @@ const METRICS_CATALOG = [
   { uid: 'block-io-latency',    title: '⚡ Block I/O Latency',    group: 'Storage' },
   { uid: 'rYdddlPWk',           title: '🖥 Host — Full',          group: 'Host' },  // 1860
   { uid: 'kernel-messages',     title: '📜 Kernel & Logs',        group: 'Host' },
-  { uid: 'klab-test-matrix',    title: '🧪 ZFS Test Matrix',     group: 'ZFS Test Lab' },
-  { uid: 'klab-test-debug',     title: '🐛 ZFS Test VM Debug',   group: 'ZFS Test Lab' },
+  // ZFS Test Matrix + Debug dashboards moved into the OpenZFS Test view's
+  // "Dashboards" tab (view-tests-zfs → zfstest-sub-dash) so test runs and
+  // their telemetry live in one place. The standalone Metrics group is for
+  // estate-wide dashboards — keeping these two there too was duplication.
+  // They're still reachable via /grafana/d/klab-test-matrix and
+  // /grafana/d/klab-test-debug directly for power users.
   // Kubernetes / Cilium entries: these dashboards are auto-provisioned by
   // the Cilium + Tetragon helm charts at the END of kube-cluster bootstrap.
   // They appear here as "not yet" entries until helm catches up — clicking
@@ -7122,9 +7373,12 @@ function renderDoctorReport(msg) {
                       :                'var(--muted)';
   const iconFor  = s => s === 'ok' ? '✓' : s === 'fail' ? '✗' : s === 'warn' ? '!' : '∅';
 
-  // Accordion: subsystems collapse by default. Only expand subsystems that
-  // have a fail or warn (they're the ones the user needs to see). All-green
-  // subsystems stay collapsed but show their count + an "all ok" badge.
+  // Accordion: all subsystems collapse by default — the per-subsystem badges
+  // already show fail/warn counts, so the user can pick which group to drill
+  // into. A toolbar with "Expand all / Collapse all" sits above the list for
+  // a one-click open of everything. (Earlier revision auto-opened groups
+  // with fail/warn; on a fresh install that opened nearly every group and
+  // the panel "stayed treed".)
   const accordionHtml = subOrder.map(sub => {
     const items = bySub[sub];
     const okN   = items.filter(r => r.status === 'ok').length;
@@ -7138,8 +7392,6 @@ function renderDoctorReport(msg) {
       okN   ? `<span style="color:var(--accent)">✓ ${okN}</span>` : '',
       skipN ? `<span style="color:var(--muted)">∅ ${skipN}</span>` : '',
     ].filter(Boolean).join(' ');
-    // Start open only if there's a problem to look at
-    const startOpen = failN > 0 || warnN > 0 ? ' open' : '';
     const rows = items.map(r => `
       <tr>
         <td style="padding:0.3rem 0.5rem;width:20px"><span style="color:${colorFor(r.status)};font-weight:bold">${iconFor(r.status)}</span></td>
@@ -7150,16 +7402,31 @@ function renderDoctorReport(msg) {
         </td>
       </tr>`).join('');
     return `
-      <details${startOpen} style="margin-bottom:0.4rem">
-        <summary style="font-size:0.82rem;font-weight:600;color:var(--subtle);padding:0.4rem 0.6rem;background:var(--surface2);border-radius:4px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:0.5rem">
+      <details class="doctor-sub" style="margin-bottom:0.4rem">
+        <summary style="font-size:0.82rem;font-weight:600;color:var(--subtle);padding:0.4rem 0.6rem;background:var(--surface2);border-radius:4px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:0.5rem;list-style:revert">
           <span>${esc(sub)} <span style="font-weight:normal;color:var(--muted);font-size:0.75rem">(${items.length})</span></span>
           <span style="font-size:0.75rem;display:flex;gap:0.5rem">${badges}</span>
         </summary>
         <table style="width:100%;border-collapse:collapse;margin-top:0.25rem">${rows}</table>
       </details>`;
   }).join('');
-  if (el)   el.innerHTML   = accordionHtml;
-  if (elKl) elKl.innerHTML = accordionHtml;
+  // Toolbar — Expand/Collapse all. Scoped by container so dashboard and klab
+  // copies operate independently. event.target.closest('.doctor-panel') gives
+  // us "the panel I was clicked from".
+  const toolbar = `
+    <div class="doctor-panel">
+      <div style="display:flex;justify-content:flex-end;gap:0.4rem;margin-bottom:0.4rem">
+        <button class="btn btn-ghost btn-sm" onclick="
+          this.closest('.doctor-panel').querySelectorAll('details.doctor-sub').forEach(d=>d.open=true)
+        ">Expand all</button>
+        <button class="btn btn-ghost btn-sm" onclick="
+          this.closest('.doctor-panel').querySelectorAll('details.doctor-sub').forEach(d=>d.open=false)
+        ">Collapse all</button>
+      </div>
+      ${accordionHtml}
+    </div>`;
+  if (el)   el.innerHTML   = toolbar;
+  if (elKl) elKl.innerHTML = toolbar;
 }
 
 // ── Ansible ──────────────────────────────────────────────────────────────────
@@ -7820,9 +8087,8 @@ function _klabOpsLogShow(line) {
   const panel = document.getElementById('klab-ops-log-panel');
   const box   = document.getElementById('klab-ops-log');
   if (panel) panel.style.display = '';
-  if (box)   {
-    box.textContent += (line || '') + '\n';
-    box.scrollTop = box.scrollHeight;
+  if (box) {
+    appendLog(box, line || '');
     // Scroll the panel into view so the user can see it even if they
     // were focused on the deploy buttons at the top of the subtab.
     panel.scrollIntoView({behavior: 'smooth', block: 'nearest'});
@@ -7845,11 +8111,54 @@ function klabRunTest() {
   const mode = document.querySelector('input[name="klab-test-mode"]:checked')?.value || 'quick';
   const exec = document.querySelector('input[name="klab-test-exec"]:checked')?.value || 'parallel';
   const distro = document.getElementById('klab-test-distro')?.value || '';
+  // Visible-immediately feedback. The first ~30-60s of a test run are
+  // SSH-wait (klab cloning + booting test VMs) — the host driver doesn't
+  // write any log lines during that window, so without this seed the
+  // operator clicks Run and sees nothing happen for what feels like
+  // forever. Inject a synthetic banner into the live-log box so there's
+  // an obvious "yes, it started" indicator, switch to the log tab, and
+  // disable the Run button until exec_done fires.
+  const logBox = document.getElementById('klab-test-log');
+  if (logBox) {
+    const ts = new Date().toLocaleTimeString();
+    appendLog(logBox, '');
+    appendLog(logBox, `══════════════════════════════════════════════════════════════════════`);
+    appendLog(logBox, `▶ ${ts}  klab test --${mode}${distro ? ' --distro ' + distro : ''} (${exec})`);
+    appendLog(logBox, `   Cloning + booting test VMs — host-side log goes quiet for the next`);
+    appendLog(logBox, `   ~30-60s while VMs come up. SSH probes start as soon as any VM has`);
+    appendLog(logBox, `   an IP. First real test output usually appears around t+60-90s.`);
+    appendLog(logBox, `══════════════════════════════════════════════════════════════════════`);
+  }
+  // Disable + relabel the Run button so a double-click can't fire a
+  // second concurrent test (which would step on the first's snapshots).
+  // exec_done from the backend re-enables.
+  document.querySelectorAll('#view-tests-zfs button').forEach(b => {
+    if (/Run.*Test|Run suite/.test(b.textContent || '')) {
+      b.dataset.origLabel = b.dataset.origLabel || b.textContent;
+      b.textContent = '⏳ Test running…';
+      b.disabled = true;
+    }
+  });
+  // Toast on the dashboard so the user sees confirmation even when
+  // glancing away from the log box.
+  if (typeof _busyShow === 'function') _busyShow('klab test launching — cloning VMs…', 90000);
   send({ action: 'klab_test', mode, distro, execution: exec });
   // Jump to the live log so the user sees output flow immediately —
   // without this the Run tab stays focused and the test appears to be
   // doing nothing for the first 30-60s of VM clone + SSH wait.
   if (typeof zfsTestSubTab === 'function') zfsTestSubTab('log');
+}
+
+// Re-enable the Run button when the test finishes. Hooked into the
+// existing exec_done handler via the 'klab' target.
+function _klabTestRunButtonReset() {
+  document.querySelectorAll('#view-tests-zfs button').forEach(b => {
+    if (b.dataset.origLabel) {
+      b.textContent = b.dataset.origLabel;
+      delete b.dataset.origLabel;
+      b.disabled = false;
+    }
+  });
 }
 
 // ZFS Testing view renderers
@@ -8935,6 +9244,42 @@ function _renderBobImgStrip() {
 function stripAnsi(s) { return String(s).replace(/\x1b\[[0-9;]*[mGKHF]/g, ''); }
 function esc(s) {
   return stripAnsi(String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// appendLog(box, line) — O(1) per-line append that caps the buffer.
+//
+// Why this exists: `box.textContent += line + '\n'` is O(N) per call because
+// the browser reconstructs the entire text node on every assignment. At a
+// few hundred lines/sec (kube-cluster scale, ansible playbooks, installer
+// chatter) this dominates the main thread and the whole tab "browns out"
+// for the duration of the operation — clicks queue up, animations stall,
+// the websocket can't even tick fast enough to ping.
+//
+// Strategy: use createTextNode + appendChild (O(1)), and trim once the
+// child count exceeds LOG_CAP. Trimming removes the oldest LOG_TRIM children
+// in a batch so the cost is amortized — we don't trim every line.
+const LOG_CAP  = 1500;
+const LOG_TRIM = 400;
+function appendLog(box, line) {
+  if (!box) return;
+  box.appendChild(document.createTextNode((line == null ? '' : line) + '\n'));
+  if (box.childNodes.length > LOG_CAP) {
+    for (let i = 0; i < LOG_TRIM && box.firstChild; i++) box.removeChild(box.firstChild);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+// throttleStatus(action, ms) — coalesce frequent send({action:...}) refresh
+// requests into at most one round-trip per `ms`. Used in log handlers that
+// previously re-requested k8s_status on every phase marker; under heavy
+// scale output that was 10+ kubectl-roundtrips/sec which compounded the
+// brownout. Each (action) gets its own timer slot.
+window._throttleTimers = window._throttleTimers || {};
+function throttleStatus(action, ms) {
+  ms = ms || 1500;
+  const t = window._throttleTimers;
+  if (t[action]) return;
+  t[action] = setTimeout(() => { delete t[action]; send({ action }); }, ms);
 }
 
 // Auto-detect browser timezone and pre-select in dropdown

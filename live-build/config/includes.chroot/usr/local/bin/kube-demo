@@ -1224,15 +1224,47 @@ demo_remove_nodes() {
       echo -e "  ${G}✓ VM destroyed${N}"
     fi
 
-    # 3. Destroy the zvol (and any snapshots/clones under it).
-    if zfs list "rpool/vms/${node}" >/dev/null 2>&1; then
-      zfs destroy -r "rpool/vms/${node}" 2>/dev/null \
-        && echo -e "  ${G}✓ zvol destroyed${N}" \
-        || echo -e "  ${Y}✗ zvol destroy failed (holds?)${N}"
+    # 3. Destroy the zvol — `-Rf` not `-r`:
+    #   -R = also destroy clones rooted at any of this dataset's snapshots
+    #        (the `klab-k8s-scale-*` auto-snapshots created by webui have
+    #        clones that block plain -r).
+    #   -f = force destroy even if a libvirt release hasn't fully landed
+    #        on the device node yet.
+    # Plus release any zfs holds first — snapshots used by promotion/
+    # rollback flows can carry holds that block destroy. Verify the
+    # dataset is actually gone afterward; surface the real stderr if
+    # not so the operator can diagnose instead of seeing a generic
+    # "holds?" guess.
+    local ds="rpool/vms/${node}"
+    if zfs list "$ds" >/dev/null 2>&1; then
+      # Release any holds on this dataset's snapshots (best-effort).
+      while IFS= read -r snap; do
+        [[ -z "$snap" ]] && continue
+        while IFS= read -r tag; do
+          [[ -z "$tag" ]] && continue
+          zfs release "$tag" "$snap" 2>/dev/null || true
+        done < <(zfs holds -H "$snap" 2>/dev/null | awk '{print $2}')
+      done < <(zfs list -H -t snapshot -o name -r "$ds" 2>/dev/null)
+      local zfs_err
+      if zfs_err=$(zfs destroy -Rf "$ds" 2>&1); then
+        echo -e "  ${G}✓ zvol destroyed${N}"
+      else
+        # Verify the dataset is really gone — `zfs destroy` returns 0
+        # even for some warnings.
+        if zfs list "$ds" >/dev/null 2>&1; then
+          echo -e "  ${Y}✗ zvol destroy failed:${N} ${zfs_err}"
+        else
+          echo -e "  ${G}✓ zvol destroyed${N} (with warnings)"
+        fi
+      fi
     fi
 
-    # 4. cloud-init ISO leftover.
-    rm -f "/var/lib/libvirt/isos/${node}-ci.iso" 2>/dev/null || true
+    # 4. cloud-init ISO leftover — kube-cluster writes to /var/lib/kldload/
+    # cloud-init/, kube-demo's add_nodes writes to /var/lib/libvirt/isos/.
+    # Clean both paths so a node deleted by EITHER caller stays cleaned.
+    rm -f "/var/lib/kldload/cloud-init/${node}-ci.iso" \
+          "/var/lib/kldload/cloud-init/${node}-cloud-init.iso" \
+          "/var/lib/libvirt/isos/${node}-ci.iso" 2>/dev/null || true
 
     # 5. state.db row, if tooling is available.
     if command -v kldload-db >/dev/null 2>&1; then
@@ -1241,6 +1273,16 @@ demo_remove_nodes() {
 
     # 6. Clear local /etc/hosts line if one was added.
     sed -i "/\\s${node}\$/d" /etc/hosts 2>/dev/null || true
+
+    # 7. Verify slot is truly empty so a subsequent scale doesn't trip
+    # over silent leftovers. If anything's still there, name it loud so
+    # the operator knows what to look at.
+    local residue=()
+    virsh dominfo "$node" >/dev/null 2>&1 && residue+=("libvirt domain")
+    zfs list "$ds"        >/dev/null 2>&1 && residue+=("zvol")
+    if (( ${#residue[@]} > 0 )); then
+      echo -e "  ${Y}⚠ residue remains: ${residue[*]}${N}"
+    fi
 
     echo ""
   done <<< "$victims"

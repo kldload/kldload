@@ -67,3 +67,26 @@ scrape_configs:
           expression: '/root/klab/[^/]+/(?P<vm>[a-z]+)\.log'
       - labels:
           vm:
+
+  # ── klab VM serial consoles ────────────────────────────────────────
+  # libvirt writes every VM's serial output (including the guest kernel
+  # ring) to /var/log/klab/klab-(ztest|test)-<distro>-console.log. The
+  # Test Debug dashboard's hung_task / kernel-BUG / dmsg panels query
+  # {vm=<distro>} |~ "hung_task|...", so without this scrape they hit
+  # the right label dimension but never match any line. Tailing the
+  # consoles into Loki with vm + variant labels closes that gap.
+  - job_name: klab-vm-console
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: klab-vm-console
+          host: kldload-node
+          source: serial-console
+          __path__: /var/log/klab/klab-*-console.log
+    pipeline_stages:
+      - regex:
+          source: filename
+          expression: '/var/log/klab/klab-(?P<variant>ztest|test|blue|green)-(?P<vm>[a-z]+)-console\.log'
+      - labels:
+          vm:
+          variant:

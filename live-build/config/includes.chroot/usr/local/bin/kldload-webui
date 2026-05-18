@@ -2110,9 +2110,40 @@ async def ws_handler(websocket):
                     # and tails the live log back to this WS until the unit
                     # exits or this WS closes.
                     await _klab_test_reattach(websocket)
+                elif action == "detached_reattach":
+                    # Generic detached-job reattach: re-stream the log of an
+                    # in-flight _stream_proc_detached job for {target}. Sent
+                    # by the frontend on (re)connect when the active view
+                    # has a build that may have outlived the prior WS.
+                    await _detached_reattach(websocket, msg)
+                elif action == "tmux_pull_buffer":
+                    # Read the ttyd-k9s tmux session's paste-buffer so the UI
+                    # can show its contents in a textarea where native browser
+                    # copy works. Workaround for Clipboard API silently
+                    # dropping the OSC 52 escape on self-signed-cert origins.
+                    # The buffer is filled by `copy-selection` on mouse-drag
+                    # release (see kldload-console binds).
+                    try:
+                        out = subprocess.check_output(
+                            ["tmux", "-S", "/tmp/tmux-0/default",
+                             "show-buffer"],
+                            text=True, stderr=subprocess.DEVNULL, timeout=2)
+                    except Exception:
+                        out = ""
+                    await websocket.send(json.dumps({
+                        "type": "tmux_buffer", "text": out,
+                    }))
                 elif action == "klab_build_ztest_goldens":
                     target = msg.get("target", "all")
-                    await _stream_proc(websocket, ["klab", "golden-ztest", target], target="klab")
+                    # Detached — a ztest golden build is 30-60 min per distro
+                    # (compiles OpenZFS from source inside each VM). With the
+                    # non-detached _stream_proc, any webui restart or WS drop
+                    # killed the bash driver and left the half-built VM idling
+                    # at a login prompt — observed .101 2026-05-18 where
+                    # `klab golden-ztest all` was started, the WS bounced
+                    # during the K8s scale chatter, and centos sat at the
+                    # login screen for 12+ minutes with no driver.
+                    await _stream_proc_detached(websocket, ["klab", "golden-ztest", target], target="klab")
                 elif action == "klab_ztest_goldens":
                     await websocket.send(json.dumps({
                         "type": "klab_ztest_goldens",
@@ -3061,7 +3092,10 @@ async def _run_spawn(websocket, msg):
     for k, v in params.items():
         cmd += [f"--{k.replace('_','-')}", str(v)]
     target = msg.get("_target", "spawn")
-    await _stream_proc(websocket, cmd, target=target)
+    # Spawn boots a fresh VM from a golden template — 2-5 min minimum, often
+    # longer for stamp + first-boot + cloud-init. Detached so a webui restart
+    # mid-spawn doesn't leave a half-stamped clone with no driver.
+    await _stream_proc_detached(websocket, cmd, target=target)
 
 async def _run_golden(websocket, msg):
     template = msg.get("template", "kvm")
@@ -3070,7 +3104,8 @@ async def _run_golden(websocket, msg):
         return
     target = msg.get("_target", "golden")
     cmd = ["/usr/local/sbin/kldload-golden", "--template", template]
-    await _stream_proc(websocket, cmd, target=target)
+    # Golden template build runs an install end-to-end — 20-40 min easy.
+    await _stream_proc_detached(websocket, cmd, target=target)
 
 async def _run_stamp(websocket, msg):
     template   = msg.get("template", "kvm")
@@ -3092,14 +3127,15 @@ async def _run_stamp(websocket, msg):
         idx      = base_index + i
         hostname = f"{template}-{idx:02d}"
         clone    = golden_dir / f"{hostname}.qcow2"
-        # Create CoW clone
+        # Create CoW clone — quick (CoW is metadata-only) so stays in-process.
         rc = await _stream_proc(websocket,
             ["qemu-img", "create", "-f", "qcow2", "-b", str(image_path), "-F", "qcow2", str(clone)],
             target=target)
         if rc != 0:
             break
-        # Stamp identity into clone
-        rc = await _stream_proc(websocket,
+        # Stamp identity — boots the clone, edits hostname/network, snaps.
+        # 1-3 min per clone; detached so a multi-clone loop survives.
+        rc = await _stream_proc_detached(websocket,
             ["/usr/local/sbin/kldload-stamp-identity",
              "--image",    str(clone),
              "--hostname", hostname,
@@ -3117,7 +3153,8 @@ async def _run_k8s_join(websocket, msg):
         await websocket.send(json.dumps({"type": "error", "msg": "invalid role"}))
         return
     cmd = ["/usr/local/sbin/kldload-k8s-join", "--role", role]
-    await _stream_proc(websocket, cmd, target=target)
+    # kubeadm join is 3-10 min depending on image-pull bandwidth.
+    await _stream_proc_detached(websocket, cmd, target=target)
 
 async def _run_salt_highstate(websocket, msg):
     salt_target = msg.get("target", "*")
@@ -3126,7 +3163,8 @@ async def _run_salt_highstate(websocket, msg):
         await websocket.send(json.dumps({"type": "error", "msg": "invalid salt target"}))
         return
     cmd = ["salt", salt_target, "state.highstate"]
-    await _stream_proc(websocket, cmd, target=ws_target)
+    # Salt highstate against a minion fleet — 5-15 min typical.
+    await _stream_proc_detached(websocket, cmd, target=ws_target)
 
 async def _salt_accept_all(websocket):
     try:
@@ -3324,31 +3362,17 @@ async def _list_vms(websocket):
                         break
             except Exception:
                 pass
-            # IP discovery (running VMs only) — try lease first (works for any
-            # NAT-attached VM with DHCP), fall back to qemu-guest-agent if
-            # installed inside the guest. Both calls are cheap and idempotent;
-            # silent on shut-off VMs. Returns "—" if no answer.
+            # IP discovery (running VMs only) — agent → arp → lease cascade.
+            # ARP is the universal fallback that covers VMs without QGA
+            # (Debian/Ubuntu cloud images don't install it by default). Lease
+            # comes last because dnsmasq's lease index doesn't always match
+            # what `virsh domifaddr --source lease` returns. See
+            # _vm_resolve_ip for the rationale.
             ip = "—"
             if state == "running":
-                for src in ("lease", "agent"):
-                    try:
-                        out = subprocess.check_output(
-                            ["virsh", "domifaddr", name, "--source", src],
-                            text=True, stderr=subprocess.DEVNULL, timeout=3
-                        )
-                        # Format: Name MAC Protocol Address
-                        # Pick the first ipv4 we see, skip loopback/link-local.
-                        for line in out.splitlines():
-                            parts = line.split()
-                            if len(parts) >= 4 and parts[2] == "ipv4":
-                                addr = parts[3].split("/")[0]
-                                if not addr.startswith(("127.", "169.254.")):
-                                    ip = addr
-                                    break
-                        if ip != "—":
-                            break
-                    except Exception:
-                        continue
+                resolved = _vm_resolve_ip(name)
+                if resolved:
+                    ip = resolved
             # Readiness probe for running VMs: ping the qemu-guest-agent.
             # Cheap (~50ms when agent responds, 1s when not).
             #   starting: running but no IP yet
@@ -3648,7 +3672,9 @@ async def _node_apply(websocket, msg):
         await websocket.send(json.dumps({"type": "error", "msg": "invalid state"}))
         return
     cmd = ["salt", salt_target, "state.apply", state]
-    await _stream_proc(websocket, cmd, target=ws_target)
+    # state.apply on a fleet can run minutes — detached for the same reason
+    # as state.highstate above.
+    await _stream_proc_detached(websocket, cmd, target=ws_target)
 
 
 async def _mine_refresh(websocket, msg):
@@ -3801,7 +3827,9 @@ async def _run_cluster_deploy(websocket, msg):
             resolved[node] = _env_for_node(node)
         env["KLDLOAD_NODE_CREDS"] = json.dumps(resolved)
 
-    await _stream_proc(websocket, [deploy_sh, cmd_type], env=env, target="cluster-deploy")
+    # Cluster-deploy walks every node in the fleet — Proxmox API calls,
+    # SSH bootstraps, ZFS provisioning. Easily 10-30 min for a 6-node deploy.
+    await _stream_proc_detached(websocket, [deploy_sh, cmd_type], env=env, target="cluster-deploy")
 
 async def _wg_planes_list(websocket):
     """Return all WireGuard interfaces: fixed defaults + user-defined."""
@@ -3956,7 +3984,9 @@ async def _vm_clone(websocket, msg):
             await websocket.send(json.dumps({"type": "error", "msg": f"qemu-img clone failed: {e}"}))
             return
         cmd = ["kldload-stamp-identity", "--hostname", new_name, "--image", str(clone_path), "--start"]
-    await _stream_proc(websocket, cmd, target="vm-log")
+    # virt-clone copies a full disk; stamp-identity boots + edits + reseals.
+    # 2-5 min minimum, often longer on slow disks.
+    await _stream_proc_detached(websocket, cmd, target="vm-log")
     # Persist the cloned domain — same bug as vm_create_cloud: virt-install/
     # virt-clone may produce a transient domain that auto-undefines on
     # shutdown. dumpxml | define is idempotent.
@@ -4373,7 +4403,9 @@ async def _vm_create_cloud(websocket, msg):
         "--video", "virtio",
         "--noautoconsole",
     ]
-    await _stream_proc(websocket, cmd, target="vm-log")
+    # virt-install + cloud-init first boot = 2-10 min. Detach so a Create-VM
+    # operation doesn't get killed by a brownout reload.
+    await _stream_proc_detached(websocket, cmd, target="vm-log")
     # CRITICAL — make the domain persistent. virt-install in some libvirt
     # builds creates the initial domain as transient even without
     # --transient — possibly an interaction with --import + --noautoconsole
@@ -4509,10 +4541,10 @@ async def _service_deploy(websocket, msg):
     if svc_id:
         db_update_service_status(svc_id, "deploying")
 
-    # Push via Salt
+    # Push via Salt — service deploys do package + config + restart, ~1-3 min.
     cmd = ["salt", salt_tgt, "state.apply", f"kldload.services.{name}",
            "--timeout=60", "--out=yaml"]
-    await _stream_proc(websocket, cmd, target="svc-log")
+    await _stream_proc_detached(websocket, cmd, target="svc-log")
 
     if svc_id:
         db_update_service_status(svc_id, "running")
@@ -4805,7 +4837,9 @@ async def _ansible_run(websocket, msg):
     if diff:    cmd += ["--diff"]
     if verbose: cmd += ["-vv"]
 
-    rc = await _stream_proc(websocket, cmd, env=_ansible_env(), target="ansible_log")
+    # ansible-playbook across an inventory of nodes — minutes to tens of
+    # minutes. Detached so partial deploys don't get aborted by a UI reload.
+    rc = await _stream_proc_detached(websocket, cmd, env=_ansible_env(), target="ansible_log")
     # Close the ledger row if we opened one
     if dep_id:
         try:
@@ -5284,7 +5318,10 @@ async def _helm_install(websocket, msg, upgrade=False):
         vf.close()
         cmd += ["-f", vf.name]
     try:
-        await _stream_proc(websocket, cmd, env=_helm_env(), target="helm_log")
+        # Helm install with --wait can sit for 10 min waiting for pods to
+        # become ready; even without --wait, image pulls + chart hooks add
+        # up. Detached so a UI reload doesn't orphan a partial release.
+        await _stream_proc_detached(websocket, cmd, env=_helm_env(), target="helm_log")
     finally:
         if vf and os.path.exists(vf.name):
             try: os.unlink(vf.name)
@@ -5295,9 +5332,10 @@ async def _helm_uninstall(websocket, msg):
     ns   = (msg.get("namespace") or "default").strip()
     if not name: return
     db_log_event("helm", name, f"uninstall ns={ns}", {"namespace": ns})
-    await _stream_proc(websocket,
-                       ["helm", "uninstall", name, "--namespace", ns],
-                       env=_helm_env(), target="helm_log")
+    # Uninstall walks finalizers + termination grace periods — minutes.
+    await _stream_proc_detached(websocket,
+                                ["helm", "uninstall", name, "--namespace", ns],
+                                env=_helm_env(), target="helm_log")
 
 async def _helm_release_status(websocket, msg):
     name = (msg.get("name") or "").strip()
@@ -5715,7 +5753,9 @@ async def _k8s_run_demo(websocket, msg):
         await websocket.send(json.dumps({"type": "error", "msg": "unknown script"}))
         return
     argv = [script] + demo.split()
-    await _stream_proc(websocket, argv, target="k8s")
+    # Demos vary wildly — kube-demo workloads can be 30s, kube-cluster scale
+    # is 5-20 min. Default to detached so the worst case is covered.
+    await _stream_proc_detached(websocket, argv, target="k8s")
 
 
 async def _k8s_top(websocket):
@@ -5765,12 +5805,17 @@ async def _k8s_bootstrap(websocket, msg):
             "line": f"[k8s] Existing cluster detected (kldload-cp present). Scaling to {workers} workers instead of re-bootstrapping.",
         }))
         await _auto_snapshot(websocket, f"k8s-scale-to-{workers}")
-        await _stream_proc(websocket,
+        # kube-cluster scale clones + DHCPs + joins — 5-15 min for 3 workers,
+        # easily 30+ for larger. Detached for the same reasons as the
+        # explicit scale handler (_k8s_cluster_scale below).
+        await _stream_proc_detached(websocket,
             ["kube-cluster", "scale", str(workers)],
             target="k8s")
     else:
         await _auto_snapshot(websocket, "k8s-bootstrap")
-        await _stream_proc(websocket,
+        # Full bootstrap is the longest single op in the GUI — 15-30 min for
+        # cp + workers + Cilium/Tetragon/MetalLB.
+        await _stream_proc_detached(websocket,
             ["kube-cluster", "bootstrap", "--workers", str(workers)],
             target="k8s")
     await _k8s_status(websocket)
@@ -5939,8 +5984,43 @@ def _klab_get_ztest_goldens():
     return goldens
 
 
+def _vm_resolve_ip(name):
+    """Best-effort IP discovery for a libvirt domain.
+
+    Tries three sources in order:
+      1. --source agent  — works if qemu-guest-agent is connected (Rocky,
+         Fedora, RHEL cloud images have it; Debian/Ubuntu cloud images
+         usually don't unless we explicitly install qemu-guest-agent in
+         cloud-init).
+      2. --source arp    — populated whenever the host's bridge has seen
+         any packet from the guest, which is true the moment the guest
+         has touched the network. Universal fallback.
+      3. --source lease  — dnsmasq lease file. Empty for "blank" guests
+         that never DHCPd a new lease (rare; covered by 1+2).
+
+    Earlier code synthesized fake static IPs by distro index. They almost
+    never matched the actual DHCP-assigned address, which is why the klab
+    view rendered IPs that wouldn't route — and why debian-blue/ubuntu-blue
+    (no QGA) showed blank after an earlier rewrite that returned empty on
+    miss. Real discovery fixes both classes of bug.
+    """
+    for src in ("agent", "arp", "lease"):
+        try:
+            out = subprocess.check_output(
+                ["virsh", "domifaddr", name, "--source", src],
+                text=True, stderr=subprocess.DEVNULL, timeout=3)
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 4 and parts[2] == "ipv4":
+                    addr = parts[3].split("/")[0]
+                    if addr and not addr.startswith(("127.", "169.254.", "0.")):
+                        return addr
+        except Exception:
+            continue
+    return ""
+
 def _klab_get_site_vms(site):
-    """Get running VMs for a klab site (blue or green)."""
+    """Get running VMs for a klab site (blue or green) with real IPs."""
     vms = []
     try:
         out = subprocess.check_output(
@@ -5952,22 +6032,13 @@ def _klab_get_site_vms(site):
                 continue
             distro = name.replace(f"klab-{site}-", "")
             state = "unknown"
-            ip = ""
             try:
-                st = subprocess.check_output(
+                state = subprocess.check_output(
                     ["virsh", "domstate", name],
                     text=True, stderr=subprocess.DEVNULL).strip()
-                state = st
             except Exception:
                 pass
-            # Get IP from static assignment: blue=192.168.122.10x, green=192.168.122.20x
-            try:
-                idx = KLAB_DISTROS.index(distro) + 1
-            except ValueError:
-                idx = 0
-            if idx:
-                base = 100 if site == "blue" else 200
-                ip = f"192.168.122.{base + idx}"
+            ip = _vm_resolve_ip(name) if state == "running" else ""
             vms.append({"name": name, "distro": distro, "state": state, "ip": ip})
     except Exception:
         pass
@@ -6102,7 +6173,12 @@ async def _klab_status(websocket):
 
 
 async def _klab_golden(websocket, msg):
-    """Build klab golden image(s). Streams logs."""
+    """Build klab golden image(s). Streams logs.
+
+    Detached because each blue-green golden takes 5-15 min (cloud image
+    download + virt-install + setup_vm_golden snapshot). A 6-distro `all`
+    run is 30-60 min; same survival-across-webui-restart logic as ztest.
+    """
     distro = msg.get("distro", "all")
     if distro != "all" and distro not in KLAB_DISTROS:
         await websocket.send(json.dumps({"type": "error", "msg": f"invalid distro: {distro}"}))
@@ -6113,7 +6189,7 @@ async def _klab_golden(websocket, msg):
     zfs_source = msg.get("zfs_source", "")
     if zfs_source:
         env["ZFS_SOURCE"] = zfs_source
-    await _stream_proc(websocket, ["klab", "golden", distro], env=env, target="klab")
+    await _stream_proc_detached(websocket, ["klab", "golden", distro], env=env, target="klab")
     # Refresh status after build
     await _klab_status(websocket)
 
@@ -6124,7 +6200,9 @@ async def _klab_verify(websocket, msg):
     if distro != "all" and distro not in KLAB_DISTROS:
         await websocket.send(json.dumps({"type": "error", "msg": f"invalid distro: {distro}"}))
         return
-    await _stream_proc(websocket, ["klab", "verify", distro], target="klab")
+    # klab verify boots each golden + runs a smoke test inside — minutes
+    # per distro.
+    await _stream_proc_detached(websocket, ["klab", "verify", distro], target="klab")
 
 
 async def _klab_deploy(websocket, msg):
@@ -6134,7 +6212,9 @@ async def _klab_deploy(websocket, msg):
         await websocket.send(json.dumps({"type": "error", "msg": "site must be 'blue' or 'green'"}))
         return
     await _auto_snapshot(websocket, f"deploy-{site}")
-    await _stream_proc(websocket, ["klab", "deploy", site], target="klab")
+    # 5 distros × clone-from-snapshot + boot — 1-3 min typical, can run
+    # longer if cloud-init does post-boot work. Detached for safety.
+    await _stream_proc_detached(websocket, ["klab", "deploy", site], target="klab")
     await _klab_status(websocket)
 
 
@@ -6142,13 +6222,16 @@ async def _klab_promote(websocket, msg):
     """Promote green to blue."""
     site = msg.get("site", "green")
     await _auto_snapshot(websocket, "promote")
-    await _stream_proc(websocket, ["klab", "promote", site], target="klab")
+    # Promote = snap-blue + zfs-clone-from-green — usually <30s, but a slow
+    # zpool can stretch it; detach to be safe since it's destructive.
+    await _stream_proc_detached(websocket, ["klab", "promote", site], target="klab")
     await _klab_status(websocket)
 
 
 async def _klab_rollback(websocket):
     """Rollback blue to previous snapshot."""
-    await _stream_proc(websocket, ["klab", "rollback"], target="klab")
+    # Destructive — protect against UI reload mid-op.
+    await _stream_proc_detached(websocket, ["klab", "rollback"], target="klab")
     await _klab_status(websocket)
 
 
@@ -6318,6 +6401,143 @@ async def _klab_test(websocket, msg):
     await _klab_test_tail(websocket, proc.pid, log_path, target="klab")
 
 
+def _detached_find_active(target):
+    """Find the most-recent still-running detached job for a given target.
+
+    _stream_proc_detached writes its log to /var/log/kldload/<target>-<ts>.log
+    and writes a sentinel .<target>-<ts>.done when the unit exits. Scanning
+    for log files without a matching .done gives us the in-flight jobs. We
+    cross-check against systemctl so a crashed unit that never wrote the
+    sentinel (kernel OOM, etc.) doesn't masquerade as active.
+
+    Returns (unit_name, log_path, started_ts) or None.
+    """
+    log_dir = "/var/log/kldload"
+    if not os.path.isdir(log_dir):
+        return None
+    prefix = f"{target}-"
+    active = []
+    try:
+        for fn in os.listdir(log_dir):
+            if not fn.startswith(prefix) or not fn.endswith(".log"):
+                continue
+            ts_part = fn[len(prefix):-len(".log")]
+            if not ts_part.isdigit():
+                continue
+            done = os.path.join(log_dir, f".{target}-{ts_part}.done")
+            if os.path.exists(done):
+                continue
+            unit = f"kldload-{target}-{ts_part}.service"
+            try:
+                rc = subprocess.call(
+                    ["systemctl", "is-active", "--quiet", unit],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                rc = 1
+            if rc != 0:
+                continue
+            active.append((int(ts_part), unit, os.path.join(log_dir, fn)))
+    except Exception as e:
+        LOG.warning("_detached_find_active(%s): %s", target, e)
+        return None
+    if not active:
+        return None
+    active.sort(reverse=True)   # newest first
+    ts, unit, log_path = active[0]
+    return (unit, log_path, ts)
+
+
+async def _detached_reattach(websocket, msg):
+    """Re-attach a reconnecting client to a detached _stream_proc job.
+
+    Mirrors _klab_test_reattach but for the generic
+    /var/log/kldload/<target>-<ts>.log + .done sentinel pattern that
+    _stream_proc_detached uses. Frontend calls this on (re)connect for
+    the active view so the user sees live progress of a build that was
+    kicked off in a prior session.
+
+    No active job → quiet noop. Don't error — it's expected most of the
+    time.
+    """
+    target = msg.get("target") or ""
+    if not target or "/" in target or "." in target:
+        return
+    found = _detached_find_active(target)
+    if not found:
+        await websocket.send(json.dumps({
+            "type": "detached_reattach_noop", "target": target,
+        }))
+        return
+    unit, log_path, started_ts = found
+    await websocket.send(json.dumps({
+        "type": "detached_reattach_start",
+        "target": target, "unit": unit, "log": log_path, "started": started_ts,
+    }))
+    # Tail the file until the .done sentinel appears OR the WS closes.
+    # We use a simple file poll + sentinel check; no PID needed because
+    # the .done file IS the canonical "finished" signal that
+    # _stream_proc_detached writes on exit.
+    done_path = os.path.join(os.path.dirname(log_path),
+                             "." + os.path.basename(log_path).replace(".log", ".done"))
+    _ansi_re = re.compile(r'\x1b\[[0-9;]*[mGKHF]')
+    try:
+        f = open(log_path, "r", errors="replace")
+    except Exception as e:
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": target,
+            "line": f"[reattach] open failed: {e}",
+        }))
+        return
+    # Send the last 400 lines as catchup context (matches _klab_test_tail).
+    try:
+        all_lines = f.readlines()
+        for line in all_lines[-400:]:
+            await websocket.send(json.dumps({
+                "type": "log_line", "target": target,
+                "line": _ansi_re.sub('', line.rstrip()),
+            }))
+    except Exception:
+        return
+    # Live tail.
+    while True:
+        line = f.readline()
+        if line:
+            try:
+                await websocket.send(json.dumps({
+                    "type": "log_line", "target": target,
+                    "line": _ansi_re.sub('', line.rstrip()),
+                }))
+            except Exception:
+                f.close()
+                return
+        else:
+            if os.path.exists(done_path):
+                trailing = f.read()
+                if trailing:
+                    for t in trailing.splitlines():
+                        try:
+                            await websocket.send(json.dumps({
+                                "type": "log_line", "target": target,
+                                "line": _ansi_re.sub('', t),
+                            }))
+                        except Exception:
+                            f.close()
+                            return
+                # Read the rc from the sentinel and send exec_done so the
+                # client UI flips from "building" to "done/failed".
+                try:
+                    with open(done_path) as df:
+                        rc = int(df.read().strip())
+                except Exception:
+                    rc = -1
+                await websocket.send(json.dumps({
+                    "type": "exec_done", "target": target, "rc": rc,
+                }))
+                f.close()
+                return
+            await asyncio.sleep(0.4)
+
+
 async def _klab_test_reattach(websocket):
     """Re-attach a reconnecting client to an already-running klab test.
     Reads /var/run/klab/current-run.env for pid+log, then hands off to
@@ -6480,7 +6700,10 @@ async def _klab_destroy(websocket, msg):
         await websocket.send(json.dumps({"type": "error", "msg": "target must be blue|green|all|goldens|ztest:<distro>"}))
         return
     await _auto_snapshot(websocket, f"destroy-{target}")
-    await _stream_proc(websocket, ["klab", "destroy", target], target="klab")
+    # klab destroy — virsh destroys + zfs recursive destroys. Destructive
+    # and can run minutes for "all". Detached so a UI reload doesn't leave
+    # the teardown half-finished.
+    await _stream_proc_detached(websocket, ["klab", "destroy", target], target="klab")
     await _klab_status(websocket)
 
 
@@ -8743,32 +8966,16 @@ def _vm_console_window_name(vm):
 def _vm_lookup_ip(vm):
     """Return first usable IPv4 for a libvirt domain, or None.
 
-    Tries `virsh domifaddr --source lease` first (works as long as the VM
-    got DHCP from a libvirt-managed network like virbr0), then falls back
-    to the qemu-guest-agent source for VMs on external networks. Skips
-    loopback and link-local. Returns None if no IP is discoverable — the
-    caller surfaces a friendly "VM still booting" error to the UI."""
-    import re as _re_ipv4
-    _IP_RE = _re_ipv4.compile(r"\b(\d+\.\d+\.\d+\.\d+)(?:/\d+)?\b")
-    for src in ("lease", "agent"):
-        try:
-            out = subprocess.check_output(
-                ["virsh", "domifaddr", vm, "--source", src],
-                text=True, stderr=subprocess.DEVNULL, timeout=5)
-        except Exception:
-            continue
-        for line in out.splitlines():
-            parts = line.split()
-            # Format: "name mac protocol address"  e.g. "vnet0 52:54... ipv4 192.168.122.45/24"
-            if len(parts) >= 4 and parts[2] == "ipv4":
-                m = _IP_RE.search(parts[3])
-                if not m:
-                    continue
-                ip = m.group(1)
-                if ip.startswith(("127.", "169.254.", "0.")):
-                    continue
-                return ip
-    return None
+    Thin wrapper around _vm_resolve_ip (defined alongside _klab_get_site_vms)
+    which does agent → arp → lease in that order. Previously this function
+    only tried lease + agent and missed every Debian/Ubuntu cloud-image VM
+    (no qemu-guest-agent installed by default) whose dnsmasq lease was
+    present but `virsh domifaddr --source lease` didn't surface it — the
+    user got "Couldn't find an IPv4" from Switch-to-SSH even when arp had
+    the address. Unified IP-discovery path means klab UI, VMs list, and
+    SSH-open all behave consistently.
+    """
+    return _vm_resolve_ip(vm) or None
 
 
 async def _vm_ssh_open(websocket, msg):
@@ -9197,10 +9404,10 @@ async def _klab_run_playbook(websocket, msg):
                     "type": "log_line", "target": "klab", "line": line,
                 }))
         elif playbook:
-            # Ansible playbook against this host
+            # Ansible playbook against this host — minutes per VM.
             cmd = ["ansible-playbook", playbook, "-i", f"{vm['ip']},",
                    "--user", "root", "--ssh-extra-args", "-o StrictHostKeyChecking=no"]
-            await _stream_proc(websocket, cmd, target="klab")
+            await _stream_proc_detached(websocket, cmd, target="klab")
 
     await websocket.send(json.dumps({
         "type": "klab_playbook_done",

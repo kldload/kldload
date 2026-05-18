@@ -271,27 +271,73 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   # the permission check; the `Ms` terminfo override makes it explicit.
   tmux set -ag terminal-overrides ',xterm*:Ms=\E]52;c;%p2%s\007'
   # vi keys in copy-mode (Prefix [ to enter, then v to start selection,
-  # y to yank). Also bind mouse-drag to auto-copy on release: no need
-  # to enter copy-mode manually — highlight with the mouse, let go,
-  # text is in the system clipboard. Middle-click to paste.
+  # y to yank).
   tmux set -g mode-keys vi
   tmux bind-key -T copy-mode-vi v send-keys -X begin-selection
-  tmux bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
-  tmux bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-selection-and-cancel
+
+  # Mouse-drag copy: changed `copy-selection-and-cancel` → `copy-selection`
+  # 2026-05-18. The -and-cancel variant exits copy-mode the moment the OSC
+  # 52 escape goes out — but if Chrome silently drops the clipboard API
+  # call (which it does on self-signed-cert origins), the user gets ZERO
+  # feedback: the highlight vanishes, nothing lands on the system
+  # clipboard, and there's no path to retry. `copy-selection` (no cancel)
+  # keeps the highlight visible AND emits OSC 52 — if the clipboard write
+  # silently fails, the user can at least right-click → Copy Selection
+  # from the explicit tmux menu below.
+  # Status-bar toast on drag-release shows a live snippet of what was
+  # captured (first 80 chars + total length) so the operator has visible
+  # confirmation even when xterm.js doesn't paint the selection highlight
+  # for long (some redraw paths repaint the inverse-color cells). Toast
+  # stays up for 3s — long enough to read, short enough not to pile up.
+  tmux set -g display-time 3000
+  tmux bind-key -T copy-mode-vi y                 send-keys -X copy-selection-no-clear \; display-message -d 3000 "✓ captured: #{=80:buffer_sample} (#{buffer_size}c)"
+  tmux bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-selection-no-clear \; display-message -d 3000 "✓ captured: #{=80:buffer_sample} (#{buffer_size}c) — Pull selection / right-click Copy"
+  # ALSO override the non-vi copy-mode table — entering copy-mode via
+  # `copy-mode -M` (which is what MouseDrag1Pane in the root table calls)
+  # uses whichever table tmux picks based on mode-keys. Even with
+  # `mode-keys vi` set globally, the built-in `copy-mode` table still
+  # carries `copy-pipe-and-cancel` and an unlucky path lands you there.
+  # Override both tables so a mouse drag NEVER auto-cancels the highlight.
+  tmux bind-key -T copy-mode    MouseDragEnd1Pane send-keys -X copy-selection-no-clear \; display-message -d 3000 "✓ captured: #{=80:buffer_sample} (#{buffer_size}c) — Pull selection / right-click Copy"
+  tmux bind-key -T copy-mode    y                send-keys -X copy-selection-no-clear \; display-message -d 3000 "✓ captured: #{=80:buffer_sample} (#{buffer_size}c)"
+
+  # Explicit copy keys for the cases where OSC 52 / Clipboard API silently
+  # fail. `copy-pipe` to a literal echo writes the selection back into the
+  # tmux buffer AND emits another OSC 52 (some browsers honour the second
+  # one when the user's just pressed a key — explicit user gesture, no
+  # auto-fire heuristic). Ctrl+Shift+C is the universal "copy" key.
+  tmux bind-key -T copy-mode-vi C-c send-keys -X copy-selection-no-clear
+  tmux bind-key -n C-S-c run-shell -b "tmux send-keys -t '#{pane_id}' -X copy-selection 2>/dev/null"
+
   # Paste: Ctrl+Shift+V at the browser level pastes the system
   # clipboard directly into the PTY. For tmux's own buffer, Prefix + ]
   # still works (Ctrl+B ]). No-prefix Alt+V pastes tmux buffer too.
   tmux bind-key -n M-V paste-buffer
 
-  # Right-click menus: tmux 3.2+ ships a built-in context menu on
-  # MouseDown3Pane (Copy Line / Horizontal Split / Kill / etc.) that
-  # was stacking underneath the browser's own right-click menu, which
-  # looked visually broken. Unbind all three right-click surfaces so
-  # the browser's context menu appears alone. Users who want to paste
-  # just use middle-click (classic X11 primary-selection paste) or
-  # Ctrl+Shift+V — both already work.
-  tmux unbind -n MouseDown3Pane 2>/dev/null || true
-  tmux unbind -n MouseDown3Status 2>/dev/null || true
-  tmux unbind -n MouseDown3StatusLeft 2>/dev/null || true
+  # Right-click menu — restored 2026-05-18. The original concern was
+  # visual stacking with the browser's own right-click menu; tmux 3.2+
+  # display-menu draws into the terminal grid which renders on TOP of
+  # the browser's HTML context menu (the canvas paints over native UI),
+  # so the tmux menu wins the visual layer. We don't try to silence the
+  # browser menu — that's cross-iframe restricted and not worth the
+  # complexity.
+  #
+  # The menu offers Copy Selection (writes to tmux paste-buffer AND
+  # fires OSC 52 again on confirm — a fresh user gesture which the
+  # Clipboard API tends to honour after copyOnSelect did not), Copy
+  # Visible Lines (whole pane scrollback), and Paste.
+  tmux bind-key -n MouseDown3Pane display-menu -T "#[fg=cyan]Copy / Paste" -x M -y M \
+      "Copy Selection"      c "send-keys -X copy-selection-no-clear-and-cancel" \
+      "Copy Visible Lines"  l "copy-mode \\; send-keys -X history-bottom \\; send-keys -X begin-selection \\; send-keys -X history-top \\; send-keys -X copy-selection-no-clear-and-cancel" \
+      ""                    "" "" \
+      "Paste"               p "paste-buffer" \
+      "Paste from Browser"  b "send-keys 'Use Ctrl+Shift+V'" \
+      ""                    "" "" \
+      "Clear Selection"     x "send-keys -X cancel"
+  # Right-click on status line shows the same menu — saves the user from
+  # having to aim at a pane edge.
+  tmux bind-key -n MouseDown3Status display-menu -T "#[fg=cyan]Copy / Paste" -x M -y S \
+      "Copy Selection"      c "send-keys -X copy-selection-no-clear-and-cancel" \
+      "Paste"               p "paste-buffer"
 fi
 exec tmux attach-session -t $SESSION

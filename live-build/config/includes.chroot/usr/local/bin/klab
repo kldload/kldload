@@ -1687,8 +1687,13 @@ cmd_golden() {
       _distros+=("$_arg")
     fi
   done
+  # Subshell each call so a `die` inside build_golden_single (which is
+  # `exit 1`, not `return 1`) doesn't kill the whole `golden all` run.
+  # Before this change, a single failed distro #2 left distros 3..N
+  # un-attempted because the script exited mid-loop — `|| warn` never
+  # got the chance to neutralize it.
   for distro in "${_distros[@]}"; do
-    build_golden_single "$distro" || warn "Failed to build golden for ${distro}"
+    ( build_golden_single "$distro" ) || warn "Failed to build golden for ${distro} (continuing)"
   done
 }
 
@@ -1711,8 +1716,13 @@ cmd_golden_ztest() {
     fi
   done
   log "Building ZFS test goldens (target=$*) — these are separate from blue-green goldens."
+  # Subshell-isolated: see cmd_golden for the why. The ztest lineage is
+  # especially prone to triggering this because the from-source ZFS build
+  # adds 30+ minutes per distro of additional surface for a transient
+  # network hiccup, kernel-headers mismatch, or SSH timeout to fire `die`
+  # and tear down the rest of the run.
   for distro in "${_distros[@]}"; do
-    build_golden_single "$distro" || warn "Failed to build ZTEST golden for ${distro}"
+    ( build_golden_single "$distro" ) || warn "Failed to build ZTEST golden for ${distro} (continuing)"
   done
   log "ZFS test goldens ready. Names: klab-ztest-<distro>"
 }

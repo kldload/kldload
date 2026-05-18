@@ -1817,10 +1817,13 @@ cmd_scale() {
     die "scale: golden snapshot ${golden_zpath}@golden missing — re-run kube-cluster golden"
   fi
 
-  # Find next free worker indices. Match kldload-w-N for any VM defined on
-  # this host, regardless of running/stopped/orphaned. Then pick the lowest
-  # N gaps that don't collide. This way an orphan kldload-w-3 from a prior
-  # failed scale doesn't get re-stomped — operator can clean it up first.
+  # Find next free worker indices. Match kldload-w-N from BOTH libvirt
+  # domains AND ZFS zvols — a prior failed scale can leave the zvol behind
+  # after virsh undefine succeeded, and the old picker (libvirt-only) would
+  # then re-pick that slot, hit "zvol already exists" inside kvm-clone, and
+  # mark the clone as failed. Taking max(virsh, zfs) makes the picker
+  # orphan-aware. Caught .101 2026-05-18: scale +4 produced w-5/7/8 clone
+  # failures because zvols for those names existed from earlier deletions.
   local existing_max=0 v
   while IFS= read -r v; do
     [[ -z "$v" ]] && continue
@@ -1829,6 +1832,16 @@ cmd_scale() {
       (( idx > existing_max )) && existing_max=$idx
     fi
   done < <(virsh list --all --name 2>/dev/null)
+  # Also scan ZFS for orphan worker zvols.
+  while IFS= read -r v; do
+    [[ -z "$v" ]] && continue
+    # Strip "rpool/vms/" prefix — match the bare name.
+    local bare="${v##*/}"
+    if [[ "$bare" =~ ^${WORKER_PREFIX}-([0-9]+)$ ]]; then
+      local idx="${BASH_REMATCH[1]}"
+      (( idx > existing_max )) && existing_max=$idx
+    fi
+  done < <(zfs list -H -o name 2>/dev/null | grep -E "/${WORKER_PREFIX}-[0-9]+$")
 
   declare -a new_ids=()
   for i in $(seq 1 "$N"); do new_ids+=($((existing_max + i))); done
@@ -1847,6 +1860,18 @@ cmd_scale() {
     local name="${WORKER_PREFIX}-${idx}"
     new_names+=("$name")
     echo -ne "  ${GOLDEN} → ${name} ... "
+    # Defensive cleanup: even though the picker tries to skip slots with
+    # orphan zvols/domains, race conditions (concurrent UI scale clicks)
+    # or partial cleanup states can still leave dangling state at this
+    # exact name. Destroy the libvirt domain + zvol before kvm-clone
+    # writes new state. Silent on absence — this is a "make sure the
+    # slot is empty" sweep, not an error if it already is.
+    virsh destroy   "$name" >/dev/null 2>&1 || true
+    virsh undefine  "$name" --nvram >/dev/null 2>&1 \
+      || virsh undefine "$name" >/dev/null 2>&1 || true
+    zfs destroy -Rf "${POOL}/vms/${name}" >/dev/null 2>&1 || true
+    rm -f "/var/lib/kldload/cloud-init/${name}-ci.iso" \
+          "/var/lib/kldload/cloud-init/${name}-cloud-init.iso" 2>/dev/null || true
     local S E
     S=$(date +%s%N)
     if ! kvm-clone "${GOLDEN}" "$name" >/dev/null 2>&1; then
