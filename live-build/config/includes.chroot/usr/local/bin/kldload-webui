@@ -1684,6 +1684,19 @@ async def ws_handler(websocket):
                     except Exception:
                         pass
                     await websocket.send(json.dumps({"type": "install_state", **state}))
+                elif action == "rhel_creds_prefill":
+                    # Surface the saved RHEL secrets to the Install-to-Disk
+                    # form so the operator sees the credentials state and
+                    # can override per-install without re-typing. Loopback
+                    # WS only — same trust boundary as the saved secrets
+                    # themselves. Empty string for any missing secret.
+                    await websocket.send(json.dumps({
+                        "type":     "rhel_creds_prefill",
+                        "username": secret_get("rhel-username") or "",
+                        "password": secret_get("rhel-password") or "",
+                        "key":      secret_get("rhel-activation-key") or "",
+                        "org":      secret_get("rhel-organization") or "",
+                    }))
                 elif action == "install_abort":
                     # Stop the active kldinstall-* systemd unit. The
                     # subprocess is in its own cgroup so systemctl stop

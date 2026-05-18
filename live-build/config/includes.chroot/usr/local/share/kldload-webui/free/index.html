@@ -3917,6 +3917,53 @@ function handle(msg) {
 
     // ── klab messages ─────────────────────────────────────────────────
     case 'klab_status': { renderKlabStatus(msg); break; }
+    case 'rhel_creds_prefill': {
+      // Pre-populate the Install-to-Disk RHEL fields from the
+      // Dashboard's saved secrets. Only overwrite empty fields so a
+      // user who already typed something into the install form doesn't
+      // get their value stomped. Show a small hint after fill so they
+      // know where the values came from.
+      const fill = (id, val) => {
+        const el = document.getElementById(id);
+        if (!el) return false;
+        if (el.value && el.value.trim().length) return false;
+        if (!val) return false;
+        el.value = val;
+        return true;
+      };
+      let filled = false;
+      filled = fill('rhel-username', msg.username) || filled;
+      filled = fill('rhel-password', msg.password) || filled;
+      filled = fill('rhel-key',      msg.key)      || filled;
+      filled = fill('rhel-org',      msg.org)      || filled;
+      // If we filled the username+password fields and an "auth method"
+      // radio exists, flip it to whichever fields we populated so the
+      // shown section matches what's set.
+      if ((msg.username && msg.password) || (msg.key && msg.org)) {
+        const useUserPass = !!(msg.username && msg.password);
+        const radios = document.querySelectorAll('input[name="rhel-auth"]');
+        radios.forEach(r => {
+          if ((r.value === 'userpass' && useUserPass) ||
+              (r.value === 'activation' && !useUserPass)) {
+            r.checked = true;
+            if (typeof toggleRhelAuth === 'function') toggleRhelAuth();
+          }
+        });
+      }
+      // Toast/hint near the RHEL panel header so it's visible.
+      const panel = document.getElementById('rhel-auth-panel');
+      if (panel && filled) {
+        let hint = panel.querySelector('.rhel-prefill-hint');
+        if (!hint) {
+          hint = document.createElement('div');
+          hint.className = 'rhel-prefill-hint';
+          hint.style.cssText = 'font-size:0.72rem;color:var(--good);margin-top:0.3rem';
+          panel.appendChild(hint);
+        }
+        hint.textContent = '✓ Pre-filled from saved Dashboard credentials. Edit to override.';
+      }
+      break;
+    }
     case 'tmux_buffer': {
       _termShowBufferModal(msg.text || '');
       break;
@@ -4624,6 +4671,12 @@ function selectDistro(el) {
   });
   // (old AI model selector hide on BSD — block removed; picker UI no longer exists)
   if (rhelPanel) rhelPanel.style.display = el.dataset.distro === 'rhel' ? 'block' : 'none';
+  // Auto-pre-fill RHEL fields from the secrets the operator saved on
+  // the Dashboard (RHEL Credentials panel). Saves typing — and makes
+  // the credentials state visible up-front instead of "blank fields
+  // → install starts → backend fallback fires silently". Backend
+  // returns rhel_creds_prefill with {username, password, key, org}.
+  if (el.dataset.distro === 'rhel') send({ action: 'rhel_creds_prefill' });
   // Distro-specific profile restrictions
   const d = el.dataset.distro;
   const isArch = d === 'arch';
