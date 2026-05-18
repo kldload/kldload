@@ -1683,6 +1683,25 @@ async def ws_handler(websocket):
                         state = json.loads(INSTALL_STATE_PATH.read_text())
                     except Exception:
                         pass
+                    # Cross-check with systemd: if a kldinstall-* unit is
+                    # actually active, the install IS running regardless of
+                    # what the state file says. Caught .133 2026-05-18: state
+                    # file said running:false rc:0 (stale from a prior run)
+                    # while a new install was mid-flight, so the UI hid the
+                    # running panel. Trust systemd over the file.
+                    try:
+                        _q = await asyncio.create_subprocess_exec(
+                            "systemctl", "list-units", "--no-legend",
+                            "--state=active", "kldinstall-*.service",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        _out, _ = await _q.communicate()
+                        if (_out or b"").strip():
+                            state["running"] = True
+                            state["rc"] = None
+                    except Exception:
+                        pass
                     await websocket.send(json.dumps({"type": "install_state", **state}))
                 elif action == "rhel_creds_prefill":
                     # Surface the saved RHEL secrets to the Install-to-Disk
