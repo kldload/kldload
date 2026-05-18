@@ -197,10 +197,21 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   # Ctrl+q closes the current window too (keeps hand on home row if you're
   # typing). Not using Ctrl+W because the browser eats it.
   tmux bind -n C-q     kill-window
-  # Explicitly unbind Alt+x / Alt+Shift+X in case a prior session or a
-  # sourced ~/.tmux.conf set them. `unbind` is silent if not bound.
-  tmux unbind -n M-x   2>/dev/null || true
-  tmux unbind -n M-X   2>/dev/null || true
+  # Explicitly unbind Alt+x / Alt+Shift+X in EVERY key table that tmux
+  # builds in by default. The root unbind covers normal-mode use, but
+  # tmux also ships copy-mode + copy-mode-vi bindings (M-x →
+  # jump-to-mark) that fire when the operator is inside a selection
+  # and presses Alt+X, producing surprising cursor jumps that look
+  # like an unwanted line selection. Unbinding everywhere = Alt+X
+  # passes through to the PTY in every mode.
+  for _tbl in root prefix copy-mode copy-mode-vi; do
+    tmux unbind -T "$_tbl" M-x 2>/dev/null || true
+    tmux unbind -T "$_tbl" M-X 2>/dev/null || true
+  done
+  # Pre-emptive: -n binds resolve to the root table; redundant with the
+  # loop above but keeps the intent explicit.
+  tmux unbind -n M-x 2>/dev/null || true
+  tmux unbind -n M-X 2>/dev/null || true
 
   # ── bcc-tools "trace" group (Alt+letter) ─────────────────────────
   # Complements the bcc-tools on F11/F12 (network-focused). These
