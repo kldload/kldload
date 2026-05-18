@@ -1641,9 +1641,25 @@ select option:checked { background: #00b8d9; color: #000; }
               <option value="worker">Worker node(s)</option>
               <option value="cp" disabled>Control plane (HA — 1.2 feature, requires etcd quorum)</option>
             </select>
-            <button class="btn btn-primary btn-sm" onclick="k8sAddNodes()">Add</button>
+            <button id="k8s-scale-btn" class="btn btn-primary btn-sm" onclick="k8sAddNodes()">Add</button>
             <span class="k8s-panel-hdr-muted" style="margin-left:auto;font-size:0.75rem">~2 min per node — DHCP + cloud-init + kubeadm join</span>
           </div>
+        </div>
+
+        <!-- Build progress panel — visible only while a scale is in flight.
+             k8s_log lines stream here in real-time so you can watch the
+             clone → DHCP → cloud-init → kubeadm join phases as they happen
+             without leaving the Nodes tab. Auto-collapses when scale ends
+             ("Added N/M workers" marker). -->
+        <div id="k8s-node-progress" class="k8s-panel" style="display:none;margin-bottom:0.9rem;border-color:var(--accent)">
+          <div class="k8s-panel-hdr">
+            <span><span class="spinner" style="display:inline-block;width:0.7rem;height:0.7rem;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:k8s-spin 0.8s linear infinite;margin-right:0.5rem;vertical-align:middle"></span><span id="k8s-node-progress-title">Scaling cluster…</span></span>
+            <div style="display:flex;gap:0.4rem;margin-left:auto">
+              <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-node-progress-log').textContent=''">Clear</button>
+              <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-node-progress').style.display='none'">Hide</button>
+            </div>
+          </div>
+          <div id="k8s-node-progress-log" class="log-box" style="height:240px;max-height:240px;overflow-y:auto;margin:0;border-radius:0 0 8px 8px;font-size:0.78rem"></div>
         </div>
 
         <div class="k8s-panel">
@@ -3488,10 +3504,31 @@ function handle(msg) {
         if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
         if (panel) panel.style.display = '';
       } else if (target === 'k8s') {
+        const line = stripAnsi(msg.line || '');
         const box = document.getElementById('k8s-log');
         const panel = document.getElementById('k8s-log-panel');
-        if (box) { box.textContent += stripAnsi(msg.line || '') + '\n'; box.scrollTop = box.scrollHeight; }
+        if (box) { box.textContent += line + '\n'; box.scrollTop = box.scrollHeight; }
         if (panel) panel.style.display = '';
+        // Mirror to the Nodes-tab inline progress panel (only while it's
+        // showing — i.e., during an active scale operation).
+        const progBox = document.getElementById('k8s-node-progress-log');
+        const progPanel = document.getElementById('k8s-node-progress');
+        if (progBox && progPanel && progPanel.style.display !== 'none') {
+          progBox.textContent += line + '\n';
+          progBox.scrollTop = progBox.scrollHeight;
+          // Completion markers — re-enable Add button and update header.
+          if (/Added \d+\/\d+ workers/.test(line) || /BOOTSTRAP COMPLETE/.test(line) || /\bscale.*complete\b/i.test(line)) {
+            const btn = document.getElementById('k8s-scale-btn');
+            const title = document.getElementById('k8s-node-progress-title');
+            if (btn) { btn.disabled = false; btn.textContent = 'Add'; btn.style.opacity = ''; }
+            if (title) title.textContent = 'Scale complete — ' + line.replace(/^\s*[✓✗⚠]\s*/, '').slice(0, 80);
+            // Hide the spinner indicator by replacing its parent's HTML
+            const hdr = progPanel.querySelector('.k8s-panel-hdr > span:first-child');
+            if (hdr) hdr.innerHTML = '<span style="color:var(--good);margin-right:0.4rem">✓</span><span id="k8s-node-progress-title">' + (title?.textContent || 'Done') + '</span>';
+            // Re-trigger a node-list refresh so the new rows appear
+            setTimeout(() => send({ action: 'k8s_status' }), 1500);
+          }
+        }
       } else if (target === 'klab') {
         ['klab-log', 'klab-golden-log', 'klab-ops-log', 'klab-test-log'].forEach(id => {
           const box = document.getElementById(id);
@@ -5405,10 +5442,22 @@ function k8sAddNodes() {
   if (!n || n < 1) return alert('Pick a count >= 1');
   if (kind === 'cp') return alert('Multi-CP HA coming in 1.2 — workers only for now');
   if (!confirm(`Add ${n} worker node(s) to the running cluster?\n\nEach worker clones from the kubernetes golden zvol, boots, and joins via kubeadm. ~3-5 min per node.`)) return;
+  // Show inline progress panel on the Nodes tab — user stays here and
+  // watches the build phases stream live. No more "click Add and pray".
+  const panel = document.getElementById('k8s-node-progress');
+  const title = document.getElementById('k8s-node-progress-title');
+  const logBox = document.getElementById('k8s-node-progress-log');
+  if (panel) panel.style.display = '';
+  if (title) title.textContent = `Scaling cluster — +${n} worker${n>1?'s':''}…`;
+  if (logBox) logBox.textContent = `▶ Starting kube-cluster scale +${n} worker${n>1?'s':''}\n`;
+  // Disable Add button until scale completes (re-enabled by the completion
+  // marker handler in the k8s_log mirror below).
+  const btn = document.getElementById('k8s-scale-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Scaling…'; btn.style.opacity = '0.6'; }
   _busyShow(`scaling cluster +${n} worker(s)…`, 30000);
   send({ action: 'k8s_cluster_scale', workers: n });
-  // Tab is 'log' (singular) — earlier 'logs' typo was a silent no-op.
-  k8sSubTab('log');
+  // No more auto-tab-switch — user stays on Nodes and watches the live
+  // progress + table updates side-by-side.
 }
 
 function k8sReset() {
