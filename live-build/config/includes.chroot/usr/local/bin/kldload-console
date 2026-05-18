@@ -280,33 +280,21 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   tmux set -g default-terminal "xterm-256color"
   tmux set -g mouse on
 
-  # ── kldload theme — matches the webui palette ────────────────────
-  # Stock tmux ships a green status bar that clashes with the webui's
-  # dark/royal-blue theme. Repaint to match: black-with-faint-grey-line
-  # status bar, royal-blue active window highlight, emerald check on
-  # the home label, subtle pane borders that brighten to accent for
-  # the focused pane. 256-color codes (xterm-256color set above):
-  #   23   = deep teal (panel bg)
-  #   45   = royal blue (kldload accent)
-  #   46   = emerald (success/healthy)
-  #   245  = neutral grey (muted text)
-  #   235  = near-black surface
-  #   232  = darkest bg
-  tmux set -g status-position bottom
-  tmux set -g status-interval 5
-  tmux set -g status-style 'bg=colour232,fg=colour245'
-  tmux set -g status-left-length 40
-  tmux set -g status-right-length 80
-  tmux set -g status-left  '#[bg=colour45,fg=colour232,bold] kldload #[bg=colour232,fg=colour45]│#[fg=colour245] #S '
-  tmux set -g status-right '#[fg=colour245]#(whoami)@#h #[fg=colour45]│#[fg=colour245] %H:%M '
-  tmux set -g window-status-format         '#[fg=colour245] #I#{?#{!=:#W,home},·#W,} '
-  tmux set -g window-status-current-format '#[bg=colour45,fg=colour232,bold] #I·#W '
-  tmux set -g window-status-separator      ''
-  tmux set -g pane-border-style        'fg=colour235'
-  tmux set -g pane-active-border-style 'fg=colour45'
-  tmux set -g message-style       'bg=colour45,fg=colour232,bold'
-  tmux set -g message-command-style 'bg=colour46,fg=colour232,bold'
-  tmux set -g mode-style          'bg=colour45,fg=colour232,bold'   # copy-mode selection
+  # ── kldload theme + base behavior — sourced from /etc/skel/.tmux.conf ─
+  # The skeleton tmux.conf carries the canonical kldload palette
+  # (#34d399 emerald accent, #60a5fa accent2, #161b25 surface — same
+  # colors the webui CSS uses) plus pane-nav / resize / window-switch
+  # quality-of-life binds the user already knows from running tmux
+  # outside the browser. Sourcing here keeps the theme single-source-
+  # of-truth instead of duplicating hex codes in two places.
+  #
+  # Sourced BEFORE the kldload-console F-key / Alt-letter bindings so
+  # any colliding `-n` bind (e.g. S-Left resize-pane vs S-Left
+  # previous-window) gets overridden by ours below — kldload-console
+  # binds are the application-specific layer that should win.
+  for _cfg in /etc/skel/.tmux.conf "$HOME/.tmux.conf"; do
+    [[ -r "$_cfg" ]] && tmux source-file "$_cfg" 2>/dev/null || true
+  done
   tmux set -g display-time 3000
   # ── Clipboard bridge (browser ⇄ tmux) ─────────────────────────────
   # set-clipboard on tells tmux to emit OSC 52 escapes when copying
