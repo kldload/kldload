@@ -3503,11 +3503,12 @@ function handle(msg) {
         const panel = document.getElementById('k8s-log-panel');
         if (box) { box.textContent += line + '\n'; box.scrollTop = box.scrollHeight; }
         if (panel) panel.style.display = '';
-        // Mirror to the Nodes-tab inline progress panel (only while it's
-        // showing — i.e., during an active scale operation).
+        // Mirror to the Nodes-tab inline progress panel — gated on
+        // _k8sScaleActive flag so backlog/replay traffic doesn't pollute
+        // it. Flag is set true on Add click, false on completion marker.
         const progBox = document.getElementById('k8s-node-progress-log');
         const progPanel = document.getElementById('k8s-node-progress');
-        if (progBox && progPanel && progPanel.style.display !== 'none') {
+        if (progBox && progPanel && progPanel.style.display !== 'none' && window._k8sScaleActive) {
           progBox.textContent += line + '\n';
           progBox.scrollTop = progBox.scrollHeight;
           // ── Live placeholder rows ────────────────────────────────────
@@ -3516,15 +3517,26 @@ function handle(msg) {
           // kubectl get nodes to catch up.
           window._k8sPending = window._k8sPending || {};
           // 1) Initial name assignment: "Adding workers: kldload-w-5 kldload-w-6"
+          // We already predicted names client-side on click — reconcile here.
+          // Any predicted placeholders that DON'T match (off-by-one due to
+          // orphans not visible to kubectl) get dropped + replaced.
           let m = line.match(/Adding workers:\s*(.+)$/);
           if (m) {
-            const newNames = m[1].trim().split(/\s+/).filter(s => s.startsWith('kldload-'));
-            // Replace anonymous "pending-*" placeholders with the real names
-            const anonKeys = Object.keys(window._k8sPending).filter(k => k.startsWith('pending-'));
-            anonKeys.sort((a, b) => (window._k8sPending[a].slot || 0) - (window._k8sPending[b].slot || 0));
-            newNames.forEach((real, i) => {
-              if (anonKeys[i]) delete window._k8sPending[anonKeys[i]];
-              window._k8sPending[real] = { name: real, phase: 'cloning', started: Date.now() };
+            const realNames = m[1].trim().split(/\s+/).filter(s => s.startsWith('kldload-'));
+            // Drop any "predicted" placeholders that aren't in the real list
+            Object.keys(window._k8sPending).forEach(p => {
+              if (window._k8sPending[p].predicted && !realNames.includes(p)) {
+                delete window._k8sPending[p];
+              }
+            });
+            // Add real names (advance phase from "starting" → "cloning")
+            realNames.forEach(real => {
+              const existing = window._k8sPending[real];
+              window._k8sPending[real] = {
+                name: real, phase: 'cloning',
+                started: existing?.started || Date.now(),
+                slot: existing?.slot,
+              };
             });
             send({ action: 'k8s_status' });
           }
@@ -3560,6 +3572,7 @@ function handle(msg) {
           // matcher 2026-05-17 — it false-fired when the log buffer still
           // held a previous bootstrap's tail.
           if (/Added \d+\/\d+ workers/.test(line)) {
+            window._k8sScaleActive = false;
             const btn = document.getElementById('k8s-scale-btn');
             const title = document.getElementById('k8s-node-progress-title');
             if (btn) { btn.disabled = false; btn.textContent = k8sAddBtnLabel(); btn.style.opacity = ''; }
@@ -5543,14 +5556,35 @@ function k8sAddNodes() {
   // marker handler in the k8s_log mirror below).
   const btn = document.getElementById('k8s-scale-btn');
   if (btn) { btn.disabled = true; btn.textContent = `Adding ${n} ${kind === 'cp' ? 'CP' : 'worker'}${n>1?'s':''}…`; btn.style.opacity = '0.6'; }
-  // Immediately seed placeholder rows so the user sees something happen
-  // BEFORE the backend prints "Adding workers: ..." (which can take 5-10s
-  // to flow through). Use anonymous "pending-N" names; the real names
-  // overwrite them when the log line arrives.
+  // Activate the log-mirror gate. Only k8s_log lines arriving while this
+  // is true get mirrored to the progress panel — protects against old
+  // bootstrap output replaying via the websocket backlog on every new
+  // client connection. Reset on completion marker.
+  window._k8sScaleActive = true;
+  // Auto-reset if no completion in 20 min (worst case for 5+ worker scale)
+  setTimeout(() => { if (window._k8sScaleActive) { window._k8sScaleActive = false; } }, 1200000);
+  // Predict the next worker names so placeholders show the REAL names
+  // immediately — no anonymous-then-rename dance. kube-cluster scale picks
+  // names as `existing_max + 1, +2, ...` (where existing_max is the highest
+  // kldload-w-N already in libvirt). We mirror that logic from the current
+  // kubectl-known nodes — close enough; backend's "Adding workers: ..."
+  // log line will reconcile if there's any drift (orphans not in kubectl).
   window._k8sPending = window._k8sPending || {};
-  for (let i = 0; i < n; i++) {
-    const tmpName = `pending-${Date.now()}-${i}`;
-    window._k8sPending[tmpName] = { name: tmpName, phase: 'starting', placeholder: true, slot: i + 1 };
+  let existingMax = 0;
+  Object.keys(window._k8sNodesByName || {}).forEach(nm => {
+    const m = nm.match(/^kldload-w-(\d+)$/);
+    if (m) { const idx = parseInt(m[1]); if (idx > existingMax) existingMax = idx; }
+  });
+  // Also consider in-flight placeholders so back-to-back Add clicks don't
+  // collide (you click +2, get w-5/w-6, click +1 before w-5/6 are kubectl-
+  // visible, expect w-7 not w-5).
+  Object.keys(window._k8sPending).forEach(nm => {
+    const m = nm.match(/^kldload-w-(\d+)$/);
+    if (m) { const idx = parseInt(m[1]); if (idx > existingMax) existingMax = idx; }
+  });
+  for (let i = 1; i <= n; i++) {
+    const predName = `kldload-w-${existingMax + i}`;
+    window._k8sPending[predName] = { name: predName, phase: 'starting', placeholder: true, slot: i, predicted: true };
   }
   send({ action: 'k8s_status' });   // immediate render
   _busyShow(`scaling cluster +${n} worker(s)…`, 30000);
