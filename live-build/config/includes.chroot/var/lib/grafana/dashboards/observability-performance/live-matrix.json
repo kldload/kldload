@@ -3,7 +3,10 @@
     "list": [
       {
         "name": "Kernel errors",
-        "datasource": {"type": "loki", "uid": "loki"},
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
         "enable": true,
         "expr": "{job=\"systemd-journal\", transport=\"kernel\", severity=~\"emerg|alert|crit|err\"}",
         "iconColor": "red",
@@ -13,132 +16,848 @@
   },
   "title": "Observability — Live Matrix (system pulse, real-time)",
   "uid": "kldload-live-matrix",
-  "tags": ["live", "matrix", "ebpf", "real-time", "kldload"],
+  "tags": [
+    "live",
+    "matrix",
+    "ebpf",
+    "real-time",
+    "kldload"
+  ],
   "schemaVersion": 39,
   "refresh": "5s",
-  "time": {"from": "now-5m", "to": "now"},
+  "time": {
+    "from": "now-5m",
+    "to": "now"
+  },
   "description": "The 'watch the system run' dashboard. 5-second refresh, dense layout, real-time event streams, live histograms, top-N rankings. Designed to be left up on a wall in a NOC — the shape of what you see tells you whether the system is bored, busy, or burning. Tighter time window and faster refresh than the other dashboards on purpose; this one is for *now*, not history.",
   "panels": [
-
-    {"id":1,"type":"row","title":"Pulse — the heartbeat (1s grain, last 5m)","gridPos":{"h":1,"w":24,"x":0,"y":0}},
-
-    {"id":10,"type":"stat","title":"Tetragon events/s","gridPos":{"h":4,"w":3,"x":0,"y":1},
-     "targets":[{"expr":"sum(rate(tetragon_events_total[30s]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","decimals":1,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"}]}}},
-     "options":{"colorMode":"background","graphMode":"area","textMode":"value_and_name"}},
-
-    {"id":11,"type":"stat","title":"Hubble flows/s","gridPos":{"h":4,"w":3,"x":3,"y":1},
-     "targets":[{"expr":"sum(rate(hubble_flows_processed_total[30s]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","decimals":1,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"}]}}},
-     "options":{"colorMode":"background","graphMode":"area","textMode":"value_and_name"}},
-
-    {"id":12,"type":"stat","title":"Network drops/s","gridPos":{"h":4,"w":3,"x":6,"y":1},
-     "targets":[{"expr":"sum(rate(hubble_drop_total[30s]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","decimals":2,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"yellow","value":1},{"color":"red","value":10}]}}},
-     "options":{"colorMode":"background","graphMode":"area"}},
-
-    {"id":13,"type":"stat","title":"Kernel msgs/s","gridPos":{"h":4,"w":3,"x":9,"y":1},
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"sum(rate({job=\"systemd-journal\", transport=\"kernel\"}[30s]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","decimals":1,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"}]}}},
-     "options":{"colorMode":"background","graphMode":"area"}},
-
-    {"id":14,"type":"stat","title":"ZFS dbgmsg/s","gridPos":{"h":4,"w":3,"x":12,"y":1},
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"sum(rate({job=\"zfs-dbgmsg\"}[30s]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","decimals":1,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"}]}}},
-     "options":{"colorMode":"background","graphMode":"area"}},
-
-    {"id":15,"type":"stat","title":"BPF progs runs/s","gridPos":{"h":4,"w":3,"x":15,"y":1},
-     "targets":[{"expr":"sum(rate(tetragon_overhead_program_runs_total[30s]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","decimals":0,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"}]}}},
-     "options":{"colorMode":"background","graphMode":"area"}},
-
-    {"id":16,"type":"stat","title":"BPF CPU (% of 1 core)","gridPos":{"h":4,"w":3,"x":18,"y":1},
-     "targets":[{"expr":"sum(rate(tetragon_overhead_program_seconds_total[30s])) * 100","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"percent","decimals":2,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"yellow","value":5},{"color":"red","value":15}]}}},
-     "options":{"colorMode":"background","graphMode":"area"}},
-
-    {"id":17,"type":"stat","title":"Cilium BPF map ops/s","gridPos":{"h":4,"w":3,"x":21,"y":1},
-     "targets":[{"expr":"sum(rate(cilium_bpf_map_ops_total[30s]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","decimals":0,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"}]}}},
-     "options":{"colorMode":"background","graphMode":"area"}},
-
-    {"id":20,"type":"row","title":"Live event streams — what's happening right now","gridPos":{"h":1,"w":24,"x":0,"y":5}},
-
-    {"id":21,"type":"logs","title":"Kernel (warn+) — live tail","gridPos":{"h":12,"w":6,"x":0,"y":6},
-     "description":"Kernel ring buffer, severity warn+. Refreshes every 5s. The shape of message bursts tells you whether the kernel is under stress.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"{job=\"systemd-journal\", transport=\"kernel\", severity=~\"emerg|alert|crit|err|warning\"}","refId":"A"}],
-     "options":{"showTime":true,"showLabels":false,"showCommonLabels":false,"wrapLogMessage":true,"enableLogDetails":false,"sortOrder":"Descending","dedupStrategy":"none"}},
-
-    {"id":22,"type":"logs","title":"ZFS dbgmsg — live tail","gridPos":{"h":12,"w":6,"x":6,"y":6},
-     "description":"ZFS internal debug ring buffer (`/proc/spl/kstat/zfs/dbgmsg`). Scrub start/end, resilver progress, TRIM activity, vdev events, snapshot create/destroy — all surface here.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"{job=\"zfs-dbgmsg\"}","refId":"A"}],
-     "options":{"showTime":true,"showLabels":false,"showCommonLabels":false,"wrapLogMessage":true,"enableLogDetails":false,"sortOrder":"Descending","dedupStrategy":"none"}},
-
-    {"id":23,"type":"logs","title":"Container + pod events — live tail","gridPos":{"h":12,"w":6,"x":12,"y":6},
-     "description":"Container runtime + pod lifecycle events (kubelet, containerd, conmon). Pod creates / deletes / probe failures appear here.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"{job=\"systemd-journal\", unit=~\"kubelet.service|containerd.service|crio.service\"}","refId":"A"}],
-     "options":{"showTime":true,"showLabels":false,"showCommonLabels":false,"wrapLogMessage":true,"enableLogDetails":false,"sortOrder":"Descending","dedupStrategy":"none"}},
-
-    {"id":24,"type":"logs","title":"Anything error-level (all sources) — live tail","gridPos":{"h":12,"w":6,"x":18,"y":6},
-     "description":"Catch-all: anything emitting at err+ across the journal. The 'what's on fire right now' panel.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"{job=\"systemd-journal\", severity=~\"emerg|alert|crit|err\"}","refId":"A"}],
-     "options":{"showTime":true,"showLabels":true,"showCommonLabels":false,"wrapLogMessage":true,"enableLogDetails":false,"sortOrder":"Descending","dedupStrategy":"none"}},
-
-    {"id":30,"type":"row","title":"Distributions — heatmaps refreshing in real time","gridPos":{"h":1,"w":24,"x":0,"y":18}},
-
-    {"id":31,"type":"heatmap","title":"Block read latency (kernel block layer)","gridPos":{"h":8,"w":8,"x":0,"y":19},
-     "description":"Read latency distribution from the kernel block layer (BPF kprobe on `block_rq_*`). Hot band moving up = something is getting slower. Tail thickening = outliers appearing.",
-     "targets":[{"expr":"sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"read\"}[30s]))","format":"heatmap","refId":"A"}],
-     "options":{"calculate":false,"yAxis":{"unit":"s"}}},
-
-    {"id":32,"type":"heatmap","title":"Block write latency (kernel block layer)","gridPos":{"h":8,"w":8,"x":8,"y":19},
-     "targets":[{"expr":"sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"write\"}[30s]))","format":"heatmap","refId":"A"}],
-     "options":{"calculate":false,"yAxis":{"unit":"s"}}},
-
-    {"id":33,"type":"heatmap","title":"Tetragon event handling latency (kernel → userspace)","gridPos":{"h":8,"w":8,"x":16,"y":19},
-     "description":"How long Tetragon takes to handle each kernel event end-to-end. Hot top = userspace is falling behind the kernel.",
-     "targets":[{"expr":"sum by (le) (rate(tetragon_handling_latency_bucket[30s]))","format":"heatmap","refId":"A"}],
-     "options":{"calculate":false,"yAxis":{"unit":"ns"}}},
-
-    {"id":40,"type":"row","title":"Right-now rankings — top N (last 1m)","gridPos":{"h":1,"w":24,"x":0,"y":27}},
-
-    {"id":41,"type":"bargauge","title":"Hottest BPF programs by CPU time/s","gridPos":{"h":8,"w":8,"x":0,"y":28},
-     "description":"Top 10 Tetragon BPF programs by kernel CPU time/sec. Tells you which observability hook is the most expensive RIGHT NOW.",
-     "targets":[{"expr":"topk(10, sum by (program) (rate(tetragon_overhead_program_seconds_total[1m])))","legendFormat":"{{program}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"s","decimals":4,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"yellow","value":0.001},{"color":"red","value":0.01}]}}},
-     "options":{"orientation":"horizontal","displayMode":"gradient","showUnfilled":true}},
-
-    {"id":42,"type":"bargauge","title":"Loudest kernel syslog identifiers (msgs/s)","gridPos":{"h":8,"w":8,"x":8,"y":28},
-     "description":"Who's talking on the kernel ring buffer right now. Outliers = something noisy. Pair with the live kernel tail to read what it's actually saying.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"topk(10, sum by (syslog_id) (rate({job=\"systemd-journal\", transport=\"kernel\"}[1m])))","legendFormat":"{{syslog_id}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","decimals":2,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"yellow","value":1},{"color":"red","value":10}]}}},
-     "options":{"orientation":"horizontal","displayMode":"gradient","showUnfilled":true}},
-
-    {"id":43,"type":"bargauge","title":"Cilium BPF maps closest to eviction","gridPos":{"h":8,"w":8,"x":16,"y":28},
-     "description":"Top 10 BPF maps by fullness ratio. Anything > 0.8 = sizing problem brewing. Sustained 1.0 = active evictions = lost connection state.",
-     "targets":[{"expr":"topk(10, cilium_bpf_map_pressure)","legendFormat":"{{map_name}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"percentunit","decimals":3,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"yellow","value":0.7},{"color":"red","value":0.9}]}}},
-     "options":{"orientation":"horizontal","displayMode":"gradient","showUnfilled":true}},
-
-    {"id":50,"type":"row","title":"Network — Hubble flows + TCP flags + drops","gridPos":{"h":1,"w":24,"x":0,"y":36}},
-
-    {"id":51,"type":"timeseries","title":"Hubble flows/s (1s rate)","gridPos":{"h":7,"w":8,"x":0,"y":37},
-     "description":"Every TCP/UDP/ICMP flow between pods, observed in-kernel by Cilium's eBPF data plane. No sidecars, no agents, no app cooperation.",
-     "targets":[{"expr":"sum(rate(hubble_flows_processed_total[30s]))","legendFormat":"flows/s","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":30}}}},
-
-    {"id":52,"type":"timeseries","title":"TCP flags rate (SYN/RST/FIN/ACK)","gridPos":{"h":7,"w":8,"x":8,"y":37},
-     "description":"Connection lifecycle visibility. SYN bursts = new connection storms. RST = aborts (interesting). FIN = clean closes.",
-     "targets":[{"expr":"sum by (flag) (rate(hubble_tcp_flags_total[30s]))","legendFormat":"{{flag}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15}}}},
-
-    {"id":53,"type":"timeseries","title":"Tetragon events by msg_op (live, stacked)","gridPos":{"h":7,"w":8,"x":16,"y":37},
-     "description":"msg_op 13=EXECVE (process exec), 14=EXIT (process death), 15=KPROBE (policy-defined kernel probe), 16=TRACEPOINT. EXECVE bursts = something just spawned a lot of processes.",
-     "targets":[{"expr":"sum by (msg_op) (rate(tetragon_msg_op_total[30s]))","legendFormat":"msg_op {{msg_op}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":30,"stacking":{"mode":"normal"}}}}},
-
-    {"id":99,"type":"text","title":"","gridPos":{"h":5,"w":24,"x":0,"y":44},
-     "options":{"mode":"markdown","content":"### How to read this dashboard\n\n- **Pulse row** is your one-glance read. Every panel has a sparkline behind the value — the shape tells you trend at a glance. If everything is flat-green, the system is bored. If any panel is yellow/red, look up.\n- **Live event streams** refresh every 5s. They scroll like a syslog terminal. Reading them is reading the system's stream-of-consciousness.\n- **Heatmaps** show distribution shape. Hot bands moving up = things slowing down. Tail thickening = outliers appearing. A clean heatmap with a narrow band = healthy.\n- **Top-N bar gauges** show who's most active *right now* (1-minute window). Use them to find the noisy actor when something looks off in the pulse row.\n- **Network row** is Hubble's eBPF view of every flow. No sidecars, no Envoy, no per-app agents. The kernel sees every packet.\n\n### What unlocks when we ship more eBPF data\n\n- **Process exec stream as live tail** — needs Tetragon → fluent-bit → Loki shipping (the JSON export pipeline). Once wired, replaces the 'container + pod events' tail with literal `execve` lines: `[t] pod=X comm=python3 args=foo.py exit=0 dur=1.2s`. That's the Splunk-can't-do-this moment in flesh.\n- **Scheduler runqueue + softirq heatmaps** — needs `runqlat` + `softirqs` ebpf_exporter configs added. Adds two more heatmap tiles to the distribution row.\n- **TCP RTT + lifetime heatmaps** — needs `tcprtt` + `tcplife` configs. Adds the per-connection forensics tier.\n- **Off-CPU flame graph (Pyroscope)** — needs Pyroscope deployed. Adds the 'where threads are blocked' answer eBPF is uniquely able to give."}}
-
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Pulse — the heartbeat (1s grain, last 5m)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Tetragon events/s",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(tetragon_events_total[30s]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Hubble flows/s",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 3,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(hubble_flows_processed_total[30s]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Network drops/s",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 6,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(hubble_drop_total[30s]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Kernel msgs/s",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(rate({job=\"systemd-journal\", transport=\"kernel\"}[30s]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "ZFS dbgmsg/s",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(rate({job=\"zfs-dbgmsg\"}[30s]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "BPF progs runs/s",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(tetragon_overhead_program_runs_total[30s]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "BPF CPU (% of 1 core)",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 18,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(tetragon_overhead_program_seconds_total[30s])) * 100",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 15
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "Cilium BPF map ops/s",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 21,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(cilium_bpf_map_ops_total[30s]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Live event streams — what's happening right now",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      }
+    },
+    {
+      "id": 21,
+      "type": "logs",
+      "title": "Kernel (warn+) — live tail",
+      "gridPos": {
+        "h": 12,
+        "w": 6,
+        "x": 0,
+        "y": 6
+      },
+      "description": "Kernel ring buffer, severity warn+. Refreshes every 5s. The shape of message bursts tells you whether the kernel is under stress.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"systemd-journal\", transport=\"kernel\", severity=~\"emerg|alert|crit|err|warning\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "enableLogDetails": false,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      }
+    },
+    {
+      "id": 22,
+      "type": "logs",
+      "title": "ZFS dbgmsg — live tail",
+      "gridPos": {
+        "h": 12,
+        "w": 6,
+        "x": 6,
+        "y": 6
+      },
+      "description": "ZFS internal debug ring buffer (`/proc/spl/kstat/zfs/dbgmsg`). Scrub start/end, resilver progress, TRIM activity, vdev events, snapshot create/destroy — all surface here.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"zfs-dbgmsg\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "enableLogDetails": false,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      }
+    },
+    {
+      "id": 23,
+      "type": "logs",
+      "title": "Container + pod events — live tail",
+      "gridPos": {
+        "h": 12,
+        "w": 6,
+        "x": 12,
+        "y": 6
+      },
+      "description": "Container runtime + pod lifecycle events (kubelet, containerd, conmon). Pod creates / deletes / probe failures appear here.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"systemd-journal\", unit=~\"kubelet.service|containerd.service|crio.service\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "enableLogDetails": false,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      }
+    },
+    {
+      "id": 24,
+      "type": "logs",
+      "title": "Anything error-level (all sources) — live tail",
+      "gridPos": {
+        "h": 12,
+        "w": 6,
+        "x": 18,
+        "y": 6
+      },
+      "description": "Catch-all: anything emitting at err+ across the journal. The 'what's on fire right now' panel.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"systemd-journal\", severity=~\"emerg|alert|crit|err\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "enableLogDetails": false,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Distributions — heatmaps refreshing in real time",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      }
+    },
+    {
+      "id": 31,
+      "type": "heatmap",
+      "title": "Block read latency (kernel block layer)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 19
+      },
+      "description": "Read latency distribution from the kernel block layer (BPF kprobe on `block_rq_*`). Hot band moving up = something is getting slower. Tail thickening = outliers appearing.",
+      "targets": [
+        {
+          "expr": "sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"read\"}[30s]))",
+          "format": "heatmap",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "id": 32,
+      "type": "heatmap",
+      "title": "Block write latency (kernel block layer)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 19
+      },
+      "targets": [
+        {
+          "expr": "sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"write\"}[30s]))",
+          "format": "heatmap",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "id": 33,
+      "type": "heatmap",
+      "title": "Tetragon event handling latency (kernel → userspace)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 19
+      },
+      "description": "How long Tetragon takes to handle each kernel event end-to-end. Hot top = userspace is falling behind the kernel.",
+      "targets": [
+        {
+          "expr": "sum by (le) (rate(tetragon_handling_latency_bucket[30s]))",
+          "format": "heatmap",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "ns"
+        }
+      }
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Right-now rankings — top N (last 1m)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      }
+    },
+    {
+      "id": 41,
+      "type": "bargauge",
+      "title": "Hottest BPF programs by CPU time/s",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 28
+      },
+      "description": "Top 10 Tetragon BPF programs by kernel CPU time/sec. Tells you which observability hook is the most expensive RIGHT NOW.",
+      "targets": [
+        {
+          "expr": "topk(10, sum by (program) (rate(tetragon_overhead_program_seconds_total[1m])))",
+          "legendFormat": "{{program}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 4,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 0.001
+              },
+              {
+                "color": "red",
+                "value": 0.01
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 42,
+      "type": "bargauge",
+      "title": "Loudest kernel syslog identifiers (msgs/s)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 28
+      },
+      "description": "Who's talking on the kernel ring buffer right now. Outliers = something noisy. Pair with the live kernel tail to read what it's actually saying.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "topk(10, sum by (syslog_id) (rate({job=\"systemd-journal\", transport=\"kernel\"}[1m])))",
+          "legendFormat": "{{syslog_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 43,
+      "type": "bargauge",
+      "title": "Cilium BPF maps closest to eviction",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 28
+      },
+      "description": "Top 10 BPF maps by fullness ratio. Anything > 0.8 = sizing problem brewing. Sustained 1.0 = active evictions = lost connection state.",
+      "targets": [
+        {
+          "expr": "topk(10, cilium_bpf_map_pressure)",
+          "legendFormat": "{{map_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 0.7
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Network — Hubble flows + TCP flags + drops",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      }
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "Hubble flows/s (1s rate)",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 37
+      },
+      "description": "Every TCP/UDP/ICMP flow between pods, observed in-kernel by Cilium's eBPF data plane. No sidecars, no agents, no app cooperation.",
+      "targets": [
+        {
+          "expr": "sum(rate(hubble_flows_processed_total[30s]))",
+          "legendFormat": "flows/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30
+          }
+        }
+      }
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "TCP flags rate (SYN/RST/FIN/ACK)",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 37
+      },
+      "description": "Connection lifecycle visibility. SYN bursts = new connection storms. RST = aborts (interesting). FIN = clean closes.",
+      "targets": [
+        {
+          "expr": "sum by (flag) (rate(hubble_tcp_flags_total[30s]))",
+          "legendFormat": "{{flag}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      }
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "Tetragon events by msg_op (live, stacked)",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 37
+      },
+      "description": "msg_op 13=EXECVE (process exec), 14=EXIT (process death), 15=KPROBE (policy-defined kernel probe), 16=TRACEPOINT. EXECVE bursts = something just spawned a lot of processes.",
+      "targets": [
+        {
+          "expr": "sum by (msg_op) (rate(tetragon_msg_op_total[30s]))",
+          "legendFormat": "msg_op {{msg_op}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": 99,
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### How to read this dashboard\n\n- **Pulse row** is your one-glance read. Every panel has a sparkline behind the value — the shape tells you trend at a glance. Flat = quiet. Anything climbing = look up.\n- **Live event streams** refresh every 5s. They scroll like a tail.\n- **Heatmaps** show distribution shape. Hot bands moving up = things slowing down. Tail thickening = outliers appearing. Narrow stable band = healthy.\n- **Top-N bar gauges** show the highest-rate actors in the last minute. Use them to find the noisy source when something looks off in the pulse row.\n- **Network row** is Hubble's eBPF view of every flow on the host. No sidecars, no per-app agents.\n\n### What gets added as more eBPF data ships\n\n- **Process exec stream as live tail** — Tetragon → fluent-bit → Loki shipping wired in; replaces the generic event tail with `execve` lines: `[t] pod=X comm=python3 args=foo.py exit=0 dur=1.2s`.\n- **Scheduler runqueue + softirq heatmaps** — `runqlat` + `softirqs` ebpf_exporter configs added; two more heatmap tiles on the distribution row.\n- **TCP RTT + lifetime heatmaps** — `tcprtt` + `tcplife` configs added; per-connection forensics tier.\n- **Off-CPU flame graph** — Pyroscope deployed; answers \"where are threads blocked\"."
+      }
+    }
   ]
 }

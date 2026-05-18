@@ -3,7 +3,10 @@
     "list": [
       {
         "name": "Kernel errors",
-        "datasource": {"type": "loki", "uid": "loki"},
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
         "enable": true,
         "expr": "{job=\"systemd-journal\", transport=\"kernel\", severity=~\"emerg|alert|crit|err\"}",
         "iconColor": "red",
@@ -13,94 +16,595 @@
   },
   "title": "Observability — Kernel Forensics (dmesg + ZFS dbgmsg, fingerprinted)",
   "uid": "kldload-kernel-forensics",
-  "tags": ["kernel", "dmesg", "forensics", "ebpf", "kldload"],
+  "tags": [
+    "kernel",
+    "dmesg",
+    "forensics",
+    "ebpf",
+    "kldload"
+  ],
   "schemaVersion": 39,
   "refresh": "30s",
-  "time": {"from": "now-6h", "to": "now"},
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "description": "Kernel ring buffer as a first-class signal — not a place you only look after something is on fire. Shows severity shape, subsystem chatter, critical-event fingerprints, and overlays kernel errors as annotations on every other dashboard via a Loki annotation query. Splunk indexes dmesg too, but it cannot annotate latency panels with kernel events in real time without expensive per-dashboard scripting.",
   "panels": [
-
-    {"id":1,"type":"row","title":"Headline — the bad stuff (count today, kept zero = good)","gridPos":{"h":1,"w":24,"x":0,"y":0}},
-
-    {"id":10,"type":"stat","title":"Errors/sec (last 5m, level ≥ err)","gridPos":{"h":4,"w":4,"x":0,"y":1},
-     "description":"Rate of kernel messages at severity err or worse. Steady state should be near 0. Sustained > 1/sec means investigate.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"sum(rate({job=\"systemd-journal\", transport=\"kernel\", severity=~\"emerg|alert|crit|err\"}[5m]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","decimals":2,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"yellow","value":0.1},{"color":"red","value":1}]}}},
-     "options":{"colorMode":"background"}},
-
-    {"id":11,"type":"stat","title":"OOM kills (24h)","gridPos":{"h":4,"w":4,"x":4,"y":1},
-     "description":"`Out of memory: Killed process` matches. Each one is a real signal — a process the kernel decided to murder because the system was under memory pressure. Splunk would count these too, but you'd have to write the SPL.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"sum(count_over_time({job=\"systemd-journal\", transport=\"kernel\"} |~ \"Out of memory: Killed process\" [24h]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"none","decimals":0,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"orange","value":1},{"color":"red","value":5}]}}},
-     "options":{"colorMode":"background"}},
-
-    {"id":12,"type":"stat","title":"Machine Checks (24h)","gridPos":{"h":4,"w":4,"x":8,"y":1},
-     "description":"MCE / Machine check exceptions — hardware-level errors (ECC, cache parity, CPU thermal). Any non-zero count is investigate-now territory. Splunk can match the regex but won't tell you it's hardware.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"sum(count_over_time({job=\"systemd-journal\", transport=\"kernel\"} |~ \"(?i)MCE:|Machine check|mce: \" [24h]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"none","decimals":0,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"red","value":1}]}}},
-     "options":{"colorMode":"background"}},
-
-    {"id":13,"type":"stat","title":"Soft lockups + RCU stalls (24h)","gridPos":{"h":4,"w":4,"x":12,"y":1},
-     "description":"`soft lockup` = a CPU stuck in a loop without scheduling. `rcu: INFO: rcu_sched stall` = RCU couldn't make forward progress. Both mean *something held a CPU for too long* — usually a driver or filesystem under stress. Useful to correlate with latency-spike annotations.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"sum(count_over_time({job=\"systemd-journal\", transport=\"kernel\"} |~ \"soft lockup|rcu_sched.*stall|self-detected stall\" [24h]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"none","decimals":0,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"orange","value":1},{"color":"red","value":3}]}}},
-     "options":{"colorMode":"background"}},
-
-    {"id":14,"type":"stat","title":"ZFS events (24h)","gridPos":{"h":4,"w":4,"x":16,"y":1},
-     "description":"All ZFS dbgmsg + ZED-emitted events. Most are info-level (scrub start/end, snapshot taken). Spikes here cross-referenced with bio_latency = ZFS doing real work. ZFS-on-Linux's diagnostic chatter is unique to this stack — Splunk can index it but won't have ZFS-aware dashboards built in.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"sum(count_over_time({job=\"zfs-dbgmsg\"}[24h]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"none","decimals":0,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"}]}}},
-     "options":{"colorMode":"background"}},
-
-    {"id":15,"type":"stat","title":"Kernel panics (24h)","gridPos":{"h":4,"w":4,"x":20,"y":1},
-     "description":"Should be 0 forever. Panics by definition don't get to log themselves cleanly — but the boot AFTER a panic logs a panic-was-detected message via the kernel's pstore + kdump path. Anything other than 0 is a real incident.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"sum(count_over_time({job=\"systemd-journal\", transport=\"kernel\"} |~ \"Kernel panic|Oops:|BUG:\" [24h]))","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"none","decimals":0,"color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"},{"color":"red","value":1}]}}},
-     "options":{"colorMode":"background"}},
-
-    {"id":20,"type":"row","title":"Activity shape — severity over time","gridPos":{"h":1,"w":24,"x":0,"y":5}},
-
-    {"id":21,"type":"timeseries","title":"Kernel messages/sec by severity (stacked)","gridPos":{"h":8,"w":12,"x":0,"y":6},
-     "description":"The shape of kernel chatter. Healthy systems are mostly info/notice. Sudden walls of warn/err = something just broke. Compare against the same window on bio_latency / process exec rate dashboards via the kernel-error annotations.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"sum by (severity) (rate({job=\"systemd-journal\", transport=\"kernel\"}[1m]))","legendFormat":"{{severity}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":40,"stacking":{"mode":"normal"}}}}},
-
-    {"id":22,"type":"timeseries","title":"ZFS dbgmsg rate (zfs-dbgmsg job)","gridPos":{"h":8,"w":12,"x":12,"y":6},
-     "description":"Rate of messages on the ZFS debug ring buffer. Scrubs / resilvers / TRIM / dedup ops all generate dbgmsg activity. A flat-line followed by a sudden burst = ZFS just kicked off something heavy. Pair with bio_latency heatmap to see the actual disk impact.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"sum(rate({job=\"zfs-dbgmsg\"}[1m]))","legendFormat":"zfs dbgmsg/s","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":30}}}},
-
-    {"id":30,"type":"row","title":"Critical events — fingerprinted (level ≥ err, last 1h)","gridPos":{"h":1,"w":24,"x":0,"y":14}},
-
-    {"id":31,"type":"logs","title":"Critical kernel events (sorted newest first)","gridPos":{"h":10,"w":24,"x":0,"y":15},
-     "description":"The actual lines that triggered the headline counters. Time-aligned with the severity-rate chart above. Click into a line to see the surrounding context.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"{job=\"systemd-journal\", transport=\"kernel\", severity=~\"emerg|alert|crit|err\"}","refId":"A"}],
-     "options":{"showTime":true,"showLabels":true,"showCommonLabels":false,"wrapLogMessage":true,"prettifyLogMessage":false,"enableLogDetails":true,"dedupStrategy":"none","sortOrder":"Descending"}},
-
-    {"id":40,"type":"row","title":"Subsystem chatter — who's talking","gridPos":{"h":1,"w":24,"x":0,"y":25}},
-
-    {"id":41,"type":"timeseries","title":"Rate by syslog identifier (top 10)","gridPos":{"h":8,"w":12,"x":0,"y":26},
-     "description":"Which kernel subsystems are producing the most messages right now. `kernel` (catch-all) plus any kthreads that set their own syslog id (zed, libvirtd-helpers, etc.). Outliers here = something noisy.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"topk(10, sum by (syslog_id) (rate({job=\"systemd-journal\", transport=\"kernel\"}[5m])))","legendFormat":"{{syslog_id}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15}}}},
-
-    {"id":42,"type":"timeseries","title":"Rate by subsystem prefix (extracted from message)","gridPos":{"h":8,"w":12,"x":12,"y":26},
-     "description":"Many kernel subsystems prefix their messages — `BTRFS:`, `EXT4-fs`, `zfs:`, `audit:`, `nf_conntrack:`. Extracted via regex so you can see which kernel-side feature is chatty even when syslog_id is just `kernel`. The killer view for ZFS perf debugging on a noisy box.",
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"topk(10, sum by (subsystem) (rate({job=\"systemd-journal\", transport=\"kernel\"} | regexp `^(?P<subsystem>[A-Z][A-Za-z0-9_-]+):` [5m])))","legendFormat":"{{subsystem}}","refId":"A"}],
-     "fieldConfig":{"defaults":{"unit":"ops","custom":{"drawStyle":"line","lineWidth":2,"fillOpacity":15}}}},
-
-    {"id":50,"type":"row","title":"Live tail — recent kernel + ZFS dbgmsg stream (warn+)","gridPos":{"h":1,"w":24,"x":0,"y":34}},
-
-    {"id":51,"type":"logs","title":"Kernel (warn+) — live tail","gridPos":{"h":10,"w":12,"x":0,"y":35},
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"{job=\"systemd-journal\", transport=\"kernel\", severity=~\"emerg|alert|crit|err|warning\"}","refId":"A"}],
-     "options":{"showTime":true,"showLabels":false,"showCommonLabels":false,"wrapLogMessage":true,"enableLogDetails":true,"sortOrder":"Descending","dedupStrategy":"none"}},
-
-    {"id":52,"type":"logs","title":"ZFS dbgmsg — live tail","gridPos":{"h":10,"w":12,"x":12,"y":35},
-     "targets":[{"datasource":{"type":"loki","uid":"loki"},"expr":"{job=\"zfs-dbgmsg\"}","refId":"A"}],
-     "options":{"showTime":true,"showLabels":false,"showCommonLabels":false,"wrapLogMessage":true,"enableLogDetails":true,"sortOrder":"Descending","dedupStrategy":"none"}},
-
-    {"id":99,"type":"text","title":"","gridPos":{"h":7,"w":24,"x":0,"y":45},
-     "options":{"mode":"markdown","content":"### Why this dashboard exists\n\nMost ops teams treat `dmesg` like a fire extinguisher — you only reach for it when something's already burning. That's backwards. The kernel ring buffer is **the most authoritative signal source on the entire system** — it's written by the code that's closest to the hardware, the storage, the network, the scheduler. Visualizing it first-class is one of the highest-ROI things you can do for a platform.\n\n### What this gives you that Splunk doesn't\n\n1. **Annotations on every other dashboard.** The `Kernel errors` annotation on this dashboard is configured globally — paste the same `annotations` block into any other dashboard and you get red vertical markers on every panel that line up with `dmesg` errors. Splunk has annotation support but it's per-dashboard, manual, and brittle.\n2. **ZFS dbgmsg as a first-class stream.** `/proc/spl/kstat/zfs/dbgmsg` is a ZFS-only diagnostic ring buffer; the `zfs-dbgmsg` Promtail job ships it to Loki. No Splunk app does this; you'd write a forwarder.\n3. **Subsystem extraction by regex over the live stream.** The `regexp` operator extracts the `BTRFS:` / `EXT4-fs` / `zfs:` prefix and lets you `topk(10)` who's chatty. Splunk can do this at query time but the SPL is ugly and slow on big indexes.\n4. **Sub-second-resolution rates.** Loki tracks ingest time at nanosecond granularity; we display per-second rates. Splunk's default time bucketing is minute-resolution; sub-second forensics requires `bin span=1s` and gets expensive.\n\n### Pair this dashboard with\n\n- **eBPF Deep Dive** (`/d/kldload-ebpf-deep`) — when the annotations on a Tetragon event-rate spike line up with kernel errors here, you know which kernel subsystem caused the spike.\n- **Block I/O Latency** (`/d/kldload-block-io-latency`) — `bio_latency_seconds_bucket` heatmaps with kernel-error annotations overlaid = the canonical 'why was the disk slow at 1am' view.\n- **Tetragon eBPF Security** (`/d/kldload-tetragon`) — process events on the same time axis as kernel events. OOM kill → see the process that got killed → see what it was doing right before it died.\n\n### How to extend\n\n- Add an annotation block like the one in this dashboard's JSON to other dashboards — same query, instant correlation.\n- Add ZFS-specific fingerprints (scrub start, resilver, TRIM, vdev fault) as named counters.\n- Run `bcc-tools` (when we add them to the host in #30) and pipe their output to journal with `systemd-cat -p info` — they become dashboard-visible automatically."}}
-
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Headline — the bad stuff (count today, kept zero = good)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Errors/sec (last 5m, level ≥ err)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "description": "Rate of kernel messages at severity err or worse. Steady state should be near 0. Sustained > 1/sec means investigate.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(rate({job=\"systemd-journal\", transport=\"kernel\", severity=~\"emerg|alert|crit|err\"}[5m]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "yellow",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "OOM kills (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "description": "`Out of memory: Killed process` matches. Each one is a real signal — a process the kernel decided to murder because the system was under memory pressure. Splunk would count these too, but you'd have to write the SPL.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"systemd-journal\", transport=\"kernel\"} |~ \"Out of memory: Killed process\" [24h]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Machine Checks (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "description": "MCE / Machine check exceptions — hardware-level errors (ECC, cache parity, CPU thermal). Any non-zero count is investigate-now territory. Splunk can match the regex but won't tell you it's hardware.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"systemd-journal\", transport=\"kernel\"} |~ \"(?i)MCE:|Machine check|mce: \" [24h]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Soft lockups + RCU stalls (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "description": "`soft lockup` = a CPU stuck in a loop without scheduling. `rcu: INFO: rcu_sched stall` = RCU couldn't make forward progress. Both mean *something held a CPU for too long* — usually a driver or filesystem under stress. Useful to correlate with latency-spike annotations.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"systemd-journal\", transport=\"kernel\"} |~ \"soft lockup|rcu_sched.*stall|self-detected stall\" [24h]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "ZFS events (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "description": "All ZFS dbgmsg + ZED-emitted events. Most are info-level (scrub start/end, snapshot taken). Spikes here cross-referenced with bio_latency = ZFS doing real work. ZFS-on-Linux's diagnostic chatter is unique to this stack — Splunk can index it but won't have ZFS-aware dashboards built in.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"zfs-dbgmsg\"}[24h]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "Kernel panics (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "description": "Should be 0 forever. Panics by definition don't get to log themselves cleanly — but the boot AFTER a panic logs a panic-was-detected message via the kernel's pstore + kdump path. Anything other than 0 is a real incident.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"systemd-journal\", transport=\"kernel\"} |~ \"Kernel panic|Oops:|BUG:\" [24h]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Activity shape — severity over time",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Kernel messages/sec by severity (stacked)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "description": "The shape of kernel chatter. Healthy systems are mostly info/notice. Sudden walls of warn/err = something just broke. Compare against the same window on bio_latency / process exec rate dashboards via the kernel-error annotations.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (severity) (rate({job=\"systemd-journal\", transport=\"kernel\"}[1m]))",
+          "legendFormat": "{{severity}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 40,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "ZFS dbgmsg rate (zfs-dbgmsg job)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "description": "Rate of messages on the ZFS debug ring buffer. Scrubs / resilvers / TRIM / dedup ops all generate dbgmsg activity. A flat-line followed by a sudden burst = ZFS just kicked off something heavy. Pair with bio_latency heatmap to see the actual disk impact.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(rate({job=\"zfs-dbgmsg\"}[1m]))",
+          "legendFormat": "zfs dbgmsg/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30
+          }
+        }
+      }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Critical events — fingerprinted (level ≥ err, last 1h)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      }
+    },
+    {
+      "id": 31,
+      "type": "logs",
+      "title": "Critical kernel events (sorted newest first)",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "description": "The actual lines that triggered the headline counters. Time-aligned with the severity-rate chart above. Click into a line to see the surrounding context.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"systemd-journal\", transport=\"kernel\", severity=~\"emerg|alert|crit|err\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Subsystem chatter — who's talking",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      }
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Rate by syslog identifier (top 10)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "description": "Which kernel subsystems are producing the most messages right now. `kernel` (catch-all) plus any kthreads that set their own syslog id (zed, libvirtd-helpers, etc.). Outliers here = something noisy.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "topk(10, sum by (syslog_id) (rate({job=\"systemd-journal\", transport=\"kernel\"}[5m])))",
+          "legendFormat": "{{syslog_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      }
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Rate by subsystem prefix (extracted from message)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "description": "Many kernel subsystems prefix their messages — `BTRFS:`, `EXT4-fs`, `zfs:`, `audit:`, `nf_conntrack:`. Extracted via regex so you can see which kernel-side feature is chatty even when syslog_id is just `kernel`. The killer view for ZFS perf debugging on a noisy box.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "topk(10, sum by (subsystem) (rate({job=\"systemd-journal\", transport=\"kernel\"} | regexp `^(?P<subsystem>[A-Z][A-Za-z0-9_-]+):` [5m])))",
+          "legendFormat": "{{subsystem}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        }
+      }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Live tail — recent kernel + ZFS dbgmsg stream (warn+)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      }
+    },
+    {
+      "id": 51,
+      "type": "logs",
+      "title": "Kernel (warn+) — live tail",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"systemd-journal\", transport=\"kernel\", severity=~\"emerg|alert|crit|err|warning\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      }
+    },
+    {
+      "id": 52,
+      "type": "logs",
+      "title": "ZFS dbgmsg — live tail",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"zfs-dbgmsg\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      }
+    },
+    {
+      "id": 99,
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 45
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### Why this dashboard exists\n\nThe kernel ring buffer (`dmesg` / `/dev/kmsg`) is written by the code closest to the hardware, storage, network, and scheduler. It is the most authoritative signal source on the system. This dashboard surfaces it as a first-class stream and lets it annotate every other dashboard so operational anomalies and kernel-level events sit on the same time axis.\n\n### What this dashboard does\n\n1. **Annotations on every other dashboard.** The `Kernel errors` annotation defined here is exported as a global Grafana annotation block. Paste the same block into any other dashboard and red vertical markers line up with `dmesg` errors on every panel that shares the time range.\n2. **ZFS dbgmsg as a first-class stream.** `/proc/spl/kstat/zfs/dbgmsg` is a ZFS-internal diagnostic ring buffer. The `zfs-dbgmsg` Promtail job tails it into Loki under `job=zfs-dbgmsg`, so it's queryable alongside the rest.\n3. **Subsystem extraction by regex over the live stream.** The `regexp` operator pulls the `BTRFS:` / `EXT4-fs` / `zfs:` / `nvme:` prefix out of every dmesg line so `topk(10) by (subsystem) (rate(...[5m]))` ranks who's chatty in the current window.\n4. **Sub-second resolution.** Loki ingests with nanosecond timestamps; the per-second rate panels show changes at the resolution the kernel emitted them.\n\n### Pair this dashboard with\n\n- **eBPF Deep Dive** (`/d/kldload-ebpf-deep`) — when Tetragon event-rate spikes line up with kernel errors here, you know which kernel subsystem caused the spike.\n- **Block I/O Latency** (`/d/kldload-block-io-latency`) — `bio_latency_seconds_bucket` heatmaps with kernel-error annotations overlaid = the canonical \"why was the disk slow at 1am\" view.\n- **Tetragon eBPF Security** (`/d/kldload-tetragon`) — process events on the same time axis as kernel events. OOM kill → see the process that got killed → see what it was doing right before it died.\n\n### How to extend\n\n- Copy this dashboard's `annotations` block into any other dashboard for instant correlation.\n- Add ZFS-specific fingerprints (scrub start, resilver, TRIM, vdev fault) as named counters.\n- Pipe `bcc-tools` (execsnoop, biosnoop, etc.) output to journal with `systemd-cat -p info`; it shows up here automatically via the systemd-journal Promtail job."
+      }
+    }
   ]
 }
