@@ -1626,16 +1626,16 @@ select option:checked { background: #00b8d9; color: #000; }
              a less-capable version of this form). -->
         <div class="k8s-panel" style="margin-bottom:0.9rem">
           <div class="k8s-panel-hdr">
-            <span>⇅ Scale cluster</span>
-            <span class="k8s-panel-hdr-muted">add nodes — handles clone + cloud-init + kubeadm join</span>
+            <span>＋ Add nodes</span>
+            <span class="k8s-panel-hdr-muted">clone golden + cloud-init + kubeadm join</span>
           </div>
           <div style="padding:0.7rem 1rem;display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
-            <label style="font-size:0.78rem;color:var(--text-dim)">Add <input type="number" id="k8s-scale-count" value="1" min="1" max="20" style="width:55px;margin:0 0.4rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:0.2rem 0.4rem"></label>
-            <select id="k8s-scale-kind" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.82rem">
-              <option value="worker">Worker node(s)</option>
+            <label style="font-size:0.78rem;color:var(--text-dim)"><input type="number" id="k8s-scale-count" value="1" min="1" max="20" style="width:55px;margin:0 0.4rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:0.2rem 0.4rem"></label>
+            <select id="k8s-scale-kind" onchange="k8sUpdateAddBtn()" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.82rem">
+              <option value="worker">Worker(s)</option>
               <option value="cp" disabled>Control plane (HA — 1.2 feature, requires etcd quorum)</option>
             </select>
-            <button id="k8s-scale-btn" class="btn btn-primary btn-sm" onclick="k8sAddNodes()">Add</button>
+            <button id="k8s-scale-btn" class="btn btn-primary btn-sm" onclick="k8sAddNodes()">Add worker</button>
             <span class="k8s-panel-hdr-muted" style="margin-left:auto;font-size:0.75rem">~2 min per node — DHCP + cloud-init + kubeadm join</span>
           </div>
         </div>
@@ -3518,10 +3518,15 @@ function handle(msg) {
           // 1) Initial name assignment: "Adding workers: kldload-w-5 kldload-w-6"
           let m = line.match(/Adding workers:\s*(.+)$/);
           if (m) {
-            m[1].trim().split(/\s+/).forEach(n => {
-              window._k8sPending[n] = { name: n, phase: 'cloning', started: Date.now() };
+            const newNames = m[1].trim().split(/\s+/).filter(s => s.startsWith('kldload-'));
+            // Replace anonymous "pending-*" placeholders with the real names
+            const anonKeys = Object.keys(window._k8sPending).filter(k => k.startsWith('pending-'));
+            anonKeys.sort((a, b) => (window._k8sPending[a].slot || 0) - (window._k8sPending[b].slot || 0));
+            newNames.forEach((real, i) => {
+              if (anonKeys[i]) delete window._k8sPending[anonKeys[i]];
+              window._k8sPending[real] = { name: real, phase: 'cloning', started: Date.now() };
             });
-            send({ action: 'k8s_status' });   // immediate redraw with placeholders
+            send({ action: 'k8s_status' });
           }
           // 2) Per-VM phase markers — best-effort string-match
           const phaseMatchers = [
@@ -3557,7 +3562,7 @@ function handle(msg) {
           if (/Added \d+\/\d+ workers/.test(line)) {
             const btn = document.getElementById('k8s-scale-btn');
             const title = document.getElementById('k8s-node-progress-title');
-            if (btn) { btn.disabled = false; btn.textContent = 'Add'; btn.style.opacity = ''; }
+            if (btn) { btn.disabled = false; btn.textContent = k8sAddBtnLabel(); btn.style.opacity = ''; }
             if (title) title.textContent = 'Scale complete — ' + line.replace(/^\s*[✓✗⚠]\s*/, '').slice(0, 80);
             const hdr = progPanel.querySelector('.k8s-panel-hdr > span:first-child');
             if (hdr) hdr.innerHTML = '<span style="color:var(--good);margin-right:0.4rem">✓</span><span id="k8s-node-progress-title">' + (title?.textContent || 'Done') + '</span>';
@@ -5476,6 +5481,22 @@ function k8sBootstrap() {
 // requires the cluster to exist (kldload-cp present). Worker-only today
 // because multi-CP HA needs etcd quorum + kube-apiserver LB plumbing
 // that kube-cluster CLI doesn't expose yet — 1.2 feature.
+// Add button label tracks the current kind selector + count
+function k8sAddBtnLabel() {
+  const n = parseInt(document.getElementById('k8s-scale-count')?.value || '1');
+  const kind = document.getElementById('k8s-scale-kind')?.value || 'worker';
+  const noun = kind === 'cp' ? 'CP' : 'worker';
+  return `Add ${n>1 ? n+' ' : ''}${noun}${n>1?'s':''}`;
+}
+function k8sUpdateAddBtn() {
+  const btn = document.getElementById('k8s-scale-btn');
+  if (btn && !btn.disabled) btn.textContent = k8sAddBtnLabel();
+}
+// Wire the count input to update the label live
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('k8s-scale-count')?.addEventListener('input', k8sUpdateAddBtn);
+});
+
 // Cluster rebuild dialog — single confirm modal that combines the legacy
 // Bootstrap + Reset buttons (no longer in Overview). Reset destroys the
 // existing cluster + workers; Bootstrap creates a fresh one with N
@@ -5521,7 +5542,17 @@ function k8sAddNodes() {
   // Disable Add button until scale completes (re-enabled by the completion
   // marker handler in the k8s_log mirror below).
   const btn = document.getElementById('k8s-scale-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Scaling…'; btn.style.opacity = '0.6'; }
+  if (btn) { btn.disabled = true; btn.textContent = `Adding ${n} ${kind === 'cp' ? 'CP' : 'worker'}${n>1?'s':''}…`; btn.style.opacity = '0.6'; }
+  // Immediately seed placeholder rows so the user sees something happen
+  // BEFORE the backend prints "Adding workers: ..." (which can take 5-10s
+  // to flow through). Use anonymous "pending-N" names; the real names
+  // overwrite them when the log line arrives.
+  window._k8sPending = window._k8sPending || {};
+  for (let i = 0; i < n; i++) {
+    const tmpName = `pending-${Date.now()}-${i}`;
+    window._k8sPending[tmpName] = { name: tmpName, phase: 'starting', placeholder: true, slot: i + 1 };
+  }
+  send({ action: 'k8s_status' });   // immediate render
   _busyShow(`scaling cluster +${n} worker(s)…`, 30000);
   send({ action: 'k8s_cluster_scale', workers: n });
   // No more auto-tab-switch — user stays on Nodes and watches the live
@@ -5552,11 +5583,19 @@ function renderK8sStatus(data) {
   _k8sUpdateTabBadges();
 
   const tbody = document.getElementById('k8s-node-tbody');
-  if (tbody && data.nodes?.length) {
+  // Drop any placeholders that now correspond to a real kubectl node —
+  // their row will render from the real data, no point keeping a duplicate.
+  if (window._k8sPending && data.nodes) {
+    const realNames = new Set(data.nodes.map(n => n.name));
+    Object.keys(window._k8sPending).forEach(p => {
+      if (realNames.has(p)) delete window._k8sPending[p];
+    });
+  }
+  if (tbody && (data.nodes?.length || Object.keys(window._k8sPending || {}).length)) {
     // Cache nodes by name so the Edit Labels / Edit Taints modals can
     // prefill with current state (no extra backend round-trip).
     window._k8sNodesByName = {};
-    data.nodes.forEach(n => { window._k8sNodesByName[n.name] = n; });
+    (data.nodes || []).forEach(n => { window._k8sNodesByName[n.name] = n; });
 
     tbody.innerHTML = data.nodes.map(n => {
       const ready = (n.status || '').includes('Ready');
@@ -5624,7 +5663,34 @@ function renderK8sStatus(data) {
         </td>
       </tr>`;
     }).join('');
+    // Append placeholder rows for in-flight scale targets. Phase label is
+    // shown in the Status column so the user can see "cloning" → "dhcp-wait"
+    // → "joining" progressing without leaving the Nodes tab.
+    const pendings = Object.values(window._k8sPending || {});
+    if (pendings.length) {
+      const phaseColor = {
+        starting: 'var(--text-dim)', cloning: 'var(--accent)',
+        cloned: 'var(--accent)', 'dhcp-wait': '#c9a04a',
+        'dhcp-ok': 'var(--accent)', joining: '#c9a04a', joined: 'var(--good)',
+      };
+      tbody.innerHTML += pendings.map(p => {
+        const isAnon = p.name.startsWith('pending-');
+        const displayName = isAnon ? `(worker #${p.slot || '?'} — naming…)` : p.name;
+        const color = phaseColor[p.phase] || 'var(--text-dim)';
+        const ipCell = p.ip ? `<td style="font-family:monospace;font-size:0.82rem;color:var(--accent2)">${esc(p.ip)}</td>` : '<td style="color:var(--text-dim)">…</td>';
+        return `<tr style="opacity:0.7;background:rgba(50,108,229,0.04)">
+          <td style="padding:0.55rem 0.5rem"></td>
+          <td style="font-family:monospace;font-weight:600;color:var(--text-dim)">${esc(displayName)} <span style="display:inline-block;width:0.7rem;height:0.7rem;border:2px solid ${color};border-top-color:transparent;border-radius:50%;animation:k8s-spin 0.8s linear infinite;margin-left:0.4rem;vertical-align:middle"></span></td>
+          <td style="color:var(--text-dim)">worker</td>
+          <td><span style="color:${color};font-weight:500">${esc(p.phase)}</span></td>
+          <td style="color:var(--text-dim)">…</td>
+          ${ipCell}
+          <td style="text-align:right;color:var(--text-dim);font-size:0.75rem">building…</td>
+        </tr>`;
+      }).join('');
+    }
   } else if (tbody) {
+    // Nothing in cluster yet AND no in-flight placeholders — show empty state
     tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted)">No cluster deployed — click Bootstrap to create one</td></tr>';
   }
 }
