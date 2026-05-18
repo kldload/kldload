@@ -182,6 +182,17 @@ if [[ "$EDITION" != "core" ]]; then
         # Ansible — replaces cloud-init runcmd for golden VM provisioning
         # and powers the web UI's Ansible tab
         ansible-core
+        # bcc-tools + bpftrace — every Alt+letter / F11-F12 / Shift-F binding
+        # in kldload-console (the embedded terminal drawer) runs an eBPF
+        # tracer (execsnoop / opensnoop / biosnoop / killsnoop / tcplife /
+        # tcptop / tcpretrans / tcpconnect / etc.) and falls through to
+        # "need-bcc-tools" if these aren't installed. They WERE only in the
+        # darksite for installed targets — meaning every keybind in the
+        # live ISO printed "need-bcc-tools" forever. Adding here so the
+        # live env is usable as a diagnostic toolkit (which is one of the
+        # documented use cases for booting kldload as a USB rescue stick).
+        # ~80 MB; well below the ISO-size noise floor on a 16+ GB build.
+        bcc-tools bpftrace
     )
 fi
 
