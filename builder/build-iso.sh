@@ -1090,20 +1090,47 @@ if [[ "$EDITION" != "core" ]]; then
     [[ $_obs_ok -eq 1 ]] && log "Observability: stack installed (4 exporters + smartctl)" \
         || log "Observability: PARTIAL — some downloads failed, check log"
 
-    # Copy Grafana dashboards + datasource + other observability configs
-    # from includes.chroot explicitly (whitelist-copy, same pattern as
-    # Bob configs above). These would otherwise not land because the
-    # build uses explicit copies, not a full includes.chroot mirror.
+    # Copy Grafana dashboards + datasource + provisioner configs from
+    # includes.chroot explicitly (whitelist-copy, same pattern as Bob
+    # configs above). These would otherwise not land because the build
+    # uses explicit copies, not a full includes.chroot mirror.
+    #
+    # WHY recursive (cp -r .../. .../) rather than flat *.json glob: the
+    # repo ships 7 dashboard folders (host/, storage/, kubernetes/,
+    # estate/, klab-ops/, virtual-machines/, zfs-test-lab/), one per
+    # Grafana category. A flat *.json glob silently dropped all of them
+    # — build #28 landed with 6 empty top-level files instead of the 16
+    # folder-organised dashboards. Fixed 2026-05-17 after .148 install.
     if [[ -d /build/live-build/config/includes.chroot/var/lib/grafana/dashboards ]]; then
         mkdir -p "${ROOTFS}/var/lib/grafana/dashboards"
-        cp /build/live-build/config/includes.chroot/var/lib/grafana/dashboards/*.json \
-           "${ROOTFS}/var/lib/grafana/dashboards/" 2>>"$LOG_FILE" || true
-        log "Observability: $(ls "${ROOTFS}/var/lib/grafana/dashboards/" | wc -l) dashboards provisioned"
+        cp -r /build/live-build/config/includes.chroot/var/lib/grafana/dashboards/. \
+              "${ROOTFS}/var/lib/grafana/dashboards/" 2>>"$LOG_FILE" || true
+        log "Observability: $(find "${ROOTFS}/var/lib/grafana/dashboards/" -name '*.json' | wc -l) dashboards provisioned across $(find "${ROOTFS}/var/lib/grafana/dashboards/" -mindepth 1 -maxdepth 1 -type d | wc -l) folders"
     fi
     if [[ -f /build/live-build/config/includes.chroot/etc/grafana/provisioning/datasources/loki.yaml ]]; then
         mkdir -p "${ROOTFS}/etc/grafana/provisioning/datasources"
         cp /build/live-build/config/includes.chroot/etc/grafana/provisioning/datasources/loki.yaml \
            "${ROOTFS}/etc/grafana/provisioning/datasources/loki.yaml"
+    fi
+    # Grafana dashboard provisioner — kldload.yaml registers the 7
+    # folder-providers above so Grafana groups dashboards in the left-nav.
+    # Without this file the JSONs sit on disk and Grafana never loads
+    # them (kldload-firstboot deletes any stale klab.yaml stub that would
+    # have re-pointed at the flat layout). Whole reason build #28 landed
+    # with empty dashboard folders even when the files were there.
+    if [[ -d /build/live-build/config/includes.chroot/etc/grafana/provisioning/dashboards ]]; then
+        mkdir -p "${ROOTFS}/etc/grafana/provisioning/dashboards"
+        cp /build/live-build/config/includes.chroot/etc/grafana/provisioning/dashboards/*.yaml \
+           "${ROOTFS}/etc/grafana/provisioning/dashboards/" 2>>"$LOG_FILE" || true
+    fi
+    # process-exporter config — without this the unit's
+    # ConditionPathExists=/etc/kldload/process-exporter.yml fails and the
+    # service stays inactive, leaving the Prometheus scrape on :9256 dead
+    # and per-process panels blank. Caught on .148 build #28.
+    if [[ -f /build/live-build/config/includes.chroot/etc/kldload/process-exporter.yml ]]; then
+        mkdir -p "${ROOTFS}/etc/kldload"
+        cp /build/live-build/config/includes.chroot/etc/kldload/process-exporter.yml \
+           "${ROOTFS}/etc/kldload/process-exporter.yml"
     fi
     if [[ -d /build/live-build/config/includes.chroot/etc/loki ]]; then
         mkdir -p "${ROOTFS}/etc/loki"
@@ -1185,6 +1212,15 @@ if [[ "$EDITION" != "core" ]]; then
     # kldload-proxy explicitly so only one thing binds :8443.
     chroot "${ROOTFS}" systemctl enable  nginx.service          >> "$LOG_FILE" 2>&1 || true
     chroot "${ROOTFS}" systemctl disable kldload-proxy.service  >> "$LOG_FILE" 2>&1 || true
+    # Disable kldload-headlamp.service at boot — caught 2026-05-17 on .148:
+    # the pinned upstream URL (v0.26.0 with headlamp-server-linux-amd64.tar.gz
+    # filename pattern) returns 404. The Headlamp project stopped publishing
+    # standalone server binaries; v0.42+ tarballs are the 160MB Electron app.
+    # Until kldload-headlamp-install is rewritten (likely to extract the
+    # server out of the Electron tarball, or to deploy as a helm chart),
+    # leave the unit disabled by default so fresh installs don't have a
+    # failing unit + 502 on /k8s/ in the webui. /k9s/ still works (ttyd-k9s).
+    chroot "${ROOTFS}" systemctl disable kldload-headlamp.service >> "$LOG_FILE" 2>&1 || true
     # Enable kldload-tls-cert.timer at boot (fires cert-drift check hourly)
     if [[ -f "${ROOTFS}/usr/lib/systemd/system/kldload-tls-cert.timer" ]]; then
         chroot "${ROOTFS}" systemctl enable kldload-tls-cert.timer >> "$LOG_FILE" 2>&1 || true

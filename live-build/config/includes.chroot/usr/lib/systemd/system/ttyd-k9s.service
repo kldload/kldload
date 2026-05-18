@@ -47,7 +47,17 @@ ExecStart=/usr/local/bin/ttyd -W -i 127.0.0.1 -p 7681 -b /k9s \
     -t 'rendererType=webgl' \
     -t scrollback=10000 \
     /usr/local/bin/kldload-console
-Restart=on-failure
+Restart=always
+# `Restart=always` not `on-failure` — caught 2026-05-17 on .148: the
+# wrapped kldload-console / tmux / k9s pipeline can exit *cleanly*
+# (status=0) when firstboot prereqs aren't ready (kubeconfig missing,
+# tmux socket dir not writable, ephemeral :7681 contention). With
+# `on-failure`, systemd treats status=0 as "successfully completed" and
+# the unit stays inactive forever — manual `systemctl start` recovers
+# but a fresh boot is broken until someone notices the 502/501 on
+# /k9s/ in the webui. `always` retries either way; StartLimitBurst
+# above still protects against a truly broken unit.
+#
 # 15s between retries is long enough that whatever transient (port reuse,
 # tmux socket racing kldload-tls-cert, etc.) had time to clear, but short
 # enough that 10 retries fits in the StartLimitIntervalSec=300s window.
