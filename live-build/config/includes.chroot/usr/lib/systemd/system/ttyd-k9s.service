@@ -14,8 +14,17 @@ Before=kldload-firstboot.service kldload-autodeploy.service klab-firstboot.servi
 # 90 seconds later worked first try. Widen the budget to 10 attempts in
 # 5 minutes — enough to ride through firstboot races without losing the
 # protection against truly broken units.
-StartLimitBurst=10
+StartLimitBurst=100
 StartLimitIntervalSec=300
+# Burst bumped 10 → 100 on 2026-05-17 after .131 still hit the limit even
+# with `Restart=always` from the prior pass. The wrapped kldload-console /
+# tmux / k9s pipeline exits cleanly (status=0) in ~1.5s when kubectl can't
+# reach the cluster at firstboot, and with RestartSec=15 the unit burns
+# through the budget in ~2.75 min — well within the 5-min window. 100 starts
+# in 5 min gives 25 minutes of retry headroom which is comfortably past any
+# realistic firstboot stabilization. The proper fix is in kldload-console
+# itself — keep tmux alive even when k9s exits — but that's a wrapper change
+# we'll do once we trace why `exec tmux attach-session` returns cleanly.
 
 [Service]
 Type=simple
