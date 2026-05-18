@@ -1946,6 +1946,15 @@ NETCFG
     for i in "${!new_names[@]}"; do
       [[ -n "${new_ips[$i]}" ]] && continue
       local n="${new_names[$i]}"
+      # Skip entries whose Phase-1 clone failed — without this, virsh on
+      # a non-existent domain returned rc=1 and `set -euo pipefail` killed
+      # the whole script at the first failed-clone entry. Caught .131
+      # 2026-05-17: a leftover w-4 zvol from a prior scale made kvm-clone
+      # fail; then Phase 2 immediately exited rc=1 and w-5/w-6 (which
+      # cloned fine) never got their joins.
+      if ! virsh dominfo "$n" >/dev/null 2>&1; then
+        continue
+      fi
       local mac ip
       mac="$(virsh domiflist "$n" 2>/dev/null | awk '/bridge/ {print $5}' | head -1)"
       # virsh net-dhcp-leases columns: Expiry-date Expiry-time MAC Protocol IP-CIDR Hostname Client-ID
