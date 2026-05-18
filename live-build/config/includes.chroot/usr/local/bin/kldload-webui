@@ -1684,6 +1684,52 @@ async def ws_handler(websocket):
                     except Exception:
                         pass
                     await websocket.send(json.dumps({"type": "install_state", **state}))
+                elif action == "install_abort":
+                    # Stop the active kldinstall-* systemd unit. The
+                    # subprocess is in its own cgroup so systemctl stop
+                    # kills the whole tree (debootstrap, dnf, pacstrap,
+                    # whatever's mid-execution). Marks state.running=false
+                    # with rc=-15 (SIGTERM) so the UI flips back to idle.
+                    aborted = []
+                    try:
+                        _q = await asyncio.create_subprocess_exec(
+                            "systemctl", "list-units", "--no-legend",
+                            "--state=active", "kldinstall-*.service",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        _out, _ = await _q.communicate()
+                        for ln in (_out or b"").decode().splitlines():
+                            parts = ln.strip().split()
+                            if parts and parts[0].startswith("kldinstall-"):
+                                unit = parts[0]
+                                _s = await asyncio.create_subprocess_exec(
+                                    "systemctl", "stop", unit,
+                                    stdout=asyncio.subprocess.DEVNULL,
+                                    stderr=asyncio.subprocess.PIPE,
+                                )
+                                await _s.wait()
+                                aborted.append(unit)
+                    except Exception as e:
+                        await websocket.send(json.dumps({
+                            "type": "error",
+                            "msg": f"install_abort failed: {e}",
+                        }))
+                        continue
+                    try:
+                        INSTALL_STATE_PATH.write_text(
+                            json.dumps({"running": False, "rc": -15}))
+                    except Exception:
+                        pass
+                    await websocket.send(json.dumps({
+                        "type": "log_line", "target": "install",
+                        "line": f"[abort] stopped {len(aborted)} install unit(s)"
+                                + (f": {', '.join(aborted)}" if aborted else ""),
+                    }))
+                    # Emit exec_done so the UI tears the running panel down.
+                    await websocket.send(json.dumps({
+                        "type": "exec_done", "target": "install", "rc": -15,
+                    }))
                 elif action == "install_reattach":
                     # Page refreshed mid-install — find the active kldinstall-*
                     # unit, grab its MainPID, and resume tailing the install
