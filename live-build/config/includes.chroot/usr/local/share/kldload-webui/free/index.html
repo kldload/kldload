@@ -1620,8 +1620,8 @@ select option:checked { background: #00b8d9; color: #000; }
           </div>
           <input class="k8s-table-search" placeholder="Filter pods…" oninput="k8sTableFilter('k8s-pod-tbody', this.value)">
           <table>
-            <thead><tr><th style="width:28px"><input type="checkbox" onchange="k8sSelectAll('pod', this.checked)" title="Select all"></th><th>Namespace</th><th>Name</th><th>Ready</th><th>Status</th><th>Restarts</th><th>Age</th></tr></thead>
-            <tbody id="k8s-pod-tbody"><tr><td colspan="7" style="color:var(--muted);padding:1rem">No pods</td></tr></tbody>
+            <thead><tr><th style="width:28px"><input type="checkbox" onchange="k8sSelectAll('pod', this.checked)" title="Select all"></th><th>Namespace</th><th>Name</th><th>Ready</th><th>Status</th><th>Restarts</th><th>Age</th><th style="text-align:right">Actions</th></tr></thead>
+            <tbody id="k8s-pod-tbody"><tr><td colspan="8" style="color:var(--muted);padding:1rem">No pods</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -1635,8 +1635,8 @@ select option:checked { background: #00b8d9; color: #000; }
           </div>
           <input class="k8s-table-search" placeholder="Filter services…" oninput="k8sTableFilter('k8s-svc-tbody', this.value)">
           <table>
-            <thead><tr><th>Namespace</th><th>Name</th><th>Type</th><th>Cluster IP</th><th>External</th><th>Ports</th></tr></thead>
-            <tbody id="k8s-svc-tbody"><tr><td colspan="6" style="color:var(--muted);padding:1rem">No services</td></tr></tbody>
+            <thead><tr><th>Namespace</th><th>Name</th><th>Type</th><th>Cluster IP</th><th>External</th><th>Ports</th><th style="text-align:right">Actions</th></tr></thead>
+            <tbody id="k8s-svc-tbody"><tr><td colspan="7" style="color:var(--muted);padding:1rem">No services</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -3639,6 +3639,9 @@ function handle(msg) {
     case 'k8s_top': { renderK8sTop(msg); break; }
     case 'k8s_inspect': { renderK8sInspect(msg); break; }
     case 'k8s_node_shell': { k8sShowNodeShell(msg); break; }
+    case 'k8s_pod_shell':  { k8sShowPodShell(msg); break; }
+    case 'k8s_logs':       { k8sShowLogs(msg); break; }
+    case 'k8s_describe':   { k8sShowDescribe(msg); break; }
     case 'k8s_namespaces': { renderK8sNamespaces(msg.namespaces); break; }
     case 'k8s_deployments': { renderK8sDeployments(msg.deployments); break; }
     case 'k8s_services': { renderK8sServices(msg.services); break; }
@@ -5493,6 +5496,17 @@ function renderK8sPods(pods) {
       <td><span style="color:${statusColor}">${esc(p.status)}</span></td>
       <td style="color:var(--muted)">${esc(p.restarts || '0')}</td>
       <td style="color:var(--muted);font-size:0.82rem">${esc(p.age || '—')}</td>
+      <td onclick="event.stopPropagation()" style="white-space:nowrap;text-align:right">
+        <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sPodLogs('${esc(p.namespace)}','${esc(p.name)}')" title="kubectl logs --tail=200">Logs</button>
+        <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sPodShell('${esc(p.namespace)}','${esc(p.name)}')" title="kubectl exec -it — opens a shell into the pod via /k9s/ tmux">Shell</button>
+        <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="k8sPodDelete('${esc(p.namespace)}','${esc(p.name)}')" title="Delete pod — deployment recreates it (restart pattern)">✕</button>
+        <button class="btn btn-ghost btn-sm" style="font-size:0.72rem;padding:0.2rem 0.4rem" onclick="k8sPodMenuToggle('${esc(p.namespace)}','${esc(p.name)}',this)" title="More pod actions">⋮</button>
+        <div class="k8s-node-menu" id="k8s-pod-menu-${esc(p.namespace)}-${esc(p.name)}" style="display:none;position:absolute;background:var(--card-bg);border:1px solid var(--border);border-radius:6px;box-shadow:var(--shadow);z-index:100;min-width:180px;font-size:0.78rem">
+          <button class="k8s-node-menu-item" onclick="k8sPodDescribe('${esc(p.namespace)}','${esc(p.name)}')">Describe</button>
+          <button class="k8s-node-menu-item" onclick="k8sPodLogs('${esc(p.namespace)}','${esc(p.name)}',500)">Logs (tail 500)</button>
+          <button class="k8s-node-menu-item" onclick="send({action:'k8s_inspect',target:'pod',name:'${esc(p.name)}',namespace:'${esc(p.namespace)}'});k8sPodMenuClose()">View events / inspect</button>
+        </div>
+      </td>
     </tr>`;
   }).join('');
   k8sUpdateSelCount('pod');   // rebuild-safe selection accounting
@@ -5593,6 +5607,144 @@ function k8sUpdateSelCount(kind) {
   if (bar) bar.style.display = n > 0 ? 'flex' : 'none';
   if (cnt) cnt.textContent = `${n} selected`;
 }
+// ── Per-row pod actions ─────────────────────────────────────────────────────
+// Mirror of the node-row pattern: 3 inline buttons (Logs / Shell / Delete)
+// + ⋮ overflow (Describe / Logs-deep / Inspect). Shell uses the same tmux
+// trick as the node shell — backend opens a new kldload-session window
+// running `kubectl exec -it`, frontend opens /k9s/ in a modal showing it.
+
+function k8sPodLogs(ns, name, tail) {
+  send({ action: 'k8s_logs', namespace: ns, name, tail: tail || 200 });
+  k8sPodMenuClose();
+}
+function k8sPodShell(ns, name) {
+  send({ action: 'k8s_pod_exec', namespace: ns, name });
+  k8sPodMenuClose();
+}
+function k8sPodDelete(ns, name) {
+  if (!confirm(`Delete pod ${ns}/${name}?\n\nIf this pod is managed by a Deployment / DaemonSet / StatefulSet, the controller will recreate it — this is the standard "restart pod" workflow.`)) return;
+  send({ action: 'k8s_delete_pod', namespace: ns, name });
+}
+function k8sPodDescribe(ns, name) {
+  send({ action: 'k8s_describe', kind: 'pod', namespace: ns, name });
+  k8sPodMenuClose();
+}
+
+let _k8sPodMenu = null;
+function k8sPodMenuClose() {
+  if (_k8sPodMenu) { _k8sPodMenu.style.display = 'none'; _k8sPodMenu = null; }
+}
+function k8sPodMenuToggle(ns, name, btn) {
+  const menu = document.getElementById(`k8s-pod-menu-${ns}-${name}`);
+  if (!menu) return;
+  if (_k8sPodMenu === menu) { k8sPodMenuClose(); return; }
+  k8sPodMenuClose();
+  const rect = btn.getBoundingClientRect();
+  menu.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+  menu.style.left = Math.max(rect.right + window.scrollX - 180, 8) + 'px';
+  menu.style.display = 'block';
+  _k8sPodMenu = menu;
+}
+document.addEventListener('click', e => {
+  if (!_k8sPodMenu) return;
+  if (e.target.closest('.k8s-node-menu')) return;
+  if (e.target.matches('button[onclick*="k8sPodMenuToggle"]')) return;
+  k8sPodMenuClose();
+});
+
+// ── Per-row service actions ─────────────────────────────────────────────────
+function k8sDeleteService(ns, name) {
+  if (!confirm(`Delete service ${ns}/${name}?`)) return;
+  send({ action: 'k8s_delete_service', namespace: ns, name });
+}
+function k8sSvcDescribe(ns, name) {
+  send({ action: 'k8s_describe', kind: 'svc', namespace: ns, name });
+}
+
+// ── Modals (logs, describe, pod-shell) ──────────────────────────────────────
+function k8sShowLogs(msg) {
+  const ns = msg.namespace || '';
+  const name = msg.name || '';
+  const logs = msg.logs || '(no output)';
+  // Reuse modal if already open for same pod — just refresh the text
+  const existing = document.getElementById('k8s-logs-modal');
+  if (existing) {
+    const pre = existing.querySelector('#k8s-logs-text');
+    if (pre) pre.textContent = logs;
+    const t = existing.querySelector('[data-k8s-logs-title]');
+    if (t) t.textContent = `Logs — ${ns}/${name}`;
+    return;
+  }
+  const modal = document.createElement('div');
+  modal.id = 'k8s-logs-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:10000;display:flex;align-items:center;justify-content:center;padding:1rem';
+  modal.innerHTML = `
+    <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.4rem;max-width:1100px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:var(--shadow-lg)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem">
+        <div data-k8s-logs-title style="font-size:1rem;font-weight:600;color:var(--text-bright)">Logs &mdash; ${esc(ns)}/${esc(name)}</div>
+        <div style="display:flex;gap:0.4rem">
+          <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('k8s-logs-text').textContent);this.textContent='✓ Copied'">Copy</button>
+          <button class="btn btn-ghost btn-sm" onclick="send({action:'k8s_logs',namespace:'${esc(ns)}',name:'${esc(name)}',tail:200});this.textContent='↻ Reloading'">↻ Reload</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-logs-modal').remove()">✕</button>
+        </div>
+      </div>
+      <pre id="k8s-logs-text" style="flex:1;overflow:auto;background:var(--bg);color:var(--text);padding:0.7rem 0.9rem;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;font-family:monospace;line-height:1.45;white-space:pre-wrap;word-wrap:break-word">${esc(logs)}</pre>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function k8sShowDescribe(msg) {
+  const kind = msg.kind || '';
+  const name = msg.name || '';
+  const ns = msg.namespace || '';
+  const text = msg.text || '(no output)';
+  const modal = document.createElement('div');
+  modal.id = 'k8s-describe-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:10000;display:flex;align-items:center;justify-content:center;padding:1rem';
+  modal.innerHTML = `
+    <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.4rem;max-width:1100px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:var(--shadow-lg)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem">
+        <div style="font-size:1rem;font-weight:600;color:var(--text-bright)">Describe ${esc(kind)} &mdash; ${esc(ns)}/${esc(name)}</div>
+        <div style="display:flex;gap:0.4rem">
+          <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('k8s-describe-text').textContent);this.textContent='✓ Copied'">Copy</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-describe-modal').remove()">✕</button>
+        </div>
+      </div>
+      <pre id="k8s-describe-text" style="flex:1;overflow:auto;background:var(--bg);color:var(--text);padding:0.7rem 0.9rem;border:1px solid var(--border);border-radius:4px;font-size:0.78rem;font-family:monospace;line-height:1.45;white-space:pre-wrap;word-wrap:break-word">${esc(text)}</pre>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+function k8sShowPodShell(msg) {
+  // Reuses the node-shell modal layout — backend opened a tmux window
+  // running `kubectl exec -it`; the iframe shows /k9s/ which renders the
+  // running tmux session.
+  const node = `${msg.namespace}/${msg.name}`;
+  const auto = msg.auto;
+  const win = msg.window || '';
+  const cmd = msg.cmd || '';
+  const modal = document.createElement('div');
+  modal.id = 'k8s-pod-shell-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:10000;display:flex;align-items:center;justify-content:center;padding:1rem';
+  const note = auto
+    ? `<div style="font-size:0.78rem;color:var(--good);margin-bottom:0.6rem">✓ Connected via kubectl exec — tmux window <code style="background:var(--bg);padding:0.1rem 0.35rem;border-radius:3px">${esc(win)}</code> is the active shell.</div>`
+    : `<div style="font-size:0.78rem;color:var(--text-dim);margin-bottom:0.6rem">tmux unavailable — run manually:</div>
+       <div style="display:flex;gap:0.4rem;margin-bottom:1rem">
+         <code id="kpe-cmd" style="flex:1;padding:0.45rem 0.7rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:0.82rem;font-family:monospace;color:var(--accent2);user-select:all">${esc(cmd)}</code>
+         <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('kpe-cmd').textContent);this.textContent='✓ Copied'">Copy</button>
+       </div>`;
+  modal.innerHTML = `
+    <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.4rem;max-width:900px;width:100%;box-shadow:var(--shadow-lg);max-height:90vh;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem">
+        <div style="font-size:1rem;font-weight:600;color:var(--text-bright)">Pod shell — ${esc(node)}</div>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-pod-shell-modal').remove()">✕</button>
+      </div>
+      ${note}
+      <iframe src="/k9s/" style="width:100%;flex:1;min-height:520px;border:1px solid var(--border);border-radius:4px;background:#000"></iframe>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
 // ── Per-row node actions (Cordon / Drain / Reboot / Delete / overflow menu) ─
 // Cordon/Uncordon/Drain are simple send() calls inlined in the row template.
 // The rest need confirms, modals, or follow-up work, so they get helpers.
@@ -6179,6 +6331,10 @@ function renderK8sServices(svcs) {
       <td style="color:var(--muted);font-family:monospace;font-size:0.8rem">${esc(s.cluster_ip)}</td>
       <td style="font-family:monospace;font-size:0.8rem">${esc(extIp)}</td>
       <td style="color:var(--muted);font-family:monospace;font-size:0.78rem" title="${esc(s.ports)}">${esc((s.ports || '').slice(0, 40))}</td>
+      <td style="white-space:nowrap;text-align:right">
+        <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sSvcDescribe('${esc(s.namespace)}','${esc(s.name)}')" title="kubectl describe svc — see endpoints + selectors">Describe</button>
+        <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="k8sDeleteService('${esc(s.namespace)}','${esc(s.name)}')" title="Delete service">✕</button>
+      </td>
     </tr>`;
   }).join('');
 }

@@ -1895,6 +1895,109 @@ async def ws_handler(websocket):
                         "auto": auto_ok,
                         "window": window_name,
                     }))
+                elif action == "k8s_logs":
+                    # Pod logs — tail last N lines, return as one chunk.
+                    # Used by the per-row Logs button on the Pods table.
+                    name = msg.get("name", "")
+                    ns = msg.get("namespace", "")
+                    tail = msg.get("tail", 200)
+                    container = msg.get("container", "")
+                    if not name or not ns:
+                        return
+                    cmd = ["kubectl", "logs", name, "-n", ns, f"--tail={int(tail)}"]
+                    if container:
+                        cmd.extend(["-c", container])
+                    try:
+                        out = subprocess.check_output(
+                            cmd, text=True, stderr=subprocess.STDOUT, timeout=20,
+                            env={**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"})
+                    except subprocess.CalledProcessError as e:
+                        out = (e.output or str(e))
+                    except Exception as e:
+                        out = f"error fetching logs: {e}"
+                    await websocket.send(json.dumps({
+                        "type": "k8s_logs",
+                        "name": name, "namespace": ns,
+                        "container": container,
+                        "logs": out[-200000:]  # safety cap at ~200KB
+                    }))
+                elif action == "k8s_pod_exec":
+                    # Interactive shell into a pod — same tmux trick as node
+                    # shell: spawn a new window in the kldload tmux session
+                    # running `kubectl exec -it`, then frontend opens /k9s/
+                    # in a modal and the user is already inside the pod shell.
+                    name = msg.get("name", "")
+                    ns = msg.get("namespace", "")
+                    container = msg.get("container", "")
+                    if not name or not ns:
+                        return
+                    # bash if available, sh as fallback — works on alpine
+                    inner = (
+                        f"kubectl exec -it -n {shlex.quote(ns)} {shlex.quote(name)}"
+                        + (f" -c {shlex.quote(container)}" if container else "")
+                        + " -- /bin/sh -c 'command -v bash >/dev/null && exec bash || exec sh'"
+                    )
+                    window_name = f"pod-{ns}-{name}"[:40]
+                    auto_ok = False
+                    try:
+                        check = await asyncio.create_subprocess_exec(
+                            "tmux", "list-windows", "-t", "kldload", "-F", "#{window_name}",
+                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                        wout, _ = await check.communicate()
+                        windows = (wout.decode() if wout else "").split()
+                        if window_name in windows:
+                            await (await asyncio.create_subprocess_exec(
+                                "tmux", "select-window", "-t", f"kldload:{window_name}",
+                                stderr=asyncio.subprocess.DEVNULL)).wait()
+                        else:
+                            await (await asyncio.create_subprocess_exec(
+                                "tmux", "new-window", "-t", "kldload",
+                                "-n", window_name, inner,
+                                stderr=asyncio.subprocess.DEVNULL)).wait()
+                        auto_ok = True
+                    except Exception:
+                        pass
+                    await websocket.send(json.dumps({
+                        "type": "k8s_pod_shell",
+                        "name": name, "namespace": ns,
+                        "auto": auto_ok, "window": window_name,
+                        "cmd": inner,
+                    }))
+                elif action == "k8s_delete_service":
+                    # Per-row Delete button on the Services table. There was
+                    # no UI surface for deleting a service before; if you
+                    # built a LoadBalancer with the wrong externalTrafficPolicy
+                    # you had to drop to kubectl.
+                    name = msg.get("name", "")
+                    ns = msg.get("namespace", "")
+                    if not name or not ns:
+                        return
+                    await _stream_proc(websocket, ["kubectl", "delete", "service", name, "-n", ns], target="k8s")
+                elif action == "k8s_describe":
+                    # Surface kubectl describe in a modal — useful for "why
+                    # is this pod pending" / "why does this service have no
+                    # endpoints". Reuses the same handler shape as k8s_logs.
+                    kind = msg.get("kind", "pod")
+                    name = msg.get("name", "")
+                    ns = msg.get("namespace", "")
+                    if not name:
+                        return
+                    cmd = ["kubectl", "describe", kind, name]
+                    if ns:
+                        cmd.extend(["-n", ns])
+                    try:
+                        out = subprocess.check_output(
+                            cmd, text=True, stderr=subprocess.STDOUT, timeout=20,
+                            env={**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"})
+                    except subprocess.CalledProcessError as e:
+                        out = (e.output or str(e))
+                    except Exception as e:
+                        out = f"error: {e}"
+                    await websocket.send(json.dumps({
+                        "type": "k8s_describe",
+                        "kind": kind, "name": name, "namespace": ns,
+                        "text": out[-200000:]
+                    }))
                 elif action == "k8s_inspect":
                     await _k8s_inspect(websocket, msg)
                 elif action == "k8s_top":
