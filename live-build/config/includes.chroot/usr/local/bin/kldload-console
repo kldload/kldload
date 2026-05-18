@@ -186,12 +186,21 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   tmux bind -n M-Enter new-window
   tmux bind -n "M-\\"  split-window -h -c "#{pane_current_path}"
   tmux bind -n M--     split-window -v -c "#{pane_current_path}"
-  tmux bind -n M-x     kill-pane
-  tmux bind -n M-X     kill-window          # Alt+Shift+X — kill the whole window
-  tmux bind -n M-q     kill-window          # Alt+q — shorter alias (q for "quit this")
+  # Window close — Alt+q is the canonical "quit this window". Ctrl+q is
+  # the home-row alias. We do NOT bind Alt+x / Alt+Shift+X to anything
+  # because they collide with everyday apps: emacs Meta-x (execute-
+  # extended-command — the central emacs interaction), readline Meta-x
+  # (revert-line), vim's Esc/Alt+X workflows, etc. Operators close panes
+  # via the toggle key that opened them (re-press Alt+E to close exec,
+  # F11 to close tcplife, etc.) or via Alt+q for the whole window.
+  tmux bind -n M-q     kill-window          # Alt+q — quit/close this window
   # Ctrl+q closes the current window too (keeps hand on home row if you're
   # typing). Not using Ctrl+W because the browser eats it.
   tmux bind -n C-q     kill-window
+  # Explicitly unbind Alt+x / Alt+Shift+X in case a prior session or a
+  # sourced ~/.tmux.conf set them. `unbind` is silent if not bound.
+  tmux unbind -n M-x   2>/dev/null || true
+  tmux unbind -n M-X   2>/dev/null || true
 
   # ── bcc-tools "trace" group (Alt+letter) ─────────────────────────
   # Complements the bcc-tools on F11/F12 (network-focused). These
