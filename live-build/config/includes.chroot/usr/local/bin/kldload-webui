@@ -3040,6 +3040,37 @@ async def _run_install(websocket, msg):
     # Auto-detect distro if not specified
     if "distro" not in params:
         params["distro"] = _detect_distro()
+    # RHEL credentials fallback — if the operator saved creds in the
+    # Dashboard's RHEL Credentials panel (rhel-username / rhel-password /
+    # rhel-activation-key secrets) but left the Install-to-Disk RHEL
+    # fields blank, pull from secrets instead of failing the install
+    # with "no RHEL creds provided". Only fires for the rhel distro;
+    # other distros never look at these fields. Form values always win
+    # if the operator explicitly typed them.
+    if params.get("distro") == "rhel":
+        if not (params.get("rhel_key") or "").strip():
+            _saved_key = secret_get("rhel-activation-key") or ""
+            if _saved_key:
+                params["rhel_key"] = _saved_key
+                await websocket.send(json.dumps({
+                    "type": "log_line", "target": "install",
+                    "line": "[rhel] using activation-key from saved Dashboard credentials",
+                }))
+        # Username + password (alternative to activation key). Empty
+        # values stay empty so the installer's preflight knows to skip
+        # the username/password code path.
+        if not (params.get("rhel_user") or "").strip():
+            _saved_user = secret_get("rhel-username") or ""
+            if _saved_user:
+                params["rhel_user"] = _saved_user
+        if not (params.get("rhel_pass") or "").strip():
+            _saved_pass = secret_get("rhel-password") or ""
+            if _saved_pass:
+                params["rhel_pass"] = _saved_pass
+                await websocket.send(json.dumps({
+                    "type": "log_line", "target": "install",
+                    "line": "[rhel] using username/password from saved Dashboard credentials",
+                }))
     answers = []
     for k, v in params.items():
         key = k.upper()
