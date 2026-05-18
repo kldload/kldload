@@ -1449,6 +1449,17 @@ SVCEOF
 
     chroot "$ROOTFS" systemctl enable kldload-webui 2>/dev/null || true
 
+    # ttyd-k9s — the browser terminal (k9s / shell / logs in a tmux session).
+    # Powers the embedded console drawer + every Shell/Console modal in the
+    # webui. Without an explicit `systemctl enable`, the unit file ships in
+    # /usr/lib/systemd/system/ but no /etc/systemd/system/multi-user.target.wants/
+    # symlink exists, so the service doesn't auto-start on the live ISO and
+    # kldload-proxy returns 502 on /k9s/. Enabling here doesn't affect the
+    # installed-system behavior because the installer's profiles.sh
+    # explicitly re-creates (or removes) the multi-user.target.wants symlink
+    # per profile + KLDLOAD_ENABLE_WEBUI gate.
+    chroot "$ROOTFS" systemctl enable ttyd-k9s.service 2>/dev/null || true
+
     # Debian darksite APT mirror service — Python HTTP server on port 3142.
     # debootstrap on the live ISO is configured to use http://127.0.0.1:3142/apt/
     # as its mirror, which serves packages from the baked-in darksite directory.
