@@ -1558,20 +1558,14 @@ select option:checked { background: #00b8d9; color: #000; }
           </div>
         </div>
 
-        <div class="k8s-panel">
-          <div class="k8s-panel-hdr">
-            <span>▶ Bootstrap</span>
-            <span class="k8s-panel-hdr-muted">1 CP + N workers on ZFS instant clones · Cilium eBPF + MetalLB</span>
-          </div>
-          <div style="padding:0.9rem 1rem;display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap">
-            <label style="font-size:0.75rem;color:var(--muted)">Workers <input type="number" id="k8s-workers" value="3" min="1" max="10" style="width:60px;margin-left:0.4rem"></label>
-            <button class="btn btn-primary btn-sm" onclick="k8sBootstrap()">Bootstrap cluster</button>
-            <button class="btn btn-danger btn-sm" onclick="k8sReset()">Reset cluster</button>
-          </div>
+        <!-- Bootstrap + Scale moved out of Overview 2026-05-17 —
+             Scale lives on the Nodes tab now. Bootstrap is recovery-only
+             (autodeploy creates the cluster at install time) and lives in
+             the ⋮ menu accessed by clicking "Rebuild cluster" below the
+             stat strip, so it doesn't dominate Overview. -->
+        <div style="display:flex;justify-content:flex-end;margin-bottom:0.9rem">
+          <button class="btn btn-ghost btn-sm" onclick="k8sShowRebuildDialog()" title="Recovery option — destroys current cluster + workers and bootstraps a fresh one. Rarely needed since autodeploy handles initial cluster creation." style="font-size:0.72rem;color:var(--text-dim)">⚙ Cluster rebuild…</button>
         </div>
-
-        <!-- Scale moved to the Nodes tab 2026-05-17 — it lives next to the
-             node table where you can see what you're scaling against. -->
       </div>
 
       <!-- ── Workloads (Deployments + Pods) ────────────────────────────── -->
@@ -3516,17 +3510,63 @@ function handle(msg) {
         if (progBox && progPanel && progPanel.style.display !== 'none') {
           progBox.textContent += line + '\n';
           progBox.scrollTop = progBox.scrollHeight;
-          // Completion markers — re-enable Add button and update header.
-          if (/Added \d+\/\d+ workers/.test(line) || /BOOTSTRAP COMPLETE/.test(line) || /\bscale.*complete\b/i.test(line)) {
+          // ── Live placeholder rows ────────────────────────────────────
+          // Parse phase transitions from the scale output so the Nodes
+          // table shows in-flight VMs immediately instead of waiting for
+          // kubectl get nodes to catch up.
+          window._k8sPending = window._k8sPending || {};
+          // 1) Initial name assignment: "Adding workers: kldload-w-5 kldload-w-6"
+          let m = line.match(/Adding workers:\s*(.+)$/);
+          if (m) {
+            m[1].trim().split(/\s+/).forEach(n => {
+              window._k8sPending[n] = { name: n, phase: 'cloning', started: Date.now() };
+            });
+            send({ action: 'k8s_status' });   // immediate redraw with placeholders
+          }
+          // 2) Per-VM phase markers — best-effort string-match
+          const phaseMatchers = [
+            { re: /^\s*([\w-]+)\s*→\s*[\w-]+\s+\.\.\.\s*done/, phase: 'cloned' },
+            { re: /Waiting for new workers to take DHCP/, phase: 'dhcp-wait', all: true },
+            { re: /^\s*([\w-]+):\s+(\d+\.\d+\.\d+\.\d+)/, phase: 'dhcp-ok' },
+            { re: /rescue:\s+([\w-]+)\s+late-DHCP/, phase: 'dhcp-ok' },
+            { re: /Joining\s+([\w-]+)/, phase: 'joining' },
+            { re: /joining\s+([\w-]+)/, phase: 'joining' },
+            { re: /\[ok\] join completed.*?([\w-]+)/, phase: 'joined' },
+          ];
+          phaseMatchers.forEach(p => {
+            const mm = line.match(p.re);
+            if (!mm) return;
+            if (p.all) {
+              // global phase — apply to every still-cloning placeholder
+              Object.values(window._k8sPending).forEach(x => {
+                if (x.phase === 'cloning' || x.phase === 'cloned') x.phase = p.phase;
+              });
+            } else {
+              const nm = mm[1];
+              if (window._k8sPending[nm]) {
+                window._k8sPending[nm].phase = p.phase;
+                if (mm[2]) window._k8sPending[nm].ip = mm[2];   // dhcp-ok carries IP
+              }
+            }
+            send({ action: 'k8s_status' });
+          });
+          // 3) Completion markers — re-enable Add + drop placeholders. Match
+          // ONLY scale-specific lines. Dropped "BOOTSTRAP COMPLETE" from the
+          // matcher 2026-05-17 — it false-fired when the log buffer still
+          // held a previous bootstrap's tail.
+          if (/Added \d+\/\d+ workers/.test(line)) {
             const btn = document.getElementById('k8s-scale-btn');
             const title = document.getElementById('k8s-node-progress-title');
             if (btn) { btn.disabled = false; btn.textContent = 'Add'; btn.style.opacity = ''; }
             if (title) title.textContent = 'Scale complete — ' + line.replace(/^\s*[✓✗⚠]\s*/, '').slice(0, 80);
-            // Hide the spinner indicator by replacing its parent's HTML
             const hdr = progPanel.querySelector('.k8s-panel-hdr > span:first-child');
             if (hdr) hdr.innerHTML = '<span style="color:var(--good);margin-right:0.4rem">✓</span><span id="k8s-node-progress-title">' + (title?.textContent || 'Done') + '</span>';
-            // Re-trigger a node-list refresh so the new rows appear
+            // Mark all pending as "joined" — they'll be cleaned up when
+            // the next k8s_status renders and finds them in kubectl too.
+            Object.values(window._k8sPending || {}).forEach(x => { x.phase = 'joined'; });
             setTimeout(() => send({ action: 'k8s_status' }), 1500);
+            // Stale-cleanup safety: drop anything still pending after 10 min
+            setTimeout(() => { window._k8sPending = {}; send({ action: 'k8s_status' }); }, 600000);
           }
         }
       } else if (target === 'klab') {
@@ -5436,6 +5476,34 @@ function k8sBootstrap() {
 // requires the cluster to exist (kldload-cp present). Worker-only today
 // because multi-CP HA needs etcd quorum + kube-apiserver LB plumbing
 // that kube-cluster CLI doesn't expose yet — 1.2 feature.
+// Cluster rebuild dialog — single confirm modal that combines the legacy
+// Bootstrap + Reset buttons (no longer in Overview). Reset destroys the
+// existing cluster + workers; Bootstrap creates a fresh one with N
+// workers. Both rare — autodeploy creates the cluster at install time.
+function k8sShowRebuildDialog() {
+  const n = prompt('Cluster rebuild — DESTRUCTIVE.\n\nThis will:\n  1. Destroy the existing cluster (all VMs, ZFS clones, kubelet state)\n  2. Bootstrap a fresh cluster with N workers\n\nAll running workloads will be lost.\n\nEnter the number of workers for the new cluster (or Cancel):', '3');
+  if (n === null) return;
+  const w = parseInt(n);
+  if (!w || w < 1 || w > 10) return alert('Worker count must be 1-10');
+  if (!confirm(`Last warning — destroy the existing cluster and rebuild with ${w} workers?\n\nIrreversible.`)) return;
+  // Write workers into the legacy hidden input (k8sBootstrap reads from it)
+  // then call the existing bootstrap/reset functions. Simpler than
+  // duplicating the websocket call here.
+  let hidden = document.getElementById('k8s-workers');
+  if (!hidden) {
+    hidden = document.createElement('input');
+    hidden.type = 'hidden';
+    hidden.id = 'k8s-workers';
+    document.body.appendChild(hidden);
+  }
+  hidden.value = w;
+  // Reset first (destroy), then bootstrap. Backend handles the ordering
+  // via the cluster_scale → reset → bootstrap chain if invoked correctly;
+  // here we just call k8sBootstrap which kube-cluster handles as
+  // "destroy if exists, then bootstrap".
+  k8sBootstrap();
+}
+
 function k8sAddNodes() {
   const n = parseInt(document.getElementById('k8s-scale-count')?.value || '1');
   const kind = document.getElementById('k8s-scale-kind')?.value || 'worker';
