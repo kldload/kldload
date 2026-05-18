@@ -1503,12 +1503,35 @@ select option:checked { background: #00b8d9; color: #000; }
 
       <!-- ── Overview ──────────────────────────────────────────────────── -->
       <div class="k8s-subview active" id="k8s-sub-overview">
-        <div class="stat-grid" style="margin-bottom:0.9rem">
+        <!-- Compact horizontal stat strip — was vertical fat blocks before
+             .stat-grid was defined. The inline padding/min-width overrides
+             make these noticeably smaller than the dashboard's stat-cards
+             so all five fit on one row even at narrower viewports. -->
+        <div class="stat-grid k8s-stat-strip">
           <div class="stat-card"><div class="stat-label">Nodes</div><div class="stat-value" id="k8s-node-count">—</div></div>
           <div class="stat-card"><div class="stat-label">Ready</div><div class="stat-value ok" id="k8s-ready-count">—</div></div>
           <div class="stat-card"><div class="stat-label">API Server</div><div class="stat-value" id="k8s-api" style="font-size:0.9rem">—</div></div>
           <div class="stat-card"><div class="stat-label">Version</div><div class="stat-value" id="k8s-ver" style="font-size:1rem">—</div></div>
           <div class="stat-card"><div class="stat-label">Pods</div><div class="stat-value" id="k8s-pod-count">—</div></div>
+        </div>
+
+        <!-- Embedded live metrics — Grafana Live Matrix dashboard in kiosk
+             mode. theme= follows the document theme (toggleTheme() in
+             app.js swaps the iframe src so dark/light mode stays
+             consistent). 600px is enough to show the pulse-row + one
+             heatmap-row, with the user able to "Open in Grafana →"
+             for the full dashboard. -->
+        <div class="k8s-panel" style="margin-bottom:0.9rem">
+          <div class="k8s-panel-hdr">
+            <span>📊 Cluster metrics (live)</span>
+            <span class="k8s-panel-hdr-muted">embedded Grafana — <a href="/grafana/d/kldload-live-matrix/observability-live-matrix-system-pulse-real-time" target="_blank" style="color:var(--accent2)">open in Grafana ↗</a></span>
+          </div>
+          <div style="padding:0">
+            <iframe id="k8s-metrics-iframe"
+                    src="/grafana/d/kldload-live-matrix/observability-live-matrix-system-pulse-real-time?orgId=1&amp;kiosk=tv&amp;refresh=10s&amp;from=now-15m&amp;to=now"
+                    style="width:100%;height:600px;border:0;display:block;background:var(--bg)"
+                    title="Live cluster metrics"></iframe>
+          </div>
         </div>
 
         <div class="k8s-panel">
@@ -6126,12 +6149,19 @@ function _applyTheme(theme) {
   const btn = document.getElementById('theme-toggle');
   if (btn) btn.textContent = theme === 'light' ? '☀️' : '🌙';
   try { localStorage.setItem('kldload:theme', theme); } catch (e) {}
-  // Grafana iframe needs its own theme param — reload if active
-  const ifr = document.getElementById('metrics-iframe');
-  if (ifr && ifr.src) {
-    const newSrc = ifr.src.replace(/([?&])theme=(light|dark)/, '$1theme=' + theme);
+  // Grafana iframes need their own theme param — sync all embeds at once
+  // (the dedicated Metrics view's #metrics-iframe AND any other Grafana
+  // embed elsewhere like the K8s overview's #k8s-metrics-iframe). Using
+  // a selector instead of a hardcoded id so new embeds get theme sync
+  // for free without touching this function.
+  document.querySelectorAll('iframe[src*="/grafana/"]').forEach(ifr => {
+    if (!ifr.src) return;
+    // If the URL already has a theme param, swap it; else append one.
+    const newSrc = /([?&])theme=(light|dark)/.test(ifr.src)
+      ? ifr.src.replace(/([?&])theme=(light|dark)/, '$1theme=' + theme)
+      : ifr.src + (ifr.src.includes('?') ? '&' : '?') + 'theme=' + theme;
     if (newSrc !== ifr.src) ifr.src = newSrc;
-  }
+  });
 }
 function toggleTheme() {
   _applyTheme(_currentTheme() === 'light' ? 'dark' : 'light');
