@@ -1922,46 +1922,108 @@ async def ws_handler(websocket):
                         "logs": out[-200000:]  # safety cap at ~200KB
                     }))
                 elif action == "k8s_pod_exec":
-                    # Interactive shell into a pod — same tmux trick as node
-                    # shell: spawn a new window in the kldload tmux session
-                    # running `kubectl exec -it`, then frontend opens /k9s/
-                    # in a modal and the user is already inside the pod shell.
+                    # Interactive shell into a pod via the kldload tmux session
+                    # (the one ttyd-k9s renders at /k9s/). Frontend opens /k9s/
+                    # in an iframe; tmux session has the new window selected so
+                    # the user lands directly inside the pod shell.
+                    #
+                    # Wrap kubectl exec in a hold-on-exit fallback so:
+                    #   - if kubectl fails (auth, network, pod restart) the
+                    #     user sees the error instead of a vanishing window
+                    #   - PS1 is forced so the pod's shell shows a prompt
+                    #     (busybox/alpine often have empty PS1; user sees a
+                    #     "blank pane" otherwise and assumes nothing happened)
                     name = msg.get("name", "")
                     ns = msg.get("namespace", "")
                     container = msg.get("container", "")
                     if not name or not ns:
                         return
-                    # bash if available, sh as fallback — works on alpine
-                    inner = (
+                    # Force a visible PS1 so even minimal images show a prompt.
+                    # `exec` for the shell so PID-1-style behavior is clean.
+                    pod_shell = (
+                        "PS1='[\\u@$(hostname) \\w]# ' "
+                        "exec bash --norc 2>/dev/null || "
+                        "PS1='# ' exec sh"
+                    )
+                    inner_cmd = (
                         f"kubectl exec -it -n {shlex.quote(ns)} {shlex.quote(name)}"
                         + (f" -c {shlex.quote(container)}" if container else "")
-                        + " -- /bin/sh -c 'command -v bash >/dev/null && exec bash || exec sh'"
+                        + f" -- /bin/sh -c {shlex.quote(pod_shell)}"
+                    )
+                    # Tmux command — keep the pane alive if kubectl exec fails
+                    # so the user sees the error instead of an empty / vanished
+                    # window. `read` blocks forever; user closes the modal.
+                    tmux_cmd = (
+                        f"echo '── kubectl exec → {ns}/{name} ──'; "
+                        f"{inner_cmd}; "
+                        "rc=$?; "
+                        "echo; echo \"[exec exited rc=$rc] press Enter to close\"; "
+                        "read"
                     )
                     window_name = f"pod-{ns}-{name}"[:40]
                     auto_ok = False
+                    err_msg = ""
                     try:
+                        # Bootstrap the kldload tmux session if missing.
+                        # ttyd-k9s creates it lazily on browser connect — if
+                        # the user clicks Shell BEFORE the /k9s/ iframe loads
+                        # (or if no client ever connected this boot), there's
+                        # no session for us to attach windows to. `has-session`
+                        # is the canonical check; nonzero exit = session
+                        # missing. We create it detached so ttyd will attach
+                        # to it later as if it had been there all along.
+                        hs = await asyncio.create_subprocess_exec(
+                            "tmux", "has-session", "-t", "kldload",
+                            stderr=asyncio.subprocess.DEVNULL)
+                        if (await hs.wait()) != 0:
+                            await (await asyncio.create_subprocess_exec(
+                                "tmux", "new-session", "-d", "-s", "kldload", "-n", "home",
+                                stderr=asyncio.subprocess.DEVNULL)).wait()
+                        # Check existing windows
                         check = await asyncio.create_subprocess_exec(
                             "tmux", "list-windows", "-t", "kldload", "-F", "#{window_name}",
-                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                        wout, _ = await check.communicate()
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE)
+                        wout, werr = await check.communicate()
                         windows = (wout.decode() if wout else "").split()
                         if window_name in windows:
-                            await (await asyncio.create_subprocess_exec(
+                            # Already open — just bring to front
+                            p = await asyncio.create_subprocess_exec(
                                 "tmux", "select-window", "-t", f"kldload:{window_name}",
-                                stderr=asyncio.subprocess.DEVNULL)).wait()
+                                stderr=asyncio.subprocess.PIPE)
+                            _, err = await p.communicate()
+                            if p.returncode != 0:
+                                err_msg = f"select-window: {err.decode()[:200]}"
+                            else:
+                                auto_ok = True
                         else:
-                            await (await asyncio.create_subprocess_exec(
+                            # New window — pass tmux_cmd as a single shell-command
+                            # arg; tmux will run it via /bin/sh -c. Use absolute
+                            # path to bash for tmux's command shell so PATH issues
+                            # don't bite.
+                            p = await asyncio.create_subprocess_exec(
                                 "tmux", "new-window", "-t", "kldload",
-                                "-n", window_name, inner,
-                                stderr=asyncio.subprocess.DEVNULL)).wait()
-                        auto_ok = True
-                    except Exception:
-                        pass
+                                "-n", window_name, tmux_cmd,
+                                stderr=asyncio.subprocess.PIPE)
+                            _, err = await p.communicate()
+                            if p.returncode != 0:
+                                err_msg = f"new-window: {err.decode()[:200]}"
+                            else:
+                                # Explicit select for safety — new-window should
+                                # auto-select but be defensive about edge cases.
+                                p2 = await asyncio.create_subprocess_exec(
+                                    "tmux", "select-window", "-t", f"kldload:{window_name}",
+                                    stderr=asyncio.subprocess.DEVNULL)
+                                await p2.wait()
+                                auto_ok = True
+                    except Exception as ex:
+                        err_msg = f"exception: {ex}"
                     await websocket.send(json.dumps({
                         "type": "k8s_pod_shell",
                         "name": name, "namespace": ns,
                         "auto": auto_ok, "window": window_name,
-                        "cmd": inner,
+                        "cmd": inner_cmd,
+                        "error": err_msg,
                     }))
                 elif action == "k8s_delete_service":
                     # Per-row Delete button on the Services table. There was
