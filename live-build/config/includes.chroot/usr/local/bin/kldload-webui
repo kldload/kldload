@@ -3358,6 +3358,27 @@ async def _k8s_nodes(websocket):
                 })
     except Exception:
         pass
+    # Enrich each node with its labels + taints so the UI can display
+    # them inline AND prefill the Edit Labels / Edit Taints modals with
+    # current state. One extra kubectl call per refresh (returns ~5-10 KB
+    # per node — cheap). Failures are non-fatal; labels/taints just stay
+    # empty in the UI if this call fails.
+    try:
+        json_out = subprocess.check_output(
+            ["kubectl", "get", "nodes", "-o", "json"],
+            text=True, stderr=subprocess.DEVNULL,
+            env={**os.environ, "KUBECONFIG": "/root/.kube/config"},
+        )
+        data = json.loads(json_out)
+        by_name = {n["name"]: n for n in nodes}
+        for item in data.get("items", []):
+            nm = item.get("metadata", {}).get("name", "")
+            if nm not in by_name:
+                continue
+            by_name[nm]["labels"] = item.get("metadata", {}).get("labels", {}) or {}
+            by_name[nm]["taints"] = item.get("spec", {}).get("taints", []) or []
+    except Exception:
+        pass
     await websocket.send(json.dumps({"type": "k8s_nodes", "nodes": nodes}))
 
 async def _node_list(websocket):
@@ -5131,6 +5152,26 @@ async def _k8s_status(websocket):
         data["nodes"] = nodes
         data["node_count"] = len(nodes)
         data["ready_count"] = sum(1 for n in nodes if "Ready" in n["status"])
+    except Exception:
+        pass
+
+    # Enrich nodes with labels + taints from JSON. Keeps the existing
+    # text-parsed structure intact (no risk of breaking field offsets)
+    # and just merges {labels, taints} onto each node by name. One extra
+    # ~10 KB/node kubectl call per status refresh — cheap.
+    try:
+        json_out = subprocess.check_output(
+            ["kubectl", "get", "nodes", "-o", "json"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10,
+            env={**os.environ, "KUBECONFIG": "/root/.kube/config"},
+        )
+        items = json.loads(json_out).get("items", [])
+        by_name = {n["name"]: n for n in data["nodes"]}
+        for item in items:
+            nm = item.get("metadata", {}).get("name", "")
+            if nm in by_name:
+                by_name[nm]["labels"] = item.get("metadata", {}).get("labels", {}) or {}
+                by_name[nm]["taints"] = item.get("spec", {}).get("taints", []) or []
     except Exception:
         pass
 

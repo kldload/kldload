@@ -4878,16 +4878,21 @@ function renderVMList(vms) {
       <td style="font-family:monospace;font-size:0.82rem;color:${(v.ip && v.ip !== '—') ? 'var(--accent2)' : 'var(--muted)'}">${esc(v.ip || '—')}</td>
       <td style="white-space:nowrap;text-align:right">
         ${isRunning
-          ? `<button class="btn btn-ghost btn-sm" onclick="vmSsh('${esc(v.name)}')" title="SSH into the VM as admin (cert auth)">⌨ SSH</button>
-             <button class="btn btn-ghost btn-sm" onclick="vmView('${esc(v.name)}')" title="View the VM desktop / login screen (noVNC)">🖼 View</button>
-             <button class="btn btn-ghost btn-sm" onclick="vmMetrics('${esc(v.name)}')" title="Open this VM's Grafana dashboard — pre-filtered for this domain"><span style="filter:grayscale(1) brightness(0.65);margin-right:0.15rem">📊</span>Metrics</button>
-             <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','shutdown')">Stop</button>
-             <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','reboot')">Reboot</button>`
-          : `<button class="btn btn-primary btn-sm" onclick="vmOp('${esc(v.name)}','start')">Start</button>`}
-        <button class="btn btn-ghost btn-sm" onclick="vmSnap('${esc(v.name)}')" title="Snapshot this VM's dataset (rpool/vms/${esc(v.name)})">Snap</button>
-        <button class="btn btn-ghost btn-sm" onclick="vmRollback('${esc(v.name)}', event)" title="Rollback this VM to a prior snapshot (stops + restarts the VM)">Rollback</button>
-        <button class="btn btn-ghost btn-sm" onclick="vmClone('${esc(v.name)}')">Clone</button>
-        <button class="btn btn-danger btn-sm" onclick="vmDelete('${esc(v.name)}')">Delete</button>
+          ? `<button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','shutdown')" title="Graceful ACPI shutdown">Stop</button>
+             <button class="btn btn-ghost btn-sm" onclick="vmSsh('${esc(v.name)}')" title="SSH into the VM (cert auth)">⌨ SSH</button>
+             <button class="btn btn-ghost btn-sm" onclick="vmOp('${esc(v.name)}','reboot')" title="virsh reboot">Reboot</button>`
+          : `<button class="btn btn-primary btn-sm" onclick="vmOp('${esc(v.name)}','start')" title="virsh start">Start</button>`}
+        <button class="btn btn-danger btn-sm" onclick="vmDelete('${esc(v.name)}')" title="Destroy + undefine + zfs destroy zvol (irreversible)">Delete</button>
+        <button class="btn btn-ghost btn-sm" style="padding:0.2rem 0.4rem" onclick="vmMenuToggle('${esc(v.name)}', this)" title="More VM actions">⋮</button>
+        <div class="k8s-node-menu" id="vm-menu-${esc(v.name)}" style="display:none;position:absolute;background:var(--card-bg);border:1px solid var(--border);border-radius:6px;box-shadow:var(--shadow);z-index:100;min-width:200px;font-size:0.78rem">
+          ${isRunning
+            ? `<button class="k8s-node-menu-item" onclick="vmView('${esc(v.name)}');vmMenuClose()">View console (noVNC)</button>
+               <button class="k8s-node-menu-item" onclick="vmMetrics('${esc(v.name)}');vmMenuClose()">Open metrics dashboard</button>`
+            : ''}
+          <button class="k8s-node-menu-item" onclick="vmSnap('${esc(v.name)}');vmMenuClose()">Snapshot now</button>
+          <button class="k8s-node-menu-item" onclick="vmRollback('${esc(v.name)}', event);vmMenuClose()">Rollback to snapshot…</button>
+          <button class="k8s-node-menu-item" onclick="vmClone('${esc(v.name)}');vmMenuClose()">Clone (ZFS instant)</button>
+        </div>
       </td>
     </tr>`;
   }).join('');
@@ -5428,13 +5433,44 @@ function renderK8sStatus(data) {
 
   const tbody = document.getElementById('k8s-node-tbody');
   if (tbody && data.nodes?.length) {
+    // Cache nodes by name so the Edit Labels / Edit Taints modals can
+    // prefill with current state (no extra backend round-trip).
+    window._k8sNodesByName = {};
+    data.nodes.forEach(n => { window._k8sNodesByName[n.name] = n; });
+
     tbody.innerHTML = data.nodes.map(n => {
       const ready = (n.status || '').includes('Ready');
       const top = (window._k8sTopNodes || {})[n.name];
       const topCell = top ? `<span style="color:var(--muted);font-size:0.75rem" title="CPU: ${esc(top.cpu)} (${esc(top.cpu_pct)})  Memory: ${esc(top.mem)} (${esc(top.mem_pct)})">${esc(top.cpu_pct)} / ${esc(top.mem_pct)}</span>` : '';
+      // Compact labels/taints subtitle. Show only the keys the user
+      // probably cares about — non-built-in labels (i.e. not the
+      // kubernetes.io/* / node-role.kubernetes.io/* defaults). Taints
+      // always shown because they're rarer and matter more.
+      const labels = n.labels || {};
+      const taints = n.taints || [];
+      const userLabels = Object.entries(labels)
+        .filter(([k]) => !k.startsWith('kubernetes.io/')
+                      && !k.startsWith('node-role.kubernetes.io/')
+                      && !k.startsWith('beta.kubernetes.io/')
+                      && !k.startsWith('node.kubernetes.io/'));
+      const labelTooltip = Object.entries(labels)
+        .map(([k,v]) => `${k}=${v}`).join('\n');
+      const taintTooltip = taints
+        .map(t => `${t.key}${t.value?'='+t.value:''}:${t.effect}`).join('\n');
+      const labelChips = userLabels.length
+        ? userLabels.slice(0, 3).map(([k,v]) =>
+            `<span style="display:inline-block;background:var(--accent-bg);color:var(--accent);padding:0.05em 0.4em;border-radius:8px;font-size:0.7rem;font-family:monospace;margin-right:0.25rem" title="${esc(k)}=${esc(v)}">${esc(k.split('/').pop())}</span>`
+          ).join('') + (userLabels.length > 3 ? `<span style="color:var(--text-dim);font-size:0.7rem">+${userLabels.length-3}</span>` : '')
+        : `<span style="color:var(--text-dim);font-size:0.7rem">no labels</span>`;
+      const taintChips = taints.length
+        ? taints.slice(0, 2).map(t =>
+            `<span style="display:inline-block;background:var(--warn-bg);color:var(--warn);padding:0.05em 0.4em;border-radius:8px;font-size:0.7rem;font-family:monospace;margin-right:0.25rem" title="${esc(t.key)}${t.value?'='+esc(t.value):''}:${esc(t.effect)}">⛔ ${esc(t.key)}</span>`
+          ).join('') + (taints.length > 2 ? `<span style="color:var(--warn);font-size:0.7rem">+${taints.length-2}</span>` : '')
+        : '';
+      const subtitle = `<div style="font-size:0.7rem;margin-top:0.15rem;font-family:var(--font-sans);font-weight:400" title="${esc(labelTooltip)}${taintTooltip?' \\u2014 taints:\\n'+esc(taintTooltip):''}">${labelChips}${taintChips}</div>`;
       return `<tr class="k8s-row" data-kind="node" data-name="${esc(n.name)}" onclick="k8sRowClick(this)" style="cursor:pointer" title="Click for events, pods on this node, capacity">
         <td onclick="event.stopPropagation()" style="padding:0.55rem 0.5rem"><input type="checkbox" class="k8s-sel-node" data-name="${esc(n.name)}" onchange="k8sUpdateSelCount('node')"></td>
-        <td style="font-family:monospace;font-weight:600;color:var(--accent2)">${esc(n.name)} ${topCell}</td>
+        <td style="font-family:monospace;font-weight:600;color:var(--accent2)">${esc(n.name)} ${topCell}${subtitle}</td>
         <td>${esc(n.role || '—')}</td>
         <td><span style="color:${ready ? 'var(--good)' : 'var(--danger)'}">${esc(n.status)}</span></td>
         <td style="color:var(--muted)">${esc(n.version || '—')}</td>
@@ -5607,6 +5643,31 @@ function k8sUpdateSelCount(kind) {
   if (bar) bar.style.display = n > 0 ? 'flex' : 'none';
   if (cnt) cnt.textContent = `${n} selected`;
 }
+// ── Per-row VM overflow menu ───────────────────────────────────────────────
+// Same pattern as the K8s node menu (.k8s-node-menu class is generic enough
+// to reuse — visual styling is identical).
+let _vmOpenMenu = null;
+function vmMenuClose() {
+  if (_vmOpenMenu) { _vmOpenMenu.style.display = 'none'; _vmOpenMenu = null; }
+}
+function vmMenuToggle(name, btn) {
+  const menu = document.getElementById(`vm-menu-${name}`);
+  if (!menu) return;
+  if (_vmOpenMenu === menu) { vmMenuClose(); return; }
+  vmMenuClose();
+  const rect = btn.getBoundingClientRect();
+  menu.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+  menu.style.left = Math.max(rect.right + window.scrollX - 200, 8) + 'px';
+  menu.style.display = 'block';
+  _vmOpenMenu = menu;
+}
+document.addEventListener('click', e => {
+  if (!_vmOpenMenu) return;
+  if (e.target.closest('.k8s-node-menu')) return;
+  if (e.target.matches('button[onclick*="vmMenuToggle"]')) return;
+  vmMenuClose();
+});
+
 // ── Per-row pod actions ─────────────────────────────────────────────────────
 // Mirror of the node-row pattern: 3 inline buttons (Logs / Shell / Delete)
 // + ⋮ overflow (Describe / Logs-deep / Inspect). Shell uses the same tmux
@@ -5831,6 +5892,24 @@ function k8sLabelTaintModal(kind, node) {
       </div>
     </div>`;
   document.body.appendChild(modal);
+  // Prefill rows with the node's current labels/taints (cached at last
+  // status refresh). Skip kubernetes-builtin labels for labels editor —
+  // editing those is almost always wrong and clutters the modal. For
+  // taints we show everything since there are usually few.
+  const cached = (window._k8sNodesByName || {})[node];
+  if (cached) {
+    if (isTaint) {
+      (cached.taints || []).forEach(t => k8sLabelTaintAddRow(true, t.key || '', t.value || '', t.effect || 'NoSchedule'));
+    } else {
+      Object.entries(cached.labels || {})
+        .filter(([k]) => !k.startsWith('kubernetes.io/')
+                      && !k.startsWith('node-role.kubernetes.io/')
+                      && !k.startsWith('beta.kubernetes.io/')
+                      && !k.startsWith('node.kubernetes.io/'))
+        .forEach(([k, v]) => k8sLabelTaintAddRow(false, k, v));
+    }
+  }
+  // Always leave one empty row for adding new entries.
   k8sLabelTaintAddRow(isTaint);
 }
 function k8sLabelTaintAddRow(isTaint, key='', value='', effect='NoSchedule') {
