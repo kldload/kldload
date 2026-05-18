@@ -1460,16 +1460,12 @@ SVCEOF
 
     chroot "$ROOTFS" systemctl enable kldload-webui 2>/dev/null || true
 
-    # ttyd-k9s — the browser terminal (k9s / shell / logs in a tmux session).
-    # Powers the embedded console drawer + every Shell/Console modal in the
-    # webui. Without an explicit `systemctl enable`, the unit file ships in
-    # /usr/lib/systemd/system/ but no /etc/systemd/system/multi-user.target.wants/
-    # symlink exists, so the service doesn't auto-start on the live ISO and
-    # kldload-proxy returns 502 on /k9s/. Enabling here doesn't affect the
-    # installed-system behavior because the installer's profiles.sh
-    # explicitly re-creates (or removes) the multi-user.target.wants symlink
-    # per profile + KLDLOAD_ENABLE_WEBUI gate.
-    chroot "$ROOTFS" systemctl enable ttyd-k9s.service 2>/dev/null || true
+    # ttyd-k9s enable moved down to AFTER the unit file is copied into the
+    # rootfs (the `for _svc in ... ttyd-k9s.service ...` loop ~100 lines
+    # below). Enabling it here would hit a non-existent unit and silently
+    # no-op. Caught build #33 on .133 2026-05-18: ttyd-k9s.service file
+    # shipped fine but no multi-user.target.wants symlink, so the live
+    # ISO booted with the console disabled and /k9s/ returned 502.
 
     # Debian darksite APT mirror service — Python HTTP server on port 3142.
     # debootstrap on the live ISO is configured to use http://127.0.0.1:3142/apt/
@@ -1581,6 +1577,14 @@ ALPEOF
         _src="/build/live-build/config/includes.chroot/usr/lib/systemd/system/${_svc}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/lib/systemd/system/${_svc}"
     done
+
+    # NOW enable ttyd-k9s — the unit file just got copied into the rootfs
+    # by the loop above, so `systemctl enable` finds it and creates the
+    # /etc/systemd/system/multi-user.target.wants/ttyd-k9s.service symlink.
+    # The earlier attempt at line ~1472 ran before this copy and silently
+    # no-op'd, leaving the live ISO booting with the embedded console
+    # disabled. See the comment block where that earlier enable used to be.
+    chroot "$ROOTFS" systemctl enable ttyd-k9s.service 2>/dev/null || true
 
     # Copy kldload-firstboot and kldload-export-deferred to sbin
     for _sb in kldload-firstboot kldload-export-deferred; do
