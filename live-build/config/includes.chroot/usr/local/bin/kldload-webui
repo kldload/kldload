@@ -2343,6 +2343,125 @@ async def _wg_remove_peer(websocket, msg):
     await websocket.send(json.dumps({"type": "wg_data", "data": get_wg_status()}))
 
 
+async def _stream_proc_detached(websocket, cmd, env=None, target="log"):
+    """Long-running variant of _stream_proc — subprocess runs as a systemd
+    transient service so it survives webui restart (the default KillMode=
+    control-group would otherwise kill every child of webui on restart).
+    Output is captured to a per-invocation log file; we tail it line-by-line
+    and stream to the websocket. If webui restarts mid-tail, the subprocess
+    keeps running and writing to disk; the operator recovers state via the
+    normal status polls on next webui start.
+
+    Use this for any subprocess that takes more than ~30s and whose loss
+    mid-execution would leave the system in a half-state (kube-cluster
+    scale, kube-cluster bootstrap, klab golden — anything orchestrating
+    VM lifecycle + cluster joins). Short ops (kubectl drain, helm install)
+    should keep using _stream_proc — they're fast enough that a webui
+    restart can't catch them mid-flight.
+
+    Caught .131 2026-05-17: 4 consecutive `+ Add worker` clicks each died
+    at the first VM clone because webui got restarted (manually + maybe
+    self-restart on some condition). With KillMode=control-group the
+    subprocess was in webui's cgroup and got SIGKILLed. systemd-run --unit
+    puts it in a sibling cgroup that's independent of webui's lifecycle."""
+    ts = int(time.time())
+    suffix = f"{target}-{ts}"
+    log_path = f"/var/log/kldload/{suffix}.log"
+    done_path = f"/var/log/kldload/.{suffix}.done"
+    unit = f"kldload-{suffix}.service"
+
+    # Inner script: write start banner, run user cmd, capture rc, write
+    # sentinel + rc-file. `set +e` so a nonzero rc doesn't skip the
+    # bookkeeping. shlex.quote on every argument prevents shell-injection
+    # via filenames that contain spaces / quotes.
+    cmd_str = " ".join(shlex.quote(str(c)) for c in cmd)
+    inner = (
+        f"set +e; "
+        f"echo '== {ts} {cmd_str} ==' > {shlex.quote(log_path)}; "
+        f"{cmd_str} >> {shlex.quote(log_path)} 2>&1; "
+        f"rc=$?; "
+        f"echo \"== DONE rc=$rc ==\" >> {shlex.quote(log_path)}; "
+        f"echo \"$rc\" > {shlex.quote(done_path)}"
+    )
+
+    setenv_args = []
+    if env:
+        for k, v in env.items():
+            setenv_args.extend(["--setenv", f"{k}={v}"])
+
+    await websocket.send(json.dumps({
+        "type": "exec_start", "cmd": str(cmd), "target": target,
+        "detached": True, "unit": unit, "log_path": log_path,
+    }))
+
+    # Launch via systemd-run as a transient service. --collect cleans up
+    # the unit on exit; --quiet suppresses the "Running as unit" banner.
+    launch = await asyncio.create_subprocess_exec(
+        "systemd-run", "--unit", unit, "--collect", "--quiet",
+        *setenv_args,
+        "bash", "-c", inner,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, launch_err = await launch.communicate()
+    if launch.returncode != 0:
+        # systemd-run unavailable / failed — fall back to in-process stream
+        # so the user still gets the operation (just without restart-survival).
+        err_msg = (launch_err or b"").decode(errors="replace")[:300]
+        await websocket.send(json.dumps({
+            "type": "log_line",
+            "line": f"[systemd-run failed rc={launch.returncode}: {err_msg} — falling back to in-process exec]",
+            "target": target,
+        }))
+        return await _stream_proc(websocket, cmd, env=env, target=target)
+
+    # Tail the log file until the sentinel appears. The subprocess writes
+    # to log_path independently of our reading; we just chase its tail.
+    last_pos = 0
+    while True:
+        finished = os.path.exists(done_path)
+        try:
+            with open(log_path, "r") as f:
+                f.seek(last_pos)
+                chunk = f.read()
+                last_pos = f.tell()
+        except FileNotFoundError:
+            chunk = ""
+        if chunk:
+            for line in chunk.splitlines():
+                try:
+                    await websocket.send(json.dumps({
+                        "type": "log_line", "line": line, "target": target,
+                    }))
+                except Exception:
+                    # websocket died — bail. The subprocess keeps running;
+                    # its output continues going to log_path for the next
+                    # webui connection to read on demand.
+                    return None
+        if finished:
+            break
+        await asyncio.sleep(0.4)
+
+    # Read return code from sentinel file
+    try:
+        with open(done_path) as f:
+            rc = int(f.read().strip())
+    except Exception:
+        rc = -1
+
+    # Cleanup transient artifacts
+    for p in (log_path, done_path):
+        try:
+            os.unlink(p)
+        except Exception:
+            pass
+
+    await websocket.send(json.dumps({
+        "type": "exec_done", "target": target, "rc": rc,
+    }))
+    return rc
+
+
 async def _stream_proc(websocket, cmd, env=None, target="log"):
     """Run a command, stream stdout/stderr lines to websocket AND tee to
     /var/log/kldload/stream.log so the F5 firehose in the terminal
@@ -5675,7 +5794,12 @@ async def _k8s_cluster_scale(websocket, msg):
     # kube-cluster's arg parser expects --workers N (flag), not positional.
     # Positional argument hit `die "Unknown option: <N>"` and the scale
     # request silently dropped. Caught .113 + .137 2026-05-17.
-    await _stream_proc(websocket,
+    #
+    # Use the DETACHED variant — scale takes 4-6 minutes per worker and
+    # any webui restart during that window used to kill the subprocess
+    # (KillMode=control-group). Detached runs as a transient systemd unit
+    # in its own cgroup, so a webui restart no longer breaks scales.
+    await _stream_proc_detached(websocket,
         ["kube-cluster", "scale", "--workers", str(workers)],
         target="k8s")
     await _k8s_status(websocket)
