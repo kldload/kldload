@@ -1838,24 +1838,63 @@ async def ws_handler(websocket):
                                 spec = f"{key}={value}:{effect}" if value else f"{key}:{effect}"
                                 await _stream_proc(websocket, ["kubectl", "taint", "node", node, spec, "--overwrite"], target="k8s")
                 elif action == "k8s_node_shell_info":
-                    # Returns SSH info for the frontend to display in a
-                    # "Shell" modal. The frontend shows the command + a
-                    # copy button + an embedded /k9s/ iframe so the user
-                    # can paste-and-go without leaving the webui.
+                    # Open the SSH session in the existing kldload tmux
+                    # session (the one ttyd-k9s renders at /k9s/) so the
+                    # user just opens the modal and is already connected
+                    # — no copy/paste needed. Falls back to showing the
+                    # command if tmux isn't available.
+                    #
+                    # Auth on klab/kube-cluster VMs: root + password
+                    # "kldload" (cloud-init seeded, key auth not set up
+                    # for cross-host). sshpass handles password feed.
                     node = msg.get("node", "")
-                    if node:
-                        # Look up node IP from kubectl
-                        proc = await asyncio.create_subprocess_exec(
-                            "kubectl", "get", "node", node,
-                            "-o", "jsonpath={.status.addresses[?(@.type=='InternalIP')].address}",
-                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                        out, _ = await proc.communicate()
-                        ip = (out.decode() if out else "").strip() or node
-                        cmd = f"ssh -i /root/.ssh/id_kldload admin@{ip}"
-                        await websocket.send(json.dumps({
-                            "type": "k8s_node_shell",
-                            "node": node, "ip": ip, "cmd": cmd
-                        }))
+                    if not node:
+                        return
+                    # Look up node IP from kubectl
+                    proc = await asyncio.create_subprocess_exec(
+                        "kubectl", "get", "node", node,
+                        "-o", "jsonpath={.status.addresses[?(@.type=='InternalIP')].address}",
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                    out, _ = await proc.communicate()
+                    ip = (out.decode() if out else "").strip() or node
+                    # Display command (for the modal fallback / copy)
+                    cmd_display = f"sshpass -p kldload ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{ip}"
+                    # Real command piped into tmux — use exec-style ssh
+                    # so closing the shell closes the tmux window cleanly.
+                    ssh_inner = (
+                        f"sshpass -p kldload ssh -o StrictHostKeyChecking=no "
+                        f"-o UserKnownHostsFile=/dev/null root@{ip}"
+                    )
+                    window_name = f"ssh-{node}"
+                    # Switch to existing window if already open, else create
+                    auto_ok = False
+                    try:
+                        check = await asyncio.create_subprocess_exec(
+                            "tmux", "list-windows", "-t", "kldload", "-F", "#{window_name}",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.DEVNULL)
+                        wout, _ = await check.communicate()
+                        windows = (wout.decode() if wout else "").split()
+                        if window_name in windows:
+                            await (await asyncio.create_subprocess_exec(
+                                "tmux", "select-window", "-t", f"kldload:{window_name}",
+                                stderr=asyncio.subprocess.DEVNULL)).wait()
+                        else:
+                            await (await asyncio.create_subprocess_exec(
+                                "tmux", "new-window", "-t", "kldload",
+                                "-n", window_name, ssh_inner,
+                                stderr=asyncio.subprocess.DEVNULL)).wait()
+                        auto_ok = True
+                    except Exception:
+                        # tmux unavailable — fallback to copy-paste path
+                        pass
+                    await websocket.send(json.dumps({
+                        "type": "k8s_node_shell",
+                        "node": node, "ip": ip,
+                        "cmd": cmd_display,
+                        "auto": auto_ok,
+                        "window": window_name,
+                    }))
                 elif action == "k8s_inspect":
                     await _k8s_inspect(websocket, msg)
                 elif action == "k8s_top":
