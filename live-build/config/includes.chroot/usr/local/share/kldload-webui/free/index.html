@@ -2133,18 +2133,11 @@ select option:checked { background: #00b8d9; color: #000; }
         </div>
       </div>
 
-      <div class="panel" style="margin-bottom:1rem">
-        <div class="panel-hdr" style="justify-content:space-between">
-          <span>🩺 System Doctor</span>
-          <div style="display:flex;gap:0.4rem;align-items:center">
-            <span id="doctor-summary-klab" style="font-size:0.75rem;color:var(--muted)">—</span>
-            <button class="btn btn-ghost btn-sm" onclick="send({action:'doctor_run'})">↻ Run</button>
-          </div>
-        </div>
-        <div class="panel-body" style="padding:0.5rem">
-          <div id="doctor-report-klab" style="font-size:0.82rem;color:var(--muted)">Click Run to diagnose.</div>
-        </div>
-      </div>
+<!-- System Doctor panel removed from klab view 2026-05-18 — it duplicated
+     the one on the Dashboard, which is its home. The doctor_run handler
+     still updates #doctor-report-klab / #doctor-summary-klab if those
+     IDs exist anywhere, so the JS mirror in renderDoctor() is harmless. -->
+
 
       <div class="stat-grid" id="klab-stat-grid">
         <div class="stat-card"><div class="stat-label">Goldens Ready</div><div class="stat-value" id="kl-goldens-count">—</div></div>
@@ -2628,8 +2621,8 @@ select option:checked { background: #00b8d9; color: #000; }
           <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_test_results'})" title="Reload results">↻</button>
         </div>
         <div class="ws-tabs" role="tablist">
-          <button class="ws-tab"        data-sub="dash"    onclick="zfsTestSubTab('dash')">Dashboards</button>
-          <button class="ws-tab active" data-sub="run"     onclick="zfsTestSubTab('run')">Run</button>
+          <button class="ws-tab active" data-sub="dash"    onclick="zfsTestSubTab('dash')">Dashboards</button>
+          <button class="ws-tab"        data-sub="run"     onclick="zfsTestSubTab('run')">Run</button>
           <button class="ws-tab"        data-sub="results" onclick="zfsTestSubTab('results')">Results</button>
           <button class="ws-tab"        data-sub="history" onclick="zfsTestSubTab('history')">History</button>
           <button class="ws-tab"        data-sub="audit"   onclick="zfsTestSubTab('audit')">Audit</button>
@@ -2637,8 +2630,8 @@ select option:checked { background: #00b8d9; color: #000; }
         </div>
       </div>
 
-      <!-- ── Run ──────────────────────────────────────────────────────── -->
-      <div class="ws-subview active" id="zfstest-sub-run">
+      <!-- ── Run (sub-view; default is Dashboards now — see _zfstestRestoreTab) ── -->
+      <div class="ws-subview" id="zfstest-sub-run">
         <div class="ws-panel">
           <div class="ws-panel-hdr"><span>▶ Run Test Suite</span></div>
           <div style="padding:0.9rem 1rem">
@@ -2765,7 +2758,7 @@ select option:checked { background: #00b8d9; color: #000; }
            every 5s while the tab is active. Each iframe lazy-loads on
            first tab open so the Run/Results tabs aren't slowed by
            Grafana websocket churn before the user actually wants it. -->
-      <div class="ws-subview" id="zfstest-sub-dash">
+      <div class="ws-subview active" id="zfstest-sub-dash">
         <div class="ws-panel">
           <div class="ws-panel-hdr">
             <span>🧪 ZFS Test Matrix</span>
@@ -5518,10 +5511,12 @@ function vmSubTab(name) {
   if (name === 'vms' || name === 'overview') send({action: 'list_vms'});
 }
 function _vmRestoreTab() {
-  try {
-    const t = localStorage.getItem(VM_TAB_KEY);
-    if (t) vmSubTab(t);
-  } catch (e) {}
+  // 2026-05-18: always land on Overview when the user clicks Virtual
+  // Machines in the sidebar. Previously this restored the last-visited
+  // tab from localStorage, which was confusing — users would click VMs
+  // expecting the dashboard and land on the Log tab from yesterday.
+  // Within-view tab clicks still stick for the current session.
+  vmSubTab('overview');
 }
 
 function vmTableFilter(tbodyId, needle) {
@@ -6993,14 +6988,29 @@ function zfsTestSubTab(name) {
   // and that's wasteful when the user is on Run/Results/Audit/Log. Setting
   // src here makes the load happen exactly once per page lifetime.
   if (name === 'dash') {
+    // Append the current theme to the data-src so the lazy-loaded
+    // Grafana iframe matches the kldload UI theme. Previously the
+    // data-src had no theme= param, so the iframe inherited Grafana's
+    // server-side default (was dark; now `system`) — which means it
+    // followed the *browser's* prefers-color-scheme, not the kldload
+    // theme toggle. Stuck dark when the page was light. Fixed by
+    // appending theme= at activation time. (2026-05-18)
+    const theme = (typeof _currentTheme === 'function') ? _currentTheme() : 'dark';
     ['zfstest-dash-matrix', 'zfstest-dash-debug'].forEach(id => {
       const f = document.getElementById(id);
-      if (f && f.dataset.src && f.src === 'about:blank') f.src = f.dataset.src;
+      if (f && f.dataset.src && f.src === 'about:blank') {
+        const sep = f.dataset.src.includes('?') ? '&' : '?';
+        f.src = f.dataset.src + sep + 'theme=' + theme;
+      }
     });
   }
 }
 function _zfstestRestoreTab() {
-  try { const t = localStorage.getItem(ZFSTEST_TAB_KEY); if (t) zfsTestSubTab(t); } catch (e) {}
+  // Always land on Dashboards (2026-05-18). The OpenZFS Suite's
+  // dashboards (Run Matrix + VM Debug) are the visible payoff — most
+  // operators land here to glance at fleet test results, not to start
+  // a fresh run. Previous behaviour dropped them on Run.
+  zfsTestSubTab('dash');
 }
 
 // Download helpers — the webui HTTP server has two routes:
@@ -7039,7 +7049,11 @@ function klabSubTab(name) {
   if (name === 'ebpf')  send({action: 'klab_status'});
 }
 function _klabRestoreTab() {
-  try { const t = localStorage.getItem(KLAB_TAB_KEY); if (t) klabSubTab(t); } catch (e) {}
+  // Always land on Status (2026-05-18). Status is the home page of klab —
+  // showing Lab Ready, distro matrix, quick actions, traffic map. Was
+  // restoring from localStorage which left users on Goldens after a
+  // previous session.
+  klabSubTab('status');
 }
 
 // ── Add worker ──────────────────────────────────────────────────────────────
@@ -7429,10 +7443,15 @@ function metricsLoadDashboard(uid) {
     ? `${base}/d/${uid}/?orgId=1&kiosk=1&refresh=5s&theme=${theme}`
     : `${base}/?orgId=1&kiosk=1&theme=${theme}`;
   ifr.src = url;
-  // Highlight the active row in the left rail
+  // Highlight the active row using the SAME treatment as #sidebar li.active —
+  // accent-bg background, accent-coloured text, left rule bar in accent.
+  // Keeps the eye trained on one "this is selected" affordance everywhere.
   document.querySelectorAll('#metrics-list li').forEach(li => {
-    li.style.background = li.dataset.uid === _metricsActiveUid ? 'var(--surface2)' : '';
-    li.style.color      = li.dataset.uid === _metricsActiveUid ? 'var(--text)' : 'var(--subtle)';
+    const on = li.dataset.uid === _metricsActiveUid;
+    li.style.background      = on ? 'var(--accent-bg)' : '';
+    li.style.color           = on ? 'var(--accent)'    : 'var(--subtle)';
+    li.style.borderLeftColor = on ? 'var(--accent)'    : 'transparent';
+    li.style.fontWeight      = on ? '600' : '';
   });
 }
 // Known dashboards we provision at firstboot. We can't fetch Grafana's
@@ -7444,33 +7463,46 @@ function metricsLoadDashboard(uid) {
 // fixed strings set by the upstream authors and don't change between
 // dashboard versions, so they're safe to hardcode.
 const METRICS_CATALOG = [
-  // No standalone "Home" entry — Grafana's default_home_dashboard_uid auto-loads
-  // the Estate dashboard at /grafana/ root. Top of menu is Estate + VMs.
-  { uid: 'kldload-estate',      title: '🏛 Estate',               group: 'Overview' },
-  { uid: 'klab-vm-estate',      title: '🖧 Virtual Machines',     group: 'Overview' },
-  { uid: 'zfs-pool-health',     title: '🌊 ZFS Pool Health',      group: 'Storage' },
-  { uid: 'scrub-history',       title: '🧹 ZFS Scrub & Errors',   group: 'Storage' },
-  { uid: 'compression-trend',   title: '🗜 Compression Trends',   group: 'Storage' },
-  { uid: 'disk-health-smart',   title: '💽 Disk Health (SMART)',  group: 'Storage' },
-  { uid: 'block-io-latency',    title: '⚡ Block I/O Latency',    group: 'Storage' },
-  { uid: 'rYdddlPWk',           title: '🖥 Host — Full',          group: 'Host' },  // 1860
-  { uid: 'kernel-messages',     title: '📜 Kernel & Logs',        group: 'Host' },
-  // ZFS Test Matrix + Debug dashboards moved into the OpenZFS Test view's
-  // "Dashboards" tab (view-tests-zfs → zfstest-sub-dash) so test runs and
-  // their telemetry live in one place. The standalone Metrics group is for
-  // estate-wide dashboards — keeping these two there too was duplication.
-  // They're still reachable via /grafana/d/klab-test-matrix and
-  // /grafana/d/klab-test-debug directly for power users.
-  // Kubernetes / Cilium entries: these dashboards are auto-provisioned by
-  // the Cilium + Tetragon helm charts at the END of kube-cluster bootstrap.
-  // They appear here as "not yet" entries until helm catches up — clicking
-  // them shows "Dashboard not found" until then. Hidden via __wait_for so
-  // they don't clutter the UI when the cluster isn't deployed.
-  { uid: 'kldload-ebpf-deep',   title: '🧬 eBPF Deep Dive',       group: 'Kubernetes' },
-  { uid: 'tetragon-ebpf',       title: '🔭 Tetragon eBPF',        group: 'Kubernetes', __wait_for: 'cluster' },
-  { uid: 'vtuWtdumz',           title: '⌁ Cilium Agent',          group: 'Kubernetes', __wait_for: 'cluster' }, // 16611
-  { uid: '1GC0TT4Wz',           title: '⌁ Cilium Operator',       group: 'Kubernetes', __wait_for: 'cluster' }, // 16612
-  { uid: '5HftnJAWz',           title: '⌁ Hubble Metrics',        group: 'Kubernetes', __wait_for: 'cluster' }, // 16613
+  // Order = the order they render in the left rail. Groups are headed
+  // by their group label. New eBPF section (2026-05-18) is the
+  // headline category — kldload's actual value-prop versus a vanilla
+  // RHEL / Fedora install.
+  { uid: 'kldload-estate',           title: '🏛 Estate',                    group: 'Overview' },
+  { uid: 'klab-vm-estate',           title: '🖧 Virtual Machines',          group: 'Overview' },
+
+  // ── eBPF — observability that names root cause, not symptoms ─────────
+  // Why-You-Need-It first: anyone landing on Metrics for the first time
+  // sees the case-study dashboard before they see any raw metrics.
+  { uid: 'kldload-ebpf-vs-traditional', title: '🧠 Why eBPF (case studies)',  group: '🧬 eBPF' },
+  { uid: 'kldload-distributions',    title: '📊 Distributions that matter',  group: '🧬 eBPF' },
+  { uid: 'kldload-zfs-live',         title: '🌊 OpenZFS — Live Test Bench',  group: '🧬 eBPF' },
+  { uid: 'kldload-k8s-lifecycle',    title: '💥 K8s — Die & Rebuild',        group: '🧬 eBPF' },
+  { uid: 'kldload-cilium-live',      title: '⌁ Cilium — Datapath Live',      group: '🧬 eBPF' },
+  { uid: 'kldload-tetragon-live',    title: '🔭 Tetragon — Syscall Watch',   group: '🧬 eBPF' },
+  { uid: 'kldload-network-live',     title: '🌐 Network — Traffic Microscope', group: '🧬 eBPF' },
+  { uid: 'kldload-memory-pressure',  title: '🧠 Memory — Pressure Story',    group: '🧬 eBPF' },
+  { uid: 'kldload-footprint',        title: '⚖ Platform Footprint (honest)', group: '🧬 eBPF' },
+  { uid: 'kldload-ebpf-deep',        title: '🧬 Deep Dive',                  group: '🧬 eBPF' },
+  { uid: 'kldload-live-matrix',      title: '⏱ Live Matrix',                 group: '🧬 eBPF' },
+  { uid: 'kldload-kernel-forensics', title: '🔍 Kernel Forensics',           group: '🧬 eBPF' },
+  { uid: 'block-io-latency',         title: '⚡ Block I/O Latency (eBPF)',   group: '🧬 eBPF' },
+
+  // ── Storage ───────────────────────────────────────────────────────────
+  { uid: 'zfs-pool-health',          title: '🌊 ZFS Pool Health',            group: 'Storage' },
+  { uid: 'scrub-history',            title: '🧹 ZFS Scrub & Errors',         group: 'Storage' },
+  { uid: 'compression-trend',        title: '🗜 Compression Trends',         group: 'Storage' },
+  { uid: 'disk-health-smart',        title: '💽 Disk Health (SMART)',        group: 'Storage' },
+
+  // ── Host ──────────────────────────────────────────────────────────────
+  { uid: 'rYdddlPWk',                title: '🖥 Host — Full',                group: 'Host' },  // 1860
+  { uid: 'kernel-messages',          title: '📜 Kernel & Logs',              group: 'Host' },
+
+  // ── Kubernetes ────────────────────────────────────────────────────────
+  // Auto-provisioned by Cilium + Tetragon helm charts at bootstrap; hidden
+  // via __wait_for until the cluster is up to avoid "Dashboard not found"
+  // clicks. Reachable via /grafana/d/<uid> directly even when hidden.
+  { uid: 'vtuWtdumz',                title: '⌁ Cilium Agent',                group: 'Kubernetes', __wait_for: 'cluster' }, // 16611
+  { uid: '1GC0TT4Wz',                title: '⌁ Cilium Operator',             group: 'Kubernetes', __wait_for: 'cluster' }, // 16612
 ];
 function metricsRefreshList() {
   const list = document.getElementById('metrics-list');
@@ -7482,11 +7514,19 @@ function metricsRefreshList() {
   });
   let html = '';
   Object.keys(groups).forEach(g => {
-    if (g) html += `<div style="font-size:0.7rem;color:var(--muted);padding:0.6rem 0.75rem 0.2rem;letter-spacing:0.08em">${esc(g)}</div>`;
+    // Section header: same green as the sidebar accent, uppercase, with
+    // a left rule bar — distinguishes group labels from the dashboard
+    // entries so the eye lands on the section at a glance.
+    if (g) html += `<div style="font-size:0.72rem;color:var(--good);padding:0.75rem 0.75rem 0.35rem;letter-spacing:0.12em;font-weight:600;text-transform:uppercase;border-left:2px solid var(--good);margin-top:0.25rem;background:linear-gradient(90deg,rgba(16,185,129,0.08),transparent)">${esc(g)}</div>`;
     groups[g].forEach(e => {
+      // Item style matches the left sidebar's active state — accent blue
+      // background + colour + left rule on selection, same as #sidebar
+      // li.active. Unifies the "this row is selected" affordance across
+      // sidebar and dashboard list.
       html += `<li data-uid="${esc(e.uid)}" onclick="metricsLoadDashboard('${esc(e.uid)}')"
-                   style="padding:0.5rem 0.75rem;cursor:pointer;border-radius:4px;color:var(--subtle);font-size:0.82rem;margin-bottom:1px;transition:background 0.1s"
-                   onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=this.dataset.uid==='${esc(_metricsActiveUid||'')}'?'var(--surface2)':''">
+                   style="padding:0.5rem 0.75rem 0.5rem 0.65rem;cursor:pointer;color:var(--subtle);font-size:0.82rem;margin-bottom:1px;transition:background 0.1s,color 0.1s;border-left:3px solid transparent"
+                   onmouseover="if(this.dataset.uid!=='${esc(_metricsActiveUid||'')}')this.style.background='var(--surface2)'"
+                   onmouseout="if(this.dataset.uid!=='${esc(_metricsActiveUid||'')}')this.style.background=''">
           ${esc(e.title)}
         </li>`;
     });

@@ -1,0 +1,320 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Tells the story leading up to an OOM kill: MemAvailable decline, reclaim activity, page-cache drop, slab growth, then the kill. Watch this dashboard during a memory-heavy test to see the kernel's response unfold.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "options": {
+        "mode": "markdown",
+        "content": "## Memory pressure \u2014 the story leading up to an OOM\n\nMemory failures rarely happen suddenly. There's almost always a several-minute curve where MemAvailable climbs down, the kernel starts reclaiming, swap activity rises, slab grows, then finally the OOM killer fires.\n\nThis dashboard tells that story. Each panel is a layer of the kernel's memory-management response. Watch them together to see the kill coming."
+      }
+    },
+    {
+      "type": "row",
+      "title": "The leading indicators (climb-down before the kill)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 110,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "MemAvailable fraction \u2014 the curve that ends in OOM",
+      "description": "Fraction of memory still usable (accounting for reclaim). A steady decline toward 0 is the signal. Healthy = ~0.4-0.8.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      },
+      "id": 111,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes",
+          "legendFormat": "available fraction"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "OOM kills over time (the final event)",
+      "description": "node_vmstat_oom_kill \u2014 every SIGKILL the kernel's OOM killer fired. Pair with the available-fraction panel to see cause\u2192effect.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "id": 112,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(node_vmstat_oom_kill[5m]) * 60",
+          "legendFormat": "OOM kills/min"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Reclaim activity (the kernel fighting back)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "id": 120,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 121,
+      "options": {
+        "mode": "markdown",
+        "content": "Before the kill, the kernel tries to reclaim memory. These curves spike when it's working hard:\n- **pgmajfault** = page faults serviced from disk (slow path)\n- **pgscan_*** = pages scanned during reclaim\n- **pgsteal_*** = pages successfully evicted\n\nHeavy reclaim + falling MemAvailable = OOM is imminent."
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Major page faults/sec (slow-path memory access)",
+      "description": "Every major fault required disk I/O to satisfy. Elevated rate = pages are being evicted faster than they can be brought back.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "id": 122,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(node_vmstat_pgmajfault[1m])",
+          "legendFormat": "pgmajfault"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pages scanned + stolen during reclaim",
+      "description": "kswapd is the background reclaimer; direct reclaim happens when allocations stall. The ratio of scan to steal tells you reclaim efficiency.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "id": 123,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(node_vmstat_pgscan_kswapd[1m])",
+          "legendFormat": "pgscan_kswapd"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(node_vmstat_pgscan_direct[1m])",
+          "legendFormat": "pgscan_direct"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(node_vmstat_pgsteal_kswapd[1m])",
+          "legendFormat": "pgsteal_kswapd"
+        },
+        {
+          "refId": "D",
+          "expr": "rate(node_vmstat_pgsteal_direct[1m])",
+          "legendFormat": "pgsteal_direct"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Slab + cache \u2014 kernel-side allocator state",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "id": 130,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Slab usage (reclaimable vs unreclaimable)",
+      "description": "Slab is the kernel's small-object cache. Growing SUnreclaim with no obvious cause is sometimes the precursor to an OOM (kernel memory leak).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "id": 131,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_memory_SReclaimable_bytes",
+          "legendFormat": "SReclaimable"
+        },
+        {
+          "refId": "B",
+          "expr": "node_memory_SUnreclaim_bytes",
+          "legendFormat": "SUnreclaim"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Cached + Buffers vs Free",
+      "description": "Page cache is the workload's friend (re-read avoidance) \u2014 Linux uses all free RAM for it. Sudden cache drop = something forced reclaim hard.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
+      "id": 132,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_memory_Cached_bytes",
+          "legendFormat": "page cache"
+        },
+        {
+          "refId": "B",
+          "expr": "node_memory_Buffers_bytes",
+          "legendFormat": "buffers"
+        },
+        {
+          "refId": "C",
+          "expr": "node_memory_MemFree_bytes",
+          "legendFormat": "free"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "kldload",
+    "memory",
+    "pressure",
+    "oom"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Memory \u2014 Pressure Story (the curve before the OOM)",
+  "uid": "kldload-memory-pressure",
+  "version": 1,
+  "weekStart": ""
+}

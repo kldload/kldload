@@ -1,0 +1,229 @@
+{
+  "annotations": { "list": [] },
+  "description": "Live observation of OpenZFS internals while the klab test suite runs. Watch txg sync rate, ARC hit/miss flow, MRU/MFU composition, pool ops, and the kernel's own dbgmsg event stream react in real time as zfs-tests.sh exercises every code path. Built for the kldload OpenZFS test bench — same dashboard you'd open during a 2-hour full-test run to see the kernel's perspective on what your test is doing.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "type": "text", "title": "",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 0}, "id": 100,
+      "options": { "mode": "markdown", "content":
+"## OpenZFS — live test bench\n\nThis is the dashboard you open *while* the klab test suite runs. Every panel below reads kernel-side ZFS state directly — `txg_synced`, ARC hit/miss/evict counters, MRU vs MFU composition, per-pool ops, kernel dbgmsg events — and updates every 5 seconds.\n\nRun a test (`klab test full` or any `zfs-tests.sh` subset) and watch this dashboard:\n\n- **txg sync rate** climbs while writes are flowing\n- **ARC hits** spike on warm-cache reads; **ARC misses** spike on cold paths\n- **MFU vs MRU** sizes shift as the test working set replaces the previous one\n- **Block I/O heatmap** shows whether requests are queueing or completing fast\n- **dbgmsg stream** narrates everything the kernel decides to log along the way\n\nNobody else's observability stack ships ZFS internals at this depth out of the box."
+      }
+    },
+
+    {
+      "type": "row", "title": "Pool ops + txg sync — what the test is actually doing to the pool",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 6}, "id": 110, "collapsed": false, "panels": []
+    },
+    {
+      "type": "stat", "title": "txg sync rate (/s)",
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 7}, "id": 111,
+      "description": "klab_zfs_txg_synced_total — how many transaction groups committed per second. Spikes during write-heavy phases. A stuck flat counter while writes are flowing = txg sync stall.",
+      "targets": [{"refId":"A","expr":"sum(rate(klab_zfs_txg_synced_total[1m])) or vector(0)"}],
+      "options": {"reduceOptions": {"calcs":["lastNotNull"]}, "colorMode":"value","graphMode":"area","textMode":"auto"},
+      "fieldConfig":{"defaults":{"unit":"hertz","color":{"mode":"continuous-GrYlRd"}}}
+    },
+    {
+      "type": "stat", "title": "Pool read ops (/s)",
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 7}, "id": 112,
+      "description": "klab_zfs_pool_read_ops — read operations the pool serviced. Includes both ARC hits and disk reads. Pair with ARC hit ratio to see what fraction was cache-served.",
+      "targets":[{"refId":"A","expr":"sum(klab_zfs_pool_read_ops) or vector(0)"}],
+      "options":{"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"value","graphMode":"area"},
+      "fieldConfig":{"defaults":{"unit":"reqps","color":{"mode":"continuous-BlPu"}}}
+    },
+    {
+      "type": "stat", "title": "Pool write ops (/s)",
+      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 7}, "id": 113,
+      "description": "klab_zfs_pool_write_ops — write operations queued to the pool. Goes through ZIL for sync writes, async writes batch into txg.",
+      "targets":[{"refId":"A","expr":"sum(klab_zfs_pool_write_ops) or vector(0)"}],
+      "options":{"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"value","graphMode":"area"},
+      "fieldConfig":{"defaults":{"unit":"reqps","color":{"mode":"continuous-RdYlGr"}}}
+    },
+    {
+      "type": "stat", "title": "ARC hit ratio",
+      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 7}, "id": 114,
+      "description": "klab_zfs_arc_hit_ratio — fraction of reads served from ARC vs disk. >0.95 = warm cache. A dive to 0.5 mid-test means the test is reading data that doesn't fit in ARC (cold-miss thrashing).",
+      "targets":[{"refId":"A","expr":"avg(klab_zfs_arc_hit_ratio) or vector(0)"}],
+      "options":{"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"background","graphMode":"area"},
+      "fieldConfig":{"defaults":{"unit":"percentunit","min":0,"max":1,
+                                   "thresholds":{"mode":"absolute","steps":[
+                                     {"color":"red","value":null},{"color":"yellow","value":0.6},{"color":"green","value":0.9}]}}}
+    },
+
+    {
+      "type": "timeseries", "title": "Pool throughput — bytes/sec (read = blue, write = orange)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13}, "id": 115,
+      "description": "klab_zfs_pool_read_bw_bytes vs klab_zfs_pool_write_bw_bytes — actual byte rates through the pool. The read line going flat while ops climb = ARC absorbing them; the read line tracking ops = disk-bound.",
+      "targets": [
+        {"refId":"A","expr":"sum(klab_zfs_pool_read_bw_bytes) or vector(0)","legendFormat":"read"},
+        {"refId":"B","expr":"sum(klab_zfs_pool_write_bw_bytes) or vector(0)","legendFormat":"write"}
+      ],
+      "fieldConfig":{"defaults":{"unit":"Bps","custom":{"fillOpacity":20,"lineWidth":2}}}
+    },
+    {
+      "type": "timeseries", "title": "txg syncs/sec over test run",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13}, "id": 116,
+      "description": "Sustained txg sync rate during a test. Watch for: cliffs (test phase change), plateaus (steady-state write pressure), spikes during the dirty-data flush cycle.",
+      "targets":[{"refId":"A","expr":"sum(rate(klab_zfs_txg_synced_total[1m])) or vector(0)","legendFormat":"txg/s"}],
+      "fieldConfig":{"defaults":{"unit":"hertz","custom":{"fillOpacity":30,"lineWidth":2,"gradientMode":"opacity"}}}
+    },
+
+    {
+      "type": "row", "title": "ARC internals — the cache the test is hammering",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21}, "id": 120, "collapsed": false, "panels": []
+    },
+    {
+      "type": "text", "title": "",
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 22}, "id": 121,
+      "options": {"mode": "markdown", "content":
+"**The ARC (Adaptive Replacement Cache)** is ZFS's in-RAM read cache. It splits into two lists: **MRU** (Most Recently Used — fresh reads) and **MFU** (Most Frequently Used — popular reads promoted from MRU). When the test working set churns, the MRU dominates; when reads repeat, MFU grows. Watching the ratio change in real time is one of the most direct windows into ZFS internals — there is no equivalent signal in a generic block-cache. The hit / miss / evict counters tell you whether the test is exercising cache management code or scanning past it."
+      }
+    },
+    {
+      "type": "timeseries", "title": "ARC composition — MRU vs MFU vs target",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 26}, "id": 122,
+      "description": "klab_zfs_arc_mru_size_bytes + klab_zfs_arc_mfu_size_bytes vs target. When MRU dominates → working set is being introduced fresh. When MFU dominates → test is re-reading. The target line is what ZFS's heuristic wants the total to be.",
+      "targets": [
+        {"refId":"A","expr":"avg(klab_zfs_arc_mru_size_bytes)","legendFormat":"MRU"},
+        {"refId":"B","expr":"avg(klab_zfs_arc_mfu_size_bytes)","legendFormat":"MFU"},
+        {"refId":"C","expr":"avg(klab_zfs_arc_target_bytes)","legendFormat":"target"},
+        {"refId":"D","expr":"avg(klab_zfs_arc_size_bytes)","legendFormat":"total size"}
+      ],
+      "fieldConfig":{"defaults":{"unit":"bytes","custom":{"fillOpacity":15,"lineWidth":2,"stacking":{"mode":"none"}}}}
+    },
+    {
+      "type": "timeseries", "title": "ARC hits, misses, evictions — the cache's verdict per second",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 26}, "id": 123,
+      "description": "rate of klab_zfs_arc_hits/misses/evict_total. Misses spike when the test reads cold data. Evictions spike when the working set exceeds ARC size and entries are being pushed out. The relationship between these three is the cache management story.",
+      "targets": [
+        {"refId":"A","expr":"sum(rate(klab_zfs_arc_hits_total[1m])) or vector(0)","legendFormat":"hits"},
+        {"refId":"B","expr":"sum(rate(klab_zfs_arc_misses_total[1m])) or vector(0)","legendFormat":"misses"},
+        {"refId":"C","expr":"sum(rate(klab_zfs_arc_evict_total[1m])) or vector(0)","legendFormat":"evictions"},
+        {"refId":"D","expr":"sum(rate(klab_zfs_arc_demand_hits_total[1m])) or vector(0)","legendFormat":"demand hits"},
+        {"refId":"E","expr":"sum(rate(klab_zfs_arc_prefetch_hits_total[1m])) or vector(0)","legendFormat":"prefetch hits"}
+      ],
+      "fieldConfig":{"defaults":{"unit":"hertz","custom":{"fillOpacity":20,"lineWidth":2}}}
+    },
+
+    {
+      "type": "row", "title": "Kernel block-layer view — how the disk experiences the test",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 35}, "id": 130, "collapsed": false, "panels": []
+    },
+    {
+      "type": "text", "title": "", "gridPos": {"h": 3, "w": 24, "x": 0, "y": 36}, "id": 131,
+      "options": {"mode": "markdown", "content":
+"`ebpf_exporter` traces every block I/O the kernel handles, separated by read vs write. Sustained heat at the top during a test = the disk can't keep up. For zfs-tests.sh, expect tight bottom-band reads (ARC absorbing) and a wider write distribution during txg commit phases."
+      }
+    },
+    {
+      "type": "heatmap", "title": "Block READ latency during test",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 39}, "id": 132,
+      "description": "ebpf_exporter_bio_latency_seconds_bucket{operation='read'} — every block read serviced by the kernel.",
+      "targets":[{"refId":"A","expr":"sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"read\"}[2m]))","format":"heatmap","legendFormat":"{{le}}"}],
+      "options":{"calculate":false,"yAxis":{"unit":"s","decimals":4},"color":{"scheme":"Spectral","mode":"scheme","exponent":0.5},"cellGap":1}
+    },
+    {
+      "type": "heatmap", "title": "Block WRITE latency during test",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 39}, "id": 133,
+      "description": "ebpf_exporter_bio_latency_seconds_bucket{operation='write'} — every block write the kernel committed. Wide spread during txg flushes.",
+      "targets":[{"refId":"A","expr":"sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"write\"}[2m]))","format":"heatmap","legendFormat":"{{le}}"}],
+      "options":{"calculate":false,"yAxis":{"unit":"s","decimals":4},"color":{"scheme":"Spectral","mode":"scheme","exponent":0.5},"cellGap":1}
+    },
+
+    {
+      "type": "row", "title": "Pool capacity + dataset state",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 48}, "id": 140, "collapsed": false, "panels": []
+    },
+    {
+      "type": "stat", "title": "Pool used %",
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 49}, "id": 141,
+      "description": "klab_zfs_pool_used_bytes / size. Tests that create big datasets push this number; cleanup phases pull it back.",
+      "targets":[{"refId":"A","expr":"avg(klab_zfs_pool_used_bytes / klab_zfs_pool_size_bytes)"}],
+      "options":{"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"background"},
+      "fieldConfig":{"defaults":{"unit":"percentunit","min":0,"max":1,
+                                 "thresholds":{"mode":"absolute","steps":[
+                                   {"color":"green","value":null},{"color":"yellow","value":0.75},{"color":"red","value":0.9}]}}}
+    },
+    {
+      "type": "stat", "title": "Pool fragmentation",
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 49}, "id": 142,
+      "description": "klab_zfs_pool_fragmentation. Higher = freer space is more fractured. Climbs during random-write tests, stays put during sequential.",
+      "targets":[{"refId":"A","expr":"avg(klab_zfs_pool_fragmentation)"}],
+      "options":{"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"background"},
+      "fieldConfig":{"defaults":{"unit":"percent","min":0,"max":100,
+                                 "thresholds":{"mode":"absolute","steps":[
+                                   {"color":"green","value":null},{"color":"yellow","value":30},{"color":"red","value":60}]}}}
+    },
+    {
+      "type": "stat", "title": "Compression ratio",
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 49}, "id": 143,
+      "description": "klab_zfs_pool_compress_ratio. >1 means data on disk is smaller than logical. Tests that write compressible data raise this.",
+      "targets":[{"refId":"A","expr":"avg(klab_zfs_pool_compress_ratio)"}],
+      "options":{"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"value"},
+      "fieldConfig":{"defaults":{"unit":"none","decimals":2}}
+    },
+    {
+      "type": "stat", "title": "Snapshots",
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 49}, "id": 144,
+      "description": "klab_zfs_snapshot_count — total snapshots on pool. Tests that take/destroy snapshots churn this number; the kldload klab-pre snapshot is here too.",
+      "targets":[{"refId":"A","expr":"sum(klab_zfs_snapshot_count)"}],
+      "options":{"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"value","graphMode":"area"},
+      "fieldConfig":{"defaults":{"unit":"short"}}
+    },
+
+    {
+      "type": "row", "title": "Kernel's own ZFS narration — `zfs-dbgmsg` live tail",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 54}, "id": 150, "collapsed": false, "panels": []
+    },
+    {
+      "type": "text", "title": "", "gridPos": {"h": 3, "w": 24, "x": 0, "y": 55}, "id": 151,
+      "options": {"mode": "markdown", "content":
+"`/proc/spl/kstat/zfs/dbgmsg` is OpenZFS's internal narration buffer — the kernel module logs every txg commit, scrub progress mark, async-destroy step, dataset import/export, and resilver event here. Tailing it during a test run is the closest you can get to looking inside the module without a debugger. **What good looks like**: steady commits, no errors. **What bad looks like**: repeated `vdev_label`, `spa_misc`, or `arc_reclaim` warnings, or `dnode_*` complaints — those are signals of fragmentation, memory pressure, or test fault injection landing."
+      }
+    },
+    {
+      "type": "logs", "title": "zfs-dbgmsg — live",
+      "gridPos": {"h": 14, "w": 24, "x": 0, "y": 58}, "id": 152,
+      "description": "Loki tail of {job='zfs-dbgmsg'} — the kernel ZFS module's own narration during the test. Wraps to fit; scroll for history.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "refId": "A", "expr": "{job=\"zfs-dbgmsg\"}" }],
+      "options": {"showTime": true, "wrapLogMessage": true, "sortOrder": "Descending"}
+    },
+
+    {
+      "type": "row", "title": "Test runner output — `klab-test-logs` live",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 72}, "id": 160, "collapsed": false, "panels": []
+    },
+    {
+      "type": "logs", "title": "klab test output — every distro, every test, live",
+      "gridPos": {"h": 14, "w": 24, "x": 0, "y": 73}, "id": 161,
+      "description": "Loki tail of {job='klab-test-logs'} — what zfs-tests.sh is printing as it runs. Pair this panel with the ARC + txg + dbgmsg panels above to correlate test events with kernel-side behavior.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "refId": "A", "expr": "{job=\"klab-test-logs\"}" }],
+      "options": {"showTime": true, "wrapLogMessage": true, "sortOrder": "Descending"}
+    },
+
+    {
+      "type": "text", "title": "", "gridPos": {"h": 5, "w": 24, "x": 0, "y": 87}, "id": 200,
+      "options": {"mode": "markdown", "content":
+"---\n\n### Why this dashboard exists\n\nkldload was built as a test bench for OpenZFS at scale. The dashboards you see across this section are the signals the test matrix needed — not abstract observability, but specific kernel-side visibility into what `zfs-tests.sh` does to the pool every time it runs.\n\nOpen this dashboard. Run `klab test full`. Watch it.\n\nThe ARC curve will shift. txg sync rate will climb during writes. The block-I/O heatmap will fan out during cache misses and tighten back up. dbgmsg will narrate the txg cycles. All of it happens in real time, all of it shipped pre-wired, all of it on a USB-bootable image."
+      }
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["kldload", "ebpf", "zfs", "openzfs", "test-suite", "live"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "OpenZFS — Live Test Bench (kldload)",
+  "uid": "kldload-zfs-live",
+  "version": 1,
+  "weekStart": ""
+}

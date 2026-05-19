@@ -1,71 +1,403 @@
 {
-  "annotations": {"list": []},
-  "title": "Host — Kernel & System Logs",
+  "annotations": {
+    "list": []
+  },
+  "title": "Host \u2014 Kernel & System Logs",
   "uid": "kernel-messages",
-  "tags": ["host", "logs", "kldload", "loki"],
+  "tags": [
+    "host",
+    "logs",
+    "kldload",
+    "loki"
+  ],
   "schemaVersion": 39,
-  "refresh": "15s",
-  "time": {"from": "now-30m", "to": "now"},
-  "description": "Live log streams kldload's promtail ships to Loki — ZED ZFS events, kldload tooling output, ZFS module debug, klab test runs. Plus journald (when promtail has read access — see footer note).",
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "description": "Live log streams kldload's promtail ships to Loki \u2014 ZED ZFS events, kldload tooling output, ZFS module debug, klab test runs. Plus journald (when promtail has read access \u2014 see footer note).",
   "panels": [
-    {"id":1,"type":"row","title":"Counters — last 15min","gridPos":{"h":1,"w":24,"x":0,"y":0}},
-    {"id":10,"type":"stat","title":"ZED events","gridPos":{"h":4,"w":4,"x":0,"y":1},
-     "datasource":{"type":"loki","uid":"loki"},
-     "description":"ZFS Event Daemon — pool import, scrub start/finish, errors. Every state change in any zpool fires here.",
-     "targets":[{"expr":"sum(count_over_time({job=\"zed\"}[15m]))","refId":"A","datasource":{"type":"loki","uid":"loki"}}],
-     "fieldConfig":{"defaults":{"unit":"short","color":{"mode":"thresholds"},"thresholds":{"steps":[{"color":"green"}]}}},
-     "options":{"colorMode":"background","graphMode":"area"}},
-    {"id":11,"type":"stat","title":"kldload-apps","gridPos":{"h":4,"w":4,"x":4,"y":1},
-     "datasource":{"type":"loki","uid":"loki"},
-     "description":"Output of kldload's own tools — kube-cluster, klab, install-target, firstboot, webui.",
-     "targets":[{"expr":"sum(count_over_time({job=\"kldload-apps\"}[15m]))","refId":"A","datasource":{"type":"loki","uid":"loki"}}]},
-    {"id":12,"type":"stat","title":"ZFS dbgmsg","gridPos":{"h":4,"w":4,"x":8,"y":1},
-     "datasource":{"type":"loki","uid":"loki"},
-     "description":"ZFS module's kernel debug ring — txg sync stats, ARC events, async destroy progress.",
-     "targets":[{"expr":"sum(count_over_time({job=\"zfs-dbgmsg\"}[15m]))","refId":"A","datasource":{"type":"loki","uid":"loki"}}]},
-    {"id":13,"type":"stat","title":"klab tests","gridPos":{"h":4,"w":4,"x":12,"y":1},
-     "datasource":{"type":"loki","uid":"loki"},
-     "description":"Output from klab test runs.",
-     "targets":[{"expr":"sum(count_over_time({job=\"klab-test-logs\"}[15m]))","refId":"A","datasource":{"type":"loki","uid":"loki"}}]},
-    {"id":14,"type":"stat","title":"systemd journal","gridPos":{"h":4,"w":4,"x":16,"y":1},
-     "datasource":{"type":"loki","uid":"loki"},
-     "description":"Empty box → promtail can't read /run/log/journal/ (usually a perms issue — see footer for the fix).",
-     "targets":[{"expr":"sum(count_over_time({job=\"systemd-journal\"}[15m]))","refId":"A","datasource":{"type":"loki","uid":"loki"}}],
-     "fieldConfig":{"defaults":{"noValue":"(none — see footer)"}}},
-    {"id":15,"type":"stat","title":"All log lines (15m)","gridPos":{"h":4,"w":4,"x":20,"y":1},
-     "datasource":{"type":"loki","uid":"loki"},
-     "targets":[{"expr":"sum(count_over_time({job=~\".+\"}[15m]))","refId":"A","datasource":{"type":"loki","uid":"loki"}}]},
-
-    {"id":20,"type":"row","title":"ZED — ZFS pool state events","gridPos":{"h":1,"w":24,"x":0,"y":5}},
-    {"id":21,"type":"logs","title":"ZED — every pool event (live tail)","gridPos":{"h":12,"w":24,"x":0,"y":6},
-     "datasource":{"type":"loki","uid":"loki"},
-     "description":"Imports, exports, scrub start/finish, snapshot create, error events, vdev state changes — the system's ZFS heartbeat.",
-     "targets":[{"expr":"{job=\"zed\"}","refId":"A","datasource":{"type":"loki","uid":"loki"}}],
-     "options":{"showTime":true,"showLabels":false,"wrapLogMessage":true,"dedupStrategy":"none","sortOrder":"Descending"}},
-
-    {"id":30,"type":"row","title":"kldload tooling output","gridPos":{"h":1,"w":24,"x":0,"y":18}},
-    {"id":31,"type":"logs","title":"kldload-apps — last 30min","gridPos":{"h":12,"w":24,"x":0,"y":19},
-     "datasource":{"type":"loki","uid":"loki"},
-     "description":"Everything kldload's CLIs printed. Useful for retracing a deploy / bootstrap / install — output streams here as the operation runs.",
-     "targets":[{"expr":"{job=\"kldload-apps\"}","refId":"A","datasource":{"type":"loki","uid":"loki"}}],
-     "options":{"showTime":true,"showLabels":false,"wrapLogMessage":true,"dedupStrategy":"none","sortOrder":"Descending"}},
-
-    {"id":40,"type":"row","title":"ZFS kernel debug messages","gridPos":{"h":1,"w":24,"x":0,"y":31}},
-    {"id":41,"type":"logs","title":"ZFS dbgmsg — txg + ARC + async-destroy + scrub-internal","gridPos":{"h":12,"w":24,"x":0,"y":32},
-     "datasource":{"type":"loki","uid":"loki"},
-     "description":"In-kernel ZFS messages. Empty during quiet periods, spikes during pool activity.",
-     "targets":[{"expr":"{job=\"zfs-dbgmsg\"}","refId":"A","datasource":{"type":"loki","uid":"loki"}}],
-     "options":{"showTime":true,"showLabels":false,"wrapLogMessage":true,"dedupStrategy":"none","sortOrder":"Descending"}},
-
-    {"id":50,"type":"row","title":"klab test runs","gridPos":{"h":1,"w":24,"x":0,"y":44}},
-    {"id":51,"type":"logs","title":"klab test output","gridPos":{"h":10,"w":24,"x":0,"y":45},
-     "datasource":{"type":"loki","uid":"loki"},
-     "description":"Captured during klab test runs. Empty if no tests have run.",
-     "targets":[{"expr":"{job=\"klab-test-logs\"}","refId":"A","datasource":{"type":"loki","uid":"loki"}}],
-     "options":{"showTime":true,"showLabels":false,"wrapLogMessage":true,"dedupStrategy":"none","sortOrder":"Descending"}},
-
-    {"id":99,"type":"text","title":"About this dashboard","gridPos":{"h":4,"w":24,"x":0,"y":55},
-     "options":{"mode":"markdown","content":"### What's here\n\nLog streams kldload's **promtail** ships to **Loki** in real time. Click any panel header → Explore for full LogQL drilldown.\n\n### If the systemd-journal panel is blank\n\nPromtail's `journal` scraper needs read access to `/run/log/journal/<machine-id>/`. On fresh kldload installs the promtail user may not be in the `systemd-journal` group. Fix: `sudo usermod -aG systemd-journal promtail && sudo systemctl restart promtail`. The ZED + kldload-apps + ZFS dbgmsg + klab streams work without that — they're file-tail scrapers, not journald."}
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Counters \u2014 last 15min",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "ZED events (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "ZFS Event Daemon \u2014 pool import, scrub start/finish, errors. Every state change in any zpool fires here.",
+      "targets": [
+        {
+          "expr": "sum(count_over_time({job=\"zed\"}[24h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "kldload-apps (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Output of kldload's own tools \u2014 kube-cluster, klab, install-target, firstboot, webui.",
+      "targets": [
+        {
+          "expr": "sum(count_over_time({job=\"kldload-apps\"}[24h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          }
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "ZFS dbgmsg (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "ZFS module's kernel debug ring \u2014 txg sync stats, ARC events, async destroy progress.",
+      "targets": [
+        {
+          "expr": "sum(count_over_time({job=\"zfs-dbgmsg\"}[24h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          }
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "klab tests (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Output from klab test runs.",
+      "targets": [
+        {
+          "expr": "sum(count_over_time({job=\"klab-test-logs\"}[24h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          }
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "systemd journal (24h)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Empty box \u2192 promtail can't read /run/log/journal/ (usually a perms issue \u2014 see footer for the fix).",
+      "targets": [
+        {
+          "expr": "sum(count_over_time({job=\"systemd-journal\"}[24h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "(none \u2014 see footer)"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "All log lines (15m)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({job=~\".+\"}[24h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          }
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "ZED \u2014 ZFS pool state events",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      }
+    },
+    {
+      "id": 21,
+      "type": "logs",
+      "title": "ZED \u2014 every pool event (live tail)",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Imports, exports, scrub start/finish, snapshot create, error events, vdev state changes \u2014 the system's ZFS heartbeat.",
+      "targets": [
+        {
+          "expr": "{job=\"zed\"}",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "kldload tooling output",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      }
+    },
+    {
+      "id": 31,
+      "type": "logs",
+      "title": "kldload-apps \u2014 last 30min",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Everything kldload's CLIs printed. Useful for retracing a deploy / bootstrap / install \u2014 output streams here as the operation runs.",
+      "targets": [
+        {
+          "expr": "{job=\"kldload-apps\"}",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "ZFS kernel debug messages",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      }
+    },
+    {
+      "id": 41,
+      "type": "logs",
+      "title": "ZFS dbgmsg \u2014 txg + ARC + async-destroy + scrub-internal",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "In-kernel ZFS messages. Empty during quiet periods, spikes during pool activity.",
+      "targets": [
+        {
+          "expr": "{job=\"zfs-dbgmsg\"}",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "klab test runs",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      }
+    },
+    {
+      "id": 51,
+      "type": "logs",
+      "title": "klab test output",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 45
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Captured during klab test runs. Empty if no tests have run.",
+      "targets": [
+        {
+          "expr": "{job=\"klab-test-logs\"}",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 99,
+      "type": "text",
+      "title": "About this dashboard",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### What's here\n\nLog streams kldload's **promtail** ships to **Loki** in real time. Click any panel header \u2192 Explore for full LogQL drilldown.\n\n### If the systemd-journal panel is blank\n\nPromtail's `journal` scraper needs read access to `/run/log/journal/<machine-id>/`. On fresh kldload installs the promtail user may not be in the `systemd-journal` group. Fix: `sudo usermod -aG systemd-journal promtail && sudo systemctl restart promtail`. The ZED + kldload-apps + ZFS dbgmsg + klab streams work without that \u2014 they're file-tail scrapers, not journald."
+      }
     }
   ]
 }

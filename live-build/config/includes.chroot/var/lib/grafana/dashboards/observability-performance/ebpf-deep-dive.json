@@ -29,194 +29,195 @@
         "x": 0,
         "y": 0
       },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "id": 10,
-      "type": "stat",
-      "title": "Kernel events/sec captured",
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 0,
-        "y": 1
-      },
-      "description": "Total events per second captured directly from kernel BPF programs (Tetragon process/policy events + Hubble network flows). This is the raw signal volume the kernel sees \u2014 not log lines an agent has to ship.",
-      "targets": [
+      "collapsed": true,
+      "panels": [
         {
-          "expr": "sum(rate(tetragon_events_total[5m])) + sum(rate(hubble_flows_processed_total[5m]))",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
+          "id": 10,
+          "type": "stat",
+          "title": "Kernel events/sec captured",
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 0,
+            "y": 1
           },
-          "thresholds": {
-            "steps": [
-              {
-                "color": "green"
+          "description": "Total events per second captured directly from kernel BPF programs (Tetragon process/policy events + Hubble network flows). This is the raw signal volume the kernel sees \u2014 not log lines an agent has to ship.",
+          "targets": [
+            {
+              "expr": "sum(rate(tetragon_events_total[5m])) + sum(rate(hubble_flows_processed_total[5m]))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "decimals": 0,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "steps": [
+                  {
+                    "color": "green"
+                  }
+                ]
               }
-            ]
+            }
+          },
+          "options": {
+            "colorMode": "background",
+            "graphMode": "area",
+            "textMode": "value_and_name"
+          }
+        },
+        {
+          "id": 11,
+          "type": "stat",
+          "title": "If this were Splunk \u2014 $/day ingest",
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 6,
+            "y": 1
+          },
+          "description": "Bytes/event \u00d7 Splunk Cloud's published $5/GB/day. Upper bound only \u2014 these events never leave the kernel unless a TracingPolicy matches.",
+          "targets": [
+            {
+              "expr": "( sum(rate(tetragon_events_total[5m])) + sum(rate(hubble_flows_processed_total[5m])) ) * 300 * 86400 / 1073741824 * 5",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 2,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 50
+                  },
+                  {
+                    "color": "orange",
+                    "value": 250
+                  },
+                  {
+                    "color": "red",
+                    "value": 1000
+                  }
+                ]
+              }
+            }
+          },
+          "options": {
+            "colorMode": "background",
+            "textMode": "value_and_name"
+          }
+        },
+        {
+          "id": 12,
+          "type": "stat",
+          "title": "BPF CPU overhead (% of one core)",
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 12,
+            "y": 1
+          },
+          "description": "Total CPU time spent inside Tetragon's BPF programs, expressed as a fraction of one core. eBPF runs in-kernel and is the cheapest observation point in the system \u2014 typical overhead is 1-3% of one core for hundreds of thousands of events/sec.",
+          "targets": [
+            {
+              "expr": "sum(rate(tetragon_overhead_program_seconds_total[5m])) * 100",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "decimals": 2,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 5
+                  },
+                  {
+                    "color": "red",
+                    "value": 15
+                  }
+                ]
+              }
+            }
+          },
+          "options": {
+            "colorMode": "background"
+          }
+        },
+        {
+          "id": 13,
+          "type": "stat",
+          "title": "BPF data-plane memory (MB)",
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 18,
+            "y": 1
+          },
+          "description": "Memory used by Cilium's BPF maps + program text. The entire kernel-side data plane for routing + L7 policy + observability \u2014 fits in a few hundred MB. Compare to your Splunk forwarder's RSS.",
+          "targets": [
+            {
+              "expr": "( sum(cilium_bpf_maps_virtual_memory_max_bytes) + sum(cilium_bpf_progs_virtual_memory_max_bytes) ) / 1024 / 1024",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "decmbytes",
+              "decimals": 1,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "steps": [
+                  {
+                    "color": "green"
+                  }
+                ]
+              }
+            }
+          },
+          "options": {
+            "colorMode": "background"
+          }
+        },
+        {
+          "id": 14,
+          "type": "text",
+          "title": "",
+          "gridPos": {
+            "h": 3,
+            "w": 24,
+            "x": 0,
+            "y": 6
+          },
+          "options": {
+            "mode": "markdown",
+            "content": "**Why eBPF wins vs log-shipping:** every event above was observed in the kernel, filtered against active policies, and exported only when it mattered. Splunk's model is the inverse \u2014 agents tail logs, ship every line over the network, then a backend indexer parses them. You pay 4\u00d7 for the same data: agent CPU, network bandwidth, indexer CPU, license/storage. And you still miss everything that never made it into a log \u2014 privilege use, file opens, syscall errors, in-pod traffic between containers. The dollar figure above is just the ingest tax; the visibility gap is what we actually fix."
           }
         }
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "area",
-        "textMode": "value_and_name"
-      }
-    },
-    {
-      "id": 11,
-      "type": "stat",
-      "title": "If this were Splunk \u2014 $/day ingest",
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 6,
-        "y": 1
-      },
-      "description": "Bytes/event \u00d7 Splunk Cloud's published $5/GB/day. Upper bound only \u2014 these events never leave the kernel unless a TracingPolicy matches.",
-      "targets": [
-        {
-          "expr": "( sum(rate(tetragon_events_total[5m])) + sum(rate(hubble_flows_processed_total[5m])) ) * 300 * 86400 / 1073741824 * 5",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "decimals": 2,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "yellow",
-                "value": 50
-              },
-              {
-                "color": "orange",
-                "value": 250
-              },
-              {
-                "color": "red",
-                "value": 1000
-              }
-            ]
-          }
-        }
-      },
-      "options": {
-        "colorMode": "background",
-        "textMode": "value_and_name"
-      }
-    },
-    {
-      "id": 12,
-      "type": "stat",
-      "title": "BPF CPU overhead (% of one core)",
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 12,
-        "y": 1
-      },
-      "description": "Total CPU time spent inside Tetragon's BPF programs, expressed as a fraction of one core. eBPF runs in-kernel and is the cheapest observation point in the system \u2014 typical overhead is 1-3% of one core for hundreds of thousands of events/sec.",
-      "targets": [
-        {
-          "expr": "sum(rate(tetragon_overhead_program_seconds_total[5m])) * 100",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "decimals": 2,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "yellow",
-                "value": 5
-              },
-              {
-                "color": "red",
-                "value": 15
-              }
-            ]
-          }
-        }
-      },
-      "options": {
-        "colorMode": "background"
-      }
-    },
-    {
-      "id": 13,
-      "type": "stat",
-      "title": "BPF data-plane memory (MB)",
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 18,
-        "y": 1
-      },
-      "description": "Memory used by Cilium's BPF maps + program text. The entire kernel-side data plane for routing + L7 policy + observability \u2014 fits in a few hundred MB. Compare to your Splunk forwarder's RSS.",
-      "targets": [
-        {
-          "expr": "( sum(cilium_bpf_maps_virtual_memory_max_bytes) + sum(cilium_bpf_progs_virtual_memory_max_bytes) ) / 1024 / 1024",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "decmbytes",
-          "decimals": 1,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "steps": [
-              {
-                "color": "green"
-              }
-            ]
-          }
-        }
-      },
-      "options": {
-        "colorMode": "background"
-      }
-    },
-    {
-      "id": 14,
-      "type": "text",
-      "title": "",
-      "gridPos": {
-        "h": 3,
-        "w": 24,
-        "x": 0,
-        "y": 6
-      },
-      "options": {
-        "mode": "markdown",
-        "content": "**Why eBPF wins vs log-shipping:** every event above was observed in the kernel, filtered against active policies, and exported only when it mattered. Splunk's model is the inverse \u2014 agents tail logs, ship every line over the network, then a backend indexer parses them. You pay 4\u00d7 for the same data: agent CPU, network bandwidth, indexer CPU, license/storage. And you still miss everything that never made it into a log \u2014 privilege use, file opens, syscall errors, in-pod traffic between containers. The dollar figure above is just the ingest tax; the visibility gap is what we actually fix."
-      }
+      ]
     },
     {
       "id": 20,

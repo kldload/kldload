@@ -1,0 +1,493 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Open this before pressing Cluster Rebuild. Watch a full Kubernetes cluster die and rebuild in real time \u2014 pods evacuating, VMs destroying, ZFS clones spawning, kubeadm joining, Cilium re-meshing. Every line is kernel-side or kubelet-side ground truth.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "options": {
+        "mode": "markdown",
+        "content": "## Kubernetes \u2014 die-and-rebuild lifecycle\n\n**This is the kldload thesis, in one dashboard.** Modern resilience isn't about preventing failures or logging into a broken cluster to fix it. It's about whether you can **destroy the cluster and rebuild it in 6-10 minutes**.\n\nThat's what this page shows. Press Cluster Rebuild from the Kubernetes overview; watch every line below tell the story:\n\n1. **Pods evacuate** as kubelet kills containers\n2. **VMs destroy** as libvirt tears down the worker domains\n3. **ZFS zvols destruct** (the dbgmsg stream narrates each one)\n4. ~30 seconds of zero \u2014 cluster is gone\n5. **VMs clone** from `k8s-golden` (ZFS clone = milliseconds \u2014 that's why this is fast)\n6. **kubeadm joins** each worker in parallel\n7. **Cilium re-meshes** the network in the kernel datapath\n8. **Pods reschedule** from manifests on disk\n\nTotal: 6-10 minutes for a 3-worker cluster, single host, no external dependencies. **Stop fixing things. Start rebuilding them.** That's the pitch."
+      }
+    },
+    {
+      "type": "row",
+      "title": "Cluster state \u2014 what's alive right now",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 110,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "VMs",
+      "description": "Running libvirt domains. Drops to 1 (just cp) during destroy, climbs back as workers clone.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 7
+      },
+      "id": 111,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(libvirt_domain_info_state == 1) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Workers (vCPUs total)",
+      "description": "Aggregate worker vCPUs.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 7
+      },
+      "id": 112,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(libvirt_domain_info_virtual_cpus{domain=~'kldload-w-.*'}) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Pods running",
+      "description": "kubelet's own count of running pods. Decays to 0 during destroy, climbs back during reschedule.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 7
+      },
+      "id": 113,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(kubelet_running_pods) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Containers running",
+      "description": "kubelet container count. Tracks pods with a small offset (sidecars, init).",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 7
+      },
+      "id": 114,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(kubelet_running_containers) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pod count over time (the heartbeat of the lifecycle)",
+      "description": "When you press Rebuild, both lines should drop simultaneously, hold at zero for ~15s, then climb back. The shape of that climb tells you how parallel your workers are.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 115,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(kubelet_running_pods) or vector(0)",
+          "legendFormat": "running pods"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(kubelet_running_containers) or vector(0)",
+          "legendFormat": "running containers"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "VM count + virtual CPUs",
+      "description": "Falling edge = VMs being destroyed. Rising edge = kube-cluster scale cloning from the k8s-golden zvol (ZFS clones are O(1) \u2014 they appear nearly instantly).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 116,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(libvirt_domain_info_state == 1) or vector(0)",
+          "legendFormat": "running VMs"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(libvirt_domain_info_virtual_cpus{domain=~'kldload.*'})/4 or vector(0)",
+          "legendFormat": "vCPUs / 4"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Container lifecycle latency \u2014 kernel CRI view",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "id": 120,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 121,
+      "options": {
+        "mode": "markdown",
+        "content": "**During nuke**: every container teardown goes through CRI (CreateContainer/RemoveContainer). The runtime ops heatmap fans wide for a few seconds.\n\n**During rebuild**: kubelet pulls images (mostly already cached on golden), then starts containers in batches. Watch the cold-start heatmap for the bootstrap tail."
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Container cold-start time (pod Scheduled \u2192 Ready)",
+      "description": "Pod cold-start distribution. Bursts of pods rescheduling after the nuke show up as a wide hot band that tightens over minutes.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "id": 122,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(kubelet_pod_start_total_duration_seconds_bucket[2m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 4
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "CRI runtime operations duration",
+      "description": "Every CRI call (start/stop/exec). The destroy phase pushes the right tail; the rebuild phase normalises it.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "id": 123,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(kubelet_runtime_operations_duration_seconds_bucket[2m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 4
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1
+      }
+    },
+    {
+      "type": "row",
+      "title": "Kernel events during lifecycle \u2014 Tetragon + Hubble",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "id": 130,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Tetragon kernel events/sec by class",
+      "description": "5=EXECVE 7=EXIT 23=KPROBE. A nuke spikes EXIT (containers dying), then EXECVE (rebuild). The eBPF tracer sees every fork/exec/exit the kernel does \u2014 no agent.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
+      "id": 131,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (msg_op) (rate(tetragon_msg_op_total[1m])) or vector(0)",
+          "legendFormat": "msg_op={{msg_op}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Cilium endpoints + Hubble flows/sec",
+      "description": "Cilium watches every pod-to-pod flow in the kernel. Drops during the nuke are pods losing their routes mid-teardown \u2014 recovery is automatic.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
+      "id": 132,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hubble_flows_processed_total[1m])) or vector(0)",
+          "legendFormat": "flows/sec"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(hubble_drop_total[1m])) or vector(0)",
+          "legendFormat": "drops/sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Live narration \u2014 log streams of the lifecycle",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "id": 140,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "logs",
+      "title": "kldload + kubelet + containerd live tail",
+      "description": "Filtered to lifecycle-relevant lines. Reads top-down (newest first) so the destroy/rebuild story scrolls naturally.",
+      "gridPos": {
+        "h": 16,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "id": 141,
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{job=~\"systemd-journal|kldload-apps\"} |~ \"(?i)kubelet|cilium|cluster|node|pod\""
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "id": 200,
+      "options": {
+        "mode": "markdown",
+        "content": "---\n\n### The point of this demo\n\nMost observability stacks help you triage a broken cluster. kldload helps you decide you don't need to: when a cluster gets sick, you redeploy the whole thing in single-digit minutes, and you have the kernel-level evidence in front of you that it actually came back identical.\n\nLogs say 'pod restarted.' Traces say 'a request took 3s.' This dashboard says 'the entire control plane and worker fleet went away and came back, here's every kernel event along the way.'\n\n**Cattle, not pets, all the way down to the BPF map.**"
+      }
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": [
+    "kldload",
+    "ebpf",
+    "kubernetes",
+    "lifecycle",
+    "demo"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Kubernetes \u2014 Live Cluster Lifecycle (the nuke-button watch)",
+  "uid": "kldload-k8s-lifecycle",
+  "version": 1,
+  "weekStart": ""
+}

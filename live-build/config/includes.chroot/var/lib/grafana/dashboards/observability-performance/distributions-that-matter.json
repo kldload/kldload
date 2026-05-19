@@ -1,0 +1,608 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Five heatmaps that show distributions, not averages. Each one is a signal that an averages-only stack hides \u2014 long tails, bimodal behavior, sudden right-shifts. Includes 'what good looks like' and 'what bad looks like' on every panel so even non-SREs can read them.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "options": {
+        "mode": "markdown",
+        "content": "## Distributions that matter\n\nAverages lie. A P50 of 2 seconds is fine \u2014 until 1 in 10,000 requests hits 90 seconds and that one is the customer demo. Heatmaps show every request; scattergrams show every actor at every moment. Long-tail and bimodal behaviour become obvious instead of buried in mean-stripped time series.\n\nEvery panel below reads live from this kldload box. The text under each title tells you **what good looks like** and **what bad looks like** so you can read these without being an SRE veteran.\n\n**The block-I/O panels (sections 4 + 6) are the load-bearing ones for OpenZFS** \u2014 they're the signals the kldload test matrix was built around. The XY scattergram at the bottom (section 8) is the observability-economics view: a real cost-of-instrumentation analysis, programmer by programmer."
+      }
+    },
+    {
+      "type": "row",
+      "title": "1 \u00b7 Container cold-start latency",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 110,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 111,
+      "options": {
+        "mode": "markdown",
+        "content": "**Source**: kubelet, every pod from `Scheduled` to `Ready`. **What good looks like**: tight band under 5s, a thin trail to ~30s for image pulls. **What bad looks like**: smear extending past 60s, a second hot band at the top of the chart, or sudden right-shifts when a node gets busy. **Why it matters**: this is the latency your operators feel during a rolling deploy. Averages will say `8s` while P99.9 is `90s`."
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Pod cold-start \u2014 Scheduled \u2192 Ready",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "id": 112,
+      "description": "kubelet_pod_start_total_duration_seconds_bucket \u2014 the histogram of how long every pod took from `Scheduled` to `Ready`. Y axis = seconds (log). X axis = wall clock. Heat = how many pods landed in each latency bucket per minute.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(kubelet_pod_start_total_duration_seconds_bucket[1m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 2
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1,
+        "tooltip": {
+          "show": true,
+          "yHistogram": true
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "2 \u00b7 Kubelet PLEG relist latency",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "id": 120,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "id": 121,
+      "options": {
+        "mode": "markdown",
+        "content": "**Source**: kubelet's Pod Lifecycle Event Generator. **What good looks like**: every relist completes in <100ms, all heat hugs the bottom. **What bad looks like**: heat creeping upward, especially toward >1s \u2014 this is the famous PLEG hang. When it climbs past 3 minutes the node flips `NotReady`. **Why it matters**: this signal moves *minutes before* the node fails, so you have time to evacuate. Logs only tell you AFTER the node went down."
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "PLEG relist duration",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "id": 122,
+      "description": "kubelet_pleg_relist_duration_seconds_bucket \u2014 how long the kubelet's PLEG loop is taking per node. Tail latency here is the gold-standard 'node is about to die' signal.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(kubelet_pleg_relist_duration_seconds_bucket[1m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 3
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1
+      }
+    },
+    {
+      "type": "row",
+      "title": "3 \u00b7 Kubelet runtime operations (CRI latency)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "id": 130,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "id": 131,
+      "options": {
+        "mode": "markdown",
+        "content": "**Source**: kubelet \u2192 CRI (CRI-O/containerd) for every container lifecycle operation (CreateContainer, RemoveContainer, StartContainer, etc.). **What good looks like**: tight band under 100ms. **What bad looks like**: column smearing into seconds (CRI/runtime under pressure, OCI layer fetch hung, network unmount stuck). **Why it matters**: every pod lifecycle goes through this. When CRI degrades, your pod start, stop, and probe operations all slow down \u2014 and unlike pod metrics this is the *runtime side*, so it shows the cause, not the symptom."
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Kubelet \u2192 CRI operation duration",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "id": 132,
+      "description": "kubelet_runtime_operations_duration_seconds_bucket \u2014 every CRI request the kubelet made (create/start/remove container, exec, status). Tail latency here is one of the cleanest \"is this node degrading?\" signals available.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(kubelet_runtime_operations_duration_seconds_bucket[1m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 3
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1
+      }
+    },
+    {
+      "type": "row",
+      "title": "4 \u00b7 Block I/O latency (eBPF)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "id": 140,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "id": 141,
+      "options": {
+        "mode": "markdown",
+        "content": "**Source**: `ebpf_exporter` traces every block I/O directly from the kernel block layer. **What good looks like**: NVMe shows a tight band at ~100\u00b5s\u20131ms; spinning rust at ~5\u201320ms.\n\n**What bad looks like, kldload edition**:\n- Persistent heat at the top during a `zpool scrub` = scrub is starving application I/O (a real test-matrix finding \u2014 application reads queued behind scrub reads)\n- Bimodal distribution = ARC just went cold; the upper band is the app reading from disk that used to come from cache\n- Sudden right-shift coinciding with a txg sync = ZFS write pressure pushed back on reads; this is the signal that revealed the txg-throttle interaction we found in 2.4.0 testing\n- Long tail past 100ms on NVMe = noisy-neighbour I/O on a shared pool\n\n**Why it matters**: every \"ZFS feels slow\" report ends here. This panel names the cause by service-time shape. It is the single most important panel kldload publishes, and it's why the project exists."
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Block I/O service time (kernel-level)",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "id": 142,
+      "description": "`ebpf_exporter_bio_latency_seconds_bucket` \u2014 every block I/O the kernel handled, bucketed by service time. For ZFS pools: this is where txg commits, scrub reads, ARC misses, and app I/O all show up as distinct heat patterns. The shape names the cause.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket[1m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 4
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1
+      }
+    },
+    {
+      "type": "row",
+      "title": "5 \u00b7 Tetragon kernel \u2192 userspace event handling",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 61
+      },
+      "id": 150,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 62
+      },
+      "id": 151,
+      "options": {
+        "mode": "markdown",
+        "content": "**Source**: Tetragon, time from kernel-side BPF probe firing to userspace ingest. **What good looks like**: most events handled in <100\u00b5s, almost everything under 1ms. **What bad looks like**: events stacking up in the 10ms+ band, ring-buffer overruns spiking (separate metric: `tetragon_ringbuffer_lost_events_total`). **Why it matters**: this measures the *cost* of your eBPF observability. If this gets fat, you're over-instrumenting; tighten Tetragon's TracingPolicies."
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Tetragon event handling latency",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 66
+      },
+      "id": 152,
+      "description": "tetragon_handling_latency_bucket \u2014 the time-to-userspace for every event Tetragon's BPF probes generate. This IS the eBPF tax, in measurable form.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(tetragon_handling_latency_bucket[1m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 6
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1
+      }
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 75
+      },
+      "id": 200,
+      "options": {
+        "mode": "markdown",
+        "content": "---\n\n### How to read a heatmap (quick guide for non-SREs)\n\n- **X axis** is time. New columns appear as the dashboard refreshes.\n- **Y axis** is value (latency or size, usually log-scaled). Each row is a bucket.\n- **Color** is how many events landed in that bucket during that time window. Bright = many.\n- **Healthy**: one tight horizontal band low on the chart.\n- **Unhealthy**: heat spreading upward, OR a second band appearing higher up (bimodal \u2014 two distinct populations of behavior).\n- **About to fail**: sudden right-shift in the latest column \u2014 you have minutes-to-hours to react before logs would tell you.\n\nThese five together form a 30-second cluster-health read: scan top to bottom, anything not hugging the bottom is worth a click-in."
+      }
+    },
+    {
+      "type": "row",
+      "title": "6 \u00b7 Block I/O \u2014 read vs write split (ZFS angle)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 79
+      },
+      "id": 160,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 80
+      },
+      "id": 161,
+      "options": {
+        "mode": "markdown",
+        "content": "**Why split read and write**: on a ZFS pool they have very different physics. Reads can be ARC-cached (fast) or disk-bound (slow). Writes are always async into the txg, then synchronous to disk at commit. When the box \"feels slow,\" knowing whether reads or writes are queuing tells you whether to look at ARC cold-miss patterns or txg sync pressure. **What good**: tight bottom band on both. **What bad**: heat at the top of the write chart only = txg commit stall; heat at the top of the read chart only = ARC just went cold."
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Block READ latency (kernel)",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 84
+      },
+      "id": 162,
+      "description": "ebpf_exporter_bio_latency_seconds_bucket{operation=\"read\"} \u2014 sustained heat at the top here = ARC misses forcing disk reads. The shape names whether ARC is healthy.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"read\"}[2m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 4
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Block WRITE latency (kernel)",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 84
+      },
+      "id": 163,
+      "description": "ebpf_exporter_bio_latency_seconds_bucket{operation=\"write\"} \u2014 sustained heat at the top here = txg commit pressure; reads are queueing behind sync writes. This is the signal the kldload test matrix was built around.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"write\"}[2m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 4
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1
+      }
+    },
+    {
+      "type": "row",
+      "title": "7 \u00b7 Tetragon event payload size",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 93
+      },
+      "id": 170,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 94
+      },
+      "id": 171,
+      "options": {
+        "mode": "markdown",
+        "content": "**What this is**: every kernel event Tetragon shipped to userspace, bucketed by serialized size. A bimodal distribution is the most common pattern \u2014 tiny (~60 byte) process events stacked at the bottom, occasional fat events at the top (file paths, command-line arguments, environment variables for forensic captures). **What good**: the small band is dense, the large band is rare. **What bad**: a sudden hot band in the middle = your TracingPolicies are shipping more context per event than you need (and paying for it in kernel\u2192userspace bandwidth). Tune them down."
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Tetragon event size distribution",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 98
+      },
+      "id": 172,
+      "description": "tetragon_data_event_size_bucket \u2014 the serialized size of each kernel event before it crosses the ring buffer. Tail size correlates with TracingPolicy verbosity.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(tetragon_data_event_size_bucket[2m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "bytes",
+          "decimals": 0
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1
+      }
+    },
+    {
+      "type": "row",
+      "title": "8 \u00b7 Scattergram \u2014 Tetragon BPF cost vs event rate (observability economics)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 107
+      },
+      "id": 180,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 108
+      },
+      "id": 181,
+      "options": {
+        "mode": "markdown",
+        "content": "**What this is**: a true XY scatter \u2014 each Tetragon BPF program at each scrape interval becomes one point. **X axis = events/sec** the program fired. **Y axis = kernel CPU seconds/sec** the program consumed.\n\n**How to read it**:\n- **Bottom-right** (high rate, low cost): efficient program \u2014 many cheap events. This is what good looks like.\n- **Top-left** (low rate, high cost): expensive per-event program \u2014 maybe doing heavy stack walks or string copies. Candidate for optimization.\n- **Top-right** (high rate, high cost): the program is both busy and expensive \u2014 usually a network-flow program on a hot cluster. Worth tuning.\n- **Bottom-left**: idle program.\n\nThis is the **cost-of-observability frame** nobody else shows. It demonstrates the eBPF tax in measurable terms, programmer-by-programmer."
+      }
+    },
+    {
+      "type": "xychart",
+      "title": "BPF programs \u2014 cost vs throughput",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 113
+      },
+      "id": 182,
+      "description": "Each point is one (program, scrape-time) pair. X = events/sec; Y = CPU seconds/sec. Bottom-right corner = efficient. Top-left = expensive per event.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(tetragon_overhead_program_runs_total[1m])",
+          "legendFormat": "{{program}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(tetragon_overhead_program_seconds_total[1m])",
+          "legendFormat": "{{program}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {}
+        }
+      },
+      "options": {
+        "mapping": "manual",
+        "series": [
+          {
+            "frame": {
+              "matcher": {
+                "id": "byRefId",
+                "options": "A"
+              }
+            },
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "Value"
+              }
+            }
+          }
+        ],
+        "showLegend": true
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "kldload",
+    "ebpf",
+    "histograms",
+    "distributions",
+    "observability"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Observability \u2014 Distributions That Matter (5 heatmaps)",
+  "uid": "kldload-distributions",
+  "version": 1,
+  "weekStart": ""
+}

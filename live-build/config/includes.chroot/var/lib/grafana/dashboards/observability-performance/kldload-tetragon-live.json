@@ -1,0 +1,394 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Live view of every process, file, and syscall the kernel handles, via Tetragon BPF programs. The structured-event stream Falco wishes it had, with K8s pod attribution.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "options": {
+        "mode": "markdown",
+        "content": "## Tetragon \u2014 kernel-syscall security watch\n\nTetragon attaches BPF programs to **every interesting kernel hook**: `execve`, `clone`, `exit`, `security_file_open`, `tcp_connect`, capability checks, LSM hooks. The result is a stream of structured events with full kernel context (PID, parent PID, command-line, file path, capabilities, return code) for everything the kernel actually does.\n\nNo agent install, no app instrumentation, no log scraping \u2014 same data Falco produces but with first-class K8s pod attribution and lower overhead."
+      }
+    },
+    {
+      "type": "row",
+      "title": "Process activity surface (every fork + exec + exit)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 110,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Events/sec (all classes)",
+      "description": "Aggregate Tetragon event rate. A noisy K8s node can run 1k+/sec; a quiet box is single digits.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 7
+      },
+      "id": 111,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(tetragon_events_total[2m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "EXECVE/sec",
+      "description": "Every process exec \u2014 fork+exec on Linux. Container init burst, then steady-state.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 7
+      },
+      "id": 112,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(tetragon_msg_op_total{msg_op='5'}[2m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "EXIT/sec",
+      "description": "Every process exit. Pairs with EXECVE. Sudden burst = something is crashing / OOM-killing.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 7
+      },
+      "id": 113,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(tetragon_msg_op_total{msg_op='7'}[2m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "KPROBE/sec",
+      "description": "Every kernel function call your TracingPolicies traced. File opens, capability checks, syscall returns.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 7
+      },
+      "id": 114,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(tetragon_msg_op_total{msg_op='23'}[2m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tetragon events/sec by class (msg_op breakdown)",
+      "description": "Stacked area of every event class. 5=EXECVE 7=EXIT 23=PROCESS_KPROBE. The ratio is workload character \u2014 heavy KPROBE = heavy syscall tracing; heavy EXECVE = lots of short-lived containers.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      },
+      "id": 115,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (msg_op) (rate(tetragon_msg_op_total[1m])) or vector(0)",
+          "legendFormat": "msg_op={{msg_op}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Observability cost \u2014 what Tetragon's BPF programs consume",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "id": 120,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 121,
+      "options": {
+        "mode": "markdown",
+        "content": "Honest accounting: every BPF program Tetragon attaches costs kernel CPU time. The panel below shows that cost per program. Most are <0.5% of one core; if you see a program hot, tune its TracingPolicy down."
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "BPF program CPU time/sec (top 8 by runtime)",
+      "description": "Total kernel CPU each Tetragon BPF program consumed per second. The platform is honest about its own cost.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "id": 122,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(8, sum by (program) (rate(tetragon_overhead_program_seconds_total[1m]))) or vector(0)",
+          "legendFormat": "{{program}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "BPF program runs/sec (top 8 by invocation rate)",
+      "description": "How often each program fires. Pair with the CPU panel: high runs + low CPU = efficient. Low runs + high CPU = expensive per event.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "id": 123,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(8, sum by (program) (rate(tetragon_overhead_program_runs_total[1m]))) or vector(0)",
+          "legendFormat": "{{program}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Tetragon kernel\u2192userspace handling latency",
+      "description": "Time from BPF probe firing to userspace ingest. Tight bottom band = healthy ring buffer. Heat creeping up = ring buffer pressure.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "id": 124,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(tetragon_handling_latency_bucket[2m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 4
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1
+      }
+    },
+    {
+      "type": "row",
+      "title": "Ring buffer health (lost events = blind spot)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "id": 130,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Tetragon ring buffer events: received vs lost",
+      "description": "Lost events = the kernel had something to tell you and the buffer was full. >0 = increase buffer size or reduce TracingPolicy verbosity.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "id": 131,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(tetragon_observer_ringbuf_events_received_total[1m])) or vector(0)",
+          "legendFormat": "received"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(tetragon_observer_ringbuf_events_lost_total[1m])) or vector(0)",
+          "legendFormat": "lost"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "kldload",
+    "ebpf",
+    "tetragon",
+    "security"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Tetragon \u2014 Kernel Syscall Security Watch",
+  "uid": "kldload-tetragon-live",
+  "version": 1,
+  "weekStart": ""
+}

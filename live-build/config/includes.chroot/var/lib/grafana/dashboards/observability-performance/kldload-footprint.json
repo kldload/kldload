@@ -1,0 +1,243 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Honest accounting of the platform: CPU, RAM, FDs, threads, IO of every kldload daemon and observability-stack process. Most platforms hide this; the kldload pitch is that the cost is visible by design.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "options": {
+        "mode": "markdown",
+        "content": "## kldload \u2014 platform footprint (the honest accounting)\n\nWhat does kldload itself cost you to run? This dashboard shows the CPU, RAM, FDs, and threads of every kldload-shipped daemon AND the observability stack itself (Prometheus, Loki, Grafana, promtail, exporters). Most platforms don't show their own footprint. We do.\n\n**Rule of thumb on a healthy box**: total kldload + observability stack should sit around 5-10% of total CPU and 1-2GB RAM. If it's eating more, tune."
+      }
+    },
+    {
+      "type": "row",
+      "title": "CPU consumed by the platform itself",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 110,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Top 12 process groups by CPU rate (kldload + observability)",
+      "description": "Per-process-group user+sys CPU. The platform should be the bottom band; your workloads should dominate.",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "id": 111,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(12, sum by (groupname) (rate(namedprocess_namegroup_cpu_seconds_total{groupname=~'kldload.*|klab.*|grafana|loki|prometheus|promtail|node_exporter|libvirt-exporte|process-exporte|smartctl_export|smartd|zfs_exporter|ebpf_exporter|tetragon|cilium-agent|hubble.*|ttyd|nginx'}[2m])))",
+          "legendFormat": "{{groupname}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Memory consumed by the platform itself",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 120,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Top 12 process groups by RSS",
+      "description": "Resident set size per group. Grafana + Loki + Prometheus are the usual top of the list; the kldload daemons themselves are usually under 100MB each.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "id": 121,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(12, sum by (groupname) (namedprocess_namegroup_memory_bytes{groupname=~'kldload.*|klab.*|grafana|loki|prometheus|promtail|node_exporter|libvirt-exporte|process-exporte|smartctl_export|smartd|zfs_exporter|ebpf_exporter|tetragon|cilium-agent|hubble.*|ttyd|nginx', memtype='resident'}))",
+          "legendFormat": "{{groupname}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "File descriptors held by the platform",
+      "description": "FD count. Promtail tailing journals + Grafana's data source pool typically dominate. A leak shows as a runaway here.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "id": 122,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(8, sum by (groupname) (namedprocess_namegroup_open_filedesc{groupname=~'kldload.*|grafana|loki|prometheus|tetragon|cilium-agent'}))",
+          "legendFormat": "{{groupname}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "I/O attribution \u2014 who's reading + writing",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "id": 130,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Read bytes/sec by group",
+      "description": "Disk read bandwidth per platform component. Prometheus rebuilding from disk on restart spikes here.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "id": 131,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(8, sum by (groupname) (rate(namedprocess_namegroup_read_bytes_total{groupname=~'kldload.*|grafana|loki|prometheus|promtail|tetragon|cilium-agent'}[2m])))",
+          "legendFormat": "{{groupname}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Context switches/sec by group",
+      "description": "Context switches indicate concurrent activity. Healthy webui is mostly polling-driven (low). Loki ingest is bursty.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "id": 132,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(8, sum by (groupname) (rate(namedprocess_namegroup_context_switches_total{groupname=~'kldload.*|grafana|loki|prometheus|tetragon|cilium-agent'}[2m])))",
+          "legendFormat": "{{groupname}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "kldload",
+    "footprint",
+    "introspection"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Platform Footprint \u2014 what kldload itself costs",
+  "uid": "kldload-footprint",
+  "version": 1,
+  "weekStart": ""
+}

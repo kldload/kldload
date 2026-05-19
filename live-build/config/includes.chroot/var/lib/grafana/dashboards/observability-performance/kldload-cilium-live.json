@@ -1,0 +1,402 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Live view of Cilium's in-kernel eBPF datapath: every flow, every drop, every BPF map, every TCP state transition. Signals that effectively require eBPF \u2014 they're unavailable from userspace network observability.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "options": {
+        "mode": "markdown",
+        "content": "## Cilium Datapath \u2014 live in-kernel\n\nCilium replaces kube-proxy and the Linux bridge with an eBPF datapath that runs **inside the kernel network stack**. Every flow, every policy decision, every load-balanced connection is decided by BPF programs attached to network hooks.\n\nThis dashboard shows that datapath at work. Most of what's here would require kprobe instrumentation or pcap captures on a non-eBPF network stack."
+      }
+    },
+    {
+      "type": "row",
+      "title": "Flow volume + drops \u2014 what the kernel datapath is doing",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 110,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Flows/sec",
+      "description": "Every L3/L4 flow Cilium observed. Includes inter-pod, ingress, egress.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 7
+      },
+      "id": 111,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hubble_flows_processed_total[2m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Drops/sec",
+      "description": "Dropped flows \u2014 by definition something failed (policy, MTU, dead endpoint).",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 7
+      },
+      "id": 112,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hubble_drop_total[2m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "ICMP/sec",
+      "description": "ICMP traffic \u2014 reachability probes, MTU discovery, errors.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 7
+      },
+      "id": 113,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hubble_icmp_total[2m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Lost events/sec",
+      "description": "If non-zero the ring buffer is dropping. Tune Hubble verbosity.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 7
+      },
+      "id": 114,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hubble_lost_events_total[2m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Flow rate over time, broken by direction (if labels carry it)",
+      "description": "Flows split by Cilium's verdict (FORWARDED/DROPPED/AUDIT). Baseline is mostly FORWARDED; drops show as a stacked red band.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 115,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (verdict) (rate(hubble_flows_processed_total[1m])) or vector(0)",
+          "legendFormat": "{{verdict}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Drops by verdict (the why)",
+      "description": "POLICY_DENIED = NetworkPolicy. UNDEFINED = no policy. MTU/fragmentation surface here too. This is where 'connection refused' reports get named.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 116,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (verdict) (rate(hubble_drop_total[1m])) or vector(0)",
+          "legendFormat": "{{verdict}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "BPF datapath internals \u2014 map pressure",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "id": 120,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 121,
+      "options": {
+        "mode": "markdown",
+        "content": "Cilium stores connection state, identity mappings, policy decisions, and load-balancer state in BPF maps. Each map has a fixed size; when it fills, Cilium starts evicting or rejecting entries. **Map pressure > 0.85** is the early-warning signal for a busy cluster."
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "BPF map pressure \u2014 top 15 maps (fullness ratio)",
+      "description": "1.0 = map is full. >0.85 = consider sizing up via Cilium config.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "id": 122,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(15, cilium_bpf_map_pressure)",
+          "legendFormat": "{{map_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "BPF map operations/sec (top 10)",
+      "description": "Operations breakdown by map. lookup=read, update=write. Heavy update on conntrack = high connection churn.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "id": 123,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (map_name, operation) (rate(cilium_bpf_map_ops_total[2m])))",
+          "legendFormat": "{{map_name}}:{{operation}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "TCP flag distribution \u2014 protocol health (eBPF only)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "id": 130,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "id": 131,
+      "options": {
+        "mode": "markdown",
+        "content": "**TCP flag distribution** is one of those signals that's effectively impossible to surface without eBPF in the datapath. Every connection state transition (SYN, SYN-ACK, FIN, RST) tells you about TCP health: lots of RST = something is aborting connections rudely; SYN without ACK = connection refused."
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "TCP flags/sec \u2014 every state transition",
+      "description": "SYN = new connection attempts. RST = aborted connections. FIN = clean shutdowns. The mix tells you protocol health at a glance.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "id": 132,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (flag) (rate(hubble_tcp_flags_total[2m])) or vector(0)",
+          "legendFormat": "{{flag}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "kldload",
+    "ebpf",
+    "cilium",
+    "network"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Cilium \u2014 Datapath Live (eBPF in the kernel network stack)",
+  "uid": "kldload-cilium-live",
+  "version": 1,
+  "weekStart": ""
+}

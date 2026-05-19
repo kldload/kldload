@@ -1,0 +1,344 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "In-kernel datapath microscope. Every TCP flag, every drop verdict, every L7 protocol Cilium can decode \u2014 signals that effectively only exist via eBPF.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "options": {
+        "mode": "markdown",
+        "content": "## Network Traffic Microscope (L3 \u2192 L7 in the kernel)\n\nHubble observes every packet in the kernel datapath. This dashboard surfaces patterns that pcap captures can show but live dashboards almost never do: TCP state-transition mix, ICMP rate, drops by verdict, lost events. Every line is what the kernel actually decided to do."
+      }
+    },
+    {
+      "type": "row",
+      "title": "Volume + integrity",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "id": 110,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Total flows/sec",
+      "description": "Every L3/L4 flow Cilium decided about.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 7
+      },
+      "id": 111,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hubble_flows_processed_total[2m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Drops/sec",
+      "description": "Drops are by definition incidents.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 7
+      },
+      "id": 112,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hubble_drop_total[2m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "TCP RSTs/sec",
+      "description": "TCP resets \u2014 usually a rude shutdown. Healthy traffic has few.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 7
+      },
+      "id": 113,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hubble_tcp_flags_total{flag='RST'}[2m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "ICMP/sec",
+      "description": "Pings + diagnostics + path-MTU.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 7
+      },
+      "id": 114,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hubble_icmp_total[2m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "TCP state transitions/sec (every flag)",
+      "description": "Every TCP state event the datapath saw. SYN/ACK ratio tells you connection success. FIN dominates clean shutdowns. RST surge = something is aborting.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 115,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (flag) (rate(hubble_tcp_flags_total[1m])) or vector(0)",
+          "legendFormat": "{{flag}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Drops by verdict \u2014 root cause is in the labels",
+      "description": "Each drop verdict names a different cause: POLICY_DENIED, UNDEFINED, MISSED_TAIL_CALL, etc.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 116,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (verdict) (rate(hubble_drop_total[1m])) or vector(0)",
+          "legendFormat": "{{verdict}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "L3-L7 visibility (Hubble's headline feature)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 120,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "id": 121,
+      "options": {
+        "mode": "markdown",
+        "content": "Cilium's L7 module can decode HTTP, gRPC, Kafka, and DNS in the datapath. If you have L7 policies loaded, this section lights up. Without L7 policies it's quiet \u2014 load them in Cilium Helm values to enable."
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "ICMP rate (reachability probes + path-MTU)",
+      "description": "ICMP often signals diagnostics: traceroute, ping checks, path-MTU discovery on the network.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "id": 122,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hubble_icmp_total[1m])) or vector(0)",
+          "legendFormat": "ICMP/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Ring buffer events: lost (= blind spots)",
+      "description": "Lost events mean Hubble couldn't keep up with the kernel. >0 is a blind spot. Increase ring buffer size.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "id": 123,
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hubble_lost_events_total[2m])) or vector(0)",
+          "legendFormat": "lost"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "fillOpacity": 25,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "kldload",
+    "ebpf",
+    "hubble",
+    "network",
+    "microscope"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Network \u2014 Traffic Microscope (Hubble L3-L7 live)",
+  "uid": "kldload-network-live",
+  "version": 1,
+  "weekStart": ""
+}

@@ -1544,14 +1544,13 @@ async def ws_handler(websocket):
                     nodes    = db_list_nodes()
                     vms      = db_list_vms()
                     events   = db_list_events(50)
-                    # Augment nodes with live virsh VM count per host
+                    # Augment nodes with live virsh VM count per host.
+                    # Async — virsh can stall briefly on a busy libvirtd.
                     vm_counts = {}
-                    try:
-                        out = subprocess.check_output(["virsh", "list", "--all", "--name"],
-                                                       text=True, stderr=subprocess.DEVNULL)
-                        vm_counts["localhost"] = len([l for l in out.strip().splitlines() if l.strip()])
-                    except Exception:
-                        pass
+                    _rc, _out = await _run_text(
+                        ["virsh", "list", "--all", "--name"], timeout=5)
+                    if _rc == 0:
+                        vm_counts["localhost"] = len([l for l in _out.strip().splitlines() if l.strip()])
                     await websocket.send(json.dumps({
                         "type": "infra_status",
                         "clusters": clusters,
@@ -1897,18 +1896,22 @@ async def ws_handler(websocket):
                         }))
 
                 elif action == "network_info":
+                    # Async — `ip addr` is fast but blocks the loop if
+                    # netlink is congested (large numbers of veth/cilium
+                    # interfaces on K8s nodes).
                     ifaces = []
-                    try:
-                        out = subprocess.check_output(["ip", "-j", "addr"], text=True)
-                        import json as _json
-                        for iface in _json.loads(out):
-                            name = iface.get("ifname", "")
-                            up   = iface.get("operstate", "") in ("UP", "UNKNOWN")
-                            addrs = [a.get("local", "") for a in iface.get("addr_info", [])
-                                     if a.get("family") in ("inet", "inet6")]
-                            ifaces.append({"name": name, "up": up, "addr": ", ".join(addrs)})
-                    except Exception:
-                        pass
+                    _rc, _out = await _run_text(["ip", "-j", "addr"], timeout=5, merge_stderr=False)
+                    if _rc == 0:
+                        try:
+                            import json as _json
+                            for iface in _json.loads(_out):
+                                name = iface.get("ifname", "")
+                                up   = iface.get("operstate", "") in ("UP", "UNKNOWN")
+                                addrs = [a.get("local", "") for a in iface.get("addr_info", [])
+                                         if a.get("family") in ("inet", "inet6")]
+                                ifaces.append({"name": name, "up": up, "addr": ", ".join(addrs)})
+                        except Exception:
+                            pass
                     await websocket.send(json.dumps({"type": "network_info", "interfaces": ifaces}))
 
                 elif action == "ansible_status":

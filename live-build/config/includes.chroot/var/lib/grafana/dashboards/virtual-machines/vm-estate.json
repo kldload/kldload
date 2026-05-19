@@ -28,14 +28,17 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "query": "label_values(libvirt_domain_info_state{domain!~\".*-golden.*\"}, domain)",
+        "query": "label_values(libvirt_domain_info_state{state_desc=\"the domain is running\"}, domain)",
         "refresh": 2,
         "includeAll": true,
-        "multi": false,
+        "multi": true,
         "current": {
           "text": "All",
-          "value": "$__all"
-        }
+          "value": "$__all",
+          "selected": true
+        },
+        "allValue": ".+",
+        "sort": 1
       }
     ]
   },
@@ -52,7 +55,7 @@
       },
       "targets": [
         {
-          "expr": "count(libvirt_domain_info_state{domain!~\".*-golden.*\"})",
+          "expr": "count(libvirt_domain_info_state)",
           "refId": "A"
         }
       ],
@@ -76,7 +79,7 @@
       },
       "targets": [
         {
-          "expr": "count(libvirt_domain_info_state{domain!~\".*-golden.*\"} == 1)",
+          "expr": "count(libvirt_domain_info_state == 1)",
           "refId": "A"
         }
       ],
@@ -116,7 +119,7 @@
       },
       "targets": [
         {
-          "expr": "count(libvirt_domain_info_state{domain!~\".*-golden.*\"} != 1)",
+          "expr": "count(libvirt_domain_info_state != 1)",
           "refId": "A"
         }
       ],
@@ -141,26 +144,26 @@
       "description": "Every libvirt domain on the host. Click a row to filter dashboards. State 1=running, 5=shut-off, 3=paused.",
       "targets": [
         {
-          "expr": "libvirt_domain_info_virtual_cpus{domain!~\".*-golden.*\"}",
+          "expr": "libvirt_domain_info_virtual_cpus",
           "refId": "A",
           "format": "table",
           "instant": true,
           "legendFormat": "{{domain}}"
         },
         {
-          "expr": "libvirt_domain_info_maximum_memory_bytes{domain!~\".*-golden.*\"} / 1024 / 1024",
+          "expr": "libvirt_domain_info_maximum_memory_bytes / 1024 / 1024",
           "refId": "B",
           "format": "table",
           "instant": true
         },
         {
-          "expr": "rate(libvirt_domain_info_cpu_time_seconds_total{domain!~\".*-golden.*\"}[1m])",
+          "expr": "rate(libvirt_domain_info_cpu_time_seconds_total[1m])",
           "refId": "C",
           "format": "table",
           "instant": true
         },
         {
-          "expr": "libvirt_domain_info_state{domain!~\".*-golden.*\"}",
+          "expr": "libvirt_domain_info_state",
           "refId": "D",
           "format": "table",
           "instant": true
@@ -191,7 +194,7 @@
     {
       "id": 20,
       "type": "timeseries",
-      "title": "CPU usage \u2014 $vm",
+      "title": "CPU usage",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -201,7 +204,7 @@
       "description": "vCPU seconds per second = effective cores in use. 2.0 = 2 vCPUs fully pinned.",
       "targets": [
         {
-          "expr": "rate(libvirt_domain_info_cpu_time_seconds_tota{domain!~\".*-golden.*\"}l{domain=~\"$vm\",domain!~\".*-golden.*\"}[1m])",
+          "expr": "rate(libvirt_domain_info_cpu_time_seconds_total{domain=~\"$vm\"}[1m])",
           "legendFormat": "{{domain}}",
           "refId": "A"
         }
@@ -220,7 +223,7 @@
     {
       "id": 21,
       "type": "timeseries",
-      "title": "Memory used \u2014 $vm",
+      "title": "Memory used",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -230,7 +233,7 @@
       "description": "Actual memory in use by the qemu process, not allocation ceiling.",
       "targets": [
         {
-          "expr": "libvirt_domain_info_memory_usage_byte{domain!~\".*-golden.*\"}s{domain=~\"$vm\",domain!~\".*-golden.*\"}",
+          "expr": "libvirt_domain_info_memory_usage_bytes{domain=~\"$vm\"}",
           "legendFormat": "{{domain}}",
           "refId": "A"
         }
@@ -249,7 +252,7 @@
     {
       "id": 30,
       "type": "timeseries",
-      "title": "Disk I/O bytes \u2014 $vm",
+      "title": "Disk I/O bytes",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -259,12 +262,12 @@
       "description": "Per-virtual-disk read/write throughput from libvirt's view. Catches storage-thrashing test VMs at a glance.",
       "targets": [
         {
-          "expr": "rate(libvirt_domain_block_stats_read_bytes_tota{domain!~\".*-golden.*\"}l{domain=~\"$vm\",domain!~\".*-golden.*\"}[1m])",
+          "expr": "rate(libvirt_domain_block_stats_read_bytes_total{domain=~\"$vm\"}[1m])",
           "legendFormat": "{{domain}} {{target_device}} read",
           "refId": "A"
         },
         {
-          "expr": "rate(libvirt_domain_block_stats_write_bytes_tota{domain!~\".*-golden.*\"}l{domain=~\"$vm\",domain!~\".*-golden.*\"}[1m])",
+          "expr": "rate(libvirt_domain_block_stats_write_bytes_total{domain=~\"$vm\"}[1m])",
           "legendFormat": "{{domain}} {{target_device}} write",
           "refId": "B"
         }
@@ -283,7 +286,7 @@
     {
       "id": 31,
       "type": "timeseries",
-      "title": "Disk IOPS \u2014 $vm",
+      "title": "Disk IOPS",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -293,12 +296,12 @@
       "description": "Read + write operations per second. ZFS test runs spike here during txg syncs and zfs-recv.",
       "targets": [
         {
-          "expr": "rate(libvirt_domain_block_stats_read_requests_tota{domain!~\".*-golden.*\"}l{domain=~\"$vm\",domain!~\".*-golden.*\"}[1m])",
+          "expr": "rate(libvirt_domain_block_stats_read_requests_total{domain=~\"$vm\"}[1m])",
           "legendFormat": "{{domain}} {{target_device}} reads",
           "refId": "A"
         },
         {
-          "expr": "rate(libvirt_domain_block_stats_write_requests_tota{domain!~\".*-golden.*\"}l{domain=~\"$vm\",domain!~\".*-golden.*\"}[1m])",
+          "expr": "rate(libvirt_domain_block_stats_write_requests_total{domain=~\"$vm\"}[1m])",
           "legendFormat": "{{domain}} {{target_device}} writes",
           "refId": "B"
         }
@@ -317,7 +320,7 @@
     {
       "id": 40,
       "type": "timeseries",
-      "title": "Network bytes \u2014 $vm",
+      "title": "Network bytes",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -327,12 +330,12 @@
       "description": "Per-vNIC rx/tx throughput. Watch for stuck/silent VMs during deploys.",
       "targets": [
         {
-          "expr": "rate(libvirt_domain_interface_stats_receive_bytes_tota{domain!~\".*-golden.*\"}l{domain=~\"$vm\",domain!~\".*-golden.*\"}[1m])",
+          "expr": "rate(libvirt_domain_interface_stats_receive_bytes_total{domain=~\"$vm\"}[1m])",
           "legendFormat": "{{domain}} {{target_device}} rx",
           "refId": "A"
         },
         {
-          "expr": "rate(libvirt_domain_interface_stats_transmit_bytes_tota{domain!~\".*-golden.*\"}l{domain=~\"$vm\",domain!~\".*-golden.*\"}[1m])",
+          "expr": "rate(libvirt_domain_interface_stats_transmit_bytes_total{domain=~\"$vm\"}[1m])",
           "legendFormat": "{{domain}} {{target_device}} tx",
           "refId": "B"
         }
@@ -351,7 +354,7 @@
     {
       "id": 41,
       "type": "timeseries",
-      "title": "Network packets \u2014 $vm",
+      "title": "Network packets",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -360,12 +363,12 @@
       },
       "targets": [
         {
-          "expr": "rate(libvirt_domain_interface_stats_receive_packets_tota{domain!~\".*-golden.*\"}l{domain=~\"$vm\",domain!~\".*-golden.*\"}[1m])",
+          "expr": "rate(libvirt_domain_interface_stats_receive_packets_total{domain=~\"$vm\"}[1m])",
           "legendFormat": "{{domain}} {{target_device}} rx pkts",
           "refId": "A"
         },
         {
-          "expr": "rate(libvirt_domain_interface_stats_transmit_packets_tota{domain!~\".*-golden.*\"}l{domain=~\"$vm\",domain!~\".*-golden.*\"}[1m])",
+          "expr": "rate(libvirt_domain_interface_stats_transmit_packets_total{domain=~\"$vm\"}[1m])",
           "legendFormat": "{{domain}} {{target_device}} tx pkts",
           "refId": "B"
         }
