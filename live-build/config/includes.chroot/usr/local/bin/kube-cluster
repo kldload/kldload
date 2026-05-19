@@ -607,13 +607,23 @@ find_cloud_image() {
       dest="/var/lib/libvirt/isos/ubuntu-24.04-cloudimg-${_arch_deb}.qcow2"
       warn "No cloud image found. Downloading Ubuntu 24.04 (${_arch_deb})..."
       ;;
-    fedora)
-      # Asahi hosts often pick fedora — grab Fedora Cloud's arch-appropriate qcow2.
-      # Fedora cloud images bump build numbers (44-1.6 → 1.7 → …) without a
-      # .latest. symlink. Resolve dynamically from the directory listing;
+    *)
+      # Default for every RPM-family host (Fedora, RHEL, CentOS, Rocky, Alma)
+      # and the fallback path. Builds the K8s golden from a Fedora 44 cloud
+      # image so the K8s nodes run the same kernel + userspace as the
+      # live ISO and the host. Single OS surface across the whole stack
+      # (host = F44 or RHEL10, live = F44, K8s nodes = F44, klab goldens
+      # = the user's picks). Caught 2026-05-19: RHEL10 host was getting
+      # CentOS 9 K8s nodes via the previous *) fallback — three kernel
+      # generations across one cluster, eBPF/Tetragon behavior diverging
+      # between host and node.
+      #
+      # Fedora cloud images bump build numbers (44-1.6 → 1.7 → …) without
+      # a .latest. symlink. Resolve dynamically from the directory listing;
       # fall back through F44 → F43 → F42 if newer is missing. Bug seen
-      # 2026-05-04: hardcoded -44-1.6 silently 404'd after Fedora published
-      # -1.7, kube-cluster bootstrap dead in the water.
+      # 2026-05-04 on the prior `fedora)` branch: hardcoded -44-1.6
+      # silently 404'd after Fedora published -1.7, kube-cluster bootstrap
+      # dead in the water.
       local _ver _latest _base="https://download.fedoraproject.org/pub/fedora/linux/releases"
       url=""
       for _ver in 44 43 42; do
@@ -632,11 +642,6 @@ find_cloud_image() {
         dest="/var/lib/libvirt/isos/Fedora-Cloud-Base-44-${_arch_rpm}.qcow2"
         warn "Fedora cloud directory listing failed — using hardcoded fallback (may 404)"
       fi
-      ;;
-    *)
-      url="https://cloud.centos.org/centos/9-stream/${_arch_rpm}/images/CentOS-Stream-GenericCloud-9-latest.${_arch_rpm}.qcow2"
-      dest="/var/lib/libvirt/isos/CentOS-Stream-9-GenericCloud-${_arch_rpm}.qcow2"
-      warn "No cloud image found. Downloading CentOS Stream 9 (${_arch_rpm})..."
       ;;
   esac
   # Atomic rename — same race fix as klab. Readers must only see completed
