@@ -1093,10 +1093,44 @@ select option:checked { background: #00b8d9; color: #000; }
       </div>
 
       <div class="ws-subview active" id="zfs-sub-pools">
+        <!-- Quick actions strip — same Overview pattern as K8s/VM/klab
+             (2026-05-18). zpool scrub + take snapshot are the two
+             actions a user actually performs from the Pools view; the
+             rest of the ZFS surface lives on Snapshots and BE sub-tabs. -->
+        <div class="ws-panel" style="margin-bottom:0.9rem">
+          <div class="ws-panel-hdr"><span>▶ Quick actions</span></div>
+          <div style="padding:0.7rem 1rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-primary btn-sm" onclick="zfsScrubAll()">Scrub all pools</button>
+            <button class="btn btn-ghost btn-sm" onclick="takeSnapshot()">＋ Take snapshot</button>
+            <button class="btn btn-ghost btn-sm" onclick="zfsSubTab('snapshots')">Snapshots</button>
+            <button class="btn btn-ghost btn-sm" onclick="zfsSubTab('be')">Boot environments</button>
+            <button class="btn btn-ghost btn-sm" onclick="refreshZFS()">↻ Refresh status</button>
+          </div>
+        </div>
+
+        <!-- Embedded live pool health — Grafana ZFS Pool Health dashboard.
+             Sized to viewport (same calc/min-height as the other embeds
+             on K8s/VM Overview) so the eye-line is consistent. -->
+        <div class="k8s-panel" style="margin-bottom:0.9rem">
+          <div class="k8s-panel-hdr">
+            <span>📊 ZFS Pool Health (live)</span>
+            <span class="k8s-panel-hdr-muted">embedded Grafana — Pool Health · <a href="/grafana/d/zfs-pool-health/?kiosk=1" target="_blank" style="color:var(--accent2)">open ↗</a></span>
+          </div>
+          <div style="padding:0">
+            <iframe id="zfs-pool-iframe"
+                    src="/grafana/d/zfs-pool-health/?orgId=1&amp;kiosk=1&amp;refresh=30s&amp;from=now-1h&amp;to=now&amp;theme=dark"
+                    style="width:100%;height:calc(100vh - 300px);min-height:520px;border:0;display:block;background:var(--bg)"
+                    title="Live ZFS Pool Health"></iframe>
+          </div>
+        </div>
+
+        <!-- Raw zpool status — retained underneath the dashboard for
+             users who want the textual output (oldschool habit dies
+             hard; also the dashboard can't show every pool detail). -->
         <div class="ws-panel">
-          <div class="ws-panel-hdr"><span>◧ Pool status</span></div>
+          <div class="ws-panel-hdr"><span>◧ Pool status (raw zpool)</span></div>
           <div style="padding:0.5rem 1rem">
-            <div class="log-box" id="zfs-pool-status" style="height:50vh;min-height:200px;margin:0">(no pools — install to disk first)</div>
+            <div class="log-box" id="zfs-pool-status" style="height:280px;min-height:200px;margin:0">(no pools — install to disk first)</div>
           </div>
         </div>
       </div>
@@ -1255,9 +1289,27 @@ select option:checked { background: #00b8d9; color: #000; }
           <div class="stat-card"><div class="stat-label">Total RAM</div><div class="stat-value" id="vm-stat-ram">—</div></div>
         </div>
 
+        <!-- Quick actions sits directly under the sub-tabs (with the
+             stat strip above it as a passive summary) so creating /
+             refreshing / jumping to sub-views is one click away. The
+             Grafana embed below then extends down to fill the viewport
+             — pre-2026-05-18 it was sandwiched between the iframe and
+             the bottom of the page, which buried it. -->
+        <div class="ws-panel" style="margin-bottom:0.9rem">
+          <div class="ws-panel-hdr"><span>▶ Quick actions</span></div>
+          <div style="padding:0.9rem 1rem;display:flex;gap:0.5rem;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" onclick="vmShowCreate()">+ Create custom VM</button>
+            <button class="btn btn-ghost btn-sm" onclick="vmRefreshAll()">↻ Refresh all</button>
+            <button class="btn btn-ghost btn-sm" onclick="vmSubTab('snapshots')">Snapshots</button>
+            <button class="btn btn-ghost btn-sm" onclick="vmSubTab('networks')">Networks</button>
+          </div>
+        </div>
+
         <!-- Embedded live VM metrics — Grafana VM Estate dashboard in
              full kiosk mode. Same selector-based theme sync as the K8s
-             embed picks this iframe up automatically via toggleTheme(). -->
+             embed picks this iframe up automatically via toggleTheme().
+             Height bumped to (100vh - 300px) here because the stat strip
+             AND the Quick actions panel both sit above the iframe. -->
         <div class="k8s-panel" style="margin-bottom:0.9rem">
           <div class="k8s-panel-hdr">
             <span>📊 VM metrics (live)</span>
@@ -1266,17 +1318,8 @@ select option:checked { background: #00b8d9; color: #000; }
           <div style="padding:0">
             <iframe id="vm-metrics-iframe"
                     src="/grafana/d/klab-vm-estate/?orgId=1&amp;kiosk=1&amp;refresh=15s&amp;from=now-1h&amp;to=now&amp;theme=dark"
-                    style="width:100%;height:600px;border:0;display:block;background:var(--bg)"
+                    style="width:100%;height:calc(100vh - 300px);min-height:600px;border:0;display:block;background:var(--bg)"
                     title="Live VM metrics"></iframe>
-          </div>
-        </div>
-        <div class="ws-panel">
-          <div class="ws-panel-hdr"><span>▶ Quick actions</span></div>
-          <div style="padding:0.9rem 1rem;display:flex;gap:0.5rem;flex-wrap:wrap">
-            <button class="btn btn-primary btn-sm" onclick="vmShowCreate()">+ Create custom VM</button>
-            <button class="btn btn-ghost btn-sm" onclick="vmRefreshAll()">↻ Refresh all</button>
-            <button class="btn btn-ghost btn-sm" onclick="vmSubTab('snapshots')">Snapshots</button>
-            <button class="btn btn-ghost btn-sm" onclick="vmSubTab('networks')">Networks</button>
           </div>
         </div>
       </div>
@@ -1575,6 +1618,28 @@ select option:checked { background: #00b8d9; color: #000; }
           <div class="stat-card"><div class="stat-label">Pods</div><div class="stat-value" id="k8s-pod-count">—</div></div>
         </div>
 
+        <!-- Mirror of "+ Add nodes" form from the Nodes sub-view — same
+             knobs, separate IDs (k8s-ov-*) so React-ish state stays sane.
+             k8sAddNodesFromOverview() copies the values into the canonical
+             Nodes-tab inputs and switches to the Nodes tab so the user sees
+             the inline progress panel that already lives there. Avoids
+             duplicating that whole progress + log-mirror block here. -->
+        <div class="k8s-panel" style="margin-bottom:0.9rem">
+          <div class="k8s-panel-hdr">
+            <span>＋ Add nodes</span>
+            <span class="k8s-panel-hdr-muted">clone golden + cloud-init + kubeadm join</span>
+          </div>
+          <div style="padding:0.7rem 1rem;display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
+            <label style="font-size:0.78rem;color:var(--text-dim)"><input type="number" id="k8s-ov-scale-count" value="1" min="1" max="20" style="width:55px;margin:0 0.4rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:0.2rem 0.4rem"></label>
+            <select id="k8s-ov-scale-kind" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.82rem">
+              <option value="worker">Worker(s)</option>
+              <option value="cp" disabled>Control plane (HA — 1.2 feature, requires etcd quorum)</option>
+            </select>
+            <button class="btn btn-primary btn-sm" onclick="k8sAddNodesFromOverview()">Add worker</button>
+            <span class="k8s-panel-hdr-muted" style="margin-left:auto;font-size:0.75rem">~2 min per node — progress streams on Nodes tab</span>
+          </div>
+        </div>
+
         <!-- Embedded live metrics — Grafana eBPF Deep Dive dashboard in
              full kiosk mode (kiosk=1 hides the top bar including the
              "Sign in" link that anon-viewers otherwise see). theme=
@@ -1594,7 +1659,7 @@ select option:checked { background: #00b8d9; color: #000; }
           <div style="padding:0">
             <iframe id="k8s-metrics-iframe"
                     src="/grafana/d/kldload-ebpf-deep/?orgId=1&amp;kiosk=1&amp;refresh=15s&amp;from=now-1h&amp;to=now&amp;theme=dark"
-                    style="width:100%;height:600px;border:0;display:block;background:var(--bg)"
+                    style="width:100%;height:calc(100vh - 300px);min-height:600px;border:0;display:block;background:var(--bg)"
                     title="Live cluster metrics"></iframe>
           </div>
         </div>
@@ -1913,6 +1978,19 @@ select option:checked { background: #00b8d9; color: #000; }
         <div class="stat-card"><div class="stat-label">Releases</div><div class="stat-value" id="helm-rel-count">—</div></div>
         <div class="stat-card"><div class="stat-label">Namespaces</div><div class="stat-value" id="helm-ns-count">—</div></div>
       </div>
+      <!-- Quick actions strip — same Overview pattern as K8s/VM/klab/ZFS
+           (2026-05-18). The Install chart and Add repo full forms live on
+           their own sub-tabs; these buttons just jump there so the user
+           can deploy/configure without hunting through the nav. -->
+      <div class="ws-panel" style="margin-bottom:0.9rem">
+        <div class="ws-panel-hdr"><span>▶ Quick actions</span></div>
+        <div style="padding:0.7rem 1rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-primary btn-sm" onclick="helmSubTab('install')">＋ Install chart</button>
+          <button class="btn btn-ghost btn-sm" onclick="helmSubTab('repos')">+ Add repo</button>
+          <button class="btn btn-ghost btn-sm" onclick="send({action:'helm_repo_update'})">↻ Update repos</button>
+          <button class="btn btn-ghost btn-sm" onclick="helmRefresh()">↻ Refresh all</button>
+        </div>
+      </div>
       <div class="ws-panel">
         <div class="ws-panel-hdr">
           <span>⎈ Releases</span>
@@ -2076,6 +2154,24 @@ select option:checked { background: #00b8d9; color: #000; }
         <div class="stat-card"><div class="stat-label">Last Test</div><div class="stat-value" id="kl-last-test">—</div></div>
       </div>
 
+      <!-- Quick Actions sits directly under the stat strip — same pattern
+           as K8s + VM Overview pages (2026-05-18). Was buried below
+           Distro Matrix + Pool Metrics; the user had to scroll past
+           informational tables to reach the buttons that drive them. -->
+      <div class="panel">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span>▶ Quick Actions</span>
+        </div>
+        <div class="panel-body" style="display:flex;gap:0.5rem;flex-wrap:wrap">
+          <button class="btn btn-primary btn-sm" onclick="klabAction('golden','all')">Build All Goldens</button>
+          <button class="btn btn-ghost btn-sm" onclick="klabAction('deploy','blue')">Deploy Blue</button>
+          <button class="btn btn-ghost btn-sm" onclick="klabAction('deploy','green')">Deploy Green</button>
+          <button class="btn btn-ghost btn-sm" onclick="klabAction('test','quick')">Run Quick Test</button>
+          <button class="btn btn-danger btn-sm" onclick="klabAction('destroy','all')">Destroy All</button>
+          <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_status'})">↻ Refresh</button>
+        </div>
+      </div>
+
       <div class="panel">
         <div class="panel-hdr">◈ Distro Matrix</div>
         <div class="panel-body">
@@ -2090,20 +2186,6 @@ select option:checked { background: #00b8d9; color: #000; }
         <div class="panel-hdr">◧ ZFS Pool Metrics</div>
         <div class="panel-body">
           <div id="kl-pool-metrics" style="font-size:0.85rem;color:var(--muted)">(klab-exporter not running — start with: systemctl start klab-exporter)</div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-hdr" style="justify-content:space-between">
-          <span>▶ Quick Actions</span>
-        </div>
-        <div class="panel-body" style="display:flex;gap:0.5rem;flex-wrap:wrap">
-          <button class="btn btn-primary btn-sm" onclick="klabAction('golden','all')">Build All Goldens</button>
-          <button class="btn btn-ghost btn-sm" onclick="klabAction('deploy','blue')">Deploy Blue</button>
-          <button class="btn btn-ghost btn-sm" onclick="klabAction('deploy','green')">Deploy Green</button>
-          <button class="btn btn-ghost btn-sm" onclick="klabAction('test','quick')">Run Quick Test</button>
-          <button class="btn btn-danger btn-sm" onclick="klabAction('destroy','all')">Destroy All</button>
-          <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_status'})">↻ Refresh</button>
         </div>
       </div>
 
@@ -2689,21 +2771,21 @@ select option:checked { background: #00b8d9; color: #000; }
             <span>🧪 ZFS Test Matrix</span>
             <a class="btn btn-ghost btn-sm" href="/grafana/d/klab-test-matrix?kiosk=1&refresh=10s" target="_blank" rel="noopener">⇗ Open in Grafana</a>
           </div>
-          <!-- Fixed pixel height matches the dashboard's actual content
-               (36 grid-rows × 30px + chrome ≈ 1180px for Matrix). With
-               an exact-fit height the iframe never renders its own
-               scrollbar, so the user gets one clean outer scroll on the
-               page and the dashboard reads as a continuous panel. -->
-          <iframe id="zfstest-dash-matrix" data-src="/grafana/d/klab-test-matrix?kiosk=1&refresh=10s" src="about:blank" style="width:100%;height:1180px;border:0;background:var(--bg);border-radius:0 0 8px 8px"></iframe>
+          <!-- Viewport-scaled height (matches K8s/VM/Metrics embeds for
+               visual consistency). Earlier we used a fixed 1180px to
+               match the dashboard's natural content height so the iframe
+               never showed its own scrollbar — but the user found that
+               wasteful on tall monitors and inconsistent with the rest
+               of the embeds, so the inner scrollbar is now accepted. -->
+          <iframe id="zfstest-dash-matrix" data-src="/grafana/d/klab-test-matrix?kiosk=1&refresh=10s" src="about:blank" style="width:100%;height:calc(100vh - 240px);min-height:600px;border:0;background:var(--bg);border-radius:0 0 8px 8px"></iframe>
         </div>
         <div class="ws-panel" style="margin-top:0.9rem">
           <div class="ws-panel-hdr">
             <span>🐛 ZFS Test VM Debug</span>
             <a class="btn btn-ghost btn-sm" href="/grafana/d/klab-test-debug?kiosk=1&refresh=10s" target="_blank" rel="noopener">⇗ Open in Grafana</a>
           </div>
-          <!-- 41 grid-rows × 30px + chrome ≈ 1340px for Debug. Same
-               exact-fit principle as Matrix above. -->
-          <iframe id="zfstest-dash-debug" data-src="/grafana/d/klab-test-debug?kiosk=1&refresh=10s" src="about:blank" style="width:100%;height:1340px;border:0;background:var(--bg);border-radius:0 0 8px 8px"></iframe>
+          <!-- Viewport-scaled height to match Matrix above. -->
+          <iframe id="zfstest-dash-debug" data-src="/grafana/d/klab-test-debug?kiosk=1&refresh=10s" src="about:blank" style="width:100%;height:calc(100vh - 240px);min-height:600px;border:0;background:var(--bg);border-radius:0 0 8px 8px"></iframe>
         </div>
       </div>
 
@@ -3180,19 +3262,22 @@ function _refreshActiveView() {
   }
   if (isActive('view-vms')) {
     send({ action: 'list_vms' });
-    send({ action: 'detached_reattach', target: 'vm-log' });
+    send({ action: 'detached_reattach', target: 'vm-log',
+           since_lines: (window._logLines && window._logLines['vm-log']) || 0 });
   }
   if (isActive('view-k8s')) {
     send({ action: 'k8s_status' });
     send({ action: 'k8s_pods' });
     send({ action: 'k8s_top' });
-    send({ action: 'detached_reattach', target: 'k8s' });
+    send({ action: 'detached_reattach', target: 'k8s',
+           since_lines: (window._logLines && window._logLines['k8s']) || 0 });
   }
   if (isActive('view-klab')) {
     send({ action: 'klab_status' });
     // Re-attach to any in-flight klab golden/ztest/deploy/destroy build
     // so the live log resumes streaming after a webui restart or WS drop.
-    send({ action: 'detached_reattach', target: 'klab' });
+    send({ action: 'detached_reattach', target: 'klab',
+           since_lines: (window._logLines && window._logLines['klab']) || 0 });
   }
   if (isActive('view-install')) send({ action: 'install_state' });
 }
@@ -3543,7 +3628,8 @@ function handle(msg) {
         // so the in-flight progress shows up immediately instead of an
         // empty box. Without this the user got a "do not power off"
         // banner with no visible activity after a refresh.
-        send({ action: 'install_reattach' });
+        send({ action: 'install_reattach',
+               since_lines: (window._logLines && window._logLines['install']) || 0 });
       } else if (msg.rc !== null && msg.rc !== undefined) {
         // Install finished — show result if user is on install view
         const bar = document.getElementById('install-progress');
@@ -3652,6 +3738,12 @@ function handle(msg) {
 
     case 'log_line': {
       const target = msg.target || '';
+      // Per-target line counter — sent as `since_lines` on reattach so
+      // the server can skip lines we already have in the DOM. Without
+      // this, every WS reconnect re-dumps the last 400 lines and the
+      // log box balloons with duplicates (2026-05-18 fix).
+      window._logLines = window._logLines || {};
+      window._logLines[target] = (window._logLines[target] || 0) + 1;
       if (target === 'install') {
         appendLog(document.getElementById('install-log'), stripAnsi(msg.line || ''));
         const st = document.getElementById('install-status');
@@ -4033,6 +4125,16 @@ function handle(msg) {
       // Server is about to start streaming a detached job's log to us.
       // Make the relevant log panel visible so the user sees the catch-up
       // immediately, and clear any stale "complete" badge.
+      // If `started` is newer than what we last saw for this target, the
+      // log file is from a new run — reset the line counter so since_lines
+      // on the next reattach doesn't skip the new run's lines.
+      window._lastStarted = window._lastStarted || {};
+      const tgt = msg.target || '';
+      if (msg.started && msg.started > (window._lastStarted[tgt] || 0)) {
+        window._logLines = window._logLines || {};
+        window._logLines[tgt] = 0;
+        window._lastStarted[tgt] = msg.started;
+      }
       const targetPanelMap = {
         'klab':   ['klab-log-panel', 'klab-golden-log-panel', 'klab-ops-log-panel'],
         'k8s':    ['k8s-log-panel'],
@@ -4825,6 +4927,10 @@ function checkPass() {
 
 // ── ZFS ──────────────────────────────────────────────────────────────────────
 function refreshZFS()       { send({ action: 'zfs_status' }); }
+function zfsScrubAll() {
+  if (!confirm('Start zpool scrub on every imported pool?\n\nScrub runs in the background — progress shows in pool status and on the ZFS Pool Health dashboard.')) return;
+  send({ action: 'zfs_scrub_all' });
+}
 function refreshSnapshots() { send({ action: 'snapshot_list' }); }
 function listBEs()          { send({ action: 'be_list' }); }
 function createBE() {
@@ -5878,6 +5984,22 @@ function k8sShowRebuildDialog() {
   // here we just call k8sBootstrap which kube-cluster handles as
   // "destroy if exists, then bootstrap".
   k8sBootstrap();
+}
+
+// Wrapper for the duplicate "+ Add nodes" form on the Overview sub-view.
+// Copies the user-picked count + kind into the canonical Nodes-tab inputs,
+// switches to the Nodes sub-tab so the inline progress panel is visible,
+// then calls the regular k8sAddNodes() — avoids duplicating the entire
+// progress + log-mirror + button-disable state machine.
+function k8sAddNodesFromOverview() {
+  const cnt  = document.getElementById('k8s-ov-scale-count')?.value || '1';
+  const kind = document.getElementById('k8s-ov-scale-kind')?.value || 'worker';
+  const cntInp  = document.getElementById('k8s-scale-count');
+  const kindSel = document.getElementById('k8s-scale-kind');
+  if (cntInp)  cntInp.value  = cnt;
+  if (kindSel) kindSel.value = kind;
+  k8sSubTab('nodes');
+  k8sAddNodes();
 }
 
 function k8sAddNodes() {

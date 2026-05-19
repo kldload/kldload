@@ -1568,6 +1568,36 @@ async def ws_handler(websocket):
                         out = str(e)
                     await websocket.send(json.dumps({"type": "zfs_status", "output": out}))
 
+                elif action == "zfs_scrub_all":
+                    # Kicks zpool scrub on every imported pool. Scrub is a
+                    # background operation — the call returns immediately;
+                    # progress shows in `zpool status -v` and on the
+                    # ZFS Pool Health Grafana dashboard. Safe to invoke on
+                    # an already-scrubbing pool (zpool refuses gracefully).
+                    lines = []
+                    try:
+                        pools = subprocess.check_output(
+                            ["zpool", "list", "-H", "-o", "name"],
+                            text=True, stderr=subprocess.STDOUT).split()
+                        if not pools:
+                            lines.append("no imported pools — nothing to scrub")
+                        for p in pools:
+                            try:
+                                subprocess.check_output(
+                                    ["zpool", "scrub", p],
+                                    text=True, stderr=subprocess.STDOUT)
+                                lines.append(f"started: {p}")
+                            except subprocess.CalledProcessError as e:
+                                lines.append(f"{p}: {e.output.strip()}")
+                    except Exception as e:
+                        lines.append(f"error: {e}")
+                    await websocket.send(json.dumps({
+                        "type": "zfs_status",
+                        "output": "\n".join(lines) + "\n\n--- zpool status ---\n" + subprocess.run(
+                            ["zpool", "status", "-v"],
+                            capture_output=True, text=True).stdout,
+                    }))
+
                 elif action == "snapshot_list":
                     # Sort newest-first (-S creation) so the most recent
                     # snaps land at the top of the panel. Previously
@@ -1824,11 +1854,21 @@ async def ws_handler(websocket):
                         except Exception:
                             pass
                     if main_pid > 0:
+                        # Client may pass `since_lines` to skip lines it
+                        # already has in its DOM — prevents the replay
+                        # storm where every reconnect re-dumps the last
+                        # 400 lines (2026-05-18 fix).
+                        try:
+                            since_lines = int(msg.get("since_lines") or 0)
+                        except Exception:
+                            since_lines = 0
                         await websocket.send(json.dumps({
                             "type": "install_reattached",
                             "pid": main_pid, "unit": unit_name, "log": log_path,
                         }))
-                        await _klab_test_tail(websocket, main_pid, log_path, target="install")
+                        await _klab_test_tail(websocket, main_pid, log_path,
+                                              target="install",
+                                              since_lines=since_lines)
                     else:
                         await websocket.send(json.dumps({
                             "type": "install_reattach_noop",
@@ -6696,10 +6736,20 @@ async def _detached_reattach(websocket, msg):
             "line": f"[reattach] open failed: {e}",
         }))
         return
-    # Send the last 400 lines as catchup context (matches _klab_test_tail).
+    # Catchup: honour `since_lines` from the client (same replay-storm
+    # fix as _klab_test_tail). If the client already has N lines, skip
+    # them; otherwise send last 400 for run-header context.
+    try:
+        since_lines = int(msg.get("since_lines") or 0)
+    except Exception:
+        since_lines = 0
     try:
         all_lines = f.readlines()
-        for line in all_lines[-400:]:
+        if since_lines > 0 and since_lines < len(all_lines):
+            catchup = all_lines[since_lines:]
+        else:
+            catchup = all_lines[-400:]
+        for line in catchup:
             await websocket.send(json.dumps({
                 "type": "log_line", "target": target,
                 "line": _ansi_re.sub('', line.rstrip()),
@@ -6794,13 +6844,19 @@ async def _klab_test_reattach(websocket):
     await _klab_test_tail(websocket, pid, log_path, target="klab")
 
 
-async def _klab_test_tail(websocket, pid, log_path, target="klab"):
+async def _klab_test_tail(websocket, pid, log_path, target="klab", since_lines=0):
     """Stream new lines from the detached klab-test log to the WS
     until the PID exits or the WS closes. Never kills the subprocess.
 
     Called automatically from _klab_test after spawn, and also
     on-demand (action 'klab_test_tail') so a reconnecting client
-    can re-attach to an already-running test."""
+    can re-attach to an already-running test.
+
+    `since_lines`: when >0, treats it as the line cursor the client
+    already has in its DOM — send only lines[since_lines:] as catchup
+    instead of the unconditional last 400. Prevents the replay storm
+    where every reconnect re-dumps the same 400 lines (2026-05-18 fix).
+    """
     _ansi_re = re.compile(r'\x1b\[[0-9;]*[mGKHF]')
     # Wait up to 10s for the log file to appear (the child writes
     # the header during initial start; first reads can race).
@@ -6822,11 +6878,16 @@ async def _klab_test_tail(websocket, pid, log_path, target="klab"):
             "line": f"[tail] open failed: {e}",
         }))
         return
-    # Start at beginning-of-this-run by reading the last ~400 lines first,
-    # then tail forward. 400 covers the run-header + a few distro entries.
+    # Catchup: if the client already has `since_lines` lines in its DOM
+    # (reconnect case), send only the lines past that cursor. Otherwise
+    # (first attach) send the last 400 as run-header + context.
     try:
         all_lines = f.readlines()
-        for line in all_lines[-400:]:
+        if since_lines > 0 and since_lines < len(all_lines):
+            catchup = all_lines[since_lines:]
+        else:
+            catchup = all_lines[-400:]
+        for line in catchup:
             await websocket.send(json.dumps({
                 "type": "log_line", "target": target,
                 "line": _ansi_re.sub('', line.rstrip()),

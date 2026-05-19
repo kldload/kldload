@@ -403,4 +403,31 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
       "Copy Selection"      c "send-keys -X copy-selection-no-clear-and-cancel" \
       "Paste"               p "paste-buffer"
 fi
-exec tmux attach-session -t $SESSION
+# Attach with transient-detect retry. Background: on firstboot the
+# tmux server racing with kldload-tls-cert / webui restarts / port :7681
+# contention sometimes makes `tmux attach-session` return clean (exit 0)
+# in ~1.5s before any user could have detached. That clean exit propagated
+# to ttyd-k9s which propagated to systemd, which burned the StartLimit
+# budget (see ttyd-k9s.service header for the full trace).
+#
+# Heuristic: a real interactive detach is always >2s (Ctrl+B d takes at
+# least one human second). If attach returns in <2s we know it's the
+# transient — sleep + re-exec the script to re-bootstrap the session.
+# Real detach (long-running attach) exits cleanly so ttyd treats it as
+# normal browser disconnect.
+while true; do
+  _start_ts=$(date +%s%N)
+  tmux attach-session -t $SESSION
+  _rc=$?
+  _elapsed_ms=$(( ($(date +%s%N) - _start_ts) / 1000000 ))
+  if [ $_rc -eq 0 ] && [ $_elapsed_ms -lt 2000 ]; then
+    # Transient: session got GC'd or server was busy. Wait for the
+    # ambient firstboot churn to settle, then re-bootstrap by re-execing.
+    sleep 2
+    exec "$0" "$@"
+  fi
+  # Either a real detach (>2s) or attach explicitly failed (e.g. user
+  # did kill-server). Exit so ttyd cleans up the PTY; systemd doesn't
+  # restart us — ttyd handles the next browser connect.
+  exit $_rc
+done
