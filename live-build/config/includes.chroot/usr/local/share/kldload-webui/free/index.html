@@ -1561,25 +1561,9 @@ select option:checked { background: #00b8d9; color: #000; }
           </select>
           <input id="k8s-search-global" class="k8s-search" placeholder="Search everything…"
                  oninput="k8sGlobalFilter(this.value)" title="Filters every table below by name">
-          <div class="dropdown" id="k8s-deploy-dd">
-            <button class="btn btn-primary btn-sm" onclick="k8sToggleDeployMenu(event)">＋ Deploy ▾</button>
-            <div class="dropdown-menu">
-              <div class="dropdown-label">Quick deploy</div>
-              <button class="dropdown-item" onclick="k8sToggleApply();k8sCloseDeployMenu()">📝 Apply YAML…</button>
-              <div class="dropdown-sep"></div>
-              <div class="dropdown-label">Demo workloads</div>
-              <button class="dropdown-item" onclick="k8sQuickDemo('nginx')">🌐 nginx + service (HTTP traffic)</button>
-              <button class="dropdown-item" onclick="k8sQuickDemo('pod_dns')">🔎 DNS test</button>
-              <button class="dropdown-item" onclick="k8sQuickDemo('zfs_pvc')">💾 ZFS PVC</button>
-              <button class="dropdown-item" onclick="k8sQuickDemo('metallb')">🌉 MetalLB LoadBalancer</button>
-              <button class="dropdown-item" onclick="k8sQuickDemo('netpol')">🛡 Network policy</button>
-              <button class="dropdown-item" onclick="k8sMoreDemos()">⋯ More demos…</button>
-              <div class="dropdown-sep"></div>
-              <div class="dropdown-label">Cluster</div>
-              <button class="dropdown-item" onclick="k8sBootstrap()">🚀 Bootstrap new cluster</button>
-              <button class="dropdown-item" onclick="k8sReset();k8sCloseDeployMenu()" style="color:var(--danger)">✕ Reset cluster</button>
-            </div>
-          </div>
+          <!-- Deploy dropdown removed 2026-05-18 — every entry it used to host
+               (quick demos, bootstrap, reset) is now first-class on the
+               Overview sub-view's "Deploy & lifecycle" panel. -->
           <button class="btn btn-ghost btn-sm" onclick="k8sRefreshAll()" title="Reload everything">↻</button>
         </div>
 
@@ -1589,7 +1573,6 @@ select option:checked { background: #00b8d9; color: #000; }
           <button class="k8s-tab"        data-sub="workloads" onclick="k8sSubTab('workloads')">Workloads <span id="k8s-cnt-workloads" class="tab-count">0</span></button>
           <button class="k8s-tab"        data-sub="network"   onclick="k8sSubTab('network')">Network <span id="k8s-cnt-network" class="tab-count">0</span></button>
           <button class="k8s-tab"        data-sub="nodes"     onclick="k8sSubTab('nodes')">Nodes <span id="k8s-cnt-nodes" class="tab-count">0</span></button>
-          <button class="k8s-tab"        data-sub="events"    onclick="k8sSubTab('events')">Events</button>
           <button class="k8s-tab"        data-sub="log"       onclick="k8sSubTab('log')">Log</button>
         </div>
 
@@ -1616,6 +1599,39 @@ select option:checked { background: #00b8d9; color: #000; }
           <div class="stat-card"><div class="stat-label">API Server</div><div class="stat-value" id="k8s-api" style="font-size:0.9rem">—</div></div>
           <div class="stat-card"><div class="stat-label">Version</div><div class="stat-value" id="k8s-ver" style="font-size:1rem">—</div></div>
           <div class="stat-card"><div class="stat-label">Pods</div><div class="stat-value" id="k8s-pod-count">—</div></div>
+        </div>
+
+        <!-- Deploy + Lifecycle panel (2026-05-18) — surfaces what was
+             hidden in the Deploy ▾ dropdown. The same buttons one click
+             away on Overview so the demo flow is obvious:
+               1. Hit a quick-deploy → see kernel activity react on the
+                  Cluster metrics iframe below
+               2. Hit "Destroy & rebuild" → die-and-rebuild story
+             Matches the kldload "rebuild it when it fails" thesis. -->
+        <div class="k8s-panel" style="margin-bottom:0.9rem">
+          <div class="k8s-panel-hdr">
+            <span>＋ Deploy &amp; lifecycle</span>
+            <span class="k8s-panel-hdr-muted">quick-deploy demos · cluster lifecycle one click away</span>
+          </div>
+          <div style="padding:0.7rem 1rem;display:flex;flex-direction:column;gap:0.55rem">
+            <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
+              <span style="font-size:0.72rem;color:var(--text-dim);width:80px">Quick demos</span>
+              <button class="btn btn-primary btn-sm" onclick="k8sQuickDemo('nginx')">🌐 nginx</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('pod_dns')">🔎 DNS test</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('zfs_pvc')">💾 ZFS PVC</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('metallb')">🌉 MetalLB</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('netpol')">🛡 NetworkPolicy</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sMoreDemos()">⋯ More</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sToggleApply()">📝 Apply YAML…</button>
+            </div>
+            <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
+              <span style="font-size:0.72rem;color:var(--text-dim);width:80px">Lifecycle</span>
+              <button class="btn btn-primary btn-sm" onclick="k8sBootstrap()">🚀 Bootstrap cluster</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sShowRebuildDialog()" title="Destroy AND re-bootstrap in one flow — the headline demo move">↻ Destroy &amp; rebuild</button>
+              <span style="flex:1"></span>
+              <button class="btn btn-danger btn-sm" onclick="k8sDestroyClusterPrompt()" title="Tears down cp + workers + zvols. Leaves nothing.">💥 Destroy cluster</button>
+            </div>
+          </div>
         </div>
 
         <!-- Mirror of "+ Add nodes" form from the Nodes sub-view — same
@@ -1664,14 +1680,9 @@ select option:checked { background: #00b8d9; color: #000; }
           </div>
         </div>
 
-        <!-- Bootstrap + Scale moved out of Overview 2026-05-17 —
-             Scale lives on the Nodes tab now. Bootstrap is recovery-only
-             (autodeploy creates the cluster at install time) and lives in
-             the ⋮ menu accessed by clicking "Rebuild cluster" below the
-             stat strip, so it doesn't dominate Overview. -->
-        <div style="display:flex;justify-content:flex-end;margin-bottom:0.9rem">
-          <button class="btn btn-ghost btn-sm" onclick="k8sShowRebuildDialog()" title="Recovery option — destroys current cluster + workers and bootstraps a fresh one. Rarely needed since autodeploy handles initial cluster creation." style="font-size:0.72rem;color:var(--text-dim)">⚙ Cluster rebuild…</button>
-        </div>
+        <!-- Buried "Cluster rebuild…" button removed 2026-05-18 — promoted
+             to the Deploy & lifecycle panel above the metrics iframe. -->
+
       </div>
 
       <!-- ── Workloads (Deployments + Pods) ────────────────────────────── -->
@@ -1726,41 +1737,20 @@ select option:checked { background: #00b8d9; color: #000; }
       <!-- ── Nodes ─────────────────────────────────────────────────────── -->
       <div class="k8s-subview" id="k8s-sub-nodes">
 
-        <!-- Scale strip — qty + kind picker. Moved from Overview 2026-05-17
-             so node scaling lives next to the table you're scaling against.
-             Replaces the standalone "+ Add worker" button (which was just
-             a less-capable version of this form). -->
-        <div class="k8s-panel" style="margin-bottom:0.9rem">
-          <div class="k8s-panel-hdr">
-            <span>＋ Add nodes</span>
-            <span class="k8s-panel-hdr-muted">clone golden + cloud-init + kubeadm join</span>
-          </div>
-          <div style="padding:0.7rem 1rem;display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
-            <label style="font-size:0.78rem;color:var(--text-dim)"><input type="number" id="k8s-scale-count" value="1" min="1" max="20" style="width:55px;margin:0 0.4rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:0.2rem 0.4rem"></label>
-            <select id="k8s-scale-kind" onchange="k8sUpdateAddBtn()" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.82rem">
-              <option value="worker">Worker(s)</option>
-              <option value="cp" disabled>Control plane (HA — 1.2 feature, requires etcd quorum)</option>
-            </select>
-            <button id="k8s-scale-btn" class="btn btn-primary btn-sm" onclick="k8sAddNodes()">Add worker</button>
-            <span class="k8s-panel-hdr-muted" style="margin-left:auto;font-size:0.75rem">~2 min per node — DHCP + cloud-init + kubeadm join</span>
-          </div>
-        </div>
-
-        <!-- Build progress panel — visible only while a scale is in flight.
-             k8s_log lines stream here in real-time so you can watch the
-             clone → DHCP → cloud-init → kubeadm join phases as they happen
-             without leaving the Nodes tab. Auto-collapses when scale ends
-             ("Added N/M workers" marker). -->
-        <div id="k8s-node-progress" class="k8s-panel" style="display:none;margin-bottom:0.9rem;border-color:var(--accent)">
-          <div class="k8s-panel-hdr">
-            <span><span class="spinner" style="display:inline-block;width:0.7rem;height:0.7rem;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:k8s-spin 0.8s linear infinite;margin-right:0.5rem;vertical-align:middle"></span><span id="k8s-node-progress-title">Scaling cluster…</span></span>
-            <div style="display:flex;gap:0.4rem;margin-left:auto">
-              <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-node-progress-log').textContent=''">Clear</button>
-              <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-node-progress').style.display='none'">Hide</button>
-            </div>
-          </div>
-          <div id="k8s-node-progress-log" class="log-box" style="height:240px;max-height:240px;overflow-y:auto;margin:0;border-radius:0 0 8px 8px;font-size:0.78rem"></div>
-        </div>
+        <!-- Add-nodes form and inline scaling progress panel removed
+             2026-05-18 — both live in the Overview's "Deploy &
+             lifecycle" panel now, and the streaming output is already
+             visible on the Log sub-tab. This page is the node table,
+             period. The k8s-scale-count / k8s-scale-kind / k8s-scale-btn
+             elements are still referenced by k8sAddNodes() so the
+             Overview's k8sAddNodesFromOverview() wrapper continues to
+             work; placed below as hidden mirrors so DOM lookups don't
+             return null. -->
+        <span style="display:none">
+          <input type="number" id="k8s-scale-count" value="1" min="1" max="20">
+          <select id="k8s-scale-kind"><option value="worker" selected>worker</option></select>
+          <button id="k8s-scale-btn">hidden</button>
+        </span>
 
         <div class="k8s-panel">
           <div class="k8s-panel-hdr">
@@ -1785,23 +1775,11 @@ select option:checked { background: #00b8d9; color: #000; }
         </div>
       </div>
 
-      <!-- ── Events ────────────────────────────────────────────────────── -->
-      <div class="k8s-subview" id="k8s-sub-events">
-        <div class="k8s-panel">
-          <div class="k8s-panel-hdr">
-            <span>⚠ Recent events</span>
-            <div style="display:flex;gap:0.4rem;align-items:center">
-              <label style="font-size:0.75rem;color:var(--muted);display:flex;align-items:center;gap:0.3rem">
-                <input type="checkbox" id="k8s-events-warn-only" onchange="k8sRefreshEvents()"> warnings only
-              </label>
-              <button class="btn btn-ghost btn-sm" onclick="k8sRefreshEvents()">↻</button>
-            </div>
-          </div>
-          <div id="k8s-events-list" style="padding:0.5rem 1rem;max-height:60vh;overflow:auto;font-family:monospace;font-size:0.78rem;color:var(--subtle)">
-            <div style="color:var(--muted);padding:0.4rem 0">Click ↻ to fetch recent cluster events.</div>
-          </div>
-        </div>
-      </div>
+      <!-- Events sub-view removed 2026-05-18 — cluster-level event spam is
+           mostly noise; per-resource events are surfaced via the
+           describe modal on each row; meaningful operational output is
+           on the Log tab. Five tabs (Overview/Workloads/Network/Nodes/Log),
+           every one with a clear job. -->
 
       <!-- ── Log ───────────────────────────────────────────────────────── -->
       <div class="k8s-subview" id="k8s-sub-log">
@@ -5947,6 +5925,15 @@ function k8sAddBtnLabel() {
 function k8sUpdateAddBtn() {
   const btn = document.getElementById('k8s-scale-btn');
   if (btn && !btn.disabled) btn.textContent = k8sAddBtnLabel();
+}
+
+// Destroy-only — no rebuild. Paired with k8sBootstrap() if you want
+// to rebuild later. Routed through the new k8s_destroy_cluster backend
+// action which runs `kube-cluster destroy --yes` detached.
+function k8sDestroyClusterPrompt() {
+  if (!confirm('💥 DESTROY the entire K8s cluster?\n\nThis tears down:\n  • kldload-cp (control plane VM)\n  • All worker VMs\n  • Every zvol cloned from k8s-golden\n  • kubelet + etcd state\n\nNothing is rebuilt — use 🚀 Bootstrap cluster afterwards to come back online.\n\nIrreversible. Continue?')) return;
+  send({ action: 'k8s_destroy_cluster' });
+  k8sSubTab('log');  // jump to log so the user sees the teardown stream
 }
 // Wire the count input to update the label live
 document.addEventListener('DOMContentLoaded', () => {

@@ -1,0 +1,53 @@
+# kldload keynote demo — 3 nginx pods + service + load generator.
+# Drives Hubble flows, Tetragon EXECVE, container cold-start heatmap.
+#
+# Apply:    kubectl apply -f keynote-demo.yaml
+# Cleanup:  kubectl delete -f keynote-demo.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: demo
+  template:
+    metadata:
+      labels:
+        app: demo
+    spec:
+      containers:
+      - name: web
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo
+spec:
+  selector:
+    app: demo
+  ports:
+  - port: 80
+    targetPort: 80
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hammer
+spec:
+  restartPolicy: Never
+  containers:
+  - name: load
+    image: alpine
+    command:
+    - sh
+    - -c
+    - "while :; do wget -qO- http://demo/ >/dev/null; sleep 0.2; done"

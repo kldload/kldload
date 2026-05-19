@@ -1959,6 +1959,14 @@ async def ws_handler(websocket):
                     await _k8s_pods(websocket)
                 elif action == "k8s_bootstrap":
                     await _k8s_bootstrap(websocket, msg)
+                elif action == "k8s_destroy_cluster":
+                    # Destroy ALL K8s resources (cp + workers + zvols + kubelet state).
+                    # No rebuild. Used by the "die-and-rebuild" demo flow on the
+                    # K8s Overview lifecycle bar (2026-05-18). Followed by an
+                    # explicit `k8s_bootstrap` if the operator wants it back.
+                    await _stream_proc_detached(websocket,
+                        ["kube-cluster", "destroy", "--yes"], target="k8s")
+                    await _k8s_status(websocket)
                 elif action == "k8s_cluster_scale":
                     await _k8s_cluster_scale(websocket, msg)
                 elif action == "k8s_reset":
@@ -5940,17 +5948,68 @@ async def _k8s_delete_deployment(websocket, msg):
 async def _k8s_apply_yaml(websocket, msg):
     """Apply a YAML blob. We write it to a temp file and kubectl apply -f,
     streaming the result. This is the most-requested "deploy something
-    quickly" escape hatch."""
+    quickly" escape hatch.
+
+    Quirks handled:
+      1. **Auto-dedent**: pastes from markdown / docs nearly always arrive
+         with a uniform leading-whitespace gutter that makes the entire
+         document a single invalid scalar. We compute the minimum indent
+         across non-blank lines and strip it from every line. This is
+         the same trick textwrap.dedent uses; reimplementing rather than
+         importing because some lines are `---` separators that need to
+         hit column zero specifically.
+      2. **Error surfacing**: previously `kubectl apply` failures were
+         logged to the k8s stream but appeared identical to silence in
+         the user's eye. We now echo the kubectl exit-code+stderr summary
+         as an `error` message too so the user gets a clear toast.
+    """
     yaml_text = msg.get("yaml", "")
     if not yaml_text.strip():
         await websocket.send(json.dumps({"type": "error", "msg": "empty YAML"}))
         return
+
+    # Dedent: find the minimum leading-whitespace of non-blank lines and
+    # strip it from every line. Idempotent on already-flush YAML.
+    lines = yaml_text.splitlines()
+    non_blank = [ln for ln in lines if ln.strip()]
+    if non_blank:
+        min_indent = min(len(ln) - len(ln.lstrip(" \t")) for ln in non_blank)
+        if min_indent > 0:
+            lines = [ln[min_indent:] if len(ln) >= min_indent else ln for ln in lines]
+            yaml_text = "\n".join(lines) + ("\n" if not yaml_text.endswith("\n") else "")
+            await websocket.send(json.dumps({"type": "k8s_log",
+                "line": f"[apply-yaml] auto-stripped {min_indent} spaces of leading indent"}))
+
     import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
         f.write(yaml_text)
         path = f.name
     try:
-        await _stream_proc(websocket, ["kubectl", "apply", "-f", path], target="k8s")
+        # Run kubectl apply and capture full output, including stderr, so
+        # we can surface failures to the UI in addition to streaming them.
+        proc = await asyncio.create_subprocess_exec(
+            "kubectl", "apply", "-f", path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out_bytes, _ = await proc.communicate()
+        out = (out_bytes or b"").decode("utf-8", errors="replace")
+        # Stream the full output as k8s_log lines (mirrors the old _stream_proc behaviour)
+        for line in out.splitlines():
+            await websocket.send(json.dumps({"type": "k8s_log", "line": line}))
+        rc = proc.returncode or 0
+        if rc != 0:
+            # Pull the most actionable error line for the toast — kubectl
+            # typically prints "error: <thing>" or "Error from server (X): Y".
+            err_line = next((ln for ln in out.splitlines()[::-1]
+                             if ln.strip() and ("error" in ln.lower() or "invalid" in ln.lower())),
+                            out.splitlines()[-1] if out.splitlines() else "kubectl apply failed")
+            await websocket.send(json.dumps({"type": "error",
+                "msg": f"apply failed (rc={rc}): {err_line[:240]}"}))
+        else:
+            await websocket.send(json.dumps({"type": "k8s_log",
+                "line": "[apply-yaml] kubectl apply completed (rc=0)"}))
+        await websocket.send(json.dumps({"type": "exec_done", "rc": rc, "target": "k8s"}))
     finally:
         try: os.unlink(path)
         except Exception: pass
