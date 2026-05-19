@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>kldload — tactical wallpaper</title>
+<style>
+  /* ──────────────────────────────────────────────────────────────────
+     kldload tactical wallpaper — first cut 2026-05-18.
+     Renders as a standalone page at /wallpaper. Intended to be mounted
+     as the GNOME background actor (or just opened in a browser tab to
+     iterate on the look). Self-contained: no external CSS / JS.
+
+     Layer stack from back to front:
+       0. WebGL starfield (3 depth layers of slow-drifting stars)
+       1. CSS plasma backdrop (radial blooms from the demoscene mockup)
+       2. CSS plasma drift (animated, mix-blend screen, very low alpha)
+       3. SVG film grain (fractal noise, overlay blend, 0.03 alpha)
+       4. SVG constellation (cluster topology — nodes + Cilium edges)
+       5. Tactical HUD corner readouts (monospace, low alpha)
+
+     URL params:
+       ?theme=starfield|plasma|aurora|off    (default starfield)
+       ?hud=0|1                              (default 1)
+       ?demo=1                               (synthetic data for design iteration)
+     ────────────────────────────────────────────────────────────────── */
+
+  :root {
+    --bg-deep: #06030d;
+    --bg: #0a0612;
+    --rose: #e0568f;
+    --rose-glow: rgba(224,86,143,0.40);
+    --teal: #67c1d4;
+    --teal-glow: rgba(103,193,212,0.35);
+    --peach: #f7b88c;
+    --peach-glow: rgba(247,184,140,0.30);
+    --text: #d4bfd0;
+    --text-mute: #9a7e96;
+    --mono: "JetBrains Mono", "Source Code Pro", "Fira Code", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; width: 100%; overflow: hidden; background: var(--bg-deep); color: var(--text); font-family: var(--mono); }
+
+  /* z=0: WebGL starfield canvas — covers entire viewport */
+  #stars {
+    position: fixed; inset: 0; z-index: 0;
+    display: block; width: 100%; height: 100%;
+  }
+
+  /* z=1: painterly radial blooms (purple-rose-teal-peach atmosphere).
+     Copied from /home/todd/kldload-design-mockups/index-demoscene.html
+     — the bake of "purple-black with warmth, never pure black". */
+  .backdrop {
+    position: fixed; inset: 0; z-index: 1; pointer-events: none;
+    background:
+      radial-gradient(ellipse 1100px 700px at 12% 18%, rgba(224,86,143,0.10) 0%, transparent 55%),
+      radial-gradient(ellipse 900px 600px at 88% 22%,  rgba(103,193,212,0.08) 0%, transparent 55%),
+      radial-gradient(ellipse 800px 500px at 60% 95%,  rgba(247,184,140,0.06) 0%, transparent 55%),
+      radial-gradient(ellipse 700px 500px at 5% 100%,  rgba(60,20,80,0.30) 0%, transparent 60%);
+    mix-blend-mode: screen;
+  }
+  /* z=2: 90s plasma drift, blurred, additive-blended on top of stars */
+  .plasma {
+    position: fixed; inset: -10%; z-index: 2; pointer-events: none;
+    background:
+      radial-gradient(ellipse 600px 400px at 20% 30%, rgba(224,86,143,0.06) 0%, transparent 50%),
+      radial-gradient(ellipse 500px 400px at 80% 70%, rgba(103,193,212,0.05) 0%, transparent 50%),
+      radial-gradient(ellipse 400px 300px at 60% 20%, rgba(247,184,140,0.04) 0%, transparent 50%),
+      radial-gradient(ellipse 500px 350px at 30% 85%, rgba(196,64,139,0.04) 0%, transparent 50%);
+    animation: plasma-drift 90s ease-in-out infinite alternate;
+    filter: blur(40px);
+    mix-blend-mode: screen;
+    will-change: transform;
+  }
+  @keyframes plasma-drift {
+    0%   { transform: translate(0, 0)        rotate(0deg)   scale(1); }
+    33%  { transform: translate(2%, -1.5%)   rotate(0.5deg) scale(1.04); }
+    66%  { transform: translate(-1.5%, 1%)   rotate(-0.4deg) scale(0.98); }
+    100% { transform: translate(1%, 1.5%)    rotate(0.2deg) scale(1.02); }
+  }
+  /* z=3: barely-there film grain */
+  .grain {
+    position: fixed; inset: 0; z-index: 3; pointer-events: none;
+    opacity: 0.03;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+  }
+
+  /* z=4: cluster constellation — nodes + Cilium edges drawn live.
+     Stars rendered as `.node` divs (clickable/tappable) absolute-
+     positioned over the SVG which only carries the edges. Keeps the
+     touch hit-target large without bloating SVG. */
+  #constellation { position: fixed; inset: 0; z-index: 4; pointer-events: none; }
+  #constellation line {
+    stroke: var(--teal); stroke-width: 0.5; opacity: 0.35;
+    stroke-dasharray: 4 6; animation: edge-flow 20s linear infinite;
+  }
+  @keyframes edge-flow { to { stroke-dashoffset: -100; } }
+  .node {
+    position: fixed; z-index: 5;
+    width: 14px; height: 14px; border-radius: 50%;
+    transform: translate(-50%, -50%);
+    cursor: pointer; pointer-events: auto;
+    transition: transform 0.15s ease;
+  }
+  .node::after {
+    content: ""; position: absolute; inset: -10px; border-radius: 50%;
+    background: radial-gradient(circle, currentColor 0%, transparent 60%);
+    opacity: 0.5;
+  }
+  .node.kind-cp     { background: var(--rose);  color: var(--rose-glow);  }
+  .node.kind-worker { background: var(--teal);  color: var(--teal-glow);  }
+  .node.kind-vm     { background: var(--peach); color: var(--peach-glow); }
+  .node.state-down  { background: #555; color: rgba(120,120,120,0.4); }
+  .node:hover { transform: translate(-50%, -50%) scale(1.5); }
+  .node-label {
+    position: absolute; left: 18px; top: -4px; white-space: nowrap;
+    font-size: 9px; color: var(--text-mute); opacity: 0; transition: opacity 0.2s;
+    pointer-events: none;
+  }
+  .node:hover .node-label { opacity: 1; }
+
+  /* z=6: tactical HUD readouts at the four corners. ~9-10pt monospace,
+     30% alpha, no background — just text laid into the atmosphere. */
+  .hud { position: fixed; z-index: 6; font-family: var(--mono); font-size: 10px;
+         color: var(--text); opacity: 0.5; line-height: 1.6;
+         text-shadow: 0 0 6px rgba(0,0,0,0.8); pointer-events: none;
+         letter-spacing: 0.05em; }
+  .hud.tl { top: 16px;    left: 16px;    text-align: left; }
+  .hud.tr { top: 16px;    right: 16px;   text-align: right; }
+  .hud.bl { bottom: 16px; left: 16px;    text-align: left; }
+  .hud.br { bottom: 16px; right: 16px;   text-align: right; }
+  .hud .label { color: var(--text-mute); }
+  .hud .val   { color: var(--rose); }
+  .hud .val.teal  { color: var(--teal); }
+  .hud .val.peach { color: var(--peach); }
+  .hud .val.warn  { color: #ff6e6e; }
+
+  /* Hidden when ?hud=0 — pure visual mode for screenshots/marketing. */
+  body.hud-off .hud, body.hud-off #constellation, body.hud-off .node { display: none; }
+
+  /* Node detail flyout — translucent panel anchored near the clicked
+     node. Real glass with backdrop-filter so it sits in the atmosphere
+     instead of slapped on top of it. */
+  #flyout {
+    position: fixed; z-index: 7; display: none;
+    min-width: 200px; max-width: 340px;
+    background: rgba(20,12,28,0.78);
+    border: 1px solid rgba(210,140,200,0.30);
+    border-radius: 6px;
+    backdrop-filter: blur(14px) saturate(1.1);
+    -webkit-backdrop-filter: blur(14px) saturate(1.1);
+    padding: 10px 12px;
+    font-size: 11px; line-height: 1.5;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+    pointer-events: auto;
+  }
+  #flyout .fy-title { font-size: 12px; color: var(--rose); margin-bottom: 4px; letter-spacing: 0.05em; text-transform: uppercase; }
+  #flyout .fy-row { display: flex; justify-content: space-between; gap: 10px; }
+  #flyout .fy-row .k { color: var(--text-mute); }
+  #flyout .fy-row .v { color: var(--text); }
+  #flyout .fy-close {
+    position: absolute; top: 6px; right: 8px; cursor: pointer;
+    color: var(--text-mute); font-size: 14px; line-height: 1;
+  }
+  #flyout .fy-close:hover { color: var(--text); }
+</style>
+</head>
+<body>
+
+<canvas id="stars"></canvas>
+<div class="backdrop"></div>
+<div class="plasma"></div>
+<div class="grain"></div>
+
+<svg id="constellation" preserveAspectRatio="none"></svg>
+<!-- .node divs are appended dynamically -->
+
+<div class="hud tl">
+  <div><span class="label">host </span><span class="val" id="hud-host">—</span></div>
+  <div><span class="label">up   </span><span class="val teal" id="hud-up">—</span></div>
+  <div><span class="label">prof </span><span class="val peach" id="hud-prof">—</span></div>
+</div>
+<div class="hud tr">
+  <div><span class="label">cluster </span><span class="val teal" id="hud-cluster">—</span></div>
+  <div><span class="label">nodes   </span><span class="val" id="hud-nodes">—</span></div>
+  <div><span class="label">pods    </span><span class="val peach" id="hud-pods">—</span></div>
+</div>
+<div class="hud bl">
+  <div><span class="label">pool   </span><span class="val teal" id="hud-pool">—</span></div>
+  <div><span class="label">cap    </span><span class="val" id="hud-cap">—</span></div>
+  <div><span class="label">scrub  </span><span class="val peach" id="hud-scrub">—</span></div>
+</div>
+<div class="hud br">
+  <div><span class="label">last </span><span class="val" id="hud-last">—</span></div>
+  <div><span class="label">load </span><span class="val teal" id="hud-load">—</span></div>
+  <div><span class="label">net  </span><span class="val peach" id="hud-net">—</span></div>
+</div>
+
+<div id="flyout">
+  <span class="fy-close" onclick="closeFlyout()">×</span>
+  <div class="fy-title" id="fy-title">—</div>
+  <div id="fy-body"></div>
+</div>
+
+<script>
+'use strict';
+
+/* ─── URL params ──────────────────────────────────────────────────── */
+const params = new URLSearchParams(location.search);
+const THEME = params.get('theme') || 'starfield';   // starfield | plasma | aurora | off
+const HUD_ON = params.get('hud') !== '0';
+const DEMO  = params.get('demo') === '1';
+if (!HUD_ON) document.body.classList.add('hud-off');
+if (THEME === 'off' || THEME === 'plasma') { /* canvas stays blank — pure CSS atmosphere */ }
+
+/* ─── WebGL starfield ──────────────────────────────────────────────
+   Fullscreen quad + fragment shader with 3 depth layers. Layer 0 is
+   the furthest (smallest, dimmest, slowest); layer 2 is closest. Each
+   sample uses a cell-based hash so the field is procedural — no JS
+   per-frame loop, all GPU. ~0.2% CPU on a modern laptop iGPU.    */
+
+const VERT = `
+attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }
+`;
+const FRAG = `
+precision highp float;
+uniform float u_time;
+uniform vec2  u_res;
+uniform float u_intensity;  // 0..1, fades the whole field
+
+float hash(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+
+vec3 layer(vec2 p, float speed, float scale, float threshold, vec3 tint, float bri){
+  vec2 q = p + vec2(u_time*speed, u_time*speed*0.4);
+  vec2 g = floor(q*scale);
+  vec2 f = fract(q*scale);
+  float h = hash(vec3(g, scale));
+  if(h < threshold) return vec3(0.0);
+  vec2 c = vec2(hash(vec3(g, scale+1.0)), hash(vec3(g, scale+2.0)));
+  float d = length(f - c);
+  float br = (h - threshold) / (1.0 - threshold);
+  float star = (1.0 - smoothstep(0.0, 0.05, d)) * br;
+  /* twinkle — different phase per star */
+  star *= 0.6 + 0.4*sin(u_time*1.5 + h*100.0);
+  /* tint mix */
+  vec3 col = mix(tint, vec3(1.0), hash(vec3(g, scale+5.0)));
+  return star * col * bri;
+}
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_res;
+  vec2 p = uv * vec2(u_res.x/u_res.y, 1.0);
+  vec3 col = vec3(0.0);
+  /* three layers — farthest/dimmest first so closer stars composite over them */
+  col += layer(p, 0.002, 240.0, 0.992, vec3(0.85, 0.85, 1.00), 0.50);
+  col += layer(p, 0.005, 160.0, 0.988, vec3(1.00, 0.90, 0.95), 0.65);
+  col += layer(p, 0.010,  90.0, 0.984, vec3(1.00, 0.85, 0.90), 0.85);
+  /* vignette toward the corners — emphasises center, calmer feel */
+  float v = smoothstep(1.35, 0.55, length(uv - 0.5));
+  col *= v;
+  col *= u_intensity;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+function initStars(){
+  if (THEME === 'off' || THEME === 'plasma') return;
+  const canvas = document.getElementById('stars');
+  const gl = canvas.getContext('webgl', { alpha: true, antialias: false, premultipliedAlpha: false });
+  if (!gl) {
+    console.warn('[wallpaper] WebGL unavailable — falling back to CSS-only atmosphere');
+    return;
+  }
+
+  /* compile */
+  const compile = (type, src) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error('shader:', gl.getShaderInfoLog(s)); return null;
+    }
+    return s;
+  };
+  const vs = compile(gl.VERTEX_SHADER, VERT);
+  const fs = compile(gl.FRAGMENT_SHADER, FRAG);
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error('link:', gl.getProgramInfoLog(prog)); return;
+  }
+  gl.useProgram(prog);
+
+  /* fullscreen quad — two triangles */
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1,-1,  1,-1,  -1, 1,
+     1,-1,  1, 1,  -1, 1,
+  ]), gl.STATIC_DRAW);
+  const aLoc = gl.getAttribLocation(prog, 'a');
+  gl.enableVertexAttribArray(aLoc);
+  gl.vertexAttribPointer(aLoc, 2, gl.FLOAT, false, 0, 0);
+
+  const uTime = gl.getUniformLocation(prog, 'u_time');
+  const uRes  = gl.getUniformLocation(prog, 'u_res');
+  const uInt  = gl.getUniformLocation(prog, 'u_intensity');
+  gl.uniform1f(uInt, THEME === 'aurora' ? 0.5 : 1.0);
+
+  const resize = () => {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width  = Math.floor(window.innerWidth  * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+    canvas.style.width  = window.innerWidth  + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.uniform2f(uRes, canvas.width, canvas.height);
+  };
+  resize();
+  window.addEventListener('resize', resize);
+
+  const start = performance.now();
+  function frame(){
+    const t = (performance.now() - start) / 1000;
+    gl.uniform1f(uTime, t);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+/* ─── Constellation ────────────────────────────────────────────────
+   Cluster nodes laid out in a soft circular formation (deterministic
+   from name hash so they stay put across reloads). Edges connect:
+     - cp ↔ every worker (kubeadm join)
+     - every worker pair (Cilium mesh — full L4 visibility)
+   VMs cluster around the cp with shorter, fainter edges. */
+
+let _nodes = [];   // [{name, kind, state}]
+
+function hashStr(s){
+  let h = 5381;
+  for (let i=0;i<s.length;i++) h = ((h<<5) + h + s.charCodeAt(i)) & 0xffffffff;
+  return Math.abs(h);
+}
+
+function layoutNodes(){
+  const W = window.innerWidth, H = window.innerHeight;
+  const cx = W/2, cy = H/2;
+  const r = Math.min(W, H) * 0.32;
+  /* cp at center; workers in inner ring; VMs in outer ring */
+  const cps     = _nodes.filter(n => n.kind === 'cp');
+  const workers = _nodes.filter(n => n.kind === 'worker');
+  const vms     = _nodes.filter(n => n.kind === 'vm');
+  const positioned = [];
+
+  cps.forEach((n, i) => positioned.push({...n, x: cx, y: cy}));
+
+  workers.forEach((n, i) => {
+    const ang = (i / Math.max(1, workers.length)) * Math.PI * 2 + (hashStr(n.name) % 100)/100 * 0.3;
+    positioned.push({...n, x: cx + r * Math.cos(ang), y: cy + r * Math.sin(ang)});
+  });
+
+  vms.forEach((n, i) => {
+    const ang = (i / Math.max(1, vms.length)) * Math.PI * 2 + Math.PI/vms.length + (hashStr(n.name) % 100)/100 * 0.5;
+    const rr  = r * 1.55 + (hashStr(n.name) % 60) - 30;
+    positioned.push({...n, x: cx + rr * Math.cos(ang), y: cy + rr * Math.sin(ang)});
+  });
+
+  return positioned;
+}
+
+function renderConstellation(){
+  const svg = document.getElementById('constellation');
+  svg.setAttribute('viewBox', `0 0 ${window.innerWidth} ${window.innerHeight}`);
+  svg.setAttribute('width',  window.innerWidth);
+  svg.setAttribute('height', window.innerHeight);
+  svg.innerHTML = '';
+  document.querySelectorAll('.node').forEach(n => n.remove());
+
+  const pos = layoutNodes();
+  const cps     = pos.filter(n => n.kind === 'cp');
+  const workers = pos.filter(n => n.kind === 'worker');
+  const vms     = pos.filter(n => n.kind === 'vm');
+
+  /* edges: cp → each worker, worker pair mesh */
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  const edge = (a, b, opacity=0.35) => {
+    const ln = document.createElementNS(SVGNS, 'line');
+    ln.setAttribute('x1', a.x); ln.setAttribute('y1', a.y);
+    ln.setAttribute('x2', b.x); ln.setAttribute('y2', b.y);
+    ln.setAttribute('style', `opacity:${opacity}`);
+    svg.appendChild(ln);
+  };
+  cps.forEach(c => workers.forEach(w => edge(c, w, 0.40)));
+  for (let i=0;i<workers.length;i++) for (let j=i+1;j<workers.length;j++) edge(workers[i], workers[j], 0.18);
+  /* VMs anchored to cp with very faint edges */
+  cps.forEach(c => vms.forEach(v => edge(c, v, 0.12)));
+
+  /* node markers */
+  pos.forEach(n => {
+    const div = document.createElement('div');
+    div.className = `node kind-${n.kind} state-${n.state || 'up'}`;
+    div.style.left = n.x + 'px';
+    div.style.top  = n.y + 'px';
+    div.innerHTML = `<span class="node-label">${n.name}</span>`;
+    div.addEventListener('click', e => showFlyout(n, e));
+    document.body.appendChild(div);
+  });
+}
+
+/* ─── Flyout ───────────────────────────────────────────────────── */
+function showFlyout(node, ev){
+  const fy = document.getElementById('flyout');
+  const x = Math.min(window.innerWidth - 360, (ev.clientX || 0) + 12);
+  const y = Math.min(window.innerHeight - 200, (ev.clientY || 0) + 12);
+  fy.style.left = x + 'px';
+  fy.style.top  = y + 'px';
+  document.getElementById('fy-title').textContent = node.name;
+  document.getElementById('fy-body').innerHTML = `
+    <div class="fy-row"><span class="k">kind</span><span class="v">${node.kind}</span></div>
+    <div class="fy-row"><span class="k">state</span><span class="v">${node.state || 'up'}</span></div>
+    ${node.detail ? Object.entries(node.detail).map(([k,v]) =>
+      `<div class="fy-row"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('') : ''}
+  `;
+  fy.style.display = 'block';
+}
+function closeFlyout(){ document.getElementById('flyout').style.display = 'none'; }
+document.addEventListener('click', e => {
+  if (!e.target.closest('.node') && !e.target.closest('#flyout')) closeFlyout();
+});
+
+/* ─── Live data via WebSocket ──────────────────────────────────────
+   Connects to the existing /ws and listens for the SAME messages the
+   main webui consumes (k8s_status, list_vms, host_stats). We DON'T
+   poll — only receive updates as the existing dashboard polls already.
+   On a fresh load we send one initial pull for each known message
+   type to populate the HUD without waiting for the next periodic tick. */
+
+let ws = null;
+function wsConnect(){
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({action: 'host_stats'}));
+    ws.send(JSON.stringify({action: 'k8s_status'}));
+    ws.send(JSON.stringify({action: 'list_vms'}));
+    ws.send(JSON.stringify({action: 'zfs_status'}));
+  };
+  ws.onmessage = ev => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    handleMsg(msg);
+  };
+  ws.onclose = () => setTimeout(wsConnect, 3000);
+  ws.onerror = () => {};
+}
+
+function handleMsg(msg){
+  switch (msg.type) {
+    case 'host_stats':
+      if (msg.hostname) setVal('hud-host', msg.hostname);
+      if (msg.uptime)   setVal('hud-up',   msg.uptime);
+      if (msg.profile)  setVal('hud-prof', msg.profile);
+      if (msg.loadavg)  setVal('hud-load', msg.loadavg);
+      if (msg.netif)    setVal('hud-net',  msg.netif);
+      break;
+    case 'k8s_status':
+      if (msg.version)    setVal('hud-cluster', msg.version);
+      if (msg.node_count) setVal('hud-nodes', `${msg.ready_count||0}/${msg.node_count}`);
+      if (msg.pod_count != null) setVal('hud-pods', msg.pod_count);
+      /* refresh constellation */
+      if (Array.isArray(msg.nodes)) {
+        _nodes = _nodes.filter(n => n.kind === 'vm').concat(
+          msg.nodes.map(n => ({
+            name: n.name, kind: n.role === 'control-plane' ? 'cp' : 'worker',
+            state: n.ready ? 'up' : 'down', detail: { ip: n.ip, version: n.version },
+          })));
+        renderConstellation();
+      }
+      break;
+    case 'vm_list':
+    case 'list_vms':
+      if (Array.isArray(msg.vms)) {
+        _nodes = _nodes.filter(n => n.kind !== 'vm').concat(
+          msg.vms.map(v => ({
+            name: v.name, kind: 'vm',
+            state: v.state === 'running' ? 'up' : 'down',
+            detail: { ip: v.ip || '—', vcpu: v.vcpu, ram: v.ram },
+          })));
+        renderConstellation();
+      }
+      break;
+    case 'zfs_status':
+      if (msg.summary) {
+        if (msg.summary.health) setVal('hud-pool', msg.summary.health);
+        if (msg.summary.cap)    setVal('hud-cap',  msg.summary.cap);
+        if (msg.summary.scrub)  setVal('hud-scrub', msg.summary.scrub);
+      }
+      break;
+  }
+}
+
+function setVal(id, v){
+  const el = document.getElementById(id);
+  if (el) el.textContent = String(v).slice(0, 18);
+}
+
+/* ─── Demo mode for design iteration ───────────────────────────── */
+function demoData(){
+  _nodes = [
+    { name: 'kldload-cp',  kind: 'cp',     state: 'up' },
+    { name: 'kldload-w-1', kind: 'worker', state: 'up' },
+    { name: 'kldload-w-2', kind: 'worker', state: 'up' },
+    { name: 'kldload-w-3', kind: 'worker', state: 'up' },
+    { name: 'kldload-w-4', kind: 'worker', state: 'down' },
+    { name: 'klab-rocky',  kind: 'vm',     state: 'up' },
+    { name: 'klab-centos', kind: 'vm',     state: 'up' },
+    { name: 'klab-fedora', kind: 'vm',     state: 'up' },
+    { name: 'klab-debian', kind: 'vm',     state: 'down' },
+  ];
+  renderConstellation();
+  setVal('hud-host', 'kldload-node');
+  setVal('hud-up',   '4d 18h');
+  setVal('hud-prof', 'kvm');
+  setVal('hud-cluster', 'v1.31.4');
+  setVal('hud-nodes',   '4/5');
+  setVal('hud-pods',    '67');
+  setVal('hud-pool',    'ONLINE');
+  setVal('hud-cap',     '38%');
+  setVal('hud-scrub',   '12d ago');
+  setVal('hud-load',    '0.42');
+  setVal('hud-net',     '1.2 Gb/s');
+  setVal('hud-last',    'k8s-scale +2');
+}
+
+/* ─── Boot ─────────────────────────────────────────────────────── */
+window.addEventListener('load', () => {
+  initStars();
+  window.addEventListener('resize', renderConstellation);
+  if (DEMO) demoData();
+  else      wsConnect();
+});
+</script>
+</body>
+</html>

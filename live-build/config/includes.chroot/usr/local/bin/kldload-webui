@@ -1207,6 +1207,39 @@ async def _pro_required(websocket, action: str) -> bool:
         return True
     return False
 
+
+async def _run_text(cmd, timeout=15, merge_stderr=True):
+    """Run a command non-blockingly and return (rc, stdout_text).
+
+    Replaces subprocess.check_output / subprocess.run in WS handlers —
+    the sync calls would block the entire asyncio event loop for the
+    duration of the child process, freezing every other client's
+    pings/refreshes during slow commands like `zpool status` on a busy
+    pool or `kubectl get` against a stressed apiserver. With this
+    helper the event loop stays alive; other handlers keep responding
+    while we're waiting on the subprocess.
+
+    Returns (returncode, text). Never raises — caller decides what to
+    do with non-zero rc. On timeout returns (-1, "[timeout]"). Output
+    is decoded as utf-8 with replacement so binary noise doesn't crash
+    JSON serialisation downstream.
+    """
+    try:
+        p = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT if merge_stderr else asyncio.subprocess.PIPE,
+        )
+        try:
+            out, _ = await asyncio.wait_for(p.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            try: p.kill()
+            except Exception: pass
+            return -1, "[timeout]"
+        return p.returncode or 0, (out or b"").decode("utf-8", errors="replace")
+    except Exception as e:
+        return -1, f"[exec error] {e}"
+
 async def ws_handler(websocket):
     LOG.info("WebSocket client connected: %s", websocket.remote_address)
     try:
@@ -1561,11 +1594,10 @@ async def ws_handler(websocket):
 
                 # ── Free-edition actions (ZFS / snapshots / logs) ──────────────
                 elif action == "zfs_status":
-                    try:
-                        out = subprocess.check_output(
-                            ["zpool", "status", "-v"], text=True, stderr=subprocess.STDOUT)
-                    except Exception as e:
-                        out = str(e)
+                    # Async to avoid blocking the event loop on a slow
+                    # `zpool status -v` (can take seconds when a scrub is
+                    # mid-flight or a vdev is degraded).
+                    _, out = await _run_text(["zpool", "status", "-v"], timeout=10)
                     await websocket.send(json.dumps({"type": "zfs_status", "output": out}))
 
                 elif action == "zfs_scrub_all":
@@ -1575,27 +1607,19 @@ async def ws_handler(websocket):
                     # ZFS Pool Health Grafana dashboard. Safe to invoke on
                     # an already-scrubbing pool (zpool refuses gracefully).
                     lines = []
-                    try:
-                        pools = subprocess.check_output(
-                            ["zpool", "list", "-H", "-o", "name"],
-                            text=True, stderr=subprocess.STDOUT).split()
-                        if not pools:
-                            lines.append("no imported pools — nothing to scrub")
-                        for p in pools:
-                            try:
-                                subprocess.check_output(
-                                    ["zpool", "scrub", p],
-                                    text=True, stderr=subprocess.STDOUT)
-                                lines.append(f"started: {p}")
-                            except subprocess.CalledProcessError as e:
-                                lines.append(f"{p}: {e.output.strip()}")
-                    except Exception as e:
-                        lines.append(f"error: {e}")
+                    rc, pools_out = await _run_text(
+                        ["zpool", "list", "-H", "-o", "name"], timeout=5)
+                    pools = pools_out.split() if rc == 0 else []
+                    if not pools:
+                        lines.append("no imported pools — nothing to scrub"
+                                     if rc == 0 else f"zpool list failed: {pools_out.strip()}")
+                    for p in pools:
+                        rc, out = await _run_text(["zpool", "scrub", p], timeout=5)
+                        lines.append(f"started: {p}" if rc == 0 else f"{p}: {out.strip()}")
+                    _, status_out = await _run_text(["zpool", "status", "-v"], timeout=10)
                     await websocket.send(json.dumps({
                         "type": "zfs_status",
-                        "output": "\n".join(lines) + "\n\n--- zpool status ---\n" + subprocess.run(
-                            ["zpool", "status", "-v"],
-                            capture_output=True, text=True).stdout,
+                        "output": "\n".join(lines) + "\n\n--- zpool status ---\n" + status_out,
                     }))
 
                 elif action == "snapshot_list":
@@ -1603,12 +1627,13 @@ async def ws_handler(websocket):
                     # snaps land at the top of the panel. Previously
                     # zfs returned creation-ascending and the JS sliced
                     # to first 20 — newest manual snaps got cut off.
-                    try:
-                        out = subprocess.check_output(
-                            ["zfs", "list", "-t", "snapshot", "-o", "name,used,creation",
-                             "-S", "creation", "-H"],
-                            text=True, stderr=subprocess.STDOUT)
-                        snaps = []
+                    # Async exec so a slow `zfs list` on a large pool
+                    # doesn't freeze every other client's event loop.
+                    _rc, out = await _run_text(
+                        ["zfs", "list", "-t", "snapshot", "-o", "name,used,creation",
+                         "-S", "creation", "-H"], timeout=15)
+                    snaps = []
+                    if _rc == 0:
                         for line in out.strip().splitlines():
                             parts = line.split('\t')
                             if len(parts) >= 2:
@@ -1617,8 +1642,6 @@ async def ws_handler(websocket):
                                     "used":     parts[1],
                                     "creation": parts[2] if len(parts) >= 3 else "",
                                 })
-                    except Exception:
-                        snaps = []
                     await websocket.send(json.dumps({"type": "snapshot_list", "snapshots": snaps}))
 
                 elif action == "snapshot_take":
@@ -1680,12 +1703,10 @@ async def ws_handler(websocket):
                         await websocket.send(json.dumps({"type": "error", "msg": str(e)}))
 
                 elif action == "be_list":
-                    try:
-                        out = subprocess.check_output(
-                            ["/usr/lib/kldload-installer/backend/bin/kbe", "list"],
-                            text=True, stderr=subprocess.STDOUT)
-                    except Exception as e:
-                        out = str(e)
+                    # Async — kbe list runs zfs commands that can stall
+                    # briefly on a busy pool.
+                    _, out = await _run_text(
+                        ["/usr/lib/kldload-installer/backend/bin/kbe", "list"], timeout=15)
                     await websocket.send(json.dumps({"type": "be_list", "output": out}))
 
                 elif action == "be_create":
@@ -4874,6 +4895,13 @@ class WebUIHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/" or self.path == "":
             self.path = "/index.html"
+        # /wallpaper alias — pretty URL for the tactical live-wallpaper
+        # page. Same target HTML, hot-reloads via the same SimpleHTTP
+        # path. Strip a query string if present (URL params are honoured
+        # by the page's own JS, not by the server).
+        if self.path == "/wallpaper" or self.path.startswith("/wallpaper?"):
+            qs = self.path[10:] if "?" in self.path else ""
+            self.path = "/wallpaper.html" + qs
         # Download endpoint for klab test run bundles. Matches
         #   /download/klab/<run-id>.tar.gz
         # Builds the tarball on the fly from /root/klab/<run-id>/ so we

@@ -1014,9 +1014,20 @@ ZFSREPO
       # RHEL requires Red Hat CDN repos
       k_log_to "$log" "RHEL install — skipping darksite (using Red Hat CDN only)"
     else
-      # Darksite available: add as high-priority repo, keep internet repos as fallback
-      # cost=1 means dnf prefers darksite packages but falls back to internet if needed
-      k_log_to "$log" "Darksite detected — adding local RPM mirror (internet fallback available)"
+      # Darksite available: add as the canonical source AND disable upstream
+      # repos. Background: prior pass kept upstream enabled "as a fallback"
+      # with cost=1 on the darksite, but dnf always picks the NEWEST version
+      # available across all enabled repos regardless of cost. fedora-updates
+      # ships fresher packages than the darksite snapshot, so dnf silently
+      # fell through to mirrors.fedoraproject.org — breaking the offline
+      # install promise on XPS (2026-05-18). cost is only a tiebreaker when
+      # versions match.
+      #
+      # New rule: darksite present → darksite ONLY. Missing package fails
+      # the install explicitly so the user knows to either rebuild the
+      # darksite or set KLDLOAD_ALLOW_INTERNET_FALLBACK=1 to opt back into
+      # the old hybrid behaviour.
+      k_log_to "$log" "Darksite detected — adding local RPM mirror as canonical source"
       cat > "${target}/etc/yum.repos.d/kldload-darksite.repo" <<DSREPO
 [kldload-darksite]
 name=kldload offline RPM mirror
@@ -1025,6 +1036,23 @@ enabled=1
 gpgcheck=0
 cost=1
 DSREPO
+
+      if [[ "${KLDLOAD_ALLOW_INTERNET_FALLBACK:-0}" != "1" ]]; then
+        # Disable upstream repos that were written earlier in this
+        # function (fedora.repo / centos.repo / rocky.repo / etc.).
+        # Strict offline mode: darksite is the only source.
+        for _up_repo in "${target}/etc/yum.repos.d/fedora.repo" \
+                        "${target}/etc/yum.repos.d/fedora-updates.repo" \
+                        "${target}/etc/yum.repos.d/centos.repo" \
+                        "${target}/etc/yum.repos.d/rocky.repo" \
+                        "${target}/etc/yum.repos.d/epel.repo"; do
+          [[ -f "$_up_repo" ]] || continue
+          sed -i 's/^enabled=1/enabled=0/g' "$_up_repo"
+          k_log_to "$log" "  disabled upstream repo (strict offline): $(basename "$_up_repo")"
+        done
+      else
+        k_log_to "$log" "  KLDLOAD_ALLOW_INTERNET_FALLBACK=1 → upstream repos stay enabled (hybrid mode)"
+      fi
     fi
   fi
 

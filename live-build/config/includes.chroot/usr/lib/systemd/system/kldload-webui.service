@@ -42,5 +42,37 @@ StandardOutput=journal
 StandardError=journal
 WorkingDirectory=/usr/local/share/kldload-webui
 
+# ── Brownout protection (2026-05-18) ──────────────────────────────────
+# The webui browns out when the host is busy (ZFS scrub, K8s build,
+# klab golden) because by default cgroup v2 gives every service the
+# same CPU/IO share. These knobs ensure the webui gets ~2× the share
+# of normal workloads under contention so the dashboard stays
+# responsive even when the box is buried.
+#
+# Nice=-5            kernel scheduler priority bump (range -20..19;
+#                    -5 is "noticeably preferred" without starving
+#                    anything important).
+# CPUWeight=200      cgroup v2 CPU weight (default 100); doubles the
+#                    webui's CPU slice when there's contention. No
+#                    effect when the system is idle, so this is pure
+#                    upside.
+# IOWeight=200       cgroup v2 IO weight (default 100); doubles disk
+#                    bandwidth share so a scrub doesn't starve the
+#                    webui's reads.
+# IOSchedulingClass=best-effort + Priority=2
+#                    Block-layer hint (separate from cgroup IOWeight)
+#                    that moves webui reads to a higher-priority lane
+#                    in the IO scheduler.
+# MemoryHigh=512M    throttle webui memory growth before it competes
+#                    with kubelet/etcd under pressure. Base footprint
+#                    is ~80MB; 512M absorbs log buffers + WebSocket
+#                    queues without OOMing.
+Nice=-5
+CPUWeight=200
+IOWeight=200
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
+MemoryHigh=512M
+
 [Install]
 WantedBy=multi-user.target
