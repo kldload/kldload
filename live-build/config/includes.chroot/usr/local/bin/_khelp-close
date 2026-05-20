@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Close the kldload help popup if it's open. No-op if not.
+#
+# Chained into every F2..F12 binding so pressing any F-key
+# automatically dismisses the F1 welcome / help overlay before the
+# selected action runs. The popup tracks its child PID in
+# /tmp/kldload-help.pid (see _khelp-toggle); killing that PID makes
+# `less` exit, which makes `display-popup -E` close the overlay.
+set -u
+PIDF=/tmp/kldload-help.pid
+[[ -f "$PIDF" ]] || exit 0
+pid=$(cat "$PIDF" 2>/dev/null || true)
+[[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null
+rm -f "$PIDF"
+exit 0

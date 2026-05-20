@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# kldload-loadtest — fire a multi-layer load that lights up every
+# cockpit window simultaneously. Designed for live keynote demos:
+# the operator runs this in one terminal, then walks the audience
+# through F6 cockpit, F9 TCP details, F4/F5 eBPF cockpits, Grafana
+# dashboards — every layer of the stack is now visibly busy.
+#
+# What it generates:
+#   * HTTP traffic at scale         → Hubble flows, cilium-lb hits,
+#                                     TCP_INFO bytes/rtt, conntrack
+#   * Block I/O against rpool       → ebpf_exporter bio_latency
+#                                     heatmap, ZFS txg + ARC churn,
+#                                     zpool iostat numbers move
+#   * Process fork storm            → Tetragon EXECVE rate spike,
+#                                     bpftool prog show CPU bumps
+#
+# Usage:
+#   kldload-loadtest [SECONDS] [--http-only|--io-only|--fork-only]
+#   defaults: 60 seconds, all three layers
+#
+# Safe to Ctrl-C — runs everything in tagged background jobs and
+# cleans up on exit (kills the kubectl-run pods + the local fio + the
+# fork loop). Idempotent on the demo deployment (deploys if missing).
+set -u
+DURATION="${1:-60}"
+MODE="${2:-all}"
+
+# Strip --prefix so positional args don't get confused.
+case "$MODE" in --*) ;; *) MODE="all" ;; esac
+
+# Colours for readable output.
+G=$'\e[32m'; Y=$'\e[33m'; C=$'\e[36m'; D=$'\e[2m'; B=$'\e[1m'; N=$'\e[0m'
+
+# Cleanup hook — kills everything we spawned. set -u with subshell &
+# patterns means we have to track PIDs explicitly.
+PIDS=()
+TMPFILE=""
+cleanup() {
+    echo
+    echo "${Y}[loadtest] tearing down…${N}"
+    for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null; done
+    kubectl delete pod -n default plow-load 2>/dev/null
+    kubectl delete pod -n default fortio-load 2>/dev/null
+    [[ -n "$TMPFILE" ]] && rm -f "$TMPFILE"
+    echo "${G}[loadtest] done.${N}"
+}
+trap cleanup INT TERM EXIT
+
+echo "${B}${C}═══ kldload-loadtest — ${DURATION}s of multi-layer load ═══${N}"
+echo "${D}Watch in another pane:  F6 (kernel cockpit), F9 (tcp top), F4/F5 eBPF, Grafana eBPF section${N}"
+echo
+
+# ─── HTTP load (drives Hubble + Cilium + TCP_INFO + Tetragon) ────────
+if [[ "$MODE" == "all" || "$MODE" == "--http-only" ]]; then
+    # Ensure the demo deployment exists; ignore if already there.
+    if ! kubectl get svc demo -n default >/dev/null 2>&1; then
+        echo "${Y}[http] deploying demo nginx + service…${N}"
+        kubectl apply -f /root/demo/keynote-demo.yaml 2>/dev/null \
+            || kubectl apply -f /usr/local/share/kldload/keynote-demo.yaml 2>/dev/null
+        # Give the pods a moment to land.
+        sleep 5
+    fi
+    echo "${G}[http] firing plow — 50 concurrent connections for ${DURATION}s against http://demo${N}"
+    # plow is a friendly HTTP load gen (https://github.com/six-ddc/plow);
+    # we run it inside the cluster via kubectl run so it's an in-cluster
+    # client — drives the cilium datapath, not the host's iptables.
+    kubectl run plow-load -n default --rm --restart=Never \
+        --image=ghcr.io/six-ddc/plow:latest \
+        -- -c 50 -d "${DURATION}s" http://demo/ \
+        > /dev/null 2>&1 &
+    PIDS+=($!)
+fi
+
+# ─── Block I/O load (drives ebpf_exporter bio_latency + ZFS internals) ─
+if [[ "$MODE" == "all" || "$MODE" == "--io-only" ]]; then
+    TMPFILE=$(mktemp /var/tmp/kldload-loadtest.fio.XXXXXX)
+    # 2GB sparse file for fio to thrash; written then random-read.
+    if command -v fio >/dev/null 2>&1; then
+        echo "${G}[io] fio random-rw against ${TMPFILE} for ${DURATION}s (drives ZFS txg + bio_latency)${N}"
+        fio --name=kldload-blast \
+            --filename="$TMPFILE" --size=2G \
+            --bs=8k --iodepth=32 --numjobs=4 \
+            --rw=randrw --rwmixread=70 \
+            --time_based --runtime="${DURATION}" \
+            --direct=1 --group_reporting \
+            > /dev/null 2>&1 &
+        PIDS+=($!)
+    else
+        echo "${Y}[io] fio not installed — falling back to dd loop${N}"
+        ( for i in $(seq 1 "$((DURATION/2))"); do
+              dd if=/dev/urandom of="$TMPFILE" bs=1M count=128 oflag=direct 2>/dev/null
+              dd if="$TMPFILE" of=/dev/null bs=4k iflag=direct 2>/dev/null
+          done ) &
+        PIDS+=($!)
+    fi
+fi
+
+# ─── Process fork storm (drives Tetragon EXECVE + bpftool prog runtime) ─
+if [[ "$MODE" == "all" || "$MODE" == "--fork-only" ]]; then
+    echo "${G}[fork] short-lived /bin/true exec loop for ${DURATION}s (drives Tetragon EXECVE)${N}"
+    # Fast, deterministic exec generator. ~200-1000 execs/sec depending
+    # on host CPU. /bin/true is the cheapest possible exec — measures
+    # the Tetragon EXEC path, not whatever the binary does after.
+    (
+        end=$(( $(date +%s) + DURATION ))
+        while [[ $(date +%s) -lt $end ]]; do
+            for _ in 1 2 3 4 5 6 7 8 9 10; do /bin/true; done
+        done
+    ) &
+    PIDS+=($!)
+fi
+
+echo
+echo "${B}${C}═══ load running — open F6 / F9 in another pane to watch ═══${N}"
+echo "${D}PIDs:${N} ${PIDS[*]}"
+echo "${D}Duration:${N} ${DURATION}s   ${D}Mode:${N} ${MODE}"
+echo "${D}Press Ctrl-C to stop early.${N}"
+echo
+
+# Wait for everything to finish (or trap to fire on Ctrl-C).
+for pid in "${PIDS[@]}"; do wait "$pid" 2>/dev/null; done

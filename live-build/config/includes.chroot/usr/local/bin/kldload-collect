@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# kldload-collect — capture the kernel cockpit's signal set as a
+# structured JSONL corpus suitable for training an AI assistant on
+# the kldload box's own behaviour over time.
+#
+# One invocation = one snapshot pass: runs each configured command,
+# captures its output, wraps it in a JSONL record with timestamp +
+# host + cluster context, and appends to a date-bucketed file in
+# /var/lib/kldload/training-corpus/.
+#
+# Designed to be called by a systemd timer (kldload-collect.timer)
+# every 60 seconds. Idempotent, safe to re-run, never blocks more
+# than a few seconds per command (timeout 5s default).
+#
+# Schema (one JSONL record per command per pass):
+#   {
+#     "ts":           "2026-05-19T20:00:00Z",
+#     "host":         "kldload-node",
+#     "cluster":      "klab",
+#     "cmd":          "bpftool prog show",
+#     "desc":         "every BPF program loaded into the kernel",
+#     "category":     "ebpf|cilium|zfs|k8s|host|tetragon",
+#     "exit_code":    0,
+#     "duration_ms":  42,
+#     "output_text":  "...raw...",
+#     "output_struct": { ... }   // present only when source emits JSON
+#   }
+#
+# Each command's records go in their own file:
+#   /var/lib/kldload/training-corpus/2026-05-19/bpftool-prog-show.jsonl
+#
+# Tunables (env or /etc/kldload/collect.conf):
+#   KLDLOAD_COLLECT_DIR     output root (default /var/lib/kldload/training-corpus)
+#   KLDLOAD_COLLECT_TIMEOUT per-command timeout in seconds (default 5)
+#   KLDLOAD_COLLECT_HOST    host label (default `hostname`)
+#   KLDLOAD_COLLECT_CLUSTER cluster label (default from /etc/kldload/cluster or hostname)
+set -u
+
+: "${KLDLOAD_COLLECT_DIR:=/var/lib/kldload/training-corpus}"
+: "${KLDLOAD_COLLECT_TIMEOUT:=5}"
+: "${KLDLOAD_COLLECT_HOST:=$(hostname)}"
+: "${KLDLOAD_COLLECT_CLUSTER:=$(cat /etc/kldload/cluster 2>/dev/null || hostname)}"
+
+# Allow site-local overrides
+[[ -f /etc/kldload/collect.conf ]] && . /etc/kldload/collect.conf
+
+DATE=$(date -u +%Y-%m-%d)
+OUTDIR="$KLDLOAD_COLLECT_DIR/$DATE"
+mkdir -p "$OUTDIR"
+
+# emit <category> <cmd> <desc> [structured_flag]
+#   <category> short tag for filtering
+#   <cmd>      command string (also used as filename, slugified)
+#   <desc>     one-line human description
+#   structured_flag: "json" if the command emits JSON directly
+emit() {
+    local category="$1" cmd="$2" desc="$3" structured="${4:-text}"
+    local slug
+    slug=$(echo "$cmd" | sed 's|[^a-zA-Z0-9-]|-|g; s|--*|-|g; s|^-||; s|-$||' | cut -c1-80)
+    local file="$OUTDIR/$slug.jsonl"
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local start_ns end_ns dur_ms
+    start_ns=$(date +%s%N)
+    local out exit_code
+    out=$(timeout "$KLDLOAD_COLLECT_TIMEOUT" bash -c "$cmd" 2>&1)
+    exit_code=$?
+    end_ns=$(date +%s%N)
+    dur_ms=$(( (end_ns - start_ns) / 1000000 ))
+
+    # Build JSONL record. We use jq if present (clean escaping),
+    # otherwise fall back to python -c (always present).
+    if command -v jq >/dev/null 2>&1; then
+        if [[ "$structured" == "json" ]] && [[ "$exit_code" -eq 0 ]]; then
+            # Output is structured JSON — embed both raw text and parsed struct.
+            jq -nc --arg ts "$ts" --arg host "$KLDLOAD_COLLECT_HOST" \
+               --arg cluster "$KLDLOAD_COLLECT_CLUSTER" \
+               --arg cmd "$cmd" --arg desc "$desc" --arg category "$category" \
+               --argjson exit_code "$exit_code" --argjson duration_ms "$dur_ms" \
+               --arg output_text "$out" \
+               --argjson output_struct "$(printf '%s' "$out" | jq -c . 2>/dev/null || echo null)" \
+               '{ts: $ts, host: $host, cluster: $cluster, cmd: $cmd, desc: $desc,
+                 category: $category, exit_code: $exit_code, duration_ms: $duration_ms,
+                 output_text: $output_text, output_struct: $output_struct}' \
+               >> "$file" 2>/dev/null
+        else
+            jq -nc --arg ts "$ts" --arg host "$KLDLOAD_COLLECT_HOST" \
+               --arg cluster "$KLDLOAD_COLLECT_CLUSTER" \
+               --arg cmd "$cmd" --arg desc "$desc" --arg category "$category" \
+               --argjson exit_code "$exit_code" --argjson duration_ms "$dur_ms" \
+               --arg output_text "$out" \
+               '{ts: $ts, host: $host, cluster: $cluster, cmd: $cmd, desc: $desc,
+                 category: $category, exit_code: $exit_code, duration_ms: $duration_ms,
+                 output_text: $output_text}' \
+               >> "$file" 2>/dev/null
+        fi
+    else
+        python3 -c "
+import json, sys
+rec = {
+  'ts': sys.argv[1], 'host': sys.argv[2], 'cluster': sys.argv[3],
+  'cmd': sys.argv[4], 'desc': sys.argv[5], 'category': sys.argv[6],
+  'exit_code': int(sys.argv[7]), 'duration_ms': int(sys.argv[8]),
+  'output_text': sys.argv[9],
+}
+if sys.argv[10] == 'json' and rec['exit_code'] == 0:
+    try: rec['output_struct'] = json.loads(sys.argv[9])
+    except Exception: pass
+print(json.dumps(rec))
+" "$ts" "$KLDLOAD_COLLECT_HOST" "$KLDLOAD_COLLECT_CLUSTER" \
+  "$cmd" "$desc" "$category" "$exit_code" "$dur_ms" "$out" "$structured" \
+  >> "$file"
+    fi
+}
+
+# Cilium kubectl-exec prefix — only useful if a cluster exists.
+K='kubectl -n kube-system exec ds/cilium -c cilium-agent --'
+
+# ─── ZFS / storage ───────────────────────────────────────────────────
+emit zfs "zpool list -o name,size,alloc,free,frag,cap,dedup,health"       "ZFS pools — capacity + fragmentation + health"
+emit zfs "zfs list -t snapshot -o name,used,creation -s creation"         "ZFS snapshots (chronological)"
+emit zfs "cat /proc/spl/kstat/zfs/arcstats | head -40"                    "ARC kstat (hits/misses/size/MRU/MFU)"
+emit zfs "tail -50 /proc/spl/kstat/zfs/dbgmsg"                            "Last 50 ZFS kernel narration lines"
+emit zfs "for d in \$(zpool list -H -o name); do echo === \$d ===; zpool status \$d; done" "Per-pool full status"
+
+# ─── eBPF / kernel ───────────────────────────────────────────────────
+emit ebpf "bpftool -j prog show"                                          "Every BPF program loaded (JSON)" json
+emit ebpf "bpftool -j map show"                                           "Every BPF map (JSON)" json
+emit ebpf "bpftool -j net show"                                           "Every BPF network attachment (JSON)" json
+
+# ─── Cilium / Hubble ─────────────────────────────────────────────────
+if kubectl get ds -n kube-system cilium >/dev/null 2>&1; then
+    emit cilium "$K cilium status -o json"                                "Cilium agent status (structured)" json
+    emit cilium "$K cilium bpf lb list"                                   "Cilium in-kernel LB service→backend map"
+    emit cilium "$K cilium bpf ct list global"                            "Cilium kernel connection tracking table"
+    emit cilium "$K cilium bpf metrics list"                              "Cilium BPF map pressure"
+    emit cilium "$K cilium endpoint list -o json"                         "Cilium endpoints (structured)" json
+    emit cilium "$K cilium identity list -o json"                         "Cilium identities (structured)" json
+fi
+
+# ─── Tetragon ────────────────────────────────────────────────────────
+if kubectl get ds -n kube-system tetragon >/dev/null 2>&1; then
+    emit tetragon "kubectl get tracingpolicies,tracingpoliciesnamespaced -A -o json" "TracingPolicies loaded" json
+    # Sample 5 seconds of Tetragon event stream
+    emit tetragon "timeout 5 kubectl logs -n kube-system ds/tetragon -c export-stdout --since=10s 2>&1 | head -200" \
+                  "5-second sample of Tetragon kernel event stream"
+fi
+
+# ─── Kubernetes ──────────────────────────────────────────────────────
+if kubectl version --client >/dev/null 2>&1 && kubectl get nodes >/dev/null 2>&1; then
+    emit k8s "kubectl get nodes -o json"                                  "Cluster nodes (structured)" json
+    emit k8s "kubectl get pods -A -o json"                                "Every pod cluster-wide (structured)" json
+    emit k8s "kubectl get svc -A -o json"                                 "Every Service (structured)" json
+    emit k8s "kubectl get netpol,cnp,ccnp -A -o json"                     "Every NetworkPolicy (structured)" json
+    emit k8s "kubectl top nodes 2>&1"                                     "Node CPU + memory"
+    emit k8s "kubectl top pods -A --sort-by=cpu 2>&1 | head -50"          "Top 50 pods by CPU"
+    emit k8s "kubectl get events -A --sort-by=.lastTimestamp 2>&1 | tail -50" "Last 50 cluster events"
+fi
+
+# ─── Host / hypervisor ───────────────────────────────────────────────
+emit host "uptime"                                                        "Load average + uptime"
+emit host "cat /proc/loadavg"                                             "Load avg (raw kernel)"
+emit host "free -b"                                                       "Memory (bytes)"
+emit host "df -PB1"                                                       "Disk usage (bytes)"
+emit host "ss -tneHpi state established | head -100"                      "ESTABLISHED TCP sockets with TCP_INFO"
+emit host "journalctl -k --since=30s --no-pager | head -100"              "Kernel ring buffer (last 30s)"
+
+if command -v virsh >/dev/null 2>&1; then
+    emit host "virsh list --all"                                          "libvirt domains (klab + k8s VMs)"
+fi
+if command -v nvidia-smi >/dev/null 2>&1; then
+    emit host "nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu --format=csv,noheader" \
+              "NVIDIA GPU utilisation snapshot"
+fi
+if command -v zfs_exporter >/dev/null 2>&1 || systemctl is-active --quiet zfs_exporter 2>/dev/null; then
+    emit host "curl -s http://localhost:9134/metrics | head -100"         "zfs_exporter Prometheus metrics (head)"
+fi
+
+# Optional: nightly tar-gz of the previous day's corpus for shipping
+# elsewhere. Disabled by default — uncomment if you want auto-archive.
+# YESTERDAY=$(date -u -d 'yesterday' +%Y-%m-%d)
+# if [[ -d "$KLDLOAD_COLLECT_DIR/$YESTERDAY" && ! -f "$KLDLOAD_COLLECT_DIR/$YESTERDAY.tar.gz" ]]; then
+#     tar -czf "$KLDLOAD_COLLECT_DIR/$YESTERDAY.tar.gz" -C "$KLDLOAD_COLLECT_DIR" "$YESTERDAY"
+# fi
+
+exit 0

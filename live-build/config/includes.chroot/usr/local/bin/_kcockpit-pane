@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Helper for the F6 kernel cockpit. Runs a single command inside an
+# infinite restart loop so the pane never goes "pane is dead" if the
+# command exits for any reason — kubectl context blip, cilium-agent
+# pod restart, watch hitting a transient exit, journalctl losing its
+# stream, etc. Two modes:
+#
+#   watch   — refresh on a 5s interval via watch(1). Used for
+#             snapshots (bpftool prog show, cilium status, virsh list)
+#   stream  — long-running follow command (hubble observe --follow,
+#             tetragon -f, zpool iostat 5, journalctl -kf)
+#
+# Quoting strategy: the command is received as a clean positional arg
+# (caller uses printf '%q' to escape it through tmux → sh -c → here).
+# We then write it to a temp script and execute that, which sidesteps
+# every nested-quote pitfall — awk and jq programs with literal
+# single-quotes pass through untouched.
+#
+# A 4-line banner is reprinted on every restart so the audience never
+# loses context: command line (cyan), description (dim), watch-mode
+# refresh hint, and a separator rule.
+#
+# Usage:  _kcockpit-pane <watch|stream> "<desc>" "<cmd>"
+set -u
+mode="$1"
+desc="$2"
+cmd="$3"
+
+C=$'\033[1;36m'; D=$'\033[2;37m'; Y=$'\033[33m'; N=$'\033[0m'
+
+# Write cmd to a temp script. mkdir -p in case /run/kldload is fresh.
+mkdir -p /run/kldload 2>/dev/null
+tmp=$(mktemp /run/kldload/cockpit-XXXXXX.sh) || tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+{
+    printf '#!/bin/bash\n'
+    printf 'set +e\n'
+    printf '%s\n' "$cmd"
+} > "$tmp"
+chmod +x "$tmp"
+
+banner() {
+    printf "${C}\$ %s${N}\n" "$cmd"
+    printf "${D}ℹ  %s${N}\n" "$desc"
+    if [ "$mode" = watch ]; then
+        printf "${D}↻  refreshing every 5s — Ctrl-C to abort${N}\n"
+    else
+        printf "${D}↻  live follow — Ctrl-C to abort, auto-reconnect on exit${N}\n"
+    fi
+    printf "${D}─────────────────────────────────────────────────────────────────────${N}\n"
+}
+
+while :; do
+    clear
+    banner
+    if [ "$mode" = watch ]; then
+        # watch reruns the script every 5s. The banner above stays
+        # frozen at the top of the screen; watch's own native header
+        # repeats the script path on each refresh below it.
+        watch -n 5 -c -t "$tmp"
+        rc=$?
+    else
+        "$tmp"
+        rc=$?
+    fi
+    printf "\n${Y}[cockpit pane exited rc=%d — restarting in 3s. Ctrl-C aborts.]${N}\n" "$rc"
+    sleep 3
+done

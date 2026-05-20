@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kldload — sample homepage redesign</title>
+<style>
+  /* Same tokens as the operator console (Direction A) — same brand,
+     warmer chrome for marketing. Single accent, hairline borders, mono
+     for any number/distro/version. */
+  :root {
+    --bg:        #0a0a0c;
+    --surface:   #141417;
+    --surface-2: #1c1c21;
+    --surface-3: #232329;
+    --border:    #26262d;
+    --border-2:  #34343d;
+    --text:      #e6e6ea;
+    --text-dim:  #8a8a93;
+    --text-mute: #5a5a63;
+
+    --accent:    #7c5cff;
+    --accent-dim:#5b3ed6;
+    --accent-soft: rgba(124,92,255,0.10);
+    --ok:        #10b981;
+    --warn:      #f59e0b;
+    --err:       #ef4444;
+
+    --mono: "JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,monospace;
+    --sans: "Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 15px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--text); text-decoration: none; }
+  code, .mono { font-family: var(--mono); }
+
+  /* nav */
+  .nav {
+    position: sticky; top: 0; z-index: 10;
+    backdrop-filter: blur(12px);
+    background: rgba(10,10,12,0.85);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 32px;
+    display: flex; align-items: center; gap: 32px;
+  }
+  .brand {
+    font-weight: 600; letter-spacing: -0.01em; font-size: 17px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .brand-mark {
+    width: 24px; height: 24px; border-radius: 6px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+    display: grid; place-items: center;
+    font-family: var(--mono); font-size: 12px; font-weight: 700; color: #fff;
+  }
+  .nav-links { display: flex; gap: 24px; }
+  .nav-links a { color: var(--text-dim); font-size: 13px; }
+  .nav-links a:hover { color: var(--text); }
+  .nav-cta { margin-left: auto; display: flex; gap: 10px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 14px; font-size: 13px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 5px; cursor: pointer;
+    transition: border-color 0.12s, background 0.12s;
+  }
+  .btn:hover { border-color: var(--border-2); background: var(--surface-3); }
+  .btn.primary {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
+  .btn.primary:hover { background: var(--accent-dim); border-color: var(--accent-dim); }
+
+  /* hero */
+  .hero {
+    padding: 120px 32px 80px;
+    max-width: 1100px; margin: 0 auto;
+    text-align: center;
+    position: relative;
+  }
+  .hero::before {
+    content: ""; position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 50% 0%, var(--accent-soft) 0%, transparent 60%);
+    pointer-events: none;
+  }
+  .hero-eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 11px;
+    color: var(--text-dim); letter-spacing: 0.04em;
+    padding: 4px 12px; border: 1px solid var(--border-2);
+    border-radius: 999px; background: var(--surface);
+    margin-bottom: 24px;
+  }
+  .hero-eyebrow .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+  h1.hero-title {
+    font-size: 64px; font-weight: 600; letter-spacing: -0.035em;
+    line-height: 1.05; margin-bottom: 22px;
+    background: linear-gradient(180deg, var(--text) 0%, var(--text-dim) 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  h1.hero-title em { font-style: normal; color: var(--accent); -webkit-text-fill-color: var(--accent); }
+  .hero-sub {
+    font-size: 19px; color: var(--text-dim); line-height: 1.5;
+    max-width: 640px; margin: 0 auto 36px;
+  }
+  .hero-cta { display: flex; gap: 12px; justify-content: center; }
+  .hero-cta .btn { padding: 11px 22px; font-size: 14px; }
+
+  .hero-meta {
+    margin-top: 72px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface);
+  }
+  .hero-meta > div {
+    padding: 18px 22px;
+    border-right: 1px solid var(--border);
+    text-align: left;
+  }
+  .hero-meta > div:last-child { border-right: none; }
+  .hero-meta .label {
+    font-size: 11px; color: var(--text-mute);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    margin-bottom: 6px;
+  }
+  .hero-meta .val {
+    font-family: var(--mono); font-size: 15px; font-weight: 500;
+  }
+
+  /* sections */
+  section { padding: 80px 32px; max-width: 1100px; margin: 0 auto; }
+  section.alt { background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); max-width: none; padding-left: 0; padding-right: 0; }
+  section.alt .inner { max-width: 1100px; margin: 0 auto; padding: 0 32px; }
+
+  .section-eyebrow {
+    font-family: var(--mono); font-size: 11px;
+    color: var(--accent); letter-spacing: 0.06em;
+    text-transform: uppercase; margin-bottom: 12px;
+  }
+  h2 { font-size: 36px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.1; margin-bottom: 14px; }
+  h2 + p.lead { font-size: 17px; color: var(--text-dim); max-width: 640px; line-height: 1.55; margin-bottom: 48px; }
+
+  /* distro grid */
+  .distro-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+  }
+  .distro {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 18px 20px; transition: border-color 0.12s, background 0.12s;
+    cursor: pointer;
+  }
+  .distro:hover { border-color: var(--accent); background: var(--surface-2); }
+  .distro .name { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+  .distro .ver { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+  .distro .ver .ok { color: var(--ok); }
+
+  /* feature grid */
+  .feature-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 32px;
+  }
+  .feature {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 28px 24px;
+    transition: border-color 0.15s;
+  }
+  .feature:hover { border-color: var(--border-2); }
+  .feature .icn {
+    width: 32px; height: 32px; border-radius: 6px;
+    background: var(--accent-soft); border: 1px solid rgba(124,92,255,0.3);
+    display: grid; place-items: center;
+    font-family: var(--mono); font-size: 14px; font-weight: 700; color: #b4a4ff;
+    margin-bottom: 16px;
+  }
+  .feature h3 { font-size: 16px; font-weight: 600; margin-bottom: 8px; letter-spacing: -0.01em; }
+  .feature p { color: var(--text-dim); font-size: 14px; line-height: 1.55; }
+
+  /* code block */
+  .code-block {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden; margin-top: 32px;
+  }
+  .code-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px; background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    font-family: var(--mono); font-size: 11px; color: var(--text-mute);
+  }
+  .code-bar .dots { display: flex; gap: 5px; }
+  .code-bar .dots span { width: 10px; height: 10px; border-radius: 50%; background: var(--surface-3); }
+  .code-bar .title { margin-left: auto; }
+  pre.code {
+    padding: 18px 20px; font-family: var(--mono); font-size: 13px; line-height: 1.7;
+    overflow: auto; color: var(--text);
+  }
+  pre.code .c { color: var(--text-mute); } /* comment */
+  pre.code .p { color: var(--accent); }     /* prompt */
+  pre.code .k { color: #b4a4ff; }            /* keyword */
+  pre.code .s { color: var(--ok); }          /* success */
+
+  /* split section */
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: center; }
+  .split-text h2 { font-size: 32px; }
+  .split-text p { color: var(--text-dim); font-size: 15px; margin-bottom: 16px; }
+  .split-text ul { margin-top: 20px; padding-left: 0; list-style: none; }
+  .split-text li {
+    padding: 10px 0 10px 28px; position: relative;
+    font-size: 14px; color: var(--text);
+    border-top: 1px solid var(--border);
+  }
+  .split-text li:first-child { border-top: none; }
+  .split-text li::before {
+    content: "✓"; position: absolute; left: 0; top: 11px;
+    color: var(--ok); font-weight: 700;
+  }
+  .split-text li code { color: var(--text-dim); font-size: 12px; }
+
+  /* footer */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 48px 32px;
+    color: var(--text-mute); font-size: 13px;
+  }
+  footer .inner { max-width: 1100px; margin: 0 auto; display: flex; gap: 32px; flex-wrap: wrap; }
+  footer a { color: var(--text-dim); margin-right: 18px; font-size: 13px; }
+  footer a:hover { color: var(--text); }
+  footer .copy { margin-left: auto; font-family: var(--mono); font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="brand">
+    <div class="brand-mark">k</div>
+    <span>kldload</span>
+  </div>
+  <div class="nav-links">
+    <a href="#features">Features</a>
+    <a href="#distros">Distros</a>
+    <a href="#install">Install</a>
+    <a href="#docs">Docs</a>
+    <a href="#blog">Blog</a>
+  </div>
+  <div class="nav-cta">
+    <a class="btn" href="#github">GitHub</a>
+    <a class="btn primary" href="#download">Download 1.1.0</a>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="hero-eyebrow">
+    <span class="dot"></span>
+    <span>1.1.0 · F44 live env · OpenZFS 2.4.1</span>
+  </div>
+  <h1 class="hero-title">Pick your distro.<br>Get <em>ZFS on root</em>.</h1>
+  <p class="hero-sub">
+    One ISO. Nine distros. Offline. kldload assembles the platform you want from the parts you choose —
+    CentOS, Debian, Ubuntu, Fedora, RHEL, Rocky, Arch, Alpine, FreeBSD — with ZFS on root, WireGuard,
+    eBPF, and KVM hypervisor with 100ms instant clones.
+  </p>
+  <div class="hero-cta">
+    <a class="btn primary" href="#download">Download ISO →</a>
+    <a class="btn" href="#docs">Read the docs</a>
+  </div>
+
+  <div class="hero-meta">
+    <div>
+      <div class="label">Distros</div>
+      <div class="val">9</div>
+    </div>
+    <div>
+      <div class="label">ISO size</div>
+      <div class="val">5.4 GB</div>
+    </div>
+    <div>
+      <div class="label">Time to install</div>
+      <div class="val">~12 min</div>
+    </div>
+    <div>
+      <div class="label">License</div>
+      <div class="val">MIT · Free</div>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="inner">
+    <div class="section-eyebrow">Distros</div>
+    <h2>One installer. Pick at boot.</h2>
+    <p class="lead">RPM and APT mirrors are baked into the ISO. Install offline — no Wi-Fi, no auth proxy, no surprise.</p>
+
+    <div class="distro-grid">
+      <div class="distro"><div class="name">CentOS Stream</div><div class="ver"><span class="ok">●</span> 9 · validated</div></div>
+      <div class="distro"><div class="name">Debian</div>      <div class="ver"><span class="ok">●</span> 13 · trixie</div></div>
+      <div class="distro"><div class="name">Ubuntu</div>      <div class="ver"><span class="ok">●</span> 24.04 · noble</div></div>
+      <div class="distro"><div class="name">Fedora</div>      <div class="ver"><span class="ok">●</span> 44 · live env</div></div>
+      <div class="distro"><div class="name">RHEL</div>        <div class="ver"><span class="ok">●</span> 9 · validated</div></div>
+      <div class="distro"><div class="name">Rocky Linux</div> <div class="ver"><span class="ok">●</span> 9 · validated</div></div>
+      <div class="distro"><div class="name">Arch Linux</div>  <div class="ver"><span class="ok">●</span> rolling</div></div>
+      <div class="distro"><div class="name">Alpine</div>      <div class="ver"><span class="ok">●</span> 3.21</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="section-eyebrow">What you get</div>
+  <h2>The platform, not just the OS.</h2>
+  <p class="lead">Most installers stop at the rootfs. kldload keeps going — boot environments, snapshots, mesh VPN, eBPF tracing, NVIDIA, container runtime, and an instant-clone KVM lab — all wired and signed before first boot.</p>
+
+  <div class="feature-grid">
+    <div class="feature">
+      <div class="icn">Z</div>
+      <h3>ZFS on root, properly</h3>
+      <p>Native rpool, dataset layout, sanoid-managed snapshots, ZFSBootMenu rollback. Clone, snapshot, rewind — zero rebuild.</p>
+    </div>
+    <div class="feature">
+      <div class="icn">⚡</div>
+      <h3>100ms VM clones</h3>
+      <p>klab spawns a full Linux VM from a golden ZFS image in under a second. Tear it down, spawn ten more. Zero copy.</p>
+    </div>
+    <div class="feature">
+      <div class="icn">🔒</div>
+      <h3>Secure Boot, signed chain</h3>
+      <p>shim → grub → vmlinuz → zfs.ko, all signed. Per-install MOK leaf cert, enrolled at first boot via MokManager.</p>
+    </div>
+    <div class="feature">
+      <div class="icn">⌘</div>
+      <h3>Offline darksites</h3>
+      <p>RPM and APT mirrors baked in. Install behind air gaps, in proxy hell, or off your phone tether — same ISO.</p>
+    </div>
+    <div class="feature">
+      <div class="icn">⌗</div>
+      <h3>WireGuard mesh</h3>
+      <p>Each node generates its own keypair, registers via the manager, gets a /24 in the cluster mesh — at install.</p>
+    </div>
+    <div class="feature">
+      <div class="icn">⚙</div>
+      <h3>K8s + Cilium eBPF</h3>
+      <p>kube-cluster bootstraps a control plane and N workers on ZFS instant clones, with Cilium eBPF networking out of the box.</p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="inner">
+    <div class="split">
+      <div class="split-text">
+        <div class="section-eyebrow">Install</div>
+        <h2>Boot the USB. Pick a profile. Walk away.</h2>
+        <p>The installer is one Python file and one HTML file. No Anaconda, no debian-installer screens, no Y/N text walls.
+           Pick a distro, pick a profile, click Install. You'll be at a desktop or an ssh prompt in twelve minutes.</p>
+        <ul>
+          <li>Three profiles: <code>desktop</code>, <code>server</code>, <code>core</code></li>
+          <li>Two editions: <code>free</code> (everything) and <code>core</code> (ZFS only)</li>
+          <li>Export to <code>qcow2 / vmdk / vhd / ova / raw</code> as a golden cloud-init image</li>
+          <li>Single static answers file for headless / scripted installs</li>
+        </ul>
+      </div>
+
+      <div class="code-block">
+        <div class="code-bar">
+          <div class="dots"><span></span><span></span><span></span></div>
+          <div class="title">install.sh — answers</div>
+        </div>
+<pre class="code"><span class="c"># headless install — single env file</span>
+<span class="k">PROFILE</span>=desktop
+<span class="k">DISTRO</span>=fedora
+<span class="k">EDITION</span>=free
+<span class="k">DISK</span>=/dev/nvme0n1
+<span class="k">HOSTNAME</span>=kldload-node
+<span class="k">ZFS_ENCRYPT</span>=1
+
+<span class="c"># or interactive</span>
+<span class="p">$</span> kldload-install-target
+<span class="s">  ✓ partitioned /dev/nvme0n1
+  ✓ created rpool · raidz2 · 1.8T
+  ✓ bootstrapped fedora 44 from darksite
+  ✓ signed kernel + initramfs
+  ✓ enrolled MOK · ready to boot</span>
+<span class="p">$</span> reboot</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="inner">
+    <div>
+      <a href="#about">About</a>
+      <a href="#docs">Docs</a>
+      <a href="#blog">Blog</a>
+      <a href="#github">GitHub</a>
+      <a href="#license">License</a>
+    </div>
+    <div class="copy">© 2026 kldload · MIT · v1.1.0</div>
+  </div>
+</footer>
+
+</body>
+</html>

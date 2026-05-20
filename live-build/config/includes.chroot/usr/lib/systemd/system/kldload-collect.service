@@ -1,0 +1,26 @@
+[Unit]
+Description=kldload-collect — snapshot the kernel cockpit's signal set as JSONL corpus
+Documentation=man:kldload-collect(8) https://kldload.com/docs/collect
+# Don't run before the cluster is up; collector handles missing pieces gracefully
+# anyway, but skipping the very-early-boot pass keeps the corpus clean.
+After=network-online.target
+ConditionPathExists=/usr/local/bin/kldload-collect
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# kubectl, virsh, cilium-cli all expect HOME / KUBECONFIG to be set;
+# systemd runs us in a sterile env by default. Plus PATH so bpftool /
+# bcc-tools / cilium-cli are findable.
+Environment=HOME=/root
+Environment=KUBECONFIG=/root/.kube/config
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Cap each pass to 60s total wall-clock — every individual command has its
+# own 5s timeout, so this is belt-and-suspenders for a pathological hang.
+TimeoutStartSec=60
+ExecStart=/usr/local/bin/kldload-collect
+# Stdout/stderr land in the journal; useful when debugging missing records.
+StandardOutput=journal
+StandardError=journal

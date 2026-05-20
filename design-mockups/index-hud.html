@@ -1,0 +1,967 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kldload — HUD direction (5 layers)</title>
+<style>
+  /* Direction E — heads-up display.
+     Layers, bottom up:
+       L1  live wallpaper  — WebGL fragment shader on <canvas>
+       L2  black panels    — five tones of near-black, 92-96% opacity
+       L3  wireframe       — SVG corner brackets, clipped-corner shapes,
+                             hairline grids in dark/mid grays
+       L4  neon edge       — cyan/green glow on the wireframe outline
+       L5  data            — bright-white numbers, mono caps labels
+                             with pulse on changing values
+     No purple. No "soft tints". Black on black, gray bones, neon edge,
+     white data. Like a fighter cockpit MFD.                                  */
+
+  :root {
+    /* L1: handled by canvas, not CSS                                        */
+
+    /* L2: black-on-black tonal stack                                        */
+    --k0:  #000000;
+    --k1:  #050505;
+    --k2:  #0a0a0a;
+    --k3:  #101010;
+    --k4:  #181818;
+
+    /* L3: wireframe grays                                                   */
+    --g1:  #1a1a1a;
+    --g2:  #2a2a2a;
+    --g3:  #3a3a3a;
+    --g4:  #525252;
+    --g5:  #707070;
+
+    /* L4: neon edge — cyan primary, green accent. Lock to ONE for chrome    */
+    --neon:        #00e5ff;
+    --neon-soft:   rgba(0,229,255,0.10);
+    --neon-glow:   rgba(0,229,255,0.50);
+    --neon-bright: #67f0ff;
+
+    --neon2:       #00ff88;        /* status: ok                              */
+    --neon2-glow:  rgba(0,255,136,0.50);
+
+    /* status                                                                */
+    --warn:  #ffb454;
+    --warn-glow: rgba(255,180,84,0.50);
+    --err:   #ff4757;
+    --err-glow:  rgba(255,71,87,0.50);
+
+    /* L5: data text                                                         */
+    --d-pri:  #f0f0f0;       /* primary readout                              */
+    --d-sec:  #a8a8a8;       /* secondary                                    */
+    --d-dim:  #6a6a6a;       /* labels, subtitles                            */
+    --d-mute: #404040;       /* tick marks, rule lines                       */
+
+    --mono: "JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--k0);
+    color: var(--d-pri);
+    font-family: var(--mono);
+    font-size: 12px; line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     L1 — WebGL canvas. Real shader, runs forever, eats no DOM.
+     ────────────────────────────────────────────────────────────────── */
+  #wallpaper {
+    position: fixed; inset: 0; z-index: 0;
+    width: 100%; height: 100%;
+    display: block;
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     L2 — black panels, 92-96% opacity. The wallpaper only bleeds at
+     the edges of the screen and through clipped corners.
+     ────────────────────────────────────────────────────────────────── */
+  .frame {
+    position: relative; z-index: 2;
+    background: var(--k1);
+    /* opacity isn't used — we use semi-transparent backgrounds so the
+       canvas shows through ONLY where we want it to. */
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     SHELL
+     ────────────────────────────────────────────────────────────────── */
+  .hud {
+    position: relative; z-index: 2;
+    display: grid; grid-template-columns: 240px 1fr 280px;
+    grid-template-rows: 56px 1fr 32px;
+    grid-template-areas:
+      "topbar topbar topbar"
+      "rail   stage  vitals"
+      "footer footer footer";
+    height: 100vh;
+    gap: 1px;
+    background: var(--k0);
+  }
+
+  /* ── TOP BAR ─────────────────────────────────────────────────────── */
+  header.topbar {
+    grid-area: topbar;
+    background: rgba(5,5,5,0.92);
+    border-bottom: 1px solid var(--g2);
+    display: flex; align-items: center;
+    padding: 0 18px; gap: 18px;
+    position: relative;
+  }
+  /* the neon edge runs ALONG the bottom border, hairline, glow */
+  header.topbar::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+    background: linear-gradient(90deg, transparent 0%, var(--neon) 6%, var(--neon) 94%, transparent 100%);
+    box-shadow: 0 0 8px var(--neon-glow);
+    animation: edge-breathe 4s ease-in-out infinite;
+  }
+  @keyframes edge-breathe { 0%,100% { opacity:0.65; } 50% { opacity:1; } }
+
+  .brand {
+    display: flex; align-items: center; gap: 12px;
+    font-family: var(--mono);
+  }
+  .brand-mark {
+    width: 30px; height: 30px;
+    position: relative;
+  }
+  .brand-mark svg { width:100%; height:100%; display:block; filter: drop-shadow(0 0 6px var(--neon-glow)); }
+  .brand-name {
+    font-size: 13px; letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--d-pri); font-weight: 500;
+  }
+  .brand-name .v { color: var(--neon); margin-left: 6px; font-size: 10px; letter-spacing: 0.18em; }
+
+  .topbar-cluster {
+    display: flex; gap: 16px; align-items: center;
+    margin-left: auto;
+    font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--d-dim);
+  }
+  .topbar-cluster .pair { display: flex; gap: 6px; align-items: center; }
+  .topbar-cluster .pair .lbl { color: var(--d-mute); }
+  .topbar-cluster .pair .val { color: var(--d-pri); }
+  .topbar-cluster .pair .val.ok { color: var(--neon2); text-shadow: 0 0 6px var(--neon2-glow); }
+
+  /* ── LEFT RAIL ───────────────────────────────────────────────────── */
+  aside.rail {
+    grid-area: rail;
+    background: rgba(8,8,8,0.94);
+    border-right: 1px solid var(--g2);
+    padding: 16px 0;
+    overflow: auto;
+    position: relative;
+  }
+  aside.rail::after {
+    content:""; position:absolute; top:0; right:-1px; bottom:0; width:1px;
+    background: linear-gradient(180deg, transparent 0%, var(--neon) 4%, var(--neon) 96%, transparent 100%);
+    box-shadow: 0 0 8px var(--neon-glow);
+    opacity: 0.5;
+  }
+
+  .rail-section {
+    padding: 14px 18px 6px;
+    font-size: 9px; letter-spacing: 0.30em; text-transform: uppercase;
+    color: var(--d-mute); font-weight: 600;
+    position: relative;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .rail-section::before {
+    content: ""; width: 4px; height: 4px; border-radius: 0;
+    background: var(--neon); box-shadow: 0 0 6px var(--neon-glow);
+  }
+  .rail-section::after {
+    content: ""; flex: 1; height: 1px;
+    background: linear-gradient(90deg, var(--g2) 0%, transparent 100%);
+  }
+
+  .rail-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 18px;
+    color: var(--d-sec); font-size: 12px; cursor: pointer;
+    border-left: 2px solid transparent;
+    position: relative;
+    letter-spacing: 0.04em;
+  }
+  .rail-item:hover { color: var(--d-pri); background: rgba(255,255,255,0.02); }
+  .rail-item.on {
+    color: var(--neon); background: linear-gradient(90deg, var(--neon-soft) 0%, transparent 100%);
+    border-left-color: var(--neon);
+    text-shadow: 0 0 8px var(--neon-glow);
+  }
+  .rail-item .marker {
+    width: 8px; height: 8px;
+    background: transparent; border: 1px solid var(--g4);
+    flex-shrink: 0;
+  }
+  .rail-item.on .marker { background: var(--neon); border-color: var(--neon); box-shadow: 0 0 6px var(--neon-glow); }
+  .rail-item .badge { margin-left: auto; font-size: 10px; color: var(--d-mute); }
+
+  /* ── STAGE (main) ────────────────────────────────────────────────── */
+  main.stage {
+    grid-area: stage;
+    background: rgba(0,0,0,0.0);
+    overflow: auto;
+    padding: 20px;
+    position: relative;
+  }
+
+  /* HUD panel — the L3 + L4 wireframe shape with clipped corners */
+  .hud-panel {
+    position: relative;
+    background: rgba(8,8,8,0.92);
+    border: 1px solid var(--g3);
+    /* clipped corners: top-right and bottom-left cut at 14px (F-35 vibe) */
+    clip-path: polygon(
+      0 0, calc(100% - 14px) 0, 100% 14px,
+      100% 100%, 14px 100%, 0 calc(100% - 14px));
+    margin-bottom: 16px;
+  }
+  /* the neon edge — drawn OVER the panel as an SVG outline that follows
+     the same clip-path. Implemented as a CSS gradient border via a
+     pseudo-element + matching clip-path. */
+  .hud-panel::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background:
+      linear-gradient(180deg, var(--neon) 0%, transparent 8%, transparent 92%, var(--neon) 100%),
+      linear-gradient(90deg,  var(--neon) 0%, transparent 8%, transparent 92%, var(--neon) 100%);
+    background-size: 1px 100%, 100% 1px;
+    background-repeat: no-repeat;
+    background-position: top left, top left;
+    opacity: 0.6;
+  }
+  /* corner brackets — 4 hard-coded SVG-ish boxes per panel               */
+  .hud-panel > .corner {
+    position: absolute; width: 18px; height: 18px;
+    border: 1px solid var(--neon);
+    pointer-events: none;
+    box-shadow: 0 0 6px var(--neon-glow);
+  }
+  .hud-panel > .corner.tl { top: -1px; left: -1px;  border-right: none; border-bottom: none; }
+  .hud-panel > .corner.tr { top: -1px; right: -1px; border-left:  none; border-bottom: none; }
+  .hud-panel > .corner.bl { bottom: -1px; left: -1px;  border-right: none; border-top: none; }
+  .hud-panel > .corner.br { bottom: -1px; right: -1px; border-left:  none; border-top: none; }
+
+  /* panel header — title + spec line                                     */
+  .hud-head {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--g2);
+    display: flex; align-items: center; gap: 14px;
+    background: linear-gradient(180deg, rgba(0,229,255,0.04) 0%, transparent 100%);
+  }
+  .hud-head::before {
+    content: "▸"; color: var(--neon); font-size: 10px;
+    text-shadow: 0 0 4px var(--neon-glow);
+  }
+  .hud-title {
+    font-size: 11px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--d-pri); font-weight: 500;
+  }
+  .hud-spec {
+    margin-left: auto;
+    font-size: 10px; letter-spacing: 0.10em;
+    color: var(--d-mute);
+  }
+  .hud-spec b { color: var(--neon); font-weight: 400; }
+
+  /* hairline tick row across the panel — pure decoration */
+  .ticks {
+    height: 8px; padding: 0 16px;
+    display: flex; gap: 6px; align-items: center;
+    border-bottom: 1px solid var(--g2);
+  }
+  .ticks > i {
+    flex: 1; height: 1px; background: var(--g3);
+    position: relative;
+  }
+  .ticks > i:nth-child(5n)::after,
+  .ticks > i:first-child::after,
+  .ticks > i:last-child::after {
+    content: ""; position: absolute; right: -1px; top: -3px;
+    width: 1px; height: 7px; background: var(--g4);
+  }
+
+  /* ── HERO BIG-NUMBER readout ─────────────────────────────────────── */
+  .readout-grid {
+    display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 1px;
+    background: var(--g2);
+    border: 1px solid var(--g3);
+    margin-bottom: 16px;
+  }
+  .readout {
+    background: rgba(5,5,5,0.95);
+    padding: 22px 22px;
+    position: relative;
+    overflow: hidden;
+  }
+  .readout-label {
+    font-size: 9px; letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--d-mute);
+    display: flex; align-items: center; gap: 6px;
+    margin-bottom: 14px;
+  }
+  .readout-label::before {
+    content: ""; width: 6px; height: 1px; background: var(--neon);
+    box-shadow: 0 0 4px var(--neon-glow);
+  }
+  .readout-val {
+    font-family: var(--mono); font-size: 36px; font-weight: 300;
+    letter-spacing: 0.02em;
+    color: var(--d-pri);
+    line-height: 1;
+    margin-bottom: 8px;
+  }
+  .readout-val.big { font-size: 48px; }
+  .readout-val .unit { font-size: 12px; color: var(--d-dim); margin-left: 6px; letter-spacing: 0.14em; text-transform: uppercase; }
+  .readout-val.live { animation: live-pulse 2.4s ease-in-out infinite; }
+  @keyframes live-pulse {
+    0%,100% { text-shadow: 0 0 0px transparent; }
+    50%     { text-shadow: 0 0 14px var(--neon-glow); color: var(--neon-bright); }
+  }
+  .readout-bar {
+    height: 3px; background: var(--g2); margin-top: 8px;
+    position: relative; overflow: hidden;
+  }
+  .readout-bar > i {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    background: var(--neon);
+    box-shadow: 0 0 8px var(--neon-glow);
+  }
+  .readout-bar > i.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn-glow); }
+  .readout-foot {
+    margin-top: 10px;
+    font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--d-dim);
+  }
+  .readout-foot.ok   { color: var(--neon2); }
+  .readout-foot.warn { color: var(--warn); }
+  .readout-foot.err  { color: var(--err); }
+
+  /* targeting reticle in upper-right corner of each readout — pure HUD */
+  .readout::after {
+    content: ""; position: absolute; top: 14px; right: 14px;
+    width: 16px; height: 16px;
+    border: 1px solid var(--g4);
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 4px transparent;
+  }
+  .readout::before {
+    content: ""; position: absolute; top: 21px; right: 7px;
+    width: 30px; height: 1px; background: var(--g4);
+    transform-origin: 0 0; transform: rotate(0deg);
+  }
+
+  /* ── two-column row ─────────────────────────────────────────────── */
+  .two-col { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+
+  /* ── waveform / spark — drawn in neon */
+  .spark {
+    width: 100%; height: 110px;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid var(--g2);
+    position: relative;
+  }
+  .spark svg { width:100%; height:100%; display:block; }
+  .spark .grid line { stroke: var(--g2); stroke-width: 0.5; }
+  .spark .axis line { stroke: var(--g3); stroke-width: 0.5; }
+  .spark .line {
+    fill: none; stroke: var(--neon); stroke-width: 1.2;
+    filter: drop-shadow(0 0 4px var(--neon-glow));
+  }
+  .spark .line.warn  { stroke: var(--warn);  filter: drop-shadow(0 0 4px var(--warn-glow)); }
+  .spark .line.green { stroke: var(--neon2); filter: drop-shadow(0 0 4px var(--neon2-glow)); }
+  .spark .area { fill: var(--neon-soft); }
+
+  /* ── data table — wireframe + data layer ─────────────────────────── */
+  table.hud-table { width: 100%; border-collapse: collapse; }
+  table.hud-table thead th {
+    text-align: left; padding: 8px 16px;
+    font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--d-dim); font-weight: 600;
+    border-bottom: 1px solid var(--g2);
+    background: rgba(0,0,0,0.4);
+  }
+  table.hud-table tbody td {
+    padding: 7px 16px;
+    color: var(--d-pri);
+    border-bottom: 1px solid var(--g1);
+    font-size: 11px;
+  }
+  table.hud-table tbody tr:hover { background: rgba(0,229,255,0.03); }
+  table.hud-table tbody tr.ok    td:first-child { color: var(--neon2); text-shadow: 0 0 4px var(--neon2-glow); }
+  table.hud-table tbody tr.warn  td:first-child { color: var(--warn);  text-shadow: 0 0 4px var(--warn-glow); }
+  table.hud-table tbody tr.err   td:first-child { color: var(--err);   text-shadow: 0 0 4px var(--err-glow); }
+  table.hud-table tbody tr.idle  td:first-child { color: var(--d-mute); }
+
+  .dim  { color: var(--d-dim); }
+  .mute { color: var(--d-mute); }
+
+  /* ── RIGHT VITALS — concentric data rings + key/value list ────────── */
+  aside.vitals {
+    grid-area: vitals;
+    background: rgba(8,8,8,0.94);
+    border-left: 1px solid var(--g2);
+    padding: 16px 18px;
+    overflow: auto;
+    position: relative;
+  }
+  aside.vitals::after {
+    content:""; position:absolute; top:0; left:-1px; bottom:0; width:1px;
+    background: linear-gradient(180deg, transparent 0%, var(--neon) 4%, var(--neon) 96%, transparent 100%);
+    box-shadow: 0 0 8px var(--neon-glow);
+    opacity: 0.5;
+  }
+
+  .vitals h3 {
+    font-size: 9px; letter-spacing: 0.30em; text-transform: uppercase;
+    color: var(--neon); margin-bottom: 10px; font-weight: 500;
+    text-shadow: 0 0 6px var(--neon-glow);
+    padding-bottom: 6px; border-bottom: 1px solid var(--g2);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .vitals h3::before { content: "[ "; color: var(--g4); }
+  .vitals h3::after { content: " ]"; color: var(--g4); margin-left: auto; }
+  .vitals .blk { margin-bottom: 18px; }
+  .vitals .kv { display: flex; padding: 3px 0; font-size: 11px; }
+  .vitals .kv .k { color: var(--d-mute); width: 96px; }
+  .vitals .kv .v { color: var(--d-pri); }
+  .vitals .kv .v.ok { color: var(--neon2); }
+  .vitals .kv .v.warn { color: var(--warn); }
+
+  /* concentric ring */
+  .ring-wrap {
+    display: flex; justify-content: center; padding: 10px 0 8px;
+  }
+  .ring {
+    width: 140px; height: 140px;
+    position: relative;
+  }
+  .ring svg { width:100%; height:100%; display:block; }
+  .ring .ring-num {
+    position: absolute; inset: 0;
+    display: grid; place-items: center;
+    font-family: var(--mono);
+    font-size: 28px; font-weight: 300;
+    color: var(--d-pri);
+    text-shadow: 0 0 12px var(--neon-glow);
+  }
+  .ring .ring-sub {
+    position: absolute; inset: 0;
+    display: grid; place-items: end center; padding-bottom: 32px;
+    font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--d-dim);
+  }
+
+  /* ── FOOTER ───────────────────────────────────────────────────── */
+  footer.footbar {
+    grid-area: footer;
+    background: rgba(0,0,0,0.95);
+    border-top: 1px solid var(--g2);
+    padding: 0 18px;
+    display: flex; align-items: center; gap: 18px;
+    font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--d-mute);
+    position: relative;
+  }
+  footer.footbar::before {
+    content:""; position:absolute; left:0; right:0; top:-1px; height:1px;
+    background: linear-gradient(90deg, transparent 0%, var(--neon) 6%, var(--neon) 94%, transparent 100%);
+    box-shadow: 0 0 8px var(--neon-glow);
+    animation: edge-breathe 4s ease-in-out infinite;
+  }
+  footer.footbar b { color: var(--neon); }
+  footer.footbar .right { margin-left: auto; }
+  footer.footbar .right .live { color: var(--neon2); animation: live-pulse 2.4s ease-in-out infinite; }
+
+  /* honor reduced-motion */
+  @media (prefers-reduced-motion: reduce) {
+    .readout-val.live, header.topbar::after, footer.footbar::before,
+    footer.footbar .right .live { animation: none !important; }
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     CLICK FEEDBACK — Canadian cool. ONE ring expands from the cursor,
+     fades in ~280ms, never overlaps itself. No second effect, no sound,
+     no full-screen flash. Acknowledgement, not theatre.
+     ────────────────────────────────────────────────────────────────── */
+  .click-ripple {
+    position: fixed; pointer-events: none; z-index: 9999;
+    width: 14px; height: 14px; margin: -7px 0 0 -7px;
+    border: 1px solid var(--neon);
+    border-radius: 50%;
+    box-shadow: 0 0 6px var(--neon-glow);
+    animation: ripple 280ms cubic-bezier(0.2, 0.6, 0.2, 1) forwards;
+  }
+  @keyframes ripple {
+    0%   { transform: scale(0.4); opacity: 0.85; }
+    100% { transform: scale(3.6); opacity: 0;    }
+  }
+
+  /* button/item press — brief glow lift on mousedown, settles immediately */
+  .rail-item:active,
+  table.hud-table tbody tr:active,
+  .topbar-cluster .pair:active {
+    background: rgba(0,229,255,0.06);
+    transition: background 90ms ease-out;
+  }
+
+  /* wallpaper picker toggle in topbar */
+  .wp-picker {
+    background: transparent; border: 1px solid var(--g3);
+    color: var(--d-sec); font-family: var(--mono);
+    font-size: 9px; letter-spacing: 0.20em; text-transform: uppercase;
+    padding: 4px 10px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .wp-picker:hover { border-color: var(--neon); color: var(--neon); }
+  .wp-picker .current { color: var(--neon); }
+
+  /* honor reduced-motion for clicks too */
+  @media (prefers-reduced-motion: reduce) {
+    .click-ripple { animation: none !important; display: none; }
+  }
+
+  /* scrollbar — keep on brand */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--k1); }
+  ::-webkit-scrollbar-thumb { background: var(--g2); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--neon); }
+</style>
+</head>
+<body>
+
+<!-- L1: live wallpaper, real fragment shader -->
+<canvas id="wallpaper"></canvas>
+
+<!-- L2-L5: HUD shell -->
+<div class="hud">
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 30 30" fill="none">
+          <polygon points="15,2 27,26 3,26" stroke="#00e5ff" stroke-width="1.2" fill="rgba(0,229,255,0.06)"/>
+          <circle cx="15" cy="18" r="4" stroke="#00e5ff" stroke-width="0.8" fill="none"/>
+          <circle cx="15" cy="18" r="1.2" fill="#00e5ff"/>
+          <line x1="15" y1="11" x2="15" y2="13.5" stroke="#00e5ff" stroke-width="0.8"/>
+        </svg>
+      </div>
+      <div class="brand-name">kldload<span class="v">v1.1.0</span></div>
+    </div>
+    <div class="topbar-cluster">
+      <div class="pair"><span class="lbl">node</span><span class="val">10.100.10.118</span></div>
+      <div class="pair"><span class="lbl">kernel</span><span class="val">6.19.14</span></div>
+      <div class="pair"><span class="lbl">zfs</span><span class="val">2.4.1</span></div>
+      <div class="pair"><span class="lbl">link</span><span class="val ok">●&nbsp;active</span></div>
+      <button class="wp-picker" id="wp-toggle" title="cycle wallpaper">
+        <span>BG</span><span class="current" id="wp-name">NEBULA</span>
+      </button>
+    </div>
+  </header>
+
+  <aside class="rail">
+    <div class="rail-section">Operate</div>
+    <div class="rail-item on"><span class="marker"></span>Dashboard</div>
+    <div class="rail-item"><span class="marker"></span>ZFS Pools<span class="badge">02</span></div>
+    <div class="rail-item"><span class="marker"></span>KVM &amp; klab<span class="badge">07</span></div>
+    <div class="rail-item"><span class="marker"></span>Logs</div>
+
+    <div class="rail-section">Build</div>
+    <div class="rail-item"><span class="marker"></span>Profiles</div>
+    <div class="rail-item"><span class="marker"></span>Darksites</div>
+    <div class="rail-item"><span class="marker"></span>Export images</div>
+
+    <div class="rail-section">Infra</div>
+    <div class="rail-item"><span class="marker"></span>Kubernetes</div>
+    <div class="rail-item"><span class="marker"></span>Boot envs</div>
+    <div class="rail-item"><span class="marker"></span>Secure boot</div>
+  </aside>
+
+  <main class="stage">
+
+    <!-- HERO READOUT -->
+    <div class="readout-grid">
+      <div class="readout">
+        <div class="readout-label">SYSTEM STATUS</div>
+        <div class="readout-val big live">NOMINAL</div>
+        <div class="readout-foot ok">UPTIME 3D 14H 22M · LOAD 1.20</div>
+      </div>
+      <div class="readout">
+        <div class="readout-label">POOL CAPACITY</div>
+        <div class="readout-val">22<span class="unit">%</span></div>
+        <div class="readout-bar"><i style="width:22%"></i></div>
+        <div class="readout-foot">412G / 1.8T · +1.4G/24H</div>
+      </div>
+      <div class="readout">
+        <div class="readout-label">VMS ACTIVE</div>
+        <div class="readout-val">07<span class="unit">/09</span></div>
+        <div class="readout-bar"><i style="width:78%"></i></div>
+        <div class="readout-foot">2 STOPPED · 0 FAILED</div>
+      </div>
+      <div class="readout">
+        <div class="readout-label">SNAPSHOT LAG</div>
+        <div class="readout-val">038<span class="unit">M</span></div>
+        <div class="readout-bar"><i class="warn" style="width:42%"></i></div>
+        <div class="readout-foot warn">SANOID SKIPPED · LOAD 4.2</div>
+      </div>
+    </div>
+
+    <!-- WAVEFORM + EVENTS -->
+    <div class="two-col">
+      <div class="hud-panel">
+        <span class="corner tl"></span><span class="corner tr"></span>
+        <span class="corner bl"></span><span class="corner br"></span>
+        <div class="hud-head">
+          <span class="hud-title">Throughput · TANK</span>
+          <span class="hud-spec">LAST 30M · <b>READ 128 MB/s</b> · WRITE 42 MB/s</span>
+        </div>
+        <div class="ticks"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <div style="padding: 14px 18px;">
+          <div class="spark">
+            <svg viewBox="0 0 600 110" preserveAspectRatio="none">
+              <g class="grid">
+                <line x1="0"   y1="22"  x2="600" y2="22"/>
+                <line x1="0"   y1="55"  x2="600" y2="55"/>
+                <line x1="0"   y1="88"  x2="600" y2="88"/>
+                <line x1="120" y1="0"   x2="120" y2="110"/>
+                <line x1="240" y1="0"   x2="240" y2="110"/>
+                <line x1="360" y1="0"   x2="360" y2="110"/>
+                <line x1="480" y1="0"   x2="480" y2="110"/>
+              </g>
+              <path class="area" d="M0,100 L0,42 30,40 60,38 90,30 120,28 150,33 180,22 210,25 240,18 270,20 300,12 330,17 360,14 390,9 420,18 450,11 480,7 510,15 540,10 570,12 600,8 L600,110 0,110 Z"/>
+              <path class="line" d="M0,42 L30,40 60,38 90,30 120,28 150,33 180,22 210,25 240,18 270,20 300,12 330,17 360,14 390,9 420,18 450,11 480,7 510,15 540,10 570,12 600,8"/>
+              <path class="line green" d="M0,72 L30,70 60,68 90,65 120,67 150,62 180,64 210,60 240,58 270,62 300,55 330,58 360,52 390,54 420,50 450,52 480,48 510,50 540,46 570,48 600,44"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="hud-panel">
+        <span class="corner tl"></span><span class="corner tr"></span>
+        <span class="corner bl"></span><span class="corner br"></span>
+        <div class="hud-head">
+          <span class="hud-title">Event Stream</span>
+          <span class="hud-spec">LAST 30M · <b>12 EVT</b></span>
+        </div>
+        <table class="hud-table">
+          <tbody>
+            <tr class="ok">  <td>● SNAP</td><td class="dim">2M</td><td>tank/vm/k8s‑01@daily</td></tr>
+            <tr class="ok">  <td>● START</td><td class="dim">14M</td><td>klab‑debian13</td></tr>
+            <tr class="warn"><td>● SKIP</td><td class="dim">38M</td><td>sanoid · load 4.2</td></tr>
+            <tr class="ok">  <td>● SCRUB</td><td class="dim">1H</td><td>tank · 0 errors</td></tr>
+            <tr class="ok">  <td>● KBE</td><td class="dim">3H</td><td>BE 1.1.0‑dev‑pre</td></tr>
+            <tr class="err"> <td>● ERR</td><td class="dim">3H</td><td>kbe · grub.cfg under SB</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- VM TABLE -->
+    <div class="hud-panel">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+      <div class="hud-head">
+        <span class="hud-title">Virtual Machines · Lock List</span>
+        <span class="hud-spec">9 TARGETS · 7 ACTIVE · <b>2 IDLE</b></span>
+      </div>
+      <table class="hud-table">
+        <thead><tr>
+          <th>STATUS</th><th>NAME</th><th>PROFILE</th><th>DISTRO</th><th>vCPU</th><th>RAM</th><th>IP</th><th>UPTIME</th><th>TAGS</th>
+        </tr></thead>
+        <tbody>
+          <tr class="ok"><td>● ACTIVE</td><td>k8s-01</td><td>kvm</td><td>fedora 44</td><td>4</td><td>8G</td><td>192.168.122.11</td><td>2D 14H</td><td class="dim">control-plane</td></tr>
+          <tr class="ok"><td>● ACTIVE</td><td>k8s-02</td><td>kvm</td><td>fedora 44</td><td>4</td><td>8G</td><td>192.168.122.12</td><td>2D 14H</td><td class="dim">worker</td></tr>
+          <tr class="ok"><td>● ACTIVE</td><td>k8s-03</td><td>kvm</td><td>fedora 44</td><td>4</td><td>8G</td><td>192.168.122.13</td><td>2D 14H</td><td class="dim">worker</td></tr>
+          <tr class="ok"><td>● ACTIVE</td><td>klab-debian13</td><td>desktop</td><td>debian 13</td><td>2</td><td>4G</td><td>192.168.122.42</td><td>3H 12M</td><td></td></tr>
+          <tr class="ok"><td>● ACTIVE</td><td>klab-fedora44</td><td>desktop</td><td>fedora 44</td><td>2</td><td>4G</td><td>192.168.122.43</td><td>1D 02H</td><td></td></tr>
+          <tr class="warn"><td>● DEGRD</td><td>klab-ubuntu24</td><td>desktop</td><td>ubuntu 24.04</td><td>2</td><td>4G</td><td>192.168.122.45</td><td>22M</td><td class="dim">guest agent down</td></tr>
+          <tr class="idle"><td>○ IDLE</td><td>klab-rocky</td><td>server</td><td>rocky 9</td><td>2</td><td>2G</td><td class="mute">—</td><td class="mute">—</td><td></td></tr>
+          <tr class="idle"><td>○ IDLE</td><td>klab-arch</td><td>desktop</td><td>arch</td><td>2</td><td>4G</td><td class="mute">—</td><td class="mute">—</td><td></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+  </main>
+
+  <aside class="vitals">
+    <div class="blk">
+      <h3>vitals</h3>
+      <div class="ring-wrap">
+        <div class="ring">
+          <svg viewBox="0 0 100 100">
+            <circle cx="50" cy="50" r="44" fill="none" stroke="#1a1a1a" stroke-width="3"/>
+            <circle cx="50" cy="50" r="44" fill="none" stroke="#00e5ff" stroke-width="3"
+                    stroke-dasharray="276" stroke-dashoffset="61"
+                    transform="rotate(-90 50 50)"
+                    style="filter: drop-shadow(0 0 6px #00e5ff);"/>
+            <circle cx="50" cy="50" r="36" fill="none" stroke="#1a1a1a" stroke-width="1"/>
+            <circle cx="50" cy="50" r="28" fill="none" stroke="#1a1a1a" stroke-width="1"/>
+            <line x1="50" y1="2"  x2="50" y2="6"  stroke="#3a3a3a"/>
+            <line x1="50" y1="94" x2="50" y2="98" stroke="#3a3a3a"/>
+            <line x1="2"  y1="50" x2="6"  y2="50" stroke="#3a3a3a"/>
+            <line x1="94" y1="50" x2="98" y2="50" stroke="#3a3a3a"/>
+          </svg>
+          <div class="ring-num">78<span style="font-size:14px; color: var(--d-dim);">%</span></div>
+          <div class="ring-sub">CPU READY</div>
+        </div>
+      </div>
+      <div class="kv"><div class="k">load</div><div class="v">1.20 1.04 0.92</div></div>
+      <div class="kv"><div class="k">uptime</div><div class="v">3D 14H 22M</div></div>
+      <div class="kv"><div class="k">hostid</div><div class="v">7a3f9c11</div></div>
+    </div>
+
+    <div class="blk">
+      <h3>capacity</h3>
+      <div class="kv"><div class="k">tank</div><div class="v">412G / 4.0T</div></div>
+      <div class="readout-bar" style="margin: 4px 0 8px;"><i style="width:10%"></i></div>
+      <div class="kv"><div class="k">rpool</div><div class="v">32G / 460G</div></div>
+      <div class="readout-bar" style="margin: 4px 0;"><i style="width:7%"></i></div>
+    </div>
+
+    <div class="blk">
+      <h3>secure boot</h3>
+      <div class="kv"><div class="k">state</div><div class="v ok">ENABLED</div></div>
+      <div class="kv"><div class="k">mok</div><div class="v">enrolled</div></div>
+      <div class="kv"><div class="k">chain</div><div class="v">shim → grub → vmlinuz</div></div>
+      <div class="kv"><div class="k">zfs.ko</div><div class="v ok">SIGNED</div></div>
+    </div>
+
+    <div class="blk">
+      <h3>kubernetes</h3>
+      <div class="kv"><div class="k">nodes</div><div class="v ok">5 / 5 READY</div></div>
+      <div class="kv"><div class="k">cilium</div><div class="v">1.16.4 ebpf</div></div>
+      <div class="kv"><div class="k">etcd</div><div class="v ok">HEALTHY</div></div>
+      <div class="kv"><div class="k">version</div><div class="v">1.31.2</div></div>
+    </div>
+  </aside>
+
+  <footer class="footbar">
+    <span><b>↑↓</b> nav</span>
+    <span><b>:</b> cmd</span>
+    <span><b>/</b> filter</span>
+    <span><b>p</b> pools</span>
+    <span><b>v</b> vms</span>
+    <span><b>l</b> logs</span>
+    <span><b>s</b> snapshot</span>
+    <span><b>x</b> destroy</span>
+    <span class="right"><span class="live">●</span> link · 12ms · build d2f4e91</span>
+  </footer>
+
+</div>
+
+<!-- ── Live wallpaper — two shaders: NEBULA + BREADBOARD ──────────────── -->
+<script>
+/*
+  Bottom layer is a real fragment shader. Two options, click the BG button
+  in the topbar to swap. Both run SUBSERVIENT — slow, low-saturation, with
+  vignette pushing the centre dark so data reads. The HUD panels sit on top
+  at 92-96% opacity, so only the screen edges and clipped corners reveal
+  the shader. Atmosphere at the periphery, data front-and-centre.
+*/
+const canvas = document.getElementById('wallpaper');
+const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+
+const VS = `
+  attribute vec2 p;
+  void main() { gl_Position = vec4(p, 0.0, 1.0); }
+`;
+
+const SHADERS = {
+  /* ── NEBULA — slow drifting cyan/green dust + pinpoint stars ─────── */
+  NEBULA: `
+    precision highp float;
+    uniform vec2 u_res; uniform float u_t;
+    float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+    float noise(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);
+      return mix(mix(hash(i),hash(i+vec2(1,0)),u.x),
+                 mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x),u.y);}
+    float fbm(vec2 p){float v=0.,a=.5;for(int i=0;i<5;i++){v+=a*noise(p);p*=2.;a*=.5;}return v;}
+    void main(){
+      vec2 uv=(gl_FragCoord.xy-.5*u_res)/u_res.y;
+      float t=u_t*0.05;
+      vec2 q1=uv*1.4+vec2(t*0.5,t*0.3);
+      vec2 q2=uv*2.2-vec2(t*0.4,t*0.6);
+      float n=fbm(q1)*0.6+fbm(q2)*0.4;
+      vec3 col=mix(vec3(0.005,0.015,0.025),vec3(0.04,0.18,0.28),n);
+      col+=vec3(0.10,0.30,0.40)*pow(n,3.0)*0.6;
+      col+=vec3(0.02,0.10,0.06)*smoothstep(0.4,0.8,fbm(uv*3.0+t*0.2));
+      vec2 sp=floor(uv*80.0+vec2(0.0,t*0.05));
+      float h=hash(sp);
+      vec2 fp=fract(uv*80.0+vec2(0.0,t*0.05))-0.5;
+      float s=smoothstep(0.04,0.0,length(fp))*step(0.992,h);
+      s*=0.5+0.5*sin(u_t*(0.5+h*2.0)+h*30.0);
+      col+=vec3(0.9,0.95,1.0)*s;
+      float vig=smoothstep(1.4,0.4,length(uv));
+      col*=0.45+0.55*vig;
+      col*=0.85;
+      gl_FragColor=vec4(col,1.0);
+    }
+  `,
+
+  /* ── BREADBOARD — PCB silkscreen with electrons flowing along traces.
+       Repeating grid of pads, traces routing between them, electron pulses
+       moving at ~10% normal speed. Olive-green solder mask base, cyan
+       electrons, dim copper traces. Calmer than nebula. ─────────────── */
+  BREADBOARD: `
+    precision highp float;
+    uniform vec2 u_res; uniform float u_t;
+
+    // signed distance to a horizontal/vertical capsule
+    float sdSegment(vec2 p, vec2 a, vec2 b, float r) {
+      vec2 pa = p-a, ba = b-a;
+      float h = clamp(dot(pa,ba)/dot(ba,ba), 0.0, 1.0);
+      return length(pa - ba*h) - r;
+    }
+    // small grid hash so traces are deterministic per cell
+    float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+
+    void main(){
+      vec2 uv=(gl_FragCoord.xy-.5*u_res)/u_res.y;
+      float t=u_t*0.10;          // SLOW — Canadian-cool
+
+      // base: very dark olive-black solder mask
+      vec3 col = vec3(0.012, 0.022, 0.018);
+
+      // grid of pads every 0.16 units
+      vec2 cell = uv * 6.0;
+      vec2 cid  = floor(cell);
+      vec2 cf   = fract(cell) - 0.5;
+
+      // pad: small donut at every cell centre
+      float pad = abs(length(cf) - 0.05) - 0.012;
+      pad = smoothstep(0.0, 0.006, -pad);
+      col += vec3(0.18, 0.10, 0.04) * pad * 0.6;        // copper-orange
+
+      // copper traces — horizontal or vertical, decided by hash per cell
+      float h1 = hash(cid);
+      float h2 = hash(cid + vec2(1.0, 0.0));
+      float trace = 999.0;
+      // horizontal trace if hash threshold met
+      if (h1 > 0.55) {
+        float d = sdSegment(cf, vec2(-0.5, 0.0), vec2(0.5, 0.0), 0.012);
+        trace = min(trace, d);
+      }
+      // vertical trace
+      if (h2 > 0.55) {
+        float d = sdSegment(cf, vec2(0.0, -0.5), vec2(0.0, 0.5), 0.012);
+        trace = min(trace, d);
+      }
+      float traceMask = smoothstep(0.0, 0.004, -trace);
+      col += vec3(0.16, 0.09, 0.03) * traceMask;        // dim copper
+
+      // electrons: bright cyan blip moving along traces
+      // each cell with a horizontal trace has 1 pulse moving rightward
+      // each cell with a vertical trace has 1 pulse moving upward
+      // blip at position determined by t and cell hash for phase offset
+      float phaseH = fract(t + hash(cid + 0.7));
+      float phaseV = fract(t + hash(cid + 1.3));
+      if (h1 > 0.55) {
+        vec2 ep = vec2(-0.5 + phaseH, 0.0);
+        float d = length(cf - ep);
+        col += vec3(0.20, 0.85, 1.0) * smoothstep(0.04, 0.0, d) * 0.55;
+      }
+      if (h2 > 0.55) {
+        vec2 ep = vec2(0.0, -0.5 + phaseV);
+        float d = length(cf - ep);
+        col += vec3(0.20, 0.85, 1.0) * smoothstep(0.04, 0.0, d) * 0.55;
+      }
+
+      // very subtle silkscreen text dots (random sparse) for texture
+      float silk = step(0.995, hash(floor(uv * 30.0)));
+      col += vec3(0.04, 0.06, 0.05) * silk;
+
+      // vignette
+      float vig=smoothstep(1.5,0.4,length(uv));
+      col*=0.40+0.60*vig;
+      col*=0.85;
+
+      gl_FragColor=vec4(col,1.0);
+    }
+  `,
+};
+
+let prog, u_res, u_t, currentName = 'NEBULA';
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+function loadShader(name) {
+  if (!gl) return;
+  if (prog) gl.deleteProgram(prog);
+  prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, SHADERS[name]));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  const loc = gl.getAttribLocation(prog, 'p');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  u_res = gl.getUniformLocation(prog, 'u_res');
+  u_t   = gl.getUniformLocation(prog, 'u_t');
+  currentName = name;
+  const lbl = document.getElementById('wp-name');
+  if (lbl) lbl.textContent = name;
+}
+
+if (gl) {
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+  loadShader('NEBULA');
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width  = Math.floor(window.innerWidth  * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+    canvas.style.width  = window.innerWidth  + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener('resize', resize); resize();
+
+  const t0 = performance.now();
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function frame() {
+    const t = (performance.now() - t0) / 1000;
+    gl.uniform2f(u_res, canvas.width, canvas.height);
+    gl.uniform1f(u_t, reduced ? 0 : t);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (!reduced) requestAnimationFrame(frame);
+  }
+  frame();
+} else {
+  canvas.style.background = 'radial-gradient(ellipse at 30% 30%, #0a1828 0%, #000 70%)';
+}
+
+/* wallpaper picker — cycles through SHADERS keys */
+document.getElementById('wp-toggle').addEventListener('click', () => {
+  const names = Object.keys(SHADERS);
+  const next = names[(names.indexOf(currentName) + 1) % names.length];
+  loadShader(next);
+});
+
+/* ──────────────────────────────────────────────────────────────────
+   Click ripple — Canadian cool. One ring per click, that's it.
+   ────────────────────────────────────────────────────────────────── */
+document.addEventListener('click', (e) => {
+  const r = document.createElement('div');
+  r.className = 'click-ripple';
+  r.style.left = e.clientX + 'px';
+  r.style.top  = e.clientY + 'px';
+  document.body.appendChild(r);
+  setTimeout(() => r.remove(), 320);
+}, true);
+</script>
+
+</body>
+</html>

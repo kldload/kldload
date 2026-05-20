@@ -1,0 +1,808 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kldload — demoscene direction</title>
+<style>
+  /* Direction D — demoscene shader aesthetic.
+     Painterly dark base with magenta/cyan radial blooms, drifting petal
+     particles, soft DOF haze. Foreground UI is crisp glass on top of
+     atmosphere. Typography channels demoscene credit rolls — wide
+     letter-spacing all caps for chrome, monospace for data. Triangle/
+     sigil brand mark instead of round logo.
+
+     Palette comes from the cherry-blossom + ruin shader stills:
+       - deep purple-black canvas (NOT pure black — has warmth)
+       - dusty magenta/rose primary
+       - dusty teal/cyan secondary
+       - warm peach for rare highlights
+       - faded pink for soft accents */
+
+  :root, :root[data-theme="dark"] {
+    /* canvas — purple-black, not pure black */
+    --bg:        #0a0612;
+    --bg-deep:   #06030d;
+    --surface:   rgba(20,12,28,0.78);     /* glass panels */
+    --surface-2: rgba(30,18,42,0.82);
+    --surface-3: rgba(48,28,62,0.85);
+    --border:    rgba(180,120,180,0.14);
+    --border-2:  rgba(210,140,200,0.30);
+
+    --text:      #f5e8f0;     /* warm white, slight pink */
+    --text-soft: #d4bfd0;
+    --text-dim:  #9a7e96;
+    --text-mute: #6a526a;
+
+    /* the demoscene palette */
+    --rose:        #e0568f;       /* primary brand — dusty cherry */
+    --rose-soft:   rgba(224,86,143,0.14);
+    --rose-glow:   rgba(224,86,143,0.40);
+    --rose-edge:   rgba(224,86,143,0.55);
+
+    --magenta:     #c4408b;       /* deeper rose for hover */
+    --pink:        #f7c2d9;       /* faded petal highlights */
+
+    --teal:        #3d8e9a;       /* secondary — dusty cyan */
+    --teal-bright: #67c1d4;
+    --teal-soft:   rgba(103,193,212,0.14);
+    --teal-glow:   rgba(103,193,212,0.35);
+    --teal-edge:   rgba(103,193,212,0.55);
+
+    --peach:       #f7b88c;       /* rare warm highlight */
+    --peach-soft:  rgba(247,184,140,0.14);
+    --peach-glow:  rgba(247,184,140,0.35);
+
+    --amber:       #d4a258;       /* warning */
+    --crimson:     #c93a4f;       /* error — deep, not bright */
+
+    --mono: "JetBrains Mono","IBM Plex Mono",ui-monospace,monospace;
+    --sans: "Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  :root[data-theme="light"] {
+    /* light mode: dawn instead of dusk — pale rose canvas */
+    --bg:        #f6e6ea;
+    --bg-deep:   #ead4dc;
+    --surface:   rgba(255,250,252,0.82);
+    --surface-2: rgba(248,232,238,0.85);
+    --surface-3: rgba(240,218,228,0.90);
+    --border:    rgba(180,90,140,0.18);
+    --border-2:  rgba(180,90,140,0.32);
+
+    --text:      #2a1230;
+    --text-soft: #4a2848;
+    --text-dim:  #7c5878;
+    --text-mute: #b09cab;
+
+    --rose:        #b8336e;
+    --rose-soft:   rgba(184,51,110,0.10);
+    --rose-glow:   rgba(184,51,110,0.30);
+    --rose-edge:   rgba(184,51,110,0.55);
+    --magenta:     #962556;
+    --pink:        #e688ad;
+
+    --teal:        #1f6a78;
+    --teal-bright: #2c8b9d;
+    --teal-soft:   rgba(31,106,120,0.10);
+    --teal-glow:   rgba(31,106,120,0.25);
+    --teal-edge:   rgba(31,106,120,0.55);
+
+    --peach:       #d97a3c;
+    --peach-soft:  rgba(217,122,60,0.10);
+    --peach-glow:  rgba(217,122,60,0.30);
+
+    --amber:       #a06820;
+    --crimson:     #a31f33;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+
+  body {
+    background: var(--bg-deep);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     ATMOSPHERIC BACKDROP — slow plasma, almost imperceptible
+     Three layers stacked:
+       1. base painterly blooms (static)
+       2. slow-cycling gradient drift (90s cycle, 60% opacity over base)
+       3. ultra-faint petals (0.15 opacity, 70-90s drift)
+     Result: feels alive, never distracts. Watch the page for 30s and
+     you notice; glance at it and it's just dark.
+     ────────────────────────────────────────────────────────────────── */
+  .backdrop {
+    position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background:
+      radial-gradient(ellipse 1100px 700px at 12% 18%, rgba(224,86,143,0.10) 0%, transparent 55%),
+      radial-gradient(ellipse 900px 600px at 88% 22%,  rgba(103,193,212,0.08) 0%, transparent 55%),
+      radial-gradient(ellipse 800px 500px at 60% 95%,  rgba(247,184,140,0.06) 0%, transparent 55%),
+      radial-gradient(ellipse 700px 500px at 5% 100%,  rgba(60,20,80,0.30) 0%, transparent 60%),
+      var(--bg);
+  }
+  /* slow-drifting overlay — animates 4 radial blooms back and forth */
+  .plasma {
+    position: fixed; inset: -10%; z-index: 0; pointer-events: none;
+    background:
+      radial-gradient(ellipse 600px 400px at 20% 30%, rgba(224,86,143,0.07) 0%, transparent 50%),
+      radial-gradient(ellipse 500px 400px at 80% 70%, rgba(103,193,212,0.06) 0%, transparent 50%),
+      radial-gradient(ellipse 400px 300px at 60% 20%, rgba(247,184,140,0.05) 0%, transparent 50%),
+      radial-gradient(ellipse 500px 350px at 30% 85%, rgba(196,64,139,0.05) 0%, transparent 50%);
+    animation: plasma-drift 90s ease-in-out infinite alternate;
+    filter: blur(40px);
+    will-change: transform;
+  }
+  @keyframes plasma-drift {
+    0%   { transform: translate(0, 0)        rotate(0deg)   scale(1); }
+    33%  { transform: translate(2%, -1.5%)   rotate(0.5deg) scale(1.04); }
+    66%  { transform: translate(-1.5%, 1%)   rotate(-0.4deg) scale(0.98); }
+    100% { transform: translate(1%, 1.5%)    rotate(0.2deg) scale(1.02); }
+  }
+
+  /* film grain — barely there */
+  .grain {
+    position: fixed; inset: 0; z-index: 1; pointer-events: none;
+    opacity: 0.03;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+  }
+
+  /* ghost petals — much fainter and slower than v1 */
+  .petals { position: fixed; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
+  .petal {
+    position: absolute; bottom: -20px;
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--rose);
+    opacity: 0.14;
+    filter: blur(1.5px);
+    animation: drift 78s linear infinite;
+    box-shadow: 0 0 10px var(--rose-glow);
+  }
+  .petal.teal  { background: var(--teal-bright); box-shadow: 0 0 10px var(--teal-glow); opacity: 0.12; }
+  .petal.pink  { background: var(--pink); opacity: 0.10; box-shadow: 0 0 8px rgba(247,194,217,0.30); }
+  .petal.peach { background: var(--peach); box-shadow: 0 0 10px var(--peach-glow); opacity: 0.11; }
+  @keyframes drift {
+    0%   { transform: translateY(0)        translateX(0);     opacity: 0; }
+    8%   { opacity: 0.15; }
+    50%  { transform: translateY(-55vh)    translateX(35px); }
+    92%  { opacity: 0.13; }
+    100% { transform: translateY(-115vh)   translateX(-25px); opacity: 0; }
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     SHELL — glass panels float over the atmosphere
+     ────────────────────────────────────────────────────────────────── */
+  .app {
+    position: relative; z-index: 2;
+    display: grid; grid-template-columns: 230px 1fr;
+    height: 100vh;
+  }
+
+  /* rail — glass with backdrop blur */
+  aside.nav {
+    background: var(--surface);
+    backdrop-filter: blur(18px) saturate(1.2);
+    -webkit-backdrop-filter: blur(18px) saturate(1.2);
+    border-right: 1px solid var(--border);
+    padding: 22px 0;
+    display: flex; flex-direction: column;
+    position: relative;
+  }
+
+  /* triangle sigil brand */
+  .brand {
+    padding: 0 20px 28px; display: flex; align-items: center; gap: 12px;
+  }
+  .brand-mark {
+    width: 36px; height: 36px;
+    position: relative;
+    flex-shrink: 0;
+  }
+  .brand-mark svg { width: 100%; height: 100%; display: block; filter: drop-shadow(0 0 8px var(--rose-glow)); }
+  .brand-name {
+    font-family: var(--mono);
+    font-size: 13px; font-weight: 500;
+    letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--text);
+  }
+  .brand-sub {
+    font-family: var(--mono);
+    font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--rose); margin-top: 2px;
+    opacity: 0.85;
+  }
+
+  /* group labels — wide letter-spacing demoscene credits style */
+  .nav-section {
+    padding: 22px 22px 8px;
+    font-family: var(--mono);
+    font-size: 9px; letter-spacing: 0.30em; text-transform: uppercase;
+    color: var(--text-mute); font-weight: 600;
+  }
+  .nav-section::after {
+    content: ""; display: block; height: 1px; margin-top: 6px;
+    background: linear-gradient(90deg, var(--border-2) 0%, transparent 100%);
+  }
+
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 22px; margin: 0;
+    color: var(--text-soft); font-size: 13px; cursor: pointer;
+    border-left: 2px solid transparent;
+    transition: color 0.2s, background 0.2s;
+  }
+  .nav-item:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+  .nav-item.active {
+    color: var(--text);
+    background: linear-gradient(90deg, var(--rose-soft) 0%, transparent 100%);
+    border-left-color: var(--rose);
+    box-shadow: inset 0 0 30px -10px var(--rose-glow);
+  }
+  .nav-item .ic {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--text-mute);
+    flex-shrink: 0;
+  }
+  .nav-item.active .ic { background: var(--rose); box-shadow: 0 0 8px var(--rose-glow); }
+  .nav-item[data-cat="zfs"]  .ic { background: var(--teal-bright); box-shadow: 0 0 6px var(--teal-glow); }
+  .nav-item[data-cat="vm"]   .ic { background: var(--peach); box-shadow: 0 0 6px var(--peach-glow); }
+  .nav-item[data-cat="logs"] .ic { background: var(--pink); }
+  .nav-item .badge {
+    margin-left: auto; font-family: var(--mono); font-size: 10px;
+    color: var(--text-mute); letter-spacing: 0.04em;
+  }
+
+  .nav-foot {
+    margin-top: auto; padding: 14px 22px;
+    border-top: 1px solid var(--border);
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.10em;
+    color: var(--text-mute);
+  }
+
+  /* main */
+  main { display: flex; flex-direction: column; overflow: hidden; }
+
+  header.bar {
+    height: 52px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    backdrop-filter: blur(18px) saturate(1.2);
+    -webkit-backdrop-filter: blur(18px) saturate(1.2);
+    display: flex; align-items: center;
+    padding: 0 24px; gap: 14px;
+  }
+  .crumbs {
+    color: var(--text-soft);
+    font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.16em; text-transform: uppercase;
+  }
+  .crumbs strong { color: var(--text); font-weight: 500; }
+  .bar-search {
+    margin-left: auto; display: flex; align-items: center; gap: 8px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border);
+    padding: 6px 12px; border-radius: 4px; min-width: 320px;
+    font-family: var(--mono); font-size: 12px; color: var(--text-mute);
+  }
+  .bar-search:focus-within {
+    border-color: var(--rose-edge); box-shadow: 0 0 0 3px var(--rose-soft);
+  }
+  .bar-search kbd {
+    margin-left: auto; font-family: var(--mono); font-size: 10px;
+    color: var(--text-soft); background: rgba(255,255,255,0.05);
+    padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border-2);
+  }
+  .icon-btn {
+    width: 32px; height: 32px; border-radius: 4px;
+    display: grid; place-items: center;
+    background: transparent; border: 1px solid transparent; cursor: pointer;
+    color: var(--text-dim); font-family: var(--mono); font-size: 13px;
+  }
+  .icon-btn:hover { background: rgba(255,255,255,0.04); color: var(--text); border-color: var(--border); }
+  .theme-toggle {
+    background: transparent; border: 1px solid var(--border-2);
+    color: var(--text-dim); cursor: pointer;
+    padding: 4px 10px; border-radius: 4px;
+    font-family: var(--mono); font-size: 10px;
+    letter-spacing: 0.12em; text-transform: uppercase;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .theme-toggle:hover { color: var(--rose); border-color: var(--rose-edge); }
+
+  .view { flex: 1; overflow: auto; padding: 28px 32px; }
+
+  /* ──────────────────────────────────────────────────────────────────
+     HERO — credits-roll typography
+     ────────────────────────────────────────────────────────────────── */
+  .hero-credits {
+    margin-bottom: 30px;
+    padding: 24px 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    position: relative;
+  }
+  .hero-credits::before, .hero-credits::after {
+    content: ""; position: absolute; left: 0; right: 0; height: 1px;
+    background: linear-gradient(90deg, transparent 0%, var(--rose-edge) 30%, var(--teal-edge) 70%, transparent 100%);
+  }
+  .hero-credits::before { top: -1px; }
+  .hero-credits::after  { bottom: -1px; }
+
+  .credit-eyebrow {
+    font-family: var(--mono);
+    font-size: 10px; letter-spacing: 0.40em; text-transform: uppercase;
+    color: var(--rose); margin-bottom: 12px;
+    text-shadow: 0 0 12px var(--rose-glow);
+  }
+  .credit-title {
+    font-family: var(--mono);
+    font-size: 32px; letter-spacing: 0.10em; text-transform: uppercase;
+    font-weight: 300; color: var(--text);
+    margin-bottom: 6px;
+  }
+  .credit-sub {
+    font-family: var(--mono);
+    font-size: 11px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     STAT TILES — credits-style: name (big caps) + role (tiny caps)
+     ────────────────────────────────────────────────────────────────── */
+  .stat-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 4px; overflow: hidden;
+    margin-bottom: 28px;
+  }
+  .stat {
+    background: var(--surface);
+    padding: 22px 24px;
+    position: relative;
+    transition: background 0.2s;
+  }
+  .stat:hover { background: var(--surface-2); }
+  .stat::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent-glow);
+  }
+  .stat[data-c="rose"]  { --accent: var(--rose);  --accent-glow: var(--rose-glow); }
+  .stat[data-c="teal"]  { --accent: var(--teal-bright); --accent-glow: var(--teal-glow); }
+  .stat[data-c="peach"] { --accent: var(--peach); --accent-glow: var(--peach-glow); }
+  .stat[data-c="pink"]  { --accent: var(--pink);  --accent-glow: rgba(247,194,217,0.30); }
+
+  .stat-val {
+    font-family: var(--mono);
+    font-size: 28px; font-weight: 300;
+    letter-spacing: 0.04em;
+    color: var(--text);
+    margin-bottom: 10px;
+    text-shadow: 0 0 16px var(--accent-glow);
+  }
+  .stat-val .unit {
+    font-size: 12px; color: var(--text-dim);
+    letter-spacing: 0.10em; margin-left: 6px;
+    text-shadow: none;
+  }
+  .stat-label {
+    font-family: var(--mono);
+    font-size: 9px; letter-spacing: 0.30em; text-transform: uppercase;
+    color: var(--text-mute); font-weight: 600;
+  }
+  .stat-trend {
+    font-family: var(--mono);
+    font-size: 10px; letter-spacing: 0.06em;
+    color: var(--text-dim); margin-top: 6px;
+  }
+  .stat-trend.up   { color: var(--teal-bright); }
+  .stat-trend.down { color: var(--peach); }
+
+  /* ──────────────────────────────────────────────────────────────────
+     PANELS
+     ────────────────────────────────────────────────────────────────── */
+  .two-col { display: grid; grid-template-columns: 2fr 1fr; gap: 18px; margin-bottom: 18px; }
+  .panel {
+    background: var(--surface);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: 4px; overflow: hidden;
+  }
+  .panel-head {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    position: relative;
+  }
+  .panel-head::after {
+    content: ""; position: absolute; bottom: -1px; left: 0; height: 1px;
+    width: 40%;
+    background: linear-gradient(90deg, var(--rose) 0%, transparent 100%);
+  }
+  .panel.teal  .panel-head::after { background: linear-gradient(90deg, var(--teal-bright) 0%, transparent 100%); }
+  .panel.peach .panel-head::after { background: linear-gradient(90deg, var(--peach) 0%, transparent 100%); }
+
+  .panel-title {
+    font-family: var(--mono);
+    font-size: 11px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--text); font-weight: 500;
+  }
+  .panel-meta {
+    margin-left: auto;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em;
+    color: var(--text-mute);
+  }
+
+  /* tables */
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  thead th {
+    text-align: left; padding: 9px 20px;
+    font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--text-mute); font-weight: 600;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody td {
+    padding: 8px 20px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-soft);
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(224,86,143,0.04); }
+
+  /* status pills — soft, not loud */
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 1px 9px; border-radius: 2px;
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.18em;
+    text-transform: uppercase; font-weight: 600;
+  }
+  .pill .dot { width: 4px; height: 4px; border-radius: 50%; }
+  .pill.teal   { color: var(--teal-bright); border: 1px solid var(--teal-edge); background: var(--teal-soft); }
+  .pill.teal   .dot { background: var(--teal-bright); box-shadow: 0 0 6px var(--teal-glow); }
+  .pill.rose   { color: var(--rose); border: 1px solid var(--rose-edge); background: var(--rose-soft); }
+  .pill.rose   .dot { background: var(--rose); box-shadow: 0 0 6px var(--rose-glow); }
+  .pill.peach  { color: var(--peach); border: 1px solid rgba(247,184,140,0.4); background: var(--peach-soft); }
+  .pill.peach  .dot { background: var(--peach); box-shadow: 0 0 6px var(--peach-glow); }
+  .pill.crimson{ color: var(--crimson); border: 1px solid rgba(201,58,79,0.5); background: rgba(201,58,79,0.10); }
+  .pill.crimson .dot { background: var(--crimson); }
+  .pill.idle   { color: var(--text-mute); border: 1px solid var(--border-2); background: transparent; }
+  .pill.idle   .dot { background: var(--text-mute); }
+
+  .dim  { color: var(--text-dim); }
+  .mute { color: var(--text-mute); }
+
+  /* sparkline */
+  .spark { width: 100%; height: 110px; display: block; }
+  .spark .area-rose { fill: rgba(224,86,143,0.18); }
+  .spark .line-rose { fill: none; stroke: var(--rose); stroke-width: 1.4; filter: drop-shadow(0 0 6px var(--rose-glow)); }
+  .spark .line-teal { fill: none; stroke: var(--teal-bright); stroke-width: 1.4; filter: drop-shadow(0 0 6px var(--teal-glow)); }
+  .spark .line-peach{ fill: none; stroke: var(--peach); stroke-width: 1.2; filter: drop-shadow(0 0 4px var(--peach-glow)); }
+
+  /* buttons */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 16px; font-family: var(--mono); font-size: 10px;
+    letter-spacing: 0.20em; text-transform: uppercase; font-weight: 600;
+    background: transparent; border: 1px solid var(--border-2);
+    color: var(--text-soft); border-radius: 3px; cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn:hover { color: var(--text); border-color: var(--rose-edge); background: var(--rose-soft); box-shadow: 0 0 18px var(--rose-glow); }
+  .btn.primary {
+    color: var(--text); border-color: var(--rose);
+    background: linear-gradient(135deg, var(--rose-soft) 0%, transparent 100%);
+    box-shadow: inset 0 0 24px var(--rose-soft);
+  }
+  .btn.primary:hover { background: linear-gradient(135deg, var(--rose) 0%, var(--magenta) 100%); border-color: var(--rose); box-shadow: 0 0 24px var(--rose-glow); }
+
+  .row { display: flex; align-items: center; gap: 12px; }
+  .grow { flex: 1; }
+
+  /* ──────────────────────────────────────────────────────────────────
+     MICRO-RENDERING — chrome details that move slowly
+     ────────────────────────────────────────────────────────────────── */
+
+  /* active nav item: faint sheen that travels every 6s */
+  .nav-item.active { position: relative; overflow: hidden; }
+  .nav-item.active::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(110deg,
+      transparent 0%,
+      transparent 40%,
+      rgba(255,255,255,0.05) 50%,
+      transparent 60%,
+      transparent 100%);
+    transform: translateX(-100%);
+    animation: sheen 7s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes sheen {
+    0%, 70%   { transform: translateX(-100%); }
+    100%      { transform: translateX(100%); }
+  }
+
+  /* panel rim-light: faint inner top highlight */
+  .panel { position: relative; }
+  .panel::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+    background: linear-gradient(90deg,
+      transparent 0%,
+      rgba(255,255,255,0.06) 30%,
+      rgba(255,255,255,0.10) 50%,
+      rgba(255,255,255,0.06) 70%,
+      transparent 100%);
+    pointer-events: none;
+  }
+
+  /* stat tile: very slow pulse on the top accent line */
+  .stat::before { animation: line-breathe 8s ease-in-out infinite; }
+  @keyframes line-breathe {
+    0%, 100% { opacity: 0.55; }
+    50%      { opacity: 1; }
+  }
+
+  /* buttons get a glass refraction on hover — gradient slides across */
+  .btn { position: relative; overflow: hidden; }
+  .btn::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(110deg,
+      transparent 0%,
+      transparent 40%,
+      rgba(255,255,255,0.08) 50%,
+      transparent 60%,
+      transparent 100%);
+    transform: translateX(-100%);
+    transition: transform 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: none;
+  }
+  .btn:hover::after { transform: translateX(100%); }
+
+  /* search input gets a faint cyan rim that breathes */
+  .bar-search { position: relative; }
+  .bar-search::after {
+    content: ""; position: absolute; inset: -1px; border-radius: 4px;
+    border: 1px solid var(--teal-edge);
+    opacity: 0.4;
+    pointer-events: none;
+    animation: search-breathe 5s ease-in-out infinite;
+  }
+  @keyframes search-breathe {
+    0%, 100% { opacity: 0.15; }
+    50%      { opacity: 0.40; }
+  }
+
+  /* category dots in nav — slow halo pulse */
+  .nav-item .ic { position: relative; }
+  .nav-item .ic::after {
+    content: ""; position: absolute; inset: -3px; border-radius: 50%;
+    background: inherit;
+    opacity: 0.35; filter: blur(3px);
+    animation: dot-halo 4s ease-in-out infinite;
+  }
+  @keyframes dot-halo {
+    0%, 100% { transform: scale(1); opacity: 0.25; }
+    50%      { transform: scale(1.6); opacity: 0.45; }
+  }
+
+  /* sparkline lines breathe — drop-shadow strength oscillates */
+  .spark .line-rose { animation: line-glow 6s ease-in-out infinite; }
+  .spark .line-teal { animation: line-glow 6s ease-in-out infinite; animation-delay: 2s; }
+  .spark .line-peach{ animation: line-glow 6s ease-in-out infinite; animation-delay: 4s; }
+  @keyframes line-glow {
+    0%, 100% { filter: drop-shadow(0 0 4px var(--rose-glow)); }
+    50%      { filter: drop-shadow(0 0 10px var(--rose-glow)); }
+  }
+
+  /* honor reduced-motion: kill all animations for users who opt out */
+  @media (prefers-reduced-motion: reduce) {
+    .plasma, .petal, .nav-item.active::after, .stat::before,
+    .bar-search::after, .nav-item .ic::after,
+    .spark .line-rose, .spark .line-teal, .spark .line-peach {
+      animation: none !important;
+    }
+  }
+</style>
+</head>
+<body>
+
+<div class="backdrop"></div>
+<div class="plasma"></div>
+<div class="grain"></div>
+<div class="petals">
+  <div class="petal"        style="left:8%;  animation-delay:0s;  animation-duration:38s;"></div>
+  <div class="petal pink"   style="left:18%; animation-delay:6s;  animation-duration:42s;"></div>
+  <div class="petal teal"   style="left:28%; animation-delay:12s; animation-duration:34s;"></div>
+  <div class="petal"        style="left:36%; animation-delay:2s;  animation-duration:46s;"></div>
+  <div class="petal peach"  style="left:48%; animation-delay:18s; animation-duration:40s;"></div>
+  <div class="petal pink"   style="left:55%; animation-delay:9s;  animation-duration:36s;"></div>
+  <div class="petal"        style="left:64%; animation-delay:14s; animation-duration:44s;"></div>
+  <div class="petal teal"   style="left:72%; animation-delay:22s; animation-duration:38s;"></div>
+  <div class="petal pink"   style="left:80%; animation-delay:5s;  animation-duration:32s;"></div>
+  <div class="petal peach"  style="left:88%; animation-delay:16s; animation-duration:42s;"></div>
+  <div class="petal"        style="left:94%; animation-delay:25s; animation-duration:36s;"></div>
+</div>
+
+<div class="app">
+
+  <aside class="nav">
+    <div class="brand">
+      <div class="brand-mark">
+        <!-- triangle sigil with k inside, demoscene credit-screen style -->
+        <svg viewBox="0 0 36 36" fill="none" stroke="currentColor">
+          <polygon points="18,3 33,30 3,30" stroke="#e0568f" stroke-width="1.4" fill="rgba(224,86,143,0.10)"/>
+          <circle cx="18" cy="22" r="5" stroke="#67c1d4" stroke-width="1" fill="none"/>
+          <circle cx="18" cy="22" r="1.5" fill="#e0568f"/>
+          <line x1="18" y1="14" x2="18" y2="17" stroke="#67c1d4" stroke-width="1"/>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-name">kldload</div>
+        <div class="brand-sub">v1.1.0 — dev</div>
+      </div>
+    </div>
+
+    <div class="nav-section">Operate</div>
+    <div class="nav-item active"><span class="ic"></span>Dashboard</div>
+    <div class="nav-item" data-cat="zfs"><span class="ic"></span>ZFS Pools<span class="badge">02</span></div>
+    <div class="nav-item" data-cat="vm"><span class="ic"></span>KVM &amp; klab<span class="badge">07</span></div>
+    <div class="nav-item" data-cat="logs"><span class="ic"></span>Logs</div>
+
+    <div class="nav-section">Build</div>
+    <div class="nav-item"><span class="ic"></span>Profiles</div>
+    <div class="nav-item"><span class="ic"></span>Darksites</div>
+    <div class="nav-item"><span class="ic"></span>Export images</div>
+
+    <div class="nav-section">Infra</div>
+    <div class="nav-item"><span class="ic"></span>Kubernetes</div>
+    <div class="nav-item"><span class="ic"></span>Boot envs</div>
+    <div class="nav-item"><span class="ic"></span>Secure boot</div>
+
+    <div class="nav-foot">
+      live · 10.100.10.118<br>
+      build d2f4e91 · 4h
+    </div>
+  </aside>
+
+  <main>
+    <header class="bar">
+      <div class="crumbs">kldload &nbsp;/&nbsp;<strong>Dashboard</strong></div>
+      <div class="bar-search">
+        <span style="color:var(--rose)">⌕</span>
+        <span>Search pools, vms, logs…</span>
+        <kbd>⌘K</kbd>
+      </div>
+      <button class="icon-btn">↻</button>
+      <button class="icon-btn">⚙</button>
+      <button class="theme-toggle" onclick="toggleTheme()">
+        <span id="theme-ic">☾</span><span id="theme-lbl">dusk</span>
+      </button>
+    </header>
+
+    <section class="view">
+
+      <!-- demoscene credit-roll hero -->
+      <div class="hero-credits">
+        <div class="credit-eyebrow">— SYSTEM HEALTHY —</div>
+        <div class="credit-title">10.100.10.118</div>
+        <div class="credit-sub">FEDORA 44 · KERNEL 6.19.14 · ZFS 2.4.1 · UPTIME 3D 14H</div>
+      </div>
+
+      <!-- stat grid: 4 colors, no border-glow chrome, just one accent line on top -->
+      <div class="stat-grid">
+        <div class="stat" data-c="teal">
+          <div class="stat-val">2<span class="unit">/ 2</span></div>
+          <div class="stat-label">Pools online</div>
+          <div class="stat-trend up">scrub clean · 2d ago</div>
+        </div>
+        <div class="stat" data-c="rose">
+          <div class="stat-val">412<span class="unit">G</span></div>
+          <div class="stat-label">Capacity used</div>
+          <div class="stat-trend">22% · +1.4G/24h</div>
+        </div>
+        <div class="stat" data-c="peach">
+          <div class="stat-val">7<span class="unit">/ 9</span></div>
+          <div class="stat-label">VMs running</div>
+          <div class="stat-trend">2 stopped</div>
+        </div>
+        <div class="stat" data-c="pink">
+          <div class="stat-val">38<span class="unit">M</span></div>
+          <div class="stat-label">Snapshot lag</div>
+          <div class="stat-trend down">sanoid skipped · load 4.2</div>
+        </div>
+      </div>
+
+      <!-- chart + events -->
+      <div class="two-col">
+        <div class="panel">
+          <div class="panel-head">
+            <span class="panel-title">Throughput · tank</span>
+            <span class="panel-meta">last 30m · rose=read · teal=write · peach=cache</span>
+          </div>
+          <div style="padding: 22px 24px;">
+            <svg class="spark" viewBox="0 0 600 110" preserveAspectRatio="none">
+              <path class="area-rose" d="M0,100 L0,42 30,40 60,38 90,30 120,28 150,33 180,22 210,25 240,18 270,20 300,12 330,17 360,14 390,9 420,18 450,11 480,7 510,15 540,10 570,12 600,8 L600,110 0,110 Z"/>
+              <path class="line-rose" d="M0,42 L30,40 60,38 90,30 120,28 150,33 180,22 210,25 240,18 270,20 300,12 330,17 360,14 390,9 420,18 450,11 480,7 510,15 540,10 570,12 600,8"/>
+              <path class="line-teal" d="M0,72 L30,70 60,68 90,65 120,67 150,62 180,64 210,60 240,58 270,62 300,55 330,58 360,52 390,54 420,50 450,52 480,48 510,50 540,46 570,48 600,44"/>
+              <path class="line-peach" d="M0,90 L30,88 60,86 90,85 120,87 150,82 180,84 210,80 240,78 270,82 300,75 330,78 360,72 390,74 420,70 450,73 480,68 510,72 540,66 570,69 600,64"/>
+            </svg>
+            <div class="row" style="margin-top:14px;">
+              <span class="pill rose"><span class="dot"></span>Read 128 MB/s</span>
+              <span class="pill teal"><span class="dot"></span>Write 42 MB/s</span>
+              <span class="pill peach"><span class="dot"></span>Cache 86%</span>
+              <span class="grow"></span>
+              <span class="mute" style="font-family:var(--mono); font-size:10px; letter-spacing:0.14em; text-transform:uppercase;">peak 312 MB/s</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel teal">
+          <div class="panel-head">
+            <span class="panel-title">Recent events</span>
+            <span class="panel-meta">12 today</span>
+          </div>
+          <table>
+            <tbody>
+              <tr><td><span class="pill teal"><span class="dot"></span>Snap</span></td><td class="dim">2m</td><td>tank/vm/k8s‑01@daily</td></tr>
+              <tr><td><span class="pill rose"><span class="dot"></span>Start</span></td><td class="dim">14m</td><td>klab‑debian13</td></tr>
+              <tr><td><span class="pill peach"><span class="dot"></span>Skip</span></td><td class="dim">38m</td><td>sanoid · load 4.2</td></tr>
+              <tr><td><span class="pill teal"><span class="dot"></span>Scrub</span></td><td class="dim">1h</td><td>tank · 0 errors</td></tr>
+              <tr><td><span class="pill rose"><span class="dot"></span>Kbe</span></td><td class="dim">3h</td><td>BE 1.1.0‑dev‑pre</td></tr>
+              <tr><td><span class="pill crimson"><span class="dot"></span>Err</span></td><td class="dim">3h</td><td>kbe · grub.cfg under SB</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- VM panel — credit-roll style: NAME + role -->
+      <div class="panel peach">
+        <div class="panel-head">
+          <span class="panel-title">Virtual machines</span>
+          <span class="panel-meta">9 total · 7 running · 2 stopped</span>
+          <button class="btn primary" style="margin-left: 12px;">+ New VM</button>
+        </div>
+        <table>
+          <thead><tr>
+            <th>State</th><th>Name</th><th>Profile</th><th>Distro</th><th>vCPU</th><th>RAM</th><th>IP</th><th>Uptime</th><th>Tags</th>
+          </tr></thead>
+          <tbody>
+            <tr><td><span class="pill teal"><span class="dot"></span>Running</span></td><td>k8s-01</td><td>kvm</td><td>fedora 44</td><td>4</td><td>8G</td><td>192.168.122.11</td><td>2d 14h</td><td><span class="pill rose"><span class="dot"></span>Control-plane</span></td></tr>
+            <tr><td><span class="pill teal"><span class="dot"></span>Running</span></td><td>k8s-02</td><td>kvm</td><td>fedora 44</td><td>4</td><td>8G</td><td>192.168.122.12</td><td>2d 14h</td><td><span class="pill peach"><span class="dot"></span>Worker</span></td></tr>
+            <tr><td><span class="pill teal"><span class="dot"></span>Running</span></td><td>klab-debian13</td><td>desktop</td><td>debian 13</td><td>2</td><td>4G</td><td>192.168.122.42</td><td>3h 12m</td><td></td></tr>
+            <tr><td><span class="pill peach"><span class="dot"></span>Degraded</span></td><td>klab-ubuntu24</td><td>desktop</td><td>ubuntu 24.04</td><td>2</td><td>4G</td><td>192.168.122.45</td><td>22m</td><td><span class="dim">guest agent down</span></td></tr>
+            <tr><td><span class="pill idle"><span class="dot"></span>Stopped</span></td><td>klab-rocky</td><td>server</td><td>rocky 9</td><td>2</td><td>2G</td><td class="mute">—</td><td class="mute">—</td><td></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+    </section>
+  </main>
+</div>
+
+<script>
+  function applyTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    document.getElementById('theme-ic').textContent  = (t === 'dark') ? '☾' : '☀';
+    document.getElementById('theme-lbl').textContent = (t === 'dark') ? 'dusk' : 'dawn';
+    try { localStorage.setItem('kldload-theme', t); } catch (e) {}
+  }
+  function toggleTheme() {
+    const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+    applyTheme(cur === 'dark' ? 'light' : 'dark');
+  }
+  (function() {
+    let saved = null;
+    try { saved = localStorage.getItem('kldload-theme'); } catch (e) {}
+    if (saved) return applyTheme(saved);
+    applyTheme('dark');
+  })();
+</script>
+
+</body>
+</html>

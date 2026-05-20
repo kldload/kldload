@@ -47,6 +47,7 @@ ${B}${G}Topics${N}
   ${C}backup${N}        sanoid snapshots, boot environments, recovery
   ${C}ai${N}            Bob (local LLM), model swap, voice, agentic mode
   ${C}observability${N} Grafana, Hubble, Tetragon, klab dashboards
+  ${C}cockpit${N}       F-key console — what each cockpit answers and when to use it
   ${C}firstboot${N}     what runs unattended at first boot, where the logs are
   ${C}recipes${N}       end-to-end workflows with worked examples
   ${C}all${N}           print every topic (for grep / less)
@@ -417,6 +418,147 @@ ${B}${Y}Grafana login${N}
 EOF
 }
 
+# ── cockpit topic — F-key console reference ───────────────────────────────
+# Documents the value of each F-key window rather than just what it shows.
+# Anyone can grep ss(8) man-page output; the point of these cockpits is
+# that they answer specific *operator questions* in one keystroke. Each
+# section leads with the question, names the kernel data source, and ends
+# with a demo line operators can read aloud to a customer.
+_t_cockpit() {
+cat <<EOF
+
+${B}${G}── cockpit — the F-key console (kernel + cluster on one keystroke) ──────${N}
+
+The kldload console (browser: ${C}https://<host>:8443/k9s/${N}, or SSH +
+${C}sudo kldload-console${N}) is a tmux session pre-wired so that every
+F-key toggles one cockpit on or off. Press it once → cockpit windows
+appear. Press it again → they all disappear. Nav: ${C}Alt+←/→${N} or
+${C}Alt+h/l${N} between windows, ${C}Alt+1..9${N} jumps direct.
+
+${B}${C}F1${N}  Help — this page (toggle popup)
+  This document, in a floating 90%×90% less(1) overlay. Press F1
+  again to dismiss, or q / Esc inside less. Appears once as a
+  welcome the first time the browser console attaches; after that
+  it's silent until you press F1.
+
+${B}${C}F2${N}  k9s — interactive cluster TUI
+  Best general-purpose K8s window: type ${Y}:pods${N}, ${Y}:nodes${N},
+  ${Y}:svc${N}, ${Y}:deploy${N}, ${Y}:events${N}, etc. Tab through, drill in.
+
+${B}${C}F3${N}  Terminal — new scratch shell every press
+  Not a toggle: F3 twice opens two shells. Close with ${C}Ctrl+q${N}
+  or with ${C}F4${N} (close everything).
+
+${B}${C}F4${N}  Close everything — kill every non-klab window in one keystroke
+  Wipes out every cockpit + every scratch shell, returns you to the
+  klab home pane. The "I'm done demoing, give me a clean slate"
+  button. The klab home is never killed.
+
+${B}${C}F5${N}  Logs — every kldload log in one ${C}tail -F${N}
+  Drives ${C}kldload-follow${N}, which multiplexes ${C}/var/log/kldload/*.log${N}
+  (firstboot, autodeploy, kube-bootstrap, klab-build, webui).
+  ${Y}Answers:${N} "did first-boot finish?", "why did the K8s join fail?"
+
+${B}${C}F6${N}  Syscall cockpit — what programs are doing to the kernel
+  5 windows: ${Y}execsnoop${N}, ${Y}opensnoop${N}, ${Y}killsnoop${N}, ${Y}syscount${N}, ${Y}capable${N}
+  Source: bcc-tools BPF programs attached to syscall tracepoints.
+  ${Y}Answers:${N} "what just ran?", "who killed my pod?", "what files is
+  X touching?", "which syscall is the hot path?", "what cap does a
+  container actually need (so I can drop the rest)?"
+  ${P}Demo line:${N} every ${Y}exec${N} on the box, named, with args and pid —
+  zero application instrumentation, kernel-resident, ~0% overhead.
+
+${B}${C}F7${N}  I/O + ZFS latency cockpit
+  7 windows: ${Y}biosnoop${N}, ${Y}biolatency${N}, ${Y}tcpconnect${N}, ${Y}tcpretrans${N},
+  ${Y}tcplife${N}, ${Y}fileslower${N}, ${Y}zfsdist${N}
+  Source: bcc-tools on block + TCP + VFS layers; ${Y}zfsdist${N} is a
+  bpftrace kprobe on zfs_read/zfs_write that yields a latency hist.
+  ${Y}Answers:${N} "is the disk slow?" (biolatency hist), "who issued the
+  slow op?" (biosnoop), "how long do TCP sessions live?" (tcplife),
+  "is anything being retransmitted?" (tcpretrans).
+  ${P}Demo line:${N} block-layer + transport + VFS + ZFS latency, all from
+  the live kernel — no log shipping, no APM, no agent.
+
+${B}${C}F8${N}  Kernel cockpit — Cilium / Tetragon / ZFS / cluster
+  15 windows, single command per window, full screen each:
+    ${Y}bpf-prog${N}      every BPF program loaded
+    ${Y}hubble${N}        L3/L4/L7 flow stream from the datapath
+    ${Y}cilium-lb${N}     in-kernel service→backend map (replaces kube-proxy)
+    ${Y}conntrack${N}     every connection the datapath is tracking
+    ${Y}bpf-maps${N}      Cilium's BPF map fullness (policy/identity/lb)
+    ${Y}cilium-status${N} agent verbose snapshot
+    ${Y}netpol${N}        Cilium identities + NetPols + CiliumNetPols
+    ${Y}tetragon${N}      every kernel event Tetragon shipped
+    ${Y}tracingpol${N}    TracingPolicies (kernel-rule analog of NetPol)
+    ${Y}zfs-internals${N} txg counter + ARC composition + zfs-dbgmsg
+    ${Y}zpool-io${N}      per-vdev I/O rate (zpool iostat 5)
+    ${Y}virsh-vms${N}     libvirt domains (klab + K8s + blue/green VMs)
+    ${Y}k8s-top${N}       kubectl top nodes + top 30 pods by CPU
+    ${Y}kernel-log${N}    live kernel ring buffer (dmesg / journalctl -kf)
+    ${Y}gpu${N}           nvidia-smi (only present if NVIDIA detected)
+  ${Y}Answers:${N} "is the cluster healthy from a kernel POV?", "is BPF
+  enforcement actually loaded?", "which pods are exchanging which
+  bytes?", "is ZFS hung on a txg?", "is my GPU pegged?"
+  ${P}Demo line:${N} this is the cluster's kernel state in fifteen windows
+  with one keystroke. Splunk doesn't have this. Datadog doesn't have
+  this. It's free because it's already in the kernel.
+
+${B}${C}F9${N}  Kubernetes events — live event stream
+  Runs ${C}kubectl get events -A --watch${N}. Anything K8s wants to tell
+  you (scheduling, image pulls, restarts, evictions) flows here.
+
+${B}${C}F10${N} htop — host CPU / memory / processes
+  The classic. Sorted by CPU by default; F6 inside htop re-sorts.
+
+${B}${C}F11${N} kernel-tcp — every TCP socket's kernel-side state
+  Two panes:
+    Top:    ${C}ss -tnHpi state established${N} through a custom awk
+            formatter that humanizes bytes, computes per-second rates
+            from a state file, colour-codes RTT (green<10ms, amber<50,
+            red≥50) and retransmits, draws a unicode sparkline of
+            rate-by-rank, and rolls up by process at the bottom.
+    Bottom: ${C}nethogs${N} for per-process bandwidth attribution.
+  ${Y}Answers:${N} "why is this specific connection slow?" (RTT/retrans),
+  "is BBR loaded per-socket?" (cubic vs bbr in the algo column), "is
+  the app the bottleneck or the wire?" (send-Q depth vs cwnd), "what
+  process is eating my pipe?" (nethogs).
+  ${P}Demo line:${N} every number on this screen came out of
+  ${C}struct tcp_sock${N} in the kernel — no APM agent, no sidecar, no
+  application instrumentation. The data has always been there; we're
+  just finally letting you read it. Run ${C}sudo kldload-loadtest${N}
+  and watch RTT spike → retrans yellow → cwnd collapse → recover, all
+  in this one pane.
+
+${B}${C}F12${N} nethogs — per-process bandwidth (alone, full screen)
+  Same tool as the bottom pane of F11, but on its own when you want
+  to dedicate the whole window to it.
+
+${B}${C}Shift+F<N>${N} (deep-dive variants)
+  S-F2  k8s warnings only       S-F6  iotop per-process disk I/O
+  S-F3  root shell (sudo -i)    S-F7  kubectl top pods by memory
+  S-F4  dmesg                   S-F8  cilium monitor --type drop
+  S-F5  kldload-doctor loop
+
+${B}${C}Alt+letter heads-up popups (auto-dismiss on Enter)${N}
+  Alt+v VMs & net    Alt+c cluster      Alt+z ZFS         Alt+w WireGuard
+  Alt+d disk/mem     Alt+u uptime       Alt+p iftop       Alt+n nethogs
+
+${B}${C}Restart-loop guarantee (2026-05-19)${N}
+  Every F4/F5/F6/F9 pane runs inside an infinite restart loop. If a
+  tool exits — kubectl context blip, cilium-agent restart, sudo TTY
+  glitch, transient bcc detach — the pane prints the exit code and
+  restarts after 3 seconds. The audience never sees "pane is dead";
+  the demo doesn't break on the first transient hiccup.
+
+${B}${Y}Driving the cockpits with synthetic load${N}
+  ${C}sudo kldload-loadtest${N}              60 seconds of HTTP + fio + fork-storm
+  ${C}sudo kldload-loadtest 300 --http-only${N}  5 minutes of HTTP only
+  Lights up F4 (exec/syscount), F5 (bio/tcp), F6 (hubble/tetragon),
+  F9 (RTT/retrans/cwnd) all at once. Best demo command on the box.
+
+EOF
+}
+
 _t_firstboot() {
 cat <<EOF
 
@@ -542,6 +684,7 @@ case "$topic" in
     backup|snapshot|be|rollback|recovery) _t_backup ;;
     ai|bob|ollama)                        _t_ai ;;
     observability|obs|grafana|hubble|tetragon|metrics) _t_observability ;;
+    cockpit|console|fkeys|f-keys|tmux)    _t_cockpit ;;
     firstboot|fb|autodeploy)              _t_firstboot ;;
     recipes|howto|examples)               _t_recipes ;;
     all|full|everything)                  _t_all ;;

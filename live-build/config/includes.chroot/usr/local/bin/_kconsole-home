@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Render the kldload-console home-tab reference card. Two-column layout
+# Render the kldload-console klab-tab reference card. Two-column layout
 # so the cheatsheet uses the whole terminal width and fits on one screen
 # instead of scrolling. Called by kldload-console at session start and
 # available any time via the `menu` shell alias.
@@ -21,57 +21,30 @@ fi
 
 clear
 
-# ── Banner (full width) ────────────────────────────────────────────────
-# Box inner width = 72 cols (matches top/bottom ───). Each banner line is
-# 2sp + KLDLAB(48) + 2sp + tagline-area(20) = 72 inner. The right │ now
-# lines up with ┐ — the old layout had 78-wide banner lines in a 72-wide
-# box, so the right border was 4 cols past the corner.
 cat <<BANNER
 ${D}┌────────────────────────────────────────────────────────────────────┐${N}
-${D}│${N}  ${W}██╗  ██╗██╗     ██████╗ ██╗      █████╗ ██████╗ ${N}  ${C}c o n s o l e${N}     ${D}│${N}
-${D}│${N}  ${W}██║ ██╔╝██║     ██╔══██╗██║     ██╔══██╗██╔══██╗${N}                    ${D}│${N}
-${D}│${N}  ${W}█████╔╝ ██║     ██║  ██║██║     ███████║██████╔╝${N}  ${G}one-pane ops${N}      ${D}│${N}
-${D}│${N}  ${W}██╔═██╗ ██║     ██║  ██║██║     ██╔══██║██╔══██╗${N}  ${G}lab + operator${N}    ${D}│${N}
-${D}│${N}  ${W}██║  ██╗███████╗██████╔╝███████╗██║  ██║██████╔╝${N}                    ${D}│${N}
-${D}│${N}  ${W}╚═╝  ╚═╝╚══════╝╚═════╝ ╚══════╝╚═╝  ╚═╝╚═════╝ ${N}                    ${D}│${N}
+${D}│${N}  ${W}${B}klab console${N}  ${M}— one-pane ops + operator + kernel cockpit${N}           ${D}│${N}
 ${D}└────────────────────────────────────────────────────────────────────┘${N}
 BANNER
 
 printf "\n${M}  F-keys toggle watch windows — press to open, press again to close.${N}\n"
-printf "${M}  Nothing runs until you ask. Type ${G}menu${M} to redraw this cheatsheet.${N}\n\n"
+printf "${M}  Type ${G}menu${M} to redraw this cheatsheet, ${G}help${M} for full kldload-mgmt.${N}\n\n"
 
-# ── Two-column layout ──────────────────────────────────────────────────
-# Lines are built into LEFT[] and RIGHT[] arrays with ANSI colour codes.
-# Each visible row has the same padded length; we use a `-%-*s` format
-# where the width compensates for invisible ANSI escape bytes, so the
-# right column aligns even when the left has colour sequences.
 LEFT=()
 RIGHT=()
 
-# ANSI colour sequences occupy bytes but zero visible width. We build
-# two counters: raw byte length (for printf %s) and visible columns
-# (for alignment). Easiest: strip ANSI when measuring, then print the
-# coloured version with a padding calculated from the stripped length.
 _emit() {
-    # _emit <side> <key> <label> <desc>   — colours chosen by caller
     local side="$1" key="$2" label="$3" desc="$4" kcolor="$5"
-    # Raw (coloured) output; fixed visible widths: key 9, label 18, desc 30
-    # Description is trimmed to 30 visible chars so the row stays within
-    # ~60 visible columns — half of an 80-wide drawer / 1/3 of 120-wide.
-    local trimmed="${desc:0:30}"
+    local trimmed="${desc:0:32}"
     local row
-    row="   ${kcolor}$(printf '%-9s' "$key")${N}  ${W}$(printf '%-18s' "$label")${N}  ${M}$(printf '%-30s' "$trimmed")${N}"
+    row="   ${kcolor}$(printf '%-9s' "$key")${N}  ${W}$(printf '%-22s' "$label")${N}  ${M}$(printf '%-32s' "$trimmed")${N}"
     if [[ "$side" == "L" ]]; then LEFT+=("$row"); else RIGHT+=("$row"); fi
 }
 
 _head() {
-    # Pad header to exactly 64 visible cols: 2sp + title(20) + 2sp + hint(40)
-    # so every LEFT row — header, _emit, or blank — starts RIGHT at col 64.
-    # %-22s (not %-20s) because every title starts with `▸` — 3 bytes for
-    # 1 visible col, so we pad 2 extra bytes to land on 20 visible cols.
     local side="$1" title="$2" hint="$3" color="$4"
     local row
-    row="  ${color}${B}$(printf '%-22s' "$title")${N}  ${D}$(printf '%-40s' "$hint")${N}"
+    row="  ${color}${B}$(printf '%-22s' "$title")${N}  ${D}$(printf '%-44s' "$hint")${N}"
     if [[ "$side" == "L" ]]; then LEFT+=("$row"); else RIGHT+=("$row"); fi
 }
 
@@ -79,76 +52,67 @@ _blank() {
     if [[ "${1}" == "L" ]]; then LEFT+=(""); else RIGHT+=(""); fi
 }
 
-# ── LEFT column: Primary panes + Bandwidth top + Trace group ──────────
-_head  L "▸ Primary panes" "(F1-F12, toggle)" "$C"
-_emit  L "F1"  "help (popup)"      "kldload-mgmt — Ctrl-D to close" "$G"
-_emit  L "F2"  "k9s"               "cluster-at-a-glance"          "$G"
-_emit  L "F3"  "ZFS test tail"     "live zfs-tests.sh PASS/FAIL"  "$G"
-_emit  L "F4"  "logs"              "webui + ttyd journal"         "$G"
-_emit  L "F5"  "lh (cluster logs)" "LogHog menu, all nodes"       "$G"
-_emit  L "F6"  "htop"              "host CPU / mem / procs"       "$G"
-_emit  L "F7"  "k8s events"        "kubectl get events --watch"   "$G"
-_emit  L "F8"  "hubble observe"    "live pod packet flows"        "$G"
-_emit  L "F9"  "zpool iostat"      "ZFS per-vdev latency"         "$G"
-_emit  L "F10" "scratch"           "throwaway shell"              "$G"
-_emit  L "F11" "tcplife"           "TCP sessions src->dst"        "$G"
-_emit  L "F12" "tcptop"            "top active TCP conns"         "$G"
+# ── LEFT column: F-keys (each row explains the actual contents) ──────
+_head  L "▸ F-keys (toggle)" "press once = open; press again = close" "$C"
+_emit  L "F1"  "help"                 "toggle popup — F1 to close"    "$G"
+_emit  L "F2"  "k9s"                  "cluster TUI"                   "$G"
+_emit  L "F3"  "terminal"             "new scratch shell"             "$G"
+_emit  L "F4"  "close everything"     "kill every non-klab window"    "$Y"
+_emit  L "F5"  "logs"                 "kldload-follow — every log"    "$G"
+_emit  L "F6"  "syscall cockpit"      "5w: exec/open/kill/sysc/cap"   "$G"
+_emit  L "F7"  "I/O + ZFS cockpit"    "7w: bio/lat/tcp×3/file/zfsdist" "$G"
+_emit  L "F8"  "kernel cockpit"       "15w: bpf/cilium/tetragon/zfs"  "$G"
+_emit  L "F9"  "k8s events"           "kubectl events --watch"        "$G"
+_emit  L "F10" "htop"                 "host CPU / mem / procs"        "$G"
+_emit  L "F11" "kernel-tcp"           "ss -i awk + nethogs split"     "$G"
+_emit  L "F12" "nethogs"              "per-process bandwidth"         "$G"
 _blank L
-_head  L "▸ HUD popups" "(Alt+letter, auto-dismiss)" "$C"
-_emit  L "Alt+v" "VMs & net"        "virsh + DHCP + interfaces"    "$C"
-_emit  L "Alt+c" "cluster"          "nodes + sad pods + warnings"  "$C"
-_emit  L "Alt+z" "ZFS"              "pools + top datasets + ARC"   "$C"
-_emit  L "Alt+w" "WireGuard/net"    "wg show + routes + conns"     "$C"
-_emit  L "Alt+d" "disk/mem/cpu"     "df + free + lscpu snapshot"   "$C"
-_emit  L "Alt+u" "uptime"           "uptime + who + last logins"   "$C"
-_blank L
-_head  L "▸ Bandwidth top" "(pftop equivalents)" "$Y"
-_emit  L "Alt+p" "iftop"           "per-connection bandwidth"     "$Y"
-_emit  L "Alt+n" "nethogs"         "per-process bandwidth"        "$Y"
-_blank L
-_head  L "▸ Trace group" "(bcc-tools)" "$Y"
-_emit  L "Alt+e" "execsnoop"       "every exec() + cmdline"       "$Y"
-_emit  L "Alt+o" "opensnoop"       "every open() + path"          "$Y"
-_emit  L "Alt+b" "biosnoop"        "every block I/O + latency"    "$Y"
-_emit  L "Alt+k" "killsnoop"       "every signal / OOM kill"      "$Y"
+_head  L "▸ Navigation (browser-safe)" "Alt-key only — arrows blocked by browser" "$C"
+_emit  L "Alt+1..9"    "jump to win N" "fastest — direct by number"   "$C"
+_emit  L "Alt+←/→"     "prev/next win" "browser-iframe arrow keys"    "$C"
+_emit  L "Alt+h / l"   "prev/next win" "vim direction (same as ←/→)"  "$C"
+_emit  L "Alt+↑/↓"     "walk panes"    "up/down within a window"      "$C"
+_emit  L "Alt+k / j"   "walk panes"    "vim direction (same as ↑/↓)"  "$C"
+_emit  L "Alt+Enter"   "new window"    "blank shell window"           "$C"
+_emit  L "Alt+\\\\"    "vsplit"        "pane to the right"            "$C"
+_emit  L "Alt+-"       "hsplit"        "pane below"                   "$C"
+_emit  L "Ctrl+q"      "close pane"    "kills pane, then window"      "$C"
 
-# ── RIGHT column: Deep-dive + Window/pane ops + Navigation ────────────
+# ── RIGHT column: Heads-up popups + Window nav + Scroll + Deep-dive ──
+_head  R "▸ Heads-up popups" "(Alt+letter — auto-dismiss on Enter)" "$Y"
+_emit  R "Alt+v" "VMs & net"          "virsh + DHCP + interfaces"     "$Y"
+_emit  R "Alt+c" "cluster"            "nodes + sad pods + warnings"   "$Y"
+_emit  R "Alt+z" "ZFS"                "pools + datasets + ARC"        "$Y"
+_emit  R "Alt+w" "WireGuard / net"    "wg show + routes + conns"      "$Y"
+_emit  R "Alt+d" "disk / mem / cpu"   "df + free + lscpu snapshot"    "$Y"
+_emit  R "Alt+u" "uptime"             "uptime + who + last logins"    "$Y"
+_emit  R "Alt+p" "iftop"              "per-connection bandwidth"      "$Y"
+_emit  R "Alt+n" "nethogs"            "per-process bandwidth"         "$Y"
+_blank R
+_head  R "▸ Scrollback" "(no prefix needed)" "$C"
+_emit  R "PageUp"      "scrollback"   "into copy-mode, scroll up"     "$C"
+_emit  R "S-PageUp"    "jump top"     "history-top"                   "$C"
+_emit  R "S-PageDown"  "jump bottom"  "back to live"                  "$C"
+_emit  R "Mouse wheel" "scrollback"   "auto-enters copy-mode"         "$C"
+_emit  R "q  or Enter" "exit scroll"  "back to live view"             "$C"
+_blank R
 _head  R "▸ Deep-dive" "(Shift+F<N>, toggle)" "$P"
-_emit  R "S-F2"  "k8s warnings"     "warning-only events"         "$P"
-_emit  R "S-F3"  "root shell"       "sudo -i (spawns new)"        "$P"
-_emit  R "S-F4"  "dmesg"            "kernel ring buffer"          "$P"
-_emit  R "S-F5"  "doctor"           "kldload-doctor loop"         "$P"
-_emit  R "S-F6"  "iotop"            "per-process disk I/O"        "$P"
-_emit  R "S-F7"  "kubectl top pods" "pod mem/cpu heavyweights"    "$P"
-_emit  R "S-F8"  "cilium drops"     "cilium monitor --type drop"  "$P"
-_emit  R "S-F9"  "zfs iostat -l"    "per-dataset latency"         "$P"
-_emit  R "S-F10" "kinspect picker"  "pick 2 endpoints, inspect"   "$P"
-_emit  R "S-F11" "tcpretrans"       "TCP retransmit events"       "$P"
-_emit  R "S-F12" "tcpconnect"       "every outbound TCP connect"  "$P"
-_blank R
-_head  R "▸ Window + pane ops" "" "$C"
-_emit  R "Alt+Enter" "new window"    "blank shell window"         "$C"
-_emit  R "Alt+\\\\"  "vsplit"        "pane to the right"          "$C"
-_emit  R "Alt+-"   "hsplit"          "pane below"                 "$C"
-_emit  R "Alt+x"   "close pane"      "kill current pane"          "$C"
-_emit  R "Alt+q"   "close window"    "kill current window"        "$C"
-_emit  R "Ctrl+q"  "close window"    "alias for Alt+q"            "$C"
-_blank R
-_head  R "▸ Navigation" "(Shift+Arrow, Alt+Arrow)" "$C"
-_emit  R "Alt+arrow" "walk panes"    "move focus between panes"   "$C"
-_emit  R "S-Right"  "next window"    "F-key tab forward"          "$C"
-_emit  R "S-Left"   "prev window"    "F-key tab back"             "$C"
+_emit  R "S-F2"  "k8s warnings"       "warning-only events"           "$P"
+_emit  R "S-F3"  "root shell"         "sudo -i"                       "$P"
+_emit  R "S-F4"  "dmesg"              "kernel ring buffer"            "$P"
+_emit  R "S-F5"  "doctor loop"        "kldload-doctor live"           "$P"
+_emit  R "S-F6"  "iotop"              "per-process disk I/O"          "$P"
+_emit  R "S-F7"  "kubectl top pods"   "pod mem/cpu top"               "$P"
+_emit  R "S-F8"  "cilium drops"       "cilium monitor --type drop"    "$P"
 
-# ── Print columns side by side ─────────────────────────────────────────
-# Every LEFT row is exactly 64 visible cols (matches _emit/_head padding).
-# Empty rows get a 64-space fallback so RIGHT starts at the same column
-# whether LEFT has a row, header, or blank.
-_blankL=$(printf '%.0s ' {1..64})
+# ── Print columns side by side ────────────────────────────────────────
+_blankL=$(printf '%.0s ' {1..70})
 max=${#LEFT[@]}
 (( ${#RIGHT[@]} > max )) && max=${#RIGHT[@]}
 for ((i=0; i<max; i++)); do
     printf "%s%s\n" "${LEFT[i]:-$_blankL}" "${RIGHT[i]:-}"
 done
 
-printf "\n${D}   ${G}kztest-tail${D} follows the latest zfs test run's full.log.${N}\n"
-printf "${D}   ${G}kinspect <a> <b>${D} opens a 3-pane layout watching comms between two endpoints.${N}\n\n"
+printf "\n${D}   ${G}F4${D} = syscall traces (5 wins)  ·  ${G}F5${D} = I/O + ZFS latency (7 wins)  ·  ${G}F6${D} = kernel deep-dive (15 wins).${N}\n"
+printf "${D}   To light up every pane at once for a demo:  ${G}sudo kldload-loadtest 60${D}  — drives HTTP + block I/O + exec fork-storm in parallel.${N}\n"
+printf "${D}   Window list is in the status strip below — clickable.${N}\n\n"

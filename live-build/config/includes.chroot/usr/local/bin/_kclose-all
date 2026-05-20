@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# F4 — close every kldload-console window except the klab home.
+# Wipes out every cockpit pane in one keystroke so the operator can
+# return to a quiet, single-pane shell without manually killing each
+# group (F4/F5/F6/F9 toggles only close their own group).
+#
+# Implementation: tmux list-windows for the session, kill any window
+# whose name is not "klab". The klab window is the always-present
+# home pane; preserving it means F4 leaves the session intact, just
+# tidy.
+set -u
+SESSION="${KLDLOAD_TMUX_SESSION:-kldload}"
+KEEP="klab"
+
+# Switch back to klab FIRST so the active window doesn't disappear
+# mid-operation (which would otherwise auto-promote a random other
+# window and briefly flash its content on screen).
+tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$KEEP" && \
+    tmux select-window -t "${SESSION}:=${KEEP}"
+
+# Kill every other window. The =name selector resolves to the
+# window by exact name match, immune to index renumbering.
+while read -r w; do
+    [[ -z "$w" || "$w" == "$KEEP" ]] && continue
+    tmux kill-window -t "${SESSION}:=${w}" 2>/dev/null
+done < <(tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null)
+
+exit 0

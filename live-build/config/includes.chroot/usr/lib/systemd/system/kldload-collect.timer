@@ -1,0 +1,18 @@
+[Unit]
+Description=kldload-collect snapshot every 60 seconds (kernel-cockpit JSONL corpus)
+Documentation=man:kldload-collect(8) https://kldload.com/docs/collect
+
+[Timer]
+# 60-second cadence — granular enough that a Tetragon event burst or a txg
+# spike is captured in the JSONL stream, coarse enough that the cost of the
+# collector itself (kubectl + bpftool + a dozen short commands) is well
+# under 1% of CPU and trivial disk I/O.
+OnBootSec=2min
+OnUnitActiveSec=60sec
+AccuracySec=5s
+# Persistent=true so a missed pass (system off) doesn't lose the slot
+# entirely — systemd fires once on next start to catch up.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Toggle the kldload "kernel cockpit" — a group of tmux windows in the
+# status strip, one per signal. Each window is a single full-screen
+# pane that prints:
+#   1. The executed command line (cyan, marked with $)
+#   2. A short human-readable description (dim grey)
+#   3. The actual data (live watch refresh or follow stream)
+#
+# Bound to F6 in kldload-console:
+#   F6 once  → every window appears
+#   F6 again → every cockpit window is killed in one shot
+set -u
+SESSION="${KLDLOAD_TMUX_SESSION:-kldload}"
+WINDOWS=(
+  bpf-prog hubble cilium-lb conntrack bpf-maps cilium-status netpol
+  tetragon tracingpol
+  zfs-internals zpool-io
+  virsh-vms k8s-top kernel-log
+  gpu
+)
+
+# ─── Toggle: close everything if any cockpit window exists ───────────
+existing=()
+for w in "${WINDOWS[@]}"; do
+    if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$w"; then
+        existing+=("$w")
+    fi
+done
+if [[ ${#existing[@]} -gt 0 ]]; then
+    for w in "${existing[@]}"; do
+        tmux kill-window -t "${SESSION}:=${w}" 2>/dev/null
+    done
+    tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx klab && \
+        tmux select-window -t "${SESSION}:=klab"
+    exit 0
+fi
+
+# K = kubectl-exec prefix into the cilium-agent DS pod. Kept as a
+# variable so the printed command line is short ($K cilium ...) AND
+# the description below it can spell out what $K expands to once.
+K='kubectl -n kube-system exec ds/cilium -c cilium-agent --'
+
+# ─── window: snapshot pane via `_kcockpit-pane watch` ────────────────
+# Delegates the banner-and-restart-loop to /usr/local/bin/_kcockpit-pane
+# so we never lose the pane to "pane is dead" if watch exits (kubectl
+# context blip, cilium-agent restart, transient sudo failure). printf
+# '%q' escapes desc + cmd so awk/jq programs with literal single
+# quotes (zfs-internals, tetragon) survive the tmux → sh → here chain.
+window() {
+    local name="$1" desc="$2" cmd="$3"
+    local qdesc qcmd
+    qdesc=$(printf '%q' "$desc")
+    qcmd=$(printf '%q' "$cmd")
+    tmux new-window -t "$SESSION" -n "$name" -d \
+        "/usr/local/bin/_kcockpit-pane watch $qdesc $qcmd"
+}
+
+# ─── stream_window: follow-stream pane ────────────────────────────────
+# Same helper, "stream" mode: runs the command directly (no watch
+# wrapper) and restarts on exit. Used for Hubble / Tetragon / dmesg /
+# zpool iostat — anything with built-in --follow semantics.
+stream_window() {
+    local name="$1" desc="$2" cmd="$3"
+    local qdesc qcmd
+    qdesc=$(printf '%q' "$desc")
+    qcmd=$(printf '%q' "$cmd")
+    tmux new-window -t "$SESSION" -n "$name" -d \
+        "/usr/local/bin/_kcockpit-pane stream $qdesc $qcmd"
+}
+
+# ─── Cilium / Kubernetes datapath ────────────────────────────────────
+window  bpf-prog \
+        "every BPF program currently loaded in the kernel (Cilium + Tetragon + others)" \
+        "bpftool prog show"
+
+stream_window  hubble \
+        "live L3/L4/L7 flow stream from the kernel datapath" \
+        "$K hubble observe --follow --output compact"
+
+window  cilium-lb \
+        "in-kernel service-to-backend map Cilium replaces iptables/kube-proxy with" \
+        "$K cilium bpf lb list"
+
+window  conntrack \
+        "every connection the eBPF datapath is actively tracking" \
+        "$K cilium bpf ct list global | head -120"
+
+window  bpf-maps \
+        "fullness of every BPF map Cilium uses for policy/identity/lb state" \
+        "$K cilium bpf metrics list"
+
+window  cilium-status \
+        "single snapshot of the agent: endpoints, identities, IPAM, datapath" \
+        "$K cilium status --verbose"
+
+window  netpol \
+        "Cilium identities + NetworkPolicies + CiliumNetworkPolicies cluster-wide" \
+        "echo === Cilium identities ===; kubectl get ciliumidentity --no-headers 2>/dev/null | head -20; echo; echo === NetworkPolicies + CiliumNetworkPolicies ===; kubectl get netpol,cnp,ccnp -A -o wide 2>&1; echo; echo hint: paste a NetworkPolicy via Apply YAML to see drops fire on Hubble"
+
+# ─── Tetragon — live syscall stream ──────────────────────────────────
+# Tetragon export pod ships every kernel event as JSON; we filter via
+# jq down to one human-readable line per event. The filter lives in a
+# .jq file (not inline) because nested quotes through bash → tmux →
+# bash → jq lost the inner double-quotes around the literal "EXEC",
+# "EXIT", "KPROBE" strings — `-f <file>` sidesteps that completely.
+stream_window  tetragon \
+        "every kernel event Tetragon shipped: EXEC / EXIT / PROCESS_KPROBE" \
+        "kubectl logs -n kube-system ds/tetragon -c export-stdout -f | jq -r --unbuffered -f /usr/local/share/kldload/tetragon-filter.jq"
+
+window  tracingpol \
+        "Tetragon TracingPolicies loaded cluster-wide (kernel-rule analog to NetworkPolicy)" \
+        "kubectl get tracingpolicies,tracingpoliciesnamespaced -A 2>&1"
+
+# ─── ZFS internals ───────────────────────────────────────────────────
+window  zfs-internals \
+        "ZFS txg sync counter + ARC composition + last 12 zfs-dbgmsg narrations" \
+        "echo === ZFS transaction-group sync counter ===; cat /proc/spl/kstat/zfs/*/txgs 2>/dev/null | head -8; echo; echo === ARC composition \\(MRU / MFU / target / total\\) ===; awk '/^(c|c_max|c_min|size|hits|misses|p|mru_size|mfu_size)/ {print}' /proc/spl/kstat/zfs/arcstats 2>/dev/null | head -20; echo; echo === zfs-dbgmsg \\(last 12\\) ===; tail -12 /proc/spl/kstat/zfs/dbgmsg 2>/dev/null"
+
+stream_window  zpool-io \
+        "per-vdev I/O rate every 5 seconds (zpool's native iostat)" \
+        "zpool iostat -vy 5"
+
+# ─── Hypervisor + cluster + kernel log ───────────────────────────────
+window  virsh-vms \
+        "libvirt domains — klab goldens, k8s VMs, blue-green VMs" \
+        "virsh list --all 2>&1"
+
+window  k8s-top \
+        "kubectl top nodes + top 30 pods by CPU (resource pressure at a glance)" \
+        "echo === Nodes ===; kubectl top nodes 2>&1; echo; echo === Pods \\(top 30 by CPU\\) ===; kubectl top pods -A --sort-by=cpu 2>&1 | head -32"
+
+stream_window  kernel-log \
+        "live kernel ring buffer (dmesg-style) — catches OOM kills, hw errors, ZFS module noise" \
+        "journalctl -kfn 80 --no-pager"
+
+# ─── GPU (conditional — only if NVIDIA detected) ─────────────────────
+if nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1; then
+    window  gpu \
+            "NVIDIA GPU utilization, memory, processes, temperatures" \
+            "nvidia-smi"
+fi
+
+tmux select-window -t "${SESSION}:=bpf-prog"

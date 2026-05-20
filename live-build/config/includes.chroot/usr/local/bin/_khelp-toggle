@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# F1 help-popup toggle for kldload-console. Tmux doesn't natively
+# toggle a popup when the binding key is re-pressed — by default the
+# second F1 stacks a new popup or sends F1 to the popup's child. We
+# work around that with a PID file:
+#
+#   F1 with no popup open → spawn one (and record its PID)
+#   F1 with popup open    → kill that PID (less exits → -E closes the
+#                           popup → trap removes the PID file)
+#
+# The popup runs `kldload-help cockpit | less -R`. Less exits on q or
+# Esc, so users have three ways out: F1, q, Esc — whichever they
+# reach for first works. The popup itself is launched in the
+# background (setsid + disown) so this toggle script returns
+# immediately; otherwise tmux's run-shell would block on it.
+set -u
+
+PIDF=/tmp/kldload-help.pid
+
+# Toggle off branch — popup is open, kill it.
+if [[ -f "$PIDF" ]]; then
+    pid=$(cat "$PIDF" 2>/dev/null || true)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill -TERM "$pid" 2>/dev/null || true
+        rm -f "$PIDF"
+        exit 0
+    fi
+    # Stale PID file — clean up and fall through to "open".
+    rm -f "$PIDF"
+fi
+
+# Toggle on branch — launch popup in the background so the tmux
+# binding returns to the user immediately. The inner shell writes
+# its own PID to the file, and the trap removes the file when less
+# exits (q/Esc/F1-kill all reach the same cleanup path).
+setsid bash -c '
+    tmux display-popup -E -w 90% -h 90% -d /root "
+        echo \$\$ > '"$PIDF"';
+        trap \"rm -f '"$PIDF"'\" EXIT;
+        export LESSSECURE=1;
+        kldload-help cockpit | less -R -P \"kldload help — F1 / q / Esc to close\"
+    "
+' </dev/null >/dev/null 2>&1 &
+disown
+exit 0

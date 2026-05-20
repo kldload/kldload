@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Helper for the F4/F5 eBPF cockpits — prints a 4-line banner
+# (command, description, what-to-look-for, rule) then runs the tool
+# in a restart loop so the pane never goes "dead". If the tool exits
+# (no events to print, BPF detach, sudo permission glitch, anything),
+# the loop prints a short note and retries after 3 seconds — keeping
+# the audience's attention on a live, banner-led view instead of a
+# "↩ tool exited" tmux dead-pane prompt that needs a click to dismiss.
+#
+# Usage:  _kbcc-pane <tool> "<desc>" "<hint>" [tool-args...]
+#
+# Tool-resolution order: upstream <tool>, then <tool>-bpfcc, then
+# /usr/share/bcc/tools/<tool>. Falls through to a helpful message if
+# none of those exist; the loop still keeps the pane alive.
+set -u
+tool="$1"
+desc="$2"
+hint="$3"
+shift 3
+args=("$@")
+
+# ANSI palette
+C=$'\033[1;36m'; D=$'\033[2;37m'; Y=$'\033[33m'; N=$'\033[0m'
+
+# Resolve tool path once so we don't recompute every restart.
+if command -v "$tool" >/dev/null 2>&1; then
+    bin="sudo $tool"
+elif command -v "${tool}-bpfcc" >/dev/null 2>&1; then
+    bin="sudo ${tool}-bpfcc"
+elif [ -x "/usr/share/bcc/tools/$tool" ]; then
+    bin="sudo /usr/share/bcc/tools/$tool"
+else
+    bin=""
+fi
+
+while :; do
+    clear
+    printf "${C}\$ %s %s${N}\n" "$bin" "${args[*]}"
+    printf "${D}ℹ  %s${N}\n" "$desc"
+    printf "${D}👀 %s${N}\n" "$hint"
+    printf "${D}─────────────────────────────────────────────────────────────────────${N}\n"
+
+    if [ -z "$bin" ]; then
+        printf "${Y}[${tool}] not installed — pkg: bcc-tools or bpfcc-tools${N}\n"
+        sleep 99
+        continue
+    fi
+
+    $bin "${args[@]}"
+    rc=$?
+    printf "\n${Y}[${tool}] exited (rc=%d) — restarting in 3s. Ctrl-C aborts.${N}\n" "$rc"
+    sleep 3
+done

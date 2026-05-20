@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kldload installer — sample wizard</title>
+<style>
+  /* Live installer wizard — same tokens, fewer chrome distractions.
+     This is what the user sees on the booted USB before they click Install.
+     Wizard layout: left = step list + summary, right = current-step form. */
+  :root {
+    --bg:        #0a0a0c;
+    --surface:   #141417;
+    --surface-2: #1c1c21;
+    --surface-3: #232329;
+    --border:    #26262d;
+    --border-2:  #34343d;
+    --text:      #e6e6ea;
+    --text-dim:  #8a8a93;
+    --text-mute: #5a5a63;
+
+    --accent:    #7c5cff;
+    --accent-dim:#5b3ed6;
+    --accent-soft: rgba(124,92,255,0.10);
+    --ok:        #10b981;
+    --warn:      #f59e0b;
+    --err:       #ef4444;
+
+    --mono: "JetBrains Mono","IBM Plex Mono",ui-monospace,monospace;
+    --sans: "Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 14px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  .wizard { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
+
+  /* left rail: brand + steps + summary */
+  aside.rail {
+    background: var(--surface); border-right: 1px solid var(--border);
+    padding: 24px 0; display: flex; flex-direction: column;
+  }
+  .brand {
+    padding: 0 24px 28px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .brand-mark {
+    width: 28px; height: 28px; border-radius: 7px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+    display: grid; place-items: center;
+    font-family: var(--mono); font-size: 13px; font-weight: 700; color: #fff;
+  }
+  .brand-name { font-weight: 600; font-size: 17px; letter-spacing: -0.01em; }
+  .brand-sub { color: var(--text-mute); font-family: var(--mono); font-size: 11px; margin-top: 2px; }
+
+  .rail-section {
+    padding: 12px 24px 6px;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-mute); font-weight: 600;
+  }
+
+  .step {
+    display: flex; align-items: center; gap: 12px;
+    padding: 9px 24px; font-size: 13px;
+    color: var(--text-dim);
+    border-left: 2px solid transparent;
+  }
+  .step .marker {
+    width: 22px; height: 22px; border-radius: 50%;
+    border: 1px solid var(--border-2);
+    display: grid; place-items: center;
+    font-family: var(--mono); font-size: 11px; color: var(--text-mute);
+    flex-shrink: 0;
+  }
+  .step.done { color: var(--text); }
+  .step.done .marker { background: var(--ok); border-color: var(--ok); color: #000; font-weight: 700; }
+  .step.active {
+    color: var(--text); background: var(--surface-2);
+    border-left-color: var(--accent);
+  }
+  .step.active .marker {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
+
+  .summary {
+    margin-top: auto; padding: 18px 24px;
+    border-top: 1px solid var(--border);
+  }
+  .summary-row { display: flex; padding: 4px 0; font-family: var(--mono); font-size: 12px; }
+  .summary-row .k { color: var(--text-mute); width: 90px; }
+  .summary-row .v { color: var(--text); }
+
+  /* main: current step */
+  main {
+    overflow: auto;
+    padding: 56px 64px;
+  }
+  .crumbs {
+    color: var(--text-mute); font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.04em; text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  h1.step-title { font-size: 32px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.1; margin-bottom: 10px; }
+  .step-sub { font-size: 16px; color: var(--text-dim); max-width: 640px; margin-bottom: 36px; }
+
+  /* distro grid */
+  .picker {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+    max-width: 880px;
+  }
+  .pick {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 20px;
+    cursor: pointer; transition: border-color 0.12s, background 0.12s;
+    position: relative;
+  }
+  .pick:hover { border-color: var(--border-2); background: var(--surface-2); }
+  .pick.on {
+    border-color: var(--accent); background: var(--accent-soft);
+  }
+  .pick.on::after {
+    content: "✓"; position: absolute; top: 12px; right: 14px;
+    width: 20px; height: 20px; border-radius: 50%;
+    background: var(--accent); color: #fff;
+    display: grid; place-items: center; font-size: 12px; font-weight: 700;
+  }
+  .pick .row1 { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+  .pick .name { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+  .pick .ver  { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+  .pick .desc { font-size: 13px; color: var(--text-dim); line-height: 1.5; }
+  .pick .meta {
+    margin-top: 12px; padding-top: 12px;
+    border-top: 1px solid var(--border);
+    font-family: var(--mono); font-size: 11px; color: var(--text-mute);
+    display: flex; gap: 16px;
+  }
+
+  /* profile cards */
+  .profiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; max-width: 880px; margin-top: 28px; }
+  .profile {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 20px;
+    cursor: pointer;
+  }
+  .profile.on { border-color: var(--accent); background: var(--accent-soft); }
+  .profile .badge {
+    display: inline-block; padding: 1px 7px; border-radius: 3px;
+    background: var(--surface-3); border: 1px solid var(--border-2);
+    font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+  .profile h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; letter-spacing: -0.01em; }
+  .profile p { font-size: 12px; color: var(--text-dim); line-height: 1.55; margin-bottom: 14px; }
+  .profile ul { list-style: none; padding: 0; }
+  .profile li {
+    font-family: var(--mono); font-size: 11px; color: var(--text-mute);
+    padding: 2px 0;
+    padding-left: 14px; position: relative;
+  }
+  .profile li::before { content: "·"; position: absolute; left: 4px; color: var(--text-mute); }
+  .profile li.on { color: var(--text-dim); }
+  .profile li.on::before { content: "✓"; color: var(--ok); }
+
+  /* footer action bar */
+  .actions {
+    margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border);
+    display: flex; gap: 10px; align-items: center; max-width: 880px;
+  }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 9px 18px; font-size: 14px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 5px; cursor: pointer;
+    transition: border-color 0.12s, background 0.12s;
+    font-family: var(--sans);
+  }
+  .btn:hover { border-color: var(--border-2); background: var(--surface-3); }
+  .btn.primary {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
+  .btn.primary:hover { background: var(--accent-dim); }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--text-dim); }
+  .btn.ghost:hover { color: var(--text); background: var(--surface-2); }
+
+  .actions .grow { flex: 1; }
+  .actions .meta { color: var(--text-mute); font-family: var(--mono); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="wizard">
+
+  <aside class="rail">
+    <div class="brand">
+      <div class="brand-mark">k</div>
+      <div>
+        <div class="brand-name">kldload</div>
+        <div class="brand-sub">installer · 1.1.0</div>
+      </div>
+    </div>
+
+    <div class="rail-section">Setup</div>
+    <div class="step done"><div class="marker">✓</div>Welcome</div>
+    <div class="step done"><div class="marker">✓</div>Network</div>
+    <div class="step done"><div class="marker">✓</div>Disk &amp; ZFS</div>
+    <div class="step active"><div class="marker">4</div>Distro &amp; profile</div>
+    <div class="step"><div class="marker">5</div>Account</div>
+    <div class="step"><div class="marker">6</div>Review</div>
+
+    <div class="rail-section">Install</div>
+    <div class="step"><div class="marker">7</div>Bootstrap &amp; sign</div>
+    <div class="step"><div class="marker">8</div>Reboot</div>
+
+    <div class="summary">
+      <div class="summary-row"><div class="k">host</div><div class="v">kldload-node</div></div>
+      <div class="summary-row"><div class="k">network</div><div class="v">10.100.10.122</div></div>
+      <div class="summary-row"><div class="k">disk</div><div class="v">/dev/nvme0n1</div></div>
+      <div class="summary-row"><div class="k">topology</div><div class="v">single · 1.8T</div></div>
+      <div class="summary-row"><div class="k">encrypt</div><div class="v" style="color:var(--ok);">on</div></div>
+      <div class="summary-row"><div class="k">SB</div><div class="v" style="color:var(--ok);">enabled</div></div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="crumbs">Step 4 of 8 · Distro &amp; profile</div>
+    <h1 class="step-title">Pick a distro and a profile.</h1>
+    <p class="step-sub">
+      All distros are baked into this ISO and install offline. Profile shapes which packages and tools land on disk —
+      you can change either later, just not the distro.
+    </p>
+
+    <div class="picker">
+      <div class="pick">
+        <div class="row1"><div class="name">CentOS Stream</div><div class="ver">9</div></div>
+        <div class="desc">Upstream of RHEL. Long-lived, conservative, great for servers and labs.</div>
+        <div class="meta"><span>RPM</span><span>kernel 5.14</span><span>el9</span></div>
+      </div>
+      <div class="pick">
+        <div class="row1"><div class="name">Debian</div><div class="ver">13 trixie</div></div>
+        <div class="desc">Stable, conservative, the canonical Linux distro. APT, systemd, no surprises.</div>
+        <div class="meta"><span>APT</span><span>kernel 6.12</span><span>trixie</span></div>
+      </div>
+      <div class="pick">
+        <div class="row1"><div class="name">Ubuntu</div><div class="ver">24.04 LTS</div></div>
+        <div class="desc">Noble Numbat. Same APT, more recent kernel, broader hardware support.</div>
+        <div class="meta"><span>APT</span><span>kernel 6.8</span><span>noble</span></div>
+      </div>
+      <div class="pick on">
+        <div class="row1"><div class="name">Fedora</div><div class="ver">44</div></div>
+        <div class="desc">Newest stable kernel (6.19), latest GNOME, OpenZFS 2.4. Best fit for workstation + KVM.</div>
+        <div class="meta"><span>RPM</span><span>kernel 6.19</span><span>fc44</span></div>
+      </div>
+      <div class="pick">
+        <div class="row1"><div class="name">Rocky Linux</div><div class="ver">9</div></div>
+        <div class="desc">RHEL-compatible rebuild. Drop-in replacement for production CentOS-7-era infra.</div>
+        <div class="meta"><span>RPM</span><span>kernel 5.14</span><span>el9</span></div>
+      </div>
+      <div class="pick">
+        <div class="row1"><div class="name">Arch Linux</div><div class="ver">rolling</div></div>
+        <div class="desc">Bleeding edge, minimal, you-build-it. Requires internet (no darksite — rolling release).</div>
+        <div class="meta"><span>pacman</span><span>kernel 6.19</span><span>online</span></div>
+      </div>
+    </div>
+
+    <h2 style="font-size:18px; font-weight:600; margin: 40px 0 10px; letter-spacing:-0.01em;">Profile</h2>
+    <p style="color:var(--text-dim); font-size:13px; max-width:640px;">
+      Determines what packages and tools install. You can switch profiles later — but reinstalling is faster than re-bolting.
+    </p>
+
+    <div class="profiles">
+      <div class="profile">
+        <span class="badge">core</span>
+        <h3>Core</h3>
+        <p>The minimum: ZFS on root, working bootloader, sshd. No GUI, no kldload tools, no extras.</p>
+        <ul>
+          <li class="on">ZFS on root</li>
+          <li class="on">SSH</li>
+          <li>klab / kube-cluster</li>
+          <li>kldload web UI</li>
+        </ul>
+      </div>
+      <div class="profile">
+        <span class="badge">server</span>
+        <h3>Server</h3>
+        <p>Headless. ZFS + sanoid + WireGuard mesh + eBPF tools + the full kldload tool belt.</p>
+        <ul>
+          <li class="on">Everything in Core</li>
+          <li class="on">sanoid · WireGuard · eBPF</li>
+          <li class="on">klab · kube-cluster · kzfs-test</li>
+          <li>GNOME desktop</li>
+        </ul>
+      </div>
+      <div class="profile on">
+        <span class="badge">desktop</span>
+        <h3>Desktop</h3>
+        <p>Server profile + GNOME, NVIDIA drivers, Firefox, container runtime, klab UI in a browser.</p>
+        <ul>
+          <li class="on">Everything in Server</li>
+          <li class="on">GNOME · NVIDIA · Firefox</li>
+          <li class="on">podman · klab UI · Open WebUI</li>
+          <li class="on">file pickers · Wayland</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn ghost">← Back</button>
+      <span class="grow"></span>
+      <span class="meta">fedora 44 · desktop · ~12 min · 5.4 GB</span>
+      <button class="btn primary">Continue →</button>
+    </div>
+  </main>
+
+</div>
+
+</body>
+</html>

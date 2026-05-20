@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kldload — rich-color direction (v2)</title>
+<style>
+  /* Direction C v2 — five colors that play well together:
+       black canvas · violet · jade green · sapphire blue · burnt orange
+     plus crimson for alarm only. Yellow/amber dropped (clashes w/ green).
+     Titles get a colored gradient + 1px dark drop, not flat white.
+     Body text is bright (#f3f3fb) with a 1px shadow offset for depth.
+     Surfaces have a 4-step tonal ladder so panels feel layered. */
+  :root {
+    /* tonal ladder — 5 steps from black to lightest surface */
+    --bg:        #07070b;       /* canvas */
+    --surface-0: #0d0d15;       /* faint surface */
+    --surface:   #14141e;       /* card */
+    --surface-2: #1c1c2a;       /* nested / hover */
+    --surface-3: #262638;       /* deeper nested */
+    --border:    #2c2c40;
+    --border-2:  #3a3a52;
+
+    /* text ladder — bright primary with embossed shadow for crispness */
+    --text:      #f3f3fb;
+    --text-soft: #cdcde0;
+    --text-dim:  #9292a8;
+    --text-mute: #5a5a72;
+    --text-shadow: 0 1px 0 rgba(0,0,0,0.55);
+
+    /* five core colors — each has soft (12%) + glow (28%) + edge (45%) */
+    --violet:      #8b5cf6;
+    --violet-2:    #a78bfa;
+    --violet-soft: rgba(139,92,246,0.12);
+    --violet-glow: rgba(139,92,246,0.28);
+    --violet-edge: rgba(139,92,246,0.45);
+
+    --jade:        #22c55e;
+    --jade-2:      #4ade80;
+    --jade-soft:   rgba(34,197,94,0.12);
+    --jade-glow:   rgba(34,197,94,0.28);
+    --jade-edge:   rgba(34,197,94,0.45);
+
+    --blue:        #3b82f6;
+    --blue-2:      #60a5fa;
+    --blue-soft:   rgba(59,130,246,0.12);
+    --blue-glow:   rgba(59,130,246,0.28);
+    --blue-edge:   rgba(59,130,246,0.45);
+
+    --orange:      #f97316;
+    --orange-2:    #fb923c;
+    --orange-soft: rgba(249,115,22,0.12);
+    --orange-glow: rgba(249,115,22,0.28);
+    --orange-edge: rgba(249,115,22,0.45);
+
+    --crimson:     #ef4444;
+    --crimson-soft:rgba(239,68,68,0.12);
+    --crimson-edge:rgba(239,68,68,0.45);
+
+    --mono: "JetBrains Mono","IBM Plex Mono",ui-monospace,monospace;
+    --sans: "Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px; line-height: 1.5;
+    text-shadow: var(--text-shadow);
+    -webkit-font-smoothing: antialiased;
+  }
+  /* mono shouldn't get the embossed shadow — kills legibility on tiny digits */
+  .mono, code, pre, table, .stat-val, .panel-meta, .log, .crumbs, .brand-version,
+  .nav-foot, .summary-row { text-shadow: none; }
+
+  /* ──────────────────────────────────────────────────────────────────
+     SHELL
+     ────────────────────────────────────────────────────────────────── */
+  .app { display: grid; grid-template-columns: 220px 1fr; height: 100vh; }
+
+  aside.nav {
+    background: linear-gradient(180deg, var(--surface-0) 0%, var(--bg) 100%);
+    border-right: 1px solid var(--border);
+    padding: 16px 0; display: flex; flex-direction: column;
+    position: relative;
+  }
+  /* violet→blue glow drift in upper rail */
+  aside.nav::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 100px;
+    background: radial-gradient(ellipse at top left, var(--violet-soft) 0%, transparent 70%),
+                radial-gradient(ellipse at top right, var(--blue-soft) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .brand {
+    padding: 4px 16px 22px; display: flex; align-items: center; gap: 10px;
+    font-weight: 600; letter-spacing: -0.01em; font-size: 15px;
+    position: relative; z-index: 1;
+  }
+  .brand-mark {
+    width: 26px; height: 26px; border-radius: 7px;
+    background: linear-gradient(135deg, var(--violet) 0%, var(--blue) 50%, var(--jade) 100%);
+    display: grid; place-items: center;
+    font-family: var(--mono); font-size: 12px; font-weight: 700; color: #fff;
+    box-shadow: 0 0 16px var(--violet-glow), inset 0 1px 0 rgba(255,255,255,0.25);
+  }
+  .brand-version { color: var(--text-mute); font-size: 11px; font-family: var(--mono); margin-left: auto; }
+
+  .nav-section {
+    padding: 14px 16px 4px; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.09em; color: var(--text-mute); font-weight: 700;
+  }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 14px; margin: 1px 6px; border-radius: 5px;
+    color: var(--text-soft); font-size: 13px; cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  .nav-item:hover { background: var(--surface-2); color: var(--text); }
+  .nav-item.active {
+    background: var(--violet-soft); color: var(--text);
+    border-left-color: var(--violet);
+    box-shadow: inset 0 0 36px -12px var(--violet-glow);
+  }
+  .nav-item .ic { width: 14px; opacity: 0.9; font-family: var(--mono); font-size: 11px; }
+  /* category pip colors — present but quiet */
+  .nav-item[data-cat="zfs"]  .ic { color: var(--jade); }
+  .nav-item[data-cat="vm"]   .ic { color: var(--blue); }
+  .nav-item[data-cat="logs"] .ic { color: var(--orange); }
+  .nav-item[data-cat="sb"]   .ic { color: var(--violet); }
+  .nav-item .badge {
+    margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--text-mute);
+  }
+  .nav-foot {
+    margin-top: auto; padding: 12px 16px; border-top: 1px solid var(--border);
+    color: var(--text-mute); font-size: 11px; font-family: var(--mono);
+  }
+  .nav-foot .live-dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--jade); margin-right: 6px;
+    box-shadow: 0 0 8px var(--jade-glow);
+    animation: pulse-jade 2s ease-in-out infinite;
+  }
+  @keyframes pulse-jade {
+    0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--jade-glow); }
+    50%      { opacity: 0.7; box-shadow: 0 0 14px var(--jade-edge); }
+  }
+
+  main { display: flex; flex-direction: column; overflow: hidden; }
+
+  header.bar {
+    height: 50px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center;
+    padding: 0 22px; gap: 12px; background: var(--bg);
+  }
+  .crumbs { color: var(--text-dim); font-family: var(--mono); font-size: 12px; }
+  .crumbs strong { color: var(--text); font-weight: 500; }
+  .bar-search {
+    margin-left: auto; display: flex; align-items: center; gap: 8px;
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 6px 12px; border-radius: 6px; min-width: 320px;
+    font-family: var(--mono); font-size: 12px; color: var(--text-mute);
+  }
+  .bar-search:focus-within {
+    border-color: var(--violet);
+    box-shadow: 0 0 0 3px var(--violet-soft);
+  }
+  .bar-search kbd {
+    margin-left: auto; font-family: var(--mono); font-size: 10px;
+    color: var(--text-soft); background: var(--surface-3);
+    padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border-2);
+  }
+  .bar-actions { display: flex; align-items: center; gap: 4px; }
+  .icon-btn {
+    width: 32px; height: 32px; border-radius: 6px;
+    display: grid; place-items: center;
+    background: transparent; border: 1px solid transparent; cursor: pointer;
+    color: var(--text-dim); font-family: var(--mono); font-size: 13px;
+    position: relative;
+  }
+  .icon-btn:hover { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+  .icon-btn .dot {
+    position: absolute; top: 6px; right: 6px;
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--orange); box-shadow: 0 0 8px var(--orange-glow);
+  }
+
+  .view { flex: 1; overflow: auto; padding: 24px 28px; }
+
+  /* ──────────────────────────────────────────────────────────────────
+     TITLES — colored gradient fill instead of flat white
+     ────────────────────────────────────────────────────────────────── */
+  .title-grad {
+    background: linear-gradient(135deg, var(--text) 0%, var(--violet-2) 50%, var(--blue-2) 100%);
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent; -webkit-text-fill-color: transparent;
+    text-shadow: none;
+  }
+  .title-grad.jade  { background: linear-gradient(135deg, var(--text) 0%, var(--jade-2) 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  .title-grad.blue  { background: linear-gradient(135deg, var(--text) 0%, var(--blue-2) 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  .title-grad.orange{ background: linear-gradient(135deg, var(--text) 0%, var(--orange-2) 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+
+  /* ──────────────────────────────────────────────────────────────────
+     HERO panel — violet→blue→jade glow header
+     ────────────────────────────────────────────────────────────────── */
+  .hero-panel {
+    background:
+      radial-gradient(ellipse 700px 240px at  0% 0%, var(--violet-soft) 0%, transparent 65%),
+      radial-gradient(ellipse 600px 200px at 60% 0%, var(--blue-soft)   0%, transparent 65%),
+      radial-gradient(ellipse 500px 200px at 100% 100%, var(--jade-soft) 0%, transparent 65%),
+      var(--surface-0);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 26px 30px;
+    margin-bottom: 20px;
+    position: relative; overflow: hidden;
+  }
+  .hero-panel::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+    background: linear-gradient(90deg, transparent 0%, var(--violet-edge) 25%, var(--blue-edge) 50%, var(--jade-edge) 75%, transparent 100%);
+  }
+  .hero-row { display: flex; align-items: flex-start; gap: 24px; }
+  .hero-l { flex: 1; }
+  .hero-eyebrow {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--text-soft);
+    padding: 4px 11px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--border-2);
+    margin-bottom: 14px;
+    text-shadow: none;
+  }
+  .hero-eyebrow .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--jade); box-shadow: 0 0 6px var(--jade-glow);
+  }
+  .hero-title {
+    font-size: 26px; font-weight: 600; letter-spacing: -0.025em;
+    margin-bottom: 6px; line-height: 1.15;
+  }
+  .hero-sub {
+    color: var(--text-soft); font-size: 13px; font-family: var(--mono);
+    text-shadow: none;
+  }
+  .hero-r { display: flex; gap: 8px; }
+
+  /* ──────────────────────────────────────────────────────────────────
+     STAT CARDS — colored top edge + soft glow + label pip
+     ────────────────────────────────────────────────────────────────── */
+  .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 18px 20px;
+    border-radius: 8px;
+    position: relative; overflow: hidden;
+  }
+  .stat::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: var(--accent-color, var(--text-mute));
+    box-shadow: 0 0 12px var(--accent-glow, transparent);
+  }
+  .stat::after {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 70px;
+    background: radial-gradient(ellipse at top, var(--accent-soft, transparent) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .stat[data-c="violet"] { --accent-color: var(--violet); --accent-soft: var(--violet-soft); --accent-glow: var(--violet-glow); }
+  .stat[data-c="jade"]   { --accent-color: var(--jade);   --accent-soft: var(--jade-soft);   --accent-glow: var(--jade-glow); }
+  .stat[data-c="blue"]   { --accent-color: var(--blue);   --accent-soft: var(--blue-soft);   --accent-glow: var(--blue-glow); }
+  .stat[data-c="orange"] { --accent-color: var(--orange); --accent-soft: var(--orange-soft); --accent-glow: var(--orange-glow); }
+
+  .stat-label {
+    color: var(--text-dim); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.08em; margin-bottom: 10px; font-weight: 600;
+    display: flex; align-items: center; gap: 7px;
+    position: relative; z-index: 1;
+    text-shadow: none;
+  }
+  .stat-label .pip {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent-color);
+    box-shadow: 0 0 8px var(--accent-color);
+  }
+  .stat-val {
+    font-family: var(--mono); font-size: 26px; font-weight: 500; letter-spacing: -0.025em;
+    position: relative; z-index: 1;
+    color: var(--text);
+  }
+  .stat-val .unit { font-size: 13px; color: var(--text-dim); margin-left: 5px; font-weight: 400; }
+  .stat-trend {
+    font-family: var(--mono); font-size: 11px; margin-top: 9px;
+    color: var(--text-dim);
+    position: relative; z-index: 1;
+  }
+  .stat-trend.up   { color: var(--jade-2); }
+  .stat-trend.down { color: var(--orange-2); }
+
+  /* ──────────────────────────────────────────────────────────────────
+     PANELS — colored border + tinted header
+     ────────────────────────────────────────────────────────────────── */
+  .two-col { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+  }
+  .panel.violet { border-color: var(--violet-edge); }
+  .panel.jade   { border-color: var(--jade-edge); }
+  .panel.blue   { border-color: var(--blue-edge); }
+  .panel.orange { border-color: var(--orange-edge); }
+
+  .panel-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 13px 18px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    position: relative;
+  }
+  .panel.violet .panel-head { background: linear-gradient(90deg, var(--violet-soft) 0%, var(--surface) 60%); }
+  .panel.jade   .panel-head { background: linear-gradient(90deg, var(--jade-soft)   0%, var(--surface) 60%); }
+  .panel.blue   .panel-head { background: linear-gradient(90deg, var(--blue-soft)   0%, var(--surface) 60%); }
+  .panel.orange .panel-head { background: linear-gradient(90deg, var(--orange-soft) 0%, var(--surface) 60%); }
+
+  .panel-title {
+    font-size: 13px; font-weight: 600; letter-spacing: -0.01em;
+  }
+  .panel-meta {
+    color: var(--text-dim); font-family: var(--mono); font-size: 11px;
+    margin-left: auto;
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+     TABLES — chip status pills, not just left-borders
+     ────────────────────────────────────────────────────────────────── */
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  thead th {
+    text-align: left; padding: 10px 18px;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--text-dim); font-weight: 700; font-family: var(--sans);
+    border-bottom: 1px solid var(--border); background: var(--surface-2);
+    text-shadow: none;
+  }
+  tbody td {
+    padding: 9px 18px; border-bottom: 1px solid var(--border);
+    color: var(--text); white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--surface-0); }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 9px; border-radius: 12px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.02em;
+    font-weight: 500; text-shadow: none;
+  }
+  .chip .dot { width: 5px; height: 5px; border-radius: 50%; }
+  .chip.jade   { background: var(--jade-soft);   color: #86efac; border: 1px solid var(--jade-edge); }
+  .chip.jade   .dot { background: var(--jade); box-shadow: 0 0 6px var(--jade-glow); }
+  .chip.blue   { background: var(--blue-soft);   color: #93c5fd; border: 1px solid var(--blue-edge); }
+  .chip.blue   .dot { background: var(--blue); box-shadow: 0 0 6px var(--blue-glow); }
+  .chip.orange { background: var(--orange-soft); color: #fdba74; border: 1px solid var(--orange-edge); }
+  .chip.orange .dot { background: var(--orange); box-shadow: 0 0 6px var(--orange-glow); }
+  .chip.violet { background: var(--violet-soft); color: #c4b5fd; border: 1px solid var(--violet-edge); }
+  .chip.violet .dot { background: var(--violet); box-shadow: 0 0 6px var(--violet-glow); }
+  .chip.crimson{ background: var(--crimson-soft);color: #fca5a5; border: 1px solid var(--crimson-edge); }
+  .chip.crimson .dot { background: var(--crimson); }
+  .chip.idle   { background: var(--surface-3); color: var(--text-mute); border: 1px solid var(--border-2); }
+  .chip.idle   .dot { background: var(--text-mute); }
+
+  .dim { color: var(--text-dim); }
+  .mute { color: var(--text-mute); }
+
+  /* gradient progress bar */
+  .progress {
+    height: 6px; background: var(--surface-3); border-radius: 3px;
+    overflow: hidden; position: relative;
+  }
+  .progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--violet) 0%, var(--blue) 100%);
+    box-shadow: 0 0 12px var(--violet-glow);
+  }
+
+  /* sparkline */
+  .spark { width: 100%; height: 80px; display: block; }
+  .spark .area-violet { fill: var(--violet-soft); }
+  .spark .area-jade   { fill: var(--jade-soft); }
+  .spark .line-violet { fill: none; stroke: var(--violet-2); stroke-width: 1.6; filter: drop-shadow(0 0 6px var(--violet-glow)); }
+  .spark .line-jade   { fill: none; stroke: var(--jade-2);   stroke-width: 1.6; filter: drop-shadow(0 0 6px var(--jade-glow)); }
+  .spark .line-blue   { fill: none; stroke: var(--blue-2);   stroke-width: 1.6; filter: drop-shadow(0 0 6px var(--blue-glow)); }
+
+  /* buttons */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 13px; font-size: 12px; font-weight: 500;
+    background: var(--surface-2); border: 1px solid var(--border-2);
+    color: var(--text); border-radius: 6px; cursor: pointer;
+    font-family: var(--sans); text-shadow: none;
+    transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
+  }
+  .btn:hover { background: var(--surface-3); border-color: var(--text-mute); }
+  .btn.primary {
+    background: linear-gradient(135deg, var(--violet) 0%, var(--blue) 100%);
+    border-color: var(--violet); color: #fff;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.18);
+  }
+  .btn.primary:hover { box-shadow: 0 0 18px var(--violet-glow), inset 0 1px 0 rgba(255,255,255,0.18); }
+  .btn.jade {
+    background: linear-gradient(135deg, var(--jade) 0%, #16a34a 100%);
+    border-color: var(--jade); color: #fff;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.18);
+  }
+  .btn.jade:hover { box-shadow: 0 0 18px var(--jade-glow), inset 0 1px 0 rgba(255,255,255,0.18); }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--text-soft); }
+  .btn.ghost:hover { color: var(--text); background: var(--surface-2); border-color: var(--border); }
+
+  /* logs */
+  .log {
+    font-family: var(--mono); font-size: 12px; line-height: 1.6;
+    background: var(--surface-0); padding: 14px 18px;
+    max-height: 260px; overflow: auto;
+  }
+  .log-line { display: grid; grid-template-columns: 90px 50px 1fr; gap: 12px; padding: 1px 0; }
+  .log-line .ts  { color: var(--text-mute); }
+  .log-line .lvl { font-weight: 700; font-size: 10px; padding: 1px 6px; border-radius: 3px; text-align: center; align-self: start; margin-top: 2px; letter-spacing: 0.04em; }
+  .log-line .lvl.info  { color: #93c5fd; background: var(--blue-soft);    border: 1px solid var(--blue-edge); }
+  .log-line .lvl.ok    { color: #86efac; background: var(--jade-soft);    border: 1px solid var(--jade-edge); }
+  .log-line .lvl.warn  { color: #fdba74; background: var(--orange-soft);  border: 1px solid var(--orange-edge); }
+  .log-line .lvl.err   { color: #fca5a5; background: var(--crimson-soft); border: 1px solid var(--crimson-edge); }
+  .log-line .msg { color: var(--text-soft); white-space: pre-wrap; word-break: break-word; }
+
+  .row { display: flex; align-items: center; gap: 10px; }
+  .grow { flex: 1; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <aside class="nav">
+    <div class="brand">
+      <div class="brand-mark">k</div>
+      <div>kldload</div>
+      <span class="brand-version">1.1.0</span>
+    </div>
+
+    <div class="nav-section">Operate</div>
+    <div class="nav-item active" data-cat="dash"><span class="ic">▣</span>Dashboard</div>
+    <div class="nav-item" data-cat="zfs"><span class="ic">●</span>ZFS Pools<span class="badge">2</span></div>
+    <div class="nav-item" data-cat="vm"><span class="ic">●</span>KVM &amp; klab<span class="badge">7</span></div>
+    <div class="nav-item" data-cat="logs"><span class="ic">●</span>Logs</div>
+
+    <div class="nav-section">Build</div>
+    <div class="nav-item"><span class="ic">⚙</span>Profiles</div>
+    <div class="nav-item"><span class="ic">↓</span>Darksites</div>
+    <div class="nav-item"><span class="ic">⊕</span>Export images</div>
+
+    <div class="nav-section">Infra</div>
+    <div class="nav-item"><span class="ic">☷</span>Kubernetes</div>
+    <div class="nav-item"><span class="ic">⊞</span>Boot envs</div>
+    <div class="nav-item" data-cat="sb"><span class="ic">●</span>Secure boot</div>
+
+    <div class="nav-foot">
+      <span class="live-dot"></span>live · 10.100.10.118<br>
+      <span style="margin-left:14px; color: var(--text-mute);">build d2f4e91 · 4h</span>
+    </div>
+  </aside>
+
+  <main>
+    <header class="bar">
+      <div class="crumbs"><span>kldload</span> / <strong>Dashboard</strong></div>
+      <div class="bar-search">
+        <span style="color:var(--violet-2)">⌕</span>
+        <span>Search pools, vms, logs…</span>
+        <kbd>⌘K</kbd>
+      </div>
+      <div class="bar-actions">
+        <button class="icon-btn"><span>↻</span></button>
+        <button class="icon-btn"><span>◔</span><span class="dot"></span></button>
+        <button class="icon-btn"><span>⚙</span></button>
+      </div>
+    </header>
+
+    <section class="view">
+
+      <!-- HERO -->
+      <div class="hero-panel">
+        <div class="hero-row">
+          <div class="hero-l">
+            <div class="hero-eyebrow"><span class="dot"></span>system healthy · 3d 14h uptime</div>
+            <div class="hero-title title-grad">10.100.10.118</div>
+            <div class="hero-sub">fedora 44 · kernel 6.19.14-300 · zfs 2.4.1 · hostid 7a3f9c11</div>
+          </div>
+          <div class="hero-r">
+            <button class="btn ghost">Snapshot all</button>
+            <button class="btn primary">+ New VM</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- STATS — four colors -->
+      <div class="stat-grid">
+        <div class="stat" data-c="jade">
+          <div class="stat-label"><span class="pip"></span>Pools online</div>
+          <div class="stat-val">2<span class="unit">/2 healthy</span></div>
+          <div class="stat-trend up">↑ scrub clean · 2d ago</div>
+        </div>
+        <div class="stat" data-c="violet">
+          <div class="stat-label"><span class="pip"></span>Capacity</div>
+          <div class="stat-val">412<span class="unit">G of 1.8T</span></div>
+          <div class="stat-trend">22% · +1.4G/24h</div>
+        </div>
+        <div class="stat" data-c="blue">
+          <div class="stat-label"><span class="pip"></span>VMs running</div>
+          <div class="stat-val">7<span class="unit">/9 online</span></div>
+          <div class="stat-trend">2 stopped · klab-rocky, klab-arch</div>
+        </div>
+        <div class="stat" data-c="orange">
+          <div class="stat-label"><span class="pip"></span>Snapshot lag</div>
+          <div class="stat-val">38<span class="unit">m behind</span></div>
+          <div class="stat-trend down">sanoid skipped · load 4.2</div>
+        </div>
+      </div>
+
+      <!-- THROUGHPUT + EVENTS -->
+      <div class="two-col">
+        <div class="panel violet">
+          <div class="panel-head">
+            <span class="panel-title title-grad" style="font-size:14px;">Pool throughput · tank</span>
+            <span class="panel-meta">last 30m · 5s · violet=read · jade=write · blue=cache</span>
+          </div>
+          <div style="padding: 18px 20px;">
+            <svg class="spark" viewBox="0 0 600 80" preserveAspectRatio="none">
+              <path class="area-violet" d="M0,72 L0,42 30,40 60,38 90,30 120,28 150,33 180,22 210,25 240,18 270,20 300,12 330,17 360,14 390,9 420,18 450,11 480,7 510,15 540,10 570,12 600,8 L600,80 0,80 Z"/>
+              <path class="line-violet" d="M0,42 L30,40 60,38 90,30 120,28 150,33 180,22 210,25 240,18 270,20 300,12 330,17 360,14 390,9 420,18 450,11 480,7 510,15 540,10 570,12 600,8"/>
+              <path class="line-jade" d="M0,62 L30,60 60,58 90,55 120,57 150,52 180,54 210,50 240,48 270,52 300,45 330,48 360,42 390,44 420,40 450,42 480,38 510,40 540,36 570,38 600,34"/>
+              <path class="line-blue" d="M0,68 L30,66 60,64 90,62 120,65 150,60 180,62 210,58 240,56 270,60 300,55 330,58 360,52 390,54 420,50 450,53 480,48 510,52 540,46 570,49 600,44"/>
+            </svg>
+            <div class="row" style="margin-top:14px;">
+              <span class="chip violet"><span class="dot"></span>read 128 MB/s</span>
+              <span class="chip jade"><span class="dot"></span>write 42 MB/s</span>
+              <span class="chip blue"><span class="dot"></span>cache 86%</span>
+              <span class="grow"></span>
+              <span class="mute" style="font-family:var(--mono); font-size:11px;">peak today · 312 MB/s</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel jade">
+          <div class="panel-head">
+            <span class="panel-title title-grad jade" style="font-size:14px;">Recent events</span>
+            <span class="panel-meta">12 today</span>
+          </div>
+          <table>
+            <tbody>
+              <tr><td><span class="chip jade"><span class="dot"></span>snap</span></td><td class="dim">2m</td><td>tank/vm/k8s‑01@daily</td></tr>
+              <tr><td><span class="chip blue"><span class="dot"></span>start</span></td><td class="dim">14m</td><td>klab‑debian13</td></tr>
+              <tr><td><span class="chip orange"><span class="dot"></span>skip</span></td><td class="dim">38m</td><td>sanoid · load 4.2</td></tr>
+              <tr><td><span class="chip jade"><span class="dot"></span>scrub</span></td><td class="dim">1h</td><td>tank · 0 errors</td></tr>
+              <tr><td><span class="chip violet"><span class="dot"></span>kbe</span></td><td class="dim">3h</td><td>BE 1.1.0‑dev‑pre</td></tr>
+              <tr><td><span class="chip crimson"><span class="dot"></span>err</span></td><td class="dim">3h</td><td>kbe · grub.cfg under SB</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- VMs -->
+      <div style="margin-top: 16px;">
+        <div class="panel blue">
+          <div class="panel-head">
+            <span class="panel-title title-grad blue" style="font-size:14px;">Virtual machines</span>
+            <span class="panel-meta">9 total · 7 running · 2 stopped</span>
+          </div>
+          <table>
+            <thead><tr>
+              <th>Status</th><th>Name</th><th>Profile</th><th>Distro</th><th>vCPU</th><th>RAM</th><th>IP</th><th>Uptime</th><th>Tags</th>
+            </tr></thead>
+            <tbody>
+              <tr><td><span class="chip jade"><span class="dot"></span>running</span></td><td>k8s-01</td><td>kvm</td><td>fedora 44</td><td>4</td><td>8G</td><td>192.168.122.11</td><td>2d 14h</td><td><span class="chip violet"><span class="dot"></span>control-plane</span></td></tr>
+              <tr><td><span class="chip jade"><span class="dot"></span>running</span></td><td>k8s-02</td><td>kvm</td><td>fedora 44</td><td>4</td><td>8G</td><td>192.168.122.12</td><td>2d 14h</td><td><span class="chip blue"><span class="dot"></span>worker</span></td></tr>
+              <tr><td><span class="chip jade"><span class="dot"></span>running</span></td><td>klab-debian13</td><td>desktop</td><td>debian 13</td><td>2</td><td>4G</td><td>192.168.122.42</td><td>3h 12m</td><td></td></tr>
+              <tr><td><span class="chip orange"><span class="dot"></span>degraded</span></td><td>klab-ubuntu24</td><td>desktop</td><td>ubuntu 24.04</td><td>2</td><td>4G</td><td>192.168.122.45</td><td>22m</td><td><span class="dim">guest agent down</span></td></tr>
+              <tr><td><span class="chip idle"><span class="dot"></span>stopped</span></td><td>klab-rocky</td><td>server</td><td>rocky 9</td><td>2</td><td>2G</td><td class="mute">—</td><td class="mute">—</td><td></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- LOGS -->
+      <div style="margin-top: 16px;">
+        <div class="panel orange">
+          <div class="panel-head">
+            <span class="panel-title title-grad orange" style="font-size:14px;">Live tail · journalctl</span>
+            <span class="panel-meta">/var/log/kldload — 2.1k lines/m</span>
+          </div>
+          <div class="log">
+            <div class="log-line"><span class="ts">21:43:02.118</span><span class="lvl info">INFO</span><span class="msg">kldload-firstboot: nvidia.ko present, restoring parked configs</span></div>
+            <div class="log-line"><span class="ts">21:43:02.249</span><span class="lvl ok">OK</span><span class="msg">restored /etc/modprobe.d/nouveau-blacklist.conf</span></div>
+            <div class="log-line"><span class="ts">21:43:02.402</span><span class="lvl info">INFO</span><span class="msg">dracut --force --regenerate-all (kernel 6.19.14-300.fc44.x86_64)</span></div>
+            <div class="log-line"><span class="ts">21:43:08.611</span><span class="lvl ok">OK</span><span class="msg">tank imported · 4.0T · raidz2 · 0 errors</span></div>
+            <div class="log-line"><span class="ts">21:43:09.412</span><span class="lvl warn">WARN</span><span class="msg">sanoid: skipping tank/vm/k8s-01@daily — load_avg 4.2 above threshold 3.0</span></div>
+            <div class="log-line"><span class="ts">21:43:14.118</span><span class="lvl info">INFO</span><span class="msg">cilium: identity 12044 allocated for pod kube-system/coredns-7d8c</span></div>
+            <div class="log-line"><span class="ts">21:43:18.001</span><span class="lvl err">ERR</span><span class="msg">kbe: cannot rewrite grub.cfg under SB direct-kernel boot — manual edit required</span></div>
+            <div class="log-line"><span class="ts">21:43:18.512</span><span class="lvl info">INFO</span><span class="msg">kbe: created BE 1.1.0-dev-pre on tank/ROOT</span></div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+  </main>
+</div>
+</body>
+</html>

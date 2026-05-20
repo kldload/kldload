@@ -67,7 +67,7 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   # pre-loaded. Every F-key brings up its own content window on demand,
   # and pressing the same key again closes it. User controls what's
   # running, nothing steals CPU/memory just because the drawer is open.
-  tmux new-session -d -s $SESSION -n home
+  tmux new-session -d -s $SESSION -n klab
   # Session-level survivability:
   #   destroy-unattached off — when ttyd's browser tab disconnects momentarily
   #     (network blip, iframe reload, F-key window churn under load), tmux
@@ -102,26 +102,23 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   # remain-on-exit kicks in.
   tmux bind-key -T root -N "close dead pane with Enter" Enter \
     if-shell -F "#{pane_dead}" "kill-pane" "send-keys Enter"
-  # The home tab greets the user with an ASCII-art cheatsheet covering
-  # every key binding. `menu` is aliased so a user who cleared the screen
-  # can type it to redraw. _kconsole-home uses 256-color ANSI; falls back
-  # to plain text if TERM doesn't support color.
-  tmux send-keys -t $SESSION:home "alias menu='_kconsole-home'; alias help='kldload-help'; _kconsole-home" Enter
+  # The klab home tab starts as a plain bash prompt. No auto-rendered
+  # cheatsheet — F1 is the single source of help. Aliases for `menu`
+  # (redraw the cheatsheet) and `help` (full kldload-help) are still
+  # available if the operator wants them inline.
+  tmux send-keys -t $SESSION:klab "alias menu='_kconsole-home'; alias help='kldload-help'; clear" Enter
 
-  # Help is delivered as a F1-toggled popup rather than a permanent window.
-  # The earlier design used a separate `help` window (2:help in the tab
-  # strip) which (a) took up window slot, (b) required prefix+2 / S-Right
-  # navigation to reach, (c) couldn't easily be dismissed once open. A
-  # tmux 3.2+ display-popup gives us the right UX: one keystroke opens the
-  # operator catalog over the current pane, Ctrl-D / exit closes it back
-  # to wherever you were. The popup is 90%×90% so kldload-mgmt's command
-  # reference is fully visible; `kldload-help` and `help <topic>` work
-  # inside the bash that runs after the catalog renders.
-  #
-  # On tmux 3.4+ pressing F1 while a popup is open auto-closes it (true
-  # toggle); on 3.2/3.3 a second F1 would open a stacked popup, which is
-  # ugly but not broken. The live env (tmux 3.6a) has the toggle natively.
-  tmux bind -n F1 display-popup -E -w 90% -h 90% -d /root "/usr/local/bin/kldload-mgmt"
+  # F1 = help popup, TRUE toggle. _khelp-toggle tracks the popup's
+  # child PID in /tmp/kldload-help.pid:
+  #   • F1 with no popup open → spawn one (`kldload-help cockpit |
+  #     less -R`); writes the PID so the next F1 finds it.
+  #   • F1 with popup open → kill the tracked PID; less exits → the
+  #     popup's -E flag closes it; trap removes the PID file.
+  # Three ways out for the operator: F1, q (less builtin), Esc.
+  # Implementation runs in the background via setsid+disown so this
+  # binding returns immediately — tmux's run-shell can't host an
+  # interactive popup otherwise.
+  tmux bind -n F1 run-shell -b "/usr/local/bin/_khelp-toggle"
 
   # ── Primary F-keys (content panes) ────────────────────────────────
   # Bind by window NAME (=name) not index so closing/reordering doesn't
@@ -131,57 +128,122 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   # htop starts. Press F6 again: htop is killed. No wasteful restart.
   # F3 (shell) and Shift+F3 (root) are intentionally NOT toggles — every
   # press spawns a fresh shell so you can keep multiple open.
-  tmux bind -n F2  run-shell "_ktoggle-win k9s    'bash -c _k9s_wrap'"
-  # F3 → kztest-tail: follows the live ZFS test run. When nothing's
-  # running it waits for /root/klab/latest/full.log to appear, then
-  # tails it forever. Hit it right after `klab test --full` and you
-  # see every [PASS]/[FAIL]/[SKIP] stream by in real time, prefixed
-  # by [distro]. Pair with S-F5 (doctor loop) for system-health
-  # correlation when a test flakes.
-  # F3 = unified live tail across every post-install log stream
-  # (autodeploy + klab driver + firstboot + kube-bootstrap + every VM
-  # console under /var/log/klab/). Replaces the older ztest-only
-  # kztest-tail because the ztest-only view was only useful during a
-  # `klab test` run — operators kept asking "what's actually happening
-  # right now?" during the goldens / kube / firstboot phases and the
-  # answer was "tail four different files". Single command, all of it.
-  tmux bind -n F3  run-shell "_ktoggle-win follow 'kldload-follow'"
-  tmux bind -n F4  run-shell "_ktoggle-win logs   'journalctl -f -u kldload-webui -u ttyd-k9s'"
-  # F5 → kldload-lh: LogHog with cluster-wide SSHFS stitching. Launches
-  # the interactive menu (Live All / Auth / Errors / Network / RegEX / IP
-  # search / JSON export) on every /var/log + /var/log/kldload + klab +
-  # libvirt + audit file across the whole cluster, ordered by timestamp.
-  # Much faster and more useful than the old journalctl firehose.
-  tmux bind -n F5  run-shell "_ktoggle-win live   'kldload-lh'"
-  tmux bind -n F6  run-shell "_ktoggle-win htop   'htop || top'"
-  tmux bind -n F7  run-shell "_ktoggle-win events 'kubectl get events -A --watch 2>&1 || (echo no-cluster; sleep 99)'"
-  tmux bind -n F8  run-shell "_ktoggle-win hubble 'kubectl -n kube-system exec ds/cilium -c cilium-agent -- hubble observe --follow --output compact 2>&1 || (echo hubble-unavailable; sleep 99)'"
-  tmux bind -n F9  run-shell "_ktoggle-win zpool  'zpool iostat -vy 2'"
-  tmux bind -n F10 run-shell "_ktoggle-win scratch 'bash'"
-  tmux bind -n F11 run-shell "_ktoggle-win tcplife 'sudo /usr/share/bcc/tools/tcplife 2>/dev/null || sudo tcplife-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
-  tmux bind -n F12 run-shell "_ktoggle-win tcptop  'sudo /usr/share/bcc/tools/tcptop 2>/dev/null || sudo tcptop-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
+  # F-key layout (rebuilt 2026-05-19):
+  #   F1  help (toggle popup)
+  #   F2  k9s
+  #   F3  terminal (scratch shell — every press spawns a fresh one)
+  #   F4  CLOSE EVERYTHING (kill every non-klab window)
+  #   F5  logs (kldload-follow)
+  #   F6  syscall cockpit  (5 windows: exec/open/kill/sysc/capable)
+  #   F7  I/O cockpit      (7 windows: bio/tcp/file/zfsdist)
+  #   F8  kernel cockpit   (15 windows: bpf/cilium/tetragon/zfs/k8s)
+  #   F9  k8s events
+  #   F10 htop
+  #   F11 kernel-tcp       (ss -i + nethogs split, custom awk formatter)
+  #   F12 nethogs          (full-window per-process bandwidth)
+  # Every F2..F12 binding chains `run-shell _khelp-close` BEFORE the
+  # action so any open F1 help popup is dismissed first. _khelp-close
+  # is a no-op when no popup is open, so the chain is harmless if the
+  # help was never opened. Using sync run-shell (not -b) so the kill
+  # completes before the action's run-shell fires its window-create.
+  tmux bind -n F2  run-shell "_khelp-close" \; run-shell "_ktoggle-win k9s    'bash -c _k9s_wrap'"
+  # F3 = terminal. Always-new scratch shell rather than a toggle — F3
+  # twice in a row opens TWO scratch shells, which is what an operator
+  # actually wants (one per task). To close, use Ctrl+q or F4.
+  tmux bind -n F3  run-shell "_khelp-close" \; new-window -n term 'bash'
+  # F4 = close everything. Kills every non-klab window in one shot.
+  # See _kclose-all — it picks klab first so the active window doesn't
+  # flash through a stranger mid-operation.
+  tmux bind -n F4  run-shell "_khelp-close" \; run-shell "_kclose-all"
+  # F5 = unified log viewer. kldload-follow multiplexes autodeploy,
+  # klab, firstboot, kube-bootstrap, and every VM console log into one
+  # tail -F. Toggleable.
+  tmux bind -n F5  run-shell "_khelp-close" \; run-shell "_ktoggle-win logs   'kldload-follow'"
+  # F6 = syscall cockpit. Group-toggle: 5 windows (execsnoop, opensnoop,
+  # killsnoop, syscount, capable). F6 again closes all five.
+  tmux bind -n F6  run-shell "_khelp-close" \; run-shell "_kebpf-syscalls"
+  # F7 = I/O cockpit. Group-toggle: 7 windows (biosnoop, biolatency,
+  # tcpconnect, tcpretrans, tcplife, fileslower, zfsdist).
+  tmux bind -n F7  run-shell "_khelp-close" \; run-shell "_kebpf-io"
+  # F8 = kernel cockpit. Group-toggle: 15 windows covering Cilium,
+  # Tetragon, ZFS internals, virsh, k8s top, kernel ring buffer, GPU.
+  # Heaviest cockpit — usually the demo finisher.
+  tmux bind -n F8  run-shell "_khelp-close" \; run-shell "_kcockpit"
+  # F9 = k8s events stream.
+  tmux bind -n F9  run-shell "_khelp-close" \; run-shell "_ktoggle-win events 'kubectl get events -A --watch 2>&1 || (echo no-cluster; sleep 99)'"
+  # F10 = htop.
+  tmux bind -n F10 run-shell "_khelp-close" \; run-shell "_ktoggle-win htop   'htop || top'"
+  # F11 = kernel-tcp (was F9). 2-pane window: ss -i + custom awk
+  # formatter (RTT/cwnd/retrans colour-coded, per-process rollup, rate
+  # sparkline) on top, nethogs on the bottom. The headline observability
+  # window — "every number on this screen came from struct tcp_sock".
+  tmux bind -n F11 run-shell "_khelp-close" \; run-shell "_ktcp-expanded"
+  # F12 = nethogs alone (full-window per-process bandwidth).
+  tmux bind -n F12 run-shell "_khelp-close" \; run-shell "_ktoggle-win nethogs 'sudo nethogs 2>/dev/null || (echo need-nethogs; sleep 99)'"
+
+  # ── Welcome popup on first client attach (2026-05-19) ─────────────
+  # When the user opens the browser console for the first time, fire
+  # F1 automatically so the cockpit reference appears as a welcome.
+  # Flag-file gating means we only fire once per session — if the
+  # browser tab is reloaded later, the user goes straight to the klab
+  # prompt without the popup. F1 still works manually after that.
+  tmux set-hook -g client-attached \
+    "run-shell -b 'mkdir -p /run/kldload 2>/dev/null; [[ -f /run/kldload/welcomed.${SESSION} ]] || { touch /run/kldload/welcomed.${SESSION}; sleep 0.3; /usr/local/bin/_khelp-toggle; }'"
 
   # Shift+F<N> — deeper complementary views. Same toggle semantics.
-  tmux bind -n S-F2  run-shell "_ktoggle-win k-evts  'kubectl get events -A --watch --field-selector type=Warning 2>&1 || (echo no-cluster; sleep 99)'"
-  tmux bind -n S-F3  new-window -n root 'sudo -i'   # always-new root shell
-  tmux bind -n S-F4  run-shell "_ktoggle-win dmesg   'sudo dmesg --follow --human --ctime'"
-  tmux bind -n S-F5  run-shell "_ktoggle-win doctor  'while true; do clear; kldload-doctor 2>/dev/null | python3 -m json.tool | head -80; sleep 15; done'"
-  tmux bind -n S-F6  run-shell "_ktoggle-win iotop   'sudo iotop -o -P'"
-  tmux bind -n S-F7  run-shell "_ktoggle-win k-top   'watch -n 3 kubectl top pods -A --sort-by=memory'"
-  tmux bind -n S-F8  run-shell "_ktoggle-win c-drop  'kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg monitor --type drop 2>&1 || (echo cilium-unavailable; sleep 99)'"
-  tmux bind -n S-F9  run-shell "_ktoggle-win zfsio   'zfs iostat -l -v 2'"
-  tmux bind -n S-F10 run-shell "_ktoggle-win kinspect 'bash -c _kinspect_picker'"
-  tmux bind -n S-F11 run-shell "_ktoggle-win retrans 'sudo /usr/share/bcc/tools/tcpretrans 2>/dev/null || sudo tcpretrans-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
-  tmux bind -n S-F12 run-shell "_ktoggle-win connect 'sudo /usr/share/bcc/tools/tcpconnect 2>/dev/null || sudo tcpconnect-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
+  tmux bind -n S-F2  run-shell "_khelp-close" \; run-shell "_ktoggle-win k-evts  'kubectl get events -A --watch --field-selector type=Warning 2>&1 || (echo no-cluster; sleep 99)'"
+  tmux bind -n S-F3  run-shell "_khelp-close" \; new-window -n root 'sudo -i'
+  tmux bind -n S-F4  run-shell "_khelp-close" \; run-shell "_ktoggle-win dmesg   'sudo dmesg --follow --human --ctime'"
+  tmux bind -n S-F5  run-shell "_khelp-close" \; run-shell "_ktoggle-win doctor  'while true; do clear; kldload-doctor 2>/dev/null | python3 -m json.tool | head -80; sleep 15; done'"
+  tmux bind -n S-F6  run-shell "_khelp-close" \; run-shell "_ktoggle-win iotop   'sudo iotop -o -P'"
+  tmux bind -n S-F7  run-shell "_khelp-close" \; run-shell "_ktoggle-win k-top   'watch -n 3 kubectl top pods -A --sort-by=memory'"
+  tmux bind -n S-F8  run-shell "_khelp-close" \; run-shell "_ktoggle-win c-drop  'kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg monitor --type drop 2>&1 || (echo cilium-unavailable; sleep 99)'"
+  tmux bind -n S-F9  run-shell "_khelp-close" \; run-shell "_ktoggle-win zfsio   'zfs iostat -l -v 2'"
+  tmux bind -n S-F10 run-shell "_khelp-close" \; run-shell "_ktoggle-win kinspect 'bash -c _kinspect_picker'"
+  tmux bind -n S-F11 run-shell "_khelp-close" \; run-shell "_ktoggle-win retrans 'sudo /usr/share/bcc/tools/tcpretrans 2>/dev/null || sudo tcpretrans-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
+  tmux bind -n S-F12 run-shell "_khelp-close" \; run-shell "_ktoggle-win connect 'sudo /usr/share/bcc/tools/tcpconnect 2>/dev/null || sudo tcpconnect-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
 
   # ── Pane manipulation (Alt-shortcuts, no prefix) ──────────────────
-  # Alt+N is captured by browsers for tab switching, so stick to
-  # Alt+arrow / Alt+Enter / Alt+symbol which pass through reliably.
-  # Alt+arrows walk PANES within a window.
-  tmux bind -n M-Left  select-pane -L
-  tmux bind -n M-Right select-pane -R
+  # Alt+left/right + Alt+h/l walk WINDOWS (Shift+Arrow gets eaten by
+  # the browser's text-selection / history-nav before xterm.js sees
+  # it, so we lean on Alt). Alt+up/down + Alt+j/k walk PANES within a
+  # window. Two key faces for each direction is intentional: vim
+  # users reach for h/l, everyone else for arrows; both work in the
+  # native terminal AND inside the ttyd iframe. (Reorganised
+  # 2026-05-19 after the user reported Shift+Arrow never working.)
+  tmux bind -n M-Left  previous-window
+  tmux bind -n M-Right next-window
+  tmux bind -n M-h     previous-window
+  tmux bind -n M-l     next-window
   tmux bind -n M-Up    select-pane -U
   tmux bind -n M-Down  select-pane -D
+  tmux bind -n M-k     select-pane -U
+  tmux bind -n M-j     select-pane -D
+  # Ctrl+arrow as a third pane-nav alternative — terminals send these
+  # as CSI sequences that the browser doesn't grab.
+  tmux bind -n C-Left  select-pane -L
+  tmux bind -n C-Right select-pane -R
+  tmux bind -n C-Up    select-pane -U
+  tmux bind -n C-Down  select-pane -D
+
+  # ── Scrollback nav without ceremony (2026-05-19) ──────────────────
+  # Browser-embedded ttyd makes default tmux scrollback awkward:
+  #   * mouse wheel often goes to xterm.js's outer buffer, not tmux's
+  #     pane history; the data exists but is unreachable
+  #   * the canonical "Ctrl-B [" then PageUp is two-step and assumes
+  #     the operator knows tmux copy-mode
+  # PageUp without prefix enters tmux copy-mode and scrolls one screen
+  # back. Subsequent PageUp / PageDown / Up / Down (in copy-mode) walks
+  # the history. Press q or Enter to exit back to live view.
+  # Shift+PageUp = jump-to-top; Shift+PageDown = jump-to-bottom.
+  tmux bind -n PageUp     copy-mode -u
+  tmux bind -n S-PageUp   copy-mode \; send-keys -X history-top
+  tmux bind -n S-PageDown send-keys -X history-bottom
+  # Mouse wheel scrolling on a pane: enter copy-mode + scroll three
+  # lines. Hovering scroll on a live pane no longer dumps the wheel
+  # event into an inert xterm.js buffer; instead tmux owns it.
+  tmux bind -n WheelUpPane   if-shell -F -t = "#{pane_in_mode}" "send-keys -X -N 3 scroll-up"   "copy-mode -e ; send-keys -X -N 3 scroll-up"
+  tmux bind -n WheelDownPane if-shell -F -t = "#{pane_in_mode}" "send-keys -X -N 3 scroll-down" ""
   # Shift+arrows walk between WINDOWS (tabs) in order. Lets you flip
   # through open F-key panes without remembering which key opened which.
   # Shift+Right = next window, Shift+Left = previous window.
@@ -200,10 +262,19 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   # (revert-line), vim's Esc/Alt+X workflows, etc. Operators close panes
   # via the toggle key that opened them (re-press Alt+E to close exec,
   # F11 to close tcplife, etc.) or via Alt+q for the whole window.
-  tmux bind -n M-q     kill-window          # Alt+q — quit/close this window
-  # Ctrl+q closes the current window too (keeps hand on home row if you're
-  # typing). Not using Ctrl+W because the browser eats it.
-  tmux bind -n C-q     kill-window
+  # Single close-pane key (2026-05-19 consolidation): Ctrl+q kills the
+  # current pane. If it's the only pane in the window (the common case
+  # in kldload-console — most F-keys open single-pane windows), the
+  # window closes too. Not using Ctrl+X because editors (nano, vim
+  # in insert mode, emacs) bind Ctrl+X for save/cut. Not using Ctrl+W
+  # because the browser eats it. Not using Alt+q either — used to also
+  # be bound to kill-window, but having two close keys created confusion
+  # ("did I just close the wrong thing?"). One key, one job.
+  tmux unbind -n M-q   2>/dev/null || true
+  tmux bind -n C-q     kill-pane
+  # Belt-and-suspenders: explicitly leave Ctrl+X untouched. Older
+  # versions of this config tried to bind it; not anymore.
+  tmux unbind -n C-x   2>/dev/null || true
   # Explicitly unbind Alt+x / Alt+Shift+X in EVERY key table that tmux
   # builds in by default. The root unbind covers normal-mode use, but
   # tmux also ships copy-mode + copy-mode-vi bindings (M-x →
@@ -225,10 +296,13 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   # answer "what is the system actually DOING right now?" — every
   # exec/open/block-io event with the real command line. Toggle same
   # as the F-keys: press to open, press again to close.
-  tmux bind -n M-e  run-shell "_ktoggle-win exec   'sudo /usr/share/bcc/tools/execsnoop 2>/dev/null || sudo execsnoop-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
-  tmux bind -n M-o  run-shell "_ktoggle-win open   'sudo /usr/share/bcc/tools/opensnoop 2>/dev/null || sudo opensnoop-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
-  tmux bind -n M-b  run-shell "_ktoggle-win bio    'sudo /usr/share/bcc/tools/biosnoop  2>/dev/null || sudo biosnoop-bpfcc  2>/dev/null || (echo need-bcc-tools; sleep 99)'"
-  tmux bind -n M-k  run-shell "_ktoggle-win ksyms  'sudo /usr/share/bcc/tools/killsnoop 2>/dev/null || sudo killsnoop-bpfcc 2>/dev/null || (echo need-bcc-tools; sleep 99)'"
+  # Alt+e/o/b/k trace bindings removed 2026-05-19 — superseded by the
+  # F4 eBPF syscall cockpit (execsnoop + opensnoop + killsnoop + more)
+  # and F5 eBPF I/O cockpit (biosnoop + biolatency + tcplife + zfsdist).
+  # The standalone single-window versions were redundant AND clashed
+  # with Alt+k for pane-up navigation (Alt+k=killsnoop overrode the
+  # pane-up bind earlier in this file). Pane nav now reliably uses
+  # Alt+h / Alt+j / Alt+k / Alt+l for left / down / up / right.
 
   # ── Heads-up popups (Alt+letter) ─────────────────────────────────
   # Quick info overlays — tmux display-popup floats a window over the
@@ -322,6 +396,24 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   for _cfg in /etc/skel/.tmux.conf "$HOME/.tmux.conf"; do
     [[ -r "$_cfg" ]] && tmux source-file "$_cfg" 2>/dev/null || true
   done
+  # ── Re-bind nav keys AFTER sourcing skel (2026-05-19) ─────────────
+  # Skel sources HERE, after our nav binds above, so its M-Left=pane
+  # and S-Left=resize-pane assignments would otherwise win. Re-state
+  # the kldload binds last so they stick. Shift+Arrow stays bound for
+  # native-terminal users; in the ttyd iframe browsers eat it, which
+  # is why Alt+arrow/Alt+hjkl exist alongside.
+  tmux bind -n S-Right next-window
+  tmux bind -n S-Left  previous-window
+  tmux bind -n S-Up    select-window -t :+
+  tmux bind -n S-Down  select-window -t :-
+  tmux bind -n M-Left  previous-window
+  tmux bind -n M-Right next-window
+  tmux bind -n M-h     previous-window
+  tmux bind -n M-l     next-window
+  tmux bind -n M-Up    select-pane -U
+  tmux bind -n M-Down  select-pane -D
+  tmux bind -n M-k     select-pane -U
+  tmux bind -n M-j     select-pane -D
   tmux set -g display-time 3000
   # ── Clipboard bridge (browser ⇄ tmux) ─────────────────────────────
   # set-clipboard on tells tmux to emit OSC 52 escapes when copying

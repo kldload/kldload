@@ -112,7 +112,7 @@ select option:checked { background: #00b8d9; color: #000; }
              native copy works regardless of cert/clipboard-API state.
              Buffer is session-global so a selection made in this VM
              console reads correctly here. -->
-        <button class="btn btn-primary btn-sm" onclick="termPullBuffer()" title="Pull last terminal selection into a copy-friendly modal">&#128203; Pull selection</button>
+        <button class="btn btn-primary btn-sm" onclick="termPullBuffer()" title="Copy the last terminal selection to the system clipboard">&#128203; Copy selection</button>
         <!-- vncMode-only: swap to SSH so the operator gets a real xterm.js
              where text can be highlighted + copied. noVNC is a pixel stream
              so there is no text concept — confusing for new users. Button
@@ -126,7 +126,7 @@ select option:checked { background: #00b8d9; color: #000; }
     <div class="vm-console-modal-tip">
       Press <code>Ctrl-]</code> inside the terminal to detach from <code>virsh console</code> without killing the VM &middot; closing this window also kills the tmux session
     </div>
-    <iframe id="vm-console-iframe" class="vm-console-modal-iframe" src="about:blank" title="VM serial console"></iframe>
+    <iframe id="vm-console-iframe" allow="clipboard-read; clipboard-write; fullscreen" class="vm-console-modal-iframe" src="about:blank" title="VM serial console"></iframe>
   </div>
 </div>
 
@@ -2877,12 +2877,12 @@ select option:checked { background: #00b8d9; color: #000; }
            drag-select text in the terminal) into a real DOM textarea so
            you can Cmd+C/Ctrl+C natively. Workaround for browsers that
            silently drop OSC 52 on self-signed-cert origins. -->
-      <button onclick="termPullBuffer()" title="Show last terminal selection in a copy-friendly modal" style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-size:0.7rem;padding:0 0.5rem;border-radius:3px;cursor:pointer;font-weight:600">📋 Pull selection</button>
+      <button onclick="termPullBuffer()" title="Copy the last terminal selection to the system clipboard" style="background:var(--accent);border:1px solid var(--accent);color:#fff;font-size:0.7rem;padding:0 0.5rem;border-radius:3px;cursor:pointer;font-weight:600">📋 Copy selection</button>
       <button onclick="termToggleFullscreen()" title="Toggle full-screen" style="background:transparent;border:1px solid var(--border);color:var(--subtle);font-size:0.72rem;padding:0 0.5rem;border-radius:3px;cursor:pointer">⛶</button>
       <button onclick="termClose()" title="Hide (session persists)" style="background:transparent;border:1px solid var(--border);color:var(--subtle);font-size:0.72rem;padding:0 0.5rem;border-radius:3px;cursor:pointer">×</button>
     </div>
   </div>
-  <iframe id="term-iframe" style="width:100%;height:calc(100% - 24px);border:0;background:#0f1117"></iframe>
+  <iframe id="term-iframe" allow="clipboard-read; clipboard-write; fullscreen" style="width:100%;height:calc(100% - 24px);border:0;background:#0f1117"></iframe>
 </div>
 
 <!-- Floating launcher — shown when drawer is closed. One click opens terminal. -->
@@ -6344,7 +6344,7 @@ function vmShowSshShell(msg) {
         <button class="btn btn-ghost btn-sm" onclick="document.getElementById('vm-ssh-shell-modal').remove()">✕</button>
       </div>
       ${note}
-      <iframe src="/k9s/" style="width:100%;flex:1;min-height:520px;border:1px solid var(--border);border-radius:4px;background:#000"></iframe>
+      <iframe src="/k9s/" allow="clipboard-read; clipboard-write; fullscreen" style="width:100%;flex:1;min-height:520px;border:1px solid var(--border);border-radius:4px;background:#000"></iframe>
     </div>`;
   document.body.appendChild(modal);
 }
@@ -6507,7 +6507,7 @@ function k8sShowPodShell(msg) {
         <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-pod-shell-modal').remove()">✕</button>
       </div>
       ${note}
-      <iframe src="/k9s/" style="width:100%;flex:1;min-height:520px;border:1px solid var(--border);border-radius:4px;background:#000"></iframe>
+      <iframe src="/k9s/" allow="clipboard-read; clipboard-write; fullscreen" style="width:100%;flex:1;min-height:520px;border:1px solid var(--border);border-radius:4px;background:#000"></iframe>
     </div>`;
   document.body.appendChild(modal);
 }
@@ -6691,7 +6691,7 @@ function k8sShowNodeShell(msg) {
         <button class="btn btn-ghost btn-sm" onclick="document.getElementById('k8s-node-shell-modal').remove()">✕</button>
       </div>
       ${headerNote}
-      <iframe src="/k9s/" style="width:100%;flex:1;min-height:520px;border:1px solid var(--border);border-radius:4px;background:#000"></iframe>
+      <iframe src="/k9s/" allow="clipboard-read; clipboard-write; fullscreen" style="width:100%;flex:1;min-height:520px;border:1px solid var(--border);border-radius:4px;background:#000"></iframe>
     </div>`;
   document.body.appendChild(modal);
 }
@@ -7236,59 +7236,108 @@ function termToggleFullscreen() {
 // internal, independent of any browser API). copy-selection on mouse
 // release fills it; we read it back over WS, dump it into a real DOM
 // textarea, auto-select, and let the operator Cmd+C / Ctrl+C natively.
-function termPullBuffer() {
+// User-gesture-preserving copy path (2026-05-19 fix):
+// navigator.clipboard.writeText() requires that the call happen in
+// the same task as a real user-gesture handler. Going to the server
+// and back over WS breaks that — by the time the buffer arrives, the
+// click event is long gone and the clipboard write is silently denied.
+//
+// Pre-fetch on hover: when the mouse enters the button (or it takes
+// focus), kick a tmux_pull_buffer request. By the time the user
+// clicks, window._tmuxBufferCache has the latest text and the click
+// handler can write it synchronously inside the user-gesture.
+window._tmuxBufferCache = '';
+function termPrefetchBuffer() {
   send({ action: 'tmux_pull_buffer' });
+}
+function termPullBuffer() {
+  // Fall back to async fetch if hover prefetch never happened.
+  if (!window._tmuxBufferCache) {
+    send({ action: 'tmux_pull_buffer' });
+    // Show a placeholder toast; the async path will follow if/when it lands.
+    _termToast('fetching… (try again if nothing copied)', false);
+    return;
+  }
+  // Synchronous write — user gesture is still hot.
+  _termCopyNow(window._tmuxBufferCache);
+}
+// Synchronous write helper. Tries the modern API; falls back to
+// execCommand inside the same task tick if needed.
+function _termCopyNow(text) {
+  if (!text || text.trim() === '') {
+    _termToast('tmux buffer is empty — drag-select some text first', false);
+    return;
+  }
+  let copied = false;
+  if (navigator.clipboard && window.isSecureContext) {
+    // Use the promise BUT also do the execCommand fallback right now
+    // to maximise the chance one of them lands the gesture.
+    try { navigator.clipboard.writeText(text); copied = true; } catch (e) {}
+  }
+  if (!copied) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { copied = document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+  _termToast(copied
+    ? `✓ Copied ${text.length} chars (${text.split('\n').length} lines)`
+    : 'copy failed — clipboard blocked; try Ctrl+Shift+C in the terminal',
+    copied);
 }
 
 // Server replies with type:'tmux_buffer' carrying { text, lines }.
+// One-step copy (2026-05-19): write straight to the clipboard, flash a
+// toast, done. The old behaviour popped a modal with the selection in
+// a textarea — two steps, two clicks, two key sequences. Now it's
+// "drag-select in tmux, click 📋 Copy selection, done." If clipboard
+// API is blocked (insecure context / older browser), fall back to a
+// hidden-textarea + execCommand pattern that still works in one click.
 function _termShowBufferModal(text) {
-  let modal = document.getElementById('term-buffer-modal');
-  if (modal) modal.remove();
-  modal = document.createElement('div');
-  modal.id = 'term-buffer-modal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100;display:flex;align-items:center;justify-content:center;padding:2rem';
-  const lines = (text || '').split('\n').length;
-  modal.innerHTML = `
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;max-width:80vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.6)">
-      <div style="padding:0.7rem 1rem;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-        <span style="font-weight:600;color:var(--text)">📋 Terminal selection (${lines} line${lines===1?'':'s'})</span>
-        <div style="display:flex;gap:0.4rem">
-          <button class="btn btn-primary btn-sm" id="term-buffer-copy">Copy to clipboard</button>
-          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('term-buffer-modal').remove()">Close</button>
-        </div>
-      </div>
-      <div style="padding:0.5rem 1rem 0.3rem;font-size:0.72rem;color:var(--muted)">
-        Pre-selected — Cmd+C / Ctrl+C copies. If browser blocks the copy button, drag-select inside the textarea and copy natively.
-      </div>
-      <textarea id="term-buffer-ta" readonly style="flex:1;margin:0.5rem 1rem 1rem;padding:0.6rem;font-family:var(--mono);font-size:0.82rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;min-height:300px;min-width:60vw;resize:both"></textarea>
-    </div>`;
-  document.body.appendChild(modal);
-  const ta = document.getElementById('term-buffer-ta');
-  ta.value = text || '(tmux buffer is empty — drag-select some text in the terminal first, then click Pull selection again)';
-  // Auto-select all so the user can just hit Cmd+C / Ctrl+C immediately.
-  setTimeout(() => { ta.focus(); ta.select(); }, 0);
-  // Copy button — tries navigator.clipboard first, falls back to
-  // execCommand('copy') after manual selection (this fallback works
-  // even on origins where the modern API is blocked, because the
-  // textarea is a real DOM element with a user-gesture event chain).
-  document.getElementById('term-buffer-copy').onclick = async () => {
-    ta.focus(); ta.select();
-    let ok = false;
-    if (navigator.clipboard && window.isSecureContext) {
-      try { await navigator.clipboard.writeText(ta.value); ok = true; } catch (e) { ok = false; }
-    }
-    if (!ok) {
-      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-    }
-    const btn = document.getElementById('term-buffer-copy');
-    if (btn) {
-      btn.textContent = ok ? '✓ Copied' : 'Cmd+C now';
-      btn.style.background = ok ? 'var(--good)' : 'var(--warn)';
-      setTimeout(() => { if (btn) { btn.textContent = 'Copy to clipboard'; btn.style.background = ''; } }, 2000);
-    }
-  };
-  // Esc closes
-  modal.addEventListener('keydown', (e) => { if (e.key === 'Escape') modal.remove(); });
+  if (!text || text.trim() === '') {
+    _termToast('tmux buffer is empty — drag-select some text first', false);
+    return;
+  }
+  // Try the modern Clipboard API first.
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text)
+      .then(() => _termToast(`✓ Copied ${text.length} chars (${text.split('\n').length} lines)`, true))
+      .catch(() => _termCopyFallback(text));
+    return;
+  }
+  _termCopyFallback(text);
+}
+
+// Fallback: invisible textarea + execCommand('copy'). Works on
+// non-HTTPS, http-over-LAN, older browsers, and contexts where the
+// modern API is silently denied. We're still in the click handler's
+// event chain, so the copy permission flows through.
+function _termCopyFallback(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  document.body.removeChild(ta);
+  _termToast(ok ? `✓ Copied ${text.length} chars` : 'copy failed — try Ctrl+Shift+C in the terminal instead', ok);
+}
+
+// Small bottom-right toast that auto-dismisses after 2s.
+function _termToast(msg, success) {
+  const t = document.createElement('div');
+  t.textContent = msg;
+  t.style.cssText = `position:fixed;bottom:1.2rem;right:1.2rem;z-index:1000;
+    padding:0.55rem 0.9rem;border-radius:6px;font-size:0.85rem;font-weight:600;
+    background:${success ? 'var(--good)' : 'var(--warn)'};color:#0a0d13;
+    box-shadow:0 4px 16px rgba(0,0,0,0.4);opacity:0;transition:opacity 0.2s`;
+  document.body.appendChild(t);
+  requestAnimationFrame(() => { t.style.opacity = '1'; });
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 250); }, 2000);
 }
 
 function termSend(window) {

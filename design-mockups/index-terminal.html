@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kldload — terminal direction (v3 calm)</title>
+<style>
+  /* Direction B v3 — calmer than v2. Cyan is reserved for brand only:
+     "kldload" wordmark, brand mark, the ONE active resource indicator,
+     and link hover. Sectioning is done with TONE — four surface steps —
+     and TYPOGRAPHY: uppercase small caps, letter-spacing, size contrast.
+     Status colors live only on rows of data, never on chrome. */
+
+  :root, :root[data-theme="dark"] {
+    /* four-step surface ladder — this is what separates sections */
+    --bg:        #07070a;     /* canvas */
+    --surface-1: #0c0c10;     /* rail / right pane */
+    --surface-2: #14141a;     /* tables */
+    --surface-3: #1c1c24;     /* hover / active */
+    --border:    #1f1f28;
+    --border-2: #2a2a36;
+
+    /* text — bright primary with depth */
+    --text:      #e4e4ec;
+    --text-soft: #c4c4d0;
+    --text-dim:  #84849a;
+    --text-mute: #4f4f5e;
+
+    /* one brand accent — used sparingly */
+    --brand:        #22d3ee;
+    --brand-soft:   rgba(34,211,238,0.10);
+    --brand-glow:   rgba(34,211,238,0.30);
+    --brand-edge:   rgba(34,211,238,0.40);
+
+    /* status — DATA only, never chrome */
+    --ok:    #4ade80;
+    --warn:  #fb923c;
+    --err:   #f87171;
+    --info:  #60a5fa;
+    --violet:#a78bfa;
+
+    --mono: "JetBrains Mono","IBM Plex Mono",ui-monospace,monospace;
+  }
+  :root[data-theme="light"] {
+    --bg:        #f7f7f9;
+    --surface-1: #ffffff;
+    --surface-2: #f1f2f6;
+    --surface-3: #e6e7ee;
+    --border:    #e1e2e8;
+    --border-2: #d0d1d8;
+
+    --text:      #16161c;
+    --text-soft: #2c2c36;
+    --text-dim:  #5a5a68;
+    --text-mute: #9a9aa6;
+
+    --brand:        #0e7490;
+    --brand-soft:   rgba(14,116,144,0.08);
+    --brand-glow:   rgba(14,116,144,0.20);
+    --brand-edge:   rgba(14,116,144,0.40);
+
+    --ok:    #15803d;
+    --warn:  #b45309;
+    --err:   #b91c1c;
+    --info:  #1d4ed8;
+    --violet:#6d28d9;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--mono); font-size: 12px; line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+
+  /* ── topbar — only "kldload" wears the brand color ───────────────── */
+  .topbar {
+    border-bottom: 1px solid var(--border);
+    padding: 7px 14px; display: flex; gap: 16px; align-items: center;
+    background: var(--surface-1);
+  }
+  .topbar .name {
+    color: var(--brand); font-weight: 700; letter-spacing: 0.01em;
+    font-size: 13px;
+  }
+  .topbar .meta { color: var(--text-dim); font-size: 11px; }
+  .topbar .right { margin-left: auto; color: var(--text-mute); display: flex; gap: 14px; align-items: center; font-size: 11px; }
+  .topbar .right .key b { color: var(--text-soft); font-weight: 600; }
+  .theme-toggle {
+    background: transparent; border: 1px solid var(--border-2);
+    color: var(--text-dim); cursor: pointer;
+    padding: 3px 9px; border-radius: 4px;
+    font-family: var(--mono); font-size: 11px;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .theme-toggle:hover { color: var(--text); border-color: var(--text-mute); background: var(--surface-2); }
+
+  /* ── layout — three tones: rail (darkest) / main (mid) / right (light) */
+  .layout { display: grid; grid-template-columns: 200px 1fr 320px; min-height: calc(100vh - 30px); }
+
+  /* side rail — uses surface-1, slightly darker than main */
+  nav.side {
+    border-right: 1px solid var(--border);
+    padding: 14px 0;
+    background: var(--surface-1);
+  }
+  nav.side .grp {
+    color: var(--text-mute);
+    padding: 14px 16px 6px;
+    font-size: 9px; text-transform: uppercase; letter-spacing: 0.14em;
+    font-weight: 700;
+  }
+  nav.side .grp:first-of-type { padding-top: 4px; }
+  nav.side .it {
+    padding: 5px 16px; color: var(--text-dim); cursor: pointer;
+    font-size: 12px; border-left: 2px solid transparent;
+  }
+  nav.side .it:hover { color: var(--text); background: var(--surface-2); }
+  nav.side .it.on  {
+    color: var(--text); background: var(--surface-3);
+    border-left-color: var(--brand);
+  }
+  nav.side .it .n  { color: var(--text-mute); float: right; font-size: 11px; }
+
+  /* main content — middle tone */
+  main { padding: 18px 22px 60px; overflow: auto; background: var(--bg); }
+
+  /* h1 — text in --text, NOT brand. Sectioning by size + letter-spacing */
+  h1 {
+    font-size: 13px; font-weight: 700; color: var(--text);
+    letter-spacing: 0.01em;
+    margin-bottom: 3px;
+    display: flex; align-items: baseline; gap: 10px;
+  }
+  h1::before {
+    content: ""; display: inline-block; width: 3px; height: 14px;
+    background: var(--brand);
+    margin-right: 2px;
+  }
+  h1 .qty { color: var(--text-mute); font-weight: 400; font-size: 11px; }
+  .sub { color: var(--text-dim); margin-bottom: 14px; font-size: 11px; }
+
+  /* command line — neutral except prompt brackets */
+  .cmd {
+    background: var(--surface-2); border: 1px solid var(--border);
+    padding: 6px 12px; margin-bottom: 14px;
+    color: var(--text-dim); font-size: 12px;
+    border-radius: 4px;
+  }
+  .cmd b { color: var(--brand); font-weight: 700; }
+  .cmd .arrow { color: var(--text-mute); }
+
+  /* tables — surface-2 background, headers neutral, body crisp */
+  .tbl-wrap {
+    background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: 4px;
+    overflow: hidden; margin-bottom: 18px;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    text-align: left; padding: 7px 12px;
+    color: var(--text-dim); font-weight: 600; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-1);
+  }
+  tbody td {
+    padding: 5px 12px; color: var(--text);
+    border-bottom: 1px solid var(--border);
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--surface-3); }
+  tbody tr td:first-child { padding-left: 20px; position: relative; width: 22px; }
+  tbody tr td:first-child::before {
+    content: ""; position: absolute; left: 10px; top: 0; bottom: 0; width: 2px;
+  }
+  tbody tr.ok    td:first-child::before { background: var(--ok); }
+  tbody tr.warn  td:first-child::before { background: var(--warn); }
+  tbody tr.err   td:first-child::before { background: var(--err); }
+  tbody tr.info  td:first-child::before { background: var(--info); }
+  tbody tr.idle  td:first-child::before { background: var(--text-mute); }
+
+  .ok    { color: var(--ok); }
+  .warn  { color: var(--warn); }
+  .err   { color: var(--err); }
+  .info  { color: var(--info); }
+  .dim   { color: var(--text-dim); }
+  .mute  { color: var(--text-mute); }
+
+  /* right info pane — surface-1 (same as rail) */
+  aside.right {
+    border-left: 1px solid var(--border);
+    padding: 18px 18px 60px;
+    background: var(--surface-1); overflow: auto;
+  }
+  .blk { margin-bottom: 20px; }
+  .blk h3 {
+    font-size: 10px; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.12em;
+    margin-bottom: 9px; font-weight: 700;
+    padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  }
+  .blk .kv { display: flex; padding: 3px 0; font-size: 11px; }
+  .blk .kv .k { color: var(--text-dim); width: 100px; }
+  .blk .kv .v { color: var(--text); }
+
+  .bar {
+    height: 4px; background: var(--surface-3); border-radius: 2px;
+    margin: 6px 0; overflow: hidden;
+  }
+  .bar > i {
+    display: block; height: 100%; background: var(--brand);
+  }
+  .bar.warn > i { background: var(--warn); }
+  .bar.err > i  { background: var(--err); }
+
+  .footbar {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    border-top: 1px solid var(--border); background: var(--surface-1);
+    padding: 5px 14px; color: var(--text-mute); font-size: 11px;
+    display: flex; gap: 18px;
+  }
+  .footbar b { color: var(--text-soft); font-weight: 700; }
+  .footbar .right { margin-left: auto; color: var(--text-mute); }
+  .footbar .right .live { color: var(--ok); }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="name">kldload</span>
+  <span class="meta">10.100.10.118 · fedora 44 · 1.1.0-dev (d2f4e91)</span>
+  <span class="right">
+    <span class="key">
+      <b>?</b> help &nbsp; <b>:</b> cmd &nbsp; <b>/</b> filter &nbsp; <b>q</b> quit
+    </span>
+    <button class="theme-toggle" onclick="toggleTheme()">
+      <span id="theme-ic">☾</span><span id="theme-lbl">dark</span>
+    </button>
+  </span>
+</div>
+
+<div class="layout">
+  <nav class="side">
+    <div class="grp">resources</div>
+    <div class="it on">pools <span class="n">2</span></div>
+    <div class="it">datasets <span class="n">14</span></div>
+    <div class="it">snapshots <span class="n">87</span></div>
+    <div class="it">vms <span class="n">9</span></div>
+    <div class="it">k8s nodes <span class="n">5</span></div>
+    <div class="it">boot envs <span class="n">3</span></div>
+
+    <div class="grp">streams</div>
+    <div class="it">install</div>
+    <div class="it">journal</div>
+    <div class="it">events</div>
+
+    <div class="grp">build</div>
+    <div class="it">profiles</div>
+    <div class="it">darksites</div>
+    <div class="it">images</div>
+  </nav>
+
+  <main>
+    <h1>pools<span class="qty">— 2 online · last scrub 2d04h · sanoid lag 38m</span></h1>
+    <div class="sub">all rpool/tank state · ZFS 2.4.1 · raidz2 + mirror</div>
+
+    <div class="cmd">::pools <span class="arrow">→</span> sort=cap,desc filter=online &nbsp;<b>ENTER</b> <span class="mute">to inspect</span></div>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th></th><th>name</th><th>state</th><th>vdev</th><th>size</th><th>used</th><th>cap%</th><th>frag%</th><th>scrub</th><th>health</th>
+        </tr></thead>
+        <tbody>
+          <tr class="ok">
+            <td>●</td><td>tank</td><td class="ok">ONLINE</td><td>raidz2 6×1T</td><td>4.0T</td><td>412G</td><td>10%</td><td>4%</td><td>2d04h ago</td><td class="ok">0 err</td>
+          </tr>
+          <tr class="ok">
+            <td>●</td><td>rpool</td><td class="ok">ONLINE</td><td>mirror 2×512G</td><td>460G</td><td>32G</td><td>7%</td><td>2%</td><td>2d04h ago</td><td class="ok">0 err</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h1 style="margin-top:24px;">vms<span class="qty">— 9 total / 7 running / 2 stopped</span></h1>
+    <div class="sub">libvirtd · virbr0 192.168.122.0/24 · cilium ebpf</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th></th><th>name</th><th>state</th><th>profile</th><th>distro</th><th>cpu</th><th>ram</th><th>ip</th><th>uptime</th><th>kvers</th>
+        </tr></thead>
+        <tbody>
+          <tr class="ok"><td>●</td><td>k8s-01</td><td class="ok">running</td><td>kvm</td><td>fedora 44</td><td>4</td><td>8G</td><td>192.168.122.11</td><td>2d 14h</td><td>6.19.14</td></tr>
+          <tr class="ok"><td>●</td><td>k8s-02</td><td class="ok">running</td><td>kvm</td><td>fedora 44</td><td>4</td><td>8G</td><td>192.168.122.12</td><td>2d 14h</td><td>6.19.14</td></tr>
+          <tr class="ok"><td>●</td><td>k8s-03</td><td class="ok">running</td><td>kvm</td><td>fedora 44</td><td>4</td><td>8G</td><td>192.168.122.13</td><td>2d 14h</td><td>6.19.14</td></tr>
+          <tr class="ok"><td>●</td><td>klab-debian13</td><td class="ok">running</td><td>desktop</td><td>debian 13</td><td>2</td><td>4G</td><td>192.168.122.42</td><td>3h 12m</td><td>6.12.0</td></tr>
+          <tr class="ok"><td>●</td><td>klab-fedora44</td><td class="ok">running</td><td>desktop</td><td>fedora 44</td><td>2</td><td>4G</td><td>192.168.122.43</td><td>1d 02h</td><td>6.19.14</td></tr>
+          <tr class="ok"><td>●</td><td>klab-centos9</td><td class="ok">running</td><td>server</td><td>centos 9</td><td>2</td><td>2G</td><td>192.168.122.44</td><td>5h 41m</td><td>5.14.0</td></tr>
+          <tr class="warn"><td>●</td><td>klab-ubuntu24</td><td class="warn">degraded</td><td>desktop</td><td>ubuntu 24.04</td><td>2</td><td>4G</td><td>192.168.122.45</td><td>22m</td><td>6.8.0</td></tr>
+          <tr class="idle"><td>○</td><td>klab-rocky</td><td class="mute">stopped</td><td>server</td><td>rocky 9</td><td>2</td><td>2G</td><td class="mute">—</td><td class="mute">—</td><td class="mute">—</td></tr>
+          <tr class="idle"><td>○</td><td>klab-arch</td><td class="mute">stopped</td><td>desktop</td><td>arch</td><td>2</td><td>4G</td><td class="mute">—</td><td class="mute">—</td><td class="mute">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h1 style="margin-top:24px;">events<span class="qty">— last 30 min · 12 total</span></h1>
+    <div class="sub">zfs · libvirt · sanoid · kbe · cilium</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th></th><th>age</th><th>kind</th><th>resource</th><th>detail</th></tr></thead>
+        <tbody>
+          <tr class="ok"><td>●</td><td>2m</td><td class="dim">snapshot</td><td>tank/vm/k8s-01@daily-05-03</td><td class="dim">12K</td></tr>
+          <tr class="info"><td>●</td><td>14m</td><td class="dim">vm.start</td><td>klab-debian13</td><td class="dim">virsh start</td></tr>
+          <tr class="warn"><td>●</td><td>38m</td><td class="dim">sanoid</td><td>cron skipped (load 4.2 &gt; 3.0)</td><td class="dim">tank/vm/k8s-01</td></tr>
+          <tr class="ok"><td>●</td><td>1h</td><td class="dim">scrub</td><td>tank · 0 errors</td><td class="dim">2.1G/s</td></tr>
+          <tr class="info"><td>●</td><td>3h</td><td class="dim">kbe.create</td><td>1.1.0-dev-pre</td><td class="dim">tank/ROOT</td></tr>
+          <tr class="err"><td>●</td><td>3h</td><td class="dim">kbe.activate</td><td>cannot rewrite grub.cfg under SB direct-kernel</td><td class="dim">manual</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+
+  <aside class="right">
+    <div class="blk">
+      <h3>host</h3>
+      <div class="kv"><div class="k">kernel</div><div class="v">6.19.14-300.fc44</div></div>
+      <div class="kv"><div class="k">zfs</div><div class="v">2.4.1-1.fc44</div></div>
+      <div class="kv"><div class="k">load</div><div class="v">1.20 1.04 0.92</div></div>
+      <div class="kv"><div class="k">uptime</div><div class="v">3d 14h 22m</div></div>
+      <div class="kv"><div class="k">hostid</div><div class="v">7a3f9c11</div></div>
+    </div>
+
+    <div class="blk">
+      <h3>capacity</h3>
+      <div class="kv"><div class="k">tank</div><div class="v">412G / 4.0T &nbsp;<span class="dim">10%</span></div></div>
+      <div class="bar"><i style="width:10%"></i></div>
+      <div class="kv"><div class="k">rpool</div><div class="v">32G / 460G &nbsp;<span class="dim">7%</span></div></div>
+      <div class="bar"><i style="width:7%"></i></div>
+    </div>
+
+    <div class="blk">
+      <h3>secure boot</h3>
+      <div class="kv"><div class="k">state</div><div class="v ok">enabled</div></div>
+      <div class="kv"><div class="k">mok</div><div class="v">enrolled · leaf cert</div></div>
+      <div class="kv"><div class="k">chain</div><div class="v">shim → grub → vmlinuz</div></div>
+      <div class="kv"><div class="k">zfs.ko</div><div class="v ok">signed</div></div>
+    </div>
+
+    <div class="blk">
+      <h3>sanoid</h3>
+      <div class="kv"><div class="k">last run</div><div class="v warn">38m ago (skipped)</div></div>
+      <div class="kv"><div class="k">snapshots</div><div class="v">87 · 3 stale</div></div>
+      <div class="kv"><div class="k">policy</div><div class="v">production</div></div>
+    </div>
+
+    <div class="blk">
+      <h3>kubernetes</h3>
+      <div class="kv"><div class="k">nodes</div><div class="v ok">5 / 5 ready</div></div>
+      <div class="kv"><div class="k">cilium</div><div class="v">1.16.4 · ebpf</div></div>
+      <div class="kv"><div class="k">etcd</div><div class="v ok">healthy</div></div>
+      <div class="kv"><div class="k">version</div><div class="v">1.31.2</div></div>
+    </div>
+  </aside>
+</div>
+
+<div class="footbar">
+  <span><b>↑↓</b> nav</span>
+  <span><b>:</b> cmd</span>
+  <span><b>/</b> filter</span>
+  <span><b>p</b> pools</span>
+  <span><b>v</b> vms</span>
+  <span><b>l</b> logs</span>
+  <span><b>s</b> snapshot</span>
+  <span><b>x</b> destroy</span>
+  <span class="right"><span class="live">●</span> connected · 12ms</span>
+</div>
+
+<script>
+  function applyTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    document.getElementById('theme-ic').textContent  = (t === 'dark') ? '☾' : '☀';
+    document.getElementById('theme-lbl').textContent = t;
+    try { localStorage.setItem('kldload-theme', t); } catch (e) {}
+  }
+  function toggleTheme() {
+    const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+    applyTheme(cur === 'dark' ? 'light' : 'dark');
+  }
+  (function() {
+    let saved = null;
+    try { saved = localStorage.getItem('kldload-theme'); } catch (e) {}
+    if (saved) return applyTheme(saved);
+    const wantsLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+    applyTheme(wantsLight ? 'light' : 'dark');
+  })();
+</script>
+
+</body>
+</html>

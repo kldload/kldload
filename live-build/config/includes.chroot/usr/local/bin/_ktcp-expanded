@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Toggle the kldload "TCP details" window (F9). Two panes:
+#   ┌────────────────────────────────────────────────────────────────┐
+#   │ ss -tnHpi  (top, 60%)                                          │
+#   │   every ESTABLISHED TCP socket with full TCP_INFO — RTT,       │
+#   │   retransmits, cwnd, bytes — sorted by current rate, colour-   │
+#   │   coded by health, with per-process roll-up and rate sparkline │
+#   ├────────────────────────────────────────────────────────────────┤
+#   │ nethogs (bottom, 40%)                                          │
+#   │   per-process bandwidth at-a-glance                            │
+#   └────────────────────────────────────────────────────────────────┘
+#
+# Both panes run inside RESTART LOOPS so they never go "pane is dead"
+# in tmux — matches the F4/F5 cockpit convention. If the inner command
+# exits for any reason (watch crashes, nethogs hits an interface
+# error, sudo denies, awk faults on weird ss output), the loop prints
+# the exit code and retries after 3 seconds.
+set -u
+SESSION="${KLDLOAD_TMUX_SESSION:-kldload}"
+NAME="kernel-tcp"
+
+if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$NAME"; then
+    tmux kill-window -t "${SESSION}:=${NAME}"
+    exit 0
+fi
+
+SS_CMD="ss -tnHpi state established"
+AWK_FMT="/usr/local/share/kldload/ktcp-format.awk"
+
+# Top pane: watch wrapping ss | awk, with a banner header. Wrapped in
+# an outer restart loop so watch dying takes the pane back to
+# launch-state rather than to a dead-pane prompt.
+TOP_LOOP="while :; do \
+  watch -n 2 -c \"printf '\\\\033[1;36m\\\$ $SS_CMD | awk -f $AWK_FMT\\\\033[0m\\\\n\\\\033[2;37mℹ  every TCP socket — sorted by rate, RTT/retrans colour-coded\\\\033[0m\\\\n\\\\n'; $SS_CMD 2>&1 | awk -f $AWK_FMT\" ; \
+  echo '[ss/awk watch exited — restarting in 3s. Ctrl-C aborts.]' ; \
+  sleep 3 ; \
+done"
+
+# Bottom pane: nethogs in a restart loop with banner. nethogs sometimes
+# exits when an interface disappears or when sudo's TTY heuristics
+# trip; the loop hides that from the audience.
+BOT_LOOP="while :; do \
+  printf '\\033[1;36m\$ sudo nethogs\\033[0m\\n\\033[2;37mℹ  per-process bandwidth — bytes/sec live\\033[0m\\n\\n' ; \
+  if command -v nethogs >/dev/null 2>&1 ; then \
+    sudo nethogs ; \
+  else \
+    echo '[nethogs] not installed — pkg: nethogs' ; \
+  fi ; \
+  echo '[nethogs exited — restarting in 3s. Ctrl-C aborts.]' ; \
+  sleep 3 ; \
+done"
+
+tmux new-window -t "$SESSION" -n "$NAME" -d "bash -c \"$TOP_LOOP\""
+tmux split-window -t "${SESSION}:=${NAME}" -v -l 40% "bash -c \"$BOT_LOOP\""
+tmux select-pane -t "${SESSION}:=${NAME}.0"
+tmux select-window -t "${SESSION}:=${NAME}"
