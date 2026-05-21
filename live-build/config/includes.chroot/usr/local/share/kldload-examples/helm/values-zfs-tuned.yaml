@@ -1,0 +1,50 @@
+# values-zfs-tuned.yaml — overlay for any chart whose PVCs land on
+# kldload's ZFS-CSI default storage class. Marks the volume with the
+# right snapshot-policy label so sanoid picks it up automatically, and
+# hints at the recommended ZFS tuning for the dataset class.
+#
+# Apply as a values overlay:
+#   helm install <release> <chart> -n <ns> \
+#     -f /usr/local/share/kldload-examples/helm/values-zfs-tuned.yaml
+#
+# This file uses common nested keys (persistence, primary, etc.) that
+# most charts expose. If your chart uses different keys, copy this and
+# adapt — the kldload.io labels are the only kldload-specific bit.
+
+# Common pattern for charts with a top-level persistence: block
+# (bitnami/postgresql, bitnami/mariadb, bitnami/redis-master, etc.)
+persistence:
+  enabled: true
+  storageClass: ""     # empty = cluster default = ZFS-CSI tuned class
+  size: 5Gi
+  annotations:
+    # Sanoid policy match. Available templates:
+    #   petclinic — 5-min frequent + 1h hourly + 30d daily (demo cadence)
+    #   production — 1h frequent + 168h hourly + 90d daily (heavier)
+    #   minimal — 1d daily + 7w weekly (low-churn datasets)
+    kldload.io/snapshot-policy: petclinic
+  labels:
+    # Dataset class — hints to the operator at recommended ZFS props.
+    #   postgres: recordsize=8K, primarycache=metadata, logbias=throughput
+    #   sqlite:   recordsize=64K, sync=disabled OK if app handles consistency
+    #   bigfiles: recordsize=1M, compression=zstd-9
+    #   timeseries: recordsize=128K, compression=zstd-3
+    kldload.io/dataset-class: postgres
+
+# Bitnami "primary" sub-pattern (Postgres / MySQL / MariaDB)
+primary:
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 5Gi
+    annotations:
+      kldload.io/snapshot-policy: petclinic
+
+# Bitnami "master" sub-pattern (Redis)
+master:
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 1Gi
+    annotations:
+      kldload.io/snapshot-policy: petclinic

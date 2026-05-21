@@ -1,0 +1,95 @@
+---
+# 01-cloud-image-vm — download a Debian cloud image, cloud-init it,
+# boot. Works on any kldload box; uses /var/lib/libvirt/images/ as
+# the working directory. Defaults to a 2-vCPU / 2-GB Debian 13 VM
+# named "demo-deb" with serial console enabled.
+
+- name: cloud-image-vm — Debian 13 generic cloud image via virt-install
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  vars:
+    vm_name: demo-deb
+    vm_memory_mb: 2048
+    vm_vcpus: 2
+    vm_disk_gb: 20
+    image_url:   "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2"
+    images_dir:  "/var/lib/libvirt/images"
+    seed_user:   "admin"
+    seed_pass:   "kldload"           # change for prod
+    seed_ssh_keys: []
+
+  tasks:
+    - name: Ensure images dir exists
+      file: { path: "{{ images_dir }}", state: directory, mode: '0755' }
+
+    - name: Download cloud image (if absent)
+      get_url:
+        url: "{{ image_url }}"
+        dest: "{{ images_dir }}/debian-13-generic-amd64.qcow2"
+        mode: '0644'
+        force: false
+
+    - name: Copy + resize the base image for this VM
+      shell: |
+        cp --reflink=auto "{{ images_dir }}/debian-13-generic-amd64.qcow2" \
+                          "{{ images_dir }}/{{ vm_name }}.qcow2"
+        qemu-img resize "{{ images_dir }}/{{ vm_name }}.qcow2" "{{ vm_disk_gb }}G"
+      args:
+        creates: "{{ images_dir }}/{{ vm_name }}.qcow2"
+
+    - name: Generate cloud-init NoCloud seed iso
+      shell: |
+        set -e
+        tmp=$(mktemp -d)
+        cat > "$tmp/user-data" <<EOF
+        #cloud-config
+        hostname: {{ vm_name }}
+        users:
+          - name: {{ seed_user }}
+            sudo: ['ALL=(ALL) NOPASSWD:ALL']
+            shell: /bin/bash
+            lock_passwd: false
+            plain_text_passwd: {{ seed_pass }}
+            ssh_authorized_keys: {{ seed_ssh_keys | to_json }}
+        ssh_pwauth: true
+        chpasswd: { expire: false }
+        EOF
+        echo "instance-id: {{ vm_name }}" > "$tmp/meta-data"
+        echo "local-hostname: {{ vm_name }}" >> "$tmp/meta-data"
+        genisoimage -output "{{ images_dir }}/{{ vm_name }}-seed.iso" \
+                    -volid cidata -joliet -rock "$tmp/user-data" "$tmp/meta-data"
+        rm -rf "$tmp"
+      args:
+        creates: "{{ images_dir }}/{{ vm_name }}-seed.iso"
+
+    - name: virt-install (define + start)
+      shell: |
+        virt-install \
+          --name {{ vm_name }} \
+          --memory {{ vm_memory_mb }} \
+          --vcpus {{ vm_vcpus }} \
+          --osinfo debian13 \
+          --disk path={{ images_dir }}/{{ vm_name }}.qcow2,bus=virtio \
+          --disk path={{ images_dir }}/{{ vm_name }}-seed.iso,device=cdrom \
+          --network network=default,model=virtio \
+          --graphics none \
+          --console pty,target_type=serial \
+          --noautoconsole \
+          --import
+      args:
+        creates: "/etc/libvirt/qemu/{{ vm_name }}.xml"
+
+    - name: Show DHCP lease (after ~30s)
+      shell: |
+        sleep 30
+        virsh net-dhcp-leases default | grep {{ vm_name }} || \
+          echo "VM started but no DHCP lease yet — virsh console {{ vm_name }} to investigate"
+      register: lease
+      changed_when: false
+
+    - debug:
+        msg:
+          - "VM up. Console: virsh console {{ vm_name }} (Ctrl-] to detach)"
+          - "{{ lease.stdout }}"

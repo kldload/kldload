@@ -1,0 +1,53 @@
+---
+# 03-helm-from-ansible — install a Helm chart via Ansible's helm module.
+# Useful when you want the install to be tracked in the deployment
+# ledger AND want Ansible's idempotence + retry semantics around helm.
+#
+# Installs Redis (bitnami/redis) as the demo chart; replace with any
+# chart your operator workflow needs.
+
+- name: helm-from-ansible — drive helm via kubernetes.core
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    release_name: example-redis
+    namespace: examples
+    chart_ref: bitnami/redis
+    chart_repo: https://charts.bitnami.com/bitnami
+    chart_version: "20.0.0"     # pin the version — :latest is a footgun
+    redis_password: "change-me"
+
+  tasks:
+    - name: Add bitnami repo
+      kubernetes.core.helm_repository:
+        name: bitnami
+        repo_url: "{{ chart_repo }}"
+
+    - name: Install redis with values overlay
+      kubernetes.core.helm:
+        name: "{{ release_name }}"
+        chart_ref: "{{ chart_ref }}"
+        chart_version: "{{ chart_version }}"
+        release_namespace: "{{ namespace }}"
+        create_namespace: true
+        wait: true
+        wait_timeout: 5m
+        values:
+          architecture: standalone        # single replica; "replication" for HA
+          auth:
+            password: "{{ redis_password }}"
+          master:
+            persistence:
+              enabled: true
+              size: 1Gi
+              storageClass: ""            # cluster default = ZFS-CSI tuned
+          metrics:
+            enabled: true                 # exposes /metrics; kldload Prom auto-scrapes
+
+    - name: Show how to connect
+      debug:
+        msg: |
+          Redis is up. From inside the cluster:
+            kubectl exec -n {{ namespace }} {{ release_name }}-master-0 -- \
+              redis-cli -a {{ redis_password }} ping

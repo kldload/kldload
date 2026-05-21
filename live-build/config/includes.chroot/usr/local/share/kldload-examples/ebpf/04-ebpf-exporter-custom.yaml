@@ -1,0 +1,62 @@
+# ebpf_exporter — custom config exposing block I/O size distribution
+# as a Prometheus histogram. Drop into /etc/ebpf_exporter/ and the
+# exporter picks it up on restart.
+#
+# kldload ships with ebpf_exporter pre-configured (see
+# /etc/ebpf_exporter/biolatency.yaml + bio-trace.yaml). This file adds
+# ONE additional metric: distribution of block I/O sizes in KB,
+# grouped by device + operation (read/write).
+#
+# Install:  sudo cp 04-ebpf-exporter-custom.yaml /etc/ebpf_exporter/
+#           sudo systemctl restart ebpf_exporter
+# Query:    curl -s localhost:9435/metrics | grep ^bio_size_kb
+# Grafana:  Prometheus datasource → query: histogram_quantile(0.95, rate(bio_size_kb_bucket[1m]))
+
+programs:
+  - name: bio-size
+    metrics:
+      histograms:
+        - name: bio_size_kb
+          help: Block I/O request size, in kilobytes
+          table: bio_size
+          bucket_type: exp2          # exponential base-2 buckets
+          bucket_min: 0              # 2^0 = 1 KB
+          bucket_max: 16             # 2^16 = 64 MB
+          bucket_multiplier: 1.0     # values already in KB
+          labels:
+            - name: device
+              size: 4
+              decoders:
+                - name: majorminor
+            - name: operation
+              size: 8
+              decoders:
+                - name: string
+            - name: bucket
+              size: 4
+              decoders:
+                - name: uint
+    kprobes:
+      blk_account_io_done: trace_io_done
+    code: |
+      #include <linux/blk_types.h>
+      #include <linux/blkdev.h>
+
+      struct hist_key {
+        u32 dev;
+        char op[8];
+        u32 slot;
+      };
+
+      BPF_HISTOGRAM(bio_size, struct hist_key);
+
+      int trace_io_done(struct pt_regs *ctx, struct request *req) {
+        struct hist_key key = {};
+        // bi_size is bytes; convert to KB then log2-bucket.
+        u64 size_kb = req->__data_len / 1024;
+        key.dev = req->rq_disk ? req->rq_disk->major << 20 | req->rq_disk->first_minor : 0;
+        __builtin_memcpy(&key.op, (req->cmd_flags & REQ_OP_MASK) ? "write" : "read", 6);
+        key.slot = bpf_log2l(size_kb);
+        bio_size.increment(key);
+        return 0;
+      }

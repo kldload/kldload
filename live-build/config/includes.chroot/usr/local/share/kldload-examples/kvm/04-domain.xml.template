@@ -1,0 +1,79 @@
+<!--
+  04-domain.xml.template — minimal hand-written libvirt domain XML.
+
+  Use when virt-install's flags don't cover an unusual requirement
+  (CPU pinning, hugepages, IOMMU/VFIO passthrough, custom virtio-net
+  queues, etc.). Copy this to /tmp/my-vm.xml, edit the placeholders,
+  then:
+
+    virsh define /tmp/my-vm.xml
+    virsh start <vm-name>
+
+  Placeholders marked %%VAR%% — replace before defining.
+-->
+<domain type='kvm'>
+  <name>%%VM_NAME%%</name>
+  <memory unit='MiB'>%%MEMORY_MB%%</memory>
+  <vcpu placement='static'>%%VCPUS%%</vcpu>
+
+  <os firmware='efi'>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <bootmenu enable='no'/>
+  </os>
+
+  <features>
+    <acpi/>
+    <apic/>
+    <vmport state='off'/>
+  </features>
+
+  <cpu mode='host-passthrough' check='none' migratable='off'/>
+
+  <clock offset='utc'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+  </clock>
+
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+
+  <devices>
+    <emulator>/usr/libexec/qemu-kvm</emulator>
+
+    <!-- Root disk — virtio-blk against a qcow2 file -->
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' discard='unmap' cache='none' io='native'/>
+      <source file='%%ROOT_DISK_PATH%%'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+
+    <!-- Cloud-init seed ISO (drop the <disk> block if not using cloud-init) -->
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='%%SEED_ISO_PATH%%'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+    </disk>
+
+    <!-- NIC on the kldload default virbr0 -->
+    <interface type='network'>
+      <source network='default'/>
+      <model type='virtio'/>
+    </interface>
+
+    <!-- Serial console — virsh console attaches here -->
+    <serial type='pty'><target type='isa-serial' port='0'/></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
+
+    <!-- Random number generator (helps with entropy on small VMs) -->
+    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+    </rng>
+
+    <!-- VGA card (graphics='none' equivalent: no VNC/spice) -->
+    <video><model type='vga' vram='9216' heads='1'/></video>
+
+  </devices>
+</domain>

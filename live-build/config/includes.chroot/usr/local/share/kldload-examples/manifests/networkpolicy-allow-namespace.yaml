@@ -1,0 +1,55 @@
+# networkpolicy-allow-namespace.yaml — default-deny + namespace-only
+# allow pattern. Cilium enforces this in the BPF datapath; drops show
+# up on Hubble + the cilium drop monitor.
+#
+# After applying:
+#   1. Try cross-namespace pod-to-pod ping → DROPPED
+#   2. Try same-namespace pod-to-pod ping → ALLOWED
+#   3. hubble observe --follow --type drop  shows the drops
+#   4. The "Cilium drops" panel in Grafana surfaces the policy events
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: locked-ns }
+---
+# Default deny — nothing in or out unless explicitly allowed below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: locked-ns
+spec:
+  podSelector: {}                # matches every pod in the namespace
+  policyTypes: [Ingress, Egress]
+---
+# Explicit allow: traffic FROM pods in the same namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace
+  namespace: locked-ns
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}        # any pod in this namespace
+---
+# Explicit allow: egress to cluster DNS (kube-system/coredns)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-coredns
+  namespace: locked-ns
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }

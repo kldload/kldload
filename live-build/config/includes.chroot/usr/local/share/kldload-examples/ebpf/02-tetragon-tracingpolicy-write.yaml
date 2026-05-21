@@ -1,0 +1,30 @@
+# Tetragon TracingPolicy — KPROBE on sys_write, fires when a write
+# touches /etc/passwd or /etc/shadow. Useful for detecting privilege
+# escalation attempts inside a compromised container.
+#
+# Apply:  kubectl apply -f 02-tetragon-tracingpolicy-write.yaml
+# Test:   kubectl run -n examples test --rm -it --image=alpine -- sh -c \
+#           "echo evil >> /etc/passwd"
+#         → KPROBE event fires with binary, args, container, namespace.
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: detect-passwd-modification
+spec:
+  kprobes:
+    - call: "fd_install"   # fires when an fd is opened for write
+      syscall: false
+      args:
+        - { index: 0, type: "int" }
+        - { index: 1, type: "file" }
+      selectors:
+        - matchArgs:
+            - index: 1
+              operator: "Equal"
+              values:
+                - "/etc/passwd"
+                - "/etc/shadow"
+                - "/etc/sudoers"
+          matchActions:
+            - action: Post

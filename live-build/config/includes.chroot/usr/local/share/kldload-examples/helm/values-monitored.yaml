@@ -1,0 +1,43 @@
+# values-monitored.yaml — overlay to wire any chart into the kldload
+# observability stack (Prometheus + Loki + Grafana). Adds scrape
+# annotations, Loki labels for log shipping, and enables ServiceMonitor
+# CRD if the chart supports it.
+#
+# Apply as a values overlay:
+#   helm install <release> <chart> -n <ns> \
+#     -f /usr/local/share/kldload-examples/helm/values-monitored.yaml
+#
+# Most kldload-shipped Prometheus picks up annotations on Pods and
+# Services. ServiceMonitor is only useful for charts that come with
+# Bitnami's monitoring stack already integrated.
+
+# Most charts expose this top-level for scrape annotations on their
+# main pod(s). Bitnami's pattern.
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port:   "8080"        # adjust per chart
+  prometheus.io/path:   "/metrics"
+  # Loki promtail labels — what shows up in {job=...} queries.
+  loki.io/job: "kldload-app"
+
+# Annotations on the Service (some charts route scrape annotations
+# here rather than on pods)
+service:
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port:   "8080"
+    prometheus.io/path:   "/metrics"
+
+# Metrics sub-chart (Bitnami pattern — installs a sidecar exporter)
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: false        # kldload's Prometheus uses annotation-scrape
+                          # not ServiceMonitor CRD by default; flip to
+                          # true if you've installed kube-prometheus-stack
+
+# Pod labels — used by Loki promtail to tag log streams. The
+# kldload-app job picks up any pod with this label.
+podLabels:
+  loki.io/job: "kldload-app"
+  kldload.io/observable: "true"

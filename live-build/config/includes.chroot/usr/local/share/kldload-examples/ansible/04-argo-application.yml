@@ -1,0 +1,59 @@
+---
+# 04-argo-application — register a Git-sourced workload with Argo CD.
+# After this runs, Argo continuously reconciles the manifests in the
+# upstream Git repo. Drift is auto-corrected; sync state visible at
+# https://10.100.10.31/applications/<app_name>.
+
+- name: argo-application — wire a Git repo into Argo for continuous reconcile
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    app_name: example-guestbook
+    namespace: examples
+    repo_url: https://github.com/argoproj/argocd-example-apps
+    repo_path: guestbook
+    target_revision: HEAD
+
+  tasks:
+    - name: Argo Application CRD
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: "{{ app_name }}"
+            namespace: argocd
+            labels: { kldload.io/example: "argo-application" }
+            finalizers: [resources-finalizer.argocd.argoproj.io]
+          spec:
+            project: default
+            source:
+              repoURL: "{{ repo_url }}"
+              targetRevision: "{{ target_revision }}"
+              path: "{{ repo_path }}"
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: "{{ namespace }}"
+            syncPolicy:
+              automated: { prune: true, selfHeal: true, allowEmpty: false }
+              syncOptions: [CreateNamespace=true, ApplyOutOfSyncOnly=true, PruneLast=true]
+              retry:
+                limit: 5
+                backoff: { duration: 10s, factor: 2, maxDuration: 5m }
+
+    - name: Wait for first sync
+      kubernetes.core.k8s_info:
+        api_version: argoproj.io/v1alpha1
+        kind: Application
+        name: "{{ app_name }}"
+        namespace: argocd
+      register: argo_app
+      until: argo_app.resources[0].status.sync.status is defined
+             and argo_app.resources[0].status.sync.status == "Synced"
+      retries: 60
+      delay: 5
+
+    - debug:
+        msg: "Argo UI: https://10.100.10.31/applications/{{ app_name }} (admin password at /var/lib/kldload/argocd-admin-password)"

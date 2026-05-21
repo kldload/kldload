@@ -1,0 +1,37 @@
+# Tetragon TracingPolicy — emit an event for every exec of a binary
+# matching the denylist. Defaults flag /usr/bin/curl + /usr/bin/wget
+# in the `examples` namespace, but the policy template generalises to
+# any binary + any namespace.
+#
+# Apply:  kubectl apply -f 01-tetragon-tracingpolicy-exec.yaml
+# Watch:  kubectl logs -n kube-system ds/tetragon -c export-stdout -f | \
+#           jq -r -f /usr/local/share/kldload/tetragon-filter.jq
+# Test:   kubectl run -n examples test --rm -it --image=alpine -- sh -c "wget -O /tmp/x https://example.com"
+#         → TracingPolicy fires; event appears in the stream.
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: deny-network-utils-exec
+  namespace: examples
+spec:
+  kprobes:
+    - call: "security_bprm_check"
+      syscall: false
+      args:
+        - { index: 0, type: "linux_binprm" }
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Postfix"
+              values:
+                - "/usr/bin/curl"
+                - "/usr/bin/wget"
+                - "/usr/bin/nc"
+                - "/usr/bin/ncat"
+          matchActions:
+            - action: Post
+              # Drop the action below to: Sigkill to actually BLOCK the exec
+              # (TracingPolicy can enforce, not just observe).
+              # Sigkill requires the pod to NOT have the
+              # tetragon.io/passthrough annotation.

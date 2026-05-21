@@ -1,0 +1,43 @@
+# Argo ApplicationSet — template one Application per matching cluster.
+# Powerful for fleet rollouts: define the workload ONCE, register
+# multiple kldload boxes as cluster sources, the ApplicationSet
+# generator creates one Application per box.
+#
+# Generators supported by Argo:
+#   * list        — explicit list of clusters
+#   * cluster     — every registered cluster matching a label selector
+#   * git         — directories or files in a Git repo (one app per match)
+#   * pull-request — PR-driven preview environments
+#
+# This example uses the `clusters` generator to target every registered
+# cluster with label `env=dev`.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: example-fleet-nginx
+  namespace: argocd
+  labels: { kldload.io/example: "argo-applicationset" }
+spec:
+  generators:
+    - clusters:
+        selector:
+          matchLabels: { env: dev }
+  template:
+    metadata:
+      name: "nginx-{{name}}"   # one Application per cluster
+      labels:
+        kldload.io/fleet: "true"
+        kldload.io/example: "argo-applicationset"
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/argoproj/argocd-example-apps
+        targetRevision: HEAD
+        path: guestbook
+      destination:
+        server: "{{server}}"   # cluster's API server, from generator
+        namespace: examples
+      syncPolicy:
+        automated: { prune: true, selfHeal: true }
+        syncOptions: [CreateNamespace=true]

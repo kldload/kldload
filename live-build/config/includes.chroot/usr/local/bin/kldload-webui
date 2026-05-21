@@ -5034,8 +5034,16 @@ def _scan_playbooks(directory, origin):
     out = []
     if not os.path.isdir(directory):
         return out
+    # Recurse one level into examples/ so the kldload-examples library
+    # (mounted at <ANSIBLE_LIB>/playbooks/examples via a build-time
+    # symlink → /usr/local/share/kldload-examples/ansible/) surfaces
+    # in the same dropdown as system playbooks. Only one level deep —
+    # operators shouldn't need to dig through nested subdirs to find
+    # paste-and-run examples.
     for path in sorted(glob.glob(f"{directory}/*.yml") +
-                       glob.glob(f"{directory}/*.yaml")):
+                       glob.glob(f"{directory}/*.yaml") +
+                       glob.glob(f"{directory}/examples/*.yml") +
+                       glob.glob(f"{directory}/examples/*.yaml")):
         name = os.path.basename(path)
         hosts, tasks, desc = "—", 0, ""
         try:

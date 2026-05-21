@@ -1,0 +1,75 @@
+---
+# 05-zfs-snapshot-flow — host-side: snapshot, corrupt, rollback, verify.
+# Pure-host playbook (no K8s) demonstrating the kldload value-prop
+# rollback story end-to-end. Pick any dataset; defaults to a scratch
+# child of rpool that the playbook creates and tears down.
+#
+# Run:  ansible-playbook 05-zfs-snapshot-flow.yml
+
+- name: zfs-snapshot-flow — full snapshot/corrupt/rollback cycle
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  vars:
+    pool: rpool
+    test_dataset: "{{ pool }}/examples/snap-demo"
+    mountpoint: /mnt/snap-demo
+
+  tasks:
+    - name: Create scratch dataset
+      community.general.zfs:
+        name: "{{ test_dataset }}"
+        state: present
+        extra_zfs_properties:
+          mountpoint: "{{ mountpoint }}"
+          compression: zstd-3
+          atime: "off"
+
+    - name: Write baseline file
+      copy:
+        content: "kldload zfs rollback demo — baseline content\n"
+        dest: "{{ mountpoint }}/important.txt"
+
+    - name: Capture baseline checksum
+      command: "sha256sum {{ mountpoint }}/important.txt"
+      register: baseline_sum
+
+    - name: Snapshot the dataset
+      community.general.zfs:
+        name: "{{ test_dataset }}@before-disaster"
+        state: present
+
+    - name: Simulate corruption — overwrite the file
+      copy:
+        content: "RANSOMWARE — every byte encrypted by FAKE-CRYPT 2026\n"
+        dest: "{{ mountpoint }}/important.txt"
+
+    - name: Confirm corruption (checksum changed)
+      command: "sha256sum {{ mountpoint }}/important.txt"
+      register: corrupt_sum
+
+    - name: Show the damage
+      debug:
+        msg:
+          - "Baseline:   {{ baseline_sum.stdout }}"
+          - "Corrupted:  {{ corrupt_sum.stdout }}"
+
+    - name: ZFS rollback — the headline operation
+      command: "zfs rollback {{ test_dataset }}@before-disaster"
+
+    - name: Verify recovery
+      command: "sha256sum {{ mountpoint }}/important.txt"
+      register: restored_sum
+
+    - name: Assert data restored byte-for-byte
+      assert:
+        that: baseline_sum.stdout == restored_sum.stdout
+        success_msg: "✓ Recovered. baseline sha == restored sha. Rollback works."
+        fail_msg:    "✗ Recovery failed — checksums differ."
+
+# ── Cleanup ──────────────────────────────────────────────────────────
+#     - name: Destroy scratch dataset
+#       community.general.zfs:
+#         name: "{{ test_dataset }}"
+#         state: absent

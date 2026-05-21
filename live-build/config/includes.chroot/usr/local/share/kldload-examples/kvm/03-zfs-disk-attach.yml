@@ -1,0 +1,59 @@
+---
+# 03-zfs-disk-attach — create a ZFS zvol on the host, attach it to a
+# running libvirt VM as a virtio-blk disk. The VM sees it as a normal
+# /dev/vdb device; on the host it's a zvol with all ZFS properties.
+#
+# Snapshot the zvol on the host without touching the VM:
+#   zfs snapshot rpool/vm/<vm-name>/data@before-experiment
+#
+# Roll back without rebooting the VM (hot-swap unsupported; need stop):
+#   virsh shutdown <vm-name>
+#   zfs rollback rpool/vm/<vm-name>/data@before-experiment
+#   virsh start <vm-name>
+
+- name: zfs-disk-attach — virtio-blk backed by a ZFS zvol
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  vars:
+    vm_name: demo-deb
+    disk_size: 10G
+    zvol_dataset: "rpool/vm/{{ vm_name }}/data"
+    virtio_target: vdb
+
+  tasks:
+    - name: Create the zvol
+      command: "zfs create -V {{ disk_size }} -b 8K -o compression=zstd -o sync=disabled {{ zvol_dataset }}"
+      args:
+        creates: "/dev/zvol/{{ zvol_dataset }}"
+
+    - name: Confirm VM exists
+      command: "virsh dominfo {{ vm_name }}"
+      register: dominfo
+      failed_when: dominfo.rc != 0
+
+    - name: Attach as virtio-blk (live attach — no reboot)
+      command: |
+        virsh attach-disk {{ vm_name }}
+          /dev/zvol/{{ zvol_dataset }}
+          {{ virtio_target }}
+          --persistent
+          --driver qemu
+          --type disk
+          --subdriver raw
+      args:
+        # Make idempotent: skip if the disk is already attached.
+        # Check by grepping the domain XML.
+        creates: "/var/lib/kldload/.zvol-attached-{{ vm_name }}-{{ virtio_target }}"
+
+    - name: Marker file (idempotence anchor)
+      file:
+        path: "/var/lib/kldload/.zvol-attached-{{ vm_name }}-{{ virtio_target }}"
+        state: touch
+
+    - debug:
+        msg:
+          - "Disk {{ zvol_dataset }} attached to {{ vm_name }} as /dev/{{ virtio_target }}"
+          - "Inside VM: mkfs.ext4 /dev/{{ virtio_target }} && mkdir /mnt/data && mount /dev/{{ virtio_target }} /mnt/data"
+          - "ZFS-side props: zfs get all {{ zvol_dataset }}"

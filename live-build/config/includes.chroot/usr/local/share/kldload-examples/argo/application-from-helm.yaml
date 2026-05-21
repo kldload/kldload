@@ -1,0 +1,38 @@
+# Argo Application — Helm-sourced chart with inline values.
+# Useful when you want GitOps + Helm together: Argo fetches the chart
+# from the helm repo, renders templates, applies them, reconciles.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: example-redis
+  namespace: argocd
+  labels: { kldload.io/example: "argo-helm" }
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://charts.bitnami.com/bitnami
+    chart: redis             # chart name (not repo path)
+    targetRevision: "20.0.0" # pin the chart version
+    helm:
+      releaseName: example-redis
+      values: |
+        architecture: standalone
+        auth:
+          password: "change-me"
+        master:
+          persistence:
+            enabled: true
+            storageClass: ""
+            size: 1Gi
+            annotations:
+              kldload.io/snapshot-policy: petclinic
+        metrics:
+          enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: examples
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]

@@ -1,0 +1,33 @@
+# Argo Application — Git-sourced manifests, continuous reconcile.
+# Apply with:  kubectl -n argocd apply -f application-from-git.yaml
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: example-guestbook
+  namespace: argocd
+  labels: { kldload.io/example: "argo-git" }
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/argoproj/argocd-example-apps
+    targetRevision: HEAD
+    path: guestbook
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: examples
+  syncPolicy:
+    automated:
+      prune: true        # delete resources removed from Git
+      selfHeal: true     # revert manual edits
+      allowEmpty: false  # don't wipe everything on accidental empty commit
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+      - PruneLast=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff: { duration: 10s, factor: 2, maxDuration: 5m }
+  revisionHistoryLimit: 10

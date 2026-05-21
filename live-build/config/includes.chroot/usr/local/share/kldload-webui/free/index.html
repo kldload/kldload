@@ -2059,6 +2059,8 @@ select option:checked { background: #00b8d9; color: #000; }
             <label style="font-size:0.8rem;color:var(--subtle)"><input type="checkbox" id="helm-inst-create-ns" checked> Create namespace</label>
             <label style="font-size:0.8rem;color:var(--subtle)"><input type="checkbox" id="helm-inst-wait"> Wait for ready</label>
             <span style="flex:1"></span>
+            <button class="btn btn-ghost btn-sm" onclick="helmBrowseExamples()"
+              title="Show the catalogue of bundled example charts + values.yaml overlays at /usr/local/share/kldload-examples/helm/">📚 Browse examples</button>
             <button class="btn btn-primary btn-sm" onclick="helmInstall()">Install</button>
             <button class="btn btn-ghost btn-sm" onclick="helmUpgrade()">Upgrade (--install)</button>
           </div>
@@ -8003,6 +8005,36 @@ function helmRepoRemove(name) {
 
 function helmInstall()  { _helmInstallLike(false); }
 function helmUpgrade()  { _helmInstallLike(true); }
+
+// helmBrowseExamples — paste the bundled-examples catalogue into a
+// quick-and-readable modal. Full file picker w/ click-to-load is a
+// 1.1 polish item; for now this is the "where are they?" affordance.
+function helmBrowseExamples() {
+  const path = '/usr/local/share/kldload-examples';
+  const msg =
+    'Bundled Helm examples on this kldload box:\n\n' +
+    '── Charts ──\n' +
+    `  ${path}/helm/hello-world/        Minimal Chart.yaml + 1 template + values.yaml\n` +
+    '\n' +
+    '── Values overlays (apply to any chart) ──\n' +
+    `  ${path}/helm/values-zfs-tuned.yaml   PVC + storageClass + snapshot-policy labels\n` +
+    `  ${path}/helm/values-monitored.yaml   Prometheus scrape annotations + Loki labels\n` +
+    '\n' +
+    '── To install the hello-world chart ──\n' +
+    '  Chart field:  /usr/local/share/kldload-examples/helm/hello-world\n' +
+    '  Release name: hello\n' +
+    '  Namespace:    examples\n' +
+    '\n' +
+    'For Ansible / kubectl-apply / Argo Application examples, see the\n' +
+    'matching directories under ' + path + '/. The Ansible ones appear\n' +
+    'automatically in the Ansible tab → Playbooks dropdown.\n';
+  // Use a textarea-in-prompt so the operator can copy chart paths
+  if (window.prompt) {
+    window.prompt('Helm examples catalogue (read-only, copy any path):', msg);
+  } else {
+    alert(msg);
+  }
+}
 
 function _helmInstallLike(upgrade) {
   const name    = document.getElementById('helm-inst-name')?.value.trim();

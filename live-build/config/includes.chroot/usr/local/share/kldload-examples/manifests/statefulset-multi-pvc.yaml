@@ -1,0 +1,51 @@
+# statefulset-multi-pvc.yaml — 3-replica StatefulSet, each pod has its
+# own PVC via volumeClaimTemplates. The ZFS-CSI provisioner creates
+# rpool/k8s/pvc-<random>-0 / -1 / -2 datasets.
+#
+# StatefulSet identity guarantees:
+#   * Pod names are sticky (data-0, data-1, data-2)
+#   * Each pod keeps the SAME PVC across reschedules
+#   * Pods come up in order (data-0 then data-1 then data-2)
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: examples }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data
+  namespace: examples
+spec:
+  clusterIP: None
+  selector: { app: data }
+  ports: [{ port: 9000, name: data }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: data, namespace: examples }
+spec:
+  serviceName: data
+  replicas: 3
+  selector: { matchLabels: { app: data } }
+  template:
+    metadata: { labels: { app: data } }
+    spec:
+      containers:
+        - name: data
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "$HOSTNAME PVC content" > /data/who.txt
+              tail -f /data/who.txt
+          ports: [{ containerPort: 9000 }]
+          volumeMounts: [{ name: vol, mountPath: /data }]
+  volumeClaimTemplates:
+    - metadata:
+        name: vol
+        annotations: { kldload.io/snapshot-policy: petclinic }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 500Mi } }

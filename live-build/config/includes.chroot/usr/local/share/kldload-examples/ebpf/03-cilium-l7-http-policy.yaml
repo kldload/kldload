@@ -1,0 +1,34 @@
+# Cilium L7 HTTP policy — enforce method + path at the kernel
+# datapath (no service mesh, no sidecar). Allows GET /api/* but blocks
+# everything else from the `frontend` pods to the `backend` service.
+#
+# Apply:  kubectl apply -f 03-cilium-l7-http-policy.yaml
+# Test:   kubectl exec -n examples deploy/frontend -- \
+#           wget -qO- http://backend/api/health    # ALLOWED (GET /api/*)
+#         kubectl exec -n examples deploy/frontend -- \
+#           wget -qO- --method=DELETE http://backend/api/health   # DENIED (method)
+#         kubectl exec -n examples deploy/frontend -- \
+#           wget -qO- http://backend/admin         # DENIED (path)
+# Watch:  hubble observe --follow --type policy-verdict
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: frontend-can-only-get-api
+  namespace: examples
+spec:
+  endpointSelector:
+    matchLabels: { app: backend }
+  ingress:
+    - fromEndpoints:
+        - matchLabels: { app: frontend }
+      toPorts:
+        - ports:
+            - { port: "80", protocol: TCP }
+          rules:
+            http:
+              - method: "GET"
+                path: "/api/.*"
+              - method: "GET"
+                path: "/healthz"
+              # Anything not matching above is denied.

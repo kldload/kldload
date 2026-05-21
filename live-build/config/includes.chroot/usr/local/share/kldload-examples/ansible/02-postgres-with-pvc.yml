@@ -1,0 +1,112 @@
+---
+# 02-postgres-with-pvc — Postgres 16 StatefulSet on ZFS-tuned PVC.
+# Demonstrates the stateful-tier pattern: Secret + PVC + headless Service.
+# Postgres datatype lands in rpool/k8s/pvc-{{ app_name }}-data which the
+# host-side sanoid policy can then snapshot every 5 min.
+#
+# Watch:  zfs list rpool/k8s/pvc-*
+#         kubectl exec -n {{ namespace }} {{ app_name }}-0 -- pg_isready
+
+- name: postgres-with-pvc — stateful tier pattern
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    app_name: pg
+    namespace: examples
+    pg_user: app
+    pg_database: app
+    pg_password: change-me
+    pg_image: "bitnami/postgresql:16.4.0-debian-12-r0"
+    storage_size: 5Gi
+
+  tasks:
+    - name: Namespace
+      kubernetes.core.k8s:
+        state: present
+        definition: { apiVersion: v1, kind: Namespace, metadata: { name: "{{ namespace }}" } }
+
+    - name: Postgres credentials Secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata: { name: "{{ app_name }}-creds", namespace: "{{ namespace }}" }
+          stringData:
+            POSTGRESQL_USERNAME: "{{ pg_user }}"
+            POSTGRESQL_DATABASE: "{{ pg_database }}"
+            POSTGRESQL_PASSWORD: "{{ pg_password }}"
+
+    - name: PVC (ZFS-CSI default class)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: "{{ app_name }}-data"
+            namespace: "{{ namespace }}"
+            labels:
+              kldload.io/dataset-class: postgres
+              kldload.io/snapshot-policy: petclinic  # 5-min frequents
+          spec:
+            accessModes: [ReadWriteOnce]
+            resources: { requests: { storage: "{{ storage_size }}" } }
+
+    - name: StatefulSet
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata: { name: "{{ app_name }}", namespace: "{{ namespace }}" }
+          spec:
+            serviceName: "{{ app_name }}"
+            replicas: 1
+            selector: { matchLabels: { app: "{{ app_name }}" } }
+            template:
+              metadata: { labels: { app: "{{ app_name }}" } }
+              spec:
+                containers:
+                  - name: postgres
+                    image: "{{ pg_image }}"
+                    envFrom: [{ secretRef: { name: "{{ app_name }}-creds" } }]
+                    env:
+                      - name: POSTGRESQL_EXTRA_CONF
+                        value: |
+                          wal_compression = on
+                          full_page_writes = off
+                          synchronous_commit = on
+                    ports: [{ containerPort: 5432, name: postgres }]
+                    volumeMounts: [{ name: data, mountPath: /bitnami/postgresql }]
+                volumes:
+                  - name: data
+                    persistentVolumeClaim: { claimName: "{{ app_name }}-data" }
+
+    - name: Headless Service (internal-only — never expose Postgres via MetalLB)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata: { name: "{{ app_name }}", namespace: "{{ namespace }}" }
+          spec:
+            clusterIP: None
+            selector: { app: "{{ app_name }}" }
+            ports: [{ port: 5432, targetPort: 5432 }]
+
+    - name: Wait for Postgres ready
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: "{{ app_name }}-0"
+        namespace: "{{ namespace }}"
+      register: pg
+      until: pg.resources[0].status.containerStatuses[0].ready is defined
+             and pg.resources[0].status.containerStatuses[0].ready
+      retries: 60
+      delay: 3
+
+    - debug:
+        msg: "Connect: kubectl exec -n {{ namespace }} {{ app_name }}-0 -- psql -U {{ pg_user }} -d {{ pg_database }}"

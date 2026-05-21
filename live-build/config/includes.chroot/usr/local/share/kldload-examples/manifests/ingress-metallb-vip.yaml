@@ -1,0 +1,42 @@
+# ingress-metallb-vip.yaml — request a specific VIP from MetalLB's
+# kldload-pool. Useful when you want a stable LAN IP for an app
+# (e.g., a DNS server pointing other devices at this VIP).
+#
+# Pool defaults to 10.100.10.30-39. Pick an unused IP from that range.
+# Conflicts are visible immediately:
+#   kubectl -n examples describe svc pinned-app
+#   # Events: "Failed to allocate IP from pool: in use by ..."
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: examples }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: pinned-app, namespace: examples }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: pinned-app } }
+  template:
+    metadata: { labels: { app: pinned-app } }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports: [{ containerPort: 80 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pinned-app
+  namespace: examples
+  labels: { kldload.io/app: "true" }
+  annotations:
+    # The two MetalLB conventions — both honored:
+    metallb.universe.tf/address-pool: kldload-pool
+    metallb.universe.tf/loadBalancerIPs: "10.100.10.35"
+spec:
+  type: LoadBalancer
+  loadBalancerIP: "10.100.10.35"     # request this exact IP
+  selector: { app: pinned-app }
+  ports: [{ port: 80, targetPort: 80 }]

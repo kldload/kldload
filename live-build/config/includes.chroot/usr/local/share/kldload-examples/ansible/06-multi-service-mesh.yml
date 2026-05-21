@@ -1,0 +1,134 @@
+---
+# 06-multi-service-mesh — three microservices behind a public ingress,
+# demonstrating service-to-service flow visibility through Cilium +
+# Hubble L7. Pure stdlib images so no chart-fetch required.
+#
+# Topology:
+#                ┌──────────┐
+#       LAN ───▶ │  nginx   │ ── /api/* ──▶ ┌────────┐ ───▶ ┌────────┐
+#                │  ingress │               │  api   │     │ worker │
+#                └──────────┘               └────────┘     └────────┘
+#                                              │                │
+#                                              └──▶ ┌────────┐ ◀┘
+#                                                   │ cache  │
+#                                                   └────────┘
+#
+# Every hop shows up in `hubble observe`; the api→worker / api→cache
+# flows light up the Cilium service-map dashboard.
+
+- name: multi-service-mesh — 3 services + ingress, hubble L7 visibility
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    namespace: mesh-demo
+    api_image:    "kennethreitz/httpbin:latest"   # mock REST API
+    worker_image: "nginx:1.27-alpine"             # stand-in for any worker
+    cache_image:  "redis:7-alpine"
+
+  tasks:
+    - name: Namespace
+      kubernetes.core.k8s:
+        state: present
+        definition: { apiVersion: v1, kind: Namespace, metadata: { name: "{{ namespace }}", labels: { kldload.io/app: "true" } } }
+
+    - name: api — Deployment + Service
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ item }}"
+      loop:
+        - apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: api, namespace: "{{ namespace }}" }
+          spec:
+            replicas: 2
+            selector: { matchLabels: { app: api } }
+            template:
+              metadata: { labels: { app: api } }
+              spec:
+                containers:
+                  - { name: api, image: "{{ api_image }}", ports: [{ containerPort: 80 }] }
+        - apiVersion: v1
+          kind: Service
+          metadata: { name: api, namespace: "{{ namespace }}" }
+          spec:
+            selector: { app: api }
+            ports: [{ port: 80, targetPort: 80 }]
+
+    - name: worker — Deployment + Service
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ item }}"
+      loop:
+        - apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: worker, namespace: "{{ namespace }}" }
+          spec:
+            replicas: 2
+            selector: { matchLabels: { app: worker } }
+            template:
+              metadata: { labels: { app: worker } }
+              spec:
+                containers:
+                  - { name: worker, image: "{{ worker_image }}", ports: [{ containerPort: 80 }] }
+        - apiVersion: v1
+          kind: Service
+          metadata: { name: worker, namespace: "{{ namespace }}" }
+          spec:
+            selector: { app: worker }
+            ports: [{ port: 80, targetPort: 80 }]
+
+    - name: cache — Deployment + Service
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ item }}"
+      loop:
+        - apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: cache, namespace: "{{ namespace }}" }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: cache } }
+            template:
+              metadata: { labels: { app: cache } }
+              spec:
+                containers:
+                  - { name: cache, image: "{{ cache_image }}", ports: [{ containerPort: 6379 }] }
+        - apiVersion: v1
+          kind: Service
+          metadata: { name: cache, namespace: "{{ namespace }}" }
+          spec:
+            selector: { app: cache }
+            ports: [{ port: 6379, targetPort: 6379 }]
+
+    - name: Public ingress (MetalLB VIP)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: ingress
+            namespace: "{{ namespace }}"
+            annotations: { metallb.universe.tf/address-pool: kldload-pool }
+            labels: { kldload.io/app: "true" }
+          spec:
+            type: LoadBalancer
+            selector: { app: api }    # api fronts the mesh; routes internally
+            ports: [{ port: 80, targetPort: 80 }]
+
+    - name: Wait for VIP
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        name: ingress
+        namespace: "{{ namespace }}"
+      register: svc
+      until: svc.resources[0].status.loadBalancer.ingress is defined
+      retries: 30
+      delay: 2
+
+    - debug:
+        msg:
+          - "Public IP: http://{{ svc.resources[0].status.loadBalancer.ingress[0].ip }}/"
+          - "Run `hubble observe --follow --output compact` to see L4 + L7 flows"

@@ -1,0 +1,105 @@
+---
+# 01-nginx-app — 3-replica nginx + ZFS-backed PVC + MetalLB LoadBalancer.
+# The simplest "spawn an app on kldload" pattern. Demonstrates:
+#   * kubernetes.core.k8s module for inline manifest application
+#   * Cilium service-to-backend map filling (3 endpoints behind 1 svc)
+#   * MetalLB advertising a VIP from the kldload-pool on the LAN
+#   * ZFS-CSI auto-creating rpool/k8s/pvc-{{ app_name }}-data on the host
+#
+# Watch:  hubble observe --follow --output compact
+#         zfs list rpool/k8s/pvc-*
+#         curl http://<vip>/
+
+- name: nginx-app — paste-and-deploy
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    app_name: nginx-app
+    namespace: examples
+    replicas: 3
+    nginx_image: "nginx:1.27-alpine"
+
+  tasks:
+    - name: Namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ namespace }}"
+            labels: { kldload.io/app: "true" }
+
+    - name: PVC (ZFS-backed via default CSI)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata: { name: "{{ app_name }}-data", namespace: "{{ namespace }}" }
+          spec:
+            accessModes: [ReadWriteOnce]
+            resources: { requests: { storage: 1Gi } }
+
+    - name: Deployment
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: "{{ app_name }}", namespace: "{{ namespace }}" }
+          spec:
+            replicas: "{{ replicas }}"
+            selector: { matchLabels: { app: "{{ app_name }}" } }
+            template:
+              metadata: { labels: { app: "{{ app_name }}" } }
+              spec:
+                containers:
+                  - name: nginx
+                    image: "{{ nginx_image }}"
+                    ports: [{ containerPort: 80 }]
+                    volumeMounts:
+                      - { name: data, mountPath: /usr/share/nginx/html }
+                volumes:
+                  - name: data
+                    persistentVolumeClaim: { claimName: "{{ app_name }}-data" }
+
+    - name: LoadBalancer Service (MetalLB advertises a VIP)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: "{{ app_name }}"
+            namespace: "{{ namespace }}"
+            annotations: { metallb.universe.tf/address-pool: kldload-pool }
+            labels: { kldload.io/app: "true" }
+          spec:
+            type: LoadBalancer
+            selector: { app: "{{ app_name }}" }
+            ports: [{ port: 80, targetPort: 80 }]
+
+    - name: Wait for VIP assignment
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        name: "{{ app_name }}"
+        namespace: "{{ namespace }}"
+      register: svc
+      until: svc.resources[0].status.loadBalancer.ingress is defined
+      retries: 30
+      delay: 2
+
+    - name: Report VIP
+      debug:
+        msg: "{{ app_name }} is live at http://{{ svc.resources[0].status.loadBalancer.ingress[0].ip }}/"
+
+# ── Cleanup (uncomment + re-run to undeploy) ────────────────────────
+#     - name: Delete namespace (cascades to all resources)
+#       kubernetes.core.k8s:
+#         state: absent
+#         api_version: v1
+#         kind: Namespace
+#         name: "{{ namespace }}"

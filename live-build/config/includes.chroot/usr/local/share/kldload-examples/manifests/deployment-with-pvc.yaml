@@ -1,0 +1,52 @@
+# deployment-with-pvc.yaml — 1-pod Deployment + ZFS-backed PVC + a
+# loop that writes timestamps. Survives pod restart because the PVC
+# persists (ZFS dataset on rpool/k8s/).
+#
+# Verify persistence:
+#   kubectl apply -f deployment-with-pvc.yaml
+#   kubectl -n examples logs deploy/persistent-counter
+#   kubectl -n examples delete pod -l app=persistent-counter
+#   # New pod starts, log continues from where it left off
+#   kubectl -n examples logs deploy/persistent-counter
+---
+apiVersion: v1
+kind: Namespace
+metadata: { name: examples }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: persistent-counter-data
+  namespace: examples
+  annotations:
+    kldload.io/snapshot-policy: petclinic
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 100Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: persistent-counter, namespace: examples }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: persistent-counter } }
+  template:
+    metadata: { labels: { app: persistent-counter } }
+    spec:
+      containers:
+        - name: counter
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              touch /data/log.txt
+              while :; do
+                date +"%FT%T  pod=$HOSTNAME  $(wc -l < /data/log.txt) lines so far" \
+                  | tee -a /data/log.txt
+                sleep 5
+              done
+          volumeMounts: [{ name: data, mountPath: /data }]
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: persistent-counter-data }
