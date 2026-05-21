@@ -5,25 +5,51 @@
 # available any time via the `menu` shell alias.
 set -u
 
-if [[ -t 1 ]] && [[ "${TERM:-}" != "dumb" ]]; then
-    G=$'\e[38;5;85m'     # accent green
-    C=$'\e[38;5;117m'    # accent cyan
-    Y=$'\e[38;5;221m'    # warn amber
-    P=$'\e[38;5;177m'    # accent purple
-    M=$'\e[38;5;245m'    # muted
-    W=$'\e[1;38;5;255m'  # bright white
-    D=$'\e[38;5;240m'    # dim
-    N=$'\e[0m'
-    B=$'\e[1m'
-else
-    G= C= Y= P= M= W= D= N= B=
-fi
+# ── Colours: always emit, never gate on isatty(1) ────────────────────
+# Earlier versions gated on `[[ -t 1 ]]` to skip ANSI when piped. That
+# broke the side-by-side composition in _kconsole-greeting, which
+# captures this output via `mapfile < <(...)` — stdout is a pipe in
+# that case, the gate kicked in, and the entire right column rendered
+# in default-colour gray. Always emitting is the right call: anyone
+# piping to a file can `cat -v` or strip the codes if they care.
+G=$'\e[38;5;85m'     # accent green
+C=$'\e[38;5;117m'    # accent cyan
+Y=$'\e[38;5;221m'    # warn amber
+P=$'\e[38;5;177m'    # accent purple
+M=$'\e[38;5;245m'    # muted
+W=$'\e[1;38;5;255m'  # bright white
+D=$'\e[38;5;240m'    # dim
+N=$'\e[0m'
+B=$'\e[1m'
 
-clear
+# ── Width-aware padding ──────────────────────────────────────────────
+# `printf '%-Ns' "$s"` pads to N BYTES. Strings with multi-byte UTF-8
+# (em-dashes "—", triangle markers "▸", box-drawing) get under-padded
+# visually because each multi-byte char eats more byte budget than its
+# 1-column terminal footprint. Result: rows containing em-dashes ended
+# up 2-3 visible cells shorter than rows that didn't, and the right
+# column wobbled depending on whether the description had a dash.
+#
+# Bash's ${#str} returns CHARACTER count in a UTF-8 locale (which all
+# kldload installs use). Compute (target_chars - char_count) extra
+# spaces ourselves and append.
+LC_ALL=${LC_ALL:-C.UTF-8}
+_pad() {
+    local s="$1" w="$2" cl=${#1}
+    if (( cl < w )); then
+        printf '%s%*s' "$s" $((w - cl)) ''
+    else
+        printf '%s' "$s"
+    fi
+}
 
+# Box-width note: the top/bottom border is 68 `─` chars between corners,
+# so the middle line needs 68 visible chars between `│` and `│`. The
+# trailing-spaces count below is tuned for that exact width — the
+# em-dash counts as 1 visible column even though it's 3 UTF-8 bytes.
 cat <<BANNER
 ${D}┌────────────────────────────────────────────────────────────────────┐${N}
-${D}│${N}  ${W}${B}klab console${N}  ${M}— one-pane ops + operator + kernel cockpit${N}           ${D}│${N}
+${D}│${N}  ${W}${B}klab console${N}  ${M}— one-pane ops + operator + kernel cockpit${N}          ${D}│${N}
 ${D}└────────────────────────────────────────────────────────────────────┘${N}
 BANNER
 
@@ -36,15 +62,13 @@ RIGHT=()
 _emit() {
     local side="$1" key="$2" label="$3" desc="$4" kcolor="$5"
     local trimmed="${desc:0:32}"
-    local row
-    row="   ${kcolor}$(printf '%-9s' "$key")${N}  ${W}$(printf '%-22s' "$label")${N}  ${M}$(printf '%-32s' "$trimmed")${N}"
+    local row="   ${kcolor}$(_pad "$key" 9)${N}  ${W}$(_pad "$label" 22)${N}  ${M}$(_pad "$trimmed" 32)${N}"
     if [[ "$side" == "L" ]]; then LEFT+=("$row"); else RIGHT+=("$row"); fi
 }
 
 _head() {
     local side="$1" title="$2" hint="$3" color="$4"
-    local row
-    row="  ${color}${B}$(printf '%-22s' "$title")${N}  ${D}$(printf '%-44s' "$hint")${N}"
+    local row="  ${color}${B}$(_pad "$title" 22)${N}  ${D}$(_pad "$hint" 44)${N}"
     if [[ "$side" == "L" ]]; then LEFT+=("$row"); else RIGHT+=("$row"); fi
 }
 
@@ -52,33 +76,35 @@ _blank() {
     if [[ "${1}" == "L" ]]; then LEFT+=(""); else RIGHT+=(""); fi
 }
 
-# ── LEFT column: F-keys (each row explains the actual contents) ──────
+# ── LEFT column: F-keys + simplified Navigation ──────────────────────
 _head  L "▸ F-keys (toggle)" "press once = open; press again = close" "$C"
-_emit  L "F1"  "help"                 "toggle popup — F1 to close"    "$G"
+_emit  L "F1"  "help"                 "redraw this cheatsheet"        "$G"
 _emit  L "F2"  "k9s"                  "cluster TUI"                   "$G"
-_emit  L "F3"  "terminal"             "new scratch shell"             "$G"
-_emit  L "F4"  "close everything"     "kill every non-klab window"    "$Y"
-_emit  L "F5"  "logs"                 "kldload-follow — every log"    "$G"
-_emit  L "F6"  "syscall cockpit"      "5w: exec/open/kill/sysc/cap"   "$G"
-_emit  L "F7"  "I/O + ZFS cockpit"    "7w: bio/lat/tcp×3/file/zfsdist" "$G"
-_emit  L "F8"  "kernel cockpit"       "15w: bpf/cilium/tetragon/zfs"  "$G"
-_emit  L "F9"  "k8s events"           "kubectl events --watch"        "$G"
-_emit  L "F10" "htop"                 "host CPU / mem / procs"        "$G"
-_emit  L "F11" "kernel-tcp"           "ss -i awk + nethogs split"     "$G"
-_emit  L "F12" "nethogs"              "per-process bandwidth"         "$G"
+_emit  L "F3"  "logs"                 "kldload-follow — every log"    "$G"
+_emit  L "F4"  "webui logs"           "journalctl webui + ttyd"       "$G"
+_emit  L "F5"  "disk bcc (4w)"        "bio+biolat+fileslow+zfsdist"   "$G"
+_emit  L "F6"  "syscall bcc (5w)"     "exec+open+kill+count+capable"  "$G"
+_emit  L "F7"  "tcp group"            "connect+retrans+tcplife"       "$G"
+_emit  L "F8"  "cilium state"         "status+lb+netpol+bpf-maps"     "$G"
+_emit  L "F9"  "in-kernel top"        "htop+k8s+zpool+bpf-prog"       "$G"
+_emit  L "F10" "zfs group"            "zpool-io+zfs-internals"        "$G"
+_emit  L "F11" "tracing"              "hubble+tetragon+pol+kmsg"      "$G"
+_emit  L "F12" "kernel-tcp"           "rich ss awk + nethogs split"   "$G"
 _blank L
-_head  L "▸ Navigation (browser-safe)" "Alt-key only — arrows blocked by browser" "$C"
-_emit  L "Alt+1..9"    "jump to win N" "fastest — direct by number"   "$C"
-_emit  L "Alt+←/→"     "prev/next win" "browser-iframe arrow keys"    "$C"
-_emit  L "Alt+h / l"   "prev/next win" "vim direction (same as ←/→)"  "$C"
-_emit  L "Alt+↑/↓"     "walk panes"    "up/down within a window"      "$C"
-_emit  L "Alt+k / j"   "walk panes"    "vim direction (same as ↑/↓)"  "$C"
-_emit  L "Alt+Enter"   "new window"    "blank shell window"           "$C"
-_emit  L "Alt+\\\\"    "vsplit"        "pane to the right"            "$C"
-_emit  L "Alt+-"       "hsplit"        "pane below"                   "$C"
-_emit  L "Ctrl+q"      "close pane"    "kills pane, then window"      "$C"
+# Navigation simplified 2026-05-20: kept only Alt+number for direct
+# window jump, Shift+arrows for prev/next, Alt+Enter for new window,
+# Alt+\ / Alt+- for splits, Ctrl+q to close. The old Alt+arrow /
+# Alt+hjkl / Alt+up-down / C-arrow duplicates were dropped from the
+# cheatsheet — too many ways to do the same thing was confusing.
+_head  L "▸ Navigation" "fewer keys, no duplicates" "$C"
+_emit  L "Alt+1..9"   "jump window"   "direct by number — fastest"    "$C"
+_emit  L "Shift+←/→"  "prev / next"   "walk through open windows"     "$C"
+_emit  L "Alt+Enter"  "new window"    "blank shell window"            "$C"
+_emit  L "Alt+\\\\"   "vsplit"        "pane to the right"             "$C"
+_emit  L "Alt+-"      "hsplit"        "pane below"                    "$C"
+_emit  L "Ctrl+q"     "close pane"    "kills pane, then window"       "$C"
 
-# ── RIGHT column: Heads-up popups + Window nav + Scroll + Deep-dive ──
+# ── RIGHT column: Heads-up popups + Scrollback + Deep-dive ──────────
 _head  R "▸ Heads-up popups" "(Alt+letter — auto-dismiss on Enter)" "$Y"
 _emit  R "Alt+v" "VMs & net"          "virsh + DHCP + interfaces"     "$Y"
 _emit  R "Alt+c" "cluster"            "nodes + sad pods + warnings"   "$Y"
@@ -105,14 +131,15 @@ _emit  R "S-F6"  "iotop"              "per-process disk I/O"          "$P"
 _emit  R "S-F7"  "kubectl top pods"   "pod mem/cpu top"               "$P"
 _emit  R "S-F8"  "cilium drops"       "cilium monitor --type drop"    "$P"
 
-# ── Print columns side by side ────────────────────────────────────────
-_blankL=$(printf '%.0s ' {1..70})
+# ── Print columns side by side ───────────────────────────────────────
+_blankL=$(_pad "" 70)
 max=${#LEFT[@]}
 (( ${#RIGHT[@]} > max )) && max=${#RIGHT[@]}
 for ((i=0; i<max; i++)); do
     printf "%s%s\n" "${LEFT[i]:-$_blankL}" "${RIGHT[i]:-}"
 done
 
-printf "\n${D}   ${G}F4${D} = syscall traces (5 wins)  ·  ${G}F5${D} = I/O + ZFS latency (7 wins)  ·  ${G}F6${D} = kernel deep-dive (15 wins).${N}\n"
+printf "\n${D}   ${G}Demo cockpits${D} (open from F10 scratch shell — each opens many windows at once):${N}\n"
+printf "${D}     ${G}_kebpf-syscalls${D} 5w syscall  ·  ${G}_kebpf-io${D} 7w I/O+ZFS  ·  ${G}_kcockpit${D} 15w kernel  ·  ${G}_ktcp-expanded${D} TCP cockpit  ·  ${G}_kclose-all${D} reset${N}\n"
 printf "${D}   To light up every pane at once for a demo:  ${G}sudo kldload-loadtest 60${D}  — drives HTTP + block I/O + exec fork-storm in parallel.${N}\n"
 printf "${D}   Window list is in the status strip below — clickable.${N}\n\n"

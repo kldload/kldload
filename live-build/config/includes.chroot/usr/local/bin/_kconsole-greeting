@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# _kconsole-greeting — render fastfetch + _kconsole-home side-by-side.
+#
+# The klab window's landing view. fastfetch on the left (distro ASCII
+# logo + OS / kernel / uptime / packages / shell / CPU / GPU / mem / IP)
+# tells you what host you're on at a glance; _kconsole-home on the right
+# is the F-key cheatsheet for kldload-console. Single pane, no tmux
+# split, so klab stays a normal bash window after the greeting prints.
+#
+# Width strategy: measure the widest VISIBLE column of fastfetch (with
+# ANSI escapes stripped — `${#var}` counts bytes including \e[...m,
+# which is wrong for terminal width) then pad each row to that width
+# before appending the cheatsheet row. If the cheatsheet has more rows
+# than fastfetch (it does — ~40 vs ~15), the extra rows hang off the
+# right with the left column blank.
+#
+# Falls back gracefully: if fastfetch isn't installed we just render
+# the cheatsheet alone (no left column at all).
+set -u
+
+# strip CSI / OSC escape sequences for width calc only — the output
+# string keeps its colours intact. ${#var} counts bytes (including the
+# `\e[...m` SGR sequences), which would inflate left-column padding
+# beyond what the terminal actually renders.
+_visible_len() {
+    local plain
+    plain=$(printf '%s' "$1" | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g')
+    printf '%d' "${#plain}"
+}
+
+mapfile -t RIGHT < <(/usr/local/bin/_kconsole-home 2>/dev/null)
+
+if command -v fastfetch >/dev/null 2>&1; then
+    # Three pieces:
+    #
+    # --logo-position top    forces SEQUENTIAL line-by-line output
+    #     (logo rows first, then info rows below). Default "left"
+    #     emits \e[17A / \e[44C cursor-positioning escapes that trash
+    #     our line-by-line composition with the cheatsheet.
+    #
+    # --pipe false           forces colours ON. fastfetch auto-detects
+    #     "stdout is a pipe → strip colours" and our mapfile process
+    #     substitution IS a pipe. `false` = "do not enter pipe mode"
+    #     (inverted-sense flag).
+    #
+    # awk SGR-preservation filter
+    #     fastfetch's logo emits `\e[1m\e[31m` on line 1 only — lines
+    #     2-17 are plain text that relies on the terminal staying in
+    #     the bold-red state set by line 1. Side-by-side composition
+    #     reset that state after each row's right column closes, so
+    #     logo lines 2+ rendered in default colour (gray) while only
+    #     line 1 stayed red. The awk filter tracks the active SGR
+    #     state across lines: any line that opens a new SGR sets the
+    #     state, any line without a leading SGR gets that state
+    #     prepended, and every line ends with an explicit reset so
+    #     each line is self-contained for the composer.
+    mapfile -t LEFT < <(fastfetch --logo-position top --pipe false 2>/dev/null \
+        | awk '
+            BEGIN { state = "" }
+            {
+                line = $0
+                # Match leading SGR sequence(s) — one or more "\e[...m"
+                # codes. \033 is the awk-portable spelling of ESC.
+                if (match(line, /^(\033\[[0-9;]*m)+/)) {
+                    prefix = substr(line, 1, RLENGTH)
+                    # If the leading code is a reset (\e[0m or \e[m),
+                    # clear state. Otherwise this prefix becomes the
+                    # new active state for following plain lines.
+                    if (prefix == "\033[0m" || prefix == "\033[m") {
+                        state = ""
+                    } else {
+                        state = prefix
+                    }
+                    print line "\033[0m"
+                } else if (length(line) > 0) {
+                    # Plain line — wrap with cached state + reset so
+                    # the row is self-contained for the composer.
+                    print state line "\033[0m"
+                } else {
+                    # Blank line — keep blank, no SGR.
+                    print ""
+                }
+            }
+        ')
+else
+    LEFT=()
+fi
+
+if [[ ${#LEFT[@]} -eq 0 ]]; then
+    # No fastfetch — just print the cheatsheet on its own.
+    printf '%s\n' "${RIGHT[@]}"
+    exit 0
+fi
+
+# Widest visible column in LEFT so the cheatsheet starts at a flat margin.
+maxw=0
+for line in "${LEFT[@]}"; do
+    w=$(_visible_len "$line")
+    (( w > maxw )) && maxw=$w
+done
+
+# Two-space gutter between fastfetch and the cheatsheet.
+GUTTER=2
+maxw=$(( maxw + GUTTER ))
+
+N=${#LEFT[@]}
+M=${#RIGHT[@]}
+TOTAL=$(( N > M ? N : M ))
+
+# ANSI reset between left and right columns.
+#
+# fastfetch logo lines start with `\e[1m\e[31m` (bold red on RHEL,
+# different colour per distro) but DO NOT close with `\e[0m` — they
+# rely on the terminal eventually being reset by something downstream.
+# When we splice the cheatsheet onto the right of those lines, the
+# padding spaces and any subsequent un-colored right-column content
+# stay in the logo colour, bleeding red across the whole help block.
+# Emitting `\e[0m` immediately after the LEFT column closes the SGR
+# state cleanly; the cheatsheet's own colour codes then take over for
+# the right column without interference.
+RESET=$'\e[0m'
+
+# Top blank line — visual breathing room above the greeting.
+echo ""
+
+for ((i=0; i<TOTAL; i++)); do
+    l="${LEFT[i]:-}"
+    r="${RIGHT[i]:-}"
+    # Pad LEFT line to maxw visible chars. printf's %-*s counts bytes,
+    # so we compute the byte padding ourselves: (target_visible_width -
+    # actual_visible_width) extra spaces appended.
+    lw=$(_visible_len "$l")
+    pad=$(( maxw - lw ))
+    (( pad < 0 )) && pad=0
+    printf '%s%s%*s%s\n' "$l" "$RESET" "$pad" "" "$r"
+done
+
+# Bottom blank line — visual breathing room below the greeting.
+echo ""

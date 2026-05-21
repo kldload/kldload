@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# _kgroup <name> — themed mini-cockpit toggle (kldload-console F5..F12).
+#
+# Each named group opens 2-3 related windows in the kldload tmux session
+# so an F-key gives you cross-view context for a single question without
+# the 30-window dump of the all-up _kcockpit / _kebpf-* scripts. Same
+# toggle semantics as those: if any of the group's windows already exist,
+# all of them are killed; otherwise all are opened.
+#
+# Why this exists: the 2026-05-19 group-cockpit rework collapsed F6/F7/F8
+# down to "syscall (5w) / I/O (7w) / kernel (15w)" cockpits. Pressing one
+# key got you 27 windows at once — fine for a demo finale, wrong for the
+# everyday "let me see disk stuff" question. 2026-05-20 reorg splits the
+# windows into themed mini-groups across F5..F12 instead. The big all-up
+# cockpits stay on disk (_kebpf-syscalls / _kebpf-io / _kcockpit) for the
+# demo finale; run them from a scratch shell.
+#
+# Spawner mapping per tool:
+#   _kbcc-pane        — bcc-tools (banner + restart loop, bcc path-resolution)
+#   _kcockpit-pane    — watch/stream wrapper for any other command
+#   direct new-window — full-screen interactive TUIs (htop, nethogs) that
+#                       paint their own header and don't want a banner
+set -u
+
+SESSION="${KLDLOAD_TMUX_SESSION:-kldload}"
+GROUP="${1:-}"
+
+case "$GROUP" in
+disk)
+    # F5 — block I/O + filesystem + ZFS latency bcc tools. Mirrors the
+    # old _kebpf-io cockpit minus the TCP windows (those are on F7).
+    WINDOWS=(biosnoop biolatency fileslower zfsdist)
+    ;;
+syscall)
+    # F6 — the full syscall / capability bcc set. Same windows as the
+    # old _kebpf-syscalls cockpit, just on a smaller key surface.
+    WINDOWS=(execsnoop opensnoop killsnoop syscount capable)
+    ;;
+tcp)
+    WINDOWS=(tcpconnect tcpretrans tcplife)
+    ;;
+cilium)
+    # F8 — Cilium kernel-state snapshots. The "what's the datapath
+    # actually configured to do right now" view. Live flow stream
+    # (hubble) lives on F11 with the other tracing streams instead.
+    WINDOWS=(cilium-status cilium-lb netpol bpf-maps)
+    ;;
+top)
+    # F9 — in-kernel top. The "yummy kernel goodness logs don't show":
+    # process top + cluster pod top + ZFS vdev top + BPF-programs
+    # loaded (top of resident kernel programs). Four top-style views
+    # answering "where's the load right now" across every layer.
+    WINDOWS=(htop k8s-top zpool-iostat bpf-prog)
+    ;;
+zfs)
+    WINDOWS=(zpool-io zfs-internals)
+    ;;
+tracing)
+    # F11 — live kernel tracing streams. Hubble L3/L4/L7 flows +
+    # Tetragon kernel events + TracingPolicies + kernel ring buffer.
+    # The streams that show what the kernel is *doing*, not what got
+    # logged afterward.
+    WINDOWS=(hubble tetragon tracingpol kernel-log)
+    ;;
+bandwidth)
+    WINDOWS=(tcptop nethogs)
+    ;;
+""|--help|-h)
+    cat <<EOF
+_kgroup <name> — themed mini-cockpit toggle
+Groups: disk syscall tcp cilium top zfs tracing bandwidth
+Bound to F5..F12 in kldload-console (in that order).
+EOF
+    exit 0
+    ;;
+*)
+    echo "_kgroup: unknown group '$GROUP'" >&2
+    exit 2
+    ;;
+esac
+
+# ── Toggle: if any window already exists, kill the whole group ─────────
+existing=()
+for w in "${WINDOWS[@]}"; do
+    tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$w" && existing+=("$w")
+done
+if [[ ${#existing[@]} -gt 0 ]]; then
+    for w in "${existing[@]}"; do
+        tmux kill-window -t "${SESSION}:=${w}" 2>/dev/null
+    done
+    # Land back on the klab home window if it's still around so the
+    # operator isn't dumped onto a window they didn't choose.
+    tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx klab && \
+        tmux select-window -t "${SESSION}:=klab"
+    exit 0
+fi
+
+# ── Spawn helpers ──────────────────────────────────────────────────────
+# bcc-tools window via _kbcc-pane. printf %q on desc/hint keeps any
+# apostrophes/em-dashes/quotes inside descriptions safe through tmux's
+# sh -c expansion. Remaining positional args pass through as tool flags.
+spawn_bcc() {
+    local name="$1" tool="$2" desc="$3" hint="$4"; shift 4
+    tmux new-window -t "$SESSION" -n "$name" -d \
+        "_kbcc-pane $tool $(printf '%q ' "$desc" "$hint" "$@")"
+}
+
+# Generic command window via _kcockpit-pane in watch/stream mode.
+spawn_cockpit() {
+    local name="$1" mode="$2" desc="$3" cmd="$4"
+    local qdesc qcmd
+    qdesc=$(printf '%q' "$desc")
+    qcmd=$(printf '%q' "$cmd")
+    tmux new-window -t "$SESSION" -n "$name" -d \
+        "/usr/local/bin/_kcockpit-pane $mode $qdesc $qcmd"
+}
+
+# Direct full-screen TUI (no banner — htop, nethogs paint their own).
+spawn_direct() {
+    local name="$1" cmd="$2"
+    tmux new-window -t "$SESSION" -n "$name" -d "$cmd"
+}
+
+# ── Open the requested group ───────────────────────────────────────────
+case "$GROUP" in
+disk)
+    spawn_bcc biosnoop biosnoop \
+        "Every block I/O the kernel handled. PID, comm, disk, sector, size, latency µs." \
+        "Latency over 5ms on NVMe = disk in trouble OR scrub running."
+    spawn_bcc biolatency biolatency \
+        "Block I/O latency histogram — prints every 5 seconds." \
+        "Healthy NVMe = heat in the 64-256µs row. Bimodal = ZFS ARC misses." \
+        -m 5
+    spawn_bcc fileslower fileslower \
+        "Filesystem operations slower than N ms (default 10ms)." \
+        "ZFS on healthy NVMe rarely shows entries. Spikes = slow scrub / frag / full pool." \
+        10
+    # zfsdist is a bpftrace script, not a stock bcc tool. Reuse the same
+    # script-on-disk approach _kebpf-io uses so behaviour matches there.
+    mkdir -p /run/kldload
+    cat > /run/kldload/zfsdist.bt <<'BT'
+kprobe:zfs_read,kprobe:zfs_write { @start[tid] = nsecs; }
+kretprobe:zfs_read /@start[tid]/ { @us["zfs_read"]  = hist((nsecs - @start[tid])/1000); delete(@start[tid]); }
+kretprobe:zfs_write /@start[tid]/ { @us["zfs_write"] = hist((nsecs - @start[tid])/1000); delete(@start[tid]); }
+interval:s:5 { print(@us); clear(@us); }
+BT
+    tmux new-window -t "$SESSION" -n zfsdist -d "_kbcc-pane bpftrace \
+        $(printf '%q ' \
+            'ZFS per-call latency histogram in microseconds, refreshed every 5s.' \
+            'Most heat in 4-32µs on healthy NVMe. Right-shift = scrub or txg pressure.' \
+            -f text /run/kldload/zfsdist.bt)"
+    tmux select-window -t "${SESSION}:=biosnoop"
+    ;;
+
+syscall)
+    spawn_bcc execsnoop execsnoop \
+        "Every fork()+exec() the kernel handles. PID, parent, full command line." \
+        "Spikes during pod creation / klab golden builds. Idle box <10/s."
+    spawn_bcc opensnoop opensnoop \
+        "Every open() syscall. PID, comm, return code, file path." \
+        "Which config a process actually reads. EACCES rows = denied opens."
+    spawn_bcc killsnoop killsnoop \
+        "Every signal sent via kill(). Source PID, target, signal name. OOM kills land here." \
+        "Pair with htop / cgroup pressure when you see SIGKILL fly past."
+    spawn_bcc syscount syscount \
+        "Histogram of syscalls — counts per syscall name over a 5-second window." \
+        "Idle = epoll_wait / futex top. Busy node = read/write/clock_gettime climb." \
+        -i 5 -T 10
+    spawn_bcc capable capable \
+        "Every capability check the kernel performed. PID + comm + cap + verdict." \
+        "Answers 'why does this thing need CAP_SYS_ADMIN'. Cilium / Tetragon / libvirt show up at startup."
+    tmux select-window -t "${SESSION}:=execsnoop"
+    ;;
+
+tcp)
+    spawn_bcc tcpconnect tcpconnect \
+        "Every new outbound TCP connect — PID, source IP, dest IP, port." \
+        "cloud-image pulls, kubectl exec, image pulls light up here."
+    spawn_bcc tcpretrans tcpretrans \
+        "Every TCP retransmit — connection tuple + kernel reason code." \
+        "Healthy LAN = empty. Bursts = MTU mismatch, switch flap, sick peer."
+    spawn_bcc tcplife tcplife \
+        "Connection lifetime — sockets that closed, with PID + bytes + duration." \
+        "Long hubble.observe streams sit for minutes; k8s probes <100ms."
+    tmux select-window -t "${SESSION}:=tcpconnect"
+    ;;
+
+cilium)
+    # Spawn order matches the WINDOWS list above so toggle-on/toggle-off
+    # never desyncs between the "what's checked" and "what's opened"
+    # sets. Earlier version spawned hubble here but its WINDOWS list
+    # had netpol/bpf-maps — pressing F8 twice killed only the 2 that
+    # overlapped and left hubble orphaned, and the 3rd press created
+    # a SECOND hubble next to the first. Lesson: WINDOWS array and
+    # spawn calls must list the same names in the same order.
+    K='kubectl -n kube-system exec ds/cilium -c cilium-agent --'
+    spawn_cockpit cilium-status watch \
+        "agent snapshot — endpoints, identities, IPAM, datapath" \
+        "$K cilium status --verbose"
+    spawn_cockpit cilium-lb watch \
+        "in-kernel service-to-backend map Cilium uses in place of kube-proxy" \
+        "$K cilium bpf lb list"
+    spawn_cockpit netpol watch \
+        "NetworkPolicies + CiliumNetworkPolicies + identities cluster-wide" \
+        "echo === Cilium identities ===; kubectl get ciliumidentity --no-headers 2>/dev/null | head -20; echo; echo === NetworkPolicies + CiliumNetworkPolicies ===; kubectl get netpol,cnp,ccnp -A -o wide 2>&1"
+    spawn_cockpit bpf-maps watch \
+        "fullness of every BPF map Cilium uses (policy / identity / lb state)" \
+        "$K cilium bpf metrics list"
+    tmux select-window -t "${SESSION}:=cilium-status"
+    ;;
+
+top)
+    # F9 = "kernel version of top" — process top + pod top + vdev top
+    # + loaded-BPF-program top on one keystroke. Four top-style views
+    # answering "where's the load right now" across every layer of
+    # the stack. bpf-prog is the kernel-resident view that logs
+    # don't show. Order matches the WINDOWS list above.
+    spawn_direct htop "htop || top"
+    spawn_cockpit k8s-top watch \
+        "kubectl top nodes + top 30 pods by CPU" \
+        "echo === Nodes ===; kubectl top nodes 2>&1; echo; echo === Pods \\(top 30 by CPU\\) ===; kubectl top pods -A --sort-by=cpu 2>&1 | head -32"
+    spawn_cockpit zpool-iostat stream \
+        "per-vdev I/O rate every 2 seconds — top-style for ZFS vdevs" \
+        "zpool iostat -vy 2"
+    spawn_cockpit bpf-prog watch \
+        "every BPF program currently loaded in the kernel (Cilium + Tetragon + others)" \
+        "bpftool prog show"
+    tmux select-window -t "${SESSION}:=htop"
+    ;;
+
+zfs)
+    spawn_cockpit zpool-io stream \
+        "per-vdev I/O rate every 5 seconds (zpool's native iostat)" \
+        "zpool iostat -vy 5"
+    spawn_cockpit zfs-internals watch \
+        "ZFS txg sync counter + ARC composition + last 12 zfs-dbgmsg narrations" \
+        "echo === ZFS transaction-group sync counter ===; cat /proc/spl/kstat/zfs/*/txgs 2>/dev/null | head -8; echo; echo === ARC composition \\(MRU / MFU / target / total\\) ===; awk '/^(c|c_max|c_min|size|hits|misses|p|mru_size|mfu_size)/ {print}' /proc/spl/kstat/zfs/arcstats 2>/dev/null | head -20; echo; echo === zfs-dbgmsg \\(last 12\\) ===; tail -12 /proc/spl/kstat/zfs/dbgmsg 2>/dev/null"
+    tmux select-window -t "${SESSION}:=zpool-io"
+    ;;
+
+tracing)
+    # Spawn order matches WINDOWS list (hubble first). Earlier version
+    # forgot hubble entirely so F11 opened 3 of 4 windows. Same lesson
+    # as cilium block above: keep WINDOWS array and spawn calls in
+    # sync.
+    K='kubectl -n kube-system exec ds/cilium -c cilium-agent --'
+    spawn_cockpit hubble stream \
+        "live L3/L4/L7 flow stream from the kernel datapath" \
+        "$K hubble observe --follow --output compact"
+    spawn_cockpit tetragon stream \
+        "every kernel event Tetragon shipped: EXEC / EXIT / PROCESS_KPROBE" \
+        "kubectl logs -n kube-system ds/tetragon -c export-stdout -f | jq -r --unbuffered -f /usr/local/share/kldload/tetragon-filter.jq"
+    # tracingpol: kubectl print yields "No resources found." when no
+    # policies are applied, which is the common state but looks like
+    # an error. Wrap with a friendlier banner so the operator knows
+    # the window IS working — just that nothing's configured yet.
+    spawn_cockpit tracingpol watch \
+        "Tetragon TracingPolicies loaded cluster-wide (kernel-rule analog of NetPol)" \
+        "echo === TracingPolicies \\(cluster-wide + namespaced\\) ===; out=\$(kubectl get tracingpolicies,tracingpoliciesnamespaced -A 2>&1); if echo \"\$out\" | grep -q 'No resources'; then echo; echo '   (none configured — kubectl apply -f a TracingPolicy to see Tetragon enforce it)'; else echo \"\$out\"; fi"
+    spawn_cockpit kernel-log stream \
+        "live kernel ring buffer (dmesg-style) — OOMs, hw errors, ZFS module noise" \
+        "journalctl -kfn 80 --no-pager"
+    tmux select-window -t "${SESSION}:=hubble"
+    ;;
+
+bandwidth)
+    spawn_bcc tcptop tcptop \
+        "Per-process TCP bandwidth, top-style — refreshes every second." \
+        "Who's actually pushing bytes right now."
+    spawn_direct nethogs "sudo nethogs 2>/dev/null || (echo need-nethogs; sleep 99)"
+    tmux select-window -t "${SESSION}:=tcptop"
+    ;;
+esac

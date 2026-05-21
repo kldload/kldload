@@ -52,5 +52,10 @@ done"
 
 tmux new-window -t "$SESSION" -n "$NAME" -d "bash -c \"$TOP_LOOP\""
 tmux split-window -t "${SESSION}:=${NAME}" -v -l 40% "bash -c \"$BOT_LOOP\""
-tmux select-pane -t "${SESSION}:=${NAME}.0"
+# select-pane index is base-aware: kldload's /etc/skel/.tmux.conf sets
+# `pane-base-index 1`, so the first pane is `.1` not `.0`. Earlier code
+# hard-coded `.0` and tmux errored "can't find pane: 0", leaving the
+# split window with no focus action. Use `top` instead of a number to
+# stay neutral to whatever base-index the user has configured.
+tmux select-pane -t "${SESSION}:=${NAME}" -U
 tmux select-window -t "${SESSION}:=${NAME}"
