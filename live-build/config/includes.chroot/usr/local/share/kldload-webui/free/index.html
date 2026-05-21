@@ -1614,15 +1614,51 @@ select option:checked { background: #00b8d9; color: #000; }
             <span class="k8s-panel-hdr-muted">quick-deploy demos · cluster lifecycle one click away</span>
           </div>
           <div style="padding:0.7rem 1rem;display:flex;flex-direction:column;gap:0.55rem">
+            <!-- Quick demos: all visible (no overflow), each with a mouseover
+                 title describing what kube-demo function fires + what the
+                 audience should watch happen. Tooltips render via the browser-
+                 native title attribute → works in every browser, no JS popovers
+                 to maintain. Examples in the title are the literal shell command
+                 the operator can copy if they want the CLI version. -->
             <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
               <span style="font-size:0.72rem;color:var(--text-dim);width:80px">Quick demos</span>
-              <button class="btn btn-primary btn-sm" onclick="k8sQuickDemo('nginx')">🌐 nginx</button>
-              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('pod_dns')">🔎 DNS test</button>
-              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('zfs_pvc')">💾 ZFS PVC</button>
-              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('metallb')">🌉 MetalLB</button>
-              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('netpol')">🛡 NetworkPolicy</button>
-              <button class="btn btn-ghost btn-sm" onclick="k8sMoreDemos()">⋯ More</button>
-              <button class="btn btn-ghost btn-sm" onclick="k8sToggleApply()">📝 Apply YAML…</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('nginx')"
+                title="Deploy a 3-replica nginx Deployment + LoadBalancer Service.&#10;Watch: Cilium service map fills, Hubble L7 flows show HTTP GETs.&#10;CLI: kube-demo nginx">🌐 nginx</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('pod_dns')"
+                title="Pod-to-Pod DNS resolution test via CoreDNS.&#10;Watch: hubble shows the in-cluster DNS round-trip; resolved IPs from BPF map.&#10;CLI: kube-demo pod_dns">🔎 DNS test</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('zfs_pvc')"
+                title="Create a PVC, watch the matching ZFS dataset appear on the host.&#10;Watch: zfs list -t snapshot rpool/k8s/pvc-* shows the new dataset.&#10;CLI: kube-demo zfs_pvc">💾 ZFS PVC</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('metallb')"
+                title="Deploy a Service of type=LoadBalancer; MetalLB announces an IP from the kldload pool.&#10;Watch: external IP becomes reachable from the LAN — no cloud provider needed.&#10;CLI: kube-demo metallb">🌉 MetalLB</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('netpol')"
+                title="Deploy two pods; block traffic with a NetworkPolicy; allow with a label.&#10;Watch: Cilium drop logs surface in the policy panel; hubble shows enforced flows.&#10;CLI: kube-demo netpol">🛡 NetworkPolicy</button>
+              <button class="btn btn-primary btn-sm" onclick="k8sQuickDemo('javaapi')"
+                title="🎄 THE 1.0 HEADLINE — Spring PetClinic full-stack (7 services + Postgres + nginx + k6 loadgen) via ArgoCD.&#10;Watch: every Grafana dashboard lights up. Then run Disaster + Recover for the rollback demo.&#10;CLI: kube-demo javaapi">🎄 Full-stack demo</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sToggleApply()"
+                title="Open the Apply YAML drawer — paste any kubectl manifest and apply.&#10;Useful for ad-hoc demos beyond the canned ones.">📝 Apply YAML…</button>
+            </div>
+
+            <!-- Demo Mode controls — appear ONLY when the full-stack PetClinic
+                 demo is deployed. Bound to kube-demo petclinic_{disaster,recover,
+                 destroy} functions. Hidden initially; revealed by the JS
+                 k8sCheckPetclinicStatus poller that runs when the K8s tab is open. -->
+            <!-- Demo Mode row is ALWAYS visible — if the demo isn't deployed
+                 yet, the kube-demo backend prints a friendly "deploy first"
+                 message. Adding a JS poller to hide/show based on Application
+                 existence is a polish task tracked for post-1.0. -->
+            <div id="petclinic-demo-controls" style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap;padding-top:0.3rem;border-top:1px dashed var(--border)">
+              <span style="font-size:0.72rem;color:var(--text-dim);width:80px">Demo mode</span>
+              <button class="btn btn-warning btn-sm" onclick="k8sQuickDemo('javaapi_disaster')"
+                title="Pick a disaster: drop tables (app) / corrupt fs bytes / delete PVC (operator).&#10;Watch: API gateway 500s, hubble shows failed responses, Grafana error-rate spikes.&#10;CLI: kube-demo javaapi_disaster">💥 Disaster</button>
+              <button class="btn btn-primary btn-sm" onclick="k8sQuickDemo('javaapi_recover')"
+                title="ZFS rollback to the most-recent autosnap + restart Postgres pod + Argo re-sync.&#10;Watch: TTR clock, error-rate drops back to 0, Hubble flows resume — all under 60 seconds.&#10;CLI: kube-demo javaapi_recover">↻ Recover</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('javaapi_status')"
+                title="Show Argo sync state + pod readiness + snapshot inventory + replication lag.&#10;CLI: kube-demo javaapi_status">📊 Status</button>
+              <button class="btn btn-ghost btn-sm" onclick="k8sQuickDemo('javaapi_verify')"
+                title="Sanity SQL queries: are the seed owners back? do visits link to vets correctly?&#10;Asserts data integrity after a recovery. CLI: kube-demo javaapi_verify">✓ Verify data</button>
+              <span style="flex:1"></span>
+              <button class="btn btn-danger btn-sm" onclick="k8sQuickDemo('javaapi_destroy')"
+                title="Delete the javaapi-fullstack Argo Application (keeps cluster + ArgoCD).&#10;Use this when the demo's done and you want a clean cluster again.">✕ Destroy demo</button>
             </div>
             <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
               <span style="font-size:0.72rem;color:var(--text-dim);width:80px">Lifecycle</span>

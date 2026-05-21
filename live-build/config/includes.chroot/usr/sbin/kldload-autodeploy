@@ -410,6 +410,76 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
                     >> "$LOG_FILE" 2>&1 && log "[k8s] Tetragon installed (online)" \
                     || log "[k8s] Tetragon install skipped — non-fatal"
             fi
+
+            # ── ArgoCD — GitOps reconciler for the kldload demo workload ──
+            # Full ArgoCD (not Core) — operator UI at MetalLB VIP
+            # 10.100.10.31. Same offline-first install pattern as
+            # Tetragon: vendored chart first, online fallback.
+            #
+            # The "kldload Demo Mode" UX leans on ArgoCD as the
+            # reconciliation layer for the full-stack PetClinic demo
+            # workload — click "Demo Mode" → CLI applies an Argo
+            # Application CRD → Argo syncs the chart → workload comes
+            # up reconciled and stays reconciled. Disaster + recover
+            # buttons stay clean because Argo brings drift back to
+            # truth after `zfs rollback` repoints the PVC.
+            #
+            # Values strategy: minimal overrides at install time —
+            # most config lives in the values file shipped alongside
+            # this script at /usr/local/share/kldload/argocd-values.yaml
+            # so re-tuning the install doesn't require touching this
+            # script.
+            log "[k8s] installing ArgoCD (full server + UI + repo-server + controller + dex + redis + notifications)..."
+            helm uninstall argocd -n argocd >> "$LOG_FILE" 2>&1 || true
+            kubectl create namespace argocd >> "$LOG_FILE" 2>&1 || true
+            _argo_tgz="/root/darksite/helm-charts/argo-cd.tgz"
+            _argo_values="/usr/local/share/kldload/argocd-values.yaml"
+            _argo_helm_args=()
+            [[ -f "$_argo_values" ]] && _argo_helm_args+=( -f "$_argo_values" )
+            if [[ -f "$_argo_tgz" ]]; then
+                helm install argocd "$_argo_tgz" -n argocd \
+                    "${_argo_helm_args[@]}" \
+                    --set server.service.type=LoadBalancer \
+                    --set server.service.loadBalancerIP=10.100.10.31 \
+                    --set configs.params."server\.insecure"=true \
+                    --set notifications.enabled=true \
+                    --set applicationSet.enabled=true \
+                    --set dex.enabled=true \
+                    --wait --timeout 5m \
+                    >> "$LOG_FILE" 2>&1 && log "[k8s] ArgoCD installed (offline) — UI at https://10.100.10.31" \
+                    || log "[k8s] ArgoCD install failed — non-fatal"
+            else
+                log "[k8s] ArgoCD chart not in darksite — trying online helm repo"
+                helm repo add argo https://argoproj.github.io/argo-helm >> "$LOG_FILE" 2>&1 || true
+                helm repo update >> "$LOG_FILE" 2>&1 || true
+                helm install argocd argo/argo-cd -n argocd \
+                    "${_argo_helm_args[@]}" \
+                    --set server.service.type=LoadBalancer \
+                    --set server.service.loadBalancerIP=10.100.10.31 \
+                    --set configs.params."server\.insecure"=true \
+                    --set notifications.enabled=true \
+                    --set applicationSet.enabled=true \
+                    --set dex.enabled=true \
+                    --wait --timeout 5m \
+                    >> "$LOG_FILE" 2>&1 && log "[k8s] ArgoCD installed (online) — UI at https://10.100.10.31" \
+                    || log "[k8s] ArgoCD install skipped — non-fatal"
+            fi
+
+            # Surface the initial admin password to the webui by
+            # writing it to a file the webui has read access to.
+            # ArgoCD stores it as a Secret on install, then expects
+            # the operator to log in once and change it. We don't
+            # change it (this is a demo platform); we just expose it.
+            # Webui's "Demo Mode → Open ArgoCD UI" button reads this
+            # file to populate a click-to-copy widget.
+            if kubectl -n argocd get secret argocd-initial-admin-secret >/dev/null 2>&1; then
+                kubectl -n argocd get secret argocd-initial-admin-secret \
+                    -o jsonpath='{.data.password}' | base64 -d \
+                    > /var/lib/kldload/argocd-admin-password 2>>"$LOG_FILE" || true
+                chmod 0640 /var/lib/kldload/argocd-admin-password 2>/dev/null || true
+                chgrp kldload /var/lib/kldload/argocd-admin-password 2>/dev/null || true
+                log "[k8s] ArgoCD initial-admin password exposed at /var/lib/kldload/argocd-admin-password"
+            fi
         else
             log "[k8s] FAILED — see /var/log/kldload/kube-bootstrap.log"
         fi

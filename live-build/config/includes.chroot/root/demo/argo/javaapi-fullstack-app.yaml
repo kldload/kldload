@@ -1,0 +1,99 @@
+# ArgoCD Application — kldload PetClinic full-stack demo workload.
+#
+# This is the "click button → spawn the whole world" CRD. When applied
+# (via kldload-demo deploy, or the webui Demo Mode button), Argo:
+#   1. Clones the kldload repo
+#   2. Resolves the javaapi-fullstack helm chart
+#   3. Renders the templates with the values
+#   4. kubectl apply-s the result into the `demo` namespace
+#   5. Continuously reconciles every 3 min (default Argo polling)
+#
+# Disaster + recover scripts work cleanly with Argo in the loop:
+#   * disaster-app.sh DROP TABLE     → Argo notices no drift (DB rows
+#                                       aren't owned by Argo), workload
+#                                       still "Synced"; app-level
+#                                       errors are the visible signal
+#   * disaster-fs.sh corrupt bytes   → same; the COW filesystem damage
+#                                       is invisible to Argo until
+#                                       Postgres crashes
+#   * disaster-operator.sh delete pvc → Argo sees missing PVC, marks
+#                                       OutOfSync, re-creates it on
+#                                       next sync — BUT the ZFS dataset
+#                                       under the new PVC is empty.
+#                                       The recover.sh script handles
+#                                       this by rolling back the dataset
+#                                       BEFORE Argo gets a chance to
+#                                       create a fresh PV.
+#
+# recover.sh always wins because:
+#   1. It pauses Argo auto-sync (argocd app set javaapi-fullstack --sync-policy none)
+#   2. zfs rollbacks the dataset
+#   3. kubectl deletes the postgres pod (forces re-mount of rolled-back dataset)
+#   4. Re-enables Argo auto-sync — Argo confirms everything matches truth
+#
+# Self-healing turned ON so Argo continuously corrects drift introduced
+# by anything but the recover.sh path.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: javaapi-fullstack
+  namespace: argocd
+  labels:
+    kldload.io/demo: "javaapi-fullstack"
+    kldload.io/version: "1.0"
+  finalizers:
+    # Cascade-delete: when the Application is removed, Argo deletes
+    # all the resources it managed. Without this finalizer, deleting
+    # the Application leaves orphan pods/services in the `demo` ns.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/kldload/kldload
+    # Track main — for a stable demo prefer pinning to a tag like
+    # v1.0.0 once cut. The "what's running" tile in webui shows the
+    # resolved commit SHA so the operator knows exactly what's deployed.
+    targetRevision: HEAD
+    path: live-build/config/includes.chroot/root/demo/charts/javaapi-fullstack
+    helm:
+      releaseName: javaapi-fullstack
+      # Inline values override the chart's values.yaml. Empty here = use
+      # chart defaults. The webui Demo Mode "Variable load" toggle would
+      # populate `loadgen.variableLoad: true` here on flip.
+      values: |
+        # kldload demo mode — chart defaults applied
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      # prune = delete resources removed from the source
+      prune: true
+      # selfHeal = auto-revert drift from the source
+      selfHeal: true
+      # allowEmpty: false → if the chart renders zero resources, Argo
+      # treats it as misconfiguration, not a wipe.
+      allowEmpty: false
+    syncOptions:
+      # CreateNamespace: Argo creates `demo` if it doesn't exist
+      - CreateNamespace=true
+      # ApplyOutOfSyncOnly: only re-apply resources that drift; don't
+      # re-apply every resource on every sync (reduces churn).
+      - ApplyOutOfSyncOnly=true
+      # PruneLast: delete resources only after creating new ones — so
+      # a chart restructure doesn't briefly delete the world.
+      - PruneLast=true
+      # ServerSideApply: avoid client-side --force-conflicts errors when
+      # multiple controllers touch the same resource (Argo + HPA, etc.)
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
+  # Revision history for rollback (Argo lets you revert to any previous
+  # synced revision via the UI). 10 is the default; bumping for the
+  # demo so a presenter can show "argo rollback to 8 revisions ago"
+  # in addition to the zfs-rollback story.
+  revisionHistoryLimit: 20

@@ -173,6 +173,13 @@ menu() {
   echo -e "  ${G}23${N}  Zero sidecar proof — no proxies, no iptables, no kube-proxy"
   echo -e "  ${G}24${N}  Kernel datapath trace — live packet through eBPF"
   echo ""
+  echo -e "  ${C}── Full-stack demo (1.0 headline) ──────────────────────${N}"
+  echo -e "  ${G}25${N}  ${W}Deploy PetClinic full-stack${N}     (Postgres + 7 Spring services + nginx + k6 via Argo)"
+  echo -e "  ${Y}26${N}  Disaster mode                  (drop tables / corrupt fs / delete PVC)"
+  echo -e "  ${G}27${N}  Recover (ZFS rollback)          ${D}— headline 1.0 capability${N}"
+  echo -e "  ${G}28${N}  Status (Argo + snapshots + replication)"
+  echo -e "  ${G}29${N}  Destroy demo (keep cluster)"
+  echo ""
   echo -e "  ${C}── Full Audit ──────────────────────────────────────────${N}"
   echo -e "  ${G}99${N}  Smoke test (all checks)"
   echo ""
@@ -3211,6 +3218,209 @@ demo_destroy_all() {
   pause
 }
 
+# ── Full-stack PetClinic demo (kldload 1.0 "Christmas tree") ─────────
+#
+# Six functions wired together: deploy, status, disaster, recover,
+# verify, destroy. Designed for the CLI to be its own demo — every
+# function prints a banner, then human-readable progress, then a
+# clean summary with timing. The skeptic-in-the-back-of-the-room
+# moment: "screw your web UI, run it from the terminal" — and the
+# substance lands either way.
+#
+# Argo CD is the deploy mechanism (Application CRD), ZFS rollback is
+# the recovery mechanism (zfs rollback @ snap → pod restart →
+# Argo re-syncs). See:
+#   /root/demo/argo/javaapi-fullstack-app.yaml      Application
+#   /root/demo/charts/javaapi-fullstack/             helm chart
+#   /etc/sanoid/sanoid.d/javaapi.conf                snapshot policy
+
+_javaapi_app_yaml='/root/demo/argo/javaapi-fullstack-app.yaml'
+_javaapi_ns='demo'
+_javaapi_pvc_dataset='rpool/k8s/pvc-postgres-data'
+_javaapi_vip='10.100.10.30'
+
+demo_javaapi() {
+  header
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  Full-stack PetClinic — the kldload 1.0 demo workload${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo
+  echo -e "${D}  Deploys: Postgres + 7 Spring services + nginx + k6 loadgen${N}"
+  echo -e "${D}  via Argo CD Application (continuous reconcile, GitOps).${N}"
+  echo -e "${D}  Target VIP: ${C}http://${_javaapi_vip}/${N}"
+  echo
+  if [[ ! -f "$_javaapi_app_yaml" ]]; then
+    echo -e "${R}  Application manifest missing: ${_javaapi_app_yaml}${N}"
+    return 1
+  fi
+  echo -e "${G}→${N} ${W}kubectl apply -f $_javaapi_app_yaml${N}"
+  _kctl apply -f "$_javaapi_app_yaml" || return 1
+  echo
+  echo -e "${G}→${N} ${W}waiting for Argo to sync (timeout 10m)…${N}"
+  local _t0 _t1
+  _t0=$(date +%s)
+  # argocd CLI may not be authenticated; fall back to polling the CRD.
+  if command -v argocd >/dev/null 2>&1 && argocd app get javaapi-fullstack >/dev/null 2>&1; then
+    argocd app wait javaapi-fullstack --health --sync --timeout 600 2>&1 | tail -3
+  else
+    local _deadline=$(( $(date +%s) + 600 ))
+    while (( $(date +%s) < _deadline )); do
+      local _sync _health
+      _sync=$(_kctl -n argocd get application javaapi-fullstack -o jsonpath='{.status.sync.status}' 2>/dev/null)
+      _health=$(_kctl -n argocd get application javaapi-fullstack -o jsonpath='{.status.health.status}' 2>/dev/null)
+      printf '\r  sync=%s health=%s   ' "${_sync:-?}" "${_health:-?}"
+      [[ "$_sync" == "Synced" && "$_health" == "Healthy" ]] && { echo; break; }
+      sleep 5
+    done
+  fi
+  _t1=$(date +%s)
+  echo
+  echo -e "${G}✓ deployed in $((_t1 - _t0)) seconds${N}"
+  echo
+  echo -e "${C}Try it:${N}"
+  echo -e "  ${W}curl http://${_javaapi_vip}/${N}                    (homepage)"
+  echo -e "  ${W}curl http://${_javaapi_vip}/api/customer${N}        (REST endpoint)"
+  echo -e "  ${W}kube-demo javaapi_status${N}              (sync + snapshots + replication)"
+  echo -e "  ${W}kube-demo javaapi_disaster${N}            (drop a table — watch it break)"
+  echo -e "  ${W}kube-demo javaapi_recover${N}             (zfs rollback — watch it recover)"
+  pause
+}
+
+demo_javaapi_status() {
+  header
+  echo -e "${C}── PetClinic status — sync, snapshots, replication ─────${N}"
+  echo
+  echo -e "${W}Argo CD Application:${N}"
+  _kctl -n argocd get application javaapi-fullstack \
+        -o custom-columns='SYNC:.status.sync.status,HEALTH:.status.health.status,REVISION:.status.sync.revision' \
+        2>/dev/null || echo -e "  ${Y}(not deployed)${N}"
+  echo
+  echo -e "${W}Pods in ${_javaapi_ns} namespace:${N}"
+  _kctl -n "$_javaapi_ns" get pods 2>/dev/null | head -20 || echo -e "  ${Y}(no pods)${N}"
+  echo
+  echo -e "${W}Postgres dataset snapshots (most recent 10):${N}"
+  zfs list -t snapshot -o name,used,creation -s creation -r "$_javaapi_pvc_dataset" 2>/dev/null \
+        | tail -11 || echo -e "  ${Y}(no snapshots — sanoid not configured for $_javaapi_pvc_dataset)${N}"
+  echo
+  echo -e "${W}Last syncoid replication (if configured):${N}"
+  local _last
+  _last=$(grep "javaapi" /var/log/syncoid.log 2>/dev/null | tail -1)
+  echo -e "  ${D}${_last:-(no replication yet)}${N}"
+  pause
+}
+
+demo_javaapi_disaster() {
+  local _mode="${1:-}"
+  if [[ -z "$_mode" ]]; then
+    echo -e "${Y}Pick a disaster:${N}"
+    echo -e "  ${W}1${N})  app       drop the customers table (app-level corruption)"
+    echo -e "  ${W}2${N})  fs        random byte corruption inside the dataset"
+    echo -e "  ${W}3${N})  operator  kubectl delete pvc (fat-finger fat-finger)"
+    echo -ne "${W}  Choice: ${N}"
+    read -r _c
+    case "$_c" in 1) _mode=app ;; 2) _mode=fs ;; 3) _mode=operator ;; *) echo "Aborted"; return 1 ;; esac
+  fi
+  echo
+  echo -e "${R}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${R}  DISASTER: ${_mode}${N}"
+  echo -e "${R}══════════════════════════════════════════════════════════════${N}"
+  case "$_mode" in
+    app)
+      echo -e "${Y}→${N} dropping customers table via psql"
+      _kctl -n "$_javaapi_ns" exec postgres-0 -- env PGPASSWORD=petclinic-demo-2026 \
+            psql -U petclinic -d petclinic \
+            -c "DROP TABLE IF EXISTS owners CASCADE;" 2>&1 | tail -3
+      ;;
+    fs)
+      echo -e "${Y}→${N} corrupting random bytes inside /bitnami/postgresql"
+      _kctl -n "$_javaapi_ns" exec postgres-0 -- bash -c \
+        "find /bitnami/postgresql/data -type f -name '*.idx' -exec dd if=/dev/urandom of={} bs=1 count=4096 conv=notrunc \; 2>/dev/null" \
+        || true
+      _kctl -n "$_javaapi_ns" delete pod postgres-0 --grace-period=1 2>&1 | tail -1
+      ;;
+    operator)
+      echo -e "${Y}→${N} deleting the PostgreSQL PVC (cascade-delete)"
+      _kctl -n "$_javaapi_ns" delete pvc pvc-postgres-data --wait=false 2>&1 | tail -1
+      ;;
+    *) echo -e "${R}unknown disaster: $_mode${N}"; return 2 ;;
+  esac
+  echo
+  echo -e "${R}✗ disaster fired — workload is now broken${N}"
+  echo -e "${D}  curl http://${_javaapi_vip}/api/customer  should now error${N}"
+  echo -e "${G}  Recover with:  ${W}kube-demo javaapi_recover${N}"
+  pause
+}
+
+demo_javaapi_recover() {
+  header
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${W}  Recovery — ZFS rollback + pod restart + Argo re-sync${N}"
+  echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+  echo
+  local _t0=$(date +%s)
+  # 1. Find the most recent autosnap.
+  local _snap
+  _snap=$(zfs list -t snapshot -o name -s creation -r "$_javaapi_pvc_dataset" 2>/dev/null \
+          | grep "@autosnap_" | tail -1)
+  if [[ -z "$_snap" ]]; then
+    echo -e "${R}  No autosnap found on $_javaapi_pvc_dataset${N}"
+    echo -e "${D}  Did sanoid run? Check /etc/sanoid/sanoid.d/javaapi.conf${N}"
+    return 1
+  fi
+  echo -e "${G}→${N} ${W}rolling back to ${_snap}${N}"
+  # 2. If PVC was deleted (operator disaster), re-stamp it first.
+  if ! _kctl -n "$_javaapi_ns" get pvc pvc-postgres-data >/dev/null 2>&1; then
+    echo -e "${Y}  PVC was deleted — pausing Argo auto-sync and re-creating from snapshot${N}"
+    _kctl -n argocd patch application javaapi-fullstack \
+          --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}' 2>&1 | tail -1
+  fi
+  # 3. zfs rollback — the headline operation.
+  local _t_zfs0=$(date +%s.%N)
+  zfs rollback -r "$_snap" 2>&1 | tail -3
+  local _t_zfs1=$(date +%s.%N)
+  echo -e "${G}  zfs rollback completed in $(printf '%.3f' $(echo "$_t_zfs1 - $_t_zfs0" | bc)) seconds${N}"
+  # 4. Force pod restart to re-mount the rolled-back dataset.
+  echo -e "${G}→${N} ${W}restarting postgres-0 to remount rolled-back dataset${N}"
+  _kctl -n "$_javaapi_ns" delete pod postgres-0 --grace-period=1 2>&1 | tail -1
+  # 5. Re-enable Argo auto-sync (resyncs anything else that drifted).
+  _kctl -n argocd patch application javaapi-fullstack \
+        --type merge -p '{"spec":{"syncPolicy":{"automated":{"prune":true,"selfHeal":true}}}}' 2>&1 | tail -1
+  echo -e "${G}→${N} ${W}waiting for postgres-0 to come back Ready${N}"
+  _kctl -n "$_javaapi_ns" wait --for=condition=Ready pod/postgres-0 --timeout=60s 2>&1 | tail -1
+  local _t1=$(date +%s)
+  echo
+  echo -e "${G}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${G}  ✓ RECOVERED in $((_t1 - _t0)) seconds — Postgres back online${N}"
+  echo -e "${G}══════════════════════════════════════════════════════════════${N}"
+  echo -e "${D}  Verify data: ${W}kube-demo javaapi_verify${N}"
+  pause
+}
+
+demo_javaapi_verify() {
+  echo -e "${C}── Verifying PetClinic data integrity after recovery ───${N}"
+  local _rows
+  _rows=$(_kctl -n "$_javaapi_ns" exec postgres-0 -- env PGPASSWORD=petclinic-demo-2026 \
+          psql -U petclinic -d petclinic -tAc "SELECT count(*) FROM owners;" 2>/dev/null | tr -d '[:space:]')
+  if [[ -n "$_rows" && "$_rows" -gt 0 ]]; then
+    echo -e "${G}  ✓ owners table has $_rows rows — data intact${N}"
+    _kctl -n "$_javaapi_ns" exec postgres-0 -- env PGPASSWORD=petclinic-demo-2026 \
+          psql -U petclinic -d petclinic -c "SELECT id,first_name,last_name FROM owners LIMIT 3;" 2>/dev/null
+    return 0
+  else
+    echo -e "${R}  ✗ owners table empty or missing (rows=${_rows:-error})${N}"
+    return 1
+  fi
+}
+
+demo_javaapi_destroy() {
+  echo -ne "${Y}  Delete javaapi-fullstack Argo Application (keeps cluster)? [y/N] ${N}"
+  read -r _a
+  case "${_a,,}" in y|yes) ;; *) echo "  Aborted."; return 0 ;; esac
+  _kctl -n argocd delete application javaapi-fullstack --wait=true 2>&1 | tail -3
+  echo -e "${G}  javaapi-fullstack destroyed.${N}"
+  echo -e "${D}  Re-deploy with: ${W}kube-demo javaapi${N}"
+}
+
 # ── CLI dispatch (headless / UI-driven) ────────────────────────
 # Invocation patterns:
 #   kube-demo                  → interactive menu (original behaviour)
@@ -3226,6 +3436,8 @@ _DEMO_NAMES=(
   pod_dns scale rolling_update self_heal drain node_rollback
   replace_nodes ebpf_deep_dive zero_sidecar datapath_trace smoke
   cleanup
+  javaapi javaapi_status javaapi_disaster javaapi_recover
+  javaapi_verify javaapi_destroy
 )
 if [[ "${1:-}" == "--list" ]]; then
   printf "%s\n" "${_DEMO_NAMES[@]}"
@@ -3297,6 +3509,11 @@ while true; do
     22) demo_ebpf_deep_dive ;;
     23) demo_zero_sidecar ;;
     24) demo_datapath_trace ;;
+    25) demo_javaapi ;;
+    26) demo_javaapi_disaster ;;
+    27) demo_javaapi_recover ;;
+    28) demo_javaapi_status ;;
+    29) demo_javaapi_destroy ;;
     99) demo_smoke ;;
     0)  demo_cleanup ;;
     00) demo_destroy_all ;;

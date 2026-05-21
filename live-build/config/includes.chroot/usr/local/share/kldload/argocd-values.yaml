@@ -1,0 +1,123 @@
+# ArgoCD helm values — kldload defaults
+#
+# Loaded by kldload-autodeploy at K8s bootstrap time (Phase 2 in
+# /usr/sbin/kldload-autodeploy). Everything here can be re-applied by
+# `helm upgrade argocd /root/darksite/helm-charts/argo-cd.tgz -n argocd
+# -f /usr/local/share/kldload/argocd-values.yaml` without touching the
+# autodeploy script.
+#
+# Sizing: targets a klab cluster of 1 CP + 3 workers (~4 vCPU / 8 GB
+# per worker). Full Argo (server + repo-server + controller + dex +
+# redis + notifications + applicationset) fits in ~1 GB RAM total.
+
+global:
+  # Image registry override available if you mirror inside an
+  # air-gap. By default Argo pulls from quay.io which is reachable
+  # from kldload installs.
+  image:
+    imagePullPolicy: IfNotPresent
+
+# ── server (web UI + API) ─────────────────────────────────────────────
+server:
+  replicas: 1   # single replica for klab footprint — HA Argo (3
+                # replicas + redis-ha) is a 1.1 concern not 1.0
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+  service:
+    # Exposed via MetalLB. The VIP is set on the helm install command
+    # line so it stays a single source of truth (kldload-autodeploy
+    # line ~440). Pool 10.100.10.30-39 must include this IP — see
+    # the metallb-pool ConfigMap created by kube-cluster bootstrap.
+    type: LoadBalancer
+    annotations:
+      metallb.universe.tf/address-pool: kldload-pool
+  ingress:
+    # We do NOT use an ingress — MetalLB LB IP is enough. ingress
+    # adds the nginx-controller dependency for what is otherwise a
+    # 2-line config. If you front Argo with TLS via cert-manager
+    # later, flip enabled: true and configure ingressClassName.
+    enabled: false
+  # Insecure mode = no self-signed TLS handshake confusion in the
+  # iframe embed. nginx in front of Argo already does TLS via the
+  # kldload-tls-cert pipeline. server.insecure also lives in
+  # configs.params for parity (helm template order matters).
+  extraArgs:
+    - --insecure
+  config:
+    # Argo's CLI/UI banner. Helps presenter not confuse this with
+    # a generic Argo install.
+    banner: |
+      kldload Demo Mode — full ArgoCD running on this kldload install.
+      Default admin password: cat /var/lib/kldload/argocd-admin-password
+    banner.permanent: "true"
+
+configs:
+  params:
+    # Insecure server (matches extraArgs above). Argo's chart looks
+    # for this key in two places depending on version; we set both
+    # to avoid the "works in v2.10, broke in v2.11" footgun.
+    server.insecure: true
+  # CM data ConfigMap — controls dex / repo-server credentials /
+  # sync-window defaults. Mostly defaults; only override what we need.
+  cm:
+    # Allow ANY repository (we point Argo at github.com/kldload/kldload
+    # for the demo chart; further uses add more repos).
+    repositories: |
+      - url: https://github.com/kldload/kldload
+        type: git
+        name: kldload-self
+    # Resource customizations — silence noisy CRD diff for cilium
+    # which mutates status fields in ways Argo flags as drift.
+    resource.customizations: |
+      cilium.io/CiliumNetworkPolicy:
+        ignoreDifferences: |
+          jsonPointers:
+            - /status
+      cilium.io/CiliumEndpoint:
+        ignoreDifferences: |
+          jsonPointers:
+            - /status
+
+# ── repo-server (clones git repos for Argo Applications) ─────────────
+repoServer:
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+
+# ── application-controller (the reconciliation loop) ─────────────────
+controller:
+  replicas: 1
+  resources:
+    requests: { cpu: 100m, memory: 192Mi }
+    limits:   { cpu: 1,    memory: 512Mi }
+
+# ── dex (SSO — disabled UI-wise but we keep the pod for future SSO) ──
+dex:
+  enabled: true
+  resources:
+    requests: { cpu: 10m,  memory: 32Mi }
+    limits:   { cpu: 100m, memory: 64Mi }
+
+# ── redis (HA state cache) ─────────────────────────────────────────
+redis:
+  enabled: true
+  resources:
+    requests: { cpu: 10m,  memory: 32Mi }
+    limits:   { cpu: 100m, memory: 96Mi }
+
+# ── notifications-controller (Slack/email on sync events) ────────────
+notifications:
+  enabled: true
+  resources:
+    requests: { cpu: 10m,  memory: 32Mi }
+    limits:   { cpu: 100m, memory: 96Mi }
+
+# ── applicationset-controller (template multi-cluster apps) ──────────
+# Useful when expanding to a multi-host kldload cluster fleet.
+applicationSet:
+  enabled: true
+  resources:
+    requests: { cpu: 10m,  memory: 32Mi }
+    limits:   { cpu: 100m, memory: 96Mi }

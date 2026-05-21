@@ -1,0 +1,120 @@
+{{- if .Values.loadgen.enabled }}
+# k6 CronJob — continuous load against the public VIP.
+#
+# Runs every minute, generates ~rps requests/sec for durationSeconds
+# (defaults 50 RPS for 30s, so 1500 requests per minute cycle).
+# Hits the homepage + /api/customer + /api/vet + /api/visit in a
+# weighted round-robin so all three Spring domain services see traffic.
+#
+# Why a CronJob and not a long-running Deployment:
+#   * Short-lived k6 pods fire+exit → audience sees POD CREATIONS in
+#     the Tetragon EXEC stream every minute (visible churn = good demo)
+#   * Restart loop is the kubelet's job → no k6-internal scheduling
+#   * Cleanup of completed Job pods is automatic (ttlSecondsAfterFinished)
+#
+# Variable-load mode (values.yaml loadgen.variableLoad): ramps 50→200→50
+# RPS over the duration. Off by default (steady-state is more
+# deterministic for smoke tests); flip on for live demos.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k6-script
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "javaapi.commonLabels" . | nindent 4 }}
+data:
+  loadtest.js: |
+    import http from 'k6/http';
+    import { check, sleep } from 'k6';
+    {{- if .Values.loadgen.variableLoad }}
+    // Variable-load mode: ramp 50 → 200 → 50 RPS over the run.
+    export const options = {
+      stages: [
+        { duration: '10s', target: 50 },
+        { duration: '10s', target: 200 },
+        { duration: '10s', target: 50 },
+      ],
+      thresholds: {
+        http_req_failed:   ['rate<0.05'],
+        http_req_duration: ['p(95)<1000'],
+      },
+    };
+    {{- else }}
+    // Steady-state: maintain {{ .Values.loadgen.rps }} RPS for {{ .Values.loadgen.durationSeconds }}s
+    export const options = {
+      scenarios: {
+        steady: {
+          executor: 'constant-arrival-rate',
+          rate: {{ .Values.loadgen.rps }},
+          timeUnit: '1s',
+          duration: '{{ .Values.loadgen.durationSeconds }}s',
+          preAllocatedVUs: 50,
+          maxVUs: 200,
+        },
+      },
+      thresholds: {
+        http_req_failed:   ['rate<0.05'],
+        http_req_duration: ['p(95)<1000'],
+      },
+    };
+    {{- end }}
+    const BASE = `http://${__ENV.TARGET_HOST || 'ingress'}`;
+    const endpoints = [
+      { url: BASE + '/',             weight: 2 },
+      { url: BASE + '/api/customer', weight: 4 },
+      { url: BASE + '/api/vet',      weight: 2 },
+      { url: BASE + '/api/visit',    weight: 2 },
+    ];
+    const pool = endpoints.flatMap(e => Array(e.weight).fill(e.url));
+    export default function () {
+      const url = pool[Math.floor(Math.random() * pool.length)];
+      const res = http.get(url, { timeout: '5s' });
+      check(res, { 'status was 2xx or 3xx': r => r.status >= 200 && r.status < 400 });
+      sleep(0.01);
+    }
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: loadgen
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "javaapi.commonLabels" . | nindent 4 }}
+    kldload.io/component: loadgen
+spec:
+  schedule: {{ .Values.loadgen.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 120
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "javaapi.commonLabels" . | nindent 12 }}
+            app: loadgen
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: k6
+              image: "{{ .Values.loadgen.image.repository }}:{{ .Values.loadgen.image.tag }}"
+              imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+              args: [run, /scripts/loadtest.js]
+              env:
+                - name: TARGET_HOST
+                  value: "ingress"
+              resources: {{- toYaml .Values.loadgen.resources | nindent 16 }}
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+          volumes:
+            - name: script
+              configMap:
+                name: k6-script
+                items:
+                  - { key: loadtest.js, path: loadtest.js }
+{{- end }}

@@ -1,0 +1,180 @@
+{{- if .Values.ingress.enabled }}
+# nginx as the public-facing L7 proxy. Reads requests on MetalLB VIP
+# (.Values.global.publicVip) and proxies to api-gateway:8080 inside
+# the cluster. Static index page is served from a ConfigMap mounted
+# into the nginx pod, just enough to give the audience a "homepage"
+# they can hit before drilling into /api/customers etc.
+#
+# Why nginx as the front and not a CNI Ingress controller:
+#   * MetalLB → Service of type LoadBalancer is the simplest hop the
+#     audience can see in hubble flows (one less indirection than
+#     ingress-nginx, which adds its own ingress class + admission ctrl)
+#   * The Spring Cloud Gateway IS the L7 router for /api/* already —
+#     nginx is just the "front door" with the index + L7 logs that
+#     get scraped into Loki.
+#   * Cilium has its own L7 visibility — letting nginx and Cilium
+#     both decode HTTP is a deliberate redundancy for the demo so the
+#     audience sees the same request from two different observers.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-index
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "javaapi.commonLabels" . | nindent 4 }}
+data:
+  index.html: |
+    <!doctype html>
+    <html><head><title>kldload demo — PetClinic</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 720px; margin: 4em auto; padding: 0 1em; color: #c0c0d0; background: #0f1117 }
+      h1 { color: #34d399 }
+      a { color: #60a5fa }
+      code { background: #1a1d28; padding: 0.2em 0.4em; border-radius: 3px; color: #f4f4f5 }
+    </style>
+    </head><body>
+      <h1>kldload — PetClinic full-stack demo</h1>
+      <p>This is the kldload 1.0 "Christmas tree" demo workload. If you can read this, the
+         deployment is live and every kldload dashboard should show non-zero activity.</p>
+      <ul>
+        <li><a href="/api/customer">/api/customer</a> — customers service</li>
+        <li><a href="/api/vet">/api/vet</a> — vets service</li>
+        <li><a href="/api/visit">/api/visit</a> — visits service</li>
+        <li><a href="/admin">/admin</a> — Spring Boot admin UI</li>
+      </ul>
+      <p>k6 load generator is firing 50 RPS against these endpoints continuously.
+         Watch the dashboards in the kldload webui — every panel should be moving.</p>
+      <p><em>Drop a table or delete a PVC and click "Recover" in the Demo Mode panel.
+         Time-to-recover should be under 60 seconds.</em></p>
+    </body></html>
+
+  default.conf: |
+    server {
+      listen 80 default_server;
+      access_log /dev/stdout main;
+      error_log  /dev/stderr;
+
+      # Static index
+      location = / {
+        root /usr/share/nginx/html;
+        index index.html;
+      }
+
+      # Everything under /api goes to the Spring Cloud Gateway
+      location /api/ {
+        proxy_pass http://api-gateway:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+      }
+
+      # Spring Boot Admin UI
+      location /admin {
+        proxy_pass http://admin-server:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+      }
+
+      # Nginx itself doesn't talk back to Postgres etc — health is just "am I serving?"
+      location = /healthz {
+        return 200 "ok\n";
+        add_header Content-Type text/plain;
+      }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingress
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "javaapi.commonLabels" . | nindent 4 }}
+    app: ingress
+    kldload.io/component: edge
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      {{- include "javaapi.selectorLabels" . | nindent 6 }}
+      app: ingress
+  template:
+    metadata:
+      labels:
+        {{- include "javaapi.commonLabels" . | nindent 8 }}
+        app: ingress
+        kldload.io/component: edge
+      annotations:
+        # Nginx exposes its own metrics on /metrics via the
+        # stub_status / prometheus-nginx-exporter sidecar. We don't
+        # bundle the sidecar — these annotations are placeholders for
+        # when we add it. Harmless to leave.
+        prometheus.io/scrape: "false"
+    spec:
+      containers:
+        - name: nginx
+          image: "{{ .Values.ingress.image.repository }}:{{ .Values.ingress.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+          resources: {{- toYaml .Values.ingress.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: 80 }
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: 80 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: nginx-index
+              mountPath: /usr/share/nginx/html/index.html
+              subPath: index.html
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+      volumes:
+        - name: nginx-index
+          configMap:
+            name: nginx-index
+            items:
+              - key: index.html
+                path: index.html
+        - name: nginx-conf
+          configMap:
+            name: nginx-index
+            items:
+              - key: default.conf
+                path: default.conf
+
+---
+# The MetalLB-advertised LoadBalancer service — this is the IP the
+# audience hits with `curl http://10.100.10.30/`. The annotation
+# binds it to the kldload-pool defined by kube-cluster bootstrap.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "javaapi.commonLabels" . | nindent 4 }}
+    kldload.io/app: "true"        # surfaces in webui Cluster Apps panel
+  annotations:
+    metallb.universe.tf/address-pool: kldload-pool
+    metallb.universe.tf/loadBalancerIPs: {{ .Values.global.publicVip | quote }}
+spec:
+  type: LoadBalancer
+  loadBalancerIP: {{ .Values.global.publicVip }}
+  selector:
+    {{- include "javaapi.selectorLabels" . | nindent 4 }}
+    app: ingress
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+{{- end }}

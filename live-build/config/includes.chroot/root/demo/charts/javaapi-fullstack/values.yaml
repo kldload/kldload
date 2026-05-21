@@ -1,0 +1,153 @@
+# javaapi-fullstack — values.yaml
+#
+# Defaults tuned for a single-host klab cluster (1 CP + 3 workers, ~4
+# CPU + 8 GB RAM per worker). Every image tag is pinned to a specific
+# version — no `:latest` anywhere — so a chart upgrade is a deliberate
+# version-bump, not a silent base-image change.
+
+# ── Global ──────────────────────────────────────────────────────────
+global:
+  namespace: demo
+  imageRegistry: docker.io
+  imagePullPolicy: IfNotPresent
+  # The MetalLB VIP the ingress advertises. Must fall inside the pool
+  # configured by kldload-autodeploy (default pool 10.100.10.30-39 on
+  # klab profile). Override at install time:
+  #   helm install ... --set global.publicVip=10.100.10.45
+  publicVip: 10.100.10.30
+  storageClass: ""  # empty = cluster default (kldload-autodeploy
+                    # configures this to be the ZFS-tuned class)
+
+# ── PostgreSQL — Bitnami chart values (we vendor an inline statefulset
+#    rather than a sub-chart dep, to avoid the Bitnami chart's many
+#    knobs we don't use; identical image, fewer surprises) ─────────────
+postgres:
+  enabled: true
+  image:
+    repository: bitnami/postgresql
+    tag: 16.4.0-debian-12-r0
+  storageSize: 5Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  credentials:
+    user: petclinic
+    database: petclinic
+    # NOT a secret in any real sense — published in the demo README.
+    # The Postgres service is ClusterIP-only; never reachable from
+    # outside the cluster. Override for any non-demo install:
+    #   --set postgres.credentials.password=<your-password>
+    password: petclinic-demo-2026
+
+# ── Spring Cloud foundation: config-server + discovery-server ────────
+# All seven services share the same image-tag version so a chart bump
+# moves the whole stack together — partial upgrades are a known source
+# of "service A talks to service B's old schema" 500s.
+springVersion: &springVersion 3.1.0
+
+configServer:
+  enabled: true
+  image:
+    repository: springcommunity/spring-petclinic-config-server
+    tag: *springVersion
+  resources:
+    requests: { cpu: 100m, memory: 384Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+discoveryServer:
+  enabled: true
+  image:
+    repository: springcommunity/spring-petclinic-discovery-server
+    tag: *springVersion
+  resources:
+    requests: { cpu: 100m, memory: 384Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+# ── Domain services — each talks to Postgres ─────────────────────────
+customersService:
+  enabled: true
+  replicas: 1
+  image:
+    repository: springcommunity/spring-petclinic-customers-service
+    tag: *springVersion
+  resources:
+    requests: { cpu: 100m, memory: 384Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+vetsService:
+  enabled: true
+  replicas: 1
+  image:
+    repository: springcommunity/spring-petclinic-vets-service
+    tag: *springVersion
+  resources:
+    requests: { cpu: 100m, memory: 384Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+visitsService:
+  enabled: true
+  replicas: 1
+  image:
+    repository: springcommunity/spring-petclinic-visits-service
+    tag: *springVersion
+  resources:
+    requests: { cpu: 100m, memory: 384Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+# ── Edge / API surface ───────────────────────────────────────────────
+apiGateway:
+  enabled: true
+  replicas: 2     # two so Cilium's service-to-backend map is non-trivial
+  image:
+    repository: springcommunity/spring-petclinic-api-gateway
+    tag: *springVersion
+  resources:
+    requests: { cpu: 200m, memory: 384Mi }
+    limits:   { cpu: 1,    memory: 512Mi }
+
+adminServer:
+  enabled: true
+  image:
+    repository: springcommunity/spring-petclinic-admin-server
+    tag: *springVersion
+  resources:
+    requests: { cpu: 100m, memory: 384Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+# ── nginx as the public-facing L7 proxy ─────────────────────────────
+ingress:
+  enabled: true
+  image:
+    repository: nginx
+    tag: 1.27-alpine
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits:   { cpu: 200m, memory: 64Mi }
+
+# ── Load generator — k6 CronJob ──────────────────────────────────────
+# Runs every minute, 50 RPS for 30s, randomised mix of GET /api/customer,
+# /api/visits, /api/vets, /. Idempotent, no destructive operations.
+loadgen:
+  enabled: true
+  image:
+    repository: grafana/k6
+    tag: 0.52.0
+  schedule: "* * * * *"
+  rps: 50
+  durationSeconds: 30
+  # Variable-load mode: when true, k6 ramps 50 → 200 → 50 over the run.
+  # Off by default (steady-state is more predictable for smoke tests).
+  variableLoad: false
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 500m, memory: 128Mi }
+
+# ── Observability annotations propagated to every pod ────────────────
+# Prometheus scrape annotations + Loki promtail label selectors are
+# applied via _helpers.tpl to keep them in sync across services. Don't
+# remove or rename — kldload's prometheus.yml and promtail.yaml depend
+# on these exact key/value pairs.
+observability:
+  scrape: true
+  prometheusPort: 8080
+  prometheusPath: /actuator/prometheus
