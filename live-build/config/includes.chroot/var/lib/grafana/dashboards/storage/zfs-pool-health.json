@@ -1,5 +1,5 @@
 {
-  "title": "Storage \u2014 ZFS Pool Health",
+  "title": "Storage — ZFS Pool Health",
   "uid": "zfs-pool-health",
   "tags": [
     "zfs",
@@ -91,7 +91,8 @@
             }
           ]
         }
-      }
+      },
+      "description": "NAME\n    Health — aggregate pool state\n\nDESCRIPTION\n    The single-value state ZFS assigns to the pool. ZFS classifies a\n    pool as one of: ONLINE, DEGRADED, FAULTED, OFFLINE, REMOVED, or\n    UNAVAIL. The state is the same value `zpool status` reports.\n\nEQUIVALENT IN OTHER TOOLS\n    In a non-ZFS Linux storage stack there is no single equivalent.\n    The same information is distributed across:\n        mdadm --detail            array layout, member state, sync\n                                  progress (software RAID only).\n        lvs / vgs / pvs           volume manager state.\n        cryptsetup status         per-mapping encryption state.\n        dmsetup status            device-mapper target state.\n        fsck output / dmesg       filesystem-detected errors.\n    None of those tools reports block-level checksum errors, because\n    none of those layers performs end-to-end checksumming. A silent\n    data corruption (bit rot, controller bug, cable error) that\n    bypasses RAID parity is invisible to that stack until an\n    application reads the data and notices it is wrong.\n\n    ZFS combines volume management, redundancy, encryption, and\n    end-to-end checksums into one subsystem with one reported state.\n\nSOURCE\n    zfs_exporter polls `zpool list -H -o name,health` every scrape\n    interval (15s default) and emits:\n        zfs_pool_health{pool=\"...\"}\n    Numeric values map to:\n        0   ONLINE\n        1   DEGRADED\n        2   FAULTED\n        3   OFFLINE\n        4   REMOVED\n        5   UNAVAIL\n\nFIELDS\n    ONLINE      Normal operation. All vdevs reachable and healthy.\n    DEGRADED    A vdev failure has occurred but redundancy is\n                tolerating it. Service continues. Investigate which\n                vdev (zpool status) and replace before redundancy is\n                exhausted.\n    FAULTED     The pool cannot be opened in its current state.\n                Service is down for any dataset on this pool.\n    OFFLINE     Operator explicitly took a vdev offline.\n    REMOVED     A vdev was physically removed at runtime.\n    UNAVAIL     A vdev is missing on import (disk gone, path moved).\n\nCAVEATS\n    This panel reports the pool's overall state only. Per-vdev\n    detail, specific error counts, and recovery progress are not\n    here. Use the zed events panel (#12) for individual vdev\n    transitions and zpool status(8) for full per-vdev state.\n\nSEE ALSO\n    Panel #12 — zed events. Live transitions of vdev state.\n    zpool(8) status — full pool state as a tree.\n    /etc/zfs/zpool.cache — last-known layout.\n    Documentation/admin-guide/zfs-tuning.rst — Linux kernel notes.\n"
     },
     {
       "id": 2,
@@ -287,7 +288,8 @@
           "min": 0,
           "max": 100
         }
-      }
+      },
+      "description": "NAME\n    ARC Hit Rate — read requests served from the in-kernel cache\n\nDESCRIPTION\n    Percentage of read requests served from the ZFS Adaptive\n    Replacement Cache (ARC) without reaching the underlying vdevs,\n    computed over a 5-minute rolling window.\n\nEQUIVALENT IN OTHER TOOLS\n    The Linux page cache, used by ext4/xfs/btrfs, does not expose an\n    equivalent hit-rate metric by default. The closest approximation\n    in a non-ZFS stack is /usr/share/bcc/tools/cachestat — an eBPF\n    tool that traces page-cache events in real time. Two structural\n    differences make the numbers not directly comparable:\n\n        Eviction policy. The Linux page cache is LRU (Least Recently\n        Used). ARC is MRU+MFU (Most Recently Used + Most Frequently\n        Used, with a ghost list to detect repeated misses). For\n        repeated random-access workloads — database working sets,\n        for example — ARC retains hot data through scans that would\n        evict the page cache.\n\n        Scope. The page cache covers all filesystems' read I/O. ARC\n        covers ZFS read I/O specifically. The two can coexist; ZFS\n        sets primarycache=metadata on datasets where the application\n        has its own cache (Postgres shared_buffers) to avoid\n        double-caching.\n\n    No Splunk, Loki, or Dynatrace panel reports ARC hit rate by\n    default. Some Splunk apps include cachestat output if it was\n    scraped to a log file, in which case the data is sampled and\n    delayed, not real-time.\n\nSOURCE\n    zfs_exporter reads /proc/spl/kstat/zfs/arcstats every scrape\n    interval (15s default) and exposes per-counter gauges:\n        zfs_arcstat{metric=\"hits\"}\n        zfs_arcstat{metric=\"misses\"}\n    Query:\n        100 * rate(hits[5m]) / rate(hits+misses[5m])\n\nFIELDS\n    > 95 %     Working set fits comfortably in ARC.\n    80 - 95 %  Healthy with occasional capacity misses.\n    < 80 %     Working set exceeds ARC capacity. Consider larger\n               primarycache, more system RAM allocated to ZFS, or\n               L2ARC if read pattern justifies it.\n    Sudden drops to near-0 % indicate either a cache flush (e.g.,\n    primarycache property change on a busy dataset) or a large new\n    dataset displacing the working set.\n\nCAVEATS\n    Hit rate is system-wide, not per-dataset. A high overall rate\n    can mask a poor rate on one specific dataset. The arcstats\n    counters are accumulative from boot; if the ZFS module is\n    reloaded, the rate calculation resets.\n\nSEE ALSO\n    Panel #8 — ARC Size vs Target. Shows current cache size and\n        how it compares to the configured target.\n    /proc/spl/kstat/zfs/arcstats — raw counters.\n    /usr/share/bcc/tools/cachestat — page cache equivalent.\n    zfs(8) primarycache property documentation.\n    Sun Solaris ARC paper (Megiddo & Modha, 2003) — original design.\n"
     },
     {
       "id": 8,
@@ -328,7 +330,7 @@
     },
     {
       "id": 9,
-      "title": "Dataset Top 10 \u2014 Used",
+      "title": "Dataset Top 10 — Used",
       "type": "table",
       "gridPos": {
         "x": 0,
@@ -389,7 +391,7 @@
     },
     {
       "id": 10,
-      "title": "Dataset Top 10 \u2014 Compression Ratio (logical/physical)",
+      "title": "Dataset Top 10 — Compression Ratio (logical/physical)",
       "type": "table",
       "gridPos": {
         "x": 12,
@@ -464,7 +466,7 @@
     },
     {
       "id": 12,
-      "title": "ZFS Events (zed) \u2014 checksum, resilver, scrub, vdev state",
+      "title": "ZFS Events (zed) — checksum, resilver, scrub, vdev state",
       "type": "logs",
       "gridPos": {
         "x": 0,

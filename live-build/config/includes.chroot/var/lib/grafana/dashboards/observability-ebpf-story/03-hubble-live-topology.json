@@ -1,0 +1,234 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "id": 100,
+      "type": "text",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 0 },
+      "title": "",
+      "options": {
+        "mode": "markdown",
+        "content": "## Hubble Live Topology\n\nEvery pod-to-pod conversation currently flowing through this cluster, decoded by the Cilium eBPF datapath at the moment each packet crosses the network namespace boundary. Refreshes every 5 seconds.\n\n**Nodes** are workloads (deployment / statefulset / daemonset names). **Edges** are flow rates between them over the last 5 minutes. Edge thickness encodes traffic volume. Verdict (FORWARDED, DROPPED, ERROR) decomposes into separate edges so a policy drop appears as its own line, not merged into the forwarded total.\n\n**EQUIVALENT IN OTHER TOOLS.** Splunk Stream, Loki host-exporter, and Dynatrace agent panels render flow data as tables or time-series lists. None decode pod identity at the kernel boundary; identity in those products is application-layer (the app reports who it is). Cilium reads it from the BPF datapath's per-endpoint identity map, which is set when the pod's network namespace is created and is unforgeable from inside the pod.\n\nThe table panel below is the same data in tabular form — useful when the topology graph has too many nodes to read at a glance."
+      }
+    },
+    {
+      "id": 110,
+      "type": "row",
+      "title": "Live cluster topology",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 111,
+      "type": "nodeGraph",
+      "title": "Service topology — live pod-to-pod flows",
+      "gridPos": { "h": 16, "w": 24, "x": 0, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "edges",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "topk(80, sum by (source, destination) (rate(hubble_flows_processed_total{source!=\"\",destination!=\"\",verdict=\"FORWARDED\"}[5m])))",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true },
+            "indexByName": {},
+            "renameByName": { "Value": "mainstat" }
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "binary",
+            "binary": { "left": "source", "operator": "+", "right": "destination" },
+            "reduce": { "reducer": "sum" },
+            "alias": "id",
+            "replaceFields": false
+          }
+        }
+      ],
+      "options": {
+        "nodes": {
+          "mainStatUnit": "reqps"
+        },
+        "edges": {
+          "mainStatUnit": "reqps"
+        }
+      },
+      "description": "Live cluster topology decoded from the Cilium BPF datapath via hubble_flows_processed_total. One edge per src/dst workload pair; thickness = forwarded-flow rate over the last 5 minutes. To produce drops as separate edges, change the query verdict filter from FORWARDED to DROPPED, or remove the filter to combine."
+    },
+    {
+      "id": 120,
+      "type": "row",
+      "title": "Same data, tabular",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 121,
+      "type": "table",
+      "title": "Top 50 edges — workload to workload (by flow rate)",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "topk(50, sum by (source, source_namespace, destination, destination_namespace, verdict) (rate(hubble_flows_processed_total{source!=\"\",destination!=\"\"}[5m])))",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true },
+            "renameByName": {
+              "source": "Source",
+              "source_namespace": "Src NS",
+              "destination": "Destination",
+              "destination_namespace": "Dst NS",
+              "verdict": "Verdict",
+              "Value": "Flows/sec"
+            },
+            "indexByName": {
+              "Source": 0,
+              "Src NS": 1,
+              "Destination": 2,
+              "Dst NS": 3,
+              "Verdict": 4,
+              "Flows/sec": 5
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [{ "field": "Flows/sec", "desc": true }]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "Flows/sec", "desc": true }]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Verdict" },
+            "properties": [{
+              "id": "mappings",
+              "value": [
+                { "type": "value", "options": { "FORWARDED": { "color": "green", "index": 0 } } },
+                { "type": "value", "options": { "DROPPED":   { "color": "red",   "index": 1 } } },
+                { "type": "value", "options": { "ERROR":     { "color": "orange","index": 2 } } }
+              ]
+            },
+            { "id": "custom.cellOptions", "value": { "type": "color-text" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Flows/sec" },
+            "properties": [
+              { "id": "decimals", "value": 2 },
+              { "id": "unit", "value": "reqps" }
+            ]
+          }
+        ]
+      },
+      "description": "Top 50 src→dst workload pairs by flow rate, including verdict. DROPPED rows are policy enforcement; ERROR rows are kernel-side errors (rare). Use this as the data sanity check when the topology panel looks empty — if rows are here, the data path is working."
+    },
+    {
+      "id": 130,
+      "type": "row",
+      "title": "Drops — what got blocked, by whom",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 131,
+      "type": "table",
+      "title": "Drops by source workload + reason",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 37 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "topk(50, sum by (source, source_namespace, reason) (rate(hubble_drop_total[5m])))",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true },
+            "renameByName": {
+              "source": "Source",
+              "source_namespace": "Src NS",
+              "reason": "Drop reason",
+              "Value": "Drops/sec"
+            },
+            "indexByName": {
+              "Source": 0,
+              "Src NS": 1,
+              "Drop reason": 2,
+              "Drops/sec": 3
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [{ "field": "Drops/sec", "desc": true }]
+          }
+        }
+      ],
+      "options": { "showHeader": true },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto" } },
+        "overrides": [{
+          "matcher": { "id": "byName", "options": "Drops/sec" },
+          "properties": [
+            { "id": "decimals", "value": 2 },
+            { "id": "unit", "value": "reqps" }
+          ]
+        }]
+      },
+      "description": "Every kernel-level packet drop in the last 5 minutes, attributed to the source workload and grouped by reason. Common reasons: POLICY_DENIED (a NetworkPolicy / CiliumNetworkPolicy blocked it), CT_INVALID (conntrack state mismatch), UNSUPPORTED_L3_PROTOCOL (IPv6 traffic on an IPv4-only datapath). The source attribution comes from the BPF endpoint identity map — the same identity Cilium uses for policy enforcement."
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["kldload", "observability", "ebpf", "story"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "03 — Hubble Live Topology",
+  "uid": "kldload-hubble-topology",
+  "version": 1,
+  "weekStart": ""
+}

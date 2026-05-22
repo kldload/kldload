@@ -7421,6 +7421,26 @@ function termSend(window) {
       try { localStorage.setItem(TERM_HEIGHT_KEY, String(Math.round(px))); } catch (e) {}
     }, 200);
   };
+  // rAF-throttle: high-poll mice fire mousemove up to 1000Hz. Without
+  // throttling, every mousemove sets the --term-h CSS variable, which
+  // forces every `calc(100vh - var(--term-h))` height in the active
+  // view to relayout. On the K8s tab with its big tables that's
+  // dozens of elements doing reflow ~1000x/sec — the drag visibly
+  // stutters and lags the cursor. rAF caps updates at 60Hz (the
+  // screen's actual paint rate), so layout work happens once per
+  // frame instead of once per mouse poll. Feels native after.
+  let pendingY = null, rafId = 0;
+  const flush = () => {
+    rafId = 0;
+    if (pendingY === null) return;
+    const y = pendingY;
+    pendingY = null;
+    const newH = Math.max(120, Math.min(startH + (startY - y), window.innerHeight - 60));
+    d.style.height = `${newH}px`;
+    _applyTermOffset(newH);
+    save(newH);
+  };
+
   h.addEventListener('mousedown', e => {
     if (e.target.tagName === 'BUTTON') return;
     dragging = true; startY = e.clientY;
@@ -7431,13 +7451,8 @@ function termSend(window) {
   });
   window.addEventListener('mousemove', e => {
     if (!dragging) return;
-    const newH = Math.max(120, Math.min(startH + (startY - e.clientY), window.innerHeight - 60));
-    // Raw height write — no transition, no animation → no jitter.
-    d.style.height = `${newH}px`;
-    // Push main content up live so the active view shrinks in lockstep
-    // with the drawer; no more hidden Bob input or buried table rows.
-    _applyTermOffset(newH);
-    save(newH);
+    pendingY = e.clientY;
+    if (!rafId) rafId = requestAnimationFrame(flush);
   });
   window.addEventListener('mouseup', () => {
     if (!dragging) return;

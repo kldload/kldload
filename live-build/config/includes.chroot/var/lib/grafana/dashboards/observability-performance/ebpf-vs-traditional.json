@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Paired case studies showing the same incident from two viewpoints: a traditional log-only stack (Splunk/CloudWatch/syslog) and the eBPF/Tetragon/Hubble view that ships with kldload. Each section is a real incident pattern \u2014 the left panel is what you'd see with logs alone, the right panel is what eBPF reveals about WHY it happened.",
+  "description": "Paired case studies showing the same incident from two viewpoints: a traditional log-only stack (Splunk/CloudWatch/syslog) and the eBPF/Tetragon/Hubble view that ships with kldload. Each section is a real incident pattern — the left panel is what you'd see with logs alone, the right panel is what eBPF reveals about WHY it happened.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -22,12 +22,12 @@
       "id": 100,
       "options": {
         "mode": "markdown",
-        "content": "## eBPF \u2014 why kldload was built on it\n\nEvery row below shows the **same incident** twice. Left side is what a **traditional log-only stack** (any SIEM, syslog forwarder, or cloud logging tier) lets you see. Right side is what a kernel-level eBPF view sees about the same moment in time.\n\nBoth panels read **live from this kldload box**. The pattern: traditional logging tells you *what* happened. eBPF tells you *why* \u2014 at kernel-function granularity, with no agent install, no separate license, no app instrumentation.\n\n**Storage and disk operations get particular attention** here because kldload was originally built as a test bench for OpenZFS at scale \u2014 every panel related to block I/O, fsync, txg, or ARC behaviour is wired to surface things `iostat` and log scraping can't."
+        "content": "## eBPF — why kldload was built on it\n\nEvery row below shows the **same incident** twice. Left side is what a **traditional log-only stack** (any SIEM, syslog forwarder, or cloud logging tier) lets you see. Right side is what a kernel-level eBPF view sees about the same moment in time.\n\nBoth panels read **live from this kldload box**. The pattern: traditional logging tells you *what* happened. eBPF tells you *why* — at kernel-function granularity, with no agent install, no separate license, no app instrumentation.\n\n**Storage and disk operations get particular attention** here because kldload was originally built as a test bench for OpenZFS at scale — every panel related to block I/O, fsync, txg, or ARC behaviour is wired to surface things `iostat` and log scraping can't."
       }
     },
     {
       "type": "row",
-      "title": "Case 1 \u2014 \"Disk feels slow\" (the ZFS testbench origin story)",
+      "title": "Case 1 — \"Disk feels slow\" (the ZFS testbench origin story)",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -50,12 +50,12 @@
       "id": 111,
       "options": {
         "mode": "markdown",
-        "content": "**The symptom**: an app, pod, or VM reports \"slow query / slow file open / I/O timeout / scrub is killing latency.\"\n\n**Traditional reporting** sees that latency went up. It cannot tell you whether the cause is the disk hardware, a noisy neighbour, page cache eviction, a scrub kicking in, ZFS txg sync pressure, or ARC cold-miss thrash. Each takes a different operator to disprove \u2014 minutes per hypothesis.\n\n**kldload's eBPF view** taps the kernel block-layer directly. The heatmap shows every individual I/O request bucketed by service time. For ZFS specifically: this is where you see txg commits stack up, scrub I/O competing with application reads, and ARC-miss penalties. The cause names itself by the shape of the heat.\n\n*This is exactly the signal that made the dashboard worth building \u2014 it's what the OpenZFS test matrix needed to catch regressions that `iostat` averaged away.*"
+        "content": "**Scenario.** An application, pod, or VM reports a slow file open, slow query, or I/O timeout. A baseline disk dashboard confirms that average wait time has risen.\n\nThe average alone does not identify the cause. The wait could be hardware degradation, a noisy neighbour, page-cache eviction, a ZFS scrub, a txg sync, an ARC cold-miss, or a single application issuing pathological I/O. Each hypothesis requires a separate investigation when the only signal is an aggregate.\n\nThe two panels below show the same workload through two methods.\n\n**Left** — the average. Produced by polling `/proc/diskstats` and computing a rate over a 1-minute window. This is the signal a Splunk Disk app, a Loki host-exporter dashboard, or a Dynatrace Host Disk module displays. It identifies that latency has risen.\n\n**Right** — every individual block I/O request, plotted by the time it took to complete. The shape of the distribution narrows the cause: a single outlier row identifies one slow request; two bright bands identify a cache-miss pattern; persistent heat in the top row during a scrub identifies noisy-neighbour I/O.\n\nPanel descriptions below each chart document what the view can and cannot see, the data path, and the CLI tool that produces the same numbers for ad-hoc work.\n"
       }
     },
     {
       "type": "timeseries",
-      "title": "Traditional view \u2014 averaged disk wait time",
+      "title": "Traditional view — averaged disk wait time",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -63,7 +63,7 @@
         "y": 10
       },
       "id": 112,
-      "description": "`node_disk_io_time_weighted_seconds_total / node_disk_io_time_seconds_total` \u2014 the average device wait time, the same metric `iostat -x` reports. Tells you latency went up; says nothing about which I/O (read vs write, sync vs async), which process or dataset issued it, or whether the wait happened in queue or in service. On a ZFS pool this averages txg, scrub, ARC fill, and app I/O into one number \u2014 the most important distinctions disappear.",
+      "description": "NAME\n    Traditional view — averaged disk wait time\n\nDESCRIPTION\n    Per-device average request wait + service time, in seconds, over\n    the most-recent 1-minute window. The same number iostat(8) -x\n    reports in the `await` column.\n\nEQUIVALENT IN OTHER TOOLS\n    Splunk Stream — Disk Performance app, `disk_io_wait_time` field.\n    Loki / host-exporter — same Prometheus counter rendered as a\n        time-series.\n    Dynatrace — Host Disk module, `Average wait time` metric.\n    All compute the same aggregate from the same kernel-emitted\n    cumulative counter.\n\nSOURCE\n    node_exporter reads /proc/diskstats every scrape interval (15s\n    default) and exposes cumulative counters:\n        node_disk_io_time_weighted_seconds_total\n        node_disk_io_time_seconds_total\n    Query:\n        rate(io_time_weighted[1m]) / rate(io_time[1m])\n\nFIELDS\n    < 1 ms      NVMe under healthy load.\n    < 10 ms     SATA SSD under healthy load.\n    < 50 ms     Spinning rust under load, healthy.\n    Steady values are normal. A rising trend without a workload\n    increase warrants investigation.\n\nCAVEATS\n    The aggregation discards information present in the source data:\n        Individual request outliers are averaged out.\n        Read and write are combined in the source counter.\n        Sync and async I/O are combined.\n        The process or dataset that issued the request is not\n            recorded by this counter.\n        Queue time and service time are combined.\n        On ZFS, txg, scrub, ARC-fill, and application I/O are\n            combined into one number.\n    A bimodal workload (50% of requests at 1 ms, 50% at 9 ms) reports\n    as 5 ms — indistinguishable from a uniform 5 ms workload.\n\nSEE ALSO\n    Panel to the right — per-request heatmap. Resolves every item\n        listed under CAVEATS.\n    iostat(8) -x — the CLI form of this metric.\n    Documentation/admin-guide/iostats.rst — kernel source for the\n        underlying counters.\n",
       "targets": [
         {
           "refId": "A",
@@ -86,7 +86,7 @@
     },
     {
       "type": "heatmap",
-      "title": "kldload view \u2014 kernel block-layer latency per request (eBPF)",
+      "title": "kldload view — kernel block-layer latency per request (eBPF)",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -94,7 +94,7 @@
         "y": 10
       },
       "id": 113,
-      "description": "`ebpf_exporter_bio_latency_seconds_bucket` \u2014 every block I/O the kernel handled, bucketed by service time. For ZFS: persistent heat at the top during a scrub is the storage SRE's favourite signal \u2014 it names noisy-neighbour I/O versus application I/O at a glance. Sudden right-shifts tied to txg sync pressure show up here BEFORE the app starts logging timeouts. Bimodal distributions mean the ARC just went cold for a workload. None of this is visible in averages.",
+      "description": "NAME\n    kldload view — kernel block-layer latency per request (eBPF)\n\nDESCRIPTION\n    Heatmap of every block I/O request the kernel completed in the\n    most-recent 1-minute window, binned by service time on a\n    power-of-two microsecond scale. Cell brightness encodes the rate\n    of requests in that latency bucket.\n\nEQUIVALENT IN OTHER TOOLS\n    None. Splunk and Loki ingest log lines emitted by applications;\n    Dynatrace agents sample running processes at a configured\n    interval (10s default). None of these observe individual\n    block-layer requests at the kernel boundary. The closest\n    commercial equivalent is Splunk Stream's per-IOP collector,\n    which still aggregates to time-window averages before display.\n\nSOURCE\n    BPF program at /etc/ebpf_exporter/biolatency.yaml, attached as\n    a kretprobe on blk_account_io_done() in block/blk-core.c. Each\n    request's elapsed service time is recorded in a\n    BPF_MAP_TYPE_HISTOGRAM named bio_latency. ebpf_exporter reads\n    the map every 5s and exposes:\n        ebpf_exporter_bio_latency_seconds_bucket{le=\"...\"}\n    Query:\n        sum by (le) (rate(...bio_latency_seconds_bucket[1m]))\n\nFIELDS\n    The brightest row identifies device class:\n        64 - 256 us     NVMe steady state.\n        256 us - 2 ms   SATA SSD, or NVMe under queue-depth pressure.\n        2 - 16 ms       Spinning rust, healthy.\n        16 - 128 ms     Spinning rust under contention or scrub.\n    Two bright bands (bimodal distribution) indicate ZFS ARC misses\n        falling to a slower vdev tier.\n    Persistent heat in the top row during a scrub identifies the\n        scrub I/O without correlating to zpool status.\n    A right-shift over time without a workload change is the\n        canonical early indicator of a failing SSD.\n\nCAVEATS\n    Counts requests with a usable device pointer. Some device-mapper\n        targets (dm-flakey, certain dm-cache modes) strip this and\n        do not appear here.\n    Software RAID (md) requests appear twice — once for the array,\n        once per leg — inflating totals relative to physical I/O.\n    The kretprobe does not fire on I/O completed in interrupt\n        context that bypasses blk_account_io_done. This affects\n        certain NVMe polling modes; uncommon on default kernels.\n\nSEE ALSO\n    Panel to the left — same workload, aggregated.\n    /usr/share/bcc/tools/biolatency — CLI form, prints the same\n        histogram to a terminal.\n    /usr/share/bcc/tools/biosnoop — per-request log with PID and\n        command name. Identifies the process that issued a slow\n        request.\n    zfs_arc_hits / zfs_arc_misses panels — confirms whether bimodal\n        heat is ARC-miss-driven.\n",
       "targets": [
         {
           "refId": "A",
@@ -120,7 +120,7 @@
     },
     {
       "type": "row",
-      "title": "Case 2 \u2014 Pod can't reach a service",
+      "title": "Case 2 — Pod can't reach a service",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -143,12 +143,12 @@
       "id": 121,
       "options": {
         "mode": "markdown",
-        "content": "**The symptom**: pod logs say `connection refused` or `i/o timeout`.\n\n**Traditional reporting** counts the error log lines. From there the cause is one of: NetworkPolicy, missing route, MTU mismatch, DNS, overlay encapsulation, the target pod actually being down. Each takes a different operator to disprove.\n\n**kldload's eBPF view** (Hubble) lives in the kernel datapath itself. Every dropped flow is annotated with the verdict, the policy that did it, the source + destination identity, and the L4/L7 layer. No guessing \u2014 the kernel says exactly what it did."
+        "content": "**The symptom**: pod logs say `connection refused` or `i/o timeout`.\n\n**Traditional reporting** counts the error log lines. From there the cause is one of: NetworkPolicy, missing route, MTU mismatch, DNS, overlay encapsulation, the target pod actually being down. Each takes a different operator to disprove.\n\n**kldload's eBPF view** (Hubble) lives in the kernel datapath itself. Every dropped flow is annotated with the verdict, the policy that did it, the source + destination identity, and the L4/L7 layer. No guessing — the kernel says exactly what it did."
       }
     },
     {
       "type": "timeseries",
-      "title": "Traditional view \u2014 application log error rate",
+      "title": "Traditional view — application log error rate",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -176,7 +176,7 @@
     },
     {
       "type": "timeseries",
-      "title": "kldload view \u2014 Hubble flow drops by kernel verdict",
+      "title": "kldload view — Hubble flow drops by kernel verdict",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -184,7 +184,7 @@
         "y": 23
       },
       "id": 123,
-      "description": "`hubble_drop_total` \u2014 every L3/L4/L7 flow eBPF observed dropping in the kernel, broken out by drop verdict. `POLICY_DENIED` = a NetworkPolicy did it. `UNDEFINED` = no policy covers this identity pair. `MISSED_TAIL_CALL` = MTU or fragmentation. The traditional error spike on the left aligns to the second with one of these verdicts on the right \u2014 that's root cause, not symptom.",
+      "description": "`hubble_drop_total` — every L3/L4/L7 flow eBPF observed dropping in the kernel, broken out by drop verdict. `POLICY_DENIED` = a NetworkPolicy did it. `UNDEFINED` = no policy covers this identity pair. `MISSED_TAIL_CALL` = MTU or fragmentation. The traditional error spike on the left aligns to the second with one of these verdicts on the right — that's root cause, not symptom.",
       "targets": [
         {
           "refId": "A",
@@ -203,7 +203,7 @@
     },
     {
       "type": "row",
-      "title": "Case 3 \u2014 Pod OOM-killed (silent crash)",
+      "title": "Case 3 — Pod OOM-killed (silent crash)",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -226,12 +226,12 @@
       "id": 131,
       "options": {
         "mode": "markdown",
-        "content": "**The symptom**: kubelet restarts a pod with exit code 137.\n\n**Traditional reporting** counts restarts. It cannot tell you whether the pod was OOM-killed, kernel-killed, runtime-killed, or self-exited cleanly. It also cannot tell you *when in the resource curve* the kill happened \u2014 was the pod climbing toward a limit, hit it fast, or get killed because a different process on the node went haywire?\n\n**kldload's eBPF view** sees the actual `node_vmstat_oom_kill` counter (a SIGKILL the kernel's OOM killer issued) alongside the `MemAvailable` curve leading up to it. The curve climbing toward zero right before the kill is the smoking gun. Pair with Tetragon's `process_exit` event to get the exact PID."
+        "content": "**The symptom**: kubelet restarts a pod with exit code 137.\n\n**Traditional reporting** counts restarts. It cannot tell you whether the pod was OOM-killed, kernel-killed, runtime-killed, or self-exited cleanly. It also cannot tell you *when in the resource curve* the kill happened — was the pod climbing toward a limit, hit it fast, or get killed because a different process on the node went haywire?\n\n**kldload's eBPF view** sees the actual `node_vmstat_oom_kill` counter (a SIGKILL the kernel's OOM killer issued) alongside the `MemAvailable` curve leading up to it. The curve climbing toward zero right before the kill is the smoking gun. Pair with Tetragon's `process_exit` event to get the exact PID."
       }
     },
     {
       "type": "timeseries",
-      "title": "Traditional view \u2014 kubelet pod-start error counter",
+      "title": "Traditional view — kubelet pod-start error counter",
       "gridPos": {
         "h": 6,
         "w": 12,
@@ -239,7 +239,7 @@
         "y": 36
       },
       "id": 132,
-      "description": "`kubelet_started_pods_errors_total` \u2014 a flat counter of \"pod start failed\" events as the kubelet sees them. Tells you how many pods failed; says nothing about why (OOM vs image pull vs network vs runtime). On a log-only stack this is what you have to work with.",
+      "description": "`kubelet_started_pods_errors_total` — a flat counter of \"pod start failed\" events as the kubelet sees them. Tells you how many pods failed; says nothing about why (OOM vs image pull vs network vs runtime). On a log-only stack this is what you have to work with.",
       "targets": [
         {
           "refId": "A",
@@ -258,7 +258,7 @@
     },
     {
       "type": "timeseries",
-      "title": "kldload view \u2014 OOM kills + memory available trend",
+      "title": "kldload view — OOM kills + memory available trend",
       "gridPos": {
         "h": 6,
         "w": 12,
@@ -266,7 +266,7 @@
         "y": 36
       },
       "id": 133,
-      "description": "Top line = `node_vmstat_oom_kill` (every actual SIGKILL the kernel's OOM killer issued). Bottom line = `MemAvailable / MemTotal` (fraction of usable memory free). The available curve dives toward zero right before the kill \u2014 you can see it coming. Pair with `tetragon_events_total{event=\"process_exit\",signal=\"SIGKILL\"}` to confirm the exact PID and command-line at the kill instant.",
+      "description": "Top line = `node_vmstat_oom_kill` (every actual SIGKILL the kernel's OOM killer issued). Bottom line = `MemAvailable / MemTotal` (fraction of usable memory free). The available curve dives toward zero right before the kill — you can see it coming. Pair with `tetragon_events_total{event=\"process_exit\",signal=\"SIGKILL\"}` to confirm the exact PID and command-line at the kill instant.",
       "targets": [
         {
           "refId": "A",
@@ -291,7 +291,7 @@
     },
     {
       "type": "row",
-      "title": "Case 4 \u2014 Permission denied (on what, by whom?)",
+      "title": "Case 4 — Permission denied (on what, by whom?)",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -314,12 +314,12 @@
       "id": 141,
       "options": {
         "mode": "markdown",
-        "content": "**The symptom**: an application or operator gets `EACCES` / `EPERM` from a syscall.\n\n**Traditional reporting** records the string \"permission denied\" in an application log. It does not name which file, which UID, which capability, or which LSM (SELinux / AppArmor / cap_check) said no \u2014 and it cannot say whether the syscall was `open()`, `mount()`, `bind()`, or one of forty others.\n\n**kldload's eBPF view** (Tetragon) traces every syscall the kernel handles. With a TracingPolicy filtering `returnCode < 0` on `security_file_open`, every deny is captured with PID, parent PID, process name, file path, capability flags, and return code. The deny IS the event \u2014 no log scraping required."
+        "content": "**The symptom**: an application or operator gets `EACCES` / `EPERM` from a syscall.\n\n**Traditional reporting** records the string \"permission denied\" in an application log. It does not name which file, which UID, which capability, or which LSM (SELinux / AppArmor / cap_check) said no — and it cannot say whether the syscall was `open()`, `mount()`, `bind()`, or one of forty others.\n\n**kldload's eBPF view** (Tetragon) traces every syscall the kernel handles. With a TracingPolicy filtering `returnCode < 0` on `security_file_open`, every deny is captured with PID, parent PID, process name, file path, capability flags, and return code. The deny IS the event — no log scraping required."
       }
     },
     {
       "type": "logs",
-      "title": "Traditional view \u2014 log lines mentioning permission denied",
+      "title": "Traditional view — log lines mentioning permission denied",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -341,7 +341,7 @@
     },
     {
       "type": "timeseries",
-      "title": "eBPF view \u2014 Tetragon kernel events (msg_op breakdown)",
+      "title": "eBPF view — Tetragon kernel events (msg_op breakdown)",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -349,7 +349,7 @@
         "y": 47
       },
       "id": 143,
-      "description": "Tetragon publishes one Prometheus counter per BPF event class. `msg_op=5` EXECVE (every process exec the kernel saw). `msg_op=7` EXIT (every process exit + signal, including OOM SIGKILLs). `msg_op=23` PROCESS_KPROBE (every kernel function call your TracingPolicies trace \u2014 file opens, capability checks, syscall returns). The deny the traditional log says \"EACCES\" about IS in `msg_op=23` with the full kernel context (PID, path argument, return code, security labels). Volume alone tells you Tetragon is observing thousands of syscalls per second without measurable cost.",
+      "description": "Tetragon publishes one Prometheus counter per BPF event class. `msg_op=5` EXECVE (every process exec the kernel saw). `msg_op=7` EXIT (every process exit + signal, including OOM SIGKILLs). `msg_op=23` PROCESS_KPROBE (every kernel function call your TracingPolicies trace — file opens, capability checks, syscall returns). The deny the traditional log says \"EACCES\" about IS in `msg_op=23` with the full kernel context (PID, path argument, return code, security labels). Volume alone tells you Tetragon is observing thousands of syscalls per second without measurable cost.",
       "datasource": null,
       "targets": [
         {
@@ -372,7 +372,7 @@
     },
     {
       "type": "row",
-      "title": "Case 5 \u2014 CPU spike of unknown origin",
+      "title": "Case 5 — CPU spike of unknown origin",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -395,12 +395,12 @@
       "id": 151,
       "options": {
         "mode": "markdown",
-        "content": "**The symptom**: load average climbs, the app gets sluggish, `top` shows one process at 200% CPU but won't say what it's doing.\n\n**Traditional reporting** captures load average and per-process CPU time. It cannot break those down into the syscall flavours that drove them \u2014 runaway forks, kqueue thrash, page-fault storm, syscall flood, kernel-side BPF tax all look the same in user CPU columns.\n\n**kldload's eBPF view** splits the kernel's actual time across BPF programs by program name (so you know which observer is hot) AND across user-space processes by groupname (so you know which user workload is hot). Two lines, two layers of attribution, one panel."
+        "content": "**The symptom**: load average climbs, the app gets sluggish, `top` shows one process at 200% CPU but won't say what it's doing.\n\n**Traditional reporting** captures load average and per-process CPU time. It cannot break those down into the syscall flavours that drove them — runaway forks, kqueue thrash, page-fault storm, syscall flood, kernel-side BPF tax all look the same in user CPU columns.\n\n**kldload's eBPF view** splits the kernel's actual time across BPF programs by program name (so you know which observer is hot) AND across user-space processes by groupname (so you know which user workload is hot). Two lines, two layers of attribution, one panel."
       }
     },
     {
       "type": "timeseries",
-      "title": "Traditional view \u2014 system load average",
+      "title": "Traditional view — system load average",
       "gridPos": {
         "h": 6,
         "w": 12,
@@ -423,11 +423,11 @@
           }
         }
       },
-      "description": "`node_load1` \u2014 1-minute load average. Tells you the system is busy. Says nothing about user vs kernel time, which subsystem, which syscall family, or whether the load is from observability tooling itself."
+      "description": "`node_load1` — 1-minute load average. Tells you the system is busy. Says nothing about user vs kernel time, which subsystem, which syscall family, or whether the load is from observability tooling itself."
     },
     {
       "type": "timeseries",
-      "title": "kldload view \u2014 kernel BPF program time + user-space process time",
+      "title": "kldload view — kernel BPF program time + user-space process time",
       "gridPos": {
         "h": 6,
         "w": 12,
@@ -435,7 +435,7 @@
         "y": 61
       },
       "id": 153,
-      "description": "Top series: BPF program time/second per program (the kernel-side cost of observability \u2014 if Tetragon is hot, it's named here, by program). Bottom series: user-space CPU per process group (the workload-side cost). Together they tell you which side of the kernel/user boundary is driving the load \u2014 something `top` and `htop` cannot do.",
+      "description": "Top series: BPF program time/second per program (the kernel-side cost of observability — if Tetragon is hot, it's named here, by program). Bottom series: user-space CPU per process group (the workload-side cost). Together they tell you which side of the kernel/user boundary is driving the load — something `top` and `htop` cannot do.",
       "targets": [
         {
           "refId": "A",
@@ -472,7 +472,7 @@
       "id": 200,
       "options": {
         "mode": "markdown",
-        "content": "---\n\n### Why kldload ships these dashboards in the box\n\nTraditional logging is an after-the-fact summary of what your code wrote down. eBPF is the kernel telling you what it actually did. Same incident, two categories of signal \u2014 the second one names root cause instead of describing symptoms.\n\nkldload was built as a test bench for OpenZFS at scale, and the test matrix kept catching regressions that averaged metrics hid. Every panel on this page is something we needed to see \u2014 and once it was wired, it turned out to be useful for every other workload too. **You get the lab, not a marketing demo.**\n\nNo agent install, no separate license, no upgrade tier. Just the box."
+        "content": "---\n\n### Why kldload ships these dashboards in the box\n\nTraditional logging is an after-the-fact summary of what your code wrote down. eBPF is the kernel telling you what it actually did. Same incident, two categories of signal — the second one names root cause instead of describing symptoms.\n\nkldload was built as a test bench for OpenZFS at scale, and the test matrix kept catching regressions that averaged metrics hid. Every panel on this page is something we needed to see — and once it was wired, it turned out to be useful for every other workload too. **You get the lab, not a marketing demo.**\n\nNo agent install, no separate license, no upgrade tier. Just the box."
       }
     }
   ],
@@ -494,7 +494,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "Observability \u2014 eBPF vs Traditional Logging (Case Studies)",
+  "title": "Observability — eBPF vs Traditional Logging (Case Studies)",
   "uid": "kldload-ebpf-vs-traditional",
   "version": 1,
   "weekStart": ""
