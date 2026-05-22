@@ -9844,32 +9844,64 @@ async def main_async(args):
     # CNAME.
     import socket
     _origins = ["https://localhost:8443", "https://kldload.local:8443"]
+
+    # Hostname-based origins (short + .local + FQDN if resolvable).
     try:
         _h = socket.gethostname()
         if _h:
             _origins += [f"https://{_h}:8443", f"https://{_h}.local:8443"]
+            try:
+                _fqdn = socket.getfqdn(_h)
+                if _fqdn and _fqdn not in (_h, "localhost"):
+                    _origins.append(f"https://{_fqdn}:8443")
+            except Exception:
+                pass
     except Exception:
         pass
+
+    # IP-based origins — discover via `ip -o addr show scope global`.
+    #
+    # Earlier version used `socket.getaddrinfo(socket.gethostname(),
+    # None)` which only returns what /etc/hosts knows. On a fresh
+    # kldload install, /etc/hosts maps the short hostname to 127.0.1.1
+    # (Debian) or 127.0.0.1 (RH) — the DHCP-assigned LAN IP is NOT
+    # there, so the allow-list MISSED the address the user actually
+    # types in the browser. Symptom: webui stuck on "trying to
+    # connect" with `InvalidOrigin` in the journal. Bug landed in
+    # build #42, fixed in #43.
+    #
+    # `ip -o addr show scope global` is the same data source
+    # kldload-tls-cert uses for SAN generation, so cert SAN list and
+    # WS origin allow-list now stay in sync by construction — anywhere
+    # the cert is valid, the WS origin is too.
     try:
-        import ipaddress
-        for fam, _, _, _, sockaddr in socket.getaddrinfo(socket.gethostname(), None):
-            ip = sockaddr[0]
-            if ip.startswith("127.") or ip == "::1":
+        import subprocess as _sp
+        _out = _sp.run(["ip", "-o", "addr", "show", "scope", "global"],
+                       capture_output=True, text=True, timeout=5).stdout
+        for line in _out.splitlines():
+            parts = line.split()
+            if len(parts) < 4:
                 continue
-            # Bracket v6, plain v4.
+            ip = parts[3].split("/")[0]
+            # Skip already-covered + link-local
+            if ip.startswith("127.") or ip == "::1" or ip.startswith("fe80::"):
+                continue
             host = f"[{ip}]" if ":" in ip else ip
             _origins.append(f"https://{host}:8443")
-    except Exception:
-        pass
-    # Allow operators to add extra origins via env (one per line or
-    # comma-separated). Mirrors the /etc/kldload/tls-extra-sans.txt
-    # pattern used by kldload-tls-cert.
+    except Exception as _e:
+        LOG.warning("origin list: could not enumerate interfaces via `ip` — %s", _e)
+
+    # Operator overrides — env var (comma or newline separated) for
+    # custom CNAMEs / reverse proxies sitting in front of the box.
     _extra = os.environ.get("KLDLOAD_WEBUI_EXTRA_ORIGINS", "").replace(",", "\n")
     for line in _extra.splitlines():
         line = line.strip()
         if line:
             _origins.append(line)
-    LOG.info("WS origin allow-list: %s", _origins)
+
+    # Deduplicate + sort for stable logs
+    _origins = sorted(set(_origins))
+    LOG.info("WS origin allow-list (%d entries): %s", len(_origins), _origins)
 
     ws_server = await websockets.serve(
         ws_handler, args.bind, args.port,
