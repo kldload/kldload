@@ -317,25 +317,39 @@ cmd_trust_install() {
   [[ -f "${ROOT_CRT}" ]] || die "root CA missing — run: kldload-ca init"
 
   # Distro-agnostic: try every known layout that exists, skip the rest.
+  #
+  # FAIL LOUD policy 2026-05-21 — the previous `update-ca-trust extract
+  # >/dev/null 2>&1 || true` swallowed broken-bundle errors silently.
+  # Symptom: the cert is "installed" into the anchors directory but the
+  # consolidated bundle (/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+  # on RH; /etc/ssl/certs/ca-certificates.crt on Debian) doesn't include
+  # it. curl/wget/python-requests on the host then DON'T trust the cert
+  # nginx is serving — every internal HTTPS call fails verification,
+  # silently, for days, until somebody traces it. Surface the error
+  # immediately instead. die() rolls up to the systemd unit's red
+  # status, journalctl shows the actual command output.
   local installed=0
 
   if [[ -d /etc/pki/ca-trust/source/anchors ]]; then
     install -m 0644 "${ROOT_CRT}" /etc/pki/ca-trust/source/anchors/kldload-ca.crt
-    update-ca-trust extract >/dev/null 2>&1 || true
+    update-ca-trust extract \
+      || die "update-ca-trust extract failed — host trust bundle is OUT OF SYNC with the anchors dir."
     installed=1
     log "installed into /etc/pki/ca-trust (RH/CentOS/Fedora/Rocky)"
   fi
 
   if [[ -d /usr/local/share/ca-certificates ]]; then
     install -m 0644 "${ROOT_CRT}" /usr/local/share/ca-certificates/kldload-ca.crt
-    update-ca-certificates >/dev/null 2>&1 || true
+    update-ca-certificates \
+      || die "update-ca-certificates failed — host trust bundle is OUT OF SYNC with /usr/local/share/ca-certificates/."
     installed=1
     log "installed into /usr/local/share/ca-certificates (Debian/Ubuntu)"
   fi
 
   if [[ -d /etc/ca-certificates/trust-source/anchors ]]; then
     install -m 0644 "${ROOT_CRT}" /etc/ca-certificates/trust-source/anchors/kldload-ca.crt
-    trust extract-compat >/dev/null 2>&1 || true
+    trust extract-compat \
+      || die "trust extract-compat failed — host trust bundle is OUT OF SYNC with /etc/ca-certificates/trust-source/anchors/."
     installed=1
     log "installed into /etc/ca-certificates/trust-source/anchors (Arch)"
   fi

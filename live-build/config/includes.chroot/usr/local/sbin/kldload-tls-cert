@@ -210,10 +210,21 @@ if [[ "$_regen" -eq 1 ]]; then
     # Prefer the kldload CA when present — every service on the box
     # chains to one root, which the system trust store + (optionally) the
     # user's browser trust ONCE. Falls back to the old self-signed path
-    # if kldload-ca is missing or fails, so the boot path never regresses.
+    # if kldload-ca is missing, so the boot path never regresses.
+    #
+    # CA root is initialized at INSTALL time by bootstrap.sh (line 359
+    # runs `kldload-ca init` inside the chroot). By the time systemd
+    # gets here the root MUST already exist. The previous lazy
+    # `kldload-ca init >&2 2>/dev/null || true` masked three classes of
+    # real failure — broken libcrypto after a dist-upgrade, entropy
+    # starvation, manual wipe of /etc/kldload/ca — by silently falling
+    # through to the self-signed branch, which then produced a leaf
+    # with no chain, which made /kldload-ca.crt 404, which broke the
+    # trust ceremony. Removed 2026-05-21: fail loud when the CA root
+    # is missing, the self-signed branch can still execute as a
+    # deliberate fallback (the `if [[ -f ... ]]` test below).
     _issued_via_ca=0
     if [[ -x /usr/local/sbin/kldload-ca ]]; then
-        /usr/local/sbin/kldload-ca init >&2 2>/dev/null || true
         if [[ -f /etc/kldload/ca/root/ca.crt ]]; then
             _ca_args=(issue webui --days 365)
             _ca_args+=(--dns "${_hostname}" --dns "${_short}" --dns localhost --dns kldload.local)

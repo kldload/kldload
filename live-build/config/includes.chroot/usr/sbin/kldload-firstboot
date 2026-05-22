@@ -991,12 +991,24 @@ SALT
     # ── kldload CA: install the per-install root into the system trust ──
     # store so local consumers (curl, kubectl, ansible, prometheus scrapes)
     # trust webui/proxy/grafana without --insecure. Idempotent: skipped
-    # if the CA hasn't been initialized yet (kldload-tls-cert ensures
-    # init runs before any leaf is issued). Any failure is non-fatal.
+    # if the CA hasn't been initialized yet.
+    #
+    # FAIL LOUD 2026-05-21 — previous code piped stderr to /dev/null
+    # and only logged "WARNING ... (non-fatal)". The downstream effect
+    # of a silent trust-install failure is curl/wget/python-requests
+    # on the host not trusting the cert nginx serves — every internal
+    # HTTPS call fails verification, silently, for days. Surface the
+    # actual command output AND log to firstboot.log so the next
+    # operator sees it instead of paging through journals.
     if [[ -x /usr/local/sbin/kldload-ca && -f /etc/kldload/ca/root/ca.crt ]]; then
       log "installing kldload CA into system trust store"
-      /usr/local/sbin/kldload-ca trust-install >/dev/null 2>&1 || \
-        log "WARNING: kldload-ca trust-install failed (non-fatal)"
+      if ! /usr/local/sbin/kldload-ca trust-install 2>&1 | tee -a "$LOG_FILE"; then
+        log "ERROR: kldload-ca trust-install FAILED — host trust store is OUT OF SYNC. See above for the actual command output."
+        # Still non-fatal to firstboot (rest of the install matters
+        # more than this single step), but no longer silent. An
+        # operator looking at journalctl -u kldload-firstboot now sees
+        # exactly why curl-against-self fails.
+      fi
     fi
 
     # ── MOK self-heal: make sure THIS install's signing cert is staged ──

@@ -30,12 +30,20 @@ try:
 except ImportError:
     yaml = None
 
-try:
-    import websockets
-except ImportError:
-    print("[kldload-webui] Installing websockets...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "websockets"])
-    import websockets
+# websockets must be present in the image. build-iso.sh removes the
+# CentOS-9 python3-websockets RPM (lacks the websockets.http11 API) and
+# pip-installs websockets v11+ during the build container's chroot
+# phase, so a fresh install boots with it ready. If import fails here
+# at runtime that's a BUILD bug (missing pip-install step), NOT
+# something to silently paper over by reaching out to PyPI as root on
+# every boot. Pre-1.2.0 the fallback was a runtime
+# `subprocess.check_call([sys.executable, "-m", "pip", "install", ...])`
+# — three problems with that: it contradicts the offline / darksite
+# pitch, it's a MITM-RCE if anything sits between the box and PyPI on
+# first boot, and it modifies the system Python out from under the
+# distro package manager. Fail loud instead: missing module = missing
+# build step = fix the build, not paper over it at runtime.
+import websockets
 
 LOG = logging.getLogger("kldload-webui")
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [webui] %(message)s",
@@ -1183,29 +1191,20 @@ def _save_credentials(creds):
 
 RUNNING_PROCS = {}
 
-PRO_ONLY_ACTIONS = {
-    "spawn", "golden", "cluster_deploy", "wg_peer_add", "wg_peer_remove",
-    "wg_info", "node_list", "node_register", "node_poof", "apply_role",
-    "salt_highstate", "salt_apply", "ansible_run", "k8s_join",
-    # NOTE: All VM lifecycle ops (list/start/stop/destroy/clone/create_cloud/
-    # delete_full/op/bulk) are intentionally FREE — they're the core hypervisor
-    # experience and Pro-gating them gutted the value proposition vs.
-    # virt-manager/Proxmox. Pro-tier differentiators live elsewhere (fleet
-    # ops, salt highstate, ansible runs, cluster_info, etc.).
-    "service_action", "credential_list", "credential_add",
-    "proxmox_list", "firewall_rule", "cluster_info",
-}
-
-async def _pro_required(websocket, action: str) -> bool:
-    """Return True (and send error) if this is a free edition trying a pro action."""
-    if EDITION == "free" and action in PRO_ONLY_ACTIONS:
-        await websocket.send(json.dumps({
-            "type": "error",
-            "msg": f"'{action}' requires kldload Pro. Upgrade at kldload.ca/upgrade.",
-            "pro_required": True,
-        }))
-        return True
-    return False
+# Pro-edition gating removed 2026-05-21 — kldload Pro is no longer a
+# thing; the whole codebase is BSD-3 and what was "Pro" is now "free."
+# The _pro_required gate would either let everything through (since
+# every install IS free edition now) or pop an "upgrade at kldload.ca/
+# upgrade" error pointing at a non-existent SKU. Both are dead UX.
+#
+# CRITICAL — this function was NOT a security check despite being the
+# only thing between an unauthenticated WebSocket and shell_run /
+# k8s_join / wg_peer_add / salt_apply. Real auth is a separate
+# in-progress concern (bearer token at install time, validated on
+# every WS message — see project_release_1_0_target.md follow-ups).
+# Removing this dead gate prevents future maintainers from mistaking
+# edition-gating for authentication, which was the original audit
+# finding (Claude 2026-05-21).
 
 
 async def _run_text(cmd, timeout=15, merge_stderr=True):
@@ -1253,8 +1252,6 @@ async def ws_handler(websocket):
             action = msg.get("action", "")
             LOG.info("WS action: %s", action)
             try:
-                if await _pro_required(websocket, action):
-                    continue
                 if action == "ping":
                     await websocket.send(json.dumps({"type": "pong"}))
                 elif action == "system_info":
@@ -9829,12 +9826,57 @@ async def main_async(args):
         ])
         return WsResponse(200, "OK", headers, body)
 
-    # Single port for both HTTP (static files) and WebSocket
+    # Single port for both HTTP (static files) and WebSocket.
+    #
+    # origins= closes Cross-Site WebSocket Hijacking: without it, any
+    # other browser tab the user has open (any malicious page they
+    # visit) can `new WebSocket("wss://kldload-box:8443/")` and the
+    # browser will connect with the user's accepted-cert session.
+    # Once connected, every WS `action` works without authentication,
+    # including shell_run. Audit finding 2026-05-21 (Claude review).
+    #
+    # The allowed list is "things you'd actually type in the URL bar":
+    #   * https://localhost:8443                              same-host
+    #   * https://kldload.local:8443                          mDNS
+    #   * https://<hostname>:8443 + https://<hostname>.local  short + .local
+    #   * https://<lan-ip>:8443 for every non-loopback v4/v6  literal IP
+    # plus an env-var escape for advanced deployments behind a custom
+    # CNAME.
+    import socket
+    _origins = ["https://localhost:8443", "https://kldload.local:8443"]
+    try:
+        _h = socket.gethostname()
+        if _h:
+            _origins += [f"https://{_h}:8443", f"https://{_h}.local:8443"]
+    except Exception:
+        pass
+    try:
+        import ipaddress
+        for fam, _, _, _, sockaddr in socket.getaddrinfo(socket.gethostname(), None):
+            ip = sockaddr[0]
+            if ip.startswith("127.") or ip == "::1":
+                continue
+            # Bracket v6, plain v4.
+            host = f"[{ip}]" if ":" in ip else ip
+            _origins.append(f"https://{host}:8443")
+    except Exception:
+        pass
+    # Allow operators to add extra origins via env (one per line or
+    # comma-separated). Mirrors the /etc/kldload/tls-extra-sans.txt
+    # pattern used by kldload-tls-cert.
+    _extra = os.environ.get("KLDLOAD_WEBUI_EXTRA_ORIGINS", "").replace(",", "\n")
+    for line in _extra.splitlines():
+        line = line.strip()
+        if line:
+            _origins.append(line)
+    LOG.info("WS origin allow-list: %s", _origins)
+
     ws_server = await websockets.serve(
         ws_handler, args.bind, args.port,
         ping_interval=20, ping_timeout=10,
         ssl=ssl_ctx,
         process_request=process_request,
+        origins=_origins,
     )
     LOG.info("kldload Web UI on %s://%s:%d (HTTP + WebSocket)", scheme, args.bind, args.port)
 
