@@ -703,6 +703,39 @@ k_install_system_files() {
     cp -r /usr/local/share/kldload-webui/active/. "${target}/usr/local/share/kldload-webui/"
   fi
 
+  # ── Demo workload assets (chart + Argo Application + recipes) ─────────────
+  # /usr/local/share/kldload/demo/ holds the javaapi-fullstack helm chart,
+  # the Argo Application CRD, and the demo recipe README. kube-demo's
+  # path resolver reads from here (with /root/demo as legacy fallback).
+  # The installer must copy this tree explicitly — like every other
+  # platform asset, /usr/local/share/ contents do NOT come along
+  # automatically; the installer copies named paths only.
+  #
+  # Bug origin: build #45 moved these files from /root/demo to the
+  # canonical /usr/local/share/kldload/demo path so they'd survive
+  # install. The move was correct but the installer was never taught
+  # to copy the new path. Result: kube-demo javaapi on a fresh #45
+  # install failed with "Application manifest missing." Caught on
+  # .137 install 2026-05-23.
+  if [[ -d /usr/local/share/kldload/demo ]]; then
+    mkdir -p "${target}/usr/local/share/kldload/demo"
+    cp -r /usr/local/share/kldload/demo/. "${target}/usr/local/share/kldload/demo/"
+  fi
+
+  # ── Bundled examples library (ansible / helm / manifests / kvm / ebpf / …) ─
+  # /usr/local/share/kldload-examples/ holds the 32-example library
+  # (build #41) — paste-and-deploy ansible playbooks, helm charts,
+  # kubectl manifests, wireguard recipes, zfs tuning examples. Same
+  # category of issue as the demo files above: in /usr/local/share so
+  # the installer needs an explicit copy line, otherwise they live in
+  # the live env only and disappear after install. Symlink at
+  # /usr/local/share/kldload-ansible/playbooks/examples → ../../kldload-examples/ansible
+  # is created by the build but the target tree must exist.
+  if [[ -d /usr/local/share/kldload-examples ]]; then
+    mkdir -p "${target}/usr/local/share/kldload-examples"
+    cp -r /usr/local/share/kldload-examples/. "${target}/usr/local/share/kldload-examples/"
+  fi
+
   # ── Firefox autostart to dashboard — LAB profiles only ────────────────────
   # Workstation users (desktop profile) and headless (server) installs
   # should NOT have Firefox auto-open to the kldload dashboard on every
