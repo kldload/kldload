@@ -1,17 +1,19 @@
 {{- if .Values.postgres.enabled }}
-# Postgres 16 — the demo's stateful tier and the dataset the entire
-# rollback story rotates around. Named `pvc-postgres-data` so the
-# corresponding ZFS dataset (rpool/k8s/pvc-postgres-data via the
-# kldload-default storage class's name templating) is trivial to find
-# from the host:
+# Postgres 16 (official Alpine image) — the demo's stateful tier and
+# the dataset the rollback story rotates around. Named pvc-postgres-data
+# so the host-side ZFS dataset (the worker VM's zvol or local-path
+# directory on the worker) is easy to find:
 #
-#   zfs list -t snapshot rpool/k8s/pvc-postgres-data
-#   zfs rollback rpool/k8s/pvc-postgres-data@autosnap_2026-05-21_14:30
+#   On the worker VM:
+#     ls /opt/local-path-provisioner/*/pvc-postgres-data*
 #
-# Sanoid policy (/etc/sanoid/sanoid.d/javaapi.conf) snapshots this
-# dataset every 5 minutes. The `kldload-demo recover` script picks the
-# most-recent pre-disaster snapshot automatically and re-mounts the
-# pod against the rolled-back dataset.
+#   For the host-level rollback (the actual kldload pattern):
+#     zfs snapshot rpool/vms/kldload-w-<n>@before-disaster
+#     zfs rollback rpool/vms/kldload-w-<n>@before-disaster
+#
+# Sanoid policy (/etc/sanoid/sanoid.d/javaapi.conf) snapshots the
+# WORKER VM's zvol every 5 minutes; that captures the PVC data
+# transitively (the worker disk contains the local-path PVC dir).
 ---
 apiVersion: v1
 kind: Secret
@@ -22,10 +24,9 @@ metadata:
     {{- include "javaapi.commonLabels" . | nindent 4 }}
 type: Opaque
 stringData:
-  postgres-password: {{ .Values.postgres.credentials.password | quote }}
   POSTGRES_USER:     {{ .Values.postgres.credentials.user | quote }}
   POSTGRES_DB:       {{ .Values.postgres.credentials.database | quote }}
-
+  POSTGRES_PASSWORD: {{ .Values.postgres.credentials.password | quote }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -44,7 +45,6 @@ spec:
   {{- if .Values.global.storageClass }}
   storageClassName: {{ .Values.global.storageClass }}
   {{- end }}
-
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -68,57 +68,37 @@ spec:
         {{- include "javaapi.commonLabels" . | nindent 8 }}
         app: postgres
         kldload.io/component: stateful-tier
-      annotations:
-        # Postgres-exporter isn't bundled (yet) — these annotations
-        # are a no-op until kldload adds the postgres_exporter sidecar
-        # in a future build. Harmless to leave.
-        prometheus.io/scrape: "false"
     spec:
       containers:
         - name: postgres
           image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          envFrom:
+            - secretRef: { name: postgres-credentials }
           env:
-            - name: POSTGRESQL_USERNAME
-              valueFrom: { secretKeyRef: { name: postgres-credentials, key: POSTGRES_USER } }
-            - name: POSTGRESQL_DATABASE
-              valueFrom: { secretKeyRef: { name: postgres-credentials, key: POSTGRES_DB } }
-            - name: POSTGRESQL_PASSWORD
-              valueFrom: { secretKeyRef: { name: postgres-credentials, key: postgres-password } }
-            # ZFS-friendly Postgres tuning. ZFS is COW + checksummed,
-            # so full_page_writes (Postgres's torn-write protection)
-            # is redundant — turning it off cuts write amplification
-            # ~30% on update-heavy workloads. fsync stays ON because
-            # ARC won't survive a kernel panic mid-batch.
-            - name: POSTGRESQL_EXTRA_CONF
-              value: |
-                wal_compression = on
-                full_page_writes = off
-                synchronous_commit = on
-                wal_init_zero = off
-                wal_recycle = off
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           ports:
             - name: postgres
               containerPort: 5432
           resources: {{- toYaml .Values.postgres.resources | nindent 12 }}
           volumeMounts:
             - name: data
-              mountPath: /bitnami/postgresql
+              mountPath: /var/lib/postgresql/data
           readinessProbe:
             exec:
-              command: [bash, -c, "pg_isready -U petclinic -d petclinic -h 127.0.0.1"]
-            initialDelaySeconds: 10
+              command: [pg_isready, -U, petclinic, -d, petclinic]
+            initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             exec:
-              command: [bash, -c, "pg_isready -U petclinic -d petclinic -h 127.0.0.1"]
-            initialDelaySeconds: 30
+              command: [pg_isready, -U, petclinic, -d, petclinic]
+            initialDelaySeconds: 20
             periodSeconds: 15
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: pvc-postgres-data
-
 ---
 apiVersion: v1
 kind: Service
@@ -128,7 +108,7 @@ metadata:
   labels:
     {{- include "javaapi.commonLabels" . | nindent 4 }}
 spec:
-  clusterIP: None    # headless — internal-only, never via MetalLB VIP
+  clusterIP: None
   selector:
     {{- include "javaapi.selectorLabels" . | nindent 4 }}
     app: postgres

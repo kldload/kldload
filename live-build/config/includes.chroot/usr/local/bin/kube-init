@@ -256,11 +256,42 @@ METALLB_CFG
 }
 
 # ── Install OpenEBS ZFS LocalPV CSI ─────────────────────────────────────
+install_local_path_provisioner() {
+  # Fallback storage class when ZFS-CSI can't run (klab K8s worker VMs
+  # don't ship the ZFS userspace, so OpenEBS ZFS LocalPV fails its
+  # `zpool list` health check on every node). local-path-provisioner
+  # uses the host's filesystem under /opt/local-path-provisioner —
+  # which is the worker VM's local disk, which is itself a zvol on the
+  # kldload host. Host-side ZFS snapshots of the worker's zvol still
+  # capture the PVC data, so the rollback story works at the
+  # VM-disk level even when the in-cluster CSI is the simple
+  # local-path one. Pre-build #46 this was missing entirely: on a
+  # fresh kube-cluster bootstrap, PVCs stayed Pending forever and the
+  # postgres half of the demo couldn't schedule. Caught on .137.
+  log "Installing local-path-provisioner as fallback default StorageClass..."
+  kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.30/deploy/local-path-storage.yaml \
+    >/dev/null 2>&1 || warn "local-path-provisioner manifest apply failed; PVCs will stay Pending"
+  # Mark as default — only if no other default exists yet (don't
+  # clobber zfs StorageClass if install_zfs_csi succeeded).
+  local _existing_default
+  _existing_default=$(kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' 2>/dev/null)
+  if [[ -z "$_existing_default" ]]; then
+    sleep 3
+    kubectl patch storageclass local-path \
+      -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' \
+      >/dev/null 2>&1 || true
+    log "local-path is now the default StorageClass"
+  else
+    log "default StorageClass already exists ($_existing_default) — local-path installed as non-default"
+  fi
+}
+
 install_zfs_csi() {
   # Ensure ZFS module is loaded
   modprobe zfs 2>/dev/null || true
   if ! command -v zfs >/dev/null 2>&1; then
-    log "ZFS not available — skipping ZFS CSI driver"
+    log "ZFS not available on cluster nodes — falling back to local-path-provisioner"
+    install_local_path_provisioner
     return 0
   fi
 
