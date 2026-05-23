@@ -3230,11 +3230,29 @@ demo_destroy_all() {
 # Argo CD is the deploy mechanism (Application CRD), ZFS rollback is
 # the recovery mechanism (zfs rollback @ snap → pod restart →
 # Argo re-syncs). See:
-#   /root/demo/argo/javaapi-fullstack-app.yaml      Application
-#   /root/demo/charts/javaapi-fullstack/             helm chart
+#   /usr/local/share/kldload/demo/argo/javaapi-fullstack-app.yaml
+#   /usr/local/share/kldload/demo/charts/javaapi-fullstack/
 #   /etc/sanoid/sanoid.d/javaapi.conf                snapshot policy
+#
+# Demo files live under /usr/local/share/kldload/demo/ (FHS-standard
+# for shipped static data; gets copied by the installer to the
+# installed target). Pre-#45 they were at /root/demo/ which the
+# kldload-install-target script does NOT copy from the live env to
+# the installed target — meaning the files lived in the ISO's live
+# rootfs but vanished after install. Reported by build #44 install on
+# .115: `kube-demo javaapi` failed with "Application manifest missing:
+# /root/demo/argo/javaapi-fullstack-app.yaml". The path resolver
+# below checks the new FHS-correct location first, then falls back to
+# the legacy /root/demo/ path so live-env demos still work on the ISO
+# itself (where the autoinstall env has /root/demo/ populated).
 
-_javaapi_app_yaml='/root/demo/argo/javaapi-fullstack-app.yaml'
+_javaapi_app_yaml=''
+for _p in \
+    /usr/local/share/kldload/demo/argo/javaapi-fullstack-app.yaml \
+    /root/demo/argo/javaapi-fullstack-app.yaml; do
+  if [[ -f "$_p" ]]; then _javaapi_app_yaml="$_p"; break; fi
+done
+[[ -z "$_javaapi_app_yaml" ]] && _javaapi_app_yaml='/usr/local/share/kldload/demo/argo/javaapi-fullstack-app.yaml'  # for the not-found error path
 _javaapi_ns='demo'
 _javaapi_pvc_dataset='rpool/k8s/pvc-postgres-data'
 _javaapi_vip='10.100.10.30'
@@ -3413,10 +3431,50 @@ demo_javaapi_verify() {
 }
 
 demo_javaapi_destroy() {
-  echo -ne "${Y}  Delete javaapi-fullstack Argo Application (keeps cluster)? [y/N] ${N}"
-  read -r _a
-  case "${_a,,}" in y|yes) ;; *) echo "  Aborted."; return 0 ;; esac
-  _kctl -n argocd delete application javaapi-fullstack --wait=true 2>&1 | tail -3
+  # Confirmation policy:
+  #   * Interactive shell (stdin is a TTY) — prompt for y/N as before.
+  #   * Non-interactive (webui button, ssh -c, cron) — auto-confirm.
+  #     The webui sends k8s_run_demo with no stdin, so the previous
+  #     `read -r` got EOF, defaulted to N, and the destroy silently
+  #     aborted. Reported on .137 — clicking the Destroy button did
+  #     nothing visible. Build #45 fix.
+  #   * KLDLOAD_DEMO_YES=1 — always skip prompt (cron, scripts).
+  if [[ -t 0 && -z "${KLDLOAD_DEMO_YES:-}" ]]; then
+    echo -ne "${Y}  Delete javaapi-fullstack (Argo App + helm release + namespace)? [y/N] ${N}"
+    read -r _a
+    case "${_a,,}" in y|yes) ;; *) echo "  Aborted."; return 0 ;; esac
+  else
+    echo -e "${D}  Non-interactive — auto-confirming destroy.${N}"
+  fi
+
+  # Three cleanup paths in priority order. Pre-#45 only the Argo
+  # Application was deleted. Today the demo deploys via direct
+  # `helm install` in the `demo` namespace, so the Argo path is a
+  # historical artifact + the helm path is the live one. The third
+  # path nukes the namespace, catching any orphaned resources that
+  # the first two missed.
+
+  # 1. Argo CD Application (only present if the GitOps path was used)
+  if _kctl -n argocd get application javaapi-fullstack >/dev/null 2>&1; then
+    echo -e "${D}  Removing Argo Application javaapi-fullstack...${N}"
+    _kctl -n argocd delete application javaapi-fullstack --wait=true --timeout=60s 2>&1 | tail -3
+  fi
+
+  # 2. Helm release in the demo namespace (the current deploy path)
+  if helm list -n demo 2>/dev/null | grep -q '^javaapi-fullstack\b'; then
+    echo -e "${D}  Uninstalling helm release javaapi-fullstack...${N}"
+    helm uninstall javaapi-fullstack -n demo --wait --timeout 2m 2>&1 | tail -3
+  fi
+
+  # 3. Catch-all: delete the demo namespace if anything from the chart
+  # is still lingering. --wait=false because finalizers on PVCs can
+  # keep this stuck for a minute; the user just wants the command to
+  # return.
+  if _kctl get ns demo >/dev/null 2>&1; then
+    echo -e "${D}  Deleting demo namespace (--wait=false)...${N}"
+    _kctl delete namespace demo --wait=false 2>&1 | tail -2
+  fi
+
   echo -e "${G}  javaapi-fullstack destroyed.${N}"
   echo -e "${D}  Re-deploy with: ${W}kube-demo javaapi${N}"
 }

@@ -5765,7 +5765,13 @@ async def _k8s_inspect(websocket, msg):
         ev = _run(["kubectl", "get", "events", "--all-namespaces",
                    "--field-selector", f"involvedObject.name={name},involvedObject.kind=Node",
                    "--sort-by=.lastTimestamp", "--no-headers"], timeout=5)
-        result["events"] = ev.strip().splitlines()[-15:]
+        # Filter the "No resources found in <ns> namespace." kubectl
+        # boilerplate that gets captured because _run merges stderr into
+        # stdout. Result: an empty list when there are no events, which
+        # the UI renders as "(none)" cleanly instead of as a bogus row.
+        _ev_lines = [l for l in ev.strip().splitlines()
+                     if l and "No resources found" not in l]
+        result["events"] = _ev_lines[-15:]
         # Pods currently on this node — most useful hover info.
         pods = _run(["kubectl", "get", "pods", "-A", "--field-selector",
                      f"spec.nodeName={name}", "--no-headers", "-o",
@@ -5777,7 +5783,7 @@ async def _k8s_inspect(websocket, msg):
                     "jsonpath={.status.capacity.cpu}|{.status.capacity.memory}|"
                     "{.status.allocatable.cpu}|{.status.allocatable.memory}"], timeout=4)
         result["capacity"] = cap.strip()
-    else:
+    elif kind == "pod":
         ns_args = ["-n", namespace] if namespace else []
         # Container status + images in one quick jsonpath.
         c = _run(["kubectl", "get", "pod", name, *ns_args, "-o",
@@ -5790,11 +5796,14 @@ async def _k8s_inspect(websocket, msg):
                      "jsonpath={.status.podIP}|{.spec.nodeName}|{.status.qosClass}"],
                     timeout=4)
         result["meta"] = meta.strip()
-        # Events on this pod (namespace-scoped).
+        # Events on this pod (namespace-scoped). See node branch above
+        # for why we filter "No resources found".
         ev = _run(["kubectl", "get", "events", *ns_args,
                    "--field-selector", f"involvedObject.name={name}",
                    "--sort-by=.lastTimestamp", "--no-headers"], timeout=5)
-        result["events"] = ev.strip().splitlines()[-15:]
+        _ev_lines = [l for l in ev.strip().splitlines()
+                     if l and "No resources found" not in l]
+        result["events"] = _ev_lines[-15:]
         # Log tail — best-effort, first container only. Keep small.
         logs = _run(["kubectl", "logs", name, *ns_args, "--tail=40",
                      "--all-containers=true", "--prefix=true"], timeout=6)
@@ -5802,6 +5811,49 @@ async def _k8s_inspect(websocket, msg):
         # Metrics for this specific pod.
         top = _run(["kubectl", "top", "pod", name, *ns_args, "--no-headers"], timeout=5)
         result["top"] = top.strip()
+    else:
+        # Generic-kind path — deployment, statefulset, daemonset,
+        # replicaset, etc. Workloads-tab row clicks land here. Returns
+        # describe + events + owned pods so the UI inline-drawer is
+        # useful (vs the pre-#45 silence when clicking a workload row
+        # did nothing — UX gap reported on .137 build #44).
+        ns_args = ["-n", namespace] if namespace else []
+        desc = _run(["kubectl", "describe", kind, name, *ns_args], timeout=8)
+        # Cap describe output. The full block is verbose (Tolerations,
+        # NodeSelectors, full conditions list). 8 KB keeps it useful
+        # without flooding the WS frame.
+        result["describe"] = (desc or "")[:8000]
+        # Events scoped to this object — same "No resources found"
+        # filter as the pod and node branches above.
+        ev = _run(["kubectl", "get", "events", *ns_args,
+                   "--field-selector", f"involvedObject.name={name}",
+                   "--sort-by=.lastTimestamp", "--no-headers"], timeout=5)
+        _ev_lines = [l for l in ev.strip().splitlines()
+                     if l and "No resources found" not in l]
+        result["events"] = _ev_lines[-15:]
+        # Owned pods — only meaningful for kinds that have a selector
+        # (deployment, statefulset, daemonset, replicaset). For others
+        # this resolves to empty and the UI just hides the section.
+        #
+        # Use go-template to emit the selector as `key=value,key=value`
+        # directly. Earlier version used jsonpath={.spec.selector.matchLabels}
+        # which on modern kubectl returns JSON like {"k8s-app":"hubble-relay"}
+        # — the literal quotes leaked into the kubectl -l call and BadRequest'd.
+        # Reported on .137 deployment-row inspect (build #44 hotfix).
+        if kind in ("deployment", "statefulset", "daemonset", "replicaset"):
+            sel_raw = _run([
+                "kubectl", "get", kind, name, *ns_args,
+                "-o", "go-template={{range $k, $v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}",
+            ], timeout=4)
+            owned = []
+            label_sel = (sel_raw or "").strip().rstrip(",")
+            if label_sel and "=" in label_sel:
+                pods = _run(["kubectl", "get", "pods", *ns_args,
+                             "-l", label_sel, "--no-headers", "-o",
+                             "custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,STATUS:.status.phase,NODE:.spec.nodeName"],
+                            timeout=5)
+                owned = pods.strip().splitlines()[:30]
+            result["owned_pods"] = owned
 
     await websocket.send(json.dumps(result))
 

@@ -6285,11 +6285,14 @@ function k8sRowClick(tr) {
 
 function renderK8sInspect(msg) {
   if (msg.error) return;
-  // Find the open detail row for this target. Match by kind+name+ns so
-  // stale responses to a closed drawer are silently dropped.
-  const sel = msg.kind === 'node'
-    ? `tr.k8s-row[data-kind="node"][data-name="${CSS.escape(msg.name)}"]`
-    : `tr.k8s-row[data-kind="pod"][data-name="${CSS.escape(msg.name)}"][data-ns="${CSS.escape(msg.namespace || '')}"]`;
+  // Find the open detail row for this target. Match by kind+name+ns
+  // so stale responses to a closed drawer are silently dropped. The
+  // selector now matches the message's own kind so deployment /
+  // statefulset / daemonset rows route correctly (build #45 — the
+  // pre-#45 selector hardcoded kind=pod for the non-node case).
+  const isNode = msg.kind === 'node';
+  const sel = `tr.k8s-row[data-kind="${CSS.escape(msg.kind)}"][data-name="${CSS.escape(msg.name)}"]`
+            + (isNode ? '' : `[data-ns="${CSS.escape(msg.namespace || '')}"]`);
   const tr = document.querySelector(sel);
   if (!tr) return;
   const detail = tr.nextElementSibling;
@@ -6298,7 +6301,13 @@ function renderK8sInspect(msg) {
   if (!body) return;
 
   const sec = (title, html) => `<div style="margin-bottom:0.65rem"><div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);margin-bottom:0.2rem">${esc(title)}</div>${html}</div>`;
-  const pre = txt => `<pre style="font-family:monospace;font-size:0.72rem;color:var(--subtle);background:var(--surface3);padding:0.5rem 0.7rem;border-radius:4px;white-space:pre-wrap;word-break:break-all;max-height:240px;overflow:auto;margin:0">${esc(txt || '(none)')}</pre>`;
+  // The pre block historically had max-height:240px;overflow:auto
+  // but the scrollbar didn't respond — the parent TR/TD constrains
+  // height and clips the overflow. Bumping to 480px gives the
+  // describe output room. The outer TD also gets overflow:auto via
+  // body.style below so the whole drawer scrolls if the pre stack
+  // exceeds it.
+  const pre = txt => `<pre style="font-family:monospace;font-size:0.72rem;color:var(--subtle);background:var(--surface3);padding:0.5rem 0.7rem;border-radius:4px;white-space:pre-wrap;word-break:break-all;max-height:480px;overflow:auto;margin:0">${esc(txt || '(none)')}</pre>`;
   const list = arr => arr && arr.length
     ? `<div style="font-family:monospace;font-size:0.72rem;color:var(--subtle);background:var(--surface3);padding:0.5rem 0.7rem;border-radius:4px;max-height:200px;overflow:auto">${arr.map(x => `<div>${esc(x)}</div>`).join('')}</div>`
     : `<div style="color:var(--muted);font-size:0.75rem">(none)</div>`;
@@ -6313,7 +6322,7 @@ function renderK8sInspect(msg) {
     if (msg.top) html += sec('Live usage', `<div style="font-family:monospace;font-size:0.8rem">${esc(msg.top)}</div>`);
     html += sec(`Pods on this node (${(msg.pods_on_node || []).length})`, list(msg.pods_on_node));
     html += sec('Recent events', list(msg.events));
-  } else {
+  } else if (msg.kind === 'pod') {
     const meta = (msg.meta || '').split('|');
     const metaStr = meta.length >= 3
       ? `IP ${esc(meta[0] || '—')} • node ${esc(meta[1] || '—')} • QoS ${esc(meta[2] || '—')}`
@@ -6323,7 +6332,23 @@ function renderK8sInspect(msg) {
     html += sec('Containers', list(msg.containers));
     html += sec('Recent events', list(msg.events));
     html += sec('Log tail (last 40 lines)', pre(msg.logs));
+  } else {
+    // Generic-kind path: deployment, statefulset, daemonset,
+    // replicaset, etc. Backend returns describe + events +
+    // owned_pods (only set for selector-based kinds).
+    html += sec(`${esc(msg.kind)} — ${esc(msg.namespace)}/${esc(msg.name)}`, '');
+    if (msg.owned_pods && msg.owned_pods.length) {
+      html += sec(`Owned pods (${msg.owned_pods.length})`, list(msg.owned_pods));
+    }
+    html += sec('Recent events', list(msg.events));
+    html += sec('Describe', pre(msg.describe));
   }
+  // Hard-cap the drawer at 60vh + give it its own scroll. Without
+  // this the deployment-row describe block (up to 8 KB of text) pushes
+  // the page layout downward and the inner pre scrollbars don't
+  // engage. Build #45 fix; reported on .137.
+  body.style.maxHeight = '60vh';
+  body.style.overflowY = 'auto';
   body.innerHTML = html;
 }
 
@@ -7130,13 +7155,17 @@ function renderK8sDeployments(deploys) {
     const desired = d.desired || '?';
     const healthy = String(ready) === String(desired);
     const imgShort = (d.image || '').split('/').pop().slice(0, 40);
-    return `<tr>
+    // Row-click expands an inline detail drawer (same pattern as pods
+    // + nodes tabs). data-kind tags the row so k8sRowClick() routes
+    // through k8s_inspect with kind=deployment, which the backend
+    // extends to describe + owned pods + last rollout for deployments.
+    return `<tr class="k8s-row" data-kind="deployment" data-name="${esc(d.name)}" data-ns="${esc(d.namespace)}" onclick="k8sRowClick(this)" style="cursor:pointer" title="Click for describe, owned pods, last rollout">
       <td style="color:var(--muted);font-size:0.82rem">${esc(d.namespace)}</td>
       <td style="font-family:monospace;font-size:0.82rem;font-weight:600;color:var(--accent2)">${esc(d.name)}</td>
       <td><span style="color:${healthy ? 'var(--good)' : 'var(--warn)'}">${esc(ready)}/${esc(desired)}</span></td>
       <td style="color:var(--muted);font-family:monospace;font-size:0.75rem" title="${esc(d.image)}">${esc(imgShort)}</td>
       <td style="color:var(--muted);font-size:0.78rem">${esc((d.age || '').slice(0, 10))}</td>
-      <td style="white-space:nowrap">
+      <td onclick="event.stopPropagation()" style="white-space:nowrap">
         <button class="btn btn-ghost btn-sm" onclick="k8sScale('${esc(d.namespace)}','${esc(d.name)}',${parseInt(desired) || 1})" title="Scale replicas">⇅ Scale</button>
         <button class="btn btn-ghost btn-sm" onclick="k8sRolloutRestart('${esc(d.namespace)}','${esc(d.name)}')" title="kubectl rollout restart">↻ Restart</button>
         <button class="btn btn-ghost btn-sm" onclick="k8sRolloutUndo('${esc(d.namespace)}','${esc(d.name)}')" title="kubectl rollout undo">↶ Rollback</button>

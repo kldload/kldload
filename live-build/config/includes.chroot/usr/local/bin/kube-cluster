@@ -279,6 +279,7 @@ CMD="${1:-}"
 [[ -n "$CMD" ]] || usage
 shift
 
+YES_FLAG=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --workers) WORKERS="$2"; shift 2 ;;
@@ -287,9 +288,11 @@ while [[ $# -gt 0 ]]; do
     --disk)    DISK="$2"; shift 2 ;;
     --image)   CLOUD_IMAGE="$2"; shift 2 ;;
     --all)     DESTROY_ALL=1; shift ;;
+    --yes|-y)  YES_FLAG=1; shift ;;
     *)         die "Unknown option: $1" ;;
   esac
 done
+export YES_FLAG
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1672,8 +1675,26 @@ cmd_destroy() {
   echo "  Control plane: ${CP_NAME}"
   echo "  Workers: ${WORKER_PREFIX}-1 through ${WORKER_PREFIX}-${WORKERS}"
   echo ""
-  read -r -p "Type 'destroy' to continue: " confirm
-  [[ "$confirm" == "destroy" ]] || { echo "Aborted."; exit 0; }
+
+  # Confirmation policy:
+  #   * Interactive shell — type "destroy" literally (no accidental
+  #     y/N fat-finger; this is irreversible).
+  #   * Non-interactive (webui button, ssh -c, cron) — require
+  #     KUBE_CLUSTER_YES=1 in env, OR --yes/-y flag from caller.
+  #     Without that, refuse loudly. Earlier `kube-cluster destroy
+  #     --yes` returned "Unknown option: --yes" because the flag
+  #     wasn't parsed; the dispatch case statement at the bottom now
+  #     extracts it before reaching here. Build #45 fix.
+  if [[ "${KUBE_CLUSTER_YES:-0}" == "1" || "${YES_FLAG:-0}" == "1" ]]; then
+    echo -e "${D:-}  Non-interactive / --yes — proceeding without prompt.${N}"
+  elif [[ -t 0 ]]; then
+    read -r -p "Type 'destroy' to continue: " confirm
+    [[ "$confirm" == "destroy" ]] || { echo "Aborted."; exit 0; }
+  else
+    echo -e "${R}ERROR: refusing to destroy from a non-interactive shell without explicit confirmation.${N}" >&2
+    echo "  Set KUBE_CLUSTER_YES=1 in the env, or pass --yes, then retry." >&2
+    exit 2
+  fi
 
   log "Destroying cluster..."
 
