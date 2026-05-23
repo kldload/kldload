@@ -3264,40 +3264,62 @@ demo_javaapi() {
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
   echo
   echo -e "${D}  Deploys: Postgres + 7 Spring services + nginx + k6 loadgen${N}"
-  echo -e "${D}  via Argo CD Application (continuous reconcile, GitOps).${N}"
+  echo -e "${D}  via direct helm install of the local chart.${N}"
   echo -e "${D}  Target VIP: ${C}http://${_javaapi_vip}/${N}"
   echo
-  if [[ ! -f "$_javaapi_app_yaml" ]]; then
-    echo -e "${R}  Application manifest missing: ${_javaapi_app_yaml}${N}"
+
+  # Locate the helm chart (mirrors the path-resolution pattern used by
+  # _javaapi_app_yaml — checks the FHS-correct /usr/local/share path
+  # first, falls back to the legacy /root/demo path for backward compat
+  # with pre-build-#45 ISOs).
+  local _chart=''
+  for _p in \
+      /usr/local/share/kldload/demo/charts/javaapi-fullstack \
+      /root/demo/charts/javaapi-fullstack; do
+    if [[ -d "$_p" && -f "$_p/Chart.yaml" ]]; then _chart="$_p"; break; fi
+  done
+  if [[ -z "$_chart" ]]; then
+    echo -e "${R}  Chart missing at /usr/local/share/kldload/demo/charts/javaapi-fullstack${N}"
+    echo -e "${R}  (or the legacy /root/demo/ path)${N}"
     return 1
   fi
-  echo -e "${G}→${N} ${W}kubectl apply -f $_javaapi_app_yaml${N}"
-  _kctl apply -f "$_javaapi_app_yaml" || return 1
-  echo
-  echo -e "${G}→${N} ${W}waiting for Argo to sync (timeout 10m)…${N}"
+
+  # Direct helm install — bypasses Argo. Earlier iterations registered
+  # an Argo Application CRD pointing at a public Git URL, but Argo's
+  # repo-server refused to checkout the kldload-free source repo
+  # because it contains symlinks targeting outside the working tree
+  # ("out-of-bounds symlinks" — a security guard in argocd-repo-server).
+  # The Argo path also forces a network round-trip + a Git clone for
+  # a chart that's already on disk. Direct helm install is faster, more
+  # reliable, and doesn't require ArgoCD to be working. Build #46 fix.
+  echo -e "${G}→${N} ${W}helm install javaapi-fullstack ${_chart}${N}"
   local _t0 _t1
   _t0=$(date +%s)
-  # argocd CLI may not be authenticated; fall back to polling the CRD.
-  if command -v argocd >/dev/null 2>&1 && argocd app get javaapi-fullstack >/dev/null 2>&1; then
-    argocd app wait javaapi-fullstack --health --sync --timeout 600 2>&1 | tail -3
+  if helm status javaapi-fullstack -n "${_javaapi_ns}" >/dev/null 2>&1; then
+    helm upgrade javaapi-fullstack "$_chart" \
+      -n "${_javaapi_ns}" --create-namespace \
+      --wait --timeout 5m 2>&1 | tail -8
   else
-    local _deadline=$(( $(date +%s) + 600 ))
-    while (( $(date +%s) < _deadline )); do
-      local _sync _health
-      _sync=$(_kctl -n argocd get application javaapi-fullstack -o jsonpath='{.status.sync.status}' 2>/dev/null)
-      _health=$(_kctl -n argocd get application javaapi-fullstack -o jsonpath='{.status.health.status}' 2>/dev/null)
-      printf '\r  sync=%s health=%s   ' "${_sync:-?}" "${_health:-?}"
-      [[ "$_sync" == "Synced" && "$_health" == "Healthy" ]] && { echo; break; }
-      sleep 5
-    done
+    helm install javaapi-fullstack "$_chart" \
+      -n "${_javaapi_ns}" --create-namespace \
+      --wait --timeout 5m 2>&1 | tail -8
   fi
   _t1=$(date +%s)
   echo
   echo -e "${G}✓ deployed in $((_t1 - _t0)) seconds${N}"
   echo
+
+  # Show where to hit it. The MetalLB-allocated ingress VIP is
+  # discovered live; falls back to the legacy hardcoded VIP if the
+  # service hasn't gotten an EXTERNAL-IP yet.
+  local _vip
+  _vip=$(_kctl -n "${_javaapi_ns}" get svc ingress \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+  [[ -z "$_vip" ]] && _vip="${_javaapi_vip}"
+
   echo -e "${C}Try it:${N}"
-  echo -e "  ${W}curl http://${_javaapi_vip}/${N}                    (homepage)"
-  echo -e "  ${W}curl http://${_javaapi_vip}/api/customer${N}        (REST endpoint)"
+  echo -e "  ${W}curl http://${_vip}/${N}                       (homepage)"
+  echo -e "  ${W}curl http://${_vip}/api/customer${N}           (REST endpoint)"
   echo -e "  ${W}kube-demo javaapi_status${N}              (sync + snapshots + replication)"
   echo -e "  ${W}kube-demo javaapi_disaster${N}            (drop a table — watch it break)"
   echo -e "  ${W}kube-demo javaapi_recover${N}             (zfs rollback — watch it recover)"
