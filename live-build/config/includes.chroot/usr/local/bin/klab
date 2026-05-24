@@ -1916,6 +1916,20 @@ cmd_build_all() {
   # already exists; deploy_site skips distros whose <site>-<distro>
   # zvol already exists. Re-runs after partial failure pick up where
   # the last run stopped.
+  #
+  # Single-flight lock: caught on .135 build #49 -- operator clicked
+  # "Build Everything" twice ~8 min apart, two concurrent klab build-
+  # all jobs fought for libvirt resources and undef/redef'd each
+  # other's golden VMs mid-build. flock -n on a /run/ lockfile
+  # prevents the second invocation. fd 200 is the convention for
+  # bash flock; -n returns immediately instead of blocking if locked.
+  exec 200>/run/klab-build-all.lock || die "could not open lockfile /run/klab-build-all.lock"
+  if ! flock -n 200; then
+    warn "klab build-all already in progress (lock held by another process)"
+    warn "if you are sure no other run is active: rm -f /run/klab-build-all.lock"
+    exit 0
+  fi
+  trap 'rm -f /run/klab-build-all.lock' EXIT
   log "${C}klab build-all${N}: building 6 goldens, then deploying blue + green sites"
   log "  Total expected time: ~45-60 min (golden build dominates)"
   log "  Result: rpool/vms/klab-{golden,blue,green}-<distro> + WireGuard mesh"
