@@ -1184,13 +1184,27 @@ if [[ "$EDITION" != "core" ]]; then
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/*-exporter.timer \
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/loki.service \
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/promtail.service \
-        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-tls-cert.service \
-        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-tls-cert.timer \
-        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-proxy.service \
-        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-headlamp.service \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-*.service \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-*.timer \
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-session@.service; do
         [[ -f "$_unit_path" ]] && cp "$_unit_path" "${ROOTFS}/usr/lib/systemd/system/$(basename "$_unit_path")"
     done
+
+    # Wholesale-copy /usr/local/lib/kldload-rag/ (RAG service code +
+    # indexer + unit-file sources). Same root-cause fix as the unit-file
+    # glob above: previous hardcoded approach missed the lib dir entirely,
+    # so RAG silently shipped without its python code. Catch-all glob.
+    if [[ -d /build/live-build/config/includes.chroot/usr/local/lib ]]; then
+        mkdir -p "${ROOTFS}/usr/local/lib"
+        for _libdir in /build/live-build/config/includes.chroot/usr/local/lib/*/; do
+            [[ -d "$_libdir" ]] || continue
+            _libname=$(basename "$_libdir")
+            mkdir -p "${ROOTFS}/usr/local/lib/${_libname}"
+            cp -r "${_libdir}/." "${ROOTFS}/usr/local/lib/${_libname}/"
+        done
+        log "Copied /usr/local/lib/* dirs from includes.chroot to ROOTFS"
+    fi
+
     shopt -u nullglob
     # ── 1.0.6 TLS-terminator swap: nginx replaces kldload-proxy ────────
     # nginx on :8443 with HTTP/2 + ALPN + drop-in dir pattern. Graceful

@@ -89,40 +89,44 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
 
   # ── Bob + RAG content inside the squashfs ───────────────────────────
   # Catches the regression where RAG code shipped but indexer/units/
-  # deps were missing (commit ec5bd90 fix). Loop-mount squashfs read-only.
+  # deps were missing. unsquashfs returns 0 even when some requested
+  # files don't exist in the image, so we verify each file
+  # individually after the extract instead of trusting its exit code.
   if [[ -f "$MOUNTPOINT/LiveOS/squashfs.img" ]] && command -v unsquashfs >/dev/null 2>&1; then
     SQEXTRACT=$(mktemp -d)
-    if unsquashfs -q -d "$SQEXTRACT/root" -ll "$MOUNTPOINT/LiveOS/squashfs.img" >/dev/null 2>&1; then
-      # unsquashfs -ll only lists; for actual checks use -d extract
-      rm -rf "$SQEXTRACT/root"
-      if unsquashfs -q -f -d "$SQEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" \
-           usr/local/bin/bob \
-           usr/local/bin/kldload-rag-index \
-           usr/local/bin/kai-rag \
-           usr/local/lib/kldload-rag/kldload_rag.py \
-           usr/local/lib/kldload-rag/kldload_rag_index.py \
-           usr/lib/systemd/system/kldload-rag.service \
-           usr/lib/systemd/system/kldload-rag-firstboot.service \
-           usr/lib/systemd/system/kldload-rag-index.timer \
-           usr/lib/systemd/system/kldload-rag-index.service \
-           >/dev/null 2>&1; then
-        _pass "squashfs has RAG service code"
-        _pass "squashfs has RAG indexer code"
-        _pass "squashfs has RAG indexer CLI"
-        _pass "squashfs has all 4 RAG systemd units"
+    declare -a RAG_FILES=(
+        usr/local/bin/bob
+        usr/local/bin/kldload-rag-index
+        usr/local/bin/kai-rag
+        usr/local/lib/kldload-rag/kldload_rag.py
+        usr/local/lib/kldload-rag/kldload_rag_index.py
+        usr/lib/systemd/system/kldload-rag.service
+        usr/lib/systemd/system/kldload-rag-firstboot.service
+        usr/lib/systemd/system/kldload-rag-index.timer
+        usr/lib/systemd/system/kldload-rag-index.service
+    )
+    unsquashfs -q -f -d "$SQEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" \
+        "${RAG_FILES[@]}" >/dev/null 2>&1 || true
 
-        # Verify bob CLI is the patched version (has BOB_RAG bridge),
-        # NOT the 3-line stub from older builds
-        if grep -q 'BOB_RAG\b' "$SQEXTRACT/root/usr/local/bin/bob" 2>/dev/null; then
-          _pass "squashfs bob CLI has RAG bridge"
-        else
-          _fail "squashfs bob CLI has RAG bridge" "stub installed instead of full bob -- RAG won't be used"
-        fi
+    # Per-file existence + content checks
+    for _f in "${RAG_FILES[@]}"; do
+      if [[ -f "$SQEXTRACT/root/$_f" ]]; then
+        _pass "squashfs has $_f"
       else
-        _fail "RAG files in squashfs" "one or more files missing -- RAG won't work after install"
+        _fail "squashfs has $_f" "file missing from squashfs"
       fi
-      rm -rf "$SQEXTRACT"
+    done
+
+    # bob must contain BOB_RAG (the bridge marker) -- catches the stub
+    if [[ -f "$SQEXTRACT/root/usr/local/bin/bob" ]]; then
+      if grep -q 'BOB_RAG' "$SQEXTRACT/root/usr/local/bin/bob"; then
+        _pass "squashfs bob CLI has RAG bridge"
+      else
+        _fail "squashfs bob CLI has RAG bridge" "stub installed instead of full bob -- RAG won't be used"
+      fi
     fi
+
+    rm -rf "$SQEXTRACT"
   fi
 
   umount "$MOUNTPOINT" 2>/dev/null
