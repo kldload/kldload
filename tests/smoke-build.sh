@@ -87,6 +87,44 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
     _warn "Boot loader" "no isolinux or grub — may not boot on all systems"
   fi
 
+  # ── Bob + RAG content inside the squashfs ───────────────────────────
+  # Catches the regression where RAG code shipped but indexer/units/
+  # deps were missing (commit ec5bd90 fix). Loop-mount squashfs read-only.
+  if [[ -f "$MOUNTPOINT/LiveOS/squashfs.img" ]] && command -v unsquashfs >/dev/null 2>&1; then
+    SQEXTRACT=$(mktemp -d)
+    if unsquashfs -q -d "$SQEXTRACT/root" -ll "$MOUNTPOINT/LiveOS/squashfs.img" >/dev/null 2>&1; then
+      # unsquashfs -ll only lists; for actual checks use -d extract
+      rm -rf "$SQEXTRACT/root"
+      if unsquashfs -q -f -d "$SQEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" \
+           usr/local/bin/bob \
+           usr/local/bin/kldload-rag-index \
+           usr/local/bin/kai-rag \
+           usr/local/lib/kldload-rag/kldload_rag.py \
+           usr/local/lib/kldload-rag/kldload_rag_index.py \
+           usr/lib/systemd/system/kldload-rag.service \
+           usr/lib/systemd/system/kldload-rag-firstboot.service \
+           usr/lib/systemd/system/kldload-rag-index.timer \
+           usr/lib/systemd/system/kldload-rag-index.service \
+           >/dev/null 2>&1; then
+        _pass "squashfs has RAG service code"
+        _pass "squashfs has RAG indexer code"
+        _pass "squashfs has RAG indexer CLI"
+        _pass "squashfs has all 4 RAG systemd units"
+
+        # Verify bob CLI is the patched version (has BOB_RAG bridge),
+        # NOT the 3-line stub from older builds
+        if grep -q 'BOB_RAG\b' "$SQEXTRACT/root/usr/local/bin/bob" 2>/dev/null; then
+          _pass "squashfs bob CLI has RAG bridge"
+        else
+          _fail "squashfs bob CLI has RAG bridge" "stub installed instead of full bob -- RAG won't be used"
+        fi
+      else
+        _fail "RAG files in squashfs" "one or more files missing -- RAG won't work after install"
+      fi
+      rm -rf "$SQEXTRACT"
+    fi
+  fi
+
   umount "$MOUNTPOINT" 2>/dev/null
   _pass "ISO unmounted cleanly"
 else
