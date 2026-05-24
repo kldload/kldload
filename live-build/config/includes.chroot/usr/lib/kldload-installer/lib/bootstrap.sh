@@ -738,89 +738,45 @@ ROCKYREPO
                  || k_die "subscription-manager register failed — check your activation key and org ID"; }
       fi
 
-      # ── Pre-stage the RHEL Cloud Image qcow2 + build the 6th golden ──
-      # While we still have the user's creds in memory (and ONLY here),
-      # do all the RHEL setup the firstboot golden builder would have
-      # done post-reboot:
+      # ── Mark for the firstboot osbuild-composer build ──────────────
+      # The original plan was to download the pre-built RHEL Cloud
+      # Image qcow2 via access.redhat.com's Images API during install.
+      # That path is now dead at the source: RH disabled grant_type=
+      # password for the rhsm-api SSO client in 2025-26 (returns
+      # `unauthorized_client / Client not allowed for direct access
+      # grants`). The only remaining programmatic paths are:
       #
-      #   1. Download the RHEL 10 KVM Guest Image qcow2 via the RH
-      #      Customer Portal Images API (klab fetch-rhel-image)
-      #   2. Create the zvol on the target's rpool
-      #   3. qemu-img convert the qcow2 into the zvol
-      #   4. zfs snapshot @golden
+      #   1. User generates an offline token at access.redhat.com/
+      #      management/api and pastes it -- poor UX, one-time setup
+      #      per operator with a fragile token TTL story.
       #
-      # After this, firstboot's `klab golden rhel` sees the snapshot
-      # already exists and skips RHEL entirely -- no creds needed
-      # post-install, no Dashboard panel, nothing to forget. Install
-      # takes ~3-5 min longer (image download dominates) but the
-      # operator ends up with all 6 klab goldens and zero remaining
-      # credential surface.
+      #   2. osbuild-composer locally on the registered RHEL host
+      #      builds a qcow2 from subscription content. RH-blessed
+      #      "build custom RHEL images from your registered system"
+      #      flow. Sidesteps the API entirely. (CHOSEN.)
       #
-      # Only attempted when we have username/password (RH API doesn't
-      # accept activation keys -- those are for subscription-manager
-      # only). Activation-key flows skip the auto-build; operator can
-      # hand-place a qcow2 at /var/lib/klab/images/rhel-10-cloud.qcow2
-      # before next `klab golden rhel` run if needed.
-      if [[ "${rhel_auth}" == "userpass" ]]; then
-        local rhel_qcow="${target}/var/lib/klab/images/rhel-10-cloud.qcow2"
-        install -d -m 0755 "${target}/var/lib/klab/images"
-        k_log_to "$log" "Pre-staging RHEL 10 Cloud Image (a few min)..."
-
-        if RHEL_USERNAME="${rhel_user}" RHEL_PASSWORD="${rhel_pass}" \
-           /usr/local/bin/klab fetch-rhel-image \
-             --output "${rhel_qcow}" \
-             >>"$log" 2>&1; then
-          k_log_to "$log" "RHEL Cloud Image cached at /var/lib/klab/images/rhel-10-cloud.qcow2"
-
-          # Now turn it into the 6th klab golden. Target's rpool is
-          # already imported (mounted under ${target}); we create the
-          # zvol + convert + snapshot directly. The pool name follows
-          # klab's default (POOL=rpool, zvol path rpool/vms/klab-golden-rhel).
-          # The snapshot persists across reboot since it lives on the
-          # target's rpool, not the live env.
-          local zpath="rpool/vms/klab-golden-rhel"
-          local zdev="/dev/zvol/${zpath}"
-          local disk_gb=40   # matches klab DISK=40 default
-
-          k_log_to "$log" "Building 6th klab golden (zvol + convert + snapshot)..."
-          if zfs list rpool/vms >/dev/null 2>&1 || zfs create rpool/vms 2>>"$log"; then
-            if zfs create -V "${disk_gb}G" -s \
-                          -o volblocksize=64k -o compression=lz4 \
-                          "$zpath" 2>>"$log"; then
-              # Wait for /dev/zvol/<zpath> to materialise (udev).
-              for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-                [[ -b "$zdev" ]] && break
-                sleep 1
-              done
-              if [[ -b "$zdev" ]] && qemu-img convert -f qcow2 -O raw "$rhel_qcow" "$zdev" >>"$log" 2>&1; then
-                growpart "$zdev" 1 >>"$log" 2>&1 || true
-                if zfs snapshot "${zpath}@golden" 2>>"$log"; then
-                  k_log_to "$log" "klab-golden-rhel snapshot created -- firstboot will skip RHEL"
-                else
-                  k_log_to "$log" "WARN: zfs snapshot ${zpath}@golden failed"
-                fi
-              else
-                k_log_to "$log" "WARN: qemu-img convert into zvol failed (zvol missing or convert errored)"
-              fi
-            else
-              k_log_to "$log" "WARN: zfs create ${zpath} failed (firstboot will retry from cached qcow2)"
-            fi
-          else
-            k_log_to "$log" "WARN: could not create rpool/vms (firstboot will handle)"
-          fi
-        else
-          k_log_to "$log" "WARN: RHEL Cloud Image fetch failed (no 6th golden -- operator can hand-place qcow2)"
-        fi
-      else
-        k_log_to "$log" "RHEL auth=${rhel_auth} -- skipping 6th-golden auto-build (API needs userpass; hand-place qcow2 if needed)"
-      fi
+      # Composer needs to run ON the registered RHEL host, not the
+      # live env (live env is Fedora; composer's RHEL repo defs need
+      # to be present + entitlement certs available -- the installed
+      # target has both, the live env doesn't without extra plumbing).
+      # So we DEFER to firstboot: write a marker, install-time exits,
+      # systemd's kldload-rhel-composer.service picks it up after the
+      # host boots into its installed-RHEL state.
+      #
+      # User experience: install completes ~3 min faster than the old
+      # pre-stage path (no image download here), but klab-golden-rhel
+      # appears ~15-25 min into first boot rather than immediately.
+      # Other 5 distros' goldens build in parallel during firstboot;
+      # all are usable as soon as each finishes.
+      install -d -m 0755 "${target}/var/lib/klab"
+      touch "${target}/var/lib/klab/.rhel-composer-pending"
+      k_log_to "$log" "RHEL 6th klab golden deferred to firstboot composer build (~15-25 min after first reboot, background)"
 
       # ── Shred install-time creds ──────────────────────────────────
       # Pass-through-and-delete model. By here:
       #   - host registered (subscription-manager identity persists)
-      #   - cloud image converted into rpool/vms/klab-golden-rhel
-      #     and snapshotted @golden (if userpass)
-      #   - 6th klab golden ready; firstboot will skip RHEL
+      #   - marker written for firstboot composer (no creds needed --
+      #     composer uses the host's entitlement certs)
       #
       # Nothing about RHEL needs the creds anymore. Unset in-memory.
       # We do NOT write /root/.klab-rhel-creds, do NOT mirror into

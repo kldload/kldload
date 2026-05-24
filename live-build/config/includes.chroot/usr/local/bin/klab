@@ -543,6 +543,21 @@ NETCFG
 # ── Section 3: RHEL Credentials ──────────────────────────────────────────
 
 _fetch_rhel_cloud_image_via_api() {
+  # NOTE (build #50): This function is DEFUNCT but kept for reference.
+  # Red Hat disabled `grant_type=password` for the rhsm-api SSO client
+  # (returns: `unauthorized_client / Client not allowed for direct
+  # access grants`). The only way to programmatically download a pre-
+  # built RHEL Cloud Image via the API is now via an offline token
+  # (user generates at access.redhat.com/management/api), which is a
+  # poor UX. kldload pivoted to osbuild-composer instead -- see
+  # kldload-rhel-composer-build, which uses the host's entitlement
+  # certs to assemble a custom qcow2 from cdn.redhat.com content.
+  #
+  # The function below will still attempt the password-grant flow and
+  # log the actual error to /var/log/klab/rhel-image-fetch.log if
+  # invoked. Useful for: (a) confirming the API is still dead, (b)
+  # future revival if RH ever re-enables the password grant.
+  #
   # Use the saved RHEL_USERNAME/PASSWORD to download the latest RHEL 10
   # KVM Guest Image qcow2 via the Customer Portal Images API.
   #
@@ -555,16 +570,15 @@ _fetch_rhel_cloud_image_via_api() {
   #      actual blob, streams to disk
   #
   # Output path: default /var/lib/klab/images/rhel-10-cloud.qcow2,
-  # overridable by setting $1 (allows the installer to stage the file
-  # directly onto the target before reboot, then shred creds and never
-  # have to mention them again post-install).
+  # overridable by setting $1.
   #
   # Logs to /var/log/klab/rhel-image-fetch.log. Tokens + creds are
   # never logged or echoed to stdout (sed-scrubbed on any line that
   # might quote them back).
   #
   # Returns: 0 = qcow2 landed at the output path
-  #          1 = any failure (caller logs warn + skips)
+  #          1 = any failure (caller logs warn + skips). Currently
+  #              always returns 1 because of the upstream API change.
   local out_path="${1:-/var/lib/klab/images/rhel-10-cloud.qcow2}"
   local out_dir; out_dir="$(dirname "$out_path")"
   local log_file=/var/log/klab/rhel-image-fetch.log

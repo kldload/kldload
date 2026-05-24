@@ -1,0 +1,125 @@
+# kldload RHEL 10 cloud image blueprint
+#
+# Consumed by kldload-rhel-composer-build (firstboot one-shot) via
+# osbuild-composer's composer-cli. Builds a custom qcow2 using the
+# registered host's subscription content, lands it as the 6th klab
+# golden (rpool/vms/klab-golden-rhel@golden).
+#
+# Replaces the broken access.redhat.com Images API pull -- RH disabled
+# grant_type=password for the rhsm-api client at some point in 2025-26,
+# making programmatic qcow2 download impossible without a manually-
+# generated offline token. Composer sidesteps the API entirely; it
+# uses the host's entitlement certs to fetch RPMs from cdn.redhat.com
+# and assembles the image locally.
+#
+# Package set is the same shape as klab's setup_vm_golden for other
+# distros: base + dev + ebpf + observability. NOT included: EPEL-only
+# packages (iftop, nethogs, etc.) -- composer's default RHEL repos
+# don't include EPEL. Operator can layer those post-clone via cloud-
+# init if needed.
+
+name        = "rhel-cloud"
+description = "kldload RHEL 10 cloud-init ready klab golden"
+version     = "1.0.0"
+
+# Hostname is a placeholder; cloud-init overrides on each clone via
+# the kldload make_cloud_init_iso path.
+[customizations]
+hostname = "rhel-template"
+
+# Cloud-user lands with NOPASSWD wheel sudo -- standard RHEL cloud
+# image convention. Operator's per-clone user comes in via cloud-init.
+[[customizations.user]]
+name   = "cloud-user"
+groups = ["wheel"]
+
+[customizations.kernel]
+append = "console=ttyS0,115200n8 console=tty0"
+
+# Services enabled at boot.
+[customizations.services]
+enabled = [
+    "sshd",
+    "cloud-init-local",
+    "cloud-init",
+    "cloud-config",
+    "cloud-final",
+    "qemu-guest-agent",
+]
+
+# ── Base packages every RHEL cloud image needs ─────────────────────────
+[[packages]]
+name = "cloud-init"
+
+[[packages]]
+name = "subscription-manager"
+
+[[packages]]
+name = "qemu-guest-agent"
+
+[[packages]]
+name = "openssh-server"
+
+[[packages]]
+name = "openssh-clients"
+
+[[packages]]
+name = "sudo"
+
+[[packages]]
+name = "NetworkManager"
+
+[[packages]]
+name = "chrony"
+
+# ── Operator-friendly userland ─────────────────────────────────────────
+[[packages]]
+name = "vim-enhanced"
+
+[[packages]]
+name = "tmux"
+
+[[packages]]
+name = "rsync"
+
+[[packages]]
+name = "curl"
+
+[[packages]]
+name = "wget"
+
+[[packages]]
+name = "jq"
+
+[[packages]]
+name = "htop"
+
+[[packages]]
+name = "iotop-c"
+
+# ── Dev / kernel-module build environment ──────────────────────────────
+# kernel-devel ships in CodeReady Linux Builder, which subscription-
+# manager enables when the host is registered. Lets the operator
+# layer ZFS DKMS (or any out-of-tree module) inside a clone later
+# without an extra dnf install round.
+[[packages]]
+name = "kernel-devel"
+
+[[packages]]
+name = "dkms"
+
+[[packages]]
+name = "gcc"
+
+[[packages]]
+name = "make"
+
+[[packages]]
+name = "git"
+
+# ── eBPF observability (matches the host's F5-F12 cockpit set) ─────────
+[[packages]]
+name = "bcc-tools"
+
+[[packages]]
+name = "bpftrace"

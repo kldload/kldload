@@ -515,8 +515,11 @@ k_install_system_files() {
   # first. The kldload-rag-* entries below were missing pre-build-#48 and
   # caused RAG to be completely dead on every installed system even though
   # smoke-build saw the files in the squashfs (caught on .101 / build #47).
+  # kldload-rhel-composer.service added in build #50 -- runs at firstboot
+  # when bootstrap.sh wrote /var/lib/klab/.rhel-composer-pending (RHEL
+  # distro selected). Builds the 6th klab golden via osbuild-composer.
   mkdir -p "${target}/usr/lib/systemd/system"
-  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rag.service kldload-rag-firstboot.service kldload-rag-index.service kldload-rag-index.timer; do
+  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rag.service kldload-rag-firstboot.service kldload-rag-index.service kldload-rag-index.timer kldload-rhel-composer.service; do
     [[ -f "/usr/lib/systemd/system/${f}" ]] && \
       cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
   done
@@ -674,6 +677,19 @@ k_install_system_files() {
   fi
   # ChromaDB data dir
   install -d -m 0755 "${target}/var/lib/kldload-rag"
+
+  # ── RHEL firstboot composer build ──────────────────────────────────
+  # Wires kldload-rhel-composer.service into multi-user.target.wants/.
+  # The unit's ConditionPathExists=/var/lib/klab/.rhel-composer-pending
+  # makes it a no-op on non-RHEL installs (the marker file is only
+  # written by bootstrap.sh when KLDLOAD_DISTRO=rhel). Safe to enable
+  # universally. See kldload-rhel-composer-build header for the why
+  # (RH's password-grant SSO API is dead; composer is the replacement).
+  if [[ -f /usr/lib/systemd/system/kldload-rhel-composer.service ]]; then
+    ln -sf "/usr/lib/systemd/system/kldload-rhel-composer.service" \
+      "${target}/etc/systemd/system/multi-user.target.wants/kldload-rhel-composer.service" || true
+  fi
+  install -d -m 0755 "${target}/var/lib/klab/images"
   # ── 1.0.6 TLS-terminator: nginx ─────────────────────────────────────
   # nginx replaces the Python kldload-proxy as the :8443 listener.
   # HTTP/2 + graceful SIGHUP reload + drop-in dir pattern. The old

@@ -1,0 +1,30 @@
+[Unit]
+Description=kldload: build RHEL 10 klab golden via osbuild-composer
+Documentation=man:kldload-rhel-composer-build(8)
+# Run after kldload-firstboot has done its thing (ollama install + Bob
+# setup, etc.) and after subscription-manager-rhsm-facts has confirmed
+# the host's RH identity. We need network and the composer socket.
+After=network-online.target subscription-manager-rhsm-facts.service kldload-firstboot.service osbuild-composer.socket
+Wants=network-online.target osbuild-composer.socket
+# Only fire if bootstrap.sh wrote the marker (RHEL distro was picked
+# during install). Activation symlink in multi-user.target.wants is
+# always present, but the ConditionPathExists short-circuits on non-
+# RHEL installs so this is a free no-op there.
+ConditionPathExists=/var/lib/klab/.rhel-composer-pending
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kldload-rhel-composer-build
+RemainAfterExit=no
+StandardOutput=journal+console
+StandardError=journal+console
+# Compose can take 30+ min on slow links / big package sets. Don't
+# let systemd kill the build mid-compose.
+TimeoutSec=3600
+# Build pulls a lot of RPMs and assembles a qcow2; needs decent IO
+# and CPU. Don't run as a low-priority cgroup.
+Nice=0
+IOSchedulingClass=best-effort
+
+[Install]
+WantedBy=multi-user.target

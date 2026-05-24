@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# kldload-rhel-composer-build — first-boot RHEL Cloud Image builder.
+#
+# Fired by kldload-rhel-composer.service (one-shot, conditional on the
+# /var/lib/klab/.rhel-composer-pending marker bootstrap.sh writes when
+# a RHEL host is installed). Result: rpool/vms/klab-golden-rhel@golden
+# zvol snapshot, ready for kvm-clone / klab build-all to use as the
+# 6th distro alongside centos/rocky/fedora/debian/ubuntu.
+#
+# Why composer instead of the access.redhat.com Images API:
+#   RH disabled grant_type=password for the rhsm-api SSO client in
+#   2025-26 (returns: "unauthorized_client / Client not allowed for
+#   direct access grants"). The pre-built qcow2 cannot be programma-
+#   tically downloaded with portal username/password anymore -- you
+#   need a manually-generated offline token, which is a poor UX.
+#   Composer bypasses the API entirely: it uses the host's entitlement
+#   certs to fetch RPMs from cdn.redhat.com and ASSEMBLES the qcow2
+#   locally. RH-blessed path (it's their official "build custom RHEL
+#   images from your registered system" tool).
+#
+# Why firstboot instead of install-time:
+#   Composer needs a registered RHEL host running it (entitlement
+#   certs + working dnf with redhat.repo configured). The live ISO is
+#   Fedora -- it has subscription-manager certs after register, but
+#   composer's default repo definitions point at Fedora, and pointing
+#   them at RHEL requires shipping our own /etc/osbuild-composer/
+#   repositories/rhel-10.json. Doable but fragile. Running on the
+#   installed RHEL host instead means composer "just works" with its
+#   stock RHEL repo definitions and the host's entitlement.
+#
+# Time: ~15-25 min on a fast box (~500MB-1GB of RPMs pulled, depsolve,
+# image assembly). Runs in the background; user can use the box while
+# it builds. When done, the snapshot appears and klab golden rhel /
+# klab build-all see it via the existing skip-if-snapshot-exists path.
+
+set -euo pipefail
+
+log() {
+    logger -t kldload-rhel-composer "$*"
+    printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$*"
+}
+
+MARKER=/var/lib/klab/.rhel-composer-pending
+BLUEPRINT=/usr/local/share/kldload/rhel-cloud.toml
+OUTPUT_DIR=/var/lib/klab/images
+ZPATH=rpool/vms/klab-golden-rhel
+ZDEV=/dev/zvol/${ZPATH}
+DISK_GB=40
+
+# ── Preflight: do we need to run? ────────────────────────────────────
+if [[ ! -f "$MARKER" ]]; then
+    log "marker $MARKER missing -- nothing to do, exiting clean"
+    exit 0
+fi
+
+# Idempotency: if @golden already exists, we're done. Drop the marker
+# and exit. Lets the operator safely re-enable the service for re-runs
+# without it duplicating work.
+if zfs list "${ZPATH}@golden" >/dev/null 2>&1; then
+    log "${ZPATH}@golden already exists -- removing marker, exiting"
+    rm -f "$MARKER"
+    exit 0
+fi
+
+# Must be on a registered RHEL host. Composer's RHEL repo definitions
+# need active entitlement certs to talk to cdn.redhat.com.
+if ! subscription-manager identity >/dev/null 2>&1; then
+    log "ERROR: host is not registered with Red Hat -- composer cannot pull RHEL content"
+    log "       run: subscription-manager register --username=... --password=..."
+    log "       then: systemctl start kldload-rhel-composer"
+    exit 1
+fi
+log "host registered: $(subscription-manager identity 2>/dev/null | head -1 | tr -d '\n')"
+
+# composer-cli + osbuild-composer must be installed (RPMs are in RHEL
+# AppStream; kldload-install-target adds them to the dnf list).
+if ! command -v composer-cli >/dev/null 2>&1; then
+    log "ERROR: composer-cli not installed -- dnf install osbuild-composer composer-cli"
+    exit 1
+fi
+
+# ── Start composer + wait for API ────────────────────────────────────
+log "starting osbuild-composer.socket..."
+systemctl enable --now osbuild-composer.socket >/dev/null 2>&1 || true
+
+# composer-cli status returns "API server up" when ready. Poll up to
+# 60 sec -- socket activation is fast but the server can take a moment
+# to load its repo definitions on first run.
+log "waiting for composer API..."
+for _try in $(seq 1 30); do
+    if composer-cli status show 2>&1 | grep -qiE "api server.*up|api: connected"; then
+        log "composer API ready (attempt ${_try})"
+        break
+    fi
+    sleep 2
+done
+composer-cli status show >/dev/null 2>&1 || {
+    log "ERROR: composer-cli status check failed after 60s"
+    log "       service logs: journalctl -u osbuild-composer -n 50"
+    exit 1
+}
+
+# ── Push blueprint, depsolve, start compose ──────────────────────────
+[[ -r "$BLUEPRINT" ]] || { log "ERROR: blueprint $BLUEPRINT not found"; exit 1; }
+log "pushing blueprint: $BLUEPRINT"
+composer-cli blueprints push "$BLUEPRINT"
+
+log "depsolving rhel-cloud blueprint (resolves all RPM dependencies)..."
+if ! composer-cli blueprints depsolve rhel-cloud 2>&1 | tee /tmp/composer-depsolve.log; then
+    log "ERROR: depsolve failed (see /tmp/composer-depsolve.log)"
+    exit 1
+fi
+
+log "starting compose (output: qcow2)..."
+UUID=$(composer-cli compose start rhel-cloud qcow2 2>&1 | awk '/^Compose [0-9a-f]/ {print $2}')
+if [[ -z "$UUID" ]]; then
+    log "ERROR: failed to extract compose UUID from composer-cli output"
+    exit 1
+fi
+log "compose UUID: $UUID"
+
+# ── Wait for compose to finish (poll every 30s, up to 60 min) ───────
+log "polling compose status (typical: 10-25 min)..."
+COMPOSE_FINAL=""
+for _try in $(seq 1 120); do
+    STATUS=$(composer-cli compose status 2>&1 | awk -v id="$UUID" '$1 == id { print $2 }')
+    case "$STATUS" in
+        FINISHED)
+            log "compose FINISHED after ${_try} polls (~$((_try * 30))s)"
+            COMPOSE_FINAL=FINISHED
+            break
+            ;;
+        FAILED)
+            log "ERROR: compose FAILED"
+            log "  last 50 lines of compose log:"
+            composer-cli compose log "$UUID" 2>&1 | tail -50 | sed 's/^/  /'
+            exit 1
+            ;;
+        RUNNING|WAITING)
+            # Only log every 4th poll (~2 min) to avoid journal spam
+            (( _try % 4 == 0 )) && log "compose status: $STATUS (poll ${_try}/120)"
+            sleep 30
+            ;;
+        "")
+            log "WARN: compose status returned empty (poll ${_try}/120) -- retrying"
+            sleep 30
+            ;;
+        *)
+            log "compose status: $STATUS (poll ${_try}/120)"
+            sleep 30
+            ;;
+    esac
+done
+[[ "$COMPOSE_FINAL" == FINISHED ]] || { log "ERROR: compose timed out after 60 min"; exit 1; }
+
+# ── Download the qcow2 ─────────────────────────────────────────────
+log "downloading qcow2 (composer keeps it in /var/lib/osbuild-composer)..."
+mkdir -p "$OUTPUT_DIR"
+cd "$OUTPUT_DIR"
+composer-cli compose image "$UUID"
+
+# composer-cli writes ${UUID}-disk.qcow2 into cwd
+QCOW="${OUTPUT_DIR}/${UUID}-disk.qcow2"
+if [[ ! -f "$QCOW" ]]; then
+    log "ERROR: expected qcow2 at $QCOW after download -- composer-cli failed?"
+    exit 1
+fi
+mv -f "$QCOW" "${OUTPUT_DIR}/rhel-10-cloud.qcow2"
+QCOW="${OUTPUT_DIR}/rhel-10-cloud.qcow2"
+log "qcow2 staged: $QCOW ($(du -h "$QCOW" | cut -f1))"
+
+# ── Create zvol + convert qcow2 → zvol + snapshot @golden ──────────
+log "creating ZFS zvol $ZPATH (${DISK_GB}G sparse, lz4 compression)..."
+zfs list rpool/vms >/dev/null 2>&1 || zfs create rpool/vms
+zfs create -V "${DISK_GB}G" -s \
+    -o volblocksize=64k -o compression=lz4 "$ZPATH"
+
+# Wait for /dev/zvol/$ZPATH device node (udev populates async)
+for _ in $(seq 1 15); do
+    [[ -b "$ZDEV" ]] && break
+    sleep 1
+done
+[[ -b "$ZDEV" ]] || { log "ERROR: zvol device $ZDEV did not appear within 15s"; exit 1; }
+
+log "converting qcow2 -> raw -> zvol..."
+qemu-img convert -f qcow2 -O raw "$QCOW" "$ZDEV"
+
+# growpart expands the in-image partition to fill the zvol. Cloud
+# images ship with a small root partition; growpart makes it use the
+# zvol's full DISK_GB. Non-fatal if it fails (cloud-init growpart will
+# do the same on first boot of any clone).
+growpart "$ZDEV" 1 2>/dev/null || true
+
+log "snapshotting ${ZPATH}@golden..."
+zfs snapshot "${ZPATH}@golden"
+
+# ── Cleanup ───────────────────────────────────────────────────────────
+# Remove the qcow2 -- the data is now in the zvol; keeping both wastes
+# ~1-2 GB. Remove the compose blob from /var/lib/osbuild-composer too.
+rm -f "$QCOW"
+composer-cli compose delete "$UUID" >/dev/null 2>&1 || true
+
+# Remove the marker so the service doesn't re-run on next boot.
+rm -f "$MARKER"
+
+log "klab-golden-rhel built via osbuild-composer -- $(zfs list -H -o used "${ZPATH}@golden") used"
+log "ready for: kvm-clone klab-golden-rhel <name>  or  klab build-all"
