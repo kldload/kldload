@@ -738,30 +738,98 @@ ROCKYREPO
                  || k_die "subscription-manager register failed — check your activation key and org ID"; }
       fi
 
-      # Persist the credentials inside the target at the path klab(1) reads
-      # from (RHEL_CREDS_FILE in klab:77). klab-firstboot.service runs
-      # `klab golden rhel` unattended — without these creds the golden build
-      # falls into the rc=2 (skip) branch and the RHEL row is missing from
-      # the autodeploy result. Mode 0600 because passwords; root-only mkdir.
-      install -d -m 0700 "${target}/root"
+      # ── Pre-stage the RHEL Cloud Image qcow2 + build the 6th golden ──
+      # While we still have the user's creds in memory (and ONLY here),
+      # do all the RHEL setup the firstboot golden builder would have
+      # done post-reboot:
+      #
+      #   1. Download the RHEL 10 KVM Guest Image qcow2 via the RH
+      #      Customer Portal Images API (klab fetch-rhel-image)
+      #   2. Create the zvol on the target's rpool
+      #   3. qemu-img convert the qcow2 into the zvol
+      #   4. zfs snapshot @golden
+      #
+      # After this, firstboot's `klab golden rhel` sees the snapshot
+      # already exists and skips RHEL entirely -- no creds needed
+      # post-install, no Dashboard panel, nothing to forget. Install
+      # takes ~3-5 min longer (image download dominates) but the
+      # operator ends up with all 6 klab goldens and zero remaining
+      # credential surface.
+      #
+      # Only attempted when we have username/password (RH API doesn't
+      # accept activation keys -- those are for subscription-manager
+      # only). Activation-key flows skip the auto-build; operator can
+      # hand-place a qcow2 at /var/lib/klab/images/rhel-10-cloud.qcow2
+      # before next `klab golden rhel` run if needed.
       if [[ "${rhel_auth}" == "userpass" ]]; then
-        umask 0177
-        cat > "${target}/root/.klab-rhel-creds" <<KLABCRED
-RHEL_USERNAME='${rhel_user}'
-RHEL_PASSWORD='${rhel_pass}'
-KLABCRED
-        chmod 0600 "${target}/root/.klab-rhel-creds"
-        k_log_to "$log" "RHEL creds persisted to /root/.klab-rhel-creds (klab-firstboot will reuse them)"
-      elif [[ "${rhel_auth}" == "activation" ]]; then
-        umask 0177
-        cat > "${target}/root/.klab-rhel-creds" <<KLABCRED
-RHEL_ACTIVATION_KEY='${rhel_key}'
-RHEL_ORG_ID='${rhel_org}'
-KLABCRED
-        chmod 0600 "${target}/root/.klab-rhel-creds"
-        k_log_to "$log" "RHEL activation key persisted to /root/.klab-rhel-creds"
+        local rhel_qcow="${target}/var/lib/klab/images/rhel-10-cloud.qcow2"
+        install -d -m 0755 "${target}/var/lib/klab/images"
+        k_log_to "$log" "Pre-staging RHEL 10 Cloud Image (a few min)..."
+
+        if RHEL_USERNAME="${rhel_user}" RHEL_PASSWORD="${rhel_pass}" \
+           /usr/local/bin/klab fetch-rhel-image \
+             --output "${rhel_qcow}" \
+             >>"$log" 2>&1; then
+          k_log_to "$log" "RHEL Cloud Image cached at /var/lib/klab/images/rhel-10-cloud.qcow2"
+
+          # Now turn it into the 6th klab golden. Target's rpool is
+          # already imported (mounted under ${target}); we create the
+          # zvol + convert + snapshot directly. The pool name follows
+          # klab's default (POOL=rpool, zvol path rpool/vms/klab-golden-rhel).
+          # The snapshot persists across reboot since it lives on the
+          # target's rpool, not the live env.
+          local zpath="rpool/vms/klab-golden-rhel"
+          local zdev="/dev/zvol/${zpath}"
+          local disk_gb=40   # matches klab DISK=40 default
+
+          k_log_to "$log" "Building 6th klab golden (zvol + convert + snapshot)..."
+          if zfs list rpool/vms >/dev/null 2>&1 || zfs create rpool/vms 2>>"$log"; then
+            if zfs create -V "${disk_gb}G" -s \
+                          -o volblocksize=64k -o compression=lz4 \
+                          "$zpath" 2>>"$log"; then
+              # Wait for /dev/zvol/<zpath> to materialise (udev).
+              for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+                [[ -b "$zdev" ]] && break
+                sleep 1
+              done
+              if [[ -b "$zdev" ]] && qemu-img convert -f qcow2 -O raw "$rhel_qcow" "$zdev" >>"$log" 2>&1; then
+                growpart "$zdev" 1 >>"$log" 2>&1 || true
+                if zfs snapshot "${zpath}@golden" 2>>"$log"; then
+                  k_log_to "$log" "klab-golden-rhel snapshot created -- firstboot will skip RHEL"
+                else
+                  k_log_to "$log" "WARN: zfs snapshot ${zpath}@golden failed"
+                fi
+              else
+                k_log_to "$log" "WARN: qemu-img convert into zvol failed (zvol missing or convert errored)"
+              fi
+            else
+              k_log_to "$log" "WARN: zfs create ${zpath} failed (firstboot will retry from cached qcow2)"
+            fi
+          else
+            k_log_to "$log" "WARN: could not create rpool/vms (firstboot will handle)"
+          fi
+        else
+          k_log_to "$log" "WARN: RHEL Cloud Image fetch failed (no 6th golden -- operator can hand-place qcow2)"
+        fi
+      else
+        k_log_to "$log" "RHEL auth=${rhel_auth} -- skipping 6th-golden auto-build (API needs userpass; hand-place qcow2 if needed)"
       fi
-      umask 0022
+
+      # ── Shred install-time creds ──────────────────────────────────
+      # Pass-through-and-delete model. By here:
+      #   - host registered (subscription-manager identity persists)
+      #   - cloud image converted into rpool/vms/klab-golden-rhel
+      #     and snapshotted @golden (if userpass)
+      #   - 6th klab golden ready; firstboot will skip RHEL
+      #
+      # Nothing about RHEL needs the creds anymore. Unset in-memory.
+      # We do NOT write /root/.klab-rhel-creds, do NOT mirror into
+      # /var/lib/kldload/secrets/, do NOT keep anything around. If
+      # the operator wants to spawn more RHEL VMs later, they re-enter
+      # creds at clone time (or `subscription-manager register` inside
+      # each clone manually -- standard RHEL flow).
+      unset rhel_user rhel_pass rhel_key rhel_org
+      k_log_to "$log" "RHEL install-time creds shredded from env (no persistent storage)"
 
       # Step 2: Install redhat-release into the installroot so it has proper
       # RHEL identity from the start (no CentOS packages ever touch it).

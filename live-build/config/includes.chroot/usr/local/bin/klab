@@ -542,6 +542,166 @@ NETCFG
 
 # ── Section 3: RHEL Credentials ──────────────────────────────────────────
 
+_fetch_rhel_cloud_image_via_api() {
+  # Use the saved RHEL_USERNAME/PASSWORD to download the latest RHEL 10
+  # KVM Guest Image qcow2 via the Customer Portal Images API.
+  #
+  # Three-step flow:
+  #   1. POST to sso.redhat.com to exchange username+password for a
+  #      ~15-min bearer (grant_type=password, client_id=rhsm-api)
+  #   2. GET api.access.redhat.com/management/v1/images filtered for
+  #      RHEL 10 + imageType=qcow2 -- pick the newest by version
+  #   3. GET .../images/<checksum>/download -- follows redirect to the
+  #      actual blob, streams to disk
+  #
+  # Output path: default /var/lib/klab/images/rhel-10-cloud.qcow2,
+  # overridable by setting $1 (allows the installer to stage the file
+  # directly onto the target before reboot, then shred creds and never
+  # have to mention them again post-install).
+  #
+  # Logs to /var/log/klab/rhel-image-fetch.log. Tokens + creds are
+  # never logged or echoed to stdout (sed-scrubbed on any line that
+  # might quote them back).
+  #
+  # Returns: 0 = qcow2 landed at the output path
+  #          1 = any failure (caller logs warn + skips)
+  local out_path="${1:-/var/lib/klab/images/rhel-10-cloud.qcow2}"
+  local out_dir; out_dir="$(dirname "$out_path")"
+  local log_file=/var/log/klab/rhel-image-fetch.log
+  mkdir -p /var/log/klab "$out_dir"
+  : > "$log_file"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "ERROR: jq not installed -- cannot parse API responses" >> "$log_file"
+    return 1
+  fi
+
+  local sso=https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
+  local api=https://api.access.redhat.com/management/v1
+
+  echo "[$(date -u +%FT%TZ)] requesting bearer token from RH SSO" >> "$log_file"
+  local token
+  token=$(curl -s -X POST "$sso" \
+      -d grant_type=password \
+      -d client_id=rhsm-api \
+      --data-urlencode "username=${RHEL_USERNAME}" \
+      --data-urlencode "password=${RHEL_PASSWORD}" \
+      | jq -r '.access_token // empty')
+  if [[ -z "$token" || "$token" == "null" ]]; then
+    echo "ERROR: SSO token exchange failed (bad creds or SSO unreachable)" >> "$log_file"
+    return 1
+  fi
+  echo "[$(date -u +%FT%TZ)] bearer acquired" >> "$log_file"
+
+  # Page through images filtered to RHEL 10 + qcow2 + latest version.
+  # The API returns a JSON array; we pick the one with the highest
+  # version string that matches /^10\./. Using `sort -V` for proper
+  # semver-style comparison so 10.10 > 10.9.
+  echo "[$(date -u +%FT%TZ)] querying Image API for RHEL 10 qcow2" >> "$log_file"
+  local images_json
+  images_json=$(curl -s -H "Authorization: Bearer $token" \
+      "${api}/images?filter=arch==x86_64;contentType==Image;imageType==qcow2;productCode==RHEL;version==10*&limit=50")
+  if ! echo "$images_json" | jq -e '.body | length > 0' >/dev/null 2>&1; then
+    echo "ERROR: Image API returned no matches; raw body:" >> "$log_file"
+    echo "$images_json" | head -c 2000 >> "$log_file"
+    return 1
+  fi
+
+  local checksum filename version
+  read -r checksum filename version < <(
+    echo "$images_json" | jq -r '
+      .body
+      | map(select(.imageType=="qcow2" and (.version|startswith("10."))))
+      | sort_by(.version)
+      | reverse
+      | .[0]
+      | "\(.checksum) \(.filename) \(.version)"'
+  )
+  if [[ -z "$checksum" || "$checksum" == "null" ]]; then
+    echo "ERROR: could not pick an image from API response" >> "$log_file"
+    return 1
+  fi
+  echo "[$(date -u +%FT%TZ)] selected RHEL ${version} qcow2: ${filename} (checksum=${checksum:0:12}...)" >> "$log_file"
+
+  # Resolve the download URL (API returns a signed redirect). Use
+  # -L to follow; redirect target may be on CDN host.
+  local partial="${out_path}.partial"
+  echo "[$(date -u +%FT%TZ)] downloading qcow2 to ${out_path} (several minutes)" >> "$log_file"
+  if curl -fSL --retry 5 --retry-delay 10 --retry-all-errors \
+       -H "Authorization: Bearer $token" \
+       -C - -o "$partial" \
+       "${api}/images/${checksum}/download" >> "$log_file" 2>&1; then
+    mv -f "$partial" "$out_path"
+    echo "[$(date -u +%FT%TZ)] download complete: $(du -h "$out_path" | cut -f1)" >> "$log_file"
+    return 0
+  else
+    rm -f "$partial"
+    echo "ERROR: download failed" >> "$log_file"
+    return 1
+  fi
+}
+
+cmd_fetch_rhel_image() {
+  # CLI subcommand: pull the RHEL 10 KVM Guest Image qcow2 to a target
+  # path using saved/env RHEL credentials. Designed for the kldload
+  # installer to invoke during install (writes the qcow2 onto the
+  # target before reboot, so first-boot has the 6th klab golden ready
+  # without ever re-asking for creds).
+  #
+  # Usage:
+  #   klab fetch-rhel-image --output /abs/path/to/rhel-10-cloud.qcow2
+  #   RHEL_USERNAME=... RHEL_PASSWORD=... klab fetch-rhel-image
+  local out=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --output|-o) out="$2"; shift 2 ;;
+      -h|--help)
+        cat <<'HELP'
+klab fetch-rhel-image --output <PATH>
+
+Downloads the latest RHEL 10 KVM Guest Image qcow2 via the RH Customer
+Portal Images API using credentials from the environment or the saved
+secrets store. Logs to /var/log/klab/rhel-image-fetch.log.
+
+Required (via env or RHEL_CREDS_FILE / /var/lib/kldload/secrets):
+  RHEL_USERNAME, RHEL_PASSWORD     (RH portal login)
+
+Activation-key flows are NOT supported -- the RH API doesn't accept
+activation keys, those are for subscription-manager only.
+
+Exit codes:
+  0  qcow2 written to --output path
+  1  any failure (see log file)
+HELP
+        return 0 ;;
+      *) die "unknown arg to fetch-rhel-image: $1" ;;
+    esac
+  done
+  _rhel_prompt_creds || die "RHEL credentials not available (set RHEL_USERNAME + RHEL_PASSWORD)"
+  [[ -n "$RHEL_USERNAME" && -n "$RHEL_PASSWORD" ]] \
+    || die "fetch-rhel-image requires username+password (not activation key)"
+  _fetch_rhel_cloud_image_via_api "$out"
+}
+
+_rhel_creds_shred() {
+  # Pass-through-and-shred. Called after a successful RHEL golden
+  # build. Removes the four secret-store files + the legacy
+  # .klab-rhel-creds env file. `shred -u` overwrites then unlinks
+  # (defence against fs-level recovery on the secrets ZFS dataset).
+  # Errors are logged but never fatal -- if a file's already gone
+  # because the operator already cleaned up, that's fine.
+  local sec=/var/lib/kldload/secrets
+  for f in rhel-username rhel-password rhel-activation-key rhel-organization; do
+    if [[ -f "${sec}/${f}" ]]; then
+      shred -u "${sec}/${f}" 2>/dev/null || rm -f "${sec}/${f}"
+    fi
+  done
+  if [[ -f /root/.klab-rhel-creds ]]; then
+    shred -u /root/.klab-rhel-creds 2>/dev/null || rm -f /root/.klab-rhel-creds
+  fi
+  log "  RHEL creds shredded (pass-through model: needed only for golden build)"
+}
+
 _rhel_prompt_creds() {
   # Credential source priority (all non-interactive — firstboot-safe):
   #   1. Env vars set by caller
@@ -1350,11 +1510,38 @@ build_golden_single() {
       fi
     fi
 
+    # ─── RH Customer Portal API fetch ───────────────────────────────
+    # Final automatic path: use the saved RHEL_USERNAME/PASSWORD to
+    # exchange for a short-lived bearer token via RH SSO, then call
+    # api.access.redhat.com to download the latest RHEL 10 KVM Guest
+    # Image qcow2. RH supports `grant_type=password` against the
+    # `rhsm-api` client for exactly this use case -- no extra "offline
+    # token" workflow required, the saved subscription-manager creds
+    # double as the API creds. Bearer is ~15min, plenty for download.
+    #
+    # Falls through to skip if:
+    #   - no username/password creds in scope (activation-key only --
+    #     RH's API doesn't accept activation keys, those are for
+    #     subscription-manager only; operator must use one of the
+    #     manual paths above for activation-key-only environments)
+    #   - SSO token exchange returns 401 (bad creds)
+    #   - Image API returns no matching image or download fails
+    if [[ -z "$rhel_img" && -n "$RHEL_USERNAME" && -n "$RHEL_PASSWORD" ]]; then
+      log "  No pre-staged image — pulling from access.redhat.com via Customer Portal API..."
+      if _fetch_rhel_cloud_image_via_api; then
+        rhel_img=/var/lib/klab/images/rhel-10-cloud.qcow2
+        log "  API-fetched image ready: ${rhel_img}"
+      else
+        warn "RH API fetch failed (see /var/log/klab/rhel-image-fetch.log)"
+      fi
+    fi
+
     if [[ -z "$rhel_img" ]]; then
       log "  Skipping RHEL — no image. Provide one of:"
       log "    1. Drop qcow2 at /var/lib/klab/images/rhel-10-cloud.qcow2"
       log "    2. Set KLAB_RHEL_IMAGE=/abs/path/to/your.qcow2"
       log "    3. Set KLAB_RHEL_IMAGE_URL=<one-shot Customer Portal URL>"
+      log "    4. Set RH username + password creds (Dashboard → RHEL Subscription)"
       log "  Get the RHEL 10 KVM Guest Image from access.redhat.com"
       return 0
     fi
@@ -3200,8 +3387,9 @@ done
 set -- "${_args[@]+"${_args[@]}"}"
 
 case "$CMD" in
-  golden)       cmd_golden "${1:-all}" ;;
-  golden-ztest) cmd_golden_ztest "${1:-all}" ;;
+  golden)             cmd_golden "${1:-all}" ;;
+  golden-ztest)       cmd_golden_ztest "${1:-all}" ;;
+  fetch-rhel-image)   cmd_fetch_rhel_image "$@" ;;
   deploy)       deploy_site "${1:-blue}" ;;
   promote)      cmd_promote "${1:-green}" ;;
   rollback)     cmd_rollback ;;

@@ -1750,19 +1750,11 @@ async def ws_handler(websocket):
                     except Exception:
                         pass
                     await websocket.send(json.dumps({"type": "install_state", **state}))
-                elif action == "rhel_creds_prefill":
-                    # Surface the saved RHEL secrets to the Install-to-Disk
-                    # form so the operator sees the credentials state and
-                    # can override per-install without re-typing. Loopback
-                    # WS only — same trust boundary as the saved secrets
-                    # themselves. Empty string for any missing secret.
-                    await websocket.send(json.dumps({
-                        "type":     "rhel_creds_prefill",
-                        "username": secret_get("rhel-username") or "",
-                        "password": secret_get("rhel-password") or "",
-                        "key":      secret_get("rhel-activation-key") or "",
-                        "org":      secret_get("rhel-organization") or "",
-                    }))
+                # 'rhel_creds_prefill' action removed in build #49+ — no
+                # Dashboard panel storing RHEL creds anymore. The Install-
+                # to-Disk form always starts blank; operator types creds
+                # once per install (used for register + image fetch +
+                # 6th klab golden build, then shredded).
                 elif action == "install_reboot":
                     # Reboot the host into the installed system. Fires
                     # `systemctl reboot` via systemd-run so the command
@@ -3209,47 +3201,22 @@ async def _run_install(websocket, msg):
     # Auto-detect distro if not specified
     if "distro" not in params:
         params["distro"] = _detect_distro()
-    # RHEL credentials fallback — if the operator saved creds in the
-    # Dashboard's RHEL Credentials panel but left the Install-to-Disk
-    # RHEL fields blank, pull from the secrets store. Only fires for
-    # the rhel distro; other distros never look at these fields. Form
-    # values always win when present.
+    # RHEL credential validation (build #49+).
     #
-    # CRITICAL: parameter names MUST match the install form's payload
-    # exactly because the answers-file builder upper-cases them and
-    # prefixes KLDLOAD_. The install form sends rhel_username /
-    # rhel_password / rhel_key / rhel_org → KLDLOAD_RHEL_USERNAME etc.
-    # An earlier rev used rhel_user / rhel_pass which produced
-    # KLDLOAD_RHEL_USER / KLDLOAD_RHEL_PASS — installer rejected with
-    # "ERROR: RHEL install requires KLDLOAD_RHEL_USERNAME...".
+    # Saved-secrets fallback removed: no Dashboard panel anymore, no
+    # secrets-store entries for rhel-*, nothing to fall back from. The
+    # install form is the ONLY input path. Operator types creds once,
+    # the installer uses them for register + image fetch + 6th klab
+    # golden build, then shreds them. Nothing about RHEL persists.
+    #
+    # CRITICAL: form parameter names MUST match the answers-file
+    # builder's upper-casing -- rhel_username -> KLDLOAD_RHEL_USERNAME,
+    # not KLDLOAD_RHEL_USER. The installer's bootstrap.sh keys on the
+    # _USERNAME / _PASSWORD / _KEY / _ORG suffixes.
     if params.get("distro") == "rhel":
-        if not (params.get("rhel_key") or "").strip():
-            _saved_key = secret_get("rhel-activation-key") or ""
-            if _saved_key:
-                params["rhel_key"] = _saved_key
-                await websocket.send(json.dumps({
-                    "type": "log_line", "target": "install",
-                    "line": "[rhel] using activation-key from saved Dashboard credentials",
-                }))
-        if not (params.get("rhel_org") or "").strip():
-            _saved_org = secret_get("rhel-organization") or ""
-            if _saved_org:
-                params["rhel_org"] = _saved_org
-        if not (params.get("rhel_username") or "").strip():
-            _saved_user = secret_get("rhel-username") or ""
-            if _saved_user:
-                params["rhel_username"] = _saved_user
-        if not (params.get("rhel_password") or "").strip():
-            _saved_pass = secret_get("rhel-password") or ""
-            if _saved_pass:
-                params["rhel_password"] = _saved_pass
-                await websocket.send(json.dumps({
-                    "type": "log_line", "target": "install",
-                    "line": "[rhel] using username/password from saved Dashboard credentials",
-                }))
-        # Hard preflight here so the operator gets a clear error in the
-        # webui log instead of waiting for the installer to bail with a
-        # generic message buried 200 lines deep.
+        # Hard preflight: operator gets a clear error in the webui log
+        # instead of waiting for the installer to bail with a generic
+        # message buried 200 lines deep.
         _have_userpass = (params.get("rhel_username") or "").strip() and (params.get("rhel_password") or "").strip()
         _have_keyorg   = (params.get("rhel_key")      or "").strip() and (params.get("rhel_org")      or "").strip()
         if not (_have_userpass or _have_keyorg):

@@ -1145,6 +1145,17 @@ if [[ "$EDITION" != "core" ]]; then
         cp /build/live-build/config/includes.chroot/etc/kldload/process-exporter.yml \
            "${ROOTFS}/etc/kldload/process-exporter.yml"
     fi
+    # Default authorized_keys for the installer's k_create_users. Read on
+    # the LIVE env during install, copied to ~admin/.ssh/authorized_keys
+    # on the target. Without this on the live env the SSH key bake
+    # silently no-ops (the file-check in bootstrap.sh sees no file and
+    # falls through). Caught in build #48 verification.
+    if [[ -f /build/live-build/config/includes.chroot/etc/kldload/default-authorized-keys ]]; then
+        mkdir -p "${ROOTFS}/etc/kldload"
+        cp /build/live-build/config/includes.chroot/etc/kldload/default-authorized-keys \
+           "${ROOTFS}/etc/kldload/default-authorized-keys"
+        chmod 0644 "${ROOTFS}/etc/kldload/default-authorized-keys"
+    fi
     if [[ -d /build/live-build/config/includes.chroot/etc/loki ]]; then
         mkdir -p "${ROOTFS}/etc/loki"
         cp /build/live-build/config/includes.chroot/etc/loki/*.yaml "${ROOTFS}/etc/loki/" 2>/dev/null || true

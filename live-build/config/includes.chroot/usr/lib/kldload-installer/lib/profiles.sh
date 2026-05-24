@@ -1723,13 +1723,13 @@ ConditionPathExists=!/var/lib/kldload/klab-firstboot-done
 [Service]
 Type=oneshot
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do curl -sf --connect-timeout 5 https://cloud.debian.org >/dev/null 2>&1 && exit 0; echo "Waiting for internet ($i/30)..."; sleep 10; done'
-# Bridge webui-stored RHEL creds (/var/lib/kldload/secrets/rhel-{username,
-# password}) → klab's expected /root/.klab-rhel-creds env-file format.
-# klab CLI reads RHEL_CREDS_FILE=/root/.klab-rhel-creds (klab:77) but the
-# webui's secret_set action writes to the secrets dataset only. Without
-# this bridge step, `klab golden rhel` skips with rc=2 even though the
-# operator entered creds at install time. Bug caught .111 2026-05-16.
-ExecStartPre=/bin/bash -c 'U=$(cat /var/lib/kldload/secrets/rhel-username 2>/dev/null); P=$(cat /var/lib/kldload/secrets/rhel-password 2>/dev/null); if [[ -n "$U" && -n "$P" ]]; then umask 0177; printf "RHEL_USERNAME=\"%s\"\nRHEL_PASSWORD=\"%s\"\n" "$U" "$P" > /root/.klab-rhel-creds; chmod 0600 /root/.klab-rhel-creds; echo "klab-firstboot: bridged RHEL creds for user $U"; else echo "klab-firstboot: no RHEL creds in /var/lib/kldload/secrets/ — rhel golden will skip"; fi'
+# Build #49+: webui no longer stores RHEL creds (no Dashboard panel).
+# Creds are entered once in the install form, used to (a) register the
+# host, (b) fetch the RHEL Cloud Image, (c) build the 6th klab golden
+# (rpool/vms/klab-golden-rhel@golden), then shredded. So this service
+# does NOT need to bridge creds — the RHEL golden is already on disk
+# before first boot, and `klab golden rhel` below will see the existing
+# @golden snapshot and skip naturally.
 # Per-distro `-` prefix makes systemd ignore non-zero exits — without it,
 # the first failing distro aborts the unit and the rest never run. Caught
 # 2026-05-12 on the first RHEL 10 install: rocky golden failed silently
@@ -1743,13 +1743,13 @@ ExecStart=-/usr/local/bin/klab golden rocky
 ExecStart=-/usr/local/bin/klab golden fedora
 ExecStart=-/usr/local/bin/klab golden debian
 ExecStart=-/usr/local/bin/klab golden ubuntu
-# RHEL 10 golden: builds only if both (1) RHEL creds are present in the
-# secrets store (webui Dashboard → RHEL Subscription panel writes them to
-# /var/lib/kldload/secrets/rhel-{username,password}) AND (2) a RHEL 10
-# KVM Guest Image is available — either at /var/lib/klab/images/rhel-10-
-# cloud.qcow2, via KLAB_RHEL_IMAGE=/path, or KLAB_RHEL_IMAGE_URL=<one-shot
-# Customer Portal URL>. Either condition missing → klab returns 0 (skip)
-# so this service still goes green for the other five distros.
+# RHEL 10 golden: pre-built during install (rpool/vms/klab-golden-rhel
+# @golden). klab's build_golden_single checks for the existing snapshot
+# and returns 0 cleanly. Left in the list as a safety net -- if the
+# install-time build didn't run (e.g. activation-key auth flow where
+# the RH API path isn't available), this gives the operator a chance
+# to drop a qcow2 at /var/lib/klab/images/rhel-10-cloud.qcow2 and let
+# firstboot finish what install couldn't.
 ExecStart=-/usr/local/bin/klab golden rhel
 # K8s bootstrap is OWNED BY kldload-autodeploy (single orchestrator).
 # Previously had a duplicate `kube-cluster bootstrap --workers 3` here

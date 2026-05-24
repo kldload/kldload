@@ -352,37 +352,11 @@ select option:checked { background: #00b8d9; color: #000; }
         </div>
       </div>
 
-      <!-- ── RHEL credentials ─────────────────────────────────────────
-           Stored in the ZFS-encrypted secrets dataset. klab checks for these
-           before building the RHEL golden — if populated, builds RHEL from
-           CentOS clone + subscription-manager register. If empty, klab skips
-           RHEL gracefully. Either path works without user interaction. -->
-      <div class="panel" style="margin-top:1rem">
-        <div class="panel-hdr" style="justify-content:space-between">
-          <span>🔐 RHEL Subscription (optional)</span>
-          <span id="rhel-creds-status" style="font-size:0.72rem;color:var(--muted)">not set</span>
-        </div>
-        <div class="panel-body">
-          <div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
-            Populate to enable the RHEL golden at firstboot. Empty = klab skips RHEL.
-            Credentials stored encrypted on <code>rpool/kldload/secrets</code>.
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:0.5rem;align-items:end">
-            <div class="form-group" style="margin:0"><label>Username</label>
-              <input type="text" id="rhel-user" placeholder="user@example.com" style="width:100%"></div>
-            <div class="form-group" style="margin:0"><label>Password</label>
-              <input type="password" id="rhel-pass" placeholder="••••••••" style="width:100%"></div>
-            <button class="btn btn-primary btn-sm" onclick="saveRhelCreds()">Save</button>
-          </div>
-          <div style="margin-top:0.4rem;font-size:0.7rem;color:var(--muted)">
-            Alternative: activation key instead of password. Leave user blank, paste key here.
-          </div>
-          <div style="display:grid;grid-template-columns:1fr auto;gap:0.5rem;margin-top:0.3rem">
-            <input type="text" id="rhel-actkey" placeholder="(optional) activation key / org id" style="width:100%">
-            <button class="btn btn-ghost btn-sm" onclick="clearRhelCreds()">Clear</button>
-          </div>
-        </div>
-      </div>
+      <!-- RHEL Subscription panel removed in build #49+ — RHEL creds
+           are now only entered at install time (Install-to-Disk form
+           below). The installer registers the host, fetches the RHEL
+           cloud image, builds the 6th klab golden, then shreds the
+           creds. Nothing about RHEL needs to be tracked post-install. -->
 
       <!-- ── Install kldload elsewhere ─────────────────────────────────── -->
       <!-- Copy-paste one-liners for bringing up kldload on another machine.
@@ -679,28 +653,47 @@ select option:checked { background: #00b8d9; color: #000; }
               <label style="font-size:0.85rem;cursor:pointer"><input type="radio" name="rhel-auth" value="userpass" checked onchange="toggleRhelAuth()"> Username &amp; password</label>
               <label style="font-size:0.85rem;cursor:pointer"><input type="radio" name="rhel-auth" value="activation" onchange="toggleRhelAuth()"> Activation key</label>
             </div>
+            <!-- Both username AND password are obscured by default with
+                 per-field eye-toggle reveal. Screen captures of the
+                 installer should never leak either half of the cred.
+                 Same shape applies to activation key + org. -->
             <div id="rhel-userpass-fields">
               <div class="form-group">
                 <label>Red Hat username</label>
-                <input type="text" id="rhel-username" placeholder="your Red Hat portal login">
+                <div style="display:flex;gap:0.4rem;align-items:center">
+                  <input type="password" id="rhel-username" placeholder="your Red Hat portal login" autocomplete="off" style="flex:1">
+                  <button type="button" class="btn btn-ghost btn-sm" style="font-size:0.72rem;min-width:3.2rem" onclick="toggleRhelReveal('rhel-username', this)" aria-label="Show/hide username">show</button>
+                </div>
               </div>
               <div class="form-group">
                 <label>Red Hat password</label>
-                <input type="password" id="rhel-password" placeholder="portal password">
+                <div style="display:flex;gap:0.4rem;align-items:center">
+                  <input type="password" id="rhel-password" placeholder="portal password" autocomplete="off" style="flex:1">
+                  <button type="button" class="btn btn-ghost btn-sm" style="font-size:0.72rem;min-width:3.2rem" onclick="toggleRhelReveal('rhel-password', this)" aria-label="Show/hide password">show</button>
+                </div>
               </div>
             </div>
             <div id="rhel-activation-fields" style="display:none">
               <div class="form-group">
                 <label>Activation key</label>
-                <input type="text" id="rhel-key" placeholder="activation key name">
+                <div style="display:flex;gap:0.4rem;align-items:center">
+                  <input type="password" id="rhel-key" placeholder="activation key name" autocomplete="off" style="flex:1">
+                  <button type="button" class="btn btn-ghost btn-sm" style="font-size:0.72rem;min-width:3.2rem" onclick="toggleRhelReveal('rhel-key', this)" aria-label="Show/hide activation key">show</button>
+                </div>
               </div>
               <div class="form-group">
                 <label>Org ID</label>
-                <input type="text" id="rhel-org" placeholder="numeric org ID">
+                <div style="display:flex;gap:0.4rem;align-items:center">
+                  <input type="password" id="rhel-org" placeholder="numeric org ID" autocomplete="off" style="flex:1">
+                  <button type="button" class="btn btn-ghost btn-sm" style="font-size:0.72rem;min-width:3.2rem" onclick="toggleRhelReveal('rhel-org', this)" aria-label="Show/hide org ID">show</button>
+                </div>
               </div>
             </div>
             <div style="font-size:0.8rem;color:var(--muted);margin-top:0.4rem">
               RHEL requires internet to pull packages from Red Hat CDN.
+              Both fields are obscured by default — screen-capture-safe.
+              Used once to register + fetch image + build the 6th klab
+              golden, then shredded. Nothing about RHEL persists.
             </div>
           </div>
         </div>
@@ -4079,53 +4072,8 @@ function handle(msg) {
 
     // ── klab messages ─────────────────────────────────────────────────
     case 'klab_status': { renderKlabStatus(msg); break; }
-    case 'rhel_creds_prefill': {
-      // Pre-populate the Install-to-Disk RHEL fields from the
-      // Dashboard's saved secrets. Only overwrite empty fields so a
-      // user who already typed something into the install form doesn't
-      // get their value stomped. Show a small hint after fill so they
-      // know where the values came from.
-      const fill = (id, val) => {
-        const el = document.getElementById(id);
-        if (!el) return false;
-        if (el.value && el.value.trim().length) return false;
-        if (!val) return false;
-        el.value = val;
-        return true;
-      };
-      let filled = false;
-      filled = fill('rhel-username', msg.username) || filled;
-      filled = fill('rhel-password', msg.password) || filled;
-      filled = fill('rhel-key',      msg.key)      || filled;
-      filled = fill('rhel-org',      msg.org)      || filled;
-      // If we filled the username+password fields and an "auth method"
-      // radio exists, flip it to whichever fields we populated so the
-      // shown section matches what's set.
-      if ((msg.username && msg.password) || (msg.key && msg.org)) {
-        const useUserPass = !!(msg.username && msg.password);
-        const radios = document.querySelectorAll('input[name="rhel-auth"]');
-        radios.forEach(r => {
-          if ((r.value === 'userpass' && useUserPass) ||
-              (r.value === 'activation' && !useUserPass)) {
-            r.checked = true;
-            if (typeof toggleRhelAuth === 'function') toggleRhelAuth();
-          }
-        });
-      }
-      // Toast/hint near the RHEL panel header so it's visible.
-      const panel = document.getElementById('rhel-auth-panel');
-      if (panel && filled) {
-        let hint = panel.querySelector('.rhel-prefill-hint');
-        if (!hint) {
-          hint = document.createElement('div');
-          hint.className = 'rhel-prefill-hint';
-          hint.style.cssText = 'font-size:0.72rem;color:var(--good);margin-top:0.3rem';
-          panel.appendChild(hint);
-        }
-        hint.textContent = '✓ Pre-filled from saved Dashboard credentials. Edit to override.';
-      }
-      break;
-    }
+    // 'rhel_creds_prefill' case removed in build #49+ — no Dashboard
+    // panel persisting RHEL creds anymore, so nothing to pre-fill from.
     case 'tmux_buffer': {
       _termShowBufferModal(msg.text || '');
       break;
@@ -4843,12 +4791,10 @@ function selectDistro(el) {
   });
   // (old AI model selector hide on BSD — block removed; picker UI no longer exists)
   if (rhelPanel) rhelPanel.style.display = el.dataset.distro === 'rhel' ? 'block' : 'none';
-  // Auto-pre-fill RHEL fields from the secrets the operator saved on
-  // the Dashboard (RHEL Credentials panel). Saves typing — and makes
-  // the credentials state visible up-front instead of "blank fields
-  // → install starts → backend fallback fires silently". Backend
-  // returns rhel_creds_prefill with {username, password, key, org}.
-  if (el.dataset.distro === 'rhel') send({ action: 'rhel_creds_prefill' });
+  // (build #49+) RHEL prefill removed — Dashboard no longer stores
+  // RHEL creds, so the install form is always blank-on-open and the
+  // operator types them once. Used for register + image fetch + 6th
+  // golden build, then shredded.
   // Distro-specific profile restrictions
   const d = el.dataset.distro;
   const isArch = d === 'arch';
@@ -4883,11 +4829,38 @@ function selectDistro(el) {
   }
 }
 
+// Per-field reveal toggle for the RHEL credential inputs. Default is
+// type=password (obscured) for BOTH username and password (plus
+// activation key + org ID) so screen captures of the installer can't
+// leak either half. Operator clicks the eye-toggle to reveal a single
+// field, types, clicks again to re-hide. State is per-input, so they
+// can verify each separately without exposing the other.
+function toggleRhelReveal(inputId, btn) {
+  const el = document.getElementById(inputId);
+  if (!el) return;
+  if (el.type === 'password') {
+    el.type = 'text';
+    if (btn) btn.textContent = 'hide';
+  } else {
+    el.type = 'password';
+    if (btn) btn.textContent = 'show';
+  }
+}
+
 // ── DHCP toggle ──────────────────────────────────────────────────────────────
 function toggleRhelAuth() {
   const mode = document.querySelector('input[name="rhel-auth"]:checked')?.value || 'userpass';
   document.getElementById('rhel-userpass-fields').style.display = mode === 'userpass' ? 'block' : 'none';
   document.getElementById('rhel-activation-fields').style.display = mode === 'activation' ? 'block' : 'none';
+  // Re-hide everything when auth mode toggles, so the previously-shown
+  // field doesn't stay visible after the operator swaps to a different
+  // auth flow.
+  ['rhel-username','rhel-password','rhel-key','rhel-org'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.type = 'password';
+    const btn = el?.parentElement?.querySelector('button');
+    if (btn && btn.textContent !== 'show') btn.textContent = 'show';
+  });
 }
 
 function toggleDHCP() {
@@ -7754,50 +7727,11 @@ function renderFirstbootStatus(msg) {
   }
 }
 
-// RHEL credentials stash — reads current state on load, writes to secrets.
-function saveRhelCreds() {
-  const user = document.getElementById('rhel-user')?.value.trim();
-  const pass = document.getElementById('rhel-pass')?.value;
-  const key  = document.getElementById('rhel-actkey')?.value.trim();
-  if (!user && !key) { alert('Enter a username+password OR an activation key'); return; }
-  // Store each piece as a separate secret so klab can read them individually
-  if (user) send({ action: 'secret_set', name: 'rhel-username', value: user });
-  if (pass) send({ action: 'secret_set', name: 'rhel-password', value: pass });
-  if (key)  send({ action: 'secret_set', name: 'rhel-activation-key', value: key });
-  document.getElementById('rhel-pass').value = '';  // don't keep in DOM
-  setTimeout(() => send({action:'secret_list'}), 300);
-}
-
-function clearRhelCreds() {
-  if (!confirm('Clear stored RHEL credentials?')) return;
-  ['rhel-username', 'rhel-password', 'rhel-activation-key'].forEach(n =>
-    send({ action: 'secret_delete', name: n }));
-  document.getElementById('rhel-user').value = '';
-  document.getElementById('rhel-pass').value = '';
-  document.getElementById('rhel-actkey').value = '';
-  setTimeout(() => send({action:'secret_list'}), 300);
-}
-
-function renderSecretList(msg) {
-  const status = document.getElementById('rhel-creds-status');
-  if (!status) return;
-  const names = (msg.secrets || []).map(s => s.name);
-  const have = {
-    user: names.includes('rhel-username'),
-    pass: names.includes('rhel-password'),
-    key:  names.includes('rhel-activation-key'),
-  };
-  if (have.user && (have.pass || have.key)) {
-    status.textContent = 'stored ✓ — will build RHEL golden';
-    status.style.color = 'var(--accent)';
-  } else if (have.key) {
-    status.textContent = 'activation key stored ✓';
-    status.style.color = 'var(--accent)';
-  } else {
-    status.textContent = 'not set — RHEL will be skipped';
-    status.style.color = 'var(--muted)';
-  }
-}
+// saveRhelCreds / clearRhelCreds / renderSecretList(rhel) removed in
+// build #49+. RHEL creds are now only entered in the Install-to-Disk
+// form (one-shot, used for register + image fetch + 6th golden build,
+// then shredded). No post-install Dashboard panel, no secrets store
+// persistence for them, no place to forget where they live.
 
 function renderDoctorReport(msg) {
   const results = msg.results || [];
