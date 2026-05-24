@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# _kkernel-events — driver for the F12 "kernel-events" window.
+#
+# Pipes a bpftrace program (which probes exec/openat/tcp_connect and
+# syscall errors system-wide) through an awk formatter to produce a
+# polished "kernel-eye view of userland" table that refreshes every
+# 2 seconds.
+#
+# Mirrors the kernel-tcp pane's pattern: one declarative source
+# (kkernel-events.bt), one cosmetic layer (kkernel-events.awk), one
+# driver (this file). Same code shape as _ktcp-expanded -- restart
+# loop, sanity-check files exist before launching, single-pane window.
+#
+# Invoked from _ktcp-expanded as part of the F12 cockpit cluster.
+# Also runnable standalone: `sudo _kkernel-events`.
+set -u
+
+BT_SCRIPT=/usr/local/share/kldload/kkernel-events.bt
+AWK_FMT=/usr/local/share/kldload/kkernel-events.awk
+
+# Sanity-check both files. If either is missing, fail loud so the
+# operator knows it's an install-completeness problem, not a runtime
+# bug. Same pattern as _ktcp-expanded.
+if [[ ! -r "$BT_SCRIPT" ]]; then
+    echo "ERROR: $BT_SCRIPT not found."
+    echo "  F12 kernel-events cockpit needs this bpftrace program."
+    echo "  Re-run installer or copy from /usr/local/share/kldload/ in the live ISO."
+    exec sleep 99
+fi
+if [[ ! -r "$AWK_FMT" ]]; then
+    echo "ERROR: $AWK_FMT not found."
+    echo "  F12 kernel-events cockpit needs this formatter."
+    echo "  Re-run installer or copy from /usr/local/share/kldload/ in the live ISO."
+    exec sleep 99
+fi
+if ! command -v bpftrace >/dev/null 2>&1; then
+    echo "ERROR: bpftrace not installed."
+    echo "  RHEL/CentOS:  sudo dnf install bpftrace"
+    echo "  Debian/Ubuntu: sudo apt install bpftrace"
+    exec sleep 99
+fi
+
+# Auto-elevate -- bpftrace needs CAP_BPF or root. Re-exec under sudo
+# if we're not already root. -E so the env (TMUX, PATH) survives.
+if [[ $EUID -ne 0 ]]; then
+    exec sudo -E "$0" "$@"
+fi
+
+# Restart loop -- bpftrace can exit on probe load errors (transient
+# kernel module load conflicts during heavy autodeploy churn), or if
+# a probed kprobe disappears (kernel module unloaded). Operator
+# sees a brief banner instead of a [process completed] tombstone.
+while :; do
+    bpftrace "$BT_SCRIPT" 2>&1 | awk -f "$AWK_FMT"
+    printf '\n[kernel-events exited (rc=%d) - restarting in 3s. Ctrl-C aborts.]\n' "$?"
+    sleep 3
+done

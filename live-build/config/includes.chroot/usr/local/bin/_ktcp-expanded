@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# Toggle the kldload "kernel-tcp" cockpit (F12). Opens TWO full-pane
-# tmux windows side-by-side in the window list, both togglable as a
-# pair:
+# Toggle the kldload "kernel-tcp" cockpit (F12). Opens THREE full-pane
+# tmux windows side-by-side in the window list, all togglable as a
+# group:
 #
-#   1. kernel-tcp -- ss -tnHpi state established | ktcp-format.awk
+#   1. kernel-tcp     -- ss -tnHpi state established | ktcp-format.awk
 #      Every ESTABLISHED TCP socket with full TCP_INFO (RTT,
 #      retransmits, cwnd, bytes), sorted by current rate, colour-
 #      coded by health, with per-process roll-up and rate sparkline.
 #
-#   2. nethogs    -- sudo nethogs
+#   2. kernel-events  -- bpftrace + kkernel-events.awk
+#      "Kernel-eye view of userland." Aggregates four kernel surfaces
+#      every 2 sec: exec/openat/tcp_connect/syscall errors. Top-8 per
+#      axis, colour-coded section headers. Reveals the iceberg of
+#      activity that's invisible from `top` (background scans,
+#      ENOENT churn, every fork/exec across the box).
+#
+#   3. nethogs        -- sudo nethogs
 #      Per-process bandwidth live (bytes/sec).
 #
 # Build #50 rewrite (was: single window with a split-pane top/bottom):
@@ -26,14 +33,16 @@
 set -u
 SESSION="${KLDLOAD_TMUX_SESSION:-kldload}"
 KTCP_NAME="kernel-tcp"
+KEVT_NAME="kernel-events"
 NHOG_NAME="nethogs"
 
-# Toggle: if EITHER window exists, kill BOTH and exit.
+# Toggle: if ANY of the three windows exist, kill ALL of them and exit.
 _have_window() {
     tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$1"
 }
-if _have_window "$KTCP_NAME" || _have_window "$NHOG_NAME"; then
+if _have_window "$KTCP_NAME" || _have_window "$KEVT_NAME" || _have_window "$NHOG_NAME"; then
     _have_window "$KTCP_NAME" && tmux kill-window -t "${SESSION}:=${KTCP_NAME}"
+    _have_window "$KEVT_NAME" && tmux kill-window -t "${SESSION}:=${KEVT_NAME}"
     _have_window "$NHOG_NAME" && tmux kill-window -t "${SESSION}:=${NHOG_NAME}"
     exit 0
 fi
@@ -95,8 +104,12 @@ done
 NHOG
 chmod +x "$NHOG_SCRIPT"
 
-# Open both windows. -d = don't auto-switch (we explicitly select the
-# kernel-tcp one at the end so the operator lands on the TCP view).
+# Open all three windows. -d = don't auto-switch (we explicitly select
+# kernel-tcp at the end so the operator lands on the TCP view first).
+# kernel-events uses the dedicated driver script -- it handles its own
+# sudo elevation + restart loop + missing-file diagnostics so we don't
+# duplicate that logic here.
 tmux new-window -t "$SESSION" -n "$KTCP_NAME" -d "bash '$KTCP_SCRIPT'"
+tmux new-window -t "$SESSION" -n "$KEVT_NAME" -d "/usr/local/bin/_kkernel-events"
 tmux new-window -t "$SESSION" -n "$NHOG_NAME" -d "bash '$NHOG_SCRIPT'"
 tmux select-window -t "${SESSION}:=${KTCP_NAME}"

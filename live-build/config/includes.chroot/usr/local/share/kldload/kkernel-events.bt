@@ -1,0 +1,77 @@
+#!/usr/bin/env bpftrace
+/*
+ * kkernel-events.bt — kldload "kernel-eye view of userland"
+ *
+ * Single bpftrace program attached to four kernel surfaces, aggregating
+ * each one into a hash map (key=comm, value=count). Every 2 seconds:
+ *   - print top-8 of each map
+ *   - clear maps (rolling 2-sec window, not cumulative since boot)
+ *
+ * Consumed by /usr/local/bin/_kkernel-events which pipes this through
+ * an awk formatter to color-code the headers and indent the rows. Same
+ * pattern as kernel-tcp's `ss + ktcp-format.awk` — one declarative
+ * source of truth (this file), one cosmetic layer (the awk), one
+ * driver (the shell wrapper).
+ *
+ * Surfaces probed:
+ *
+ *   1. tracepoint:syscalls:sys_enter_execve
+ *        → every new process exec'd. Reveals shell/cron/systemd churn.
+ *
+ *   2. tracepoint:syscalls:sys_enter_openat (with AT_FDCWD filter)
+ *        → every file open from user code. Reveals the constant
+ *          background scanning by journald, prometheus scrapers, etc.
+ *
+ *   3. kprobe:tcp_connect
+ *        → every outbound TCP connection attempt. Reveals which
+ *          processes are talking to the network and how often.
+ *
+ *   4. tracepoint:syscalls:sys_exit_* with ret<0 filter
+ *        → every FAILED syscall, by process. Reveals the iceberg of
+ *          ENOENT/EAGAIN/EWOULDBLOCK happening under the surface.
+ *
+ * Run as root (eBPF requires CAP_BPF or root). Probes are JIT-compiled
+ * once at startup; runtime overhead is per-event hash insert which is
+ * essentially free.
+ */
+
+BEGIN {
+    printf("KK-START\n");
+}
+
+tracepoint:syscalls:sys_enter_execve {
+    @exec[comm] = count();
+}
+
+tracepoint:syscalls:sys_enter_openat /args->dfd == -100/ {
+    @open[comm] = count();
+}
+
+kprobe:tcp_connect {
+    @tcp[comm] = count();
+}
+
+tracepoint:syscalls:sys_exit_openat,
+tracepoint:syscalls:sys_exit_read,
+tracepoint:syscalls:sys_exit_write,
+tracepoint:syscalls:sys_exit_connect,
+tracepoint:syscalls:sys_exit_accept4
+    /args->ret < 0/ {
+    @err[comm] = count();
+}
+
+interval:s:2 {
+    time("KK-TS %H:%M:%S\n");
+    printf("KK-SECTION exec\n"); print(@exec, 8); clear(@exec);
+    printf("KK-SECTION open\n"); print(@open, 8); clear(@open);
+    printf("KK-SECTION tcp\n");  print(@tcp, 8);  clear(@tcp);
+    printf("KK-SECTION err\n");  print(@err, 8);  clear(@err);
+    printf("KK-END\n");
+}
+
+END {
+    clear(@exec);
+    clear(@open);
+    clear(@tcp);
+    clear(@err);
+}
