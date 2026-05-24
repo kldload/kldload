@@ -20,7 +20,7 @@ echo -e "\033[1;36m╚═══════════════════�
 # ── ISO exists ───────────────────────────────────────────────────────────────
 _section "ISO File"
 
-ISO=$(find "$ROOT/live-build/output/" -name "kldload-*.iso" 2>/dev/null | head -1)
+ISO=$(find "$ROOT/live-build/output/" -name "kldload-*.iso" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
 if [[ -n "$ISO" && -f "$ISO" ]]; then
   _pass "ISO exists: $(basename "$ISO")"
 else
