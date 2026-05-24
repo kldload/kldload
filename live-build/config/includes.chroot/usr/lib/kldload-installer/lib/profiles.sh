@@ -509,8 +509,14 @@ k_install_system_files() {
   done
 
   # ── Systemd units ──────────────────────────────────────────────────────────
+  # Explicit list so adding a unit is a conscious decision. Lines 627-638
+  # below `ln -sf` symlink the RAG units into multi-user.target.wants but
+  # those symlinks point nowhere unless the unit files are copied here
+  # first. The kldload-rag-* entries below were missing pre-build-#48 and
+  # caused RAG to be completely dead on every installed system even though
+  # smoke-build saw the files in the squashfs (caught on .101 / build #47).
   mkdir -p "${target}/usr/lib/systemd/system"
-  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service; do
+  for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rag.service kldload-rag-firstboot.service kldload-rag-index.service kldload-rag-index.timer; do
     [[ -f "/usr/lib/systemd/system/${f}" ]] && \
       cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
   done
@@ -595,6 +601,36 @@ k_install_system_files() {
     cp /usr/local/share/kldload-ai/*.txt "${target}/usr/local/share/kldload-ai/" 2>/dev/null || true
     k_log "Bob docs corpus copied to target ($(du -sh "${target}/usr/local/share/kldload-ai" 2>/dev/null | cut -f1))"
   fi
+
+  # /usr/local/lib/kldload-* — Python modules consumed by the k* CLIs.
+  # Currently: kldload-rag/ (used by kldload-rag-index, kai-rag, and the
+  # bob RAG bridge). Without these on target, `bob` falls back to no-RAG
+  # mode silently and every kldload-specific question gets a generic
+  # answer. Glob handles future additions. Caught 2026-05-23 on .101.
+  if compgen -G '/usr/local/lib/kldload-*' >/dev/null 2>&1; then
+    mkdir -p "${target}/usr/local/lib"
+    for _libdir in /usr/local/lib/kldload-*/; do
+      [[ -d "$_libdir" ]] || continue
+      _libname=$(basename "$_libdir")
+      mkdir -p "${target}/usr/local/lib/${_libname}"
+      cp -r "${_libdir}." "${target}/usr/local/lib/${_libname}/"
+      k_log "Copied /usr/local/lib/${_libname} ($(du -sh "${target}/usr/local/lib/${_libname}" 2>/dev/null | cut -f1))"
+    done
+  fi
+
+  # (ChromaDB data dir created below alongside the symlink block.)
+
+  # RAG python deps — chromadb (vector store) + beautifulsoup4 (HTML doc
+  # extraction). No RPM ships either; dnf --installroot has no path to
+  # pip-install into the target, so we do it explicitly here. Same
+  # pattern as the websockets pip install below. --break-system-packages
+  # is required on PEP 668 distros (Fedora 43+, RHEL 10+, Debian 13+).
+  # Without this, `kldload-rag-index` crashes on import and Bob's RAG
+  # bridge can't index anything.
+  chroot "${target}" pip3 install --quiet --break-system-packages \
+    chromadb beautifulsoup4 2>/dev/null || \
+    k_log "WARNING: chromadb/bs4 pip install failed — RAG will not function"
+
   # webui service already ships with --port 8443 baked into its unit file
   # (see builder/build-iso.sh). No post-install sed needed — removed the
   # empty if/fi block that used to flip the port, which was an install-

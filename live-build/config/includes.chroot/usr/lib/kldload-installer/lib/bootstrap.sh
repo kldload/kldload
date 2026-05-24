@@ -214,6 +214,44 @@ k_create_users() {
   if [[ -n "${KLDLOAD_PASSWORD:-}" ]]; then
     echo "${user}:${KLDLOAD_PASSWORD}" | chroot "${target}" /usr/sbin/chpasswd
   fi
+
+  # ── Default authorized_keys for the admin user ────────────────────────
+  # Sources, in priority order (each line appended; dupes culled):
+  #   1. $KLDLOAD_ADMIN_SSH_KEYS (newline-separated pubkeys, from answers env)
+  #   2. /etc/kldload/default-authorized-keys (baked into the ISO)
+  #
+  # This makes every installed kldload box keyed in for the operator on
+  # first boot — no per-machine ssh-copy-id dance. Source (2) is the
+  # primary path: live-build/.../etc/kldload/default-authorized-keys
+  # gets a single line per trusted operator pubkey. Personal keys are
+  # gitignored; the included key is the generic `admin@kldload` one.
+  # Without this block, fresh installs require the admin password every
+  # SSH session — usable but painful for fleet ops.
+  local admin_ssh_dir="${target}/home/${user}/.ssh"
+  local admin_auth_keys="${admin_ssh_dir}/authorized_keys"
+  local _have_keys=0
+  install -d -m 0700 "${admin_ssh_dir}"
+  : > "${admin_auth_keys}.new"
+  if [[ -n "${KLDLOAD_ADMIN_SSH_KEYS:-}" ]]; then
+    printf '%s\n' "${KLDLOAD_ADMIN_SSH_KEYS}" >> "${admin_auth_keys}.new"
+    _have_keys=1
+  fi
+  if [[ -f /etc/kldload/default-authorized-keys ]]; then
+    cat /etc/kldload/default-authorized-keys >> "${admin_auth_keys}.new"
+    _have_keys=1
+  fi
+  if [[ "${_have_keys}" -eq 1 ]]; then
+    # Strip blanks + comment lines + dedupe (preserve order).
+    awk 'NF && $1 !~ /^#/ && !seen[$0]++' "${admin_auth_keys}.new" \
+      > "${admin_auth_keys}"
+    chmod 0600 "${admin_auth_keys}"
+    # Ownership: must be the admin user, not root. UID/GID 1000 by
+    # convention on every supported distro (admin is first useradd).
+    # Use chroot+chown for accuracy across uid_map differences.
+    chroot "${target}" chown -R "${user}:${user}" "/home/${user}/.ssh" \
+      2>/dev/null || true
+  fi
+  rm -f "${admin_auth_keys}.new"
 }
 
 k_write_manifest() {

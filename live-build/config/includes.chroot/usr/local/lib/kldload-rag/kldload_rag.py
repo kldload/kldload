@@ -17,8 +17,15 @@ LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 8400
 CHROMADB_PATH = os.environ.get("CHROMADB_PATH", "/var/lib/kldload-rag/chromadb")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-EMBED_MODEL = "nomic-embed-text"
-GENERATE_MODEL = "llama3.1:8b"
+# Model names can be overridden via env. kldload-firstboot writes
+# /etc/kldload/bob-model.env after it picks a chat model based on
+# detected VRAM (qwen2.5:14b on 10GB+, llama3.1:8b on 6-10GB,
+# llama3.2:3b on CPU-only). kldload-rag.service sources that file via
+# EnvironmentFile=, so this picks up the right model automatically.
+# Without the env override, RAG bridges fall back to llama3.1:8b and
+# 404 silently on installs where firstboot chose a different model.
+EMBED_MODEL    = os.environ.get("BOB_EMBED_MODEL",    "nomic-embed-text")
+GENERATE_MODEL = os.environ.get("BOB_GENERATE_MODEL", "llama3.1:8b")
 CHUNK_SIZE = 2000  # ~500 tokens
 CHUNK_OVERLAP = 200
 TOP_K = 5
