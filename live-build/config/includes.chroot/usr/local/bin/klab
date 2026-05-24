@@ -1884,6 +1884,48 @@ cmd_golden() {
   done
 }
 
+cmd_build_all() {
+  # One-click bring-everything-up: build all 6 goldens, then deploy
+  # blue site, then deploy green site. Result: full klab fleet ready
+  # for cloning (any future klab spawn = instant ZFS clone).
+  #
+  # Sequential by design -- previously, clicking "Build all goldens"
+  # then "Deploy blue" before the goldens finished was racing with
+  # build_golden_single's "zfs destroy @golden && zfs snapshot @golden"
+  # window. Deploy_site iterates distros in order; whichever distro
+  # was mid-rebuild at the moment of iteration logged "No golden for
+  # X -- skipping" and never came back. Caught on .101 (centos blue
+  # missing, golden snapshot existed but @golden creation epoch was
+  # AFTER deploy started).
+  #
+  # Idempotent: cmd_golden skips distros whose @golden snapshot
+  # already exists; deploy_site skips distros whose <site>-<distro>
+  # zvol already exists. Re-runs after partial failure pick up where
+  # the last run stopped.
+  log "${C}klab build-all${N}: building 6 goldens, then deploying blue + green sites"
+  log "  Total expected time: ~45-60 min (golden build dominates)"
+  log "  Result: rpool/vms/klab-{golden,blue,green}-<distro> + WireGuard mesh"
+
+  log ""
+  log "${C}Phase 1/3:${N} klab golden all"
+  cmd_golden all
+
+  log ""
+  log "${C}Phase 2/3:${N} klab deploy blue"
+  deploy_site blue
+
+  log ""
+  log "${C}Phase 3/3:${N} klab deploy green"
+  deploy_site green
+
+  log ""
+  log "${G}klab build-all complete.${N}"
+  log "  Goldens:  rpool/vms/klab-golden-<distro>@golden"
+  log "  Blue:     rpool/vms/klab-blue-<distro>   (IPs 192.168.122.101-106)"
+  log "  Green:    rpool/vms/klab-green-<distro>  (IPs 192.168.122.201-206)"
+  log "  Any further spawn = instant ZFS clone from goldens."
+}
+
 # Build the ZFS-test-dedicated golden lineage. Exports:
 #   KLAB_GOLDEN_KIND=ztest   → golden_name() returns klab-ztest-<distro>
 #   KLAB_ZFS_DEV=1           → setup_vm_golden() installs full test deps
@@ -3389,6 +3431,7 @@ set -- "${_args[@]+"${_args[@]}"}"
 case "$CMD" in
   golden)             cmd_golden "${1:-all}" ;;
   golden-ztest)       cmd_golden_ztest "${1:-all}" ;;
+  build-all)          cmd_build_all ;;
   fetch-rhel-image)   cmd_fetch_rhel_image "$@" ;;
   deploy)       deploy_site "${1:-blue}" ;;
   promote)      cmd_promote "${1:-green}" ;;

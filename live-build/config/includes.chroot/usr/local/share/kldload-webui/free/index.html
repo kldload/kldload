@@ -2116,7 +2116,7 @@ select option:checked { background: #00b8d9; color: #000; }
           <div style="font-size:1.15rem;font-weight:700">klab</div>
           <span id="klab-header-status" style="font-size:0.78rem;color:var(--muted)">multi-distro test platform · ZFS instant clones · blue-green</span>
           <span style="flex:1"></span>
-          <button class="btn btn-primary btn-sm" onclick="klabAction('golden','all')">＋ Build all goldens</button>
+          <button class="btn btn-primary btn-sm" onclick="klabBuildAll()" title="klab build-all — goldens (~30 min) → deploy blue (~3 min) → deploy green (~3 min). Idempotent.">＋ Build Everything (Goldens + Blue + Green)</button>
           <button class="btn btn-ghost btn-sm" onclick="send({action:'klab_status'})" title="Reload">↻</button>
         </div>
         <div class="ws-tabs" role="tablist">
@@ -2165,7 +2165,8 @@ select option:checked { background: #00b8d9; color: #000; }
           <span>▶ Quick Actions</span>
         </div>
         <div class="panel-body" style="display:flex;gap:0.5rem;flex-wrap:wrap">
-          <button class="btn btn-primary btn-sm" onclick="klabAction('golden','all')">Build All Goldens</button>
+          <button class="btn btn-primary btn-sm" onclick="klabBuildAll()" title="klab build-all — goldens + blue + green in one chain">＋ Build Everything</button>
+          <button class="btn btn-ghost btn-sm" onclick="klabAction('golden','all')" title="Just rebuild the @golden snapshots; don't deploy">Goldens Only</button>
           <button class="btn btn-ghost btn-sm" onclick="klabAction('deploy','blue')">Deploy Blue</button>
           <button class="btn btn-ghost btn-sm" onclick="klabAction('deploy','green')">Deploy Green</button>
           <button class="btn btn-ghost btn-sm" onclick="klabAction('test','quick')">Run Quick Test</button>
@@ -8476,6 +8477,26 @@ function klabAction(action, arg) {
     if (!confirm(`Destroy ${arg}? This will remove VMs and ZFS datasets.`)) return;
     send({ action: 'klab_destroy', target: arg });
   }
+}
+
+// klabBuildAll — the one-click "give me everything" button. Chains
+// klab golden all → klab deploy blue → klab deploy green inside a
+// single `klab build-all` backend call so the three steps serialize
+// naturally (and the centos-race bug from .101 can't recur).
+//
+// Idempotent end-to-end: re-clicking after a partial failure picks up
+// where the last run stopped (each phase's existing skip-if-already-
+// built logic handles it).
+function klabBuildAll() {
+  const msg = 'Build all 6 goldens, then deploy blue + green sites?\n\n' +
+              '  Phase 1/3: klab golden all       (~30-45 min)\n' +
+              '  Phase 2/3: klab deploy blue      (~3 min)\n' +
+              '  Phase 3/3: klab deploy green     (~3 min)\n\n' +
+              'Idempotent — safe to re-run after a partial failure.\n' +
+              'You can close the browser; the build survives in the background.';
+  if (!confirm(msg)) return;
+  _klabOpsLogShow('[build-all] starting: klab golden all → deploy blue → deploy green');
+  send({ action: 'klab_build_all', zfs_dev: false });
 }
 
 function klabGolden(distro) {

@@ -2305,6 +2305,8 @@ async def ws_handler(websocket):
                     await _klab_status(websocket)
                 elif action == "klab_golden":
                     await _klab_golden(websocket, msg)
+                elif action == "klab_build_all":
+                    await _klab_build_all(websocket, msg)
                 elif action == "klab_verify":
                     await _klab_verify(websocket, msg)
                 elif action == "klab_deploy":
@@ -6552,6 +6554,28 @@ async def _klab_golden(websocket, msg):
         env["ZFS_SOURCE"] = zfs_source
     await _stream_proc_detached(websocket, ["klab", "golden", distro], env=env, target="klab")
     # Refresh status after build
+    await _klab_status(websocket)
+
+
+async def _klab_build_all(websocket, msg):
+    """klab build-all: goldens + blue deploy + green deploy in one chain.
+
+    Sequential by design -- avoids the race where deploy_site iterates
+    over a distro whose @golden snapshot is mid-rebuild (caught on .101:
+    centos blue missing, golden snapshot recreated 2 min after deploy
+    started). cmd_build_all in klab is idempotent end-to-end, so safe
+    to re-click.
+
+    Detached: full chain runs ~45-60 min. Same survival-across-webui-
+    restart behaviour as klab_golden / klab_ztest_goldens.
+    """
+    env = {}
+    if msg.get("zfs_dev"):
+        env["KLAB_ZFS_DEV"] = "1"
+    zfs_source = msg.get("zfs_source", "")
+    if zfs_source:
+        env["ZFS_SOURCE"] = zfs_source
+    await _stream_proc_detached(websocket, ["klab", "build-all"], env=env, target="klab")
     await _klab_status(websocket)
 
 
