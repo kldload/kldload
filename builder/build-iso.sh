@@ -1459,12 +1459,24 @@ if [[ "$EDITION" != "core" ]]; then
         [[ -f "$_pd" ]] && cp "$_pd" "${ROOTFS}/etc/profile.d/"
     done
 
-    # Copy smoke tests and test framework
-    if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload/tests ]]; then
-        mkdir -p "${ROOTFS}/usr/local/share/kldload/tests"
-        cp /build/live-build/config/includes.chroot/usr/local/share/kldload/tests/*.sh \
-            "${ROOTFS}/usr/local/share/kldload/tests/" 2>/dev/null || true
-        chmod +x "${ROOTFS}/usr/local/share/kldload/tests/"*.sh 2>/dev/null || true
+    # Copy /usr/local/share/kldload/ — the whole tree, not just tests/.
+    # Build #48 only copied tests/ which dropped ktcp-format.awk,
+    # tetragon-filter.jq, demo/, argocd-values.yaml on the floor.
+    # Result: F12 (kernel-tcp cockpit) died with "awk: cannot open
+    # source file /usr/local/share/kldload/ktcp-format.awk"; F11
+    # tracing cockpit died with "Could not open tetragon-filter.jq";
+    # kube-demo javaapi had no chart; autodeploy had no ArgoCD values.
+    # Same shape as the RAG-files bug we fixed in build #48 -- explicit
+    # narrow copy that grew stale as the includes.chroot tree gained
+    # files. Use cp -r so future additions just work.
+    if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload ]]; then
+        mkdir -p "${ROOTFS}/usr/local/share/kldload"
+        cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload/. \
+              "${ROOTFS}/usr/local/share/kldload/"
+        # Tests subdir needs execute bit; everything else (awk, jq,
+        # yaml) is read-only data and stays mode-from-source.
+        [[ -d "${ROOTFS}/usr/local/share/kldload/tests" ]] && \
+            chmod +x "${ROOTFS}/usr/local/share/kldload/tests/"*.sh 2>/dev/null || true
     fi
 
     # Create kldload-webui systemd service
