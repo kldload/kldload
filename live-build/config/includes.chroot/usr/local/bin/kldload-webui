@@ -2057,25 +2057,32 @@ async def ws_handler(websocket):
                         if node in vm_names:
                             await _stream_proc(websocket, ["virsh", "reboot", node], target="k8s")
                         else:
-                            # Non-klab node — SSH reboot via the install key
+                            # Non-klab node -- SSH reboot. Matches the kube-demo
+                            # convention everywhere else: sshpass -p kldload as
+                            # root@. Build #50 used "admin@<node>" + id_kldload
+                            # key, but stock cloud-image worker VMs (what
+                            # kube-cluster spawns) have user "fedora" + root,
+                            # NOT "admin" -- the action failed with "Permission
+                            # denied (publickey...)" every time. Caught on .103.
                             await _stream_proc(websocket, [
-                                "ssh", "-i", "/root/.ssh/id_kldload",
-                                "-o", "StrictHostKeyChecking=no",
+                                "sshpass", "-p", "kldload",
+                                "ssh", "-o", "StrictHostKeyChecking=no",
                                 "-o", "UserKnownHostsFile=/dev/null",
-                                f"admin@{node}", "sudo systemctl reboot"
+                                f"root@{node}", "systemctl reboot"
                             ], target="k8s")
                 elif action == "k8s_kubelet_restart":
-                    # Targeted recovery — restart just kubelet without a full
+                    # Targeted recovery -- restart just kubelet without a full
                     # VM reboot. Useful when kubelet is wedged but the rest of
-                    # the node is fine. SSH-based; node must have the install
-                    # admin key (klab/kube-cluster set this up automatically).
+                    # the node is fine. SSH via the kube-demo convention:
+                    # sshpass + root@. Worker VMs have a root password of
+                    # "kldload" set at cloud-init time; no shared key needed.
                     node = msg.get("node", "")
                     if node:
                         await _stream_proc(websocket, [
-                            "ssh", "-i", "/root/.ssh/id_kldload",
-                            "-o", "StrictHostKeyChecking=no",
+                            "sshpass", "-p", "kldload",
+                            "ssh", "-o", "StrictHostKeyChecking=no",
                             "-o", "UserKnownHostsFile=/dev/null",
-                            f"admin@{node}", "sudo systemctl restart kubelet"
+                            f"root@{node}", "systemctl restart kubelet"
                         ], target="k8s")
                 elif action == "k8s_node_label":
                     # Add / remove labels on a node. msg.labels is a dict

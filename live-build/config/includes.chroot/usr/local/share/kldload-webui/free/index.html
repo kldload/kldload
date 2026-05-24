@@ -1565,6 +1565,7 @@ select option:checked { background: #00b8d9; color: #000; }
           <button class="k8s-tab active" data-sub="overview"  onclick="k8sSubTab('overview')">Overview</button>
           <button class="k8s-tab"        data-sub="workloads" onclick="k8sSubTab('workloads')">Workloads <span id="k8s-cnt-workloads" class="tab-count">0</span></button>
           <button class="k8s-tab"        data-sub="network"   onclick="k8sSubTab('network')">Network <span id="k8s-cnt-network" class="tab-count">0</span></button>
+          <button class="k8s-tab"        data-sub="storage"   onclick="k8sSubTab('storage')">Storage <span id="k8s-cnt-storage" class="tab-count">0</span></button>
           <button class="k8s-tab"        data-sub="nodes"     onclick="k8sSubTab('nodes')">Nodes <span id="k8s-cnt-nodes" class="tab-count">0</span></button>
           <button class="k8s-tab"        data-sub="log"       onclick="k8sSubTab('log')">Log</button>
         </div>
@@ -1761,6 +1762,169 @@ select option:checked { background: #00b8d9; color: #000; }
             <tbody id="k8s-svc-tbody"><tr><td colspan="7" style="color:var(--muted);padding:1rem">No services</td></tr></tbody>
           </table>
         </div>
+      </div>
+
+      <!-- ── Storage ──────────────────────────────────────────────────────
+           PVCs, PVs, StorageClasses, VolumeSnapshots.
+
+           kldload-unique view: each PV shows its BACKING ZFS dataset
+           when the provisioner is openebs ZFS LocalPV. Other provisioners
+           (local-path, hostpath) show the backing host path as-is.
+
+           Today's K8s cluster ships with local-path-provisioner as the
+           default SC because the worker VMs don't have ZFS-in-guest
+           (intentional, see kube-init install_zfs_csi fallback). For
+           ZFS-backed PVCs the operator would either rebuild workers
+           with ZFS pre-installed OR add a kube-cluster --enable-zfs-csi
+           flag (queued for a future build).
+      -->
+      <div class="k8s-subview" id="k8s-sub-storage">
+        <!-- Action bar: refresh + create PVC -->
+        <div class="k8s-panel" style="margin-bottom:0.9rem">
+          <div class="k8s-panel-hdr">
+            <span>＋ Storage actions</span>
+            <span class="k8s-panel-hdr-muted">PVCs / PVs / StorageClasses / VolumeSnapshots</span>
+          </div>
+          <div style="padding:0.7rem 1rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-primary btn-sm" onclick="k8sShowPVCCreate()">＋ Create PVC</button>
+            <button class="btn btn-ghost btn-sm"   onclick="send({action:'k8s_storage'})">↻ Refresh</button>
+            <span style="font-size:0.72rem;color:var(--muted);margin-left:auto">
+              Default StorageClass marked with ★. Snapshots require a VolumeSnapshotClass.
+            </span>
+          </div>
+
+          <!-- Create-PVC drawer (slides open on +Create PVC click) -->
+          <div id="k8s-pvc-create-wrap" style="display:none;padding:0.7rem 1rem;border-top:1px solid var(--border);background:var(--surface2)">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:0.5rem;align-items:end">
+              <div class="form-group" style="margin:0">
+                <label style="font-size:0.72rem;color:var(--muted)">Namespace</label>
+                <input type="text" id="k8s-pvc-ns" placeholder="default" value="default">
+              </div>
+              <div class="form-group" style="margin:0">
+                <label style="font-size:0.72rem;color:var(--muted)">PVC name</label>
+                <input type="text" id="k8s-pvc-name" placeholder="my-pvc">
+              </div>
+              <div class="form-group" style="margin:0">
+                <label style="font-size:0.72rem;color:var(--muted)">StorageClass</label>
+                <select id="k8s-pvc-sc">
+                  <option value="">— default —</option>
+                </select>
+              </div>
+              <div class="form-group" style="margin:0">
+                <label style="font-size:0.72rem;color:var(--muted)">Size</label>
+                <input type="text" id="k8s-pvc-size" placeholder="10Gi" value="10Gi">
+              </div>
+              <button class="btn btn-primary btn-sm" onclick="k8sCreatePVC()">Apply</button>
+            </div>
+            <div style="font-size:0.7rem;color:var(--muted);margin-top:0.4rem">
+              Access mode: ReadWriteOnce (default for block-style storage). Output streams to the Log tab.
+            </div>
+          </div>
+        </div>
+
+        <!-- StorageClasses -->
+        <div class="k8s-panel" style="margin-bottom:0.9rem">
+          <div class="k8s-panel-hdr">
+            <span>🗄 StorageClasses</span>
+            <span id="k8s-sc-count" class="k8s-panel-hdr-muted">0</span>
+          </div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse">
+              <thead>
+                <tr style="background:var(--surface2);font-size:0.75rem;text-align:left;color:var(--muted)">
+                  <th style="padding:0.4rem 0.8rem">Name</th>
+                  <th style="padding:0.4rem 0.8rem">Provisioner</th>
+                  <th style="padding:0.4rem 0.8rem">Reclaim</th>
+                  <th style="padding:0.4rem 0.8rem">Binding</th>
+                  <th style="padding:0.4rem 0.8rem">Expand</th>
+                  <th style="padding:0.4rem 0.8rem">Age</th>
+                </tr>
+              </thead>
+              <tbody id="k8s-sc-tbody">
+                <tr><td colspan="6" style="padding:0.6rem 0.8rem;color:var(--muted)">loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- PVCs -->
+        <div class="k8s-panel" style="margin-bottom:0.9rem">
+          <div class="k8s-panel-hdr">
+            <span>📦 PersistentVolumeClaims</span>
+            <span id="k8s-pvc-count" class="k8s-panel-hdr-muted">0</span>
+          </div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse">
+              <thead>
+                <tr style="background:var(--surface2);font-size:0.75rem;text-align:left;color:var(--muted)">
+                  <th style="padding:0.4rem 0.8rem">Namespace</th>
+                  <th style="padding:0.4rem 0.8rem">Name</th>
+                  <th style="padding:0.4rem 0.8rem">Status</th>
+                  <th style="padding:0.4rem 0.8rem">Capacity</th>
+                  <th style="padding:0.4rem 0.8rem">Modes</th>
+                  <th style="padding:0.4rem 0.8rem">StorageClass</th>
+                  <th style="padding:0.4rem 0.8rem">Age</th>
+                  <th style="padding:0.4rem 0.8rem"></th>
+                </tr>
+              </thead>
+              <tbody id="k8s-pvc-tbody">
+                <tr><td colspan="8" style="padding:0.6rem 0.8rem;color:var(--muted)">loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- PVs (with backing ZFS / hostpath) -->
+        <div class="k8s-panel" style="margin-bottom:0.9rem">
+          <div class="k8s-panel-hdr">
+            <span>💾 PersistentVolumes <span style="font-size:0.7rem;color:var(--muted);font-weight:400">— with backing storage</span></span>
+            <span id="k8s-pv-count" class="k8s-panel-hdr-muted">0</span>
+          </div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse">
+              <thead>
+                <tr style="background:var(--surface2);font-size:0.75rem;text-align:left;color:var(--muted)">
+                  <th style="padding:0.4rem 0.8rem">Name</th>
+                  <th style="padding:0.4rem 0.8rem">Capacity</th>
+                  <th style="padding:0.4rem 0.8rem">Status</th>
+                  <th style="padding:0.4rem 0.8rem">Claim</th>
+                  <th style="padding:0.4rem 0.8rem">Backing</th>
+                  <th style="padding:0.4rem 0.8rem">Age</th>
+                </tr>
+              </thead>
+              <tbody id="k8s-pv-tbody">
+                <tr><td colspan="6" style="padding:0.6rem 0.8rem;color:var(--muted)">loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- VolumeSnapshots -->
+        <div class="k8s-panel" style="margin-bottom:0.9rem">
+          <div class="k8s-panel-hdr">
+            <span>📸 VolumeSnapshots</span>
+            <span id="k8s-vs-count" class="k8s-panel-hdr-muted">0</span>
+          </div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse">
+              <thead>
+                <tr style="background:var(--surface2);font-size:0.75rem;text-align:left;color:var(--muted)">
+                  <th style="padding:0.4rem 0.8rem">Namespace</th>
+                  <th style="padding:0.4rem 0.8rem">Name</th>
+                  <th style="padding:0.4rem 0.8rem">Ready</th>
+                  <th style="padding:0.4rem 0.8rem">Source PVC</th>
+                  <th style="padding:0.4rem 0.8rem">Size</th>
+                  <th style="padding:0.4rem 0.8rem">Class</th>
+                  <th style="padding:0.4rem 0.8rem">Age</th>
+                </tr>
+              </thead>
+              <tbody id="k8s-vs-tbody">
+                <tr><td colspan="7" style="padding:0.6rem 0.8rem;color:var(--muted)">none — VolumeSnapshotClass needed (ZFS CSI installs one as 'zfs-snapshot'; local-path doesn't support snapshots)</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
       </div>
 
       <!-- ── Nodes ─────────────────────────────────────────────────────── -->
@@ -4042,6 +4206,7 @@ function handle(msg) {
     case 'k8s_namespaces': { renderK8sNamespaces(msg.namespaces); break; }
     case 'k8s_deployments': { renderK8sDeployments(msg.deployments); break; }
     case 'k8s_services': { renderK8sServices(msg.services); break; }
+    case 'k8s_storage':  { renderK8sStorage(msg); break; }
     case 'k8s_events': {
       const el = document.getElementById('k8s-events-list');
       if (el) {
@@ -6816,6 +6981,8 @@ function k8sSubTab(name) {
     send({action: 'k8s_pods', namespace: ns});
   } else if (name === 'network') {
     send({action: 'k8s_services', namespace: ns});
+  } else if (name === 'storage') {
+    send({action: 'k8s_storage'});
   } else if (name === 'nodes') {
     send({action: 'k8s_top'});
     send({action: 'k8s_status'});
@@ -7169,6 +7336,172 @@ function k8sDeleteDeploy(ns, name) {
 }
 
 // ── Services ────────────────────────────────────────────────────────────────
+// ── K8s Storage — render PVCs/PVs/SCs/VolumeSnapshots ──────────────
+// Single message contains everything; one render call updates every
+// table on the Storage sub-tab atomically. Same pattern as renderK8sPods
+// but for the (potentially smaller) storage data set.
+//
+// The "Backing" column is the kldload-unique bit: for PVs that come
+// from openebs-zfs-localpv it shows the dataset path (e.g.
+// rpool/k8s-volumes/pvc-abc-123); for local-path/hostpath PVs it
+// shows the worker-side host path; for unmatched provisioners it
+// shows "n/a".
+function renderK8sStorage(msg) {
+  // ── StorageClasses ──
+  const sc = msg.storage_classes || [];
+  document.getElementById('k8s-sc-count').textContent = sc.length;
+  const scTbody = document.getElementById('k8s-sc-tbody');
+  scTbody.innerHTML = sc.length
+    ? sc.map(s => `<tr>
+        <td style="padding:0.4rem 0.8rem;font-family:monospace;font-weight:600;color:var(--accent2)">
+          ${s.is_default ? '<span style="color:var(--good);margin-right:0.3rem">★</span>' : ''}
+          ${esc(s.name)}
+        </td>
+        <td style="padding:0.4rem 0.8rem;color:var(--muted);font-family:monospace;font-size:0.78rem">${esc(s.provisioner)}</td>
+        <td style="padding:0.4rem 0.8rem">${esc(s.reclaim)}</td>
+        <td style="padding:0.4rem 0.8rem;font-size:0.78rem">${esc(s.binding_mode)}</td>
+        <td style="padding:0.4rem 0.8rem">${s.expansion === 'true' ? '✓' : '—'}</td>
+        <td style="padding:0.4rem 0.8rem;color:var(--muted)">${esc(s.age)}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="6" style="padding:0.6rem 0.8rem;color:var(--muted)">No StorageClasses</td></tr>';
+
+  // Populate the Create-PVC StorageClass dropdown.
+  const sel = document.getElementById('k8s-pvc-sc');
+  if (sel) {
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">— default —</option>' +
+      sc.map(s => `<option value="${esc(s.name)}"${s.is_default ? ' selected' : ''}>${esc(s.name)}</option>`).join('');
+    if (cur) sel.value = cur;
+  }
+
+  // ── PVCs ──
+  const pvcs = msg.pvcs || [];
+  document.getElementById('k8s-pvc-count').textContent = pvcs.length;
+  if (document.getElementById('k8s-cnt-storage')) {
+    document.getElementById('k8s-cnt-storage').textContent = pvcs.length;
+  }
+  const pvcTbody = document.getElementById('k8s-pvc-tbody');
+  pvcTbody.innerHTML = pvcs.length
+    ? pvcs.map(p => {
+        const statusColor = p.status === 'Bound' ? 'var(--good)'
+                          : p.status === 'Pending' ? 'var(--warn)'
+                          : 'var(--danger)';
+        return `<tr>
+          <td style="padding:0.4rem 0.8rem;color:var(--muted);font-size:0.82rem">${esc(p.namespace)}</td>
+          <td style="padding:0.4rem 0.8rem;font-family:monospace;font-weight:600;color:var(--accent2)">${esc(p.name)}</td>
+          <td style="padding:0.4rem 0.8rem;color:${statusColor};font-weight:600">${esc(p.status)}</td>
+          <td style="padding:0.4rem 0.8rem;font-family:monospace">${esc(p.capacity || '—')}</td>
+          <td style="padding:0.4rem 0.8rem;font-size:0.78rem;color:var(--muted)">${esc(p.access_modes || '—')}</td>
+          <td style="padding:0.4rem 0.8rem;font-family:monospace;font-size:0.78rem">${esc(p.storage_class || '—')}</td>
+          <td style="padding:0.4rem 0.8rem;color:var(--muted)">${esc(p.age)}</td>
+          <td style="padding:0.4rem 0.8rem;white-space:nowrap;text-align:right">
+            <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sSnapPVC('${esc(p.namespace)}','${esc(p.name)}')" title="Take a VolumeSnapshot of this PVC">📸 Snap</button>
+            <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="k8sDeletePVC('${esc(p.namespace)}','${esc(p.name)}')" title="Delete this PVC">✕</button>
+          </td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="8" style="padding:0.6rem 0.8rem;color:var(--muted)">No PVCs — click + Create PVC to make one</td></tr>';
+
+  // ── PVs (with backing storage column) ──
+  const pvs = msg.pvs || [];
+  document.getElementById('k8s-pv-count').textContent = pvs.length;
+  const pvTbody = document.getElementById('k8s-pv-tbody');
+  pvTbody.innerHTML = pvs.length
+    ? pvs.map(p => {
+        const statusColor = p.status === 'Bound' ? 'var(--good)' : 'var(--muted)';
+        // Backing column — kldload-unique value
+        let backing = '<span style="color:var(--muted)">n/a</span>';
+        if (p.backing) {
+          const kind = p.backing_kind || 'csi';
+          const kindLabel = kind === 'zfs' ? 'ZFS dataset'
+                           : kind === 'hostpath' ? 'hostPath'
+                           : kind === 'local' ? 'local'
+                           : 'CSI';
+          const color = kind === 'zfs' ? 'var(--accent)' : 'var(--muted)';
+          backing = `<span style="font-family:monospace;font-size:0.76rem;color:${color}" title="Backing kind: ${kindLabel}">${esc(p.backing)}</span>`;
+        }
+        return `<tr>
+          <td style="padding:0.4rem 0.8rem;font-family:monospace;font-size:0.78rem;color:var(--accent2)">${esc(p.name)}</td>
+          <td style="padding:0.4rem 0.8rem;font-family:monospace">${esc(p.capacity)}</td>
+          <td style="padding:0.4rem 0.8rem;color:${statusColor};font-weight:600">${esc(p.status)}</td>
+          <td style="padding:0.4rem 0.8rem;font-size:0.78rem;color:var(--muted)">${esc(p.claim || '—')}</td>
+          <td style="padding:0.4rem 0.8rem">${backing}</td>
+          <td style="padding:0.4rem 0.8rem;color:var(--muted)">${esc(p.age)}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="6" style="padding:0.6rem 0.8rem;color:var(--muted)">No PVs (created when PVCs bind)</td></tr>';
+
+  // ── VolumeSnapshots ──
+  const vs = msg.vol_snapshots || [];
+  document.getElementById('k8s-vs-count').textContent = vs.length;
+  const vsTbody = document.getElementById('k8s-vs-tbody');
+  if (vs.length) {
+    vsTbody.innerHTML = vs.map(s => {
+      const ready = s.ready === 'true' ? '<span style="color:var(--good)">✓</span>' : '<span style="color:var(--warn)">…</span>';
+      return `<tr>
+        <td style="padding:0.4rem 0.8rem;color:var(--muted);font-size:0.82rem">${esc(s.namespace)}</td>
+        <td style="padding:0.4rem 0.8rem;font-family:monospace;font-weight:600;color:var(--accent2)">${esc(s.name)}</td>
+        <td style="padding:0.4rem 0.8rem">${ready}</td>
+        <td style="padding:0.4rem 0.8rem;font-family:monospace;font-size:0.78rem">${esc(s.source_pvc || '—')}</td>
+        <td style="padding:0.4rem 0.8rem;font-family:monospace">${esc(s.size || '—')}</td>
+        <td style="padding:0.4rem 0.8rem;font-size:0.78rem">${esc(s.class || '—')}</td>
+        <td style="padding:0.4rem 0.8rem;color:var(--muted)">${esc(s.age)}</td>
+      </tr>`;
+    }).join('');
+  } else {
+    const hasSnapClass = (msg.vol_snapshot_classes || []).length > 0;
+    const msgText = hasSnapClass
+      ? 'No snapshots yet — click 📸 Snap on a PVC row'
+      : 'No VolumeSnapshotClass installed — snapshots unsupported (install ZFS CSI or another CSI driver that provides snapshots)';
+    vsTbody.innerHTML = `<tr><td colspan="7" style="padding:0.6rem 0.8rem;color:var(--muted)">${msgText}</td></tr>`;
+  }
+}
+
+// Toggle the Create-PVC drawer
+function k8sShowPVCCreate() {
+  const w = document.getElementById('k8s-pvc-create-wrap');
+  if (!w) return;
+  w.style.display = w.style.display === 'none' ? 'block' : 'none';
+  if (w.style.display === 'block') {
+    document.getElementById('k8s-pvc-name')?.focus();
+  }
+}
+
+// Submit the Create-PVC form
+function k8sCreatePVC() {
+  const ns   = document.getElementById('k8s-pvc-ns')?.value.trim() || 'default';
+  const name = document.getElementById('k8s-pvc-name')?.value.trim();
+  const sc   = document.getElementById('k8s-pvc-sc')?.value.trim();
+  const size = document.getElementById('k8s-pvc-size')?.value.trim() || '1Gi';
+  if (!name) { alert('PVC name required'); return; }
+  send({action: 'k8s_pvc_create', namespace: ns, name, storage_class: sc, size});
+  // Hide the drawer + flash a status; the backend will refresh storage tab.
+  document.getElementById('k8s-pvc-create-wrap').style.display = 'none';
+  document.getElementById('k8s-pvc-name').value = '';
+}
+
+function k8sDeletePVC(ns, name) {
+  if (!confirm(`Delete PVC ${ns}/${name}?\n\nIf the StorageClass is reclaimPolicy=Delete the underlying PV/storage will be cleaned up too.`)) return;
+  send({action: 'k8s_pvc_delete', namespace: ns, name});
+}
+
+function k8sSnapPVC(ns, name) {
+  // Pick the first VolumeSnapshotClass. If none, tell the operator.
+  const vsRow = document.querySelector('#k8s-vs-tbody td');
+  // Cheap heuristic: ask the user for the class name. Default to common ones.
+  const klass = prompt(
+    `Take a snapshot of ${ns}/${name}?\n\nVolumeSnapshotClass name:\n` +
+    `  ZFS CSI default = "zfs-snapshot"\n` +
+    `  Cancel if you don't have a VolumeSnapshotClass installed.`,
+    'zfs-snapshot'
+  );
+  if (!klass) return;
+  const snapName = prompt(`Snapshot name?`, `${name}-snap-${Math.floor(Date.now()/1000)}`);
+  if (!snapName) return;
+  send({action: 'k8s_volsnap_create',
+    namespace: ns, pvc_name: name, snapshot_class: klass, snap_name: snapName});
+}
+
 function renderK8sServices(svcs) {
   const tbody = document.getElementById('k8s-svc-tbody');
   if (!tbody) return;

@@ -1378,10 +1378,15 @@ if [[ "$EDITION" != "core" ]]; then
     #     a stuck install can capture state from the live env, AND so
     #     profiles.sh's per-binary copy list can find it as a source when
     #     installing onto the target.
-    for _lsbin in kspawn kldload-debug-bundle; do
+    for _lsbin in kspawn kldload-debug-bundle kldload-rhel-composer-build; do
         _src="/build/live-build/config/includes.chroot/usr/local/sbin/${_lsbin}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/local/sbin/${_lsbin}" && chmod +x "${ROOTFS}/usr/local/sbin/${_lsbin}"
     done
+    # kldload-rhel-composer-build added in build #51 -- caught on .103
+    # (build #50): the script was in includes.chroot/ but neither this
+    # ROOTFS copy block nor profiles.sh's target-copy block included
+    # it, so the systemd unit kldload-rhel-composer.service failed at
+    # boot with "No such file or directory" -- no RHEL golden built.
 
     # Copy installer library files
     if [[ -d /build/live-build/config/includes.chroot/usr/lib/kldload-installer ]]; then

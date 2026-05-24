@@ -391,8 +391,16 @@ ZFSREPO
 
         # Bootstrap base system
         k_log "Running dnf --installroot (${distro} ${release})..."
+        # --skip-broken + --skip-unavailable: defensive. Caught on .103
+        # (build #50) -- `composer-cli` doesn't exist in RHEL 10 (renamed
+        # to `weldr-client`), and on that single bad-name dnf dropped
+        # the WHOLE transaction including nethogs/iftop/iotop-c (which
+        # were valid). With these flags dnf logs the unmatched name and
+        # continues with the rest. kldload-firstboot has a post-install
+        # retry pass that catches any genuinely missing optional packages.
         dnf --installroot="${target}" --releasever="${release}" \
             --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+            --skip-broken --skip-unavailable \
             --nogpgcheck -y install \
             basesystem filesystem setup \
             dnf rpm coreutils bash glibc glibc-langpack-en \
@@ -409,7 +417,7 @@ ZFSREPO
             python3 python3-pip \
             dkms gcc make autoconf automake libtool \
             zfs zfs-dkms \
-            osbuild-composer composer-cli \
+            osbuild-composer weldr-client \
             >> "$log" 2>&1 \
             || k_die "dnf --installroot failed"
 

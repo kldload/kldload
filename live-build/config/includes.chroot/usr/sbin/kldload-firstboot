@@ -855,6 +855,47 @@ main() {
   # Always enable snapshot timer
   systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
 
+  # ── Generate /root/.ssh/id_kldload (the cross-VM ops key) ────────────────
+  # Used by kldload-webui's k8s_node_reboot / k8s_kubelet_restart actions
+  # to SSH into worker VMs from the host. Klab's golden-build path
+  # injects the matching pubkey into each VM's cloud-init authorized_keys
+  # so the host can reach any klab/kube-cluster node without password.
+  # Caught on .103 (build #50) -- the key was referenced but never
+  # generated; every "restart kubelet" button click failed with "Identity
+  # file /root/.ssh/id_kldload not accessible: No such file or directory."
+  if [[ ! -f /root/.ssh/id_kldload ]]; then
+    log "generating /root/.ssh/id_kldload (host->VM ops key)..."
+    mkdir -p /root/.ssh && chmod 0700 /root/.ssh
+    ssh-keygen -t ed25519 -f /root/.ssh/id_kldload -N '' \
+      -C "kldload-host-ops@$(hostname -s)" >/dev/null 2>&1 \
+      && chmod 0600 /root/.ssh/id_kldload \
+      && chmod 0644 /root/.ssh/id_kldload.pub \
+      && log "  generated $(cat /root/.ssh/id_kldload.pub)" \
+      || log "WARN: ssh-keygen failed"
+  fi
+
+  # ── Defensive retry for optional packages that the install-time dnf
+  # may have dropped (EPEL-only, RHEL-renamed, etc). The install-target's
+  # --installroot dnf runs with --skip-broken to avoid one bad name
+  # aborting the whole transaction, but that means optional packages
+  # can quietly go missing. Retry them here from the booted target's
+  # dnf, which has every repo + entitlement fully wired. --skip-broken
+  # again so the retry doesn't fail if any are still unavailable.
+  # Caught on .103: nethogs/iftop/iotop-c absent after install even
+  # though they're in the dnf list.
+  if command -v dnf >/dev/null 2>&1; then
+    local _retry_pkgs=(nethogs iftop iotop-c htop bcc-tools bpftrace osbuild-composer weldr-client)
+    local _missing=()
+    for _p in "${_retry_pkgs[@]}"; do
+      rpm -q "$_p" >/dev/null 2>&1 || _missing+=("$_p")
+    done
+    if [[ ${#_missing[@]} -gt 0 ]]; then
+      log "post-install dnf retry for missing optional packages: ${_missing[*]}"
+      dnf install -y --skip-broken --skip-unavailable "${_missing[@]}" \
+        >> "${LOG}" 2>&1 || log "WARN: some post-install packages still failed"
+    fi
+  fi
+
   # ── /root convenience symlinks ────────────────────────────────────────────
   # Surface the install / runtime logs from /var/log under /root alongside
   # the kldload-debug-bundle output. Standard log handling (logrotate,
