@@ -403,6 +403,7 @@ ZFSREPO
             NetworkManager openssh-server openssh-clients sudo \
             vim-enhanced tmux curl wget rsync jq less tar gzip \
             iproute iputils net-tools nftables chrony \
+            nethogs iftop iotop-c htop \
             passwd shadow-utils util-linux procps-ng findutils grep sed gawk \
             rootfiles parted gdisk dosfstools \
             python3 python3-pip \
@@ -410,6 +411,13 @@ ZFSREPO
             zfs zfs-dkms \
             >> "$log" 2>&1 \
             || k_die "dnf --installroot failed"
+
+        # ── Cockpit tools (F-key console bindings depend on these) ──
+        # F12/M-n use nethogs; F9 uses htop; iotop + iftop fill out the
+        # disk/net per-process views. Caught on .101 (build #48): F12
+        # threw "pkg not installed". EPEL repo is written above so these
+        # all resolve. iotop on RHEL 10 ships as `iotop-c` (the original
+        # python iotop is deprecated upstream) -- using -c name above.
 
         k_log "Root filesystem bootstrapped: $(du -sh "${target}" | cut -f1)"
 
@@ -507,8 +515,16 @@ EOS
           curl ca-certificates vim-tiny less iproute2 iputils-ping \
           initramfs-tools dosfstools e2fsprogs \
           keyboard-configuration console-setup tzdata \
+          tmux jq rsync \
+          nethogs iftop iotop htop bpfcc-tools bpftrace \
           zfs-dkms zfsutils-linux zfs-initramfs zfs-zed \
           >> "$log" 2>&1
+        # tmux/jq/rsync + nethogs/iftop/iotop/htop + bpfcc-tools/bpftrace
+        # for the F-key console cockpits (same set as the RHEL dnf
+        # install above). Caught on .101 build #48: F12 failed with
+        # "nethogs not installed" because the base pkg list omitted
+        # these. bpfcc-tools is the Debian name for what RHEL calls
+        # bcc-tools.
         ;;
 
       # ── BSD / illumos ──────────────────────────────────────────────────
