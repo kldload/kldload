@@ -1717,19 +1717,22 @@ BOBMODEL
         log "Bob: pip install chromadb/bs4 failed -- RAG will fall back to direct Ollama"
     }
 
-    # Bob CLI is already shipped via includes.chroot/usr/local/bin/bob
-    # with full system-context + RAG-bridge support. Only fall back to a
-    # stub if the proper one is missing (defensive; shouldn't happen).
-    if [[ ! -s "${ROOTFS}/usr/local/bin/bob" ]]; then
-        log "Bob: WARN -- includes.chroot bob CLI missing, writing stub"
+    # Bob CLI: always pull from the source-of-truth in includes.chroot,
+    # don't rely on ROOTFS state (it races with the wholesale copy below
+    # the BOB_LIVE block in some build sequences). If the source is
+    # missing, write a minimal stub as a defensive fallback.
+    INCLUDES_BOB="/build/live-build/config/includes.chroot/usr/local/bin/bob"
+    if [[ -s "$INCLUDES_BOB" ]] && grep -q 'BOB_RAG\b' "$INCLUDES_BOB"; then
+        install -m 0755 "$INCLUDES_BOB" "${ROOTFS}/usr/local/bin/bob"
+        log "Bob: copied full CLI from includes.chroot (RAG bridge present)"
+    else
+        log "Bob: WARN -- includes.chroot bob CLI missing or stub; writing minimal stub"
         cat > "${ROOTFS}/usr/local/bin/bob" <<'BOBCLI'
 #!/usr/bin/env bash
 Q="${*:-Hey Bob, what can you help me with?}"
 echo "$Q" | ollama run bob
 BOBCLI
         chmod +x "${ROOTFS}/usr/local/bin/bob"
-    else
-        log "Bob: using includes.chroot bob CLI (with RAG bridge)"
     fi
 
     log "Bob live mode enabled -- Ollama + model + Bob + RAG baked into image"
