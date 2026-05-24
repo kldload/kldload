@@ -1708,15 +1708,31 @@ BOBMODEL
         log "Bob: pip install open-webui failed — will use podman on boot"
     }
 
-    # Create bob CLI command
-    cat > "${ROOTFS}/usr/local/bin/bob" <<'BOBCLI'
+    # Install kldload-rag Python deps (chromadb + beautifulsoup4) so the
+    # RAG service at /usr/local/lib/kldload-rag/kldload_rag.py can start.
+    # Without these, imports fail and the RAG silently never works -- which
+    # is exactly what shipped in earlier builds.
+    log "Bob: installing kldload-rag Python deps (chromadb, beautifulsoup4)..."
+    chroot "${ROOTFS}" pip3 install --quiet --break-system-packages chromadb beautifulsoup4 2>&1 | tail -5 || {
+        log "Bob: pip install chromadb/bs4 failed -- RAG will fall back to direct Ollama"
+    }
+
+    # Bob CLI is already shipped via includes.chroot/usr/local/bin/bob
+    # with full system-context + RAG-bridge support. Only fall back to a
+    # stub if the proper one is missing (defensive; shouldn't happen).
+    if [[ ! -s "${ROOTFS}/usr/local/bin/bob" ]]; then
+        log "Bob: WARN -- includes.chroot bob CLI missing, writing stub"
+        cat > "${ROOTFS}/usr/local/bin/bob" <<'BOBCLI'
 #!/usr/bin/env bash
 Q="${*:-Hey Bob, what can you help me with?}"
 echo "$Q" | ollama run bob
 BOBCLI
-    chmod +x "${ROOTFS}/usr/local/bin/bob"
+        chmod +x "${ROOTFS}/usr/local/bin/bob"
+    else
+        log "Bob: using includes.chroot bob CLI (with RAG bridge)"
+    fi
 
-    log "Bob live mode enabled — Ollama + model + Bob baked into image"
+    log "Bob live mode enabled -- Ollama + model + Bob + RAG baked into image"
 fi
 
 # ── Autoinstall service + baked-in answers (AI appliance, seed-disk boot) ─────

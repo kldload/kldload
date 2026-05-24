@@ -90,19 +90,30 @@ k_poweroff_after_success() {
     fi
     printf '\e[1;32m║                                                          ║\e[0m\n'
   fi
-  if [[ -f /etc/kldload/autoinstall.env ]]; then
+  # Auto-reboot by default after a 10-second window. Pre-build #47 this
+  # was gated on /etc/kldload/autoinstall.env existing (the seed-disk
+  # path) so only unattended installs rebooted. Webui-driven installs
+  # left the box sitting on the "Installation complete!" screen waiting
+  # for a manual `systemctl reboot` — including the .142 build #46
+  # install that prompted this fix. Profile doesn't matter; if the
+  # install finished cleanly, the next step is always "boot the
+  # installed system." Set KLDLOAD_NO_AUTO_REBOOT=1 in the answers env
+  # to opt out (e.g., for chained post-install steps in the live env).
+  if [[ "${KLDLOAD_NO_AUTO_REBOOT:-0}" == "1" ]]; then
+    printf '\e[1;32m║   Remove the USB / ISO and reboot when ready.            ║\e[0m\n'
+    printf '\e[1;32m║   To reboot:  systemctl reboot                           ║\e[0m\n'
+    printf '\e[1;32m║   (KLDLOAD_NO_AUTO_REBOOT=1 set — auto-reboot skipped.)  ║\e[0m\n'
+    printf '\e[1;32m║                                                          ║\e[0m\n'
+    printf '\e[1;32m╚══════════════════════════════════════════════════════════╝\e[0m\n'
+    echo
+  else
     printf '\e[1;32m║   Auto-rebooting in 10 seconds...                        ║\e[0m\n'
+    printf '\e[1;32m║   Ctrl-C now to abort; KLDLOAD_NO_AUTO_REBOOT=1 to opt out.║\e[0m\n'
     printf '\e[1;32m║                                                          ║\e[0m\n'
     printf '\e[1;32m╚══════════════════════════════════════════════════════════╝\e[0m\n'
     echo
     sleep 10
     systemctl reboot || reboot
-  else
-    printf '\e[1;32m║   Remove the USB / ISO and reboot when ready.            ║\e[0m\n'
-    printf '\e[1;32m║   To reboot:  systemctl reboot                           ║\e[0m\n'
-    printf '\e[1;32m║                                                          ║\e[0m\n'
-    printf '\e[1;32m╚══════════════════════════════════════════════════════════╝\e[0m\n'
-    echo
   fi
 }
 

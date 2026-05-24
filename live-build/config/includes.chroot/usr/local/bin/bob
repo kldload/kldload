@@ -8,6 +8,8 @@ set -euo pipefail
 
 BOB_MODEL="${BOB_MODEL:-bob}"
 BOB_CONTEXT="${BOB_CONTEXT:-true}"
+BOB_RAG="${BOB_RAG:-true}"
+BOB_RAG_URL="${BOB_RAG_URL:-http://localhost:8400}"
 BOB_HISTORY="${BOB_HISTORY:-$HOME/.bob/history}"
 
 # ── Parse flags ──────────────────────────────────────────────────────────────
@@ -15,14 +17,18 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --model) BOB_MODEL="$2"; shift 2 ;;
     --no-context) BOB_CONTEXT=false; shift ;;
+    --no-rag) BOB_RAG=false; shift ;;
     --list-models) ollama list 2>/dev/null; exit 0 ;;
     --help|-h)
-      echo "bob — talk to Bob with live system context"
+      echo "bob — talk to Bob with live system context + RAG over kldload docs"
       echo ""
       echo "Usage: bob \"your question\""
       echo "       bob --model deepseek-r1:7b \"your question\""
       echo "       bob --no-context \"just chat\""
+      echo "       bob --no-rag \"skip kldload documentation retrieval\""
       echo "       bob --list-models"
+      echo ""
+      echo "Env: BOB_MODEL, BOB_CONTEXT, BOB_RAG, BOB_RAG_URL"
       exit 0
       ;;
     *) break ;;
@@ -119,7 +125,32 @@ ${_nv}"
   fi
 fi
 
-# ── Build prompt and send to Ollama ──────────────────────────────────────────
+# ── Log query ──────────────────────────────────────────────────────────────
+mkdir -p "$(dirname "$BOB_HISTORY")"
+echo "[$(date '+%F %T')] Q: ${Q}" >> "${BOB_HISTORY}.log" 2>/dev/null || true
+
+# ── Route through RAG service (preferred) ──────────────────────────────────
+# The RAG service at $BOB_RAG_URL adds retrieved kldload-doc context to the
+# prompt and streams the answer. Falls back to plain ollama if RAG is down
+# or --no-rag was passed.
+if [[ "$BOB_RAG" == "true" ]] && command -v curl >/dev/null 2>&1 \
+   && curl -sf --max-time 2 "${BOB_RAG_URL}/health" >/dev/null 2>&1; then
+  # Build JSON safely; jq if available, else hand-craft
+  if command -v jq >/dev/null 2>&1; then
+    BODY=$(jq -n --arg q "$Q" --arg c "$CTX" '{question: $q, system_context: $c}')
+  else
+    # Crude escaping fallback
+    _esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/$/\\n/g' | tr -d '\n'; }
+    BODY="{\"question\":\"$(_esc "$Q")\",\"system_context\":\"$(_esc "$CTX")\"}"
+  fi
+  curl -sN --no-buffer -X POST "${BOB_RAG_URL}/query" \
+       -H 'Content-Type: application/json' \
+       -d "$BODY"
+  echo
+  exit 0
+fi
+
+# ── Fallback: build prompt locally + pipe to ollama directly ──────────────
 if [[ -n "$CTX" ]]; then
   PROMPT="${CTX}
 
@@ -127,9 +158,5 @@ User question: ${Q}"
 else
   PROMPT="$Q"
 fi
-
-# Log query
-mkdir -p "$(dirname "$BOB_HISTORY")"
-echo "[$(date '+%F %T')] Q: ${Q}" >> "${BOB_HISTORY}.log" 2>/dev/null || true
 
 echo "$PROMPT" | ollama run "$BOB_MODEL"

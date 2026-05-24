@@ -619,6 +619,25 @@ k_install_system_files() {
   # kldload-webui enabled at boot (firstboot also starts it, but enable here for robustness)
   ln -sf "/usr/lib/systemd/system/kldload-webui.service" \
     "${target}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" || true
+
+  # ── kldload RAG service + indexer ───────────────────────────────────
+  # The RAG service answers /query and /health on :8400. The first-boot
+  # service runs the indexer once after install to populate ChromaDB.
+  # The nightly timer keeps it fresh as kldload tools/docs change.
+  if [[ -f /usr/lib/systemd/system/kldload-rag.service ]]; then
+    ln -sf "/usr/lib/systemd/system/kldload-rag.service" \
+      "${target}/etc/systemd/system/multi-user.target.wants/kldload-rag.service" || true
+  fi
+  if [[ -f /usr/lib/systemd/system/kldload-rag-firstboot.service ]]; then
+    ln -sf "/usr/lib/systemd/system/kldload-rag-firstboot.service" \
+      "${target}/etc/systemd/system/multi-user.target.wants/kldload-rag-firstboot.service" || true
+  fi
+  if [[ -f /usr/lib/systemd/system/kldload-rag-index.timer ]]; then
+    ln -sf "/usr/lib/systemd/system/kldload-rag-index.timer" \
+      "${target}/etc/systemd/system/timers.target.wants/kldload-rag-index.timer" || true
+  fi
+  # ChromaDB data dir
+  install -d -m 0755 "${target}/var/lib/kldload-rag"
   # ── 1.0.6 TLS-terminator: nginx ─────────────────────────────────────
   # nginx replaces the Python kldload-proxy as the :8443 listener.
   # HTTP/2 + graceful SIGHUP reload + drop-in dir pattern. The old

@@ -1,0 +1,18 @@
+[Unit]
+Description=kldload RAG: index corpus once on first boot
+Documentation=man:kldload-rag-index
+After=kldload-rag.service ollama.service network-online.target
+Wants=ollama.service
+# Only run if the marker file is missing (one-shot semantics).
+ConditionPathExists=!/var/lib/kldload-rag/.first-index-done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/kldload-rag-index --quiet
+ExecStartPost=/bin/sh -c 'mkdir -p /var/lib/kldload-rag && touch /var/lib/kldload-rag/.first-index-done'
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
