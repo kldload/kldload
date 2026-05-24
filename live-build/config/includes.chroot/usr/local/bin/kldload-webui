@@ -934,16 +934,78 @@ def get_system_info():
                     break
     except Exception:
         info["ram_gb"] = 0
-    # NVIDIA VRAM via nvidia-smi (if available)
+    # NVIDIA VRAM detection — three fallbacks because the live ISO boots
+    # with nouveau (not the proprietary driver), so nvidia-smi is missing
+    # at install time. Caught on a box with an RTX 3080: has_nvidia=True
+    # (lspci sees the card) but vram_gb=0 (nvidia-smi unavailable) ->
+    # install UI gated everything to the 2 GB "mini" model.
+    #
+    #   1. nvidia-smi -- proprietary driver loaded (installed system)
+    #   2. dmesg parse -- nouveau prints "fb: NNNN MiB <vram-type>" at
+    #      probe time, reliable on every live env that boots nouveau
+    #   3. lspci -vvv prefetchable BAR -- last resort. On cards with
+    #      resizable BAR the prefetchable region == VRAM size; on older
+    #      cards the BAR is capped at 256 MiB even when VRAM is 10+ GB,
+    #      so this is intentionally pessimistic
     info["vram_gb"] = 0
     if info.get("has_nvidia"):
+        # 1. nvidia-smi (installed system path)
         try:
             nvsmi = subprocess.check_output(
                 ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-                text=True, stderr=subprocess.DEVNULL).strip()
-            info["vram_gb"] = int(nvsmi.split("\n")[0]) // 1024
+                text=True, stderr=subprocess.DEVNULL, timeout=3).strip()
+            if nvsmi:
+                mib = int(nvsmi.split("\n")[0])
+                if mib > 0:
+                    info["vram_gb"] = mib // 1024
         except Exception:
             pass
+        # 2. nouveau dmesg (live ISO path -- the common case at install time)
+        if info["vram_gb"] == 0:
+            try:
+                dm = subprocess.check_output(
+                    ["dmesg"], text=True, stderr=subprocess.DEVNULL, timeout=3)
+                # Lines: "nouveau 0000:01:00.0: fb: 10240 MiB GDDR6X"
+                import re as _re
+                for _line in dm.split("\n"):
+                    if "nouveau" in _line.lower():
+                        m = _re.search(r'fb:\s*(\d+)\s*MiB', _line)
+                        if m:
+                            mib = int(m.group(1))
+                            if mib > 0:
+                                info["vram_gb"] = mib // 1024
+                                break
+            except Exception:
+                pass
+        # 3. lspci prefetchable BAR (last resort -- caps at BAR size)
+        if info["vram_gb"] == 0:
+            try:
+                lspci_v = subprocess.check_output(
+                    ["lspci", "-vvv"], text=True, stderr=subprocess.DEVNULL, timeout=5)
+                import re as _re
+                in_nv = False
+                max_mib = 0
+                for _line in lspci_v.split("\n"):
+                    if _line and not _line.startswith((" ", "\t")):
+                        # New device block; check if NVIDIA VGA/3D
+                        in_nv = ("NVIDIA" in _line.upper() and
+                                 ("VGA" in _line or "3D" in _line))
+                        continue
+                    if in_nv:
+                        m = _re.search(
+                            r'Memory at .* prefetchable.*\[size=(\d+)([KMG])\]',
+                            _line, _re.I)
+                        if m:
+                            n = int(m.group(1))
+                            unit = m.group(2).upper()
+                            mib = n * (1024 if unit == 'G' else 1 if unit == 'M' else 0)
+                            if mib > max_mib:
+                                max_mib = mib
+                # BARs < 1 GiB are PCI MMIO regions, not VRAM. Threshold here.
+                if max_mib >= 1024:
+                    info["vram_gb"] = max_mib // 1024
+            except Exception:
+                pass
     info["edition"] = EDITION
     # Firstboot progress status
     try:
@@ -2293,6 +2355,14 @@ async def ws_handler(websocket):
                     await _k8s_delete_deployment(websocket, msg)
                 elif action == "k8s_apply_yaml":
                     await _k8s_apply_yaml(websocket, msg)
+                elif action == "k8s_storage":
+                    await _k8s_storage(websocket, msg)
+                elif action == "k8s_pvc_create":
+                    await _k8s_pvc_create(websocket, msg)
+                elif action == "k8s_pvc_delete":
+                    await _k8s_pvc_delete(websocket, msg)
+                elif action == "k8s_volsnap_create":
+                    await _k8s_volsnap_create(websocket, msg)
                 elif action == "k8s_bulk":
                     await _k8s_bulk(websocket, msg)
                 elif action == "k8s_run_demo":
@@ -5900,6 +5970,218 @@ async def _k8s_services(websocket, msg):
     except Exception:
         pass
     await websocket.send(json.dumps({"type": "k8s_services", "services": svcs}))
+
+
+async def _k8s_storage(websocket, msg):
+    """Storage tab data: StorageClasses, PVCs, PVs, VolumeSnapshots,
+    VolumeSnapshotClasses. Single round-trip so the frontend renders
+    the whole tab from one WS reply.
+
+    For each PV, we attempt to identify the backing ZFS object so the
+    UI can show "this PV is rpool/k8s-volumes/pvc-abc-123" -- the
+    kldload-unique view. Works for OpenEBS ZFS LocalPV (CSI volume
+    handle is the dataset path). Falls back to volumeHandle as-is for
+    other provisioners (local-path, etc).
+
+    All output is JSON arrays of dicts shaped for direct rendering.
+    """
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    result = {"type": "k8s_storage",
+              "storage_classes": [], "pvcs": [], "pvs": [],
+              "vol_snapshots": [], "vol_snapshot_classes": []}
+
+    def _run(cmd, default=""):
+        try:
+            return subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL,
+                                           timeout=8, env=env)
+        except Exception:
+            return default
+
+    # ── StorageClasses ───────────────────────────────────────────────
+    # NAME PROVISIONER RECLAIMPOLICY VOLUMEBINDINGMODE ALLOWVOLUMEEXPANSION AGE
+    out = _run(["kubectl", "get", "sc", "--no-headers"])
+    for line in out.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 6:
+            name = parts[0]
+            is_default = "(default)" in name
+            if is_default:
+                name = name.replace("(default)", "").strip()
+            result["storage_classes"].append({
+                "name": name, "is_default": is_default,
+                "provisioner": parts[1], "reclaim": parts[2],
+                "binding_mode": parts[3], "expansion": parts[4],
+                "age": parts[5],
+            })
+
+    # ── PVCs (all namespaces) ────────────────────────────────────────
+    # NS NAME STATUS VOLUME CAPACITY ACCESS-MODES STORAGECLASS VOLUMEATTRCLASS AGE
+    out = _run(["kubectl", "get", "pvc", "-A", "--no-headers"])
+    for line in out.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 8:
+            result["pvcs"].append({
+                "namespace": parts[0], "name": parts[1], "status": parts[2],
+                "volume": parts[3], "capacity": parts[4], "access_modes": parts[5],
+                "storage_class": parts[6], "age": parts[-1],
+            })
+
+    # ── PVs + backing storage (kldload-unique) ───────────────────────
+    # NAME CAPACITY ACCESS-MODES RECLAIM-POLICY STATUS CLAIM STORAGECLASS REASON AGE
+    out = _run(["kubectl", "get", "pv", "--no-headers"])
+    for line in out.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 8:
+            pv_name = parts[0]
+            pv = {
+                "name": pv_name, "capacity": parts[1], "access_modes": parts[2],
+                "reclaim": parts[3], "status": parts[4], "claim": parts[5],
+                "storage_class": parts[6], "age": parts[-1],
+                "backing": None, "backing_kind": None,
+            }
+            # Get the volumeHandle to find the backing storage.
+            # JSON: .spec.csi.volumeHandle (CSI), .spec.hostPath.path (local-path), etc.
+            handle = _run(["kubectl", "get", "pv", pv_name, "-o",
+                           "jsonpath={.spec.csi.volumeHandle}"]).strip()
+            if handle:
+                pv["backing"] = handle
+                pv["backing_kind"] = "csi"
+                # OpenEBS ZFS LocalPV volume handle == ZFS dataset path
+                # (e.g. "pvc-abc-123" or "rpool/k8s-volumes/pvc-abc")
+                # If it's an actual ZFS dataset, surface that detail.
+                if "/" in handle:
+                    pv["backing_kind"] = "zfs"
+            else:
+                hp = _run(["kubectl", "get", "pv", pv_name, "-o",
+                           "jsonpath={.spec.hostPath.path}"]).strip()
+                if hp:
+                    pv["backing"] = hp
+                    pv["backing_kind"] = "hostpath"
+                else:
+                    local_path = _run(["kubectl", "get", "pv", pv_name, "-o",
+                                       "jsonpath={.spec.local.path}"]).strip()
+                    if local_path:
+                        pv["backing"] = local_path
+                        pv["backing_kind"] = "local"
+            result["pvs"].append(pv)
+
+    # ── VolumeSnapshots (all namespaces, if CRD present) ────────────
+    out = _run(["kubectl", "get", "volumesnapshot", "-A", "--no-headers"])
+    for line in out.strip().splitlines():
+        parts = line.split()
+        # NS NAME READYTOUSE SOURCEPVC SOURCESNAPSHOTCONTENT RESTORESIZE SNAPSHOTCLASS SNAPSHOTCONTENT CREATIONTIME AGE
+        if len(parts) >= 8:
+            result["vol_snapshots"].append({
+                "namespace": parts[0], "name": parts[1], "ready": parts[2],
+                "source_pvc": parts[3], "size": parts[5] if len(parts) > 5 else "",
+                "class": parts[6] if len(parts) > 6 else "",
+                "age": parts[-1],
+            })
+
+    # ── VolumeSnapshotClasses (if CRD present) ──────────────────────
+    out = _run(["kubectl", "get", "volumesnapshotclass", "--no-headers"])
+    for line in out.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            result["vol_snapshot_classes"].append({
+                "name": parts[0], "driver": parts[1],
+                "deletion_policy": parts[2] if len(parts) > 2 else "",
+                "age": parts[-1],
+            })
+
+    await websocket.send(json.dumps(result))
+
+
+async def _k8s_pvc_create(websocket, msg):
+    """Create a PVC from a small form. Streams kubectl apply output.
+
+    Required: namespace, name, storage_class, size (e.g. '10Gi')
+    Optional: access_mode (default 'ReadWriteOnce'), volume_mode
+    """
+    ns = msg.get("namespace", "default")
+    name = msg.get("name", "").strip()
+    sc = msg.get("storage_class", "").strip()
+    size = msg.get("size", "1Gi").strip()
+    access = msg.get("access_mode", "ReadWriteOnce")
+    vmode = msg.get("volume_mode", "Filesystem")
+    if not name or not sc or not size:
+        await websocket.send(json.dumps({"type": "error",
+            "msg": "PVC create requires name, storage_class, size"}))
+        return
+
+    manifest = (
+        "apiVersion: v1\nkind: PersistentVolumeClaim\n"
+        f"metadata:\n  name: {name}\n  namespace: {ns}\n"
+        "spec:\n"
+        f"  storageClassName: {sc}\n"
+        f"  accessModes: [{access}]\n"
+        f"  volumeMode: {vmode}\n"
+        f"  resources:\n    requests:\n      storage: {size}\n"
+    )
+
+    # Pipe to kubectl apply via a temp file (avoids shell quoting)
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write(manifest)
+        tmp_path = f.name
+    try:
+        await _stream_proc(websocket,
+            ["kubectl", "apply", "-f", tmp_path],
+            target="k8s")
+    finally:
+        os.unlink(tmp_path)
+
+    # Refresh storage tab
+    await _k8s_storage(websocket, {})
+
+
+async def _k8s_pvc_delete(websocket, msg):
+    """Delete a PVC by namespace + name."""
+    ns = msg.get("namespace", "")
+    name = msg.get("name", "")
+    if not ns or not name:
+        await websocket.send(json.dumps({"type": "error",
+            "msg": "namespace + name required"}))
+        return
+    await _stream_proc(websocket,
+        ["kubectl", "-n", ns, "delete", "pvc", name, "--wait=false"],
+        target="k8s")
+    await _k8s_storage(websocket, {})
+
+
+async def _k8s_volsnap_create(websocket, msg):
+    """Snapshot a PVC -- creates a VolumeSnapshot referencing it.
+    Requires VolumeSnapshotClass to exist (ZFS CSI installs one named
+    'zfs-snapshot' by default; local-path-provisioner does not support
+    snapshots).
+    """
+    ns = msg.get("namespace", "")
+    pvc = msg.get("pvc_name", "")
+    snap_class = msg.get("snapshot_class", "")
+    snap_name = msg.get("snap_name", "").strip() or f"{pvc}-snap-{int(time.time())}"
+    if not ns or not pvc or not snap_class:
+        await websocket.send(json.dumps({"type": "error",
+            "msg": "namespace + pvc_name + snapshot_class required"}))
+        return
+
+    manifest = (
+        "apiVersion: snapshot.storage.k8s.io/v1\nkind: VolumeSnapshot\n"
+        f"metadata:\n  name: {snap_name}\n  namespace: {ns}\n"
+        "spec:\n"
+        f"  volumeSnapshotClassName: {snap_class}\n"
+        f"  source:\n    persistentVolumeClaimName: {pvc}\n"
+    )
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write(manifest)
+        tmp_path = f.name
+    try:
+        await _stream_proc(websocket,
+            ["kubectl", "apply", "-f", tmp_path],
+            target="k8s")
+    finally:
+        os.unlink(tmp_path)
+    await _k8s_storage(websocket, {})
 
 
 async def _k8s_scale(websocket, msg):
