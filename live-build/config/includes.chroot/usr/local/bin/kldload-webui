@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import shlex
+import signal
 import sqlite3
 import ssl
 import subprocess
@@ -2848,22 +2849,107 @@ async def _stream_proc(websocket, cmd, env=None, target="log"):
     return rc
 
 
+# Helpers used by _klab_cancel to scope kills correctly. Live-ISO installs
+# launch `klab golden ...` as a CHILD of kldload-install-target (see commit
+# 24af239 — install-time golden builds). Naive `pkill -f "klab golden"` then
+# nukes the installer's child as collateral damage, which crashes the live
+# install. We now (1) refuse to cancel while an installer is in flight, and
+# (2) when we do cancel, exclude all installer descendants from any
+# pattern-based kill. See the feedback_no_self_pkill memory for the wider
+# principle — never let a pattern-based pkill cross into a process tree
+# that we don't own.
+
+def _installer_pid_tree():
+    """Return set of pids belonging to kldload-install-target and all its
+    descendants. Empty set means no installer is running."""
+    try:
+        out = subprocess.check_output(["pgrep", "-f", "kldload-install-target"],
+                                       text=True, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        return set()
+    roots = [int(p) for p in out.split() if p.strip().isdigit()]
+    if not roots:
+        return set()
+    pids = set(roots)
+    frontier = list(roots)
+    while frontier:
+        parent = frontier.pop()
+        try:
+            children_out = subprocess.check_output(
+                ["pgrep", "-P", str(parent)], text=True,
+                stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            continue
+        for c in children_out.split():
+            if c.strip().isdigit():
+                cp = int(c)
+                if cp not in pids:
+                    pids.add(cp)
+                    frontier.append(cp)
+    return pids
+
+
+def _safe_pattern_kill(patterns, sig, protected):
+    """pgrep -f each pattern, drop any pid in the protected set, then signal
+    the survivors individually. Replaces the raw `pkill -f` calls that used
+    to kill cross-tree."""
+    own_pid = os.getpid()
+    for pattern in patterns:
+        try:
+            out = subprocess.check_output(["pgrep", "-f", pattern],
+                                           text=True, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            continue
+        for pid_s in out.split():
+            if not pid_s.strip().isdigit():
+                continue
+            pid = int(pid_s)
+            if pid in protected or pid == own_pid:
+                continue
+            try:
+                os.kill(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+
 async def _klab_cancel(websocket, msg):
     """Cancel a running klab operation — kill process, destroy VMs, clean ZFS."""
     target = msg.get("target", "klab")
     proc = RUNNING_PROCS.get(target)
+
+    # 0. Refuse to cancel while a live install is running. The installer's
+    # process tree contains a `klab golden ...` child (commit 24af239) that
+    # our pattern-match fallback would otherwise kill, crashing the install.
+    # User must wait for install completion before any klab cancel is safe.
+    install_protected = _installer_pid_tree()
+    if install_protected:
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": target,
+            "line": "[cancel] REFUSED — install is in progress. "
+                    "Cancelling a klab operation now would tear down the installer's "
+                    "child klab build. Wait for install to finish, then retry.",
+        }))
+        await websocket.send(json.dumps({"type": "exec_done", "rc": 1, "target": target}))
+        return
 
     await websocket.send(json.dumps({
         "type": "log_line", "target": target,
         "line": "\n[cancel] Stopping operation...",
     }))
 
-    # 1. Kill the tracked process
+    # 1. Kill the tracked process and its whole pgid (it was spawned with
+    # start_new_session=True so pid == pgid). Plain proc.kill() only signals
+    # the immediate process and leaves orphaned virt-install / qemu-img
+    # grandchildren behind.
     if proc and proc.returncode is None:
         try:
-            proc.kill()
-            await proc.wait()
-        except Exception:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                os.killpg(proc.pid, signal.SIGKILL)
+                await proc.wait()
+        except (ProcessLookupError, PermissionError):
             pass
 
     # 2a. If the current-run.env has a systemd unit, stop that — it's
@@ -2888,24 +2974,15 @@ async def _klab_cancel(websocket, msg):
 
     # 2b. Fall back to pattern kills for older state / goldens / demos
     # / CLI-started runs that aren't tracked via RUNNING_PROCS or
-    # systemd-run units.
-    #
-    # IMPORTANT — `klab test` is the longest-running, most-cancellable
-    # workload (ztest runs go 8+ hours). Not including it meant the UI
-    # cancel button fired, killed nothing, and the run kept going —
-    # exactly what Todd reported. Match both `klab test` and the
-    # shorter `klab test-suite` variant.
-    # `klab golden-ztest` contains "klab golden" so the existing
-    # pattern covers both golden modes.
-    for pattern in ["klab test", "klab golden", "klab golden-ztest",
-                     "klab deploy", "klab destroy", "klab kubernetes",
-                     "zfs-tests.sh", "virt-install", "qemu-img convert"]:
-        subprocess.call(["pkill", "-TERM", "-f", pattern], stderr=subprocess.DEVNULL)
+    # systemd-run units. _safe_pattern_kill excludes installer descendants
+    # (we re-fetch the protected set here in case an installer started
+    # between step 0 and now — defensive, costs almost nothing).
+    _patterns = ["klab test", "klab golden", "klab golden-ztest",
+                 "klab deploy", "klab destroy", "klab kubernetes",
+                 "zfs-tests.sh", "virt-install", "qemu-img convert"]
+    _safe_pattern_kill(_patterns, signal.SIGTERM, _installer_pid_tree())
     await asyncio.sleep(1.5)
-    for pattern in ["klab test", "klab golden", "klab golden-ztest",
-                     "klab deploy", "klab destroy", "klab kubernetes",
-                     "zfs-tests.sh"]:
-        subprocess.call(["pkill", "-KILL", "-f", pattern], stderr=subprocess.DEVNULL)
+    _safe_pattern_kill(_patterns[:-2], signal.SIGKILL, _installer_pid_tree())
     # Clear detached-run state file so the next `klab_test` doesn't
     # see a stale pid and refuse to launch.
     try:
