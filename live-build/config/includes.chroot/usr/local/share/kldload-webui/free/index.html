@@ -2657,6 +2657,16 @@ select option:checked { background: #00b8d9; color: #000; }
         </div>
       </div>
 
+      <div class="panel" id="klab-ops-progress-panel" style="display:none;margin-bottom:1rem">
+        <div class="panel-hdr" style="justify-content:space-between">
+          <span id="klab-ops-progress-title">▶ Operation in flight</span>
+          <span id="klab-ops-progress-elapsed" style="font-size:0.78rem;color:var(--muted);font-family:var(--mono)"></span>
+        </div>
+        <div class="panel-body">
+          <div id="klab-ops-progress-rows" style="display:grid;gap:0.4rem;font-size:0.85rem"></div>
+        </div>
+      </div>
+
       <div class="panel" id="klab-ops-log-panel" style="display:none">
         <div class="panel-hdr" style="justify-content:space-between">
           <span>≡ Operation Log</span>
@@ -4027,6 +4037,11 @@ function handle(msg) {
           const p = document.getElementById(id);
           if (p) p.style.display = '';
         });
+        // VM-style progress indicator parsing — matches what the K8s
+        // Nodes view does for cluster scale, but for klab golden/clone
+        // ops. State lives in window._klabVMs as {name: {phase, ip,
+        // started}}; klabRenderProgress() repaints the rows table.
+        klabParseLineForProgress(klabLine);
       } else if (target === 'vm-log' || target === 'vm_log') {
         // VM operation log — every vm_clone / vm_create_cloud / vm_replace
         // streams here. Backend uses target="vm-log" (with dash) for
@@ -4047,6 +4062,11 @@ function handle(msg) {
           const box = document.getElementById(id);
           if (box) box.textContent = '';
         });
+        // Fresh op — clear the VM-progress panel so leftover state from
+        // the previous run doesn't confuse the operator. Filled back in
+        // as klabParseLineForProgress matches phase markers in the new
+        // log stream.
+        if (typeof klabResetProgress === 'function') klabResetProgress();
       }
       break;
     }
@@ -9175,6 +9195,189 @@ function klabVmOp(vm, op) {
 function klabCancel() {
   if (!confirm('Cancel running operation? This will kill processes, destroy in-progress VMs, and clean up incomplete ZFS datasets.')) return;
   send({ action: 'klab_cancel', target: 'klab' });
+}
+
+// ── klab VM-progress indicator ─────────────────────────────────────────────
+// Mirrors the K8s Nodes scale view but for klab golden builds, blue/green
+// deploys, and build-all chains. Reads the same log stream the operator
+// sees on the Operations tab, parses phase transitions, and paints a
+// per-VM row table that updates live. Goal: when the user clicks "Build
+// All" or "Deploy Blue", they immediately see WHICH VMs are being worked
+// on and what phase each is in — instead of having to read a wall of log
+// text. Visual model is the K8s Nodes table: phase chip + IP + duration.
+window._klabVMs = window._klabVMs || {};            // {name: {phase, ip, started}}
+window._klabOpsStart = null;
+window._klabPhaseRedraw = 0;
+
+const KLAB_PHASES = {
+  'cloning':    { label: 'Cloning',       color: '#60a5fa', icon: '⟳' },
+  'zvol':       { label: 'zvol',          color: '#60a5fa', icon: '◷' },
+  'importing':  { label: 'Importing img', color: '#60a5fa', icon: '↓' },
+  'booting':    { label: 'Booting',       color: '#fbbf24', icon: '▲' },
+  'ssh-wait':   { label: 'Waiting SSH',   color: '#fbbf24', icon: '◴' },
+  'configuring':{ label: 'Configuring',   color: '#fbbf24', icon: '◐' },
+  'registering':{ label: 'Registering',   color: '#a78bfa', icon: '🔑' },
+  'validating': { label: 'Validating',    color: '#a78bfa', icon: '✓?' },
+  'sealing':    { label: 'Sealing',       color: '#a78bfa', icon: '◑' },
+  'ready':      { label: 'Ready',         color: '#34d399', icon: '✓' },
+  'failed':     { label: 'Failed',        color: '#ef4444', icon: '✗' },
+  'destroying': { label: 'Destroying',    color: '#ef4444', icon: '⊘' },
+};
+
+function klabParseLineForProgress(line) {
+  // Tight matcher set — only the lines that mark a real phase change.
+  // Each match upserts the VM into window._klabVMs and forces a redraw.
+  const upsert = (name, patch) => {
+    if (!name) return;
+    if (!window._klabVMs[name]) {
+      window._klabVMs[name] = { name, phase: 'cloning', started: Date.now() };
+      if (!window._klabOpsStart) window._klabOpsStart = Date.now();
+    }
+    Object.assign(window._klabVMs[name], patch);
+    klabRenderProgress();
+  };
+
+  let m;
+  // Golden build start: "Building golden: klab-golden-debian"
+  m = line.match(/Building golden:\s*(\S+)/);             if (m) return upsert(m[1], { phase: 'cloning' });
+  m = line.match(/Building\s+(klab-[\w-]+)/);             if (m) return upsert(m[1], { phase: 'cloning' });
+  // zvol stage: "Creating zvol (40G, sparse, lz4)..."
+  if (/Creating zvol/i.test(line)) {
+    const last = Object.values(window._klabVMs).slice(-1)[0];
+    if (last) return upsert(last.name, { phase: 'zvol' });
+  }
+  // Image import: "Importing cloud image..." or "Importing RHEL 10 image into zvol..."
+  if (/Importing (cloud image|RHEL.*image|.*image into zvol)/i.test(line)) {
+    const last = Object.values(window._klabVMs).slice(-1)[0];
+    if (last) return upsert(last.name, { phase: 'importing' });
+  }
+  // Boot stage: "Booting golden VM" / "Booting new blue site"
+  if (/Booting (golden VM|new (blue|green) site)/i.test(line)) {
+    const last = Object.values(window._klabVMs).slice(-1)[0];
+    if (last) return upsert(last.name, { phase: 'booting' });
+  }
+  // SSH wait: "Waiting for SSH..." or "Waiting for SSH (parallel)..."
+  if (/Waiting for SSH/i.test(line)) {
+    const last = Object.values(window._klabVMs).slice(-1)[0];
+    if (last) return upsert(last.name, { phase: 'ssh-wait' });
+  }
+  // IP got: "IP: 192.168.122.42"
+  m = line.match(/^\s*IP:\s+(\d+\.\d+\.\d+\.\d+)/);
+  if (m) {
+    const last = Object.values(window._klabVMs).slice(-1)[0];
+    if (last) return upsert(last.name, { ip: m[1], phase: 'configuring' });
+  }
+  // RHEL register: "Registering RHEL 10 subscription"
+  if (/Registering RHEL/i.test(line)) {
+    const last = Object.values(window._klabVMs).slice(-1)[0];
+    if (last) return upsert(last.name, { phase: 'registering' });
+  }
+  // Validating: "Validating golden centos..."
+  m = line.match(/Validating golden\s+(\w+)/);
+  if (m) {
+    // Resolve distro short name → VM name (klab-golden-<distro>)
+    const target = Object.keys(window._klabVMs).find(k => k.endsWith('-' + m[1]));
+    if (target) return upsert(target, { phase: 'validating' });
+  }
+  // Sealing for clone: "Sealing image for clone..."
+  if (/Sealing image for clone/i.test(line)) {
+    const last = Object.values(window._klabVMs).slice(-1)[0];
+    if (last) return upsert(last.name, { phase: 'sealing' });
+  }
+  // Completion: "Golden ready: klab-golden-X" / "Site blue ready" / "Created snapshot"
+  m = line.match(/Golden ready:\s*(\S+)/);                if (m) return upsert(m[1], { phase: 'ready' });
+  m = line.match(/Site (blue|green)\s+ready/);            if (m) {
+    const last = Object.values(window._klabVMs).slice(-1)[0];
+    if (last) return upsert(last.name, { phase: 'ready' });
+  }
+  // Failures
+  m = line.match(/FAIL.*?(klab-[\w-]+)/) || line.match(/(klab-[\w-]+).*?failed/i);
+  if (m) return upsert(m[1], { phase: 'failed' });
+  // Destroy
+  m = line.match(/Destroying\s+(klab-[\w-]+)/);           if (m) return upsert(m[1], { phase: 'destroying' });
+  m = line.match(/Destroyed\s+(klab-[\w-]+)/);            if (m) {
+    if (window._klabVMs[m[1]]) delete window._klabVMs[m[1]];
+    return klabRenderProgress();
+  }
+}
+
+function klabRenderProgress() {
+  // Throttle redraws — log lines fire many per second during bulk ops.
+  const now = Date.now();
+  if (now - window._klabPhaseRedraw < 200) return;
+  window._klabPhaseRedraw = now;
+
+  const panel = document.getElementById('klab-ops-progress-panel');
+  const rows = document.getElementById('klab-ops-progress-rows');
+  const elap = document.getElementById('klab-ops-progress-elapsed');
+  const title = document.getElementById('klab-ops-progress-title');
+  if (!panel || !rows) return;
+
+  const vms = Object.values(window._klabVMs);
+  if (vms.length === 0) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = '';
+
+  // Elapsed timer
+  if (window._klabOpsStart && elap) {
+    const sec = Math.floor((now - window._klabOpsStart) / 1000);
+    const mm = Math.floor(sec / 60), ss = sec % 60;
+    elap.textContent = `elapsed ${mm}:${String(ss).padStart(2,'0')}`;
+  }
+
+  // Header: count ready vs total
+  const ready = vms.filter(v => v.phase === 'ready').length;
+  const failed = vms.filter(v => v.phase === 'failed').length;
+  if (title) {
+    if (ready === vms.length) {
+      title.innerHTML = `<span style="color:var(--good)">✓</span> ${vms.length} VM${vms.length > 1 ? 's' : ''} ready`;
+    } else if (failed > 0) {
+      title.innerHTML = `<span style="color:#ef4444">✗</span> ${failed} failed, ${ready}/${vms.length} ready`;
+    } else {
+      title.innerHTML = `▶ ${ready}/${vms.length} VMs ready &mdash; in progress`;
+    }
+  }
+
+  rows.innerHTML = vms.map(v => {
+    const p = KLAB_PHASES[v.phase] || { label: v.phase, color: 'var(--muted)', icon: '·' };
+    const sec = Math.floor((now - v.started) / 1000);
+    const dur = sec >= 60 ? `${Math.floor(sec/60)}m ${sec%60}s` : `${sec}s`;
+    const spinning = !['ready','failed'].includes(v.phase);
+    const animate = spinning ? 'animation: klabSpin 1.2s linear infinite;display:inline-block' : '';
+    return `<div style="display:grid;grid-template-columns:minmax(220px,1.5fr) 130px 130px 80px;gap:0.6rem;align-items:center;padding:0.45rem 0.7rem;background:var(--bg3);border-left:3px solid ${p.color};border-radius:4px">
+      <span style="font-family:var(--mono);font-size:0.85rem;color:var(--bright)">${v.name}</span>
+      <span style="color:${p.color};font-size:0.82rem">
+        <span style="${animate}">${p.icon}</span> ${p.label}
+      </span>
+      <span style="font-family:var(--mono);font-size:0.78rem;color:var(--muted)">${v.ip || ''}</span>
+      <span style="font-family:var(--mono);font-size:0.78rem;color:var(--muted);text-align:right">${dur}</span>
+    </div>`;
+  }).join('');
+}
+
+// Add the spin keyframe once (idempotent)
+if (!document.getElementById('klab-spin-style')) {
+  const s = document.createElement('style');
+  s.id = 'klab-spin-style';
+  s.textContent = '@keyframes klabSpin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }';
+  document.head.appendChild(s);
+}
+
+// Tick the elapsed timer every second while there's an active op
+setInterval(() => {
+  if (Object.keys(window._klabVMs).length > 0) klabRenderProgress();
+}, 1000);
+
+// On exec_done for klab: hold the panel visible (final state), then
+// clear pending VMs 60s later so the next op starts from empty. Reset
+// to empty immediately on a fresh exec_start so the operator sees a
+// clean slate.
+function klabResetProgress() {
+  window._klabVMs = {};
+  window._klabOpsStart = null;
+  klabRenderProgress();
 }
 
 function klabIsolate(vm, ip, isolate) {
