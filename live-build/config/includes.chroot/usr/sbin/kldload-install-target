@@ -517,23 +517,66 @@ EOS
         printf '#!/bin/sh\nexit 101\n' > "${target}/usr/sbin/policy-rc.d"
         chmod 0755 "${target}/usr/sbin/policy-rc.d"
 
-        chroot "${target}" apt-get update >> "$log" 2>&1
+        chroot "${target}" apt-get update >> "$log" 2>&1 \
+          || k_die "apt-get update failed in target chroot — check ${log}"
+
+        # Split base/kernel into two passes. Pass A is the base userland
+        # (no kernel triggers). Pass B installs the kernel + headers + zfs
+        # stack so all DKMS triggers fire AFTER both kernel-source AND
+        # kernel-headers are present. Doing both in one transaction caused
+        # zfs-dkms's postinst to race the linux-image-amd64 install and
+        # the whole thing rolled back silently with apt returning 0 —
+        # caught on .137 2026-05-25 build #52: dpkg -l showed initramfs-
+        # tools + zfs-dkms installed but linux-image-amd64 not even in the
+        # rpm db. Verified by manual chroot apt-get install which landed
+        # the kernel cleanly once nothing else was contending.
+        #
+        # Each pass has explicit `|| k_die` so a failure is loud and stops
+        # the install instead of letting the user reboot into an unbootable
+        # target (which is what bit .137).
+
+        # Pass A: base userland (no kernel/DKMS triggers in this set)
         DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y \
-          linux-image-amd64 grub-efi-amd64 shim-signed efibootmgr \
-          locales sudo openssh-server systemd-resolved network-manager \
-          curl ca-certificates vim-tiny less iproute2 iputils-ping \
-          initramfs-tools dosfstools e2fsprogs \
-          keyboard-configuration console-setup tzdata \
-          tmux jq rsync \
-          nethogs iftop iotop htop bpfcc-tools bpftrace \
-          zfs-dkms zfsutils-linux zfs-initramfs zfs-zed \
-          >> "$log" 2>&1
-        # tmux/jq/rsync + nethogs/iftop/iotop/htop + bpfcc-tools/bpftrace
-        # for the F-key console cockpits (same set as the RHEL dnf
-        # install above). Caught on .101 build #48: F12 failed with
-        # "nethogs not installed" because the base pkg list omitted
-        # these. bpfcc-tools is the Debian name for what RHEL calls
-        # bcc-tools.
+            --no-install-recommends \
+            locales sudo openssh-server systemd-resolved network-manager \
+            curl ca-certificates vim-tiny less iproute2 iputils-ping \
+            initramfs-tools dosfstools e2fsprogs efibootmgr \
+            keyboard-configuration console-setup tzdata \
+            tmux jq rsync \
+            nethogs iftop iotop htop bpfcc-tools bpftrace \
+            >> "$log" 2>&1 \
+          || k_die "apt-get install pass A (base userland) failed — check ${log}"
+
+        # Pass B: kernel + headers + bootloader + zfs. Install headers
+        # BEFORE the kernel so when linux-image-amd64's postinst fires
+        # the dkms triggers for zfs, kernel-devel is already on disk.
+        DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y \
+            --no-install-recommends \
+            linux-headers-amd64 linux-image-amd64 \
+            grub-efi-amd64 shim-signed \
+            zfs-dkms zfsutils-linux zfs-initramfs zfs-zed \
+            >> "$log" 2>&1 \
+          || k_die "apt-get install pass B (kernel + zfs) failed — check ${log}"
+
+        # Post-install verification — assert the critical packages actually
+        # landed. apt-get can return 0 even when a postinst failed and
+        # marked the package as half-configured (status 'iF' in dpkg). The
+        # explicit `dpkg -l | grep ^ii` check is the equivalent of the RHEL
+        # pass-3 `rpm -q` verify added 2026-05-12 — without it, the install
+        # claims success and the operator only finds out at the post-reboot
+        # ZBM-can't-find-a-kernel screen. .137 2026-05-25 spent an hour on
+        # exactly this failure mode before we added the guard.
+        local _required=( linux-image-amd64 linux-headers-amd64 grub-efi-amd64
+                          shim-signed initramfs-tools zfs-dkms zfs-initramfs )
+        local _missing=()
+        for _p in "${_required[@]}"; do
+          chroot "${target}" /usr/bin/dpkg-query -W -f='${db:Status-Abbrev}' "$_p" 2>/dev/null \
+            | grep -q '^ii' || _missing+=("$_p")
+        done
+        if [[ ${#_missing[@]} -gt 0 ]]; then
+          k_die "Required packages missing or half-configured after apt install: ${_missing[*]} — target will not boot. Check ${log}"
+        fi
+        k_log "Debian/Ubuntu apt install verified: kernel + bootloader + zfs all installed"
         ;;
 
       # ── BSD / illumos ──────────────────────────────────────────────────
