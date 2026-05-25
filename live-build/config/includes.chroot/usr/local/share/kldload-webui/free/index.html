@@ -4057,7 +4057,17 @@ function handle(msg) {
         const bar = document.getElementById('install-progress');
         const st  = document.getElementById('install-status');
         const box = document.getElementById('install-log');
-        if (msg.rc === 0) {
+        // Belt-and-suspenders: even on rc=0, if the install log shows a
+        // FATAL marker the auto-reboot must NOT fire — there are bash
+        // paths where bootstrap.sh's `return 1` doesn't propagate all
+        // the way back to install-target's exit code (caught on .103
+        // 2026-05-24 build #52: dnf pass 3 fatal, k_die fired, log
+        // showed BOOTSTRAP FAILED, but exec_done arrived rc=0 and the
+        // 10-second autoreboot kicked in, rebooting the box into a
+        // half-installed disk and destroying the live-env logs).
+        const _logTxt = (box && box.textContent) || '';
+        const _installFailed = /(BOOTSTRAP FAILED|FATAL:|will not boot|Bootstrap failed|Install FAILED)/i.test(_logTxt);
+        if (msg.rc === 0 && !_installFailed) {
           if (bar) { bar.className = 'progress-bar'; bar.style.width = '100%'; bar.style.background = '#8b5cf6'; }
           appendLog(box, '✓ Install complete. Initial snapshot taken.');
           appendLog(box, '↻ Auto-rebooting in 10 seconds — pull the USB now if you want to boot from the installed disk.');

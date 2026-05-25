@@ -1527,6 +1527,9 @@ CUSTOMREPO
       --setopt='*.retries=10' \
       --setopt='*.timeout=60' \
       --setopt='*.minrate=1024' \
+      --setopt='updates.excludepkgs=selinux-policy*,policycoreutils*' \
+      --disablerepo='updates' --disablerepo='fedora' --disablerepo='fedora-cisco-openh264' \
+      --disablerepo='updates-testing' --disablerepo='updates-debuginfo' \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
       "${_exclude_scripts[@]}" \
@@ -1548,6 +1551,9 @@ CUSTOMREPO
       --setopt='*.retries=10' \
       --setopt='*.timeout=60' \
       --setopt='*.minrate=1024' \
+      --setopt='updates.excludepkgs=selinux-policy*,policycoreutils*' \
+      --disablerepo='updates' --disablerepo='fedora' --disablerepo='fedora-cisco-openh264' \
+      --disablerepo='updates-testing' --disablerepo='updates-debuginfo' \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
       "${_f44_kernel_lockout[@]}" \
@@ -1578,6 +1584,9 @@ CUSTOMREPO
       --setopt='*.retries=10' \
       --setopt='*.timeout=60' \
       --setopt='*.minrate=1024' \
+      --setopt='updates.excludepkgs=selinux-policy*,policycoreutils*' \
+      --disablerepo='updates' --disablerepo='fedora' --disablerepo='fedora-cisco-openh264' \
+      --disablerepo='updates-testing' --disablerepo='updates-debuginfo' \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install \
       "${_f44_kernel_lockout[@]}" \
