@@ -891,7 +891,15 @@ main() {
     done
     if [[ ${#_missing[@]} -gt 0 ]]; then
       log "post-install dnf retry for missing optional packages: ${_missing[*]}"
-      dnf install -y --skip-broken --skip-unavailable "${_missing[@]}" \
+      # dnf5 doesn't recognise --skip-unavailable (dnf4 alias only). Passing
+      # it makes dnf5 print usage + exit non-zero, which silently swallowed
+      # the retry for ALL the listed packages -- including nethogs / iftop
+      # / iotop-c which were perfectly installable. Just --skip-broken is
+      # enough: missing-but-resolvable pkgs install, missing-and-broken get
+      # logged + skipped. Caught on .143 build #55 2026-05-25: manual dnf
+      # install -y of the same list landed nethogs+iftop+iotop-c cleanly
+      # once --skip-unavailable was dropped.
+      dnf install -y --skip-broken "${_missing[@]}" \
         >> "${LOG}" 2>&1 || log "WARN: some post-install packages still failed"
     fi
   fi
