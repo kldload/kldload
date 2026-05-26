@@ -6193,6 +6193,29 @@ async def _k8s_pvc_create(websocket, msg):
             "msg": "PVC create requires name, storage_class, size"}))
         return
 
+    # Check the StorageClass's volumeBindingMode. If WaitForFirstConsumer
+    # (which local-path-provisioner forces), creating a bare PVC produces
+    # a Pending claim that never binds -- the operator clicks Apply, sees
+    # nothing change in the Bound table, and concludes the UI is broken.
+    # Caught on .143 build #55 2026-05-25 ("i made one and nothing happend").
+    # Fix: when binding mode is WaitForFirstConsumer, also create a
+    # busybox pod that mounts the PVC at /data so it binds immediately.
+    # Operator gets visible Bound state + an "Open shell" pathway.
+    # Pod name is derived from the PVC name (kldload-pvc-<pvc>-binder).
+    # Operator can delete the binder pod and attach their own workload.
+    binding_mode = "Immediate"
+    try:
+        _probe = await asyncio.create_subprocess_exec(
+            "kubectl", "get", "sc", sc,
+            "-o", "jsonpath={.volumeBindingMode}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        _out, _ = await _probe.communicate()
+        binding_mode = (_out.decode().strip() or "Immediate")
+    except Exception:
+        pass
+
     manifest = (
         "apiVersion: v1\nkind: PersistentVolumeClaim\n"
         f"metadata:\n  name: {name}\n  namespace: {ns}\n"
@@ -6203,6 +6226,37 @@ async def _k8s_pvc_create(websocket, msg):
         f"  resources:\n    requests:\n      storage: {size}\n"
     )
 
+    # If the SC is lazy-bind AND the user requested a Filesystem volume,
+    # bundle a binder pod. We skip the binder for Block volumes (the
+    # busybox image doesn't have a way to "mount" a raw block device
+    # meaningfully) and for ReadWriteMany (would need a different
+    # image/strategy). Operator can still attach a binder manually.
+    add_binder = (
+        binding_mode == "WaitForFirstConsumer"
+        and vmode == "Filesystem"
+        and access in ("ReadWriteOnce", "ReadWriteOncePod")
+    )
+    if add_binder:
+        binder_name = f"{name}-binder"
+        manifest += (
+            "---\n"
+            "apiVersion: v1\nkind: Pod\n"
+            f"metadata:\n  name: {binder_name}\n  namespace: {ns}\n"
+            "  labels:\n    kldload.io/role: pvc-binder\n"
+            f"    kldload.io/pvc: {name}\n"
+            "spec:\n"
+            "  restartPolicy: Always\n"
+            "  containers:\n"
+            "  - name: shell\n"
+            "    image: ecr-public.aws.com/docker/library/busybox:latest\n"
+            "    command: [\"sh\",\"-c\",\"echo READY > /data/.kldload-ready; "
+            "sleep infinity\"]\n"
+            "    volumeMounts:\n"
+            "    - {name: d, mountPath: /data}\n"
+            "  volumes:\n"
+            f"  - name: d\n    persistentVolumeClaim:\n      claimName: {name}\n"
+        )
+
     # Pipe to kubectl apply via a temp file (avoids shell quoting)
     import tempfile
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -6212,6 +6266,14 @@ async def _k8s_pvc_create(websocket, msg):
         await _stream_proc(websocket,
             ["kubectl", "apply", "-f", tmp_path],
             target="k8s")
+        if add_binder:
+            await websocket.send(json.dumps({
+                "type": "log_line", "target": "k8s",
+                "line": f"[pvc] {sc} is WaitForFirstConsumer -- added binder pod "
+                        f"{ns}/{name}-binder so the PV allocates immediately. "
+                        f"Delete the binder + attach your own workload when ready: "
+                        f"kubectl -n {ns} delete pod {name}-binder",
+            }))
     finally:
         os.unlink(tmp_path)
 
