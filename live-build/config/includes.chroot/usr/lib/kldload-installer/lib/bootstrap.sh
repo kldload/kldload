@@ -1512,6 +1512,24 @@ CUSTOMREPO
           '--exclude=kernel-tools-libs-7.*'
       )
   fi
+  # Fedora-only repo flags. dnf5 errors hard on --setopt='REPO.X=Y' AND on
+  # --disablerepo=REPO when REPO is not defined in the installroot. RHEL
+  # / CentOS / Rocky don't have fedora/updates/fedora-cisco-openh264/etc.
+  # in their repos, so applying these flags universally breaks pass 1
+  # immediately ("No matching repositories" — caught on .109 build #55
+  # 2026-05-26). Build the array per-distro and inject only when fedora.
+  local _fed_repo_flags=()
+  if [[ "${distro}" == "fedora" ]]; then
+    _fed_repo_flags=(
+      --setopt='updates.excludepkgs=selinux-policy*,policycoreutils*'
+      --setopt='updates.enabled=0'
+      --setopt='fedora.enabled=0'
+      --setopt='fedora-cisco-openh264.enabled=0'
+      --setopt='updates-testing.enabled=0'
+      --setopt='updates-debuginfo.enabled=0'
+    )
+  fi
+
   k_log_to "$log" "Running dnf --installroot pass 1 (main, ${#_dnf_pkgs[@]} packages, profile=${_profile})..."
   # Mirror-resilience: skip_if_unavailable=True so one broken upstream mirror
   # (e.g. iweb.com returning 404/corrupt repodata, observed 2026-05-16 on .111)
@@ -1527,10 +1545,7 @@ CUSTOMREPO
       --setopt='*.retries=10' \
       --setopt='*.timeout=60' \
       --setopt='*.minrate=1024' \
-      --setopt='updates.excludepkgs=selinux-policy*,policycoreutils*' \
-      --setopt='updates.enabled=0' --setopt='fedora.enabled=0' \
-      --setopt='fedora-cisco-openh264.enabled=0' \
-      --setopt='updates-testing.enabled=0' --setopt='updates-debuginfo.enabled=0' \
+      "${_fed_repo_flags[@]}" \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
       "${_exclude_scripts[@]}" \
@@ -1552,10 +1567,7 @@ CUSTOMREPO
       --setopt='*.retries=10' \
       --setopt='*.timeout=60' \
       --setopt='*.minrate=1024' \
-      --setopt='updates.excludepkgs=selinux-policy*,policycoreutils*' \
-      --setopt='updates.enabled=0' --setopt='fedora.enabled=0' \
-      --setopt='fedora-cisco-openh264.enabled=0' \
-      --setopt='updates-testing.enabled=0' --setopt='updates-debuginfo.enabled=0' \
+      "${_fed_repo_flags[@]}" \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
       "${_f44_kernel_lockout[@]}" \
@@ -1586,10 +1598,7 @@ CUSTOMREPO
       --setopt='*.retries=10' \
       --setopt='*.timeout=60' \
       --setopt='*.minrate=1024' \
-      --setopt='updates.excludepkgs=selinux-policy*,policycoreutils*' \
-      --setopt='updates.enabled=0' --setopt='fedora.enabled=0' \
-      --setopt='fedora-cisco-openh264.enabled=0' \
-      --setopt='updates-testing.enabled=0' --setopt='updates-debuginfo.enabled=0' \
+      "${_fed_repo_flags[@]}" \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install \
       "${_f44_kernel_lockout[@]}" \
