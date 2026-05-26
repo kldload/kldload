@@ -1528,8 +1528,9 @@ CUSTOMREPO
       --setopt='*.timeout=60' \
       --setopt='*.minrate=1024' \
       --setopt='updates.excludepkgs=selinux-policy*,policycoreutils*' \
-      --disablerepo='updates' --disablerepo='fedora' --disablerepo='fedora-cisco-openh264' \
-      --disablerepo='updates-testing' --disablerepo='updates-debuginfo' \
+      --setopt='updates.enabled=0' --setopt='fedora.enabled=0' \
+      --setopt='fedora-cisco-openh264.enabled=0' \
+      --setopt='updates-testing.enabled=0' --setopt='updates-debuginfo.enabled=0' \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
       "${_exclude_scripts[@]}" \
@@ -1552,8 +1553,9 @@ CUSTOMREPO
       --setopt='*.timeout=60' \
       --setopt='*.minrate=1024' \
       --setopt='updates.excludepkgs=selinux-policy*,policycoreutils*' \
-      --disablerepo='updates' --disablerepo='fedora' --disablerepo='fedora-cisco-openh264' \
-      --disablerepo='updates-testing' --disablerepo='updates-debuginfo' \
+      --setopt='updates.enabled=0' --setopt='fedora.enabled=0' \
+      --setopt='fedora-cisco-openh264.enabled=0' \
+      --setopt='updates-testing.enabled=0' --setopt='updates-debuginfo.enabled=0' \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install --skip-broken --skip-unavailable \
       "${_f44_kernel_lockout[@]}" \
@@ -1585,8 +1587,9 @@ CUSTOMREPO
       --setopt='*.timeout=60' \
       --setopt='*.minrate=1024' \
       --setopt='updates.excludepkgs=selinux-policy*,policycoreutils*' \
-      --disablerepo='updates' --disablerepo='fedora' --disablerepo='fedora-cisco-openh264' \
-      --disablerepo='updates-testing' --disablerepo='updates-debuginfo' \
+      --setopt='updates.enabled=0' --setopt='fedora.enabled=0' \
+      --setopt='fedora-cisco-openh264.enabled=0' \
+      --setopt='updates-testing.enabled=0' --setopt='updates-debuginfo.enabled=0' \
       --disableplugin=subscription-manager --disableplugin=product-id \
       --nogpgcheck -y install \
       "${_f44_kernel_lockout[@]}" \
