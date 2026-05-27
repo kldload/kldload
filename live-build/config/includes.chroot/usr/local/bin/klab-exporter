@@ -188,39 +188,45 @@ def collect_metrics():
                 lines.append(f'klab_test_last_test_info{{distro="{d}",test="{last_test}"}} 1')
 
     # ── ZFS pool health ──────────────────────────────────────────────
+    # Names use the klab_zfs_pool_* prefix so they align with the rest of
+    # the zfs metric family (klab_zfs_arc_*, klab_zfs_snapshot_*, ...)
+    # and with the ZFS Test Live dashboard's "Pool capacity + dataset
+    # state" stat panels. Renaming from klab_pool_* lit up four dashboard
+    # tiles that were stuck at "No data" because the query name didn't
+    # match the emitted name (bug found 2026-05-25).
     lines.append("")
-    lines.append("# HELP klab_pool_size_bytes Total pool size")
-    lines.append("# TYPE klab_pool_size_bytes gauge")
-    lines.append("# HELP klab_pool_used_bytes Pool used space")
-    lines.append("# TYPE klab_pool_used_bytes gauge")
-    lines.append("# HELP klab_pool_free_bytes Pool free space")
-    lines.append("# TYPE klab_pool_free_bytes gauge")
+    lines.append("# HELP klab_zfs_pool_size_bytes Total pool size")
+    lines.append("# TYPE klab_zfs_pool_size_bytes gauge")
+    lines.append("# HELP klab_zfs_pool_used_bytes Pool used space")
+    lines.append("# TYPE klab_zfs_pool_used_bytes gauge")
+    lines.append("# HELP klab_zfs_pool_free_bytes Pool free space")
+    lines.append("# TYPE klab_zfs_pool_free_bytes gauge")
 
     pool_size = run(f"zfs get -Hp -o value available {POOL}")
     pool_used = run(f"zfs get -Hp -o value used {POOL}")
     if pool_size.isdigit():
-        lines.append(f'klab_pool_free_bytes{{pool="{POOL}"}} {pool_size}')
+        lines.append(f'klab_zfs_pool_free_bytes{{pool="{POOL}"}} {pool_size}')
     if pool_used.isdigit():
-        lines.append(f'klab_pool_used_bytes{{pool="{POOL}"}} {pool_used}')
+        lines.append(f'klab_zfs_pool_used_bytes{{pool="{POOL}"}} {pool_used}')
         if pool_size.isdigit():
-            lines.append(f'klab_pool_size_bytes{{pool="{POOL}"}} {int(pool_size) + int(pool_used)}')
+            lines.append(f'klab_zfs_pool_size_bytes{{pool="{POOL}"}} {int(pool_size) + int(pool_used)}')
 
     # Pool health
     health = run(f"zpool get -H -o value health {POOL}")
     healthy = 1 if health == "ONLINE" else 0
-    lines.append(f'klab_pool_healthy{{pool="{POOL}"}} {healthy}')
+    lines.append(f'klab_zfs_pool_healthy{{pool="{POOL}"}} {healthy}')
 
     # Pool compression ratio
     compratio = run(f"zfs get -Hp -o value compressratio {POOL}")
     try:
-        lines.append(f'klab_pool_compress_ratio{{pool="{POOL}"}} {float(compratio.replace("x",""))}')
+        lines.append(f'klab_zfs_pool_compress_ratio{{pool="{POOL}"}} {float(compratio.replace("x",""))}')
     except (ValueError, AttributeError):
         pass
 
     # Pool fragmentation
     frag = run(f"zpool list -Hp -o frag {POOL}")
     try:
-        lines.append(f'klab_pool_fragmentation{{pool="{POOL}"}} {int(frag.replace("%",""))}')
+        lines.append(f'klab_zfs_pool_fragmentation{{pool="{POOL}"}} {int(frag.replace("%",""))}')
     except (ValueError, AttributeError):
         pass
 
