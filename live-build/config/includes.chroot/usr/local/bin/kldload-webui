@@ -9455,68 +9455,78 @@ async def _bob_chat(websocket, msg):
                                  "content": content or "",
                                  "tool_calls": tcalls})
                 for tc in tcalls:
-                        fn   = (tc.get("function") or {})
-                        nm   = fn.get("name", "")
-                        argv = fn.get("arguments") or {}
-                        if isinstance(argv, str):
-                            try: argv = json.loads(argv)
-                            except Exception: argv = {}
-                        db_log_event("bob_tool", nm, f"Bob called {nm}", {"args": argv})
-                        await websocket.send(json.dumps({
-                            "type": "bob_chat_chunk",
-                            "content": f"\n[tool: {nm}({json.dumps(argv)})]\n",
-                            "done": False,
-                        }))
-                        # Gate: when BOB_AUTONOMOUS (default), every tool runs
-                        # immediately — no modal, no confirm future round-trip.
-                        # Audit is still full: every call is logged to state.db
-                        # above and ZFS snapshots make any action rollback-able.
-                        # Paranoid mode (autonomy off) restores the old approval
-                        # flow for tools in BOB_EXECUTE_TOOLS.
-                        autonomous = _bob_autonomy_get()
-                        if (not autonomous) and nm in BOB_EXECUTE_TOOLS:
-                            decision = await _bob_request_confirm(websocket, nm, argv)
-                            if not decision.get("ok"):
-                                reason = decision.get("reason") or "user rejected"
-                                await websocket.send(json.dumps({
-                                    "type": "bob_chat_chunk",
-                                    "content": f"  → {reason}\n",
-                                    "done": False,
-                                }))
-                                result = json.dumps({"rejected": True, "reason": reason})
-                            else:
-                                final_args = decision.get("args") or argv
-                                await websocket.send(json.dumps({
-                                    "type": "bob_chat_chunk",
-                                    "content": "  → approved, executing…\n",
-                                    "done": False,
-                                }))
-                                if nm == "run_playbook":
-                                    summary = await _bob_run_playbook(websocket, final_args)
-                                    result = json.dumps({"ok": True, "summary": summary})
-                                else:
-                                    result = _bob_tool_exec(nm, final_args)
-                        else:
-                            # Autonomous path OR non-execute tool: just fire.
-                            if nm == "run_playbook":
-                                summary = await _bob_run_playbook(websocket, argv)
-                                result = json.dumps({"ok": True, "summary": summary})
-                            else:
-                                result = _bob_tool_exec(nm, argv)
-                        messages.append({"role": "tool", "name": nm, "content": result})
-                else:
+                    fn   = (tc.get("function") or {})
+                    nm   = fn.get("name", "")
+                    argv = fn.get("arguments") or {}
+                    if isinstance(argv, str):
+                        try: argv = json.loads(argv)
+                        except Exception: argv = {}
+                    db_log_event("bob_tool", nm, f"Bob called {nm}", {"args": argv})
                     await websocket.send(json.dumps({
                         "type": "bob_chat_chunk",
-                        "content": "\n[tool loop capped at 12 rounds]\n",
+                        "content": f"\n[tool: {nm}({json.dumps(argv)})]\n",
                         "done": False,
                     }))
+                    # Gate: when BOB_AUTONOMOUS (default), every tool runs
+                    # immediately — no modal, no confirm future round-trip.
+                    # Audit is still full: every call is logged to state.db
+                    # above and ZFS snapshots make any action rollback-able.
+                    # Paranoid mode (autonomy off) restores the old approval
+                    # flow for tools in BOB_EXECUTE_TOOLS.
+                    autonomous = _bob_autonomy_get()
+                    if (not autonomous) and nm in BOB_EXECUTE_TOOLS:
+                        decision = await _bob_request_confirm(websocket, nm, argv)
+                        if not decision.get("ok"):
+                            reason = decision.get("reason") or "user rejected"
+                            await websocket.send(json.dumps({
+                                "type": "bob_chat_chunk",
+                                "content": f"  → {reason}\n",
+                                "done": False,
+                            }))
+                            result = json.dumps({"rejected": True, "reason": reason})
+                        else:
+                            final_args = decision.get("args") or argv
+                            await websocket.send(json.dumps({
+                                "type": "bob_chat_chunk",
+                                "content": "  → approved, executing…\n",
+                                "done": False,
+                            }))
+                            if nm == "run_playbook":
+                                summary = await _bob_run_playbook(websocket, final_args)
+                                result = json.dumps({"ok": True, "summary": summary})
+                            else:
+                                result = _bob_tool_exec(nm, final_args)
+                    else:
+                        # Autonomous path OR non-execute tool: just fire.
+                        if nm == "run_playbook":
+                            summary = await _bob_run_playbook(websocket, argv)
+                            result = json.dumps({"ok": True, "summary": summary})
+                        else:
+                            result = _bob_tool_exec(nm, argv)
+                    messages.append({"role": "tool", "name": nm, "content": result})
             else:
-                # Classic streaming path — no tools
-                chunks = await loop.run_in_executor(pool, _stream_call, messages)
-                for c in chunks:
-                    await websocket.send(json.dumps({
-                        "type": "bob_chat_chunk", "content": c, "done": False,
-                    }))
+                # for-else: only fires if the round loop completed WITHOUT
+                # break — i.e. we did 12 full tool rounds and the model
+                # still wanted more. The break above (no tcalls → done)
+                # short-circuits the loop normally, so this branch really
+                # is the genuine cap. Don't move this inside the inner
+                # for-tc loop: that misindent caused this message to fire
+                # after every successful tool round (bug found 2026-05-26).
+                await websocket.send(json.dumps({
+                    "type": "bob_chat_chunk",
+                    "content": "\n[tool loop capped at 12 rounds]\n",
+                    "done": False,
+                }))
+        else:
+            # Classic streaming path — no tools requested for this turn.
+            # Must be paired with the outer `if use_tools:`, not nested
+            # under the round loop (was the second half of the same
+            # misindent bug — made this branch unreachable in practice).
+            chunks = await loop.run_in_executor(pool, _stream_call, messages)
+            for c in chunks:
+                await websocket.send(json.dumps({
+                    "type": "bob_chat_chunk", "content": c, "done": False,
+                }))
 
         await websocket.send(json.dumps({"type": "bob_chat_done"}))
     except Exception as e:
