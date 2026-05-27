@@ -1,0 +1,48 @@
+#!/bin/bash
+# kldload-zfs-dbgmsg-collector — emit new ZFS dbgmsg entries to a tailable log.
+#
+# /proc/spl/kstat/zfs/dbgmsg is mode 0600 root:root and is a kstat dump
+# (not an append-only log file), so promtail cannot tail it directly.
+# This shim runs as root on a 10s timer, diffs the kstat against the last
+# seen timestamp, and appends only new lines to a 0644 file that promtail
+# can scrape.
+#
+# Why: the Grafana "ZFS Module Debug Messages (dbgmsg)" panel pulls
+# {job="zfs-dbgmsg"} from Loki. Without this shim that query is empty
+# because promtail can't read the kstat node, and even if it could, the
+# whole-file rewind on every poll would either flood Loki or miss entries.
+#
+# History: bug surfaced on build #57 when the user noticed the dbgmsg
+# panel said "No data" on the ZFS dashboard. Promtail's __path__ was
+# pointed straight at the kstat — fixed in the same commit that added
+# this script and the matching .timer.
+
+set -uo pipefail
+
+SRC=/proc/spl/kstat/zfs/dbgmsg
+OUT=/var/log/kldload/zfs-dbgmsg.log
+LAST=/var/lib/kldload/.zfs-dbgmsg.lastts
+
+[ -r "$SRC" ] || exit 0
+
+mkdir -p "$(dirname "$OUT")" "$(dirname "$LAST")"
+touch "$OUT"
+chmod 0644 "$OUT"
+
+prev=$(cat "$LAST" 2>/dev/null || echo 0)
+max="$prev"
+
+# Format of the kstat node:
+#   timestamp    message
+#   1779849663   spa_history.c:297:spa_history_log_sync(): txg 17368 ...
+# First line is the header. Data rows start with a 10-digit unix ts.
+while IFS= read -r line; do
+  ts="${line%% *}"
+  [[ "$ts" =~ ^[0-9]+$ ]] || continue
+  if (( ts > prev )); then
+    printf "%s\n" "$line" >> "$OUT"
+    (( ts > max )) && max="$ts"
+  fi
+done < "$SRC"
+
+echo "$max" > "$LAST"

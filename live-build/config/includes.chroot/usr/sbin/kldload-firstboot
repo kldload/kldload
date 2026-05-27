@@ -855,6 +855,16 @@ main() {
   # Always enable snapshot timer
   systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
 
+  # ── ZFS dbgmsg drain ──────────────────────────────────────────────────────
+  # /proc/spl/kstat/zfs/dbgmsg is 0600 root:root and is a kstat dump rather
+  # than an append-only log, so promtail cannot tail it. The collector
+  # script reads new entries on a 10s timer and appends them to a 0644
+  # tailable file at /var/log/kldload/zfs-dbgmsg.log that promtail picks
+  # up under {job="zfs-dbgmsg"}. Caught build #57 -- the Grafana "ZFS
+  # Module Debug Messages (dbgmsg)" panel on the ZFS pool health dashboard
+  # was permanently "No data" because promtail had no readable source.
+  systemctl enable --now kldload-zfs-dbgmsg.timer 2>/dev/null || true
+
   # ── Generate /root/.ssh/id_kldload (the cross-VM ops key) ────────────────
   # Used by kldload-webui's k8s_node_reboot / k8s_kubelet_restart actions
   # to SSH into worker VMs from the host. Klab's golden-build path
