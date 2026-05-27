@@ -1085,11 +1085,26 @@ deploy_site() {
       continue
     fi
 
-    # Check if site VM already exists
+    # If zvol exists but no matching libvirt domain (orphan from a host
+    # reboot, aborted destroy, or transient-domain loss), wipe and
+    # recreate. Same bug pattern as klab/deploy_site — silently skipping
+    # leaves the user with disks but no running VMs, which is the worst
+    # of both worlds. Detected 2026-05-26.
     if zfs list "$spath" >/dev/null 2>&1; then
-      warn "${sname} already exists -- skipping (destroy first to redeploy)"
-      ((skipped++))
-      continue
+      if virsh dominfo "$sname" >/dev/null 2>&1; then
+        warn "${sname} already exists and has a libvirt domain -- skipping (destroy first to redeploy)"
+        ((skipped++))
+        continue
+      fi
+      warn "${sname} zvol exists but no libvirt domain -- clobbering and redeploying"
+      virsh destroy "$sname" 2>/dev/null || true
+      virsh undefine "$sname" --nvram 2>/dev/null \
+        || virsh undefine "$sname" 2>/dev/null || true
+      zfs destroy -Rf "$spath" 2>/dev/null || {
+        warn "failed to destroy orphan zvol ${spath}; skipping ${sname}"
+        ((skipped++))
+        continue
+      }
     fi
 
     # Clone golden — this is the key ZFS operation. "zfs clone" creates a
@@ -1667,29 +1682,42 @@ destroy_goldens() {
 
 cmd_destroy() {
   local target="${1:-}"
-  [[ -n "$target" ]] || die "Usage: kzfs-lab destroy blue|green|all"
+  local force=""
+  for a in "$@"; do [[ "$a" == "--force" ]] && force="--force"; done
+  [[ -n "$target" ]] || die "Usage: kzfs-lab destroy blue|green|all|goldens [--force]"
+
+  # Confirm helper: skip the interactive prompt when stdin isn't a TTY
+  # (cron, ssh -T, systemd, `echo | kzfs-lab destroy …`) or when --force
+  # is passed. Previously this always fired and silently aborted in
+  # non-TTY contexts, so automation just no-op'd with no error.
+  # Detected 2026-05-26.
+  _destroy_confirm() {
+    local what="$1"
+    if [[ "$force" == "--force" ]] || [[ ! -t 0 ]]; then
+      echo -e "${R}Destroying ${what}${N} (non-interactive — auto-confirmed)"
+      return 0
+    fi
+    echo -e "${R}WARNING: This will destroy ${what}${N}"
+    local confirm
+    read -r -p "Type 'destroy' to continue: " confirm
+    [[ "$confirm" == "destroy" ]] || { echo "Aborted."; return 1; }
+    return 0
+  }
 
   case "$target" in
     blue|green)
-      echo -e "${R}WARNING: This will destroy the ${target} site (all ${#DISTROS[@]} VMs)${N}"
-      read -r -p "Type 'destroy' to continue: " confirm
-      [[ "$confirm" == "destroy" ]] || { echo "Aborted."; exit 0; }
+      _destroy_confirm "the ${target} site (all ${#DISTROS[@]} VMs)" || exit 0
       destroy_site "$target"
       ;;
     all)
-      echo -e "${R}WARNING: This will destroy ALL lab VMs (blue + green sites)${N}"
-      echo -e "${R}Golden images will be preserved.${N}"
-      read -r -p "Type 'destroy' to continue: " confirm
-      [[ "$confirm" == "destroy" ]] || { echo "Aborted."; exit 0; }
+      _destroy_confirm "ALL lab VMs (blue + green sites). Golden images will be preserved." || exit 0
       destroy_site "blue"
       destroy_site "green"
       log "All sites destroyed. Goldens preserved."
       log "To also destroy goldens: zfs destroy -Rf ${POOL}/vms/${LAB_PREFIX}-golden-*"
       ;;
     goldens)
-      echo -e "${R}WARNING: This will destroy ALL golden images and site VMs${N}"
-      read -r -p "Type 'destroy' to continue: " confirm
-      [[ "$confirm" == "destroy" ]] || { echo "Aborted."; exit 0; }
+      _destroy_confirm "ALL golden images and site VMs" || exit 0
       destroy_site "blue"
       destroy_site "green"
       destroy_goldens

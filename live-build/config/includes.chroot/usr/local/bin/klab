@@ -2019,9 +2019,25 @@ deploy_site() {
       warn "No golden for ${distro} — skipping"
       ((skipped++)); continue
     fi
+    # If a zvol exists but no matching libvirt domain (orphan from a
+    # reboot or aborted destroy), wipe it and recreate. Skipping silently
+    # leaves the user with disks but no running VMs, which is worse
+    # than spending 50ms to clone again. Detected 2026-05-26 when a
+    # host reboot dropped libvirt definitions for blue/green VMs but
+    # the zvols persisted, and `klab deploy blue` silently no-op'd.
     if zfs list "$spath" >/dev/null 2>&1; then
-      warn "${sname} already exists — skipping"
-      ((skipped++)); continue
+      if virsh dominfo "$sname" >/dev/null 2>&1; then
+        warn "${sname} already exists and has a libvirt domain — skipping"
+        ((skipped++)); continue
+      fi
+      warn "${sname} zvol exists but no libvirt domain — clobbering and redeploying"
+      virsh destroy "$sname" 2>/dev/null || true
+      virsh undefine "$sname" --nvram 2>/dev/null \
+        || virsh undefine "$sname" 2>/dev/null || true
+      zfs destroy -Rf "$spath" 2>/dev/null || {
+        warn "failed to destroy orphan zvol ${spath}; skipping ${sname}"
+        ((skipped++)); continue
+      }
     fi
 
     echo -ne "  ${gname}@golden -> ${sname} (${vm_ip}) ... "
@@ -3258,18 +3274,38 @@ cmd_verify() {
 
 cmd_destroy() {
   local target="${1:-}"
-  [[ -n "$target" ]] || die "Usage: klab destroy blue|green|all|goldens"
+  local force="${2:-}"
+  [[ -n "$target" ]] || die "Usage: klab destroy blue|green|all|goldens [--force]"
+  [[ "$target" == "--force" ]] && { force="--force"; target=""; }
+  for a in "$@"; do [[ "$a" == "--force" ]] && force="--force"; done
+
+  # Confirm helper: skip the interactive prompt when stdin isn't a TTY
+  # (cron, ssh -T, systemd, `echo | klab destroy ...`) or when --force
+  # is passed. Previously this prompt always fired and silently aborted
+  # in non-TTY contexts — meaning automation just no-op'd with no error.
+  # Detected 2026-05-26 when a destroy-then-redeploy recovery sequence
+  # over SSH ran `klab destroy blue` and the script aborted on the
+  # missing TTY input, leaving orphan zvols and a broken state.
+  _destroy_confirm() {
+    local what="$1"
+    if [[ "$force" == "--force" ]] || [[ ! -t 0 ]]; then
+      echo -e "${R}Destroying ${what}${N} (non-interactive — auto-confirmed)"
+      return 0
+    fi
+    echo -e "${R}Destroying ${what}${N}"
+    local confirm
+    read -r -p "  Type 'destroy' to confirm: " confirm
+    [[ "$confirm" == "destroy" ]] || { echo "Aborted."; return 1; }
+    return 0
+  }
+
   case "$target" in
     blue|green)
-      echo -e "${R}Destroying ${target} site${N}"
-      read -r -p "  Type 'destroy' to confirm: " confirm
-      [[ "$confirm" == "destroy" ]] || { echo "Aborted."; return 0; }
+      _destroy_confirm "${target} site" || return 0
       destroy_site "$target"
       ;;
     all)
-      echo -e "${R}Destroying ALL sites (goldens preserved)${N}"
-      read -r -p "  Type 'destroy' to confirm: " confirm
-      [[ "$confirm" == "destroy" ]] || { echo "Aborted."; return 0; }
+      _destroy_confirm "ALL sites (goldens preserved)" || return 0
       destroy_site "blue"; destroy_site "green"
       # Also clean test VMs
       for distro in "${DISTROS[@]}"; do
@@ -3280,9 +3316,7 @@ cmd_destroy() {
       log "All sites destroyed. Goldens preserved."
       ;;
     goldens)
-      echo -e "${R}Destroying EVERYTHING (sites + goldens)${N}"
-      read -r -p "  Type 'destroy' to confirm: " confirm
-      [[ "$confirm" == "destroy" ]] || { echo "Aborted."; return 0; }
+      _destroy_confirm "EVERYTHING (sites + goldens)" || return 0
       destroy_site "blue"; destroy_site "green"
       for distro in "${DISTROS[@]}"; do
         local name; name="$(golden_name "$distro")"
