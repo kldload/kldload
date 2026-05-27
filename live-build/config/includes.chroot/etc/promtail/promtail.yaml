@@ -32,7 +32,12 @@ scrape_configs:
         labels:
           job: zfs-dbgmsg
           host: kldload-node
-          __path__: /proc/spl/kstat/zfs/dbgmsg
+          # kldload-zfs-dbgmsg.timer drains /proc/spl/kstat/zfs/dbgmsg
+          # into a 0644 tailable log every 10s — see
+          # /usr/local/bin/kldload-zfs-dbgmsg-collector. The kstat node is
+          # 0600 root:root and is a kstat dump (not append-only) so promtail
+          # cannot scrape it directly.
+          __path__: /var/log/kldload/zfs-dbgmsg.log
 
   - job_name: kldload-apps
     static_configs:
