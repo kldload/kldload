@@ -146,7 +146,7 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   #   F9  IN-KERNEL TOP  — htop + k8s-top + zpool-iostat + bpf-prog
   #   F10 ZFS group      — zpool-io + zfs-internals
   #   F11 TRACING        — hubble + tetragon + tracingpol + kernel-log
-  #   F12 KERNEL-TCP     — _ktcp-expanded (ss awk rich + nethogs split)
+  #   F12 KERNEL-STRESS  — _kgroup kernel-stress (PSI + runqlat + softirqs + hardirqs + bpf-prog)
   # CRITICAL — DO NOT chain run-shell calls with `\;` inside `tmux bind`.
   # Bash escapes `\;` to a literal `;` arg, but tmux's CLI parser treats
   # that as a TOP-LEVEL command separator (between distinct tmux
@@ -177,12 +177,19 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   tmux bind -n F9  run-shell "_kgroup top"
   tmux bind -n F10 run-shell "_kgroup zfs"
   tmux bind -n F11 run-shell "_kgroup tracing"
-  # F12 = the richest single-key TCP view — _ktcp-expanded creates a
-  # 2-pane "kernel-tcp" window: top pane is ss -tnHpi state established
-  # through ktcp-format.awk (RTT/cwnd/retrans colour-coded, per-PID
-  # rollup, rate sparkline); bottom pane is nethogs. Both wrapped in
-  # restart loops, never goes "pane is dead".
-  tmux bind -n F12 run-shell "_ktcp-expanded"
+  # F12 = the kernel-stress cockpit (replaces the older _ktcp-expanded
+  # TCP rich view — that data was already on F7's TCP bcc cockpit
+  # anyway). Five panes, eBPF-heavy:
+  #   psi      live /proc/pressure/{cpu,io,memory} — the single best
+  #            "what is stalled right now" surface in the kernel,
+  #            available since 4.20 and almost nobody runs it
+  #   runqlat  bcc — scheduler queue latency histogram every 5s
+  #   softirqs bcc — softirq runtime breakdown (NET_RX, RCU, TIMER…)
+  #   hardirqs bcc — IRQ handler runtime (NIC, NVMe, etc.)
+  #   bpf-prog bpftool prog show watched every 5s — the BPF tax view
+  # This is the "in-kernel top" cockpit F9 was *labeled* as for a while
+  # but never actually delivered (F9 is plain htop). Adopted 2026-05-27.
+  tmux bind -n F12 run-shell "_kgroup kernel-stress"
 
   # NO client-attached welcome hook here — the old hook fired
   # _khelp-toggle (a tmux display-popup) on first attach. The popup

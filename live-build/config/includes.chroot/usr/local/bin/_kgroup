@@ -65,6 +65,22 @@ tracing)
 bandwidth)
     WINDOWS=(tcptop nethogs)
     ;;
+kernel-stress)
+    # F12 — &ldquo;what is the kernel actually struggling with right now?&rdquo;
+    # Five panes, eBPF-heavy:
+    #   psi      live /proc/pressure/{cpu,io,memory} stall % — the
+    #            one-glance &ldquo;what&rsquo;s saturated&rdquo; answer
+    #   runqlat  bcc — scheduler queue latency histogram every 5s
+    #   softirqs bcc — softirq runtime breakdown (NET_RX, TIMER, RCU…)
+    #   hardirqs bcc — hardirq runtime breakdown (NIC, NVMe, etc.)
+    #   bpf-prog `bpftool prog show` watched every 5s — the BPF tax
+    #            view: every loaded program with run count + runtime
+    # Replaces the old F12 binding to _ktcp-expanded (kernel-TCP rich
+    # view) which overlapped F7 (TCP bcc cockpit) anyway. Adopted
+    # 2026-05-27 to make F12 the &ldquo;in-kernel top&rdquo; surface F9
+    # was *labeled* as but never delivered (F9 is plain htop).
+    WINDOWS=(psi runqlat softirqs hardirqs bpf-prog)
+    ;;
 ""|--help|-h)
     cat <<EOF
 _kgroup <name> — themed mini-cockpit toggle
@@ -269,5 +285,35 @@ bandwidth)
         "Who's actually pushing bytes right now."
     spawn_direct nethogs "sudo nethogs 2>/dev/null || (echo need-nethogs; sleep 99)"
     tmux select-window -t "${SESSION}:=tcptop"
+    ;;
+
+kernel-stress)
+    # F12 — Spawn order must match the WINDOWS list above.
+    # psi is a /proc read (not eBPF) but kept here as pane 1 because
+    # it's the most concise "what's saturated right now" surface in the
+    # kernel. cpu/io/memory each show "some" and "full" stall percentages
+    # over 10s/60s/300s windows — empty rows mean idle, climbing rows
+    # mean contention. PSI was added in kernel 4.20; we have 6.19 so
+    # all three files exist.
+    spawn_cockpit psi watch \
+        "/proc/pressure — CPU / I/O / Memory stall % over 10s, 60s, 300s windows" \
+        "echo === CPU pressure ===; cat /proc/pressure/cpu 2>/dev/null; echo; echo === I/O pressure ===; cat /proc/pressure/io 2>/dev/null; echo; echo === Memory pressure ===; cat /proc/pressure/memory 2>/dev/null"
+    # bcc-tools — eBPF kprobes on the scheduler, irq, BPF subsystems
+    spawn_bcc runqlat runqlat \
+        "Scheduler queue latency histogram — how long runnable tasks waited for a CPU." \
+        "Empty / sub-µs row = idle box. Right-shift = scheduler pressure or CPU saturation." \
+        -m 5
+    spawn_bcc softirqs softirqs \
+        "Softirq runtime per kind (NET_RX, TIMER, RCU, BLOCK, SCHED…) every 5s." \
+        "NET_RX dominating during heavy traffic, RCU climbing under high context-switch load." \
+        -d -T 5
+    spawn_bcc hardirqs hardirqs \
+        "Hardware IRQ runtime per handler — which interrupt source is costing the most CPU." \
+        "NIC ring fills here. NVMe completion IRQs land here. Idle = empty." \
+        -d -T 5
+    spawn_cockpit bpf-prog watch \
+        "bpftool prog show — every loaded BPF program with run count + cumulative runtime (the 'BPF tax')" \
+        "bpftool prog show 2>/dev/null | head -80"
+    tmux select-window -t "${SESSION}:=psi"
     ;;
 esac
