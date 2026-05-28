@@ -5,16 +5,36 @@ set -euo pipefail
 # Usage: kexport /dev/sda qcow2
 #        kexport /dev/vda vmdk
 #        kexport /dev/sda all
+#        kexport /dev/sda qcow2 /home/live/out  --no-seal
+#
+# By default kexport runs kldload-seal against the source disk BEFORE
+# converting, so the output is a portable golden (no machine-id /
+# ssh host keys / hostid / cloud-init seed carry-over). Pass --no-seal
+# to skip and produce a raw clone of the source (the historical
+# behavior — fine for 1:1 VM migration, wrong for golden deployment).
+# See /usr/local/bin/kldload-seal for what sealing actually does.
 
-DISK="${1:-}"
-FMT="${2:-}"
-OUTDIR="${3:-/root/exports}"
+# Parse positional args (DISK, FMT, OUTDIR) and a --no-seal flag in any
+# order. Defaults: OUTDIR=/root/exports, sealing ON.
+DISK=""; FMT=""; OUTDIR="/root/exports"; SEAL=1
+for a in "$@"; do
+    case "$a" in
+        --no-seal) SEAL=0 ;;
+        --seal)    SEAL=1 ;;
+        -h|--help) :;;  # handled below
+        *)
+            if   [[ -z "$DISK" ]]; then DISK="$a"
+            elif [[ -z "$FMT" ]];  then FMT="$a"
+            else OUTDIR="$a"; fi
+            ;;
+    esac
+done
 NAME="${KEXPORT_NAME:-kldload-export-$(date -u +%Y%m%d-%H%M)}"
 
 usage() {
-  echo "kexport — export a disk image"
+  echo "kexport — export a disk image (sealed by default)"
   echo ""
-  echo "Usage: kexport <disk> <format> [output-dir]"
+  echo "Usage: kexport <disk> <format> [output-dir] [--seal | --no-seal]"
   echo ""
   echo "VM formats (whole-disk):"
   echo "  qcow2    KVM / Proxmox / OpenStack (compressed)"
@@ -24,15 +44,23 @@ usage() {
   echo "  ova      VMware / VirtualBox portable (OVF + VMDK tar)"
   echo ""
   echo "Container / microVM formats (rootfs extracted):"
-  echo "  oci        Docker image tarball (docker load / podman load)"
-  echo "  lxc        LXC template tarball (lxc-create -t local)"
+  echo "  oci          Docker image tarball (docker load / podman load)"
+  echo "  lxc          LXC template tarball (lxc-create -t local)"
   echo "  firecracker  Linux kernel + ext4 rootfs + firecracker config.json"
   echo ""
   echo "  all      Export all VM formats (qcow2+raw+vhd+vmdk+ova)"
   echo ""
+  echo "Sealing:"
+  echo "  By default kexport runs kldload-seal on the source disk before"
+  echo "  conversion so the output is a portable golden — no machine-id,"
+  echo "  no ssh host keys, no hostid, no cloud-init seed state carry-over."
+  echo "  Pass --no-seal to skip (raw 1:1 clone of the source, suitable"
+  echo "  for VM migration but NOT for fleet deployment)."
+  echo ""
   echo "Examples:"
-  echo "  kexport /dev/sda qcow2"
+  echo "  kexport /dev/sda qcow2                # sealed by default"
   echo "  kexport /dev/vda all /home/live/Desktop"
+  echo "  kexport /dev/sda qcow2 --no-seal      # 1:1 clone, no sysprep"
   echo "  kexport /dev/sda oci                  # → docker-loadable tar.gz"
   echo "  kexport /dev/sda firecracker          # → kernel + rootfs.ext4 + json"
   echo "  KEXPORT_NAME=myserver kexport /dev/sda vmdk"
@@ -47,6 +75,25 @@ log() { echo "[kexport] $*"; }
 command -v qemu-img >/dev/null || die "qemu-img not found — install qemu-img"
 
 mkdir -p "$OUTDIR"
+
+# ── Seal the source first (default behaviour) ─────────────────────────
+# Sealing strips per-VM identity (machine-id / ssh host keys / hostid /
+# cloud-init seed / journald / login records) so the output is a
+# portable golden, not a 1:1 clone of the source. Disabled with
+# --no-seal for the case where you genuinely want a 1:1 clone (VM
+# migration, forensic capture). See /usr/local/bin/kldload-seal for
+# what gets stripped.
+if (( SEAL )); then
+    if [[ ! -x /usr/local/bin/kldload-seal ]]; then
+        die "sealing requested but /usr/local/bin/kldload-seal not found — install kldload >= 1.1.0 or pass --no-seal"
+    fi
+    log "Sealing source disk before conversion (use --no-seal to skip)"
+    /usr/local/bin/kldload-seal "$DISK" || die "kldload-seal failed against $DISK — refusing to ship an unsealed image. Investigate the seal error above; if you truly want an unsealed clone (e.g. for VM migration), re-run with --no-seal."
+    log "Seal complete; proceeding to format conversion"
+else
+    warn() { echo "[kexport][warn] $*"; }
+    warn "--no-seal: skipping sysprep. Output will carry the source's machine-id, ssh host keys, hostid, and cloud-init seed — DO NOT deploy this image multiple times."
+fi
 
 do_export() {
   local fmt="$1"
