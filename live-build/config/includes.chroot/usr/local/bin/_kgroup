@@ -295,22 +295,34 @@ kernel-stress)
     # over 10s/60s/300s windows — empty rows mean idle, climbing rows
     # mean contention. PSI was added in kernel 4.20; we have 6.19 so
     # all three files exist.
+    # PSI pane with graceful fallback. /proc/pressure/ requires CONFIG_PSI=y
+    # AND the kernel command line containing `psi=1` (RHEL ships PSI built
+    # in but disabled by default; Fedora/Debian usually have it on). When
+    # the directory doesn't exist we fall back to vmstat 1 so the pane
+    # still earns its slot. Detected 2026-05-27 on a RHEL 10 kernel build
+    # (6.12.0-211.16.1.el10_2) that ships PSI compiled-in but disabled
+    # at boot — the cockpit's most photogenic pane was rendering empty.
     spawn_cockpit psi watch \
-        "/proc/pressure — CPU / I/O / Memory stall % over 10s, 60s, 300s windows" \
-        "echo === CPU pressure ===; cat /proc/pressure/cpu 2>/dev/null; echo; echo === I/O pressure ===; cat /proc/pressure/io 2>/dev/null; echo; echo === Memory pressure ===; cat /proc/pressure/memory 2>/dev/null"
+        "/proc/pressure — CPU / I/O / Memory stall % over 10s, 60s, 300s (or vmstat 1 if PSI is disabled)" \
+        "if [ -d /proc/pressure ]; then echo === CPU pressure ===; cat /proc/pressure/cpu 2>/dev/null; echo; echo === I/O pressure ===; cat /proc/pressure/io 2>/dev/null; echo; echo === Memory pressure ===; cat /proc/pressure/memory 2>/dev/null; else echo \"[ /proc/pressure not exposed — add psi=1 to kernel cmdline and reboot ]\"; echo; echo === vmstat fallback (1s sample) ===; vmstat -SM 1 1 2>/dev/null; fi"
     # bcc-tools — eBPF kprobes on the scheduler, irq, BPF subsystems
     spawn_bcc runqlat runqlat \
         "Scheduler queue latency histogram — how long runnable tasks waited for a CPU." \
         "Empty / sub-µs row = idle box. Right-shift = scheduler pressure or CPU saturation." \
         -m 5
+    # softirqs/hardirqs: dropped the -d (per-CPU distribution) flag to
+    # keep the cold-start attach + first-paint fast; aggregate runtime
+    # per kind/handler is what you actually want from a cockpit pane.
+    # If you need per-CPU detail, run the tools directly from F10's
+    # scratch shell with -d.
     spawn_bcc softirqs softirqs \
         "Softirq runtime per kind (NET_RX, TIMER, RCU, BLOCK, SCHED…) every 5s." \
         "NET_RX dominating during heavy traffic, RCU climbing under high context-switch load." \
-        -d -T 5
+        -T 5
     spawn_bcc hardirqs hardirqs \
         "Hardware IRQ runtime per handler — which interrupt source is costing the most CPU." \
         "NIC ring fills here. NVMe completion IRQs land here. Idle = empty." \
-        -d -T 5
+        -T 5
     spawn_cockpit bpf-prog watch \
         "bpftool prog show — every loaded BPF program with run count + cumulative runtime (the 'BPF tax')" \
         "bpftool prog show 2>/dev/null | head -80"
