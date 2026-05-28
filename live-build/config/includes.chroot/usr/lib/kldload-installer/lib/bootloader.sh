@@ -573,7 +573,7 @@ menuentry "kldload — ZFS Boot Menu (boot environments + snapshot rollback)" --
 }
 
 menuentry "kldload — direct kernel boot (Secure Boot compatible)" --id=direct {
-    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro rhgb quiet spl_hostid=\${spl_hostid}
+    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro rhgb quiet spl_hostid=\${spl_hostid} psi=1
     initrd /EFI/BOOT/initrd.img
 }
 
