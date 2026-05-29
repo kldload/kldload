@@ -1397,26 +1397,80 @@ CUSTOMREPO
     # RPMs are glibc-forward-compatible across one Fedora release, and
     # zfs-dkms is noarch source so DKMS rebuilds against whatever kernel
     # gets installed. Same fc43-bridge trick the live env uses.
+    #
+    # PROBE upstream BEFORE dnf install — a 404 from dnf in F44 land buries
+    # the actual URL in 200 lines of metadata fetch noise. We HEAD each
+    # candidate URL up front, log exactly which release/revision was found
+    # or "404 (not yet published)" otherwise, then only invoke dnf on the
+    # URL we've confirmed serves a real RPM. Operator gets a single clear
+    # line per attempt instead of having to grep dnf transcripts.
+    k_log_to "$log" "Resolving OpenZFS Fedora repo (target=fc${_fedora_rel}, fallback=fc43)..."
     local _zfsrel_ok=0
     local _zfsrel_actual=""
+    local _zfsrel_url=""
+    local _attempted_urls=()
     for _rel in "${_fedora_rel}" 43; do
       for _rev in 3-0 2-10 2-9 2-8 2-7; do
-        # dnf5 syntax: --skip-broken must come AFTER the subcommand.
-        if dnf --installroot="${target}" --releasever="${_fedora_rel}" \
-             --setopt=cachedir="${target}/var/cache/dnf" \
-             --disableplugin=subscription-manager --disableplugin=product-id \
-             --nogpgcheck -y install --skip-broken \
-             "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_rel}.noarch.rpm" \
-             >> "$log" 2>&1; then
-          _zfsrel_ok=1
+        local _url="https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_rel}.noarch.rpm"
+        local _code
+        _code=$(curl -sSL -o /dev/null --max-time 10 -w '%{http_code}' "$_url" 2>/dev/null || echo "000")
+        _attempted_urls+=("  fc${_rel} rev ${_rev} -> HTTP ${_code}")
+        if [[ "$_code" == "200" ]]; then
+          k_log_to "$log" "  found: zfs-release-${_rev}.fc${_rel} (HTTP 200)"
+          _zfsrel_url="$_url"
           _zfsrel_actual="${_rel}"
-          k_log_to "$log" "Fedora ZFS repo enabled via zfs-release-${_rev}.fc${_rel} (target=fc${_fedora_rel})"
           break 2
+        else
+          k_log_to "$log" "  miss:  zfs-release-${_rev}.fc${_rel} (HTTP ${_code})"
         fi
       done
     done
-    [[ "$_zfsrel_ok" == "1" ]] || \
-      k_log_to "$log" "WARNING: could not install zfs-release for fc${_fedora_rel} — ZFS will likely fail to install"
+
+    if [[ -n "$_zfsrel_url" ]]; then
+      # We have a known-good URL. dnf5 syntax: --skip-broken AFTER subcommand.
+      if dnf --installroot="${target}" --releasever="${_fedora_rel}" \
+           --setopt=cachedir="${target}/var/cache/dnf" \
+           --disableplugin=subscription-manager --disableplugin=product-id \
+           --nogpgcheck -y install --skip-broken \
+           "$_zfsrel_url" \
+           >> "$log" 2>&1; then
+        _zfsrel_ok=1
+        k_log_to "$log" "Fedora ZFS repo enabled via fc${_zfsrel_actual} (target=fc${_fedora_rel})"
+      else
+        k_log_to "$log" "ERROR: zfs-release fc${_zfsrel_actual} URL serves HTTP 200 but dnf install failed — see log tail below"
+        tail -20 "$log" | sed 's/^/    | /' >&2 || true
+      fi
+    fi
+
+    if [[ "$_zfsrel_ok" != "1" ]]; then
+      # All HEAD probes failed. This is the "OpenZFS upstream has not
+      # published a Fedora N repo yet AND the fc43 bridge URL is also
+      # unreachable" case. Surface exactly what we tried so the operator
+      # knows whether to wait for upstream, switch distros, or check DNS.
+      k_log_to "$log" "============================================================"
+      k_log_to "$log" "FATAL: OpenZFS Fedora repo unavailable for fc${_fedora_rel}."
+      k_log_to "$log" ""
+      k_log_to "$log" "  zfsonlinux.org has not published a Fedora ${_fedora_rel} repo,"
+      k_log_to "$log" "  and the fc43 bridge fallback is also unreachable."
+      k_log_to "$log" ""
+      k_log_to "$log" "  Probed URLs (all returned non-200):"
+      printf '%s\n' "${_attempted_urls[@]}" | while IFS= read -r _ln; do
+        k_log_to "$log" "  ${_ln}"
+      done
+      k_log_to "$log" ""
+      k_log_to "$log" "  Likely causes:"
+      k_log_to "$log" "    1. OpenZFS upstream hasn't built fc${_fedora_rel} packages yet"
+      k_log_to "$log" "       (typical lag: 2-4 months after Fedora GA)."
+      k_log_to "$log" "    2. zfsonlinux.org is unreachable (check live env network)."
+      k_log_to "$log" "    3. Firewall / proxy blocking https://zfsonlinux.org."
+      k_log_to "$log" ""
+      k_log_to "$log" "  Workarounds:"
+      k_log_to "$log" "    - Install CentOS Stream 9 / Rocky 9 / RHEL 10 / Debian 13 / Ubuntu 24.04"
+      k_log_to "$log" "      instead (all have working ZFS sources baked into this ISO)."
+      k_log_to "$log" "    - Pass KLDLOAD_FEDORA_RELEASE=43 to install F43 directly."
+      k_log_to "$log" "============================================================"
+      return 1
+    fi
 
     # Hardcode the actual release we landed on into the repo file.
     # zfs-release-3-0.fc43.rpm drops /etc/yum.repos.d/zfs.repo with
