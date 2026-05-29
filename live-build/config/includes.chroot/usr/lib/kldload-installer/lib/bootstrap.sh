@@ -1238,7 +1238,7 @@ CUSTOMREPO
         adwaita-icon-theme google-noto-sans-fonts firefox
         mesa-dri-drivers pipewire wireplumber
         podman
-        # systemd-pam — F44+ split this out of systemd; without it
+        # systemd-pam — F43+ split this out of systemd; without it
         # /usr/lib64/security/pam_systemd.so is missing on the target
         # and user sessions silently never register. Same bug we hit
         # in the live env (commit 9e93f4f).
@@ -1385,7 +1385,7 @@ CUSTOMREPO
 
   # For Fedora: install the zfs-release RPM BEFORE the main transaction
   # so the zfs-dkms pull resolves against the correct per-release repo
-  # F44 ships OpenZFS 2.4 natively. Previously we hardcoded
+  # (F43 needs OpenZFS 2.3.x for kernel 6.19). Previously we hardcoded
   # /fedora/41/ in a static zfs.repo — that shipped ZFS 2.2.7 which
   # does not compile against 6.19, producing silent DKMS failure and
   # unbootable ZFS-root Fedora installs. Pattern mirrors klab's proven
@@ -1431,7 +1431,7 @@ CUSTOMREPO
   #     /usr/libexec/gcr-ssh-askpass from gcr) resolve. dnf5 default
   #     is to skip filelists.
   # The outer dnf here is the live env's dnf5 (F44+), even though the
-  # target may be F44/RHEL/Rocky/etc.
+  # target may be F44/F43/RHEL/Rocky/etc.
   #
   # ALSO IMPORTANT: pass --setopt=_dbpath=/var/lib/rpm so dnf writes
   # the rpm db to where EL-class targets expect it. dnf5 default is
@@ -1464,9 +1464,9 @@ CUSTOMREPO
   )
   # Fedora 44 kernel-7 lockout — see builder/build-iso.sh for the live-env
   # version of this same gate. Fedora 44 Updates ships kernel-core 7.0.x as
-  # of 2026-05-07; F44 mainline zfs (the source kldload uses since the fc43-bridge
-  # was dropped 2026-05-29) currently caps at kernel
-  # 6.19.999. Without this exclude on the
+  # of 2026-05-07; zfs-dkms-2.4.x.fc43 (the bridge build OpenZFS publishes
+  # for fc44 until they cut a native fc44 release) carries
+  # `Conflicts: kernel-uname-r > 6.19.999`. Without this exclude on the
   # target dnf pass, the installed system ends up with kernel-core-7.0.4
   # but no buildable ZFS module → /sysroot.mount fails → operator gets
   # dropped to dracut emergency. Caught 2026-05-12 on first F44+zfslab
