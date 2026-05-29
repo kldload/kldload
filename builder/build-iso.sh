@@ -120,7 +120,7 @@ PKGS=(
     vim-enhanced tmux curl wget rsync jq less tar gzip
     iproute iputils net-tools nftables chrony
     # Hardware support — WiFi firmware, storage controllers, USB, etc.
-    # F43+ split linux-firmware: bare `linux-firmware` carries only licenses,
+    # F44+ split linux-firmware: bare `linux-firmware` carries only licenses,
     # actual blobs live in per-vendor sub-packages. `iwl*-firmware` glob
     # catches iwlwifi-{dvm,mvm,mld}-firmware + iwlegacy-firmware on F44, but
     # we also need realtek/atheros explicitly (don't start with `iwl`).

@@ -627,7 +627,7 @@ k_install_system_files() {
   # extraction). No RPM ships either; dnf --installroot has no path to
   # pip-install into the target, so we do it explicitly here. Same
   # pattern as the websockets pip install below. --break-system-packages
-  # is required on PEP 668 distros (Fedora 43+, RHEL 10+, Debian 13+).
+  # is required on PEP 668 distros (Fedora 44+, RHEL 10+, Debian 13+).
   # Without this, `kldload-rag-index` crashes on import and Bob's RAG
   # bridge can't index anything.
   chroot "${target}" pip3 install --quiet --break-system-packages \
