@@ -58,38 +58,11 @@ if [[ ! -f /etc/yum.repos.d/nvidia-container-toolkit.repo ]]; then
       || log "NOTE: could not fetch nvidia-container-toolkit.repo — GPU-in-container path will fall back to internet at install time"
 fi
 
-# Add OpenZFS for Fedora if available. F44 is brand-new (Apr 2026) — the
-# zfsonlinux.org project hasn't published fc44 binaries yet. fc43 is
-# available with OpenZFS 2.4.1, and fc43 userspace RPMs are
-# glibc-forward-compatible to fc44; zfs-dkms is noarch source so DKMS
-# rebuilds the kmod against whatever target kernel gets installed. So
-# we try fc${RELEASE} first, then fall back to fc43.
-if ! rpm -q zfs-release 2>/dev/null >/dev/null; then
-    log "Adding OpenZFS repo for Fedora ${RELEASE} (with fc43 bridge fallback)..."
-    _zfsrel_ok=0
-    for _rel in "${RELEASE}" 43; do
-        for _rev in 3-0 2-10 2-9 2-8 2-7 2-5 2-4 2-3; do
-            # IMPORTANT: --setopt=install_weak_deps=False is load-bearing.
-            # zfs-release-2-3.fc43 has a `Recommends: zfs` that triggers
-            # autoinstall of zfs+zfs-dkms when weak deps are on (default).
-            # zfs-dkms-2.4.1.fc43 carries `Conflicts: kernel-uname-r > 6.19.999`
-            # so when Fedora 44 updates to kernel 7.0.x (which it did 2026-05-07,
-            # right when matrix #4 went red), this dnf invocation fails the
-            # whole build — even though we only wanted the repo metadata, not
-            # the packages. We pull zfs at darksite-download time via the
-            # explicit PKGS_AVAILABLE list, not via Recommends from the repo
-            # config RPM. Without this flag, every fresh F44 build fails.
-            if dnf install -y --setopt=install_weak_deps=False \
-                   "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_rel}.noarch.rpm" 2>/dev/null; then
-                log "OpenZFS repo enabled via zfs-release-${_rev}.fc${_rel}"
-                _zfsrel_ok=1
-                break 2
-            fi
-        done
-    done
-    [[ "$_zfsrel_ok" == "1" ]] || \
-        log "NOTE: no zfs-release RPM available for fc${RELEASE} or fc43 — target will DKMS-build ZFS from source"
-fi
+# Fedora 44 ships OpenZFS 2.4 natively in mainline. Skip the external
+# zfsonlinux.org repo entirely — historical fc43-bridge fallback removed
+# 2026-05-29 because it broke at install time (dnf transaction validation
+# rejected the fc43 packages in the F44 chroot context).
+log "Fedora ${RELEASE}: using mainline ZFS packages (no external repo needed)"
 
 # Add Kubernetes repo (pkgs.k8s.io)
 K8S_MINOR="${K8S_MINOR:-v1.32}"

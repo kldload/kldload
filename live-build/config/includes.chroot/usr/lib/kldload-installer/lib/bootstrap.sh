@@ -1391,48 +1391,18 @@ CUSTOMREPO
   # unbootable ZFS-root Fedora installs. Pattern mirrors klab's proven
   # loop: try known revisions newest-first until one resolves.
   if [[ "${distro}" == "fedora" ]]; then
+    # Fedora target: F44 is the only supported release. F43 is gone —
+    # zfsonlinux.org's fc43-bridge approach we used historically fails
+    # at dnf pass 3 because the repo's $releasever macro expands to "44"
+    # in the F44 chroot and zfsonlinux only published through fc43, so
+    # every subsequent `dnf install zfs-*` 404s. F44 ships OpenZFS 2.4
+    # NATIVELY in Fedora mainline (the kldload live env itself is F44
+    # + zfs-2.4.1), so we skip the external repo entirely and let pass 3
+    # resolve `zfs` / `zfs-dkms` / `zfs-dracut` from Fedora's own
+    # mirrors. Caught 2026-05-29 on a fresh F44 install attempt —
+    # bootstrap died at "FATAL: dnf pass 3 ... failed".
     local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-44}"
-    # zfsonlinux publishes fc41/42/43 but not fc44 yet (F44 GA was 2026-04-28).
-    # Try the requested release first, then fall back to fc43 — the userspace
-    # RPMs are glibc-forward-compatible across one Fedora release, and
-    # zfs-dkms is noarch source so DKMS rebuilds against whatever kernel
-    # gets installed. Same fc43-bridge trick the live env uses.
-    local _zfsrel_ok=0
-    local _zfsrel_actual=""
-    for _rel in "${_fedora_rel}" 43; do
-      for _rev in 3-0 2-10 2-9 2-8 2-7; do
-        # dnf5 syntax: --skip-broken must come AFTER the subcommand.
-        if dnf --installroot="${target}" --releasever="${_fedora_rel}" \
-             --setopt=cachedir="${target}/var/cache/dnf" \
-             --disableplugin=subscription-manager --disableplugin=product-id \
-             --nogpgcheck -y install --skip-broken \
-             "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_rel}.noarch.rpm" \
-             >> "$log" 2>&1; then
-          _zfsrel_ok=1
-          _zfsrel_actual="${_rel}"
-          k_log_to "$log" "Fedora ZFS repo enabled via zfs-release-${_rev}.fc${_rel} (target=fc${_fedora_rel})"
-          break 2
-        fi
-      done
-    done
-    [[ "$_zfsrel_ok" == "1" ]] || \
-      k_log_to "$log" "WARNING: could not install zfs-release for fc${_fedora_rel} — ZFS will likely fail to install"
-
-    # Hardcode the actual release we landed on into the repo file.
-    # zfs-release-3-0.fc43.rpm drops /etc/yum.repos.d/zfs.repo with
-    # `baseurl=https://download.zfsonlinux.org/fedora/$releasever/...`
-    # and $releasever on a Fedora 44 target expands to "44" — but
-    # zfsonlinux only publishes through fc43. Result: every subsequent
-    # `dnf install zfs-*` 404s, including the install-time pass 3 and
-    # bootloader.sh's late zfs-dracut install. Hardcoding the path
-    # eliminates the macro expansion mismatch.
-    if [[ "$_zfsrel_ok" == "1" && "$_zfsrel_actual" != "${_fedora_rel}" ]]; then
-      local _zfs_repo="${target}/etc/yum.repos.d/zfs.repo"
-      if [[ -f "$_zfs_repo" ]]; then
-        sed -i "s|fedora/\\\$releasever|fedora/${_zfsrel_actual}|g" "$_zfs_repo"
-        k_log_to "$log" "Hardcoded zfs.repo to fedora/${_zfsrel_actual} (target releasever ${_fedora_rel} has no zfsonlinux build)"
-      fi
-    fi
+    k_log_to "$log" "Fedora ${_fedora_rel}: using mainline ZFS packages (F${_fedora_rel} ships zfs-2.4 natively, no external repo needed)"
   fi
 
   # Two-pass install:

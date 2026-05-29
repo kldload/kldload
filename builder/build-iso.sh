@@ -239,44 +239,21 @@ gpgcheck=0
 enabled=1
 FEDOREPO
 
-# ZFS source — OpenZFS 2.4 from zfsonlinux.org.
-#
-# zfsonlinux.org publishes fc41/fc42/fc43 but not fc44 yet (Fedora 44
-# GA was 2026-04-28). zfs-dkms is a noarch source package that DKMS
-# rebuilds against the running kernel — so the fc43 tag is purely
-# cosmetic for it. The userspace libs (libzfs7/libnvpair3/libzpool7)
-# are fc43-built but glibc forward-compat means they run fine on fc44.
-#
-# The hardcoded `fedora/43/` path is intentional and stays until
-# zfsonlinux publishes fc44 binaries — at which point flip to
-# `fedora/$releasever/`.
-cat > "${ROOTFS}/etc/yum.repos.d/zfs.repo" << 'ZFSREPO'
-[zfs]
-name=OpenZFS 2.4 for Fedora (using fc43 packages — fc44 not yet published)
-baseurl=http://download.zfsonlinux.org/2.4/fedora/43/$basearch/
-enabled=1
-gpgcheck=0
+# ZFS source — F44 mainline.
+# Removed 2026-05-29: the historical fc43-bridge to zfsonlinux.org. F44
+# ships OpenZFS 2.4 natively in its own repos, so we drop the external
+# repo and let dnf resolve `zfs` / `zfs-dkms` / `zfs-dracut` from Fedora
+# mainline. Eliminates the $releasever-macro mismatch that broke fresh
+# F44 installs at "FATAL: dnf pass 3 ... failed".
 
-ZFSREPO
-
-# Note: DKMS autoinstall will fail here (host kernel != target kernel).
-# That's expected — we rebuild DKMS explicitly below with --kernelsourcedir.
-# Don't let the scriptlet failure kill the build.
-#
 # pipefail is explicitly disabled here and never re-enabled. Enabling it would
 # cause SIGPIPE from "dnf | tee" to propagate as a non-zero exit, which set -e
 # would turn into a fatal build abort. The SIGPIPE is harmless (just tee closing).
 set +o pipefail
-# IMPORTANT: --exclude='kernel-*-7.*' pins the F44 live env to kernel 6.19.x.
-# Fedora 44 updates pushed kernel-core-7.0.4 around 2026-05-07 (the day matrix
-# #4 went 0/15 from 3/15 — exactly the regression session handoff predicted).
-# The fc43 zfs-dkms-2.4.1 carries `Conflicts: kernel-uname-r > 6.19.999`, so
-# pulling kernel 7.0 alongside zfs-dkms fails dependency resolution and aborts
-# the whole build. We pin updates kernels at 6.19.x until either:
-#   (a) zfsonlinux.org publishes an fc44 build for OpenZFS 2.4 or 2.5, OR
-#   (b) we ship our own zfs-dkms rebuild that drops the kernel-uname-r cap.
-# When that happens, remove the --exclude flags here. Until then, 6.19.x is
-# the highest kernel the live ISO can carry.
+# Kernel pin: F44 mainline currently carries kernel 6.19.x — keep the
+# --exclude flags so an upstream kernel-7.x doesn't drag in a version
+# the in-tree zfs userspace can't service. When F44 mainline ships zfs
+# packages that support kernel 7.x, this exclude block can be dropped.
 dnf --installroot="$ROOTFS" --releasever=44 --setopt=install_weak_deps=False \
     --exclude='kernel-7.*' --exclude='kernel-core-7.*' \
     --exclude='kernel-modules-7.*' --exclude='kernel-modules-core-7.*' \
