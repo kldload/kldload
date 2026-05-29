@@ -898,35 +898,36 @@ FFPOLICY_WS
   fi
 
   # ── Service auto-start gate ────────────────────────────────────────────────
-  # Auto-start is now PURELY profile-driven (no install-time toggle).
-  # Lab / appliance profiles (kvm / k8s / devops / ai / zfslab / klab)
-  # auto-start the webui + proxy + ttyd because the operator booted
-  # kldload FOR the UI — those profiles are appliance-shaped and the
-  # web console is the primary surface.
-  # desktop / server / core: disabled at boot. The binaries are still on
-  # disk (so an operator can flip them on later with one systemctl
-  # enable), but they don't run by default — the user picked a non-
-  # appliance profile because they want a lean box. Manual enable:
+  # Lab profiles (kvm / ai / zfslab / klab) auto-start the webui + proxy +
+  # ttyd so the operator lands on the UI at first boot.
+  # Workstation / server: opt-in. The installer's Platform Options panel
+  # has a "Web ops console" card that sets KLDLOAD_ENABLE_WEBUI=1 when
+  # checked. Default unchecked → binaries still copied (so the operator
+  # can flip it on later) but the systemd units are disabled at boot to
+  # spare RAM/CPU on machines whose user may never open the UI. Manual
+  # enable:
   #     sudo systemctl enable --now kldload-proxy kldload-webui ttyd-k9s
-  #
-  # 2026-05-28 reorg per user request:
-  #   - removed the install-time "Auto-start GUI" / Web ops console
-  #     card from the Platform Options panel — auto-start should
-  #     follow the profile, not be a redundant secondary choice
-  #   - added k8s + devops to the auto-on list (they were missing)
-  #   - desktop joined server in the "off by default" bucket since
-  #     a desktop install gets the regular GNOME session anyway and
-  #     the operator can launch the web UI in a browser tab on demand
+  # core: always disabled — bare ZFS only, no UI of any kind.
   case "${KLDLOAD_PROFILE:-server}" in
-    kvm|k8s|devops|ai|zfslab|klab)
+    kvm|ai|zfslab|klab)
       : # keep defaults — enabled in each unit's [Install] WantedBy
-      k_log "Auto-start GUI: ENABLED (appliance profile ${KLDLOAD_PROFILE})."
       ;;
-    desktop|server|core|*)
+    desktop|server)
+      if [[ "${KLDLOAD_ENABLE_WEBUI:-0}" == "1" ]]; then
+        # Operator opted in via the Platform Options card. Leave the
+        # default WantedBy enable intact.
+        k_log "Web ops console: enabled at boot (opt-in via Platform Options)."
+      else
+        chroot "${target}" systemctl disable kldload-webui.service 2>/dev/null || true
+        chroot "${target}" systemctl disable kldload-proxy.service 2>/dev/null || true
+        chroot "${target}" systemctl disable ttyd-k9s.service 2>/dev/null || true
+      fi
+      ;;
+    *)
+      # core (and any unknown profile) — disable.
       chroot "${target}" systemctl disable kldload-webui.service 2>/dev/null || true
       chroot "${target}" systemctl disable kldload-proxy.service 2>/dev/null || true
       chroot "${target}" systemctl disable ttyd-k9s.service 2>/dev/null || true
-      k_log "Auto-start GUI: DISABLED (non-appliance profile ${KLDLOAD_PROFILE:-unknown}). Enable later via: systemctl enable --now kldload-proxy kldload-webui ttyd-k9s"
       ;;
   esac
 
