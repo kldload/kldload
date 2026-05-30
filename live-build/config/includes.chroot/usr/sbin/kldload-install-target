@@ -292,6 +292,18 @@ if ! k_have_func k_preflight; then
     [[ -n "${KLDLOAD_DISK:-}" ]] || k_die "KLDLOAD_DISK is not set"
     [[ -b "${KLDLOAD_DISK}" ]]   || k_die "Target disk is not a block device: ${KLDLOAD_DISK}"
 
+    # Fedora target is blocked upstream: no OpenZFS release candidate yet
+    # ships fc44, and the in-tree F43 zfs-dkms pins kernel-uname-r <=
+    # 6.18.999 while current Fedora stable kernels are 6.19+. Either way,
+    # dnf pass-3 (zfs + zfs-dkms + zfs-dracut) fails unsatisfiable. Failing
+    # here is much friendlier than wasting ~2 min on partitioning + 2 dnf
+    # passes before the third one explodes. Set KLDLOAD_ALLOW_BLOCKED_DISTROS=1
+    # to bypass when poking at the underlying upstream issue.
+    if [[ "${KLDLOAD_DISTRO:-}" == "fedora" ]] && \
+       [[ "${KLDLOAD_ALLOW_BLOCKED_DISTROS:-0}" != "1" ]]; then
+      k_die "Fedora target is blocked: no OpenZFS release candidate compatible with current Fedora kernel/dnf state. Pick CentOS Stream 9, Rocky 9, RHEL 10, Debian 13, Ubuntu 24.04, Arch, or Alpine. (Override with KLDLOAD_ALLOW_BLOCKED_DISTROS=1 to bypass for debugging.)"
+    fi
+
     local sb=0 tpm=0
     if command -v mokutil >/dev/null 2>&1; then
       mokutil --sb-state 2>/dev/null | grep -qi 'enabled' && sb=1
