@@ -292,18 +292,13 @@ if ! k_have_func k_preflight; then
     [[ -n "${KLDLOAD_DISK:-}" ]] || k_die "KLDLOAD_DISK is not set"
     [[ -b "${KLDLOAD_DISK}" ]]   || k_die "Target disk is not a block device: ${KLDLOAD_DISK}"
 
-    # Fedora installs F43 (KLDLOAD_FEDORA_RELEASE default 43): F43's GA kernel
-    # is 6.17.x and the fc43 OpenZFS bridge (zfs-dkms 2.4.x) builds against the
-    # 6.x line. bootstrap.sh excludes kernel-7.* at install time AND pins it on
-    # the installed system (exclude=kernel-7.* in the target dnf.conf) so a
-    # later `dnf upgrade` can't pull the 7.0.x kernel that has no buildable ZFS
-    # and brick the boot. F44 stays blocked here until upstream ships fc44 ZFS;
-    # KLDLOAD_FEDORA_RELEASE=44 + KLDLOAD_ALLOW_BLOCKED_DISTROS=1 to force it.
-    if [[ "${KLDLOAD_DISTRO:-}" == "fedora" ]] && \
-       [[ "${KLDLOAD_FEDORA_RELEASE:-43}" -ge 44 ]] && \
-       [[ "${KLDLOAD_ALLOW_BLOCKED_DISTROS:-0}" != "1" ]]; then
-      k_die "Fedora ${KLDLOAD_FEDORA_RELEASE} is blocked: OpenZFS has not shipped an fc44 release candidate, and F44 ships only the 7.0.x kernel (no buildable ZFS). Use the default Fedora 43 target, or set KLDLOAD_ALLOW_BLOCKED_DISTROS=1 to force F44 for debugging."
-    fi
+    # Fedora installs F44 (KLDLOAD_FEDORA_RELEASE default 44). F44's base repo
+    # ships the 6.19.x GA kernel; bootstrap.sh excludes the 7.0.x updates at
+    # install time AND pins kernel-7.* out of the installed system's dnf.conf,
+    # so the box lands on 6.19 and `dnf upgrade` can't pull the 7.0.x kernel
+    # that has no buildable ZFS (which would drop the next boot into dracut
+    # emergency). The fc43 OpenZFS bridge (zfs-dkms 2.4.x) builds against 6.19 —
+    # the exact combo the live env runs. No gate: the pin is the safety net.
 
     local sb=0 tpm=0
     if command -v mokutil >/dev/null 2>&1; then

@@ -646,13 +646,14 @@ _k_bootstrap_dnf() {
 
   local distro="${KLDLOAD_DISTRO:-centos}"
 
-  # Fedora uses its own release version (43), not the EL release (9).
-  # Default rolled back to F43 (2026-05-30) because zfsonlinux.org has
-  # not published fc44 packages yet — F44 install fails pass 3. Live env
-  # stays on F44 (works via fc43-bridge). Override via KLDLOAD_FEDORA_RELEASE=44
-  # once upstream publishes fc44 release RPMs.
+  # Fedora uses its own release version, not the EL release (9). Default F44:
+  # F44's base repo ships the 6.19.x GA kernel and the fc43 OpenZFS bridge
+  # (zfs-dkms 2.4.x) builds against 6.19 — the exact combo the live env runs.
+  # The 7.0.x updates kernel (no buildable ZFS) is excluded at install time and
+  # pinned out of the installed dnf.conf, so the box stays on 6.19 and upgrades
+  # can't brick the ZFS boot. KLDLOAD_FEDORA_RELEASE=43 for the older 6.17 GA.
   if [[ "${distro}" == "fedora" ]]; then
-    release="${KLDLOAD_FEDORA_RELEASE:-43}"
+    release="${KLDLOAD_FEDORA_RELEASE:-44}"
   fi
 
   # RHEL has moved to 10 (GA May 2025); CentOS Stream and Rocky stay on 9.
@@ -952,7 +953,7 @@ CTMP
       fi
       ;;
     fedora)
-      local fedora_release="${KLDLOAD_FEDORA_RELEASE:-43}"
+      local fedora_release="${KLDLOAD_FEDORA_RELEASE:-44}"
       cat > "${target}/etc/yum.repos.d/fedora.repo" <<FEDORAREPO
 [fedora]
 name=Fedora ${fedora_release} - \$basearch
@@ -1413,7 +1414,7 @@ CUSTOMREPO
   # unbootable ZFS-root Fedora installs. Pattern mirrors klab's proven
   # loop: try known revisions newest-first until one resolves.
   if [[ "${distro}" == "fedora" ]]; then
-    local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-43}"
+    local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-44}"
     # zfsonlinux publishes fc41/42/43 but not fc44 yet (F44 GA was 2026-04-28).
     # Try the requested release first, then fall back to fc43 — the userspace
     # RPMs are glibc-forward-compatible across one Fedora release, and

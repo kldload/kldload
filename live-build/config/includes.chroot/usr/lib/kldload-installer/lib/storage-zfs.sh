@@ -298,9 +298,9 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
   # The profile is a curated feature subset; both live (2.4) and target
   # honor it so pools created here work natively on either side.
   local _zfs_compat_target="" _zfs_compat_reason=""
-  # Default 43 to match bootstrap.sh's install target (was 44 — a mismatch that
-  # made this pick the "no restriction" 2.4 branch while bootstrap installed F43).
-  local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-43}"
+  # Default 44 to match bootstrap.sh's install target (F44 + 6.19 GA + fc43 ZFS
+  # bridge = the live-env combo). F44 >= 44 -> the zfs-2.4 "no restriction" branch.
+  local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-44}"
   case "${KLDLOAD_DISTRO:-centos}" in
     centos|rocky)
       # EL9 = zfs 2.2 (Rocky 9 + CentOS Stream 9 stay on this branch).
