@@ -966,6 +966,24 @@ metalink=https://mirrors.fedoraproject.org/metalink?repo=updates-released-f${fed
 gpgcheck=0
 enabled=1
 FEDORAREPO
+
+      # PIN THE KERNEL on the installed system. F44 ships kernel 7.0.x, which
+      # the fc43 OpenZFS bridge (zfs-dkms 2.4.x, Conflicts: kernel-uname-r >
+      # 6.19.999) cannot build against — so an unguarded `dnf upgrade` would
+      # install kernel-7.x, leave ZFS unbuildable, and drop the next boot into
+      # dracut emergency (rpool won't import). Excluding kernel-7.* globally
+      # blocks the boot-breaking jump while STILL allowing 6.x security/kernel
+      # updates (zfs-dkms rebuilds fine across the 6.x line). When upstream
+      # ships a ZFS that builds against 7.x, remove this line (or `dnf upgrade
+      # --disableexcludes=main`) to unpin. Glob matches NEVRA, so `kernel-7.*`
+      # matches kernel-7.0.10-… but never the bare `kernel`/6.x packages.
+      local _dnfconf="${target}/etc/dnf/dnf.conf"
+      mkdir -p "${target}/etc/dnf"
+      [[ -f "$_dnfconf" ]] || printf '[main]\n' > "$_dnfconf"
+      if ! grep -q '^exclude=.*kernel-7' "$_dnfconf"; then
+        printf 'exclude=kernel-7.* kernel-core-7.* kernel-modules-7.* kernel-modules-core-7.* kernel-modules-extra-7.* kernel-devel-7.* kernel-devel-matched-7.* kernel-headers-7.* kernel-tools-7.* kernel-tools-libs-7.*\n' >> "$_dnfconf"
+        k_log_to "$log" "Pinned installed Fedora kernel at 6.x (exclude=kernel-7.* in dnf.conf) — protects ZFS-on-root from the unbuildable 7.x kernel"
+      fi
       ;;
     *) # centos (default)
       cat > "${target}/etc/yum.repos.d/centos.repo" <<DNFREPO
