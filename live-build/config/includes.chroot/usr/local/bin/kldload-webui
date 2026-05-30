@@ -7310,7 +7310,12 @@ async def _detached_reattach(websocket, msg):
         since_lines = 0
     try:
         all_lines = f.readlines()
-        if since_lines > 0 and since_lines < len(all_lines):
+        if since_lines >= len(all_lines):
+            # Same replay-storm fix as _klab_test_tail: when the client's
+            # cursor matches or exceeds the file length, send nothing and
+            # live-tail from EOF instead of resending the last 400 lines.
+            catchup = []
+        elif since_lines > 0:
             catchup = all_lines[since_lines:]
         else:
             catchup = all_lines[-400:]
@@ -7448,9 +7453,18 @@ async def _klab_test_tail(websocket, pid, log_path, target="klab", since_lines=0
     # (first attach) send the last 400 as run-header + context.
     try:
         all_lines = f.readlines()
-        if since_lines > 0 and since_lines < len(all_lines):
+        if since_lines >= len(all_lines):
+            # Client is already caught up (or claims more lines than file
+            # has — log was rotated/truncated). Send nothing; live-tail
+            # from current EOF. This was the replay-storm fix's missing
+            # case: a brief WS reconnect with zero new lines previously
+            # fell into the else branch and resent the entire log.
+            catchup = []
+        elif since_lines > 0:
+            # In-progress reconnect: send only what the client hasn't seen.
             catchup = all_lines[since_lines:]
         else:
+            # Fresh attach: send last 400 lines as run-header + context.
             catchup = all_lines[-400:]
         for line in catchup:
             await websocket.send(json.dumps({
