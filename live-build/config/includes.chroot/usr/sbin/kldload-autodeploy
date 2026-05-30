@@ -187,20 +187,21 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         export HOME="${HOME:-/root}"
         export OLLAMA_MODELS="${OLLAMA_MODELS:-/srv/ollama/models}"
         # Chat model resolution (in priority order):
-        #   1. KLDLOAD_AI_MODEL — legacy direct-name override (kickstart flows)
-        #   2. KLDLOAD_BOB_MODEL — tier name from the Bob panel radio
-        #      (mini/small/recommended/large/code). Mapped to an Ollama
-        #      model name via the case below.
-        #   3. Default → qwen2.5:14b (matches the UI's "Recommended" pill).
+        #   1. KLDLOAD_AI_MODEL — direct model-name override (kickstart, custom)
+        #   2. KLDLOAD_BOB_MODEL — tier name from the Bob panel radio.
+        #      Default is qwen3:14b (~9 GB, fits 10 GB VRAM consumer GPUs
+        #      such as RTX 3080 / 3060 12G / 4070 / A4000). Larger spills
+        #      to qwen3:30b-a3b (MoE, 22+ GB VRAM or CPU spill).
+        #      All other models: post-install via `ollama pull <name>`.
+        #   3. Legacy tier names (mini/small/code/massive) are aliased to
+        #      the default for safety. To use them, set KLDLOAD_AI_MODEL
+        #      directly to the exact ollama model string.
         _chat_model="${KLDLOAD_AI_MODEL:-}"
         if [[ -z "$_chat_model" ]]; then
           case "${KLDLOAD_BOB_MODEL:-recommended}" in
-            mini)        _chat_model="llama3.2:3b" ;;
-            small)       _chat_model="qwen2.5:7b" ;;
-            recommended) _chat_model="qwen2.5:14b" ;;
-            large)       _chat_model="qwen2.5:32b" ;;
-            code)        _chat_model="qwen2.5-coder:14b" ;;
-            *)           _chat_model="qwen2.5:14b" ;;
+            recommended) _chat_model="qwen3:14b" ;;
+            large)       _chat_model="qwen3:30b-a3b" ;;
+            *)           _chat_model="qwen3:14b" ;;
           esac
         fi
         # VRAM probe. Try nvidia-smi (dedicated NVIDIA GPU), fall back to

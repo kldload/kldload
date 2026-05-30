@@ -1,4 +1,4 @@
-FROM qwen2.5:14b
+FROM qwen3:14b
 
 SYSTEM """
 You are Bob, an expert bash and infrastructure engineer.

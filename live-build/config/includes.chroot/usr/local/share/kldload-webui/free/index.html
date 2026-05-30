@@ -477,12 +477,11 @@ select option:checked { background: #00b8d9; color: #000; }
 
         <!-- AI state (hidden checkbox + model selection, shown when AI profile selected) -->
         <input type="checkbox" id="install-ai" style="display:none">
-        <!-- AI model picker removed: Bob ships with the kldlab profile with
-             sensible defaults (qwen2.5:14b chat by default, code/smart
-             off). Users switch models post-install via `ollama pull`
-             or the Bob panel. Install-time selection was surfacing on
-             the kldlab tile (because the tile occupies the grid slot
-             the old standalone AI tile used to) and confusing users. -->
+        <!-- AI model picker is the 2-tier Default/Larger pills above.
+             Default is qwen3:14b (~9 GB, fits 10 GB VRAM consumer GPUs).
+             Users switch models post-install via `ollama pull` or the
+             Bob panel. The smart/code legacy checkboxes are kept as
+             hidden no-ops for backwards compatibility with old kickstarts. -->
         <input type="checkbox" id="ai-model-chat" checked style="display:none">
         <input type="checkbox" id="ai-model-code" style="display:none">
         <input type="checkbox" id="ai-model-smart" style="display:none">
@@ -619,28 +618,19 @@ select option:checked { background: #00b8d9; color: #000; }
               </label>
             </div>
 
-            <!-- Row 2: model pills side-by-side -->
+            <!-- Row 2: Default qwen3:14b for ~10 GB VRAM consumer GPUs. Single Larger option for bigger boxes. All else via `ollama pull` post-install. -->
             <div id="bob-model-panel" style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center">
               <span style="font-size:0.73rem;color:var(--muted);margin-right:0.2rem">Model:</span>
-              <label class="bob-pill" data-tier="mini" data-model="llama3.2:3b" data-vram-gb="0" title="llama3.2:3b — ~2 GB, CPU-friendly, runs on any GPU or CPU-only">
-                <input type="radio" name="bob-model" value="mini"> Mini<span class="sz">2G</span>
+              <label class="bob-pill selected" data-tier="recommended" data-model="qwen3:14b" data-vram-gb="10" title="qwen3:14b — ~9 GB, fits 10 GB VRAM (RTX 3080 / 3060&nbsp;12G / 4070 / A4000). First-class tool calling, hybrid /think + /no_think.">
+                <input type="radio" name="bob-model" value="recommended" checked> Default<span class="sz">9G</span>
               </label>
-              <label class="bob-pill" data-tier="small" data-model="qwen2.5:7b" data-vram-gb="6" title="qwen2.5:7b — ~5 GB, needs 6–8 GB VRAM">
-                <input type="radio" name="bob-model" value="small"> Small<span class="sz">5G</span>
-              </label>
-              <label class="bob-pill selected" data-tier="recommended" data-model="qwen2.5:14b" data-vram-gb="10" title="qwen2.5:14b — ~9 GB, 10+ GB VRAM, default">
-                <input type="radio" name="bob-model" value="recommended" checked> Recommended<span class="sz">9G</span>
-              </label>
-              <label class="bob-pill" data-tier="large" data-model="qwen2.5:32b" data-vram-gb="24" title="qwen2.5:32b — ~19 GB, 24+ GB VRAM">
-                <input type="radio" name="bob-model" value="large"> Large<span class="sz">19G</span>
-              </label>
-              <label class="bob-pill" data-tier="code" data-model="qwen2.5-coder:14b" data-vram-gb="10" title="qwen2.5-coder:14b — ~9 GB, dev focus: code, YAML, eBPF">
-                <input type="radio" name="bob-model" value="code"> Code<span class="sz">9G</span>
+              <label class="bob-pill" data-tier="large" data-model="qwen3:30b-a3b" data-vram-gb="22" title="qwen3:30b-a3b — ~19 GB MoE (3B active per token). 22+ GB VRAM or CPU spill.">
+                <input type="radio" name="bob-model" value="large"> Larger<span class="sz">19G</span>
               </label>
             </div>
 
             <div style="font-size:0.7rem;color:var(--muted);padding:0.5rem 0.7rem;background:var(--surface2);border-radius:4px;line-height:1.5">
-              After install, Bob's panel lets you download any other model from Ollama's library &mdash; no reinstall needed.
+              Default is <code>qwen3:14b</code> &mdash; fits ~10 GB VRAM (RTX 3080 / 3060&nbsp;12G / 4070 / A4000-class). Switch to any other Ollama model post-install: <code>ollama pull &lt;model&gt;</code>.
             </div>
           </div>
         </div>
@@ -3706,18 +3696,18 @@ function handle(msg) {
       const _ram = d.ram_gb || 0;
       let _bobCapable = false;
       let _bobReason = '';
-      if (d.has_nvidia && _vram >= 8) {
+      if (d.has_nvidia && _vram >= 10) {
         _bobCapable = true;
-        _bobReason = `NVIDIA GPU detected — ${_vram} GB VRAM available (recommended)`;
-      } else if (d.has_nvidia) {
+        _bobReason = `NVIDIA GPU detected — ${_vram} GB VRAM, qwen3:14b fits cleanly`;
+      } else if (d.has_nvidia && _vram >= 8) {
         _bobCapable = true;
-        _bobReason = `NVIDIA GPU detected — ${_vram} GB VRAM (small: expect slow inference on 14B chat)`;
+        _bobReason = `NVIDIA GPU detected — ${_vram} GB VRAM, qwen3:14b will partial-spill (slow)`;
       } else if (_ram >= 16) {
         _bobCapable = true;
-        _bobReason = `No GPU, ${_ram} GB RAM — CPU fallback will work (slow: ~2–5 tokens/s on 14B chat)`;
+        _bobReason = `No GPU, ${_ram} GB RAM — qwen3:14b on CPU (slow: ~2–5 tok/s)`;
       } else {
         _bobCapable = false;
-        _bobReason = `No GPU, only ${_ram} GB RAM — not enough for qwen2.5:14b; Bob skipped by default`;
+        _bobReason = `No GPU, only ${_ram} GB RAM — not enough for qwen3:14b; Bob skipped by default`;
       }
       window._bobGpuCapable = _bobCapable;
       const bobStatusEl = document.getElementById('bob-gpu-status');
@@ -4879,33 +4869,38 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // updateBobModelGating() — disable pills whose VRAM floor exceeds
-// detected VRAM (falls back to CPU-only if no GPU). Called from
-// refreshSystemInfo after _bobGpuCapable + _vram are known.
+// detected VRAM. The Default pill (qwen3:14b, ~9 GB) stays available
+// when system RAM >= 16 GB even without a GPU — CPU inference is slow
+// but works. Larger (qwen3:30b-a3b) only enables on 22+ GB VRAM.
 window.updateBobModelGating = function(vramGB, ramGB) {
   const pills = document.querySelectorAll('.bob-pill');
   let bestDefault = null;
   pills.forEach(function(pill) {
     const need = parseInt(pill.dataset.vramGb || '0', 10);
     const r = pill.querySelector('input[type=radio]');
-    // "code" tier stays enabled as long as recommended is — different persona,
-    // same VRAM. Otherwise gate strictly on VRAM.
     const tier = pill.dataset.tier;
-    const ok = (vramGB >= need) || (need === 0);
+    // Default pill: VRAM fits OR system RAM is large enough for CPU spill.
+    // Larger pill: strict VRAM gate (CPU spill is unusable for 30B MoE).
+    let ok;
+    if (tier === 'recommended') {
+      ok = (vramGB >= need) || (ramGB >= 16);
+    } else {
+      ok = (vramGB >= need) || (need === 0);
+    }
     if (!ok) {
       pill.classList.add('disabled');
       if (r) r.disabled = true;
     } else {
       pill.classList.remove('disabled');
       if (r) r.disabled = false;
-      // Track best-fit default: highest tier that fits (but cap at recommended
-      // for most, never auto-pick Large — user opts up if they want).
-      if (tier === 'mini' || tier === 'small' || tier === 'recommended') {
-        bestDefault = tier;
-      }
+      // Track best-fit default: prefer Default (qwen3:14b). User opts up
+      // to Larger explicitly — never auto-promote to it.
+      if (tier === 'recommended') bestDefault = tier;
     }
   });
-  // CPU-only fallback: mini is the only safe pick
-  if (vramGB === 0 && ramGB >= 16) bestDefault = 'mini';
+  // If nothing fit (low-RAM box without GPU), still default-select Default —
+  // user will see Bob warning but the choice is consistent with the picker.
+  if (!bestDefault) bestDefault = 'recommended';
   // If current selection is disabled, move to best default
   const cur = document.querySelector('input[name="bob-model"]:checked');
   if (cur && cur.disabled && bestDefault) {
