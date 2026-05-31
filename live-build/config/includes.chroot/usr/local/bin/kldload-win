@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# kldload-win <view> [wmclass] — open ONE kldload web-console view as an app
+# window with the left nav stripped (?app=1) and Chrome's warning bars killed
+# (--test-type). Shares one profile so many tool windows can be open at once.
+set -eo pipefail
+VIEW="${1:?usage: kldload-win <view> [wmclass]}"
+CLASS="${2:-kldload-${VIEW}}"
+URL="https://localhost:8443/?app=1#${VIEW}"
+command -v systemctl >/dev/null 2>&1 && { systemctl is-active --quiet kldload-webui || systemctl start kldload-webui 2>/dev/null || true; }
+for b in google-chrome google-chrome-stable chromium chromium-browser brave-browser; do
+  if command -v "$b" >/dev/null 2>&1; then
+    exec "$b" --app="$URL" --class="$CLASS" \
+              --user-data-dir="${HOME}/.config/kldload-apps" \
+              --test-type --ignore-certificate-errors \
+              --no-default-browser-check --no-first-run --disable-infobars \
+              --window-size=1100,820 >/dev/null 2>&1
+  fi
+done
+command -v firefox >/dev/null 2>&1 && exec firefox --new-window "$URL"
+exec xdg-open "$URL"

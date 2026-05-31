@@ -214,7 +214,8 @@ k_profile_packages() {
         gnome-keyring ${_pam_extras} ${_portal_extras} ${_dbus_extras} \
         ${_xsrv} ${_netools_extra} \
         ${_browser} \
-        tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
+        tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
+        zenity chromium"
       ;;
 
     # ── kldload templates ────────────────────────────────────────────────────────

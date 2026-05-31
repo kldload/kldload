@@ -65,7 +65,7 @@ BUILD_DATE="$(date +%Y%m%d)"
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
 DISTRO_TAG="${DISTRO:-fedora}"
-VERSION="${KLDLOAD_VERSION:-1.2.0-beta}"
+VERSION="${KLDLOAD_VERSION:-1.3.0}"
 ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 

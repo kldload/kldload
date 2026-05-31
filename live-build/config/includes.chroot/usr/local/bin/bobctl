@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# bobctl — free the GPU from Bob for gaming, or load Bob back for AI.
+#
+# Bob's model (qwen3:14b) holds ~8 GB VRAM when resident; the 3080 is 10 GB,
+# so a loaded Bob starves games. This unloads/loads it on demand. No root
+# needed — it's just Ollama API calls (idle Ollama holds ~0 VRAM).
+#
+#   bobctl off       free the GPU (gaming mode)
+#   bobctl on        load Bob (AI ready, shows in the web GUI)
+#   bobctl toggle    flip
+#   bobctl status    show resident model + free VRAM
+set -eo pipefail
+
+OLLAMA_API="${OLLAMA_HOST:-http://localhost:11434}"
+MODEL="${BOB_MODEL:-bob}"
+
+_notify(){ command -v notify-send >/dev/null 2>&1 && notify-send -a Bob "Bob" "$1" 2>/dev/null || true; echo "[bobctl] $1"; }
+_resident(){ curl -fsS --max-time 5 "$OLLAMA_API/api/ps" 2>/dev/null \
+  | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("models",[])))' 2>/dev/null || echo 0; }
+_loaded_names(){ curl -fsS --max-time 5 "$OLLAMA_API/api/ps" 2>/dev/null \
+  | python3 -c 'import json,sys; [print(m["name"]) for m in json.load(sys.stdin).get("models",[])]' 2>/dev/null || true; }
+_vram_free(){ nvidia-smi --query-gpu=memory.free --format=csv,noheader 2>/dev/null | head -1 || echo "?"; }
+
+command -v ollama >/dev/null 2>&1 || { _notify "ollama not installed"; exit 1; }
+
+case "${1:-status}" in
+  off|disable|game)
+    for m in $(_loaded_names); do ollama stop "$m" >/dev/null 2>&1 || true; done
+    ollama stop "$MODEL" >/dev/null 2>&1 || true
+    sleep 1
+    _notify "Gaming mode — GPU freed ($(_vram_free) free). Bob unloaded."
+    ;;
+  on|enable)
+    _notify "Loading Bob… (a few seconds)"
+    if curl -fsS --max-time 300 "$OLLAMA_API/api/generate" \
+        -d "{\"model\":\"$MODEL\",\"prompt\":\"hi\",\"stream\":false,\"think\":false,\"options\":{\"num_predict\":1}}" \
+        >/dev/null 2>&1; then
+      _notify "Bob is ready. (VRAM free now: $(_vram_free))"
+    else
+      _notify "Couldn't load Bob — likely not enough free RAM/VRAM (close a game first). VRAM free: $(_vram_free)"
+      exit 1
+    fi
+    ;;
+  toggle)
+    if [ "$(_resident)" -gt 0 ]; then exec "$0" off; else exec "$0" on; fi
+    ;;
+  status)
+    n="$(_resident)"
+    if [ "$n" -gt 0 ]; then echo "Bob: LOADED ($(_loaded_names | tr '\n' ' ')) | VRAM free: $(_vram_free)";
+    else echo "Bob: unloaded (GPU free for gaming) | VRAM free: $(_vram_free)"; fi
+    ;;
+  *) echo "usage: bobctl {on|off|toggle|status}"; exit 1 ;;
+esac
