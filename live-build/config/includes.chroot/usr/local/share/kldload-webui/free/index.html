@@ -1003,6 +1003,32 @@ select option:checked { background: #00b8d9; color: #000; }
                 <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Bob AI</div>
               </div>
             </div>
+            <!-- kldload Workstation "lab" extras — shown only on the desktop profile
+                 (selectTarget() toggles #opt-lab-cluster). Each card flips a flag the
+                 distro-aware backend already acts on; default all-off = plain workstation. -->
+            <div id="opt-lab-cluster" style="display:none">
+              <div style="font-size:0.74rem;color:var(--muted);margin:0.5rem 0 0.3rem">Workstation extras (optional — leave all off for a plain workstation):</div>
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.5rem;max-width:760px">
+                <div class="opt-card" id="opt-kvm" onclick="toggleOpt('kvm')" title="KVM hypervisor on ZFS — libvirt + virt-manager + zvol-backed VMs with instant clones (kvm-create/clone). Flag: KLDLOAD_ENABLE_KVM." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                  <div style="font-size:1.5rem;margin-bottom:0.3rem">🖥</div>
+                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">KVM</div>
+                </div>
+                <div class="opt-card" id="opt-k8s" onclick="toggleOpt('k8s')" title="Kubernetes on KVM (Cilium + Hubble), built on first boot. Flag: KLDLOAD_K8S_BOOTSTRAP." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                  <div style="font-size:1.5rem;margin-bottom:0.3rem">☸</div>
+                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Kubernetes</div>
+                </div>
+                <div class="opt-card" id="opt-ebpf" onclick="toggleOpt('ebpf')" title="Observability / eBPF — Prometheus + Grafana + Loki + BCC/bpftrace exporters. Flag: KLDLOAD_ENABLE_EBPF." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                  <div style="font-size:1.5rem;margin-bottom:0.3rem">📊</div>
+                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Observability</div>
+                </div>
+                <div class="opt-card" id="opt-images" onclick="toggleOpt('images')" title="Build Images — build the 5 distro cloud-image goldens (klab) on first boot for the VM lab. Several GB download; RHEL golden needs a subscription. Flag: KLDLOAD_BUILD_IMAGES." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                  <div style="font-size:1.5rem;margin-bottom:0.3rem">💿</div>
+                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Build Images</div>
+                </div>
+              </div>
+            </div>
+            <input type="checkbox" id="install-kvm" style="display:none">
+            <input type="checkbox" id="install-images" style="display:none">
             <input type="checkbox" id="install-nvidia" style="display:none">
             <input type="checkbox" id="install-wireguard" checked style="display:none">
             <input type="checkbox" id="install-ebpf" checked style="display:none">
@@ -4838,6 +4864,9 @@ function selectTarget(el) {
   const bobEligibleRoles = ['devops', 'k8s', 'kvm', 'zfslab'];
   const bobEligible = bobEligibleRoles.includes(el.dataset.role);
   if (bobPanel) bobPanel.style.display = bobEligible ? 'block' : 'none';
+  // kldload Workstation "lab" extras (KVM/K8s/eBPF/Build-Images) — desktop profile only.
+  var _labCluster = document.getElementById('opt-lab-cluster');
+  if (_labCluster) _labCluster.style.display = (el.dataset.role === 'desktop') ? 'block' : 'none';
   // Don't stomp an explicit user choice made via the always-visible "Bob AI"
   // Platform-Options card (dataset.userTouched set by toggleOpt('bob')).
   if (bobCb && !bobCb.dataset.userTouched) {
@@ -4942,7 +4971,7 @@ const DISTRO_DESCS = {
   freebsd:  'FreeBSD 15.0 — native ZFS, jails, bhyve',
 };
 function toggleOpt(name) {
-  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob'};
+  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', images: 'install-images'};
   var cb = document.getElementById(map[name]);
   var card = document.getElementById('opt-' + name);
   if (!cb || !card) return;
@@ -4966,8 +4995,8 @@ function toggleOpt(name) {
 
 // Init option cards on load
 document.addEventListener('DOMContentLoaded', function() {
-  ['wireguard','nvidia','ebpf','dedup','secure-boot','webui','bob'].forEach(function(name) {
-    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob'};
+  ['wireguard','nvidia','ebpf','dedup','secure-boot','webui','bob','kvm','k8s','images'].forEach(function(name) {
+    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', images: 'install-images'};
     var cb = document.getElementById(map[name]);
     var card = document.getElementById('opt-' + name);
     if (cb && card && cb.checked) {
@@ -5307,6 +5336,8 @@ function startInstall() {
     // KVM is implied by every profile whose cluster/goldens live in VMs,
     // including zfslab (its goldens are VMs).
     enable_kvm: (document.getElementById('install-kvm')?.checked || ['kvm','k8s','devops','zfslab'].includes(roleRaw)) ? '1' : '0',
+    // Build Images — build the 5 distro cloud-image goldens (klab) on first boot.
+    build_images: document.getElementById('install-images')?.checked ? '1' : '0',
     export_format: document.getElementById('install-export-format')?.value || 'none',
     export_scp_host: document.getElementById('export-scp-host')?.value?.trim() || '',
     export_scp_user: document.getElementById('export-scp-user')?.value?.trim() || '',

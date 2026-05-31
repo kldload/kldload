@@ -1727,7 +1727,7 @@ KUBEBANNER
   # testing. Like the K8s bootstrap, this runs on first boot because it needs
   # a running libvirtd and network access to download ISOs. The build phase
   # creates golden images, then "deploy blue" instantiates the blue site VMs.
-  if [[ "${KLDLOAD_ENABLE_DEVOPS:-0}" == "1" ]]; then
+  if [[ "${KLDLOAD_ENABLE_DEVOPS:-0}" == "1" || "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]]; then
     k_log "Enabling klab first-boot deployment..."
     cat > "${target}/etc/systemd/system/klab-firstboot.service" <<'KLABFB'
 [Unit]
