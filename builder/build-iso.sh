@@ -1355,11 +1355,14 @@ if [[ "$EDITION" != "core" ]]; then
         cp -r /build/live-build/config/includes.chroot/usr/local/share/klab/* "${ROOTFS}/usr/local/share/klab/"
     fi
 
-    # Copy .desktop files for GNOME menu
-    for dt in kst.desktop kst-dashboard.desktop ksnap.desktop kexport.desktop kldload-terminal.desktop kldload-docs.desktop vim.desktop; do
-        src="/build/live-build/config/includes.chroot/usr/share/applications/${dt}"
-        [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/share/applications/${dt}"
-    done
+    # Copy ALL .desktop files for the GNOME menu (wildcard — new launchers such
+    # as bob-chat / bob-gaming / kldload-zfs / kldload-dashboard ship
+    # automatically instead of being silently dropped by a hardcoded list).
+    if [[ -d /build/live-build/config/includes.chroot/usr/share/applications ]]; then
+        mkdir -p "${ROOTFS}/usr/share/applications"
+        cp /build/live-build/config/includes.chroot/usr/share/applications/*.desktop \
+           "${ROOTFS}/usr/share/applications/" 2>/dev/null || true
+    fi
 
     # Copy the main installer + orchestrator scripts to /usr/sbin.
     # kldload-autodeploy is the post-install orchestrator (K8s + AI + klab
@@ -1798,10 +1801,20 @@ cp "${_ic}/etc/kldload/autoinstall.env" "${ROOTFS}/etc/kldload/autoinstall.env" 
 # Answers templates
 cp -r "${_ic}/etc/kldload/debz" "${ROOTFS}/etc/kldload/" 2>/dev/null || true
 
-# Copy virtio modules config (both editions — needed for VM guests)
+# Copy ALL modules-load.d configs (virtio for VM guests, uinput for Steam
+# controllers, wireguard, etc.) — wildcard so additions ship instead of
+# being dropped by a per-file list.
 mkdir -p "${ROOTFS}/etc/modules-load.d"
-[[ -f /build/live-build/config/includes.chroot/etc/modules-load.d/virtio.conf ]] && \
-    cp /build/live-build/config/includes.chroot/etc/modules-load.d/virtio.conf "${ROOTFS}/etc/modules-load.d/"
+cp /build/live-build/config/includes.chroot/etc/modules-load.d/*.conf \
+    "${ROOTFS}/etc/modules-load.d/" 2>/dev/null || true
+
+# Copy udev rules from includes.chroot (uinput perms for Steam controllers,
+# the kldload I/O scheduler rule, etc.) — was previously not copied at all.
+if [[ -d /build/live-build/config/includes.chroot/etc/udev/rules.d ]]; then
+    mkdir -p "${ROOTFS}/etc/udev/rules.d"
+    cp /build/live-build/config/includes.chroot/etc/udev/rules.d/*.rules \
+        "${ROOTFS}/etc/udev/rules.d/" 2>/dev/null || true
+fi
 
 # Ensure ZFS module loads at boot
 cat > "${ROOTFS}/etc/modules-load.d/zfs.conf" << 'ZFSMOD'
