@@ -962,7 +962,7 @@ select option:checked { background: #00b8d9; color: #000; }
             <div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
               ZFS, WireGuard, and eBPF are included on all profiles (except Core). Toggle NVIDIA if you have a GPU. Secure Boot is <strong>off</strong> by default — enable only if your firmware can enroll MOK. Web ops console is <strong>off</strong> on server/workstation by default — enable to use the dashboard as an in-place toolkit (Doctor / VM / K8s / Install). Lab profiles (kvm / ai / zfslab / klab) always auto-start it.
             </div>
-            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.5rem;margin-bottom:0.8rem;max-width:640px">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.5rem;margin-bottom:0.8rem;max-width:760px">
               <div class="opt-card" id="opt-nvidia" onclick="toggleOpt('nvidia')" title="Drivers + CUDA + container toolkit" style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
                 <div style="font-size:1.5rem;margin-bottom:0.3rem">🎮</div>
                 <div style="font-size:0.8rem;font-weight:600;color:var(--text)">NVIDIA GPU</div>
@@ -991,6 +991,16 @@ select option:checked { background: #00b8d9; color: #000; }
               <div class="opt-card" id="opt-webui" onclick="toggleOpt('webui')" title="Auto-start kldload-webui + ttyd + proxy at boot (Doctor / VM / K8s / Install panel)" style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
                 <div style="font-size:1.5rem;margin-bottom:0.3rem">🖥</div>
                 <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Auto-start GUI</div>
+              </div>
+              <!-- Bob AI opt-in card. Mirrors the install-bob checkbox (which
+                   feeds enable_ai → KLDLOAD_ENABLE_AI). firstboot installs
+                   Ollama + builds the bob model when that flag is set on ANY
+                   profile (kldload-firstboot gates on ROLE==ai OR ENABLE_AI),
+                   so this card surfaces Bob without picking the AI profile.
+                   GPU sharing with games is handled post-install by bobctl. -->
+              <div class="opt-card" id="opt-bob" onclick="toggleOpt('bob')" title="Bob AI assistant — installs Ollama + the bob model on first boot (~9 GB, needs internet). Available on any profile. After install, free/load the GPU with bobctl (or the Bob: Gaming Mode menu item)." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                <div style="font-size:1.5rem;margin-bottom:0.3rem">🤖</div>
+                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Bob AI</div>
               </div>
             </div>
             <input type="checkbox" id="install-nvidia" style="display:none">
@@ -4828,12 +4838,23 @@ function selectTarget(el) {
   const bobEligibleRoles = ['devops', 'k8s', 'kvm', 'zfslab'];
   const bobEligible = bobEligibleRoles.includes(el.dataset.role);
   if (bobPanel) bobPanel.style.display = bobEligible ? 'block' : 'none';
-  if (bobCb && bobEligible) {
-    // Auto-check based on GPU capability the last system-info pass detected.
-    // _bobGpuCapable is set by updateBobGpuStatus() on page load / refresh.
-    bobCb.checked = !!window._bobGpuCapable;
-  } else if (bobCb) {
-    bobCb.checked = false;
+  // Don't stomp an explicit user choice made via the always-visible "Bob AI"
+  // Platform-Options card (dataset.userTouched set by toggleOpt('bob')).
+  if (bobCb && !bobCb.dataset.userTouched) {
+    if (bobEligible) {
+      // Auto-check based on GPU capability the last system-info pass detected.
+      // _bobGpuCapable is set by updateBobGpuStatus() on page load / refresh.
+      bobCb.checked = !!window._bobGpuCapable;
+    } else {
+      bobCb.checked = false;
+    }
+  }
+  // Keep the always-visible "Bob AI" opt-card visual in sync with install-bob,
+  // whichever path (profile logic or the card) last changed it.
+  var _bobCard = document.getElementById('opt-bob');
+  if (_bobCard && bobCb) {
+    _bobCard.style.borderColor = bobCb.checked ? 'var(--accent)' : 'var(--border)';
+    _bobCard.style.background = bobCb.checked ? 'rgba(0,184,217,0.08)' : 'transparent';
   }
   // Keep the legacy install-ai hidden checkbox in sync so submit payloads
   // that still reference it (and the summary badge code) behave consistently.
@@ -4921,13 +4942,15 @@ const DISTRO_DESCS = {
   freebsd:  'FreeBSD 15.0 — native ZFS, jails, bhyve',
 };
 function toggleOpt(name) {
-  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui'};
+  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob'};
   var cb = document.getElementById(map[name]);
   var card = document.getElementById('opt-' + name);
   if (!cb || !card) return;
   cb.checked = !cb.checked;
   card.style.borderColor = cb.checked ? 'var(--accent)' : 'var(--border)';
   card.style.background = cb.checked ? 'rgba(0,184,217,0.08)' : 'transparent';
+  // Remember an explicit Bob choice so profile re-renders don't override it.
+  if (name === 'bob') cb.dataset.userTouched = '1';
   // Show/hide K8s bootstrap option
   if (name === 'k8s') {
     var k8sOpt = document.getElementById('k8s-bootstrap-opt');
@@ -4943,8 +4966,8 @@ function toggleOpt(name) {
 
 // Init option cards on load
 document.addEventListener('DOMContentLoaded', function() {
-  ['wireguard','nvidia','ebpf','dedup','secure-boot','webui'].forEach(function(name) {
-    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui'};
+  ['wireguard','nvidia','ebpf','dedup','secure-boot','webui','bob'].forEach(function(name) {
+    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob'};
     var cb = document.getElementById(map[name]);
     var card = document.getElementById('opt-' + name);
     if (cb && card && cb.checked) {
