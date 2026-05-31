@@ -974,6 +974,15 @@ main() {
     # boot, and `modprobe nvidia` errors with "No such device" because
     # nouveau already owns the card.
     if [[ $_nv_ko_present -eq 1 ]]; then
+      # GTK4 apps segfault in libnvidia-glcore on the NVIDIA driver kldload
+      # ships (observed on the 610 series). Force GTK4's cairo renderer so
+      # file managers / settings apps don't crash. NVIDIA-only; cairo is
+      # software-rendered GTK4 — games/Steam are unaffected (not GTK4). Idempotent.
+      mkdir -p /etc/environment.d
+      if [[ ! -f /etc/environment.d/60-kldload-nvidia-gsk.conf ]]; then
+        printf 'GSK_RENDERER=cairo\n' > /etc/environment.d/60-kldload-nvidia-gsk.conf
+        log "GTK4 cairo renderer set for NVIDIA (libnvidia-glcore crash workaround)"
+      fi
       _nv_restored=0
       for _disabled in /usr/lib/modprobe.d/*.kldload-disabled-no-dkms \
                        /etc/modprobe.d/*.kldload-disabled-no-dkms \
