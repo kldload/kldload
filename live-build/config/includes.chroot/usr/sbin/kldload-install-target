@@ -1840,7 +1840,10 @@ main() {
     if [[ ! -d "${KLDLOAD_TARGET_MNT}/boot/efi" ]] || ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
       # Check if user mounted it somewhere
       local _efi_dev
-      _efi_dev="$(lsblk -rno PATH,PARTTYPE 2>/dev/null | grep -i 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' | awk '{print $1}' | head -1)"
+      # Scope ESP detection to the SELECTED disk — a bare system-wide scan
+      # picks the first ESP found (often disk 0's old ESP), so a multi-disk
+      # install to disk 1 would write the bootloader to disk 0. (multi-disk boot bug)
+      _efi_dev="$(lsblk -rno PATH,PARTTYPE "${KLDLOAD_DISK}" 2>/dev/null | grep -i 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' | awk '{print $1}' | head -1)"
       if [[ -n "$_efi_dev" ]]; then
         mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi"
         mount "$_efi_dev" "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
