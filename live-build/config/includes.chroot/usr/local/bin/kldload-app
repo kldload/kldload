@@ -36,9 +36,18 @@ HIDE_CSS = (
     "#content{margin-left:0!important;}"
 )
 
-# Accept the self-signed localhost cert.
+# Accept the self-signed localhost cert. The webui serves HTTPS on :8443 with a
+# self-signed cert. The old WebContext.set_tls_errors_policy(IGNORE) is BOTH
+# deprecated AND no longer honored in WebKitGTK 2.48 (RHEL 10 / el10) -> the
+# cert is rejected -> blank white screen with a TLS error. Caught 2026-05-31 on
+# .137. The reliable path in WebKit2 4.1: explicitly whitelist the cert for the
+# host on the load-failed-with-tls-errors signal, then reload. Keep the policy
+# call too (harmless where it still works on older webkit).
 ctx = WebKit2.WebContext.get_default()
-ctx.set_tls_errors_policy(WebKit2.TLSErrorsPolicy.IGNORE)
+try:
+    ctx.set_tls_errors_policy(WebKit2.TLSErrorsPolicy.IGNORE)
+except Exception:
+    pass
 
 ucm = WebKit2.UserContentManager()
 ucm.add_style_sheet(WebKit2.UserStyleSheet(
@@ -62,6 +71,27 @@ def _on_permission(_wv, request):
         pass
     return True
 web.connect("permission-request", _on_permission)
+
+# Self-signed localhost cert: whitelist it for the host and reload (the
+# WebContext policy above is a no-op on WebKitGTK 2.48). Guard against a reload
+# loop with a flag.
+_tls_allowed = {"done": False}
+def _on_tls_error(webview, failing_uri, certificate, errors):
+    if _tls_allowed["done"]:
+        return False
+    _tls_allowed["done"] = True
+    try:
+        host = GLib.Uri.parse(failing_uri, GLib.UriFlags.NONE).get_host() or "localhost"
+    except Exception:
+        host = "localhost"
+    try:
+        ctx.allow_tls_certificate_for_host(certificate, host)
+        webview.load_uri(failing_uri)
+    except Exception as e:
+        sys.stderr.write("kldload-app: TLS whitelist failed: %s\n" % e)
+        return False
+    return True
+web.connect("load-failed-with-tls-errors", _on_tls_error)
 
 win = Gtk.Window(title="kldload — %s" % TITLE)
 win.set_default_size(1100, 820)

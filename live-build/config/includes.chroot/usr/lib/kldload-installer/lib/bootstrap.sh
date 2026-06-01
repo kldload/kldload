@@ -1275,6 +1275,12 @@ CUSTOMREPO
         # install side-steps the issue. Same on CentOS Stream 9 + Fedora.
         gcr
         adwaita-icon-theme google-noto-sans-fonts firefox
+        # glib-networking — the GIO TLS backend (gnutls). WITHOUT it, WebKitGTK
+        # and anything using libsoup cannot do HTTPS AT ALL: "TLS support is not
+        # available" -> the kldload-app windows load a blank white screen.
+        # Caught 2026-05-31 on .137 RHEL 10 (it was never a hard dep so dnf
+        # never pulled it). gsettings-desktop-schemas is its proxy-config dep.
+        glib-networking gsettings-desktop-schemas
         mesa-dri-drivers pipewire wireplumber
         podman
         # systemd-pam — F43+ split this out of systemd; without it
