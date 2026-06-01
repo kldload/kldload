@@ -7,6 +7,17 @@ each window is just its tool. Reuses the existing webui HTML — no rewrite.
 Usage: kldload-app <view> [Title]
 GTK3 + WebKit2 4.1 (avoids the GTK4/NVIDIA libnvidia-glcore crash).
 """
+import os
+# NVIDIA + Wayland: WebKitGTK's DMABUF GPU renderer SIGSEGVs ("Error 71
+# Protocol error dispatching to Wayland display") a few seconds after the
+# window opens — the window appears then dies. Caught 2026-05-31 on .137
+# (RTX 3080, GNOME 49 Wayland). Disabling just the DMABUF renderer fixes it
+# surgically (the rest of the desktop keeps GPU accel). The compositing +
+# software-GL fallbacks are belt-and-suspenders for older/odd GPUs.
+# MUST be set before WebKit2 is imported/initialised.
+os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
+os.environ.setdefault("GDK_BACKEND", "wayland,x11")
 import sys
 import gi
 gi.require_version("Gtk", "3.0")
