@@ -1959,8 +1959,22 @@ KVER=$(ls "${ROOTFS}/lib/modules/" | head -1)
 [[ -n "$KVER" ]] || die "No kernel found in rootfs"
 log "Kernel version: $KVER"
 
+# dracut-108 regression (F44): its systemd module ships initrd-parse-etc.service
+# (ExecStart=/usr/lib/systemd/systemd-sysroot-fstab-check) but FAILS to pack the
+# helper binary itself into the initramfs -> the service dies 203/EXEC -> switch
+# root never completes -> dracut emergency shell. We force-install the helpers
+# the module dropped. Guard each so the build still works once dracut fixes this.
+DRACUT_INSTALL=()
+for _b in /usr/lib/systemd/systemd-sysroot-fstab-check \
+          /usr/lib/systemd/system-generators/systemd-fstab-generator; do
+    [[ -x "${ROOTFS}${_b}" ]] && DRACUT_INSTALL+=(--install "$_b")
+done
+[[ ${#DRACUT_INSTALL[@]} -gt 0 ]] && \
+    log "Force-installing dracut-108-dropped helpers: ${DRACUT_INSTALL[*]}"
+
 chroot "$ROOTFS" dracut --force --add "dmsquash-live" \
     --no-hostonly \
+    "${DRACUT_INSTALL[@]}" \
     --force-drivers "xhci_pci xhci_hcd ehci_pci ehci_hcd ohci_pci ohci_hcd uhci_hcd usb_storage uas usbhid hid_generic cdc_ether usbnet r8152 ax88179_178a thunderbolt typec_ucsi ucsi_acpi nvme nvme_core ahci virtio_blk virtio_scsi virtio_net virtio_pci sdhci sdhci_pci mmc_block" \
     --kver "$KVER" "/boot/initramfs-${KVER}.img" 2>&1 | tee -a "$LOG_FILE" || \
     die "dracut failed"
