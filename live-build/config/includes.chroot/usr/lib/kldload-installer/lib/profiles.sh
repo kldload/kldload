@@ -886,16 +886,21 @@ FFPOLICY_WS
     esac
   fi
 
-  # Desktop shortcut in the apps menu — every non-core GUI profile gets this
-  # so users can always find the webui even when it's not their homepage.
-  # Ships in the live ISO at /usr/share/applications/kldload-webui.desktop;
-  # copy it to the target.
+  # App-menu launchers — every non-core GUI profile gets the FULL set of
+  # kldload/bob launchers, not just the webui. The live ISO ships ~13 of them
+  # (.desktop) at /usr/share/applications/; we copy ALL kldload-*/bob-* so the
+  # 68 tools in /usr/local/bin are actually discoverable in the GNOME menu.
+  # Regression caught 2026-05-31 on .137 RHEL desktop: only kldload-webui.desktop
+  # was copied (explicit single-file whitelist) -> 68 tools present but only 3
+  # menu entries, desktop looked empty. Glob copy fixes it for every distro.
   if [[ "${KLDLOAD_PROFILE:-server}" != "core" ]]; then
-    if [[ -f /usr/share/applications/kldload-webui.desktop ]]; then
-      mkdir -p "${target}/usr/share/applications"
-      install -m 0644 /usr/share/applications/kldload-webui.desktop \
-        "${target}/usr/share/applications/kldload-webui.desktop"
-    fi
+    mkdir -p "${target}/usr/share/applications"
+    for _lnch in /usr/share/applications/kldload-*.desktop \
+                 /usr/share/applications/bob-*.desktop; do
+      [[ -f "$_lnch" ]] && install -m 0644 "$_lnch" \
+        "${target}/usr/share/applications/$(basename "$_lnch")"
+    done
+    chroot "${target}" update-desktop-database /usr/share/applications 2>/dev/null || true
   fi
 
   # ── Service auto-start gate ────────────────────────────────────────────────

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# kldload-term — open whatever terminal emulator this distro actually ships,
+# with kldload tools in PATH + a one-line greeting. RHEL 10 / Fedora 41+ dropped
+# gnome-terminal for ptyxis; gnome-console (kgx) is the GNOME 47 console; konsole
+# is KDE. Pick the first that exists. The greeting runs in an interactive login
+# shell so kst/ksnap/kclone/etc. are on PATH (secure_path drop-in handles sudo).
+set -eu
+GREET='echo "kldload tools: kst ksnap kclone kdf kdir kpkg kexport"; echo "Type kldload-help for the full command reference."; echo'
+run='bash -lc '"'"'$GREET; exec bash'"'"''
+for t in ptyxis gnome-console kgx gnome-terminal konsole xterm; do
+  if command -v "$t" >/dev/null 2>&1; then
+    case "$t" in
+      ptyxis)               exec ptyxis -- bash -lc "$GREET; exec bash" ;;
+      gnome-console|kgx)    exec "$t" -- bash -lc "$GREET; exec bash" ;;
+      gnome-terminal)       exec gnome-terminal -- bash -lc "$GREET; exec bash" ;;
+      konsole)              exec konsole -e bash -lc "$GREET; exec bash" ;;
+      xterm)                exec xterm -e bash -lc "$GREET; exec bash" ;;
+    esac
+  fi
+done
+exec bash -lc "$GREET; exec bash"

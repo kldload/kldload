@@ -1253,7 +1253,22 @@ CUSTOMREPO
     desktop)
       _dnf_pkgs+=(
         gnome-shell gnome-session gnome-control-center gnome-settings-daemon
-        gdm nautilus gnome-terminal gedit gnome-keyring
+        gdm nautilus gnome-keyring
+        # Terminal + text editor: Red Hat DROPPED gnome-terminal and gedit from
+        # RHEL 10 / Fedora 41+ AppStream (replaced by ptyxis + gnome-text-editor).
+        # This hardcoded list is what actually gets dnf-installed on RPM targets
+        # (NOT k_profile_packages — see the target-base.txt trap warning above).
+        # List BOTH legacy and modern names; the install uses --skip-broken so
+        # dnf takes whichever exists: gnome-terminal/gedit on EL9/F43, ptyxis/
+        # gnome-text-editor on RHEL 10 / F44+. Caught 2026-05-31 on .137 RHEL 10
+        # desktop: gnome-terminal skip-broken'd away -> booted into a desktop
+        # with NO terminal app at all.
+        ptyxis gnome-console gnome-terminal
+        gnome-text-editor gedit
+        # zenity — REQUIRED by the kldload GUI tools (kldload-zfs, ZFS Manager,
+        # replication dialogs). Was never in this list -> those tools silently
+        # no-op'd on every RPM desktop install. Same .137 regression.
+        zenity
         # gcr provides /usr/libexec/gcr-ssh-askpass (file-Required by
         # gnome-keyring). dnf5 doesn't auto-load filelists metadata so
         # the file-Require can't resolve via Provides alone — explicit
