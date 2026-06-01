@@ -834,6 +834,31 @@ DASHSTART
   # workstation users land on their default new-tab page at launch.
   if [[ "${KLDLOAD_PROFILE:-server}" != "core" && "${KLDLOAD_PROFILE:-server}" != "server" ]]; then
     mkdir -p "${target}/usr/lib64/firefox/distribution"
+
+    # ── NVIDIA crash guard ──────────────────────────────────────────────────
+    # On NVIDIA proprietary + Wayland, firefox's GPU process SIGSEGVs in the
+    # EGL stack (libEGL_mesa / libnvidia-egl collision) a few seconds after a
+    # window opens — the window appears, then dies. Caught 2026-05-31 on .137
+    # (RTX 3080, GNOME 49 Wayland): every firefox launch coredumped. Force CPU
+    # compositing IN FIREFOX ONLY via system autoconfig; the system GPU stays
+    # free for games/CUDA/etc. Verified: firefox then stays up.
+    if [[ -d "${target}/usr/lib64/firefox" ]]; then
+      cat > "${target}/usr/lib64/firefox/firefox.cfg" <<'FFCFG'
+// kldload: disable firefox GPU acceleration (NVIDIA+Wayland EGL crash guard).
+// firefox-only — does not touch system GPU accel. See profiles.sh.
+lockPref("gfx.webrender.software", true);
+lockPref("layers.acceleration.disabled", true);
+lockPref("media.ffmpeg.vaapi.enabled", false);
+lockPref("gfx.x11-egl.force-disabled", true);
+FFCFG
+      mkdir -p "${target}/usr/lib64/firefox/defaults/pref"
+      cat > "${target}/usr/lib64/firefox/defaults/pref/autoconfig.js" <<'FFACFG'
+pref("general.config.filename", "firefox.cfg");
+pref("general.config.obscure_value", 0);
+pref("general.config.sandbox_enabled", false);
+FFACFG
+    fi
+
     case "${KLDLOAD_PROFILE:-server}" in
       kvm|ai|zfslab)
         # Lab profile — autoload webui as homepage too
