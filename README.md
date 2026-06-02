@@ -191,14 +191,14 @@ The user picks the target distro at install time. After install the system runs 
 
 ## Releases
 
-### 1.3.0 &mdash; Workstation
+### 1.3.0 &mdash; Workstation (current)
 - GUI-first RHEL 10 workstation: expert ops (ZFS / KVM / K8s / eBPF) as point-and-shoot desktop apps
 - Install-time **Platform Options** — NVIDIA / KVM / Kubernetes / eBPF / golden-image building, desktop-only, default-clean
 - Native per-tool app windows (chromeless GTK/WebKit), NVIDIA + Wayland render fixes
 - Console (tmux cockpit) promoted to its own application, de-duplicated from every tool window
 - RHEL 10 desktop package + TLS fixes (ptyxis, zenity, glib-networking)
 
-### 1.2.0 &mdash; Full Stack Automation
+### 1.2.0 &mdash; Full Stack Automation (release candidate; folded into 1.3.0)
 - PetClinic Microservices + ArgoCD wired into autodeploy
 - sanoid / syncoid on by default with sensible policies
 - Web UI Demo Mode with deploy / disaster / recover buttons
