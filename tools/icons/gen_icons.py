@@ -53,10 +53,23 @@ def vms(): # two overlapping screens
 def metrics(): # bars + trend line
     bars="".join(RR(x,y,26,196-y,5,True) for x,y in ((62,140),(100,108),(138,150),(176,84)))
     return bars+P("M62 96 L114 70 L150 112 L196 58",w=9)+C(62,96,7,True)+C(114,70,7,True)+C(150,112,7,True)+C(196,58,7,True)
-def bob(): # speech bubble + AI sparkle
-    bub="M70 76 H186 A22 22 0 0 1 208 98 V152 A22 22 0 0 1 186 174 H120 L92 200 V174 H70 A22 22 0 0 1 48 152 V98 A22 22 0 0 1 70 76 Z"
-    spk="M139 104 L147 126 L169 134 L147 142 L139 164 L131 142 L109 134 L131 126 Z"
-    return P(bub,w=11)+P(spk,True)
+def bob(): # genie's lamp (filled silhouette) + rising smoke + sparkle
+    body='<ellipse cx="126" cy="166" rx="58" ry="28" fill="%s"/>' % GOLD
+    base=RR(102,188,48,10,4,True)
+    spout=P("M84 158 L44 132 L80 176 Z",True)             # filled spout, upper-left
+    lid='<path d="M108 144 Q126 124 144 144 Z" fill="%s"/>' % GOLD + RR(119,122,14,14,3,True)
+    handle=P("M182 158 Q216 156 210 182 Q206 196 186 190",w=12)
+    smoke=P("M52 122 Q34 100 54 84 Q74 70 56 50 Q47 38 64 26",w=10)    # rising from spout tip
+    spark=P("M150 56 L157 78 L179 85 L157 92 L150 114 L143 92 L121 85 L143 78 Z",True)
+    return body+base+spout+lid+handle+smoke+spark
+
+def argus(): # all-seeing eye in a triangle + rays = divine kernel observability
+    tri=P("M128 56 L196 184 L60 184 Z",w=10)
+    lens=P("M94 146 Q128 118 162 146 Q128 174 94 146 Z",w=10)
+    iris=C(128,146,15,w=8)+C(128,146,6,True)
+    rays="".join(L(128+d*8,46,128+d*22,30,7) for d in (-1,0,1)) \
+        + L(110,40,98,26,7)+L(146,40,158,26,7)
+    return tri+lens+iris+rays
 def bob_gaming(): # gamepad
     body="M92 104 H164 A52 52 0 0 1 210 172 A26 26 0 0 1 168 184 L150 164 H106 L88 184 A26 26 0 0 1 46 172 A52 52 0 0 1 92 104 Z"
     dpad=L(80,142,108,142,10)+L(94,128,94,156,10)
@@ -103,22 +116,20 @@ def shell(): # full dashboard: window with a left nav sidebar (the "UI shell")
 def terminal_(): return terminal()
 
 ICONS = {
- "kldload-console":console, "kldload-terminal":terminal, "kldload-zfs":zfs,
+ "kldload-console":argus, "kldload-terminal":terminal, "kldload-zfs":zfs,
  "kldload-zfs-manager":zfs_manager, "kldload-k8s":kubernetes, "kldload-vms":vms,
  "kldload-metrics":metrics, "bob-chat":bob, "bob-gaming":bob_gaming,
  "kldload-helm":helm, "kldload-ansible":ansible, "kldload-klab":klab,
- "kldload-docs":docs, "kldload-webui":webui, "kst":kst,
- "kst-dashboard":kst_dashboard, "ksnap":ksnap, "kexport":kexport,
- "kldload-k9s":k9s, "kldload-shell":shell,
+ "kst":kst, "kst-dashboard":kst_dashboard, "ksnap":ksnap, "kexport":kexport,
+ "kldload-k9s":k9s,
 }
 LABELS = {  # also reused to set Icon= in .desktop later
- "kldload-console":"Console","kldload-terminal":"Terminal","kldload-zfs":"ZFS",
+ "kldload-console":"Argus","kldload-terminal":"Terminal","kldload-zfs":"ZFS",
  "kldload-zfs-manager":"ZFS Mgr","kldload-k8s":"Kubernetes","kldload-vms":"VMs",
- "kldload-metrics":"Metrics","bob-chat":"Bob","bob-gaming":"Gaming",
+ "kldload-metrics":"Metrics","bob-chat":"Bob (jinn)","bob-gaming":"Gaming",
  "kldload-helm":"Helm","kldload-ansible":"Ansible","kldload-klab":"klab",
- "kldload-docs":"Docs","kldload-webui":"Web UI","kst":"Health",
- "kst-dashboard":"Dashboard","ksnap":"Snapshot","kexport":"Export",
- "kldload-k9s":"k9s","kldload-shell":"Command Center",
+ "kst":"Health","kst-dashboard":"Dashboard","ksnap":"Snapshot","kexport":"Export",
+ "kldload-k9s":"k9s",
 }
 
 def svg(inner): return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">{TILE}{inner}</svg>'
