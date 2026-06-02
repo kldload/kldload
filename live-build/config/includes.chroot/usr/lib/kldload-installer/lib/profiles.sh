@@ -926,6 +926,19 @@ FFPOLICY_WS
         "${target}/usr/share/applications/$(basename "$_lnch")"
     done
     chroot "${target}" update-desktop-database /usr/share/applications 2>/dev/null || true
+
+    # Custom kldload app icons (gold-on-slate set) — copy the scalable theme
+    # icons the launchers reference, else the menu shows generic fallbacks.
+    local themedir="usr/share/icons/hicolor/scalable/apps"
+    if [[ -d "/${themedir}" ]]; then
+      mkdir -p "${target}/${themedir}"
+      for _ic in /${themedir}/kldload-*.svg /${themedir}/bob-*.svg \
+                 /${themedir}/kst*.svg /${themedir}/ksnap.svg /${themedir}/kexport.svg; do
+        [[ -f "$_ic" ]] && install -m 0644 "$_ic" \
+          "${target}/${themedir}/$(basename "$_ic")"
+      done
+      chroot "${target}" gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
+    fi
   fi
 
   # ── Service auto-start gate ────────────────────────────────────────────────
