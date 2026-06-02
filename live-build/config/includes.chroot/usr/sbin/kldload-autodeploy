@@ -586,7 +586,17 @@ if [[ $_all_ok -eq 1 ]]; then
     mark "all"
     phase "ready"
     log "══════════════════════════════════════════════════════════════"
-    log "  kldload is fully deployed. Everything requested is up."
+    log "  kldload autodeploy complete — subsystem summary:"
+    # "Everything requested is up" hid the common surprise where the operator
+    # expected K8s/klab but the bootstrap flag was 0 (e.g. a plain desktop
+    # install enables the K8s *tools* but not the cluster). Spell out what's on
+    # vs off, with the one command to add each, so a gap is never silent.
+    [[ "${WANT[ai]}"   == "1" ]] && log "    AI:   deployed" \
+                                  || log "    AI:   off — enable the Bob/AI tile at install"
+    [[ "${WANT[k8s]}"  == "1" ]] && log "    K8s:  deployed (${K8S_WORKERS} workers)" \
+                                  || log "    K8s:  off — to add now: kube-cluster bootstrap --workers 3"
+    [[ "${WANT[klab]}" == "1" ]] && log "    klab: deployed" \
+                                  || log "    klab: off — enable the klab option at install"
     log "══════════════════════════════════════════════════════════════"
 else
     phase "partial"
