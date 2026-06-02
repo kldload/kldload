@@ -939,6 +939,21 @@ FFPOLICY_WS
       done
       chroot "${target}" gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
     fi
+
+    # Curate stock launchers (package-owned, so patched on-target, idempotent):
+    #   htop — a TUI; the Konsole/terminal tile covers it. Hide its GUI tile.
+    #   vim  — the stock launcher ships Exec=gnome-terminal, which is absent on
+    #          RHEL/konsole desktops, so its tile is a dead click. Repoint it at
+    #          kldload-term (picks whatever terminal the box actually has). Its
+    #          default text-editor icon is kept — no custom icon.
+    local _appdir="${target}/usr/share/applications"
+    if [[ -f "${_appdir}/htop.desktop" ]] && ! grep -q '^NoDisplay=true' "${_appdir}/htop.desktop"; then
+      printf 'NoDisplay=true\n' >> "${_appdir}/htop.desktop"
+    fi
+    if [[ -f "${_appdir}/vim.desktop" ]] && grep -q '^Exec=gnome-terminal' "${_appdir}/vim.desktop"; then
+      sed -i 's|^Exec=gnome-terminal[[:space:]]*--[[:space:]]*|Exec=kldload-term |' "${_appdir}/vim.desktop"
+    fi
+    chroot "${target}" update-desktop-database /usr/share/applications 2>/dev/null || true
   fi
 
   # ── Service auto-start gate ────────────────────────────────────────────────
@@ -1160,7 +1175,7 @@ DCONF
 
   # ── Custom .desktop launchers ───────────────────────────────────────────────
   mkdir -p "${target}/usr/share/applications"
-  for _dt in vim.desktop kst.desktop kst-dashboard.desktop ksnap.desktop kexport.desktop kldload-terminal.desktop kldload-docs.desktop; do
+  for _dt in kst.desktop kst-dashboard.desktop ksnap.desktop kexport.desktop; do
     [[ -f "/usr/share/applications/${_dt}" ]] && \
       cp "/usr/share/applications/${_dt}" "${target}/usr/share/applications/${_dt}"
   done
