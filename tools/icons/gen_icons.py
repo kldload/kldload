@@ -86,6 +86,20 @@ def ksnap(): # camera (snapshot)
     return RR(48,86,160,108,16,sw=11)+P("M92 86 L104 68 H152 L164 86",w=11)+C(128,140,30,w=11)+C(128,140,12,True)+C(182,108,6,True)
 def kexport(): # drive + export arrow
     return RR(56,128,144,56,12,sw=11)+C(80,156,7,True)+L(110,156,184,156,9)+P("M128 112 V56 M104 80 L128 56 L152 80",w=12)
+def k9s(): # k8s wheel inside a terminal window = k9s TUI
+    win = RR(48,72,160,112,16,sw=10)+L(48,100,208,100,10)+C(66,86,4.5,True)+C(82,86,4.5,True)+C(98,86,4.5,True)
+    cx,cy,Rv,hub=128,144,30,6; o=[C(cx,cy,hub,w=6)];pts=[]
+    for k in range(7):
+        a=math.radians(-90+k*360/7);x,y=cx+Rv*math.cos(a),cy+Rv*math.sin(a);pts.append((x,y))
+        o.append(L(cx+hub*math.cos(a),cy+hub*math.sin(a),x,y,6));o.append(C(x,y,4.5,True))
+    o.append(P("M"+" L".join(f"{x:.1f} {y:.1f}" for x,y in pts)+" Z",w=5))
+    return win+"".join(o)
+
+def shell(): # full dashboard: window with a left nav sidebar (the "UI shell")
+    return RR(48,64,160,128,16,sw=11)+L(48,96,208,96,11)+C(66,80,5,True)+C(84,80,5,True) \
+        +L(96,96,96,192,11)+L(70,118,80,118,8)+L(70,138,80,138,8)+L(70,158,80,158,8) \
+        +L(118,124,188,124,8)+L(118,146,188,146,8)+L(118,168,166,168,8)
+
 def terminal_(): return terminal()
 
 ICONS = {
@@ -95,6 +109,7 @@ ICONS = {
  "kldload-helm":helm, "kldload-ansible":ansible, "kldload-klab":klab,
  "kldload-docs":docs, "kldload-webui":webui, "kst":kst,
  "kst-dashboard":kst_dashboard, "ksnap":ksnap, "kexport":kexport,
+ "kldload-k9s":k9s, "kldload-shell":shell,
 }
 LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-console":"Console","kldload-terminal":"Terminal","kldload-zfs":"ZFS",
@@ -103,6 +118,7 @@ LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-helm":"Helm","kldload-ansible":"Ansible","kldload-klab":"klab",
  "kldload-docs":"Docs","kldload-webui":"Web UI","kst":"Health",
  "kst-dashboard":"Dashboard","ksnap":"Snapshot","kexport":"Export",
+ "kldload-k9s":"k9s","kldload-shell":"Command Center",
 }
 
 def svg(inner): return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">{TILE}{inner}</svg>'
