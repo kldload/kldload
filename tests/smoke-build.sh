@@ -129,6 +129,49 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
     rm -rf "$SQEXTRACT"
   fi
 
+  # ── Workstation launchers + custom app icons inside the squashfs ────
+  # Catches the icon-drop regression: build-iso.sh must copy the hicolor
+  # app-icon theme + the Web UI launcher into the live rootfs, else the
+  # menu (live AND installed — profiles.sh sources icons from the live
+  # rootfs) falls back to generic icons.
+  if [[ -f "$MOUNTPOINT/LiveOS/squashfs.img" ]] && command -v unsquashfs >/dev/null 2>&1; then
+    WSEXTRACT=$(mktemp -d)
+    declare -a WS_FILES=(
+        usr/share/applications/kldload-webui.desktop
+        usr/share/icons/hicolor/scalable/apps/kldload-webui.svg
+        usr/share/icons/hicolor/scalable/apps/bob-chat.svg
+        usr/share/icons/hicolor/scalable/apps/kldload-zfs.svg
+        usr/local/bin/bob-models
+    )
+    unsquashfs -q -f -d "$WSEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" \
+        "${WS_FILES[@]}" usr/share/applications/kldload-console.desktop >/dev/null 2>&1 || true
+
+    for _f in "${WS_FILES[@]}"; do
+      if [[ -f "$WSEXTRACT/root/$_f" ]]; then
+        _pass "squashfs has $_f"
+      else
+        _fail "squashfs has $_f" "launcher/icon dropped from ISO"
+      fi
+    done
+
+    # The Console/Argus launcher was replaced by Web UI — it must be gone.
+    if [[ -f "$WSEXTRACT/root/usr/share/applications/kldload-console.desktop" ]]; then
+      _fail "console launcher replaced" "kldload-console.desktop still in squashfs"
+    else
+      _pass "console launcher replaced by Web UI"
+    fi
+
+    # bob delegates model mgmt to bob-models; bob-models swaps the resident
+    # model via the ollama keep_alive API (load/unload).
+    if [[ -f "$WSEXTRACT/root/usr/local/bin/bob-models" ]] && grep -q 'keep_alive' "$WSEXTRACT/root/usr/local/bin/bob-models"; then
+      _pass "bob-models has load/unload (keep_alive) support"
+    else
+      _fail "bob-models load/unload" "keep_alive missing — model swap won't work"
+    fi
+
+    rm -rf "$WSEXTRACT"
+  fi
+
   umount "$MOUNTPOINT" 2>/dev/null
   _pass "ISO unmounted cleanly"
 else

@@ -1364,6 +1364,18 @@ if [[ "$EDITION" != "core" ]]; then
            "${ROOTFS}/usr/share/applications/" 2>/dev/null || true
     fi
 
+    # Copy the custom kldload app-icon theme (the scalable SVGs the launchers
+    # above reference). Same wildcard rationale as the .desktop block: without
+    # this the live GNOME menu shows generic fallback icons — and because
+    # profiles.sh copies icons to the install target *from the live rootfs*,
+    # a missing theme here means the installed system loses them too.
+    if [[ -d /build/live-build/config/includes.chroot/usr/share/icons/hicolor/scalable/apps ]]; then
+        mkdir -p "${ROOTFS}/usr/share/icons/hicolor/scalable/apps"
+        cp /build/live-build/config/includes.chroot/usr/share/icons/hicolor/scalable/apps/*.svg \
+           "${ROOTFS}/usr/share/icons/hicolor/scalable/apps/" 2>/dev/null || true
+        chroot "${ROOTFS}" gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
+    fi
+
     # Copy the main installer + orchestrator scripts to /usr/sbin.
     # kldload-autodeploy is the post-install orchestrator (K8s + AI + klab
     # goldens). Without it on the live ISO the installer's cp to target is
