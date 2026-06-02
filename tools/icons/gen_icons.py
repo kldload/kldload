@@ -1,28 +1,37 @@
 #!/usr/bin/env python3
 """kldload app-icon generator — one cohesive flat set.
 
-Dark slate "squircle" tile + gold (#c9a04a) glyph, one per app. Emits scalable
-SVG (GNOME renders crisp at any size) plus a contact-sheet SVG for review.
+Transparent background, NO tile: each icon is just the object drawn as line
+art in translucent light-blue (#7cc0ff) with a darker-blue lining (#0e3a66)
+hugging every stroke for definition on dark and light shells alike. Emits
+scalable SVG (GNOME renders crisp at any size) plus a contact-sheet SVG for
+review (the sheet has a dark background so the translucent blue is visible;
+the shipped icons themselves are transparent).
 Run: python3 gen_icons.py <outdir>
 """
 import math, os, sys
 
-GOLD = "#c9a04a"
+ACCENT = "#7cc0ff"      # glyph line color — light blue
+ALPHA  = "0.92"         # translucency of the whole glyph (drawn over the shell)
+LINING = "#0e3a66"      # darker-blue lining drawn behind every stroke
+LINE_R = "3.2"          # lining thickness (feMorphology dilate radius, 256-space)
 OUT = sys.argv[1] if len(sys.argv) > 1 else "."
 os.makedirs(OUT, exist_ok=True)
 
-TILE = '''<defs><linearGradient id="slate" x1="0" y1="0" x2="0" y2="1">
-<stop offset="0" stop-color="#243049"/><stop offset="1" stop-color="#141a26"/>
-</linearGradient></defs>
-<rect x="8" y="8" width="240" height="240" rx="58" fill="url(#slate)"/>
-<rect x="8.75" y="8.75" width="238.5" height="238.5" rx="57.25" fill="none"
- stroke="%s" stroke-opacity="0.30" stroke-width="1.5"/>''' % GOLD
+# Darker-blue lining: dilate the glyph's alpha, flood it darker-blue, drop the
+# original line art back on top. Generic — works no matter how a glyph is drawn.
+FILTER = (f'<filter id="ln" x="-20%" y="-20%" width="140%" height="140%">'
+          f'<feMorphology in="SourceAlpha" operator="dilate" radius="{LINE_R}" result="d"/>'
+          f'<feFlood flood-color="{LINING}" result="f"/>'
+          f'<feComposite in="f" in2="d" operator="in" result="o"/>'
+          f'<feMerge><feMergeNode in="o"/><feMergeNode in="SourceGraphic"/></feMerge>'
+          f'</filter>')
 
-S = f'stroke="{GOLD}"'           # shorthand
+S = f'stroke="{ACCENT}"'           # shorthand
 def L(x1,y1,x2,y2,w=11): return f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" {S} stroke-width="{w}" stroke-linecap="round"/>'
-def C(cx,cy,r,fill=False,w=11): return f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" '+(f'fill="{GOLD}"' if fill else f'fill="none" {S} stroke-width="{w}"')+'/>'
-def RR(x,y,w,h,r,fill=False,sw=11): return f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{r}" '+(f'fill="{GOLD}"' if fill else f'fill="none" {S} stroke-width="{sw}"')+'/>'
-def P(d,fill=False,w=11,cap="round",join="round"): return f'<path d="{d}" '+(f'fill="{GOLD}"' if fill else f'fill="none" {S} stroke-width="{w}"')+f' stroke-linecap="{cap}" stroke-linejoin="{join}"/>'
+def C(cx,cy,r,fill=False,w=11): return f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" '+(f'fill="{ACCENT}"' if fill else f'fill="none" {S} stroke-width="{w}"')+'/>'
+def RR(x,y,w,h,r,fill=False,sw=11): return f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{r}" '+(f'fill="{ACCENT}"' if fill else f'fill="none" {S} stroke-width="{sw}"')+'/>'
+def P(d,fill=False,w=11,cap="round",join="round"): return f'<path d="{d}" '+(f'fill="{ACCENT}"' if fill else f'fill="none" {S} stroke-width="{w}"')+f' stroke-linecap="{cap}" stroke-linejoin="{join}"/>'
 
 # ── glyphs (drawn in 0..256 space) ───────────────────────────────────────────
 def console():   return P("M86 90 L124 128 L86 166",w=16)+RR(138,150,48,16,8,True)
@@ -49,15 +58,15 @@ def kubernetes():
     o.append(P("M"+" L".join(f"{x:.1f} {y:.1f}" for x,y in pts)+" Z",w=9))
     return "".join(o)
 def vms(): # two overlapping screens
-    return RR(58,64,118,86,12,sw=11)+L(96,150,96,162,11)+L(80,162,112,162,11)+RR(118,108,82,72,12,sw=11)+f'<rect x="124" y="114" width="70" height="48" rx="4" fill="{GOLD}" fill-opacity="0.18"/>'
+    return RR(58,64,118,86,12,sw=11)+L(96,150,96,162,11)+L(80,162,112,162,11)+RR(118,108,82,72,12,sw=11)+f'<rect x="124" y="114" width="70" height="48" rx="4" fill="{ACCENT}" fill-opacity="0.18"/>'
 def metrics(): # bars + trend line
     bars="".join(RR(x,y,26,196-y,5,True) for x,y in ((62,140),(100,108),(138,150),(176,84)))
     return bars+P("M62 96 L114 70 L150 112 L196 58",w=9)+C(62,96,7,True)+C(114,70,7,True)+C(150,112,7,True)+C(196,58,7,True)
 def bob(): # genie's lamp (filled silhouette) + rising smoke + sparkle
-    body='<ellipse cx="126" cy="166" rx="58" ry="28" fill="%s"/>' % GOLD
+    body='<ellipse cx="126" cy="166" rx="58" ry="28" fill="%s"/>' % ACCENT
     base=RR(102,188,48,10,4,True)
     spout=P("M84 158 L44 132 L80 176 Z",True)             # filled spout, upper-left
-    lid='<path d="M108 144 Q126 124 144 144 Z" fill="%s"/>' % GOLD + RR(119,122,14,14,3,True)
+    lid='<path d="M108 144 Q126 124 144 144 Z" fill="%s"/>' % ACCENT + RR(119,122,14,14,3,True)
     handle=P("M182 158 Q216 156 210 182 Q206 196 186 190",w=12)
     smoke=P("M52 122 Q34 100 54 84 Q74 70 56 50 Q47 38 64 26",w=10)    # rising from spout tip
     spark=P("M150 56 L157 78 L179 85 L157 92 L150 114 L143 92 L121 85 L143 78 Z",True)
@@ -116,7 +125,7 @@ def shell(): # full dashboard: window with a left nav sidebar (the "UI shell")
 def terminal_(): return terminal()
 
 ICONS = {
- "kldload-console":argus, "kldload-terminal":terminal, "kldload-zfs":zfs,
+ "kldload-webui":webui, "kldload-terminal":terminal, "kldload-zfs":zfs,
  "kldload-zfs-manager":zfs_manager, "kldload-k8s":kubernetes, "kldload-vms":vms,
  "kldload-metrics":metrics, "bob-chat":bob, "bob-gaming":bob_gaming,
  "kldload-helm":helm, "kldload-ansible":ansible, "kldload-klab":klab,
@@ -124,7 +133,7 @@ ICONS = {
  "kldload-k9s":k9s,
 }
 LABELS = {  # also reused to set Icon= in .desktop later
- "kldload-console":"Argus","kldload-terminal":"Terminal","kldload-zfs":"ZFS",
+ "kldload-webui":"Web UI","kldload-terminal":"Terminal","kldload-zfs":"ZFS",
  "kldload-zfs-manager":"ZFS Mgr","kldload-k8s":"Kubernetes","kldload-vms":"VMs",
  "kldload-metrics":"Metrics","bob-chat":"Bob (jinn)","bob-gaming":"Gaming",
  "kldload-helm":"Helm","kldload-ansible":"Ansible","kldload-klab":"klab",
@@ -132,23 +141,28 @@ LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-k9s":"k9s",
 }
 
-def svg(inner): return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">{TILE}{inner}</svg>'
+def svg(inner):
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">'
+            f'<defs>{FILTER}</defs>'
+            f'<g filter="url(#ln)" opacity="{ALPHA}">{inner}</g></svg>')
 
 for name,fn in ICONS.items():
     open(os.path.join(OUT,name+".svg"),"w").write(svg(fn()))
 print("wrote", len(ICONS), "icons")
 
-# contact sheet (inline, no external refs so rsvg renders it directly)
+# contact sheet (dark bg so the translucent blue line art is visible; the
+# shipped icons are transparent). One filter def, referenced by every cell.
 cols=6; cell=150; gap=14; pad=20
 names=list(ICONS); rows=(len(names)+cols-1)//cols
 W=pad*2+cols*cell+(cols-1)*gap; H=pad*2+rows*(cell+26)
 parts=[f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">',
-       f'<rect width="{W}" height="{H}" fill="#8a8f98"/>']
+       f'<defs>{FILTER}</defs>',
+       f'<rect width="{W}" height="{H}" fill="#222833"/>']
 for i,name in enumerate(names):
     r,c=divmod(i,cols); x=pad+c*(cell+gap); y=pad+r*(cell+26)
     sc=cell/256.0
-    parts.append(f'<g transform="translate({x},{y}) scale({sc})">{TILE}{ICONS[name]()}</g>')
-    parts.append(f'<text x="{x+cell/2}" y="{y+cell+18}" font-family="sans-serif" font-size="15" fill="#111" text-anchor="middle">{LABELS[name]}</text>')
+    parts.append(f'<g transform="translate({x},{y}) scale({sc})"><g filter="url(#ln)" opacity="{ALPHA}">{ICONS[name]()}</g></g>')
+    parts.append(f'<text x="{x+cell/2}" y="{y+cell+18}" font-family="sans-serif" font-size="15" fill="#cbd5e1" text-anchor="middle">{LABELS[name]}</text>')
 parts.append('</svg>')
 open(os.path.join(OUT,"sheet.svg"),"w").write("".join(parts))
 print("wrote sheet.svg", W,"x",H)
