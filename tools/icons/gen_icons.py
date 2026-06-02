@@ -2,19 +2,28 @@
 """kldload app-icon generator — one cohesive flat set.
 
 Transparent background, NO tile: each icon is just the object drawn as line
-art in translucent light-blue (#7cc0ff) with a darker-blue lining (#0e3a66)
-hugging every stroke for definition on dark and light shells alike. Emits
-scalable SVG (GNOME renders crisp at any size) plus a contact-sheet SVG for
-review (the sheet has a dark background so the translucent blue is visible;
-the shipped icons themselves are transparent).
+art in solid light-blue (#7cc0ff) with a crisp BLACK lining hugging every
+stroke, so the glyph pops and stays legible on dark and light shells alike.
+Emits scalable SVG (GNOME renders crisp at any size) plus a contact-sheet SVG
+for review (the sheet has a mid background so both the blue and the black
+outline are visible; the shipped icons themselves are transparent).
 Run: python3 gen_icons.py <outdir>
 """
 import math, os, sys
 
-ACCENT = "#7cc0ff"      # glyph line color — light blue
-ALPHA  = "0.92"         # translucency of the whole glyph (drawn over the shell)
-LINING = "#0e3a66"      # darker-blue lining drawn behind every stroke
-LINE_R = "3.2"          # lining thickness (feMorphology dilate radius, 256-space)
+# STYLE (env): pick the aesthetic — 'outline' (blue + black lining, pops/sticker),
+# 'clean' (single-weight blue stroke, no outline — sleek/modern Lucide-ish),
+# or 'mono' (near-white single stroke — GNOME-native, very sleek).
+STYLE = os.environ.get("STYLE", "clean")
+ALPHA = "1"             # fully opaque — translucency made it hard to read
+if STYLE == "clean":
+    ACCENT = "#5ab0ff"; USE_LINING = False
+elif STYLE == "mono":
+    ACCENT = "#e9eef7"; USE_LINING = False
+else:  # outline
+    ACCENT = "#7cc0ff"; USE_LINING = True
+LINING = "#000000"      # crisp BLACK lining behind every stroke (outline style)
+LINE_R = "2.6"          # lining thickness (feMorphology dilate radius, 256-space)
 OUT = sys.argv[1] if len(sys.argv) > 1 else "."
 os.makedirs(OUT, exist_ok=True)
 
@@ -141,10 +150,15 @@ LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-k9s":"k9s",
 }
 
+def _grp(inner):  # wrap the glyph per style: black-lining filter, or plain
+    if USE_LINING:
+        return f'<g filter="url(#ln)" opacity="{ALPHA}">{inner}</g>'
+    return f'<g opacity="{ALPHA}">{inner}</g>'
+
 def svg(inner):
+    defs = f'<defs>{FILTER}</defs>' if USE_LINING else ''
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">'
-            f'<defs>{FILTER}</defs>'
-            f'<g filter="url(#ln)" opacity="{ALPHA}">{inner}</g></svg>')
+            f'{defs}{_grp(inner)}</svg>')
 
 for name,fn in ICONS.items():
     open(os.path.join(OUT,name+".svg"),"w").write(svg(fn()))
@@ -156,12 +170,12 @@ cols=6; cell=150; gap=14; pad=20
 names=list(ICONS); rows=(len(names)+cols-1)//cols
 W=pad*2+cols*cell+(cols-1)*gap; H=pad*2+rows*(cell+26)
 parts=[f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">',
-       f'<defs>{FILTER}</defs>',
-       f'<rect width="{W}" height="{H}" fill="#222833"/>']
+       (f'<defs>{FILTER}</defs>' if USE_LINING else ''),
+       f'<rect width="{W}" height="{H}" fill="#2e3436"/>']
 for i,name in enumerate(names):
     r,c=divmod(i,cols); x=pad+c*(cell+gap); y=pad+r*(cell+26)
     sc=cell/256.0
-    parts.append(f'<g transform="translate({x},{y}) scale({sc})"><g filter="url(#ln)" opacity="{ALPHA}">{ICONS[name]()}</g></g>')
+    parts.append(f'<g transform="translate({x},{y}) scale({sc})">{_grp(ICONS[name]())}</g>')
     parts.append(f'<text x="{x+cell/2}" y="{y+cell+18}" font-family="sans-serif" font-size="15" fill="#cbd5e1" text-anchor="middle">{LABELS[name]}</text>')
 parts.append('</svg>')
 open(os.path.join(OUT,"sheet.svg"),"w").write("".join(parts))
