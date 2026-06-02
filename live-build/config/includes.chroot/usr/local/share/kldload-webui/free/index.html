@@ -1018,7 +1018,7 @@ html.kld-app #term-drawer{display:none!important;}
                  (selectTarget() toggles #opt-lab-cluster). Each card flips a flag the
                  distro-aware backend already acts on; default all-off = plain workstation. -->
             <div id="opt-lab-cluster" style="display:none">
-              <div style="font-size:0.74rem;color:var(--muted);margin:0.5rem 0 0.3rem">Workstation extras (optional — leave all off for a plain workstation):</div>
+              <div style="font-size:0.74rem;color:var(--muted);margin:0.5rem 0 0.3rem">Workstation extras (optional — leave all off for a plain workstation) — <a href="#" onclick="selectAllExtras();return false" style="color:var(--accent);text-decoration:none">select all</a></div>
               <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.5rem;max-width:760px">
                 <div class="opt-card" id="opt-kvm" onclick="toggleOpt('kvm')" title="KVM hypervisor on ZFS — libvirt + virt-manager + zvol-backed VMs with instant clones (kvm-create/clone). Flag: KLDLOAD_ENABLE_KVM." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
                   <div style="font-size:1.5rem;margin-bottom:0.3rem">🖥</div>
@@ -4991,17 +4991,30 @@ function toggleOpt(name) {
   card.style.background = cb.checked ? 'rgba(0,184,217,0.08)' : 'transparent';
   // Remember an explicit Bob choice so profile re-renders don't override it.
   if (name === 'bob') cb.dataset.userTouched = '1';
-  // Show/hide K8s bootstrap option
+  // Show/hide K8s bootstrap option. Selecting Kubernetes means "give me a
+  // running cluster", so default the bootstrap ON (operator can untick it
+  // below for a tools-only install). Previously the tile set only ENABLE_K8S
+  // and left the cluster off unless the operator also found this sub-checkbox
+  // — the #1 "K8s never came up" on desktop installs (.147, 2026-06-02).
   if (name === 'k8s') {
     var k8sOpt = document.getElementById('k8s-bootstrap-opt');
     if (k8sOpt) k8sOpt.style.display = cb.checked ? 'block' : 'none';
-    if (!cb.checked) {
-      var bsCb = document.getElementById('k8s-bootstrap-check');
-      var bsHidden = document.getElementById('install-k8s-bootstrap');
-      if (bsCb) bsCb.checked = false;
-      if (bsHidden) bsHidden.checked = false;
-    }
+    var bsCb = document.getElementById('k8s-bootstrap-check');
+    var bsHidden = document.getElementById('install-k8s-bootstrap');
+    if (bsCb) bsCb.checked = cb.checked;
+    if (bsHidden) bsHidden.checked = cb.checked;
   }
+}
+
+// Select-all for the Workstation extras (KVM / Kubernetes / Observability /
+// Build Images). Turns ON any that are off, routing through toggleOpt so the
+// K8s tile's cluster-bootstrap default fires too. This is what "I selected all
+// the checkboxes" should have done.
+function selectAllExtras() {
+  ['kvm','k8s','ebpf','images'].forEach(function(n){
+    var cb = document.getElementById('install-' + n);
+    if (cb && !cb.checked) toggleOpt(n);
+  });
 }
 
 // Init option cards on load
