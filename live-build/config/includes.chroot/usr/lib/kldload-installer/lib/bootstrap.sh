@@ -1263,7 +1263,9 @@ CUSTOMREPO
         # gnome-text-editor on RHEL 10 / F44+. Caught 2026-05-31 on .137 RHEL 10
         # desktop: gnome-terminal skip-broken'd away -> booted into a desktop
         # with NO terminal app at all.
-        ptyxis gnome-console gnome-terminal
+        # konsole is the kldload workstation's preferred terminal (richer than
+        # ptyxis); ship it plus the fallbacks so kldload-term always finds one.
+        konsole ptyxis gnome-console gnome-terminal
         gnome-text-editor gedit
         # zenity — REQUIRED by the kldload GUI tools (kldload-zfs, ZFS Manager,
         # replication dialogs). Was never in this list -> those tools silently
