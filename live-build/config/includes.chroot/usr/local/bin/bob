@@ -12,6 +12,15 @@ BOB_RAG="${BOB_RAG:-true}"
 BOB_RAG_URL="${BOB_RAG_URL:-http://localhost:8400}"
 BOB_HISTORY="${BOB_HISTORY:-$HOME/.bob/history}"
 
+# ── Model management: `bob models …` ─────────────────────────────────────────
+# Download / load / unload / set-default of Bob's model catalog. Delegates to
+# bob-models (the engine the app also calls to swap the resident model). Kept
+# on the `bob` command so there's a single entry point.
+if [[ "${1:-}" == "models" || "${1:-}" == "model" ]]; then
+  shift
+  exec bob-models "$@"
+fi
+
 # ── Parse flags ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -27,6 +36,11 @@ while [[ $# -gt 0 ]]; do
       echo "       bob --no-context \"just chat\""
       echo "       bob --no-rag \"skip kldload documentation retrieval\""
       echo "       bob --list-models"
+      echo ""
+      echo "Models: bob models             list catalog + installed/loaded"
+      echo "        bob models pull all    download the whole catalog"
+      echo "        bob models load 70b    warm a model into memory"
+      echo "        bob models unload all  evict models from memory"
       echo ""
       echo "Env: BOB_MODEL, BOB_CONTEXT, BOB_RAG, BOB_RAG_URL"
       exit 0
