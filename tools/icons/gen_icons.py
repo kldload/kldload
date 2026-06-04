@@ -150,6 +150,41 @@ LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-k9s":"k9s",
 }
 
+# Colour-coded by FUNCTION GROUP so colour tells you the category at a glance
+# (orange = monitoring, coral = compute, green = storage, blue = orchestration,
+# violet = AI, teal = web). Soft pastels — not dark/dreary, not flashy — with a
+# slight per-icon shade shift so apps in a group stay distinguishable. Each
+# glyph also gets a gunmetal/steel offset behind it for quiet depth.
+COLORS = {
+ # storage — green
+ "kldload-zfs":"#4cb98a","kldload-zfs-manager":"#3fae7e","ksnap":"#6cc9a2","kexport":"#84d4b0",
+ # compute — coral
+ "kldload-vms":"#e88a8a",
+ # monitoring — orange
+ "kldload-metrics":"#e6a55f","kst":"#e8b878","kst-dashboard":"#edc28a",
+ # orchestration — blue
+ "kldload-k8s":"#6a9fd8","kldload-k9s":"#82b0e0","kldload-helm":"#5a8fc8","kldload-klab":"#92bce8","kldload-ansible":"#7aa6d6",
+ # ai — violet
+ "bob-chat":"#c79be0","bob-gaming":"#d3a8ec",
+ # web / console — teal
+ "kldload-webui":"#5fc4bc","kldload-terminal":"#7cd0c9",
+}
+DEFAULT_COLOR = "#7aa6d6"
+GUNMETAL = "#3f4855"          # steel offset behind each glyph
+OFFX, OFFY, OFF_OP = 3.0, 4.0, "0.55"
+
+def _paint(color):  # rebind module-global paint so the glyph helpers pick it up
+    global ACCENT, S
+    ACCENT = color; S = f'stroke="{color}"'
+
+def layered(name, fn):  # gunmetal steel offset behind + pastel group colour on top
+    if STYLE != "clean":
+        return fn()
+    pastel = COLORS.get(name, DEFAULT_COLOR)
+    _paint(GUNMETAL); shadow = fn()
+    _paint(pastel);   main = fn()
+    return f'<g transform="translate({OFFX},{OFFY})" opacity="{OFF_OP}">{shadow}</g>{main}'
+
 def _grp(inner):  # wrap the glyph per style: black-lining filter, or plain
     if USE_LINING:
         return f'<g filter="url(#ln)" opacity="{ALPHA}">{inner}</g>'
@@ -161,7 +196,7 @@ def svg(inner):
             f'{defs}{_grp(inner)}</svg>')
 
 for name,fn in ICONS.items():
-    open(os.path.join(OUT,name+".svg"),"w").write(svg(fn()))
+    open(os.path.join(OUT,name+".svg"),"w").write(svg(layered(name, fn)))
 print("wrote", len(ICONS), "icons")
 
 # contact sheet (dark bg so the translucent blue line art is visible; the
@@ -175,7 +210,7 @@ parts=[f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBo
 for i,name in enumerate(names):
     r,c=divmod(i,cols); x=pad+c*(cell+gap); y=pad+r*(cell+26)
     sc=cell/256.0
-    parts.append(f'<g transform="translate({x},{y}) scale({sc})">{_grp(ICONS[name]())}</g>')
+    parts.append(f'<g transform="translate({x},{y}) scale({sc})">{_grp(layered(name, ICONS[name]))}</g>')
     parts.append(f'<text x="{x+cell/2}" y="{y+cell+18}" font-family="sans-serif" font-size="15" fill="#cbd5e1" text-anchor="middle">{LABELS[name]}</text>')
 parts.append('</svg>')
 open(os.path.join(OUT,"sheet.svg"),"w").write("".join(parts))
