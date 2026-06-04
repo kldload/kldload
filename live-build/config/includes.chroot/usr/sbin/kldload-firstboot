@@ -677,6 +677,18 @@ PROM
 
   # Grafana: set admin password + enable service
   if command -v grafana-server >/dev/null 2>&1 || [[ -f /usr/sbin/grafana-server ]]; then
+    # Lock-safe start. firstboot starts grafana, then restarts it twice more
+    # (anonymous + iframe config); a restart that catches grafana mid seeder
+    # migration leaves a stale 'oss-ac-basic-role-seeder' row in server_lock,
+    # after which every start fails "already a lock" → systemd gives up and the
+    # Metrics tile shows only the ttyd fallback (.147 sat dead 13h, 2026-06-03).
+    # This drop-in clears stale locks before EVERY start, making the restarts safe.
+    mkdir -p /etc/systemd/system/grafana-server.service.d
+    cat > /etc/systemd/system/grafana-server.service.d/10-kldload-unlock.conf <<'UNLOCK'
+[Service]
+ExecStartPre=-/usr/bin/python3 -c "import sqlite3,os;p='/var/lib/grafana/grafana.db';c=sqlite3.connect(p) if os.path.exists(p) else None;c and c.execute('DELETE FROM server_lock');c and c.commit()"
+UNLOCK
+    systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now grafana-server 2>/dev/null || true
     log "  Grafana enabled (default login admin/admin — change on first login)"
   else
@@ -1043,9 +1055,12 @@ SALT
     fi
     unset _gt_alt
 
-    # Enable web UI (free version)
-    systemctl enable kldload-webui 2>/dev/null || true
-    systemctl start  kldload-webui 2>/dev/null || true
+    # Enable web UI (free version) + the proxy and k9s terminal it embeds.
+    # The Kubernetes tile's web view embeds /k9s (ttyd-k9s); enabling
+    # kldload-webui alone left that pane 502 on a fresh install (.147,
+    # 2026-06-03), so the tile looked like "just a terminal". Enable the trio.
+    systemctl enable kldload-webui kldload-proxy ttyd-k9s 2>/dev/null || true
+    systemctl start  kldload-webui kldload-proxy ttyd-k9s 2>/dev/null || true
 
     # Enable the hourly TLS-cert drift-check timer. The cert is generated
     # for the first time via ttyd-k9s.service's ExecStartPre, now ordered
