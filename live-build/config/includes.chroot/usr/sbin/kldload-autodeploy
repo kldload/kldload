@@ -119,8 +119,13 @@ esac
 # prior default was conservative; user expected the full cluster.
 case "$TEMPLATE" in
     k8s|klab|devops|ai)  K8S_WORKERS_DEFAULT=3 ;;
-    zfslab)              K8S_WORKERS_DEFAULT=0 ;;
-    *)                   K8S_WORKERS_DEFAULT=0 ;;
+    zfslab)              K8S_WORKERS_DEFAULT=0 ;;   # intentional — budget for ZFS test VMs
+    *)
+      # desktop/other: a lone control plane isn't a useful cluster. If the
+      # operator explicitly ticked the Kubernetes tile (K8S_BOOTSTRAP=1), give
+      # them the full 3-worker cluster like the k8s template — otherwise 0
+      # (no bootstrap was requested anyway). .147 2026-06-03 came up CP-only.
+      [[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]] && K8S_WORKERS_DEFAULT=3 || K8S_WORKERS_DEFAULT=0 ;;
 esac
 K8S_WORKERS="${KLDLOAD_K8S_WORKERS:-$K8S_WORKERS_DEFAULT}"
 
