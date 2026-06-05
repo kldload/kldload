@@ -141,7 +141,9 @@ ICONS = {
  "kldload-zfs-manager":zfs_manager, "kldload-k8s":kubernetes, "kldload-vms":vms,
  "kldload-metrics":metrics, "bob-chat":bob, "bob-gaming":bob_gaming,
  "kldload-helm":helm, "kldload-ansible":ansible, "kldload-klab":klab,
- "kst":kst, "kst-dashboard":kst_dashboard, "ksnap":ksnap, "kexport":kexport,
+ # kst (System Health) launcher was removed — see commit dropping kst.desktop.
+ # Generator no longer ships its icon.
+ "kst-dashboard":kst_dashboard, "ksnap":ksnap, "kexport":kexport,
  "kldload-k9s":k9s,
 }
 LABELS = {  # also reused to set Icon= in .desktop later
