@@ -63,7 +63,7 @@ k_profile_packages() {
   if [[ "$_distro" == "arch" ]]; then
     case "$profile" in
       server)
-        echo "openssh sudo curl ca-certificates vim less chrony wireguard-tools iproute2 tmux python python-websockets python-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd ripgrep zoxide podman fastfetch"
+        echo "openssh sudo curl ca-certificates vim less chrony wireguard-tools iproute2 tmux python python-websockets python-yaml htopnet-tools ethtool nftables tcpdump fzf bat eza fd ripgrep zoxide podman fastfetch"
         ;;
       client)
         echo "openssh sudo curl ca-certificates vim less networkmanager wireguard-tools iproute2"
@@ -75,14 +75,14 @@ k_profile_packages() {
           adwaita-icon-theme cantarell-fonts gvfs gvfs-mtp gvfs-smb \
           gnome-keyring \
           firefox \
-          tmux python python-websockets python-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd ripgrep zoxide podman fastfetch"
+          tmux python python-websockets python-yaml htopnet-tools wireguard-tools iproute2 fzf bat eza fd ripgrep zoxide podman fastfetch"
         ;;
       core)
         echo "openssh sudo curl ca-certificates vim less iproute2 chrony nftables wireguard-tools"
         ;;
       ai)
         echo "openssh sudo curl ca-certificates vim less iproute2 chrony nftables \
-          wireguard-tools tmux python python-pip jq htop btop fzf bat eza fd ripgrep zoxide podman fastfetch \
+          wireguard-tools tmux python python-pip jq htopfzf bat eza fd ripgrep zoxide podman fastfetch \
           zstd cloud-init qemu-guest-agent \
           python-websockets python-yaml net-tools ethtool tcpdump \
           pipewire cmake gcc make git"
@@ -99,7 +99,7 @@ k_profile_packages() {
   # which also work on RPM distros via the darksite package sets.
   case "$profile" in
     server)
-      echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
+      echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htopnet-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
       ;;
     client)
       echo "openssh-server sudo curl ca-certificates vim less network-manager wireguard-tools iproute2"
@@ -214,7 +214,7 @@ k_profile_packages() {
         gnome-keyring ${_pam_extras} ${_portal_extras} ${_dbus_extras} \
         ${_xsrv} ${_netools_extra} \
         ${_browser} \
-        tmux eject sanoid python3 python3-websockets python3-yaml htop btop net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
+        tmux eject sanoid python3 python3-websockets python3-yaml htopnet-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
         zenity chromium"
       ;;
 
@@ -235,7 +235,7 @@ k_profile_packages() {
     kvm)
       # Hypervisor: KVM + libvirt (KVM-specific qemu/libvirt added by k_profile_optional_packages per-distro)
       echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
-        wireguard-tools tmux python3 python3-websockets python3-yaml htop btop net-tools ethtool tcpdump \
+        wireguard-tools tmux python3 python3-websockets python3-yaml htopnet-tools ethtool tcpdump \
         fzf bat eza fd-find ripgrep zoxide podman sanoid qemu-utils pciutils ${_fastfetch}"
       ;;
 
@@ -291,7 +291,7 @@ k_profile_packages() {
     ai)
       # AI learning tool — core + WireGuard + Python + tmux + modern CLI. Ollama on firstboot.
       echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
-        wireguard-tools tmux python3 python3-pip jq htop btop fzf bat eza fd-find ripgrep zoxide ${_fastfetch} \
+        wireguard-tools tmux python3 python3-pip jq htopfzf bat eza fd-find ripgrep zoxide ${_fastfetch} \
         sanoid cloud-init qemu-guest-agent qemu-utils eject zstd \
         python3-websockets python3-yaml net-tools ethtool tcpdump \
         alsa-utils pipewire pipewire-utils cmake gcc-c++ make git podman"

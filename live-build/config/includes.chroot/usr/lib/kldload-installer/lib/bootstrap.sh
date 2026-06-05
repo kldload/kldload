@@ -1266,7 +1266,14 @@ CUSTOMREPO
         # konsole is the kldload workstation's preferred terminal (richer than
         # ptyxis); ship it plus the fallbacks so kldload-term always finds one.
         konsole ptyxis gnome-console gnome-terminal
-        gnome-text-editor gedit
+        # Text editor: keep gedit (the classic GTK editor — best of the GNOME
+        # editors for power users). gnome-text-editor (the new GNOME 42+
+        # "Text Editor") is dropped — duplicate role, less capable, just
+        # clutters the app grid. vim-X11 provides /usr/bin/gvim (the GUI
+        # vim) so vim.desktop actually opens an X11 vim window; vim-enhanced
+        # provides the terminal vim with full feature set.
+        gedit
+        vim-X11 vim-enhanced
         # zenity — REQUIRED by the kldload GUI tools (kldload-zfs, ZFS Manager,
         # replication dialogs). Was never in this list -> those tools silently
         # no-op'd on every RPM desktop install. Same .137 regression.
@@ -1333,7 +1340,10 @@ CUSTOMREPO
         #    covers HP-specific protocols; sane + simple-scan for
         #    all-in-one device scanner heads.
         cups cups-filters cups-pk-helper system-config-printer
-        hplip sane-backends simple-scan
+        # Scanner: dropped simple-scan + sane-backends entirely (user prefs:
+        # not a scanner appliance; ditch the GNOME "Document Scanner" app
+        # cluttering the app grid). Printing kept via cups/cups-filters/hplip.
+        hplip
         # ── Network: VPN plugins + cellular modems. Laptops bought
         #    in the last 10 years commonly have WWAN slots; corp
         #    deployments almost always need openvpn/openconnect.

@@ -168,9 +168,28 @@ bootstrap_install_packages() {
                 network-manager
                 network-manager-gnome
                 calamares
+                # vim-gtk3 ships /usr/bin/vim with GUI hooks (gvim) so the
+                # vim.desktop launcher actually opens a usable vim window
+                # on Debian targets. Pairs with vim-X11 on the RPM side.
+                vim-gtk3
             )
             in_chroot "$target" \
                 "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${desktop_pkgs[*]}"
+
+            # ── Drop GNOME apps that duplicate kldload tooling or that user
+            # explicitly does not want in the app grid. task-gnome-desktop
+            # drags these in transitively even with --no-install-recommends,
+            # so we explicitly remove them post-install:
+            #   - simple-scan: scanner UI; kldload installs aren't scanner
+            #     appliances. Printing kept (cups).
+            #   - gnome-text-editor: the new GNOME 42+ "Text Editor"; gedit
+            #     stays as the canonical GTK editor + vim is added explicitly.
+            local desktop_drop_pkgs=(
+                simple-scan
+                gnome-text-editor
+            )
+            in_chroot "$target" \
+                "DEBIAN_FRONTEND=noninteractive apt-get remove -y ${desktop_drop_pkgs[*]} 2>/dev/null || true"
             ;;
 
         server)
