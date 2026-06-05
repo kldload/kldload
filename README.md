@@ -191,19 +191,30 @@ The user picks the target distro at install time. After install the system runs 
 
 ## Releases
 
-### 1.3.0 &mdash; Workstation (current)
-- GUI-first RHEL 10 workstation: expert ops (ZFS / KVM / K8s / eBPF) as point-and-shoot desktop apps
-- Install-time **Platform Options** — NVIDIA / KVM / Kubernetes / eBPF / golden-image building, desktop-only, default-clean
-- Native per-tool app windows (chromeless GTK/WebKit), NVIDIA + Wayland render fixes
-- Console (tmux cockpit) promoted to its own application, de-duplicated from every tool window
-- RHEL 10 desktop package + TLS fixes (ptyxis, zenity, glib-networking)
+### 1.3.0 &mdash; Workstation+ (current)
+The Full Stack Automation work-in-progress that was tagged 1.2.0 internally
+was never released as a separate version &mdash; it shipped as part of 1.3.0
+alongside the Workstation polish. "+" is the hotrod mark on the default
+wallpaper: same RHEL 10 desktop image, steel-blue tint, faint &lsquo;+&rsquo;
+in the lower-right corner saying *this isn't stock*.
 
-### 1.2.0 &mdash; Full Stack Automation (release candidate; folded into 1.3.0)
+**Workstation (the GUI layer):**
+- GUI-first RHEL 10 workstation: expert ops (ZFS / KVM / K8s / eBPF) as point-and-shoot desktop apps
+- Install-time **Platform Options** &mdash; NVIDIA / KVM / Kubernetes / eBPF / golden-image building, desktop-only, default-clean
+- Native per-tool app windows (chromeless GTK/WebKit), NVIDIA + Wayland render fixes (GSK_RENDERER=ngl pre-baked, no first-session Nautilus segfault)
+- Console (tmux cockpit) promoted to its own application, de-duplicated from every tool window
+- VM serial console embedded in the web UI via the same ttyd-k9s session
+- RHEL 10 desktop package + TLS fixes (ptyxis, zenity, glib-networking)
+- Steam (Flathub) + nvidia-settings + gvim as default workstation apps
+- Refined icon set: per-family colour with one warm accent per glyph, hotrodded RHEL 10 wallpaper, dock pinned to Files / Firefox / Konsole on installed systems (empty on the live ISO so the installer is the focus)
+
+**Full Stack Automation (the install-time layer):**
 - PetClinic Microservices + ArgoCD wired into autodeploy
 - sanoid / syncoid on by default with sensible policies
 - Web UI Demo Mode with deploy / disaster / recover buttons
 - State & reconciliation layer under `/var/lib/kldload/state/`
 - Deterministic install ordering (CP &rarr; workers &rarr; Cilium &rarr; observability &rarr; Tetragon &rarr; klab)
+- Installer auto-generates + bakes an admin SSH key into every install &mdash; nodes are peer-reachable out of the box
 
 ### 1.1.0 &mdash; Hardware Reality
 - Live env cut over from CentOS Stream 9 to Fedora 44 (kernel 6.19, OpenZFS 2.4.x)
