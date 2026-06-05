@@ -851,10 +851,32 @@ EOS
       chroot "${KLDLOAD_TARGET_MNT}" chown -R "${user}:${user}" "/home/${user}/.ssh"
       k_log "SSH pubkey installed for ${user}"
     fi
-    if [[ -n "${KLDLOAD_ADMIN_SSH_PUBKEY:-}" ]]; then
+    # Admin SSH key — explicit override OR auto-generated default.
+    # Without this, fresh installs ship with no root authorized_keys at all,
+    # so the node is unreachable from any peer until someone consoles in and
+    # adds a key by hand. Auto-generate one into /etc/kldload/secrets/ on the
+    # target — operators can copy the private key off the box to manage it
+    # from a workstation, OR rsync the pubkey onto peer nodes for ssh-from
+    # access. The private key never leaves the target until an operator
+    # pulls it; no implicit trust between hosts.
+    local _admin_pub="${KLDLOAD_ADMIN_SSH_PUBKEY:-}"
+    if [[ -z "${_admin_pub}" ]]; then
+      local _secrets="${KLDLOAD_TARGET_MNT}/etc/kldload/secrets"
+      mkdir -p "${_secrets}"
+      chmod 0700 "${_secrets}"
+      if [[ ! -f "${_secrets}/admin-ssh.pub" ]]; then
+        chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/ssh-keygen -t ed25519 -N "" \
+          -C "kldload-admin@$(cat "${KLDLOAD_TARGET_MNT}/etc/hostname" 2>/dev/null || echo unknown)" \
+          -f /etc/kldload/secrets/admin-ssh >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 \
+          && chmod 0600 "${_secrets}/admin-ssh" \
+          && k_log "Generated admin SSH keypair at /etc/kldload/secrets/admin-ssh — pull it off this host to manage it from peers"
+      fi
+      [[ -f "${_secrets}/admin-ssh.pub" ]] && _admin_pub="$(cat "${_secrets}/admin-ssh.pub")"
+    fi
+    if [[ -n "${_admin_pub}" ]]; then
       local root_ssh_dir="${KLDLOAD_TARGET_MNT}/root/.ssh"
       mkdir -p "${root_ssh_dir}"
-      printf '%s\n' "${KLDLOAD_ADMIN_SSH_PUBKEY}" >> "${root_ssh_dir}/authorized_keys"
+      printf '%s\n' "${_admin_pub}" >> "${root_ssh_dir}/authorized_keys"
       chmod 0700 "${root_ssh_dir}"
       chmod 0600 "${root_ssh_dir}/authorized_keys"
       k_log "Admin SSH pubkey installed for root"
