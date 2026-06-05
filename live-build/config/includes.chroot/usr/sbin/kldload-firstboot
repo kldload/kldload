@@ -987,13 +987,22 @@ main() {
     # nouveau already owns the card.
     if [[ $_nv_ko_present -eq 1 ]]; then
       # GTK4 apps segfault in libnvidia-glcore on the NVIDIA driver kldload
-      # ships (observed on the 610 series). Force GTK4's cairo renderer so
-      # file managers / settings apps don't crash. NVIDIA-only; cairo is
-      # software-rendered GTK4 — games/Steam are unaffected (not GTK4). Idempotent.
+      # ships (observed on the 610 series). Force GTK4's ngl (OpenGL) renderer
+      # so file managers / settings apps don't crash. ngl uses NVIDIA's stable
+      # OpenGL path instead of the Vulkan path that triggers the segfault;
+      # faster than cairo (the previous workaround), which was pure software.
+      # Verified on NVIDIA 610.43.02 + GTK4 Wayland (onyx, RTX 3080, 2026-06-04).
+      #
+      # Live ISO ships /etc/environment.d/60-kldload-nvidia-gsk.conf pre-baked
+      # (so the first session post-install inherits it before this firstboot
+      # block runs), but we still write it here for: (a) upgrades from older
+      # ISOs that didn't ship the pre-baked file, (b) any code path that
+      # rebuilds initramfs/userspace without the includes.chroot layer.
+      # NVIDIA-only; games/Steam are unaffected (not GTK4). Idempotent.
       mkdir -p /etc/environment.d
       if [[ ! -f /etc/environment.d/60-kldload-nvidia-gsk.conf ]]; then
-        printf 'GSK_RENDERER=cairo\n' > /etc/environment.d/60-kldload-nvidia-gsk.conf
-        log "GTK4 cairo renderer set for NVIDIA (libnvidia-glcore crash workaround)"
+        printf 'GSK_RENDERER=ngl\n' > /etc/environment.d/60-kldload-nvidia-gsk.conf
+        log "GTK4 ngl renderer set for NVIDIA (libnvidia-glcore crash workaround)"
       fi
       _nv_restored=0
       for _disabled in /usr/lib/modprobe.d/*.kldload-disabled-no-dkms \
