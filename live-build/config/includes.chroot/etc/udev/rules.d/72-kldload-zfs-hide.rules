@@ -1,0 +1,28 @@
+# Hide ZFS pool members and zvol partitions from udisks2/Nautilus sidebar.
+#
+# On a ZFS-on-root system, the Nautilus left sidebar (and gnome-disks) shows
+# every block device udisks2 sees — including the raw partitions that make
+# up the rpool. The result is clutter like "43 GB Volume", "fedora-swap",
+# "Linux filesystem" pinned to the sidebar even though they're not really
+# mountable filesystems from the user's perspective (zpool owns them).
+#
+# UDISKS_IGNORE=1 tells udisks2 to skip these from its DBus enumeration —
+# they vanish from Nautilus, gnome-disks, and any other udisks2 consumer.
+# Real removable media (USB sticks, external drives, optical) keep showing
+# normally because they don't match these patterns.
+#
+# What this hides:
+#   - any partition that's part of a ZFS pool (ID_FS_TYPE=zfs_member)
+#   - any zvol partition (loop/dm devices that came from `zfs create -V`)
+#   - mounted ZFS dataset block dev placeholders (rare; defensive)
+#
+# What still shows: USB drives, optical media, mounted NFS/SMB (which come
+# via gvfs, not udisks2), and any non-ZFS partition like an EFI fallback
+# stick the user plugged in.
+#
+# To debug: `udisksctl info -b /dev/sdXN` shows what udisks2 sees. If a
+# block device still clutters Nautilus, check its `ID_FS_TYPE` with
+# `udevadm info /dev/sdXN | grep ID_FS_TYPE` and extend this rule if needed.
+
+SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="zfs_member", ENV{UDISKS_IGNORE}="1"
+SUBSYSTEM=="block", KERNEL=="zd*",                 ENV{UDISKS_IGNORE}="1"
