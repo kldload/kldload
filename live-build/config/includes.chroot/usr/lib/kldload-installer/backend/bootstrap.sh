@@ -172,6 +172,9 @@ bootstrap_install_packages() {
                 # vim.desktop launcher actually opens a usable vim window
                 # on Debian targets. Pairs with vim-X11 on the RPM side.
                 vim-gtk3
+                # gnome-tweaks — the canonical GNOME power-user panel for
+                # fonts, workspace behaviour, extensions, top-bar tweaks.
+                gnome-tweaks
                 # flatpak — the cross-distro app runtime kldload uses to
                 # ship Steam (and any future Flatpak app). The actual
                 # Steam install happens at firstboot via `flatpak install

@@ -1274,6 +1274,10 @@ CUSTOMREPO
         # provides the terminal vim with full feature set.
         gedit
         vim-X11 vim-enhanced
+        # gnome-tweaks — the canonical GNOME power-user panel for fonts,
+        # workspace behaviour, top-bar tweaks, and extension management.
+        # Not in the default GNOME shell on RHEL 10; install explicitly.
+        gnome-tweaks
         # flatpak — the cross-distro app runtime kldload uses to ship Steam
         # (and any other Flatpak app a user adds later). The actual Steam
         # install runs further down via `flatpak install com.valvesoftware.Steam`
