@@ -1038,6 +1038,29 @@ main() {
     unset _nv_src _nv_ver _nv_ko_present _nv_restored _disabled
   fi
 
+  # ── Desktop apps that need network at first boot ─────────────────────────
+  # Steam ships via Flathub (cross-distro; no native RHEL package). Done at
+  # firstboot rather than install-time so the install itself stays offline-
+  # capable. Skipped silently on non-desktop profiles, on systems with no
+  # internet (flatpak remote-add will fail fast), and if flatpak isn't
+  # installed (server/kvm/core profiles don't bring it in). Idempotent —
+  # flatpak remote-add --if-not-exists and `flatpak install -y` are both
+  # no-ops on re-run.
+  if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]] \
+       && command -v flatpak >/dev/null 2>&1; then
+    log "Setting up Flathub + installing Steam"
+    if flatpak remote-add --if-not-exists --system flathub \
+         https://flathub.org/repo/flathub.flatpakrepo 2>>"$LOG"; then
+      if flatpak install -y --system flathub com.valvesoftware.Steam >>"$LOG" 2>&1; then
+        ok "Steam installed via Flathub"
+      else
+        log "WARNING: Steam Flathub install failed (no internet? slow mirror?) — user can retry: flatpak install flathub com.valvesoftware.Steam"
+      fi
+    else
+      log "WARNING: flathub remote-add failed (no internet?) — skipping Steam install"
+    fi
+  fi
+
   # ── FREE edition: standalone only ─────────────────────────────────────────
   if [[ "$_edition" == "free" ]]; then
     log "Free edition — standalone setup only (no WireGuard mesh, no cluster)"

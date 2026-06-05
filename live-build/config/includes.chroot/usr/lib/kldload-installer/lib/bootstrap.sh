@@ -1274,6 +1274,11 @@ CUSTOMREPO
         # provides the terminal vim with full feature set.
         gedit
         vim-X11 vim-enhanced
+        # flatpak — the cross-distro app runtime kldload uses to ship Steam
+        # (and any other Flatpak app a user adds later). The actual Steam
+        # install runs further down via `flatpak install com.valvesoftware.Steam`
+        # so it can pull the matching runtime in the same step.
+        flatpak
         # zenity — REQUIRED by the kldload GUI tools (kldload-zfs, ZFS Manager,
         # replication dialogs). Was never in this list -> those tools silently
         # no-op'd on every RPM desktop install. Same .137 regression.
@@ -2205,6 +2210,7 @@ CUDAREPO
         chroot "${target}" /usr/bin/dnf install -y --skip-broken \
             nvidia-driver nvidia-driver-libs nvidia-driver-cuda \
             nvidia-container-toolkit \
+            nvidia-settings \
             >> "$log" 2>&1 \
           || k_log_to "$log" "WARNING: NVIDIA driver install had issues (no GPU?)"
         ;;
