@@ -37,7 +37,7 @@ _copy_log_on_exit() {
     if [[ -d "$todd_log_dir" ]]; then
         local latest
         latest="$(find "${LOG_DIR:-/tmp}" -name "build-${PROFILE:-desktop}-${ARCH:-amd64}-*.log" \
-                  2>/dev/null | sort | tail -1 || true)"
+            2>/dev/null | sort | tail -1 || true)"
         if [[ -n "$latest" ]] && [[ -f "$latest" ]]; then
             local dest_name="${EDITION:-free}-$(basename "$latest")"
             cp "$latest" "${todd_log_dir}/${dest_name}" 2>/dev/null || true
@@ -78,8 +78,8 @@ log "Root:              $ROOT"
 # ---------------------------------------------------------------------------
 
 case "$PROFILE" in
-    desktop|server) ;;
-    *) die "Invalid PROFILE '$PROFILE'. Must be 'desktop' or 'server'." ;;
+desktop | server) ;;
+*) die "Invalid PROFILE '$PROFILE'. Must be 'desktop' or 'server'." ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -114,8 +114,8 @@ log "Starting builder container '$BUILDER_CONTAINER'..."
     --env SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     --env OUTPUT_DIR="/build/live-build/output" \
     --env LOG_DIR="/build/live-build/logs" \
-    "$BUILDER_IMAGE" \
-    || die "Builder container exited with non-zero status — check logs in $LOG_DIR"
+    "$BUILDER_IMAGE" ||
+    die "Builder container exited with non-zero status — check logs in $LOG_DIR"
 
 # ---------------------------------------------------------------------------
 # Report output ISO path
@@ -147,9 +147,9 @@ fi
 TODD_LOG_DIR="${TODD_LOG_DIR:-/home/todd/logs}"
 if [[ -d "$TODD_LOG_DIR" ]]; then
     LATEST_LB_LOG="$(find "$LOG_DIR" -name "build-${PROFILE}-${ARCH}-*.log" \
-                     -newer "$OUTPUT_DIR" -o \
-                     -name "build-${PROFILE}-${ARCH}-*.log" 2>/dev/null \
-                     | sort | tail -1 || true)"
+        -newer "$OUTPUT_DIR" -o \
+        -name "build-${PROFILE}-${ARCH}-*.log" 2>/dev/null |
+        sort | tail -1 || true)"
     if [[ -n "$LATEST_LB_LOG" ]] && [[ -f "$LATEST_LB_LOG" ]]; then
         cp "$LATEST_LB_LOG" "${TODD_LOG_DIR}/$(basename "$LATEST_LB_LOG")"
         ln -sf "${TODD_LOG_DIR}/$(basename "$LATEST_LB_LOG")" "${TODD_LOG_DIR}/${EDITION}-lb-build-latest.log"

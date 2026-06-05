@@ -21,8 +21,8 @@ mkdir -p "${REPO_DIR}"
 # Add ZFS on Linux repo
 if [[ ! -f /etc/yum.repos.d/zfs.repo ]]; then
     log "Adding ZFS on Linux repo..."
-    dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-3.el${RELEASE}.noarch.rpm" 2>/dev/null || \
-    dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-2.el${RELEASE}.noarch.rpm" 2>/dev/null || \
+    dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-3.el${RELEASE}.noarch.rpm" 2>/dev/null ||
+        dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-2.el${RELEASE}.noarch.rpm" 2>/dev/null ||
         log "WARNING: could not add ZFS repo — ZFS packages may be missing"
 fi
 
@@ -43,7 +43,7 @@ fi
 # Add containerd repo (Docker CE for containerd.io)
 if [[ ! -f /etc/yum.repos.d/docker-ce.repo ]]; then
     log "Adding Docker CE repo (for containerd.io)..."
-    dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || \
+    dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null ||
         log "WARNING: could not add Docker CE repo — containerd.io may be missing"
 fi
 
@@ -51,13 +51,16 @@ fi
 declare -a PACKAGES=()
 read_package_set() {
     local file="${PKG_SETS_DIR}/${1}.txt"
-    [[ -f "$file" ]] || { log "Package set not found (skipping): $file"; return 0; }
+    [[ -f "$file" ]] || {
+        log "Package set not found (skipping): $file"
+        return 0
+    }
     while IFS= read -r line; do
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line//[[:space:]]/}" ]] && continue
         PACKAGES+=("$line")
-    done < "$file"
-    log "Loaded package set: $1 ($(wc -l < "$file") entries)"
+    done <"$file"
+    log "Loaded package set: $1 ($(wc -l <"$file") entries)"
 }
 
 read_package_set "target-base"

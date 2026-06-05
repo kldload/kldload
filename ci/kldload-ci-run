@@ -58,23 +58,48 @@ SHOW_REPORT=""
 
 # ── Args ───────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --skip-build)   SKIP_BUILD=1; shift ;;
-    --skip-sync)    SKIP_SYNC=1; shift ;;
-    --only)         ONLY_FILTER="$2"; shift 2 ;;
-    --diff-last)    DIFF_LAST=1; shift ;;
-    --status)       SHOW_STATUS=1; shift ;;
-    --report)       SHOW_REPORT="$2"; shift 2 ;;
-    -h|--help)
-      sed -n '/^# kldload-ci-run/,/^set -e/p' "$0" | sed 's/^# \?//' | head -40
-      exit 0 ;;
-    *)              echo "unknown arg: $1" >&2; exit 3 ;;
-  esac
+    case "$1" in
+    --skip-build)
+        SKIP_BUILD=1
+        shift
+        ;;
+    --skip-sync)
+        SKIP_SYNC=1
+        shift
+        ;;
+    --only)
+        ONLY_FILTER="$2"
+        shift 2
+        ;;
+    --diff-last)
+        DIFF_LAST=1
+        shift
+        ;;
+    --status)
+        SHOW_STATUS=1
+        shift
+        ;;
+    --report)
+        SHOW_REPORT="$2"
+        shift 2
+        ;;
+    -h | --help)
+        sed -n '/^# kldload-ci-run/,/^set -e/p' "$0" | sed 's/^# \?//' | head -40
+        exit 0
+        ;;
+    *)
+        echo "unknown arg: $1" >&2
+        exit 3
+        ;;
+    esac
 done
 
-log()  { printf '[%(%F %T)T] [ci] %s\n' -1 "$*"; }
+log() { printf '[%(%F %T)T] [ci] %s\n' -1 "$*"; }
 warn() { printf '[%(%F %T)T] [ci] WARN: %s\n' -1 "$*" >&2; }
-die()  { printf '[%(%F %T)T] [ci] FATAL: %s\n' -1 "$*" >&2; exit 3; }
+die() {
+    printf '[%(%F %T)T] [ci] FATAL: %s\n' -1 "$*" >&2
+    exit 3
+}
 
 # ── Concurrency guard ─────────────────────────────────────────────────────
 # Bug seen 2026-05-06: kldload-ci.timer fired at 03:00 while a manual
@@ -89,12 +114,12 @@ if ! flock -n 9; then
     holder="$(cat "${CI_ROOT}/.run.holder" 2>/dev/null || echo unknown)"
     die "another kldload-ci-run is in progress (holder: ${holder}) — refusing to start"
 fi
-echo "$$ $(date -u +%FT%TZ)" > "${CI_ROOT}/.run.holder"
+echo "$$ $(date -u +%FT%TZ)" >"${CI_ROOT}/.run.holder"
 trap 'rm -f "${CI_ROOT}/.run.holder"' EXIT
 
 # ── SQLite schema ─────────────────────────────────────────────────────────
 init_db() {
-  sqlite3 "$DB_FILE" <<'SQL'
+    sqlite3 "$DB_FILE" <<'SQL'
 CREATE TABLE IF NOT EXISTS runs (
   run_id        TEXT PRIMARY KEY,         -- ISO timestamp like 2026-05-06-001230
   started_at    TEXT NOT NULL,
@@ -124,10 +149,10 @@ SQL
 
 # ── --status: show last 10 runs ───────────────────────────────────────────
 if [[ "$SHOW_STATUS" == "1" ]]; then
-  init_db
-  printf '%-22s  %-8s  %-12s  %-7s  %-7s  %s\n' \
-    'RUN_ID' 'RC' 'DURATION' 'PASS' 'FAIL' 'ISO_SHA'
-  sqlite3 -column "$DB_FILE" "
+    init_db
+    printf '%-22s  %-8s  %-12s  %-7s  %-7s  %s\n' \
+        'RUN_ID' 'RC' 'DURATION' 'PASS' 'FAIL' 'ISO_SHA'
+    sqlite3 -column "$DB_FILE" "
     SELECT run_id,
            COALESCE(rc, '?'),
            CASE WHEN finished_at IS NULL THEN 'running...'
@@ -136,27 +161,27 @@ if [[ "$SHOW_STATUS" == "1" ]]; then
            substr(iso_sha,1,12)
     FROM runs ORDER BY started_at DESC LIMIT 10;
   " 2>/dev/null
-  exit 0
+    exit 0
 fi
 
 # ── --report ID: full report for one run ─────────────────────────────────
 if [[ -n "$SHOW_REPORT" ]]; then
-  init_db
-  echo "=== Run: $SHOW_REPORT ==="
-  sqlite3 "$DB_FILE" "SELECT * FROM runs WHERE run_id='$SHOW_REPORT';" 2>/dev/null | head
-  echo
-  echo "=== Combo results ==="
-  sqlite3 -column "$DB_FILE" "
+    init_db
+    echo "=== Run: $SHOW_REPORT ==="
+    sqlite3 "$DB_FILE" "SELECT * FROM runs WHERE run_id='$SHOW_REPORT';" 2>/dev/null | head
+    echo
+    echo "=== Combo results ==="
+    sqlite3 -column "$DB_FILE" "
     SELECT distro, profile, status, duration_s,
            COALESCE(substr(fail_reason, 1, 60), '')
     FROM results WHERE run_id='$SHOW_REPORT'
     ORDER BY distro, profile;
   " 2>/dev/null
-  RESULT_DIR="${RESULTS_ROOT}/${SHOW_REPORT}"
-  echo
-  echo "Artifacts: ${RESULT_DIR}"
-  ls -la "${RESULT_DIR}/" 2>/dev/null | head -20
-  exit 0
+    RESULT_DIR="${RESULTS_ROOT}/${SHOW_REPORT}"
+    echo
+    echo "Artifacts: ${RESULT_DIR}"
+    ls -la "${RESULT_DIR}/" 2>/dev/null | head -20
+    exit 0
 fi
 
 # ── Run identity ──────────────────────────────────────────────────────────
@@ -172,20 +197,20 @@ init_db
 
 # ── Phase 1: Sync source ──────────────────────────────────────────────────
 if [[ "$SKIP_SYNC" != "1" && -n "${CI_SYNC_CMD:-}" ]]; then
-  log "syncing source..."
-  bash -c "$CI_SYNC_CMD" >> "${RESULT_DIR}/sync.log" 2>&1 \
-    || warn "source sync exited non-zero; continuing with local copy"
+    log "syncing source..."
+    bash -c "$CI_SYNC_CMD" >>"${RESULT_DIR}/sync.log" 2>&1 ||
+        warn "source sync exited non-zero; continuing with local copy"
 elif [[ "$SKIP_SYNC" != "1" && -d "${SRC_DIR}/.git" ]]; then
-  log "git pull..."
-  (cd "${SRC_DIR}" && git pull --ff-only) >> "${RESULT_DIR}/sync.log" 2>&1 \
-    || warn "git pull exited non-zero; continuing with current HEAD"
+    log "git pull..."
+    (cd "${SRC_DIR}" && git pull --ff-only) >>"${RESULT_DIR}/sync.log" 2>&1 ||
+        warn "git pull exited non-zero; continuing with current HEAD"
 fi
 
 SOURCE_SHA="$(cd "${SRC_DIR}" && git rev-parse --short HEAD 2>/dev/null || echo 'rsync')"
 
 # Open a runs row before build so it appears in --status even if build fails.
 sqlite3 "$DB_FILE" \
-  "INSERT INTO runs (run_id, started_at, source_sha, matrix_total)
+    "INSERT INTO runs (run_id, started_at, source_sha, matrix_total)
    VALUES ('${RUN_ID}', datetime('now'), '${SOURCE_SHA}', $((${#MATRIX_DISTROS[@]} * ${#MATRIX_PROFILES[@]})));"
 
 # ── Phase 2: Build ─────────────────────────────────────────────────────────
@@ -195,141 +220,149 @@ sqlite3 "$DB_FILE" \
 # `podman system prune`) where kldload-live-builder:latest doesn't exist.
 ISO_PATH=""
 if [[ "$SKIP_BUILD" != "1" ]]; then
-  if ! podman image exists kldload-live-builder:latest 2>/dev/null; then
-    log "builder image missing — building..."
-    if (cd "${SRC_DIR}" && ./deploy.sh builder-image) >> "${RESULT_DIR}/build.log" 2>&1; then
-      log "  builder image OK"
-    else
-      warn "builder image FAILED — see ${RESULT_DIR}/build.log"
-      sqlite3 "$DB_FILE" "UPDATE runs SET rc=1, finished_at=datetime('now') WHERE run_id='${RUN_ID}';"
-      exit 1
+    if ! podman image exists kldload-live-builder:latest 2>/dev/null; then
+        log "builder image missing — building..."
+        if (cd "${SRC_DIR}" && ./deploy.sh builder-image) >>"${RESULT_DIR}/build.log" 2>&1; then
+            log "  builder image OK"
+        else
+            warn "builder image FAILED — see ${RESULT_DIR}/build.log"
+            sqlite3 "$DB_FILE" "UPDATE runs SET rc=1, finished_at=datetime('now') WHERE run_id='${RUN_ID}';"
+            exit 1
+        fi
     fi
-  fi
 
-  log "building ISO..."
-  if (cd "${SRC_DIR}" && PROFILE=desktop ./deploy.sh build) >> "${RESULT_DIR}/build.log" 2>&1; then
-    log "build OK"
-  else
-    warn "build FAILED — see ${RESULT_DIR}/build.log"
-    sqlite3 "$DB_FILE" "UPDATE runs SET rc=1, finished_at=datetime('now') WHERE run_id='${RUN_ID}';"
-    exit 1
-  fi
+    log "building ISO..."
+    if (cd "${SRC_DIR}" && PROFILE=desktop ./deploy.sh build) >>"${RESULT_DIR}/build.log" 2>&1; then
+        log "build OK"
+    else
+        warn "build FAILED — see ${RESULT_DIR}/build.log"
+        sqlite3 "$DB_FILE" "UPDATE runs SET rc=1, finished_at=datetime('now') WHERE run_id='${RUN_ID}';"
+        exit 1
+    fi
 fi
 
 ISO_PATH="$(ls -t "${SRC_DIR}/live-build/output/"kldload-*.iso 2>/dev/null | head -1)"
 [[ -z "$ISO_PATH" ]] && die "no ISO found in ${SRC_DIR}/live-build/output/"
 ISO_SHA="$(sha256sum "$ISO_PATH" | awk '{print $1}')"
 ISO_SIZE="$(stat -c %s "$ISO_PATH")"
-log "ISO: $(basename "$ISO_PATH")  sha=${ISO_SHA:0:12}  size=$((ISO_SIZE/1024/1024)) MiB"
+log "ISO: $(basename "$ISO_PATH")  sha=${ISO_SHA:0:12}  size=$((ISO_SIZE / 1024 / 1024)) MiB"
 
 sqlite3 "$DB_FILE" "UPDATE runs SET iso_sha='${ISO_SHA}', iso_size=${ISO_SIZE} WHERE run_id='${RUN_ID}';"
 
 # ── Phase 3: Smoke-build sanity ────────────────────────────────────────────
 log "smoke-build..."
-(cd "${SRC_DIR}" && ./deploy.sh smoke-build) > "${RESULT_DIR}/smoke-build.log" 2>&1 \
-  && log "smoke-build OK" \
-  || { warn "smoke-build FAILED — see ${RESULT_DIR}/smoke-build.log"; }
+(cd "${SRC_DIR}" && ./deploy.sh smoke-build) >"${RESULT_DIR}/smoke-build.log" 2>&1 &&
+    log "smoke-build OK" ||
+    { warn "smoke-build FAILED — see ${RESULT_DIR}/smoke-build.log"; }
 
 # ── Phase 4: Matrix ────────────────────────────────────────────────────────
 # Build the combos list. --diff-last subsets to only what failed last time.
 declare -a COMBOS
 if [[ "$DIFF_LAST" == "1" ]]; then
-  while IFS='|' read -r d p; do
-    COMBOS+=("${d}-${p}")
-  done < <(sqlite3 "$DB_FILE" -separator '|' "
+    while IFS='|' read -r d p; do
+        COMBOS+=("${d}-${p}")
+    done < <(sqlite3 "$DB_FILE" -separator '|' "
     SELECT distro, profile FROM results
     WHERE status='fail' AND run_id=(
       SELECT run_id FROM runs WHERE rc IS NOT NULL ORDER BY started_at DESC LIMIT 1
     );")
-  [[ ${#COMBOS[@]} -eq 0 ]] && { log "--diff-last: no failures in last run; nothing to do"; exit 0; }
+    [[ ${#COMBOS[@]} -eq 0 ]] && {
+        log "--diff-last: no failures in last run; nothing to do"
+        exit 0
+    }
 elif [[ -n "$ONLY_FILTER" ]]; then
-  IFS=',' read -ra COMBOS <<< "$ONLY_FILTER"
+    IFS=',' read -ra COMBOS <<<"$ONLY_FILTER"
 else
-  for d in "${MATRIX_DISTROS[@]}"; do
-    for p in "${MATRIX_PROFILES[@]}"; do
-      COMBOS+=("${d}-${p}")
+    for d in "${MATRIX_DISTROS[@]}"; do
+        for p in "${MATRIX_PROFILES[@]}"; do
+            COMBOS+=("${d}-${p}")
+        done
     done
-  done
 fi
 
-PASS=0; FAIL=0
+PASS=0
+FAIL=0
 log "matrix: ${#COMBOS[@]} combos to run"
 for combo in "${COMBOS[@]}"; do
-  distro="${combo%-*}"
-  profile="${combo##*-}"
-  combo_log="${RESULT_DIR}/smoke-${distro}-${profile}.log"
-  combo_fail_dir="${RESULT_DIR}/failures/${distro}-${profile}"
-  log "  [${distro} ${profile}] start"
-  start_t=$(date +%s)
+    distro="${combo%-*}"
+    profile="${combo##*-}"
+    combo_log="${RESULT_DIR}/smoke-${distro}-${profile}.log"
+    combo_fail_dir="${RESULT_DIR}/failures/${distro}-${profile}"
+    log "  [${distro} ${profile}] start"
+    start_t=$(date +%s)
 
-  # The smoke-test framework prints colorized output we don't want in logs.
-  if (cd "${SRC_DIR}" && sudo ./deploy.sh smoke-test "$distro" "$profile") \
-       > "$combo_log" 2>&1; then
-    end_t=$(date +%s); dur=$((end_t-start_t))
-    log "  [${distro} ${profile}] PASS (${dur}s)"
-    PASS=$((PASS+1))
-    sqlite3 "$DB_FILE" "INSERT INTO results VALUES \
+    # The smoke-test framework prints colorized output we don't want in logs.
+    if (cd "${SRC_DIR}" && sudo ./deploy.sh smoke-test "$distro" "$profile") \
+        >"$combo_log" 2>&1; then
+        end_t=$(date +%s)
+        dur=$((end_t - start_t))
+        log "  [${distro} ${profile}] PASS (${dur}s)"
+        PASS=$((PASS + 1))
+        sqlite3 "$DB_FILE" "INSERT INTO results VALUES \
       ('${RUN_ID}','${distro}','${profile}','pass',${dur},NULL,'${combo_log}');"
-  else
-    end_t=$(date +%s); dur=$((end_t-start_t))
-    fail_excerpt="$(grep -aE 'FAIL|ERROR|fatal|Failed' "$combo_log" | tail -1 | tr -d "'" | cut -c -200)"
-    warn "  [${distro} ${profile}] FAIL (${dur}s) — ${fail_excerpt:-see log}"
-    FAIL=$((FAIL+1))
-    mkdir -p "$combo_fail_dir"
+    else
+        end_t=$(date +%s)
+        dur=$((end_t - start_t))
+        fail_excerpt="$(grep -aE 'FAIL|ERROR|fatal|Failed' "$combo_log" | tail -1 | tr -d "'" | cut -c -200)"
+        warn "  [${distro} ${profile}] FAIL (${dur}s) — ${fail_excerpt:-see log}"
+        FAIL=$((FAIL + 1))
+        mkdir -p "$combo_fail_dir"
 
-    # Capture VM console + target journal if KEEP_FAILED_VM=1 left a VM.
-    # Per CLAUDE.md, smoke-test leaves the VM on failure unless KEEP_VM=0.
-    vm_name="$(virsh -c qemu:///system list --all --name 2>/dev/null \
-                | grep -E "kldload-smoke-${distro}-${profile}" | head -1 || true)"
-    if [[ -n "$vm_name" ]]; then
-      virsh -c qemu:///system console "$vm_name" --safe \
-        > "${combo_fail_dir}/vm-console.log" 2>&1 &
-      sleep 5 && kill -INT %1 2>/dev/null || true
-      virsh -c qemu:///system dumpxml "$vm_name" \
-        > "${combo_fail_dir}/vm-domain.xml" 2>/dev/null || true
-    fi
-    cp -f "$combo_log" "${combo_fail_dir}/" 2>/dev/null || true
+        # Capture VM console + target journal if KEEP_FAILED_VM=1 left a VM.
+        # Per CLAUDE.md, smoke-test leaves the VM on failure unless KEEP_VM=0.
+        vm_name="$(virsh -c qemu:///system list --all --name 2>/dev/null |
+            grep -E "kldload-smoke-${distro}-${profile}" | head -1 || true)"
+        if [[ -n "$vm_name" ]]; then
+            virsh -c qemu:///system console "$vm_name" --safe \
+                >"${combo_fail_dir}/vm-console.log" 2>&1 &
+            sleep 5 && kill -INT %1 2>/dev/null || true
+            virsh -c qemu:///system dumpxml "$vm_name" \
+                >"${combo_fail_dir}/vm-domain.xml" 2>/dev/null || true
+        fi
+        cp -f "$combo_log" "${combo_fail_dir}/" 2>/dev/null || true
 
-    sqlite3 "$DB_FILE" "INSERT INTO results VALUES \
+        sqlite3 "$DB_FILE" "INSERT INTO results VALUES \
       ('${RUN_ID}','${distro}','${profile}','fail',${dur}, \
        '$(echo "${fail_excerpt:-}" | sed "s/'/''/g")','${combo_log}');"
-  fi
+    fi
 done
 
 # ── Phase 5: Summary ───────────────────────────────────────────────────────
 {
-  echo "# kldload CI run ${RUN_ID}"
-  echo
-  echo "- Source: \`${SOURCE_SHA}\`"
-  echo "- ISO:    \`$(basename "$ISO_PATH")\`  (sha \`${ISO_SHA:0:12}\`, $((ISO_SIZE/1024/1024)) MiB)"
-  echo "- Result: ${PASS} pass, ${FAIL} fail"
-  echo
-  echo "## Matrix"
-  echo
-  printf '| %-7s |' 'distro'
-  for p in "${MATRIX_PROFILES[@]}"; do printf ' %-7s |' "$p"; done; echo
-  # printf with leading '-' fails: "printf: --: invalid option" — the
-  # format string is parsed for flags first. %s with a literal arg avoids it.
-  printf '%s' '|---------|'
-  for _ in "${MATRIX_PROFILES[@]}"; do printf '%s' '---------|'; done; echo
-  for d in "${MATRIX_DISTROS[@]}"; do
-    printf '| %-7s |' "$d"
-    for p in "${MATRIX_PROFILES[@]}"; do
-      s="$(sqlite3 "$DB_FILE" "SELECT status FROM results \
-            WHERE run_id='${RUN_ID}' AND distro='${d}' AND profile='${p}';" 2>/dev/null)"
-      case "$s" in
-        pass) printf ' %-7s |' '✅ pass' ;;
-        fail) printf ' %-7s |' '❌ FAIL' ;;
-        *)    printf ' %-7s |' '— skip' ;;
-      esac
-    done
+    echo "# kldload CI run ${RUN_ID}"
     echo
-  done
-} > "${RESULT_DIR}/SUMMARY.md"
+    echo "- Source: \`${SOURCE_SHA}\`"
+    echo "- ISO:    \`$(basename "$ISO_PATH")\`  (sha \`${ISO_SHA:0:12}\`, $((ISO_SIZE / 1024 / 1024)) MiB)"
+    echo "- Result: ${PASS} pass, ${FAIL} fail"
+    echo
+    echo "## Matrix"
+    echo
+    printf '| %-7s |' 'distro'
+    for p in "${MATRIX_PROFILES[@]}"; do printf ' %-7s |' "$p"; done
+    echo
+    # printf with leading '-' fails: "printf: --: invalid option" — the
+    # format string is parsed for flags first. %s with a literal arg avoids it.
+    printf '%s' '|---------|'
+    for _ in "${MATRIX_PROFILES[@]}"; do printf '%s' '---------|'; done
+    echo
+    for d in "${MATRIX_DISTROS[@]}"; do
+        printf '| %-7s |' "$d"
+        for p in "${MATRIX_PROFILES[@]}"; do
+            s="$(sqlite3 "$DB_FILE" "SELECT status FROM results \
+            WHERE run_id='${RUN_ID}' AND distro='${d}' AND profile='${p}';" 2>/dev/null)"
+            case "$s" in
+            pass) printf ' %-7s |' '✅ pass' ;;
+            fail) printf ' %-7s |' '❌ FAIL' ;;
+            *) printf ' %-7s |' '— skip' ;;
+            esac
+        done
+        echo
+    done
+} >"${RESULT_DIR}/SUMMARY.md"
 
 cat "${RESULT_DIR}/SUMMARY.md"
 
-RC=$(( FAIL > 0 ? 2 : 0 ))
+RC=$((FAIL > 0 ? 2 : 0))
 sqlite3 "$DB_FILE" "UPDATE runs SET finished_at=datetime('now'), \
   matrix_pass=${PASS}, matrix_fail=${FAIL}, rc=${RC} WHERE run_id='${RUN_ID}';"
 log "=== run complete: rc=${RC} pass=${PASS} fail=${FAIL} ==="

@@ -9,19 +9,23 @@ PW="${2:-Passw0rd}"
 SSH="sshpass -p ${PW} ssh -o StrictHostKeyChecking=no admin@${IP}"
 TMUX_SEND="$SSH tmux send-keys -t kldload"
 
-pause() { echo ""; echo "  [Press Enter to continue]"; read -r; }
+pause() {
+    echo ""
+    echo "  [Press Enter to continue]"
+    read -r
+}
 narrate() { printf '\n\e[1;36m  ▸ %s\e[0m\n' "$*"; }
 type_cmd() {
-  # Type command character by character into tmux for dramatic effect
-  local cmd="$1"
-  $SSH "tmux send-keys -t kldload -l ''" 2>/dev/null || true
-  for (( i=0; i<${#cmd}; i++ )); do
-    local char="${cmd:$i:1}"
-    $SSH "tmux send-keys -t kldload -l '$char'" 2>/dev/null
-    sleep 0.04
-  done
-  sleep 0.3
-  $TMUX_SEND Enter
+    # Type command character by character into tmux for dramatic effect
+    local cmd="$1"
+    $SSH "tmux send-keys -t kldload -l ''" 2>/dev/null || true
+    for ((i = 0; i < ${#cmd}; i++)); do
+        local char="${cmd:$i:1}"
+        $SSH "tmux send-keys -t kldload -l '$char'" 2>/dev/null
+        sleep 0.04
+    done
+    sleep 0.3
+    $TMUX_SEND Enter
 }
 
 clear

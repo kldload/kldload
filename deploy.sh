@@ -30,20 +30,20 @@ ROOT="$(dirname "$(realpath "$0")")"
 
 # ── Build configuration ──────────────────────────────────────────────────────
 # These control what gets built. Override via environment or kldload.env.
-PROFILE="${PROFILE:-desktop}"       # Install profile: desktop, server, kvm, ai, core
-EDITION="${EDITION:-free}"          # Edition: free (full) or core (ZFS-only, no tools)
-ARCH="${ARCH:-x86_64}"             # Target architecture
-RELEASE="${RELEASE:-9}"            # CentOS Stream release version
+PROFILE="${PROFILE:-desktop}"                                   # Install profile: desktop, server, kvm, ai, core
+EDITION="${EDITION:-free}"                                      # Edition: free (full) or core (ZFS-only, no tools)
+ARCH="${ARCH:-x86_64}"                                          # Target architecture
+RELEASE="${RELEASE:-9}"                                         # CentOS Stream release version
 BUILDER_IMAGE="${BUILDER_IMAGE:-kldload-live-builder:latest}"   # Builder container image tag
 BUILDER_CONTAINER="${BUILDER_CONTAINER:-kldload-free-build-$$}" # Builder container name (unique per run)
-OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/live-build/output}"              # Where the ISO lands
-LOG_DIR="${LOG_DIR:-$ROOT/live-build/logs}"                      # Build logs
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/live-build/output}"             # Where the ISO lands
+LOG_DIR="${LOG_DIR:-$ROOT/live-build/logs}"                     # Build logs
 
 # ── Proxmox deployment ───────────────────────────────────────────────────────
 # Used by proxmox-deploy. Set in kldload.env or environment.
-PROXMOX_HOST="${PROXMOX_HOST:-10.100.10.225}"     # Proxmox host IP
-PROXMOX_NODE="${PROXMOX_NODE:-fiend}"             # Proxmox node name
-PROXMOX_TOKEN_ID="${PROXMOX_TOKEN_ID:-}"          # API token (optional — uses SSH if empty)
+PROXMOX_HOST="${PROXMOX_HOST:-10.100.10.225}" # Proxmox host IP
+PROXMOX_NODE="${PROXMOX_NODE:-fiend}"         # Proxmox node name
+PROXMOX_TOKEN_ID="${PROXMOX_TOKEN_ID:-}"      # API token (optional — uses SSH if empty)
 PROXMOX_TOKEN_SECRET="${PROXMOX_TOKEN_SECRET:-}"
 
 # ── VM configuration ─────────────────────────────────────────────────────────
@@ -57,27 +57,32 @@ VM_BRIDGE="${VM_BRIDGE:-vmbr0}"    # Network bridge
 KVM_VMS="${KVM_VMS:-1}"            # Number of KVM test VMs to create
 
 # ── USB burn ─────────────────────────────────────────────────────────────────
-USB_DEVICE="${USB_DEVICE:-/dev/sda}"       # Target USB block device
-USB_BURN_ON_DEPLOY="${USB_BURN_ON_DEPLOY:-no}"  # Auto-burn after full build (yes/no)
+USB_DEVICE="${USB_DEVICE:-/dev/sda}"           # Target USB block device
+USB_BURN_ON_DEPLOY="${USB_BURN_ON_DEPLOY:-no}" # Auto-burn after full build (yes/no)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 log() { printf '[%s] [deploy] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
-die() { log "ERROR: $*"; exit 1; }
+die() {
+    log "ERROR: $*"
+    exit 1
+}
 
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
 # Auto-detect container runtime (podman preferred, docker fallback)
 detect_runtime() {
-    if command -v podman &>/dev/null; then echo podman
-    elif command -v docker &>/dev/null; then echo docker
+    if command -v podman &>/dev/null; then
+        echo podman
+    elif command -v docker &>/dev/null; then
+        echo docker
     else die "No container runtime found (need docker or podman)"; fi
 }
 
 # Find the most recently built ISO in the output directory
 latest_iso() {
-    find "$OUTPUT_DIR" -maxdepth 1 -name '*.iso' -printf '%T@ %p\n' 2>/dev/null \
-        | sort -rn | head -1 | cut -d' ' -f2-
+    find "$OUTPUT_DIR" -maxdepth 1 -name '*.iso' -printf '%T@ %p\n' 2>/dev/null |
+        sort -rn | head -1 | cut -d' ' -f2-
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,13 +102,13 @@ cmd_builder_image() {
     local tag="$BUILDER_IMAGE"
     local platform=""
     case "$ARCH" in
-        aarch64|arm64)
-            tag="${BUILDER_IMAGE%:*}:aarch64"
-            platform="--platform linux/arm64"
-            ;;
-        *)
-            platform="--platform linux/amd64"
-            ;;
+    aarch64 | arm64)
+        tag="${BUILDER_IMAGE%:*}:aarch64"
+        platform="--platform linux/arm64"
+        ;;
+    *)
+        platform="--platform linux/amd64"
+        ;;
     esac
     log "Building kldload builder image: $tag (${ARCH})"
     "$runtime" build $platform -t "$tag" -f "$ROOT/builder/Dockerfile" "$ROOT/builder/"
@@ -123,9 +128,15 @@ cmd_build_debian_darksite() {
     # Darksite cache is arch-scoped — aarch64 and amd64 packages don't mix.
     local darksite_dir
     case "$ARCH" in
-        x86_64|amd64) _deb_arch="amd64"; darksite_dir="$ROOT/live-build/darksite-debian-cache" ;;
-        aarch64|arm64) _deb_arch="arm64"; darksite_dir="$ROOT/live-build/darksite-debian-cache-arm64" ;;
-        *) die "unsupported ARCH=$ARCH" ;;
+    x86_64 | amd64)
+        _deb_arch="amd64"
+        darksite_dir="$ROOT/live-build/darksite-debian-cache"
+        ;;
+    aarch64 | arm64)
+        _deb_arch="arm64"
+        darksite_dir="$ROOT/live-build/darksite-debian-cache-arm64"
+        ;;
+    *) die "unsupported ARCH=$ARCH" ;;
     esac
     mkdir -p "$darksite_dir"
     log "Building Debian darksite APT mirror (${_deb_arch})..."
@@ -151,9 +162,15 @@ cmd_build_ubuntu_darksite() {
     runtime="$(detect_runtime)"
     local darksite_dir
     case "$ARCH" in
-        x86_64|amd64) _deb_arch="amd64"; darksite_dir="$ROOT/live-build/darksite-ubuntu-cache" ;;
-        aarch64|arm64) _deb_arch="arm64"; darksite_dir="$ROOT/live-build/darksite-ubuntu-cache-arm64" ;;
-        *) die "unsupported ARCH=$ARCH" ;;
+    x86_64 | amd64)
+        _deb_arch="amd64"
+        darksite_dir="$ROOT/live-build/darksite-ubuntu-cache"
+        ;;
+    aarch64 | arm64)
+        _deb_arch="arm64"
+        darksite_dir="$ROOT/live-build/darksite-ubuntu-cache-arm64"
+        ;;
+    *) die "unsupported ARCH=$ARCH" ;;
     esac
     mkdir -p "$darksite_dir"
     log "Building Ubuntu darksite APT mirror (${_deb_arch})..."
@@ -181,9 +198,15 @@ cmd_build_fedora_darksite() {
     local darksite_dir
     local _fed_arch
     case "$ARCH" in
-        x86_64|amd64) _fed_arch="x86_64"; darksite_dir="$ROOT/live-build/darksite-fedora-cache" ;;
-        aarch64|arm64) _fed_arch="aarch64"; darksite_dir="$ROOT/live-build/darksite-fedora-cache-arm64" ;;
-        *) die "unsupported ARCH=$ARCH" ;;
+    x86_64 | amd64)
+        _fed_arch="x86_64"
+        darksite_dir="$ROOT/live-build/darksite-fedora-cache"
+        ;;
+    aarch64 | arm64)
+        _fed_arch="aarch64"
+        darksite_dir="$ROOT/live-build/darksite-fedora-cache-arm64"
+        ;;
+    *) die "unsupported ARCH=$ARCH" ;;
     esac
     mkdir -p "$darksite_dir"
     local fed_release="${FEDORA_RELEASE:-44}"
@@ -243,12 +266,12 @@ cmd_build_ai_docs() {
     if [[ -d "$web_dir" ]]; then
         log "Scraping ${web_dir} HTML pages..."
         local _docs="$ai_dir/kldload-docs.txt"
-        : > "$_docs"
+        : >"$_docs"
         find "$web_dir" -name '*.html' -not -path '*node_modules*' -not -path '*.git*' -not -path '*assets*' | sort | while read -r _f; do
             local _rel="${_f#${web_dir}/}"
-            echo "=== ${_rel} ===" >> "$_docs"
-            perl -0777 -pe 's/<script[^>]*>.*?<\/script>//gsi; s/<style[^>]*>.*?<\/style>//gsi; s/<[^>]+>//g; s/&nbsp;/ /g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&mdash;/—/g; s/&ndash;/–/g; s/&rsquo;/'"'"'/g; s/&lsquo;/'"'"'/g; s/&rdquo;/"/g; s/&ldquo;/"/g; s/&rarr;/→/g; s/&bull;/•/g; s/&#\d+;//g; s/^\s*$//gm' "$_f" >> "$_docs" 2>/dev/null
-            echo "" >> "$_docs"
+            echo "=== ${_rel} ===" >>"$_docs"
+            perl -0777 -pe 's/<script[^>]*>.*?<\/script>//gsi; s/<style[^>]*>.*?<\/style>//gsi; s/<[^>]+>//g; s/&nbsp;/ /g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&mdash;/—/g; s/&ndash;/–/g; s/&rsquo;/'"'"'/g; s/&lsquo;/'"'"'/g; s/&rdquo;/"/g; s/&ldquo;/"/g; s/&rarr;/→/g; s/&bull;/•/g; s/&#\d+;//g; s/^\s*$//gm' "$_f" >>"$_docs" 2>/dev/null
+            echo "" >>"$_docs"
         done
         local _pages _size
         _pages=$(grep -c '^===' "$_docs")
@@ -267,12 +290,12 @@ cmd_build_ai_docs() {
         pdftotext /tmp/kldload-docs-ocr.pdf "$ai_dir/kldload-manual.txt" 2>&1
         rm -f /tmp/kldload-docs-ocr.pdf
         local _lines
-        _lines=$(wc -l < "$ai_dir/kldload-manual.txt")
+        _lines=$(wc -l <"$ai_dir/kldload-manual.txt")
         log "PDF OCR: ${_lines} lines -> kldload-manual.txt"
     elif [[ -n "$_pdf" ]]; then
         log "No ocrmypdf — trying pdftotext directly on $(basename "$_pdf")..."
         pdftotext "$_pdf" "$ai_dir/kldload-manual.txt" 2>&1
-        log "PDF text: $(wc -l < "$ai_dir/kldload-manual.txt") lines"
+        log "PDF text: $(wc -l <"$ai_dir/kldload-manual.txt") lines"
     else
         log "No PDF manual found — skipping"
     fi
@@ -307,9 +330,9 @@ cmd_build() {
     # Switch to the arch-specific builder tag if we're not building x86_64,
     # so `./deploy.sh build` "just works" after the builder image is present.
     case "$ARCH" in
-        aarch64|arm64)
-            BUILDER_IMAGE="${BUILDER_IMAGE%:*}:aarch64"
-            ;;
+    aarch64 | arm64)
+        BUILDER_IMAGE="${BUILDER_IMAGE%:*}:aarch64"
+        ;;
     esac
     log "Building kldload ISO (PROFILE=$PROFILE EDITION=$EDITION ARCH=$ARCH RELEASE=$RELEASE)"
 
@@ -403,9 +426,9 @@ cmd_build() {
         # after Cilium is up. Offline-first; falls back to upstream URL.
         if [[ ! -f "$k8s_manifests/metrics-server.yaml" ]] && command -v curl >/dev/null 2>&1; then
             curl -fsSL "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml" \
-                -o "$k8s_manifests/metrics-server.yaml" 2>/dev/null \
-                && log "metrics-server manifest cached" \
-                || log "WARNING: could not cache metrics-server manifest"
+                -o "$k8s_manifests/metrics-server.yaml" 2>/dev/null &&
+                log "metrics-server manifest cached" ||
+                log "WARNING: could not cache metrics-server manifest"
         fi
         # Cilium chart
         if [[ ! -f "$helm_cache/cilium.tgz" ]]; then
@@ -413,7 +436,7 @@ cmd_build() {
             if command -v helm >/dev/null 2>&1; then
                 helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
                 helm repo update >/dev/null 2>&1 || true
-                helm pull cilium/cilium --version "${CILIUM_VERSION:-1.16.5}" -d "$helm_cache" 2>/dev/null && \
+                helm pull cilium/cilium --version "${CILIUM_VERSION:-1.16.5}" -d "$helm_cache" 2>/dev/null &&
                     mv "$helm_cache"/cilium-*.tgz "$helm_cache/cilium.tgz" 2>/dev/null || true
             elif command -v curl >/dev/null 2>&1; then
                 curl -fsSL "https://helm.cilium.io/cilium-${CILIUM_VERSION:-1.16.5}.tgz" \
@@ -431,28 +454,28 @@ cmd_build() {
         if [[ ! -f "$helm_cache/tetragon.tgz" ]]; then
             log "Caching Tetragon Helm chart..."
             if command -v helm >/dev/null 2>&1; then
-                helm pull cilium/tetragon -d "$helm_cache" 2>/dev/null && \
+                helm pull cilium/tetragon -d "$helm_cache" 2>/dev/null &&
                     mv "$helm_cache"/tetragon-*.tgz "$helm_cache/tetragon.tgz" 2>/dev/null || true
             fi
             if [[ ! -f "$helm_cache/tetragon.tgz" ]] && command -v curl >/dev/null 2>&1; then
                 # Resolve the latest chart version from the Cilium helm repo
                 # index and download the tgz directly — no helm CLI required.
                 local _tg_ver
-                _tg_ver="$(curl -fsSL --max-time 10 https://helm.cilium.io/index.yaml 2>/dev/null \
-                    | awk '/^  - name: tetragon$/{f=1;next} f && /version: /{print $2; exit}' \
-                    | tr -d '\r')"
+                _tg_ver="$(curl -fsSL --max-time 10 https://helm.cilium.io/index.yaml 2>/dev/null |
+                    awk '/^  - name: tetragon$/{f=1;next} f && /version: /{print $2; exit}' |
+                    tr -d '\r')"
                 if [[ -n "$_tg_ver" ]]; then
                     curl -fsSL --max-time 60 \
                         -o "$helm_cache/tetragon.tgz" \
-                        "https://helm.cilium.io/tetragon-${_tg_ver}.tgz" 2>/dev/null \
-                        || log "WARNING: Could not download Tetragon chart via curl"
+                        "https://helm.cilium.io/tetragon-${_tg_ver}.tgz" 2>/dev/null ||
+                        log "WARNING: Could not download Tetragon chart via curl"
                 else
                     log "WARNING: Could not resolve Tetragon chart version from helm.cilium.io"
                 fi
             fi
-            [[ -f "$helm_cache/tetragon.tgz" ]] \
-                && log "Tetragon chart cached: $(du -h "$helm_cache/tetragon.tgz" | cut -f1)" \
-                || log "WARNING: Tetragon chart not cached — autodeploy will fall back to online install"
+            [[ -f "$helm_cache/tetragon.tgz" ]] &&
+                log "Tetragon chart cached: $(du -h "$helm_cache/tetragon.tgz" | cut -f1)" ||
+                log "WARNING: Tetragon chart not cached — autodeploy will fall back to online install"
         fi
         # Grafana dashboards (pre-fetched so firstboot never needs internet)
         # 1860  = Node Exporter Full
@@ -466,9 +489,9 @@ cmd_build() {
             local dash_file="$dash_cache/grafana-${id}.json"
             if [[ ! -f "$dash_file" ]] && command -v curl >/dev/null 2>&1; then
                 curl -fsSL "https://grafana.com/api/dashboards/${id}/revisions/latest/download" \
-                    -o "$dash_file" 2>/dev/null \
-                    && log "Grafana dashboard ${id} cached" \
-                    || log "WARNING: Could not cache Grafana dashboard ${id}"
+                    -o "$dash_file" 2>/dev/null &&
+                    log "Grafana dashboard ${id} cached" ||
+                    log "WARNING: Could not cache Grafana dashboard ${id}"
             fi
         done
     fi
@@ -487,8 +510,8 @@ cmd_build() {
     # as qemu-user-binfmt or qemu-user-static packages).
     local _platform=""
     case "$ARCH" in
-        x86_64|amd64) _platform="linux/amd64" ;;
-        aarch64|arm64) _platform="linux/arm64" ;;
+    x86_64 | amd64) _platform="linux/amd64" ;;
+    aarch64 | arm64) _platform="linux/arm64" ;;
     esac
     "$runtime" run -d --privileged \
         --platform "$_platform" \
@@ -523,7 +546,7 @@ cmd_build() {
     if [[ -n "$iso" ]]; then
         local _iso_mtime
         _iso_mtime="$(stat -c %Y "$iso" 2>/dev/null || echo 0)"
-        if (( _iso_mtime < _build_start_epoch )); then
+        if ((_iso_mtime < _build_start_epoch)); then
             log "ERROR: build container exited ${_rc} and no fresh ISO produced"
             log "       latest ISO (${iso}) is older than build start — refusing to claim success"
             die "Build failed — see live-build/logs/build-${PROFILE}-${ARCH}-*.log"
@@ -532,7 +555,7 @@ cmd_build() {
             log "WARNING: build container exited with code ${_rc} but ISO is fresh — continuing"
         fi
         log "ISO built: $iso ($(du -sh "$iso" | cut -f1))"
-        sha256sum "$iso" > "${iso}.sha256"
+        sha256sum "$iso" >"${iso}.sha256"
     else
         die "No ISO found after build (container exit code ${_rc})"
     fi
@@ -721,7 +744,8 @@ cmd_deploy_all() {
     cmd_proxmox_deploy
     log ""
     log "Both VMs deployed. USB burn command:"
-    local iso; iso="$(latest_iso)"
+    local iso
+    iso="$(latest_iso)"
     log "  dd if=$iso of=/dev/sda bs=4M status=progress oflag=sync conv=fsync && sync"
 }
 
@@ -730,51 +754,54 @@ cmd_deploy_all() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 case "${1:-help}" in
-    build)              cmd_build ;;
-    build-ai-appliance) cmd_build_ai_appliance ;;
-    build-debian-darksite) cmd_build_debian_darksite ;;
-    build-ubuntu-darksite) cmd_build_ubuntu_darksite ;;
-    build-fedora-darksite) cmd_build_fedora_darksite ;;
-    build-ollama-darksite) cmd_build_ollama_darksite ;;
-    build-k8s-darksite)
-        # Build Kubernetes + Cilium offline image cache separately.
-        # Normally this runs as part of `build`, but can be triggered
-        # independently to pre-cache images before a full build.
-        log "Building Kubernetes + Cilium offline darksite..."
-        bash "$ROOT/build/darksite/pull-k8s-images.sh" "$ROOT/live-build/config/includes.chroot/root/darksite/k8s-images"
-        mkdir -p "$ROOT/live-build/config/includes.chroot/root/darksite/helm-charts"
-        if command -v helm >/dev/null 2>&1; then
-            helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
-            helm repo update >/dev/null 2>&1 || true
-            helm pull cilium/cilium --version "${CILIUM_VERSION:-1.16.5}" -d "/tmp/cilium-chart" 2>/dev/null
-            mv /tmp/cilium-chart/cilium-*.tgz "$ROOT/live-build/config/includes.chroot/root/darksite/helm-charts/cilium.tgz" 2>/dev/null || true
-            rm -rf /tmp/cilium-chart
-        fi
-        log "K8s darksite ready"
-        ;;
-    build-ai-docs)      cmd_build_ai_docs ;;
-    builder-image)      cmd_builder_image ;;
-    clean)              cmd_clean ;;
-    burn)               cmd_burn ;;
-    full)               cmd_full ;;
-    kvm-deploy)         cmd_kvm_deploy ;;
-    kvm-deploy-bob)     cmd_kvm_deploy_bob ;;
-    proxmox-deploy)     cmd_proxmox_deploy ;;
-    deploy-all)         cmd_deploy_all ;;
-    smoke-test)
-        # Full-loop install smoke test in KVM (boot ISO → headless install
-        # → reboot → run tests/smoke-auto.sh on the installed target).
-        # Closes the gap between `build` and `tests/smoke-*.sh`.
-        shift
-        [[ $# -eq 2 ]] || { echo "usage: $0 smoke-test <distro> <profile>" >&2; exit 64; }
-        bash "$ROOT/tests/lifecycle.sh" "$@"
-        ;;
-    smoke-build)
-        # Static checks on the just-built ISO (file exists, fresh, sane size).
-        bash "$ROOT/tests/smoke-build.sh"
-        ;;
-    help|*)
-        cat <<EOF
+build) cmd_build ;;
+build-ai-appliance) cmd_build_ai_appliance ;;
+build-debian-darksite) cmd_build_debian_darksite ;;
+build-ubuntu-darksite) cmd_build_ubuntu_darksite ;;
+build-fedora-darksite) cmd_build_fedora_darksite ;;
+build-ollama-darksite) cmd_build_ollama_darksite ;;
+build-k8s-darksite)
+    # Build Kubernetes + Cilium offline image cache separately.
+    # Normally this runs as part of `build`, but can be triggered
+    # independently to pre-cache images before a full build.
+    log "Building Kubernetes + Cilium offline darksite..."
+    bash "$ROOT/build/darksite/pull-k8s-images.sh" "$ROOT/live-build/config/includes.chroot/root/darksite/k8s-images"
+    mkdir -p "$ROOT/live-build/config/includes.chroot/root/darksite/helm-charts"
+    if command -v helm >/dev/null 2>&1; then
+        helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+        helm repo update >/dev/null 2>&1 || true
+        helm pull cilium/cilium --version "${CILIUM_VERSION:-1.16.5}" -d "/tmp/cilium-chart" 2>/dev/null
+        mv /tmp/cilium-chart/cilium-*.tgz "$ROOT/live-build/config/includes.chroot/root/darksite/helm-charts/cilium.tgz" 2>/dev/null || true
+        rm -rf /tmp/cilium-chart
+    fi
+    log "K8s darksite ready"
+    ;;
+build-ai-docs) cmd_build_ai_docs ;;
+builder-image) cmd_builder_image ;;
+clean) cmd_clean ;;
+burn) cmd_burn ;;
+full) cmd_full ;;
+kvm-deploy) cmd_kvm_deploy ;;
+kvm-deploy-bob) cmd_kvm_deploy_bob ;;
+proxmox-deploy) cmd_proxmox_deploy ;;
+deploy-all) cmd_deploy_all ;;
+smoke-test)
+    # Full-loop install smoke test in KVM (boot ISO → headless install
+    # → reboot → run tests/smoke-auto.sh on the installed target).
+    # Closes the gap between `build` and `tests/smoke-*.sh`.
+    shift
+    [[ $# -eq 2 ]] || {
+        echo "usage: $0 smoke-test <distro> <profile>" >&2
+        exit 64
+    }
+    bash "$ROOT/tests/lifecycle.sh" "$@"
+    ;;
+smoke-build)
+    # Static checks on the just-built ISO (file exists, fresh, sane size).
+    bash "$ROOT/tests/smoke-build.sh"
+    ;;
+help | *)
+    cat <<EOF
 kldload deploy.sh — build + deploy pipeline for kldloadOS
 
 Usage: ./deploy.sh <command>
@@ -831,5 +858,5 @@ Examples:
   ./deploy.sh kvm-deploy                     # Test in local KVM
   ./deploy.sh burn                           # Write to USB
 EOF
-        ;;
+    ;;
 esac

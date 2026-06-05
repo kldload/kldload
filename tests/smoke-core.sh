@@ -9,7 +9,8 @@ source "${SCRIPT_DIR}/lib-test.sh"
 
 DISTRO=$(detect_distro)
 
-export TERM=xterm; clear
+export TERM=xterm
+clear
 printf "\e[1;36m╔══════════════════════════════════════════════════════════╗\e[0m\n"
 printf "\e[1;36m║  kldloadOS Smoke Test — CORE profile                     ║\e[0m\n"
 printf "\e[1;36m╚══════════════════════════════════════════════════════════╝\e[0m\n"
@@ -47,7 +48,8 @@ test_dataset "rpool/var/log exists" "rpool/var/log"
 test_dataset "rpool/srv exists" "rpool/srv"
 
 DATASET_COUNT=$(zfs list -H -o name 2>/dev/null | wc -l)
-if [[ $DATASET_COUNT -ge 10 ]]; then _pass "Dataset count ($DATASET_COUNT >= 10)"
+if [[ $DATASET_COUNT -ge 10 ]]; then
+    _pass "Dataset count ($DATASET_COUNT >= 10)"
 else _warn "Dataset count" "only $DATASET_COUNT datasets (expected >= 10)"; fi
 
 test_output_contains "Compression enabled" "zfs get -H -o value compression rpool" "lz4\|zstd\|on"
@@ -66,9 +68,9 @@ test_dir "EFI directory exists" "/boot/efi/EFI"
 
 # Check for ZFSBootMenu
 if find /boot/efi -name "zfsbootmenu*" -o -name "ZFSBootMenu*" -o -name "vmlinuz*" 2>/dev/null | grep -q .; then
-  _pass "ZFSBootMenu/kernel in EFI"
+    _pass "ZFSBootMenu/kernel in EFI"
 else
-  _warn "ZFSBootMenu in EFI" "no ZFSBootMenu or kernel found in /boot/efi"
+    _warn "ZFSBootMenu in EFI" "no ZFSBootMenu or kernel found in /boot/efi"
 fi
 
 test_file "Hostid configured" "/etc/hostid"
@@ -96,34 +98,34 @@ test_succeeds "Default route exists" "ip route show default | grep -q 'default'"
 test_succeeds "DNS resolves" "getent hosts github.com"
 
 if [[ "$DISTRO" == "deb" ]]; then
-  test_service_active "NetworkManager or networkd" "NetworkManager" || test_service_active "systemd-networkd" "systemd-networkd"
+    test_service_active "NetworkManager or networkd" "NetworkManager" || test_service_active "systemd-networkd" "systemd-networkd"
 else
-  test_service_active "NetworkManager running" "NetworkManager"
+    test_service_active "NetworkManager running" "NetworkManager"
 fi
 
 # ── Core Profile Verification (should NOT have k* tools) ────────────────────
 _section "Core Profile Verification"
 
 for tool in kst ksnap kbe kclone kdf kdir kpkg kupgrade kexport krecovery kldload-webui sanoid; do
-  if command -v "$tool" >/dev/null 2>&1; then
-    _fail "$tool absent (core)" "$tool found — should not be in core profile"
-  else
-    _pass "$tool absent (core)"
-  fi
+    if command -v "$tool" >/dev/null 2>&1; then
+        _fail "$tool absent (core)" "$tool found — should not be in core profile"
+    else
+        _pass "$tool absent (core)"
+    fi
 done
 
 # Webui should not be running
 if systemctl is-active kldload-webui >/dev/null 2>&1; then
-  _fail "kldload-webui not running (core)" "webui is active — should not be in core"
+    _fail "kldload-webui not running (core)" "webui is active — should not be in core"
 else
-  _pass "kldload-webui not running (core)"
+    _pass "kldload-webui not running (core)"
 fi
 
 # Sanoid should not be running
 if systemctl is-active sanoid.timer >/dev/null 2>&1; then
-  _fail "sanoid not running (core)" "sanoid.timer is active — should not be in core"
+    _fail "sanoid not running (core)" "sanoid.timer is active — should not be in core"
 else
-  _pass "sanoid not running (core)"
+    _pass "sanoid not running (core)"
 fi
 
 # ── Snapshot Test ────────────────────────────────────────────────────────────
@@ -131,16 +133,16 @@ _section "ZFS Snapshot Test"
 
 SNAP_NAME="smoketest-$(date +%Y%m%d-%H%M%S)"
 if zfs snapshot "rpool@${SNAP_NAME}" 2>/dev/null; then
-  _pass "Can create snapshot (rpool@${SNAP_NAME})"
-  if zfs list -t snapshot "rpool@${SNAP_NAME}" >/dev/null 2>&1; then
-    _pass "Snapshot visible in list"
-  else
-    _fail "Snapshot visible" "snapshot created but not in list"
-  fi
-  zfs destroy "rpool@${SNAP_NAME}" 2>/dev/null
-  _pass "Snapshot destroyed cleanly"
+    _pass "Can create snapshot (rpool@${SNAP_NAME})"
+    if zfs list -t snapshot "rpool@${SNAP_NAME}" >/dev/null 2>&1; then
+        _pass "Snapshot visible in list"
+    else
+        _fail "Snapshot visible" "snapshot created but not in list"
+    fi
+    zfs destroy "rpool@${SNAP_NAME}" 2>/dev/null
+    _pass "Snapshot destroyed cleanly"
 else
-  _fail "Can create snapshot" "zfs snapshot failed"
+    _fail "Can create snapshot" "zfs snapshot failed"
 fi
 
 # ── Debug bundle tool ────────────────────────────────────────────────────────
@@ -149,8 +151,8 @@ fi
 # future regression that drops it from includes.chroot or loses the
 # +x bit is caught before a user actually needs the tool.
 _section "Debug Bundle Tool"
-test_cmd       "kldload-debug-bundle present"      "kldload-debug-bundle"
-test_succeeds  "kldload-debug-bundle --help works" "kldload-debug-bundle --help >/dev/null 2>&1"
+test_cmd "kldload-debug-bundle present" "kldload-debug-bundle"
+test_succeeds "kldload-debug-bundle --help works" "kldload-debug-bundle --help >/dev/null 2>&1"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 summary

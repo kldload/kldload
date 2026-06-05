@@ -144,9 +144,9 @@ test_eq "$POST" "$BASELINE" "owners.count() after recover ($POST) == baseline ($
 # ── 9: Cleanup ───────────────────────────────────────────────────────
 if [[ "$KEEP_DEMO" != "1" ]]; then
     _section "Cleanup — destroy demo Application"
-    echo "y" | kube-demo javaapi_destroy >/tmp/javaapi-destroy.log 2>&1 \
-        && _pass "demo destroyed" \
-        || _warn "smoke-javaapi" "destroy returned non-zero — check /tmp/javaapi-destroy.log"
+    echo "y" | kube-demo javaapi_destroy >/tmp/javaapi-destroy.log 2>&1 &&
+        _pass "demo destroyed" ||
+        _warn "smoke-javaapi" "destroy returned non-zero — check /tmp/javaapi-destroy.log"
 fi
 
 _summary

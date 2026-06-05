@@ -26,7 +26,7 @@ mkdir -p "${REPO_DIR}"
 
 # Core tooling — fedora base image doesn't ship createrepo_c or dnf-plugins-core.
 log "Installing build tooling (createrepo_c, dnf-plugins-core)..."
-dnf install -y --setopt=install_weak_deps=False createrepo_c dnf-plugins-core >/dev/null 2>&1 || \
+dnf install -y --setopt=install_weak_deps=False createrepo_c dnf-plugins-core >/dev/null 2>&1 ||
     log "WARNING: could not install createrepo_c — repo metadata step will fail"
 
 # Enable RPMFusion free + nonfree.
@@ -37,12 +37,12 @@ dnf install -y --setopt=install_weak_deps=False createrepo_c dnf-plugins-core >/
 #             reliable source of akmod-nvidia for current Fedora.)
 if ! rpm -q rpmfusion-free-release 2>/dev/null >/dev/null; then
     log "Adding RPMFusion free repo..."
-    dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${RELEASE}.noarch.rpm" 2>/dev/null || \
+    dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${RELEASE}.noarch.rpm" 2>/dev/null ||
         log "NOTE: RPMFusion free release for fc${RELEASE} not available — may limit package coverage"
 fi
 if ! rpm -q rpmfusion-nonfree-release 2>/dev/null >/dev/null; then
     log "Adding RPMFusion nonfree repo (for akmod-nvidia)..."
-    dnf install -y "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${RELEASE}.noarch.rpm" 2>/dev/null || \
+    dnf install -y "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${RELEASE}.noarch.rpm" 2>/dev/null ||
         log "NOTE: RPMFusion nonfree release for fc${RELEASE} not available — NVIDIA darksite path unavailable"
 fi
 
@@ -54,8 +54,8 @@ fi
 if [[ ! -f /etc/yum.repos.d/nvidia-container-toolkit.repo ]]; then
     log "Adding NVIDIA Container Toolkit repo (distro-agnostic)..."
     curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
-        > /etc/yum.repos.d/nvidia-container-toolkit.repo 2>/dev/null \
-      || log "NOTE: could not fetch nvidia-container-toolkit.repo — GPU-in-container path will fall back to internet at install time"
+        >/etc/yum.repos.d/nvidia-container-toolkit.repo 2>/dev/null ||
+        log "NOTE: could not fetch nvidia-container-toolkit.repo — GPU-in-container path will fall back to internet at install time"
 fi
 
 # Add OpenZFS for Fedora if available. F44 is brand-new (Apr 2026) — the
@@ -80,14 +80,14 @@ if ! rpm -q zfs-release 2>/dev/null >/dev/null; then
             # explicit PKGS_AVAILABLE list, not via Recommends from the repo
             # config RPM. Without this flag, every fresh F44 build fails.
             if dnf install -y --setopt=install_weak_deps=False \
-                   "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_rel}.noarch.rpm" 2>/dev/null; then
+                "https://zfsonlinux.org/fedora/zfs-release-${_rev}.fc${_rel}.noarch.rpm" 2>/dev/null; then
                 log "OpenZFS repo enabled via zfs-release-${_rev}.fc${_rel}"
                 _zfsrel_ok=1
                 break 2
             fi
         done
     done
-    [[ "$_zfsrel_ok" == "1" ]] || \
+    [[ "$_zfsrel_ok" == "1" ]] ||
         log "NOTE: no zfs-release RPM available for fc${RELEASE} or fc43 — target will DKMS-build ZFS from source"
 fi
 
@@ -105,8 +105,8 @@ REPOEOF
 # Add Docker CE (for containerd.io) — fedora-specific repo file
 if [[ ! -f /etc/yum.repos.d/docker-ce.repo ]]; then
     log "Adding Docker CE repo..."
-    dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo 2>/dev/null || \
-    dnf config-manager --add-repo=https://download.docker.com/linux/fedora/docker-ce.repo 2>/dev/null || \
+    dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo 2>/dev/null ||
+        dnf config-manager --add-repo=https://download.docker.com/linux/fedora/docker-ce.repo 2>/dev/null ||
         log "WARNING: could not add Docker CE repo — containerd.io may be missing"
 fi
 
@@ -129,7 +129,7 @@ read_package_set() {
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line//[[:space:]]/}" ]] && continue
         PACKAGES+=("$line")
-    done < "$file"
+    done <"$file"
     log "Loaded package set: $name (from $(dirname "$file" | xargs basename))"
 }
 
@@ -148,7 +148,7 @@ if [[ -f "$_fed_extras_file" ]]; then
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line//[[:space:]]/}" ]] && continue
         PACKAGES+=("$line")
-    done < "$_fed_extras_file"
+    done <"$_fed_extras_file"
     log "Loaded fedora extras: target-fedora-extras ($(grep -cvE '^\s*(#|$)' "$_fed_extras_file") entries)"
 fi
 
@@ -176,7 +176,7 @@ declare -a PKGS_AVAILABLE=()
 declare -a PKGS_MISSING=()
 for _p in "${PKGS_FINAL[@]}"; do
     if dnf repoquery --latest-limit=1 --releasever="${RELEASE}" \
-           --arch="${ARCH},noarch" --qf '%{name}' "$_p" 2>/dev/null | grep -q .; then
+        --arch="${ARCH},noarch" --qf '%{name}' "$_p" 2>/dev/null | grep -q .; then
         PKGS_AVAILABLE+=("$_p")
     else
         PKGS_MISSING+=("$_p")
@@ -199,8 +199,8 @@ log "Downloading ${#PKGS_AVAILABLE[@]} packages (with deps) for Fedora ${RELEASE
 # surface in the build log instead of being swallowed.
 _dl_log="$(mktemp)"
 if ! dnf download --resolve --alldeps --destdir "${REPO_DIR}" \
-        --releasever "${RELEASE}" --arch "${ARCH}" --arch noarch \
-        "${PKGS_AVAILABLE[@]}" >"${_dl_log}" 2>&1; then
+    --releasever "${RELEASE}" --arch "${ARCH}" --arch noarch \
+    "${PKGS_AVAILABLE[@]}" >"${_dl_log}" 2>&1; then
     log "WARNING: dnf download exited non-zero — last 40 lines:"
     tail -40 "${_dl_log}" | sed 's/^/    /' >&2
 fi

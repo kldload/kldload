@@ -22,7 +22,10 @@ DARKSITE_OUT="${DARKSITE_OUT:-/output}"
 MODELS_DIR="${DARKSITE_OUT}/models"
 
 log() { printf '[%s] [darksite-ollama] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
-die() { log "FATAL: $*"; exit 1; }
+die() {
+    log "FATAL: $*"
+    exit 1
+}
 
 mkdir -p "${MODELS_DIR}"
 
@@ -32,7 +35,11 @@ mkdir -p "${MODELS_DIR}"
 # the socket before accepting requests). If serve dies, we dump its log
 # so the build surfaces the actual reason instead of a generic timeout.
 port_listening() {
-    exec 3<>/dev/tcp/127.0.0.1/11434 2>/dev/null && { exec 3<&- ; exec 3>&- ; return 0; }
+    exec 3<>/dev/tcp/127.0.0.1/11434 2>/dev/null && {
+        exec 3<&-
+        exec 3>&-
+        return 0
+    }
     return 1
 }
 

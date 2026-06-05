@@ -21,7 +21,10 @@ APT_POOL="${APT_ROOT}/pool/main"
 APT_DISTS="${APT_ROOT}/dists/${SUITE}/main/binary-${ARCH}"
 
 log() { printf '[%s] [darksite-deb] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
-die() { log "ERROR: $*"; exit 1; }
+die() {
+    log "ERROR: $*"
+    exit 1
+}
 
 # ---------------------------------------------------------------------------
 # Read package sets
@@ -41,8 +44,8 @@ read_package_set() {
         [[ -z "${line//[[:space:]]/}" ]] && continue
         line="${line//\$\{ARCH\}/$ARCH}"
         PACKAGES+=("$line")
-    done < "$file"
-    log "Loaded package set: $name ($(wc -l < "$file") entries)"
+    done <"$file"
+    log "Loaded package set: $name ($(wc -l <"$file") entries)"
 }
 
 read_package_set "live-base"
@@ -74,10 +77,10 @@ apt-get update -q 2>&1 | grep -v '^Get\|^Hit\|^Ign' || true
 # Add required+important priority packages for debootstrap
 log "Adding required+important Debian base packages..."
 mapfile -t PRIORITY_PKGS < <(
-    apt-cache dumpavail 2>/dev/null \
-        | awk '/^Package:/ { pkg=$2 }
-               /^Priority: (required|important)/ { print pkg }' \
-        | sort -u
+    apt-cache dumpavail 2>/dev/null |
+        awk '/^Package:/ { pkg=$2 }
+               /^Priority: (required|important)/ { print pkg }' |
+        sort -u
 )
 log "Priority packages found: ${#PRIORITY_PKGS[@]}"
 PACKAGES+=("${PRIORITY_PKGS[@]}")
@@ -107,9 +110,9 @@ log "Resolving full dependency closure..."
 mapfile -t CLOSURE < <(
     apt-cache depends --recurse --no-recommends --no-suggests \
         --no-conflicts --no-breaks --no-replaces --no-enhances \
-        "${PKGS_FINAL[@]}" 2>/dev/null \
-        | grep '^[[:alpha:]]' \
-        | sort -u
+        "${PKGS_FINAL[@]}" 2>/dev/null |
+        grep '^[[:alpha:]]' |
+        sort -u
 )
 log "Dependency closure: ${#CLOSURE[@]} packages"
 
@@ -135,7 +138,7 @@ if [[ "${#DARKSITE_BLACKLIST[@]}" -gt 0 ]]; then
     for _p in "${CLOSURE[@]}"; do
         [[ -z "${_bl[$_p]:-}" ]] && _filtered+=("$_p")
     done
-    log "Removed $(( ${#CLOSURE[@]} - ${#_filtered[@]} )) blacklisted packages"
+    log "Removed $((${#CLOSURE[@]} - ${#_filtered[@]})) blacklisted packages"
     CLOSURE=("${_filtered[@]}")
 fi
 
@@ -143,16 +146,16 @@ fi
 log "Downloading ${#CLOSURE[@]} packages..."
 _dl_new=0 _dl_skip=0 _dl_fail=0 _dl_idx=0 _dl_total="${#CLOSURE[@]}"
 for _pkg in "${CLOSURE[@]}"; do
-    (( _dl_idx++ )) || true
-    (( _dl_idx % 100 == 0 )) && log "Progress: ${_dl_idx}/${_dl_total} — ${_dl_new} new, ${_dl_skip} cached, ${_dl_fail} skipped"
-    if compgen -G "${APT_POOL}/${_pkg}_*.deb" > /dev/null 2>&1; then
-        (( _dl_skip++ )) || true
+    ((_dl_idx++)) || true
+    ((_dl_idx % 100 == 0)) && log "Progress: ${_dl_idx}/${_dl_total} — ${_dl_new} new, ${_dl_skip} cached, ${_dl_fail} skipped"
+    if compgen -G "${APT_POOL}/${_pkg}_*.deb" >/dev/null 2>&1; then
+        ((_dl_skip++)) || true
         continue
     fi
     (cd "$APT_POOL" && apt-get download "$_pkg" 2>/dev/null) && {
-        (( _dl_new++ )) || true
+        ((_dl_new++)) || true
     } || {
-        (( _dl_fail++ )) || true
+        ((_dl_fail++)) || true
     }
 done
 log "Download complete: ${_dl_new} new, ${_dl_skip} cached, ${_dl_fail} skipped"
@@ -165,7 +168,7 @@ done < <(find "$APT_POOL" -maxdepth 1 -name '*%3a*' -print0)
 
 DEB_COUNT=0
 while IFS= read -r -d '' _; do
-    (( DEB_COUNT++ )) || true
+    ((DEB_COUNT++)) || true
 done < <(find "$APT_POOL" -maxdepth 1 -name "*.deb" -print0)
 
 log "Darksite pool: ${DEB_COUNT} packages"
@@ -176,22 +179,22 @@ log "Generating Packages index..."
 (
     cd "$APT_ROOT"
     dpkg-scanpackages --multiversion pool/main 2>/dev/null \
-        > "dists/${SUITE}/main/binary-${ARCH}/Packages" \
-        || dpkg-scanpackages pool/main \
-        > "dists/${SUITE}/main/binary-${ARCH}/Packages"
+        >"dists/${SUITE}/main/binary-${ARCH}/Packages" ||
+        dpkg-scanpackages pool/main \
+            >"dists/${SUITE}/main/binary-${ARCH}/Packages"
 )
-gzip -9c "${APT_DISTS}/Packages" > "${APT_DISTS}/Packages.gz"
+gzip -9c "${APT_DISTS}/Packages" >"${APT_DISTS}/Packages.gz"
 
 # Generate Release file
 log "Generating Release file..."
 _size() { stat -c%s "$1"; }
-_md5()  { md5sum "$1" | awk '{print $1}'; }
+_md5() { md5sum "$1" | awk '{print $1}'; }
 _sha256() { sha256sum "$1" | awk '{print $1}'; }
 
 PKG_PATH="dists/${SUITE}/main/binary-${ARCH}/Packages"
 PKG_GZ_PATH="dists/${SUITE}/main/binary-${ARCH}/Packages.gz"
 
-cat > "${APT_ROOT}/dists/${SUITE}/Release" <<EOF
+cat >"${APT_ROOT}/dists/${SUITE}/Release" <<EOF
 Origin: kldload Darksite
 Label: kldload
 Suite: ${SUITE}

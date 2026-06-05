@@ -39,23 +39,23 @@ ARCH="${ARCH:-x86_64}"
 # Helm, Go releases, Alpine repos all spell "aarch64" differently — centralise
 # the translation so the rest of the script stays readable.
 case "$ARCH" in
-    x86_64)
-        ARCH_EFI="x64"         # grub2-efi-x64, shim-x64, BOOTX64.EFI
-        ARCH_DEB="amd64"       # helm linux-amd64.tar.gz, Debian arm64 vs amd64
-        ARCH_DKMS="x86_64"     # kernel DKMS ARCH= value
-        ARCH_ALPINE="x86_64"
-        ;;
-    aarch64|arm64)
-        ARCH="aarch64"         # canonical name inside the script
-        ARCH_EFI="aa64"        # grub2-efi-aa64, shim-aa64, BOOTAA64.EFI
-        ARCH_DEB="arm64"
-        ARCH_DKMS="arm64"
-        ARCH_ALPINE="aarch64"
-        ;;
-    *)
-        echo "ERROR: unsupported ARCH=$ARCH (x86_64 or aarch64 only)" >&2
-        exit 1
-        ;;
+x86_64)
+    ARCH_EFI="x64"     # grub2-efi-x64, shim-x64, BOOTX64.EFI
+    ARCH_DEB="amd64"   # helm linux-amd64.tar.gz, Debian arm64 vs amd64
+    ARCH_DKMS="x86_64" # kernel DKMS ARCH= value
+    ARCH_ALPINE="x86_64"
+    ;;
+aarch64 | arm64)
+    ARCH="aarch64"  # canonical name inside the script
+    ARCH_EFI="aa64" # grub2-efi-aa64, shim-aa64, BOOTAA64.EFI
+    ARCH_DEB="arm64"
+    ARCH_DKMS="arm64"
+    ARCH_ALPINE="aarch64"
+    ;;
+*)
+    echo "ERROR: unsupported ARCH=$ARCH (x86_64 or aarch64 only)" >&2
+    exit 1
+    ;;
 esac
 OUTPUT_DIR="${OUTPUT_DIR:-/build/live-build/output}"
 LOG_DIR="${LOG_DIR:-/build/live-build/logs}"
@@ -70,7 +70,10 @@ ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
 log() { printf '[%s] [build-iso] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
-die() { printf '[%s] [build-iso] ERROR: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
+die() {
+    printf '[%s] [build-iso] ERROR: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
+    exit 1
+}
 
 log "Starting kldload ISO build."
 log "Profile:    $PROFILE"
@@ -225,7 +228,7 @@ PKGS+=(
 # Set up repos inside the installroot
 mkdir -p "${ROOTFS}/etc/yum.repos.d" "${ROOTFS}/etc/pki/rpm-gpg"
 
-cat > "${ROOTFS}/etc/yum.repos.d/fedora.repo" << 'FEDOREPO'
+cat >"${ROOTFS}/etc/yum.repos.d/fedora.repo" <<'FEDOREPO'
 [fedora]
 name=Fedora 44 - $basearch
 metalink=https://mirrors.fedoraproject.org/metalink?repo=fedora-$releasever&arch=$basearch
@@ -250,7 +253,7 @@ FEDOREPO
 # The hardcoded `fedora/43/` path is intentional and stays until
 # zfsonlinux publishes fc44 binaries — at which point flip to
 # `fedora/$releasever/`.
-cat > "${ROOTFS}/etc/yum.repos.d/zfs.repo" << 'ZFSREPO'
+cat >"${ROOTFS}/etc/yum.repos.d/zfs.repo" <<'ZFSREPO'
 [zfs]
 name=OpenZFS 2.4 for Fedora (using fc43 packages — fc44 not yet published)
 baseurl=http://download.zfsonlinux.org/2.4/fedora/43/$basearch/
@@ -302,7 +305,7 @@ log "Root filesystem bootstrapped: $(du -sh "$ROOTFS" | cut -f1)"
 if [[ "$EDITION" != "core" ]]; then
     log "Installing sanoid from GitHub..."
     SANOID_VER="2.2.0"
-    curl -sL "https://github.com/jimsalterjrs/sanoid/archive/refs/tags/v${SANOID_VER}.tar.gz" | \
+    curl -sL "https://github.com/jimsalterjrs/sanoid/archive/refs/tags/v${SANOID_VER}.tar.gz" |
         tar xz -C /tmp/
     cp "/tmp/sanoid-${SANOID_VER}/sanoid" "${ROOTFS}/usr/local/sbin/sanoid"
     cp "/tmp/sanoid-${SANOID_VER}/syncoid" "${ROOTFS}/usr/local/sbin/syncoid"
@@ -323,11 +326,11 @@ if [[ "$EDITION" != "core" ]]; then
     # aarch64 "unknown-linux-gnu" release tarballs — naming matches rustc
     # targets exactly, so $ARCH works as-is.
     log "Installing eza from GitHub..."
-    EZA_VER="$(curl -fsSL https://api.github.com/repos/eza-community/eza/releases/latest 2>/dev/null \
-        | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/')" || true
+    EZA_VER="$(curl -fsSL https://api.github.com/repos/eza-community/eza/releases/latest 2>/dev/null |
+        grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/')" || true
     if [[ -n "$EZA_VER" ]]; then
-        curl -fsSL "https://github.com/eza-community/eza/releases/download/v${EZA_VER}/eza_${ARCH}-unknown-linux-gnu.tar.gz" \
-            | tar xz -C "${ROOTFS}/usr/local/bin/" 2>/dev/null || \
+        curl -fsSL "https://github.com/eza-community/eza/releases/download/v${EZA_VER}/eza_${ARCH}-unknown-linux-gnu.tar.gz" |
+            tar xz -C "${ROOTFS}/usr/local/bin/" 2>/dev/null ||
             log "WARNING: eza ${EZA_VER} download failed for ${ARCH} — skipping"
         chmod +x "${ROOTFS}/usr/local/bin/eza" 2>/dev/null || true
         log "eza ${EZA_VER} installed."
@@ -344,8 +347,8 @@ if [[ "$EDITION" != "core" ]]; then
     # (console tab just won't work).
     log "Installing ttyd (browser terminal) from GitHub..."
     case "$ARCH" in
-        x86_64)  _ttyd_arch="x86_64" ;;
-        aarch64) _ttyd_arch="aarch64" ;;
+    x86_64) _ttyd_arch="x86_64" ;;
+    aarch64) _ttyd_arch="aarch64" ;;
     esac
     if curl -fsSL "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.${_ttyd_arch}" \
         -o "${ROOTFS}/usr/local/bin/ttyd" 2>/dev/null; then
@@ -358,16 +361,16 @@ if [[ "$EDITION" != "core" ]]; then
     # k9s — terminal-based k8s UI, runs inside ttyd's tmux session. Same
     # lazy fallback: console page shows a shell if k9s is missing.
     log "Installing k9s from GitHub..."
-    K9S_VERSION="$(curl -fsSL https://api.github.com/repos/derailed/k9s/releases/latest 2>/dev/null \
-        | grep '"tag_name"' | head -1 | sed 's/.*"\([^"]*\)".*/\1/')" || true
+    K9S_VERSION="$(curl -fsSL https://api.github.com/repos/derailed/k9s/releases/latest 2>/dev/null |
+        grep '"tag_name"' | head -1 | sed 's/.*"\([^"]*\)".*/\1/')" || true
     case "$ARCH" in
-        x86_64)  _k9s_arch="amd64" ;;
-        aarch64) _k9s_arch="arm64" ;;
+    x86_64) _k9s_arch="amd64" ;;
+    aarch64) _k9s_arch="arm64" ;;
     esac
     if [[ -n "$K9S_VERSION" ]]; then
         curl -fsSL "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_${_k9s_arch}.tar.gz" \
-            2>/dev/null | tar xz -C "${ROOTFS}/usr/local/bin/" k9s 2>/dev/null && \
-            chmod +x "${ROOTFS}/usr/local/bin/k9s" && log "k9s ${K9S_VERSION} installed." || \
+            2>/dev/null | tar xz -C "${ROOTFS}/usr/local/bin/" k9s 2>/dev/null &&
+            chmod +x "${ROOTFS}/usr/local/bin/k9s" && log "k9s ${K9S_VERSION} installed." ||
             log "WARNING: k9s extract failed"
     else
         log "WARNING: could not resolve k9s version — skipping"
@@ -411,15 +414,15 @@ if [[ "$EDITION" != "core" ]]; then
     log "Installing process-exporter from GitHub..."
     PROCESS_EXPORTER_VERSION="${PROCESS_EXPORTER_VERSION:-0.8.7}"
     case "$ARCH" in
-        x86_64)  _pe_arch="amd64" ;;
-        aarch64) _pe_arch="arm64" ;;
+    x86_64) _pe_arch="amd64" ;;
+    aarch64) _pe_arch="arm64" ;;
     esac
     if _fetch_with_retry \
         "https://github.com/ncabatoff/process-exporter/releases/download/v${PROCESS_EXPORTER_VERSION}/process-exporter-${PROCESS_EXPORTER_VERSION}.linux-${_pe_arch}.tar.gz" \
         /tmp/process-exporter.tar.gz "process-exporter"; then
         tar -xzf /tmp/process-exporter.tar.gz -C /tmp/
-        install -m 755 /tmp/process-exporter-*/process-exporter "${ROOTFS}/usr/local/bin/process-exporter" \
-            || die "process-exporter extract failed — tarball layout changed?"
+        install -m 755 /tmp/process-exporter-*/process-exporter "${ROOTFS}/usr/local/bin/process-exporter" ||
+            die "process-exporter extract failed — tarball layout changed?"
         rm -rf /tmp/process-exporter.tar.gz /tmp/process-exporter-*
         log "process-exporter ${PROCESS_EXPORTER_VERSION} installed."
     else
@@ -436,17 +439,17 @@ if [[ "$EDITION" != "core" ]]; then
     log "Installing libvirt-exporter from GitHub..."
     LIBVIRT_EXPORTER_VERSION="${LIBVIRT_EXPORTER_VERSION:-2.3.1}"
     case "$ARCH" in
-        x86_64)  _lvexp_arch="amd64" ;;
-        aarch64) _lvexp_arch="arm64" ;;
+    x86_64) _lvexp_arch="amd64" ;;
+    aarch64) _lvexp_arch="arm64" ;;
     esac
     if _fetch_with_retry \
         "https://github.com/inovex/prometheus-libvirt-exporter/releases/download/v${LIBVIRT_EXPORTER_VERSION}/prometheus-libvirt-exporter-${LIBVIRT_EXPORTER_VERSION}.linux-${_lvexp_arch}.tar.gz" \
         /tmp/libvirt-exporter.tar.gz "libvirt-exporter"; then
         tar -xzf /tmp/libvirt-exporter.tar.gz -C /tmp/
         # Tarball ships the binary as `prometheus-libvirt-exporter` at top-level.
-        install -m 755 /tmp/prometheus-libvirt-exporter "${ROOTFS}/usr/local/bin/libvirt-exporter" 2>/dev/null \
-            || install -m 755 /tmp/prometheus-libvirt-exporter-*/prometheus-libvirt-exporter "${ROOTFS}/usr/local/bin/libvirt-exporter" 2>/dev/null \
-            || die "libvirt-exporter extract layout unexpected — release tarball may have changed"
+        install -m 755 /tmp/prometheus-libvirt-exporter "${ROOTFS}/usr/local/bin/libvirt-exporter" 2>/dev/null ||
+            install -m 755 /tmp/prometheus-libvirt-exporter-*/prometheus-libvirt-exporter "${ROOTFS}/usr/local/bin/libvirt-exporter" 2>/dev/null ||
+            die "libvirt-exporter extract layout unexpected — release tarball may have changed"
         rm -rf /tmp/libvirt-exporter.tar.gz /tmp/prometheus-libvirt-exporter*
         log "libvirt-exporter ${LIBVIRT_EXPORTER_VERSION} installed."
     else
@@ -503,7 +506,7 @@ if [[ -n "$ZFS_VER" ]]; then
     fi
 
     chroot "$ROOTFS" dkms install -m zfs -v "$ZFS_VER" -k "$KVER" --force \
-        2>&1 | tee -a "$LOG_FILE" || \
+        2>&1 | tee -a "$LOG_FILE" ||
         log "WARNING: DKMS install failed"
 fi
 
@@ -528,7 +531,7 @@ chmod 0600 "${MOK_DIR}/mok.key" 2>/dev/null || true
 SIGN_FILE="${ROOTFS}/usr/src/kernels/${KVER}/scripts/sign-file"
 if [[ -x "$SIGN_FILE" && -f "${MOK_DIR}/mok.key" ]]; then
     log "Signing ZFS kernel modules with MOK key..."
-_signed=0 || true
+    _signed=0 || true
     while IFS= read -r _ko; do
         [[ -f "$_ko" ]] || continue
         if [[ "$_ko" == *.xz ]]; then
@@ -556,11 +559,11 @@ _signed=0 || true
                 ((_signed++)) || true
             fi
         else
-            "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko" 2>/dev/null && \
+            "$SIGN_FILE" sha256 "${MOK_DIR}/mok.key" "${MOK_DIR}/mok.pub" "$_ko" 2>/dev/null &&
                 log "  Signed: $(basename "$_ko")" && ((_signed++)) || true || true
         fi
     done < <(find "${ROOTFS}/lib/modules/${KVER}/extra" "${ROOTFS}/lib/modules/${KVER}/weak-updates" \
-                   -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' 2>/dev/null)
+        -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' 2>/dev/null)
     log "Signed ${_signed} ZFS/SPL kernel modules"
 
     # Embed MOK public key in the live ISO for the installed system to use
@@ -615,7 +618,7 @@ if [[ "$EDITION" != "core" && "$ARCH" == "x86_64" ]]; then
         # pacman-static looks for /etc/ssl/certs/ca-certificates.crt (Arch path)
         # CentOS uses /etc/pki/tls/certs/ — symlink so TLS verification works
         ln -sf /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem "${ROOTFS}/etc/pki/tls/certs/ca-certificates.crt"
-        printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n' > "${ROOTFS}/etc/pacman.d/mirrorlist"
+        printf 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n' >"${ROOTFS}/etc/pacman.d/mirrorlist"
         log "pacman-static installed: $(chroot "$ROOTFS" /usr/bin/pacman --version 2>&1 | head -1)"
     fi
 elif [[ "$ARCH" != "x86_64" ]]; then
@@ -629,8 +632,8 @@ fi
 if [[ "$EDITION" != "core" ]]; then
     log "Downloading apk-tools-static for Alpine support (${ARCH_ALPINE})..."
     _apk_ver=""
-    _apk_ver="$(curl -sfL "https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/${ARCH_ALPINE}/" \
-        | grep -oP 'apk-tools-static-\K[0-9][^"]*(?=\.apk)' | head -1)" || true
+    _apk_ver="$(curl -sfL "https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/${ARCH_ALPINE}/" |
+        grep -oP 'apk-tools-static-\K[0-9][^"]*(?=\.apk)' | head -1)" || true
     if [[ -n "$_apk_ver" ]]; then
         curl -sfL "https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/${ARCH_ALPINE}/apk-tools-static-${_apk_ver}.apk" \
             -o /tmp/apk-tools-static.apk || {
@@ -656,7 +659,7 @@ fi
 log "Configuring live system..."
 
 # Hostname
-echo "kldload" > "${ROOTFS}/etc/hostname"
+echo "kldload" >"${ROOTFS}/etc/hostname"
 
 # Live user
 chroot "$ROOTFS" useradd -m -G wheel -s /bin/bash live 2>/dev/null || true
@@ -664,12 +667,12 @@ echo "live:live" | chroot "$ROOTFS" chpasswd
 echo "root:kldload" | chroot "$ROOTFS" chpasswd
 
 # Passwordless sudo for wheel
-echo "%wheel ALL=(ALL) NOPASSWD: ALL" > "${ROOTFS}/etc/sudoers.d/wheel-nopasswd"
+echo "%wheel ALL=(ALL) NOPASSWD: ALL" >"${ROOTFS}/etc/sudoers.d/wheel-nopasswd"
 chmod 440 "${ROOTFS}/etc/sudoers.d/wheel-nopasswd"
 
 # Enable SSH password auth on the live ISO (CentOS 9 disables it by default)
 mkdir -p "${ROOTFS}/etc/ssh/sshd_config.d"
-cat > "${ROOTFS}/etc/ssh/sshd_config.d/50-kldload-live.conf" <<'SSHEOF'
+cat >"${ROOTFS}/etc/ssh/sshd_config.d/50-kldload-live.conf" <<'SSHEOF'
 PasswordAuthentication yes
 PermitRootLogin yes
 SSHEOF
@@ -683,7 +686,7 @@ chroot "$ROOTFS" systemctl set-default graphical.target 2>/dev/null || true
 
 # GDM autologin for live session — boots straight to desktop with no login prompt
 mkdir -p "${ROOTFS}/etc/gdm"
-cat > "${ROOTFS}/etc/gdm/custom.conf" << 'GDMCONF'
+cat >"${ROOTFS}/etc/gdm/custom.conf" <<'GDMCONF'
 [daemon]
 AutomaticLoginEnable=True
 AutomaticLogin=live
@@ -707,7 +710,7 @@ if [[ "$EDITION" != "core" && "${BOB_LIVE:-}" != "1" ]]; then
     # cert into Firefox's NSS DB (via certutil from nss-tools) so the
     # installer page loads without a "Warning: Potential Security Risk"
     # prompt. Falls back silently if certutil or cert are missing.
-    cat > "${ROOTFS}/etc/xdg/autostart/kldload-webui.desktop" << 'AUTOSTART'
+    cat >"${ROOTFS}/etc/xdg/autostart/kldload-webui.desktop" <<'AUTOSTART'
 [Desktop Entry]
 Type=Application
 Name=kldload Web UI
@@ -718,7 +721,7 @@ AUTOSTART
 
     # Firefox policy — suppress first-run tabs, privacy notice, default browser check
     mkdir -p "${ROOTFS}/usr/lib64/firefox/distribution"
-    cat > "${ROOTFS}/usr/lib64/firefox/distribution/policies.json" << 'FFPOLICY'
+    cat >"${ROOTFS}/usr/lib64/firefox/distribution/policies.json" <<'FFPOLICY'
 {
   "policies": {
     "OverrideFirstRunPage": "",
@@ -761,24 +764,24 @@ FFPOLICY
     # the GNOME system default. Fixed by copying from source and writing the
     # live-session quirks as a separate file with a higher numeric prefix.
     mkdir -p "${ROOTFS}/etc/dconf/db/local.d" "${ROOTFS}/etc/dconf/profile"
-    cat > "${ROOTFS}/etc/dconf/profile/user" << 'DCONFPROFILE'
+    cat >"${ROOTFS}/etc/dconf/profile/user" <<'DCONFPROFILE'
 user-db:user
 system-db:local
 DCONFPROFILE
     # Copy the real desktop + terminal-default files from source.
     if [[ -f /build/live-build/config/includes.chroot/etc/dconf/db/local.d/00-kldload-desktop ]]; then
         cp /build/live-build/config/includes.chroot/etc/dconf/db/local.d/00-kldload-desktop \
-           "${ROOTFS}/etc/dconf/db/local.d/00-kldload-desktop"
+            "${ROOTFS}/etc/dconf/db/local.d/00-kldload-desktop"
     fi
     if [[ -f /build/live-build/config/includes.chroot/etc/dconf/db/local.d/01-kldload-terminal-default ]]; then
         cp /build/live-build/config/includes.chroot/etc/dconf/db/local.d/01-kldload-terminal-default \
-           "${ROOTFS}/etc/dconf/db/local.d/01-kldload-terminal-default"
+            "${ROOTFS}/etc/dconf/db/local.d/01-kldload-terminal-default"
     fi
     # Live-ISO-only overrides — idle=0 to keep the session up indefinitely
     # during install, no auto-lock, suppress GNOME welcome dialog. These
     # ride alongside (not on top of) the source files thanks to the 99-
     # prefix; dconf merges them at db build time.
-    cat > "${ROOTFS}/etc/dconf/db/local.d/99-kldload-live-session" << 'DCONFLIVE'
+    cat >"${ROOTFS}/etc/dconf/db/local.d/99-kldload-live-session" <<'DCONFLIVE'
 # kldload — live-ISO-only quirks. Suppresses idle, lock, welcome dialog
 # so the operator can leave the live session open while watching a long
 # install. Installed-system overrides live in 00-kldload-desktop.
@@ -799,7 +802,7 @@ welcome-dialog-last-shown-version='99'
 DCONFLIVE
     # Lock these settings so the user can't accidentally re-enable
     mkdir -p "${ROOTFS}/etc/dconf/db/local.d/locks"
-    cat > "${ROOTFS}/etc/dconf/db/local.d/locks/kldload-live" << 'LOCKS'
+    cat >"${ROOTFS}/etc/dconf/db/local.d/locks/kldload-live" <<'LOCKS'
 /org/gnome/desktop/session/idle-delay
 /org/gnome/desktop/screensaver/lock-enabled
 /org/gnome/desktop/screensaver/idle-activation-enabled
@@ -814,7 +817,7 @@ LOCKS
 
     # Method 3: xset/xorg — disable DPMS and screensaver at X level
     mkdir -p "${ROOTFS}/etc/X11/xinit/xinitrc.d"
-    cat > "${ROOTFS}/etc/X11/xinit/xinitrc.d/99-no-blank.sh" << 'XSET'
+    cat >"${ROOTFS}/etc/X11/xinit/xinitrc.d/99-no-blank.sh" <<'XSET'
 #!/bin/sh
 xset s off s noblank 2>/dev/null || true
 xset -dpms 2>/dev/null || true
@@ -823,12 +826,12 @@ XSET
 
     # Method 4: kernel — disable console blanking
     mkdir -p "${ROOTFS}/etc/sysctl.d"
-    echo "kernel.consoleblank=0" > "${ROOTFS}/etc/sysctl.d/99-no-blank.conf"
+    echo "kernel.consoleblank=0" >"${ROOTFS}/etc/sysctl.d/99-no-blank.conf"
 fi
 
 # Edition marker — lets runtime tools distinguish free vs core edition
 mkdir -p "${ROOTFS}/etc/kldload"
-echo "$EDITION" > "${ROOTFS}/etc/kldload/edition"
+echo "$EDITION" >"${ROOTFS}/etc/kldload/edition"
 
 # Build ID generation — produces a version string like "1.0.4-b47" where:
 #   - VERSION is the release version from kldload.env (e.g., 1.0.4)
@@ -839,16 +842,16 @@ echo "$EDITION" > "${ROOTFS}/etc/kldload/edition"
 GIT_SHA=$(git -C /build rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_NUM=$(git -C /build log --oneline --grep="^bump.*${VERSION}\|^bump.*version" 2>/dev/null | head -1 | cut -d' ' -f1)
 if [[ -n "$BUILD_NUM" ]]; then
-  BUILD_NUM=$(git -C /build rev-list --count "${BUILD_NUM}..HEAD" 2>/dev/null || echo "0")
+    BUILD_NUM=$(git -C /build rev-list --count "${BUILD_NUM}..HEAD" 2>/dev/null || echo "0")
 else
-  BUILD_NUM=$(git -C /build rev-list --count HEAD 2>/dev/null || echo "0")
+    BUILD_NUM=$(git -C /build rev-list --count HEAD 2>/dev/null || echo "0")
 fi
-echo "$GIT_SHA" > "${ROOTFS}/etc/kldload-build-sha"
-echo "${VERSION}-b${BUILD_NUM}" > "${ROOTFS}/etc/kldload-build-id"
+echo "$GIT_SHA" >"${ROOTFS}/etc/kldload-build-sha"
+echo "${VERSION}-b${BUILD_NUM}" >"${ROOTFS}/etc/kldload-build-id"
 log "Build ID: ${VERSION}-b${BUILD_NUM} (${GIT_SHA})"
 
 # OS branding
-cat > "${ROOTFS}/etc/os-release" << OSREL
+cat >"${ROOTFS}/etc/os-release" <<OSREL
 PRETTY_NAME="kldload (Fedora 44)"
 NAME="kldload"
 VERSION_ID="44"
@@ -919,28 +922,28 @@ if [[ "$EDITION" != "core" ]]; then
     log "Bob: building whisper.cpp (voice input)..."
     _whisper_tmp="$(mktemp -d)"
     if git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git \
-            "${_whisper_tmp}/whisper.cpp" >> "$LOG_FILE" 2>&1; then
+        "${_whisper_tmp}/whisper.cpp" >>"$LOG_FILE" 2>&1; then
         cp -a "${_whisper_tmp}/whisper.cpp" "${ROOTFS}/opt/whisper.cpp"
         mount --bind /proc "${ROOTFS}/proc" 2>/dev/null || true
-        mount --bind /sys  "${ROOTFS}/sys"  2>/dev/null || true
-        mount --bind /dev  "${ROOTFS}/dev"  2>/dev/null || true
+        mount --bind /sys "${ROOTFS}/sys" 2>/dev/null || true
+        mount --bind /dev "${ROOTFS}/dev" 2>/dev/null || true
         if chroot "${ROOTFS}" bash -c \
             "cd /opt/whisper.cpp && cmake -B build && cmake --build build --config Release -j\$(nproc)" \
-            >> "$LOG_FILE" 2>&1; then
+            >>"$LOG_FILE" 2>&1; then
             log "Bob: whisper.cpp built"
         else
             log "Bob: WARNING — whisper.cpp build failed (voice input disabled)"
         fi
         umount "${ROOTFS}/proc" 2>/dev/null || true
-        umount "${ROOTFS}/sys"  2>/dev/null || true
-        umount "${ROOTFS}/dev"  2>/dev/null || true
+        umount "${ROOTFS}/sys" 2>/dev/null || true
+        umount "${ROOTFS}/dev" 2>/dev/null || true
         # Download base.en model (~150 MB)
         mkdir -p "${ROOTFS}/opt/whisper.cpp/models"
         curl -fsSL -o "${ROOTFS}/opt/whisper.cpp/models/ggml-base.en.bin" \
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
-            >> "$LOG_FILE" 2>&1 \
-            && log "Bob: whisper model downloaded" \
-            || log "Bob: WARNING — whisper model download failed"
+            >>"$LOG_FILE" 2>&1 &&
+            log "Bob: whisper model downloaded" ||
+            log "Bob: WARNING — whisper model download failed"
     else
         log "Bob: WARNING — whisper.cpp clone failed (offline build?)"
     fi
@@ -958,13 +961,13 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -d /build/live-build/config/includes.chroot/opt/lh/src ]]; then
         mkdir -p "${ROOTFS}/opt/lh"
         cp -r /build/live-build/config/includes.chroot/opt/lh/src \
-              "${ROOTFS}/opt/lh/src"
+            "${ROOTFS}/opt/lh/src"
     fi
     if [[ -d "${ROOTFS}/opt/lh/src" ]]; then
         log "Building LogHog (lh)..."
         mount --bind /proc "${ROOTFS}/proc" 2>/dev/null || true
-        mount --bind /sys  "${ROOTFS}/sys"  2>/dev/null || true
-        mount --bind /dev  "${ROOTFS}/dev"  2>/dev/null || true
+        mount --bind /sys "${ROOTFS}/sys" 2>/dev/null || true
+        mount --bind /dev "${ROOTFS}/dev" 2>/dev/null || true
         if chroot "${ROOTFS}" bash -c "
             set -e
             # json-c-devel + readline-devel + ncurses-devel are in the
@@ -976,14 +979,14 @@ if [[ "$EDITION" != "core" ]]; then
             make >/dev/null
             install -m 0755 lh /usr/local/bin/lh
             strip /usr/local/bin/lh 2>/dev/null || true
-        " >> "$LOG_FILE" 2>&1; then
+        " >>"$LOG_FILE" 2>&1; then
             log "  lh installed: $(stat -c '%s bytes' "${ROOTFS}/usr/local/bin/lh" 2>/dev/null)"
         else
             log "  WARNING: lh build failed — F5 will fall back to journalctl"
         fi
         umount "${ROOTFS}/proc" 2>/dev/null || true
-        umount "${ROOTFS}/sys"  2>/dev/null || true
-        umount "${ROOTFS}/dev"  2>/dev/null || true
+        umount "${ROOTFS}/sys" 2>/dev/null || true
+        umount "${ROOTFS}/dev" 2>/dev/null || true
     fi
 
     # ── Observability stack — zfs_exporter, smartctl_exporter, loki, promtail ─
@@ -999,38 +1002,42 @@ if [[ "$EDITION" != "core" ]]; then
     # zfs_exporter
     if curl -fsSL -o "${_obs_tmp}/zfs_exporter.tgz" \
         "https://github.com/pdf/zfs_exporter/releases/download/v2.3.8/zfs_exporter-2.3.8.linux-amd64.tar.gz" \
-        >> "$LOG_FILE" 2>&1; then
-        tar xzf "${_obs_tmp}/zfs_exporter.tgz" -C "${_obs_tmp}" >> "$LOG_FILE" 2>&1
+        >>"$LOG_FILE" 2>&1; then
+        tar xzf "${_obs_tmp}/zfs_exporter.tgz" -C "${_obs_tmp}" >>"$LOG_FILE" 2>&1
         install -m 0755 "${_obs_tmp}"/zfs_exporter-*/zfs_exporter "${ROOTFS}/usr/local/bin/zfs_exporter"
     else
-        log "  WARNING zfs_exporter download failed"; _obs_ok=0
+        log "  WARNING zfs_exporter download failed"
+        _obs_ok=0
     fi
     # smartctl_exporter
     if curl -fsSL -o "${_obs_tmp}/smartctl_exporter.tgz" \
         "https://github.com/prometheus-community/smartctl_exporter/releases/download/v0.14.0/smartctl_exporter-0.14.0.linux-amd64.tar.gz" \
-        >> "$LOG_FILE" 2>&1; then
-        tar xzf "${_obs_tmp}/smartctl_exporter.tgz" -C "${_obs_tmp}" >> "$LOG_FILE" 2>&1
+        >>"$LOG_FILE" 2>&1; then
+        tar xzf "${_obs_tmp}/smartctl_exporter.tgz" -C "${_obs_tmp}" >>"$LOG_FILE" 2>&1
         install -m 0755 "${_obs_tmp}"/smartctl_exporter-*/smartctl_exporter "${ROOTFS}/usr/local/bin/smartctl_exporter"
     else
-        log "  WARNING smartctl_exporter download failed"; _obs_ok=0
+        log "  WARNING smartctl_exporter download failed"
+        _obs_ok=0
     fi
     # loki (single binary, zip archive)
     if curl -fsSL -o "${_obs_tmp}/loki.zip" \
         "https://github.com/grafana/loki/releases/download/v3.3.2/loki-linux-amd64.zip" \
-        >> "$LOG_FILE" 2>&1; then
-        (cd "${_obs_tmp}" && unzip -o loki.zip >> "$LOG_FILE" 2>&1)
+        >>"$LOG_FILE" 2>&1; then
+        (cd "${_obs_tmp}" && unzip -o loki.zip >>"$LOG_FILE" 2>&1)
         install -m 0755 "${_obs_tmp}/loki-linux-amd64" "${ROOTFS}/usr/local/bin/loki"
     else
-        log "  WARNING loki download failed"; _obs_ok=0
+        log "  WARNING loki download failed"
+        _obs_ok=0
     fi
     # promtail (same release)
     if curl -fsSL -o "${_obs_tmp}/promtail.zip" \
         "https://github.com/grafana/loki/releases/download/v3.3.2/promtail-linux-amd64.zip" \
-        >> "$LOG_FILE" 2>&1; then
-        (cd "${_obs_tmp}" && unzip -o promtail.zip >> "$LOG_FILE" 2>&1)
+        >>"$LOG_FILE" 2>&1; then
+        (cd "${_obs_tmp}" && unzip -o promtail.zip >>"$LOG_FILE" 2>&1)
         install -m 0755 "${_obs_tmp}/promtail-linux-amd64" "${ROOTFS}/usr/local/bin/promtail"
     else
-        log "  WARNING promtail download failed"; _obs_ok=0
+        log "  WARNING promtail download failed"
+        _obs_ok=0
     fi
     rm -rf "${_obs_tmp}"
     # Enable the 4 services in the live ISO rootfs so they start at first
@@ -1038,7 +1045,7 @@ if [[ "$EDITION" != "core" ]]; then
     # journal is enabled via includes.chroot/etc/systemd/journald.conf.d.
     for _svc in zfs_exporter smartctl_exporter loki promtail; do
         if [[ -f "${ROOTFS}/usr/lib/systemd/system/${_svc}.service" ]]; then
-            chroot "${ROOTFS}" systemctl enable "${_svc}.service" >> "$LOG_FILE" 2>&1 || true
+            chroot "${ROOTFS}" systemctl enable "${_svc}.service" >>"$LOG_FILE" 2>&1 || true
         fi
     done
     # Pre-create Loki + promtail state dirs so services come up clean.
@@ -1053,18 +1060,18 @@ if [[ "$EDITION" != "core" ]]; then
     mkdir -p "${ROOTFS}/root/darksite/helm-charts"
     _helm_tmp="$(mktemp -d)"
     if curl -fsSL -o "${_helm_tmp}/helm.tgz" \
-        "https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz" >> "$LOG_FILE" 2>&1; then
-        tar xzf "${_helm_tmp}/helm.tgz" -C "${_helm_tmp}" >> "$LOG_FILE" 2>&1 || true
+        "https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz" >>"$LOG_FILE" 2>&1; then
+        tar xzf "${_helm_tmp}/helm.tgz" -C "${_helm_tmp}" >>"$LOG_FILE" 2>&1 || true
     fi
     # Pull tetragon chart directly from the cilium oci registry via HTTPS
     if curl -fsSL -o "${ROOTFS}/root/darksite/helm-charts/tetragon.tgz" \
-        "https://helm.cilium.io/tetragon-1.4.1.tgz" >> "$LOG_FILE" 2>&1; then
+        "https://helm.cilium.io/tetragon-1.4.1.tgz" >>"$LOG_FILE" 2>&1; then
         log "Observability: tetragon chart downloaded to darksite"
     else
         # Fallback: try the latest release
         if curl -fsSL -o "${ROOTFS}/root/darksite/helm-charts/tetragon.tgz" \
             "https://github.com/cilium/tetragon/releases/download/tetragon-1.4.1/tetragon-1.4.1.tgz" \
-            >> "$LOG_FILE" 2>&1; then
+            >>"$LOG_FILE" 2>&1; then
             log "Observability: tetragon chart (from github) downloaded"
         else
             log "  WARNING tetragon chart download failed — will skip during install"
@@ -1072,7 +1079,7 @@ if [[ "$EDITION" != "core" ]]; then
     fi
     rm -rf "${_helm_tmp}"
     # smartmontools (smartctl CLI) — required at runtime by smartctl_exporter
-    chroot "${ROOTFS}" dnf install -y smartmontools >> "$LOG_FILE" 2>&1 || \
+    chroot "${ROOTFS}" dnf install -y smartmontools >>"$LOG_FILE" 2>&1 ||
         log "  WARNING smartmontools install failed"
 
     # ebpf_exporter (Cloudflare) — per-device block I/O latency histograms.
@@ -1080,8 +1087,8 @@ if [[ "$EDITION" != "core" ]]; then
     _ebpf_tmp="$(mktemp -d)"
     if curl -fsSL -o "${_ebpf_tmp}/ebpf.tgz" \
         "https://github.com/cloudflare/ebpf_exporter/releases/download/v2.5.1/ebpf_exporter_with_examples.x86_64.tar.gz" \
-        >> "$LOG_FILE" 2>&1; then
-        tar xzf "${_ebpf_tmp}/ebpf.tgz" -C "${_ebpf_tmp}" --strip-components=1 >> "$LOG_FILE" 2>&1
+        >>"$LOG_FILE" 2>&1; then
+        tar xzf "${_ebpf_tmp}/ebpf.tgz" -C "${_ebpf_tmp}" --strip-components=1 >>"$LOG_FILE" 2>&1
         install -m 0755 "${_ebpf_tmp}/ebpf_exporter" "${ROOTFS}/usr/local/bin/ebpf_exporter"
         log "Observability: ebpf_exporter installed"
     else
@@ -1090,18 +1097,18 @@ if [[ "$EDITION" != "core" ]]; then
     rm -rf "${_ebpf_tmp}"
     # Enable ebpf_exporter at boot
     if [[ -f "${ROOTFS}/usr/lib/systemd/system/ebpf_exporter.service" ]]; then
-        chroot "${ROOTFS}" systemctl enable ebpf_exporter.service >> "$LOG_FILE" 2>&1 || true
+        chroot "${ROOTFS}" systemctl enable ebpf_exporter.service >>"$LOG_FILE" 2>&1 || true
     fi
     # Enable zpool-scrub-exporter timer (scrub state textfile collector)
     if [[ -f "${ROOTFS}/usr/lib/systemd/system/zpool-scrub-exporter.timer" ]]; then
-        chroot "${ROOTFS}" systemctl enable zpool-scrub-exporter.timer >> "$LOG_FILE" 2>&1 || true
+        chroot "${ROOTFS}" systemctl enable zpool-scrub-exporter.timer >>"$LOG_FILE" 2>&1 || true
     fi
     # Enable arcstats-exporter timer
     if [[ -f "${ROOTFS}/usr/lib/systemd/system/arcstats-exporter.timer" ]]; then
-        chroot "${ROOTFS}" systemctl enable arcstats-exporter.timer >> "$LOG_FILE" 2>&1 || true
+        chroot "${ROOTFS}" systemctl enable arcstats-exporter.timer >>"$LOG_FILE" 2>&1 || true
     fi
-    [[ $_obs_ok -eq 1 ]] && log "Observability: stack installed (4 exporters + smartctl)" \
-        || log "Observability: PARTIAL — some downloads failed, check log"
+    [[ $_obs_ok -eq 1 ]] && log "Observability: stack installed (4 exporters + smartctl)" ||
+        log "Observability: PARTIAL — some downloads failed, check log"
 
     # Copy Grafana dashboards + datasource + provisioner configs from
     # includes.chroot explicitly (whitelist-copy, same pattern as Bob
@@ -1117,13 +1124,13 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -d /build/live-build/config/includes.chroot/var/lib/grafana/dashboards ]]; then
         mkdir -p "${ROOTFS}/var/lib/grafana/dashboards"
         cp -r /build/live-build/config/includes.chroot/var/lib/grafana/dashboards/. \
-              "${ROOTFS}/var/lib/grafana/dashboards/" 2>>"$LOG_FILE" || true
+            "${ROOTFS}/var/lib/grafana/dashboards/" 2>>"$LOG_FILE" || true
         log "Observability: $(find "${ROOTFS}/var/lib/grafana/dashboards/" -name '*.json' | wc -l) dashboards provisioned across $(find "${ROOTFS}/var/lib/grafana/dashboards/" -mindepth 1 -maxdepth 1 -type d | wc -l) folders"
     fi
     if [[ -f /build/live-build/config/includes.chroot/etc/grafana/provisioning/datasources/loki.yaml ]]; then
         mkdir -p "${ROOTFS}/etc/grafana/provisioning/datasources"
         cp /build/live-build/config/includes.chroot/etc/grafana/provisioning/datasources/loki.yaml \
-           "${ROOTFS}/etc/grafana/provisioning/datasources/loki.yaml"
+            "${ROOTFS}/etc/grafana/provisioning/datasources/loki.yaml"
     fi
     # Grafana dashboard provisioner — kldload.yaml registers the 7
     # folder-providers above so Grafana groups dashboards in the left-nav.
@@ -1134,7 +1141,7 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -d /build/live-build/config/includes.chroot/etc/grafana/provisioning/dashboards ]]; then
         mkdir -p "${ROOTFS}/etc/grafana/provisioning/dashboards"
         cp /build/live-build/config/includes.chroot/etc/grafana/provisioning/dashboards/*.yaml \
-           "${ROOTFS}/etc/grafana/provisioning/dashboards/" 2>>"$LOG_FILE" || true
+            "${ROOTFS}/etc/grafana/provisioning/dashboards/" 2>>"$LOG_FILE" || true
     fi
     # process-exporter config — without this the unit's
     # ConditionPathExists=/etc/kldload/process-exporter.yml fails and the
@@ -1143,7 +1150,7 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -f /build/live-build/config/includes.chroot/etc/kldload/process-exporter.yml ]]; then
         mkdir -p "${ROOTFS}/etc/kldload"
         cp /build/live-build/config/includes.chroot/etc/kldload/process-exporter.yml \
-           "${ROOTFS}/etc/kldload/process-exporter.yml"
+            "${ROOTFS}/etc/kldload/process-exporter.yml"
     fi
     # Default authorized_keys for the installer's k_create_users. Read on
     # the LIVE env during install, copied to ~admin/.ssh/authorized_keys
@@ -1153,7 +1160,7 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -f /build/live-build/config/includes.chroot/etc/kldload/default-authorized-keys ]]; then
         mkdir -p "${ROOTFS}/etc/kldload"
         cp /build/live-build/config/includes.chroot/etc/kldload/default-authorized-keys \
-           "${ROOTFS}/etc/kldload/default-authorized-keys"
+            "${ROOTFS}/etc/kldload/default-authorized-keys"
         chmod 0644 "${ROOTFS}/etc/kldload/default-authorized-keys"
     fi
     if [[ -d /build/live-build/config/includes.chroot/etc/loki ]]; then
@@ -1176,12 +1183,12 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -d /build/live-build/config/includes.chroot/etc/systemd/journald.conf.d ]]; then
         mkdir -p "${ROOTFS}/etc/systemd/journald.conf.d"
         cp /build/live-build/config/includes.chroot/etc/systemd/journald.conf.d/*.conf \
-           "${ROOTFS}/etc/systemd/journald.conf.d/" 2>/dev/null || true
+            "${ROOTFS}/etc/systemd/journald.conf.d/" 2>/dev/null || true
     fi
     if [[ -d /build/live-build/config/includes.chroot/etc/systemd/system/node_exporter.service.d ]]; then
         mkdir -p "${ROOTFS}/etc/systemd/system/node_exporter.service.d"
         cp /build/live-build/config/includes.chroot/etc/systemd/system/node_exporter.service.d/*.conf \
-           "${ROOTFS}/etc/systemd/system/node_exporter.service.d/" 2>/dev/null || true
+            "${ROOTFS}/etc/systemd/system/node_exporter.service.d/" 2>/dev/null || true
     fi
     # Copy systemd units from the live-build tree — glob pattern so new
     # units added to includes.chroot/usr/lib/systemd/system/ get picked
@@ -1240,7 +1247,7 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -d /build/live-build/config/includes.chroot/etc/systemd/system/nginx.service.d ]]; then
         mkdir -p "${ROOTFS}/etc/systemd/system/nginx.service.d"
         cp /build/live-build/config/includes.chroot/etc/systemd/system/nginx.service.d/*.conf \
-           "${ROOTFS}/etc/systemd/system/nginx.service.d/" 2>/dev/null || true
+            "${ROOTFS}/etc/systemd/system/nginx.service.d/" 2>/dev/null || true
     fi
 
     # Session session-dir scaffold (owned by root, readable).
@@ -1248,8 +1255,8 @@ if [[ "$EDITION" != "core" ]]; then
 
     # Enable nginx at boot — the new :8443 TLS terminator. Disable
     # kldload-proxy explicitly so only one thing binds :8443.
-    chroot "${ROOTFS}" systemctl enable  nginx.service          >> "$LOG_FILE" 2>&1 || true
-    chroot "${ROOTFS}" systemctl disable kldload-proxy.service  >> "$LOG_FILE" 2>&1 || true
+    chroot "${ROOTFS}" systemctl enable nginx.service >>"$LOG_FILE" 2>&1 || true
+    chroot "${ROOTFS}" systemctl disable kldload-proxy.service >>"$LOG_FILE" 2>&1 || true
     # Disable kldload-headlamp.service at boot — caught 2026-05-17 on .148:
     # the pinned upstream URL (v0.26.0 with headlamp-server-linux-amd64.tar.gz
     # filename pattern) returns 404. The Headlamp project stopped publishing
@@ -1258,15 +1265,15 @@ if [[ "$EDITION" != "core" ]]; then
     # server out of the Electron tarball, or to deploy as a helm chart),
     # leave the unit disabled by default so fresh installs don't have a
     # failing unit + 502 on /k8s/ in the webui. /k9s/ still works (ttyd-k9s).
-    chroot "${ROOTFS}" systemctl disable kldload-headlamp.service >> "$LOG_FILE" 2>&1 || true
+    chroot "${ROOTFS}" systemctl disable kldload-headlamp.service >>"$LOG_FILE" 2>&1 || true
     # Enable kldload-tls-cert.timer at boot (fires cert-drift check hourly)
     if [[ -f "${ROOTFS}/usr/lib/systemd/system/kldload-tls-cert.timer" ]]; then
-        chroot "${ROOTFS}" systemctl enable kldload-tls-cert.timer >> "$LOG_FILE" 2>&1 || true
+        chroot "${ROOTFS}" systemctl enable kldload-tls-cert.timer >>"$LOG_FILE" 2>&1 || true
     fi
     # Enable kldload-tls-cert.service at boot (regenerates cert once
     # network is up — handles the DHCP race)
     if [[ -f "${ROOTFS}/usr/lib/systemd/system/kldload-tls-cert.service" ]]; then
-        chroot "${ROOTFS}" systemctl enable kldload-tls-cert.service >> "$LOG_FILE" 2>&1 || true
+        chroot "${ROOTFS}" systemctl enable kldload-tls-cert.service >>"$LOG_FILE" 2>&1 || true
     fi
     # Enable kldload-journal-flush on first boot — ensures persistent
     # journal actually gets populated so promtail can scrape kernel logs
@@ -1278,8 +1285,8 @@ if [[ "$EDITION" != "core" ]]; then
     # *-exporter glob)
     if [[ -f /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-journal-flush.service ]]; then
         cp /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-journal-flush.service \
-           "${ROOTFS}/usr/lib/systemd/system/kldload-journal-flush.service"
-        chroot "${ROOTFS}" systemctl enable kldload-journal-flush.service >> "$LOG_FILE" 2>&1 || true
+            "${ROOTFS}/usr/lib/systemd/system/kldload-journal-flush.service"
+        chroot "${ROOTFS}" systemctl enable kldload-journal-flush.service >>"$LOG_FILE" 2>&1 || true
     fi
 
     # NetworkManager dispatcher hook — fires on IP change events so the
@@ -1295,32 +1302,32 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -d /build/live-build/config/includes.chroot/etc/kldload ]]; then
         mkdir -p "${ROOTFS}/etc/kldload"
         cp /build/live-build/config/includes.chroot/etc/kldload/*.txt \
-           "${ROOTFS}/etc/kldload/" 2>/dev/null || true
+            "${ROOTFS}/etc/kldload/" 2>/dev/null || true
     fi
     # tetragon zfs tracing policy
     if [[ -f /build/live-build/config/includes.chroot/usr/local/share/klab/tetragon-zfs-policy.yaml ]]; then
         mkdir -p "${ROOTFS}/usr/local/share/klab"
         cp /build/live-build/config/includes.chroot/usr/local/share/klab/tetragon-zfs-policy.yaml \
-           "${ROOTFS}/usr/local/share/klab/tetragon-zfs-policy.yaml"
+            "${ROOTFS}/usr/local/share/klab/tetragon-zfs-policy.yaml"
     fi
 
     # ── piper — text-to-speech for Bob's voice output ────────────────────
     log "Bob: installing piper TTS..."
     _piper_tmp="$(mktemp -d)"
     if curl -fsSL -o "${_piper_tmp}/piper.tar.gz" \
-         "https://github.com/rhasspy/piper/releases/latest/download/piper_linux_x86_64.tar.gz" \
-         >> "$LOG_FILE" 2>&1; then
-        tar xf "${_piper_tmp}/piper.tar.gz" -C "${ROOTFS}/opt/" >> "$LOG_FILE" 2>&1
+        "https://github.com/rhasspy/piper/releases/latest/download/piper_linux_x86_64.tar.gz" \
+        >>"$LOG_FILE" 2>&1; then
+        tar xf "${_piper_tmp}/piper.tar.gz" -C "${ROOTFS}/opt/" >>"$LOG_FILE" 2>&1
         mkdir -p "${ROOTFS}/opt/piper/models"
         curl -fsSL -o "${ROOTFS}/opt/piper/models/en_US-lessac-medium.onnx" \
             "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" \
-            >> "$LOG_FILE" 2>&1 || log "Bob: WARNING piper voice onnx download failed"
+            >>"$LOG_FILE" 2>&1 || log "Bob: WARNING piper voice onnx download failed"
         curl -fsSL -o "${ROOTFS}/opt/piper/models/en_US-lessac-medium.onnx.json" \
             "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" \
-            >> "$LOG_FILE" 2>&1 || true
-        [[ -x "${ROOTFS}/opt/piper/piper" ]] \
-            && log "Bob: piper TTS installed" \
-            || log "Bob: WARNING piper binary not found after extract"
+            >>"$LOG_FILE" 2>&1 || true
+        [[ -x "${ROOTFS}/opt/piper/piper" ]] &&
+            log "Bob: piper TTS installed" ||
+            log "Bob: WARNING piper binary not found after extract"
     else
         log "Bob: WARNING — piper download failed (offline build?)"
     fi
@@ -1335,7 +1342,7 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-ansible ]]; then
         mkdir -p "${ROOTFS}/usr/local/share/kldload-ansible"
         cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-ansible/. \
-              "${ROOTFS}/usr/local/share/kldload-ansible/"
+            "${ROOTFS}/usr/local/share/kldload-ansible/"
         log "Ansible playbook library installed: $(find "${ROOTFS}/usr/local/share/kldload-ansible/playbooks" -name '*.yml' 2>/dev/null | wc -l) playbooks"
     fi
 
@@ -1346,7 +1353,7 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-ai ]]; then
         mkdir -p "${ROOTFS}/usr/local/share/kldload-ai"
         cp /build/live-build/config/includes.chroot/usr/local/share/kldload-ai/*.txt \
-              "${ROOTFS}/usr/local/share/kldload-ai/" 2>/dev/null || true
+            "${ROOTFS}/usr/local/share/kldload-ai/" 2>/dev/null || true
         log "Bob docs corpus installed: $(du -sh "${ROOTFS}/usr/local/share/kldload-ai" 2>/dev/null | cut -f1)"
     fi
 
@@ -1361,7 +1368,7 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -d /build/live-build/config/includes.chroot/usr/share/applications ]]; then
         mkdir -p "${ROOTFS}/usr/share/applications"
         cp /build/live-build/config/includes.chroot/usr/share/applications/*.desktop \
-           "${ROOTFS}/usr/share/applications/" 2>/dev/null || true
+            "${ROOTFS}/usr/share/applications/" 2>/dev/null || true
     fi
 
     # Copy the custom kldload app-icon theme (the scalable SVGs the launchers
@@ -1372,7 +1379,7 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -d /build/live-build/config/includes.chroot/usr/share/icons/hicolor/scalable/apps ]]; then
         mkdir -p "${ROOTFS}/usr/share/icons/hicolor/scalable/apps"
         cp /build/live-build/config/includes.chroot/usr/share/icons/hicolor/scalable/apps/*.svg \
-           "${ROOTFS}/usr/share/icons/hicolor/scalable/apps/" 2>/dev/null || true
+            "${ROOTFS}/usr/share/icons/hicolor/scalable/apps/" 2>/dev/null || true
         chroot "${ROOTFS}" gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
     fi
 
@@ -1409,14 +1416,14 @@ if [[ "$EDITION" != "core" ]]; then
         chmod +x "${ROOTFS}/usr/lib/kldload-installer/backend/bin/"* 2>/dev/null || true
         # Symlink backend tools to PATH
         for be_tool in kbe krecovery kupgrade; do
-            [[ -f "${ROOTFS}/usr/lib/kldload-installer/backend/bin/${be_tool}" ]] && \
+            [[ -f "${ROOTFS}/usr/lib/kldload-installer/backend/bin/${be_tool}" ]] &&
                 ln -sf "/usr/lib/kldload-installer/backend/bin/${be_tool}" "${ROOTFS}/usr/local/bin/${be_tool}"
         done
     fi
 
     # Copy sanoid config
     mkdir -p "${ROOTFS}/etc/sanoid"
-    [[ -f /build/live-build/config/includes.chroot/etc/sanoid/sanoid.conf ]] && \
+    [[ -f /build/live-build/config/includes.chroot/etc/sanoid/sanoid.conf ]] &&
         cp /build/live-build/config/includes.chroot/etc/sanoid/sanoid.conf "${ROOTFS}/etc/sanoid/"
 
     # Copy webui binary + static files
@@ -1428,7 +1435,7 @@ if [[ "$EDITION" != "core" ]]; then
     # single WorkingDirectory in the systemd unit.
     if [[ -x /build/live-build/config/includes.chroot/usr/local/bin/kldload-webui ]]; then
         cp /build/live-build/config/includes.chroot/usr/local/bin/kldload-webui \
-           "${ROOTFS}/usr/local/bin/kldload-webui"
+            "${ROOTFS}/usr/local/bin/kldload-webui"
         chmod +x "${ROOTFS}/usr/local/bin/kldload-webui"
         # Replace active/ with the correct edition's UI files
         rm -rf "${ROOTFS}/usr/local/share/kldload-webui/active" 2>/dev/null || true
@@ -1436,7 +1443,7 @@ if [[ "$EDITION" != "core" ]]; then
         if [[ "$EDITION" != "core" ]]; then
             if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/free ]]; then
                 cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/free/. \
-                      "${ROOTFS}/usr/local/share/kldload-webui/active/"
+                    "${ROOTFS}/usr/local/share/kldload-webui/active/"
                 log "Free UI copied to active/"
             fi
         fi
@@ -1451,7 +1458,7 @@ if [[ "$EDITION" != "core" ]]; then
     # Copy adduser hook
     if [[ -f /build/live-build/config/includes.chroot/usr/local/sbin/adduser.local ]]; then
         cp /build/live-build/config/includes.chroot/usr/local/sbin/adduser.local \
-           "${ROOTFS}/usr/local/sbin/adduser.local"
+            "${ROOTFS}/usr/local/sbin/adduser.local"
         chmod +x "${ROOTFS}/usr/local/sbin/adduser.local"
     fi
 
@@ -1461,10 +1468,10 @@ if [[ "$EDITION" != "core" ]]; then
         cp /build/live-build/config/includes.chroot/etc/skel/.bashrc "${ROOTFS}/home/live/.bashrc" 2>/dev/null || true
         cp /build/live-build/config/includes.chroot/etc/skel/.bashrc "${ROOTFS}/root/.bashrc"
     fi
-    [[ -f /build/live-build/config/includes.chroot/etc/skel/.tmux.conf ]] && \
-        cp /build/live-build/config/includes.chroot/etc/skel/.tmux.conf "${ROOTFS}/etc/skel/.tmux.conf" && \
+    [[ -f /build/live-build/config/includes.chroot/etc/skel/.tmux.conf ]] &&
+        cp /build/live-build/config/includes.chroot/etc/skel/.tmux.conf "${ROOTFS}/etc/skel/.tmux.conf" &&
         cp /build/live-build/config/includes.chroot/etc/skel/.tmux.conf "${ROOTFS}/home/live/.tmux.conf" 2>/dev/null || true
-    [[ -f /build/live-build/config/includes.chroot/etc/skel/.vimrc ]] && \
+    [[ -f /build/live-build/config/includes.chroot/etc/skel/.vimrc ]] &&
         cp /build/live-build/config/includes.chroot/etc/skel/.vimrc "${ROOTFS}/etc/skel/.vimrc"
     # vim colorscheme
     if [[ -d /build/live-build/config/includes.chroot/etc/skel/.vim ]]; then
@@ -1492,15 +1499,15 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload ]]; then
         mkdir -p "${ROOTFS}/usr/local/share/kldload"
         cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload/. \
-              "${ROOTFS}/usr/local/share/kldload/"
+            "${ROOTFS}/usr/local/share/kldload/"
         # Tests subdir needs execute bit; everything else (awk, jq,
         # yaml) is read-only data and stays mode-from-source.
-        [[ -d "${ROOTFS}/usr/local/share/kldload/tests" ]] && \
+        [[ -d "${ROOTFS}/usr/local/share/kldload/tests" ]] &&
             chmod +x "${ROOTFS}/usr/local/share/kldload/tests/"*.sh 2>/dev/null || true
     fi
 
     # Create kldload-webui systemd service
-    cat > "${ROOTFS}/usr/lib/systemd/system/kldload-webui.service" << 'SVCEOF'
+    cat >"${ROOTFS}/usr/lib/systemd/system/kldload-webui.service" <<'SVCEOF'
 [Unit]
 Description=kldload Web UI (installer + management frontend)
 After=network-online.target
@@ -1529,7 +1536,7 @@ SVCEOF
     # Debian darksite APT mirror service — Python HTTP server on port 3142.
     # debootstrap on the live ISO is configured to use http://127.0.0.1:3142/apt/
     # as its mirror, which serves packages from the baked-in darksite directory.
-    cat > "${ROOTFS}/usr/lib/systemd/system/kldload-apt-mirror.service" << 'APTEOF'
+    cat >"${ROOTFS}/usr/lib/systemd/system/kldload-apt-mirror.service" <<'APTEOF'
 [Unit]
 Description=kldload Debian darksite APT mirror
 After=network.target
@@ -1548,7 +1555,7 @@ APTEOF
     chroot "$ROOTFS" systemctl enable kldload-apt-mirror 2>/dev/null || true
 
     # Ubuntu darksite APT mirror service (serves on port 3143)
-    cat > "${ROOTFS}/usr/lib/systemd/system/kldload-apt-mirror-ubuntu.service" << 'UAPTEOF'
+    cat >"${ROOTFS}/usr/lib/systemd/system/kldload-apt-mirror-ubuntu.service" <<'UAPTEOF'
 [Unit]
 Description=kldload Ubuntu darksite APT mirror
 After=network.target
@@ -1569,7 +1576,7 @@ UAPTEOF
     # Arch Linux darksite — note: Arch is a rolling release so the darksite
     # goes stale quickly. Arch installs actually require internet; this mirror
     # is a partial cache that supplements live mirrors.
-    cat > "${ROOTFS}/usr/lib/systemd/system/kldload-pacman-mirror.service" << 'PACEOF'
+    cat >"${ROOTFS}/usr/lib/systemd/system/kldload-pacman-mirror.service" <<'PACEOF'
 [Unit]
 Description=kldload Arch darksite pacman mirror
 After=network.target
@@ -1588,7 +1595,7 @@ PACEOF
     chroot "$ROOTFS" systemctl enable kldload-pacman-mirror 2>/dev/null || true
 
     # Fedora darksite RPM mirror service (serves on port 3145)
-    cat > "${ROOTFS}/usr/lib/systemd/system/kldload-fedora-mirror.service" << 'FEDEOF'
+    cat >"${ROOTFS}/usr/lib/systemd/system/kldload-fedora-mirror.service" <<'FEDEOF'
 [Unit]
 Description=kldload Fedora darksite RPM mirror
 After=network.target
@@ -1607,7 +1614,7 @@ FEDEOF
     chroot "$ROOTFS" systemctl enable kldload-fedora-mirror 2>/dev/null || true
 
     # Alpine Linux darksite apk mirror service (serves on port 3146)
-    cat > "${ROOTFS}/usr/lib/systemd/system/kldload-apk-mirror.service" << 'ALPEOF'
+    cat >"${ROOTFS}/usr/lib/systemd/system/kldload-apk-mirror.service" <<'ALPEOF'
 [Unit]
 Description=kldload Alpine darksite apk mirror
 After=network.target
@@ -1629,10 +1636,10 @@ ALPEOF
     # installer's profiles.sh tries to symlink needs to live here first
     # (otherwise the `[[ -f ... ]] && cp` in profiles.sh silently skips).
     for _svc in kldload-firstboot.service kldload-autodeploy.service kldload-webui.service \
-                kldload-srv-snapshot.service kldload-srv-snapshot.timer \
-                kldload-snapshot.service kldload-snapshot.timer kldload-export.service \
-                ttyd-k9s.service \
-                klab-prom-targets.service klab-prom-targets.timer; do
+        kldload-srv-snapshot.service kldload-srv-snapshot.timer \
+        kldload-snapshot.service kldload-snapshot.timer kldload-export.service \
+        ttyd-k9s.service \
+        klab-prom-targets.service klab-prom-targets.timer; do
         _src="/build/live-build/config/includes.chroot/usr/lib/systemd/system/${_svc}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/lib/systemd/system/${_svc}"
     done
@@ -1671,12 +1678,12 @@ if [[ "${BOB_LIVE:-}" == "1" ]]; then
 
     # ── Pre-bake Ollama + model + Open WebUI into the image ──────────────
     log "Bob: installing Ollama into rootfs..."
-    BINDIR="${ROOTFS}/usr/local/bin" curl -fsSL https://ollama.com/install.sh | sh >> "$LOG_DIR/bob-build.log" 2>&1
+    BINDIR="${ROOTFS}/usr/local/bin" curl -fsSL https://ollama.com/install.sh | sh >>"$LOG_DIR/bob-build.log" 2>&1
     log "Bob: Ollama installed to rootfs"
 
     # Create ollama user + service in rootfs
     chroot "${ROOTFS}" useradd -r -s /bin/false -U -m -d /usr/share/ollama ollama 2>/dev/null || true
-    cat > "${ROOTFS}/etc/systemd/system/ollama.service" <<'OSERVICE'
+    cat >"${ROOTFS}/etc/systemd/system/ollama.service" <<'OSERVICE'
 [Unit]
 Description=Ollama Service
 After=network-online.target
@@ -1700,17 +1707,17 @@ OSERVICE
     mkdir -p "${ROOTFS}/usr/share/ollama/.ollama/models"
     export OLLAMA_MODELS="${ROOTFS}/usr/share/ollama/.ollama/models"
     # Run ollama serve from rootfs (it's a static binary, works outside chroot)
-    "${ROOTFS}/usr/local/bin/ollama" serve >> "$LOG_DIR/bob-build.log" 2>&1 &
+    "${ROOTFS}/usr/local/bin/ollama" serve >>"$LOG_DIR/bob-build.log" 2>&1 &
     _ollama_pid=$!
     for _try in $(seq 1 20); do
         curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && break
         sleep 2
     done
-    "${ROOTFS}/usr/local/bin/ollama" pull llama3.1:8b >> "$LOG_DIR/bob-build.log" 2>&1
+    "${ROOTFS}/usr/local/bin/ollama" pull llama3.1:8b >>"$LOG_DIR/bob-build.log" 2>&1
     log "Bob: model pulled, creating Bob personality..."
 
     # Create Bob modelfile and build it
-    cat > /tmp/Modelfile.bob <<'BOBMODEL'
+    cat >/tmp/Modelfile.bob <<'BOBMODEL'
 FROM llama3.1:8b
 
 SYSTEM """
@@ -1753,7 +1760,8 @@ BOBMODEL
     log "Bob: model created"
 
     # Stop the temporary ollama
-    kill $_ollama_pid 2>/dev/null; wait $_ollama_pid 2>/dev/null || true
+    kill $_ollama_pid 2>/dev/null
+    wait $_ollama_pid 2>/dev/null || true
     unset OLLAMA_MODELS
 
     # Fix ownership
@@ -1784,7 +1792,7 @@ BOBMODEL
         log "Bob: copied full CLI from includes.chroot (RAG bridge present)"
     else
         log "Bob: WARN -- includes.chroot bob CLI missing or stub; writing minimal stub"
-        cat > "${ROOTFS}/usr/local/bin/bob" <<'BOBCLI'
+        cat >"${ROOTFS}/usr/local/bin/bob" <<'BOBCLI'
 #!/usr/bin/env bash
 Q="${*:-Hey Bob, what can you help me with?}"
 echo "$Q" | ollama run bob
@@ -1805,10 +1813,10 @@ cp "${_ic}/etc/systemd/system/kldload-autoinstall.service" "${ROOTFS}/etc/system
     log "Autoinstall service installed"
 } || true
 # Autoinstall script
-cp "${_ic}/usr/local/sbin/kldload-autoinstall" "${ROOTFS}/usr/local/sbin/" 2>/dev/null && \
+cp "${_ic}/usr/local/sbin/kldload-autoinstall" "${ROOTFS}/usr/local/sbin/" 2>/dev/null &&
     chmod +x "${ROOTFS}/usr/local/sbin/kldload-autoinstall" || true
 # Baked-in answers file (AI appliance builds only)
-cp "${_ic}/etc/kldload/autoinstall.env" "${ROOTFS}/etc/kldload/autoinstall.env" 2>/dev/null && \
+cp "${_ic}/etc/kldload/autoinstall.env" "${ROOTFS}/etc/kldload/autoinstall.env" 2>/dev/null &&
     log "Baked-in autoinstall.env — this ISO will auto-install on boot" || true
 # Answers templates
 cp -r "${_ic}/etc/kldload/debz" "${ROOTFS}/etc/kldload/" 2>/dev/null || true
@@ -1829,13 +1837,13 @@ if [[ -d /build/live-build/config/includes.chroot/etc/udev/rules.d ]]; then
 fi
 
 # Ensure ZFS module loads at boot
-cat > "${ROOTFS}/etc/modules-load.d/zfs.conf" << 'ZFSMOD'
+cat >"${ROOTFS}/etc/modules-load.d/zfs.conf" <<'ZFSMOD'
 zfs
 ZFSMOD
 
 # ZFS modprobe tuning
 mkdir -p "${ROOTFS}/etc/modprobe.d"
-cat > "${ROOTFS}/etc/modprobe.d/zfs.conf" << 'ZFSTUNE'
+cat >"${ROOTFS}/etc/modprobe.d/zfs.conf" <<'ZFSTUNE'
 # Limit ARC to 25% of RAM on systems with <8GB
 options zfs zfs_arc_max=0
 ZFSTUNE
@@ -1935,7 +1943,7 @@ if [[ "$EDITION" != "core" ]]; then
             cp -r /build/live-build/darksite-alpine-cache/keys/. "${ROOTFS}/root/darksite/alpine/keys/"
         fi
         # Copy version file
-        [[ -f /build/live-build/darksite-alpine-cache/alpine-version ]] && \
+        [[ -f /build/live-build/darksite-alpine-cache/alpine-version ]] &&
             cp /build/live-build/darksite-alpine-cache/alpine-version "${ROOTFS}/root/darksite/alpine/"
         log "Alpine darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/alpine" 2>/dev/null | cut -f1)"
     else
@@ -1978,17 +1986,17 @@ log "Kernel version: $KVER"
 # the module dropped. Guard each so the build still works once dracut fixes this.
 DRACUT_INSTALL=()
 for _b in /usr/lib/systemd/systemd-sysroot-fstab-check \
-          /usr/lib/systemd/system-generators/systemd-fstab-generator; do
+    /usr/lib/systemd/system-generators/systemd-fstab-generator; do
     [[ -x "${ROOTFS}${_b}" ]] && DRACUT_INSTALL+=(--install "$_b")
 done
-[[ ${#DRACUT_INSTALL[@]} -gt 0 ]] && \
+[[ ${#DRACUT_INSTALL[@]} -gt 0 ]] &&
     log "Force-installing dracut-108-dropped helpers: ${DRACUT_INSTALL[*]}"
 
 chroot "$ROOTFS" dracut --force --add "dmsquash-live" \
     --no-hostonly \
     "${DRACUT_INSTALL[@]}" \
     --force-drivers "xhci_pci xhci_hcd ehci_pci ehci_hcd ohci_pci ohci_hcd uhci_hcd usb_storage uas usbhid hid_generic cdc_ether usbnet r8152 ax88179_178a thunderbolt typec_ucsi ucsi_acpi nvme nvme_core ahci virtio_blk virtio_scsi virtio_net virtio_pci sdhci sdhci_pci mmc_block" \
-    --kver "$KVER" "/boot/initramfs-${KVER}.img" 2>&1 | tee -a "$LOG_FILE" || \
+    --kver "$KVER" "/boot/initramfs-${KVER}.img" 2>&1 | tee -a "$LOG_FILE" ||
     die "dracut failed"
 
 # ---------------------------------------------------------------------------
@@ -2002,7 +2010,7 @@ if [[ -d /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/
     rm -rf "${ROOTFS}/usr/local/share/kldload-webui/active" 2>/dev/null || true
     mkdir -p "${ROOTFS}/usr/local/share/kldload-webui/active"
     cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-webui/free/. \
-          "${ROOTFS}/usr/local/share/kldload-webui/active/"
+        "${ROOTFS}/usr/local/share/kldload-webui/active/"
     log "Final webui sync: free/ → active/ ($(grep -o 'kldloadOS [0-9.]*' "${ROOTFS}/usr/local/share/kldload-webui/active/index.html" 2>/dev/null || echo 'unknown'))"
 fi
 
@@ -2040,17 +2048,23 @@ cp "${ROOTFS}/boot/initramfs-${KVER}.img" "${ISO_STAGING}/images/pxeboot/initrd.
 #   x86_64 → grubx64.efi + BOOTX64.EFI (default per EFI spec)
 #   aarch64 → grubaa64.efi + BOOTAA64.EFI
 case "$ARCH_EFI" in
-    x64)  GRUB_EFI="grubx64.efi";  BOOT_EFI="BOOTX64.EFI"  ;;
-    aa64) GRUB_EFI="grubaa64.efi"; BOOT_EFI="BOOTAA64.EFI" ;;
+x64)
+    GRUB_EFI="grubx64.efi"
+    BOOT_EFI="BOOTX64.EFI"
+    ;;
+aa64)
+    GRUB_EFI="grubaa64.efi"
+    BOOT_EFI="BOOTAA64.EFI"
+    ;;
 esac
-find "$ROOTFS" -name "$GRUB_EFI" -exec cp {} "${ISO_STAGING}/EFI/BOOT/${BOOT_EFI}" \; 2>/dev/null || \
+find "$ROOTFS" -name "$GRUB_EFI" -exec cp {} "${ISO_STAGING}/EFI/BOOT/${BOOT_EFI}" \; 2>/dev/null ||
     log "WARNING: ${GRUB_EFI} not found — live ISO may not UEFI boot"
 
 # Also keep the arch-named copy as itself (some firmware looks for it by name)
 cp "${ISO_STAGING}/EFI/BOOT/${BOOT_EFI}" "${ISO_STAGING}/EFI/BOOT/${GRUB_EFI}" 2>/dev/null || true
 
 # GRUB config
-cat > "${ISO_STAGING}/EFI/BOOT/grub.cfg" << 'GRUBCFG'
+cat >"${ISO_STAGING}/EFI/BOOT/grub.cfg" <<'GRUBCFG'
 set default=0
 set timeout=5
 set timeout_style=countdown
@@ -2133,8 +2147,8 @@ mcopy -i "${ISO_STAGING}/images/efiboot.img" "${ISO_STAGING}/EFI/BOOT/grub.cfg" 
 _iso_label="kldload ${VERSION} x86_64"
 _iso_built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 mkdir -p "${ISO_STAGING}/.disk" "${ISO_STAGING}/etc/kldload"
-printf '%s\n' "${_iso_label}" > "${ISO_STAGING}/.disk/info"
-cat > "${ISO_STAGING}/VERSION" <<VERSIONEOF
+printf '%s\n' "${_iso_label}" >"${ISO_STAGING}/.disk/info"
+cat >"${ISO_STAGING}/VERSION" <<VERSIONEOF
 kldload_version = ${VERSION}
 iso_name        = ${ISO_NAME}
 built_at        = ${_iso_built_at}
@@ -2180,15 +2194,15 @@ xorriso -as mkisofs \
     -no-emul-boot \
     -appended_part_as_gpt \
     -append_partition 2 C12A7328-F81F-11D2-BA4B-00A0C93EC93B \
-        "${ISO_STAGING}/images/efiboot.img" \
-    "$ISO_STAGING" 2>&1 | tee -a "$LOG_FILE" || \
+    "${ISO_STAGING}/images/efiboot.img" \
+    "$ISO_STAGING" 2>&1 | tee -a "$LOG_FILE" ||
     die "xorriso failed"
 
 # ---------------------------------------------------------------------------
 # Checksum
 # ---------------------------------------------------------------------------
 log "Generating SHA256 checksum..."
-(cd "$OUTPUT_DIR" && sha256sum "$ISO_NAME" > "${ISO_NAME}.sha256")
+(cd "$OUTPUT_DIR" && sha256sum "$ISO_NAME" >"${ISO_NAME}.sha256")
 
 ISO_DEST="${OUTPUT_DIR}/${ISO_NAME}"
 ISO_SIZE="$(du -sh "$ISO_DEST" | cut -f1)"
