@@ -1121,6 +1121,20 @@ OSREL
   done
   [[ -f /etc/dconf/profile/user ]] && cp /etc/dconf/profile/user "${target}/etc/dconf/profile/user"
 
+  # ── Installed-system dock favorites ──────────────────────────────────────────
+  # 00-kldload-desktop ships with empty favorites for the live ISO. This
+  # higher-numbered overlay pins the 3 apps we want on installed systems:
+  # Files (Nautilus), Firefox (browser), and Konsole (the rich GUI terminal
+  # with copy/paste, scrollback, splits, etc.). kst-dashboard stays available
+  # as an app in the menu but isn't pinned — users who want the multi-pane
+  # tmux dashboard launch it explicitly. Multiple Firefox names listed —
+  # GNOME silently drops missing entries, so Debian/Ubuntu (firefox-esr) and
+  # Fedora/RHEL/Arch (firefox) both end up with a working pin.
+  cat > "${target}/etc/dconf/db/local.d/50-kldload-installed-favorites" <<'DCONF'
+[org/gnome/shell]
+favorite-apps=['org.gnome.Nautilus.desktop', 'firefox.desktop', 'firefox-esr.desktop', 'org.kde.konsole.desktop']
+DCONF
+
   # ── GDM login screen (dconf db + profile + config) ────────────────────────────
   if [[ -d /etc/dconf/db/gdm.d ]]; then
     mkdir -p "${target}/etc/dconf/db/gdm.d"
@@ -1175,7 +1189,7 @@ DCONF
 
   # ── Custom .desktop launchers ───────────────────────────────────────────────
   mkdir -p "${target}/usr/share/applications"
-  for _dt in kst.desktop kst-dashboard.desktop ksnap.desktop kexport.desktop; do
+  for _dt in kst-dashboard.desktop ksnap.desktop kexport.desktop; do
     [[ -f "/usr/share/applications/${_dt}" ]] && \
       cp "/usr/share/applications/${_dt}" "${target}/usr/share/applications/${_dt}"
   done
