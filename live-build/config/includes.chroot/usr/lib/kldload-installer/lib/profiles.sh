@@ -1162,13 +1162,16 @@ OSREL
     # tmux dashboard launch it explicitly. Multiple Firefox names listed —
     # GNOME silently drops missing entries, so Debian/Ubuntu (firefox-esr) and
     # Fedora/RHEL/Arch (firefox) both end up with a working pin.
-    # Chrome listed FIRST. firefox.desktop / firefox-esr.desktop kept as
-    # fallbacks so installs that opted out of Chrome (or older builds before
-    # the google-chrome.repo landed) still get a pinned browser. GNOME's
-    # favorite-apps silently drops missing entries.
+    # Chrome only — firefox/firefox-esr removed 2026-06-06 after operator
+    # feedback "I still see firefox in the dock." Chrome is now the only
+    # browser in the RPM desktop package list (see _browser= above), and
+    # leaving firefox*.desktop in the favorites list re-pinned firefox the
+    # moment it landed on the system from a prior install or a dep pull-in.
+    # GNOME silently drops favorites whose .desktop is missing, so an install
+    # without Chrome still gets a 4-icon dock — just no browser pinned.
     cat >"${target}/etc/dconf/db/local.d/50-kldload-installed-favorites" <<'DCONF'
 [org/gnome/shell]
-favorite-apps=['org.gnome.Nautilus.desktop', 'google-chrome.desktop', 'firefox.desktop', 'firefox-esr.desktop', 'org.kde.konsole.desktop']
+favorite-apps=['org.gnome.Nautilus.desktop', 'google-chrome.desktop', 'org.kde.konsole.desktop']
 DCONF
     # .135 + onyx both shipped without this file in the installed system —
     # dock came up empty for fresh users. The heredoc won't fail on disk-full
