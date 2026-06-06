@@ -17,7 +17,18 @@ import os
 # MUST be set before WebKit2 is imported/initialised.
 os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
 os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
-os.environ.setdefault("GDK_BACKEND", "wayland,x11")
+# Force the X11 (XWayland) backend so set_wmclass() at line 107 actually
+# takes effect. On Wayland sessions set_wmclass is silently a no-op (the
+# Wayland protocol uses app_id from GtkApplication, not WM_CLASS), which
+# means GNOME shell can't match the spawned window to its .desktop file
+# (StartupWMClass=kldload-${view}) and falls back to a default placeholder
+# icon. Operator 2026-06-06 saw 3 dock windows render as blue diamonds for
+# this exact reason. XWayland still works on Wayland sessions, just routes
+# through X11 conventions including WM_CLASS — minor GPU/HiDPI cost vs
+# proper Wayland-native, but it's a small webview window so the trade is
+# acceptable. Long-term fix: refactor to GtkApplication(application_id=...)
+# which works on both backends; tracked as task #8.
+os.environ.setdefault("GDK_BACKEND", "x11")
 import sys
 import gi
 gi.require_version("Gtk", "3.0")
