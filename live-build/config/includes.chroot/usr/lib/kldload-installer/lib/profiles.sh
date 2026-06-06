@@ -1106,11 +1106,23 @@ FFPOLICY_WS
     ubuntu)  _target_suite="${KLDLOAD_SUITE:-noble}" ;;
     arch)    _target_suite="rolling" ;;
   esac
+  # VERSION_ID is REQUIRED by tools that key off distro identity:
+  # osbuild-composer's weldr API refuses to start without it
+  # ("failed to read host distro information"), dnf/yum plugins use it,
+  # Ansible reads it as ansible_distribution_version. ID_LIKE lets
+  # rhel-family / debian-family tools accept the derivative.
+  local _id_like=""
+  case "$_target_distro" in
+    centos|rocky|rhel|fedora) _id_like='ID_LIKE="rhel fedora"' ;;
+    debian|ubuntu)            _id_like='ID_LIKE=debian' ;;
+  esac
   cat > "${target}/etc/os-release" <<OSREL
 PRETTY_NAME="kldload (${_target_distro} ${_target_suite})"
 NAME="kldload"
 ID=${_target_distro}
 VERSION="${_target_suite}"
+VERSION_ID="${_target_suite}"
+${_id_like}
 OSREL
 
   # ── GNOME dconf system settings (dock, theme, terminal defaults) ──────────────
@@ -1661,23 +1673,99 @@ STORAGE
 
     # Enable libvirtd + default network (virbr0)
     chroot "${target}" systemctl enable libvirtd 2>/dev/null || true
-    # virsh can't run in a chroot because there's no running libvirtd daemon to
-    # connect to. We also can't just run "virsh net-autostart default" in a
-    # firstboot ExecStart because libvirtd takes variable time to initialize
-    # (it must register drivers and create the default network). A simple oneshot
-    # After=libvirtd.service races and fails. Instead, use a systemd timer that
-    # fires 30s after boot, then retry in a loop until libvirtd is actually ready.
-    # The service self-disables after success so it only runs on first boot.
+    # virsh can't run in a chroot (no running libvirtd to connect to). At
+    # firstboot, libvirtd takes variable time to register drivers and create
+    # the default network; a plain After=libvirtd.service races.
+    #
+    # Previous design used a 30s timer + a 10-iteration shell loop with
+    # `net-autostart && net-start && exit 0`. That had two latent bugs:
+    #   1. net-autostart returns 0 even when the net is unconfigured (it only
+    #      flips the autostart flag), so the && chain depended entirely on
+    #      net-start. When net-start failed (stale `default` definition, missing
+    #      bridge module, etc.) the loop fell through, then the trailing `echo`
+    #      returned 0 -> systemd reported success even though virbr0 was DOWN.
+    #      Result: kldload-doctor green, every VM creation fails to attach.
+    #   2. No `set -e`, no explicit `exit 1`; only an echo for diagnosis.
+    #
+    # New design: a small helper script with explicit state checks and a real
+    # exit code. Retries via Restart=on-failure / RestartSec= rather than an
+    # in-shell loop, so each attempt is a separate journald entry and the
+    # final failure is visible to systemd, kldload-doctor, and Prometheus.
+    install -d -m 0755 "${target}/usr/local/sbin"
+    cat > "${target}/usr/local/sbin/kldload-virbr0-up" <<'VIRBR0SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+# Bring up the libvirt 'default' network (virbr0) reliably at firstboot.
+# Exits 0 only when the network is both Active and Persistent.
+
+readonly _net="default"
+_log() { logger -t kldload-virbr0 -- "$*"; printf '%s\n' "$*"; }
+
+# Wait for libvirtd's UNIX socket — Type=notify on libvirtd means the unit is
+# 'active' before the socket accepts; poll briefly.
+for _ in $(seq 1 30); do
+    virsh -c qemu:///system list >/dev/null 2>&1 && break
+    sleep 1
+done
+virsh -c qemu:///system list >/dev/null 2>&1 || {
+    _log "libvirtd not responsive after 30s"
+    exit 1
+}
+
+# Reconcile stale state. A failed prior boot can leave the network defined
+# with an inactive bridge that won't restart cleanly; destroy+undefine and
+# re-create from the libvirt-shipped default net XML.
+if virsh -c qemu:///system net-info "$_net" >/dev/null 2>&1; then
+    _active=$(virsh -c qemu:///system net-info "$_net" | awk '/^Active:/ {print $2}')
+    if [[ "$_active" != "yes" ]]; then
+        _log "net '$_net' present but inactive — recreating"
+        virsh -c qemu:///system net-destroy "$_net" 2>/dev/null || true
+        virsh -c qemu:///system net-undefine "$_net" 2>/dev/null || true
+    fi
+fi
+if ! virsh -c qemu:///system net-info "$_net" >/dev/null 2>&1; then
+    # /usr/share/libvirt/networks/default.xml ships with the libvirt-daemon
+    # package on rhel/fedora/debian/arch — defensive existence check anyway.
+    _xml="/usr/share/libvirt/networks/default.xml"
+    [[ -f "$_xml" ]] || { _log "default.xml missing at $_xml"; exit 1; }
+    virsh -c qemu:///system net-define "$_xml"
+fi
+virsh -c qemu:///system net-autostart "$_net" >/dev/null
+virsh -c qemu:///system net-start "$_net" 2>/dev/null || true
+
+# Final verification: must be Active AND Persistent. Anything else is a fail.
+_status=$(virsh -c qemu:///system net-info "$_net" 2>/dev/null | awk '/^(Active|Persistent):/ {print $1$2}' | sort | xargs)
+if [[ "$_status" != "Active:yes Persistent:yes" ]]; then
+    _log "net '$_net' final state: ${_status:-unknown} — FAIL"
+    exit 1
+fi
+# Disable our retry trigger now that we've succeeded — one-shot semantics.
+systemctl disable kldload-virbr0.timer kldload-virbr0.service 2>/dev/null || true
+_log "virbr0 up (default network Active + Persistent)"
+VIRBR0SH
+    chmod +x "${target}/usr/local/sbin/kldload-virbr0-up"
+
     cat > "${target}/etc/systemd/system/kldload-virbr0.service" <<'VIRBR0SVC'
 [Unit]
 Description=Enable libvirt default network (virbr0) autostart
-After=libvirtd.service
+After=libvirtd.service network-online.target
+Wants=libvirtd.service network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'for i in $(seq 1 10); do virsh net-autostart default 2>/dev/null && virsh net-start default 2>/dev/null && exit 0; sleep 3; done; echo "virbr0 setup failed after 10 attempts"'
-ExecStartPost=/bin/bash -c 'systemctl disable kldload-virbr0.timer 2>/dev/null; systemctl disable kldload-virbr0.service 2>/dev/null; true'
+ExecStart=/usr/local/sbin/kldload-virbr0-up
 RemainAfterExit=yes
+# Per-attempt timeout; total wall-time bounded by StartLimitBurst below.
+TimeoutStartSec=90
+Restart=on-failure
+RestartSec=15
+# Stop retrying after ~10 minutes (6 attempts * (90s + 15s)); failed state
+# is now visible to kldload-doctor instead of being papered over.
+StartLimitIntervalSec=600
+StartLimitBurst=6
+
+[Install]
+WantedBy=multi-user.target
 VIRBR0SVC
     cat > "${target}/etc/systemd/system/kldload-virbr0.timer" <<'VIRBR0TMR'
 [Unit]
@@ -1690,10 +1778,7 @@ Unit=kldload-virbr0.service
 [Install]
 WantedBy=timers.target
 VIRBR0TMR
-    chroot "${target}" systemctl enable kldload-virbr0.timer 2>/dev/null || true
-
-    # Ensure default libvirt network starts on boot (virbr0 — required for klab VMs)
-    chroot "${target}" bash -c 'virsh net-autostart default 2>/dev/null || true' 2>/dev/null || true
+    chroot "${target}" systemctl enable kldload-virbr0.service kldload-virbr0.timer 2>/dev/null || true
 
     k_log "KVM host configured: ZFS datasets, ARC tuning, sysctl, replication, VM snapshots, kvm-* tools, Podman ZFS driver"
   fi

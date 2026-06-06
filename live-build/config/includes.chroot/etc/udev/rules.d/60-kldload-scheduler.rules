@@ -1,7 +1,12 @@
 # kldload I/O scheduler tuning
 # NVMe / non-rotational: use 'none' (no scheduler overhead, hardware queues handle it)
 # Rotational HDD: use 'bfq' (fair queuing, better latency under mixed read/write load)
+#
+# ENV{DEVTYPE}=="disk" excludes partitions. Without it, the previous nvme rule
+# (KERNEL=="nvme[0-9]*") also matched nvme0n1p1/p2/... — partitions have no
+# queue/scheduler attribute, so udev logged for every partition on every boot:
+#   Failed to write "none" to sysfs attribute /sys/.../nvme0n1p1/queue/scheduler
 
-ACTION=="add|change", KERNEL=="nvme[0-9]*", ATTR{queue/scheduler}="none"
-ACTION=="add|change", KERNEL=="sd[a-z]|vd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="none"
-ACTION=="add|change", KERNEL=="sd[a-z]|vd[a-z]", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
+ACTION=="add|change", ENV{DEVTYPE}=="disk", KERNEL=="nvme[0-9]n[0-9]*", ATTR{queue/scheduler}="none"
+ACTION=="add|change", ENV{DEVTYPE}=="disk", KERNEL=="sd[a-z]|vd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="none"
+ACTION=="add|change", ENV{DEVTYPE}=="disk", KERNEL=="sd[a-z]|vd[a-z]", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"

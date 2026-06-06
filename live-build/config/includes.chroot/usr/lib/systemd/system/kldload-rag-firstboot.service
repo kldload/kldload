@@ -1,10 +1,19 @@
 [Unit]
 Description=kldload RAG: index corpus once on first boot
 Documentation=man:kldload-rag-index
-After=kldload-rag.service ollama.service network-online.target
-Wants=ollama.service
-# Only run if the marker file is missing (one-shot semantics).
+After=kldload-rag.service ollama.service network-online.target kldload-autodeploy.service
+# `Wants=ollama.service` is a no-op when the unit file isn't on disk yet, and
+# kldload-autodeploy installs ollama at runtime via `curl install.sh | sh` —
+# so at multi-user.target the ollama unit may not exist, and rag-firstboot
+# would fire with "Ollama isn't reachable" and exit 1.
+# Skip until autodeploy has finished provisioning AI (it sets
+# /var/lib/kldload/ai-ready on success — see mark() in kldload-autodeploy)
+# AND the ollama unit is on disk.
 ConditionPathExists=!/var/lib/kldload-rag/.first-index-done
+ConditionPathExists=/var/lib/kldload/ai-ready
+ConditionPathExists=/usr/lib/systemd/system/ollama.service
+# Wants= still useful once the unit exists — pulls ollama into the txn.
+Wants=ollama.service
 
 [Service]
 Type=oneshot

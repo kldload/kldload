@@ -366,6 +366,18 @@ if [[ "${WANT[ai]}" == "1" ]]; then
             >/dev/null 2>&1 || true
         mark "ai"
         log "[ai] complete"
+        # kldload-rag-firstboot.service is WantedBy=multi-user.target but its
+        # ConditionPathExists gates skip it at boot — ollama.service didn't
+        # exist yet and /var/lib/kldload/ai-ready hadn't been set. Now that
+        # both are true, kick it explicitly so the RAG corpus is indexed
+        # against the freshly-pulled model. `--no-block` keeps autodeploy from
+        # waiting on the 1800s index TimeoutStartSec.
+        if [[ -f /usr/lib/systemd/system/kldload-rag-firstboot.service ]] \
+            && [[ ! -f /var/lib/kldload-rag/.first-index-done ]]; then
+            log "[ai] kicking kldload-rag-firstboot.service (post-AI)"
+            systemctl start --no-block kldload-rag-firstboot.service \
+                >>"$LOG_FILE" 2>&1 || log "[ai] rag-firstboot start failed (non-fatal)"
+        fi
     ) &
     AI_PID=$!
     log "[ai] pull running as pid $AI_PID (backgrounded)"
