@@ -1219,6 +1219,25 @@ x-scheme-handler/unknown=google-chrome.desktop
 text/html=google-chrome.desktop
 application/xhtml+xml=google-chrome.desktop
 MIMES
+
+        # Chrome enterprise policy — suppress the "Make Chrome the default
+        # browser?" prompt that fires every launch until the user agrees.
+        # On .137 b628 the kldload-webui dock launcher triggered this on
+        # first open because Chrome's default-check still runs even when the
+        # system mimeapps.list already routes http(s) to Chrome (the policy
+        # check is separate from the OS default). DefaultBrowserSettingEnabled
+        # = false also removes the "Make default" option from chrome://settings
+        # so the user can't accidentally enable the prompt back. The other two
+        # keys silence the welcome-tour promo tabs + opt out of usage metrics
+        # (kldload ships offline-first; metrics make no sense here).
+        mkdir -p "${target}/etc/opt/chrome/policies/managed"
+        cat >"${target}/etc/opt/chrome/policies/managed/kldload-defaults.json" <<'CHROMEPOLICY'
+{
+  "DefaultBrowserSettingEnabled": false,
+  "PromotionalTabsEnabled": false,
+  "MetricsReportingEnabled": false
+}
+CHROMEPOLICY
     fi
 
     # ── GDM login screen (dconf db + profile + config) ────────────────────────────
