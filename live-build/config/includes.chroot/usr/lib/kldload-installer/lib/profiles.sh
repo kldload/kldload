@@ -1175,6 +1175,30 @@ OSREL
     done
     [[ -f /etc/dconf/profile/user ]] && cp /etc/dconf/profile/user "${target}/etc/dconf/profile/user"
 
+    # ── /etc files that live in includes.chroot but profiles.sh has to
+    #    explicitly carry through to /target (build-iso.sh puts them in the
+    #    LIVE rootfs; the install-time chroot dnf doesn't copy /etc/* from
+    #    live to target — only package-owned files arrive that way). Each
+    #    miss caused a real .137/.121 install regression:
+    #
+    #      gtk-3.0/settings.ini + gtk-4.0/settings.ini  → GTK3/4 apps without
+    #        these render with light theme even on a dark-mode session
+    #        (.137 b628 audit 2026-06-06).
+    #      yum.repos.d/google-chrome.repo              → without it on the
+    #        target at chroot-dnf time, dnf install -y google-chrome-stable
+    #        silently fails to resolve, falls back to firefox staying pinned
+    #        (.121 b637 audit: firefox installed, chrome missing).
+    #
+    #    Loop the live → target carry-over so any future /etc file we drop
+    #    into includes.chroot lands on the installed system too.
+    for _p in etc/gtk-3.0/settings.ini etc/gtk-4.0/settings.ini etc/yum.repos.d/google-chrome.repo; do
+        if [[ -f "/${_p}" ]]; then
+            install -D -m 0644 "/${_p}" "${target}/${_p}"
+            k_log "carried /${_p} → target"
+        fi
+    done
+    unset _p
+
     # ── Installed-system dock favorites ──────────────────────────────────────────
     # 00-kldload-desktop ships with empty favorites for the live ISO. This
     # higher-numbered overlay pins the 3 apps we want on installed systems:

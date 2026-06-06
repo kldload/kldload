@@ -13,13 +13,13 @@ set -Eeuo pipefail
 # perfectly good installs. EXIT-only fires once, when bash actually exits,
 # with the real final rc — no false alarms.
 _emergency_cleanup() {
-  local exit_code=$?
-  [[ $exit_code -eq 0 ]] && return
-  printf '\n\e[1;31m  ✖   Installation failed (exit %d) — cleaning up mounts\e[0m\n' "$exit_code" >&2
-  local mnt="${KLDLOAD_TARGET_MNT:-/target}"
-  # Unmount in reverse order
-  umount -R "${mnt}" 2>/dev/null || true
-  zpool export rpool 2>/dev/null || true
+    local exit_code=$?
+    [[ $exit_code -eq 0 ]] && return
+    printf '\n\e[1;31m  ✖   Installation failed (exit %d) — cleaning up mounts\e[0m\n' "$exit_code" >&2
+    local mnt="${KLDLOAD_TARGET_MNT:-/target}"
+    # Unmount in reverse order
+    umount -R "${mnt}" 2>/dev/null || true
+    zpool export rpool 2>/dev/null || true
 }
 trap '_emergency_cleanup' EXIT
 
@@ -53,7 +53,7 @@ trap '_emergency_cleanup' EXIT
 #     regardless of SB state — it's also the TLS CA) and queues
 #     mokutil --import. Reboot to complete enrollment in MokManager.
 _secure_boot_enabled() {
-  [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]]
+    [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]]
 }
 
 # Back-compat alias — existing callers inside this script still use the
@@ -63,73 +63,72 @@ _secure_boot_enabled() {
 _is_hw_profile() { _secure_boot_enabled; }
 
 k_poweroff_after_success() {
-  local _fmt="${1:-none}"
-  local _name="${2:-}"
-  local _path="${3:-}"
+    local _fmt="${1:-none}"
+    local _name="${2:-}"
+    local _path="${3:-}"
 
-  k_log "Install completed successfully"
-  sync || true
-  # Eject all optical drives so machine boots from disk on next start
-  for _dev in /dev/sr0 /dev/sr1 /dev/cdrom /dev/dvd; do
-    [[ -b "$_dev" ]] && eject "$_dev" 2>/dev/null || true
-  done
+    k_log "Install completed successfully"
+    sync || true
+    # Eject all optical drives so machine boots from disk on next start
+    for _dev in /dev/sr0 /dev/sr1 /dev/cdrom /dev/dvd; do
+        [[ -b "$_dev" ]] && eject "$_dev" 2>/dev/null || true
+    done
 
-  echo
-  printf '\e[1;32m╔══════════════════════════════════════════════════════════╗\e[0m\n'
-  printf '\e[1;32m║                                                          ║\e[0m\n'
-  printf '\e[1;32m║        ✔  Installation complete!                         ║\e[0m\n'
-  printf '\e[1;32m║                                                          ║\e[0m\n'
-  if [[ -n "$_path" && -f "$_path" ]]; then
-    local _size
-    _size="$(du -sh "$_path" 2>/dev/null | cut -f1)"
-    printf '\e[1;32m║   ✔  Golden image: %-37s ║\e[0m\n' "${_name}.${_fmt} (${_size})"
-    printf '\e[1;32m║      Cloud-init ready — use as Packer base or template   ║\e[0m\n'
-    printf '\e[1;32m║      Location: %-41s ║\e[0m\n' "${_path}"
-    if [[ -n "${KLDLOAD_EXPORT_SCP_HOST:-}" ]]; then
-      printf '\e[1;32m║      Uploaded: %-41s ║\e[0m\n' "${KLDLOAD_EXPORT_SCP_USER:-root}@${KLDLOAD_EXPORT_SCP_HOST}"
+    echo
+    printf '\e[1;32m╔══════════════════════════════════════════════════════════╗\e[0m\n'
+    printf '\e[1;32m║                                                          ║\e[0m\n'
+    printf '\e[1;32m║        ✔  Installation complete!                         ║\e[0m\n'
+    printf '\e[1;32m║                                                          ║\e[0m\n'
+    if [[ -n "$_path" && -f "$_path" ]]; then
+        local _size
+        _size="$(du -sh "$_path" 2>/dev/null | cut -f1)"
+        printf '\e[1;32m║   ✔  Golden image: %-37s ║\e[0m\n' "${_name}.${_fmt} (${_size})"
+        printf '\e[1;32m║      Cloud-init ready — use as Packer base or template   ║\e[0m\n'
+        printf '\e[1;32m║      Location: %-41s ║\e[0m\n' "${_path}"
+        if [[ -n "${KLDLOAD_EXPORT_SCP_HOST:-}" ]]; then
+            printf '\e[1;32m║      Uploaded: %-41s ║\e[0m\n' "${KLDLOAD_EXPORT_SCP_USER:-root}@${KLDLOAD_EXPORT_SCP_HOST}"
+        fi
+        printf '\e[1;32m║                                                          ║\e[0m\n'
     fi
-    printf '\e[1;32m║                                                          ║\e[0m\n'
-  fi
-  # Auto-reboot by default after a 10-second window. Pre-build #47 this
-  # was gated on /etc/kldload/autoinstall.env existing (the seed-disk
-  # path) so only unattended installs rebooted. Webui-driven installs
-  # left the box sitting on the "Installation complete!" screen waiting
-  # for a manual `systemctl reboot` — including the .142 build #46
-  # install that prompted this fix. Profile doesn't matter; if the
-  # install finished cleanly, the next step is always "boot the
-  # installed system." Set KLDLOAD_NO_AUTO_REBOOT=1 in the answers env
-  # to opt out (e.g., for chained post-install steps in the live env).
-  if [[ "${KLDLOAD_NO_AUTO_REBOOT:-0}" == "1" ]]; then
-    printf '\e[1;32m║   Remove the USB / ISO and reboot when ready.            ║\e[0m\n'
-    printf '\e[1;32m║   To reboot:  systemctl reboot                           ║\e[0m\n'
-    printf '\e[1;32m║   (KLDLOAD_NO_AUTO_REBOOT=1 set — auto-reboot skipped.)  ║\e[0m\n'
-    printf '\e[1;32m║                                                          ║\e[0m\n'
-    printf '\e[1;32m╚══════════════════════════════════════════════════════════╝\e[0m\n'
-    echo
-  else
-    printf '\e[1;32m║   Auto-rebooting in 10 seconds...                        ║\e[0m\n'
-    printf '\e[1;32m║   Ctrl-C now to abort; KLDLOAD_NO_AUTO_REBOOT=1 to opt out.║\e[0m\n'
-    printf '\e[1;32m║                                                          ║\e[0m\n'
-    printf '\e[1;32m╚══════════════════════════════════════════════════════════╝\e[0m\n'
-    echo
-    sleep 10
-    systemctl reboot || reboot
-  fi
+    # Auto-reboot by default after a 10-second window. Pre-build #47 this
+    # was gated on /etc/kldload/autoinstall.env existing (the seed-disk
+    # path) so only unattended installs rebooted. Webui-driven installs
+    # left the box sitting on the "Installation complete!" screen waiting
+    # for a manual `systemctl reboot` — including the .142 build #46
+    # install that prompted this fix. Profile doesn't matter; if the
+    # install finished cleanly, the next step is always "boot the
+    # installed system." Set KLDLOAD_NO_AUTO_REBOOT=1 in the answers env
+    # to opt out (e.g., for chained post-install steps in the live env).
+    if [[ "${KLDLOAD_NO_AUTO_REBOOT:-0}" == "1" ]]; then
+        printf '\e[1;32m║   Remove the USB / ISO and reboot when ready.            ║\e[0m\n'
+        printf '\e[1;32m║   To reboot:  systemctl reboot                           ║\e[0m\n'
+        printf '\e[1;32m║   (KLDLOAD_NO_AUTO_REBOOT=1 set — auto-reboot skipped.)  ║\e[0m\n'
+        printf '\e[1;32m║                                                          ║\e[0m\n'
+        printf '\e[1;32m╚══════════════════════════════════════════════════════════╝\e[0m\n'
+        echo
+    else
+        printf '\e[1;32m║   Auto-rebooting in 10 seconds...                        ║\e[0m\n'
+        printf '\e[1;32m║   Ctrl-C now to abort; KLDLOAD_NO_AUTO_REBOOT=1 to opt out.║\e[0m\n'
+        printf '\e[1;32m║                                                          ║\e[0m\n'
+        printf '\e[1;32m╚══════════════════════════════════════════════════════════╝\e[0m\n'
+        echo
+        sleep 10
+        systemctl reboot || reboot
+    fi
 }
 
-
 if [[ "$(id -u)" -ne 0 ]]; then
-  exec pkexec "$0" "$@"
+    exec pkexec "$0" "$@"
 fi
 
 resolve_libdir() {
-  if [[ -d /usr/lib/kldload-installer/lib ]]; then
-    printf '%s\n' /usr/lib/kldload-installer/lib
-    return 0
-  fi
-  local self_dir
-  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  printf '%s\n' "${self_dir%/sbin}/lib"
+    if [[ -d /usr/lib/kldload-installer/lib ]]; then
+        printf '%s\n' /usr/lib/kldload-installer/lib
+        return 0
+    fi
+    local self_dir
+    self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    printf '%s\n' "${self_dir%/sbin}/lib"
 }
 
 LIB_DIR="$(resolve_libdir)"
@@ -148,20 +147,19 @@ export LIB_DIR
 # k_apply_profile, k_bind_chroot_mounts, k_list_candidate_disks, etc.) are
 # defined as inline fallbacks below and are the authoritative implementations.
 for f in \
-  common.sh \
-  logging.sh \
-  storage-zfs.sh \
-  profiles.sh \
-  bootstrap.sh \
-  security.sh \
-  bootloader.sh \
-  answers.sh \
-  infra.sh
-do
-  if [[ -f "${LIB_DIR}/${f}" ]]; then
-    # shellcheck source=/dev/null
-    source "${LIB_DIR}/${f}"
-  fi
+    common.sh \
+    logging.sh \
+    storage-zfs.sh \
+    profiles.sh \
+    bootstrap.sh \
+    security.sh \
+    bootloader.sh \
+    answers.sh \
+    infra.sh; do
+    if [[ -f "${LIB_DIR}/${f}" ]]; then
+        # shellcheck source=/dev/null
+        source "${LIB_DIR}/${f}"
+    fi
 done
 
 : "${KLDLOAD_LOG_DIR:=/var/log/installer}"
@@ -174,191 +172,196 @@ mkdir -p "${KLDLOAD_LOG_DIR}"
 k_have_func() { declare -F "$1" >/dev/null 2>&1; }
 
 if ! k_have_func k_log; then
-  k_log() {
-    mkdir -p "${KLDLOAD_LOG_DIR}"
-    printf '[%(%F %T)T] %s\n' -1 "$*" | tee -a "${KLDLOAD_LOG_DIR}/kldload-installer.log" >&2
-  }
+    k_log() {
+        mkdir -p "${KLDLOAD_LOG_DIR}"
+        printf '[%(%F %T)T] %s\n' -1 "$*" | tee -a "${KLDLOAD_LOG_DIR}/kldload-installer.log" >&2
+    }
 fi
 
 if ! k_have_func k_die; then
-  k_die() { k_log "ERROR: $*"; exit 1; }
+    k_die() {
+        k_log "ERROR: $*"
+        exit 1
+    }
 fi
 
 if ! k_have_func k_answers_load_env_file; then
-  k_answers_load_env_file() {
-    local cfg="${1:?missing env file}"
-    [[ -f "$cfg" ]] || k_die "answers file not found: $cfg"
-    set -a
-    # shellcheck source=/dev/null
-    source "$cfg"
-    set +a
-  }
+    k_answers_load_env_file() {
+        local cfg="${1:?missing env file}"
+        [[ -f "$cfg" ]] || k_die "answers file not found: $cfg"
+        set -a
+        # shellcheck source=/dev/null
+        source "$cfg"
+        set +a
+    }
 fi
 
 if ! k_have_func k_save_effective_config; then
-  k_save_effective_config() {
-    local out="${KLDLOAD_LOG_DIR}/effective-config.env"
-    : > "$out"
-    env | sort | grep '^KLDLOAD_' >> "$out" || true
-    chmod 0600 "$out"
-    k_log "Saved effective config to ${out}"
-  }
+    k_save_effective_config() {
+        local out="${KLDLOAD_LOG_DIR}/effective-config.env"
+        : >"$out"
+        env | sort | grep '^KLDLOAD_' >>"$out" || true
+        chmod 0600 "$out"
+        k_log "Saved effective config to ${out}"
+    }
 fi
 
 if ! k_have_func k_list_candidate_disks; then
-  k_list_candidate_disks() {
-    echo "Available disks:"
-    lsblk -d -e7,11 -n -o PATH,SIZE,MODEL
-    echo
-  }
+    k_list_candidate_disks() {
+        echo "Available disks:"
+        lsblk -d -e7,11 -n -o PATH,SIZE,MODEL
+        echo
+    }
 fi
 
 if ! k_have_func k_bind_chroot_mounts; then
-  k_bind_chroot_mounts() {
-    mkdir -p "${KLDLOAD_TARGET_MNT}"/{dev,proc,sys,run}
-    mount --bind /dev   "${KLDLOAD_TARGET_MNT}/dev"
-    mount --bind /proc  "${KLDLOAD_TARGET_MNT}/proc"
-    mount --bind /sys   "${KLDLOAD_TARGET_MNT}/sys"
-    mount --bind /run   "${KLDLOAD_TARGET_MNT}/run"
-    if [[ -d /sys/firmware/efi/efivars ]]; then
-      mkdir -p "${KLDLOAD_TARGET_MNT}/sys/firmware/efi/efivars"
-      mount --bind /sys/firmware/efi/efivars "${KLDLOAD_TARGET_MNT}/sys/firmware/efi/efivars" || true
-    fi
-  }
+    k_bind_chroot_mounts() {
+        mkdir -p "${KLDLOAD_TARGET_MNT}"/{dev,proc,sys,run}
+        mount --bind /dev "${KLDLOAD_TARGET_MNT}/dev"
+        mount --bind /proc "${KLDLOAD_TARGET_MNT}/proc"
+        mount --bind /sys "${KLDLOAD_TARGET_MNT}/sys"
+        mount --bind /run "${KLDLOAD_TARGET_MNT}/run"
+        if [[ -d /sys/firmware/efi/efivars ]]; then
+            mkdir -p "${KLDLOAD_TARGET_MNT}/sys/firmware/efi/efivars"
+            mount --bind /sys/firmware/efi/efivars "${KLDLOAD_TARGET_MNT}/sys/firmware/efi/efivars" || true
+        fi
+    }
 fi
 
 if ! k_have_func k_unbind_chroot_mounts; then
-  k_unbind_chroot_mounts() {
-    umount -lf "${KLDLOAD_TARGET_MNT}/sys/firmware/efi/efivars" 2>/dev/null || true
-    umount -lf "${KLDLOAD_TARGET_MNT}/run"   2>/dev/null || true
-    umount -lf "${KLDLOAD_TARGET_MNT}/sys"   2>/dev/null || true
-    umount -lf "${KLDLOAD_TARGET_MNT}/proc"  2>/dev/null || true
-    umount -lf "${KLDLOAD_TARGET_MNT}/dev"   2>/dev/null || true
-  }
+    k_unbind_chroot_mounts() {
+        umount -lf "${KLDLOAD_TARGET_MNT}/sys/firmware/efi/efivars" 2>/dev/null || true
+        umount -lf "${KLDLOAD_TARGET_MNT}/run" 2>/dev/null || true
+        umount -lf "${KLDLOAD_TARGET_MNT}/sys" 2>/dev/null || true
+        umount -lf "${KLDLOAD_TARGET_MNT}/proc" 2>/dev/null || true
+        umount -lf "${KLDLOAD_TARGET_MNT}/dev" 2>/dev/null || true
+    }
 fi
 
 # Seal the installed system for use as a clonable golden image.
 # Clears machine-specific state so cloud-init / first-boot can repersonalize.
 k_seal_image_for_clone() {
-  local target="${KLDLOAD_TARGET_MNT}"
-  k_log "Sealing image for clone: clearing machine-id, SSH host keys, cloud-init state"
+    local target="${KLDLOAD_TARGET_MNT}"
+    k_log "Sealing image for clone: clearing machine-id, SSH host keys, cloud-init state"
 
-  # Truncate machine-id — systemd regenerates on first boot
-  : > "${target}/etc/machine-id"
-  rm -f "${target}/var/lib/dbus/machine-id" 2>/dev/null || true
+    # Truncate machine-id — systemd regenerates on first boot
+    : >"${target}/etc/machine-id"
+    rm -f "${target}/var/lib/dbus/machine-id" 2>/dev/null || true
 
-  # Remove SSH host keys — sshd-keygen regenerates on first boot
-  rm -f "${target}"/etc/ssh/ssh_host_*
+    # Remove SSH host keys — sshd-keygen regenerates on first boot
+    rm -f "${target}"/etc/ssh/ssh_host_*
 
-  # Remove any hardcoded DHCP leases
-  rm -f "${target}"/var/lib/NetworkManager/*.lease 2>/dev/null || true
-  rm -f "${target}"/var/lib/dhclient/*.lease 2>/dev/null || true
-  rm -rf "${target}"/var/lib/dhcp/* 2>/dev/null || true
+    # Remove any hardcoded DHCP leases
+    rm -f "${target}"/var/lib/NetworkManager/*.lease 2>/dev/null || true
+    rm -f "${target}"/var/lib/dhclient/*.lease 2>/dev/null || true
+    rm -rf "${target}"/var/lib/dhcp/* 2>/dev/null || true
 
-  # Reset cloud-init so it runs on next boot
-  if [[ -d "${target}/var/lib/cloud" ]]; then
-    rm -rf "${target}/var/lib/cloud/instances" 2>/dev/null || true
-    rm -f "${target}/var/lib/cloud/instance" 2>/dev/null || true
-  fi
+    # Reset cloud-init so it runs on next boot
+    if [[ -d "${target}/var/lib/cloud" ]]; then
+        rm -rf "${target}/var/lib/cloud/instances" 2>/dev/null || true
+        rm -f "${target}/var/lib/cloud/instance" 2>/dev/null || true
+    fi
 
-  # Ensure cloud-init is enabled (not masked)
-  chroot "${target}" systemctl enable cloud-init.service 2>/dev/null || true
-  chroot "${target}" systemctl enable cloud-init-local.service 2>/dev/null || true
-  chroot "${target}" systemctl enable cloud-config.service 2>/dev/null || true
-  chroot "${target}" systemctl enable cloud-final.service 2>/dev/null || true
+    # Ensure cloud-init is enabled (not masked)
+    chroot "${target}" systemctl enable cloud-init.service 2>/dev/null || true
+    chroot "${target}" systemctl enable cloud-init-local.service 2>/dev/null || true
+    chroot "${target}" systemctl enable cloud-config.service 2>/dev/null || true
+    chroot "${target}" systemctl enable cloud-final.service 2>/dev/null || true
 
-  # Write cloud-init datasource config — NoCloud for Proxmox/KVM, falls back to others
-  mkdir -p "${target}/etc/cloud/cloud.cfg.d"
-  cat > "${target}/etc/cloud/cloud.cfg.d/99-kldload-datasource.cfg" <<'CLOUDINIT'
+    # Write cloud-init datasource config — NoCloud for Proxmox/KVM, falls back to others
+    mkdir -p "${target}/etc/cloud/cloud.cfg.d"
+    cat >"${target}/etc/cloud/cloud.cfg.d/99-kldload-datasource.cfg" <<'CLOUDINIT'
 # kldload golden image — accept any datasource
 datasource_list: [ NoCloud, ConfigDrive, OpenStack, Azure, GCE, Ec2, None ]
 CLOUDINIT
 
-  # Clear bash history and logs from the build process
-  rm -f "${target}/root/.bash_history"
-  : > "${target}/var/log/wtmp" 2>/dev/null || true
-  : > "${target}/var/log/btmp" 2>/dev/null || true
-  : > "${target}/var/log/lastlog" 2>/dev/null || true
+    # Clear bash history and logs from the build process
+    rm -f "${target}/root/.bash_history"
+    : >"${target}/var/log/wtmp" 2>/dev/null || true
+    : >"${target}/var/log/btmp" 2>/dev/null || true
+    : >"${target}/var/log/lastlog" 2>/dev/null || true
 
-  # Remove the install manifest (contains build-time passwords)
-  rm -f "${target}/etc/kldload/install-manifest.env" 2>/dev/null || true
+    # Remove the install manifest (contains build-time passwords)
+    rm -f "${target}/etc/kldload/install-manifest.env" 2>/dev/null || true
 
-  k_log "Image sealed for cloning"
+    k_log "Image sealed for cloning"
 }
 
 if ! k_have_func k_preflight; then
-  k_preflight() {
-    k_log "========== Preflight =========="
-    [[ -n "${KLDLOAD_DISK:-}" ]] || k_die "KLDLOAD_DISK is not set"
-    [[ -b "${KLDLOAD_DISK}" ]]   || k_die "Target disk is not a block device: ${KLDLOAD_DISK}"
+    k_preflight() {
+        k_log "========== Preflight =========="
+        [[ -n "${KLDLOAD_DISK:-}" ]] || k_die "KLDLOAD_DISK is not set"
+        [[ -b "${KLDLOAD_DISK}" ]] || k_die "Target disk is not a block device: ${KLDLOAD_DISK}"
 
-    # Fedora installs F44 (KLDLOAD_FEDORA_RELEASE default 44). F44's base repo
-    # ships the 6.19.x GA kernel; bootstrap.sh excludes the 7.0.x updates at
-    # install time AND pins kernel-7.* out of the installed system's dnf.conf,
-    # so the box lands on 6.19 and `dnf upgrade` can't pull the 7.0.x kernel
-    # that has no buildable ZFS (which would drop the next boot into dracut
-    # emergency). The fc43 OpenZFS bridge (zfs-dkms 2.4.x) builds against 6.19 —
-    # the exact combo the live env runs. No gate: the pin is the safety net.
+        # Fedora installs F44 (KLDLOAD_FEDORA_RELEASE default 44). F44's base repo
+        # ships the 6.19.x GA kernel; bootstrap.sh excludes the 7.0.x updates at
+        # install time AND pins kernel-7.* out of the installed system's dnf.conf,
+        # so the box lands on 6.19 and `dnf upgrade` can't pull the 7.0.x kernel
+        # that has no buildable ZFS (which would drop the next boot into dracut
+        # emergency). The fc43 OpenZFS bridge (zfs-dkms 2.4.x) builds against 6.19 —
+        # the exact combo the live env runs. No gate: the pin is the safety net.
 
-    local sb=0 tpm=0
-    if command -v mokutil >/dev/null 2>&1; then
-      mokutil --sb-state 2>/dev/null | grep -qi 'enabled' && sb=1
-    fi
-    [[ -e /dev/tpm0 || -e /dev/tpmrm0 ]] && tpm=1
-    export KLDLOAD_SECURE_BOOT="${sb}" KLDLOAD_TPM_PRESENT="${tpm}"
-
-    if [[ "${KLDLOAD_STORAGE_MODE:-zfs}" == "zfs" ]]; then
-      command -v zpool >/dev/null 2>&1 && command -v zfs >/dev/null 2>&1 \
-        || k_die "ZFS requested but zpool/zfs userspace is missing"
-      if ! modprobe zfs >/dev/null 2>&1; then
-        if [[ "${sb}" -eq 1 ]]; then
-          if mokutil --list-new 2>/dev/null | grep -qi 'kldload\|CN=kldload'; then
-            k_die "Secure Boot: MOK enrollment is pending — reboot, enroll in MokManager (password: kldload), then run the installer"
-          else
-            k_die "Secure Boot: modprobe zfs failed — MOK not enrolled. Reboot the live ISO; it will automatically queue MOK enrollment"
-          fi
-        else
-          k_die "ZFS requested but modprobe zfs failed — check dmesg for details"
+        local sb=0 tpm=0
+        if command -v mokutil >/dev/null 2>&1; then
+            mokutil --sb-state 2>/dev/null | grep -qi 'enabled' && sb=1
         fi
-      fi
-    fi
-    k_log "Preflight OK: secure_boot=${sb} tpm=${tpm}"
-  }
+        [[ -e /dev/tpm0 || -e /dev/tpmrm0 ]] && tpm=1
+        export KLDLOAD_SECURE_BOOT="${sb}" KLDLOAD_TPM_PRESENT="${tpm}"
+
+        if [[ "${KLDLOAD_STORAGE_MODE:-zfs}" == "zfs" ]]; then
+            command -v zpool >/dev/null 2>&1 && command -v zfs >/dev/null 2>&1 ||
+                k_die "ZFS requested but zpool/zfs userspace is missing"
+            if ! modprobe zfs >/dev/null 2>&1; then
+                if [[ "${sb}" -eq 1 ]]; then
+                    if mokutil --list-new 2>/dev/null | grep -qi 'kldload\|CN=kldload'; then
+                        k_die "Secure Boot: MOK enrollment is pending — reboot, enroll in MokManager (password: kldload), then run the installer"
+                    else
+                        k_die "Secure Boot: modprobe zfs failed — MOK not enrolled. Reboot the live ISO; it will automatically queue MOK enrollment"
+                    fi
+                else
+                    k_die "ZFS requested but modprobe zfs failed — check dmesg for details"
+                fi
+            fi
+        fi
+        k_log "Preflight OK: secure_boot=${sb} tpm=${tpm}"
+    }
 fi
 
-
 if ! k_have_func k_install_zfs_storage; then
-  k_install_zfs_storage() {
-    k_have_func k_storage_zfs_install \
-      && { k_log "Invoking ZFS installer"; k_storage_zfs_install; } \
-      || k_die "ZFS installer entrypoint not found"
-  }
+    k_install_zfs_storage() {
+        k_have_func k_storage_zfs_install &&
+            {
+                k_log "Invoking ZFS installer"
+                k_storage_zfs_install
+            } ||
+            k_die "ZFS installer entrypoint not found"
+    }
 fi
 
 if ! k_have_func k_bootstrap_base; then
-  k_bootstrap_base() {
-    : > "${KLDLOAD_LOG_DIR}/bootstrap.log"
-    local target="${KLDLOAD_TARGET_MNT}"
-    local distro="${KLDLOAD_DISTRO:-centos}"
-    local log="${KLDLOAD_LOG_DIR}/bootstrap.log"
+    k_bootstrap_base() {
+        : >"${KLDLOAD_LOG_DIR}/bootstrap.log"
+        local target="${KLDLOAD_TARGET_MNT}"
+        local distro="${KLDLOAD_DISTRO:-centos}"
+        local log="${KLDLOAD_LOG_DIR}/bootstrap.log"
 
-    k_log "Bootstrapping ${distro} → ${target}"
+        k_log "Bootstrapping ${distro} → ${target}"
 
-    case "${distro}" in
-      # ── CentOS / Rocky / RHEL (DNF-based) ──────────────────────────────
-      centos|rocky|rhel|fedora)
-        local release="${KLDLOAD_RELEASE:-9}"
+        case "${distro}" in
+        # ── CentOS / Rocky / RHEL (DNF-based) ──────────────────────────────
+        centos | rocky | rhel | fedora)
+            local release="${KLDLOAD_RELEASE:-9}"
 
-        # Set up repos inside installroot
-        mkdir -p "${target}/etc/yum.repos.d" "${target}/etc/pki/rpm-gpg"
+            # Set up repos inside installroot
+            mkdir -p "${target}/etc/yum.repos.d" "${target}/etc/pki/rpm-gpg"
 
-        if [[ "${distro}" == "rhel" ]]; then
-          k_log "RHEL mode — using customer subscription repos"
-          # RHEL customers must have repos configured; copy from live host
-          cp /etc/yum.repos.d/*.repo "${target}/etc/yum.repos.d/" 2>/dev/null || true
-          cp -r /etc/pki/rpm-gpg/* "${target}/etc/pki/rpm-gpg/" 2>/dev/null || true
-        else
-          cat > "${target}/etc/yum.repos.d/centos.repo" <<DNFREPO
+            if [[ "${distro}" == "rhel" ]]; then
+                k_log "RHEL mode — using customer subscription repos"
+                # RHEL customers must have repos configured; copy from live host
+                cp /etc/yum.repos.d/*.repo "${target}/etc/yum.repos.d/" 2>/dev/null || true
+                cp -r /etc/pki/rpm-gpg/* "${target}/etc/pki/rpm-gpg/" 2>/dev/null || true
+            else
+                cat >"${target}/etc/yum.repos.d/centos.repo" <<DNFREPO
 [baseos]
 name=CentOS Stream ${release} - BaseOS
 metalink=https://mirrors.centos.org/metalink?repo=centos-baseos-${release}-stream&arch=\$basearch&protocol=https
@@ -377,10 +380,10 @@ metalink=https://mirrors.centos.org/metalink?repo=centos-crb-${release}-stream&a
 gpgcheck=0
 enabled=1
 DNFREPO
-        fi
+            fi
 
-        # EPEL
-        cat > "${target}/etc/yum.repos.d/epel.repo" <<EPELREPO
+            # EPEL
+            cat >"${target}/etc/yum.repos.d/epel.repo" <<EPELREPO
 [epel]
 name=EPEL ${release}
 metalink=https://mirrors.fedoraproject.org/metalink?repo=epel-${release}&arch=\$basearch
@@ -388,8 +391,8 @@ gpgcheck=0
 enabled=1
 EPELREPO
 
-        # ZFS repo
-        cat > "${target}/etc/yum.repos.d/zfs.repo" <<ZFSREPO
+            # ZFS repo
+            cat >"${target}/etc/yum.repos.d/zfs.repo" <<ZFSREPO
 [zfs]
 name=ZFS on Linux for EL${release}
 baseurl=http://download.zfsonlinux.org/epel/${release}/\$basearch/
@@ -397,66 +400,66 @@ enabled=1
 gpgcheck=0
 ZFSREPO
 
-        # Bootstrap base system
-        k_log "Running dnf --installroot (${distro} ${release})..."
-        # --skip-broken + --skip-unavailable: defensive. Caught on .103
-        # (build #50) -- `composer-cli` doesn't exist in RHEL 10 (renamed
-        # to `weldr-client`), and on that single bad-name dnf dropped
-        # the WHOLE transaction including nethogs/iftop/iotop-c (which
-        # were valid). With these flags dnf logs the unmatched name and
-        # continues with the rest. kldload-firstboot has a post-install
-        # retry pass that catches any genuinely missing optional packages.
-        dnf --installroot="${target}" --releasever="${release}" \
-            --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
-            --skip-broken --skip-unavailable \
-            --nogpgcheck -y install \
-            basesystem filesystem setup \
-            dnf rpm coreutils bash glibc glibc-langpack-en \
-            systemd systemd-udev dbus-common \
-            kernel kernel-core kernel-modules kernel-devel \
-            dracut \
-            grub2-efi-x64 grub2-tools shim-x64 efibootmgr mokutil \
-            NetworkManager openssh-server openssh-clients sudo \
-            vim-enhanced tmux curl wget rsync jq less tar gzip \
-            iproute iputils net-tools nftables chrony \
-            nethogs iftop iotop-c htop \
-            passwd shadow-utils util-linux procps-ng findutils grep sed gawk \
-            rootfiles parted gdisk dosfstools \
-            python3 python3-pip \
-            dkms gcc make autoconf automake libtool \
-            zfs zfs-dkms \
-            osbuild-composer weldr-client \
-            >> "$log" 2>&1 \
-            || k_die "dnf --installroot failed"
+            # Bootstrap base system
+            k_log "Running dnf --installroot (${distro} ${release})..."
+            # --skip-broken + --skip-unavailable: defensive. Caught on .103
+            # (build #50) -- `composer-cli` doesn't exist in RHEL 10 (renamed
+            # to `weldr-client`), and on that single bad-name dnf dropped
+            # the WHOLE transaction including nethogs/iftop/iotop-c (which
+            # were valid). With these flags dnf logs the unmatched name and
+            # continues with the rest. kldload-firstboot has a post-install
+            # retry pass that catches any genuinely missing optional packages.
+            dnf --installroot="${target}" --releasever="${release}" \
+                --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+                --skip-broken --skip-unavailable \
+                --nogpgcheck -y install \
+                basesystem filesystem setup \
+                dnf rpm coreutils bash glibc glibc-langpack-en \
+                systemd systemd-udev dbus-common \
+                kernel kernel-core kernel-modules kernel-devel \
+                dracut \
+                grub2-efi-x64 grub2-tools shim-x64 efibootmgr mokutil \
+                NetworkManager openssh-server openssh-clients sudo \
+                vim-enhanced tmux curl wget rsync jq less tar gzip \
+                iproute iputils net-tools nftables chrony \
+                nethogs iftop iotop-c htop \
+                passwd shadow-utils util-linux procps-ng findutils grep sed gawk \
+                rootfiles parted gdisk dosfstools \
+                python3 python3-pip \
+                dkms gcc make autoconf automake libtool \
+                zfs zfs-dkms \
+                osbuild-composer weldr-client \
+                >>"$log" 2>&1 ||
+                k_die "dnf --installroot failed"
 
-        # ── Cockpit tools (F-key console bindings depend on these) ──
-        # F12/M-n use nethogs; F9 uses htop; iotop + iftop fill out the
-        # disk/net per-process views. Caught on .101 (build #48): F12
-        # threw "pkg not installed". EPEL repo is written above so these
-        # all resolve. iotop on RHEL 10 ships as `iotop-c` (the original
-        # python iotop is deprecated upstream) -- using -c name above.
+            # ── Cockpit tools (F-key console bindings depend on these) ──
+            # F12/M-n use nethogs; F9 uses htop; iotop + iftop fill out the
+            # disk/net per-process views. Caught on .101 (build #48): F12
+            # threw "pkg not installed". EPEL repo is written above so these
+            # all resolve. iotop on RHEL 10 ships as `iotop-c` (the original
+            # python iotop is deprecated upstream) -- using -c name above.
 
-        k_log "Root filesystem bootstrapped: $(du -sh "${target}" | cut -f1)"
+            k_log "Root filesystem bootstrapped: $(du -sh "${target}" | cut -f1)"
 
-        # Generate MOK keys + DKMS sign helper only if the user explicitly
-        # opted in to Secure Boot. Default is OFF — see _secure_boot_enabled()
-        # comment at top of this script for why. SB users get the full
-        # pipeline; everyone else gets a clean unsigned ZBM → direct boot.
-        if _secure_boot_enabled; then
-        k_log "Generating MOK keys for Secure Boot (KLDLOAD_ENABLE_SECURE_BOOT=1)..."
-        if k_have_func k_generate_mok_keys; then
-          KLDLOAD_TARGET="${target}" k_generate_mok_keys || k_log "WARNING: MOK key generation failed — modules won't be signed"
-        else
-          # Inline fallback if lib/bootstrap.sh wasn't loaded
-          local _mok_dir="${target}/var/lib/dkms"
-          mkdir -p "${_mok_dir}" "${target}/etc/dkms/framework.conf.d"
-          openssl req -new -x509 -newkey rsa:2048 \
-            -keyout "${_mok_dir}/mok.key" -out "${_mok_dir}/mok.pub" \
-            -days 3650 -nodes -subj "/CN=kldload Secure Boot MOK $(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d%H%M%S)-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')/" >> "$log" 2>&1 || true
-          openssl x509 -in "${_mok_dir}/mok.pub" -out "${_mok_dir}/mok.der" -outform DER >> "$log" 2>&1 || true
-          chmod 0600 "${_mok_dir}/mok.key" 2>/dev/null
-          # Sign helper that works on both CentOS and Debian
-          cat > "${target}/etc/dkms/sign_helper.sh" <<'EOSIGN'
+            # Generate MOK keys + DKMS sign helper only if the user explicitly
+            # opted in to Secure Boot. Default is OFF — see _secure_boot_enabled()
+            # comment at top of this script for why. SB users get the full
+            # pipeline; everyone else gets a clean unsigned ZBM → direct boot.
+            if _secure_boot_enabled; then
+                k_log "Generating MOK keys for Secure Boot (KLDLOAD_ENABLE_SECURE_BOOT=1)..."
+                if k_have_func k_generate_mok_keys; then
+                    KLDLOAD_TARGET="${target}" k_generate_mok_keys || k_log "WARNING: MOK key generation failed — modules won't be signed"
+                else
+                    # Inline fallback if lib/bootstrap.sh wasn't loaded
+                    local _mok_dir="${target}/var/lib/dkms"
+                    mkdir -p "${_mok_dir}" "${target}/etc/dkms/framework.conf.d"
+                    openssl req -new -x509 -newkey rsa:2048 \
+                        -keyout "${_mok_dir}/mok.key" -out "${_mok_dir}/mok.pub" \
+                        -days 3650 -nodes -subj "/CN=kldload Secure Boot MOK $(hostname -s 2>/dev/null || echo node)-$(date +%Y%m%d%H%M%S)-$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')/" >>"$log" 2>&1 || true
+                    openssl x509 -in "${_mok_dir}/mok.pub" -out "${_mok_dir}/mok.der" -outform DER >>"$log" 2>&1 || true
+                    chmod 0600 "${_mok_dir}/mok.key" 2>/dev/null
+                    # Sign helper that works on both CentOS and Debian
+                    cat >"${target}/etc/dkms/sign_helper.sh" <<'EOSIGN'
 #!/bin/bash
 set -euo pipefail
 KVER="${1:?}" MOD="${2:?}"
@@ -466,244 +469,245 @@ SIGN_FILE=$(find /usr/src/kernels/"${KVER}" /usr/src/linux-headers-"${KVER}" \
 [[ -x "${SIGN_FILE}" ]] || { echo "sign-file not found for ${KVER}" >&2; exit 0; }
 exec "${SIGN_FILE}" sha256 /var/lib/dkms/mok.key /var/lib/dkms/mok.pub "${MOD}"
 EOSIGN
-          chmod 0755 "${target}/etc/dkms/sign_helper.sh"
-          cat > "${target}/etc/dkms/framework.conf.d/kldload-mok.conf" <<'MOKCONF'
+                    chmod 0755 "${target}/etc/dkms/sign_helper.sh"
+                    cat >"${target}/etc/dkms/framework.conf.d/kldload-mok.conf" <<'MOKCONF'
 mok_signing_key=/var/lib/dkms/mok.key
 mok_certificate=/var/lib/dkms/mok.pub
 sign_tool=/etc/dkms/sign_helper.sh
 # Force signing even inside chroot (default not_in_chroot skips during install)
 try_sign_modules=true
 MOKCONF
-          k_log "MOK keys generated (inline fallback)"
-        fi
-        else
-          k_log "Skipping MOK key generation (Secure Boot disabled — set KLDLOAD_ENABLE_SECURE_BOOT=1 at install time to enable)"
-        fi  # end _secure_boot_enabled
+                    k_log "MOK keys generated (inline fallback)"
+                fi
+            else
+                k_log "Skipping MOK key generation (Secure Boot disabled — set KLDLOAD_ENABLE_SECURE_BOOT=1 at install time to enable)"
+            fi # end _secure_boot_enabled
 
-        # Build ZFS DKMS module (signed with MOK key if hw profile, unsigned otherwise)
-        local kver
-        kver=$(ls "${target}/lib/modules/" | grep -v '^$' | head -1)
-        k_log "Building ZFS DKMS module for kernel ${kver} (Secure Boot signed)..."
-        mount -t proc proc "${target}/proc"
-        mount -t sysfs sysfs "${target}/sys"
-        mount --bind /dev "${target}/dev"
-        mount --bind /dev/pts "${target}/dev/pts"
+            # Build ZFS DKMS module (signed with MOK key if hw profile, unsigned otherwise)
+            local kver
+            kver=$(ls "${target}/lib/modules/" | grep -v '^$' | head -1)
+            k_log "Building ZFS DKMS module for kernel ${kver} (Secure Boot signed)..."
+            mount -t proc proc "${target}/proc"
+            mount -t sysfs sysfs "${target}/sys"
+            mount --bind /dev "${target}/dev"
+            mount --bind /dev/pts "${target}/dev/pts"
 
-        local zfs_ver
-        zfs_ver=$(chroot "${target}" rpm -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")
-        if [[ -n "$zfs_ver" ]]; then
-          chroot "${target}" /usr/sbin/dkms build -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
-          chroot "${target}" /usr/sbin/dkms install -m zfs -v "$zfs_ver" -k "$kver" >> "$log" 2>&1 || true
-        fi
-        chroot "${target}" depmod -a "$kver" 2>/dev/null || true
+            local zfs_ver
+            zfs_ver=$(chroot "${target}" rpm -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")
+            if [[ -n "$zfs_ver" ]]; then
+                chroot "${target}" /usr/sbin/dkms build -m zfs -v "$zfs_ver" -k "$kver" >>"$log" 2>&1 || true
+                chroot "${target}" /usr/sbin/dkms install -m zfs -v "$zfs_ver" -k "$kver" >>"$log" 2>&1 || true
+            fi
+            chroot "${target}" depmod -a "$kver" 2>/dev/null || true
 
-        umount "${target}/dev/pts" 2>/dev/null || true
-        umount "${target}/dev" 2>/dev/null || true
-        umount "${target}/sys" 2>/dev/null || true
-        umount "${target}/proc" 2>/dev/null || true
+            umount "${target}/dev/pts" 2>/dev/null || true
+            umount "${target}/dev" 2>/dev/null || true
+            umount "${target}/sys" 2>/dev/null || true
+            umount "${target}/proc" 2>/dev/null || true
 
-        # Prevent services from starting in chroot
-        printf '#!/bin/sh\nexit 101\n' > "${target}/usr/sbin/policy-rc.d"
-        chmod 0755 "${target}/usr/sbin/policy-rc.d"
-        ;;
+            # Prevent services from starting in chroot
+            printf '#!/bin/sh\nexit 101\n' >"${target}/usr/sbin/policy-rc.d"
+            chmod 0755 "${target}/usr/sbin/policy-rc.d"
+            ;;
 
-      # ── Debian / Ubuntu (APT-based) ────────────────────────────────────
-      debian|ubuntu)
-        local suite="${KLDLOAD_DEBIAN_SUITE:-trixie}"
-        local mirror="${KLDLOAD_DEBIAN_MIRROR:-https://mirror.it.ubc.ca/debian}"
+        # ── Debian / Ubuntu (APT-based) ────────────────────────────────────
+        debian | ubuntu)
+            local suite="${KLDLOAD_DEBIAN_SUITE:-trixie}"
+            local mirror="${KLDLOAD_DEBIAN_MIRROR:-https://mirror.it.ubc.ca/debian}"
 
-        k_log "Running debootstrap (${suite})..."
-        debootstrap --arch amd64 "${suite}" "${target}" "${mirror}" \
-          >> "$log" 2>&1
+            k_log "Running debootstrap (${suite})..."
+            debootstrap --arch amd64 "${suite}" "${target}" "${mirror}" \
+                >>"$log" 2>&1
 
-        cat > "${target}/etc/apt/sources.list" <<EOS
+            cat >"${target}/etc/apt/sources.list" <<EOS
 deb ${mirror} ${suite} main contrib non-free-firmware
 deb ${mirror} ${suite}-updates main contrib non-free-firmware
 deb http://security.debian.org/debian-security ${suite}-security main contrib non-free-firmware
 EOS
 
-        printf '#!/bin/sh\nexit 101\n' > "${target}/usr/sbin/policy-rc.d"
-        chmod 0755 "${target}/usr/sbin/policy-rc.d"
+            printf '#!/bin/sh\nexit 101\n' >"${target}/usr/sbin/policy-rc.d"
+            chmod 0755 "${target}/usr/sbin/policy-rc.d"
 
-        chroot "${target}" apt-get update >> "$log" 2>&1 \
-          || k_die "apt-get update failed in target chroot — check ${log}"
+            chroot "${target}" apt-get update >>"$log" 2>&1 ||
+                k_die "apt-get update failed in target chroot — check ${log}"
 
-        # Split base/kernel into two passes. Pass A is the base userland
-        # (no kernel triggers). Pass B installs the kernel + headers + zfs
-        # stack so all DKMS triggers fire AFTER both kernel-source AND
-        # kernel-headers are present. Doing both in one transaction caused
-        # zfs-dkms's postinst to race the linux-image-amd64 install and
-        # the whole thing rolled back silently with apt returning 0 —
-        # caught on .137 2026-05-25 build #52: dpkg -l showed initramfs-
-        # tools + zfs-dkms installed but linux-image-amd64 not even in the
-        # rpm db. Verified by manual chroot apt-get install which landed
-        # the kernel cleanly once nothing else was contending.
-        #
-        # Each pass has explicit `|| k_die` so a failure is loud and stops
-        # the install instead of letting the user reboot into an unbootable
-        # target (which is what bit .137).
+            # Split base/kernel into two passes. Pass A is the base userland
+            # (no kernel triggers). Pass B installs the kernel + headers + zfs
+            # stack so all DKMS triggers fire AFTER both kernel-source AND
+            # kernel-headers are present. Doing both in one transaction caused
+            # zfs-dkms's postinst to race the linux-image-amd64 install and
+            # the whole thing rolled back silently with apt returning 0 —
+            # caught on .137 2026-05-25 build #52: dpkg -l showed initramfs-
+            # tools + zfs-dkms installed but linux-image-amd64 not even in the
+            # rpm db. Verified by manual chroot apt-get install which landed
+            # the kernel cleanly once nothing else was contending.
+            #
+            # Each pass has explicit `|| k_die` so a failure is loud and stops
+            # the install instead of letting the user reboot into an unbootable
+            # target (which is what bit .137).
 
-        # Pass A: base userland (no kernel/DKMS triggers in this set)
-        DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y \
-            --no-install-recommends \
-            locales sudo openssh-server systemd-resolved network-manager \
-            curl ca-certificates vim-tiny less iproute2 iputils-ping \
-            initramfs-tools dosfstools e2fsprogs efibootmgr \
-            keyboard-configuration console-setup tzdata \
-            tmux jq rsync \
-            nethogs iftop iotop htop bpfcc-tools bpftrace \
-            >> "$log" 2>&1 \
-          || k_die "apt-get install pass A (base userland) failed — check ${log}"
+            # Pass A: base userland (no kernel/DKMS triggers in this set)
+            DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y \
+                --no-install-recommends \
+                locales sudo openssh-server systemd-resolved network-manager \
+                curl ca-certificates vim-tiny less iproute2 iputils-ping \
+                initramfs-tools dosfstools e2fsprogs efibootmgr \
+                keyboard-configuration console-setup tzdata \
+                tmux jq rsync \
+                nethogs iftop iotop htop bpfcc-tools bpftrace \
+                >>"$log" 2>&1 ||
+                k_die "apt-get install pass A (base userland) failed — check ${log}"
 
-        # Pass B: kernel + headers + bootloader + zfs. Install headers
-        # BEFORE the kernel so when linux-image-amd64's postinst fires
-        # the dkms triggers for zfs, kernel-devel is already on disk.
-        DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y \
-            --no-install-recommends \
-            linux-headers-amd64 linux-image-amd64 \
-            grub-efi-amd64 shim-signed \
-            zfs-dkms zfsutils-linux zfs-initramfs zfs-zed \
-            >> "$log" 2>&1 \
-          || k_die "apt-get install pass B (kernel + zfs) failed — check ${log}"
+            # Pass B: kernel + headers + bootloader + zfs. Install headers
+            # BEFORE the kernel so when linux-image-amd64's postinst fires
+            # the dkms triggers for zfs, kernel-devel is already on disk.
+            DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y \
+                --no-install-recommends \
+                linux-headers-amd64 linux-image-amd64 \
+                grub-efi-amd64 shim-signed \
+                zfs-dkms zfsutils-linux zfs-initramfs zfs-zed \
+                >>"$log" 2>&1 ||
+                k_die "apt-get install pass B (kernel + zfs) failed — check ${log}"
 
-        # Post-install verification — assert the critical packages actually
-        # landed. apt-get can return 0 even when a postinst failed and
-        # marked the package as half-configured (status 'iF' in dpkg). The
-        # explicit `dpkg -l | grep ^ii` check is the equivalent of the RHEL
-        # pass-3 `rpm -q` verify added 2026-05-12 — without it, the install
-        # claims success and the operator only finds out at the post-reboot
-        # ZBM-can't-find-a-kernel screen. .137 2026-05-25 spent an hour on
-        # exactly this failure mode before we added the guard.
-        local _required=( linux-image-amd64 linux-headers-amd64 grub-efi-amd64
-                          shim-signed initramfs-tools zfs-dkms zfs-initramfs )
-        local _missing=()
-        for _p in "${_required[@]}"; do
-          chroot "${target}" /usr/bin/dpkg-query -W -f='${db:Status-Abbrev}' "$_p" 2>/dev/null \
-            | grep -q '^ii' || _missing+=("$_p")
-        done
-        if [[ ${#_missing[@]} -gt 0 ]]; then
-          k_die "Required packages missing or half-configured after apt install: ${_missing[*]} — target will not boot. Check ${log}"
+            # Post-install verification — assert the critical packages actually
+            # landed. apt-get can return 0 even when a postinst failed and
+            # marked the package as half-configured (status 'iF' in dpkg). The
+            # explicit `dpkg -l | grep ^ii` check is the equivalent of the RHEL
+            # pass-3 `rpm -q` verify added 2026-05-12 — without it, the install
+            # claims success and the operator only finds out at the post-reboot
+            # ZBM-can't-find-a-kernel screen. .137 2026-05-25 spent an hour on
+            # exactly this failure mode before we added the guard.
+            local _required=(linux-image-amd64 linux-headers-amd64 grub-efi-amd64
+                shim-signed initramfs-tools zfs-dkms zfs-initramfs)
+            local _missing=()
+            for _p in "${_required[@]}"; do
+                chroot "${target}" /usr/bin/dpkg-query -W -f='${db:Status-Abbrev}' "$_p" 2>/dev/null |
+                    grep -q '^ii' || _missing+=("$_p")
+            done
+            if [[ ${#_missing[@]} -gt 0 ]]; then
+                k_die "Required packages missing or half-configured after apt install: ${_missing[*]} — target will not boot. Check ${log}"
+            fi
+            k_log "Debian/Ubuntu apt install verified: kernel + bootloader + zfs all installed"
+            ;;
+
+        # ── BSD / illumos ──────────────────────────────────────────────────
+        freebsd)
+            _k_bootstrap_freebsd
+            ;;
+        openbsd)
+            _k_bootstrap_openbsd
+            ;;
+        ghostbsd)
+            _k_bootstrap_ghostbsd
+            ;;
+        illumos)
+            _k_bootstrap_illumos
+            ;;
+        windows)
+            _k_bootstrap_windows
+            ;;
+
+        *)
+            k_die "Unsupported distro: ${distro}. Use: centos, rocky, rhel, fedora, debian, ubuntu, freebsd, openbsd, ghostbsd, illumos, windows"
+            ;;
+        esac
+
+        # ── Common post-bootstrap (all distros) ──────────────────────────────
+
+        k_bind_chroot_mounts
+
+        # Locale
+        local locale="${KLDLOAD_LOCALE:-en_US.UTF-8}"
+        if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
+            echo "${locale} UTF-8" >"${target}/etc/locale.gen"
+            chroot "${target}" locale-gen >>"$log" 2>&1
+            printf 'LANG=%s\n' "${locale}" >"${target}/etc/default/locale"
+        else
+            echo "LANG=${locale}" >"${target}/etc/locale.conf"
         fi
-        k_log "Debian/Ubuntu apt install verified: kernel + bootloader + zfs all installed"
-        ;;
 
-      # ── BSD / illumos ──────────────────────────────────────────────────
-      freebsd)
-        _k_bootstrap_freebsd
-        ;;
-      openbsd)
-        _k_bootstrap_openbsd
-        ;;
-      ghostbsd)
-        _k_bootstrap_ghostbsd
-        ;;
-      illumos)
-        _k_bootstrap_illumos
-        ;;
-      windows)
-        _k_bootstrap_windows
-        ;;
-
-      *)
-        k_die "Unsupported distro: ${distro}. Use: centos, rocky, rhel, fedora, debian, ubuntu, freebsd, openbsd, ghostbsd, illumos, windows"
-        ;;
-    esac
-
-    # ── Common post-bootstrap (all distros) ──────────────────────────────
-
-    k_bind_chroot_mounts
-
-    # Locale
-    local locale="${KLDLOAD_LOCALE:-en_US.UTF-8}"
-    if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
-      echo "${locale} UTF-8" > "${target}/etc/locale.gen"
-      chroot "${target}" locale-gen >> "$log" 2>&1
-      printf 'LANG=%s\n' "${locale}" > "${target}/etc/default/locale"
-    else
-      echo "LANG=${locale}" > "${target}/etc/locale.conf"
-    fi
-
-    # Keyboard
-    local kblayout="${KLDLOAD_KEYBOARD_LAYOUT:-us}"
-    if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
-      cat > "${target}/etc/default/keyboard" <<EOS
+        # Keyboard
+        local kblayout="${KLDLOAD_KEYBOARD_LAYOUT:-us}"
+        if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
+            cat >"${target}/etc/default/keyboard" <<EOS
 XKBMODEL="pc105"
 XKBLAYOUT="${kblayout}"
 XKBVARIANT=""
 XKBOPTIONS=""
 BACKSPACE="guess"
 EOS
-      DEBIAN_FRONTEND=noninteractive chroot "${target}" \
-        dpkg-reconfigure -f noninteractive keyboard-configuration \
-        >> "$log" 2>&1 || true
-    else
-      echo "KEYMAP=${kblayout}" > "${target}/etc/vconsole.conf"
-    fi
+            DEBIAN_FRONTEND=noninteractive chroot "${target}" \
+                dpkg-reconfigure -f noninteractive keyboard-configuration \
+                >>"$log" 2>&1 || true
+        else
+            echo "KEYMAP=${kblayout}" >"${target}/etc/vconsole.conf"
+        fi
 
-    # Timezone
-    local tz="${KLDLOAD_TIMEZONE:-UTC}"
-    ln -sf "/usr/share/zoneinfo/${tz}" "${target}/etc/localtime" 2>/dev/null || true
-    echo "${tz}" > "${target}/etc/timezone" 2>/dev/null || true
-    if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
-      DEBIAN_FRONTEND=noninteractive chroot "${target}" \
-        dpkg-reconfigure -f noninteractive tzdata >> "$log" 2>&1 || true
-    else
-      chroot "${target}" timedatectl set-timezone "${tz}" 2>/dev/null || true
-    fi
-    k_log "Timezone: ${tz}"
+        # Timezone
+        local tz="${KLDLOAD_TIMEZONE:-UTC}"
+        ln -sf "/usr/share/zoneinfo/${tz}" "${target}/etc/localtime" 2>/dev/null || true
+        echo "${tz}" >"${target}/etc/timezone" 2>/dev/null || true
+        if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
+            DEBIAN_FRONTEND=noninteractive chroot "${target}" \
+                dpkg-reconfigure -f noninteractive tzdata >>"$log" 2>&1 || true
+        else
+            chroot "${target}" timedatectl set-timezone "${tz}" 2>/dev/null || true
+        fi
+        k_log "Timezone: ${tz}"
 
-    # Hostname
-    echo "${KLDLOAD_HOSTNAME:-kldload}" > "${target}/etc/hostname"
+        # Hostname
+        echo "${KLDLOAD_HOSTNAME:-kldload}" >"${target}/etc/hostname"
 
-    # Extra packages
-    if [[ -n "${KLDLOAD_EXTRA_PACKAGES:-}" ]]; then
-      k_log "Installing extra packages: ${KLDLOAD_EXTRA_PACKAGES}"
-      IFS=', ' read -r -a _extra <<< "${KLDLOAD_EXTRA_PACKAGES}"
-      if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
-        DEBIAN_FRONTEND=noninteractive chroot "${target}" \
-          apt-get install -y "${_extra[@]}" >> "$log" 2>&1 || true
-      elif [[ "${distro}" == "arch" ]]; then
-        chroot "${target}" pacman --noconfirm --needed -S "${_extra[@]}" >> "$log" 2>&1 || true
-      else
-        chroot "${target}" dnf install -y "${_extra[@]}" >> "$log" 2>&1 || true
-      fi
-    fi
+        # Extra packages
+        if [[ -n "${KLDLOAD_EXTRA_PACKAGES:-}" ]]; then
+            k_log "Installing extra packages: ${KLDLOAD_EXTRA_PACKAGES}"
+            IFS=', ' read -r -a _extra <<<"${KLDLOAD_EXTRA_PACKAGES}"
+            if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
+                DEBIAN_FRONTEND=noninteractive chroot "${target}" \
+                    apt-get install -y "${_extra[@]}" >>"$log" 2>&1 || true
+            elif [[ "${distro}" == "arch" ]]; then
+                chroot "${target}" pacman --noconfirm --needed -S "${_extra[@]}" >>"$log" 2>&1 || true
+            else
+                chroot "${target}" dnf install -y "${_extra[@]}" >>"$log" 2>&1 || true
+            fi
+        fi
 
-    rm -f "${target}/usr/sbin/policy-rc.d"
-    k_log "Base bootstrap complete (${distro})"
-  }
+        rm -f "${target}/usr/sbin/policy-rc.d"
+        k_log "Base bootstrap complete (${distro})"
+    }
 fi
 
 if ! k_have_func k_configure_network; then
-  k_configure_network() {
-    : > "${KLDLOAD_LOG_DIR}/network.log"
-    local hostname="${KLDLOAD_HOSTNAME:-kldload}"
-    local distro="${KLDLOAD_DISTRO:-centos}"
+    k_configure_network() {
+        : >"${KLDLOAD_LOG_DIR}/network.log"
+        local hostname="${KLDLOAD_HOSTNAME:-kldload}"
+        local distro="${KLDLOAD_DISTRO:-centos}"
 
-    # BSD network config is handled in bootstrap — rc.conf / hostname.* files
-    case "${distro}" in
-      freebsd|openbsd|ghostbsd)
-        k_log "Network: handled by ${distro} bootstrap (rc.conf)"
-        return 0 ;;
-    esac
+        # BSD network config is handled in bootstrap — rc.conf / hostname.* files
+        case "${distro}" in
+        freebsd | openbsd | ghostbsd)
+            k_log "Network: handled by ${distro} bootstrap (rc.conf)"
+            return 0
+            ;;
+        esac
 
-    echo "${hostname}" > "${KLDLOAD_TARGET_MNT}/etc/hostname"
-    cat > "${KLDLOAD_TARGET_MNT}/etc/hosts" <<EOS
+        echo "${hostname}" >"${KLDLOAD_TARGET_MNT}/etc/hostname"
+        cat >"${KLDLOAD_TARGET_MNT}/etc/hosts" <<EOS
 127.0.0.1 localhost
 127.0.1.1 ${hostname}
 ::1 localhost ip6-localhost ip6-loopback
 EOS
 
-    mkdir -p "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections"
+        mkdir -p "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections"
 
-    if [[ "${KLDLOAD_NET_METHOD:-dhcp}" == "static" ]]; then
-      local iface="${KLDLOAD_NET_IFACE:-eth0}"
-      local ip="${KLDLOAD_NET_IP:?static IP required}"
-      local prefix="${KLDLOAD_NET_PREFIX:-24}"
-      local gw="${KLDLOAD_NET_GW:?gateway required}"
-      local dns="${KLDLOAD_NET_DNS:-1.1.1.1,8.8.8.8}"
-      k_log "Static IP: ${ip}/${prefix} gw=${gw} dns=${dns}"
-      cat > "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/kldload-static.nmconnection" <<EOS
+        if [[ "${KLDLOAD_NET_METHOD:-dhcp}" == "static" ]]; then
+            local iface="${KLDLOAD_NET_IFACE:-eth0}"
+            local ip="${KLDLOAD_NET_IP:?static IP required}"
+            local prefix="${KLDLOAD_NET_PREFIX:-24}"
+            local gw="${KLDLOAD_NET_GW:?gateway required}"
+            local dns="${KLDLOAD_NET_DNS:-1.1.1.1,8.8.8.8}"
+            k_log "Static IP: ${ip}/${prefix} gw=${gw} dns=${dns}"
+            cat >"${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/kldload-static.nmconnection" <<EOS
 [connection]
 id=kldload-static
 type=ethernet
@@ -721,10 +725,10 @@ dns=${dns}
 [ipv6]
 method=auto
 EOS
-      chmod 0600 "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/kldload-static.nmconnection"
-    else
-      k_log "Network: DHCP"
-      cat > "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/kldload-dhcp.nmconnection" <<EOS
+            chmod 0600 "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/kldload-static.nmconnection"
+        else
+            k_log "Network: DHCP"
+            cat >"${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/kldload-dhcp.nmconnection" <<EOS
 [connection]
 id=kldload-dhcp
 type=ethernet
@@ -738,20 +742,20 @@ method=auto
 [ipv6]
 method=auto
 EOS
-      chmod 0600 "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/kldload-dhcp.nmconnection"
-    fi
+            chmod 0600 "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/kldload-dhcp.nmconnection"
+        fi
 
-    # ── WiFi connection — optional, written alongside ethernet config ──
-    # The ethernet profile above covers wired fallback; this WiFi profile
-    # comes up when the wired cable isn't plugged in (autoconnect=true,
-    # autoconnect-priority higher than ethernet). Set via the installer
-    # UI's "Connect over WiFi" checkbox → KLDLOAD_WIFI_SSID/KLDLOAD_WIFI_PSK.
-    if [[ -n "${KLDLOAD_WIFI_SSID:-}" ]]; then
-      local _wifi_id
-      _wifi_id="$(printf '%s' "${KLDLOAD_WIFI_SSID}" | tr -cd 'A-Za-z0-9._ -')"
-      [[ -z "${_wifi_id}" ]] && _wifi_id="kldload-wifi"
-      k_log "WiFi: writing NM profile for SSID='${KLDLOAD_WIFI_SSID}'"
-      cat > "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/${_wifi_id}.nmconnection" <<EOS
+        # ── WiFi connection — optional, written alongside ethernet config ──
+        # The ethernet profile above covers wired fallback; this WiFi profile
+        # comes up when the wired cable isn't plugged in (autoconnect=true,
+        # autoconnect-priority higher than ethernet). Set via the installer
+        # UI's "Connect over WiFi" checkbox → KLDLOAD_WIFI_SSID/KLDLOAD_WIFI_PSK.
+        if [[ -n "${KLDLOAD_WIFI_SSID:-}" ]]; then
+            local _wifi_id
+            _wifi_id="$(printf '%s' "${KLDLOAD_WIFI_SSID}" | tr -cd 'A-Za-z0-9._ -')"
+            [[ -z "${_wifi_id}" ]] && _wifi_id="kldload-wifi"
+            k_log "WiFi: writing NM profile for SSID='${KLDLOAD_WIFI_SSID}'"
+            cat >"${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/${_wifi_id}.nmconnection" <<EOS
 [connection]
 id=${_wifi_id}
 type=wifi
@@ -773,372 +777,346 @@ method=auto
 [ipv6]
 method=auto
 EOS
-      chmod 0600 "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/${_wifi_id}.nmconnection"
-      k_log "WiFi profile saved: ${_wifi_id}.nmconnection (0600)"
-    fi
+            chmod 0600 "${KLDLOAD_TARGET_MNT}/etc/NetworkManager/system-connections/${_wifi_id}.nmconnection"
+            k_log "WiFi profile saved: ${_wifi_id}.nmconnection (0600)"
+        fi
 
-    # Enable network manager — NetworkManager on most distros, systemd-networkd as fallback
-    if chroot "${KLDLOAD_TARGET_MNT}" systemctl enable NetworkManager >> "${KLDLOAD_LOG_DIR}/network.log" 2>&1; then
-      true  # NetworkManager enabled successfully
-    else
-      # Fallback: enable systemd-networkd (Alpine, minimal installs)
-      chroot "${KLDLOAD_TARGET_MNT}" systemctl enable systemd-networkd >> "${KLDLOAD_LOG_DIR}/network.log" 2>&1 || true
-      chroot "${KLDLOAD_TARGET_MNT}" systemctl enable systemd-resolved >> "${KLDLOAD_LOG_DIR}/network.log" 2>&1 || true
-    fi
-    k_log "Network configuration complete"
-  }
+        # Enable network manager — NetworkManager on most distros, systemd-networkd as fallback
+        if chroot "${KLDLOAD_TARGET_MNT}" systemctl enable NetworkManager >>"${KLDLOAD_LOG_DIR}/network.log" 2>&1; then
+            true # NetworkManager enabled successfully
+        else
+            # Fallback: enable systemd-networkd (Alpine, minimal installs)
+            chroot "${KLDLOAD_TARGET_MNT}" systemctl enable systemd-networkd >>"${KLDLOAD_LOG_DIR}/network.log" 2>&1 || true
+            chroot "${KLDLOAD_TARGET_MNT}" systemctl enable systemd-resolved >>"${KLDLOAD_LOG_DIR}/network.log" 2>&1 || true
+        fi
+        k_log "Network configuration complete"
+    }
 fi
 
 if ! k_have_func k_configure_security; then
-  k_configure_security() {
-    : > "${KLDLOAD_LOG_DIR}/security.log"
-    local user="${KLDLOAD_USERNAME:-admin}"
-    local upass="${KLDLOAD_PASSWORD:-admin}"
-    local distro="${KLDLOAD_DISTRO:-centos}"
+    k_configure_security() {
+        : >"${KLDLOAD_LOG_DIR}/security.log"
+        local user="${KLDLOAD_USERNAME:-admin}"
+        local upass="${KLDLOAD_PASSWORD:-admin}"
+        local distro="${KLDLOAD_DISTRO:-centos}"
 
-    # BSD user creation and SSH config is handled in bootstrap
-    case "${distro}" in
-      freebsd|openbsd|ghostbsd)
-        k_log "Security: handled by ${distro} bootstrap (pw/useradd, sshd_config)"
-        return 0 ;;
-    esac
+        # BSD user creation and SSH config is handled in bootstrap
+        case "${distro}" in
+        freebsd | openbsd | ghostbsd)
+            k_log "Security: handled by ${distro} bootstrap (pw/useradd, sshd_config)"
+            return 0
+            ;;
+        esac
 
-    # Bare `chroot $target $cmd` doesn't go through bash, so PATH inside
-    # the chroot is whatever the caller had (often without /usr/sbin),
-    # and chroot fails with "failed to run command '$cmd'". Absolute
-    # paths sidestep that — useradd/chpasswd/usermod live in /usr/sbin
-    # on every supported target.
-    chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/useradd -m -s /bin/bash "${user}" \
-      >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
-    echo "${user}:${upass}" | chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/chpasswd >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1
-    # The sudoers group is named differently per distro: `wheel` on RPM
-    # (CentOS/Fedora/RHEL/Rocky), `sudo` on Debian/Ubuntu. Add to whichever
-    # exists. Harmless if neither does — sudoers.d/kldload-admin below
-    # grants NOPASSWD ALL directly to the user.
-    for _grp in wheel sudo; do
-      if chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/getent group "${_grp}" >/dev/null 2>&1; then
-        chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/usermod -aG "${_grp}" "${user}" >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
-      fi
-    done
+        # Bare `chroot $target $cmd` doesn't go through bash, so PATH inside
+        # the chroot is whatever the caller had (often without /usr/sbin),
+        # and chroot fails with "failed to run command '$cmd'". Absolute
+        # paths sidestep that — useradd/chpasswd/usermod live in /usr/sbin
+        # on every supported target.
+        chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/useradd -m -s /bin/bash "${user}" \
+            >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
+        echo "${user}:${upass}" | chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/chpasswd >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1
+        # The sudoers group is named differently per distro: `wheel` on RPM
+        # (CentOS/Fedora/RHEL/Rocky), `sudo` on Debian/Ubuntu. Add to whichever
+        # exists. Harmless if neither does — sudoers.d/kldload-admin below
+        # grants NOPASSWD ALL directly to the user.
+        for _grp in wheel sudo; do
+            if chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/getent group "${_grp}" >/dev/null 2>&1; then
+                chroot "${KLDLOAD_TARGET_MNT}" /usr/sbin/usermod -aG "${_grp}" "${user}" >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
+            fi
+        done
 
-    # Passwordless sudo for the admin user
-    printf '%s ALL=(ALL) NOPASSWD: ALL\n' "${user}" \
-      > "${KLDLOAD_TARGET_MNT}/etc/sudoers.d/kldload-admin"
-    chmod 0440 "${KLDLOAD_TARGET_MNT}/etc/sudoers.d/kldload-admin"
+        # Passwordless sudo for the admin user
+        printf '%s ALL=(ALL) NOPASSWD: ALL\n' "${user}" \
+            >"${KLDLOAD_TARGET_MNT}/etc/sudoers.d/kldload-admin"
+        chmod 0440 "${KLDLOAD_TARGET_MNT}/etc/sudoers.d/kldload-admin"
 
-    mkdir -p "${KLDLOAD_TARGET_MNT}/etc/ssh/sshd_config.d"
-    cat > "${KLDLOAD_TARGET_MNT}/etc/ssh/sshd_config.d/10-kldload.conf" <<'EOS'
+        mkdir -p "${KLDLOAD_TARGET_MNT}/etc/ssh/sshd_config.d"
+        cat >"${KLDLOAD_TARGET_MNT}/etc/ssh/sshd_config.d/10-kldload.conf" <<'EOS'
 PermitRootLogin prohibit-password
 PasswordAuthentication yes
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
 UsePAM yes
 EOS
-    # SSH service name differs: 'ssh' on Debian/Ubuntu, 'sshd' on CentOS/RHEL/Rocky/Fedora/Arch
-    local _ssh_svc="ssh"
-    case "${KLDLOAD_DISTRO:-}" in
-      centos|rocky|rhel|fedora|arch|alpine) _ssh_svc="sshd" ;;
-    esac
-    chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/systemctl enable "$_ssh_svc" >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
+        # SSH service name differs: 'ssh' on Debian/Ubuntu, 'sshd' on CentOS/RHEL/Rocky/Fedora/Arch
+        local _ssh_svc="ssh"
+        case "${KLDLOAD_DISTRO:-}" in
+        centos | rocky | rhel | fedora | arch | alpine) _ssh_svc="sshd" ;;
+        esac
+        chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/systemctl enable "$_ssh_svc" >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1 || true
 
-    # Install SSH public keys if provided
-    if [[ -n "${KLDLOAD_SSH_PUBKEY:-}" ]]; then
-      local user_ssh_dir="${KLDLOAD_TARGET_MNT}/home/${user}/.ssh"
-      mkdir -p "${user_ssh_dir}"
-      printf '%s\n' "${KLDLOAD_SSH_PUBKEY}" >> "${user_ssh_dir}/authorized_keys"
-      chmod 0700 "${user_ssh_dir}"
-      chmod 0600 "${user_ssh_dir}/authorized_keys"
-      chroot "${KLDLOAD_TARGET_MNT}" chown -R "${user}:${user}" "/home/${user}/.ssh"
-      k_log "SSH pubkey installed for ${user}"
-    fi
-    # Admin SSH key — explicit override OR auto-generated default.
-    # Without this, fresh installs ship with no root authorized_keys at all,
-    # so the node is unreachable from any peer until someone consoles in and
-    # adds a key by hand. Auto-generate one into /etc/kldload/secrets/ on the
-    # target — operators can copy the private key off the box to manage it
-    # from a workstation, OR rsync the pubkey onto peer nodes for ssh-from
-    # access. The private key never leaves the target until an operator
-    # pulls it; no implicit trust between hosts.
-    local _admin_pub="${KLDLOAD_ADMIN_SSH_PUBKEY:-}"
-    if [[ -z "${_admin_pub}" ]]; then
-      local _secrets="${KLDLOAD_TARGET_MNT}/etc/kldload/secrets"
-      mkdir -p "${_secrets}"
-      chmod 0700 "${_secrets}"
-      if [[ ! -f "${_secrets}/admin-ssh.pub" ]]; then
-        chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/ssh-keygen -t ed25519 -N "" \
-          -C "kldload-admin@$(cat "${KLDLOAD_TARGET_MNT}/etc/hostname" 2>/dev/null || echo unknown)" \
-          -f /etc/kldload/secrets/admin-ssh >> "${KLDLOAD_LOG_DIR}/security.log" 2>&1 \
-          && chmod 0600 "${_secrets}/admin-ssh" \
-          && k_log "Generated admin SSH keypair at /etc/kldload/secrets/admin-ssh — pull it off this host to manage it from peers"
-      fi
-      [[ -f "${_secrets}/admin-ssh.pub" ]] && _admin_pub="$(cat "${_secrets}/admin-ssh.pub")"
-    fi
-    if [[ -n "${_admin_pub}" ]]; then
-      local root_ssh_dir="${KLDLOAD_TARGET_MNT}/root/.ssh"
-      mkdir -p "${root_ssh_dir}"
-      printf '%s\n' "${_admin_pub}" >> "${root_ssh_dir}/authorized_keys"
-      chmod 0700 "${root_ssh_dir}"
-      chmod 0600 "${root_ssh_dir}/authorized_keys"
-      k_log "Admin SSH pubkey installed for root"
-    fi
+        # Install SSH public keys if provided
+        if [[ -n "${KLDLOAD_SSH_PUBKEY:-}" ]]; then
+            local user_ssh_dir="${KLDLOAD_TARGET_MNT}/home/${user}/.ssh"
+            mkdir -p "${user_ssh_dir}"
+            printf '%s\n' "${KLDLOAD_SSH_PUBKEY}" >>"${user_ssh_dir}/authorized_keys"
+            chmod 0700 "${user_ssh_dir}"
+            chmod 0600 "${user_ssh_dir}/authorized_keys"
+            chroot "${KLDLOAD_TARGET_MNT}" chown -R "${user}:${user}" "/home/${user}/.ssh"
+            k_log "SSH pubkey installed for ${user}"
+        fi
+        # Admin SSH key — explicit override OR auto-generated default.
+        # Without this, fresh installs ship with no root authorized_keys at all,
+        # so the node is unreachable from any peer until someone consoles in and
+        # adds a key by hand. Auto-generate one into /etc/kldload/secrets/ on the
+        # target — operators can copy the private key off the box to manage it
+        # from a workstation, OR rsync the pubkey onto peer nodes for ssh-from
+        # access. The private key never leaves the target until an operator
+        # pulls it; no implicit trust between hosts.
+        local _admin_pub="${KLDLOAD_ADMIN_SSH_PUBKEY:-}"
+        if [[ -z "${_admin_pub}" ]]; then
+            local _secrets="${KLDLOAD_TARGET_MNT}/etc/kldload/secrets"
+            mkdir -p "${_secrets}"
+            chmod 0700 "${_secrets}"
+            if [[ ! -f "${_secrets}/admin-ssh.pub" ]]; then
+                chroot "${KLDLOAD_TARGET_MNT}" /usr/bin/ssh-keygen -t ed25519 -N "" \
+                    -C "kldload-admin@$(cat "${KLDLOAD_TARGET_MNT}/etc/hostname" 2>/dev/null || echo unknown)" \
+                    -f /etc/kldload/secrets/admin-ssh >>"${KLDLOAD_LOG_DIR}/security.log" 2>&1 &&
+                    chmod 0600 "${_secrets}/admin-ssh" &&
+                    k_log "Generated admin SSH keypair at /etc/kldload/secrets/admin-ssh — pull it off this host to manage it from peers"
+            fi
+            [[ -f "${_secrets}/admin-ssh.pub" ]] && _admin_pub="$(cat "${_secrets}/admin-ssh.pub")"
+        fi
+        if [[ -n "${_admin_pub}" ]]; then
+            local root_ssh_dir="${KLDLOAD_TARGET_MNT}/root/.ssh"
+            mkdir -p "${root_ssh_dir}"
+            printf '%s\n' "${_admin_pub}" >>"${root_ssh_dir}/authorized_keys"
+            chmod 0700 "${root_ssh_dir}"
+            chmod 0600 "${root_ssh_dir}/authorized_keys"
+            k_log "Admin SSH pubkey installed for root"
+        fi
 
-    k_log "Security configuration complete"
-  }
+        k_log "Security configuration complete"
+    }
 fi
 
 if ! k_have_func k_apply_profile; then
-  k_apply_profile() {
-    local profile="${KLDLOAD_PROFILE:-server}"
-    local distro="${KLDLOAD_DISTRO:-centos}"
-    local target="${KLDLOAD_TARGET_MNT}"
-    local log="${KLDLOAD_LOG_DIR}/bootstrap.log"
-    local -a pkgs=()
+    k_apply_profile() {
+        local profile="${KLDLOAD_PROFILE:-server}"
+        local distro="${KLDLOAD_DISTRO:-centos}"
+        local target="${KLDLOAD_TARGET_MNT}"
+        local log="${KLDLOAD_LOG_DIR}/bootstrap.log"
+        local -a pkgs=()
 
-    # Arch: profile packages are handled by _k_bootstrap_pacman() — skip here
-    if [[ "${distro}" == "arch" ]]; then
-      k_log "Arch profile packages already installed by bootstrap — skipping fallback"
-      return 0
-    fi
+        # Arch: profile packages are handled by _k_bootstrap_pacman() — skip here
+        if [[ "${distro}" == "arch" ]]; then
+            k_log "Arch profile packages already installed by bootstrap — skipping fallback"
+            return 0
+        fi
 
-    # BSD: no package manager available from Linux chroot — base sets are complete
-    case "${distro}" in
-      freebsd|openbsd|ghostbsd)
-        k_log "BSD profile: base sets include everything needed — no extra packages from Linux"
-        return 0 ;;
-    esac
+        # BSD: no package manager available from Linux chroot — base sets are complete
+        case "${distro}" in
+        freebsd | openbsd | ghostbsd)
+            k_log "BSD profile: base sets include everything needed — no extra packages from Linux"
+            return 0
+            ;;
+        esac
 
-    # ── Distro-specific package names ──────────────────────────────────────
-    if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
-      # Debian/Ubuntu packages
-      pkgs=(zfsutils-linux zfs-dkms zfs-initramfs zfs-zed
-            curl ca-certificates openssh-server wireguard-tools
-            chrony nftables htop ethtool tcpdump tmux sanoid)
-      case "${profile}" in
-        server|client) ;;
-        desktop)
-          pkgs+=(gnome-shell gnome-session gnome-control-center gdm3
-                 nautilus gnome-terminal firefox-esr gnome-keyring
-                 adwaita-icon-theme)
-          ;;
-      esac
-    else
-      # CentOS/Rocky/RHEL packages (ZFS already installed in bootstrap)
-      pkgs=(curl ca-certificates openssh-server wireguard-tools
-            chrony nftables htop ethtool tcpdump tmux
-            python3 python3-pip)
-      case "${profile}" in
-        server|client) ;;
-        desktop)
-          pkgs+=(gnome-shell gnome-session gnome-control-center gdm
-                 nautilus gnome-terminal firefox gnome-keyring
-                 adwaita-icon-theme mesa-dri-drivers pipewire wireplumber)
-          ;;
-      esac
-    fi
+        # ── Distro-specific package names ──────────────────────────────────────
+        if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
+            # Debian/Ubuntu packages
+            pkgs=(zfsutils-linux zfs-dkms zfs-initramfs zfs-zed
+                curl ca-certificates openssh-server wireguard-tools
+                chrony nftables htop ethtool tcpdump tmux sanoid)
+            case "${profile}" in
+            server | client) ;;
+            desktop)
+                pkgs+=(gnome-shell gnome-session gnome-control-center gdm3
+                    nautilus gnome-terminal firefox-esr gnome-keyring
+                    adwaita-icon-theme)
+                ;;
+            esac
+        else
+            # CentOS/Rocky/RHEL packages (ZFS already installed in bootstrap)
+            pkgs=(curl ca-certificates openssh-server wireguard-tools
+                chrony nftables htop ethtool tcpdump tmux
+                python3 python3-pip)
+            case "${profile}" in
+            server | client) ;;
+            desktop)
+                pkgs+=(gnome-shell gnome-session gnome-control-center gdm
+                    nautilus gnome-terminal firefox gnome-keyring
+                    adwaita-icon-theme mesa-dri-drivers pipewire wireplumber)
+                ;;
+            esac
+        fi
 
-    k_log "Installing profile packages (${distro}/${profile}): ${pkgs[*]}"
+        k_log "Installing profile packages (${distro}/${profile}): ${pkgs[*]}"
 
-    if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
-      DEBIAN_FRONTEND=noninteractive chroot "${target}" \
-        apt-get install -y "${pkgs[@]}" >> "$log" 2>&1 \
-        || k_log "WARNING: some profile packages failed"
-    elif [[ "${distro}" == "arch" ]]; then
-      chroot "${target}" pacman --noconfirm --needed -S "${pkgs[@]}" >> "$log" 2>&1 \
-        || k_log "WARNING: some profile packages failed"
-    else
-      chroot "${target}" dnf install -y --skip-broken "${pkgs[@]}" >> "$log" 2>&1 \
-        || k_log "WARNING: some profile packages failed"
-    fi
+        if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
+            DEBIAN_FRONTEND=noninteractive chroot "${target}" \
+                apt-get install -y "${pkgs[@]}" >>"$log" 2>&1 ||
+                k_log "WARNING: some profile packages failed"
+        elif [[ "${distro}" == "arch" ]]; then
+            chroot "${target}" pacman --noconfirm --needed -S "${pkgs[@]}" >>"$log" 2>&1 ||
+                k_log "WARNING: some profile packages failed"
+        else
+            chroot "${target}" dnf install -y --skip-broken "${pkgs[@]}" >>"$log" 2>&1 ||
+                k_log "WARNING: some profile packages failed"
+        fi
 
-    # Enable display manager for desktop
-    if [[ "${profile}" == "desktop" ]]; then
-      if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
-        chroot "${target}" systemctl enable gdm3 >> "$log" 2>&1 || true
-      else
-        chroot "${target}" systemctl enable gdm >> "$log" 2>&1 || true
-      fi
-      chroot "${target}" systemctl set-default graphical.target >> "$log" 2>&1 || true
+        # Enable display manager for desktop
+        if [[ "${profile}" == "desktop" ]]; then
+            if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
+                chroot "${target}" systemctl enable gdm3 >>"$log" 2>&1 || true
+            else
+                chroot "${target}" systemctl enable gdm >>"$log" 2>&1 || true
+            fi
+            chroot "${target}" systemctl set-default graphical.target >>"$log" 2>&1 || true
 
-      # GNOME desktop defaults — dark mode, terminal in dock, no idle blank
-      mkdir -p "${target}/etc/dconf/db/local.d" "${target}/etc/dconf/profile"
-      cat > "${target}/etc/dconf/profile/user" << 'DPROF'
-user-db:user
-system-db:local
-DPROF
-      cat > "${target}/etc/dconf/db/local.d/00-kldload-desktop" << 'DCONF'
-[org/gnome/desktop/interface]
-color-scheme='prefer-dark'
-gtk-theme='Adwaita-dark'
+            # NOTE: this fallback k_apply_profile USED to write its own stub
+            # 00-kldload-desktop dconf override here — hardcoded Adwaita
+            # wallpaper, firefox-esr favorites, Terminal pinned. That stub
+            # overwrote the proper 00-kldload-desktop that lib/profiles.sh's
+            # k_install_system_files had ALREADY copied from the live ISO's
+            # /etc/dconf/db/local.d/. Symptom on every RHEL desktop install
+            # 2026-06: kldload wallpaper missing, Apps/System app-folders
+            # missing, Chrome favorites missing, firefox stayed pinned. Five
+            # hours of operator-side hot-patching chased this stub's effects
+            # without finding the cause until the .121 install audit
+            # 2026-06-06 surfaced the byte-for-byte stub here.
+            #
+            # The stub block is now DELETED. lib/profiles.sh is the single
+            # source of truth for installed-system dconf — it copies the
+            # 00-kldload-desktop file (which has our actual kldload identity:
+            # color-scheme, kldload wallpaper, dock favorites, app-folders,
+            # locks, terminal profile) into ${target}/etc/dconf/db/local.d/
+            # and runs dconf update in the chroot. That covers everything
+            # this stub used to do, plus the kldload-specific keys this stub
+            # was missing.
+            #
+            # Kernel console blanking off is unrelated to dconf — keep it.
+            echo "kernel.consoleblank=0" >"${target}/etc/sysctl.d/99-no-blank.conf"
+        fi
 
-[org/gnome/desktop/background]
-picture-uri='file:///usr/share/backgrounds/gnome/adwaita-l.jxl'
-picture-uri-dark='file:///usr/share/backgrounds/gnome/adwaita-d.jxl'
-primary-color='#241f31'
-
-[org/gnome/shell]
-favorite-apps=['org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'firefox-esr.desktop', 'firefox.desktop']
-welcome-dialog-last-shown-version='99'
-
-[org/gnome/terminal/legacy/profiles:/:b1dcc9dd-5262-4d8d-a863-c897e6d979b9]
-use-theme-colors=false
-foreground-color='rgb(208,207,204)'
-background-color='rgb(23,20,33)'
-
-[org/gnome/desktop/session]
-idle-delay=uint32 0
-
-[org/gnome/desktop/screensaver]
-lock-enabled=false
-idle-activation-enabled=false
-
-[org/gnome/settings-daemon/plugins/power]
-idle-dim=false
-sleep-inactive-ac-type='nothing'
-sleep-inactive-battery-type='nothing'
-DCONF
-      # Lock screensaver/power settings so GNOME can't override
-      mkdir -p "${target}/etc/dconf/db/local.d/locks"
-      cat > "${target}/etc/dconf/db/local.d/locks/kldload" << 'DLOCKS'
-/org/gnome/desktop/session/idle-delay
-/org/gnome/desktop/screensaver/lock-enabled
-/org/gnome/desktop/screensaver/idle-activation-enabled
-/org/gnome/settings-daemon/plugins/power/idle-dim
-/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-type
-/org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-type
-DLOCKS
-      chroot "${target}" dconf update 2>/dev/null || true
-
-      # Kernel console blanking off
-      echo "kernel.consoleblank=0" > "${target}/etc/sysctl.d/99-no-blank.conf"
-    fi
-
-    k_log "Profile packages installed (${distro}/${profile})"
-  }
+        k_log "Profile packages installed (${distro}/${profile})"
+    }
 fi
 
 if ! k_have_func k_install_tools; then
-  k_install_tools() {
-    local target="${KLDLOAD_TARGET_MNT}"
-    local log="${KLDLOAD_LOG_DIR}/bootstrap.log"
-    local _profile="${KLDLOAD_PROFILE:-server}"
+    k_install_tools() {
+        local target="${KLDLOAD_TARGET_MNT}"
+        local log="${KLDLOAD_LOG_DIR}/bootstrap.log"
+        local _profile="${KLDLOAD_PROFILE:-server}"
 
-    # ── Universal diagnostic tools (every profile, including core) ────────
-    # kldload-debug-bundle is a diagnostic harvester — collects journals,
-    # dmesg, ZFS state, etc. into a tarball for support. It's NOT a
-    # kldload feature, it's incident-response plumbing that any kldload
-    # install should ship. Install it before the core early-return.
-    # Bug seen 2026-05-06 (matrix run #2): smoke-core expected
-    # kldload-debug-bundle present, my earlier core-skip stripped it.
-    local lsbin_dst="${target}/usr/local/sbin"
-    mkdir -p "${lsbin_dst}"
-    for f in kldload-debug-bundle kldload-recovery; do
-      [[ -f "/usr/local/sbin/${f}" ]] && \
-        install -m 0755 "/usr/local/sbin/${f}" "${lsbin_dst}/${f}"
-    done
+        # ── Universal diagnostic tools (every profile, including core) ────────
+        # kldload-debug-bundle is a diagnostic harvester — collects journals,
+        # dmesg, ZFS state, etc. into a tarball for support. It's NOT a
+        # kldload feature, it's incident-response plumbing that any kldload
+        # install should ship. Install it before the core early-return.
+        # Bug seen 2026-05-06 (matrix run #2): smoke-core expected
+        # kldload-debug-bundle present, my earlier core-skip stripped it.
+        local lsbin_dst="${target}/usr/local/sbin"
+        mkdir -p "${lsbin_dst}"
+        for f in kldload-debug-bundle kldload-recovery; do
+            [[ -f "/usr/local/sbin/${f}" ]] &&
+                install -m 0755 "/usr/local/sbin/${f}" "${lsbin_dst}/${f}"
+        done
 
-    # Core profile: ZFS-on-root + stock distro + nothing kldload-specific
-    # (beyond the diagnostic tools above). The non-core branch below
-    # copies kldload-firstboot, kldload-webui (via the kldload-* glob),
-    # snapshot scripts, APT snapshot hooks, and the full systemd unit
-    # set — none belong on a core install per CLAUDE.md spec ("no k*
-    # tools/webui/sanoid/darksites").
-    if [[ "$_profile" == "core" ]]; then
-      k_log "Core profile — skipping kldload management tools (debug-bundle + recovery installed)."
-      return 0
-    fi
+        # Core profile: ZFS-on-root + stock distro + nothing kldload-specific
+        # (beyond the diagnostic tools above). The non-core branch below
+        # copies kldload-firstboot, kldload-webui (via the kldload-* glob),
+        # snapshot scripts, APT snapshot hooks, and the full systemd unit
+        # set — none belong on a core install per CLAUDE.md spec ("no k*
+        # tools/webui/sanoid/darksites").
+        if [[ "$_profile" == "core" ]]; then
+            k_log "Core profile — skipping kldload management tools (debug-bundle + recovery installed)."
+            return 0
+        fi
 
-    k_log "Installing management tools to target"
+        k_log "Installing management tools to target"
 
-    # /usr/sbin management binaries
-    local sbin_dst="${target}/usr/sbin"
-    mkdir -p "${sbin_dst}"
-    for f in kldload-firstboot kldload-recovery kldload-snapshot kldload-apply-platform-holds; do
-      [[ -f "/usr/sbin/${f}" ]] || continue
-      install -m 0755 "/usr/sbin/${f}" "${sbin_dst}/${f}"
-      printf '  installed: /usr/sbin/%s\n' "${f}" >> "${log}"
-    done
+        # /usr/sbin management binaries
+        local sbin_dst="${target}/usr/sbin"
+        mkdir -p "${sbin_dst}"
+        for f in kldload-firstboot kldload-recovery kldload-snapshot kldload-apply-platform-holds; do
+            [[ -f "/usr/sbin/${f}" ]] || continue
+            install -m 0755 "/usr/sbin/${f}" "${sbin_dst}/${f}"
+            printf '  installed: /usr/sbin/%s\n' "${f}" >>"${log}"
+        done
 
-    # /usr/local/sbin snapshot scripts
-    local lsbin_dst="${target}/usr/local/sbin"
-    mkdir -p "${lsbin_dst}"
-    for f in snapshot-create.sh snapshot-prune.sh snapshot-policy.sh; do
-      [[ -f "/usr/local/sbin/${f}" ]] || continue
-      install -m 0755 "/usr/local/sbin/${f}" "${lsbin_dst}/${f}"
-      printf '  installed: /usr/local/sbin/%s\n' "${f}" >> "${log}"
-    done
+        # /usr/local/sbin snapshot scripts
+        local lsbin_dst="${target}/usr/local/sbin"
+        mkdir -p "${lsbin_dst}"
+        for f in snapshot-create.sh snapshot-prune.sh snapshot-policy.sh; do
+            [[ -f "/usr/local/sbin/${f}" ]] || continue
+            install -m 0755 "/usr/local/sbin/${f}" "${lsbin_dst}/${f}"
+            printf '  installed: /usr/local/sbin/%s\n' "${f}" >>"${log}"
+        done
 
-    # /usr/local/sbin kldload-* scripts (exclude live-only)
-    for f in /usr/local/sbin/kldload-*; do
-      [[ -f "${f}" ]] || continue
-      local base
-      base="$(basename "${f}")"
-      case "${base}" in
-        kldload-live-*|kldload-deploy-tui) continue ;;
-      esac
-      install -m 0755 "${f}" "${lsbin_dst}/${base}"
-      printf '  installed: /usr/local/sbin/%s\n' "${base}" >> "${log}"
-    done
+        # /usr/local/sbin kldload-* scripts (exclude live-only)
+        for f in /usr/local/sbin/kldload-*; do
+            [[ -f "${f}" ]] || continue
+            local base
+            base="$(basename "${f}")"
+            case "${base}" in
+            kldload-live-* | kldload-deploy-tui) continue ;;
+            esac
+            install -m 0755 "${f}" "${lsbin_dst}/${base}"
+            printf '  installed: /usr/local/sbin/%s\n' "${base}" >>"${log}"
+        done
 
-    # APT snapshot hooks
-    local apt_dst="${target}/etc/apt/apt.conf.d"
-    mkdir -p "${apt_dst}"
-    for f in 00-kldload-snapshot-pre 00-kldload-snapshot-post; do
-      [[ -f "/etc/apt/apt.conf.d/${f}" ]] || continue
-      install -m 0644 "/etc/apt/apt.conf.d/${f}" "${apt_dst}/${f}"
-      printf '  installed: /etc/apt/apt.conf.d/%s\n' "${f}" >> "${log}"
-    done
+        # APT snapshot hooks
+        local apt_dst="${target}/etc/apt/apt.conf.d"
+        mkdir -p "${apt_dst}"
+        for f in 00-kldload-snapshot-pre 00-kldload-snapshot-post; do
+            [[ -f "/etc/apt/apt.conf.d/${f}" ]] || continue
+            install -m 0644 "/etc/apt/apt.conf.d/${f}" "${apt_dst}/${f}"
+            printf '  installed: /etc/apt/apt.conf.d/%s\n' "${f}" >>"${log}"
+        done
 
-    # systemd units for the installed system (exclude live-only services)
-    local unit_dst="${target}/usr/lib/systemd/system"
-    mkdir -p "${unit_dst}"
-    local -a target_units=(
-      kldload-firstboot.service
-      kldload-snapshot.service kldload-snapshot.timer
-      kldload-srv-snapshot.service kldload-srv-snapshot.timer
-      kldload-autobootstrap.service kldload-autobootstrap.timer
-      kldload-dns-api.service
-    )
-    for u in "${target_units[@]}"; do
-      [[ -f "/usr/lib/systemd/system/${u}" ]] || continue
-      install -m 0644 "/usr/lib/systemd/system/${u}" "${unit_dst}/${u}"
-      printf '  installed: /usr/lib/systemd/system/%s\n' "${u}" >> "${log}"
-    done
+        # systemd units for the installed system (exclude live-only services)
+        local unit_dst="${target}/usr/lib/systemd/system"
+        mkdir -p "${unit_dst}"
+        local -a target_units=(
+            kldload-firstboot.service
+            kldload-snapshot.service kldload-snapshot.timer
+            kldload-srv-snapshot.service kldload-srv-snapshot.timer
+            kldload-autobootstrap.service kldload-autobootstrap.timer
+            kldload-dns-api.service
+        )
+        for u in "${target_units[@]}"; do
+            [[ -f "/usr/lib/systemd/system/${u}" ]] || continue
+            install -m 0644 "/usr/lib/systemd/system/${u}" "${unit_dst}/${u}"
+            printf '  installed: /usr/lib/systemd/system/%s\n' "${u}" >>"${log}"
+        done
 
-    k_log "Management tools installed to target"
-  }
+        k_log "Management tools installed to target"
+    }
 fi
 
 if ! k_have_func k_write_install_manifest; then
-  k_write_install_manifest() {
-    local target="${KLDLOAD_TARGET_MNT}"
-    mkdir -p "${target}/etc/kldload"
+    k_write_install_manifest() {
+        local target="${KLDLOAD_TARGET_MNT}"
+        mkdir -p "${target}/etc/kldload"
 
-    # For non-core profiles, default the autodeploy-driven subsystems
-    # (K8s cluster, klab goldens, AI) to ON so the UX is "install, reboot,
-    # watch the UI indicator, come back to a running cluster." Core
-    # profile is bare ZFS only and stays opt-in. Individual flags can
-    # still be overridden by the installer env or web UI.
-    local _kld_heavy=1
-    [[ "${KLDLOAD_PROFILE:-server}" == "core" ]] && _kld_heavy=0
+        # For non-core profiles, default the autodeploy-driven subsystems
+        # (K8s cluster, klab goldens, AI) to ON so the UX is "install, reboot,
+        # watch the UI indicator, come back to a running cluster." Core
+        # profile is bare ZFS only and stays opt-in. Individual flags can
+        # still be overridden by the installer env or web UI.
+        local _kld_heavy=1
+        [[ "${KLDLOAD_PROFILE:-server}" == "core" ]] && _kld_heavy=0
 
-    # Compute the ISO version OUTSIDE the heredoc. Previously this was a
-    # nested $() inside the cat heredoc — under set -Eeuo pipefail +
-    # inherit_errexit, a failing awk inside a $() can propagate exit 1
-    # despite the `|| echo` fallback and trip the parent script. Caught
-    # 2026-05-14 on .113 RHEL 10 desktop install where gawk reported
-    # "invalid char in expression" (probably a UTF-8 byte from a
-    # locale-sensitive context), the heredoc-embedded $() returned non-
-    # zero, and install-target's k_die path halted the install. Pulling
-    # the computation OUT into a plain variable assignment guarantees
-    # the heredoc itself never references a failing subprocess. Safe by
-    # construction.
-    local _kld_iso_ver=""
-    _kld_iso_ver="$(awk -F'[[:space:]]*=[[:space:]]*' \
-                         '/^kldload_version/{print $2; exit}' \
-                         /etc/kldload/VERSION 2>/dev/null || true)"
-    [[ -z "${_kld_iso_ver}" ]] && _kld_iso_ver="1.1.0"
+        # Compute the ISO version OUTSIDE the heredoc. Previously this was a
+        # nested $() inside the cat heredoc — under set -Eeuo pipefail +
+        # inherit_errexit, a failing awk inside a $() can propagate exit 1
+        # despite the `|| echo` fallback and trip the parent script. Caught
+        # 2026-05-14 on .113 RHEL 10 desktop install where gawk reported
+        # "invalid char in expression" (probably a UTF-8 byte from a
+        # locale-sensitive context), the heredoc-embedded $() returned non-
+        # zero, and install-target's k_die path halted the install. Pulling
+        # the computation OUT into a plain variable assignment guarantees
+        # the heredoc itself never references a failing subprocess. Safe by
+        # construction.
+        local _kld_iso_ver=""
+        _kld_iso_ver="$(awk -F'[[:space:]]*=[[:space:]]*' \
+            '/^kldload_version/{print $2; exit}' \
+            /etc/kldload/VERSION 2>/dev/null || true)"
+        [[ -z "${_kld_iso_ver}" ]] && _kld_iso_ver="1.1.0"
 
-    cat > "${target}/etc/kldload/install-manifest.env" <<EOF
+        cat >"${target}/etc/kldload/install-manifest.env" <<EOF
 # KLDload Install Manifest — written by installer $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 # KLDLOAD_INSTALLED=1 is the canonical "came from installer, not live ISO"
 # flag. kldload-webui's is_live_mode() reads this; without it the webui
@@ -1198,48 +1176,51 @@ KLDLOAD_KLAB_ZFS_DEV="${KLDLOAD_KLAB_ZFS_DEV:-${_kld_heavy}}"
 # For join mode: LAN IP of the Cluster Manager to connect to at first boot
 KLDLOAD_HUB_LAN="${KLDLOAD_HUB_LAN:-}"
 EOF
-    chmod 0640 "${target}/etc/kldload/install-manifest.env"
-    k_log "Install manifest written: ${target}/etc/kldload/install-manifest.env"
+        chmod 0640 "${target}/etc/kldload/install-manifest.env"
+        k_log "Install manifest written: ${target}/etc/kldload/install-manifest.env"
 
-    # ── ISO install attestation ──────────────────────────────────────
-    # Writes /etc/kldload/install.attest on the target with the exact
-    # ISO SHA-256 + version + date that produced this install. Later
-    # `klab test` runs reference this file so the audit bundle links
-    # back to the original ISO artifact — closing the proof chain:
-    #   ISO (known SHA) → installer run → test run → results.
-    local _iso_path _iso_sha _iso_ver _iso_build
-    # Live ISO is mounted at /run/live/medium (debian-live) or
-    # /run/initramfs/live (dracut). Try both.
-    for _p in /run/live/medium /run/initramfs/live /lib/live/mount/medium; do
-      [[ -f "${_p}/.disk/info" || -f "${_p}/LiveOS/squashfs.img" || -f "${_p}/VERSION" ]] \
-          && { _iso_path="$_p"; break; }
-    done
-    # Prefer .disk/info (Debian-live convention), fall back to /VERSION
-    # (kldload-native format written by builder/build-iso.sh), then any
-    # embedded /etc/kldload/VERSION from the rootfs tree on the ISO.
-    if [[ -n "${_iso_path:-}" && -f "${_iso_path}/.disk/info" ]]; then
-      _iso_ver="$(head -1 "${_iso_path}/.disk/info" 2>/dev/null || echo unknown)"
-    elif [[ -n "${_iso_path:-}" && -f "${_iso_path}/VERSION" ]]; then
-      _iso_ver="$(awk -F'= ' '/^kldload_version/{print "kldload " $2 " " ENVIRON["_arch"]}' \
-                        "${_iso_path}/VERSION" _arch="$(uname -m)" 2>/dev/null \
-                  || head -1 "${_iso_path}/VERSION")"
-    elif [[ -n "${_iso_path:-}" && -f "${_iso_path}/etc/kldload/VERSION" ]]; then
-      _iso_ver="$(head -1 "${_iso_path}/etc/kldload/VERSION" 2>/dev/null)"
-    fi
-    # SHA-256 of the squashfs is stable per-ISO; we pin that rather
-    # than the whole ISO file which may not be mounted read-back-able.
-    if [[ -n "${_iso_path:-}" && -f "${_iso_path}/LiveOS/squashfs.img" ]]; then
-      # Belt+suspenders: 2>/dev/null on BOTH sides of the pipe + || true on the
-      # whole substitution. gawk's stderr falls through to install-direct.log
-      # via systemd's StandardError=inherit, so any parse-time error here used
-      # to surface as a scary log line during the 5-min sha256sum window. Even
-      # if the pipe somehow malfunctions, the worst outcome is an empty _iso_sha
-      # which gets the `?` fallback in the attestation file.
-      _iso_sha="$(sha256sum "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null \
-                  | awk '{print $1}' 2>/dev/null || true)"
-    fi
-    _iso_build="$(stat -c '%y' "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null || date -Iseconds)"
-    cat > "${target}/etc/kldload/install.attest" <<ATTEST
+        # ── ISO install attestation ──────────────────────────────────────
+        # Writes /etc/kldload/install.attest on the target with the exact
+        # ISO SHA-256 + version + date that produced this install. Later
+        # `klab test` runs reference this file so the audit bundle links
+        # back to the original ISO artifact — closing the proof chain:
+        #   ISO (known SHA) → installer run → test run → results.
+        local _iso_path _iso_sha _iso_ver _iso_build
+        # Live ISO is mounted at /run/live/medium (debian-live) or
+        # /run/initramfs/live (dracut). Try both.
+        for _p in /run/live/medium /run/initramfs/live /lib/live/mount/medium; do
+            [[ -f "${_p}/.disk/info" || -f "${_p}/LiveOS/squashfs.img" || -f "${_p}/VERSION" ]] &&
+                {
+                    _iso_path="$_p"
+                    break
+                }
+        done
+        # Prefer .disk/info (Debian-live convention), fall back to /VERSION
+        # (kldload-native format written by builder/build-iso.sh), then any
+        # embedded /etc/kldload/VERSION from the rootfs tree on the ISO.
+        if [[ -n "${_iso_path:-}" && -f "${_iso_path}/.disk/info" ]]; then
+            _iso_ver="$(head -1 "${_iso_path}/.disk/info" 2>/dev/null || echo unknown)"
+        elif [[ -n "${_iso_path:-}" && -f "${_iso_path}/VERSION" ]]; then
+            _iso_ver="$(awk -F'= ' '/^kldload_version/{print "kldload " $2 " " ENVIRON["_arch"]}' \
+                "${_iso_path}/VERSION" _arch="$(uname -m)" 2>/dev/null ||
+                head -1 "${_iso_path}/VERSION")"
+        elif [[ -n "${_iso_path:-}" && -f "${_iso_path}/etc/kldload/VERSION" ]]; then
+            _iso_ver="$(head -1 "${_iso_path}/etc/kldload/VERSION" 2>/dev/null)"
+        fi
+        # SHA-256 of the squashfs is stable per-ISO; we pin that rather
+        # than the whole ISO file which may not be mounted read-back-able.
+        if [[ -n "${_iso_path:-}" && -f "${_iso_path}/LiveOS/squashfs.img" ]]; then
+            # Belt+suspenders: 2>/dev/null on BOTH sides of the pipe + || true on the
+            # whole substitution. gawk's stderr falls through to install-direct.log
+            # via systemd's StandardError=inherit, so any parse-time error here used
+            # to surface as a scary log line during the 5-min sha256sum window. Even
+            # if the pipe somehow malfunctions, the worst outcome is an empty _iso_sha
+            # which gets the `?` fallback in the attestation file.
+            _iso_sha="$(sha256sum "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null |
+                awk '{print $1}' 2>/dev/null || true)"
+        fi
+        _iso_build="$(stat -c '%y' "${_iso_path}/LiveOS/squashfs.img" 2>/dev/null || date -Iseconds)"
+        cat >"${target}/etc/kldload/install.attest" <<ATTEST
 
 [install_attestation]
 iso_version    = ${_iso_ver:-?}
@@ -1252,69 +1233,72 @@ installer_ver  = ${KLDLOAD_INSTALLER_VERSION:-?}
 target_distro  = ${KLDLOAD_DISTRO:-?}
 target_profile = ${KLDLOAD_PROFILE:-?}
 ATTEST
-    chmod 0644 "${target}/etc/kldload/install.attest"
-    k_log "Install attestation written: ${target}/etc/kldload/install.attest"
-  }
+        chmod 0644 "${target}/etc/kldload/install.attest"
+        k_log "Install attestation written: ${target}/etc/kldload/install.attest"
+    }
 fi
 
 if ! k_have_func k_enable_firstboot; then
-  k_enable_firstboot() {
-    local target="${KLDLOAD_TARGET_MNT}"
-    local distro="${KLDLOAD_DISTRO:-centos}"
+    k_enable_firstboot() {
+        local target="${KLDLOAD_TARGET_MNT}"
+        local distro="${KLDLOAD_DISTRO:-centos}"
 
-    # BSD has no systemd — skip firstboot service
-    case "${distro}" in
-      freebsd|openbsd|ghostbsd)
-        k_log "BSD: no systemd firstboot — skipping"
-        return 0 ;;
-    esac
+        # BSD has no systemd — skip firstboot service
+        case "${distro}" in
+        freebsd | openbsd | ghostbsd)
+            k_log "BSD: no systemd firstboot — skipping"
+            return 0
+            ;;
+        esac
 
-    chroot "${target}" systemctl enable kldload-firstboot.service \
-      >> "${KLDLOAD_LOG_DIR}/bootstrap.log" 2>&1 \
-      || k_log "WARNING: could not enable kldload-firstboot.service"
-    k_log "kldload-firstboot.service enabled"
-  }
+        chroot "${target}" systemctl enable kldload-firstboot.service \
+            >>"${KLDLOAD_LOG_DIR}/bootstrap.log" 2>&1 ||
+            k_log "WARNING: could not enable kldload-firstboot.service"
+        k_log "kldload-firstboot.service enabled"
+    }
 fi
 
 if ! k_have_func k_seed_ca; then
-  k_seed_ca() {
-    local target="${KLDLOAD_TARGET_MNT}"
-    local distro="${KLDLOAD_DISTRO:-centos}"
-    local iso_ca="/etc/kldload/ca/ca.crt"
+    k_seed_ca() {
+        local target="${KLDLOAD_TARGET_MNT}"
+        local distro="${KLDLOAD_DISTRO:-centos}"
+        local iso_ca="/etc/kldload/ca/ca.crt"
 
-    # BSD uses different CA paths — skip for now
-    case "${distro}" in
-      freebsd|openbsd|ghostbsd)
-        k_log "BSD: CA seeding skipped (not yet implemented)"
-        return 0 ;;
-    esac
+        # BSD uses different CA paths — skip for now
+        case "${distro}" in
+        freebsd | openbsd | ghostbsd)
+            k_log "BSD: CA seeding skipped (not yet implemented)"
+            return 0
+            ;;
+        esac
 
-    if [[ -f "${iso_ca}" ]]; then
-      mkdir -p "${target}/etc/kldload/ca" "${target}/usr/local/share/ca-certificates"
-      cp "${iso_ca}" "${target}/etc/kldload/ca/ca.crt"
-      cp "${iso_ca}" "${target}/usr/local/share/ca-certificates/kldload-ca.crt"
-      chmod 0644 "${target}/etc/kldload/ca/ca.crt" \
-                 "${target}/usr/local/share/ca-certificates/kldload-ca.crt"
-      chroot "${target}" update-ca-certificates \
-        >> "${KLDLOAD_LOG_DIR}/bootstrap.log" 2>&1 || true
-      k_log "ISO CA cert seeded to target"
-    else
-      k_log "No ISO CA at ${iso_ca} — skipping CA seeding"
-    fi
-  }
+        if [[ -f "${iso_ca}" ]]; then
+            mkdir -p "${target}/etc/kldload/ca" "${target}/usr/local/share/ca-certificates"
+            cp "${iso_ca}" "${target}/etc/kldload/ca/ca.crt"
+            cp "${iso_ca}" "${target}/usr/local/share/ca-certificates/kldload-ca.crt"
+            chmod 0644 "${target}/etc/kldload/ca/ca.crt" \
+                "${target}/usr/local/share/ca-certificates/kldload-ca.crt"
+            chroot "${target}" update-ca-certificates \
+                >>"${KLDLOAD_LOG_DIR}/bootstrap.log" 2>&1 || true
+            k_log "ISO CA cert seeded to target"
+        else
+            k_log "No ISO CA at ${iso_ca} — skipping CA seeding"
+        fi
+    }
 fi
 
 cleanup() {
-  local rc=$?
-  sync || true
-  k_unbind_chroot_mounts || true
-  umount -lf "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
-  umount -lf "${KLDLOAD_TARGET_MNT}"          2>/dev/null || true
-  [[ "$rc" -ne 0 ]] && k_log "Install FAILED (exit ${rc})"
-  return "$rc"
+    local rc=$?
+    sync || true
+    k_unbind_chroot_mounts || true
+    umount -lf "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
+    umount -lf "${KLDLOAD_TARGET_MNT}" 2>/dev/null || true
+    [[ "$rc" -ne 0 ]] && k_log "Install FAILED (exit ${rc})"
+    return "$rc"
 }
 
-usage() { cat <<'EOU'
+usage() {
+    cat <<'EOU'
 Usage:
   kldload-install-target --config /path/to/answers.env
   kldload-install-target --guided
@@ -1325,848 +1309,877 @@ EOU
 
 # Horizontal rule — bright blue
 _bar() {
-  printf '\n\e[1;34m  ══════════════════════════════════════════════════════\e[0m\n'
+    printf '\n\e[1;34m  ══════════════════════════════════════════════════════\e[0m\n'
 }
 
 # Section header — bright blue bar + bold white title
 _hdr() {
-  _bar
-  printf '\e[1;37m  %s\e[0m\n' "$*"
-  _bar
-  echo
+    _bar
+    printf '\e[1;37m  %s\e[0m\n' "$*"
+    _bar
+    echo
 }
 
 # Question prompt — bold white arrow + label, bright green default, white colon
 # Adds a blank line before each question so they breathe
 _ask() {
-  local prompt="$1" default="${2:-}" v
-  # Write prompt to stderr — _ask is called inside $() so stdout is captured.
-  # Prompt must go to stderr to be visible on the terminal.
-  echo >&2
-  if [[ -n "$default" ]]; then
-    printf '\e[1;37m  ›  %s \e[1;32m[%s]\e[1;37m: \e[0m' "$prompt" "$default" >&2
-  else
-    printf '\e[1;37m  ›  %s: \e[0m' "$prompt" >&2
-  fi
-  read -r v
-  echo "${v:-$default}"
+    local prompt="$1" default="${2:-}" v
+    # Write prompt to stderr — _ask is called inside $() so stdout is captured.
+    # Prompt must go to stderr to be visible on the terminal.
+    echo >&2
+    if [[ -n "$default" ]]; then
+        printf '\e[1;37m  ›  %s \e[1;32m[%s]\e[1;37m: \e[0m' "$prompt" "$default" >&2
+    else
+        printf '\e[1;37m  ›  %s: \e[0m' "$prompt" >&2
+    fi
+    read -r v
+    echo "${v:-$default}"
 }
 
 # Password prompt — same style, no echo
 _askpass() {
-  local prompt="$1" v
-  echo >&2
-  printf '\e[1;37m  ›  %s: \e[0m' "$prompt" >&2
-  read -r -s v
-  echo >&2
-  echo "$v"
+    local prompt="$1" v
+    echo >&2
+    printf '\e[1;37m  ›  %s: \e[0m' "$prompt" >&2
+    read -r -s v
+    echo >&2
+    echo "$v"
 }
 
 # Info / example line — regular white (NOT dim)
 _info() { printf '  \e[0;37m%s\e[0m\n' "$*"; }
 
 # Example with highlight — white label + bright cyan value
-_eg()   { printf '  \e[0;37m  e.g. \e[1;36m%s\e[0m\n' "$*"; }
+_eg() { printf '  \e[0;37m  e.g. \e[1;36m%s\e[0m\n' "$*"; }
 
 # Warning — bright yellow
 _warn() { printf '\n  \e[1;33m⚠   %s\e[0m\n' "$*"; }
 
 # Confirmed value — bright green tick
-_ok()   { printf '  \e[1;32m✔   %-12s\e[0;37m %s\e[0m\n' "$1" "$2"; }
+_ok() { printf '  \e[1;32m✔   %-12s\e[0;37m %s\e[0m\n' "$1" "$2"; }
 
 # Error — bright red
-_err()  { printf '\n  \e[1;31m✖   %s\e[0m\n' "$*"; }
+_err() { printf '\n  \e[1;31m✖   %s\e[0m\n' "$*"; }
 
 # ── Auto-detect first available disk ─────────────────────────────────────────
 _detect_first_disk() {
-  local candidates=(/dev/sda /dev/vda /dev/xvda /dev/nvme0n1 /dev/mmcblk0 /dev/hda)
-  for dev in "${candidates[@]}"; do
-    [[ -b "$dev" ]] && { echo "$dev"; return 0; }
-  done
-  # Fallback: first disk reported by lsblk
-  lsblk -d -e7 -n -o PATH,TYPE 2>/dev/null \
-    | awk '$2=="disk" {print $1; exit}'
+    local candidates=(/dev/sda /dev/vda /dev/xvda /dev/nvme0n1 /dev/mmcblk0 /dev/hda)
+    for dev in "${candidates[@]}"; do
+        [[ -b "$dev" ]] && {
+            echo "$dev"
+            return 0
+        }
+    done
+    # Fallback: first disk reported by lsblk
+    lsblk -d -e7 -n -o PATH,TYPE 2>/dev/null |
+        awk '$2=="disk" {print $1; exit}'
 }
 
 # ── Disk list ─────────────────────────────────────────────────────────────────
 k_list_candidate_disks() {
-  printf '\e[1;37m  %-20s %-8s %-30s\e[0m\n' "DEVICE" "SIZE" "MODEL"
-  printf '\e[1;34m  %-20s %-8s %-30s\e[0m\n' "──────────────────" "────────" "──────────────────────────────"
-  lsblk -d -e7,11 -n -o PATH,SIZE,MODEL 2>/dev/null \
-    | while read -r dev size model; do
-        printf "\033[1;36m  %-20s \033[1;32m%-8s \033[0;37m%-30s\033[0m\n" \
-          "$dev" "$size" "$model"
-      done
-  echo
+    printf '\e[1;37m  %-20s %-8s %-30s\e[0m\n' "DEVICE" "SIZE" "MODEL"
+    printf '\e[1;34m  %-20s %-8s %-30s\e[0m\n' "──────────────────" "────────" "──────────────────────────────"
+    lsblk -d -e7,11 -n -o PATH,SIZE,MODEL 2>/dev/null |
+        while read -r dev size model; do
+            printf "\033[1;36m  %-20s \033[1;32m%-8s \033[0;37m%-30s\033[0m\n" \
+                "$dev" "$size" "$model"
+        done
+    echo
 }
 
 guided_defaults() {
-  export KLDLOAD_PROFILE="${KLDLOAD_PROFILE:-server}"
-  export KLDLOAD_STORAGE_MODE="${KLDLOAD_STORAGE_MODE:-zfs}"
-  export KLDLOAD_ENABLE_ZFS="${KLDLOAD_ENABLE_ZFS:-1}"
-  export KLDLOAD_ZFS_ENCRYPT="${KLDLOAD_ZFS_ENCRYPT:-0}"
-  export KLDLOAD_ZFS_TOPOLOGY="${KLDLOAD_ZFS_TOPOLOGY:-single}"
-  export KLDLOAD_ZFS_DATA_DISKS="${KLDLOAD_ZFS_DATA_DISKS:-}"
-  export KLDLOAD_ZFS_SPECIAL_DISKS="${KLDLOAD_ZFS_SPECIAL_DISKS:-}"
-  export KLDLOAD_HOSTNAME="${KLDLOAD_HOSTNAME:-kldload}"
-  export KLDLOAD_NET_METHOD="${KLDLOAD_NET_METHOD:-dhcp}"
-  export KLDLOAD_ENABLE_EBPF="${KLDLOAD_ENABLE_EBPF:-1}"
-  export KLDLOAD_ENABLE_K8S="${KLDLOAD_ENABLE_K8S:-0}"
-  export KLDLOAD_FORCE_WIPE="${KLDLOAD_FORCE_WIPE:-1}"
-  export KLDLOAD_BOOTLOADER_ID="${KLDLOAD_BOOTLOADER_ID:-KLDload}"
-  export KLDLOAD_KEYBOARD_LAYOUT="${KLDLOAD_KEYBOARD_LAYOUT:-us}"
-  export KLDLOAD_KEYBOARD_VARIANT="${KLDLOAD_KEYBOARD_VARIANT:-}"
-  export KLDLOAD_TIMEZONE="${KLDLOAD_TIMEZONE:-UTC}"
-  export KLDLOAD_LOCALE="${KLDLOAD_LOCALE:-en_US.UTF-8}"
-  export KLDLOAD_EXTRA_PACKAGES="${KLDLOAD_EXTRA_PACKAGES:-}"
-  export KLDLOAD_KEEP_DARKSITE="${KLDLOAD_KEEP_DARKSITE:-0}"
-  export KLDLOAD_CUSTOM_MIRROR_URL="${KLDLOAD_CUSTOM_MIRROR_URL:-}"
-  export KLDLOAD_INFRA_MODE="${KLDLOAD_INFRA_MODE:-standalone}"
-  export KLDLOAD_CLUSTER_CIDR="${KLDLOAD_CLUSTER_CIDR:-}"
-  export KLDLOAD_CLUSTER_DOMAIN="${KLDLOAD_CLUSTER_DOMAIN:-infra.local}"
-  export KLDLOAD_CLUSTER_SIZE="${KLDLOAD_CLUSTER_SIZE:-16}"
-  export KLDLOAD_GENERATE_SSH_KEY="${KLDLOAD_GENERATE_SSH_KEY:-1}"
+    export KLDLOAD_PROFILE="${KLDLOAD_PROFILE:-server}"
+    export KLDLOAD_STORAGE_MODE="${KLDLOAD_STORAGE_MODE:-zfs}"
+    export KLDLOAD_ENABLE_ZFS="${KLDLOAD_ENABLE_ZFS:-1}"
+    export KLDLOAD_ZFS_ENCRYPT="${KLDLOAD_ZFS_ENCRYPT:-0}"
+    export KLDLOAD_ZFS_TOPOLOGY="${KLDLOAD_ZFS_TOPOLOGY:-single}"
+    export KLDLOAD_ZFS_DATA_DISKS="${KLDLOAD_ZFS_DATA_DISKS:-}"
+    export KLDLOAD_ZFS_SPECIAL_DISKS="${KLDLOAD_ZFS_SPECIAL_DISKS:-}"
+    export KLDLOAD_HOSTNAME="${KLDLOAD_HOSTNAME:-kldload}"
+    export KLDLOAD_NET_METHOD="${KLDLOAD_NET_METHOD:-dhcp}"
+    export KLDLOAD_ENABLE_EBPF="${KLDLOAD_ENABLE_EBPF:-1}"
+    export KLDLOAD_ENABLE_K8S="${KLDLOAD_ENABLE_K8S:-0}"
+    export KLDLOAD_FORCE_WIPE="${KLDLOAD_FORCE_WIPE:-1}"
+    export KLDLOAD_BOOTLOADER_ID="${KLDLOAD_BOOTLOADER_ID:-KLDload}"
+    export KLDLOAD_KEYBOARD_LAYOUT="${KLDLOAD_KEYBOARD_LAYOUT:-us}"
+    export KLDLOAD_KEYBOARD_VARIANT="${KLDLOAD_KEYBOARD_VARIANT:-}"
+    export KLDLOAD_TIMEZONE="${KLDLOAD_TIMEZONE:-UTC}"
+    export KLDLOAD_LOCALE="${KLDLOAD_LOCALE:-en_US.UTF-8}"
+    export KLDLOAD_EXTRA_PACKAGES="${KLDLOAD_EXTRA_PACKAGES:-}"
+    export KLDLOAD_KEEP_DARKSITE="${KLDLOAD_KEEP_DARKSITE:-0}"
+    export KLDLOAD_CUSTOM_MIRROR_URL="${KLDLOAD_CUSTOM_MIRROR_URL:-}"
+    export KLDLOAD_INFRA_MODE="${KLDLOAD_INFRA_MODE:-standalone}"
+    export KLDLOAD_CLUSTER_CIDR="${KLDLOAD_CLUSTER_CIDR:-}"
+    export KLDLOAD_CLUSTER_DOMAIN="${KLDLOAD_CLUSTER_DOMAIN:-infra.local}"
+    export KLDLOAD_CLUSTER_SIZE="${KLDLOAD_CLUSTER_SIZE:-16}"
+    export KLDLOAD_GENERATE_SSH_KEY="${KLDLOAD_GENERATE_SSH_KEY:-1}"
 }
 
 guided_prompt() {
-  guided_defaults
+    guided_defaults
 
-  clear
+    clear
 
-  local v
+    local v
 
-  # ── 1 of 6 · Identity & Credentials ─────────────────────────────────────
-  # Collected first so the username is available for ZFS home dataset creation
-  # (rpool/home/<username> is created as a dedicated dataset at pool setup time).
-  _hdr "1 of 6  ·  Identity & Credentials"
+    # ── 1 of 6 · Identity & Credentials ─────────────────────────────────────
+    # Collected first so the username is available for ZFS home dataset creation
+    # (rpool/home/<username> is created as a dedicated dataset at pool setup time).
+    _hdr "1 of 6  ·  Identity & Credentials"
 
-  _info "Hostname is used as the machine name on the network."
-  KLDLOAD_HOSTNAME="$(_ask "Hostname" "kldload")"
-  export KLDLOAD_HOSTNAME
+    _info "Hostname is used as the machine name on the network."
+    KLDLOAD_HOSTNAME="$(_ask "Hostname" "kldload")"
+    export KLDLOAD_HOSTNAME
 
-  echo
-  _info "Profile determines which packages are installed:"
-  _info "  server   —  headless, SSH, eBPF tools            (default)"
-  _info "  desktop  —  GNOME desktop, GDM, Firefox, eBPF tools"
-  _info "  master   —  Central Command: desktop + salt-master + webui + reconcile"
-  v="$(_ask "Profile" "server")"
-  export KLDLOAD_PROFILE="${v:-server}"
+    echo
+    _info "Profile determines which packages are installed:"
+    _info "  server   —  headless, SSH, eBPF tools            (default)"
+    _info "  desktop  —  GNOME desktop, GDM, Firefox, eBPF tools"
+    _info "  master   —  Central Command: desktop + salt-master + webui + reconcile"
+    v="$(_ask "Profile" "server")"
+    export KLDLOAD_PROFILE="${v:-server}"
 
-  echo
-  _info "Admin user — this account gets passwordless sudo. Root login is disabled."
-  KLDLOAD_USERNAME="$(_ask "Admin username" "admin")"
-  export KLDLOAD_USERNAME
-  while true; do
-    KLDLOAD_PASSWORD="$(_askpass "Password")"
-    local _pw_confirm
-    _pw_confirm="$(_askpass "Confirm password")"
-    [[ "$KLDLOAD_PASSWORD" == "$_pw_confirm" ]] && break
-    _err "Passwords do not match — try again."
-  done
-  export KLDLOAD_PASSWORD
-
-  _ok "Hostname"   "${KLDLOAD_HOSTNAME}"
-  _ok "Profile"    "${KLDLOAD_PROFILE}"
-  _ok "User"       "${KLDLOAD_USERNAME}  (passwordless sudo · home dataset: rpool/home/${KLDLOAD_USERNAME})"
-
-  # ── 2 of 6 · Disk & Pool Layout ──────────────────────────────────────────
-  _hdr "2 of 6  ·  Disk & Pool Layout"
-  k_list_candidate_disks
-
-  _info "Pool layout — select one:"
-  _info ""
-  _info "  single         boot disk only: EFI + bpool + rpool on one disk"
-  _info "  mirror         2-disk mirror   (rpool: 2 data disks · boot stays on sda)"
-  _info "  raidz1         4-disk RAIDZ1   (rpool: 4 data disks · boot stays on sda)"
-  _info "  mirror-stripe  4-disk RAID10   (rpool: sdb+sdc mirror ║ sdd+sde mirror)"
-  _info ""
-  _info "Extra disks (scsi1–4) are used as rpool data disks for multi-disk topologies."
-  _info "Remaining disks (scsi5–6) are offered as special vdevs (metadata acceleration)."
-
-  local _topo
-  _topo="$(_ask "Pool layout" "single")"
-  case "${_topo}" in
-    single|mirror|raidz1|mirror-stripe) export KLDLOAD_ZFS_TOPOLOGY="${_topo}" ;;
-    *) _err "Unknown layout '${_topo}'. Valid: single mirror raidz1 mirror-stripe"; exit 1 ;;
-  esac
-
-  local _default_disk
-  _default_disk="$(_detect_first_disk)"
-  _warn "The boot disk will be completely wiped."
-  KLDLOAD_DISK="$(_ask "Boot disk" "${_default_disk}")"
-  [[ -b "${KLDLOAD_DISK}" ]] || { _err "Not a valid block device: ${KLDLOAD_DISK}"; exit 1; }
-  export KLDLOAD_DISK
-
-  if [[ "${KLDLOAD_ZFS_TOPOLOGY}" != "single" ]]; then
-    # Collect all block disks except the boot disk, in sorted order
-    local -a _all_disks=()
-    mapfile -t _all_disks < <(lsblk -d -e7,11 -n -o PATH 2>/dev/null | sort)
-    local -a _data_candidates=()
-    local _d
-    for _d in "${_all_disks[@]}"; do
-      [[ "${_d}" != "${KLDLOAD_DISK}" ]] && _data_candidates+=("${_d}")
+    echo
+    _info "Admin user — this account gets passwordless sudo. Root login is disabled."
+    KLDLOAD_USERNAME="$(_ask "Admin username" "admin")"
+    export KLDLOAD_USERNAME
+    while true; do
+        KLDLOAD_PASSWORD="$(_askpass "Password")"
+        local _pw_confirm
+        _pw_confirm="$(_askpass "Confirm password")"
+        [[ "$KLDLOAD_PASSWORD" == "$_pw_confirm" ]] && break
+        _err "Passwords do not match — try again."
     done
+    export KLDLOAD_PASSWORD
 
-    local _needed_data
-    case "${KLDLOAD_ZFS_TOPOLOGY}" in
-      mirror)        _needed_data=2 ;;
-      raidz1)        _needed_data=4 ;;
-      mirror-stripe) _needed_data=4 ;;
-    esac
+    _ok "Hostname" "${KLDLOAD_HOSTNAME}"
+    _ok "Profile" "${KLDLOAD_PROFILE}"
+    _ok "User" "${KLDLOAD_USERNAME}  (passwordless sudo · home dataset: rpool/home/${KLDLOAD_USERNAME})"
 
-    local _default_data="${_data_candidates[*]:0:${_needed_data}}"
+    # ── 2 of 6 · Disk & Pool Layout ──────────────────────────────────────────
+    _hdr "2 of 6  ·  Disk & Pool Layout"
+    k_list_candidate_disks
+
+    _info "Pool layout — select one:"
     _info ""
-    _info "Data disks for the rpool (space-separated, need ${_needed_data}):"
-    KLDLOAD_ZFS_DATA_DISKS="$(_ask "Pool disks" "${_default_data}")"
-    export KLDLOAD_ZFS_DATA_DISKS
+    _info "  single         boot disk only: EFI + bpool + rpool on one disk"
+    _info "  mirror         2-disk mirror   (rpool: 2 data disks · boot stays on sda)"
+    _info "  raidz1         4-disk RAIDZ1   (rpool: 4 data disks · boot stays on sda)"
+    _info "  mirror-stripe  4-disk RAID10   (rpool: sdb+sdc mirror ║ sdd+sde mirror)"
+    _info ""
+    _info "Extra disks (scsi1–4) are used as rpool data disks for multi-disk topologies."
+    _info "Remaining disks (scsi5–6) are offered as special vdevs (metadata acceleration)."
 
-    # Offer remaining disks as special vdevs
-    # shellcheck disable=SC2206
-    local -a _used=(${KLDLOAD_ZFS_DATA_DISKS})
-    local -a _special_candidates=()
-    local _u _in_use
-    for _d in "${_data_candidates[@]}"; do
-      _in_use=0
-      for _u in "${_used[@]}"; do [[ "${_d}" == "${_u}" ]] && _in_use=1 && break; done
-      [[ ${_in_use} -eq 0 ]] && _special_candidates+=("${_d}")
-    done
-
-    if [[ ${#_special_candidates[@]} -ge 1 ]]; then
-      local _default_special
-      _default_special="${_special_candidates[*]:0:2}"
-      _info ""
-      _info "Special vdev disks — accelerate metadata and small blocks (optional)."
-      _info "Detected candidates: ${_default_special}"
-      local _use_special
-      _use_special="$(_ask "Add special vdevs" "yes")"
-      if [[ "${_use_special}" == "yes" || "${_use_special}" == "y" ]]; then
-        KLDLOAD_ZFS_SPECIAL_DISKS="$(_ask "Special vdev disks" "${_default_special}")"
-        export KLDLOAD_ZFS_SPECIAL_DISKS
-        _ok "Special vdevs" "${KLDLOAD_ZFS_SPECIAL_DISKS}"
-      fi
-    fi
-
-    _ok "Pool layout"  "${KLDLOAD_ZFS_TOPOLOGY}"
-    _ok "Boot disk"    "${KLDLOAD_DISK}"
-    _ok "Pool disks"   "${KLDLOAD_ZFS_DATA_DISKS}"
-  else
-    _ok "Pool layout"  "single  (${KLDLOAD_DISK})"
-  fi
-
-  # ── 3 of 6 · Encryption ──────────────────────────────────────────────────
-  _hdr "3 of 6  ·  ZFS Encryption"
-  _info "kldload installs ZFS on root for snapshots, boot environments, and replication."
-  _info ""
-  _info "  zfs      —  ZFS, no encryption  (default)"
-  _info "  zfs-enc  —  ZFS with full dataset encryption (you will be prompted for a passphrase)"
-  v="$(_ask "Storage mode" "zfs")"
-  case "${v}" in
-    zfs-enc|zfs-encrypt|enc|encrypted)
-      export KLDLOAD_STORAGE_MODE=zfs KLDLOAD_ENABLE_ZFS=1 KLDLOAD_ZFS_ENCRYPT=1
-      KLDLOAD_ZFS_PASSPHRASE="$(_askpass "ZFS encryption passphrase")"
-      export KLDLOAD_ZFS_PASSPHRASE
-      _ok "Encryption" "enabled"
-      ;;
+    local _topo
+    _topo="$(_ask "Pool layout" "single")"
+    case "${_topo}" in
+    single | mirror | raidz1 | mirror-stripe) export KLDLOAD_ZFS_TOPOLOGY="${_topo}" ;;
     *)
-      export KLDLOAD_STORAGE_MODE=zfs KLDLOAD_ENABLE_ZFS=1 KLDLOAD_ZFS_ENCRYPT=0
-      _ok "Encryption" "disabled"
-      ;;
-  esac
-
-  # ── 4 of 6 · Keyboard & Locale ───────────────────────────────────────────
-  _hdr "4 of 6  ·  Keyboard & Locale"
-  _info "Keyboard layout controls key mapping for the installed system."
-  _eg  "us  gb  de  fr  es  it  pt  ru  jp"
-  KLDLOAD_KEYBOARD_LAYOUT="$(_ask "Keyboard layout" "us")"
-  export KLDLOAD_KEYBOARD_LAYOUT
-
-  _info ""
-  _info "Variant is optional — leave blank for the standard layout."
-  _eg  "dvorak  colemak  intl  nodeadkeys"
-  KLDLOAD_KEYBOARD_VARIANT="$(_ask "Keyboard variant" "")"
-  export KLDLOAD_KEYBOARD_VARIANT
-
-  _info ""
-  _info "Locale controls language and number/date formats."
-  _eg  "en_US.UTF-8  en_GB.UTF-8  de_DE.UTF-8  fr_FR.UTF-8"
-  KLDLOAD_LOCALE="$(_ask "System locale" "en_US.UTF-8")"
-  export KLDLOAD_LOCALE
-
-  # ── 5 of 6 · Timezone ────────────────────────────────────────────────────
-  _hdr "5 of 6  ·  Timezone"
-  _info "Use the standard tz database format."
-  _eg  "UTC  America/New_York  America/Los_Angeles  America/Chicago"
-  _eg  "Europe/London  Europe/Berlin  Asia/Tokyo  Australia/Sydney"
-  KLDLOAD_TIMEZONE="$(_ask "Timezone" "UTC")"
-  export KLDLOAD_TIMEZONE
-
-  # ── 6 of 6 · Network ─────────────────────────────────────────────────────
-  _hdr "6 of 6  ·  Network"
-  _info "DHCP works for most setups. Choose static if this host needs a fixed IP."
-  _eg  "dhcp  or  static"
-  v="$(_ask "Network mode" "dhcp")"
-  export KLDLOAD_NET_METHOD="${v:-dhcp}"
-
-  if [[ "${KLDLOAD_NET_METHOD}" == "static" ]]; then
-    _eg "eth0  ens3  enp2s0"
-    KLDLOAD_NET_IFACE="$(_ask "Interface name" "eth0")"; export KLDLOAD_NET_IFACE
-    _eg "192.168.1.10"
-    KLDLOAD_NET_IP="$(_ask "IP address")"; export KLDLOAD_NET_IP
-    KLDLOAD_NET_PREFIX="$(_ask "Prefix length" "24")"; export KLDLOAD_NET_PREFIX
-    _eg "192.168.1.1"
-    KLDLOAD_NET_GW="$(_ask "Gateway")"; export KLDLOAD_NET_GW
-    _eg "1.1.1.1,8.8.8.8"
-    KLDLOAD_NET_DNS="$(_ask "DNS servers" "1.1.1.1,8.8.8.8")"; export KLDLOAD_NET_DNS
-    _ok "Network" "static  ${KLDLOAD_NET_IP}/${KLDLOAD_NET_PREFIX}"
-  else
-    _ok "Network" "DHCP"
-  fi
-
-  # ── Extra packages ────────────────────────────────────────────────────────
-  _bar
-  printf '\n\e[1;37m  Extra Packages\e[0m\n\n'
-  _info "Additional packages to install — space or comma separated. Leave blank to skip."
-  _eg  "htop git tmux wireguard-tools docker.io"
-  KLDLOAD_EXTRA_PACKAGES="$(_ask "Extra packages" "")"; export KLDLOAD_EXTRA_PACKAGES
-
-  # ── APT mirror for updates ────────────────────────────────────────────────
-  _bar
-  printf '\n\e[1;37m  Package Updates\e[0m\n\n'
-  _info "After install, the target system needs an APT source for future updates."
-  _info ""
-  _info "  internet  — standard Debian repos (deb.debian.org)         (default)"
-  _info "  custom    — your own APT mirror URL (air-gap / private DC)"
-  _info ""
-  _info "The installation itself always uses the fast local darksite mirror."
-  _info "This setting only affects the installed system's update source."
-  local _mirror_mode
-  _mirror_mode="$(_ask "Update source" "internet")"
-  if [[ "${_mirror_mode}" == "custom" ]]; then
-    _eg "http://apt.internal/debian  or  http://10.0.0.1:3142/apt"
-    KLDLOAD_CUSTOM_MIRROR_URL="$(_ask "Mirror URL")"
-    if [[ -n "${KLDLOAD_CUSTOM_MIRROR_URL}" ]]; then
-      export KLDLOAD_KEEP_DARKSITE=1
-      export KLDLOAD_CUSTOM_MIRROR_URL
-      _ok "Updates" "custom mirror: ${KLDLOAD_CUSTOM_MIRROR_URL}"
-    else
-      export KLDLOAD_KEEP_DARKSITE=0
-      _warn "No URL entered — falling back to standard Debian internet repos"
-      _ok "Updates" "internet (deb.debian.org)"
-    fi
-  else
-    export KLDLOAD_KEEP_DARKSITE=0
-    _ok "Updates" "internet (deb.debian.org)"
-  fi
-
-  # ── Infrastructure mode (screens 7–13) ───────────────────────────────────
-  if k_have_func guided_infra_prompt; then
-    guided_infra_prompt
-  fi
-
-  # ── Summary ───────────────────────────────────────────────────────────────
-  _bar
-  printf '\n\e[1;37m  Install Summary\e[0m\n\n'
-  _ok "User:"      "${KLDLOAD_USERNAME}  (passwordless sudo)"
-  _ok "Hostname:"  "${KLDLOAD_HOSTNAME}"
-  _ok "Profile:"   "${KLDLOAD_PROFILE}"
-  _ok "Disk:"      "${KLDLOAD_DISK}"
-  _ok "Topology:"  "${KLDLOAD_ZFS_TOPOLOGY}${KLDLOAD_ZFS_DATA_DISKS:+  ·  ${KLDLOAD_ZFS_DATA_DISKS}}"
-  [[ -n "${KLDLOAD_ZFS_SPECIAL_DISKS:-}" ]] && _ok "Special:"   "${KLDLOAD_ZFS_SPECIAL_DISKS}"
-  _ok "ZFS:"       "${KLDLOAD_STORAGE_MODE}${KLDLOAD_ZFS_ENCRYPT:+  · encrypted}"
-  _ok "Keyboard:"  "${KLDLOAD_KEYBOARD_LAYOUT}${KLDLOAD_KEYBOARD_VARIANT:+ / ${KLDLOAD_KEYBOARD_VARIANT}}"
-  _ok "Locale:"    "${KLDLOAD_LOCALE}"
-  _ok "Timezone:"  "${KLDLOAD_TIMEZONE}"
-  _ok "Network:"   "${KLDLOAD_NET_METHOD}"
-  [[ -n "${KLDLOAD_EXTRA_PACKAGES}" ]] && _ok "Extras:"   "${KLDLOAD_EXTRA_PACKAGES}"
-  if [[ "${KLDLOAD_KEEP_DARKSITE:-0}" == "1" ]]; then
-    _ok "Updates:"  "custom mirror: ${KLDLOAD_CUSTOM_MIRROR_URL}"
-  else
-    _ok "Updates:"  "internet (deb.debian.org)"
-  fi
-  # Infrastructure mode summary
-  _ok "Deploy mode:" "${KLDLOAD_INFRA_MODE}"
-  if [[ "${KLDLOAD_INFRA_MODE}" == "control-plane" ]]; then
-    _ok "Cluster:"   "${KLDLOAD_CLUSTER_CIDR}  /  ${KLDLOAD_CLUSTER_SIZE} nodes  /  ${KLDLOAD_CLUSTER_DOMAIN}"
-    _ok "WireGuard:" "wg0 :${KLDLOAD_WG0_PORT:-51820}  wg1 :${KLDLOAD_WG1_PORT:-51821}  wg2 :${KLDLOAD_WG2_PORT:-51822}  wg3 :${KLDLOAD_WG3_PORT:-51823}"
-    if [[ -n "${KLDLOAD_AWS_ACCESS_KEY_ID:-}"  ]]; then _ok "AWS:"     "${KLDLOAD_AWS_REGION}"; fi
-    if [[ -n "${KLDLOAD_AZURE_SUBSCRIPTION_ID:-}" ]]; then _ok "Azure:" "${KLDLOAD_AZURE_SUBSCRIPTION_ID:0:8}…"; fi
-    if [[ -n "${KLDLOAD_GCP_PROJECT_ID:-}"    ]]; then _ok "GCP:"     "${KLDLOAD_GCP_PROJECT_ID}"; fi
-  fi
-  while true; do
-    echo
-    _warn "This will permanently ERASE ${KLDLOAD_DISK}. There is no undo."
-    echo
-    v="$(_ask "Type 'yes' to begin  ·  'no' to restart from the top")"
-    case "${v}" in
-      yes)  break ;;
-      no|n) _info "Restarting installer..."; sleep 1; guided_prompt; return ;;
-      *)    _err "Please type 'yes' to install or 'no' to go back." ;;
+        _err "Unknown layout '${_topo}'. Valid: single mirror raidz1 mirror-stripe"
+        exit 1
+        ;;
     esac
-  done
+
+    local _default_disk
+    _default_disk="$(_detect_first_disk)"
+    _warn "The boot disk will be completely wiped."
+    KLDLOAD_DISK="$(_ask "Boot disk" "${_default_disk}")"
+    [[ -b "${KLDLOAD_DISK}" ]] || {
+        _err "Not a valid block device: ${KLDLOAD_DISK}"
+        exit 1
+    }
+    export KLDLOAD_DISK
+
+    if [[ "${KLDLOAD_ZFS_TOPOLOGY}" != "single" ]]; then
+        # Collect all block disks except the boot disk, in sorted order
+        local -a _all_disks=()
+        mapfile -t _all_disks < <(lsblk -d -e7,11 -n -o PATH 2>/dev/null | sort)
+        local -a _data_candidates=()
+        local _d
+        for _d in "${_all_disks[@]}"; do
+            [[ "${_d}" != "${KLDLOAD_DISK}" ]] && _data_candidates+=("${_d}")
+        done
+
+        local _needed_data
+        case "${KLDLOAD_ZFS_TOPOLOGY}" in
+        mirror) _needed_data=2 ;;
+        raidz1) _needed_data=4 ;;
+        mirror-stripe) _needed_data=4 ;;
+        esac
+
+        local _default_data="${_data_candidates[*]:0:${_needed_data}}"
+        _info ""
+        _info "Data disks for the rpool (space-separated, need ${_needed_data}):"
+        KLDLOAD_ZFS_DATA_DISKS="$(_ask "Pool disks" "${_default_data}")"
+        export KLDLOAD_ZFS_DATA_DISKS
+
+        # Offer remaining disks as special vdevs
+        # shellcheck disable=SC2206
+        local -a _used=(${KLDLOAD_ZFS_DATA_DISKS})
+        local -a _special_candidates=()
+        local _u _in_use
+        for _d in "${_data_candidates[@]}"; do
+            _in_use=0
+            for _u in "${_used[@]}"; do [[ "${_d}" == "${_u}" ]] && _in_use=1 && break; done
+            [[ ${_in_use} -eq 0 ]] && _special_candidates+=("${_d}")
+        done
+
+        if [[ ${#_special_candidates[@]} -ge 1 ]]; then
+            local _default_special
+            _default_special="${_special_candidates[*]:0:2}"
+            _info ""
+            _info "Special vdev disks — accelerate metadata and small blocks (optional)."
+            _info "Detected candidates: ${_default_special}"
+            local _use_special
+            _use_special="$(_ask "Add special vdevs" "yes")"
+            if [[ "${_use_special}" == "yes" || "${_use_special}" == "y" ]]; then
+                KLDLOAD_ZFS_SPECIAL_DISKS="$(_ask "Special vdev disks" "${_default_special}")"
+                export KLDLOAD_ZFS_SPECIAL_DISKS
+                _ok "Special vdevs" "${KLDLOAD_ZFS_SPECIAL_DISKS}"
+            fi
+        fi
+
+        _ok "Pool layout" "${KLDLOAD_ZFS_TOPOLOGY}"
+        _ok "Boot disk" "${KLDLOAD_DISK}"
+        _ok "Pool disks" "${KLDLOAD_ZFS_DATA_DISKS}"
+    else
+        _ok "Pool layout" "single  (${KLDLOAD_DISK})"
+    fi
+
+    # ── 3 of 6 · Encryption ──────────────────────────────────────────────────
+    _hdr "3 of 6  ·  ZFS Encryption"
+    _info "kldload installs ZFS on root for snapshots, boot environments, and replication."
+    _info ""
+    _info "  zfs      —  ZFS, no encryption  (default)"
+    _info "  zfs-enc  —  ZFS with full dataset encryption (you will be prompted for a passphrase)"
+    v="$(_ask "Storage mode" "zfs")"
+    case "${v}" in
+    zfs-enc | zfs-encrypt | enc | encrypted)
+        export KLDLOAD_STORAGE_MODE=zfs KLDLOAD_ENABLE_ZFS=1 KLDLOAD_ZFS_ENCRYPT=1
+        KLDLOAD_ZFS_PASSPHRASE="$(_askpass "ZFS encryption passphrase")"
+        export KLDLOAD_ZFS_PASSPHRASE
+        _ok "Encryption" "enabled"
+        ;;
+    *)
+        export KLDLOAD_STORAGE_MODE=zfs KLDLOAD_ENABLE_ZFS=1 KLDLOAD_ZFS_ENCRYPT=0
+        _ok "Encryption" "disabled"
+        ;;
+    esac
+
+    # ── 4 of 6 · Keyboard & Locale ───────────────────────────────────────────
+    _hdr "4 of 6  ·  Keyboard & Locale"
+    _info "Keyboard layout controls key mapping for the installed system."
+    _eg "us  gb  de  fr  es  it  pt  ru  jp"
+    KLDLOAD_KEYBOARD_LAYOUT="$(_ask "Keyboard layout" "us")"
+    export KLDLOAD_KEYBOARD_LAYOUT
+
+    _info ""
+    _info "Variant is optional — leave blank for the standard layout."
+    _eg "dvorak  colemak  intl  nodeadkeys"
+    KLDLOAD_KEYBOARD_VARIANT="$(_ask "Keyboard variant" "")"
+    export KLDLOAD_KEYBOARD_VARIANT
+
+    _info ""
+    _info "Locale controls language and number/date formats."
+    _eg "en_US.UTF-8  en_GB.UTF-8  de_DE.UTF-8  fr_FR.UTF-8"
+    KLDLOAD_LOCALE="$(_ask "System locale" "en_US.UTF-8")"
+    export KLDLOAD_LOCALE
+
+    # ── 5 of 6 · Timezone ────────────────────────────────────────────────────
+    _hdr "5 of 6  ·  Timezone"
+    _info "Use the standard tz database format."
+    _eg "UTC  America/New_York  America/Los_Angeles  America/Chicago"
+    _eg "Europe/London  Europe/Berlin  Asia/Tokyo  Australia/Sydney"
+    KLDLOAD_TIMEZONE="$(_ask "Timezone" "UTC")"
+    export KLDLOAD_TIMEZONE
+
+    # ── 6 of 6 · Network ─────────────────────────────────────────────────────
+    _hdr "6 of 6  ·  Network"
+    _info "DHCP works for most setups. Choose static if this host needs a fixed IP."
+    _eg "dhcp  or  static"
+    v="$(_ask "Network mode" "dhcp")"
+    export KLDLOAD_NET_METHOD="${v:-dhcp}"
+
+    if [[ "${KLDLOAD_NET_METHOD}" == "static" ]]; then
+        _eg "eth0  ens3  enp2s0"
+        KLDLOAD_NET_IFACE="$(_ask "Interface name" "eth0")"
+        export KLDLOAD_NET_IFACE
+        _eg "192.168.1.10"
+        KLDLOAD_NET_IP="$(_ask "IP address")"
+        export KLDLOAD_NET_IP
+        KLDLOAD_NET_PREFIX="$(_ask "Prefix length" "24")"
+        export KLDLOAD_NET_PREFIX
+        _eg "192.168.1.1"
+        KLDLOAD_NET_GW="$(_ask "Gateway")"
+        export KLDLOAD_NET_GW
+        _eg "1.1.1.1,8.8.8.8"
+        KLDLOAD_NET_DNS="$(_ask "DNS servers" "1.1.1.1,8.8.8.8")"
+        export KLDLOAD_NET_DNS
+        _ok "Network" "static  ${KLDLOAD_NET_IP}/${KLDLOAD_NET_PREFIX}"
+    else
+        _ok "Network" "DHCP"
+    fi
+
+    # ── Extra packages ────────────────────────────────────────────────────────
+    _bar
+    printf '\n\e[1;37m  Extra Packages\e[0m\n\n'
+    _info "Additional packages to install — space or comma separated. Leave blank to skip."
+    _eg "htop git tmux wireguard-tools docker.io"
+    KLDLOAD_EXTRA_PACKAGES="$(_ask "Extra packages" "")"
+    export KLDLOAD_EXTRA_PACKAGES
+
+    # ── APT mirror for updates ────────────────────────────────────────────────
+    _bar
+    printf '\n\e[1;37m  Package Updates\e[0m\n\n'
+    _info "After install, the target system needs an APT source for future updates."
+    _info ""
+    _info "  internet  — standard Debian repos (deb.debian.org)         (default)"
+    _info "  custom    — your own APT mirror URL (air-gap / private DC)"
+    _info ""
+    _info "The installation itself always uses the fast local darksite mirror."
+    _info "This setting only affects the installed system's update source."
+    local _mirror_mode
+    _mirror_mode="$(_ask "Update source" "internet")"
+    if [[ "${_mirror_mode}" == "custom" ]]; then
+        _eg "http://apt.internal/debian  or  http://10.0.0.1:3142/apt"
+        KLDLOAD_CUSTOM_MIRROR_URL="$(_ask "Mirror URL")"
+        if [[ -n "${KLDLOAD_CUSTOM_MIRROR_URL}" ]]; then
+            export KLDLOAD_KEEP_DARKSITE=1
+            export KLDLOAD_CUSTOM_MIRROR_URL
+            _ok "Updates" "custom mirror: ${KLDLOAD_CUSTOM_MIRROR_URL}"
+        else
+            export KLDLOAD_KEEP_DARKSITE=0
+            _warn "No URL entered — falling back to standard Debian internet repos"
+            _ok "Updates" "internet (deb.debian.org)"
+        fi
+    else
+        export KLDLOAD_KEEP_DARKSITE=0
+        _ok "Updates" "internet (deb.debian.org)"
+    fi
+
+    # ── Infrastructure mode (screens 7–13) ───────────────────────────────────
+    if k_have_func guided_infra_prompt; then
+        guided_infra_prompt
+    fi
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    _bar
+    printf '\n\e[1;37m  Install Summary\e[0m\n\n'
+    _ok "User:" "${KLDLOAD_USERNAME}  (passwordless sudo)"
+    _ok "Hostname:" "${KLDLOAD_HOSTNAME}"
+    _ok "Profile:" "${KLDLOAD_PROFILE}"
+    _ok "Disk:" "${KLDLOAD_DISK}"
+    _ok "Topology:" "${KLDLOAD_ZFS_TOPOLOGY}${KLDLOAD_ZFS_DATA_DISKS:+  ·  ${KLDLOAD_ZFS_DATA_DISKS}}"
+    [[ -n "${KLDLOAD_ZFS_SPECIAL_DISKS:-}" ]] && _ok "Special:" "${KLDLOAD_ZFS_SPECIAL_DISKS}"
+    _ok "ZFS:" "${KLDLOAD_STORAGE_MODE}${KLDLOAD_ZFS_ENCRYPT:+  · encrypted}"
+    _ok "Keyboard:" "${KLDLOAD_KEYBOARD_LAYOUT}${KLDLOAD_KEYBOARD_VARIANT:+ / ${KLDLOAD_KEYBOARD_VARIANT}}"
+    _ok "Locale:" "${KLDLOAD_LOCALE}"
+    _ok "Timezone:" "${KLDLOAD_TIMEZONE}"
+    _ok "Network:" "${KLDLOAD_NET_METHOD}"
+    [[ -n "${KLDLOAD_EXTRA_PACKAGES}" ]] && _ok "Extras:" "${KLDLOAD_EXTRA_PACKAGES}"
+    if [[ "${KLDLOAD_KEEP_DARKSITE:-0}" == "1" ]]; then
+        _ok "Updates:" "custom mirror: ${KLDLOAD_CUSTOM_MIRROR_URL}"
+    else
+        _ok "Updates:" "internet (deb.debian.org)"
+    fi
+    # Infrastructure mode summary
+    _ok "Deploy mode:" "${KLDLOAD_INFRA_MODE}"
+    if [[ "${KLDLOAD_INFRA_MODE}" == "control-plane" ]]; then
+        _ok "Cluster:" "${KLDLOAD_CLUSTER_CIDR}  /  ${KLDLOAD_CLUSTER_SIZE} nodes  /  ${KLDLOAD_CLUSTER_DOMAIN}"
+        _ok "WireGuard:" "wg0 :${KLDLOAD_WG0_PORT:-51820}  wg1 :${KLDLOAD_WG1_PORT:-51821}  wg2 :${KLDLOAD_WG2_PORT:-51822}  wg3 :${KLDLOAD_WG3_PORT:-51823}"
+        if [[ -n "${KLDLOAD_AWS_ACCESS_KEY_ID:-}" ]]; then _ok "AWS:" "${KLDLOAD_AWS_REGION}"; fi
+        if [[ -n "${KLDLOAD_AZURE_SUBSCRIPTION_ID:-}" ]]; then _ok "Azure:" "${KLDLOAD_AZURE_SUBSCRIPTION_ID:0:8}…"; fi
+        if [[ -n "${KLDLOAD_GCP_PROJECT_ID:-}" ]]; then _ok "GCP:" "${KLDLOAD_GCP_PROJECT_ID}"; fi
+    fi
+    while true; do
+        echo
+        _warn "This will permanently ERASE ${KLDLOAD_DISK}. There is no undo."
+        echo
+        v="$(_ask "Type 'yes' to begin  ·  'no' to restart from the top")"
+        case "${v}" in
+        yes) break ;;
+        no | n)
+            _info "Restarting installer..."
+            sleep 1
+            guided_prompt
+            return
+            ;;
+        *) _err "Please type 'yes' to install or 'no' to go back." ;;
+        esac
+    done
 }
 
-
 main() {
-  local mode="guided" cfg=""
+    local mode="guided" cfg=""
 
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --guided) mode="guided"; shift ;;
-      --config) cfg="${2:?missing config path}"; mode="config"; shift 2 ;;
-      -h|--help) usage; exit 0 ;;
-      *) k_die "unknown argument: $1" ;;
-    esac
-  done
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --guided)
+            mode="guided"
+            shift
+            ;;
+        --config)
+            cfg="${2:?missing config path}"
+            mode="config"
+            shift 2
+            ;;
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        *) k_die "unknown argument: $1" ;;
+        esac
+    done
 
-  # Drop "installer busy" flag so kldload-bounce-tls-services skips
-  # the webui/ttyd/grafana restart cycle during the install. Without
-  # this, wifi reconnect → network-online.target re-fires →
-  # kldload-tls-cert.service re-runs → bounce script restarts webui
-  # → kills our install subprocess tree (webui cgroup) → user sees
-  # blank browser with zero install progress. Trap ensures the flag
-  # is removed on ANY exit path — success, failure, Ctrl-C, OOM.
-  mkdir -p /var/run/kldload 2>/dev/null
-  : > /var/run/kldload/installer-busy
-  trap 'rm -f /var/run/kldload/installer-busy' EXIT INT TERM HUP
+    # Drop "installer busy" flag so kldload-bounce-tls-services skips
+    # the webui/ttyd/grafana restart cycle during the install. Without
+    # this, wifi reconnect → network-online.target re-fires →
+    # kldload-tls-cert.service re-runs → bounce script restarts webui
+    # → kills our install subprocess tree (webui cgroup) → user sees
+    # blank browser with zero install progress. Trap ensures the flag
+    # is removed on ANY exit path — success, failure, Ctrl-C, OOM.
+    mkdir -p /var/run/kldload 2>/dev/null
+    : >/var/run/kldload/installer-busy
+    trap 'rm -f /var/run/kldload/installer-busy' EXIT INT TERM HUP
 
-  mkdir -p "${KLDLOAD_LOG_DIR}"
-  for _l in kldload-installer storage zfs security network bootstrap bootloader; do
-    : > "${KLDLOAD_LOG_DIR}/${_l}.log"
-  done
+    mkdir -p "${KLDLOAD_LOG_DIR}"
+    for _l in kldload-installer storage zfs security network bootstrap bootloader; do
+        : >"${KLDLOAD_LOG_DIR}/${_l}.log"
+    done
 
-  [[ "${mode}" == "config" ]] && k_answers_load_env_file "${cfg}" || guided_prompt
+    [[ "${mode}" == "config" ]] && k_answers_load_env_file "${cfg}" || guided_prompt
 
-  # ── Hostname validation + normalization ──────────────────────────────────
-  # Previously users hit unbootable installs when they set a hostname with
-  # mixed case, underscores, or trailing dashes — ZFS dataset name validators
-  # and systemd-hostname validators disagree. Normalize to lowercase, strip
-  # invalid chars, enforce length+start-char rules, and fail loudly if the
-  # input can't be sanitized into something legal. Then force-export to
-  # every env consumer so no subshell can fall through to a default.
-  : "${KLDLOAD_HOSTNAME:=kldload}"
-  _kh_in="${KLDLOAD_HOSTNAME}"
-  # Lowercase + replace underscore/space with hyphen + strip anything
-  # that's not [a-z0-9-], then strip leading/trailing hyphens.
-  _kh="$(printf '%s' "${_kh_in}" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--' | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//')"
-  if [[ -z "${_kh}" ]] || (( ${#_kh} > 63 )) || [[ "${_kh}" =~ ^[0-9]+$ ]]; then
-    k_die "invalid hostname '${_kh_in}' — must be 1-63 chars of [a-z0-9-], start with a letter, not all-numeric"
-  fi
-  KLDLOAD_HOSTNAME="${_kh}"
-  export KLDLOAD_HOSTNAME
-  if [[ "${_kh_in}" != "${_kh}" ]]; then
-    k_log "Hostname normalized: '${_kh_in}' → '${_kh}'"
-  fi
-  k_log "Hostname: ${KLDLOAD_HOSTNAME} (export propagated to all subshells)"
-  k_log "ZFS BE will be: rpool/ROOT/${KLDLOAD_HOSTNAME}"
+    # ── Hostname validation + normalization ──────────────────────────────────
+    # Previously users hit unbootable installs when they set a hostname with
+    # mixed case, underscores, or trailing dashes — ZFS dataset name validators
+    # and systemd-hostname validators disagree. Normalize to lowercase, strip
+    # invalid chars, enforce length+start-char rules, and fail loudly if the
+    # input can't be sanitized into something legal. Then force-export to
+    # every env consumer so no subshell can fall through to a default.
+    : "${KLDLOAD_HOSTNAME:=kldload}"
+    _kh_in="${KLDLOAD_HOSTNAME}"
+    # Lowercase + replace underscore/space with hyphen + strip anything
+    # that's not [a-z0-9-], then strip leading/trailing hyphens.
+    _kh="$(printf '%s' "${_kh_in}" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--' | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//')"
+    if [[ -z "${_kh}" ]] || ((${#_kh} > 63)) || [[ "${_kh}" =~ ^[0-9]+$ ]]; then
+        k_die "invalid hostname '${_kh_in}' — must be 1-63 chars of [a-z0-9-], start with a letter, not all-numeric"
+    fi
+    KLDLOAD_HOSTNAME="${_kh}"
+    export KLDLOAD_HOSTNAME
+    if [[ "${_kh_in}" != "${_kh}" ]]; then
+        k_log "Hostname normalized: '${_kh_in}' → '${_kh}'"
+    fi
+    k_log "Hostname: ${KLDLOAD_HOSTNAME} (export propagated to all subshells)"
+    k_log "ZFS BE will be: rpool/ROOT/${KLDLOAD_HOSTNAME}"
 
-  # ── Timezone validation + force-export ───────────────────────────────────
-  # Same drift pattern as hostname — pre-XPS-v3.4 installs reported clock
-  # stuck on UTC despite user picking America/Vancouver in the UI. The zone
-  # file must exist on the *live ISO* at install time (we ln -sf into the
-  # target path). If the user picks an invalid zone, fall back to UTC with
-  # a loud log instead of silently breaking /etc/localtime.
-  : "${KLDLOAD_TIMEZONE:=UTC}"
-  if [[ ! -f "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE}" ]]; then
-    k_log "WARNING: Timezone '${KLDLOAD_TIMEZONE}' not in /usr/share/zoneinfo — falling back to UTC"
-    KLDLOAD_TIMEZONE="UTC"
-  fi
-  export KLDLOAD_TIMEZONE
-  k_log "Timezone: ${KLDLOAD_TIMEZONE} (zoneinfo file verified)"
+    # ── Timezone validation + force-export ───────────────────────────────────
+    # Same drift pattern as hostname — pre-XPS-v3.4 installs reported clock
+    # stuck on UTC despite user picking America/Vancouver in the UI. The zone
+    # file must exist on the *live ISO* at install time (we ln -sf into the
+    # target path). If the user picks an invalid zone, fall back to UTC with
+    # a loud log instead of silently breaking /etc/localtime.
+    : "${KLDLOAD_TIMEZONE:=UTC}"
+    if [[ ! -f "/usr/share/zoneinfo/${KLDLOAD_TIMEZONE}" ]]; then
+        k_log "WARNING: Timezone '${KLDLOAD_TIMEZONE}' not in /usr/share/zoneinfo — falling back to UTC"
+        KLDLOAD_TIMEZONE="UTC"
+    fi
+    export KLDLOAD_TIMEZONE
+    k_log "Timezone: ${KLDLOAD_TIMEZONE} (zoneinfo file verified)"
 
-  # k_save_effective_config writes an advisory log file; a failure here is
-  # not a reason to abort the whole install. Earlier pass-29 installs hit
-  # a bash process-substitution race inside this function that killed the
-  # entire run before the preflight even started. Wrapping in || true so
-  # any transient logging-side failure degrades to a warning, not a fatal.
-  k_save_effective_config || k_log "WARNING: k_save_effective_config failed — continuing install without effective-config.env"
-  k_preflight
+    # k_save_effective_config writes an advisory log file; a failure here is
+    # not a reason to abort the whole install. Earlier pass-29 installs hit
+    # a bash process-substitution race inside this function that killed the
+    # entire run before the preflight even started. Wrapping in || true so
+    # any transient logging-side failure degrades to a warning, not a fatal.
+    k_save_effective_config || k_log "WARNING: k_save_effective_config failed — continuing install without effective-config.env"
+    k_preflight
 
-  # ── Installation progress ─────────────────────────────────────────────────
-  _hdr "Installing — do not power off"
+    # ── Installation progress ─────────────────────────────────────────────────
+    _hdr "Installing — do not power off"
 
-  # OpenBSD: chain-boot approach — bootstrap handles partitioning, sets staging,
-  # and autoinstall config. Skip ZFS storage, skip all post-bootstrap Linux steps.
-  # On reboot, OpenBSD's bsd.rd installer runs unattended.
-  if [[ "${KLDLOAD_DISTRO:-}" == "openbsd" ]]; then
-    _info "▸  Staging OpenBSD chain-boot installer..."
-    k_bootstrap_base
-    _ok "OpenBSD"    "Chain-boot staged — reboot to install"
-    _hdr ""
-    _info "  ┌─────────────────────────────────────────────────────────┐"
-    _info "  │  OpenBSD install staged successfully.                    │"
-    _info "  │                                                         │"
-    _info "  │  On reboot, OpenBSD's own installer (bsd.rd) will run   │"
-    _info "  │  with auto_install.conf for unattended installation.    │"
-    _info "  │                                                         │"
-    _info "  │  Remove the kldload USB/ISO before rebooting.           │"
-    _info "  └─────────────────────────────────────────────────────────┘"
-    _info ""
-    _ok "Complete"   "Reboot to begin OpenBSD installation"
-    return 0
-  fi
+    # OpenBSD: chain-boot approach — bootstrap handles partitioning, sets staging,
+    # and autoinstall config. Skip ZFS storage, skip all post-bootstrap Linux steps.
+    # On reboot, OpenBSD's bsd.rd installer runs unattended.
+    if [[ "${KLDLOAD_DISTRO:-}" == "openbsd" ]]; then
+        _info "▸  Staging OpenBSD chain-boot installer..."
+        k_bootstrap_base
+        _ok "OpenBSD" "Chain-boot staged — reboot to install"
+        _hdr ""
+        _info "  ┌─────────────────────────────────────────────────────────┐"
+        _info "  │  OpenBSD install staged successfully.                    │"
+        _info "  │                                                         │"
+        _info "  │  On reboot, OpenBSD's own installer (bsd.rd) will run   │"
+        _info "  │  with auto_install.conf for unattended installation.    │"
+        _info "  │                                                         │"
+        _info "  │  Remove the kldload USB/ISO before rebooting.           │"
+        _info "  └─────────────────────────────────────────────────────────┘"
+        _info ""
+        _ok "Complete" "Reboot to begin OpenBSD installation"
+        return 0
+    fi
 
-  if [[ "${KLDLOAD_STORAGE_MANUAL:-0}" == "1" ]]; then
-    # ── Manual shell mode (core profile) ─────────────────────────────────
-    # User creates their own ZFS pool and datasets. We just need:
-    #   1. An EFI partition mounted at /target/boot/efi (or we create one)
-    #   2. A pool named 'rpool' imported with a dataset for /
-    _info ""
-    _info "  ┌─────────────────────────────────────────────────────────┐"
-    _info "  │  Manual storage mode                                    │"
-    _info "  │                                                         │"
-    _info "  │  Create your ZFS pool and datasets now.                 │"
-    _info "  │  Requirements:                                          │"
-    _info "  │    • Pool named 'rpool'                                 │"
-    _info "  │    • Dataset 'rpool/ROOT/default' mounted at /target    │"
-    _info "  │    • EFI partition (512M, FAT32) at /target/boot/efi    │"
-    _info "  │                                                         │"
-    _info "  │  Example:                                               │"
-    _info "  │    sgdisk -Z /dev/sda                                   │"
-    _info "  │    sgdisk -n1:0:+512M -t1:EF00 /dev/sda                │"
-    _info "  │    sgdisk -n2:0:0 -t2:BF01 /dev/sda                    │"
-    _info "  │    mkfs.fat -F32 /dev/sda1                              │"
-    _info "  │    zpool create -o ashift=12 -O compression=lz4 \\      │"
-    _info "  │      -O acltype=posixacl -O xattr=sa rpool /dev/sda2   │"
-    _info "  │    zfs create -o canmount=off rpool/ROOT                │"
-    _info "  │    zfs create -o mountpoint=/ rpool/ROOT/default        │"
-    _info "  │    mkdir -p /target/boot/efi                            │"
-    _info "  │    mount /dev/sda1 /target/boot/efi                     │"
-    _info "  │                                                         │"
-    _info "  │  Type 'exit' when done. The installer will continue.    │"
-    _info "  └─────────────────────────────────────────────────────────┘"
-    _info ""
+    if [[ "${KLDLOAD_STORAGE_MANUAL:-0}" == "1" ]]; then
+        # ── Manual shell mode (core profile) ─────────────────────────────────
+        # User creates their own ZFS pool and datasets. We just need:
+        #   1. An EFI partition mounted at /target/boot/efi (or we create one)
+        #   2. A pool named 'rpool' imported with a dataset for /
+        _info ""
+        _info "  ┌─────────────────────────────────────────────────────────┐"
+        _info "  │  Manual storage mode                                    │"
+        _info "  │                                                         │"
+        _info "  │  Create your ZFS pool and datasets now.                 │"
+        _info "  │  Requirements:                                          │"
+        _info "  │    • Pool named 'rpool'                                 │"
+        _info "  │    • Dataset 'rpool/ROOT/default' mounted at /target    │"
+        _info "  │    • EFI partition (512M, FAT32) at /target/boot/efi    │"
+        _info "  │                                                         │"
+        _info "  │  Example:                                               │"
+        _info "  │    sgdisk -Z /dev/sda                                   │"
+        _info "  │    sgdisk -n1:0:+512M -t1:EF00 /dev/sda                │"
+        _info "  │    sgdisk -n2:0:0 -t2:BF01 /dev/sda                    │"
+        _info "  │    mkfs.fat -F32 /dev/sda1                              │"
+        _info "  │    zpool create -o ashift=12 -O compression=lz4 \\      │"
+        _info "  │      -O acltype=posixacl -O xattr=sa rpool /dev/sda2   │"
+        _info "  │    zfs create -o canmount=off rpool/ROOT                │"
+        _info "  │    zfs create -o mountpoint=/ rpool/ROOT/default        │"
+        _info "  │    mkdir -p /target/boot/efi                            │"
+        _info "  │    mount /dev/sda1 /target/boot/efi                     │"
+        _info "  │                                                         │"
+        _info "  │  Type 'exit' when done. The installer will continue.    │"
+        _info "  └─────────────────────────────────────────────────────────┘"
+        _info ""
 
-    # Drop to an interactive shell
-    export KLDLOAD_TARGET_MNT
-    export PS1='\[\e[1;33m\][kldload-storage]\[\e[0m\] \w # '
-    bash --norc --noprofile -i || true
+        # Drop to an interactive shell
+        export KLDLOAD_TARGET_MNT
+        export PS1='\[\e[1;33m\][kldload-storage]\[\e[0m\] \w # '
+        bash --norc --noprofile -i || true
 
-    # Verify the user created what we need
+        # Verify the user created what we need
+        if ! zpool list rpool >/dev/null 2>&1; then
+            k_die "Pool 'rpool' not found. Create it before exiting the shell."
+        fi
+        if ! zfs list rpool/ROOT/default >/dev/null 2>&1; then
+            k_die "Dataset 'rpool/ROOT/default' not found. Create it before exiting the shell."
+        fi
+        # Detect the mountpoint
+        local _mnt
+        _mnt="$(zfs get -H -o value mountpoint rpool/ROOT/default 2>/dev/null)"
+        if [[ "$_mnt" != "/" && "$_mnt" != "${KLDLOAD_TARGET_MNT}" ]]; then
+            # Try to set it
+            zfs set mountpoint="${KLDLOAD_TARGET_MNT}" rpool/ROOT/default 2>/dev/null || true
+        fi
+        # Ensure it's mounted
+        zfs mount rpool/ROOT/default 2>/dev/null || true
+        [[ -d "${KLDLOAD_TARGET_MNT}" ]] || k_die "/target not mounted. Mount rpool/ROOT/default at ${KLDLOAD_TARGET_MNT}."
+
+        # Try to detect EFI partition
+        if [[ ! -d "${KLDLOAD_TARGET_MNT}/boot/efi" ]] || ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
+            # Check if user mounted it somewhere
+            local _efi_dev
+            # Scope ESP detection to the SELECTED disk — a bare system-wide scan
+            # picks the first ESP found (often disk 0's old ESP), so a multi-disk
+            # install to disk 1 would write the bootloader to disk 0. (multi-disk boot bug)
+            _efi_dev="$(lsblk -rno PATH,PARTTYPE "${KLDLOAD_DISK}" 2>/dev/null | grep -i 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' | awk '{print $1}' | head -1)"
+            if [[ -n "$_efi_dev" ]]; then
+                mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi"
+                mount "$_efi_dev" "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
+            fi
+        fi
+
+        # Export partition vars for bootloader step
+        export KLDLOAD_PART_EFI="${_efi_dev:-}"
+        export KLDLOAD_EFI_PART="${KLDLOAD_PART_EFI}"
+        export KLDLOAD_PART_ROOT=""
+        export KLDLOAD_ROOT_PART=""
+
+        _ok "Storage" "Manual — rpool created by user"
+    else
+        _info "▸  Wiping and partitioning ${KLDLOAD_DISK}..."
+        k_install_zfs_storage
+        export KLDLOAD_PART_ROOT="${KLDLOAD_PART_ROOT:-${KLDLOAD_ROOT_PART:-}}"
+        export KLDLOAD_ROOT_PART="${KLDLOAD_ROOT_PART:-${KLDLOAD_PART_ROOT:-}}"
+        export KLDLOAD_PART_EFI="${KLDLOAD_PART_EFI:-${KLDLOAD_EFI_PART:-}}"
+        export KLDLOAD_EFI_PART="${KLDLOAD_EFI_PART:-${KLDLOAD_PART_EFI:-}}"
+        _ok "Storage" "ZFS pools created on ${KLDLOAD_DISK}"
+    fi
+
+    _info "▸  Bootstrapping ${KLDLOAD_DISTRO:-centos} base system (this takes a few minutes)..."
+    # Explicit return-code check — _k_bootstrap_dnf disables errexit (set +e) inside
+    # the chroot catchup block and never restores it, so a bare `k_bootstrap_base`
+    # call would silently swallow FATAL `return 1` paths and let the installer
+    # report "Complete" while the target is half-built (no admin user, no manifest,
+    # no zfs module for the boot kernel). Caught 2026-05-12 on F44 zfslab install:
+    # DKMS verify fired correctly, return-code was lost, install "succeeded",
+    # target refused to boot. Two layers of belt-and-suspenders here so a future
+    # regression in either lib- or script-side errexit handling can't reintroduce
+    # the silent-success failure mode.
+    if ! k_bootstrap_base; then
+        # Persist the bootstrap log into the target rpool BEFORE dying, so the
+        # diagnostics survive the live env's volatile rootfs (every reboot wipes
+        # /var/log/installer on the live ISO). Without this step we have no
+        # forensic trail of which FATAL guard fired — exactly what bit us on
+        # 2026-05-12. Two destinations: rpool root (for SREs probing from a
+        # rescue boot) and a fixed path under /target/root for ssh-from-the-
+        # live-env access without re-mounting.
+        if [[ -d "${KLDLOAD_TARGET_MNT}" ]]; then
+            mkdir -p "${KLDLOAD_TARGET_MNT}/root/kldload-install-logs" 2>/dev/null
+            cp -a "${KLDLOAD_LOG_DIR}"/. "${KLDLOAD_TARGET_MNT}/root/kldload-install-logs/" 2>/dev/null || true
+            cp -a "${KLDLOAD_LOG_DIR}/bootstrap.log" "${KLDLOAD_TARGET_MNT}/bootstrap.log.failure" 2>/dev/null || true
+        fi
+        _info ""
+        _info "  ╔═══════════════════════════════════════════════════════════╗"
+        _info "  ║  BOOTSTRAP FAILED — install ABORTED before finalization   ║"
+        _info "  ║                                                           ║"
+        _info "  ║  Logs preserved at:                                       ║"
+        _info "  ║    • /var/log/installer/bootstrap.log    (live ISO)       ║"
+        _info "  ║    • /target/root/kldload-install-logs/  (target rpool)   ║"
+        _info "  ║    • /target/bootstrap.log.failure       (target rpool)   ║"
+        _info "  ║                                                           ║"
+        _info "  ║  Common FATAL causes (search the log for 'FATAL'):        ║"
+        _info "  ║    • ZFS DKMS build for target kernel failed              ║"
+        _info "  ║    • dnf pass 3 (zfs / zfs-dkms / zfs-dracut) failed      ║"
+        _info "  ║    • initramfs rebuild missing extra/zfs.ko               ║"
+        _info "  ║                                                           ║"
+        _info "  ║  Do NOT reboot — the target will not boot.                ║"
+        _info "  ╚═══════════════════════════════════════════════════════════╝"
+        k_die "Bootstrap failed — install aborted (see /var/log/installer/bootstrap.log)"
+    fi
+    _ok "Bootstrap" "${KLDLOAD_DISTRO:-centos} base installed"
+
+    # Write install manifest via the k_write_manifest function (defined earlier)
+    # which includes all flags: AI, eBPF, NVIDIA, WireGuard, etc.
+    k_write_manifest
+    k_log "Install manifest written to ${KLDLOAD_TARGET_MNT}/etc/kldload/install-manifest.env"
+
+    _info "▸  Configuring network..."
+    k_configure_network
+    _ok "Network" "${KLDLOAD_NET_METHOD:-dhcp}"
+
+    _info "▸  Applying security settings..."
+    k_configure_security
+    _ok "Security" "SSH hardened, APT holds set"
+
+    _info "▸  Installing profile packages (${KLDLOAD_PROFILE:-server})..."
+    k_apply_profile
+    k_install_tools
+    _ok "Profile" "${KLDLOAD_PROFILE:-server}"
+
+    _info "▸  Finalising system..."
+    k_write_install_manifest
+    k_seed_ca
+    k_enable_firstboot
+
+    # Copy live session state DB to target if it exists
+    if [[ -f "/var/lib/kldload/state.db" ]]; then
+        k_log "Copying live session state.db to target..."
+        mkdir -p "${KLDLOAD_TARGET_MNT}/var/lib/kldload"
+        cp "/var/lib/kldload/state.db" "${KLDLOAD_TARGET_MNT}/var/lib/kldload/state.db"
+    fi
+
+    _info "▸  Taking factory snapshot..."
+    local _snap_ts
+    _snap_ts=$(date -u +%Y%m%dT%H%M%SZ)
+    zfs snapshot -r "rpool@install-${_snap_ts}" 2>/dev/null || true
+    zfs snapshot -r "bpool@install-${_snap_ts}" 2>/dev/null || true
+    _ok "Snapshot" "rpool@install-${_snap_ts}"
+
+    # ── Bootloader — write EFI files + initramfs (pool still mounted) ──────
+    # Defensive remount: something during pass 3 / catchup sometimes
+    # exports rpool — possibly zfs-dkms's %post triggering systemd zfs
+    # services, or systemctl preset-all enabling zfs-import-cache that
+    # re-imports without altroot. By the time we reach the bootloader
+    # stage rpool may be exported and /target is just an empty mountpoint.
+    # Without re-importing, bootloader.sh writes land into the live env's
+    # filesystem instead of the target's, and the install reports ✔ but
+    # the disk is empty at boot.
+    # Two cases to handle:
+    #   (a) rpool exported entirely — `zpool list rpool` returns non-zero
+    #   (b) rpool imported but BE dataset NOT mounted at /target — pool
+    #       is listed but mountpoint -q /target returns non-zero
     if ! zpool list rpool >/dev/null 2>&1; then
-      k_die "Pool 'rpool' not found. Create it before exiting the shell."
+        k_log "rpool got exported during install — re-importing with altroot=${KLDLOAD_TARGET_MNT}"
+        zpool import -f -N -R "${KLDLOAD_TARGET_MNT}" rpool 2>&1 || true
     fi
-    if ! zfs list rpool/ROOT/default >/dev/null 2>&1; then
-      k_die "Dataset 'rpool/ROOT/default' not found. Create it before exiting the shell."
+    if ! mountpoint -q "${KLDLOAD_TARGET_MNT}" 2>/dev/null; then
+        k_log "BE dataset not mounted at ${KLDLOAD_TARGET_MNT} — mounting now"
+        local _be
+        _be=$(zfs list -H -o name 2>/dev/null | grep -E '^rpool/ROOT/[^/]+$' | head -1)
+        [[ -n "$_be" ]] && zfs mount "$_be" 2>&1 || true
+        zfs mount -a 2>&1 || true
     fi
-    # Detect the mountpoint
-    local _mnt
-    _mnt="$(zfs get -H -o value mountpoint rpool/ROOT/default 2>/dev/null)"
-    if [[ "$_mnt" != "/" && "$_mnt" != "${KLDLOAD_TARGET_MNT}" ]]; then
-      # Try to set it
-      zfs set mountpoint="${KLDLOAD_TARGET_MNT}" rpool/ROOT/default 2>/dev/null || true
-    fi
-    # Ensure it's mounted
-    zfs mount rpool/ROOT/default 2>/dev/null || true
-    [[ -d "${KLDLOAD_TARGET_MNT}" ]] || k_die "/target not mounted. Mount rpool/ROOT/default at ${KLDLOAD_TARGET_MNT}."
-
-    # Try to detect EFI partition
-    if [[ ! -d "${KLDLOAD_TARGET_MNT}/boot/efi" ]] || ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
-      # Check if user mounted it somewhere
-      local _efi_dev
-      # Scope ESP detection to the SELECTED disk — a bare system-wide scan
-      # picks the first ESP found (often disk 0's old ESP), so a multi-disk
-      # install to disk 1 would write the bootloader to disk 0. (multi-disk boot bug)
-      _efi_dev="$(lsblk -rno PATH,PARTTYPE "${KLDLOAD_DISK}" 2>/dev/null | grep -i 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' | awk '{print $1}' | head -1)"
-      if [[ -n "$_efi_dev" ]]; then
-        mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi"
-        mount "$_efi_dev" "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
-      fi
-    fi
-
-    # Export partition vars for bootloader step
-    export KLDLOAD_PART_EFI="${_efi_dev:-}"
-    export KLDLOAD_EFI_PART="${KLDLOAD_PART_EFI}"
-    export KLDLOAD_PART_ROOT=""
-    export KLDLOAD_ROOT_PART=""
-
-    _ok "Storage"     "Manual — rpool created by user"
-  else
-    _info "▸  Wiping and partitioning ${KLDLOAD_DISK}..."
-    k_install_zfs_storage
-    export KLDLOAD_PART_ROOT="${KLDLOAD_PART_ROOT:-${KLDLOAD_ROOT_PART:-}}"
-    export KLDLOAD_ROOT_PART="${KLDLOAD_ROOT_PART:-${KLDLOAD_PART_ROOT:-}}"
-    export KLDLOAD_PART_EFI="${KLDLOAD_PART_EFI:-${KLDLOAD_EFI_PART:-}}"
-    export KLDLOAD_EFI_PART="${KLDLOAD_EFI_PART:-${KLDLOAD_PART_EFI:-}}"
-    _ok "Storage"     "ZFS pools created on ${KLDLOAD_DISK}"
-  fi
-
-  _info "▸  Bootstrapping ${KLDLOAD_DISTRO:-centos} base system (this takes a few minutes)..."
-  # Explicit return-code check — _k_bootstrap_dnf disables errexit (set +e) inside
-  # the chroot catchup block and never restores it, so a bare `k_bootstrap_base`
-  # call would silently swallow FATAL `return 1` paths and let the installer
-  # report "Complete" while the target is half-built (no admin user, no manifest,
-  # no zfs module for the boot kernel). Caught 2026-05-12 on F44 zfslab install:
-  # DKMS verify fired correctly, return-code was lost, install "succeeded",
-  # target refused to boot. Two layers of belt-and-suspenders here so a future
-  # regression in either lib- or script-side errexit handling can't reintroduce
-  # the silent-success failure mode.
-  if ! k_bootstrap_base; then
-    # Persist the bootstrap log into the target rpool BEFORE dying, so the
-    # diagnostics survive the live env's volatile rootfs (every reboot wipes
-    # /var/log/installer on the live ISO). Without this step we have no
-    # forensic trail of which FATAL guard fired — exactly what bit us on
-    # 2026-05-12. Two destinations: rpool root (for SREs probing from a
-    # rescue boot) and a fixed path under /target/root for ssh-from-the-
-    # live-env access without re-mounting.
-    if [[ -d "${KLDLOAD_TARGET_MNT}" ]]; then
-      mkdir -p "${KLDLOAD_TARGET_MNT}/root/kldload-install-logs" 2>/dev/null
-      cp -a "${KLDLOAD_LOG_DIR}"/. "${KLDLOAD_TARGET_MNT}/root/kldload-install-logs/" 2>/dev/null || true
-      cp -a "${KLDLOAD_LOG_DIR}/bootstrap.log" "${KLDLOAD_TARGET_MNT}/bootstrap.log.failure" 2>/dev/null || true
-    fi
-    _info ""
-    _info "  ╔═══════════════════════════════════════════════════════════╗"
-    _info "  ║  BOOTSTRAP FAILED — install ABORTED before finalization   ║"
-    _info "  ║                                                           ║"
-    _info "  ║  Logs preserved at:                                       ║"
-    _info "  ║    • /var/log/installer/bootstrap.log    (live ISO)       ║"
-    _info "  ║    • /target/root/kldload-install-logs/  (target rpool)   ║"
-    _info "  ║    • /target/bootstrap.log.failure       (target rpool)   ║"
-    _info "  ║                                                           ║"
-    _info "  ║  Common FATAL causes (search the log for 'FATAL'):        ║"
-    _info "  ║    • ZFS DKMS build for target kernel failed              ║"
-    _info "  ║    • dnf pass 3 (zfs / zfs-dkms / zfs-dracut) failed      ║"
-    _info "  ║    • initramfs rebuild missing extra/zfs.ko               ║"
-    _info "  ║                                                           ║"
-    _info "  ║  Do NOT reboot — the target will not boot.                ║"
-    _info "  ╚═══════════════════════════════════════════════════════════╝"
-    k_die "Bootstrap failed — install aborted (see /var/log/installer/bootstrap.log)"
-  fi
-  _ok "Bootstrap"   "${KLDLOAD_DISTRO:-centos} base installed"
-
-  # Write install manifest via the k_write_manifest function (defined earlier)
-  # which includes all flags: AI, eBPF, NVIDIA, WireGuard, etc.
-  k_write_manifest
-  k_log "Install manifest written to ${KLDLOAD_TARGET_MNT}/etc/kldload/install-manifest.env"
-
-  _info "▸  Configuring network..."
-  k_configure_network
-  _ok "Network"     "${KLDLOAD_NET_METHOD:-dhcp}"
-
-  _info "▸  Applying security settings..."
-  k_configure_security
-  _ok "Security"    "SSH hardened, APT holds set"
-
-  _info "▸  Installing profile packages (${KLDLOAD_PROFILE:-server})..."
-  k_apply_profile
-  k_install_tools
-  _ok "Profile"     "${KLDLOAD_PROFILE:-server}"
-
-  _info "▸  Finalising system..."
-  k_write_install_manifest
-  k_seed_ca
-  k_enable_firstboot
-
-  # Copy live session state DB to target if it exists
-  if [[ -f "/var/lib/kldload/state.db" ]]; then
-    k_log "Copying live session state.db to target..."
-    mkdir -p "${KLDLOAD_TARGET_MNT}/var/lib/kldload"
-    cp "/var/lib/kldload/state.db" "${KLDLOAD_TARGET_MNT}/var/lib/kldload/state.db"
-  fi
-
-  _info "▸  Taking factory snapshot..."
-  local _snap_ts
-  _snap_ts=$(date -u +%Y%m%dT%H%M%SZ)
-  zfs snapshot -r "rpool@install-${_snap_ts}" 2>/dev/null || true
-  zfs snapshot -r "bpool@install-${_snap_ts}" 2>/dev/null || true
-  _ok "Snapshot"    "rpool@install-${_snap_ts}"
-
-  # ── Bootloader — write EFI files + initramfs (pool still mounted) ──────
-  # Defensive remount: something during pass 3 / catchup sometimes
-  # exports rpool — possibly zfs-dkms's %post triggering systemd zfs
-  # services, or systemctl preset-all enabling zfs-import-cache that
-  # re-imports without altroot. By the time we reach the bootloader
-  # stage rpool may be exported and /target is just an empty mountpoint.
-  # Without re-importing, bootloader.sh writes land into the live env's
-  # filesystem instead of the target's, and the install reports ✔ but
-  # the disk is empty at boot.
-  # Two cases to handle:
-  #   (a) rpool exported entirely — `zpool list rpool` returns non-zero
-  #   (b) rpool imported but BE dataset NOT mounted at /target — pool
-  #       is listed but mountpoint -q /target returns non-zero
-  if ! zpool list rpool >/dev/null 2>&1; then
-    k_log "rpool got exported during install — re-importing with altroot=${KLDLOAD_TARGET_MNT}"
-    zpool import -f -N -R "${KLDLOAD_TARGET_MNT}" rpool 2>&1 || true
-  fi
-  if ! mountpoint -q "${KLDLOAD_TARGET_MNT}" 2>/dev/null; then
-    k_log "BE dataset not mounted at ${KLDLOAD_TARGET_MNT} — mounting now"
-    local _be
-    _be=$(zfs list -H -o name 2>/dev/null | grep -E '^rpool/ROOT/[^/]+$' | head -1)
-    [[ -n "$_be" ]] && zfs mount "$_be" 2>&1 || true
-    zfs mount -a 2>&1 || true
-  fi
-  mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
-  if ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
-    if [[ -n "${KLDLOAD_PART_EFI:-}" && -b "${KLDLOAD_PART_EFI}" ]]; then
-      k_log "Re-mounting EFI partition (${KLDLOAD_PART_EFI}) at ${KLDLOAD_TARGET_MNT}/boot/efi for bootloader stage"
-      mount "${KLDLOAD_PART_EFI}" "${KLDLOAD_TARGET_MNT}/boot/efi" 2>&1 || true
-    fi
-  fi
-  # Hard verify — refuse to proceed if either the pool isn't mounted
-  # at /target OR the EFI partition isn't really mounted at /target/
-  # boot/efi. Both must hold or bootloader writes go nowhere useful.
-  if ! mountpoint -q "${KLDLOAD_TARGET_MNT}" 2>/dev/null; then
-    _err "Target rpool is NOT mounted at ${KLDLOAD_TARGET_MNT} — install state corrupt, aborting"
-    return 1
-  fi
-  if ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
-    _err "EFI partition is NOT mounted at ${KLDLOAD_TARGET_MNT}/boot/efi — refusing to write boot files into the rpool dataset"
-    return 1
-  fi
-  k_install_bootloader
-  case "${KLDLOAD_DISTRO:-}" in
-    freebsd|ghostbsd) _ok "Bootloader"  "loader.efi + EFI registered" ;;
-    openbsd)          _ok "Bootloader"  "OpenBSD bootloader + EFI registered" ;;
-    *)                _ok "Bootloader"  "ZFSBootMenu + EFI registered" ;;
-  esac
-
-  # Removed: the sbverify post-check that lived here. It assumed
-  # /boot/efi/EFI/BOOT/grubx64.efi would be our MOK-signed ZFSBootMenu.
-  # The b3ec0ba bootloader architecture uses the DISTRO-signed grubx64.efi
-  # (Red-Hat-signed) as the second-stage for shim, and boots the kernel
-  # directly from ESP — ZBM is only an optional boot-env-selection tool
-  # at /EFI/zbm/. A MOK-based sbverify against distro-signed grub always
-  # returns false-negative, which made every SB install trigger the
-  # scary yellow "not safe to enable" banner unnecessarily.
-  #
-  # Under the current chain (firmware → shim → distro-grub → kernel →
-  # zfs.ko), the only thing we actually sign with MOK is zfs.ko via
-  # DKMS sign_tool — that's handled inside k_bootstrap_base and the
-  # DKMS build itself. No install-time sbverify of boot binaries
-  # needed; boot chain trust is the distro's problem, our concern is
-  # that zfs.ko loads under SB, which the DKMS sign step guarantees.
-
-  # ── Image export — AFTER bootloader so image includes ZFSBootMenu ──────
-  # BEFORE pool finalization so qemu-img can read the block device
-  local export_fmt="${KLDLOAD_EXPORT_FORMAT:-none}"
-  local _ename="kldload-${KLDLOAD_DISTRO:-centos}-${KLDLOAD_PROFILE:-server}-${KLDLOAD_HOSTNAME:-kldload}-$(date -u +%Y%m%d)"
-  local _export_path=""
-
-  if [[ "${export_fmt}" != "none" && -n "${export_fmt}" ]]; then
-    # ── Seal the image for cloning (cloud-init / Packer ready) ──────────
-    _info "▸  Sealing image for cloning..."
-    k_seal_image_for_clone
-    _ok "Sealed"     "machine-id cleared, SSH host keys removed, cloud-init enabled"
-
-    _info "▸  Exporting disk image (${export_fmt}) — this may take a few minutes..."
-
-    # Unbind chroot mounts and export pools BEFORE qemu-img reads the disk
-    k_unbind_chroot_mounts
-    sync || true
-    zpool export bpool 2>/dev/null || true
-    zpool export rpool 2>/dev/null || true
-    sleep 1
-
-    # Pools exported — qemu-img reads the raw block device, writes compressed to /tmp
-    local _tmp_export="/tmp/kldload-export"
-    mkdir -p "${_tmp_export}"
-
-    if KEXPORT_NAME="${_ename}" kexport "${KLDLOAD_DISK}" "${export_fmt}" "${_tmp_export}"; then
-      _export_path="${_tmp_export}/${_ename}.${export_fmt}"
-      local _size
-      _size="$(du -sh "${_export_path}" 2>/dev/null | cut -f1)"
-      _ok "Export" "${_ename}.${export_fmt} (${_size})"
-
-      # ── SCP to remote host if configured ────────────────────────────
-      local _scp_host="${KLDLOAD_EXPORT_SCP_HOST:-}"
-      local _scp_user="${KLDLOAD_EXPORT_SCP_USER:-root}"
-      local _scp_path="${KLDLOAD_EXPORT_SCP_PATH:-/root/}"
-      local _scp_key="${KLDLOAD_EXPORT_SCP_KEY:-}"
-      local _scp_pass="${KLDLOAD_EXPORT_SCP_PASS:-}"
-
-      if [[ -n "${_scp_host}" ]]; then
-        _info "▸  Uploading image to ${_scp_user}@${_scp_host}:${_scp_path} ..."
-        local _scp_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
-        local _scp_cmd=(scp)
-
-        if [[ -n "${_scp_key}" && -f "${_scp_key}" ]]; then
-          # Key-based auth
-          _scp_opts+=(-i "${_scp_key}")
-        elif [[ -n "${_scp_pass}" ]]; then
-          # Password auth via sshpass
-          if command -v sshpass >/dev/null 2>&1; then
-            _scp_cmd=(sshpass -p "${_scp_pass}" scp)
-          else
-            _warn "sshpass not available — trying key-based auth"
-          fi
+    mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
+    if ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
+        if [[ -n "${KLDLOAD_PART_EFI:-}" && -b "${KLDLOAD_PART_EFI}" ]]; then
+            k_log "Re-mounting EFI partition (${KLDLOAD_PART_EFI}) at ${KLDLOAD_TARGET_MNT}/boot/efi for bootloader stage"
+            mount "${KLDLOAD_PART_EFI}" "${KLDLOAD_TARGET_MNT}/boot/efi" 2>&1 || true
         fi
+    fi
+    # Hard verify — refuse to proceed if either the pool isn't mounted
+    # at /target OR the EFI partition isn't really mounted at /target/
+    # boot/efi. Both must hold or bootloader writes go nowhere useful.
+    if ! mountpoint -q "${KLDLOAD_TARGET_MNT}" 2>/dev/null; then
+        _err "Target rpool is NOT mounted at ${KLDLOAD_TARGET_MNT} — install state corrupt, aborting"
+        return 1
+    fi
+    if ! mountpoint -q "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null; then
+        _err "EFI partition is NOT mounted at ${KLDLOAD_TARGET_MNT}/boot/efi — refusing to write boot files into the rpool dataset"
+        return 1
+    fi
+    k_install_bootloader
+    case "${KLDLOAD_DISTRO:-}" in
+    freebsd | ghostbsd) _ok "Bootloader" "loader.efi + EFI registered" ;;
+    openbsd) _ok "Bootloader" "OpenBSD bootloader + EFI registered" ;;
+    *) _ok "Bootloader" "ZFSBootMenu + EFI registered" ;;
+    esac
 
-        if "${_scp_cmd[@]}" "${_scp_opts[@]}" "${_export_path}" "${_scp_user}@${_scp_host}:${_scp_path}"; then
-          _ok "Upload"  "${_ename}.${export_fmt} → ${_scp_user}@${_scp_host}:${_scp_path}"
+    # Removed: the sbverify post-check that lived here. It assumed
+    # /boot/efi/EFI/BOOT/grubx64.efi would be our MOK-signed ZFSBootMenu.
+    # The b3ec0ba bootloader architecture uses the DISTRO-signed grubx64.efi
+    # (Red-Hat-signed) as the second-stage for shim, and boots the kernel
+    # directly from ESP — ZBM is only an optional boot-env-selection tool
+    # at /EFI/zbm/. A MOK-based sbverify against distro-signed grub always
+    # returns false-negative, which made every SB install trigger the
+    # scary yellow "not safe to enable" banner unnecessarily.
+    #
+    # Under the current chain (firmware → shim → distro-grub → kernel →
+    # zfs.ko), the only thing we actually sign with MOK is zfs.ko via
+    # DKMS sign_tool — that's handled inside k_bootstrap_base and the
+    # DKMS build itself. No install-time sbverify of boot binaries
+    # needed; boot chain trust is the distro's problem, our concern is
+    # that zfs.ko loads under SB, which the DKMS sign step guarantees.
+
+    # ── Image export — AFTER bootloader so image includes ZFSBootMenu ──────
+    # BEFORE pool finalization so qemu-img can read the block device
+    local export_fmt="${KLDLOAD_EXPORT_FORMAT:-none}"
+    local _ename="kldload-${KLDLOAD_DISTRO:-centos}-${KLDLOAD_PROFILE:-server}-${KLDLOAD_HOSTNAME:-kldload}-$(date -u +%Y%m%d)"
+    local _export_path=""
+
+    if [[ "${export_fmt}" != "none" && -n "${export_fmt}" ]]; then
+        # ── Seal the image for cloning (cloud-init / Packer ready) ──────────
+        _info "▸  Sealing image for cloning..."
+        k_seal_image_for_clone
+        _ok "Sealed" "machine-id cleared, SSH host keys removed, cloud-init enabled"
+
+        _info "▸  Exporting disk image (${export_fmt}) — this may take a few minutes..."
+
+        # Unbind chroot mounts and export pools BEFORE qemu-img reads the disk
+        k_unbind_chroot_mounts
+        sync || true
+        zpool export bpool 2>/dev/null || true
+        zpool export rpool 2>/dev/null || true
+        sleep 1
+
+        # Pools exported — qemu-img reads the raw block device, writes compressed to /tmp
+        local _tmp_export="/tmp/kldload-export"
+        mkdir -p "${_tmp_export}"
+
+        if KEXPORT_NAME="${_ename}" kexport "${KLDLOAD_DISK}" "${export_fmt}" "${_tmp_export}"; then
+            _export_path="${_tmp_export}/${_ename}.${export_fmt}"
+            local _size
+            _size="$(du -sh "${_export_path}" 2>/dev/null | cut -f1)"
+            _ok "Export" "${_ename}.${export_fmt} (${_size})"
+
+            # ── SCP to remote host if configured ────────────────────────────
+            local _scp_host="${KLDLOAD_EXPORT_SCP_HOST:-}"
+            local _scp_user="${KLDLOAD_EXPORT_SCP_USER:-root}"
+            local _scp_path="${KLDLOAD_EXPORT_SCP_PATH:-/root/}"
+            local _scp_key="${KLDLOAD_EXPORT_SCP_KEY:-}"
+            local _scp_pass="${KLDLOAD_EXPORT_SCP_PASS:-}"
+
+            if [[ -n "${_scp_host}" ]]; then
+                _info "▸  Uploading image to ${_scp_user}@${_scp_host}:${_scp_path} ..."
+                local _scp_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+                local _scp_cmd=(scp)
+
+                if [[ -n "${_scp_key}" && -f "${_scp_key}" ]]; then
+                    # Key-based auth
+                    _scp_opts+=(-i "${_scp_key}")
+                elif [[ -n "${_scp_pass}" ]]; then
+                    # Password auth via sshpass
+                    if command -v sshpass >/dev/null 2>&1; then
+                        _scp_cmd=(sshpass -p "${_scp_pass}" scp)
+                    else
+                        _warn "sshpass not available — trying key-based auth"
+                    fi
+                fi
+
+                if "${_scp_cmd[@]}" "${_scp_opts[@]}" "${_export_path}" "${_scp_user}@${_scp_host}:${_scp_path}"; then
+                    _ok "Upload" "${_ename}.${export_fmt} → ${_scp_user}@${_scp_host}:${_scp_path}"
+                else
+                    _warn "SCP failed — image saved locally at ${_export_path}"
+                fi
+            else
+                _info "    Image saved to: ${_export_path}"
+                _info "    Retrieve via: scp root@<this-machine>:${_export_path} ."
+            fi
         else
-          _warn "SCP failed — image saved locally at ${_export_path}"
+            _warn "Export failed — you can run manually: sudo kexport ${KLDLOAD_DISK} ${export_fmt}"
         fi
-      else
-        _info "    Image saved to: ${_export_path}"
-        _info "    Retrieve via: scp root@<this-machine>:${_export_path} ."
-      fi
-    else
-      _warn "Export failed — you can run manually: sudo kexport ${KLDLOAD_DISK} ${export_fmt}"
+
+        k_log "Install + export complete"
+        k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
+        sync || true
+        return
     fi
 
-    k_log "Install + export complete"
-    k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
-    sync || true
-    return
-  fi
-
-  # ── AI Assistant setup (if enabled) ──────────────────────────────────────
-  # Install-time Ollama setup has been removed. Running curl|chroot bash
-  # from the installer fails on real hardware because the target chroot
-  # lacks /etc/resolv.conf and a fully-wired dynamic linker path (exit 127
-  # "bash: No such file or directory"). Defer the whole AI bring-up to
-  # kldload-firstboot — it runs after the target has booted into a real
-  # kernel with networking, systemd, DNS, and full libc. The Ollama
-  # darksite (when present) makes firstboot essentially offline too.
-  if [[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]; then
-    k_log "AI setup deferred to first boot (kldload-firstboot handles Ollama install + model pull + Bob creation)"
-  fi
-
-  # Target mount point — needed for MOK enrollment, log copy, and smoke test
-  local target="${KLDLOAD_TARGET_MNT:-/target}"
-
-  # ── MOK enrollment for Secure Boot (opt-in only) ─────────────────────────
-  # Run mokutil from the LIVE environment (not chroot) — the live ISO has
-  # mokutil and access to EFI vars. The target's mokutil may not be installed
-  # yet but that doesn't matter — MOK enrollment is an EFI firmware operation
-  # that persists in NVRAM, not on disk. Gated on KLDLOAD_ENABLE_SECURE_BOOT
-  # AND the presence of mok.der (belt + suspenders: if SB wasn't opted in,
-  # MOK generation was skipped above, so mok.der won't exist anyway).
-  if _secure_boot_enabled && [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
-    if [[ -d /sys/firmware/efi/efivars ]] && command -v mokutil >/dev/null 2>&1; then
-      # Use a fixed password "kldload" — consistent, memorable, documented.
-      # Random passwords caused confusion and required out-of-band password
-      # delivery. The MOK password is only used once at MokManager and the
-      # private key (mok.key) is the real secret, not the enrollment password.
-      local _mok_pass="kldload"
-
-      # Check if this exact key is already enrolled (re-installs with same ISO)
-      if mokutil --test-key "${target}/var/lib/dkms/mok.der" 2>/dev/null | grep -qi 'already enrolled'; then
-        _ok "MOK enrollment" "key already enrolled — Secure Boot ready"
-      else
-        printf '%s\n%s\n' "${_mok_pass}" "${_mok_pass}" | \
-          mokutil --ignore-keyring --import "${target}/var/lib/dkms/mok.der" 2>/dev/null && \
-          _ok "MOK enrollment" "queued — on first boot select: Enroll MOK → password: kldload" || \
-          _ok "MOK enrollment" "skipped (mokutil failed — enroll manually after boot)"
-      fi
-
-      mkdir -p "${target}/root/kldload-install-logs"
-      echo "MOK_PASSWORD=${_mok_pass}" > "${target}/root/kldload-install-logs/mok-password.txt"
-      chmod 0600 "${target}/root/kldload-install-logs/mok-password.txt"
-    else
-      _ok "MOK enrollment" "skipped (no EFI vars — non-EFI boot)"
+    # ── AI Assistant setup (if enabled) ──────────────────────────────────────
+    # Install-time Ollama setup has been removed. Running curl|chroot bash
+    # from the installer fails on real hardware because the target chroot
+    # lacks /etc/resolv.conf and a fully-wired dynamic linker path (exit 127
+    # "bash: No such file or directory"). Defer the whole AI bring-up to
+    # kldload-firstboot — it runs after the target has booted into a real
+    # kernel with networking, systemd, DNS, and full libc. The Ollama
+    # darksite (when present) makes firstboot essentially offline too.
+    if [[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]; then
+        k_log "AI setup deferred to first boot (kldload-firstboot handles Ollama install + model pull + Bob creation)"
     fi
-  fi
 
-  # ── Copy install logs to target for post-install debugging ──────────────
-  if [[ -d /var/log/installer ]]; then
-    mkdir -p "${target}/root/kldload-install-logs"
-    cp -r /var/log/installer/* "${target}/root/kldload-install-logs/" 2>/dev/null || true
-    _ok "Install logs" "copied to /root/kldload-install-logs/"
-  fi
+    # Target mount point — needed for MOK enrollment, log copy, and smoke test
+    local target="${KLDLOAD_TARGET_MNT:-/target}"
 
-  # ── Schedule firstboot MOK enrollment — runs on first boot with EFI vars available ──
-  if [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
-    cat > "${target}/etc/systemd/system/kldload-mok-enroll.service" <<'MOKENROLL'
+    # ── MOK enrollment for Secure Boot (opt-in only) ─────────────────────────
+    # Run mokutil from the LIVE environment (not chroot) — the live ISO has
+    # mokutil and access to EFI vars. The target's mokutil may not be installed
+    # yet but that doesn't matter — MOK enrollment is an EFI firmware operation
+    # that persists in NVRAM, not on disk. Gated on KLDLOAD_ENABLE_SECURE_BOOT
+    # AND the presence of mok.der (belt + suspenders: if SB wasn't opted in,
+    # MOK generation was skipped above, so mok.der won't exist anyway).
+    if _secure_boot_enabled && [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
+        if [[ -d /sys/firmware/efi/efivars ]] && command -v mokutil >/dev/null 2>&1; then
+            # Use a fixed password "kldload" — consistent, memorable, documented.
+            # Random passwords caused confusion and required out-of-band password
+            # delivery. The MOK password is only used once at MokManager and the
+            # private key (mok.key) is the real secret, not the enrollment password.
+            local _mok_pass="kldload"
+
+            # Check if this exact key is already enrolled (re-installs with same ISO)
+            if mokutil --test-key "${target}/var/lib/dkms/mok.der" 2>/dev/null | grep -qi 'already enrolled'; then
+                _ok "MOK enrollment" "key already enrolled — Secure Boot ready"
+            else
+                printf '%s\n%s\n' "${_mok_pass}" "${_mok_pass}" |
+                    mokutil --ignore-keyring --import "${target}/var/lib/dkms/mok.der" 2>/dev/null &&
+                    _ok "MOK enrollment" "queued — on first boot select: Enroll MOK → password: kldload" ||
+                    _ok "MOK enrollment" "skipped (mokutil failed — enroll manually after boot)"
+            fi
+
+            mkdir -p "${target}/root/kldload-install-logs"
+            echo "MOK_PASSWORD=${_mok_pass}" >"${target}/root/kldload-install-logs/mok-password.txt"
+            chmod 0600 "${target}/root/kldload-install-logs/mok-password.txt"
+        else
+            _ok "MOK enrollment" "skipped (no EFI vars — non-EFI boot)"
+        fi
+    fi
+
+    # ── Copy install logs to target for post-install debugging ──────────────
+    if [[ -d /var/log/installer ]]; then
+        mkdir -p "${target}/root/kldload-install-logs"
+        cp -r /var/log/installer/* "${target}/root/kldload-install-logs/" 2>/dev/null || true
+        _ok "Install logs" "copied to /root/kldload-install-logs/"
+    fi
+
+    # ── Schedule firstboot MOK enrollment — runs on first boot with EFI vars available ──
+    if [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
+        cat >"${target}/etc/systemd/system/kldload-mok-enroll.service" <<'MOKENROLL'
 [Unit]
 Description=kldload MOK key enrollment for Secure Boot
 After=local-fs.target
@@ -2183,13 +2196,13 @@ StandardError=journal+console
 [Install]
 WantedBy=multi-user.target
 MOKENROLL
-    ln -sf /etc/systemd/system/kldload-mok-enroll.service \
-      "${target}/etc/systemd/system/multi-user.target.wants/kldload-mok-enroll.service" 2>/dev/null || true
-    _ok "MOK enrollment" "scheduled for first boot (password: kldload)"
-  fi
+        ln -sf /etc/systemd/system/kldload-mok-enroll.service \
+            "${target}/etc/systemd/system/multi-user.target.wants/kldload-mok-enroll.service" 2>/dev/null || true
+        _ok "MOK enrollment" "scheduled for first boot (password: kldload)"
+    fi
 
-  # ── Schedule firstboot smoke test — runs after first reboot, saves report ──
-  cat > "${target}/etc/systemd/system/kldload-smoke-firstboot.service" <<'SMOKEFB'
+    # ── Schedule firstboot smoke test — runs after first reboot, saves report ──
+    cat >"${target}/etc/systemd/system/kldload-smoke-firstboot.service" <<'SMOKEFB'
 [Unit]
 Description=kldload post-install smoke test
 # Run AFTER autodeploy + klab-firstboot finish, not in parallel with them.
@@ -2227,17 +2240,17 @@ TimeoutStartSec=6000
 [Install]
 WantedBy=multi-user.target
 SMOKEFB
-  ln -sf /etc/systemd/system/kldload-smoke-firstboot.service \
-    "${target}/etc/systemd/system/multi-user.target.wants/kldload-smoke-firstboot.service" 2>/dev/null || true
-  _ok "Smoke test" "scheduled for first boot → /root/kldload-smoke-report.txt"
+    ln -sf /etc/systemd/system/kldload-smoke-firstboot.service \
+        "${target}/etc/systemd/system/multi-user.target.wants/kldload-smoke-firstboot.service" 2>/dev/null || true
+    _ok "Smoke test" "scheduled for first boot → /root/kldload-smoke-report.txt"
 
-  # ── Finalize — unbind chroot, export pools (LAST step) ─────────────────
-  k_finalize_bootloader
-  _ok "Finalized"   "Pools exported, ready to reboot"
+    # ── Finalize — unbind chroot, export pools (LAST step) ─────────────────
+    k_finalize_bootloader
+    _ok "Finalized" "Pools exported, ready to reboot"
 
-  k_log "Install complete"
-  k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
-  sync || true
+    k_log "Install complete"
+    k_poweroff_after_success "${export_fmt}" "${_ename}" "${_export_path}"
+    sync || true
 }
 
 main "$@"
