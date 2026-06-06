@@ -231,6 +231,50 @@ NETXML
 Check: sudo virsh net-info default && ip link show virbr0"
 }
 
+_ensure_cloud_init_pool() {
+  # The cloud-init pool is a `dir` pool over /var/lib/kldload/cloud-init/.
+  # Every golden + clone boot drops a per-VM cidata ISO there; libvirt
+  # needs to *know* about the directory as a pool, otherwise virt-install
+  # tries to auto-define one from the path. That auto-define collides
+  # with any pre-existing pool of the same name and aborts the whole
+  # bootstrap at the first --disk argument:
+  #
+  #   ERROR  --disk .../k8s-golden-cloud-init.iso,device=cdrom: Could not
+  #          define storage pool: pool 'cloud-init' already exists with
+  #          uuid bf3f8222-...
+  #
+  # The collision is invisible to operators because pools are persistent
+  # across reboots; once one is left behind by a partially-failed prior
+  # attempt the next bootstrap will hit this every time.
+  #
+  # Idempotent. Tolerates: pool absent, pool present with right path,
+  # pool present with wrong path (stale install).
+  local _name="cloud-init"
+  local _path="/var/lib/kldload/cloud-init"
+  mkdir -p "$_path"
+
+  if virsh -q -c qemu:///system pool-info "$_name" >/dev/null 2>&1; then
+    local _current
+    _current=$(virsh -c qemu:///system pool-dumpxml "$_name" 2>/dev/null \
+      | awk -F'[<>]' '/<path>/{print $3; exit}')
+    if [[ -n "$_current" && "$_current" != "$_path" ]]; then
+      warn "Stale '$_name' pool points to $_current — recreating at $_path"
+      virsh -c qemu:///system pool-destroy  "$_name" 2>/dev/null || true
+      virsh -c qemu:///system pool-undefine "$_name" 2>/dev/null || true
+    fi
+  fi
+
+  if ! virsh -q -c qemu:///system pool-info "$_name" >/dev/null 2>&1; then
+    virsh -c qemu:///system pool-define-as "$_name" dir --target "$_path" \
+      >/dev/null || die "Failed to define libvirt pool '$_name' at $_path"
+  fi
+  virsh -c qemu:///system pool-autostart "$_name" >/dev/null 2>&1 || true
+  if ! virsh -q -c qemu:///system pool-list | awk '{print $1}' | grep -qx "$_name"; then
+    virsh -c qemu:///system pool-start "$_name" >/dev/null \
+      || die "Failed to start libvirt pool '$_name'"
+  fi
+}
+
 
 usage() {
   cat <<'EOF'
@@ -783,16 +827,27 @@ NETCFG
       "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null
   rm -rf "$ci_dir"
 
+  # Refresh the cloud-init pool so libvirt sees the .iso we just wrote as
+  # a managed volume. Without this, --disk vol=cloud-init/... resolves to
+  # nothing and virt-install falls back to its path-based auto-pool code
+  # (the bug we're fixing). Refresh is cheap and idempotent.
+  virsh -c qemu:///system pool-refresh cloud-init >/dev/null 2>&1 || true
+
   # Boot the golden VM. The zvol is the primary disk (virtio for performance),
   # cloud-init ISO is a secondary CDROM. --import skips PXE/install — boot
   # directly from the cloud image's existing OS.
+  #
+  # The cdrom disk uses vol=<pool>/<name> instead of a raw path. The raw
+  # path form makes virt-install try to define a new storage pool for the
+  # iso's parent directory, which collides with the pre-existing
+  # 'cloud-init' pool by name and aborts before any VM is created.
   log "Booting golden VM..."
   virt-install \
     --name "${GOLDEN}" \
     --ram "${RAM}" --vcpus "${CPUS}" \
     --os-variant "$(case $HOST_DISTRO in debian) echo debian12;; ubuntu) echo ubuntu24.04;; centos) echo centos-stream9;; rhel) echo rhel9.0;; rocky) echo centos-stream9;; *) echo fedora-unknown;; esac)" \
     --disk "${zvol},bus=virtio,cache=none" \
-    --disk "${ci_iso},device=cdrom" \
+    --disk "vol=cloud-init/$(basename "$ci_iso"),device=cdrom" \
     --network bridge=virbr0,model=virtio \
     --graphics vnc,listen=0.0.0.0 \
     --noautoconsole \
@@ -1007,6 +1062,7 @@ cmd_bootstrap() {
   echo ""
 
   _ensure_libvirt_default_net
+  _ensure_cloud_init_pool
 
   # Step 0: Clean slate — destroy any existing cluster + golden
   # No half-states, no stale VMs, no orphaned zvols. Every bootstrap
@@ -1793,6 +1849,7 @@ cmd_status() {
 cmd_golden() {
   _BOOT_START=$(date +%s)
   _ensure_libvirt_default_net
+  _ensure_cloud_init_pool
   build_golden
 }
 
@@ -1815,6 +1872,7 @@ cmd_scale() {
   echo -e "${C}══════════════════════════════════════════════════════════════${N}"
 
   _ensure_libvirt_default_net
+  _ensure_cloud_init_pool
 
   # Verify the cluster exists. We need (a) the CP VM running, (b) a reachable
   # API server (either via kubectl on the host or via SSH-to-CP). Without
