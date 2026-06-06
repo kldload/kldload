@@ -948,8 +948,30 @@ FFPOLICY_WS
                     [[ -f "$_ic" ]] && install -m 0644 "$_ic" \
                         "${target}/${themedir}/$(basename "$_ic")"
                 done
-                chroot "${target}" gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
             fi
+
+            # Konsole's stock .desktop references Icon=utilities-terminal — a
+            # name that exists in Breeze (KDE) but NOT in Adwaita/hicolor on
+            # RHEL 10 / GNOME 50. Without a fallback in hicolor, the dock pin
+            # for Konsole renders as the default-app triangle (operator
+            # report .137 b628 2026-06-06). Konsole pulls in
+            # breeze-icon-theme as a dep, so the Breeze SVG is on the target
+            # — symlink it into hicolor's universal-fallback path. Cheap
+            # against icon-theme updates because the symlink targets the
+            # package-installed Breeze file rather than copying the bytes.
+            local _btv=""
+            for _bsz in 48 64 32 22 16; do
+                if [[ -f "${target}/usr/share/icons/breeze/apps/${_bsz}/utilities-terminal.svg" ]]; then
+                    _btv="${_bsz}"
+                    break
+                fi
+            done
+            if [[ -n "$_btv" ]] && [[ ! -e "${target}/usr/share/icons/hicolor/scalable/apps/utilities-terminal.svg" ]]; then
+                ln -sf "/usr/share/icons/breeze/apps/${_btv}/utilities-terminal.svg" \
+                    "${target}/usr/share/icons/hicolor/scalable/apps/utilities-terminal.svg"
+                k_log "icons: utilities-terminal symlinked from breeze (${_btv}px) — Konsole dock pin now resolves"
+            fi
+            chroot "${target}" gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
 
             # Curate stock launchers (package-owned, so patched on-target, idempotent):
             #   htop — a TUI; the Konsole/terminal tile covers it. Hide its GUI tile.
