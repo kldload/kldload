@@ -821,6 +821,26 @@ DCONFPROFILE
         done
         unset _r
     fi
+
+    # ── kldload-branded wallpapers ────────────────────────────────────────────
+    # /usr/share/backgrounds/kldload/{default,default-dark}.png — referenced by
+    # both 00-kldload-desktop dconf (picture-uri / picture-uri-dark) AND
+    # /etc/dconf/db/local.d/01-kldload-wallpaper that profiles.sh writes at
+    # install time. Without these PNGs in the rootfs, the new install asserted
+    # via k_install_tree "wallpapers: source dir missing" on .137-class boots
+    # (1.3.0-b631 / 14:06:58 install run). Hard-fail the build if the source
+    # dir is empty — these are load-bearing for the desktop visual identity.
+    if [[ -d /build/live-build/config/includes.chroot/usr/share/backgrounds/kldload ]]; then
+        mkdir -p "${ROOTFS}/usr/share/backgrounds/kldload"
+        cp /build/live-build/config/includes.chroot/usr/share/backgrounds/kldload/*.png \
+            "${ROOTFS}/usr/share/backgrounds/kldload/"
+        _wp_count=$(find "${ROOTFS}/usr/share/backgrounds/kldload" -maxdepth 1 -name '*.png' | wc -l)
+        ((_wp_count > 0)) || die "FATAL: wallpaper copy dropped all files in ${ROOTFS}/usr/share/backgrounds/kldload"
+        log "kldload wallpapers installed: ${_wp_count} png(s)"
+        unset _wp_count
+    else
+        die "FATAL: includes.chroot/usr/share/backgrounds/kldload missing — desktop has no branded wallpaper"
+    fi
     # Live-ISO-only overrides — idle=0 to keep the session up indefinitely
     # during install, no auto-lock, suppress GNOME welcome dialog. These
     # ride alongside (not on top of) the source files thanks to the 99-
