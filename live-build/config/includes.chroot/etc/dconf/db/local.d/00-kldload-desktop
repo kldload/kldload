@@ -62,17 +62,23 @@ auto-save-session=false
 system-service-activated=true
 
 # ── Mutter / window manager ───────────────────────────────────────────────────
-# overlay-key='' disables the Super (Windows) key from opening the Activities
-# overview. Reason: on Wayland sessions, Mutter's overlay-key handler grabs
-# Super on keydown but the keyup sometimes leaks through to the focused
-# window before Mutter swallows it. Games running under Wine/Proton then see
-# Super held during the next keypress — DDO's key-bind UI displayed "Windows
-# Q" instead of "Q" because Wine maps Super_L → VK_LWIN. Killing the overlay
-# binding stops the modifier leak. Users open Activities via the screen
-# corner hot-spot or the Activities button.
 [org/gnome/mutter]
 center-new-windows=true
-overlay-key=''
+
+# ── XWayland keyboard grab allowlist for Wine / Steam / gaming ───────────────
+# On Wayland, Mutter normally denies X11 keyboard grabs as a security boundary
+# (a hostile X11 client otherwise reads every keystroke). The side effect is
+# that Wine/Proton games can't fully capture Super_L, and Mutter's overlay-key
+# binding leaks the Super state into the focused game — DDO's key-bind UI
+# displayed "Windows Q" instead of "Q" because Wine maps Super_L → VK_LWIN.
+#
+# Allowing these specific patterns to grab the keyboard means while focused
+# they receive every key (including Super) directly, before Mutter sees it.
+# Activities still opens with Super-tap when no game is focused. Only known
+# game-class patterns get the grab — operators don't lose the Wayland
+# security boundary for the rest of the system.
+[org/gnome/mutter/wayland]
+xwayland-grab-access-rules=['gamescope', 'Steam', 'steam_app_*', '*.exe']
 
 [org/gnome/desktop/wm/preferences]
 button-layout='appmenu:minimize,maximize,close'
