@@ -210,6 +210,13 @@ PKGS+=(
     gnome-keyring firefox mesa-dri-drivers
     pipewire wireplumber
     adwaita-icon-theme google-noto-sans-fonts
+    # F44 branded wallpapers for the LIVE installer only. The installed
+    # system uses /usr/share/backgrounds/kldload/default{,-dark}.png set by
+    # 00-kldload-desktop dconf. The live ISO overrides those with the F44
+    # default via 99-kldload-live-session below so the operator sees Fedora
+    # branding during install, not kldload — clearer signal "you're booting
+    # the installer, not the installed system."
+    f44-backgrounds-gnome
     # Monospace fonts — without these, fc-match monospace falls back to
     # NotoSans (proportional), and the GNOME Terminal renders with
     # variable-width glyphs. F44 + GNOME 50 doesn't pull these as weak
@@ -863,6 +870,17 @@ sleep-inactive-battery-type='nothing'
 
 [org/gnome/shell]
 welcome-dialog-last-shown-version='99'
+
+# Wallpaper — show F44 branding on the LIVE installer (clear "you're in
+# the installer, not the installed system" signal) instead of inheriting
+# 00-kldload-desktop's kldload-branded background. Installed-system
+# wallpaper is unaffected — 00-kldload-desktop applies post-install.
+[org/gnome/desktop/background]
+picture-uri='file:///usr/share/backgrounds/f44/default/f44-01-day.jxl'
+picture-uri-dark='file:///usr/share/backgrounds/f44/default/f44-01-night.jxl'
+picture-options='zoom'
+primary-color='#241f31'
+secondary-color='#241f31'
 DCONFLIVE
     # Lock these settings so the user can't accidentally re-enable
     mkdir -p "${ROOTFS}/etc/dconf/db/local.d/locks"
