@@ -496,6 +496,22 @@ cmd_build() {
         done
     fi
 
+    # ── Stage 3.5: Builder image (auto-build if missing) ─────────────────
+    # `cmd_build` previously assumed the kldload-live-builder image was
+    # already in local storage — a hangover from when the only sensible
+    # `./deploy.sh build` invocation came after `builder-image` or `full`.
+    # On a clean podman storage (CI, fresh dev host, after `clean`),
+    # cmd_build would try `podman run kldload-live-builder:latest`,
+    # podman couldn't resolve the bare name (short-name-mode=enforcing,
+    # RHEL 10 default), and the run died with:
+    #   Error: short-name resolution enforced but cannot prompt without a TTY
+    # before the ISO step even started. Build the image inline if it's
+    # missing so `./deploy.sh build` works standalone.
+    if ! "$runtime" image exists "$BUILDER_IMAGE" 2>/dev/null; then
+        log "Builder image $BUILDER_IMAGE not found — building it now"
+        cmd_builder_image
+    fi
+
     # ── Stage 4: ISO assembly (runs inside builder container) ────────────
     # The builder container runs build-iso.sh which:
     #   - Bootstraps a CentOS 9 rootfs via dnf --installroot
