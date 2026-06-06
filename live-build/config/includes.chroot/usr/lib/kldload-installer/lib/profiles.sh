@@ -1201,6 +1201,27 @@ DCONF
     [[ -s "${target}/etc/dconf/db/local.d/50-kldload-installed-favorites" ]] ||
         k_die "dock pins: 50-kldload-installed-favorites was not written to ${target}"
 
+    # ── Lock the visual-identity keys so re-login doesn't drift ───────────────
+    # Operator on .137 b628 logged out, logged back in, and the carefully-set
+    # folder-children + favorites + wallpaper reset to GNOME 47 schema defaults
+    # — which on RHEL 10 are leftovers from upstream contributions
+    # ('System','Utilities','YaST','Pardus') intermixed with our intended
+    # 'system','apps' folders. Result: icons scattered, ghost folders, no
+    # kldload wallpaper. /etc/dconf/db/local.d/locks/ entries make these keys
+    # read-only at the user-session layer; gsettings set is rejected with
+    # "The key is not writable." Installed system gets the locked-in look
+    # every login.
+    mkdir -p "${target}/etc/dconf/db/local.d/locks"
+    cat >"${target}/etc/dconf/db/local.d/locks/kldload-desktop" <<'LOCKS'
+/org/gnome/desktop/app-folders/folder-children
+/org/gnome/desktop/background/picture-uri
+/org/gnome/desktop/background/picture-uri-dark
+/org/gnome/desktop/background/picture-options
+/org/gnome/desktop/interface/color-scheme
+/org/gnome/desktop/interface/gtk-theme
+/org/gnome/shell/favorite-apps
+LOCKS
+
     # ── Default browser → Chrome (RPM-family desktop only) ───────────────────────
     # /etc/xdg/mimeapps.list sets system-wide defaults that apply unless the
     # user override them in ~/.config/mimeapps.list. Operator feedback

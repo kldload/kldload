@@ -40,11 +40,18 @@ LOG_FILE=/var/log/kldload/autodeploy.log
 PHASE_FILE="${STATE_DIR}/current-phase"
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG_FILE")"
-touch "$LOG_FILE"; chmod 644 "$LOG_FILE"
+touch "$LOG_FILE"
+chmod 644 "$LOG_FILE"
 
-log()   { printf '[%(%F %T)T] [autodeploy] %s\n' -1 "$*" | tee -a "$LOG_FILE" >&2; }
-phase() { printf '%s\n' "$1" > "$PHASE_FILE"; log "PHASE: $1"; }
-mark()  { touch "${STATE_DIR}/$1-ready"; log "marker: $1-ready"; }
+log() { printf '[%(%F %T)T] [autodeploy] %s\n' -1 "$*" | tee -a "$LOG_FILE" >&2; }
+phase() {
+    printf '%s\n' "$1" >"$PHASE_FILE"
+    log "PHASE: $1"
+}
+mark() {
+    touch "${STATE_DIR}/$1-ready"
+    log "marker: $1-ready"
+}
 
 # ── Load install-time flags ───────────────────────────────────────────────────
 # Two files:
@@ -84,9 +91,9 @@ if [[ -z "$TEMPLATE" ]]; then
     # Legacy fall-back: reconstruct the template from the old env-var
     # combination so an existing 1.0.x install upgrading in place still
     # gets the right phases on the next autodeploy run.
-    if   [[ "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" || "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ]]; then
+    if [[ "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" || "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ]]; then
         TEMPLATE="zfslab"
-    elif [[ "${KLDLOAD_ENABLE_K8S:-0}"  == "1" || "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]]; then
+    elif [[ "${KLDLOAD_ENABLE_K8S:-0}" == "1" || "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]]; then
         TEMPLATE="k8s"
     elif [[ "${KLDLOAD_PROFILE:-}" == "kvm" ]]; then
         TEMPLATE="kvm"
@@ -94,10 +101,10 @@ if [[ -z "$TEMPLATE" ]]; then
 fi
 
 case "$TEMPLATE" in
-    k8s|klab|zfslab|devops|ai) WANT[k8s]=1 ;;
+k8s | klab | zfslab | devops | ai) WANT[k8s]=1 ;;
 esac
 case "$TEMPLATE" in
-    kvm|klab|zfslab|devops|ai) WANT[klab]=1 ;;
+kvm | klab | zfslab | devops | ai) WANT[klab]=1 ;;
 esac
 
 # Explicit env-var overrides (still honored for kickstart / smoke-test flows)
@@ -108,7 +115,14 @@ esac
 # K8S_BOOTSTRAP/KLAB flags silently ignored — the "K8s never came up on a
 # desktop install" gap (.147, 2026-06-02).
 [[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]] && WANT[k8s]=1
-[[ "${KLDLOAD_KLAB_ZFS_DEV:-0}"  == "1" ]] && WANT[klab]=1
+[[ "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ]] && WANT[klab]=1
+# Webui "Build all images" tile sets KLDLOAD_BUILD_IMAGES=1 in the install
+# manifest — operator on .137 b628 reported "I checked off build all images
+# in the gui when i installed.. my assumption was that that checkbox would
+# have indicated these images should have been built automatically on
+# install" but autodeploy ignored it because only KLAB_ZFS_DEV / template
+# triggered the klab phase. Manifest flag now maps to WANT[klab]=1 directly.
+[[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && WANT[klab]=1
 [[ "${KLDLOAD_KLAB_NO_AUTO:-0}" == "1" ]] && WANT[klab]=0
 
 # K8s cluster sizing — klab and k8s templates both land with a fully
@@ -118,14 +132,15 @@ esac
 # Caught 2026-05-17 on .142 — klab landed with 0 workers because the
 # prior default was conservative; user expected the full cluster.
 case "$TEMPLATE" in
-    k8s|klab|devops|ai)  K8S_WORKERS_DEFAULT=3 ;;
-    zfslab)              K8S_WORKERS_DEFAULT=0 ;;   # intentional — budget for ZFS test VMs
-    *)
-      # desktop/other: a lone control plane isn't a useful cluster. If the
-      # operator explicitly ticked the Kubernetes tile (K8S_BOOTSTRAP=1), give
-      # them the full 3-worker cluster like the k8s template — otherwise 0
-      # (no bootstrap was requested anyway). .147 2026-06-03 came up CP-only.
-      [[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]] && K8S_WORKERS_DEFAULT=3 || K8S_WORKERS_DEFAULT=0 ;;
+k8s | klab | devops | ai) K8S_WORKERS_DEFAULT=3 ;;
+zfslab) K8S_WORKERS_DEFAULT=0 ;; # intentional — budget for ZFS test VMs
+*)
+    # desktop/other: a lone control plane isn't a useful cluster. If the
+    # operator explicitly ticked the Kubernetes tile (K8S_BOOTSTRAP=1), give
+    # them the full 3-worker cluster like the k8s template — otherwise 0
+    # (no bootstrap was requested anyway). .147 2026-06-03 came up CP-only.
+    [[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]] && K8S_WORKERS_DEFAULT=3 || K8S_WORKERS_DEFAULT=0
+    ;;
 esac
 K8S_WORKERS="${KLDLOAD_K8S_WORKERS:-$K8S_WORKERS_DEFAULT}"
 
@@ -134,9 +149,9 @@ K8S_WORKERS="${KLDLOAD_K8S_WORKERS:-$K8S_WORKERS_DEFAULT}"
 # goldens. KLAB_GOLDEN_KIND used by phase 3 below to pick the right
 # subcommand and skip the irrelevant lineage.
 KLAB_GOLDEN_KIND="lean"
-if [[ "$TEMPLATE" == "zfslab" \
-      || "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" \
-      || "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" ]]; then
+if [[ "$TEMPLATE" == "zfslab" ||
+    "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ||
+    "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" ]]; then
     KLAB_GOLDEN_KIND="ztest"
 fi
 
@@ -169,9 +184,9 @@ systemctl is-active kldload-webui >/dev/null 2>&1 || systemctl start kldload-web
 if ! command -v ansible-playbook >/dev/null 2>&1; then
     log "[prereqs] ansible-playbook missing — installing ansible-core"
     if command -v dnf >/dev/null 2>&1; then
-        dnf install -y ansible-core >> "$LOG_FILE" 2>&1 || log "[prereqs] ansible-core install failed — K8s phase may fail"
+        dnf install -y ansible-core >>"$LOG_FILE" 2>&1 || log "[prereqs] ansible-core install failed — K8s phase may fail"
     elif command -v apt-get >/dev/null 2>&1; then
-        apt-get install -y ansible-core >> "$LOG_FILE" 2>&1 || log "[prereqs] ansible-core install failed"
+        apt-get install -y ansible-core >>"$LOG_FILE" 2>&1 || log "[prereqs] ansible-core install failed"
     fi
 fi
 
@@ -210,11 +225,11 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         #      directly to the exact ollama model string.
         _chat_model="${KLDLOAD_AI_MODEL:-}"
         if [[ -z "$_chat_model" ]]; then
-          case "${KLDLOAD_BOB_MODEL:-recommended}" in
+            case "${KLDLOAD_BOB_MODEL:-recommended}" in
             recommended) _chat_model="qwen3:14b" ;;
-            large)       _chat_model="qwen3:30b-a3b" ;;
-            *)           _chat_model="qwen3:14b" ;;
-          esac
+            large) _chat_model="qwen3:30b-a3b" ;;
+            *) _chat_model="qwen3:14b" ;;
+            esac
         fi
         # VRAM probe. Try nvidia-smi (dedicated NVIDIA GPU), fall back to
         # rocminfo (AMD), then DRM sysfs (Intel Arc / fallback). 0 GB means
@@ -248,7 +263,7 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         if lspci 2>/dev/null | grep -qi nvidia; then
             log "[ai] NVIDIA hardware detected — waiting up to 3 min for nvidia-smi (akmod-nvidia build)"
             for _i in $(seq 1 36); do
-                command -v nvidia-smi >/dev/null 2>&1 && \
+                command -v nvidia-smi >/dev/null 2>&1 &&
                     nvidia-smi -L 2>/dev/null | grep -q GPU && break
                 sleep 5
             done
@@ -260,11 +275,11 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         fi
         if command -v nvidia-smi >/dev/null 2>&1; then
             _vram_gb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)
-            _vram_gb=$(( ${_vram_gb:-0} / 1024 ))
+            _vram_gb=$((${_vram_gb:-0} / 1024))
         elif command -v rocminfo >/dev/null 2>&1; then
             # rocminfo prints bytes; take the largest local memory pool.
             _bytes=$(rocminfo 2>/dev/null | awk '/Size:.*\(.*\)/ {gsub(/[^0-9]/,"",$2); if ($2+0 > max) max=$2+0} END {print max+0}')
-            _vram_gb=$(( _bytes / 1024 / 1024 / 1024 ))
+            _vram_gb=$((_bytes / 1024 / 1024 / 1024))
         fi
         set -e
         # Restore ERR trap (only if we actually had one saved — fresh shells
@@ -296,8 +311,8 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         if [[ "$_bob_darksite" == "1" ]]; then
             _model_name="${_chat_model%%:*}"
             _model_tag="${_chat_model##*:}"
-            if [[ -d /root/darksite/ollama/models ]] && \
-               compgen -G "/root/darksite/ollama/models/manifests/registry.ollama.ai/library/${_model_name}/${_model_tag}" >/dev/null; then
+            if [[ -d /root/darksite/ollama/models ]] &&
+                compgen -G "/root/darksite/ollama/models/manifests/registry.ollama.ai/library/${_model_name}/${_model_tag}" >/dev/null; then
                 _darksite_has_model=1
                 log "[ai] darksite HIT: ${_chat_model} weights present under /root/darksite/ollama/"
             else
@@ -305,16 +320,16 @@ if [[ "${WANT[ai]}" == "1" ]]; then
             fi
         fi
         log "[ai] installing ollama runtime"
-        command -v ollama >/dev/null 2>&1 || \
-            curl -fsSL https://ollama.com/install.sh | sh >> "$LOG_FILE" 2>&1
+        command -v ollama >/dev/null 2>&1 ||
+            curl -fsSL https://ollama.com/install.sh | sh >>"$LOG_FILE" 2>&1
         # Rehydrate from darksite BEFORE first ollama start so the models
         # are already visible in /api/tags when serve comes up.
         if [[ "$_darksite_has_model" == "1" ]]; then
             mkdir -p /srv/ollama/models
             log "[ai] rehydrating /srv/ollama/models/ from darksite (air-gap path)"
-            rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ >>"$LOG_FILE" 2>&1 \
-                && log "[ai] darksite rehydrate ok" \
-                || log "[ai] WARNING: darksite rehydrate failed — ollama pull will need internet"
+            rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ >>"$LOG_FILE" 2>&1 &&
+                log "[ai] darksite rehydrate ok" ||
+                log "[ai] WARNING: darksite rehydrate failed — ollama pull will need internet"
             chown -R ollama:ollama /srv/ollama 2>/dev/null || true
         fi
         systemctl enable --now ollama 2>/dev/null || true
@@ -329,7 +344,7 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         # tab opens to an empty model dropdown.
         _pull_ok=0
         for _try in 1 2 3; do
-            ollama pull "${_chat_model}" >> "$LOG_FILE" 2>&1 || true
+            ollama pull "${_chat_model}" >>"$LOG_FILE" 2>&1 || true
             if curl -sf http://127.0.0.1:11434/api/tags 2>/dev/null | grep -q "\"name\":\"${_chat_model}\""; then
                 _pull_ok=1
                 log "[ai] model ${_chat_model} confirmed loaded (try ${_try})"
@@ -354,7 +369,7 @@ if [[ "${WANT[ai]}" == "1" ]]; then
             _ram_gb=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
             if [[ $_vram_gb -ge 10 ]] && [[ $_ram_gb -ge 16 ]]; then
                 log "[ai] KLDLOAD_PULL_VISION_MODEL=1 — pulling llama3.2-vision:11b"
-                ollama pull llama3.2-vision:11b >> "$LOG_FILE" 2>&1 || \
+                ollama pull llama3.2-vision:11b >>"$LOG_FILE" 2>&1 ||
                     log "[ai] vision pull failed — non-fatal"
             fi
         else
@@ -372,8 +387,8 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         # both are true, kick it explicitly so the RAG corpus is indexed
         # against the freshly-pulled model. `--no-block` keeps autodeploy from
         # waiting on the 1800s index TimeoutStartSec.
-        if [[ -f /usr/lib/systemd/system/kldload-rag-firstboot.service ]] \
-            && [[ ! -f /var/lib/kldload-rag/.first-index-done ]]; then
+        if [[ -f /usr/lib/systemd/system/kldload-rag-firstboot.service ]] &&
+            [[ ! -f /var/lib/kldload-rag/.first-index-done ]]; then
             log "[ai] kicking kldload-rag-firstboot.service (post-AI)"
             systemctl start --no-block kldload-rag-firstboot.service \
                 >>"$LOG_FILE" 2>&1 || log "[ai] rag-firstboot start failed (non-fatal)"
@@ -400,7 +415,7 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
         # to a third of host RAM each, hitting 30 vCPU / 51 GB on a 24-core
         # / 63 GB host. Fixed defaults in kube-cluster keep this bounded.
         log "[k8s] running kube-cluster bootstrap --workers ${K8S_WORKERS}"
-        if kube-cluster bootstrap --workers "${K8S_WORKERS}" >> /var/log/kldload/kube-bootstrap.log 2>&1; then
+        if kube-cluster bootstrap --workers "${K8S_WORKERS}" >>/var/log/kldload/kube-bootstrap.log 2>&1; then
             mark "k8s"
             log "[k8s] complete"
 
@@ -415,25 +430,25 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
             # autodeploy step here would fail with "cannot re-use a name".
             # Pre-uninstall (best-effort) so a re-run lands cleanly. Caught
             # .142 2026-05-17.
-            helm uninstall tetragon -n kube-system >> "$LOG_FILE" 2>&1 || true
+            helm uninstall tetragon -n kube-system >>"$LOG_FILE" 2>&1 || true
             _tetragon_tgz="/root/darksite/helm-charts/tetragon.tgz"
             if [[ -f "$_tetragon_tgz" ]]; then
                 helm install tetragon "$_tetragon_tgz" -n kube-system \
                     --set tetragon.enableProcessCred=true \
                     --set tetragon.enableProcessNs=true \
                     --set tetragonOperator.install=true \
-                    >> "$LOG_FILE" 2>&1 && log "[k8s] Tetragon installed (offline)" \
-                    || log "[k8s] Tetragon install failed — non-fatal"
+                    >>"$LOG_FILE" 2>&1 && log "[k8s] Tetragon installed (offline)" ||
+                    log "[k8s] Tetragon install failed — non-fatal"
             else
                 log "[k8s] Tetragon chart not in darksite — trying online helm repo"
-                helm repo add cilium https://helm.cilium.io/ >> "$LOG_FILE" 2>&1 || true
-                helm repo update >> "$LOG_FILE" 2>&1 || true
+                helm repo add cilium https://helm.cilium.io/ >>"$LOG_FILE" 2>&1 || true
+                helm repo update >>"$LOG_FILE" 2>&1 || true
                 helm install tetragon cilium/tetragon -n kube-system \
                     --set tetragon.enableProcessCred=true \
                     --set tetragon.enableProcessNs=true \
                     --set tetragonOperator.install=true \
-                    >> "$LOG_FILE" 2>&1 && log "[k8s] Tetragon installed (online)" \
-                    || log "[k8s] Tetragon install skipped — non-fatal"
+                    >>"$LOG_FILE" 2>&1 && log "[k8s] Tetragon installed (online)" ||
+                    log "[k8s] Tetragon install skipped — non-fatal"
             fi
 
             # ── ArgoCD — GitOps reconciler for the kldload demo workload ──
@@ -455,12 +470,12 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
             # so re-tuning the install doesn't require touching this
             # script.
             log "[k8s] installing ArgoCD (full server + UI + repo-server + controller + dex + redis + notifications)..."
-            helm uninstall argocd -n argocd >> "$LOG_FILE" 2>&1 || true
-            kubectl create namespace argocd >> "$LOG_FILE" 2>&1 || true
+            helm uninstall argocd -n argocd >>"$LOG_FILE" 2>&1 || true
+            kubectl create namespace argocd >>"$LOG_FILE" 2>&1 || true
             _argo_tgz="/root/darksite/helm-charts/argo-cd.tgz"
             _argo_values="/usr/local/share/kldload/argocd-values.yaml"
             _argo_helm_args=()
-            [[ -f "$_argo_values" ]] && _argo_helm_args+=( -f "$_argo_values" )
+            [[ -f "$_argo_values" ]] && _argo_helm_args+=(-f "$_argo_values")
             if [[ -f "$_argo_tgz" ]]; then
                 helm install argocd "$_argo_tgz" -n argocd \
                     "${_argo_helm_args[@]}" \
@@ -470,12 +485,12 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
                     --set applicationSet.enabled=true \
                     --set dex.enabled=true \
                     --wait --timeout 5m \
-                    >> "$LOG_FILE" 2>&1 && log "[k8s] ArgoCD installed (offline) — UI at https://10.100.10.31" \
-                    || log "[k8s] ArgoCD install failed — non-fatal"
+                    >>"$LOG_FILE" 2>&1 && log "[k8s] ArgoCD installed (offline) — UI at https://10.100.10.31" ||
+                    log "[k8s] ArgoCD install failed — non-fatal"
             else
                 log "[k8s] ArgoCD chart not in darksite — trying online helm repo"
-                helm repo add argo https://argoproj.github.io/argo-helm >> "$LOG_FILE" 2>&1 || true
-                helm repo update >> "$LOG_FILE" 2>&1 || true
+                helm repo add argo https://argoproj.github.io/argo-helm >>"$LOG_FILE" 2>&1 || true
+                helm repo update >>"$LOG_FILE" 2>&1 || true
                 helm install argocd argo/argo-cd -n argocd \
                     "${_argo_helm_args[@]}" \
                     --set server.service.type=LoadBalancer \
@@ -484,8 +499,8 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
                     --set applicationSet.enabled=true \
                     --set dex.enabled=true \
                     --wait --timeout 5m \
-                    >> "$LOG_FILE" 2>&1 && log "[k8s] ArgoCD installed (online) — UI at https://10.100.10.31" \
-                    || log "[k8s] ArgoCD install skipped — non-fatal"
+                    >>"$LOG_FILE" 2>&1 && log "[k8s] ArgoCD installed (online) — UI at https://10.100.10.31" ||
+                    log "[k8s] ArgoCD install skipped — non-fatal"
             fi
 
             # Surface the initial admin password to the webui by
@@ -498,7 +513,7 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
             if kubectl -n argocd get secret argocd-initial-admin-secret >/dev/null 2>&1; then
                 kubectl -n argocd get secret argocd-initial-admin-secret \
                     -o jsonpath='{.data.password}' | base64 -d \
-                    > /var/lib/kldload/argocd-admin-password 2>>"$LOG_FILE" || true
+                    >/var/lib/kldload/argocd-admin-password 2>>"$LOG_FILE" || true
                 chmod 0640 /var/lib/kldload/argocd-admin-password 2>/dev/null || true
                 chgrp kldload /var/lib/kldload/argocd-admin-password 2>/dev/null || true
                 log "[k8s] ArgoCD initial-admin password exposed at /var/lib/kldload/argocd-admin-password"
@@ -536,15 +551,15 @@ if [[ "${WANT[klab]}" == "1" ]]; then
             # the unit is 7200s; full sequence takes ~30-60 min on typical hw).
             # 1-hour poll budget here covers a reasonable real run; longer than
             # that and the operator should investigate manually.
-            _deadline=$(( $(date +%s) + 7200 ))
-            while (( $(date +%s) < _deadline )); do
+            _deadline=$(($(date +%s) + 7200))
+            while (($(date +%s) < _deadline)); do
                 [[ -f /var/lib/kldload/klab-firstboot-done ]] && break
                 # If klab-firstboot.service is no longer activating AND the
                 # done-marker hasn't appeared, the unit must have failed —
                 # don't poll forever. Check unit state every 30s.
-                if ! systemctl is-active --quiet klab-firstboot.service \
-                     && ! systemctl is-failed --quiet klab-firstboot.service \
-                     && [[ "$(systemctl is-active klab-firstboot.service 2>/dev/null)" != "activating" ]]; then
+                if ! systemctl is-active --quiet klab-firstboot.service &&
+                    ! systemctl is-failed --quiet klab-firstboot.service &&
+                    [[ "$(systemctl is-active klab-firstboot.service 2>/dev/null)" != "activating" ]]; then
                     log "[klab] klab-firstboot.service not running — proceeding without it"
                     break
                 fi
@@ -578,7 +593,7 @@ if [[ "${WANT[klab]}" == "1" ]]; then
             log "[klab] ztest already marked ready — skipping"
         else
             log "[klab] running klab golden-ztest all (ZFS test-lab lineage, ~60 min)"
-            if klab golden-ztest all >> /var/log/kldload/klab-firstboot.log 2>&1; then
+            if klab golden-ztest all >>/var/log/kldload/klab-firstboot.log 2>&1; then
                 mark "klab-ztest"
                 log "[klab] ztest goldens complete"
             else
@@ -615,12 +630,12 @@ if [[ $_all_ok -eq 1 ]]; then
     # expected K8s/klab but the bootstrap flag was 0 (e.g. a plain desktop
     # install enables the K8s *tools* but not the cluster). Spell out what's on
     # vs off, with the one command to add each, so a gap is never silent.
-    [[ "${WANT[ai]}"   == "1" ]] && log "    AI:   deployed" \
-                                  || log "    AI:   off — enable the Bob/AI tile at install"
-    [[ "${WANT[k8s]}"  == "1" ]] && log "    K8s:  deployed (${K8S_WORKERS} workers)" \
-                                  || log "    K8s:  off — to add now: kube-cluster bootstrap --workers 3"
-    [[ "${WANT[klab]}" == "1" ]] && log "    klab: deployed" \
-                                  || log "    klab: off — enable the klab option at install"
+    [[ "${WANT[ai]}" == "1" ]] && log "    AI:   deployed" ||
+        log "    AI:   off — enable the Bob/AI tile at install"
+    [[ "${WANT[k8s]}" == "1" ]] && log "    K8s:  deployed (${K8S_WORKERS} workers)" ||
+        log "    K8s:  off — to add now: kube-cluster bootstrap --workers 3"
+    [[ "${WANT[klab]}" == "1" ]] && log "    klab: deployed" ||
+        log "    klab: off — enable the klab option at install"
     log "══════════════════════════════════════════════════════════════"
 else
     phase "partial"
