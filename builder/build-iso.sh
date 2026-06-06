@@ -780,10 +780,46 @@ DCONFPROFILE
     if [[ -f /build/live-build/config/includes.chroot/etc/dconf/db/local.d/00-kldload-desktop ]]; then
         cp /build/live-build/config/includes.chroot/etc/dconf/db/local.d/00-kldload-desktop \
             "${ROOTFS}/etc/dconf/db/local.d/00-kldload-desktop"
+    else
+        die "FATAL: includes.chroot/etc/dconf/db/local.d/00-kldload-desktop missing — build dropped it"
     fi
     if [[ -f /build/live-build/config/includes.chroot/etc/dconf/db/local.d/01-kldload-terminal-default ]]; then
         cp /build/live-build/config/includes.chroot/etc/dconf/db/local.d/01-kldload-terminal-default \
             "${ROOTFS}/etc/dconf/db/local.d/01-kldload-terminal-default"
+    fi
+
+    # ── GTK 3 / GTK 4 dark-theme defaults ─────────────────────────────────────
+    # Plain GTK3/GTK4 apps don't read GNOME's color-scheme dconf key; they
+    # only honour gtk-3.0/settings.ini + gtk-4.0/settings.ini. Without these
+    # files in the rootfs, random app windows render against a white canvas
+    # on a kldload-dark desktop. .137 1.3.0-b625 shipped without them
+    # because nothing in this script copied that path. Hard-fail loudly if
+    # the source files are missing — they ARE in includes.chroot, so a miss
+    # means the bind mount or copy step is broken.
+    for _gtkdir in gtk-3.0 gtk-4.0; do
+        _src="/build/live-build/config/includes.chroot/etc/${_gtkdir}/settings.ini"
+        if [[ -f "$_src" ]]; then
+            mkdir -p "${ROOTFS}/etc/${_gtkdir}"
+            cp "$_src" "${ROOTFS}/etc/${_gtkdir}/settings.ini"
+        else
+            die "FATAL: $_src missing — GTK ${_gtkdir} dark theme defaults not shipped"
+        fi
+    done
+    unset _src
+
+    # ── Third-party RPM repos shipped in /etc/yum.repos.d/ ────────────────────
+    # google-chrome.repo lets dnf resolve google-chrome-stable at install
+    # time; without it, profiles.sh added Chrome to the dnf install list but
+    # dnf couldn't find the package and silently dropped it (1.3.0-b625
+    # shipped with .repo missing -> Chrome not installed -> firefox-esr
+    # still default in the dock).
+    if [[ -d /build/live-build/config/includes.chroot/etc/yum.repos.d ]]; then
+        mkdir -p "${ROOTFS}/etc/yum.repos.d"
+        for _r in /build/live-build/config/includes.chroot/etc/yum.repos.d/*.repo; do
+            [[ -f "$_r" ]] || continue
+            cp "$_r" "${ROOTFS}/etc/yum.repos.d/$(basename "$_r")"
+        done
+        unset _r
     fi
     # Live-ISO-only overrides — idle=0 to keep the session up indefinitely
     # during install, no auto-lock, suppress GNOME welcome dialog. These

@@ -1224,8 +1224,12 @@ DCONF
     chroot "${target}" dconf update 2>/dev/null || true
 
     # ── Custom .desktop launchers ───────────────────────────────────────────────
+    # kst-dashboard.desktop removed 2026-06-05 — operator feedback was that the
+    # launcher confused users (read as "btop-equivalent dashboard" and looked
+    # redundant against Bob + Grafana). The kst-dashboard binary stays under
+    # /usr/local/bin/ for terminal users; just no app-grid tile.
     mkdir -p "${target}/usr/share/applications"
-    for _dt in kst-dashboard.desktop ksnap.desktop kexport.desktop; do
+    for _dt in ksnap.desktop kexport.desktop; do
         [[ -f "/usr/share/applications/${_dt}" ]] &&
             cp "/usr/share/applications/${_dt}" "${target}/usr/share/applications/${_dt}"
     done
