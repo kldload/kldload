@@ -1165,6 +1165,11 @@ OSREL
 [org/gnome/shell]
 favorite-apps=['org.gnome.Nautilus.desktop', 'google-chrome.desktop', 'firefox.desktop', 'firefox-esr.desktop', 'org.kde.konsole.desktop']
 DCONF
+    # .135 + onyx both shipped without this file in the installed system —
+    # dock came up empty for fresh users. The heredoc won't fail on disk-full
+    # or missing parent dir; assert the write landed and is non-empty.
+    [[ -s "${target}/etc/dconf/db/local.d/50-kldload-installed-favorites" ]] ||
+        k_die "dock pins: 50-kldload-installed-favorites was not written to ${target}"
 
     # ── GDM login screen (dconf db + profile + config) ────────────────────────────
     if [[ -d /etc/dconf/db/gdm.d ]]; then
@@ -1226,9 +1231,16 @@ DCONF
     done
 
     # ── Wallpaper — set the distro's default background ───────────────────────
+    # k_install_tree fails the install if the wallpaper dir came up short.
+    # Previously a silent cp -r dropped /usr/share/backgrounds/kldload entirely
+    # on .135 — dconf still pointed at file:///usr/share/backgrounds/kldload/...
+    # and GNOME fell back to no-wallpaper. Operator never knew.
     if [[ -d /usr/share/backgrounds/kldload ]]; then
-        mkdir -p "${target}/usr/share/backgrounds/kldload"
-        cp -r /usr/share/backgrounds/kldload/. "${target}/usr/share/backgrounds/kldload/"
+        k_install_tree /usr/share/backgrounds/kldload \
+            "${target}/usr/share/backgrounds/kldload" \
+            "wallpapers"
+    else
+        k_die "wallpapers: /usr/share/backgrounds/kldload missing on live ISO — build dropped them"
     fi
     local _wp=""
     case "${KLDLOAD_DISTRO:-centos}" in

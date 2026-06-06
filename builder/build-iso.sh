@@ -2228,7 +2228,14 @@ xorriso -as mkisofs \
 # Checksum
 # ---------------------------------------------------------------------------
 log "Generating SHA256 checksum..."
-(cd "$OUTPUT_DIR" && sha256sum "$ISO_NAME" >"${ISO_NAME}.sha256")
+# 1.3.0-b623 shipped with a 0-byte .sha256 because nothing verified the file
+# after writing it. Compute → verify non-empty → die loudly if the write
+# silently failed. Distribution artifacts MUST be verifiable; an empty checksum
+# is worse than no checksum (operators trust the file exists).
+(cd "$OUTPUT_DIR" && sha256sum "$ISO_NAME" >"${ISO_NAME}.sha256") ||
+    die "sha256sum failed for $ISO_NAME"
+[[ -s "${OUTPUT_DIR}/${ISO_NAME}.sha256" ]] ||
+    die "sha256 file is empty: ${OUTPUT_DIR}/${ISO_NAME}.sha256"
 
 ISO_DEST="${OUTPUT_DIR}/${ISO_NAME}"
 ISO_SIZE="$(du -sh "$ISO_DEST" | cut -f1)"
