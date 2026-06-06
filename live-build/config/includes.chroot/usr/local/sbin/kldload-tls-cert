@@ -55,10 +55,10 @@ else
             _regen=1
             break
         fi
-    done < <(ip -4 -o addr show 2>/dev/null \
-                | awk '{print $4}' \
-                | cut -d/ -f1 \
-                | grep -v '^127\.' || true)
+    done < <(ip -4 -o addr show 2>/dev/null |
+        awk '{print $4}' |
+        cut -d/ -f1 |
+        grep -v '^127\.' || true)
     # 2. drift on IPv6 non-loopback addresses
     if [[ "$_regen" -eq 0 ]]; then
         while IFS= read -r _cur_ip6; do
@@ -69,10 +69,10 @@ else
                 _regen=1
                 break
             fi
-        done < <(ip -6 -o addr show 2>/dev/null \
-                    | awk '{print $4}' \
-                    | cut -d/ -f1 \
-                    | grep -v '^::1$' || true)
+        done < <(ip -6 -o addr show 2>/dev/null |
+            awk '{print $4}' |
+            cut -d/ -f1 |
+            grep -v '^::1$' || true)
     fi
     # 3. drift on hostname (handles hostname change via hostnamectl)
     if [[ "$_regen" -eq 0 ]]; then
@@ -86,7 +86,8 @@ else
         while IFS= read -r _line; do
             # strip comments + whitespace, skip blanks
             _line="${_line%%#*}"
-            _line="${_line## }"; _line="${_line%% }"
+            _line="${_line## }"
+            _line="${_line%% }"
             [[ -z "$_line" ]] && continue
             # Line may be "DNS:foo.example.com" or "IP:203.0.113.1"
             # Convert to the SAN-check form that openssl emits
@@ -106,7 +107,7 @@ else
                 _regen=1
                 break
             fi
-        done < "$EXTRA_SANS_FILE"
+        done <"$EXTRA_SANS_FILE"
     fi
 fi
 
@@ -130,28 +131,30 @@ if [[ "$_regen" -eq 1 ]]; then
     _ips+=("192.168.122.1")
     while IFS= read -r ip; do
         [[ -n "$ip" ]] && _ips+=("$ip")
-    done < <(ip -4 -o addr show 2>/dev/null \
-                | awk '{print $4}' \
-                | cut -d/ -f1 \
-                | grep -v '^127\.' \
-                | grep -v '^192\.168\.122\.1$' || true)
+    done < <(ip -4 -o addr show 2>/dev/null |
+        awk '{print $4}' |
+        cut -d/ -f1 |
+        grep -v '^127\.' |
+        grep -v '^192\.168\.122\.1$' || true)
     # IPv6 — link-local (fe80::/10) excluded; they rotate + don't help
     _ips6=()
     while IFS= read -r ip6; do
         [[ -z "$ip6" ]] && continue
         [[ "$ip6" == fe80:* ]] && continue
         _ips6+=("$ip6")
-    done < <(ip -6 -o addr show 2>/dev/null \
-                | awk '{print $4}' \
-                | cut -d/ -f1 \
-                | grep -v '^::1$' || true)
+    done < <(ip -6 -o addr show 2>/dev/null |
+        awk '{print $4}' |
+        cut -d/ -f1 |
+        grep -v '^::1$' || true)
 
     # Extra SANs from admin file
     _extra_dns=()
     _extra_ips=()
     if [[ -r "$EXTRA_SANS_FILE" ]]; then
         while IFS= read -r _line; do
-            _line="${_line%%#*}"; _line="${_line## }"; _line="${_line%% }"
+            _line="${_line%%#*}"
+            _line="${_line## }"
+            _line="${_line%% }"
             [[ -z "$_line" ]] && continue
             if [[ "$_line" == DNS:* ]]; then
                 _extra_dns+=("${_line#DNS:}")
@@ -162,7 +165,7 @@ if [[ "$_regen" -eq 1 ]]; then
             else
                 _extra_dns+=("$_line")
             fi
-        done < "$EXTRA_SANS_FILE"
+        done <"$EXTRA_SANS_FILE"
     fi
 
     {
@@ -205,7 +208,7 @@ if [[ "$_regen" -eq 1 ]]; then
             echo "IP.${_i} = ${ip}"
             _i=$((_i + 1))
         done
-    } > "${CERT_DIR}/webui.cnf"
+    } >"${CERT_DIR}/webui.cnf"
 
     # Prefer the kldload CA when present — every service on the box
     # chains to one root, which the system trust store + (optionally) the
@@ -230,9 +233,9 @@ if [[ "$_regen" -eq 1 ]]; then
             _ca_args+=(--dns "${_hostname}" --dns "${_short}" --dns localhost --dns kldload.local)
             for _d in "${_extra_dns[@]}"; do _ca_args+=(--dns "${_d}"); done
             _ca_args+=(--ip 127.0.0.1 --ip ::1)
-            for ip  in "${_ips[@]}";       do _ca_args+=(--ip "${ip}");  done
-            for ip6 in "${_ips6[@]}";      do _ca_args+=(--ip "${ip6}"); done
-            for ip  in "${_extra_ips[@]}"; do _ca_args+=(--ip "${ip}");  done
+            for ip in "${_ips[@]}"; do _ca_args+=(--ip "${ip}"); done
+            for ip6 in "${_ips6[@]}"; do _ca_args+=(--ip "${ip6}"); done
+            for ip in "${_extra_ips[@]}"; do _ca_args+=(--ip "${ip}"); done
             if /usr/local/sbin/kldload-ca "${_ca_args[@]}" >&2; then
                 # Atomic install: stage to .tmp then rename. Defends
                 # against post-flock script kills (OOM, ctrl-c) leaving
@@ -270,6 +273,29 @@ if [[ "$_regen" -eq 1 ]]; then
     # --no-block so we don't block boot if one of them is sluggish.
     if [[ -x /usr/local/sbin/kldload-bounce-tls-services ]]; then
         /usr/local/sbin/kldload-bounce-tls-services >/dev/null 2>&1 || true
+    fi
+
+    # Also add the leaf cert to the system trust store. Operator on .121
+    # b637 reported "Bob/Metrics work in full webui (Chrome), but the
+    # dock-launcher jinn/Metrics windows hang on Loading/Connecting."
+    # Root cause: WebKit (kldload-app's engine) uses the SYSTEM trust
+    # store for both HTTPS and WSS — but its load-failed-with-tls-errors
+    # reactive whitelist only fires on HTTPS navigations, not WSS
+    # connections. So the page loaded (HTTPS error → whitelist), but
+    # the wss://localhost:8443/ WebSocket silently failed TLS handshake
+    # → Bob/Metrics JS never reached the backend → infinite spinner.
+    # Chrome ducks this because the user-accept-once cert warning
+    # covers both protocols.
+    #
+    # Fix: drop the leaf into /etc/pki/ca-trust/source/anchors/ and run
+    # update-ca-trust extract so the system trust bundle includes it.
+    # WebKit (and curl, wget, openssl) then trust it for both HTTPS and
+    # WSS. Operator-side hot-patching to get there involved exactly
+    # this 2-step on .121 — bake it in so no install needs the patch.
+    if command -v update-ca-trust >/dev/null 2>&1 &&
+        [[ -d /etc/pki/ca-trust/source/anchors ]]; then
+        cp -f "$CRT" /etc/pki/ca-trust/source/anchors/kldload-webui.crt &&
+            update-ca-trust extract >/dev/null 2>&1 || true
     fi
 fi
 
