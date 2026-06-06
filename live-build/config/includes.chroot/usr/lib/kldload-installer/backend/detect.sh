@@ -18,7 +18,7 @@ detect_disks() {
 
         # Exclude loop, zram, sr (optical)
         case "$dev" in
-            loop*|zram*|sr*) continue ;;
+        loop* | zram* | sr*) continue ;;
         esac
 
         echo "/dev/$dev"
@@ -66,8 +66,11 @@ detect_zfs_pools() {
 
 disk_size_gb() {
     local dev="$1"
-    [[ -b "$dev" ]] || { echo 0; return; }
+    [[ -b "$dev" ]] || {
+        echo 0
+        return
+    }
     local bytes
     bytes="$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)"
-    echo $(( bytes / 1024 / 1024 / 1024 ))
+    echo $((bytes / 1024 / 1024 / 1024))
 }

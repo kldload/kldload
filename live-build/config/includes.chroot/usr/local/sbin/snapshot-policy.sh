@@ -53,7 +53,7 @@ while IFS= read -r snap; do
     prefix="$(echo "$snap_name" | sed 's/-[0-9]\{8\}-[0-9]\{6\}$//')"
 
     key="${dataset}|${prefix}"
-    GROUP_COUNTS["$key"]=$(( ${GROUP_COUNTS["$key"]:-0} + 1 ))
+    GROUP_COUNTS["$key"]=$((${GROUP_COUNTS["$key"]:-0} + 1))
     GROUP_SNAPS["$key"]+="${snap}"$'\n'
 done < <(zfs list -H -t snapshot -o name -r rpool 2>/dev/null | sort || true)
 
@@ -81,7 +81,7 @@ for key in $(echo "${!GROUP_COUNTS[@]}" | tr ' ' '\n' | sort); do
         status="UNMANAGED"
     elif [[ "$count" -gt "$limit" ]]; then
         status="OVER LIMIT"
-        (( OVER_LIMIT++ )) || true
+        ((OVER_LIMIT++)) || true
     else
         status="OK"
     fi

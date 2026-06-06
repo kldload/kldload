@@ -1360,7 +1360,7 @@ if [[ "$EDITION" != "core" ]]; then
         # dropped files (.135 2026-06-05: 1/6 landed → kube-cluster died with
         # 'playbook not found' on provision-golden.yml). Fail loudly instead
         # of silently shipping a non-functional ansible tree.
-        if (( _src_count > 0 )) && (( _dst_count < _src_count )); then
+        if ((_src_count > 0)) && ((_dst_count < _src_count)); then
             log "FATAL: ansible playbook copy dropped files (${_dst_count}/${_src_count})."
             log "  src: /build/live-build/config/includes.chroot/usr/local/share/kldload-ansible/playbooks"
             log "  dst: ${ROOTFS}/usr/local/share/kldload-ansible/playbooks"

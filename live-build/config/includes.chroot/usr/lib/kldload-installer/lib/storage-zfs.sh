@@ -33,493 +33,508 @@ source "${LIBDIR}/logging.sh"
 KLDLOAD_ZFS_LOG="${KLDLOAD_ZFS_LOG:-${KLDLOAD_LOG_DIR}/zfs.log}"
 
 k_zfs_root_dataset_name() {
-  local host="${1:?}"
-  echo "rpool/ROOT/${host}"
+    local host="${1:?}"
+    echo "rpool/ROOT/${host}"
 }
 
 k_zfs_log() {
-  mkdir -p "${KLDLOAD_LOG_DIR}"
-  printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "${KLDLOAD_ZFS_LOG}" >&2
+    mkdir -p "${KLDLOAD_LOG_DIR}"
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "${KLDLOAD_ZFS_LOG}" >&2
 }
 
 k_zfs_disk_prefix() {
-  local disk="${1:?}"
-  case "${disk}" in
-    *nvme*|*mmcblk*|*loop*) echo "${disk}p" ;;
+    local disk="${1:?}"
+    case "${disk}" in
+    *nvme* | *mmcblk* | *loop*) echo "${disk}p" ;;
     *) echo "${disk}" ;;
-  esac
+    esac
 }
 
 k_zfs_cleanup_old() {
-  k_zfs_log "Cleaning previous mounts/pools on ${KLDLOAD_DISK}"
+    k_zfs_log "Cleaning previous mounts/pools on ${KLDLOAD_DISK}"
 
-  # Stop zfs-zed + zfs-import-cache.service on the LIVE env so they
-  # don't race the install — zed reacts to DKMS load events / pool
-  # state changes triggered during pass 3 install scripts and can
-  # `zpool export` rpool mid-install, leaving /target as an empty
-  # mountpoint dir for everything downstream. We re-enable on
-  # reboot when the new system comes up. Idempotent.
-  systemctl stop zfs-zed.service 2>/dev/null || true
-  systemctl stop zfs-import-cache.service 2>/dev/null || true
-  # Mask the F44 zfs udev rule too — it auto-runs `zpool import`
-  # without altroot when udev sees ZFS module load events, which the
-  # chroot's zfs-dkms %post triggers. udev import overrides our
-  # altroot=/target setup → /target unmounts mid-install, every chroot
-  # call against /target then fails with "command not found".
-  # Move the rule out of the way; restore on reboot via tmpfs reset.
-  if [[ -f /usr/lib/udev/rules.d/90-zfs.rules ]]; then
-    mv -f /usr/lib/udev/rules.d/90-zfs.rules /usr/lib/udev/rules.d/90-zfs.rules.kldload-disabled 2>/dev/null || \
-      ln -sf /dev/null /etc/udev/rules.d/90-zfs.rules 2>/dev/null || true
-    udevadm control --reload-rules 2>/dev/null || true
-  fi
+    # Stop zfs-zed + zfs-import-cache.service on the LIVE env so they
+    # don't race the install — zed reacts to DKMS load events / pool
+    # state changes triggered during pass 3 install scripts and can
+    # `zpool export` rpool mid-install, leaving /target as an empty
+    # mountpoint dir for everything downstream. We re-enable on
+    # reboot when the new system comes up. Idempotent.
+    systemctl stop zfs-zed.service 2>/dev/null || true
+    systemctl stop zfs-import-cache.service 2>/dev/null || true
+    # Mask the F44 zfs udev rule too — it auto-runs `zpool import`
+    # without altroot when udev sees ZFS module load events, which the
+    # chroot's zfs-dkms %post triggers. udev import overrides our
+    # altroot=/target setup → /target unmounts mid-install, every chroot
+    # call against /target then fails with "command not found".
+    # Move the rule out of the way; restore on reboot via tmpfs reset.
+    if [[ -f /usr/lib/udev/rules.d/90-zfs.rules ]]; then
+        mv -f /usr/lib/udev/rules.d/90-zfs.rules /usr/lib/udev/rules.d/90-zfs.rules.kldload-disabled 2>/dev/null ||
+            ln -sf /dev/null /etc/udev/rules.d/90-zfs.rules 2>/dev/null || true
+        udevadm control --reload-rules 2>/dev/null || true
+    fi
 
-  sync || true
-  swapoff -a || true
+    sync || true
+    swapoff -a || true
 
-  umount -R "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
-  umount -R "${KLDLOAD_TARGET_MNT}" 2>/dev/null || true
+    umount -R "${KLDLOAD_TARGET_MNT}/boot/efi" 2>/dev/null || true
+    umount -R "${KLDLOAD_TARGET_MNT}" 2>/dev/null || true
 
-  # ── Defensive: release anything holding the target disk ───────────────────
-  # Most real-world installs aren't replacing a prior kldload — the target
-  # disk has Windows, stock Linux, LVM, mdraid, or auto-mounted partitions
-  # that will refuse to wipe until deactivated. Do everything with `|| true`
-  # so a box with none of these still breezes through.
-  local _disk_basename="${KLDLOAD_DISK##*/}"
+    # ── Defensive: release anything holding the target disk ───────────────────
+    # Most real-world installs aren't replacing a prior kldload — the target
+    # disk has Windows, stock Linux, LVM, mdraid, or auto-mounted partitions
+    # that will refuse to wipe until deactivated. Do everything with `|| true`
+    # so a box with none of these still breezes through.
+    local _disk_basename="${KLDLOAD_DISK##*/}"
 
-  # 1. Unmount every filesystem currently mounted from this disk (auto-mount
-  #    daemons, leftover /mnt entries, etc.). Iterate child partitions too.
-  lsblk -ln -o NAME,MOUNTPOINT "${KLDLOAD_DISK}" 2>/dev/null | \
-    awk 'NF==2 && $2!="[SWAP]" {print $2}' | \
-    while read -r _mp; do
-      [[ -n "${_mp}" ]] && umount -R "${_mp}" 2>/dev/null || true
+    # 1. Unmount every filesystem currently mounted from this disk (auto-mount
+    #    daemons, leftover /mnt entries, etc.). Iterate child partitions too.
+    lsblk -ln -o NAME,MOUNTPOINT "${KLDLOAD_DISK}" 2>/dev/null |
+        awk 'NF==2 && $2!="[SWAP]" {print $2}' |
+        while read -r _mp; do
+            [[ -n "${_mp}" ]] && umount -R "${_mp}" 2>/dev/null || true
+        done
+
+    # 2. Deactivate any LVM volume groups that include a PV on this disk.
+    if command -v pvs >/dev/null 2>&1; then
+        pvs --noheadings -o pv_name,vg_name 2>/dev/null |
+            awk -v d="${_disk_basename}" '$1 ~ d {print $2}' | sort -u |
+            while read -r _vg; do
+                [[ -n "${_vg}" ]] && {
+                    vgchange -a n "${_vg}" 2>/dev/null || true
+                    k_zfs_log "  Deactivated LVM VG: ${_vg}"
+                }
+            done
+    fi
+
+    # 3. Stop any mdraid arrays that include this disk as a member.
+    if [[ -e /proc/mdstat ]] && command -v mdadm >/dev/null 2>&1; then
+        awk '/^md/ {print $1}' /proc/mdstat 2>/dev/null |
+            while read -r _md; do
+                if grep -q "${_disk_basename}" "/sys/block/${_md}/md/dev-"*/block/dev 2>/dev/null ||
+                    ls -l "/sys/block/${_md}/slaves/" 2>/dev/null | grep -q "${_disk_basename}"; then
+                    mdadm --stop "/dev/${_md}" 2>/dev/null || true
+                    k_zfs_log "  Stopped mdraid array: /dev/${_md}"
+                fi
+            done
+    fi
+
+    # 4. Close any LUKS/dm-crypt mappings backed by this disk.
+    if command -v dmsetup >/dev/null 2>&1; then
+        dmsetup ls --target crypt 2>/dev/null | awk '{print $1}' |
+            while read -r _dm; do
+                [[ -z "${_dm}" || "${_dm}" == "No" ]] && continue
+                if dmsetup deps "${_dm}" 2>/dev/null | grep -q "${_disk_basename}"; then
+                    cryptsetup close "${_dm}" 2>/dev/null || dmsetup remove "${_dm}" 2>/dev/null || true
+                    k_zfs_log "  Closed LUKS mapping: ${_dm}"
+                fi
+            done
+    fi
+
+    # 5. Destroy any ZFS pool (not just 'rpool') that has a vdev on this disk.
+    #    zpool import with no args lists importable pools; running pools show in
+    #    `zpool status`. Destroy imported first, then try to import + destroy.
+    if command -v zpool >/dev/null 2>&1; then
+        zpool status 2>/dev/null | awk '/pool:/ {print $2}' |
+            while read -r _pool; do
+                if zpool status "${_pool}" 2>/dev/null | grep -q "${_disk_basename}"; then
+                    zpool destroy -f "${_pool}" 2>/dev/null || true
+                    k_zfs_log "  Destroyed imported ZFS pool on this disk: ${_pool}"
+                fi
+            done
+        zpool import 2>/dev/null | awk '/pool:/ {print $2}' |
+            while read -r _pool; do
+                zpool import -f -N "${_pool}" 2>/dev/null || continue
+                if zpool status "${_pool}" 2>/dev/null | grep -q "${_disk_basename}"; then
+                    zpool destroy -f "${_pool}" 2>/dev/null || true
+                    k_zfs_log "  Destroyed exported-then-imported pool: ${_pool}"
+                else
+                    zpool export "${_pool}" 2>/dev/null || true
+                fi
+            done
+    fi
+
+    # Legacy rpool-specific cleanup (redundant with #5 but kept for belt-and-suspenders)
+    zpool export rpool 2>/dev/null || true
+    zpool destroy -f rpool 2>/dev/null || true
+
+    wipefs -a -f "${KLDLOAD_DISK}" || true
+    sgdisk --zap-all "${KLDLOAD_DISK}" || true
+    rm -rf "${KLDLOAD_TARGET_MNT:?}/"* 2>/dev/null || true
+    partprobe "${KLDLOAD_DISK}" || true
+
+    # For multi-disk topologies, also wipe data and special vdev disks
+    local _extra_disk
+    for _extra_disk in ${KLDLOAD_ZFS_DATA_DISKS:-} ${KLDLOAD_ZFS_SPECIAL_DISKS:-}; do
+        [[ -b "${_extra_disk}" ]] || continue
+        k_zfs_log "Wiping data/special disk: ${_extra_disk}"
+        wipefs -a -f "${_extra_disk}" 2>/dev/null || true
+        zpool labelclear -f "${_extra_disk}" 2>/dev/null || true
     done
 
-  # 2. Deactivate any LVM volume groups that include a PV on this disk.
-  if command -v pvs >/dev/null 2>&1; then
-    pvs --noheadings -o pv_name,vg_name 2>/dev/null | \
-      awk -v d="${_disk_basename}" '$1 ~ d {print $2}' | sort -u | \
-      while read -r _vg; do
-        [[ -n "${_vg}" ]] && { vgchange -a n "${_vg}" 2>/dev/null || true; k_zfs_log "  Deactivated LVM VG: ${_vg}"; }
-      done
-  fi
-
-  # 3. Stop any mdraid arrays that include this disk as a member.
-  if [[ -e /proc/mdstat ]] && command -v mdadm >/dev/null 2>&1; then
-    awk '/^md/ {print $1}' /proc/mdstat 2>/dev/null | \
-      while read -r _md; do
-        if grep -q "${_disk_basename}" "/sys/block/${_md}/md/dev-"*/block/dev 2>/dev/null \
-           || ls -l "/sys/block/${_md}/slaves/" 2>/dev/null | grep -q "${_disk_basename}"; then
-          mdadm --stop "/dev/${_md}" 2>/dev/null || true
-          k_zfs_log "  Stopped mdraid array: /dev/${_md}"
-        fi
-      done
-  fi
-
-  # 4. Close any LUKS/dm-crypt mappings backed by this disk.
-  if command -v dmsetup >/dev/null 2>&1; then
-    dmsetup ls --target crypt 2>/dev/null | awk '{print $1}' | \
-      while read -r _dm; do
-        [[ -z "${_dm}" || "${_dm}" == "No" ]] && continue
-        if dmsetup deps "${_dm}" 2>/dev/null | grep -q "${_disk_basename}"; then
-          cryptsetup close "${_dm}" 2>/dev/null || dmsetup remove "${_dm}" 2>/dev/null || true
-          k_zfs_log "  Closed LUKS mapping: ${_dm}"
-        fi
-      done
-  fi
-
-  # 5. Destroy any ZFS pool (not just 'rpool') that has a vdev on this disk.
-  #    zpool import with no args lists importable pools; running pools show in
-  #    `zpool status`. Destroy imported first, then try to import + destroy.
-  if command -v zpool >/dev/null 2>&1; then
-    zpool status 2>/dev/null | awk '/pool:/ {print $2}' | \
-      while read -r _pool; do
-        if zpool status "${_pool}" 2>/dev/null | grep -q "${_disk_basename}"; then
-          zpool destroy -f "${_pool}" 2>/dev/null || true
-          k_zfs_log "  Destroyed imported ZFS pool on this disk: ${_pool}"
-        fi
-      done
-    zpool import 2>/dev/null | awk '/pool:/ {print $2}' | \
-      while read -r _pool; do
-        zpool import -f -N "${_pool}" 2>/dev/null || continue
-        if zpool status "${_pool}" 2>/dev/null | grep -q "${_disk_basename}"; then
-          zpool destroy -f "${_pool}" 2>/dev/null || true
-          k_zfs_log "  Destroyed exported-then-imported pool: ${_pool}"
-        else
-          zpool export "${_pool}" 2>/dev/null || true
-        fi
-      done
-  fi
-
-  # Legacy rpool-specific cleanup (redundant with #5 but kept for belt-and-suspenders)
-  zpool export rpool 2>/dev/null || true
-  zpool destroy -f rpool 2>/dev/null || true
-
-  wipefs -a -f "${KLDLOAD_DISK}" || true
-  sgdisk --zap-all "${KLDLOAD_DISK}" || true
-  rm -rf "${KLDLOAD_TARGET_MNT:?}/"* 2>/dev/null || true
-  partprobe "${KLDLOAD_DISK}" || true
-
-  # For multi-disk topologies, also wipe data and special vdev disks
-  local _extra_disk
-  for _extra_disk in ${KLDLOAD_ZFS_DATA_DISKS:-} ${KLDLOAD_ZFS_SPECIAL_DISKS:-}; do
-    [[ -b "${_extra_disk}" ]] || continue
-    k_zfs_log "Wiping data/special disk: ${_extra_disk}"
-    wipefs -a -f "${_extra_disk}" 2>/dev/null || true
-    zpool labelclear -f "${_extra_disk}" 2>/dev/null || true
-  done
-
-  sleep 2
+    sleep 2
 }
 
 k_zfs_partition_disk() {
-  local disk="${KLDLOAD_DISK}"
-  local prefix
+    local disk="${KLDLOAD_DISK}"
+    local prefix
 
-  k_zfs_log "Partitioning boot disk ${disk} (topology: ${KLDLOAD_ZFS_TOPOLOGY})"
+    k_zfs_log "Partitioning boot disk ${disk} (topology: ${KLDLOAD_ZFS_TOPOLOGY})"
 
-  if [[ "${KLDLOAD_ZFS_TOPOLOGY}" == "single" ]]; then
-    # Single-disk: EFI (part 1) + rpool (part 2)
-    sgdisk -n1:1M:+512M -t1:EF00 -c1:"EFI System Partition" "${disk}"
-    sgdisk -n2:0:0      -t2:BF01 -c2:"KLDload rpool"           "${disk}"
-  else
-    # Multi-disk: EFI on boot disk only; rpool lives on the data disks
-    sgdisk -n1:1M:+512M -t1:EF00 -c1:"EFI System Partition" "${disk}"
-  fi
+    if [[ "${KLDLOAD_ZFS_TOPOLOGY}" == "single" ]]; then
+        # Single-disk: EFI (part 1) + rpool (part 2)
+        sgdisk -n1:1M:+512M -t1:EF00 -c1:"EFI System Partition" "${disk}"
+        sgdisk -n2:0:0 -t2:BF01 -c2:"KLDload rpool" "${disk}"
+    else
+        # Multi-disk: EFI on boot disk only; rpool lives on the data disks
+        sgdisk -n1:1M:+512M -t1:EF00 -c1:"EFI System Partition" "${disk}"
+    fi
 
-  partprobe "${disk}" || true
-  sleep 2
+    partprobe "${disk}" || true
+    sleep 2
 
-  prefix="$(k_zfs_disk_prefix "${disk}")"
+    prefix="$(k_zfs_disk_prefix "${disk}")"
 
-  export KLDLOAD_PART_EFI="${prefix}1"
-  if [[ "${KLDLOAD_ZFS_TOPOLOGY}" == "single" ]]; then
-    export KLDLOAD_PART_RPOOL="${prefix}2"
-  fi
+    export KLDLOAD_PART_EFI="${prefix}1"
+    if [[ "${KLDLOAD_ZFS_TOPOLOGY}" == "single" ]]; then
+        export KLDLOAD_PART_RPOOL="${prefix}2"
+    fi
 
-  k_zfs_log "EFI=${KLDLOAD_PART_EFI} RPOOL=${KLDLOAD_PART_RPOOL:-<data disks>}"
+    k_zfs_log "EFI=${KLDLOAD_PART_EFI} RPOOL=${KLDLOAD_PART_RPOOL:-<data disks>}"
 }
 
 k_zfs_create_esp() {
-  k_zfs_log "Creating EFI filesystem on ${KLDLOAD_PART_EFI}"
-  mkfs.vfat -F 32 -n EFI "${KLDLOAD_PART_EFI}"
+    k_zfs_log "Creating EFI filesystem on ${KLDLOAD_PART_EFI}"
+    mkfs.vfat -F 32 -n EFI "${KLDLOAD_PART_EFI}"
 }
 
 k_zfs_create_rpool() {
-  local root_ds
-  local -a enc_opts=() rpool_vdevs=()
+    local root_ds
+    local -a enc_opts=() rpool_vdevs=()
 
-  root_ds="$(k_zfs_root_dataset_name "${KLDLOAD_HOSTNAME}")"
+    root_ds="$(k_zfs_root_dataset_name "${KLDLOAD_HOSTNAME}")"
 
-  # Materialise /etc/hostid on the live env BEFORE zpool create. ZFS stamps
-  # the pool's owner with gethostid() at create time — if /etc/hostid
-  # doesn't exist, glibc falls back to a value derived from the hostname,
-  # and that derived value then does NOT match whatever the installed
-  # system ends up with post-boot → rpool import fails silently → dracut
-  # hangs. Writing /etc/hostid now pins the value, and the bootloader
-  # step later copies this same file into target/etc/hostid so both ends
-  # of the chain agree. Classic ZFS-on-root footgun; bit every XPS install
-  # up through v3.5.
-  if [[ ! -s /etc/hostid ]]; then
-    if command -v zgenhostid >/dev/null 2>&1; then
-      zgenhostid -f 2>/dev/null || true
-    fi
+    # Materialise /etc/hostid on the live env BEFORE zpool create. ZFS stamps
+    # the pool's owner with gethostid() at create time — if /etc/hostid
+    # doesn't exist, glibc falls back to a value derived from the hostname,
+    # and that derived value then does NOT match whatever the installed
+    # system ends up with post-boot → rpool import fails silently → dracut
+    # hangs. Writing /etc/hostid now pins the value, and the bootloader
+    # step later copies this same file into target/etc/hostid so both ends
+    # of the chain agree. Classic ZFS-on-root footgun; bit every XPS install
+    # up through v3.5.
     if [[ ! -s /etc/hostid ]]; then
-      local _hex
-      _hex="$(hostid 2>/dev/null | tr -cd 'a-fA-F0-9' | head -c8)"
-      if [[ -n "${_hex}" ]]; then
-        python3 -c "
+        if command -v zgenhostid >/dev/null 2>&1; then
+            zgenhostid -f 2>/dev/null || true
+        fi
+        if [[ ! -s /etc/hostid ]]; then
+            local _hex
+            _hex="$(hostid 2>/dev/null | tr -cd 'a-fA-F0-9' | head -c8)"
+            if [[ -n "${_hex}" ]]; then
+                python3 -c "
 import struct
 hid = int('${_hex}', 16)
 open('/etc/hostid','wb').write(struct.pack('<I', hid))
 " 2>/dev/null || true
-      fi
+            fi
+        fi
+        if [[ ! -s /etc/hostid ]]; then
+            dd if=/dev/urandom of=/etc/hostid bs=4 count=1 status=none 2>/dev/null || true
+        fi
+        chmod 0644 /etc/hostid 2>/dev/null || true
+        k_zfs_log "live /etc/hostid pinned for zpool create: $(xxd -p /etc/hostid 2>/dev/null)"
+    else
+        k_zfs_log "live /etc/hostid already present: $(xxd -p /etc/hostid 2>/dev/null)"
     fi
-    if [[ ! -s /etc/hostid ]]; then
-      dd if=/dev/urandom of=/etc/hostid bs=4 count=1 status=none 2>/dev/null || true
+
+    if [[ "${KLDLOAD_ZFS_ENCRYPT}" == "1" ]]; then
+        : "${KLDLOAD_ZFS_PASSPHRASE:?KLDLOAD_ZFS_PASSPHRASE required when encryption is enabled}"
+        enc_opts=(
+            -O encryption=aes-256-gcm
+            -O keyformat=passphrase
+            -O keylocation=prompt
+        )
     fi
-    chmod 0644 /etc/hostid 2>/dev/null || true
-    k_zfs_log "live /etc/hostid pinned for zpool create: $(xxd -p /etc/hostid 2>/dev/null)"
-  else
-    k_zfs_log "live /etc/hostid already present: $(xxd -p /etc/hostid 2>/dev/null)"
-  fi
 
-  if [[ "${KLDLOAD_ZFS_ENCRYPT}" == "1" ]]; then
-    : "${KLDLOAD_ZFS_PASSPHRASE:?KLDLOAD_ZFS_PASSPHRASE required when encryption is enabled}"
-    enc_opts=(
-      -O encryption=aes-256-gcm
-      -O keyformat=passphrase
-      -O keylocation=prompt
-    )
-  fi
-
-  # Build vdev spec based on pool topology
-  # shellcheck disable=SC2206
-  local -a data_disks=(${KLDLOAD_ZFS_DATA_DISKS:-})
-  case "${KLDLOAD_ZFS_TOPOLOGY}" in
+    # Build vdev spec based on pool topology
+    # shellcheck disable=SC2206
+    local -a data_disks=(${KLDLOAD_ZFS_DATA_DISKS:-})
+    case "${KLDLOAD_ZFS_TOPOLOGY}" in
     single)
-      rpool_vdevs=("${KLDLOAD_PART_RPOOL:?KLDLOAD_PART_RPOOL not set for single topology}")
-      k_zfs_log "rpool topology: single disk on ${KLDLOAD_PART_RPOOL}"
-      ;;
+        rpool_vdevs=("${KLDLOAD_PART_RPOOL:?KLDLOAD_PART_RPOOL not set for single topology}")
+        k_zfs_log "rpool topology: single disk on ${KLDLOAD_PART_RPOOL}"
+        ;;
     mirror)
-      [[ ${#data_disks[@]} -ge 2 ]] \
-        || die "mirror topology requires at least 2 data disks; got: '${KLDLOAD_ZFS_DATA_DISKS}'"
-      rpool_vdevs=(mirror "${data_disks[0]}" "${data_disks[1]}")
-      k_zfs_log "rpool topology: mirror ${data_disks[0]} ${data_disks[1]}"
-      ;;
+        [[ ${#data_disks[@]} -ge 2 ]] ||
+            die "mirror topology requires at least 2 data disks; got: '${KLDLOAD_ZFS_DATA_DISKS}'"
+        rpool_vdevs=(mirror "${data_disks[0]}" "${data_disks[1]}")
+        k_zfs_log "rpool topology: mirror ${data_disks[0]} ${data_disks[1]}"
+        ;;
     raidz1)
-      [[ ${#data_disks[@]} -ge 3 ]] \
-        || die "raidz1 topology requires at least 3 data disks; got: '${KLDLOAD_ZFS_DATA_DISKS}'"
-      rpool_vdevs=(raidz1 "${data_disks[@]}")
-      k_zfs_log "rpool topology: raidz1 ${KLDLOAD_ZFS_DATA_DISKS}"
-      ;;
+        [[ ${#data_disks[@]} -ge 3 ]] ||
+            die "raidz1 topology requires at least 3 data disks; got: '${KLDLOAD_ZFS_DATA_DISKS}'"
+        rpool_vdevs=(raidz1 "${data_disks[@]}")
+        k_zfs_log "rpool topology: raidz1 ${KLDLOAD_ZFS_DATA_DISKS}"
+        ;;
     mirror-stripe)
-      [[ ${#data_disks[@]} -ge 4 ]] \
-        || die "mirror-stripe topology requires exactly 4 data disks; got: '${KLDLOAD_ZFS_DATA_DISKS}'"
-      rpool_vdevs=(
-        mirror "${data_disks[0]}" "${data_disks[1]}"
-        mirror "${data_disks[2]}" "${data_disks[3]}"
-      )
-      k_zfs_log "rpool topology: RAID10 mirror ${data_disks[0]}+${data_disks[1]} | mirror ${data_disks[2]}+${data_disks[3]}"
-      ;;
+        [[ ${#data_disks[@]} -ge 4 ]] ||
+            die "mirror-stripe topology requires exactly 4 data disks; got: '${KLDLOAD_ZFS_DATA_DISKS}'"
+        rpool_vdevs=(
+            mirror "${data_disks[0]}" "${data_disks[1]}"
+            mirror "${data_disks[2]}" "${data_disks[3]}"
+        )
+        k_zfs_log "rpool topology: RAID10 mirror ${data_disks[0]}+${data_disks[1]} | mirror ${data_disks[2]}+${data_disks[3]}"
+        ;;
     *)
-      die "Unknown ZFS topology '${KLDLOAD_ZFS_TOPOLOGY}'. Valid: single mirror raidz1 mirror-stripe"
-      ;;
-  esac
+        die "Unknown ZFS topology '${KLDLOAD_ZFS_TOPOLOGY}'. Valid: single mirror raidz1 mirror-stripe"
+        ;;
+    esac
 
-  # Compatibility: live env runs OpenZFS 2.4 (Fedora 44), but target
-  # distros ship a range of older ZFS versions. If we let zpool create
-  # enable the full 2.4 feature set, the pool gets features like
-  # raidz_expansion / longname / zilsaxattr that older ZFS doesn't
-  # understand. Target boots into "pool can only be accessed in
-  # read-only mode" — dracut fails to mount /sysroot r/w, drops to
-  # emergency mode.
-  #
-  # Map (distro, release) → known ZFS major version → profile name.
-  # The profile is a curated feature subset; both live (2.4) and target
-  # honor it so pools created here work natively on either side.
-  local _zfs_compat_target="" _zfs_compat_reason=""
-  # Default 44 to match bootstrap.sh's install target (F44 + 6.19 GA + fc43 ZFS
-  # bridge = the live-env combo). F44 >= 44 -> the zfs-2.4 "no restriction" branch.
-  local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-44}"
-  case "${KLDLOAD_DISTRO:-centos}" in
-    centos|rocky)
-      # EL9 = zfs 2.2 (Rocky 9 + CentOS Stream 9 stay on this branch).
-      _zfs_compat_target="openzfs-2.2-linux"
-      _zfs_compat_reason="EL9 (centos/rocky 9) ships zfs 2.2"
-      ;;
+    # Compatibility: live env runs OpenZFS 2.4 (Fedora 44), but target
+    # distros ship a range of older ZFS versions. If we let zpool create
+    # enable the full 2.4 feature set, the pool gets features like
+    # raidz_expansion / longname / zilsaxattr that older ZFS doesn't
+    # understand. Target boots into "pool can only be accessed in
+    # read-only mode" — dracut fails to mount /sysroot r/w, drops to
+    # emergency mode.
+    #
+    # Map (distro, release) → known ZFS major version → profile name.
+    # The profile is a curated feature subset; both live (2.4) and target
+    # honor it so pools created here work natively on either side.
+    local _zfs_compat_target="" _zfs_compat_reason=""
+    # Default 44 to match bootstrap.sh's install target (F44 + 6.19 GA + fc43 ZFS
+    # bridge = the live-env combo). F44 >= 44 -> the zfs-2.4 "no restriction" branch.
+    local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-44}"
+    case "${KLDLOAD_DISTRO:-centos}" in
+    centos | rocky)
+        # EL9 = zfs 2.2 (Rocky 9 + CentOS Stream 9 stay on this branch).
+        _zfs_compat_target="openzfs-2.2-linux"
+        _zfs_compat_reason="EL9 (centos/rocky 9) ships zfs 2.2"
+        ;;
     rhel)
-      # RHEL 10 (GA May 2025, kernel 6.12) — OpenZFS publishes 2.3.x for el10.
-      # If 2.3 DKMS won't build against the running kernel, the resolver loop
-      # at line ~340 falls back through openzfs-2.2-linux. KLDLOAD_RELEASE=9
-      # users get the EL9 profile anyway (we map by distro, not release here —
-      # if someone pins KLDLOAD_RELEASE=9 with distro=rhel the resolver still
-      # picks a working profile, just a more conservative one).
-      _zfs_compat_target="openzfs-2.3-linux"
-      _zfs_compat_reason="RHEL 10 ships zfs 2.3 (el10 OpenZFS repos)"
-      ;;
-    fedora)
-      if [[ "${_fedora_rel}" -ge 44 ]]; then
-        _zfs_compat_target=""    # F44+ = zfs 2.4, matches live
-        _zfs_compat_reason="Fedora ${_fedora_rel} ships zfs 2.4 — same as live, no restriction"
-      else
+        # RHEL 10 (GA May 2025, kernel 6.12) — OpenZFS publishes 2.3.x for el10.
+        # If 2.3 DKMS won't build against the running kernel, the resolver loop
+        # at line ~340 falls back through openzfs-2.2-linux. KLDLOAD_RELEASE=9
+        # users get the EL9 profile anyway (we map by distro, not release here —
+        # if someone pins KLDLOAD_RELEASE=9 with distro=rhel the resolver still
+        # picks a working profile, just a more conservative one).
         _zfs_compat_target="openzfs-2.3-linux"
-        _zfs_compat_reason="Fedora ${_fedora_rel} ships zfs 2.3"
-      fi
-      ;;
+        _zfs_compat_reason="RHEL 10 ships zfs 2.3 (el10 OpenZFS repos)"
+        ;;
+    fedora)
+        if [[ "${_fedora_rel}" -ge 44 ]]; then
+            _zfs_compat_target="" # F44+ = zfs 2.4, matches live
+            _zfs_compat_reason="Fedora ${_fedora_rel} ships zfs 2.4 — same as live, no restriction"
+        else
+            _zfs_compat_target="openzfs-2.3-linux"
+            _zfs_compat_reason="Fedora ${_fedora_rel} ships zfs 2.3"
+        fi
+        ;;
     debian)
-      # Debian 12 bookworm = 2.1, 13 trixie = 2.3
-      case "${KLDLOAD_SUITE:-trixie}" in
-        bookworm) _zfs_compat_target="openzfs-2.1-linux"; _zfs_compat_reason="Debian 12 bookworm ships zfs 2.1" ;;
-        *)        _zfs_compat_target="openzfs-2.3-linux"; _zfs_compat_reason="Debian 13 trixie ships zfs 2.3" ;;
-      esac
-      ;;
+        # Debian 12 bookworm = 2.1, 13 trixie = 2.3
+        case "${KLDLOAD_SUITE:-trixie}" in
+        bookworm)
+            _zfs_compat_target="openzfs-2.1-linux"
+            _zfs_compat_reason="Debian 12 bookworm ships zfs 2.1"
+            ;;
+        *)
+            _zfs_compat_target="openzfs-2.3-linux"
+            _zfs_compat_reason="Debian 13 trixie ships zfs 2.3"
+            ;;
+        esac
+        ;;
     ubuntu)
-      # Ubuntu 22.04 jammy = 2.1, 24.04 noble = 2.2
-      case "${KLDLOAD_SUITE:-noble}" in
-        jammy) _zfs_compat_target="openzfs-2.1-linux"; _zfs_compat_reason="Ubuntu 22.04 jammy ships zfs 2.1" ;;
-        *)     _zfs_compat_target="openzfs-2.2-linux"; _zfs_compat_reason="Ubuntu 24.04 noble ships zfs 2.2" ;;
-      esac
-      ;;
-    arch|alpine|*)
-      _zfs_compat_target=""
-      _zfs_compat_reason="${KLDLOAD_DISTRO} ships rolling/unconstrained zfs"
-      ;;
-  esac
+        # Ubuntu 22.04 jammy = 2.1, 24.04 noble = 2.2
+        case "${KLDLOAD_SUITE:-noble}" in
+        jammy)
+            _zfs_compat_target="openzfs-2.1-linux"
+            _zfs_compat_reason="Ubuntu 22.04 jammy ships zfs 2.1"
+            ;;
+        *)
+            _zfs_compat_target="openzfs-2.2-linux"
+            _zfs_compat_reason="Ubuntu 24.04 noble ships zfs 2.2"
+            ;;
+        esac
+        ;;
+    arch | alpine | *)
+        _zfs_compat_target=""
+        _zfs_compat_reason="${KLDLOAD_DISTRO} ships rolling/unconstrained zfs"
+        ;;
+    esac
 
-  # Resolve the chosen profile name; fall back to next-lower if unavailable.
-  local _compat="off"
-  if [[ -n "$_zfs_compat_target" ]]; then
-    for _candidate in "$_zfs_compat_target" \
-                      openzfs-2.3-linux openzfs-2.2-linux openzfs-2.1-linux; do
-      if [[ -f "/usr/share/zfs/compatibility.d/${_candidate}" ]]; then
-        _compat="$_candidate"
-        break
-      fi
-    done
-  fi
-  k_zfs_log "ZFS feature compat: ${_compat} (${_zfs_compat_reason})"
-  local _compat_opt=()
-  [[ "$_compat" != "off" ]] && _compat_opt=(-o "compatibility=${_compat}")
+    # Resolve the chosen profile name; fall back to next-lower if unavailable.
+    local _compat="off"
+    if [[ -n "$_zfs_compat_target" ]]; then
+        for _candidate in "$_zfs_compat_target" \
+            openzfs-2.3-linux openzfs-2.2-linux openzfs-2.1-linux; do
+            if [[ -f "/usr/share/zfs/compatibility.d/${_candidate}" ]]; then
+                _compat="$_candidate"
+                break
+            fi
+        done
+    fi
+    k_zfs_log "ZFS feature compat: ${_compat} (${_zfs_compat_reason})"
+    local _compat_opt=()
+    [[ "$_compat" != "off" ]] && _compat_opt=(-o "compatibility=${_compat}")
 
-  zpool create -f \
-    -o ashift=12 \
-    -o autotrim=on \
-    "${_compat_opt[@]}" \
-    -O acltype=posixacl \
-    -O canmount=off \
-    -O compression=lz4 \
-    -O dnodesize=auto \
-    -O normalization=formD \
-    -O relatime=on \
-    -O xattr=sa \
-    -O mountpoint=none \
-    "${enc_opts[@]}" \
-    -R "${KLDLOAD_TARGET_MNT}" \
-    rpool "${rpool_vdevs[@]}"
+    zpool create -f \
+        -o ashift=12 \
+        -o autotrim=on \
+        "${_compat_opt[@]}" \
+        -O acltype=posixacl \
+        -O canmount=off \
+        -O compression=lz4 \
+        -O dnodesize=auto \
+        -O normalization=formD \
+        -O relatime=on \
+        -O xattr=sa \
+        -O mountpoint=none \
+        "${enc_opts[@]}" \
+        -R "${KLDLOAD_TARGET_MNT}" \
+        rpool "${rpool_vdevs[@]}"
 
-  # Root dataset hierarchy
-  zfs create -o canmount=off -o mountpoint=none rpool/ROOT
-  zfs create -o canmount=noauto -o mountpoint=/ "${root_ds}"
-  zfs mount "${root_ds}"
+    # Root dataset hierarchy
+    zfs create -o canmount=off -o mountpoint=none rpool/ROOT
+    zfs create -o canmount=noauto -o mountpoint=/ "${root_ds}"
+    zfs mount "${root_ds}"
 
-  # Set ZFSBootMenu properties — inherited by all boot environments
-  # console=tty1 keeps VGA output; console=ttyS0 adds serial (Proxmox console tab)
-  # psi=1 enables Pressure Stall Information (/proc/pressure/*) — built into
-  # the kernel but disabled by default on RHEL-family builds. The kldload
-  # console F12 cockpit reads PSI as its headline "what's saturated right
-  # now" pane; without psi=1 the pane falls back to vmstat. Detected
-  # 2026-05-27 on a RHEL 10 kernel (6.12.0-211.16.1.el10_2.x86_64) that
-  # ships PSI built in but boot-disabled.
-  zfs set org.zfsbootmenu:commandline="rw console=tty1 console=ttyS0,115200 psi=1" rpool/ROOT
+    # Set ZFSBootMenu properties — inherited by all boot environments
+    # console=tty1 keeps VGA output; console=ttyS0 adds serial (Proxmox console tab)
+    # psi=1 enables Pressure Stall Information (/proc/pressure/*) — built into
+    # the kernel but disabled by default on RHEL-family builds. The kldload
+    # console F12 cockpit reads PSI as its headline "what's saturated right
+    # now" pane; without psi=1 the pane falls back to vmstat. Detected
+    # 2026-05-27 on a RHEL 10 kernel (6.12.0-211.16.1.el10_2.x86_64) that
+    # ships PSI built in but boot-disabled.
+    zfs set org.zfsbootmenu:commandline="rw console=tty1 console=ttyS0,115200 psi=1" rpool/ROOT
 
-  # Data datasets
-  zfs create -o mountpoint=/root      rpool/root
-  zfs create -o mountpoint=/home      rpool/home
-  # Per-user home dataset
-  if [[ -n "${KLDLOAD_USERNAME:-}" ]]; then
-    zfs create -o mountpoint="/home/${KLDLOAD_USERNAME}" "rpool/home/${KLDLOAD_USERNAME}"
-    k_zfs_log "Created user home dataset: rpool/home/${KLDLOAD_USERNAME}"
-  fi
-  zfs create -o mountpoint=/srv       rpool/srv
-  zfs create -o mountpoint=/opt       rpool/opt
+    # Data datasets
+    zfs create -o mountpoint=/root rpool/root
+    zfs create -o mountpoint=/home rpool/home
+    # Per-user home dataset
+    if [[ -n "${KLDLOAD_USERNAME:-}" ]]; then
+        zfs create -o mountpoint="/home/${KLDLOAD_USERNAME}" "rpool/home/${KLDLOAD_USERNAME}"
+        k_zfs_log "Created user home dataset: rpool/home/${KLDLOAD_USERNAME}"
+    fi
+    zfs create -o mountpoint=/srv rpool/srv
+    zfs create -o mountpoint=/opt rpool/opt
 
-  zfs create -o canmount=off -o mountpoint=/usr rpool/usr
-  zfs create -o mountpoint=/usr/local rpool/usr/local
+    zfs create -o canmount=off -o mountpoint=/usr rpool/usr
+    zfs create -o mountpoint=/usr/local rpool/usr/local
 
-  zfs create -o canmount=off -o mountpoint=/var rpool/var
-  zfs create -o mountpoint=/var/cache rpool/var/cache
-  zfs create -o mountpoint=/var/lib   rpool/var/lib
-  zfs create -o mountpoint=/var/log   rpool/var/log
-  zfs create -o mountpoint=/var/spool rpool/var/spool
-  zfs create -o mountpoint=/var/tmp   rpool/var/tmp
+    zfs create -o canmount=off -o mountpoint=/var rpool/var
+    zfs create -o mountpoint=/var/cache rpool/var/cache
+    zfs create -o mountpoint=/var/lib rpool/var/lib
+    zfs create -o mountpoint=/var/log rpool/var/log
+    zfs create -o mountpoint=/var/spool rpool/var/spool
+    zfs create -o mountpoint=/var/tmp rpool/var/tmp
 
-  # /tmp — not snapshotted, no suid/exec/devices for security
-  zfs create \
-    -o mountpoint=/tmp \
-    -o sync=disabled \
-    -o setuid=off \
-    -o exec=off \
-    -o devices=off \
-    rpool/tmp
+    # /tmp — not snapshotted, no suid/exec/devices for security
+    zfs create \
+        -o mountpoint=/tmp \
+        -o sync=disabled \
+        -o setuid=off \
+        -o exec=off \
+        -o devices=off \
+        rpool/tmp
 
-  chmod 1777 "${KLDLOAD_TARGET_MNT}/tmp" || true
-  chmod 1777 "${KLDLOAD_TARGET_MNT}/var/tmp" || true
+    chmod 1777 "${KLDLOAD_TARGET_MNT}/tmp" || true
+    chmod 1777 "${KLDLOAD_TARGET_MNT}/var/tmp" || true
 
-  # Set pool bootfs — ZFSBootMenu uses this to select the default BE
-  zpool set bootfs="${root_ds}" rpool || true
+    # Set pool bootfs — ZFSBootMenu uses this to select the default BE
+    zpool set bootfs="${root_ds}" rpool || true
 }
 
 # Add special vdev to rpool for metadata/small-block acceleration.
 # Mirrors the two disks if two are provided; uses single disk otherwise.
 # No-op if KLDLOAD_ZFS_SPECIAL_DISKS is empty.
 k_zfs_add_special_vdev() {
-  [[ -n "${KLDLOAD_ZFS_SPECIAL_DISKS:-}" ]] || return 0
+    [[ -n "${KLDLOAD_ZFS_SPECIAL_DISKS:-}" ]] || return 0
 
-  # shellcheck disable=SC2206
-  local -a sdisks=(${KLDLOAD_ZFS_SPECIAL_DISKS})
-  [[ ${#sdisks[@]} -gt 0 ]] || return 0
+    # shellcheck disable=SC2206
+    local -a sdisks=(${KLDLOAD_ZFS_SPECIAL_DISKS})
+    [[ ${#sdisks[@]} -gt 0 ]] || return 0
 
-  if [[ ${#sdisks[@]} -ge 2 ]]; then
-    k_zfs_log "Adding special vdev: mirror ${sdisks[0]} ${sdisks[1]}"
-    zpool add rpool special mirror "${sdisks[0]}" "${sdisks[1]}"
-  else
-    k_zfs_log "Adding special vdev: ${sdisks[0]}"
-    zpool add rpool special "${sdisks[0]}"
-  fi
+    if [[ ${#sdisks[@]} -ge 2 ]]; then
+        k_zfs_log "Adding special vdev: mirror ${sdisks[0]} ${sdisks[1]}"
+        zpool add rpool special mirror "${sdisks[0]}" "${sdisks[1]}"
+    else
+        k_zfs_log "Adding special vdev: ${sdisks[0]}"
+        zpool add rpool special "${sdisks[0]}"
+    fi
 }
 
 k_zfs_mount_esp() {
-  k_zfs_log "Mounting EFI partition"
-  mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi"
-  mount "${KLDLOAD_PART_EFI}" "${KLDLOAD_TARGET_MNT}/boot/efi"
+    k_zfs_log "Mounting EFI partition"
+    mkdir -p "${KLDLOAD_TARGET_MNT}/boot/efi"
+    mount "${KLDLOAD_PART_EFI}" "${KLDLOAD_TARGET_MNT}/boot/efi"
 }
 
 k_zfs_write_cachefile() {
-  k_zfs_log "Writing zpool cachefile into target"
-  mkdir -p "${KLDLOAD_TARGET_MNT}/etc/zfs"
-  zpool set cachefile="${KLDLOAD_TARGET_MNT}/etc/zfs/zpool.cache" rpool || true
+    k_zfs_log "Writing zpool cachefile into target"
+    mkdir -p "${KLDLOAD_TARGET_MNT}/etc/zfs"
+    zpool set cachefile="${KLDLOAD_TARGET_MNT}/etc/zfs/zpool.cache" rpool || true
 }
 
 k_zfs_write_target_hostid() {
-  k_zfs_log "Writing stable target hostid (matching live env's pool-create hostid)"
+    k_zfs_log "Writing stable target hostid (matching live env's pool-create hostid)"
 
-  mkdir -p "${KLDLOAD_TARGET_MNT}/etc"
+    mkdir -p "${KLDLOAD_TARGET_MNT}/etc"
 
-  # ALWAYS overwrite — the pool was created with the live env's hostid,
-  # and the installed system MUST match it for `zpool import` to succeed
-  # at boot. If we early-return here when /target/etc/hostid already
-  # exists (which dnf / zfs-dkms's zgenhostid / systemd-machine-id may
-  # have populated with a DIFFERENT random value during install), the
-  # target's initramfs reads its own hostid, sees the pool was last
-  # touched by a different hostid, refuses to import, and dracut drops
-  # to "emergency mode generating /run/initramfs/rdsosreport.txt".
-  if [[ -s /etc/hostid ]]; then
-    cp -f /etc/hostid "${KLDLOAD_TARGET_MNT}/etc/hostid"
-    k_zfs_log "  copied live /etc/hostid → ${KLDLOAD_TARGET_MNT}/etc/hostid: $(xxd -p /etc/hostid 2>/dev/null)"
-  else
-    dd if=/dev/urandom of="${KLDLOAD_TARGET_MNT}/etc/hostid" bs=4 count=1 status=none
-    k_zfs_log "  WARNING: live /etc/hostid was empty — wrote random hostid (pool may not import on boot)"
-  fi
+    # ALWAYS overwrite — the pool was created with the live env's hostid,
+    # and the installed system MUST match it for `zpool import` to succeed
+    # at boot. If we early-return here when /target/etc/hostid already
+    # exists (which dnf / zfs-dkms's zgenhostid / systemd-machine-id may
+    # have populated with a DIFFERENT random value during install), the
+    # target's initramfs reads its own hostid, sees the pool was last
+    # touched by a different hostid, refuses to import, and dracut drops
+    # to "emergency mode generating /run/initramfs/rdsosreport.txt".
+    if [[ -s /etc/hostid ]]; then
+        cp -f /etc/hostid "${KLDLOAD_TARGET_MNT}/etc/hostid"
+        k_zfs_log "  copied live /etc/hostid → ${KLDLOAD_TARGET_MNT}/etc/hostid: $(xxd -p /etc/hostid 2>/dev/null)"
+    else
+        dd if=/dev/urandom of="${KLDLOAD_TARGET_MNT}/etc/hostid" bs=4 count=1 status=none
+        k_zfs_log "  WARNING: live /etc/hostid was empty — wrote random hostid (pool may not import on boot)"
+    fi
 
-  chmod 0644 "${KLDLOAD_TARGET_MNT}/etc/hostid" || true
+    chmod 0644 "${KLDLOAD_TARGET_MNT}/etc/hostid" || true
 }
 
 k_storage_zfs_install() {
-  export KLDLOAD_STORAGE_MODE=zfs
-  export KLDLOAD_ROOT_FS_TYPE=zfs
-  export KLDLOAD_TARGET_MNT
+    export KLDLOAD_STORAGE_MODE=zfs
+    export KLDLOAD_ROOT_FS_TYPE=zfs
+    export KLDLOAD_TARGET_MNT
 
-  mkdir -p "${KLDLOAD_LOG_DIR}"
-  : > "${KLDLOAD_ZFS_LOG}"
+    mkdir -p "${KLDLOAD_LOG_DIR}"
+    : >"${KLDLOAD_ZFS_LOG}"
 
-  k_zfs_log "==== ZFS install start ===="
-  k_zfs_log "disk=${KLDLOAD_DISK}"
-  k_zfs_log "topology=${KLDLOAD_ZFS_TOPOLOGY}"
-  k_zfs_log "data_disks=${KLDLOAD_ZFS_DATA_DISKS:-}"
-  k_zfs_log "special_disks=${KLDLOAD_ZFS_SPECIAL_DISKS:-}"
-  k_zfs_log "target=${KLDLOAD_TARGET_MNT}"
-  k_zfs_log "host=${KLDLOAD_HOSTNAME}"
-  k_zfs_log "encrypt=${KLDLOAD_ZFS_ENCRYPT}"
+    k_zfs_log "==== ZFS install start ===="
+    k_zfs_log "disk=${KLDLOAD_DISK}"
+    k_zfs_log "topology=${KLDLOAD_ZFS_TOPOLOGY}"
+    k_zfs_log "data_disks=${KLDLOAD_ZFS_DATA_DISKS:-}"
+    k_zfs_log "special_disks=${KLDLOAD_ZFS_SPECIAL_DISKS:-}"
+    k_zfs_log "target=${KLDLOAD_TARGET_MNT}"
+    k_zfs_log "host=${KLDLOAD_HOSTNAME}"
+    k_zfs_log "encrypt=${KLDLOAD_ZFS_ENCRYPT}"
 
-  modprobe zfs
-  zpool --version >> "${KLDLOAD_ZFS_LOG}" 2>&1 || true
+    modprobe zfs
+    zpool --version >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
 
-  mkdir -p "${KLDLOAD_TARGET_MNT}"
+    mkdir -p "${KLDLOAD_TARGET_MNT}"
 
-  k_zfs_cleanup_old
-  k_zfs_partition_disk
-  k_zfs_create_esp
-  k_zfs_create_rpool
-  k_zfs_add_special_vdev
-  k_zfs_mount_esp
-  k_zfs_write_cachefile
-  k_zfs_write_target_hostid
+    k_zfs_cleanup_old
+    k_zfs_partition_disk
+    k_zfs_create_esp
+    k_zfs_create_rpool
+    k_zfs_add_special_vdev
+    k_zfs_mount_esp
+    k_zfs_write_cachefile
+    k_zfs_write_target_hostid
 
-  k_zfs_log "Current zpool status:"
-  zpool status >> "${KLDLOAD_ZFS_LOG}" 2>&1 || true
+    k_zfs_log "Current zpool status:"
+    zpool status >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
 
-  k_zfs_log "Current zfs list:"
-  zfs list >> "${KLDLOAD_ZFS_LOG}" 2>&1 || true
+    k_zfs_log "Current zfs list:"
+    zfs list >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
 
-  k_zfs_log "==== ZFS install complete ===="
+    k_zfs_log "==== ZFS install complete ===="
 }

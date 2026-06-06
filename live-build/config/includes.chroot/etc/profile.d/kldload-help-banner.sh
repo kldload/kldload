@@ -7,8 +7,8 @@
 
 # Interactive guard
 case $- in
-    *i*) ;;
-    *) return 0 ;;
+*i*) ;;
+*) return 0 ;;
 esac
 
 # TTY guard (skip for piped logins, sftp, etc.)
@@ -29,8 +29,8 @@ if [[ "$USER" == "live" ]] && [[ -n "${XDG_SESSION_TYPE:-}" ]]; then
 fi
 
 # Pick colors only if TERM looks capable.
-if [[ "${TERM:-}" == xterm* ]] || [[ "${TERM:-}" == screen* ]] || \
-   [[ "${TERM:-}" == tmux* ]] || [[ "${TERM:-}" == *-256color ]]; then
+if [[ "${TERM:-}" == xterm* ]] || [[ "${TERM:-}" == screen* ]] ||
+    [[ "${TERM:-}" == tmux* ]] || [[ "${TERM:-}" == *-256color ]]; then
     _kld_c=$'\e[38;5;117m'
     _kld_g=$'\e[38;5;85m'
     _kld_d=$'\e[38;5;240m'

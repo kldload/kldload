@@ -8,7 +8,8 @@ source "${SCRIPT_DIR}/lib-test.sh"
 
 DISTRO=$(detect_distro)
 
-export TERM=xterm; clear
+export TERM=xterm
+clear
 printf "\e[1;36m╔══════════════════════════════════════════════════════════╗\e[0m\n"
 printf "\e[1;36m║  kldloadOS Smoke Test — DESKTOP profile                  ║\e[0m\n"
 printf "\e[1;36m╚══════════════════════════════════════════════════════════╝\e[0m\n"
@@ -32,7 +33,7 @@ test_succeeds "DNS works" "getent hosts github.com"
 
 _section "kldloadOS Tools"
 for tool in kst ksnap kbe kclone kdf kdir kpkg kupgrade kexport krecovery; do
-  test_cmd "$tool" "$tool"
+    test_cmd "$tool" "$tool"
 done
 test_succeeds "kst executes" "kst >/dev/null 2>&1"
 
@@ -51,18 +52,18 @@ test_cmd "gnome-terminal" "gnome-terminal"
 test_cmd "nautilus (file manager)" "nautilus"
 
 if [[ "$DISTRO" == "deb" ]]; then
-  test_cmd "gnome-control-center" "gnome-control-center"
+    test_cmd "gnome-control-center" "gnome-control-center"
 fi
 
 # ── GDM ──────────────────────────────────────────────────────────────────────
 _section "Display Manager"
 
 if [[ "$DISTRO" == "deb" ]]; then
-  test_service_active "gdm3" "gdm"
-  test_service_enabled "gdm3" "gdm"
+    test_service_active "gdm3" "gdm"
+    test_service_enabled "gdm3" "gdm"
 else
-  test_service_active "gdm" "gdm"
-  test_service_enabled "gdm" "gdm"
+    test_service_active "gdm" "gdm"
+    test_service_enabled "gdm" "gdm"
 fi
 
 test_output_contains "Graphical target" "systemctl get-default" "graphical"
@@ -71,9 +72,9 @@ test_output_contains "Graphical target" "systemctl get-default" "graphical"
 _section "Firefox"
 
 if [[ "$DISTRO" == "deb" ]]; then
-  test_cmd "firefox-esr" "firefox-esr"
+    test_cmd "firefox-esr" "firefox-esr"
 else
-  test_cmd "firefox" "firefox"
+    test_cmd "firefox" "firefox"
 fi
 
 # ── Desktop Theme / Config ───────────────────────────────────────────────────
@@ -84,10 +85,10 @@ test_dir "dconf local.d" "/etc/dconf/db/local.d"
 
 # Check for screensaver disabled
 if [[ -f /etc/dconf/db/local.d/00-kldload-desktop ]]; then
-  _pass "kldload desktop dconf settings"
-  test_output_contains "Idle delay disabled" "cat /etc/dconf/db/local.d/00-kldload-desktop" "idle-delay"
+    _pass "kldload desktop dconf settings"
+    test_output_contains "Idle delay disabled" "cat /etc/dconf/db/local.d/00-kldload-desktop" "idle-delay"
 else
-  _warn "kldload desktop dconf" "00-kldload-desktop not found"
+    _warn "kldload desktop dconf" "00-kldload-desktop not found"
 fi
 
 # ── Wallpaper / Branding ────────────────────────────────────────────────────
@@ -97,9 +98,9 @@ test_file "OS release" "/etc/os-release"
 test_output_contains "OS name is kldload" "cat /etc/os-release" "kldload"
 
 if [[ -d /usr/share/backgrounds/kldload ]]; then
-  _pass "kldload wallpaper installed"
+    _pass "kldload wallpaper installed"
 else
-  _warn "kldload wallpaper" "/usr/share/backgrounds/kldload not found"
+    _warn "kldload wallpaper" "/usr/share/backgrounds/kldload not found"
 fi
 
 # ── Package Snapshot Test ────────────────────────────────────────────────────
@@ -111,9 +112,9 @@ sleep 1
 SNAP_AFTER=$(zfs list -t snapshot -H 2>/dev/null | wc -l)
 
 if [[ $SNAP_AFTER -gt $SNAP_BEFORE ]]; then
-  _pass "kpkg snapshot on install ($SNAP_BEFORE → $SNAP_AFTER)"
+    _pass "kpkg snapshot on install ($SNAP_BEFORE → $SNAP_AFTER)"
 else
-  _fail "kpkg snapshot on install" "no new snapshot ($SNAP_BEFORE → $SNAP_AFTER)"
+    _fail "kpkg snapshot on install" "no new snapshot ($SNAP_BEFORE → $SNAP_AFTER)"
 fi
 
 # ── Darksite ─────────────────────────────────────────────────────────────────
@@ -128,15 +129,15 @@ fi
 # For default installs, just verify the rehydrated outputs landed.
 _section "Darksite (post-firstboot cleanup)"
 test_succeeds "darksite removed from /root (firstboot reclaim)" \
-  "[[ ! -d /root/darksite ]]"
+    "[[ ! -d /root/darksite ]]"
 test_succeeds "darksite repo file removed" \
-  "[[ ! -f /etc/yum.repos.d/kldload-darksite.repo ]]"
+    "[[ ! -f /etc/yum.repos.d/kldload-darksite.repo ]]"
 # When KLDLOAD_KEEP_DARKSITE=1 was set at install (LAN mirror mode),
 # the dir SHOULD persist. Check that case explicitly so an admin who
 # enabled it doesn't get a false PASS from the cleanup check above.
 if [[ -f /etc/kldload/keep-darksite ]]; then
-  test_dir "LAN mirror mode: darksite kept" "/root/darksite"
-  test_service_active "LAN mirror service" "kldload-apt-mirror"
+    test_dir "LAN mirror mode: darksite kept" "/root/darksite"
+    test_service_active "LAN mirror service" "kldload-apt-mirror"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────

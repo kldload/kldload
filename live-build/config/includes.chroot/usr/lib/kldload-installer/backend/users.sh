@@ -17,7 +17,7 @@ users_create() {
     local username="$2"
     local password="$3"
 
-    [[ -n "$target"   ]] || die "users_create: target required"
+    [[ -n "$target" ]] || die "users_create: target required"
     [[ -n "$username" ]] || die "users_create: username required"
     [[ -n "$password" ]] || die "users_create: password required"
 
@@ -41,7 +41,7 @@ users_set_root_password() {
     local target="$1"
     local password="$2"
 
-    [[ -n "$target"   ]] || die "users_set_root_password: target required"
+    [[ -n "$target" ]] || die "users_set_root_password: target required"
     [[ -n "$password" ]] || die "users_set_root_password: password required"
 
     log "Setting root password in $target..."

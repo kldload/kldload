@@ -30,10 +30,10 @@ recovery_import_pool() {
 
 recovery_list_bootenvs() {
     log "Listing boot environments..."
-    zfs list -H -r -t filesystem rpool/ROOT 2>/dev/null \
-        | awk '{print $1}' \
-        | grep -v "^rpool/ROOT$" \
-        || echo "(no boot environments found)"
+    zfs list -H -r -t filesystem rpool/ROOT 2>/dev/null |
+        awk '{print $1}' |
+        grep -v "^rpool/ROOT$" ||
+        echo "(no boot environments found)"
 }
 
 # ---------------------------------------------------------------------------
@@ -46,9 +46,9 @@ recovery_list_snapshots() {
     [[ -n "$dataset" ]] || die "recovery_list_snapshots: dataset required"
 
     log "Listing snapshots of $dataset..."
-    zfs list -H -t snapshot "$dataset" 2>/dev/null \
-        | awk '{print $1}' \
-        || echo "(no snapshots found for $dataset)"
+    zfs list -H -t snapshot "$dataset" 2>/dev/null |
+        awk '{print $1}' ||
+        echo "(no snapshots found for $dataset)"
 }
 
 # ---------------------------------------------------------------------------
@@ -98,11 +98,11 @@ recovery_mount_chroot() {
     fi
 
     # Bind virtual filesystems
-    run mount --bind /dev      "${target}/dev"     2>/dev/null || true
-    run mount --bind /dev/pts  "${target}/dev/pts" 2>/dev/null || true
-    run mount -t proc  proc    "${target}/proc"    2>/dev/null || true
-    run mount -t sysfs sysfs   "${target}/sys"     2>/dev/null || true
-    run mount -t tmpfs tmpfs   "${target}/run"     2>/dev/null || true
+    run mount --bind /dev "${target}/dev" 2>/dev/null || true
+    run mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
+    run mount -t proc proc "${target}/proc" 2>/dev/null || true
+    run mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
+    run mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
 
     log "Chroot environment ready at $target"
 }
@@ -139,8 +139,8 @@ recovery_reinstall_bootloader() {
         script_dir="$(dirname "$(realpath "${BASH_SOURCE[0]:-$0}")")"
         bootenv_lib="${script_dir}/bootenv.sh"
     fi
-    [[ -f "$bootenv_lib" ]] \
-        || die "bootenv.sh not found at $bootenv_lib"
+    [[ -f "$bootenv_lib" ]] ||
+        die "bootenv.sh not found at $bootenv_lib"
     # shellcheck source=bootenv.sh
     source "$bootenv_lib"
 

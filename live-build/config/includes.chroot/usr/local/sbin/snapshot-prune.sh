@@ -32,9 +32,9 @@ fi
 
 # List all snapshots of the dataset matching @PREFIX*, sorted oldest first by creation
 mapfile -t ALL_SNAPS < <(
-    zfs list -H -t snapshot -o name -s creation "$DATASET" 2>/dev/null \
-        | grep "@${PREFIX}" \
-        || true
+    zfs list -H -t snapshot -o name -s creation "$DATASET" 2>/dev/null |
+        grep "@${PREFIX}" ||
+        true
 )
 
 TOTAL="${#ALL_SNAPS[@]}"
@@ -45,10 +45,10 @@ if [[ "$TOTAL" -le "$KEEP" ]]; then
     exit 0
 fi
 
-DELETE_COUNT=$(( TOTAL - KEEP ))
+DELETE_COUNT=$((TOTAL - KEEP))
 log "Pruning $DELETE_COUNT oldest snapshot(s)..."
 
-for (( i=0; i<DELETE_COUNT; i++ )); do
+for ((i = 0; i < DELETE_COUNT; i++)); do
     SNAP="${ALL_SNAPS[$i]}"
     log "Deleting: $SNAP"
     if zfs destroy "$SNAP" 2>&1 | tee -a "$LOG"; then
@@ -58,4 +58,4 @@ for (( i=0; i<DELETE_COUNT; i++ )); do
     fi
 done
 
-log "Prune complete. Remaining: $(( TOTAL - DELETE_COUNT )) snapshot(s)"
+log "Prune complete. Remaining: $((TOTAL - DELETE_COUNT)) snapshot(s)"

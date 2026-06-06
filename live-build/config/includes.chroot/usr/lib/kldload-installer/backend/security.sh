@@ -22,7 +22,7 @@ security_apply_holds() {
     local pref_dir="${target}/etc/apt/preferences.d"
     run mkdir -p "$pref_dir"
 
-    cat > "${pref_dir}/kldload-platform.pref" <<'EOF'
+    cat >"${pref_dir}/kldload-platform.pref" <<'EOF'
 # KLDload platform hold — managed by installer
 # These packages are pinned at priority 1001 to prevent automatic upgrades.
 # Use kldload-upgrade to perform controlled system upgrades.
@@ -77,7 +77,7 @@ security_configure_ssh() {
     local sshd_dir="${target}/etc/ssh/sshd_config.d"
     run mkdir -p "$sshd_dir"
 
-    cat > "${sshd_dir}/99-kldload.conf" <<'EOF'
+    cat >"${sshd_dir}/99-kldload.conf" <<'EOF'
 # KLDload SSH hardening — managed by installer
 # Drop-in for /etc/ssh/sshd_config
 

@@ -18,8 +18,8 @@ disk_part_suffix() {
     local base
     base="$(basename "$dev")"
     case "$base" in
-        nvme*|mmcblk*|loop*) echo "p" ;;
-        *)                   echo "" ;;
+    nvme* | mmcblk* | loop*) echo "p" ;;
+    *) echo "" ;;
     esac
 }
 
@@ -54,7 +54,7 @@ partition_disk_single() {
 
     run sgdisk \
         -n "1:0:+512M" -t "1:EF00" -c "1:EFI" \
-        -n "2:0:0"     -t "2:BF01" -c "2:ZFS" \
+        -n "2:0:0" -t "2:BF01" -c "2:ZFS" \
         "$dev"
 
     run partprobe "$dev" 2>/dev/null || run blockdev --rereadpt "$dev" 2>/dev/null || true
@@ -322,67 +322,67 @@ storage_zfs_install() {
     suffix="$(disk_part_suffix "$disk")"
 
     case "$mode" in
-        single|encrypted-single)
-            local is_enc="false"
-            [[ "$mode" == encrypted-* ]] && is_enc="true"
+    single | encrypted-single)
+        local is_enc="false"
+        [[ "$mode" == encrypted-* ]] && is_enc="true"
 
-            wipe_disk "$disk"
-            partition_disk_single "$disk"
+        wipe_disk "$disk"
+        partition_disk_single "$disk"
 
-            local efi_part="${disk}${suffix}1"
-            local zfs_part="${disk}${suffix}2"
+        local efi_part="${disk}${suffix}1"
+        local zfs_part="${disk}${suffix}2"
 
-            create_rpool_single "$zfs_part" "$is_enc" "$passphrase"
-            create_datasets "$hostname"
-            mount_efi "$efi_part"
-            write_hostid
-            # Stage passphrase for firstboot clevis sealing (encrypted pools only)
-            if [[ "$is_enc" == "true" && -n "$passphrase" ]]; then
-                mkdir -p "${KLDLOAD_TARGET}/etc/kldload"
-                printf '%s' "$passphrase" > "${KLDLOAD_TARGET}/etc/kldload/zfs-passphrase"
-                chmod 600 "${KLDLOAD_TARGET}/etc/kldload/zfs-passphrase"
-                log "ZFS passphrase staged at ${KLDLOAD_TARGET}/etc/kldload/zfs-passphrase (firstboot will seal and shred)"
-            fi
-            ;;
+        create_rpool_single "$zfs_part" "$is_enc" "$passphrase"
+        create_datasets "$hostname"
+        mount_efi "$efi_part"
+        write_hostid
+        # Stage passphrase for firstboot clevis sealing (encrypted pools only)
+        if [[ "$is_enc" == "true" && -n "$passphrase" ]]; then
+            mkdir -p "${KLDLOAD_TARGET}/etc/kldload"
+            printf '%s' "$passphrase" >"${KLDLOAD_TARGET}/etc/kldload/zfs-passphrase"
+            chmod 600 "${KLDLOAD_TARGET}/etc/kldload/zfs-passphrase"
+            log "ZFS passphrase staged at ${KLDLOAD_TARGET}/etc/kldload/zfs-passphrase (firstboot will seal and shred)"
+        fi
+        ;;
 
-        mirror|encrypted-mirror)
-            local is_enc="false"
-            [[ "$mode" == encrypted-* ]] && is_enc="true"
+    mirror | encrypted-mirror)
+        local is_enc="false"
+        [[ "$mode" == encrypted-* ]] && is_enc="true"
 
-            # For mirror mode, disk should be "disk1,disk2"
-            local disk1 disk2
-            IFS=',' read -r disk1 disk2 <<< "$disk"
-            [[ -n "$disk1" && -n "$disk2" ]] \
-                || die "Mirror mode requires two disks specified as 'disk1,disk2'"
+        # For mirror mode, disk should be "disk1,disk2"
+        local disk1 disk2
+        IFS=',' read -r disk1 disk2 <<<"$disk"
+        [[ -n "$disk1" && -n "$disk2" ]] ||
+            die "Mirror mode requires two disks specified as 'disk1,disk2'"
 
-            local suffix1 suffix2
-            suffix1="$(disk_part_suffix "$disk1")"
-            suffix2="$(disk_part_suffix "$disk2")"
+        local suffix1 suffix2
+        suffix1="$(disk_part_suffix "$disk1")"
+        suffix2="$(disk_part_suffix "$disk2")"
 
-            wipe_disk "$disk1"
-            wipe_disk "$disk2"
-            partition_disk_mirror "$disk1" "$disk2"
+        wipe_disk "$disk1"
+        wipe_disk "$disk2"
+        partition_disk_mirror "$disk1" "$disk2"
 
-            local efi_part1="${disk1}${suffix1}1"
-            local zfs_part1="${disk1}${suffix1}2"
-            local zfs_part2="${disk2}${suffix2}2"
+        local efi_part1="${disk1}${suffix1}1"
+        local zfs_part1="${disk1}${suffix1}2"
+        local zfs_part2="${disk2}${suffix2}2"
 
-            create_rpool_mirror "$zfs_part1" "$zfs_part2" "$is_enc" "$passphrase"
-            create_datasets "$hostname"
-            mount_efi "$efi_part1"
-            write_hostid
-            # Stage passphrase for firstboot clevis sealing (encrypted pools only)
-            if [[ "$is_enc" == "true" && -n "$passphrase" ]]; then
-                mkdir -p "${KLDLOAD_TARGET}/etc/kldload"
-                printf '%s' "$passphrase" > "${KLDLOAD_TARGET}/etc/kldload/zfs-passphrase"
-                chmod 600 "${KLDLOAD_TARGET}/etc/kldload/zfs-passphrase"
-                log "ZFS passphrase staged at ${KLDLOAD_TARGET}/etc/kldload/zfs-passphrase (firstboot will seal and shred)"
-            fi
-            ;;
+        create_rpool_mirror "$zfs_part1" "$zfs_part2" "$is_enc" "$passphrase"
+        create_datasets "$hostname"
+        mount_efi "$efi_part1"
+        write_hostid
+        # Stage passphrase for firstboot clevis sealing (encrypted pools only)
+        if [[ "$is_enc" == "true" && -n "$passphrase" ]]; then
+            mkdir -p "${KLDLOAD_TARGET}/etc/kldload"
+            printf '%s' "$passphrase" >"${KLDLOAD_TARGET}/etc/kldload/zfs-passphrase"
+            chmod 600 "${KLDLOAD_TARGET}/etc/kldload/zfs-passphrase"
+            log "ZFS passphrase staged at ${KLDLOAD_TARGET}/etc/kldload/zfs-passphrase (firstboot will seal and shred)"
+        fi
+        ;;
 
-        *)
-            die "Unknown storage mode: $mode"
-            ;;
+    *)
+        die "Unknown storage mode: $mode"
+        ;;
     esac
 
     log "ZFS storage installation complete."

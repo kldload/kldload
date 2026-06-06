@@ -18,7 +18,7 @@ log() {
     msg="[$(date '+%Y-%m-%dT%H:%M:%S')] $*"
     echo "$msg" >&2
     if [[ -n "${KLDLOAD_LOG:-}" ]]; then
-        echo "$msg" >> "$KLDLOAD_LOG"
+        echo "$msg" >>"$KLDLOAD_LOG"
     fi
 }
 
@@ -41,8 +41,8 @@ die() {
 
 need_cmd() {
     local cmd="$1"
-    command -v "$cmd" >/dev/null 2>&1 \
-        || die "Required command not found: $cmd"
+    command -v "$cmd" >/dev/null 2>&1 ||
+        die "Required command not found: $cmd"
 }
 
 # ---------------------------------------------------------------------------
@@ -50,8 +50,8 @@ need_cmd() {
 # ---------------------------------------------------------------------------
 
 require_root() {
-    [[ "$(id -u)" -eq 0 ]] \
-        || die "This operation requires root privileges. Run as root or with sudo."
+    [[ "$(id -u)" -eq 0 ]] ||
+        die "This operation requires root privileges. Run as root or with sudo."
 }
 
 # ---------------------------------------------------------------------------
@@ -83,7 +83,7 @@ in_chroot() {
 bool() {
     local val="${1:-}"
     case "${val,,}" in
-        1|true|yes|on) return 0 ;;
-        *)             return 1 ;;
+    1 | true | yes | on) return 0 ;;
+    *) return 1 ;;
     esac
 }

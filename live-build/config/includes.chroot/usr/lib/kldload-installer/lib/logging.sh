@@ -15,12 +15,12 @@ KLDLOAD_NETWORK_LOG="${KLDLOAD_LOG_DIR}/network.log"
 KLDLOAD_BOOTSTRAP_LOG="${KLDLOAD_LOG_DIR}/bootstrap.log"
 
 k_log_section() {
-  local title="$1"
-  k_log "========== ${title} =========="
+    local title="$1"
+    k_log "========== ${title} =========="
 }
 
 k_log_to() {
-  local logfile="$1"
-  shift
-  printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$logfile" >&2
+    local logfile="$1"
+    shift
+    printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$logfile" >&2
 }

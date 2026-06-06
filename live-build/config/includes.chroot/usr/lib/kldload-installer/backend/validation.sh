@@ -10,17 +10,17 @@
 
 validate_disk() {
     local dev="$1"
-    [[ -n "$dev" ]] \
-        || die "validate_disk: no device specified"
+    [[ -n "$dev" ]] ||
+        die "validate_disk: no device specified"
 
-    [[ -b "$dev" ]] \
-        || die "Not a block device: $dev"
+    [[ -b "$dev" ]] ||
+        die "Not a block device: $dev"
 
     # Refuse to use partitions — must be a whole disk
     local type
     type="$(lsblk -dn -o TYPE "$dev" 2>/dev/null || true)"
-    [[ "$type" == "disk" ]] \
-        || die "Device is not a whole disk (type=$type): $dev"
+    [[ "$type" == "disk" ]] ||
+        die "Device is not a whole disk (type=$type): $dev"
 
     # Refuse to target the disk that holds the current root filesystem
     local root_src parent
@@ -43,8 +43,8 @@ validate_disk() {
 validate_profile() {
     local p="$1"
     case "$p" in
-        server|desktop) ;;
-        *) die "Invalid profile '$p'. Must be 'server' or 'desktop'." ;;
+    server | desktop) ;;
+    *) die "Invalid profile '$p'. Must be 'server' or 'desktop'." ;;
     esac
 }
 
@@ -54,16 +54,16 @@ validate_profile() {
 
 validate_hostname() {
     local h="$1"
-    [[ -n "$h" ]] \
-        || die "Hostname cannot be empty."
+    [[ -n "$h" ]] ||
+        die "Hostname cannot be empty."
 
     # RFC 1123: labels 1-63 chars, alphanumeric + hyphens, no leading/trailing hyphens
     if ! echo "$h" | grep -qE '^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$'; then
         die "Invalid hostname '$h'. Must be valid RFC 1123 hostname."
     fi
 
-    [[ "${#h}" -le 253 ]] \
-        || die "Hostname too long (${#h} chars, max 253): $h"
+    [[ "${#h}" -le 253 ]] ||
+        die "Hostname too long (${#h} chars, max 253): $h"
 }
 
 # ---------------------------------------------------------------------------
@@ -72,8 +72,8 @@ validate_hostname() {
 
 validate_username() {
     local u="$1"
-    [[ -n "$u" ]] \
-        || die "Username cannot be empty."
+    [[ -n "$u" ]] ||
+        die "Username cannot be empty."
 
     # POSIX: lowercase letters, digits, hyphens, underscores; start with letter
     if ! echo "$u" | grep -qE '^[a-z][a-z0-9_-]{0,31}$'; then
@@ -82,10 +82,10 @@ validate_username() {
 
     # Refuse reserved system usernames
     case "$u" in
-        root|daemon|bin|sys|sync|games|man|lp|mail|news|uucp|proxy| \
-        www-data|backup|list|irc|gnats|nobody|systemd-*|_*)
-            die "Reserved username not allowed: $u"
-            ;;
+    root | daemon | bin | sys | sync | games | man | lp | mail | news | uucp | proxy | \
+        www-data | backup | list | irc | gnats | nobody | systemd-* | _*)
+        die "Reserved username not allowed: $u"
+        ;;
     esac
 }
 
@@ -95,8 +95,8 @@ validate_username() {
 
 validate_password() {
     local p="$1"
-    [[ -n "$p" ]] \
-        || die "Password cannot be empty."
+    [[ -n "$p" ]] ||
+        die "Password cannot be empty."
 }
 
 # ---------------------------------------------------------------------------
@@ -106,8 +106,8 @@ validate_password() {
 validate_storage_mode() {
     local m="$1"
     case "$m" in
-        single|mirror|encrypted-single|encrypted-mirror) ;;
-        *) die "Invalid storage mode '$m'. Must be: single, mirror, encrypted-single, encrypted-mirror." ;;
+    single | mirror | encrypted-single | encrypted-mirror) ;;
+    *) die "Invalid storage mode '$m'. Must be: single, mirror, encrypted-single, encrypted-mirror." ;;
     esac
 }
 
@@ -119,8 +119,8 @@ preflight_check() {
     log_section "Preflight checks"
 
     # Must boot in EFI mode
-    detect_efi \
-        || die "EFI firmware not detected. KLDload requires UEFI boot mode."
+    detect_efi ||
+        die "EFI firmware not detected. KLDload requires UEFI boot mode."
     log "EFI firmware: OK"
 
     # Required commands

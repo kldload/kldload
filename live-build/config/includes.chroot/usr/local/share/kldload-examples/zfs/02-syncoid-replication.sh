@@ -18,28 +18,28 @@ set -euo pipefail
 SOURCE_DATASET="rpool/myapp/data"
 
 # Choose ONE:
-TARGET="backup/myapp/data"                      # LOCAL: second zpool on this host
+TARGET="backup/myapp/data" # LOCAL: second zpool on this host
 # TARGET="root@backup-host:backup/myapp/data"   # REMOTE: another kldload box over ssh
 
 # Optional tuning
-NO_SYNC_SNAP=""             # set to --no-sync-snap to skip the "syncoid_" working snapshot
-QUIET=""                    # set to --quiet for cron logs (default verbose)
+NO_SYNC_SNAP="" # set to --no-sync-snap to skip the "syncoid_" working snapshot
+QUIET=""        # set to --quiet for cron logs (default verbose)
 
 # ── Pre-flight ────────────────────────────────────────────────────────
 if [[ "$TARGET" == *":"* ]]; then
-  # Remote target — verify SSH reachability
-  REMOTE_HOST="${TARGET%%:*}"
-  REMOTE_DS="${TARGET#*:}"
-  ssh -o ConnectTimeout=5 -o BatchMode=yes "$REMOTE_HOST" "zfs list $(dirname $REMOTE_DS) >/dev/null 2>&1" || {
-    echo "ERROR: cannot reach $REMOTE_HOST or parent dataset doesn't exist on remote"
-    exit 1
-  }
+    # Remote target — verify SSH reachability
+    REMOTE_HOST="${TARGET%%:*}"
+    REMOTE_DS="${TARGET#*:}"
+    ssh -o ConnectTimeout=5 -o BatchMode=yes "$REMOTE_HOST" "zfs list $(dirname $REMOTE_DS) >/dev/null 2>&1" || {
+        echo "ERROR: cannot reach $REMOTE_HOST or parent dataset doesn't exist on remote"
+        exit 1
+    }
 else
-  # Local target — verify the parent pool exists
-  zfs list "$(dirname "$TARGET")" >/dev/null 2>&1 || {
-    echo "ERROR: target parent dataset $(dirname "$TARGET") doesn't exist (zfs create it first)"
-    exit 1
-  }
+    # Local target — verify the parent pool exists
+    zfs list "$(dirname "$TARGET")" >/dev/null 2>&1 || {
+        echo "ERROR: target parent dataset $(dirname "$TARGET") doesn't exist (zfs create it first)"
+        exit 1
+    }
 fi
 
 # ── Replicate ─────────────────────────────────────────────────────────

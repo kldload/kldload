@@ -46,11 +46,11 @@ bootstrap_bind_mounts() {
 
     log "Binding virtual filesystems into $target..."
 
-    run mount --bind /dev        "${target}/dev"
-    run mount --bind /dev/pts    "${target}/dev/pts"
-    run mount -t proc  proc      "${target}/proc"
-    run mount -t sysfs sysfs     "${target}/sys"
-    run mount -t tmpfs tmpfs     "${target}/run"
+    run mount --bind /dev "${target}/dev"
+    run mount --bind /dev/pts "${target}/dev/pts"
+    run mount -t proc proc "${target}/proc"
+    run mount -t sysfs sysfs "${target}/sys"
+    run mount -t tmpfs tmpfs "${target}/run"
 
     log "Bind mounts complete."
 }
@@ -69,8 +69,8 @@ bootstrap_unbind_mounts() {
 
     # Reverse order of mounting
     for mnt in run sys proc dev/pts dev; do
-        umount "${target}/${mnt}" 2>/dev/null || \
-        umount -l "${target}/${mnt}" 2>/dev/null || true
+        umount "${target}/${mnt}" 2>/dev/null ||
+            umount -l "${target}/${mnt}" 2>/dev/null || true
     done
 
     log "Unmount complete."
@@ -87,7 +87,7 @@ bootstrap_write_sources() {
 
     log "Writing /etc/apt/sources.list in $target..."
 
-    cat > "${target}/etc/apt/sources.list" <<EOF
+    cat >"${target}/etc/apt/sources.list" <<EOF
 # KLDload APT sources — Debian ${KLDLOAD_DEBIAN_RELEASE}
 deb ${KLDLOAD_DEBIAN_MIRROR} ${KLDLOAD_DEBIAN_RELEASE} main contrib non-free non-free-firmware
 deb ${KLDLOAD_DEBIAN_MIRROR} ${KLDLOAD_DEBIAN_RELEASE}-updates main contrib non-free non-free-firmware
@@ -106,7 +106,7 @@ bootstrap_install_packages() {
     local target="$1"
     local profile="$2"
 
-    [[ -n "$target"  ]] || die "bootstrap_install_packages: target required"
+    [[ -n "$target" ]] || die "bootstrap_install_packages: target required"
     [[ -n "$profile" ]] || die "bootstrap_install_packages: profile required"
 
     log_section "Installing packages (profile: $profile)"
@@ -149,73 +149,73 @@ bootstrap_install_packages() {
 
     log "Installing base packages..."
     in_chroot "$target" \
-        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${base_pkgs[*]}" || \
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${base_pkgs[*]}" ||
         log "Some base packages failed — retrying individually..."
 
     # Secure Boot packages — shim (MS-signed bootloader), mokutil (MOK enrollment), sbsigntool (module signing)
     in_chroot "$target" \
-        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends shim-signed grub-efi-amd64-signed mokutil sbsigntool 2>/dev/null" || \
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends shim-signed grub-efi-amd64-signed mokutil sbsigntool 2>/dev/null" ||
         log "WARNING: Secure Boot packages failed — Secure Boot may not work"
 
     # Profile-specific packages
     case "$profile" in
-        desktop)
-            log "Installing desktop packages..."
-            local desktop_pkgs=(
-                task-gnome-desktop
-                gdm3
-                gnome-terminal
-                network-manager
-                network-manager-gnome
-                calamares
-                # vim-gtk3 ships /usr/bin/vim with GUI hooks (gvim) so the
-                # vim.desktop launcher actually opens a usable vim window
-                # on Debian targets. Pairs with vim-X11 on the RPM side.
-                vim-gtk3
-                # gnome-tweaks — the canonical GNOME power-user panel for
-                # fonts, workspace behaviour, extensions, top-bar tweaks.
-                gnome-tweaks
-                # flatpak — the cross-distro app runtime kldload uses to
-                # ship Steam (and any future Flatpak app). The actual
-                # Steam install happens at firstboot via `flatpak install
-                # com.valvesoftware.Steam` so the build stays offline.
-                flatpak
-            )
-            in_chroot "$target" \
-                "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${desktop_pkgs[*]}"
+    desktop)
+        log "Installing desktop packages..."
+        local desktop_pkgs=(
+            task-gnome-desktop
+            gdm3
+            gnome-terminal
+            network-manager
+            network-manager-gnome
+            calamares
+            # vim-gtk3 ships /usr/bin/vim with GUI hooks (gvim) so the
+            # vim.desktop launcher actually opens a usable vim window
+            # on Debian targets. Pairs with vim-X11 on the RPM side.
+            vim-gtk3
+            # gnome-tweaks — the canonical GNOME power-user panel for
+            # fonts, workspace behaviour, extensions, top-bar tweaks.
+            gnome-tweaks
+            # flatpak — the cross-distro app runtime kldload uses to
+            # ship Steam (and any future Flatpak app). The actual
+            # Steam install happens at firstboot via `flatpak install
+            # com.valvesoftware.Steam` so the build stays offline.
+            flatpak
+        )
+        in_chroot "$target" \
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${desktop_pkgs[*]}"
 
-            # ── Drop GNOME apps that duplicate kldload tooling or that user
-            # explicitly does not want in the app grid. task-gnome-desktop
-            # drags these in transitively even with --no-install-recommends,
-            # so we explicitly remove them post-install:
-            #   - simple-scan: scanner UI; kldload installs aren't scanner
-            #     appliances. Printing kept (cups).
-            #   - gnome-text-editor: the new GNOME 42+ "Text Editor"; gedit
-            #     stays as the canonical GTK editor + vim is added explicitly.
-            local desktop_drop_pkgs=(
-                simple-scan
-                gnome-text-editor
-            )
-            in_chroot "$target" \
-                "DEBIAN_FRONTEND=noninteractive apt-get remove -y ${desktop_drop_pkgs[*]} 2>/dev/null || true"
-            ;;
+        # ── Drop GNOME apps that duplicate kldload tooling or that user
+        # explicitly does not want in the app grid. task-gnome-desktop
+        # drags these in transitively even with --no-install-recommends,
+        # so we explicitly remove them post-install:
+        #   - simple-scan: scanner UI; kldload installs aren't scanner
+        #     appliances. Printing kept (cups).
+        #   - gnome-text-editor: the new GNOME 42+ "Text Editor"; gedit
+        #     stays as the canonical GTK editor + vim is added explicitly.
+        local desktop_drop_pkgs=(
+            simple-scan
+            gnome-text-editor
+        )
+        in_chroot "$target" \
+            "DEBIAN_FRONTEND=noninteractive apt-get remove -y ${desktop_drop_pkgs[*]} 2>/dev/null || true"
+        ;;
 
-        server)
-            log "Installing server packages..."
-            local server_pkgs=(
-                chrony
-                nftables
-                htop
-                ethtool
-                tcpdump
-            )
-            in_chroot "$target" \
-                "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${server_pkgs[*]}"
-            ;;
+    server)
+        log "Installing server packages..."
+        local server_pkgs=(
+            chrony
+            nftables
+            htop
+            ethtool
+            tcpdump
+        )
+        in_chroot "$target" \
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${server_pkgs[*]}"
+        ;;
 
-        *)
-            die "Unknown profile: $profile"
-            ;;
+    *)
+        die "Unknown profile: $profile"
+        ;;
     esac
 
     log "Package installation complete."
@@ -232,9 +232,9 @@ bootstrap_write_locale() {
 
     log "Configuring locale in $target..."
 
-    echo "en_US.UTF-8 UTF-8" > "${target}/etc/locale.gen"
+    echo "en_US.UTF-8 UTF-8" >"${target}/etc/locale.gen"
 
-    cat > "${target}/etc/default/locale" <<'EOF'
+    cat >"${target}/etc/default/locale" <<'EOF'
 LANG=en_US.UTF-8
 LANGUAGE=en_US:en
 LC_ALL=en_US.UTF-8
@@ -263,7 +263,7 @@ bootstrap_write_manifest() {
     local manifest_dir="${target}/etc/kldload"
     run mkdir -p "$manifest_dir"
 
-    cat > "${manifest_dir}/install-manifest.env" <<EOF
+    cat >"${manifest_dir}/install-manifest.env" <<EOF
 # KLDload Install Manifest
 # Generated by installer on $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
@@ -297,11 +297,11 @@ bootstrap_run() {
     local password="$5"
     local root_password="$6"
 
-    [[ -n "$target"        ]] || die "bootstrap_run: target required"
-    [[ -n "$profile"       ]] || die "bootstrap_run: profile required"
-    [[ -n "$hostname"      ]] || die "bootstrap_run: hostname required"
-    [[ -n "$username"      ]] || die "bootstrap_run: username required"
-    [[ -n "$password"      ]] || die "bootstrap_run: password required"
+    [[ -n "$target" ]] || die "bootstrap_run: target required"
+    [[ -n "$profile" ]] || die "bootstrap_run: profile required"
+    [[ -n "$hostname" ]] || die "bootstrap_run: hostname required"
+    [[ -n "$username" ]] || die "bootstrap_run: username required"
+    [[ -n "$password" ]] || die "bootstrap_run: password required"
     [[ -n "$root_password" ]] || die "bootstrap_run: root_password required"
 
     log_section "Bootstrap Run: profile=$profile hostname=$hostname"

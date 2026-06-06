@@ -21,7 +21,7 @@
 set -euo pipefail
 
 HOSTS_ARG="${1:?usage: $0 \"host1:lan_ip1 host2:lan_ip2 ...\"}"
-WG_NET="10.250.0"          # mesh network — /24
+WG_NET="10.250.0" # mesh network — /24
 WG_PORT=51820
 OUTDIR="./wg-mesh"
 
@@ -31,24 +31,27 @@ mkdir -p "$OUTDIR"
 declare -a NAMES IPS WG_IPS PRIVKEYS PUBKEYS
 i=1
 for spec in $HOSTS_ARG; do
-  NAMES+=("${spec%:*}")
-  IPS+=("${spec#*:}")
-  WG_IPS+=("${WG_NET}.${i}")
-  pk=$(wg genkey)
-  PRIVKEYS+=("$pk")
-  PUBKEYS+=("$(echo "$pk" | wg pubkey)")
-  i=$((i+1))
+    NAMES+=("${spec%:*}")
+    IPS+=("${spec#*:}")
+    WG_IPS+=("${WG_NET}.${i}")
+    pk=$(wg genkey)
+    PRIVKEYS+=("$pk")
+    PUBKEYS+=("$(echo "$pk" | wg pubkey)")
+    i=$((i + 1))
 done
 
 N=${#NAMES[@]}
 echo "Generating $N-host mesh on $WG_NET.0/24..."
 
 # Write one config per host
-for ((j=0; j<N; j++)); do
-  conf="$OUTDIR/${NAMES[$j]}.conf"
-  cat > "$conf" <<EOF
+for ((j = 0; j < N; j++)); do
+    conf="$OUTDIR/${NAMES[$j]}.conf"
+    cat >"$conf" <<EOF
 # wg-mesh.conf — kldload host ${NAMES[$j]}
-# Mesh peers: $(IFS=,; echo "${NAMES[*]}" | sed "s/${NAMES[$j]},\?//;s/,$//")
+# Mesh peers: $(
+        IFS=,
+        echo "${NAMES[*]}" | sed "s/${NAMES[$j]},\?//;s/,$//"
+    )
 # Activate:  systemctl enable --now wg-quick@wg-mesh
 
 [Interface]
@@ -59,9 +62,9 @@ PrivateKey = ${PRIVKEYS[$j]}
 # or kicking other services. Default: nothing.
 
 EOF
-  for ((k=0; k<N; k++)); do
-    [[ $j -eq $k ]] && continue
-    cat >> "$conf" <<EOF
+    for ((k = 0; k < N; k++)); do
+        [[ $j -eq $k ]] && continue
+        cat >>"$conf" <<EOF
 [Peer]
 # ${NAMES[$k]}
 PublicKey  = ${PUBKEYS[$k]}
@@ -69,15 +72,15 @@ Endpoint   = ${IPS[$k]}:$WG_PORT
 AllowedIPs = ${WG_IPS[$k]}/32
 PersistentKeepalive = 25
 EOF
-  done
-  echo "  wrote $conf"
+    done
+    echo "  wrote $conf"
 done
 
 echo
 echo "Done. Deploy each host's config + activate:"
-for ((j=0; j<N; j++)); do
-  echo "  scp $OUTDIR/${NAMES[$j]}.conf root@${IPS[$j]}:/etc/wireguard/wg-mesh.conf && \\"
-  echo "    ssh root@${IPS[$j]} 'chmod 600 /etc/wireguard/wg-mesh.conf && systemctl enable --now wg-quick@wg-mesh'"
+for ((j = 0; j < N; j++)); do
+    echo "  scp $OUTDIR/${NAMES[$j]}.conf root@${IPS[$j]}:/etc/wireguard/wg-mesh.conf && \\"
+    echo "    ssh root@${IPS[$j]} 'chmod 600 /etc/wireguard/wg-mesh.conf && systemctl enable --now wg-quick@wg-mesh'"
 done
 echo
 echo "Verify:  wg show wg-mesh   (run on any host)"

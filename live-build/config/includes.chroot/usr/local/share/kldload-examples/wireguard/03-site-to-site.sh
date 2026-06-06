@@ -22,11 +22,13 @@ WG_PORT=51820
 OUTDIR="./wg-s2s"
 mkdir -p "$OUTDIR"
 
-A_PRIV=$(wg genkey); A_PUB=$(echo "$A_PRIV" | wg pubkey)
-B_PRIV=$(wg genkey); B_PUB=$(echo "$B_PRIV" | wg pubkey)
+A_PRIV=$(wg genkey)
+A_PUB=$(echo "$A_PRIV" | wg pubkey)
+B_PRIV=$(wg genkey)
+B_PUB=$(echo "$B_PRIV" | wg pubkey)
 PSK=$(wg genpsk)
 
-cat > "$OUTDIR/${SITE_A_NAME}-wg0.conf" <<EOF
+cat >"$OUTDIR/${SITE_A_NAME}-wg0.conf" <<EOF
 # Site A — ${SITE_A_NAME} (LAN ${SITE_A_LAN})
 [Interface]
 Address    = ${SITE_A_WG_IP}/30
@@ -45,7 +47,7 @@ AllowedIPs   = ${SITE_B_LAN}, ${SITE_B_WG_IP}/32
 PersistentKeepalive = 25
 EOF
 
-cat > "$OUTDIR/${SITE_B_NAME}-wg0.conf" <<EOF
+cat >"$OUTDIR/${SITE_B_NAME}-wg0.conf" <<EOF
 # Site B — ${SITE_B_NAME} (LAN ${SITE_B_LAN})
 [Interface]
 Address    = ${SITE_B_WG_IP}/30

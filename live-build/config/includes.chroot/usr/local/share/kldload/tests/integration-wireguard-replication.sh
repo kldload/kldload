@@ -23,8 +23,14 @@ run_b() { $SSH ${USER}@${NODE_B} "echo '$PASS' | sudo -S bash -c '$1'" 2>/dev/nu
 
 PASS_COUNT=0
 FAIL_COUNT=0
-_pass() { PASS_COUNT=$((PASS_COUNT+1)); printf "\e[1;32m  ✓ PASS\e[0m  %s\n" "$1"; }
-_fail() { FAIL_COUNT=$((FAIL_COUNT+1)); printf "\e[1;31m  ✗ FAIL\e[0m  %s — %s\n" "$1" "$2"; }
+_pass() {
+    PASS_COUNT=$((PASS_COUNT + 1))
+    printf "\e[1;32m  ✓ PASS\e[0m  %s\n" "$1"
+}
+_fail() {
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    printf "\e[1;31m  ✗ FAIL\e[0m  %s — %s\n" "$1" "$2"
+}
 
 clear
 printf "\e[1;36m╔══════════════════════════════════════════════════════════╗\e[0m\n"
@@ -44,10 +50,10 @@ KEY_B_PRIV=$(run_b "wg genkey")
 KEY_B_PUB=$(echo "$KEY_B_PRIV" | $SSH ${USER}@${NODE_B} "echo '$PASS' | sudo -S wg pubkey" 2>/dev/null)
 
 if [[ -n "$KEY_A_PUB" && -n "$KEY_B_PUB" ]]; then
-  _pass "Keys generated (A: ${KEY_A_PUB:0:8}... B: ${KEY_B_PUB:0:8}...)"
+    _pass "Keys generated (A: ${KEY_A_PUB:0:8}... B: ${KEY_B_PUB:0:8}...)"
 else
-  _fail "Key generation" "failed to generate WireGuard keys"
-  exit 1
+    _fail "Key generation" "failed to generate WireGuard keys"
+    exit 1
 fi
 
 # ── Step 2: Configure WireGuard on both nodes ────────────────────────────────
@@ -92,23 +98,23 @@ sleep 3
 
 # Test connectivity
 if run_a "ping -c 2 -W 3 ${WG_B}" | grep -q "2 received"; then
-  _pass "Node A can ping Node B over WireGuard (${WG_A} → ${WG_B})"
+    _pass "Node A can ping Node B over WireGuard (${WG_A} → ${WG_B})"
 else
-  _fail "WireGuard connectivity" "ping from A to B failed"
+    _fail "WireGuard connectivity" "ping from A to B failed"
 fi
 
 if run_b "ping -c 2 -W 3 ${WG_A}" | grep -q "2 received"; then
-  _pass "Node B can ping Node A over WireGuard (${WG_B} → ${WG_A})"
+    _pass "Node B can ping Node A over WireGuard (${WG_B} → ${WG_A})"
 else
-  _fail "WireGuard connectivity" "ping from B to A failed"
+    _fail "WireGuard connectivity" "ping from B to A failed"
 fi
 
 # Check handshakes
 HANDSHAKE_A=$(run_a "wg show wg0 latest-handshakes | awk '{print \$2}'")
 if [[ -n "$HANDSHAKE_A" && "$HANDSHAKE_A" != "0" ]]; then
-  _pass "WireGuard handshake established"
+    _pass "WireGuard handshake established"
 else
-  _fail "WireGuard handshake" "no handshake detected"
+    _fail "WireGuard handshake" "no handshake detected"
 fi
 
 # ── Step 4: Set up SSH keys for replication ──────────────────────────────────
@@ -121,9 +127,9 @@ _pass "SSH key distributed (A → B)"
 
 # Test SSH over WireGuard
 if run_a "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@${WG_B} echo ok 2>/dev/null" | grep -q "ok"; then
-  _pass "SSH over WireGuard works (A → B via ${WG_B})"
+    _pass "SSH over WireGuard works (A → B via ${WG_B})"
 else
-  _fail "SSH over WireGuard" "cannot SSH from A to B over tunnel"
+    _fail "SSH over WireGuard" "cannot SSH from A to B over tunnel"
 fi
 
 # ── Step 5: Create test data on Node A ───────────────────────────────────────
@@ -143,20 +149,20 @@ printf "\n\e[1;36m  ── Step 6: Replicate over WireGuard tunnel ────�
 
 REPL_START=$(date +%s)
 if run_a "zfs send rpool/srv/repltest@test1 | ssh -o StrictHostKeyChecking=no root@${WG_B} zfs receive -F rpool/srv/repltest-replica 2>&1"; then
-  REPL_END=$(date +%s)
-  REPL_TIME=$((REPL_END - REPL_START))
-  _pass "ZFS replication completed in ${REPL_TIME}s over WireGuard"
+    REPL_END=$(date +%s)
+    REPL_TIME=$((REPL_END - REPL_START))
+    _pass "ZFS replication completed in ${REPL_TIME}s over WireGuard"
 else
-  _fail "ZFS replication" "zfs send | ssh zfs receive failed"
+    _fail "ZFS replication" "zfs send | ssh zfs receive failed"
 fi
 
 # ── Step 7: Verify replicated data ──────────────────────────────────────────
 printf "\n\e[1;36m  ── Step 7: Verify replicated data on Node B ─────────────\e[0m\n"
 
 if run_b "zfs list rpool/srv/repltest-replica" >/dev/null 2>&1; then
-  _pass "Replica dataset exists on Node B"
+    _pass "Replica dataset exists on Node B"
 else
-  _fail "Replica dataset" "rpool/srv/repltest-replica not found on Node B"
+    _fail "Replica dataset" "rpool/srv/repltest-replica not found on Node B"
 fi
 
 # Verify file content matches
@@ -164,18 +170,18 @@ HASH_A=$(run_a "sha256sum /srv/repltest/testfile.txt | awk '{print \$1}'")
 HASH_B=$(run_b "sha256sum /srv/repltest-replica/testfile.txt | awk '{print \$1}'")
 
 if [[ "$HASH_A" == "$HASH_B" && -n "$HASH_A" ]]; then
-  _pass "File checksum matches (${HASH_A:0:16}...)"
+    _pass "File checksum matches (${HASH_A:0:16}...)"
 else
-  _fail "File checksum" "A=${HASH_A:0:16} B=${HASH_B:0:16} — data mismatch"
+    _fail "File checksum" "A=${HASH_A:0:16} B=${HASH_B:0:16} — data mismatch"
 fi
 
 HASH_BIN_A=$(run_a "sha256sum /srv/repltest/random.bin | awk '{print \$1}'")
 HASH_BIN_B=$(run_b "sha256sum /srv/repltest-replica/random.bin | awk '{print \$1}'")
 
 if [[ "$HASH_BIN_A" == "$HASH_BIN_B" && -n "$HASH_BIN_A" ]]; then
-  _pass "Binary file checksum matches (5MB random data)"
+    _pass "Binary file checksum matches (5MB random data)"
 else
-  _fail "Binary checksum" "data mismatch on random.bin"
+    _fail "Binary checksum" "data mismatch on random.bin"
 fi
 
 SIZE_B=$(run_b "du -sh /srv/repltest-replica/ | cut -f1")
@@ -188,9 +194,9 @@ run_a "echo 'incremental update - $(date)' >> /srv/repltest/testfile.txt"
 run_a "zfs snapshot rpool/srv/repltest@test2"
 
 if run_a "zfs send -i rpool/srv/repltest@test1 rpool/srv/repltest@test2 | ssh -o StrictHostKeyChecking=no root@${WG_B} zfs receive -F rpool/srv/repltest-replica 2>&1"; then
-  _pass "Incremental replication succeeded (@test1 → @test2)"
+    _pass "Incremental replication succeeded (@test1 → @test2)"
 else
-  _fail "Incremental replication" "failed"
+    _fail "Incremental replication" "failed"
 fi
 
 # Verify incremental data
@@ -198,9 +204,9 @@ HASH_A2=$(run_a "sha256sum /srv/repltest/testfile.txt | awk '{print \$1}'")
 HASH_B2=$(run_b "sha256sum /srv/repltest-replica/testfile.txt | awk '{print \$1}'")
 
 if [[ "$HASH_A2" == "$HASH_B2" && -n "$HASH_A2" ]]; then
-  _pass "Incremental data verified"
+    _pass "Incremental data verified"
 else
-  _fail "Incremental verification" "checksums don't match after incremental send"
+    _fail "Incremental verification" "checksums don't match after incremental send"
 fi
 
 # ── Step 9: Cleanup ──────────────────────────────────────────────────────────
@@ -222,8 +228,8 @@ printf "  \e[1mResults:\e[0m  %d passed  " "$PASS_COUNT"
 printf "(%d total)\n" "$TOTAL"
 
 if [[ $FAIL_COUNT -eq 0 ]]; then
-  printf "\n  \e[1;32m✓ FULL STACK VERIFIED: WireGuard tunnel + ZFS replication\e[0m\n"
-  printf "  \e[1;32m  Two kldloadOS nodes, encrypted backplane, data replicated.\e[0m\n"
+    printf "\n  \e[1;32m✓ FULL STACK VERIFIED: WireGuard tunnel + ZFS replication\e[0m\n"
+    printf "  \e[1;32m  Two kldloadOS nodes, encrypted backplane, data replicated.\e[0m\n"
 fi
 printf "\e[1;36m  ══════════════════════════════════════════════════════════\e[0m\n\n"
 

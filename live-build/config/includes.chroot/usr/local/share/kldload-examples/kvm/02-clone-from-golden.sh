@@ -26,15 +26,15 @@ NEW_DATASET="rpool/vm/${VM_NAME}"
 IMAGES_DIR=/var/lib/libvirt/images
 
 if ! zfs list -t snapshot "$GOLDEN" >/dev/null 2>&1; then
-  echo "ERROR: golden snapshot $GOLDEN doesn't exist."
-  echo "Available kldload goldens:"
-  zfs list -t snapshot -o name 2>/dev/null | grep "goldens" | sed 's/^/  /'
-  exit 1
+    echo "ERROR: golden snapshot $GOLDEN doesn't exist."
+    echo "Available kldload goldens:"
+    zfs list -t snapshot -o name 2>/dev/null | grep "goldens" | sed 's/^/  /'
+    exit 1
 fi
 
 if zfs list "$NEW_DATASET" >/dev/null 2>&1; then
-  echo "ERROR: $NEW_DATASET already exists. Destroy with: zfs destroy -r $NEW_DATASET"
-  exit 1
+    echo "ERROR: $NEW_DATASET already exists. Destroy with: zfs destroy -r $NEW_DATASET"
+    exit 1
 fi
 
 echo "[1/4] Cloning $GOLDEN → $NEW_DATASET"
@@ -48,38 +48,38 @@ printf "      done in %.3f seconds\n" "$(echo "$END - $START" | bc)"
 # Adjust the path based on how the golden was built.
 echo "[2/4] Resolving cloned image path"
 if [[ -f "/${NEW_DATASET}/disk.qcow2" ]]; then
-  IMG="/${NEW_DATASET}/disk.qcow2"
+    IMG="/${NEW_DATASET}/disk.qcow2"
 elif [[ -e "/dev/zvol/${NEW_DATASET}" ]]; then
-  IMG="/dev/zvol/${NEW_DATASET}"
+    IMG="/dev/zvol/${NEW_DATASET}"
 else
-  echo "  warning: couldn't find disk.qcow2 or zvol — check zfs list -r $NEW_DATASET"
-  exit 1
+    echo "  warning: couldn't find disk.qcow2 or zvol — check zfs list -r $NEW_DATASET"
+    exit 1
 fi
 echo "      using $IMG"
 
 echo "[3/4] virt-install --import $IMG"
 virt-install \
-  --name "$VM_NAME" \
-  --memory 2048 --vcpus 2 \
-  --osinfo debian13 \
-  --disk path="$IMG",bus=virtio \
-  --network network=default,model=virtio \
-  --graphics none \
-  --console pty,target_type=serial \
-  --noautoconsole \
-  --import
+    --name "$VM_NAME" \
+    --memory 2048 --vcpus 2 \
+    --osinfo debian13 \
+    --disk path="$IMG",bus=virtio \
+    --network network=default,model=virtio \
+    --graphics none \
+    --console pty,target_type=serial \
+    --noautoconsole \
+    --import
 
 echo "[4/4] Waiting for DHCP lease..."
 for _ in $(seq 1 30); do
-  ip=$(virsh net-dhcp-leases default 2>/dev/null | awk -v vm="$VM_NAME" '$0 ~ vm {print $5}' | cut -d/ -f1)
-  [[ -n "$ip" ]] && break
-  sleep 2
+    ip=$(virsh net-dhcp-leases default 2>/dev/null | awk -v vm="$VM_NAME" '$0 ~ vm {print $5}' | cut -d/ -f1)
+    [[ -n "$ip" ]] && break
+    sleep 2
 done
 
 if [[ -n "${ip:-}" ]]; then
-  echo "READY: $VM_NAME at $ip"
-  echo "       virsh console $VM_NAME    (Ctrl-] to detach)"
-  echo "       ssh admin@$ip"
+    echo "READY: $VM_NAME at $ip"
+    echo "       virsh console $VM_NAME    (Ctrl-] to detach)"
+    echo "       ssh admin@$ip"
 else
-  echo "READY but no DHCP lease yet — virsh console $VM_NAME to investigate"
+    echo "READY but no DHCP lease yet — virsh console $VM_NAME to investigate"
 fi

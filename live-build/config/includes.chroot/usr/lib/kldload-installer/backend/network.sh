@@ -16,14 +16,14 @@ network_write_hostname() {
     local target="$1"
     local hostname="$2"
 
-    [[ -n "$target"   ]] || die "network_write_hostname: target required"
+    [[ -n "$target" ]] || die "network_write_hostname: target required"
     [[ -n "$hostname" ]] || die "network_write_hostname: hostname required"
 
     log "Writing hostname: $hostname"
 
-    echo "$hostname" > "${target}/etc/hostname"
+    echo "$hostname" >"${target}/etc/hostname"
 
-    cat > "${target}/etc/hosts" <<EOF
+    cat >"${target}/etc/hosts" <<EOF
 127.0.0.1   localhost
 127.0.1.1   ${hostname}
 
@@ -62,7 +62,7 @@ network_write_resolv() {
 
     log "Writing /etc/resolv.conf in $target..."
 
-    cat > "${target}/etc/resolv.conf" <<'EOF'
+    cat >"${target}/etc/resolv.conf" <<'EOF'
 # KLDload default resolv.conf — replaced by NetworkManager/systemd-resolved at runtime
 nameserver 1.1.1.1
 nameserver 8.8.8.8

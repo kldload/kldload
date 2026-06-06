@@ -17,7 +17,10 @@ _bootenv_active_dataset() {
     if [[ -f "$marker" ]]; then
         local ds
         ds="$(cat "$marker")"
-        [[ -n "$ds" ]] && { echo "$ds"; return 0; }
+        [[ -n "$ds" ]] && {
+            echo "$ds"
+            return 0
+        }
     fi
     echo "rpool/ROOT/default"
 }
@@ -37,7 +40,10 @@ _find_zbm_efi() {
     )
 
     for p in "${candidates[@]}"; do
-        [[ -f "$p" ]] && { echo "$p"; return 0; }
+        [[ -f "$p" ]] && {
+            echo "$p"
+            return 0
+        }
     done
 
     # Fallback: search installed package files
@@ -64,8 +70,8 @@ bootenv_install() {
     # Find ZBM EFI binary
     local zbm_src
     zbm_src="$(_find_zbm_efi)"
-    [[ -n "$zbm_src" && -f "$zbm_src" ]] \
-        || die "ZFSBootMenu EFI binary not found. Is zfsbootmenu installed?"
+    [[ -n "$zbm_src" && -f "$zbm_src" ]] ||
+        die "ZFSBootMenu EFI binary not found. Is zfsbootmenu installed?"
 
     log "ZBM EFI source: $zbm_src"
 
@@ -76,8 +82,8 @@ bootenv_install() {
     run mkdir -p "$efi_dir"
     run cp "$zbm_src" "$zbm_dest"
 
-    [[ -f "$zbm_dest" ]] \
-        || die "ZBM EFI copy failed: $zbm_dest not found after copy."
+    [[ -f "$zbm_dest" ]] ||
+        die "ZBM EFI copy failed: $zbm_dest not found after copy."
 
     log "ZBM EFI installed: $zbm_dest"
 
@@ -123,7 +129,7 @@ bootenv_install() {
     # Write ZFSBootMenu config in target
     local zbm_conf_dir="${target}/etc/zfsbootmenu"
     run mkdir -p "$zbm_conf_dir"
-    cat > "${zbm_conf_dir}/config.yaml" <<'EOF'
+    cat >"${zbm_conf_dir}/config.yaml" <<'EOF'
 Global:
   ManageImages: true
   BootMountPoint: /boot/efi
@@ -157,7 +163,7 @@ EOF
 # ---------------------------------------------------------------------------
 
 bootenv_list() {
-    zfs list -H -r -t filesystem rpool/ROOT 2>/dev/null | \
+    zfs list -H -r -t filesystem rpool/ROOT 2>/dev/null |
         awk 'NR>0 {print $1}' || true
 }
 

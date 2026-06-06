@@ -12,30 +12,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # leave the file stale.
 PROFILE=""
 if [[ -r /etc/kldload/profile ]]; then
-  PROFILE="$(tr -d '[:space:]' </etc/kldload/profile)"
+    PROFILE="$(tr -d '[:space:]' </etc/kldload/profile)"
 fi
 if [[ -z "$PROFILE" ]]; then
-  if command -v gnome-shell >/dev/null 2>&1; then
-    PROFILE="desktop"
-  elif command -v virsh >/dev/null 2>&1 \
-       && systemctl is-enabled libvirtd >/dev/null 2>&1; then
-    # KVM profile — libvirtd enabled. Earlier this script collapsed kvm
-    # into "server" and silently skipped the libvirtd / virbr0 / kube-*
-    # checks, hiding regressions in those layers.
-    PROFILE="kvm"
-  elif command -v kst >/dev/null 2>&1; then
-    PROFILE="server"
-  else
-    PROFILE="core"
-  fi
+    if command -v gnome-shell >/dev/null 2>&1; then
+        PROFILE="desktop"
+    elif command -v virsh >/dev/null 2>&1 &&
+        systemctl is-enabled libvirtd >/dev/null 2>&1; then
+        # KVM profile — libvirtd enabled. Earlier this script collapsed kvm
+        # into "server" and silently skipped the libvirtd / virbr0 / kube-*
+        # checks, hiding regressions in those layers.
+        PROFILE="kvm"
+    elif command -v kst >/dev/null 2>&1; then
+        PROFILE="server"
+    else
+        PROFILE="core"
+    fi
 fi
 
 echo "Detected profile: $PROFILE"
 echo ""
 
 if [[ ! -x "${SCRIPT_DIR}/smoke-${PROFILE}.sh" ]]; then
-  echo "no smoke-${PROFILE}.sh present — falling back to smoke-core.sh" >&2
-  PROFILE="core"
+    echo "no smoke-${PROFILE}.sh present — falling back to smoke-core.sh" >&2
+    PROFILE="core"
 fi
 
 exec bash "${SCRIPT_DIR}/smoke-${PROFILE}.sh"

@@ -14,26 +14,26 @@ set -euo pipefail
 
 PEER_NAME="${1:?usage: $0 <peer-name>}"
 WG_IF=wg0
-WG_NET=10.250.1                       # peer network — /24
+WG_NET=10.250.1 # peer network — /24
 WG_PORT=51820
-LAN_BEHIND_HOST="192.168.1.0/24"      # what the peer can reach via you
-DNS_SERVER="10.250.1.1"               # this box acts as DNS for peers
+LAN_BEHIND_HOST="192.168.1.0/24" # what the peer can reach via you
+DNS_SERVER="10.250.1.1"          # this box acts as DNS for peers
 HOST_PUBLIC_IP="${PUBLIC_IP:-$(curl -s https://api.ipify.org)}"
 HOST_PUBKEY="${HOST_PUBKEY:-$(sudo wg show $WG_IF public-key 2>/dev/null)}"
 
 if [[ -z "$HOST_PUBKEY" ]]; then
-  echo "ERROR: $WG_IF not configured on this host. Set up the WG endpoint first:"
-  echo "       sudo bash -c 'umask 077; wg genkey | tee /etc/wireguard/wg0.key | wg pubkey > /etc/wireguard/wg0.pub'"
-  echo "       sudo cp /etc/wireguard/wg0.tpl /etc/wireguard/wg0.conf"
-  echo "       sudo systemctl enable --now wg-quick@wg0"
-  exit 1
+    echo "ERROR: $WG_IF not configured on this host. Set up the WG endpoint first:"
+    echo "       sudo bash -c 'umask 077; wg genkey | tee /etc/wireguard/wg0.key | wg pubkey > /etc/wireguard/wg0.pub'"
+    echo "       sudo cp /etc/wireguard/wg0.tpl /etc/wireguard/wg0.conf"
+    echo "       sudo systemctl enable --now wg-quick@wg0"
+    exit 1
 fi
 
 # Find next free /32 in the peer subnet
 USED=$(sudo wg show $WG_IF allowed-ips 2>/dev/null | grep -oE "${WG_NET//./\\.}\.[0-9]+" | sort -u)
 NEXT=2
 while echo "$USED" | grep -qx "${WG_NET}.${NEXT}"; do
-  NEXT=$((NEXT + 1))
+    NEXT=$((NEXT + 1))
 done
 PEER_IP="${WG_NET}.${NEXT}"
 
@@ -43,7 +43,7 @@ PEER_PUB=$(echo "$PEER_PRIV" | wg pubkey)
 PEER_PSK=$(wg genpsk)
 
 # Write peer config (the file the user pastes into their WG app)
-cat > "${PEER_NAME}.conf" <<EOF
+cat >"${PEER_NAME}.conf" <<EOF
 [Interface]
 PrivateKey = $PEER_PRIV
 Address    = ${PEER_IP}/24
@@ -68,8 +68,8 @@ sudo wg-quick save $WG_IF
 
 # Generate QR code for easy mobile import
 if command -v qrencode >/dev/null 2>&1; then
-  qrencode -t png -o "${PEER_NAME}.png" < "${PEER_NAME}.conf"
-  echo "QR code: ${PEER_NAME}.png"
+    qrencode -t png -o "${PEER_NAME}.png" <"${PEER_NAME}.conf"
+    echo "QR code: ${PEER_NAME}.png"
 fi
 
 echo

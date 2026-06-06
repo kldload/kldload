@@ -18,8 +18,8 @@ KEY_NAME="zfs-key-$(echo "$DATASET" | tr '/' '-')"
 
 # ── Generate + seal a random key ──────────────────────────────────────
 if [[ -f "/var/lib/kldload/secrets/${KEY_NAME}.tpm" ]]; then
-  echo "ERROR: TPM blob ${KEY_NAME}.tpm already exists — destroy first to re-roll the key"
-  exit 1
+    echo "ERROR: TPM blob ${KEY_NAME}.tpm already exists — destroy first to re-roll the key"
+    exit 1
 fi
 
 echo "[1/4] Generating 32-byte key + sealing to TPM"
