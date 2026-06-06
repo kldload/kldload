@@ -164,7 +164,12 @@ k_profile_packages() {
             # autoconfig.js) is still useful for users who want it. Dock pin
             # below lists Chrome FIRST; GNOME silently drops missing entries
             # so this still works on older builds without Chrome in the repo.
-            _browser="google-chrome-stable firefox"
+            # Chrome ONLY on the installed RHEL/Fedora/Rocky/CentOS desktop —
+            # operator feedback 2026-06-06: firefox dropped after Chrome lands
+            # so the dock doesn't ship two browsers. Live installer still gets
+            # firefox via build-iso.sh's separate package list (that's where
+            # kldload-webui auto-opens during install).
+            _browser="google-chrome-stable"
             _viewer="eog loupe"
             _terminal="gnome-terminal ptyxis"
             _nm="NetworkManager NetworkManager-wifi NetworkManager-tui"
@@ -1171,6 +1176,26 @@ DCONF
     [[ -s "${target}/etc/dconf/db/local.d/50-kldload-installed-favorites" ]] ||
         k_die "dock pins: 50-kldload-installed-favorites was not written to ${target}"
 
+    # ── Default browser → Chrome (RPM-family desktop only) ───────────────────────
+    # /etc/xdg/mimeapps.list sets system-wide defaults that apply unless the
+    # user override them in ~/.config/mimeapps.list. Operator feedback
+    # 2026-06-06 (.137 install): when Chrome lands alongside firefox, http(s)
+    # links still launched firefox until manually changed — confusing because
+    # Chrome was already pinned as the FIRST dock app. Bind protocol handlers
+    # AND html mime types so xdg-open + GNOME's "open with" both pick Chrome.
+    if [[ "${KLDLOAD_DISTRO:-centos}" =~ ^(centos|rocky|rhel|fedora)$ ]]; then
+        mkdir -p "${target}/etc/xdg"
+        cat >"${target}/etc/xdg/mimeapps.list" <<'MIMES'
+[Default Applications]
+x-scheme-handler/http=google-chrome.desktop
+x-scheme-handler/https=google-chrome.desktop
+x-scheme-handler/about=google-chrome.desktop
+x-scheme-handler/unknown=google-chrome.desktop
+text/html=google-chrome.desktop
+application/xhtml+xml=google-chrome.desktop
+MIMES
+    fi
+
     # ── GDM login screen (dconf db + profile + config) ────────────────────────────
     if [[ -d /etc/dconf/db/gdm.d ]]; then
         mkdir -p "${target}/etc/dconf/db/gdm.d"
@@ -1252,7 +1277,16 @@ DCONF
     debian) _wp="/usr/share/desktop-base/active-theme/wallpaper/contents/images/1920x1080.svg" ;;
     centos | rocky | rhel | fedora) _wp="/usr/share/backgrounds/default.png" ;;
     esac
-    if [[ -n "$_wp" ]]; then
+    # 01-kldload-wallpaper has a higher numeric prefix than 00-kldload-desktop,
+    # so dconf merges its [background] block ON TOP of 00-kldload-desktop's
+    # kldload-branded wallpaper. On RHEL 10 .137 (2026-06-06) /usr/share/
+    # backgrounds/default.png doesn't actually exist on the target — result:
+    # GNOME tries to load the missing file, falls back to a blank screen, and
+    # the kldload-branded wallpaper from 00- never gets a chance to render.
+    # Only write the override if the referenced file actually lives on the
+    # target rootfs. Per-distro default wallpaper handling is the proper fix
+    # (task #24); until then, missing-file means "skip and let 00- win."
+    if [[ -n "$_wp" ]] && [[ -e "${target}${_wp}" ]]; then
         mkdir -p "${target}/etc/dconf/db/local.d"
         cat >"${target}/etc/dconf/db/local.d/01-kldload-wallpaper" <<WPEOF
 [org/gnome/desktop/background]
@@ -1261,6 +1295,8 @@ picture-uri-dark='file://${_wp}'
 picture-options='zoom'
 WPEOF
         chroot "${target}" dconf update 2>/dev/null || true
+    elif [[ -n "$_wp" ]]; then
+        k_log "01-kldload-wallpaper: distro default ${_wp} missing on target — skipping (kldload-branded wallpaper from 00- stays)"
     fi
 
     # ── Shell dotfiles (.bashrc, .tmux.conf, .vimrc) — non-core profiles only
@@ -1794,19 +1830,22 @@ VIRBR0SH
 Description=Enable libvirt default network (virbr0) autostart
 After=libvirtd.service network-online.target
 Wants=libvirtd.service network-online.target
+# Stop retrying after ~10 minutes (6 attempts * (90s + 15s)); failed state
+# is now visible to kldload-doctor instead of being papered over.
+# These keys MUST live in [Unit], not [Service]. On .137 b628 systemd
+# warned every boot: "Unknown key 'StartLimitIntervalSec' in section
+# [Service], ignoring" — the rate limit was silently disabled.
+StartLimitIntervalSec=600
+StartLimitBurst=6
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/kldload-virbr0-up
 RemainAfterExit=yes
-# Per-attempt timeout; total wall-time bounded by StartLimitBurst below.
+# Per-attempt timeout; total wall-time bounded by StartLimitBurst (in [Unit]).
 TimeoutStartSec=90
 Restart=on-failure
 RestartSec=15
-# Stop retrying after ~10 minutes (6 attempts * (90s + 15s)); failed state
-# is now visible to kldload-doctor instead of being papered over.
-StartLimitIntervalSec=600
-StartLimitBurst=6
 
 [Install]
 WantedBy=multi-user.target
