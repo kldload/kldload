@@ -1,4 +1,4 @@
-FROM fedora:44
+FROM registry.fedoraproject.org/fedora:44
 
 # ---------------------------------------------------------------------------
 # kldload live ISO builder image

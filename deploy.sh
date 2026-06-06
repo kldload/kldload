@@ -220,7 +220,7 @@ cmd_build_fedora_darksite() {
         -e RELEASE="${fed_release}" \
         -e K8S_MINOR="${K8S_MINOR:-v1.32}" \
         --name "kldload-darksite-fedora-$$" \
-        "fedora:${fed_release}" \
+        "registry.fedoraproject.org/fedora:${fed_release}" \
         bash /darksite-build/build-darksite-fedora.sh
     log "Fedora darksite ready: $(du -sh "$darksite_dir" | cut -f1)"
 }
