@@ -376,18 +376,6 @@ if [[ "$EDITION" != "core" ]]; then
         log "WARNING: could not resolve k9s version — skipping"
     fi
 
-    log "Installing helm (live host) from get.helm.sh..."
-    HELM_VERSION="${HELM_VERSION:-v3.16.2}"
-    if curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH_DEB}.tar.gz" \
-        -o /tmp/helm.tar.gz 2>/dev/null; then
-        tar -xzf /tmp/helm.tar.gz -C /tmp/
-        install -m 755 "/tmp/linux-${ARCH_DEB}/helm" "${ROOTFS}/usr/local/bin/helm"
-        rm -rf /tmp/helm.tar.gz "/tmp/linux-${ARCH_DEB}"
-        log "helm ${HELM_VERSION} installed on live host (${ARCH_DEB})."
-    else
-        log "WARNING: helm download failed — Helm tab will show 'not installed'"
-    fi
-
     # Download helper: retry up to 3 times on failure, then FAIL the build.
     # Silent warnings here used to ship ISOs with missing exporter binaries
     # (observed on .133 2026-05-16: libvirt-exporter + process-exporter both
@@ -405,6 +393,26 @@ if [[ "$EDITION" != "core" ]]; then
         done
         return 1
     }
+
+    # helm — same silent-warning class of bug previously hit k9s/exporters.
+    # Until .135 2026-06-05 the helm download had `2>/dev/null` + a WARNING
+    # log line on failure, so builds shipped without helm and "Helm tab
+    # shows not installed" was a recurring report. Now uses the retry
+    # helper and DIES if helm can't be fetched after 3 tries (just like
+    # node_exporter/process-exporter below).
+    log "Installing helm (live host) from get.helm.sh..."
+    HELM_VERSION="${HELM_VERSION:-v3.16.2}"
+    if _fetch_with_retry \
+        "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH_DEB}.tar.gz" \
+        /tmp/helm.tar.gz "helm"; then
+        tar -xzf /tmp/helm.tar.gz -C /tmp/
+        install -m 755 "/tmp/linux-${ARCH_DEB}/helm" "${ROOTFS}/usr/local/bin/helm"
+        rm -rf /tmp/helm.tar.gz "/tmp/linux-${ARCH_DEB}"
+        log "helm ${HELM_VERSION} installed on live host (${ARCH_DEB})."
+    else
+        log "FATAL: helm download failed after 3 retries — refusing to ship an ISO without helm."
+        exit 1
+    fi
 
     # process-exporter — per-process CPU/RSS/IO grouped by binary name.
     # node_exporter only exposes aggregate process counts; process-exporter
@@ -1343,7 +1351,25 @@ if [[ "$EDITION" != "core" ]]; then
         mkdir -p "${ROOTFS}/usr/local/share/kldload-ansible"
         cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload-ansible/. \
             "${ROOTFS}/usr/local/share/kldload-ansible/"
-        log "Ansible playbook library installed: $(find "${ROOTFS}/usr/local/share/kldload-ansible/playbooks" -name '*.yml' 2>/dev/null | wc -l) playbooks"
+        _src_count=$(find /build/live-build/config/includes.chroot/usr/local/share/kldload-ansible/playbooks \
+            -maxdepth 1 -name '*.yml' 2>/dev/null | wc -l)
+        _dst_count=$(find "${ROOTFS}/usr/local/share/kldload-ansible/playbooks" \
+            -maxdepth 1 -name '*.yml' 2>/dev/null | wc -l)
+        log "Ansible playbook library installed: ${_dst_count}/${_src_count} playbooks"
+        # If the build context has playbooks but the rootfs doesn't, the copy
+        # dropped files (.135 2026-06-05: 1/6 landed → kube-cluster died with
+        # 'playbook not found' on provision-golden.yml). Fail loudly instead
+        # of silently shipping a non-functional ansible tree.
+        if (( _src_count > 0 )) && (( _dst_count < _src_count )); then
+            log "FATAL: ansible playbook copy dropped files (${_dst_count}/${_src_count})."
+            log "  src: /build/live-build/config/includes.chroot/usr/local/share/kldload-ansible/playbooks"
+            log "  dst: ${ROOTFS}/usr/local/share/kldload-ansible/playbooks"
+            ls -la "${ROOTFS}/usr/local/share/kldload-ansible/playbooks/" >&2 || true
+            exit 1
+        fi
+    else
+        log "FATAL: /build/live-build/config/includes.chroot/usr/local/share/kldload-ansible missing — bind mount broken."
+        exit 1
     fi
 
     # Bob's docs corpus — scraped kldload.com HTML-to-text + OCR'd PDF

@@ -157,7 +157,14 @@ k_profile_packages() {
         # ptyxis/loupe on RHEL 10 / Fedora 41+. Caught 2026-05-14 on .143
         # RHEL 10 desktop install: gnome-terminal silently dropped,
         # operator booted into a desktop with no terminal app.
-        _browser="firefox"
+        # Google Chrome is now the default browser on RPM distros.
+        # The google-chrome.repo ships in includes.chroot/etc/yum.repos.d/
+        # so dnf can resolve the package; firefox stays in the list as a
+        # secondary so existing Firefox-tuning (NVIDIA crash guard, lab
+        # autoconfig.js) is still useful for users who want it. Dock pin
+        # below lists Chrome FIRST; GNOME silently drops missing entries
+        # so this still works on older builds without Chrome in the repo.
+        _browser="google-chrome-stable firefox"
         _viewer="eog loupe"
         _terminal="gnome-terminal ptyxis"
         _nm="NetworkManager NetworkManager-wifi NetworkManager-tui"
@@ -822,7 +829,7 @@ k_install_system_files() {
 Type=Application
 Name=kldload Dashboard
 Comment=Auto-open the kldload ops console at login (lab profile)
-Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/8443) 2>/dev/null && break; sleep 1; done; sleep 3; firefox --no-remote https://localhost:8443'
+Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/8443) 2>/dev/null && break; sleep 1; done; sleep 3; if command -v google-chrome >/dev/null 2>&1; then google-chrome --new-window https://localhost:8443; else firefox --no-remote https://localhost:8443; fi'
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=8
 DASHSTART
@@ -1074,10 +1081,19 @@ FFPOLICY_WS
     # dying with "playbook not found" on fresh 1.0.4 installs.
     mkdir -p "${target}/usr/local/share/kldload-ansible"
     if [[ -d /usr/local/share/kldload-ansible ]]; then
-      cp -r /usr/local/share/kldload-ansible/. "${target}/usr/local/share/kldload-ansible/" \
-        && k_log "installed kldload-ansible ($(find /usr/local/share/kldload-ansible/playbooks -name '*.yml' 2>/dev/null | wc -l) playbooks)"
+      cp -r /usr/local/share/kldload-ansible/. "${target}/usr/local/share/kldload-ansible/"
+      local _src _dst
+      _src=$(find /usr/local/share/kldload-ansible/playbooks -maxdepth 1 -name '*.yml' 2>/dev/null | wc -l)
+      _dst=$(find "${target}/usr/local/share/kldload-ansible/playbooks" -maxdepth 1 -name '*.yml' 2>/dev/null | wc -l)
+      k_log "installed kldload-ansible (${_dst}/${_src} playbooks)"
+      # .135 2026-06-05: install landed with 1/6 playbooks — kube-cluster
+      # dies on the missing provision-golden.yml. The earlier code logged
+      # the count but never verified, so the regression was invisible.
+      if (( _src > 0 )) && (( _dst < _src )); then
+        k_die "ansible playbook copy dropped files: ${_dst}/${_src} landed. src=/usr/local/share/kldload-ansible/playbooks dst=${target}/usr/local/share/kldload-ansible/playbooks"
+      fi
     else
-      k_log "WARNING: /usr/local/share/kldload-ansible missing in live root — kube-cluster + Ansible tab will fail"
+      k_die "/usr/local/share/kldload-ansible missing in live root — kube-cluster + Ansible tab will fail"
     fi
     [[ -f /usr/local/sbin/adduser.local ]] && \
       cp /usr/local/sbin/adduser.local "${target}/usr/local/sbin/adduser.local" && \
@@ -1142,9 +1158,13 @@ OSREL
   # tmux dashboard launch it explicitly. Multiple Firefox names listed —
   # GNOME silently drops missing entries, so Debian/Ubuntu (firefox-esr) and
   # Fedora/RHEL/Arch (firefox) both end up with a working pin.
+  # Chrome listed FIRST. firefox.desktop / firefox-esr.desktop kept as
+  # fallbacks so installs that opted out of Chrome (or older builds before
+  # the google-chrome.repo landed) still get a pinned browser. GNOME's
+  # favorite-apps silently drops missing entries.
   cat > "${target}/etc/dconf/db/local.d/50-kldload-installed-favorites" <<'DCONF'
 [org/gnome/shell]
-favorite-apps=['org.gnome.Nautilus.desktop', 'firefox.desktop', 'firefox-esr.desktop', 'org.kde.konsole.desktop']
+favorite-apps=['org.gnome.Nautilus.desktop', 'google-chrome.desktop', 'firefox.desktop', 'firefox-esr.desktop', 'org.kde.konsole.desktop']
 DCONF
 
   # ── GDM login screen (dconf db + profile + config) ────────────────────────────

@@ -1217,8 +1217,11 @@ CUSTOMREPO
     adobe-source-code-pro-fonts
     rsms-inter-fonts google-roboto-fonts open-sans-fonts
     stix-fonts
-    # Modern CLI tools + cloud + container runtime for Open WebUI
-    fzf btop fd-find ripgrep zoxide fastfetch cloud-init podman
+    # Modern CLI tools + cloud + container runtime for Open WebUI.
+    # btop removed in build #51 (d769013) — replaced by kst-dashboard's
+    # tmux multi-pane top equivalents; leftover here caused "I dropped
+    # btop but it's still on the install" reports (.135 2026-06-05).
+    fzf fd-find ripgrep zoxide fastfetch cloud-init podman
     # Sanoid Perl deps (sanoid binary copied by k_install_system_files)
     perl-Config-IniFiles perl-Capture-Tiny
     # Web UI + kldload tools backend
