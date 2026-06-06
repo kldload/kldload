@@ -178,8 +178,20 @@ if [[ "$_regen" -eq 1 ]]; then
         echo "O  = kldload"
         echo "[v3_ca]"
         echo "subjectAltName = @alt"
-        echo "basicConstraints = critical,CA:FALSE"
-        echo "keyUsage         = digitalSignature,keyEncipherment"
+        # CA:TRUE (not FALSE) so update-ca-trust extract actually pulls
+        # the cert into the system trust bundle. Without CA:TRUE the
+        # cert lands in /etc/pki/ca-trust/source/anchors/ but
+        # update-ca-trust skips it (treats it as a leaf, not an anchor)
+        # — WebKit then has no trusted CA for localhost:8443, the WSS
+        # connection from kldload-app dock launchers (Bob, Metrics)
+        # fails TLS silently, infinite spinner. Self-signing as a CA
+        # for one's own hostname is unusual but legitimate — the cert
+        # is its own root and is only ever trusted on the host that
+        # generated it. pathlen:0 caps the chain so nothing else can
+        # sign under it (defense in depth even though the key never
+        # leaves the host).
+        echo "basicConstraints = critical,CA:TRUE,pathlen:0"
+        echo "keyUsage         = digitalSignature,keyEncipherment,keyCertSign"
         echo "extendedKeyUsage = serverAuth"
         echo "[alt]"
         echo "DNS.1 = ${_hostname}"
