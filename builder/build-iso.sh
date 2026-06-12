@@ -715,49 +715,36 @@ AutomaticLogin=live
 [debug]
 GDMCONF
 
-# Auto-launch Firefox to webui on live session login (free edition only, not Bob)
+# Auto-launch Chrome to webui on live session login (free edition only, not Bob).
+#
+# Browser choice — Chrome, not Firefox. Per task #15/#47, kldload defaults to
+# google-chrome-stable as the only shipped browser. Firefox is uninstalled
+# at install time by kldload-firstboot. Operator on .142 b644 caught this
+# block still hard-coding `firefox` after the Chrome migration, leaving the
+# autostart silently broken on every fresh boot.
+#
+# Cert trust — no per-browser NSS DB cert import is needed here. The
+# kldload-trust-cert service-mode (called via kldload-tls-cert.service's
+# ExecStartPost) seeds /etc/skel/.pki/nssdb plus every existing user's
+# NSS DB with the kldload-webui cert at trust flag CT,C,T before any user
+# session opens. Chrome reads ~/.pki/nssdb on launch; the cert is already
+# trusted by the time this autostart fires.
+#
+# --app= launches in app-mode (no address bar, no tabs) so the UI feels
+# like a kiosk app instead of a browser tab — matches the "disguised
+# desktop, push-button UI behind familiar chrome" positioning.
 if [[ "$EDITION" != "core" && "${BOB_LIVE:-}" != "1" ]]; then
-    # XDG autostart — waits for GNOME Shell to be ready, then opens Firefox
-    # PostLogin removed: it raced with the compositor and caused black windows
     mkdir -p "${ROOTFS}/etc/xdg/autostart"
-    # webui runs on HTTPS :8443 (self-signed cert via kldload-tls-cert).
-    # Port 8080 was Bob's Open WebUI — not the installer. Pre-import the
-    # cert into Firefox's NSS DB (via certutil from nss-tools) so the
-    # installer page loads without a "Warning: Potential Security Risk"
-    # prompt. Falls back silently if certutil or cert are missing.
     cat >"${ROOTFS}/etc/xdg/autostart/kldload-webui.desktop" <<'AUTOSTART'
 [Desktop Entry]
 Type=Application
 Name=kldload Web UI
-Exec=bash -c 'for i in $(seq 1 60); do curl -sk -o /dev/null https://localhost:8443/ 2>/dev/null && break; sleep 1; done; PROF="$HOME/.mozilla/firefox/kldload.default"; mkdir -p "$PROF"; if command -v certutil >/dev/null 2>&1 && [[ -f /var/lib/kldload/tls/webui.crt ]]; then [[ -f "$PROF/cert9.db" ]] || timeout 5 firefox --headless --profile "$PROF" about:blank >/dev/null 2>&1; certutil -A -n kldload-webui-selfsigned -t "CT,," -i /var/lib/kldload/tls/webui.crt -d sql:"$PROF" 2>/dev/null; fi; sleep 2; firefox --no-remote --profile "$PROF" https://localhost:8443'
+Exec=bash -c 'for i in $(seq 1 60); do curl -sk -o /dev/null https://localhost:8443/ 2>/dev/null && break; sleep 1; done; sleep 2; /usr/local/bin/kldload-webview --app-id=kldload-webui --title="kldload" --url="https://localhost:8443/"'
+Icon=kldload-webui
+StartupWMClass=com.kldload.webui
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=8
 AUTOSTART
-
-    # Firefox policy — suppress first-run tabs, privacy notice, default browser check
-    mkdir -p "${ROOTFS}/usr/lib64/firefox/distribution"
-    cat >"${ROOTFS}/usr/lib64/firefox/distribution/policies.json" <<'FFPOLICY'
-{
-  "policies": {
-    "OverrideFirstRunPage": "",
-    "OverridePostUpdatePage": "",
-    "DontCheckDefaultBrowser": true,
-    "DisablePrivateBrowsing": false,
-    "NoDefaultBookmarks": true,
-    "PasswordManagerEnabled": false,
-    "OfferToSaveLogins": false,
-    "DisableFormHistory": true,
-    "DisableTelemetry": true,
-    "DisableFirefoxAccounts": true,
-    "DisableFirefoxStudies": true,
-    "DisablePocket": true,
-    "Homepage": {
-      "URL": "https://localhost:8443",
-      "StartPage": "homepage"
-    }
-  }
-}
-FFPOLICY
 
     # Disable screensaver / screen blank / auto-lock on live session
     # Method 1: dconf system database (GNOME settings)
@@ -794,6 +781,53 @@ DCONFPROFILE
         cp /build/live-build/config/includes.chroot/etc/dconf/db/local.d/01-kldload-terminal-default \
             "${ROOTFS}/etc/dconf/db/local.d/01-kldload-terminal-default"
     fi
+    # Wildcard copy ANY dconf override that operator added to source — avoids
+    # the "I added a file but the build doesn't ship it" footgun that bit us
+    # on b646 (konsole assets, terminal-default, etc.). Operator on .142 b646
+    # 2026-06-08: dock still had konsole pinned because the 3-pin favorites
+    # file was untracked AND build-iso.sh had no wildcard copy.
+    #
+    # EXPLICIT EXCLUSION: 50-kldload-installed-favorites is intentionally NOT
+    # shipped into the live rootfs — profiles.sh writes it onto the install
+    # TARGET at install-time. Shipping it into the live ISO (b649 regression)
+    # makes the live dconf pin Files/Chrome/sysdiag instead of the installer
+    # browser, breaking the live install-popup UX. The file lives in source
+    # under live-build/config/includes.chroot/etc/dconf/db/local.d/ as a
+    # reference + so editors can find it; do not also ship it.
+    for _dconf in /build/live-build/config/includes.chroot/etc/dconf/db/local.d/*-kldload-*; do
+        [[ -f "$_dconf" ]] || continue
+        case "$(basename "$_dconf")" in
+        50-kldload-installed-favorites) continue ;;
+        esac
+        cp "$_dconf" "${ROOTFS}/etc/dconf/db/local.d/$(basename "$_dconf")"
+    done
+
+    # ── Konsole assets — wildcard copy custom kldload schemes + profile ───────
+    # Operator on .142 b646 2026-06-08: sysdiag was opening in bright Konsole
+    # default scheme even with desktop in dark mode, because the kldload-dark/
+    # kldload-light colorschemes never made it into the ISO — Konsole's -p
+    # ColorScheme=kldload-dark silently no-op'd without the .colorscheme files.
+    mkdir -p "${ROOTFS}/usr/share/konsole"
+    for _kf in /build/live-build/config/includes.chroot/usr/share/konsole/kldload*; do
+        [[ -f "$_kf" ]] || continue
+        cp "$_kf" "${ROOTFS}/usr/share/konsole/$(basename "$_kf")"
+    done
+    if [[ -f /build/live-build/config/includes.chroot/etc/xdg/konsolerc ]]; then
+        mkdir -p "${ROOTFS}/etc/xdg"
+        cp /build/live-build/config/includes.chroot/etc/xdg/konsolerc \
+            "${ROOTFS}/etc/xdg/konsolerc"
+    fi
+
+    # ── systemd drop-ins kldload ships (ollama keep-alive, etc.) ──────────────
+    for _dropdir in /build/live-build/config/includes.chroot/etc/systemd/system/*.d; do
+        [[ -d "$_dropdir" ]] || continue
+        _svc=$(basename "$_dropdir")
+        mkdir -p "${ROOTFS}/etc/systemd/system/${_svc}"
+        for _conf in "$_dropdir"/*.conf; do
+            [[ -f "$_conf" ]] || continue
+            cp "$_conf" "${ROOTFS}/etc/systemd/system/${_svc}/$(basename "$_conf")"
+        done
+    done
 
     # ── GTK 3 / GTK 4 dark-theme defaults ─────────────────────────────────────
     # Plain GTK3/GTK4 apps don't read GNOME's color-scheme dconf key; they
@@ -1500,7 +1534,7 @@ if [[ "$EDITION" != "core" ]]; then
     #     a stuck install can capture state from the live env, AND so
     #     profiles.sh's per-binary copy list can find it as a source when
     #     installing onto the target.
-    for _lsbin in kspawn kldload-debug-bundle kldload-rhel-composer-build; do
+    for _lsbin in kspawn kldload-debug-bundle kldload-rhel-composer-build kldload-backup-pack kldload-backup-restore; do
         _src="/build/live-build/config/includes.chroot/usr/local/sbin/${_lsbin}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/local/sbin/${_lsbin}" && chmod +x "${ROOTFS}/usr/local/sbin/${_lsbin}"
     done

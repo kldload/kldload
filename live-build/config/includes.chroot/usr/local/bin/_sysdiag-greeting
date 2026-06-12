@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# _sysdiag-greeting — render fastfetch + _sysdiag-home side-by-side.
+#
+# Mirrors _kconsole-greeting (klab cockpit's landing view): fastfetch
+# on the left (distro ASCII logo + OS / kernel / packages / shell /
+# CPU / GPU / mem / disk / IP), _sysdiag-home on the right (the F-key
+# cheatsheet). Single pane, no tmux split — sysdiag stays a normal
+# bash window after the greeting prints.
+#
+# Width strategy: measure the widest VISIBLE column of fastfetch (with
+# ANSI escapes stripped — `${#var}` counts bytes including \e[...m,
+# which is wrong for terminal width) then pad each row to that width
+# before appending the cheatsheet row.
+#
+# Falls back gracefully: if fastfetch isn't installed we render the
+# cheatsheet alone (no left column).
+set -u
+
+# Erase scrollback + clear visible screen before drawing. SINGLE-quoted
+# so bash preserves the backslashes literally, then printf interprets
+# \033 as ESC. Earlier inline attempt in kldload-sysdiag with double
+# quotes had bash strip the backslashes before printf saw them, so the
+# literal text "033[3J033[H033[2J" leaked into the terminal at the top
+# of the screen (operator on .142 b646 2026-06-08).
+#   \e[3J = erase scrollback buffer
+#   \e[H  = move cursor to top-left
+#   \e[2J = erase entire visible screen
+printf '\033[3J\033[H\033[2J'
+
+# Strip CSI / OSC escape sequences for width calc only — the output
+# string keeps its colours intact.
+_visible_len() {
+    local plain
+    plain=$(printf '%s' "$1" | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g')
+    printf '%d' "${#plain}"
+}
+
+mapfile -t RIGHT < <(/usr/local/bin/_sysdiag-home 2>/dev/null)
+
+if command -v fastfetch >/dev/null 2>&1; then
+    # --logo-position top: SEQUENTIAL line-by-line (default "left"
+    #   emits cursor-positioning escapes that trash composition)
+    # --pipe false:        force colours ON (auto-detect would strip
+    #   them because our mapfile process substitution is a pipe)
+    # awk SGR-preservation: fastfetch's logo emits `\e[1m\e[31m` on
+    #   line 1 only; downstream lines rely on terminal state staying
+    #   bold-red. Composition resets state after each row's right
+    #   column closes. The filter tracks the active SGR and prepends
+    #   it to lines that lost their colour state.
+    # Force bold-red on every logo line so the RHEL "M" pattern renders
+    # in its actual brand red regardless of which SGR state fastfetch
+    # left the terminal in. Info lines (containing a colon) keep their
+    # own colors (fastfetch tints "OS:", "Kernel:" etc. red already).
+    # Operator on .142 b644 2026-06-07: "the red hat should be red of
+    # course." The prior awk that tracked single-CSI state lost the
+    # cumulative bold+red state after the first line.
+    mapfile -t LEFT < <(fastfetch --logo-position top --pipe false 2>/dev/null \
+        | awk '
+            {
+                if (/:/) {
+                    # Info line — leave fastfetch colors as-is
+                    print $0
+                } else if (length($0) > 0) {
+                    # Logo line — force bold red
+                    printf "\x1b[1;31m%s\x1b[0m\n", $0
+                } else {
+                    print ""
+                }
+            }
+        ')
+
+    # Find widest visible column of left
+    maxw=0
+    for row in "${LEFT[@]}"; do
+        w=$(_visible_len "$row")
+        ((w > maxw)) && maxw=$w
+    done
+
+    # Compose side-by-side
+    n=${#LEFT[@]}
+    m=${#RIGHT[@]}
+    ((n > m)) && total=$n || total=$m
+    for ((i = 0; i < total; i++)); do
+        l="${LEFT[i]:-}"
+        r="${RIGHT[i]:-}"
+        if [[ -n "$l" ]]; then
+            visw=$(_visible_len "$l")
+            padding=$((maxw - visw + 2))
+        else
+            padding=$((maxw + 2))
+        fi
+        printf '%s%*s%s\n' "$l" "$padding" '' "$r"
+    done
+else
+    # No fastfetch — just print the cheatsheet alone.
+    printf '%s\n' "${RIGHT[@]}"
+fi

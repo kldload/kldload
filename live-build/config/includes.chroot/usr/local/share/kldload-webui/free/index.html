@@ -207,7 +207,10 @@ html.kld-app #term-drawer{display:none!important;}
       <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></span> Metrics
     </li>
     <li data-view="bob" id="bob-nav-item" style="display:none">
-      <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="m12 3-1.91 5.09L5 10l5.09 1.91L12 17l1.91-5.09L19 10l-5.09-1.91z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/></svg></span> Bob
+      <!-- Genie lamp — task #9. The smoke wisp + pot + spout glyph reads
+           as "jinn's lamp" instantly; pairs better with the "AI agent
+           summoned from a vessel" mental model than generic sparkles. -->
+      <span class="nav-icon"><svg viewBox="0 0 24 24"><ellipse cx="10" cy="17" rx="7" ry="3"/><path d="M17 16 L21 15 L21 19 L17 18"/><path d="M3 17 Q1 14 4 14"/><path d="M9 14 C9 11, 12 11, 11 8 C10 5, 13 5, 12 2"/></svg></span> Bob
     </li>
   </ul>
 </nav>
@@ -3727,12 +3730,24 @@ function handle(msg) {
           installNav.title = 'System is already installed — selecting Install will wipe the chosen disk. Use this for re-install / golden refresh / recovery / export.';
         }
       }
-      // Infrastructure section is always visible — it holds the always-relevant
-      // items (VMs, K8s, ZFS, Ansible, Helm, Metrics). Conditional sub-items
-      // (klab, OpenZFS Suite, Bob) are hidden individually when their backend
-      // isn't running. Old behavior hid the whole Infrastructure section when
-      // klab was unavailable, which broke discoverability of VMs/K8s/Metrics
-      // on every non-klab profile.
+      // Live-installer mode: hide the whole Infrastructure section. None of
+      // those views (VMs/K8s/ZFS/Ansible/Helm/Metrics/klab/Bob) work on a
+      // live USB because the services they manage aren't installed yet —
+      // showing them was misleading. Operator on .145 b651 2026-06-11:
+      // "the live installer needs all the rescue tools and the gui, but
+      // nothing else is installed yet so [the infra section] is useless."
+      if (d.live_mode === true) {
+        const infraSec = document.getElementById('infra-nav-section');
+        const infraItems = document.getElementById('infra-nav-items');
+        if (infraSec) infraSec.style.display = 'none';
+        if (infraItems) infraItems.style.display = 'none';
+      }
+      // Infrastructure section is otherwise always visible — it holds the
+      // always-relevant items (VMs, K8s, ZFS, Ansible, Helm, Metrics).
+      // Conditional sub-items (klab, OpenZFS Suite, Bob) are hidden
+      // individually when their backend isn't running. Old behavior hid
+      // the whole Infrastructure section when klab was unavailable, which
+      // broke discoverability of VMs/K8s/Metrics on every non-klab profile.
       const showKlab = d.klab_available || d.kldload_profile === 'devops';
       const klabItem = document.getElementById('klab-nav-item');
       const testsZfsItem = document.getElementById('tests-zfs-nav-item');
@@ -4594,16 +4609,24 @@ function handle(msg) {
 // forward buttons work sensibly. On load we restore the saved view BEFORE
 // the WebSocket connects so view-specific data requests fire naturally.
 function _kldSwitchView(viewName) {
-  document.querySelectorAll('#sidebar li').forEach(x => x.classList.remove('active'));
-  document.querySelectorAll('.view').forEach(x => x.classList.remove('active'));
+  // Locate the sidebar li for this view. Then SYNTHESIZE a click — the
+  // existing click handler does activation AND all per-view init calls
+  // (metricsRefreshList, vmRefreshAll, k8sRefreshAll, klab_status, etc.).
+  //
+  // Operator on .142 b647 2026-06-08: "i never see any metrics. unless im
+  // going through the gui." Root cause: launcher windows opened via URL
+  // hash (#metrics, #vms, #k8s, ...) only activated the view's CSS class
+  // — they never triggered the per-view init that the sidebar click
+  // handler does. So Metrics-launcher showed "Loading..." forever because
+  // metricsRefreshList() was never called.
+  //
+  // .click() on a hidden li (when #sidebar is display:none in launcher
+  // mode) still fires the click handler — synthetic events dispatch to
+  // hidden elements just fine. So this works in both GUI and launcher mode.
   const li = document.querySelector(`#sidebar li[data-view="${viewName}"]`);
   const vw = document.getElementById('view-' + viewName);
   if (!li || !vw) return false;
-  li.classList.add('active');
-  vw.classList.add('active');
-  try { localStorage.setItem('kldload:view', viewName); } catch (e) {}
-  if (location.hash !== '#' + viewName) history.replaceState(null, '', '#' + viewName);
-  li.dispatchEvent(new CustomEvent('kldload-viewOpened', { bubbles: false }));
+  li.click();
   return true;
 }
 // Restore saved view on page load (default: dashboard)
@@ -7934,14 +7957,46 @@ function termSend(window) {
 // carry all the heavy lifting (see :root + [data-theme="light"] in app.css).
 // Persisted to localStorage so the choice survives refresh.
 function _currentTheme() {
-  try { return localStorage.getItem('kldload:theme') || 'dark'; }
-  catch (e) { return 'dark'; }
+  // User's explicit choice (via the 🌙 toggle) wins. If they never picked,
+  // follow the OS prefers-color-scheme so a system-wide light/dark flip
+  // takes the SPA with it.
+  //
+  // Operator on .142 b647 2026-06-08: "the gui dark/light works .. its just
+  // the ones with the icons .. always come up in dark unless you manually
+  // change it." Root cause: this function honored ANY localStorage value
+  // for 'kldload:theme' regardless of whether it came from the user toggle
+  // or got auto-written by older buggy code. The main GUI window stayed
+  // in sync because it heard the live prefers-color-scheme `change` event;
+  // launcher windows (Chrome --app=URL) opened FRESH, read stale localStorage,
+  // never received a system-theme event, and stuck in dark.
+  //
+  // Fix: only honor saved IF the source sentinel says it came from the user
+  // toggle. Anything else = ignore localStorage and follow the OS.
+  try {
+    const saved  = localStorage.getItem('kldload:theme');
+    const source = localStorage.getItem('kldload:theme:source');
+    if ((saved === 'light' || saved === 'dark') && source === 'user') return saved;
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) return 'light';
+    return 'dark';
+  } catch (e) { return 'dark'; }
 }
-function _applyTheme(theme) {
+function _applyTheme(theme, persist) {
+  // persist=false  -> auto-detect path (don't write localStorage; future
+  //                   system flips can still drive the theme)
+  // persist=true (or undefined) -> user explicitly picked via toggle (DO
+  //                   write so it survives reload AND blocks auto-flip)
+  // Without this split, _initTheme's auto-apply-on-load polluted
+  // localStorage and masked subsequent prefers-color-scheme changes.
+  if (persist === undefined) persist = true;
   document.documentElement.setAttribute('data-theme', theme);
   const btn = document.getElementById('theme-toggle');
   if (btn) btn.textContent = theme === 'light' ? '☀️' : '🌙';
-  try { localStorage.setItem('kldload:theme', theme); } catch (e) {}
+  if (persist) {
+    try {
+      localStorage.setItem('kldload:theme', theme);
+      localStorage.setItem('kldload:theme:source', 'user');
+    } catch (e) {}
+  }
   // Grafana iframes need their own theme param — sync all embeds at once
   // (the dedicated Metrics view's #metrics-iframe AND any other Grafana
   // embed elsewhere like the K8s overview's #k8s-metrics-iframe). Using
@@ -7959,8 +8014,51 @@ function _applyTheme(theme) {
 function toggleTheme() {
   _applyTheme(_currentTheme() === 'light' ? 'dark' : 'light');
 }
-// Apply saved theme on page load BEFORE render to avoid dark-flash
-(function _initTheme() { _applyTheme(_currentTheme()); })();
+// Apply theme on page load BEFORE render to avoid light/dark flash.
+// Also listen for OS-level prefers-color-scheme flips so the SPA tracks the
+// system toggle automatically — UNLESS the user has explicitly clicked the
+// in-app 🌙 toggle (which sets localStorage and takes precedence per
+// _currentTheme above).
+(function _initTheme() {
+  // Migration: an earlier patch unconditionally persisted auto-detected
+  // values into 'kldload:theme', masking subsequent OS prefers-color-scheme
+  // changes. The 'kldload:theme:source' sentinel is only set by toggleTheme,
+  // so its absence means whatever's in 'kldload:theme' came from the buggy
+  // path — clear it so system pref wins.
+  try {
+    // Always defer to system on first init — clear any cached pin so the
+    // initial render matches system. User can re-pin via 🌙 mid-session.
+    if (window.matchMedia) {
+      const mqSysLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+      const sysTheme = mqSysLight ? 'light' : 'dark';
+      const cached = localStorage.getItem('kldload:theme');
+      if (cached && cached !== sysTheme) {
+        localStorage.removeItem('kldload:theme');
+        localStorage.removeItem('kldload:theme:source');
+      }
+    } else if (localStorage.getItem('kldload:theme') && !localStorage.getItem('kldload:theme:source')) {
+      localStorage.removeItem('kldload:theme');
+    }
+  } catch (e) {}
+  _applyTheme(_currentTheme(), false);
+  try {
+    const mql = window.matchMedia('(prefers-color-scheme: light)');
+    const onChange = () => {
+      // System theme is always authoritative. Any prior in-app pin gets
+      // cleared so the user's most recent action (the system flip) wins.
+      // Operator on .142 b642: 'if i change it in the website part at
+      // the top it works' — but a previous in-app click had pinned the
+      // theme and the matchMedia listener bailed forever.
+      try {
+        localStorage.removeItem('kldload:theme');
+        localStorage.removeItem('kldload:theme:source');
+      } catch (e) {}
+      _applyTheme(mql.matches ? 'light' : 'dark', false);
+    };
+    if (mql.addEventListener) mql.addEventListener('change', onChange);
+    else if (mql.addListener) mql.addListener(onChange);
+  } catch (e) {}
+})();
 
 // ── Metrics (Grafana embed) ────────────────────────────────────────────────
 // Grafana is fronted by kldload-proxy at /grafana on the same origin.

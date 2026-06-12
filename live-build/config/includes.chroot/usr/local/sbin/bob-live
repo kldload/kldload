@@ -8,11 +8,11 @@ LOG=/var/log/bob-live.log
 exec > >(tee -a "$LOG") 2>&1
 
 log() { printf '[%(%F %T)T] [bob] %s\n' -1 "$*"; }
-ok()  { printf '[%(%F %T)T] [bob] ✔  %s\n' -1 "$*"; }
+ok() { printf '[%(%F %T)T] [bob] ✔  %s\n' -1 "$*"; }
 
 _status() {
-  echo "$1" > /tmp/kldload-firstboot-status
-  log "$1"
+    echo "$1" >/tmp/kldload-firstboot-status
+    log "$1"
 }
 
 _status "Starting Bob..."
@@ -21,36 +21,36 @@ _status "Starting Bob..."
 systemctl start ollama
 log "Waiting for Ollama..."
 for _try in $(seq 1 30); do
-  curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && break
-  sleep 2
+    curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && break
+    sleep 2
 done
 ok "Ollama ready"
 
 # ── Start Open WebUI ──────────────────────────────────────────────────────────
 _status "Starting Open WebUI..."
 if command -v open-webui >/dev/null 2>&1; then
-  # Installed via pip — run directly
-  open-webui serve --host 0.0.0.0 --port 8080 >> "$LOG" 2>&1 &
-  log "Open WebUI started (pip)"
+    # Installed via pip — run directly
+    open-webui serve --host 0.0.0.0 --port 8080 >>"$LOG" 2>&1 &
+    log "Open WebUI started (pip)"
 elif command -v podman >/dev/null 2>&1; then
-  # Fallback: podman container
-  podman run -d --name open-webui --network host \
-    -v open-webui:/app/backend/data \
-    -e OLLAMA_BASE_URL=http://127.0.0.1:11434 \
-    --restart always \
-    ghcr.io/open-webui/open-webui:main >> "$LOG" 2>&1 \
-    && log "Open WebUI started (podman)" \
-    || log "WARNING: Open WebUI container failed"
+    # Fallback: podman container
+    podman run -d --name open-webui --network host \
+        -v open-webui:/app/backend/data \
+        -e OLLAMA_BASE_URL=http://127.0.0.1:11434 \
+        --restart always \
+        ghcr.io/open-webui/open-webui:main >>"$LOG" 2>&1 &&
+        log "Open WebUI started (podman)" ||
+        log "WARNING: Open WebUI container failed"
 else
-  log "WARNING: No Open WebUI available"
+    log "WARNING: No Open WebUI available"
 fi
 
 # ── Wait for Open WebUI, then open Firefox ────────────────────────────────────
 _status "Bob is starting up..."
 log "Waiting for Open WebUI on port 8080..."
 for _i in $(seq 1 120); do
-  curl -sf http://localhost:8080 >/dev/null 2>&1 && break
-  sleep 2
+    curl -sf http://localhost:8080 >/dev/null 2>&1 && break
+    sleep 2
 done
 
 _status "Bob is ready"
@@ -58,16 +58,16 @@ ok "Bob is live at http://localhost:8080"
 
 # Open Firefox for any logged-in desktop user
 (
-  set +e
-  sleep 3
-  for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
-    _user=$(id -nu "$_uid" 2>/dev/null) || continue
-    sudo -u "$_user" \
-      DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
-      XDG_RUNTIME_DIR="/run/user/${_uid}" \
-      WAYLAND_DISPLAY=wayland-0 \
-      firefox --no-remote http://localhost:8080 2>/dev/null &
-  done
+    set +e
+    sleep 3
+    for _uid in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $1}'); do
+        _user=$(id -nu "$_uid" 2>/dev/null) || continue
+        sudo -u "$_user" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${_uid}/bus" \
+            XDG_RUNTIME_DIR="/run/user/${_uid}" \
+            WAYLAND_DISPLAY=wayland-0 \
+            google-chrome --app=http://localhost:8080 --no-first-run --no-default-browser-check 2>/dev/null &
+    done
 ) 2>/dev/null
 
 log "CLI: bob 'your question'"

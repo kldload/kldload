@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""
+kldload-webview — GTK4 + WebKit6 native-Wayland launcher for kldload SPA views.
+
+Why this exists:
+  Chrome on Wayland does not honor `--class=` for the surface app_id;
+  every chrome --app= window comes up as app_id=google-chrome and
+  gnome-shell can't match it to a .desktop file (= blue diamond icon).
+  WebKitGTK 4.1 + GTK3 crashes with a Wayland Protocol error on RHEL 10
+  the moment you add a WebView to a window.
+
+  GTK4 + WebKit 6.0 (webkitgtk6.0 from EPEL on RHEL 10) is the native
+  Wayland answer: Gtk.Application(application_id=...) sets the xdg-shell
+  app_id during surface creation, gnome-shell matches the .desktop's
+  StartupWMClass to it, the correct icon renders. No XWayland fallback,
+  no Chrome IPC merging, no per-launch user-data-dir.
+
+  Chrome stays installed and is still the user's general-purpose browser.
+  This launcher is ONLY for the kldload SPA views fired from the app
+  grid / dock.
+
+Usage:
+  kldload-webview --app-id=kldload-vms \\
+                  --title="Virtual Machines" \\
+                  --url="https://localhost:8443/?app=1#vms"
+
+The .desktop file's `StartupWMClass=` must match the *full* app_id this
+script generates (`com.kldload.<short>`), and the `Icon=` field is the
+standard hicolor lookup (`kldload-vms`, `bob-chat`, etc.).
+"""
+
+import argparse
+import os
+import re
+import sys
+
+# Stop GTK/GIO from querying the xdg-desktop-portal Settings interface.
+# WebKit's portal-Settings reads were triggering a feedback loop with
+# gnome-shell that auto-flipped color-scheme between 'default' and
+# 'prefer-dark' a few times a second, breaking the user's Dark Style
+# toggle. The webview doesn't need portal Settings — it picks colours
+# from CSS prefers-color-scheme inside the page. Verified on .139 b650
+# 2026-06-10: killing webview processes stopped the flip immediately.
+os.environ["GTK_USE_PORTAL"] = "0"
+os.environ["GIO_USE_PORTALS"] = "none"
+
+import gi  # noqa: E402
+gi.require_version("Gtk", "4.0")
+gi.require_version("WebKit", "6.0")
+from gi.repository import Gtk, WebKit, Gio, GLib, Gdk  # noqa: E402
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--app-id", required=True,
+        help="short app id like 'kldload-vms'. Mapped to GApplication "
+             "application_id='com.kldload.<name>'. Wayland surface gets "
+             "that app_id, .desktop StartupWMClass must match.")
+    parser.add_argument("--title", default=None, help="Window title.")
+    parser.add_argument("--url", required=True, help="URL to load.")
+    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--height", type=int, default=800)
+    parser.add_argument(
+        "--ignore-tls-errors", action="store_true", default=True,
+        help="Trust the kldload-webui self-signed cert. Default on; "
+             "the only target this launcher ever opens is localhost:8443.")
+    args = parser.parse_args()
+
+    # Wayland / GApplication app-id must follow reverse-domain rules.
+    # Map kldload-vms -> com.kldload.vms; bob-chat -> com.kldload.bob_chat.
+    short = re.sub(r"^kldload-", "", args.app_id)
+    safe = re.sub(r"[^a-zA-Z0-9_]", "_", short)
+    app_id = f"com.kldload.{safe}"
+
+    # NON_UNIQUE: each invocation gets its own GApplication instance so
+    # repeat launches don't fold into the first one (which would defeat
+    # the whole point of per-launcher windows).
+    app = Gtk.Application(
+        application_id=app_id,
+        flags=Gio.ApplicationFlags.NON_UNIQUE,
+    )
+    # set_prgname sets WM_CLASS on the X11 fallback path so xdotool /
+    # wmctrl / etc. still see a usable name in mixed sessions.
+    GLib.set_prgname(app_id)
+
+    # Read GNOME color-scheme DIRECTLY via Gio.Settings — bypasses the
+    # xdg-portal Settings interface (which is what was causing the flip)
+    # but still gives us the user's current preference. We pass it to the
+    # SPA as a URL query param so the page can render in the matching
+    # theme without WebKit having to query the portal at all.
+    iface_settings = Gio.Settings.new("org.gnome.desktop.interface")
+    gnome_scheme = iface_settings.get_string("color-scheme")
+    spa_theme = "light" if gnome_scheme == "default" else "dark"
+    # Append theme=… without clobbering existing query/hash.
+    if "?" in args.url:
+        if "#" in args.url:
+            base, _, frag = args.url.partition("#")
+            url_with_theme = f"{base}&theme={spa_theme}#{frag}"
+        else:
+            url_with_theme = f"{args.url}&theme={spa_theme}"
+    else:
+        if "#" in args.url:
+            base, _, frag = args.url.partition("#")
+            url_with_theme = f"{base}?theme={spa_theme}#{frag}"
+        else:
+            url_with_theme = f"{args.url}?theme={spa_theme}"
+
+    # Hold a reference so the GSettings 'changed' signal handler can
+    # reach the live WebView and re-inject the theme without the page
+    # reloading. nonlocal would also work; using a list keeps it clean.
+    state = {"web": None, "theme": spa_theme}
+
+    def on_activate(application):
+        win = Gtk.ApplicationWindow(application=application)
+        win.set_default_size(args.width, args.height)
+        win.set_title(args.title or args.app_id)
+
+        # WebKit 6.0 reaches set_tls_errors_policy via the
+        # NetworkSession bound to the WebContext, not directly on the
+        # context like 4.1 did.
+        if args.ignore_tls_errors:
+            try:
+                ns = WebKit.NetworkSession.get_default()
+                ns.set_tls_errors_policy(WebKit.TLSErrorsPolicy.IGNORE)
+            except Exception:
+                # If the API isn't available the worst case is a cert
+                # warning the operator clicks past once per launch.
+                pass
+
+        # Force the SPA to match GNOME's color-scheme. The SPA has its own
+        # late-running theme code that races with localStorage and ends up
+        # auto-flipping our injected value back to dark. To get a clean
+        # result we (a) seed localStorage with source=user, (b) install a
+        # MutationObserver that re-applies our chosen data-theme any time
+        # the SPA tries to change it, and (c) hide the in-page light/dark
+        # toggle — webview windows take their theme from GNOME, full stop.
+        # Operator on .139 b650 2026-06-10: "remove the dark/light toggle
+        # from the UIs and make gnome dictate."
+        web = WebKit.WebView()
+        ucm = web.get_user_content_manager()
+
+        # Hide the in-page theme toggle via a user stylesheet (runs in
+        # every webview window). The button id is `theme-toggle` in the
+        # current SPA; covering the moon/sun span class as a safety net.
+        css = (
+            "#theme-toggle, .theme-toggle, [data-role=\"theme-toggle\"]"
+            " { display: none !important; }"
+        )
+        ucm.add_style_sheet(WebKit.UserStyleSheet.new(
+            css,
+            WebKit.UserContentInjectedFrames.ALL_FRAMES,
+            WebKit.UserStyleLevel.USER,
+            None, None,
+        ))
+
+        # The MutationObserver reads window.__kldload_theme each time it
+        # fires — so when the host (kldload-webview) updates that global
+        # via evaluate_javascript on a GNOME color-scheme change, the
+        # observer re-pins to the NEW value. Previously the observer
+        # captured T at injection time and would never let go of the
+        # launch-time theme, even after gnome flipped. .139 b650
+        # 2026-06-10: operator saw windows stay light after toggling
+        # GNOME to dark.
+        js = (
+            "(function(){"
+            f"  window.__kldload_theme = '{spa_theme}';"
+            "  var apply = function(){"
+            "    var T = window.__kldload_theme || 'dark';"
+            "    try {"
+            "      localStorage.setItem('kldload:theme', T);"
+            "      localStorage.setItem('kldload:theme:source', 'user');"
+            "    } catch (e) {}"
+            "    if (document.documentElement.getAttribute('data-theme') !== T) {"
+            "      document.documentElement.setAttribute('data-theme', T);"
+            "    }"
+            "  };"
+            "  apply();"
+            "  document.addEventListener('DOMContentLoaded', apply);"
+            "  var obs = new MutationObserver(apply);"
+            "  obs.observe(document.documentElement, {"
+            "    attributes: true, attributeFilter: ['data-theme']"
+            "  });"
+            "})();"
+        )
+        ucm.add_script(WebKit.UserScript.new(
+            js,
+            WebKit.UserContentInjectedFrames.ALL_FRAMES,
+            WebKit.UserScriptInjectionTime.START,
+            None, None,
+        ))
+
+        # Pre-paint the WebKit surface in the matching theme so there's
+        # no white-then-dark (or dark-then-light) flash during the SPA's
+        # first ~200 ms of bootstrap. #0d1117 = SPA dark background;
+        # #ffffff = SPA light background.
+        bg = Gdk.RGBA()
+        bg.parse("#0d1117" if spa_theme == "dark" else "#ffffff")
+        web.set_background_color(bg)
+
+        web.load_uri(url_with_theme)
+        win.set_child(web)
+        win.present()
+        state["web"] = web
+
+    # Watch GNOME's color-scheme. When it flips, push a fresh theme into
+    # the live page so existing webview windows track the OS toggle (not
+    # just the next launch). Uses Gio.Settings directly — no portal call,
+    # no flip loop. Verified .139 b650 2026-06-10: operator wanted "they
+    # should change when you toggle dark/light in gnome."
+    def on_scheme_changed(settings, key):
+        s = settings.get_string("color-scheme")
+        t = "light" if s == "default" else "dark"
+        if t == state["theme"] or state["web"] is None:
+            return
+        state["theme"] = t
+        # Update the mutable global the in-page observer reads, then
+        # trigger one immediate apply so we don't wait for the SPA to
+        # mutate data-theme again.
+        js = (
+            f"window.__kldload_theme = '{t}';"
+            "try {"
+            f"  localStorage.setItem('kldload:theme','{t}');"
+            "  localStorage.setItem('kldload:theme:source','user');"
+            f"  document.documentElement.setAttribute('data-theme','{t}');"
+            "} catch (e) {}"
+        )
+        try:
+            state["web"].evaluate_javascript(js, -1, None, None, None, None, None)
+        except Exception:
+            # Older WebKit 6 builds had a different signature; fall back
+            # to the no-callback variant so the watcher never crashes
+            # the launcher.
+            try:
+                state["web"].evaluate_javascript(js, -1, None, None, None)
+            except Exception:
+                pass
+
+    iface_settings.connect("changed::color-scheme", on_scheme_changed)
+
+    app.connect("activate", on_activate)
+    return app.run([])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

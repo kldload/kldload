@@ -1,13 +1,34 @@
-# ── Interface: dark mode + steel gray ────────────────────────────────────────
+# ── Interface: dark mode by default + steel gray ────────────────────────────
+# color-scheme='prefer-dark' is the default; the GNOME light/dark quick-toggle
+# (Settings → Appearance, or the shell quick-settings panel) flips this to
+# 'default' for light mode and back. gtk-theme MUST stay as plain 'Adwaita'
+# (NOT 'Adwaita-dark') for the toggle to work — on GNOME 42+, the Adwaita
+# stylesheet adapts to color-scheme automatically, and an explicit '-dark'
+# suffix forces dark regardless of color-scheme. Operator on .140 b640:
+# "the gnome dark / light mode doesnt seem to work" — that was this key.
+# The matching unlock in profiles.sh's locks file (kldload-desktop) drops
+# color-scheme + gtk-theme from the read-only set so the toggle's gsettings
+# write actually lands.
 [org/gnome/desktop/interface]
 color-scheme='prefer-dark'
-gtk-theme='Adwaita-dark'
+gtk-theme='Adwaita'
 icon-theme='Adwaita'
 cursor-theme='Adwaita'
 font-name='Cantarell 11'
 monospace-font-name='Monospace 12'
 font-antialiasing='rgba'
 font-hinting='slight'
+# Accent: GNOME 47 ships a stock accent-color key with named values
+# (blue/teal/green/yellow/orange/red/pink/purple/slate). 'slate' is a
+# desaturated blue-gray ("steel blue") that's softer than default sky-
+# bright 'blue' and less saturated than 'purple'. Operator on .142 b642
+# tried purple first — "should either be like steel blue.. or a softer
+# purple" — slate gets us steel-blue without compromising visual hierarchy.
+# A truly custom palette (e.g. #6d28d9 to perfectly match the SPA's
+# --purple) would need GTK4 CSS overrides in /etc/skel/.config/gtk-4.0/
+# but those affect GTK4 apps only, not GNOME shell — slate is the cleanest
+# named option for now.
+accent-color='slate'
 enable-animations=true
 
 # ── Background: RHEL 10 default wallpaper, kldload-hotrodded ─────────────────
@@ -62,8 +83,18 @@ auto-save-session=false
 system-service-activated=true
 
 # ── Mutter / window manager ───────────────────────────────────────────────────
+# Static 4 workspaces in a + layout — operator settled on this 2D map on
+# .142 b644 2026-06-07. The Ctrl+Alt+Arrow / Super+Arrow / Super+Shift+Arrow
+# keymap below depends on a FIXED 4-workspace setup; dynamic mode (the
+# typical GNOME default elsewhere) doesn't play with absolute switch-to-
+# workspace-1/2/3/4 bindings — workspaces get added/removed under your
+# feet and the bindings stop hitting predictable targets.
 [org/gnome/mutter]
 center-new-windows=true
+dynamic-workspaces=false
+
+[org/gnome/desktop/wm/preferences]
+num-workspaces=4
 
 # ── XWayland keyboard grab allowlist for Wine / Steam / gaming ───────────────
 # On Wayland, Mutter normally denies X11 keyboard grabs as a security boundary
@@ -82,7 +113,7 @@ xwayland-grab-access-rules=['gamescope', 'Steam', 'steam_app_*', '*.exe']
 
 [org/gnome/desktop/wm/preferences]
 button-layout='appmenu:minimize,maximize,close'
-theme='Adwaita-dark'
+theme='Adwaita'
 
 # ── App folders — group "System" + GNOME Tweaks under one folder ─────────────
 # Operator feedback (.135 2026-06-05): "the System icon should be in the
@@ -137,3 +168,76 @@ palette=['#1a1f2b','#ef5350','#66bb6a','#ffca28','#42a5f5','#ab47bc','#26c6da','
 scrollbar-policy='never'
 audible-bell=false
 login-shell=true
+
+# ── Super-key bindings — pin to stock-GNOME values ───────────────────────────
+# RHEL 10 GNOME ships with overlay-key='Super' (broken — mutter needs the
+# 'Super_L' keysym spelling) AND toggle-overview=[] (empty), which together
+# kill bare-Super-tap → activities AND Super+S → overview. Operator on .125
+# 2026-06-07 hit this immediately after install. Pinning both to the
+# correct values ensures bare-Super and Super+S/Super+A all work out of the
+# box on every install.
+[org/gnome/mutter]
+overlay-key='Super_L'
+
+[org/gnome/shell/keybindings]
+toggle-overview=['<Super>s']
+toggle-application-view=['<Super>a']
+
+# ── 2D workspace keymap — 4 desktops in a + layout ───────────────────────────
+# Operator on .142 b644 settled on this scheme: workspaces 1/2/3/4 arranged
+# as compass points (1=N, 2=W, 3=E, 4=S) with two symmetric keymaps:
+#
+#   Ctrl+Alt+Arrow → SWITCH to workspace (no window movement)
+#   Super+Arrow    → SEND current window to workspace AND follow it there
+#
+# Conflicts cleared in [org/gnome/desktop/wm/keybindings] below: maximize,
+# unmaximize (were on Super+Up/Down), and the relative-direction
+# switch-to-workspace-up/down/left/right (collided with absolute bindings).
+# toggle-tiled-left/right in the mutter section below for the same reason.
+[org/gnome/desktop/wm/keybindings]
+switch-to-workspace-1=['<Control><Alt>Up']
+switch-to-workspace-2=['<Control><Alt>Left']
+switch-to-workspace-3=['<Control><Alt>Right']
+switch-to-workspace-4=['<Control><Alt>Down']
+switch-to-workspace-up=@as []
+switch-to-workspace-down=@as []
+switch-to-workspace-left=@as []
+switch-to-workspace-right=@as []
+move-to-workspace-1=['<Super>Up']
+move-to-workspace-2=['<Super>Left']
+move-to-workspace-3=['<Super>Right']
+move-to-workspace-4=['<Super>Down']
+# Window ops on Super+Shift+Arrow — Ctrl+Arrow was the operator's first
+# instinct but it eats word-by-word cursor navigation in every text input
+# (bash readline, every editor, Chrome address bar, etc.). Super+Shift+Arrow
+# pairs cleanly with the Super+Arrow workspace map above: same right hand,
+# left thumb adds Shift, mental model is "Super=WM domain, Shift=transform
+# this window instead of moving it."
+#
+# Use toggle-maximized (NOT maximize): plain `maximize` is a one-way action
+# that only ever maximizes; toggle-maximized handles both directions so the
+# same key restores the window when pressed again. Caught .142 b644 2026-06-07.
+#
+# move-to-monitor-{up,down,left,right} are GNOME's defaults bound to
+# Super+Shift+{arrow} for multi-monitor "send window to neighbor monitor"
+# operations. They collide on the SAME combos as our tiling map, and when
+# two bindings register the same combo mutter's resolution is undefined —
+# observed: Super+Shift+Right did nothing instead of tiling right. Clear
+# them; on multi-monitor setups operators can re-bind via Tweaks.
+toggle-maximized=['<Super><Shift>Up']
+# Alt+Q joins Alt+F4 as a window-close binding. Operator on .142 b647
+# 2026-06-08 asked for it — pairs nicely with the rest of the Alt-letter
+# tmux/sysdiag bindings and matches the Mac Cmd+Q muscle memory many
+# operators carry. Word-jump (Ctrl+Arrow) preserved per the keymap memory.
+close=['<Alt>q', '<Alt>F4']
+minimize=['<Super><Shift>Down']
+maximize=@as []
+unmaximize=@as []
+move-to-monitor-up=@as []
+move-to-monitor-down=@as []
+move-to-monitor-left=@as []
+move-to-monitor-right=@as []
+
+[org/gnome/mutter/keybindings]
+toggle-tiled-left=['<Super><Shift>Left']
+toggle-tiled-right=['<Super><Shift>Right']

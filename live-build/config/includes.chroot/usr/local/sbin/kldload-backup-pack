@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# kldload-backup-pack — snapshot the system root and ship it to a remote
+# host (default: fiend) as a single zstd-compressed ZFS send stream.
+#
+# What "the system root" means here:
+#   The ZFS dataset currently mounted at / — typically rpool/ROOT/<node>.
+#   We send -R so all CHILD datasets travel with it, AND every snapshot
+#   in their history travels too. This means the receiver gets a complete,
+#   atomic copy of the install (config + SPA + kldload binaries + /home).
+#
+# What's NOT included:
+#   /vms, /srv/ollama, klab goldens, container-storage datasets — those
+#   are siblings of rpool/ROOT/, not children, so -R skips them. That's
+#   intentional: VM images and LLM models are heavy and can be rebuilt
+#   from the install. If you want everything, pass --full to send the
+#   whole pool.
+#
+# Output:
+#   <remote-dir>/<hostname>-<utc-timestamp>.zfs.zst   # the stream
+#   <remote-dir>/<hostname>-<utc-timestamp>.meta      # sidecar metadata
+#
+# Usage:
+#   sudo kldload-backup-pack                        # default: fiend, system root
+#   sudo kldload-backup-pack --full                 # whole pool
+#   sudo kldload-backup-pack --host other.host      # remote override
+#   sudo kldload-backup-pack --dataset rpool/foo    # source dataset override
+#   sudo kldload-backup-pack --keep-snapshot        # don't delete @backup-... after
+#
+# Env overrides:
+#   BACKUP_REMOTE_HOST   default: fiend
+#   BACKUP_REMOTE_DIR    default: /var/lib/kldload-backups
+#   BACKUP_SSH_OPTS      default: -o BatchMode=yes -o StrictHostKeyChecking=accept-new
+
+set -Eeuo pipefail
+
+REMOTE_HOST="${BACKUP_REMOTE_HOST:-fiend}"
+REMOTE_DIR="${BACKUP_REMOTE_DIR:-/var/lib/kldload-backups}"
+SSH_OPTS="${BACKUP_SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=accept-new}"
+SOURCE_DATASET=""
+FULL_POOL=0
+KEEP_SNAP=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --full) FULL_POOL=1 ;;
+    --host)
+        REMOTE_HOST="$2"
+        shift
+        ;;
+    --dest-dir)
+        REMOTE_DIR="$2"
+        shift
+        ;;
+    --dataset)
+        SOURCE_DATASET="$2"
+        shift
+        ;;
+    --keep-snapshot) KEEP_SNAP=1 ;;
+    -h | --help)
+        sed -n '2,32p' "$0"
+        exit 0
+        ;;
+    *)
+        echo "unknown arg: $1" >&2
+        exit 2
+        ;;
+    esac
+    shift
+done
+
+LOG=/var/log/kldload/backup-pack.log
+mkdir -p /var/log/kldload
+exec > >(tee -a "$LOG") 2>&1
+log() { printf '[%(%F %T)T] [pack] %s\n' -1 "$*"; }
+
+[[ "$(id -u)" -eq 0 ]] || {
+    log "FATAL: must run as root (need zfs send)"
+    exit 1
+}
+command -v zfs >/dev/null || {
+    log "FATAL: zfs not installed"
+    exit 1
+}
+command -v zstd >/dev/null || {
+    log "FATAL: zstd not installed"
+    exit 1
+}
+command -v ssh >/dev/null || {
+    log "FATAL: ssh not installed"
+    exit 1
+}
+
+# Auto-detect source dataset: take the dataset mounted at /.
+if [[ -z "$SOURCE_DATASET" ]]; then
+    if ((FULL_POOL)); then
+        SOURCE_DATASET="$(findmnt -no SOURCE / | cut -d/ -f1)"
+        [[ -n "$SOURCE_DATASET" ]] || {
+            log "FATAL: could not detect root pool"
+            exit 1
+        }
+    else
+        SOURCE_DATASET="$(findmnt -no SOURCE /)"
+        [[ -n "$SOURCE_DATASET" ]] || {
+            log "FATAL: could not detect root dataset"
+            exit 1
+        }
+    fi
+fi
+log "source dataset: ${SOURCE_DATASET}"
+
+zfs list -H -o name "$SOURCE_DATASET" >/dev/null 2>&1 ||
+    {
+        log "FATAL: ${SOURCE_DATASET} is not a ZFS dataset"
+        exit 1
+    }
+
+# Reachability + dir bootstrap on remote.
+log "verifying ssh access to ${REMOTE_HOST}..."
+# shellcheck disable=SC2086
+ssh $SSH_OPTS "$REMOTE_HOST" "mkdir -p '$REMOTE_DIR' && [ -w '$REMOTE_DIR' ]" ||
+    {
+        log "FATAL: cannot reach ${REMOTE_HOST} or write to ${REMOTE_DIR}"
+        exit 1
+    }
+log "remote ready: ${REMOTE_HOST}:${REMOTE_DIR}"
+
+HOSTNAME_SHORT="$(hostname -s)"
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+SNAP="${SOURCE_DATASET}@backup-${TS}"
+REMOTE_NAME="${HOSTNAME_SHORT}-${TS}.zfs.zst"
+REMOTE_META="${HOSTNAME_SHORT}-${TS}.meta"
+
+# Atomic snapshot. -r includes children so the send stream is consistent.
+log "taking recursive snapshot: ${SNAP}"
+zfs snapshot -r "$SNAP"
+
+cleanup() {
+    if ((KEEP_SNAP == 0)); then
+        log "removing local backup snapshot: ${SNAP}"
+        zfs destroy -r "$SNAP" 2>/dev/null || true
+    else
+        log "keeping local backup snapshot (--keep-snapshot): ${SNAP}"
+    fi
+}
+trap cleanup EXIT
+
+# Size estimate (uncompressed bytes the send would emit). Useful sanity check.
+SIZE_BYTES="$(zfs send -nP -R "$SNAP" 2>/dev/null | awk '/^size/{print $2}' | tail -1)"
+log "estimated uncompressed stream size: ${SIZE_BYTES:-unknown} bytes"
+
+# zstd -T0 uses all cores; -3 is fast and the WAN is the bottleneck anyway.
+# pv is nice for live throughput but optional — only insert if installed.
+PV=cat
+command -v pv >/dev/null 2>&1 && PV="pv -prtab"
+
+log "sending → ${REMOTE_HOST}:${REMOTE_DIR}/${REMOTE_NAME}"
+# shellcheck disable=SC2086
+if ! zfs send -R "$SNAP" |
+    $PV |
+    zstd -T0 -3 --long |
+    ssh $SSH_OPTS "$REMOTE_HOST" "cat > '${REMOTE_DIR}/${REMOTE_NAME}'"; then
+    log "FATAL: send pipeline failed (check ssh + remote disk space)"
+    exit 1
+fi
+
+# Verify the remote file exists and grab its size.
+# shellcheck disable=SC2086
+REMOTE_SIZE="$(ssh $SSH_OPTS "$REMOTE_HOST" "stat -c %s '${REMOTE_DIR}/${REMOTE_NAME}'" 2>/dev/null || echo 0)"
+[[ "$REMOTE_SIZE" -gt 0 ]] ||
+    {
+        log "FATAL: remote file is empty or missing"
+        exit 1
+    }
+log "remote file: ${REMOTE_SIZE} bytes compressed"
+
+# Sidecar metadata. Plain text so it's grep-able from any host.
+# shellcheck disable=SC2086
+ssh $SSH_OPTS "$REMOTE_HOST" "cat > '${REMOTE_DIR}/${REMOTE_META}'" <<META
+source_host=${HOSTNAME_SHORT}
+source_dataset=${SOURCE_DATASET}
+source_snapshot=backup-${TS}
+created_utc=${TS}
+created_local=$(date -Is)
+stream_bytes_compressed=${REMOTE_SIZE}
+stream_bytes_estimated_raw=${SIZE_BYTES:-unknown}
+kldload_edition=$(cat /etc/kldload/edition 2>/dev/null || echo unknown)
+kldload_profile=$(cat /etc/kldload/profile 2>/dev/null || echo unknown)
+kernel=$(uname -r)
+META
+
+log "DONE"
+log "  remote: ${REMOTE_HOST}:${REMOTE_DIR}/${REMOTE_NAME}"
+log "  meta:   ${REMOTE_HOST}:${REMOTE_DIR}/${REMOTE_META}"
+log "  to restore: sudo kldload-backup-restore --file ${REMOTE_NAME}"

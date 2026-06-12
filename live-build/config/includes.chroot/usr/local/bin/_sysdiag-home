@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Render the sysdiag cockpit reference card. Two-column layout, same
+# style as _kconsole-home (the klab cockpit cheatsheet). Called by
+# kldload-sysdiag at session start and via the `menu` alias.
+set -u
+
+# Colors: always emit so capture-pane gets the codes.
+# Light-mode safety: W (label color) is now BOLD with NO color, so it
+# adapts to the terminal's foreground. Bright-white-on-white was
+# invisible in light mode — operator on .142 b644 2026-06-07: "need to
+# fix the white text because it's invisible in light mode."
+G=$'\e[38;5;85m'     # accent green
+C=$'\e[38;5;117m'    # accent cyan
+Y=$'\e[38;5;221m'    # warn amber
+P=$'\e[38;5;177m'    # accent purple
+M=$'\e[38;5;245m'    # muted
+W=$'\e[1m'           # label = bold, terminal default fg (works in both modes)
+D=$'\e[38;5;240m'    # dim
+N=$'\e[0m'
+B=$'\e[1m'
+
+LC_ALL=${LC_ALL:-C.UTF-8}
+_pad() {
+    local s="$1" w="$2" cl=${#1}
+    if ((cl < w)); then
+        printf '%s%*s' "$s" $((w - cl)) ''
+    else
+        printf '%s' "$s"
+    fi
+}
+
+cat <<BANNER
+
+${W}  sysdiag${N}${M}  ─ local-OS observability cockpit ${D}(parallel to klab)${N}
+${D}  ────────────────────────────────────────────────────────────────────────────${N}
+
+BANNER
+
+L_ROWS=()
+R_ROWS=()
+
+_head() {
+    local col="$1" title="$2" subtitle="$3" color="$4"
+    local row
+    row="${color}${B}$(_pad "$title" 40)${N}${M}$(_pad "$subtitle" 32)${N}"
+    if [[ "$col" == "L" ]]; then L_ROWS+=("$row"); else R_ROWS+=("$row"); fi
+}
+_emit() {
+    local col="$1" key="$2" name="$3" desc="$4" color="$5"
+    local row
+    row="${color}$(_pad "  $key" 12)${W}$(_pad "$name" 22)${N}${M}$(_pad "$desc" 36)${N}"
+    if [[ "$col" == "L" ]]; then L_ROWS+=("$row"); else R_ROWS+=("$row"); fi
+}
+_blank() {
+    if [[ "$1" == "L" ]]; then L_ROWS+=(""); else R_ROWS+=(""); fi
+}
+
+# ── LEFT column: F-keys (primary panes) + navigation ────────────────
+_head L "▸ F-keys (toggle)" "press once = open; press again = close" "$G"
+_emit L "F1"  "help"          "redraw this cheatsheet"        "$G"
+_emit L "F2"  "k9s"           "cluster TUI"                   "$G"
+_emit L "F3"  "journal"       "journalctl -f live stream"     "$G"
+_emit L "F4"  "dmesg"         "kernel ring (follow)"          "$G"
+_emit L "F5"  "DISK bcc (4w)" "biosnoop + biolatency + fileslower + zfsdist" "$G"
+_emit L "F6"  "SYSCALL (5w)"  "exec + open + kill + syscount + capable"      "$G"
+_emit L "F7"  "TCP bcc (3w)"  "tcpconnect + tcpretrans + tcplife"            "$G"
+_emit L "F8"  "NET"           "ss + ip + listeners + active"                 "$G"
+_emit L "F9"  "SERVICES"      "failed + recently-restarted"                  "$G"
+_emit L "F10" "ZFS (2w)"      "zpool-io + zfs-internals"                     "$G"
+_emit L "F11" "KERNEL-STRESS" "psi + runqlat + softirqs + hardirqs + bpfp"   "$G"
+_emit L "F12" "BANDWIDTH"     "tcptop + nethogs"                             "$G"
+_blank L
+_emit L "S-F6" "hardware"     "lscpu + lspci + sensors"                      "$P"
+_emit L "S-F7" "packages"     "rpm/dnf last + history"                       "$P"
+_emit L "S-F8" "kernel"       "uname + modules + sysctl"                     "$P"
+
+_blank L
+_head L "▸ Navigation — one pattern" "Alt walks, Alt+Shift splits" "$C"
+_emit L "Alt+←/→"   "prev / next"     "walk windows"                "$C"
+_emit L "Alt+1..9"  "jump window"     "direct by number"            "$C"
+_emit L "click tab" "any window"      "mouse the status bar"        "$C"
+_emit L "Alt+Sh+→"  "split w/ next"   "current LEFT, next RIGHT"    "$C"
+_emit L "Alt+Sh+←"  "split w/ prev"   "prev LEFT, current RIGHT"    "$C"
+_emit L "Alt+Sh+↓"  "split below"     "current TOP, next BELOW"     "$C"
+_emit L "Alt+Sh+↑"  "split above"     "prev TOP, current BELOW"     "$C"
+_emit L "Alt+x"     "un-split"        "drop other panes, return one" "$C"
+_emit L "Alt+Enter" "new window"      "blank shell"                 "$C"
+_emit L "Ctrl+q"    "close pane"      "kills pane, then window"     "$C"
+
+# ── RIGHT column: Alt-letter heads-up + Shift-F deep dive ────────────
+_head R "▸ Heads-up popups" "(Alt+letter — auto-dismiss on Enter)" "$Y"
+_emit R "Alt+u" "uptime"          "uptime + who + last logins"       "$Y"
+_emit R "Alt+m" "memory"          "PSI + free -h + top RSS"          "$Y"
+_emit R "Alt+d" "disk"            "lsblk + df + smartctl health"     "$Y"
+_emit R "Alt+n" "network"         "interfaces + routes + dns"        "$Y"
+_emit R "Alt+s" "services"        "failed + recent err"              "$Y"
+_emit R "Alt+z" "ZFS"             "pool + list + recent snapshots"   "$Y"
+_emit R "Alt+p" "processes"       "top by CPU + top by RAM"          "$Y"
+_emit R "Alt+l" "logins"          "who / w / last 20"                "$Y"
+
+_blank R
+_head R "▸ Scrollback" "(no prefix needed)" "$C"
+_emit R "PageUp"      "scrollback"  "into copy-mode, scroll up"      "$C"
+_emit R "S-PageUp"    "jump top"    "history-top"                    "$C"
+_emit R "S-PageDown"  "jump bottom" "back to live"                   "$C"
+_emit R "Mouse wheel" "scrollback"  "auto-enters copy-mode"          "$C"
+_emit R "q / Enter"   "exit scroll" "back to live view"              "$C"
+
+_blank R
+_head R "▸ Deep-dive" "(Shift+F<N>, full-screen)" "$P"
+_emit R "S-F2" "root shell"     "sudo -i"                          "$P"
+_emit R "S-F3" "dmesg search"   "interactive grep prompt"          "$P"
+_emit R "S-F4" "sysctl explorer" "sysctl -a | less"                "$P"
+_emit R "S-F5" "doctor loop"    "kldload-doctor live refresh 15s"  "$P"
+_emit R "S-F9" "htop"           "process explorer (was F2)"        "$P"
+
+_blank R
+_head R "▸ GNOME desktop" "(outside tmux — 4 workspaces in + layout)" "$M"
+_emit R "Ctrl-Alt+↑/←/→/↓" "switch ws"   "go to ws 1/2/3/4 (no window)"     "$M"
+_emit R "Super+↑/←/→/↓"    "send + go"   "move active window + follow"      "$M"
+_emit R "Super-Sh+↑"       "max toggle"  "maximize / restore"               "$M"
+_emit R "Super-Sh+↓"       "minimize"    "drop to dock"                     "$M"
+_emit R "Super-Sh+←/→"     "tile L/R"    "snap to half-screen"              "$M"
+
+# ── Compose side-by-side ─────────────────────────────────────────────
+_max=${#L_ROWS[@]}
+((${#R_ROWS[@]} > _max)) && _max=${#R_ROWS[@]}
+for ((i = 0; i < _max; i++)); do
+    L="${L_ROWS[i]:-}"
+    R="${R_ROWS[i]:-}"
+    printf '%s   %s\n' "$L" "$R"
+done
+
+cat <<FOOT
+
+${M}  ${D}Type ${N}${C}menu${M}${D} to redraw, ${N}${C}help${M}${D} for the full kldload-help docs.${N}
+${M}  ${D}Bob can drive these same panes — ask: ${N}${C}\"sysdiag: open zfs pane, tell me if any pool is degraded\"${N}
+
+FOOT

@@ -992,6 +992,324 @@ def speak(text):
 
 
 # ---------------------------------------------------------------------------
+# Tmux cockpit integration — Bob drives the same kldload-console session
+# the human looks at. F-keys, Alt-letters, ad-hoc windows. Persistent so
+# the human can inspect afterwards.
+# ---------------------------------------------------------------------------
+KLDLOAD_TMUX_SESSION = "kldload"  # default: klab/cluster cockpit
+KLDLOAD_OS_SESSION   = "sysdiag"   # local-OS cockpit (kldload-sysdiag)
+
+
+def tmux_ensure(session=KLDLOAD_TMUX_SESSION):
+    """Start a kldload tmux cockpit session detached if it doesn't exist.
+
+    Session names:
+        'kldload' (default) — klab/cluster cockpit (kldload-console)
+        'sysdiag'           — local-OS cockpit (kldload-sysdiag, F2 htop /
+                              F3 journal / F4 dmesg / F8 zfs / etc)
+    """
+    has = subprocess.run(
+        ["tmux", "has-session", "-t", session],
+        capture_output=True,
+    )
+    if has.returncode == 0:
+        return {"status": "exists", "session": session}
+    bootstrapper = "kldload-sysdiag" if session == KLDLOAD_OS_SESSION else "kldload-console"
+    subprocess.Popen(
+        ["bash", "-lc", f"tmux new-session -d -s {session} '{bootstrapper}'"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    import time
+    for _ in range(10):
+        time.sleep(0.3)
+        if subprocess.run(
+            ["tmux", "has-session", "-t", session],
+            capture_output=True,
+        ).returncode == 0:
+            return {"status": "created", "session": session}
+    return {"status": "failed", "error": "tmux session did not come up"}
+
+
+def tmux_status(session=KLDLOAD_TMUX_SESSION):
+    """List windows in the cockpit + which one is active."""
+    out = subprocess.run(
+        ["tmux", "list-windows", "-t", session,
+         "-F", "#{window_index}\t#{window_name}\tactive=#{window_active}"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return {"error": "session not running",
+                "stderr": out.stderr.strip(),
+                "hint": "call tmux_ensure first"}
+    windows = []
+    active = None
+    for line in out.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            idx, name, act = parts[0], parts[1], parts[2]
+            windows.append({"index": int(idx), "name": name})
+            if act.endswith("=1"):
+                active = name
+    return {"session": session, "windows": windows, "active": active}
+
+
+def tmux_capture(window="klab", session=KLDLOAD_TMUX_SESSION, lines=80):
+    """Return the last N visible lines of a cockpit window's pane.
+
+    Window names map to F-keys: klab (home), k9s (F2), follow (F3),
+    disk (F5), syscall (F6), tcp (F7), cilium (F8), top (F9), zfs (F10),
+    tracing (F11), kernel-stress (F12), bob (Alt+B).
+    """
+    target = f"{session}:{window}"
+    out = subprocess.run(
+        ["tmux", "capture-pane", "-t", target, "-p", "-S", f"-{lines}"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return {"error": f"can't capture {target}",
+                "stderr": out.stderr.strip(),
+                "hint": "list windows with tmux_status; key may not be opened yet"}
+    text = out.stdout.rstrip()
+    return {"window": window, "lines": text.count("\n") + 1, "content": text[-4000:]}
+
+
+def tmux_press(key, session=KLDLOAD_TMUX_SESSION):
+    """Send a key to the cockpit (F1-F12, M-letter for Alt, S-F* for Shift-F).
+
+    F-keys open primary observability panes. Alt-letter brings up popups
+    (M-v VMs, M-c cluster, M-z ZFS, M-w WireGuard, etc). S-F is deep dive
+    (S-F2 root shell, S-F5 kldload-doctor live loop).
+    """
+    out = subprocess.run(
+        ["tmux", "send-keys", "-t", session, key],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return {"error": "send-keys failed", "stderr": out.stderr.strip()}
+    import time
+    time.sleep(0.5)
+    return {"sent": key, "session": session}
+
+
+def tmux_run(command, window_name="bob-task", session=KLDLOAD_TMUX_SESSION,
+             timeout=20, capture_lines=80):
+    """Open a NEW window in the cockpit, run a shell command, capture output.
+
+    The window persists after the command finishes so the human can inspect
+    it later. If a window with this name already exists, it's replaced.
+    """
+    target = f"{session}:{window_name}"
+    subprocess.run(["tmux", "kill-window", "-t", target], capture_output=True)
+    sentinel = "BOB_TASK_DONE_MARKER"
+    wrapped = f"bash -c \"{command}; echo {sentinel}; exec bash\""
+    out = subprocess.run(
+        ["tmux", "new-window", "-t", session, "-n", window_name, wrapped],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return {"error": "new-window failed", "stderr": out.stderr.strip(),
+                "hint": "call tmux_ensure first"}
+    import time
+    waited = 0
+    while waited < timeout:
+        time.sleep(1)
+        waited += 1
+        cap = subprocess.run(
+            ["tmux", "capture-pane", "-t", target, "-p", "-S", f"-{capture_lines}"],
+            capture_output=True, text=True,
+        )
+        if cap.returncode == 0 and sentinel in cap.stdout:
+            content = cap.stdout.split(sentinel)[0].rstrip()
+            return {"window": window_name, "elapsed_s": waited,
+                    "content": content[-4000:]}
+    cap = subprocess.run(
+        ["tmux", "capture-pane", "-t", target, "-p", "-S", f"-{capture_lines}"],
+        capture_output=True, text=True,
+    )
+    return {"window": window_name, "timed_out": True, "elapsed_s": waited,
+            "content": cap.stdout[-4000:],
+            "hint": "command may still be running; window persists for inspection"}
+
+
+# ---------------------------------------------------------------------------
+# kldload ops — high-level operator tools (diagnostics + scaling +
+# replication). Bob isn't a chat bot; it's a system operator that drives
+# the kldload tool catalog.
+# ---------------------------------------------------------------------------
+
+
+def _run_capture(cmd, timeout=30):
+    """Run a command list, capture stdout/stderr/rc — no shell."""
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return {"rc": out.returncode, "stdout": out.stdout.strip(),
+                "stderr": out.stderr.strip()}
+    except subprocess.TimeoutExpired:
+        return {"rc": -1, "error": f"timeout after {timeout}s"}
+    except FileNotFoundError:
+        return {"rc": -1, "error": f"not found: {cmd[0]}"}
+
+
+def kldload_doctor():
+    """Run kldload-doctor — canonical 'state of the box' snapshot."""
+    r = _run_capture(["kldload-doctor"], timeout=60)
+    if r.get("rc") == 0 and r.get("stdout"):
+        try:
+            return {"health": json.loads(r["stdout"])}
+        except json.JSONDecodeError:
+            return {"health_text": r["stdout"][:4000]}
+    return {"error": r.get("error") or r.get("stderr") or "kldload-doctor failed", "rc": r.get("rc")}
+
+
+def k8s_overview():
+    """K8s cluster overview — nodes, pod counts, warning events."""
+    env = os.environ.copy()
+    env["KUBECONFIG"] = env.get("KUBECONFIG", "/root/.kube/config")
+    nodes = _run_capture(["kubectl", "get", "nodes", "-o",
+                          "custom-columns=NAME:.metadata.name,STATUS:.status.conditions[-1].type,ROLE:.metadata.labels.kubernetes\\.io/role,VER:.status.nodeInfo.kubeletVersion",
+                          "--no-headers"], timeout=10)
+    pods = _run_capture(["kubectl", "get", "pods", "-A", "--no-headers"], timeout=10)
+    events = _run_capture(["kubectl", "get", "events", "-A",
+                           "--field-selector=type=Warning",
+                           "--sort-by=.lastTimestamp",
+                           "-o", "custom-columns=TIME:.lastTimestamp,NS:.metadata.namespace,REASON:.reason,MSG:.message",
+                           "--no-headers"], timeout=10)
+    pod_lines = [l for l in (pods.get("stdout") or "").splitlines() if l.strip()]
+    not_running = [l for l in pod_lines if l.split()[3:4] and l.split()[3] != "Running"]
+    return {
+        "nodes": (nodes.get("stdout") or "").splitlines(),
+        "pod_count": len(pod_lines),
+        "pods_not_running": not_running[:20],
+        "recent_warnings": (events.get("stdout") or "").splitlines()[-10:],
+    }
+
+
+def klab_status():
+    """klab goldens + blue/green sites — golden snapshots + running VMs."""
+    snaps = _run_capture(["zfs", "list", "-H", "-t", "snapshot", "-o", "name"], timeout=10)
+    golden = sorted({s for s in (snaps.get("stdout") or "").splitlines() if "@golden" in s})
+    vms = _run_capture(["virsh", "list", "--all", "--name"], timeout=10)
+    vm_list = [v for v in (vms.get("stdout") or "").splitlines() if v.strip()]
+    blue = sorted([v for v in vm_list if v.startswith("klab-blue-") or "klab-" in v and "-blue" in v])
+    green = sorted([v for v in vm_list if v.startswith("klab-green-") or "klab-" in v and "-green" in v])
+    return {
+        "goldens": golden,
+        "blue_sites": blue,
+        "green_sites": green,
+        "total_vms": len(vm_list),
+    }
+
+
+def zfs_health():
+    """ZFS pool status + scrub + ARC + dataset usage summary."""
+    pools = _run_capture(["zpool", "status", "-x"], timeout=10)
+    pool_list = _run_capture(["zpool", "list", "-H", "-o",
+                              "name,size,alloc,free,frag,cap,health"], timeout=10)
+    arc = ""
+    try:
+        with open("/proc/spl/kstat/zfs/arcstats") as f:
+            for line in f:
+                if line.split()[0] in ("size", "c_max", "hits", "misses"):
+                    arc += line
+    except FileNotFoundError:
+        arc = "(arcstats unavailable)"
+    datasets = _run_capture(["zfs", "list", "-H", "-o",
+                             "name,used,refer,mountpoint"], timeout=10)
+    return {
+        "pool_health": (pools.get("stdout") or "").strip()[:2000],
+        "pools": (pool_list.get("stdout") or "").splitlines(),
+        "arc_summary": arc[:1000],
+        "dataset_count": len((datasets.get("stdout") or "").splitlines()),
+    }
+
+
+def find_recent_errors(minutes=15, units=None):
+    """journalctl error+ in the last N minutes, optionally per-unit."""
+    cmd = ["journalctl", "-p", "err", "--since", f"{minutes} min ago",
+           "--no-pager", "-o", "short"]
+    for u in (units or []):
+        cmd.extend(["-u", u])
+    r = _run_capture(cmd, timeout=15)
+    lines = [l for l in (r.get("stdout") or "").splitlines()
+             if l and "Guest agent is not responding" not in l]
+    seen = set()
+    deduped = []
+    for l in lines:
+        sig = " ".join(l.split()[3:])[:120]
+        if sig not in seen:
+            seen.add(sig)
+            deduped.append(l)
+    return {
+        "window_minutes": minutes,
+        "units": units or [],
+        "error_lines": deduped[:40],
+        "total_unique": len(deduped),
+    }
+
+
+def profile_system(duration_s=5):
+    """Sample CPU/disk/memory pressure for N seconds — what's eating the box."""
+    top = _run_capture(["top", "-bn1", "-w", "120"], timeout=10)
+    top_lines = (top.get("stdout") or "").splitlines()
+    cpu_top = top_lines[7:17] if len(top_lines) > 17 else []
+    io_stat = _run_capture(["iostat", "-xm", "1", str(duration_s)], timeout=duration_s + 10)
+    psi = {}
+    for k in ("cpu", "memory", "io"):
+        try:
+            with open(f"/proc/pressure/{k}") as f:
+                psi[k] = f.read().strip()
+        except FileNotFoundError:
+            psi[k] = "(PSI unavailable)"
+    return {
+        "cpu_top_processes": cpu_top,
+        "io_sample": (io_stat.get("stdout") or "").splitlines()[-20:],
+        "pressure": psi,
+    }
+
+
+def k8s_add_worker(count=1):
+    """Add N worker nodes to the cluster — DESTRUCTIVE."""
+    r = _run_capture(["kube-cluster", "add-worker", "--count", str(count)], timeout=600)
+    return {
+        "rc": r.get("rc"),
+        "stdout": (r.get("stdout") or "")[-2000:],
+        "stderr": (r.get("stderr") or "")[-2000:],
+        "warning": "destructive: confirm with user before running",
+    }
+
+
+def klab_spawn(distro, site="green"):
+    """Clone a single golden into a fresh blue or green site VM."""
+    if distro not in ("centos", "rocky", "debian", "fedora", "ubuntu", "rhel"):
+        return {"error": f"unknown distro: {distro}"}
+    if site not in ("blue", "green"):
+        return {"error": f"site must be blue or green, got: {site}"}
+    r = _run_capture(["klab", "deploy", site, "--distro", distro], timeout=120)
+    return {
+        "distro": distro, "site": site,
+        "rc": r.get("rc"),
+        "stdout": (r.get("stdout") or "")[-2000:],
+        "stderr": (r.get("stderr") or "")[-2000:],
+    }
+
+
+def klab_destroy(distro, site):
+    """Tear down a klab blue or green site VM — DESTRUCTIVE."""
+    if distro not in ("centos", "rocky", "debian", "fedora", "ubuntu", "rhel"):
+        return {"error": f"unknown distro: {distro}"}
+    if site not in ("blue", "green"):
+        return {"error": f"site must be blue or green, got: {site}"}
+    r = _run_capture(["klab", "destroy", site, "--distro", distro], timeout=60)
+    return {
+        "distro": distro, "site": site,
+        "rc": r.get("rc"),
+        "stdout": (r.get("stdout") or "")[-2000:],
+        "warning": "destructive: confirm with user before running",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tool definitions for Ollama function calling
 # ---------------------------------------------------------------------------
 TOOLS = [
@@ -1508,6 +1826,89 @@ TOOLS = [
             }
         }
     },
+
+    # ── kldload tmux cockpit (drive the same panes the human sees) ─────────
+    # Two cockpit sessions: 'kldload' is the klab/cluster cockpit (kldload-
+    # console: F2 k9s, F8 cilium, klab cattle popups), 'sysdiag' is the
+    # local-OS cockpit (kldload-sysdiag: F2 htop, F3 journal, F4 dmesg,
+    # F8 zfs, F9 services). Pick the right session for what the human asked.
+    {"type": "function", "function": {
+        "name": "tmux_ensure",
+        "description": "Start a kldload tmux cockpit session if it isn't already running. Idempotent. Call before any other tmux_* tool.",
+        "parameters": {"type": "object", "properties": {
+            "session": {"type": "string", "description": "Cockpit session: 'kldload' (klab/cluster — k9s, cilium, klab cattle) or 'sysdiag' (local OS — htop, journal, dmesg, zfs, services). Default: kldload"}}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "tmux_status",
+        "description": "List the windows open in a cockpit session and which one is active. Use to see what observability panes the human has open.",
+        "parameters": {"type": "object", "properties": {
+            "session": {"type": "string", "description": "'kldload' or 'sysdiag' (default kldload)"}}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "tmux_capture",
+        "description": "Read the recent content of a cockpit window's pane. kldload session windows: klab (home), k9s (F2), follow (F3), disk (F5), syscall (F6), tcp (F7), cilium (F8), top (F9), zfs (F10), tracing (F11), kernel-stress (F12), bob (Alt+B). sysdiag session windows: home (F1), htop (F2), journal (F3), dmesg (F4), disk (F5), syscall (F6), net (F7), zfs (F8), services (F9), hw (F10), packages (F11), kernel (F12).",
+        "parameters": {"type": "object", "properties": {
+            "window": {"type": "string", "description": "Window name (defaults: 'klab' for kldload session, 'home' for sysdiag)"},
+            "session": {"type": "string", "description": "'kldload' or 'sysdiag' (default kldload)"},
+            "lines": {"type": "integer", "description": "Last N lines (default 80)"}}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "tmux_press",
+        "description": "Send a key to a cockpit to navigate. F1-F12 open observability panes. M-letter = Alt-letter heads-up popup. S-F = Shift-F deep dive. Use 'sysdiag' for local-OS work, 'kldload' for cluster/klab work.",
+        "parameters": {"type": "object", "properties": {
+            "key": {"type": "string", "description": "Key in tmux notation, e.g. F5, M-b, S-F2"},
+            "session": {"type": "string", "description": "'kldload' or 'sysdiag' (default kldload)"}}, "required": ["key"]}}},
+    {"type": "function", "function": {
+        "name": "tmux_run",
+        "description": "Open a NEW window in a cockpit, run a shell command, capture output. The window persists so the human can inspect afterwards. Use for ad-hoc diagnostics that don't have a dedicated F-key pane.",
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string", "description": "Shell command"},
+            "window_name": {"type": "string", "description": "Window label (default 'bob-task')"},
+            "session": {"type": "string", "description": "'kldload' or 'sysdiag' (default kldload)"},
+            "timeout": {"type": "integer", "description": "Wait up to N seconds (default 20)"}}, "required": ["command"]}}},
+
+    # ── kldload ops (high-level diagnostics + scaling) ─────────────────────
+    {"type": "function", "function": {
+        "name": "kldload_doctor",
+        "description": "Run kldload-doctor and return the full system health snapshot — ZFS pool health, K8s nodes, failed services, recent errors, autodeploy markers, hardware. Use this when the user asks 'is everything ok?' or 'what's wrong?' — it's the canonical 'state of the box' query.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "k8s_overview",
+        "description": "Get K8s cluster overview: node list with status, pod count, failed pods, recent warning events. Use when user asks about cluster health.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "klab_status",
+        "description": "List klab goldens + blue/green sites with state (running, shut-off, paused). Use when user asks about cattle pattern / VMs / lab state.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "zfs_health",
+        "description": "Get ZFS pool health: pool status, scrub state, ARC stats, dataset usage. Use when user asks about storage.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "find_recent_errors",
+        "description": "Search journalctl for error/critical messages in the last N minutes (default 15), optionally filtered to specific units. Returns deduped error lines so Bob can identify problems without drowning in noise.",
+        "parameters": {"type": "object", "properties": {
+            "minutes": {"type": "integer", "description": "Look-back window (default 15)"},
+            "units": {"type": "array", "items": {"type": "string"}, "description": "Restrict to these systemd units"}}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "profile_system",
+        "description": "Sample system performance: top processes by CPU, disk I/O activity, memory pressure (PSI). Returns a structured profile snapshot. Use when user asks 'what's slow' or 'profile the system'.",
+        "parameters": {"type": "object", "properties": {
+            "duration_s": {"type": "integer", "description": "Sample duration (default 5)"}}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "k8s_add_worker",
+        "description": "Add N more worker nodes to the K8s cluster via kube-cluster bootstrap. DESTRUCTIVE — confirm with user before calling.",
+        "parameters": {"type": "object", "properties": {
+            "count": {"type": "integer", "description": "Number of workers to add (default 1)"}}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "klab_spawn",
+        "description": "Clone a klab golden into a fresh blue or green site VM (one distro at a time). Uses ZFS instant-clone + virt-install --import. ~2s to spawn.",
+        "parameters": {"type": "object", "properties": {
+            "distro": {"type": "string", "description": "centos / rocky / debian / fedora / ubuntu / rhel"},
+            "site": {"type": "string", "description": "blue or green (default green)"}}, "required": ["distro"]}}},
+    {"type": "function", "function": {
+        "name": "klab_destroy",
+        "description": "Tear down a klab blue or green site VM. Use to recycle the playground demo. DESTRUCTIVE — confirm with user before calling.",
+        "parameters": {"type": "object", "properties": {
+            "distro": {"type": "string", "description": "centos / rocky / debian / fedora / ubuntu / rhel"},
+            "site": {"type": "string", "description": "blue or green"}}, "required": ["distro", "site"]}}},
 ]
 
 # Map tool names to functions
@@ -1548,6 +1949,22 @@ TOOL_MAP = {
     "push_notification": push_notification,
     "discord_message": discord_message,
     "hue_control": hue_control,
+    # tmux cockpit
+    "tmux_ensure": tmux_ensure,
+    "tmux_status": tmux_status,
+    "tmux_capture": tmux_capture,
+    "tmux_press": tmux_press,
+    "tmux_run": tmux_run,
+    # kldload ops
+    "kldload_doctor": kldload_doctor,
+    "k8s_overview": k8s_overview,
+    "klab_status": klab_status,
+    "zfs_health": zfs_health,
+    "find_recent_errors": find_recent_errors,
+    "profile_system": profile_system,
+    "k8s_add_worker": k8s_add_worker,
+    "klab_spawn": klab_spawn,
+    "klab_destroy": klab_destroy,
 }
 
 

@@ -1,0 +1,370 @@
+#!/bin/bash
+# ══════════════════════════════════════════════════════════════════════════
+# kldload-sysdiag — local-OS observability tmux cockpit
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Parallel to kldload-console (klab/cluster cockpit). Same F-key UX,
+# retargeted to the workstation. Each F-key calls a named exported helper
+# function so the binding line stays readable AND so Bob (via tmux_run)
+# can call the same helpers directly: `_sys_disk`, `_sys_zfs`, etc.
+#
+# Session name: "sysdiag" (klab's session is "kldload" — they coexist).
+# F1 redraws the cheatsheet via _sysdiag-home. `menu` and `help` aliases
+# do the same any time.
+
+export TERM=xterm-256color
+export KUBECONFIG=/root/.kube/config
+SESSION=sysdiag
+
+# ── primary helpers (exported so tmux child shells inherit) ───────────
+_sys_htop() {
+    if command -v htop >/dev/null 2>&1; then
+        exec htop
+    else
+        exec top
+    fi
+}
+export -f _sys_htop
+
+# F2 = k9s — matches klab cockpit's F2 binding so muscle memory transfers
+# between sysdiag and klab. If KUBECONFIG isn't set or the cluster isn't
+# reachable, k9s prints a connection error in its own UI rather than
+# crashing the pane.
+_sys_k9s() {
+    export KUBECONFIG=${KUBECONFIG:-/root/.kube/config}
+    if command -v k9s >/dev/null 2>&1; then
+        exec k9s
+    else
+        echo "(k9s not installed — dnf install k9s)"
+        sleep 99
+    fi
+}
+export -f _sys_k9s
+
+_sys_journal() {
+    exec journalctl -f -n 200 --no-pager
+}
+export -f _sys_journal
+
+_sys_dmesg() {
+    sudo dmesg --follow --human --ctime 2>&1 || {
+        echo "(dmesg unavailable — needs sudo)"
+        sleep 99
+    }
+}
+export -f _sys_dmesg
+
+_sys_disk() {
+    while true; do
+        clear
+        date
+        echo "── iostat -xm (1s sample) ─────────────────────────────"
+        iostat -xm 1 1 2>/dev/null | tail -n +2 || echo "(install sysstat for iostat)"
+        echo
+        echo "── df -h ──────────────────────────────────────────────"
+        df -h | grep -vE 'tmpfs|devtmpfs|overlay|squashfs|cgroup' | head -15
+        echo
+        echo "── BCC biolatency (1s) ────────────────────────────────"
+        timeout 1 sudo /usr/share/bcc/tools/biolatency 1 1 2>/dev/null ||
+            timeout 1 sudo biolatency-bpfcc 1 1 2>/dev/null ||
+            echo "(biolatency unavailable — install bcc-tools)"
+        sleep 4
+    done
+}
+export -f _sys_disk
+
+_sys_syscall() {
+    sudo /usr/share/bcc/tools/execsnoop 2>/dev/null ||
+        sudo execsnoop-bpfcc 2>/dev/null ||
+        {
+            echo "(execsnoop needs bcc-tools — install bcc-tools)"
+            sleep 99
+        }
+}
+export -f _sys_syscall
+
+_sys_net() {
+    while true; do
+        clear
+        date
+        echo "── interfaces ─────────────────────────────────────────"
+        ip -br -c addr
+        echo
+        echo "── routes ─────────────────────────────────────────────"
+        ip -br -c route
+        echo
+        echo "── listeners (ss -tlnp) ───────────────────────────────"
+        ss -tlnp 2>/dev/null | head -15
+        echo
+        echo "── established connections ────────────────────────────"
+        ss -tnp state established 2>/dev/null | head -10
+        sleep 5
+    done
+}
+export -f _sys_net
+
+_sys_zfs() {
+    while true; do
+        clear
+        date
+        echo "── zpool status ───────────────────────────────────────"
+        zpool status 2>&1 | head -30
+        echo
+        echo "── zfs iostat (1s) ────────────────────────────────────"
+        zfs iostat -l 1 1 2>/dev/null | head -10
+        echo
+        echo "── top datasets by USED ───────────────────────────────"
+        zfs list -t filesystem -o name,used,refer,mountpoint -s used 2>/dev/null | tail -15
+        sleep 5
+    done
+}
+export -f _sys_zfs
+
+_sys_services() {
+    while true; do
+        clear
+        date
+        echo "── failed units ───────────────────────────────────────"
+        systemctl --failed --no-pager 2>&1
+        echo
+        echo "── recently activated (last 30) ───────────────────────"
+        systemctl list-units --state=active --no-pager 2>/dev/null | head -25
+        sleep 5
+    done
+}
+export -f _sys_services
+
+_sys_hw() {
+    clear
+    echo "── lscpu ──────────────────────────────────────────────"
+    lscpu | head -25
+    echo
+    echo "── lspci -v (head) ────────────────────────────────────"
+    lspci -v 2>/dev/null | head -50
+    echo
+    echo "── sensors ────────────────────────────────────────────"
+    sensors 2>/dev/null | head -20 || echo "(install lm_sensors for sensors)"
+    echo
+    read -r -p "Enter to dismiss…" _
+}
+export -f _sys_hw
+
+_sys_packages() {
+    clear
+    date
+    echo "── last 30 installs ───────────────────────────────────"
+    if command -v rpm >/dev/null 2>&1; then
+        rpm -qa --last 2>/dev/null | head -30
+    elif command -v dpkg-query >/dev/null 2>&1; then
+        dpkg-query -W -f '${db:Status-Abbrev} ${binary:Package} ${Version}\n' 2>/dev/null | head -30
+    else
+        pacman -Q 2>/dev/null | head -30
+    fi
+    echo
+    echo "── dnf/apt history ────────────────────────────────────"
+    dnf history list 2>/dev/null | head -15 || apt list --installed 2>/dev/null | tail -15
+    echo
+    read -r -p "Enter to dismiss…" _
+}
+export -f _sys_packages
+
+_sys_kernel() {
+    clear
+    echo "── uname ──────────────────────────────────────────────"
+    uname -a
+    echo
+    echo "── loaded modules (top 25 by size) ────────────────────"
+    lsmod | sort -k2 -n -r | head -25
+    echo
+    echo "── selected sysctls ───────────────────────────────────"
+    sysctl vm.swappiness vm.dirty_ratio fs.inotify.max_user_watches kernel.pid_max \
+        net.ipv4.ip_forward net.bridge.bridge-nf-call-iptables 2>/dev/null
+    echo
+    read -r -p "Enter to dismiss…" _
+}
+export -f _sys_kernel
+
+# ── Shift-Fn deep-dive helpers ────────────────────────────────────────
+_sys_dmesg_grep() {
+    read -r -p "dmesg grep for: " q
+    clear
+    sudo dmesg | grep -i "$q" | tail -50
+    echo
+    read -r -p "Enter to dismiss…" _
+}
+export -f _sys_dmesg_grep
+
+_sys_doctor_loop() {
+    while true; do
+        clear
+        date
+        if command -v kldload-doctor >/dev/null 2>&1; then
+            kldload-doctor 2>/dev/null | python3 -m json.tool 2>/dev/null | head -80 ||
+                kldload-doctor 2>&1 | head -80
+        else
+            echo "(kldload-doctor not installed)"
+        fi
+        sleep 15
+    done
+}
+export -f _sys_doctor_loop
+
+# ── tmux helpers ──────────────────────────────────────────────────────
+_ktoggle-win() {
+    local name="$1"
+    shift
+    local cmd="$*"
+    if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$name"; then
+        tmux kill-window -t "${SESSION}:${name}"
+    else
+        tmux new-window -t "$SESSION" -n "$name" "$cmd"
+    fi
+}
+export -f _ktoggle-win
+
+# ── bootstrap session ─────────────────────────────────────────────────
+if ! tmux has-session -t $SESSION 2>/dev/null; then
+    tmux new-session -d -s $SESSION -n home
+    tmux set-option -g destroy-unattached off
+    tmux set-option -g remain-on-exit on
+    tmux set-hook -g pane-died 'display-message -d 0 "↩ tool exited — Enter / Alt+X to close"'
+    tmux bind-key -T root -N "close dead pane with Enter" Enter \
+        if-shell -F "#{pane_dead}" "kill-pane" "send-keys Enter"
+
+    tmux send-keys -t $SESSION:home \
+        "alias menu='_sysdiag-home'; alias help='kldload-help'; clear; _sysdiag-greeting" Enter
+
+    # F1 — redraw cheatsheet into the home window. Uses the greeting
+    # (fastfetch + cheatsheet side-by-side) for consistency with the
+    # initial bootstrap landing — operator gets the same visual whether
+    # they just opened sysdiag or hit F1 to redraw.
+    tmux bind -n F1 if-shell -F "#{!=:#{window_name},home}" \
+        "select-window -t '${SESSION}:=home'" \
+        "send-keys -t '${SESSION}:=home' 'clear; _sysdiag-greeting' Enter"
+
+    # F2..F12 — primary observability panes.
+    # Multi-pane groups (F5/F6/F7/F10/F11/F12) reuse _kgroup from
+    # kldload-console for full bcc-tools mini-cockpit polish. _kgroup
+    # reads KLDLOAD_TMUX_SESSION so we target sysdiag, not klab.
+    tmux bind -n F2 run-shell "_ktoggle-win k9s       '_sys_k9s'"
+    tmux bind -n F3 run-shell "_ktoggle-win journal   '_sys_journal'"
+    tmux bind -n F4 run-shell "_ktoggle-win dmesg     '_sys_dmesg'"
+    tmux bind -n F5 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup disk"
+    tmux bind -n F6 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup syscall"
+    tmux bind -n F7 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup tcp"
+    tmux bind -n F8 run-shell "_ktoggle-win net       '_sys_net'"
+    tmux bind -n F9 run-shell "_ktoggle-win services  '_sys_services'"
+    tmux bind -n F10 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup zfs"
+    tmux bind -n F11 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup kernel-stress"
+    tmux bind -n F12 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup bandwidth"
+    # Shift-F supplemental: hw / packages / kernel (single-pane info dumps)
+    tmux bind -n S-F6 run-shell "_ktoggle-win hw       '_sys_hw'"
+    tmux bind -n S-F7 run-shell "_ktoggle-win packages '_sys_packages'"
+    tmux bind -n S-F8 run-shell "_ktoggle-win kernel   '_sys_kernel'"
+
+    # Alt-letter heads-up popups
+    tmux bind -n M-u display-popup -E -w 80% -h 50% "bash -c 'uptime; echo; who; echo; echo --- last logins ---; last -n 10; echo; read -r -p \"Enter to dismiss…\" _'"
+    tmux bind -n M-m display-popup -E -w 85% -h 70% "bash -c 'free -h; echo; echo --- PSI memory ---; cat /proc/pressure/memory 2>/dev/null || echo \"(PSI unavailable)\"; echo; echo --- top RSS ---; ps aux --sort=-rss | head -15; echo; read -r -p \"Enter to dismiss…\" _'"
+    tmux bind -n M-d display-popup -E -w 90% -h 70% "bash -c 'lsblk; echo; df -h | grep -vE \"tmpfs|devtmpfs\"; echo; echo --- smartctl health ---; for d in /dev/nvme0n1 /dev/sda /dev/sdb; do [[ -b \$d ]] && sudo smartctl -H \$d 2>/dev/null | grep -A1 -i health; done; echo; read -r -p \"Enter to dismiss…\" _'"
+    tmux bind -n M-n display-popup -E -w 90% -h 70% "bash -c 'ip -br -c addr; echo; ip -br -c route; echo; echo --- dns ---; resolvectl status 2>/dev/null | head -20 || cat /etc/resolv.conf; echo; read -r -p \"Enter to dismiss…\" _'"
+    tmux bind -n M-s display-popup -E -w 90% -h 70% "bash -c 'systemctl --failed --no-pager; echo; echo --- last 30 min errors ---; journalctl --since \"30 min ago\" -p err --no-pager 2>&1 | tail -25; echo; read -r -p \"Enter to dismiss…\" _'"
+    tmux bind -n M-z display-popup -E -w 90% -h 70% "bash -c 'zpool status -x; echo; zpool list; echo; echo --- recent snapshots ---; zfs list -t snapshot 2>/dev/null | tail -10; echo; read -r -p \"Enter to dismiss…\" _'"
+    tmux bind -n M-p display-popup -E -w 90% -h 75% "bash -c 'echo --- top CPU ---; ps aux --sort=-pcpu | head -12; echo; echo --- top RAM ---; ps aux --sort=-rss | head -12; echo; read -r -p \"Enter to dismiss…\" _'"
+    tmux bind -n M-l display-popup -E -w 70% -h 50% "bash -c 'who; echo; w; echo; echo --- last 20 logins ---; last -n 20; echo; read -r -p \"Enter to dismiss…\" _'"
+
+    # Shift-Fn deep dive
+    tmux bind -n S-F2 new-window -t "$SESSION" -n root 'sudo -i'
+    tmux bind -n S-F3 run-shell "_ktoggle-win dmesg-grep '_sys_dmesg_grep'"
+    tmux bind -n S-F4 run-shell "_ktoggle-win sysctl-explorer 'bash -c \"sysctl -a 2>/dev/null | less\"'"
+    tmux bind -n S-F5 run-shell "_ktoggle-win doctor '_sys_doctor_loop'"
+    tmux bind -n S-F9 run-shell "_ktoggle-win htop '_sys_htop'"
+
+    # ── Simple nav: Alt for walk, Alt+Shift for splits ────────────────
+    # Alt+arrow walks windows. Alt+Shift+arrow JOINS the adjacent window
+    # into the current as a split pane (the source window collapses).
+    # Alt+x kills every pane except the current one (un-split, return to
+    # single view). Operator on .142 b642: "right and left moves left
+    # and right .. up/down can split tabs simple .. f5 on the right
+    # with f6 on the left" — this is that scheme.
+    tmux bind -n M-S-Right join-pane -h -s :+1
+    tmux bind -n M-S-Left join-pane -h -s :-1
+    tmux bind -n M-S-Down join-pane -v -s :+1
+    tmux bind -n M-S-Up join-pane -v -s :-1
+    tmux bind -n M-x kill-pane -a
+
+    # Window navigation (matches kldload-console keymap)
+    tmux bind -n M-Left previous-window
+    tmux bind -n M-Right next-window
+    tmux bind -n M-h previous-window
+    tmux bind -n M-l next-window
+    tmux bind -n M-k select-pane -U
+    tmux bind -n M-j select-pane -D
+    tmux bind -n S-Right next-window
+    tmux bind -n S-Left previous-window
+    tmux bind -n S-Up select-window -t :+
+    tmux bind -n S-Down select-window -t :-
+    tmux bind -n M-Enter new-window
+    tmux bind -n "M-\\" split-window -h -c "#{pane_current_path}"
+    tmux bind -n M-- split-window -v -c "#{pane_current_path}"
+    tmux bind -n C-q kill-pane
+    for i in 1 2 3 4 5 6 7 8 9; do
+        tmux bind -n "M-$i" select-window -t "$SESSION:$i" 2>/dev/null
+    done
+
+    # Scrollback without ceremony
+    tmux bind -n PageUp copy-mode -u
+    tmux bind -n S-PageUp copy-mode \; send-keys -X history-top
+    tmux bind -n S-PageDown send-keys -X history-bottom
+    tmux bind -n WheelUpPane if-shell -F -t = "#{pane_in_mode}" "send-keys -X -N 3 scroll-up" "copy-mode -e ; send-keys -X -N 3 scroll-up"
+    tmux bind -n WheelDownPane if-shell -F -t = "#{pane_in_mode}" "send-keys -X -N 3 scroll-down" ""
+
+    tmux set -g default-terminal "xterm-256color"
+    tmux set -g mouse on
+
+    # ── Copy / paste → system clipboard via OSC52 ──────────────────────
+    # set-clipboard on tells tmux to emit OSC 52 escape sequences when
+    # copy-mode selects to a buffer. Modern Konsole accepts OSC 52 and
+    # writes to the system clipboard, so mouse-drag selections + vi
+    # copy-mode 'y' both land in the OS clipboard. Without this,
+    # tmux's "copy" stays inside tmux's own paste buffer and the GUI
+    # paste shortcuts (Ctrl+Shift+V, Shift+Insert, middle-click) get
+    # nothing. Operator on .142 b644 2026-06-07: "copy paste and other
+    # features that were in the gui terminal need to be added if possible."
+    tmux set -g set-clipboard on
+
+    # vi-keys in copy-mode: Prefix [ enters, v starts selection, y copies
+    # (yank). More natural than emacs-keys for operators coming from any
+    # tiling-WM / vim background. After yank, the selection is in BOTH
+    # tmux's buffer AND the system clipboard thanks to set-clipboard on.
+    tmux set -g mode-keys vi
+    tmux bind-key -T copy-mode-vi v send-keys -X begin-selection
+    tmux bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+    tmux bind-key -T copy-mode-vi MouseDragEnd1Pane \
+        send-keys -X copy-selection-and-cancel
+
+    # Larger scrollback so journalctl / dmesg / iotop output is available
+    # when the operator scrolls back through copy-mode.
+    tmux set -g history-limit 50000
+
+    # Source kldload tmux theme if present — palette parity with klab.
+    # IMPORTANT: source BEFORE our window-nav bindings below so the skel's
+    # `bind -n M-Left select-pane -L` (pane nav) doesn't override our
+    # window-nav binding. Operator on .142 b642: "alt+1 2 3 works but i
+    # cant use rht arreos to navigate tmux windows" — that was the
+    # skel file's M-Left/M-Right hijacking our binding post-init.
+    for _cfg in /etc/skel/.tmux.conf "$HOME/.tmux.conf"; do
+        [[ -f "$_cfg" ]] && tmux source-file "$_cfg" 2>/dev/null || true
+    done
+
+    # ── Re-assert window-nav AFTER skel source ────────────────────────
+    # Skel binds M-Left/M-Right to pane navigation (select-pane -L/-R).
+    # We want them to walk WINDOWS (next/prev tab). Re-bind here so the
+    # last-wins rule lands on our side. For pane nav within a window
+    # the user has M-k / M-j (Alt+k/j vim-style) and click-to-focus.
+    tmux bind -n M-Left previous-window
+    tmux bind -n M-Right next-window
+    tmux bind -n M-h previous-window
+    tmux bind -n M-l next-window
+fi
+
+exec tmux attach -t $SESSION

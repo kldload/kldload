@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# kldload-trust-cert — import kldload's TLS cert into Chrome NSS DB(s)
+# so https://localhost:8443 is trusted automatically. No certificate
+# warning, no --ignore-certificate-errors flag needed.
+#
+# Two modes:
+#   kldload-trust-cert            — per-user; imports into $HOME/.pki/nssdb
+#   kldload-trust-cert --system   — root only; seeds /etc/skel + every
+#                                   existing user's NSS DB. This is the mode
+#                                   wired into kldload-tls-cert.service's
+#                                   ExecStartPost so trust is established
+#                                   BEFORE any user session starts and
+#                                   re-applied on every cert rotation.
+#
+# Chrome on Linux reads ~/.pki/nssdb/ — NOT the /etc/pki/ca-trust system
+# bundle. So even with update-ca-trust populated, Chrome rejects the cert
+# until it's mirrored into NSS DB. The script is the bridge.
+#
+# Idempotent: compares cert fingerprints; only re-imports on rotation.
+set -Eeuo pipefail
+
+CERT=/etc/pki/ca-trust/source/anchors/kldload-webui.crt
+NICKNAME=kldload-webui
+
+# ── per-DB import (used by both modes) ─────────────────────────────
+# Trust flag MUST be "CT,C,T" — this is the only combination that makes
+# Chrome on Linux silently accept the cert.
+#
+# Why not "C,,":  the obvious choice ("trusted CA for SSL") makes Chrome
+# STILL reject the leaf with NET::ERR_CERT_AUTHORITY_INVALID. The cert is
+# both CA and leaf (self-signed with CA:TRUE pathlen:0). NSS's chain
+# builder needs explicit "trusted to issue *for this purpose*" flags on
+# all three slots (SSL, email, code-signing) or chain validation flips
+# to "Certificate type not approved for application." Verified on b643
+# .142 — went from cert warning banner to silent trust the moment the
+# trust flag flipped from C,, → CT,C,T. The lowercase 'c' that NSS
+# writes back ("CT,C,c") is normal — it can't promote the code-signing
+# slot beyond "valid CA," and that's fine for our purpose.
+TRUST_FLAGS="CT,C,T"
+
+_import_into() {
+    local db="$1"
+    mkdir -p "$db"
+    [[ -f "$db/cert9.db" ]] || certutil -d "sql:$db" -N --empty-password >/dev/null 2>&1
+    local cur ins existing_flags
+    cur="$(openssl x509 -in "$CERT" -noout -fingerprint -sha256 2>/dev/null |
+        cut -d= -f2 | tr -d ':' | tr 'a-f' 'A-F' || true)"
+    ins="$(certutil -L -d "sql:$db" -n "$NICKNAME" 2>/dev/null |
+        awk '/Fingerprint \(SHA-256\)/{getline; print; exit}' |
+        tr -d ' :' | tr 'a-f' 'A-F' || true)"
+    # Trust-flag check: an existing entry with the wrong flags must be
+    # re-trusted even if the fingerprint matches (this is how we recover
+    # NSS DBs poisoned by older b643 versions that used "C,,").
+    existing_flags="$(certutil -L -d "sql:$db" 2>/dev/null |
+        awk -v n="$NICKNAME" '$0 ~ "^"n" "{
+                for (i=NF; i>=1; i--) if ($i ~ /^[CTPpcuw,]+$/) {print $i; exit}}' || true)"
+    if [[ -n "$ins" && "$ins" == "$cur" && "$existing_flags" == "CT,C,c" ]]; then
+        return 0
+    fi
+    certutil -D -d "sql:$db" -n "$NICKNAME" >/dev/null 2>&1 || true
+    certutil -A -d "sql:$db" -n "$NICKNAME" -t "$TRUST_FLAGS" -i "$CERT"
+    echo "kldload-trust-cert: imported $NICKNAME (${cur:0:16}...) into $db"
+}
+
+# ── prerequisites ─────────────────────────────────────────────────
+[[ -r "$CERT" ]] || { exit 0; }
+command -v certutil >/dev/null 2>&1 || {
+    echo "kldload-trust-cert: certutil missing (need nss-tools)" >&2
+    exit 0
+}
+
+# ── system mode: seed skel + every existing user ──────────────────
+if [[ "${1:-}" == "--system" ]]; then
+    if [[ "$(id -u)" != "0" ]]; then
+        echo "kldload-trust-cert: --system requires root" >&2
+        exit 1
+    fi
+
+    # /etc/skel — every future-created user starts with the cert trusted
+    _import_into /etc/skel/.pki/nssdb || true
+    chmod -R go-rwx /etc/skel/.pki 2>/dev/null || true
+
+    # Existing users: /root + every /home/*
+    for user_home in /root /home/*; do
+        [[ -d "$user_home" ]] || continue
+        local_owner="$(stat -c '%U' "$user_home" 2>/dev/null || echo root)"
+        nssdb="$user_home/.pki/nssdb"
+        if [[ "$local_owner" == "root" ]]; then
+            _import_into "$nssdb" || true
+        else
+            # Run as the owning user so file ownership lands correctly.
+            # MUST pass TRUST_FLAGS through the env prefix — _import_into reads
+            # it from the calling shell, but the su subshell sees only what's
+            # exported or set on the command line. Omitting it (b649 .139
+            # 2026-06-09 incident) caused certutil -t '' → empty trust flags
+            # (',,'), Chrome rejected the cert, every kldload --app launcher
+            # showed the cert-warning interstitial on every open.
+            mkdir -p "$nssdb"
+            chown -R "$local_owner:$local_owner" "$user_home/.pki" 2>/dev/null || true
+            su -s /bin/bash "$local_owner" -c "$(declare -f _import_into); CERT='$CERT' NICKNAME='$NICKNAME' TRUST_FLAGS='$TRUST_FLAGS' _import_into '$nssdb'" || true
+        fi
+    done
+    exit 0
+fi
+
+# ── per-user mode (default) ───────────────────────────────────────
+_import_into "$HOME/.pki/nssdb" || true

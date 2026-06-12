@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# kldload-sysdiag-launch — wrapper that opens kldload-sysdiag in Konsole
+# with a color scheme matching the current GNOME light/dark preference.
+#
+# Konsole on RHEL 10 ships with NO built-in color schemes — passing
+# `-p ColorScheme=...` to konsole silently no-ops without ours installed
+# (they live at /usr/share/konsole/kldload-{dark,light}.colorscheme).
+#
+# Operator on .142 b644 2026-06-07: "sysdiag is not abiding by the
+# light/dark scheme set by gnome." Without this wrapper, Konsole renders
+# its hardcoded dark grey regardless of GNOME's preference — visually
+# inconsistent when the rest of the desktop is in light mode.
+#
+# GNOME's color-scheme key reports:
+#   'prefer-dark' → user explicitly wants dark
+#   'default'     → light (or system default which is currently light)
+#   'prefer-light'→ user explicitly wants light (rare)
+set -u
+
+SCHEME=kldload-dark
+if command -v gsettings >/dev/null 2>&1; then
+    cs="$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null | tr -d "'")"
+    case "$cs" in
+    default | prefer-light) SCHEME=kldload-light ;;
+    prefer-dark | *) SCHEME=kldload-dark ;;
+    esac
+fi
+
+exec /usr/bin/konsole \
+    -p TerminalColumns=200 \
+    -p TerminalRows=60 \
+    -p ColorScheme="$SCHEME" \
+    -e /usr/local/bin/kldload-sysdiag
+# Note: --hide-menubar removed alongside --fullscreen. Operator on .142
+# b644 2026-06-07 noted "copy paste functionality and buttons is missing"
+# — the menubar carries the Edit menu (Copy / Paste / Find / Select All)
+# which is the only visible affordance for clipboard ops in Konsole.
+# Without it, operators with no muscle memory for Ctrl+Shift+C/V have
+# no clue how to copy. konsolerc sets MenuBar=Enabled to back this up.
+# Note: --fullscreen flag REMOVED. It stripped the window decorations
+# (min/max/close buttons + title bar right-click menu). Operator on .142
+# b644 2026-06-07: "the konsole sysdiag window is actually missing max,
+# min and middle mouse buttons at the top of the screen / right menus."
+# Opens as a normal Konsole window now. Super+Shift+Up maximizes if
+# you want fullscreen feel; 200x60 chars (~1600x900 px) is a sensible
+# default that the tmux F-key layout was designed around.

@@ -922,8 +922,11 @@ if ! k_have_func k_apply_profile; then
             case "${profile}" in
             server | client) ;;
             desktop)
+                # Browser: chromium on Debian/Ubuntu (Chrome isn't in APT
+                # by default; chromium is closest in-repo). Firefox dropped
+                # 2026-06-06 per Task #47.
                 pkgs+=(gnome-shell gnome-session gnome-control-center gdm3
-                    nautilus gnome-terminal firefox-esr gnome-keyring
+                    nautilus gnome-terminal chromium gnome-keyring
                     adwaita-icon-theme)
                 ;;
             esac
@@ -935,8 +938,12 @@ if ! k_have_func k_apply_profile; then
             case "${profile}" in
             server | client) ;;
             desktop)
+                # Browser: google-chrome-stable (resolved via google-chrome.repo
+                # shipped in includes.chroot). Firefox dropped 2026-06-06 per
+                # Task #47. kldload-firstboot has a belt-and-suspenders
+                # recovery dnf-install in case the transaction here drops it.
                 pkgs+=(gnome-shell gnome-session gnome-control-center gdm
-                    nautilus gnome-terminal firefox gnome-keyring
+                    nautilus gnome-terminal google-chrome-stable gnome-keyring
                     adwaita-icon-theme mesa-dri-drivers pipewire wireplumber)
                 ;;
             esac
@@ -954,6 +961,38 @@ if ! k_have_func k_apply_profile; then
         else
             chroot "${target}" dnf install -y --skip-broken "${pkgs[@]}" >>"$log" 2>&1 ||
                 k_log "WARNING: some profile packages failed"
+        fi
+
+        # Critical-deps gate: kldload-webview can't import without
+        # webkitgtk6.0 + gtk4 + python3-gobject (RHEL/Fedora) or
+        # gir1.2-webkit-6.0 + libgtk-4-1 + python3-gi (Debian/Ubuntu).
+        # The first-pass dnf above uses --skip-broken so a missing
+        # package would be silently dropped — caught on .145 b652
+        # 2026-06-11 where every webview launcher silently failed at
+        # import time because the dep got skipped. Re-attempt the
+        # webview deps WITHOUT --skip-broken so we fail loudly and
+        # the operator knows the install needs intervention. Same idea
+        # belt-and-suspenders runs from kldload-firstboot as a final
+        # net for "user installed before EPEL metadata propagated."
+        if [[ "${profile}" == "desktop" ]]; then
+            local _wvdeps
+            case "${distro}" in
+                debian | ubuntu) _wvdeps="gir1.2-webkit-6.0 libgtk-4-1 python3-gi" ;;
+                arch) _wvdeps="webkitgtk-6.0 gtk4 python-gobject" ;;
+                *) _wvdeps="webkitgtk6.0 gtk4 python3-gobject" ;;
+            esac
+            k_log "installing kldload-webview deps (${_wvdeps})"
+            if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
+                DEBIAN_FRONTEND=noninteractive chroot "${target}" \
+                    apt-get install -y ${_wvdeps} >>"$log" 2>&1 ||
+                    k_log "FATAL: kldload-webview deps install failed — every webview launcher will silently fail on first boot. Inspect ${log}."
+            elif [[ "${distro}" == "arch" ]]; then
+                chroot "${target}" pacman --noconfirm --needed -S ${_wvdeps} >>"$log" 2>&1 ||
+                    k_log "FATAL: kldload-webview deps install failed — every webview launcher will silently fail on first boot. Inspect ${log}."
+            else
+                chroot "${target}" dnf install -y ${_wvdeps} >>"$log" 2>&1 ||
+                    k_log "FATAL: kldload-webview deps install failed — every webview launcher will silently fail on first boot. Inspect ${log}."
+            fi
         fi
 
         # Enable display manager for desktop

@@ -10,21 +10,21 @@
 # opens an interactive shell with the kldload greeting.
 set -eu
 if [ "$#" -gt 0 ]; then
-  INNER="$*; echo; exec bash"
+    INNER="$*; echo; exec bash"
 else
-  INNER='echo "kldload tools: kst ksnap kclone kdf kdir kpkg kexport"; echo "Type kldload-help for the full command reference."; echo; exec bash'
+    INNER='echo "kldload tools: kst ksnap kclone kdf kdir kpkg kexport"; echo "Type kldload-help for the full command reference."; echo; exec bash'
 fi
-# konsole first — it's the preferred terminal on the kldload workstation
-# (richer than ptyxis: profiles, split views, proper scrollback). Falls back
-# to ptyxis/gnome-console/etc on systems where konsole isn't installed.
+# konsole first — operator on .142 b644 2026-06-07 collapsed to a single
+# terminal: Konsole only, everywhere. Ptyxis stays in the fallback chain
+# for non-RHEL targets where konsole isn't installed by default.
 for t in konsole ptyxis gnome-console kgx gnome-terminal xterm; do
-  if command -v "$t" >/dev/null 2>&1; then
-    case "$t" in
-      ptyxis)             exec ptyxis -- bash -lc "$INNER" ;;
-      gnome-console|kgx)  exec "$t" -- bash -lc "$INNER" ;;
-      gnome-terminal)     exec gnome-terminal -- bash -lc "$INNER" ;;
-      konsole|xterm)      exec "$t" -e bash -lc "$INNER" ;;
-    esac
-  fi
+    if command -v "$t" >/dev/null 2>&1; then
+        case "$t" in
+        ptyxis) exec ptyxis -- bash -lc "$INNER" ;;
+        gnome-console | kgx) exec "$t" -- bash -lc "$INNER" ;;
+        gnome-terminal) exec gnome-terminal -- bash -lc "$INNER" ;;
+        konsole | xterm) exec "$t" -e bash -lc "$INNER" ;;
+        esac
+    fi
 done
 exec bash -lc "$INNER"

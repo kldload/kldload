@@ -63,19 +63,27 @@ k_profile_packages() {
     if [[ "$_distro" == "arch" ]]; then
         case "$profile" in
         server)
-            echo "openssh sudo curl ca-certificates vim less chrony wireguard-tools iproute2 tmux python python-websockets python-yaml htopnet-tools ethtool nftables tcpdump fzf bat eza fd ripgrep zoxide podman fastfetch"
+            echo "openssh sudo curl ca-certificates vim less chrony wireguard-tools iproute2 tmux python python-websockets python-yaml htop net-tools ethtool nftables tcpdump fzf bat eza fd ripgrep zoxide podman fastfetch"
             ;;
         client)
             echo "openssh sudo curl ca-certificates vim less networkmanager wireguard-tools iproute2"
             ;;
         desktop)
+            # kldload-webview deps (webkitgtk6.0 + gtk4 + python3-gobject):
+            # without these on the target the per-launcher webview windows
+            # die at import time and the dock launchers silently fail to
+            # open. Caught on .139 b651 reinstall 2026-06-11: helm /
+            # ansible / klab / vms / k8s / metrics all dead because the
+            # live ISO had webkitgtk6.0 from kldload-live.ks but the
+            # install-time package list didn't carry it onto disk.
             echo "openssh sudo curl ca-certificates vim less networkmanager \
           gnome-shell gnome-session gnome-control-center gnome-settings-daemon \
           gdm nautilus gnome-terminal eog \
           adwaita-icon-theme cantarell-fonts gvfs gvfs-mtp gvfs-smb \
           gnome-keyring \
-          firefox \
-          tmux python python-websockets python-yaml htopnet-tools wireguard-tools iproute2 fzf bat eza fd ripgrep zoxide podman fastfetch"
+          webkitgtk6.0 gtk4 python3-gobject \
+          pulseaudio-utils \
+          tmux python python-websockets python-yaml htop net-tools wireguard-tools iproute2 fzf bat eza fd ripgrep zoxide podman fastfetch"
             ;;
         core)
             echo "openssh sudo curl ca-certificates vim less iproute2 chrony nftables wireguard-tools"
@@ -99,7 +107,7 @@ k_profile_packages() {
     # which also work on RPM distros via the darksite package sets.
     case "$profile" in
     server)
-        echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htopnet-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
+        echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml htop net-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
         ;;
     client)
         echo "openssh-server sudo curl ca-certificates vim less network-manager wireguard-tools iproute2"
@@ -111,7 +119,15 @@ k_profile_packages() {
         # silently no-op'd on Fedora/Rocky/CentOS/RHEL — installs
         # "succeeded" with no NetworkManager, no display manager,
         # dropping Fedora users into a wifi-less terminal on first boot.
-        local _browser="firefox-esr"
+        # Debian/Ubuntu: Chrome isn't in stock APT repos and Firefox is no
+        # longer the kldload-preferred browser (Task #47 — workstation
+        # standardizes on Chrome via google-chrome.repo on RPM). On Debian
+        # we land chromium as the closest in-repo equivalent; an operator
+        # who wants the same Chrome experience can add the Google APT
+        # signing key + .list and `apt install google-chrome-stable`
+        # post-install. Leaving _browser empty would result in a desktop
+        # with NO browser at all, so chromium is the safer default.
+        local _browser="chromium"
         local _viewer="loupe"
         local _terminal="gnome-terminal"
         local _nm="network-manager"
@@ -157,18 +173,13 @@ k_profile_packages() {
             # ptyxis/loupe on RHEL 10 / Fedora 41+. Caught 2026-05-14 on .143
             # RHEL 10 desktop install: gnome-terminal silently dropped,
             # operator booted into a desktop with no terminal app.
-            # Google Chrome is now the default browser on RPM distros.
-            # The google-chrome.repo ships in includes.chroot/etc/yum.repos.d/
-            # so dnf can resolve the package; firefox stays in the list as a
-            # secondary so existing Firefox-tuning (NVIDIA crash guard, lab
-            # autoconfig.js) is still useful for users who want it. Dock pin
-            # below lists Chrome FIRST; GNOME silently drops missing entries
-            # so this still works on older builds without Chrome in the repo.
-            # Chrome ONLY on the installed RHEL/Fedora/Rocky/CentOS desktop —
-            # operator feedback 2026-06-06: firefox dropped after Chrome lands
-            # so the dock doesn't ship two browsers. Live installer still gets
-            # firefox via build-iso.sh's separate package list (that's where
-            # kldload-webui auto-opens during install).
+            #
+            # Chrome is the ONLY browser on the installed RPM desktop. Firefox
+            # was the previous co-shipped fallback but Task #47 ripped it —
+            # kldload-firstboot has belt-and-suspenders Chrome install if dnf
+            # transaction here didn't land it. Live installer ISO still ships
+            # firefox separately (build-iso.sh) for the installer-GUI render —
+            # that's transient, the user never sees it post-install.
             _browser="google-chrome-stable"
             _viewer="eog loupe"
             _terminal="gnome-terminal ptyxis"
@@ -219,14 +230,21 @@ k_profile_packages() {
             _pam_extras="libpam-gnome-keyring libpam-systemd"
             _dbus_extras="dbus-x11"
         fi
-        echo "openssh-server sudo curl ca-certificates vim less ${_nm} \
+        # kldload-webview deps for Debian/Ubuntu — gir1.2-webkit-6.0 +
+        # libgtk-4-1 + python3-gi. Same role as webkitgtk6.0 on RHEL: the
+        # GTK4 + WebKit 6.0 stack the per-launcher webview Python script
+        # imports. Missing on .139 b651 reinstall 2026-06-11 broke every
+        # dock launcher except sysdiag / k9s / Bob.
+        echo "openssh-server sudo curl ca-certificates vim nano less ${_nm} \
         gnome-shell gnome-session ${_xsession_pkg} gnome-control-center gnome-settings-daemon \
         ${_gdm} nautilus ${_terminal} ${_viewer} \
         adwaita-icon-theme ${_fonts} gvfs ${_gvfs_extra} \
         gnome-keyring ${_pam_extras} ${_portal_extras} ${_dbus_extras} \
         ${_xsrv} ${_netools_extra} \
-        ${_browser} \
-        tmux eject sanoid python3 python3-websockets python3-yaml htopnet-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
+        ${_browser} nss-tools \
+        gir1.2-webkit-6.0 libgtk-4-1 python3-gi \
+        pulseaudio-utils \
+        tmux eject sanoid python3 python3-websockets python3-yaml htop iotop lm_sensors net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
         zenity chromium"
         ;;
 
@@ -247,7 +265,7 @@ k_profile_packages() {
     kvm)
         # Hypervisor: KVM + libvirt (KVM-specific qemu/libvirt added by k_profile_optional_packages per-distro)
         echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
-        wireguard-tools tmux python3 python3-websockets python3-yaml htopnet-tools ethtool tcpdump \
+        wireguard-tools tmux python3 python3-websockets python3-yaml htop net-tools ethtool tcpdump \
         fzf bat eza fd-find ripgrep zoxide podman sanoid qemu-utils pciutils ${_fastfetch}"
         ;;
 
@@ -546,6 +564,19 @@ k_install_system_files() {
             cp /usr/local/sbin/kldload-proxy "${target}/usr/local/sbin/kldload-proxy"
             chmod +x "${target}/usr/local/sbin/kldload-proxy"
         fi
+        # Backup tools — pack the installed system to fiend, restore later.
+        # Operator-only tools, shipped to /usr/local/sbin so they're in PATH
+        # under sudo. ZFS send/recv-based, so they only make sense on a ZFS
+        # root; no-op cleanly on btrfs/ext4 installs (they'll die on the
+        # findmnt check).
+        mkdir -p "${target}/usr/local/sbin"
+        for _bk in kldload-backup-pack kldload-backup-restore; do
+            if [[ -f "/usr/local/sbin/${_bk}" ]]; then
+                cp "/usr/local/sbin/${_bk}" "${target}/usr/local/sbin/${_bk}" &&
+                    chmod +x "${target}/usr/local/sbin/${_bk}" &&
+                    k_log "installed /usr/local/sbin/${_bk}"
+            fi
+        done
         # Ship orchestrator + console scripts alongside the units. Ensure
         # /usr/sbin exists on the bootstrap — a minimal dnf install may not
         # create it before this function runs, and a silent cp failure here
@@ -819,12 +850,16 @@ k_install_system_files() {
         # may need its own block if its tree grows beyond what the autodeploy
         # symlinks reach.
 
-        # ── Firefox autostart to dashboard — LAB profiles only ────────────────────
-        # Workstation users (desktop profile) and headless (server) installs
-        # should NOT have Firefox auto-open to the kldload dashboard on every
-        # login — that's a daily driver, the user's homepage is theirs. Only
-        # lab-focused profiles (kvm / ai / zfslab), where the user explicitly
-        # booted kldload FOR the UI, get the auto-open.
+        # ── Chrome autostart to dashboard — LAB profiles only ────────────────────
+        # Workstation (desktop) and headless (server) installs should NOT have
+        # the browser auto-open to the kldload dashboard at every login —
+        # that's a daily driver, the user's homepage is theirs. Only lab
+        # profiles (kvm/ai/zfslab) where the operator explicitly booted FOR
+        # the UI get the auto-open. Firefox was the previous default here;
+        # ripped 2026-06-06 after operator decided to standardize on Chrome
+        # (see CLAUDE.md / task #15 / task #47). Chrome is the only browser
+        # in the desktop package list now; the live ISO's installer-GUI
+        # rendering still uses Firefox (transient, not user-facing).
         case "${KLDLOAD_PROFILE:-server}" in
         kvm | ai | zfslab)
             mkdir -p "${target}/etc/xdg/autostart"
@@ -833,94 +868,12 @@ k_install_system_files() {
 Type=Application
 Name=kldload Dashboard
 Comment=Auto-open the kldload ops console at login (lab profile)
-Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/8443) 2>/dev/null && break; sleep 1; done; sleep 3; if command -v google-chrome >/dev/null 2>&1; then google-chrome --new-window https://localhost:8443; else firefox --no-remote https://localhost:8443; fi'
+Exec=bash -c 'for i in $(seq 1 60); do (echo >/dev/tcp/localhost/8443) 2>/dev/null && break; sleep 1; done; sleep 3; google-chrome-stable --new-window https://localhost:8443'
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=8
 DASHSTART
             ;;
         esac
-
-        # Firefox policies — ALL GUI profiles get the bookmarks (discovery) and
-        # first-run-junk suppression. Only lab profiles get Homepage set, so
-        # workstation users land on their default new-tab page at launch.
-        if [[ "${KLDLOAD_PROFILE:-server}" != "core" && "${KLDLOAD_PROFILE:-server}" != "server" ]]; then
-            mkdir -p "${target}/usr/lib64/firefox/distribution"
-
-            # ── NVIDIA crash guard ──────────────────────────────────────────────────
-            # On NVIDIA proprietary + Wayland, firefox's GPU process SIGSEGVs in the
-            # EGL stack (libEGL_mesa / libnvidia-egl collision) a few seconds after a
-            # window opens — the window appears, then dies. Caught 2026-05-31 on .137
-            # (RTX 3080, GNOME 49 Wayland): every firefox launch coredumped. Force CPU
-            # compositing IN FIREFOX ONLY via system autoconfig; the system GPU stays
-            # free for games/CUDA/etc. Verified: firefox then stays up.
-            if [[ -d "${target}/usr/lib64/firefox" ]]; then
-                cat >"${target}/usr/lib64/firefox/firefox.cfg" <<'FFCFG'
-// kldload: disable firefox GPU acceleration (NVIDIA+Wayland EGL crash guard).
-// firefox-only — does not touch system GPU accel. See profiles.sh.
-lockPref("gfx.webrender.software", true);
-lockPref("layers.acceleration.disabled", true);
-lockPref("media.ffmpeg.vaapi.enabled", false);
-lockPref("gfx.x11-egl.force-disabled", true);
-FFCFG
-                mkdir -p "${target}/usr/lib64/firefox/defaults/pref"
-                cat >"${target}/usr/lib64/firefox/defaults/pref/autoconfig.js" <<'FFACFG'
-pref("general.config.filename", "firefox.cfg");
-pref("general.config.obscure_value", 0);
-pref("general.config.sandbox_enabled", false);
-FFACFG
-            fi
-
-            case "${KLDLOAD_PROFILE:-server}" in
-            kvm | ai | zfslab)
-                # Lab profile — autoload webui as homepage too
-                cat >"${target}/usr/lib64/firefox/distribution/policies.json" <<'FFPOLICY_LAB'
-{
-  "policies": {
-    "OverrideFirstRunPage": "",
-    "OverridePostUpdatePage": "",
-    "DontCheckDefaultBrowser": true,
-    "NoDefaultBookmarks": true,
-    "DisplayBookmarksToolbar": "always",
-    "Homepage": {
-      "URL": "https://localhost:8443",
-      "StartPage": "homepage"
-    },
-    "Bookmarks": [
-      {"Title": "kldload Web UI", "URL": "https://localhost:8443", "Placement": "toolbar"},
-      {"Title": "kldload Docs",   "URL": "https://kldload.com",    "Placement": "toolbar"}
-    ],
-    "UserMessaging": {
-      "WhatsNewMessaging": false,
-      "ExtensionRecommendations": false,
-      "SkipOnboarding": true
-    }
-  }
-}
-FFPOLICY_LAB
-                ;;
-            desktop)
-                # Workstation profile — NO Homepage override. Still show the
-                # bookmark on the toolbar so one click reaches the Web UI.
-                cat >"${target}/usr/lib64/firefox/distribution/policies.json" <<'FFPOLICY_WS'
-{
-  "policies": {
-    "DontCheckDefaultBrowser": true,
-    "DisplayBookmarksToolbar": "always",
-    "Bookmarks": [
-      {"Title": "kldload Web UI", "URL": "https://localhost:8443", "Placement": "toolbar"},
-      {"Title": "kldload Docs",   "URL": "https://kldload.com",    "Placement": "toolbar"}
-    ],
-    "UserMessaging": {
-      "WhatsNewMessaging": false,
-      "ExtensionRecommendations": false,
-      "SkipOnboarding": true
-    }
-  }
-}
-FFPOLICY_WS
-                ;;
-            esac
-        fi
 
         # App-menu launchers — every non-core GUI profile gets the FULL set of
         # kldload/bob launchers, not just the webui. The live ISO ships ~13 of them
@@ -986,25 +939,46 @@ FFPOLICY_WS
             if [[ -f "${_appdir}/vim.desktop" ]] && grep -q '^Exec=gnome-terminal' "${_appdir}/vim.desktop"; then
                 sed -i 's|^Exec=gnome-terminal[[:space:]]*--[[:space:]]*|Exec=kldload-term |' "${_appdir}/vim.desktop"
             fi
+            # Reveal the post-install kldload launchers that were hidden on
+            # the LIVE ISO (NoDisplay=true). The live session shouldn't
+            # surface VMs / K8s / klab / Ansible / Helm / Metrics / ZFS in
+            # the app grid — none of those services run on a USB live, so
+            # the launchers fail silently and confuse the operator. On the
+            # install target they become first-class, so we strip the flag.
+            # Operator on .145 b651 live 2026-06-11: "the live needs all the
+            # rescue tools and the GUI, but nothing else is installed yet
+            # so [the infra section] is useless."
+            for _ldskt in kldload-vms kldload-k8s kldload-helm kldload-klab \
+                kldload-ansible kldload-metrics kldload-zfs kldload-zfs-manager; do
+                if [[ -f "${_appdir}/${_ldskt}.desktop" ]]; then
+                    sed -i '/^NoDisplay=true$/d' "${_appdir}/${_ldskt}.desktop"
+                fi
+            done
             chroot "${target}" update-desktop-database /usr/share/applications 2>/dev/null || true
         fi
 
         # ── Service auto-start gate ────────────────────────────────────────────────
-        # Lab profiles (kvm / ai / zfslab / klab) auto-start the webui + proxy +
-        # ttyd so the operator lands on the UI at first boot.
-        # Workstation / server: opt-in. The installer's Platform Options panel
-        # has a "Web ops console" card that sets KLDLOAD_ENABLE_WEBUI=1 when
-        # checked. Default unchecked → binaries still copied (so the operator
-        # can flip it on later) but the systemd units are disabled at boot to
-        # spare RAM/CPU on machines whose user may never open the UI. Manual
-        # enable:
+        # Lab profiles (kvm / ai / zfslab / klab) and the desktop / Workstation
+        # Developer Edition auto-start the webui + proxy + ttyd-k9s so the
+        # operator lands on the UI at first boot. Workstation: the embedded
+        # browser-terminal panel (TTYD → kldload-console F-key tmux cockpit)
+        # is the headline UX next to gnome-terminal and the kldload-klab-console
+        # dock launcher. Without ttyd-k9s enabled at boot, the "TERMINAL" panel
+        # in the webui shows a connect-refused state. Operator on .140 b640:
+        # "tmux commands and integration with bob ... works great as the server
+        # console but doesn't exist in workstation" — that was this gate.
+        # Server: opt-in. The installer's Platform Options panel has a "Web ops
+        # console" card that sets KLDLOAD_ENABLE_WEBUI=1 when checked. Default
+        # unchecked → binaries still copied (so the operator can flip it on
+        # later) but the systemd units are disabled at boot to spare RAM/CPU on
+        # headless boxes whose user may never open the UI. Manual enable:
         #     sudo systemctl enable --now kldload-proxy kldload-webui ttyd-k9s
         # core: always disabled — bare ZFS only, no UI of any kind.
         case "${KLDLOAD_PROFILE:-server}" in
-        kvm | ai | zfslab | klab)
+        kvm | ai | zfslab | klab | desktop)
             : # keep defaults — enabled in each unit's [Install] WantedBy
             ;;
-        desktop | server)
+        server)
             if [[ "${KLDLOAD_ENABLE_WEBUI:-0}" == "1" ]]; then
                 # Operator opted in via the Platform Options card. Leave the
                 # default WantedBy enable intact.
@@ -1065,7 +1039,7 @@ FFPOLICY_WS
         # them makes every F-key return 127. Skip installer-only internals.
         _skip_tools="kldload-install-target kldload-overview"
         shopt -s nullglob
-        for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/bob /usr/local/bin/bob-*; do
+        for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/_s* /usr/local/bin/bob /usr/local/bin/bob-*; do
             [[ -x "$_src" ]] || continue
             _name="$(basename "$_src")"
             case " $_skip_tools kldload-webui " in *" $_name "*) continue ;; esac
@@ -1199,25 +1173,33 @@ OSREL
     done
     unset _p
 
-    # ── Installed-system dock favorites ──────────────────────────────────────────
+    # ── Installed-system dock favorites — minimum viable ─────────────────────
     # 00-kldload-desktop ships with empty favorites for the live ISO. This
-    # higher-numbered overlay pins the 3 apps we want on installed systems:
-    # Files (Nautilus), Firefox (browser), and Konsole (the rich GUI terminal
-    # with copy/paste, scrollback, splits, etc.). kst-dashboard stays available
-    # as an app in the menu but isn't pinned — users who want the multi-pane
-    # tmux dashboard launch it explicitly. Multiple Firefox names listed —
-    # GNOME silently drops missing entries, so Debian/Ubuntu (firefox-esr) and
-    # Fedora/RHEL/Arch (firefox) both end up with a working pin.
-    # Chrome only — firefox/firefox-esr removed 2026-06-06 after operator
-    # feedback "I still see firefox in the dock." Chrome is now the only
-    # browser in the RPM desktop package list (see _browser= above), and
-    # leaving firefox*.desktop in the favorites list re-pinned firefox the
-    # moment it landed on the system from a prior install or a dep pull-in.
-    # GNOME silently drops favorites whose .desktop is missing, so an install
-    # without Chrome still gets a 4-icon dock — just no browser pinned.
+    # overlay pins the BARE MINIMUM for the installed workstation:
+    #   Nautilus      — Files
+    #   Chrome        — browser (also the entry point to the webui at
+    #                   localhost:8443 — see Chrome managed policy below
+    #                   which sets that as homepage + startup page)
+    #   Konsole       — terminal (everything kldload is CLI-discoverable
+    #                   from here: `klab`, `kldload-console`, `bob`,
+    #                   `kldload-doctor`, `kst`, `ksnap`, etc.)
+    # All custom kldload-*/bob-* dock launchers were ripped 2026-06-06
+    # per operator: "yeah so its literally 2 folders .. terminal konsole
+    # chrome and files ... the cleanest possible install". Pure-Unix
+    # posture: the OS does NOT advertise itself in the dock. Power users
+    # find the tools via $PATH; the webui is just a website Chrome opens.
+    # GNOME silently drops favorites whose .desktop is missing, so on a
+    # build without Chrome the dock still renders Files + Konsole.
+    # 3-pin (no Konsole). Operator on .142 b647 2026-06-08: "the dock should
+    # be files, chrome, sysdiag we dont need terminal now right?" Konsole
+    # stays accessible via the app grid (Super+A) for ad-hoc shells, but
+    # sysdiag — which itself opens IN Konsole with the tmux cockpit — is the
+    # pinned daily-driver terminal entry. Source file at
+    # live-build/config/includes.chroot/etc/dconf/db/local.d/50-kldload-installed-favorites
+    # keeps the same 3-pin in sync; do not let them drift.
     cat >"${target}/etc/dconf/db/local.d/50-kldload-installed-favorites" <<'DCONF'
 [org/gnome/shell]
-favorite-apps=['org.gnome.Nautilus.desktop', 'google-chrome.desktop', 'org.kde.konsole.desktop']
+favorite-apps=['org.gnome.Nautilus.desktop', 'google-chrome.desktop', 'kldload-sysdiag.desktop']
 DCONF
     # .135 + onyx both shipped without this file in the installed system —
     # dock came up empty for fresh users. The heredoc won't fail on disk-full
@@ -1236,15 +1218,91 @@ DCONF
     # "The key is not writable." Installed system gets the locked-in look
     # every login.
     mkdir -p "${target}/etc/dconf/db/local.d/locks"
+    # Locks list: ONLY the brand/structural keys. Anything an operator should
+    # be able to flip from Settings (color-scheme, gtk-theme, font-name, etc.)
+    # is set as a DEFAULT in 00-kldload-desktop but NOT locked. The .140 b640
+    # operator hit the inverse — color-scheme was locked, so the GNOME quick
+    # dark/light toggle silently no-op'd. Rule of thumb:
+    #   LOCK:   identity (wallpaper, dock pins, app-folder layout, brand)
+    #   DEFAULT: preference (theme variant, fonts, animations, idle delay)
+    # Operator on .142 b647 2026-06-08: "still can't make the background
+    # change using gnome?" The wallpaper IS identity territory by the rule
+    # above, but locking it actively prevents the operator from picking a
+    # different one via Settings → Appearance — a basic ergonomic loss.
+    # Demote wallpaper from LOCK to DEFAULT: the kldload picture-uri stays
+    # the install-time default (set in 00-kldload-desktop), but GNOME
+    # Settings can override it for the session. Locks now stick to
+    # structural-only (app folders + dock pins).
     cat >"${target}/etc/dconf/db/local.d/locks/kldload-desktop" <<'LOCKS'
 /org/gnome/desktop/app-folders/folder-children
-/org/gnome/desktop/background/picture-uri
-/org/gnome/desktop/background/picture-uri-dark
-/org/gnome/desktop/background/picture-options
-/org/gnome/desktop/interface/color-scheme
-/org/gnome/desktop/interface/gtk-theme
 /org/gnome/shell/favorite-apps
 LOCKS
+
+    # ── Per-user xdg autostart + systemd tmpfiles glob copy ──────────────────
+    # The wholesale kldload-* glob in /usr/local/bin handles tools but the
+    # installer historically didn't reach into /etc/xdg/autostart/ or
+    # /usr/lib/tmpfiles.d/ for kldload's own entries. Operator on .142
+    # b642 install: kldload-trust-cert.desktop autostart MISSED →
+    # Chrome warning banner came back; tmpfiles.d/kldload-runtime.conf
+    # MISSED → /run/kldload not created → F5/F11 _kgroup bcc bpftrace
+    # writes failed for non-root with "permission denied". Glob-copy both
+    # paths for any kldload-*.* under them.
+    shopt -s nullglob
+    if [[ -d /etc/xdg/autostart ]]; then
+        mkdir -p "${target}/etc/xdg/autostart"
+        for _au in /etc/xdg/autostart/kldload-*.desktop /etc/xdg/autostart/bob-*.desktop; do
+            [[ -f "$_au" ]] || continue
+            install -m 0644 "$_au" "${target}${_au}"
+            k_log "carried xdg-autostart: $_au"
+        done
+    fi
+    if [[ -d /usr/lib/tmpfiles.d ]]; then
+        mkdir -p "${target}/usr/lib/tmpfiles.d"
+        for _tf in /usr/lib/tmpfiles.d/kldload-*.conf; do
+            [[ -f "$_tf" ]] || continue
+            install -m 0644 "$_tf" "${target}${_tf}"
+            k_log "carried tmpfiles.d: $_tf"
+        done
+    fi
+    # /etc/xdg/konsolerc — KDE/Konsole shortcut overrides (F11 fullscreen
+    # toggle disable so it reaches tmux). Lives outside autostart pattern.
+    if [[ -f /etc/xdg/konsolerc ]]; then
+        mkdir -p "${target}/etc/xdg"
+        install -m 0644 /etc/xdg/konsolerc "${target}/etc/xdg/konsolerc"
+        k_log "carried /etc/xdg/konsolerc"
+    fi
+    # /usr/share/konsole/kldload* — custom color schemes (light + dark) +
+    # profile with AutoCopySelectedText. Without these on the install
+    # target, sysdiag's `-p ColorScheme=kldload-dark` silently no-ops and
+    # Konsole falls back to its hardcoded grey-on-black scheme, ignoring
+    # the GNOME light/dark preference. Operator on .142 b646 2026-06-08:
+    # "the sysdiag is opening in bright mode when the desktop is in dark
+    # mode" — that was these files missing.
+    mkdir -p "${target}/usr/share/konsole"
+    for _kf in /usr/share/konsole/kldload*; do
+        [[ -f "$_kf" ]] || continue
+        install -m 0644 "$_kf" "${target}/usr/share/konsole/$(basename "$_kf")"
+        k_log "carried $(basename "$_kf")"
+    done
+    # systemd drop-ins kldload ships (ollama keep-alive, future services).
+    for _dropdir in /etc/systemd/system/*.d; do
+        [[ -d "$_dropdir" ]] || continue
+        _svc=$(basename "$_dropdir")
+        mkdir -p "${target}/etc/systemd/system/${_svc}"
+        for _conf in "$_dropdir"/*.conf; do
+            [[ -f "$_conf" ]] || continue
+            install -m 0644 "$_conf" \
+                "${target}/etc/systemd/system/${_svc}/$(basename "$_conf")"
+            k_log "carried drop-in: ${_svc}/$(basename "$_conf")"
+        done
+    done
+    # /etc/dnf/automatic.conf — security-only nightly upgrade config.
+    if [[ -f /etc/dnf/automatic.conf ]]; then
+        mkdir -p "${target}/etc/dnf"
+        install -m 0644 /etc/dnf/automatic.conf "${target}/etc/dnf/automatic.conf"
+        k_log "carried /etc/dnf/automatic.conf"
+    fi
+    shopt -u nullglob
 
     # ── Default browser → Chrome (RPM-family desktop only) ───────────────────────
     # /etc/xdg/mimeapps.list sets system-wide defaults that apply unless the
@@ -1280,7 +1338,19 @@ MIMES
 {
   "DefaultBrowserSettingEnabled": false,
   "PromotionalTabsEnabled": false,
-  "MetricsReportingEnabled": false
+  "MetricsReportingEnabled": false,
+  "HomepageLocation": "https://localhost:8443/",
+  "HomepageIsNewTabPage": false,
+  "ShowHomeButton": true,
+  "RestoreOnStartup": 4,
+  "RestoreOnStartupURLs": ["https://localhost:8443/"],
+  "BookmarkBarEnabled": true,
+  "ManagedBookmarks": [
+    {"toplevel_name": "kldload"},
+    {"name": "kldload Web UI",  "url": "https://localhost:8443/"},
+    {"name": "Grafana",         "url": "https://localhost:8443/grafana/"},
+    {"name": "kldload Docs",    "url": "https://kldload.com/"}
+  ]
 }
 CHROMEPOLICY
     fi
@@ -2097,6 +2167,30 @@ ExecStart=-/usr/local/bin/klab golden ubuntu
 # to drop a qcow2 at /var/lib/klab/images/rhel-10-cloud.qcow2 and let
 # firstboot finish what install couldn't.
 ExecStart=-/usr/local/bin/klab golden rhel
+# ── Blue/green playground spawn (the "spit clones" demo) ─────────────────
+# After all 6 goldens land (above), klab deploy blue + deploy green clone
+# each @golden into a live VM via ZFS instant-clone (~75ms per clone) +
+# virt-install --import. Result: 12 small VMs running side-by-side
+# (klab-blue-<distro> + klab-green-<distro>) on static IPs:
+#   blue:  192.168.122.101-106
+#   green: 192.168.122.201-206
+# Operator on .121 b640: "spawn 1 test vm for each distro .. one blue and
+# 1 green .. so people can 'see' how easy this is now". The cattle pattern
+# was previously aspirational ("blue-green ready" was logged but no clones
+# spawned); now they actually fire.
+#
+# RAM/CPU override: klab's defaults are RAM=4096 CPUS=2 — sized for a
+# beefy ZFS-lab host, not a workstation. The first spawn on .121 b640
+# pushed 10 VMs × 4GB = 40GB on top of K8s + ollama + GNOME and OOM-killed
+# the entire GNOME session (gsd-*, gjs/shell, evolution, gnome-session-binary
+# all SIGKILL'd by the kernel; user got booted to GDM). For the cattle DEMO,
+# blue/green VMs only need enough RAM to boot the cloud image and respond to
+# `virsh` — 384MB per VM keeps total blue/green footprint ~3.8GB and leaves
+# room for K8s + ollama + the desktop. Wrap in bash so the env override
+# applies only to this call (goldens above still build at the full 4GB they
+# need for package install + cloud-init).
+ExecStart=-/bin/bash -c 'RAM=384 CPUS=1 exec /usr/local/bin/klab deploy blue'
+ExecStart=-/bin/bash -c 'RAM=384 CPUS=1 exec /usr/local/bin/klab deploy green'
 # K8s bootstrap is OWNED BY kldload-autodeploy (single orchestrator).
 # Previously had a duplicate `kube-cluster bootstrap --workers 3` here
 # which raced autodeploy's K8s phase — both tried to bootstrap, second
@@ -2106,6 +2200,7 @@ ExecStart=-/usr/local/bin/klab golden rhel
 # workers without this duplicate ExecStart.
 ExecStartPost=/bin/mkdir -p /var/lib/kldload
 ExecStartPost=/bin/touch /var/lib/kldload/klab-firstboot-done
+ExecStartPost=/bin/touch /var/lib/kldload/bluegreen-ready
 StandardOutput=journal+console
 StandardError=journal+console
 TimeoutStartSec=7200

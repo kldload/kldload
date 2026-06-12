@@ -386,6 +386,17 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
   tmux bind -n M-p  run-shell "_ktoggle-win iftop    'sudo iftop -i \$(ip route show default 2>/dev/null | awk \"/default/ {print \\\$5; exit}\") -N -n -P 2>/dev/null || sudo iftop -N -n -P 2>/dev/null || (echo need-iftop; sleep 99)'"
   tmux bind -n M-n  run-shell "_ktoggle-win nethogs  'sudo nethogs 2>/dev/null || (echo need-nethogs; sleep 99)'"
 
+  # ── Bob: AI ops chat in the cockpit (Alt+B) ──────────────────────
+  # Drops into the `bob` CLI as a toggle-window — press once to open,
+  # press again to close. Same pattern as F2 (k9s) and Alt+v (VMs).
+  # Bob reads /etc/bob/personas.json + /usr/local/share/klab-bob/* and
+  # talks to ollama on localhost:11434 (qwen3:14b on AI-enabled installs).
+  # If ollama isn't up yet, `bob` prints a one-line "starting" status and
+  # polls — no crash loop. This is the "integration with bob" the .140
+  # workstation operator asked for: cockpit-level access to Bob next to
+  # the kernel/cluster heads-up popups, not buried in a separate web tab.
+  tmux bind -n M-b  run-shell "_ktoggle-win bob      'bash -lc \"bob 2>&1 || (echo Bob needs ollama running; sleep 99)\"'"
+
   tmux set -g default-terminal "xterm-256color"
   tmux set -g mouse on
 

@@ -137,6 +137,12 @@ ncdu
 # ── Hypervisor guest tools ───────────────────────────────────────────────
 qemu-guest-agent
 open-vm-tools
+# kldload-webview deps: GTK4 + WebKit 6.0 + python3-gobject. Without
+# these the per-launcher windows fall back to Chrome --app= which on
+# Wayland cannot set per-window app_id, breaking the dock icons.
+webkitgtk6.0
+gtk4
+python3-gobject
 
 # ── Exclude unwanted packages ────────────────────────────────────────────
 -plymouth

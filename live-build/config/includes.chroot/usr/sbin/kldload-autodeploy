@@ -322,10 +322,23 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         log "[ai] installing ollama runtime"
         command -v ollama >/dev/null 2>&1 ||
             curl -fsSL https://ollama.com/install.sh | sh >>"$LOG_FILE" 2>&1
+        # ZFS-backed model store: pre-create /srv/ollama/models with the
+        # right ownership BEFORE ollama starts. The systemd override (see
+        # kldload-firstboot) sets OLLAMA_MODELS=/srv/ollama/models, and
+        # the ollama service runs as the unprivileged 'ollama' user — if
+        # the directory doesn't exist, ollama.service hits
+        # "Error: mkdir /srv/ollama: permission denied" and crashloops.
+        # Operator on .142 b641: ollama silently used the default
+        # ~/.ollama/models on first boot (because the override hadn't kicked
+        # in yet), then a later restart picked up the override and crashed
+        # — Bob looked alive until anything bounced ollama.
+        # ALWAYS create + chown, independent of whether darksite weights
+        # are being rehydrated below.
+        mkdir -p /srv/ollama/models
+        chown -R ollama:ollama /srv/ollama 2>/dev/null || true
         # Rehydrate from darksite BEFORE first ollama start so the models
         # are already visible in /api/tags when serve comes up.
         if [[ "$_darksite_has_model" == "1" ]]; then
-            mkdir -p /srv/ollama/models
             log "[ai] rehydrating /srv/ollama/models/ from darksite (air-gap path)"
             rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ >>"$LOG_FILE" 2>&1 &&
                 log "[ai] darksite rehydrate ok" ||
@@ -358,6 +371,40 @@ if [[ "${WANT[ai]}" == "1" ]]; then
             mark "ai-failed"
             exit 0
         fi
+        # Create the 'bob' model alias from /etc/bob/Modelfile.bob — bob-agent
+        # defaults to BOB_MODEL=bob, so without this `bob` CLI fails with
+        # "Can't reach Ollama" (misleading; it's actually "model not found").
+        # The Modelfile.bob (shipped in includes.chroot/etc/bob/) wires the
+        # kldload-operator system prompt to the just-pulled base model, so
+        # Bob behaves as a kldload operator (drives the tmux cockpit, knows
+        # the ops tool catalog) rather than generic chat. Operator on .142:
+        # "Can't reach Ollama" was this missing step.
+        if [[ -f /etc/bob/Modelfile.bob ]] && ! curl -sf http://127.0.0.1:11434/api/tags 2>/dev/null | grep -q '"name":"bob:'; then
+            log "[ai] creating 'bob' model from /etc/bob/Modelfile.bob..."
+            if ollama create bob -f /etc/bob/Modelfile.bob >>"$LOG_FILE" 2>&1; then
+                log "[ai] bob model created and ready"
+            else
+                log "[ai] WARNING: bob model creation failed — bob-agent will fall back to BOB_MODEL=${_chat_model} or fail with 'Can't reach Ollama'. Inspect with: ollama list ; cat /etc/bob/Modelfile.bob"
+            fi
+        elif curl -sf http://127.0.0.1:11434/api/tags 2>/dev/null | grep -q '"name":"bob:'; then
+            log "[ai] bob model already present — skipping create"
+        else
+            log "[ai] WARNING: /etc/bob/Modelfile.bob missing — bob-agent will fall back to base model"
+        fi
+        # Pre-warm bob into VRAM so the webui's Bob nav item is visible from
+        # first paint. ai_ollama in kldload-webui's /status response gates the
+        # sidebar Bob entry on /api/ps (resident-in-VRAM models). Without a
+        # warm model, Bob is silently hidden — operator on .142 b641: "i
+        # dont see bob in the ui is this still failing". keep_alive=-1 +
+        # OLLAMA_KEEP_ALIVE=-1 (systemd override) → pinned forever. Cost ~9
+        # GB VRAM, gain instant Bob + visible nav item. Fire-and-forget so
+        # autodeploy doesn't block 30-60s on the load.
+        log "[ai] pre-warming bob into VRAM (background; takes ~30-60s on first load)..."
+        ( curl -sS -m 180 -o /dev/null -X POST http://127.0.0.1:11434/api/generate \
+            -d '{"model":"bob","prompt":"warm","stream":false,"keep_alive":-1}' \
+            >>"$LOG_FILE" 2>&1 \
+            && log "[ai] bob warmed — resident in VRAM" \
+            || log "[ai] WARNING: bob warm-up did not complete in 180s — first user message will pay the cold-start tax" ) &
         # Vision model (llama3.2-vision:11b) is NO LONGER auto-pulled — it's
         # 6 GB of weights and ~8 GB of VRAM for a capability used on <5% of
         # Bob sessions (pasted screenshots of non-text images). Text models

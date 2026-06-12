@@ -23,6 +23,24 @@ RemainAfterExit=true
 ExecStartPre=/usr/local/sbin/kldload-wait-for-ip
 ExecStart=/usr/local/sbin/kldload-tls-cert
 ExecStartPost=/usr/local/sbin/kldload-bounce-tls-services
+# Chrome trust: import the cert into /etc/skel + every existing user's
+# NSS DB so https://localhost:8443 is trusted from the moment the user
+# logs in — no warning banner, no autostart race. Re-fires on every cert
+# rotation. Per-user xdg-autostart kldload-trust-cert.desktop remains as
+# a catch-all for users created LATER.
+# `-` prefix: tolerate failure (e.g. nss-tools not yet installed — first
+# boot's firstboot recovery installs it shortly after).
+ExecStartPost=-/usr/local/bin/kldload-trust-cert --system
+# SECURITY: kldload-tls-cert intentionally prints the cert + private key
+# on stdout (CLI-friendly: `kldload-tls-cert | tee /tmp/server.pem`).
+# When systemd captures that to journal, anyone with journalctl read can
+# extract the webui's private key. .121 b640 journal had the full
+# BEGIN/END PRIVATE KEY block dumped on every regen. Route stdout to
+# /dev/null at the unit level — the file-write paths inside the script
+# don't depend on stdout, and stderr (openssl status via `>&2`) still
+# reaches the journal for debugging.
+StandardOutput=null
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
