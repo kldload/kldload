@@ -605,19 +605,172 @@ cmd_burn() {
 
     if [[ -z "$USB_DEVICE" ]]; then
         local candidates=()
+        # -type b filters to block devices only — without it, a stale regular
+        # file at /dev/sda (left by a prior dd when the stick was unplugged)
+        # gets picked as a "candidate" and the next burn silently writes 9 GB
+        # to a regular file. Real incident, b649 2026-06-08.
         while IFS= read -r dev; do
             local rm_flag
             rm_flag="$(cat "/sys/block/$(basename "$dev")/removable" 2>/dev/null || echo 0)"
             [[ "$rm_flag" == "1" ]] && candidates+=("$dev")
-        done < <(find /dev -maxdepth 1 -name 'sd[a-z]' | sort)
+        done < <(find /dev -maxdepth 1 -type b -name 'sd[a-z]' | sort)
         [[ "${#candidates[@]}" -eq 1 ]] || die "Set USB_DEVICE explicitly"
         USB_DEVICE="${candidates[0]}"
     fi
 
+    # HARD GUARD: refuse to write unless the target is a real block device.
+    # `oflag=direct` below would also fail for a regular file, but the explicit
+    # check makes the failure mode loud and obvious (and protects callers that
+    # passed USB_DEVICE in explicitly and bypassed the candidate search).
+    [[ -b "$USB_DEVICE" ]] || die "$USB_DEVICE is not a block device — refusing to burn (was the stick unplugged?)"
+
     log "Burning $iso to $USB_DEVICE..."
-    dd if="$iso" of="$USB_DEVICE" bs=4M status=progress oflag=sync conv=fsync
+    dd if="$iso" of="$USB_DEVICE" bs=4M status=progress oflag=direct conv=fsync
     sync
     log "USB burn complete: $USB_DEVICE"
+}
+
+# =============================================================================
+# cmd_ship — build → burn → notify, the default release loop.
+#
+# WHAT IT DOES, IN ORDER:
+#   1. Builds the ISO using the standard cmd_build path (honours PROFILE,
+#      EDITION, ARCH, RELEASE env vars same as `./deploy.sh build`).
+#   2. On build success, burns the resulting ISO to ${USB_DEVICE} via
+#      cmd_burn — which itself enforces the block-device guard added after
+#      the b649 file-write incident.
+#   3. Writes a per-run log under /var/log/kldload-ship/ship-<utc>.log so
+#      the build phase, exit code, burn phase, exit code, and notify
+#      attempt are all timestamped in one file. Symlinked to
+#      /var/log/kldload-ship/latest so `tail -f` always points at the
+#      current run.
+#   4. Fires a desktop notification when done — notify-send if a session
+#      bus is available, else `wall` to broadcast to logged-in users,
+#      else stderr + terminal bell. Whichever fires logs which one fired.
+#
+# WHY:
+#   Every interactive cycle today was "build, wait, burn, wait, did it
+#   work?" assembled by hand. Encoding that loop as one subcommand
+#   removes the room for "I forgot to burn after the build finished" and
+#   gives an operator-visible signal when the USB is actually ready.
+#
+# USAGE:
+#   ./deploy.sh ship                  # uses USB_DEVICE (defaults to /dev/sda)
+#   USB_DEVICE=/dev/sdb ./deploy.sh ship
+#   PROFILE=server ./deploy.sh ship   # ships a server-profile ISO
+#
+# EXIT STATUS:
+#   0   build + burn + notify all succeeded
+#   1   build failed (no burn attempted)
+#   2   burn failed after a successful build
+#
+# FILES:
+#   /var/log/kldload-ship/ship-<utc>.log  per-run combined log
+#   /var/log/kldload-ship/latest          symlink to most recent log
+# =============================================================================
+cmd_ship() {
+    local log_dir=/var/log/kldload-ship
+    sudo mkdir -p "$log_dir"
+    sudo chown "$(id -un):$(id -gn)" "$log_dir" 2>/dev/null || true
+
+    local ts
+    ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    local ship_log="${log_dir}/ship-${ts}.log"
+    ln -sfn "$ship_log" "${log_dir}/latest"
+
+    log "=== ship start ${ts} ==="
+    log "  USB_DEVICE: ${USB_DEVICE}"
+    log "  log:        ${ship_log}"
+    {
+        echo "=== ship start $(date -Is) ==="
+        echo "  PROFILE=${PROFILE} EDITION=${EDITION} ARCH=${ARCH} RELEASE=${RELEASE}"
+        echo "  USB_DEVICE=${USB_DEVICE}"
+    } | tee -a "$ship_log"
+
+    # ── Phase 1: build ──────────────────────────────────────────────────────
+    # cmd_build writes its own log via the build container; we tee the
+    # deploy-side messages here so the ship log captures the full story
+    # without having to chase multiple files.
+    {
+        echo "=== build phase $(date -Is) ==="
+        cmd_build 2>&1
+        echo "=== build exit: $? ==="
+    } | tee -a "$ship_log"
+    local build_rc=${PIPESTATUS[0]}
+
+    if [[ $build_rc -ne 0 ]]; then
+        log "ship: build failed (rc=${build_rc}); skipping burn."
+        _ship_notify "kldload ship FAILED" "Build returned ${build_rc}. See ${ship_log}." "critical"
+        return 1
+    fi
+
+    # ── Phase 2: burn ───────────────────────────────────────────────────────
+    # cmd_burn enforces the [[ -b "$USB_DEVICE" ]] guard so a missing
+    # stick gets a loud refusal rather than a silent file-write (b649).
+    {
+        echo "=== burn phase $(date -Is) ==="
+        sudo "$0" burn 2>&1
+        echo "=== burn exit: $? ==="
+    } | tee -a "$ship_log"
+    local burn_rc=${PIPESTATUS[0]}
+
+    if [[ $burn_rc -ne 0 ]]; then
+        log "ship: burn failed (rc=${burn_rc})."
+        _ship_notify "kldload ship FAILED at burn" \
+            "Build succeeded but burn returned ${burn_rc}. See ${ship_log}." "critical"
+        return 2
+    fi
+
+    # ── Phase 3: notify + summary ───────────────────────────────────────────
+    {
+        echo "=== all done $(date -Is) ==="
+    } | tee -a "$ship_log"
+    log "ship: DONE — ISO built and burned to ${USB_DEVICE}."
+    _ship_notify "kldload ship DONE" \
+        "USB ${USB_DEVICE} is ready. Build+burn log: ${ship_log}." "normal"
+    return 0
+}
+
+# _ship_notify — layered notification with graceful fallback.
+#
+# Tries (in order): notify-send via DBUS, wall broadcast, terminal bell +
+# stderr. Whichever path actually fires is logged via log() so a tail of
+# the ship log says exactly how the operator was notified.
+#
+# Args:
+#   $1  summary  (one-line title)
+#   $2  body     (longer description)
+#   $3  urgency  (low|normal|critical) — passed to notify-send when used
+_ship_notify() {
+    local summary="$1" body="$2" urgency="${3:-normal}"
+
+    # Path 1 — desktop notify-send if we have a session bus AND the binary.
+    # Catches the common "operator launched ship from their own terminal"
+    # case; notify-send returns 0 when the daemon accepts the toast.
+    if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && command -v notify-send >/dev/null 2>&1; then
+        if notify-send -u "$urgency" "$summary" "$body" 2>/dev/null; then
+            log "ship: notified via notify-send (urgency=${urgency})"
+            return 0
+        fi
+    fi
+
+    # Path 2 — `wall` broadcasts to all logged-in users. Less polished
+    # but works on headless servers, over SSH, and inside a tmux from a
+    # systemd one-shot.
+    if command -v wall >/dev/null 2>&1; then
+        printf '%s\n\n%s\n' "$summary" "$body" | wall 2>/dev/null && {
+            log "ship: notified via wall"
+            return 0
+        }
+    fi
+
+    # Path 3 — terminal bell + stderr. Always succeeds; the bell only
+    # rings if the terminal's audible-bell is on, but the message is
+    # always visible at the end of the log.
+    printf '\a' >&2
+    echo "NOTIFY: ${summary}: ${body}" >&2
+    log "ship: notified via stderr (no notify-send or wall available)"
+    return 0
 }
 
 # Full rebuild: clean everything, rebuild the builder image, build ISO.
@@ -796,6 +949,7 @@ build-ai-docs) cmd_build_ai_docs ;;
 builder-image) cmd_builder_image ;;
 clean) cmd_clean ;;
 burn) cmd_burn ;;
+ship) cmd_ship ;;
 full) cmd_full ;;
 kvm-deploy) cmd_kvm_deploy ;;
 kvm-deploy-bob) cmd_kvm_deploy_bob ;;
@@ -841,6 +995,12 @@ Deploy:
   proxmox-deploy         Deploy ISO to remote Proxmox (SSH + qm API)
   deploy-all             Deploy to KVM + Proxmox + print USB command
   burn                   Write ISO to USB drive
+  ship                   build → burn → notify in one shot. The default
+                         iteration loop. Honours PROFILE/EDITION/USB_DEVICE
+                         same as their individual subcommands. Per-run log
+                         at /var/log/kldload-ship/ship-<utc>.log; notify-send
+                         fires on completion (falls back to wall, then
+                         stderr). Exit 1 = build failed, 2 = burn failed.
 
 Test:
   smoke-build            Validate the just-built ISO (size, freshness, structure)
@@ -873,6 +1033,8 @@ Examples:
   ./deploy.sh clean && ./deploy.sh build     # Full rebuild
   ./deploy.sh kvm-deploy                     # Test in local KVM
   ./deploy.sh burn                           # Write to USB
+  ./deploy.sh ship                           # build + burn + notify (default loop)
+  USB_DEVICE=/dev/sdb ./deploy.sh ship       # Ship to a specific USB
 EOF
     ;;
 esac
