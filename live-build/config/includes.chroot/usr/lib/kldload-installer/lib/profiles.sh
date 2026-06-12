@@ -857,7 +857,7 @@ k_install_system_files() {
         # profiles (kvm/ai/zfslab) where the operator explicitly booted FOR
         # the UI get the auto-open. Firefox was the previous default here;
         # ripped 2026-06-06 after operator decided to standardize on Chrome
-        # (see CLAUDE.md / task #15 / task #47). Chrome is the only browser
+        # (see project rules / task #15 / task #47). Chrome is the only browser
         # in the desktop package list now; the live ISO's installer-GUI
         # rendering still uses Firefox (transient, not user-facing).
         case "${KLDLOAD_PROFILE:-server}" in

@@ -1,9 +1,9 @@
 # kldload CI — operator handbook
 
 This directory holds the CI runner script. **Read this before touching the
-test infrastructure.** Goal: anyone (or Claude in a future session) can
-pick up the test environment cold, know what's running, what's broken,
-and how to drive a fix to verification.
+test infrastructure.** Goal: anyone landing on this cold — a new operator,
+a future-self, an SRE on rotation — can pick up the test environment, know
+what's running, what's broken, and how to drive a fix to verification.
 
 ---
 
@@ -69,7 +69,7 @@ as the airbag and hardware install as the seatbelt.
 the matrix yet — they need their own `tests/smoke-{kvm,klab,zfslab}.sh`
 wrappers. Phase-2 work.
 
-Profile semantics (per `CLAUDE.md`):
+Profile semantics (per project rules):
 
 - **core** — ZFS-on-root + stock distro + WireGuard + eBPF + diagnostic
   tools (`kldload-debug-bundle`, `kldload-recovery`). NO kldload-webui,
@@ -317,7 +317,7 @@ ssh admin@fiend 'echo "short-name-mode = \"permissive\"
 unqualified-search-registries = [\"docker.io\",\"quay.io\",\"registry.fedoraproject.org\"]" \
   | sudo tee /etc/containers/registries.conf.d/00-kldload-ci-permissive.conf'
 
-# 6. Rsync source from onyx (excludes output, caches, .claude):
+# 6. Rsync source from onyx (excludes build output, caches, and local config):
 sshpass -p Passw0rd rsync -av --delete \
   --exclude='live-build/output' \
   --exclude='live-build/output-pass*' \
