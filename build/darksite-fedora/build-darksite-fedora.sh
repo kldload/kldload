@@ -208,6 +208,49 @@ fi
 tail -5 "${_dl_log}" | sed 's/^/    /' >&2
 rm -f "${_dl_log}"
 
+# ── Boolean/rich-dep closure (what `download --resolve` silently skips) ──────
+# `dnf download --resolve --alldeps` follows HARD deps but NOT rich `(X if Y)`
+# deps, so the -selinux companions (passt-selinux, smartmontools-selinux,
+# swtpm-selinux, container-selinux's chain, ...) get missed — and one such gap
+# makes the whole OFFLINE install transaction unsatisfiable (the F44 zfs pass-3
+# brick, 2026-06-13). A real install RESOLUTION does follow rich deps, so we
+# resolve the realistic desktop install set with `--downloadonly` (auto-pulls
+# every boolean companion) and harvest the RPMs into the mirror. Scope = base +
+# server + desktop + fedora-extras (+ zfs DKMS trio, kernel, KVM optionals).
+# kubernetes and nvidia are separate profiles whose offline closures (grafana-
+# selinux, akmod→akmods→rpm-build build chain) are tracked separately — they
+# must not block a desktop ISO.
+declare -A _avail_map=()
+for _a in "${PKGS_AVAILABLE[@]}"; do _avail_map["$_a"]=1; done
+declare -a _closure_set=()
+for _cs in target-base target-server target-desktop target-fedora-extras; do
+    _cf="${PKG_SETS_DIR_FED}/${_cs}.txt"
+    [[ -f "$_cf" ]] || _cf="${PKG_SETS_DIR_EL}/${_cs}.txt"
+    [[ -f "$_cf" ]] || continue
+    while IFS= read -r _cl; do
+        [[ "$_cl" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${_cl//[[:space:]]/}" ]] && continue
+        [[ -n "${_avail_map[$_cl]:-}" ]] && _closure_set+=("$_cl")
+    done <"$_cf"
+done
+_closure_set+=(kernel-core kernel-devel zfs zfs-dkms zfs-dracut
+    qemu-kvm libvirt-daemon-driver-qemu libvirt-daemon swtpm swtpm-tools)
+log "Boolean-dep closure: downloadonly-resolving ${#_closure_set[@]} desktop-set packages to pull rich-dep companions..."
+_clcache="$(mktemp -d)"
+_clroot="$(mktemp -d)"
+dnf install --installroot="${_clroot}" --releasever="${RELEASE}" --forcearch="${ARCH}" \
+    --setopt=cachedir="${_clcache}" --setopt=keepcache=1 --downloadonly --nogpgcheck -y \
+    "${_closure_set[@]}" >"${_clcache}.log" 2>&1 || {
+    log "WARNING: downloadonly closure exited non-zero — tail:"
+    tail -25 "${_clcache}.log" | sed 's/^/    /' >&2
+}
+_harvested=0
+while IFS= read -r _r; do
+    cp -n "$_r" "${REPO_DIR}/" 2>/dev/null && _harvested=$((_harvested + 1))
+done < <(find "${_clcache}" -name '*.rpm')
+log "Boolean-dep closure: harvested ${_harvested} additional RPMs into the mirror"
+rm -rf "${_clcache}" "${_clroot}" "${_clcache}.log"
+
 log "Creating repo metadata..."
 createrepo_c "${REPO_DIR}"
 
@@ -230,14 +273,18 @@ fi
 # (incl. the zfs DKMS trio + kernel) against ONLY this darksite and fail loud
 # with the unresolved leaves. --assumeno also exits non-zero on a *successful*
 # resolve (it declines the prompt), so we judge by the error text, not $?.
-log "Completeness gate: resolving the full offline install set against the darksite..."
+log "Completeness gate: resolving the desktop install set against the darksite alone..."
 _gate_root="$(mktemp -d)"
 _gate_log="$(mktemp)"
+# Gate the realistic desktop install set (same scope as the closure pass above),
+# NOT the full PKGS_AVAILABLE union — that union is intentionally un-installable
+# in one transaction (nvidia akmods + every profile's packages together), which
+# would be a false positive. kubernetes/nvidia get their own validation.
 dnf install --installroot="${_gate_root}" --releasever="${RELEASE}" \
     --forcearch="${ARCH}" --disablerepo='*' \
     --repofrompath="dsgate,file://${REPO_DIR}" --enablerepo=dsgate \
     --nogpgcheck --assumeno \
-    "${PKGS_AVAILABLE[@]}" kernel-core kernel-devel zfs zfs-dkms zfs-dracut \
+    "${_closure_set[@]}" \
     >"${_gate_log}" 2>&1 || true
 if grep -qiE 'nothing provides|none of the providers can be installed|no match for argument|cannot install the best|conflicting requests|unable to resolve' "${_gate_log}"; then
     log "FATAL: darksite INCOMPLETE — offline install would fail. Unresolved dependencies:" >&2
