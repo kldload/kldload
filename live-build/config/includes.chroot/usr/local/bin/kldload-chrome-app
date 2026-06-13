@@ -48,9 +48,24 @@ if [[ -z "$chrome" ]]; then
     exit 1
 fi
 
+# Appliance-mode flags — suppress every first-run nag/check that can block or
+# clutter the kldload UI window on a fresh GNOME session:
+#   --no-first-run / --no-default-browser-check : skip the welcome + "make
+#       Chrome your default?" prompts.
+#   --password-store=basic : do NOT touch gnome-keyring. On a fresh live/desktop
+#       session the keyring is locked, so Chrome otherwise pops a BLOCKING
+#       "unlock your keyring / create password" dialog (or hangs) before the app
+#       window ever appears — a frequent "the UI never opened" cause. The kldload
+#       app profile stores nothing sensitive, so a basic store is fine.
+#   --disable-session-crashed-bubble : no "Restore pages?" bubble after the
+#       window is killed (logout / bobctl), which would steal focus from the SPA.
+#   --disable-features=Translate : no translate infobar over the dashboard.
 exec "$chrome" \
     --user-data-dir="$profile_dir" \
     --class="$app_id" \
     --no-first-run \
     --no-default-browser-check \
+    --password-store=basic \
+    --disable-session-crashed-bubble \
+    --disable-features=Translate \
     --app="$url"

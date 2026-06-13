@@ -205,9 +205,14 @@ fi
 # would have no way to interact with the web UI. The PROFILE variable only
 # affects what packages get installed on the TARGET system at install time.
 PKGS+=(
+    # firefox is NOT installed: Chrome is the only kldload browser (installed
+    # from google-chrome.repo after the rootfs is built) and renders the webui
+    # via kldload-chrome-app. Shipping firefox here left two browsers on the live
+    # and a stale firefox dock pin. gnome-terminal ("Terminal") stays as the F44
+    # terminal.
     gnome-shell gnome-session gdm gnome-terminal nautilus
     gnome-control-center gnome-settings-daemon gedit
-    gnome-keyring firefox mesa-dri-drivers
+    gnome-keyring mesa-dri-drivers
     pipewire wireplumber
     adwaita-icon-theme google-noto-sans-fonts
     # F44 branded wallpapers for the LIVE installer only. The installed
@@ -867,6 +872,19 @@ DCONFPROFILE
             die "FATAL: google-chrome-stable not installed into live rootfs — webui app window will not open"
         log "google-chrome-stable installed into live rootfs"
     fi
+
+    # ── Hide stock TUI launchers on the LIVE grid ─────────────────────────────
+    # htop is a terminal app and ships its own GUI tile; on the live grid it's
+    # clutter (the operator opens it from a terminal). Mirror what profiles.sh
+    # does on the installed target. vim correctly ships no tile — htop should
+    # match. NoDisplay hides the tile without removing the tool.
+    for _hide in htop; do
+        _hd="${ROOTFS}/usr/share/applications/${_hide}.desktop"
+        if [[ -f "$_hd" ]] && ! grep -q '^NoDisplay=true' "$_hd"; then
+            printf 'NoDisplay=true\n' >>"$_hd"
+            log "live grid: hid ${_hide}.desktop (TUI tool, no GUI tile needed)"
+        fi
+    done
 
     # ── kldload-branded wallpapers ────────────────────────────────────────────
     # /usr/share/backgrounds/kldload/{default,default-dark}.png — referenced by
