@@ -218,3 +218,33 @@ if [[ "${_rpm_count}" -lt 50 ]]; then
     log "ERROR: fedora darksite produced only ${_rpm_count} RPMs — expected ≥50. Investigate dnf output above." >&2
     exit 1
 fi
+
+# ── Completeness gate ──────────────────────────────────────────────────────
+# `dnf download --resolve --alldeps` does NOT follow rich/boolean deps like
+# `Requires: (passt-selinux if selinux-policy-targeted)`. So a mirror can look
+# complete (createrepo happy, RPM count high) yet be UNSATISFIABLE at offline
+# install time — exactly how the F44 zfs pass-3 install aborted "target will not
+# boot" (2026-06-13): qemu→passt→passt-selinux fired but passt-selinux was never
+# mirrored, poisoning the whole transaction. Catch that class HERE, at mirror
+# time, not on the operator's target: dry-run the FULL offline install set
+# (incl. the zfs DKMS trio + kernel) against ONLY this darksite and fail loud
+# with the unresolved leaves. --assumeno also exits non-zero on a *successful*
+# resolve (it declines the prompt), so we judge by the error text, not $?.
+log "Completeness gate: resolving the full offline install set against the darksite..."
+_gate_root="$(mktemp -d)"
+_gate_log="$(mktemp)"
+dnf install --installroot="${_gate_root}" --releasever="${RELEASE}" \
+    --forcearch="${ARCH}" --disablerepo='*' \
+    --repofrompath="dsgate,file://${REPO_DIR}" --enablerepo=dsgate \
+    --nogpgcheck --assumeno \
+    "${PKGS_AVAILABLE[@]}" kernel-core kernel-devel zfs zfs-dkms zfs-dracut \
+    >"${_gate_log}" 2>&1 || true
+if grep -qiE 'nothing provides|none of the providers can be installed|no match for argument|cannot install the best|conflicting requests|unable to resolve' "${_gate_log}"; then
+    log "FATAL: darksite INCOMPLETE — offline install would fail. Unresolved dependencies:" >&2
+    grep -iE 'nothing provides|none of the providers can be installed|no match for argument|conflicting requests' \
+        "${_gate_log}" | sort -u | sed 's/^/    /' >&2
+    rm -rf "${_gate_root}" "${_gate_log}"
+    exit 1
+fi
+log "Completeness gate PASSED — the full offline install set resolves against the darksite alone."
+rm -rf "${_gate_root}" "${_gate_log}"
