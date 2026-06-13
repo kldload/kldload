@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-webui-launch — wait for the local webui, then open it in Chrome
+#
+# WHAT IT DOES:
+#   1. Poll https://localhost:8443/ for up to ~60s until the SPA backend answers
+#      (it comes up shortly after login via kldload-webui.service / nginx).
+#   2. Hand off to kldload-chrome-app, which opens the UI as a standalone Chrome
+#      app window (the kldload default browser, with Web Speech API for Bob).
+#
+# WHY A SCRIPT (not an inline Exec=):
+#   The autostart .desktop used to carry the whole `bash -c 'for ...; curl ...'`
+#   pipeline inline. That is invalid per the Desktop Entry spec (reserved chars
+#   $ ( ) ; & > ' in Exec) and trips desktop-file-validate. Factoring it into a
+#   script keeps the .desktop a single clean Exec= and is the documented fix.
+#
+# USAGE:  kldload-webui-launch            (invoked from kldload-webui autostart)
+# EXIT:   execs Chrome; the poll never hard-fails — if the backend never answers
+#         it still opens the window so the operator sees the connection error in
+#         the UI rather than a silent no-show.
+# SEE ALSO: kldload-chrome-app, kldload-webui.service.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+
+url='https://localhost:8443/'
+
+# Wait for the SPA to answer (up to ~60s). `curl -k` because the cert is the
+# local kldload-webui cert; we only care that the endpoint is serving.
+for _ in $(seq 1 60); do
+    if curl -sk -o /dev/null "$url" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+sleep 2 # let nginx finish wiring the upstream before we paint the SPA
+
+exec /usr/local/bin/kldload-chrome-app com.kldload.webui "$url"

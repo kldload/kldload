@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-chrome-app — open a kldload SPA view as a standalone Chrome app window
+#
+# WHAT IT DOES, IN ORDER:
+#   1. Take an app-id (window class) and a URL.
+#   2. Launch Chrome in --app mode against a DEDICATED kldload profile dir, so
+#      the window is a frameless standalone app window grouped under its own
+#      icon (--class == the .desktop StartupWMClass).
+#
+# WHY THIS EXISTS:
+#   kldload's UI is a single SPA served at https://localhost:8443/. It used to
+#   render through kldload-webview (GTK4 + WebKit6). WebKit does NOT implement
+#   the Web Speech API, so Bob's voice/hot-mic broke with "Speech recognition
+#   not available in this browser." Chrome is the default browser throughout
+#   kldload and *does* support it — so every SPA window now runs in Chrome.
+#
+#   Using a dedicated --user-data-dir (not the user's main Chrome profile) means:
+#     - launches reliably open a NEW app window instead of being swallowed by an
+#       already-running main browser ("Opening in existing browser session"),
+#     - the kldload UI is isolated from the user's browsing/extensions/logins,
+#     - the localhost:8443 cert is still trusted: Chrome reads ~/.pki/nssdb and
+#       the system trust store (kldload-webui.crt lives in both), which are
+#       independent of the Chrome profile.
+#
+# USAGE:    kldload-chrome-app <app-id> <url>
+# EXAMPLE:  kldload-chrome-app com.kldload.bob 'https://localhost:8443/?app=1#bob'
+# EXIT:     execs Chrome (replaces this process); non-zero only on bad args.
+#
+# NOTES:
+#   - Mic on https://localhost is a secure context, so Chrome allows it; the
+#     first use may prompt once per profile to allow the microphone.
+#   - SEE ALSO: bob-chat.desktop, kldload-webui.desktop, kldload-webview(1).
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+
+app_id="${1:?usage: kldload-chrome-app <app-id> <url>}"
+url="${2:?usage: kldload-chrome-app <app-id> <url>}"
+
+# Dedicated, per-user kldload browser profile (isolated from the main browser).
+profile_dir="${XDG_DATA_HOME:-$HOME/.local/share}/kldload-chrome"
+mkdir -p "$profile_dir"
+
+# google-chrome-stable is the kldload default; fall back to google-chrome.
+chrome="$(command -v google-chrome-stable || command -v google-chrome || true)"
+if [[ -z "$chrome" ]]; then
+    echo "kldload-chrome-app: google-chrome not found" >&2
+    exit 1
+fi
+
+exec "$chrome" \
+    --user-data-dir="$profile_dir" \
+    --class="$app_id" \
+    --no-first-run \
+    --no-default-browser-check \
+    --app="$url"

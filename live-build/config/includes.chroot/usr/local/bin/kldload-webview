@@ -2,22 +2,21 @@
 """
 kldload-webview — GTK4 + WebKit6 native-Wayland launcher for kldload SPA views.
 
-Why this exists:
-  Chrome on Wayland does not honor `--class=` for the surface app_id;
-  every chrome --app= window comes up as app_id=google-chrome and
-  gnome-shell can't match it to a .desktop file (= blue diamond icon).
-  WebKitGTK 4.1 + GTK3 crashes with a Wayland Protocol error on RHEL 10
-  the moment you add a WebView to a window.
+Why this exists (HISTORICAL — superseded by kldload-chrome-app):
+  This was written when Chrome on Wayland did not honor `--class=` for the
+  surface app_id — every chrome --app= window came up as app_id=google-chrome
+  and gnome-shell couldn't match it to a .desktop (= blue diamond icon), so a
+  GTK4 shim that calls Gtk.Application(application_id=...) was the only way to
+  get a correct per-app app_id.
 
-  GTK4 + WebKit 6.0 (webkitgtk6.0 from EPEL on RHEL 10) is the native
-  Wayland answer: Gtk.Application(application_id=...) sets the xdg-shell
-  app_id during surface creation, gnome-shell matches the .desktop's
-  StartupWMClass to it, the correct icon renders. No XWayland fallback,
-  no Chrome IPC merging, no per-launch user-data-dir.
-
-  Chrome stays installed and is still the user's general-purpose browser.
-  This launcher is ONLY for the kldload SPA views fired from the app
-  grid / dock.
+  That is no longer true. Verified on Chrome 149 (2026-06-13): a window
+  launched with `--class=com.kldload.vms --app=...` emits
+  set_app_id("com.kldload.vms") on the Wayland socket, which gnome-shell
+  matches to StartupWMClass — the correct icon renders with no shim. Bob also
+  needs Chrome's Chromium-only Web Speech API, so kldload moved the SPA views
+  to Chrome (kldload-chrome-app) and this launcher is retained only as a
+  fallback. Do NOT reintroduce a GTK4/PWA app_id workaround on the strength of
+  the old comment above — test the shipped Chrome first.
 
 Usage:
   kldload-webview --app-id=kldload-vms \\

@@ -201,7 +201,7 @@ in the lower-right corner saying *this isn't stock*.
 **Workstation (the GUI layer):**
 - GUI-first RHEL 10 workstation: expert ops (ZFS / KVM / K8s / eBPF) as point-and-shoot desktop apps
 - Install-time **Platform Options** &mdash; NVIDIA / KVM / Kubernetes / eBPF / golden-image building, desktop-only, default-clean
-- Native per-tool app windows (chromeless GTK/WebKit), NVIDIA + Wayland render fixes (GSK_RENDERER=ngl pre-baked, no first-session Nautilus segfault)
+- Native per-tool app windows (chromeless GTK/WebKit), NVIDIA + Wayland render fixes (GSK_RENDERER=ngl pre-baked; firstboot also reloads running user sessions so the fix lands without a re-login &mdash; no first-session Nautilus segfault)
 - Console (tmux cockpit) promoted to its own application, de-duplicated from every tool window
 - VM serial console embedded in the web UI via the same ttyd-k9s session
 - RHEL 10 desktop package + TLS fixes (ptyxis, zenity, glib-networking)

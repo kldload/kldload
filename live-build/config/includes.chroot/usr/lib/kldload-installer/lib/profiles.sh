@@ -939,21 +939,30 @@ DASHSTART
             if [[ -f "${_appdir}/vim.desktop" ]] && grep -q '^Exec=gnome-terminal' "${_appdir}/vim.desktop"; then
                 sed -i 's|^Exec=gnome-terminal[[:space:]]*--[[:space:]]*|Exec=kldload-term |' "${_appdir}/vim.desktop"
             fi
-            # Reveal the post-install kldload launchers that were hidden on
-            # the LIVE ISO (NoDisplay=true). The live session shouldn't
-            # surface VMs / K8s / klab / Ansible / Helm / Metrics / ZFS in
-            # the app grid — none of those services run on a USB live, so
-            # the launchers fail silently and confuse the operator. On the
-            # install target they become first-class, so we strip the flag.
-            # Operator on .145 b651 live 2026-06-11: "the live needs all the
-            # rescue tools and the GUI, but nothing else is installed yet
+            # Launcher surface is profile-dependent — this is the Workstation /
+            # server-class split:
+            #   desktop (Workstation): every tool is a first-class app icon in
+            #     the GNOME grid. The launchers ship NoDisplay=true (hidden on
+            #     the live ISO and on server-class installs); strip it here so
+            #     the operator gets point-and-shoot windows — VMs, K8s, ZFS,
+            #     Metrics, Ansible, Helm, klab — each grouping under its own icon
+            #     (kldload-chrome-app sets a matching Wayland app_id via --class).
+            #   kvm / zfslab / klab / server / core: keep the single cohesive
+            #     web GUI page (https://localhost:8443) as the only surface, the
+            #     way it's always been. Those land on a server, not a desktop, so
+            #     per-tool grid icons would be clutter — leave NoDisplay in place.
+            # The live ISO keeps them hidden regardless (the web GUI is the live
+            # surface). Operator on .145 b651 live 2026-06-11: "the live needs
+            # all the rescue tools and the GUI, but nothing else is installed yet
             # so [the infra section] is useless."
-            for _ldskt in kldload-vms kldload-k8s kldload-helm kldload-klab \
-                kldload-ansible kldload-metrics kldload-zfs kldload-zfs-manager; do
-                if [[ -f "${_appdir}/${_ldskt}.desktop" ]]; then
-                    sed -i '/^NoDisplay=true$/d' "${_appdir}/${_ldskt}.desktop"
-                fi
-            done
+            if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
+                for _ldskt in kldload-vms kldload-k8s kldload-helm kldload-klab \
+                    kldload-ansible kldload-metrics kldload-zfs kldload-zfs-manager; do
+                    if [[ -f "${_appdir}/${_ldskt}.desktop" ]]; then
+                        sed -i '/^NoDisplay=true$/d' "${_appdir}/${_ldskt}.desktop"
+                    fi
+                done
+            fi
             chroot "${target}" update-desktop-database /usr/share/applications 2>/dev/null || true
         fi
 

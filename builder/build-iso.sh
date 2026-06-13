@@ -739,7 +739,7 @@ if [[ "$EDITION" != "core" && "${BOB_LIVE:-}" != "1" ]]; then
 [Desktop Entry]
 Type=Application
 Name=kldload Web UI
-Exec=bash -c 'for i in $(seq 1 60); do curl -sk -o /dev/null https://localhost:8443/ 2>/dev/null && break; sleep 1; done; sleep 2; /usr/local/bin/kldload-webview --app-id=kldload-webui --title="kldload" --url="https://localhost:8443/"'
+Exec=/usr/local/bin/kldload-webui-launch
 Icon=kldload-webui
 StartupWMClass=com.kldload.webui
 X-GNOME-Autostart-enabled=true

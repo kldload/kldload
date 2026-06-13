@@ -1042,6 +1042,27 @@ main() {
             if [[ ! -f /etc/environment.d/60-kldload-nvidia-gsk.conf ]]; then
                 printf 'GSK_RENDERER=ngl\n' >/etc/environment.d/60-kldload-nvidia-gsk.conf
                 log "GTK4 ngl renderer set for NVIDIA (libnvidia-glcore crash workaround)"
+                # NOTE: gdm races this unit (we're After=network-online.target, gdm
+                #       isn't ordered against us), so a user manager may have run its
+                #       environment generators before the file above existed. That
+                #       session still picks the Vulkan renderer and GTK4 apps segfault
+                #       until re-login (onyx, 2026-06-11: Files crashed on any folder
+                #       with thumbnails). Reload every running user manager so the
+                #       generators re-read environment.d — dbus-activated apps launched
+                #       after this point inherit the fix without a re-login. We
+                #       deliberately do NOT order this unit Before=display-manager:
+                #       a slow network-online.target would hold the login screen hostage.
+                for _udir in /run/user/[0-9]*; do
+                    [[ -d $_udir ]] || continue
+                    _uname="$(id -nu "${_udir##*/}" 2>/dev/null)" || continue
+                    # stderr dropped: systemctl prints "Failed to connect to bus" for
+                    # a lingering /run/user dir whose manager already exited — the
+                    # log line below is the loud path for anything else.
+                    if ! runuser -u "$_uname" -- env XDG_RUNTIME_DIR="$_udir" \
+                        systemctl --user daemon-reload 2>/dev/null; then
+                        log "WARN: user manager reload failed for ${_uname} — GSK_RENDERER lands at next login"
+                    fi
+                done
             fi
             _nv_restored=0
             for _disabled in /usr/lib/modprobe.d/*.kldload-disabled-no-dkms \
@@ -2015,80 +2036,73 @@ KAIREMOTE
                     ok "AI profile ready — commands: kai, kai-voice, kai-do, kai-remote"
                     ok "AI model and knowledge corpus configured"
 
-                    # Firefox policy — bookmarks + first-run suppression on EVERY GUI
-                    # profile. Only LAB profiles (kvm / ai / zfslab) also get Homepage
-                    # + autostart to auto-open the webui at login; workstation
+                    # Browser policy — bookmarks + first-run suppression on EVERY GUI
+                    # profile. Only LAB profiles (kvm / ai / zfslab) also get a
+                    # homepage + autostart to auto-open the webui at login; workstation
                     # (desktop) and server users keep their chosen homepage.
+                    #
+                    # Chrome, not Firefox (Task #47): firefox is removed earlier in
+                    # firstboot, so a /etc/firefox/policies write would be dead. Chrome
+                    # reads /etc/opt/chrome/policies/managed/*.json across every profile
+                    # incl. the dedicated kldload-chrome app profile.
                     local _webui_ready="${_webui_ready:-false}"
                     local _prof="${ROLE:-${KLDLOAD_PROFILE:-server}}"
                     case "${_prof}" in
                     kvm | ai | zfslab)
-                        mkdir -p /etc/firefox/policies
-                        cat >/etc/firefox/policies/policies.json <<FFPOL
+                        mkdir -p /etc/opt/chrome/policies/managed
+                        cat >/etc/opt/chrome/policies/managed/kldload.json <<'CHROMEPOL'
 {
-  "policies": {
-    "Homepage": {
-      "URL": "https://localhost:8443",
-      "StartPage": "homepage"
-    },
-    "OverrideFirstRunPage": "https://localhost:8443",
-    "Bookmarks": [
-      {"Title": "kldload Web UI", "URL": "https://localhost:8443", "Placement": "toolbar"},
-      {"Title": "kldload Docs",   "URL": "https://kldload.com",    "Placement": "toolbar"}
-    ],
-    "DisplayBookmarksToolbar": "always",
-    "NoDefaultBookmarks": true,
-    "OverridePostUpdatePage": "",
-    "UserMessaging": {
-      "WhatsNewMessaging": false,
-      "ExtensionRecommendations": false,
-      "SkipOnboarding": true
-    }
-  }
+  "RestoreOnStartup": 4,
+  "RestoreOnStartupURLs": ["https://localhost:8443"],
+  "HomepageLocation": "https://localhost:8443",
+  "ShowHomeButton": true,
+  "BookmarkBarEnabled": true,
+  "ManagedBookmarks": [
+    {"name": "kldload Web UI", "url": "https://localhost:8443"},
+    {"name": "kldload Docs", "url": "https://kldload.com"}
+  ],
+  "DefaultBrowserSettingEnabled": false,
+  "PromotionalTabsEnabled": false,
+  "MetricsReportingEnabled": false
 }
-FFPOL
+CHROMEPOL
                         mkdir -p /etc/xdg/autostart
                         cat >/etc/xdg/autostart/kldload-dashboard.desktop <<AUTOSTART
 [Desktop Entry]
 Type=Application
 Name=kldload Dashboard
 Comment=Auto-open the kldload ops console at login (lab profile)
-Exec=bash -c 'for i in \$(seq 1 60); do (echo >/dev/tcp/localhost/8443) 2>/dev/null && break; sleep 1; done; sleep 3; /usr/local/bin/kldload-webview --app-id=kldload-webui --title="kldload" --url="https://localhost:8443/"'
+Exec=/usr/local/bin/kldload-webui-launch
 Icon=kldload-webui
 StartupWMClass=com.kldload.webui
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=8
 AUTOSTART
-                        log "Lab profile (${_prof}): Firefox homepage + autostart set to webui on :8443"
+                        log "Lab profile (${_prof}): Chrome homepage + autostart set to webui on :8443"
                         ;;
                     desktop)
                         # Workstation — bookmarks + first-run suppression, NO homepage
                         # override, NO autostart. User's daily driver is theirs.
-                        mkdir -p /etc/firefox/policies
-                        cat >/etc/firefox/policies/policies.json <<FFPOL
+                        mkdir -p /etc/opt/chrome/policies/managed
+                        cat >/etc/opt/chrome/policies/managed/kldload.json <<'CHROMEPOL'
 {
-  "policies": {
-    "DontCheckDefaultBrowser": true,
-    "DisplayBookmarksToolbar": "always",
-    "Bookmarks": [
-      {"Title": "kldload Web UI", "URL": "https://localhost:8443", "Placement": "toolbar"},
-      {"Title": "kldload Docs",   "URL": "https://kldload.com",    "Placement": "toolbar"}
-    ],
-    "UserMessaging": {
-      "WhatsNewMessaging": false,
-      "ExtensionRecommendations": false,
-      "SkipOnboarding": true
-    }
-  }
+  "DefaultBrowserSettingEnabled": false,
+  "BookmarkBarEnabled": true,
+  "ManagedBookmarks": [
+    {"name": "kldload Web UI", "url": "https://localhost:8443"},
+    {"name": "kldload Docs", "url": "https://kldload.com"}
+  ],
+  "PromotionalTabsEnabled": false,
+  "MetricsReportingEnabled": false
 }
-FFPOL
-                        log "Workstation profile: Firefox bookmarks set (no homepage override, no autostart)"
+CHROMEPOL
+                        log "Workstation profile: Chrome bookmarks set (no homepage override, no autostart)"
                         # Ensure stale lab-profile autostart from a prior install is
                         # removed if the user re-profiled to desktop.
                         rm -f /etc/xdg/autostart/kldload-dashboard.desktop 2>/dev/null || true
                         ;;
                     *)
-                        log "Profile '${_prof}' is headless/stripped — no Firefox policy applied"
+                        log "Profile '${_prof}' is headless/stripped — no browser policy applied"
                         ;;
                     esac
                     # Desktop notification
@@ -2520,26 +2534,23 @@ KLABEXP
                 done
                 ok "klab observability: Prometheus :9090, Grafana :3000, klab-exporter :9101"
 
-                # ── Firefox homepage → Grafana ──
-                mkdir -p /etc/firefox/policies
-                cat >/etc/firefox/policies/policies.json <<'FFPOL'
+                # ── Chrome homepage → Grafana (Task #47: Chrome, not Firefox) ──
+                mkdir -p /etc/opt/chrome/policies/managed
+                cat >/etc/opt/chrome/policies/managed/kldload-klab.json <<'CHROMEPOL'
 {
-  "policies": {
-    "Homepage": {
-      "URL": "http://localhost:3000/d/klab-estate/klab-estate?orgId=1&refresh=30s",
-      "StartPage": "homepage"
-    },
-    "OverrideFirstRunPage": "http://localhost:3000/d/klab-estate/klab-estate?orgId=1&refresh=30s",
-    "Bookmarks": [
-      {"Title": "klab Dashboard", "URL": "http://localhost:3000/d/klab-estate/klab-estate", "Placement": "toolbar"},
-      {"Title": "Prometheus", "URL": "http://localhost:9090", "Placement": "toolbar"},
-      {"Title": "kldload Docs", "URL": "https://kldload.com", "Placement": "toolbar"}
-    ],
-    "DisplayBookmarksToolbar": "always"
-  }
+  "RestoreOnStartup": 4,
+  "RestoreOnStartupURLs": ["http://localhost:3000/d/klab-estate/klab-estate?orgId=1&refresh=30s"],
+  "HomepageLocation": "http://localhost:3000/d/klab-estate/klab-estate?orgId=1&refresh=30s",
+  "ShowHomeButton": true,
+  "BookmarkBarEnabled": true,
+  "ManagedBookmarks": [
+    {"name": "klab Dashboard", "url": "http://localhost:3000/d/klab-estate/klab-estate"},
+    {"name": "Prometheus", "url": "http://localhost:9090"},
+    {"name": "kldload Docs", "url": "https://kldload.com"}
+  ]
 }
-FFPOL
-                ok "Firefox homepage set to Grafana klab dashboard"
+CHROMEPOL
+                ok "Chrome homepage set to Grafana klab dashboard"
             fi
 
             # klab golden builds are owned by kldload-autodeploy.service — NOT

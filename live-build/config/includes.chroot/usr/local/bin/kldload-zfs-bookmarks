@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-zfs-bookmarks — surface extra-pool ZFS datasets in the Files sidebar
+#
+# WHAT IT DOES, IN ORDER:
+#   1. Enumerate every *mounted* ZFS filesystem dataset on the box.
+#   2. Keep only the "data" ones — mountpoints that are NOT FHS system dirs and
+#      NOT under the user's home (those already appear in Files via Home,
+#      Documents, Music, ... by default).
+#   3. Rewrite a self-delimited, auto-managed block in the calling user's GTK
+#      bookmarks file so each such dataset shows up in the Nautilus / GTK left
+#      sidebar — e.g. tank's apps / books / music / pdf / playlists.
+#
+# WHY THIS EXISTS:
+#   The root filesystem already populates the Files sidebar. Extra pools (the
+#   common kldload case is `tank` holding media/data datasets) do not — the
+#   operator otherwise has to bookmark each mountpoint by hand on every box.
+#   This makes them appear automatically, at GUI login, for every user, without
+#   ever touching the user's own bookmarks. It is the "show the good stuff"
+#   complement to 72-kldload-zfs-hide.rules, which hides the raw pool members
+#   and VM zvols from udisks/Nautilus.
+#
+# INPUTS:   imported + mounted ZFS datasets (read via `zfs list`).
+# OUTPUTS:  ${XDG_CONFIG_HOME:-~/.config}/gtk-3.0/bookmarks  (managed block only)
+# RUNS AS:  the logging-in user, from /etc/xdg/autostart at GUI login.
+# EXIT:     0 always on a healthy run (incl. "no zfs / nothing to add"); non-zero
+#           only on an unexpected error, which the ERR trap reports with a line.
+#
+# NOTES / INVARIANTS:
+#   - Only the region between the BEGIN/END markers is owned by this script.
+#     Anything the user added themselves is preserved verbatim.
+#   - Idempotent: safe to run on every login. The file changes only when the set
+#     of mounted data datasets changes.
+#   - No `sudo`, no system mutation — it writes one per-user dotfile.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kldload-zfs-bookmarks: FAIL at line $LINENO running: $BASH_COMMAND" >&2' ERR
+
+# ── Managed-region markers ── everything between these is ours to rewrite; the
+#    exact strings are matched literally (not as regex) when we strip the block.
+readonly BEGIN_MARK='# >>> kldload-zfs-bookmarks (auto-managed - do not edit inside) >>>'
+readonly END_MARK='# <<< kldload-zfs-bookmarks <<<'
+
+# Non-ZFS host (or zfs not in PATH): nothing to do, succeed quietly.
+command -v zfs >/dev/null 2>&1 || exit 0
+
+bookmarks="${XDG_CONFIG_HOME:-$HOME/.config}/gtk-3.0/bookmarks"
+
+# is_system_path PATH
+#   True (0) when PATH is a root-filesystem / FHS location or a per-user home
+#   dir that Files already shows by default, so we should NOT bookmark it.
+#   Returns 1 for genuine data mountpoints like /tank, /tank/music, /samples.
+is_system_path() {
+    case "$1" in
+    / | /boot | /boot/* | /var | /var/* | /usr | /usr/* | /opt | /srv | \
+        /tmp | /root | /home | /home/* | /nix | /nix/* | /proc | /sys | /dev | \
+        /run | /run/*)
+        return 0
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+# build_lines
+#   Emit one GTK bookmark line ("file://<mountpoint> <label>") per mounted data
+#   dataset, sorted by mountpoint for stable output. Label is the mountpoint's
+#   basename (tank's "music", "apps", ...), which matches how operators refer to
+#   them. Prints nothing when there are no extra-pool data datasets.
+build_lines() {
+    local name mnt mounted label
+    while IFS=$'\t' read -r name mnt mounted; do
+        [[ "$mounted" == "yes" ]] || continue
+        [[ "$mnt" == /* ]] || continue # skip none / legacy / -
+        is_system_path "$mnt" && continue
+        label="${mnt##*/}"
+        printf 'file://%s %s\n' "$mnt" "$label"
+    done < <(zfs list -H -o name,mountpoint,mounted -t filesystem 2>/dev/null) | LC_ALL=C sort -u
+}
+
+main() {
+    local managed kept tmp
+    managed="$(build_lines || true)"
+
+    mkdir -p "$(dirname "$bookmarks")"
+    touch "$bookmarks"
+
+    # Drop any previous managed block (markers inclusive) via exact-string match,
+    # keeping every other line the user has. awk avoids regex pitfalls in the
+    # marker text (>>>, parens, ...).
+    kept="$(awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
+        $0 == b { skip = 1 }
+        !skip   { print }
+        $0 == e { skip = 0 }
+    ' "$bookmarks")"
+
+    # Atomic rewrite: user bookmarks first, then our fresh managed block.
+    tmp="$(mktemp "${bookmarks}.XXXXXX")"
+    {
+        printf '%s\n' "$kept" | sed '/^[[:space:]]*$/d'
+        if [[ -n "$managed" ]]; then
+            printf '%s\n' "$BEGIN_MARK"
+            printf '%s\n' "$managed"
+            printf '%s\n' "$END_MARK"
+        fi
+    } >"$tmp"
+    mv -f "$tmp" "$bookmarks"
+}
+
+main "$@"
