@@ -238,7 +238,12 @@ _closure_set+=(kernel-core kernel-devel zfs zfs-dkms zfs-dracut
 log "Boolean-dep closure: downloadonly-resolving ${#_closure_set[@]} desktop-set packages to pull rich-dep companions..."
 _clcache="$(mktemp -d)"
 _clroot="$(mktemp -d)"
-dnf install --installroot="${_clroot}" --releasever="${RELEASE}" --forcearch="${ARCH}" \
+# --use-host-config: resolve against the BUILDER's repos (fedora/updates/zfs/…),
+# not the empty installroot — without it dnf5 finds zero repos and downloads
+# nothing ("No matching repositories for *"). That was why the closure harvested
+# 0 and the gate kept failing.
+dnf install --installroot="${_clroot}" --use-host-config \
+    --releasever="${RELEASE}" --forcearch="${ARCH}" \
     --setopt=cachedir="${_clcache}" --setopt=keepcache=1 --downloadonly --nogpgcheck -y \
     "${_closure_set[@]}" >"${_clcache}.log" 2>&1 || {
     log "WARNING: downloadonly closure exited non-zero — tail:"
