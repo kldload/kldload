@@ -58,12 +58,13 @@ if [[ ! -f /etc/yum.repos.d/nvidia-container-toolkit.repo ]]; then
         log "NOTE: could not fetch nvidia-container-toolkit.repo — GPU-in-container path will fall back to internet at install time"
 fi
 
-# Add OpenZFS for Fedora if available. F44 is brand-new (Apr 2026) — the
-# zfsonlinux.org project hasn't published fc44 binaries yet. fc43 is
-# available with OpenZFS 2.4.1, and fc43 userspace RPMs are
-# glibc-forward-compatible to fc44; zfs-dkms is noarch source so DKMS
-# rebuilds the kmod against whatever target kernel gets installed. So
-# we try fc${RELEASE} first, then fall back to fc43.
+# Add OpenZFS for Fedora. As of 2026-06-12 the 2.4 line ships OpenZFS 2.4.3
+# for both fc43 and fc44 (cap raised to kernel-uname-r > 7.0.999), so the
+# mirror now carries a ZFS that builds against F44's native 7.0.x kernel — no
+# more 6.19 cap. The zfs-release *config* RPM is still only published for fc43
+# (none for fc44 yet), so we try fc${RELEASE} first then fall back to fc43;
+# its repo path resolves to the 2.4.3 packages either way. zfs-dkms is noarch
+# source — DKMS rebuilds the kmod against whatever target kernel is installed.
 if ! rpm -q zfs-release 2>/dev/null >/dev/null; then
     log "Adding OpenZFS repo for Fedora ${RELEASE} (with fc43 bridge fallback)..."
     _zfsrel_ok=0

@@ -973,22 +973,19 @@ gpgcheck=0
 enabled=1
 FEDORAREPO
 
-        # PIN THE KERNEL on the installed system. F44 ships kernel 7.0.x, which
-        # the fc43 OpenZFS bridge (zfs-dkms 2.4.x, Conflicts: kernel-uname-r >
-        # 6.19.999) cannot build against — so an unguarded `dnf upgrade` would
-        # install kernel-7.x, leave ZFS unbuildable, and drop the next boot into
-        # dracut emergency (rpool won't import). Excluding kernel-7.* globally
-        # blocks the boot-breaking jump while STILL allowing 6.x security/kernel
-        # updates (zfs-dkms rebuilds fine across the 6.x line). When upstream
-        # ships a ZFS that builds against 7.x, remove this line (or `dnf upgrade
-        # --disableexcludes=main`) to unpin. Glob matches NEVRA, so `kernel-7.*`
-        # matches kernel-7.0.10-… but never the bare `kernel`/6.x packages.
+        # No kernel pin. OpenZFS 2.4.3 (Conflicts: kernel-uname-r > 7.0.999)
+        # builds against F44's native kernel, including the 7.0.x updates. The
+        # old exclude=kernel-7.* in dnf.conf pinned the installed system to 6.x
+        # ONLY because the previous zfs-dkms-2.4.1 capped at 6.19.999 — that cap
+        # is gone in 2.4.3. The zfs-dkms Conflicts is now the upper-bound
+        # guardrail (a future kernel > 7.0.999 would conflict with the installed
+        # module); the fix then is a zfs bump (the 2.4 repo auto-serves latest),
+        # not a manual pin. Also scrub any stale pin from a prior install so
+        # re-profiled F44 boxes pick up the 7.0.x kernel.
         local _dnfconf="${target}/etc/dnf/dnf.conf"
-        mkdir -p "${target}/etc/dnf"
-        [[ -f "$_dnfconf" ]] || printf '[main]\n' >"$_dnfconf"
-        if ! grep -q '^exclude=.*kernel-7' "$_dnfconf"; then
-            printf 'exclude=kernel-7.* kernel-core-7.* kernel-modules-7.* kernel-modules-core-7.* kernel-modules-extra-7.* kernel-devel-7.* kernel-devel-matched-7.* kernel-headers-7.* kernel-tools-7.* kernel-tools-libs-7.*\n' >>"$_dnfconf"
-            k_log_to "$log" "Pinned installed Fedora kernel at 6.x (exclude=kernel-7.* in dnf.conf) — protects ZFS-on-root from the unbuildable 7.x kernel"
+        if [[ -f "$_dnfconf" ]] && grep -q '^exclude=.*kernel-7' "$_dnfconf"; then
+            sed -i '/^exclude=.*kernel-7/d' "$_dnfconf"
+            k_log_to "$log" "Removed legacy kernel-7.* dnf.conf pin (OpenZFS 2.4.3 builds against F44's native kernel)"
         fi
         ;;
     *) # centos (default)
@@ -1619,26 +1616,16 @@ CUSTOMREPO
         '--exclude=kernel-debug-modules-extra' '--exclude=kernel-debug-devel'
         '--exclude=zfs' '--exclude=zfs-dkms' '--exclude=zfs-dracut'
     )
-    # Fedora 44 kernel-7 lockout — see builder/build-iso.sh for the live-env
-    # version of this same gate. Fedora 44 Updates ships kernel-core 7.0.x as
-    # of 2026-05-07; zfs-dkms-2.4.x.fc43 (the bridge build OpenZFS publishes
-    # for fc44 until they cut a native fc44 release) carries
-    # `Conflicts: kernel-uname-r > 6.19.999`. Without this exclude on the
-    # target dnf pass, the installed system ends up with kernel-core-7.0.4
-    # but no buildable ZFS module → /sysroot.mount fails → operator gets
-    # dropped to dracut emergency. Caught 2026-05-12 on first F44+zfslab
-    # install. The exclude is also harmless on non-Fedora targets (no
-    # kernel-*-7.* package exists there).
+    # Fedora 44 kernel-7 lockout RETIRED. OpenZFS 2.4.3 (published 2026-06-12,
+    # Conflicts: kernel-uname-r > 7.0.999) builds against F44's native kernel,
+    # including the 7.0.x updates — so we no longer exclude kernel-7.* from the
+    # target dnf pass, and the installed system rides 7.0.x with a buildable ZFS
+    # module. The earlier 6.19.999 cap on zfs-dkms-2.4.1 was the only reason for
+    # the pin (it dropped F44+zfslab to dracut emergency, caught 2026-05-12).
+    # Kept as an empty array so the dnf invocation below is unchanged; if a
+    # future kernel ever exceeds the OpenZFS cap before the 2.4 line raises it,
+    # re-populate this — do NOT re-add a hardcoded 6.x/7.x pin.
     local _f44_kernel_lockout=()
-    if [[ "${distro}" == "fedora" ]]; then
-        _f44_kernel_lockout=(
-            '--exclude=kernel-7.*' '--exclude=kernel-core-7.*'
-            '--exclude=kernel-modules-7.*' '--exclude=kernel-modules-core-7.*'
-            '--exclude=kernel-devel-7.*' '--exclude=kernel-devel-matched-7.*'
-            '--exclude=kernel-headers-7.*' '--exclude=kernel-tools-7.*'
-            '--exclude=kernel-tools-libs-7.*'
-        )
-    fi
     # Fedora-only repo flags. dnf5 errors hard on --setopt='REPO.X=Y' AND on
     # --disablerepo=REPO when REPO is not defined in the installroot. RHEL
     # / CentOS / Rocky don't have fedora/updates/fedora-cisco-openh264/etc.
