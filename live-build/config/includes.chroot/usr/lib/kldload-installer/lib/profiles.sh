@@ -957,7 +957,8 @@ DASHSTART
             # so [the infra section] is useless."
             if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
                 for _ldskt in kldload-vms kldload-k8s kldload-helm kldload-klab \
-                    kldload-ansible kldload-metrics kldload-zfs kldload-zfs-manager; do
+                    kldload-ansible kldload-metrics kldload-zfs kldload-zfs-manager \
+                    bob-chat kldload-k9s bob-gaming; do
                     if [[ -f "${_appdir}/${_ldskt}.desktop" ]]; then
                         sed -i '/^NoDisplay=true$/d' "${_appdir}/${_ldskt}.desktop"
                     fi

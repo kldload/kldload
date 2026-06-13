@@ -852,6 +852,22 @@ DCONFPROFILE
         unset _r
     fi
 
+    # Install Chrome INTO the live rootfs now that google-chrome.repo is present.
+    # The webui autostart renders the dashboard via kldload-chrome-app (Chrome —
+    # its Web Speech API powers Bob's mic). The repo alone only lets the INSTALLED
+    # system pull Chrome via profiles.sh; the LIVE ISO never installed it, so the
+    # live session had the repo + firefox but no Chrome → the app window silently
+    # never opened (F44 live 2026-06-13: GNOME up, webui :8443 HTTP 200, but
+    # CHROME MISSING). Hard-fail — the live env has no firstboot heal net, so a
+    # browserless live ISO is a defect, not a degrade.
+    if [[ -f "${ROOTFS}/etc/yum.repos.d/google-chrome.repo" ]]; then
+        dnf --installroot="$ROOTFS" --releasever=44 --setopt=install_weak_deps=False \
+            --setopt=tsflags=nodocs --nogpgcheck -y install google-chrome-stable 2>&1 | tee -a "$LOG_FILE"
+        chroot "$ROOTFS" rpm -q google-chrome-stable >/dev/null 2>&1 ||
+            die "FATAL: google-chrome-stable not installed into live rootfs — webui app window will not open"
+        log "google-chrome-stable installed into live rootfs"
+    fi
+
     # ── kldload-branded wallpapers ────────────────────────────────────────────
     # /usr/share/backgrounds/kldload/{default,default-dark}.png — referenced by
     # both 00-kldload-desktop dconf (picture-uri / picture-uri-dark) AND

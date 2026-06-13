@@ -57,3 +57,16 @@ perl-File-Find
 
 # Firmware / tools that Fedora names differently vs EL
 iotop-c
+
+# Boolean/rich-dep companions that `dnf download --resolve --alldeps` does NOT
+# follow (it ignores `(X if Y)` conditional deps). qemu pulls passt, and passt
+# carries `Requires: (passt-selinux if selinux-policy-targeted)`. Since the
+# target installs selinux-policy-targeted, that condition fires at install time
+# and demands passt-selinux — which, if absent from the mirror, makes the ENTIRE
+# offline dnf transaction unsatisfiable, taking the zfs pass-3 install down with
+# it (F44 b-2026-06-13: install aborted "target will not boot" although zfs 2.4.3
+# resolved fine). Listing it explicitly pulls it in the same snapshot as passt
+# so the version matches. NOTE: if other rich-dep companions surface, add them
+# here too, or build a post-mirror closure gate that dry-run-installs the full
+# set against the darksite and reports gaps.
+passt-selinux
