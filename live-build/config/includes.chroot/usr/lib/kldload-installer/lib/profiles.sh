@@ -889,12 +889,14 @@ DASHSTART
         # menu entries, desktop looked empty. Glob copy fixes it for every distro.
         if [[ "${KLDLOAD_PROFILE:-server}" != "core" ]]; then
             mkdir -p "${target}/usr/share/applications"
-            # com.kldload.*.desktop are the app_id-matched hidden entries that
-            # let GNOME (Wayland) map each webview window to its OWN icon — the
-            # glob MUST include them or every dashboard window falls back to one
-            # shared generic icon (10.100.10.x: "all the icons are the same").
+            # Each launcher is a single .desktop whose StartupWMClass matches the
+            # Wayland app_id kldload-chrome-app sets via `--class` — GNOME maps the
+            # Chrome app window to its OWN icon directly, no hidden shadow entry
+            # needed. (A prior build added com.kldload.*.desktop shadows for the
+            # GTK4 kldload-webview path; that path was reverted to chrome-app
+            # because WebKit fails to map a window on first boot before the NVIDIA
+            # akmod loads — windowless processes pile up and "no icon opens".)
             for _lnch in /usr/share/applications/kldload-*.desktop \
-                /usr/share/applications/com.kldload.*.desktop \
                 /usr/share/applications/bob-*.desktop; do
                 [[ -f "$_lnch" ]] && install -m 0644 "$_lnch" \
                     "${target}/usr/share/applications/$(basename "$_lnch")"
