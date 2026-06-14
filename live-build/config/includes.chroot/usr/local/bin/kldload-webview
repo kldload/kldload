@@ -43,6 +43,24 @@ import sys
 os.environ["GTK_USE_PORTAL"] = "0"
 os.environ["GIO_USE_PORTALS"] = "none"
 
+# ── Render reliably regardless of GPU state ───────────────────────────────────
+# WebKitGTK's default DMABUF/GPU-compositing renderer FAILS to map a window
+# when there's no working accelerated GL context — e.g. on first boot before the
+# NVIDIA akmod has loaded (akmods builds it, but it only loads after a reboot),
+# or on nouveau/basic-framebuffer. Symptom: kldload-webview launches, the
+# process stays alive, but NO window ever appears — every dashboard icon "does
+# nothing" and dead processes pile up (10.100.10.119, 2026-06-14: 8 live vms
+# webviews, zero windows). It worked on a box where NVIDIA was already loaded,
+# which masked the bug. Disabling the DMABUF renderer + GPU compositing makes
+# WebKit use the shared-memory path, which renders on ANY GPU. setdefault so an
+# operator can still override.
+os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
+# GTK4 itself: fall back to software (cairo) if no GL — guarantees the window
+# maps even when GL is absent. The NVIDIA ngl tweak lives in
+# /etc/environment.d/60-kldload-nvidia-gsk.conf for once the driver is loaded.
+os.environ.setdefault("GSK_RENDERER", "cairo")
+
 import gi  # noqa: E402
 gi.require_version("Gtk", "4.0")
 gi.require_version("WebKit", "6.0")

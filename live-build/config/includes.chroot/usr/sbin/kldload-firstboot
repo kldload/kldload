@@ -1307,22 +1307,40 @@ main() {
             libbpf-tools bpftrace bcc-tools \
             libvirt-daemon-driver-network libvirt-daemon-config-network; do
             rpm -q "$_pkg" >/dev/null 2>&1 && continue
-            if dnf install -y "$_pkg" >>"$LOG" 2>&1; then
+            # Retry up to 3x: konsole drags ~135 KDE packages and the big
+            # transaction occasionally fails mid-way (10.100.10.x) — a retry
+            # succeeds. Don't let one flaky package leave the feature broken.
+            _heal_ok=0
+            for _t in 1 2 3; do
+                if dnf install -y "$_pkg" >>"$LOG" 2>&1; then
+                    _heal_ok=1
+                    break
+                fi
+                sleep 3
+            done
+            if [[ "$_heal_ok" == 1 ]]; then
                 ok "healed desktop package: $_pkg"
             else
-                log "WARNING: could not install $_pkg (offline? not in repo?) — feature degraded but boot is fine"
+                log "WARNING: could not install $_pkg after 3 tries (offline? not in repo?) — feature degraded but boot is fine"
             fi
         done
         # Prefer power-profiles-daemon over tlp on the desktop: ppd drives the
         # GNOME "Power Mode" slider, and the two conflict at runtime (ppd won't
         # start while tlp is active). tlp stays installed for server/laptop
         # profiles; here we make ppd the active one.
+        #
+        # CRITICAL: NO `systemctl --now` here. firstboot runs AS a systemd
+        # service, and a synchronous `enable --now` (which waits for the start
+        # job) DEADLOCKS against firstboot's own running job — it hung 12+ min
+        # on 10.100.10.119 (2026-06-14), blocking nvidia heal + autodeploy.
+        # Enable/disable/mask only (config, instant) and fire the start with
+        # --no-block so we never wait on a job; ppd is fully active next boot.
         if rpm -q power-profiles-daemon >/dev/null 2>&1; then
-            systemctl disable --now tlp tlp-rdw >/dev/null 2>&1 || true
+            systemctl disable tlp tlp-rdw >/dev/null 2>&1 || true
             systemctl mask tlp >/dev/null 2>&1 || true
-            systemctl enable --now power-profiles-daemon >/dev/null 2>&1 ||
-                log "WARNING: could not enable power-profiles-daemon"
-            ok "power-profiles-daemon active (tlp masked on desktop)"
+            systemctl enable power-profiles-daemon >/dev/null 2>&1 || true
+            systemctl --no-block restart power-profiles-daemon >/dev/null 2>&1 || true
+            ok "power-profiles-daemon enabled (tlp masked; GNOME power slider active next boot)"
         fi
     fi
 

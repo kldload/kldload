@@ -1670,11 +1670,22 @@ KBYAML
         # Also publish to the desktop/install user so k9s + kubectl work
         # WITHOUT sudo. kube-cluster runs as root, so without this the cluster
         # is invisible to the GUI user (10.100.10.x: "k9s doesn't see the
-        # cluster"). Resolve the real login user (SUDO_USER, else the manifest
-        # username, else 'admin') and drop a per-user copy.
+        # cluster"). Resolve the install user WITHOUT hardcoding 'admin' — an
+        # operator may pick 'jimmy'. autodeploy runs us as root with no
+        # SUDO_USER and may not export KLDLOAD_USERNAME, so: SUDO_USER, else the
+        # install manifest, else the first real (uid>=1000) account.
         local _kc_user _kc_home
-        _kc_user="${SUDO_USER:-${KLDLOAD_USERNAME:-admin}}"
-        if [[ "$_kc_user" != "root" ]] &&
+        _kc_user="${SUDO_USER:-}"
+        if [[ -z "$_kc_user" || "$_kc_user" == "root" ]]; then
+            _kc_user="$(
+                . /etc/kldload/install-manifest.env 2>/dev/null
+                printf '%s' "${KLDLOAD_USERNAME:-}"
+            )"
+        fi
+        if [[ -z "$_kc_user" ]]; then
+            _kc_user="$(getent passwd | awk -F: '$3>=1000 && $3<65000 {print $1; exit}')"
+        fi
+        if [[ -n "$_kc_user" && "$_kc_user" != "root" ]] &&
             _kc_home="$(getent passwd "$_kc_user" | cut -d: -f6)" &&
             [[ -n "$_kc_home" ]]; then
             mkdir -p "${_kc_home}/.kube"

@@ -10,161 +10,166 @@ POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
 SVC_CIDR="${SVC_CIDR:-10.96.0.0/12}"
 CILIUM_VERSION="${CILIUM_VERSION:-1.16.5}"
 METALLB_VERSION="${METALLB_VERSION:-0.14.9}"
-METALLB_POOL="${METALLB_POOL:-}"  # auto-detect from node subnet if empty
+METALLB_POOL="${METALLB_POOL:-}" # auto-detect from node subnet if empty
 
-log()  { echo -e "\033[1;32m[kube-init]\033[0m $*"; }
+log() { echo -e "\033[1;32m[kube-init]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[kube-init]\033[0m $*" >&2; }
-die()  { echo -e "\033[1;31m[kube-init]\033[0m $*" >&2; exit 1; }
+die() {
+    echo -e "\033[1;31m[kube-init]\033[0m $*" >&2
+    exit 1
+}
 
 # ── Pre-flight checks ─────────────────────────────────────────────────────
 preflight() {
-  command -v kubeadm >/dev/null 2>&1 || die "kubeadm not found. Run kube-setup first."
-  command -v kubectl >/dev/null 2>&1 || die "kubectl not found. Run kube-setup first."
-  command -v helm >/dev/null 2>&1 || die "helm not found. Run kube-setup first."
-  command -v cilium >/dev/null 2>&1 || die "cilium CLI not found. Run kube-setup first."
+    command -v kubeadm >/dev/null 2>&1 || die "kubeadm not found. Run kube-setup first."
+    command -v kubectl >/dev/null 2>&1 || die "kubectl not found. Run kube-setup first."
+    command -v helm >/dev/null 2>&1 || die "helm not found. Run kube-setup first."
+    command -v cilium >/dev/null 2>&1 || die "cilium CLI not found. Run kube-setup first."
 
-  if kubectl cluster-info >/dev/null 2>&1; then
-    die "A Kubernetes cluster is already running on this node. Use kube-reset to tear it down first."
-  fi
+    if kubectl cluster-info >/dev/null 2>&1; then
+        die "A Kubernetes cluster is already running on this node. Use kube-reset to tear it down first."
+    fi
 
-  systemctl is-active containerd >/dev/null 2>&1 || die "containerd is not running"
-  log "Pre-flight checks passed"
+    systemctl is-active containerd >/dev/null 2>&1 || die "containerd is not running"
+    log "Pre-flight checks passed"
 }
 
 # ── Detect node IP ─────────────────────────────────────────────────────────
 detect_node_ip() {
-  local ip
-  # Use the default route IP (LAN) for API server — WireGuard gets configured after
-  # the cluster is running, so we can't bind the API server to a WG IP during init
-  ip="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}')" || true
-  echo "${ip:-$(hostname -I | awk '{print $1}')}"
+    local ip
+    # Use the default route IP (LAN) for API server — WireGuard gets configured after
+    # the cluster is running, so we can't bind the API server to a WG IP during init
+    ip="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}')" || true
+    echo "${ip:-$(hostname -I | awk '{print $1}')}"
 }
 
 # ── ZFS snapshot before init ───────────────────────────────────────────────
 snapshot_before_init() {
-  if command -v zfs >/dev/null 2>&1; then
-    local pool
-    pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
-    if [[ -n "$pool" ]]; then
-      local snap="${pool}@pre-kube-init-$(date -u +%Y%m%dT%H%M%SZ)"
-      zfs snapshot -r "$snap" 2>/dev/null || true
-      log "ZFS snapshot created: $snap (rollback point)"
+    if command -v zfs >/dev/null 2>&1; then
+        local pool
+        pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
+        if [[ -n "$pool" ]]; then
+            local snap="${pool}@pre-kube-init-$(date -u +%Y%m%dT%H%M%SZ)"
+            zfs snapshot -r "$snap" 2>/dev/null || true
+            log "ZFS snapshot created: $snap (rollback point)"
+        fi
     fi
-  fi
 }
 
 # ── kubeadm init ───────────────────────────────────────────────────────────
 run_kubeadm_init() {
-  local node_ip
-  node_ip="$(detect_node_ip)"
-  log "Initializing control plane on $node_ip"
-  log "  Pod CIDR:     $POD_CIDR"
-  log "  Service CIDR: $SVC_CIDR"
+    local node_ip
+    node_ip="$(detect_node_ip)"
+    log "Initializing control plane on $node_ip"
+    log "  Pod CIDR:     $POD_CIDR"
+    log "  Service CIDR: $SVC_CIDR"
 
-  # Load pre-pulled images from darksite if available (offline install)
-  if [[ -d /root/darksite/k8s-images ]]; then
-    log "Loading pre-pulled container images from darksite..."
-    kube-load-images /root/darksite/k8s-images
-  fi
+    # Load pre-pulled images from darksite if available (offline install)
+    if [[ -d /root/darksite/k8s-images ]]; then
+        log "Loading pre-pulled container images from darksite..."
+        kube-load-images /root/darksite/k8s-images
+    fi
 
-  # Include WireGuard IPs in API server cert SANs so kubectl works
-  # over both virbr0 (LAN) and WireGuard (encrypted) from the host.
-  local extra_sans="10.251.0.1,10.250.0.1"
-  # Also add any other WireGuard IPs configured on this node
-  local wg_ip
-  wg_ip="$(ip -4 addr show wg-k8s 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)" || true
-  [[ -n "$wg_ip" && "$wg_ip" != "10.251.0.1" ]] && extra_sans="${extra_sans},${wg_ip}"
+    # Include WireGuard IPs in API server cert SANs so kubectl works
+    # over both virbr0 (LAN) and WireGuard (encrypted) from the host.
+    local extra_sans="10.251.0.1,10.250.0.1"
+    # Also add any other WireGuard IPs configured on this node
+    local wg_ip
+    wg_ip="$(ip -4 addr show wg-k8s 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)" || true
+    [[ -n "$wg_ip" && "$wg_ip" != "10.251.0.1" ]] && extra_sans="${extra_sans},${wg_ip}"
 
-  kubeadm init \
-    --pod-network-cidr="$POD_CIDR" \
-    --service-cidr="$SVC_CIDR" \
-    --apiserver-advertise-address="$node_ip" \
-    --apiserver-cert-extra-sans="${extra_sans}" \
-    --skip-phases=addon/kube-proxy \
-    --upload-certs \
-    2>&1 | tee /var/log/kubeadm-init.log
+    kubeadm init \
+        --pod-network-cidr="$POD_CIDR" \
+        --service-cidr="$SVC_CIDR" \
+        --apiserver-advertise-address="$node_ip" \
+        --apiserver-cert-extra-sans="${extra_sans}" \
+        --skip-phases=addon/kube-proxy \
+        --upload-certs \
+        2>&1 | tee /var/log/kubeadm-init.log
 
-  # Set up kubeconfig for root and admin user
-  mkdir -p /root/.kube
-  cp /etc/kubernetes/admin.conf /root/.kube/config
-  chmod 600 /root/.kube/config
-  export KUBECONFIG=/etc/kubernetes/admin.conf
+    # Set up kubeconfig for root and admin user
+    mkdir -p /root/.kube
+    cp /etc/kubernetes/admin.conf /root/.kube/config
+    chmod 600 /root/.kube/config
+    export KUBECONFIG=/etc/kubernetes/admin.conf
 
-  # Copy to admin user if exists
-  if id admin >/dev/null 2>&1; then
-    local admin_home
-    admin_home="$(getent passwd admin | cut -d: -f6)"
-    mkdir -p "${admin_home}/.kube"
-    cp /etc/kubernetes/admin.conf "${admin_home}/.kube/config"
-    chown -R admin:admin "${admin_home}/.kube"
-  fi
+    # Copy to the primary non-root user — NOT hardcoded 'admin' (honors any
+    # selected username, e.g. 'jimmy'). First real uid>=1000 account.
+    local _u _uh
+    _u="$(getent passwd | awk -F: '$3>=1000 && $3<65000 {print $1; exit}')"
+    if [[ -n "$_u" ]]; then
+        _uh="$(getent passwd "$_u" | cut -d: -f6)"
+        mkdir -p "${_uh}/.kube"
+        cp /etc/kubernetes/admin.conf "${_uh}/.kube/config"
+        chown -R "${_u}:${_u}" "${_uh}/.kube"
+    fi
 
-  log "Control plane initialized"
+    log "Control plane initialized"
 }
 
 # ── Install Cilium CNI ────────────────────────────────────────────────────
 install_cilium() {
-  log "Installing Cilium v${CILIUM_VERSION} as CNI..."
+    log "Installing Cilium v${CILIUM_VERSION} as CNI..."
 
-  # Use cached Helm chart from darksite if available
-  local chart_source="cilium/cilium"
-  if [[ -f /root/darksite/helm-charts/cilium.tgz ]]; then
-    chart_source="/root/darksite/helm-charts/cilium.tgz"
-    log "Using cached Cilium chart from darksite"
-  else
-    # Add Cilium Helm repo (needs internet)
-    helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
-    helm repo update >/dev/null 2>&1
-  fi
+    # Use cached Helm chart from darksite if available
+    local chart_source="cilium/cilium"
+    if [[ -f /root/darksite/helm-charts/cilium.tgz ]]; then
+        chart_source="/root/darksite/helm-charts/cilium.tgz"
+        log "Using cached Cilium chart from darksite"
+    else
+        # Add Cilium Helm repo (needs internet)
+        helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+        helm repo update >/dev/null 2>&1
+    fi
 
-  # Install Cilium — replaces kube-proxy with eBPF
-  # MTU: VXLAN (50 byte overhead) runs over WireGuard (80 byte overhead).
-  # Physical MTU 1500 → WireGuard 1420 → VXLAN payload must be ≤1370.
-  # Without this, VXLAN frames silently drop on the WireGuard tunnel.
-  local _mtu=1370
-  if ! ip link show wg-k8s >/dev/null 2>&1; then
-    _mtu=1450  # No WireGuard — standard VXLAN MTU
-  fi
+    # Install Cilium — replaces kube-proxy with eBPF
+    # MTU: VXLAN (50 byte overhead) runs over WireGuard (80 byte overhead).
+    # Physical MTU 1500 → WireGuard 1420 → VXLAN payload must be ≤1370.
+    # Without this, VXLAN frames silently drop on the WireGuard tunnel.
+    local _mtu=1370
+    if ! ip link show wg-k8s >/dev/null 2>&1; then
+        _mtu=1450 # No WireGuard — standard VXLAN MTU
+    fi
 
-  helm install cilium "$chart_source" \
-    --version "${CILIUM_VERSION}" \
-    --namespace kube-system \
-    --set kubeProxyReplacement=true \
-    --set k8sServiceHost="$(detect_node_ip)" \
-    --set k8sServicePort=6443 \
-    --set ipam.operator.clusterPoolIPv4PodCIDRList="${POD_CIDR}" \
-    --set MTU="${_mtu}" \
-    --set hubble.relay.enabled=true \
-    --set hubble.ui.enabled=true \
-    --set hubble.enabled=true \
-    --set hubble.metrics.enableOpenMetrics=true \
-    --set hubble.metrics.enabled="{dns,drop:sourceContext=workload-name;destinationContext=workload-name;labelsContext=source_namespace\,destination_namespace,tcp,flow:sourceContext=workload-name;destinationContext=workload-name;labelsContext=source_namespace\,destination_namespace,port-distribution,icmp,httpV2:exemplars=true;labelsContext=source_ip\,source_namespace\,source_workload\,destination_ip\,destination_namespace\,destination_workload\,traffic_direction}" \
-    --set prometheus.enabled=true \
-    --set operator.prometheus.enabled=true \
-    --set operator.replicas=1 \
-    --set gatewayAPI.enabled=true \
-    --wait --timeout 300s \
-    2>&1
+    helm install cilium "$chart_source" \
+        --version "${CILIUM_VERSION}" \
+        --namespace kube-system \
+        --set kubeProxyReplacement=true \
+        --set k8sServiceHost="$(detect_node_ip)" \
+        --set k8sServicePort=6443 \
+        --set ipam.operator.clusterPoolIPv4PodCIDRList="${POD_CIDR}" \
+        --set MTU="${_mtu}" \
+        --set hubble.relay.enabled=true \
+        --set hubble.ui.enabled=true \
+        --set hubble.enabled=true \
+        --set hubble.metrics.enableOpenMetrics=true \
+        --set hubble.metrics.enabled="{dns,drop:sourceContext=workload-name;destinationContext=workload-name;labelsContext=source_namespace\,destination_namespace,tcp,flow:sourceContext=workload-name;destinationContext=workload-name;labelsContext=source_namespace\,destination_namespace,port-distribution,icmp,httpV2:exemplars=true;labelsContext=source_ip\,source_namespace\,source_workload\,destination_ip\,destination_namespace\,destination_workload\,traffic_direction}" \
+        --set prometheus.enabled=true \
+        --set operator.prometheus.enabled=true \
+        --set operator.replicas=1 \
+        --set gatewayAPI.enabled=true \
+        --wait --timeout 300s \
+        2>&1
 
-  log "Cilium installed"
+    log "Cilium installed"
 
-  # Wait for Cilium to be ready
-  log "Waiting for Cilium to become ready..."
-  cilium status --wait --wait-duration 120s 2>/dev/null || true
+    # Wait for Cilium to be ready
+    log "Waiting for Cilium to become ready..."
+    cilium status --wait --wait-duration 120s 2>/dev/null || true
 
-  log "Cilium CNI is operational"
+    log "Cilium CNI is operational"
 }
 
 # ── Install Gateway API CRDs ──────────────────────────────────────────────
 install_gateway_api() {
-  log "Installing Gateway API CRDs..."
-  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.1/config/crd/standard/gateway.networking.k8s.io_gatewayclasses.yaml 2>/dev/null || true
-  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.1/config/crd/standard/gateway.networking.k8s.io_gateways.yaml 2>/dev/null || true
-  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.1/config/crd/standard/gateway.networking.k8s.io_httproutes.yaml 2>/dev/null || true
-  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.1/config/crd/standard/gateway.networking.k8s.io_referencegrants.yaml 2>/dev/null || true
+    log "Installing Gateway API CRDs..."
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.1/config/crd/standard/gateway.networking.k8s.io_gatewayclasses.yaml 2>/dev/null || true
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.1/config/crd/standard/gateway.networking.k8s.io_gateways.yaml 2>/dev/null || true
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.1/config/crd/standard/gateway.networking.k8s.io_httproutes.yaml 2>/dev/null || true
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.2.1/config/crd/standard/gateway.networking.k8s.io_referencegrants.yaml 2>/dev/null || true
 
-  # Create default GatewayClass for Cilium
-  kubectl apply -f - <<'GWCLASS' 2>/dev/null || true
+    # Create default GatewayClass for Cilium
+    kubectl apply -f - <<'GWCLASS' 2>/dev/null || true
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
@@ -172,60 +177,60 @@ metadata:
 spec:
   controllerName: io.cilium/gateway-controller
 GWCLASS
-  log "Gateway API CRDs + Cilium GatewayClass installed"
+    log "Gateway API CRDs + Cilium GatewayClass installed"
 }
 
 # ── Install MetalLB ──────────────────────────────────────────────────────
 install_metrics_server() {
-  # metrics-server powers `kubectl top` and the web UI's live CPU/memory
-  # overlays on node/pod rows. Applied from the darksite YAML if cached,
-  # else falls back to the upstream release. --kubelet-insecure-tls is
-  # required because kubelet certs are self-signed in this setup.
-  log "Installing metrics-server..."
-  local _yaml="/root/darksite/k8s-manifests/metrics-server.yaml"
-  if [[ -f "$_yaml" ]]; then
-    kubectl apply -f "$_yaml" 2>&1 | tail -3
-  else
-    kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml 2>&1 | tail -3
-  fi
-  kubectl -n kube-system patch deploy metrics-server --type=json \
-    -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]' \
-    2>/dev/null || true
-  log "metrics-server installed (powers kubectl top + web UI live stats)"
+    # metrics-server powers `kubectl top` and the web UI's live CPU/memory
+    # overlays on node/pod rows. Applied from the darksite YAML if cached,
+    # else falls back to the upstream release. --kubelet-insecure-tls is
+    # required because kubelet certs are self-signed in this setup.
+    log "Installing metrics-server..."
+    local _yaml="/root/darksite/k8s-manifests/metrics-server.yaml"
+    if [[ -f "$_yaml" ]]; then
+        kubectl apply -f "$_yaml" 2>&1 | tail -3
+    else
+        kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml 2>&1 | tail -3
+    fi
+    kubectl -n kube-system patch deploy metrics-server --type=json \
+        -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]' \
+        2>/dev/null || true
+    log "metrics-server installed (powers kubectl top + web UI live stats)"
 }
 
 install_metallb() {
-  log "Installing MetalLB v${METALLB_VERSION}..."
+    log "Installing MetalLB v${METALLB_VERSION}..."
 
-  helm repo add metallb https://metallb.github.io/metallb 2>/dev/null || true
-  helm repo update >/dev/null 2>&1
+    helm repo add metallb https://metallb.github.io/metallb 2>/dev/null || true
+    helm repo update >/dev/null 2>&1
 
-  helm install metallb metallb/metallb \
-    --namespace metallb-system --create-namespace \
-    --version "${METALLB_VERSION}" \
-    --wait --timeout 300s \
-    2>&1 || warn "MetalLB helm install timed out — pods may still be pulling images"
+    helm install metallb metallb/metallb \
+        --namespace metallb-system --create-namespace \
+        --version "${METALLB_VERSION}" \
+        --wait --timeout 300s \
+        2>&1 || warn "MetalLB helm install timed out — pods may still be pulling images"
 
-  # Wait for controller — retry until ready or 5 min
-  log "Waiting for MetalLB controller..."
-  for _try in $(seq 1 30); do
-    kubectl rollout status deployment/metallb-controller -n metallb-system --timeout=10s 2>/dev/null && break
-    sleep 10
-  done
+    # Wait for controller — retry until ready or 5 min
+    log "Waiting for MetalLB controller..."
+    for _try in $(seq 1 30); do
+        kubectl rollout status deployment/metallb-controller -n metallb-system --timeout=10s 2>/dev/null && break
+        sleep 10
+    done
 
-  # Auto-detect IP pool from node's subnet if not specified
-  local pool="$METALLB_POOL"
-  if [[ -z "$pool" ]]; then
-    local node_ip
-    node_ip="$(detect_node_ip)"
-    local subnet
-    subnet="$(echo "$node_ip" | cut -d. -f1-3)"
-    pool="${subnet}.200-${subnet}.220"
-    log "Auto-detected MetalLB pool: ${pool}"
-  fi
+    # Auto-detect IP pool from node's subnet if not specified
+    local pool="$METALLB_POOL"
+    if [[ -z "$pool" ]]; then
+        local node_ip
+        node_ip="$(detect_node_ip)"
+        local subnet
+        subnet="$(echo "$node_ip" | cut -d. -f1-3)"
+        pool="${subnet}.200-${subnet}.220"
+        log "Auto-detected MetalLB pool: ${pool}"
+    fi
 
-  # Apply L2 advertisement + IP pool — retry until CRDs are registered
-  cat > /tmp/metallb-pool.yaml <<METALLB_CFG
+    # Apply L2 advertisement + IP pool — retry until CRDs are registered
+    cat >/tmp/metallb-pool.yaml <<METALLB_CFG
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
@@ -245,84 +250,87 @@ spec:
     - default-pool
 METALLB_CFG
 
-  for _try in $(seq 1 12); do
-    kubectl apply -f /tmp/metallb-pool.yaml 2>/dev/null && { log "MetalLB pool configured"; break; }
-    log "Waiting for MetalLB CRDs... (attempt ${_try}/12)"
-    sleep 15
-  done
-  rm -f /tmp/metallb-pool.yaml
+    for _try in $(seq 1 12); do
+        kubectl apply -f /tmp/metallb-pool.yaml 2>/dev/null && {
+            log "MetalLB pool configured"
+            break
+        }
+        log "Waiting for MetalLB CRDs... (attempt ${_try}/12)"
+        sleep 15
+    done
+    rm -f /tmp/metallb-pool.yaml
 
-  log "MetalLB installed — LoadBalancer pool: ${pool}"
+    log "MetalLB installed — LoadBalancer pool: ${pool}"
 }
 
 # ── Install OpenEBS ZFS LocalPV CSI ─────────────────────────────────────
 install_local_path_provisioner() {
-  # Fallback storage class when ZFS-CSI can't run (klab K8s worker VMs
-  # don't ship the ZFS userspace, so OpenEBS ZFS LocalPV fails its
-  # `zpool list` health check on every node). local-path-provisioner
-  # uses the host's filesystem under /opt/local-path-provisioner —
-  # which is the worker VM's local disk, which is itself a zvol on the
-  # kldload host. Host-side ZFS snapshots of the worker's zvol still
-  # capture the PVC data, so the rollback story works at the
-  # VM-disk level even when the in-cluster CSI is the simple
-  # local-path one. Pre-build #46 this was missing entirely: on a
-  # fresh kube-cluster bootstrap, PVCs stayed Pending forever and the
-  # postgres half of the demo couldn't schedule. Caught on .137.
-  log "Installing local-path-provisioner as fallback default StorageClass..."
-  kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.30/deploy/local-path-storage.yaml \
-    >/dev/null 2>&1 || warn "local-path-provisioner manifest apply failed; PVCs will stay Pending"
-  # Mark as default — only if no other default exists yet (don't
-  # clobber zfs StorageClass if install_zfs_csi succeeded).
-  local _existing_default
-  _existing_default=$(kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' 2>/dev/null)
-  if [[ -z "$_existing_default" ]]; then
-    sleep 3
-    kubectl patch storageclass local-path \
-      -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' \
-      >/dev/null 2>&1 || true
-    log "local-path is now the default StorageClass"
-  else
-    log "default StorageClass already exists ($_existing_default) — local-path installed as non-default"
-  fi
+    # Fallback storage class when ZFS-CSI can't run (klab K8s worker VMs
+    # don't ship the ZFS userspace, so OpenEBS ZFS LocalPV fails its
+    # `zpool list` health check on every node). local-path-provisioner
+    # uses the host's filesystem under /opt/local-path-provisioner —
+    # which is the worker VM's local disk, which is itself a zvol on the
+    # kldload host. Host-side ZFS snapshots of the worker's zvol still
+    # capture the PVC data, so the rollback story works at the
+    # VM-disk level even when the in-cluster CSI is the simple
+    # local-path one. Pre-build #46 this was missing entirely: on a
+    # fresh kube-cluster bootstrap, PVCs stayed Pending forever and the
+    # postgres half of the demo couldn't schedule. Caught on .137.
+    log "Installing local-path-provisioner as fallback default StorageClass..."
+    kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.30/deploy/local-path-storage.yaml \
+        >/dev/null 2>&1 || warn "local-path-provisioner manifest apply failed; PVCs will stay Pending"
+    # Mark as default — only if no other default exists yet (don't
+    # clobber zfs StorageClass if install_zfs_csi succeeded).
+    local _existing_default
+    _existing_default=$(kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' 2>/dev/null)
+    if [[ -z "$_existing_default" ]]; then
+        sleep 3
+        kubectl patch storageclass local-path \
+            -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' \
+            >/dev/null 2>&1 || true
+        log "local-path is now the default StorageClass"
+    else
+        log "default StorageClass already exists ($_existing_default) — local-path installed as non-default"
+    fi
 }
 
 install_zfs_csi() {
-  # Ensure ZFS module is loaded
-  modprobe zfs 2>/dev/null || true
-  if ! command -v zfs >/dev/null 2>&1; then
-    log "ZFS not available on cluster nodes — falling back to local-path-provisioner"
-    install_local_path_provisioner
-    return 0
-  fi
+    # Ensure ZFS module is loaded
+    modprobe zfs 2>/dev/null || true
+    if ! command -v zfs >/dev/null 2>&1; then
+        log "ZFS not available on cluster nodes — falling back to local-path-provisioner"
+        install_local_path_provisioner
+        return 0
+    fi
 
-  # Create a ZFS pool on loopback if none exists (cloud image VMs don't have ZFS root)
-  if ! zpool list rpool >/dev/null 2>&1; then
-    log "Creating ZFS pool for CSI (20G loopback)..."
-    truncate -s 20G /var/lib/zfs-csi-pool.img
-    zpool create -f rpool /var/lib/zfs-csi-pool.img
-  fi
+    # Create a ZFS pool on loopback if none exists (cloud image VMs don't have ZFS root)
+    if ! zpool list rpool >/dev/null 2>&1; then
+        log "Creating ZFS pool for CSI (20G loopback)..."
+        truncate -s 20G /var/lib/zfs-csi-pool.img
+        zpool create -f rpool /var/lib/zfs-csi-pool.img
+    fi
 
-  log "Installing OpenEBS ZFS LocalPV CSI driver..."
+    log "Installing OpenEBS ZFS LocalPV CSI driver..."
 
-  helm repo add openebs-zfslocalpv https://openebs.github.io/zfs-localpv 2>/dev/null || true
-  helm repo update >/dev/null 2>&1
+    helm repo add openebs-zfslocalpv https://openebs.github.io/zfs-localpv 2>/dev/null || true
+    helm repo update >/dev/null 2>&1
 
-  helm install zfs-localpv openebs-zfslocalpv/zfs-localpv \
-    --namespace openebs --create-namespace \
-    --set zfsNode.encrKeysDir=/etc/openebs \
-    --wait --timeout 120s \
-    2>&1
+    helm install zfs-localpv openebs-zfslocalpv/zfs-localpv \
+        --namespace openebs --create-namespace \
+        --set zfsNode.encrKeysDir=/etc/openebs \
+        --wait --timeout 120s \
+        2>&1
 
-  # Detect the ZFS pool
-  local pool
-  pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
-  : "${pool:=rpool}"
+    # Detect the ZFS pool
+    local pool
+    pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
+    : "${pool:=rpool}"
 
-  # Create the K8s dataset if it doesn't exist
-  zfs create -p -o mountpoint=none -o compression=lz4 "${pool}/k8s-volumes" 2>/dev/null || true
+    # Create the K8s dataset if it doesn't exist
+    zfs create -p -o mountpoint=none -o compression=lz4 "${pool}/k8s-volumes" 2>/dev/null || true
 
-  # Create default StorageClass
-  kubectl apply -f - <<ZFSC 2>/dev/null
+    # Create default StorageClass
+    kubectl apply -f - <<ZFSC 2>/dev/null
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -354,8 +362,8 @@ volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true
 ZFSC
 
-  # Create VolumeSnapshotClass
-  kubectl apply -f - <<SNAPC 2>/dev/null || true
+    # Create VolumeSnapshotClass
+    kubectl apply -f - <<SNAPC 2>/dev/null || true
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshotClass
 metadata:
@@ -366,128 +374,128 @@ driver: zfs.csi.openebs.io
 deletionPolicy: Delete
 SNAPC
 
-  log "ZFS CSI installed — StorageClasses: zfs (default, 128k), zfs-db (8k for databases)"
+    log "ZFS CSI installed — StorageClasses: zfs (default, 128k), zfs-db (8k for databases)"
 }
 
 # ── Generate join command ──────────────────────────────────────────────────
 generate_join_command() {
-  log "Generating worker join command..."
+    log "Generating worker join command..."
 
-  local join_cmd
-  join_cmd="$(kubeadm token create --print-join-command 2>/dev/null)"
+    local join_cmd
+    join_cmd="$(kubeadm token create --print-join-command 2>/dev/null)"
 
-  # Save join command for workers
-  echo "$join_cmd" > /etc/kubernetes/join-command.sh
-  chmod 600 /etc/kubernetes/join-command.sh
+    # Save join command for workers
+    echo "$join_cmd" >/etc/kubernetes/join-command.sh
+    chmod 600 /etc/kubernetes/join-command.sh
 
-  echo ""
-  log "Join command saved to /etc/kubernetes/join-command.sh"
-  log "On worker nodes, run:"
-  echo ""
-  echo "  kube-join $(detect_node_ip)"
-  echo ""
-  log "Or manually:"
-  echo "  $join_cmd"
-  echo ""
+    echo ""
+    log "Join command saved to /etc/kubernetes/join-command.sh"
+    log "On worker nodes, run:"
+    echo ""
+    echo "  kube-join $(detect_node_ip)"
+    echo ""
+    log "Or manually:"
+    echo "  $join_cmd"
+    echo ""
 }
 
 # ── Remove default taints (single-node cluster) ───────────────────────────
 remove_control_plane_taint() {
-  # For single-node clusters, allow scheduling on control plane
-  kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true
-  log "Control plane taint removed (workloads can schedule on this node)"
+    # For single-node clusters, allow scheduling on control plane
+    kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true
+    log "Control plane taint removed (workloads can schedule on this node)"
 }
 
 # ── Print cluster status ──────────────────────────────────────────────────
 print_status() {
-  echo ""
-  echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
-  echo -e "\033[1;37m  Kubernetes Cluster Initialized                             \033[0m"
-  echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
-  echo ""
-  echo -e "  API Server:     \033[1;32mhttps://$(detect_node_ip):6443\033[0m"
-  echo -e "  CNI:            \033[1;32mCilium v${CILIUM_VERSION} (eBPF, replaces kube-proxy)\033[0m"
-  echo -e "  Ingress:        \033[1;32mCilium Gateway API\033[0m"
-  echo -e "  Load Balancer:  \033[1;32mMetalLB v${METALLB_VERSION} (L2 mode)\033[0m"
-  echo -e "  Storage:        \033[1;32mOpenEBS ZFS LocalPV (default: zfs, db: zfs-db)\033[0m"
-  echo -e "  Observability:  \033[1;32mHubble (relay + UI)\033[0m"
-  echo -e "  Pod CIDR:       $POD_CIDR"
-  echo -e "  Service CIDR:   $SVC_CIDR"
-  echo ""
-  kubectl get nodes -o wide 2>/dev/null || true
-  echo ""
-  kubectl get pods -A 2>/dev/null | head -25 || true
-  echo ""
-  echo -e "  \033[1;33mStorage Classes:\033[0m"
-  kubectl get sc 2>/dev/null | head -5 || true
-  echo ""
-  echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
-  echo -e "  \033[0;37mAdd workers:  kube-join $(detect_node_ip)\033[0m"
-  echo -e "  \033[0;37mCluster info: kube-status\033[0m"
-  echo -e "  \033[0;37mHubble UI:    kubectl port-forward -n kube-system svc/hubble-ui 12000:80\033[0m"
-  echo -e "  \033[0;37mGateway:      kubectl apply -f my-gateway.yaml\033[0m"
-  echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
+    echo ""
+    echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
+    echo -e "\033[1;37m  Kubernetes Cluster Initialized                             \033[0m"
+    echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
+    echo ""
+    echo -e "  API Server:     \033[1;32mhttps://$(detect_node_ip):6443\033[0m"
+    echo -e "  CNI:            \033[1;32mCilium v${CILIUM_VERSION} (eBPF, replaces kube-proxy)\033[0m"
+    echo -e "  Ingress:        \033[1;32mCilium Gateway API\033[0m"
+    echo -e "  Load Balancer:  \033[1;32mMetalLB v${METALLB_VERSION} (L2 mode)\033[0m"
+    echo -e "  Storage:        \033[1;32mOpenEBS ZFS LocalPV (default: zfs, db: zfs-db)\033[0m"
+    echo -e "  Observability:  \033[1;32mHubble (relay + UI)\033[0m"
+    echo -e "  Pod CIDR:       $POD_CIDR"
+    echo -e "  Service CIDR:   $SVC_CIDR"
+    echo ""
+    kubectl get nodes -o wide 2>/dev/null || true
+    echo ""
+    kubectl get pods -A 2>/dev/null | head -25 || true
+    echo ""
+    echo -e "  \033[1;33mStorage Classes:\033[0m"
+    kubectl get sc 2>/dev/null | head -5 || true
+    echo ""
+    echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
+    echo -e "  \033[0;37mAdd workers:  kube-join $(detect_node_ip)\033[0m"
+    echo -e "  \033[0;37mCluster info: kube-status\033[0m"
+    echo -e "  \033[0;37mHubble UI:    kubectl port-forward -n kube-system svc/hubble-ui 12000:80\033[0m"
+    echo -e "  \033[0;37mGateway:      kubectl apply -f my-gateway.yaml\033[0m"
+    echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────
 main() {
-  preflight
-  snapshot_before_init
-  run_kubeadm_init
-  remove_control_plane_taint
-  install_cilium
-  install_gateway_api || warn "Gateway API install had issues (non-fatal)"
-  install_metallb || warn "MetalLB install had issues — pods may still be pulling"
-  install_zfs_csi || warn "ZFS CSI install had issues (non-fatal)"
-  install_metrics_server || warn "metrics-server install had issues (non-fatal)"
-  generate_join_command
-  deploy_sample_workload
-  print_status
+    preflight
+    snapshot_before_init
+    run_kubeadm_init
+    remove_control_plane_taint
+    install_cilium
+    install_gateway_api || warn "Gateway API install had issues (non-fatal)"
+    install_metallb || warn "MetalLB install had issues — pods may still be pulling"
+    install_zfs_csi || warn "ZFS CSI install had issues (non-fatal)"
+    install_metrics_server || warn "metrics-server install had issues (non-fatal)"
+    generate_join_command
+    deploy_sample_workload
+    print_status
 }
 
 # ── Deploy sample workload to prove the cluster works ────────────────────
 deploy_sample_workload() {
-  log "Deploying sample nginx workload..."
+    log "Deploying sample nginx workload..."
 
-  # Wait for Cilium to be ready (pods need CNI)
-  local attempts=0
-  while [[ $attempts -lt 30 ]]; do
-    if kubectl get ds -n kube-system cilium -o jsonpath='{.status.numberReady}' 2>/dev/null | grep -q '[1-9]'; then
-      break
+    # Wait for Cilium to be ready (pods need CNI)
+    local attempts=0
+    while [[ $attempts -lt 30 ]]; do
+        if kubectl get ds -n kube-system cilium -o jsonpath='{.status.numberReady}' 2>/dev/null | grep -q '[1-9]'; then
+            break
+        fi
+        sleep 5
+        ((attempts++))
+    done
+
+    # Deploy nginx
+    kubectl create deployment nginx-sample --image=nginx:alpine --replicas=1 2>/dev/null || true
+
+    # Expose via ClusterIP
+    kubectl expose deployment nginx-sample --port=80 --target-port=80 2>/dev/null || true
+
+    # Wait for pod to be ready
+    local ready=false
+    for _ in $(seq 1 30); do
+        if kubectl get pods -l app=nginx-sample --no-headers 2>/dev/null | grep -q Running; then
+            ready=true
+            break
+        fi
+        sleep 3
+    done
+
+    if $ready; then
+        local pod_ip
+        pod_ip="$(kubectl get pods -l app=nginx-sample -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)"
+        local svc_ip
+        svc_ip="$(kubectl get svc nginx-sample -o jsonpath='{.spec.clusterIP}' 2>/dev/null)"
+        log "Sample workload running:"
+        echo -e "    Pod:     \033[1;32mnginx-sample → ${pod_ip}\033[0m"
+        echo -e "    Service: \033[1;32mnginx-sample → ${svc_ip}:80\033[0m"
+        echo -e "    Verify:  \033[0;37mcurl ${svc_ip}\033[0m"
+    else
+        warn "Sample workload not ready yet — images may still be pulling"
+        warn "Check with: kubectl get pods -l app=nginx-sample"
     fi
-    sleep 5
-    ((attempts++))
-  done
-
-  # Deploy nginx
-  kubectl create deployment nginx-sample --image=nginx:alpine --replicas=1 2>/dev/null || true
-
-  # Expose via ClusterIP
-  kubectl expose deployment nginx-sample --port=80 --target-port=80 2>/dev/null || true
-
-  # Wait for pod to be ready
-  local ready=false
-  for _ in $(seq 1 30); do
-    if kubectl get pods -l app=nginx-sample --no-headers 2>/dev/null | grep -q Running; then
-      ready=true
-      break
-    fi
-    sleep 3
-  done
-
-  if $ready; then
-    local pod_ip
-    pod_ip="$(kubectl get pods -l app=nginx-sample -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)"
-    local svc_ip
-    svc_ip="$(kubectl get svc nginx-sample -o jsonpath='{.spec.clusterIP}' 2>/dev/null)"
-    log "Sample workload running:"
-    echo -e "    Pod:     \033[1;32mnginx-sample → ${pod_ip}\033[0m"
-    echo -e "    Service: \033[1;32mnginx-sample → ${svc_ip}:80\033[0m"
-    echo -e "    Verify:  \033[0;37mcurl ${svc_ip}\033[0m"
-  else
-    warn "Sample workload not ready yet — images may still be pulling"
-    warn "Check with: kubectl get pods -l app=nginx-sample"
-  fi
 }
 
 main "$@"

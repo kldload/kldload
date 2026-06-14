@@ -26,11 +26,28 @@ if command -v gsettings >/dev/null 2>&1; then
     esac
 fi
 
-exec /usr/bin/konsole \
-    -p TerminalColumns=200 \
-    -p TerminalRows=60 \
-    -p ColorScheme="$SCHEME" \
-    -e /usr/local/bin/kldload-sysdiag
+# konsole (KDE) is preferred — it carries the light/dark color-scheme
+# integration above. But konsole pulls the whole KDE stack and its install can
+# flake (10.100.10.x: 135-pkg transaction failed mid-way). sysdiag must ALWAYS
+# open, so fall back to any available terminal rather than hard-failing.
+if command -v konsole >/dev/null 2>&1; then
+    exec konsole \
+        -p TerminalColumns=200 \
+        -p TerminalRows=60 \
+        -p ColorScheme="$SCHEME" \
+        -e /usr/local/bin/kldload-sysdiag
+fi
+for _t in ptyxis gnome-terminal gnome-console kgx xterm; do
+    command -v "$_t" >/dev/null 2>&1 || continue
+    case "$_t" in
+    ptyxis) exec ptyxis -- /usr/local/bin/kldload-sysdiag ;;
+    gnome-terminal) exec gnome-terminal --geometry=200x60 -- /usr/local/bin/kldload-sysdiag ;;
+    gnome-console | kgx) exec "$_t" -e /usr/local/bin/kldload-sysdiag ;;
+    xterm) exec xterm -geometry 200x60 -e /usr/local/bin/kldload-sysdiag ;;
+    esac
+done
+echo "kldload-sysdiag-launch: no terminal emulator found (install konsole or gnome-terminal)" >&2
+exit 1
 # Note: --hide-menubar removed alongside --fullscreen. Operator on .142
 # b644 2026-06-07 noted "copy paste functionality and buttons is missing"
 # — the menubar carries the Edit menu (Copy / Paste / Find / Select All)

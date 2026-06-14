@@ -1517,7 +1517,10 @@ WPEOF
     if [[ "$_profile" != "core" ]]; then
         local _user="${KLDLOAD_USERNAME:-admin}"
         local _user_home="${target}/home/${_user}"
-        for _f in .bashrc .tmux.conf .vimrc; do
+        # .bash_profile is REQUIRED: kldload-term opens a login shell (bash -l)
+        # which sources .bash_profile, NOT .bashrc directly. Without it the
+        # terminal skips the kldload .bashrc and comes up plain (10.100.10.119).
+        for _f in .bashrc .bash_profile .tmux.conf .vimrc; do
             [[ -f "/etc/skel/${_f}" ]] || continue
             cp "/etc/skel/${_f}" "${target}/etc/skel/${_f}"
             cp "/etc/skel/${_f}" "${target}/root/${_f}"
