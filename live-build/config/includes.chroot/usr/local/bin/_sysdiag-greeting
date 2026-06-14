@@ -42,27 +42,33 @@ if command -v fastfetch >/dev/null 2>&1; then
     #   emits cursor-positioning escapes that trash composition)
     # --pipe false:        force colours ON (auto-detect would strip
     #   them because our mapfile process substitution is a pipe)
-    # awk SGR-preservation: fastfetch's logo emits `\e[1m\e[31m` on
-    #   line 1 only; downstream lines rely on terminal state staying
-    #   bold-red. Composition resets state after each row's right
-    #   column closes. The filter tracks the active SGR and prepends
-    #   it to lines that lost their colour state.
-    # Force bold-red on every logo line so the RHEL "M" pattern renders
-    # in its actual brand red regardless of which SGR state fastfetch
-    # left the terminal in. Info lines (containing a colon) keep their
-    # own colors (fastfetch tints "OS:", "Kernel:" etc. red already).
-    # Operator on .142 b644 2026-06-07: "the red hat should be red of
-    # course." The prior awk that tracked single-CSI state lost the
-    # cumulative bold+red state after the first line.
-    mapfile -t LEFT < <(fastfetch --logo-position top --pipe false 2>/dev/null \
-        | awk '
+    #
+    # Logo color per substrate. fastfetch's native logo carries its OWN
+    # embedded multi-color SGR; left in place it mixed with our forced color
+    # AND threw off the visible-width measurement used for side-by-side
+    # padding — that's the "garbled / messed-up lines" seen on BOTH F44 and
+    # RHEL. Fix: STRIP the embedded SGR per logo line, then re-apply ONE clean
+    # brand color the composition can preserve and _visible_len can measure.
+    _lc='1;36' # kldload cyan (default / unknown distro)
+    case "$(
+        . /etc/os-release 2>/dev/null
+        printf '%s' "${ID:-}"
+    )" in
+    fedora) _lc='1;34' ;;                            # Fedora blue
+    rhel | centos | rocky | almalinux) _lc='1;31' ;; # Red Hat red
+    debian) _lc='1;31' ;;                            # Debian red
+    ubuntu) _lc='1;33' ;;                            # Ubuntu orange
+    esac
+    mapfile -t LEFT < <(fastfetch --logo-position top --pipe false 2>/dev/null |
+        awk -v lc="$_lc" '
             {
                 if (/:/) {
-                    # Info line — leave fastfetch colors as-is
+                    # Info line — keep fastfetch colors as-is
                     print $0
                 } else if (length($0) > 0) {
-                    # Logo line — force bold red
-                    printf "\x1b[1;31m%s\x1b[0m\n", $0
+                    # Logo line — strip embedded SGR, force one clean color
+                    gsub(/\x1b\[[0-9;]*m/, "", $0)
+                    printf "\x1b[%sm%s\x1b[0m\n", lc, $0
                 } else {
                     print ""
                 }

@@ -400,11 +400,11 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         # GB VRAM, gain instant Bob + visible nav item. Fire-and-forget so
         # autodeploy doesn't block 30-60s on the load.
         log "[ai] pre-warming bob into VRAM (background; takes ~30-60s on first load)..."
-        ( curl -sS -m 180 -o /dev/null -X POST http://127.0.0.1:11434/api/generate \
+        (curl -sS -m 180 -o /dev/null -X POST http://127.0.0.1:11434/api/generate \
             -d '{"model":"bob","prompt":"warm","stream":false,"keep_alive":-1}' \
-            >>"$LOG_FILE" 2>&1 \
-            && log "[ai] bob warmed — resident in VRAM" \
-            || log "[ai] WARNING: bob warm-up did not complete in 180s — first user message will pay the cold-start tax" ) &
+            >>"$LOG_FILE" 2>&1 &&
+            log "[ai] bob warmed — resident in VRAM" ||
+            log "[ai] WARNING: bob warm-up did not complete in 180s — first user message will pay the cold-start tax") &
         # Vision model (llama3.2-vision:11b) is NO LONGER auto-pulled — it's
         # 6 GB of weights and ~8 GB of VRAM for a capability used on <5% of
         # Bob sessions (pasted screenshots of non-text images). Text models
@@ -633,6 +633,12 @@ if [[ "${WANT[klab]}" == "1" ]]; then
     _ztest_requested=0
     [[ "${KLAB_GOLDEN_KIND}" == "ztest" ]] && _ztest_requested=1
     [[ "${KLDLOAD_BUILD_ZTEST_GOLDENS:-0}" == "1" ]] && _ztest_requested=1
+    # "Build all images" means EVERY golden lineage — operator expectation is
+    # lean klab goldens AND the ZFS-test (ztest) goldens, regardless of profile
+    # (10.100.10.x desktop install: checked Build Images, got klab+blue-green
+    # but NOT ztest). On a lean template this now builds BOTH 3a (lean) and 3b
+    # (ztest); on zfslab, 3a is skipped above and only ztest builds.
+    [[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && _ztest_requested=1
 
     if [[ "$_ztest_requested" == "1" ]]; then
         phase "klab-ztest-goldens"

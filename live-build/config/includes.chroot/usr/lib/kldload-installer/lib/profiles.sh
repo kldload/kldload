@@ -348,7 +348,12 @@ k_profile_optional_packages() {
         elif [[ "$_distro" == "ubuntu" ]]; then
             out+=(bpfcc-tools bpftrace linux-tools-common linux-tools-generic)
         else
-            out+=(bpftool bpfcc-tools bpftrace linux-perf)
+            # libbpf-tools = the CO-RE/BTF rebuilds of the bcc tools; REQUIRED
+            # on modern kernels (F44/7.0) where legacy bcc runtime-compile
+            # fails. bpfcc-tools→bcc-tools is remapped in bootstrap.sh; both
+            # ship so sysdiag prefers /usr/bin/bpf-* and falls back to legacy
+            # on older substrates.
+            out+=(bpftool bpfcc-tools libbpf-tools bpftrace linux-perf)
         fi
     fi
     if [[ "${KLDLOAD_ENABLE_ZFS:-0}" == "1" ]]; then
@@ -884,7 +889,12 @@ DASHSTART
         # menu entries, desktop looked empty. Glob copy fixes it for every distro.
         if [[ "${KLDLOAD_PROFILE:-server}" != "core" ]]; then
             mkdir -p "${target}/usr/share/applications"
+            # com.kldload.*.desktop are the app_id-matched hidden entries that
+            # let GNOME (Wayland) map each webview window to its OWN icon — the
+            # glob MUST include them or every dashboard window falls back to one
+            # shared generic icon (10.100.10.x: "all the icons are the same").
             for _lnch in /usr/share/applications/kldload-*.desktop \
+                /usr/share/applications/com.kldload.*.desktop \
                 /usr/share/applications/bob-*.desktop; do
                 [[ -f "$_lnch" ]] && install -m 0644 "$_lnch" \
                     "${target}/usr/share/applications/$(basename "$_lnch")"
@@ -958,6 +968,7 @@ DASHSTART
             if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
                 for _ldskt in kldload-vms kldload-k8s kldload-helm kldload-klab \
                     kldload-ansible kldload-metrics kldload-zfs kldload-zfs-manager \
+                    kldload-zfslab kldload-sysdiag \
                     bob-chat kldload-k9s bob-gaming; do
                     if [[ -f "${_appdir}/${_ldskt}.desktop" ]]; then
                         sed -i '/^NoDisplay=true$/d' "${_appdir}/${_ldskt}.desktop"
@@ -1440,32 +1451,65 @@ DCONF
     else
         k_die "wallpapers: /usr/share/backgrounds/kldload missing on live ISO — build dropped them"
     fi
-    local _wp=""
+    # ── Per-distro NATIVE default wallpaper ──────────────────────────────────
+    # Each distro install wears ITS OWN stock GNOME wallpaper, NOT the kldload
+    # nebula baked into 00-kldload-desktop (operator 2026-06-13: "each profile
+    # should use its respected distro default wallpaper — F44 install → F44
+    # default"). This is the per-distro-native identity stance now that F44 is
+    # the primary substrate: an F44 box should look like Fedora, a RHEL box
+    # like RHEL — see [[disguise-as-rhel]] (evolved from always-RHEL to
+    # per-distro-native).
+    #
+    # HISTORY: until .143 the fedora case mapped to /usr/share/backgrounds/
+    # default.png (the RHEL/CentOS path). That file doesn't exist on Fedora, so
+    # the [[ -e ]] guard skipped the override and 00-kldload-desktop's kldload
+    # nebula won — that's the "RHEL 10 wallpaper on F44" the operator saw on the
+    # 10.100.10.113 install. Fedora's actual default ships in f44-backgrounds-
+    # gnome with DISTINCT day/night art, so we carry separate light/dark URIs.
+    local _wp_day="" _wp_dark=""
     case "${KLDLOAD_DISTRO:-centos}" in
-    ubuntu) _wp="/usr/share/backgrounds/warty-final-ubuntu.png" ;;
-    debian) _wp="/usr/share/desktop-base/active-theme/wallpaper/contents/images/1920x1080.svg" ;;
-    centos | rocky | rhel | fedora) _wp="/usr/share/backgrounds/default.png" ;;
+    ubuntu)
+        _wp_day="/usr/share/backgrounds/warty-final-ubuntu.png"
+        _wp_dark="$_wp_day"
+        ;;
+    debian)
+        _wp_day="/usr/share/desktop-base/active-theme/wallpaper/contents/images/1920x1080.svg"
+        _wp_dark="$_wp_day"
+        ;;
+    fedora)
+        _wp_day="/usr/share/backgrounds/f44/default/f44-01-day.jxl"
+        _wp_dark="/usr/share/backgrounds/f44/default/f44-01-night.jxl"
+        ;;
+    centos | rocky | rhel)
+        _wp_day="/usr/share/backgrounds/default.png"
+        _wp_dark="$_wp_day"
+        ;;
     esac
     # 01-kldload-wallpaper has a higher numeric prefix than 00-kldload-desktop,
-    # so dconf merges its [background] block ON TOP of 00-kldload-desktop's
-    # kldload-branded wallpaper. On RHEL 10 .137 (2026-06-06) /usr/share/
-    # backgrounds/default.png doesn't actually exist on the target — result:
-    # GNOME tries to load the missing file, falls back to a blank screen, and
-    # the kldload-branded wallpaper from 00- never gets a chance to render.
-    # Only write the override if the referenced file actually lives on the
-    # target rootfs. Per-distro default wallpaper handling is the proper fix
-    # (task #24); until then, missing-file means "skip and let 00- win."
-    if [[ -n "$_wp" ]] && [[ -e "${target}${_wp}" ]]; then
+    # so dconf merges its [background] block ON TOP of the 00- nebula. The
+    # distro-default backgrounds package is a hard member of every desktop set
+    # AND is enforced by the darksite completeness gate, so on a correct build
+    # the file is always present. If it is somehow missing we DON'T silently
+    # fall back to the wrong-distro nebula (operator 2026-06-13: "no silent
+    # failures") — we log a loud, greppable WARN naming the file so the
+    # darksite gap gets fixed, and leave the wallpaper unset rather than lying
+    # about which distro this is. Cosmetic, so WARN not k_die: a bad wallpaper
+    # must not brick an otherwise-good install.
+    if [[ -n "$_wp_day" ]] && [[ -e "${target}${_wp_day}" ]]; then
+        [[ -e "${target}${_wp_dark}" ]] || _wp_dark="$_wp_day"
         mkdir -p "${target}/etc/dconf/db/local.d"
         cat >"${target}/etc/dconf/db/local.d/01-kldload-wallpaper" <<WPEOF
 [org/gnome/desktop/background]
-picture-uri='file://${_wp}'
-picture-uri-dark='file://${_wp}'
+picture-uri='file://${_wp_day}'
+picture-uri-dark='file://${_wp_dark}'
 picture-options='zoom'
 WPEOF
-        chroot "${target}" dconf update 2>/dev/null || true
-    elif [[ -n "$_wp" ]]; then
-        k_log "01-kldload-wallpaper: distro default ${_wp} missing on target — skipping (kldload-branded wallpaper from 00- stays)"
+        if ! chroot "${target}" dconf update; then
+            k_die "01-kldload-wallpaper: dconf update failed on target — wallpaper override will not apply"
+        fi
+        k_log "wallpaper: ${KLDLOAD_DISTRO:-centos} native default set (${_wp_day})"
+    elif [[ -n "$_wp_day" ]]; then
+        k_log "WARN: wallpaper: ${KLDLOAD_DISTRO:-centos} default ${_wp_day} MISSING on target — darksite gap, fix the package set; leaving wallpaper unset (refusing to fall back to wrong-distro nebula)"
     fi
 
     # ── Shell dotfiles (.bashrc, .tmux.conf, .vimrc) — non-core profiles only

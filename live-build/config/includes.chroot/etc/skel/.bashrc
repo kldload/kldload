@@ -135,7 +135,13 @@ _kcur_ns()         { kubectl config view --minify --output 'jsonpath={..namespac
 
 # ── kubectl + kubeconfig ──────────────────────────────────────────────────────
 if __have kubectl; then
-  export KUBECONFIG="${KUBECONFIG:-/etc/kubernetes/admin.conf}"
+  # Per-user kubeconfig. kube-cluster drops a copy at ~/.kube/config for the
+  # install user; default here points there so kubectl/k9s work as the desktop
+  # user. The old default (/etc/kubernetes/admin.conf) is the IN-VM path — it
+  # doesn't exist on the host, so it silently broke k9s for the admin user
+  # (10.100.10.x: "k9s doesn't see the cluster"). kubeconfig still wins if the
+  # user exports their own KUBECONFIG.
+  export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
   alias k='kubectl'
   alias kga='kubectl get all -A'
   alias kgn='kubectl get nodes -o wide'

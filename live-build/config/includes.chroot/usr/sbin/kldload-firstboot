@@ -2,7 +2,16 @@
 # kldload-firstboot — runs once on first boot of any installed kldload node.
 # Reads KLDLOAD_PROFILE from /etc/kldload/install-manifest.env, performs
 # role-specific setup, then registers with MASTER.
-set -euo pipefail
+#
+# -E so the ERR trap below fires inside functions too (setup_kvm, setup_master,
+# …); without it a failure deep in a role function used to die with a bare
+# non-zero exit and no breadcrumb — the "desktop came up half-built and nobody
+# knew why" failure mode (2026-06-13, F44 install on 10.100.10.113). Every
+# UNGUARDED command that fails now logs its line + the exact command before the
+# script exits. Intentionally-optional steps still opt out explicitly with
+# `|| true` (and must name the harmless case) — the trap only catches the ones
+# nobody meant to swallow.
+set -Eeuo pipefail
 
 export HOME=/root
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -22,6 +31,14 @@ die() {
     exit 1
 }
 ok() { log "OK: $*"; }
+
+# ERR trap — the breadcrumb that makes a firstboot failure self-diagnosing.
+# Logs the failing line, exit code, and the literal command. Paired with -E
+# above so it reaches into functions. The script still exits non-zero (set -e),
+# so systemd marks kldload-firstboot.service failed and the operator sees it in
+# `systemctl --failed` AND in /var/log/kldload/firstboot.log — two surfaces,
+# no silence.
+trap 'rc=$?; log "ERR: line ${LINENO} exited ${rc} running: ${BASH_COMMAND}"' ERR
 
 # ── Load install manifest ─────────────────────────────────────────────────────
 [[ -f "${MANIFEST}" ]] || die "install manifest not found: ${MANIFEST}"
@@ -979,6 +996,45 @@ main() {
         ln -sfn /var/log/kldload /root/kldload-logs 2>/dev/null || true
     fi
 
+    # ── NVIDIA healing net — driver never installed at install-time ───────────
+    # WHY: install-time akmod-nvidia comes from RPM Fusion, a NETWORK repo the
+    # strict-offline install can't reach unless it's packed into the darksite.
+    # On the 10.100.10.113 F44 install rpmfusion was --skip-unavailable'd and
+    # akmod-nvidia was SILENTLY never installed → no kernel module → the desktop
+    # was stuck at 1024x768 on the basic framebuffer. This net detects that case
+    # on the booted system (network now available) and installs the driver. The
+    # DKMS-retry block below handles the "source present but not built" case;
+    # this one handles "nothing to build because nothing was installed."
+    # OFFLINE NOTE: a true air-gap needs rpmfusion + akmod-nvidia packed into the
+    # darksite at build time (follow-up). Until then this needs a network at
+    # first boot and says so LOUDLY if it can't reach one — no silent skip.
+    if lspci 2>/dev/null | grep -qiE 'vga.*nvidia|3d.*nvidia' &&
+        ! compgen -G "/lib/modules/$(uname -r)/extra/nvidia.ko*" >/dev/null 2>&1 &&
+        ! compgen -G '/usr/src/nvidia-*' >/dev/null 2>&1 &&
+        ! rpm -q akmod-nvidia >/dev/null 2>&1; then
+        log "NVIDIA GPU present but no driver installed — attempting install (needs network)"
+        _dnf="$(command -v dnf5 || command -v dnf || true)"
+        _fedver="$(rpm -E %fedora 2>/dev/null || true)"
+        if [[ -z "$_dnf" ]]; then
+            log "WARNING: no package manager on PATH — cannot install NVIDIA driver (desktop stays on nouveau)"
+        elif ! curl -fsS -m 8 -o /dev/null https://mirrors.rpmfusion.org/ 2>/dev/null; then
+            log "WARNING: no network to RPM Fusion — NVIDIA driver NOT installed. Pack rpmfusion+akmod-nvidia into the darksite for offline; desktop runs on nouveau at reduced resolution until fixed."
+        elif "$_dnf" install -y \
+            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${_fedver}.noarch.rpm" \
+            "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${_fedver}.noarch.rpm" \
+            >>"$LOG" 2>&1 &&
+            "$_dnf" install -y akmod-nvidia xorg-x11-drv-nvidia "kernel-devel-$(uname -r)" >>"$LOG" 2>&1; then
+            log "akmod-nvidia installed — building kernel module"
+            command -v akmods >/dev/null 2>&1 &&
+                { akmods --force --kernels "$(uname -r)" >>"$LOG" 2>&1 || log "WARNING: akmods build failed — see $LOG"; }
+            command -v dracut >/dev/null 2>&1 &&
+                { dracut --force --regenerate-all >>"$LOG" 2>&1 || log "WARNING: dracut regenerate failed after nvidia install"; }
+            ok "NVIDIA driver installed — reboot once to load it (resolution corrects after reboot)"
+        else
+            log "WARNING: NVIDIA driver install failed — see $LOG; desktop stays on nouveau"
+        fi
+    fi
+
     # ── NVIDIA DKMS first-boot retry ──────────────────────────────────────────
     # NVIDIA's kernel-open module reliably FAILS to build inside the install
     # chroot (we don't yet know exactly why — conftest.sh runs sub-processes
@@ -1236,6 +1292,40 @@ main() {
         fi
     fi
 
+    # ── Desktop completeness healing net ─────────────────────────────────────
+    # Belt-and-suspenders for packages that the desktop set lists but the
+    # darksite closure can drop via --skip-broken (konsole drags the whole KDE
+    # stack; vim-X11 wants X libs; steam needs RPM Fusion + i686 multilib). They
+    # are NOT boot-critical, so they're healed here from the re-enabled repos
+    # rather than failing the install. Each is independent — one miss doesn't
+    # block the others. virbr0's network driver is included because the bare
+    # libvirt-daemon (older ISOs) shipped without it. Anything still missing is
+    # logged loud, not swallowed.
+    if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]] &&
+        command -v dnf >/dev/null 2>&1; then
+        for _pkg in konsole vim-X11 steam \
+            libbpf-tools bpftrace bcc-tools \
+            libvirt-daemon-driver-network libvirt-daemon-config-network; do
+            rpm -q "$_pkg" >/dev/null 2>&1 && continue
+            if dnf install -y "$_pkg" >>"$LOG" 2>&1; then
+                ok "healed desktop package: $_pkg"
+            else
+                log "WARNING: could not install $_pkg (offline? not in repo?) — feature degraded but boot is fine"
+            fi
+        done
+        # Prefer power-profiles-daemon over tlp on the desktop: ppd drives the
+        # GNOME "Power Mode" slider, and the two conflict at runtime (ppd won't
+        # start while tlp is active). tlp stays installed for server/laptop
+        # profiles; here we make ppd the active one.
+        if rpm -q power-profiles-daemon >/dev/null 2>&1; then
+            systemctl disable --now tlp tlp-rdw >/dev/null 2>&1 || true
+            systemctl mask tlp >/dev/null 2>&1 || true
+            systemctl enable --now power-profiles-daemon >/dev/null 2>&1 ||
+                log "WARNING: could not enable power-profiles-daemon"
+            ok "power-profiles-daemon active (tlp masked on desktop)"
+        fi
+    fi
+
     # ── Versionlock the load-bearing kernel / driver / ZFS triad ────────────
     # Update model: install-once + security backports on userspace; the
     # kABI-coupled substrate (kernel, NVIDIA, ZFS, BCC/bpftrace) ONLY moves
@@ -1261,10 +1351,11 @@ main() {
         if command -v dnf >/dev/null 2>&1 && dnf versionlock list >/dev/null 2>&1; then
             dnf versionlock add \
                 kernel kernel-core kernel-modules kernel-modules-core kernel-modules-extra \
+                kernel-devel kernel-headers \
                 nvidia-driver nvidia-driver-cuda nvidia-driver-libs nvidia-kmod-common \
-                xorg-x11-drv-nvidia \
+                xorg-x11-drv-nvidia akmod-nvidia \
                 zfs zfs-dkms zfs-libs spl \
-                bcc bcc-tools bpftool bpftrace \
+                bcc bcc-tools libbpf-tools bpftool bpftrace \
                 >>"$LOG" 2>&1 &&
                 ok "Core packages versionlocked — userspace can still security-update via dnf" ||
                 log "WARNING: dnf versionlock add failed — operator can retry: dnf versionlock add <list>"

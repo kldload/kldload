@@ -55,8 +55,34 @@ perl-interpreter
 perl-Getopt-Long
 perl-File-Find
 
+# Package manager — MUST be in the darksite so the install can put it on the
+# target. The bootstrap.sh install array lists dnf5 explicitly (it was being
+# --skip-broken'd away as a mere dep of the `dnf` compat metapackage, leaving
+# the 10.100.10.113 F44 box with NO package manager). The post-install critical
+# gate now hard-fails if dnf5 is absent, so it MUST resolve from this mirror.
+dnf5
+dnf5-plugins
+
+# Editors — nano (terminal, universal) + gnome-text-editor (F44's GUI editor;
+# gedit was dropped from F44 AppStream). Both must be in the mirror for the
+# offline install to land an editor.
+nano
+gnome-text-editor
+
 # Firmware / tools that Fedora names differently vs EL
 iotop-c
+
+# Fedora's NATIVE default GNOME wallpaper (distinct day/night art). REQUIRED on
+# the target: profiles.sh sets the per-distro native wallpaper at install
+# (01-kldload-wallpaper → /usr/share/backgrounds/f44/default/f44-01-{day,night}
+# .jxl) instead of the kldload nebula, so an F44 box looks like Fedora. The
+# GNOME desktop group does NOT reliably drag this in on a minimal/offline
+# install, so we list it explicitly — otherwise the wallpaper file is missing,
+# the install logs a loud WARN, and the box boots with no wallpaper (F44 install
+# on 10.100.10.113, 2026-06-13: came up with the wrong-distro nebula because the
+# Fedora default art was never on the target). The completeness gate enforces
+# its presence in the darksite.
+f44-backgrounds-gnome
 
 # Boolean/rich-dep companions that `dnf download --resolve --alldeps` does NOT
 # follow (it ignores `(X if Y)` conditional deps). qemu pulls passt, and passt
@@ -70,3 +96,26 @@ iotop-c
 # here too, or build a post-mirror closure gate that dry-run-installs the full
 # set against the darksite and reports gaps.
 passt-selinux
+
+# Fedora-grade desktop parity (1.3.0) — boot splash, GNOME utility apps, a11y,
+# fingerprint, printer drivers, input methods + locales, and video-decode/GPU
+# driver breadth. Bundled so the desktop comes up offline-complete.
+plymouth
+plymouth-system-theme
+power-profiles-daemon
+gnome-system-monitor
+gnome-disk-utility
+orca
+at-spi2-core
+speech-dispatcher
+fprintd
+libfprint
+gutenprint
+ibus
+ibus-libpinyin
+ibus-anthy
+ibus-hangul
+glibc-all-langpacks
+mesa-vdpau-drivers
+libva-intel-driver
+nvidia-vaapi-driver

@@ -1185,7 +1185,7 @@ CUSTOMREPO
         # failed` and fall back to unaccelerated framebuffer.
         amd-gpu-firmware nvidia-gpu-firmware
         openssh-server openssh-clients sudo
-        vim-enhanced tmux curl wget rsync jq less
+        vim-enhanced nano tmux curl wget rsync jq less
         iproute iputils net-tools nftables chrony
         passwd shadow-utils util-linux procps-ng findutils grep sed gawk
         parted gdisk dosfstools
@@ -1276,7 +1276,12 @@ CUSTOMREPO
             # clutters the app grid. vim-X11 provides /usr/bin/gvim (the GUI
             # vim) so vim.desktop actually opens an X11 vim window; vim-enhanced
             # provides the terminal vim with full feature set.
-            gedit
+            # gedit on EL9/F43; gnome-text-editor on F44/RHEL10 (gedit was
+            # dropped from F44 AppStream — it silently --skip-broken'd away on
+            # the 10.100.10.113 F44 install, leaving NO graphical editor). List
+            # both so each distro lands at least one; nano (base set) is the
+            # always-present terminal fallback.
+            gedit gnome-text-editor
             vim-X11 vim-enhanced
             # gnome-tweaks — the canonical GNOME power-user panel for fonts,
             # workspace behaviour, top-bar tweaks, and extension management.
@@ -1297,6 +1302,12 @@ CUSTOMREPO
             # install side-steps the issue. Same on CentOS Stream 9 + Fedora.
             gcr
             adwaita-icon-theme google-noto-sans-fonts firefox
+            # f44-backgrounds-gnome — Fedora's NATIVE default wallpaper (day/
+            # night .jxl). profiles.sh sets the per-distro native wallpaper at
+            # install; without this package on the target the F44 box fell back
+            # to the kldload nebula (the "RHEL 10 wallpaper" on 10.100.10.113).
+            # EL distros --skip-broken it and use their own default-backgrounds.
+            f44-backgrounds-gnome
             # glib-networking — the GIO TLS backend (gnutls). WITHOUT it, WebKitGTK
             # and anything using libsoup cannot do HTTPS AT ALL: "TLS support is not
             # available" -> the kldload-app windows load a blank white screen.
@@ -1305,6 +1316,23 @@ CUSTOMREPO
             glib-networking gsettings-desktop-schemas
             mesa-dri-drivers pipewire wireplumber
             podman
+            # ── KVM/libvirt for the Developer/Workstation edition ────────────
+            # The desktop edition IS a loaded dev box — it ships virtualization.
+            # libvirt-daemon-KVM (the meta) NOT bare libvirt-daemon: the bare
+            # daemon omits the network/nwfilter drivers, so virtnetworkd never
+            # exists and virbr0 can't come up (kldload-virbr0.service failed on
+            # the 10.100.10.x desktop installs → klab/kube-cluster VMs had no
+            # network). The -kvm meta pulls qemu + network + nwfilter + storage
+            # drivers; config-network ships /usr/share/libvirt/networks/
+            # default.xml that the virbr0 unit defines from.
+            qemu-kvm libvirt-daemon-kvm libvirt-daemon-config-network
+            libvirt-client virt-install
+            # konsole pulls the full KDE stack which the desktop darksite
+            # closure doesn't fully carry, so it --skip-broken's away and
+            # kldload-sysdiag (which hard-codes konsole) breaks. vim-X11 (gvim)
+            # similarly drops. Both are listed in the desktop set above; the
+            # real fix is darksite closure completeness (tracked) — meanwhile
+            # firstboot heals them from the re-enabled repos.
             # systemd-pam — F43+ split this out of systemd; without it
             # /usr/lib64/security/pam_systemd.so is missing on the target
             # and user sessions silently never register. Same bug we hit
@@ -1372,6 +1400,30 @@ CUSTOMREPO
             fwupd
             # ── Power / backlight helpers
             powertop brightnessctl
+            # power-profiles-daemon — drives the GNOME "Power Mode" slider
+            # (Performance/Balanced/Saver). Fedora's default; tlp (in the base
+            # set) conflicts with it at runtime, so firstboot swaps to ppd on
+            # the desktop profile (mask tlp, enable ppd).
+            power-profiles-daemon
+            # ── Fedora-grade desktop parity ──────────────────────────────────
+            # Boot splash, GNOME utility apps, accessibility, fingerprint login,
+            # broader printer drivers, input methods + all locales.
+            plymouth plymouth-system-theme
+            gnome-system-monitor gnome-disk-utility
+            orca at-spi2-core speech-dispatcher
+            fprintd libfprint
+            gutenprint
+            ibus ibus-libpinyin ibus-anthy ibus-hangul
+            glibc-all-langpacks
+            # ── Video-decode / GPU driver breadth ────────────────────────────
+            # mesa covers AMD/Intel GL+Vulkan+VAAPI; add VDPAU, the legacy Intel
+            # i965 VAAPI driver (Gen5-7), and the NVIDIA VAAPI bridge so HW video
+            # decode works in Firefox/Chrome on NVIDIA. NOTE: proprietary
+            # Broadcom (broadcom-wl) and Realtek-USB (rtl88xxau) Wi-Fi are RPM
+            # Fusion akmods — opt-in like NVIDIA, not bundle-able in the darksite.
+            mesa-vdpau-drivers libva-intel-driver nvidia-vaapi-driver
+            # 32-bit GL/Vulkan so Steam + Wine titles render.
+            mesa-dri-drivers.i686 mesa-vulkan-drivers.i686 vulkan-loader.i686
         )
         ;;
     server)
@@ -1380,7 +1432,15 @@ CUSTOMREPO
     kvm)
         _dnf_pkgs+=(
             tcpdump socat sysstat net-tools podman
-            qemu-kvm libvirt-daemon libvirt-client virt-install
+            qemu-kvm libvirt-daemon-kvm libvirt-client virt-install
+            # libvirt-daemon-kvm (the meta) NOT bare libvirt-daemon: the bare
+            # daemon ships WITHOUT the network/nwfilter drivers, so virtnetworkd
+            # never exists and `virsh net-define` fails "not supported by the
+            # connection driver" → no virbr0 → klab + kube-cluster VMs can't
+            # attach (10.100.10.x F44, 2026-06-13). The -kvm meta pulls the
+            # qemu + network + nwfilter + storage drivers AND config-network
+            # (ships /usr/share/libvirt/networks/default.xml).
+            libvirt-daemon-config-network
             bridge-utils edk2-ovmf dnsmasq
         )
         ;;
@@ -1398,7 +1458,7 @@ CUSTOMREPO
             iwlwifi-dvm-firmware iwlwifi-mvm-firmware iwlwifi-mld-firmware
             iwlegacy-firmware realtek-firmware atheros-firmware
             openssh-server openssh-clients sudo
-            vim-enhanced curl less iproute iputils nftables chrony wireguard-tools
+            vim-enhanced nano curl less iproute iputils nftables chrony wireguard-tools
             passwd shadow-utils util-linux procps-ng findutils grep sed gawk
             parted gdisk dosfstools
             dkms gcc make autoconf automake libtool
@@ -1417,6 +1477,31 @@ CUSTOMREPO
     if [[ "${distro}" == "rhel" ]]; then
         _dnf_pkgs+=(subscription-manager subscription-manager-rhsm-certificates)
     fi
+
+    # ── Package manager MUST land on the target ──────────────────────────────
+    # WHY: the install runs dnf from the LIVE env via --installroot, so the
+    # target only gets a package manager if one is in this list. The bare `dnf`
+    # at the top of the array is the dnf4 compat metapackage; on Fedora 41+ it
+    # pulls dnf5, but if dnf5 isn't independently resolvable from the darksite
+    # the whole `dnf` node --skip-broken's away and the target boots with NO
+    # package manager (10.100.10.113 F44 install, 2026-06-13: `rpm -q dnf` →
+    # not installed; every firstboot `dnf install` then died "command not
+    # found" and was silently swallowed). List dnf5 EXPLICITLY on the distros
+    # that use it so it can't be dropped as a mere dependency. The post-install
+    # verify gate (below the install passes) hard-fails if it's still missing.
+    #   Fedora + EL10 → dnf5; EL9 → dnf4 (dnf5 not in EL9 repos).
+    case "${distro}" in
+    fedora)
+        _dnf_pkgs+=(dnf5 dnf5-plugins)
+        ;;
+    centos | rocky | rhel)
+        if [[ "${release:-9}" -ge 10 ]] 2>/dev/null; then
+            _dnf_pkgs+=(dnf5 dnf5-plugins)
+        else
+            _dnf_pkgs+=(dnf dnf-plugins-core)
+        fi
+        ;;
+    esac
 
     # Optional packages (eBPF, extra ZFS tools) — same logic as Debian path
     local _opt_pkgs
@@ -1737,6 +1822,67 @@ CUSTOMREPO
         fi
     done
     k_log_to "$log" "Pass 3 verified: zfs + zfs-dkms + zfs-dracut all present in target"
+
+    # ── Critical-package verify gate ─────────────────────────────────────────
+    # WHY: pass 1 uses --skip-broken, so any name that won't resolve is dropped
+    # SILENTLY and dnf still exits 0. That is exactly how the 10.100.10.113 F44
+    # box shipped with NO package manager (dnf5 dropped), no graphical editor
+    # (gedit not in F44), and a desktop full of launchers whose binaries were
+    # never installed. Exit 0 from dnf means "nothing fatal," NOT "everything
+    # you asked for is present." So we hard-verify the load-bearing set and
+    # k_die with the exact missing list — fail loud so it gets fixed, per the
+    # operator's "no silent failures" rule (2026-06-13). Cosmetic/optional
+    # packages are deliberately NOT gated (a missing font must not brick an
+    # install); only the packages that decide whether the box is usable are.
+    local _crit=(kernel-core systemd NetworkManager grub2-efi-x64 shim-x64 dracut)
+    if [[ "${_profile}" == "desktop" ]]; then
+        _crit+=(gnome-shell gnome-session gdm)
+    fi
+    local _missing_crit=()
+    for _cp in "${_crit[@]}"; do
+        chroot "${target}" /usr/bin/rpm -q "$_cp" >/dev/null 2>&1 || _missing_crit+=("$_cp")
+    done
+    # The package manager is verified by BINARY, not rpm name: Fedora 41+/EL10
+    # ship it as `dnf5`, EL9 as `dnf` (dnf4), and the `dnf` command may be a
+    # symlink either way. Checking the binary is robust against that naming
+    # drift — a hard `rpm -q dnf5` would false-fail on EL9. This is THE check
+    # that would have caught the 10.100.10.113 no-package-manager install.
+    if ! chroot "${target}" sh -c 'command -v dnf5 >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1'; then
+        _missing_crit+=("dnf/dnf5(package-manager)")
+    fi
+    if ((${#_missing_crit[@]} > 0)); then
+        k_log_to "$log" "FATAL: critical packages MISSING from target after install: ${_missing_crit[*]}"
+        k_log_to "$log" "  → --skip-broken dropped them (unresolved in darksite/repos). Fix the package set/darksite; refusing to claim a usable install."
+        return 1
+    fi
+    k_log_to "$log" "Critical-package gate passed: ${_crit[*]} all present"
+
+    # ── Re-enable base repos for the INSTALLED system ────────────────────────
+    # The strict-offline block earlier set the target's base repos (fedora /
+    # updates / baseos / appstream / crb) to enabled=0 so the INSTALL resolves
+    # only from the darksite — correct for a reproducible build. But that
+    # disable must NOT persist onto the booted workstation, or it can't install
+    # or update ANYTHING: on the 10.100.10.x F44 installs chrome, grafana,
+    # konsole, the k8s tools and steam all silently failed at firstboot purely
+    # because every base repo was off and the darksite was already gone. Flip
+    # the MAIN repo of each base file back on (leaving -source/-debuginfo/
+    # -testing alone) so the installed box is a functional Fedora/EL station.
+    # Air-gapped operators set KLDLOAD_KEEP_OFFLINE_REPOS=1 to keep them off and
+    # rely on a persisted darksite mirror instead.
+    if [[ "${KLDLOAD_KEEP_OFFLINE_REPOS:-0}" != "1" ]]; then
+        _reenable_repo() { # $1=repo file  $2=section id
+            [[ -f "$1" ]] || return 0
+            # section-scoped: only the [$2] block, not source/debuginfo siblings
+            sed -i "/^\[$2\]/,/^\[/ s/^enabled=0/enabled=1/" "$1"
+        }
+        _reenable_repo "${target}/etc/yum.repos.d/fedora.repo" fedora
+        _reenable_repo "${target}/etc/yum.repos.d/fedora-updates.repo" updates
+        _reenable_repo "${target}/etc/yum.repos.d/centos.repo" baseos
+        _reenable_repo "${target}/etc/yum.repos.d/centos.repo" appstream
+        _reenable_repo "${target}/etc/yum.repos.d/rocky.repo" baseos
+        _reenable_repo "${target}/etc/yum.repos.d/rocky.repo" appstream
+        k_log_to "$log" "Re-enabled base repos on target (installed system can install + update; KLDLOAD_KEEP_OFFLINE_REPOS=1 to keep strict air-gap)"
+    fi
 
     # dnf5 writes the rpm db to /usr/lib/sysimage/rpm (modern Fedora
     # default). EL9's rpm config still reads /var/lib/rpm. Sync them so

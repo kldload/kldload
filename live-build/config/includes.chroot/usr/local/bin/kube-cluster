@@ -1666,6 +1666,23 @@ KBYAML
         chmod 600 /root/.kube/config
         export KUBECONFIG=/root/.kube/config
         log "kubeconfig installed → /root/.kube/config"
+
+        # Also publish to the desktop/install user so k9s + kubectl work
+        # WITHOUT sudo. kube-cluster runs as root, so without this the cluster
+        # is invisible to the GUI user (10.100.10.x: "k9s doesn't see the
+        # cluster"). Resolve the real login user (SUDO_USER, else the manifest
+        # username, else 'admin') and drop a per-user copy.
+        local _kc_user _kc_home
+        _kc_user="${SUDO_USER:-${KLDLOAD_USERNAME:-admin}}"
+        if [[ "$_kc_user" != "root" ]] &&
+            _kc_home="$(getent passwd "$_kc_user" | cut -d: -f6)" &&
+            [[ -n "$_kc_home" ]]; then
+            mkdir -p "${_kc_home}/.kube"
+            cp /root/.kube/config "${_kc_home}/.kube/config"
+            chown -R "${_kc_user}:${_kc_user}" "${_kc_home}/.kube"
+            chmod 600 "${_kc_home}/.kube/config"
+            log "kubeconfig also published → ${_kc_home}/.kube/config (user ${_kc_user})"
+        fi
     else
         warn "Could not copy kubeconfig from CP"
     fi
