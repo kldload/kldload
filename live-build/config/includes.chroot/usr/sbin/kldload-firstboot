@@ -1294,20 +1294,25 @@ main() {
 
     # ── Desktop completeness healing net ─────────────────────────────────────
     # Belt-and-suspenders for packages that the desktop set lists but the
-    # darksite closure can drop via --skip-broken (konsole drags the whole KDE
-    # stack; vim-X11 wants X libs; steam needs RPM Fusion + i686 multilib). They
-    # are NOT boot-critical, so they're healed here from the re-enabled repos
-    # rather than failing the install. Each is independent — one miss doesn't
-    # block the others. virbr0's network driver is included because the bare
-    # libvirt-daemon (older ISOs) shipped without it. Anything still missing is
-    # logged loud, not swallowed.
+    # darksite closure can drop via --skip-broken (vim-X11 wants X libs; steam
+    # needs RPM Fusion + i686 multilib). They are NOT boot-critical, so they're
+    # healed here from the re-enabled repos rather than failing the install. Each
+    # is independent — one miss doesn't block the others. virbr0's network driver
+    # is included because the bare libvirt-daemon (older ISOs) shipped without it.
+    # Anything still missing is logged loud, not swallowed.
+    #
+    # konsole is intentionally NOT here: it drags the whole ~135-package KDE
+    # stack, isn't in the Fedora darksite, and its online transaction flaked 3x
+    # (10.100.10.124 2026-06-14). sysdiag now defaults to gnome-terminal (always
+    # present, in the mirror) — see kldload-sysdiag-launch — so konsole earns no
+    # heal attempt.
     if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]] &&
         command -v dnf >/dev/null 2>&1; then
-        for _pkg in konsole vim-X11 steam \
+        for _pkg in vim-X11 steam \
             libbpf-tools bpftrace bcc-tools \
             libvirt-daemon-driver-network libvirt-daemon-config-network; do
             rpm -q "$_pkg" >/dev/null 2>&1 && continue
-            # Retry up to 3x: konsole drags ~135 KDE packages and the big
+            # Retry up to 3x: steam drags RPM Fusion + i686 multilib and the big
             # transaction occasionally fails mid-way (10.100.10.x) — a retry
             # succeeds. Don't let one flaky package leave the feature broken.
             _heal_ok=0

@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# kldload-sysdiag-launch — wrapper that opens kldload-sysdiag in Konsole
-# with a color scheme matching the current GNOME light/dark preference.
+# kldload-sysdiag-launch — open kldload-sysdiag in a terminal window.
 #
-# Konsole on RHEL 10 ships with NO built-in color schemes — passing
-# `-p ColorScheme=...` to konsole silently no-ops without ours installed
-# (they live at /usr/share/konsole/kldload-{dark,light}.colorscheme).
+# PRIMARY terminal is gnome-terminal: it's GNOME-native, ships on every
+# kldload desktop install (and is in the offline darksite mirror), and its
+# default profile follows the GTK theme so it tracks GNOME's light/dark
+# preference without any extra color-scheme files to install.
 #
-# Operator on .142 b644 2026-06-07: "sysdiag is not abiding by the
-# light/dark scheme set by gnome." Without this wrapper, Konsole renders
-# its hardcoded dark grey regardless of GNOME's preference — visually
-# inconsistent when the rest of the desktop is in light mode.
+# WHY NOT konsole anymore: konsole carries the kldload-{dark,light} color
+# schemes, but it drags in the entire ~135-package KDE stack and is NOT in
+# the Fedora darksite — so on F44 its install flaked three times and left
+# the box with no konsole at all (10.100.10.124 2026-06-14). gnome-terminal
+# was already present and is the lean, reliable default. konsole is kept
+# ONLY as a fallback for boxes that happen to have it, where it still gets
+# the matching color scheme.
 #
 # GNOME's color-scheme key reports:
 #   'prefer-dark' → user explicitly wants dark
@@ -17,6 +20,11 @@
 #   'prefer-light'→ user explicitly wants light (rare)
 set -u
 
+SYSDIAG=/usr/local/bin/kldload-sysdiag
+
+# Resolve GNOME's light/dark preference once — used ONLY by the konsole
+# fallback's ColorScheme. gnome-terminal follows the GTK theme itself, so
+# it needs no explicit scheme here.
 SCHEME=kldload-dark
 if command -v gsettings >/dev/null 2>&1; then
     cs="$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null | tr -d "'")"
@@ -26,38 +34,28 @@ if command -v gsettings >/dev/null 2>&1; then
     esac
 fi
 
-# konsole (KDE) is preferred — it carries the light/dark color-scheme
-# integration above. But konsole pulls the whole KDE stack and its install can
-# flake (10.100.10.x: 135-pkg transaction failed mid-way). sysdiag must ALWAYS
-# open, so fall back to any available terminal rather than hard-failing.
-if command -v konsole >/dev/null 2>&1; then
-    exec konsole \
-        -p TerminalColumns=200 \
-        -p TerminalRows=60 \
-        -p ColorScheme="$SCHEME" \
-        -e /usr/local/bin/kldload-sysdiag
+# gnome-terminal first. 200x60 chars (~1600x900 px) is the size the tmux
+# F-key layout in sysdiag was designed around.
+if command -v gnome-terminal >/dev/null 2>&1; then
+    exec gnome-terminal --geometry=200x60 -- "$SYSDIAG"
 fi
-for _t in ptyxis gnome-terminal gnome-console kgx xterm; do
+
+# Fallbacks, in order of preference, so sysdiag ALWAYS opens:
+#   ptyxis / gnome-console (kgx) — GNOME's newer terminals; some F44 spins
+#     ship ptyxis in place of gnome-terminal.
+#   konsole — only if present; still gets the matching kldload color scheme.
+#     Opens as a normal window (no --fullscreen, no --hide-menubar): the
+#     menubar carries Copy/Paste/Find and --fullscreen stripped the window
+#     min/max/close buttons (operator on .142 b644 2026-06-07).
+#   xterm — universal last resort.
+for _t in ptyxis gnome-console kgx konsole xterm; do
     command -v "$_t" >/dev/null 2>&1 || continue
     case "$_t" in
-    ptyxis) exec ptyxis -- /usr/local/bin/kldload-sysdiag ;;
-    gnome-terminal) exec gnome-terminal --geometry=200x60 -- /usr/local/bin/kldload-sysdiag ;;
-    gnome-console | kgx) exec "$_t" -e /usr/local/bin/kldload-sysdiag ;;
-    xterm) exec xterm -geometry 200x60 -e /usr/local/bin/kldload-sysdiag ;;
+    ptyxis) exec ptyxis -- "$SYSDIAG" ;;
+    gnome-console | kgx) exec "$_t" -e "$SYSDIAG" ;;
+    konsole) exec konsole -p TerminalColumns=200 -p TerminalRows=60 -p ColorScheme="$SCHEME" -e "$SYSDIAG" ;;
+    xterm) exec xterm -geometry 200x60 -e "$SYSDIAG" ;;
     esac
 done
-echo "kldload-sysdiag-launch: no terminal emulator found (install konsole or gnome-terminal)" >&2
+echo "kldload-sysdiag-launch: no terminal emulator found (install gnome-terminal or konsole)" >&2
 exit 1
-# Note: --hide-menubar removed alongside --fullscreen. Operator on .142
-# b644 2026-06-07 noted "copy paste functionality and buttons is missing"
-# — the menubar carries the Edit menu (Copy / Paste / Find / Select All)
-# which is the only visible affordance for clipboard ops in Konsole.
-# Without it, operators with no muscle memory for Ctrl+Shift+C/V have
-# no clue how to copy. konsolerc sets MenuBar=Enabled to back this up.
-# Note: --fullscreen flag REMOVED. It stripped the window decorations
-# (min/max/close buttons + title bar right-click menu). Operator on .142
-# b644 2026-06-07: "the konsole sysdiag window is actually missing max,
-# min and middle mouse buttons at the top of the screen / right menus."
-# Opens as a normal Konsole window now. Super+Shift+Up maximizes if
-# you want fullscreen feel; 200x60 chars (~1600x900 px) is a sensible
-# default that the tmux F-key layout was designed around.
