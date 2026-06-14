@@ -69,6 +69,20 @@ dnf5-plugins
 nano
 gnome-text-editor
 
+# Cert trust — nss-tools ships `certutil`, which kldload-trust-cert uses to
+# seed Chrome's per-user NSS DB (~/.pki/nssdb) + the system store so the
+# kldload-webui self-signed cert on https://localhost:8443 is trusted silently
+# (no interstitial on every dashboard tile). It's already in the Debian darksite
+# (target-base.txt) and the Fedora desktop install list (profiles.sh), and there
+# is a firstboot healing net that re-attempts `dnf install nss-tools` — but on
+# F44 that net FAILED because the .rpm was never mirrored here: only the repo
+# *metadata* carried nss-tools (as a transitive dep), so the completeness gate's
+# metadata dry-run passed while the actual file was absent (10.100.10.124
+# 2026-06-14: "Could not open file .../nss-tools-3.123.1-1.fc44.x86_64.rpm",
+# kldload-tls-cert.service then churned to start-limit-hit). Listing it here
+# forces the .rpm into the snapshot so the offline install can land it.
+nss-tools
+
 # Firmware / tools that Fedora names differently vs EL
 iotop-c
 
