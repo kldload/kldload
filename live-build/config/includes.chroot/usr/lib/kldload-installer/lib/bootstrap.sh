@@ -1258,6 +1258,16 @@ CUSTOMREPO
         _dnf_pkgs+=(
             gnome-shell gnome-session gnome-control-center gnome-settings-daemon
             gdm nautilus gnome-keyring
+            # nss-tools ships `certutil`, which kldload-trust-cert uses to seed
+            # Chrome's NSS DB so the https://localhost:8443 webui cert is trusted
+            # with no interstitial. It MUST live in THIS array — _dnf_pkgs is what
+            # actually gets dnf-installed on RPM targets; the k_profile_packages
+            # list in profiles.sh that also names nss-tools is NOT used for the
+            # transaction (same trap as gnome-terminal below). Without it,
+            # kldload-tls-cert churns to start-limit-hit and the install ships with
+            # one red unit + Chrome cert warnings (10.100.10.123/.124 2026-06-14).
+            # The .rpm is mirrored via target-fedora-extras.txt.
+            nss-tools
             # Terminal + text editor: Red Hat DROPPED gnome-terminal and gedit from
             # RHEL 10 / Fedora 41+ AppStream (replaced by ptyxis + gnome-text-editor).
             # This hardcoded list is what actually gets dnf-installed on RPM targets
