@@ -1148,10 +1148,39 @@ main() {
                 fi
                 log "NVIDIA driver will load after next reboot (nouveau is currently driving the GPU)"
             fi
+
+            # ── Block nouveau in the ZFSBootMenu cmdline (the load-bearing fix) ──
+            # kldload boots via ZFSBootMenu, which builds the kernel command line
+            # SOLELY from the org.zfsbootmenu:commandline ZFS property — it ignores
+            # /etc/kernel/cmdline AND the ESP grub.cfg. So the modprobe.d
+            # nouveau-blacklist + initramfs restored above is necessary but NOT
+            # sufficient: nouveau still won the GPU at boot and `modprobe nvidia`
+            # couldn't bind (10.100.10.123 2026-06-15: nvidia.ko built, desktop stuck
+            # on nouveau, dashboards wouldn't composite). Putting
+            # rd.driver.blacklist=nouveau on the ZBM cmdline is what definitively
+            # makes the akmod driver load on the next boot. Set it on the ROOT parent
+            # so EVERY boot environment inherits it — this is a ZFS property, never a
+            # bootloader binary, so it's fully BE/snapshot-safe and reversible. Only
+            # runs when nvidia.ko is present (NVIDIA hardware); non-NVIDIA boxes are
+            # untouched. Idempotent (skips if the blacklist is already there).
+            if command -v zfs >/dev/null 2>&1; then
+                _be_ds="$(findmnt -no SOURCE / 2>/dev/null)" # e.g. rpool/ROOT/<be>
+                _root_ds="${_be_ds%/*}"                      # e.g. rpool/ROOT
+                if [[ "$_root_ds" == */ROOT ]] && zfs list "$_root_ds" >/dev/null 2>&1; then
+                    _cl="$(zfs get -H -o value org.zfsbootmenu:commandline "$_root_ds" 2>/dev/null)"
+                    if [[ "$_cl" != *blacklist=nouveau* ]]; then
+                        if zfs set org.zfsbootmenu:commandline="${_cl} rd.driver.blacklist=nouveau,nova_core modprobe.blacklist=nouveau,nova_core nvidia-drm.modeset=1" "$_root_ds" 2>>"$LOG"; then
+                            ok "NVIDIA: nouveau blacklisted in ZFSBootMenu cmdline (${_root_ds}) — driver loads next boot"
+                        else
+                            log "WARNING: could not set org.zfsbootmenu:commandline on ${_root_ds} — nvidia may stay on nouveau"
+                        fi
+                    fi
+                fi
+            fi
         else
             log "WARNING: NVIDIA DKMS still failing on running system — staying on nouveau"
         fi
-        unset _nv_src _nv_ver _nv_ko_present _nv_restored _disabled
+        unset _nv_src _nv_ver _nv_ko_present _nv_restored _disabled _be_ds _root_ds _cl
     fi
 
     # ── Desktop apps that need network at first boot ─────────────────────────
