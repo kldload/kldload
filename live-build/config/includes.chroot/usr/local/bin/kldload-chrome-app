@@ -37,8 +37,18 @@ set -Eeuo pipefail
 app_id="${1:?usage: kldload-chrome-app <app-id> <url>}"
 url="${2:?usage: kldload-chrome-app <app-id> <url>}"
 
-# Dedicated, per-user kldload browser profile (isolated from the main browser).
-profile_dir="${XDG_DATA_HOME:-$HOME/.local/share}/kldload-chrome"
+# PER-APP browser profile — one profile dir per app_id, NOT one shared kldload
+# profile. WHY (verified on .139 2026-06-15): a shared profile makes every tool
+# open as a window inside ONE Chrome process, and GNOME groups all of a single
+# process's windows under ONE dock icon (the .desktop that launched the process)
+# — it ignores the per-window Wayland app_id for grouping. So all tools collapsed
+# onto the kldload-console (dashboard) icon even though each window's app_id was
+# correct. A distinct --user-data-dir per app_id makes each tool its OWN Chrome
+# PROCESS, so GNOME gives it its own dock/window icon (matched by app_id →
+# StartupWMClass → kldload-<tool>). Still isolated from the user's main browser;
+# the localhost:8443 cert is trusted via ~/.pki/nssdb + the system store, which
+# are independent of the Chrome profile, so every per-app profile trusts it.
+profile_dir="${XDG_DATA_HOME:-$HOME/.local/share}/kldload-chrome/${app_id}"
 mkdir -p "$profile_dir"
 
 # google-chrome-stable is the kldload default; fall back to google-chrome.
@@ -60,7 +70,19 @@ fi
 #   --disable-session-crashed-bubble : no "Restore pages?" bubble after the
 #       window is killed (logout / bobctl), which would steal focus from the SPA.
 #   --disable-features=Translate : no translate infobar over the dashboard.
+#   --ozone-platform=wayland : run as a NATIVE Wayland client, never XWayland —
+#       kldload is a modern Wayland desktop with no legacy X11 fallback. IMPORTANT
+#       consequence: in native Wayland, Chrome 149 IGNORES --class for the surface
+#       app_id and derives it from the URL host+path (port/query/fragment
+#       stripped), so https://localhost:8443/?app=1#<anything> -> app_id
+#       "chrome-localhost__-Default". Verified via WAYLAND_DEBUG set_app_id on
+#       .139 (2026-06-15). The window/dock icon is therefore matched by a
+#       .desktop whose StartupWMClass equals that URL-derived id (see
+#       kldload-webui.desktop), NOT by --class. Every tool opens the same root
+#       URL, so they all share that one app_id — one cohesive console icon.
+#       --class is kept only as a harmless hint for any future XWayland path.
 exec "$chrome" \
+    --ozone-platform=wayland \
     --user-data-dir="$profile_dir" \
     --class="$app_id" \
     --no-first-run \

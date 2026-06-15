@@ -365,6 +365,31 @@ setup_kvm() {
     #   2. the previous net-destroy+undefine block left NO default network
     #      behind → klab-firstboot could not attach VMs to virbr0.
     systemctl enable --now libvirtd
+
+    # ── VM restore-on-reboot (libvirt-guests) ─────────────────────────────────
+    # Record the RUNNING guests at host shutdown and start exactly that set on
+    # boot — VMs that were off stay off. This is the SINGLE source of truth for
+    # VM boot state; kube-cluster no longer pins static `virsh autostart` (which
+    # would force a guest on even if it was deliberately stopped). ON_SHUTDOWN=
+    # shutdown gives each guest a clean cold boot next time (robust across qemu/
+    # kernel bumps — no managedsave image to go stale). START_DELAY staggers the
+    # starts so N guests don't thunder-herd first boot. Config path is distro-
+    # family-specific: RPM uses /etc/sysconfig, Debian/Ubuntu use /etc/default.
+    _lvg_conf="/etc/sysconfig/libvirt-guests"
+    [[ -d /etc/sysconfig ]] || _lvg_conf="/etc/default/libvirt-guests"
+    cat >"${_lvg_conf}" <<'LVG'
+# kldload VM restore-on-reboot policy — read by the libvirt-guests service.
+URIS=default
+ON_BOOT=start
+ON_SHUTDOWN=shutdown
+START_DELAY=15
+SHUTDOWN_TIMEOUT=120
+PARALLEL_SHUTDOWN=4
+LVG
+    # || true: VM-restore is an enhancement — a missing libvirt-guests unit
+    # (e.g. a trimmed libvirt install) must not abort firstboot.
+    systemctl enable --now libvirt-guests 2>/dev/null || true
+
     mkdir -p /var/lib/libvirt/images
     for _i in 1 2 3 4 5 6 7 8 9 10; do
         virsh list >/dev/null 2>&1 && break
@@ -2249,8 +2274,8 @@ Type=Application
 Name=kldload Dashboard
 Comment=Auto-open the kldload ops console at login (lab profile)
 Exec=/usr/local/bin/kldload-webui-launch
-Icon=kldload-webui
-StartupWMClass=com.kldload.webui
+Icon=kldload-console
+StartupWMClass=chrome-localhost__-Default
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=8
 AUTOSTART

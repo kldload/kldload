@@ -968,14 +968,23 @@ DASHSTART
             # all the rescue tools and the GUI, but nothing else is installed yet
             # so [the infra section] is useless."
             if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
+                # kldload-webui included so the web GUI is a point-and-click win+A
+                # app (hexagon icon) on the workstation, not just a hidden window
+                # matcher. Lab/server keep it NoDisplay (their surface is the
+                # auto-opened kiosk page).
                 for _ldskt in kldload-vms kldload-k8s kldload-helm kldload-klab \
                     kldload-ansible kldload-metrics kldload-zfs kldload-zfs-manager \
                     kldload-zfslab kldload-sysdiag \
-                    bob-chat kldload-k9s bob-gaming; do
+                    bob-chat kldload-k9s bob-gaming kldload-webui; do
                     if [[ -f "${_appdir}/${_ldskt}.desktop" ]]; then
                         sed -i '/^NoDisplay=true$/d' "${_appdir}/${_ldskt}.desktop"
                     fi
                 done
+                # Workstation: the web GUI is launched on demand from win+A, NOT
+                # flung open on every login. Drop the system autostart that
+                # build-iso.sh ships (lab/server profiles keep it as their kiosk
+                # surface). Operator request 2026-06-15.
+                rm -f "${target}/etc/xdg/autostart/kldload-webui.desktop"
             fi
             chroot "${target}" update-desktop-database /usr/share/applications 2>/dev/null || true
         fi

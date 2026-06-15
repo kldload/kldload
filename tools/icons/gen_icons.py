@@ -134,9 +134,26 @@ def shell(): # full dashboard: window with a left nav sidebar (the "UI shell")
         +L(96,96,96,192,11)+L(70,118,80,118,8)+L(70,138,80,138,8)+L(70,158,80,158,8) \
         +L(118,124,188,124,8)+L(118,146,188,146,8)+L(118,168,166,168,8)
 
+def kldload_hex():  # brand mark A: hexagon "kernel" + downward load chevron
+    cx, cy, r = 128, 122, 82
+    pts = [(cx + r * math.cos(math.radians(a)), cy + r * math.sin(math.radians(a))) for a in range(-90, 270, 60)]
+    hexp = "M" + " L".join(f"{x:.1f} {y:.1f}" for x, y in pts) + " Z"
+    shaft = L(cx, cy - 40, cx, cy + 18, 15)
+    head = P(f"M{cx-28} {cy-8} L{cx} {cy+26} L{cx+28} {cy-8}", w=15)
+    base = L(cx - 32, cy + 46, cx + 32, cy + 46, 13)  # the "load target" baseline
+    return P(hexp, w=12) + shaft + head + base + Cf2(cx, cy + 46, 0.1)
+
+def kldload_k():  # brand mark B: bold geometric "k" monogram + amber load dot
+    stem = L(94, 60, 94, 196, 20)
+    arm_up = L(94, 132, 156, 70, 17)
+    arm_dn = L(94, 132, 162, 196, 17)
+    return stem + arm_up + arm_dn + Cf2(156, 70, 11)  # amber tip = "loaded"
+
 def terminal_(): return terminal()
 
 ICONS = {
+ # kldload-console = the unique brand/tray mark (kldload_k is a ready alt).
+ "kldload-console":kldload_hex,
  "kldload-webui":webui, "kldload-terminal":terminal, "kldload-zfs":zfs,
  "kldload-zfs-manager":zfs_manager, "kldload-k8s":kubernetes, "kldload-vms":vms,
  "kldload-metrics":metrics, "bob-chat":bob, "bob-gaming":bob_gaming,
@@ -152,7 +169,7 @@ LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-metrics":"Metrics","bob-chat":"Bob (jinn)","bob-gaming":"Gaming",
  "kldload-helm":"Helm","kldload-ansible":"Ansible","kldload-klab":"klab",
  "kst":"Health","kst-dashboard":"Dashboard","ksnap":"Snapshot","kexport":"Export",
- "kldload-k9s":"k9s",
+ "kldload-k9s":"k9s","kldload-console":"kldload",
 }
 
 # Colour-coded by FUNCTION GROUP so colour tells you the category at a glance
@@ -173,6 +190,8 @@ COLORS = {
  "bob-chat":"#c79be0","bob-gaming":"#d3a8ec",
  # web / console — teal
  "kldload-webui":"#5fc4bc","kldload-terminal":"#7cd0c9",
+ # kldload brand mark — a distinct bright kldload blue (no tool uses it)
+ "kldload-console":"#5ab0ff",
 }
 # Secondary accent — one warm complementary highlight per icon family.
 # Glyphs that opt in (via the F2 / Cf2 / RRf2 helpers below) get a single
@@ -192,6 +211,8 @@ ACCENTS2 = {
  "bob-chat":"#ffafd2","bob-gaming":"#ffafd2",
  # web / console teal → amber highlight (cursor / active dot)
  "kldload-webui":"#f0c674","kldload-terminal":"#f0c674",
+ # brand mark → amber "loaded" accent (matches the set's warm highlight)
+ "kldload-console":"#f0c674",
 }
 DEFAULT_COLOR = "#7aa6d6"
 DEFAULT_COLOR2 = "#f0c674"

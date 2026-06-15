@@ -1082,7 +1082,10 @@ NETCFG
 
         virsh start "$vm" 2>/dev/null && echo -e "  ${G}${vm}${N} started" ||
             echo -e "  ${Y}${vm}${N} already running"
-        virsh autostart "$vm" 2>/dev/null || true
+        # libvirt-guests owns VM boot state (see the block at end of bootstrap) —
+        # clear any static autostart so a deliberately-stopped VM stays off across
+        # reboots. || true: a libvirtd transient here must not abort bootstrap.
+        virsh autostart --disable "$vm" 2>/dev/null || true
         # Brief pause between VM starts — just enough for libvirt
         sleep 1
     done
@@ -1095,21 +1098,16 @@ NETCFG
     log "Waiting for all nodes to get IPs..."
     sleep 75
 
-    # Belt-and-suspenders: re-assert autostart on every cluster VM after the
-    # boot wait. The inline `virsh autostart` at line 1031 (inside the
-    # per-VM loop above) silently uses `|| true` and on .125 2026-06-07
-    # operator hit the case where NONE of the 4 cluster VMs (cp + 3 workers)
-    # had autostart set after a successful bootstrap — probably a libvirtd
-    # transient that ate the early autostart calls. After a host reboot, the
-    # whole cluster stayed shut off, and the operator had to manually
-    # `virsh start` each. This final pass loudly logs success/failure so a
-    # missed autostart never gets discovered the hard way again.
+    # Boot state is owned by libvirt-guests (it records the RUNNING guests at host
+    # shutdown and restores exactly that set on boot), NOT by per-VM static
+    # `virsh autostart`. Static autostart would force a cluster VM back on even
+    # after the operator deliberately stopped it — fighting the restore-what-was-
+    # running model (operator request 2026-06-15). So clear static autostart on
+    # every cluster VM here; the cluster still survives a host reboot as long as
+    # it was running when the host went down. (Supersedes the .125 2026-06-07
+    # belt-and-suspenders that pinned autostart ON.)
     for vm in "${CP_NAME}" $(seq -f "${WORKER_PREFIX}-%g" 1 "$WORKERS"); do
-        if virsh autostart "$vm" 2>/dev/null; then
-            log "  autostart enabled: $vm"
-        else
-            warn "  autostart FAILED for $vm — set manually with: virsh autostart $vm"
-        fi
+        virsh autostart --disable "$vm" 2>/dev/null || true
     done
 }
 
@@ -2001,10 +1999,9 @@ cmd_scale() {
         virsh start "${CP_NAME}" 2>&1 | head -1
         sleep 5
     fi
-    # Make sure scale-time CP start is autostart-enabled — same reason as the
-    # belt-and-suspenders block at the end of bootstrap (operator hit
-    # missing-autostart on .125 2026-06-07).
-    virsh autostart "${CP_NAME}" 2>/dev/null || true
+    # Boot state owned by libvirt-guests — clear static autostart (see the
+    # block at end of bootstrap). || true: a libvirtd transient is non-fatal.
+    virsh autostart --disable "${CP_NAME}" 2>/dev/null || true
 
     local cp_ip
     cp_ip="$(get_vm_ip "${CP_NAME}")"
@@ -2156,9 +2153,9 @@ NETCFG
                 continue
             fi
         fi
-        # Pin autostart on every successfully-started scale-out worker — see
-        # the belt-and-suspenders rationale at end of bootstrap.
-        virsh autostart "$name" 2>/dev/null || true
+        # Boot state owned by libvirt-guests — clear static autostart on each
+        # scale-out worker (see the block at end of bootstrap).
+        virsh autostart --disable "$name" 2>/dev/null || true
         new_ips+=("") # filled in next pass
     done
 

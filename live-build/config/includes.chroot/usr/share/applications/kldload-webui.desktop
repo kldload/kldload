@@ -1,23 +1,32 @@
 [Desktop Entry]
 # Window-matching entry for the kldload Web UI / installer window.
 #
-# The UI window is opened by kldload-webui-launch (autostart) as a Chrome
-# app with --class=com.kldload.webui. GNOME Shell matches a running window
-# to a .desktop ONLY by files under /usr/share/applications (or
-# ~/.local/share/applications) — NEVER the ~/.config/autostart entry. The
-# autostart .desktop carried Icon=/StartupWMClass= but, living in autostart,
-# was invisible to the window tracker, so the running UI fell back to the
-# generic blue-diamond icon (live installer, 10.100.10.123 2026-06-14).
-# This entry gives the window tracker the StartupWMClass→Icon binding it
-# needs. NoDisplay=true keeps it out of the app grid (the UI is opened by
-# autostart, not launched from the menu); NoDisplay does not affect
+# GNOME Shell's window tracker matches a running window to a .desktop ONLY by
+# files under /usr/share/applications (or ~/.local/share/applications) — never
+# the ~/.config/autostart entry — using the window's app_id against this
+# StartupWMClass.
+#
+# CRITICAL (verified on .139 2026-06-15 via WAYLAND_DEBUG set_app_id):
+# kldload-chrome-app runs Chrome as a NATIVE Wayland client, and in native
+# Wayland Chrome 149 IGNORES --class and derives the surface app_id from the
+# URL host+path with port/query/fragment stripped. Every kldload tool opens
+# https://localhost:8443/?app=1#<tool>, which all collapse to the SAME app_id:
+#
+#     chrome-localhost__-Default
+#
+# An earlier attempt set StartupWMClass=com.kldload.webui (the --class value),
+# which never matched, so the UI fell back to the generic blue-gear icon
+# (.123 2026-06-14, .139 2026-06-15). The value below is the app_id Chrome
+# actually emits. Because all tools share that one id, they all render this one
+# cohesive console icon (kldload accepts a single condensed icon by design).
+# NoDisplay=true keeps this matcher out of the app grid; it does not affect
 # running-window icon matching.
 Type=Application
 Name=kldload Web UI
 Comment=kldload control plane and installer
 Exec=/usr/local/bin/kldload-webui-launch
-Icon=kldload-webui
+Icon=kldload-console
 Terminal=false
 Categories=System;
-StartupWMClass=com.kldload.webui
+StartupWMClass=chrome-localhost__-Default
 NoDisplay=true
