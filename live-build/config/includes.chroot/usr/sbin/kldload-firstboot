@@ -1183,6 +1183,39 @@ main() {
         unset _nv_src _nv_ver _nv_ko_present _nv_restored _disabled _be_ds _root_ds _cl
     fi
 
+    # ── NVIDIA: blacklist nouveau in the ZBM cmdline — akmod OR dkms path ─────────
+    # The DKMS block above only runs when /usr/src/nvidia-* exists. The Fedora
+    # DEFAULT is the akmod path (RPM Fusion akmod-nvidia), which has NO /usr/src
+    # source dir — akmods builds kmod-nvidia at firstboot straight into
+    # /lib/modules/<kver>/extra/nvidia/. On that path the block above is skipped,
+    # so nouveau was never blacklisted in the cmdline ZFSBootMenu actually reads,
+    # and nvidia never loaded (10.100.10.123 2026-06-15: nvidia.ko built by akmods,
+    # desktop stuck on nouveau until the property was set by hand). This catch-all
+    # covers BOTH paths: whenever an NVIDIA GPU is present AND nvidia.ko exists for
+    # the running kernel, ensure org.zfsbootmenu:commandline carries the nouveau
+    # blacklist (set on the ROOT parent so every BE inherits it). ZFS property, not
+    # a bootloader binary — BE/snapshot-safe, reversible. Idempotent (skips if the
+    # blacklist is already present, so it never double-appends or fights the DKMS
+    # block above). NVIDIA loads on the next boot.
+    if lspci 2>/dev/null | grep -qiE 'vga.*nvidia|3d.*nvidia' &&
+        { compgen -G "/lib/modules/$(uname -r)/extra/nvidia/nvidia.ko"* >/dev/null 2>&1 ||
+            compgen -G "/lib/modules/$(uname -r)/extra/nvidia.ko"* >/dev/null 2>&1; } &&
+        command -v zfs >/dev/null 2>&1; then
+        _be_ds="$(findmnt -no SOURCE / 2>/dev/null)"
+        _root_ds="${_be_ds%/*}"
+        if [[ "$_root_ds" == */ROOT ]] && zfs list "$_root_ds" >/dev/null 2>&1; then
+            _cl="$(zfs get -H -o value org.zfsbootmenu:commandline "$_root_ds" 2>/dev/null)"
+            if [[ "$_cl" != *blacklist=nouveau* ]]; then
+                if zfs set org.zfsbootmenu:commandline="${_cl} rd.driver.blacklist=nouveau,nova_core modprobe.blacklist=nouveau,nova_core nvidia-drm.modeset=1" "$_root_ds" 2>>"$LOG"; then
+                    ok "NVIDIA: nouveau blacklisted in ZFSBootMenu cmdline (${_root_ds}) — driver loads next boot (akmod/dkms catch-all)"
+                else
+                    log "WARNING: could not set org.zfsbootmenu:commandline on ${_root_ds} — nvidia may stay on nouveau"
+                fi
+            fi
+        fi
+        unset _be_ds _root_ds _cl
+    fi
+
     # ── Desktop apps that need network at first boot ─────────────────────────
     # Steam ships via Flathub (cross-distro; no native RHEL package). Done at
     # firstboot rather than install-time so the install itself stays offline-
