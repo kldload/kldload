@@ -2344,7 +2344,38 @@ NCTREPO
 blacklist nouveau
 options nouveau modeset=0
 NOUVEAU
-                k_log_to "$log" "  nouveau blacklisted on target — first-boot will use nvidia after akmods build"
+                k_log_to "$log" "  nouveau blacklisted on target (modprobe.d)"
+            fi
+
+            # Blacklist nouveau in the ZFSBootMenu cmdline too — this is what makes
+            # NVIDIA bind on the FIRST boot (no reboot). kldload boots via ZBM, which
+            # reads the kernel command line ONLY from the org.zfsbootmenu:commandline
+            # ZFS property — it ignores /etc/modprobe.d AND grub.cfg, so the
+            # modprobe.d blacklist above is not honored early enough and nouveau wins
+            # boot #1 (10.100.10.123 2026-06-15: nvidia.ko present, desktop stuck on
+            # nouveau until a manual reboot). SAFETY GATE: only do this when nvidia.ko
+            # is actually present in the target (the pre-built kmod-nvidia landed) —
+            # otherwise we'd block nouveau on a box with no working driver and boot to
+            # a black screen. If the module will only build at firstboot (akmod source,
+            # no pre-built kmod), the firstboot NVIDIA healing net sets this property
+            # AFTER confirming the build (costs one reboot, but never bricks the GPU).
+            # Set on the ROOT parent so every BE inherits it; it is a ZFS property,
+            # not a bootloader binary, so it is fully BE/snapshot-safe and reversible.
+            if compgen -G "${target}/lib/modules/"*"/extra/nvidia/nvidia.ko"* >/dev/null 2>&1 ||
+                compgen -G "${target}/lib/modules/"*"/extra/nvidia.ko"* >/dev/null 2>&1; then
+                if zfs list rpool/ROOT >/dev/null 2>&1; then
+                    _zbm_cl="$(zfs get -H -o value org.zfsbootmenu:commandline rpool/ROOT 2>/dev/null)"
+                    if [[ "$_zbm_cl" != *blacklist=nouveau* ]]; then
+                        if zfs set org.zfsbootmenu:commandline="${_zbm_cl} rd.driver.blacklist=nouveau,nova_core modprobe.blacklist=nouveau,nova_core nvidia-drm.modeset=1" rpool/ROOT 2>>"$log"; then
+                            k_log_to "$log" "  nouveau blacklisted in ZFSBootMenu cmdline — NVIDIA loads on FIRST boot (pre-built kmod present)"
+                        else
+                            k_log_to "$log" "  WARNING: could not set org.zfsbootmenu:commandline — NVIDIA may need a reboot to load"
+                        fi
+                    fi
+                    unset _zbm_cl
+                fi
+            else
+                k_log_to "$log" "  nvidia.ko not pre-built in target — leaving nouveau live; firstboot will switch after akmods builds (one reboot)"
             fi
 
             # 3. Drop the CUDA repo too, with a tiered fallback baseurl chain.
