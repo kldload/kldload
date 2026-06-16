@@ -191,7 +191,7 @@ The user picks the target distro at install time. After install the system runs 
 
 ## Releases
 
-### 1.3.1 &mdash; EL10 parity (current)
+### 1.3.1 &mdash; The Kernel-Loaded Desktop (current)
 - **CentOS Stream + Rocky moved to EL10** (kernel 6.12, OpenZFS 2.3) to match RHEL 10 &mdash; retires the EL9 (5.14) path that wedged dracut/NVIDIA on first boot
 - Per-tool **native-app dashboards** (each web tool opens as its own dock-iconed window) and **VM restore-on-reboot** (running VMs return after a reboot; stopped stay stopped)
 - Live env corrected to Fedora 44 **kernel 7.0.12 / OpenZFS 2.4.3** (the old 6.19 pin is gone; ZFS 2.4.3 builds against the GA 7.0 kernel)
