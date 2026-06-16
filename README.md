@@ -39,22 +39,22 @@ Boot the USB &rarr; the web UI opens over TLS at `https://<host>:8443` &rarr; pi
 
 | Distribution | Install method | Offline |
 |---|---|---|
-| CentOS Stream 9 | `dnf --installroot` | Yes (RPM darksite) |
+| CentOS Stream 10 | `dnf --installroot` | Network (no EL darksite yet) |
 | Debian 13 (Trixie) | `debootstrap` | Yes (APT darksite) |
 | Ubuntu 24.04 (Noble) | `debootstrap` | Yes (APT darksite, universe enabled) |
 | Fedora 44 | `dnf --installroot` | Yes (RPM darksite) |
-| Rocky Linux 9 | `dnf --installroot` | Yes (shared RPM darksite) |
+| Rocky Linux 10 | `dnf --installroot` | Network (no EL darksite yet) |
 | RHEL 10 | `dnf --installroot` | No (Red Hat CDN; subscription required) |
 | Arch Linux | `pacstrap` | No (rolling; requires internet) |
 | Alpine Linux | `apk add --root` | Partial (apk cache) |
 
-Live environment is **Fedora 44** (kernel pinned at 6.19.x, OpenZFS 2.4.x).
+Live environment is **Fedora 44** (kernel 7.0.x — currently `7.0.12` — with OpenZFS `2.4.3` on root).
 
-> **Fedora 44 + ZFS:** there is no upstream `zfsonlinux` build for Fedora 44 yet, so kldload bridges to the `fc43` OpenZFS repo and pins the target kernel to 6.19.x (F44 ships 7.0.x, which the bridge's DKMS can't build against). When an upstream Fedora 44 OpenZFS source lands, the bridge and the kernel pin go away and the target moves to native fc44 + the GA kernel.
+> **Fedora 44 + ZFS:** OpenZFS now ships a native `fc44` build (`2.4.3`) that builds against Fedora 44's stock 7.0 kernel, so there is no `fc43` bridge and no kernel pin — the live ISO and the installed target ride the GA kernel. The shipped kernel + OpenZFS + NVIDIA are **versionlocked at first boot**, so a routine `dnf update` can't pull a kernel ZFS can't build for. (OpenZFS 2.4.x caps at kernel ≤ 7.0.x; the substrate only moves to a newer kernel once a matching ZFS build exists.)
 
 ---
 
-## Workstation edition (1.3.0)
+## Workstation edition (1.3.1)
 
 The **Desktop** profile is a GUI-first RHEL 10 workstation: expert operations — ZFS replication, KVM, Kubernetes, eBPF observability — exposed as point-and-shoot desktop apps, not CLI rituals.
 
@@ -157,7 +157,7 @@ klab matrix run script.sh # run a change against every supported distro in paral
 | `full` | Rebuild the builder image + all darksites, then build the ISO |
 | `clean` | Remove build artifacts |
 | `burn` | Write the ISO to a USB device |
-| `builder-image` | Rebuild the CentOS Stream 9 builder container |
+| `builder-image` | Rebuild the Fedora 44 builder container |
 | `smoke-build` | Static checks on the built ISO (size, freshness, content) |
 | `smoke-test <distro> <profile>` | Full install lifecycle in KVM, then smoke-test the installed target |
 | `build-debian-darksite` / `build-ubuntu-darksite` | Build / refresh the APT offline mirrors |
@@ -172,8 +172,8 @@ klab matrix run script.sh # run a change against every supported distro in paral
 ## Architecture
 
 ```
-Live environment:  Fedora 44 (kernel 6.19.x, OpenZFS 2.4.x)
-Builder:           CentOS Stream 9 container (lorax + squashfs-tools + xorriso + dracut)
+Live environment:  Fedora 44 (kernel 7.0.x, OpenZFS 2.4.3)
+Builder:           Fedora 44 container (lorax + squashfs-tools + xorriso + dracut)
 Bootstrap paths:   dnf --installroot  (CentOS / Fedora / Rocky / RHEL)
                    debootstrap        (Debian / Ubuntu)
                    pacstrap           (Arch)
@@ -191,7 +191,14 @@ The user picks the target distro at install time. After install the system runs 
 
 ## Releases
 
-### 1.3.0 &mdash; Workstation+ (current)
+### 1.3.1 &mdash; EL10 parity (current)
+- **CentOS Stream + Rocky moved to EL10** (kernel 6.12, OpenZFS 2.3) to match RHEL 10 &mdash; retires the EL9 (5.14) path that wedged dracut/NVIDIA on first boot
+- Per-tool **native-app dashboards** (each web tool opens as its own dock-iconed window) and **VM restore-on-reboot** (running VMs return after a reboot; stopped stay stopped)
+- Live env corrected to Fedora 44 **kernel 7.0.12 / OpenZFS 2.4.3** (the old 6.19 pin is gone; ZFS 2.4.3 builds against the GA 7.0 kernel)
+- Substrate (kernel + OpenZFS + NVIDIA) **versionlocked at first boot** so `dnf update` can't brick ZFS boot
+- KVM / Kubernetes / lab profiles now warn they need hardware virtualization (VT-x / AMD-V or nested virt)
+
+### 1.3.0 &mdash; Workstation+
 The Full Stack Automation work-in-progress that was tagged 1.2.0 internally
 was never released as a separate version &mdash; it shipped as part of 1.3.0
 alongside the Workstation polish. "+" is the hotrod mark on the default
