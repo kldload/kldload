@@ -2435,6 +2435,25 @@ CUDAREPO
                 k_log_to "$log" "WARNING: NVIDIA driver install had issues (no GPU?)"
             ;;
         esac
+        # NVIDIA nouveau-blacklist on the ZFSBootMenu cmdline — UNIVERSAL, for
+        # EVERY NVIDIA-detected distro (not just Fedora). kldload boots via ZBM,
+        # which builds the kernel cmdline ONLY from org.zfsbootmenu:commandline.
+        # The fedora) branch set this itself; the EL family (centos/rocky/rhel)
+        # did NOT, so on CentOS nouveau won boot #1 and nvidia only bound after
+        # the firstboot catch-all + a SECOND reboot (CentOS Stream 9 .139
+        # 2026-06-16). Setting it here for all distros makes NVIDIA bind on the
+        # FIRST boot everywhere. Idempotent guard; ROOT parent so every BE
+        # inherits; ZFS property = BE/snapshot-safe + reversible.
+        if zfs list rpool/ROOT >/dev/null 2>&1; then
+            local _zbm_cl_u
+            _zbm_cl_u="$(zfs get -H -o value org.zfsbootmenu:commandline rpool/ROOT 2>/dev/null)"
+            if [[ "$_zbm_cl_u" != *blacklist=nouveau* ]]; then
+                zfs set org.zfsbootmenu:commandline="${_zbm_cl_u} rd.driver.blacklist=nouveau,nova_core modprobe.blacklist=nouveau,nova_core nvidia-drm.modeset=1" rpool/ROOT 2>>"$log" &&
+                    k_log_to "$log" "  nouveau blacklisted in ZBM cmdline at install (all distros) — NVIDIA binds on first boot" ||
+                    k_log_to "$log" "  WARNING: could not set org.zfsbootmenu:commandline — NVIDIA may need a reboot"
+            fi
+            unset _zbm_cl_u
+        fi
         # DKMS build — dnf only registers the module ('added'), it doesn't build in chroot
         local _nv_ver
         _nv_ver=$(rpm --root="${target}" -q --qf '%{VERSION}' kmod-nvidia-open-dkms 2>/dev/null | sed 's/-.*//' || echo "")
