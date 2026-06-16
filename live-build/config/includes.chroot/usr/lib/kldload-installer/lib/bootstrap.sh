@@ -930,7 +930,7 @@ CTMP
             rm -f "${target}/etc/yum.repos.d/centos-tmp.repo"
             # Remove ALL CentOS packages to avoid version conflicts with RHEL
             chroot "${target}" /usr/bin/rpm -e --nodeps --allmatches \
-                $(chroot "${target}" /usr/bin/rpm -qa 'centos-*' 2>/dev/null) 2>>"$log" || true
+                $(rpm --root="${target}" -qa 'centos-*' 2>/dev/null) 2>>"$log" || true
             # Install redhat-release
             local rhel_rpms="/root/darksite/rhel-release"
             [[ -d "$rhel_rpms" ]] || rhel_rpms="/usr/share/kldload/rhel-release"
@@ -1124,7 +1124,19 @@ gpgcheck=0
 cost=1
 DSREPO
 
-            if [[ "${KLDLOAD_ALLOW_INTERNET_FALLBACK:-0}" != "1" ]]; then
+            # CentOS Stream / Rocky (the FREE EL rebuilds) have no local EL
+            # darksite — only Fedora/Debian/Ubuntu are mirrored — so strict
+            # offline leaves dnf with nothing to install (pass 1 finds zero
+            # packages → ZFS deps unresolvable → install aborts). Default them to
+            # their PUBLIC network repos (BaseOS/AppStream/CRB + EPEL + OpenZFS),
+            # the same online posture RHEL already uses via its subscription CDN.
+            # Until a build/darksite-el{9,10} exists, EL rebuilds join Arch as a
+            # network-required substrate. KLDLOAD_ALLOW_INTERNET_FALLBACK=1 forces
+            # network mode for any distro. Verified: CentOS Stream 9 installs +
+            # builds ZFS-on-root this way (.139 2026-06-16).
+            local _kld_allow_net="${KLDLOAD_ALLOW_INTERNET_FALLBACK:-0}"
+            case "${KLDLOAD_DISTRO:-}" in centos | rocky) _kld_allow_net=1 ;; esac
+            if [[ "${_kld_allow_net}" != "1" ]]; then
                 # Disable upstream repos that were written earlier in this
                 # function (fedora.repo / centos.repo / rocky.repo / etc.).
                 # Strict offline mode: darksite is the only source.
@@ -1138,7 +1150,7 @@ DSREPO
                     k_log_to "$log" "  disabled upstream repo (strict offline): $(basename "$_up_repo")"
                 done
             else
-                k_log_to "$log" "  KLDLOAD_ALLOW_INTERNET_FALLBACK=1 → upstream repos stay enabled (hybrid mode)"
+                k_log_to "$log" "  upstream repos stay enabled (network mode: ${KLDLOAD_DISTRO:-?} has no local EL darksite, or FALLBACK=1)"
             fi
         fi
     fi
@@ -1826,7 +1838,7 @@ CUSTOMREPO
     # weak-dep resolution or pre-existing conflicts can quietly drop
     # packages even without --skip-broken. Hard-check post-install:
     for _zp in zfs zfs-dkms zfs-dracut; do
-        if ! chroot "${target}" /usr/bin/rpm -q "$_zp" >/dev/null 2>&1; then
+        if ! rpm --root="${target}" -q "$_zp" >/dev/null 2>&1; then
             k_log_to "$log" "FATAL: ${_zp} not installed in target after pass 3 — refusing to claim success"
             return 1
         fi
@@ -1850,7 +1862,7 @@ CUSTOMREPO
     fi
     local _missing_crit=()
     for _cp in "${_crit[@]}"; do
-        chroot "${target}" /usr/bin/rpm -q "$_cp" >/dev/null 2>&1 || _missing_crit+=("$_cp")
+        rpm --root="${target}" -q "$_cp" >/dev/null 2>&1 || _missing_crit+=("$_cp")
     done
     # The package manager is verified by BINARY, not rpm name: Fedora 41+/EL10
     # ship it as `dnf5`, EL9 as `dnf` (dnf4), and the `dnf` command may be a
@@ -2040,7 +2052,7 @@ CUSTOMREPO
     kver=""
     case "$distro" in
     centos | rocky | rhel | fedora)
-        kver=$(chroot "${target}" /usr/bin/rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-core 2>/dev/null |
+        kver=$(rpm --root="${target}" -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-core 2>/dev/null |
             sort -V | tail -1)
         ;;
     debian | ubuntu)
@@ -2060,7 +2072,7 @@ CUSTOMREPO
     k_log_to "$log" "Compiling ZFS kernel module via DKMS for ${kver} (initramfs rebuild follows)..."
 
     local zfs_ver
-    zfs_ver=$(chroot "${target}" /usr/bin/rpm -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")
+    zfs_ver=$(rpm --root="${target}" -q --qf '%{VERSION}' zfs-dkms 2>/dev/null || echo "")
     if [[ -z "$zfs_ver" ]]; then
         k_log_to "$log" "FATAL: zfs-dkms not installed in target — pass 3 verification should have caught this earlier"
         set -e
@@ -2425,7 +2437,7 @@ CUDAREPO
         esac
         # DKMS build — dnf only registers the module ('added'), it doesn't build in chroot
         local _nv_ver
-        _nv_ver=$(chroot "${target}" /usr/bin/rpm -q --qf '%{VERSION}' kmod-nvidia-open-dkms 2>/dev/null | sed 's/-.*//' || echo "")
+        _nv_ver=$(rpm --root="${target}" -q --qf '%{VERSION}' kmod-nvidia-open-dkms 2>/dev/null | sed 's/-.*//' || echo "")
         if [[ -n "$_nv_ver" && -n "$kver" ]]; then
             k_log_to "$log" "Building NVIDIA DKMS ${_nv_ver} for kernel ${kver}..."
             # `dkms build` requires the module to be present in the DKMS tree
