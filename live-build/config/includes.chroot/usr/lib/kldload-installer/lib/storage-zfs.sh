@@ -306,9 +306,17 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     local _fedora_rel="${KLDLOAD_FEDORA_RELEASE:-44}"
     case "${KLDLOAD_DISTRO:-centos}" in
     centos | rocky)
-        # EL9 = zfs 2.2 (Rocky 9 + CentOS Stream 9 stay on this branch).
-        _zfs_compat_target="openzfs-2.2-linux"
-        _zfs_compat_reason="EL9 (centos/rocky 9) ships zfs 2.2"
+        # CentOS Stream / Rocky default to EL10 (kernel 6.12) — EL9's 5.14 +
+        # zfs-2.2 DKMS path was wedging dracut/NVIDIA on first boot. EL10 ships
+        # zfs 2.3 (same el10 OpenZFS repos RHEL 10 uses). KLDLOAD_RELEASE=9 still
+        # gets the conservative EL9 (zfs 2.2) profile for anyone pinning it.
+        if [[ "${KLDLOAD_RELEASE:-10}" == "9" ]]; then
+            _zfs_compat_target="openzfs-2.2-linux"
+            _zfs_compat_reason="EL9 (centos/rocky 9) ships zfs 2.2"
+        else
+            _zfs_compat_target="openzfs-2.3-linux"
+            _zfs_compat_reason="EL10 (centos/rocky 10) ships zfs 2.3"
+        fi
         ;;
     rhel)
         # RHEL 10 (GA May 2025, kernel 6.12) — OpenZFS publishes 2.3.x for el10.

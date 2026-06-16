@@ -642,26 +642,30 @@ k_bootstrap_base() {
 
 _k_bootstrap_dnf() {
     local target="${KLDLOAD_TARGET:?}"
-    local release="${KLDLOAD_RELEASE:-9}"
+    local release="${KLDLOAD_RELEASE:-10}"
     local log="${KLDLOAD_BOOTSTRAP_LOG:-/var/log/installer/bootstrap.log}"
 
     local distro="${KLDLOAD_DISTRO:-centos}"
 
-    # Fedora uses its own release version, not the EL release (9). Default F44:
-    # F44's base repo ships the 6.19.x GA kernel and the fc43 OpenZFS bridge
-    # (zfs-dkms 2.4.x) builds against 6.19 — the exact combo the live env runs.
-    # The 7.0.x updates kernel (no buildable ZFS) is excluded at install time and
-    # pinned out of the installed dnf.conf, so the box stays on 6.19 and upgrades
-    # can't brick the ZFS boot. KLDLOAD_FEDORA_RELEASE=43 for the older 6.17 GA.
+    # Fedora uses its own release version, not the EL release. Default F44:
+    # F44 ships kernel 7.0.x (currently 7.0.12-201.fc44) and the zfsonlinux fc44
+    # build serves OpenZFS 2.4.3, which conflicts only at kernel > 7.0.999 — so
+    # F44's native kernel is fully buildable and we NO LONGER pin it (the old
+    # exclude=kernel-7.* / 6.19 cap is gone; see build-iso.sh). The installed
+    # system versionlocks the shipped kernel+zfs pair at firstboot, so a routine
+    # update can't drift onto a kernel ZFS can't build for.
+    # WARN: OpenZFS 2.4 caps at kernel 7.0.999. If F44 ships 7.1 before a
+    # 7.1-capable ZFS lands, the build aborts on dep resolution (fix = zfs bump,
+    # not a kernel pin). KLDLOAD_FEDORA_RELEASE=43 for the older 6.17 GA.
     if [[ "${distro}" == "fedora" ]]; then
         release="${KLDLOAD_FEDORA_RELEASE:-44}"
     fi
 
-    # RHEL has moved to 10 (GA May 2025); CentOS Stream and Rocky stay on 9.
-    # KLDLOAD_RELEASE overrides for users who still need RHEL 9.
-    if [[ "${distro}" == "rhel" ]]; then
-        release="${KLDLOAD_RELEASE:-10}"
-    fi
+    # All EL substrates default to 10 (release default above): RHEL 10 (GA May
+    # 2025, kernel 6.12), CentOS Stream 10, and Rocky 10 all share the el10
+    # OpenZFS repos and the buildable zfs-2.3 DKMS path. EL9's 5.14 kernel +
+    # zfs-2.2 was wedging dracut/NVIDIA on first boot. Pin KLDLOAD_RELEASE=9 to
+    # fall back to the old EL9 profile (conservative, but ancient).
 
     k_log_to "$log" "Bootstrapping ${distro} ${release} → ${target}"
 
@@ -1642,7 +1646,7 @@ CUSTOMREPO
             k_log_to "$log" "    3. Firewall / proxy blocking https://zfsonlinux.org."
             k_log_to "$log" ""
             k_log_to "$log" "  Workarounds:"
-            k_log_to "$log" "    - Install CentOS Stream 9 / Rocky 9 / RHEL 10 / Debian 13 / Ubuntu 24.04"
+            k_log_to "$log" "    - Install CentOS Stream 10 / Rocky 10 / RHEL 10 / Debian 13 / Ubuntu 24.04"
             k_log_to "$log" "      instead (all have working ZFS sources baked into this ISO)."
             k_log_to "$log" "    - Pass KLDLOAD_FEDORA_RELEASE=43 to install F43 directly."
             k_log_to "$log" "============================================================"

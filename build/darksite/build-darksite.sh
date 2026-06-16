@@ -10,7 +10,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_SETS_DIR="${SCRIPT_DIR}/config/package-sets"
 ARCH="${ARCH:-x86_64}"
-RELEASE="${RELEASE:-9}"
+# EL10 (kernel 6.12, zfs 2.3) is the default EL target — matches RHEL 10 and the
+# CentOS Stream / Rocky bootstrap default. NOTE: this builder runs on Fedora 44
+# (no CentOS BaseOS/AppStream repos configured), so this pass only captures the
+# add-on repos it can reach (zfs el10, k8s, docker). True EL10 base air-gap needs
+# CentOS Stream 10 BaseOS/AppStream/CRB repos wired in here first; until then the
+# installer's centos/rocky path falls back to network (see bootstrap.sh
+# _kld_allow_net). Override with RELEASE=9 for the legacy EL9 set.
+RELEASE="${RELEASE:-10}"
 DARKSITE_ROOT="${DARKSITE_ROOT:-/build/live-build/config/includes.chroot/root/darksite}"
 REPO_DIR="${DARKSITE_ROOT}/rpm"
 
