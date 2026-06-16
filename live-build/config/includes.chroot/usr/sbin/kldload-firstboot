@@ -907,6 +907,34 @@ LVG
     if [[ "${ROLE}" == "desktop" ]]; then
         rm -f /etc/xdg/autostart/kldload-webui.desktop
         log "desktop: web-GUI kiosk autostart removed (web UI is a win+A launcher)"
+        # Re-assert GDM autologin for the admin user AFTER all packages are in:
+        # profiles.sh writes it at install, but the gdm3 dpkg postinst (Debian/
+        # Ubuntu) resets daemon.conf, leaving a login prompt (.139 debian-trixie
+        # 2026-06-15). Path differs — gdm3 on Debian/Ubuntu, gdm on Fedora/EL.
+        # Admin is uid 1000 by convention; both conf names written (each DM reads
+        # only its own — harmless on the other).
+        local _audir="" _au
+        [[ -d /etc/gdm3 ]] && _audir=/etc/gdm3
+        [[ -z "$_audir" && -d /etc/gdm ]] && _audir=/etc/gdm
+        _au=$(id -nu 1000 2>/dev/null || true)
+        if [[ -n "$_audir" && -n "$_au" ]]; then
+            for _gc in custom.conf daemon.conf; do
+                cat >"${_audir}/${_gc}" <<AUTOLOGIN
+[daemon]
+AutomaticLoginEnable=True
+AutomaticLogin=${_au}
+
+[security]
+
+[xdmcp]
+
+[chooser]
+
+[debug]
+AUTOLOGIN
+            done
+            log "desktop: GDM autologin re-asserted for ${_au} (${_audir})"
+        fi
     fi
 }
 
