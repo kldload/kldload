@@ -51,10 +51,18 @@ url="${2:?usage: kldload-chrome-app <app-id> <url>}"
 profile_dir="${XDG_DATA_HOME:-$HOME/.local/share}/kldload-chrome/${app_id}"
 mkdir -p "$profile_dir"
 
-# google-chrome-stable is the kldload default; fall back to google-chrome.
-chrome="$(command -v google-chrome-stable || command -v google-chrome || true)"
+# Browser: google-chrome on the RPM distros (kldload default), chromium on
+# Debian/Ubuntu — and chromium as a fallback anywhere google-chrome isn't
+# installed. Both are Chromium-based, so --app mode, Bob's Web Speech API, and
+# the ~/.pki/nssdb cert trust all behave identically. WHY this matters: without
+# the fallback, kldload-chrome-app exited "not found" on Debian and EVERY web-UI
+# tool failed to launch (.139 debian-trixie 2026-06-15). NOTE: the Wayland
+# app_id PREFIX differs by binary (chrome- vs chromium-), so profiles.sh aligns
+# each launcher's StartupWMClass to the installed browser so dock icons match.
+chrome="$(command -v google-chrome-stable || command -v google-chrome \
+    || command -v chromium || command -v chromium-browser || true)"
 if [[ -z "$chrome" ]]; then
-    echo "kldload-chrome-app: google-chrome not found" >&2
+    echo "kldload-chrome-app: no Chromium-based browser (google-chrome/chromium) found" >&2
     exit 1
 fi
 
