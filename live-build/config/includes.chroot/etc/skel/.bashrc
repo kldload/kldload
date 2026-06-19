@@ -57,18 +57,21 @@ export PATH="$HOME/.local/bin:/usr/local/bin:/usr/local/sbin:$PATH"
 [[ -d "$HOME/go/bin" ]] && export PATH="$PATH:$HOME/go/bin"
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
+# Compact k8s indicator for the prompt. Emits a short "⎈<namespace> " ONLY when
+# there's a real current-context — and the brackets/space live INSIDE the output
+# so a non-k8s shell (sysdiag / local console) gets a clean prompt with no empty
+# "[]" and no clutter. (Was "[kubernetes-admin@kubernetes/default]" on every
+# prompt, which buried a local root shell in cluster noise — operator on .104.)
 __ps1_k8s_ns() {
+  command -v kubectl >/dev/null 2>&1 || return
   local ctx ns
   ctx="$(kubectl config current-context 2>/dev/null)" || return
+  [[ -n "$ctx" ]] || return
   ns="$(kubectl config view --minify --output 'jsonpath={..namespace}' 2>/dev/null)"
-  printf '%s/%s' "${ctx}" "${ns:-default}"
+  printf '\001\e[96m\002⎈%s \001\e[0m\002' "${ns:-default}"
 }
 
-if command -v kubectl >/dev/null 2>&1; then
-  PS1='\[\e[96m\][$(__ps1_k8s_ns)]\[\e[0m\] \[\e[1;34m\]\w\[\e[0m\] \[\e[95m\]\u@\h\[\e[0m\]\$ '
-else
-  PS1='\[\e[1;36m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
-fi
+PS1='$(__ps1_k8s_ns)\[\e[1;36m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
 
 # ── Internal helpers (must be before tool sections) ─────────────────────────
 __have()           { command -v "$1" >/dev/null 2>&1; }
