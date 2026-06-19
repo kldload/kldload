@@ -1,0 +1,17 @@
+# kldload dnf5 boot-environment snapshot — libdnf5 "actions" plugin rule.
+# Installed to: /etc/dnf/libdnf5-plugins/actions.d/kldload-be.actions by firstboot.
+# Requires the libdnf5-plugin-actions package (firstboot installs it on dnf5).
+#
+# Role: snapshot the ZFS root boot environment before every dnf5 transaction —
+#   the dnf5 peer of the dnf4 kldload_be.py plugin and the apt/pacman hooks, all
+#   calling the same helper, so a bad `dnf upgrade` is a ZFSBootMenu rollback
+#   rather than a reinstall. dnf5 (Fedora 41+) dropped the dnf4 Python plugin API,
+#   so the EL plugin cannot work here — this actions file is the replacement.
+#
+# Line format (libdnf5 actions): callback:pkg_filter:direction:options:command
+#   Five colon-separated fields; empty filter/direction/options = fire on EVERY
+#   transaction. snapshot-create.sh exits 0 on a non-ZFS root, so this never
+#   blocks an update. No raise_error option — a snapshot hiccup must not abort dnf.
+# Consequence if missing: dnf5 transactions take NO labelled pre-tx BE snapshot;
+#   you fall back to the coarser hourly auto/sanoid streams.
+pre_transaction::::/usr/local/sbin/snapshot-create.sh dnf-pre

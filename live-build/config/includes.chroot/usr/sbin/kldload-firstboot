@@ -1498,31 +1498,51 @@ main() {
     # rollback via grub even when ZFS BEs are the primary recovery path).
     if command -v dnf >/dev/null 2>&1; then
         log "Locking load-bearing kernel/driver/ZFS packages — userspace stays unlocked"
-        dnf install -y python3-dnf-plugin-versionlock >>"$LOG" 2>&1 ||
-            log "WARNING: versionlock plugin install failed — core packages NOT locked"
-        if command -v dnf >/dev/null 2>&1 && dnf versionlock list >/dev/null 2>&1; then
-            # WARN: ZFS must be locked as a COMPLETE kABI-coupled set, not a
-            # representative member. On EL10 the stack is 7 packages (zfs,
-            # zfs-dkms, zfs-dracut + libzfs5/libnvpair3/libuutil3/libzpool5)
-            # that move in lockstep. Locking only `zfs zfs-dkms` (and the
-            # since-removed `zfs-libs`/`spl` names, which match nothing on
-            # EL10) left the rest floating: the first OpenZFS point release
-            # (2.2.9 -> 2.2.10) deadlocked the WHOLE `dnf update` solver and
-            # blocked userspace security updates too (onyx, 1.3.1). Globs lock
-            # the set whatever the per-EL/Fedora split names are and survive a
-            # soname major (libzfs5 -> libzfs6) without going stale. Unmatched
-            # globs (e.g. `spl*` on EL10) are harmless no-ops. # HISTORY: 1.3.1
-            dnf versionlock add \
-                kernel kernel-core kernel-modules kernel-modules-core kernel-modules-extra \
-                kernel-devel kernel-headers \
-                nvidia-driver nvidia-driver-cuda nvidia-driver-libs nvidia-kmod-common \
-                xorg-x11-drv-nvidia akmod-nvidia \
-                zfs zfs-dkms zfs-dracut \
-                'libzfs*' 'libnvpair*' 'libuutil*' 'libzpool*' 'zfs-libs' 'spl*' \
-                bcc bcc-tools libbpf-tools bpftool bpftrace \
-                >>"$LOG" 2>&1 &&
-                ok "Core packages versionlocked — userspace can still security-update via dnf" ||
-                log "WARNING: dnf versionlock add failed — operator can retry: dnf versionlock add <list>"
+        # versionlock ships in a DIFFERENT package per dnf generation: dnf4 (EL10)
+        # has it as python3-dnf-plugin-versionlock; dnf5 (Fedora 41+) ships it in
+        # dnf5-plugins. Install the wrong one and `dnf versionlock` silently does
+        # not exist → the kABI substrate ships UNLOCKED. That is the Fedora-44
+        # footgun: F44 is the newest-everything substrate (kernel 7.0.12 + zfs
+        # 2.4.3, active 7.1 fragility window) and is the one that MOST needs the
+        # freeze, yet was the one silently getting none. Branch on dnf generation.
+        if command -v dnf5 >/dev/null 2>&1 || rpm -q dnf5 >/dev/null 2>&1; then
+            dnf install -y dnf5-plugins >>"$LOG" 2>&1 ||
+                log "WARNING: dnf5-plugins install failed — core packages NOT locked"
+        else
+            dnf install -y python3-dnf-plugin-versionlock >>"$LOG" 2>&1 ||
+                log "WARNING: versionlock plugin install failed — core packages NOT locked"
+        fi
+        if dnf versionlock list >/dev/null 2>&1; then
+            # WARN: kernel/NVIDIA/ZFS must be locked as COMPLETE kABI-coupled sets,
+            # not representative members. On EL10 ZFS alone is 7 packages (zfs,
+            # zfs-dkms, zfs-dracut + libzfs5/libnvpair3/libuutil3/libzpool5); on
+            # Fedora the soname digits differ (libzfs6...) and NVIDIA splits again.
+            # Locking only `zfs zfs-dkms` left the rest floating and the first
+            # OpenZFS point release (2.2.9 -> 2.2.10) deadlocked the WHOLE
+            # `dnf update` solver, blocking userspace security updates too (onyx,
+            # 1.3.1). Build the list from the ACTUALLY-INSTALLED rpms via rpm
+            # globs: complete by construction, version-agnostic, and only concrete
+            # installed names are passed — dnf4 versionlock expands globs but
+            # dnf5's does not reliably AND can choke on a not-installed name, so
+            # resolving to real names first keeps BOTH generations happy.
+            # HISTORY: 1.3.1
+            mapfile -t _kabi_lock < <(
+                rpm -qa --qf '%{NAME}\n' \
+                    'kernel' 'kernel-core' 'kernel-modules*' 'kernel-devel' 'kernel-headers' \
+                    'nvidia-driver*' 'nvidia-kmod-common' 'xorg-x11-drv-nvidia*' \
+                    'akmod-nvidia' 'kmod-nvidia*' \
+                    'zfs' 'zfs-dkms' 'zfs-dracut' \
+                    'libzfs*' 'libnvpair*' 'libuutil*' 'libzpool*' 'spl' 'spl-dkms' \
+                    'bcc' 'bcc-tools' 'libbpf-tools' 'bpftool' 'bpftrace' \
+                    2>/dev/null | sort -u
+            )
+            if [[ "${#_kabi_lock[@]}" -gt 0 ]]; then
+                dnf versionlock add "${_kabi_lock[@]}" >>"$LOG" 2>&1 &&
+                    ok "Core packages versionlocked (${#_kabi_lock[@]} pkgs) — userspace can still security-update via dnf" ||
+                    log "WARNING: dnf versionlock add failed — operator can retry: dnf versionlock add <list>"
+            else
+                log "WARNING: no kABI packages resolved to lock (kernel/zfs not installed?)"
+            fi
         fi
         # Prevent dnf-automatic from EVER firing in the background, even if a
         # future RPM transaction pulls it in transitively.
@@ -1547,20 +1567,34 @@ main() {
     # it. # HISTORY: 1.3.1 (onyx: `dnf update` took no pre-tx snapshot)
     _hooks=/usr/local/share/kldload/hooks
     if [[ -x /usr/local/sbin/snapshot-create.sh && -d "$_hooks" ]]; then
-        if command -v dnf >/dev/null 2>&1 && [[ -f "$_hooks/dnf/kldload_be.py" ]]; then
-            # dnf loads plugins from the `dnf-plugins` dir SIBLING to the dnf
-            # module itself (/usr/lib/.../site-packages/dnf-plugins), which is
-            # python-version- AND distro-specific. Derive it from the imported
-            # dnf module — NOT sysconfig purelib, which resolves to /usr/local/lib
-            # and dnf never scans there (verified on EL10, 1.3.1).
-            _plugdir="$(python3 -c 'import os, dnf; print(os.path.join(os.path.dirname(os.path.dirname(dnf.__file__)), "dnf-plugins"))' 2>/dev/null)"
-            if [[ -d "$_plugdir" ]]; then
-                install -m 0644 "$_hooks/dnf/kldload_be.py" "$_plugdir/kldload_be.py" 2>>"$LOG" &&
-                    install -m 0644 -D "$_hooks/dnf/kldload_be.conf" /etc/dnf/plugins/kldload_be.conf 2>>"$LOG" &&
-                    ok "dnf pre-transaction BE-snapshot plugin installed (${_plugdir})" ||
-                    log "WARNING: failed to install dnf BE-snapshot plugin — dnf update will not auto-snapshot"
-            else
-                log "WARNING: could not resolve dnf plugin dir — BE-snapshot plugin not installed"
+        if command -v dnf >/dev/null 2>&1; then
+            if command -v dnf5 >/dev/null 2>&1 || rpm -q dnf5 >/dev/null 2>&1; then
+                # dnf5 (Fedora 41+) dropped the dnf4 Python plugin API, so the
+                # kldload_be.py plugin cannot load here. Use the libdnf5 "actions"
+                # plugin instead: install libdnf5-plugin-actions + drop a .actions
+                # rule that fires snapshot-create.sh on pre_transaction.
+                if [[ -f "$_hooks/dnf5/kldload-be.actions" ]]; then
+                    dnf install -y libdnf5-plugin-actions >>"$LOG" 2>&1 ||
+                        log "WARNING: libdnf5-plugin-actions install failed — dnf5 will not auto-snapshot"
+                    install -m 0644 -D "$_hooks/dnf5/kldload-be.actions" \
+                        /etc/dnf/libdnf5-plugins/actions.d/kldload-be.actions 2>>"$LOG" &&
+                        ok "dnf5 pre-transaction BE-snapshot action installed" ||
+                        log "WARNING: failed to install dnf5 BE-snapshot action"
+                fi
+            elif [[ -f "$_hooks/dnf/kldload_be.py" ]]; then
+                # dnf4 (EL10): a Python plugin loaded from the `dnf-plugins` dir
+                # SIBLING to the dnf module. Derive it from the imported dnf module
+                # — NOT sysconfig purelib, which resolves to /usr/local/lib where
+                # dnf never scans (verified on EL10, 1.3.1).
+                _plugdir="$(python3 -c 'import os, dnf; print(os.path.join(os.path.dirname(os.path.dirname(dnf.__file__)), "dnf-plugins"))' 2>/dev/null)"
+                if [[ -d "$_plugdir" ]]; then
+                    install -m 0644 "$_hooks/dnf/kldload_be.py" "$_plugdir/kldload_be.py" 2>>"$LOG" &&
+                        install -m 0644 -D "$_hooks/dnf/kldload_be.conf" /etc/dnf/plugins/kldload_be.conf 2>>"$LOG" &&
+                        ok "dnf pre-transaction BE-snapshot plugin installed (${_plugdir})" ||
+                        log "WARNING: failed to install dnf BE-snapshot plugin — dnf update will not auto-snapshot"
+                else
+                    log "WARNING: could not resolve dnf plugin dir — BE-snapshot plugin not installed"
+                fi
             fi
         fi
         if command -v pacman >/dev/null 2>&1 && [[ -f "$_hooks/pacman/05-kldload-be-snapshot.hook" ]]; then
