@@ -1501,12 +1501,24 @@ main() {
         dnf install -y python3-dnf-plugin-versionlock >>"$LOG" 2>&1 ||
             log "WARNING: versionlock plugin install failed — core packages NOT locked"
         if command -v dnf >/dev/null 2>&1 && dnf versionlock list >/dev/null 2>&1; then
+            # WARN: ZFS must be locked as a COMPLETE kABI-coupled set, not a
+            # representative member. On EL10 the stack is 7 packages (zfs,
+            # zfs-dkms, zfs-dracut + libzfs5/libnvpair3/libuutil3/libzpool5)
+            # that move in lockstep. Locking only `zfs zfs-dkms` (and the
+            # since-removed `zfs-libs`/`spl` names, which match nothing on
+            # EL10) left the rest floating: the first OpenZFS point release
+            # (2.2.9 -> 2.2.10) deadlocked the WHOLE `dnf update` solver and
+            # blocked userspace security updates too (onyx, 1.3.1). Globs lock
+            # the set whatever the per-EL/Fedora split names are and survive a
+            # soname major (libzfs5 -> libzfs6) without going stale. Unmatched
+            # globs (e.g. `spl*` on EL10) are harmless no-ops. # HISTORY: 1.3.1
             dnf versionlock add \
                 kernel kernel-core kernel-modules kernel-modules-core kernel-modules-extra \
                 kernel-devel kernel-headers \
                 nvidia-driver nvidia-driver-cuda nvidia-driver-libs nvidia-kmod-common \
                 xorg-x11-drv-nvidia akmod-nvidia \
-                zfs zfs-dkms zfs-libs spl \
+                zfs zfs-dkms zfs-dracut \
+                'libzfs*' 'libnvpair*' 'libuutil*' 'libzpool*' 'zfs-libs' 'spl*' \
                 bcc bcc-tools libbpf-tools bpftool bpftrace \
                 >>"$LOG" 2>&1 &&
                 ok "Core packages versionlocked — userspace can still security-update via dnf" ||
@@ -1520,6 +1532,51 @@ main() {
             sed -i 's/^installonly_limit=.*/installonly_limit=5/' /etc/dnf/dnf.conf
         elif [[ -f /etc/dnf/dnf.conf ]]; then
             echo "installonly_limit=5" >>/etc/dnf/dnf.conf
+        fi
+    fi
+
+    # ── Boot-environment snapshot hook for this distro's package manager ─────
+    # WHY: every package transaction must drop a labelled, bootable root-BE
+    # snapshot (@{apt,dnf,pacman}-pre-<ts>) so a bad upgrade is a ZFSBootMenu
+    # rollback, not a reinstall. apt ships its Pre-Invoke hook statically; dnf
+    # and pacman had NO hook, so a plain `dnf update` / `pacman -Syu` left no
+    # rollback point (only the opt-in `kpkg` wrapper snapshotted). Idempotent and
+    # in the healing net so already-deployed installs self-repair on next boot.
+    # Never AbortOnFail / raise: a snapshot hiccup must not block updates — the
+    # helper exits 0 on non-ZFS roots and the hourly auto/sanoid streams backstop
+    # it. # HISTORY: 1.3.1 (onyx: `dnf update` took no pre-tx snapshot)
+    _hooks=/usr/local/share/kldload/hooks
+    if [[ -x /usr/local/sbin/snapshot-create.sh && -d "$_hooks" ]]; then
+        if command -v dnf >/dev/null 2>&1 && [[ -f "$_hooks/dnf/kldload_be.py" ]]; then
+            # dnf loads plugins from the `dnf-plugins` dir SIBLING to the dnf
+            # module itself (/usr/lib/.../site-packages/dnf-plugins), which is
+            # python-version- AND distro-specific. Derive it from the imported
+            # dnf module — NOT sysconfig purelib, which resolves to /usr/local/lib
+            # and dnf never scans there (verified on EL10, 1.3.1).
+            _plugdir="$(python3 -c 'import os, dnf; print(os.path.join(os.path.dirname(os.path.dirname(dnf.__file__)), "dnf-plugins"))' 2>/dev/null)"
+            if [[ -d "$_plugdir" ]]; then
+                install -m 0644 "$_hooks/dnf/kldload_be.py" "$_plugdir/kldload_be.py" 2>>"$LOG" &&
+                    install -m 0644 -D "$_hooks/dnf/kldload_be.conf" /etc/dnf/plugins/kldload_be.conf 2>>"$LOG" &&
+                    ok "dnf pre-transaction BE-snapshot plugin installed (${_plugdir})" ||
+                    log "WARNING: failed to install dnf BE-snapshot plugin — dnf update will not auto-snapshot"
+            else
+                log "WARNING: could not resolve dnf plugin dir — BE-snapshot plugin not installed"
+            fi
+        fi
+        if command -v pacman >/dev/null 2>&1 && [[ -f "$_hooks/pacman/05-kldload-be-snapshot.hook" ]]; then
+            install -m 0644 -D "$_hooks/pacman/05-kldload-be-snapshot.hook" \
+                /etc/pacman.d/hooks/05-kldload-be-snapshot.hook 2>>"$LOG" &&
+                ok "pacman pre-transaction BE-snapshot hook installed" ||
+                log "WARNING: failed to install pacman BE-snapshot hook"
+        fi
+        if command -v apt-get >/dev/null 2>&1; then
+            # apt's Pre/Post-Invoke hooks ship statically at
+            # /etc/apt/apt.conf.d/00-kldload-snapshot-{pre,post}; just report status.
+            if [[ -f /etc/apt/apt.conf.d/00-kldload-snapshot-pre ]]; then
+                ok "apt BE-snapshot hook present"
+            else
+                log "WARNING: apt BE-snapshot hook missing at /etc/apt/apt.conf.d/00-kldload-snapshot-pre"
+            fi
         fi
     fi
 

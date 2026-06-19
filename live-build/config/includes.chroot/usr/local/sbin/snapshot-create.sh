@@ -4,7 +4,15 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # snapshot-create.sh — create a ZFS snapshot for the given context
 # Usage: snapshot-create.sh <context> [dataset]
-# Contexts: apt-pre, apt-post, srv, manual
+# Contexts: {apt,dnf,pacman}-{pre,post}, srv, manual
+#
+# The {apt,dnf,pacman}-pre contexts are invoked automatically by each distro's
+# native package-manager hook (apt Pre-Invoke / a dnf pre_transaction plugin /
+# a pacman PreTransaction hook) so EVERY package transaction — not just `kpkg` —
+# drops a labelled, bootable root-BE snapshot you can pick in ZFSBootMenu to roll
+# back a bad upgrade. The label IS the context (e.g. @dnf-pre-<ts>), so the
+# pre-upgrade rollback point is greppable and distinct from the hourly auto/
+# sanoid snapshot streams that otherwise flood the ZBM picker.
 # ---------------------------------------------------------------------------
 
 CONTEXT="${1:-manual}"
@@ -34,14 +42,13 @@ ROOT_DS="$(zfs list -H -o name "$(zpool get -H -o value bootfs rpool 2>/dev/null
     echo 'rpool/ROOT/kldload')"
 
 case "$CONTEXT" in
-apt-pre)
+# Pre/post hooks for every supported package manager snapshot the root BE.
+# PREFIX is the full context so the snapshot name self-documents which manager
+# and phase produced it; KEEP=10 retains a useful rollback depth without adding
+# to the auto/sanoid sprawl (each prefix is pruned independently).
+apt-pre | dnf-pre | pacman-pre | apt-post | dnf-post | pacman-post)
     DS="${ROOT_DS}"
-    PREFIX=apt-pre
-    KEEP=10
-    ;;
-apt-post)
-    DS="${ROOT_DS}"
-    PREFIX=apt-post
+    PREFIX="${CONTEXT}"
     KEEP=10
     ;;
 srv)
@@ -55,7 +62,7 @@ manual)
     KEEP=10
     ;;
 *)
-    die "Unknown context: '$CONTEXT'. Valid: apt-pre, apt-post, srv, manual"
+    die "Unknown context: '$CONTEXT'. Valid: {apt,dnf,pacman}-{pre,post}, srv, manual"
     ;;
 esac
 

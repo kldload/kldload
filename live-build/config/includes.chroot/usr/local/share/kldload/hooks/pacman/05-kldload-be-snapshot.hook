@@ -1,0 +1,23 @@
+# kldload pacman pre-transaction boot-environment snapshot hook (Arch).
+# Installed to: /etc/pacman.d/hooks/05-kldload-be-snapshot.hook by kldload-firstboot.
+# Role: before pacman commits any package add/change/remove, snapshot the active
+#   ZFS root boot environment so a bad `pacman -Syu` is a ZFSBootMenu rollback
+#   rather than a reinstall. This is the Arch peer of the apt Pre-Invoke hook and
+#   the dnf pre_transaction plugin — same helper, same @pacman-pre-<ts> label.
+# Consequence if missing: pacman transactions take NO labelled pre-tx snapshot;
+#   you fall back to the hourly auto/sanoid streams, which are coarser and harder
+#   to identify in the boot menu.
+# Note: NO AbortOnFail — a snapshot hiccup must never block a pacman transaction.
+#   snapshot-create.sh already exits 0 cleanly when the root is not on ZFS.
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = *
+
+[Action]
+Description = kldload: snapshot root boot environment before transaction
+When = PreTransaction
+Exec = /usr/local/sbin/snapshot-create.sh pacman-pre
