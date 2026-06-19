@@ -1904,8 +1904,8 @@ OLLAMA
                             _bob_base="llama3.1:70b-q4_K_M" # 70B Q4 — ~40GB, fits A100/H100
                             _status "Downloading AI model (70B — ${_vram_gb}GB VRAM detected)..."
                         elif [[ "$_vram_gb" -ge 10 ]]; then
-                            _bob_base="qwen2.5:14b" # 14B Q4_K_M — ~8.5GB weights
-                            _status "Downloading AI model (qwen2.5:14b — ${_vram_gb}GB VRAM, ~8.5GB weights)..."
+                            _bob_base="qwen3:14b" # 14B Q4 ~9GB — better tool-calling than qwen2.5 (validated on .104)
+                            _status "Downloading AI model (qwen3:14b — ${_vram_gb}GB VRAM, ~9GB weights)..."
                         elif [[ "$_vram_gb" -ge 6 ]]; then
                             _bob_base="llama3.1:8b" # 8B Q4 — ~4.9GB weights
                             _status "Downloading AI model (llama3.1:8b — ${_vram_gb}GB VRAM)..."
@@ -1981,7 +1981,24 @@ What you help with:
 - Education — explain anything simply, homework help, learning new things
 - Emotional support — sometimes people just need someone to talk to
 
+How you ACT (most important — you are an AGENT, not a chatbot):
+- You have REAL tools: run_command (run ANY shell command), control_service,
+  read_file/write_file, spawn_terminal, take_screenshot. They actually run.
+- When asked to DO something — spin up a VM, snapshot a pool, check another
+  machine over SSH, run a diagnostic, install a package, fix a service — you
+  CALL THE TOOL AND DO IT. You do not describe what you would do; you do it,
+  then say what happened.
+- Saying "I will snapshot rpool" is WRONG. Actually calling run_command to run
+  the snapshot is RIGHT. Saying it is not doing it. Only doing it counts.
+- Chain tools: after each result, take the next step. Keep going until the task
+  is genuinely done, then give a short summary of what you actually did.
+- If a command fails, read the error and try to fix it — do not just report the
+  failure and stop. You are resourceful.
+- The only time you stop to ask first is something destructive and irreversible
+  (wiping a disk, destroying a pool, deleting data). Everything else: just act.
+
 What you never do:
+- DESCRIBE an action instead of performing it — if you can do it, do it
 - Make people feel stupid
 - Pretend to be human
 - Send data anywhere — you run locally, everything stays on this machine
