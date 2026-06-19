@@ -319,7 +319,19 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
     tmux bind -n WheelDownPane if-shell -F -t = "#{pane_in_mode}" "send-keys -X -N 3 scroll-down" ""
 
     tmux set -g default-terminal "xterm-256color"
-    tmux set -g mouse on
+    # mouse OFF on purpose. With `mouse on`, tmux captures the mouse, so a
+    # click-drag selection gets pulled into tmux's own copy-mode and FLASHES
+    # AWAY on release instead of staying highlighted like a normal terminal.
+    # Operator on .104 (2026-06-18): "when i select text with the mouse the
+    # highlighted part just vanishes … the gui console is exactly what I want …
+    # it has all the copy paste and good stuff." With mouse OFF, gnome-terminal
+    # owns the mouse: drag highlights and STAYS, and Ctrl+Shift+C / right-click /
+    # middle-click-paste all behave natively — the GUI-console UX. Keyboard
+    # copy-mode (Prefix [, v, y) still pipes to the system clipboard via
+    # copy-command below for grabbing off-screen scrollback.
+    # Trade-off: the wheel no longer scrolls tmux panes (use Shift+PageUp);
+    # fine here because sysdiag is F-key driven, not mouse-driven.
+    tmux set -g mouse off
 
     # ── Copy / paste → system clipboard ────────────────────────────────
     # HISTORY (operator on .104, 2026-06-18: "copy paste and mouse control in
