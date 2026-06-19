@@ -1946,15 +1946,19 @@ SNAPTMR
         if [[ -f "${target}/etc/sanoid/sanoid.conf" ]]; then
             cat >>"${target}/etc/sanoid/sanoid.conf" <<'KVMSANOID'
 
-# KVM VM datasets — hourly snapshots for VM zvols
+# KVM VM datasets — hourly snapshots for VM zvols.
+# recursive=yes means EVERY child zvol gets the full ladder, so on a multi-VM
+# lab (klab blue/green x N distros + goldens) the snapshot count is hourly x
+# datasets — 48h x ~36 datasets wedged ~1900 snapshots on onyx. 24h of hourly +
+# a week of daily is ample VM rollback granularity at roughly half the count.
 [rpool/vms]
 use_template = kvm
 recursive = yes
 
 [template_kvm]
 frequently = 0
-hourly     = 48
-daily      = 14
+hourly     = 24
+daily      = 7
 weekly     = 4
 monthly    = 3
 yearly     = 0

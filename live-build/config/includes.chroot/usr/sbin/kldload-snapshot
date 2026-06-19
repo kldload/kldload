@@ -16,4 +16,13 @@ if [[ -n "$root_ds" && "$root_ds" != "-" ]]; then
     echo "[$(date '+%F %T')] creating snapshot ${snap}"
     zfs snapshot "$snap"
   } >>"$LOG" 2>&1 || true
+  # Bound the @auto-* stream to the last 24 (≈1 day of hourly) so it does not
+  # flood the ZFSBootMenu rollback picker — this timer previously grew the BE's
+  # snapshot list without limit. Prefix "auto-" (WITH the dash) so the prune can
+  # never match sanoid's "@autosnap_*" snapshots. Best-effort: a prune hiccup
+  # must not fail the snapshot that already succeeded above. # HISTORY: 1.3.1
+  if [[ -x /usr/local/sbin/snapshot-prune.sh ]]; then
+    /usr/local/sbin/snapshot-prune.sh "$root_ds" "auto-" 24 >>"$LOG" 2>&1 ||
+      echo "[$(date '+%F %T')] WARNING: auto-* prune failed (snapshot kept)" >>"$LOG"
+  fi
 fi
