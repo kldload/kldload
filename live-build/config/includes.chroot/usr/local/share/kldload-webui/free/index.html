@@ -4932,14 +4932,19 @@ function selectTarget(el) {
   const smRow = document.getElementById('storage-mode-row');
   if (smRow) smRow.style.display = el.dataset.role === 'core' ? 'block' : 'none';
 
-  // AI / Bob handling: Bob ships with kldlab/k8s/kvm/zfslab profiles
-  // when a capable GPU is detected. Users can override either direction
-  // via the install-bob checkbox in the Bob panel. Model selection
-  // itself is runtime (Bob's own UI) — no install-time picker.
+  // AI / Bob handling: the Bob panel is offered on every profile that can
+  // realistically run a local GPU model — the heavy infra profiles (devops/
+  // k8s/kvm/zfslab) PLUS desktop, storage, and master. It used to be limited
+  // to the four infra roles, which made the AI selector silently vanish on
+  // desktop/storage/master while showing on kvm/kubernetes — inconsistent
+  // (operator on .104). Actual install is still gated by GPU detection +
+  // the install-bob checkbox; this only controls whether the SELECTOR shows.
+  // core (minimal ZFS-only) and server (headless) stay excluded by intent.
+  // Model selection itself is runtime (Bob's own UI) — no install-time picker.
   const aiCb = document.getElementById('install-ai');
   const bobCb = document.getElementById('install-bob');
   const bobPanel = document.getElementById('bob-panel');
-  const bobEligibleRoles = ['devops', 'k8s', 'kvm', 'zfslab'];
+  const bobEligibleRoles = ['desktop', 'devops', 'k8s', 'kvm', 'master', 'storage', 'zfslab'];
   const bobEligible = bobEligibleRoles.includes(el.dataset.role);
   if (bobPanel) bobPanel.style.display = bobEligible ? 'block' : 'none';
   // kldload Workstation "lab" extras (KVM/K8s/eBPF/Build-Images) — desktop profile only.
