@@ -321,26 +321,43 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
     tmux set -g default-terminal "xterm-256color"
     tmux set -g mouse on
 
-    # ── Copy / paste → system clipboard via OSC52 ──────────────────────
-    # set-clipboard on tells tmux to emit OSC 52 escape sequences when
-    # copy-mode selects to a buffer. Modern Konsole accepts OSC 52 and
-    # writes to the system clipboard, so mouse-drag selections + vi
-    # copy-mode 'y' both land in the OS clipboard. Without this,
-    # tmux's "copy" stays inside tmux's own paste buffer and the GUI
-    # paste shortcuts (Ctrl+Shift+V, Shift+Insert, middle-click) get
-    # nothing. Operator on .142 b644 2026-06-07: "copy paste and other
-    # features that were in the gui terminal need to be added if possible."
+    # ── Copy / paste → system clipboard ────────────────────────────────
+    # HISTORY (operator on .104, 2026-06-18: "copy paste and mouse control in
+    # the sysdiag doesnt work"): sysdiag launches in gnome-terminal
+    # (kldload-sysdiag-launch), and gnome-terminal/VTE does NOT honor OSC 52
+    # clipboard WRITES — so the old `set-clipboard on`-only path silently
+    # dropped every copy on the default terminal. Fix: pipe the selection
+    # DIRECTLY to the OS clipboard tool (wl-copy on Wayland, xclip/xsel on X11)
+    # via copy-pipe — terminal-agnostic, works in gnome-terminal AND Konsole.
+    # Requires wl-clipboard/xclip installed (desktop profile ships it).
+    # set-clipboard stays on as belt-and-suspenders for OSC52-capable
+    # terminals; copy-pipe is what actually lands the copy on the default one.
+    _clip=""
+    if [[ -n "${WAYLAND_DISPLAY:-}" ]] && command -v wl-copy >/dev/null 2>&1; then
+        _clip="wl-copy"
+    elif [[ -n "${DISPLAY:-}" ]] && command -v xclip >/dev/null 2>&1; then
+        _clip="xclip -selection clipboard -in"
+    elif [[ -n "${DISPLAY:-}" ]] && command -v xsel >/dev/null 2>&1; then
+        _clip="xsel --clipboard --input"
+    fi
     tmux set -g set-clipboard on
 
-    # vi-keys in copy-mode: Prefix [ enters, v starts selection, y copies
-    # (yank). More natural than emacs-keys for operators coming from any
-    # tiling-WM / vim background. After yank, the selection is in BOTH
-    # tmux's buffer AND the system clipboard thanks to set-clipboard on.
+    # vi-keys in copy-mode: Prefix [ enters, v starts selection, y copies.
     tmux set -g mode-keys vi
     tmux bind-key -T copy-mode-vi v send-keys -X begin-selection
-    tmux bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
-    tmux bind-key -T copy-mode-vi MouseDragEnd1Pane \
-        send-keys -X copy-selection-and-cancel
+    if [[ -n "$_clip" ]]; then
+        # copy-pipe-and-cancel feeds the selection straight to the clipboard
+        # tool — does NOT rely on the terminal forwarding OSC 52.
+        tmux set -g copy-command "$_clip"
+        tmux bind-key -T copy-mode-vi y send-keys -X copy-pipe-and-cancel "$_clip"
+        tmux bind-key -T copy-mode-vi MouseDragEnd1Pane \
+            send-keys -X copy-pipe-and-cancel "$_clip"
+    else
+        # No clipboard tool present — fall back to OSC52-only (e.g. Konsole).
+        tmux bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+        tmux bind-key -T copy-mode-vi MouseDragEnd1Pane \
+            send-keys -X copy-selection-and-cancel
+    fi
 
     # Larger scrollback so journalctl / dmesg / iotop output is available
     # when the operator scrolls back through copy-mode.

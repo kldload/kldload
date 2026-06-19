@@ -82,7 +82,7 @@ k_profile_packages() {
           adwaita-icon-theme cantarell-fonts gvfs gvfs-mtp gvfs-smb \
           gnome-keyring \
           webkitgtk6.0 gtk4 python3-gobject \
-          pulseaudio-utils \
+          pulseaudio-utils wl-clipboard xclip \
           tmux python python-websockets python-yaml htop net-tools wireguard-tools iproute2 fzf bat eza fd ripgrep zoxide podman fastfetch"
             ;;
         core)
@@ -288,7 +288,7 @@ k_profile_packages() {
         ffmpeg libsrt1.5 \
         pipewire wireplumber \
         wf-recorder \
-        xdotool xclip \
+        xdotool xclip wl-clipboard \
         python3-websockets \
         evemu-tools \
         nginx \
