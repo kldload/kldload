@@ -267,6 +267,30 @@ if [[ "${_rpm_count}" -lt 50 ]]; then
     exit 1
 fi
 
+# ── File-presence guard ────────────────────────────────────────────────────
+# The dependency completeness gate below resolves against repodata METADATA and
+# so cannot catch a "package listed but its .rpm silently didn't download"
+# desync — exactly what shipped nethogs/iftop/iotop-c with a repodata entry but
+# no file, failing the offline install on 10.100.10.136 (2026-07-05) with
+# "Could not open file … .rpm / all mirrors tried". Here we assert every package
+# EXPLICITLY named in target-fedora-extras has a matching RPM on disk, so a drop
+# fails THIS build loudly instead of a customer's firstboot.
+_missing_files=()
+while IFS= read -r _pkg; do
+    _pkg="${_pkg%%#*}" # strip trailing comments
+    _pkg="$(printf '%s' "$_pkg" | tr -d '[:space:]')"
+    [[ -n "$_pkg" ]] || continue
+    # A listed name is satisfied by NAME-<ver>.<arch>.rpm on disk.
+    compgen -G "${REPO_DIR}/${_pkg}-[0-9]*.rpm" >/dev/null || _missing_files+=("$_pkg")
+done < <(grep -vE '^\s*(#|$)' "${_fed_extras_file}")
+if [[ ${#_missing_files[@]} -gt 0 ]]; then
+    log "FATAL: darksite INCOMPLETE — these listed Fedora extras have NO .rpm in the mirror:" >&2
+    printf '    %s\n' "${_missing_files[@]}" >&2
+    log "  (repodata may still reference them → metadata/file desync → offline install fails)" >&2
+    exit 1
+fi
+log "File-presence guard PASSED — every listed Fedora extra has an RPM on disk."
+
 # ── Completeness gate ──────────────────────────────────────────────────────
 # `dnf download --resolve --alldeps` does NOT follow rich/boolean deps like
 # `Requires: (passt-selinux if selinux-policy-targeted)`. So a mirror can look

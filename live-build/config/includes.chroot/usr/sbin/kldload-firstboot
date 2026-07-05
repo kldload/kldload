@@ -1014,16 +1014,32 @@ main() {
         done
         if [[ ${#_missing[@]} -gt 0 ]]; then
             log "post-install dnf retry for missing optional packages: ${_missing[*]}"
-            # dnf5 doesn't recognise --skip-unavailable (dnf4 alias only). Passing
-            # it makes dnf5 print usage + exit non-zero, which silently swallowed
-            # the retry for ALL the listed packages -- including nethogs / iftop
-            # / iotop-c which were perfectly installable. Just --skip-broken is
-            # enough: missing-but-resolvable pkgs install, missing-and-broken get
-            # logged + skipped. Caught on .143 build #55 2026-05-25: manual dnf
-            # install -y of the same list landed nethogs+iftop+iotop-c cleanly
-            # once --skip-unavailable was dropped.
-            dnf install -y --skip-broken "${_missing[@]}" \
-                >>"${LOG}" 2>&1 || log "WARN: some post-install packages still failed"
+            # --skip-broken so one unresolvable name can't abort the whole batch
+            # (dnf5 rejects the dnf4-only --skip-unavailable). We do NOT trust its
+            # exit code — re-verify with rpm -q and surface anything STILL missing
+            # LOUDLY. The old "WARN and move on" swallowed real gaps (a package
+            # that didn't land is an operator-visible defect, not a buried line).
+            dnf install -y --skip-broken "${_missing[@]}" >>"${LOG}" 2>&1 || true
+            local _still=()
+            for _p in "${_missing[@]}"; do rpm -q "$_p" >/dev/null 2>&1 || _still+=("$_p"); done
+            if [[ ${#_still[@]} -eq 0 ]]; then
+                log "post-install retry resolved all optional packages"
+            else
+                # LOUD + PERSISTENT, but non-fatal: these are optional TUIs, not
+                # boot-critical, so we don't brick the boot. The real darksite gap
+                # is now caught at BUILD time (build-darksite-fedora.sh file-presence
+                # guard), so reaching here means a genuine repo/network fault the
+                # operator must resolve — recorded to a marker + MOTD so it can't
+                # be missed, with the exact one-liner to fix it.
+                local _mark=/var/log/kldload/unresolved-packages.log
+                echo "[$(date -u '+%FT%TZ')] firstboot could NOT install: ${_still[*]}" >>"$_mark"
+                log "ERROR: post-install packages UNRESOLVED (see ${_mark}): ${_still[*]}"
+                log "ERROR: resolve now with:  dnf install -y ${_still[*]}"
+                mkdir -p /etc/motd.d 2>/dev/null || true
+                printf 'kldload: %d post-install package(s) unresolved: %s\n  resolve: sudo dnf install -y %s\n' \
+                    "${#_still[@]}" "${_still[*]}" "${_still[*]}" \
+                    >/etc/motd.d/kldload-unresolved-packages 2>/dev/null || true
+            fi
         fi
     fi
 
