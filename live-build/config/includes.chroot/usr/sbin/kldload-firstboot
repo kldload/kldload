@@ -1453,7 +1453,10 @@ main() {
     # heal attempt.
     if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]] &&
         command -v dnf >/dev/null 2>&1; then
-        for _pkg in vim-X11 steam \
+        # flatpak is here because the Steam-via-Flathub block below is gated
+        # on it and the darksite closure dropped it through 1.3.1 (Steam-less
+        # desktops with no log trail).
+        for _pkg in vim-X11 steam flatpak \
             libbpf-tools bpftrace bcc-tools \
             libvirt-daemon-driver-network libvirt-daemon-config-network; do
             rpm -q "$_pkg" >/dev/null 2>&1 && continue
@@ -1602,7 +1605,10 @@ main() {
                 # SIBLING to the dnf module. Derive it from the imported dnf module
                 # — NOT sysconfig purelib, which resolves to /usr/local/lib where
                 # dnf never scans (verified on EL10, 1.3.1).
-                _plugdir="$(python3 -c 'import os, dnf; print(os.path.join(os.path.dirname(os.path.dirname(dnf.__file__)), "dnf-plugins"))' 2>/dev/null)"
+                # `|| true`: if python3 is missing or `import dnf` fails, the
+                # failing substitution must not kill firstboot via set -e —
+                # the [[ -d ]] below already handles the empty result.
+                _plugdir="$(python3 -c 'import os, dnf; print(os.path.join(os.path.dirname(os.path.dirname(dnf.__file__)), "dnf-plugins"))' 2>/dev/null || true)"
                 if [[ -d "$_plugdir" ]]; then
                     install -m 0644 "$_hooks/dnf/kldload_be.py" "$_plugdir/kldload_be.py" 2>>"$LOG" &&
                         install -m 0644 -D "$_hooks/dnf/kldload_be.conf" /etc/dnf/plugins/kldload_be.conf 2>>"$LOG" &&
@@ -1630,18 +1636,38 @@ main() {
         fi
     fi
 
-    if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]] &&
-        command -v flatpak >/dev/null 2>&1; then
-        log "Setting up Flathub + installing Steam"
-        if flatpak remote-add --if-not-exists --system flathub \
-            https://flathub.org/repo/flathub.flatpakrepo 2>>"$LOG"; then
-            if flatpak install -y --system flathub com.valvesoftware.Steam >>"$LOG" 2>&1; then
-                ok "Steam installed via Flathub"
+    if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]]; then
+        # Heal flatpak itself before gating on it. Through 1.3.1 the darksite
+        # closure never carried flatpak, install pass 1 dropped it via
+        # --skip-broken, and this block was gated on `command -v flatpak` with
+        # no else branch — so every Fedora desktop shipped Steam-less with
+        # ZERO log output (b652 class: ghost install, nothing to grep for).
+        if ! command -v flatpak >/dev/null 2>&1; then
+            log "flatpak missing (darksite closure dropped it) — healing from re-enabled repos"
+            # Failures fall through on purpose: the command -v re-check below
+            # is the single judge, and it logs the loud WARNING on a miss.
+            if command -v dnf >/dev/null 2>&1; then
+                dnf install -y flatpak >>"$LOG" 2>&1 || true
+            elif command -v apt-get >/dev/null 2>&1; then
+                apt-get install -y flatpak >>"$LOG" 2>&1 || true
+            elif command -v pacman >/dev/null 2>&1; then
+                pacman -S --noconfirm flatpak >>"$LOG" 2>&1 || true
+            fi
+        fi
+        if command -v flatpak >/dev/null 2>&1; then
+            log "Setting up Flathub + installing Steam"
+            if flatpak remote-add --if-not-exists --system flathub \
+                https://flathub.org/repo/flathub.flatpakrepo 2>>"$LOG"; then
+                if flatpak install -y --system flathub com.valvesoftware.Steam >>"$LOG" 2>&1; then
+                    ok "Steam installed via Flathub"
+                else
+                    log "WARNING: Steam Flathub install failed (no internet? slow mirror?) — user can retry: flatpak install flathub com.valvesoftware.Steam"
+                fi
             else
-                log "WARNING: Steam Flathub install failed (no internet? slow mirror?) — user can retry: flatpak install flathub com.valvesoftware.Steam"
+                log "WARNING: flathub remote-add failed (no internet?) — skipping Steam install"
             fi
         else
-            log "WARNING: flathub remote-add failed (no internet?) — skipping Steam install"
+            log "WARNING: flatpak unavailable (offline and not in darksite) — Steam NOT installed; retry by hand: dnf/apt install flatpak, then flatpak install flathub com.valvesoftware.Steam"
         fi
     fi
 
@@ -1701,7 +1727,11 @@ SALT
         # operator sees it instead of paging through journals.
         if [[ -x /usr/local/sbin/kldload-ca && -f /etc/kldload/ca/root/ca.crt ]]; then
             log "installing kldload CA into system trust store"
-            if ! /usr/local/sbin/kldload-ca trust-install 2>&1 | tee -a "$LOG_FILE"; then
+            # NB: the log variable in this script is $LOG — this line used
+            # $LOG_FILE (unbound under set -u), which killed the tee, made
+            # the pipeline non-zero, and fired the ERROR branch even when
+            # trust-install succeeded.
+            if ! /usr/local/sbin/kldload-ca trust-install 2>&1 | tee -a "$LOG"; then
                 log "ERROR: kldload-ca trust-install FAILED — host trust store is OUT OF SYNC. See above for the actual command output."
                 # Still non-fatal to firstboot (rest of the install matters
                 # more than this single step), but no longer silent. An
@@ -2041,12 +2071,18 @@ BOBMODEL
                         # neither is specified (shouldn't happen via the UI, but covers
                         # manifest-less installs).
                         local _chat_model="${KLDLOAD_AI_MODEL_CHAT_NAME:-}"
+                        # Tier map MUST match kldload-autodeploy's (qwen3 family)
+                        # and /etc/bob/Modelfile.bob (FROM qwen3:14b). Through
+                        # 1.3.1+4ae0bb3 this map still said qwen2.5: a normal
+                        # install pulled qwen2.5:14b (~9 GB) and then
+                        # `ollama create bob` fetched the qwen3 base as a SECOND
+                        # ~9 GB pull — a hard failure on darksite installs.
                         if [[ -z "$_chat_model" ]]; then
                             case "${KLDLOAD_BOB_MODEL:-recommended}" in
                             mini) _chat_model="llama3.2:3b" ;;
-                            small) _chat_model="qwen2.5:7b" ;;
-                            recommended) _chat_model="qwen2.5:14b" ;;
-                            large) _chat_model="qwen2.5:32b" ;;
+                            small) _chat_model="qwen3:8b" ;;
+                            recommended) _chat_model="qwen3:14b" ;;
+                            large) _chat_model="qwen3:30b-a3b" ;;
                             code) _chat_model="qwen2.5-coder:14b" ;;
                             *) _chat_model="" ;; # fall through to VRAM detect
                             esac
@@ -2058,11 +2094,11 @@ BOBMODEL
                                 _v=$((${_v:-0} / 1024))
                             fi
                             if [[ "$_v" -ge 24 ]]; then
-                                _chat_model="qwen2.5:32b"
+                                _chat_model="qwen3:30b-a3b"
                             elif [[ "$_v" -ge 10 ]]; then
-                                _chat_model="qwen2.5:14b"
+                                _chat_model="qwen3:14b"
                             elif [[ "$_v" -ge 6 ]]; then
-                                _chat_model="qwen2.5:7b"
+                                _chat_model="qwen3:8b"
                             else
                                 _chat_model="llama3.2:3b"
                             fi
@@ -2951,7 +2987,7 @@ CHROMEPOL
         # internet, not the local mirror — but the mirror dir itself stays
         # so other machines can point at it.
         if [[ -d /root/darksite ]]; then
-            if [[ -d /root/darksite/ollama/models ]] && [[ ! -f /srv/ollama/models/manifests/registry.ollama.ai/library/qwen2.5/14b && ! -f /srv/ollama/models/manifests/registry.ollama.ai/library/llama3.1/8b ]]; then
+            if [[ -d /root/darksite/ollama/models ]] && [[ ! -f /srv/ollama/models/manifests/registry.ollama.ai/library/qwen3/14b && ! -f /srv/ollama/models/manifests/registry.ollama.ai/library/qwen2.5/14b && ! -f /srv/ollama/models/manifests/registry.ollama.ai/library/llama3.1/8b ]]; then
                 mkdir -p /srv/ollama/models
                 log "Rehydrating Ollama models from darksite (before darksite cleanup)..."
                 rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ 2>&1 | tail -3

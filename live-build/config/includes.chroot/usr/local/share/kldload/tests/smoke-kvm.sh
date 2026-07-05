@@ -54,13 +54,20 @@ if command -v mokutil >/dev/null 2>&1; then
 else
     _warn "mokutil" "not installed"
 fi
-# MOK / shim / signing checks only apply when the user explicitly opted
-# into Secure Boot at install time. Default is opt-out, so the absence
-# of mok.{key,pub,der} is correct behaviour — not a failure. The install
-# manifest records whether SB was requested.
+# MOK / shim / signing checks only apply when the install ran with
+# Secure Boot intent, so the absence of mok.{key,pub,der} on an SB-off
+# install is correct behaviour — not a failure. Primary source: the
+# install manifest (install-target writes the resolved value). Fallback
+# for manifests from older installers that never wrote the key (through
+# 1.3.1 the grep below matched nothing and these checks were PERMANENTLY
+# skipped): the live firmware SB state via mokutil — if SB is enforcing
+# right now, the MOK chain had better be in place.
 _sb_requested=0
 if [[ -f /etc/kldload/install-manifest.env ]] &&
     grep -q '^KLDLOAD_ENABLE_SECURE_BOOT="\?1"\?' /etc/kldload/install-manifest.env 2>/dev/null; then
+    _sb_requested=1
+elif ! grep -q '^KLDLOAD_ENABLE_SECURE_BOOT=' /etc/kldload/install-manifest.env 2>/dev/null &&
+    mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
     _sb_requested=1
 fi
 
@@ -229,7 +236,9 @@ _section "Kubernetes Cluster (if deployed)"
 if virsh list --name 2>/dev/null | grep -q kldload-cp; then
     _pass "Control plane VM running"
 
-    WORKER_COUNT=$(virsh list --name 2>/dev/null | grep -c 'kldload-w-')
+    # `|| true`: grep -c prints its 0 before exiting 1 on no match; without
+    # the guard, 0 workers (mid-bootstrap) aborts the suite under set -e.
+    WORKER_COUNT=$(virsh list --name 2>/dev/null | grep -c 'kldload-w-' || true)
     _pass "Worker VMs: $WORKER_COUNT"
 
     # Host management tools

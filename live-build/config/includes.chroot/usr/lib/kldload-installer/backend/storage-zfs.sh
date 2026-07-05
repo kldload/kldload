@@ -279,9 +279,27 @@ mount_efi() {
 # write_hostid — generate and install /etc/hostid
 # ---------------------------------------------------------------------------
 
+# ensure_hostid — pin /etc/hostid in the live env BEFORE any zpool create.
+# The pool is stamped with the creating host's hostid at creation time;
+# generating /etc/hostid afterwards (the old order: create pool, then
+# zgenhostid) guaranteed a mismatch → `zpool import` refuses at boot →
+# dracut emergency shell. Same footgun lib/storage-zfs.sh documents as
+# "bit every XPS install up through v3.5". Idempotent: an existing
+# non-empty hostid is kept (zgenhostid without -f errors on overwrite).
+ensure_hostid() {
+    if [[ -s /etc/hostid ]]; then
+        log "Using existing /etc/hostid (pool will be stamped with it)"
+    else
+        log "Generating host ID (before pool creation)..."
+        run zgenhostid
+    fi
+}
+
+# write_hostid — copy the (already pinned) live-env hostid into the target
+# so the installed initramfs imports with the same identity the pool was
+# created under. Must run after create_datasets (target root mounted).
 write_hostid() {
-    log "Generating host ID..."
-    run zgenhostid
+    run mkdir -p "${KLDLOAD_TARGET}/etc"
     run cp /etc/hostid "${KLDLOAD_TARGET}/etc/hostid"
     log "Host ID written to ${KLDLOAD_TARGET}/etc/hostid"
 }
@@ -320,6 +338,10 @@ storage_zfs_install() {
 
     local suffix
     suffix="$(disk_part_suffix "$disk")"
+
+    # Hostid must exist before either branch runs zpool create (see
+    # ensure_hostid preamble — post-create generation bricked boots).
+    ensure_hostid
 
     case "$mode" in
     single | encrypted-single)

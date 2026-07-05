@@ -101,6 +101,11 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -x "$DARKSITE_SCRIPT" ]]; then
         log "Building darksite RPM mirror..."
         bash "$DARKSITE_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
+        # pipefail is off (SIGPIPE note below) so the tee hides the script's
+        # exit code — check PIPESTATUS or a darksite failure silently ships
+        # an ISO that violates the air-gap invariant (b652 class).
+        DARKSITE_RC=${PIPESTATUS[0]}
+        [[ "$DARKSITE_RC" -eq 0 ]] || die "darksite mirror build failed (rc=$DARKSITE_RC) — see $LOG_FILE"
     fi
 else
     log "Core edition — skipping darksite RPM mirror build."
@@ -2159,8 +2164,11 @@ chroot "$ROOTFS" dracut --force --add "dmsquash-live" \
     --no-hostonly \
     "${DRACUT_INSTALL[@]}" \
     --force-drivers "xhci_pci xhci_hcd ehci_pci ehci_hcd ohci_pci ohci_hcd uhci_hcd usb_storage uas usbhid hid_generic cdc_ether usbnet r8152 ax88179_178a thunderbolt typec_ucsi ucsi_acpi nvme nvme_core ahci virtio_blk virtio_scsi virtio_net virtio_pci sdhci sdhci_pci mmc_block" \
-    --kver "$KVER" "/boot/initramfs-${KVER}.img" 2>&1 | tee -a "$LOG_FILE" ||
-    die "dracut failed"
+    --kver "$KVER" "/boot/initramfs-${KVER}.img" 2>&1 | tee -a "$LOG_FILE"
+# pipefail is off, so `| tee || die` tested tee's exit code and the die was
+# dead code — a failed dracut shipped an ISO with a stale/missing initramfs.
+DRACUT_RC=${PIPESTATUS[0]}
+[[ "$DRACUT_RC" -eq 0 ]] || die "dracut failed (rc=$DRACUT_RC)"
 
 # ---------------------------------------------------------------------------
 # Step 4: Create squashfs
@@ -2358,8 +2366,10 @@ xorriso -as mkisofs \
     -appended_part_as_gpt \
     -append_partition 2 C12A7328-F81F-11D2-BA4B-00A0C93EC93B \
     "${ISO_STAGING}/images/efiboot.img" \
-    "$ISO_STAGING" 2>&1 | tee -a "$LOG_FILE" ||
-    die "xorriso failed"
+    "$ISO_STAGING" 2>&1 | tee -a "$LOG_FILE"
+# Same PIPESTATUS dance as dracut above: pipefail is off, tee masked xorriso.
+XORRISO_RC=${PIPESTATUS[0]}
+[[ "$XORRISO_RC" -eq 0 ]] || die "xorriso failed (rc=$XORRISO_RC)"
 
 # ---------------------------------------------------------------------------
 # Checksum

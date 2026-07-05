@@ -260,7 +260,6 @@ for i in $(seq 1 360); do
             # so it's available even before the install completes.
             log "running kldload-debug-bundle on the live env"
             if ssh_live 'sudo kldload-debug-bundle --quiet --out /tmp >/dev/null 2>&1'; then
-                local _bundle
                 _bundle="$(ssh_live 'ls -t /tmp/kldload-debug-*.tar.gz 2>/dev/null | head -1')"
                 if [[ -n "$_bundle" ]]; then
                     sshpass -p live scp "${SSH_OPTS[@]}" "live@${VM_IP}:${_bundle}" "/tmp/" >>"$LOG" 2>&1 &&

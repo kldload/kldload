@@ -226,6 +226,86 @@ else
     _pass "NVIDIA not installed (expected if checkbox not selected)"
 fi
 
+# ── Bob + RAG ────────────────────────────────────────────────────────────────
+# Verifies the Bob CLI + the RAG service stack added in commit ec5bd90:
+# previous builds shipped the RAG code but it never worked because deps
+# weren't installed, units weren't enabled, and Bob didn't call it.
+_section "Bob + RAG"
+
+# CLI presence
+test_file "Bob CLI" "/usr/local/bin/bob"
+test_file "RAG service code" "/usr/local/lib/kldload-rag/kldload_rag.py"
+test_file "RAG indexer code" "/usr/local/lib/kldload-rag/kldload_rag_index.py"
+test_file "RAG indexer CLI" "/usr/local/bin/kldload-rag-index"
+test_file "kai-rag CLI" "/usr/local/bin/kai-rag"
+
+# Bob CLI was actually patched (not the 3-line stub from older builds)
+if [[ -f /usr/local/bin/bob ]] && grep -q 'BOB_RAG\b' /usr/local/bin/bob 2>/dev/null; then
+    _pass "Bob CLI has RAG bridge"
+else
+    _fail "Bob CLI has RAG bridge" "no BOB_RAG reference -- stub installed instead of full bob"
+fi
+
+# Systemd unit files installed
+test_file "RAG service unit" "/usr/lib/systemd/system/kldload-rag.service"
+test_file "RAG firstboot unit" "/usr/lib/systemd/system/kldload-rag-firstboot.service"
+test_file "RAG index timer" "/usr/lib/systemd/system/kldload-rag-index.timer"
+test_file "RAG index service" "/usr/lib/systemd/system/kldload-rag-index.service"
+
+# Symlinks created by profiles.sh (units enabled to start at boot)
+test_file "RAG service enabled (symlink)" \
+    "/etc/systemd/system/multi-user.target.wants/kldload-rag.service"
+test_file "RAG firstboot enabled (symlink)" \
+    "/etc/systemd/system/multi-user.target.wants/kldload-rag-firstboot.service"
+test_file "RAG index timer enabled (symlink)" \
+    "/etc/systemd/system/timers.target.wants/kldload-rag-index.timer"
+
+# ChromaDB data dir
+test_dir "RAG ChromaDB data dir" "/var/lib/kldload-rag"
+
+# Python imports succeed (the actual reason RAG used to never start)
+if python3 -c "import chromadb, bs4" 2>/dev/null; then
+    _pass "Python deps importable (chromadb, bs4)"
+else
+    _fail "Python deps importable" "chromadb or beautifulsoup4 missing -- RAG service can't start"
+fi
+
+# RAG service is actually running and responding
+if curl -sf --max-time 3 http://localhost:8400/health >/dev/null 2>&1; then
+    _pass "RAG service responds on :8400"
+    # And ChromaDB has some chunks indexed (first-boot indexer ran successfully)
+    # `|| true`: a /health response without a chunks field exits the
+    # pipeline non-zero — without the guard that kills the suite mid-run
+    # under set -e; the [[ -n ]] below already handles the empty case.
+    chunks=$(curl -sf --max-time 3 http://localhost:8400/health | grep -oE '"chunks":\s*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+    if [[ -n "$chunks" && "$chunks" -gt 0 ]]; then
+        _pass "RAG corpus indexed ($chunks chunks)"
+    else
+        _warn "RAG corpus indexed" "0 chunks -- first-boot indexer may still be running"
+    fi
+else
+    _fail "RAG service responds on :8400" "no response from /health -- service down"
+fi
+
+# Ollama (RAG and Bob both depend on this)
+if command -v ollama >/dev/null 2>&1; then
+    _pass "Ollama CLI"
+    if curl -sf --max-time 3 http://localhost:11434/api/tags >/dev/null 2>&1; then
+        _pass "Ollama API responds"
+    else
+        _warn "Ollama API responds" "ollama service may not be running yet"
+    fi
+else
+    _warn "Ollama CLI" "not installed -- Bob/RAG will not work"
+fi
+
+# Indexer is callable
+if [[ -x /usr/local/bin/kldload-rag-index ]]; then
+    _pass "kldload-rag-index is executable"
+else
+    _fail "kldload-rag-index is executable" "not executable -- nightly re-index will fail"
+fi
+
 # ── System Files ─────────────────────────────────────────────────────────────
 _section "System Files"
 

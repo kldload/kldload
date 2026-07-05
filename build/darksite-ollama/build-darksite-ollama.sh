@@ -14,10 +14,11 @@ set -euo pipefail
 #     models/blobs/sha256-<hex>
 #     models/manifests/registry.ollama.ai/library/<model>/<tag>
 
-# Default bakes qwen2.5:14b only — better tool calling + reasoning than
-# llama3.1:8b at similar VRAM cost, keeps the ISO ~5 GB smaller. Users
-# who want the smaller model can pull it post-install.
-MODELS="${OLLAMA_MODELS:-qwen2.5:14b}"
+# Default bakes qwen3:14b only — the model /etc/bob/Modelfile.bob is
+# built FROM and the tier firstboot/autodeploy resolve "recommended" to.
+# Baking anything else forces `ollama create bob` into a second ~9 GB
+# registry fetch at firstboot — a hard failure on air-gapped installs.
+MODELS="${OLLAMA_MODELS:-qwen3:14b}"
 DARKSITE_OUT="${DARKSITE_OUT:-/output}"
 MODELS_DIR="${DARKSITE_OUT}/models"
 

@@ -22,8 +22,14 @@ LOG="$LOG_DIR/snapshots.log"
 
 ts() { date '+%Y-%m-%dT%H:%M:%S'; }
 
+# Log to STDERR, never stdout. The dnf5 actions plugin captures each
+# action's stdout and parses every line as a plugin directive (tmp.*=,
+# conf.*=, stop=, error=, …) — human-readable log lines on stdout are
+# reported as plugin errors on EVERY dnf5 transaction, and would abort
+# transactions outright if raise_error=1 is ever set. stderr passes
+# through untouched for all callers (apt/pacman/dnf4/dnf5/manual).
 log() {
-    echo "$(ts) [snapshot-create] $*" | tee -a "$LOG"
+    echo "$(ts) [snapshot-create] $*" | tee -a "$LOG" >&2
 }
 
 die() {
@@ -74,8 +80,21 @@ fi
 
 SNAP="${DS}@${PREFIX}-$(date +%Y%m%d-%H%M%S)"
 log "Creating snapshot: $SNAP"
-zfs snapshot "$SNAP"
-log "Snapshot created: $SNAP"
+# A failed safety snapshot must NEVER block the package transaction that
+# triggered it. This script runs as apt DPkg::Pre-Invoke (which aborts
+# apt on any non-zero hook exit) — an unguarded failure here (pool full,
+# quota, same-second name collision) made Debian/Ubuntu unpatchable via
+# apt, exactly when the operator is trying to patch. The dnf plugin and
+# pacman hook already swallow failures by design; apt gets the same
+# contract: log loud, exit 0.
+if zfs snapshot "$SNAP" 2>&1 | tee -a "$LOG" >&2; then
+    log "Snapshot created: $SNAP"
+else
+    log "ERROR: could not create $SNAP — proceeding WITHOUT a rollback point (pool full? name collision?)"
+    exit 0
+fi
 
-# Prune old snapshots beyond the keep limit
-/usr/local/sbin/snapshot-prune.sh "$DS" "$PREFIX" "$KEEP"
+# Prune old snapshots beyond the keep limit. Best-effort for the same
+# reason: pruning noise must not abort an apt/dnf/pacman transaction.
+/usr/local/sbin/snapshot-prune.sh "$DS" "$PREFIX" "$KEEP" ||
+    log "WARNING: snapshot-prune failed for ${DS}@${PREFIX}-* (keep=${KEEP})"

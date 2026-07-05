@@ -265,8 +265,50 @@ if command -v shellcheck >/dev/null 2>&1; then
             fi
         fi
     done
+
+    # The smoke suite itself must be shellcheck-clean too. A July 2026
+    # audit found `local` used outside functions in three tests/*.sh —
+    # a runtime abort under set -e that the curated list above never
+    # scanned for. Gate the whole tests/ dir so the harness can't rot.
+    for FILE in "$ROOT"/tests/*.sh; do
+        ERRORS=$(shellcheck -S error "$FILE" 2>&1 | grep -c "SC[0-9]" || true)
+        if [[ "$ERRORS" -eq 0 ]]; then
+            _pass "tests/$(basename "$FILE") shellcheck clean"
+        else
+            _fail "tests/$(basename "$FILE") shellcheck" "$ERRORS errors"
+        fi
+    done
 else
     _warn "Shellcheck" "not installed — install ShellCheck (dnf/apt)"
+fi
+
+# ── Test-suite twin sync ─────────────────────────────────────────────────────
+# The smoke suite exists twice on purpose: tests/ (scp'd into VMs by
+# lifecycle.sh, run by CI) and includes.chroot/usr/local/share/kldload/
+# tests/ (shipped in the ISO for on-target runs on installed systems).
+# The two forked between 2026-04 and 2026-06 and each side accumulated
+# real bug fixes the other never received (SB opt-in gating, grep -c
+# double-zero, zfs -rH, Bob/RAG checks). Any byte drift is now a build
+# failure: fix one copy, then cp it over the twin.
+_section "Test-suite twin sync"
+CHROOT_TESTS="$ROOT/live-build/config/includes.chroot/usr/local/share/kldload/tests"
+if [[ -d "$CHROOT_TESTS" ]]; then
+    for _t in "$ROOT"/tests/*.sh; do
+        _b=$(basename "$_t")
+        # host-side harness scripts have no ISO twin by design
+        case "$_b" in
+        lifecycle.sh | lifecycle-matrix.sh | smoke-javaapi-rollback.sh) continue ;;
+        esac
+        if [[ ! -f "$CHROOT_TESTS/$_b" ]]; then
+            _fail "ISO twin missing: $_b" "cp tests/$_b into includes.chroot .../tests/"
+        elif ! cmp -s "$_t" "$CHROOT_TESTS/$_b"; then
+            _fail "test drift: $_b" "tests/ and includes.chroot copies differ — sync them"
+        else
+            _pass "in sync: $_b"
+        fi
+    done
+else
+    _warn "Test-suite twin sync" "includes.chroot tests dir not found — skipped"
 fi
 
 # ── shfmt drift (style enforcement, if available) ────────────────────────────

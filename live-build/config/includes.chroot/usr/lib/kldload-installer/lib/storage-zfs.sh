@@ -10,7 +10,13 @@ source "${LIBDIR}/logging.sh"
 
 : "${KLDLOAD_TARGET:=/target}"
 : "${KLDLOAD_TARGET_MNT:=${KLDLOAD_TARGET}}"
-: "${KLDLOAD_DISK:=/dev/sda}"
+# NO default disk — ever. Through 1.3.1 this defaulted to /dev/sda, which
+# meant an answers file that omitted KLDLOAD_DISK sailed past preflight's
+# "disk must be set" guard (this default made the var always non-empty)
+# and config-mode installs — which have no "type yes" gate — would wipefs
+# whatever /dev/sda happened to be, frequently the live USB itself.
+# Empty forces k_preflight's [[ -n ... ]] check to actually fire.
+: "${KLDLOAD_DISK:=}"
 : "${KLDLOAD_HOSTNAME:=kldload}"
 : "${KLDLOAD_LOG_DIR:=/var/log/installer}"
 : "${KLDLOAD_ZFS_ENCRYPT:=0}"
@@ -265,19 +271,19 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
         ;;
     mirror)
         [[ ${#data_disks[@]} -ge 2 ]] ||
-            die "mirror topology requires at least 2 data disks; got: '${KLDLOAD_ZFS_DATA_DISKS}'"
+            k_die "mirror topology requires at least 2 data disks; got: '${KLDLOAD_ZFS_DATA_DISKS}'"
         rpool_vdevs=(mirror "${data_disks[0]}" "${data_disks[1]}")
         k_zfs_log "rpool topology: mirror ${data_disks[0]} ${data_disks[1]}"
         ;;
     raidz1)
         [[ ${#data_disks[@]} -ge 3 ]] ||
-            die "raidz1 topology requires at least 3 data disks; got: '${KLDLOAD_ZFS_DATA_DISKS}'"
+            k_die "raidz1 topology requires at least 3 data disks; got: '${KLDLOAD_ZFS_DATA_DISKS}'"
         rpool_vdevs=(raidz1 "${data_disks[@]}")
         k_zfs_log "rpool topology: raidz1 ${KLDLOAD_ZFS_DATA_DISKS}"
         ;;
     mirror-stripe)
         [[ ${#data_disks[@]} -ge 4 ]] ||
-            die "mirror-stripe topology requires exactly 4 data disks; got: '${KLDLOAD_ZFS_DATA_DISKS}'"
+            k_die "mirror-stripe topology requires exactly 4 data disks; got: '${KLDLOAD_ZFS_DATA_DISKS}'"
         rpool_vdevs=(
             mirror "${data_disks[0]}" "${data_disks[1]}"
             mirror "${data_disks[2]}" "${data_disks[3]}"
@@ -285,7 +291,7 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
         k_zfs_log "rpool topology: RAID10 mirror ${data_disks[0]}+${data_disks[1]} | mirror ${data_disks[2]}+${data_disks[3]}"
         ;;
     *)
-        die "Unknown ZFS topology '${KLDLOAD_ZFS_TOPOLOGY}'. Valid: single mirror raidz1 mirror-stripe"
+        k_die "Unknown ZFS topology '${KLDLOAD_ZFS_TOPOLOGY}'. Valid: single mirror raidz1 mirror-stripe"
         ;;
     esac
 

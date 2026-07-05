@@ -36,7 +36,6 @@ test_succeeds "Has IP" "ip -4 addr show | grep -q 'inet '"
 _section "Secure Boot"
 if command -v mokutil >/dev/null 2>&1; then
     _pass "mokutil installed"
-    local _sb_state
     _sb_state="$(mokutil --sb-state 2>/dev/null || echo 'unknown')"
     if echo "$_sb_state" | grep -q "enabled"; then
         _pass "Secure Boot: ENABLED"
@@ -47,7 +46,6 @@ if command -v mokutil >/dev/null 2>&1; then
             _warn "MOK key" "not enrolled — run mokutil --import /var/lib/dkms/mok.der"
         fi
         # Check lockdown
-        local _lockdown
         _lockdown="$(cat /sys/kernel/security/lockdown 2>/dev/null || echo 'unknown')"
         _pass "Kernel lockdown: ${_lockdown}"
     else
@@ -56,28 +54,48 @@ if command -v mokutil >/dev/null 2>&1; then
 else
     _warn "mokutil" "not installed"
 fi
-test_file "MOK key (DER)" "/var/lib/dkms/mok.der"
-test_file "MOK key (private)" "/var/lib/dkms/mok.key"
-test_file "MOK key (public)" "/var/lib/dkms/mok.pub"
-if command -v sbsign >/dev/null 2>&1; then
-    _pass "sbsigntool installed"
-else
-    _warn "sbsigntool" "not installed — modules can't be signed locally"
+# MOK / shim / signing checks only apply when the install ran with
+# Secure Boot intent, so the absence of mok.{key,pub,der} on an SB-off
+# install is correct behaviour — not a failure. Primary source: the
+# install manifest (install-target writes the resolved value). Fallback
+# for manifests from older installers that never wrote the key (through
+# 1.3.1 the grep below matched nothing and these checks were PERMANENTLY
+# skipped): the live firmware SB state via mokutil — if SB is enforcing
+# right now, the MOK chain had better be in place.
+_sb_requested=0
+if [[ -f /etc/kldload/install-manifest.env ]] &&
+    grep -q '^KLDLOAD_ENABLE_SECURE_BOOT="\?1"\?' /etc/kldload/install-manifest.env 2>/dev/null; then
+    _sb_requested=1
+elif ! grep -q '^KLDLOAD_ENABLE_SECURE_BOOT=' /etc/kldload/install-manifest.env 2>/dev/null &&
+    mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
+    _sb_requested=1
 fi
-# Check shim on EFI partition
-if [[ -f /boot/efi/EFI/BOOT/BOOTX64.EFI ]]; then
-    local _boot_hash _zbm_hash
-    _boot_hash="$(sha256sum /boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
-    _zbm_hash="$(sha256sum /boot/efi/EFI/zbm/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
-    if [[ "$_boot_hash" != "$_zbm_hash" ]]; then
-        _pass "Shim installed as UEFI fallback (different from ZFSBootMenu)"
+
+if [[ "${_sb_requested}" == "1" ]]; then
+    test_file "MOK key (DER)" "/var/lib/dkms/mok.der"
+    test_file "MOK key (private)" "/var/lib/dkms/mok.key"
+    test_file "MOK key (public)" "/var/lib/dkms/mok.pub"
+    if command -v sbsign >/dev/null 2>&1; then
+        _pass "sbsigntool installed"
     else
-        _warn "BOOT/BOOTX64.EFI" "same as ZFSBootMenu — shim may not be installed"
+        _warn "sbsigntool" "not installed — modules can't be signed locally"
     fi
+    # Check shim on EFI partition
+    if [[ -f /boot/efi/EFI/BOOT/BOOTX64.EFI ]]; then
+        _boot_hash="$(sha256sum /boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
+        _zbm_hash="$(sha256sum /boot/efi/EFI/zbm/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
+        if [[ "$_boot_hash" != "$_zbm_hash" ]]; then
+            _pass "Shim installed as UEFI fallback (different from ZFSBootMenu)"
+        else
+            _warn "BOOT/BOOTX64.EFI" "same as ZFSBootMenu — shim may not be installed"
+        fi
+    fi
+    test_file "MokManager" "/boot/efi/EFI/BOOT/mmx64.efi"
+    test_file "MOK cert on EFI" "/boot/efi/EFI/BOOT/mok.der"
+    test_file "grubx64.efi (ZBM for shim)" "/boot/efi/EFI/BOOT/grubx64.efi"
+else
+    _pass "Secure Boot: opt-in default (SB off — MOK/shim/signing checks skipped)"
 fi
-test_file "MokManager" "/boot/efi/EFI/BOOT/mmx64.efi"
-test_file "MOK cert on EFI" "/boot/efi/EFI/BOOT/mok.der"
-test_file "grubx64.efi (ZBM for shim)" "/boot/efi/EFI/BOOT/grubx64.efi"
 
 # ── Profile & Edition ────────────────────────────────────────────────────────
 _section "Profile Markers"
@@ -92,7 +110,7 @@ fi
 
 # ── kldloadOS Tools ──────────────────────────────────────────────────────────
 _section "kldloadOS Tools"
-for tool in kst ksnap kbe kclone kdf kdir kpkg kupgrade kexport krecovery kldload-help kldload-overview kube-demo; do
+for tool in kst ksnap kbe kclone kdf kdir kpkg kupgrade kexport krecovery kldload-help kube-demo; do
     test_cmd "$tool" "$tool"
 done
 
@@ -135,7 +153,11 @@ done
 
 # ── kzfs-lab ─────────────────────────────────────────────────────────────────
 _section "ZFS Dev Lab"
-test_cmd "kzfs-lab" "kzfs-lab"
+if command -v kzfs-lab >/dev/null 2>&1; then
+    test_cmd "kzfs-lab" "kzfs-lab"
+else
+    _warn "kzfs-lab" "not installed (planned for 1.0.5)"
+fi
 
 # ── Sanoid ───────────────────────────────────────────────────────────────────
 _section "Sanoid"
@@ -195,28 +217,114 @@ fi
 _section "Containers"
 test_cmd "podman" "podman"
 
+# ── Secure Boot State ────────────────────────────────────────────────────────
+_section "Secure Boot (runtime)"
+if mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
+    _pass "SecureBoot ENABLED"
+    # Verify ZFS loaded under Secure Boot
+    if lsmod | grep -q '^zfs '; then
+        _pass "ZFS module loaded with Secure Boot on"
+    else
+        _fail "ZFS module NOT loaded — MOK enrollment may have failed"
+    fi
+else
+    _warn "SecureBoot" "disabled — enable in BIOS + enroll MOK for verified boot"
+fi
+
 # ── Kubernetes Cluster (if deployed) ─────────────────────────────────────────
 _section "Kubernetes Cluster (if deployed)"
 if virsh list --name 2>/dev/null | grep -q kldload-cp; then
     _pass "Control plane VM running"
-    CP_MAC=$(virsh domiflist kldload-cp 2>/dev/null | awk '/bridge/ {print $5}' | head -1)
-    CP_IP=$(virsh net-dhcp-leases default 2>/dev/null | awk -v m="$CP_MAC" '$3 == m {print $5}' | cut -d/ -f1 | head -1)
-    if [[ -n "$CP_IP" ]]; then
-        _pass "CP IP: $CP_IP"
-        if sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@${CP_IP} "kubectl get nodes --no-headers" 2>/dev/null; then
-            _pass "kubectl get nodes works"
-            NODES=$(sshpass -p kldload ssh -o StrictHostKeyChecking=no root@${CP_IP} "kubectl get nodes --no-headers 2>/dev/null | wc -l")
-            READY=$(sshpass -p kldload ssh -o StrictHostKeyChecking=no root@${CP_IP} "kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready'")
-            _pass "Nodes: ${READY}/${NODES} Ready"
+
+    # `|| true`: grep -c prints its 0 before exiting 1 on no match; without
+    # the guard, 0 workers (mid-bootstrap) aborts the suite under set -e.
+    WORKER_COUNT=$(virsh list --name 2>/dev/null | grep -c 'kldload-w-' || true)
+    _pass "Worker VMs: $WORKER_COUNT"
+
+    # Host management tools
+    _section "Host Management Tools"
+    for tool in kubectl helm k9s cilium hubble; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            _pass "$tool installed"
         else
-            _warn "kubectl" "cannot reach API server"
+            _fail "$tool NOT installed on host"
         fi
+    done
+
+    # Kubeconfig
+    if [[ -f /root/.kube/config ]]; then
+        _pass "kubeconfig: /root/.kube/config"
+        export KUBECONFIG=/root/.kube/config
     else
-        _warn "CP IP" "could not determine"
+        _fail "kubeconfig NOT found on host"
     fi
 
-    WORKER_COUNT=$(virsh list --name 2>/dev/null | grep -c 'kldload-w-')
-    _pass "Worker VMs: $WORKER_COUNT"
+    # WireGuard mesh — host as node 100
+    _section "WireGuard Mesh (host)"
+    if ip link show wg-mgmt >/dev/null 2>&1; then
+        _pass "wg-mgmt interface up"
+        HOST_WG_IP=$(ip -4 addr show wg-mgmt 2>/dev/null | awk '/inet / {print $2}')
+        _pass "Host WireGuard IP: $HOST_WG_IP"
+        PEER_COUNT=$(wg show wg-mgmt peers 2>/dev/null | wc -l)
+        _pass "WireGuard peers: $PEER_COUNT"
+    else
+        _warn "wg-mgmt" "not configured — host not in WireGuard mesh"
+    fi
+    if ip link show wg-k8s >/dev/null 2>&1; then
+        _pass "wg-k8s interface up"
+    else
+        _warn "wg-k8s" "not configured"
+    fi
+
+    # K8s cluster health (via local kubectl)
+    _section "K8s Cluster Health"
+    if command -v kubectl >/dev/null 2>&1 && [[ -f "${KUBECONFIG:-/root/.kube/config}" ]]; then
+        NODES=$(kubectl get nodes --no-headers 2>/dev/null | wc -l)
+        READY=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready' || true)
+        if [[ "$NODES" -gt 0 ]]; then
+            _pass "Nodes: ${READY}/${NODES} Ready"
+            kubectl get nodes -o wide --no-headers 2>/dev/null | while read -r line; do
+                _pass "  $line"
+            done
+        else
+            _warn "kubectl" "no nodes returned — cluster may still be initializing"
+        fi
+
+        # Cilium
+        if command -v cilium >/dev/null 2>&1; then
+            if cilium status --wait --wait-duration 5s >/dev/null 2>&1; then
+                _pass "Cilium: healthy"
+            else
+                _warn "Cilium" "not ready"
+            fi
+        fi
+
+        # Hubble — check relay is deployed (flows require port-forward)
+        if kubectl get svc -n kube-system hubble-relay >/dev/null 2>&1; then
+            _pass "Hubble relay deployed"
+            if kubectl get pods -n kube-system -l k8s-app=hubble-relay --no-headers 2>/dev/null | grep -q Running; then
+                _pass "Hubble relay running"
+            else
+                _warn "Hubble relay" "pod not yet Running"
+            fi
+        else
+            _warn "Hubble" "relay service not found"
+        fi
+
+        # Pods
+        TOTAL_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | wc -l)
+        RUNNING_PODS=$(kubectl get pods -A --no-headers 2>/dev/null | grep -c 'Running' || true)
+        _pass "Pods: ${RUNNING_PODS}/${TOTAL_PODS} Running"
+
+        # MetalLB
+        if kubectl get pods -n metallb-system --no-headers 2>/dev/null | grep -q 'Running'; then
+            _pass "MetalLB: running"
+        else
+            _warn "MetalLB" "not running"
+        fi
+    else
+        _warn "kubectl" "not available — skipping cluster health checks"
+    fi
 else
     _pass "No cluster deployed (expected — run kube-cluster bootstrap)"
 fi

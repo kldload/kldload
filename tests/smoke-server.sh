@@ -274,7 +274,10 @@ fi
 if curl -sf --max-time 3 http://localhost:8400/health >/dev/null 2>&1; then
     _pass "RAG service responds on :8400"
     # And ChromaDB has some chunks indexed (first-boot indexer ran successfully)
-    chunks=$(curl -sf --max-time 3 http://localhost:8400/health | grep -oE '"chunks":\s*[0-9]+' | grep -oE '[0-9]+' | head -1)
+    # `|| true`: a /health response without a chunks field exits the
+    # pipeline non-zero — without the guard that kills the suite mid-run
+    # under set -e; the [[ -n ]] below already handles the empty case.
+    chunks=$(curl -sf --max-time 3 http://localhost:8400/health | grep -oE '"chunks":\s*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
     if [[ -n "$chunks" && "$chunks" -gt 0 ]]; then
         _pass "RAG corpus indexed ($chunks chunks)"
     else

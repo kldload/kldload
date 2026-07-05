@@ -34,7 +34,7 @@ echo -e "\033[1;36m╚═══════════════════�
 # ── ISO exists ───────────────────────────────────────────────────────────────
 _section "ISO File"
 
-ISO=$(find "$ROOT/live-build/output/" -name "kldload-*.iso" 2>/dev/null | head -1)
+ISO=$(find "$ROOT/live-build/output/" -name "kldload-*.iso" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
 if [[ -n "$ISO" && -f "$ISO" ]]; then
     _pass "ISO exists: $(basename "$ISO")"
 else
@@ -99,6 +99,91 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
         _pass "Boot loader present"
     else
         _warn "Boot loader" "no isolinux or grub — may not boot on all systems"
+    fi
+
+    # ── Bob + RAG content inside the squashfs ───────────────────────────
+    # Catches the regression where RAG code shipped but indexer/units/
+    # deps were missing. unsquashfs returns 0 even when some requested
+    # files don't exist in the image, so we verify each file
+    # individually after the extract instead of trusting its exit code.
+    if [[ -f "$MOUNTPOINT/LiveOS/squashfs.img" ]] && command -v unsquashfs >/dev/null 2>&1; then
+        SQEXTRACT=$(mktemp -d)
+        declare -a RAG_FILES=(
+            usr/local/bin/bob
+            usr/local/bin/kldload-rag-index
+            usr/local/bin/kai-rag
+            usr/local/lib/kldload-rag/kldload_rag.py
+            usr/local/lib/kldload-rag/kldload_rag_index.py
+            usr/lib/systemd/system/kldload-rag.service
+            usr/lib/systemd/system/kldload-rag-firstboot.service
+            usr/lib/systemd/system/kldload-rag-index.timer
+            usr/lib/systemd/system/kldload-rag-index.service
+        )
+        unsquashfs -q -f -d "$SQEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" \
+            "${RAG_FILES[@]}" >/dev/null 2>&1 || true
+
+        # Per-file existence + content checks
+        for _f in "${RAG_FILES[@]}"; do
+            if [[ -f "$SQEXTRACT/root/$_f" ]]; then
+                _pass "squashfs has $_f"
+            else
+                _fail "squashfs has $_f" "file missing from squashfs"
+            fi
+        done
+
+        # bob must contain BOB_RAG (the bridge marker) -- catches the stub
+        if [[ -f "$SQEXTRACT/root/usr/local/bin/bob" ]]; then
+            if grep -q 'BOB_RAG' "$SQEXTRACT/root/usr/local/bin/bob"; then
+                _pass "squashfs bob CLI has RAG bridge"
+            else
+                _fail "squashfs bob CLI has RAG bridge" "stub installed instead of full bob -- RAG won't be used"
+            fi
+        fi
+
+        rm -rf "$SQEXTRACT"
+    fi
+
+    # ── Workstation launchers + custom app icons inside the squashfs ────
+    # Catches the icon-drop regression: build-iso.sh must copy the hicolor
+    # app-icon theme + the Web UI launcher into the live rootfs, else the
+    # menu (live AND installed — profiles.sh sources icons from the live
+    # rootfs) falls back to generic icons.
+    if [[ -f "$MOUNTPOINT/LiveOS/squashfs.img" ]] && command -v unsquashfs >/dev/null 2>&1; then
+        WSEXTRACT=$(mktemp -d)
+        declare -a WS_FILES=(
+            usr/share/applications/kldload-webui.desktop
+            usr/share/icons/hicolor/scalable/apps/kldload-webui.svg
+            usr/share/icons/hicolor/scalable/apps/bob-chat.svg
+            usr/share/icons/hicolor/scalable/apps/kldload-zfs.svg
+            usr/local/bin/bob-models
+        )
+        unsquashfs -q -f -d "$WSEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" \
+            "${WS_FILES[@]}" usr/share/applications/kldload-console.desktop >/dev/null 2>&1 || true
+
+        for _f in "${WS_FILES[@]}"; do
+            if [[ -f "$WSEXTRACT/root/$_f" ]]; then
+                _pass "squashfs has $_f"
+            else
+                _fail "squashfs has $_f" "launcher/icon dropped from ISO"
+            fi
+        done
+
+        # The Console/Argus launcher was replaced by Web UI — it must be gone.
+        if [[ -f "$WSEXTRACT/root/usr/share/applications/kldload-console.desktop" ]]; then
+            _fail "console launcher replaced" "kldload-console.desktop still in squashfs"
+        else
+            _pass "console launcher replaced by Web UI"
+        fi
+
+        # bob delegates model mgmt to bob-models; bob-models swaps the resident
+        # model via the ollama keep_alive API (load/unload).
+        if [[ -f "$WSEXTRACT/root/usr/local/bin/bob-models" ]] && grep -q 'keep_alive' "$WSEXTRACT/root/usr/local/bin/bob-models"; then
+            _pass "bob-models has load/unload (keep_alive) support"
+        else
+            _fail "bob-models load/unload" "keep_alive missing — model swap won't work"
+        fi
+
+        rm -rf "$WSEXTRACT"
     fi
 
     umount "$MOUNTPOINT" 2>/dev/null
@@ -180,6 +265,72 @@ if command -v shellcheck >/dev/null 2>&1; then
             fi
         fi
     done
+
+    # The smoke suite itself must be shellcheck-clean too. A July 2026
+    # audit found `local` used outside functions in three tests/*.sh —
+    # a runtime abort under set -e that the curated list above never
+    # scanned for. Gate the whole tests/ dir so the harness can't rot.
+    for FILE in "$ROOT"/tests/*.sh; do
+        ERRORS=$(shellcheck -S error "$FILE" 2>&1 | grep -c "SC[0-9]" || true)
+        if [[ "$ERRORS" -eq 0 ]]; then
+            _pass "tests/$(basename "$FILE") shellcheck clean"
+        else
+            _fail "tests/$(basename "$FILE") shellcheck" "$ERRORS errors"
+        fi
+    done
+else
+    _warn "Shellcheck" "not installed — install ShellCheck (dnf/apt)"
+fi
+
+# ── Test-suite twin sync ─────────────────────────────────────────────────────
+# The smoke suite exists twice on purpose: tests/ (scp'd into VMs by
+# lifecycle.sh, run by CI) and includes.chroot/usr/local/share/kldload/
+# tests/ (shipped in the ISO for on-target runs on installed systems).
+# The two forked between 2026-04 and 2026-06 and each side accumulated
+# real bug fixes the other never received (SB opt-in gating, grep -c
+# double-zero, zfs -rH, Bob/RAG checks). Any byte drift is now a build
+# failure: fix one copy, then cp it over the twin.
+_section "Test-suite twin sync"
+CHROOT_TESTS="$ROOT/live-build/config/includes.chroot/usr/local/share/kldload/tests"
+if [[ -d "$CHROOT_TESTS" ]]; then
+    for _t in "$ROOT"/tests/*.sh; do
+        _b=$(basename "$_t")
+        # host-side harness scripts have no ISO twin by design
+        case "$_b" in
+        lifecycle.sh | lifecycle-matrix.sh | smoke-javaapi-rollback.sh) continue ;;
+        esac
+        if [[ ! -f "$CHROOT_TESTS/$_b" ]]; then
+            _fail "ISO twin missing: $_b" "cp tests/$_b into includes.chroot .../tests/"
+        elif ! cmp -s "$_t" "$CHROOT_TESTS/$_b"; then
+            _fail "test drift: $_b" "tests/ and includes.chroot copies differ — sync them"
+        else
+            _pass "in sync: $_b"
+        fi
+    done
+else
+    _warn "Test-suite twin sync" "includes.chroot tests dir not found — skipped"
+fi
+
+# ── shfmt drift (style enforcement, if available) ────────────────────────────
+# Every tracked *.sh + ci/kldload-ci-run must match `shfmt -i 4`. After the
+# 2026 bulk-reformat this is the gate that keeps the codebase from drifting.
+if command -v shfmt >/dev/null 2>&1; then
+    _section "shfmt drift"
+    DRIFT=$(cd "$ROOT" && find . -type f \( -name '*.sh' -o -path './ci/kldload-ci-run' \) \
+        -not -path './.git/*' \
+        -not -path './live-build/*' \
+        -not -path './build/darksite-*/output/*' \
+        -not -path './builder/.cache/*' \
+        -print0 | xargs -0 shfmt -l -i 4 2>/dev/null)
+    if [[ -z "$DRIFT" ]]; then
+        _pass "all shell scripts shfmt-clean"
+    else
+        while IFS= read -r f; do
+            _fail "$f" "needs 'shfmt -w -i 4'"
+        done <<<"$DRIFT"
+    fi
+else
+    _warn "shfmt" "not installed — install shfmt (github.com/mvdan/sh releases)"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────

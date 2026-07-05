@@ -243,7 +243,7 @@ k_profile_packages() {
         ${_xsrv} ${_netools_extra} \
         ${_browser} nss-tools \
         gir1.2-webkit-6.0 libgtk-4-1 python3-gi \
-        pulseaudio-utils \
+        pulseaudio-utils wl-clipboard xclip \
         tmux eject sanoid python3 python3-websockets python3-yaml htop iotop lm_sensors net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
         zenity chromium"
         ;;

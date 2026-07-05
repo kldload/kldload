@@ -57,7 +57,12 @@ VM_BRIDGE="${VM_BRIDGE:-vmbr0}"    # Network bridge
 KVM_VMS="${KVM_VMS:-1}"            # Number of KVM test VMs to create
 
 # ── USB burn ─────────────────────────────────────────────────────────────────
-USB_DEVICE="${USB_DEVICE:-/dev/sda}"           # Target USB block device
+# NO default device. /dev/sda is frequently an INTERNAL disk (or the live
+# USB itself); a default meant `./deploy.sh burn` with no argument and no
+# env var dd'd 9 GB over whatever sda was, and the auto-detect branch in
+# cmd_burn was dead code because the var was never empty. Empty = cmd_burn
+# takes the positional arg, or auto-detects a single removable drive.
+USB_DEVICE="${USB_DEVICE:-}"                   # Target USB block device
 USB_BURN_ON_DEPLOY="${USB_BURN_ON_DEPLOY:-no}" # Auto-burn after full build (yes/no)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -233,12 +238,12 @@ cmd_build_ollama_darksite() {
     runtime="$(detect_runtime)"
     local darksite_dir="$ROOT/live-build/darksite-ollama-cache"
     mkdir -p "$darksite_dir"
-    # Bake qwen2.5:14b only. It's strictly better than llama3.1:8b at
-    # tool calling + reasoning, and one model keeps the ISO ~5 GB smaller.
-    # Users with weaker GPUs can manually `ollama pull llama3.1:8b` post-
-    # install if they prefer the smaller model. Override with
-    # OLLAMA_MODELS=... to bake anything else.
-    local models="${OLLAMA_MODELS:-qwen2.5:14b}"
+    # Bake qwen3:14b only — must match /etc/bob/Modelfile.bob (FROM
+    # qwen3:14b) and the "recommended" tier in firstboot/autodeploy, or
+    # `ollama create bob` triggers a second ~9 GB registry fetch at
+    # firstboot (hard failure air-gapped). One model keeps the ISO ~5 GB
+    # smaller. Override with OLLAMA_MODELS=... to bake anything else.
+    local models="${OLLAMA_MODELS:-qwen3:14b}"
     log "Building Ollama model darksite (models=${models})..."
     "$runtime" run --rm \
         --platform linux/amd64 \
@@ -366,7 +371,7 @@ cmd_build() {
         # Ollama model darksite — opt-IN as of 1.0.5. By default the ISO
         # ships WITHOUT baked-in LLM weights (saves ~9 GB / ~46% of the
         # ISO). On first boot with Bob enabled, kldload-firstboot falls
-        # back to pulling qwen2.5:14b from ollama.com — same model,
+        # back to pulling qwen3:14b from ollama.com — same model,
         # ~5 min on a typical home connection. Users who need offline
         # AI (air-gapped labs, classified networks) have two options:
         #
@@ -603,6 +608,12 @@ cmd_burn() {
     iso="$(latest_iso)"
     [[ -n "$iso" ]] || die "No ISO found"
 
+    # Positional device wins: `./deploy.sh burn /dev/sdX` is the documented
+    # interface (see README). Through 1.3.1 the dispatch never
+    # passed it, so the argument was silently IGNORED in favour of
+    # USB_DEVICE's /dev/sda default.
+    if [[ -n "${1:-}" ]]; then USB_DEVICE="$1"; fi
+
     if [[ -z "$USB_DEVICE" ]]; then
         local candidates=()
         # -type b filters to block devices only — without it, a stale regular
@@ -624,6 +635,16 @@ cmd_burn() {
     # passed USB_DEVICE in explicitly and bypassed the candidate search).
     [[ -b "$USB_DEVICE" ]] || die "$USB_DEVICE is not a block device — refusing to burn (was the stick unplugged?)"
 
+    # Show the target and ask — docs promise "asks first", and dd here is
+    # unrecoverable. Non-interactive callers (ship/CI) preserve the old
+    # no-prompt behavior via BURN_YES=1 or by having no TTY on stdin
+    # combined with an explicit device.
+    log "About to burn $iso to $USB_DEVICE:"
+    lsblk -o NAME,SIZE,MODEL,TRAN "$USB_DEVICE" 2>/dev/null || true
+    if [[ "${BURN_YES:-0}" != "1" && -t 0 ]]; then
+        read -rp "Erase $USB_DEVICE and write the ISO? Type yes to continue: " _confirm
+        [[ "$_confirm" == "yes" ]] || die "burn aborted by user"
+    fi
     log "Burning $iso to $USB_DEVICE..."
     dd if="$iso" of="$USB_DEVICE" bs=4M status=progress oflag=direct conv=fsync
     sync
@@ -709,7 +730,7 @@ cmd_ship() {
     # stick gets a loud refusal rather than a silent file-write (b649).
     {
         echo "=== burn phase $(date -Is) ==="
-        sudo "$0" burn 2>&1
+        sudo USB_DEVICE="$USB_DEVICE" BURN_YES="${BURN_YES:-0}" "$0" burn 2>&1
         echo "=== burn exit: $? ==="
     } | tee -a "$ship_log"
     local burn_rc=${PIPESTATUS[0]}
@@ -948,7 +969,7 @@ build-k8s-darksite)
 build-ai-docs) cmd_build_ai_docs ;;
 builder-image) cmd_builder_image ;;
 clean) cmd_clean ;;
-burn) cmd_burn ;;
+burn) cmd_burn "${2:-}" ;;
 ship) cmd_ship ;;
 full) cmd_full ;;
 kvm-deploy) cmd_kvm_deploy ;;

@@ -101,9 +101,15 @@ if [[ -n "${1:-}" ]]; then
     fi
   fi
 
-  # Set as default
-  _set_default "$_selected" 2>/dev/null || true
-  echo -e "${GREEN}✔${NC} Default model: ${BOLD}${_selected}${NC}"
+  # Set as default. This used to call _set_default, a function that was
+  # never defined — swallowed by `2>/dev/null || true`, so the tool
+  # printed success while persisting nothing. Write the same profile.d
+  # drop-in the interactive path uses.
+  if echo "export BOB_MODEL='${_selected}'" | sudo tee /etc/profile.d/bob-model.sh > /dev/null; then
+    echo -e "${GREEN}✔${NC} Default model: ${BOLD}${_selected}${NC} (persisted — new shells pick it up)"
+  else
+    echo -e "${YELLOW}⚠${NC} could not write /etc/profile.d/bob-model.sh — default NOT persisted (need sudo)"
+  fi
   exit 0
 fi
 

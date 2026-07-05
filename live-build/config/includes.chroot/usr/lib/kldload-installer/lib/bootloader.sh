@@ -537,9 +537,16 @@ EOFSTAB
     # \EFI\centos\grub.cfg (or rocky/fedora). Write both dirs' grub.cfg to
     # the same content so whichever path runs, the menu shows up.
     #
-    # Default depends on the user's Secure Boot intent:
+    # Default depends on the user's Secure Boot intent. NB: when the
+    # operator gave no explicit answer, kldload-install-target resolves
+    # the intent from the firmware's live SecureBoot state and EXPORTS
+    # KLDLOAD_ENABLE_SECURE_BOOT before this lib runs — so the unset→0
+    # fallbacks in this file are only reachable when the lib is sourced
+    # standalone (backend tooling), never on the install path. Through
+    # 1.3.1 this file defaulted unset→0 while install-target defaulted
+    # unset→1, which mis-booted SB-on installs ("Verification failed").
     #
-    #   SB OFF (KLDLOAD_ENABLE_SECURE_BOOT=0, the majority install case):
+    #   SB OFF (KLDLOAD_ENABLE_SECURE_BOOT=0):
     #     default = `zbm`. GRUB silently chainloads ZFSBootMenu, which is
     #     the canonical kldload boot UX — boot-env picker, snapshot rollback,
     #     read-only recovery shell. This is what users see in production.

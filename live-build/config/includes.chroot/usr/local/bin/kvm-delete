@@ -53,12 +53,20 @@ if zfs list "${ZVOL}" >/dev/null 2>&1; then
   zfs destroy -r "${ZVOL}"
 
   # Clean up orphaned clone snapshots on the source
-  # Find all clone-* snapshots on the source that have no remaining clones
+  # Find all clone-* snapshots on the source that have no remaining clones.
+  # mapfile + `|| true` guards, NOT a bare `… | grep | while` pipeline:
+  # under set -euo pipefail the old shape aborted the script when grep
+  # matched nothing (no clone snaps), and aborted INSIDE the loop when a
+  # snapshot was orphaned (the grep that finds no remaining user exits 1
+  # — precisely the case the loop exists to clean up). Either way the
+  # zvol was already destroyed but kldload-db vm-delete below never ran,
+  # leaving a ghost inventory entry, and orphans were never pruned.
   SRC=$(echo "$ORIGIN" | cut -d@ -f1)
   if [[ -n "$SRC" && "$SRC" != "-" ]]; then
-    zfs list -t snapshot -H -o name "$SRC" 2>/dev/null | grep '@clone-' | while read snap; do
+    mapfile -t CLONE_SNAPS < <(zfs list -t snapshot -H -o name "$SRC" 2>/dev/null | grep '@clone-' || true)
+    for snap in "${CLONE_SNAPS[@]}"; do
       # Check if any zvol still uses this snapshot as its origin
-      USED_BY=$(zfs get -H -o value origin -t volume -r rpool/vms 2>/dev/null | grep "^${snap}$")
+      USED_BY=$(zfs get -H -o value origin -t volume -r rpool/vms 2>/dev/null | grep "^${snap}$" || true)
       if [[ -z "$USED_BY" ]]; then
         echo "Cleaning up orphaned snapshot: ${snap}"
         zfs destroy "${snap}" 2>/dev/null || true

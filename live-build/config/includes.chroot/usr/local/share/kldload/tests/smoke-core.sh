@@ -35,7 +35,13 @@ test_succeeds "Pool scrub runs" "zpool scrub rpool"
 _section "ZFS Datasets"
 
 test_dataset "rpool/ROOT exists" "rpool/ROOT"
-test_output_contains "Root dataset mounted at /" "zfs get -H -o value mountpoint rpool/ROOT/*" "/"
+# rpool/ROOT/* is NOT a valid zfs dataset name — `zfs get rpool/ROOT/*`
+# fails with "invalid character '*' in name". Use -r to recurse into
+# rpool/ROOT/<BE> children. Bug seen 2026-05-06 on fiend CI: the eval
+# failure inside test_output_contains cascaded through set -e and
+# halted smoke-core.sh after the rpool/ROOT exists check, with no
+# FAIL line printed (silent abort).
+test_output_contains "Root dataset mounted at /" "zfs get -rH -o value mountpoint rpool/ROOT" "/"
 test_dataset "rpool/home exists" "rpool/home"
 test_dataset "rpool/var exists" "rpool/var"
 test_dataset "rpool/var/log exists" "rpool/var/log"
@@ -67,7 +73,10 @@ _section "EFI / Bootloader"
 # in an otherwise-green run.
 # Wrap in set +e so a quirk of the discovery commands (findmnt return
 # codes, pipefail interactions) can't take down the script itself.
-(
+# Brace group, NOT a subshell: the original `( set +e … )` ran _pass/_fail
+# against subshell COPIES of PASS/FAIL/TESTS — the lines printed but were
+# dropped from the summary, so an ESP FAIL could never fail the suite.
+{
     set +e
     _esp_dev=$(findmnt -no SOURCE /boot/efi 2>/dev/null)
     if [[ -z "$_esp_dev" ]]; then
@@ -96,7 +105,8 @@ _section "EFI / Bootloader"
     else
         _fail "ESP partition exists" "no EFI System Partition found via findmnt or lsblk"
     fi
-)
+    set -e
+}
 
 test_file "Hostid configured" "/etc/hostid"
 
@@ -169,6 +179,15 @@ if zfs snapshot "rpool@${SNAP_NAME}" 2>/dev/null; then
 else
     _fail "Can create snapshot" "zfs snapshot failed"
 fi
+
+# ── Debug bundle tool ────────────────────────────────────────────────────────
+# kldload-debug-bundle ships with every install for fast post-mortem
+# capture. Verify it's on PATH and at least responds to --help, so a
+# future regression that drops it from includes.chroot or loses the
+# +x bit is caught before a user actually needs the tool.
+_section "Debug Bundle Tool"
+test_cmd "kldload-debug-bundle present" "kldload-debug-bundle"
+test_succeeds "kldload-debug-bundle --help works" "kldload-debug-bundle --help >/dev/null 2>&1"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 summary

@@ -17,13 +17,13 @@ _pass() {
 }
 _fail() {
     FAIL=$((FAIL + 1))
-    TESTS+=("FAIL|$1|$2")
-    printf "\e[1;31m  ✗ FAIL\e[0m  %s — %s\n" "$1" "$2"
+    TESTS+=("FAIL|$1|${2:-}")
+    printf "\e[1;31m  ✗ FAIL\e[0m  %s — %s\n" "$1" "${2:-}"
 }
 _warn() {
     WARN=$((WARN + 1))
-    TESTS+=("WARN|$1|$2")
-    printf "\e[1;33m  ⚠ WARN\e[0m  %s — %s\n" "$1" "$2"
+    TESTS+=("WARN|$1|${2:-}")
+    printf "\e[1;33m  ⚠ WARN\e[0m  %s — %s\n" "$1" "${2:-}"
 }
 _section() { printf "\n\e[1;36m  ── %s ──────────────────────────────────────────\e[0m\n" "$1"; }
 

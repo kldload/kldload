@@ -120,11 +120,18 @@ bootenv_install() {
         log "WARNING: Could not determine disk for efibootmgr — skipping EFI registration"
     fi
 
-    # Set ZFSBootMenu kernel command line property on root dataset
-    local active_ds
-    active_ds="$(_bootenv_active_dataset)"
-    log "Setting ZBM commandline on ${active_ds}..."
-    run zfs set org.zfsbootmenu:commandline="ro console=tty1 console=ttyS0,115200" "${active_ds}"
+    # Set ZFSBootMenu kernel command line property. Two invariants, both
+    # violated by earlier revisions of this line:
+    #   1. `rw`, never `ro` — the shipped fstab has no `/` entry, so nothing
+    #      remounts the root read-write later; a `ro` root fails systemd's
+    #      writable-fs setup at boot.
+    #   2. Set on rpool/ROOT (inherited by every BE), never on the active
+    #      dataset — a local property on one BE OVERRIDES the inherited
+    #      value the lib installer set, so running this tool on a working
+    #      install silently downgraded its cmdline.
+    # Matches lib/storage-zfs.sh's `rw console=… psi=1` on rpool/ROOT.
+    log "Setting ZBM commandline on rpool/ROOT (inherited by all BEs)..."
+    run zfs set org.zfsbootmenu:commandline="rw console=tty1 console=ttyS0,115200 psi=1" rpool/ROOT
 
     # Write ZFSBootMenu config in target
     local zbm_conf_dir="${target}/etc/zfsbootmenu"

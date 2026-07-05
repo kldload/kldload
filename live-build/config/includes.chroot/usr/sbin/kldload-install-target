@@ -14,6 +14,9 @@ set -Eeuo pipefail
 # with the real final rc — no false alarms.
 _emergency_cleanup() {
     local exit_code=$?
+    # The busy marker (created in main()) comes off on EVERY exit path,
+    # success included — a stale marker blocks the next installer run.
+    rm -f /var/run/kldload/installer-busy 2>/dev/null
     [[ $exit_code -eq 0 ]] && return
     printf '\n\e[1;31m  ✖   Installation failed (exit %d) — cleaning up mounts\e[0m\n' "$exit_code" >&2
     local mnt="${KLDLOAD_TARGET_MNT:-/target}"
@@ -23,22 +26,27 @@ _emergency_cleanup() {
 }
 trap '_emergency_cleanup' EXIT
 
-# Secure Boot + MOK is ON by default as of 1.0.6. 1.0.5 briefly flipped
-# it to opt-in while we chased MOK-enrollment failures that were causing
-# "installed but won't boot" reports. Those root causes (non-unique MOK
-# subjects, DKMS never signing inside chroot, efivars-not-writable silent
-# fails, stale proxy cert drift) are all fixed, and with the kldload-ca
-# unification the MOK cert IS the TLS CA root — one enrollment covers
-# TLS, kernel module signing, and (soon) K8s intra-cluster trust.
+# Secure Boot + MOK: when the operator gives no explicit answer, follow
+# the firmware's current SecureBoot state (resolved + exported below).
+# HISTORY: 1.0.5 was opt-in while we chased MOK-enrollment failures
+# ("installed but won't boot"); 1.0.6 flipped to default-ON after fixing
+# the root causes (non-unique MOK subjects, DKMS never signing inside
+# chroot, efivars-not-writable silent fails, stale proxy cert drift);
+# through 1.3.1 that default disagreed with lib/bootloader.sh's unset→0
+# default, which mis-booted SB-on boxes. With the kldload-ca unification
+# the MOK cert IS the TLS CA root — one enrollment covers TLS, kernel
+# module signing, and (soon) K8s intra-cluster trust.
 #
 # Three supported paths:
 #
-#   - default install (the 95% case): KLDLOAD_ENABLE_SECURE_BOOT=1.
-#     kldload-ca root generated, MOK = CA DER, mokutil --import queued,
-#     ZBM signed with the CA key, shim installed as fallback. On first
-#     reboot firmware drops into MokManager: user enrolls (password
-#     printed in the installer log by security.sh), reboots, SB boots
-#     clean.
+#   - default install: KLDLOAD_ENABLE_SECURE_BOOT unset → follow the
+#     firmware's CURRENT SecureBoot state (resolved below, exported).
+#     SB-on firmware: kldload-ca root generated, MOK = CA DER, mokutil
+#     --import queued, ZBM signed with the CA key, shim installed as
+#     fallback. On first reboot firmware drops into MokManager: user
+#     enrolls (password printed in the installer log by security.sh),
+#     reboots, SB boots clean. SB-off firmware: ZBM boot-env picker is
+#     the default boot UX, no MOK prompt.
 #
 #   - explicit opt-out: KLDLOAD_ENABLE_SECURE_BOOT=0 at install time, OR
 #     checkbox unchecked in the web UI. ZBM installed unsigned at
@@ -52,8 +60,39 @@ trap '_emergency_cleanup' EXIT
 #     existing kldload-ca root (which is generated at install time
 #     regardless of SB state — it's also the TLS CA) and queues
 #     mokutil --import. Reboot to complete enrollment in MokManager.
+#
+# Resolve the SB intent ONCE, here, and export it so every consumer sees
+# the same answer. Through 1.3.1 this file defaulted unset→1 while
+# lib/bootloader.sh defaulted unset→0: MOK keys were generated and
+# enrollment queued as an SB install, but the kernel was never re-signed
+# and grub defaulted to the ZBM chainload that shim 15.8 SBAT-rejects —
+# so an SB-enabled box with no explicit answer defaulted into
+# "Verification failed" at first boot. When the operator didn't say,
+# follow the firmware: the live env sees the same EFI vars the installed
+# system will boot under.
+if [[ -z "${KLDLOAD_ENABLE_SECURE_BOOT:-}" ]]; then
+    if command -v mokutil >/dev/null 2>&1 &&
+        mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
+        KLDLOAD_ENABLE_SECURE_BOOT=1
+    elif [[ -r /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c ]]; then
+        # mokutil missing — read the EFI var directly: 4 bytes of
+        # attributes, then 1 data byte (1 = SB enforcing).
+        if [[ "$(od -An -tu1 -j4 -N1 \
+            /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c \
+            2>/dev/null | tr -d ' ')" == "1" ]]; then
+            KLDLOAD_ENABLE_SECURE_BOOT=1
+        else
+            KLDLOAD_ENABLE_SECURE_BOOT=0
+        fi
+    else
+        # No mokutil and no efivar (legacy BIOS, or non-EFI VM): SB
+        # cannot be enforced on this firmware — treat as off.
+        KLDLOAD_ENABLE_SECURE_BOOT=0
+    fi
+fi
+export KLDLOAD_ENABLE_SECURE_BOOT
 _secure_boot_enabled() {
-    [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]]
+    [[ "${KLDLOAD_ENABLE_SECURE_BOOT}" == "1" ]]
 }
 
 # Back-compat alias — existing callers inside this script still use the
@@ -980,9 +1019,9 @@ if ! k_have_func k_apply_profile; then
         if [[ "${profile}" == "desktop" ]]; then
             local _wvdeps
             case "${distro}" in
-                debian | ubuntu) _wvdeps="gir1.2-webkit-6.0 libgtk-4-1 python3-gi" ;;
-                arch) _wvdeps="webkitgtk-6.0 gtk4 python-gobject" ;;
-                *) _wvdeps="webkitgtk6.0 gtk4 python3-gobject" ;;
+            debian | ubuntu) _wvdeps="gir1.2-webkit-6.0 libgtk-4-1 python3-gi" ;;
+            arch) _wvdeps="webkitgtk-6.0 gtk4 python-gobject" ;;
+            *) _wvdeps="webkitgtk6.0 gtk4 python3-gobject" ;;
             esac
             k_log "installing kldload-webview deps (${_wvdeps})"
             if [[ "${distro}" == "debian" || "${distro}" == "ubuntu" ]]; then
@@ -1179,6 +1218,10 @@ KLDLOAD_NET_DNS="${KLDLOAD_NET_DNS:-}"
 KLDLOAD_STORAGE_MODE="${KLDLOAD_STORAGE_MODE:-zfs}"
 KLDLOAD_ZFS_TOPOLOGY="${KLDLOAD_ZFS_TOPOLOGY:-single}"
 KLDLOAD_ZFS_ENCRYPT="${KLDLOAD_ZFS_ENCRYPT:-0}"
+# Resolved SB intent (exported near the top of this script). The lib
+# manifest writer records it too; smoke-kvm gates its MOK/shim checks on
+# this key, so the fallback manifest must carry it as well.
+KLDLOAD_ENABLE_SECURE_BOOT="${KLDLOAD_ENABLE_SECURE_BOOT:-0}"
 KLDLOAD_DEBIAN_RELEASE="${KLDLOAD_DEBIAN_RELEASE:-trixie}"
 # Prefer the ISO's build-time version (written to /etc/kldload/VERSION by
 # builder/build-iso.sh) so the attestation reports the real shipped version
@@ -1788,14 +1831,28 @@ main() {
     # is removed on ANY exit path — success, failure, Ctrl-C, OOM.
     mkdir -p /var/run/kldload 2>/dev/null
     : >/var/run/kldload/installer-busy
-    trap 'rm -f /var/run/kldload/installer-busy' EXIT INT TERM HUP
+    # Re-register the ONE cleanup handler for signals too. This line used
+    # to install a busy-file-only trap, which OVERWROTE the EXIT trap set
+    # at the top of this file — from here on an aborted install left
+    # /target mounted and rpool imported, and the red failure banner never
+    # printed. _emergency_cleanup now owns the busy file as well.
+    trap '_emergency_cleanup' EXIT INT TERM HUP
 
     mkdir -p "${KLDLOAD_LOG_DIR}"
     for _l in kldload-installer storage zfs security network bootstrap bootloader; do
         : >"${KLDLOAD_LOG_DIR}/${_l}.log"
     done
 
-    [[ "${mode}" == "config" ]] && k_answers_load_env_file "${cfg}" || guided_prompt
+    # NOT `[[ config ]] && load || guided_prompt`: with that shape a failed
+    # answers load silently dropped an UNATTENDED install into the
+    # interactive prompt — hanging forever on a headless box, or installing
+    # with defaults if something was feeding stdin. Config mode must die.
+    if [[ "${mode}" == "config" ]]; then
+        k_answers_load_env_file "${cfg}" ||
+            k_die "failed to load answers file '${cfg}' — refusing to fall back to interactive prompts in config mode"
+    else
+        guided_prompt
+    fi
 
     # ── Hostname validation + normalization ──────────────────────────────────
     # Previously users hit unbootable installs when they set a hostname with
@@ -1994,9 +2051,17 @@ main() {
     fi
     _ok "Bootstrap" "${KLDLOAD_DISTRO:-centos} base installed"
 
-    # Write install manifest via the k_write_manifest function (defined earlier)
-    # which includes all flags: AI, eBPF, NVIDIA, WireGuard, etc.
-    k_write_manifest
+    # Write install manifest via the k_write_manifest function (defined in
+    # lib/bootstrap.sh) which includes all flags: AI, eBPF, NVIDIA,
+    # WireGuard, etc. When the libs failed to load we're on the inline
+    # fallback, which only defines k_write_install_manifest — without this
+    # guard the fallback path died "command not found" HERE, after the
+    # disk was already wiped and bootstrapped.
+    if k_have_func k_write_manifest; then
+        k_write_manifest
+    else
+        k_write_install_manifest
+    fi
     k_log "Install manifest written to ${KLDLOAD_TARGET_MNT}/etc/kldload/install-manifest.env"
 
     _info "▸  Configuring network..."
