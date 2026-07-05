@@ -1,4 +1,4 @@
-# kldload 1.3.0 "Workstation" — Feature List
+# kldload 1.3.1 "Workstation" — Feature List
 
 *Fedora 44 substrate on the Linux 7.0 kernel (also RHEL/Rocky/CentOS/Debian/
 Ubuntu/Arch). A reproducible developer workstation with a datacenter behind the

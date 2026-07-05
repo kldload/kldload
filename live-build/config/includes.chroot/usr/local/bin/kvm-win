@@ -12,8 +12,22 @@
 #
 # Hardware: q35 + OVMF Secure Boot + swtpm TPM 2.0 + virtio (the Win11 floor).
 #
+# WSL (--wsl on a golden): bakes WSL2 into the Win11 golden so `wsl` works inside
+# the guest. Two things are needed and both are handled here:
+#   1. The guest must SEE virtualization extensions (WSL2 runs on Hyper-V, which
+#      is itself a VM under our KVM). So the golden + its clones run with
+#      `--cpu host-passthrough` (exposes vmx/svm) instead of the default model.
+#      This only actually nests if the HOST has kvm_intel/kvm_amd nested=1 —
+#      kldload-firstboot drops that modprobe conf when Windows+WSL is selected.
+#   2. The Windows optional features Microsoft-Windows-Subsystem-Linux and
+#      VirtualMachinePlatform are DISM-enabled in the unattended install (offline,
+#      no MS Store needed). Installing a specific distro (`wsl --install -d …`)
+#      needs internet + a reboot, so that's left to the operator post-boot.
+# create_vm auto-detects a WSL golden via the zfs `kldload:wsl` property — no need
+# to repeat --wsl when spawning clones.
+#
 # Usage:
-#   kvm-win golden win11|server [--iso URL|PATH] [--ram MB] [--disk GB]
+#   kvm-win golden win11|server [--wsl] [--iso URL|PATH] [--ram MB] [--disk GB]
 #   kvm-win create NAME --os win11|server [--ram MB] [--cpus N] [--disk GB]
 #   kvm-win demo sccm                 # build both goldens + spawn 1 Server + 1 Win11
 #   kvm-win list | destroy NAME [--purge] | --self-test
@@ -62,7 +76,9 @@ _iso_tool() { command -v genisoimage >/dev/null 2>&1 && echo genisoimage || echo
 check_prereqs() {
   local missing=()
   for b in virt-install virsh qemu-img zfs swtpm curl; do command -v "$b" >/dev/null 2>&1 || missing+=("$b"); done
-  command -v genisoimage >/dev/null 2>&1 || command -v mkisofs >/dev/null 2>&1 || missing+=("genisoimage/mkisofs")
+  # xorriso is the portable ISO builder (EL dropped genisoimage from base); accept
+  # any of the three so kvm-win runs unchanged across Fedora/EL/Debian/Arch.
+  command -v xorriso >/dev/null 2>&1 || command -v genisoimage >/dev/null 2>&1 || command -v mkisofs >/dev/null 2>&1 || missing+=("xorriso/genisoimage/mkisofs")
   [[ ${#missing[@]} -eq 0 ]] || die "missing tools: ${missing[*]}"
   _find_ovmf
   [[ -n "$OVMF_CODE" ]] || die "OVMF Secure Boot firmware not found (need edk2-ovmf)"
@@ -111,7 +127,16 @@ fetch_windows() {
 # oobeSystem skips OOBE, sets Administrator, enables RDP, and FirstLogonCommands
 # installs the QEMU guest agent + Cloudbase-Init, then sysprep /generalize.
 gen_autounattend() {
-  local os="$1" out="$2"
+  local os="$1" out="$2" wsl="${3:-}"
+  # WSL: enable the two optional features OFFLINE via DISM (no MS Store, no
+  # internet) during the unattended install, before sysprep captures the image.
+  # This makes `wsl` usable in every clone; installing a specific distro
+  # (`wsl --install -d …`, needs internet + a reboot) is a post-clone step.
+  local wsl_block=""
+  if [[ -n "$wsl" ]]; then
+    wsl_block='        <SynchronousCommand wcm:action="add"><Order>4</Order><CommandLine>cmd /c "dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart"</CommandLine></SynchronousCommand>
+        <SynchronousCommand wcm:action="add"><Order>5</Order><CommandLine>cmd /c "dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart"</CommandLine></SynchronousCommand>'
+  fi
   cat > "$out" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
@@ -169,6 +194,7 @@ gen_autounattend() {
         <SynchronousCommand wcm:action="add"><Order>1</Order><CommandLine>cmd /c "D:\\virtio-win-guest-tools.exe /install /quiet /norestart"</CommandLine></SynchronousCommand>
         <SynchronousCommand wcm:action="add"><Order>2</Order><CommandLine>msiexec /i D:\\guest-agent\\qemu-ga-x86_64.msi /quiet /norestart</CommandLine></SynchronousCommand>
         <SynchronousCommand wcm:action="add"><Order>3</Order><CommandLine>powershell -ExecutionPolicy Bypass -NoProfile -Command "Invoke-WebRequest -UseBasicParsing 'https://github.com/cloudbase/cloudbase-init/releases/latest/download/CloudbaseInitSetup_x64.msi' -OutFile C:\\cbi.msi; Start-Process msiexec -Wait -ArgumentList '/i C:\\cbi.msi /qn /norestart LOGGINGCONF=true'"</CommandLine></SynchronousCommand>
+${wsl_block}
         <SynchronousCommand wcm:action="add"><Order>9</Order><CommandLine>cmd /c "C:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown /quiet"</CommandLine></SynchronousCommand>
       </FirstLogonCommands>
     </component>
@@ -179,11 +205,17 @@ XML
 
 # Build the autounattend onto a tiny ISO labelled so Windows Setup auto-finds it.
 make_unattend_iso() {
-  local os="$1"
+  local os="$1" wsl="${2:-}"
   local iso="${WORK}/unattend-${os}.iso" dir="${WORK}/au-${os}"
   rm -rf "$dir"; mkdir -p "$dir"
-  gen_autounattend "$os" "${dir}/autounattend.xml"
-  "$(_iso_tool)" -quiet -J -r -V UNATTEND -o "$iso" "$dir" 2>/dev/null || die "unattend ISO build failed"
+  gen_autounattend "$os" "${dir}/autounattend.xml" "$wsl"
+  # Prefer xorriso (portable, EL-safe) via its mkisofs emulation; fall back to
+  # genisoimage/mkisofs. Same volume label (UNATTEND) so Windows Setup auto-finds it.
+  if command -v xorriso >/dev/null 2>&1; then
+    xorriso -as mkisofs -J -r -V UNATTEND -o "$iso" "$dir" >/dev/null 2>&1 || die "unattend ISO build failed (xorriso)"
+  else
+    "$(_iso_tool)" -quiet -J -r -V UNATTEND -o "$iso" "$dir" 2>/dev/null || die "unattend ISO build failed"
+  fi
   echo "$iso"
 }
 
@@ -191,17 +223,26 @@ make_unattend_iso() {
 golden_zvol() { echo "${POOL}/win-${1}-golden"; }
 
 build_golden() {
-  local os="$1" iso_override="$2" ram="$3" disk="$4"
+  local os="$1" iso_override="$2" ram="$3" disk="$4" wsl="${5:-}"
   _validate_os "$os"; check_prereqs
   local gz; gz="$(golden_zvol "$os")"
-  if zfs list "${gz}@golden" >/dev/null 2>&1; then ok "golden ${gz}@golden already exists — skipping"; return; fi
+  if zfs list "${gz}@golden" >/dev/null 2>&1; then
+    # A WSL request against a golden that was built WITHOUT WSL is a silent
+    # mismatch — the clone would lack the extensions. Warn loudly so the
+    # operator destroys + rebuilds rather than shipping a golden that can't
+    # run WSL2 despite --wsl being asked for.
+    if [[ -n "$wsl" && "$(zfs get -Ho value kldload:wsl "$gz" 2>/dev/null)" != "1" ]]; then
+      warn "golden ${gz}@golden exists WITHOUT WSL — rebuild for WSL: kvm-win destroy win-${os}-golden --purge && kvm-win golden ${os} --wsl"
+    fi
+    ok "golden ${gz}@golden already exists — skipping"; return
+  fi
   ram="${ram:-${RAM[$os]}}"; disk="${disk:-${DISK[$os]}}"
 
   local winiso virtio auiso vars
   winiso="$(fetch_windows "$os" "$iso_override")"
   virtio="$(fetch_virtio)"
-  auiso="$(make_unattend_iso "$os")"
-  log "building golden ${gz} from $(basename "$winiso") (${ram}MB / ${disk}GB)…"
+  auiso="$(make_unattend_iso "$os" "$wsl")"
+  log "building golden ${gz} from $(basename "$winiso") (${ram}MB / ${disk}GB${wsl:+ / WSL})…"
 
   # fresh build zvol + a private NVRAM copy (Secure Boot vars)
   zfs list "$gz" >/dev/null 2>&1 && zfs destroy -r "$gz" 2>/dev/null || true
@@ -210,8 +251,12 @@ build_golden() {
 
   local name="win-${os}-build"
   virsh destroy "$name" 2>/dev/null || true; virsh undefine "$name" --nvram 2>/dev/null || true
+  # WSL needs the guest to SEE vmx/svm (Hyper-V nests inside our KVM), so pass the
+  # host CPU straight through. Only nests if the host has kvm_intel/kvm_amd
+  # nested=1 — kldload-firstboot drops that when Windows+WSL is chosen.
+  local cpu_opt=(); [[ -n "$wsl" ]] && cpu_opt=(--cpu host-passthrough)
   # CDROM order matters: D: = virtio (drivers + guest tools), E: = its driver tree.
-  virt-install --name "$name" --memory "$ram" --vcpus 4 --machine q35 \
+  virt-install --name "$name" --memory "$ram" --vcpus 4 --machine q35 "${cpu_opt[@]}" \
     --boot uefi,loader="$OVMF_CODE",loader.readonly=yes,loader.secure=yes,loader.type=pflash,nvram="$vars" \
     --features smm.state=on --tpm backend.type=emulator,backend.version=2.0,model=tpm-crb \
     --disk "path=/dev/zvol/${gz},bus=virtio,cache=none,format=raw" \
@@ -233,6 +278,9 @@ build_golden() {
   virsh undefine "$name" --nvram 2>/dev/null || true
   log "install complete — snapshotting golden"
   zfs snapshot "${gz}@golden"
+  # Record WSL on the golden so create_vm auto-runs clones with host-passthrough
+  # without the operator having to repeat --wsl.
+  [[ -n "$wsl" ]] && { zfs set kldload:wsl=1 "$gz"; ok "WSL baked in — clones auto-run --cpu host-passthrough"; }
   ok "golden ready: ${gz}@golden"
 }
 
@@ -244,12 +292,16 @@ create_vm() {
   zfs list "${gz}@golden" >/dev/null 2>&1 || die "no golden for '${os}' — run: kvm-win golden ${os}"
   virsh dominfo "$name" >/dev/null 2>&1 && die "VM '${name}' already exists"
   ram="${ram:-${RAM[$os]}}"; cpus="${cpus:-2}"
+  # Auto-inherit the golden's WSL posture — clones of a WSL golden must also
+  # expose vmx/svm or `wsl` inside them can't start Hyper-V.
+  local wsl=""; [[ "$(zfs get -Ho value kldload:wsl "$gz" 2>/dev/null)" == "1" ]] && wsl=1
   local clone="${POOL}/${name}" vars="${WORK}/${name}-VARS.fd"
   zfs list "$clone" >/dev/null 2>&1 && zfs destroy -r "$clone" 2>/dev/null || true
   zfs clone "${gz}@golden" "$clone"
   cp -f "$OVMF_VARS" "$vars"
-  log "spawning ${name} (${os}, ${ram}MB/${cpus}vcpu) as an instant clone of ${gz}@golden"
-  virt-install --name "$name" --memory "$ram" --vcpus "$cpus" --machine q35 \
+  log "spawning ${name} (${os}, ${ram}MB/${cpus}vcpu${wsl:+ / WSL}) as an instant clone of ${gz}@golden"
+  local cpu_opt=(); [[ -n "$wsl" ]] && cpu_opt=(--cpu host-passthrough)
+  virt-install --name "$name" --memory "$ram" --vcpus "$cpus" --machine q35 "${cpu_opt[@]}" \
     --boot uefi,loader="$OVMF_CODE",loader.readonly=yes,loader.secure=yes,loader.type=pflash,nvram="$vars" \
     --features smm.state=on --tpm backend.type=emulator,backend.version=2.0,model=tpm-crb \
     --disk "path=/dev/zvol/${clone},bus=virtio,cache=none,format=raw" \
@@ -291,25 +343,34 @@ self_test() {
       xmllint --noout "${WORK}/.au-test.xml" 2>/dev/null && ok "autounattend(${os}) well-formed" || { warn "autounattend(${os}) XML invalid"; rc=1; }
     else ok "autounattend(${os}) generated (install xmllint to validate)"; fi
   done
+  # WSL variant must also stay well-formed (the DISM enable-feature injection).
+  gen_autounattend win11 "${WORK}/.au-test.xml" 1
+  if command -v xmllint >/dev/null 2>&1; then
+    xmllint --noout "${WORK}/.au-test.xml" 2>/dev/null && ok "autounattend(win11+wsl) well-formed" || { warn "autounattend(win11+wsl) XML invalid"; rc=1; }
+  fi
   rm -f "${WORK}/.au-test.xml"
   echo; [[ $rc -eq 0 ]] && ok "self-test PASS" || die "self-test FAIL"
 }
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
+# Print the whole file-header banner (line 2 up to but not including the
+# `set -euo pipefail` line) so --help never truncates as the header grows.
+usage() { sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 cmd="${1:-}"; shift || true
 ISO_OVERRIDE=""; RAM_ARG=""; CPUS_ARG=""; DISK_ARG=""; OS_ARG=""
+WSL="${KVMWIN_WSL:-}" # env default; --wsl overrides. Only meaningful on `golden`.
 _parse() {
   while [[ $# -gt 0 ]]; do case "$1" in
     --iso) ISO_OVERRIDE="$2"; shift 2;; --ram) RAM_ARG="$2"; shift 2;;
     --cpus) CPUS_ARG="$2"; shift 2;; --disk) DISK_ARG="$2"; shift 2;;
     --os) OS_ARG="$2"; shift 2;; --purge) PURGE="--purge"; shift;;
+    --wsl) WSL=1; shift;;
     *) POS+=("$1"); shift;; esac; done
 }
 PURGE=""; POS=()
 case "$cmd" in
-  golden)  os="${1:-}"; shift || true; _parse "$@"; [[ -n "$os" ]] || die "usage: kvm-win golden win11|server"; build_golden "$os" "$ISO_OVERRIDE" "$RAM_ARG" "$DISK_ARG" ;;
+  golden)  os="${1:-}"; shift || true; _parse "$@"; [[ -n "$os" ]] || die "usage: kvm-win golden win11|server [--wsl]"; build_golden "$os" "$ISO_OVERRIDE" "$RAM_ARG" "$DISK_ARG" "$WSL" ;;
   create)  name="${1:-}"; shift || true; _parse "$@"; [[ -n "$name" && -n "$OS_ARG" ]] || die "usage: kvm-win create NAME --os win11|server"; create_vm "$name" "$OS_ARG" "$RAM_ARG" "$CPUS_ARG" "$DISK_ARG" ;;
   demo)    [[ "${1:-}" == "sccm" ]] || die "usage: kvm-win demo sccm"; demo_sccm ;;
   list)    virsh list --all | grep -iE 'win-|Name|---' || true; echo; zfs list -r "$POOL" 2>/dev/null | grep -iE 'win-|NAME' || true ;;

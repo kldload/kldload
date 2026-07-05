@@ -382,6 +382,20 @@ k_profile_optional_packages() {
         fi
     fi
 
+    # Windows 11 VM (kvm-win) — extras beyond the KVM base above (Windows implies
+    # KVM, so qemu/libvirt/edk2-ovmf already came along). swtpm gives the guest a
+    # TPM 2.0 (a hard Win11 requirement); xorriso builds the tiny autounattend
+    # seed ISO. xorriso is the portable ISO tool across the whole matrix —
+    # genisoimage was dropped from EL base, so we standardise on xorriso
+    # (Arch ships it inside libisoburn).
+    if [[ "${KLDLOAD_ENABLE_WINDOWS:-0}" == "1" ]]; then
+        if [[ "$_distro" == "arch" ]]; then
+            out+=(swtpm libisoburn)
+        else
+            out+=(swtpm swtpm-tools xorriso)
+        fi
+    fi
+
     # Kubernetes (optional checkbox)
     # Debian/Ubuntu use "containerd" from distro repos; RPM distros use
     # "containerd.io" from the Docker CE repo (different binary package name).

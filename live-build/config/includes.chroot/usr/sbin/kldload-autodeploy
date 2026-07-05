@@ -61,7 +61,7 @@ mark() {
 # effective-config depending on installer version. Load both; manifest wins
 # on conflict.
 declare -A WANT=(
-    [k8s]=0 [ai]=0 [klab]=0
+    [k8s]=0 [ai]=0 [klab]=0 [windows]=0
 )
 for _src in "$EFFECTIVE" "$MANIFEST"; do
     if [[ -r "$_src" ]]; then
@@ -124,6 +124,10 @@ esac
 # triggered the klab phase. Manifest flag now maps to WANT[klab]=1 directly.
 [[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && WANT[klab]=1
 [[ "${KLDLOAD_KLAB_NO_AUTO:-0}" == "1" ]] && WANT[klab]=0
+# Windows 11 VM tile (desktop) — build a Win11 golden on KVM/ZFS in the
+# background (deferred here, never at boot). Implies KVM, which the installer
+# already forced on, so the hypervisor + rpool/vms exist by autodeploy time.
+[[ "${KLDLOAD_ENABLE_WINDOWS:-0}" == "1" ]] && WANT[windows]=1
 
 # K8s cluster sizing — klab and k8s templates both land with a fully
 # bootstrapped 4-node cluster (1 CP + 3 workers). zfslab stays at 0
@@ -155,12 +159,12 @@ if [[ "$TEMPLATE" == "zfslab" ||
     KLAB_GOLDEN_KIND="ztest"
 fi
 
-log "Template: ${TEMPLATE:-<none>} → k8s=${WANT[k8s]}(workers=${K8S_WORKERS}) ai=${WANT[ai]} klab=${WANT[klab]}(${KLAB_GOLDEN_KIND})"
+log "Template: ${TEMPLATE:-<none>} → k8s=${WANT[k8s]}(workers=${K8S_WORKERS}) ai=${WANT[ai]} klab=${WANT[klab]}(${KLAB_GOLDEN_KIND}) windows=${WANT[windows]}"
 
 # Early-out if nothing was requested — avoids a green "ready" banner on a
 # plain install that didn't ask for any of these. The ConditionPathExists
 # in the unit prevents re-firing; create the marker with a distinct name.
-if [[ "${WANT[k8s]}${WANT[ai]}${WANT[klab]}" == "000" ]]; then
+if [[ "${WANT[k8s]}${WANT[ai]}${WANT[klab]}${WANT[windows]}" == "0000" ]]; then
     phase "nothing-requested"
     touch "${STATE_DIR}/autodeploy-skipped"
     log "No extended services requested in install manifest — nothing to do."
@@ -658,6 +662,73 @@ if [[ "${WANT[klab]}" == "1" ]]; then
     fi
 fi
 
+# ── Phase 3.5: Windows 11 golden (foreground, deferred) ───────────────────────
+# The point-and-shoot "Win11 on kldload" build. This is the ONE unavoidable
+# online, long (~30-60 min) step — it can't ship in the ISO (MS media isn't
+# redistributable), so it runs here: after firstboot, in the background, never
+# blocking boot. Sequence: (1) enable host nested-virt if WSL was asked for so
+# WSL2/Hyper-V can nest inside the guest; (2) build the golden via kvm-win
+# (pulls ISO → unattended install → sysprep → optional WSL2); (3) spawn one
+# instant-clone VM and mark it autostart so every subsequent power-on brings it
+# straight back (the "no interruption from power-on to Windows desktop" goal).
+# Fail-loud + non-fatal: a failure logs FATAL and leaves the host usable; the
+# operator re-runs `kvm-win golden win11` once the cause (network/ISO) is fixed.
+if [[ "${WANT[windows]}" == "1" ]]; then
+    phase "windows-golden"
+    if [[ -f "${STATE_DIR}/windows-ready" ]]; then
+        log "[windows] golden already marked ready — skipping"
+    else
+        # Assemble kvm-win args as an array (quote-safe — no word-split of an
+        # optional flag). _win_wsl is a boolean used for the nested-virt gate
+        # and the log note; the array carries the actual CLI flags.
+        _win_wsl=0
+        [[ "${KLDLOAD_WINDOWS_WSL:-0}" == "1" ]] && _win_wsl=1
+        _win_gargs=(win11)
+        [[ "$_win_wsl" == 1 ]] && _win_gargs+=(--wsl)
+        [[ -n "${KLDLOAD_WINDOWS_ISO:-}" ]] && _win_gargs+=(--iso "${KLDLOAD_WINDOWS_ISO}")
+        _win_note=""
+        [[ "$_win_wsl" == 1 ]] && _win_note=" + WSL2"
+
+        # WSL2 nests Hyper-V inside our KVM guest — only possible if the host
+        # kvm module was loaded with nested=1. Drop the durable modprobe.d conf
+        # (active from the next boot) and best-effort flip it live now. The
+        # golden BUILD itself doesn't need nesting (DISM enable-feature is
+        # offline), so building on boot #1 without live-nested is fine; the
+        # running VM picks nesting up on the next reboot.
+        if [[ "$_win_wsl" == 1 ]]; then
+            cat >/etc/modprobe.d/kldload-kvm-nested.conf <<'NEST'
+# kldload: nested virtualization for WSL2 inside Windows 11 guests.
+# WSL2 runs on Hyper-V, itself a VM under our KVM — the guest must see vmx/svm.
+# Written by kldload-autodeploy when a Win11+WSL VM was requested at install.
+options kvm_intel nested=1
+options kvm_amd nested=1
+NEST
+            # Live best-effort (works only if no VM is using the module yet).
+            for _p in /sys/module/kvm_intel/parameters/nested /sys/module/kvm_amd/parameters/nested; do
+                [[ -w "$_p" ]] && echo 1 >"$_p" 2>/dev/null || true
+            done
+            log "[windows] nested-virt enabled for WSL2 (durable from next boot)"
+        fi
+
+        log "[windows] building Win11 golden${_win_note} — this pulls MS media and takes ~30-60 min (one time)"
+        if kvm-win golden "${_win_gargs[@]}" >>/var/log/kldload/kvm-win.log 2>&1; then
+            log "[windows] golden built — spawning the Win11 VM and marking it autostart"
+            # Spawn one clone named 'win11' and autostart it so VM-restore-on-reboot
+            # brings the Windows desktop back on every power-on with no prompt.
+            if kvm-win create win11 --os win11 >>/var/log/kldload/kvm-win.log 2>&1; then
+                virsh autostart win11 >>/var/log/kldload/kvm-win.log 2>&1 ||
+                    log "[windows] WARN: could not mark win11 autostart — set it with: virsh autostart win11"
+                mark "windows"
+                log "[windows] Win11 VM 'win11' running + autostart — RDP/console via the VM panel"
+            else
+                log "[windows] FATAL: golden built but VM spawn failed — see /var/log/kldload/kvm-win.log; retry: kvm-win create win11 --os win11"
+            fi
+        else
+            log "[windows] FATAL: Win11 golden build failed — see /var/log/kldload/kvm-win.log; retry: kvm-win golden ${_win_gargs[*]}"
+        fi
+    fi
+fi
+
 # ── Phase 4: Wait for backgrounded AI ────────────────────────────────────────
 if [[ -n "$AI_PID" ]]; then
     phase "ai-wait"
@@ -668,7 +739,7 @@ fi
 # All requested phases must have written their marker. Unrequested phases
 # count as satisfied. This is what firstboot_status keys off.
 _all_ok=1
-for sub in k8s ai klab; do
+for sub in k8s ai klab windows; do
     if [[ "${WANT[$sub]}" == "1" ]] && [[ ! -f "${STATE_DIR}/${sub}-ready" ]]; then
         _all_ok=0
         log "SKIP all-ready: ${sub} requested but no marker"
@@ -689,6 +760,8 @@ if [[ $_all_ok -eq 1 ]]; then
         log "    K8s:  off — to add now: kube-cluster bootstrap --workers 3"
     [[ "${WANT[klab]}" == "1" ]] && log "    klab: deployed" ||
         log "    klab: off — enable the klab option at install"
+    [[ "${WANT[windows]}" == "1" ]] && log "    win:  Win11 VM 'win11' built + autostart" ||
+        log "    win:  off — enable the Windows 11 VM tile at install"
     log "══════════════════════════════════════════════════════════════"
 else
     phase "partial"

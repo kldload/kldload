@@ -192,23 +192,25 @@ The user picks the target distro at install time. After install the system runs 
 ## Releases
 
 ### 1.3.1 &mdash; The Kernel-Loaded Desktop (current)
+First public release of the 1.3.x line. There was no separate 1.3.0 build &mdash;
+the Workstation polish and the Full Stack Automation layer (the work-in-progress
+once tagged 1.2.0 internally) all ship here, together with the EL10 distro-parity
+fixes. The hotrod mark is the default wallpaper: same RHEL 10 desktop image,
+steel-blue tint, faint &lsquo;+&rsquo; in the lower-right corner saying *this
+isn't stock*.
+
+**Substrate &amp; distro parity:**
 - **CentOS Stream + Rocky moved to EL10** (kernel 6.12, OpenZFS 2.3) to match RHEL 10 &mdash; retires the EL9 (5.14) path that wedged dracut/NVIDIA on first boot
-- Per-tool **native-app dashboards** (each web tool opens as its own dock-iconed window) and **VM restore-on-reboot** (running VMs return after a reboot; stopped stay stopped)
 - Live env corrected to Fedora 44 **kernel 7.0.12 / OpenZFS 2.4.3** (the old 6.19 pin is gone; ZFS 2.4.3 builds against the GA 7.0 kernel)
 - Substrate (kernel + OpenZFS + NVIDIA) **versionlocked at first boot** so `dnf update` can't brick ZFS boot
 - KVM / Kubernetes / lab profiles now warn they need hardware virtualization (VT-x / AMD-V or nested virt)
 
-### 1.3.0 &mdash; Workstation+
-The Full Stack Automation work-in-progress that was tagged 1.2.0 internally
-was never released as a separate version &mdash; it shipped as part of 1.3.0
-alongside the Workstation polish. "+" is the hotrod mark on the default
-wallpaper: same RHEL 10 desktop image, steel-blue tint, faint &lsquo;+&rsquo;
-in the lower-right corner saying *this isn't stock*.
-
 **Workstation (the GUI layer):**
 - GUI-first RHEL 10 workstation: expert ops (ZFS / KVM / K8s / eBPF) as point-and-shoot desktop apps
-- Install-time **Platform Options** &mdash; NVIDIA / KVM / Kubernetes / eBPF / golden-image building, desktop-only, default-clean
-- Native per-tool app windows (chromeless GTK/WebKit), NVIDIA + Wayland render fixes (GSK_RENDERER=ngl pre-baked; firstboot also reloads running user sessions so the fix lands without a re-login &mdash; no first-session Nautilus segfault)
+- Install-time **Platform Options** &mdash; NVIDIA / KVM / Kubernetes / eBPF / golden-image building / **Windows 11 VM**, desktop-only, default-clean
+- Native per-tool app windows (chromeless GTK/WebKit) &mdash; each web tool opens as its own dock-iconed window, NVIDIA + Wayland render fixes (GSK_RENDERER=ngl pre-baked; firstboot also reloads running user sessions so the fix lands without a re-login &mdash; no first-session Nautilus segfault)
+- **VM restore-on-reboot** &mdash; running VMs return automatically after a reboot; stopped VMs stay stopped
+- **Windows 11 VM (point-and-shoot)** &mdash; tick the tile at install and a Win11 golden is built in the background *after* first boot (never blocking boot): pulls the media, unattended install + sysprep on KVM/ZFS with TPM 2.0 + Secure Boot, optional **WSL2** baked in (host nested-virt auto-enabled), captured as an instant-clone golden. The VM is spawned + set to autostart, so with VM-restore-on-reboot every later power-on returns straight to the Windows desktop. The one-time build is the only online step &mdash; Windows media can't ship in the ISO. `kvm-win golden win11 --wsl` drives it by hand; BYOL via `--iso`.
 - Console (tmux cockpit) promoted to its own application, de-duplicated from every tool window
 - VM serial console embedded in the web UI via the same ttyd-k9s session
 - RHEL 10 desktop package + TLS fixes (ptyxis, zenity, glib-networking)
