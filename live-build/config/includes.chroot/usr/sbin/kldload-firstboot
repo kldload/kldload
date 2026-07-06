@@ -1312,13 +1312,11 @@ main() {
     fi
 
     # ── Desktop apps that need network at first boot ─────────────────────────
-    # Steam ships via Flathub (cross-distro; no native RHEL package). Done at
-    # firstboot rather than install-time so the install itself stays offline-
-    # capable. Skipped silently on non-desktop profiles, on systems with no
-    # internet (flatpak remote-add will fail fast), and if flatpak isn't
-    # installed (server/kvm/core profiles don't bring it in). Idempotent —
-    # flatpak remote-add --if-not-exists and `flatpak install -y` are both
-    # no-ops on re-run.
+    # Steam is installed further down: native RPM via the desktop heal loop
+    # (Fedora, from RPM Fusion), with a Flatpak fallback ONLY where no native
+    # package exists (RHEL/Rocky/CentOS Stream). Both are firstboot-online, not
+    # darksite, so the install itself stays offline-capable. See the heal loop
+    # and the gated Flathub block below — this section is just the anchor.
     # ── Desktop: Firefox is SHIPPED, not purged ────────────────────────────
     # This block used to `dnf remove -y firefox` on every boot, because Chrome
     # was the only supported browser (Task #47) and RHEL 10's gnome-shell
@@ -1455,6 +1453,16 @@ main() {
     # is included because the bare libvirt-daemon (older ISOs) shipped without it.
     # Anything still missing is logged loud, not swallowed.
     #
+    # gamescope (Fedora 'updates', no RPM Fusion needed): the micro-compositor
+    # that hands a game its own fixed-resolution display. Without it, an XWayland
+    # game on a mixed-resolution/multi-monitor desktop is handed the full desktop
+    # bounding box (e.g. a 1440p + tall-panel pair reads as one 5K screen), so its
+    # menus render tiny and spill onto the dead region between panels. The desktop
+    # dconf already whitelists gamescope for XWayland input grabs
+    # (00-kldload-desktop xwayland-grab-access-rules) — this makes the binary it
+    # names actually present. Absent on RHEL/Rocky (not in EPEL) → warns, degrades
+    # gracefully, same as steam.
+    #
     # konsole is intentionally NOT here: it drags the whole ~135-package KDE
     # stack, isn't in the Fedora darksite, and its online transaction flaked 3x
     # (10.100.10.124 2026-06-14). sysdiag now defaults to gnome-terminal (always
@@ -1485,7 +1493,7 @@ main() {
                 log "WARNING: no network to RPM Fusion — steam will miss below and be queued for the network-up heal hook"
             fi
         fi
-        for _pkg in vim-X11 steam \
+        for _pkg in vim-X11 steam gamescope \
             libbpf-tools bpftrace bcc-tools \
             libvirt-daemon-driver-network libvirt-daemon-config-network; do
             rpm -q "$_pkg" >/dev/null 2>&1 && continue
@@ -1589,9 +1597,18 @@ main() {
         fi
     fi
 
+    # Flatpak Steam is the FALLBACK only where there's no native RPM steam
+    # (RHEL/Rocky/CentOS Stream have no steam package; Fedora does via RPM Fusion,
+    # installed by the desktop heal loop above). Installing both leaves two Steams
+    # with separate game libraries, and the Flatpak sandbox is worse for
+    # anti-cheat and controllers than the native RPM — so native wins where it
+    # exists. Gate on `rpm -q steam` (and a `steam` on PATH) so Fedora skips this
+    # entirely and only the native-less distros take the Flathub path.
     if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]] &&
-        command -v flatpak >/dev/null 2>&1; then
-        log "Setting up Flathub + installing Steam"
+        command -v flatpak >/dev/null 2>&1 &&
+        ! rpm -q steam >/dev/null 2>&1 &&
+        ! command -v steam >/dev/null 2>&1; then
+        log "No native steam package — installing Steam via Flathub"
         if flatpak remote-add --if-not-exists --system flathub \
             https://flathub.org/repo/flathub.flatpakrepo 2>>"$LOG"; then
             if flatpak install -y --system flathub com.valvesoftware.Steam >>"$LOG" 2>&1; then
