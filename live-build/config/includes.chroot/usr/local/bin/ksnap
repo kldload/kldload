@@ -40,7 +40,13 @@ rollback)
         _err "Cannot find ZFS dataset for $target"
         exit 1
     }
-    last_snap="$(zfs list -H -t snapshot -o name -S creation -d1 "$ds" 2>/dev/null | head -1)"
+    # Newest snapshot without `| head`: mapfile reads all of `zfs list` in-
+    # process, so the producer never takes SIGPIPE (exit 141 under pipefail) on
+    # a dataset with enough snapshots to overflow the pipe buffer. Same crash
+    # class as the kst dashboard fix; latent here (max ~20 snaps/dataset) but a
+    # rollback path shouldn't have a snapshot-count landmine in it.
+    mapfile -t _snaps < <(zfs list -H -t snapshot -o name -S creation -d1 "$ds" 2>/dev/null)
+    last_snap="${_snaps[0]:-}"
     [[ -n "$last_snap" ]] || {
         _err "No snapshots found for $ds"
         exit 1

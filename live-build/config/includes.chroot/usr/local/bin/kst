@@ -32,9 +32,24 @@ root_avail="$(zfs get -H -o value available "$root_ds" 2>/dev/null || echo "?")"
 compress="$(zfs get -H -o value compressratio "$root_ds" 2>/dev/null || echo "?")"
 
 # ── Snapshots ─────────────────────────────────────────────────────────────────
-snap_count="$(zfs list -H -t snapshot -o name 2>/dev/null | wc -l)"
-snap_oldest="$(zfs list -H -t snapshot -o creation -s creation 2>/dev/null | head -1 | xargs -r)"
-snap_newest="$(zfs list -H -t snapshot -o creation -S creation 2>/dev/null | head -1 | xargs -r)"
+# Fetch snapshot creation times once (oldest-first), then derive count/oldest/
+# newest from the captured list with bash builtins instead of `zfs list | head`.
+# WHY: `zfs list … | head -1` under `set -o pipefail` crashes the whole
+# dashboard once a pool has enough snapshots to overflow the 64K pipe buffer —
+# `head` closes early, `zfs list` takes SIGPIPE, pipefail turns that into exit
+# 141 (HISTORY: onyx at 345 snapshots exited 141, printing nothing). `mapfile`
+# from a here-string reads the value in-process, so there is no pipe to break.
+snap_creations="$(zfs list -H -t snapshot -o creation -s creation 2>/dev/null || true)"
+if [[ -n "$snap_creations" ]]; then
+    mapfile -t _snaps <<<"$snap_creations"
+    snap_count="${#_snaps[@]}"
+    snap_oldest="${_snaps[0]}"
+    snap_newest="${_snaps[-1]}"
+else
+    snap_count=0
+    snap_oldest=""
+    snap_newest=""
+fi
 
 # ── Boot environments ────────────────────────────────────────────────────────
 be_count="$(zfs list -H -o name -r rpool/ROOT 2>/dev/null | grep -c 'rpool/ROOT/' || echo 0)"
