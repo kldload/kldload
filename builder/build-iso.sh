@@ -284,16 +284,25 @@ ZFSREPO
 # cause SIGPIPE from "dnf | tee" to propagate as a non-zero exit, which set -e
 # would turn into a fatal build abort. The SIGPIPE is harmless (just tee closing).
 set +o pipefail
-# No kernel pin — OpenZFS 2.4.3 (Conflicts: kernel-uname-r > 7.0.999) builds
-# against F44's native kernel, including the 7.0.x updates. The old
-# --exclude='kernel-7.*' pin to 6.19.x existed only because the previous
-# zfs-dkms-2.4.1 capped at 6.19.999; that cap is gone in 2.4.3. The live ISO
-# now rides whatever F44 ships (currently 7.0.x). NOTE: zfs-dkms-2.4.3 still
-# conflicts with kernel > 7.0.999, so if F44 ever pushes kernel 7.1 before the
-# 2.4 line raises its cap, this transaction will abort on dep resolution — the
-# fix then is a zfs bump (the 2.4 repo auto-serves the latest), not a kernel pin.
+# Kernel pin — REINSTATED 2026-07-07. OpenZFS 2.4.3 Conflicts: kernel-uname-r
+# > 7.0.999, and F44 updates has now jumped straight to kernel 7.1.3-200 (the
+# 7.0.x line is gone from the repos). Without the exclude, dnf picks 7.1.3 as
+# "best", zfs-dkms-2.4.3 refuses to build against it, and the whole
+# --installroot transaction aborts on dep resolution — the exact failure the
+# old comment warned about ("if F44 ever pushes kernel 7.1..."). The intended
+# fix was "zfs bump", but the 2.4 repo still tops out at 2.4.3 and there is no
+# 2.5 repo yet (404), so a kernel pin is the only working option today.
+# `kernel*-7.1*` excludes ONLY the incompatible 7.1+ and KEEPS 7.0.x (which
+# zfs-dkms-2.4.3 supports, <=7.0.999) — here that leaves 6.19.10-300, which zfs
+# builds against cleanly (verified). NB: a broader `kernel*-7.*` also strips
+# 7.0.x, which broke the INSTALL pass — the darksite ships kernel 7.0.14 that
+# zfs 2.4.3 needs, and the wide glob filtered it out (2026-07-07). Drop
+# this exclude once a 7.1-capable OpenZFS lands (2.4 line raises the cap or a
+# 2.5 repo appears). The installed system re-locks this pair via firstboot
+# versionlock, so a later `dnf update` can't drift onto 7.1 either.
 dnf --installroot="$ROOTFS" --releasever=44 --setopt=install_weak_deps=False \
-    --setopt=tsflags=nodocs --nogpgcheck -y install "${PKGS[@]}" 2>&1 | tee -a "$LOG_FILE"
+    --setopt=tsflags=nodocs --nogpgcheck -y install --exclude='kernel*-7.1*' \
+    "${PKGS[@]}" 2>&1 | tee -a "$LOG_FILE"
 DNF_RC=${PIPESTATUS[0]}
 # set -o pipefail  # INTENTIONALLY DISABLED — see SIGPIPE note above
 # Check if packages actually installed (ignore DKMS scriptlet exit code)
