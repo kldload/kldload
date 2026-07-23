@@ -807,17 +807,24 @@ setup_zero_trust() {
     # 4. Seal ZFS passphrase against TPM2 + tang (encrypted pools only)
     local passphrase_file="/etc/kldload/zfs-passphrase"
     local tang_url_file="/etc/kldload/tang-url"
-    if [[ -f "${passphrase_file}" && -x /usr/local/sbin/kldload-clevis-seal ]]; then
-        local tang_url="http://10.77.${oct3}.1:7500"
-        [[ -f "${tang_url_file}" ]] && tang_url="$(cat "${tang_url_file}")"
-        log "Sealing ZFS passphrase against TPM2 + tang @ ${tang_url}"
-        /usr/local/sbin/kldload-clevis-seal \
-            --passphrase "$(cat "${passphrase_file}")" \
-            --tang-url "${tang_url}" \
-            --pool rpool &&
-            ok "ZFS passphrase sealed — auto-unlock requires TPM PCR match + tang reachable" ||
-            log "WARNING: clevis-seal failed — ZFS will require manual passphrase at boot"
-        # Shred the plaintext passphrase regardless of seal outcome
+    if [[ -f "${passphrase_file}" ]]; then
+        if [[ -x /usr/local/sbin/kldload-clevis-seal ]]; then
+            local tang_url="http://10.77.${oct3}.1:7500"
+            [[ -f "${tang_url_file}" ]] && tang_url="$(cat "${tang_url_file}")"
+            log "Sealing ZFS passphrase against TPM2 + tang @ ${tang_url}"
+            /usr/local/sbin/kldload-clevis-seal \
+                --passphrase "$(cat "${passphrase_file}")" \
+                --tang-url "${tang_url}" \
+                --pool rpool &&
+                ok "ZFS passphrase sealed — auto-unlock requires TPM PCR match + tang reachable" ||
+                log "WARNING: clevis-seal failed — ZFS will require manual passphrase at boot"
+        else
+            log "WARNING: kldload-clevis-seal not installed — TPM auto-unlock NOT configured; ZFS will prompt for the passphrase at boot"
+        fi
+        # Shred the plaintext passphrase UNCONDITIONALLY — including when the
+        # seal tool is absent. The old gate ([[ -f pass && -x seal ]]) skipped
+        # this whole block when the tool was missing, leaving the plaintext
+        # passphrase on disk forever.
         shred -uz "${passphrase_file}" 2>/dev/null || rm -f "${passphrase_file}"
         log "Plaintext passphrase shredded"
     fi

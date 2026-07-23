@@ -384,26 +384,53 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     local _compat_opt=()
     [[ "$_compat" != "off" ]] && _compat_opt=(-o "compatibility=${_compat}")
 
-    zpool create -f \
-        -o ashift=12 \
-        -o autotrim=on \
-        "${_compat_opt[@]}" \
-        -O acltype=posixacl \
-        -O canmount=off \
-        -O compression=lz4 \
-        -O dnodesize=auto \
-        -O normalization=formD \
-        -O relatime=on \
-        -O xattr=sa \
-        -O mountpoint=none \
-        "${enc_opts[@]}" \
-        -R "${KLDLOAD_TARGET_MNT}" \
+    local -a _zpool_create_args=(
+        -o ashift=12
+        -o autotrim=on
+        "${_compat_opt[@]}"
+        -O acltype=posixacl
+        -O canmount=off
+        -O compression=lz4
+        -O dnodesize=auto
+        -O normalization=formD
+        -O relatime=on
+        -O xattr=sa
+        -O mountpoint=none
+        "${enc_opts[@]}"
+        -R "${KLDLOAD_TARGET_MNT}"
         rpool "${rpool_vdevs[@]}"
+    )
+    if [[ "${KLDLOAD_ZFS_ENCRYPT}" == "1" ]]; then
+        # keylocation=prompt reads the key from stdin when stdin is not a
+        # TTY — feed the recorded passphrase. Without this pipe the create
+        # re-prompted on the installer's TTY (TUI installs could end up with
+        # a pool key that differs from the recorded answer) and got EOF on
+        # webui/autoinstall runs. Mirrors backend/storage-zfs.sh
+        # create_rpool_*. printf, not echo: passphrase may start with '-'.
+        printf '%s\n' "${KLDLOAD_ZFS_PASSPHRASE}" | zpool create -f "${_zpool_create_args[@]}"
+    else
+        zpool create -f "${_zpool_create_args[@]}"
+    fi
 
     # Root dataset hierarchy
     zfs create -o canmount=off -o mountpoint=none rpool/ROOT
     zfs create -o canmount=noauto -o mountpoint=/ "${root_ds}"
     zfs mount "${root_ds}"
+
+    # Stage the passphrase for firstboot TPM/clevis sealing (encrypted pools
+    # only). kldload-firstboot setup_zero_trust seals it against TPM2(+tang)
+    # when the seal tool is present and SHREDS this file unconditionally on
+    # first boot either way. 0600 root-only, and it lives INSIDE the
+    # encrypted root dataset, so at rest it is protected by the very key it
+    # holds — exposure window is the first boot only. Mirrors the (dormant)
+    # backend/storage-zfs.sh staging; without this the firstboot seal block
+    # never had anything to seal on real installs.
+    if [[ "${KLDLOAD_ZFS_ENCRYPT}" == "1" ]]; then
+        mkdir -p "${KLDLOAD_TARGET_MNT}/etc/kldload"
+        printf '%s' "${KLDLOAD_ZFS_PASSPHRASE}" >"${KLDLOAD_TARGET_MNT}/etc/kldload/zfs-passphrase"
+        chmod 0600 "${KLDLOAD_TARGET_MNT}/etc/kldload/zfs-passphrase"
+        k_zfs_log "ZFS passphrase staged for firstboot sealing (shredded at first boot)"
+    fi
 
     # Set ZFSBootMenu properties — inherited by all boot environments
     # console=tty1 keeps VGA output; console=ttyS0 adds serial (Proxmox console tab)
