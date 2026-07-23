@@ -539,6 +539,7 @@ cmd_build() {
         -e ISO_NAME_OVERRIDE="${ISO_NAME_OVERRIDE:-}" \
         -e BOB_LIVE="${BOB_LIVE:-}" \
         -e KLDLOAD_INCLUDE_OLLAMA_DARKSITE="${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" \
+        -e KLDLOAD_ZFS_GIT="${KLDLOAD_ZFS_GIT:-}" \
         --name "$BUILDER_CONTAINER" \
         "$BUILDER_IMAGE" \
         bash /build/builder/build-iso.sh
@@ -1016,7 +1017,10 @@ Environment (override via env vars or kldload.env):
   PROFILE         Install profile: desktop, server, kvm, ai, core (default: desktop)
   EDITION         Edition: free (full) or core (ZFS-only) (default: free)
   ARCH            Target architecture (default: x86_64)
-  RELEASE         CentOS Stream release version (default: 9)
+  RELEASE         EL release version for CentOS/Rocky/RHEL targets (default: 10)
+  KLDLOAD_ZFS_GIT Build OpenZFS from git instead of the release repo
+                  (1 = master, else a branch/tag) and UNPIN the live-ISO
+                  kernel to newest F44. Unsupported — test builds only.
   VMID            Proxmox VM ID (default: 902)
   VM_MEMORY       VM RAM in MB (default: 16384)
   VM_CORES        VM CPU cores (default: 4)

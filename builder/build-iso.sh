@@ -163,7 +163,8 @@ PKGS=(
     # 7zip/p7zip for extracting Windows recovery images).
     exfatprogs ntfsprogs p7zip p7zip-plugins
     bash-completion hostname
-    # ZFS — DKMS build inside chroot against target kernel
+    # ZFS — DKMS build inside chroot against target kernel. zfs/zfs-dkms are
+    # dropped from this list in ZFS-from-git mode (see KLDLOAD_ZFS_GIT below).
     dkms gcc make autoconf automake libtool kernel-devel
     zfs zfs-dkms
     # RHEL support — subscription-manager needed on live system for RHEL installs
@@ -262,14 +263,14 @@ gpgcheck=0
 enabled=1
 FEDOREPO
 
-# ZFS source — OpenZFS 2.4 line from zfsonlinux.org.
+# ZFS source — OpenZFS 2.4 line from zfsonlinux.org (release builds), or a
+# from-git build when KLDLOAD_ZFS_GIT is set (repo skipped — the built rpms
+# are fed to the bootstrap dnf directly, see the ZFS-from-git block below).
 #
-# As of 2026-06-12 zfsonlinux.org publishes a native fc44 build, and the 2.4
-# line now serves OpenZFS 2.4.3 (verified: download.zfsonlinux.org/2.4/fedora/44/
-# has zfs-dkms-2.4.3-1.fc44 + zfs-2.4.3-1.fc44). 2.4.3 supports Linux 4.18–7.0,
-# so F44's native kernel (6.19 and the 7.0.x updates) is fully buildable — we no
-# longer pin the kernel (see the dnf install below). $releasever expands to 44.
-cat >"${ROOTFS}/etc/yum.repos.d/zfs.repo" <<'ZFSREPO'
+# As of 2026-06-12 zfsonlinux.org publishes a native fc44 build; the 2.4 line
+# serves OpenZFS 2.4.3 (supports Linux 4.18–7.0). $releasever expands to 44.
+if [[ -z "${KLDLOAD_ZFS_GIT:-}" || "${KLDLOAD_ZFS_GIT}" == "0" ]]; then
+    cat >"${ROOTFS}/etc/yum.repos.d/zfs.repo" <<'ZFSREPO'
 [zfs]
 name=OpenZFS 2.4 for Fedora $releasever
 baseurl=http://download.zfsonlinux.org/2.4/fedora/$releasever/$basearch/
@@ -277,6 +278,7 @@ enabled=1
 gpgcheck=0
 
 ZFSREPO
+fi
 
 # Note: DKMS autoinstall will fail here (host kernel != target kernel).
 # That's expected — we rebuild DKMS explicitly below with --kernelsourcedir.
@@ -292,32 +294,74 @@ set +o pipefail
 # `Conflicts: kernel-uname-r > 7.0.999` cap — unpinned, this transaction
 # aborts on dep resolution (exactly as the previous comment here predicted).
 #
-# Pin choice: koji URLs for 7.0.12-201.fc44 — the exact kernel+zfs combo
-# every ISO since June shipped and boot-verified — rather than falling back
-# to GA 6.19.10 (an untested combo) or riding git-master zfs (unsigned,
-# against the versionlock philosophy). Modules only build against RELEASE
+# Pin choice: koji URLs for the newest 7.0.x NVR — the kernel line the
+# shipping ISOs already boot-verified with zfs 2.4.3 — rather than falling
+# back to GA 6.19.10 (an untested combo). Modules only build against RELEASE
 # zfs; the kernel holds at the newest that release supports. kojipkgs keeps
 # every built NVR forever (mirrors prune; updates-archive unreachable from
-# the builder, probed 2026-07-23). All five subpackage URLs verified 200.
+# the builder, probed 2026-07-23). All six subpackage URLs verified 200.
 # The --exclude keeps any repo 7.1+ kernel out of the transaction; it does
-# NOT match the 7.0.12 URL packages.
+# NOT match the 7.0.x URL packages.
 # REMOVE this pin (restore kernel names in PKGS) when the 2.4 line ships a
 # zfs-dkms whose cap covers the then-current F44 kernel —
 # check: dnf repoquery --repoid=zfs zfs-dkms
-KOJI_KERNEL_NVR="7.0.12-201.fc44"
+KOJI_KERNEL_NVR="7.0.14-201.fc44"
 KOJI_KERNEL_BASE="https://kojipkgs.fedoraproject.org/packages/kernel/${KOJI_KERNEL_NVR%%-*}/${KOJI_KERNEL_NVR#*-}/${ARCH}"
 KOJI_KERNEL_URLS=()
 # kernel-devel-matched must be pinned too: something in the closure requires
-# it, and without a 7.0.12 provider on the command line dnf pulls the repo's
-# 6.19.10 one — which drags a SECOND kernel-core/devel into the transaction
-# (kernels are installonly, so dnf stacks both; verified 2026-07-23).
+# it, and without a matching provider on the command line dnf pulls the
+# repo's 6.19 one — which drags a SECOND kernel-core/devel into the
+# transaction (kernels are installonly, so dnf stacks both; verified
+# 2026-07-23).
 for _ksub in kernel kernel-core kernel-modules kernel-modules-core kernel-devel kernel-devel-matched; do
     KOJI_KERNEL_URLS+=("${KOJI_KERNEL_BASE}/${_ksub}-${KOJI_KERNEL_NVR}.${ARCH}.rpm")
 done
+
+# ─── ZFS-from-git test mode (KLDLOAD_ZFS_GIT) ────────────────────────────────
+# OPT-IN escape hatch for the "zfs lags the kernel" window: build OpenZFS
+# rpms from git (1 = master, anything else = branch/tag) and UNPIN the kernel
+# so the rootfs rides newest F44 — the combination you'd be testing. The
+# built rpms carry the same package names (zfs, zfs-dkms), so the rpm -q
+# gate, the explicit DKMS rebuild below, and the firstboot versionlock all
+# work unchanged. UNSUPPORTED test path — release builds stay on release
+# zfs + the pinned kernel above. Default (flag unset) is byte-identical to
+# the release path.
+ZFS_GIT_RPMS=()
+if [[ -n "${KLDLOAD_ZFS_GIT:-}" && "${KLDLOAD_ZFS_GIT}" != "0" ]]; then
+    _zfs_ref="${KLDLOAD_ZFS_GIT}"
+    [[ "$_zfs_ref" == "1" ]] && _zfs_ref="master"
+    log "ZFS-FROM-GIT: building OpenZFS rpms from ref '${_zfs_ref}' (UNSUPPORTED test build; kernel unpinned)"
+    dnf -y install git rpm-build 2>&1 | tail -2
+    # builddep from the release package's spec — close enough for master
+    dnf -y builddep zfs 2>&1 | tail -3 || die "dnf builddep zfs failed"
+    git clone --depth 1 --branch "${_zfs_ref}" https://github.com/openzfs/zfs.git /tmp/zfs-git ||
+        die "git clone of openzfs ref '${_zfs_ref}' failed (branch/tag only, not a SHA)"
+    (cd /tmp/zfs-git && ./autogen.sh && ./configure && make -j"$(nproc)" rpm-utils rpm-dkms) ||
+        die "zfs from-git rpm build failed — see output above"
+    mapfile -t ZFS_GIT_RPMS < <(find /tmp/zfs-git -maxdepth 1 -name '*.rpm' \
+        ! -name '*.src.rpm' ! -name '*debug*')
+    ((${#ZFS_GIT_RPMS[@]})) || die "zfs from-git build produced no installable rpms"
+    log "ZFS-FROM-GIT: built ${#ZFS_GIT_RPMS[@]} rpms"
+    # Drop the repo zfs packages from the bootstrap set — the built rpms
+    # replace them (the zfs repo file was never written in this mode).
+    _pkgs_no_zfs=()
+    for _p in "${PKGS[@]}"; do
+        [[ "$_p" == "zfs" || "$_p" == "zfs-dkms" ]] || _pkgs_no_zfs+=("$_p")
+    done
+    PKGS=("${_pkgs_no_zfs[@]}")
+fi
+
+# Kernel selection: pinned koji set (release path) vs unpinned newest F44
+# (ZFS-from-git test path).
+DNF_KERNEL_ARGS=()
+if ((${#ZFS_GIT_RPMS[@]})); then
+    DNF_KERNEL_ARGS=(kernel kernel-core kernel-modules kernel-devel)
+else
+    DNF_KERNEL_ARGS=(--exclude='kernel*-7.[1-9]*' "${KOJI_KERNEL_URLS[@]}")
+fi
 dnf --installroot="$ROOTFS" --releasever=44 --setopt=install_weak_deps=False \
-    --exclude='kernel*-7.[1-9]*' \
     --setopt=tsflags=nodocs --nogpgcheck -y install \
-    "${KOJI_KERNEL_URLS[@]}" "${PKGS[@]}" 2>&1 | tee -a "$LOG_FILE"
+    "${DNF_KERNEL_ARGS[@]}" "${PKGS[@]}" "${ZFS_GIT_RPMS[@]}" 2>&1 | tee -a "$LOG_FILE"
 DNF_RC=${PIPESTATUS[0]}
 # set -o pipefail  # INTENTIONALLY DISABLED — see SIGPIPE note above
 # Check if packages actually installed (ignore DKMS scriptlet exit code)
