@@ -63,6 +63,16 @@ baseurl=https://mirror.stream.centos.org/${RELEASE}-stream/CRB/${ARCH}/os/
 enabled=1
 gpgcheck=0
 
+[el-epel]
+name=EPEL ${RELEASE} - Everything
+# EPEL is load-bearing, not optional: dkms (required by zfs-dkms) lives ONLY
+# here on EL, so without EPEL the zfs chain is unresolvable and the mirror
+# zeroes out (found 2026-07-23). Also supplies the operator tools the shared
+# package sets expect (htop, fzf, pv, node_exporter, ...).
+baseurl=https://dl.fedoraproject.org/pub/epel/${RELEASE}/Everything/${ARCH}/
+enabled=1
+gpgcheck=0
+
 [el-zfs]
 name=OpenZFS 2.3 for EL${RELEASE}
 baseurl=http://download.zfsonlinux.org/2.3/epel/${RELEASE}/${ARCH}/
