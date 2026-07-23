@@ -340,8 +340,13 @@ if [[ -n "${KLDLOAD_ZFS_GIT:-}" && "${KLDLOAD_ZFS_GIT}" != "0" ]]; then
     # mode deliberately skips the zfsonlinux repo, so builddep has nothing
     # to resolve from — it died here invisibly on the first attempt
     # (2026-07-23; container stdout was lost, hence the tee below).
+    # kernel-devel: zfs's default configure probes a kernel tree even though
+    # we only ship the dkms + userland rpms. In git mode the builder gets the
+    # NEWEST F44 kernel-devel (7.1.x) — deliberately: configure against it is
+    # the first signal on whether the git ref supports that kernel at all.
     dnf -y install \
         git rpm-build kernel-rpm-macros gcc make autoconf automake libtool \
+        kernel-devel \
         libtirpc-devel libblkid-devel libuuid-devel systemd-devel \
         openssl-devel zlib-ng-compat-devel libaio-devel libattr-devel \
         elfutils-libelf-devel python3-devel python3-setuptools python3-cffi \
