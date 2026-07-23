@@ -92,17 +92,35 @@ recovery_mount_chroot() {
 
     log "Preparing chroot environment at $target..."
 
-    # Mount root dataset if not already mounted
+    # Mount the ACTIVE root dataset, not a hardcoded rpool/ROOT/default —
+    # the installer names the BE after the hostname, so the hardcoded mount
+    # failed (silently) on every real install and chroot landed in an empty
+    # dir. Detection + a loud failure are the whole point of this path: a
+    # 3am operator must know the root didn't mount, not get a hollow shell.
     if ! mountpoint -q "$target" 2>/dev/null; then
-        run zfs mount rpool/ROOT/default 2>/dev/null || true
+        # bootenv.sh owns BE detection; source it if the caller hasn't
+        if ! declare -F _bootenv_active_dataset >/dev/null; then
+            # shellcheck source=bootenv.sh
+            source "$(dirname "${BASH_SOURCE[0]:-$0}")/bootenv.sh"
+        fi
+        local _root_ds
+        _root_ds="$(_bootenv_active_dataset)"
+        log "Mounting root BE: $_root_ds"
+        run zfs mount "$_root_ds" ||
+            die "failed to mount $_root_ds — is the pool imported? (krecovery import). 'zfs list -r rpool/ROOT' shows the available BEs."
     fi
 
-    # Bind virtual filesystems
-    run mount --bind /dev "${target}/dev" 2>/dev/null || true
-    run mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || true
-    run mount -t proc proc "${target}/proc" 2>/dev/null || true
-    run mount -t sysfs sysfs "${target}/sys" 2>/dev/null || true
-    run mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || true
+    # Sanity: this must look like a root filesystem before we bind into it
+    [[ -d "${target}/etc" && -d "${target}/usr" ]] ||
+        die "$target is mounted but does not look like a root filesystem (no /etc or /usr) — wrong dataset or empty BE"
+
+    # Bind virtual filesystems — visible warning per failure (a missing
+    # /dev or /proc makes most in-chroot tooling misbehave in confusing ways)
+    run mount --bind /dev "${target}/dev" 2>/dev/null || log "WARNING: bind mount of /dev failed"
+    run mount --bind /dev/pts "${target}/dev/pts" 2>/dev/null || log "WARNING: bind mount of /dev/pts failed"
+    run mount -t proc proc "${target}/proc" 2>/dev/null || log "WARNING: mount of /proc failed"
+    run mount -t sysfs sysfs "${target}/sys" 2>/dev/null || log "WARNING: mount of /sys failed"
+    run mount -t tmpfs tmpfs "${target}/run" 2>/dev/null || log "WARNING: mount of /run failed"
 
     log "Chroot environment ready at $target"
 }
@@ -114,6 +132,9 @@ recovery_mount_chroot() {
 
 recovery_chroot() {
     local target="${1:-$RECOVERY_MOUNT}"
+
+    [[ -x "${target}/bin/bash" || -x "${target}/usr/bin/bash" ]] ||
+        die "no bash inside $target — root BE not mounted correctly (run krecovery import, then retry)"
 
     log "Entering chroot: $target"
     exec chroot "$target" /bin/bash

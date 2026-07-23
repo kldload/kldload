@@ -3,20 +3,35 @@ set -Eeuo pipefail
 
 case "${1:-help}" in
 import)
+    # -a: import every pool found; -f: pools from the installed system are
+    # never cleanly exported when you're here, so a hostid mismatch is the
+    # normal case, not an error. -N so nothing auto-mounts over the live env;
+    # use krecovery chroot (or zfs mount) for that. A bare `zpool import`
+    # only LISTS importable pools — which is what this command did until
+    # 2026-07-22, silently importing nothing while claiming success.
+    zpool import -a -f -N
+    zpool list
+    ;;
+scan)
+    # exit 1 "no pools available to import" is the benign empty case —
+    # the message above is the answer the operator asked for
     zpool import || true
     ;;
 list-pools)
-    zpool list || true
+    zpool list
     ;;
 list-datasets)
-    zfs list || true
+    zfs list
     ;;
 *)
     cat <<'EOH'
 Usage:
-  kldload-recovery import
-  kldload-recovery list-pools
-  kldload-recovery list-datasets
+  kldload-recovery import          import all found pools (zpool import -a -f -N)
+  kldload-recovery scan            list importable pools without importing
+  kldload-recovery list-pools      list imported pools
+  kldload-recovery list-datasets   list datasets of imported pools
+
+For chroot/rollback/bootloader repair, see: krecovery help
 EOH
     ;;
 esac
