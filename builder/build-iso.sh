@@ -117,7 +117,9 @@ PKGS=(
     basesystem filesystem setup
     dnf rpm coreutils bash glibc glibc-langpack-en
     systemd systemd-pam systemd-udev dbus-broker
-    kernel kernel-core kernel-modules kernel-devel dracut dracut-live dracut-squash
+    # kernel* intentionally absent — koji-pinned to the last zfs-compatible
+    # NVR, see KOJI_KERNEL_URLS at the bootstrap dnf below
+    dracut dracut-live dracut-squash
     grub2-efi-${ARCH_EFI} grub2-tools shim-${ARCH_EFI} efibootmgr mokutil pesign sbsigntools
     NetworkManager NetworkManager-wifi wpa_supplicant openssh-server openssh-clients sudo
     vim-enhanced tmux curl wget rsync jq less tar gzip
@@ -285,19 +287,37 @@ ZFSREPO
 # would turn into a fatal build abort. The SIGPIPE is harmless (just tee closing).
 set +o pipefail
 # Kernel pin REINSTATED 2026-07-23: the predicted 7.1 window opened. F44
-# updates now serves kernel 7.1.4-202 (and has dropped 7.0.x entirely), while
-# the OpenZFS 2.4 repo still serves zfs-dkms-2.4.3 with its
+# updates now serves kernel 7.1.4-202 (and pruned 7.0.x entirely), while the
+# OpenZFS 2.4 repo still serves zfs-dkms-2.4.3 with its
 # `Conflicts: kernel-uname-r > 7.0.999` cap — unpinned, this transaction
 # aborts on dep resolution (exactly as the previous comment here predicted).
-# With the exclude, dnf resolves kernel-core-6.19.10 from the F44 GA repo
-# (verified in the builder container 2026-07-23) — inside zfs 2.4.3's
-# supported 4.18-7.0 range. The glob covers 7.1 through 7.9* so the next
-# upstream kernel bump doesn't reopen the window.
-# REMOVE this pin when the 2.4 line ships a zfs-dkms whose cap covers the
-# then-current F44 kernel — check: dnf repoquery --repoid=zfs zfs-dkms
+#
+# Pin choice: koji URLs for 7.0.12-201.fc44 — the exact kernel+zfs combo
+# every ISO since June shipped and boot-verified — rather than falling back
+# to GA 6.19.10 (an untested combo) or riding git-master zfs (unsigned,
+# against the versionlock philosophy). Modules only build against RELEASE
+# zfs; the kernel holds at the newest that release supports. kojipkgs keeps
+# every built NVR forever (mirrors prune; updates-archive unreachable from
+# the builder, probed 2026-07-23). All five subpackage URLs verified 200.
+# The --exclude keeps any repo 7.1+ kernel out of the transaction; it does
+# NOT match the 7.0.12 URL packages.
+# REMOVE this pin (restore kernel names in PKGS) when the 2.4 line ships a
+# zfs-dkms whose cap covers the then-current F44 kernel —
+# check: dnf repoquery --repoid=zfs zfs-dkms
+KOJI_KERNEL_NVR="7.0.12-201.fc44"
+KOJI_KERNEL_BASE="https://kojipkgs.fedoraproject.org/packages/kernel/${KOJI_KERNEL_NVR%%-*}/${KOJI_KERNEL_NVR#*-}/${ARCH}"
+KOJI_KERNEL_URLS=()
+# kernel-devel-matched must be pinned too: something in the closure requires
+# it, and without a 7.0.12 provider on the command line dnf pulls the repo's
+# 6.19.10 one — which drags a SECOND kernel-core/devel into the transaction
+# (kernels are installonly, so dnf stacks both; verified 2026-07-23).
+for _ksub in kernel kernel-core kernel-modules kernel-modules-core kernel-devel kernel-devel-matched; do
+    KOJI_KERNEL_URLS+=("${KOJI_KERNEL_BASE}/${_ksub}-${KOJI_KERNEL_NVR}.${ARCH}.rpm")
+done
 dnf --installroot="$ROOTFS" --releasever=44 --setopt=install_weak_deps=False \
     --exclude='kernel*-7.[1-9]*' \
-    --setopt=tsflags=nodocs --nogpgcheck -y install "${PKGS[@]}" 2>&1 | tee -a "$LOG_FILE"
+    --setopt=tsflags=nodocs --nogpgcheck -y install \
+    "${KOJI_KERNEL_URLS[@]}" "${PKGS[@]}" 2>&1 | tee -a "$LOG_FILE"
 DNF_RC=${PIPESTATUS[0]}
 # set -o pipefail  # INTENTIONALLY DISABLED — see SIGPIPE note above
 # Check if packages actually installed (ignore DKMS scriptlet exit code)
