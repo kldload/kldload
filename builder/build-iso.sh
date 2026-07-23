@@ -284,15 +284,19 @@ ZFSREPO
 # cause SIGPIPE from "dnf | tee" to propagate as a non-zero exit, which set -e
 # would turn into a fatal build abort. The SIGPIPE is harmless (just tee closing).
 set +o pipefail
-# No kernel pin — OpenZFS 2.4.3 (Conflicts: kernel-uname-r > 7.0.999) builds
-# against F44's native kernel, including the 7.0.x updates. The old
-# --exclude='kernel-7.*' pin to 6.19.x existed only because the previous
-# zfs-dkms-2.4.1 capped at 6.19.999; that cap is gone in 2.4.3. The live ISO
-# now rides whatever F44 ships (currently 7.0.x). NOTE: zfs-dkms-2.4.3 still
-# conflicts with kernel > 7.0.999, so if F44 ever pushes kernel 7.1 before the
-# 2.4 line raises its cap, this transaction will abort on dep resolution — the
-# fix then is a zfs bump (the 2.4 repo auto-serves the latest), not a kernel pin.
+# Kernel pin REINSTATED 2026-07-23: the predicted 7.1 window opened. F44
+# updates now serves kernel 7.1.4-202 (and has dropped 7.0.x entirely), while
+# the OpenZFS 2.4 repo still serves zfs-dkms-2.4.3 with its
+# `Conflicts: kernel-uname-r > 7.0.999` cap — unpinned, this transaction
+# aborts on dep resolution (exactly as the previous comment here predicted).
+# With the exclude, dnf resolves kernel-core-6.19.10 from the F44 GA repo
+# (verified in the builder container 2026-07-23) — inside zfs 2.4.3's
+# supported 4.18-7.0 range. The glob covers 7.1 through 7.9* so the next
+# upstream kernel bump doesn't reopen the window.
+# REMOVE this pin when the 2.4 line ships a zfs-dkms whose cap covers the
+# then-current F44 kernel — check: dnf repoquery --repoid=zfs zfs-dkms
 dnf --installroot="$ROOTFS" --releasever=44 --setopt=install_weak_deps=False \
+    --exclude='kernel*-7.[1-9]*' \
     --setopt=tsflags=nodocs --nogpgcheck -y install "${PKGS[@]}" 2>&1 | tee -a "$LOG_FILE"
 DNF_RC=${PIPESTATUS[0]}
 # set -o pipefail  # INTENTIONALLY DISABLED — see SIGPIPE note above

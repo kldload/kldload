@@ -87,8 +87,12 @@ done
 log "Total unique packages: ${#PKGS_FINAL[@]}"
 log "Downloading RPMs to ${REPO_DIR}..."
 
+# dnf5 rejects the dnf4 comma syntax --arch "x86_64,noarch" outright
+# ("Unsupported architecture") — the whole download died and the WARNING
+# below made an EMPTY darksite look like a partial one (0 RPMs, found
+# 2026-07-23). Pass --arch twice, same fix as build-darksite-fedora.sh.
 dnf download --resolve --alldeps --destdir "${REPO_DIR}" \
-    --releasever "${RELEASE}" --arch "${ARCH},noarch" \
+    --releasever "${RELEASE}" --arch "${ARCH}" --arch noarch \
     --skip-broken \
     "${PKGS_FINAL[@]}" 2>&1 | tail -10 || log "WARNING: some packages could not be downloaded"
 
