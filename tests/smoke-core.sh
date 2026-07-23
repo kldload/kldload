@@ -93,7 +93,9 @@ test_succeeds "SSH port open" "ss -tlnp | grep -q :22"
 # ── Networking ───────────────────────────────────────────────────────────────
 _section "Networking"
 
-test_succeeds "Has an IP address" "ip -4 addr show | grep -q 'inet '"
+# no `grep -q`: -q exits at first match and SIGPIPEs `ip` → exit 141 under
+# pipefail, failing the test on a box that plainly has an IP (e7b1b4f class)
+test_succeeds "Has an IP address" "ip -4 addr show | grep 'inet ' >/dev/null"
 test_succeeds "Default route exists" "ip route show default | grep -q 'default'"
 test_succeeds "DNS resolves" "getent hosts github.com"
 

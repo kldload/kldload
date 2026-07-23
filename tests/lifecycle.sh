@@ -225,6 +225,7 @@ ssh_live 'sudo bash -c "setsid nohup /usr/sbin/kldload-install-target --config /
     fail "couldn't kick off installer"
 
 # Poll until the install-target process exits. Ceiling 60 min.
+_install_state="running"
 for i in $(seq 1 360); do
     sleep 10
     # Use the bracket trick so pgrep doesn't match its own SSH session.
@@ -236,8 +237,21 @@ for i in $(seq 1 360); do
     # argv `[/]usr/sbin/...` of the SSH bash session. Bug took two passes
     # to nail down — fiend CI runs 2026-05-06-015029 and -021928.
     if ! ssh_live 'pgrep -f "[/]usr/sbin/kldload-install-target" >/dev/null' 2>/dev/null; then
+        # A failed pgrep-over-ssh means EITHER the installer exited OR the
+        # live env itself went down. Distinguish them: on success the VM can
+        # reboot into the target before we ever read the marker (seen
+        # 2026-07-23: 9-min darksite install, VM rebooted mid-poll and the
+        # refused ssh was misreported as "installer aborted"). If ssh is
+        # dead, don't call it an abort — fall through to the target-boot
+        # phase, whose wait_for_ssh is the authoritative success check.
+        if ! ssh_live 'true' 2>/dev/null; then
+            log "live env unreachable mid-poll — installer likely finished and rebooted; verifying via target boot"
+            _install_state="rebooted"
+            break
+        fi
         if ssh_live 'sudo grep -q "Install completed successfully" /var/log/installer/kldload-installer.log 2>/dev/null' 2>/dev/null; then
             ok "install completed (after ~$((i * 10 / 60)) min)"
+            _install_state="done"
             break
         else
             # Capture all relevant install logs — not just kldload-installer.log,
@@ -271,6 +285,13 @@ for i in $(seq 1 360); do
     fi
     [[ $((i % 6)) -eq 0 ]] && log "  install still running ($((i * 10 / 60)) min elapsed)"
 done
+
+# Loop exhaustion = the installer is STILL RUNNING at the 60-min ceiling.
+# Without this gate the script fell through to the shutdown/reboot phase and
+# a mid-install VM got misreported as "installed system never came up"
+# (2026-07 audit finding).
+[[ "$_install_state" != "running" ]] ||
+    fail "install timed out — still running after 60 min (VM left up for inspection)"
 
 # ── Reboot into the installed target ─────────────────────────────────────────
 log "shutting down VM, switching boot order to disk-first, restarting"

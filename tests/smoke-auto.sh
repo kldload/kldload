@@ -33,7 +33,12 @@ fi
 echo "Detected profile: $PROFILE"
 echo ""
 
-if [[ ! -x "${SCRIPT_DIR}/smoke-${PROFILE}.sh" ]]; then
+# -r, NOT -x: we invoke via `bash` so the exec bit is irrelevant, and -x
+# lies on noexec mounts — kldload's own /tmp ships exec=off, so lifecycle's
+# upload-to-/tmp made every desktop run silently fall back to the core
+# suite (found 2026-07-23: "Detected profile: desktop" followed by the
+# core leanness assertions failing on desktop tools).
+if [[ ! -r "${SCRIPT_DIR}/smoke-${PROFILE}.sh" ]]; then
     echo "no smoke-${PROFILE}.sh present — falling back to smoke-core.sh" >&2
     PROFILE="core"
 fi
