@@ -113,7 +113,28 @@ for p in "${PACKAGES[@]}"; do
 done
 
 log "Total unique packages: ${#PKGS_FINAL[@]}"
-log "Downloading RPMs to ${REPO_DIR}..."
+
+# ─── Availability pre-filter ─────────────────────────────────────────────────
+# dnf5's `download` is all-or-nothing with no --skip-broken: ONE package name
+# that doesn't exist in EL (the sets are shared with Fedora; first offender
+# found: gnupg2-minimal) zeroes the whole mirror. Same fix as the fedora
+# builder: repoquery-test each name against the EL repos and download only
+# what exists, logging every skip so a load-bearing miss is visible.
+declare -a PKGS_AVAILABLE=()
+declare -a PKGS_SKIPPED=()
+for _p in "${PKGS_FINAL[@]}"; do
+    if dnf -q repoquery --setopt=reposdir="${REPO_DEFS}" \
+        --releasever "${RELEASE}" --arch "${ARCH}" --arch noarch \
+        --qf '%{name}' "$_p" 2>/dev/null | grep -q .; then
+        PKGS_AVAILABLE+=("$_p")
+    else
+        PKGS_SKIPPED+=("$_p")
+    fi
+done
+if [[ ${#PKGS_SKIPPED[@]} -gt 0 ]]; then
+    log "Skipping ${#PKGS_SKIPPED[@]} names not present in EL${RELEASE} repos: ${PKGS_SKIPPED[*]}"
+fi
+log "Downloading ${#PKGS_AVAILABLE[@]} available packages (with deps) to ${REPO_DIR}..."
 
 # dnf5 rejects the dnf4 comma syntax --arch "x86_64,noarch" outright
 # ("Unsupported architecture") — the whole download died and the WARNING
@@ -127,7 +148,7 @@ log "Downloading RPMs to ${REPO_DIR}..."
 dnf download --resolve --alldeps --destdir "${REPO_DIR}" \
     --setopt=reposdir="${REPO_DEFS}" \
     --releasever "${RELEASE}" --arch "${ARCH}" --arch noarch \
-    "${PKGS_FINAL[@]}" 2>&1 | tail -10 || log "WARNING: download reported errors — count gate below decides"
+    "${PKGS_AVAILABLE[@]}" 2>&1 | tail -10 || log "WARNING: download reported errors — count gate below decides"
 
 log "Creating repo metadata..."
 createrepo_c "${REPO_DIR}"

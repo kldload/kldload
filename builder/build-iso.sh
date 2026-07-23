@@ -101,6 +101,15 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -x "$DARKSITE_SCRIPT" ]]; then
         log "Building darksite RPM mirror..."
         bash "$DARKSITE_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
+        # pipefail is deliberately off in this script (SIGPIPE note at top),
+        # so the tee masks the darksite's exit — its hard RPM-count gate was
+        # silently defeated on 2026-07-23 and a mirror-less ISO kept building.
+        # Judge the real status via PIPESTATUS, same as the bootstrap dnf.
+        _darksite_rc=${PIPESTATUS[0]}
+        if [[ "$_darksite_rc" != "0" ]]; then
+            echo "FATAL: EL darksite build failed (rc=${_darksite_rc}) — refusing to ship an ISO with an empty EL mirror" >&2
+            exit 1
+        fi
     fi
 else
     log "Core edition — skipping darksite RPM mirror build."
