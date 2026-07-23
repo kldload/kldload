@@ -201,6 +201,7 @@ log "Downloading ${#PKGS_AVAILABLE[@]} packages (with deps) for Fedora ${RELEASE
 _dl_log="$(mktemp)"
 if ! dnf download --resolve --alldeps --destdir "${REPO_DIR}" \
     --releasever "${RELEASE}" --arch "${ARCH}" --arch noarch \
+    --exclude='kernel*-7.[1-9]*' \
     "${PKGS_AVAILABLE[@]}" >"${_dl_log}" 2>&1; then
     log "WARNING: dnf download exited non-zero — last 40 lines:"
     tail -40 "${_dl_log}" | sed 's/^/    /' >&2
@@ -244,6 +245,7 @@ _clroot="$(mktemp -d)"
 # 0 and the gate kept failing.
 dnf install --installroot="${_clroot}" --use-host-config \
     --releasever="${RELEASE}" --forcearch="${ARCH}" \
+    --exclude='kernel*-7.[1-9]*' \
     --setopt=cachedir="${_clcache}" --setopt=keepcache=1 --downloadonly --nogpgcheck -y \
     "${_closure_set[@]}" >"${_clcache}.log" 2>&1 || {
     log "WARNING: downloadonly closure exited non-zero — tail:"
@@ -255,6 +257,29 @@ while IFS= read -r _r; do
 done < <(find "${_clcache}" -name '*.rpm')
 log "Boolean-dep closure: harvested ${_harvested} additional RPMs into the mirror"
 rm -rf "${_clcache}" "${_clroot}" "${_clcache}.log"
+
+# ─── Koji kernel pin injection ──────────────────────────────────────────────
+# F44's updates repo pruned 7.0.x when 7.1.4 landed, and zfs-dkms 2.4.3 caps
+# at kernel 7.0.999 — with the 7.[1-9] excludes above, plain resolution would
+# capture the GA 6.19 kernel. Inject the boot-verified 7.0.14 NVR from koji
+# so the mirror serves the same kernel the live ISO pins (builder/build-iso.sh
+# KOJI_KERNEL_NVR — keep these two in lockstep). The 6.19 copies pulled by
+# dep-resolution stay in the mirror harmlessly; installs pick the highest.
+# Hard-fail on any fetch: a mirror silently missing its kernel is the exact
+# ghost-install class the gates below exist to kill.
+KOJI_KERNEL_NVR="${KOJI_KERNEL_NVR:-7.0.14-201.fc44}"
+_koji_base="https://kojipkgs.fedoraproject.org/packages/kernel/${KOJI_KERNEL_NVR%%-*}/${KOJI_KERNEL_NVR#*-}/${ARCH}"
+for _ksub in kernel kernel-core kernel-modules kernel-modules-core kernel-modules-extra kernel-devel kernel-devel-matched; do
+    _krpm="${_ksub}-${KOJI_KERNEL_NVR}.${ARCH}.rpm"
+    if [[ ! -f "${REPO_DIR}/${_krpm}" ]]; then
+        curl -fsSL -o "${REPO_DIR}/${_krpm}" "${_koji_base}/${_krpm}" ||
+            {
+                log "FATAL: koji fetch failed for ${_krpm} — mirror would ship without its pinned kernel" >&2
+                exit 1
+            }
+    fi
+done
+log "Koji kernel pin injected: ${KOJI_KERNEL_NVR} (7 subpackages)"
 
 log "Creating repo metadata..."
 createrepo_c "${REPO_DIR}"

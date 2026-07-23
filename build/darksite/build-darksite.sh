@@ -11,12 +11,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_SETS_DIR="${SCRIPT_DIR}/config/package-sets"
 ARCH="${ARCH:-x86_64}"
 # EL10 (kernel 6.12, zfs 2.3) is the default EL target — matches RHEL 10 and the
-# CentOS Stream / Rocky bootstrap default. NOTE: this builder runs on Fedora 44
-# (no CentOS BaseOS/AppStream repos configured), so this pass only captures the
-# add-on repos it can reach (zfs el10, k8s, docker). True EL10 base air-gap needs
-# CentOS Stream 10 BaseOS/AppStream/CRB repos wired in here first; until then the
-# installer's centos/rocky path falls back to network (see bootstrap.sh
-# _kld_allow_net). Override with RELEASE=9 for the legacy EL9 set.
+# CentOS Stream / Rocky bootstrap default. As of 2026-07-23 this builds a REAL
+# EL10 base mirror: explicit CentOS Stream BaseOS/AppStream/CRB + zfs 2.3 EL +
+# Docker CE + Kubernetes repo definitions in a private reposdir (the fedora:44
+# builder has no EL repos of its own — the old host-repo approach resolved
+# --releasever 10 to the 2008 "Fedora 10" archive and shipped 0 RPMs). RHEL
+# proper still needs entitled CDN repos at install time; centos/rocky install
+# offline from this mirror. Override with RELEASE=9 for the legacy EL9 set
+# (NB: the zfs 2.3 line and Stream 9 EOL status are untested there).
 RELEASE="${RELEASE:-10}"
 DARKSITE_ROOT="${DARKSITE_ROOT:-/build/live-build/config/includes.chroot/root/darksite}"
 REPO_DIR="${DARKSITE_ROOT}/rpm"
@@ -25,34 +27,60 @@ log() { printf '[%s] [darksite] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&
 
 mkdir -p "${REPO_DIR}"
 
-# Add ZFS on Linux repo
-if [[ ! -f /etc/yum.repos.d/zfs.repo ]]; then
-    log "Adding ZFS on Linux repo..."
-    dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-3.el${RELEASE}.noarch.rpm" 2>/dev/null ||
-        dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-2.el${RELEASE}.noarch.rpm" 2>/dev/null ||
-        log "WARNING: could not add ZFS repo — ZFS packages may be missing"
-fi
-
-# Add Kubernetes repo (pkgs.k8s.io)
+# ─── EL repo definitions (self-contained reposdir) ──────────────────────────
+# The builder is Fedora 44 with NO EL repos, and the old approach (install
+# zfs-release rpm + dnf config-manager on the HOST) was triply broken: dnf5
+# dropped `config-manager --add-repo`, the zfs-release repo file expands
+# $releasever to 44, and — fatally — the download below ran against the
+# host's Fedora repos, which `--releasever 10` resolves to the 2008 "Fedora
+# 10" archive. Result: the EL darksite shipped 0 RPMs behind a WARNING since
+# the fedora:44 builder cutover (root-caused 2026-07-23).
+# Fix: a private reposdir holding EXPLICIT CentOS Stream ${RELEASE} BaseOS/
+# AppStream/CRB + zfs 2.3 EL + Docker CE + Kubernetes definitions; the
+# download runs with reposdir= pointed here so the host's repos are never
+# consulted. gpgcheck=0: this is a download-only mirror build (dnf download
+# does not verify signatures either way); target-side install policy owns
+# verification. All six repomd.xml URLs probed 200 on 2026-07-23.
 K8S_MINOR="${K8S_MINOR:-v1.32}"
-if [[ ! -f /etc/yum.repos.d/kubernetes.repo ]]; then
-    log "Adding Kubernetes repo (${K8S_MINOR})..."
-    cat >/etc/yum.repos.d/kubernetes.repo <<EOF
-[kubernetes]
-name=Kubernetes
+REPO_DEFS="$(mktemp -d)"
+trap 'rm -rf "$REPO_DEFS"' EXIT
+cat >"${REPO_DEFS}/el-darksite.repo" <<EOF
+[el-baseos]
+name=CentOS Stream ${RELEASE} - BaseOS
+baseurl=https://mirror.stream.centos.org/${RELEASE}-stream/BaseOS/${ARCH}/os/
+enabled=1
+gpgcheck=0
+
+[el-appstream]
+name=CentOS Stream ${RELEASE} - AppStream
+baseurl=https://mirror.stream.centos.org/${RELEASE}-stream/AppStream/${ARCH}/os/
+enabled=1
+gpgcheck=0
+
+[el-crb]
+name=CentOS Stream ${RELEASE} - CRB
+baseurl=https://mirror.stream.centos.org/${RELEASE}-stream/CRB/${ARCH}/os/
+enabled=1
+gpgcheck=0
+
+[el-zfs]
+name=OpenZFS 2.3 for EL${RELEASE}
+baseurl=http://download.zfsonlinux.org/2.3/epel/${RELEASE}/${ARCH}/
+enabled=1
+gpgcheck=0
+
+[el-docker-ce]
+name=Docker CE Stable - EL${RELEASE}
+baseurl=https://download.docker.com/linux/centos/${RELEASE}/${ARCH}/stable/
+enabled=1
+gpgcheck=0
+
+[el-kubernetes]
+name=Kubernetes ${K8S_MINOR}
 baseurl=https://pkgs.k8s.io/core:/stable:/${K8S_MINOR}/rpm/
 enabled=1
-gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/${K8S_MINOR}/rpm/repodata/repomd.xml.key
+gpgcheck=0
 EOF
-fi
-
-# Add containerd repo (Docker CE for containerd.io)
-if [[ ! -f /etc/yum.repos.d/docker-ce.repo ]]; then
-    log "Adding Docker CE repo (for containerd.io)..."
-    dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null ||
-        log "WARNING: could not add Docker CE repo — containerd.io may be missing"
-fi
 
 # Read package sets
 declare -a PACKAGES=()
@@ -93,14 +121,25 @@ log "Downloading RPMs to ${REPO_DIR}..."
 # 2026-07-23). Pass --arch twice, same fix as build-darksite-fedora.sh.
 # NB: no --skip-broken — dnf5's `download` rejects it as an unknown argument
 # (exits before downloading anything; second dnf5 incompatibility found here
-# 2026-07-23, after the --arch comma syntax). Unresolvable packages fail the
-# pipeline and are caught by the || WARNING below.
+# 2026-07-23, after the --arch comma syntax). The transaction is
+# all-or-nothing: an unresolvable package fails the whole download, which
+# the RPM-count gate below turns into a hard build failure.
 dnf download --resolve --alldeps --destdir "${REPO_DIR}" \
+    --setopt=reposdir="${REPO_DEFS}" \
     --releasever "${RELEASE}" --arch "${ARCH}" --arch noarch \
-    "${PKGS_FINAL[@]}" 2>&1 | tail -10 || log "WARNING: some packages could not be downloaded"
+    "${PKGS_FINAL[@]}" 2>&1 | tail -10 || log "WARNING: download reported errors — count gate below decides"
 
 log "Creating repo metadata..."
 createrepo_c "${REPO_DIR}"
 
+# Hard gate: this mirror shipped 0 RPMs behind a WARNING for months (three
+# stacked failures, root-caused 2026-07-23). An empty or near-empty EL
+# darksite must kill the build, not decorate the log — the 160-package set
+# with deps resolves to several hundred RPMs when the repos are healthy.
+_el_count=$(find "${REPO_DIR}" -name '*.rpm' | wc -l)
 log "Darksite repo ready: ${REPO_DIR}"
-log "RPM count: $(find "${REPO_DIR}" -name '*.rpm' | wc -l)"
+log "RPM count: ${_el_count}"
+if [[ "${_el_count}" -lt 100 ]]; then
+    log "ERROR: EL darksite produced only ${_el_count} RPMs — expected hundreds. See dnf output above." >&2
+    exit 1
+fi
