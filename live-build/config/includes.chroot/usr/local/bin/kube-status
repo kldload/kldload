@@ -5,12 +5,17 @@ set -euo pipefail
 # Auto-elevate to root
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
-C="\033[1;36m"; G="\033[1;32m"; Y="\033[1;33m"; R="\033[1;31m"
-W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"
+C="\033[1;36m"
+G="\033[1;32m"
+Y="\033[1;33m"
+R="\033[1;31m"
+W="\033[1;37m"
+D="\033[0;37m"
+N="\033[0m"
 
 if ! command -v kubectl >/dev/null 2>&1 || ! kubectl cluster-info >/dev/null 2>&1; then
-  echo -e "${R}[kube-status]${N} No cluster available. Is this a control plane node?"
-  exit 1
+    echo -e "${R}[kube-status]${N} No cluster available. Is this a control plane node?"
+    exit 1
 fi
 
 echo -e "${C}══════════════════════════════════════════════════════════════${N}"
@@ -31,9 +36,9 @@ echo ""
 # Component status
 echo -e "${Y}Cilium Status${N}"
 if command -v cilium >/dev/null 2>&1; then
-  cilium status 2>/dev/null || echo "  Cilium CLI not responding"
+    cilium status 2>/dev/null || echo "  Cilium CLI not responding"
 else
-  echo "  Cilium CLI not installed"
+    echo "  Cilium CLI not installed"
 fi
 echo ""
 
@@ -54,21 +59,21 @@ echo ""
 
 # ZFS status if available
 if command -v zfs >/dev/null 2>&1; then
-  echo -e "${Y}ZFS Storage${N}"
-  zfs list -o name,used,avail,mountpoint 2>/dev/null | grep -E 'etcd|containerd|kubelet|NAME' || true
-  echo ""
-  echo -e "${Y}ZFS Snapshots (K8s related)${N}"
-  zfs list -t snapshot 2>/dev/null | grep -E 'kube|etcd|NAME' | head -10 || echo "  None"
-  echo ""
+    echo -e "${Y}ZFS Storage${N}"
+    zfs list -o name,used,avail,mountpoint 2>/dev/null | grep -E 'etcd|containerd|kubelet|NAME' || true
+    echo ""
+    echo -e "${Y}ZFS Snapshots (K8s related)${N}"
+    zfs list -t snapshot 2>/dev/null | grep -E 'kube|etcd|NAME' | head -10 || echo "  None"
+    echo ""
 fi
 
 # Hubble
 echo -e "${Y}Hubble${N}"
 if kubectl get svc -n kube-system hubble-relay >/dev/null 2>&1; then
-  echo -e "  Relay:  ${G}running${N}"
-  echo -e "  UI:     kubectl port-forward -n kube-system svc/hubble-ui 12000:80"
+    echo -e "  Relay:  ${G}running${N}"
+    echo -e "  UI:     kubectl port-forward -n kube-system svc/hubble-ui 12000:80"
 else
-  echo -e "  ${D}Not installed${N}"
+    echo -e "  ${D}Not installed${N}"
 fi
 
 echo ""

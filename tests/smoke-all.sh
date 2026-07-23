@@ -154,8 +154,9 @@ fi
 
     # VMs if KVM
     if command -v virsh >/dev/null 2>&1; then
-        local vm_count
-        vm_count=$(virsh list --all --name 2>/dev/null | grep -c -v '^$' || echo 0)
+        # grep -c prints its count even when it exits 1 (zero matches), so
+        # only swallow the status — `|| echo 0` would yield "0\n0" here.
+        vm_count=$(virsh list --all --name 2>/dev/null | grep -c -v '^$' || true)
         echo "  VMs:     $vm_count defined"
         virsh list --all 2>/dev/null | grep -v "^$" | sed 's/^/           /'
         echo ""

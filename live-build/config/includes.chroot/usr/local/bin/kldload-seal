@@ -57,11 +57,19 @@ set -euo pipefail
 
 DISK="${1:-}"
 
-C=$'\033[1;36m'; G=$'\033[1;32m'; Y=$'\033[33m'; R=$'\033[1;31m'; D=$'\033[2;37m'; N=$'\033[0m'
+C=$'\033[1;36m'
+G=$'\033[1;32m'
+Y=$'\033[33m'
+R=$'\033[1;31m'
+D=$'\033[2;37m'
+N=$'\033[0m'
 
-log()  { printf "${C}[seal]${N} %s\n" "$*" >&2; }
+log() { printf "${C}[seal]${N} %s\n" "$*" >&2; }
 warn() { printf "${Y}[seal][warn]${N} %s\n" "$*" >&2; }
-die()  { printf "${R}[seal][error]${N} %s\n" "$*" >&2; exit 1; }
+die() {
+    printf "${R}[seal][error]${N} %s\n" "$*" >&2
+    exit 1
+}
 
 usage() {
     cat <<EOF
@@ -88,7 +96,10 @@ when you want to seal an image without converting its format.
 EOF
 }
 
-[[ -n "$DISK" && "$DISK" != "-h" && "$DISK" != "--help" ]] || { usage; exit 1; }
+[[ -n "$DISK" && "$DISK" != "-h" && "$DISK" != "--help" ]] || {
+    usage
+    exit 1
+}
 [[ -b "$DISK" || -f "$DISK" ]] || die "$DISK is not a block device or file"
 [[ $EUID -eq 0 ]] || die "must run as root"
 
@@ -113,8 +124,11 @@ fi
 if command -v virsh >/dev/null 2>&1; then
     if virsh list --name 2>/dev/null | while read -r vm; do
         [[ -n "$vm" ]] || continue
-        virsh domblklist "$vm" 2>/dev/null | awk 'NR>2 {print $2}' | grep -qFx "$DISK" \
-            && { echo "RUNNING: $vm"; break; }
+        virsh domblklist "$vm" 2>/dev/null | awk 'NR>2 {print $2}' | grep -qFx "$DISK" &&
+            {
+                echo "RUNNING: $vm"
+                break
+            }
     done | grep -q RUNNING; then
         die "$DISK is currently attached to a running libvirt domain — shut it down first"
     fi
@@ -149,13 +163,15 @@ detect_shape() {
     local d="$1"
     # Probe whole disk first
     if zdb -l "$d" 2>/dev/null | grep -q "^    name:"; then
-        echo "zfs:$d"; return
+        echo "zfs:$d"
+        return
     fi
     # Probe each partition
     for part in "${d}"p* "${d}"[0-9]*; do
         [[ -b "$part" ]] || continue
         if zdb -l "$part" 2>/dev/null | grep -q "^    name:"; then
-            echo "zfs:$part"; return
+            echo "zfs:$part"
+            return
         fi
     done
     # No ZFS label found — assume partitioned image with FS root
@@ -167,7 +183,7 @@ if [[ -f "$DISK" ]]; then
     LOOP=$(losetup -fP --show "$DISK")
     log "loop-attached $DISK as $LOOP"
     SHAPE=$(detect_shape "$LOOP")
-    SHAPE="${SHAPE/$LOOP/$DISK}"   # report nicely
+    SHAPE="${SHAPE/$LOOP/$DISK}" # report nicely
     PROBE_DEV="$LOOP"
 else
     SHAPE=$(detect_shape "$DISK")
@@ -225,11 +241,12 @@ fs)
     BEST_SIZE=0
     while IFS= read -r part; do
         [[ -n "$part" ]] || continue
-        [[ "$part" == "$PT_DEV_REAL" ]] && continue  # skip the whole-disk row
+        [[ "$part" == "$PT_DEV_REAL" ]] && continue # skip the whole-disk row
         [[ -b "$part" ]] || continue
         sz=$(blockdev --getsize64 "$part" 2>/dev/null || echo 0)
-        if (( sz > BEST_SIZE )); then
-            BEST_SIZE=$sz; ROOT_PART="$part"
+        if ((sz > BEST_SIZE)); then
+            BEST_SIZE=$sz
+            ROOT_PART="$part"
         fi
     done < <(lsblk -nrp -o NAME "$PT_DEV_REAL" 2>/dev/null)
 
@@ -248,7 +265,7 @@ esac
 log "sealing $MNT"
 
 # 1. machine-id — truncated, not deleted (systemd respects empty + regenerates)
-: > "$MNT/etc/machine-id"
+: >"$MNT/etc/machine-id"
 rm -f "$MNT/var/lib/dbus/machine-id"
 log "  cleared /etc/machine-id"
 
@@ -262,12 +279,12 @@ log "  removed /etc/hostid"
 
 # 4. cloud-init — wipe seed/instance state, write portable datasource list
 rm -rf "$MNT/var/lib/cloud/data" \
-       "$MNT/var/lib/cloud/instance" \
-       "$MNT/var/lib/cloud/instances" \
-       "$MNT/var/lib/cloud/sem" 2>/dev/null
+    "$MNT/var/lib/cloud/instance" \
+    "$MNT/var/lib/cloud/instances" \
+    "$MNT/var/lib/cloud/sem" 2>/dev/null
 if [[ -d "$MNT/etc/cloud" ]]; then
     mkdir -p "$MNT/etc/cloud/cloud.cfg.d"
-    cat > "$MNT/etc/cloud/cloud.cfg.d/99-kldload-seal.cfg" <<'CICFG'
+    cat >"$MNT/etc/cloud/cloud.cfg.d/99-kldload-seal.cfg" <<'CICFG'
 # Written by kldload-seal — portable datasource list so this image
 # auto-attaches to whichever cloud-init metadata source it finds first.
 datasource_list: [ NoCloud, ConfigDrive, OpenStack, Ec2, AltCloud, OVF, None ]
@@ -277,9 +294,9 @@ fi
 
 # 5. journald + login records — don't ship audit history with the image
 rm -rf "$MNT/var/log/journal/"* 2>/dev/null
-: > "$MNT/var/log/btmp" 2>/dev/null
-: > "$MNT/var/log/wtmp" 2>/dev/null
-: > "$MNT/var/log/lastlog" 2>/dev/null
+: >"$MNT/var/log/btmp" 2>/dev/null
+: >"$MNT/var/log/wtmp" 2>/dev/null
+: >"$MNT/var/log/lastlog" 2>/dev/null
 log "  cleared journald + wtmp/btmp/lastlog"
 
 # 6. bash history for root + admin (defensive — should be empty on a golden
@@ -288,7 +305,7 @@ rm -f "$MNT/root/.bash_history" "$MNT/home"/*/.bash_history 2>/dev/null
 
 # 7. Forensic marker
 mkdir -p "$MNT/etc/kldload"
-cat > "$MNT/etc/kldload/seal.info" <<EOF
+cat >"$MNT/etc/kldload/seal.info" <<EOF
 sealed: $(date -Iseconds)
 sealed-by: kldload-seal $(date +%Y%m%d)
 sealed-on: $(hostname)

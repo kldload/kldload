@@ -101,7 +101,10 @@ composer-cli status show >/dev/null 2>&1 || {
 }
 
 # ── Push blueprint, depsolve, start compose ──────────────────────────
-[[ -r "$BLUEPRINT" ]] || { log "ERROR: blueprint $BLUEPRINT not found"; exit 1; }
+[[ -r "$BLUEPRINT" ]] || {
+    log "ERROR: blueprint $BLUEPRINT not found"
+    exit 1
+}
 log "pushing blueprint: $BLUEPRINT"
 composer-cli blueprints push "$BLUEPRINT"
 
@@ -125,33 +128,36 @@ COMPOSE_FINAL=""
 for _try in $(seq 1 120); do
     STATUS=$(composer-cli compose status 2>&1 | awk -v id="$UUID" '$1 == id { print $2 }')
     case "$STATUS" in
-        FINISHED)
-            log "compose FINISHED after ${_try} polls (~$((_try * 30))s)"
-            COMPOSE_FINAL=FINISHED
-            break
-            ;;
-        FAILED)
-            log "ERROR: compose FAILED"
-            log "  last 50 lines of compose log:"
-            composer-cli compose log "$UUID" 2>&1 | tail -50 | sed 's/^/  /'
-            exit 1
-            ;;
-        RUNNING|WAITING)
-            # Only log every 4th poll (~2 min) to avoid journal spam
-            (( _try % 4 == 0 )) && log "compose status: $STATUS (poll ${_try}/120)"
-            sleep 30
-            ;;
-        "")
-            log "WARN: compose status returned empty (poll ${_try}/120) -- retrying"
-            sleep 30
-            ;;
-        *)
-            log "compose status: $STATUS (poll ${_try}/120)"
-            sleep 30
-            ;;
+    FINISHED)
+        log "compose FINISHED after ${_try} polls (~$((_try * 30))s)"
+        COMPOSE_FINAL=FINISHED
+        break
+        ;;
+    FAILED)
+        log "ERROR: compose FAILED"
+        log "  last 50 lines of compose log:"
+        composer-cli compose log "$UUID" 2>&1 | tail -50 | sed 's/^/  /'
+        exit 1
+        ;;
+    RUNNING | WAITING)
+        # Only log every 4th poll (~2 min) to avoid journal spam
+        ((_try % 4 == 0)) && log "compose status: $STATUS (poll ${_try}/120)"
+        sleep 30
+        ;;
+    "")
+        log "WARN: compose status returned empty (poll ${_try}/120) -- retrying"
+        sleep 30
+        ;;
+    *)
+        log "compose status: $STATUS (poll ${_try}/120)"
+        sleep 30
+        ;;
     esac
 done
-[[ "$COMPOSE_FINAL" == FINISHED ]] || { log "ERROR: compose timed out after 60 min"; exit 1; }
+[[ "$COMPOSE_FINAL" == FINISHED ]] || {
+    log "ERROR: compose timed out after 60 min"
+    exit 1
+}
 
 # ── Download the qcow2 ─────────────────────────────────────────────
 log "downloading qcow2 (composer keeps it in /var/lib/osbuild-composer)..."
@@ -180,7 +186,10 @@ for _ in $(seq 1 15); do
     [[ -b "$ZDEV" ]] && break
     sleep 1
 done
-[[ -b "$ZDEV" ]] || { log "ERROR: zvol device $ZDEV did not appear within 15s"; exit 1; }
+[[ -b "$ZDEV" ]] || {
+    log "ERROR: zvol device $ZDEV did not appear within 15s"
+    exit 1
+}
 
 log "converting qcow2 -> raw -> zvol..."
 qemu-img convert -f qcow2 -O raw "$QCOW" "$ZDEV"

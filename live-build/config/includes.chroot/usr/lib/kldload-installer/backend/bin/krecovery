@@ -71,12 +71,12 @@ for candidate in "${CANDIDATES[@]}"; do
     fi
 done
 
-[[ -n "$RECOVERY_LIB" ]] \
-    || die "recovery.sh not found. Checked: ${CANDIDATES[*]}"
+[[ -n "$RECOVERY_LIB" ]] ||
+    die "recovery.sh not found. Checked: ${CANDIDATES[*]}"
 
 COMMON_LIB="$(dirname "$RECOVERY_LIB")/common.sh"
-[[ -f "$COMMON_LIB" ]] \
-    || die "common.sh not found at $COMMON_LIB"
+[[ -f "$COMMON_LIB" ]] ||
+    die "common.sh not found at $COMMON_LIB"
 
 # shellcheck source=../common.sh
 source "$COMMON_LIB"
@@ -91,84 +91,84 @@ COMMAND="${1:-}"
 shift || true
 
 case "$COMMAND" in
-    help|--help|-h|"")
-        usage
-        exit 0
-        ;;
+help | --help | -h | "")
+    usage
+    exit 0
+    ;;
 esac
 
 # ---------------------------------------------------------------------------
 # All remaining commands require root
 # ---------------------------------------------------------------------------
 
-[[ "$(id -u)" -eq 0 ]] \
-    || die "krecovery requires root. Run with sudo or as root."
+[[ "$(id -u)" -eq 0 ]] ||
+    die "krecovery requires root. Run with sudo or as root."
 
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
 case "$COMMAND" in
-    import)
-        POOL="${1:-rpool}"
-        recovery_import_pool "$POOL"
-        ;;
+import)
+    POOL="${1:-rpool}"
+    recovery_import_pool "$POOL"
+    ;;
 
-    list-be)
-        recovery_list_bootenvs
-        ;;
+list-be)
+    recovery_list_bootenvs
+    ;;
 
-    list-snapshots)
-        DATASET="${1:-}"
-        [[ -n "$DATASET" ]] \
-            || die "list-snapshots requires a dataset argument. Example: rpool/ROOT/default"
-        recovery_list_snapshots "$DATASET"
-        ;;
+list-snapshots)
+    DATASET="${1:-}"
+    [[ -n "$DATASET" ]] ||
+        die "list-snapshots requires a dataset argument. Example: rpool/ROOT/default"
+    recovery_list_snapshots "$DATASET"
+    ;;
 
-    activate)
-        SNAP="${1:-}"
-        [[ -n "$SNAP" ]] \
-            || die "activate requires a snapshot argument."
-        recovery_activate_bootenv "$SNAP"
-        log "Next boot will use: ${SNAP%%@*}"
-        ;;
+activate)
+    SNAP="${1:-}"
+    [[ -n "$SNAP" ]] ||
+        die "activate requires a snapshot argument."
+    recovery_activate_bootenv "$SNAP"
+    log "Next boot will use: ${SNAP%%@*}"
+    ;;
 
-    rollback)
-        SNAP="${1:-}"
-        [[ -n "$SNAP" ]] \
-            || die "rollback requires a snapshot argument."
-        log "WARNING: Rolling back will DISCARD all changes made after $SNAP."
-        log "Press Ctrl+C within 5 seconds to abort..."
-        sleep 5
-        recovery_rollback "$SNAP"
-        log "Rollback complete. Reboot to apply."
-        ;;
+rollback)
+    SNAP="${1:-}"
+    [[ -n "$SNAP" ]] ||
+        die "rollback requires a snapshot argument."
+    log "WARNING: Rolling back will DISCARD all changes made after $SNAP."
+    log "Press Ctrl+C within 5 seconds to abort..."
+    sleep 5
+    recovery_rollback "$SNAP"
+    log "Rollback complete. Reboot to apply."
+    ;;
 
-    chroot)
-        TARGET="${1:-${RECOVERY_MOUNT}}"
-        recovery_mount_chroot "$TARGET"
-        recovery_chroot "$TARGET"
-        ;;
+chroot)
+    TARGET="${1:-${RECOVERY_MOUNT}}"
+    recovery_mount_chroot "$TARGET"
+    recovery_chroot "$TARGET"
+    ;;
 
-    export-logs)
-        DEST="${1:-}"
-        [[ -n "$DEST" ]] \
-            || die "export-logs requires a destination argument. Example: /mnt/usb/logs"
-        recovery_export_logs "$DEST"
-        ;;
+export-logs)
+    DEST="${1:-}"
+    [[ -n "$DEST" ]] ||
+        die "export-logs requires a destination argument. Example: /mnt/usb/logs"
+    recovery_export_logs "$DEST"
+    ;;
 
-    reinstall-bootloader)
-        DISK="${1:-}"
-        [[ -n "$DISK" ]] \
-            || die "reinstall-bootloader requires a disk argument. Example: /dev/sda"
-        [[ -b "$DISK" ]] \
-            || die "Not a block device: $DISK"
-        TARGET="${2:-${RECOVERY_MOUNT}}"
-        recovery_reinstall_bootloader "$TARGET" "$DISK"
-        ;;
+reinstall-bootloader)
+    DISK="${1:-}"
+    [[ -n "$DISK" ]] ||
+        die "reinstall-bootloader requires a disk argument. Example: /dev/sda"
+    [[ -b "$DISK" ]] ||
+        die "Not a block device: $DISK"
+    TARGET="${2:-${RECOVERY_MOUNT}}"
+    recovery_reinstall_bootloader "$TARGET" "$DISK"
+    ;;
 
-    *)
-        usage
-        die "Unknown command: '$COMMAND'"
-        ;;
+*)
+    usage
+    die "Unknown command: '$COMMAND'"
+    ;;
 esac

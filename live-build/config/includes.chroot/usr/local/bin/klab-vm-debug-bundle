@@ -64,7 +64,7 @@ if [[ -z "$vm_ip" ]]; then
 fi
 if [[ -z "$vm_ip" ]]; then
     _log "FATAL: cannot resolve IP for $vm_name"
-    cat > "$out_dir/meta.json" <<META
+    cat >"$out_dir/meta.json" <<META
 {"error":"vm_ip_not_found","distro":"${distro}","run_id":"${run_id}"}
 META
     tar czf "$out_tgz" -C "$run_dir" "${distro}-debug-bundle"
@@ -86,34 +86,60 @@ _run() {
 # ═════════════════════ ENV ═════════════════════
 _log "[$distro] env.txt"
 {
-    echo "=== uname ==="; _run "uname -a"
-    echo; echo "=== cmdline ==="; _run "cat /proc/cmdline"
-    echo; echo "=== loaded zfs modules ==="; _run "lsmod | grep -E '^(zfs|spl|zavl|znvpair|zunicode|zcommon|zlua|icp) '"
-    echo; echo "=== dkms status ==="; _TMO=5 _run "dkms status 2>/dev/null || echo no-dkms"
-    echo; echo "=== uptime ==="; _run "uptime; cat /proc/loadavg"
-    echo; echo "=== meminfo (key) ==="; _run "grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Slab|SReclaimable|SUnreclaim|Committed_AS):' /proc/meminfo"
-    echo; echo "=== vmstat ==="; _TMO=5 _run "vmstat 1 3 2>/dev/null"
-} > "$out_dir/env.txt"
+    echo "=== uname ==="
+    _run "uname -a"
+    echo
+    echo "=== cmdline ==="
+    _run "cat /proc/cmdline"
+    echo
+    echo "=== loaded zfs modules ==="
+    _run "lsmod | grep -E '^(zfs|spl|zavl|znvpair|zunicode|zcommon|zlua|icp) '"
+    echo
+    echo "=== dkms status ==="
+    _TMO=5 _run "dkms status 2>/dev/null || echo no-dkms"
+    echo
+    echo "=== uptime ==="
+    _run "uptime; cat /proc/loadavg"
+    echo
+    echo "=== meminfo (key) ==="
+    _run "grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Slab|SReclaimable|SUnreclaim|Committed_AS):' /proc/meminfo"
+    echo
+    echo "=== vmstat ==="
+    _TMO=5 _run "vmstat 1 3 2>/dev/null"
+} >"$out_dir/env.txt"
 
 # ═════════════════════ ZFS CORE ═════════════════════
 # Run these in parallel with short TOs — hung pool can block individual
 # commands but others still succeed.
 _log "[$distro] zfs.txt (parallel, 30s budget each)"
 {
-    echo "=== zfs version ==="; _run "zfs version 2>&1 | head -10"
-    echo; echo "=== zpool list (30s) ==="; _TMO=30 _run "zpool list"
-    echo; echo "=== zpool status -v (30s) ==="; _TMO=30 _run "zpool status -v"
-    echo; echo "=== zpool events -v last 300 ==="; _TMO=30 _run "zpool events -v 2>/dev/null | tail -300"
-    echo; echo "=== zpool history -il (30s) ==="; _TMO=30 _run "zpool history -il 2>/dev/null | tail -200"
-    echo; echo "=== zfs list -t all (30s) ==="; _TMO=30 _run "zfs list -t all"
-    echo; echo "=== zfs mount ==="; _run "zfs mount 2>/dev/null | head -30"
-} > "$out_dir/zfs.txt"
+    echo "=== zfs version ==="
+    _run "zfs version 2>&1 | head -10"
+    echo
+    echo "=== zpool list (30s) ==="
+    _TMO=30 _run "zpool list"
+    echo
+    echo "=== zpool status -v (30s) ==="
+    _TMO=30 _run "zpool status -v"
+    echo
+    echo "=== zpool events -v last 300 ==="
+    _TMO=30 _run "zpool events -v 2>/dev/null | tail -300"
+    echo
+    echo "=== zpool history -il (30s) ==="
+    _TMO=30 _run "zpool history -il 2>/dev/null | tail -200"
+    echo
+    echo "=== zfs list -t all (30s) ==="
+    _TMO=30 _run "zfs list -t all"
+    echo
+    echo "=== zfs mount ==="
+    _run "zfs mount 2>/dev/null | head -30"
+} >"$out_dir/zfs.txt"
 
 _log "[$distro] zfs-get-all.txt"
-_TMO=30 _run "zfs get -p all 2>/dev/null" > "$out_dir/zfs-get-all.txt"
+_TMO=30 _run "zfs get -p all 2>/dev/null" >"$out_dir/zfs-get-all.txt"
 
 _log "[$distro] zpool iostat (15s sample, 3×5s)"
-_TMO=25 _run "zpool iostat -vyH 5 3 2>/dev/null" > "$out_dir/zpool-iostat.txt"
+_TMO=25 _run "zpool iostat -vyH 5 3 2>/dev/null" >"$out_dir/zpool-iostat.txt"
 
 _log "[$distro] zdb (per-pool)"
 # zdb -C is usually fast; zdb -h can be slow on big pools. Per-pool so if
@@ -145,12 +171,12 @@ done <<<"$_pools_raw"
         echo "raw zpool list output (for debugging the parse):"
         printf '%s\n' "$_pools_raw"
     }
-} > "$out_dir/zdb.txt" 2>&1
+} >"$out_dir/zdb.txt" 2>&1
 
 # ═════════════════════ KSTAT + TUNABLES ═════════════════════
 _log "[$distro] /sys/module/zfs/parameters/*"
 _TMO=10 _run "for f in /sys/module/zfs/parameters/*; do printf '%s=%s\n' \"\${f##*/}\" \"\$(cat \"\$f\" 2>/dev/null)\"; done | sort" \
-    > "$out_dir/zfs-tunables.txt"
+    >"$out_dir/zfs-tunables.txt"
 
 _log "[$distro] /proc/spl/kstat/zfs/*"
 # Capture every readable file — includes per-pool io/txgs/state subdirs.
@@ -159,22 +185,22 @@ _TMO=15 _run "find /proc/spl/kstat/zfs -type f 2>/dev/null | while read f; do
   echo '=== '\"\$f\"' ==='
   cat \"\$f\" 2>/dev/null
   echo
-done" > "$out_dir/kstat/all-kstats.txt"
+done" >"$out_dir/kstat/all-kstats.txt"
 # Also capture individual core files for convenience
 for f in arcstats dbgmsg dmu_tx dnodestats fletcher_4_bench vdev_cache_stats zfetchstats zil; do
-    _TMO=5 _run "cat /proc/spl/kstat/zfs/${f} 2>/dev/null" > "$out_dir/kstat/${f}" || true
+    _TMO=5 _run "cat /proc/spl/kstat/zfs/${f} 2>/dev/null" >"$out_dir/kstat/${f}" || true
 done
 # spl kmem allocator inventory (memory leak diagnosis)
-_TMO=5 _run "cat /proc/spl/kmem/slab 2>/dev/null" > "$out_dir/kstat/spl-slab.txt"
+_TMO=5 _run "cat /proc/spl/kmem/slab 2>/dev/null" >"$out_dir/kstat/spl-slab.txt"
 
 # ═════════════════════ KERNEL + LOGS ═════════════════════
 _log "[$distro] dmesg + journal"
-_TMO=15 _run "dmesg -T" > "$out_dir/dmesg.log"
-_TMO=30 _run "journalctl --no-pager --output=short-iso --since '3 hours ago'" > "$out_dir/journal.log"
+_TMO=15 _run "dmesg -T" >"$out_dir/dmesg.log"
+_TMO=30 _run "journalctl --no-pager --output=short-iso --since '3 hours ago'" >"$out_dir/journal.log"
 
 # ═════════════════════ PROCESSES + STACKS ═════════════════════
 _log "[$distro] processes.txt"
-_TMO=10 _run "ps -eLf --sort state" > "$out_dir/processes.txt"
+_TMO=10 _run "ps -eLf --sort state" >"$out_dir/processes.txt"
 
 _log "[$distro] D-state stacks"
 _dstate_pids="$(_TMO=10 _run "ps -eLo pid,stat,comm | awk '\$2 ~ /D/ {print \$1}' | sort -u | head -50")"
@@ -188,7 +214,7 @@ _dstate_pids="$(_TMO=10 _run "ps -eLo pid,stat,comm | awk '\$2 ~ /D/ {print \$1}
         _TMO=5 _run "cat /proc/$pid/comm 2>/dev/null; cat /proc/$pid/status 2>/dev/null | grep -E '^(State|Name|Pid|PPid|VmRSS|Threads|voluntary)'; echo '- stack -'; cat /proc/$pid/stack 2>/dev/null; echo; echo '- wchan -'; cat /proc/$pid/wchan 2>/dev/null; echo"
         echo
     done
-} > "$out_dir/stacks/d-state.txt"
+} >"$out_dir/stacks/d-state.txt"
 
 _log "[$distro] all-task kernel stacks"
 # Full stacks for every kernel-visible task. Cheap (sysrq-style) but
@@ -201,15 +227,21 @@ _TMO=30 _run "for s in /proc/*/stack; do
   printf '--- pid=%s state=%s comm=%s ---\n' \"\$pid\" \"\$state\" \"\$comm\"
   cat \"\$s\" 2>/dev/null
   echo
-done" > "$out_dir/stacks/all-tasks.txt"
+done" >"$out_dir/stacks/all-tasks.txt"
 
 # ═════════════════════ DISK LAYER ═════════════════════
 _log "[$distro] physical disks (lsblk + smart)"
 {
-    echo "=== lsblk -tf ==="; _run "lsblk -tf"
-    echo; echo "=== lsblk -O ==="; _TMO=10 _run "lsblk -O 2>/dev/null"
-    echo; echo "=== smartctl --scan-open ==="; _run "smartctl --scan-open 2>/dev/null || echo no-smartctl"
-    echo; echo "=== per-device SMART ==="
+    echo "=== lsblk -tf ==="
+    _run "lsblk -tf"
+    echo
+    echo "=== lsblk -O ==="
+    _TMO=10 _run "lsblk -O 2>/dev/null"
+    echo
+    echo "=== smartctl --scan-open ==="
+    _run "smartctl --scan-open 2>/dev/null || echo no-smartctl"
+    echo
+    echo "=== per-device SMART ==="
     # Iterate real block devices
     _disks=$(_TMO=5 _run "lsblk -dn -o NAME,TYPE 2>/dev/null | awk '\$2==\"disk\"{print \$1}'")
     for d in $_disks; do
@@ -223,27 +255,27 @@ _log "[$distro] physical disks (lsblk + smart)"
         fi
         echo
     done
-} > "$out_dir/disks.txt"
+} >"$out_dir/disks.txt"
 
 # ═════════════════════ PACKAGES + HOST-SIDE ═════════════════════
 _log "[$distro] packages.txt"
-_TMO=15 _run "rpm -qa 2>/dev/null | sort" > "$out_dir/packages.txt"
+_TMO=15 _run "rpm -qa 2>/dev/null | sort" >"$out_dir/packages.txt"
 if [[ ! -s "$out_dir/packages.txt" ]] || grep -q timeout "$out_dir/packages.txt"; then
-    _TMO=15 _run "dpkg -l 2>/dev/null | awk '/^ii/ {print \$2\"=\"\$3}' | sort" > "$out_dir/packages.txt"
+    _TMO=15 _run "dpkg -l 2>/dev/null | awk '/^ii/ {print \$2\"=\"\$3}' | sort" >"$out_dir/packages.txt"
 fi
 
 _log "[$distro] copying host-side files"
-[[ -f "${run_dir}/${distro}.log" ]]     && cp "${run_dir}/${distro}.log"     "$out_dir/test.log"
-[[ -f "${run_dir}/${distro}.env" ]]     && cp "${run_dir}/${distro}.env"     "$out_dir/host-attestation.txt"
-[[ -f "${run_dir}/${distro}.zpool" ]]   && cp "${run_dir}/${distro}.zpool"   "$out_dir/host-zpool.txt"
-[[ -f "${run_dir}/${distro}.status" ]]  && cp "${run_dir}/${distro}.status"  "$out_dir/host-status.txt"
+[[ -f "${run_dir}/${distro}.log" ]] && cp "${run_dir}/${distro}.log" "$out_dir/test.log"
+[[ -f "${run_dir}/${distro}.env" ]] && cp "${run_dir}/${distro}.env" "$out_dir/host-attestation.txt"
+[[ -f "${run_dir}/${distro}.zpool" ]] && cp "${run_dir}/${distro}.zpool" "$out_dir/host-zpool.txt"
+[[ -f "${run_dir}/${distro}.status" ]] && cp "${run_dir}/${distro}.status" "$out_dir/host-status.txt"
 [[ -f "${run_dir}/${distro}.summary" ]] && cp "${run_dir}/${distro}.summary" "$out_dir/host-summary.txt"
 
 # ═════════════════════ TIER-2 (--deep) ═════════════════════
 if [[ $DEEP -eq 1 ]]; then
     _log "[$distro] deep: 30s perf record (if perf available)"
     _TMO=40 _run "command -v perf >/dev/null && perf record -o /tmp/perf.data -F 99 -a -g sleep 30 && perf script -i /tmp/perf.data 2>/dev/null | head -10000 || echo 'no perf on VM'" \
-        > "$out_dir/perf-script.txt"
+        >"$out_dir/perf-script.txt"
 
     _log "[$distro] deep: zfs:* tracepoints 30s"
     _TMO=40 _run "
@@ -254,12 +286,15 @@ if [[ $DEEP -eq 1 ]]; then
       else
         echo 'zfs tracepoints not available (kernel built without CONFIG_TRACEPOINTS?)'
       fi
-    " > "$out_dir/trace/zfs-events.txt"
+    " >"$out_dir/trace/zfs-events.txt"
 fi
 
 # ═════════════════════ META + ISSUE TEMPLATE ═════════════════════
 _log "[$distro] meta.json + ISSUE.md"
-_kernel="$(head -1 "$out_dir/env.txt" 2>/dev/null; _TMO=5 _run 'uname -r' | head -1)"
+_kernel="$(
+    head -1 "$out_dir/env.txt" 2>/dev/null
+    _TMO=5 _run 'uname -r' | head -1
+)"
 _kernel="$(_TMO=5 _run 'uname -r' | head -1 | tr -d '\n')"
 _zfsv="$(grep -A1 '=== zfs version ===' "$out_dir/zfs.txt" | head -2 | tail -1 | tr -d '\n')"
 _ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -270,7 +305,7 @@ _pass_count="$(grep -c '\[PASS\]' "$out_dir/test.log" 2>/dev/null || echo 0)"
 _last_test="$(tac "$out_dir/test.log" 2>/dev/null | grep -m1 '/functional/' | sed -E 's|.*/functional/([^ ]+).*|\1|' || echo unknown)"
 _status="$(cat "$out_dir/host-status.txt" 2>/dev/null || echo unknown)"
 
-cat > "$out_dir/meta.json" <<META
+cat >"$out_dir/meta.json" <<META
 {
   "distro": "${distro}",
   "run_id": "${run_id}",
@@ -292,7 +327,7 @@ META
 
 # OpenZFS GitHub issue template — paste into
 # https://github.com/openzfs/zfs/issues/new
-cat > "$out_dir/ISSUE.md" <<ISSUE
+cat >"$out_dir/ISSUE.md" <<ISSUE
 <!-- Generated by klab-vm-debug-bundle — paste into OpenZFS issue tracker.
      Attach the full bundle: ${out_tgz} -->
 

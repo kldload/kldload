@@ -9,77 +9,78 @@ cmd="${1:-help}"
 shift 2>/dev/null || true
 
 _snap() {
-  if command -v zfs &>/dev/null && zpool list &>/dev/null 2>&1; then
-    local ds
-    ds=$(mount | awk '$3=="/" && /zfs/{print $1}')
-    [[ -n "$ds" ]] && zfs snapshot "${ds}@kpkg-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
-  fi
+    if command -v zfs &>/dev/null && zpool list &>/dev/null 2>&1; then
+        local ds
+        ds=$(mount | awk '$3=="/" && /zfs/{print $1}')
+        [[ -n "$ds" ]] && zfs snapshot "${ds}@kpkg-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    fi
 }
 
 if command -v pacman &>/dev/null; then
-  PKG=pacman
+    PKG=pacman
 elif command -v dnf &>/dev/null; then
-  PKG=dnf
+    PKG=dnf
 elif command -v apt-get &>/dev/null; then
-  PKG=apt-get
+    PKG=apt-get
 else
-  echo "No package manager found" >&2; exit 1
+    echo "No package manager found" >&2
+    exit 1
 fi
 
 case "$cmd" in
-  install)
+install)
     _snap
     case "$PKG" in
-      pacman)  sudo pacman -S --noconfirm "$@" ;;
-      dnf)     sudo dnf install -y "$@" ;;
-      apt-get) sudo apt-get install -y "$@" ;;
+    pacman) sudo pacman -S --noconfirm "$@" ;;
+    dnf) sudo dnf install -y "$@" ;;
+    apt-get) sudo apt-get install -y "$@" ;;
     esac
     ;;
-  remove)
+remove)
     _snap
     case "$PKG" in
-      pacman)  sudo pacman -R --noconfirm "$@" ;;
-      dnf)     sudo dnf remove -y "$@" ;;
-      apt-get) sudo apt-get remove -y "$@" ;;
+    pacman) sudo pacman -R --noconfirm "$@" ;;
+    dnf) sudo dnf remove -y "$@" ;;
+    apt-get) sudo apt-get remove -y "$@" ;;
     esac
     ;;
-  update)
+update)
     case "$PKG" in
-      pacman)  sudo pacman -Sy ;;
-      dnf)     sudo dnf check-update "$@" || true ;;
-      apt-get) sudo apt-get update "$@" ;;
+    pacman) sudo pacman -Sy ;;
+    dnf) sudo dnf check-update "$@" || true ;;
+    apt-get) sudo apt-get update "$@" ;;
     esac
     ;;
-  upgrade)
+upgrade)
     _snap
     case "$PKG" in
-      pacman)  sudo pacman -Syu --noconfirm "$@" ;;
-      dnf)     sudo dnf upgrade -y "$@" ;;
-      apt-get) sudo apt-get dist-upgrade -y "$@" ;;
+    pacman) sudo pacman -Syu --noconfirm "$@" ;;
+    dnf) sudo dnf upgrade -y "$@" ;;
+    apt-get) sudo apt-get dist-upgrade -y "$@" ;;
     esac
     ;;
-  search)
+search)
     case "$PKG" in
-      pacman)  pacman -Ss "$@" ;;
-      dnf)     dnf search "$@" ;;
-      apt-get) apt-cache search "$@" ;;
+    pacman) pacman -Ss "$@" ;;
+    dnf) dnf search "$@" ;;
+    apt-get) apt-cache search "$@" ;;
     esac
     ;;
-  list)
+list)
     case "$PKG" in
-      pacman)  pacman -Q "$@" ;;
-      dnf)     rpm -qa "$@" | sort ;;
-      apt-get) dpkg -l "$@" ;;
+    pacman) pacman -Q "$@" ;;
+    dnf) rpm -qa "$@" | sort ;;
+    apt-get) dpkg -l "$@" ;;
     esac
     ;;
-  info)
+info)
     case "$PKG" in
-      pacman)  pacman -Qi "$@" 2>/dev/null || pacman -Si "$@" ;;
-      dnf)     dnf info "$@" ;;
-      apt-get) apt-cache show "$@" ;;
+    pacman) pacman -Qi "$@" 2>/dev/null || pacman -Si "$@" ;;
+    dnf) dnf info "$@" ;;
+    apt-get) apt-cache show "$@" ;;
     esac
     ;;
-  help|*)
+help | *)
     echo "kpkg — universal package manager (auto-detects apt/dnf/pacman)"
     echo ""
     echo "  kpkg install <pkg>    Install a package (ZFS snapshot first)"

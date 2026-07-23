@@ -36,7 +36,7 @@ if ! command -v dkms >/dev/null 2>&1; then
     exit 0
 fi
 
-if dkms autoinstall -k "${KVER}" >> "${LOG}" 2>&1; then
+if dkms autoinstall -k "${KVER}" >>"${LOG}" 2>&1; then
     log "ZFS DKMS rebuild succeeded for ${KVER}"
 else
     log "WARNING: ZFS DKMS rebuild FAILED for ${KVER}"
@@ -72,15 +72,15 @@ log "Re-signing ZFS modules for ${KVER} with MOK key"
 signed=0
 failed=0
 while IFS= read -r ko; do
-    if "${SIGN_HELPER}" "${KVER}" "${ko}" >> "${LOG}" 2>&1; then
-        (( signed++ )) || true
+    if "${SIGN_HELPER}" "${KVER}" "${ko}" >>"${LOG}" 2>&1; then
+        ((signed++)) || true
     else
-        (( failed++ )) || true
+        ((failed++)) || true
         log "WARNING: failed to sign ${ko}"
     fi
 done < <(find "/lib/modules/${KVER}" \
-              -name '*.ko' -o -name '*.ko.gz' -o -name '*.ko.zst' \
-              2>/dev/null | grep -i zfs || true)
+    -name '*.ko' -o -name '*.ko.gz' -o -name '*.ko.zst' \
+    2>/dev/null | grep -i zfs || true)
 
 log "Signing complete: ${signed} signed, ${failed} failed"
 exit 0

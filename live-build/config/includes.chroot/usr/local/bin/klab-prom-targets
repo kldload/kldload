@@ -20,7 +20,7 @@ mkdir -p "$TARGETS_DIR"
 write_json() {
     local file="$1" content="$2"
     # Atomic write — Prometheus' file_sd can read mid-write otherwise.
-    printf '%s\n' "$content" > "${file}.tmp"
+    printf '%s\n' "$content" >"${file}.tmp"
     mv -f "${file}.tmp" "$file"
 }
 
@@ -47,7 +47,9 @@ fi
 blue_json='['
 green_json='['
 kspawn_json='['
-_first_blue=1; _first_green=1; _first_kspawn=1
+_first_blue=1
+_first_green=1
+_first_kspawn=1
 add() {
     local var="$1" ip="$2" name="$3" site="$4" distro="$5" cluster="${6:-}"
     local entry
@@ -55,9 +57,18 @@ add() {
         "$ip" "$site" "$distro" "$name" \
         "${cluster:+,\"cluster\":\"${cluster}\"}")
     case "$var" in
-        blue)   [[ $_first_blue   -eq 1 ]] && _first_blue=0   || blue_json="${blue_json},"   ; blue_json="${blue_json}${entry}" ;;
-        green)  [[ $_first_green  -eq 1 ]] && _first_green=0  || green_json="${green_json},"  ; green_json="${green_json}${entry}" ;;
-        kspawn) [[ $_first_kspawn -eq 1 ]] && _first_kspawn=0 || kspawn_json="${kspawn_json},"; kspawn_json="${kspawn_json}${entry}" ;;
+    blue)
+        [[ $_first_blue -eq 1 ]] && _first_blue=0 || blue_json="${blue_json},"
+        blue_json="${blue_json}${entry}"
+        ;;
+    green)
+        [[ $_first_green -eq 1 ]] && _first_green=0 || green_json="${green_json},"
+        green_json="${green_json}${entry}"
+        ;;
+    kspawn)
+        [[ $_first_kspawn -eq 1 ]] && _first_kspawn=0 || kspawn_json="${kspawn_json},"
+        kspawn_json="${kspawn_json}${entry}"
+        ;;
     esac
 }
 
@@ -66,20 +77,20 @@ if command -v virsh >/dev/null 2>&1; then
         ip="${DHCP[$vm]:-}"
         [[ -z "$ip" ]] && continue
         case "$vm" in
-            klab-blue-*)   add blue   "$ip" "$vm" "blue"  "${vm#klab-blue-}"   ;;
-            klab-green-*)  add green  "$ip" "$vm" "green" "${vm#klab-green-}"  ;;
-            kspawn-*)
-                # kspawn-<cluster>-NN
-                rest="${vm#kspawn-}"
-                cluster="${rest%-*}"
-                add kspawn "$ip" "$vm" "kspawn" "-" "$cluster"
-                ;;
+        klab-blue-*) add blue "$ip" "$vm" "blue" "${vm#klab-blue-}" ;;
+        klab-green-*) add green "$ip" "$vm" "green" "${vm#klab-green-}" ;;
+        kspawn-*)
+            # kspawn-<cluster>-NN
+            rest="${vm#kspawn-}"
+            cluster="${rest%-*}"
+            add kspawn "$ip" "$vm" "kspawn" "-" "$cluster"
+            ;;
         esac
     done
 fi
 
-write_json "${TARGETS_DIR}/klab-blue.json"   "${blue_json}]"
-write_json "${TARGETS_DIR}/klab-green.json"  "${green_json}]"
+write_json "${TARGETS_DIR}/klab-blue.json" "${blue_json}]"
+write_json "${TARGETS_DIR}/klab-green.json" "${green_json}]"
 write_json "${TARGETS_DIR}/klab-kspawn.json" "${kspawn_json}]"
 
 # ── Kubernetes cluster targets (cilium/hubble/tetragon/kubelet) ────────
@@ -97,15 +108,22 @@ if command -v kubectl >/dev/null 2>&1 && [[ -r /root/.kube/config || -n "${KUBEC
     # leaves 3 of 4 targets permanently DOWN and the Grafana dashboard
     # looks empty on every panel that aggregates across targets.
     _operator_node="$(kubectl -n kube-system get pod -l io.cilium/app=operator -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null)"
-    cilium_agent='['    ; _first_ca=1
-    cilium_operator='['; _first_co=1
-    hubble='['         ; _first_hb=1
-    tetragon='['       ; _first_tg=1
-    kubelet='['        ; _first_kl=1
+    cilium_agent='['
+    _first_ca=1
+    cilium_operator='['
+    _first_co=1
+    hubble='['
+    _first_hb=1
+    tetragon='['
+    _first_tg=1
+    kubelet='['
+    _first_kl=1
     _append() {
         local varname="$1" first_var="$2" entry="$3"
-        local cur; cur="$(eval "printf '%s' \"\$${varname}\"")"
-        local f; f="$(eval "printf '%s' \"\$${first_var}\"")"
+        local cur
+        cur="$(eval "printf '%s' \"\$${varname}\"")"
+        local f
+        f="$(eval "printf '%s' \"\$${first_var}\"")"
         if [[ "$f" == "1" ]]; then
             eval "${first_var}=0"
             eval "${varname}=\"\${cur}\${entry}\""
@@ -116,7 +134,7 @@ if command -v kubectl >/dev/null 2>&1 && [[ -r /root/.kube/config || -n "${KUBEC
     while IFS=, read -r name ip; do
         [[ -z "$name" || -z "$ip" ]] && continue
         # cilium-agent
-        _append cilium_agent    _first_ca "$(printf '{"targets":["%s:9962"],"labels":{"k8s_app":"cilium","pod":"cilium-%s","node":"%s"}}' "$ip" "$name" "$name")"
+        _append cilium_agent _first_ca "$(printf '{"targets":["%s:9962"],"labels":{"k8s_app":"cilium","pod":"cilium-%s","node":"%s"}}' "$ip" "$name" "$name")"
         # cilium-operator — emit only for the node the operator pod is
         # scheduled on. Fall back to every node if kubectl couldn't tell
         # us (early boot) so a freshly bootstrapped cluster still shows
@@ -125,17 +143,17 @@ if command -v kubectl >/dev/null 2>&1 && [[ -r /root/.kube/config || -n "${KUBEC
             _append cilium_operator _first_co "$(printf '{"targets":["%s:9963"],"labels":{"k8s_app":"cilium-operator","io_cilium_app":"operator","node":"%s"}}' "$ip" "$name")"
         fi
         # hubble metrics
-        _append hubble          _first_hb "$(printf '{"targets":["%s:9965"],"labels":{"k8s_app":"cilium","pod":"cilium-%s","node":"%s"}}' "$ip" "$name" "$name")"
+        _append hubble _first_hb "$(printf '{"targets":["%s:9965"],"labels":{"k8s_app":"cilium","pod":"cilium-%s","node":"%s"}}' "$ip" "$name" "$name")"
         # tetragon
-        _append tetragon        _first_tg "$(printf '{"targets":["%s:2112"],"labels":{"pod":"tetragon-%s","node":"%s"}}' "$ip" "$name" "$name")"
+        _append tetragon _first_tg "$(printf '{"targets":["%s:2112"],"labels":{"pod":"tetragon-%s","node":"%s"}}' "$ip" "$name" "$name")"
         # kubelet (HTTPS:10250)
-        _append kubelet         _first_kl "$(printf '{"targets":["%s:10250"],"labels":{"node":"%s"}}' "$ip" "$name")"
+        _append kubelet _first_kl "$(printf '{"targets":["%s:10250"],"labels":{"node":"%s"}}' "$ip" "$name")"
     done <<<"$_nodes_raw"
-    write_json "${TARGETS_DIR}/cilium-agent.json"    "${cilium_agent}]"
+    write_json "${TARGETS_DIR}/cilium-agent.json" "${cilium_agent}]"
     write_json "${TARGETS_DIR}/cilium-operator.json" "${cilium_operator}]"
-    write_json "${TARGETS_DIR}/hubble-metrics.json"  "${hubble}]"
-    write_json "${TARGETS_DIR}/tetragon.json"        "${tetragon}]"
-    write_json "${TARGETS_DIR}/kubelet.json"         "${kubelet}]"
+    write_json "${TARGETS_DIR}/hubble-metrics.json" "${hubble}]"
+    write_json "${TARGETS_DIR}/tetragon.json" "${tetragon}]"
+    write_json "${TARGETS_DIR}/kubelet.json" "${kubelet}]"
 else
     # No cluster yet — empty target sets. Prometheus stops complaining
     # about the missing file_sd files, and starts scraping as soon as

@@ -6,7 +6,7 @@ set -euo pipefail
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 usage() {
-  cat <<EOF
+    cat <<EOF
 Usage: kvm-snap <vm-name> [action]
 
 Actions:
@@ -22,49 +22,51 @@ Examples:
   kvm-snap myvm rollback           # rollback to latest
   kvm-snap myvm delete @2026-03-30
 EOF
-  exit 1
+    exit 1
 }
 
 [[ $# -lt 1 ]] && usage
-NAME="$1"; shift
-ACTION="${1:-snap}"; shift 2>/dev/null || true
+NAME="$1"
+shift
+ACTION="${1:-snap}"
+shift 2>/dev/null || true
 
 ZVOL="rpool/vms/${NAME}"
 
 # Verify zvol exists
 if ! zfs list "${ZVOL}" >/dev/null 2>&1; then
-  echo "Error: VM zvol '${ZVOL}' not found"
-  exit 1
+    echo "Error: VM zvol '${ZVOL}' not found"
+    exit 1
 fi
 
 case "$ACTION" in
-  snap|create)
+snap | create)
     SNAP="${ZVOL}@$(date +%Y-%m-%d_%H%M%S)"
     # Stop VM briefly for consistent snapshot (optional)
     STATE=$(virsh domstate "${NAME}" 2>/dev/null || echo "unknown")
     if [[ "$STATE" == "running" ]]; then
-      echo "Pausing VM for consistent snapshot..."
-      virsh suspend "${NAME}" 2>/dev/null || true
+        echo "Pausing VM for consistent snapshot..."
+        virsh suspend "${NAME}" 2>/dev/null || true
     fi
     zfs snapshot "${SNAP}"
     if [[ "$STATE" == "running" ]]; then
-      virsh resume "${NAME}" 2>/dev/null || true
+        virsh resume "${NAME}" 2>/dev/null || true
     fi
     echo "✔ Snapshot: ${SNAP}"
     ;;
-  list|ls)
+list | ls)
     echo "Snapshots for ${NAME}:"
     zfs list -t snapshot -o name,creation,used -r "${ZVOL}" 2>/dev/null || echo "  (none)"
     ;;
-  rollback)
+rollback)
     SNAP="${1:-}"
     if [[ -z "$SNAP" ]]; then
-      # Get most recent snapshot
-      SNAP=$(zfs list -t snapshot -o name -r "${ZVOL}" -S creation 2>/dev/null | head -2 | tail -1)
+        # Get most recent snapshot
+        SNAP=$(zfs list -t snapshot -o name -r "${ZVOL}" -S creation 2>/dev/null | head -2 | tail -1)
     fi
     if [[ -z "$SNAP" || "$SNAP" == "NAME" ]]; then
-      echo "No snapshots found for ${NAME}"
-      exit 1
+        echo "No snapshots found for ${NAME}"
+        exit 1
     fi
     echo "Rolling back to: ${SNAP}"
     virsh destroy "${NAME}" 2>/dev/null || true
@@ -72,13 +74,13 @@ case "$ACTION" in
     virsh start "${NAME}" 2>/dev/null || true
     echo "✔ Rolled back to ${SNAP}"
     ;;
-  delete|rm)
+delete | rm)
     SNAP="${1:?Usage: kvm-snap $NAME delete <snapshot>}"
     [[ "$SNAP" != *@* ]] && SNAP="${ZVOL}@${SNAP}"
     zfs destroy "${SNAP}"
     echo "✔ Deleted: ${SNAP}"
     ;;
-  *)
+*)
     usage
     ;;
 esac

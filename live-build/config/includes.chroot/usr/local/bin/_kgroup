@@ -81,7 +81,7 @@ kernel-stress)
     # was *labeled* as but never delivered (F9 is plain htop).
     WINDOWS=(psi runqlat softirqs hardirqs bpf-prog)
     ;;
-""|--help|-h)
+"" | --help | -h)
     cat <<EOF
 _kgroup <name> — themed mini-cockpit toggle
 Groups: disk syscall tcp cilium top zfs tracing bandwidth
@@ -106,7 +106,7 @@ if [[ ${#existing[@]} -gt 0 ]]; then
     done
     # Land back on the klab home window if it's still around so the
     # operator isn't dumped onto a window they didn't choose.
-    tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx klab && \
+    tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx klab &&
         tmux select-window -t "${SESSION}:=klab"
     exit 0
 fi
@@ -116,7 +116,8 @@ fi
 # apostrophes/em-dashes/quotes inside descriptions safe through tmux's
 # sh -c expansion. Remaining positional args pass through as tool flags.
 spawn_bcc() {
-    local name="$1" tool="$2" desc="$3" hint="$4"; shift 4
+    local name="$1" tool="$2" desc="$3" hint="$4"
+    shift 4
     tmux new-window -t "$SESSION" -n "$name" -d \
         "_kbcc-pane $tool $(printf '%q ' "$desc" "$hint" "$@")"
 }
@@ -154,7 +155,7 @@ disk)
     # zfsdist is a bpftrace script, not a stock bcc tool. Reuse the same
     # script-on-disk approach _kebpf-io uses so behaviour matches there.
     mkdir -p /run/kldload
-    cat > /run/kldload/zfsdist.bt <<'BT'
+    cat >/run/kldload/zfsdist.bt <<'BT'
 kprobe:zfs_read,kprobe:zfs_write { @start[tid] = nsecs; }
 kretprobe:zfs_read /@start[tid]/ { @us["zfs_read"]  = hist((nsecs - @start[tid])/1000); delete(@start[tid]); }
 kretprobe:zfs_write /@start[tid]/ { @us["zfs_write"] = hist((nsecs - @start[tid])/1000); delete(@start[tid]); }
@@ -162,9 +163,9 @@ interval:s:5 { print(@us); clear(@us); }
 BT
     tmux new-window -t "$SESSION" -n zfsdist -d "_kbcc-pane bpftrace \
         $(printf '%q ' \
-            'ZFS per-call latency histogram in microseconds, refreshed every 5s.' \
-            'Most heat in 4-32µs on healthy NVMe. Right-shift = scrub or txg pressure.' \
-            -f text /run/kldload/zfsdist.bt)"
+        'ZFS per-call latency histogram in microseconds, refreshed every 5s.' \
+        'Most heat in 4-32µs on healthy NVMe. Right-shift = scrub or txg pressure.' \
+        -f text /run/kldload/zfsdist.bt)"
     tmux select-window -t "${SESSION}:=biosnoop"
     ;;
 

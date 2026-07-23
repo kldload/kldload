@@ -237,58 +237,72 @@ for ds in debian ubuntu; do
     fi
 done
 
-# ── Key scripts syntax check ─────────────────────────────────────────────────
+# ── Shell-script inventory ───────────────────────────────────────────────────
+# Enumerate every tracked shell script by SHEBANG, not extension: most shipped
+# tools (usr/local/bin/*, usr/sbin/kldload-*, live hooks) are extensionless,
+# so a '*.sh' glob misses ~120 of them. HISTORY: the extension-based gates let
+# 122 shfmt-drifted files and 5 shellcheck-error files ship unchecked until
+# the 2026-07 audit. git ls-files also keeps untracked caches/darksite output
+# out of the sweep without a -not -path list.
 _section "Script Syntax"
 
-for script in kube-cluster kube-init kube-setup kube-demo kzfs-lab kvm-demo kvm-clone; do
-    FILE=$(find "$ROOT/live-build/config/includes.chroot" -name "$script" -type f 2>/dev/null | head -1)
-    if [[ -n "$FILE" ]]; then
-        if bash -n "$FILE" 2>/dev/null; then
-            _pass "$script syntax OK"
-        else
-            _fail "$script syntax" "bash -n failed"
+SHELL_SCRIPTS=()
+if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    while IFS= read -r -d '' f; do
+        [[ -f "$ROOT/$f" ]] || continue # tracked but deleted in worktree
+        if head -c 80 "$ROOT/$f" 2>/dev/null | head -n 1 |
+            grep -qE '^#!.*(bash|/bin/sh)'; then
+            SHELL_SCRIPTS+=("$f")
         fi
-    fi
-done
-
-# ── Shellcheck (if available) ────────────────────────────────────────────────
-if command -v shellcheck >/dev/null 2>&1; then
-    _section "Shellcheck"
-    for script in kube-cluster kube-init kube-setup kzfs-lab profiles.sh build-iso.sh; do
-        FILE=$(find "$ROOT" -name "$script" -not -path "*cache*" -not -path "*.git*" -type f 2>/dev/null | head -1)
-        if [[ -n "$FILE" ]]; then
-            ERRORS=$(shellcheck -S error "$FILE" 2>&1 | grep -c "SC[0-9]" || true)
-            if [[ "$ERRORS" -eq 0 ]]; then
-                _pass "$script shellcheck clean"
-            else
-                _fail "$script shellcheck" "$ERRORS errors"
-            fi
-        fi
-    done
-else
-    _warn "Shellcheck" "not installed — install ShellCheck (dnf/apt)"
+    done < <(git -C "$ROOT" ls-files -z)
 fi
 
-# ── shfmt drift (style enforcement, if available) ────────────────────────────
-# Every tracked *.sh + ci/kldload-ci-run must match `shfmt -i 4`. After the
-# 2026 bulk-reformat this is the gate that keeps the codebase from drifting.
-if command -v shfmt >/dev/null 2>&1; then
-    _section "shfmt drift"
-    DRIFT=$(cd "$ROOT" && find . -type f \( -name '*.sh' -o -path './ci/kldload-ci-run' \) \
-        -not -path './.git/*' \
-        -not -path './live-build/*' \
-        -not -path './build/darksite-*/output/*' \
-        -not -path './builder/.cache/*' \
-        -print0 | xargs -0 shfmt -l -i 4 2>/dev/null)
-    if [[ -z "$DRIFT" ]]; then
-        _pass "all shell scripts shfmt-clean"
-    else
-        while IFS= read -r f; do
-            _fail "$f" "needs 'shfmt -w -i 4'"
-        done <<<"$DRIFT"
-    fi
+if [[ ${#SHELL_SCRIPTS[@]} -eq 0 ]]; then
+    _fail "script inventory" "git ls-files found no shell scripts under $ROOT — gates below did not run"
 else
-    _warn "shfmt" "not installed — install shfmt (github.com/mvdan/sh releases)"
+    SYNTAX_BAD=0
+    for f in "${SHELL_SCRIPTS[@]}"; do
+        if ! bash -n "$ROOT/$f" 2>/dev/null; then
+            _fail "$f syntax" "bash -n failed"
+            SYNTAX_BAD=1
+        fi
+    done
+    [[ $SYNTAX_BAD -eq 0 ]] && _pass "all ${#SHELL_SCRIPTS[@]} shell scripts bash -n clean"
+
+    # ── Shellcheck (if available) ────────────────────────────────────────────
+    # -S error only: the baseline is error-clean; warnings stay advisory.
+    if command -v shellcheck >/dev/null 2>&1; then
+        _section "Shellcheck"
+        SC_OUT=$(cd "$ROOT" && printf '%s\0' "${SHELL_SCRIPTS[@]}" |
+            xargs -0 shellcheck -S error 2>&1) || true
+        if [[ -z "$SC_OUT" ]]; then
+            _pass "all ${#SHELL_SCRIPTS[@]} shell scripts shellcheck -S error clean"
+        else
+            while IFS= read -r f; do
+                _fail "$f shellcheck" "run: shellcheck -S error $f"
+            done < <(awk '/^In /{print $2}' <<<"$SC_OUT" | sort -u)
+        fi
+    else
+        _warn "Shellcheck" "not installed — install ShellCheck (dnf/apt)"
+    fi
+
+    # ── shfmt drift (style enforcement, if available) ────────────────────────
+    # Every tracked shell script must match `shfmt -i 4`. After the 2026
+    # bulk-reformats this is the gate that keeps the codebase from drifting.
+    if command -v shfmt >/dev/null 2>&1; then
+        _section "shfmt drift"
+        DRIFT=$(cd "$ROOT" && printf '%s\0' "${SHELL_SCRIPTS[@]}" |
+            xargs -0 shfmt -l -i 4 2>&1) || true
+        if [[ -z "$DRIFT" ]]; then
+            _pass "all ${#SHELL_SCRIPTS[@]} shell scripts shfmt-clean"
+        else
+            while IFS= read -r f; do
+                _fail "$f" "needs 'shfmt -w -i 4'"
+            done <<<"$DRIFT"
+        fi
+    else
+        _warn "shfmt" "not installed — install shfmt (github.com/mvdan/sh releases)"
+    fi
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────

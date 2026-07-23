@@ -23,10 +23,10 @@
 set -euo pipefail
 
 # ── Config ───────────────────────────────────────────────────────────────────
-POOL="${KVMWIN_POOL:-rpool/vms}"                 # ZFS parent for golden + VM zvols
+POOL="${KVMWIN_POOL:-rpool/vms}" # ZFS parent for golden + VM zvols
 ISO_DIR="${KVMWIN_ISO_DIR:-/var/lib/libvirt/isos}"
-WORK="${KVMWIN_WORK:-/var/lib/kldload/kvm-win}"  # autounattend/seed scratch
-NET="${KVMWIN_NET:-default}"                     # libvirt network (192.168.122.0/24)
+WORK="${KVMWIN_WORK:-/var/lib/kldload/kvm-win}" # autounattend/seed scratch
+NET="${KVMWIN_NET:-default}"                    # libvirt network (192.168.122.0/24)
 MIDO_URL="https://raw.githubusercontent.com/ElliotKillick/Mido/26f5da92ba9b54cf3eb6a2c8b3a73c8350fbf513/Mido.sh"
 VIRTIO_URL="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
 
@@ -34,76 +34,109 @@ VIRTIO_URL="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/sta
 # eval product key (KMS client key — lets autounattend pick the edition without
 # prompting), Mido identifier, sensible RAM/disk floors.
 declare -A EDITION KEY MIDO RAM DISK OSVAR
-EDITION[win11]="Windows 11 Enterprise Evaluation"; KEY[win11]="NPPR9-FWDCX-D2C8J-H872K-2YT43"; MIDO[win11]="win11"; RAM[win11]=6144; DISK[win11]=64; OSVAR[win11]="win11"
-EDITION[server]="Windows Server 2022 Standard Evaluation (Desktop Experience)"; KEY[server]="VDYBN-27WPP-V4HQT-9VMD4-VMK7H"; MIDO[server]="win2022"; RAM[server]=8192; DISK[server]=80; OSVAR[server]="win2k22"
+EDITION[win11]="Windows 11 Enterprise Evaluation"
+KEY[win11]="NPPR9-FWDCX-D2C8J-H872K-2YT43"
+MIDO[win11]="win11"
+RAM[win11]=6144
+DISK[win11]=64
+OSVAR[win11]="win11"
+EDITION[server]="Windows Server 2022 Standard Evaluation (Desktop Experience)"
+KEY[server]="VDYBN-27WPP-V4HQT-9VMD4-VMK7H"
+MIDO[server]="win2022"
+RAM[server]=8192
+DISK[server]=80
+OSVAR[server]="win2k22"
 
 _c() { [[ -t 1 ]] && printf '\033[%sm' "$1" || true; }
-log()  { echo -e "$(_c '0;36')[kvm-win]$(_c 0) $*"; }
-ok()   { echo -e "  $(_c '1;32')✔$(_c 0) $*"; }
+log() { echo -e "$(_c '0;36')[kvm-win]$(_c 0) $*"; }
+ok() { echo -e "  $(_c '1;32')✔$(_c 0) $*"; }
 warn() { echo -e "  $(_c '1;33')!$(_c 0) $*" >&2; }
-die()  { echo -e "$(_c '0;31')[kvm-win] error:$(_c 0) $*" >&2; exit 1; }
+die() {
+    echo -e "$(_c '0;31')[kvm-win] error:$(_c 0) $*" >&2
+    exit 1
+}
 
 _validate_os() { [[ -n "${EDITION[$1]:-}" ]] || die "unknown --os '$1' (use: win11 | server)"; }
 
 # ── Prereqs ──────────────────────────────────────────────────────────────────
-OVMF_CODE=""; OVMF_VARS=""
+OVMF_CODE=""
+OVMF_VARS=""
 _find_ovmf() {
-  local c v
-  for c in /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd /usr/share/OVMF/OVMF_CODE.secboot.fd /usr/share/OVMF/OVMF_CODE_4M.secboot.fd; do
-    [[ -f "$c" ]] && { OVMF_CODE="$c"; break; }
-  done
-  for v in /usr/share/edk2/ovmf/OVMF_VARS.secboot.fd /usr/share/OVMF/OVMF_VARS.secboot.fd /usr/share/edk2/ovmf/OVMF_VARS.fd /usr/share/OVMF/OVMF_VARS_4M.fd; do
-    [[ -f "$v" ]] && { OVMF_VARS="$v"; break; }
-  done
+    local c v
+    for c in /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd /usr/share/OVMF/OVMF_CODE.secboot.fd /usr/share/OVMF/OVMF_CODE_4M.secboot.fd; do
+        [[ -f "$c" ]] && {
+            OVMF_CODE="$c"
+            break
+        }
+    done
+    for v in /usr/share/edk2/ovmf/OVMF_VARS.secboot.fd /usr/share/OVMF/OVMF_VARS.secboot.fd /usr/share/edk2/ovmf/OVMF_VARS.fd /usr/share/OVMF/OVMF_VARS_4M.fd; do
+        [[ -f "$v" ]] && {
+            OVMF_VARS="$v"
+            break
+        }
+    done
 }
 
 _iso_tool() { command -v genisoimage >/dev/null 2>&1 && echo genisoimage || echo mkisofs; }
 
 check_prereqs() {
-  local missing=()
-  for b in virt-install virsh qemu-img zfs swtpm curl; do command -v "$b" >/dev/null 2>&1 || missing+=("$b"); done
-  command -v genisoimage >/dev/null 2>&1 || command -v mkisofs >/dev/null 2>&1 || missing+=("genisoimage/mkisofs")
-  [[ ${#missing[@]} -eq 0 ]] || die "missing tools: ${missing[*]}"
-  _find_ovmf
-  [[ -n "$OVMF_CODE" ]] || die "OVMF Secure Boot firmware not found (need edk2-ovmf)"
-  zpool list -Ho name "${POOL%%/*}" >/dev/null 2>&1 || die "ZFS pool '${POOL%%/*}' not found"
-  virsh net-info "$NET" >/dev/null 2>&1 || die "libvirt network '$NET' not found"
-  [[ "$(virsh net-info "$NET" 2>/dev/null | awk '/Active/{print $2}')" == "yes" ]] || virsh net-start "$NET" >/dev/null 2>&1 || true
-  mkdir -p "$ISO_DIR" "$WORK"
+    local missing=()
+    for b in virt-install virsh qemu-img zfs swtpm curl; do command -v "$b" >/dev/null 2>&1 || missing+=("$b"); done
+    command -v genisoimage >/dev/null 2>&1 || command -v mkisofs >/dev/null 2>&1 || missing+=("genisoimage/mkisofs")
+    [[ ${#missing[@]} -eq 0 ]] || die "missing tools: ${missing[*]}"
+    _find_ovmf
+    [[ -n "$OVMF_CODE" ]] || die "OVMF Secure Boot firmware not found (need edk2-ovmf)"
+    zpool list -Ho name "${POOL%%/*}" >/dev/null 2>&1 || die "ZFS pool '${POOL%%/*}' not found"
+    virsh net-info "$NET" >/dev/null 2>&1 || die "libvirt network '$NET' not found"
+    [[ "$(virsh net-info "$NET" 2>/dev/null | awk '/Active/{print $2}')" == "yes" ]] || virsh net-start "$NET" >/dev/null 2>&1 || true
+    mkdir -p "$ISO_DIR" "$WORK"
 }
 
 # ── Fetch (on demand — nothing shipped) ──────────────────────────────────────
 fetch_virtio() {
-  local dest="${ISO_DIR}/virtio-win.iso"
-  [[ -s "$dest" ]] && { echo "$dest"; return; }
-  log "fetching virtio-win drivers…" >&2
-  curl -fL --retry 3 -o "${dest}.part" "$VIRTIO_URL" || die "virtio-win download failed"
-  mv "${dest}.part" "$dest"; echo "$dest"
+    local dest="${ISO_DIR}/virtio-win.iso"
+    [[ -s "$dest" ]] && {
+        echo "$dest"
+        return
+    }
+    log "fetching virtio-win drivers…" >&2
+    curl -fL --retry 3 -o "${dest}.part" "$VIRTIO_URL" || die "virtio-win download failed"
+    mv "${dest}.part" "$dest"
+    echo "$dest"
 }
 
 # Resolve the Windows ISO: explicit --iso (path or URL), else Mido eval fetch.
 fetch_windows() {
-  local os="$1" override="$2"
-  local dest="${ISO_DIR}/win-${os}.iso"
-  if [[ -n "$override" ]]; then
-    if [[ -f "$override" ]]; then echo "$override"; return; fi
-    log "downloading BYOL ISO for ${os}…" >&2
-    curl -fL --retry 3 -o "${dest}.part" "$override" || die "ISO download failed: $override"
-    mv "${dest}.part" "$dest"; echo "$dest"; return
-  fi
-  [[ -s "$dest" ]] && { echo "$dest"; return; }
-  log "no --iso given — fetching ${os} EVAL via Mido (official MS media)…" >&2
-  local mido="${WORK}/Mido.sh"
-  [[ -s "$mido" ]] || curl -fL --retry 3 -o "$mido" "$MIDO_URL" || die "could not fetch Mido (provide --iso instead)"
-  chmod +x "$mido"
-  ( cd "$ISO_DIR" && bash "$mido" "${MIDO[$os]}" ) || die "Mido fetch failed — provide --iso <path|url> instead"
-  local got="" f
-  for f in "$ISO_DIR"/*.ISO "$ISO_DIR"/*.iso; do
-    [[ -f "$f" ]] || continue
-    case "${f,,}" in *win*|*server*) [[ -z "$got" || "$f" -nt "$got" ]] && got="$f" ;; esac
-  done
-  [[ -n "$got" ]] || die "Mido produced no ISO — provide --iso"
-  mv "$got" "$dest"; echo "$dest"
+    local os="$1" override="$2"
+    local dest="${ISO_DIR}/win-${os}.iso"
+    if [[ -n "$override" ]]; then
+        if [[ -f "$override" ]]; then
+            echo "$override"
+            return
+        fi
+        log "downloading BYOL ISO for ${os}…" >&2
+        curl -fL --retry 3 -o "${dest}.part" "$override" || die "ISO download failed: $override"
+        mv "${dest}.part" "$dest"
+        echo "$dest"
+        return
+    fi
+    [[ -s "$dest" ]] && {
+        echo "$dest"
+        return
+    }
+    log "no --iso given — fetching ${os} EVAL via Mido (official MS media)…" >&2
+    local mido="${WORK}/Mido.sh"
+    [[ -s "$mido" ]] || curl -fL --retry 3 -o "$mido" "$MIDO_URL" || die "could not fetch Mido (provide --iso instead)"
+    chmod +x "$mido"
+    (cd "$ISO_DIR" && bash "$mido" "${MIDO[$os]}") || die "Mido fetch failed — provide --iso <path|url> instead"
+    local got="" f
+    for f in "$ISO_DIR"/*.ISO "$ISO_DIR"/*.iso; do
+        [[ -f "$f" ]] || continue
+        case "${f,,}" in *win* | *server*) [[ -z "$got" || "$f" -nt "$got" ]] && got="$f" ;; esac
+    done
+    [[ -n "$got" ]] || die "Mido produced no ISO — provide --iso"
+    mv "$got" "$dest"
+    echo "$dest"
 }
 
 # ── autounattend.xml — fully unattended install ──────────────────────────────
@@ -111,8 +144,8 @@ fetch_windows() {
 # oobeSystem skips OOBE, sets Administrator, enables RDP, and FirstLogonCommands
 # installs the QEMU guest agent + Cloudbase-Init, then sysprep /generalize.
 gen_autounattend() {
-  local os="$1" out="$2"
-  cat > "$out" <<XML
+    local os="$1" out="$2"
+    cat >"$out" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
   <settings pass="windowsPE">
@@ -179,142 +212,216 @@ XML
 
 # Build the autounattend onto a tiny ISO labelled so Windows Setup auto-finds it.
 make_unattend_iso() {
-  local os="$1"
-  local iso="${WORK}/unattend-${os}.iso" dir="${WORK}/au-${os}"
-  rm -rf "$dir"; mkdir -p "$dir"
-  gen_autounattend "$os" "${dir}/autounattend.xml"
-  "$(_iso_tool)" -quiet -J -r -V UNATTEND -o "$iso" "$dir" 2>/dev/null || die "unattend ISO build failed"
-  echo "$iso"
+    local os="$1"
+    local iso="${WORK}/unattend-${os}.iso" dir="${WORK}/au-${os}"
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    gen_autounattend "$os" "${dir}/autounattend.xml"
+    "$(_iso_tool)" -quiet -J -r -V UNATTEND -o "$iso" "$dir" 2>/dev/null || die "unattend ISO build failed"
+    echo "$iso"
 }
 
 # ── Golden build ─────────────────────────────────────────────────────────────
 golden_zvol() { echo "${POOL}/win-${1}-golden"; }
 
 build_golden() {
-  local os="$1" iso_override="$2" ram="$3" disk="$4"
-  _validate_os "$os"; check_prereqs
-  local gz; gz="$(golden_zvol "$os")"
-  if zfs list "${gz}@golden" >/dev/null 2>&1; then ok "golden ${gz}@golden already exists — skipping"; return; fi
-  ram="${ram:-${RAM[$os]}}"; disk="${disk:-${DISK[$os]}}"
+    local os="$1" iso_override="$2" ram="$3" disk="$4"
+    _validate_os "$os"
+    check_prereqs
+    local gz
+    gz="$(golden_zvol "$os")"
+    if zfs list "${gz}@golden" >/dev/null 2>&1; then
+        ok "golden ${gz}@golden already exists — skipping"
+        return
+    fi
+    ram="${ram:-${RAM[$os]}}"
+    disk="${disk:-${DISK[$os]}}"
 
-  local winiso virtio auiso vars
-  winiso="$(fetch_windows "$os" "$iso_override")"
-  virtio="$(fetch_virtio)"
-  auiso="$(make_unattend_iso "$os")"
-  log "building golden ${gz} from $(basename "$winiso") (${ram}MB / ${disk}GB)…"
+    local winiso virtio auiso vars
+    winiso="$(fetch_windows "$os" "$iso_override")"
+    virtio="$(fetch_virtio)"
+    auiso="$(make_unattend_iso "$os")"
+    log "building golden ${gz} from $(basename "$winiso") (${ram}MB / ${disk}GB)…"
 
-  # fresh build zvol + a private NVRAM copy (Secure Boot vars)
-  zfs list "$gz" >/dev/null 2>&1 && zfs destroy -r "$gz" 2>/dev/null || true
-  zfs create -V "${disk}G" -o volmode=dev "$gz"
-  vars="${WORK}/${os}-VARS.fd"; cp -f "$OVMF_VARS" "$vars"
+    # fresh build zvol + a private NVRAM copy (Secure Boot vars)
+    zfs list "$gz" >/dev/null 2>&1 && zfs destroy -r "$gz" 2>/dev/null || true
+    zfs create -V "${disk}G" -o volmode=dev "$gz"
+    vars="${WORK}/${os}-VARS.fd"
+    cp -f "$OVMF_VARS" "$vars"
 
-  local name="win-${os}-build"
-  virsh destroy "$name" 2>/dev/null || true; virsh undefine "$name" --nvram 2>/dev/null || true
-  # CDROM order matters: D: = virtio (drivers + guest tools), E: = its driver tree.
-  virt-install --name "$name" --memory "$ram" --vcpus 4 --machine q35 \
-    --boot uefi,loader="$OVMF_CODE",loader.readonly=yes,loader.secure=yes,loader.type=pflash,nvram="$vars" \
-    --features smm.state=on --tpm backend.type=emulator,backend.version=2.0,model=tpm-crb \
-    --disk "path=/dev/zvol/${gz},bus=virtio,cache=none,format=raw" \
-    --disk "path=${winiso},device=cdrom,bus=sata,boot.order=1" \
-    --disk "path=${virtio},device=cdrom,bus=sata" \
-    --disk "path=${auiso},device=cdrom,bus=sata" \
-    --network "network=${NET},model=virtio" \
-    --os-variant "${OSVAR[$os]}" --graphics spice --video qxl --channel spicevmc \
-    --noautoconsole --noreboot || die "virt-install failed for golden"
+    local name="win-${os}-build"
+    virsh destroy "$name" 2>/dev/null || true
+    virsh undefine "$name" --nvram 2>/dev/null || true
+    # CDROM order matters: D: = virtio (drivers + guest tools), E: = its driver tree.
+    virt-install --name "$name" --memory "$ram" --vcpus 4 --machine q35 \
+        --boot uefi,loader="$OVMF_CODE",loader.readonly=yes,loader.secure=yes,loader.type=pflash,nvram="$vars" \
+        --features smm.state=on --tpm backend.type=emulator,backend.version=2.0,model=tpm-crb \
+        --disk "path=/dev/zvol/${gz},bus=virtio,cache=none,format=raw" \
+        --disk "path=${winiso},device=cdrom,bus=sata,boot.order=1" \
+        --disk "path=${virtio},device=cdrom,bus=sata" \
+        --disk "path=${auiso},device=cdrom,bus=sata" \
+        --network "network=${NET},model=virtio" \
+        --os-variant "${OSVAR[$os]}" --graphics spice --video qxl --channel spicevmc \
+        --noautoconsole --noreboot || die "virt-install failed for golden"
 
-  log "Windows is installing unattended (~20-40 min) then syspreps + powers off."
-  log "  watch:  virt-viewer ${name}   ·   virsh console not available (graphical)"
-  local waited=0 max=4800
-  while [[ "$(virsh domstate "$name" 2>/dev/null)" != "shut off" ]]; do
-    sleep 30; waited=$((waited+30))
-    [[ $((waited % 300)) -eq 0 ]] && log "  …still installing (${waited}s elapsed)"
-    [[ $waited -ge $max ]] && die "golden build timed out after ${max}s — inspect with virt-viewer ${name}"
-  done
-  virsh undefine "$name" --nvram 2>/dev/null || true
-  log "install complete — snapshotting golden"
-  zfs snapshot "${gz}@golden"
-  ok "golden ready: ${gz}@golden"
+    log "Windows is installing unattended (~20-40 min) then syspreps + powers off."
+    log "  watch:  virt-viewer ${name}   ·   virsh console not available (graphical)"
+    local waited=0 max=4800
+    while [[ "$(virsh domstate "$name" 2>/dev/null)" != "shut off" ]]; do
+        sleep 30
+        waited=$((waited + 30))
+        [[ $((waited % 300)) -eq 0 ]] && log "  …still installing (${waited}s elapsed)"
+        [[ $waited -ge $max ]] && die "golden build timed out after ${max}s — inspect with virt-viewer ${name}"
+    done
+    virsh undefine "$name" --nvram 2>/dev/null || true
+    log "install complete — snapshotting golden"
+    zfs snapshot "${gz}@golden"
+    ok "golden ready: ${gz}@golden"
 }
 
 # ── Per-VM (instant ZFS clone of the golden) ─────────────────────────────────
 create_vm() {
-  local name="$1" os="$2" ram="$3" cpus="$4" disk="$5"
-  _validate_os "$os"; check_prereqs
-  local gz; gz="$(golden_zvol "$os")"
-  zfs list "${gz}@golden" >/dev/null 2>&1 || die "no golden for '${os}' — run: kvm-win golden ${os}"
-  virsh dominfo "$name" >/dev/null 2>&1 && die "VM '${name}' already exists"
-  ram="${ram:-${RAM[$os]}}"; cpus="${cpus:-2}"
-  local clone="${POOL}/${name}" vars="${WORK}/${name}-VARS.fd"
-  zfs list "$clone" >/dev/null 2>&1 && zfs destroy -r "$clone" 2>/dev/null || true
-  zfs clone "${gz}@golden" "$clone"
-  cp -f "$OVMF_VARS" "$vars"
-  log "spawning ${name} (${os}, ${ram}MB/${cpus}vcpu) as an instant clone of ${gz}@golden"
-  virt-install --name "$name" --memory "$ram" --vcpus "$cpus" --machine q35 \
-    --boot uefi,loader="$OVMF_CODE",loader.readonly=yes,loader.secure=yes,loader.type=pflash,nvram="$vars" \
-    --features smm.state=on --tpm backend.type=emulator,backend.version=2.0,model=tpm-crb \
-    --disk "path=/dev/zvol/${clone},bus=virtio,cache=none,format=raw" \
-    --network "network=${NET},model=virtio" \
-    --os-variant "${OSVAR[$os]}" --graphics spice --video qxl --channel spicevmc \
-    --import --noautoconsole || die "virt-install failed for ${name}"
-  ok "${name} running — RDP/console once it boots (admin: Administrator / kldload)"
+    local name="$1" os="$2" ram="$3" cpus="$4" disk="$5"
+    _validate_os "$os"
+    check_prereqs
+    local gz
+    gz="$(golden_zvol "$os")"
+    zfs list "${gz}@golden" >/dev/null 2>&1 || die "no golden for '${os}' — run: kvm-win golden ${os}"
+    virsh dominfo "$name" >/dev/null 2>&1 && die "VM '${name}' already exists"
+    ram="${ram:-${RAM[$os]}}"
+    cpus="${cpus:-2}"
+    local clone="${POOL}/${name}" vars="${WORK}/${name}-VARS.fd"
+    zfs list "$clone" >/dev/null 2>&1 && zfs destroy -r "$clone" 2>/dev/null || true
+    zfs clone "${gz}@golden" "$clone"
+    cp -f "$OVMF_VARS" "$vars"
+    log "spawning ${name} (${os}, ${ram}MB/${cpus}vcpu) as an instant clone of ${gz}@golden"
+    virt-install --name "$name" --memory "$ram" --vcpus "$cpus" --machine q35 \
+        --boot uefi,loader="$OVMF_CODE",loader.readonly=yes,loader.secure=yes,loader.type=pflash,nvram="$vars" \
+        --features smm.state=on --tpm backend.type=emulator,backend.version=2.0,model=tpm-crb \
+        --disk "path=/dev/zvol/${clone},bus=virtio,cache=none,format=raw" \
+        --network "network=${NET},model=virtio" \
+        --os-variant "${OSVAR[$os]}" --graphics spice --video qxl --channel spicevmc \
+        --import --noautoconsole || die "virt-install failed for ${name}"
+    ok "${name} running — RDP/console once it boots (admin: Administrator / kldload)"
 }
 
 # ── SCCM-style demo: 1 Server + 1 Win11 on the same net ──────────────────────
 demo_sccm() {
-  log "SCCM demo: building goldens (on demand) then spawning 1 Server + 1 Win11"
-  build_golden server "" "" ""
-  build_golden win11  "" "" ""
-  create_vm "win-sccm-srv" server 8192 4 ""
-  create_vm "win-sccm-ws"  win11  6144 2 ""
-  echo
-  ok "demo up — both on ${NET} (192.168.122.0/24), admin Administrator/kldload"
-  log "  win-sccm-srv = your Server (promote to DC + install SCCM/SQL/ADK here)"
-  log "  win-sccm-ws  = Win11 client to enrol. SCCM itself is your demo content."
+    log "SCCM demo: building goldens (on demand) then spawning 1 Server + 1 Win11"
+    build_golden server "" "" ""
+    build_golden win11 "" "" ""
+    create_vm "win-sccm-srv" server 8192 4 ""
+    create_vm "win-sccm-ws" win11 6144 2 ""
+    echo
+    ok "demo up — both on ${NET} (192.168.122.0/24), admin Administrator/kldload"
+    log "  win-sccm-srv = your Server (promote to DC + install SCCM/SQL/ADK here)"
+    log "  win-sccm-ws  = Win11 client to enrol. SCCM itself is your demo content."
 }
 
 destroy_vm() {
-  local name="$1" purge="$2"
-  virsh destroy "$name" 2>/dev/null || true
-  virsh undefine "$name" --nvram 2>/dev/null || true
-  [[ "$purge" == "--purge" ]] && zfs destroy -r "${POOL}/${name}" 2>/dev/null || true
-  ok "destroyed ${name}${purge:+ (zvol purged)}"
+    local name="$1" purge="$2"
+    virsh destroy "$name" 2>/dev/null || true
+    virsh undefine "$name" --nvram 2>/dev/null || true
+    [[ "$purge" == "--purge" ]] && zfs destroy -r "${POOL}/${name}" 2>/dev/null || true
+    ok "destroyed ${name}${purge:+ (zvol purged)}"
 }
 
 self_test() {
-  local rc=0
-  check_prereqs && ok "prereqs ok (virt-install/swtpm/OVMF-secboot/zfs/${NET})" || rc=1
-  ok "OVMF: ${OVMF_CODE:-none} / VARS ${OVMF_VARS:-none}"
-  curl -fsI -m 15 "$VIRTIO_URL" >/dev/null 2>&1 && ok "virtio-win URL reachable" || warn "virtio-win URL unreachable (need internet at golden-build)"
-  local os; for os in win11 server; do
-    gen_autounattend "$os" "${WORK}/.au-test.xml"
-    if command -v xmllint >/dev/null 2>&1; then
-      xmllint --noout "${WORK}/.au-test.xml" 2>/dev/null && ok "autounattend(${os}) well-formed" || { warn "autounattend(${os}) XML invalid"; rc=1; }
-    else ok "autounattend(${os}) generated (install xmllint to validate)"; fi
-  done
-  rm -f "${WORK}/.au-test.xml"
-  echo; [[ $rc -eq 0 ]] && ok "self-test PASS" || die "self-test FAIL"
+    local rc=0
+    check_prereqs && ok "prereqs ok (virt-install/swtpm/OVMF-secboot/zfs/${NET})" || rc=1
+    ok "OVMF: ${OVMF_CODE:-none} / VARS ${OVMF_VARS:-none}"
+    curl -fsI -m 15 "$VIRTIO_URL" >/dev/null 2>&1 && ok "virtio-win URL reachable" || warn "virtio-win URL unreachable (need internet at golden-build)"
+    local os
+    for os in win11 server; do
+        gen_autounattend "$os" "${WORK}/.au-test.xml"
+        if command -v xmllint >/dev/null 2>&1; then
+            xmllint --noout "${WORK}/.au-test.xml" 2>/dev/null && ok "autounattend(${os}) well-formed" || {
+                warn "autounattend(${os}) XML invalid"
+                rc=1
+            }
+        else ok "autounattend(${os}) generated (install xmllint to validate)"; fi
+    done
+    rm -f "${WORK}/.au-test.xml"
+    echo
+    [[ $rc -eq 0 ]] && ok "self-test PASS" || die "self-test FAIL"
 }
 
 usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────
-cmd="${1:-}"; shift || true
-ISO_OVERRIDE=""; RAM_ARG=""; CPUS_ARG=""; DISK_ARG=""; OS_ARG=""
+cmd="${1:-}"
+shift || true
+ISO_OVERRIDE=""
+RAM_ARG=""
+CPUS_ARG=""
+DISK_ARG=""
+OS_ARG=""
 _parse() {
-  while [[ $# -gt 0 ]]; do case "$1" in
-    --iso) ISO_OVERRIDE="$2"; shift 2;; --ram) RAM_ARG="$2"; shift 2;;
-    --cpus) CPUS_ARG="$2"; shift 2;; --disk) DISK_ARG="$2"; shift 2;;
-    --os) OS_ARG="$2"; shift 2;; --purge) PURGE="--purge"; shift;;
-    *) POS+=("$1"); shift;; esac; done
+    while [[ $# -gt 0 ]]; do case "$1" in
+        --iso)
+            ISO_OVERRIDE="$2"
+            shift 2
+            ;;
+        --ram)
+            RAM_ARG="$2"
+            shift 2
+            ;;
+        --cpus)
+            CPUS_ARG="$2"
+            shift 2
+            ;;
+        --disk)
+            DISK_ARG="$2"
+            shift 2
+            ;;
+        --os)
+            OS_ARG="$2"
+            shift 2
+            ;;
+        --purge)
+            PURGE="--purge"
+            shift
+            ;;
+        *)
+            POS+=("$1")
+            shift
+            ;;
+        esac done
 }
-PURGE=""; POS=()
+PURGE=""
+POS=()
 case "$cmd" in
-  golden)  os="${1:-}"; shift || true; _parse "$@"; [[ -n "$os" ]] || die "usage: kvm-win golden win11|server"; build_golden "$os" "$ISO_OVERRIDE" "$RAM_ARG" "$DISK_ARG" ;;
-  create)  name="${1:-}"; shift || true; _parse "$@"; [[ -n "$name" && -n "$OS_ARG" ]] || die "usage: kvm-win create NAME --os win11|server"; create_vm "$name" "$OS_ARG" "$RAM_ARG" "$CPUS_ARG" "$DISK_ARG" ;;
-  demo)    [[ "${1:-}" == "sccm" ]] || die "usage: kvm-win demo sccm"; demo_sccm ;;
-  list)    virsh list --all | grep -iE 'win-|Name|---' || true; echo; zfs list -r "$POOL" 2>/dev/null | grep -iE 'win-|NAME' || true ;;
-  destroy) name="${1:-}"; shift || true; _parse "$@"; [[ -n "$name" ]] || die "usage: kvm-win destroy NAME [--purge]"; destroy_vm "$name" "$PURGE" ;;
-  --self-test|selftest) self_test ;;
-  -h|--help|help|"") usage ;;
-  *) die "unknown command: $cmd (try: kvm-win --help)" ;;
+golden)
+    os="${1:-}"
+    shift || true
+    _parse "$@"
+    [[ -n "$os" ]] || die "usage: kvm-win golden win11|server"
+    build_golden "$os" "$ISO_OVERRIDE" "$RAM_ARG" "$DISK_ARG"
+    ;;
+create)
+    name="${1:-}"
+    shift || true
+    _parse "$@"
+    [[ -n "$name" && -n "$OS_ARG" ]] || die "usage: kvm-win create NAME --os win11|server"
+    create_vm "$name" "$OS_ARG" "$RAM_ARG" "$CPUS_ARG" "$DISK_ARG"
+    ;;
+demo)
+    [[ "${1:-}" == "sccm" ]] || die "usage: kvm-win demo sccm"
+    demo_sccm
+    ;;
+list)
+    virsh list --all | grep -iE 'win-|Name|---' || true
+    echo
+    zfs list -r "$POOL" 2>/dev/null | grep -iE 'win-|NAME' || true
+    ;;
+destroy)
+    name="${1:-}"
+    shift || true
+    _parse "$@"
+    [[ -n "$name" ]] || die "usage: kvm-win destroy NAME [--purge]"
+    destroy_vm "$name" "$PURGE"
+    ;;
+--self-test | selftest) self_test ;;
+-h | --help | help | "") usage ;;
+*) die "unknown command: $cmd (try: kvm-win --help)" ;;
 esac

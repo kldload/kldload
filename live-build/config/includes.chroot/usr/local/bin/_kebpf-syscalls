@@ -18,7 +18,7 @@ if [[ ${#existing[@]} -gt 0 ]]; then
     for w in "${existing[@]}"; do
         tmux kill-window -t "${SESSION}:=${w}" 2>/dev/null
     done
-    tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx klab && \
+    tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx klab &&
         tmux select-window -t "${SESSION}:=klab"
     exit 0
 fi
@@ -28,30 +28,31 @@ fi
 # script that takes positional args, we wrap its invocation in quotes
 # that survive one shell expansion.
 spawn() {
-    local name="$1" tool="$2" desc="$3" hint="$4"; shift 4
+    local name="$1" tool="$2" desc="$3" hint="$4"
+    shift 4
     # The "$@" carries any remaining tool args through.
     tmux new-window -t "$SESSION" -n "$name" -d "_kbcc-pane $tool $(printf '%q ' "$desc" "$hint" "$@")"
 }
 
 spawn execsnoop execsnoop \
-      "Every fork()+exec() the kernel handles. One line per process start with PID, parent, and command line." \
-      "Spikes during container starts, k8s pod creation, klab golden builds. Steady-state on an idle box is <10/s."
+    "Every fork()+exec() the kernel handles. One line per process start with PID, parent, and command line." \
+    "Spikes during container starts, k8s pod creation, klab golden builds. Steady-state on an idle box is <10/s."
 
 spawn opensnoop opensnoop \
-      "Every open() syscall. Shows PID, comm, return code, file path." \
-      "Greatest hit: which config file an app reads — opensnoop names it. EACCES rows are denied opens."
+    "Every open() syscall. Shows PID, comm, return code, file path." \
+    "Greatest hit: which config file an app reads — opensnoop names it. EACCES rows are denied opens."
 
 spawn killsnoop killsnoop \
-      "Every signal sent via kill() — PID source, target, signal name. OOM kills land here too." \
-      "Audience may not have seen the OOM killer SIGKILL fly past in real time. Pair with htop or cgroup pressure."
+    "Every signal sent via kill() — PID source, target, signal name. OOM kills land here too." \
+    "Audience may not have seen the OOM killer SIGKILL fly past in real time. Pair with htop or cgroup pressure."
 
 spawn syscount syscount \
-      "Histogram of syscalls — counts per syscall name over a 5-second window." \
-      "Top syscall on a quiet box is usually epoll_wait or futex (idle threads); on a busy node it is read/write/clock_gettime." \
-      -i 5 -T 10
+    "Histogram of syscalls — counts per syscall name over a 5-second window." \
+    "Top syscall on a quiet box is usually epoll_wait or futex (idle threads); on a busy node it is read/write/clock_gettime." \
+    -i 5 -T 10
 
 spawn capable capable \
-      "Every capability check the kernel performed. PID + comm + capability requested + verdict." \
-      "Surfaces 'why does this thing need CAP_SYS_ADMIN' questions. Cilium, Tetragon, libvirt show up at startup."
+    "Every capability check the kernel performed. PID + comm + capability requested + verdict." \
+    "Surfaces 'why does this thing need CAP_SYS_ADMIN' questions. Cilium, Tetragon, libvirt show up at startup."
 
 tmux select-window -t "${SESSION}:=execsnoop"

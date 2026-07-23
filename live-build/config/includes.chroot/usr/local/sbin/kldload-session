@@ -38,27 +38,30 @@ AUDIT_LOG="${KLDLOAD_SESSION_AUDIT:-/var/log/kldload-session.log}"
 PORT_RANGE_LO=19000
 PORT_RANGE_HI=19255
 
-log()   { echo "[kldload-session] $*" >&2; }
-die()   { log "error: $*"; exit 1; }
+log() { echo "[kldload-session] $*" >&2; }
+die() {
+    log "error: $*"
+    exit 1
+}
 need_root() { [[ $EUID -eq 0 ]] || die "must run as root"; }
-ts()    { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
 audit() {
-  # Structured one-line records so loki/grafana can parse without
-  # regex gymnastics. Matches the kldload.audit namespace we'll use
-  # for every enterprise-auditable action.
-  local action="$1" id="$2" kind="$3" target="$4" user="${5:-$(whoami)}"
-  mkdir -p "$(dirname "${AUDIT_LOG}")"
-  printf 'ts=%s action=%s id=%s kind=%s target=%s user=%s from=%s\n' \
-    "$(ts)" "$action" "$id" "$kind" "$target" "$user" "${SUDO_CLIENT:-local}" \
-    >> "${AUDIT_LOG}"
-  # Also tee to journal so live-triage sees it without tailing a file.
-  logger -t kldload-session -- "action=$action id=$id kind=$kind target=$target user=$user"
+    # Structured one-line records so loki/grafana can parse without
+    # regex gymnastics. Matches the kldload.audit namespace we'll use
+    # for every enterprise-auditable action.
+    local action="$1" id="$2" kind="$3" target="$4" user="${5:-$(whoami)}"
+    mkdir -p "$(dirname "${AUDIT_LOG}")"
+    printf 'ts=%s action=%s id=%s kind=%s target=%s user=%s from=%s\n' \
+        "$(ts)" "$action" "$id" "$kind" "$target" "$user" "${SUDO_CLIENT:-local}" \
+        >>"${AUDIT_LOG}"
+    # Also tee to journal so live-triage sees it without tailing a file.
+    logger -t kldload-session -- "action=$action id=$id kind=$kind target=$target user=$user"
 }
 
 ensure_dirs() {
-  install -d -m 0755 -o root -g root "${SESSION_DIR}"
-  install -d -m 0755 -o root -g root "${NGX_DYN_DIR}"
+    install -d -m 0755 -o root -g root "${SESSION_DIR}"
+    install -d -m 0755 -o root -g root "${NGX_DYN_DIR}"
 }
 
 # Random URL-safe id. 8 hex chars = 32 bits — plenty for a short-lived
@@ -69,13 +72,13 @@ new_id() { head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 # (Real enterprise version would use SO_REUSEPORT probe; here we
 # check ss and fall back to a second attempt.)
 pick_port() {
-  local p
-  for p in $(shuf -i "${PORT_RANGE_LO}-${PORT_RANGE_HI}" -n 32); do
-    ss -ltn "sport = :${p}" 2>/dev/null | grep -q LISTEN && continue
-    echo "$p"
-    return 0
-  done
-  die "no free port in ${PORT_RANGE_LO}-${PORT_RANGE_HI}"
+    local p
+    for p in $(shuf -i "${PORT_RANGE_LO}-${PORT_RANGE_HI}" -n 32); do
+        ss -ltn "sport = :${p}" 2>/dev/null | grep -q LISTEN && continue
+        echo "$p"
+        return 0
+    done
+    die "no free port in ${PORT_RANGE_LO}-${PORT_RANGE_HI}"
 }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -90,111 +93,118 @@ pick_port() {
 #   klab-tail     target=<run-name>             — klab tail for a klab run
 #
 cmd_open() {
-  need_root
-  ensure_dirs
+    need_root
+    ensure_dirs
 
-  local kind="${1:-}" target="${2:-}"; shift 2 2>/dev/null || true
-  local user="${SUDO_USER:-$(whoami)}" title=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --user)  user="$2";  shift 2 ;;
-      --title) title="$2"; shift 2 ;;
-      *) die "unknown flag: $1" ;;
-    esac
-  done
-  [[ -n "$kind" && -n "$target" ]] \
-    || die "usage: kldload-session open <kind> <target> [--user NAME] [--title STR]"
+    local kind="${1:-}" target="${2:-}"
+    shift 2 2>/dev/null || true
+    local user="${SUDO_USER:-$(whoami)}" title=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --user)
+            user="$2"
+            shift 2
+            ;;
+        --title)
+            title="$2"
+            shift 2
+            ;;
+        *) die "unknown flag: $1" ;;
+        esac
+    done
+    [[ -n "$kind" && -n "$target" ]] ||
+        die "usage: kldload-session open <kind> <target> [--user NAME] [--title STR]"
 
-  local id port cmd ttyd_args
-  id="$(new_id)"
-  port="$(pick_port)"
+    local id port cmd ttyd_args
+    id="$(new_id)"
+    port="$(pick_port)"
 
-  case "$kind" in
+    case "$kind" in
     shell)
-      if [[ "$target" == "-" ]]; then
-        cmd="/bin/bash -l"
-      else
-        # Caller supplies the command; quoted through the env file.
-        cmd="$target"
-      fi
-      ;;
+        if [[ "$target" == "-" ]]; then
+            cmd="/bin/bash -l"
+        else
+            # Caller supplies the command; quoted through the env file.
+            cmd="$target"
+        fi
+        ;;
     vm-serial)
-      [[ "$target" =~ ^[a-zA-Z0-9._-]+$ ]] || die "invalid VM name: $target"
-      cmd="/usr/bin/virsh console --force ${target}"
-      ;;
+        [[ "$target" =~ ^[a-zA-Z0-9._-]+$ ]] || die "invalid VM name: $target"
+        cmd="/usr/bin/virsh console --force ${target}"
+        ;;
     vm-ssh)
-      # SSH into a running VM using the kldload host's keypair. Target
-      # is an IP (the webui resolves VM-name -> IP via libvirt DHCP
-      # leases before calling us).
-      #
-      # User selection: try root first, fall back to admin. Why:
-      #   - klab cloud-image VMs (centos/debian/fedora/ubuntu/rocky
-      #     goldens, ztest, kube-cluster nodes) have cloud-init enable
-      #     root + import kldload's pubkey. No admin user exists.
-      #   - kldload-installed VMs (rare under libvirt, since kldload
-      #     usually installs to bare metal) have admin/Passw0rd and
-      #     root disabled. root SSH will fail fast (Permission denied)
-      #     and we fall through to admin.
-      # Without the fallback, hardcoded admin@ hung on every klab VM
-      # because cloud images don't have admin and the iframe just sat
-      # at "Permission denied" for ConnectTimeout=5s with no terminal
-      # echo to indicate the failure.
-      #
-      # StrictHostKeyChecking=accept-new auto-accepts new host keys;
-      # UserKnownHostsFile pinned to a kldload-managed file so session
-      # churn doesn't litter /root/.ssh/known_hosts.
-      [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$target" =~ ^[a-zA-Z0-9._-]+$ ]] \
-        || die "invalid vm-ssh target: $target (expected IP or hostname)"
-      local _ssh_opts="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/var/lib/kldload/known_hosts.vm -o ConnectTimeout=5 -o NumberOfPasswordPrompts=0 -i /root/.ssh/id_ed25519"
-      cmd="/bin/sh -c 'echo \"[kldload] connecting to ${target} as root…\"; /usr/bin/ssh ${_ssh_opts} root@${target} || { echo; echo \"[kldload] root failed, trying admin…\"; /usr/bin/ssh ${_ssh_opts} admin@${target}; } || { echo; echo \"[kldload] both root and admin failed. The VM may not have either user set up, or kldload host key isnt authorized. Try the View button for graphical access.\"; sleep 8; }'"
-      ;;
+        # SSH into a running VM using the kldload host's keypair. Target
+        # is an IP (the webui resolves VM-name -> IP via libvirt DHCP
+        # leases before calling us).
+        #
+        # User selection: try root first, fall back to admin. Why:
+        #   - klab cloud-image VMs (centos/debian/fedora/ubuntu/rocky
+        #     goldens, ztest, kube-cluster nodes) have cloud-init enable
+        #     root + import kldload's pubkey. No admin user exists.
+        #   - kldload-installed VMs (rare under libvirt, since kldload
+        #     usually installs to bare metal) have admin/Passw0rd and
+        #     root disabled. root SSH will fail fast (Permission denied)
+        #     and we fall through to admin.
+        # Without the fallback, hardcoded admin@ hung on every klab VM
+        # because cloud images don't have admin and the iframe just sat
+        # at "Permission denied" for ConnectTimeout=5s with no terminal
+        # echo to indicate the failure.
+        #
+        # StrictHostKeyChecking=accept-new auto-accepts new host keys;
+        # UserKnownHostsFile pinned to a kldload-managed file so session
+        # churn doesn't litter /root/.ssh/known_hosts.
+        [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$target" =~ ^[a-zA-Z0-9._-]+$ ]] ||
+            die "invalid vm-ssh target: $target (expected IP or hostname)"
+        local _ssh_opts="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/var/lib/kldload/known_hosts.vm -o ConnectTimeout=5 -o NumberOfPasswordPrompts=0 -i /root/.ssh/id_ed25519"
+        cmd="/bin/sh -c 'echo \"[kldload] connecting to ${target} as root…\"; /usr/bin/ssh ${_ssh_opts} root@${target} || { echo; echo \"[kldload] root failed, trying admin…\"; /usr/bin/ssh ${_ssh_opts} admin@${target}; } || { echo; echo \"[kldload] both root and admin failed. The VM may not have either user set up, or kldload host key isnt authorized. Try the View button for graphical access.\"; sleep 8; }'"
+        ;;
     pod-exec)
-      [[ "$target" =~ ^[a-z0-9-]+/[a-z0-9-]+(/[a-z0-9-]+)?$ ]] \
-        || die "pod-exec target must be <namespace>/<pod>[/<container>]"
-      local ns="${target%%/*}" rest="${target#*/}" pod="${rest%%/*}" container=""
-      [[ "$rest" == *"/"* ]] && container="--container ${rest##*/}"
-      cmd="/usr/bin/kubectl exec -it -n ${ns} ${pod} ${container} -- /bin/sh"
-      ;;
+        [[ "$target" =~ ^[a-z0-9-]+/[a-z0-9-]+(/[a-z0-9-]+)?$ ]] ||
+            die "pod-exec target must be <namespace>/<pod>[/<container>]"
+        local ns="${target%%/*}" rest="${target#*/}" pod="${rest%%/*}" container=""
+        [[ "$rest" == *"/"* ]] && container="--container ${rest##*/}"
+        cmd="/usr/bin/kubectl exec -it -n ${ns} ${pod} ${container} -- /bin/sh"
+        ;;
     node-ssh)
-      [[ "$target" =~ ^[a-zA-Z0-9._-]+$ ]] || die "invalid host: $target"
-      cmd="/usr/bin/ssh -o StrictHostKeyChecking=accept-new root@${target}"
-      ;;
+        [[ "$target" =~ ^[a-zA-Z0-9._-]+$ ]] || die "invalid host: $target"
+        cmd="/usr/bin/ssh -o StrictHostKeyChecking=accept-new root@${target}"
+        ;;
     klab-tail)
-      [[ "$target" =~ ^[a-zA-Z0-9._-]+$ ]] || die "invalid klab run name: $target"
-      cmd="/usr/local/bin/klab tail ${target}"
-      ;;
+        [[ "$target" =~ ^[a-zA-Z0-9._-]+$ ]] || die "invalid klab run name: $target"
+        cmd="/usr/local/bin/klab tail ${target}"
+        ;;
     *) die "unsupported kind: $kind (supported: shell vm-serial vm-ssh pod-exec node-ssh klab-tail)" ;;
-  esac
+    esac
 
-  # Persist session metadata for list/close + audit. Values are
-  # single-quoted so `source`-ing the file from bash (in cmd_list /
-  # cmd_close below) doesn't try to split the value on whitespace and
-  # execute the remainder as a command. systemd's EnvironmentFile=
-  # parser is more forgiving and would accept bare values, but bash
-  # is stricter — single-quote-all is the portable fix.
-  {
-    printf "KLDLOAD_SESSION_ID='%s'\n"         "${id}"
-    printf "KLDLOAD_SESSION_KIND='%s'\n"       "${kind}"
-    printf "KLDLOAD_SESSION_TARGET='%s'\n"     "${target}"
-    printf "KLDLOAD_SESSION_PORT='%s'\n"       "${port}"
-    printf "KLDLOAD_SESSION_CMD='%s'\n"        "${cmd//\'/\'\\\'\'}"
-    printf "KLDLOAD_SESSION_TITLE='%s'\n"      "${title:-${kind}: ${target}}"
-    printf "KLDLOAD_SESSION_USER='%s'\n"       "${user}"
-    printf "KLDLOAD_SESSION_OPENED_AT='%s'\n"  "$(ts)"
-  } > "${SESSION_DIR}/${id}.env"
-  chmod 0640 "${SESSION_DIR}/${id}.env"
+    # Persist session metadata for list/close + audit. Values are
+    # single-quoted so `source`-ing the file from bash (in cmd_list /
+    # cmd_close below) doesn't try to split the value on whitespace and
+    # execute the remainder as a command. systemd's EnvironmentFile=
+    # parser is more forgiving and would accept bare values, but bash
+    # is stricter — single-quote-all is the portable fix.
+    {
+        printf "KLDLOAD_SESSION_ID='%s'\n" "${id}"
+        printf "KLDLOAD_SESSION_KIND='%s'\n" "${kind}"
+        printf "KLDLOAD_SESSION_TARGET='%s'\n" "${target}"
+        printf "KLDLOAD_SESSION_PORT='%s'\n" "${port}"
+        printf "KLDLOAD_SESSION_CMD='%s'\n" "${cmd//\'/\'\\\'\'}"
+        printf "KLDLOAD_SESSION_TITLE='%s'\n" "${title:-${kind}: ${target}}"
+        printf "KLDLOAD_SESSION_USER='%s'\n" "${user}"
+        printf "KLDLOAD_SESSION_OPENED_AT='%s'\n" "$(ts)"
+    } >"${SESSION_DIR}/${id}.env"
+    chmod 0640 "${SESSION_DIR}/${id}.env"
 
-  # Write the nginx drop-in. Deliberately minimal — common behaviors
-  # (WS upgrade, proxy headers) come from the includes in the main
-  # kldload.conf server block, which is where the /s/<id>/ location
-  # here slots into at include time.
-  #
-  # proxy_pass WITHOUT a URI part (bare http://host:port) forwards the
-  # incoming URI untouched. ttyd was started with `-b /s/<id>` so it
-  # expects to see the prefix in requests — stripping it via
-  # `proxy_pass http://host:port/` would send ttyd "/" and it would
-  # 404. Bare form is correct for this pattern.
-  cat > "${NGX_DYN_DIR}/${id}.conf" <<EOCONF
+    # Write the nginx drop-in. Deliberately minimal — common behaviors
+    # (WS upgrade, proxy headers) come from the includes in the main
+    # kldload.conf server block, which is where the /s/<id>/ location
+    # here slots into at include time.
+    #
+    # proxy_pass WITHOUT a URI part (bare http://host:port) forwards the
+    # incoming URI untouched. ttyd was started with `-b /s/<id>` so it
+    # expects to see the prefix in requests — stripping it via
+    # `proxy_pass http://host:port/` would send ttyd "/" and it would
+    # 404. Bare form is correct for this pattern.
+    cat >"${NGX_DYN_DIR}/${id}.conf" <<EOCONF
 # kldload session ${id} — kind=${kind} target=${target}
 # opened=$(ts) user=${user}
 # DO NOT EDIT MANUALLY — kldload-session manages this file.
@@ -208,137 +218,142 @@ location /s/${id}/ {
 }
 EOCONF
 
-  # Validate nginx config BEFORE starting the unit. If the drop-in is
-  # busted we abort cleanly without a half-started session.
-  if ! nginx -t >/dev/null 2>&1; then
-    rm -f "${NGX_DYN_DIR}/${id}.conf" "${SESSION_DIR}/${id}.env"
-    die "nginx -t failed after writing drop-in; session aborted"
-  fi
-
-  # Start the templated unit (systemd reads EnvironmentFile= from
-  # /var/lib/kldload/sessions/%i.env to pick up PORT + CMD).
-  systemctl start "kldload-session@${id}.service"
-
-  # Graceful reload — no dropped WS on existing sessions.
-  systemctl reload nginx
-
-  # Wait until nginx actually has the new drop-in live before returning.
-  #
-  # `systemctl reload nginx` (and `nginx -s reload`) are ASYNC — they
-  # signal the nginx master via SIGHUP, which then quietly shuts down
-  # old workers and starts new ones with the new config. Returns
-  # immediately to the caller. The new config isn't actually serving
-  # requests until the new workers finish their startup, typically
-  # 50-200ms but occasionally longer under load.
-  #
-  # If we return the URL to the webui before the new workers are live,
-  # the browser's iframe load races in and gets a 404 — the OLD config
-  # (without our /s/<id>/ block) falls through to the catch-all
-  # location which proxies to kldload-webui, which doesn't have that
-  # route either, so the webui returns its own 404. The user sees a
-  # blank "404 not found" iframe and the experience is broken.
-  #
-  # Caught 2026-05-16 on .127: every Console click produced a fresh
-  # session id (cc117731, b1b82d72, etc.) that all returned 404 to the
-  # browser — because the iframe load won the race against nginx
-  # reload every single time. Manual `nginx -s reload` afterwards made
-  # the URL work, confirming the only issue was timing.
-  #
-  # Poll the local URL until it returns non-404 (the actual ttyd HTML
-  # is a 200, the WS-upgrade upgrade arc is a 101 — either is fine,
-  # both prove the location block is live). 100ms × 30 = 3s ceiling.
-  local _i
-  for _i in $(seq 1 30); do
-    local _code
-    _code="$(curl -ks --connect-timeout 1 \
-                  -o /dev/null -w '%{http_code}' \
-                  "https://127.0.0.1:8443/s/${id}/" 2>/dev/null || echo 000)"
-    if [[ -n "$_code" && "$_code" != "404" && "$_code" != "000" ]]; then
-      break
+    # Validate nginx config BEFORE starting the unit. If the drop-in is
+    # busted we abort cleanly without a half-started session.
+    if ! nginx -t >/dev/null 2>&1; then
+        rm -f "${NGX_DYN_DIR}/${id}.conf" "${SESSION_DIR}/${id}.env"
+        die "nginx -t failed after writing drop-in; session aborted"
     fi
-    sleep 0.1
-  done
 
-  audit open "$id" "$kind" "$target" "$user"
+    # Start the templated unit (systemd reads EnvironmentFile= from
+    # /var/lib/kldload/sessions/%i.env to pick up PORT + CMD).
+    systemctl start "kldload-session@${id}.service"
 
-  # stdout contract: machine-readable URL on line 1 so the webui can parse.
-  local host; host="$(hostname -f 2>/dev/null || cat /etc/hostname 2>/dev/null || echo localhost)"
-  echo "https://${host}:8443/s/${id}/"
-  log "session opened: id=${id} kind=${kind} target=${target} port=${port}"
+    # Graceful reload — no dropped WS on existing sessions.
+    systemctl reload nginx
+
+    # Wait until nginx actually has the new drop-in live before returning.
+    #
+    # `systemctl reload nginx` (and `nginx -s reload`) are ASYNC — they
+    # signal the nginx master via SIGHUP, which then quietly shuts down
+    # old workers and starts new ones with the new config. Returns
+    # immediately to the caller. The new config isn't actually serving
+    # requests until the new workers finish their startup, typically
+    # 50-200ms but occasionally longer under load.
+    #
+    # If we return the URL to the webui before the new workers are live,
+    # the browser's iframe load races in and gets a 404 — the OLD config
+    # (without our /s/<id>/ block) falls through to the catch-all
+    # location which proxies to kldload-webui, which doesn't have that
+    # route either, so the webui returns its own 404. The user sees a
+    # blank "404 not found" iframe and the experience is broken.
+    #
+    # Caught 2026-05-16 on .127: every Console click produced a fresh
+    # session id (cc117731, b1b82d72, etc.) that all returned 404 to the
+    # browser — because the iframe load won the race against nginx
+    # reload every single time. Manual `nginx -s reload` afterwards made
+    # the URL work, confirming the only issue was timing.
+    #
+    # Poll the local URL until it returns non-404 (the actual ttyd HTML
+    # is a 200, the WS-upgrade upgrade arc is a 101 — either is fine,
+    # both prove the location block is live). 100ms × 30 = 3s ceiling.
+    local _i
+    for _i in $(seq 1 30); do
+        local _code
+        _code="$(curl -ks --connect-timeout 1 \
+            -o /dev/null -w '%{http_code}' \
+            "https://127.0.0.1:8443/s/${id}/" 2>/dev/null || echo 000)"
+        if [[ -n "$_code" && "$_code" != "404" && "$_code" != "000" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    audit open "$id" "$kind" "$target" "$user"
+
+    # stdout contract: machine-readable URL on line 1 so the webui can parse.
+    local host
+    host="$(hostname -f 2>/dev/null || cat /etc/hostname 2>/dev/null || echo localhost)"
+    echo "https://${host}:8443/s/${id}/"
+    log "session opened: id=${id} kind=${kind} target=${target} port=${port}"
 }
 
 # ──────────────────────────────────────────────────────────────────────
 # close <id>
 # ──────────────────────────────────────────────────────────────────────
 cmd_close() {
-  need_root
-  local id="${1:?usage: kldload-session close <id>}"
-  [[ "$id" =~ ^[a-f0-9]+$ ]] || die "invalid session id"
-  local env="${SESSION_DIR}/${id}.env"
-  [[ -f "$env" ]] || { log "no such session: $id (already closed?)"; return 0; }
+    need_root
+    local id="${1:?usage: kldload-session close <id>}"
+    [[ "$id" =~ ^[a-f0-9]+$ ]] || die "invalid session id"
+    local env="${SESSION_DIR}/${id}.env"
+    [[ -f "$env" ]] || {
+        log "no such session: $id (already closed?)"
+        return 0
+    }
 
-  # shellcheck disable=SC1090
-  local kind="?" target="?" user="?"
-  if source "$env" 2>/dev/null; then
-    kind="${KLDLOAD_SESSION_KIND:-?}"
-    target="${KLDLOAD_SESSION_TARGET:-?}"
-    user="${KLDLOAD_SESSION_USER:-?}"
-  fi
+    # shellcheck disable=SC1090
+    local kind="?" target="?" user="?"
+    if source "$env" 2>/dev/null; then
+        kind="${KLDLOAD_SESSION_KIND:-?}"
+        target="${KLDLOAD_SESSION_TARGET:-?}"
+        user="${KLDLOAD_SESSION_USER:-?}"
+    fi
 
-  systemctl stop "kldload-session@${id}.service" 2>/dev/null || true
-  rm -f "${NGX_DYN_DIR}/${id}.conf" "${env}"
-  systemctl reload nginx 2>/dev/null || true
+    systemctl stop "kldload-session@${id}.service" 2>/dev/null || true
+    rm -f "${NGX_DYN_DIR}/${id}.conf" "${env}"
+    systemctl reload nginx 2>/dev/null || true
 
-  audit close "$id" "$kind" "$target" "$user"
-  log "session closed: ${id}"
+    audit close "$id" "$kind" "$target" "$user"
+    log "session closed: ${id}"
 }
 
 # ──────────────────────────────────────────────────────────────────────
 # list
 # ──────────────────────────────────────────────────────────────────────
 cmd_list() {
-  local any=0
-  shopt -s nullglob
-  for env in "${SESSION_DIR}"/*.env; do
-    any=1
-    # shellcheck disable=SC1090
-    ( source "$env"
-      state="$(systemctl is-active "kldload-session@${KLDLOAD_SESSION_ID}.service" 2>/dev/null || echo unknown)"
-      printf '%s  %-10s  %-30s  port=%s  state=%s  opened=%s  user=%s\n' \
-        "${KLDLOAD_SESSION_ID}" \
-        "${KLDLOAD_SESSION_KIND}" \
-        "${KLDLOAD_SESSION_TARGET}" \
-        "${KLDLOAD_SESSION_PORT}" \
-        "${state}" \
-        "${KLDLOAD_SESSION_OPENED_AT}" \
-        "${KLDLOAD_SESSION_USER}"
-    )
-  done
-  [[ $any -eq 1 ]] || echo "(no active sessions)"
+    local any=0
+    shopt -s nullglob
+    for env in "${SESSION_DIR}"/*.env; do
+        any=1
+        # shellcheck disable=SC1090
+        (
+            source "$env"
+            state="$(systemctl is-active "kldload-session@${KLDLOAD_SESSION_ID}.service" 2>/dev/null || echo unknown)"
+            printf '%s  %-10s  %-30s  port=%s  state=%s  opened=%s  user=%s\n' \
+                "${KLDLOAD_SESSION_ID}" \
+                "${KLDLOAD_SESSION_KIND}" \
+                "${KLDLOAD_SESSION_TARGET}" \
+                "${KLDLOAD_SESSION_PORT}" \
+                "${state}" \
+                "${KLDLOAD_SESSION_OPENED_AT}" \
+                "${KLDLOAD_SESSION_USER}"
+        )
+    done
+    [[ $any -eq 1 ]] || echo "(no active sessions)"
 }
 
 # ──────────────────────────────────────────────────────────────────────
 # prune — remove dead session records (unit stopped, files lingering)
 # ──────────────────────────────────────────────────────────────────────
 cmd_prune() {
-  need_root
-  shopt -s nullglob
-  local cleaned=0
-  for env in "${SESSION_DIR}"/*.env; do
-    local id state
-    id="$(basename "$env" .env)"
-    state="$(systemctl is-active "kldload-session@${id}.service" 2>/dev/null || echo inactive)"
-    if [[ "$state" != "active" && "$state" != "activating" ]]; then
-      log "pruning dead session: $id ($state)"
-      cmd_close "$id" >/dev/null || true
-      cleaned=$((cleaned+1))
-    fi
-  done
-  log "pruned ${cleaned} session(s)"
+    need_root
+    shopt -s nullglob
+    local cleaned=0
+    for env in "${SESSION_DIR}"/*.env; do
+        local id state
+        id="$(basename "$env" .env)"
+        state="$(systemctl is-active "kldload-session@${id}.service" 2>/dev/null || echo inactive)"
+        if [[ "$state" != "active" && "$state" != "activating" ]]; then
+            log "pruning dead session: $id ($state)"
+            cmd_close "$id" >/dev/null || true
+            cleaned=$((cleaned + 1))
+        fi
+    done
+    log "pruned ${cleaned} session(s)"
 }
 
 usage() {
-  cat <<'EOUSE'
+    cat <<'EOUSE'
 kldload-session — short-lived terminal/console sessions behind nginx
 
 Usage:
@@ -365,16 +380,19 @@ EOUSE
 }
 
 main() {
-  local cmd="${1:-}"
-  [[ $# -ge 1 ]] && shift || true
-  case "$cmd" in
-    open)   cmd_open  "$@" ;;
-    close)  cmd_close "$@" ;;
-    list)   cmd_list  "$@" ;;
-    prune)  cmd_prune "$@" ;;
-    -h|--help|help|"") usage ;;
-    *) usage; exit 2 ;;
-  esac
+    local cmd="${1:-}"
+    [[ $# -ge 1 ]] && shift || true
+    case "$cmd" in
+    open) cmd_open "$@" ;;
+    close) cmd_close "$@" ;;
+    list) cmd_list "$@" ;;
+    prune) cmd_prune "$@" ;;
+    -h | --help | help | "") usage ;;
+    *)
+        usage
+        exit 2
+        ;;
+    esac
 }
 
 main "$@"

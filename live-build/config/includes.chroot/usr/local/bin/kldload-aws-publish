@@ -71,7 +71,12 @@
 
 set -euo pipefail
 
-C=$'\033[1;36m'; G=$'\033[1;32m'; Y=$'\033[33m'; R=$'\033[1;31m'; D=$'\033[2;37m'; N=$'\033[0m'
+C=$'\033[1;36m'
+G=$'\033[1;32m'
+Y=$'\033[33m'
+R=$'\033[1;31m'
+D=$'\033[2;37m'
+N=$'\033[0m'
 
 # ── Arg parsing ───────────────────────────────────────────────────────
 DISK=""
@@ -87,32 +92,84 @@ DRY_RUN=0
 JSON=0
 
 usage() {
-    sed -n '3,/^set -euo pipefail/{/^set -euo pipefail/q;p}' "$0" \
-        | sed 's/^# \?//'
+    sed -n '3,/^set -euo pipefail/{/^set -euo pipefail/q;p}' "$0" |
+        sed 's/^# \?//'
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --region)        REGION="$2"; shift 2 ;;
-        --bucket)        BUCKET="$2"; shift 2 ;;
-        --name)          AMI_NAME="$2"; shift 2 ;;
-        --profile)       KLDLOAD_PROFILE="$2"; shift 2 ;;
-        --description)   DESCRIPTION="$2"; shift 2 ;;
-        --copy-regions)  COPY_REGIONS="$2"; shift 2 ;;
-        --keep-s3)       KEEP_S3=1; shift ;;
-        --no-seal)       SEAL=0; shift ;;
-        --dry-run)       DRY_RUN=1; shift ;;
-        --json)          JSON=1; shift ;;
-        -h|--help)       usage; exit 0 ;;
-        --)              shift; break ;;
-        -*)              echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
-        *)               [[ -z "$DISK" ]] && { DISK="$1"; shift; } || \
-                            { echo "unexpected positional arg: $1" >&2; exit 2; } ;;
+    --region)
+        REGION="$2"
+        shift 2
+        ;;
+    --bucket)
+        BUCKET="$2"
+        shift 2
+        ;;
+    --name)
+        AMI_NAME="$2"
+        shift 2
+        ;;
+    --profile)
+        KLDLOAD_PROFILE="$2"
+        shift 2
+        ;;
+    --description)
+        DESCRIPTION="$2"
+        shift 2
+        ;;
+    --copy-regions)
+        COPY_REGIONS="$2"
+        shift 2
+        ;;
+    --keep-s3)
+        KEEP_S3=1
+        shift
+        ;;
+    --no-seal)
+        SEAL=0
+        shift
+        ;;
+    --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+    --json)
+        JSON=1
+        shift
+        ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    --)
+        shift
+        break
+        ;;
+    -*)
+        echo "unknown flag: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+    *) [[ -z "$DISK" ]] && {
+        DISK="$1"
+        shift
+    } ||
+        {
+            echo "unexpected positional arg: $1" >&2
+            exit 2
+        } ;;
     esac
 done
 
-[[ -n "$DISK" ]]               || { usage >&2; exit 2; }
-[[ -b "$DISK" || -f "$DISK" ]] || { echo "ERROR: $DISK is not a block device or file" >&2; exit 1; }
+[[ -n "$DISK" ]] || {
+    usage >&2
+    exit 2
+}
+[[ -b "$DISK" || -f "$DISK" ]] || {
+    echo "ERROR: $DISK is not a block device or file" >&2
+    exit 1
+}
 
 # ── Output helpers ────────────────────────────────────────────────────
 say() {
@@ -122,8 +179,9 @@ say() {
 say_event() {
     # machine-readable event for the web UI to render as a progress step.
     # one JSON object per line on stderr.
-    if (( JSON )); then
-        local kind="$1"; shift
+    if ((JSON)); then
+        local kind="$1"
+        shift
         local msg="$*"
         # crude JSON encoding — escape backslashes + quotes
         msg=${msg//\\/\\\\}
@@ -140,18 +198,18 @@ die() {
 
 # ── Dependency checks ────────────────────────────────────────────────
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 not found on PATH — install $2"; }
-need aws       "AWS CLI v2 (https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)"
-need qemu-img  "qemu-img (package: qemu-img on RHEL/Fedora, qemu-utils on Debian/Ubuntu)"
-if (( SEAL )); then
+need aws "AWS CLI v2 (https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)"
+need qemu-img "qemu-img (package: qemu-img on RHEL/Fedora, qemu-utils on Debian/Ubuntu)"
+if ((SEAL)); then
     [[ -x /usr/local/bin/kldload-seal ]] || die "/usr/local/bin/kldload-seal not found — install kldload >= 1.1.0 or pass --no-seal"
 fi
 
 # ── Credential + region detection ─────────────────────────────────────
 say "checking AWS credentials"
 say_event step "checking AWS credentials"
-if (( ! DRY_RUN )); then
-    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
-        || die "aws sts get-caller-identity failed — credentials missing or invalid. Configure via env (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY), ~/.aws/credentials, or an EC2 instance role."
+if ((!DRY_RUN)); then
+    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) ||
+        die "aws sts get-caller-identity failed — credentials missing or invalid. Configure via env (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY), ~/.aws/credentials, or an EC2 instance role."
     CALLER=$(aws sts get-caller-identity --query Arn --output text 2>/dev/null)
     say "  authenticated as $CALLER (account $ACCOUNT_ID)"
 else
@@ -179,10 +237,10 @@ fi
 [[ -n "$DESCRIPTION" ]] || DESCRIPTION="kldload ${KLDLOAD_PROFILE} profile, sealed $(date -Iseconds), source: $(hostname)"
 
 # ── Stage 1: seal ─────────────────────────────────────────────────────
-if (( SEAL )); then
+if ((SEAL)); then
     say "stage 1/5 — sealing source disk"
     say_event step "seal"
-    if (( DRY_RUN )); then
+    if ((DRY_RUN)); then
         say "  (dry-run) would run: kldload-seal $DISK"
     else
         /usr/local/bin/kldload-seal "$DISK" || die "kldload-seal failed; refusing to ship an unsealed AMI. If you really want a 1:1 clone, re-run with --no-seal."
@@ -199,40 +257,40 @@ RAW_NAME="${AMI_NAME}.raw"
 
 say "stage 2/5 — converting source to raw at $RAW_TMP"
 say_event step "convert-raw"
-if (( DRY_RUN )); then
+if ((DRY_RUN)); then
     say "  (dry-run) would run: qemu-img convert -p -f raw -O raw $DISK $RAW_TMP"
 else
-    qemu-img convert -p -f raw -O raw "$DISK" "$RAW_TMP" \
-        || die "qemu-img convert failed"
+    qemu-img convert -p -f raw -O raw "$DISK" "$RAW_TMP" ||
+        die "qemu-img convert failed"
     say "  raw image: $(du -h "$RAW_TMP" | cut -f1)"
 fi
 
 # ── Stage 3: S3 upload ────────────────────────────────────────────────
 say "stage 3/5 — uploading raw to s3://${BUCKET}/${RAW_NAME}"
 say_event step "s3-upload"
-if (( DRY_RUN )); then
+if ((DRY_RUN)); then
     say "  (dry-run) would create bucket if missing + aws s3 cp"
 else
     # Auto-create bucket if it doesn't exist
     if ! aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null; then
         say "  bucket $BUCKET not found — creating"
         if [[ "$REGION" == "us-east-1" ]]; then
-            aws s3api create-bucket --bucket "$BUCKET" --region us-east-1 \
-                || die "failed to create bucket $BUCKET"
+            aws s3api create-bucket --bucket "$BUCKET" --region us-east-1 ||
+                die "failed to create bucket $BUCKET"
         else
             aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
-                --create-bucket-configuration LocationConstraint="$REGION" \
-                || die "failed to create bucket $BUCKET"
+                --create-bucket-configuration LocationConstraint="$REGION" ||
+                die "failed to create bucket $BUCKET"
         fi
     fi
-    aws s3 cp "$RAW_TMP" "s3://${BUCKET}/${RAW_NAME}" --region "$REGION" \
-        || die "s3 upload failed"
+    aws s3 cp "$RAW_TMP" "s3://${BUCKET}/${RAW_NAME}" --region "$REGION" ||
+        die "s3 upload failed"
 fi
 
 # ── Stage 4: import-snapshot ─────────────────────────────────────────
 say "stage 4/5 — importing as EBS snapshot (this takes 10-30 min)"
 say_event step "import-snapshot"
-if (( DRY_RUN )); then
+if ((DRY_RUN)); then
     say "  (dry-run) would call aws ec2 import-snapshot + poll until completed"
     SNAPSHOT_ID="snap-DRYRUN"
 else
@@ -240,8 +298,8 @@ else
         --region "$REGION" \
         --description "$DESCRIPTION" \
         --disk-container "Format=raw,UserBucket={S3Bucket=${BUCKET},S3Key=${RAW_NAME}}" \
-        --query 'ImportTaskId' --output text) \
-        || die "import-snapshot failed to enqueue"
+        --query 'ImportTaskId' --output text) ||
+        die "import-snapshot failed to enqueue"
     say "  import task: $IMPORT_TASK"
     say_event import-task "$IMPORT_TASK"
 
@@ -251,8 +309,8 @@ else
             --region "$REGION" \
             --import-task-ids "$IMPORT_TASK" \
             --query 'ImportSnapshotTasks[0].SnapshotTaskDetail.{S:Status,P:Progress,M:StatusMessage,Sn:SnapshotId}' \
-            --output json 2>/dev/null) \
-            || die "describe-import-snapshot-tasks failed"
+            --output json 2>/dev/null) ||
+            die "describe-import-snapshot-tasks failed"
         STATUS=$(echo "$STATUS_LINE" | jq -r .S 2>/dev/null || echo unknown)
         PROGRESS=$(echo "$STATUS_LINE" | jq -r .P 2>/dev/null || echo "?")
         MSG=$(echo "$STATUS_LINE" | jq -r .M 2>/dev/null || echo "")
@@ -262,8 +320,11 @@ else
         say_event import-progress "$STATUS $PROGRESS%"
 
         case "$STATUS" in
-            completed) say "  snapshot ready: $SNAPSHOT_ID"; break ;;
-            deleted|deleting|cancelled|cancelling) die "import task ended with status: $STATUS ($MSG)" ;;
+        completed)
+            say "  snapshot ready: $SNAPSHOT_ID"
+            break
+            ;;
+        deleted | deleting | cancelled | cancelling) die "import task ended with status: $STATUS ($MSG)" ;;
         esac
         sleep 30
     done
@@ -272,7 +333,7 @@ fi
 # ── Stage 5: register AMI ────────────────────────────────────────────
 say "stage 5/5 — registering AMI"
 say_event step "register-image"
-if (( DRY_RUN )); then
+if ((DRY_RUN)); then
     AMI_ID="ami-DRYRUN"
     say "  (dry-run) would register AMI $AMI_NAME backed by $SNAPSHOT_ID"
 else
@@ -287,36 +348,36 @@ else
         --sriov-net-support simple \
         --boot-mode uefi-preferred \
         --block-device-mappings "DeviceName=/dev/xvda,Ebs={SnapshotId=${SNAPSHOT_ID},VolumeType=gp3,DeleteOnTermination=true}" \
-        --query 'ImageId' --output text) \
-        || die "register-image failed"
+        --query 'ImageId' --output text) ||
+        die "register-image failed"
     say "  AMI registered: $AMI_ID"
 
     # Tag it for findability
     aws ec2 create-tags --region "$REGION" --resources "$AMI_ID" \
         --tags \
-            Key=kldload-profile,Value="$KLDLOAD_PROFILE" \
-            Key=kldload-version,Value="1.1.0" \
-            Key=kldload-sealed-at,Value="$(date -Iseconds)" \
-            Key=kldload-source-host,Value="$(hostname)" \
+        Key=kldload-profile,Value="$KLDLOAD_PROFILE" \
+        Key=kldload-version,Value="1.1.0" \
+        Key=kldload-sealed-at,Value="$(date -Iseconds)" \
+        Key=kldload-source-host,Value="$(hostname)" \
         2>/dev/null || say "  (warn) failed to tag AMI — non-fatal"
 fi
 say_event ami-registered "$AMI_ID"
 
 # ── Optional cleanup ──────────────────────────────────────────────────
-if (( ! KEEP_S3 && ! DRY_RUN )); then
+if ((!KEEP_S3 && !DRY_RUN)); then
     say "removing staged S3 object (use --keep-s3 to retain)"
     aws s3 rm "s3://${BUCKET}/${RAW_NAME}" --region "$REGION" 2>/dev/null || say "  (warn) S3 cleanup failed — non-fatal"
 fi
 
 # ── Optional copy to other regions ────────────────────────────────────
-echo "$AMI_ID"   # primary AMI ID on stdout first
+echo "$AMI_ID" # primary AMI ID on stdout first
 
 if [[ -n "$COPY_REGIONS" ]]; then
-    IFS=',' read -ra REGIONS <<< "$COPY_REGIONS"
+    IFS=',' read -ra REGIONS <<<"$COPY_REGIONS"
     for dst in "${REGIONS[@]}"; do
         say "copying AMI to $dst"
         say_event step "copy-image-${dst}"
-        if (( DRY_RUN )); then
+        if ((DRY_RUN)); then
             say "  (dry-run) would copy $AMI_ID from $REGION to $dst"
             echo "ami-COPYDRYRUN-${dst}"
         else
@@ -326,8 +387,11 @@ if [[ -n "$COPY_REGIONS" ]]; then
                 --source-image-id "$AMI_ID" \
                 --name "$AMI_NAME" \
                 --description "$DESCRIPTION (copied from $REGION)" \
-                --query 'ImageId' --output text) \
-                || { say "  (warn) copy to $dst failed"; continue; }
+                --query 'ImageId' --output text) ||
+                {
+                    say "  (warn) copy to $dst failed"
+                    continue
+                }
             say "  $dst: $COPY_ID"
             say_event ami-copied "${dst}=${COPY_ID}"
             echo "$COPY_ID"

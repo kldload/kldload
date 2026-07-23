@@ -5,17 +5,23 @@ set -uo pipefail
 
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
-C="\033[1;36m"; G="\033[1;32m"; Y="\033[1;33m"; R="\033[1;31m"
-W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"
+C="\033[1;36m"
+G="\033[1;32m"
+Y="\033[1;33m"
+R="\033[1;31m"
+W="\033[1;37m"
+D="\033[0;37m"
+N="\033[0m"
 
-_dot_ok()   { echo -e "${G}●${N}"; }
+_dot_ok() { echo -e "${G}●${N}"; }
 _dot_warn() { echo -e "${Y}○${N}"; }
 _dot_fail() { echo -e "${R}✗${N}"; }
 
 # ── Header ─────────────────────────────────────────────────────
 clear
 HOSTNAME="$(hostname)"
-DISTRO="unknown"; [[ -f /etc/os-release ]] && DISTRO="$(. /etc/os-release && echo "$PRETTY_NAME")"
+DISTRO="unknown"
+[[ -f /etc/os-release ]] && DISTRO="$(. /etc/os-release && echo "$PRETTY_NAME")"
 KERNEL="$(uname -r)"
 UPTIME="$(uptime -p 2>/dev/null | sed 's/up //')"
 CPU="$(nproc) cores"
@@ -35,66 +41,67 @@ echo ""
 # ── ZFS ────────────────────────────────────────────────────────
 echo -e "${W}  ZFS Storage${N}"
 if command -v zpool >/dev/null 2>&1 && zpool list >/dev/null 2>&1; then
-  while IFS=$'\t' read -r name size alloc free health; do
-    if [[ "$health" == "ONLINE" ]]; then
-      echo -e "    $(_dot_ok) ${C}${name}${N}  ${size}  (${alloc} used, ${free} free)"
-    else
-      echo -e "    $(_dot_fail) ${C}${name}${N}  ${size}  ${health}"
-    fi
-  done < <(zpool list -H -o name,size,alloc,free,health 2>/dev/null)
-  snaps="$(zfs list -t snapshot -H 2>/dev/null | wc -l)"
-  datasets="$(zfs list -H 2>/dev/null | wc -l)"
-  echo -e "    ${D}${datasets} datasets, ${snaps} snapshots${N}"
+    while IFS=$'\t' read -r name size alloc free health; do
+        if [[ "$health" == "ONLINE" ]]; then
+            echo -e "    $(_dot_ok) ${C}${name}${N}  ${size}  (${alloc} used, ${free} free)"
+        else
+            echo -e "    $(_dot_fail) ${C}${name}${N}  ${size}  ${health}"
+        fi
+    done < <(zpool list -H -o name,size,alloc,free,health 2>/dev/null)
+    snaps="$(zfs list -t snapshot -H 2>/dev/null | wc -l)"
+    datasets="$(zfs list -H 2>/dev/null | wc -l)"
+    echo -e "    ${D}${datasets} datasets, ${snaps} snapshots${N}"
 else
-  echo -e "    $(_dot_fail) No ZFS pools"
+    echo -e "    $(_dot_fail) No ZFS pools"
 fi
 echo ""
 
 # ── KVM Virtual Machines ──────────────────────────────────────
 echo -e "${W}  KVM Virtual Machines${N}"
 if command -v virsh >/dev/null 2>&1; then
-  running=0; stopped=0
-  while read -r vmname; do
-    [[ -z "$vmname" ]] && continue
-    vmstate="$(virsh domstate "$vmname" 2>/dev/null)"
-    if [[ "$vmstate" == "running" ]]; then
-      mac="$(virsh domiflist "$vmname" 2>/dev/null | awk '/bridge/ {print $5}')"
-      ip=""
-      [[ -n "$mac" ]] && ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
-      ram="$(virsh dominfo "$vmname" 2>/dev/null | awk '/Used memory/ {printf "%.0fMB", $3/1024}')"
-      vcpus="$(virsh dominfo "$vmname" 2>/dev/null | awk '/CPU\(s\)/ {print $2}')"
-      echo -e "    $(_dot_ok) ${G}${vmname}${N}  ${ip:-no-ip}  ${ram}  ${vcpus}vCPU"
-      ((running++))
-    else
-      echo -e "    $(_dot_warn) ${D}${vmname}${N}  ${vmstate}"
-      ((stopped++))
-    fi
-  done < <(virsh list --all --name 2>/dev/null | grep -v '^$')
-  [[ $running -eq 0 && $stopped -eq 0 ]] && echo -e "    ${D}No VMs${N}"
-  echo -e "    ${D}${running} running, ${stopped} stopped${N}"
+    running=0
+    stopped=0
+    while read -r vmname; do
+        [[ -z "$vmname" ]] && continue
+        vmstate="$(virsh domstate "$vmname" 2>/dev/null)"
+        if [[ "$vmstate" == "running" ]]; then
+            mac="$(virsh domiflist "$vmname" 2>/dev/null | awk '/bridge/ {print $5}')"
+            ip=""
+            [[ -n "$mac" ]] && ip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
+            ram="$(virsh dominfo "$vmname" 2>/dev/null | awk '/Used memory/ {printf "%.0fMB", $3/1024}')"
+            vcpus="$(virsh dominfo "$vmname" 2>/dev/null | awk '/CPU\(s\)/ {print $2}')"
+            echo -e "    $(_dot_ok) ${G}${vmname}${N}  ${ip:-no-ip}  ${ram}  ${vcpus}vCPU"
+            ((running++))
+        else
+            echo -e "    $(_dot_warn) ${D}${vmname}${N}  ${vmstate}"
+            ((stopped++))
+        fi
+    done < <(virsh list --all --name 2>/dev/null | grep -v '^$')
+    [[ $running -eq 0 && $stopped -eq 0 ]] && echo -e "    ${D}No VMs${N}"
+    echo -e "    ${D}${running} running, ${stopped} stopped${N}"
 else
-  echo -e "    ${D}libvirt not installed${N}"
+    echo -e "    ${D}libvirt not installed${N}"
 fi
 echo ""
 
 # ── Podman Containers ─────────────────────────────────────────
 echo -e "${W}  Podman Containers${N}"
 if command -v podman >/dev/null 2>&1; then
-  ctr_count=0
-  while read -r line; do
-    [[ -z "$line" ]] && continue
-    ctr_name="$(echo "$line" | awk '{print $1}')"
-    ctr_status="$(echo "$line" | cut -d' ' -f2-)"
-    if [[ "$ctr_status" == *"Up"* ]]; then
-      echo -e "    $(_dot_ok) ${G}${ctr_name}${N}  ${ctr_status}"
-    else
-      echo -e "    $(_dot_warn) ${D}${ctr_name}${N}  ${ctr_status}"
-    fi
-    ((ctr_count++)) || true
-  done < <(podman ps -a --format "{{.Names}} {{.Status}}" 2>/dev/null)
-  [[ $ctr_count -eq 0 ]] && echo -e "    ${D}No containers${N}"
+    ctr_count=0
+    while read -r line; do
+        [[ -z "$line" ]] && continue
+        ctr_name="$(echo "$line" | awk '{print $1}')"
+        ctr_status="$(echo "$line" | cut -d' ' -f2-)"
+        if [[ "$ctr_status" == *"Up"* ]]; then
+            echo -e "    $(_dot_ok) ${G}${ctr_name}${N}  ${ctr_status}"
+        else
+            echo -e "    $(_dot_warn) ${D}${ctr_name}${N}  ${ctr_status}"
+        fi
+        ((ctr_count++)) || true
+    done < <(podman ps -a --format "{{.Names}} {{.Status}}" 2>/dev/null)
+    [[ $ctr_count -eq 0 ]] && echo -e "    ${D}No containers${N}"
 else
-  echo -e "    ${D}podman not installed${N}"
+    echo -e "    ${D}podman not installed${N}"
 fi
 echo ""
 
@@ -105,98 +112,98 @@ cp_ip=""
 
 # Check if we ARE the control plane
 if [[ -f /etc/kubernetes/admin.conf ]]; then
-  export KUBECONFIG=/etc/kubernetes/admin.conf
-  k8s_found=true
-  cp_ip="localhost"
+    export KUBECONFIG=/etc/kubernetes/admin.conf
+    k8s_found=true
+    cp_ip="localhost"
 fi
 
 # Check VMs for control plane
 if [[ "$k8s_found" == "false" ]] && command -v virsh >/dev/null 2>&1; then
-  for vm in $(virsh list --name 2>/dev/null | grep -v '^$'); do
-    mac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}')"
-    vip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
-    if [[ -n "$vip" ]] && sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 \
-      "root@${vip}" "test -f /etc/kubernetes/admin.conf" 2>/dev/null; then
-      cp_ip="$vip"
-      k8s_found=true
-      break
-    fi
-  done
+    for vm in $(virsh list --name 2>/dev/null | grep -v '^$'); do
+        mac="$(virsh domiflist "$vm" 2>/dev/null | awk '/bridge/ {print $5}')"
+        vip="$(virsh net-dhcp-leases default 2>/dev/null | grep "$mac" | awk '{print $5}' | cut -d/ -f1)"
+        if [[ -n "$vip" ]] && sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 \
+            "root@${vip}" "test -f /etc/kubernetes/admin.conf" 2>/dev/null; then
+            cp_ip="$vip"
+            k8s_found=true
+            break
+        fi
+    done
 fi
 
 if [[ "$k8s_found" == "true" && -n "$cp_ip" ]]; then
-  _kctl() {
-    if [[ "$cp_ip" == "localhost" ]]; then
-      kubectl "$@" 2>/dev/null
-    else
-      sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-        "root@${cp_ip}" "kubectl $*" 2>/dev/null
-    fi
-  }
+    _kctl() {
+        if [[ "$cp_ip" == "localhost" ]]; then
+            kubectl "$@" 2>/dev/null
+        else
+            sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+                "root@${cp_ip}" "kubectl $*" 2>/dev/null
+        fi
+    }
 
-  [[ "$cp_ip" != "localhost" ]] && echo -e "    ${D}Control plane: ${cp_ip}${N}"
+    [[ "$cp_ip" != "localhost" ]] && echo -e "    ${D}Control plane: ${cp_ip}${N}"
 
-  # Nodes
-  while read -r nname nstatus nroles nage nver; do
-    [[ -z "$nname" ]] && continue
-    if [[ "$nstatus" == "Ready" ]]; then
-      echo -e "    $(_dot_ok) ${G}${nname}${N}  ${nstatus}  ${nroles}  ${nver}"
-    else
-      echo -e "    $(_dot_fail) ${R}${nname}${N}  ${nstatus}  ${nroles}  ${nver}"
-    fi
-  done < <(_kctl get nodes --no-headers)
+    # Nodes
+    while read -r nname nstatus nroles nage nver; do
+        [[ -z "$nname" ]] && continue
+        if [[ "$nstatus" == "Ready" ]]; then
+            echo -e "    $(_dot_ok) ${G}${nname}${N}  ${nstatus}  ${nroles}  ${nver}"
+        else
+            echo -e "    $(_dot_fail) ${R}${nname}${N}  ${nstatus}  ${nroles}  ${nver}"
+        fi
+    done < <(_kctl get nodes --no-headers)
 
-  # Stack components
-  cilium="$(_kctl get pods -n kube-system -l k8s-app=cilium --no-headers | grep -c Running || echo 0)"
-  hubble="$(_kctl get pods -n kube-system -l k8s-app=hubble-relay --no-headers | grep -c Running || echo 0)"
-  metallb="$(_kctl get pods -n metallb-system --no-headers | grep -c Running || echo 0)"
-  coredns="$(_kctl get pods -n kube-system -l k8s-app=kube-dns --no-headers | grep -c Running || echo 0)"
-  zfscsi="$(_kctl get pods -n openebs --no-headers 2>/dev/null | grep -c Running)" || zfscsi=0
+    # Stack components
+    cilium="$(_kctl get pods -n kube-system -l k8s-app=cilium --no-headers | grep -c Running || echo 0)"
+    hubble="$(_kctl get pods -n kube-system -l k8s-app=hubble-relay --no-headers | grep -c Running || echo 0)"
+    metallb="$(_kctl get pods -n metallb-system --no-headers | grep -c Running || echo 0)"
+    coredns="$(_kctl get pods -n kube-system -l k8s-app=kube-dns --no-headers | grep -c Running || echo 0)"
+    zfscsi="$(_kctl get pods -n openebs --no-headers 2>/dev/null | grep -c Running)" || zfscsi=0
 
-  echo ""
-  echo -e "    ${D}Stack:${N}"
-  [[ "$cilium" -gt 0 ]] && echo -e "    $(_dot_ok) Cilium eBPF (${cilium} pods)" || echo -e "    $(_dot_fail) Cilium"
-  [[ "$hubble" -gt 0 ]] && echo -e "    $(_dot_ok) Hubble (relay + UI)" || echo -e "    $(_dot_warn) Hubble"
-  [[ "$metallb" -gt 0 ]] && echo -e "    $(_dot_ok) MetalLB (${metallb} pods)" || echo -e "    $(_dot_warn) MetalLB"
-  [[ "$coredns" -gt 0 ]] && echo -e "    $(_dot_ok) CoreDNS (${coredns} pods)" || echo -e "    $(_dot_fail) CoreDNS"
-  [[ "$zfscsi" -gt 0 ]] && echo -e "    $(_dot_ok) ZFS CSI (${zfscsi} pods)" || echo -e "    $(_dot_warn) ZFS CSI"
+    echo ""
+    echo -e "    ${D}Stack:${N}"
+    [[ "$cilium" -gt 0 ]] && echo -e "    $(_dot_ok) Cilium eBPF (${cilium} pods)" || echo -e "    $(_dot_fail) Cilium"
+    [[ "$hubble" -gt 0 ]] && echo -e "    $(_dot_ok) Hubble (relay + UI)" || echo -e "    $(_dot_warn) Hubble"
+    [[ "$metallb" -gt 0 ]] && echo -e "    $(_dot_ok) MetalLB (${metallb} pods)" || echo -e "    $(_dot_warn) MetalLB"
+    [[ "$coredns" -gt 0 ]] && echo -e "    $(_dot_ok) CoreDNS (${coredns} pods)" || echo -e "    $(_dot_fail) CoreDNS"
+    [[ "$zfscsi" -gt 0 ]] && echo -e "    $(_dot_ok) ZFS CSI (${zfscsi} pods)" || echo -e "    $(_dot_warn) ZFS CSI"
 else
-  echo -e "    ${D}No cluster running${N}"
-  echo -e "    ${D}Deploy: kube-cluster bootstrap --workers 3${N}"
+    echo -e "    ${D}No cluster running${N}"
+    echo -e "    ${D}Deploy: kube-cluster bootstrap --workers 3${N}"
 fi
 echo ""
 
 # ── GPU ───────────────────────────────────────────────────────
 echo -e "${W}  GPU${N}"
 if command -v nvidia-smi >/dev/null 2>&1; then
-  gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)"
-  gpu_temp="$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null)"
-  gpu_power="$(nvidia-smi --query-gpu=power.draw --format=csv,noheader 2>/dev/null)"
-  gpu_mem="$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null)"
-  echo -e "    $(_dot_ok) ${G}${gpu_name}${N}  ${gpu_temp}°C  ${gpu_power}  ${gpu_mem}"
-  gpu_procs="$(nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv,noheader 2>/dev/null | wc -l)"
-  echo -e "    ${D}${gpu_procs} compute processes${N}"
+    gpu_name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null)"
+    gpu_temp="$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null)"
+    gpu_power="$(nvidia-smi --query-gpu=power.draw --format=csv,noheader 2>/dev/null)"
+    gpu_mem="$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null)"
+    echo -e "    $(_dot_ok) ${G}${gpu_name}${N}  ${gpu_temp}°C  ${gpu_power}  ${gpu_mem}"
+    gpu_procs="$(nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv,noheader 2>/dev/null | wc -l)"
+    echo -e "    ${D}${gpu_procs} compute processes${N}"
 else
-  echo -e "    ${D}No NVIDIA GPU${N}"
+    echo -e "    ${D}No NVIDIA GPU${N}"
 fi
 echo ""
 
 # ── Network ───────────────────────────────────────────────────
 echo -e "${W}  Network${N}"
 while read -r iface ip; do
-  echo -e "    $(_dot_ok) ${C}${iface}${N}  ${ip}"
+    echo -e "    $(_dot_ok) ${C}${iface}${N}  ${ip}"
 done < <(ip -4 addr show scope global 2>/dev/null | awk '/inet / {split($2,a,"/"); print $NF, a[1]}')
 if command -v wg >/dev/null 2>&1; then
-  wg_ifaces="$(wg show interfaces 2>/dev/null || true)"
-  if [[ -n "$wg_ifaces" ]]; then
-    for wgi in $wg_ifaces; do
-      wg_ip="$(ip -4 addr show "$wgi" 2>/dev/null | awk '/inet / {print $2}')"
-      peers="$(wg show "$wgi" peers 2>/dev/null | wc -l)"
-      echo -e "    $(_dot_ok) ${C}${wgi}${N}  ${wg_ip}  (${peers} peers)"
-    done
-  elif [[ -d /etc/wireguard ]]; then
-    echo -e "    $(_dot_warn) WireGuard configured but not active"
-  fi
+    wg_ifaces="$(wg show interfaces 2>/dev/null || true)"
+    if [[ -n "$wg_ifaces" ]]; then
+        for wgi in $wg_ifaces; do
+            wg_ip="$(ip -4 addr show "$wgi" 2>/dev/null | awk '/inet / {print $2}')"
+            peers="$(wg show "$wgi" peers 2>/dev/null | wc -l)"
+            echo -e "    $(_dot_ok) ${C}${wgi}${N}  ${wg_ip}  (${peers} peers)"
+        done
+    elif [[ -d /etc/wireguard ]]; then
+        echo -e "    $(_dot_warn) WireGuard configured but not active"
+    fi
 fi
 echo ""
 
@@ -204,13 +211,16 @@ echo ""
 echo -e "${W}  eBPF${N}"
 has_ebpf=false
 if command -v bpftool >/dev/null 2>&1; then
-  echo -e "    $(_dot_ok) bpftool"; has_ebpf=true
+    echo -e "    $(_dot_ok) bpftool"
+    has_ebpf=true
 fi
 if [[ -d /usr/share/bcc/tools ]] || compgen -G '/usr/sbin/*-bpfcc' >/dev/null 2>&1; then
-  echo -e "    $(_dot_ok) bcc-tools"; has_ebpf=true
+    echo -e "    $(_dot_ok) bcc-tools"
+    has_ebpf=true
 fi
 if command -v bpftrace >/dev/null 2>&1; then
-  echo -e "    $(_dot_ok) bpftrace"; has_ebpf=true
+    echo -e "    $(_dot_ok) bpftrace"
+    has_ebpf=true
 fi
 [[ "$has_ebpf" == "false" ]] && echo -e "    ${D}eBPF tools not installed${N}"
 echo ""
@@ -218,13 +228,13 @@ echo ""
 # ── Services ──────────────────────────────────────────────────
 echo -e "${W}  Services${N}"
 for svc in kldload-webui libvirtd sshd zfs-zed; do
-  state="$(systemctl is-active "$svc" 2>/dev/null || echo 'n/a')"
-  case "$state" in
-    active)   echo -e "    $(_dot_ok) ${svc}" ;;
+    state="$(systemctl is-active "$svc" 2>/dev/null || echo 'n/a')"
+    case "$state" in
+    active) echo -e "    $(_dot_ok) ${svc}" ;;
     inactive) echo -e "    $(_dot_warn) ${svc} (stopped)" ;;
-    n/a)      ;; # skip missing
-    *)        echo -e "    $(_dot_fail) ${svc} (${state})" ;;
-  esac
+    n/a) ;; # skip missing
+    *) echo -e "    $(_dot_fail) ${svc} (${state})" ;;
+    esac
 done
 echo ""
 

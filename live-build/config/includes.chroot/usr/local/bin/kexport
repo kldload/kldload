@@ -16,61 +16,75 @@ set -euo pipefail
 
 # Parse positional args (DISK, FMT, OUTDIR) and a --no-seal flag in any
 # order. Defaults: OUTDIR=/root/exports, sealing ON.
-DISK=""; FMT=""; OUTDIR="/root/exports"; SEAL=1
+DISK=""
+FMT=""
+OUTDIR="/root/exports"
+SEAL=1
 for a in "$@"; do
     case "$a" in
-        --no-seal) SEAL=0 ;;
-        --seal)    SEAL=1 ;;
-        -h|--help) :;;  # handled below
-        *)
-            if   [[ -z "$DISK" ]]; then DISK="$a"
-            elif [[ -z "$FMT" ]];  then FMT="$a"
-            else OUTDIR="$a"; fi
-            ;;
+    --no-seal) SEAL=0 ;;
+    --seal) SEAL=1 ;;
+    -h | --help) : ;; # handled below
+    *)
+        if [[ -z "$DISK" ]]; then
+            DISK="$a"
+        elif [[ -z "$FMT" ]]; then
+            FMT="$a"
+        else OUTDIR="$a"; fi
+        ;;
     esac
 done
 NAME="${KEXPORT_NAME:-kldload-export-$(date -u +%Y%m%d-%H%M)}"
 
 usage() {
-  echo "kexport — export a disk image (sealed by default)"
-  echo ""
-  echo "Usage: kexport <disk> <format> [output-dir] [--seal | --no-seal]"
-  echo ""
-  echo "VM formats (whole-disk):"
-  echo "  qcow2    KVM / Proxmox / OpenStack (compressed)"
-  echo "  raw      dd-ready sparse disk image"
-  echo "  vhd      Azure / Hyper-V"
-  echo "  vmdk     VMware ESXi / vSphere"
-  echo "  ova      VMware / VirtualBox portable (OVF + VMDK tar)"
-  echo ""
-  echo "Container / microVM formats (rootfs extracted):"
-  echo "  oci          Docker image tarball (docker load / podman load)"
-  echo "  lxc          LXC template tarball (lxc-create -t local)"
-  echo "  firecracker  Linux kernel + ext4 rootfs + firecracker config.json"
-  echo ""
-  echo "  all      Export all VM formats (qcow2+raw+vhd+vmdk+ova)"
-  echo ""
-  echo "Sealing:"
-  echo "  By default kexport runs kldload-seal on the source disk before"
-  echo "  conversion so the output is a portable golden — no machine-id,"
-  echo "  no ssh host keys, no hostid, no cloud-init seed state carry-over."
-  echo "  Pass --no-seal to skip (raw 1:1 clone of the source, suitable"
-  echo "  for VM migration but NOT for fleet deployment)."
-  echo ""
-  echo "Examples:"
-  echo "  kexport /dev/sda qcow2                # sealed by default"
-  echo "  kexport /dev/vda all /home/live/Desktop"
-  echo "  kexport /dev/sda qcow2 --no-seal      # 1:1 clone, no sysprep"
-  echo "  kexport /dev/sda oci                  # → docker-loadable tar.gz"
-  echo "  kexport /dev/sda firecracker          # → kernel + rootfs.ext4 + json"
-  echo "  KEXPORT_NAME=myserver kexport /dev/sda vmdk"
+    echo "kexport — export a disk image (sealed by default)"
+    echo ""
+    echo "Usage: kexport <disk> <format> [output-dir] [--seal | --no-seal]"
+    echo ""
+    echo "VM formats (whole-disk):"
+    echo "  qcow2    KVM / Proxmox / OpenStack (compressed)"
+    echo "  raw      dd-ready sparse disk image"
+    echo "  vhd      Azure / Hyper-V"
+    echo "  vmdk     VMware ESXi / vSphere"
+    echo "  ova      VMware / VirtualBox portable (OVF + VMDK tar)"
+    echo ""
+    echo "Container / microVM formats (rootfs extracted):"
+    echo "  oci          Docker image tarball (docker load / podman load)"
+    echo "  lxc          LXC template tarball (lxc-create -t local)"
+    echo "  firecracker  Linux kernel + ext4 rootfs + firecracker config.json"
+    echo ""
+    echo "  all      Export all VM formats (qcow2+raw+vhd+vmdk+ova)"
+    echo ""
+    echo "Sealing:"
+    echo "  By default kexport runs kldload-seal on the source disk before"
+    echo "  conversion so the output is a portable golden — no machine-id,"
+    echo "  no ssh host keys, no hostid, no cloud-init seed state carry-over."
+    echo "  Pass --no-seal to skip (raw 1:1 clone of the source, suitable"
+    echo "  for VM migration but NOT for fleet deployment)."
+    echo ""
+    echo "Examples:"
+    echo "  kexport /dev/sda qcow2                # sealed by default"
+    echo "  kexport /dev/vda all /home/live/Desktop"
+    echo "  kexport /dev/sda qcow2 --no-seal      # 1:1 clone, no sysprep"
+    echo "  kexport /dev/sda oci                  # → docker-loadable tar.gz"
+    echo "  kexport /dev/sda firecracker          # → kernel + rootfs.ext4 + json"
+    echo "  KEXPORT_NAME=myserver kexport /dev/sda vmdk"
 }
 
-die() { echo "ERROR: $*" >&2; exit 1; }
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
 log() { echo "[kexport] $*"; }
 
-[[ -n "$DISK" ]] || { usage; exit 1; }
-[[ -n "$FMT" ]]  || { usage; exit 1; }
+[[ -n "$DISK" ]] || {
+    usage
+    exit 1
+}
+[[ -n "$FMT" ]] || {
+    usage
+    exit 1
+}
 [[ -b "$DISK" || -f "$DISK" ]] || die "$DISK is not a block device or file"
 command -v qemu-img >/dev/null || die "qemu-img not found — install qemu-img"
 
@@ -83,7 +97,7 @@ mkdir -p "$OUTDIR"
 # --no-seal for the case where you genuinely want a 1:1 clone (VM
 # migration, forensic capture). See /usr/local/bin/kldload-seal for
 # what gets stripped.
-if (( SEAL )); then
+if ((SEAL)); then
     if [[ ! -x /usr/local/bin/kldload-seal ]]; then
         die "sealing requested but /usr/local/bin/kldload-seal not found — install kldload >= 1.1.0 or pass --no-seal"
     fi
@@ -96,40 +110,40 @@ else
 fi
 
 do_export() {
-  local fmt="$1"
-  case "$fmt" in
+    local fmt="$1"
+    case "$fmt" in
     qcow2)
-      log "Exporting ${DISK} → ${OUTDIR}/${NAME}.qcow2 (compressed)"
-      qemu-img convert -f raw -O qcow2 -c -p "$DISK" "${OUTDIR}/${NAME}.qcow2"
-      log "Done: ${OUTDIR}/${NAME}.qcow2 ($(du -sh "${OUTDIR}/${NAME}.qcow2" | cut -f1))"
-      ;;
+        log "Exporting ${DISK} → ${OUTDIR}/${NAME}.qcow2 (compressed)"
+        qemu-img convert -f raw -O qcow2 -c -p "$DISK" "${OUTDIR}/${NAME}.qcow2"
+        log "Done: ${OUTDIR}/${NAME}.qcow2 ($(du -sh "${OUTDIR}/${NAME}.qcow2" | cut -f1))"
+        ;;
     raw)
-      log "Exporting ${DISK} → ${OUTDIR}/${NAME}.raw (sparse)"
-      dd if="$DISK" of="${OUTDIR}/${NAME}.raw" bs=4M status=progress conv=sparse
-      log "Done: ${OUTDIR}/${NAME}.raw ($(du -sh "${OUTDIR}/${NAME}.raw" | cut -f1))"
-      ;;
+        log "Exporting ${DISK} → ${OUTDIR}/${NAME}.raw (sparse)"
+        dd if="$DISK" of="${OUTDIR}/${NAME}.raw" bs=4M status=progress conv=sparse
+        log "Done: ${OUTDIR}/${NAME}.raw ($(du -sh "${OUTDIR}/${NAME}.raw" | cut -f1))"
+        ;;
     vhd)
-      log "Exporting ${DISK} → ${OUTDIR}/${NAME}.vhd"
-      qemu-img convert -f raw -O vpc -o subformat=fixed,force_size "$DISK" "${OUTDIR}/${NAME}.vhd"
-      log "Done: ${OUTDIR}/${NAME}.vhd ($(du -sh "${OUTDIR}/${NAME}.vhd" | cut -f1))"
-      ;;
+        log "Exporting ${DISK} → ${OUTDIR}/${NAME}.vhd"
+        qemu-img convert -f raw -O vpc -o subformat=fixed,force_size "$DISK" "${OUTDIR}/${NAME}.vhd"
+        log "Done: ${OUTDIR}/${NAME}.vhd ($(du -sh "${OUTDIR}/${NAME}.vhd" | cut -f1))"
+        ;;
     vmdk)
-      log "Exporting ${DISK} → ${OUTDIR}/${NAME}.vmdk"
-      qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "$DISK" "${OUTDIR}/${NAME}.vmdk"
-      log "Done: ${OUTDIR}/${NAME}.vmdk ($(du -sh "${OUTDIR}/${NAME}.vmdk" | cut -f1))"
-      ;;
+        log "Exporting ${DISK} → ${OUTDIR}/${NAME}.vmdk"
+        qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "$DISK" "${OUTDIR}/${NAME}.vmdk"
+        log "Done: ${OUTDIR}/${NAME}.vmdk ($(du -sh "${OUTDIR}/${NAME}.vmdk" | cut -f1))"
+        ;;
     ova)
-      log "Exporting ${DISK} → ${OUTDIR}/${NAME}.ova"
-      qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "$DISK" "${OUTDIR}/${NAME}.vmdk"
-      local vmdk_size
-      vmdk_size=$(stat -c%s "${OUTDIR}/${NAME}.vmdk" 2>/dev/null || echo 0)
-      local disk_bytes
-      if [[ -b "$DISK" ]]; then
-        disk_bytes=$(blockdev --getsize64 "$DISK" 2>/dev/null || echo 42949672960)
-      else
-        disk_bytes=$(stat -c%s "$DISK" 2>/dev/null || echo 42949672960)
-      fi
-      cat > "${OUTDIR}/${NAME}.ovf" <<OVFEOF
+        log "Exporting ${DISK} → ${OUTDIR}/${NAME}.ova"
+        qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "$DISK" "${OUTDIR}/${NAME}.vmdk"
+        local vmdk_size
+        vmdk_size=$(stat -c%s "${OUTDIR}/${NAME}.vmdk" 2>/dev/null || echo 0)
+        local disk_bytes
+        if [[ -b "$DISK" ]]; then
+            disk_bytes=$(blockdev --getsize64 "$DISK" 2>/dev/null || echo 42949672960)
+        else
+            disk_bytes=$(stat -c%s "$DISK" 2>/dev/null || echo 42949672960)
+        fi
+        cat >"${OUTDIR}/${NAME}.ovf" <<OVFEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <Envelope xmlns="http://schemas.dmtf.org/ovf/envelope/1"
           xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
@@ -148,156 +162,159 @@ do_export() {
   </VirtualSystem>
 </Envelope>
 OVFEOF
-      (cd "${OUTDIR}" && tar cf "${NAME}.ova" "${NAME}.ovf" "${NAME}.vmdk")
-      rm -f "${OUTDIR}/${NAME}.vmdk" "${OUTDIR}/${NAME}.ovf"
-      log "Done: ${OUTDIR}/${NAME}.ova ($(du -sh "${OUTDIR}/${NAME}.ova" | cut -f1))"
-      ;;
+        (cd "${OUTDIR}" && tar cf "${NAME}.ova" "${NAME}.ovf" "${NAME}.vmdk")
+        rm -f "${OUTDIR}/${NAME}.vmdk" "${OUTDIR}/${NAME}.ovf"
+        log "Done: ${OUTDIR}/${NAME}.ova ($(du -sh "${OUTDIR}/${NAME}.ova" | cut -f1))"
+        ;;
     # ── Container / microVM formats ──────────────────────────────────────
     # All three mount the disk's root partition read-only, pull the rootfs,
     # and repackage it for the target runtime. We never modify the source
     # image — the mount is RO and everything happens in a scratch directory.
-    oci|lxc|firecracker)
-      _export_container "$fmt"
-      ;;
+    oci | lxc | firecracker)
+        _export_container "$fmt"
+        ;;
     *)
-      die "Unknown format: $fmt (use qcow2, raw, vhd, vmdk, ova, oci, lxc, firecracker, or all)"
-      ;;
-  esac
+        die "Unknown format: $fmt (use qcow2, raw, vhd, vmdk, ova, oci, lxc, firecracker, or all)"
+        ;;
+    esac
 }
 
 # Mount the source's root partition to a scratch dir and return its path.
 # Caller is responsible for umount + cleanup. Returns path on stdout.
 _mount_source_rootfs() {
-  local mp
-  mp="$(mktemp -d /tmp/kexport-root.XXXXXX)"
-  # For a block device we need to find the root partition. Cloud images are
-  # usually partition 1; multi-partition systems may use 2 or 3. Pick the
-  # largest partition as a reasonable default heuristic.
-  local src="$DISK"
-  if [[ -b "$DISK" ]]; then
-    local parts
-    parts=$(lsblk -nrpo NAME,SIZE,TYPE "$DISK" | awk '$3=="part"{print $1" "$2}' \
-            | sort -k2 -h | tail -1 | awk '{print $1}')
-    [[ -n "$parts" ]] && src="$parts"
-  fi
-  log "Mounting ${src} to ${mp} (read-only)..."
-  mount -o ro "$src" "$mp" 2>/dev/null || {
-    # Try with guestmount for qcow2 files — needs libguestfs-tools
-    if command -v guestmount >/dev/null 2>&1 && [[ -f "$DISK" ]]; then
-      guestmount -a "$DISK" -i --ro "$mp"
-    else
-      rmdir "$mp"
-      die "Could not mount ${src} (try installing libguestfs-tools for qcow2 files)"
+    local mp
+    mp="$(mktemp -d /tmp/kexport-root.XXXXXX)"
+    # For a block device we need to find the root partition. Cloud images are
+    # usually partition 1; multi-partition systems may use 2 or 3. Pick the
+    # largest partition as a reasonable default heuristic.
+    local src="$DISK"
+    if [[ -b "$DISK" ]]; then
+        local parts
+        parts=$(lsblk -nrpo NAME,SIZE,TYPE "$DISK" | awk '$3=="part"{print $1" "$2}' |
+            sort -k2 -h | tail -1 | awk '{print $1}')
+        [[ -n "$parts" ]] && src="$parts"
     fi
-  }
-  echo "$mp"
+    log "Mounting ${src} to ${mp} (read-only)..."
+    mount -o ro "$src" "$mp" 2>/dev/null || {
+        # Try with guestmount for qcow2 files — needs libguestfs-tools
+        if command -v guestmount >/dev/null 2>&1 && [[ -f "$DISK" ]]; then
+            guestmount -a "$DISK" -i --ro "$mp"
+        else
+            rmdir "$mp"
+            die "Could not mount ${src} (try installing libguestfs-tools for qcow2 files)"
+        fi
+    }
+    echo "$mp"
 }
 
 _umount_source_rootfs() {
-  local mp="$1"
-  [[ -n "$mp" && -d "$mp" ]] || return 0
-  umount "$mp" 2>/dev/null || guestunmount "$mp" 2>/dev/null || true
-  rmdir "$mp" 2>/dev/null || true
+    local mp="$1"
+    [[ -n "$mp" && -d "$mp" ]] || return 0
+    umount "$mp" 2>/dev/null || guestunmount "$mp" 2>/dev/null || true
+    rmdir "$mp" 2>/dev/null || true
 }
 
 _export_container() {
-  local fmt="$1"
-  local mp
-  mp="$(_mount_source_rootfs)"
-  trap "_umount_source_rootfs $mp" RETURN
+    local fmt="$1"
+    local mp
+    mp="$(_mount_source_rootfs)"
+    trap "_umount_source_rootfs $mp" RETURN
 
-  case "$fmt" in
+    case "$fmt" in
     oci)
-      # Docker image tarball. Produces a single tar.gz of the rootfs that
-      # `docker import` / `podman import` ingests into an image. Simpler
-      # than the full OCI layout spec — and sufficient for every Docker
-      # client in the wild.
-      local out="${OUTDIR}/${NAME}-oci.tar.gz"
-      log "Exporting rootfs → ${out} (Docker importable)"
-      # --numeric-owner so users don't need /etc/passwd in the image
-      # --exclude boot/vm/run/tmp — those don't belong in a container
-      tar -C "$mp" --numeric-owner \
-        --exclude=./proc --exclude=./sys --exclude=./dev \
-        --exclude=./run --exclude=./tmp --exclude=./var/tmp \
-        --exclude=./var/cache/apt --exclude=./var/cache/dnf \
-        --exclude=./boot --exclude=./var/log \
-        -czf "$out" .
-      log "Done: $out ($(du -sh "$out" | cut -f1))"
-      log "  Import: docker import $out kldload:$(date +%Y%m%d)"
-      log "  Import: podman import $out kldload:$(date +%Y%m%d)"
-      ;;
+        # Docker image tarball. Produces a single tar.gz of the rootfs that
+        # `docker import` / `podman import` ingests into an image. Simpler
+        # than the full OCI layout spec — and sufficient for every Docker
+        # client in the wild.
+        local out="${OUTDIR}/${NAME}-oci.tar.gz"
+        log "Exporting rootfs → ${out} (Docker importable)"
+        # --numeric-owner so users don't need /etc/passwd in the image
+        # --exclude boot/vm/run/tmp — those don't belong in a container
+        tar -C "$mp" --numeric-owner \
+            --exclude=./proc --exclude=./sys --exclude=./dev \
+            --exclude=./run --exclude=./tmp --exclude=./var/tmp \
+            --exclude=./var/cache/apt --exclude=./var/cache/dnf \
+            --exclude=./boot --exclude=./var/log \
+            -czf "$out" .
+        log "Done: $out ($(du -sh "$out" | cut -f1))"
+        log "  Import: docker import $out kldload:$(date +%Y%m%d)"
+        log "  Import: podman import $out kldload:$(date +%Y%m%d)"
+        ;;
 
     lxc)
-      # LXC template tarball — LXC's "local" template driver accepts this
-      # format directly. Ships with a minimal config stub so lxc-create
-      # knows architecture and OS flavor without probing.
-      local tarball="${OUTDIR}/${NAME}-lxc.tar.xz"
-      local meta="${OUTDIR}/${NAME}-lxc-meta.tar.xz"
-      log "Exporting rootfs → ${tarball} (LXC template)"
-      tar -C "$mp" --numeric-owner \
-        --exclude=./proc --exclude=./sys --exclude=./dev \
-        --exclude=./run --exclude=./tmp \
-        -cJf "$tarball" .
-      # LXC metadata tarball — tiny companion file with OS metadata
-      local meta_dir; meta_dir="$(mktemp -d)"
-      cat > "${meta_dir}/config" <<LXCCFG
+        # LXC template tarball — LXC's "local" template driver accepts this
+        # format directly. Ships with a minimal config stub so lxc-create
+        # knows architecture and OS flavor without probing.
+        local tarball="${OUTDIR}/${NAME}-lxc.tar.xz"
+        local meta="${OUTDIR}/${NAME}-lxc-meta.tar.xz"
+        log "Exporting rootfs → ${tarball} (LXC template)"
+        tar -C "$mp" --numeric-owner \
+            --exclude=./proc --exclude=./sys --exclude=./dev \
+            --exclude=./run --exclude=./tmp \
+            -cJf "$tarball" .
+        # LXC metadata tarball — tiny companion file with OS metadata
+        local meta_dir
+        meta_dir="$(mktemp -d)"
+        cat >"${meta_dir}/config" <<LXCCFG
 lxc.arch = $(uname -m)
 lxc.include = /usr/share/lxc/config/common.conf
 lxc.rootfs.path = dir:/var/lib/lxc/%NAME%/rootfs
 LXCCFG
-      cat > "${meta_dir}/create-message" <<MSG
+        cat >"${meta_dir}/create-message" <<MSG
 kldload LXC template — created $(date -u +%Y-%m-%dT%H:%M:%SZ)
 Deploy: lxc-create -n mycontainer -t local -- --metadata ${meta##*/} --fstree ${tarball##*/}
 MSG
-      tar -C "$meta_dir" -cJf "$meta" .
-      rm -rf "$meta_dir"
-      log "Done: $tarball + $meta"
-      log "  Deploy on LXC host:"
-      log "    lxc-create -n mycontainer -t local -- \\"
-      log "      --metadata $meta --fstree $tarball"
-      ;;
+        tar -C "$meta_dir" -cJf "$meta" .
+        rm -rf "$meta_dir"
+        log "Done: $tarball + $meta"
+        log "  Deploy on LXC host:"
+        log "    lxc-create -n mycontainer -t local -- \\"
+        log "      --metadata $meta --fstree $tarball"
+        ;;
 
     firecracker)
-      # Firecracker microVMs need three artifacts: a kernel uncompressed
-      # (Firecracker doesn't boot bzImage, wants vmlinux), an ext4 rootfs,
-      # and a JSON config describing the VM. Output all three as a bundle
-      # so the target host can launch in one firecracker invocation.
-      local bundle="${OUTDIR}/${NAME}-firecracker"
-      mkdir -p "$bundle"
-      log "Building Firecracker bundle → ${bundle}/"
+        # Firecracker microVMs need three artifacts: a kernel uncompressed
+        # (Firecracker doesn't boot bzImage, wants vmlinux), an ext4 rootfs,
+        # and a JSON config describing the VM. Output all three as a bundle
+        # so the target host can launch in one firecracker invocation.
+        local bundle="${OUTDIR}/${NAME}-firecracker"
+        mkdir -p "$bundle"
+        log "Building Firecracker bundle → ${bundle}/"
 
-      # 1. Kernel — Firecracker needs uncompressed vmlinux (not bzImage).
-      # Most distros ship bzImage; extract vmlinux via extract-vmlinux or
-      # manually strip the gzip wrapper. We try the extract-vmlinux script
-      # first (bundled with kernel-devel) and fall back to the bzImage if
-      # Firecracker supports it on the target version (v1.1+ does).
-      local src_kern
-      src_kern=$(find "$mp/boot" -name 'vmlinuz-*' 2>/dev/null | sort -V | tail -1)
-      if [[ -n "$src_kern" ]]; then
-        cp "$src_kern" "${bundle}/vmlinuz"
-        log "  kernel: $(basename "$src_kern") → vmlinuz"
-      else
-        log "WARNING: no kernel found in /boot — you'll need to supply one"
-      fi
+        # 1. Kernel — Firecracker needs uncompressed vmlinux (not bzImage).
+        # Most distros ship bzImage; extract vmlinux via extract-vmlinux or
+        # manually strip the gzip wrapper. We try the extract-vmlinux script
+        # first (bundled with kernel-devel) and fall back to the bzImage if
+        # Firecracker supports it on the target version (v1.1+ does).
+        local src_kern
+        src_kern=$(find "$mp/boot" -name 'vmlinuz-*' 2>/dev/null | sort -V | tail -1)
+        if [[ -n "$src_kern" ]]; then
+            cp "$src_kern" "${bundle}/vmlinuz"
+            log "  kernel: $(basename "$src_kern") → vmlinuz"
+        else
+            log "WARNING: no kernel found in /boot — you'll need to supply one"
+        fi
 
-      # 2. Rootfs — ext4 image sized to contents + 25% headroom.
-      log "  building rootfs.ext4..."
-      local rootfs_size_mb
-      rootfs_size_mb=$(du -sm "$mp" | cut -f1)
-      rootfs_size_mb=$((rootfs_size_mb * 125 / 100 + 512))
-      dd if=/dev/zero of="${bundle}/rootfs.ext4" bs=1M count="$rootfs_size_mb" status=none
-      mkfs.ext4 -F -L "${NAME}" "${bundle}/rootfs.ext4" >/dev/null 2>&1
-      local fs_mp; fs_mp="$(mktemp -d)"
-      mount -o loop "${bundle}/rootfs.ext4" "$fs_mp"
-      # Copy with -aX to preserve attrs, skip pseudo-fs
-      (cd "$mp" && tar --exclude=./proc --exclude=./sys --exclude=./dev \
-                       --exclude=./run --exclude=./tmp -cf - .) \
-         | (cd "$fs_mp" && tar -xf -)
-      umount "$fs_mp"; rmdir "$fs_mp"
-      log "  rootfs: ${rootfs_size_mb}MB"
+        # 2. Rootfs — ext4 image sized to contents + 25% headroom.
+        log "  building rootfs.ext4..."
+        local rootfs_size_mb
+        rootfs_size_mb=$(du -sm "$mp" | cut -f1)
+        rootfs_size_mb=$((rootfs_size_mb * 125 / 100 + 512))
+        dd if=/dev/zero of="${bundle}/rootfs.ext4" bs=1M count="$rootfs_size_mb" status=none
+        mkfs.ext4 -F -L "${NAME}" "${bundle}/rootfs.ext4" >/dev/null 2>&1
+        local fs_mp
+        fs_mp="$(mktemp -d)"
+        mount -o loop "${bundle}/rootfs.ext4" "$fs_mp"
+        # Copy with -aX to preserve attrs, skip pseudo-fs
+        (cd "$mp" && tar --exclude=./proc --exclude=./sys --exclude=./dev \
+            --exclude=./run --exclude=./tmp -cf - .) |
+            (cd "$fs_mp" && tar -xf -)
+        umount "$fs_mp"
+        rmdir "$fs_mp"
+        log "  rootfs: ${rootfs_size_mb}MB"
 
-      # 3. Firecracker config JSON
-      cat > "${bundle}/config.json" <<FCJSON
+        # 3. Firecracker config JSON
+        cat >"${bundle}/config.json" <<FCJSON
 {
   "boot-source": {
     "kernel_image_path": "./vmlinuz",
@@ -314,8 +331,8 @@ MSG
 }
 FCJSON
 
-      # 4. Tiny launcher script so the target host can just run ./launch.sh
-      cat > "${bundle}/launch.sh" <<'LAUNCH'
+        # 4. Tiny launcher script so the target host can just run ./launch.sh
+        cat >"${bundle}/launch.sh" <<'LAUNCH'
 #!/bin/sh
 # One-shot Firecracker launcher. Requires firecracker binary in PATH and
 # a TAP device named tap0 pre-configured (ip tuntap add tap0 mode tap; ...)
@@ -323,20 +340,20 @@ set -e
 cd "$(dirname "$0")"
 firecracker --no-api --config-file config.json
 LAUNCH
-      chmod +x "${bundle}/launch.sh"
+        chmod +x "${bundle}/launch.sh"
 
-      log "Done: ${bundle}/ ($(du -sh "$bundle" | cut -f1))"
-      log "  On target (firecracker installed): ${bundle}/launch.sh"
-      ;;
-  esac
+        log "Done: ${bundle}/ ($(du -sh "$bundle" | cut -f1))"
+        log "  On target (firecracker installed): ${bundle}/launch.sh"
+        ;;
+    esac
 }
 
 if [[ "$FMT" == "all" ]]; then
-  for f in qcow2 raw vhd vmdk ova; do
-    do_export "$f"
-  done
+    for f in qcow2 raw vhd vmdk ova; do
+        do_export "$f"
+    done
 else
-  do_export "$FMT"
+    do_export "$FMT"
 fi
 
 log "Export complete → ${OUTDIR}/"

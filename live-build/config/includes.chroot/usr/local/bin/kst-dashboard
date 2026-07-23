@@ -12,11 +12,11 @@ set -euo pipefail
 SESSION="dashboard"
 
 case "${1:-}" in
-  --kill|-k)
+--kill | -k)
     tmux kill-session -t "$SESSION" 2>/dev/null && echo "Dashboard killed." || echo "No dashboard running."
     exit 0
     ;;
-  --help|-h)
+--help | -h)
     echo "kst-dashboard — live system monitoring in tmux"
     echo ""
     echo "Usage: kst-dashboard [--detach|--kill|--help]"
@@ -38,8 +38,8 @@ esac
 
 # If session exists, just attach
 if tmux has-session -t "$SESSION" 2>/dev/null; then
-  [[ "${1:-}" == "--detach" ]] && exit 0
-  exec tmux attach-session -t "$SESSION"
+    [[ "${1:-}" == "--detach" ]] && exit 0
+    exec tmux attach-session -t "$SESSION"
 fi
 
 # Colors
@@ -52,11 +52,11 @@ N='\033[0m'
 
 # Main window: kst on the left (auto-refreshing)
 tmux new-session -d -s "$SESSION" -n "monitor" -x 160 -y 45 \
-  "while true; do clear; kst 2>/dev/null; sleep 10; done"
+    "while true; do clear; kst 2>/dev/null; sleep 10; done"
 
 # Right-top: ZFS pool + snapshot summary
 tmux split-window -t "$SESSION:monitor" -h \
-  "while true; do
+    "while true; do
     clear
     printf '\033[1;36m── ZFS Pools ──\033[0m\n'
     zpool list -o name,size,alloc,free,frag,health 2>/dev/null || echo 'No ZFS pools'
@@ -74,11 +74,11 @@ tmux split-window -t "$SESSION:monitor" -h \
 # `pane-base-index 1`. Using .0 / .1 here would silently fail the splits and
 # leave the dashboard with a single pane (caught on .113, 2026-06-04).
 tmux split-window -t "$SESSION:monitor.1" -v \
-  "htop 2>/dev/null || top"
+    "htop 2>/dev/null || top"
 
 # Bottom-right: services + network
 tmux split-window -t "$SESSION:monitor.2" -v \
-  "while true; do
+    "while true; do
     clear
     printf '\033[1;36m── Services ──\033[0m\n'
     for svc in sshd zfs-zed sanoid.timer kldload-webui kldload-firstboot NetworkManager nftables; do
@@ -112,7 +112,7 @@ tmux select-window -t "$SESSION:monitor"
 
 # Attach or stay detached
 if [[ "${1:-}" == "--detach" ]]; then
-  echo "Dashboard running in tmux session '$SESSION'. Attach with: tmux attach -t $SESSION"
+    echo "Dashboard running in tmux session '$SESSION'. Attach with: tmux attach -t $SESSION"
 else
-  exec tmux attach-session -t "$SESSION"
+    exec tmux attach-session -t "$SESSION"
 fi

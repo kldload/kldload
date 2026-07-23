@@ -54,8 +54,8 @@ if command -v fastfetch >/dev/null 2>&1; then
     #     state, any line without a leading SGR gets that state
     #     prepended, and every line ends with an explicit reset so
     #     each line is self-contained for the composer.
-    mapfile -t LEFT < <(fastfetch --logo-position top --pipe false 2>/dev/null \
-        | awk '
+    mapfile -t LEFT < <(fastfetch --logo-position top --pipe false 2>/dev/null |
+        awk '
             BEGIN { state = "" }
             {
                 line = $0
@@ -96,16 +96,16 @@ fi
 maxw=0
 for line in "${LEFT[@]}"; do
     w=$(_visible_len "$line")
-    (( w > maxw )) && maxw=$w
+    ((w > maxw)) && maxw=$w
 done
 
 # Two-space gutter between fastfetch and the cheatsheet.
 GUTTER=2
-maxw=$(( maxw + GUTTER ))
+maxw=$((maxw + GUTTER))
 
 N=${#LEFT[@]}
 M=${#RIGHT[@]}
-TOTAL=$(( N > M ? N : M ))
+TOTAL=$((N > M ? N : M))
 
 # ANSI reset between left and right columns.
 #
@@ -123,15 +123,15 @@ RESET=$'\e[0m'
 # Top blank line — visual breathing room above the greeting.
 echo ""
 
-for ((i=0; i<TOTAL; i++)); do
+for ((i = 0; i < TOTAL; i++)); do
     l="${LEFT[i]:-}"
     r="${RIGHT[i]:-}"
     # Pad LEFT line to maxw visible chars. printf's %-*s counts bytes,
     # so we compute the byte padding ourselves: (target_visible_width -
     # actual_visible_width) extra spaces appended.
     lw=$(_visible_len "$l")
-    pad=$(( maxw - lw ))
-    (( pad < 0 )) && pad=0
+    pad=$((maxw - lw))
+    ((pad < 0)) && pad=0
     printf '%s%s%*s%s\n' "$l" "$RESET" "$pad" "" "$r"
 done
 

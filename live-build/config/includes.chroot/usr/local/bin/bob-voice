@@ -21,19 +21,19 @@ ONCE=false
 
 # ── Checks ───────────────────────────────────────────────────────────────────
 if ! command -v arecord &>/dev/null; then
-  echo -e "${YELLOW}arecord not found. Install alsa-utils.${NC}"
-  exit 1
+    echo -e "${YELLOW}arecord not found. Install alsa-utils.${NC}"
+    exit 1
 fi
 
 if [[ ! -x "$WHISPER" ]]; then
-  echo -e "${YELLOW}whisper.cpp not found at ${WHISPER}${NC}"
-  echo -e "${DIM}Bob voice needs whisper.cpp built and installed.${NC}"
-  exit 1
+    echo -e "${YELLOW}whisper.cpp not found at ${WHISPER}${NC}"
+    echo -e "${DIM}Bob voice needs whisper.cpp built and installed.${NC}"
+    exit 1
 fi
 
 if [[ ! -f "$MODEL" ]]; then
-  echo -e "${YELLOW}Whisper model not found at ${MODEL}${NC}"
-  exit 1
+    echo -e "${YELLOW}Whisper model not found at ${MODEL}${NC}"
+    exit 1
 fi
 
 # ── Record + transcribe + ask ────────────────────────────────────────────────
@@ -42,27 +42,28 @@ echo -e "${DIM}Press Enter to record, Enter again to stop${NC}"
 echo ""
 
 while true; do
-  read -rp "  [Enter to record] "
-  echo -e "  ${DIM}Listening... (Enter to stop)${NC}"
-  arecord -f S16_LE -r 16000 -c 1 -d 30 "$REC" 2>/dev/null &
-  REC_PID=$!
-  read -r
-  kill $REC_PID 2>/dev/null; wait $REC_PID 2>/dev/null || true
+    read -rp "  [Enter to record] "
+    echo -e "  ${DIM}Listening... (Enter to stop)${NC}"
+    arecord -f S16_LE -r 16000 -c 1 -d 30 "$REC" 2>/dev/null &
+    REC_PID=$!
+    read -r
+    kill $REC_PID 2>/dev/null
+    wait $REC_PID 2>/dev/null || true
 
-  echo -e "  ${DIM}Transcribing...${NC}"
-  TEXT=$($WHISPER -m "$MODEL" -f "$REC" --no-timestamps 2>/dev/null \
-    | grep -v '^\[' | grep -v '^$' | head -5 | tr '\n' ' ' | sed 's/  */ /g;s/^ *//;s/ *$//')
+    echo -e "  ${DIM}Transcribing...${NC}"
+    TEXT=$($WHISPER -m "$MODEL" -f "$REC" --no-timestamps 2>/dev/null |
+        grep -v '^\[' | grep -v '^$' | head -5 | tr '\n' ' ' | sed 's/  */ /g;s/^ *//;s/ *$//')
 
-  if [[ -z "$TEXT" ]]; then
-    echo -e "  ${YELLOW}(nothing detected)${NC}"
+    if [[ -z "$TEXT" ]]; then
+        echo -e "  ${YELLOW}(nothing detected)${NC}"
+        [[ "$ONCE" == true ]] && exit 0
+        continue
+    fi
+
+    echo -e "  ${GREEN}You said:${NC} ${TEXT}"
+    echo ""
+    bob "$TEXT"
+    echo ""
+
     [[ "$ONCE" == true ]] && exit 0
-    continue
-  fi
-
-  echo -e "  ${GREEN}You said:${NC} ${TEXT}"
-  echo ""
-  bob "$TEXT"
-  echo ""
-
-  [[ "$ONCE" == true ]] && exit 0
 done

@@ -33,31 +33,46 @@ VERBOSE=false
 EDIT_MODE=false
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --yes|-y) AUTO_YES=true; shift ;;
-    --dry-run) DRY_RUN=true; shift ;;
-    --verbose|-v) VERBOSE=true; shift ;;
-    --edit|-e) EDIT_MODE=true; shift ;;
-    --model) BOB_MODEL="$2"; shift 2 ;;
-    --help|-h)
-      echo "bob-bash — natural language to production bash scripts"
-      echo ""
-      echo "Usage: bob-bash \"your request\""
-      echo "  --yes       Skip confirmation"
-      echo "  --dry-run   Show script but don't run"
-      echo "  --edit      Open script in editor before running"
-      echo "  --verbose   Show Bob's reasoning"
-      echo "  --model X   Use a different model"
-      exit 0
-      ;;
+    case "$1" in
+    --yes | -y)
+        AUTO_YES=true
+        shift
+        ;;
+    --dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+    --verbose | -v)
+        VERBOSE=true
+        shift
+        ;;
+    --edit | -e)
+        EDIT_MODE=true
+        shift
+        ;;
+    --model)
+        BOB_MODEL="$2"
+        shift 2
+        ;;
+    --help | -h)
+        echo "bob-bash — natural language to production bash scripts"
+        echo ""
+        echo "Usage: bob-bash \"your request\""
+        echo "  --yes       Skip confirmation"
+        echo "  --dry-run   Show script but don't run"
+        echo "  --edit      Open script in editor before running"
+        echo "  --verbose   Show Bob's reasoning"
+        echo "  --model X   Use a different model"
+        exit 0
+        ;;
     *) break ;;
-  esac
+    esac
 done
 
 if [[ $# -eq 0 ]]; then
-  echo -e "${CYAN}bob-bash${NC} — tell Bob what to build"
-  echo "Usage: bob-bash \"set up nginx reverse proxy for port 3000\""
-  exit 0
+    echo -e "${CYAN}bob-bash${NC} — tell Bob what to build"
+    echo "Usage: bob-bash \"set up nginx reverse proxy for port 3000\""
+    exit 0
 fi
 
 REQUEST="$*"
@@ -109,7 +124,7 @@ SCRIPT=$(echo "$SCRIPT" | sed '/^```/d')
 
 # Ensure it starts with shebang
 if ! echo "$SCRIPT" | head -1 | grep -q '^#!/'; then
-  SCRIPT="#!/usr/bin/env bash
+    SCRIPT="#!/usr/bin/env bash
 set -euo pipefail
 trap 'echo \"Error on line \$LINENO\" >&2' ERR
 
@@ -119,7 +134,7 @@ fi
 # ── Save script ──────────────────────────────────────────────────────────────
 _timestamp=$(date +%Y%m%d-%H%M%S)
 _script_file="${SCRIPT_DIR}/${_timestamp}-bob-bash.sh"
-echo "$SCRIPT" > "$_script_file"
+echo "$SCRIPT" >"$_script_file"
 chmod +x "$_script_file"
 
 # ── Display ──────────────────────────────────────────────────────────────────
@@ -129,15 +144,15 @@ echo ""
 
 # Syntax highlight (basic — colorize comments, strings, keywords)
 echo "$SCRIPT" | while IFS= read -r line; do
-  if [[ "$line" =~ ^[[:space:]]*# ]]; then
-    echo -e "${DIM}${line}${NC}"
-  elif [[ "$line" =~ ^[[:space:]]*(if|then|else|elif|fi|for|do|done|while|case|esac|function) ]]; then
-    echo -e "${YELLOW}${line}${NC}"
-  elif [[ "$line" =~ ^=== ]]; then
-    echo -e "${CYAN}${line}${NC}"
-  else
-    echo "$line"
-  fi
+    if [[ "$line" =~ ^[[:space:]]*# ]]; then
+        echo -e "${DIM}${line}${NC}"
+    elif [[ "$line" =~ ^[[:space:]]*(if|then|else|elif|fi|for|do|done|while|case|esac|function) ]]; then
+        echo -e "${YELLOW}${line}${NC}"
+    elif [[ "$line" =~ ^=== ]]; then
+        echo -e "${CYAN}${line}${NC}"
+    else
+        echo "$line"
+    fi
 done
 
 echo ""
@@ -147,33 +162,33 @@ echo -e "${DIM}Script saved: ${_script_file}${NC}"
 
 # ── Log ──────────────────────────────────────────────────────────────────────
 _log="${HISTORY_DIR}/${_timestamp}.log"
-echo "# bob-bash: ${REQUEST}" > "$_log"
-echo "# date: $(date)" >> "$_log"
-echo "# script: ${_script_file}" >> "$_log"
+echo "# bob-bash: ${REQUEST}" >"$_log"
+echo "# date: $(date)" >>"$_log"
+echo "# script: ${_script_file}" >>"$_log"
 
 # ── Dry run ──────────────────────────────────────────────────────────────────
 if [[ "$DRY_RUN" == true ]]; then
-  echo -e "${YELLOW}Dry run — script not executed.${NC}"
-  exit 0
+    echo -e "${YELLOW}Dry run — script not executed.${NC}"
+    exit 0
 fi
 
 # ── Edit mode ────────────────────────────────────────────────────────────────
 if [[ "$EDIT_MODE" == true ]]; then
-  _editor="${EDITOR:-vi}"
-  echo -e "${BLUE}Opening in ${_editor}...${NC}"
-  "$_editor" "$_script_file"
-  echo ""
-  echo -e "${BLUE}Script edited. Run it?${NC}"
+    _editor="${EDITOR:-vi}"
+    echo -e "${BLUE}Opening in ${_editor}...${NC}"
+    "$_editor" "$_script_file"
+    echo ""
+    echo -e "${BLUE}Script edited. Run it?${NC}"
 fi
 
 # ── Confirm ──────────────────────────────────────────────────────────────────
 if [[ "$AUTO_YES" != true ]]; then
-  echo -e -n "${BOLD}Run this script?${NC} [y/N] "
-  read -r _confirm
-  if [[ "$_confirm" != "y" ]] && [[ "$_confirm" != "Y" ]]; then
-    echo -e "${DIM}Script saved but not executed: ${_script_file}${NC}"
-    exit 0
-  fi
+    echo -e -n "${BOLD}Run this script?${NC} [y/N] "
+    read -r _confirm
+    if [[ "$_confirm" != "y" ]] && [[ "$_confirm" != "Y" ]]; then
+        echo -e "${DIM}Script saved but not executed: ${_script_file}${NC}"
+        exit 0
+    fi
 fi
 
 # ── Execute ──────────────────────────────────────────────────────────────────
@@ -181,41 +196,41 @@ echo ""
 echo -e "${GREEN}${BOLD}Executing...${NC}"
 echo ""
 
-echo "# EXECUTED: $(date)" >> "$_log"
+echo "# EXECUTED: $(date)" >>"$_log"
 set +e
 bash "$_script_file" 2>&1 | tee -a "$_log"
 _exit=$?
 set -e
 
-echo "" >> "$_log"
+echo "" >>"$_log"
 if [[ $_exit -eq 0 ]]; then
-  echo "# RESULT: success" >> "$_log"
-  echo ""
-  echo -e "${GREEN}${BOLD}✔ Done.${NC}"
+    echo "# RESULT: success" >>"$_log"
+    echo ""
+    echo -e "${GREEN}${BOLD}✔ Done.${NC}"
 else
-  echo "# RESULT: failed (exit ${_exit})" >> "$_log"
-  echo ""
-  echo -e "${RED}Script failed (exit ${_exit}).${NC}"
+    echo "# RESULT: failed (exit ${_exit})" >>"$_log"
+    echo ""
+    echo -e "${RED}Script failed (exit ${_exit}).${NC}"
 fi
 
 # ── Follow-up loop ───────────────────────────────────────────────────────────
 echo ""
 echo -e "${DIM}Follow-up? (empty to quit)${NC}"
 while true; do
-  echo -e -n "${CYAN}bob-bash> ${NC}"
-  read -r _followup
-  [[ -z "$_followup" ]] && break
+    echo -e -n "${CYAN}bob-bash> ${NC}"
+    read -r _followup
+    [[ -z "$_followup" ]] && break
 
-  # Include previous context
-  PREV_CONTEXT="Previous script that just ran:
+    # Include previous context
+    PREV_CONTEXT="Previous script that just ran:
 $(cat "$_script_file")
 
 Previous result: $(tail -1 "$_log")
 
 Follow-up request: ${_followup}"
 
-  echo -e "${BLUE}Bob is writing...${NC}"
-  SCRIPT=$(echo "You are a bash script generator. Write a follow-up script.
+    echo -e "${BLUE}Bob is writing...${NC}"
+    SCRIPT=$(echo "You are a bash script generator. Write a follow-up script.
 
 System context:
 ${CTX}
@@ -224,22 +239,22 @@ ${PREV_CONTEXT}
 
 Output ONLY the bash script. No explanation. No markdown fences." | ollama run "$BOB_MODEL" 2>/dev/null | sed '/^```/d')
 
-  _timestamp=$(date +%Y%m%d-%H%M%S)
-  _script_file="${SCRIPT_DIR}/${_timestamp}-bob-bash.sh"
-  echo "$SCRIPT" > "$_script_file"
-  chmod +x "$_script_file"
+    _timestamp=$(date +%Y%m%d-%H%M%S)
+    _script_file="${SCRIPT_DIR}/${_timestamp}-bob-bash.sh"
+    echo "$SCRIPT" >"$_script_file"
+    chmod +x "$_script_file"
 
-  echo ""
-  echo "$SCRIPT"
-  echo ""
+    echo ""
+    echo "$SCRIPT"
+    echo ""
 
-  if [[ "$AUTO_YES" != true ]]; then
-    echo -e -n "${BOLD}Run?${NC} [y/N] "
-    read -r _confirm
-    [[ "$_confirm" != "y" ]] && [[ "$_confirm" != "Y" ]] && continue
-  fi
+    if [[ "$AUTO_YES" != true ]]; then
+        echo -e -n "${BOLD}Run?${NC} [y/N] "
+        read -r _confirm
+        [[ "$_confirm" != "y" ]] && [[ "$_confirm" != "Y" ]] && continue
+    fi
 
-  set +e
-  bash "$_script_file" 2>&1 | tee -a "$_log"
-  set -e
+    set +e
+    bash "$_script_file" 2>&1 | tee -a "$_log"
+    set -e
 done

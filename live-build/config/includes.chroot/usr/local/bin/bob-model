@@ -57,54 +57,54 @@ _ram_gb=$(awk '/MemTotal/{printf "%.0f", $2/1024/1024}' /proc/meminfo 2>/dev/nul
 
 # ── Pull command ─────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "pull" ]] && [[ -n "${2:-}" ]]; then
-  echo -e "${BLUE}Pulling ${2}...${NC}"
-  ollama pull "$2"
-  echo -e "${GREEN}✔${NC} Done"
-  exit 0
+    echo -e "${BLUE}Pulling ${2}...${NC}"
+    ollama pull "$2"
+    echo -e "${GREEN}✔${NC} Done"
+    exit 0
 fi
 
 # ── Shortcut matching ────────────────────────────────────────────────────────
 if [[ -n "${1:-}" ]]; then
-  _input=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    _input=$(echo "$1" | tr '[:upper:]' '[:lower:]')
 
-  # Try exact match first
-  for key in "${!MODELS[@]}"; do
-    if [[ "$_input" == "$key" ]] || [[ "$_input" == "${MODELS[$key]}" ]]; then
-      _selected="${MODELS[$key]}"
-      break
-    fi
-  done
-
-  # Try partial match
-  if [[ -z "${_selected:-}" ]]; then
+    # Try exact match first
     for key in "${!MODELS[@]}"; do
-      if echo "$key" | grep -qi "$_input" || echo "${MODELS[$key]}" | grep -qi "$_input"; then
-        _selected="${MODELS[$key]}"
-        break
-      fi
+        if [[ "$_input" == "$key" ]] || [[ "$_input" == "${MODELS[$key]}" ]]; then
+            _selected="${MODELS[$key]}"
+            break
+        fi
     done
-  fi
 
-  # Direct model name
-  if [[ -z "${_selected:-}" ]]; then
-    _selected="$1"
-  fi
-
-  # Check if model exists locally
-  if ! ollama list 2>/dev/null | grep -q "$(echo "$_selected" | cut -d: -f1)"; then
-    echo -e "${YELLOW}Model ${_selected} not found locally. Pull it?${NC}"
-    read -rp "[y/N] " _pull
-    if [[ "$_pull" == "y" ]] || [[ "$_pull" == "Y" ]]; then
-      ollama pull "$_selected"
-    else
-      exit 0
+    # Try partial match
+    if [[ -z "${_selected:-}" ]]; then
+        for key in "${!MODELS[@]}"; do
+            if echo "$key" | grep -qi "$_input" || echo "${MODELS[$key]}" | grep -qi "$_input"; then
+                _selected="${MODELS[$key]}"
+                break
+            fi
+        done
     fi
-  fi
 
-  # Set as default
-  _set_default "$_selected" 2>/dev/null || true
-  echo -e "${GREEN}✔${NC} Default model: ${BOLD}${_selected}${NC}"
-  exit 0
+    # Direct model name
+    if [[ -z "${_selected:-}" ]]; then
+        _selected="$1"
+    fi
+
+    # Check if model exists locally
+    if ! ollama list 2>/dev/null | grep -q "$(echo "$_selected" | cut -d: -f1)"; then
+        echo -e "${YELLOW}Model ${_selected} not found locally. Pull it?${NC}"
+        read -rp "[y/N] " _pull
+        if [[ "$_pull" == "y" ]] || [[ "$_pull" == "Y" ]]; then
+            ollama pull "$_selected"
+        else
+            exit 0
+        fi
+    fi
+
+    # Set as default
+    _set_default "$_selected" 2>/dev/null || true
+    echo -e "${GREEN}✔${NC} Default model: ${BOLD}${_selected}${NC}"
+    exit 0
 fi
 
 # ── Interactive picker ───────────────────────────────────────────────────────
@@ -116,11 +116,11 @@ echo ""
 echo -e "${BOLD}Installed models:${NC}"
 _installed=$(ollama list 2>/dev/null | tail -n +2 || true)
 if [[ -n "$_installed" ]]; then
-  echo "$_installed" | while read -r line; do
-    echo -e "  ${GREEN}●${NC} ${line}"
-  done
+    echo "$_installed" | while read -r line; do
+        echo -e "  ${GREEN}●${NC} ${line}"
+    done
 else
-  echo -e "  ${DIM}No models installed${NC}"
+    echo -e "  ${DIM}No models installed${NC}"
 fi
 
 echo ""
@@ -130,30 +130,30 @@ echo ""
 _n=1
 _options=()
 for key in bob deepseek7b deepseek32b 70b codellama mistral; do
-  _model="${MODELS[$key]}"
-  _size="${MODEL_SIZE[$key]}"
-  _ram="${MODEL_RAM[$key]}"
-  _desc="${MODEL_DESC[$key]}"
-  _ram_num=$(echo "$_ram" | tr -dc '0-9')
+    _model="${MODELS[$key]}"
+    _size="${MODEL_SIZE[$key]}"
+    _ram="${MODEL_RAM[$key]}"
+    _desc="${MODEL_DESC[$key]}"
+    _ram_num=$(echo "$_ram" | tr -dc '0-9')
 
-  # RAM warning
-  _warn=""
-  if [[ $_ram_gb -lt $_ram_num ]]; then
-    _warn=" ${RED}(needs ${_ram} RAM — you have ${_ram_gb}GB)${NC}"
-  fi
+    # RAM warning
+    _warn=""
+    if [[ $_ram_gb -lt $_ram_num ]]; then
+        _warn=" ${RED}(needs ${_ram} RAM — you have ${_ram_gb}GB)${NC}"
+    fi
 
-  # Installed indicator
-  _installed_mark=""
-  if ollama list 2>/dev/null | grep -q "$(echo "$_model" | cut -d: -f1)"; then
-    _installed_mark="${GREEN}●${NC} "
-  else
-    _installed_mark="${DIM}○${NC} "
-  fi
+    # Installed indicator
+    _installed_mark=""
+    if ollama list 2>/dev/null | grep -q "$(echo "$_model" | cut -d: -f1)"; then
+        _installed_mark="${GREEN}●${NC} "
+    else
+        _installed_mark="${DIM}○${NC} "
+    fi
 
-  echo -e "  ${_installed_mark}${BOLD}${_n})${NC} ${_model} ${DIM}(${_size})${NC}${_warn}"
-  echo -e "     ${DIM}${_desc}${NC}"
-  _options+=("$_model")
-  _n=$((_n + 1))
+    echo -e "  ${_installed_mark}${BOLD}${_n})${NC} ${_model} ${DIM}(${_size})${NC}${_warn}"
+    echo -e "     ${DIM}${_desc}${NC}"
+    _options+=("$_model")
+    _n=$((_n + 1))
 done
 
 echo ""
@@ -161,20 +161,20 @@ echo -e -n "${CYAN}Select model [1-${#_options[@]}]: ${NC}"
 read -r _choice
 
 if [[ -z "$_choice" ]] || [[ "$_choice" -lt 1 ]] || [[ "$_choice" -gt ${#_options[@]} ]] 2>/dev/null; then
-  echo -e "${DIM}No change.${NC}"
-  exit 0
+    echo -e "${DIM}No change.${NC}"
+    exit 0
 fi
 
 _selected="${_options[$((_choice - 1))]}"
 
 # Pull if needed
 if ! ollama list 2>/dev/null | grep -q "$(echo "$_selected" | cut -d: -f1)"; then
-  echo -e "${BLUE}Pulling ${_selected}...${NC}"
-  ollama pull "$_selected"
+    echo -e "${BLUE}Pulling ${_selected}...${NC}"
+    ollama pull "$_selected"
 fi
 
 # Set as default
-echo "export BOB_MODEL='${_selected}'" | sudo tee /etc/profile.d/bob-model.sh > /dev/null 2>&1 || true
+echo "export BOB_MODEL='${_selected}'" | sudo tee /etc/profile.d/bob-model.sh >/dev/null 2>&1 || true
 export BOB_MODEL="$_selected"
 
 echo ""

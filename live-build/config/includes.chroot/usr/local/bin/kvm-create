@@ -6,7 +6,7 @@ set -euo pipefail
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 usage() {
-  cat <<EOF
+    cat <<EOF
 Usage: kvm-create <name> [options]
 
 Options:
@@ -25,11 +25,12 @@ Examples:
 The VM disk is a ZFS zvol at rpool/vms/<name> — thin provisioned,
 compressed, snapshotable. Clone with kvm-clone, snapshot with kvm-snap.
 EOF
-  exit 1
+    exit 1
 }
 
 [[ $# -lt 1 ]] && usage
-NAME="$1"; shift
+NAME="$1"
+shift
 
 RAM=2048
 CPUS=2
@@ -39,29 +40,50 @@ BRIDGE="br0"
 OS_VARIANT="generic"
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --ram)    RAM="$2"; shift 2 ;;
-    --cpus)   CPUS="$2"; shift 2 ;;
-    --disk)   DISK="$2"; shift 2 ;;
-    --iso)    ISO="$2"; shift 2 ;;
-    --bridge) BRIDGE="$2"; shift 2 ;;
-    --os)     OS_VARIANT="$2"; shift 2 ;;
-    *)        echo "Unknown option: $1"; usage ;;
-  esac
+    case "$1" in
+    --ram)
+        RAM="$2"
+        shift 2
+        ;;
+    --cpus)
+        CPUS="$2"
+        shift 2
+        ;;
+    --disk)
+        DISK="$2"
+        shift 2
+        ;;
+    --iso)
+        ISO="$2"
+        shift 2
+        ;;
+    --bridge)
+        BRIDGE="$2"
+        shift 2
+        ;;
+    --os)
+        OS_VARIANT="$2"
+        shift 2
+        ;;
+    *)
+        echo "Unknown option: $1"
+        usage
+        ;;
+    esac
 done
 
 ZVOL="rpool/vms/${NAME}"
 
 # Validate disk size is a positive number
 if ! [[ "$DISK" =~ ^[0-9]+$ ]] || [[ "$DISK" -le 0 ]]; then
-  echo "ERROR: --disk must be a positive integer (got: ${DISK})"
-  exit 1
+    echo "ERROR: --disk must be a positive integer (got: ${DISK})"
+    exit 1
 fi
 
 # Check if zvol already exists
 if zfs list "${ZVOL}" >/dev/null 2>&1; then
-  echo "ERROR: ZFS zvol '${ZVOL}' already exists. Use a different name or delete first."
-  exit 1
+    echo "ERROR: ZFS zvol '${ZVOL}' already exists. Use a different name or delete first."
+    exit 1
 fi
 
 # Snapshot before creating (safety net)
@@ -73,39 +95,39 @@ zfs create -V "${DISK}G" -s -o compression=off -o volblocksize=64K "${ZVOL}"
 
 # Wait for zvol device node to appear
 for _i in $(seq 1 30); do
-  [[ -e "/dev/zvol/${ZVOL}" ]] && break
-  sleep 0.1
+    [[ -e "/dev/zvol/${ZVOL}" ]] && break
+    sleep 0.1
 done
 if [[ ! -e "/dev/zvol/${ZVOL}" ]]; then
-  echo "ERROR: /dev/zvol/${ZVOL} did not appear after 3 seconds"
-  exit 1
+    echo "ERROR: /dev/zvol/${ZVOL} did not appear after 3 seconds"
+    exit 1
 fi
 
 # Build virt-install command
 CMD=(virt-install
-  --name "${NAME}"
-  --ram "${RAM}"
-  --vcpus "${CPUS}"
-  --cpu host-model
-  --machine q35
-  --disk "source.dev=/dev/zvol/${ZVOL},type=block,bus=virtio,cache=none"
-  --network "bridge=${BRIDGE},model=virtio"
-  --graphics vnc,listen=0.0.0.0
-  --os-variant "${OS_VARIANT}"
-  --noautoconsole
+    --name "${NAME}"
+    --ram "${RAM}"
+    --vcpus "${CPUS}"
+    --cpu host-model
+    --machine q35
+    --disk "source.dev=/dev/zvol/${ZVOL},type=block,bus=virtio,cache=none"
+    --network "bridge=${BRIDGE},model=virtio"
+    --graphics vnc,listen=0.0.0.0
+    --os-variant "${OS_VARIANT}"
+    --noautoconsole
 )
 
 if [[ -n "$ISO" ]]; then
-  CMD+=(--cdrom "${ISO}" --boot uefi,cdrom,hd)
+    CMD+=(--cdrom "${ISO}" --boot uefi,cdrom,hd)
 else
-  CMD+=(--boot uefi --import)
+    CMD+=(--boot uefi --import)
 fi
 
 echo "Creating VM: ${NAME} (${RAM}MB RAM, ${CPUS} vCPUs, ${DISK}GB disk)..."
 if ! "${CMD[@]}"; then
-  echo "ERROR: virt-install failed. Cleaning up zvol..."
-  zfs destroy "${ZVOL}" 2>/dev/null
-  exit 1
+    echo "ERROR: virt-install failed. Cleaning up zvol..."
+    zfs destroy "${ZVOL}" 2>/dev/null
+    exit 1
 fi
 
 echo ""
@@ -119,8 +141,8 @@ echo "  Clone:   kvm-clone ${NAME} <new-name>"
 # Register with kldload state DB so the dynamic Ansible inventory sees it.
 # Soft-fail — a missing kldload-db must not block a working virt-install.
 if command -v kldload-db >/dev/null 2>&1; then
-  kldload-db vm-register --name "${NAME}" --cpu "${CPUS}" --ram-gb "$(( RAM / 1024 ))" \
-    --disk-gb "${DISK}" --status "defined" 2>/dev/null || true
-  kldload-db event --type "vm" --subject "${NAME}" \
-    --message "kvm-create: ${RAM}MB / ${CPUS}vCPU / ${DISK}GB disk" 2>/dev/null || true
+    kldload-db vm-register --name "${NAME}" --cpu "${CPUS}" --ram-gb "$((RAM / 1024))" \
+        --disk-gb "${DISK}" --status "defined" 2>/dev/null || true
+    kldload-db event --type "vm" --subject "${NAME}" \
+        --message "kvm-create: ${RAM}MB / ${CPUS}vCPU / ${DISK}GB disk" 2>/dev/null || true
 fi

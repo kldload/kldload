@@ -6,86 +6,127 @@
 set -eo pipefail
 
 T="kldload ZFS"
-_err(){ zenity --error --title="$T" --width=420 --text="$1" 2>/dev/null; }
-_info(){ zenity --info --title="$T" --width=420 --text="$1" 2>/dev/null; }
-_z(){ zenity "$@" 2>/dev/null; }
+_err() { zenity --error --title="$T" --width=420 --text="$1" 2>/dev/null; }
+_info() { zenity --info --title="$T" --width=420 --text="$1" 2>/dev/null; }
+_z() { zenity "$@" 2>/dev/null; }
 # privileged zfs/zpool via polkit
-_pz(){ pkexec "$@"; }
+_pz() { pkexec "$@"; }
 
-command -v zfs >/dev/null   || { _err "ZFS not installed."; exit 1; }
-command -v zenity >/dev/null|| { echo "zenity required" >&2; exit 1; }
-
-_pick_dataset(){  # echoes chosen filesystem/volume
-  local rows; rows="$(zfs list -H -o name,used,avail -t filesystem,volume 2>/dev/null)"
-  [[ -n "$rows" ]] || { _err "No ZFS datasets found."; return 1; }
-  printf '%s\n' "$rows" | awk -F'\t' '{print $1"\n"$2"\n"$3}' \
-    | _z --list --title="$T — pick a dataset" --width=560 --height=420 \
-         --column=Dataset --column=Used --column=Avail
+command -v zfs >/dev/null || {
+    _err "ZFS not installed."
+    exit 1
 }
-_pick_snapshot(){  # $1=dataset; echoes full snap name
-  local snaps; snaps="$(zfs list -H -t snapshot -o name,used -s creation -d1 "$1" 2>/dev/null)"
-  [[ -n "$snaps" ]] || { _err "No snapshots on $1."; return 1; }
-  printf '%s\n' "$snaps" | awk -F'\t' '{print $1"\n"$2}' \
-    | _z --list --title="$T — pick a snapshot" --width=620 --height=420 \
-         --column=Snapshot --column=Used
+command -v zenity >/dev/null || {
+    echo "zenity required" >&2
+    exit 1
 }
 
-do_snapshot(){
-  local ds; ds="$(_pick_dataset)" || return
-  [[ -n "$ds" ]] || return
-  local label; label="$(_z --entry --title="$T" --width=420 \
-      --text="Snapshot name for ${ds}@" --entry-text="$(date +%Y%m%d-%H%M%S)")" || return
-  [[ -n "$label" ]] || return
-  if _pz zfs snapshot "${ds}@${label}"; then _info "Created snapshot:\n${ds}@${label}"
-  else _err "Snapshot failed (cancelled or already exists)."; fi
+_pick_dataset() { # echoes chosen filesystem/volume
+    local rows
+    rows="$(zfs list -H -o name,used,avail -t filesystem,volume 2>/dev/null)"
+    [[ -n "$rows" ]] || {
+        _err "No ZFS datasets found."
+        return 1
+    }
+    printf '%s\n' "$rows" | awk -F'\t' '{print $1"\n"$2"\n"$3}' |
+        _z --list --title="$T — pick a dataset" --width=560 --height=420 \
+            --column=Dataset --column=Used --column=Avail
+}
+_pick_snapshot() { # $1=dataset; echoes full snap name
+    local snaps
+    snaps="$(zfs list -H -t snapshot -o name,used -s creation -d1 "$1" 2>/dev/null)"
+    [[ -n "$snaps" ]] || {
+        _err "No snapshots on $1."
+        return 1
+    }
+    printf '%s\n' "$snaps" | awk -F'\t' '{print $1"\n"$2}' |
+        _z --list --title="$T — pick a snapshot" --width=620 --height=420 \
+            --column=Snapshot --column=Used
 }
 
-do_rollback(){
-  local ds; ds="$(_pick_dataset)" || return; [[ -n "$ds" ]] || return
-  local snap; snap="$(_pick_snapshot "$ds")" || return; [[ -n "$snap" ]] || return
-  _z --question --width=460 --title="$T" \
-     --text="Roll <b>${ds}</b> back to\n<b>${snap}</b>?\n\nThis DISCARDS all changes made after that snapshot." || return
-  if _pz zfs rollback -r "$snap"; then _info "Rolled back to:\n${snap}"
-  else _err "Rollback failed."; fi
+do_snapshot() {
+    local ds
+    ds="$(_pick_dataset)" || return
+    [[ -n "$ds" ]] || return
+    local label
+    label="$(_z --entry --title="$T" --width=420 \
+        --text="Snapshot name for ${ds}@" --entry-text="$(date +%Y%m%d-%H%M%S)")" || return
+    [[ -n "$label" ]] || return
+    if _pz zfs snapshot "${ds}@${label}"; then
+        _info "Created snapshot:\n${ds}@${label}"
+    else _err "Snapshot failed (cancelled or already exists)."; fi
 }
 
-do_replicate(){
-  local ds; ds="$(_pick_dataset)" || return; [[ -n "$ds" ]] || return
-  # destination: a local pool, or the fiend minion
-  local dest; dest="$(printf 'tank (local pool)\nrpool (local pool)\nfiend (remote minion)\n' \
-      | _z --list --title="$T — replicate ${ds} to…" --width=480 --column=Destination)" || return
-  [[ -n "$dest" ]] || return
-  local snap; snap="${ds}@repl-$(date +%Y%m%d-%H%M%S)"
-  _pz zfs snapshot "$snap" || { _err "Could not snapshot ${ds}."; return; }
-  local base="${ds##*/}"
-  if [[ "$dest" == fiend* ]]; then
-    ( zfs send "$snap" | ssh -o ConnectTimeout=8 admin@fiend "sudo zfs recv -F tank/replicas/${base}" ) \
-      2>/tmp/kldzfs.err &
-  else
-    local pool="${dest%% *}"
-    ( _pz sh -c "zfs send '$snap' | zfs recv -F '${pool}/replicas/${base}'" ) 2>/tmp/kldzfs.err &
-  fi
-  local pid=$!
-  ( while kill -0 $pid 2>/dev/null; do echo 50; sleep 1; done; echo 100 ) \
-    | _z --progress --pulsate --auto-close --title="$T" --width=420 \
-         --text="Replicating ${base} → ${dest%% *} …"
-  wait $pid && _info "Replicated:\n${snap}\n→ ${dest%% *}/replicas/${base}" \
-    || _err "Replication failed:\n$(tail -3 /tmp/kldzfs.err 2>/dev/null)"
+do_rollback() {
+    local ds
+    ds="$(_pick_dataset)" || return
+    [[ -n "$ds" ]] || return
+    local snap
+    snap="$(_pick_snapshot "$ds")" || return
+    [[ -n "$snap" ]] || return
+    _z --question --width=460 --title="$T" \
+        --text="Roll <b>${ds}</b> back to\n<b>${snap}</b>?\n\nThis DISCARDS all changes made after that snapshot." || return
+    if _pz zfs rollback -r "$snap"; then
+        _info "Rolled back to:\n${snap}"
+    else _err "Rollback failed."; fi
 }
 
-show_status(){
-  { echo "=== zpool list ==="; zpool list; echo; echo "=== zpool status ==="; zpool status; } \
-    | _z --text-info --title="$T — pool status" --width=760 --height=520 --font=monospace
+do_replicate() {
+    local ds
+    ds="$(_pick_dataset)" || return
+    [[ -n "$ds" ]] || return
+    # destination: a local pool, or the fiend minion
+    local dest
+    dest="$(printf 'tank (local pool)\nrpool (local pool)\nfiend (remote minion)\n' |
+        _z --list --title="$T — replicate ${ds} to…" --width=480 --column=Destination)" || return
+    [[ -n "$dest" ]] || return
+    local snap
+    snap="${ds}@repl-$(date +%Y%m%d-%H%M%S)"
+    _pz zfs snapshot "$snap" || {
+        _err "Could not snapshot ${ds}."
+        return
+    }
+    local base="${ds##*/}"
+    if [[ "$dest" == fiend* ]]; then
+        (zfs send "$snap" | ssh -o ConnectTimeout=8 admin@fiend "sudo zfs recv -F tank/replicas/${base}") \
+            2>/tmp/kldzfs.err &
+    else
+        local pool="${dest%% *}"
+        (_pz sh -c "zfs send '$snap' | zfs recv -F '${pool}/replicas/${base}'") 2>/tmp/kldzfs.err &
+    fi
+    local pid=$!
+    (
+        while kill -0 $pid 2>/dev/null; do
+            echo 50
+            sleep 1
+        done
+        echo 100
+    ) |
+        _z --progress --pulsate --auto-close --title="$T" --width=420 \
+            --text="Replicating ${base} → ${dest%% *} …"
+    wait $pid && _info "Replicated:\n${snap}\n→ ${dest%% *}/replicas/${base}" ||
+        _err "Replication failed:\n$(tail -3 /tmp/kldzfs.err 2>/dev/null)"
+}
+
+show_status() {
+    {
+        echo "=== zpool list ==="
+        zpool list
+        echo
+        echo "=== zpool status ==="
+        zpool status
+    } |
+        _z --text-info --title="$T — pool status" --width=760 --height=520 --font=monospace
 }
 
 while true; do
-  choice="$(printf 'Snapshot a dataset\nReplicate (send) to another pool / fiend\nRoll back to a snapshot\nPool status\nQuit\n' \
-    | _z --list --title="$T" --width=460 --height=360 --column="What do you want to do?")" || exit 0
-  case "$choice" in
-    Snapshot*)  do_snapshot ;;
+    choice="$(printf 'Snapshot a dataset\nReplicate (send) to another pool / fiend\nRoll back to a snapshot\nPool status\nQuit\n' |
+        _z --list --title="$T" --width=460 --height=360 --column="What do you want to do?")" || exit 0
+    case "$choice" in
+    Snapshot*) do_snapshot ;;
     Replicate*) do_replicate ;;
-    Roll*)      do_rollback ;;
-    Pool*)      show_status ;;
-    *)          exit 0 ;;
-  esac
+    Roll*) do_rollback ;;
+    Pool*) show_status ;;
+    *) exit 0 ;;
+    esac
 done

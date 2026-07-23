@@ -17,41 +17,42 @@ if [[ ${#existing[@]} -gt 0 ]]; then
     for w in "${existing[@]}"; do
         tmux kill-window -t "${SESSION}:=${w}" 2>/dev/null
     done
-    tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx klab && \
+    tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx klab &&
         tmux select-window -t "${SESSION}:=klab"
     exit 0
 fi
 
 spawn() {
-    local name="$1" tool="$2" desc="$3" hint="$4"; shift 4
+    local name="$1" tool="$2" desc="$3" hint="$4"
+    shift 4
     tmux new-window -t "$SESSION" -n "$name" -d "_kbcc-pane $tool $(printf '%q ' "$desc" "$hint" "$@")"
 }
 
 spawn biosnoop biosnoop \
-      "Every block I/O the kernel handled. PID, comm, disk, sector, size, latency in microseconds." \
-      "Bursty rows during fio, qcow2, klab golden builds. Latency over 5ms on NVMe = disk is in trouble OR a scrub is running."
+    "Every block I/O the kernel handled. PID, comm, disk, sector, size, latency in microseconds." \
+    "Bursty rows during fio, qcow2, klab golden builds. Latency over 5ms on NVMe = disk is in trouble OR a scrub is running."
 
 spawn biolatency biolatency \
-      "Block I/O latency histogram — prints every 5 seconds (passed via -m 5)." \
-      "Healthy NVMe = most heat in the 64-256 us row. Spinning rust = the 4-16 ms row. Bimodal = ZFS ARC misses." \
-      -m 5
+    "Block I/O latency histogram — prints every 5 seconds (passed via -m 5)." \
+    "Healthy NVMe = most heat in the 64-256 us row. Spinning rust = the 4-16 ms row. Bimodal = ZFS ARC misses." \
+    -m 5
 
 spawn tcpconnect tcpconnect \
-      "Every new outbound TCP connect — PID, source IP, dest IP, port." \
-      "klab cloud-image downloads, kubectl exec, container image pulls all light up here. The 'what just started talking' view."
+    "Every new outbound TCP connect — PID, source IP, dest IP, port." \
+    "klab cloud-image downloads, kubectl exec, container image pulls all light up here. The 'what just started talking' view."
 
 spawn tcpretrans tcpretrans \
-      "Every TCP retransmit — connection tuple plus the kernel reason code (LOSS, FRTO, ...)." \
-      "Healthy LAN = almost empty. Burst of retransmits = MTU mismatch, switch flap, or the remote peer is unhealthy."
+    "Every TCP retransmit — connection tuple plus the kernel reason code (LOSS, FRTO, ...)." \
+    "Healthy LAN = almost empty. Burst of retransmits = MTU mismatch, switch flap, or the remote peer is unhealthy."
 
 spawn tcplife tcplife \
-      "Connection lifetime — every TCP socket that closed in the last interval, with PID + bytes + duration." \
-      "Long-lived hubble.observe streams sit here for minutes. Short-burst k8s probes show up at <100ms with kilobyte counts."
+    "Connection lifetime — every TCP socket that closed in the last interval, with PID + bytes + duration." \
+    "Long-lived hubble.observe streams sit here for minutes. Short-burst k8s probes show up at <100ms with kilobyte counts."
 
 spawn fileslower fileslower \
-      "Filesystem operations that took longer than N milliseconds (default 10ms)." \
-      "ZFS on healthy NVMe rarely shows entries. When it does — slow scrub, fragmented dataset, full pool — they jump out." \
-      10
+    "Filesystem operations that took longer than N milliseconds (default 10ms)." \
+    "ZFS on healthy NVMe rarely shows entries. When it does — slow scrub, fragmented dataset, full pool — they jump out." \
+    10
 
 # zfsdist — custom bpftrace script. Different invocation path because
 # it is not a bcc tool; we run bpftrace directly. _kbcc-pane won't
@@ -64,12 +65,12 @@ interval:s:5 { print(@us); clear(@us); }'
 # Save the script to a file so we can pass its path as a positional
 # arg to _kbcc-pane (which expects a binary + args).
 mkdir -p /run/kldload
-printf '%s\n' "$ZFSDIST_SCRIPT" > /run/kldload/zfsdist.bt
+printf '%s\n' "$ZFSDIST_SCRIPT" >/run/kldload/zfsdist.bt
 
 tmux new-window -t "$SESSION" -n zfsdist -d "_kbcc-pane bpftrace \
     $(printf '%q ' \
-        'ZFS per-call latency histogram in microseconds. Refreshes every 5 seconds. Built for the kldload OpenZFS test bench.' \
-        'Most heat in the 4-32us row on a healthy NVMe pool. Right-shift into milliseconds during scrub or txg pressure.' \
-        -f text /run/kldload/zfsdist.bt)"
+    'ZFS per-call latency histogram in microseconds. Refreshes every 5 seconds. Built for the kldload OpenZFS test bench.' \
+    'Most heat in the 4-32us row on a healthy NVMe pool. Right-shift into milliseconds during scrub or txg pressure.' \
+    -f text /run/kldload/zfsdist.bt)"
 
 tmux select-window -t "${SESSION}:=biosnoop"

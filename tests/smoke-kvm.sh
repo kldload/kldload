@@ -36,7 +36,6 @@ test_succeeds "Has IP" "ip -4 addr show | grep -q 'inet '"
 _section "Secure Boot"
 if command -v mokutil >/dev/null 2>&1; then
     _pass "mokutil installed"
-    local _sb_state
     _sb_state="$(mokutil --sb-state 2>/dev/null || echo 'unknown')"
     if echo "$_sb_state" | grep -q "enabled"; then
         _pass "Secure Boot: ENABLED"
@@ -47,7 +46,6 @@ if command -v mokutil >/dev/null 2>&1; then
             _warn "MOK key" "not enrolled — run mokutil --import /var/lib/dkms/mok.der"
         fi
         # Check lockdown
-        local _lockdown
         _lockdown="$(cat /sys/kernel/security/lockdown 2>/dev/null || echo 'unknown')"
         _pass "Kernel lockdown: ${_lockdown}"
     else
@@ -66,7 +64,6 @@ else
 fi
 # Check shim on EFI partition
 if [[ -f /boot/efi/EFI/BOOT/BOOTX64.EFI ]]; then
-    local _boot_hash _zbm_hash
     _boot_hash="$(sha256sum /boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
     _zbm_hash="$(sha256sum /boot/efi/EFI/zbm/BOOTX64.EFI 2>/dev/null | awk '{print $1}')"
     if [[ "$_boot_hash" != "$_zbm_hash" ]]; then

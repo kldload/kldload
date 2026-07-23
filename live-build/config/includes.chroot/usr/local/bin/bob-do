@@ -24,12 +24,12 @@ DIM='\033[2m'
 NC='\033[0m'
 
 if [[ $# -eq 0 ]]; then
-  echo -e "${CYAN}bob-do${NC} — translate natural language to planned commands"
-  echo ""
-  echo "Usage: bob-do \"your request in plain English\""
-  echo ""
-  echo "The Sergeant reads orders back before executing."
-  exit 0
+    echo -e "${CYAN}bob-do${NC} — translate natural language to planned commands"
+    echo ""
+    echo "Usage: bob-do \"your request in plain English\""
+    echo ""
+    echo "The Sergeant reads orders back before executing."
+    exit 0
 fi
 
 REQUEST="$*"
@@ -89,8 +89,8 @@ else:
 " 2>/dev/null)
 
 if [[ "$PLAN_JSON" == "{}" ]] || [[ -z "$PLAN_JSON" ]]; then
-  echo -e "${RED}Bob couldn't plan that. Try rephrasing.${NC}"
-  exit 1
+    echo -e "${RED}Bob couldn't plan that. Try rephrasing.${NC}"
+    exit 1
 fi
 
 # Extract fields
@@ -112,10 +112,10 @@ echo ""
 
 # Risk badge
 case "$_risk" in
-  low)    echo -e "Risk: ${GREEN}LOW${NC} — ${_risk_reason}" ;;
-  medium) echo -e "Risk: ${YELLOW}MEDIUM${NC} — ${_risk_reason}" ;;
-  high)   echo -e "Risk: ${RED}HIGH${NC} — ${_risk_reason}" ;;
-  *)      echo -e "Risk: ${YELLOW}${_risk}${NC} — ${_risk_reason}" ;;
+low) echo -e "Risk: ${GREEN}LOW${NC} — ${_risk_reason}" ;;
+medium) echo -e "Risk: ${YELLOW}MEDIUM${NC} — ${_risk_reason}" ;;
+high) echo -e "Risk: ${RED}HIGH${NC} — ${_risk_reason}" ;;
+*) echo -e "Risk: ${YELLOW}${_risk}${NC} — ${_risk_reason}" ;;
 esac
 echo ""
 
@@ -125,28 +125,28 @@ echo "$_commands"
 # ── Confirm ──────────────────────────────────────────────────────────────────
 echo ""
 if [[ "$_risk" == "high" ]]; then
-  echo -e "${RED}${BOLD}HIGH RISK — type YES to proceed:${NC}"
-  read -rp "> " _confirm
-  if [[ "$_confirm" != "YES" ]]; then
-    echo -e "${DIM}Aborted.${NC}"
-    exit 0
-  fi
+    echo -e "${RED}${BOLD}HIGH RISK — type YES to proceed:${NC}"
+    read -rp "> " _confirm
+    if [[ "$_confirm" != "YES" ]]; then
+        echo -e "${DIM}Aborted.${NC}"
+        exit 0
+    fi
 else
-  read -rp "Execute? [y/N] " _confirm
-  if [[ "$_confirm" != "y" ]] && [[ "$_confirm" != "Y" ]]; then
-    echo -e "${DIM}Aborted.${NC}"
-    exit 0
-  fi
+    read -rp "Execute? [y/N] " _confirm
+    if [[ "$_confirm" != "y" ]] && [[ "$_confirm" != "Y" ]]; then
+        echo -e "${DIM}Aborted.${NC}"
+        exit 0
+    fi
 fi
 
 # ── Execute ──────────────────────────────────────────────────────────────────
 echo ""
 _log="${HISTORY_DIR}/$(date +%Y%m%d-%H%M%S)-bob-do.log"
-echo "# bob-do: ${REQUEST}" > "$_log"
-echo "# plan: ${_plan}" >> "$_log"
-echo "# risk: ${_risk}" >> "$_log"
-echo "# date: $(date)" >> "$_log"
-echo "" >> "$_log"
+echo "# bob-do: ${REQUEST}" >"$_log"
+echo "# plan: ${_plan}" >>"$_log"
+echo "# risk: ${_risk}" >>"$_log"
+echo "# date: $(date)" >>"$_log"
+echo "" >>"$_log"
 
 _cmds=$(echo "$PLAN_JSON" | python3 -c "
 import sys,json
@@ -156,29 +156,29 @@ for c in d.get('commands',[]):
 ")
 
 while IFS= read -r _cmd; do
-  [[ -z "$_cmd" ]] && continue
-  echo -e "${CYAN}\$ ${_cmd}${NC}"
-  echo "$ ${_cmd}" >> "$_log"
+    [[ -z "$_cmd" ]] && continue
+    echo -e "${CYAN}\$ ${_cmd}${NC}"
+    echo "$ ${_cmd}" >>"$_log"
 
-  set +e
-  eval "$_cmd" 2>&1 | tee -a "$_log"
-  _exit=$?
-  set -e
+    set +e
+    eval "$_cmd" 2>&1 | tee -a "$_log"
+    _exit=$?
+    set -e
 
-  if [[ $_exit -ne 0 ]]; then
-    echo -e "${RED}Command failed (exit ${_exit})${NC}"
-    echo "# FAILED: exit ${_exit}" >> "$_log"
-    read -rp "Continue with remaining commands? [y/N] " _cont
-    if [[ "$_cont" != "y" ]] && [[ "$_cont" != "Y" ]]; then
-      echo -e "${DIM}Stopped.${NC}"
-      exit 1
+    if [[ $_exit -ne 0 ]]; then
+        echo -e "${RED}Command failed (exit ${_exit})${NC}"
+        echo "# FAILED: exit ${_exit}" >>"$_log"
+        read -rp "Continue with remaining commands? [y/N] " _cont
+        if [[ "$_cont" != "y" ]] && [[ "$_cont" != "Y" ]]; then
+            echo -e "${DIM}Stopped.${NC}"
+            exit 1
+        fi
+    else
+        echo -e "${GREEN}✔${NC}"
+        echo "# OK" >>"$_log"
     fi
-  else
-    echo -e "${GREEN}✔${NC}"
-    echo "# OK" >> "$_log"
-  fi
-  echo "" >> "$_log"
-done <<< "$_cmds"
+    echo "" >>"$_log"
+done <<<"$_cmds"
 
 echo ""
 echo -e "${GREEN}${BOLD}Done.${NC} Log: ${_log}"

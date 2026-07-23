@@ -60,13 +60,13 @@ for candidate in "${CANDIDATES[@]}"; do
     fi
 done
 
-[[ -n "$BOOTENV_LIB" ]] \
-    || die "bootenv.sh not found. Checked: ${CANDIDATES[*]}"
+[[ -n "$BOOTENV_LIB" ]] ||
+    die "bootenv.sh not found. Checked: ${CANDIDATES[*]}"
 
 # Also source common.sh for log/die/run helpers
 COMMON_LIB="$(dirname "$BOOTENV_LIB")/common.sh"
-[[ -f "$COMMON_LIB" ]] \
-    || die "common.sh not found at $COMMON_LIB"
+[[ -f "$COMMON_LIB" ]] ||
+    die "common.sh not found at $COMMON_LIB"
 
 # shellcheck source=../common.sh
 source "$COMMON_LIB"
@@ -87,60 +87,60 @@ COMMAND="${1:-}"
 shift || true
 
 case "$COMMAND" in
-    list)
-        echo "Boot environments (rpool/ROOT):"
-        echo "---"
-        zfs list -r -t filesystem -o name,creation,used rpool/ROOT 2>/dev/null \
-            || echo "(no boot environments found)"
+list)
+    echo "Boot environments (rpool/ROOT):"
+    echo "---"
+    zfs list -r -t filesystem -o name,creation,used rpool/ROOT 2>/dev/null ||
+        echo "(no boot environments found)"
 
-        echo ""
-        echo "Active bootfs:"
-        zpool get -H -o value bootfs rpool 2>/dev/null || echo "(unknown)"
-        ;;
+    echo ""
+    echo "Active bootfs:"
+    zpool get -H -o value bootfs rpool 2>/dev/null || echo "(unknown)"
+    ;;
 
-    create)
-        NAME="${1:-}"
-        [[ -n "$NAME" ]] || die "create requires a name argument. Usage: $PROGNAME create <name>"
-        # If name doesn't look like a full snapshot path, treat as just the name
-        if [[ "$NAME" != *"@"* ]]; then
-            bootenv_create "$NAME"
-        else
-            die "For create, provide just the snapshot name (without @), e.g.: $PROGNAME create my-backup"
-        fi
-        ;;
+create)
+    NAME="${1:-}"
+    [[ -n "$NAME" ]] || die "create requires a name argument. Usage: $PROGNAME create <name>"
+    # If name doesn't look like a full snapshot path, treat as just the name
+    if [[ "$NAME" != *"@"* ]]; then
+        bootenv_create "$NAME"
+    else
+        die "For create, provide just the snapshot name (without @), e.g.: $PROGNAME create my-backup"
+    fi
+    ;;
 
-    activate)
-        SNAP="${1:-}"
-        [[ -n "$SNAP" ]] || die "activate requires a snapshot argument."
-        bootenv_activate "$SNAP"
-        log "Next boot will use: ${SNAP%%@*}"
-        ;;
+activate)
+    SNAP="${1:-}"
+    [[ -n "$SNAP" ]] || die "activate requires a snapshot argument."
+    bootenv_activate "$SNAP"
+    log "Next boot will use: ${SNAP%%@*}"
+    ;;
 
-    rollback)
-        SNAP="${1:-}"
-        [[ -n "$SNAP" ]] || die "rollback requires a snapshot argument."
-        log "WARNING: Rolling back will DISCARD all changes made after $SNAP."
-        log "Press Ctrl+C within 5 seconds to abort..."
-        sleep 5
-        bootenv_rollback "$SNAP"
-        log "Rollback complete. Reboot to apply."
-        ;;
+rollback)
+    SNAP="${1:-}"
+    [[ -n "$SNAP" ]] || die "rollback requires a snapshot argument."
+    log "WARNING: Rolling back will DISCARD all changes made after $SNAP."
+    log "Press Ctrl+C within 5 seconds to abort..."
+    sleep 5
+    bootenv_rollback "$SNAP"
+    log "Rollback complete. Reboot to apply."
+    ;;
 
-    delete)
-        SNAP="${1:-}"
-        [[ -n "$SNAP" ]] || die "delete requires a snapshot argument."
-        [[ "$SNAP" == *"@"* ]] || die "delete requires a full snapshot path (e.g. rpool/ROOT/default@name)"
-        log "Deleting boot environment: $SNAP"
-        run zfs destroy "$SNAP"
-        log "Deleted: $SNAP"
-        ;;
+delete)
+    SNAP="${1:-}"
+    [[ -n "$SNAP" ]] || die "delete requires a snapshot argument."
+    [[ "$SNAP" == *"@"* ]] || die "delete requires a full snapshot path (e.g. rpool/ROOT/default@name)"
+    log "Deleting boot environment: $SNAP"
+    run zfs destroy "$SNAP"
+    log "Deleted: $SNAP"
+    ;;
 
-    help|--help|-h|"")
-        usage
-        ;;
+help | --help | -h | "")
+    usage
+    ;;
 
-    *)
-        usage
-        die "Unknown command: '$COMMAND'"
-        ;;
+*)
+    usage
+    die "Unknown command: '$COMMAND'"
+    ;;
 esac

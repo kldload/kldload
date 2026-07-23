@@ -5,9 +5,12 @@ set -euo pipefail
 # Auto-elevate to root
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
-log()  { echo -e "\033[1;32m[kube-reset]\033[0m $*"; }
+log() { echo -e "\033[1;32m[kube-reset]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[kube-reset]\033[0m $*" >&2; }
-die()  { echo -e "\033[1;31m[kube-reset]\033[0m $*" >&2; exit 1; }
+die() {
+    echo -e "\033[1;31m[kube-reset]\033[0m $*" >&2
+    exit 1
+}
 
 echo -e "\033[1;31m"
 echo "WARNING: This will tear down Kubernetes on this node."
@@ -17,16 +20,19 @@ echo "  - Cilium and all pods will be destroyed"
 echo -e "\033[0m"
 
 read -r -p "Type 'reset' to continue: " confirm
-[[ "$confirm" == "reset" ]] || { echo "Aborted."; exit 0; }
+[[ "$confirm" == "reset" ]] || {
+    echo "Aborted."
+    exit 0
+}
 
 # ZFS snapshot before reset
 if command -v zfs >/dev/null 2>&1; then
-  pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
-  if [[ -n "${pool:-}" ]]; then
-    snap="${pool}@pre-kube-reset-$(date -u +%Y%m%dT%H%M%SZ)"
-    zfs snapshot -r "$snap" 2>/dev/null || true
-    log "ZFS snapshot: $snap (rollback with: zfs rollback -r $snap)"
-  fi
+    pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
+    if [[ -n "${pool:-}" ]]; then
+        snap="${pool}@pre-kube-reset-$(date -u +%Y%m%dT%H%M%SZ)"
+        zfs snapshot -r "$snap" 2>/dev/null || true
+        log "ZFS snapshot: $snap (rollback with: zfs rollback -r $snap)"
+    fi
 fi
 
 log "Running kubeadm reset..."

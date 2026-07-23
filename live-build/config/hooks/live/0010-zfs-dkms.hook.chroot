@@ -12,11 +12,14 @@ mkdir -p "$(dirname "$LOG")"
 
 # Use explicit paths so the ERR trap works even if PATH is broken
 _DATE="$(command -v date 2>/dev/null || echo /usr/bin/date)"
-_TEE="$(command -v tee  2>/dev/null || echo /usr/bin/tee)"
+_TEE="$(command -v tee 2>/dev/null || echo /usr/bin/tee)"
 
-ts()  { "$_DATE" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo "??:??:??"; }
+ts() { "$_DATE" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo "??:??:??"; }
 log() { echo "$(ts) [zfs-dkms] $*" | "$_TEE" -a "$LOG" >&2; }
-die() { log "ERROR: $*"; exit 1; }
+die() {
+    log "ERROR: $*"
+    exit 1
+}
 
 trap 'die "Unexpected error at line $LINENO (exit $?)"' ERR
 
@@ -33,9 +36,9 @@ if [[ ! -L /bin ]]; then
         if [[ ! -e "/bin/${_bin}" ]]; then
             _src="$(command -v "${_bin}" 2>/dev/null || true)"
             if [[ -x "${_src}" ]]; then
-                ln -sf "${_src}" "/bin/${_bin}" 2>/dev/null \
-                    && log "  linked /bin/${_bin} -> ${_src}" \
-                    || log "  WARNING: could not link /bin/${_bin}"
+                ln -sf "${_src}" "/bin/${_bin}" 2>/dev/null &&
+                    log "  linked /bin/${_bin} -> ${_src}" ||
+                    log "  WARNING: could not link /bin/${_bin}"
             fi
         fi
     done
@@ -63,8 +66,8 @@ if [[ ! -d "$HEADERS_DIR" ]]; then
     log "Attempting to find and install matching headers package..."
 
     # Derive the headers package name from the installed kernel package
-    KPKG="$(dpkg-query -W -f='${Package}\n' 'linux-image-*' 2>/dev/null \
-            | grep -v '^linux-image-amd64$' | sort -V | tail -1 || true)"
+    KPKG="$(dpkg-query -W -f='${Package}\n' 'linux-image-*' 2>/dev/null |
+        grep -v '^linux-image-amd64$' | sort -V | tail -1 || true)"
     if [[ -n "$KPKG" ]]; then
         HPKG="${KPKG/linux-image-/linux-headers-}"
         log "Installing $HPKG..."
@@ -111,12 +114,12 @@ touch "/var/lib/dkms/zfs/${ZFS_VER}/build/make.log"
 log "Pre-created DKMS build dir: /var/lib/dkms/zfs/${ZFS_VER}/build"
 
 log "DKMS build (kernel $KVER)..."
-dkms build "zfs/${ZFS_VER}" --kernelver "$KVER" --force 2>&1 | "$_TEE" -a "$LOG" \
-    || die "dkms build failed for zfs/$ZFS_VER on $KVER"
+dkms build "zfs/${ZFS_VER}" --kernelver "$KVER" --force 2>&1 | "$_TEE" -a "$LOG" ||
+    die "dkms build failed for zfs/$ZFS_VER on $KVER"
 
 log "DKMS install..."
-dkms install "zfs/${ZFS_VER}" --kernelver "$KVER" --force 2>&1 | "$_TEE" -a "$LOG" \
-    || die "dkms install failed for zfs/$ZFS_VER on $KVER"
+dkms install "zfs/${ZFS_VER}" --kernelver "$KVER" --force 2>&1 | "$_TEE" -a "$LOG" ||
+    die "dkms install failed for zfs/$ZFS_VER on $KVER"
 
 # ---------------------------------------------------------------------------
 # Post-install
@@ -141,13 +144,13 @@ mkdir -p "$MOK_DIR"
 log "Generating Secure Boot MOK key pair at $MOK_DIR ..."
 openssl req -new -x509 -newkey rsa:2048 \
     -keyout "$MOK_DIR/mok.key" \
-    -out    "$MOK_DIR/mok.pub" \
+    -out "$MOK_DIR/mok.pub" \
     -days 3650 -nodes \
     -subj "/CN=kldload Live ISO Secure Boot MOK/" \
     2>&1 | "$_TEE" -a "$LOG"
 
 openssl x509 \
-    -in  "$MOK_DIR/mok.pub" \
+    -in "$MOK_DIR/mok.pub" \
     -out "$MOK_DIR/mok.der" \
     -outform DER \
     2>&1 | "$_TEE" -a "$LOG"
@@ -172,49 +175,49 @@ else
 
     while IFS= read -r _mod; do
         case "$_mod" in
-            *.ko.xz)
-                _ko="${_mod%.xz}"
-                xz -dk "$_mod" 2>>"$LOG"                   # decompress, keep .xz
-                if "$SIGN_FILE" sha256 "$MOK_DIR/mok.key" "$MOK_DIR/mok.pub" "$_ko" \
-                        2>&1 | "$_TEE" -a "$LOG"; then
-                    xz --check=crc32 -f "$_ko" 2>>"$LOG"  # recompress — kernel decompressor requires crc32 not crc64
-                    _signed=$(( _signed + 1 ))
-                    log "  signed: $(basename "$_mod")"
-                else
-                    rm -f "$_ko"
-                    _failed=$(( _failed + 1 ))
-                    log "  WARNING: signing failed: $(basename "$_mod")"
-                fi
-                ;;
-            *.ko.gz)
-                _ko="${_mod%.gz}"
-                gunzip -c "$_mod" > "$_ko" 2>>"$LOG"       # decompress, keep .gz
-                if "$SIGN_FILE" sha256 "$MOK_DIR/mok.key" "$MOK_DIR/mok.pub" "$_ko" \
-                        2>&1 | "$_TEE" -a "$LOG"; then
-                    gzip -f "$_ko" 2>>"$LOG"               # recompress
-                    mv "${_ko}.gz" "$_mod" 2>>"$LOG"       # put back
-                    _signed=$(( _signed + 1 ))
-                    log "  signed: $(basename "$_mod")"
-                else
-                    rm -f "$_ko"
-                    _failed=$(( _failed + 1 ))
-                    log "  WARNING: signing failed: $(basename "$_mod")"
-                fi
-                ;;
-            *.ko)
-                if "$SIGN_FILE" sha256 "$MOK_DIR/mok.key" "$MOK_DIR/mok.pub" "$_mod" \
-                        2>&1 | "$_TEE" -a "$LOG"; then
-                    _signed=$(( _signed + 1 ))
-                    log "  signed: $(basename "$_mod")"
-                else
-                    _failed=$(( _failed + 1 ))
-                    log "  WARNING: signing failed: $(basename "$_mod")"
-                fi
-                ;;
+        *.ko.xz)
+            _ko="${_mod%.xz}"
+            xz -dk "$_mod" 2>>"$LOG" # decompress, keep .xz
+            if "$SIGN_FILE" sha256 "$MOK_DIR/mok.key" "$MOK_DIR/mok.pub" "$_ko" \
+                2>&1 | "$_TEE" -a "$LOG"; then
+                xz --check=crc32 -f "$_ko" 2>>"$LOG" # recompress — kernel decompressor requires crc32 not crc64
+                _signed=$((_signed + 1))
+                log "  signed: $(basename "$_mod")"
+            else
+                rm -f "$_ko"
+                _failed=$((_failed + 1))
+                log "  WARNING: signing failed: $(basename "$_mod")"
+            fi
+            ;;
+        *.ko.gz)
+            _ko="${_mod%.gz}"
+            gunzip -c "$_mod" >"$_ko" 2>>"$LOG" # decompress, keep .gz
+            if "$SIGN_FILE" sha256 "$MOK_DIR/mok.key" "$MOK_DIR/mok.pub" "$_ko" \
+                2>&1 | "$_TEE" -a "$LOG"; then
+                gzip -f "$_ko" 2>>"$LOG"         # recompress
+                mv "${_ko}.gz" "$_mod" 2>>"$LOG" # put back
+                _signed=$((_signed + 1))
+                log "  signed: $(basename "$_mod")"
+            else
+                rm -f "$_ko"
+                _failed=$((_failed + 1))
+                log "  WARNING: signing failed: $(basename "$_mod")"
+            fi
+            ;;
+        *.ko)
+            if "$SIGN_FILE" sha256 "$MOK_DIR/mok.key" "$MOK_DIR/mok.pub" "$_mod" \
+                2>&1 | "$_TEE" -a "$LOG"; then
+                _signed=$((_signed + 1))
+                log "  signed: $(basename "$_mod")"
+            else
+                _failed=$((_failed + 1))
+                log "  WARNING: signing failed: $(basename "$_mod")"
+            fi
+            ;;
         esac
     done < <(find "/lib/modules/${KVER}" \
-                  \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.gz' \) \
-                  2>/dev/null | grep -i zfs || true)
+        \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.gz' \) \
+        2>/dev/null | grep -i zfs || true)
 
     log "ZFS module signing complete: $_signed signed, $_failed failed"
 fi
@@ -227,22 +230,22 @@ fi
 log "Recompressing ZFS modules with --check=crc32 (kernel requires crc32, not crc64)..."
 while IFS= read -r _mod; do
     case "$_mod" in
-        *.ko.xz)
-            _check="$(xz --robot --list "$_mod" 2>/dev/null | awk '/^file/{print $7}')"
-            if [[ "$_check" != "CRC32" ]]; then
-                _ko="${_mod%.xz}"
-                xz -dk "$_mod" 2>>"$LOG"
-                rm -f "$_mod"
-                xz --check=crc32 -f "$_ko" 2>>"$LOG"
-                log "  recompressed (${_check:-unknown}→CRC32): $(basename "$_mod")"
-            fi
-            ;;
+    *.ko.xz)
+        _check="$(xz --robot --list "$_mod" 2>/dev/null | awk '/^file/{print $7}')"
+        if [[ "$_check" != "CRC32" ]]; then
+            _ko="${_mod%.xz}"
+            xz -dk "$_mod" 2>>"$LOG"
+            rm -f "$_mod"
+            xz --check=crc32 -f "$_ko" 2>>"$LOG"
+            log "  recompressed (${_check:-unknown}→CRC32): $(basename "$_mod")"
+        fi
+        ;;
     esac
 done < <(find "/lib/modules/${KVER}" -name '*.ko.xz' 2>/dev/null | grep -i zfs || true)
 
 log "Rebuilding initramfs for $KVER..."
-update-initramfs -u -k "$KVER" 2>&1 | "$_TEE" -a "$LOG" \
-    || die "update-initramfs failed"
+update-initramfs -u -k "$KVER" 2>&1 | "$_TEE" -a "$LOG" ||
+    die "update-initramfs failed"
 
 # ---------------------------------------------------------------------------
 # Verify zfs.ko is present

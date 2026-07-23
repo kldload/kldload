@@ -21,16 +21,20 @@ SSH_USER="${KLDLOAD_CLUSTER_SSH_USER:-root}"
 # SSH opts: short connect timeout so a dead node doesn't block the whole
 # launch; batch mode so we don't prompt for passwords; strict=no because
 # /mnt/cluster-logs is an admin-controlled tree and we trust WG-mesh IPs.
-SSH_OPTS=(-o ConnectTimeout=4 -o BatchMode=yes -o StrictHostKeyChecking=no \
-          -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+SSH_OPTS=(-o ConnectTimeout=4 -o BatchMode=yes -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 # Mount options: allow_other so non-root users can read (lh may run as
 # non-root); ro because we never write remote logs; reconnect so a
 # transient network blip doesn't kill the mount; cache_timeout for
 # readdir speed; no attr caching because logs rotate.
 SSHFS_OPTS="ro,allow_other,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache_timeout=20,attr_timeout=0"
 
-C_G=$'\033[32m'; C_Y=$'\033[33m'; C_R=$'\033[31m'; C_D=$'\033[2m'; C_N=$'\033[0m'
-log()  { printf "%b[lh-cluster]%b %s\n" "$C_G" "$C_N" "$*" >&2; }
+C_G=$'\033[32m'
+C_Y=$'\033[33m'
+C_R=$'\033[31m'
+C_D=$'\033[2m'
+C_N=$'\033[0m'
+log() { printf "%b[lh-cluster]%b %s\n" "$C_G" "$C_N" "$*" >&2; }
 warn() { printf "%b[lh-cluster]%b %s\n" "$C_Y" "$C_N" "$*" >&2; }
 
 # ── Node discovery ─────────────────────────────────────────────────────
@@ -81,9 +85,9 @@ _unmount_all() {
     if [[ -d "$MOUNT_ROOT" ]]; then
         for d in "$MOUNT_ROOT"/*/var/log; do
             [[ -d "$d" ]] || continue
-            fusermount -u "$d" 2>/dev/null \
-                || umount "$d" 2>/dev/null \
-                || umount -l "$d" 2>/dev/null
+            fusermount -u "$d" 2>/dev/null ||
+                umount "$d" 2>/dev/null ||
+                umount -l "$d" 2>/dev/null
             rmdir "$d" "$(dirname "$d")" 2>/dev/null || true
         done
     fi
@@ -115,7 +119,7 @@ else
                 continue
             fi
             _mount_node "$_host" "$_ip" &
-        done <<< "$_nodes"
+        done <<<"$_nodes"
         # Parallel mount so one slow node doesn't delay the rest.
         wait
     fi

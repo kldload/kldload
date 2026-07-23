@@ -29,7 +29,12 @@ MODE="${2:-all}"
 case "$MODE" in --*) ;; *) MODE="all" ;; esac
 
 # Colours for readable output.
-G=$'\e[32m'; Y=$'\e[33m'; C=$'\e[36m'; D=$'\e[2m'; B=$'\e[1m'; N=$'\e[0m'
+G=$'\e[32m'
+Y=$'\e[33m'
+C=$'\e[36m'
+D=$'\e[2m'
+B=$'\e[1m'
+N=$'\e[0m'
 
 # Cleanup hook — kills everything we spawned. set -u with subshell &
 # patterns means we have to track PIDs explicitly.
@@ -55,8 +60,8 @@ if [[ "$MODE" == "all" || "$MODE" == "--http-only" ]]; then
     # Ensure the demo deployment exists; ignore if already there.
     if ! kubectl get svc demo -n default >/dev/null 2>&1; then
         echo "${Y}[http] deploying demo nginx + service…${N}"
-        kubectl apply -f /root/demo/keynote-demo.yaml 2>/dev/null \
-            || kubectl apply -f /usr/local/share/kldload/keynote-demo.yaml 2>/dev/null
+        kubectl apply -f /root/demo/keynote-demo.yaml 2>/dev/null ||
+            kubectl apply -f /usr/local/share/kldload/keynote-demo.yaml 2>/dev/null
         # Give the pods a moment to land.
         sleep 5
     fi
@@ -67,7 +72,7 @@ if [[ "$MODE" == "all" || "$MODE" == "--http-only" ]]; then
     kubectl run plow-load -n default --rm --restart=Never \
         --image=ghcr.io/six-ddc/plow:latest \
         -- -c 50 -d "${DURATION}s" http://demo/ \
-        > /dev/null 2>&1 &
+        >/dev/null 2>&1 &
     PIDS+=($!)
 fi
 
@@ -83,14 +88,14 @@ if [[ "$MODE" == "all" || "$MODE" == "--io-only" ]]; then
             --rw=randrw --rwmixread=70 \
             --time_based --runtime="${DURATION}" \
             --direct=1 --group_reporting \
-            > /dev/null 2>&1 &
+            >/dev/null 2>&1 &
         PIDS+=($!)
     else
         echo "${Y}[io] fio not installed — falling back to dd loop${N}"
-        ( for i in $(seq 1 "$((DURATION/2))"); do
-              dd if=/dev/urandom of="$TMPFILE" bs=1M count=128 oflag=direct 2>/dev/null
-              dd if="$TMPFILE" of=/dev/null bs=4k iflag=direct 2>/dev/null
-          done ) &
+        (for i in $(seq 1 "$((DURATION / 2))"); do
+            dd if=/dev/urandom of="$TMPFILE" bs=1M count=128 oflag=direct 2>/dev/null
+            dd if="$TMPFILE" of=/dev/null bs=4k iflag=direct 2>/dev/null
+        done) &
         PIDS+=($!)
     fi
 fi
@@ -102,7 +107,7 @@ if [[ "$MODE" == "all" || "$MODE" == "--fork-only" ]]; then
     # on host CPU. /bin/true is the cheapest possible exec — measures
     # the Tetragon EXEC path, not whatever the binary does after.
     (
-        end=$(( $(date +%s) + DURATION ))
+        end=$(($(date +%s) + DURATION))
         while [[ $(date +%s) -lt $end ]]; do
             for _ in 1 2 3 4 5 6 7 8 9 10; do /bin/true; done
         done

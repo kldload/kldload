@@ -6,11 +6,11 @@ RAG_URL="http://localhost:8400"
 Q="${*}"
 
 if [[ -z "$Q" ]]; then
-  echo "Usage: kai <question>"
-  echo "  kai 'how do I create a ZFS mirror?'"
-  echo "  kai 'tune PostgreSQL for ZFS'"
-  echo "  kai 'set up WireGuard mesh'"
-  exit 0
+    echo "Usage: kai <question>"
+    echo "  kai 'how do I create a ZFS mirror?'"
+    echo "  kai 'tune PostgreSQL for ZFS'"
+    echo "  kai 'set up WireGuard mesh'"
+    exit 0
 fi
 
 # Collect system context
@@ -23,12 +23,12 @@ CTX+="$(free -h 2>/dev/null || true)"
 
 # Check if RAG service is available
 if curl -sf "${RAG_URL}/health" >/dev/null 2>&1; then
-  # Use RAG (preferred)
-  curl -sN -X POST "${RAG_URL}/query" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -n --arg q "$Q" --arg c "$CTX" '{question: $q, system_context: $c}')"
+    # Use RAG (preferred)
+    curl -sN -X POST "${RAG_URL}/query" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -n --arg q "$Q" --arg c "$CTX" '{question: $q, system_context: $c}')"
 else
-  # Fallback to direct Ollama (no RAG context)
-  echo "(RAG service unavailable -- using direct model)" >&2
-  echo -e "Current system:\n${CTX}\n\nQuestion: ${Q}" | ollama run kldload-ai
+    # Fallback to direct Ollama (no RAG context)
+    echo "(RAG service unavailable -- using direct model)" >&2
+    echo -e "Current system:\n${CTX}\n\nQuestion: ${Q}" | ollama run kldload-ai
 fi

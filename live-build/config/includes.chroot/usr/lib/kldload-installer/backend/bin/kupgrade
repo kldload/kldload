@@ -12,9 +12,12 @@ PROGNAME="$(basename "$0")"
 LOG_DIR=/var/log/kldload
 LOG="${LOG_DIR}/upgrade.log"
 
-ts()  { date '+%Y-%m-%dT%H:%M:%S'; }
+ts() { date '+%Y-%m-%dT%H:%M:%S'; }
 log() { echo "$(ts) [$PROGNAME] $*" | tee -a "$LOG" >&2; }
-die() { log "ERROR: $*"; exit 1; }
+die() {
+    log "ERROR: $*"
+    exit 1
+}
 
 [[ "$(id -u)" -eq 0 ]] || die "kupgrade must be run as root."
 
@@ -134,16 +137,16 @@ else
 
         log "  ZFS modules missing for ${kver} — attempting rebuild"
 
-        if dkms autoinstall -k "${kver}" >> "$LOG" 2>&1; then
+        if dkms autoinstall -k "${kver}" >>"$LOG" 2>&1; then
             log "  ZFS rebuilt OK: ${kver}"
 
             # Re-sign with MOK key if configured
             if [[ -x /etc/dkms/sign_helper.sh && -f /var/lib/dkms/mok.key ]]; then
                 while IFS= read -r ko; do
-                    /etc/dkms/sign_helper.sh "${kver}" "${ko}" >> "$LOG" 2>&1 || true
+                    /etc/dkms/sign_helper.sh "${kver}" "${ko}" >>"$LOG" 2>&1 || true
                 done < <(find "/lib/modules/${kver}" \
-                              -name '*.ko' -o -name '*.ko.gz' -o -name '*.ko.zst' \
-                              2>/dev/null | grep -i zfs || true)
+                    -name '*.ko' -o -name '*.ko.gz' -o -name '*.ko.zst' \
+                    2>/dev/null | grep -i zfs || true)
                 log "  ZFS modules re-signed: ${kver}"
             fi
         else

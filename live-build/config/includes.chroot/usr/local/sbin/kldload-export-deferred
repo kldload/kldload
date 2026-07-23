@@ -11,7 +11,10 @@ exec > >(tee -a "$LOG") 2>&1
 
 log() { printf '[%(%F %T)T] [export] %s\n' -1 "$*"; }
 
-[[ -f "$ENV_FILE" ]] || { log "No pending export — nothing to do"; exit 0; }
+[[ -f "$ENV_FILE" ]] || {
+    log "No pending export — nothing to do"
+    exit 0
+}
 
 # shellcheck disable=SC1090
 source "$ENV_FILE"
@@ -23,23 +26,23 @@ NAME="${KEXPORT_NAME:-kldload-export-$(date -u +%Y%m%d)}"
 # Find the first real (non-root) user's Downloads, fall back to /root/Downloads
 OUTDIR="/root/Downloads"
 for home in /home/*/; do
-  _user="$(basename "$home")"
-  [[ "$_user" == "live" ]] && continue
-  OUTDIR="${home}Downloads"
-  break
+    _user="$(basename "$home")"
+    [[ "$_user" == "live" ]] && continue
+    OUTDIR="${home}Downloads"
+    break
 done
 mkdir -p "$OUTDIR"
 
 log "Starting deferred export: disk=${DISK} format=${FMT} output=${OUTDIR}/${NAME}"
 
 if ! command -v kexport >/dev/null 2>&1; then
-  log "FATAL: kexport not found in PATH"
-  exit 1
+    log "FATAL: kexport not found in PATH"
+    exit 1
 fi
 
 if ! [[ -b "$DISK" ]]; then
-  log "FATAL: ${DISK} is not a block device"
-  exit 1
+    log "FATAL: ${DISK} is not a block device"
+    exit 1
 fi
 
 # Export all active ZFS pools so the disk is not busy
@@ -53,10 +56,10 @@ zfs mount -a 2>/dev/null || true
 
 # Fix ownership so the desktop user can access the file
 if [[ "$OUTDIR" != "/root/Desktop" ]]; then
-  _user="$(basename "$(dirname "$OUTDIR")")"
-  _uid="$(id -u "$_user" 2>/dev/null || echo "")"
-  _gid="$(id -g "$_user" 2>/dev/null || echo "")"
-  [[ -n "$_uid" && -n "$_gid" ]] && chown "${_uid}:${_gid}" "${OUTDIR}/${NAME}"* 2>/dev/null || true
+    _user="$(basename "$(dirname "$OUTDIR")")"
+    _uid="$(id -u "$_user" 2>/dev/null || echo "")"
+    _gid="$(id -g "$_user" 2>/dev/null || echo "")"
+    [[ -n "$_uid" && -n "$_gid" ]] && chown "${_uid}:${_gid}" "${OUTDIR}/${NAME}"* 2>/dev/null || true
 fi
 
 log "Export complete: ${OUTDIR}/${NAME}.${FMT}"

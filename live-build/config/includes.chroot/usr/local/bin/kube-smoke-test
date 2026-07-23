@@ -6,17 +6,36 @@ set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
-C="\033[1;36m"; G="\033[1;32m"; Y="\033[1;33m"; R="\033[1;31m"
-W="\033[1;37m"; D="\033[0;37m"; N="\033[0m"
+C="\033[1;36m"
+G="\033[1;32m"
+Y="\033[1;33m"
+R="\033[1;31m"
+W="\033[1;37m"
+D="\033[0;37m"
+N="\033[0m"
 
-PASS=0; FAIL=0; WARN=0
+PASS=0
+FAIL=0
+WARN=0
 
-pass() { echo -e "  ${G}PASS${N}  $*"; ((++PASS)); }
-fail() { echo -e "  ${R}FAIL${N}  $*"; ((++FAIL)); }
-warn() { echo -e "  ${Y}WARN${N}  $*"; ((++WARN)); }
+pass() {
+    echo -e "  ${G}PASS${N}  $*"
+    ((++PASS))
+}
+fail() {
+    echo -e "  ${R}FAIL${N}  $*"
+    ((++FAIL))
+}
+warn() {
+    echo -e "  ${Y}WARN${N}  $*"
+    ((++WARN))
+}
 skip() { echo -e "  ${D}SKIP${N}  $*"; }
 
-section() { echo ""; echo -e "${C}=== $* ===${N}"; }
+section() {
+    echo ""
+    echo -e "${C}=== $* ===${N}"
+}
 
 echo -e "${C}══════════════════════════════════════════════════════════════${N}"
 echo -e "${W}  kldload Kubernetes Smoke Test                              ${N}"
@@ -25,21 +44,21 @@ echo -e "${C}══════════════════════�
 # ── 1. Package Manager ────────────────────────────────────────────────────
 section "Package Manager"
 if command -v dnf >/dev/null 2>&1; then
-  pass "dnf available"
+    pass "dnf available"
 elif command -v apt-get >/dev/null 2>&1; then
-  pass "apt available"
+    pass "apt available"
 else
-  fail "No package manager (dnf or apt)"
+    fail "No package manager (dnf or apt)"
 fi
 
 # ── 2. Kernel Modules ────────────────────────────────────────────────────
 section "Kernel Modules"
 for mod in overlay br_netfilter ip_vs ip_vs_rr ip_vs_wrr ip_vs_sh nf_conntrack; do
-  if lsmod | grep -qw "$mod" 2>/dev/null || [[ -d "/sys/module/$mod" ]]; then
-    pass "$mod loaded"
-  else
-    modprobe "$mod" 2>/dev/null && pass "$mod loaded (on demand)" || fail "$mod not loadable"
-  fi
+    if lsmod | grep -qw "$mod" 2>/dev/null || [[ -d "/sys/module/$mod" ]]; then
+        pass "$mod loaded"
+    else
+        modprobe "$mod" 2>/dev/null && pass "$mod loaded (on demand)" || fail "$mod not loadable"
+    fi
 done
 
 # ── 3. Sysctl ──────────────────────────────────────────────────────────────
@@ -50,239 +69,239 @@ section "Sysctl"
 # ── 4. Swap ────────────────────────────────────────────────────────────────
 section "Swap"
 if [[ "$(cat /proc/swaps 2>/dev/null | tail -n +2 | wc -l)" == "0" ]]; then
-  pass "Swap disabled"
+    pass "Swap disabled"
 else
-  fail "Swap is active (kubeadm requires swap off)"
+    fail "Swap is active (kubeadm requires swap off)"
 fi
 
 # ── 5. Containerd ──────────────────────────────────────────────────────────
 section "Containerd"
 if command -v containerd >/dev/null 2>&1; then
-  pass "containerd binary: $(containerd --version 2>/dev/null | awk '{print $3}')"
+    pass "containerd binary: $(containerd --version 2>/dev/null | awk '{print $3}')"
 else
-  fail "containerd not installed"
+    fail "containerd not installed"
 fi
 
 if systemctl is-active containerd >/dev/null 2>&1; then
-  pass "containerd running"
+    pass "containerd running"
 else
-  fail "containerd not running"
+    fail "containerd not running"
 fi
 
 if [[ -S /run/containerd/containerd.sock ]]; then
-  pass "containerd socket exists"
+    pass "containerd socket exists"
 else
-  fail "containerd socket missing"
+    fail "containerd socket missing"
 fi
 
 if grep -q 'SystemdCgroup = true' /etc/containerd/config.toml 2>/dev/null; then
-  pass "containerd SystemdCgroup = true"
+    pass "containerd SystemdCgroup = true"
 else
-  fail "containerd SystemdCgroup not enabled"
+    fail "containerd SystemdCgroup not enabled"
 fi
 
 if [[ -f /etc/crictl.yaml ]]; then
-  pass "crictl.yaml configured"
+    pass "crictl.yaml configured"
 else
-  warn "crictl.yaml missing"
+    warn "crictl.yaml missing"
 fi
 
 # ── 6. Kubernetes Binaries ────────────────────────────────────────────────
 section "Kubernetes Binaries"
 for bin in kubeadm kubelet kubectl; do
-  if command -v "$bin" >/dev/null 2>&1; then
-    ver="$($bin version --client -o yaml 2>/dev/null | grep gitVersion | awk '{print $2}' || $bin version -o short 2>/dev/null || echo "unknown")"
-    pass "$bin installed ($ver)"
-  else
-    fail "$bin not found"
-  fi
+    if command -v "$bin" >/dev/null 2>&1; then
+        ver="$($bin version --client -o yaml 2>/dev/null | grep gitVersion | awk '{print $2}' || $bin version -o short 2>/dev/null || echo "unknown")"
+        pass "$bin installed ($ver)"
+    else
+        fail "$bin not found"
+    fi
 done
 
 if command -v helm >/dev/null 2>&1; then
-  pass "helm installed ($(helm version --short 2>/dev/null))"
+    pass "helm installed ($(helm version --short 2>/dev/null))"
 else
-  warn "helm not installed"
+    warn "helm not installed"
 fi
 
 if command -v cilium >/dev/null 2>&1; then
-  pass "cilium CLI installed"
+    pass "cilium CLI installed"
 else
-  warn "cilium CLI not installed"
+    warn "cilium CLI not installed"
 fi
 
 # ── 7. CNI ─────────────────────────────────────────────────────────────────
 section "CNI"
 if [[ -d /opt/cni/bin ]] && [[ -n "$(ls -A /opt/cni/bin 2>/dev/null)" ]]; then
-  pass "CNI plugins in /opt/cni/bin ($(ls /opt/cni/bin | wc -l) plugins)"
+    pass "CNI plugins in /opt/cni/bin ($(ls /opt/cni/bin | wc -l) plugins)"
 else
-  warn "CNI plugins not in /opt/cni/bin"
+    warn "CNI plugins not in /opt/cni/bin"
 fi
 
 # ── 8. ZFS ─────────────────────────────────────────────────────────────────
 section "ZFS"
 if command -v zfs >/dev/null 2>&1; then
-  pass "ZFS available ($(zfs version 2>/dev/null | head -1))"
+    pass "ZFS available ($(zfs version 2>/dev/null | head -1))"
 
-  for ds in etcd containerd kubelet; do
-    if zfs list -o name 2>/dev/null | grep -q "var/lib/${ds}"; then
-      rs="$(zfs get -H -o value recordsize "$(zfs list -H -o name 2>/dev/null | grep "var/lib/${ds}" | head -1)" 2>/dev/null)"
-      pass "ZFS dataset for $ds (recordsize=$rs)"
-    else
-      warn "No dedicated ZFS dataset for /var/lib/$ds"
-    fi
-  done
+    for ds in etcd containerd kubelet; do
+        if zfs list -o name 2>/dev/null | grep -q "var/lib/${ds}"; then
+            rs="$(zfs get -H -o value recordsize "$(zfs list -H -o name 2>/dev/null | grep "var/lib/${ds}" | head -1)" 2>/dev/null)"
+            pass "ZFS dataset for $ds (recordsize=$rs)"
+        else
+            warn "No dedicated ZFS dataset for /var/lib/$ds"
+        fi
+    done
 else
-  skip "ZFS not available"
+    skip "ZFS not available"
 fi
 
 # ── 9. WireGuard ───────────────────────────────────────────────────────────
 section "WireGuard"
 if command -v wg >/dev/null 2>&1; then
-  pass "WireGuard tools installed"
+    pass "WireGuard tools installed"
 else
-  warn "WireGuard tools not installed"
+    warn "WireGuard tools not installed"
 fi
 
 if ip link show wg-k8s >/dev/null 2>&1; then
-  k8s_ip="$(ip -4 addr show wg-k8s 2>/dev/null | awk '/inet / {print $2}')"
-  pass "wg-k8s interface up ($k8s_ip)"
+    k8s_ip="$(ip -4 addr show wg-k8s 2>/dev/null | awk '/inet / {print $2}')"
+    pass "wg-k8s interface up ($k8s_ip)"
 elif ip link show wg0 >/dev/null 2>&1; then
-  pass "wg0 interface up (legacy single-plane)"
+    pass "wg0 interface up (legacy single-plane)"
 else
-  warn "No WireGuard interfaces (K8s will use LAN — unencrypted)"
+    warn "No WireGuard interfaces (K8s will use LAN — unencrypted)"
 fi
 
 if ip link show wg-mgmt >/dev/null 2>&1; then
-  mgmt_ip="$(ip -4 addr show wg-mgmt 2>/dev/null | awk '/inet / {print $2}')"
-  pass "wg-mgmt interface up ($mgmt_ip)"
+    mgmt_ip="$(ip -4 addr show wg-mgmt 2>/dev/null | awk '/inet / {print $2}')"
+    pass "wg-mgmt interface up ($mgmt_ip)"
 else
-  skip "wg-mgmt not configured"
+    skip "wg-mgmt not configured"
 fi
 
 # ── 10. Kubelet node-ip ───────────────────────────────────────────────────
 section "Kubelet Node IP"
 if [[ -f /etc/default/kubelet ]]; then
-  node_ip="$(grep 'node-ip' /etc/default/kubelet 2>/dev/null | sed 's/.*node-ip=//')"
-  if [[ -n "$node_ip" ]]; then
-    pass "kubelet pinned to $node_ip"
-    # Check if it's a WG address
-    if [[ "$node_ip" == 10.251.* || "$node_ip" == 10.250.* ]]; then
-      pass "kubelet on WireGuard plane"
+    node_ip="$(grep 'node-ip' /etc/default/kubelet 2>/dev/null | sed 's/.*node-ip=//')"
+    if [[ -n "$node_ip" ]]; then
+        pass "kubelet pinned to $node_ip"
+        # Check if it's a WG address
+        if [[ "$node_ip" == 10.251.* || "$node_ip" == 10.250.* ]]; then
+            pass "kubelet on WireGuard plane"
+        else
+            warn "kubelet on LAN IP (not encrypted backplane)"
+        fi
     else
-      warn "kubelet on LAN IP (not encrypted backplane)"
+        warn "kubelet node-ip not set"
     fi
-  else
-    warn "kubelet node-ip not set"
-  fi
 else
-  warn "/etc/default/kubelet not found"
+    warn "/etc/default/kubelet not found"
 fi
 
 # ── 11. Firewall ───────────────────────────────────────────────────────────
 section "Firewall"
 _nft_rules="$(nft list ruleset 2>/dev/null || true)"
 if echo "$_nft_rules" | grep -q 'chain input'; then
-  pass "nftables rules loaded"
-  if echo "$_nft_rules" | grep -q 'wg-k8s\|wg-mgmt'; then
-    pass "nftables has WireGuard rules"
-  else
-    warn "nftables missing WireGuard-specific rules"
-  fi
-  if echo "$_nft_rules" | grep -q '6443'; then
-    pass "K8s API port 6443 allowed"
-  else
-    warn "K8s API port 6443 not in firewall"
-  fi
+    pass "nftables rules loaded"
+    if echo "$_nft_rules" | grep -q 'wg-k8s\|wg-mgmt'; then
+        pass "nftables has WireGuard rules"
+    else
+        warn "nftables missing WireGuard-specific rules"
+    fi
+    if echo "$_nft_rules" | grep -q '6443'; then
+        pass "K8s API port 6443 allowed"
+    else
+        warn "K8s API port 6443 not in firewall"
+    fi
 else
-  warn "No nftables rules loaded"
+    warn "No nftables rules loaded"
 fi
 
 # ── 12. Pre-pulled Images ────────────────────────────────────────────────
 section "Offline Images"
 if [[ -d /root/darksite/k8s-images ]] && [[ -n "$(ls -A /root/darksite/k8s-images/*.tar 2>/dev/null)" ]]; then
-  count="$(ls /root/darksite/k8s-images/*.tar 2>/dev/null | wc -l)"
-  size="$(du -sh /root/darksite/k8s-images 2>/dev/null | cut -f1)"
-  pass "Pre-pulled images: $count tarballs ($size)"
+    count="$(ls /root/darksite/k8s-images/*.tar 2>/dev/null | wc -l)"
+    size="$(du -sh /root/darksite/k8s-images 2>/dev/null | cut -f1)"
+    pass "Pre-pulled images: $count tarballs ($size)"
 elif crictl images 2>/dev/null | grep -q 'registry.k8s.io'; then
-  count="$(crictl images 2>/dev/null | grep -c 'registry.k8s.io' || true)"
-  pass "Pre-pulled images: $count K8s images in containerd"
+    count="$(crictl images 2>/dev/null | grep -c 'registry.k8s.io' || true)"
+    pass "Pre-pulled images: $count K8s images in containerd"
 else
-  warn "No pre-pulled images (will need internet for kube-init)"
+    warn "No pre-pulled images (will need internet for kube-init)"
 fi
 
 # ── 13. Cluster Status (if running) ──────────────────────────────────────
 section "Cluster (if running)"
 if [[ -f /etc/kubernetes/admin.conf ]]; then
-  pass "admin.conf exists"
+    pass "admin.conf exists"
 
-  if kubectl cluster-info >/dev/null 2>&1; then
-    pass "API server reachable"
+    if kubectl cluster-info >/dev/null 2>&1; then
+        pass "API server reachable"
 
-    nodes="$(kubectl get nodes --no-headers 2>/dev/null | wc -l)"
-    ready="$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready')"
-    pass "Nodes: $ready/$nodes ready"
+        nodes="$(kubectl get nodes --no-headers 2>/dev/null | wc -l)"
+        ready="$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready')"
+        pass "Nodes: $ready/$nodes ready"
 
-    # Cilium
-    if kubectl get ds -n kube-system cilium >/dev/null 2>&1; then
-      cilium_ready="$(kubectl get pods -n kube-system -l k8s-app=cilium --no-headers 2>/dev/null | grep -c Running)"
-      pass "Cilium: $cilium_ready pods running"
+        # Cilium
+        if kubectl get ds -n kube-system cilium >/dev/null 2>&1; then
+            cilium_ready="$(kubectl get pods -n kube-system -l k8s-app=cilium --no-headers 2>/dev/null | grep -c Running)"
+            pass "Cilium: $cilium_ready pods running"
+        else
+            fail "Cilium not deployed"
+        fi
+
+        # CoreDNS
+        coredns_ready="$(kubectl get pods -n kube-system -l k8s-app=kube-dns --no-headers 2>/dev/null | grep -c Running)"
+        [[ "$coredns_ready" -gt 0 ]] && pass "CoreDNS: $coredns_ready pods running" || fail "CoreDNS not running"
+
+        # Hubble
+        if kubectl get svc -n kube-system hubble-relay >/dev/null 2>&1; then
+            pass "Hubble relay deployed"
+        else
+            warn "Hubble relay not found"
+        fi
+
+        # Pod test — create and delete a test pod
+        echo ""
+        echo -e "  ${D}Running pod test...${N}"
+        if kubectl run smoke-test --image=busybox --restart=Never --command -- sleep 30 >/dev/null 2>&1; then
+            # Wait up to 30s for pod to start (image pull may take time on first run)
+            pod_status=""
+            for _i in $(seq 1 15); do
+                pod_status="$(kubectl get pod smoke-test --no-headers 2>/dev/null | awk '{print $3}')"
+                [[ "$pod_status" == "Running" || "$pod_status" == "Completed" ]] && break
+                sleep 2
+            done
+            if [[ "$pod_status" == "Running" || "$pod_status" == "Completed" ]]; then
+                pass "Pod scheduling works (test pod: $pod_status)"
+            else
+                fail "Test pod status: $pod_status"
+            fi
+            kubectl delete pod smoke-test --grace-period=0 --force >/dev/null 2>&1 || true
+        else
+            fail "Could not create test pod"
+        fi
+
+        # DNS test — use exec into a running pod instead of interactive kubectl run
+        echo -e "  ${D}Running DNS test...${N}"
+        if kubectl run dns-test --image=busybox --restart=Never --command -- sleep 30 >/dev/null 2>&1; then
+            sleep 5
+            dns_output="$(kubectl exec dns-test -- nslookup kubernetes.default.svc.cluster.local 2>/dev/null || true)"
+            dns_result="$(echo "$dns_output" | grep -c 'Address' || echo 0)"
+            if [[ "$dns_result" -gt 0 ]]; then
+                pass "Cluster DNS resolves kubernetes.default"
+            else
+                warn "DNS test inconclusive (may need more time)"
+            fi
+        else
+            warn "DNS test pod creation failed (non-fatal)"
+        fi
+        kubectl delete pod dns-test --grace-period=0 --force >/dev/null 2>&1 || true
+
     else
-      fail "Cilium not deployed"
+        fail "API server not reachable"
     fi
-
-    # CoreDNS
-    coredns_ready="$(kubectl get pods -n kube-system -l k8s-app=kube-dns --no-headers 2>/dev/null | grep -c Running)"
-    [[ "$coredns_ready" -gt 0 ]] && pass "CoreDNS: $coredns_ready pods running" || fail "CoreDNS not running"
-
-    # Hubble
-    if kubectl get svc -n kube-system hubble-relay >/dev/null 2>&1; then
-      pass "Hubble relay deployed"
-    else
-      warn "Hubble relay not found"
-    fi
-
-    # Pod test — create and delete a test pod
-    echo ""
-    echo -e "  ${D}Running pod test...${N}"
-    if kubectl run smoke-test --image=busybox --restart=Never --command -- sleep 30 >/dev/null 2>&1; then
-      # Wait up to 30s for pod to start (image pull may take time on first run)
-      pod_status=""
-      for _i in $(seq 1 15); do
-        pod_status="$(kubectl get pod smoke-test --no-headers 2>/dev/null | awk '{print $3}')"
-        [[ "$pod_status" == "Running" || "$pod_status" == "Completed" ]] && break
-        sleep 2
-      done
-      if [[ "$pod_status" == "Running" || "$pod_status" == "Completed" ]]; then
-        pass "Pod scheduling works (test pod: $pod_status)"
-      else
-        fail "Test pod status: $pod_status"
-      fi
-      kubectl delete pod smoke-test --grace-period=0 --force >/dev/null 2>&1 || true
-    else
-      fail "Could not create test pod"
-    fi
-
-    # DNS test — use exec into a running pod instead of interactive kubectl run
-    echo -e "  ${D}Running DNS test...${N}"
-    if kubectl run dns-test --image=busybox --restart=Never --command -- sleep 30 >/dev/null 2>&1; then
-      sleep 5
-      dns_output="$(kubectl exec dns-test -- nslookup kubernetes.default.svc.cluster.local 2>/dev/null || true)"
-      dns_result="$(echo "$dns_output" | grep -c 'Address' || echo 0)"
-      if [[ "$dns_result" -gt 0 ]]; then
-        pass "Cluster DNS resolves kubernetes.default"
-      else
-        warn "DNS test inconclusive (may need more time)"
-      fi
-    else
-      warn "DNS test pod creation failed (non-fatal)"
-    fi
-    kubectl delete pod dns-test --grace-period=0 --force >/dev/null 2>&1 || true
-
-  else
-    fail "API server not reachable"
-  fi
 else
-  skip "No cluster running (admin.conf not found)"
+    skip "No cluster running (admin.conf not found)"
 fi
 
 # ── Observability pipeline ─────────────────────────────────────────────────
@@ -293,73 +312,73 @@ fi
 # Grafana dashboards actually rendering (no unresolved ${DS_PROMETHEUS}),
 # inter-node firewall (policy drop was silently eating metrics traffic).
 if [[ -f /etc/kubernetes/admin.conf ]]; then
-  section "Observability pipeline"
+    section "Observability pipeline"
 
-  # metrics-server → kubectl top
-  if kubectl top node --no-headers >/dev/null 2>&1; then
-    pass "metrics-server: kubectl top node returns data"
-  else
-    fail "metrics-server: kubectl top node not responding (install or --kubelet-insecure-tls)"
-  fi
-
-  # Prometheus reachable
-  if curl -fsS -m4 http://localhost:9090/-/ready >/dev/null 2>&1; then
-    pass "prometheus: /ready on :9090"
-  else
-    warn "prometheus: /ready not reachable on localhost:9090"
-  fi
-
-  # Expected scrape jobs present with at least one target up
-  for job in cilium-agent hubble-metrics tetragon node_exporter; do
-    up_count="$(curl -fsS -m4 "http://localhost:9090/api/v1/targets" 2>/dev/null \
-      | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for t in d['data']['activeTargets'] if t['labels'].get('job')=='${job}' and t['health']=='up'))" 2>/dev/null || echo 0)"
-    if [[ "$up_count" -gt 0 ]]; then
-      pass "prometheus scrape: ${job} (${up_count} targets up)"
+    # metrics-server → kubectl top
+    if kubectl top node --no-headers >/dev/null 2>&1; then
+        pass "metrics-server: kubectl top node returns data"
     else
-      fail "prometheus scrape: ${job} has zero up targets"
+        fail "metrics-server: kubectl top node not responding (install or --kubelet-insecure-tls)"
     fi
-  done
 
-  # Cilium label synthesis — dashboards won't render without this
-  cilium_series="$(curl -fsS -m4 -G http://localhost:9090/api/v1/query \
-    --data-urlencode 'query=cilium_version{k8s_app="cilium"}' 2>/dev/null \
-    | python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']['result']))" 2>/dev/null || echo 0)"
-  if [[ "$cilium_series" -gt 0 ]]; then
-    pass "cilium scrape labels: {k8s_app=cilium} resolves (${cilium_series} agents)"
-  else
-    fail "cilium scrape labels: no series — dashboards 16611/16613 won't render"
-  fi
-
-  # Tetragon emitting events
-  tg_series="$(curl -fsS -m4 -G http://localhost:9090/api/v1/query \
-    --data-urlencode 'query=tetragon_events_total' 2>/dev/null \
-    | python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']['result']))" 2>/dev/null || echo 0)"
-  if [[ "$tg_series" -gt 0 ]]; then
-    pass "tetragon scrape: tetragon_events_total has ${tg_series} series"
-  else
-    warn "tetragon scrape: no series (tetragon may still be starting)"
-  fi
-
-  # Grafana dashboards clean of DS_PROMETHEUS placeholders
-  dash_dir="/var/lib/grafana/dashboards"
-  if [[ -d "$dash_dir" ]]; then
-    bad_dash="$(grep -l 'DS_PROMETHEUS\|"__inputs"' "$dash_dir"/*.json 2>/dev/null | wc -l)"
-    if [[ "$bad_dash" -eq 0 ]]; then
-      n_dash="$(ls "$dash_dir"/*.json 2>/dev/null | wc -l)"
-      pass "grafana dashboards: ${n_dash} provisioned, all datasource refs resolved"
+    # Prometheus reachable
+    if curl -fsS -m4 http://localhost:9090/-/ready >/dev/null 2>&1; then
+        pass "prometheus: /ready on :9090"
     else
-      fail "grafana dashboards: ${bad_dash} still have \${DS_PROMETHEUS} — panels will show 'No data'"
+        warn "prometheus: /ready not reachable on localhost:9090"
     fi
-  else
-    skip "grafana dashboards: no dashboards dir"
-  fi
 
-  # Inter-node firewall — kubelet:10250 and hubble-peer:4244 reachable
-  if grep -qE 'ip saddr.*192\.168\.122|ip saddr.*10\.244' /etc/nftables.conf 2>/dev/null; then
-    pass "cluster firewall: node subnet or pod CIDR trusted in nft input chain"
-  else
-    warn "cluster firewall: no node-subnet trust rule (kube-network nft may be stale)"
-  fi
+    # Expected scrape jobs present with at least one target up
+    for job in cilium-agent hubble-metrics tetragon node_exporter; do
+        up_count="$(curl -fsS -m4 "http://localhost:9090/api/v1/targets" 2>/dev/null |
+            python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for t in d['data']['activeTargets'] if t['labels'].get('job')=='${job}' and t['health']=='up'))" 2>/dev/null || echo 0)"
+        if [[ "$up_count" -gt 0 ]]; then
+            pass "prometheus scrape: ${job} (${up_count} targets up)"
+        else
+            fail "prometheus scrape: ${job} has zero up targets"
+        fi
+    done
+
+    # Cilium label synthesis — dashboards won't render without this
+    cilium_series="$(curl -fsS -m4 -G http://localhost:9090/api/v1/query \
+        --data-urlencode 'query=cilium_version{k8s_app="cilium"}' 2>/dev/null |
+        python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']['result']))" 2>/dev/null || echo 0)"
+    if [[ "$cilium_series" -gt 0 ]]; then
+        pass "cilium scrape labels: {k8s_app=cilium} resolves (${cilium_series} agents)"
+    else
+        fail "cilium scrape labels: no series — dashboards 16611/16613 won't render"
+    fi
+
+    # Tetragon emitting events
+    tg_series="$(curl -fsS -m4 -G http://localhost:9090/api/v1/query \
+        --data-urlencode 'query=tetragon_events_total' 2>/dev/null |
+        python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']['result']))" 2>/dev/null || echo 0)"
+    if [[ "$tg_series" -gt 0 ]]; then
+        pass "tetragon scrape: tetragon_events_total has ${tg_series} series"
+    else
+        warn "tetragon scrape: no series (tetragon may still be starting)"
+    fi
+
+    # Grafana dashboards clean of DS_PROMETHEUS placeholders
+    dash_dir="/var/lib/grafana/dashboards"
+    if [[ -d "$dash_dir" ]]; then
+        bad_dash="$(grep -l 'DS_PROMETHEUS\|"__inputs"' "$dash_dir"/*.json 2>/dev/null | wc -l)"
+        if [[ "$bad_dash" -eq 0 ]]; then
+            n_dash="$(ls "$dash_dir"/*.json 2>/dev/null | wc -l)"
+            pass "grafana dashboards: ${n_dash} provisioned, all datasource refs resolved"
+        else
+            fail "grafana dashboards: ${bad_dash} still have \${DS_PROMETHEUS} — panels will show 'No data'"
+        fi
+    else
+        skip "grafana dashboards: no dashboards dir"
+    fi
+
+    # Inter-node firewall — kubelet:10250 and hubble-peer:4244 reachable
+    if grep -qE 'ip saddr.*192\.168\.122|ip saddr.*10\.244' /etc/nftables.conf 2>/dev/null; then
+        pass "cluster firewall: node subnet or pod CIDR trusted in nft input chain"
+    else
+        warn "cluster firewall: no node-subnet trust rule (kube-network nft may be stale)"
+    fi
 fi
 
 # ── Bob / webui tooling ────────────────────────────────────────────────────
@@ -367,28 +386,28 @@ section "Bob + web UI tooling"
 
 # Ollama reachable and at least one model in memory
 if curl -fsS -m3 http://localhost:11434/api/ps >/dev/null 2>&1; then
-  n_models="$(curl -fsS -m3 http://localhost:11434/api/ps 2>/dev/null \
-    | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('models',[])))" 2>/dev/null || echo 0)"
-  if [[ "$n_models" -gt 0 ]]; then
-    pass "ollama: reachable, ${n_models} model(s) resident"
-  else
-    warn "ollama: reachable but no models loaded (Bob will be slow on first prompt)"
-  fi
+    n_models="$(curl -fsS -m3 http://localhost:11434/api/ps 2>/dev/null |
+        python3 -c "import sys,json; print(len(json.load(sys.stdin).get('models',[])))" 2>/dev/null || echo 0)"
+    if [[ "$n_models" -gt 0 ]]; then
+        pass "ollama: reachable, ${n_models} model(s) resident"
+    else
+        warn "ollama: reachable but no models loaded (Bob will be slow on first prompt)"
+    fi
 else
-  warn "ollama: not reachable on localhost:11434"
+    warn "ollama: not reachable on localhost:11434"
 fi
 
 # Bob observability tools present in the webui
 if [[ -f /usr/local/bin/kldload-webui ]]; then
-  missing=""
-  for tool in k8s_get_pods k8s_describe k8s_logs k8s_events prom_query zfs_status host_vitals doctor_check; do
-    grep -q "\"${tool}\"" /usr/local/bin/kldload-webui 2>/dev/null || missing+="${tool} "
-  done
-  if [[ -z "$missing" ]]; then
-    pass "webui: all 8 Bob observability tools registered"
-  else
-    fail "webui: missing Bob tools:${missing}"
-  fi
+    missing=""
+    for tool in k8s_get_pods k8s_describe k8s_logs k8s_events prom_query zfs_status host_vitals doctor_check; do
+        grep -q "\"${tool}\"" /usr/local/bin/kldload-webui 2>/dev/null || missing+="${tool} "
+    done
+    if [[ -z "$missing" ]]; then
+        pass "webui: all 8 Bob observability tools registered"
+    else
+        fail "webui: missing Bob tools:${missing}"
+    fi
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
@@ -404,19 +423,19 @@ echo ""
 # Append summary + timestamp to /root/kube-smoke-test.log so humans and Bob
 # can grep history of smoke runs. Rotates at ~2MB.
 {
-  printf "# %s  pass=%d fail=%d warn=%d\n" "$(date -Iseconds)" "$PASS" "$FAIL" "$WARN"
-} >> /root/kube-smoke-test.log 2>/dev/null || true
+    printf "# %s  pass=%d fail=%d warn=%d\n" "$(date -Iseconds)" "$PASS" "$FAIL" "$WARN"
+} >>/root/kube-smoke-test.log 2>/dev/null || true
 if [[ -f /root/kube-smoke-test.log && $(stat -c%s /root/kube-smoke-test.log 2>/dev/null || echo 0) -gt 2000000 ]]; then
-  mv /root/kube-smoke-test.log /root/kube-smoke-test.log.old 2>/dev/null || true
+    mv /root/kube-smoke-test.log /root/kube-smoke-test.log.old 2>/dev/null || true
 fi
 
 if [[ $FAIL -eq 0 ]]; then
-  echo -e "  ${G}All critical checks passed.${N}"
-  if [[ $WARN -gt 0 ]]; then
-    echo -e "  ${Y}$WARN warnings — review above for optional improvements.${N}"
-  fi
+    echo -e "  ${G}All critical checks passed.${N}"
+    if [[ $WARN -gt 0 ]]; then
+        echo -e "  ${Y}$WARN warnings — review above for optional improvements.${N}"
+    fi
 else
-  echo -e "  ${R}$FAIL critical failures — fix before proceeding.${N}"
+    echo -e "  ${R}$FAIL critical failures — fix before proceeding.${N}"
 fi
 echo -e "${C}══════════════════════════════════════════════════════════════${N}"
 

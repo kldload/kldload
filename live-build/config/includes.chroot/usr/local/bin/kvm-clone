@@ -6,7 +6,7 @@ set -euo pipefail
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 usage() {
-  cat <<EOF
+    cat <<EOF
 Usage: kvm-clone <source-vm> <new-name> [--snap <snapshot>]
 
 Creates an instant copy-on-write clone of a VM. Zero bytes copied —
@@ -20,7 +20,7 @@ Examples:
   kvm-clone template webserver-02     # another clone, instant
   kvm-clone myvm test --snap @stable  # clone from named snapshot
 EOF
-  exit 1
+    exit 1
 }
 
 [[ $# -lt 2 ]] && usage
@@ -30,10 +30,16 @@ shift 2
 
 SNAP_NAME=""
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --snap) SNAP_NAME="$2"; shift 2 ;;
-    *)      echo "Unknown option: $1"; usage ;;
-  esac
+    case "$1" in
+    --snap)
+        SNAP_NAME="$2"
+        shift 2
+        ;;
+    *)
+        echo "Unknown option: $1"
+        usage
+        ;;
+    esac
 done
 
 SRC_ZVOL="rpool/vms/${SOURCE}"
@@ -41,27 +47,27 @@ DST_ZVOL="rpool/vms/${DEST}"
 
 # Verify source exists
 if ! zfs list "${SRC_ZVOL}" >/dev/null 2>&1; then
-  echo "Error: Source VM zvol '${SRC_ZVOL}' not found"
-  exit 1
+    echo "Error: Source VM zvol '${SRC_ZVOL}' not found"
+    exit 1
 fi
 
 # Check dest doesn't exist
 if zfs list "${DST_ZVOL}" >/dev/null 2>&1; then
-  echo "Error: Destination '${DST_ZVOL}' already exists"
-  exit 1
+    echo "Error: Destination '${DST_ZVOL}' already exists"
+    exit 1
 fi
 
 # Create or use snapshot
 if [[ -n "$SNAP_NAME" ]]; then
-  [[ "$SNAP_NAME" != *@* ]] && SNAP_NAME="${SRC_ZVOL}@${SNAP_NAME}"
-  SNAP="${SNAP_NAME}"
+    [[ "$SNAP_NAME" != *@* ]] && SNAP_NAME="${SRC_ZVOL}@${SNAP_NAME}"
+    SNAP="${SNAP_NAME}"
 else
-  SNAP="${SRC_ZVOL}@clone-$(date +%Y%m%d_%H%M%S%N)"
-  # Pause source if running for consistent snapshot
-  STATE=$(virsh domstate "${SOURCE}" 2>/dev/null || echo "unknown")
-  [[ "$STATE" == "running" ]] && virsh suspend "${SOURCE}" 2>/dev/null || true
-  zfs snapshot "${SNAP}"
-  [[ "$STATE" == "running" ]] && virsh resume "${SOURCE}" 2>/dev/null || true
+    SNAP="${SRC_ZVOL}@clone-$(date +%Y%m%d_%H%M%S%N)"
+    # Pause source if running for consistent snapshot
+    STATE=$(virsh domstate "${SOURCE}" 2>/dev/null || echo "unknown")
+    [[ "$STATE" == "running" ]] && virsh suspend "${SOURCE}" 2>/dev/null || true
+    zfs snapshot "${SNAP}"
+    [[ "$STATE" == "running" ]] && virsh resume "${SOURCE}" 2>/dev/null || true
 fi
 
 # Clone the zvol (instant, zero copy)
@@ -75,7 +81,7 @@ zfs set com.kldload:clone-origin="${SNAP}" "${DST_ZVOL}"
 NVRAM_SRC="/var/lib/libvirt/qemu/nvram/${SOURCE}_VARS.fd"
 NVRAM_DST="/var/lib/libvirt/qemu/nvram/${DEST}_VARS.fd"
 if [[ -f "${NVRAM_SRC}" ]]; then
-  cp "${NVRAM_SRC}" "${NVRAM_DST}"
+    cp "${NVRAM_SRC}" "${NVRAM_DST}"
 fi
 
 # Clone the libvirt domain definition via XML manipulation.
@@ -85,18 +91,18 @@ fi
 echo "Cloning VM definition..."
 SRC_DEV="$(readlink -f "/dev/zvol/${SRC_ZVOL}" 2>/dev/null || echo "/dev/zvol/${SRC_ZVOL}")"
 DST_DEV="$(readlink -f "/dev/zvol/${DST_ZVOL}" 2>/dev/null || echo "/dev/zvol/${DST_ZVOL}")"
-virsh dumpxml "${SOURCE}" | \
-  sed "s|<name>${SOURCE}</name>|<name>${DEST}</name>|" | \
-  sed "s|${SRC_ZVOL}|${DST_ZVOL}|g" | \
-  sed "s|${SRC_DEV}|${DST_DEV}|g" | \
-  sed "s|${SOURCE}_VARS.fd|${DEST}_VARS.fd|g" | \
-  sed '/<uuid>/d' | \
-  sed '/<mac address/d' | \
-  virsh define /dev/stdin || {
+virsh dumpxml "${SOURCE}" |
+    sed "s|<name>${SOURCE}</name>|<name>${DEST}</name>|" |
+    sed "s|${SRC_ZVOL}|${DST_ZVOL}|g" |
+    sed "s|${SRC_DEV}|${DST_DEV}|g" |
+    sed "s|${SOURCE}_VARS.fd|${DEST}_VARS.fd|g" |
+    sed '/<uuid>/d' |
+    sed '/<mac address/d' |
+    virsh define /dev/stdin || {
     echo "ERROR: Failed to define VM ${DEST}"
     zfs destroy "${DST_ZVOL}" 2>/dev/null
     exit 1
-  }
+}
 
 echo ""
 echo "✔ Cloned '${SOURCE}' → '${DEST}' (instant, zero bytes copied)"
@@ -110,18 +116,19 @@ echo "  Snap:   kvm-snap ${DEST}"
 #   <cluster>-cp-*    → control_plane
 #   <cluster>-worker-* → worker
 if command -v kldload-db >/dev/null 2>&1; then
-  _role="clone"; _cluster=""
-  case "$DEST" in
-    *-cp|*-cp-*)         _role="control_plane" ;;
-    *-worker-*|*worker*) _role="worker" ;;
-  esac
-  # Extract cluster prefix (everything before the first role suffix)
-  if [[ "$DEST" == *-cp* || "$DEST" == *-worker* ]]; then
-    _cluster="${DEST%%-cp*}"
-    _cluster="${_cluster%%-worker*}"
-  fi
-  kldload-db vm-register --name "$DEST" --role "$_role" \
-    --cluster "$_cluster" --golden-src "$SOURCE" --status "cloned" 2>/dev/null || true
-  kldload-db event --type "vm" --subject "$DEST" \
-    --message "cloned from ${SOURCE}" 2>/dev/null || true
+    _role="clone"
+    _cluster=""
+    case "$DEST" in
+    *-cp | *-cp-*) _role="control_plane" ;;
+    *-worker-* | *worker*) _role="worker" ;;
+    esac
+    # Extract cluster prefix (everything before the first role suffix)
+    if [[ "$DEST" == *-cp* || "$DEST" == *-worker* ]]; then
+        _cluster="${DEST%%-cp*}"
+        _cluster="${_cluster%%-worker*}"
+    fi
+    kldload-db vm-register --name "$DEST" --role "$_role" \
+        --cluster "$_cluster" --golden-src "$SOURCE" --status "cloned" 2>/dev/null || true
+    kldload-db event --type "vm" --subject "$DEST" \
+        --message "cloned from ${SOURCE}" 2>/dev/null || true
 fi

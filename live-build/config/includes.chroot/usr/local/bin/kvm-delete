@@ -6,7 +6,7 @@ set -euo pipefail
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 usage() {
-  cat <<EOF
+    cat <<EOF
 Usage: kvm-delete <vm-name> [--force]
 
 Removes a VM and its ZFS zvol. The VM must be shut down first
@@ -16,7 +16,7 @@ Examples:
   kvm-delete myvm
   kvm-delete myvm --force    # force-stop if running
 EOF
-  exit 1
+    exit 1
 }
 
 [[ $# -lt 1 ]] && usage
@@ -27,46 +27,46 @@ ZVOL="rpool/vms/${NAME}"
 
 # Check VM exists
 if ! virsh dominfo "${NAME}" >/dev/null 2>&1; then
-  echo "Warning: VM '${NAME}' not found in libvirt (removing zvol only)"
+    echo "Warning: VM '${NAME}' not found in libvirt (removing zvol only)"
 else
-  STATE=$(virsh domstate "${NAME}" 2>/dev/null || echo "unknown")
-  if [[ "$STATE" == "running" ]]; then
-    if [[ "$FORCE" == "--force" ]]; then
-      echo "Force-stopping VM..."
-      virsh destroy "${NAME}" 2>/dev/null || true
-    else
-      echo "ERROR: VM '${NAME}' is running. Stop it first or use --force"
-      exit 1
+    STATE=$(virsh domstate "${NAME}" 2>/dev/null || echo "unknown")
+    if [[ "$STATE" == "running" ]]; then
+        if [[ "$FORCE" == "--force" ]]; then
+            echo "Force-stopping VM..."
+            virsh destroy "${NAME}" 2>/dev/null || true
+        else
+            echo "ERROR: VM '${NAME}' is running. Stop it first or use --force"
+            exit 1
+        fi
     fi
-  fi
 
-  echo "Removing VM definition..."
-  virsh undefine "${NAME}" --nvram 2>/dev/null || \
-    virsh undefine "${NAME}" 2>/dev/null || true
+    echo "Removing VM definition..."
+    virsh undefine "${NAME}" --nvram 2>/dev/null ||
+        virsh undefine "${NAME}" 2>/dev/null || true
 fi
 
 if zfs list "${ZVOL}" >/dev/null 2>&1; then
-  # Check if this clone has a tracked origin snapshot
-  ORIGIN=$(zfs get -H -o value com.kldload:clone-origin "${ZVOL}" 2>/dev/null)
+    # Check if this clone has a tracked origin snapshot
+    ORIGIN=$(zfs get -H -o value com.kldload:clone-origin "${ZVOL}" 2>/dev/null)
 
-  echo "Destroying ZFS zvol: ${ZVOL}"
-  zfs destroy -r "${ZVOL}"
+    echo "Destroying ZFS zvol: ${ZVOL}"
+    zfs destroy -r "${ZVOL}"
 
-  # Clean up orphaned clone snapshots on the source
-  # Find all clone-* snapshots on the source that have no remaining clones
-  SRC=$(echo "$ORIGIN" | cut -d@ -f1)
-  if [[ -n "$SRC" && "$SRC" != "-" ]]; then
-    zfs list -t snapshot -H -o name "$SRC" 2>/dev/null | grep '@clone-' | while read snap; do
-      # Check if any zvol still uses this snapshot as its origin
-      USED_BY=$(zfs get -H -o value origin -t volume -r rpool/vms 2>/dev/null | grep "^${snap}$")
-      if [[ -z "$USED_BY" ]]; then
-        echo "Cleaning up orphaned snapshot: ${snap}"
-        zfs destroy "${snap}" 2>/dev/null || true
-      fi
-    done
-  fi
+    # Clean up orphaned clone snapshots on the source
+    # Find all clone-* snapshots on the source that have no remaining clones
+    SRC=$(echo "$ORIGIN" | cut -d@ -f1)
+    if [[ -n "$SRC" && "$SRC" != "-" ]]; then
+        zfs list -t snapshot -H -o name "$SRC" 2>/dev/null | grep '@clone-' | while read snap; do
+            # Check if any zvol still uses this snapshot as its origin
+            USED_BY=$(zfs get -H -o value origin -t volume -r rpool/vms 2>/dev/null | grep "^${snap}$")
+            if [[ -z "$USED_BY" ]]; then
+                echo "Cleaning up orphaned snapshot: ${snap}"
+                zfs destroy "${snap}" 2>/dev/null || true
+            fi
+        done
+    fi
 else
-  echo "Warning: ZFS zvol '${ZVOL}' not found"
+    echo "Warning: ZFS zvol '${ZVOL}' not found"
 fi
 
 echo ""
@@ -74,8 +74,8 @@ echo "Deleted '${NAME}'"
 
 # Soft-delete from the state DB — history survives, dynamic inventory drops it.
 if command -v kldload-db >/dev/null 2>&1; then
-  kldload-db vm-delete --name "${NAME}" 2>/dev/null || true
-  kldload-db node-delete --hostname "${NAME}" 2>/dev/null || true
-  kldload-db event --type "vm" --subject "${NAME}" \
-    --message "kvm-delete" 2>/dev/null || true
+    kldload-db vm-delete --name "${NAME}" 2>/dev/null || true
+    kldload-db node-delete --hostname "${NAME}" 2>/dev/null || true
+    kldload-db event --type "vm" --subject "${NAME}" \
+        --message "kvm-delete" 2>/dev/null || true
 fi

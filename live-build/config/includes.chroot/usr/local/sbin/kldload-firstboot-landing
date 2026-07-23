@@ -26,15 +26,21 @@ DONE_FILE="${STATE}/landing-done"
 LANDING_ROOT=/srv/landing
 
 mkdir -p "${STATE}" /var/log/kldload
-exec >> "${LOG}" 2>&1
+exec >>"${LOG}" 2>&1
 
-log()  { printf '[%(%F %T)T] [landing-firstboot] %s\n' -1 "$*"; }
-die()  { log "FATAL: $*"; exit 1; }
+log() { printf '[%(%F %T)T] [landing-firstboot] %s\n' -1 "$*"; }
+die() {
+    log "FATAL: $*"
+    exit 1
+}
 
-[[ -f "${DONE_FILE}" ]] && { log "Already complete — skipping"; exit 0; }
+[[ -f "${DONE_FILE}" ]] && {
+    log "Already complete — skipping"
+    exit 0
+}
 
 # ── Load environment ──────────────────────────────────────────────────────────
-[[ -f /etc/kldload/hub.env  ]] && source /etc/kldload/hub.env
+[[ -f /etc/kldload/hub.env ]] && source /etc/kldload/hub.env
 [[ -f /etc/kldload/node.env ]] && source /etc/kldload/node.env
 
 MASTER_IP="${KLDLOAD_MASTER_IP:-10.78.0.1}"
@@ -81,7 +87,7 @@ fi
 
 # ── Harden sshd for SFTP chroot ───────────────────────────────────────────────
 log "Writing SFTP sshd configuration..."
-cat > /etc/ssh/sshd_config.d/50-kldload-landing-sftp.conf <<SSHCFG
+cat >/etc/ssh/sshd_config.d/50-kldload-landing-sftp.conf <<SSHCFG
 # kldload landing zone — SFTP chroot for sftpusers group
 # All members of sftpusers get sftp-only access, chrooted to their home dir.
 
@@ -99,7 +105,7 @@ SSHCFG
 # ── Write user management helper scripts ──────────────────────────────────────
 log "Installing landing zone management tools..."
 
-cat > /usr/local/sbin/kldload-landing-adduser <<'ADDUSER'
+cat >/usr/local/sbin/kldload-landing-adduser <<'ADDUSER'
 #!/usr/bin/env bash
 # kldload-landing-adduser <username> [--key "ssh-ed25519 ..."]
 set -euo pipefail
@@ -172,7 +178,7 @@ echo "SFTP command:"
 echo "  sftp ${USERNAME}@$(hostname -I | awk '{print $1}')"
 ADDUSER
 
-cat > /usr/local/sbin/kldload-landing-removeuser <<'RMUSER'
+cat >/usr/local/sbin/kldload-landing-removeuser <<'RMUSER'
 #!/usr/bin/env bash
 # kldload-landing-removeuser <username> [--destroy-data]
 set -euo pipefail
@@ -199,7 +205,7 @@ else
 fi
 RMUSER
 
-cat > /usr/local/sbin/kldload-landing-list <<'LSUSER'
+cat >/usr/local/sbin/kldload-landing-list <<'LSUSER'
 #!/usr/bin/env bash
 # kldload-landing-list — show active SFTP landing users and their disk usage
 set -euo pipefail
@@ -233,7 +239,7 @@ chmod +x \
 log "Enabling node_exporter..."
 systemctl daemon-reload
 systemctl enable prometheus-node-exporter
-systemctl start  prometheus-node-exporter
+systemctl start prometheus-node-exporter
 
 # ── Restart sshd ──────────────────────────────────────────────────────────────
 log "Reloading sshd..."
@@ -242,7 +248,8 @@ systemctl reload sshd || systemctl restart sshd
 # ── Register with master ──────────────────────────────────────────────────────
 log "Registering with master at ${MASTER_API}..."
 
-PAYLOAD="$(cat <<JSON
+PAYLOAD="$(
+    cat <<JSON
 {
   "hostname": "${MY_HOSTNAME}",
   "ip": "${MY_IP}",
@@ -255,10 +262,10 @@ JSON
 )"
 
 if curl -sf -X POST \
-        -H "Content-Type: application/json" \
-        -d "${PAYLOAD}" \
-        "${MASTER_API}/api/landing/register" \
-        --retry 5 --retry-delay 5 --retry-connrefused; then
+    -H "Content-Type: application/json" \
+    -d "${PAYLOAD}" \
+    "${MASTER_API}/api/landing/register" \
+    --retry 5 --retry-delay 5 --retry-connrefused; then
     log "Registered with master successfully"
 else
     log "WARNING: Master registration failed — node will still function"

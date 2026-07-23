@@ -37,17 +37,32 @@ VM=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --fix) FIX=1 ; shift ;;
-        --vm) VM="$2" ; shift 2 ;;
-        -h|--help) sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#$//' ; exit 0 ;;
-        *) echo "unknown arg: $1" >&2 ; exit 2 ;;
+    --fix)
+        FIX=1
+        shift
+        ;;
+    --vm)
+        VM="$2"
+        shift 2
+        ;;
+    -h | --help)
+        sed -n '2,/^$/p' "$0" | sed 's/^# //; s/^#$//'
+        exit 0
+        ;;
+    *)
+        echo "unknown arg: $1" >&2
+        exit 2
+        ;;
     esac
 done
 
-_pass() { printf '  %s[OK]%s   %s\n' "$GRN" "$RST" "$1" ; }
-_fail() { printf '  %s[FAIL]%s %s\n' "$RED" "$RST" "$1" ; FAIL=$((FAIL+1)) ; }
-_warn() { printf '  %s[WARN]%s %s\n' "$YLW" "$RST" "$1" ; }
-_hint() { printf '         %s%s%s\n' "$DIM" "$1" "$RST" ; }
+_pass() { printf '  %s[OK]%s   %s\n' "$GRN" "$RST" "$1"; }
+_fail() {
+    printf '  %s[FAIL]%s %s\n' "$RED" "$RST" "$1"
+    FAIL=$((FAIL + 1))
+}
+_warn() { printf '  %s[WARN]%s %s\n' "$YLW" "$RST" "$1"; }
+_hint() { printf '         %s%s%s\n' "$DIM" "$1" "$RST"; }
 
 # ─── [1] services active ──────────────────────────────────────────────
 echo "[1] systemd services"
@@ -66,7 +81,7 @@ done
 # ─── [2] listening ports ──────────────────────────────────────────────
 echo
 echo "[2] listening ports"
-declare -A _ports=( [zfs_exporter]=9134 [smartctl_exporter]=9633 [loki]=3100 [promtail]=9080 [grafana]=3000 [prometheus]=9090 [ebpf_exporter]=9435 )
+declare -A _ports=([zfs_exporter]=9134 [smartctl_exporter]=9633 [loki]=3100 [promtail]=9080 [grafana]=3000 [prometheus]=9090 [ebpf_exporter]=9435)
 for name in "${!_ports[@]}"; do
     _port="${_ports[$name]}"
     if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE ":${_port}$"; then
@@ -93,10 +108,12 @@ for t in d['data']['activeTargets']:
         print(t['health']); break
 " 2>/dev/null)"
         case "$_h" in
-            up)   _pass "scrape $job → up" ;;
-            down) _fail "scrape $job → down"
-                  _hint "  curl http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.labels.job==\"$job\")'" ;;
-            *)    _warn "scrape $job → not configured ($_h)" ;;
+        up) _pass "scrape $job → up" ;;
+        down)
+            _fail "scrape $job → down"
+            _hint "  curl http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.labels.job==\"$job\")'"
+            ;;
+        *) _warn "scrape $job → not configured ($_h)" ;;
         esac
     done
 fi

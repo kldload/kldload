@@ -45,64 +45,67 @@ SERIAL="${ROOT_DIR}/serial"
 FPRINT="${ROOT_DIR}/fingerprint"
 
 log() { echo "[kldload-ca] $*" >&2; }
-die() { log "error: $*"; exit 1; }
+die() {
+    log "error: $*"
+    exit 1
+}
 
 # Hostname + install fingerprint for CN — uniqueness matters so MokManager
 # doesn't silently skip because "a CA with this subject is already trusted"
 # from a prior install.
 _hostname() { hostname -s 2>/dev/null || echo kldload; }
-_stamp()    { date +%Y%m%d%H%M%S; }
-_rand()     { head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+_stamp() { date +%Y%m%d%H%M%S; }
+_rand() { head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
 need_root() {
-  [[ $EUID -eq 0 ]] || die "must run as root"
+    [[ $EUID -eq 0 ]] || die "must run as root"
 }
 
 ensure_dirs() {
-  # Root cert is public by definition — only the .key needs lockdown
-  # (handled at file level below). 0755 on the dirs so anyone can read
-  # ca.crt / ca.der for system-trust-install on non-root tooling.
-  install -d -m 0755 -o root -g root "${CA_DIR}"
-  install -d -m 0755 -o root -g root "${ROOT_DIR}"
-  install -d -m 0755 -o root -g root "${LEAF_DIR}"
+    # Root cert is public by definition — only the .key needs lockdown
+    # (handled at file level below). 0755 on the dirs so anyone can read
+    # ca.crt / ca.der for system-trust-install on non-root tooling.
+    install -d -m 0755 -o root -g root "${CA_DIR}"
+    install -d -m 0755 -o root -g root "${ROOT_DIR}"
+    install -d -m 0755 -o root -g root "${LEAF_DIR}"
 }
 
 # ──────────────────────────────────────────────────────────────────────
 # init — idempotent root generation
 # ──────────────────────────────────────────────────────────────────────
 cmd_init() {
-  local force=0
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --force) force=1 ;;
-      *) die "unknown flag: $1" ;;
-    esac
-    shift
-  done
+    local force=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --force) force=1 ;;
+        *) die "unknown flag: $1" ;;
+        esac
+        shift
+    done
 
-  need_root
-  ensure_dirs
+    need_root
+    ensure_dirs
 
-  if [[ -f "${ROOT_KEY}" && -f "${ROOT_CRT}" && $force -eq 0 ]]; then
-    log "root CA already exists at ${ROOT_DIR} — use --force to rotate"
-    cmd_info
-    return 0
-  fi
+    if [[ -f "${ROOT_KEY}" && -f "${ROOT_CRT}" && $force -eq 0 ]]; then
+        log "root CA already exists at ${ROOT_DIR} — use --force to rotate"
+        cmd_info
+        return 0
+    fi
 
-  if [[ $force -eq 1 && -f "${ROOT_CRT}" ]]; then
-    log "rotating root CA (--force) — old material archived"
-    local stamp
-    stamp="$(date +%Y%m%d-%H%M%S)"
-    mv "${ROOT_DIR}" "${CA_DIR}/root.archived.${stamp}"
-    install -d -m 0700 -o root -g root "${ROOT_DIR}"
-  fi
+    if [[ $force -eq 1 && -f "${ROOT_CRT}" ]]; then
+        log "rotating root CA (--force) — old material archived"
+        local stamp
+        stamp="$(date +%Y%m%d-%H%M%S)"
+        mv "${ROOT_DIR}" "${CA_DIR}/root.archived.${stamp}"
+        install -d -m 0700 -o root -g root "${ROOT_DIR}"
+    fi
 
-  local cn="kldload-ca $(_hostname)-$(_stamp)-$(_rand)"
+    local cn="kldload-ca $(_hostname)-$(_stamp)-$(_rand)"
 
-  log "generating root CA: CN='${cn}'"
+    log "generating root CA: CN='${cn}'"
 
-  local conf="${ROOT_DIR}/ca.conf"
-  cat >"${conf}" <<EOCONF
+    local conf="${ROOT_DIR}/ca.conf"
+    cat >"${conf}" <<EOCONF
 [req]
 distinguished_name = dn
 x509_extensions    = v3_ca
@@ -121,75 +124,88 @@ subjectKeyIdentifier   = hash
 authorityKeyIdentifier = keyid:always,issuer
 EOCONF
 
-  openssl req -x509 -nodes -newkey rsa:4096 \
-    -keyout "${ROOT_KEY}" \
-    -out    "${ROOT_CRT}" \
-    -days 3650 \
-    -config "${conf}" \
-    -extensions v3_ca 2>>"${ROOT_DIR}/openssl.log"
+    openssl req -x509 -nodes -newkey rsa:4096 \
+        -keyout "${ROOT_KEY}" \
+        -out "${ROOT_CRT}" \
+        -days 3650 \
+        -config "${conf}" \
+        -extensions v3_ca 2>>"${ROOT_DIR}/openssl.log"
 
-  openssl x509 -in "${ROOT_CRT}" -out "${ROOT_DER}" -outform DER
+    openssl x509 -in "${ROOT_CRT}" -out "${ROOT_DER}" -outform DER
 
-  chmod 0600 "${ROOT_KEY}"
-  chmod 0644 "${ROOT_CRT}" "${ROOT_DER}"
+    chmod 0600 "${ROOT_KEY}"
+    chmod 0644 "${ROOT_CRT}" "${ROOT_DER}"
 
-  echo 01 > "${SERIAL}"
-  openssl x509 -in "${ROOT_CRT}" -noout -fingerprint -sha256 \
-    | sed 's/^.*=//' > "${FPRINT}"
+    echo 01 >"${SERIAL}"
+    openssl x509 -in "${ROOT_CRT}" -noout -fingerprint -sha256 |
+        sed 's/^.*=//' >"${FPRINT}"
 
-  log "root CA ready."
-  log "  cert:        ${ROOT_CRT}"
-  log "  der:         ${ROOT_DER}"
-  log "  fingerprint: $(cat "${FPRINT}")"
+    log "root CA ready."
+    log "  cert:        ${ROOT_CRT}"
+    log "  der:         ${ROOT_DER}"
+    log "  fingerprint: $(cat "${FPRINT}")"
 }
 
 # ──────────────────────────────────────────────────────────────────────
 # issue — sign a service leaf
 # ──────────────────────────────────────────────────────────────────────
 cmd_issue() {
-  local name=""
-  local -a dns_sans=() ip_sans=()
-  local days=90
-  local eku="serverAuth,clientAuth"
+    local name=""
+    local -a dns_sans=() ip_sans=()
+    local days=90
+    local eku="serverAuth,clientAuth"
 
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --dns) dns_sans+=("$2"); shift 2 ;;
-      --ip)  ip_sans+=("$2");  shift 2 ;;
-      --days) days="$2";       shift 2 ;;
-      --eku)  eku="$2";        shift 2 ;;
-      -*) die "unknown flag: $1" ;;
-      *)
-        [[ -z "$name" ]] || die "only one leaf name per call"
-        name="$1"; shift
-        ;;
-    esac
-  done
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --dns)
+            dns_sans+=("$2")
+            shift 2
+            ;;
+        --ip)
+            ip_sans+=("$2")
+            shift 2
+            ;;
+        --days)
+            days="$2"
+            shift 2
+            ;;
+        --eku)
+            eku="$2"
+            shift 2
+            ;;
+        -*) die "unknown flag: $1" ;;
+        *)
+            [[ -z "$name" ]] || die "only one leaf name per call"
+            name="$1"
+            shift
+            ;;
+        esac
+    done
 
-  [[ -n "$name" ]] || die "usage: kldload-ca issue <name> [--dns HOST]... [--ip ADDR]... [--days N]"
-  [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die "invalid leaf name: ${name}"
-  [[ -f "${ROOT_KEY}" ]] || die "root CA missing — run: kldload-ca init"
+    [[ -n "$name" ]] || die "usage: kldload-ca issue <name> [--dns HOST]... [--ip ADDR]... [--days N]"
+    [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die "invalid leaf name: ${name}"
+    [[ -f "${ROOT_KEY}" ]] || die "root CA missing — run: kldload-ca init"
 
-  need_root
-  ensure_dirs
+    need_root
+    ensure_dirs
 
-  local leaf_key="${LEAF_DIR}/${name}.key"
-  local leaf_crt="${LEAF_DIR}/${name}.crt"
-  local leaf_csr="${LEAF_DIR}/${name}.csr"
-  local leaf_conf="${LEAF_DIR}/${name}.cnf"
-  local leaf_sans="${LEAF_DIR}/${name}.sans"
+    local leaf_key="${LEAF_DIR}/${name}.key"
+    local leaf_crt="${LEAF_DIR}/${name}.crt"
+    local leaf_csr="${LEAF_DIR}/${name}.csr"
+    local leaf_conf="${LEAF_DIR}/${name}.cnf"
+    local leaf_sans="${LEAF_DIR}/${name}.sans"
 
-  # Always record invocation for renew replay. Line-based format, parsed
-  # by cmd_renew — deliberately NOT shell-sourceable, so no quoting games.
-  {
-    echo "NAME ${name}"
-    echo "DAYS ${days}"
-    echo "EKU ${eku}"
-    for d in "${dns_sans[@]}"; do echo "DNS ${d}"; done
-    for i in "${ip_sans[@]}";  do echo "IP ${i}"; done
-  } > "${leaf_sans}"
+    # Always record invocation for renew replay. Line-based format, parsed
+    # by cmd_renew — deliberately NOT shell-sourceable, so no quoting games.
+    {
+        echo "NAME ${name}"
+        echo "DAYS ${days}"
+        echo "EKU ${eku}"
+        for d in "${dns_sans[@]}"; do echo "DNS ${d}"; done
+        for i in "${ip_sans[@]}"; do echo "IP ${i}"; done
+    } >"${leaf_sans}"
 
-  cat >"${leaf_conf}" <<EOCONF
+    cat >"${leaf_conf}" <<EOCONF
 [req]
 distinguished_name = dn
 req_extensions     = v3_req
@@ -209,190 +225,196 @@ subjectAltName   = @alt
 [alt]
 EOCONF
 
-  {
-    local i=1
-    for d in "${dns_sans[@]}"; do echo "DNS.${i} = ${d}"; i=$((i+1)); done
-    local j=1
-    for ip in "${ip_sans[@]}"; do echo "IP.${j} = ${ip}"; j=$((j+1)); done
-  } >> "${leaf_conf}"
+    {
+        local i=1
+        for d in "${dns_sans[@]}"; do
+            echo "DNS.${i} = ${d}"
+            i=$((i + 1))
+        done
+        local j=1
+        for ip in "${ip_sans[@]}"; do
+            echo "IP.${j} = ${ip}"
+            j=$((j + 1))
+        done
+    } >>"${leaf_conf}"
 
-  openssl req -new -newkey rsa:2048 -nodes \
-    -keyout "${leaf_key}" \
-    -out    "${leaf_csr}" \
-    -config "${leaf_conf}" 2>>"${ROOT_DIR}/openssl.log"
+    openssl req -new -newkey rsa:2048 -nodes \
+        -keyout "${leaf_key}" \
+        -out "${leaf_csr}" \
+        -config "${leaf_conf}" 2>>"${ROOT_DIR}/openssl.log"
 
-  # Sign with root, preserving v3_req extensions.
-  openssl x509 -req \
-    -in    "${leaf_csr}" \
-    -CA    "${ROOT_CRT}" \
-    -CAkey "${ROOT_KEY}" \
-    -CAserial "${SERIAL}" \
-    -days "${days}" \
-    -extensions v3_req \
-    -extfile  "${leaf_conf}" \
-    -out "${leaf_crt}" 2>>"${ROOT_DIR}/openssl.log"
+    # Sign with root, preserving v3_req extensions.
+    openssl x509 -req \
+        -in "${leaf_csr}" \
+        -CA "${ROOT_CRT}" \
+        -CAkey "${ROOT_KEY}" \
+        -CAserial "${SERIAL}" \
+        -days "${days}" \
+        -extensions v3_req \
+        -extfile "${leaf_conf}" \
+        -out "${leaf_crt}" 2>>"${ROOT_DIR}/openssl.log"
 
-  chmod 0640 "${leaf_key}"
-  chmod 0644 "${leaf_crt}"
-  rm -f "${leaf_csr}"
+    chmod 0640 "${leaf_key}"
+    chmod 0644 "${leaf_crt}"
+    rm -f "${leaf_csr}"
 
-  log "issued: ${leaf_crt} (expires $(openssl x509 -in "${leaf_crt}" -noout -enddate | sed 's/^.*=//'))"
-  log "  key:  ${leaf_key}"
-  log "  sans: $(openssl x509 -in "${leaf_crt}" -noout -ext subjectAltName 2>/dev/null | grep -v 'X509v3' | paste -sd' ' -)"
+    log "issued: ${leaf_crt} (expires $(openssl x509 -in "${leaf_crt}" -noout -enddate | sed 's/^.*=//'))"
+    log "  key:  ${leaf_key}"
+    log "  sans: $(openssl x509 -in "${leaf_crt}" -noout -ext subjectAltName 2>/dev/null | grep -v 'X509v3' | paste -sd' ' -)"
 }
 
 # ──────────────────────────────────────────────────────────────────────
 # renew — re-issue from saved SAN record
 # ──────────────────────────────────────────────────────────────────────
 cmd_renew() {
-  local name="${1:?usage: kldload-ca renew <name>}"
-  local sans="${LEAF_DIR}/${name}.sans"
-  [[ -r "${sans}" ]] || die "no SAN record for ${name} at ${sans}"
+    local name="${1:?usage: kldload-ca renew <name>}"
+    local sans="${LEAF_DIR}/${name}.sans"
+    [[ -r "${sans}" ]] || die "no SAN record for ${name} at ${sans}"
 
-  local -a args=() dns_args=() ip_args=()
-  local leaf_name="" days="90" eku="serverAuth,clientAuth"
-  local key val
-  while read -r key val; do
-    case "$key" in
-      NAME) leaf_name="$val" ;;
-      DAYS) days="$val" ;;
-      EKU)  eku="$val" ;;
-      DNS)  dns_args+=(--dns "$val") ;;
-      IP)   ip_args+=(--ip  "$val") ;;
-    esac
-  done < "${sans}"
+    local -a args=() dns_args=() ip_args=()
+    local leaf_name="" days="90" eku="serverAuth,clientAuth"
+    local key val
+    while read -r key val; do
+        case "$key" in
+        NAME) leaf_name="$val" ;;
+        DAYS) days="$val" ;;
+        EKU) eku="$val" ;;
+        DNS) dns_args+=(--dns "$val") ;;
+        IP) ip_args+=(--ip "$val") ;;
+        esac
+    done <"${sans}"
 
-  [[ -n "${leaf_name}" ]] || die "SAN record at ${sans} is missing NAME"
-  args=("${leaf_name}" --days "${days}" --eku "${eku}")
-  [[ ${#dns_args[@]} -gt 0 ]] && args+=("${dns_args[@]}")
-  [[ ${#ip_args[@]}  -gt 0 ]] && args+=("${ip_args[@]}")
+    [[ -n "${leaf_name}" ]] || die "SAN record at ${sans} is missing NAME"
+    args=("${leaf_name}" --days "${days}" --eku "${eku}")
+    [[ ${#dns_args[@]} -gt 0 ]] && args+=("${dns_args[@]}")
+    [[ ${#ip_args[@]} -gt 0 ]] && args+=("${ip_args[@]}")
 
-  cmd_issue "${args[@]}"
+    cmd_issue "${args[@]}"
 }
 
 # ──────────────────────────────────────────────────────────────────────
 # enroll-mok — stage root CA for Secure Boot MokManager
 # ──────────────────────────────────────────────────────────────────────
 cmd_enroll_mok() {
-  need_root
-  [[ -f "${ROOT_DER}" ]] || die "root CA missing — run: kldload-ca init"
+    need_root
+    [[ -f "${ROOT_DER}" ]] || die "root CA missing — run: kldload-ca init"
 
-  if ! command -v mokutil >/dev/null 2>&1; then
-    log "mokutil not installed — skipping MOK enrollment (non-SB system)"
-    return 0
-  fi
+    if ! command -v mokutil >/dev/null 2>&1; then
+        log "mokutil not installed — skipping MOK enrollment (non-SB system)"
+        return 0
+    fi
 
-  if [[ ! -d /sys/firmware/efi/efivars ]]; then
-    log "EFI vars not mounted — skipping MOK enrollment (non-EFI or chroot)"
-    return 0
-  fi
+    if [[ ! -d /sys/firmware/efi/efivars ]]; then
+        log "EFI vars not mounted — skipping MOK enrollment (non-EFI or chroot)"
+        return 0
+    fi
 
-  # Idempotent: already enrolled?
-  if mokutil --test-key "${ROOT_DER}" 2>/dev/null | grep -qi 'is already enrolled'; then
-    log "kldload CA already enrolled as MOK"
-    return 0
-  fi
+    # Idempotent: already enrolled?
+    if mokutil --test-key "${ROOT_DER}" 2>/dev/null | grep -qi 'is already enrolled'; then
+        log "kldload CA already enrolled as MOK"
+        return 0
+    fi
 
-  # Already pending from prior install? Let the user drive.
-  if mokutil --list-new 2>/dev/null | grep -q "$(openssl x509 -in "${ROOT_CRT}" -noout -subject | sed 's/^subject=//;s/ *//g')"; then
-    log "kldload CA already queued for enrollment — reboot into MokManager to finish"
-    return 0
-  fi
+    # Already pending from prior install? Let the user drive.
+    if mokutil --list-new 2>/dev/null | grep -q "$(openssl x509 -in "${ROOT_CRT}" -noout -subject | sed 's/^subject=//;s/ *//g')"; then
+        log "kldload CA already queued for enrollment — reboot into MokManager to finish"
+        return 0
+    fi
 
-  local pass="${KLDLOAD_MOK_PASSWORD:-kldload}"
-  if printf '%s\n%s\n' "${pass}" "${pass}" | mokutil --ignore-keyring --import "${ROOT_DER}" >/dev/null 2>&1; then
-    log "MOK enrollment queued — password: ${pass}"
-    log "Reboot: firmware will drop into MokManager. Choose 'Enroll MOK' → Continue → enter password."
-  else
-    log "WARNING: mokutil --import failed"
-    return 1
-  fi
+    local pass="${KLDLOAD_MOK_PASSWORD:-kldload}"
+    if printf '%s\n%s\n' "${pass}" "${pass}" | mokutil --ignore-keyring --import "${ROOT_DER}" >/dev/null 2>&1; then
+        log "MOK enrollment queued — password: ${pass}"
+        log "Reboot: firmware will drop into MokManager. Choose 'Enroll MOK' → Continue → enter password."
+    else
+        log "WARNING: mokutil --import failed"
+        return 1
+    fi
 }
 
 # ──────────────────────────────────────────────────────────────────────
 # trust-install — put root into system trust store
 # ──────────────────────────────────────────────────────────────────────
 cmd_trust_install() {
-  need_root
-  [[ -f "${ROOT_CRT}" ]] || die "root CA missing — run: kldload-ca init"
+    need_root
+    [[ -f "${ROOT_CRT}" ]] || die "root CA missing — run: kldload-ca init"
 
-  # Distro-agnostic: try every known layout that exists, skip the rest.
-  #
-  # FAIL LOUD policy 2026-05-21 — the previous `update-ca-trust extract
-  # >/dev/null 2>&1 || true` swallowed broken-bundle errors silently.
-  # Symptom: the cert is "installed" into the anchors directory but the
-  # consolidated bundle (/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
-  # on RH; /etc/ssl/certs/ca-certificates.crt on Debian) doesn't include
-  # it. curl/wget/python-requests on the host then DON'T trust the cert
-  # nginx is serving — every internal HTTPS call fails verification,
-  # silently, for days, until somebody traces it. Surface the error
-  # immediately instead. die() rolls up to the systemd unit's red
-  # status, journalctl shows the actual command output.
-  local installed=0
+    # Distro-agnostic: try every known layout that exists, skip the rest.
+    #
+    # FAIL LOUD policy 2026-05-21 — the previous `update-ca-trust extract
+    # >/dev/null 2>&1 || true` swallowed broken-bundle errors silently.
+    # Symptom: the cert is "installed" into the anchors directory but the
+    # consolidated bundle (/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+    # on RH; /etc/ssl/certs/ca-certificates.crt on Debian) doesn't include
+    # it. curl/wget/python-requests on the host then DON'T trust the cert
+    # nginx is serving — every internal HTTPS call fails verification,
+    # silently, for days, until somebody traces it. Surface the error
+    # immediately instead. die() rolls up to the systemd unit's red
+    # status, journalctl shows the actual command output.
+    local installed=0
 
-  if [[ -d /etc/pki/ca-trust/source/anchors ]]; then
-    install -m 0644 "${ROOT_CRT}" /etc/pki/ca-trust/source/anchors/kldload-ca.crt
-    update-ca-trust extract \
-      || die "update-ca-trust extract failed — host trust bundle is OUT OF SYNC with the anchors dir."
-    installed=1
-    log "installed into /etc/pki/ca-trust (RH/CentOS/Fedora/Rocky)"
-  fi
+    if [[ -d /etc/pki/ca-trust/source/anchors ]]; then
+        install -m 0644 "${ROOT_CRT}" /etc/pki/ca-trust/source/anchors/kldload-ca.crt
+        update-ca-trust extract ||
+            die "update-ca-trust extract failed — host trust bundle is OUT OF SYNC with the anchors dir."
+        installed=1
+        log "installed into /etc/pki/ca-trust (RH/CentOS/Fedora/Rocky)"
+    fi
 
-  if [[ -d /usr/local/share/ca-certificates ]]; then
-    install -m 0644 "${ROOT_CRT}" /usr/local/share/ca-certificates/kldload-ca.crt
-    update-ca-certificates \
-      || die "update-ca-certificates failed — host trust bundle is OUT OF SYNC with /usr/local/share/ca-certificates/."
-    installed=1
-    log "installed into /usr/local/share/ca-certificates (Debian/Ubuntu)"
-  fi
+    if [[ -d /usr/local/share/ca-certificates ]]; then
+        install -m 0644 "${ROOT_CRT}" /usr/local/share/ca-certificates/kldload-ca.crt
+        update-ca-certificates ||
+            die "update-ca-certificates failed — host trust bundle is OUT OF SYNC with /usr/local/share/ca-certificates/."
+        installed=1
+        log "installed into /usr/local/share/ca-certificates (Debian/Ubuntu)"
+    fi
 
-  if [[ -d /etc/ca-certificates/trust-source/anchors ]]; then
-    install -m 0644 "${ROOT_CRT}" /etc/ca-certificates/trust-source/anchors/kldload-ca.crt
-    trust extract-compat \
-      || die "trust extract-compat failed — host trust bundle is OUT OF SYNC with /etc/ca-certificates/trust-source/anchors/."
-    installed=1
-    log "installed into /etc/ca-certificates/trust-source/anchors (Arch)"
-  fi
+    if [[ -d /etc/ca-certificates/trust-source/anchors ]]; then
+        install -m 0644 "${ROOT_CRT}" /etc/ca-certificates/trust-source/anchors/kldload-ca.crt
+        trust extract-compat ||
+            die "trust extract-compat failed — host trust bundle is OUT OF SYNC with /etc/ca-certificates/trust-source/anchors/."
+        installed=1
+        log "installed into /etc/ca-certificates/trust-source/anchors (Arch)"
+    fi
 
-  [[ $installed -eq 1 ]] || die "no known system trust store found — unsupported distro?"
+    [[ $installed -eq 1 ]] || die "no known system trust store found — unsupported distro?"
 }
 
 # ──────────────────────────────────────────────────────────────────────
 # info / list / dump
 # ──────────────────────────────────────────────────────────────────────
 cmd_info() {
-  if [[ ! -f "${ROOT_CRT}" ]]; then
-    echo "no kldload CA initialized (run: kldload-ca init)"
-    return 0
-  fi
-  echo "root:     ${ROOT_CRT}"
-  echo "fingerprint (sha256):"
-  echo "  $(cat "${FPRINT}")"
-  echo "subject:"
-  openssl x509 -in "${ROOT_CRT}" -noout -subject | sed 's/^/  /'
-  echo "validity:"
-  openssl x509 -in "${ROOT_CRT}" -noout -dates | sed 's/^/  /'
-  echo "leaves:"
-  if compgen -G "${LEAF_DIR}/*.crt" >/dev/null; then
-    local f
-    for f in "${LEAF_DIR}"/*.crt; do
-      printf '  %-20s  expires %s\n' \
-        "$(basename "$f" .crt)" \
-        "$(openssl x509 -in "$f" -noout -enddate | sed 's/^.*=//')"
-    done
-  else
-    echo "  (none)"
-  fi
+    if [[ ! -f "${ROOT_CRT}" ]]; then
+        echo "no kldload CA initialized (run: kldload-ca init)"
+        return 0
+    fi
+    echo "root:     ${ROOT_CRT}"
+    echo "fingerprint (sha256):"
+    echo "  $(cat "${FPRINT}")"
+    echo "subject:"
+    openssl x509 -in "${ROOT_CRT}" -noout -subject | sed 's/^/  /'
+    echo "validity:"
+    openssl x509 -in "${ROOT_CRT}" -noout -dates | sed 's/^/  /'
+    echo "leaves:"
+    if compgen -G "${LEAF_DIR}/*.crt" >/dev/null; then
+        local f
+        for f in "${LEAF_DIR}"/*.crt; do
+            printf '  %-20s  expires %s\n' \
+                "$(basename "$f" .crt)" \
+                "$(openssl x509 -in "$f" -noout -enddate | sed 's/^.*=//')"
+        done
+    else
+        echo "  (none)"
+    fi
 }
 
 cmd_dump_root() {
-  [[ -f "${ROOT_CRT}" ]] || die "root CA missing — run: kldload-ca init"
-  cat "${ROOT_CRT}"
+    [[ -f "${ROOT_CRT}" ]] || die "root CA missing — run: kldload-ca init"
+    cat "${ROOT_CRT}"
 }
 
 cmd_dump_der() {
-  [[ -f "${ROOT_DER}" ]] || die "root CA missing — run: kldload-ca init"
-  cat "${ROOT_DER}"
+    [[ -f "${ROOT_DER}" ]] || die "root CA missing — run: kldload-ca init"
+    cat "${ROOT_DER}"
 }
 
 # ──────────────────────────────────────────────────────────────────────
@@ -400,27 +422,30 @@ cmd_dump_der() {
 #   args: KVER MODULE_PATH   (same calling convention as sign-file)
 # ──────────────────────────────────────────────────────────────────────
 cmd_sign_module() {
-  local kver="${1:?kver required}"
-  local mod="${2:?module path required}"
-  [[ -f "${ROOT_KEY}" ]] || die "root CA missing — run: kldload-ca init"
+    local kver="${1:?kver required}"
+    local mod="${2:?module path required}"
+    [[ -f "${ROOT_KEY}" ]] || die "root CA missing — run: kldload-ca init"
 
-  local sign_file
-  sign_file=$(find \
-    /usr/src/kernels/"${kver}" \
-    /usr/src/linux-headers-"${kver}" \
-    /usr/lib/linux-kbuild-"${kver%%.*}"* \
-    -name sign-file -type f 2>/dev/null | head -1 || true)
+    local sign_file
+    sign_file=$(find \
+        /usr/src/kernels/"${kver}" \
+        /usr/src/linux-headers-"${kver}" \
+        /usr/lib/linux-kbuild-"${kver%%.*}"* \
+        -name sign-file -type f 2>/dev/null | head -1 || true)
 
-  [[ -x "${sign_file}" ]] || { log "sign-file not found for ${kver} — module unsigned"; exit 0; }
+    [[ -x "${sign_file}" ]] || {
+        log "sign-file not found for ${kver} — module unsigned"
+        exit 0
+    }
 
-  exec "${sign_file}" sha256 "${ROOT_KEY}" "${ROOT_CRT}" "${mod}"
+    exec "${sign_file}" sha256 "${ROOT_KEY}" "${ROOT_CRT}" "${mod}"
 }
 
 # ──────────────────────────────────────────────────────────────────────
 # usage
 # ──────────────────────────────────────────────────────────────────────
 usage() {
-  cat <<'EOUSE'
+    cat <<'EOUSE'
 kldload-ca — per-install PKI root
 
 Usage:
@@ -457,21 +482,24 @@ EOUSE
 }
 
 main() {
-  local cmd="${1:-}"
-  [[ $# -ge 1 ]] && shift || true
-  case "$cmd" in
-    init)           cmd_init "$@" ;;
-    issue)          cmd_issue "$@" ;;
-    renew)          cmd_renew "$@" ;;
-    enroll-mok)     cmd_enroll_mok ;;
-    trust-install)  cmd_trust_install ;;
-    sign-module)    cmd_sign_module "$@" ;;
-    info)           cmd_info ;;
-    dump-root)      cmd_dump_root ;;
-    dump-der)       cmd_dump_der ;;
-    -h|--help|help|"") usage ;;
-    *) usage; exit 2 ;;
-  esac
+    local cmd="${1:-}"
+    [[ $# -ge 1 ]] && shift || true
+    case "$cmd" in
+    init) cmd_init "$@" ;;
+    issue) cmd_issue "$@" ;;
+    renew) cmd_renew "$@" ;;
+    enroll-mok) cmd_enroll_mok ;;
+    trust-install) cmd_trust_install ;;
+    sign-module) cmd_sign_module "$@" ;;
+    info) cmd_info ;;
+    dump-root) cmd_dump_root ;;
+    dump-der) cmd_dump_der ;;
+    -h | --help | help | "") usage ;;
+    *)
+        usage
+        exit 2
+        ;;
+    esac
 }
 
 main "$@"

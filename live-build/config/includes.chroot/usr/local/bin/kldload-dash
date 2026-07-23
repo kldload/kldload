@@ -11,9 +11,16 @@ REFRESH="${KLDLOAD_DASH_REFRESH:-3}"
 
 # ── Colours (soft, dark-theme friendly) ───────────────────────────────
 if [[ -t 1 ]] && [[ "${TERM:-}" != "dumb" ]]; then
-    G=$'\e[38;5;85m'; C=$'\e[38;5;117m'; Y=$'\e[38;5;221m'
-    P=$'\e[38;5;177m'; M=$'\e[38;5;245m'; W=$'\e[1;38;5;255m'
-    R=$'\e[38;5;203m'; D=$'\e[38;5;240m'; N=$'\e[0m'; B=$'\e[1m'
+    G=$'\e[38;5;85m'
+    C=$'\e[38;5;117m'
+    Y=$'\e[38;5;221m'
+    P=$'\e[38;5;177m'
+    M=$'\e[38;5;245m'
+    W=$'\e[1;38;5;255m'
+    R=$'\e[38;5;203m'
+    D=$'\e[38;5;240m'
+    N=$'\e[0m'
+    B=$'\e[1m'
 else
     G= C= Y= P= M= W= R= D= N= B=
 fi
@@ -42,31 +49,33 @@ _kube() {
         return
     fi
     local total ready
-    read -r total ready < <(kubectl get nodes --no-headers 2>/dev/null \
-        | awk '{t++; if ($2=="Ready") r++} END {print t+0, r+0}')
-    local color; [[ "$ready" == "$total" && "$total" -gt 0 ]] && color="$G" || color="$Y"
+    read -r total ready < <(kubectl get nodes --no-headers 2>/dev/null |
+        awk '{t++; if ($2=="Ready") r++} END {print t+0, r+0}')
+    local color
+    [[ "$ready" == "$total" && "$total" -gt 0 ]] && color="$G" || color="$Y"
     printf "  ${color}${ready}/${total} nodes ready${N}"
 
     # Pod states
     local running pending cl bad
-    eval "$(kubectl get pods -A --no-headers 2>/dev/null \
-        | awk '{s[$4]++} END {printf "running=%d; pending=%d; cl=%d; bad=%d\n",
+    eval "$(kubectl get pods -A --no-headers 2>/dev/null |
+        awk '{s[$4]++} END {printf "running=%d; pending=%d; cl=%d; bad=%d\n",
             s["Running"]+0, s["Pending"]+0, s["CrashLoopBackOff"]+0,
             (s["Error"]+s["Failed"]+s["ImagePullBackOff"]+s["ErrImagePull"])+0}')"
     printf "${M}  ·${N}  ${G}${running} Running${N}"
     [[ "$pending" -gt 0 ]] && printf "${M}  ·${N}  ${Y}${pending} Pending${N}"
-    [[ "$cl" -gt 0 ]]      && printf "${M}  ·${N}  ${R}${cl} CrashLoop${N}"
-    [[ "$bad" -gt 0 ]]     && printf "${M}  ·${N}  ${R}${bad} Error${N}"
+    [[ "$cl" -gt 0 ]] && printf "${M}  ·${N}  ${R}${cl} CrashLoop${N}"
+    [[ "$bad" -gt 0 ]] && printf "${M}  ·${N}  ${R}${bad} Error${N}"
     printf "\n"
 
     # Key system components
     local comps="cilium hubble-relay metrics-server coredns"
     for c in $comps; do
         local ready_cnt total_cnt
-        read -r ready_cnt total_cnt < <(kubectl -n kube-system get pods -l "k8s-app=${c}" --no-headers 2>/dev/null \
-            | awk '{t++; if ($3=="Running") r++} END {print r+0, t+0}')
+        read -r ready_cnt total_cnt < <(kubectl -n kube-system get pods -l "k8s-app=${c}" --no-headers 2>/dev/null |
+            awk '{t++; if ($3=="Running") r++} END {print r+0, t+0}')
         [[ "$total_cnt" -eq 0 ]] && continue
-        local col; [[ "$ready_cnt" == "$total_cnt" ]] && col="$G" || col="$R"
+        local col
+        [[ "$ready_cnt" == "$total_cnt" ]] && col="$G" || col="$R"
         printf "  ${col}${c} ${ready_cnt}/${total_cnt}${N}"
     done
     printf "\n"
@@ -78,7 +87,8 @@ _zfs() {
         return
     fi
     while read -r name size alloc free health frag cap; do
-        local col="$G"; [[ "$health" != "ONLINE" ]] && col="$R"
+        local col="$G"
+        [[ "$health" != "ONLINE" ]] && col="$R"
         printf "  ${W}${name}${N}${M}:${N} ${W}${alloc}${N}${M} alloc ·${N} ${W}${free}${N}${M} free ·${N} ${col}${health}${N}${M} · frag ${frag} · ${cap} used${N}\n"
     done < <(zpool list -H -o name,size,alloc,free,health,frag,cap 2>/dev/null)
     # ARC hit ratio — if arcstats present
@@ -104,7 +114,10 @@ _vms() {
     local shown=0
     while read -r name; do
         [[ -z "$name" ]] && continue
-        ((shown++)) && (( shown > 6 )) && { printf "  ${D}  +$((running - 6)) more${N}\n"; break; }
+        ((shown++)) && ((shown > 6)) && {
+            printf "  ${D}  +$((running - 6)) more${N}\n"
+            break
+        }
         local ip
         ip="$(virsh domifaddr "$name" 2>/dev/null | awk '/ipv4/ {split($4,a,"/"); print a[1]; exit}')"
         [[ -z "$ip" ]] && ip="${D}(no dhcp lease)${N}"
@@ -119,10 +132,10 @@ _events() {
     fi
     local count=0
     while IFS= read -r line; do
-        ((count++)) && (( count > 4 )) && break
+        ((count++)) && ((count > 4)) && break
         printf "  ${Y}%s${N}\n" "$line"
-    done < <(kubectl get events -A --field-selector type=Warning --sort-by=.lastTimestamp --no-headers 2>/dev/null \
-        | awk '{printf "%s %s/%s: %s\n", $1, $2, $5, $7}' | tail -4 | tac)
+    done < <(kubectl get events -A --field-selector type=Warning --sort-by=.lastTimestamp --no-headers 2>/dev/null |
+        awk '{printf "%s %s/%s: %s\n", $1, $2, $5, $7}' | tail -4 | tac)
     [[ "$count" -eq 0 ]] && printf "  ${G}(no warnings in the last 5 minutes)${N}\n"
 }
 

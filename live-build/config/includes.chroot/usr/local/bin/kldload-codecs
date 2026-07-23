@@ -6,11 +6,17 @@
 # Needs internet + root.
 set -eo pipefail
 
-[[ $EUID -eq 0 ]] || { echo "Run as root:  sudo kldload-codecs" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || {
+    echo "Run as root:  sudo kldload-codecs" >&2
+    exit 1
+}
 
 . /etc/os-release 2>/dev/null || true
 EL="${VERSION_ID%%.*}"
-[[ -n "$EL" ]] || { echo "Cannot determine EL version from /etc/os-release" >&2; exit 1; }
+[[ -n "$EL" ]] || {
+    echo "Cannot determine EL version from /etc/os-release" >&2
+    exit 1
+}
 
 cat <<EOF
 This enables RPM Fusion (free + nonfree) on THIS machine and installs full
@@ -18,22 +24,25 @@ codecs. These are third-party, patent-encumbered packages — not part of
 kldload. Continue?
 EOF
 read -rp "[y/N] " ans
-[[ "$ans" == [yY] ]] || { echo "Aborted."; exit 0; }
+[[ "$ans" == [yY] ]] || {
+    echo "Aborted."
+    exit 0
+}
 
 echo "==> Enabling RPM Fusion for EL${EL}..."
 dnf install -y \
-  "https://download1.rpmfusion.org/free/el/rpmfusion-free-release-${EL}.noarch.rpm" \
-  "https://download1.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-${EL}.noarch.rpm"
+    "https://download1.rpmfusion.org/free/el/rpmfusion-free-release-${EL}.noarch.rpm" \
+    "https://download1.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-${EL}.noarch.rpm"
 
 echo "==> Installing codecs (full ffmpeg + GStreamer + VLC)..."
 dnf install -y --allowerasing \
-  ffmpeg ffmpeg-libs \
-  gstreamer1-plugins-ugly gstreamer1-plugins-bad-freeworld gstreamer1-plugin-libav \
-  lame vlc
+    ffmpeg ffmpeg-libs \
+    gstreamer1-plugins-ugly gstreamer1-plugins-bad-freeworld gstreamer1-plugin-libav \
+    lame vlc
 
 echo "==> Verifying H.264/HEVC/AAC decoders..."
 for c in h264 hevc aac; do
-  ffmpeg -hide_banner -decoders 2>/dev/null | grep -q " $c " \
-    && echo "   $c: ok" || echo "   $c: MISSING"
+    ffmpeg -hide_banner -decoders 2>/dev/null | grep -q " $c " &&
+        echo "   $c: ok" || echo "   $c: MISSING"
 done
 echo "Done. Every app (browsers, players, VLC) can now decode common media."

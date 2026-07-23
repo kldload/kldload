@@ -25,8 +25,8 @@ log() { echo "[kldload-headlamp-install] $*" >&2; }
 mkdir -p "${DEST_DIR}"
 
 # Already installed and right version? Short-circuit.
-if [[ -x "${BIN}" ]] && \
-   "${BIN}" --version 2>/dev/null | grep -q "${HEADLAMP_VER}"; then
+if [[ -x "${BIN}" ]] &&
+    "${BIN}" --version 2>/dev/null | grep -q "${HEADLAMP_VER}"; then
     log "Headlamp ${HEADLAMP_VER} already installed at ${BIN}"
     exit 0
 fi
@@ -41,9 +41,12 @@ fi
 # Online fallback — GitHub release. arch-aware (amd64/arm64 only for now).
 arch="$(uname -m)"
 case "${arch}" in
-    x86_64|amd64) arch=amd64 ;;
-    aarch64|arm64) arch=arm64 ;;
-    *) log "unsupported arch: ${arch}"; exit 1 ;;
+x86_64 | amd64) arch=amd64 ;;
+aarch64 | arm64) arch=arm64 ;;
+*)
+    log "unsupported arch: ${arch}"
+    exit 1
+    ;;
 esac
 
 url="https://github.com/headlamp-k8s/headlamp/releases/download/v${HEADLAMP_VER}/headlamp-server-linux-${arch}.tar.gz"
@@ -59,7 +62,10 @@ fi
 tar -xzf "${tmp}/headlamp.tgz" -C "${tmp}"
 # Release tarball structure varies by version; find the server binary.
 src="$(find "${tmp}" -type f -name 'headlamp-server*' -perm -u+x | head -1)"
-[[ -n "${src}" ]] || { log "headlamp-server binary not found in tarball"; exit 1; }
+[[ -n "${src}" ]] || {
+    log "headlamp-server binary not found in tarball"
+    exit 1
+}
 
 install -m 0755 "${src}" "${BIN}"
 log "Headlamp ${HEADLAMP_VER} installed at ${BIN}"

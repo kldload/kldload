@@ -25,20 +25,31 @@ SESSION="${KLDLOAD_TMUX_SESSION:-kldload}"
 WINDOW="inspect"
 SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-          -o LogLevel=ERROR -o ConnectTimeout=5)
+    -o LogLevel=ERROR -o ConnectTimeout=5)
 
-die() { echo "kinspect: $*" >&2; exit 1; }
+die() {
+    echo "kinspect: $*" >&2
+    exit 1
+}
 
 mode="vm"
 case "${1:-}" in
-    --pod) mode="pod"; shift ;;
-    --ip)  mode="ip";  shift ;;
-    -h|--help|"")
-        sed -n 's/^# \{0,1\}//; 1,/^$/p' "$0" | head -30
-        exit 0 ;;
+--pod)
+    mode="pod"
+    shift
+    ;;
+--ip)
+    mode="ip"
+    shift
+    ;;
+-h | --help | "")
+    sed -n 's/^# \{0,1\}//; 1,/^$/p' "$0" | head -30
+    exit 0
+    ;;
 esac
 [[ $# -eq 2 ]] || die "need two ${mode}s (got $#)"
-t1="$1"; t2="$2"
+t1="$1"
+t2="$2"
 
 # ── Resolve to IPs ─────────────────────────────────────────────────────
 resolve_vm_ip() {
@@ -53,14 +64,18 @@ resolve_pod_ip() {
 }
 
 case "$mode" in
-    vm)
-        ip1="$(resolve_vm_ip "$t1")" || true
-        ip2="$(resolve_vm_ip "$t2")" || true ;;
-    pod)
-        ip1="$(resolve_pod_ip "$t1")" || true
-        ip2="$(resolve_pod_ip "$t2")" || true ;;
-    ip)
-        ip1="$t1"; ip2="$t2" ;;
+vm)
+    ip1="$(resolve_vm_ip "$t1")" || true
+    ip2="$(resolve_vm_ip "$t2")" || true
+    ;;
+pod)
+    ip1="$(resolve_pod_ip "$t1")" || true
+    ip2="$(resolve_pod_ip "$t2")" || true
+    ;;
+ip)
+    ip1="$t1"
+    ip2="$t2"
+    ;;
 esac
 [[ -n "$ip1" ]] || die "could not resolve $t1 to an IP"
 [[ -n "$ip2" ]] || die "could not resolve $t2 to an IP"
@@ -113,8 +128,8 @@ tmux new-window -t "$SESSION" -n "$WINDOW"
 #   split-window -h from pane 0 → pane 1 (top-right)
 #   split-window -v from pane 0 → pane 2 (bottom, full-width-ish)
 # Then resize pane 2 to take ~55% vertical so flows are the focal point.
-tmux split-window -h -t "${SESSION}:${WINDOW}"          # pane 1 (top-right)
-tmux split-window -v -t "${SESSION}:${WINDOW}.0"        # pane 2 (bottom-left)
+tmux split-window -h -t "${SESSION}:${WINDOW}"   # pane 1 (top-right)
+tmux split-window -v -t "${SESSION}:${WINDOW}.0" # pane 2 (bottom-left)
 tmux select-layout -t "${SESSION}:${WINDOW}" main-horizontal
 # The main-horizontal layout: one big pane on top, smaller panes below.
 # We want flows BIG and watches small, so swap: promote pane 2 to main.

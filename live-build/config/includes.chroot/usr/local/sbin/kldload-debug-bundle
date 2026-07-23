@@ -51,16 +51,29 @@ if [[ $EUID -ne 0 ]]; then exec sudo -E "$0" "$@"; fi
 OUT_DIR="/root"
 QUIET=0
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --out)    OUT_DIR="$2"; shift 2 ;;
-    --quiet)  QUIET=1; shift ;;
-    -h|--help)
-      sed -n '2,/^set -E/p' "$0" | sed -n 's/^# \{0,1\}//p' | sed '/^set -E/d'
-      exit 0 ;;
-    *) echo "unknown arg: $1" >&2; exit 64 ;;
-  esac
+    case "$1" in
+    --out)
+        OUT_DIR="$2"
+        shift 2
+        ;;
+    --quiet)
+        QUIET=1
+        shift
+        ;;
+    -h | --help)
+        sed -n '2,/^set -E/p' "$0" | sed -n 's/^# \{0,1\}//p' | sed '/^set -E/d'
+        exit 0
+        ;;
+    *)
+        echo "unknown arg: $1" >&2
+        exit 64
+        ;;
+    esac
 done
-[[ -d "$OUT_DIR" ]] || { echo "output dir does not exist: $OUT_DIR" >&2; exit 66; }
+[[ -d "$OUT_DIR" ]] || {
+    echo "output dir does not exist: $OUT_DIR" >&2
+    exit 66
+}
 
 # `||` short-circuits on non-zero exit, but `hostnamectl --static` exits 0
 # with empty output when no static hostname is set, so use ${X:-fallback}
@@ -78,83 +91,84 @@ step() { [[ $QUIET -eq 0 ]] && printf '  %s\n' "$*" >&2; }
 
 # ── manifest of what was captured + when ─────────────────────────────────────
 {
-  echo "kldload-debug-bundle"
-  echo "host:      ${HOST}"
-  echo "captured:  ${TS}"
-  echo "kernel:    $(uname -a)"
-  echo "uptime:    $(uptime -p 2>/dev/null || uptime)"
-  echo "os:       $(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME || true)"
-  echo "kldload:  $(cat /etc/kldload-build-id 2>/dev/null || echo unknown)"
-  echo "tool ver:  $(date -r "$0" -u +%Y-%m-%d 2>/dev/null) (script mtime)"
-} > "$WORK/00-MANIFEST.txt"
+    echo "kldload-debug-bundle"
+    echo "host:      ${HOST}"
+    echo "captured:  ${TS}"
+    echo "kernel:    $(uname -a)"
+    echo "uptime:    $(uptime -p 2>/dev/null || uptime)"
+    echo "os:       $(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME || true)"
+    echo "kldload:  $(cat /etc/kldload-build-id 2>/dev/null || echo unknown)"
+    echo "tool ver:  $(date -r "$0" -u +%Y-%m-%d 2>/dev/null) (script mtime)"
+} >"$WORK/00-MANIFEST.txt"
 
 # ── helper: capture cmd output, never fail the bundle on a missing tool ──────
 cap() {
-  local out="$1"; shift
-  { "$@" 2>&1 || echo "[cap: command failed: $*]"; } > "$WORK/$out"
+    local out="$1"
+    shift
+    { "$@" 2>&1 || echo "[cap: command failed: $*]"; } >"$WORK/$out"
 }
 
 # ── system identity / kldload metadata ───────────────────────────────────────
 step "kldload + system identity"
 mkdir -p "$WORK/etc"
 [[ -d /etc/kldload ]] && cp -a /etc/kldload "$WORK/etc/kldload" || true
-[[ -f /etc/hostid  ]] && xxd /etc/hostid > "$WORK/etc/hostid.hex" || true
+[[ -f /etc/hostid ]] && xxd /etc/hostid >"$WORK/etc/hostid.hex" || true
 [[ -f /proc/cmdline ]] && cp /proc/cmdline "$WORK/proc-cmdline.txt"
 [[ -f /etc/kldload-build-id ]] && cp /etc/kldload-build-id "$WORK/" || true
 [[ -f /etc/kldload-build-sha ]] && cp /etc/kldload-build-sha "$WORK/" || true
 
 # ── hardware ─────────────────────────────────────────────────────────────────
 step "hardware (lspci, lsmod, /proc/{cpuinfo,meminfo})"
-cap lspci-k.txt        lspci -nnk
-cap lsmod.txt          lsmod
-cap dmidecode.txt      dmidecode -t system -t bios -t baseboard
-[[ -f /proc/cpuinfo ]] && head -50 /proc/cpuinfo > "$WORK/cpuinfo.head.txt" || true
+cap lspci-k.txt lspci -nnk
+cap lsmod.txt lsmod
+cap dmidecode.txt dmidecode -t system -t bios -t baseboard
+[[ -f /proc/cpuinfo ]] && head -50 /proc/cpuinfo >"$WORK/cpuinfo.head.txt" || true
 [[ -f /proc/meminfo ]] && cp /proc/meminfo "$WORK/meminfo.txt" || true
-cap lsblk.txt          lsblk -O
+cap lsblk.txt lsblk -O
 
 # ── install logs (the highest-value section) ─────────────────────────────────
 step "install-time logs (/var/log/installer)"
 [[ -d /var/log/installer ]] && cp -a /var/log/installer "$WORK/var-log-installer" || true
-[[ -d /var/log/kldload   ]] && cp -a /var/log/kldload   "$WORK/var-log-kldload"   || true
+[[ -d /var/log/kldload ]] && cp -a /var/log/kldload "$WORK/var-log-kldload" || true
 
 # ── boot + journal ───────────────────────────────────────────────────────────
 step "dmesg + journalctl (current + previous boot)"
-cap dmesg.txt           dmesg -T
-cap journal-b0.txt      journalctl -b   --no-pager
-cap journal-b-1.txt     journalctl -b-1 --no-pager
+cap dmesg.txt dmesg -T
+cap journal-b0.txt journalctl -b --no-pager
+cap journal-b-1.txt journalctl -b-1 --no-pager
 cap systemctl-failed.txt systemctl --failed --no-pager
-cap systemctl-units.txt  systemctl list-units --no-pager --no-legend
+cap systemctl-units.txt systemctl list-units --no-pager --no-legend
 
 # ── Secure Boot / MOK state ──────────────────────────────────────────────────
 step "Secure Boot / MOK / EFI"
-cap mokutil-sb-state.txt        mokutil --sb-state
-cap mokutil-list-enrolled.txt   mokutil --list-enrolled
-cap mokutil-list-new.txt        mokutil --list-new
-cap mokutil-sbat-rev.txt        mokutil --list-sbat-revocations
-cap efibootmgr.txt              efibootmgr -v
+cap mokutil-sb-state.txt mokutil --sb-state
+cap mokutil-list-enrolled.txt mokutil --list-enrolled
+cap mokutil-list-new.txt mokutil --list-new
+cap mokutil-sbat-rev.txt mokutil --list-sbat-revocations
+cap efibootmgr.txt efibootmgr -v
 [[ -d /boot/efi ]] && find /boot/efi -maxdepth 4 -type f -printf '%TY-%Tm-%Td %TH:%TM %s %p\n' \
-                       > "$WORK/efi-tree.txt" 2>/dev/null || true
+    >"$WORK/efi-tree.txt" 2>/dev/null || true
 # Public MOK only — the .key (private) is never copied.
 mkdir -p "$WORK/mok-pub"
 [[ -f /var/lib/dkms/mok.der ]] && cp /var/lib/dkms/mok.der "$WORK/mok-pub/mok.der" || true
 [[ -f /var/lib/dkms/mok.pub ]] && cp /var/lib/dkms/mok.pub "$WORK/mok-pub/mok.pub" || true
-[[ -f /var/lib/dkms/mok.der ]] \
-  && openssl x509 -in /var/lib/dkms/mok.der -inform DER -noout -fingerprint -sha1 -subject -issuer \
-       > "$WORK/mok-pub/mok-fingerprint.txt" 2>&1 || true
+[[ -f /var/lib/dkms/mok.der ]] &&
+    openssl x509 -in /var/lib/dkms/mok.der -inform DER -noout -fingerprint -sha1 -subject -issuer \
+        >"$WORK/mok-pub/mok-fingerprint.txt" 2>&1 || true
 
 # ── ZFS state ────────────────────────────────────────────────────────────────
 step "ZFS pools, datasets, props"
-cap zpool-list.txt      zpool list -v
-cap zpool-status.txt    zpool status -v
-cap zpool-get-all.txt   zpool get all
-cap zfs-list.txt        zfs list -t all -o name,used,avail,refer,mountpoint,canmount,mounted
-cap zfs-get-all.txt     zfs get all
+cap zpool-list.txt zpool list -v
+cap zpool-status.txt zpool status -v
+cap zpool-get-all.txt zpool get all
+cap zfs-list.txt zfs list -t all -o name,used,avail,refer,mountpoint,canmount,mounted
+cap zfs-get-all.txt zfs get all
 
 # ── DKMS state ───────────────────────────────────────────────────────────────
 step "DKMS modules"
-cap dkms-status.txt     dkms status
+cap dkms-status.txt dkms status
 [[ -d /var/lib/dkms ]] && find /var/lib/dkms -maxdepth 3 -type d -printf '%p\n' \
-                            > "$WORK/dkms-tree.txt" 2>/dev/null || true
+    >"$WORK/dkms-tree.txt" 2>/dev/null || true
 # Capture make.log for any failed build (preserves diagnostic info that
 # `dkms remove` would otherwise blow away — see bootstrap.sh comment).
 mkdir -p "$WORK/dkms-make-logs"
@@ -166,28 +180,28 @@ find /var/lib/dkms -name make.log -size +0 -exec sh -c '
 step "modprobe + xorg config (nouveau-blacklist class of bugs)"
 mkdir -p "$WORK/modprobe.d-merged"
 for d in /usr/lib/modprobe.d /etc/modprobe.d /run/modprobe.d; do
-  [[ -d "$d" ]] && cp -a "$d" "$WORK/modprobe.d-merged/$(basename "$d")" || true
+    [[ -d "$d" ]] && cp -a "$d" "$WORK/modprobe.d-merged/$(basename "$d")" || true
 done
 mkdir -p "$WORK/xorg-conf.d"
-[[ -d /etc/X11/xorg.conf.d      ]] && cp -a /etc/X11/xorg.conf.d      "$WORK/xorg-conf.d/etc" || true
+[[ -d /etc/X11/xorg.conf.d ]] && cp -a /etc/X11/xorg.conf.d "$WORK/xorg-conf.d/etc" || true
 [[ -d /usr/share/X11/xorg.conf.d ]] && cp -a /usr/share/X11/xorg.conf.d "$WORK/xorg-conf.d/usr-share" || true
-[[ -f /etc/X11/xorg.conf        ]] && cp /etc/X11/xorg.conf "$WORK/xorg.conf" || true
+[[ -f /etc/X11/xorg.conf ]] && cp /etc/X11/xorg.conf "$WORK/xorg.conf" || true
 
 # ── network state (no secrets) ───────────────────────────────────────────────
 step "network state"
-cap ip-addr.txt         ip -d addr
-cap ip-route.txt        ip -d route
-cap resolvectl.txt      resolvectl status
-cap nm-status.txt       nmcli -t
+cap ip-addr.txt ip -d addr
+cap ip-route.txt ip -d route
+cap resolvectl.txt resolvectl status
+cap nm-status.txt nmcli -t
 
 # ── installer answers (with password redacted) ───────────────────────────────
 step "installer answers (passwords redacted)"
 for f in /etc/kldload/install-manifest.env \
-         /var/log/installer/effective-config.env \
-         /tmp/answers.env; do
-  [[ -f "$f" ]] || continue
-  sed -E 's/(KLDLOAD_PASSWORD)=.*/\1=<redacted>/; s/(KLDLOAD_LUKS_PASSPHRASE)=.*/\1=<redacted>/' \
-    "$f" > "$WORK/answers-$(basename "$f")"
+    /var/log/installer/effective-config.env \
+    /tmp/answers.env; do
+    [[ -f "$f" ]] || continue
+    sed -E 's/(KLDLOAD_PASSWORD)=.*/\1=<redacted>/; s/(KLDLOAD_LUKS_PASSPHRASE)=.*/\1=<redacted>/' \
+        "$f" >"$WORK/answers-$(basename "$f")"
 done
 
 # ── bundle it ────────────────────────────────────────────────────────────────
