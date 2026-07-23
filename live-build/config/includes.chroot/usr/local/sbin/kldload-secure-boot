@@ -139,6 +139,20 @@ _resign_zbm() {
         /boot/efi/EFI/BOOT/BOOTX64.EFI \
         /boot/efi/EFI/kldload/BOOTX64.EFI; do
         [[ -f "${target}" ]] || continue
+        # Strip ALL existing signatures first — sbsign appends rather than
+        # replaces, so every repeated `kldload-secure-boot enable` run was
+        # stacking another signature onto the same PE. Multi-signature
+        # binaries are the exact shim-rejection hazard the installer's
+        # staged-kernel path documents (lib/bootloader.sh sbattach block):
+        # some shim versions only check the first signature. One --remove
+        # strips one signature, so loop until none remain (capped — a PE
+        # never legitimately carries more than a handful).
+        if command -v sbattach >/dev/null 2>&1; then
+            local _strip
+            for _strip in 1 2 3 4 5 6 7 8; do
+                sbattach --remove "${target}" >/dev/null 2>&1 || break
+            done
+        fi
         signed="${target}.signed"
         if sbsign --key "${CA_KEY}" --cert "${CA}" --output "${signed}" "${target}" 2>/dev/null; then
             mv "${signed}" "${target}"
