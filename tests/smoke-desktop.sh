@@ -68,14 +68,13 @@ fi
 
 test_output_contains "Graphical target" "systemctl get-default" "graphical"
 
-# ── Firefox ──────────────────────────────────────────────────────────────────
-_section "Firefox"
+# ── Browser ──────────────────────────────────────────────────────────────────
+# Installed targets ship Chrome (webui app windows, Web Speech API for Bob);
+# firefox is LIVE-ISO-only by design — the old firefox assertion here failed
+# every correctly-built desktop install.
+_section "Browser"
 
-if [[ "$DISTRO" == "deb" ]]; then
-    test_cmd "firefox-esr" "firefox-esr"
-else
-    test_cmd "firefox" "firefox"
-fi
+test_cmd "google-chrome" "google-chrome-stable"
 
 # ── Desktop Theme / Config ───────────────────────────────────────────────────
 _section "Desktop Configuration"
