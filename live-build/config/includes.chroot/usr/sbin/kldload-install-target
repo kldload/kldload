@@ -2180,7 +2180,7 @@ main() {
     # Target mount point — needed for MOK enrollment, log copy, and smoke test
     local target="${KLDLOAD_TARGET_MNT:-/target}"
 
-    # ── MOK enrollment for Secure Boot (opt-in only) ─────────────────────────
+    # ── MOK enrollment for Secure Boot (default-on; env/webui can disable) ──
     # Run mokutil from the LIVE environment (not chroot) — the live ISO has
     # mokutil and access to EFI vars. The target's mokutil may not be installed
     # yet but that doesn't matter — MOK enrollment is an EFI firmware operation
@@ -2199,10 +2199,17 @@ main() {
             if mokutil --test-key "${target}/var/lib/dkms/mok.der" 2>/dev/null | grep -qi 'already enrolled'; then
                 _ok "MOK enrollment" "key already enrolled — Secure Boot ready"
             else
-                printf '%s\n%s\n' "${_mok_pass}" "${_mok_pass}" |
-                    mokutil --ignore-keyring --import "${target}/var/lib/dkms/mok.der" 2>/dev/null &&
-                    _ok "MOK enrollment" "queued — on first boot select: Enroll MOK → password: kldload" ||
-                    _ok "MOK enrollment" "skipped (mokutil failed — enroll manually after boot)"
+                if printf '%s\n%s\n' "${_mok_pass}" "${_mok_pass}" |
+                    mokutil --ignore-keyring --import "${target}/var/lib/dkms/mok.der" 2>/dev/null; then
+                    _ok "MOK enrollment" "queued — on first boot select: Enroll MOK → password: kldload"
+                else
+                    # A failure here is NOT a green check: with Secure Boot on
+                    # and no MOK enrolled, the signed-module chain is dead and
+                    # the box can refuse to load zfs.ko. The firstboot
+                    # kldload-mok-enroll.service (below) and the firstboot MOK
+                    # self-heal both retry, but the operator must see this.
+                    _warn "MOK enrollment FAILED (mokutil import) — firstboot will retry; if Secure Boot is ON and boot fails, disable SB or run: mokutil --import /var/lib/dkms/mok.der"
+                fi
             fi
 
             mkdir -p "${target}/root/kldload-install-logs"
