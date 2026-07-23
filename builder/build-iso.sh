@@ -313,7 +313,11 @@ KOJI_KERNEL_URLS=()
 # repo's 6.19 one — which drags a SECOND kernel-core/devel into the
 # transaction (kernels are installonly, so dnf stacks both; verified
 # 2026-07-23).
-for _ksub in kernel kernel-core kernel-modules kernel-modules-core kernel-devel kernel-devel-matched; do
+# kernel-modules-extra included: it wasn't pinned in the first 7.0.14 build,
+# so the resolver pulled the repo's 6.19.10 one — mixed-NVR modules-extra on
+# a 7.0.14 kernel (uncommon drivers missing) — caught on the smoke VM's
+# versionlock list 2026-07-23.
+for _ksub in kernel kernel-core kernel-modules kernel-modules-core kernel-modules-extra kernel-devel kernel-devel-matched; do
     KOJI_KERNEL_URLS+=("${KOJI_KERNEL_BASE}/${_ksub}-${KOJI_KERNEL_NVR}.${ARCH}.rpm")
 done
 
