@@ -440,7 +440,7 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     # now" pane; without psi=1 the pane falls back to vmstat. Detected
     # 2026-05-27 on a RHEL 10 kernel (6.12.0-211.16.1.el10_2.x86_64) that
     # ships PSI built in but boot-disabled.
-    zfs set org.zfsbootmenu:commandline="rw console=tty1 console=ttyS0,115200 psi=1" rpool/ROOT
+    zfs set org.zfsbootmenu:commandline="rw console=tty1 console=ttyS0,115200 psi=1 selinux=0" rpool/ROOT
 
     # Data datasets
     zfs create -o mountpoint=/root rpool/root
