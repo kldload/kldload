@@ -490,7 +490,7 @@ EOFSTAB
         # SB-on installs keep the re-sign because some distros (notably Rocky 9
         # under a CentOS-built shim whose vendor_cert doesn't chain to Rocky's CA)
         # still need it for the direct-kernel grub entry to verify.
-        if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]] &&
+        if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] &&
             [[ -f "$_mok_key" && -f "$_mok_pub" ]] &&
             command -v sbsign >/dev/null 2>&1; then
             local _signed="${zbm_fallback_dir}/vmlinuz.signed"
@@ -521,7 +521,7 @@ EOFSTAB
                 rm -f "$_signed" 2>/dev/null
                 k_log "WARNING: sbsign failed for /EFI/BOOT/vmlinuz — SB direct-boot will fail until manually signed"
             fi
-        elif [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" != "1" ]]; then
+        elif [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" != "1" ]]; then
             k_log "Kernel re-sign skipped — SB off (ZBM is the default boot target; staged kernel kept with distro-signed vmlinuz for direct-boot fallback)"
         else
             k_log "INFO: skipping kernel re-sign (no MOK key at ${_mok_key} or sbsign missing) — SB direct-boot will need distro-signed kernel + matching shim vendor cert"
@@ -567,17 +567,33 @@ EOFSTAB
     #
     # timeout=0 + timeout_style=hidden = silent boot to default. ESC during
     # boot interrupts and exposes the full menu (ZBM + direct + rescue).
+    # With SB now default-ON (2026-07-22), keying `direct` off the intent flag
+    # alone would hide ZBM from EVERY install — the exact 1.0.5→1.1.0 "ZBM has
+    # been gone for a week" regression documented above. Only firmware-ACTIVE
+    # Secure Boot forces the signed direct chain (shim rejects ZBM's
+    # chainload, SBAT gap); SB-off firmware keeps the ZBM boot-env UX while
+    # MOK enrollment + module signing still arm the box for a later SB flip.
+    # mokutil ships on the live ISO (used for the SB preflight above); if it
+    # is somehow absent the grep fails and we stay on zbm — the right default
+    # for the non-SB majority.
     local _grub_default="zbm"
-    [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]] && _grub_default="direct"
+    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] &&
+        mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
+        _grub_default="direct"
+    fi
     local _grub_cfg=""
     read -r -d '' _grub_cfg <<GRUBCFG || true
 # kldload — auto-generated at install time
-# default boot target depends on Secure Boot intent at install time:
-#   SB off → zbm (boot-env picker, the kldload UX)
-#   SB on  → direct (signed chain — ZBM cannot chainload under shim 15.8)
+# default boot target depends on FIRMWARE Secure Boot state at install time:
+#   SB inactive → zbm (boot-env picker, the kldload UX)
+#   SB active   → direct (signed chain — ZBM cannot chainload under shim 15.8)
+# fallback=direct: if the zbm entry fails (e.g. the operator enables SB in
+# firmware AFTER install, and shim then rejects ZBM's chainload), GRUB falls
+# through to the signed direct entry instead of stalling at a hidden menu.
 set timeout=0
 set timeout_style=hidden
 set default=${_grub_default}
+set fallback=direct
 
 menuentry "kldload — ZFS Boot Menu (boot environments + snapshot rollback)" --id=zbm {
     chainloader /EFI/zbm/BOOTX64.EFI

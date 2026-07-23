@@ -994,7 +994,7 @@ html.kld-app #term-drawer{display:none!important;}
           <div class="panel-hdr">⚙ Platform Options</div>
           <div class="panel-body">
             <div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
-              ZFS, WireGuard, and eBPF are included on all profiles (except Core). Toggle NVIDIA if you have a GPU. Secure Boot is <strong>off</strong> by default — enable only if your firmware can enroll MOK. Web ops console is <strong>off</strong> on server/workstation by default — enable to use the dashboard as an in-place toolkit (Doctor / VM / K8s / Install). Lab profiles (kvm / ai / zfslab / klab) always auto-start it.
+              ZFS, WireGuard, and eBPF are included on all profiles (except Core). Toggle NVIDIA if you have a GPU. Secure Boot is <strong>on</strong> by default (MOK enrollment on first boot, password <code>kldload</code>) — disable it only if your firmware can't enroll MOK. Web ops console is <strong>off</strong> on server/workstation by default — enable to use the dashboard as an in-place toolkit (Doctor / VM / K8s / Install). Lab profiles (kvm / ai / zfslab / klab) always auto-start it.
               <br><strong style="color:#c9a04a">⚠ KVM, Kubernetes, and the lab profiles run real VMs through KVM &mdash; they need CPU virtualization (Intel VT-x / AMD-V): bare metal, or a guest with <em>nested virtualization</em> enabled on the host. Without it QEMU falls back to TCG software emulation and VMs are unusably slow. A plain workstation / server or Core (no KVM) runs fine virtualized.</strong>
             </div>
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.5rem;margin-bottom:0.8rem;max-width:760px">
@@ -1002,14 +1002,17 @@ html.kld-app #term-drawer{display:none!important;}
                 <div style="font-size:1.5rem;margin-bottom:0.3rem">🎮</div>
                 <div style="font-size:0.8rem;font-weight:600;color:var(--text)">NVIDIA GPU</div>
               </div>
-              <!-- Secure Boot default = OFF as of 1.1.0 polish pass.
-                   Reason: SB end-to-end on F44 + shim 15.8 is gated by an
-                   upstream ZBM SBAT gap (no `shim,X` SBAT entry, shim
-                   rejects chainload regardless of MOK enrollment — see
-                   project_sb_roadmap.md). With SB off, ZBM becomes the
-                   default boot target (firmware-time snapshot rollback +
-                   boot-env picker) — the kldload customer feature.
-                   Operators who want SB can opt in by clicking this card. -->
+              <!-- Secure Boot default = ON again as of 2026-07-22.
+                   The 1.1.0 reason for OFF (ZBM SBAT gap: shim 15.8 rejects
+                   ZBM chainload regardless of MOK) is now handled in the
+                   installer instead of by disabling SB: the GRUB default is
+                   FIRMWARE-SB-aware (lib/bootloader.sh) — SB-active firmware
+                   boots the signed direct chain, SB-inactive firmware keeps
+                   ZBM as default while MOK enrollment + module signing still
+                   arm the box for a later SB flip (grub fallback=direct
+                   covers that flip). Uncheck for firmware that can't enroll
+                   MOK or throwaway test installs. -->
+
               <div class="opt-card" id="opt-secure-boot" onclick="toggleOpt('secure-boot')" title="kldload CA → MOK → signed ZFS kmod + ZBM" style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
                 <div style="font-size:1.5rem;margin-bottom:0.3rem">🔒</div>
                 <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Secure Boot</div>
@@ -1071,7 +1074,7 @@ html.kld-app #term-drawer{display:none!important;}
             <input type="checkbox" id="install-zfs-dedup" style="display:none">
             <input type="checkbox" id="install-k8s" style="display:none">
             <input type="checkbox" id="install-k8s-bootstrap" style="display:none">
-            <input type="checkbox" id="install-secure-boot" style="display:none">
+            <input type="checkbox" id="install-secure-boot" style="display:none" checked>
             <input type="checkbox" id="install-webui" style="display:none">
             <!-- Export format -->
             <div style="margin-top:0.8rem;padding-top:0.8rem;border-top:1px solid var(--border)">
