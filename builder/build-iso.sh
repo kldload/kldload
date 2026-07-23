@@ -335,13 +335,23 @@ if [[ -n "${KLDLOAD_ZFS_GIT:-}" && "${KLDLOAD_ZFS_GIT}" != "0" ]]; then
     _zfs_ref="${KLDLOAD_ZFS_GIT}"
     [[ "$_zfs_ref" == "1" ]] && _zfs_ref="master"
     log "ZFS-FROM-GIT: building OpenZFS rpms from ref '${_zfs_ref}' (UNSUPPORTED test build; kernel unpinned)"
-    dnf -y install git rpm-build 2>&1 | tail -2
-    # builddep from the release package's spec — close enough for master
-    dnf -y builddep zfs 2>&1 | tail -3 || die "dnf builddep zfs failed"
-    git clone --depth 1 --branch "${_zfs_ref}" https://github.com/openzfs/zfs.git /tmp/zfs-git ||
+    # Explicit build-dep list (the documented OpenZFS Fedora set), NOT
+    # `dnf builddep zfs`: Fedora's repos don't carry zfs at all and this
+    # mode deliberately skips the zfsonlinux repo, so builddep has nothing
+    # to resolve from — it died here invisibly on the first attempt
+    # (2026-07-23; container stdout was lost, hence the tee below).
+    dnf -y install \
+        git rpm-build kernel-rpm-macros gcc make autoconf automake libtool \
+        libtirpc-devel libblkid-devel libuuid-devel systemd-devel \
+        openssl-devel zlib-ng-compat-devel libaio-devel libattr-devel \
+        elfutils-libelf-devel python3-devel python3-setuptools python3-cffi \
+        libffi-devel ncompress libcurl-devel 2>&1 | tail -3 | tee -a "$LOG_FILE"
+    rpm -q rpm-build gcc libtool >/dev/null 2>&1 ||
+        die "ZFS-FROM-GIT: build toolchain install failed — see $LOG_FILE"
+    git clone --depth 1 --branch "${_zfs_ref}" https://github.com/openzfs/zfs.git /tmp/zfs-git 2>&1 | tee -a "$LOG_FILE" ||
         die "git clone of openzfs ref '${_zfs_ref}' failed (branch/tag only, not a SHA)"
-    (cd /tmp/zfs-git && ./autogen.sh && ./configure && make -j"$(nproc)" rpm-utils rpm-dkms) ||
-        die "zfs from-git rpm build failed — see output above"
+    (cd /tmp/zfs-git && ./autogen.sh && ./configure && make -j"$(nproc)" rpm-utils rpm-dkms) >>"$LOG_FILE" 2>&1 ||
+        die "zfs from-git rpm build failed — tail $LOG_FILE"
     mapfile -t ZFS_GIT_RPMS < <(find /tmp/zfs-git -maxdepth 1 -name '*.rpm' \
         ! -name '*.src.rpm' ! -name '*debug*')
     ((${#ZFS_GIT_RPMS[@]})) || die "zfs from-git build produced no installable rpms"

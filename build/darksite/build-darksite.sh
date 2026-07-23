@@ -91,9 +91,12 @@ log "Downloading RPMs to ${REPO_DIR}..."
 # ("Unsupported architecture") — the whole download died and the WARNING
 # below made an EMPTY darksite look like a partial one (0 RPMs, found
 # 2026-07-23). Pass --arch twice, same fix as build-darksite-fedora.sh.
+# NB: no --skip-broken — dnf5's `download` rejects it as an unknown argument
+# (exits before downloading anything; second dnf5 incompatibility found here
+# 2026-07-23, after the --arch comma syntax). Unresolvable packages fail the
+# pipeline and are caught by the || WARNING below.
 dnf download --resolve --alldeps --destdir "${REPO_DIR}" \
     --releasever "${RELEASE}" --arch "${ARCH}" --arch noarch \
-    --skip-broken \
     "${PKGS_FINAL[@]}" 2>&1 | tail -10 || log "WARNING: some packages could not be downloaded"
 
 log "Creating repo metadata..."
