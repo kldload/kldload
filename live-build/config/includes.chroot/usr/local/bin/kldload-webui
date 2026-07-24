@@ -3762,6 +3762,19 @@ async def _list_vms(websocket):
                         break
             except Exception:
                 pass
+            # disk usage — for zvol-backed VMs (the default) report the ACTUAL
+            # ZFS space consumed (thin + compressed), so the overview shows real
+            # consumption instead of only the backing type. rpool/vms/<name> is
+            # the zvol convention (kvm-create / kexport). Cheap: one zfs get.
+            disk_used = ""
+            if disk == "zvol":
+                try:
+                    disk_used = subprocess.check_output(
+                        ["zfs", "get", "-H", "-o", "value", "used",
+                         f"rpool/vms/{name}"], text=True,
+                        stderr=subprocess.DEVNULL).strip()
+                except Exception:
+                    disk_used = ""
             # IP discovery (running VMs only) — agent → arp → lease cascade.
             # ARP is the universal fallback that covers VMs without QGA
             # (Debian/Ubuntu cloud images don't install it by default). Lease
@@ -3874,7 +3887,7 @@ async def _list_vms(websocket):
                         _exp_mark.unlink()
                     except Exception:
                         pass
-            vms.append({"name": name, "state": state, "vcpus": vcpus, "ram": ram, "disk": disk, "ip": ip, "ready": ready, "building": building})
+            vms.append({"name": name, "state": state, "vcpus": vcpus, "ram": ram, "disk": disk, "disk_used": disk_used, "ip": ip, "ready": ready, "building": building})
     except Exception as e:
         LOG.warning("virsh list failed: %s", e)
     await websocket.send(json.dumps({"type": "vm_list", "vms": vms}))
