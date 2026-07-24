@@ -90,7 +90,11 @@ case "$COMMAND" in
 list)
     echo "Boot environments (rpool/ROOT):"
     echo "---"
-    zfs list -r -t filesystem -o name,creation,used rpool/ROOT 2>/dev/null ||
+    # -t filesystem,snapshot, NOT just filesystem: `kbe create` makes a boot
+    # environment as a SNAPSHOT of the active root (rpool/ROOT/<host>@<name>),
+    # so listing filesystems alone hid every BE the operator created — created
+    # BEs never appeared in `kbe list` (verified on hardware 2026-07-24).
+    zfs list -r -t filesystem,snapshot -o name,creation,used rpool/ROOT 2>/dev/null ||
         echo "(no boot environments found)"
 
     echo ""

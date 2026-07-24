@@ -224,11 +224,14 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# bootenv_list — list all boot environments (datasets under rpool/ROOT)
+# bootenv_list — list all boot environments under rpool/ROOT.
+# Includes SNAPSHOTS, not just filesystems: bootenv_create makes a BE as a
+# snapshot (rpool/ROOT/<host>@<name>), so a filesystem-only listing hid every
+# created BE (kbe create/list mismatch, verified on hardware 2026-07-24).
 # ---------------------------------------------------------------------------
 
 bootenv_list() {
-    zfs list -H -r -t filesystem rpool/ROOT 2>/dev/null |
+    zfs list -H -r -t filesystem,snapshot rpool/ROOT 2>/dev/null |
         awk 'NR>0 {print $1}' || true
 }
 
