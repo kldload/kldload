@@ -567,20 +567,20 @@ EOFSTAB
     #
     # timeout=0 + timeout_style=hidden = silent boot to default. ESC during
     # boot interrupts and exposes the full menu (ZBM + direct + rescue).
-    # With SB now default-ON (2026-07-22), keying `direct` off the intent flag
-    # alone would hide ZBM from EVERY install — the exact 1.0.5→1.1.0 "ZBM has
-    # been gone for a week" regression documented above. Only firmware-ACTIVE
-    # Secure Boot forces the signed direct chain (shim rejects ZBM's
-    # chainload, SBAT gap); SB-off firmware keeps the ZBM boot-env UX while
-    # MOK enrollment + module signing still arm the box for a later SB flip.
-    # mokutil ships on the live ISO (used for the SB preflight above); if it
-    # is somehow absent the grep fails and we stay on zbm — the right default
-    # for the non-SB majority.
+    # The default keys on the operator's Secure Boot INTENT, never on the
+    # firmware SB state at install time. The install-then-enable-SB flow
+    # (install with SB intent, then enable SB + enroll MOK in firmware
+    # afterward) means firmware SB is commonly OFF during install — so a
+    # `mokutil --sb-state` check here baked `default=zbm` and then FAILED
+    # under SB: ZBM cannot load a kernel under Secure Boot (SBAT gap), and
+    # `fallback=direct` can't rescue it because the ZBM *chainload succeeds*
+    # (the failure is inside ZBM, after grub handed off). Confirmed on
+    # hardware 2026-07-24. `direct` (shim → distro-signed grub → MOK-signed
+    # kernel) boots under SB AND without it, so it is the correct default
+    # whenever SB is intended; ZBM stays reachable with ESC. SB-off installs
+    # (intent=0) keep ZBM as the default boot-env picker.
     local _grub_default="zbm"
-    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] &&
-        mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
-        _grub_default="direct"
-    fi
+    [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] && _grub_default="direct"
     local _grub_cfg=""
     read -r -d '' _grub_cfg <<GRUBCFG || true
 # kldload — auto-generated at install time
