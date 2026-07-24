@@ -356,6 +356,32 @@ cmd_trust_install() {
         install -m 0644 "${ROOT_CRT}" /etc/pki/ca-trust/source/anchors/kldload-ca.crt
         update-ca-trust extract ||
             die "update-ca-trust extract failed — host trust bundle is OUT OF SYNC with the anchors dir."
+
+        # Ensure the COMPAT SYMLINKS exist. `update-ca-trust extract`
+        # regenerates the consolidated bundle at
+        # /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem but does NOT create
+        # the legacy paths curl / openssl / the NVIDIA repo / most non-p11-kit
+        # tooling actually read: /etc/pki/tls/certs/ca-bundle.crt and
+        # /etc/pki/tls/cert.pem. Those are shipped by the ca-certificates RPM,
+        # and a `dnf --installroot` bootstrap can land the package without its
+        # symlinks (scriptlet runs in a chroot without a live trust setup) —
+        # leaving the extracted bundle present but the read paths ABSENT, so
+        # every external HTTPS fetch fails "No such file" cert verification
+        # while the trust store is actually fine. Seen on hardware
+        # 2026-07-24 (10.100.10.108): NVIDIA container-toolkit repo + the
+        # TLS-cert service both died on the missing ca-bundle.crt. `-e` is
+        # false on a dangling link too, so this also repairs a broken symlink.
+        local _ext=/etc/pki/ca-trust/extracted
+        if [[ -f "${_ext}/pem/tls-ca-bundle.pem" ]]; then
+            [[ -e /etc/pki/tls/certs/ca-bundle.crt ]] ||
+                ln -sf "${_ext}/pem/tls-ca-bundle.pem" /etc/pki/tls/certs/ca-bundle.crt
+            [[ -e /etc/pki/tls/cert.pem ]] ||
+                ln -sf "${_ext}/pem/tls-ca-bundle.pem" /etc/pki/tls/cert.pem
+            if [[ -f "${_ext}/openssl/ca-bundle.trust.crt" && ! -e /etc/pki/tls/certs/ca-bundle.trust.crt ]]; then
+                ln -sf "${_ext}/openssl/ca-bundle.trust.crt" /etc/pki/tls/certs/ca-bundle.trust.crt
+            fi
+        fi
+
         installed=1
         log "installed into /etc/pki/ca-trust (RH/CentOS/Fedora/Rocky)"
     fi
