@@ -12,6 +12,17 @@ CILIUM_VERSION="${CILIUM_VERSION:-1.16.5}"
 METALLB_VERSION="${METALLB_VERSION:-0.14.9}"
 METALLB_POOL="${METALLB_POOL:-}" # auto-detect from node subnet if empty
 
+# ── HA control-plane VIP (kube-vip) ──────────────────────────────────────────
+# When KUBE_VIP_ADDRESS is set, the cluster is built HA-READY: kubeadm init uses
+# --control-plane-endpoint=<VIP>:6443 (so additional control planes can join
+# later) and a kube-vip static pod advertises the VIP in ARP/L2 mode. When it is
+# empty, kube-init keeps the current single-control-plane behavior unchanged.
+# The VIP must be a FREE address on the interface's L2 segment (the orchestrator
+# picks it — kube-cluster; standalone callers set it explicitly).
+KUBE_VIP_ADDRESS="${KUBE_VIP_ADDRESS:-}"
+KUBE_VIP_INTERFACE="${KUBE_VIP_INTERFACE:-}"   # empty = auto-detect the default-route iface
+KUBE_VIP_VERSION="${KUBE_VIP_VERSION:-v0.8.9}" # pinned; image mirrored in the k8s darksite
+
 log() { echo -e "\033[1;32m[kube-init]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[kube-init]\033[0m $*" >&2; }
 die() {
@@ -56,6 +67,57 @@ snapshot_before_init() {
     fi
 }
 
+# ── kube-vip static pod (HA control-plane VIP) ───────────────────────────────
+# Generates the kube-vip static Pod manifest BEFORE `kubeadm init`, so kubelet
+# brings the VIP up alongside the API server and init's wait-control-plane can
+# reach the API through the VIP. ARP/L2 mode, leader-elected (the VIP floats to
+# whichever control plane holds the lease). No-op unless KUBE_VIP_ADDRESS is set.
+#
+# k8s ≥1.29 trap: `admin.conf` does not exist until init COMPLETES, but the
+# generated manifest references it — so kube-vip can't authenticate during init
+# and `kubeadm init` hangs at wait-control-plane. Workaround (per kube-vip docs):
+# point the manifest at `super-admin.conf` (kubeadm writes it earlier) for the
+# first init, then switch it back to `admin.conf` once init succeeds.
+setup_kube_vip() {
+    [[ -n "$KUBE_VIP_ADDRESS" ]] || return 0
+    local iface="$KUBE_VIP_INTERFACE"
+    if [[ -z "$iface" ]]; then
+        iface="$(ip route get 1.1.1.1 2>/dev/null |
+            awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')" || true
+    fi
+    [[ -n "$iface" ]] || die "kube-vip: could not determine an interface (set KUBE_VIP_INTERFACE)"
+    log "kube-vip: advertising API VIP ${KUBE_VIP_ADDRESS} on ${iface} (ARP/L2, leader-elected)"
+
+    mkdir -p /etc/kubernetes/manifests
+    # containerd (this node's runtime) — pull + run the pinned image to emit the
+    # static Pod manifest. Prefer the mirrored offline image if present.
+    ctr -n k8s.io image pull "ghcr.io/kube-vip/kube-vip:${KUBE_VIP_VERSION}" >/dev/null 2>&1 ||
+        warn "kube-vip: image pull failed (need it mirrored in the k8s darksite for offline)"
+    ctr -n k8s.io run --rm --net-host "ghcr.io/kube-vip/kube-vip:${KUBE_VIP_VERSION}" \
+        kv-manifest /kube-vip manifest pod \
+        --interface "$iface" \
+        --address "$KUBE_VIP_ADDRESS" \
+        --controlplane \
+        --services \
+        --arp \
+        --leaderElection \
+        >/etc/kubernetes/manifests/kube-vip.yaml ||
+        die "kube-vip: manifest generation failed"
+    [[ -s /etc/kubernetes/manifests/kube-vip.yaml ]] ||
+        die "kube-vip: generated manifest is empty"
+    # First-init auth: use super-admin.conf until init writes admin.conf.
+    sed -i 's#/etc/kubernetes/admin.conf#/etc/kubernetes/super-admin.conf#g' \
+        /etc/kubernetes/manifests/kube-vip.yaml
+}
+
+# Post-init: repoint kube-vip back at admin.conf now that init has created it.
+finalize_kube_vip() {
+    [[ -n "$KUBE_VIP_ADDRESS" && -f /etc/kubernetes/manifests/kube-vip.yaml ]] || return 0
+    sed -i 's#/etc/kubernetes/super-admin.conf#/etc/kubernetes/admin.conf#g' \
+        /etc/kubernetes/manifests/kube-vip.yaml
+    log "kube-vip: switched to admin.conf (VIP ${KUBE_VIP_ADDRESS} is the cluster endpoint)"
+}
+
 # ── kubeadm init ───────────────────────────────────────────────────────────
 run_kubeadm_init() {
     local node_ip
@@ -63,6 +125,7 @@ run_kubeadm_init() {
     log "Initializing control plane on $node_ip"
     log "  Pod CIDR:     $POD_CIDR"
     log "  Service CIDR: $SVC_CIDR"
+    [[ -n "$KUBE_VIP_ADDRESS" ]] && log "  API endpoint: ${KUBE_VIP_ADDRESS}:6443 (HA VIP)"
 
     # Load pre-pulled images from darksite if available (offline install)
     if [[ -d /root/darksite/k8s-images ]]; then
@@ -77,15 +140,28 @@ run_kubeadm_init() {
     local wg_ip
     wg_ip="$(ip -4 addr show wg-k8s 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)" || true
     [[ -n "$wg_ip" && "$wg_ip" != "10.251.0.1" ]] && extra_sans="${extra_sans},${wg_ip}"
+    # The VIP must be a SAN too, or kubectl/joins against the endpoint fail TLS.
+    [[ -n "$KUBE_VIP_ADDRESS" ]] && extra_sans="${extra_sans},${KUBE_VIP_ADDRESS}"
+
+    # HA-ready: --control-plane-endpoint makes the VIP (not one node's IP) the
+    # cluster's stable front end, so additional control planes can join later.
+    local cp_endpoint_arg=()
+    if [[ -n "$KUBE_VIP_ADDRESS" ]]; then
+        cp_endpoint_arg=(--control-plane-endpoint="${KUBE_VIP_ADDRESS}:6443")
+        setup_kube_vip
+    fi
 
     kubeadm init \
         --pod-network-cidr="$POD_CIDR" \
         --service-cidr="$SVC_CIDR" \
         --apiserver-advertise-address="$node_ip" \
         --apiserver-cert-extra-sans="${extra_sans}" \
+        "${cp_endpoint_arg[@]}" \
         --skip-phases=addon/kube-proxy \
         --upload-certs \
         2>&1 | tee /var/log/kubeadm-init.log
+
+    finalize_kube_vip
 
     # Set up kubeconfig for root and admin user
     mkdir -p /root/.kube
@@ -131,11 +207,15 @@ install_cilium() {
         _mtu=1450 # No WireGuard — standard VXLAN MTU
     fi
 
+    # Cilium (kube-proxy replacement) must reach the API at the cluster's stable
+    # endpoint. On an HA cluster that's the VIP, so a failed control plane doesn't
+    # take Cilium's API path down with it; otherwise the single node's IP.
+    local _cilium_api="${KUBE_VIP_ADDRESS:-$(detect_node_ip)}"
     helm install cilium "$chart_source" \
         --version "${CILIUM_VERSION}" \
         --namespace kube-system \
         --set kubeProxyReplacement=true \
-        --set k8sServiceHost="$(detect_node_ip)" \
+        --set k8sServiceHost="${_cilium_api}" \
         --set k8sServicePort=6443 \
         --set ipam.operator.clusterPoolIPv4PodCIDRList="${POD_CIDR}" \
         --set MTU="${_mtu}" \
