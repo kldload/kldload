@@ -2351,6 +2351,10 @@ async def ws_handler(websocket):
                     await _k8s_deployments(websocket, msg)
                 elif action == "k8s_services":
                     await _k8s_services(websocket, msg)
+                elif action == "k8s_netpol":
+                    await _k8s_netpol(websocket, msg)
+                elif action == "k8s_ingress":
+                    await _k8s_ingress(websocket, msg)
                 elif action == "k8s_scale":
                     await _k8s_scale(websocket, msg)
                 elif action == "k8s_rollout_restart":
@@ -6036,6 +6040,60 @@ async def _k8s_deployments(websocket, msg):
     except Exception:
         pass
     await websocket.send(json.dumps({"type": "k8s_deployments", "deployments": deploys}))
+
+
+async def _k8s_netpol(websocket, msg):
+    """List NetworkPolicies (namespace, name, pod-selector, age) for the
+    Network panel — shows which pods have ingress/egress rules applied.
+    A zero count on a cluster that expects policy is itself a red flag."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    ns = msg.get("namespace", "")
+    cmd = ["kubectl", "get", "netpol", "--no-headers"]
+    cmd.extend(["-n", ns] if ns and ns != "all" else ["-A"])
+    pols = []
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL,
+                                      timeout=8, env=env)
+        for line in out.strip().splitlines():
+            # -A: NS NAME POD-SELECTOR AGE (pod-selector is one token, comma-joined)
+            parts = line.split(None, 3)
+            if len(parts) >= 4:
+                pols.append({"namespace": parts[0], "name": parts[1],
+                             "selector": parts[2], "age": parts[3]})
+            elif len(parts) == 3:  # -n <ns>: NAME POD-SELECTOR AGE
+                pols.append({"namespace": ns, "name": parts[0],
+                             "selector": parts[1], "age": parts[2]})
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_netpol", "netpol": pols}))
+
+
+async def _k8s_ingress(websocket, msg):
+    """List Ingress resources (class, hosts, address, ports) for the Network
+    panel — the L7 entry points into the cluster. ADDRESS is blank until the
+    ingress controller assigns one, so handle the short-line case."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    ns = msg.get("namespace", "")
+    cmd = ["kubectl", "get", "ingress", "--no-headers"]
+    cmd.extend(["-n", ns] if ns and ns != "all" else ["-A"])
+    ings = []
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL,
+                                      timeout=8, env=env)
+        for line in out.strip().splitlines():
+            # -A: NS NAME CLASS HOSTS [ADDRESS] PORTS AGE — ADDRESS may be blank
+            parts = line.split()
+            if len(parts) >= 7:
+                ings.append({"namespace": parts[0], "name": parts[1], "class": parts[2],
+                             "hosts": parts[3], "address": parts[4],
+                             "ports": parts[5], "age": parts[6]})
+            elif len(parts) == 6:  # no ADDRESS yet
+                ings.append({"namespace": parts[0], "name": parts[1], "class": parts[2],
+                             "hosts": parts[3], "address": "—",
+                             "ports": parts[4], "age": parts[5]})
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_ingress", "ingress": ings}))
 
 
 async def _k8s_services(websocket, msg):

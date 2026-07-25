@@ -1828,6 +1828,28 @@ html.kld-app #term-drawer{display:none!important;}
             <tbody id="k8s-svc-tbody"><tr><td colspan="7" style="color:var(--muted);padding:1rem">No services</td></tr></tbody>
           </table>
         </div>
+        <div class="k8s-panel">
+          <div class="k8s-panel-hdr">
+            <span>⛨ Network Policies <span class="k8s-panel-hdr-muted" id="k8s-netpol-count">0</span></span>
+            <button class="btn btn-ghost btn-sm" onclick="send({action:'k8s_netpol', namespace: document.getElementById('k8s-ns-filter')?.value || 'all'})">↻</button>
+          </div>
+          <input class="k8s-table-search" placeholder="Filter policies…" oninput="k8sTableFilter('k8s-netpol-tbody', this.value)">
+          <table>
+            <thead><tr><th>Namespace</th><th>Name</th><th>Pod Selector</th><th style="text-align:right">Age</th></tr></thead>
+            <tbody id="k8s-netpol-tbody"><tr><td colspan="4" style="color:var(--muted);padding:1rem">No network policies</td></tr></tbody>
+          </table>
+        </div>
+        <div class="k8s-panel">
+          <div class="k8s-panel-hdr">
+            <span>⇥ Ingress <span class="k8s-panel-hdr-muted" id="k8s-ingress-count">0</span></span>
+            <button class="btn btn-ghost btn-sm" onclick="send({action:'k8s_ingress', namespace: document.getElementById('k8s-ns-filter')?.value || 'all'})">↻</button>
+          </div>
+          <input class="k8s-table-search" placeholder="Filter ingress…" oninput="k8sTableFilter('k8s-ingress-tbody', this.value)">
+          <table>
+            <thead><tr><th>Namespace</th><th>Name</th><th>Class</th><th>Hosts</th><th>Address</th><th>Ports</th><th style="text-align:right">Age</th></tr></thead>
+            <tbody id="k8s-ingress-tbody"><tr><td colspan="7" style="color:var(--muted);padding:1rem">No ingress</td></tr></tbody>
+          </table>
+        </div>
       </div>
 
       <!-- ── Storage ──────────────────────────────────────────────────────
@@ -4314,6 +4336,8 @@ function handle(msg) {
     case 'k8s_namespaces': { renderK8sNamespaces(msg.namespaces); break; }
     case 'k8s_deployments': { renderK8sDeployments(msg.deployments); break; }
     case 'k8s_services': { renderK8sServices(msg.services); break; }
+    case 'k8s_netpol':   { renderK8sNetpol(msg.netpol); break; }
+    case 'k8s_ingress':  { renderK8sIngress(msg.ingress); break; }
     case 'k8s_storage':  { renderK8sStorage(msg); break; }
     case 'k8s_events': {
       const el = document.getElementById('k8s-events-list');
@@ -7115,6 +7139,8 @@ function k8sNsChange() {
   send({action: 'k8s_pods', namespace: ns});
   send({action: 'k8s_deployments', namespace: ns});
   send({action: 'k8s_services', namespace: ns});
+  send({action: 'k8s_netpol', namespace: ns});
+  send({action: 'k8s_ingress', namespace: ns});
 }
 
 // ── Apply YAML ──────────────────────────────────────────────────────────────
@@ -7702,6 +7728,38 @@ function renderK8sServices(svcs) {
         <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sSvcDescribe('${esc(s.namespace)}','${esc(s.name)}')" title="kubectl describe svc — see endpoints + selectors">Describe</button>
         <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="k8sDeleteService('${esc(s.namespace)}','${esc(s.name)}')" title="Delete service">✕</button>
       </td>
+    </tr>`;
+  }).join('');
+}
+
+function renderK8sNetpol(pols) {
+  const tbody = document.getElementById('k8s-netpol-tbody');
+  if (!tbody) return;
+  const c = document.getElementById('k8s-netpol-count'); if (c) c.textContent = (pols || []).length;
+  if (!pols?.length) { tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted);padding:1rem">No network policies</td></tr>'; return; }
+  tbody.innerHTML = pols.map(p => `<tr>
+      <td style="color:var(--muted);font-size:0.82rem">${esc(p.namespace)}</td>
+      <td style="font-family:monospace;font-size:0.82rem;font-weight:600;color:var(--accent2)">${esc(p.name)}</td>
+      <td style="color:var(--muted);font-family:monospace;font-size:0.78rem" title="${esc(p.selector)}">${esc((p.selector || '').slice(0, 48))}</td>
+      <td style="text-align:right;color:var(--muted);font-size:0.8rem">${esc(p.age)}</td>
+    </tr>`).join('');
+}
+
+function renderK8sIngress(ings) {
+  const tbody = document.getElementById('k8s-ingress-tbody');
+  if (!tbody) return;
+  const c = document.getElementById('k8s-ingress-count'); if (c) c.textContent = (ings || []).length;
+  if (!ings?.length) { tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted);padding:1rem">No ingress</td></tr>'; return; }
+  tbody.innerHTML = ings.map(i => {
+    const addr = i.address && i.address !== '<none>' ? i.address : '—';
+    return `<tr>
+      <td style="color:var(--muted);font-size:0.82rem">${esc(i.namespace)}</td>
+      <td style="font-family:monospace;font-size:0.82rem;font-weight:600;color:var(--accent2)">${esc(i.name)}</td>
+      <td style="color:var(--muted)">${esc(i.class)}</td>
+      <td style="font-family:monospace;font-size:0.78rem" title="${esc(i.hosts)}">${esc((i.hosts || '').slice(0, 32))}</td>
+      <td style="font-family:monospace;font-size:0.8rem;color:${addr !== '—' ? 'var(--accent2)' : 'var(--muted)'}">${esc(addr)}</td>
+      <td style="color:var(--muted);font-family:monospace;font-size:0.78rem">${esc(i.ports)}</td>
+      <td style="text-align:right;color:var(--muted);font-size:0.8rem">${esc(i.age)}</td>
     </tr>`;
   }).join('');
 }
