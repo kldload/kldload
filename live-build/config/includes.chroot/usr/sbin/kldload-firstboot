@@ -1461,10 +1461,21 @@ main() {
             done
             if [[ "$_heal_ok" == 1 ]]; then
                 ok "healed desktop package: $_pkg"
+                _healed_any=1
             else
                 log "WARNING: could not install $_pkg after 3 tries (offline? not in repo?) — feature degraded but boot is fine"
             fi
         done
+        # A package healed LATE — after the login session already built its app
+        # grid — stays invisible until the desktop DB + icon cache are rebuilt.
+        # Without this the operator sees "steam didn't install" when it actually
+        # did; it just wasn't in the grid yet (found on .111, 2026-07-25). Rebuild
+        # both so the next login shows it. No-op when nothing healed.
+        if [[ "${_healed_any:-0}" == 1 ]]; then
+            update-desktop-database /usr/share/applications 2>/dev/null || true
+            gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+            ok "rebuilt desktop database + icon cache after healing desktop packages"
+        fi
         # Prefer power-profiles-daemon over tlp on the desktop: ppd drives the
         # GNOME "Power Mode" slider, and the two conflict at runtime (ppd won't
         # start while tlp is active). tlp stays installed for server/laptop
