@@ -2381,6 +2381,8 @@ async def ws_handler(websocket):
                     await _k8s_delete_deployment(websocket, msg)
                 elif action == "k8s_apply_yaml":
                     await _k8s_apply_yaml(websocket, msg)
+                elif action == "k8s_get_yaml":
+                    await _k8s_get_yaml(websocket, msg)
                 elif action == "k8s_port_forward":
                     await _k8s_port_forward(websocket, msg)
                 elif action == "k8s_port_forwards":
@@ -6705,6 +6707,33 @@ async def _k8s_delete_deployment(websocket, msg):
         ["kubectl", "-n", ns, "delete", "deploy", name],
         target="k8s")
     await _k8s_deployments(websocket, {"namespace": ns})
+
+
+async def _k8s_get_yaml(websocket, msg):
+    """Fetch a resource's LIVE yaml for the edit-in-drawer flow, then the user
+    edits + re-applies via _k8s_apply_yaml. --show-managed-fields=false drops the
+    huge managedFields block so the editor shows just the spec that matters."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    kind = msg.get("kind", "")
+    name = msg.get("name", "")
+    ns = msg.get("namespace", "")
+    if not (kind and name):
+        await websocket.send(json.dumps({"type": "error", "msg": "edit: need a kind + name"}))
+        return
+    cmd = ["kubectl", "get", kind, name, "-o", "yaml", "--show-managed-fields=false"]
+    if ns:
+        cmd.extend(["-n", ns])
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT, timeout=10, env=env)
+    except subprocess.CalledProcessError as e:
+        await websocket.send(json.dumps({"type": "error",
+            "msg": f"couldn't read {kind}/{name}: {(e.output or '').strip()[:200]}"}))
+        return
+    except Exception as e:
+        await websocket.send(json.dumps({"type": "error", "msg": f"couldn't read {kind}/{name}: {e}"}))
+        return
+    await websocket.send(json.dumps({"type": "k8s_yaml", "kind": kind, "name": name,
+                                     "namespace": ns, "yaml": out}))
 
 
 async def _k8s_apply_yaml(websocket, msg):

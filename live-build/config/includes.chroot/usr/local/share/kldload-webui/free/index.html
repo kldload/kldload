@@ -1640,6 +1640,7 @@ html.kld-app #term-drawer{display:none!important;}
 
         <!-- Apply YAML drawer (slides in above sub-tab content when opened from the menu). -->
         <div id="k8s-apply-wrap" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0.75rem;margin-bottom:0.9rem">
+          <div id="k8s-apply-editing" style="font-size:0.8rem;color:var(--accent2);margin-bottom:0.45rem;font-weight:600"></div>
           <textarea id="k8s-apply-yaml" placeholder="apiVersion: v1&#10;kind: Pod&#10;metadata:&#10;  name: demo&#10;..." style="width:100%;min-height:180px;font-family:'Cascadia Code',monospace;font-size:0.8rem;background:var(--surface3);color:var(--subtle);border:1px solid var(--border);border-radius:5px;padding:0.5rem"></textarea>
           <div style="display:flex;gap:0.4rem;margin-top:0.5rem;align-items:center">
             <button class="btn btn-primary btn-sm" onclick="k8sApplyYaml()">Apply</button>
@@ -4460,6 +4461,17 @@ function handle(msg) {
     case 'k8s_cilium':       { renderK8sCilium(msg.cilium);             break; }
     case 'k8s_metallb':      { renderK8sMetallb(msg.metallb);           break; }
     case 'k8s_port_forwards': { renderK8sPortForwards(msg.forwards);    break; }
+    case 'k8s_yaml': {
+      const ta = document.getElementById('k8s-apply-yaml');
+      const wrap = document.getElementById('k8s-apply-wrap');
+      const note = document.getElementById('k8s-apply-editing');
+      if (ta) ta.value = msg.yaml || '';
+      if (note) note.textContent = `✎ Editing ${msg.kind} ${msg.namespace ? msg.namespace + '/' : ''}${msg.name} — edit below and Apply`;
+      if (wrap) wrap.style.display = 'block';
+      k8sSubTab('overview');   // the Apply drawer lives on the Overview sub-tab
+      if (ta) ta.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      break;
+    }
     case 'k8s_storage':  { renderK8sStorage(msg); break; }
     case 'k8s_events':        { renderK8sEvents(msg.events);           break; }
 
@@ -6713,6 +6725,7 @@ function renderK8sPods(pods) {
           <button class="k8s-node-menu-item" onclick="k8sPodDescribe('${esc(p.namespace)}','${esc(p.name)}')">Describe</button>
           <button class="k8s-node-menu-item" onclick="k8sPodLogs('${esc(p.namespace)}','${esc(p.name)}',500)">Logs (tail 500)</button>
           <button class="k8s-node-menu-item" onclick="k8sPodPortForward('${esc(p.namespace)}','${esc(p.name)}');k8sPodMenuClose()">⇄ Port-forward…</button>
+          <button class="k8s-node-menu-item" onclick="k8sEditYaml('pod','${esc(p.namespace)}','${esc(p.name)}');k8sPodMenuClose()">✎ Edit YAML</button>
           <button class="k8s-node-menu-item" onclick="send({action:'k8s_inspect',target:'pod',name:'${esc(p.name)}',namespace:'${esc(p.namespace)}'});k8sPodMenuClose()">View events / inspect</button>
         </div>
       </td>
@@ -7271,13 +7284,22 @@ function k8sNsChange() {
 function k8sToggleApply() {
   const wrap = document.getElementById('k8s-apply-wrap');
   if (!wrap) return;
-  wrap.style.display = wrap.style.display === 'none' ? 'block' : 'none';
+  const opening = wrap.style.display === 'none';
+  wrap.style.display = opening ? 'block' : 'none';
+  // Manual "Apply YAML…" = a fresh new-manifest editor, not an edit session.
+  if (opening) { const note = document.getElementById('k8s-apply-editing'); if (note) note.textContent = ''; }
 }
 function k8sApplyYaml() {
   const ta = document.getElementById('k8s-apply-yaml');
   if (!ta || !ta.value.trim()) return;
   send({action: 'k8s_apply_yaml', yaml: ta.value});
   // Keep the textarea open — user might want to tweak and re-apply.
+}
+// Edit an EXISTING resource's live YAML: fetch it (kubectl get -o yaml), populate
+// the Apply drawer, mark it as an edit. Apply re-applies the edited manifest via
+// the same _k8s_apply_yaml path. kind = deployment|service|configmap|secret|pod|…
+function k8sEditYaml(kind, ns, name) {
+  send({ action: 'k8s_get_yaml', kind: kind, namespace: ns || '', name: name });
 }
 
 // ── Demo runner ─────────────────────────────────────────────────────────────
@@ -7645,6 +7667,7 @@ function renderK8sDeployments(deploys) {
         <button class="btn btn-ghost btn-sm" onclick="k8sScale('${esc(d.namespace)}','${esc(d.name)}',${parseInt(desired) || 1})" title="Scale replicas">⇅ Scale</button>
         <button class="btn btn-ghost btn-sm" onclick="k8sRolloutRestart('${esc(d.namespace)}','${esc(d.name)}')" title="kubectl rollout restart">↻ Restart</button>
         <button class="btn btn-ghost btn-sm" onclick="k8sRolloutUndo('${esc(d.namespace)}','${esc(d.name)}')" title="kubectl rollout undo">↶ Rollback</button>
+        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();k8sEditYaml('deployment','${esc(d.namespace)}','${esc(d.name)}')" title="Edit live YAML — get → edit → apply">✎ Edit</button>
         <button class="btn btn-danger btn-sm" onclick="k8sDeleteDeploy('${esc(d.namespace)}','${esc(d.name)}')" title="Delete deployment">✕</button>
       </td>
     </tr>`;
@@ -7861,6 +7884,7 @@ function renderK8sServices(svcs) {
       <td style="white-space:nowrap;text-align:right">
         <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sSvcPortForward('${esc(s.namespace)}','${esc(s.name)}','${esc((String(s.ports||'').match(/\d+/)||[''])[0])}')" title="Forward this service to localhost">⇄</button>
         <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sSvcDescribe('${esc(s.namespace)}','${esc(s.name)}')" title="kubectl describe svc — see endpoints + selectors">Describe</button>
+        <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sEditYaml('service','${esc(s.namespace)}','${esc(s.name)}')" title="Edit live YAML">✎</button>
         <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="k8sDeleteService('${esc(s.namespace)}','${esc(s.name)}')" title="Delete service">✕</button>
       </td>
     </tr>`;
@@ -7944,7 +7968,8 @@ function renderK8sConfigMaps(cms) {
   if (!cms?.length) { tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted);padding:1rem">No configmaps</td></tr>'; return; }
   tbody.innerHTML = cms.map(m => `<tr>
       <td style="color:var(--muted);font-size:0.82rem">${esc(m.namespace)}</td>
-      <td style="font-family:monospace;font-size:0.82rem;font-weight:600;color:var(--accent2)">${esc(m.name)}</td>
+      <td style="font-family:monospace;font-size:0.82rem;font-weight:600;color:var(--accent2)">${esc(m.name)}
+        <button class="btn btn-ghost btn-sm" style="font-size:0.7rem;padding:0.1rem 0.3rem" onclick="k8sEditYaml('configmap','${esc(m.namespace)}','${esc(m.name)}')" title="Edit live YAML">✎</button></td>
       <td style="font-family:monospace;color:var(--muted)">${esc(m.data)}</td>
       <td style="text-align:right;color:var(--muted);font-size:0.8rem">${esc(m.age)}</td>
     </tr>`).join('');
