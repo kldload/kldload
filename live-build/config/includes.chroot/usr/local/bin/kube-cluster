@@ -100,6 +100,20 @@ CLOUD_IMAGE="${CLOUD_IMAGE:-}"
 SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
 POOL="rpool"
 
+# ── HA control plane (brick 4) ───────────────────────────────────────────────
+# HA_READY=1 (default) makes EVERY cluster born expandable: kube-init is told a
+# floating VIP, so kubeadm uses --control-plane-endpoint + --upload-certs even
+# for a single CP. This is the one thing that CANNOT be retrofitted — a cluster
+# init'd without a control-plane-endpoint can never gain control planes — so we
+# pay the (near-zero) cost of a kube-vip static pod up front on every cluster.
+# Set HA_READY=0 for a throwaway single-CP with no VIP (matches pre-brick-4).
+# KUBE_VIP_ADDRESS pins the VIP; empty → auto-allocate KUBE_VIP_DEFAULT, which
+# sits ABOVE the MetalLB pool (192.168.122.200-220) in a slice we reserve out
+# of libvirt DHCP so dnsmasq never leases it out from under kube-vip.
+HA_READY="${HA_READY:-1}"
+KUBE_VIP_ADDRESS="${KUBE_VIP_ADDRESS:-}"
+KUBE_VIP_DEFAULT="${KUBE_VIP_DEFAULT:-192.168.122.240}"
+
 # ANSI color codes for terminal output
 C="\033[1;36m"
 G="\033[1;32m"
@@ -238,6 +252,49 @@ NETXML
     done
     die "virbr0 still missing or admin-down after starting default network. \
 Check: sudo virsh net-info default && ip link show virbr0"
+}
+
+# _allocate_ha_vip — pick + reserve the HA control-plane VIP (brick 4)
+# Args: none. Reads/sets the global KUBE_VIP_ADDRESS.
+# Behaviour:
+#   - No-op (returns 0, leaves KUBE_VIP_ADDRESS empty) when HA_READY=0 — the
+#     caller then runs the legacy single-CP, no-VIP path.
+#   - Otherwise defaults KUBE_VIP_ADDRESS to KUBE_VIP_DEFAULT, then RESERVES it
+#     out of libvirt DHCP via a static ip-dhcp-host entry (a placeholder MAC so
+#     dnsmasq drops that address from the dynamic pool — cleaner than range
+#     surgery and idempotent). kube-vip then ARP-claims the VIP on the CP.
+#   - Aborts if the VIP is already answering ARP (someone/something owns it) so
+#     we never advertise a duplicate address onto the segment.
+# Failure modes for callers: dies on a live VIP conflict; net-update failures
+# are warned-not-fatal (dnsmasq usually still won't lease a mid-pool address
+# that's actively ARP-defended, and the VIP slice is above the busy range).
+_allocate_ha_vip() {
+    [[ "$HA_READY" == "1" ]] || {
+        log "HA_READY=0 — single control plane, no VIP (cluster will NOT be expandable)"
+        return 0
+    }
+    [[ -n "$KUBE_VIP_ADDRESS" ]] || KUBE_VIP_ADDRESS="$KUBE_VIP_DEFAULT"
+
+    # Conflict check: a reply means the address is taken — refuse rather than
+    # advertise a duplicate. arping -D returns 0 when the address is FREE.
+    if command -v arping >/dev/null 2>&1; then
+        if arping -q -D -c 2 -w 3 -I virbr0 "$KUBE_VIP_ADDRESS" 2>/dev/null; then
+            : # free
+        else
+            die "HA VIP ${KUBE_VIP_ADDRESS} already answers ARP on virbr0 — set KUBE_VIP_ADDRESS to a free address or HA_READY=0"
+        fi
+    fi
+
+    # Reserve the VIP out of the DHCP dynamic pool. A static host entry with a
+    # reserved-looking QEMU-OUI MAC makes dnsmasq exclude the address from
+    # dynamic leasing. add-last is idempotent-ish: a duplicate entry errors
+    # harmlessly (already reserved), so the || true is the "already done" case.
+    virsh net-update default add-last ip-dhcp-host \
+        "<host mac='52:54:00:00:00:fe' ip='${KUBE_VIP_ADDRESS}'/>" \
+        --live --config >/dev/null 2>&1 ||
+        log "  VIP DHCP reservation already present (or net-update unsupported) — continuing"
+
+    log "HA-ready: control-plane VIP ${KUBE_VIP_ADDRESS} (kube-vip ARP/L2, reserved out of DHCP)"
 }
 
 _ensure_cloud_init_pool() {
@@ -1132,6 +1189,7 @@ cmd_bootstrap() {
 
     _ensure_libvirt_default_net
     _ensure_cloud_init_pool
+    _allocate_ha_vip # brick 4: born HA-ready (sets KUBE_VIP_ADDRESS unless HA_READY=0)
 
     # Step 0: Clean slate — destroy any existing cluster + golden
     # No half-states, no stale VMs, no orphaned zvols. Every bootstrap
@@ -1342,7 +1400,12 @@ cmd_bootstrap() {
     step_done "WireGuard full mesh configured"
 
     step 4 "Control Plane (Cilium + MetalLB + Hubble)"
-    _ssh_cmd "$cp_ip" "kube-init" || warn "kube-init had errors — some components may still be pulling images"
+    # brick 4: hand kube-init the VIP so it inits HA-ready (--control-plane-endpoint
+    # + --upload-certs + kube-vip static pod). Empty KUBE_VIP_ADDRESS (HA_READY=0)
+    # falls through to the legacy single-CP path unchanged. Interface is left for
+    # kube-init to auto-detect inside the VM (its default-route iface, not the host's).
+    _ssh_cmd "$cp_ip" "KUBE_VIP_ADDRESS='${KUBE_VIP_ADDRESS}' kube-init" ||
+        warn "kube-init had errors — some components may still be pulling images"
 
     # Step 5: Join workers. The join token is a short-lived bootstrap credential
     # that lets workers authenticate to the API server.

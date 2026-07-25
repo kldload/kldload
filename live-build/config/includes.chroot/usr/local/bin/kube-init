@@ -67,59 +67,82 @@ snapshot_before_init() {
     fi
 }
 
-# ── kube-vip static pod (HA control-plane VIP) ───────────────────────────────
-# Generates the kube-vip static Pod manifest BEFORE `kubeadm init`, so kubelet
-# brings the VIP up alongside the API server and init's wait-control-plane can
-# reach the API through the VIP. ARP/L2 mode, leader-elected (the VIP floats to
-# whichever control plane holds the lease). No-op unless KUBE_VIP_ADDRESS is set.
+# ── Control-plane VIP (static for a single CP) ───────────────────────────────
+# Assigns KUBE_VIP_ADDRESS as a STATIC address on the CP's interface before
+# `kubeadm init`, so init's wait-control-plane reaches the API through the
+# VIP:6443 control-plane-endpoint, and that endpoint stays stable for future
+# control planes to join.
 #
-# k8s ≥1.29 trap: `admin.conf` does not exist until init COMPLETES, but the
-# generated manifest references it — so kube-vip can't authenticate during init
-# and `kubeadm init` hangs at wait-control-plane. Workaround (per kube-vip docs):
-# point the manifest at `super-admin.conf` (kubeadm writes it earlier) for the
-# first init, then switch it back to `admin.conf` once init succeeds.
-setup_kube_vip() {
+# Why not kube-vip here: kube-vip must build a k8s API client BEFORE it will
+# raise the VIP (even ARP control-plane mode). During init the ONLY route to the
+# API is the VIP it would raise — a hard self-dependency (kube-vip logged
+# 'could not create k8s REST config ... KUBERNETES_SERVICE_HOST must be defined'
+# and the VIP never appeared; init then failed at wait-control-plane, .111
+# 2026-07-25). A lone control plane needs no failover, so a plain static IP is
+# simpler and deterministic. kube-vip — pointed at the node's LOCAL API, never
+# the VIP it manages — is introduced when brick 2 adds a second CP and the VIP
+# must actually float. No-op unless KUBE_VIP_ADDRESS is set.
+setup_cp_vip() {
     [[ -n "$KUBE_VIP_ADDRESS" ]] || return 0
     local iface="$KUBE_VIP_INTERFACE"
     if [[ -z "$iface" ]]; then
         iface="$(ip route get 1.1.1.1 2>/dev/null |
             awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')" || true
     fi
-    [[ -n "$iface" ]] || die "kube-vip: could not determine an interface (set KUBE_VIP_INTERFACE)"
-    log "kube-vip: advertising API VIP ${KUBE_VIP_ADDRESS} on ${iface} (ARP/L2, leader-elected)"
+    [[ -n "$iface" ]] || die "cp-vip: could not determine an interface (set KUBE_VIP_INTERFACE)"
+    log "control-plane VIP ${KUBE_VIP_ADDRESS} → static on ${iface} (single CP; kube-vip failover added at brick 2)"
 
-    mkdir -p /etc/kubernetes/manifests
-    # containerd (this node's runtime) — pull + run the pinned image to emit the
-    # static Pod manifest. Prefer the mirrored offline image if present.
-    ctr -n k8s.io image pull "ghcr.io/kube-vip/kube-vip:${KUBE_VIP_VERSION}" >/dev/null 2>&1 ||
-        warn "kube-vip: image pull failed (need it mirrored in the k8s darksite for offline)"
-    ctr -n k8s.io run --rm --net-host "ghcr.io/kube-vip/kube-vip:${KUBE_VIP_VERSION}" \
-        kv-manifest /kube-vip manifest pod \
-        --interface "$iface" \
-        --address "$KUBE_VIP_ADDRESS" \
-        --controlplane \
-        --services \
-        --arp \
-        --leaderElection \
-        >/etc/kubernetes/manifests/kube-vip.yaml ||
-        die "kube-vip: manifest generation failed"
-    [[ -s /etc/kubernetes/manifests/kube-vip.yaml ]] ||
-        die "kube-vip: generated manifest is empty"
-    # First-init auth: use super-admin.conf until init writes admin.conf.
-    sed -i 's#/etc/kubernetes/admin.conf#/etc/kubernetes/super-admin.conf#g' \
-        /etc/kubernetes/manifests/kube-vip.yaml
-}
+    ip addr replace "${KUBE_VIP_ADDRESS}/32" dev "$iface" 2>/dev/null ||
+        die "cp-vip: could not assign ${KUBE_VIP_ADDRESS} to ${iface}"
 
-# Post-init: repoint kube-vip back at admin.conf now that init has created it.
-finalize_kube_vip() {
-    [[ -n "$KUBE_VIP_ADDRESS" && -f /etc/kubernetes/manifests/kube-vip.yaml ]] || return 0
-    sed -i 's#/etc/kubernetes/super-admin.conf#/etc/kubernetes/admin.conf#g' \
-        /etc/kubernetes/manifests/kube-vip.yaml
-    log "kube-vip: switched to admin.conf (VIP ${KUBE_VIP_ADDRESS} is the cluster endpoint)"
+    # Persist across reboots via a oneshot unit. Brick 2 disables this and hands
+    # the VIP to kube-vip (leader-elected, localhost kubeconfig) at multi-CP.
+    local ipbin
+    ipbin="$(command -v ip)"
+    cat >/etc/systemd/system/kldload-cp-vip.service <<UNIT
+[Unit]
+Description=kldload single-CP control-plane VIP (${KUBE_VIP_ADDRESS} on ${iface})
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${ipbin} addr replace ${KUBE_VIP_ADDRESS}/32 dev ${iface}
+ExecStop=${ipbin} addr del ${KUBE_VIP_ADDRESS}/32 dev ${iface}
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable kldload-cp-vip.service 2>/dev/null || true
 }
 
 # ── kubeadm init ───────────────────────────────────────────────────────────
 run_kubeadm_init() {
+    # Retry-safety. kube-init is invoked over SSH by kube-cluster's _ssh_cmd,
+    # which retries on ANY non-zero exit (including a dropped connection mid-run).
+    # `kubeadm init` is NOT idempotent — a retry onto a half-initialized node
+    # dies at preflight ("manifests already exist / ports in use / etcd not
+    # empty", observed .111 2026-07-25). Reconcile before touching kubeadm:
+    #   - healthy local API already answering  → a prior run succeeded, skip.
+    #   - stale manifests/etcd, no healthy API → a prior run FAILED, reset clean.
+    # "Already initialized" must mean init COMPLETED, not merely "an API socket
+    # answers" — a half-init (failed at wait-control-plane) leaves a running
+    # apiserver too, and skipping on that ships a broken cluster (seen .111
+    # 2026-07-25). The kubeadm-config ConfigMap is written by init's near-final
+    # upload-config phase, so its presence is a reliable "init finished" signal.
+    if [[ -f /etc/kubernetes/admin.conf ]] &&
+        KUBECONFIG=/etc/kubernetes/admin.conf kubectl --request-timeout=5s \
+            get -n kube-system configmap kubeadm-config >/dev/null 2>&1; then
+        log "Control plane already initialized (kubeadm-config present) — skipping kubeadm init"
+        return 0
+    fi
+    if [[ -f /etc/kubernetes/manifests/kube-apiserver.yaml ]] ||
+        { [[ -d /var/lib/etcd ]] && [[ -n "$(ls -A /var/lib/etcd 2>/dev/null)" ]]; }; then
+        log "Stale control-plane state from a failed prior init — 'kubeadm reset -f' for a clean retry"
+        kubeadm reset -f >/dev/null 2>&1 || true
+        rm -rf /etc/kubernetes/manifests/*.yaml /var/lib/etcd 2>/dev/null || true
+    fi
+
     local node_ip
     node_ip="$(detect_node_ip)"
     log "Initializing control plane on $node_ip"
@@ -148,7 +171,7 @@ run_kubeadm_init() {
     local cp_endpoint_arg=()
     if [[ -n "$KUBE_VIP_ADDRESS" ]]; then
         cp_endpoint_arg=(--control-plane-endpoint="${KUBE_VIP_ADDRESS}:6443")
-        setup_kube_vip
+        setup_cp_vip # raise the VIP (static) BEFORE init so wait-control-plane reaches it
     fi
 
     kubeadm init \
@@ -160,8 +183,6 @@ run_kubeadm_init() {
         --skip-phases=addon/kube-proxy \
         --upload-certs \
         2>&1 | tee /var/log/kubeadm-init.log
-
-    finalize_kube_vip
 
     # Set up kubeconfig for root and admin user
     mkdir -p /root/.kube
