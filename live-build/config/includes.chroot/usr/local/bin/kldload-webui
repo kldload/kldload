@@ -2365,6 +2365,10 @@ async def ws_handler(websocket):
                     await _k8s_configmaps(websocket, msg)
                 elif action == "k8s_secrets":
                     await _k8s_secrets(websocket, msg)
+                elif action == "k8s_cilium":
+                    await _k8s_cilium(websocket, msg)
+                elif action == "k8s_metallb":
+                    await _k8s_metallb(websocket, msg)
                 elif action == "k8s_scale":
                     await _k8s_scale(websocket, msg)
                 elif action == "k8s_rollout_restart":
@@ -6240,6 +6244,83 @@ async def _k8s_secrets(websocket, msg):
     except Exception:
         pass
     await websocket.send(json.dumps({"type": "k8s_secrets", "secrets": secs}))
+
+
+async def _k8s_cilium(websocket, msg):
+    """Cilium CNI health for the Network panel. Deliberately built from robust
+    kubectl -o json queries, NOT the multi-line `cilium status` text (which has
+    no stable machine format): agent DaemonSet readiness, operator readiness,
+    version from the container image tag, and per-node agent pod state. Cilium
+    is the datapath here (kube-proxy replacement), so an agent NotReady on a
+    node means that node's pod networking is broken — worth surfacing loudly."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    info = {"agents_ready": "", "agents_desired": "", "operator": "", "version": "", "pods": []}
+    try:
+        out = subprocess.check_output(
+            ["kubectl", "-n", "kube-system", "get", "ds", "cilium", "-o", "json"],
+            text=True, stderr=subprocess.DEVNULL, timeout=8, env=env)
+        d = json.loads(out)
+        st = d.get("status", {})
+        info["agents_desired"] = st.get("desiredNumberScheduled", 0)
+        info["agents_ready"] = st.get("numberReady", 0)
+        img = d["spec"]["template"]["spec"]["containers"][0].get("image", "")
+        info["version"] = img.split(":")[-1] if ":" in img else img
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(
+            ["kubectl", "-n", "kube-system", "get", "deploy", "cilium-operator",
+             "-o", "jsonpath={.status.readyReplicas}/{.status.replicas}"],
+            text=True, stderr=subprocess.DEVNULL, timeout=8, env=env)
+        info["operator"] = out.strip()
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(
+            ["kubectl", "-n", "kube-system", "get", "pods", "-l", "k8s-app=cilium", "-o", "json"],
+            text=True, stderr=subprocess.DEVNULL, timeout=8, env=env)
+        for p in json.loads(out).get("items", []):
+            cs = p.get("status", {}).get("containerStatuses", []) or []
+            info["pods"].append({
+                "name": p["metadata"]["name"],
+                "node": p.get("spec", {}).get("nodeName", ""),
+                "ready": bool(cs) and all(c.get("ready") for c in cs),
+                "restarts": sum(c.get("restartCount", 0) for c in cs),
+                "phase": p.get("status", {}).get("phase", ""),
+            })
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_cilium", "cilium": info}))
+
+
+async def _k8s_metallb(websocket, msg):
+    """MetalLB config for the Network panel: IPAddressPools (the LAN ranges it
+    hands to type=LoadBalancer Services) + L2Advertisements. The Services view
+    shows only the ASSIGNED external IP; this shows the pool it came from and
+    how much address space is left to give out. metallb-system is a fixed
+    namespace, so this ignores the panel's namespace filter."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    pools, l2 = [], []
+    try:
+        out = subprocess.check_output(
+            ["kubectl", "get", "ipaddresspools", "-n", "metallb-system", "-o", "json"],
+            text=True, stderr=subprocess.DEVNULL, timeout=8, env=env)
+        for p in json.loads(out).get("items", []):
+            pools.append({"name": p["metadata"]["name"],
+                          "addresses": ", ".join(p.get("spec", {}).get("addresses", []))})
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(
+            ["kubectl", "get", "l2advertisements", "-n", "metallb-system", "-o", "json"],
+            text=True, stderr=subprocess.DEVNULL, timeout=8, env=env)
+        for a in json.loads(out).get("items", []):
+            names = a.get("spec", {}).get("ipAddressPools", [])
+            l2.append({"name": a["metadata"]["name"],
+                       "pools": ", ".join(names) if names else "(all pools)"})
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_metallb", "metallb": {"pools": pools, "l2": l2}}))
 
 
 async def _k8s_services(websocket, msg):

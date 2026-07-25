@@ -1876,6 +1876,30 @@ html.kld-app #term-drawer{display:none!important;}
             <tbody id="k8s-ingress-tbody"><tr><td colspan="7" style="color:var(--muted);padding:1rem">No ingress</td></tr></tbody>
           </table>
         </div>
+
+        <div class="k8s-panel">
+          <div class="k8s-panel-hdr">
+            <span>🔗 Cilium <span class="k8s-panel-hdr-muted" id="k8s-cilium-count">—</span></span>
+            <button class="btn btn-ghost btn-sm" onclick="send({action:'k8s_cilium'})">↻</button>
+          </div>
+          <div id="k8s-cilium-summary" style="padding:0.4rem 1rem;font-size:0.78rem;color:var(--muted)">—</div>
+          <table>
+            <thead><tr><th>Node</th><th>Agent</th><th style="text-align:right">Restarts</th></tr></thead>
+            <tbody id="k8s-cilium-tbody"><tr><td colspan="3" style="color:var(--muted);padding:1rem">Cilium not detected</td></tr></tbody>
+          </table>
+        </div>
+
+        <div class="k8s-panel">
+          <div class="k8s-panel-hdr">
+            <span>🌉 MetalLB Pools <span class="k8s-panel-hdr-muted" id="k8s-metallb-count">0</span></span>
+            <button class="btn btn-ghost btn-sm" onclick="send({action:'k8s_metallb'})">↻</button>
+          </div>
+          <table>
+            <thead><tr><th>Pool</th><th>Address Range</th></tr></thead>
+            <tbody id="k8s-metallb-tbody"><tr><td colspan="2" style="color:var(--muted);padding:1rem">No MetalLB pools (or MetalLB not installed)</td></tr></tbody>
+          </table>
+          <div id="k8s-metallb-l2" style="padding:0.35rem 1rem;font-size:0.75rem;color:var(--muted)"></div>
+        </div>
       </div>
 
       <!-- ── Config ── ConfigMaps + Secrets. Secrets are metadata-only (type +
@@ -4418,6 +4442,8 @@ function handle(msg) {
     case 'k8s_daemonsets':   { renderK8sDaemonSets(msg.daemonsets);     break; }
     case 'k8s_configmaps':   { renderK8sConfigMaps(msg.configmaps);     break; }
     case 'k8s_secrets':      { renderK8sSecrets(msg.secrets);           break; }
+    case 'k8s_cilium':       { renderK8sCilium(msg.cilium);             break; }
+    case 'k8s_metallb':      { renderK8sMetallb(msg.metallb);           break; }
     case 'k8s_storage':  { renderK8sStorage(msg); break; }
     case 'k8s_events':        { renderK8sEvents(msg.events);           break; }
 
@@ -7258,6 +7284,8 @@ function k8sSubTab(name) {
     send({action: 'k8s_services', namespace: ns});
     send({action: 'k8s_netpol', namespace: ns});
     send({action: 'k8s_ingress', namespace: ns});
+    send({action: 'k8s_cilium'});    // cluster-scoped infra — no namespace
+    send({action: 'k8s_metallb'});
   } else if (name === 'config') {
     send({action: 'k8s_configmaps', namespace: ns});
     send({action: 'k8s_secrets', namespace: ns});
@@ -7926,6 +7954,41 @@ function renderK8sEvents(evs) {
       <td style="font-size:0.8rem" title="${esc(e.message)}">${esc((e.message || '').slice(0, 120))}</td>
     </tr>`;
   }).join('');
+}
+
+function renderK8sCilium(c) {
+  c = c || {};
+  const cnt = document.getElementById('k8s-cilium-count');
+  if (cnt) cnt.textContent = c.version ? esc(c.version) : '—';
+  const sum = document.getElementById('k8s-cilium-summary');
+  if (sum) {
+    const agents = `${c.agents_ready ?? '?'}/${c.agents_desired ?? '?'}`;
+    const agentsOk = String(c.agents_ready) === String(c.agents_desired) && c.agents_desired !== '';
+    sum.innerHTML = `agents <span style="color:${agentsOk ? 'var(--ok,#4ade80)' : 'var(--warn)'};font-weight:600">${esc(agents)}</span>`
+      + ` · operator <span style="color:var(--muted)">${esc(c.operator || '—')}</span>`
+      + ` · <span style="color:var(--muted)">kube-proxy replacement (eBPF)</span>`;
+  }
+  const tbody = document.getElementById('k8s-cilium-tbody');
+  if (!tbody) return;
+  const pods = c.pods || [];
+  tbody.innerHTML = pods.length ? pods.map(p => `<tr>
+      <td style="font-family:monospace;font-size:0.8rem;color:var(--accent2)">${esc(p.node || p.name)}</td>
+      <td style="color:${p.ready ? 'var(--ok,#4ade80)' : 'var(--warn)'};font-size:0.82rem">${p.ready ? 'Ready' : esc(p.phase || 'NotReady')}</td>
+      <td style="text-align:right;color:${p.restarts > 0 ? 'var(--warn)' : 'var(--muted)'};font-family:monospace">${esc(p.restarts)}</td>
+    </tr>`).join('') : '<tr><td colspan="3" style="color:var(--muted);padding:1rem">Cilium not detected</td></tr>';
+}
+
+function renderK8sMetallb(m) {
+  m = m || {};
+  const pools = m.pools || [], l2 = m.l2 || [];
+  const cnt = document.getElementById('k8s-metallb-count'); if (cnt) cnt.textContent = pools.length;
+  const tbody = document.getElementById('k8s-metallb-tbody');
+  if (tbody) tbody.innerHTML = pools.length ? pools.map(p => `<tr>
+      <td style="font-family:monospace;font-size:0.82rem;font-weight:600;color:var(--accent2)">${esc(p.name)}</td>
+      <td style="font-family:monospace;font-size:0.8rem">${esc(p.addresses)}</td>
+    </tr>`).join('') : '<tr><td colspan="2" style="color:var(--muted);padding:1rem">No MetalLB pools (or MetalLB not installed)</td></tr>';
+  const l2el = document.getElementById('k8s-metallb-l2');
+  if (l2el) l2el.textContent = l2.length ? ('L2 advertisements: ' + l2.map(a => `${a.name} → ${a.pools}`).join('  ·  ')) : '';
 }
 
 // Unified refresh — pulls everything at once. Order matters: namespaces
