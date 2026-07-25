@@ -6264,7 +6264,12 @@ async def _k8s_cilium(websocket, msg):
         info["agents_desired"] = st.get("desiredNumberScheduled", 0)
         info["agents_ready"] = st.get("numberReady", 0)
         img = d["spec"]["template"]["spec"]["containers"][0].get("image", "")
-        info["version"] = img.split(":")[-1] if ":" in img else img
+        # image may be repo:tag, repo@sha256:digest, or repo:tag@sha256:digest
+        # (Cilium is digest-pinned but keeps the :vX.Y.Z tag). Drop the digest,
+        # then take the tag only if the LAST path component actually has one —
+        # so a "registry:5000/…" port prefix is never mistaken for the version.
+        ref = img.split("@", 1)[0]
+        info["version"] = ref.rsplit(":", 1)[-1] if ":" in ref.rsplit("/", 1)[-1] else ""
     except Exception:
         pass
     try:
