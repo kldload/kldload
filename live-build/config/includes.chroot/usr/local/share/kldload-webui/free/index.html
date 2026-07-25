@@ -1631,8 +1631,10 @@ html.kld-app #term-drawer{display:none!important;}
           <button class="k8s-tab active" data-sub="overview"  onclick="k8sSubTab('overview')">Overview</button>
           <button class="k8s-tab"        data-sub="workloads" onclick="k8sSubTab('workloads')">Workloads <span id="k8s-cnt-workloads" class="tab-count">0</span></button>
           <button class="k8s-tab"        data-sub="network"   onclick="k8sSubTab('network')">Network <span id="k8s-cnt-network" class="tab-count">0</span></button>
+          <button class="k8s-tab"        data-sub="config"    onclick="k8sSubTab('config')">Config <span id="k8s-cnt-config" class="tab-count">0</span></button>
           <button class="k8s-tab"        data-sub="storage"   onclick="k8sSubTab('storage')">Storage <span id="k8s-cnt-storage" class="tab-count">0</span></button>
           <button class="k8s-tab"        data-sub="nodes"     onclick="k8sSubTab('nodes')">Nodes <span id="k8s-cnt-nodes" class="tab-count">0</span></button>
+          <button class="k8s-tab"        data-sub="events"    onclick="k8sSubTab('events')">Events <span id="k8s-cnt-events" class="tab-count">0</span></button>
           <button class="k8s-tab"        data-sub="log"       onclick="k8sSubTab('log')">Log</button>
         </div>
 
@@ -1813,6 +1815,30 @@ html.kld-app #term-drawer{display:none!important;}
             <tbody id="k8s-pod-tbody"><tr><td colspan="8" style="color:var(--muted);padding:1rem">No pods</td></tr></tbody>
           </table>
         </div>
+
+        <div class="k8s-panel">
+          <div class="k8s-panel-hdr">
+            <span>▤ StatefulSets <span class="k8s-panel-hdr-muted" id="k8s-sts-count">0</span></span>
+            <button class="btn btn-ghost btn-sm" onclick="send({action:'k8s_statefulsets', namespace: document.getElementById('k8s-ns-filter')?.value || 'all'})">↻</button>
+          </div>
+          <input class="k8s-table-search" placeholder="Filter statefulsets…" oninput="k8sTableFilter('k8s-sts-tbody', this.value)">
+          <table>
+            <thead><tr><th>Namespace</th><th>Name</th><th>Ready</th><th style="text-align:right">Age</th></tr></thead>
+            <tbody id="k8s-sts-tbody"><tr><td colspan="4" style="color:var(--muted);padding:1rem">No statefulsets</td></tr></tbody>
+          </table>
+        </div>
+
+        <div class="k8s-panel">
+          <div class="k8s-panel-hdr">
+            <span>⬡ DaemonSets <span class="k8s-panel-hdr-muted" id="k8s-ds-count">0</span></span>
+            <button class="btn btn-ghost btn-sm" onclick="send({action:'k8s_daemonsets', namespace: document.getElementById('k8s-ns-filter')?.value || 'all'})">↻</button>
+          </div>
+          <input class="k8s-table-search" placeholder="Filter daemonsets…" oninput="k8sTableFilter('k8s-ds-tbody', this.value)">
+          <table>
+            <thead><tr><th>Namespace</th><th>Name</th><th>Desired</th><th>Ready</th><th>Available</th><th style="text-align:right">Age</th></tr></thead>
+            <tbody id="k8s-ds-tbody"><tr><td colspan="6" style="color:var(--muted);padding:1rem">No daemonsets</td></tr></tbody>
+          </table>
+        </div>
       </div>
 
       <!-- ── Network (Services) ────────────────────────────────────────── -->
@@ -1848,6 +1874,56 @@ html.kld-app #term-drawer{display:none!important;}
           <table>
             <thead><tr><th>Namespace</th><th>Name</th><th>Class</th><th>Hosts</th><th>Address</th><th>Ports</th><th style="text-align:right">Age</th></tr></thead>
             <tbody id="k8s-ingress-tbody"><tr><td colspan="7" style="color:var(--muted);padding:1rem">No ingress</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ── Config ── ConfigMaps + Secrets. Secrets are metadata-only (type +
+           key count); the backend never reads decoded values, so nothing
+           sensitive crosses the wire. ────────────────────────────────────── -->
+      <div class="k8s-subview" id="k8s-sub-config">
+        <div class="k8s-panel">
+          <div class="k8s-panel-hdr">
+            <span>▦ ConfigMaps <span class="k8s-panel-hdr-muted" id="k8s-cm-count">0</span></span>
+            <button class="btn btn-ghost btn-sm" onclick="send({action:'k8s_configmaps', namespace: document.getElementById('k8s-ns-filter')?.value || 'all'})">↻</button>
+          </div>
+          <input class="k8s-table-search" placeholder="Filter configmaps…" oninput="k8sTableFilter('k8s-cm-tbody', this.value)">
+          <table>
+            <thead><tr><th>Namespace</th><th>Name</th><th>Keys</th><th style="text-align:right">Age</th></tr></thead>
+            <tbody id="k8s-cm-tbody"><tr><td colspan="4" style="color:var(--muted);padding:1rem">No configmaps</td></tr></tbody>
+          </table>
+        </div>
+        <div class="k8s-panel">
+          <div class="k8s-panel-hdr">
+            <span>🔑 Secrets <span class="k8s-panel-hdr-muted" id="k8s-sec-count">0</span> <span class="k8s-panel-hdr-muted">· metadata only, values never shown</span></span>
+            <button class="btn btn-ghost btn-sm" onclick="send({action:'k8s_secrets', namespace: document.getElementById('k8s-ns-filter')?.value || 'all'})">↻</button>
+          </div>
+          <input class="k8s-table-search" placeholder="Filter secrets…" oninput="k8sTableFilter('k8s-sec-tbody', this.value)">
+          <table>
+            <thead><tr><th>Namespace</th><th>Name</th><th>Type</th><th>Keys</th><th style="text-align:right">Age</th></tr></thead>
+            <tbody id="k8s-sec-tbody"><tr><td colspan="5" style="color:var(--muted);padding:1rem">No secrets</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ── Events ── cluster events, newest first. The first-look debug view:
+           "why is X broken" almost always shows here first. Warnings-only
+           toggle mirrors the AI-assistant k8s_events tool. ────────────────── -->
+      <div class="k8s-subview" id="k8s-sub-events">
+        <div class="k8s-panel">
+          <div class="k8s-panel-hdr">
+            <span>⚡ Cluster Events <span class="k8s-panel-hdr-muted" id="k8s-events-count">0</span></span>
+            <div style="display:flex;gap:0.6rem;align-items:center">
+              <label style="font-size:0.72rem;color:var(--text-dim);display:flex;gap:0.3rem;align-items:center;cursor:pointer">
+                <input type="checkbox" id="k8s-events-warn-only" onchange="k8sRefreshEvents()"> Warnings only
+              </label>
+              <button class="btn btn-ghost btn-sm" onclick="k8sRefreshEvents()">↻</button>
+            </div>
+          </div>
+          <input class="k8s-table-search" placeholder="Filter events…" oninput="k8sTableFilter('k8s-events-tbody', this.value)">
+          <table>
+            <thead><tr><th>Last</th><th>Type</th><th>Namespace</th><th>Reason</th><th>Object</th><th>Message</th></tr></thead>
+            <tbody id="k8s-events-tbody"><tr><td colspan="6" style="color:var(--muted);padding:1rem">No events</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -4338,20 +4414,12 @@ function handle(msg) {
     case 'k8s_services': { renderK8sServices(msg.services); break; }
     case 'k8s_netpol':   { renderK8sNetpol(msg.netpol); break; }
     case 'k8s_ingress':  { renderK8sIngress(msg.ingress); break; }
+    case 'k8s_statefulsets': { renderK8sStatefulSets(msg.statefulsets); break; }
+    case 'k8s_daemonsets':   { renderK8sDaemonSets(msg.daemonsets);     break; }
+    case 'k8s_configmaps':   { renderK8sConfigMaps(msg.configmaps);     break; }
+    case 'k8s_secrets':      { renderK8sSecrets(msg.secrets);           break; }
     case 'k8s_storage':  { renderK8sStorage(msg); break; }
-    case 'k8s_events': {
-      const el = document.getElementById('k8s-events-list');
-      if (el) {
-        const events = msg.events || [];
-        el.innerHTML = events.length
-          ? events.map(e => {
-              const isWarn = /warning|fail|error|crashloopbackoff|fatal/i.test(e);
-              return `<div style="padding:0.25rem 0;color:${isWarn ? 'var(--warn)' : 'var(--subtle)'}">${esc(e)}</div>`;
-            }).join('')
-          : '<div style="color:var(--muted);padding:0.4rem 0">No recent events.</div>';
-      }
-      break;
-    }
+    case 'k8s_events':        { renderK8sEvents(msg.events);           break; }
 
     case 'ansible_status': { renderAnsibleStatus(msg); break; }
     case 'ansible_list':   { renderAnsibleList(msg);   break; }
@@ -7141,6 +7209,10 @@ function k8sNsChange() {
   send({action: 'k8s_services', namespace: ns});
   send({action: 'k8s_netpol', namespace: ns});
   send({action: 'k8s_ingress', namespace: ns});
+  send({action: 'k8s_statefulsets', namespace: ns});
+  send({action: 'k8s_daemonsets', namespace: ns});
+  send({action: 'k8s_configmaps', namespace: ns});
+  send({action: 'k8s_secrets', namespace: ns});
 }
 
 // ── Apply YAML ──────────────────────────────────────────────────────────────
@@ -7180,8 +7252,15 @@ function k8sSubTab(name) {
   if (name === 'workloads') {
     send({action: 'k8s_deployments', namespace: ns});
     send({action: 'k8s_pods', namespace: ns});
+    send({action: 'k8s_statefulsets', namespace: ns});
+    send({action: 'k8s_daemonsets', namespace: ns});
   } else if (name === 'network') {
     send({action: 'k8s_services', namespace: ns});
+    send({action: 'k8s_netpol', namespace: ns});
+    send({action: 'k8s_ingress', namespace: ns});
+  } else if (name === 'config') {
+    send({action: 'k8s_configmaps', namespace: ns});
+    send({action: 'k8s_secrets', namespace: ns});
   } else if (name === 'storage') {
     send({action: 'k8s_storage'});
   } else if (name === 'nodes') {
@@ -7760,6 +7839,91 @@ function renderK8sIngress(ings) {
       <td style="font-family:monospace;font-size:0.8rem;color:${addr !== '—' ? 'var(--accent2)' : 'var(--muted)'}">${esc(addr)}</td>
       <td style="color:var(--muted);font-family:monospace;font-size:0.78rem">${esc(i.ports)}</td>
       <td style="text-align:right;color:var(--muted);font-size:0.8rem">${esc(i.age)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderK8sStatefulSets(sts) {
+  const tbody = document.getElementById('k8s-sts-tbody');
+  if (!tbody) return;
+  const c = document.getElementById('k8s-sts-count'); if (c) c.textContent = (sts || []).length;
+  if (!sts?.length) { tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted);padding:1rem">No statefulsets</td></tr>'; return; }
+  tbody.innerHTML = sts.map(s => {
+    // READY is "n/m" — dim it amber when the ready count trails the desired.
+    const [r, w] = (s.ready || '').split('/');
+    const degraded = r !== undefined && w !== undefined && r !== w;
+    return `<tr>
+      <td style="color:var(--muted);font-size:0.82rem">${esc(s.namespace)}</td>
+      <td style="font-family:monospace;font-size:0.82rem;font-weight:600;color:var(--accent2)">${esc(s.name)}</td>
+      <td style="font-family:monospace;color:${degraded ? 'var(--warn)' : 'var(--ok,#4ade80)'}">${esc(s.ready)}</td>
+      <td style="text-align:right;color:var(--muted);font-size:0.8rem">${esc(s.age)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderK8sDaemonSets(dss) {
+  const tbody = document.getElementById('k8s-ds-tbody');
+  if (!tbody) return;
+  const c = document.getElementById('k8s-ds-count'); if (c) c.textContent = (dss || []).length;
+  if (!dss?.length) { tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);padding:1rem">No daemonsets</td></tr>'; return; }
+  tbody.innerHTML = dss.map(d => {
+    // ready < desired means a node is missing this node-level workload.
+    const degraded = String(d.ready) !== String(d.desired);
+    return `<tr>
+      <td style="color:var(--muted);font-size:0.82rem">${esc(d.namespace)}</td>
+      <td style="font-family:monospace;font-size:0.82rem;font-weight:600;color:var(--accent2)">${esc(d.name)}</td>
+      <td style="font-family:monospace;color:var(--muted)">${esc(d.desired)}</td>
+      <td style="font-family:monospace;color:${degraded ? 'var(--warn)' : 'var(--ok,#4ade80)'}">${esc(d.ready)}</td>
+      <td style="font-family:monospace;color:var(--muted)">${esc(d.available)}</td>
+      <td style="text-align:right;color:var(--muted);font-size:0.8rem">${esc(d.age)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderK8sConfigMaps(cms) {
+  const tbody = document.getElementById('k8s-cm-tbody');
+  if (!tbody) return;
+  const c = document.getElementById('k8s-cm-count'); if (c) c.textContent = (cms || []).length;
+  const nav = document.getElementById('k8s-cnt-config'); if (nav) nav.textContent = (cms || []).length;
+  if (!cms?.length) { tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted);padding:1rem">No configmaps</td></tr>'; return; }
+  tbody.innerHTML = cms.map(m => `<tr>
+      <td style="color:var(--muted);font-size:0.82rem">${esc(m.namespace)}</td>
+      <td style="font-family:monospace;font-size:0.82rem;font-weight:600;color:var(--accent2)">${esc(m.name)}</td>
+      <td style="font-family:monospace;color:var(--muted)">${esc(m.data)}</td>
+      <td style="text-align:right;color:var(--muted);font-size:0.8rem">${esc(m.age)}</td>
+    </tr>`).join('');
+}
+
+function renderK8sSecrets(secs) {
+  const tbody = document.getElementById('k8s-sec-tbody');
+  if (!tbody) return;
+  const c = document.getElementById('k8s-sec-count'); if (c) c.textContent = (secs || []).length;
+  if (!secs?.length) { tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);padding:1rem">No secrets</td></tr>'; return; }
+  // Renders TYPE + key COUNT only — the backend never fetches decoded values.
+  tbody.innerHTML = secs.map(s => `<tr>
+      <td style="color:var(--muted);font-size:0.82rem">${esc(s.namespace)}</td>
+      <td style="font-family:monospace;font-size:0.82rem;font-weight:600;color:var(--accent2)">${esc(s.name)}</td>
+      <td style="color:var(--muted);font-size:0.78rem">${esc(s.type)}</td>
+      <td style="font-family:monospace;color:var(--muted)">${esc(s.data)}</td>
+      <td style="text-align:right;color:var(--muted);font-size:0.8rem">${esc(s.age)}</td>
+    </tr>`).join('');
+}
+
+function renderK8sEvents(evs) {
+  const tbody = document.getElementById('k8s-events-tbody');
+  if (!tbody) return;
+  const c = document.getElementById('k8s-events-count'); if (c) c.textContent = (evs || []).length;
+  const nav = document.getElementById('k8s-cnt-events'); if (nav) nav.textContent = (evs || []).length;
+  if (!evs?.length) { tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);padding:1rem">No events</td></tr>'; return; }
+  tbody.innerHTML = evs.map(e => {
+    const warn = /warning/i.test(e.type || '');
+    return `<tr>
+      <td style="color:var(--muted);font-size:0.78rem;white-space:nowrap">${esc(e.last)}</td>
+      <td style="color:${warn ? 'var(--warn)' : 'var(--muted)'};font-size:0.78rem">${esc(e.type)}</td>
+      <td style="color:var(--muted);font-size:0.8rem">${esc(e.namespace)}</td>
+      <td style="font-family:monospace;font-size:0.78rem;color:${warn ? 'var(--warn)' : 'var(--accent2)'}">${esc(e.reason)}</td>
+      <td style="font-family:monospace;font-size:0.78rem;color:var(--muted)">${esc(e.object)}</td>
+      <td style="font-size:0.8rem" title="${esc(e.message)}">${esc((e.message || '').slice(0, 120))}</td>
     </tr>`;
   }).join('');
 }

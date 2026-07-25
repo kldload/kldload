@@ -2355,6 +2355,16 @@ async def ws_handler(websocket):
                     await _k8s_netpol(websocket, msg)
                 elif action == "k8s_ingress":
                     await _k8s_ingress(websocket, msg)
+                elif action == "k8s_events":
+                    await _k8s_events(websocket, msg)
+                elif action == "k8s_statefulsets":
+                    await _k8s_statefulsets(websocket, msg)
+                elif action == "k8s_daemonsets":
+                    await _k8s_daemonsets(websocket, msg)
+                elif action == "k8s_configmaps":
+                    await _k8s_configmaps(websocket, msg)
+                elif action == "k8s_secrets":
+                    await _k8s_secrets(websocket, msg)
                 elif action == "k8s_scale":
                     await _k8s_scale(websocket, msg)
                 elif action == "k8s_rollout_restart":
@@ -6094,6 +6104,142 @@ async def _k8s_ingress(websocket, msg):
     except Exception:
         pass
     await websocket.send(json.dumps({"type": "k8s_ingress", "ingress": ings}))
+
+
+async def _k8s_events(websocket, msg):
+    """Cluster events, newest-first and capped, for the Overview panel — the
+    single most useful debugging view: what is failing/happening right now.
+    kubectl --sort-by sorts ASCENDING (oldest first), so we reverse + cap.
+    MESSAGE is free text with spaces, hence split(None, maxsplit) keeps it whole."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    ns = msg.get("namespace", "")
+    all_ns = (not ns) or ns == "all"
+    cmd = ["kubectl", "get", "events", "--sort-by=.lastTimestamp", "--no-headers"]
+    cmd.extend(["-A"] if all_ns else ["-n", ns])
+    if msg.get("warnings_only"):  # parity with the AI-assistant k8s_events tool
+        cmd.extend(["--field-selector", "type=Warning"])
+    evs = []
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL,
+                                      timeout=8, env=env)
+        # -A: NS LAST-SEEN TYPE REASON OBJECT MESSAGE ; -n <ns> drops the NS col
+        maxsplit = 5 if all_ns else 4
+        for line in out.strip().splitlines():
+            parts = line.split(None, maxsplit)
+            if all_ns and len(parts) >= 6:
+                evs.append({"namespace": parts[0], "last": parts[1], "type": parts[2],
+                            "reason": parts[3], "object": parts[4], "message": parts[5]})
+            elif not all_ns and len(parts) >= 5:
+                evs.append({"namespace": ns, "last": parts[0], "type": parts[1],
+                            "reason": parts[2], "object": parts[3], "message": parts[4]})
+        evs = list(reversed(evs))[:80]  # newest first, capped for the panel
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_events", "events": evs}))
+
+
+async def _k8s_statefulsets(websocket, msg):
+    """StatefulSets (ns, name, ready, age) for the Workloads panel — the
+    stateful workloads Deployments don't cover (databases, brokers, etc.)."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    ns = msg.get("namespace", "")
+    all_ns = (not ns) or ns == "all"
+    cmd = ["kubectl", "get", "statefulsets", "--no-headers"]
+    cmd.extend(["-A"] if all_ns else ["-n", ns])
+    sts = []
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL,
+                                      timeout=8, env=env)
+        for line in out.strip().splitlines():
+            parts = line.split()
+            if all_ns and len(parts) >= 4:
+                sts.append({"namespace": parts[0], "name": parts[1],
+                            "ready": parts[2], "age": parts[3]})
+            elif not all_ns and len(parts) >= 3:
+                sts.append({"namespace": ns, "name": parts[0],
+                            "ready": parts[1], "age": parts[2]})
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_statefulsets", "statefulsets": sts}))
+
+
+async def _k8s_daemonsets(websocket, msg):
+    """DaemonSets (ns, name, desired, ready, available, age) for the Workloads
+    panel — node-level workloads (Cilium agent, node-exporters) live here, and
+    desired!=ready is a fast signal a node is missing critical infra."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    ns = msg.get("namespace", "")
+    all_ns = (not ns) or ns == "all"
+    cmd = ["kubectl", "get", "daemonsets", "--no-headers"]
+    cmd.extend(["-A"] if all_ns else ["-n", ns])
+    dss = []
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL,
+                                      timeout=8, env=env)
+        for line in out.strip().splitlines():
+            parts = line.split()
+            # -A: NS NAME DESIRED CURRENT READY UP-TO-DATE AVAILABLE NODE-SELECTOR AGE
+            if all_ns and len(parts) >= 9:
+                dss.append({"namespace": parts[0], "name": parts[1], "desired": parts[2],
+                            "ready": parts[4], "available": parts[6], "age": parts[-1]})
+            elif not all_ns and len(parts) >= 8:
+                dss.append({"namespace": ns, "name": parts[0], "desired": parts[1],
+                            "ready": parts[3], "available": parts[5], "age": parts[-1]})
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_daemonsets", "daemonsets": dss}))
+
+
+async def _k8s_configmaps(websocket, msg):
+    """ConfigMaps (ns, name, data-key count, age) for the Config panel."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    ns = msg.get("namespace", "")
+    all_ns = (not ns) or ns == "all"
+    cmd = ["kubectl", "get", "configmaps", "--no-headers"]
+    cmd.extend(["-A"] if all_ns else ["-n", ns])
+    cms = []
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL,
+                                      timeout=8, env=env)
+        for line in out.strip().splitlines():
+            parts = line.split()
+            if all_ns and len(parts) >= 4:
+                cms.append({"namespace": parts[0], "name": parts[1],
+                            "data": parts[2], "age": parts[3]})
+            elif not all_ns and len(parts) >= 3:
+                cms.append({"namespace": ns, "name": parts[0],
+                            "data": parts[1], "age": parts[2]})
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_configmaps", "configmaps": cms}))
+
+
+async def _k8s_secrets(websocket, msg):
+    """Secrets for the Config panel — type + data-key COUNT only, NEVER values.
+    SAFETY: this deliberately shells 'kubectl get secrets' (metadata), never
+    'get secret -o yaml' (the decoded payload); no secret material leaves the
+    node. Data column is a key count, not content."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    ns = msg.get("namespace", "")
+    all_ns = (not ns) or ns == "all"
+    cmd = ["kubectl", "get", "secrets", "--no-headers"]
+    cmd.extend(["-A"] if all_ns else ["-n", ns])
+    secs = []
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL,
+                                      timeout=8, env=env)
+        for line in out.strip().splitlines():
+            parts = line.split()
+            # -A: NS NAME TYPE DATA AGE
+            if all_ns and len(parts) >= 5:
+                secs.append({"namespace": parts[0], "name": parts[1], "type": parts[2],
+                             "data": parts[3], "age": parts[4]})
+            elif not all_ns and len(parts) >= 4:
+                secs.append({"namespace": ns, "name": parts[0], "type": parts[1],
+                             "data": parts[2], "age": parts[3]})
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_secrets", "secrets": secs}))
 
 
 async def _k8s_services(websocket, msg):
