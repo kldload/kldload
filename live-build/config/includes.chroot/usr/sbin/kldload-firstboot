@@ -1404,6 +1404,13 @@ main() {
             /usr/local/bin/kldload-trust-cert --system >>"$LOG" 2>&1 &&
                 ok "Chrome trust seeded — no cert warning for localhost:8443" ||
                 log "WARNING: kldload-trust-cert --system failed; per-user xdg-autostart will cover it on next login"
+            # Signal the GUI autostart (kldload-webui-launch) that the PKI seed
+            # step has run, so it opens Chrome with the cert already trusted
+            # rather than flashing the ~1-min transient cert warning during the
+            # firstboot window (.111 2026-07-25). Touched regardless of seed
+            # outcome so the launcher's bounded wait never hangs the desktop.
+            mkdir -p /var/lib/kldload
+            touch /var/lib/kldload/pki-ready
         fi
     fi
 

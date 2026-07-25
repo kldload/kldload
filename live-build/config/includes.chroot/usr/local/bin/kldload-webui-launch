@@ -34,4 +34,17 @@ for _ in $(seq 1 60); do
 done
 sleep 2 # let nginx finish wiring the upstream before we paint the SPA
 
+# Also wait for the PKI seed before painting. firstboot generates the CA, issues
+# the webui cert, seeds it into each user's ~/.pki/nssdb (the store Chrome reads),
+# THEN touches this marker. On a FRESH install the graphical login can beat that
+# seed by ~1 min (login 09:06 vs nssdb seed 09:07 on .111 2026-07-25), so Chrome's
+# first paint would flash a cert warning that self-heals seconds later. Waiting for
+# the marker means it's trusted on first paint — no warning ever. Bounded; an
+# already-provisioned system has the marker, so there's no wait after first boot,
+# and if it never appears we still open the UI rather than block the desktop.
+for _ in $(seq 1 90); do
+    [[ -f /var/lib/kldload/pki-ready ]] && break
+    sleep 1
+done
+
 exec /usr/local/bin/kldload-chrome-app com.kldload.webui "$url"
