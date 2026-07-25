@@ -121,6 +121,10 @@ KUBE_VIP_DEFAULT="${KUBE_VIP_DEFAULT:-192.168.122.240}"
 # the host itself) and forces an ODD count (1/3/5) for etcd quorum, falling back
 # to 1 — still HA-READY and expandable later — rather than OOM-ing the box.
 CONTROL_PLANES="${CONTROL_PLANES:-3}"
+# kube-vip image for the multi-CP VIP float (must match the k8s darksite mirror
+# and kube-init's pin). Single-CP uses a static VIP (no kube-vip); kube-vip only
+# comes in at >1 CP, where it floats the VIP to whichever CP holds the lease.
+KUBE_VIP_VERSION="${KUBE_VIP_VERSION:-v0.8.9}"
 
 # ANSI color codes for terminal output
 C="\033[1;36m"
@@ -1420,6 +1424,85 @@ _scale_control_planes() {
     done
     log "Control planes now:"
     _ssh_cmd "$cp_ip" 'kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers' 2>/dev/null || true
+    # Once there's more than one CP, the VIP must FLOAT (failover) instead of
+    # sitting statically on CP1 — otherwise a CP1 loss drops the endpoint.
+    _vip_float
+}
+
+# _install_kube_vip_on <cp-ip> <vip> — install a leader-elected kube-vip static
+# pod on one control plane, pointed at the NODE'S OWN api (127-equivalent: the
+# node IP, which is in that node's apiserver cert SANs) so kube-vip never depends
+# on the very VIP it manages. Shipped base64-encoded to dodge ssh quoting.
+_install_kube_vip_on() {
+    local ip="$1" vip="$2" script b64
+    script="$(
+        cat <<REMOTE
+set -e
+NODE_IP=\$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if(\$i=="src") print \$(i+1)}')
+IFACE=\$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if(\$i=="dev") print \$(i+1)}')
+# kube-vip kubeconfig → this node's OWN API (valid TLS via node-IP SAN), never the VIP.
+cp -f /etc/kubernetes/admin.conf /etc/kubernetes/kube-vip.conf
+sed -i "s#server: https://${vip}:6443#server: https://\${NODE_IP}:6443#" /etc/kubernetes/kube-vip.conf
+ctr -n k8s.io image pull ghcr.io/kube-vip/kube-vip:${KUBE_VIP_VERSION} >/dev/null 2>&1 || true
+ctr -n k8s.io run --rm --net-host ghcr.io/kube-vip/kube-vip:${KUBE_VIP_VERSION} kvmani \\
+    /kube-vip manifest pod --interface "\${IFACE}" --address "${vip}" \\
+    --controlplane --arp --leaderElection --prometheusHTTPServer ":2113" \\
+    > /etc/kubernetes/manifests/kube-vip.yaml
+# kube-vip's metrics port DEFAULTS to :2112 — which TETRAGON (a DaemonSet on
+# every node) already owns, so kube-vip crash-looped "listen :2112: address
+# already in use" on the non-leader CPs (.111 2026-07-25; the leader just won
+# the race on its node). Force kube-vip's metrics to :2113 everywhere, catching
+# any :2112 default that slips past the flag.
+sed -i 's#:2112#:2113#g' /etc/kubernetes/manifests/kube-vip.yaml
+sed -i 's#/etc/kubernetes/admin.conf#/etc/kubernetes/kube-vip.conf#g' /etc/kubernetes/manifests/kube-vip.yaml
+REMOTE
+    )"
+    b64="$(printf '%s' "$script" | base64 -w0)"
+    _ssh_cmd "$ip" "echo ${b64} | base64 -d | bash" 2>/dev/null
+}
+
+# _vip_float — convert a >1-CP cluster from the static single-CP VIP to a
+# leader-elected kube-vip that floats the VIP to whichever CP holds the lease.
+# No-op on a single CP. Idempotent-ish (reinstalling the static pod is safe).
+_vip_float() {
+    local vip cp1_ip cp_names n name ip code
+    vip="${KUBE_VIP_ADDRESS:-$KUBE_VIP_DEFAULT}"
+    cp1_ip="$(_node_ip "$CP_NAME")"
+    [[ -n "$cp1_ip" ]] || {
+        warn "vip-float: control plane ${CP_NAME} not found"
+        return 1
+    }
+    # Enumerate CPs BEFORE any VIP disruption (this query goes through the VIP).
+    cp_names="$(_ssh_cmd "$cp1_ip" 'kubectl get nodes -l node-role.kubernetes.io/control-plane -o name 2>/dev/null' | sed 's#node/##')"
+    n="$(printf '%s\n' "$cp_names" | grep -c .)"
+    if ((n < 2)); then
+        log "Single control plane — static VIP kept (kube-vip float needs ≥2 CPs)"
+        return 0
+    fi
+    log "VIP float: leader-elected kube-vip on ${n} control planes (VIP ${vip})"
+    for name in $cp_names; do
+        ip="$(_node_ip "$name")"
+        [[ -n "$ip" ]] || {
+            warn "  ${name}: no IP — skipping kube-vip"
+            continue
+        }
+        log "  kube-vip → ${name} (${ip})"
+        _install_kube_vip_on "$ip" "$vip" || warn "  ${name}: kube-vip install errored"
+    done
+    # Let kube-vip start + elect a leader (which claims the VIP) before retiring
+    # the static holder, so the VIP is only ever held by one owner at a time.
+    log "  waiting for kube-vip to take the VIP..."
+    sleep 20
+    # Retire the static single-CP VIP unit on every CP — kube-vip owns it now.
+    # --now runs ExecStop (removes the static IP) so we never dual-announce .240.
+    for name in $cp_names; do
+        ip="$(_node_ip "$name")"
+        [[ -n "$ip" ]] || continue
+        _ssh_cmd "$ip" 'systemctl disable --now kldload-cp-vip.service >/dev/null 2>&1; rm -f /etc/systemd/system/kldload-cp-vip.service; systemctl daemon-reload >/dev/null 2>&1; true' 2>/dev/null || true
+    done
+    sleep 5
+    code="$(_ssh_cmd "$cp1_ip" "curl -sk -o /dev/null -w '%{http_code}' --max-time 8 https://${vip}:6443/healthz" 2>/dev/null)"
+    log "VIP ${vip} now floats across ${n} CPs (kube-vip, leader-elected) — endpoint: ${code:-unreachable}"
 }
 
 # ── Bootstrap: Full Auto Cluster Deploy ────────────────────────────────────
@@ -2674,5 +2757,10 @@ golden) cmd_golden ;;
 destroy) cmd_destroy "${2:-}" ;;
 status) cmd_status ;;
 scale) if [[ "${_SCALE_CP:-0}" == 1 ]]; then cmd_scale_cp; else cmd_scale "${WORKERS:-1}"; fi ;;
+vip-float)
+    _ensure_libvirt_default_net
+    KUBE_VIP_ADDRESS="${KUBE_VIP_ADDRESS:-$KUBE_VIP_DEFAULT}"
+    _vip_float
+    ;;
 *) usage ;;
 esac
