@@ -114,6 +114,14 @@ HA_READY="${HA_READY:-1}"
 KUBE_VIP_ADDRESS="${KUBE_VIP_ADDRESS:-}"
 KUBE_VIP_DEFAULT="${KUBE_VIP_DEFAULT:-192.168.122.240}"
 
+# ── Multi control plane (brick 3) ────────────────────────────────────────────
+# CONTROL_PLANES is the TARGET control-plane count. Default 3 = real HA (survives
+# losing one). But 3 CPs must physically fit — _preflight_control_planes() below
+# caps this to what the host's RAM/CPU can host (reserving headroom for workers +
+# the host itself) and forces an ODD count (1/3/5) for etcd quorum, falling back
+# to 1 — still HA-READY and expandable later — rather than OOM-ing the box.
+CONTROL_PLANES="${CONTROL_PLANES:-3}"
+
 # ANSI color codes for terminal output
 C="\033[1;36m"
 G="\033[1;32m"
@@ -294,7 +302,49 @@ _allocate_ha_vip() {
         --live --config >/dev/null 2>&1 ||
         log "  VIP DHCP reservation already present (or net-update unsupported) — continuing"
 
-    log "HA-ready: control-plane VIP ${KUBE_VIP_ADDRESS} (kube-vip ARP/L2, reserved out of DHCP)"
+    log "HA-ready: control-plane VIP ${KUBE_VIP_ADDRESS} (reserved out of DHCP)"
+}
+
+# _preflight_control_planes — clamp CONTROL_PLANES to a sane, host-fitting, ODD
+# value (sets the global). Rules:
+#   - odd only (etcd quorum): an even request rounds DOWN to the next odd.
+#   - must fit: each CP needs CP_RAM MB + CP_CPUS vcpus, each worker RAM+CPUS;
+#     reserve headroom for the host. If the target + workers don't fit, drop to
+#     the largest odd count that does (min 1 — still HA-ready, expandable later).
+# Advisory, never fatal: we only avoid over-promising; a box too small for even
+# 1 CP + its workers fails later with a clear libvirt error.
+_preflight_control_planes() {
+    local want="$CONTROL_PLANES"
+    [[ "$want" =~ ^[0-9]+$ ]] || want=3
+    ((want >= 1)) || want=1
+    ((want % 2 == 0)) && want=$((want - 1)) # 2→1, 4→3, 6→5
+    ((want >= 1)) || want=1
+
+    # RAM is the ONLY hard constraint — it can't be over-committed without
+    # swapping the hypervisor to death. vCPUs over-commit fine on KVM (standard
+    # practice), so we deliberately do NOT cap on core count. Base the budget on
+    # AVAILABLE memory (already excludes running VMs), reserve host headroom, and
+    # subtract the workers this run will also stand up.
+    local avail_mem
+    avail_mem="$(free -m 2>/dev/null | awk '/^Mem:/ {print $7}')"
+    if [[ "$avail_mem" =~ ^[0-9]+$ ]]; then
+        local budget=$((avail_mem - 2048 - WORKERS * RAM))
+        local fit=0
+        ((CP_RAM > 0)) && fit=$((budget / CP_RAM))
+        ((fit < 1)) && fit=1
+        ((fit % 2 == 0)) && fit=$((fit - 1)) # largest ODD that fits
+        ((fit < 1)) && fit=1
+        if ((fit < want)); then
+            warn "Host has RAM for ${fit} control plane(s) at ${CP_RAM}MB each, not ${want} — capping. Free RAM or lower CP_RAM to add more. Still HA-ready."
+            want=$fit
+        fi
+    fi
+    CONTROL_PLANES="$want"
+    if ((CONTROL_PLANES == 1)); then
+        log "Control planes: 1 (HA-ready + expandable — add more with 'kube-cluster scale --control-planes N')"
+    else
+        log "Control planes: ${CONTROL_PLANES} (odd, etcd-quorum-safe — tolerates $(((CONTROL_PLANES - 1) / 2)) failure(s))"
+    fi
 }
 
 _ensure_cloud_init_pool() {
@@ -393,6 +443,11 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
     --workers)
         WORKERS="$2"
+        shift 2
+        ;;
+    --control-planes | --cps)
+        CONTROL_PLANES="$2"
+        _SCALE_CP=1 # for `scale`: distinguishes scaling CPs from scaling workers
         shift 2
         ;;
     --ram)
@@ -1166,6 +1221,205 @@ NETCFG
     for vm in "${CP_NAME}" $(seq -f "${WORKER_PREFIX}-%g" 1 "$WORKERS"); do
         virsh autostart --disable "$vm" 2>/dev/null || true
     done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi control plane orchestration (brick 3)
+#
+# Adding a control plane is: clone golden → boot with a unique identity →
+# node-prep (Ansible) → `kubeadm join --control-plane` against the cluster VIP.
+# These primitives are shared by cmd_bootstrap (born-with-N-CPs) and cmd_scale
+# (grow an existing cluster). The join is host-driven, mirroring the proven
+# worker path _kube_join_one (fresh token + fresh cert key per attempt, reset on
+# retry) rather than shelling the standalone `kube-join` tool inside the VM.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# _node_ip <vm-name> — the VM's current DHCP IP on virbr0 (empty until leased).
+_node_ip() {
+    local name="$1" mac ip=""
+    # Resolve by MAC, NOT hostname: cloned nodes get a DHCP lease but often
+    # register NO hostname in it (lease shows "-"), so hostname matching silently
+    # fails and the node looks "never leased" when it's actually up (seen .111
+    # 2026-07-25). The VM's MAC is stable and always present in the lease table.
+    mac="$(virsh dumpxml "$name" 2>/dev/null | grep -oiE "([0-9a-f]{2}:){5}[0-9a-f]{2}" | head -1)"
+    if [[ -n "$mac" ]]; then
+        ip="$(virsh net-dhcp-leases default 2>/dev/null |
+            awk -v m="$mac" 'index(tolower($0), tolower(m)) {
+                for (i = 1; i <= NF; i++) if ($i ~ /^192\.168\.122\./) { print $i; exit } }' |
+            cut -d/ -f1)"
+    fi
+    # Fallback: libvirt's own per-domain lease resolver.
+    [[ -n "$ip" ]] || ip="$(virsh domifaddr "$name" --source lease 2>/dev/null | grep -oE '192\.168\.122\.[0-9]+' | head -1)"
+    printf '%s' "$ip"
+}
+
+# _clone_boot_node <name> — clone the golden into a control-plane-sized VM with a
+# unique cloud-init identity, boot it, and echo its IP once leased (empty on
+# failure). Single-node analogue of clone_and_boot; used to add control planes.
+_clone_boot_node() {
+    local name="$1" pubkey ci_dir ci_iso ip=""
+    pubkey="$(cat "${SSH_KEY}.pub" 2>/dev/null)"
+    # Idempotent: obliterate any stale VM + zvol for this name from a prior
+    # failed/partial run, so kvm-clone never trips on "destination already
+    # exists" (seen .111 2026-07-25 — a leftover cp-3 zvol blocked the reclone).
+    virsh destroy "$name" >/dev/null 2>&1 || true
+    virsh undefine "$name" --nvram >/dev/null 2>&1 || virsh undefine "$name" >/dev/null 2>&1 || true
+    rm -f "/var/lib/kldload/cloud-init/${name}-ci.iso" >/dev/null 2>&1 || true
+    zfs destroy -Rf "${POOL}/vms/${name}" >/dev/null 2>&1 || true
+    kvm-clone "${GOLDEN}" "${name}" >/dev/null 2>&1 || {
+        warn "clone failed: ${name}"
+        return 1
+    }
+    ci_dir="$(mktemp -d)"
+    ci_iso="/var/lib/kldload/cloud-init/${name}-ci.iso"
+    cat >"${ci_dir}/meta-data" <<META
+instance-id: ${name}
+local-hostname: ${name}
+META
+    cat >"${ci_dir}/user-data" <<USERDATA
+#cloud-config
+hostname: ${name}
+manage_etc_hosts: true
+disable_root: false
+ssh_pwauth: true
+ssh_authorized_keys:
+  - ${pubkey}
+chpasswd:
+  expire: false
+  list: |
+    root:kldload
+bootcmd:
+  - [ sh, -c, "systemctl stop firewalld 2>/dev/null; systemctl mask firewalld 2>/dev/null; true" ]
+  - [ sh, -c, "systemctl stop ufw 2>/dev/null; ufw --force disable 2>/dev/null; true" ]
+  - [ sh, -c, "rm -f /etc/machine-id && systemd-machine-id-setup" ]
+  - [ sh, -c, "rm -f /etc/ssh/ssh_host_* && ssh-keygen -A" ]
+  - [ sh, -c, "passwd -uf root 2>/dev/null || true" ]
+  - [ sh, -c, "mkdir -p /etc/ssh/sshd_config.d && printf 'PermitRootLogin yes\\nPasswordAuthentication yes\\nMaxStartups 20:30:60\\n' > /etc/ssh/sshd_config.d/99-kldload.conf" ]
+USERDATA
+    cat >"${ci_dir}/network-config" <<NETCFG
+version: 2
+ethernets:
+  id0:
+    match: {name: "en*"}
+    dhcp4: true
+  id1:
+    match: {name: "eth*"}
+    dhcp4: true
+NETCFG
+    # CRITICAL: this function's ONLY stdout is the trailing `printf "$ip"`, so
+    # every virsh/genisoimage call below MUST swallow BOTH stdout and stderr —
+    # virsh attach-disk/autostart print success chatter to STDOUT which would
+    # otherwise pollute the captured IP ("no SSH at Disk attached successfully",
+    # seen .111 2026-07-25).
+    genisoimage -output "$ci_iso" -volid cidata -joliet -rock \
+        "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" >/dev/null 2>&1 ||
+        xorriso -as mkisofs -o "$ci_iso" -volid cidata -joliet -rock \
+            "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" >/dev/null 2>&1
+    rm -rf "$ci_dir"
+    virsh attach-disk "$name" "$ci_iso" sdb --type cdrom --config >/dev/null 2>&1 || true
+    # Control-plane sized: etcd + apiserver + Cilium need the headroom.
+    virsh setmaxmem "$name" "${CP_RAM}M" --config >/dev/null 2>&1 || true
+    virsh setmem "$name" "${CP_RAM}M" --config >/dev/null 2>&1 || true
+    virsh setvcpus "$name" "${CP_CPUS}" --config --maximum >/dev/null 2>&1 || true
+    virsh setvcpus "$name" "${CP_CPUS}" --config >/dev/null 2>&1 || true
+    virsh start "$name" >/dev/null 2>&1 || true
+    virsh autostart --disable "$name" >/dev/null 2>&1 || true # match cluster boot-state policy
+    local _t
+    for _t in $(seq 1 24); do
+        ip="$(_node_ip "$name")"
+        [[ -n "$ip" ]] && break
+        sleep 5
+    done
+    printf '%s' "$ip"
+}
+
+# _join_control_plane_one <existing-cp-ip> <new-ip> <new-name> — join an already
+# booted+node-prepped node as an ADDITIONAL control plane, host-driven. Mints a
+# FRESH token and a FRESH certificate key (kubeadm's key expires ~2h) from an
+# existing CP each attempt, resets half-state on retry. Returns 0 on success.
+_join_control_plane_one() {
+    local cp_ip="$1" new_ip="$2" name="$3"
+    local logdir="/var/log/kldload" logfile
+    mkdir -p "$logdir"
+    logfile="${logdir}/kube-join-${name}.log"
+    : >"$logfile"
+    local attempt
+    for attempt in 1 2; do
+        echo "--- CP-join attempt ${attempt}: ${name} (${new_ip}) $(date -u +%FT%TZ) ---" >>"$logfile"
+        local join_cmd cert_key
+        join_cmd="$(_ssh_cmd "$cp_ip" 'kubeadm token create --ttl=15m --print-join-command' 2>/dev/null)" || join_cmd=""
+        cert_key="$(_ssh_cmd "$cp_ip" 'kubeadm init phase upload-certs --upload-certs 2>/dev/null' |
+            awk '/Using certificate key:/ { getline; gsub(/[[:space:]]/, ""); print; exit }')" || cert_key=""
+        if [[ -z "$join_cmd" || ! "$cert_key" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "[fail] no token / invalid cert-key from CP ${cp_ip}" >>"$logfile"
+            [[ $attempt -lt 2 ]] && sleep 5 && continue
+            return 2
+        fi
+        # On retry, wipe any half-joined control-plane state (etcd member too).
+        if [[ $attempt -ge 2 ]]; then
+            _ssh_cmd_logged "$new_ip" "$logfile" \
+                "kubeadm reset -f >/dev/null 2>&1 || true; rm -rf /etc/kubernetes/* /var/lib/etcd /var/lib/kubelet/* /etc/cni/net.d/* 2>/dev/null || true" || true
+        fi
+        if _ssh_cmd_logged "$new_ip" "$logfile" \
+            "${join_cmd} --control-plane --certificate-key ${cert_key} --apiserver-advertise-address ${new_ip} --v=5"; then
+            _ssh_cmd "$new_ip" 'mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config && chmod 600 /root/.kube/config' 2>/dev/null || true
+            # Schedulable CP (kldload runs workloads on control planes).
+            _ssh_cmd "$cp_ip" "kubectl taint nodes ${name} node-role.kubernetes.io/control-plane- --overwrite 2>/dev/null || true" 2>/dev/null || true
+            echo "[ok] ${name} joined as control plane on attempt ${attempt}" >>"$logfile"
+            return 0
+        fi
+        echo "[retry] join failed on attempt ${attempt}" >>"$logfile"
+    done
+    return 1
+}
+
+# _scale_control_planes <target> — grow the cluster to <target> control planes by
+# cloning/joining ${CP_NAME}-2, -3, … against the cluster VIP. Idempotent-ish:
+# does nothing if already at/above target. The VIP FLOAT hand-off (static →
+# kube-vip across all CPs) is applied by _vip_float once >1 CP exists.
+_scale_control_planes() {
+    local target="$1"
+    local cp_ip have vip idx name new_ip
+    cp_ip="$(_node_ip "$CP_NAME")"
+    [[ -n "$cp_ip" ]] || {
+        warn "cannot resolve existing control plane ${CP_NAME} — is the cluster up?"
+        return 1
+    }
+    have="$(_ssh_cmd "$cp_ip" 'kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers 2>/dev/null | wc -l')" || have=1
+    [[ "$have" =~ ^[0-9]+$ ]] || have=1
+    if ((target <= have)); then
+        log "Control planes: already ${have} (target ${target}) — nothing to add"
+        return 0
+    fi
+    vip="${KUBE_VIP_ADDRESS:-$cp_ip}"
+    log "Scaling control planes ${have} → ${target} via endpoint ${vip}"
+    idx=$((have + 1))
+    while ((idx <= target)); do
+        name="${CP_NAME}-${idx}"
+        log "  + control plane ${name}"
+        new_ip="$(_clone_boot_node "$name")"
+        if [[ -z "$new_ip" ]]; then
+            warn "  ${name}: never leased an IP — skipping"
+            idx=$((idx + 1))
+            continue
+        fi
+        if ! wait_for_ssh "$new_ip" 120; then
+            warn "  ${name}: no SSH at ${new_ip} — skipping"
+            idx=$((idx + 1))
+            continue
+        fi
+        run_ansible_against_vm "$new_ip" node-prep.yml -e "inventory_hostname_short=${name}" ||
+            warn "  ${name}: node-prep reported errors — attempting join anyway"
+        if _join_control_plane_one "$cp_ip" "$new_ip" "$name"; then
+            _db_register_node "$name" "control_plane" "$new_ip" "${CLUSTER_NAME}" "ready" 2>/dev/null || true
+            log "  ✓ ${name} joined as control plane (${new_ip})"
+        else
+            warn "  ✗ ${name} failed to join — /var/log/kldload/kube-join-${name}.log"
+        fi
+        idx=$((idx + 1))
+    done
+    log "Control planes now:"
+    _ssh_cmd "$cp_ip" 'kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers' 2>/dev/null || true
 }
 
 # ── Bootstrap: Full Auto Cluster Deploy ────────────────────────────────────
@@ -2038,6 +2292,29 @@ cmd_golden() {
 # index. So if you have w-1, w-2, w-5 (because w-3, w-4 were destroyed),
 # you get w-6, w-7. This avoids reusing names that may still have stale
 # entries in the apiserver's node list.
+# cmd_scale_cp — `kube-cluster scale --control-planes N`: grow the cluster's
+# control-plane count to N (odd, host-fitting). The cluster must already exist
+# and be HA-ready (bootstrap sets the VIP endpoint). Uses the same VIP the
+# cluster was born with — NOT _allocate_ha_vip, which expects a FREE address and
+# would (correctly) refuse the already-live cluster VIP.
+cmd_scale_cp() {
+    _ensure_libvirt_default_net
+    _ensure_cloud_init_pool
+    virsh dominfo "${CP_NAME}" >/dev/null 2>&1 ||
+        die "scale: control plane '${CP_NAME}' not found. Run 'kube-cluster bootstrap' first."
+    if ! virsh list --state-running --name 2>/dev/null | grep -qx "${CP_NAME}"; then
+        log "Starting ${CP_NAME}..."
+        virsh start "${CP_NAME}" >/dev/null 2>&1 || true
+        wait_for_ssh "$(_node_ip "${CP_NAME}")" 120 || warn "control plane slow to come up"
+    fi
+    KUBE_VIP_ADDRESS="${KUBE_VIP_ADDRESS:-$KUBE_VIP_DEFAULT}" # the cluster's existing endpoint
+    echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+    echo -e "${W}  kube-cluster scale — control planes → ${CONTROL_PLANES} on ${CLUSTER_NAME}${N}"
+    echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+    _preflight_control_planes
+    _scale_control_planes "$CONTROL_PLANES"
+}
+
 cmd_scale() {
     local N="${1:-${WORKERS:-1}}"
     [[ "$N" =~ ^[0-9]+$ ]] || die "scale: N must be a non-negative integer (got '$N')"
@@ -2396,6 +2673,6 @@ bootstrap) cmd_bootstrap ;;
 golden) cmd_golden ;;
 destroy) cmd_destroy "${2:-}" ;;
 status) cmd_status ;;
-scale) cmd_scale "${WORKERS:-1}" ;;
+scale) if [[ "${_SCALE_CP:-0}" == 1 ]]; then cmd_scale_cp; else cmd_scale "${WORKERS:-1}"; fi ;;
 *) usage ;;
 esac

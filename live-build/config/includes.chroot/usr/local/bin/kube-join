@@ -1,12 +1,44 @@
 #!/usr/bin/env bash
-# kube-join — join a worker node to an existing kldload Kubernetes cluster
-# Usage: kube-join <control-plane-ip>
-set -euo pipefail
+# ─────────────────────────────────────────────────────────────────────────────
+# kube-join — join a node to an existing kldload Kubernetes cluster.
+#
+# Two modes:
+#   kube-join <cp-endpoint>                  → join as a WORKER (default)
+#   kube-join --control-plane <cp-endpoint>  → join as an additional CONTROL
+#                                              PLANE (brick 2: HA control plane)
+#
+# What it does, in order:
+#   1. Pre-flight (kubeadm/containerd present, node not already joined).
+#   2. ZFS snapshot (reversible — a bad join is a rollback, not a reinstall).
+#   3. Pull a join command from an existing control plane (fresh bootstrap token).
+#   4. CONTROL-PLANE mode only: pull a FRESH certificate key (kubeadm re-uploads
+#      the control-plane certs; the key is valid ~2h, so we mint one per join and
+#      never reuse a stale one), and append the control-plane join flags.
+#   5. Run `kubeadm join` (± --control-plane) and, for a CP, wire up kubeconfig
+#      and remove the control-plane taint so the CP is schedulable (kldload runs
+#      workloads on control planes — small clusters, and the demo story).
+#
+# Why <cp-endpoint> should be the cluster's control-plane VIP, not a node IP:
+# joining against the VIP means the join survives the target CP going away, and
+# the new CP registers behind the same stable endpoint. On a kldload cluster the
+# VIP is what `kube-init` set as --control-plane-endpoint (brick 4).
+#
+# Notes / invariants:
+#   - The cluster MUST have been init'd HA-ready (a control-plane-endpoint) or a
+#     --control-plane join is impossible — kubeadm rejects it. kldload clusters
+#     are HA-ready by default since brick 4; a legacy HA_READY=0 cluster cannot
+#     take extra control planes without a reinit.
+#   - etcd quorum wants an ODD number of control planes (1→3→5). Joining the 2nd
+#     CP is a transient even state; get to 3 for real fault tolerance. This tool
+#     joins ONE CP; kube-cluster orchestrates groups + the VIP float (brick 3).
+#   - WireGuard mesh + the VIP hand-off (static → kube-vip) are orchestrated by
+#     kube-cluster, not here — this tool is the single-node join primitive.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo -e "\033[1;31m[kube-join]\033[0m FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Auto-elevate to root
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
-
-CONTROL_PLANE="${1:-}"
 
 log() { echo -e "\033[1;32m[kube-join]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[kube-join]\033[0m $*" >&2; }
@@ -17,21 +49,67 @@ die() {
 
 usage() {
     cat <<EOF
-Usage: kube-join <control-plane-ip>
+Usage:
+  kube-join <cp-endpoint>                 Join this node as a WORKER.
+  kube-join --control-plane <cp-endpoint> Join this node as an additional
+                                          CONTROL PLANE (requires an HA-ready
+                                          cluster — control-plane-endpoint set).
 
-Joins this node as a worker to the Kubernetes cluster at <control-plane-ip>.
-Requires kube-setup to have been run first on this node.
+<cp-endpoint> should be the cluster's control-plane VIP (what kube-init used for
+--control-plane-endpoint), so the join targets the stable front end. A node IP
+also works if the VIP is unavailable.
 
-Example:
-  kube-join 10.100.10.100
-  kube-join 10.250.0.1        # WireGuard backplane IP
+Requires kube-setup to have been run on this node first.
+
+Examples:
+  kube-join 192.168.122.240                  # worker, via the cluster VIP
+  kube-join --control-plane 192.168.122.240  # add a control plane
+  kube-join 10.250.0.1                        # worker, via the WireGuard IP
 EOF
     exit 1
 }
 
+# ── Arg parsing ──────────────────────────────────────────────────────────────
+AS_CONTROL_PLANE=0
+CONTROL_PLANE=""
+for arg in "$@"; do
+    case "$arg" in
+    --control-plane | --cp) AS_CONTROL_PLANE=1 ;;
+    -h | --help) usage ;;
+    -*) die "unknown flag: $arg (see --help)" ;;
+    *)
+        [[ -z "$CONTROL_PLANE" ]] || die "unexpected extra argument: $arg"
+        CONTROL_PLANE="$arg"
+        ;;
+    esac
+done
 [[ -n "$CONTROL_PLANE" ]] || usage
 
-# ── Pre-flight ─────────────────────────────────────────────────────────────
+# ── SSH to the control plane (key first, password fallback) ──────────────────
+_ssh_cp() {
+    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
+        "root@${CONTROL_PLANE}" "$@" 2>/dev/null ||
+        sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+            "root@${CONTROL_PLANE}" "$@" 2>/dev/null
+}
+
+# _this_node_ip — the source IP this node uses to reach the cluster. Used as the
+# new control plane's --apiserver-advertise-address so its apiserver binds/announces
+# on the routable interface (not a WireGuard or loopback address by accident).
+_this_node_ip() {
+    ip route get "$CONTROL_PLANE" 2>/dev/null |
+        awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }'
+}
+
+# _fresh_cert_key — re-upload the control-plane certs to the cluster and echo the
+# fresh certificate key (64 hex chars). kubeadm's key expires ~2h, so we mint a
+# new one for THIS join rather than trusting the init-time key. Empty on failure.
+_fresh_cert_key() {
+    _ssh_cp 'kubeadm init phase upload-certs --upload-certs 2>/dev/null' |
+        awk '/Using certificate key:/ { getline; gsub(/[[:space:]]/, ""); print; exit }'
+}
+
+# ── Pre-flight ───────────────────────────────────────────────────────────────
 command -v kubeadm >/dev/null 2>&1 || die "kubeadm not found. Run kube-setup first."
 systemctl is-active containerd >/dev/null 2>&1 || die "containerd is not running"
 
@@ -39,7 +117,7 @@ if kubelet --version >/dev/null 2>&1 && [[ -f /etc/kubernetes/kubelet.conf ]]; t
     die "This node is already part of a cluster. Use kube-reset to leave first."
 fi
 
-# ── ZFS snapshot before join ───────────────────────────────────────────────
+# ── ZFS snapshot before join (reversible) ────────────────────────────────────
 if command -v zfs >/dev/null 2>&1; then
     pool="$(zfs list -H -o name / 2>/dev/null | cut -d/ -f1)" || true
     if [[ -n "${pool:-}" ]]; then
@@ -49,40 +127,73 @@ if command -v zfs >/dev/null 2>&1; then
     fi
 fi
 
-# ── Get join command from control plane ────────────────────────────────────
+# ── Fetch the base join command (fresh bootstrap token) ──────────────────────
 log "Fetching join command from $CONTROL_PLANE..."
-
-JOIN_CMD=""
-
-# Try fetching via SSH (key first, then password fallback)
-_ssh_cp() {
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
-        "root@${CONTROL_PLANE}" "$@" 2>/dev/null ||
-        sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-            "root@${CONTROL_PLANE}" "$@" 2>/dev/null
-}
-
-JOIN_CMD="$(_ssh_cp 'cat /etc/kubernetes/join-command.sh')" 2>/dev/null || true
-
-# If that failed, generate a new token
-if [[ -z "$JOIN_CMD" ]]; then
-    JOIN_CMD="$(_ssh_cp 'kubeadm token create --print-join-command')" 2>/dev/null || true
-fi
-
-if [[ -z "$JOIN_CMD" ]]; then
+JOIN_CMD="$(_ssh_cp 'cat /etc/kubernetes/join-command.sh')" || true
+[[ -n "$JOIN_CMD" ]] || JOIN_CMD="$(_ssh_cp 'kubeadm token create --print-join-command')" || true
+[[ -n "$JOIN_CMD" ]] ||
     die "Could not get join command from $CONTROL_PLANE. Ensure SSH access is configured."
-fi
-
 log "Join command received"
 
-# ── Join the cluster ───────────────────────────────────────────────────────
-log "Joining cluster at $CONTROL_PLANE..."
+# ── Join ─────────────────────────────────────────────────────────────────────
+if [[ "$AS_CONTROL_PLANE" == 1 ]]; then
+    # Confirm the target cluster is actually HA-ready — kubeadm join --control-plane
+    # against a cluster with no control-plane-endpoint fails with a confusing error;
+    # catch it early with a clear message.
+    if ! _ssh_cp 'kubectl -n kube-system get cm kubeadm-config -o jsonpath={.data.ClusterConfiguration} 2>/dev/null' |
+        grep -q 'controlPlaneEndpoint'; then
+        die "cluster at $CONTROL_PLANE has no controlPlaneEndpoint — it was NOT init'd HA-ready, so it cannot take extra control planes. Reinstall with HA_READY=1 (the default)."
+    fi
+
+    cert_key="$(_fresh_cert_key)"
+    [[ "$cert_key" =~ ^[a-f0-9]{64}$ ]] ||
+        die "could not obtain a valid certificate key from $CONTROL_PLANE (got: '${cert_key:0:16}…'). Is the target a healthy control plane?"
+
+    node_ip="$(_this_node_ip)"
+    [[ -n "$node_ip" ]] || die "could not determine this node's IP toward $CONTROL_PLANE"
+
+    log "Joining as an ADDITIONAL CONTROL PLANE"
+    log "  endpoint:   $CONTROL_PLANE   advertise: $node_ip"
+    log "  cert key:   fresh (kubeadm ~2h TTL — minted for this join)"
+
+    # --certificate-key lets kubeadm pull the shared CA/SA/etcd certs from the
+    # kubeadm-certs Secret; --apiserver-advertise-address pins this CP's apiserver.
+    eval "$JOIN_CMD --control-plane --certificate-key $cert_key --apiserver-advertise-address $node_ip" 2>&1
+
+    # kubeconfig for root + the primary human user (mirrors kube-init).
+    mkdir -p /root/.kube
+    cp -f /etc/kubernetes/admin.conf /root/.kube/config
+    chmod 600 /root/.kube/config
+    export KUBECONFIG=/etc/kubernetes/admin.conf
+    _u="$(getent passwd | awk -F: '$3 >= 1000 && $3 < 65000 { print $1; exit }')"
+    if [[ -n "${_u:-}" ]]; then
+        _uh="$(getent passwd "$_u" | cut -d: -f6)"
+        mkdir -p "${_uh}/.kube"
+        cp -f /etc/kubernetes/admin.conf "${_uh}/.kube/config"
+        chown -R "${_u}:${_u}" "${_uh}/.kube"
+    fi
+
+    # Schedulable control plane — kldload runs workloads on CPs (see kube-init).
+    kubectl taint nodes "$(hostname)" node-role.kubernetes.io/control-plane- 2>/dev/null || true
+
+    echo ""
+    log "Successfully joined as a CONTROL PLANE"
+    log "  This node:  $(hostname) ($node_ip) — schedulable"
+    log ""
+    log "Verify quorum on any control plane:"
+    log "  kubectl get nodes -l node-role.kubernetes.io/control-plane"
+    log "  kubectl -n kube-system exec etcd-\$(hostname) -- etcdctl member list  # (odd count = healthy)"
+    exit 0
+fi
+
+# ── Worker join (default) ────────────────────────────────────────────────────
+log "Joining cluster at $CONTROL_PLANE as a worker..."
 eval "$JOIN_CMD" 2>&1
 
 echo ""
 log "Successfully joined the cluster"
 log "  Control plane: $CONTROL_PLANE"
-log "  This node:     $(hostname) ($(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}'))"
+log "  This node:     $(hostname) ($(_this_node_ip))"
 log ""
 log "Verify on the control plane:"
 log "  kubectl get nodes"
