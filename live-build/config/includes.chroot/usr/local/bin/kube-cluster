@@ -1520,13 +1520,12 @@ cmd_bootstrap() {
 
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
     echo -e "${W}  kube-cluster bootstrap                                     ${N}"
-    echo -e "${W}  1 control plane + ${WORKERS} workers on ZFS instant clones         ${N}"
+    echo -e "${W}  ${CONTROL_PLANES} control plane(s) + ${WORKERS} workers on ZFS instant clones         ${N}"
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
     echo ""
 
     _ensure_libvirt_default_net
     _ensure_cloud_init_pool
-    _allocate_ha_vip # brick 4: born HA-ready (sets KUBE_VIP_ADDRESS unless HA_READY=0)
 
     # Step 0: Clean slate — destroy any existing cluster + golden
     # No half-states, no stale VMs, no orphaned zvols. Every bootstrap
@@ -1554,6 +1553,12 @@ cmd_bootstrap() {
     sed -i '/# kldload-k8s-cluster/,/# end-kldload-k8s-cluster/d' /etc/hosts 2>/dev/null || true
     systemctl start sanoid.timer 2>/dev/null || true
     step_done "Clean slate"
+
+    # Allocate the HA VIP AFTER clean-slate: a prior cluster on this host holds
+    # .240 (kube-vip/static) until its VMs are destroyed above, and the ARP
+    # conflict-check would otherwise abort a re-bootstrap ('.240 already answers
+    # ARP', .111 2026-07-25). Fresh installs never hit this (VIP free).
+    _allocate_ha_vip # brick 4: born HA-ready (sets KUBE_VIP_ADDRESS unless HA_READY=0)
 
     # Register the cluster in the state DB. This is the anchor every node and
     # deployment will link to — created first so later upserts can reference it.
@@ -1800,6 +1805,21 @@ cmd_bootstrap() {
     # Step 6: Verify
     echo ""
     step_done "Workers joined: ${joined}/${WORKERS}"
+
+    # ── HA control plane (brick 3): born with N control planes ────────────────
+    # HA-by-default. The single CP + workers are up; now grow to CONTROL_PLANES
+    # (default 3, preflight-capped to what the host fits, odd for etcd quorum).
+    # _scale_control_planes also flips the VIP from the single-CP static address
+    # to a leader-elected kube-vip float once >1 CP. HA_READY=0 keeps 1 CP.
+    if [[ "$HA_READY" == "1" ]]; then
+        _preflight_control_planes
+        if ((CONTROL_PLANES > 1)); then
+            echo ""
+            log "── Control-plane HA: scaling to ${CONTROL_PLANES} + VIP float ──"
+            _scale_control_planes "$CONTROL_PLANES"
+            step_done "HA control plane: ${CONTROL_PLANES} nodes, leader-elected VIP"
+        fi
+    fi
 
     step 6 "Verification"
     _ssh_cmd "$cp_ip" "kubectl get nodes -o wide" || true
@@ -2217,7 +2237,7 @@ KBYAML
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
     echo -e "${G}  ✓ BOOTSTRAP COMPLETE — ${total_m}m${total_s}s total                     ${N}"
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
-    echo -e "  ${W}1 control plane + ${WORKERS} workers${N}"
+    echo -e "  ${W}${CONTROL_PLANES} control plane(s) + ${WORKERS} workers${N}"
     echo -e "  ${W}Cilium eBPF + Hubble + MetalLB + WireGuard${N}"
     echo -e "  ${W}Host: kubectl, k9s, cilium, hubble ready${N}"
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
