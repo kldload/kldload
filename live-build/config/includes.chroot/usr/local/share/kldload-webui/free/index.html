@@ -1900,6 +1900,21 @@ html.kld-app #term-drawer{display:none!important;}
           </table>
           <div id="k8s-metallb-l2" style="padding:0.35rem 1rem;font-size:0.75rem;color:var(--muted)"></div>
         </div>
+
+        <div class="k8s-panel">
+          <div class="k8s-panel-hdr">
+            <span>⇄ Port Forwards <span class="k8s-panel-hdr-muted" id="k8s-pf-count">0</span></span>
+            <div style="display:flex;gap:0.5rem;align-items:center">
+              <button class="btn btn-ghost btn-sm" onclick="send({action:'k8s_port_forwards'})">↻</button>
+              <button class="btn btn-ghost btn-sm" onclick="if(confirm('Stop all port-forwards?'))send({action:'k8s_port_forward_stop',unit:'*'})">Stop all</button>
+            </div>
+          </div>
+          <div style="padding:0.35rem 1rem;font-size:0.75rem;color:var(--muted)">Forward a pod/service port to this workstation — use the <b>⇄</b> button on a Pod or Service row. Reachable at <code>http://localhost:&lt;local&gt;</code>; survives a webui restart (transient systemd unit).</div>
+          <table>
+            <thead><tr><th>Target</th><th>Namespace</th><th>Local → Remote</th><th>Open</th><th style="text-align:right">Actions</th></tr></thead>
+            <tbody id="k8s-pf-tbody"><tr><td colspan="5" style="color:var(--muted);padding:1rem">No active port-forwards</td></tr></tbody>
+          </table>
+        </div>
       </div>
 
       <!-- ── Config ── ConfigMaps + Secrets. Secrets are metadata-only (type +
@@ -4444,6 +4459,7 @@ function handle(msg) {
     case 'k8s_secrets':      { renderK8sSecrets(msg.secrets);           break; }
     case 'k8s_cilium':       { renderK8sCilium(msg.cilium);             break; }
     case 'k8s_metallb':      { renderK8sMetallb(msg.metallb);           break; }
+    case 'k8s_port_forwards': { renderK8sPortForwards(msg.forwards);    break; }
     case 'k8s_storage':  { renderK8sStorage(msg); break; }
     case 'k8s_events':        { renderK8sEvents(msg.events);           break; }
 
@@ -6696,6 +6712,7 @@ function renderK8sPods(pods) {
         <div class="k8s-node-menu" id="k8s-pod-menu-${esc(p.namespace)}-${esc(p.name)}" style="display:none;position:absolute;background:var(--card-bg);border:1px solid var(--border);border-radius:6px;box-shadow:var(--shadow);z-index:100;min-width:180px;font-size:0.78rem">
           <button class="k8s-node-menu-item" onclick="k8sPodDescribe('${esc(p.namespace)}','${esc(p.name)}')">Describe</button>
           <button class="k8s-node-menu-item" onclick="k8sPodLogs('${esc(p.namespace)}','${esc(p.name)}',500)">Logs (tail 500)</button>
+          <button class="k8s-node-menu-item" onclick="k8sPodPortForward('${esc(p.namespace)}','${esc(p.name)}');k8sPodMenuClose()">⇄ Port-forward…</button>
           <button class="k8s-node-menu-item" onclick="send({action:'k8s_inspect',target:'pod',name:'${esc(p.name)}',namespace:'${esc(p.namespace)}'});k8sPodMenuClose()">View events / inspect</button>
         </div>
       </td>
@@ -7295,6 +7312,7 @@ function k8sSubTab(name) {
     send({action: 'k8s_ingress', namespace: ns});
     send({action: 'k8s_cilium'});    // cluster-scoped infra — no namespace
     send({action: 'k8s_metallb'});
+    send({action: 'k8s_port_forwards'});
   } else if (name === 'config') {
     send({action: 'k8s_configmaps', namespace: ns});
     send({action: 'k8s_secrets', namespace: ns});
@@ -7841,6 +7859,7 @@ function renderK8sServices(svcs) {
       <td style="font-family:monospace;font-size:0.8rem">${esc(extIp)}</td>
       <td style="color:var(--muted);font-family:monospace;font-size:0.78rem" title="${esc(s.ports)}">${esc((s.ports || '').slice(0, 40))}</td>
       <td style="white-space:nowrap;text-align:right">
+        <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sSvcPortForward('${esc(s.namespace)}','${esc(s.name)}','${esc((String(s.ports||'').match(/\d+/)||[''])[0])}')" title="Forward this service to localhost">⇄</button>
         <button class="btn btn-ghost btn-sm" style="font-size:0.72rem" onclick="k8sSvcDescribe('${esc(s.namespace)}','${esc(s.name)}')" title="kubectl describe svc — see endpoints + selectors">Describe</button>
         <button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="k8sDeleteService('${esc(s.namespace)}','${esc(s.name)}')" title="Delete service">✕</button>
       </td>
@@ -7999,6 +8018,35 @@ function renderK8sMetallb(m) {
   const l2el = document.getElementById('k8s-metallb-l2');
   if (l2el) l2el.textContent = l2.length ? ('L2 advertisements: ' + l2.map(a => `${a.name} → ${a.pools}`).join('  ·  ')) : '';
 }
+
+function renderK8sPortForwards(forwards) {
+  const tbody = document.getElementById('k8s-pf-tbody');
+  if (!tbody) return;
+  const fw = forwards || [];
+  const c = document.getElementById('k8s-pf-count'); if (c) c.textContent = fw.length;
+  if (!fw.length) { tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);padding:1rem">No active port-forwards</td></tr>'; return; }
+  tbody.innerHTML = fw.map(f => `<tr>
+      <td style="font-family:monospace;font-size:0.8rem;color:var(--accent2)">${esc(f.target)}</td>
+      <td style="color:var(--muted);font-size:0.82rem">${esc(f.namespace)}</td>
+      <td style="font-family:monospace;font-size:0.82rem">${esc(f.local)} → ${esc(f.remote)}</td>
+      <td><a href="http://localhost:${esc(f.local)}" target="_blank" rel="noopener" style="color:var(--accent)">:${esc(f.local)} ↗</a></td>
+      <td style="text-align:right"><button class="btn btn-danger btn-sm" style="font-size:0.72rem" onclick="send({action:'k8s_port_forward_stop',unit:'${esc(f.unit)}'})">Stop</button></td>
+    </tr>`).join('');
+}
+
+// Prompt + start a port-forward. remoteDefault pre-fills the remote port (a
+// service's own port; blank for pods so the user types the container port).
+// Local defaults to the remote port. Reachable at http://localhost:<local>.
+function k8sPortForwardPrompt(kind, ns, name, remoteDefault) {
+  const remote = prompt(`Forward ${kind === 'svc' ? 'service' : 'pod'} ${ns}/${name}\n\nRemote (container/service) port:`, remoteDefault || '');
+  if (!remote || !/^\d+$/.test(remote)) return;
+  const local = prompt(`Local port on this workstation\n(reachable at http://localhost:PORT):`, remote);
+  if (!local || !/^\d+$/.test(local)) return;
+  send({ action: 'k8s_port_forward', kind: kind, namespace: ns, name: name, local: local, remote: remote });
+  k8sSubTab('network'); // jump to Network so the new forward shows in the panel
+}
+function k8sPodPortForward(ns, name) { k8sPortForwardPrompt('pod', ns, name, ''); }
+function k8sSvcPortForward(ns, name, port) { k8sPortForwardPrompt('svc', ns, name, port || ''); }
 
 // Unified refresh — pulls everything at once. Order matters: namespaces
 // populate the filter, top warms the CPU/mem cache, then status/pods/

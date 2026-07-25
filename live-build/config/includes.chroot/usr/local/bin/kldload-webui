@@ -2381,6 +2381,12 @@ async def ws_handler(websocket):
                     await _k8s_delete_deployment(websocket, msg)
                 elif action == "k8s_apply_yaml":
                     await _k8s_apply_yaml(websocket, msg)
+                elif action == "k8s_port_forward":
+                    await _k8s_port_forward(websocket, msg)
+                elif action == "k8s_port_forwards":
+                    await _k8s_port_forward_list(websocket)
+                elif action == "k8s_port_forward_stop":
+                    await _k8s_port_forward_stop(websocket, msg)
                 elif action == "k8s_storage":
                     await _k8s_storage(websocket, msg)
                 elif action == "k8s_pvc_create":
@@ -6769,6 +6775,94 @@ async def _k8s_apply_yaml(websocket, msg):
     finally:
         try: os.unlink(path)
         except Exception: pass
+
+
+async def _k8s_port_forward(websocket, msg):
+    """Start a persistent `kubectl port-forward` as a transient systemd unit
+    (kldload-pf-<id>) so it survives a webui restart and is stoppable by name.
+    Binds 127.0.0.1:<local> → <target>:<remote>; the workstation user reaches it
+    at http://localhost:<local>. kind = 'pod' | 'svc'. Idempotent per (ns,name,
+    local): re-forwarding the same tuple replaces the old one."""
+    ns = msg.get("namespace") or "default"
+    name = msg.get("name", "")
+    kind = msg.get("kind", "pod")
+    local = str(msg.get("local", "")).strip()
+    remote = str(msg.get("remote", "")).strip()
+    if not (name and remote.isdigit()):
+        await websocket.send(json.dumps({"type": "error", "msg": "port-forward needs a name + a numeric remote port"}))
+        return
+    local = local if local.isdigit() else remote
+    target = f"{'service' if kind == 'svc' else 'pod'}/{name}"
+    unit = "kldload-pf-" + re.sub(r"[^a-zA-Z0-9-]", "-", f"{ns}-{name}-{local}")
+    kubectl = "/usr/local/bin/kubectl" if os.path.exists("/usr/local/bin/kubectl") else "/usr/bin/kubectl"
+    subprocess.call(["systemctl", "stop", f"{unit}.service"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    rc = subprocess.call([
+        "systemd-run", "--unit", unit, "--collect",
+        "--setenv=KUBECONFIG=/root/.kube/config",
+        # --address sets the bind IP; ports are just local:remote. Do NOT fold
+        # the address into the port spec (kubectl reads "127.0.0.1:L:R" as a
+        # named port and dies "does not have a named port '127.0.0.1'").
+        kubectl, "port-forward", "--address", "127.0.0.1", "-n", ns, target, f"{local}:{remote}",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if rc != 0:
+        await websocket.send(json.dumps({"type": "error", "msg": f"port-forward failed to start (rc={rc}) for {target}"}))
+    await _k8s_port_forward_list(websocket)
+
+
+async def _k8s_port_forward_list(websocket, msg=None):
+    """Active kldload-pf-* forwards, recovered from each unit's ExecStart."""
+    forwards = []
+    try:
+        out = subprocess.check_output(
+            ["systemctl", "list-units", "kldload-pf-*.service", "--no-legend", "--plain"],
+            text=True, stderr=subprocess.DEVNULL, timeout=6)
+        for line in out.strip().splitlines():
+            parts = line.split()
+            if not parts or not parts[0].startswith("kldload-pf-"):
+                continue
+            unit = parts[0]
+            active = parts[2] if len(parts) > 2 else ""
+            spec = subprocess.check_output(
+                ["systemctl", "show", unit, "-p", "ExecStart", "--value"],
+                text=True, stderr=subprocess.DEVNULL, timeout=6)
+            # Anchor the port spec to the token right AFTER the pod/service
+            # target — `systemctl show ExecStart --value` interleaves metadata
+            # with timestamps (e.g. 09:25) that also look like a port spec.
+            m = re.search(r"(pod|service)/(\S+)\s+(\d+):(\d+)", spec)
+            m_ns = re.search(r"-n (\S+)", spec)
+            if m:
+                forwards.append({
+                    "unit": unit[:-8] if unit.endswith(".service") else unit,
+                    "local": m.group(3), "remote": m.group(4),
+                    "namespace": m_ns.group(1) if m_ns else "",
+                    "target": f"{m.group(1)}/{m.group(2)}",
+                    "active": active,
+                    "url": f"http://localhost:{m.group(3)}",
+                })
+    except Exception:
+        pass
+    await websocket.send(json.dumps({"type": "k8s_port_forwards", "forwards": forwards}))
+
+
+async def _k8s_port_forward_stop(websocket, msg):
+    """Stop one forward by unit name, or all when unit == '*'."""
+    unit = msg.get("unit", "")
+    if unit == "*":
+        try:
+            out = subprocess.check_output(
+                ["systemctl", "list-units", "kldload-pf-*.service", "--no-legend", "--plain"],
+                text=True, stderr=subprocess.DEVNULL, timeout=6)
+            for line in out.strip().splitlines():
+                u = line.split()[0] if line.split() else ""
+                if u.startswith("kldload-pf-"):
+                    subprocess.call(["systemctl", "stop", u], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    elif unit.startswith("kldload-pf-"):
+        subprocess.call(["systemctl", "stop", f"{unit}.service"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    await _k8s_port_forward_list(websocket)
 
 
 async def _k8s_bulk(websocket, msg):
