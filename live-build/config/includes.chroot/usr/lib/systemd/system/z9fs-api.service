@@ -1,0 +1,42 @@
+# z9fs-api.service — host-side ZFS-transaction daemon for guest VMs.
+#
+# ROLE
+#   Runs z9fs-api on the KVM host so guest VMs (via vsock) or the operator (via
+#   the unix socket) can snapshot / roll back / commit their OWN zvols — the
+#   "instant rollback as a function" primitive. Read by systemd; the daemon
+#   itself is /usr/local/bin/z9fs-api (see its banner for the protocol + scope
+#   model). If this unit is absent/stopped, guests simply can't self-snapshot —
+#   nothing else breaks.
+#
+# WHY THESE VALUES
+#   - After=zfs.target libvirtd.service: needs zpools imported (to snapshot) and
+#     libvirt up (to map a guest vsock CID -> its VM name for scoping).
+#   - ExecStartPre modprobe vhost_vsock: the host end of virtio-vsock. Many
+#     kernels build it in (modprobe then no-ops); on modular kernels this is
+#     what makes the vsock listener bindable. `|| true` is deliberate and
+#     safe — a built-in module returns non-zero from modprobe but is already
+#     present, and the daemon still binds its unix socket regardless.
+#   - Default listeners (no args): unix /run/z9fs-api.sock (root-only, 0600) +
+#     vsock port 9455 (any guest CID). Guests are scoped to their own subtree.
+#   - Runs as root: zfs snapshot/rollback + virsh dumpxml both require it. The
+#     security boundary is the daemon's per-VM scope check, not the uid.
+[Unit]
+Description=z9fs ZFS-transaction API (guest-driven snapshot/rollback)
+Documentation=file:/usr/share/doc/kldload/Z9FS-CONSOLE-DESIGN.md
+After=zfs.target libvirtd.service
+Wants=zfs.target
+
+[Service]
+Type=simple
+ExecStartPre=-/sbin/modprobe vhost_vsock
+ExecStart=/usr/local/bin/z9fs-api --unix /run/z9fs-api.sock --vsock 9455
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+# The audit log + txn state live here; make sure the tree exists.
+StateDirectory=kldload/z9fs
+LogsDirectory=kldload
+
+[Install]
+WantedBy=multi-user.target

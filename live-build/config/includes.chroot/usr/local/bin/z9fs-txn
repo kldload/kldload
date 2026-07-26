@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+# ─────────────────────────────────────────────────────────────────────────────
+# z9fs-txn — guest-side ZFS transaction client ("instant rollback as a function")
+# ─────────────────────────────────────────────────────────────────────────────
+# WHAT
+#   The app-facing half of the z9fs transaction API. Runs INSIDE a guest VM and
+#   asks the host daemon (z9fs-api) to snapshot / roll back / commit this VM's
+#   own zvol. Turns ZFS copy-on-write into a developer transaction primitive.
+#
+# WHAT IT DOES, IN ORDER
+#   1. Connect to the host: vsock CID 2 (default), or a unix socket / TCP host.
+#   2. Authenticate: send the per-VM token from /etc/z9fs/token if present.
+#   3. Run one op — begin | rollback | commit | list — and print the JSON reply
+#      (begin prints the txn id to stdout so a script can capture it).
+#   4. For the data-zvol rollback pattern, optionally quiesce the guest side:
+#      --unmount DIR  → unmount before the host rollback; --dev DEV remounts DIR
+#      afterwards. (You cannot roll back a live-mounted FS — see z9fs-api.)
+#
+# WHY
+#   So an application can bracket a risky operation with a guaranteed, ~instant
+#   undo:
+#       txn=$(z9fs-txn begin --zvol data) || exit 1
+#       psql < migration.sql && run-tests || z9fs-txn rollback "$txn" --unmount /data --dev /dev/vdb
+#       z9fs-txn commit "$txn"
+#   Exit status is 0 on success, non-zero on failure, so it composes with && / ||.
+#
+# INPUTS / OUTPUTS
+#   Files : /etc/z9fs/token   (per-VM secret, injected at VM deploy; optional on
+#                              vsock where the host identifies us by CID)
+#   Args  : see --help. Transport defaults to vsock CID 2 port 9455.
+#   Stdout: the txn id (begin) or the JSON reply; stderr: human errors.
+#
+# NOTES
+#   - Boot-env (whole-VM) rollback isn't done here: that's "reboot onto the
+#     snapshot", a host/VM-manager action, not an in-guest FS remount.
+#   - Keep this dependency-light: stdlib only, so it drops into any guest.
+# ─────────────────────────────────────────────────────────────────────────────
+"""z9fs-txn: in-guest client for host-mediated ZFS snapshot/rollback/commit."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+AF_VSOCK = getattr(socket, "AF_VSOCK", None)
+VMADDR_CID_HOST = 2  # the host is always CID 2 from inside a guest
+TOKEN_FILE = Path("/etc/z9fs/token")
+
+
+def _connect(args: argparse.Namespace) -> socket.socket:
+    """Open a socket to the host daemon per the chosen transport."""
+    if args.unix:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(args.unix)
+    elif args.tcp:
+        host, _, port = args.tcp.rpartition(":")
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((host or "127.0.0.1", int(port)))
+    else:
+        if AF_VSOCK is None:
+            sys.exit("z9fs-txn: vsock unavailable; use --unix or --tcp")
+        s = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
+        s.connect((args.cid, args.port))
+    s.settimeout(30)
+    return s
+
+
+def _call(args: argparse.Namespace, req: dict) -> dict:
+    """Send one JSON request, return the parsed reply. Raises on transport error."""
+    token = None
+    if TOKEN_FILE.is_file():
+        token = TOKEN_FILE.read_text().strip()
+    if token:
+        req.setdefault("token", token)
+    if args.vm:  # operator/testing convenience (root-on-unix path in the daemon)
+        req.setdefault("vm", args.vm)
+    s = _connect(args)
+    try:
+        s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+        buf = b""
+        while b"\n" not in buf and len(buf) < 65536:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        s.close()
+    return json.loads(buf.decode("utf-8").strip() or "{}")
+
+
+def _run(cmd: list[str]) -> None:
+    """Run a guest-side quiesce command (umount/mount), failing loud."""
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise SystemExit(f"z9fs-txn: {' '.join(cmd)}: {proc.stderr.strip()}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog="z9fs-txn",
+        description="Guest client for host-mediated ZFS transactions.",
+    )
+    ap.add_argument("--cid", type=int, default=VMADDR_CID_HOST, help="vsock host CID (default 2)")
+    ap.add_argument("--port", type=int, default=9455, help="vsock/host port (default 9455)")
+    ap.add_argument("--unix", metavar="PATH", help="use a unix socket instead of vsock")
+    ap.add_argument("--tcp", metavar="HOST:PORT", help="use TCP instead of vsock")
+    ap.add_argument("--vm", help="name the VM explicitly (operator/root-unix only)")
+    ap.add_argument("--json", action="store_true", help="print the raw JSON reply")
+    sub = ap.add_subparsers(dest="op", required=True)
+
+    p_begin = sub.add_parser("begin", help="snapshot the zvol, open a transaction")
+    p_begin.add_argument("--zvol", help="data-disk name (default: the OS disk)")
+    p_begin.add_argument("--note", default="", help="free-text note stored with the txn")
+
+    p_roll = sub.add_parser("rollback", help="roll the zvol back to the txn snapshot")
+    p_roll.add_argument("txn", help="transaction id from begin")
+    p_roll.add_argument("--unmount", metavar="DIR", help="unmount DIR before rollback (data-zvol)")
+    p_roll.add_argument("--dev", metavar="DEV", help="remount DEV at DIR after rollback")
+    p_roll.add_argument("--force", action="store_true", help="allow rollback of an attached zvol")
+
+    p_commit = sub.add_parser("commit", help="accept the change, drop the snapshot")
+    p_commit.add_argument("txn", help="transaction id from begin")
+
+    sub.add_parser("list", help="list this VM's open transactions")
+
+    args = ap.parse_args()
+
+    if args.op == "begin":
+        rep = _call(args, {"op": "begin", "zvol": args.zvol, "note": args.note})
+        if rep.get("ok"):
+            print(rep["txn"] if not args.json else json.dumps(rep))
+            return 0
+    elif args.op == "rollback":
+        # data-zvol pattern: quiesce (unmount) in the guest, roll back on the
+        # host, then remount — the only safe way to roll back live app data.
+        if args.unmount:
+            _run(["umount", args.unmount])
+        rep = _call(args, {"op": "rollback", "txn": args.txn, "force": args.force})
+        if rep.get("ok") and args.unmount and args.dev:
+            _run(["mount", args.dev, args.unmount])
+        if args.json or not rep.get("ok"):
+            print(json.dumps(rep))
+        elif rep.get("ok"):
+            print(f"rolled back to {rep.get('snapshot')}")
+            return 0
+    elif args.op == "commit":
+        rep = _call(args, {"op": "commit", "txn": args.txn})
+        if rep.get("ok"):
+            print(f"committed {args.txn}" if not args.json else json.dumps(rep))
+            return 0
+    elif args.op == "list":
+        rep = _call(args, {"op": "list"})
+        if rep.get("ok"):
+            if args.json:
+                print(json.dumps(rep, indent=2))
+            else:
+                for t in rep.get("txns", []):
+                    print(f"{t['txn']}\t{t['zvol']}\t{t.get('note', '')}")
+            return 0
+
+    # any non-ok reply lands here
+    err = rep.get("error", "unknown error") if isinstance(rep, dict) else "no reply"
+    print(f"z9fs-txn: {err}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

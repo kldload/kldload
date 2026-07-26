@@ -215,19 +215,74 @@ snaps() { # list a dataset's snapshots (fzf → replicate the picked one)
         zfs list -t snapshot -o name,used,creation -s creation -r "$ds"
     fi
 }
-browse() { # mount a dataset/snapshot read-only and drop into it
-    local t="$1" mp
+# _explore_cleanup — tear down a zvol-explore session (globals set by browse_zvol,
+# so they survive into the EXIT trap after the function returns).
+_explore_cleanup() {
+    [[ -n "${_EX_MNT:-}" && -d "${_EX_MNT}" ]] && {
+        umount "$_EX_MNT" 2>/dev/null || true
+        rmdir "$_EX_MNT" 2>/dev/null || true
+    }
+    [[ -n "${_EX_CLONE:-}" ]] && zfs destroy "$_EX_CLONE" 2>/dev/null || true
+    [[ -n "${_EX_SNAP:-}" ]] && zfs destroy "$_EX_SNAP" 2>/dev/null || true
+}
+
+# browse_zvol <zvol> — explore a VM/zvol's FILESYSTEM read-only + consistently.
+# A zvol is a block device; the guest's filesystem is inside it. We NEVER touch
+# the live device: snapshot → clone → partprobe the clone → mount its biggest
+# partition read-only → drop into it. Auto-cleans (umount + destroy clone/snap)
+# when the explore shell exits. This is z9fs pointed at rpool/vms/<vm>.
+browse_zvol() {
+    local zv="$1"
+    have partprobe || die "browse: 'partprobe' not found (install parted) — needed to read zvol partitions"
+    local tag="z9fs-explore-$$"
+    _EX_SNAP="${zv}@${tag}"
+    _EX_CLONE="$(dirname "$zv")/${tag}"
+    _EX_MNT="$(mktemp -d /tmp/z9fs-explore.XXXXXX)"
+    trap _explore_cleanup EXIT
+
+    say "Snapshot + clone of ${zv} for a consistent read-only view (live VM untouched)…"
+    zfs snapshot "$_EX_SNAP" || die "could not snapshot ${zv}"
+    zfs clone "$_EX_SNAP" "$_EX_CLONE" || die "could not clone ${_EX_SNAP}"
+    local cdev="/dev/zvol/${_EX_CLONE}"
+    local i
+    for i in $(seq 1 20); do
+        [[ -b "$cdev" ]] && break
+        sleep 0.5
+    done
+    [[ -b "$cdev" ]] || die "clone device did not appear: ${cdev}"
+    partprobe "$cdev" 2>/dev/null || true
+    sleep 1
+
+    # Pick the biggest partition (usually root); fall back to the whole device.
+    local part target="$cdev"
+    part="$(lsblk -rno NAME,SIZE,TYPE "$cdev" 2>/dev/null | awk '$3=="part"{print $2"\t"$1}' | sort -h | tail -1 | cut -f2)"
+    [[ -n "$part" ]] && target="/dev/${part}"
+    # norecovery lets us mount journaling FS (ext4/xfs) read-only without replay.
+    mount -o ro,norecovery "$target" "$_EX_MNT" 2>/dev/null ||
+        mount -o ro "$target" "$_EX_MNT" 2>/dev/null ||
+        die "could not mount ${target} read-only (LVM/encrypted/unsupported FS?)"
+    say "${G}Exploring ${zv}${N} at ${_EX_MNT} (read-only, point-in-time). Ctrl-D to leave — auto-cleanup."
+    (cd "$_EX_MNT" && exec "${SHELL:-bash}") || true
+}
+
+browse() { # mount a dataset/snapshot/zvol read-only and drop into it
+    local t="$1" mp typ
     [[ -n "$t" ]] || die "browse: target required"
     if [[ "$t" == *@* ]]; then
         # snapshots are browsable via the dataset's hidden .zfs/snapshot dir
         mp="$(zfs get -H -o value mountpoint "${t%@*}" 2>/dev/null)"
-        [[ "$mp" == /* ]] || die "browse: ${t%@*} has no mountpoint (a zvol? clone it first)"
+        [[ "$mp" == /* ]] || die "browse: ${t%@*} has no mountpoint (a zvol? browse the dataset, not the snapshot)"
         say "Browsing ${t} (read-only). Ctrl-D to leave."
         (cd "${mp}/.zfs/snapshot/${t#*@}" 2>/dev/null && exec "${SHELL:-bash}") ||
             die "could not enter snapshot dir"
     else
+        typ="$(zfs get -H -o value type "$t" 2>/dev/null)"
+        if [[ "$typ" == "volume" ]]; then
+            browse_zvol "$t" # VM / zvol → snapshot+clone+mount-ro explore
+            return
+        fi
         mp="$(zfs get -H -o value mountpoint "$t" 2>/dev/null)"
-        [[ "$mp" == /* ]] || die "browse: ${t} is not a mounted filesystem (VM zvol browse lands in a later z9fs build)"
+        [[ "$mp" == /* ]] || die "browse: ${t} is not a mounted filesystem"
         say "Browsing ${t} at ${mp}. Ctrl-D to leave."
         (cd "$mp" && exec "${SHELL:-bash}")
     fi
