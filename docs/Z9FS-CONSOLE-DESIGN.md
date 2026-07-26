@@ -1,8 +1,9 @@
 # z9fs — the ZFS console + the ZFS-transaction API
 
-Status: **DESIGN + v1 shipped** (2026-07-25). v1 (browse + snapshot + point-and-
-shoot replicate) committed `8caf461`. This doc captures the full vision so the
-marathon stays coherent.
+Status: **layers 1–5 SHIPPED** (2026-07-25). Console `8caf461`, web-console
+backend `994fa23`, web-console SPA `a4a0d81`, VM-explore + transaction API
+`b9ff58e`, commander `6c70c49`. All proven on .111. Only layer 6 (tmux hub)
+remains. This doc captures the full vision so the marathon stays coherent.
 
 ## Thesis
 
@@ -23,21 +24,21 @@ full; mbuffer/pv; readonly+noauto target so replicas never drift; local pool OR
 `host:pool` over ssh). Subcommands double as fzf key-binds + are CI-usable.
 Proven on .111 scratch pools (incremental snap1→snap2 onto a readonly target).
 
-### 2. Dual-pane commander — NEXT
+### 2. Dual-pane commander — ✅ SHIPPED (`z9fs mc`, 6c70c49)
 Left pane / right pane, each a *location* (local, or a remote host over ssh),
 browsing pools→datasets→snapshots→BEs→**VM zvols**. F5 = replicate selection to
 the other pane. F8 = destroy. Enter = drill. MC muscle memory. tmux-hosted (fits
 the k9s/z9fs/VM-console tmux hub).
 
-### 3. VM-zvol explore — NEXT
+### 3. VM-zvol explore — ✅ SHIPPED (`z9fs browse <zvol>`, b9ff58e)
 Point z9fs at `rpool/vms`: browse a VM's filesystem by cloning/mounting its zvol
 read-only, snapshot/restore a VM "on tap." Wired into the VM tool too.
 
-### 4. z9fs API + guest agent — THE BIG ONE (design below)
+### 4. z9fs API + guest agent — ✅ SHIPPED (b9ff58e; design below)
 Guest VMs / apps perform **their own** snapshots + rollbacks via a scoped,
 authenticated host API. "Instant rollback as a function."
 
-### 5. ZFS web console — the GUI mirror
+### 5. ZFS web console — ✅ SHIPPED (a4a0d81; Pools/Datasets/Snapshots)
 Pools (topology/errors/scan/disk-replace — backend built), Datasets, Snapshots,
 Replication, Performance (ARC/iostat), merge the tests-zfs Lab view.
 
