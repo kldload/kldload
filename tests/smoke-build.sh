@@ -305,6 +305,14 @@ else
     fi
 fi
 
+# ── Behavioural units (installer/security fixes the ISO checks can't reach) ──
+_section "Behavioural Units"
+if bash "$ROOT/tests/smoke-unit.sh"; then
+    _pass "smoke-unit.sh: all behavioural checks passed"
+else
+    _fail "smoke-unit.sh" "behavioural checks failed (see output above)"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo -e "\033[1;36m══════════════════════════════════════════════════════════════\033[0m"
