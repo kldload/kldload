@@ -81,19 +81,49 @@ datasets_table() {
     done < <(zfs list -H -o name,used,refer -t filesystem,volume 2>/dev/null)
 }
 
-# preview <dataset> — the fzf preview pane: key properties + the recent snapshots.
+# preview <dataset> — the detail pane: a full dossier on the highlighted dataset.
+# Everything a ZFS operator wants at a glance — space accounting, the meaningful
+# properties, BOTH permission layers (POSIX/ACL on the mountpoint AND ZFS
+# delegated `zfs allow`), and recent snapshots. Sections are colour-ruled so a
+# dense pane still scans. fzf's preview window scrolls, so we can afford the
+# detail. (`zfs allow` here is also the surface the delegation model will hang
+# off — see the security roadmap.)
 preview() {
-    local ds="$1"
-    echo -e "${C}$ds${N}"
+    local ds="$1" typ mp allow
+    typ="$(zfs get -H -o value type "$ds" 2>/dev/null)"
+    echo -e "${C}${ds}${N}  ${M}[${typ}]${N}"
+
+    echo -e "${G}── space ─────────────────────────${N}"
     zfs get -H -o property,value \
-        type,used,referenced,available,compressratio,compression,recordsize,mountpoint,readonly \
-        "$ds" 2>/dev/null | awk -F'\t' '{printf "  %-14s %s\n",$1,$2}'
-    echo -e "\n${C}recent snapshots${N} (newest last):"
+        used,referenced,available,usedbysnapshots,usedbydataset,usedbychildren,logicalused,compressratio \
+        "$ds" 2>/dev/null | awk -F'\t' '$2!="-"{printf "  %-18s %s\n",$1,$2}'
+
+    echo -e "${G}── properties ────────────────────${N}"
+    zfs get -H -o property,value \
+        compression,recordsize,volblocksize,mountpoint,readonly,atime,quota,refquota,reservation,dedup,encryption,keystatus,sync,canmount,origin,creation \
+        "$ds" 2>/dev/null | awk -F'\t' '$2!="-"{printf "  %-14s %s\n",$1,$2}'
+
+    echo -e "${G}── permissions ───────────────────${N}"
+    mp="$(zfs get -H -o value mountpoint "$ds" 2>/dev/null)"
+    if [[ "$mp" == /* && -e "$mp" ]]; then
+        echo "  POSIX  $(ls -ldh "$mp" 2>/dev/null | awk '{print $1, $3":"$4}')"
+    fi
+    # zfs allow — the kernel-delegated permissions on this dataset (who may
+    # snapshot/send/rollback/etc. without root). Empty on most datasets today.
+    allow="$(zfs allow "$ds" 2>/dev/null | sed '/^$/d;s/^/  /')"
+    if [[ -n "$allow" ]]; then
+        echo -e "  ${Y}zfs delegated:${N}"
+        echo "$allow"
+    else
+        echo "  zfs delegated  (none — root-only)"
+    fi
+
+    echo -e "${G}── snapshots (newest last) ───────${N}"
     zfs list -H -t snapshot -o name,used,creation -s creation -r "$ds" 2>/dev/null | tail -12 |
         while IFS=$'\t' read -r n u c; do
             local mark=""
-            _snap_is_sanoid "$n" && mark="${Y}[sanoid]${N}"
-            printf "  %-40s %8s  %s %b\n" "${n#*@}" "$u" "$c" "$mark"
+            _snap_is_sanoid "$n" && mark="${Y}[auto]${N}"
+            printf "  %-30s %8s  %s %b\n" "${n#*@}" "$u" "$c" "$mark"
         done
 }
 
@@ -291,7 +321,28 @@ browse() { # mount a dataset/snapshot/zvol read-only and drop into it
         (cd "$mp" && exec "${SHELL:-bash}")
     fi
 }
-props() { zfs get all "$1" 2>/dev/null | less; }
+# props <dataset> — the FULL dossier (Ctrl-P): every ZFS property, the delegated
+# permissions, and the POSIX/ACL on the mountpoint — everything, paged. The
+# preview pane is the glance; this is the deep dive.
+props() {
+    local ds="$1" mp
+    mp="$(zfs get -H -o value mountpoint "$ds" 2>/dev/null)"
+    {
+        echo "═══ ${ds} — full property + permission dossier ═══"
+        echo
+        echo "─── all ZFS properties (zfs get all) ───"
+        zfs get all "$ds" 2>/dev/null
+        echo
+        echo "─── delegated permissions (zfs allow) ───"
+        zfs allow "$ds" 2>/dev/null || echo "(none)"
+        if [[ "$mp" == /* && -e "$mp" ]]; then
+            echo
+            echo "─── POSIX / ACL (${mp}) ───"
+            ls -ldh "$mp" 2>/dev/null
+            getfacl -p "$mp" 2>/dev/null
+        fi
+    } | less -R
+}
 
 # ── The browser (default, no args) ───────────────────────────────────────────
 browser() {
