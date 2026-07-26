@@ -24,9 +24,11 @@ fi
 
 if [ "$#" -gt 0 ]; then
     if [ "$APP_MODE" -eq 1 ]; then
-        # exec so no wrapping bash lingers: when the app exits, the terminal
-        # emulator's child is gone and the window closes.
-        INNER="exec $*"
+        # Close the window on a CLEAN exit; on FAILURE, HOLD it open so the error
+        # is readable — a full-screen TUI that dies on launch otherwise just
+        # flashes and vanishes, taking its error message with it (which made a
+        # zexplore launch failure impossible to diagnose, 2026-07-26).
+        INNER="$*; __rc=\$?; [ \"\$__rc\" -eq 0 ] || { echo; echo \"[kldload-term] '$*' exited (status \$__rc) — press Enter to close.\"; read -r _; }"
     else
         INNER="$*; echo; exec bash"
     fi
