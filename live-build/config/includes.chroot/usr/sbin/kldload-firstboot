@@ -2877,6 +2877,20 @@ CHROMEPOL
             fi
         fi
 
+        # SECURITY: shred the plaintext ZFS passphrase the installer staged for
+        # later TPM sealing. It previously lived ONLY inside setup_zero_trust —
+        # the old "pro" path this free branch `return`s before ever reaching —
+        # so every free install (i.e. every install now) left the plaintext pool
+        # passphrase on disk indefinitely. Shred it here, on the path that
+        # actually runs. (When kldload-clevis-seal lands for TPM auto-unlock,
+        # seal-then-shred goes here too.) Caught 2026-07-26 on fiend:
+        # /etc/kldload/zfs-passphrase was still present after firstboot on an
+        # encrypted install.
+        if [[ -f /etc/kldload/zfs-passphrase ]]; then
+            shred -uz /etc/kldload/zfs-passphrase 2>/dev/null || rm -f /etc/kldload/zfs-passphrase
+            log "Plaintext ZFS passphrase shredded"
+        fi
+
         rm -f /tmp/kldload-firstboot-status
         log "kldload-firstboot complete (free edition)"
         return 0

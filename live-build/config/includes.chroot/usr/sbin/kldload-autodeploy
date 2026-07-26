@@ -275,7 +275,15 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         fi
         if command -v nvidia-smi >/dev/null 2>&1; then
             _vram_gb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)
-            _vram_gb=$((${_vram_gb:-0} / 1024))
+            # nvidia-smi can print a NON-numeric error to stdout even when the
+            # binary exists (NVML init failure / driver-library mismatch right
+            # after the akmod loads). Feeding that into $(( )) makes bash treat
+            # the leading bareword (e.g. "NVIDIA-SMI...") as a variable name →
+            # unbound under `set -u` (which `set +e` does NOT suppress) → the
+            # whole backgrounded AI phase dies. Force numeric-or-zero so a broken
+            # probe degrades to "no usable GPU". Caught 2026-07-26 on fiend.
+            [[ "${_vram_gb}" =~ ^[0-9]+$ ]] || _vram_gb=0
+            _vram_gb=$((_vram_gb / 1024))
         elif command -v rocminfo >/dev/null 2>&1; then
             # rocminfo prints bytes; take the largest local memory pool.
             _bytes=$(rocminfo 2>/dev/null | awk '/Size:.*\(.*\)/ {gsub(/[^0-9]/,"",$2); if ($2+0 > max) max=$2+0} END {print max+0}')
