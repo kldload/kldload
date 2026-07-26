@@ -91,7 +91,7 @@ datasets_table() {
 # detail. (`zfs allow` here is also the surface the delegation model will hang
 # off — see the security roadmap.)
 preview() {
-    local ds="$1" typ mp allow
+    local ds="${1%@*}" typ mp allow # strip @snap so restore-point rows preview their dataset
     typ="$(zfs get -H -o value type "$ds" 2>/dev/null)"
     echo -e "${C}${ds}${N}  ${M}[${typ}]${N}"
 
@@ -358,8 +358,11 @@ browser() {
     datasets_table | fzf \
         --prompt="zexplore ▸ filesystems › " \
         --height=100% --reverse --with-nth=1,2,3,4,5 --delimiter='\t' \
-        --header=$'? help   esc back/quit   ↵ snaps   ^s snap   ^r replicate\n^o explore   ^d destroy   ^p props   ^/ pane\nNAME\tUSED\tREFER\tSNAPS\tAUTO' \
+        --header=$'[F1 files]  F2 transfer  F3 restore  F4 pools   esc quit\n↵ snaps  ^s snap  ^r replicate  ^o explore  ^d destroy  ^p props  ? help\nNAME\tUSED\tREFER\tSNAPS\tAUTO' \
         --preview="sudo $self --preview {1}" --preview-window=right,50%,wrap \
+        --bind="f2:become(sudo $self mc)" \
+        --bind="f3:become(sudo $self restore)" \
+        --bind="f4:become(sudo $self pools)" \
         --bind="?:preview(sudo $self --keys)" \
         --bind="enter:execute(sudo $self snaps {1})" \
         --bind="ctrl-s:execute(sudo $self snap {1})+reload(sudo $self --table)" \
@@ -473,10 +476,13 @@ commander() {
     [[ -n "$target" ]] || exit 0
     local self="$0"
     datasets_table | fzf \
-        --prompt="zexplore ▸ local → ${target}  (F5=replicate  ^v=view target  enter=snaps  ^s=snap  ^g=retarget  ^d=destroy) → " \
+        --prompt="zexplore ▸ transfer → ${target} › " \
         --height=100% --reverse --with-nth=1,2,3,4,5 --delimiter='\t' \
-        --header=$'NAME\tUSED\tREFER\tSNAPS\tAUTO' \
-        --preview="sudo $self --preview {1}" --preview-window=right,55%,wrap \
+        --header=$'F1 files  [F2 transfer]  F3 restore  F4 pools   esc quit\nF5 replicate → '"${target}"$'   ^v view target   ^g retarget   ↵ snaps   ^d destroy\nNAME\tUSED\tREFER\tSNAPS\tAUTO' \
+        --preview="sudo $self --preview {1}" --preview-window=right,50%,wrap \
+        --bind="f1:become(sudo $self)" \
+        --bind="f3:become(sudo $self restore)" \
+        --bind="f4:become(sudo $self pools)" \
         --bind="f5:execute(sudo $self _mcsend {1} '$target')" \
         --bind="ctrl-t:execute(sudo $self _mcsend {1} '$target')" \
         --bind="enter:execute(sudo $self snaps {1})" \
@@ -488,6 +494,72 @@ commander() {
         --bind="ctrl-/:toggle-preview" >/dev/null || true
 }
 
+# ── Restore points (F3): every snapshot + boot environment on the box ─────────
+# Newest first. Roll back, clone into a new dataset, or destroy. The F-keys jump
+# to the other sections (fzf `become` swaps the view cleanly, no nesting).
+restore() {
+    have fzf || {
+        zfs list -t snapshot -o name,used,creation -s creation 2>/dev/null
+        return 0
+    }
+    local self="$0"
+    zfs list -H -t snapshot -o name,used,creation -S creation 2>/dev/null | fzf \
+        --prompt="zexplore ▸ restore points › " \
+        --height=100% --reverse --with-nth=1,2,3 --delimiter='\t' \
+        --header=$'F1 files  F2 transfer  [F3 restore]  F4 pools   esc quit\n↵ rollback   ^k clone   ^d destroy   ^p props   ? help\nSNAPSHOT\tUSED\tCREATED' \
+        --preview="sudo $self --preview {1}" --preview-window=right,50%,wrap \
+        --bind="f1:become(sudo $self)" \
+        --bind="f2:become(sudo $self mc)" \
+        --bind="f4:become(sudo $self pools)" \
+        --bind="enter:execute(sudo $self rollback {1})" \
+        --bind="ctrl-k:execute(sudo $self clone {1})" \
+        --bind="ctrl-d:execute(sudo $self destroy {1})+reload(zfs list -H -t snapshot -o name,used,creation -S creation)" \
+        --bind="ctrl-p:execute(sudo $self props {1})" \
+        --bind="?:preview(sudo $self --keys)" \
+        --bind="ctrl-/:toggle-preview" >/dev/null || true
+}
+
+# ── Pools (F4): zpool health + operations ────────────────────────────────────
+pools() {
+    have fzf || {
+        zpool list
+        return 0
+    }
+    local self="$0"
+    zpool list -H -o name,size,alloc,free,cap,health 2>/dev/null | fzf \
+        --prompt="zexplore ▸ pools › " \
+        --height=100% --reverse --with-nth=1,2,3,4,5,6 --delimiter='\t' \
+        --header=$'F1 files  F2 transfer  F3 restore  [F4 pools]   esc quit\n^s scrub   ^t trim   ^c clear-errors   ? help\nPOOL\tSIZE\tALLOC\tFREE\tCAP\tHEALTH' \
+        --preview="zpool status -v {1}" --preview-window=right,58%,wrap \
+        --bind="f1:become(sudo $self)" \
+        --bind="f2:become(sudo $self mc)" \
+        --bind="f3:become(sudo $self restore)" \
+        --bind="ctrl-s:execute(zpool scrub {1} && echo 'scrub started {1}'; sleep 1)" \
+        --bind="ctrl-t:execute(zpool trim {1} 2>&1 | head; sleep 1)" \
+        --bind="ctrl-c:execute(zpool clear {1} && echo 'cleared {1}'; sleep 1)" \
+        --bind="?:preview(sudo $self --keys)" \
+        --bind="ctrl-/:toggle-preview" >/dev/null || true
+}
+
+# rollback <snapshot> — revert a dataset to a snapshot (destroys newer ones).
+rollback() {
+    local snap="$1"
+    [[ "$snap" == *@* ]] || die "rollback: select a snapshot (dataset@snap)"
+    confirm "Roll ${snap%@*} back to ${R}${snap#*@}${N}? Snapshots newer than it are destroyed." || exit 0
+    zfs rollback -r "$snap" && say "${G}✓${N} rolled back ${snap%@*} → ${snap#*@}"
+    read -r -p "done — enter to return" _
+}
+
+# clone <snapshot> — fork a snapshot into a new writable dataset.
+clone() {
+    local snap="$1" dest
+    [[ "$snap" == *@* ]] || die "clone: select a snapshot (dataset@snap)"
+    read -r -p "Clone ${snap} → new dataset name: " dest
+    [[ -n "$dest" ]] || exit 0
+    zfs clone "$snap" "$dest" && say "${G}✓${N} cloned ${snap} → ${dest}"
+    read -r -p "done — enter to return" _
+}
+
 usage() {
     sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
@@ -496,7 +568,11 @@ usage() {
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 case "${1:-}" in
 "") browser ;;
-mc) commander "${2:-}" ;;
+mc | transfer) commander "${2:-}" ;;
+restore) restore ;;
+pools) pools ;;
+rollback) rollback "${2:-}" ;;
+clone) clone "${2:-}" ;;
 snap) snap "${2:-}" "${3:-}" ;;
 snaps) snaps "${2:-}" ;;
 replicate) replicate "${2:-}" "${3:-}" ;;
