@@ -85,6 +85,14 @@ k_zfs_cleanup_old() {
     # that will refuse to wipe until deactivated. Do everything with `|| true`
     # so a box with none of these still breezes through.
     local _disk_basename="${KLDLOAD_DISK##*/}"
+    # Exact device names of the target disk + its partitions (sda, sda1, …;
+    # nvme0n1, nvme0n1p1, …), matched below as WHOLE WORDS. Fixes a data-loss
+    # b652-class bug: an unanchored basename "sda" also matched "sdab" (a DIFFERENT
+    # disk) and could DESTROY ITS POOL. grep -wE against the exact set can only ever
+    # hit the real target disk.
+    local _disk_devs
+    _disk_devs="$(lsblk -lno NAME "${KLDLOAD_DISK}" 2>/dev/null | paste -sd'|')"
+    [[ -n "${_disk_devs}" ]] || _disk_devs="${_disk_basename}"
 
     # 1. Unmount every filesystem currently mounted from this disk (auto-mount
     #    daemons, leftover /mnt entries, etc.). Iterate child partitions too.
@@ -97,7 +105,7 @@ k_zfs_cleanup_old() {
     # 2. Deactivate any LVM volume groups that include a PV on this disk.
     if command -v pvs >/dev/null 2>&1; then
         pvs --noheadings -o pv_name,vg_name 2>/dev/null |
-            awk -v d="${_disk_basename}" '$1 ~ d {print $2}' | sort -u |
+            grep -wE "(${_disk_devs})" | awk '{print $2}' | sort -u |
             while read -r _vg; do
                 [[ -n "${_vg}" ]] && {
                     vgchange -a n "${_vg}" 2>/dev/null || true
@@ -110,8 +118,7 @@ k_zfs_cleanup_old() {
     if [[ -e /proc/mdstat ]] && command -v mdadm >/dev/null 2>&1; then
         awk '/^md/ {print $1}' /proc/mdstat 2>/dev/null |
             while read -r _md; do
-                if grep -q "${_disk_basename}" "/sys/block/${_md}/md/dev-"*/block/dev 2>/dev/null ||
-                    ls -l "/sys/block/${_md}/slaves/" 2>/dev/null | grep -q "${_disk_basename}"; then
+                if ls "/sys/block/${_md}/slaves/" 2>/dev/null | grep -qwE "(${_disk_devs})"; then
                     mdadm --stop "/dev/${_md}" 2>/dev/null || true
                     k_zfs_log "  Stopped mdraid array: /dev/${_md}"
                 fi
@@ -123,7 +130,7 @@ k_zfs_cleanup_old() {
         dmsetup ls --target crypt 2>/dev/null | awk '{print $1}' |
             while read -r _dm; do
                 [[ -z "${_dm}" || "${_dm}" == "No" ]] && continue
-                if dmsetup deps "${_dm}" 2>/dev/null | grep -q "${_disk_basename}"; then
+                if dmsetup deps -o devname "${_dm}" 2>/dev/null | grep -qwE "(${_disk_devs})"; then
                     cryptsetup close "${_dm}" 2>/dev/null || dmsetup remove "${_dm}" 2>/dev/null || true
                     k_zfs_log "  Closed LUKS mapping: ${_dm}"
                 fi
@@ -136,7 +143,7 @@ k_zfs_cleanup_old() {
     if command -v zpool >/dev/null 2>&1; then
         zpool status 2>/dev/null | awk '/pool:/ {print $2}' |
             while read -r _pool; do
-                if zpool status "${_pool}" 2>/dev/null | grep -q "${_disk_basename}"; then
+                if zpool status -LP "${_pool}" 2>/dev/null | grep -qwE "(${_disk_devs})"; then
                     zpool destroy -f "${_pool}" 2>/dev/null || true
                     k_zfs_log "  Destroyed imported ZFS pool on this disk: ${_pool}"
                 fi
@@ -144,7 +151,7 @@ k_zfs_cleanup_old() {
         zpool import 2>/dev/null | awk '/pool:/ {print $2}' |
             while read -r _pool; do
                 zpool import -f -N "${_pool}" 2>/dev/null || continue
-                if zpool status "${_pool}" 2>/dev/null | grep -q "${_disk_basename}"; then
+                if zpool status -LP "${_pool}" 2>/dev/null | grep -qwE "(${_disk_devs})"; then
                     zpool destroy -f "${_pool}" 2>/dev/null || true
                     k_zfs_log "  Destroyed exported-then-imported pool: ${_pool}"
                 else
