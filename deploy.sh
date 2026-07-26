@@ -541,6 +541,7 @@ cmd_build() {
         -e KLDLOAD_INCLUDE_OLLAMA_DARKSITE="${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" \
         -e KLDLOAD_ZFS_GIT="${KLDLOAD_ZFS_GIT:-}" \
         -e KLDLOAD_DEBUG_ALLOW="${KLDLOAD_DEBUG_ALLOW:-}" \
+        -e KLDLOAD_VERSION="${KLDLOAD_VERSION:-}" \
         --name "$BUILDER_CONTAINER" \
         "$BUILDER_IMAGE" \
         bash /build/builder/build-iso.sh
