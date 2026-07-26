@@ -1078,9 +1078,15 @@ DASHSTART
         # in /usr/local/bin. The `_` prefix tools (_ktoggle-win, _kconsole-home)
         # are helpers called from kldload-console's tmux keybindings; missing
         # them makes every F-key return 127. Skip installer-only internals.
+        # z9fs* is explicit: the ZFS console + its API/guest CLI break the k*
+        # naming convention (branded "z9fs"), so the k*/_k* globs silently
+        # dropped them — the installed system got kldload-z9fs.desktop but no
+        # z9fs binary, and the app tile opened a terminal to "z9fs: command not
+        # found" (.116 2026-07-26). Any future non-k tool needs adding here too.
         _skip_tools="kldload-install-target kldload-overview"
         shopt -s nullglob
-        for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/_s* /usr/local/bin/bob /usr/local/bin/bob-*; do
+        for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/_s* \
+            /usr/local/bin/z9fs* /usr/local/bin/bob*; do
             [[ -x "$_src" ]] || continue
             _name="$(basename "$_src")"
             case " $_skip_tools kldload-webui " in *" $_name "*) continue ;; esac
