@@ -1659,6 +1659,12 @@ async def ws_handler(websocket):
                     _, out = await _run_text(["zpool", "status", "-v"], timeout=10)
                     await websocket.send(json.dumps({"type": "zfs_status", "output": out}))
 
+                elif action == "zfs_pools":
+                    await _zfs_pools(websocket, msg)
+                elif action == "zfs_pool_op":
+                    await _zfs_pool_op(websocket, msg)
+                elif action == "zfs_disk_replace":
+                    await _zfs_disk_replace(websocket, msg)
                 elif action == "zfs_scrub_all":
                     # Kicks zpool scrub on every imported pool. Scrub is a
                     # background operation — the call returns immediately;
@@ -2369,6 +2375,14 @@ async def ws_handler(websocket):
                     await _k8s_cilium(websocket, msg)
                 elif action == "k8s_metallb":
                     await _k8s_metallb(websocket, msg)
+                elif action == "k8s_hpa":
+                    await _k8s_hpa(websocket, msg)
+                elif action == "k8s_crds":
+                    await _k8s_crds(websocket, msg)
+                elif action == "k8s_rbac":
+                    await _k8s_rbac(websocket, msg)
+                elif action == "k8s_rollout_history":
+                    await _k8s_rollout_history(websocket, msg)
                 elif action == "k8s_scale":
                     await _k8s_scale(websocket, msg)
                 elif action == "k8s_rollout_restart":
@@ -6334,6 +6348,183 @@ async def _k8s_metallb(websocket, msg):
     except Exception:
         pass
     await websocket.send(json.dumps({"type": "k8s_metallb", "metallb": {"pools": pools, "l2": l2}}))
+
+
+def _kubectl_lines(cmd, env):
+    """Run a kubectl command, return stripped stdout lines ([] on any error)."""
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=8, env=env)
+        return [ln for ln in out.strip().splitlines() if ln]
+    except Exception:
+        return []
+
+
+async def _k8s_hpa(websocket, msg):
+    """HorizontalPodAutoscalers for the Workloads panel — target, min/max, and
+    current replicas. desired>current (or unknown targets) flags scaling stress."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    hpas = []
+    for line in _kubectl_lines(["kubectl", "get", "hpa", "-A", "--no-headers"], env):
+        p = line.split()
+        # -A: NS NAME REFERENCE TARGETS MINPODS MAXPODS REPLICAS AGE
+        if len(p) >= 8:
+            hpas.append({"namespace": p[0], "name": p[1], "reference": p[2], "targets": p[3],
+                         "min": p[4], "max": p[5], "replicas": p[6], "age": p[7]})
+    await websocket.send(json.dumps({"type": "k8s_hpa", "hpa": hpas}))
+
+
+async def _k8s_crds(websocket, msg):
+    """Installed CustomResourceDefinitions — group/kind/scope. Shows what every
+    operator (Cilium, MetalLB, cert-manager, …) added to the cluster's API."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    crds = []
+    fmt = "custom-columns=NAME:.metadata.name,GROUP:.spec.group,KIND:.spec.names.kind,SCOPE:.spec.scope"
+    for line in _kubectl_lines(["kubectl", "get", "crd", "-o", fmt, "--no-headers"], env):
+        p = line.split()
+        if len(p) >= 4:
+            crds.append({"name": p[0], "group": p[1], "kind": p[2], "scope": p[3]})
+    await websocket.send(json.dumps({"type": "k8s_crds", "crds": crds}))
+
+
+async def _k8s_rbac(websocket, msg):
+    """RBAC overview for the Access panel: ServiceAccounts, RoleBindings (ns), and
+    ClusterRoleBindings (cluster). The who-can-do-what surface."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    sas, rbs, crbs = [], [], []
+    for line in _kubectl_lines(["kubectl", "get", "sa", "-A", "--no-headers"], env):
+        p = line.split()  # NS NAME SECRETS AGE
+        if len(p) >= 4:
+            sas.append({"namespace": p[0], "name": p[1], "secrets": p[2], "age": p[3]})
+    for line in _kubectl_lines(["kubectl", "get", "rolebindings", "-A", "--no-headers"], env):
+        p = line.split()  # NS NAME ROLE AGE
+        if len(p) >= 4:
+            rbs.append({"namespace": p[0], "name": p[1], "role": p[2], "age": p[3]})
+    for line in _kubectl_lines(["kubectl", "get", "clusterrolebindings", "--no-headers"], env):
+        p = line.split()  # NAME ROLE AGE
+        if len(p) >= 3:
+            crbs.append({"name": p[0], "role": p[1], "age": p[2]})
+    await websocket.send(json.dumps({"type": "k8s_rbac",
+                                     "rbac": {"serviceaccounts": sas, "rolebindings": rbs, "clusterrolebindings": crbs}}))
+
+
+async def _k8s_rollout_history(websocket, msg):
+    """`kubectl rollout history deployment/<name>` — revision list, shown in a
+    modal. Pairs with the row's Rollback (rollout undo) action."""
+    env = {**os.environ, "KUBECONFIG": "/root/.kube/config", "HOME": "/root"}
+    ns = msg.get("namespace", "")
+    name = msg.get("name", "")
+    cmd = ["kubectl", "rollout", "history", f"deployment/{name}"]
+    if ns:
+        cmd.extend(["-n", ns])
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT, timeout=8, env=env)
+    except Exception as e:
+        out = f"rollout history failed: {e}"
+    await websocket.send(json.dumps({"type": "k8s_rollout_history", "namespace": ns, "name": name, "text": out}))
+
+
+# ── ZFS console (the ultimate ZFS tool) ──────────────────────────────────────
+def _zfs_vdev_tree(vd, depth, out):
+    """Flatten a `zpool status -j` vdev node's children into a depth-tagged list
+    (name, type, state, r/w/cksum errors) for the Pools disk-topology view."""
+    for child in (vd.get("vdevs", {}) or {}).values():
+        out.append({
+            "name": child.get("name", ""),
+            "type": child.get("vdev_type", ""),
+            "state": child.get("state", ""),
+            "read": child.get("read_errors", "0"),
+            "write": child.get("write_errors", "0"),
+            "cksum": child.get("checksum_errors", "0"),
+            "depth": depth,
+        })
+        _zfs_vdev_tree(child, depth + 1, out)
+
+
+async def _zfs_pools(websocket, msg):
+    """Every pool: health, capacity/frag/dedup, scan (scrub/resilver) progress,
+    and the full vdev/disk topology with per-device error counters. zpool list
+    for the summary, zpool status -j (JSON, OpenZFS 2.2+) for the tree."""
+    pools = []
+    summary = {}
+    try:
+        for ln in subprocess.check_output(
+                ["zpool", "list", "-Hp", "-o", "name,size,alloc,free,cap,frag,dedup,health"],
+                text=True, stderr=subprocess.DEVNULL, timeout=8).strip().splitlines():
+            f = ln.split("\t")
+            if len(f) >= 8:
+                summary[f[0]] = {"size": f[1], "alloc": f[2], "free": f[3],
+                                 "cap": f[4], "frag": f[5], "dedup": f[6], "health": f[7]}
+    except Exception:
+        pass
+    try:
+        st = json.loads(subprocess.check_output(["zpool", "status", "-j"],
+                        text=True, stderr=subprocess.DEVNULL, timeout=10))
+    except Exception:
+        st = {"pools": {}}
+    for name, p in st.get("pools", {}).items():
+        devs = []
+        # pools.<name>.vdevs is keyed by pool name → each value is the ROOT vdev
+        # node; walk each root's CHILDREN (the real mirror/raidz/disk topology).
+        for root in (p.get("vdevs", {}) or {}).values():
+            _zfs_vdev_tree(root, 0, devs)
+        scan = p.get("scan_stats", {}) or {}
+        s = summary.get(name, {})
+        pools.append({
+            "name": name, "state": p.get("state", s.get("health", "")),
+            "size": s.get("size", ""), "alloc": s.get("alloc", ""), "free": s.get("free", ""),
+            "cap": s.get("cap", ""), "frag": s.get("frag", ""), "dedup": s.get("dedup", ""),
+            "scan_func": scan.get("function", scan.get("pool_scan_func", "")),
+            "scan_state": scan.get("state", ""), "scan_pct": scan.get("pct_done", ""),
+            "status_msg": p.get("status", ""), "devs": devs,
+        })
+    await websocket.send(json.dumps({"type": "zfs_pools", "pools": pools}))
+
+
+async def _zfs_pool_op(websocket, msg):
+    """Pool maintenance op: scrub (start/stop), trim (start/stop), clear errors.
+    Destructive-adjacent but safe — all reversible/stoppable. Refuses unknown ops
+    and validates the pool exists."""
+    pool = msg.get("pool", "")
+    op = msg.get("op", "")
+    if not pool or subprocess.call(["zpool", "list", pool],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+        await websocket.send(json.dumps({"type": "error", "msg": f"no such pool: {pool}"}))
+        return
+    cmds = {
+        "scrub": ["zpool", "scrub", pool],
+        "scrub_stop": ["zpool", "scrub", "-s", pool],
+        "trim": ["zpool", "trim", pool],
+        "trim_stop": ["zpool", "trim", "-c", pool],
+        "clear": ["zpool", "clear", pool],
+    }
+    if op not in cmds:
+        await websocket.send(json.dumps({"type": "error", "msg": f"unknown pool op: {op}"}))
+        return
+    rc = subprocess.call(cmds[op], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if rc != 0:
+        await websocket.send(json.dumps({"type": "error", "msg": f"{op} on {pool} failed (rc={rc})"}))
+    await _zfs_pools(websocket, msg)
+
+
+async def _zfs_disk_replace(websocket, msg):
+    """Replace a failing/failed device in a pool (the 'my disk is failing' path):
+    zpool replace <pool> <old> <new>. Kicks off a resilver. Both devices must be
+    given; new must not already be in a pool."""
+    pool = msg.get("pool", "")
+    old = msg.get("old", "")
+    new = msg.get("new", "")
+    if not (pool and old and new):
+        await websocket.send(json.dumps({"type": "error", "msg": "replace needs pool + old + new device"}))
+        return
+    proc = subprocess.run(["zpool", "replace", pool, old, new],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        await websocket.send(json.dumps({"type": "error",
+            "msg": f"replace failed: {(proc.stderr or proc.stdout).strip()[:220]}"}))
+    else:
+        await websocket.send(json.dumps({"type": "zfs_notice",
+            "msg": f"Replacing {old} → {new} in {pool}; resilver started."}))
+    await _zfs_pools(websocket, msg)
 
 
 async def _k8s_services(websocket, msg):
