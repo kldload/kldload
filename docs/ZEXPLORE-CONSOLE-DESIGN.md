@@ -89,3 +89,64 @@ sanoid stays the scheduled layer; txns are ad-hoc + short-lived.
 snapshots→tests→rolls-back in seconds; "golden dev state" you reset to on demand.
 
 See [[k8s-cockpit-day2-roadmap]] (the parallel k8s work), [[reproducible-not-immutable]].
+
+---
+
+## zexplore v2 — the UI design (locked 2026-07-26)
+
+Renamed from z9fs (which aped k9s / implied a polished-TUI framework). **zexplore
+advertises what it is: a direct interface to ZFS primitives, not a dashboard.**
+
+### Three surfaces, one set of primitives
+- **Terminal TUI** — the locked 3-pane below (build FIRST).
+- **Clickable web GUI** — like the k8s cockpit; expand the ZFS web console SPA
+  (Pools/Datasets/Snapshots already shipped) to the same 4 sections.
+- **Programmatic API** — zexplore-api/-txn ("instant rollback as a function").
+
+Different audiences, trivial marginal cost → ship all three.
+
+### Portability (the pitch beyond kldload)
+Core = plain `zfs`/`zpool` → runs on ANY ZFS box (Linux/BSD). kldload detected →
+light up extras (zexplore-api txns, sanoid-awareness, the WireGuard mesh for
+remotes, delegation presets, offline/darksite). Vanilla → plain `ssh`, plain
+`zfs allow`. Nothing kldload-specific is required; all additive.
+
+### The locked 3-pane layout (terminal) — kills the drill-down nav
+```
+┌ F1 Filesystems  F2 Transfer  F3 Restore  F4 Pools ─────────────┐
+│ PANE 1 (left)        │ PANE 2 (right-top)                       │
+│ source: zpool/zfs    │ Filesystems: the detail dossier          │
+│ list, navigable      │ Transfer:    TARGET (ssh host / VM)      │
+│                      ├──────────────────────────────────────────┤
+│                      │ PANE 3 (right-bottom): pane-aware TERM    │
+└──────────────────────┴──────────────────────────────────────────┘
+```
+Stable frame; F-keys switch the section, arrows/type-filter within a pane.
+Filesystems mode: pane2 = the dossier (properties + both permission layers).
+Transfer mode (FTP-analog): pane1 = LOCAL source, pane2 = REMOTE/VM target.
+
+### The pane-aware terminal (the killer feature)
+Pane 3 is a REAL shell — raw zfs/zpool/ssh all work — but it also knows the two
+panes. Selections publish to shared state; the shell exposes `$SRC`/`$DST`
+(+ `$SRC_HOST`/`$DST_HOST`) and helper verbs that auto-populate from them:
+```
+replicate      # zfs send $SRC | ssh $DST_HOST zfs recv $DST   (incremental)
+copy / snap / rollback / clone / hold …
+```
+Navigate pane1→source, pane2→target, type `replicate` — done. Or type the full
+command yourself. MC's "the command line knows the panels," for ZFS.
+Ex: on fiend, pane1 = onyx (ssh) → onyx:rpool/opt/webserver; pane2 = local
+fiend:zpool/webserver; `replicate` sends onyx→fiend with paths filled.
+
+### The 4 sections + gaps folded in
+- **F1 Filesystems** — datasets/zvols + dossier; + encryption&keys, delegation
+  (`zfs allow` grant/revoke), sharing (NFS/SMB/iSCSI) as first-class actions.
+- **F2 Transfer** — the 3-pane replicate/copy/manage (local↔remote↔VM).
+- **F3 Restore points** — snapshots + boot environments; rollback/clone/hold/
+  bookmark; + `zfs diff` (what changed).
+- **F4 Pools** — status/iostat/scrub/trim/vdev+disk ops; + events/errors (ZED).
+
+### zexplore-demo (like kube-demo)
+Scripted walkthrough of every feature = **demo + functional test + video**. Uses
+onyx (kldload) + a `zexp` user with seamless SSH keys to show remote replication.
+Runs each primitive, asserts success. Build after the terminal 3-pane lands.
