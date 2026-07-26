@@ -358,8 +358,9 @@ browser() {
     datasets_table | fzf \
         --prompt="zexplore ▸ filesystems › " \
         --height=100% --reverse --with-nth=1,2,3,4,5 --delimiter='\t' \
-        --header=$'↵ snaps  ^s snap  ^r replicate\n^o explore  ^d destroy  ^p props  ^/ pane\nNAME\tUSED\tREFER\tSNAPS\tAUTO' \
+        --header=$'? help   esc back/quit   ↵ snaps   ^s snap   ^r replicate\n^o explore   ^d destroy   ^p props   ^/ pane\nNAME\tUSED\tREFER\tSNAPS\tAUTO' \
         --preview="sudo $self --preview {1}" --preview-window=right,50%,wrap \
+        --bind="?:preview(sudo $self --keys)" \
         --bind="enter:execute(sudo $self snaps {1})" \
         --bind="ctrl-s:execute(sudo $self snap {1})+reload(sudo $self --table)" \
         --bind="ctrl-r:execute(sudo $self replicate \$(sudo $self --latest {1}))" \
@@ -371,6 +372,30 @@ browser() {
 
 # --latest <dataset> — echo its newest snapshot (for the ctrl-r bind).
 _latest() { zfs list -H -t snapshot -o name -s creation -r "$1" 2>/dev/null | tail -1; }
+
+# --keys — the '?' help screen (rendered in the browser's preview pane).
+_keys() {
+    cat <<EOF
+${C}zexplore${N} — a direct interface to your ZFS primitives
+
+${G}navigate${N}
+  ↑ ↓ / type      move · fuzzy-filter
+  enter           open the highlighted dataset's snapshots
+  esc / ctrl-c    ${Y}back one level / quit  ← this is "back"${N}
+  ctrl-/          toggle this detail pane
+  ?               this help (move, or press ? again, to return)
+
+${G}act on the highlighted dataset${N}
+  ctrl-s          snapshot now
+  ctrl-r          replicate — point-and-shoot to a pool or host:pool
+  ctrl-o          explore files (mount read-only; VM zvols clone+mount)
+  ctrl-p          full properties + permissions dossier
+  ctrl-d          destroy (asks first)
+
+${G}mouse${N}   click a row to select · scroll to move
+${G}also${N}    zexplore mc <target>   pinned-target commander
+EOF
+}
 
 # ── The commander (dual-location, WinSCP-for-ZFS) ─────────────────────────────
 # The MC/WinSCP layer: browse LOCAL datasets (the source) with a PINNED target —
@@ -483,6 +508,7 @@ _mcview) _mcview "${2:-}" ;;          # internal: fzf ctrl-v bind
 --preview) preview "${2:-}" ;;
 --table) datasets_table ;;
 --latest) _latest "${2:-}" ;;
+--keys) _keys ;;
 -h | --help) usage ;;
 *) die "unknown command: $1 (try --help)" ;;
 esac
