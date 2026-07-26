@@ -34,17 +34,26 @@ for _ in $(seq 1 60); do
 done
 sleep 2 # let nginx finish wiring the upstream before we paint the SPA
 
-# Also wait for the PKI seed before painting. firstboot generates the CA, issues
-# the webui cert, seeds it into each user's ~/.pki/nssdb (the store Chrome reads),
-# THEN touches this marker. On a FRESH install the graphical login can beat that
-# seed by ~1 min (login 09:06 vs nssdb seed 09:07 on .111 2026-07-25), so Chrome's
-# first paint would flash a cert warning that self-heals seconds later. Waiting for
-# the marker means it's trusted on first paint — no warning ever. Bounded; an
-# already-provisioned system has the marker, so there's no wait after first boot,
-# and if it never appears we still open the UI rather than block the desktop.
-for _ in $(seq 1 90); do
-    [[ -f /var/lib/kldload/pki-ready ]] && break
-    sleep 1
-done
+# Also wait for the PKI seed before painting — but ONLY on an installed system.
+# firstboot generates the CA, issues the webui cert, seeds it into each user's
+# ~/.pki/nssdb (the store Chrome reads), THEN touches this marker. On a FRESH
+# install the graphical login can beat that seed by ~1 min (login 09:06 vs nssdb
+# seed 09:07 on .111 2026-07-25), so Chrome's first paint would flash a cert
+# warning that self-heals seconds later. Waiting for the marker means it's trusted
+# on first paint — no warning ever.
+#
+# The LIVE image is different: that firstboot desktop seed path does not run, so
+# pki-ready is NEVER touched — and the old unconditional wait blocked the desktop
+# for the full 90s bound waiting for a marker that never comes (the ~45-90s live-
+# boot GUI stall reported on 1.3.2, .111 2026-07-26). Detect the live image by the
+# dracut live marker and skip the wait there — the live env is ephemeral, so a
+# brief self-healing warning is fine and far better than a blank desktop. On an
+# installed system the marker is absent, so the wait runs as before.
+if [[ ! -e /run/initramfs/live ]]; then
+    for _ in $(seq 1 90); do
+        [[ -f /var/lib/kldload/pki-ready ]] && break
+        sleep 1
+    done
+fi
 
 exec /usr/local/bin/kldload-chrome-app com.kldload.webui "$url"
