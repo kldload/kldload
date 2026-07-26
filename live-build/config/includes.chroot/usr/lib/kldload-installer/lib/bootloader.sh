@@ -581,6 +581,18 @@ EOFSTAB
     # (intent=0) keep ZBM as the default boot-env picker.
     local _grub_default="zbm"
     [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] && _grub_default="direct"
+
+    # Kernel args for the `direct` entry differ for ENCRYPTED installs: the
+    # passphrase prompt raised by the initramfs (dracut 90zfs / distro zfs hook)
+    # MUST be visible. `rhgb quiet` routes it through plymouth's splash, and if
+    # the plymouth password agent isn't pulled into the initramfs the prompt is
+    # swallowed — the box sits at a blank splash looking hung when it is really
+    # waiting for a passphrase (the "encryption is presumed broken" symptom).
+    # For encrypted installs drop the splash and force the prompt onto tty1 +
+    # serial so it's unmistakable. Plaintext installs keep the quiet splash.
+    # HISTORY: 2026-07-26 encrypted-boot path audit.
+    local _direct_bootargs="rhgb quiet"
+    [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]] && _direct_bootargs="console=tty1 console=ttyS0,115200"
     local _grub_cfg=""
     read -r -d '' _grub_cfg <<GRUBCFG || true
 # kldload — auto-generated at install time
@@ -600,7 +612,7 @@ menuentry "kldload — ZFS Boot Menu (boot environments + snapshot rollback)" --
 }
 
 menuentry "kldload — direct kernel boot (Secure Boot compatible)" --id=direct {
-    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro rhgb quiet spl_hostid=\${spl_hostid} psi=1 selinux=0
+    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro ${_direct_bootargs} spl_hostid=\${spl_hostid} psi=1 selinux=0
     initrd /EFI/BOOT/initrd.img
 }
 
