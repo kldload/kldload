@@ -528,7 +528,169 @@ restore() {
         --bind="ctrl-/:toggle-preview" >/dev/null || true
 }
 
-# ── Pools (F4): zpool health + operations ────────────────────────────────────
+# ── Pool topology + vdev design ──────────────────────────────────────────────
+# The definitive part: zexplore reads AND builds any topology — mirror,
+# raidz1/2/3, stripe, RAID10 (striped mirrors) — with SLOG (log/ZIL), L2ARC
+# (cache), and special (metadata) vdevs. Not just single-disk pools.
+
+# _free_disks — whole disks not already in a pool and not hosting root. Best-
+# effort (you confirm the final command; zpool itself refuses in-use disks).
+_free_disks() {
+    local inuse rootsrc rootdisk d s
+    inuse="$(zpool status -LP 2>/dev/null | grep -oE '/dev/[^ ]+' | sort -u)"
+    rootsrc="$(findmnt -no SOURCE / 2>/dev/null)"
+    rootdisk="$(lsblk -pno PKNAME "$rootsrc" 2>/dev/null | awk 'NF{print;exit}')"
+    lsblk -dpno NAME,SIZE,TYPE 2>/dev/null | awk '$3=="disk"{print $1"\t"$2}' |
+        while IFS=$'\t' read -r d s; do
+            grep -qF "$d" <<<"$inuse" && continue
+            [ -n "$rootdisk" ] && [ "$d" = "$rootdisk" ] && continue
+            printf '%s\t%s\n' "$d" "$s"
+        done
+}
+
+# _pool_dossier <pool> — the Pools preview: the vdev tree with per-vdev capacity
+# (zpool list -v), then health / scan / errors.
+_pool_dossier() {
+    local p="$1"
+    echo -e "${C}${p}${N}  — topology + capacity"
+    zpool list -v "$p" 2>/dev/null | sed 's/^/  /'
+    echo -e "\n${G}── health · scan · errors ──${N}"
+    zpool status "$p" 2>/dev/null | sed -n '/scan:/,/errors:/p' | sed 's/^/  /'
+}
+
+# pool_create — interactive vdev-design wizard. NEVER uses -f; prints the exact
+# zpool command and confirms before running, so nothing is destroyed by surprise.
+pool_create() {
+    local name lay p a
+    local -a disks picks dd spec
+    say "── create a pool ─────────────────────────────────"
+    mapfile -t disks < <(_free_disks)
+    if [ "${#disks[@]}" -eq 0 ]; then
+        warn "no free whole disks found (existing disks/pools are protected)."
+        read -r -p "enter to return " _
+        return 0
+    fi
+    echo "  free disks:"
+    p=1
+    for a in "${disks[@]}"; do
+        printf "   [%d] %s\n" "$p" "$a"
+        p=$((p + 1))
+    done
+    echo
+    read -r -p "  pool name: " name
+    [ -n "$name" ] || return 0
+    echo "  layout:  1) mirror  2) raidz1  3) raidz2  4) raidz3  5) stripe  6) raid10 (striped mirrors)"
+    read -r -p "  choose [1-6]: " lay
+    read -r -a picks -p "  data disk #s (e.g. 1 2 3 4): "
+    for p in "${picks[@]}"; do
+        [[ "$p" =~ ^[0-9]+$ ]] && dd+=("$(awk '{print $1}' <<<"${disks[$((p - 1))]}")")
+    done
+    [ "${#dd[@]}" -gt 0 ] || {
+        warn "no disks chosen"
+        return 0
+    }
+    case "$lay" in
+    1) spec=(mirror "${dd[@]}") ;;
+    2) spec=(raidz1 "${dd[@]}") ;;
+    3) spec=(raidz2 "${dd[@]}") ;;
+    4) spec=(raidz3 "${dd[@]}") ;;
+    5) spec=("${dd[@]}") ;;
+    6)
+        ((${#dd[@]} % 2 == 0)) || {
+            warn "raid10 needs an even number of disks"
+            return 0
+        }
+        for ((p = 0; p < ${#dd[@]}; p += 2)); do spec+=(mirror "${dd[p]}" "${dd[p + 1]}"); done
+        ;;
+    *)
+        warn "invalid layout"
+        return 0
+        ;;
+    esac
+    # optional accelerator / aux vdevs
+    for a in "log:SLOG (write log / ZIL)" "cache:L2ARC (read cache)" "special:special (metadata)"; do
+        read -r -p "  add ${a#*:} — disk # (blank = none): " p
+        [[ "$p" =~ ^[0-9]+$ ]] && spec+=("${a%%:*}" "$(awk '{print $1}' <<<"${disks[$((p - 1))]}")")
+    done
+    echo
+    say "will run:  ${G}zpool create ${name} ${spec[*]}${N}"
+    confirm "create pool '${name}'?" || return 0
+    if zpool create "$name" "${spec[@]}"; then
+        say "${G}✓${N} pool ${name} created"
+        zpool status "$name"
+    else
+        warn "zpool create failed — a disk may be in use (add -f by hand only if sure)"
+    fi
+    read -r -p "enter to return " _
+}
+
+# disk_replace <pool> — swap a failed/old device for a new one (resilvers).
+disk_replace() {
+    local pool="$1" old new
+    [ -n "$pool" ] || die "disk_replace: pool required"
+    zpool status "$pool" 2>/dev/null | sed 's/^/  /'
+    read -r -p "  replace which device (old): " old
+    read -r -p "  with new device: " new
+    [ -n "$old" ] && [ -n "$new" ] || return 0
+    confirm "zpool replace ${pool} ${old} ${new}?" || return 0
+    zpool replace "$pool" "$old" "$new" && say "${G}✓${N} resilvering ${old} → ${new}"
+    read -r -p "enter to return " _
+}
+
+# pool_add <pool> — grow an existing pool with another vdev (data or accelerator).
+pool_add() {
+    local pool="$1" lay p a
+    local -a disks picks dd spec
+    [ -n "$pool" ] || die "pool_add: pool required"
+    say "── add a vdev to ${pool} ──────────────────────────"
+    mapfile -t disks < <(_free_disks)
+    if [ "${#disks[@]}" -eq 0 ]; then
+        warn "no free whole disks found."
+        read -r -p "enter to return " _
+        return 0
+    fi
+    echo "  free disks:"
+    p=1
+    for a in "${disks[@]}"; do
+        printf "   [%d] %s\n" "$p" "$a"
+        p=$((p + 1))
+    done
+    echo "  vdev:  1) mirror  2) raidz1  3) raidz2  4) raidz3  5) stripe  6) log(SLOG)  7) cache(L2ARC)  8) special"
+    read -r -p "  choose [1-8]: " lay
+    read -r -a picks -p "  disk #s: "
+    for p in "${picks[@]}"; do
+        [[ "$p" =~ ^[0-9]+$ ]] && dd+=("$(awk '{print $1}' <<<"${disks[$((p - 1))]}")")
+    done
+    [ "${#dd[@]}" -gt 0 ] || {
+        warn "no disks chosen"
+        return 0
+    }
+    case "$lay" in
+    1) spec=(mirror "${dd[@]}") ;;
+    2) spec=(raidz1 "${dd[@]}") ;;
+    3) spec=(raidz2 "${dd[@]}") ;;
+    4) spec=(raidz3 "${dd[@]}") ;;
+    5) spec=("${dd[@]}") ;;
+    6) spec=(log "${dd[@]}") ;;
+    7) spec=(cache "${dd[@]}") ;;
+    8) spec=(special "${dd[@]}") ;;
+    *)
+        warn "invalid"
+        return 0
+        ;;
+    esac
+    say "will run:  ${G}zpool add ${pool} ${spec[*]}${N}"
+    confirm "add vdev to ${pool}?" || return 0
+    if zpool add "$pool" "${spec[@]}"; then
+        say "${G}✓${N} added to ${pool}"
+        zpool status "$pool"
+    else
+        warn "zpool add failed"
+    fi
+    read -r -p "enter to return " _
+}
+
+# ── Pools (F4): zpool health + topology + vdev operations ────────────────────
 pools() {
     have fzf || {
         zpool list
@@ -538,11 +700,14 @@ pools() {
     zpool list -H -o name,size,alloc,free,cap,health 2>/dev/null | fzf \
         --prompt="zexplore ▸ pools › " \
         --height=100% --reverse --with-nth=1,2,3,4,5,6 --delimiter='\t' \
-        --header=$'F1 files  F2 transfer  F3 restore  [F4 pools]   esc quit\n^s scrub   ^t trim   ^c clear-errors   ? help\nPOOL\tSIZE\tALLOC\tFREE\tCAP\tHEALTH' \
-        --preview="zpool status -v {1}" --preview-window=right,58%,wrap \
+        --header=$'F1 files  F2 transfer  F3 restore  [F4 pools]   esc quit\n^n new-pool  ^a add-vdev  ^r replace-disk  ^s scrub  ^t trim  ^c clear  ? help\nPOOL\tSIZE\tALLOC\tFREE\tCAP\tHEALTH' \
+        --preview="sudo $self --pool-dossier {1}" --preview-window=right,58%,wrap \
         --bind="f1:become(sudo $self)" \
         --bind="f2:become(sudo $self mc)" \
         --bind="f3:become(sudo $self restore)" \
+        --bind="ctrl-n:execute(sudo $self pool-create)+reload(zpool list -H -o name,size,alloc,free,cap,health)" \
+        --bind="ctrl-a:execute(sudo $self pool-add {1})+reload(zpool list -H -o name,size,alloc,free,cap,health)" \
+        --bind="ctrl-r:execute(sudo $self disk-replace {1})" \
         --bind="ctrl-s:execute(zpool scrub {1} && echo 'scrub started {1}'; sleep 1)" \
         --bind="ctrl-t:execute(zpool trim {1} 2>&1 | head; sleep 1)" \
         --bind="ctrl-c:execute(zpool clear {1} && echo 'cleared {1}'; sleep 1)" \
@@ -580,6 +745,10 @@ case "${1:-}" in
 mc | transfer) commander "${2:-}" ;;
 restore) restore ;;
 pools) pools ;;
+pool-create) pool_create ;;
+pool-add) pool_add "${2:-}" ;;
+disk-replace) disk_replace "${2:-}" ;;
+--pool-dossier) _pool_dossier "${2:-}" ;;
 rollback) rollback "${2:-}" ;;
 clone) clone "${2:-}" ;;
 snap) snap "${2:-}" "${3:-}" ;;
