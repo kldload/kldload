@@ -1498,6 +1498,29 @@ if [[ "$EDITION" != "core" ]]; then
     # kldload-proxy explicitly so only one thing binds :8443.
     chroot "${ROOTFS}" systemctl enable nginx.service >>"$LOG_FILE" 2>&1 || true
     chroot "${ROOTFS}" systemctl disable kldload-proxy.service >>"$LOG_FILE" 2>&1 || true
+
+    # ── DEBUG MODE (opt-in, NEVER in a release build) ──────────────────────
+    # The :8443 management surface is IP-restricted to localhost by default
+    # (nginx kldload.conf) because the webui dispatch isn't authenticated yet.
+    # For remote testing, pass KLDLOAD_DEBUG_ALLOW=<ip> at build time (e.g. the
+    # onyx box). The IP is a BUILD VARIABLE — never hardcoded in the tree. It
+    # drops a central debug marker (/etc/kldload/debug.conf) that other tooling
+    # can source to relax behaviour for the trusted host, plus the nginx allow
+    # rule for :8443. Unset (a production build) → no marker, no drop-in,
+    # loopback-only. The release smoke-check should assert this file is absent.
+    if [[ -n "${KLDLOAD_DEBUG_ALLOW:-}" ]]; then
+        log "DEBUG MODE: allow ${KLDLOAD_DEBUG_ALLOW} → :8443 (and debug marker) — NOT FOR RELEASE"
+        mkdir -p "${ROOTFS}/etc/kldload" "${ROOTFS}/etc/nginx/conf.d"
+        {
+            echo "# kldload DEBUG MODE — generated at build from KLDLOAD_DEBUG_ALLOW."
+            echo "# The presence of this file MEANS this is a debug build (NOT a release)."
+            echo "# Tools may source it to relax behaviour for the trusted debug host."
+            echo "KLDLOAD_DEBUG=1"
+            echo "KLDLOAD_DEBUG_ALLOW_IP=${KLDLOAD_DEBUG_ALLOW}"
+        } >"${ROOTFS}/etc/kldload/debug.conf"
+        printf '# DEBUG (KLDLOAD_DEBUG_ALLOW) — remote test access to :8443; strip for release.\nallow %s;\n' \
+            "${KLDLOAD_DEBUG_ALLOW}" >"${ROOTFS}/etc/nginx/conf.d/kldload-access-debug.conf"
+    fi
     # Disable kldload-headlamp.service at boot — caught 2026-05-17 on .148:
     # the pinned upstream URL (v0.26.0 with headlamp-server-linux-amd64.tar.gz
     # filename pattern) returns 404. The Headlamp project stopped publishing

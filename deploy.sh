@@ -540,6 +540,7 @@ cmd_build() {
         -e BOB_LIVE="${BOB_LIVE:-}" \
         -e KLDLOAD_INCLUDE_OLLAMA_DARKSITE="${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" \
         -e KLDLOAD_ZFS_GIT="${KLDLOAD_ZFS_GIT:-}" \
+        -e KLDLOAD_DEBUG_ALLOW="${KLDLOAD_DEBUG_ALLOW:-}" \
         --name "$BUILDER_CONTAINER" \
         "$BUILDER_IMAGE" \
         bash /build/builder/build-iso.sh
