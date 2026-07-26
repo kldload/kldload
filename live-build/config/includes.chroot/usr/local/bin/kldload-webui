@@ -1665,6 +1665,18 @@ async def ws_handler(websocket):
                     await _zfs_pool_op(websocket, msg)
                 elif action == "zfs_disk_replace":
                     await _zfs_disk_replace(websocket, msg)
+                elif action == "zfs_datasets":
+                    await _zfs_datasets(websocket, msg)
+                elif action == "zfs_dataset_create":
+                    await _zfs_dataset_create(websocket, msg)
+                elif action == "zfs_dataset_destroy":
+                    await _zfs_dataset_destroy(websocket, msg)
+                elif action == "zfs_dataset_set":
+                    await _zfs_dataset_set(websocket, msg)
+                elif action == "snapshot_destroy":
+                    await _snapshot_destroy(websocket, msg)
+                elif action == "snapshot_clone":
+                    await _snapshot_clone(websocket, msg)
                 elif action == "zfs_scrub_all":
                     # Kicks zpool scrub on every imported pool. Scrub is a
                     # background operation — the call returns immediately;
@@ -6525,6 +6537,159 @@ async def _zfs_disk_replace(websocket, msg):
         await websocket.send(json.dumps({"type": "zfs_notice",
             "msg": f"Replacing {old} → {new} in {pool}; resilver started."}))
     await _zfs_pools(websocket, msg)
+
+
+# ─── ZFS datasets ────────────────────────────────────────────────────────────
+# The dataset half of the web console (the Pools half is above). Datasets +
+# volumes are what an operator actually lives in day-to-day: create a child fs,
+# tune compression, reclaim by destroying. Mirrors the z9fs CLI's dataset view.
+# All mutating ops validate the name against _ZFS_NAME_RE first — these run as
+# root, and an unvalidated name reaching `zfs destroy` is how you lose a pool.
+
+_ZFS_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_/.:@\-]*$")
+
+
+def _zfs_name_ok(name: str) -> bool:
+    """Guard every dataset/volume name that reaches a mutating zfs call. Rejects
+    empty, leading-dash (option injection), and anything outside ZFS's own legal
+    charset. Not a security boundary on its own (the socket is localhost-only)
+    but the last line before `zfs destroy` runs as root."""
+    return bool(name) and bool(_ZFS_NAME_RE.match(name)) and ".." not in name
+
+
+async def _zfs_datasets(websocket, msg):
+    """List filesystems + volumes with the columns an operator triages on:
+    used / referenced / available / mountpoint / compression + ratio. Parsed
+    machine-readably (-Hp) so the SPA renders a real table, not a text dump."""
+    rows = []
+    rc, out = await _run_text(
+        ["zfs", "list", "-Hp", "-t", "filesystem,volume", "-o",
+         "name,used,refer,avail,mountpoint,compression,compressratio,type"],
+        timeout=15)
+    if rc == 0:
+        for ln in out.strip().splitlines():
+            f = ln.split("\t")
+            if len(f) >= 8:
+                rows.append({
+                    "name": f[0], "used": f[1], "refer": f[2], "avail": f[3],
+                    "mountpoint": f[4], "compression": f[5], "ratio": f[6],
+                    "type": f[7],
+                })
+    await websocket.send(json.dumps({"type": "zfs_datasets", "datasets": rows}))
+
+
+async def _zfs_dataset_create(websocket, msg):
+    """Create a child filesystem (or a volume when size is given). Optional
+    `props` is a flat {k:v} of `zfs set`-able properties applied at create with
+    -o. Refuses a bad name and surfaces zfs's own error verbatim (truncated)."""
+    name = msg.get("name", "")
+    if not _zfs_name_ok(name):
+        await websocket.send(json.dumps({"type": "error", "msg": f"invalid dataset name: {name}"}))
+        return
+    cmd = ["zfs", "create"]
+    for k, v in (msg.get("props") or {}).items():
+        if re.match(r"^[A-Za-z0-9_:.\-]+$", str(k)):
+            cmd += ["-o", f"{k}={v}"]
+    vol = str(msg.get("volsize", "")).strip()
+    if vol:
+        if not re.match(r"^[0-9]+[KMGTP]?$", vol, re.I):
+            await websocket.send(json.dumps({"type": "error", "msg": f"invalid volsize: {vol}"}))
+            return
+        cmd += ["-V", vol]
+    cmd.append(name)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        await websocket.send(json.dumps({"type": "error",
+            "msg": f"create failed: {(proc.stderr or proc.stdout).strip()[:220]}"}))
+    else:
+        await websocket.send(json.dumps({"type": "zfs_notice", "msg": f"Created {name}"}))
+    await _zfs_datasets(websocket, msg)
+
+
+async def _zfs_dataset_destroy(websocket, msg):
+    """Destroy a dataset/volume. `recursive` adds -r (children + snapshots).
+    The confirm lives in the SPA; this is the irreversible end of it, so the
+    name guard matters most here."""
+    name = msg.get("name", "")
+    if not _zfs_name_ok(name):
+        await websocket.send(json.dumps({"type": "error", "msg": f"invalid dataset name: {name}"}))
+        return
+    cmd = ["zfs", "destroy"]
+    if msg.get("recursive"):
+        cmd.append("-r")
+    cmd.append(name)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        await websocket.send(json.dumps({"type": "error",
+            "msg": f"destroy failed: {(proc.stderr or proc.stdout).strip()[:220]}"}))
+    else:
+        await websocket.send(json.dumps({"type": "zfs_notice", "msg": f"Destroyed {name}"}))
+    await _zfs_datasets(websocket, msg)
+
+
+async def _zfs_dataset_set(websocket, msg):
+    """Set one property on a dataset (`zfs set prop=value name`). Property name
+    is charset-validated; the value is passed as a single argv item so it can't
+    inject flags."""
+    name = msg.get("name", "")
+    prop = msg.get("prop", "")
+    value = str(msg.get("value", ""))
+    if not _zfs_name_ok(name):
+        await websocket.send(json.dumps({"type": "error", "msg": f"invalid dataset name: {name}"}))
+        return
+    if not re.match(r"^[A-Za-z0-9_:.\-]+$", prop):
+        await websocket.send(json.dumps({"type": "error", "msg": f"invalid property: {prop}"}))
+        return
+    proc = subprocess.run(["zfs", "set", f"{prop}={value}", name],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        await websocket.send(json.dumps({"type": "error",
+            "msg": f"set failed: {(proc.stderr or proc.stdout).strip()[:220]}"}))
+    else:
+        await websocket.send(json.dumps({"type": "zfs_notice", "msg": f"{name}: {prop}={value}"}))
+    await _zfs_datasets(websocket, msg)
+
+
+async def _snapshot_destroy(websocket, msg):
+    """Destroy a single snapshot (`zfs destroy pool/ds@snap`). `recursive` adds
+    -r for the same-named snap across children. Guarded to names containing '@'
+    so a stray call can't destroy a live dataset."""
+    name = msg.get("name", "")
+    if "@" not in name or not _zfs_name_ok(name):
+        await websocket.send(json.dumps({"type": "error", "msg": f"not a snapshot: {name}"}))
+        return
+    cmd = ["zfs", "destroy"]
+    if msg.get("recursive"):
+        cmd.append("-r")
+    cmd.append(name)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        await websocket.send(json.dumps({"type": "error",
+            "msg": f"destroy failed: {(proc.stderr or proc.stdout).strip()[:220]}"}))
+    else:
+        await websocket.send(json.dumps({"type": "zfs_notice", "msg": f"Destroyed {name}"}))
+
+
+async def _snapshot_clone(websocket, msg):
+    """Clone a snapshot into a new writable dataset (`zfs clone snap target`).
+    The cheap-copy primitive z9fs is built on: instant writable fork of any
+    snapshot. Both names guarded; target must not already exist (zfs enforces)."""
+    snap = msg.get("name", "")
+    target = msg.get("target", "")
+    if "@" not in snap or not _zfs_name_ok(snap):
+        await websocket.send(json.dumps({"type": "error", "msg": f"not a snapshot: {snap}"}))
+        return
+    if not _zfs_name_ok(target) or "@" in target:
+        await websocket.send(json.dumps({"type": "error",
+            "msg": f"invalid clone target: {target}"}))
+        return
+    proc = subprocess.run(["zfs", "clone", snap, target], capture_output=True, text=True)
+    if proc.returncode != 0:
+        await websocket.send(json.dumps({"type": "error",
+            "msg": f"clone failed: {(proc.stderr or proc.stdout).strip()[:220]}"}))
+    else:
+        await websocket.send(json.dumps({"type": "zfs_notice",
+            "msg": f"Cloned {snap} → {target}"}))
 
 
 async def _k8s_services(websocket, msg):

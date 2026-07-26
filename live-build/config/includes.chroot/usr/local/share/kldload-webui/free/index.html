@@ -1146,6 +1146,7 @@ html.kld-app #term-drawer{display:none!important;}
         </div>
         <div class="ws-tabs" role="tablist">
           <button class="ws-tab active" data-sub="pools"     onclick="zfsSubTab('pools')">Pools</button>
+          <button class="ws-tab"        data-sub="datasets"  onclick="zfsSubTab('datasets')">Datasets</button>
           <button class="ws-tab"        data-sub="snapshots" onclick="zfsSubTab('snapshots')">Snapshots</button>
           <button class="ws-tab"        data-sub="be"        onclick="zfsSubTab('be')">Boot environments</button>
         </div>
@@ -1164,6 +1165,22 @@ html.kld-app #term-drawer{display:none!important;}
             <button class="btn btn-ghost btn-sm" onclick="zfsSubTab('snapshots')">Snapshots</button>
             <button class="btn btn-ghost btn-sm" onclick="zfsSubTab('be')">Boot environments</button>
             <button class="btn btn-ghost btn-sm" onclick="refreshZFS()">↻ Refresh status</button>
+          </div>
+        </div>
+
+        <!-- Structured pool + vdev topology — the console view. Driven by
+             the zfs_pools backend (zpool list -Hp + zpool status -j): per-pool
+             card with health/capacity/scan, the full vdev/disk tree with
+             per-device error counters, and inline actions (scrub/trim/clear +
+             replace a failing disk). This is the actionable surface; the
+             Grafana embed below is the trend view. -->
+        <div class="ws-panel" style="margin-bottom:0.9rem">
+          <div class="ws-panel-hdr">
+            <span>◨ Pools &amp; topology</span>
+            <button class="btn btn-ghost btn-sm" onclick="refreshZFS()" title="Reload">↻</button>
+          </div>
+          <div id="zfs-pools-console" style="padding:0.7rem 1rem">
+            <div style="color:var(--muted)">Loading pools…</div>
           </div>
         </div>
 
@@ -1191,6 +1208,30 @@ html.kld-app #term-drawer{display:none!important;}
           <div style="padding:0.5rem 1rem">
             <div class="log-box" id="zfs-pool-status" style="height:280px;min-height:200px;margin:0">(no pools — install to disk first)</div>
           </div>
+        </div>
+      </div>
+
+      <div class="ws-subview" id="zfs-sub-datasets">
+        <!-- Datasets + volumes — the fs half of the console. create a child,
+             tune a property, reclaim by destroying. Backed by zfs_datasets /
+             zfs_dataset_{create,set,destroy}. -->
+        <div class="ws-panel">
+          <div class="ws-panel-hdr">
+            <span>🗂 Datasets &amp; volumes</span>
+            <div style="display:flex;gap:0.4rem">
+              <button class="btn btn-primary btn-sm" onclick="zfsCreateDataset()">＋ New dataset</button>
+              <button class="btn btn-ghost btn-sm" onclick="refreshDatasets()" title="Reload">↻</button>
+            </div>
+          </div>
+          <input class="ws-table-search" placeholder="Filter datasets…" oninput="zfsTableFilter('zfs-ds-table', this.value)">
+          <table>
+            <thead><tr>
+              <th>Name</th><th>Used</th><th>Refer</th><th>Avail</th>
+              <th>Mountpoint</th><th>Compress</th><th>Ratio</th>
+              <th style="text-align:right">Actions</th>
+            </tr></thead>
+            <tbody id="zfs-ds-table"><tr><td colspan="8" style="color:var(--muted);padding:1rem">Loading…</td></tr></tbody>
+          </table>
         </div>
       </div>
 
@@ -4122,7 +4163,11 @@ function handle(msg) {
         <tr>
           <td style="font-family:monospace;font-size:0.82rem">${esc(s.name)}</td>
           <td style="color:var(--muted)">${esc(s.used || '—')}</td>
-          <td><button class="btn btn-ghost btn-sm" onclick="rollback('${esc(s.name)}')">Rollback</button></td>
+          <td style="text-align:right;white-space:nowrap">
+            <button class="btn btn-ghost btn-sm" onclick="rollback('${esc(s.name)}')" title="Roll the dataset back to this snapshot">Rollback</button>
+            <button class="btn btn-ghost btn-sm" onclick="snapClone('${esc(s.name)}')" title="Clone into a new writable dataset">Clone</button>
+            <button class="btn btn-ghost btn-sm" onclick="snapDestroy('${esc(s.name)}')" title="Destroy this snapshot" style="color:var(--warn)">Destroy</button>
+          </td>
         </tr>`).join('');
       document.getElementById('snap-status-mini').textContent = `${snaps.length} snapshot(s) — showing 100 newest`;
       break;
@@ -4132,6 +4177,13 @@ function handle(msg) {
       document.getElementById('be-list').textContent = msg.output || '(no boot environments)';
       break;
     }
+
+    case 'zfs_pools':   { renderZfsPools(msg.pools || []); break; }
+    case 'zfs_datasets': { renderZfsDatasets(msg.datasets || []); break; }
+    // A mutating ZFS op succeeded (scrub started, disk replaced, dataset
+    // created/destroyed, snapshot cloned…). Toast it green; the handler
+    // already re-pushed the fresh pool/dataset list, so no manual refresh.
+    case 'zfs_notice':  { _termToast(msg.msg || 'done', true); break; }
 
     case 'log_line': {
       const target = msg.target || '';
@@ -4488,7 +4540,13 @@ function handle(msg) {
     case 'helm_list':      { renderHelmReleases(msg);  break; }
 
     case 'snapshot_done': { refreshSnapshots(); break; }
-    case 'error': { console.warn('WS error:', msg.msg); break; }
+    case 'error': {
+      console.warn('WS error:', msg.msg);
+      // Surface backend errors (a failed zfs op, a bad name) as a toast so
+      // the operator sees WHY nothing happened instead of a silent no-op.
+      if (msg.msg) _termToast(String(msg.msg).slice(0, 160), false);
+      break;
+    }
 
     // ── klab messages ─────────────────────────────────────────────────
     case 'klab_status': { renderKlabStatus(msg); break; }
@@ -5397,7 +5455,8 @@ function checkPass() {
 }
 
 // ── ZFS ──────────────────────────────────────────────────────────────────────
-function refreshZFS()       { send({ action: 'zfs_status' }); }
+function refreshZFS()       { send({ action: 'zfs_status' }); send({ action: 'zfs_pools' }); }
+function refreshDatasets()  { send({ action: 'zfs_datasets' }); }
 function zfsScrubAll() {
   if (!confirm('Start zpool scrub on every imported pool?\n\nScrub runs in the background — progress shows in pool status and on the ZFS Pool Health dashboard.')) return;
   send({ action: 'zfs_scrub_all' });
@@ -5414,6 +5473,173 @@ function rollback(snap) {
   }
 }
 function takeSnapshot() { send({ action: 'snapshot_take' }); }
+
+// ── ZFS web console — pools/topology, datasets, snapshot destroy/clone ───────
+// GUI mirror of the z9fs CLI. Backend: zfs_pools (zpool list + status -j),
+// zfs_pool_op (scrub/trim/clear), zfs_disk_replace, zfs_datasets +
+// zfs_dataset_{create,set,destroy}, snapshot_{destroy,clone}. Every mutating
+// call round-trips a zfs_notice (green toast) or error (amber toast) and the
+// handler re-pushes the fresh list, so these fns fire-and-forget.
+
+// Colour a ZFS state string: ONLINE→good, DEGRADED→warn, everything else
+// (FAULTED/UNAVAIL/OFFLINE/REMOVED)→bad. Non-zero error counters also read bad.
+function _zfsStateColor(state) {
+  const s = (state || '').toUpperCase();
+  if (s === 'ONLINE' || s === 'AVAIL') return 'var(--good)';
+  if (s === 'DEGRADED') return 'var(--warn)';
+  return 'var(--bad)';
+}
+
+// renderZfsPools(pools) — one card per pool: health + capacity/frag/dedup +
+// scan progress if scrubbing/resilvering, then the vdev/disk tree (indented by
+// depth, per-device r/w/cksum counters, Replace… on a non-ONLINE leaf).
+function renderZfsPools(pools) {
+  const box = document.getElementById('zfs-pools-console');
+  if (!box) return;
+  if (!pools.length) {
+    box.innerHTML = '<div style="color:var(--muted)">No imported pools — install to disk first.</div>';
+    document.getElementById('zfs-status-mini').textContent = 'No pools';
+    return;
+  }
+  box.innerHTML = pools.map(p => {
+    const col = _zfsStateColor(p.state);
+    const scanning = p.scan_state && /scan|scrub|resilver|ing/i.test(p.scan_state) &&
+                     !/finished|none|canceled/i.test(p.scan_state);
+    const scanLine = (p.scan_func || scanning)
+      ? `<div style="font-size:0.8rem;color:var(--muted);margin-top:0.2rem">
+           ${esc(p.scan_func || 'scan')}: ${esc(p.scan_state || '')}${p.scan_pct ? ' · ' + esc(String(p.scan_pct)) + '%' : ''}</div>`
+      : '';
+    const devRows = (p.devs || []).map(d => {
+      const derr = (d.read !== '0' && d.read) || (d.write !== '0' && d.write) || (d.cksum !== '0' && d.cksum);
+      const dcol = (d.state && d.state.toUpperCase() !== 'ONLINE') || derr ? _zfsStateColor(d.state || 'BAD') : 'var(--fg)';
+      const bad = (d.state && d.state.toUpperCase() !== 'ONLINE');
+      const pad = 0.5 + (d.depth || 0) * 1.3;
+      return `<tr>
+        <td style="font-family:monospace;font-size:0.82rem;padding-left:${pad}rem;color:${dcol}">${esc(d.name)}</td>
+        <td style="color:var(--muted);font-size:0.78rem">${esc(d.type || '')}</td>
+        <td style="color:${_zfsStateColor(d.state)};font-weight:600">${esc(d.state || '')}</td>
+        <td style="text-align:right;color:${d.read !== '0' ? 'var(--bad)' : 'var(--muted)'}">${esc(d.read)}</td>
+        <td style="text-align:right;color:${d.write !== '0' ? 'var(--bad)' : 'var(--muted)'}">${esc(d.write)}</td>
+        <td style="text-align:right;color:${d.cksum !== '0' ? 'var(--bad)' : 'var(--muted)'}">${esc(d.cksum)}</td>
+        <td style="text-align:right">${(bad && d.type === 'disk') ? `<button class="btn btn-ghost btn-sm" onclick="zfsDiskReplace('${esc(p.name)}','${esc(d.name)}')">Replace…</button>` : ''}</td>
+      </tr>`;
+    }).join('');
+    return `<div class="ws-panel" style="margin-bottom:0.8rem;border-left:3px solid ${col}">
+      <div style="padding:0.6rem 0.9rem;display:flex;align-items:center;gap:0.9rem;flex-wrap:wrap">
+        <span style="font-weight:700;font-size:1rem">${esc(p.name)}</span>
+        <span style="color:${col};font-weight:700">${esc(p.state || '?')}</span>
+        <span style="color:var(--muted);font-size:0.82rem">
+          cap ${esc(p.cap || '?')}% · frag ${esc(p.frag || '?')}% · dedup ${esc(p.dedup || '1.00x')}</span>
+        <span style="flex:1"></span>
+        <button class="btn btn-primary btn-sm" onclick="zfsPoolOp('${esc(p.name)}','${scanning ? 'scrub_stop' : 'scrub'}')">${scanning ? 'Stop scrub' : 'Scrub'}</button>
+        <button class="btn btn-ghost btn-sm" onclick="zfsPoolOp('${esc(p.name)}','trim')">Trim</button>
+        <button class="btn btn-ghost btn-sm" onclick="zfsPoolOp('${esc(p.name)}','clear')">Clear errors</button>
+      </div>
+      ${scanLine ? `<div style="padding:0 0.9rem 0.4rem">${scanLine}</div>` : ''}
+      ${p.status_msg ? `<div style="padding:0 0.9rem 0.4rem;color:var(--warn);font-size:0.8rem">${esc(p.status_msg)}</div>` : ''}
+      <table style="margin:0">
+        <thead><tr>
+          <th>Device</th><th>Type</th><th>State</th>
+          <th style="text-align:right">Read</th><th style="text-align:right">Write</th>
+          <th style="text-align:right">Cksum</th><th></th>
+        </tr></thead>
+        <tbody>${devRows}</tbody>
+      </table>
+    </div>`;
+  }).join('');
+  const bad = pools.filter(p => (p.state || '').toUpperCase() !== 'ONLINE');
+  document.getElementById('zfs-status-mini').textContent =
+    bad.length ? `${bad.length} pool(s) not ONLINE` : `${pools.length} pool(s) ONLINE`;
+}
+
+// Pool maintenance op (scrub / scrub_stop / trim / trim_stop / clear).
+function zfsPoolOp(pool, op) {
+  const verb = { scrub: 'Start scrub on', scrub_stop: 'Stop the scrub on',
+                 trim: 'Trim', clear: 'Clear the error counters on' }[op] || op;
+  if (!confirm(`${verb} ${pool}?`)) return;
+  send({ action: 'zfs_pool_op', pool, op });
+}
+
+// Replace a failing/failed disk (asks for the new device path).
+function zfsDiskReplace(pool, old) {
+  const dev = prompt(`Replace ${old} in ${pool}.\n\nNew device (e.g. /dev/disk/by-id/…):`, '');
+  if (!dev) return;
+  send({ action: 'zfs_disk_replace', pool, old, new: dev.trim() });
+}
+
+// renderZfsDatasets(rows) — the Datasets table (filesystems + volumes) with
+// per-row Set-property / Destroy. Volumes (type=volume) get a [vol] tag.
+function renderZfsDatasets(rows) {
+  const tb = document.getElementById('zfs-ds-table');
+  if (!tb) return;
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="8" style="color:var(--muted);padding:1rem">No datasets</td></tr>';
+    return;
+  }
+  const human = (b) => {
+    const n = parseInt(b, 10);
+    if (isNaN(n)) return esc(b || '—');
+    const u = ['B', 'K', 'M', 'G', 'T', 'P']; let i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return (i === 0 ? v : v.toFixed(1)) + u[i];
+  };
+  tb.innerHTML = rows.map(d => `
+    <tr>
+      <td style="font-family:monospace;font-size:0.82rem">${esc(d.name)}${d.type === 'volume' ? ' <span style="color:var(--accent2);font-size:0.7rem">[vol]</span>' : ''}</td>
+      <td style="color:var(--muted)">${human(d.used)}</td>
+      <td style="color:var(--muted)">${human(d.refer)}</td>
+      <td style="color:var(--muted)">${human(d.avail)}</td>
+      <td style="color:var(--muted);font-size:0.8rem">${esc(d.mountpoint || '—')}</td>
+      <td style="color:var(--muted);font-size:0.8rem">${esc(d.compression || '—')}</td>
+      <td style="color:var(--muted)">${esc(d.ratio || '—')}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn btn-ghost btn-sm" onclick="zfsSetProp('${esc(d.name)}')" title="Set a property">Set…</button>
+        <button class="btn btn-ghost btn-sm" onclick="zfsDestroyDataset('${esc(d.name)}')" title="Destroy this dataset" style="color:var(--warn)">Destroy</button>
+      </td>
+    </tr>`).join('');
+}
+
+// Create a child dataset (or a volume when a size is entered).
+function zfsCreateDataset() {
+  const name = prompt('New dataset name (full path, e.g. rpool/data/myfs):', 'rpool/');
+  if (!name || name === 'rpool/') return;
+  const vol = prompt('Volume size for a zvol (e.g. 10G) — leave blank for a filesystem:', '');
+  const m = { action: 'zfs_dataset_create', name: name.trim() };
+  if (vol && vol.trim()) m.volsize = vol.trim();
+  send(m);
+}
+
+// Destroy a dataset. Second confirm gates the recursive (children+snaps) form.
+function zfsDestroyDataset(name) {
+  if (!confirm(`Destroy ${name}?\n\nThis is irreversible.`)) return;
+  const recursive = confirm(`Recursively destroy ${name} — ALL children and snapshots too?\n\nOK = recursive, Cancel = this dataset only.`);
+  send({ action: 'zfs_dataset_destroy', name, recursive });
+}
+
+// Set one property on a dataset (prompts prop then value).
+function zfsSetProp(name) {
+  const prop = prompt(`Property to set on ${name} (e.g. compression, quota, atime):`, 'compression');
+  if (!prop) return;
+  const value = prompt(`Value for ${prop} on ${name}:`, '');
+  if (value === null) return;
+  send({ action: 'zfs_dataset_set', name, prop: prop.trim(), value: value.trim() });
+}
+
+// Destroy a single snapshot (offers the recursive @name-across-children form).
+function snapDestroy(name) {
+  if (!confirm(`Destroy snapshot ${name}?`)) return;
+  const recursive = confirm(`Also destroy the same-named snapshot on child datasets (-r)?\n\nOK = recursive, Cancel = this one only.`);
+  send({ action: 'snapshot_destroy', name, recursive });
+  // Refresh shortly after — snapshot_destroy notices but doesn't re-push the list.
+  setTimeout(refreshSnapshots, 600);
+}
+
+// Clone a snapshot into a new writable dataset (the cheap-fork primitive).
+function snapClone(name) {
+  const target = prompt(`Clone ${name} into a new dataset.\n\nTarget name (e.g. rpool/clones/work):`, '');
+  if (!target) return;
+  send({ action: 'snapshot_clone', name, target: target.trim() });
+}
 
 // ── Install ──────────────────────────────────────────────────────────────────
 let _installPayload = null;
@@ -7447,13 +7673,14 @@ function zfsSubTab(name) {
   document.querySelectorAll('#view-zfs .ws-subview').forEach(v => v.classList.toggle('active', v.id === `zfs-sub-${name}`));
   try { localStorage.setItem(ZFS_TAB_KEY, name); } catch (e) {}
   if (name === 'pools')     refreshZFS();
+  if (name === 'datasets')  refreshDatasets();
   if (name === 'snapshots') refreshSnapshots();
   if (name === 'be')        listBEs();
 }
 function _zfsRestoreTab() {
   try { const t = localStorage.getItem(ZFS_TAB_KEY); if (t) zfsSubTab(t); } catch (e) {}
 }
-function zfsRefreshAll() { refreshZFS(); refreshSnapshots(); listBEs(); }
+function zfsRefreshAll() { refreshZFS(); refreshDatasets(); refreshSnapshots(); listBEs(); }
 function zfsTableFilter(tbodyId, needle) {
   const tb = document.getElementById(tbodyId);
   if (!tb) return;
