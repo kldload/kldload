@@ -63,7 +63,7 @@ _kinspect_picker() {
 export -f _kinspect_picker
 
 # _kconsoles_picker — the "consoles" menu (S-F1): one place to reach every
-# interactive console in the hub — z9fs (the ZFS console), the z9fs commander,
+# interactive console in the hub — zexplore (the ZFS console), the zexplore commander,
 # a VM's serial console, VM-filesystem explore, and k9s. Loops so you land back
 # on the menu when a console exits (like _kinspect_picker). Exported so tmux's
 # run-shell subshell can see it.
@@ -72,18 +72,18 @@ _kconsoles_picker() {
     while true; do
         clear
         echo "── consoles ──────────────────────────────────────────────"
-        echo "  [z] z9fs         — the ZFS console (browse / snapshot / replicate)"
-        echo "  [m] z9fs mc      — commander: replicate to a pinned target"
+        echo "  [z] zexplore         — the ZFS console (browse / snapshot / replicate)"
+        echo "  [m] zexplore mc      — commander: replicate to a pinned target"
         echo "  [v] VM console   — attach to a running VM's serial console"
-        echo "  [f] VM explore   — browse a VM's filesystem read-only (z9fs)"
+        echo "  [f] VM explore   — browse a VM's filesystem read-only (zexplore)"
         echo "  [k] k9s          — Kubernetes"
         echo "  [q] back to the shell"
         echo ""
         read -r -n1 -p "pick a console: " c
         echo ""
         case "$c" in
-        z) z9fs || true ;;
-        m) z9fs mc || true ;;
+        z) zexplore || true ;;
+        m) zexplore mc || true ;;
         k) _k9s_wrap || true ;;
         v)
             mapfile -t vms < <(virsh list --name 2>/dev/null | awk 'NF')
@@ -121,7 +121,7 @@ _kconsoles_picker() {
             [ -n "$n" ] || continue
             zv="${zvols[$((n - 1))]:-}"
             [ -n "$zv" ] || continue
-            z9fs browse "$zv" || true
+            zexplore browse "$zv" || true
             ;;
         q | "") return ;;
         esac
@@ -203,7 +203,7 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
     # Run those from F10 (scratch shell) when you want the firehose.
     #
     # F-key layout:
-    #   F1  help (popup toggle)      S-F1  consoles (z9fs / VM console / k9s)
+    #   F1  help (popup toggle)      S-F1  consoles (zexplore / VM console / k9s)
     #   F2  k9s
     #   F3  logs — kldload-follow unified tail
     #   F4  webui+ttyd journalctl
@@ -267,7 +267,7 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
 
     # Shift+F<N> — deeper complementary single-tool views. Same single-
     # command bind rule (NO `\;` chains).
-    # S-F1 = the consoles menu — z9fs / commander / VM serial console / VM-fs
+    # S-F1 = the consoles menu — zexplore / commander / VM serial console / VM-fs
     # explore / k9s, all from one keystroke (see _kconsoles_picker above). This
     # is the "switch between consoles" hub the ZFS + VM work plugs into.
     tmux bind -n S-F1 run-shell "_ktoggle-win consoles 'bash -c _kconsoles_picker'"

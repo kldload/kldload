@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-# z9fs-api — host-side ZFS-transaction daemon ("instant rollback as a function")
+# zexplore-api — host-side ZFS-transaction daemon ("instant rollback as a function")
 # ─────────────────────────────────────────────────────────────────────────────
 # WHAT
 #   A small host daemon that lets a guest VM (or an app inside it) snapshot,
@@ -15,7 +15,7 @@
 #        - unix : SO_PEERCRED uid 0 (the host operator) may name the VM
 #                 directly, or present a per-VM token (token -> VM map).
 #   3. Resolve + SCOPE the target zvol to that VM's subtree only
-#      (Z9FS_VM_BASE/<vm>[-<zvol>]); refuse anything outside it.
+#      (ZEXPLORE_VM_BASE/<vm>[-<zvol>]); refuse anything outside it.
 #   4. Do the op: begin (snapshot), rollback (zfs rollback -r), commit
 #      (destroy the snapshot), or list (open txns).
 #   5. Append an audit line to the audit log and answer JSON.
@@ -29,7 +29,7 @@
 #
 # HARD CONSTRAINT (callers must honour)
 #   You cannot `zfs rollback` a zvol the guest is writing live — it corrupts the
-#   mounted FS. Two supported patterns (enforced on the guest side, see z9fs-txn):
+#   mounted FS. Two supported patterns (enforced on the guest side, see zexplore-txn):
 #     - data-zvol : app data on a SEPARATE zvol; quiesce -> unmount -> rollback
 #                   -> remount -> restart. No reboot. This daemon just rolls back.
 #     - boot-env  : snapshot the OS zvol; "rollback" = reboot the VM onto it.
@@ -38,21 +38,21 @@
 #   running domain has it) unless --force, as a footgun guard.
 #
 # INPUTS / OUTPUTS
-#   Env : Z9FS_VM_BASE   (default rpool/vms)   — the zvol subtree VMs live under
-#         Z9FS_TXN_STATE (default /var/lib/kldload/z9fs) — txn + token state
-#         Z9FS_AUDIT     (default /var/log/kldload/z9fs-txn.log)
+#   Env : ZEXPLORE_VM_BASE   (default rpool/vms)   — the zvol subtree VMs live under
+#         ZEXPLORE_TXN_STATE (default /var/lib/kldload/zexplore) — txn + token state
+#         ZEXPLORE_AUDIT     (default /var/log/kldload/zexplore-txn.log)
 #   Args: --unix PATH | --vsock PORT | --tcp HOST:PORT (repeatable listeners)
 #   Sock: newline-delimited JSON request  -> newline-delimited JSON reply
 #
 # NOTES / INVARIANTS
 #   - Scope is a hard boundary: a resolved zvol MUST equal <base>/<vm> or start
 #     with <base>/<vm>- (a data disk) or <base>/<vm>/ . No exceptions.
-#   - Snapshots created here are named z9fs-txn-<epoch>-<rand>; sanoid's
+#   - Snapshots created here are named zexplore-txn-<epoch>-<rand>; sanoid's
 #     autosnap_* are never touched.
 #   - This is control-plane Python by design (robust socket + JSON handling);
-#     the guest CLI z9fs-txn is the app-facing half.
+#     the guest CLI zexplore-txn is the app-facing half.
 # ─────────────────────────────────────────────────────────────────────────────
-"""z9fs transaction daemon: scoped, audited guest-driven ZFS snapshot/rollback."""
+"""zexplore transaction daemon: scoped, audited guest-driven ZFS snapshot/rollback."""
 
 from __future__ import annotations
 
@@ -69,15 +69,15 @@ import threading
 import time
 from pathlib import Path
 
-VM_BASE = os.environ.get("Z9FS_VM_BASE", "rpool/vms")
-STATE_DIR = Path(os.environ.get("Z9FS_TXN_STATE", "/var/lib/kldload/z9fs"))
-AUDIT_LOG = Path(os.environ.get("Z9FS_AUDIT", "/var/log/kldload/z9fs-txn.log"))
+VM_BASE = os.environ.get("ZEXPLORE_VM_BASE", "rpool/vms")
+STATE_DIR = Path(os.environ.get("ZEXPLORE_TXN_STATE", "/var/lib/kldload/zexplore"))
+AUDIT_LOG = Path(os.environ.get("ZEXPLORE_AUDIT", "/var/log/kldload/zexplore-txn.log"))
 
 # AF_VSOCK may be absent on very old kernels; degrade to unix/tcp only.
 AF_VSOCK = getattr(socket, "AF_VSOCK", None)
 SO_PEERCRED = getattr(socket, "SO_PEERCRED", 17)
 
-_TXN_RE = re.compile(r"^z9fs-txn-\d+-[0-9a-f]{6,}$")
+_TXN_RE = re.compile(r"^zexplore-txn-\d+-[0-9a-f]{6,}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -115,7 +115,7 @@ def _audit(vm: str, caller: str, op: str, target: str, result: str) -> None:
         with AUDIT_LOG.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except OSError as exc:  # a broken audit log must not mask the real op
-        print(f"z9fs-api: audit write failed: {exc}", file=sys.stderr)
+        print(f"zexplore-api: audit write failed: {exc}", file=sys.stderr)
 
 
 # ─── caller identity ──────────────────────────────────────────────────────────
@@ -233,7 +233,7 @@ def _zvol_in_use(zvol: str) -> bool:
 def op_begin(vm: str, caller: str, req: dict) -> dict:
     """Snapshot the target zvol; record + return an open transaction id."""
     target = _resolve_zvol(vm, req.get("zvol"))
-    txn = f"z9fs-txn-{int(time.time())}-{secrets.token_hex(4)}"
+    txn = f"zexplore-txn-{int(time.time())}-{secrets.token_hex(4)}"
     snap = f"{target}@{txn}"
     _zfs("snapshot", snap)
     state = {
@@ -262,7 +262,7 @@ def op_rollback(vm: str, caller: str, req: dict) -> dict:
     """Roll the zvol back to the txn snapshot. Leaves the txn OPEN (retryable).
 
     Refuses if the zvol is live-attached to a running domain unless force=true —
-    the guest is expected to have quiesced/unmounted first (see z9fs-txn).
+    the guest is expected to have quiesced/unmounted first (see zexplore-txn).
     """
     state = _load_txn(vm, txn := req.get("txn", ""))
     snap = state["snapshot"]
@@ -346,7 +346,7 @@ def handle(conn: socket.socket, family: int, addr) -> None:
         reply = {"ok": False, "error": f"bad request: {exc}"}
     except Exception as exc:  # last-resort: never leak a traceback to a guest
         reply = {"ok": False, "error": f"internal error: {exc}"}
-        print(f"z9fs-api: unexpected: {exc}", file=sys.stderr)
+        print(f"zexplore-api: unexpected: {exc}", file=sys.stderr)
     try:
         conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
     except OSError:
@@ -357,12 +357,12 @@ def handle(conn: socket.socket, family: int, addr) -> None:
 
 def _serve(sock: socket.socket, family: int, label: str) -> None:
     """Accept loop for one listener; one thread per connection."""
-    print(f"z9fs-api: listening on {label}", file=sys.stderr)
+    print(f"zexplore-api: listening on {label}", file=sys.stderr)
     while True:
         try:
             conn, addr = sock.accept()
         except OSError as exc:
-            print(f"z9fs-api: accept on {label} failed: {exc}", file=sys.stderr)
+            print(f"zexplore-api: accept on {label} failed: {exc}", file=sys.stderr)
             continue
         threading.Thread(target=handle, args=(conn, family, addr), daemon=True).start()
 
@@ -381,7 +381,7 @@ def _make_unix(path: str) -> tuple[socket.socket, int, str]:
 
 def _make_vsock(port: int) -> tuple[socket.socket, int, str]:
     if AF_VSOCK is None:
-        raise SystemExit("z9fs-api: AF_VSOCK unavailable on this kernel")
+        raise SystemExit("zexplore-api: AF_VSOCK unavailable on this kernel")
     s = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
     # VMADDR_CID_ANY = 0xFFFFFFFF: accept from any guest CID on this host.
     s.bind((0xFFFFFFFF, port))
@@ -400,7 +400,7 @@ def _make_tcp(hostport: str) -> tuple[socket.socket, int, str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        prog="z9fs-api",
+        prog="zexplore-api",
         description="Host-side scoped ZFS-transaction daemon for guest VMs.",
     )
     ap.add_argument("--unix", metavar="PATH", help="listen on an AF_UNIX socket")
@@ -417,7 +417,7 @@ def main() -> int:
         listeners.append(_make_tcp(args.tcp))
     if not listeners:
         # sane default: unix socket for host ops + vsock 9455 for guests
-        listeners.append(_make_unix("/run/z9fs-api.sock"))
+        listeners.append(_make_unix("/run/zexplore-api.sock"))
         if AF_VSOCK is not None:
             listeners.append(_make_vsock(9455))
 

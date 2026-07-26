@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-# z9fs-txn — guest-side ZFS transaction client ("instant rollback as a function")
+# zexplore-txn — guest-side ZFS transaction client ("instant rollback as a function")
 # ─────────────────────────────────────────────────────────────────────────────
 # WHAT
-#   The app-facing half of the z9fs transaction API. Runs INSIDE a guest VM and
-#   asks the host daemon (z9fs-api) to snapshot / roll back / commit this VM's
+#   The app-facing half of the zexplore transaction API. Runs INSIDE a guest VM and
+#   asks the host daemon (zexplore-api) to snapshot / roll back / commit this VM's
 #   own zvol. Turns ZFS copy-on-write into a developer transaction primitive.
 #
 # WHAT IT DOES, IN ORDER
 #   1. Connect to the host: vsock CID 2 (default), or a unix socket / TCP host.
-#   2. Authenticate: send the per-VM token from /etc/z9fs/token if present.
+#   2. Authenticate: send the per-VM token from /etc/zexplore/token if present.
 #   3. Run one op — begin | rollback | commit | list — and print the JSON reply
 #      (begin prints the txn id to stdout so a script can capture it).
 #   4. For the data-zvol rollback pattern, optionally quiesce the guest side:
 #      --unmount DIR  → unmount before the host rollback; --dev DEV remounts DIR
-#      afterwards. (You cannot roll back a live-mounted FS — see z9fs-api.)
+#      afterwards. (You cannot roll back a live-mounted FS — see zexplore-api.)
 #
 # WHY
 #   So an application can bracket a risky operation with a guaranteed, ~instant
 #   undo:
-#       txn=$(z9fs-txn begin --zvol data) || exit 1
-#       psql < migration.sql && run-tests || z9fs-txn rollback "$txn" --unmount /data --dev /dev/vdb
-#       z9fs-txn commit "$txn"
+#       txn=$(zexplore-txn begin --zvol data) || exit 1
+#       psql < migration.sql && test || zexplore-txn rollback "$txn" --unmount /data
+#       zexplore-txn commit "$txn"
 #   Exit status is 0 on success, non-zero on failure, so it composes with && / ||.
 #
 # INPUTS / OUTPUTS
-#   Files : /etc/z9fs/token   (per-VM secret, injected at VM deploy; optional on
+#   Files : /etc/zexplore/token   (per-VM secret, injected at VM deploy; optional on
 #                              vsock where the host identifies us by CID)
 #   Args  : see --help. Transport defaults to vsock CID 2 port 9455.
 #   Stdout: the txn id (begin) or the JSON reply; stderr: human errors.
@@ -35,7 +35,7 @@
 #     snapshot", a host/VM-manager action, not an in-guest FS remount.
 #   - Keep this dependency-light: stdlib only, so it drops into any guest.
 # ─────────────────────────────────────────────────────────────────────────────
-"""z9fs-txn: in-guest client for host-mediated ZFS snapshot/rollback/commit."""
+"""zexplore-txn: in-guest client for host-mediated ZFS snapshot/rollback/commit."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ from pathlib import Path
 
 AF_VSOCK = getattr(socket, "AF_VSOCK", None)
 VMADDR_CID_HOST = 2  # the host is always CID 2 from inside a guest
-TOKEN_FILE = Path("/etc/z9fs/token")
+TOKEN_FILE = Path("/etc/zexplore/token")
 
 
 def _connect(args: argparse.Namespace) -> socket.socket:
@@ -62,7 +62,7 @@ def _connect(args: argparse.Namespace) -> socket.socket:
         s.connect((host or "127.0.0.1", int(port)))
     else:
         if AF_VSOCK is None:
-            sys.exit("z9fs-txn: vsock unavailable; use --unix or --tcp")
+            sys.exit("zexplore-txn: vsock unavailable; use --unix or --tcp")
         s = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
         s.connect((args.cid, args.port))
     s.settimeout(30)
@@ -96,12 +96,12 @@ def _run(cmd: list[str]) -> None:
     """Run a guest-side quiesce command (umount/mount), failing loud."""
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
-        raise SystemExit(f"z9fs-txn: {' '.join(cmd)}: {proc.stderr.strip()}")
+        raise SystemExit(f"zexplore-txn: {' '.join(cmd)}: {proc.stderr.strip()}")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        prog="z9fs-txn",
+        prog="zexplore-txn",
         description="Guest client for host-mediated ZFS transactions.",
     )
     ap.add_argument("--cid", type=int, default=VMADDR_CID_HOST, help="vsock host CID (default 2)")
@@ -164,7 +164,7 @@ def main() -> int:
 
     # any non-ok reply lands here
     err = rep.get("error", "unknown error") if isinstance(rep, dict) else "no reply"
-    print(f"z9fs-txn: {err}", file=sys.stderr)
+    print(f"zexplore-txn: {err}", file=sys.stderr)
     return 1
 
 

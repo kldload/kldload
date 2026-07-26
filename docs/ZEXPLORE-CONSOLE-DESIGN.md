@@ -1,4 +1,4 @@
-# z9fs — the ZFS console + the ZFS-transaction API
+# zexplore — the ZFS console + the ZFS-transaction API
 
 Status: **layers 1–5 SHIPPED** (2026-07-25). Console `8caf461`, web-console
 backend `994fa23`, web-console SPA `a4a0d81`, VM-explore + transaction API
@@ -9,32 +9,32 @@ remains. This doc captures the full vision so the marathon stays coherent.
 
 Everything in kldload is ZFS — datasets, boot environments, VM zvols. So **one
 console manages it all**, and ZFS's cheap snapshots + send/recv become a
-developer-grade primitive. z9fs is "k9s for ZFS": the human + programmatic layer
-on top of sanoid (which keeps taking/pruning snapshots underneath — z9fs never
+developer-grade primitive. zexplore is "k9s for ZFS": the human + programmatic layer
+on top of sanoid (which keeps taking/pruning snapshots underneath — zexplore never
 prunes sanoid's; it flags `autosnap_*` so ad-hoc vs automatic is obvious).
 
 Mental model: **Midnight Commander × WinSCP × ssh**, ZFS-native.
 
 ## Layers (build order)
 
-### 1. Console CLI — ✅ v1 SHIPPED (`/usr/local/bin/z9fs`)
+### 1. Console CLI — ✅ v1 SHIPPED (`/usr/local/bin/zexplore`)
 fzf-driven browser: datasets/snapshots (used/refer/#snaps/sanoid), snapshot on
 tap, **point-and-shoot replicate** (incremental when a common snap exists, else
 full; mbuffer/pv; readonly+noauto target so replicas never drift; local pool OR
 `host:pool` over ssh). Subcommands double as fzf key-binds + are CI-usable.
 Proven on .111 scratch pools (incremental snap1→snap2 onto a readonly target).
 
-### 2. Dual-pane commander — ✅ SHIPPED (`z9fs mc`, 6c70c49)
+### 2. Dual-pane commander — ✅ SHIPPED (`zexplore mc`, 6c70c49)
 Left pane / right pane, each a *location* (local, or a remote host over ssh),
 browsing pools→datasets→snapshots→BEs→**VM zvols**. F5 = replicate selection to
 the other pane. F8 = destroy. Enter = drill. MC muscle memory. tmux-hosted (fits
-the k9s/z9fs/VM-console tmux hub).
+the k9s/zexplore/VM-console tmux hub).
 
-### 3. VM-zvol explore — ✅ SHIPPED (`z9fs browse <zvol>`, b9ff58e)
-Point z9fs at `rpool/vms`: browse a VM's filesystem by cloning/mounting its zvol
+### 3. VM-zvol explore — ✅ SHIPPED (`zexplore browse <zvol>`, b9ff58e)
+Point zexplore at `rpool/vms`: browse a VM's filesystem by cloning/mounting its zvol
 read-only, snapshot/restore a VM "on tap." Wired into the VM tool too.
 
-### 4. z9fs API + guest agent — ✅ SHIPPED (b9ff58e; design below)
+### 4. zexplore API + guest agent — ✅ SHIPPED (b9ff58e; design below)
 Guest VMs / apps perform **their own** snapshots + rollbacks via a scoped,
 authenticated host API. "Instant rollback as a function."
 
@@ -42,7 +42,7 @@ authenticated host API. "Instant rollback as a function."
 Pools (topology/errors/scan/disk-replace — backend built), Datasets, Snapshots,
 Replication, Performance (ARC/iostat), merge the tests-zfs Lab view.
 
-### 6. z9fs in the tmux hub
+### 6. zexplore in the tmux hub
 Alongside k9s + VM consoles, sysdiag-style navigation.
 
 ## Layer 4 in detail — ZFS transactions as a developer primitive
@@ -62,14 +62,14 @@ init; the API refuses any dataset outside the caller's VM subtree).
   auth by the VM's vsock CID. Most secure.
 - **network** — reuse the host webui API (already on :8443); per-VM bearer token.
 
-**Guest CLI (`z9fs-txn`), the app-facing primitive:**
+**Guest CLI (`zexplore-txn`), the app-facing primitive:**
 ```
-z9fs-txn begin [--zvol data]   # host snapshots the VM's (data) zvol → txn id
-z9fs-txn rollback <txn>        # host rolls back to the snapshot (mode below)
-z9fs-txn commit <txn>          # keep the change, drop the snapshot
-z9fs-txn list                  # open transactions
+zexplore-txn begin [--zvol data]   # host snapshots the VM's (data) zvol → txn id
+zexplore-txn rollback <txn>        # host rolls back to the snapshot (mode below)
+zexplore-txn commit <txn>          # keep the change, drop the snapshot
+zexplore-txn list                  # open transactions
 ```
-Composable: `z9fs-txn begin && migrate.sh && test.sh || z9fs-txn rollback`.
+Composable: `zexplore-txn begin && migrate.sh && test.sh || zexplore-txn rollback`.
 
 **The hard constraint — you cannot roll back a zvol the guest is writing live.**
 Two modes:

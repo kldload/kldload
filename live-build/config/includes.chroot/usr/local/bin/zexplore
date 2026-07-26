@@ -1,35 +1,37 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# z9fs — the ZFS console. "k9s for ZFS": a dead-simple, fzf-driven commander for
-#        your files on this host — browse datasets/snapshots, snapshot on tap,
-#        and point-and-shoot replicate (local pool OR remote host over SSH).
+# zexplore — a direct, keyboard-driven interface to your ZFS primitives: browse
+#        datasets/snapshots with a full properties + permissions view, snapshot on
+#        tap, and point-and-shoot replicate (local pool OR remote host over SSH).
+#        A primitives manager, not a dashboard — and it runs on ANY ZFS box (plain
+#        zfs/zpool everywhere; kldload systems light up the extra primitives).
 #
 # WHAT IT IS / WHY:
 #   Everything in kldload is ZFS (datasets, boot environments, VM zvols), so ONE
 #   console manages it all. sanoid keeps taking + pruning snapshots underneath;
-#   z9fs adds the human layer on top — see what you have, snapshot ad-hoc, and
+#   zexplore adds the human layer on top — see what you have, snapshot ad-hoc, and
 #   replicate a snapshot/dataset/BE/VM anywhere with two picks and a keypress.
 #   Think Midnight Commander × WinSCP × ssh, but ZFS-native.
 #
 # HOW (in order):
-#   1. `z9fs` with no args → the browser: an fzf list of datasets (used, refer,
+#   1. `zexplore` with no args → the browser: an fzf list of datasets (used, refer,
 #      snap count, sanoid coverage) with a live preview (properties + recent
 #      snapshots). Keys act on the highlighted dataset:
 #        enter  drill into its snapshots     ctrl-s  snapshot now (ad-hoc)
 #        ctrl-r replicate (point-and-shoot)  ctrl-d  destroy (confirm)
 #        ctrl-p properties                   ctrl-o  browse files (mount ro)
 #   2. Replicate flow: pick a snapshot → pick a destination (a local pool, or a
-#      remote host over ssh) → z9fs sends it (incremental when a common snapshot
+#      remote host over ssh) → zexplore sends it (incremental when a common snapshot
 #      exists, else full), streamed through pv/mbuffer, into a readonly target so
 #      it never drifts.
-#   3. `z9fs mc [target]` → the commander (WinSCP-for-ZFS): browse local datasets
+#   3. `zexplore mc [target]` → the commander (WinSCP-for-ZFS): browse local datasets
 #      with a PINNED target (local pool or remote host:pool); F5 replicates the
 #      highlighted dataset there in one keypress, ctrl-v views the target.
 #   4. Subcommands (also used by the fzf key-binds; usable on their own / in CI):
-#        z9fs snap <dataset> [name]          z9fs destroy <snapshot>
-#        z9fs replicate <snapshot> [dest]    z9fs browse <dataset|snapshot|zvol>
-#        z9fs snaps <dataset>                z9fs props <dataset>
-#        z9fs mc [pool|host:pool]            (dual-location commander)
+#        zexplore snap <dataset> [name]          zexplore destroy <snapshot>
+#        zexplore replicate <snapshot> [dest]    zexplore browse <dataset|snapshot|zvol>
+#        zexplore snaps <dataset>                zexplore props <dataset>
+#        zexplore mc [pool|host:pool]            (dual-location commander)
 #
 # INPUTS/OUTPUTS: reads local ZFS (zfs/zpool); replication writes to a local
 #   pool or `ssh <host> zfs recv`. Root required (zfs send/recv, mount). fzf +
@@ -41,21 +43,21 @@
 #     chain ("since most recent snapshot", .111 2026-07-25).
 #   - Never destroys without an explicit confirm; the whole tool is read-only
 #     until you press an action key.
-#   - Remote = `ssh <host>` with the operator's key/agent; z9fs does not manage
+#   - Remote = `ssh <host>` with the operator's key/agent; zexplore does not manage
 #     credentials.
 # ─────────────────────────────────────────────────────────────────────────────
 set -Eeuo pipefail
-trap 'echo -e "\033[1;31m[z9fs]\033[0m FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+trap 'echo -e "\033[1;31m[zexplore]\033[0m FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 # Auto-elevate — zfs send/recv + mount need root.
 if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 # ── Colors + tiny helpers ────────────────────────────────────────────────────
 C=$'\033[1;36m' G=$'\033[1;32m' Y=$'\033[1;33m' R=$'\033[1;31m' M=$'\033[1;35m' N=$'\033[0m'
-say() { echo -e "${C}[z9fs]${N} $*"; }
-warn() { echo -e "${Y}[z9fs]${N} $*" >&2; }
+say() { echo -e "${C}[zexplore]${N} $*"; }
+warn() { echo -e "${Y}[zexplore]${N} $*" >&2; }
 die() {
-    echo -e "${R}[z9fs]${N} $*" >&2
+    echo -e "${R}[zexplore]${N} $*" >&2
     exit 1
 }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -65,7 +67,7 @@ confirm() { read -r -p "$(echo -e "${Y}$1${N} [y/N] ")" a && [[ "$a" =~ ^[Yy]$ ]
 
 # _snap_is_sanoid <snapname> — 0 if the snapshot looks sanoid-managed. sanoid
 # names snapshots autosnap_<date>_<period> — we only flag them so the operator
-# can tell "automatic" from "mine" (z9fs never prunes sanoid's).
+# can tell "automatic" from "mine" (zexplore never prunes sanoid's).
 _snap_is_sanoid() { [[ "$1" == *@autosnap_* || "$1" == *@auto-* ]]; }
 
 # datasets_table — one line per dataset: NAME  USED  REFER  #SNAPS  SANOID?
@@ -264,14 +266,14 @@ _explore_cleanup() {
 # A zvol is a block device; the guest's filesystem is inside it. We NEVER touch
 # the live device: snapshot → clone → partprobe the clone → mount its biggest
 # partition read-only → drop into it. Auto-cleans (umount + destroy clone/snap)
-# when the explore shell exits. This is z9fs pointed at rpool/vms/<vm>.
+# when the explore shell exits. This is zexplore pointed at rpool/vms/<vm>.
 browse_zvol() {
     local zv="$1"
     have partprobe || die "browse: 'partprobe' not found (install parted) — needed to read zvol partitions"
-    local tag="z9fs-explore-$$"
+    local tag="zexplore-explore-$$"
     _EX_SNAP="${zv}@${tag}"
     _EX_CLONE="$(dirname "$zv")/${tag}"
-    _EX_MNT="$(mktemp -d /tmp/z9fs-explore.XXXXXX)"
+    _EX_MNT="$(mktemp -d /tmp/zexplore-explore.XXXXXX)"
     trap _explore_cleanup EXIT
 
     say "Snapshot + clone of ${zv} for a consistent read-only view (live VM untouched)…"
@@ -349,15 +351,15 @@ browser() {
     have fzf || {
         datasets_table | column -t -s $'\t'
         echo
-        say "Install fzf for the interactive console; subcommands work without it (z9fs --help)."
+        say "Install fzf for the interactive console; subcommands work without it (zexplore --help)."
         return 0
     }
     local self="$0"
     datasets_table | fzf \
-        --prompt="z9fs ▸ datasets (enter=snapshots  ^s=snap  ^r=replicate  ^o=browse  ^d=destroy  ^p=props) → " \
+        --prompt="zexplore ▸ filesystems › " \
         --height=100% --reverse --with-nth=1,2,3,4,5 --delimiter='\t' \
-        --header=$'NAME\tUSED\tREFER\tSNAPS\tAUTO' \
-        --preview="sudo $self --preview {1}" --preview-window=right,55%,wrap \
+        --header=$'↵ snaps  ^s snap  ^r replicate\n^o explore  ^d destroy  ^p props  ^/ pane\nNAME\tUSED\tREFER\tSNAPS\tAUTO' \
+        --preview="sudo $self --preview {1}" --preview-window=right,50%,wrap \
         --bind="enter:execute(sudo $self snaps {1})" \
         --bind="ctrl-s:execute(sudo $self snap {1})+reload(sudo $self --table)" \
         --bind="ctrl-r:execute(sudo $self replicate \$(sudo $self --latest {1}))" \
@@ -446,7 +448,7 @@ commander() {
     [[ -n "$target" ]] || exit 0
     local self="$0"
     datasets_table | fzf \
-        --prompt="z9fs ▸ local → ${target}  (F5=replicate  ^v=view target  enter=snaps  ^s=snap  ^g=retarget  ^d=destroy) → " \
+        --prompt="zexplore ▸ local → ${target}  (F5=replicate  ^v=view target  enter=snaps  ^s=snap  ^g=retarget  ^d=destroy) → " \
         --height=100% --reverse --with-nth=1,2,3,4,5 --delimiter='\t' \
         --header=$'NAME\tUSED\tREFER\tSNAPS\tAUTO' \
         --preview="sudo $self --preview {1}" --preview-window=right,55%,wrap \

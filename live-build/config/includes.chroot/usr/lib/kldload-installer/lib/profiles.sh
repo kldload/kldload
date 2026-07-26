@@ -972,17 +972,17 @@ DASHSTART
                 # app (hexagon icon) on the workstation, not just a hidden window
                 # matcher. Lab/server keep it NoDisplay (their surface is the
                 # auto-opened kiosk page).
-                # ZFS is now ONE console: kldload-z9fs (the z9fs TUI — browse /
+                # ZFS is now ONE console: kldload-zexplore (the zexplore TUI — browse /
                 # snapshot / replicate / VM-fs explore, k9s-for-ZFS). The old
                 # per-function ZFS tiles (kldload-zfs "ZFS Snapshots", kldload-zfs-
                 # manager GTK dialogs, ksnap) are consolidated into it, so they are
                 # NO LONGER stripped here and stay NoDisplay on the desktop grid —
-                # their functions live inside z9fs. kldload-zfslab stays separate:
+                # their functions live inside zexplore. kldload-zfslab stays separate:
                 # it's the OpenZFS VM test lab, a different job, not file/snapshot
                 # management. (2026-07-26: operator "the other zfs tools should all
                 # be in the 1 zfs tool".)
                 for _ldskt in kldload-vms kldload-k8s kldload-helm kldload-klab \
-                    kldload-ansible kldload-metrics kldload-z9fs \
+                    kldload-ansible kldload-metrics kldload-zexplore \
                     kldload-zfslab kldload-sysdiag \
                     bob-chat kldload-k9s bob-gaming kldload-webui; do
                     if [[ -f "${_appdir}/${_ldskt}.desktop" ]]; then
@@ -1078,15 +1078,15 @@ DASHSTART
         # in /usr/local/bin. The `_` prefix tools (_ktoggle-win, _kconsole-home)
         # are helpers called from kldload-console's tmux keybindings; missing
         # them makes every F-key return 127. Skip installer-only internals.
-        # z9fs* is explicit: the ZFS console + its API/guest CLI break the k*
-        # naming convention (branded "z9fs"), so the k*/_k* globs silently
-        # dropped them — the installed system got kldload-z9fs.desktop but no
-        # z9fs binary, and the app tile opened a terminal to "z9fs: command not
+        # zexplore* is explicit: the ZFS console + its API/guest CLI break the k*
+        # naming convention (branded "zexplore"), so the k*/_k* globs silently
+        # dropped them — the installed system got kldload-zexplore.desktop but no
+        # zexplore binary, and the app tile opened a terminal to "zexplore: command not
         # found" (.116 2026-07-26). Any future non-k tool needs adding here too.
         _skip_tools="kldload-install-target kldload-overview"
         shopt -s nullglob
         for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/_s* \
-            /usr/local/bin/z9fs* /usr/local/bin/bob*; do
+            /usr/local/bin/zexplore* /usr/local/bin/bob*; do
             [[ -x "$_src" ]] || continue
             _name="$(basename "$_src")"
             case " $_skip_tools kldload-webui " in *" $_name "*) continue ;; esac
