@@ -166,12 +166,21 @@ replicate() {
     fi
     local recv=(zfs recv -F -o readonly=on -o canmount=noauto "$tpath")
     local rrun=()
-    [[ -n "$host" ]] && rrun=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "root@${host}")
+    # dest host may be "host" (ssh as root) or "user@host" (e.g. a zexp user that
+    # holds `zfs allow receive` on the target — no root needed on the remote).
+    if [[ -n "$host" ]]; then
+        local sshdest="$host"
+        [[ "$host" == *@* ]] || sshdest="root@${host}"
+        rrun=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "$sshdest")
+    fi
 
     # Does the target already have a snapshot we can go incremental from? Look for
     # the newest source snapshot that also exists on the target.
     local base="" tsnaps
-    tsnaps="$("${rrun[@]}" zfs list -H -t snapshot -o name -r "$tpath" 2>/dev/null |
+    # </dev/null is load-bearing: for a REMOTE target rrun is `ssh …`, and ssh
+    # slurps our stdin — which would eat the `y` a caller pipes to confirm() and
+    # silently abort the send. Detach this probe's stdin so confirm still reads it.
+    tsnaps="$("${rrun[@]}" zfs list -H -t snapshot -o name -r "$tpath" </dev/null 2>/dev/null |
         sed "s#^${tpath}#${src_ds}#" || true)"
     if [[ -n "$tsnaps" ]]; then
         local s
