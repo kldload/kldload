@@ -50,7 +50,7 @@ as the airbag and hardware install as the seatbelt.
 | `/var/log/kldload-ci-bootstrap.log` | The bootstrap log (one-off manual runs). |
 
 **Fiend's hardware:** 24c / 62 GB / 2 TB NVMe / RTX 3080. SSH:
-`admin@fiend.unixbox.net` password `Passw0rd`, sudo NOPASSWD via
+`admin@fiend.unixbox.net` password in `$CI_PW` (set it &mdash; not committed), sudo NOPASSWD via
 `/etc/sudoers.d/95-kldload-ci`.
 
 ---
@@ -144,6 +144,8 @@ combo:
     and dump the installer log + `/tmp/install.log` + storage log into
     the smoke combo log.
 
+> **Credentials:** export `CI_PW` to the lab CI password before running these commands; it is deliberately not committed.
+
 ### `ci/kldload-ci-run` (the matrix orchestrator)
 Wraps the per-combo driver in a loop, builds the ISO once at the start,
 records every result in SQLite, captures per-failure VM console.
@@ -230,7 +232,7 @@ edit source on onyx (in /root/kldload-free/...)
 git commit -m "fix(...): explanation of bug + commit-id of CI run that caught it"
    ↓
 rsync source to fiend:
-   sshpass -p Passw0rd rsync -av \
+   sshpass -p "${CI_PW}" rsync -av \
      -e 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' \
      /root/kldload-free/<changed-file> \
      admin@fiend.unixbox.net:/opt/kldload-ci/kldload-free/<same-path>
@@ -299,7 +301,7 @@ When fiend is reinstalled (or replaced), reproduce the CI infrastructure:
 
 # 2. From onyx, prepare:
 #    - sshpass / sudoers / git / shellcheck / sqlite / jq / qemu-img on fiend
-ssh admin@fiend 'echo Passw0rd | sudo -S dnf install -y \
+ssh admin@fiend 'echo "${CI_PW}" | sudo -S dnf install -y \
   git ShellCheck sqlite jq qemu-img sshpass'
 
 # 3. Layout:
@@ -318,7 +320,7 @@ unqualified-search-registries = [\"docker.io\",\"quay.io\",\"registry.fedoraproj
   | sudo tee /etc/containers/registries.conf.d/00-kldload-ci-permissive.conf'
 
 # 6. Rsync source from onyx (excludes build output, caches, and local config):
-sshpass -p Passw0rd rsync -av --delete \
+sshpass -p "${CI_PW}" rsync -av --delete \
   --exclude='live-build/output' \
   --exclude='live-build/output-pass*' \
   --exclude='live-build/cache' \
@@ -331,8 +333,8 @@ sshpass -p Passw0rd rsync -av --delete \
   admin@fiend.unixbox.net:/opt/kldload-ci/kldload-free/
 
 # 7. Install runner + sudoers:
-sshpass -p Passw0rd ssh admin@fiend '
-  echo Passw0rd | sudo -S install -m 0755 \
+sshpass -p "${CI_PW}" ssh admin@fiend '
+  echo "${CI_PW}" | sudo -S install -m 0755 \
     /opt/kldload-ci/kldload-free/ci/kldload-ci-run \
     /usr/local/bin/kldload-ci-run
   echo "admin ALL=(ALL) NOPASSWD: /usr/local/bin/kldload-ci-run, \
