@@ -9,21 +9,61 @@
 # (e.g. `kldload-term kldload-help` for the docs launcher). With no args it
 # opens an interactive shell with the kldload greeting.
 set -eu
+
+# --app: GUI-app mode. Run the command and CLOSE the terminal window when it
+# exits, instead of dropping to a shell. Full-screen TUI apps launched from the
+# desktop (e.g. `kldload-term --app zexplore`) need this so pressing quit/ESC
+# closes the window rather than leaving a bare shell behind. Without it, the
+# command-then-shell default (below) is right for docs/helpers like
+# `kldload-term kldload-help`, where the operator wants to keep working.
+APP_MODE=0
+if [ "${1:-}" = "--app" ]; then
+    APP_MODE=1
+    shift
+fi
+
 if [ "$#" -gt 0 ]; then
-    INNER="$*; echo; exec bash"
+    if [ "$APP_MODE" -eq 1 ]; then
+        # exec so no wrapping bash lingers: when the app exits, the terminal
+        # emulator's child is gone and the window closes.
+        INNER="exec $*"
+    else
+        INNER="$*; echo; exec bash"
+    fi
 else
     INNER='echo "kldload tools: kst ksnap kclone kdf kdir kpkg kexport"; echo "Type kldload-help for the full command reference."; echo; exec bash'
 fi
 # konsole first — operator on .142 b644 2026-06-07 collapsed to a single
 # terminal: Konsole only, everywhere. Ptyxis stays in the fallback chain
 # for non-RHEL targets where konsole isn't installed by default.
+# In --app mode open the window filling the screen. Each emulator spells this
+# differently and only real flags are used here: gnome-terminal/xterm maximize
+# (window keeps decorations), konsole has NO maximize flag so --fullscreen is
+# the screen-filling equivalent. ptyxis/kgx have no documented flag — launch
+# normally and let the compositor place them (don't invent a flag).
 for t in konsole ptyxis gnome-console kgx gnome-terminal xterm; do
     if command -v "$t" >/dev/null 2>&1; then
         case "$t" in
         ptyxis) exec ptyxis -- bash -lc "$INNER" ;;
         gnome-console | kgx) exec "$t" -- bash -lc "$INNER" ;;
-        gnome-terminal) exec gnome-terminal -- bash -lc "$INNER" ;;
-        konsole | xterm) exec "$t" -e bash -lc "$INNER" ;;
+        gnome-terminal)
+            if [ "$APP_MODE" -eq 1 ]; then
+                exec gnome-terminal --maximize -- bash -lc "$INNER"
+            fi
+            exec gnome-terminal -- bash -lc "$INNER"
+            ;;
+        konsole)
+            if [ "$APP_MODE" -eq 1 ]; then
+                exec konsole --fullscreen -e bash -lc "$INNER"
+            fi
+            exec konsole -e bash -lc "$INNER"
+            ;;
+        xterm)
+            if [ "$APP_MODE" -eq 1 ]; then
+                exec xterm -maximized -e bash -lc "$INNER"
+            fi
+            exec xterm -e bash -lc "$INNER"
+            ;;
         esac
     fi
 done
