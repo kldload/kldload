@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# z9fs — the ZFS console. "k9s for ZFS": a dead-simple, fzf-driven commander for
+#        your files on this host — browse datasets/snapshots, snapshot on tap,
+#        and point-and-shoot replicate (local pool OR remote host over SSH).
+#
+# WHAT IT IS / WHY:
+#   Everything in kldload is ZFS (datasets, boot environments, VM zvols), so ONE
+#   console manages it all. sanoid keeps taking + pruning snapshots underneath;
+#   z9fs adds the human layer on top — see what you have, snapshot ad-hoc, and
+#   replicate a snapshot/dataset/BE/VM anywhere with two picks and a keypress.
+#   Think Midnight Commander × WinSCP × ssh, but ZFS-native.
+#
+# HOW (in order):
+#   1. `z9fs` with no args → the browser: an fzf list of datasets (used, refer,
+#      snap count, sanoid coverage) with a live preview (properties + recent
+#      snapshots). Keys act on the highlighted dataset:
+#        enter  drill into its snapshots     ctrl-s  snapshot now (ad-hoc)
+#        ctrl-r replicate (point-and-shoot)  ctrl-d  destroy (confirm)
+#        ctrl-p properties                   ctrl-o  browse files (mount ro)
+#   2. Replicate flow: pick a snapshot → pick a destination (a local pool, or a
+#      remote host over ssh) → z9fs sends it (incremental when a common snapshot
+#      exists, else full), streamed through pv/mbuffer, into a readonly target so
+#      it never drifts.
+#   3. Subcommands (also used by the fzf key-binds; usable on their own / in CI):
+#        z9fs snap <dataset> [name]          z9fs destroy <snapshot>
+#        z9fs replicate <snapshot> [dest]    z9fs browse <dataset|snapshot>
+#        z9fs snaps <dataset>                z9fs props <dataset>
+#
+# INPUTS/OUTPUTS: reads local ZFS (zfs/zpool); replication writes to a local
+#   pool or `ssh <host> zfs recv`. Root required (zfs send/recv, mount). fzf +
+#   pv/mbuffer are optional-but-recommended (graceful fallback if absent).
+#
+# NOTES / INVARIANTS:
+#   - Replication TARGETS are received with `recv -F` + set readonly=on,
+#     canmount=noauto so an auto-mount can't drift them out of an incremental
+#     chain ("since most recent snapshot", .111 2026-07-25).
+#   - Never destroys without an explicit confirm; the whole tool is read-only
+#     until you press an action key.
+#   - Remote = `ssh <host>` with the operator's key/agent; z9fs does not manage
+#     credentials.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo -e "\033[1;31m[z9fs]\033[0m FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+# Auto-elevate — zfs send/recv + mount need root.
+if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+# ── Colors + tiny helpers ────────────────────────────────────────────────────
+C=$'\033[1;36m' G=$'\033[1;32m' Y=$'\033[1;33m' R=$'\033[1;31m' M=$'\033[1;35m' N=$'\033[0m'
+say() { echo -e "${C}[z9fs]${N} $*"; }
+warn() { echo -e "${Y}[z9fs]${N} $*" >&2; }
+die() {
+    echo -e "${R}[z9fs]${N} $*" >&2
+    exit 1
+}
+have() { command -v "$1" >/dev/null 2>&1; }
+confirm() { read -r -p "$(echo -e "${Y}$1${N} [y/N] ")" a && [[ "$a" =~ ^[Yy]$ ]]; }
+
+# ── Data helpers ─────────────────────────────────────────────────────────────
+
+# _snap_is_sanoid <snapname> — 0 if the snapshot looks sanoid-managed. sanoid
+# names snapshots autosnap_<date>_<period> — we only flag them so the operator
+# can tell "automatic" from "mine" (z9fs never prunes sanoid's).
+_snap_is_sanoid() { [[ "$1" == *@autosnap_* || "$1" == *@auto-* ]]; }
+
+# datasets_table — one line per dataset: NAME  USED  REFER  #SNAPS  SANOID?
+# (used by the browser's fzf source). Filesystems + volumes (VM zvols included).
+datasets_table() {
+    local ds used refer
+    while IFS=$'\t' read -r ds used refer; do
+        local nsnap sano
+        nsnap="$(zfs list -H -t snapshot -o name -r "$ds" 2>/dev/null | grep -c "^${ds}@" || true)"
+        sano="$(zfs list -H -t snapshot -o name -r "$ds" 2>/dev/null | grep -cE "^${ds}@autosnap_" || true)"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$ds" "$used" "$refer" "$nsnap" \
+            "$([[ "${sano:-0}" -gt 0 ]] && echo "sanoid:${sano}" || echo "-")"
+    done < <(zfs list -H -o name,used,refer -t filesystem,volume 2>/dev/null)
+}
+
+# preview <dataset> — the fzf preview pane: key properties + the recent snapshots.
+preview() {
+    local ds="$1"
+    echo -e "${C}$ds${N}"
+    zfs get -H -o property,value \
+        type,used,referenced,available,compressratio,compression,recordsize,mountpoint,readonly \
+        "$ds" 2>/dev/null | awk -F'\t' '{printf "  %-14s %s\n",$1,$2}'
+    echo -e "\n${C}recent snapshots${N} (newest last):"
+    zfs list -H -t snapshot -o name,used,creation -s creation -r "$ds" 2>/dev/null | tail -12 |
+        while IFS=$'\t' read -r n u c; do
+            local mark=""
+            _snap_is_sanoid "$n" && mark="${Y}[sanoid]${N}"
+            printf "  %-40s %8s  %s %b\n" "${n#*@}" "$u" "$c" "$mark"
+        done
+}
+
+# ── Replication (the point-and-shoot core) ───────────────────────────────────
+
+# _pipe — the throughput stage: mbuffer if present (best for network), else pv,
+# else a plain cat. Keeps replication showing live progress without a hard dep.
+_pipe() {
+    if have mbuffer; then
+        mbuffer -q -m 128M 2>/dev/null
+    elif have pv; then
+        pv -prb
+    else
+        cat
+    fi
+}
+
+# replicate <source-snapshot> [dest] — send <source-snapshot> to <dest>. dest is
+# either "pool[/path]" (local) or "host:pool[/path]" (remote over ssh). Picks an
+# incremental base automatically when the target already holds a common snapshot;
+# otherwise a full send. Target is forced readonly + non-automounting so it stays
+# a clean replica.
+replicate() {
+    local src="$1" dest="${2:-}"
+    [[ "$src" == *@* ]] || die "replicate: source must be a snapshot (dataset@snap), got '$src'"
+    local src_ds="${src%@*}"
+
+    if [[ -z "$dest" ]]; then
+        dest="$(_pick_dest "$src_ds")" || exit 0
+        [[ -n "$dest" ]] || exit 0
+    fi
+
+    # Split host:path
+    local host="" tpath="$dest"
+    if [[ "$dest" == *:* && "$dest" != /* ]]; then
+        host="${dest%%:*}"
+        tpath="${dest#*:}"
+    fi
+    local recv=(zfs recv -F -o readonly=on -o canmount=noauto "$tpath")
+    local rrun=()
+    [[ -n "$host" ]] && rrun=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "root@${host}")
+
+    # Does the target already have a snapshot we can go incremental from? Look for
+    # the newest source snapshot that also exists on the target.
+    local base="" tsnaps
+    tsnaps="$("${rrun[@]}" zfs list -H -t snapshot -o name -r "$tpath" 2>/dev/null |
+        sed "s#^${tpath}#${src_ds}#" || true)"
+    if [[ -n "$tsnaps" ]]; then
+        local s
+        while read -r s; do
+            [[ -z "$s" ]] && continue
+            # base = the NEWEST source snapshot that ALSO exists on the target
+            # (the incremental origin). Checking local existence alone is the bug
+            # that made every replication a full send (.111 2026-07-25).
+            grep -qxF "$s" <<<"$tsnaps" && base="$s"
+        done < <(zfs list -H -t snapshot -o name -s creation -r "$src_ds" 2>/dev/null)
+    fi
+
+    local est
+    if [[ -n "$base" && "$base" != "$src" ]]; then
+        est="$(zfs send -nP -i "$base" "$src" 2>/dev/null | awk '/^size/{print $2}' | tail -1)"
+        say "Incremental: ${G}${base#*@}${N} → ${G}${src#*@}${N}  →  ${M}${dest}${N}  (~${est:-?} bytes)"
+        confirm "Replicate incrementally?" || exit 0
+        zfs send -i "$base" "$src" | _pipe | "${rrun[@]}" "${recv[@]}"
+    else
+        est="$(zfs send -nP "$src" 2>/dev/null | awk '/^size/{print $2}' | tail -1)"
+        say "Full send: ${G}${src}${N}  →  ${M}${dest}${N}  (~${est:-?} bytes)"
+        confirm "Replicate (full)?" || exit 0
+        zfs send "$src" | _pipe | "${rrun[@]}" "${recv[@]}"
+    fi
+    say "${G}✓ replicated${N} ${src} → ${dest}"
+}
+
+# _pick_dest <source-dataset> — fzf-pick a replication target: a local pool, or
+# "remote…" to type host:pool. Echoes the chosen dest (host:path or path).
+_pick_dest() {
+    local src_ds="$1" leaf="${1##*/}" choice
+    if have fzf; then
+        choice="$({
+            zpool list -H -o name 2>/dev/null | sed 's#$#/'"${leaf}"'  (local pool)#'
+            echo "remote…  (type host:pool/path)"
+        } | fzf --prompt="replicate ${src_ds} → " --height=40% --reverse)" || return 1
+    else
+        echo "Local pools:" >&2
+        zpool list -H -o name >&2
+        read -r -p "Destination (pool/path or host:pool/path, or blank to cancel): " choice
+        printf '%s' "$choice"
+        return 0
+    fi
+    if [[ "$choice" == remote…* ]]; then
+        read -r -p "Remote destination host:pool/path : " choice
+    else
+        choice="${choice%%  (local pool)*}"
+    fi
+    printf '%s' "$choice"
+}
+
+# ── Actions (also the fzf key-bind targets) ──────────────────────────────────
+snap() {
+    local ds="$1" name="${2:-}"
+    [[ -n "$ds" ]] || die "snap: dataset required"
+    [[ -n "$name" ]] || { read -r -p "Snapshot name for ${ds}@ : " name; }
+    [[ -n "$name" ]] || exit 0
+    zfs snapshot "${ds}@${name}" && say "${G}✓${N} ${ds}@${name}"
+}
+destroy() {
+    local target="$1"
+    [[ -n "$target" ]] || die "destroy: target required"
+    _snap_is_sanoid "$target" && warn "${target} is sanoid-managed — sanoid will just re-take/prune on schedule."
+    confirm "Destroy ${R}${target}${N}? This cannot be undone." || exit 0
+    zfs destroy "$target" && say "destroyed ${target}"
+}
+snaps() { # list a dataset's snapshots (fzf → replicate the picked one)
+    local ds="$1"
+    [[ -n "$ds" ]] || die "snaps: dataset required"
+    if have fzf; then
+        local pick
+        pick="$(zfs list -H -t snapshot -o name,used,creation -s creation -r "$ds" 2>/dev/null |
+            fzf --prompt="${ds} snapshots (enter → replicate) → " --height=60% --reverse \
+                --with-nth=1,2,3 --delimiter='\t')" || exit 0
+        [[ -n "$pick" ]] && replicate "$(printf '%s' "$pick" | cut -f1)"
+    else
+        zfs list -t snapshot -o name,used,creation -s creation -r "$ds"
+    fi
+}
+browse() { # mount a dataset/snapshot read-only and drop into it
+    local t="$1" mp
+    [[ -n "$t" ]] || die "browse: target required"
+    if [[ "$t" == *@* ]]; then
+        # snapshots are browsable via the dataset's hidden .zfs/snapshot dir
+        mp="$(zfs get -H -o value mountpoint "${t%@*}" 2>/dev/null)"
+        [[ "$mp" == /* ]] || die "browse: ${t%@*} has no mountpoint (a zvol? clone it first)"
+        say "Browsing ${t} (read-only). Ctrl-D to leave."
+        (cd "${mp}/.zfs/snapshot/${t#*@}" 2>/dev/null && exec "${SHELL:-bash}") ||
+            die "could not enter snapshot dir"
+    else
+        mp="$(zfs get -H -o value mountpoint "$t" 2>/dev/null)"
+        [[ "$mp" == /* ]] || die "browse: ${t} is not a mounted filesystem (VM zvol browse lands in a later z9fs build)"
+        say "Browsing ${t} at ${mp}. Ctrl-D to leave."
+        (cd "$mp" && exec "${SHELL:-bash}")
+    fi
+}
+props() { zfs get all "$1" 2>/dev/null | less; }
+
+# ── The browser (default, no args) ───────────────────────────────────────────
+browser() {
+    have fzf || {
+        datasets_table | column -t -s $'\t'
+        echo
+        say "Install fzf for the interactive console; subcommands work without it (z9fs --help)."
+        return 0
+    }
+    local self="$0"
+    datasets_table | fzf \
+        --prompt="z9fs ▸ datasets (enter=snapshots  ^s=snap  ^r=replicate  ^o=browse  ^d=destroy  ^p=props) → " \
+        --height=100% --reverse --with-nth=1,2,3,4,5 --delimiter='\t' \
+        --header=$'NAME\tUSED\tREFER\tSNAPS\tAUTO' \
+        --preview="sudo $self --preview {1}" --preview-window=right,55%,wrap \
+        --bind="enter:execute(sudo $self snaps {1})" \
+        --bind="ctrl-s:execute(sudo $self snap {1})+reload(sudo $self --table)" \
+        --bind="ctrl-r:execute(sudo $self replicate \$(sudo $self --latest {1}))" \
+        --bind="ctrl-o:execute(sudo $self browse {1})" \
+        --bind="ctrl-d:execute(sudo $self destroy {1})+reload(sudo $self --table)" \
+        --bind="ctrl-p:execute(sudo $self props {1})" \
+        --bind="ctrl-/:toggle-preview" >/dev/null || true
+}
+
+# --latest <dataset> — echo its newest snapshot (for the ctrl-r bind).
+_latest() { zfs list -H -t snapshot -o name -s creation -r "$1" 2>/dev/null | tail -1; }
+
+usage() {
+    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+}
+
+# ── Dispatch ─────────────────────────────────────────────────────────────────
+case "${1:-}" in
+"") browser ;;
+snap) snap "${2:-}" "${3:-}" ;;
+snaps) snaps "${2:-}" ;;
+replicate) replicate "${2:-}" "${3:-}" ;;
+destroy) destroy "${2:-}" ;;
+browse) browse "${2:-}" ;;
+props) props "${2:-}" ;;
+--preview) preview "${2:-}" ;;
+--table) datasets_table ;;
+--latest) _latest "${2:-}" ;;
+-h | --help) usage ;;
+*) die "unknown command: $1 (try --help)" ;;
+esac
