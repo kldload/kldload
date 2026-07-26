@@ -164,10 +164,35 @@ k_zfs_cleanup_old() {
     zpool export rpool 2>/dev/null || true
     zpool destroy -f rpool 2>/dev/null || true
 
-    wipefs -a -f "${KLDLOAD_DISK}" || true
-    sgdisk --zap-all "${KLDLOAD_DISK}" || true
+    # ── Clear the TARGET boot disk — this MUST succeed ───────────────────────
+    # Everything above is best-effort teardown of OTHER pools/VGs/mdraid (|| true
+    # so a clean box breezes through). Clearing the disk we're about to install
+    # ONTO is different: it is load-bearing. A surviving ZFS label or partition
+    # table outlives `zpool create -f` and re-surfaces at import time, so the box
+    # can boot the WRONG pool — exactly the "install succeeds, reboots into a
+    # brick" failure this repo exists to prevent. So: retry a few times (a disk
+    # can be transiently held right after teardown), VERIFY no signatures remain,
+    # and abort loudly if it's still dirty instead of building on a dirty disk.
+    local _wipe_ok=0 _try
+    for _try in 1 2 3; do
+        wipefs -a -f "${KLDLOAD_DISK}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
+        sgdisk --zap-all "${KLDLOAD_DISK}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
+        zpool labelclear -f "${KLDLOAD_DISK}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
+        partprobe "${KLDLOAD_DISK}" >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
+        udevadm settle 2>/dev/null || true
+        # wipefs (read-only listing here — no -a) prints nothing when the whole
+        # disk carries no FS/partition/RAID signatures. Empty ⇒ genuinely clean.
+        if [[ -z "$(wipefs "${KLDLOAD_DISK}" 2>/dev/null)" ]]; then
+            _wipe_ok=1
+            break
+        fi
+        k_zfs_log "Target ${KLDLOAD_DISK} still has signatures after wipe attempt ${_try}/3; retrying"
+        sleep 2
+    done
+    if [[ "${_wipe_ok}" -ne 1 ]]; then
+        k_die "Refusing to install: could not clear ${KLDLOAD_DISK} — it still holds partition/filesystem/ZFS signatures after 3 attempts. Something is holding the disk (check 'lsblk', 'zpool status', 'dmsetup ls') or the disk is failing. Aborting rather than building on a dirty disk."
+    fi
     rm -rf "${KLDLOAD_TARGET_MNT:?}/"* 2>/dev/null || true
-    partprobe "${KLDLOAD_DISK}" || true
 
     # For multi-disk topologies, also wipe data and special vdev disks
     local _extra_disk
