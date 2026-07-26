@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-gen-operator-ca — mint the operator identity that unlocks the web GUI.
+# ─────────────────────────────────────────────────────────────────────────────
+# WHAT IT DOES, IN ORDER:
+#   1. init         — create the operator CA once (key + self-signed cert), if
+#                     absent. The CA is the trust root every deployed box will
+#                     verify browser client certs against.
+#   2. issue <name> — sign a client certificate for one device (laptop, phone),
+#                     bundled as a password-protected PKCS#12 (.p12) you import
+#                     into that browser ONCE.
+#   3. ca-path      — print the PUBLIC ca.crt path to feed the image build
+#                     (KLDLOAD_OPERATOR_CA=…); safe to bake — it's public.
+#
+# WHY: the web GUI is remote-only and drives root actions (install/wipe/zfs/k8s),
+#   so it must authenticate the OPERATOR, not just an IP. Mutual TLS with a
+#   personal CA is the right fit: the private client key stays in your browser,
+#   each box only ever holds the PUBLIC ca.crt (`ssl_verify_client on`), and one
+#   client cert works on EVERY box you deploy — no per-box setup, no passwords on
+#   the wire. Critically, the public release ISO must ship ZERO private keys;
+#   this tool keeps the CA private key + client key OFF the image by construction.
+#
+# INPUTS / OUTPUTS:
+#   State dir (holds the private CA — guard it):
+#     $KLDLOAD_OPERATOR_CA_DIR, else ${XDG_CONFIG_HOME:-~/.config}/kldload/operator-ca
+#       operator-ca.key   CA private key   (0600 — NEVER ships, NEVER published)
+#       operator-ca.crt   CA public cert   (bake into build / seed USB — safe)
+#       clients/<name>.p12  per-device client bundle (import into browser once)
+#       clients/<name>.pw   the random .p12 password (0600) when auto-generated
+#
+# NOTES:
+#   * Re-running `init` never overwrites an existing CA key (that would
+#     invalidate every client cert already issued) unless --force is given.
+#   * CA valid 10y, client certs 2y (re-issue is one command). Client certs
+#     carry extendedKeyUsage=clientAuth so nginx accepts them for mTLS only.
+#   * Nothing here runs on a deployed box — this is a BUILD-HOST tool. The
+#     matching target side is nginx `ssl_verify_client` + kldload-mtls-setup.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+# ─── Configuration ───────────────────────────────────────────────────────────
+# State dir holds the PRIVATE CA — default under the user's config so it's not
+# in the repo (a leaked CA key = anyone can mint a cert that unlocks every box).
+CA_DIR="${KLDLOAD_OPERATOR_CA_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/kldload/operator-ca}"
+CA_KEY="${CA_DIR}/operator-ca.key"
+CA_CRT="${CA_DIR}/operator-ca.crt"
+CLIENTS_DIR="${CA_DIR}/clients"
+
+CA_CN="${KLDLOAD_OPERATOR_CA_CN:-kldload operator CA}"
+CA_DAYS=3650    # 10 years — the CA is long-lived; rotating it re-enrolls every device.
+CLIENT_DAYS=730 # 2 years — short enough to matter, long enough to not be a chore.
+
+_need() { command -v "$1" >/dev/null 2>&1 || {
+    echo "error: '$1' not found — install openssl" >&2
+    exit 3
+}; }
+
+# ─── init — create the CA once ───────────────────────────────────────────────
+# The CA is self-signed with basicConstraints CA:TRUE so it can sign client
+# leaves. keyCertSign only — it is NOT a TLS server/client cert itself.
+cmd_init() {
+    local force=0
+    [[ "${1:-}" == "--force" ]] && force=1
+    _need openssl
+    mkdir -p "${CA_DIR}"
+    chmod 0700 "${CA_DIR}"
+
+    if [[ -f "${CA_KEY}" && "${force}" -eq 0 ]]; then
+        echo "operator CA already exists: ${CA_CRT}"
+        echo "(use 'init --force' to replace it — this invalidates every issued client cert)"
+        return 0
+    fi
+
+    openssl ecparam -name prime256v1 -genkey -noout -out "${CA_KEY}"
+    chmod 0600 "${CA_KEY}"
+    openssl req -x509 -new -key "${CA_KEY}" -sha256 -days "${CA_DAYS}" \
+        -subj "/CN=${CA_CN}" \
+        -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+        -addext "keyUsage=critical,keyCertSign,cRLSign" \
+        -out "${CA_CRT}"
+    chmod 0644 "${CA_CRT}"
+
+    echo "Operator CA created:"
+    echo "  private (guard):  ${CA_KEY}"
+    echo "  public  (bake) :  ${CA_CRT}"
+    echo
+    echo "Next: issue a client cert for a device, then bake the public CA:"
+    echo "  $0 issue laptop"
+    echo "  KLDLOAD_OPERATOR_CA=\"\$($0 ca-path)\" PROFILE=desktop ./deploy.sh build"
+}
+
+# ─── issue <name> — sign one device's client cert → .p12 ─────────────────────
+# Output is a PKCS#12 bundle (cert + key) because that's what browsers/OS key
+# stores import. Password-protected: taken from --password, else $KLDLOAD_P12_PW,
+# else a random one written next to the bundle (0600) so it isn't lost.
+cmd_issue() {
+    local name="${1:-}" pw="" pw_src="argument"
+    shift || true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --password)
+            pw="${2:-}"
+            shift 2
+            ;;
+        *)
+            echo "issue: unknown arg '$1'" >&2
+            exit 2
+            ;;
+        esac
+    done
+    [[ -n "${name}" ]] || {
+        echo "usage: $0 issue <device-name> [--password PW]" >&2
+        exit 2
+    }
+    [[ "${name}" =~ ^[A-Za-z0-9._-]+$ ]] || {
+        echo "issue: device-name must be [A-Za-z0-9._-]" >&2
+        exit 2
+    }
+    _need openssl
+    [[ -f "${CA_KEY}" ]] || {
+        echo "no operator CA yet — run '$0 init' first" >&2
+        exit 4
+    }
+
+    if [[ -z "${pw}" && -n "${KLDLOAD_P12_PW:-}" ]]; then
+        pw="${KLDLOAD_P12_PW}"
+        pw_src="\$KLDLOAD_P12_PW"
+    fi
+    if [[ -z "${pw}" ]]; then
+        pw="$(openssl rand -base64 18)"
+        pw_src="auto-generated"
+    fi
+
+    mkdir -p "${CLIENTS_DIR}"
+    chmod 0700 "${CLIENTS_DIR}"
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+
+    openssl ecparam -name prime256v1 -genkey -noout -out "${tmp}/client.key"
+    openssl req -new -key "${tmp}/client.key" -subj "/CN=${name}" -out "${tmp}/client.csr"
+    # clientAuth EKU so the leaf is usable ONLY as a TLS client — not a server,
+    # not a CA. nginx ssl_verify_client accepts it; it can't be repurposed.
+    openssl x509 -req -in "${tmp}/client.csr" \
+        -CA "${CA_CRT}" -CAkey "${CA_KEY}" -CAcreateserial \
+        -days "${CLIENT_DAYS}" -sha256 \
+        -extfile <(printf 'extendedKeyUsage=clientAuth\nkeyUsage=critical,digitalSignature\n') \
+        -out "${tmp}/client.crt"
+
+    local p12="${CLIENTS_DIR}/${name}.p12"
+    openssl pkcs12 -export -inkey "${tmp}/client.key" -in "${tmp}/client.crt" \
+        -certfile "${CA_CRT}" -name "kldload:${name}" \
+        -passout "pass:${pw}" -out "${p12}"
+    chmod 0600 "${p12}"
+
+    if [[ "${pw_src}" == "auto-generated" ]]; then
+        printf '%s\n' "${pw}" >"${CLIENTS_DIR}/${name}.pw"
+        chmod 0600 "${CLIENTS_DIR}/${name}.pw"
+    fi
+
+    echo "Client bundle for '${name}':"
+    echo "  ${p12}"
+    echo "  import password: ${pw}   (${pw_src})"
+    echo
+    echo "Import ${name}.p12 into the browser/OS keystore on that device, then"
+    echo "browse to https://<box>:8443 — the browser offers the cert automatically."
+}
+
+# ─── ca-path — the public cert to bake into the build ────────────────────────
+cmd_ca_path() {
+    [[ -f "${CA_CRT}" ]] || {
+        echo "no operator CA yet — run '$0 init' first" >&2
+        exit 4
+    }
+    printf '%s\n' "${CA_CRT}"
+}
+
+usage() {
+    cat <<EOF
+kldload-gen-operator-ca — mint the operator identity (mutual-TLS) for the web GUI
+
+Usage:
+  $0 init [--force]          Create the operator CA (once). --force replaces it
+                             (invalidates all issued client certs).
+  $0 issue <name> [--password PW]
+                             Sign a client cert for one device → <name>.p12.
+                             Password: --password, else \$KLDLOAD_P12_PW, else
+                             a random one saved to <name>.pw (0600).
+  $0 ca-path                 Print the PUBLIC ca.crt path (feed KLDLOAD_OPERATOR_CA).
+
+State dir: ${CA_DIR}
+  (override with \$KLDLOAD_OPERATOR_CA_DIR — keep it OFF the repo and any ISO)
+
+Example — set up remote GUI access on a freshly built box:
+  $0 init
+  $0 issue laptop
+  KLDLOAD_OPERATOR_CA="\$($0 ca-path)" PROFILE=server ./deploy.sh build
+  # import ~/.config/kldload/operator-ca/clients/laptop.p12 into your browser
+EOF
+}
+
+case "${1:-help}" in
+init)
+    shift
+    cmd_init "$@"
+    ;;
+issue)
+    shift
+    cmd_issue "$@"
+    ;;
+ca-path) cmd_ca_path ;;
+-h | --help | help) usage ;;
+*)
+    echo "unknown command: ${1}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
