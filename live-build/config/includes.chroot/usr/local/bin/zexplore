@@ -206,29 +206,56 @@ replicate() {
         zfs send "$src" | _pipe | "${rrun[@]}" "${recv[@]}"
     fi
     say "${G}✓ replicated${N} ${src} → ${dest}"
+    _remember_target "$dest" # so it's a one-keypress pick next time
 }
 
-# _pick_dest <source-dataset> — fzf-pick a replication target: a local pool, or
-# "remote…" to type host:pool. Echoes the chosen dest (host:path or path).
+# Recent replication targets — remembered so the common case is "pick and go",
+# not retyping a host:pool string every time. One dest per line, most-recent
+# first, capped at 20. Lives under the operator's config dir. Failing to write
+# it must never break a replication, hence the trailing `|| true`.
+_targets_file() { printf '%s/zexplore/targets' "${XDG_CONFIG_HOME:-${HOME}/.config}"; }
+
+_remember_target() { # record a REMOTE dest (host:pool/path) for next time
+    local dest="$1" tf existing=""
+    tf="$(_targets_file)"
+    # Only remember remote targets — local pools are always auto-listed anyway.
+    [[ "$dest" == *:* && "$dest" != /* ]] || return 0
+    mkdir -p "$(dirname "$tf")" 2>/dev/null || return 0
+    [[ -f "$tf" ]] && existing="$(grep -vxF -- "$dest" "$tf" 2>/dev/null || true)"
+    {
+        printf '%s\n' "$dest"
+        [[ -n "$existing" ]] && printf '%s\n' "$existing"
+    } | awk 'NF' | head -n 20 >"${tf}.tmp" 2>/dev/null && mv -f "${tf}.tmp" "$tf" 2>/dev/null || true
+}
+
+# _pick_dest <source-dataset> — fzf-pick a replication target: a local pool, a
+# REMEMBERED remote target (arrow + Enter = go), or "new remote…" to type one.
+# Echoes the chosen dest (host:path or path).
 _pick_dest() {
-    local src_ds="$1" leaf="${1##*/}" choice
+    local src_ds="$1" leaf="${1##*/}" choice tf
+    tf="$(_targets_file)"
     if have fzf; then
         choice="$({
             zpool list -H -o name 2>/dev/null | sed 's#$#/'"${leaf}"'  (local pool)#'
-            echo "remote…  (type host:pool/path)"
+            [[ -f "$tf" ]] && sed 's#$#  (recent)#' "$tf"
+            echo "+ new remote  (type host:pool/path)"
         } | fzf --prompt="replicate ${src_ds} → " --height=40% --reverse)" || return 1
     else
         echo "Local pools:" >&2
         zpool list -H -o name >&2
+        [[ -f "$tf" ]] && {
+            echo "Recent targets:" >&2
+            cat "$tf" >&2
+        }
         read -r -p "Destination (pool/path or host:pool/path, or blank to cancel): " choice
         printf '%s' "$choice"
         return 0
     fi
-    if [[ "$choice" == remote…* ]]; then
-        read -r -p "Remote destination host:pool/path : " choice
-    else
-        choice="${choice%%  (local pool)*}"
-    fi
+    case "$choice" in
+    "+ new remote"*) read -r -p "Remote destination host:pool/path : " choice ;;
+    *"  (local pool)") choice="${choice%  (local pool)}" ;;
+    *"  (recent)") choice="${choice%  (recent)}" ;;
+    esac
     printf '%s' "$choice"
 }
 
