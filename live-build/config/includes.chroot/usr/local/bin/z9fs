@@ -22,10 +22,14 @@
 #      remote host over ssh) → z9fs sends it (incremental when a common snapshot
 #      exists, else full), streamed through pv/mbuffer, into a readonly target so
 #      it never drifts.
-#   3. Subcommands (also used by the fzf key-binds; usable on their own / in CI):
+#   3. `z9fs mc [target]` → the commander (WinSCP-for-ZFS): browse local datasets
+#      with a PINNED target (local pool or remote host:pool); F5 replicates the
+#      highlighted dataset there in one keypress, ctrl-v views the target.
+#   4. Subcommands (also used by the fzf key-binds; usable on their own / in CI):
 #        z9fs snap <dataset> [name]          z9fs destroy <snapshot>
-#        z9fs replicate <snapshot> [dest]    z9fs browse <dataset|snapshot>
+#        z9fs replicate <snapshot> [dest]    z9fs browse <dataset|snapshot|zvol>
 #        z9fs snaps <dataset>                z9fs props <dataset>
+#        z9fs mc [pool|host:pool]            (dual-location commander)
 #
 # INPUTS/OUTPUTS: reads local ZFS (zfs/zpool); replication writes to a local
 #   pool or `ssh <host> zfs recv`. Root required (zfs send/recv, mount). fzf +
@@ -315,6 +319,97 @@ browser() {
 # --latest <dataset> — echo its newest snapshot (for the ctrl-r bind).
 _latest() { zfs list -H -t snapshot -o name -s creation -r "$1" 2>/dev/null | tail -1; }
 
+# ── The commander (dual-location, WinSCP-for-ZFS) ─────────────────────────────
+# The MC/WinSCP layer: browse LOCAL datasets (the source) with a PINNED target —
+# a local pool or a remote "host:pool". F5 replicates the highlighted dataset's
+# newest snapshot to the target (same leaf name) with no re-picking; ctrl-v flips
+# to a read-only view of the target so you can confirm replicas landed. This is
+# the "manage the real host, push its datasets/BEs somewhere" console. Direction
+# is push-only (local source) by design — the robust, common case; remote-source
+# pull is a later addition.
+
+# _pick_target — fzf-pick the pinned replication target: a local pool, or type a
+# remote "host:pool". Echoes the normalized target ("pool" or "host:pool").
+_pick_target() {
+    local choice
+    if ! have fzf; then
+        zpool list -H -o name >&2
+        read -r -p "Pin target (pool or host:pool): " choice
+        printf '%s' "$choice"
+        return 0
+    fi
+    choice="$({
+        zpool list -H -o name 2>/dev/null | sed 's/$/   (local pool)/'
+        echo "remote…   (type host:pool)"
+    } | fzf --prompt='pin replication target → ' --height=40% --reverse)" || return 1
+    if [[ "$choice" == remote…* ]]; then
+        read -r -p "Remote target host:pool : " choice
+    else
+        choice="${choice%%   (local pool)*}"
+    fi
+    printf '%s' "$choice"
+}
+
+# _mcsend <dataset> <target> — replicate <dataset>'s newest snapshot to
+# <target>/<leaf>. Snapshots first (ad-hoc) if the dataset has none, so F5 always
+# has something to send. Delegates the actual transfer to replicate() (incremental
+# when the target already holds a common snapshot).
+_mcsend() {
+    local ds="$1" target="$2" snap leaf nm
+    [[ -n "$ds" && -n "$target" ]] || die "mc: dataset and target required"
+    snap="$(_latest "$ds")"
+    if [[ -z "$snap" ]]; then
+        confirm "No snapshot on ${ds} yet — snapshot now to replicate?" || return 0
+        nm="mc-$(date +%Y%m%d-%H%M%S)"
+        zfs snapshot "${ds}@${nm}" && snap="${ds}@${nm}"
+    fi
+    leaf="${ds##*/}"
+    replicate "$snap" "${target}/${leaf}"
+    echo -e "\n(press enter to return to the commander)"
+    read -r
+}
+
+# _mcview <target> — read-only listing of the pinned target's datasets/snapshots,
+# so you can confirm what replicas exist. Local pool or remote host:pool.
+_mcview() {
+    local target="$1" host="" pool="$1"
+    [[ -n "$target" ]] || die "mc: target required"
+    if [[ "$target" == *:* && "$target" != /* ]]; then
+        host="${target%%:*}"
+        pool="${target#*:}"
+    fi
+    local rrun=()
+    [[ -n "$host" ]] && rrun=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "root@${host}")
+    {
+        echo "── target: ${target} ──"
+        "${rrun[@]}" zfs list -o name,used,refer,creation -r "$pool" 2>/dev/null ||
+            echo "(could not reach ${target})"
+    } | less
+}
+
+# commander [target] — the dual-location commander loop (see section banner).
+commander() {
+    have fzf || die "mc: the commander needs fzf (the plain subcommands work without it — see --help)"
+    local target="${1:-}"
+    [[ -n "$target" ]] || target="$(_pick_target)" || exit 0
+    [[ -n "$target" ]] || exit 0
+    local self="$0"
+    datasets_table | fzf \
+        --prompt="z9fs ▸ local → ${target}  (F5=replicate  ^v=view target  enter=snaps  ^s=snap  ^g=retarget  ^d=destroy) → " \
+        --height=100% --reverse --with-nth=1,2,3,4,5 --delimiter='\t' \
+        --header=$'NAME\tUSED\tREFER\tSNAPS\tAUTO' \
+        --preview="sudo $self --preview {1}" --preview-window=right,55%,wrap \
+        --bind="f5:execute(sudo $self _mcsend {1} '$target')" \
+        --bind="ctrl-t:execute(sudo $self _mcsend {1} '$target')" \
+        --bind="enter:execute(sudo $self snaps {1})" \
+        --bind="ctrl-s:execute(sudo $self snap {1})+reload(sudo $self --table)" \
+        --bind="ctrl-d:execute(sudo $self destroy {1})+reload(sudo $self --table)" \
+        --bind="ctrl-v:execute(sudo $self _mcview '$target')" \
+        --bind="ctrl-g:execute(sudo $self mc)+abort" \
+        --bind="ctrl-p:execute(sudo $self props {1})" \
+        --bind="ctrl-/:toggle-preview" >/dev/null || true
+}
+
 usage() {
     sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
@@ -323,12 +418,15 @@ usage() {
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 case "${1:-}" in
 "") browser ;;
+mc) commander "${2:-}" ;;
 snap) snap "${2:-}" "${3:-}" ;;
 snaps) snaps "${2:-}" ;;
 replicate) replicate "${2:-}" "${3:-}" ;;
 destroy) destroy "${2:-}" ;;
 browse) browse "${2:-}" ;;
 props) props "${2:-}" ;;
+_mcsend) _mcsend "${2:-}" "${3:-}" ;; # internal: fzf F5 bind
+_mcview) _mcview "${2:-}" ;;          # internal: fzf ctrl-v bind
 --preview) preview "${2:-}" ;;
 --table) datasets_table ;;
 --latest) _latest "${2:-}" ;;
