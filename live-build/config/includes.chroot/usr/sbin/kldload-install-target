@@ -1403,18 +1403,35 @@ _ok() { printf '  \e[1;32m✔   %-12s\e[0;37m %s\e[0m\n' "$1" "$2"; }
 # Error — bright red
 _err() { printf '\n  \e[1;31m✖   %s\e[0m\n' "$*"; }
 
-# ── Auto-detect first available disk ─────────────────────────────────────────
+# ── The live/boot medium's backing disk (never wipe it) ──────────────────────
+# A first-disk or full-auto pick MUST exclude the USB/ISO we booted from, or an
+# unattended install can wipe its own installer (the box then can't reboot into
+# anything). Resolve the whole disk behind whatever the live root/medium mounts.
+_live_disk() {
+    local m src
+    for m in /run/initramfs/live /run/live/medium /lib/live/mount/medium; do
+        src="$(findmnt -no SOURCE "$m" 2>/dev/null)"
+        [[ -n "$src" ]] && break
+    done
+    [[ -n "$src" ]] || src="$(findmnt -no SOURCE / 2>/dev/null)"
+    [[ "$src" == /dev/* ]] || return 0
+    lsblk -no PKNAME "$src" 2>/dev/null | awk 'NF{print "/dev/"$1; exit}'
+}
+
+# ── Auto-detect first available disk (excluding the boot medium) ─────────────
 _detect_first_disk() {
+    local live dev
+    live="$(_live_disk)"
     local candidates=(/dev/sda /dev/vda /dev/xvda /dev/nvme0n1 /dev/mmcblk0 /dev/hda)
     for dev in "${candidates[@]}"; do
-        [[ -b "$dev" ]] && {
+        [[ -b "$dev" && "$dev" != "$live" ]] && {
             echo "$dev"
             return 0
         }
     done
-    # Fallback: first disk reported by lsblk
+    # Fallback: first lsblk disk that isn't the boot medium
     lsblk -d -e7 -n -o PATH,TYPE 2>/dev/null |
-        awk '$2=="disk" {print $1; exit}'
+        awk -v live="$live" '$2=="disk" && $1!=live {print $1; exit}'
 }
 
 # ── Disk list ─────────────────────────────────────────────────────────────────

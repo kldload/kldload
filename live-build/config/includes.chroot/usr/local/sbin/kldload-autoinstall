@@ -17,6 +17,32 @@ exec > >(tee -a "$LOG") 2>&1
 
 log() { printf '[%(%F %T)T] [autoinstall] %s\n' -1 "$*"; }
 
+# _whole_disk <dev> — resolve a partition/dev to its backing whole disk (/dev/…).
+# Returns empty (rc 0) if it can't be resolved, so callers can compare safely.
+_whole_disk() {
+    local dev="$1" pk
+    [[ "$dev" == /dev/* ]] || return 0
+    pk="$(lsblk -no PKNAME "$dev" 2>/dev/null | awk 'NF{print;exit}')"
+    if [[ -n "$pk" ]]; then
+        echo "/dev/$pk"
+    else # already a whole disk (no parent)
+        echo "$dev"
+    fi
+}
+
+# _live_disk — the whole disk the live ISO/USB booted from. NEVER an install
+# target: auto-picking it would wipe the installer out from under itself, and
+# the box then reboots into nothing. Empty if it can't be determined.
+_live_disk() {
+    local m src
+    for m in /run/initramfs/live /run/live/medium /lib/live/mount/medium; do
+        src="$(findmnt -no SOURCE "$m" 2>/dev/null)"
+        [[ -n "$src" ]] && break
+    done
+    [[ -n "$src" ]] || src="$(findmnt -no SOURCE / 2>/dev/null)"
+    _whole_disk "$src"
+}
+
 # ── Find seed disk ────────────────────────────────────────────────────────────
 
 log "Scanning for KLDLOAD-SEED disk..."
@@ -73,9 +99,19 @@ fi
 
 if ! grep -q "^KLDLOAD_DISK=" "$ANSWERS_TMP" ||
     grep -q "^KLDLOAD_DISK=$" "$ANSWERS_TMP"; then
+    # Exclude the disks we must never wipe: the live boot medium and the
+    # KLDLOAD-SEED disk (if it's a separate USB). Picking either would brick
+    # the box or destroy the very answers file that drove this install.
+    _live="$(_live_disk)"
+    _seed="$(_whole_disk "${SEED_DEV:-}")"
+    log "Excluded from auto-pick: live=${_live:-none} seed=${_seed:-none}"
     DETECTED=""
-    for dev in /dev/sda /dev/vda /dev/xvda /dev/nvme0n1; do
-        [[ -b "$dev" ]] && DETECTED="$dev" && break
+    for dev in /dev/sda /dev/vda /dev/xvda /dev/nvme0n1 /dev/mmcblk0; do
+        [[ -b "$dev" ]] || continue
+        [[ "$dev" == "$_live" ]] && continue
+        [[ -n "$_seed" && "$dev" == "$_seed" ]] && continue
+        DETECTED="$dev"
+        break
     done
     if [[ -n "$DETECTED" ]]; then
         log "Auto-detected install disk: $DETECTED"
