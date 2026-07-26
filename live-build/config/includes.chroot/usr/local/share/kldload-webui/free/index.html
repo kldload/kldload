@@ -232,13 +232,17 @@ html.kld-app #term-drawer{display:none!important;}
       <div class="page-sub" id="build-info">System overview</div>
 
       <div style="margin-bottom:1rem;padding:0.8rem 1rem;background:linear-gradient(135deg,rgba(52,211,153,0.08),rgba(139,92,246,0.06));border:1px solid rgba(52,211,153,0.2);border-radius:8px">
-        <div style="font-size:0.95rem;font-weight:600;color:var(--accent);margin-bottom:0.2rem">kldload 1.3.1 &mdash; Kernel-Loaded Workstation</div>
+        <div style="font-size:0.95rem;font-weight:600;color:var(--accent);margin-bottom:0.2rem">kldload 1.3.2 &mdash; Kernel-Loaded Workstation</div>
         <div style="font-size:0.82rem;color:var(--subtle);line-height:1.5;margin-bottom:0.5rem">
           Fedora 44 on the Linux 7.0 kernel, OpenZFS 2.4.3 on root, dnf5. One URL, one cert, every service &mdash; the whole stack runs in the kernel.<br>
           <span style="font-style:italic;color:var(--muted)">For any dnf / apt / pacman Linux: Fedora &middot; RHEL &middot; Rocky &middot; CentOS &middot; Debian &middot; Ubuntu &middot; Arch. Reproducible offline install &mdash; Fedora &amp; RHEL fully air-gapped.</span>
         </div>
         <div style="font-size:0.72rem;color:var(--muted);line-height:1.7;border-top:1px solid rgba(52,211,153,0.1);padding-top:0.5rem">
-          <strong style="color:var(--subtle)">What&rsquo;s new in 1.3.1</strong><br>
+          <strong style="color:var(--subtle)">What&rsquo;s new in 1.3.2</strong><br>
+          <span style="color:#c9a04a">&#x2022;</span> <strong style="color:#c9a04a">z9fs &mdash; the ZFS console</strong> &mdash; &ldquo;k9s for ZFS&rdquo;: browse / snapshot / point-and-shoot replicate datasets and boot environments, a WinSCP-style commander (<code style="font-size:0.68rem">z9fs mc</code>: pin a target, one key replicates), explore a running VM&rsquo;s filesystem read-only, and a scoped guest snapshot/rollback API &mdash; <em>instant rollback as a function</em><br>
+          <span style="color:#c9a04a">&#x2022;</span> <strong style="color:#c9a04a">ZFS web console</strong> &mdash; pool topology with per-disk error counters + scrub / trim / clear / replace, datasets create/set/destroy, and snapshot clone/destroy &mdash; all in the dashboard<br>
+          <span style="color:#c9a04a">&#x2022;</span> <strong style="color:#c9a04a">Kubernetes day-2 depth</strong> &mdash; port-forward, edit-live-YAML, and HPA / RBAC / CRD views on top of the born-HA deploy (3 control planes + kube-vip failover)<br>
+          <span style="color:#c9a04a">&#x2022;</span> <strong style="color:#c9a04a">Power off to adjust Secure Boot</strong> &mdash; the installer now powers <em>off</em> when done (was auto-reboot) so you can toggle Secure Boot / firmware before first boot; &ldquo;Reboot instead&rdquo; is still one click<br>
           <span style="color:var(--subtle)">&#x2022;</span> <strong style="color:var(--subtle)">CentOS Stream + Rocky now on EL10</strong> &mdash; both moved to EL10 (kernel 6.12, OpenZFS 2.3) matching RHEL 10; retires the old EL9 (5.14) path that wedged dracut/NVIDIA on first boot<br>
           <span style="color:var(--subtle)">&#x2022;</span> <strong style="color:var(--subtle)">Any dnf / apt / pacman Linux</strong> &mdash; one USB, ZFS-on-root across Fedora 44 (primary) / RHEL 10 / Rocky 10 / CentOS Stream 10 / Debian 13 / Ubuntu / Arch; reproducible offline install (Fedora &amp; RHEL fully air-gapped)<br>
           <span style="color:var(--subtle)">&#x2022;</span> <strong style="color:var(--subtle)">Compose your own</strong> &mdash; capability toggles above the Install button: KVM, Kubernetes, klab, AI (Bob), observability, ZFS lab, WireGuard &mdash; mix &amp; match, point-and-shoot<br>
@@ -4358,26 +4362,28 @@ function handle(msg) {
         if (msg.rc === 0 && !_installFailed) {
           if (bar) { bar.className = 'progress-bar'; bar.style.width = '100%'; bar.style.background = '#8b5cf6'; }
           appendLog(box, '✓ Install complete. Initial snapshot taken.');
-          appendLog(box, '↻ Auto-rebooting in 10 seconds — pull the USB now if you want to boot from the installed disk.');
-          // Reveal reboot button, hide abort (no longer abortable).
+          appendLog(box, '⏻ Auto power-off in 15 seconds — so you can adjust Secure Boot / firmware, then power on to boot the installed disk. Pull the USB now.');
+          // Reveal the post-install button (repurposed to Power off), hide abort.
           const ab = document.getElementById('install-abort-btn');
           const rb2 = document.getElementById('install-reboot-btn');
           if (ab) ab.style.display = 'none';
-          if (rb2) { rb2.style.display = ''; rb2.textContent = '↻ Reboot now'; }
-          // 10-second auto-reboot countdown. Operator can cancel by clicking
-          // the "Cancel auto-reboot" button OR by clicking "Reboot now" to
-          // fire immediately.
-          window._installRebootRemaining = 10;
+          if (rb2) { rb2.style.display = ''; rb2.textContent = '⏻ Power off now'; rb2.onclick = installPoweroff; }
+          // 15-second auto-POWEROFF countdown (was auto-reboot). We power OFF, not
+          // reboot, so the operator can enter firmware and toggle Secure Boot / boot
+          // order before first boot — kldload signs its own kernel + MOK, and many
+          // operators flip SB between install and first boot. Cancel to stay,
+          // "Power off now" to fire immediately, or "↻ Reboot instead".
+          window._installRebootRemaining = 15;
           window._installAutoRebootTimer && clearInterval(window._installAutoRebootTimer);
           window._installAutoRebootTimer = setInterval(() => {
             window._installRebootRemaining--;
-            if (st) st.textContent = `✓ Install complete — auto-rebooting in ${window._installRebootRemaining}s… (Cancel to keep webui open)`;
+            if (st) st.textContent = `✓ Install complete — powering off in ${window._installRebootRemaining}s to let you adjust Secure Boot… (Cancel to stay)`;
             if (window._installRebootRemaining <= 0) {
               clearInterval(window._installAutoRebootTimer);
               window._installAutoRebootTimer = null;
-              if (st) st.textContent = '↻ Rebooting…';
-              appendLog(box, '↻ Auto-reboot firing now.');
-              send({ action: 'install_reboot' });
+              if (st) st.textContent = '⏻ Powering off…';
+              appendLog(box, '⏻ Auto power-off firing now — adjust Secure Boot, then power on.');
+              send({ action: 'install_poweroff' });
             }
           }, 1000);
           // Swap "Reboot now" semantics for a cancel option so operator can
@@ -4394,11 +4400,22 @@ function handle(msg) {
                 clearInterval(window._installAutoRebootTimer);
                 window._installAutoRebootTimer = null;
               }
-              if (st) st.textContent = '✓ Install complete — auto-reboot cancelled. Reboot manually when ready.';
+              if (st) st.textContent = '✓ Install complete — auto power-off cancelled. Power off or reboot manually when ready.';
               cancel.remove();
-              appendLog(box, '✗ Auto-reboot cancelled by operator. System stays on live installer.');
+              appendLog(box, '✗ Auto power-off cancelled by operator. System stays on the live installer.');
             };
             rb2.parentNode.insertBefore(cancel, rb2);
+            // Also offer "Reboot instead" for operators who don't need to touch
+            // Secure Boot and just want to boot straight into the installed disk.
+            if (!document.getElementById('install-reboot-instead-btn')) {
+              const rbi = document.createElement('button');
+              rbi.id = 'install-reboot-instead-btn';
+              rbi.className = 'btn btn-ghost btn-sm';
+              rbi.textContent = '↻ Reboot instead';
+              rbi.title = 'Skip the power-off and reboot straight into the installed disk (no Secure Boot change)';
+              rbi.onclick = installReboot;
+              rb2.parentNode.insertBefore(rbi, rb2);
+            }
           }
         } else {
           if (bar) { bar.className = 'progress-bar'; bar.style.width = '100%'; bar.style.background = 'var(--danger)'; }
@@ -5661,6 +5678,18 @@ function installReboot() {
   const st = document.getElementById('install-status');
   if (st) st.textContent = '↻ Rebooting…';
   send({ action: 'install_reboot' });
+}
+
+// Power OFF the host after install (the default post-install action). We power
+// off rather than reboot so the operator can enter firmware and adjust Secure
+// Boot / boot order before the installed system's first boot — kldload signs
+// its own kernel + MOK, so SB is commonly toggled at this exact moment. Backend
+// fires `systemctl poweroff` via systemd-run (survives the webui's SIGTERM).
+function installPoweroff() {
+  if (!confirm('Power off now?\n\nThe machine will shut down so you can adjust Secure Boot / firmware, then power on to boot the installed disk. Pull the USB first so it boots the disk, not the live installer.')) return;
+  const st = document.getElementById('install-status');
+  if (st) st.textContent = '⏻ Powering off…';
+  send({ action: 'install_poweroff' });
 }
 
 // Abort the in-flight install. Stops the kldinstall-*.service via the

@@ -1858,6 +1858,31 @@ async def ws_handler(websocket):
                             "type": "error",
                             "msg": f"reboot failed to schedule: {e}",
                         }))
+                elif action == "install_poweroff":
+                    # Power OFF after install (instead of reboot) so the operator
+                    # can enter firmware and adjust Secure Boot / boot order before
+                    # the installed system's first boot — kldload signs its own
+                    # kernel/MOK, so many operators want SB toggled between install
+                    # and first boot. Same systemd-run pattern as install_reboot so
+                    # the command survives the webui's own SIGTERM on the way down.
+                    # (CI is unaffected: the lifecycle harness drives its own
+                    # virsh shutdown->start and never runs this interactive path.)
+                    await websocket.send(json.dumps({
+                        "type": "log_line", "target": "install",
+                        "line": "[poweroff] powering off in 2s — set Secure Boot, then power on…",
+                    }))
+                    try:
+                        await asyncio.create_subprocess_exec(
+                            "systemd-run", "--on-active=2s", "--unit=kldload-postinstall-poweroff",
+                            "systemctl", "poweroff",
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                    except Exception as e:
+                        await websocket.send(json.dumps({
+                            "type": "error",
+                            "msg": f"poweroff failed to schedule: {e}",
+                        }))
                 elif action == "install_abort":
                     # Stop the active kldinstall-* systemd unit. The
                     # subprocess is in its own cgroup so systemctl stop

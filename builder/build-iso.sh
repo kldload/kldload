@@ -65,7 +65,7 @@ BUILD_DATE="$(date +%Y%m%d)"
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
 DISTRO_TAG="${DISTRO:-fedora}"
-VERSION="${KLDLOAD_VERSION:-1.3.1}"
+VERSION="${KLDLOAD_VERSION:-1.3.2}"
 ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
@@ -1897,7 +1897,7 @@ ALPEOF
     for _svc in kldload-firstboot.service kldload-autodeploy.service kldload-webui.service \
         kldload-srv-snapshot.service kldload-srv-snapshot.timer \
         kldload-snapshot.service kldload-snapshot.timer kldload-export.service \
-        ttyd-k9s.service \
+        ttyd-k9s.service z9fs-api.service \
         klab-prom-targets.service klab-prom-targets.timer; do
         _src="/build/live-build/config/includes.chroot/usr/lib/systemd/system/${_svc}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/lib/systemd/system/${_svc}"
@@ -1910,6 +1910,11 @@ ALPEOF
     # no-op'd, leaving the live ISO booting with the embedded console
     # disabled. See the comment block where that earlier enable used to be.
     chroot "$ROOTFS" systemctl enable ttyd-k9s.service 2>/dev/null || true
+    # z9fs-api: the guest ZFS-transaction daemon ("instant rollback as a
+    # function"). Harmless where unused — it only listens (unix socket + vsock
+    # 9455); on a KVM host it lets guest VMs snapshot/roll back their own zvols,
+    # scoped per-VM. Not a boot dependency, so a bind failure never blocks boot.
+    chroot "$ROOTFS" systemctl enable z9fs-api.service 2>/dev/null || true
 
     # Copy kldload-firstboot and kldload-export-deferred to sbin
     for _sb in kldload-firstboot kldload-export-deferred; do
