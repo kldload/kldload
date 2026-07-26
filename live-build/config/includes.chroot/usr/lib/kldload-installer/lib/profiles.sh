@@ -972,8 +972,17 @@ DASHSTART
                 # app (hexagon icon) on the workstation, not just a hidden window
                 # matcher. Lab/server keep it NoDisplay (their surface is the
                 # auto-opened kiosk page).
+                # ZFS is now ONE console: kldload-z9fs (the z9fs TUI — browse /
+                # snapshot / replicate / VM-fs explore, k9s-for-ZFS). The old
+                # per-function ZFS tiles (kldload-zfs "ZFS Snapshots", kldload-zfs-
+                # manager GTK dialogs, ksnap) are consolidated into it, so they are
+                # NO LONGER stripped here and stay NoDisplay on the desktop grid —
+                # their functions live inside z9fs. kldload-zfslab stays separate:
+                # it's the OpenZFS VM test lab, a different job, not file/snapshot
+                # management. (2026-07-26: operator "the other zfs tools should all
+                # be in the 1 zfs tool".)
                 for _ldskt in kldload-vms kldload-k8s kldload-helm kldload-klab \
-                    kldload-ansible kldload-metrics kldload-zfs kldload-zfs-manager \
+                    kldload-ansible kldload-metrics kldload-z9fs \
                     kldload-zfslab kldload-sysdiag \
                     bob-chat kldload-k9s bob-gaming kldload-webui; do
                     if [[ -f "${_appdir}/${_ldskt}.desktop" ]]; then
