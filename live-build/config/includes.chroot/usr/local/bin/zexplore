@@ -496,7 +496,11 @@ _mcview() {
         pool="${target#*:}"
     fi
     local rrun=()
-    [[ -n "$host" ]] && rrun=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "root@${host}")
+    if [[ -n "$host" ]]; then
+        local sshdest="$host"
+        [[ "$host" == *@* ]] || sshdest="root@${host}"
+        rrun=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "$sshdest")
+    fi
     {
         echo "── target: ${target} ──"
         "${rrun[@]}" zfs list -o name,used,refer,creation -r "$pool" 2>/dev/null ||
@@ -510,12 +514,40 @@ commander() {
     local target="${1:-}"
     [[ -n "$target" ]] || target="$(_pick_target)" || exit 0
     [[ -n "$target" ]] || exit 0
+
+    # If the target is REMOTE, probe SSH up front and say clearly whether it
+    # worked. Transfers use KEY-BASED ssh (no password prompt by design), so
+    # without this a bad/unauthorised key just yields a silent empty remote pane
+    # that looks broken. On failure, tell the operator exactly how to grant it.
+    local rhost=""
+    if [[ "$target" == *:* && "$target" != /* ]]; then
+        rhost="${target%%:*}"
+        [[ "$rhost" == *@* ]] || rhost="root@${rhost}"
+        say "Connecting to ${M}${rhost}${N} over SSH (key-based)…"
+        if ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=8 "$rhost" true </dev/null 2>/dev/null; then
+            say "${G}✓ connected${N} — ${rhost}"
+        else
+            say "${R}✗ cannot reach ${rhost}${N} — SSH is key-based (no password)."
+            echo "    grant access:  ssh-copy-id ${rhost}" >&2
+            echo "    or pin a delegated user:  user@host:pool  (needs 'zfs allow receive')" >&2
+            confirm "Continue anyway (remote pane stays empty until access works)?" || exit 0
+        fi
+    fi
+
     local self="$0"
+    # Right pane shows the LIVE remote side when a remote target is pinned (so you
+    # actually SEE what's on the target — local list left, remote list right),
+    # else the local dataset dossier. ^e / ^w flip between remote and local view.
+    local pv_remote="sudo $self --mcview-preview '$target'"
+    local pv_local="sudo $self --preview {1}"
+    local pv="$pv_local"
+    [[ -n "$rhost" ]] && pv="$pv_remote"
+
     datasets_table | fzf \
         --prompt="zexplore ▸ transfer → ${target} › " \
         --height=100% --reverse --with-nth=1,2,3,4,5 --delimiter='\t' \
-        --header=$'F1 files  [F2 transfer]  F3 restore  F4 pools   esc quit\nF5 replicate → '"${target}"$'   ^v view target   ^g retarget   ↵ snaps   ^d destroy\nNAME\tUSED\tREFER\tSNAPS\tAUTO' \
-        --preview="sudo $self --preview {1}" --preview-window=right,50%,wrap \
+        --header=$'F1 files  [F2 transfer]  F3 restore  F4 pools   esc quit\nF5 replicate → '"${target}"$'   ^e remote view  ^w local view  ^v full  ^g retarget  ↵ snaps  ^d destroy\nNAME\tUSED\tREFER\tSNAPS\tAUTO' \
+        --preview="$pv" --preview-window=right,50%,wrap \
         --bind="f1:become(sudo $self)" \
         --bind="f3:become(sudo $self restore)" \
         --bind="f4:become(sudo $self pools)" \
@@ -525,9 +557,37 @@ commander() {
         --bind="ctrl-s:execute(sudo $self snap {1})+reload(sudo $self --table)" \
         --bind="ctrl-d:execute(sudo $self destroy {1})+reload(sudo $self --table)" \
         --bind="ctrl-v:execute(sudo $self _mcview '$target')" \
+        --bind="ctrl-e:change-preview(sudo $self --mcview-preview '$target')" \
+        --bind="ctrl-w:change-preview(sudo $self --preview {1})" \
         --bind="ctrl-g:execute(sudo $self mc)+abort" \
         --bind="ctrl-p:execute(sudo $self props {1})" \
         --bind="ctrl-/:toggle-preview" >/dev/null || true
+}
+
+# _mcview_preview <target> — the LIVE remote (or local) target listing rendered
+# INTO the fzf preview pane (no pager). This is what makes the right pane "the
+# remote side" in the commander. Honours user@host; </dev/null so the ssh probe
+# doesn't eat fzf's input; BatchMode so an unauthorised key fails fast instead
+# of hanging the pane on a password prompt.
+_mcview_preview() {
+    local target="${1:-}" host="" pool="${1:-}" rrun=()
+    [[ -n "$target" ]] || {
+        echo "(no target pinned)"
+        return 0
+    }
+    if [[ "$target" == *:* && "$target" != /* ]]; then
+        host="${target%%:*}"
+        pool="${target#*:}"
+    fi
+    if [[ -n "$host" ]]; then
+        local sshdest="$host"
+        [[ "$host" == *@* ]] || sshdest="root@${host}"
+        rrun=(ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=6 "$sshdest")
+    fi
+    echo -e "${C}remote target${N}  ${target}"
+    echo
+    "${rrun[@]}" zfs list -o name,used,refer -r "$pool" </dev/null 2>/dev/null ||
+        echo "(cannot reach ${target} — key-based SSH not yet authorised: ssh-copy-id ${host:-$target})"
 }
 
 # ── Restore points (F3): every snapshot + boot environment on the box ─────────
@@ -784,8 +844,9 @@ replicate) replicate "${2:-}" "${3:-}" ;;
 destroy) destroy "${2:-}" ;;
 browse) browse "${2:-}" ;;
 props) props "${2:-}" ;;
-_mcsend) _mcsend "${2:-}" "${3:-}" ;; # internal: fzf F5 bind
-_mcview) _mcview "${2:-}" ;;          # internal: fzf ctrl-v bind
+_mcsend) _mcsend "${2:-}" "${3:-}" ;;         # internal: fzf F5 bind
+_mcview) _mcview "${2:-}" ;;                  # internal: fzf ctrl-v bind
+--mcview-preview) _mcview_preview "${2:-}" ;; # internal: fzf right-pane remote view
 --preview) preview "${2:-}" ;;
 --table) datasets_table ;;
 --latest) _latest "${2:-}" ;;
