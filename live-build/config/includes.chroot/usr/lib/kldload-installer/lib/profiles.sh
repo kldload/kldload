@@ -896,8 +896,12 @@ DASHSTART
             # GTK4 kldload-webview path; that path was reverted to chrome-app
             # because WebKit fails to map a window on first boot before the NVIDIA
             # akmod loads — windowless processes pile up and "no icon opens".)
+            # zxplore ships its own .desktop (not kldload-*/bob-*), so name it
+            # explicitly or the installed target gets the binary with no launcher
+            # (observed .139 2026-07-28).
             for _lnch in /usr/share/applications/kldload-*.desktop \
-                /usr/share/applications/bob-*.desktop; do
+                /usr/share/applications/bob-*.desktop \
+                /usr/share/applications/zxplore.desktop; do
                 [[ -f "$_lnch" ]] && install -m 0644 "$_lnch" \
                     "${target}/usr/share/applications/$(basename "$_lnch")"
             done
@@ -909,7 +913,8 @@ DASHSTART
             if [[ -d "/${themedir}" ]]; then
                 mkdir -p "${target}/${themedir}"
                 for _ic in /${themedir}/kldload-*.svg /${themedir}/bob-*.svg \
-                    /${themedir}/kst*.svg /${themedir}/ksnap.svg /${themedir}/kexport.svg; do
+                    /${themedir}/kst*.svg /${themedir}/ksnap.svg /${themedir}/kexport.svg \
+                    /${themedir}/zxplore.svg; do
                     [[ -f "$_ic" ]] && install -m 0644 "$_ic" \
                         "${target}/${themedir}/$(basename "$_ic")"
                 done

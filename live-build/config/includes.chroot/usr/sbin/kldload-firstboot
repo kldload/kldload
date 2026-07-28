@@ -2517,16 +2517,25 @@ GREPO
                 fi
 
                 # ── Prometheus (binary — not in CentOS/EPEL repos) ──
+                # FAIL-SOFT: this is a runtime download from GitHub. A transient
+                # 500 / rate-limit / offline boot must NOT abort firstboot — that
+                # aborts EVERYTHING after this line (node_exporter, prometheus.yml,
+                # and the rest of firstboot), leaving a half-configured install
+                # (observed .139 2026-07-28: node_exporter got HTTP 500 → firstboot
+                # died → prometheus.yml never written → prometheus.service failed).
+                # The metrics plane is not boot-critical: warn + skip, and only
+                # create the unit if the binary actually landed. TODO(#10): darksite
+                # these binaries so no network is needed at all.
                 if ! command -v prometheus >/dev/null 2>&1; then
                     log "  Installing Prometheus from binary..."
-                    curl -fsSL https://github.com/prometheus/prometheus/releases/download/v2.54.1/prometheus-2.54.1.linux-amd64.tar.gz |
-                        tar -xz -C /tmp 2>/dev/null
-                    install -m 755 /tmp/prometheus-*/prometheus /usr/local/bin/
-                    install -m 755 /tmp/prometheus-*/promtool /usr/local/bin/
-                    mkdir -p /etc/prometheus /var/lib/prometheus
-                    rm -rf /tmp/prometheus-*
+                    if curl -fsSL https://github.com/prometheus/prometheus/releases/download/v2.54.1/prometheus-2.54.1.linux-amd64.tar.gz |
+                        tar -xz -C /tmp 2>/dev/null && compgen -G "/tmp/prometheus-*/prometheus" >/dev/null; then
+                        install -m 755 /tmp/prometheus-*/prometheus /usr/local/bin/
+                        install -m 755 /tmp/prometheus-*/promtool /usr/local/bin/
+                        mkdir -p /etc/prometheus /var/lib/prometheus
+                        rm -rf /tmp/prometheus-*
 
-                    cat >/etc/systemd/system/prometheus.service <<'PROMSVC'
+                        cat >/etc/systemd/system/prometheus.service <<'PROMSVC'
 [Unit]
 Description=Prometheus
 After=network-online.target
@@ -2537,16 +2546,20 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 PROMSVC
+                    else
+                        log "  WARNING: Prometheus binary download failed (transient/offline) — skipping; metrics plane degraded. Re-run kldload-firstboot later."
+                        rm -rf /tmp/prometheus-* 2>/dev/null || true
+                    fi
                 fi
 
-                # ── node_exporter (binary) ──
+                # ── node_exporter (binary) ── FAIL-SOFT (see Prometheus note) ──
                 if ! command -v node_exporter >/dev/null 2>&1; then
-                    curl -fsSL https://github.com/prometheus/node_exporter/releases/download/v1.8.2/node_exporter-1.8.2.linux-amd64.tar.gz |
-                        tar -xz -C /tmp 2>/dev/null
-                    install -m 755 /tmp/node_exporter-*/node_exporter /usr/local/bin/
-                    rm -rf /tmp/node_exporter-*
+                    if curl -fsSL https://github.com/prometheus/node_exporter/releases/download/v1.8.2/node_exporter-1.8.2.linux-amd64.tar.gz |
+                        tar -xz -C /tmp 2>/dev/null && compgen -G "/tmp/node_exporter-*/node_exporter" >/dev/null; then
+                        install -m 755 /tmp/node_exporter-*/node_exporter /usr/local/bin/
+                        rm -rf /tmp/node_exporter-*
 
-                    cat >/etc/systemd/system/node_exporter.service <<'NESVC'
+                        cat >/etc/systemd/system/node_exporter.service <<'NESVC'
 [Unit]
 Description=Node Exporter
 After=network-online.target
@@ -2557,6 +2570,10 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 NESVC
+                    else
+                        log "  WARNING: node_exporter download failed (transient/offline) — skipping; per-node metrics degraded. Re-run kldload-firstboot later."
+                        rm -rf /tmp/node_exporter-* 2>/dev/null || true
+                    fi
                 fi
 
                 # ── Prometheus config ──

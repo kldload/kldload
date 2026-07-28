@@ -530,8 +530,14 @@ if [[ "$EDITION" != "core" ]]; then
                 die "FATAL: zxplore icon absent ($_zx_icon) — upstream repo moved it; desktop ISO needs an app icon."
             [[ -r "$_zx_desktop" ]] ||
                 die "FATAL: zxplore launcher absent ($_zx_desktop) — upstream repo moved it; desktop ISO needs a .desktop."
+            # Install into /usr/share/icons/hicolor (NOT /usr/local/share/icons):
+            # this is where every other kldload app icon lives, so the installer's
+            # icon-copy glob in profiles.sh picks it up for the installed target.
+            # HISTORY: 2026-07-28 the icon was in /usr/local/share/icons and the
+            # installer never copied it → installed .139 had the binary but no
+            # icon/launcher.
             install -Dm0644 "$_zx_icon" \
-                "${ROOTFS}/usr/local/share/icons/hicolor/scalable/apps/zxplore.svg" ||
+                "${ROOTFS}/usr/share/icons/hicolor/scalable/apps/zxplore.svg" ||
                 die "FATAL: zxplore icon install failed."
             install -Dm0644 "$_zx_desktop" \
                 "${ROOTFS}/usr/share/applications/zxplore.desktop" ||
