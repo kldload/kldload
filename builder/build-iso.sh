@@ -490,11 +490,28 @@ if [[ "$EDITION" != "core" ]]; then
         rm -rf /tmp/zxplore-src /tmp/go-cache /tmp/go
         git clone --depth 1 https://github.com/zxplore/zxplore.git /tmp/zxplore-src >>"$LOG_FILE" 2>&1 ||
             die "FATAL: zxplore clone failed — refusing to ship a desktop ISO without it."
+        # `-tags gui` is MANDATORY: zxplore gates its Fyne GUI behind the `gui`
+        # build tag (every gui*.go is `//go:build gui`; nogui.go is
+        # `//go:build !gui`). Without the tag, `go build .` compiles the
+        # terminal-only variant — a pure-Go binary with NO Fyne/GL/X11 — which
+        # is exactly the CLI-only `zxplore-tui` target, not the desktop GUI.
+        # HISTORY: 2026-07-27 the tagless build shipped a 6.8M non-GUI binary
+        # (34.9M GUI expected); the desktop's headline ZFS console was broken.
+        # This matches the upstream Makefile `gui:` target.
         # NB: redirect (not | tee) so the `if` sees go build's REAL exit — a
         # piped `... | tee` returns tee's 0 and silently ships a broken build.
         if (cd /tmp/zxplore-src &&
             HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
-                CGO_ENABLED=1 go build -trimpath -o zxplore .) >>"$LOG_FILE" 2>&1; then
+                CGO_ENABLED=1 go build -trimpath -tags gui -o zxplore .) >>"$LOG_FILE" 2>&1; then
+            # Assert we actually built the GUI, not the tagless CLI fallback. A
+            # Fyne cgo build dynamically links the GL/X11/wayland stack; the CLI
+            # variant links only libc. If the GUI libs are absent the build tag
+            # silently didn't take (renamed tag, toolchain change) — fail LOUD
+            # rather than ship a launcher that opens a console-less binary.
+            if ! readelf -d /tmp/zxplore-src/zxplore 2>/dev/null |
+                grep -qiE 'NEEDED.*(libGL|libX11|libwayland|libxkbcommon)'; then
+                die "FATAL: zxplore built WITHOUT the GUI (no GL/X11/wayland libs) — the '-tags gui' build produced the CLI variant. Refusing to ship a desktop ISO with a headless zxplore."
+            fi
             install -Dm0755 /tmp/zxplore-src/zxplore "${ROOTFS}/usr/local/bin/zxplore" ||
                 die "FATAL: zxplore binary install failed."
             # Launcher + icon are NOT optional on the desktop profile: a ZFS
