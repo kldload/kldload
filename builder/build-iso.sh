@@ -492,9 +492,9 @@ if [[ "$EDITION" != "core" ]]; then
             die "FATAL: zxplore clone failed — refusing to ship a desktop ISO without it."
         # NB: redirect (not | tee) so the `if` sees go build's REAL exit — a
         # piped `... | tee` returns tee's 0 and silently ships a broken build.
-        if ( cd /tmp/zxplore-src &&
+        if (cd /tmp/zxplore-src &&
             HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
-                CGO_ENABLED=1 go build -trimpath -o zxplore . ) >>"$LOG_FILE" 2>&1; then
+                CGO_ENABLED=1 go build -trimpath -o zxplore .) >>"$LOG_FILE" 2>&1; then
             install -Dm0755 /tmp/zxplore-src/zxplore "${ROOTFS}/usr/local/bin/zxplore"
             install -Dm0644 /tmp/zxplore-src/assets/zxplore.svg \
                 "${ROOTFS}/usr/local/share/icons/hicolor/scalable/apps/zxplore.svg"
