@@ -1281,6 +1281,9 @@ RUNNING_PROCS = {}
 # 2026-05-21 comment above promised; mTLS via the operator CA can layer on later.
 WEBUI_TOKEN_FILE = "/etc/kldload/webui-token"
 WEBUI_TOKEN = ""
+# True on the live ISO → the console auth gate is exempted (see ws_handler).
+# KLDLOAD_WEBUI_FORCE_LIVE=1 forces it on for local testing.
+WEBUI_LIVE_MODE = False
 
 
 def _load_webui_token():
@@ -1338,7 +1341,19 @@ async def _run_text(cmd, timeout=15, merge_stderr=True):
 
 async def ws_handler(websocket):
     LOG.info("WebSocket client connected: %s", websocket.remote_address)
-    _authed = False
+    # Live-ISO exemption: the live installer console has no installed system to
+    # protect and is driven by the operator physically at the machine, so it
+    # must NOT demand a token — that's pure friction on the primary install
+    # flow (operator report .134 2026-07-28). Detected via the dracut live
+    # marker; installed systems keep the gate. This does leave the live
+    # installer's socket unauthenticated on the network for the install's
+    # duration — accepted for a transient, operator-driven session, and no
+    # worse than the pre-gate baseline. The gate's real job is protecting
+    # INSTALLED systems, where data + persistent exposure live.
+    _authed = WEBUI_LIVE_MODE
+    if _authed:
+        # Announce it up-front so the SPA never paints a token prompt.
+        await websocket.send(json.dumps({"type": "auth_ok"}))
     try:
         async for raw in websocket:
             try:
@@ -1352,12 +1367,18 @@ async def ws_handler(websocket):
             # ── AUTH GATE — every privileged action requires the bearer token.
             # Until this connection sends a valid {action:"auth", token:...}, only
             # "auth" and "ping" are honoured; everything else is refused. This is
-            # the sole thing standing between an unauthenticated socket and root.
+            # the sole thing standing between an unauthenticated socket and root
+            # on an INSTALLED system (the live ISO is exempted above).
             if not _authed:
                 if action == "auth":
-                    if WEBUI_TOKEN and secrets.compare_digest(
-                        str(msg.get("token", "")), WEBUI_TOKEN
-                    ):
+                    _tok = str(msg.get("token", ""))
+                    if not _tok:
+                        # Empty probe: the SPA connected with no stored token and
+                        # is asking whether one is needed. Say so WITHOUT closing
+                        # — the operator gets prompted and re-sends a real token.
+                        await websocket.send(json.dumps({"type": "auth_required"}))
+                        continue
+                    if WEBUI_TOKEN and secrets.compare_digest(_tok, WEBUI_TOKEN):
                         _authed = True
                         LOG.info("WS authenticated: %s", websocket.remote_address)
                         await websocket.send(json.dumps({"type": "auth_ok"}))
@@ -1370,6 +1391,12 @@ async def ws_handler(websocket):
                     await websocket.send(json.dumps({"type": "pong"}))
                     continue
                 await websocket.send(json.dumps({"type": "auth_required"}))
+                continue
+
+            # Already authenticated. A stray "auth" frame here (live-mode probe,
+            # or a reconnect re-sending its token) is a harmless no-op → ack it.
+            if action == "auth":
+                await websocket.send(json.dumps({"type": "auth_ok"}))
                 continue
 
             LOG.info("WS action: %s", action)
@@ -11322,10 +11349,17 @@ def main():
 
     # Load (mint if absent) the bearer token that gates every WS action. Done
     # here — after the root check — because minting writes a 0600 root-only file.
-    global WEBUI_TOKEN
+    global WEBUI_TOKEN, WEBUI_LIVE_MODE
     WEBUI_TOKEN = _load_webui_token()
-    LOG.info("WS auth token loaded from %s (operator: `sudo cat %s`)",
-             WEBUI_TOKEN_FILE, WEBUI_TOKEN_FILE)
+    WEBUI_LIVE_MODE = (
+        os.path.exists("/run/initramfs/live")
+        or os.environ.get("KLDLOAD_WEBUI_FORCE_LIVE") == "1"
+    )
+    if WEBUI_LIVE_MODE:
+        LOG.warning("LIVE ISO detected — console auth gate EXEMPT (installer flow)")
+    else:
+        LOG.info("WS auth token loaded from %s (operator: `sudo cat %s`)",
+                 WEBUI_TOKEN_FILE, WEBUI_TOKEN_FILE)
 
     try:
         asyncio.run(main_async(args))

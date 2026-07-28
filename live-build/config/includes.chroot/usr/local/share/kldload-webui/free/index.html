@@ -3757,32 +3757,36 @@ function _startHeartbeat() {
 // reconnects, and because auth_error clears the cached token, it re-prompts.
 // The 0600 root token file remains the source of truth; this is only a cache.
 const _WEBUI_TOKEN_KEY = 'kld_webui_token';
+let _wsAuthed = false;       // server confirmed auth_ok for this connection
+let _tokenPrompted = false;  // we already showed the token prompt this connection
 
-function _webuiToken() {
-  let t = localStorage.getItem(_WEBUI_TOKEN_KEY);
-  if (!t) {
-    t = window.prompt(
-      'kldload console is protected.\n\n' +
-      'On the machine, run:\n    sudo cat /etc/kldload/webui-token\n\n' +
-      'Paste the token:');
-    if (t === null) return null;            // operator cancelled
-    t = t.trim();
-    if (t) localStorage.setItem(_WEBUI_TOKEN_KEY, t);
-  }
-  return t;
+// Send whatever token we have, WITHOUT prompting. Three outcomes:
+//   • Live installer  → server auto-authes (auth_ok on connect); empty token is fine.
+//   • Installed, token cached → server authes silently, no prompt.
+//   • Installed, no token → server replies auth_required → THEN we prompt.
+// This is why the operator never sees a prompt on the live installer and is
+// asked at most once per installed machine.
+function _sendStoredAuth() {
+  const t = localStorage.getItem(_WEBUI_TOKEN_KEY) || '';
+  try { ws.send(JSON.stringify({ action: 'auth', token: t })); } catch (e) {}
 }
 
-// Send the first (auth) frame. Sent directly on the raw socket rather than via
-// send(): send() is fine here (wsReady is already true in onopen), but keeping
-// auth explicit documents that it must precede any privileged action.
-function _sendAuth() {
-  const t = _webuiToken();
-  if (t === null || t === '') {
+// Prompt for the token, cache it, send it. Only called after the server has
+// said auth is required (installed system, no valid stored token).
+function _promptAndAuth() {
+  _tokenPrompted = true;
+  const t = window.prompt(
+    'kldload console is protected.\n\n' +
+    'On the machine, run:\n    sudo cat /etc/kldload/webui-token\n\n' +
+    'Paste the token:');
+  if (t === null) {                        // operator cancelled
     document.getElementById('status-dot').style.background = 'var(--danger)';
     document.getElementById('status-text').textContent = 'auth needed — reload to enter token';
     return;
   }
-  try { ws.send(JSON.stringify({ action: 'auth', token: t })); } catch (e) {}
+  const tok = t.trim();
+  if (tok) localStorage.setItem(_WEBUI_TOKEN_KEY, tok);
+  try { ws.send(JSON.stringify({ action: 'auth', token: tok })); } catch (e) {}
 }
 
 // Runs once the server confirms {type:'auth_ok'} — this is the data burst that
@@ -3810,17 +3814,17 @@ function connect() {
   ws.onopen = () => {
     wsReady = true;
     _lastPongAt = Date.now();
-    // The socket is open but NOT yet trusted. The server refuses every
-    // privileged action until this connection presents the bearer token
-    // (minted 0600 at /etc/kldload/webui-token). So the first frame we send
-    // is {action:'auth'}; the data burst that used to live here now runs in
-    // _onAuthed(), gated on the server's {type:'auth_ok'} reply. Heartbeat
-    // ping/pong IS allowed pre-auth, so start it now to keep the link alive
-    // while the operator is pasting the token.
+    // The socket is open but NOT yet trusted. Send our stored token (or an
+    // empty probe) WITHOUT prompting — the server replies auth_ok (live ISO or
+    // valid cached token) or auth_required (installed, need a token), and only
+    // then do we prompt. The data burst runs in _onAuthed() on auth_ok.
+    // Heartbeat ping/pong IS allowed pre-auth, so start it now.
+    _wsAuthed = false;
+    _tokenPrompted = false;
     document.getElementById('status-dot').style.background = 'var(--warn)';
     document.getElementById('status-text').textContent = 'authenticating…';
     _startHeartbeat();
-    _sendAuth();
+    _sendStoredAuth();
   };
   ws.onclose = () => {
     wsReady = false;
@@ -3912,20 +3916,30 @@ function handle(msg) {
   _lastPongAt = Date.now();
   if (msg.type === 'pong') return;
   // ── Auth replies (see the handshake block above connect()) ──────────────
-  // auth_ok    → token accepted; run the deferred data burst.
-  // auth_error → token rejected; the server has already closed the socket, so
-  //              onclose will reconnect. Drop the bad token first so the
-  //              reconnect re-prompts instead of retrying the same wrong one.
-  // auth_required → we sent a non-auth frame before authenticating (shouldn't
-  //              happen given onopen sends auth first) — just (re)send auth.
-  if (msg.type === 'auth_ok') { _onAuthed(); return; }
-  if (msg.type === 'auth_error') {
-    localStorage.removeItem(_WEBUI_TOKEN_KEY);
-    document.getElementById('status-dot').style.background = 'var(--danger)';
-    document.getElementById('status-text').textContent = 'auth failed — reconnecting…';
+  // auth_ok       → accepted (live ISO, or a valid token). Run the data burst
+  //                 ONCE — live-mode sends auth_ok twice (on connect + as the
+  //                 empty-probe ack), and reconnects re-fire it.
+  // auth_required → the server needs a token we haven't supplied. Prompt once
+  //                 per connection (guarded so stray pre-auth actions can't
+  //                 stack prompts). On the live ISO this never arrives.
+  // auth_error    → token rejected + socket closed. Drop the bad token and
+  //                 re-prompt so the reconnect doesn't retry the same wrong one.
+  if (msg.type === 'auth_ok') {
+    if (!_wsAuthed) { _wsAuthed = true; _onAuthed(); }
     return;
   }
-  if (msg.type === 'auth_required') { _sendAuth(); return; }
+  if (msg.type === 'auth_required') {
+    if (!_wsAuthed && !_tokenPrompted) _promptAndAuth();
+    return;
+  }
+  if (msg.type === 'auth_error') {
+    localStorage.removeItem(_WEBUI_TOKEN_KEY);
+    _tokenPrompted = false;
+    document.getElementById('status-dot').style.background = 'var(--danger)';
+    document.getElementById('status-text').textContent = 'auth failed — re-enter token';
+    _promptAndAuth();
+    return;
+  }
   // Pre-switch hook: if confirmInstall() is awaiting a wifi_connect_result,
   // route it there instead of falling through to the default noop.
   if (msg.type === 'wifi_connect_result' && typeof _wifiResultHandler === 'function') {
