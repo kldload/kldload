@@ -3747,14 +3747,19 @@ function _startHeartbeat() {
 // /etc/kldload/webui-token) is the one gate between an unauthenticated socket
 // and root. The operator reads it once on the box:
 //     sudo cat /etc/kldload/webui-token
-// We keep it in sessionStorage (per-tab, never written to disk by the browser)
-// so a reload inside the session doesn't re-prompt, but closing the tab forgets
-// it. On a bad token the server closes the socket; onclose reconnects, and
-// because auth_error cleared the cached token, the reconnect re-prompts.
+// Stored in localStorage (NOT sessionStorage): every kldload console tool
+// (VMs, k8s, Grafana…) opens as its own Chrome --app window, but they all share
+// one origin + one Chrome profile dir, so localStorage is shared across all of
+// them AND survives reboots. Net effect: the operator is asked at most ONCE per
+// machine — the first window to open prompts, every other tool + every future
+// boot reuses it. (sessionStorage was per-window + wiped on close → it asked on
+// every tool, every time.) On a bad token the server closes the socket; onclose
+// reconnects, and because auth_error clears the cached token, it re-prompts.
+// The 0600 root token file remains the source of truth; this is only a cache.
 const _WEBUI_TOKEN_KEY = 'kld_webui_token';
 
 function _webuiToken() {
-  let t = sessionStorage.getItem(_WEBUI_TOKEN_KEY);
+  let t = localStorage.getItem(_WEBUI_TOKEN_KEY);
   if (!t) {
     t = window.prompt(
       'kldload console is protected.\n\n' +
@@ -3762,7 +3767,7 @@ function _webuiToken() {
       'Paste the token:');
     if (t === null) return null;            // operator cancelled
     t = t.trim();
-    if (t) sessionStorage.setItem(_WEBUI_TOKEN_KEY, t);
+    if (t) localStorage.setItem(_WEBUI_TOKEN_KEY, t);
   }
   return t;
 }
@@ -3915,7 +3920,7 @@ function handle(msg) {
   //              happen given onopen sends auth first) — just (re)send auth.
   if (msg.type === 'auth_ok') { _onAuthed(); return; }
   if (msg.type === 'auth_error') {
-    sessionStorage.removeItem(_WEBUI_TOKEN_KEY);
+    localStorage.removeItem(_WEBUI_TOKEN_KEY);
     document.getElementById('status-dot').style.background = 'var(--danger)';
     document.getElementById('status-text').textContent = 'auth failed — reconnecting…';
     return;
