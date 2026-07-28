@@ -26,16 +26,20 @@ Type=simple
 # the cluster is fine.
 Environment=HOME=/root
 Environment=KUBECONFIG=/root/.kube/config
-# TLS is terminated by nginx on :8443 — the webui runs as plain HTTP
-# on loopback :8444 and nginx forwards to it. This is what lets ONE
-# cert prompt (nginx's) cover the webui + every iframed service
-# (Grafana, ttyd-k9s, Bob) as a single origin. If nginx is down, :8443
-# is unreachable — no half-working state. The hand-rolled kldload-proxy
-# was the predecessor of nginx and is now disabled at build time.
-ExecStart=/usr/local/bin/kldload-webui --port 8444 --bind 127.0.0.1 --no-tls --no-browser
-# Post-condition: backend port actually answering. Keeps systemd from
-# marking the unit "started" before the HTTP server is accept()-ing.
-ExecStartPost=/bin/bash -c 'for i in $(seq 1 60); do ss -ltn 2>/dev/null | grep -q "127.0.0.1:8444 " && exit 0; sleep 1; done; exit 1'
+# TLS is terminated by nginx on :8443. The webui runs plain HTTP on a
+# PROXY-ONLY unix socket (/run/kldload/webui.sock, 0660 root:nginx) rather
+# than a TCP port. WHY a socket, not 127.0.0.1:8444: the webui trusts nginx's
+# X-Real-IP to auto-authenticate LOCAL (loopback) console connections, so the
+# backend must be reachable by nginx ALONE — a unix socket no local process
+# can open makes that header unforgeable (a loopback TCP port could be hit
+# directly by any local process forging X-Real-IP=127.0.0.1 → root).
+# RuntimeDirectory=kldload creates /run/kldload (0755) each start; nginx
+# traverses it to reach the 0660 socket.
+ExecStart=/usr/local/bin/kldload-webui --unix-socket /run/kldload/webui.sock --no-tls --no-browser
+RuntimeDirectory=kldload
+# Post-condition: the socket exists before dependents proceed. Keeps systemd
+# from marking the unit "started" before the server is accept()-ing.
+ExecStartPost=/bin/bash -c 'for i in $(seq 1 60); do [ -S /run/kldload/webui.sock ] && exit 0; sleep 1; done; exit 1'
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

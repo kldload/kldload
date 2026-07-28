@@ -1339,20 +1339,69 @@ async def _run_text(cmd, timeout=15, merge_stderr=True):
     except Exception as e:
         return -1, f"[exec error] {e}"
 
+def _ws_client_ip(websocket):
+    """True client IP from nginx's X-Real-IP header. nginx OVERWRITES this with
+    $remote_addr, so a remote client cannot forge it — and because we listen on
+    a proxy-only unix socket, nothing but nginx can reach us to set it. Empty if
+    unavailable (which we treat as NOT local — fail closed)."""
+    try:
+        return (websocket.request.headers.get("X-Real-IP", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _ws_is_local(websocket):
+    return _ws_client_ip(websocket) in ("127.0.0.1", "::1")
+
+
+def _user_is_console_admin(user):
+    """Only wheel/sudo members may drive the root console via password."""
+    import grp
+    import pwd
+    try:
+        u = pwd.getpwnam(user)
+    except KeyError:
+        return False
+    groups = {g.gr_name for g in grp.getgrall() if user in g.gr_mem}
+    try:
+        groups.add(grp.getgrgid(u.pw_gid).gr_name)
+    except KeyError:
+        pass
+    return bool(groups & {"wheel", "sudo"})
+
+
+def _pam_authenticate(user, password):
+    """True iff (user, password) is a valid login AND user is a console admin.
+    Used for REMOTE console access — local connections auto-auth (loopback)."""
+    if not user or not password or not _user_is_console_admin(user):
+        LOG.warning("console password auth refused for user %r (unknown or not wheel/sudo)", user)
+        return False
+    try:
+        import pam as _pam
+        ok = bool(_pam.pam().authenticate(user, password, service="login"))
+        if not ok:
+            LOG.warning("console password auth FAILED for %r", user)
+        return ok
+    except Exception as _e:
+        LOG.error("PAM auth error: %s", _e)
+        return False
+
+
 async def ws_handler(websocket):
-    LOG.info("WebSocket client connected: %s", websocket.remote_address)
-    # Live-ISO exemption: the live installer console has no installed system to
-    # protect and is driven by the operator physically at the machine, so it
-    # must NOT demand a token — that's pure friction on the primary install
-    # flow (operator report .134 2026-07-28). Detected via the dracut live
-    # marker; installed systems keep the gate. This does leave the live
-    # installer's socket unauthenticated on the network for the install's
-    # duration — accepted for a transient, operator-driven session, and no
-    # worse than the pre-gate baseline. The gate's real job is protecting
-    # INSTALLED systems, where data + persistent exposure live.
-    _authed = WEBUI_LIVE_MODE
+    _ip = _ws_client_ip(websocket)
+    LOG.info("WebSocket client connected: %s (X-Real-IP=%s)", websocket.remote_address, _ip or "?")
+    # AUTH MODEL:
+    #   • Live ISO           → auto-auth (installer flow, nothing to protect).
+    #   • Local (loopback)   → auto-auth. The operator is physically at the box;
+    #     requiring a credential to use your own on-box console is pointless.
+    #     Trustworthy because we listen on a proxy-ONLY unix socket, so the only
+    #     source of an X-Real-IP=127.0.0.1 is nginx forwarding a genuine local
+    #     client — a remote or a local non-proxy process cannot forge it.
+    #   • Remote             → require the operator's system PASSWORD (PAM,
+    #     wheel/sudo only); a bearer token is also accepted for scripting.
+    _authed = WEBUI_LIVE_MODE or _ws_is_local(websocket)
     if _authed:
-        # Announce it up-front so the SPA never paints a token prompt.
+        # Announce it up-front so the SPA never paints a prompt.
         await websocket.send(json.dumps({"type": "auth_ok"}))
     try:
         async for raw in websocket:
@@ -1372,19 +1421,26 @@ async def ws_handler(websocket):
             if not _authed:
                 if action == "auth":
                     _tok = str(msg.get("token", ""))
-                    if not _tok:
-                        # Empty probe: the SPA connected with no stored token and
-                        # is asking whether one is needed. Say so WITHOUT closing
-                        # — the operator gets prompted and re-sends a real token.
+                    _pw = str(msg.get("password", ""))
+                    _user = str(msg.get("user", "")).strip() or "admin"
+                    if not _tok and not _pw:
+                        # Empty probe: the SPA is asking whether a credential is
+                        # needed. Say so WITHOUT closing — the operator gets
+                        # prompted (for their password) and re-sends.
                         await websocket.send(json.dumps({"type": "auth_required"}))
                         continue
-                    if WEBUI_TOKEN and secrets.compare_digest(_tok, WEBUI_TOKEN):
+                    _ok = False
+                    if _tok:  # scripting fallback — bearer token
+                        _ok = bool(WEBUI_TOKEN) and secrets.compare_digest(_tok, WEBUI_TOKEN)
+                    elif _pw:  # remote operator — system password via PAM
+                        _ok = _pam_authenticate(_user, _pw)
+                    if _ok:
                         _authed = True
-                        LOG.info("WS authenticated: %s", websocket.remote_address)
+                        LOG.info("WS authenticated (remote): %s user=%s", websocket.remote_address, _user)
                         await websocket.send(json.dumps({"type": "auth_ok"}))
                     else:
                         LOG.warning("WS auth FAILED: %s", websocket.remote_address)
-                        await websocket.send(json.dumps({"type": "auth_error", "msg": "invalid token"}))
+                        await websocket.send(json.dumps({"type": "auth_error", "msg": "invalid credentials"}))
                         await websocket.close()
                     continue
                 if action == "ping":
@@ -11196,8 +11252,8 @@ async def main_async(args):
     except Exception as e:
         LOG.warning("Secrets backend init failed: %s", e)
     db_init()
-    # --no-tls is set by kldload-webui.service when kldload-proxy is fronting
-    # us on :8443; we bind 127.0.0.1:8444 plain HTTP so one cert prompt on
+    # --no-tls is set by kldload-webui.service: nginx terminates TLS on :8443
+    # and we serve plain HTTP on a proxy-only unix socket, so one cert prompt on
     # the proxy covers the entire origin (webui + grafana + k9s iframes).
     ssl_ctx = None if args.no_tls else _get_ssl_context()
     scheme    = "https" if ssl_ctx else "http"
@@ -11303,26 +11359,51 @@ async def main_async(args):
     _origins = sorted(set(_origins))
     LOG.info("WS origin allow-list (%d entries): %s", len(_origins), _origins)
 
-    ws_server = await websockets.serve(
-        ws_handler, args.bind, args.port,
-        ping_interval=20, ping_timeout=10,
-        ssl=ssl_ctx,
-        process_request=process_request,
-        origins=_origins,
-    )
-    LOG.info("kldload Web UI on %s://%s:%d (HTTP + WebSocket)", scheme, args.bind, args.port)
-
-    url = f"{scheme}://localhost:{args.port}"
-    LOG.info("kldload Web UI ready: %s", url)
-
-    if not args.no_browser:
-        for cmd in ["xdg-open", "firefox-esr", "chromium"]:
-            try:
-                subprocess.Popen([cmd, url],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                break
-            except FileNotFoundError:
-                continue
+    if args.unix_socket:
+        # Proxy-ONLY backend. nginx is the sole thing that can open this socket
+        # (mode 0660 root:nginx), so the X-Real-IP it stamps is unforgeable —
+        # which is what makes ws_handler's loopback auto-auth genuinely secure
+        # rather than merely convenient. No TCP port = no local process can hit
+        # the backend directly to fake being local.
+        import grp as _grp
+        _sp = args.unix_socket
+        try:
+            if os.path.exists(_sp):
+                os.unlink(_sp)  # clear a stale socket from a prior run
+        except OSError:
+            pass
+        os.makedirs(os.path.dirname(_sp), exist_ok=True)
+        ws_server = await websockets.unix_serve(
+            ws_handler, _sp,
+            ping_interval=20, ping_timeout=10,
+            process_request=process_request,
+            origins=_origins,
+        )
+        try:
+            _gid = _grp.getgrnam("nginx").gr_gid
+            os.chown(_sp, 0, _gid)
+            os.chmod(_sp, 0o660)
+        except (KeyError, OSError) as _e:
+            LOG.error("socket perms on %s failed (%s) — proxy may not connect", _sp, _e)
+        LOG.info("kldload Web UI on unix:%s (HTTP + WebSocket, proxy-only)", _sp)
+    else:
+        ws_server = await websockets.serve(
+            ws_handler, args.bind, args.port,
+            ping_interval=20, ping_timeout=10,
+            ssl=ssl_ctx,
+            process_request=process_request,
+            origins=_origins,
+        )
+        LOG.info("kldload Web UI on %s://%s:%d (HTTP + WebSocket)", scheme, args.bind, args.port)
+        if not args.no_browser:
+            url = f"{scheme}://localhost:{args.port}"
+            for cmd in ["xdg-open", "firefox-esr", "chromium"]:
+                try:
+                    subprocess.Popen([cmd, url],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    break
+                except FileNotFoundError:
+                    continue
 
     await ws_server.wait_closed()
 
@@ -11332,6 +11413,7 @@ def main():
     parser.add_argument("--bind",       default="0.0.0.0",       help="Bind address (default 0.0.0.0)")
     parser.add_argument("--no-browser", action="store_true",     help="Don't open browser")
     parser.add_argument("--no-tls",     action="store_true",     help="Serve plain HTTP — used when fronted by kldload-proxy")
+    parser.add_argument("--unix-socket", default="",             help="Serve on this unix socket (proxy-only backend; enables loopback auto-auth)")
     args = parser.parse_args()
 
     # webui needs root: it chmod()s /var/lib/kldload/secrets to 0700, creates

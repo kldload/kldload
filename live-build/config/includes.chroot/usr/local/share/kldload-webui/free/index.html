@@ -3756,37 +3756,39 @@ function _startHeartbeat() {
 // every tool, every time.) On a bad token the server closes the socket; onclose
 // reconnects, and because auth_error clears the cached token, it re-prompts.
 // The 0600 root token file remains the source of truth; this is only a cache.
-const _WEBUI_TOKEN_KEY = 'kld_webui_token';
+const _WEBUI_CRED_KEY = 'kld_webui_cred'; // remote {user,password} — SESSION only, never localStorage/disk
 let _wsAuthed = false;       // server confirmed auth_ok for this connection
-let _tokenPrompted = false;  // we already showed the token prompt this connection
+let _tokenPrompted = false;  // we already showed the login prompt this connection
 
-// Send whatever token we have, WITHOUT prompting. Three outcomes:
-//   • Live installer  → server auto-authes (auth_ok on connect); empty token is fine.
-//   • Installed, token cached → server authes silently, no prompt.
-//   • Installed, no token → server replies auth_required → THEN we prompt.
-// This is why the operator never sees a prompt on the live installer and is
-// asked at most once per installed machine.
+// Send whatever credential we have, WITHOUT prompting. Outcomes:
+//   • Live installer / local (loopback) → server auto-authes (auth_ok on
+//     connect); no credential needed, no prompt EVER.
+//   • Remote, password cached this session → authes silently.
+//   • Remote, nothing cached → server replies auth_required → THEN we prompt.
+// So on-box use is zero-prompt; only remote access asks, and only per session.
 function _sendStoredAuth() {
-  const t = localStorage.getItem(_WEBUI_TOKEN_KEY) || '';
-  try { ws.send(JSON.stringify({ action: 'auth', token: t })); } catch (e) {}
+  const msg = { action: 'auth' };
+  const cred = sessionStorage.getItem(_WEBUI_CRED_KEY);
+  if (cred) { try { const c = JSON.parse(cred); msg.user = c.user; msg.password = c.password; } catch (e) {} }
+  try { ws.send(JSON.stringify(msg)); } catch (e) {}
 }
 
-// Prompt for the token, cache it, send it. Only called after the server has
-// said auth is required (installed system, no valid stored token).
+// Remote sign-in: prompt for the admin PASSWORD (validated server-side via PAM,
+// wheel/sudo only). Held in sessionStorage so a WS reconnect doesn't re-ask,
+// but it is never written to disk and is gone when the window closes. Only
+// called after the server says auth is required — which local/live never do.
 function _promptAndAuth() {
   _tokenPrompted = true;
-  const t = window.prompt(
-    'kldload console is protected.\n\n' +
-    'On the machine, run:\n    sudo cat /etc/kldload/webui-token\n\n' +
-    'Paste the token:');
-  if (t === null) {                        // operator cancelled
+  const password = window.prompt(
+    'Remote kldload console.\n\nSign in with your admin password:');
+  if (password === null) {                 // operator cancelled
     document.getElementById('status-dot').style.background = 'var(--danger)';
-    document.getElementById('status-text').textContent = 'auth needed — reload to enter token';
+    document.getElementById('status-text').textContent = 'sign-in needed — reload to retry';
     return;
   }
-  const tok = t.trim();
-  if (tok) localStorage.setItem(_WEBUI_TOKEN_KEY, tok);
-  try { ws.send(JSON.stringify({ action: 'auth', token: tok })); } catch (e) {}
+  const cred = { user: 'admin', password: password };
+  sessionStorage.setItem(_WEBUI_CRED_KEY, JSON.stringify(cred));
+  try { ws.send(JSON.stringify({ action: 'auth', user: cred.user, password: password })); } catch (e) {}
 }
 
 // Runs once the server confirms {type:'auth_ok'} — this is the data burst that
@@ -3933,10 +3935,10 @@ function handle(msg) {
     return;
   }
   if (msg.type === 'auth_error') {
-    localStorage.removeItem(_WEBUI_TOKEN_KEY);
+    sessionStorage.removeItem(_WEBUI_CRED_KEY);
     _tokenPrompted = false;
     document.getElementById('status-dot').style.background = 'var(--danger)';
-    document.getElementById('status-text').textContent = 'auth failed — re-enter token';
+    document.getElementById('status-text').textContent = 'sign-in failed — re-enter password';
     _promptAndAuth();
     return;
   }
