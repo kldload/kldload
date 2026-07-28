@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# kldload-trust-cert — import kldload's TLS cert into Chrome NSS DB(s)
+# kldload-trust-cert — import kldload's CA ROOT into Chrome NSS DB(s)
 # so https://localhost:8443 is trusted automatically. No certificate
 # warning, no --ignore-certificate-errors flag needed.
+#
+# Imports the CA ROOT, NOT the webui leaf. kldload-tls-cert REGENERATES the
+# leaf whenever the box gains an IP / the SAN drifts (e.g. the first
+# post-DHCP boot), so a trusted *leaf* goes stale on that regen and Chrome
+# shows the warning again (observed .145 2026-07-28). Trusting the root
+# means every leaf the CA signs — including regenerated ones — validates.
 #
 # Two modes:
 #   kldload-trust-cert            — per-user; imports into $HOME/.pki/nssdb
@@ -19,8 +25,12 @@
 # Idempotent: compares cert fingerprints; only re-imports on rotation.
 set -Eeuo pipefail
 
-CERT=/etc/pki/ca-trust/source/anchors/kldload-webui.crt
-NICKNAME=kldload-webui
+# The CA root: canonical /etc/kldload/ca location, falling back to the
+# ca-trust anchor kldload-ca installs.
+CERT=/etc/kldload/ca/root/ca.crt
+[[ -r "$CERT" ]] || CERT=/etc/pki/ca-trust/source/anchors/kldload-ca.crt
+NICKNAME=kldload-ca
+OLD_NICKNAME=kldload-webui # stale leaf entry seeded by pre-fix installs
 
 # ── per-DB import (used by both modes) ─────────────────────────────
 # Trust flag MUST be "CT,C,T" — this is the only combination that makes
@@ -54,9 +64,14 @@ _import_into() {
     existing_flags="$(certutil -L -d "sql:$db" 2>/dev/null |
         awk -v n="$NICKNAME" '$0 ~ "^"n" "{
                 for (i=NF; i>=1; i--) if ($i ~ /^[CTPpcuw,]+$/) {print $i; exit}}' || true)"
-    if [[ -n "$ins" && "$ins" == "$cur" && "$existing_flags" == "CT,C,c" ]]; then
+    # Accept both "CT,C,c" (what NSS writes for the old self-signed leaf) and
+    # "CT,C," (what it writes for the CA root) — both mean "trusted CA". Only a
+    # genuinely wrong entry (e.g. the "C,," poison) fails this and re-imports.
+    if [[ -n "$ins" && "$ins" == "$cur" && "$existing_flags" == CT,C,* ]]; then
         return 0
     fi
+    # Purge the stale leaf entry pre-fix installs seeded (harmless if absent).
+    certutil -D -d "sql:$db" -n "${OLD_NICKNAME:-kldload-webui}" >/dev/null 2>&1 || true
     certutil -D -d "sql:$db" -n "$NICKNAME" >/dev/null 2>&1 || true
     certutil -A -d "sql:$db" -n "$NICKNAME" -t "$TRUST_FLAGS" -i "$CERT"
     echo "kldload-trust-cert: imported $NICKNAME (${cur:0:16}...) into $db"
