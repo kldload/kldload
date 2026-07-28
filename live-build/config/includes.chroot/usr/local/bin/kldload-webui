@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import signal
 import sqlite3
@@ -1269,6 +1270,39 @@ RUNNING_PROCS = {}
 # edition-gating for authentication, which was the original audit
 # finding (audit 2026-05-21).
 
+# ── WebSocket auth (the real gate) ───────────────────────────────────────────
+# THE finding: ws_handler drives install / wipe_disk / spawn / shell / k8s / VM
+# ops as ROOT, bound to 0.0.0.0:8443. `origins=` is CSWSH-only — forgeable by any
+# non-browser client that reaches the port. Fix: a random bearer token minted at
+# first run (root-only 0600 file), required as the FIRST WS message and compared
+# constant-time; no valid token → no privileged action. The operator reads it
+# from /etc/kldload/webui-token (also surfaced by kldload-help) and enters it in
+# the UI once (stored in the tab's sessionStorage). This is the interim gate the
+# 2026-05-21 comment above promised; mTLS via the operator CA can layer on later.
+WEBUI_TOKEN_FILE = "/etc/kldload/webui-token"
+WEBUI_TOKEN = ""
+
+
+def _load_webui_token():
+    """Return the webui bearer token, minting + persisting one (0600) if absent."""
+    try:
+        with open(WEBUI_TOKEN_FILE) as _f:
+            _t = _f.read().strip()
+        if _t:
+            return _t
+    except OSError:
+        pass
+    _t = secrets.token_urlsafe(32)
+    try:
+        os.makedirs(os.path.dirname(WEBUI_TOKEN_FILE), exist_ok=True)
+        _fd = os.open(WEBUI_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(_fd, (_t + "\n").encode())
+        os.close(_fd)
+        LOG.warning("minted webui auth token -> %s (0600)", WEBUI_TOKEN_FILE)
+    except OSError as _e:
+        LOG.error("could not persist webui token (%s) — using ephemeral", _e)
+    return _t
+
 
 async def _run_text(cmd, timeout=15, merge_stderr=True):
     """Run a command non-blockingly and return (rc, stdout_text).
@@ -1304,6 +1338,7 @@ async def _run_text(cmd, timeout=15, merge_stderr=True):
 
 async def ws_handler(websocket):
     LOG.info("WebSocket client connected: %s", websocket.remote_address)
+    _authed = False
     try:
         async for raw in websocket:
             try:
@@ -1313,6 +1348,30 @@ async def ws_handler(websocket):
                 continue
 
             action = msg.get("action", "")
+
+            # ── AUTH GATE — every privileged action requires the bearer token.
+            # Until this connection sends a valid {action:"auth", token:...}, only
+            # "auth" and "ping" are honoured; everything else is refused. This is
+            # the sole thing standing between an unauthenticated socket and root.
+            if not _authed:
+                if action == "auth":
+                    if WEBUI_TOKEN and secrets.compare_digest(
+                        str(msg.get("token", "")), WEBUI_TOKEN
+                    ):
+                        _authed = True
+                        LOG.info("WS authenticated: %s", websocket.remote_address)
+                        await websocket.send(json.dumps({"type": "auth_ok"}))
+                    else:
+                        LOG.warning("WS auth FAILED: %s", websocket.remote_address)
+                        await websocket.send(json.dumps({"type": "auth_error", "msg": "invalid token"}))
+                        await websocket.close()
+                    continue
+                if action == "ping":
+                    await websocket.send(json.dumps({"type": "pong"}))
+                    continue
+                await websocket.send(json.dumps({"type": "auth_required"}))
+                continue
+
             LOG.info("WS action: %s", action)
             try:
                 if action == "ping":
@@ -11260,6 +11319,13 @@ def main():
             "  Manual:           sudo kldload-webui [args]\n"
         )
         sys.exit(2)
+
+    # Load (mint if absent) the bearer token that gates every WS action. Done
+    # here — after the root check — because minting writes a 0600 root-only file.
+    global WEBUI_TOKEN
+    WEBUI_TOKEN = _load_webui_token()
+    LOG.info("WS auth token loaded from %s (operator: `sudo cat %s`)",
+             WEBUI_TOKEN_FILE, WEBUI_TOKEN_FILE)
 
     try:
         asyncio.run(main_async(args))

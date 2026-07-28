@@ -3741,35 +3741,81 @@ function _startHeartbeat() {
   }, 8000);
 }
 
+// ── Auth handshake ────────────────────────────────────────────────────────
+// The webui backend drives the installer, disk wipes, VM/pod control and a
+// root shell — all as root, on 0.0.0.0:8443. A bearer token (minted 0600 to
+// /etc/kldload/webui-token) is the one gate between an unauthenticated socket
+// and root. The operator reads it once on the box:
+//     sudo cat /etc/kldload/webui-token
+// We keep it in sessionStorage (per-tab, never written to disk by the browser)
+// so a reload inside the session doesn't re-prompt, but closing the tab forgets
+// it. On a bad token the server closes the socket; onclose reconnects, and
+// because auth_error cleared the cached token, the reconnect re-prompts.
+const _WEBUI_TOKEN_KEY = 'kld_webui_token';
+
+function _webuiToken() {
+  let t = sessionStorage.getItem(_WEBUI_TOKEN_KEY);
+  if (!t) {
+    t = window.prompt(
+      'kldload console is protected.\n\n' +
+      'On the machine, run:\n    sudo cat /etc/kldload/webui-token\n\n' +
+      'Paste the token:');
+    if (t === null) return null;            // operator cancelled
+    t = t.trim();
+    if (t) sessionStorage.setItem(_WEBUI_TOKEN_KEY, t);
+  }
+  return t;
+}
+
+// Send the first (auth) frame. Sent directly on the raw socket rather than via
+// send(): send() is fine here (wsReady is already true in onopen), but keeping
+// auth explicit documents that it must precede any privileged action.
+function _sendAuth() {
+  const t = _webuiToken();
+  if (t === null || t === '') {
+    document.getElementById('status-dot').style.background = 'var(--danger)';
+    document.getElementById('status-text').textContent = 'auth needed — reload to enter token';
+    return;
+  }
+  try { ws.send(JSON.stringify({ action: 'auth', token: t })); } catch (e) {}
+}
+
+// Runs once the server confirms {type:'auth_ok'} — this is the data burst that
+// used to live in onopen. Everything here is a privileged action the server
+// would have refused pre-auth.
+function _onAuthed() {
+  // Connected + trusted = healthy. --good (emerald) per the status palette
+  // (green=healthy / red=danger / amber=warn, same in dark+light).
+  document.getElementById('status-dot').style.background = 'var(--good)';
+  document.getElementById('status-text').textContent = 'connected';
+  send({ action: 'system_info' });
+  requestDisks();
+  refreshZFS();
+  refreshSnapshots();
+  send({ action: 'install_state' });
+  // Re-attach to any klab test that's running in the background
+  // (systemd-run keeps it alive across webui restarts / WS drops).
+  send({ action: 'klab_test_tail' });
+  // Reconnect-aware: refetch whatever view the user is on.
+  _refreshActiveView();
+}
+
 function connect() {
   ws = new WebSocket(wsUrl);
   ws.onopen = () => {
     wsReady = true;
     _lastPongAt = Date.now();
-    // Connected = healthy. Use --good (emerald) per the UI's status palette
-    // convention (green=healthy/red=danger/amber=warn, same in dark+light
-    // themes). --accent is royal blue — reserved for primary actions and
-    // active nav, not status. The CSS default for #status-dot is already
-    // green; this JS line was overriding it to blue, which read as "active
-    // action" rather than "connection healthy".
-    document.getElementById('status-dot').style.background = 'var(--good)';
-    document.getElementById('status-text').textContent = 'connected';
-    send({ action: 'system_info' });
-    requestDisks();
-    refreshZFS();
-    refreshSnapshots();
-    send({ action: 'install_state' });
-    // Re-attach to any klab test that's running in the background
-    // (systemd-run keeps it alive across webui restarts / WS drops).
-    // The backend responds with klab_test_noop if nothing is running,
-    // or streams live log lines + exec_done on completion.
-    send({ action: 'klab_test_tail' });
-    // Reconnect-aware: refetch whatever view the user is on. Without this,
-    // a brief WS drop during a busy run leaves k8s/vm tables showing the
-    // pre-drop snapshot until the next 10s auto-poll fires (and even then,
-    // any open drawer or selection blocks the poll).
-    _refreshActiveView();
+    // The socket is open but NOT yet trusted. The server refuses every
+    // privileged action until this connection presents the bearer token
+    // (minted 0600 at /etc/kldload/webui-token). So the first frame we send
+    // is {action:'auth'}; the data burst that used to live here now runs in
+    // _onAuthed(), gated on the server's {type:'auth_ok'} reply. Heartbeat
+    // ping/pong IS allowed pre-auth, so start it now to keep the link alive
+    // while the operator is pasting the token.
+    document.getElementById('status-dot').style.background = 'var(--warn)';
+    document.getElementById('status-text').textContent = 'authenticating…';
     _startHeartbeat();
+    _sendAuth();
   };
   ws.onclose = () => {
     wsReady = false;
@@ -3860,6 +3906,21 @@ function handle(msg) {
   // events also counts as a heartbeat.
   _lastPongAt = Date.now();
   if (msg.type === 'pong') return;
+  // ── Auth replies (see the handshake block above connect()) ──────────────
+  // auth_ok    → token accepted; run the deferred data burst.
+  // auth_error → token rejected; the server has already closed the socket, so
+  //              onclose will reconnect. Drop the bad token first so the
+  //              reconnect re-prompts instead of retrying the same wrong one.
+  // auth_required → we sent a non-auth frame before authenticating (shouldn't
+  //              happen given onopen sends auth first) — just (re)send auth.
+  if (msg.type === 'auth_ok') { _onAuthed(); return; }
+  if (msg.type === 'auth_error') {
+    sessionStorage.removeItem(_WEBUI_TOKEN_KEY);
+    document.getElementById('status-dot').style.background = 'var(--danger)';
+    document.getElementById('status-text').textContent = 'auth failed — reconnecting…';
+    return;
+  }
+  if (msg.type === 'auth_required') { _sendAuth(); return; }
   // Pre-switch hook: if confirmInstall() is awaiting a wifi_connect_result,
   // route it there instead of falling through to the default noop.
   if (msg.type === 'wifi_connect_result' && typeof _wifiResultHandler === 'function') {
