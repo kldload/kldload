@@ -99,6 +99,20 @@ k_poweroff_after_success() {
     # install finished cleanly, the next step is always "boot the
     # installed system." Set KLDLOAD_NO_AUTO_REBOOT=1 in the answers env
     # to opt out (e.g., for chained post-install steps in the live env).
+    # Secure Boot installs POWER OFF instead of rebooting, so the operator
+    # controls the one attention-critical MOK-enrollment boot: pull the USB,
+    # power on watching, and catch the blue MokManager screen. An auto-reboot
+    # races the operator (who may be in the firmware toggling Secure Boot) →
+    # the ~10s MokManager window is missed → enrollment silently dropped, and
+    # the signed ZBM/kernel then won't boot under SB (operator report,
+    # 2026-07-28). Unattended/seed installs still reboot — nobody's there to
+    # press the power button. The kldload-mok-heal service re-offers enrollment
+    # on later boots if it's still missed, so this is belt-and-suspenders.
+    local _sb_shutdown=0
+    if _secure_boot_enabled && [[ ! -f /etc/kldload/autoinstall.env ]]; then
+        _sb_shutdown=1
+    fi
+
     if [[ "${KLDLOAD_NO_AUTO_REBOOT:-0}" == "1" ]]; then
         printf '\e[1;32m║   Remove the USB / ISO and reboot when ready.            ║\e[0m\n'
         printf '\e[1;32m║   To reboot:  systemctl reboot                           ║\e[0m\n'
@@ -106,6 +120,17 @@ k_poweroff_after_success() {
         printf '\e[1;32m║                                                          ║\e[0m\n'
         printf '\e[1;32m╚══════════════════════════════════════════════════════════╝\e[0m\n'
         echo
+    elif [[ "$_sb_shutdown" == "1" ]]; then
+        printf '\e[1;33m║   Secure Boot is on — POWERING OFF (not rebooting).      ║\e[0m\n'
+        printf '\e[1;33m║     1. Remove the USB / installer media.                 ║\e[0m\n'
+        printf '\e[1;33m║     2. Power on and watch for the blue MokManager screen ║\e[0m\n'
+        printf '\e[1;33m║        Enroll MOK → Continue → password: kldload → Yes   ║\e[0m\n'
+        printf '\e[1;33m║     Missed it? Just reboot — enrollment is re-offered.   ║\e[0m\n'
+        printf '\e[1;33m║   Powering off in 10 seconds (Ctrl-C to abort)...        ║\e[0m\n'
+        printf '\e[1;33m╚══════════════════════════════════════════════════════════╝\e[0m\n'
+        echo
+        sleep 10
+        systemctl poweroff || poweroff
     else
         printf '\e[1;32m║   Auto-rebooting in 10 seconds...                        ║\e[0m\n'
         printf '\e[1;32m║   Ctrl-C now to abort; KLDLOAD_NO_AUTO_REBOOT=1 to opt out.║\e[0m\n'
@@ -2248,17 +2273,26 @@ main() {
     if [[ -f "${target}/var/lib/dkms/mok.der" ]]; then
         cat >"${target}/etc/systemd/system/kldload-mok-enroll.service" <<'MOKENROLL'
 [Unit]
-Description=kldload MOK key enrollment for Secure Boot
+Description=kldload MOK enrollment (heals a missed MokManager prompt)
 After=local-fs.target
 ConditionPathExists=/var/lib/dkms/mok.der
-ConditionPathExists=!/var/lib/kldload-mok-enrolled
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'if command -v mokutil >/dev/null 2>&1 && [[ -d /sys/firmware/efi/efivars ]]; then printf "kldload\nkldload\n" | mokutil --ignore-keyring --import /var/lib/dkms/mok.der 2>/dev/null && echo "MOK enrollment queued — reboot to complete" || echo "mokutil import failed"; touch /var/lib/kldload-mok-enrolled; fi'
-ExecStartPost=/bin/bash -c 'systemctl disable kldload-mok-enroll.service'
+# HEALING NET: runs EVERY boot until the key is ACTUALLY enrolled. The old
+# one-shot version touched a "done" marker + disabled itself right after
+# QUEUING — so if the operator missed the ~10s MokManager window the
+# enrollment was silently dropped and NEVER re-offered (operator report
+# 2026-07-28: "never reprompts for MOK"). Now, each boot:
+#   • already enrolled (mokutil --test-key) → mark done + self-disable;
+#   • a matching import already pending           → wait for MokManager;
+#   • otherwise (prompt was missed)               → re-queue so the next
+#     boot re-offers the blue MokManager screen.
+ExecStart=/bin/bash -c 'command -v mokutil >/dev/null 2>&1 || exit 0; [[ -d /sys/firmware/efi/efivars ]] || exit 0; D=/var/lib/dkms/mok.der; [[ -r "$D" ]] || exit 0; if mokutil --test-key "$D" 2>/dev/null | grep -qi "already enrolled"; then touch /var/lib/kldload-mok-enrolled; systemctl disable kldload-mok-enroll.service 2>/dev/null || true; echo "kldload MOK enrolled — Secure Boot ready"; exit 0; fi; H=$(openssl x509 -in "$D" -inform DER -noout -subject_hash 2>/dev/null || true); if [[ -n "$H" ]] && mokutil --list-new 2>/dev/null | grep -q "$H"; then echo "MOK enrollment pending — reboot to complete in MokManager (password: kldload)"; exit 0; fi; printf "kldload\nkldload\n" | mokutil --ignore-keyring --import "$D" 2>/dev/null && echo "MOK (re)queued — reboot and enroll at the blue MokManager screen (password: kldload)" || echo "mokutil import failed — will retry next boot"'
 StandardOutput=journal+console
 StandardError=journal+console
+# Never fail the boot over enrollment.
+SuccessExitStatus=0 1
 
 [Install]
 WantedBy=multi-user.target
