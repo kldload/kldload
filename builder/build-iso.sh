@@ -479,6 +479,34 @@ if [[ "$EDITION" != "core" ]]; then
         log "WARNING: could not resolve k9s version — skipping"
     fi
 
+    # ── zxplore — the ZFS console, built from its OWN repo (github.com/zxplore/
+    # zxplore). Cloned + go-built HERE in the F44 builder (glibc matches the
+    # Fedora rootfs) and installed as a native utility. DESKTOP profile only: it's
+    # the GUI ZFS face (needs the GNOME libGL/X/wayland/fontconfig stack, already
+    # in the desktop rootfs); server/headless keep the web console. Replaces the
+    # old bash zexplore TUI. kldload stays CLEAN — no vendored source, just a pin.
+    if [[ "$PROFILE" == "desktop" ]]; then
+        log "Building zxplore from github.com/zxplore/zxplore ..."
+        rm -rf /tmp/zxplore-src /tmp/go-cache /tmp/go
+        git clone --depth 1 https://github.com/zxplore/zxplore.git /tmp/zxplore-src >>"$LOG_FILE" 2>&1 ||
+            die "FATAL: zxplore clone failed — refusing to ship a desktop ISO without it."
+        # NB: redirect (not | tee) so the `if` sees go build's REAL exit — a
+        # piped `... | tee` returns tee's 0 and silently ships a broken build.
+        if ( cd /tmp/zxplore-src &&
+            HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+                CGO_ENABLED=1 go build -trimpath -o zxplore . ) >>"$LOG_FILE" 2>&1; then
+            install -Dm0755 /tmp/zxplore-src/zxplore "${ROOTFS}/usr/local/bin/zxplore"
+            install -Dm0644 /tmp/zxplore-src/assets/zxplore.svg \
+                "${ROOTFS}/usr/local/share/icons/hicolor/scalable/apps/zxplore.svg"
+            install -Dm0644 /tmp/zxplore-src/contrib/zxplore.desktop \
+                "${ROOTFS}/usr/share/applications/zxplore.desktop"
+            rm -rf /tmp/zxplore-src /tmp/go-cache /tmp/go
+            log "zxplore installed to /usr/local/bin/zxplore (from repo)."
+        else
+            die "FATAL: zxplore go build failed — refusing to ship a desktop ISO without it."
+        fi
+    fi
+
     # Download helper: retry up to 3 times on failure, then FAIL the build.
     # Silent warnings here used to ship ISOs with missing exporter binaries
     # (observed on .133 2026-05-16: libvirt-exporter + process-exporter both

@@ -36,6 +36,19 @@ RUN dnf install -y --allowerasing \
         mtools \
         python3 \
         python3-pyyaml \
+        golang \
+        gcc \
+        pkgconf-pkg-config \
+        mesa-libGL-devel \
+        libX11-devel \
+        libXcursor-devel \
+        libXrandr-devel \
+        libXinerama-devel \
+        libXi-devel \
+        libXxf86vm-devel \
+        wayland-devel \
+        libxkbcommon-devel \
+        fontconfig-devel \
     && dnf clean all
 
 WORKDIR /build

@@ -1086,7 +1086,7 @@ DASHSTART
         _skip_tools="kldload-install-target kldload-overview"
         shopt -s nullglob
         for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/_s* \
-            /usr/local/bin/zexplore* /usr/local/bin/bob*; do
+            /usr/local/bin/zxplore* /usr/local/bin/zexplore* /usr/local/bin/bob*; do
             [[ -x "$_src" ]] || continue
             _name="$(basename "$_src")"
             case " $_skip_tools kldload-webui " in *" $_name "*) continue ;; esac
