@@ -26,8 +26,15 @@ ACTION="${2:-}"
 # disconnected. Observed .133 2026-05-18 during klab golden builds:
 # every VM boot kicked the terminal session. WireGuard wg-* and the
 # host's primary nic are still in scope.
+# wg-mgmt / wg-k8s are the k8s WireGuard cluster mesh (control + data plane),
+# NOT operator VPNs. They come up mid-`kube-cluster bootstrap`, and each event
+# used to try-restart kldload-tls-cert; 5 in 10s tripped the unit's
+# StartLimitBurst → `failed` (start-limit-hit) on .129 2026-07-27. Skip them
+# here (belt) — the SAN generator also excludes them by name (source fix). A
+# generic operator VPN (other wg-*) is still in scope, so remote-access tunnel
+# IPs still land in the cert.
 case "$IFACE" in
-vnet* | virbr* | br-* | veth* | tap* | lo | cilium_* | lxc* | docker* | podman*)
+vnet* | virbr* | br-* | veth* | tap* | lo | cilium_* | lxc* | docker* | podman* | wg-mgmt | wg-k8s)
     exit 0
     ;;
 esac

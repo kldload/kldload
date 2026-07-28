@@ -48,7 +48,10 @@ elif ! openssl x509 -in "$CRT" -noout -checkend 86400 >/dev/null 2>&1; then
     _regen=1
 else
     _san="$(openssl x509 -in "$CRT" -noout -ext subjectAltName 2>/dev/null || true)"
-    # 1. drift on current non-loopback IPs
+    # 1. drift on current non-loopback IPs. MUST use the same wg-mgmt/wg-k8s
+    # exclusion as the SAN builder below — otherwise the drift check sees a
+    # cluster-mesh IP the builder deliberately omits, flags drift on EVERY
+    # call, and regenerates the cert in an infinite loop.
     while IFS= read -r _cur_ip; do
         [[ -z "$_cur_ip" ]] && continue
         if ! grep -qF "IP Address:${_cur_ip}" <<<"$_san"; then
@@ -56,7 +59,7 @@ else
             break
         fi
     done < <(ip -4 -o addr show 2>/dev/null |
-        awk '{print $4}' |
+        awk '$2 !~ /^(wg-mgmt|wg-k8s)$/ {print $4}' |
         cut -d/ -f1 |
         grep -v '^127\.' || true)
     # 2. drift on IPv6 non-loopback addresses
@@ -131,8 +134,17 @@ if [[ "$_regen" -eq 1 ]]; then
     _ips+=("192.168.122.1")
     while IFS= read -r ip; do
         [[ -n "$ip" ]] && _ips+=("$ip")
+        # Skip the k8s WireGuard cluster mesh (wg-mgmt/wg-k8s, 10.25x.0.0/24).
+        # Those are internal control/data-plane tunnels — nobody browses the webui
+        # via a cluster mesh IP, so they don't belong in the SAN. Worse, they come
+        # up mid-convergence during `kube-cluster bootstrap`: each one fired the NM
+        # dispatcher → try-restart of this unit, and 5 in 10s tripped
+        # StartLimitBurst → the unit ended in `failed` (start-limit-hit) even though
+        # the cert was fine. Excluding them by INTERFACE NAME (not CIDR — a LAN
+        # could legitimately be 10.x) keeps the drift-check stable so those events
+        # become no-ops. HISTORY: kldload-tls-cert start-limit-hit, .129 2026-07-27.
     done < <(ip -4 -o addr show 2>/dev/null |
-        awk '{print $4}' |
+        awk '$2 !~ /^(wg-mgmt|wg-k8s)$/ {print $4}' |
         cut -d/ -f1 |
         grep -v '^127\.' |
         grep -v '^192\.168\.122\.1$' || true)

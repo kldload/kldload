@@ -2046,11 +2046,35 @@ if virsh -c qemu:///system net-info "$_net" >/dev/null 2>&1; then
     fi
 fi
 if ! virsh -c qemu:///system net-info "$_net" >/dev/null 2>&1; then
-    # /usr/share/libvirt/networks/default.xml ships with the libvirt-daemon
-    # package on rhel/fedora/debian/arch — defensive existence check anyway.
+    # Define the default net. Prefer the libvirt-shipped default.xml — but do
+    # NOT hard-depend on it. On a darksite/offline first boot the
+    # libvirt-daemon-config-network payload can land mid-convergence, so the
+    # file is absent for the first ~45s. The old `exit 1` here turned that
+    # transient into 3 failed-unit entries + a red service in the GUI before
+    # the 30s retry timer happened to fire after the file appeared. Fall back
+    # to an inline definition (the canonical 192.168.122.0/24 NAT net every
+    # kldload tool assumes, identical to kube-cluster's) so this service is
+    # self-contained and never races a package file.
+    # HISTORY: virbr0 3x-fail on kldload-node firstboot, 2026-07-27 (.129).
     _xml="/usr/share/libvirt/networks/default.xml"
-    [[ -f "$_xml" ]] || { _log "default.xml missing at $_xml"; exit 1; }
-    virsh -c qemu:///system net-define "$_xml"
+    if [[ -r "$_xml" ]]; then
+        _log "defining default net from $_xml"
+        virsh -c qemu:///system net-define "$_xml"
+    else
+        _log "default.xml absent — defining default net inline"
+        virsh -c qemu:///system net-define /dev/stdin <<'NETXML'
+<network>
+  <name>default</name>
+  <forward mode='nat'/>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.122.2' end='192.168.122.254'/>
+    </dhcp>
+  </ip>
+</network>
+NETXML
+    fi
 fi
 virsh -c qemu:///system net-autostart "$_net" >/dev/null
 virsh -c qemu:///system net-start "$_net" 2>/dev/null || true

@@ -495,13 +495,32 @@ if [[ "$EDITION" != "core" ]]; then
         if (cd /tmp/zxplore-src &&
             HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
                 CGO_ENABLED=1 go build -trimpath -o zxplore .) >>"$LOG_FILE" 2>&1; then
-            install -Dm0755 /tmp/zxplore-src/zxplore "${ROOTFS}/usr/local/bin/zxplore"
-            install -Dm0644 /tmp/zxplore-src/assets/zxplore.svg \
-                "${ROOTFS}/usr/local/share/icons/hicolor/scalable/apps/zxplore.svg"
-            install -Dm0644 /tmp/zxplore-src/contrib/zxplore.desktop \
-                "${ROOTFS}/usr/share/applications/zxplore.desktop"
+            install -Dm0755 /tmp/zxplore-src/zxplore "${ROOTFS}/usr/local/bin/zxplore" ||
+                die "FATAL: zxplore binary install failed."
+            # Launcher + icon are NOT optional on the desktop profile: a ZFS
+            # console with no app icon is a broken install. These come from the
+            # UPSTREAM zxplore repo, which is a separate project that can move
+            # files — so fail LOUD if they're absent instead of shipping a
+            # launcher-less tool. HISTORY: 2026-07-27 an ISO cloned a zxplore
+            # commit that predated assets/zxplore.svg + contrib/zxplore.desktop;
+            # because `set -e` is relaxed in this section the two installs
+            # failed SILENTLY and .129 shipped the binary with no icon/.desktop
+            # while the log still said "installed". Existence-gate + `|| die`
+            # turns that into a build-time failure the operator sees.
+            _zx_icon="/tmp/zxplore-src/assets/zxplore.svg"
+            _zx_desktop="/tmp/zxplore-src/contrib/zxplore.desktop"
+            [[ -r "$_zx_icon" ]] ||
+                die "FATAL: zxplore icon absent ($_zx_icon) — upstream repo moved it; desktop ISO needs an app icon."
+            [[ -r "$_zx_desktop" ]] ||
+                die "FATAL: zxplore launcher absent ($_zx_desktop) — upstream repo moved it; desktop ISO needs a .desktop."
+            install -Dm0644 "$_zx_icon" \
+                "${ROOTFS}/usr/local/share/icons/hicolor/scalable/apps/zxplore.svg" ||
+                die "FATAL: zxplore icon install failed."
+            install -Dm0644 "$_zx_desktop" \
+                "${ROOTFS}/usr/share/applications/zxplore.desktop" ||
+                die "FATAL: zxplore .desktop install failed."
             rm -rf /tmp/zxplore-src /tmp/go-cache /tmp/go
-            log "zxplore installed to /usr/local/bin/zxplore (from repo)."
+            log "zxplore installed: binary + icon + launcher (from repo)."
         else
             die "FATAL: zxplore go build failed — refusing to ship a desktop ISO without it."
         fi
