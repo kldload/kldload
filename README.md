@@ -191,7 +191,68 @@ The user picks the target distro at install time. After install the system runs 
 
 ## Releases
 
-### 1.3.1 &mdash; The Kernel-Loaded Desktop (current)
+### 1.4-rc2 &mdash; The ZFS Console (release candidate)
+
+The workstation gains a real ZFS control surface and a friction-free web
+console. This collapses the 1.3.2&ndash;1.3.6 development work &mdash; never
+cut as separate point releases &mdash; into one release.
+
+**[zxplore](https://zxplore.dev) &mdash; the universal ZFS console (new)**
+- A native desktop app for the whole ZFS lifecycle: browse datasets, a live
+  4-column dossier, snapshot / clone / rollback, replicate (local&harr;remote
+  and server-to-server), boot environments, encryption keys, pool scrub / trim,
+  inline property editing &mdash; right-click on any dataset.
+- Built-in server manager (WinSCP-style saved connections, key-first auth,
+  paste/generate keys, proxy jump hosts) with dual connectable panes for
+  remote-to-remote replication.
+- Runs on **any** Linux/BSD box with ZFS &mdash; an independent open project at
+  [github.com/zxplore/zxplore](https://github.com/zxplore/zxplore). On kldload
+  it auto-detects the `k`-commands and lights up extra tools. Replaces the older
+  bundled ZFS utilities. `zxplore --tui` for headless/SSH.
+
+**Console &amp; access**
+- **Zero-prompt on-box console.** The web console (`:8443`) authenticates you
+  automatically when you're at the machine (loopback trust over a proxy-only
+  socket) &mdash; no token, no password, ever, for local use.
+- **Remote access = your system password** (PAM, wheel/sudo), kept in memory for
+  the session only. A scriptable bearer token remains for automation.
+- **The live installer opens straight into the installer** &mdash; no credential
+  needed to run an install.
+- **No certificate warning** &mdash; the kldload CA root is trusted in the
+  browser on first paint and stays trusted across cert rotation.
+
+**Boot &amp; install reliability**
+- **Offline-resilient first boot** &mdash; a flaky or absent network download no
+  longer aborts firstboot; the box still comes up fully configured.
+- **Secure Boot is forgiving** &mdash; Secure-Boot installs power off so you
+  control the MOK-enrollment boot, and a healing net re-offers the blue
+  MokManager prompt every boot until the key is actually enrolled (no more
+  one-shot dead end).
+- Boot fixes: the libvirt default network self-heals offline, the TLS cert stops
+  churning against the cluster mesh, and NVIDIA VRAM is re-checked before the AI
+  assistant is skipped.
+- Installer safety: the boot USB is excluded from wipe targets, a failed
+  disk-wipe aborts instead of silently continuing, and the encrypted-passphrase
+  install is boot-verified.
+- Observability dashboards no longer paint healthy metrics red.
+
+#### What makes kldload different
+- **Reproducible, air-gapped substrate** &mdash; every artifact (RPMs, binaries,
+  container images, models) is packed at build time; install and first boot run
+  fully offline (darksite).
+- **One image, many substrates** &mdash; RHEL / Rocky / CentOS Stream / Fedora /
+  Debian / Ubuntu / Arch, picked at install; upstream packages thereafter.
+- **ZFS-native** &mdash; boot environments, snapshots, and replication are
+  first-class; [zxplore](https://zxplore.dev) is the desktop face.
+- **One click to a cluster** &mdash; a KVM host, a real multi-node Kubernetes
+  cluster, and a full observability plane (Prometheus / Grafana / Cilium+Hubble /
+  Tetragon) stand up on first boot.
+- **Looks like stock RHEL, on purpose** &mdash; the whole expert toolbox sits one
+  click behind familiar chrome.
+- **Encrypted by default** &mdash; per-dataset encryption unlocked by USB keyfile
+  &rarr; TPM &rarr; passphrase, on a Secure-Boot signed chain.
+
+### 1.3.1 &mdash; The Kernel-Loaded Desktop
 - **CentOS Stream + Rocky moved to EL10** (kernel 6.12, OpenZFS 2.3) to match RHEL 10 &mdash; retires the EL9 (5.14) path that wedged dracut/NVIDIA on first boot
 - Per-tool **native-app dashboards** (each web tool opens as its own dock-iconed window) and **VM restore-on-reboot** (running VMs return after a reboot; stopped stay stopped)
 - Live env corrected to Fedora 44 **kernel 7.0.12 / OpenZFS 2.4.3** (the old 6.19 pin is gone; ZFS 2.4.3 builds against the GA 7.0 kernel)
