@@ -35,6 +35,65 @@ Boot the USB &rarr; the web UI opens over TLS at `https://<host>:8443` &rarr; pi
 
 ---
 
+## Installing with Secure Boot &amp; encryption
+
+Secure Boot and full-disk ZFS encryption both work end-to-end. The full flow:
+
+1. **Download &amp; burn** the ISO to a USB stick (see [Quickstart](#quickstart) above).
+2. **Boot the USB.** The installer opens automatically in the browser at
+   `https://<host>:8443` &mdash; no login prompt.
+3. **Choose** your distribution, profile, and target disk. Set a **disk
+   encryption passphrase** and leave **Secure Boot** enabled (the default), then
+   start the install.
+4. When it finishes, a Secure-Boot install **powers the machine off** &mdash; so
+   *you* control the enrollment boot instead of racing an auto-reboot.
+   **Remove the USB stick.**
+5. **Power on and enter firmware setup** (usually `Del`, `F2`, or `F10`).
+   **Enable Secure Boot**, then save and exit.
+6. On the next boot the blue **MokManager** screen appears:
+   **Enroll MOK &rarr; Continue &rarr; password `kldload` &rarr; Yes &rarr; Reboot.**
+7. At the **ZFSBootMenu** unlock prompt, enter your **encryption passphrase**.
+8. The desktop loads and the console opens at `https://<host>:8443` &mdash; **no
+   certificate warning, no login prompt.** Done.
+
+> **Missed the MokManager screen?** Just reboot &mdash; kldload re-offers
+> enrollment on every boot until the key is actually enrolled. No reinstall.
+
+---
+
+## Troubleshooting
+
+### Secure Boot / MOK
+
+| Symptom | Fix |
+|---|---|
+| Missed the blue MokManager screen | Reboot &mdash; enrollment is re-offered automatically. Or `sudo kldload-secure-boot reenroll`, then reboot. |
+| "Verification failed" / won't boot after enabling SB | The MOK isn't enrolled yet. Reboot to catch MokManager (password `kldload`), or turn Secure Boot off in firmware temporarily. |
+| Check enrollment / signing state | `sudo kldload-secure-boot status` (or `mokutil --list-enrolled`). |
+| NVIDIA or ZFS module won't load under SB | Same cause &mdash; enroll the MOK. `sudo kldload-secure-boot status` shows the module signer. |
+| Forgot the MOK password | It's `kldload` (set a different one at install with `KLDLOAD_MOK_PASSWORD`). |
+
+### Console certificate warning
+
+Shouldn't happen on a fresh install &mdash; the console cert is issued by the
+kldload CA, which is trusted in the browser automatically. If a warning appears,
+re-import the CA root (clearing any stale entry first):
+
+```bash
+kldload-trust-cert                                              # re-import the CA root
+# stubborn? drop stale entries first, then re-import:
+certutil -d sql:"$HOME/.pki/nssdb" -D -n kldload-webui 2>/dev/null
+certutil -d sql:"$HOME/.pki/nssdb" -D -n kldload-ca     2>/dev/null
+kldload-trust-cert
+```
+
+### Console asks for a password
+
+Only **remote** browsers do &mdash; sign in with your admin account (a `wheel`/
+`sudo` user). On the machine itself the console never prompts.
+
+---
+
 ## Eight distributions, one USB
 
 | Distribution | Install method | Offline |
@@ -196,6 +255,12 @@ The user picks the target distro at install time. After install the system runs 
 The workstation gains a real ZFS control surface and a friction-free web
 console. This collapses the 1.3.2&ndash;1.3.6 development work &mdash; never
 cut as separate point releases &mdash; into one release.
+
+**Secure Boot + full-disk ZFS encryption both work end-to-end** &mdash; validated
+on hardware: the installer powers off after install, you enable Secure Boot and
+enroll the MOK (password `kldload`), unlock with your passphrase, and boot into a
+clean, signed, encrypted system. See
+[Installing with Secure Boot &amp; encryption](#installing-with-secure-boot--encryption).
 
 **[zxplore](https://zxplore.dev) &mdash; the universal ZFS console (new)**
 - A native desktop app for the whole ZFS lifecycle: browse datasets, a live
