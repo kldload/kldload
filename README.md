@@ -250,7 +250,7 @@ The user picks the target distro at install time. After install the system runs 
 
 ## Releases
 
-### 1.4-rc2 &mdash; The ZFS Console (release candidate)
+### 1.4.0-rc2 &mdash; The ZFS Console (release candidate)
 
 The workstation gains a real ZFS control surface and a friction-free web
 console. This collapses the 1.3.2&ndash;1.3.6 development work &mdash; never
