@@ -894,7 +894,14 @@ _try_fetch_hub_env() {
 # suspenders for profiles.sh's install-time removal) so the workstation never
 # auto-opens the dashboard at login — it's a win+A launcher instead.
 arm_vm_restore() {
-    if systemctl is-enabled libvirtd >/dev/null 2>&1 || systemctl is-active libvirtd >/dev/null 2>&1; then
+    # Gate on the libvirt-guests UNIT existing, NOT on libvirtd's transient
+    # is-active/is-enabled state. Near end-of-firstboot libvirtd can be
+    # socket-activated or mid-modular-transition, so the old
+    # `is-enabled||is-active libvirtd` check silently returned false, arming was
+    # skipped, and VMs that were running never came back after a reboot
+    # (operator report .143 2026-07-28). `enable --now` below is already
+    # fail-soft if the unit is trimmed out.
+    if systemctl cat libvirt-guests.service >/dev/null 2>&1; then
         local _lvg=/etc/sysconfig/libvirt-guests
         [[ -d /etc/sysconfig ]] || _lvg=/etc/default/libvirt-guests
         cat >"${_lvg}" <<'LVG'
