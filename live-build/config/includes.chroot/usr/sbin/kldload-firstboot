@@ -464,10 +464,24 @@ VNETDEF
         virsh net-define /tmp/libvirt-default-net.xml 2>/dev/null || true
         rm -f /tmp/libvirt-default-net.xml
     fi
+    # swallow: pre-defined nets may already have autostart set — harmless
     virsh net-autostart default 2>/dev/null || true
-    virsh net-start default 2>/dev/null || true
-    if ! virsh net-info default >/dev/null 2>&1; then
-        log "WARNING: libvirt default network not defined — klab VMs will fail to boot"
+    # Start it NOW and verify ACTIVE — autostart alone is not enough. With
+    # socket-activated modular daemons (Debian/Ubuntu split libvirt), autostart
+    # only fires when virtnetworkd itself starts, which can be never until
+    # first use. HISTORY: 2026-08-01 smoke run had default defined+autostart
+    # yet inactive → no virbr0, klab/kube VMs unroutable. Retry: early in
+    # first boot virtnetworkd may still be settling.
+    for _net_try in 1 2 3; do
+        # swallow: "already active" also exits 1 — the state check below is
+        # the authoritative pass/fail, not this start's exit code
+        virsh net-start default >/dev/null 2>&1 && break
+        sleep 2
+    done
+    if virsh net-info default 2>/dev/null | grep -q '^Active:.*yes'; then
+        ok "libvirt default network active (virbr0 up)"
+    else
+        log "WARNING: libvirt default network NOT ACTIVE — klab/kube VMs will have no virbr0. Debug: virsh net-info default; systemctl status virtnetworkd libvirtd"
     fi
 
     printf 'net.ipv4.ip_forward=1\n' >/etc/sysctl.d/99-kldload-kvm.conf
@@ -1732,9 +1746,18 @@ SALT
             }
             log "AI setup starting — terminal show + Firefox will open when ready"
 
-            # Create ZFS dataset for models (compressed, snapshotable)
-            zfs create -o compression=zstd -o recordsize=1M rpool/srv 2>/dev/null || true
-            zfs create -o compression=zstd -o recordsize=1M rpool/srv/ollama 2>/dev/null || true
+            # Model store — zstd + 1M records suit multi-GB GGUF blobs
+            # (sequential reads, cold data, compresses on the margins).
+            # rpool/srv itself is deliberately left at installer defaults:
+            # the installer always creates it before firstboot runs, so the
+            # old tuned-create of rpool/srv here ALWAYS silently no-opped
+            # (fixed 2026-07-31), and /srv may host services that want
+            # small records anyway.
+            # create swallow: dataset already exists on re-run — properties
+            # enforced by the zfs set below either way
+            zfs create -p rpool/srv/ollama 2>/dev/null || true
+            # swallow: only fails if the create above also failed (no rpool)
+            zfs set compression=zstd recordsize=1M rpool/srv/ollama 2>/dev/null || true
 
             # Ollama runs as 'ollama' user — pre-create dirs with correct ownership
             mkdir -p /srv/ollama/models
@@ -2423,9 +2446,19 @@ AIMOTD
         if [[ "$ROLE" == "kvm" || "${KLDLOAD_ENABLE_KVM:-0}" == "1" ]]; then
             log "KVM Host profile — configuring hypervisor..."
 
-            # Create ZFS dataset for VMs — optimized for VM I/O
-            zfs create -o compression=lz4 -o recordsize=64K -o primarycache=metadata rpool/vms 2>/dev/null || true
-            ok "ZFS dataset rpool/vms created (compressed, 64K recordsize)"
+            # Create ZFS dataset for VMs — optimized for VM I/O.
+            # WHY primarycache stays at the default (all): guests attach with
+            # cache=none, so ARC is the ONLY host-side read cache. The old
+            # primarycache=metadata here sent every guest read miss to
+            # physical disk (measured 2026-07-31 on NVMe: -15% random IOPS,
+            # -30% sequential; far worse on contended/spinning pools).
+            # create swallow: dataset already exists on re-run — healed below
+            zfs create -o compression=lz4 -o recordsize=64K rpool/vms 2>/dev/null || true
+            # Heal installs cut while firstboot still set primarycache=metadata
+            # (removed 2026-07-31). zvols inherit, so one set fixes every VM.
+            # swallow: only fails if the create above also failed (no rpool)
+            zfs set primarycache=all rpool/vms 2>/dev/null || true
+            ok "ZFS dataset rpool/vms ready (lz4, 64K recordsize, ARC-cached)"
 
             # libvirt storage pool for the ZFS zvols — DON'T DEFINE ONE.
             #
@@ -2489,8 +2522,28 @@ AIMOTD
             # made `klab golden` fail with "Cannot get interface MTU on virbr0".
             # The two bridges coexist cleanly: br0 for user-facing VMs with
             # LAN-routable IPs, virbr0 for klab/internal lab VMs with NAT.
+            # swallow: pre-defined nets may already have autostart — harmless
             virsh net-autostart default 2>/dev/null || true
-            virsh net-start default 2>/dev/null || true
+            # Start it NOW and verify ACTIVE — autostart alone never fires on
+            # socket-activated modular daemons (Debian/Ubuntu split libvirt).
+            # NESTED installs can never start it: when this guest's uplink is
+            # itself on a host's 192.168.122.0/24 NAT, libvirt refuses with
+            # "network already in use by interface X". klab/kube hardcode that
+            # subnet, so warn loudly instead of silently re-subnetting
+            # (subnet-aware lab tooling is a tracked backlog item).
+            for _net_try in 1 2 3; do
+                # swallow: "already active" also exits 1 — the state check
+                # below is the authoritative pass/fail, not this exit code
+                virsh net-start default >/dev/null 2>&1 && break
+                sleep 2
+            done
+            if virsh net-info default 2>/dev/null | grep -q '^Active:.*yes'; then
+                ok "libvirt default network active (virbr0 up)"
+            elif ip -4 addr show 2>/dev/null | grep -v 'virbr0' | grep -q 'inet 192\.168\.122\.'; then
+                log "WARNING: nested install — uplink already on 192.168.122.0/24; libvirt default network cannot start (subnet collision). klab/kube VMs unavailable in this guest."
+            else
+                log "WARNING: libvirt default network NOT ACTIVE — klab/kube VMs will have no virbr0. Debug: virsh net-info default; systemctl status virtnetworkd libvirtd"
+            fi
 
             ok "KVM Host ready — use kvm-create, kvm-snap, kvm-clone (br0 for LAN VMs, virbr0 for klab)"
             log "  Storage pool: zfs-vms (rpool/vms)"

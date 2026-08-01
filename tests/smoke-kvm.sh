@@ -100,15 +100,30 @@ test_cmd "virt-install" "virt-install"
 test_cmd "qemu-img" "qemu-img"
 test_service_active "libvirtd" "libvirtd"
 
-# virbr0
+# virbr0 / default NAT network. In NESTED installs (this guest's uplink is
+# itself on a host's 192.168.122.0/24 libvirt NAT) the default network can
+# never start — libvirt refuses "network already in use by interface X".
+# That is an environmental impossibility, not an install defect: WARN with
+# the reason (visible + counted) instead of a false FAIL. Real hardware
+# installs have no collision and still hard-fail here. Subnet-aware lab
+# tooling (klab/kube hardcode 192.168.122.0/24) is the tracked real fix.
+_nested_collision=0
+if ip -4 addr show 2>/dev/null | grep -v 'virbr0' | grep -q 'inet 192\.168\.122\.'; then
+    _nested_collision=1
+fi
+
 if ip addr show virbr0 >/dev/null 2>&1; then
     _pass "virbr0 interface up"
+elif ((_nested_collision)); then
+    _warn "virbr0" "absent — nested install, uplink already owns 192.168.122.0/24 (subnet collision)"
 else
     _fail "virbr0" "interface not found"
 fi
 
 if virsh net-list 2>/dev/null | grep -q "active"; then
     _pass "default network active"
+elif ((_nested_collision)); then
+    _warn "default network" "inactive — nested 192.168.122.0/24 collision (see virbr0)"
 else
     _fail "default network" "not active"
 fi

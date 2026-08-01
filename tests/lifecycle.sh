@@ -209,6 +209,11 @@ KLDLOAD_FEDORA_RELEASE=44
 KLDLOAD_NVIDIA_DRIVERS=0
 KLDLOAD_WIREGUARD=0
 KLDLOAD_ENABLE_KVM=$([[ "$PROFILE" == "kvm" ]] && echo 1 || echo 0)
+# eBPF/observability is CHECKED by default in the webui (install-ebpf) — the
+# autoinstall answers must mirror the shipped default or smoke installs test
+# a surface no human install has. HISTORY: 2026-08-01 smoke-kvm failed on
+# bpftrace because this answer was missing and autoinstall defaulted it to 0.
+KLDLOAD_ENABLE_EBPF=1
 KLDLOAD_TIMEZONE=UTC
 EOF
 

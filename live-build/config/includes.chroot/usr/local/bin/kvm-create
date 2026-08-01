@@ -16,11 +16,16 @@ Options:
   --iso    <path>     Boot ISO (optional)
   --bridge <name>     Bridge interface (default: br0)
   --os     <variant>  OS variant for virt-install (default: generic)
+  --volblocksize <sz> zvol block size (default: 64K). 64K favours
+                      sequential I/O, compression and clone efficiency;
+                      pick 8K-16K for guests running databases with
+                      small random writes (PostgreSQL/MySQL).
 
 Examples:
   kvm-create myvm
   kvm-create webserver --ram 4096 --cpus 4 --disk 40
   kvm-create testbox --iso /tmp/debian.iso --ram 2048
+  kvm-create pgbox --disk 60 --volblocksize 16K
 
 The VM disk is a ZFS zvol at rpool/vms/<name> — thin provisioned,
 compressed, snapshotable. Clone with kvm-clone, snapshot with kvm-snap.
@@ -38,6 +43,7 @@ DISK=20
 ISO=""
 BRIDGE="br0"
 OS_VARIANT="generic"
+VOLBLOCK="64K"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -65,6 +71,10 @@ while [[ $# -gt 0 ]]; do
         OS_VARIANT="$2"
         shift 2
         ;;
+    --volblocksize)
+        VOLBLOCK="$2"
+        shift 2
+        ;;
     *)
         echo "Unknown option: $1"
         usage
@@ -80,6 +90,13 @@ if ! [[ "$DISK" =~ ^[0-9]+$ ]] || [[ "$DISK" -le 0 ]]; then
     exit 1
 fi
 
+# Validate volblocksize shape here so the error names the flag; zfs create
+# still enforces the real constraint (power of two, 512B-1M).
+if ! [[ "$VOLBLOCK" =~ ^[0-9]+[kKmM]?$ ]]; then
+    echo "ERROR: --volblocksize must look like 8K/16K/64K (got: ${VOLBLOCK})"
+    exit 1
+fi
+
 # Check if zvol already exists
 if zfs list "${ZVOL}" >/dev/null 2>&1; then
     echo "ERROR: ZFS zvol '${ZVOL}' already exists. Use a different name or delete first."
@@ -89,9 +106,12 @@ fi
 # Snapshot before creating (safety net)
 zfs snapshot "rpool/vms@pre-create-${NAME}" 2>/dev/null || true
 
-# Create thin-provisioned zvol — compression off, guest manages its own filesystem
-echo "Creating ZFS zvol: ${ZVOL} (${DISK}G, thin provisioned)..."
-zfs create -V "${DISK}G" -s -o compression=off -o volblocksize=64K "${ZVOL}"
+# Create thin-provisioned zvol. Compression is inherited from rpool/vms
+# (lz4) — the old local compression=off contradicted the "compressed" promise
+# in the usage text and threw away free space savings on thin volumes.
+# 64K volblocksize matches qcow2 cluster size for efficient raw import.
+echo "Creating ZFS zvol: ${ZVOL} (${DISK}G, thin provisioned, volblocksize=${VOLBLOCK})..."
+zfs create -V "${DISK}G" -s -o volblocksize="${VOLBLOCK}" "${ZVOL}"
 
 # Wait for zvol device node to appear
 for _i in $(seq 1 30); do
@@ -110,7 +130,9 @@ CMD=(virt-install
     --vcpus "${CPUS}"
     --cpu host-model
     --machine q35
-    --disk "source.dev=/dev/zvol/${ZVOL},type=block,bus=virtio,cache=none"
+    # discard=unmap: guest TRIM punches holes in the thin zvol so deleted
+    # guest data returns space to the pool instead of leaking forever
+    --disk "source.dev=/dev/zvol/${ZVOL},type=block,bus=virtio,cache=none,discard=unmap"
     --network "bridge=${BRIDGE},model=virtio"
     --graphics vnc,listen=0.0.0.0
     --os-variant "${OS_VARIANT}"
