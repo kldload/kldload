@@ -485,11 +485,16 @@ if [[ "$EDITION" != "core" ]]; then
     # the GUI ZFS face (needs the GNOME libGL/X/wayland/fontconfig stack, already
     # in the desktop rootfs); server/headless keep the web console. Replaces the
     # old bash zexplore TUI. kldload stays CLEAN — no vendored source, just a pin.
+    # PINNED to a release tag: an unpinned clone made every ISO ingest
+    # tip-of-tree — unreproducible builds and a b652-shaped surprise waiting.
+    # Bump deliberately, with the zxplore CHANGELOG open.
+    ZXPLORE_TAG="v1.1.0"
     if [[ "$PROFILE" == "desktop" ]]; then
-        log "Building zxplore from github.com/zxplore/zxplore ..."
+        log "Building zxplore ${ZXPLORE_TAG} from github.com/zxplore/zxplore ..."
         rm -rf /tmp/zxplore-src /tmp/go-cache /tmp/go
-        git clone --depth 1 https://github.com/zxplore/zxplore.git /tmp/zxplore-src >>"$LOG_FILE" 2>&1 ||
-            die "FATAL: zxplore clone failed — refusing to ship a desktop ISO without it."
+        git clone --depth 1 --branch "$ZXPLORE_TAG" \
+            https://github.com/zxplore/zxplore.git /tmp/zxplore-src >>"$LOG_FILE" 2>&1 ||
+            die "FATAL: zxplore ${ZXPLORE_TAG} clone failed — refusing to ship a desktop ISO without it."
         # `-tags gui` is MANDATORY: zxplore gates its Fyne GUI behind the `gui`
         # build tag (every gui*.go is `//go:build gui`; nogui.go is
         # `//go:build !gui`). Without the tag, `go build .` compiles the
