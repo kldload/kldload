@@ -920,7 +920,7 @@ DASHSTART
                 mkdir -p "${target}/${themedir}"
                 for _ic in /${themedir}/kldload-*.svg /${themedir}/bob-*.svg \
                     /${themedir}/kst*.svg /${themedir}/ksnap.svg /${themedir}/kexport.svg \
-                    /${themedir}/zxplore.svg; do
+                    /${themedir}/zxplore*.svg; do
                     [[ -f "$_ic" ]] || continue
                     # honor the ZFS Console opt-out (checkbox, default on)
                     [[ "$(basename "$_ic")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue

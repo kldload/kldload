@@ -186,7 +186,9 @@ fi
 # present too (capability-gated in build-iso.sh, copied by profiles.sh).
 test_cmd "zxplore (GUI)" "zxplore"
 test_file "zxplore launcher" "/usr/share/applications/zxplore.desktop"
-test_file "zxplore icon" "/usr/share/icons/hicolor/scalable/apps/zxplore.svg"
+# Icon=zxplore-tui is the launcher's face (the dark tile) — BOTH svgs ship.
+test_file "zxplore icon (dark, launcher face)" "/usr/share/icons/hicolor/scalable/apps/zxplore-tui.svg"
+test_file "zxplore icon (logo)" "/usr/share/icons/hicolor/scalable/apps/zxplore.svg"
 test_file "zxplore commit breadcrumb" "/etc/kldload/zxplore-commit"
 
 _section "eBPF / Observability"

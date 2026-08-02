@@ -585,28 +585,27 @@ if [[ "$EDITION" != "core" ]]; then
             # failed SILENTLY and .129 shipped the binary with no icon/.desktop
             # while the log still said "installed". Existence-gate + `|| die`
             # turns that into a build-time failure the operator sees.
-            # Icon preference: the kldload-BRANDED zxplore.svg (gen_icons.py
-            # gold-on-slate set, shipped in includes.chroot) wins over
-            # upstream's own logo — the console must look native beside
-            # sysdiag/files in the tray. Upstream's stays the fallback so a
-            # missing branded file degrades to "wrong style", never "no icon".
-            _zx_branded="/build/live-build/config/includes.chroot/usr/share/icons/hicolor/scalable/apps/zxplore.svg"
-            _zx_icon="/tmp/zxplore-src/assets/zxplore.svg"
-            [[ -r "$_zx_branded" ]] && _zx_icon="$_zx_branded"
+            # Ship BOTH upstream SVGs. The launcher's face is Icon=zxplore-tui
+            # (the dark tile — the operator's intended look); zxplore.svg is
+            # the teal logo variant. HISTORY: 2026-08-02 the build shipped
+            # only zxplore.svg while the launcher referenced zxplore-tui →
+            # dangling Icon= → generic fallback icon on every install. A
+            # kldload-branded replacement icon was tried and reverted the
+            # same day: upstream's own art is the right face.
             _zx_desktop="/tmp/zxplore-src/contrib/zxplore.desktop"
-            [[ -r "$_zx_icon" ]] ||
-                die "FATAL: zxplore icon absent ($_zx_icon) — upstream repo moved it; GUI ISO needs an app icon."
+            for _zx_svg in zxplore.svg zxplore-tui.svg; do
+                [[ -r "/tmp/zxplore-src/assets/${_zx_svg}" ]] ||
+                    die "FATAL: zxplore icon absent (assets/${_zx_svg}) — upstream repo moved it; GUI ISO needs its icons."
+                install -Dm0644 "/tmp/zxplore-src/assets/${_zx_svg}" \
+                    "${ROOTFS}/usr/share/icons/hicolor/scalable/apps/${_zx_svg}" ||
+                    die "FATAL: zxplore icon install failed (${_zx_svg})."
+            done
             [[ -r "$_zx_desktop" ]] ||
                 die "FATAL: zxplore launcher absent ($_zx_desktop) — upstream repo moved it; GUI ISO needs a .desktop."
-            # Install into /usr/share/icons/hicolor (NOT /usr/local/share/icons):
-            # this is where every other kldload app icon lives, so the installer's
-            # icon-copy glob in profiles.sh picks it up for the installed target.
-            # HISTORY: 2026-07-28 the icon was in /usr/local/share/icons and the
-            # installer never copied it → installed .139 had the binary but no
-            # icon/launcher.
-            install -Dm0644 "$_zx_icon" \
-                "${ROOTFS}/usr/share/icons/hicolor/scalable/apps/zxplore.svg" ||
-                die "FATAL: zxplore icon install failed."
+            # Icons live in /usr/share/icons/hicolor (NOT /usr/local/share):
+            # that is where the installer's icon-copy glob in profiles.sh
+            # looks. HISTORY: 2026-07-28 the icon sat in /usr/local/share and
+            # installed targets got the binary but no icon/launcher.
             install -Dm0644 "$_zx_desktop" \
                 "${ROOTFS}/usr/share/applications/zxplore.desktop" ||
                 die "FATAL: zxplore .desktop install failed."

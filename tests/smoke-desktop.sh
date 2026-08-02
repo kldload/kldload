@@ -49,6 +49,7 @@ else
     _fail "zxplore-tui --version" "no version output"
 fi
 test_file "zxplore launcher" "/usr/share/applications/zxplore.desktop"
+test_file "zxplore icon (dark, launcher face)" "/usr/share/icons/hicolor/scalable/apps/zxplore-tui.svg"
 test_file "zxplore commit breadcrumb" "/etc/kldload/zxplore-commit"
 
 _section "Services"
