@@ -529,7 +529,12 @@ cmd_build() {
     x86_64 | amd64) _platform="linux/amd64" ;;
     aarch64 | arm64) _platform="linux/arm64" ;;
     esac
+    # --cpu-shares: builds are batch work on a dev box that also runs the
+    # operator's desktop (and games). ~512 shares ≈ cgroup CPUWeight 20, so
+    # the build takes every idle core at full speed but yields instantly
+    # under contention — a build should never make the foreground lag.
     "$runtime" run -d --privileged \
+        --cpu-shares=512 \
         --platform "$_platform" \
         -v "$ROOT:/build:z" \
         -e PROFILE="$PROFILE" \
