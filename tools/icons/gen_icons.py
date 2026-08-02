@@ -54,6 +54,17 @@ def zfs():
         o.append(P(f"M{cx-rx} {y} V{y+34} A{rx} {ry} 0 0 0 {cx+rx} {y+34} V{y}"))
         o.append(f'<ellipse cx="{cx}" cy="{y}" rx="{rx}" ry="{ry}" fill="none" {S} stroke-width="11"/>')
     return "".join(o)
+def zxplore():  # dataset stack + magnifier = explore the ZFS you already run
+    o = []
+    cx, rx, ry = 112, 44, 14
+    for y in (86, 116, 146):
+        o.append(P(f"M{cx-rx} {y} V{y+24} A{rx} {ry} 0 0 0 {cx+rx} {y+24} V{y}"))
+        o.append(
+            f'<ellipse cx="{cx}" cy="{y}" rx="{rx}" ry="{ry}" '
+            f'fill="none" {S} stroke-width="9"/>')
+    mx, my = 176, 164  # magnifier over the stack; amber glint = the F2 accent
+    lens = C(mx, my, 26, w=10) + L(mx + 20, my + 20, mx + 42, my + 42, 13)
+    return "".join(o) + lens + Cf2(mx - 9, my - 9, 5)
 def zfs_manager(): # zfs stack + gear badge
     g=[];cx,rx,ry=118,46,15
     for y in (96,124,152):
@@ -162,6 +173,9 @@ ICONS = {
  # Generator no longer ships its icon.
  "kst-dashboard":kst_dashboard, "ksnap":ksnap, "kexport":kexport,
  "kldload-k9s":k9s,
+ # zxplore ships from its own repo but wears the kldload icon language on
+ # kldload installs — the branded SVG wins over upstream's (build-iso.sh).
+ "zxplore":zxplore,
 }
 LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-webui":"Web UI","kldload-terminal":"Terminal","kldload-zfs":"ZFS",
@@ -169,7 +183,7 @@ LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-metrics":"Metrics","bob-chat":"Bob (jinn)","bob-gaming":"Gaming",
  "kldload-helm":"Helm","kldload-ansible":"Ansible","kldload-klab":"klab",
  "kst":"Health","kst-dashboard":"Dashboard","ksnap":"Snapshot","kexport":"Export",
- "kldload-k9s":"k9s","kldload-console":"kldload",
+ "kldload-k9s":"k9s","kldload-console":"kldload","zxplore":"ZFS Console",
 }
 
 # Colour-coded by FUNCTION GROUP so colour tells you the category at a glance
@@ -180,6 +194,7 @@ LABELS = {  # also reused to set Icon= in .desktop later
 COLORS = {
  # storage — green (true red for VMs swap — see ACCENTS2 for highlight)
  "kldload-zfs":"#4cb98a","kldload-zfs-manager":"#3fae7e","ksnap":"#6cc9a2","kexport":"#84d4b0",
+ "zxplore":"#57c295",
  # compute — RED (was coral; user wanted a real saturated red for VMs)
  "kldload-vms":"#dc4848",
  # monitoring — orange

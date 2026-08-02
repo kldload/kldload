@@ -585,7 +585,14 @@ if [[ "$EDITION" != "core" ]]; then
             # failed SILENTLY and .129 shipped the binary with no icon/.desktop
             # while the log still said "installed". Existence-gate + `|| die`
             # turns that into a build-time failure the operator sees.
+            # Icon preference: the kldload-BRANDED zxplore.svg (gen_icons.py
+            # gold-on-slate set, shipped in includes.chroot) wins over
+            # upstream's own logo — the console must look native beside
+            # sysdiag/files in the tray. Upstream's stays the fallback so a
+            # missing branded file degrades to "wrong style", never "no icon".
+            _zx_branded="/build/live-build/config/includes.chroot/usr/share/icons/hicolor/scalable/apps/zxplore.svg"
             _zx_icon="/tmp/zxplore-src/assets/zxplore.svg"
+            [[ -r "$_zx_branded" ]] && _zx_icon="$_zx_branded"
             _zx_desktop="/tmp/zxplore-src/contrib/zxplore.desktop"
             [[ -r "$_zx_icon" ]] ||
                 die "FATAL: zxplore icon absent ($_zx_icon) — upstream repo moved it; GUI ISO needs an app icon."
