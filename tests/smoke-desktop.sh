@@ -37,6 +37,20 @@ for tool in kst ksnap kbe kclone kdf kdir kpkg kupgrade kexport krecovery; do
 done
 test_succeeds "kst executes" "kst >/dev/null 2>&1"
 
+# ── ZFS Console (zxplore) ─────────────────────────────────────────────────────
+# Desktop ships BOTH zxplore variants: the Fyne GUI (with launcher/icon) and
+# the static TUI. Baked at ISO build from github.com/zxplore/zxplore.
+_section "ZFS Console"
+test_cmd "zxplore (GUI)" "zxplore"
+test_cmd "zxplore-tui" "zxplore-tui"
+if zxplore-tui --version 2>/dev/null | grep -q '^zxplore'; then
+    _pass "zxplore-tui --version reports"
+else
+    _fail "zxplore-tui --version" "no version output"
+fi
+test_file "zxplore launcher" "/usr/share/applications/zxplore.desktop"
+test_file "zxplore commit breadcrumb" "/etc/kldload/zxplore-commit"
+
 _section "Services"
 test_service_enabled "kldload-webui" "kldload-webui"
 test_cmd "sanoid" "sanoid"

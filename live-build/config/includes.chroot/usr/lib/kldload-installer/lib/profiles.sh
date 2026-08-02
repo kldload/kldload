@@ -450,6 +450,9 @@ k_install_system_files() {
     # of its provenance, and tools (kst-summary, attestation, support
     # bug reports) fall back to a hardcoded placeholder string.
     [[ -f /etc/kldload/VERSION ]] && cp /etc/kldload/VERSION "${target}/etc/kldload/VERSION"
+    # Which zxplore commit this image baked (see build-iso.sh) — traceability
+    # for the tracks-upstream-main build model.
+    [[ -f /etc/kldload/zxplore-commit ]] && cp /etc/kldload/zxplore-commit "${target}/etc/kldload/zxplore-commit"
     # process-exporter config — kldload-process-exporter.service
     # ConditionPathExists on this file, so without it the unit silently
     # skips and the per-process Grafana dashboards stay empty on the target.

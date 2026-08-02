@@ -480,21 +480,70 @@ if [[ "$EDITION" != "core" ]]; then
     fi
 
     # ── zxplore — the ZFS console, built from its OWN repo (github.com/zxplore/
-    # zxplore). Cloned + go-built HERE in the F44 builder (glibc matches the
-    # Fedora rootfs) and installed as a native utility. DESKTOP profile only: it's
-    # the GUI ZFS face (needs the GNOME libGL/X/wayland/fontconfig stack, already
-    # in the desktop rootfs); server/headless keep the web console. Replaces the
-    # old bash zexplore TUI. kldload stays CLEAN — no vendored source, just a pin.
-    # PINNED to a release tag: an unpinned clone made every ISO ingest
-    # tip-of-tree — unreproducible builds and a b652-shaped surprise waiting.
-    # Bump deliberately, with the zxplore CHANGELOG open.
-    ZXPLORE_TAG="v1.1.0"
+    # zxplore) and PART OF THE OS on every profile. The repo is separate only
+    # because zxplore runs on any OpenZFS system — kldload is its first-party
+    # distribution, not an optional consumer. Built HERE in the F44 builder
+    # (glibc matches the Fedora rootfs):
+    #   zxplore-tui — static (CGO_ENABLED=0), zero runtime deps → ALL profiles;
+    #                 the ZFS console works over SSH on every kldload box.
+    #   zxplore     — Fyne GUI, needs the GL/X/wayland stack → desktop only,
+    #                 with icon + launcher. Replaces the old bash zexplore TUI.
+    # TRACKS UPSTREAM MAIN by operator decision (2026-08-02): kldload and
+    # zxplore are co-developed and ship together, so a tag pin here goes stale
+    # the week it lands. The trade is documented unreproducibility — every
+    # build logs AND bakes the exact ingested commit into
+    # /etc/kldload/zxplore-commit so any image traces to its source. Set
+    # ZXPLORE_REF=<tag|branch> to pin a specific build (release ISOs should).
+    #
+    # DARKSITE / OFFLINE builds: the source is cached on the host at
+    # live-build/zxplore-cache (inside the gitignored live-build/ area, mounted
+    # rw at /build). Online builds refresh the cache and ship the newest
+    # commit; when the refresh fails (air-gapped builder) the build ships the
+    # CACHED source with a loud warning instead of dying. Only a first-ever
+    # build with neither network nor cache refuses — it cannot include what
+    # was never fetched.
+    ZXPLORE_REF="${ZXPLORE_REF:-}"
+    log "Building zxplore (${ZXPLORE_REF:-main HEAD}) from github.com/zxplore/zxplore ..."
+    rm -rf /tmp/zxplore-src /tmp/go-cache /tmp/go
+    _zx_cache="/build/live-build/zxplore-cache"
+    _zx_fresh=0
+    if [[ -d "${_zx_cache}/.git" ]]; then
+        if (git -C "$_zx_cache" fetch --depth 1 origin "${ZXPLORE_REF:-main}" &&
+            git -C "$_zx_cache" reset --hard FETCH_HEAD) >>"$LOG_FILE" 2>&1; then
+            _zx_fresh=1
+        fi
+    else
+        _zx_clone=(git clone --depth 1)
+        [[ -n "$ZXPLORE_REF" ]] && _zx_clone+=(--branch "$ZXPLORE_REF")
+        if "${_zx_clone[@]}" https://github.com/zxplore/zxplore.git "$_zx_cache" >>"$LOG_FILE" 2>&1; then
+            _zx_fresh=1
+        fi
+    fi
+    [[ -d "${_zx_cache}/.git" ]] ||
+        die "FATAL: zxplore unavailable — no network AND no cached source at live-build/zxplore-cache. zxplore is part of the OS; refusing to ship without it. Run one online build to populate the cache for darksite builds."
+    if ((!_zx_fresh)); then
+        log "WARNING: zxplore refresh failed (offline/darksite builder?) — shipping CACHED commit $(git -C "$_zx_cache" rev-parse --short HEAD) from $(git -C "$_zx_cache" log -1 --format=%cd --date=short)"
+    fi
+    # Build from a throwaway copy so go outputs never dirty the cache.
+    cp -a "$_zx_cache" /tmp/zxplore-src
+    _zx_commit="$(git -C /tmp/zxplore-src rev-parse HEAD)"
+    log "zxplore commit: ${_zx_commit}"
+    install -d "${ROOTFS}/etc/kldload"
+    printf '%s\n' "$_zx_commit" >"${ROOTFS}/etc/kldload/zxplore-commit"
+
+    # Static TUI — every profile. No build tag = the terminal-only variant
+    # (pure Go, no Fyne/GL); CGO_ENABLED=0 keeps it fully static.
+    if (cd /tmp/zxplore-src &&
+        HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+            CGO_ENABLED=0 go build -trimpath -o zxplore-tui .) >>"$LOG_FILE" 2>&1; then
+        install -Dm0755 /tmp/zxplore-src/zxplore-tui "${ROOTFS}/usr/local/bin/zxplore-tui" ||
+            die "FATAL: zxplore-tui install failed."
+        log "zxplore-tui installed (static, all profiles)."
+    else
+        die "FATAL: zxplore-tui build failed — refusing to ship an ISO without the ZFS console."
+    fi
+
     if [[ "$PROFILE" == "desktop" ]]; then
-        log "Building zxplore ${ZXPLORE_TAG} from github.com/zxplore/zxplore ..."
-        rm -rf /tmp/zxplore-src /tmp/go-cache /tmp/go
-        git clone --depth 1 --branch "$ZXPLORE_TAG" \
-            https://github.com/zxplore/zxplore.git /tmp/zxplore-src >>"$LOG_FILE" 2>&1 ||
-            die "FATAL: zxplore ${ZXPLORE_TAG} clone failed — refusing to ship a desktop ISO without it."
         # `-tags gui` is MANDATORY: zxplore gates its Fyne GUI behind the `gui`
         # build tag (every gui*.go is `//go:build gui`; nogui.go is
         # `//go:build !gui`). Without the tag, `go build .` compiles the

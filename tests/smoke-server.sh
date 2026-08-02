@@ -172,6 +172,20 @@ fi
 # expects to find it.
 test_file "ZFSBootMenu EFI on ESP" "/boot/efi/EFI/zbm/BOOTX64.EFI"
 
+# ── ZFS Console (zxplore) ─────────────────────────────────────────────────────
+# zxplore-tui is part of the OS on every tool-bearing profile (static binary,
+# built from github.com/zxplore/zxplore at ISO build, copied to the target by
+# the zxplore* glob in profiles.sh). A missing binary here means the build's
+# bake step or the installer copy regressed.
+_section "ZFS Console"
+test_cmd "zxplore-tui" "zxplore-tui"
+if zxplore-tui --version 2>/dev/null | grep -q '^zxplore'; then
+    _pass "zxplore-tui --version reports"
+else
+    _fail "zxplore-tui --version" "no version output"
+fi
+test_file "zxplore commit breadcrumb" "/etc/kldload/zxplore-commit"
+
 # ── eBPF / Observability ──────────────────────────────────────────────────────
 _section "eBPF / Observability"
 

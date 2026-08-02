@@ -171,6 +171,19 @@ test_cmd "wg" "wg"
 test_output_contains "WireGuard module" "modprobe wireguard && lsmod" "wireguard"
 
 # ── eBPF ─────────────────────────────────────────────────────────────────────
+# ── ZFS Console (zxplore) ─────────────────────────────────────────────────────
+# zxplore-tui is part of the OS on every tool-bearing profile (static binary,
+# baked at ISO build from github.com/zxplore/zxplore, copied to the target by
+# the zxplore* glob in profiles.sh). Missing binary = bake or copy regressed.
+_section "ZFS Console"
+test_cmd "zxplore-tui" "zxplore-tui"
+if zxplore-tui --version 2>/dev/null | grep -q '^zxplore'; then
+    _pass "zxplore-tui --version reports"
+else
+    _fail "zxplore-tui --version" "no version output"
+fi
+test_file "zxplore commit breadcrumb" "/etc/kldload/zxplore-commit"
+
 _section "eBPF / Observability"
 test_cmd "bpftrace" "bpftrace"
 
