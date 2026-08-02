@@ -147,7 +147,7 @@ klab matrix run script.sh # run a change against every supported distro in paral
 
 ## What's wired into the image
 
-- **OpenZFS on root** — checksummed, compressed, snapshotted, self-healing on mirrors. lz4 default. dedup / encryption optional.
+- **OpenZFS on root** — checksummed, compressed, snapshotted, self-healing on mirrors. lz4 default. Native AES-256-GCM encryption recommended and pre-selected in the installer (TPM2 auto-unlock when the hardware has it, passphrase at boot otherwise); dedup optional.
 - **ZFSBootMenu** — UEFI bootloader that understands ZFS. Boot environments. Seconds-fast rollback. No GRUB.
 - **WireGuard** — kernel-level encrypted networking. One UDP port at the firewall.
 - **eBPF observability** — BCC tools + bpftrace + an F-key tmux cockpit on the host; Cilium + Hubble + Tetragon inside the K8s profile (no kube-proxy, no iptables, no sidecars).
