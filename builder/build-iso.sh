@@ -486,8 +486,10 @@ if [[ "$EDITION" != "core" ]]; then
     # (glibc matches the Fedora rootfs):
     #   zxplore-tui — static (CGO_ENABLED=0), zero runtime deps → ALL profiles;
     #                 the ZFS console works over SSH on every kldload box.
-    #   zxplore     — Fyne GUI, needs the GL/X/wayland stack → desktop only,
-    #                 with icon + launcher. Replaces the old bash zexplore TUI.
+    #   zxplore     — Fyne GUI, needs the GL/X/wayland stack → every
+    #                 GUI-capable rootfs (desktop, kvm's GNOME shell, …),
+    #                 with icon + launcher beside the other tool tiles.
+    #                 Replaces the old bash zexplore TUI.
     # TRACKS UPSTREAM MAIN by operator decision (2026-08-02): kldload and
     # zxplore are co-developed and ship together, so a tag pin here goes stale
     # the week it lands. The trade is documented unreproducibility — every
@@ -543,7 +545,12 @@ if [[ "$EDITION" != "core" ]]; then
         die "FATAL: zxplore-tui build failed — refusing to ship an ISO without the ZFS console."
     fi
 
-    if [[ "$PROFILE" == "desktop" ]]; then
+    # GUI gate — CAPABILITY, not profile name: any rootfs shipping the GL/
+    # Wayland stack gets the GUI + launcher; headless rootfs skip it
+    # automatically. HISTORY: 2026-08-02 the kvm profile ships gnome-shell +
+    # full GL yet the old PROFILE==desktop gate left it TUI-only — the
+    # operator expects the console's tile beside sysdiag in the tray.
+    if [[ -e "${ROOTFS}/usr/lib64/libGL.so.1" && -e "${ROOTFS}/usr/lib64/libxkbcommon.so.0" ]]; then
         # `-tags gui` is MANDATORY: zxplore gates its Fyne GUI behind the `gui`
         # build tag (every gui*.go is `//go:build gui`; nogui.go is
         # `//go:build !gui`). Without the tag, `go build .` compiles the
@@ -564,7 +571,7 @@ if [[ "$EDITION" != "core" ]]; then
             # rather than ship a launcher that opens a console-less binary.
             if ! readelf -d /tmp/zxplore-src/zxplore 2>/dev/null |
                 grep -qiE 'NEEDED.*(libGL|libX11|libwayland|libxkbcommon)'; then
-                die "FATAL: zxplore built WITHOUT the GUI (no GL/X11/wayland libs) — the '-tags gui' build produced the CLI variant. Refusing to ship a desktop ISO with a headless zxplore."
+                die "FATAL: zxplore built WITHOUT the GUI (no GL/X11/wayland libs) — the '-tags gui' build produced the CLI variant. Refusing to ship a GUI-capable ISO with a headless zxplore."
             fi
             install -Dm0755 /tmp/zxplore-src/zxplore "${ROOTFS}/usr/local/bin/zxplore" ||
                 die "FATAL: zxplore binary install failed."
@@ -581,9 +588,9 @@ if [[ "$EDITION" != "core" ]]; then
             _zx_icon="/tmp/zxplore-src/assets/zxplore.svg"
             _zx_desktop="/tmp/zxplore-src/contrib/zxplore.desktop"
             [[ -r "$_zx_icon" ]] ||
-                die "FATAL: zxplore icon absent ($_zx_icon) — upstream repo moved it; desktop ISO needs an app icon."
+                die "FATAL: zxplore icon absent ($_zx_icon) — upstream repo moved it; GUI ISO needs an app icon."
             [[ -r "$_zx_desktop" ]] ||
-                die "FATAL: zxplore launcher absent ($_zx_desktop) — upstream repo moved it; desktop ISO needs a .desktop."
+                die "FATAL: zxplore launcher absent ($_zx_desktop) — upstream repo moved it; GUI ISO needs a .desktop."
             # Install into /usr/share/icons/hicolor (NOT /usr/local/share/icons):
             # this is where every other kldload app icon lives, so the installer's
             # icon-copy glob in profiles.sh picks it up for the installed target.
@@ -599,7 +606,7 @@ if [[ "$EDITION" != "core" ]]; then
             rm -rf /tmp/zxplore-src /tmp/go-cache /tmp/go
             log "zxplore installed: binary + icon + launcher (from repo)."
         else
-            die "FATAL: zxplore go build failed — refusing to ship a desktop ISO without it."
+            die "FATAL: zxplore go build failed — refusing to ship a GUI-capable ISO without it."
         fi
     fi
 

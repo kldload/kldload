@@ -905,7 +905,10 @@ DASHSTART
             for _lnch in /usr/share/applications/kldload-*.desktop \
                 /usr/share/applications/bob-*.desktop \
                 /usr/share/applications/zxplore.desktop; do
-                [[ -f "$_lnch" ]] && install -m 0644 "$_lnch" \
+                [[ -f "$_lnch" ]] || continue
+                # honor the ZFS Console opt-out (checkbox, default on)
+                [[ "$(basename "$_lnch")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
+                install -m 0644 "$_lnch" \
                     "${target}/usr/share/applications/$(basename "$_lnch")"
             done
             chroot "${target}" update-desktop-database /usr/share/applications 2>/dev/null || true
@@ -918,7 +921,10 @@ DASHSTART
                 for _ic in /${themedir}/kldload-*.svg /${themedir}/bob-*.svg \
                     /${themedir}/kst*.svg /${themedir}/ksnap.svg /${themedir}/kexport.svg \
                     /${themedir}/zxplore.svg; do
-                    [[ -f "$_ic" ]] && install -m 0644 "$_ic" \
+                    [[ -f "$_ic" ]] || continue
+                    # honor the ZFS Console opt-out (checkbox, default on)
+                    [[ "$(basename "$_ic")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
+                    install -m 0644 "$_ic" \
                         "${target}/${themedir}/$(basename "$_ic")"
                 done
             fi
@@ -1097,6 +1103,9 @@ DASHSTART
             /usr/local/bin/zxplore* /usr/local/bin/zexplore* /usr/local/bin/bob*; do
             [[ -x "$_src" ]] || continue
             _name="$(basename "$_src")"
+            # ZFS Console is an installer checkbox (default on) — honor an
+            # explicit opt-out. KLDLOAD_ENABLE_ZXPLORE from bootstrap.sh.
+            [[ "$_name" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
             case " $_skip_tools kldload-webui " in *" $_name "*) continue ;; esac
             cp "$_src" "${target}/usr/local/bin/${_name}"
             chmod +x "${target}/usr/local/bin/${_name}"

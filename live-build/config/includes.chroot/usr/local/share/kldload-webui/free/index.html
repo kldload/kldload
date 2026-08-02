@@ -1067,6 +1067,10 @@ html.kld-app #term-drawer{display:none!important;}
                   <div style="font-size:1.5rem;margin-bottom:0.3rem">📊</div>
                   <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Observability</div>
                 </div>
+                <div class="opt-card" id="opt-zxplore" onclick="toggleOpt('zxplore')" title="ZFS Console (zxplore) — keyboard-driven console for the ZFS you're installing: browse datasets/snapshots, replicate, restore files, boot environments. Static TUI on every profile; native GUI + tray icon where a desktop shell ships. Flag: KLDLOAD_ENABLE_ZXPLORE." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                  <div style="font-size:1.5rem;margin-bottom:0.3rem">🗂</div>
+                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">ZFS Console</div>
+                </div>
                 <div class="opt-card" id="opt-images" onclick="toggleOpt('images')" title="Build Images — build the 5 distro cloud-image goldens (klab) on first boot for the VM lab. Several GB download; RHEL golden needs a subscription. Flag: KLDLOAD_BUILD_IMAGES." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
                   <div style="font-size:1.5rem;margin-bottom:0.3rem">💿</div>
                   <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Build Images</div>
@@ -1078,6 +1082,7 @@ html.kld-app #term-drawer{display:none!important;}
             <input type="checkbox" id="install-nvidia" style="display:none">
             <input type="checkbox" id="install-wireguard" checked style="display:none">
             <input type="checkbox" id="install-ebpf" checked style="display:none">
+            <input type="checkbox" id="install-zxplore" checked style="display:none">
             <input type="checkbox" id="install-zfs-dedup" style="display:none">
             <input type="checkbox" id="install-k8s" style="display:none">
             <input type="checkbox" id="install-k8s-bootstrap" style="display:none">
@@ -5359,7 +5364,7 @@ const DISTRO_DESCS = {
   windows:  'Microsoft Windows — bare-metal install from your install.wim ISO (Desktop/Downloads/USB)',
 };
 function toggleOpt(name) {
-  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', images: 'install-images'};
+  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', images: 'install-images', zxplore: 'install-zxplore'};
   var cb = document.getElementById(map[name]);
   var card = document.getElementById('opt-' + name);
   if (!cb || !card) return;
@@ -5396,8 +5401,8 @@ function selectAllExtras() {
 
 // Init option cards on load
 document.addEventListener('DOMContentLoaded', function() {
-  ['wireguard','nvidia','ebpf','dedup','secure-boot','webui','bob','kvm','k8s','images'].forEach(function(name) {
-    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', images: 'install-images'};
+  ['wireguard','nvidia','ebpf','dedup','secure-boot','webui','bob','kvm','k8s','images','zxplore'].forEach(function(name) {
+    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', images: 'install-images', zxplore: 'install-zxplore'};
     var cb = document.getElementById(map[name]);
     var card = document.getElementById('opt-' + name);
     if (cb && card && cb.checked) {
@@ -5893,6 +5898,7 @@ function startInstall() {
     nvidia_drivers: document.getElementById('install-nvidia')?.checked ? '1' : '0',
     wireguard: document.getElementById('install-wireguard')?.checked ? '1' : '0',
     enable_ebpf: document.getElementById('install-ebpf')?.checked ? '1' : '0',
+    enable_zxplore: document.getElementById('install-zxplore')?.checked ? '1' : '0',
     // Secure Boot + MOK — default CHECKED in the UI (1.0.6). Installer
     // generates the kldload CA root, enrolls it as MOK on first boot
     // via MokManager, signs the ZFS kmod + ZBM with the CA key.

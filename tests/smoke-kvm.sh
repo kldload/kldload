@@ -182,6 +182,11 @@ if zxplore-tui --version 2>/dev/null | grep -q '^zxplore'; then
 else
     _fail "zxplore-tui --version" "no version output"
 fi
+# kvm ships gnome-shell + GL, so the GUI variant and its tray tile must be
+# present too (capability-gated in build-iso.sh, copied by profiles.sh).
+test_cmd "zxplore (GUI)" "zxplore"
+test_file "zxplore launcher" "/usr/share/applications/zxplore.desktop"
+test_file "zxplore icon" "/usr/share/icons/hicolor/scalable/apps/zxplore.svg"
 test_file "zxplore commit breadcrumb" "/etc/kldload/zxplore-commit"
 
 _section "eBPF / Observability"
