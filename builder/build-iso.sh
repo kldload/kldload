@@ -534,21 +534,17 @@ if [[ "$EDITION" != "core" ]]; then
     printf '%s\n' "$_zx_commit" >"${ROOTFS}/etc/kldload/zxplore-commit"
 
     # ── wgxplore — the WireGuard networks console, built from its OWN repo
-    # (github.com/kldload/wgxplore; moving to the zxplore family org later).
-    # NB: that repo is PRIVATE for now, so the anonymous clone/fetch below
-    # cannot reach it — the build therefore runs on the seeded local cache
-    # (live-build/wgxplore-cache, refreshed from the host with
-    # `git -C live-build/wgxplore-cache pull` while you hold the ssh key)
-    # and logs the cached commit. That path is the same one darksite builds
-    # take, so it is well-trodden rather than a special case. When the repo
-    # goes public the anonymous refresh starts working with no code change.
-    # Same tracks-main + cache model as zxplore above: online builds refresh
-    # the cache and ship newest, an air-gapped builder ships the cached
-    # source with a loud warning, and the ingested commit is baked into
-    # /etc/kldload/wgxplore-commit for traceability. GUI wherever the rootfs
-    # has GL (readelf-asserted), static TUI everywhere else.
+    # (github.com/wgxplore/wgxplore, public). Separate repo for the same
+    # reason as zxplore: wgxplore runs on ANY system with WireGuard, kldload
+    # is just its first-party distribution — anyone can use either explorer
+    # without kldload. Same tracks-main + cache model as zxplore above:
+    # online builds refresh the cache and ship newest, an air-gapped builder
+    # ships the cached source with a loud warning, and the ingested commit
+    # is baked into /etc/kldload/wgxplore-commit for traceability. GUI
+    # wherever the rootfs has GL (readelf-asserted), static TUI everywhere
+    # else.
     WGXPLORE_REF="${WGXPLORE_REF:-}"
-    log "Building wgxplore (${WGXPLORE_REF:-main HEAD}) from github.com/kldload/wgxplore ..."
+    log "Building wgxplore (${WGXPLORE_REF:-main HEAD}) from github.com/wgxplore/wgxplore ..."
     rm -rf /tmp/wgx-src
     _wgx_cache="/build/live-build/wgxplore-cache"
     _wgx_fresh=0
@@ -560,7 +556,7 @@ if [[ "$EDITION" != "core" ]]; then
     else
         _wgx_clone=(git clone --depth 1)
         [[ -n "$WGXPLORE_REF" ]] && _wgx_clone+=(--branch "$WGXPLORE_REF")
-        if "${_wgx_clone[@]}" https://github.com/kldload/wgxplore.git "$_wgx_cache" >>"$LOG_FILE" 2>&1; then
+        if "${_wgx_clone[@]}" https://github.com/wgxplore/wgxplore.git "$_wgx_cache" >>"$LOG_FILE" 2>&1; then
             _wgx_fresh=1
         fi
     fi
@@ -1964,6 +1960,32 @@ if [[ "$EDITION" != "core" ]]; then
         cp -r /build/live-build/config/includes.chroot/etc/skel/.vim "${ROOTFS}/etc/skel/.vim"
         cp -r /build/live-build/config/includes.chroot/etc/skel/.vim "${ROOTFS}/root/.vim"
         cp -r /build/live-build/config/includes.chroot/etc/skel/.vim "${ROOTFS}/home/live/.vim" 2>/dev/null || true
+    fi
+
+    # skel/.config — the whole tree, recursively, fanned out to skel + root +
+    # live like .bashrc/.vim above. WHY recursive: the per-file skel copies
+    # grew stale the moment includes.chroot gained .config/k9s/ (family skin
+    # + logoless config) — same shape as the build-#48 narrow-copy bug below.
+    # root gets it because ttyd-k9s.service runs k9s as root.
+    if [[ -d /build/live-build/config/includes.chroot/etc/skel/.config ]]; then
+        for _dest in "${ROOTFS}/etc/skel" "${ROOTFS}/root" "${ROOTFS}/home/live"; do
+            [[ -d "$_dest" ]] || continue
+            mkdir -p "${_dest}/.config"
+            cp -r /build/live-build/config/includes.chroot/etc/skel/.config/. \
+                "${_dest}/.config/"
+        done
+    fi
+
+    # polkit policies/rules — wgxplore's GUI depends on
+    # org.kldload.wgxplore.policy for prompt-free read-only estate refreshes
+    # (estate.go documents it as shipped). It sat in includes.chroot with NO
+    # copy block, so it reached neither the live ISO nor installs — caught on
+    # the 1.4.0-rc2 fresh-install verify (2026-08-03, host .119). Recursive
+    # so future rules.d/ additions just work.
+    if [[ -d /build/live-build/config/includes.chroot/usr/share/polkit-1 ]]; then
+        mkdir -p "${ROOTFS}/usr/share/polkit-1"
+        cp -r /build/live-build/config/includes.chroot/usr/share/polkit-1/. \
+            "${ROOTFS}/usr/share/polkit-1/"
     fi
 
     # Copy profile.d scripts (shell helpers, environment)
