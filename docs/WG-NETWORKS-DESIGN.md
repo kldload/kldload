@@ -91,6 +91,19 @@ fabric get read-only panes at most:
   installer/firstboot enroll boxes into a declared estate network;
   zrepl-over-wg0 config generation (see storage design discussions).
 
+## Remote management — ssh-native, ~/.ssh/config as the inventory
+
+Exactly zxplore's server model, inherited via the shared chassis: the far
+side needs nothing but sshd and kernel WireGuard. Declarations are
+rendered locally; applying to a remote member runs the same wg/ip
+commands over ssh (BatchMode, accept-new pinning, delegation-aware). The
+operator's existing ~/.ssh/config IS the global machine inventory — Host
+aliases, jump hosts, per-host keys all just work, so one seat manages an
+estate's networks the way one seat manages its pools. This is also the
+universality claim: anyone with plain WireGuard on any distro can build
+networks and imbue policy with this tool — kldload merely ships it wired
+in by default.
+
 ## Privilege model & policy
 
 Same discipline as zxplore, adapted to the domain:
