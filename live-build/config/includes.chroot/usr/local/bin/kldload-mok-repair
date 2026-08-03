@@ -130,7 +130,10 @@ cmd_status() {
         if command -v openssl >/dev/null 2>&1; then
             openssl x509 -inform der -in "$der" -noout -subject 2>/dev/null | sed 's/^/  /'
         fi
-        if mokutil --test-key "$der" >/dev/null 2>&1; then
+        # Parse the TEXT, not the exit code: mokutil --test-key exits 1 when
+        # the key IS enrolled and 0 when it is not — verified empirically
+        # 2026-08-03 after the inverted check misreported a live install.
+        if mokutil --test-key "$der" 2>/dev/null | grep -q 'is already enrolled'; then
             echo "${G}✓ this key is already enrolled — Secure Boot should verify the boot chain.${N}"
         else
             echo "${R}✗ this key is NOT enrolled — booting with Secure Boot ON will fail ('validation failed').${N}"
