@@ -104,6 +104,34 @@ universality claim: anyone with plain WireGuard on any distro can build
 networks and imbue policy with this tool — kldload merely ships it wired
 in by default.
 
+## Estate inventory — every device, everywhere (the headline view)
+
+A full kldload install is ~40 WireGuard endpoints: the host's own
+interfaces (wg-mgmt, wg-k8s), ~15 klab VMs (golden/blue/green × 5
+distros), the k8s golden + cluster nodes, attached containers, and the
+CNI's own encrypted interfaces. `wg show` per box does not scale to that;
+one console does. Sources, reconciled into a single list:
+
+1. **Declarations** — what SHOULD exist (the network files).
+2. **Live state** — what DOES exist: `wg show all dump` on every member
+   reachable via ~/.ssh/config, plus libvirt/podman enumeration to catch
+   VMs and containers that are attached but idle.
+3. **Drift** — the difference, which is the actually valuable pane:
+   - *declared but absent* → never came up / dead host,
+   - *live and healthy* → handshake-age coloring,
+   - **live but UNDECLARED → a peer nobody added: alarm.**
+
+That last row is intrusion detection for free: cryptokey routing means an
+undeclared peer had to be added by someone with root on a member, so its
+appearance in the reconciliation is a signal worth waking up for.
+
+**TPM-anchored membership** (with task #14's attestation work): the same
+install-time-enrolled EK that gates a Kubernetes node join gates mesh
+membership — attach requires an enrolled, attested device, so a spoofed
+host cannot be added to the fabric even with a stolen key. One attested
+event then grants storage, network, and cluster membership together; the
+inventory view is where that trust becomes visible per device.
+
 ## Privilege model & policy
 
 Same discipline as zxplore, adapted to the domain:
