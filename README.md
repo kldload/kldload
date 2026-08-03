@@ -42,22 +42,31 @@ Secure Boot and full-disk ZFS encryption both work end-to-end. The full flow:
 1. **Download &amp; burn** the ISO to a USB stick (see [Quickstart](#quickstart) above).
 2. **Boot the USB.** The installer opens automatically in the browser at
    `https://<host>:8443` &mdash; no login prompt.
-3. **Choose** your distribution, profile, and target disk. Set a **disk
-   encryption passphrase** and leave **Secure Boot** enabled (the default), then
+3. **Choose** your distribution, profile, and target disk. Encryption is
+   **pre-selected (recommended)** &mdash; set your **disk encryption
+   passphrase** &mdash; and leave **Secure Boot** enabled (the default), then
    start the install.
 4. When it finishes, a Secure-Boot install **powers the machine off** &mdash; so
    *you* control the enrollment boot instead of racing an auto-reboot.
    **Remove the USB stick.**
 5. **Power on and enter firmware setup** (usually `Del`, `F2`, or `F10`).
    **Enable Secure Boot**, then save and exit.
-6. On the next boot the blue **MokManager** screen appears:
-   **Enroll MOK &rarr; Continue &rarr; password `kldload` &rarr; Yes &rarr; Reboot.**
-7. At the **ZFSBootMenu** unlock prompt, enter your **encryption passphrase**.
+6. On the next boot the blue **MokManager** screen appears &mdash; it waits
+   **only ~10 seconds, so press any key immediately**, then:
+   **Enroll MOK &rarr; Continue &rarr; Yes &rarr; password `kldload` &rarr; Reboot.**
+   The password is literally `kldload` &mdash; *not* your admin or encryption
+   password.
+7. At the **ZFSBootMenu** unlock prompt, enter your **encryption passphrase**
+   (TPM2 hardware unlocks automatically after the first boot seals the key).
 8. The desktop loads and the console opens at `https://<host>:8443` &mdash; **no
    certificate warning, no login prompt.** Done.
 
 > **Missed the MokManager screen?** Just reboot &mdash; kldload re-offers
 > enrollment on every boot until the key is actually enrolled. No reinstall.
+> If you end up at a **"Secure Boot validation failed"** screen instead, the
+> app grid's **Secure Boot Repair** tool (or `sudo kldload-mok-repair` from
+> any terminal &mdash; including the live USB) diagnoses and queues the fix
+> in one step.
 
 ---
 
@@ -68,8 +77,9 @@ Secure Boot and full-disk ZFS encryption both work end-to-end. The full flow:
 | Symptom | Fix |
 |---|---|
 | Missed the blue MokManager screen | Reboot &mdash; enrollment is re-offered automatically. Or `sudo kldload-secure-boot reenroll`, then reboot. |
-| "Verification failed" / won't boot after enabling SB | The MOK isn't enrolled yet. Reboot to catch MokManager (password `kldload`), or turn Secure Boot off in firmware temporarily. |
-| Check enrollment / signing state | `sudo kldload-secure-boot status` (or `mokutil --list-enrolled`). |
+| "Secure Boot validation failed" / "Verification failed" at boot | The install's MOK isn't enrolled. Run **`sudo kldload-mok-repair`** (installed system or live USB) &mdash; it shows whether the boot chain's key is enrolled and `repair` queues the fix; then reboot, **press a key at the 10-second blue screen**, Reset &rarr; Enroll, password `kldload`. Or temporarily disable Secure Boot in firmware to boot and repair from the OS. |
+| Reinstalled several times / MOK operations start failing | Stale keys accumulate in NVRAM (one per install). `sudo kldload-mok-repair repair` queues a **Reset MOK list** + enrollment of the current key in one pass. |
+| Check enrollment / signing state | `sudo kldload-mok-repair` (or `kldload-secure-boot status`, `mokutil --list-enrolled`). |
 | NVIDIA or ZFS module won't load under SB | Same cause &mdash; enroll the MOK. `sudo kldload-secure-boot status` shows the module signer. |
 | Forgot the MOK password | It's `kldload` (set a different one at install with `KLDLOAD_MOK_PASSWORD`). |
 

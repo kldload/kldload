@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# ══════════════════════════════════════════════════════════════════════════
+# kldload-mok-repair — diagnose and repair Secure Boot MOK state
+# ══════════════════════════════════════════════════════════════════════════
+#
+# What it does, in order:
+#   1. status (default) — Secure Boot state, every enrolled MOK (flagging
+#      stale kldload-mok-* certs from prior installs), pending requests,
+#      and whether the ESP's ZFSBootMenu signature matches an enrolled key.
+#   2. repair — queue a MOK-list reset plus an import of the CURRENT
+#      install's key, then walk the operator through the MokManager dance
+#      (the password, the 10-second countdown) that actually applies it.
+#
+# Why it exists: every kldload install generates a fresh MOK key and signs
+# its ZFSBootMenu with it. Reinstalls therefore accumulate stale keys in
+# NVRAM (17 observed on one lab box, 2026-08-02) while the ONE key the
+# boot chain needs may never get enrolled — MokManager's 10-second prompt
+# is easy to miss and a wrong password silently consumes the request. The
+# result is "Secure Boot validation failed" at boot with no OS to fix it
+# from. This tool runs from the LIVE ISO (rescue context) or the installed
+# system and repairs that state.
+#
+# Inputs:  /var/lib/dkms/mok.der            (installed system's key), or
+#          the same file found by read-only importing the installed pool
+#          when running from the live ISO.
+# Outputs: queued MokManager requests (EFI variables); no disk writes
+#          beyond a copy of mok.der under /tmp when rescuing from live.
+# Exit:    0 ok / repair queued;  1 preflight or repair failure.
+#
+# Notes:
+#   - The MokManager password is the installer's hardcoded "kldload"
+#     (lib/security.sh). If that ever changes, change PASS here too.
+#   - Resetting wipes Fedora-CA MOK entries as well; that is safe — shim
+#     carries the Fedora vendor certificate built in.
+#   - SAFETY: the pool import for live rescue is readonly=on; nothing on
+#     the installed system is modified.
+
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+# Auto-elevate: mokutil writes EFI variables, root required.
+if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
+
+PASS="kldload" # must match lib/security.sh k_configure_mok
+G=$'\e[1;32m' R=$'\e[1;31m' Y=$'\e[1;33m' C=$'\e[1;36m' N=$'\e[0m'
+
+usage() {
+    cat <<EOF
+Usage: kldload-mok-repair [status|repair]
+
+  status   Show Secure Boot state, enrolled MOKs (stale kldload keys
+           flagged), pending requests, and whether the boot chain's
+           signature matches an enrolled key. Default.
+  repair   Queue a MOK-list reset + import of the current install's key,
+           then print the MokManager walkthrough (password: ${PASS}).
+
+Works on an installed system or from the live ISO (rescue): live mode
+finds the installed pool, imports it read-only, and uses its key.
+EOF
+    exit "${1:-0}"
+}
+
+# ─── preflight ─── EFI + mokutil or nothing here can work ────────────────
+preflight() {
+    [[ -d /sys/firmware/efi ]] || {
+        echo "${R}Not an EFI boot — Secure Boot/MOK does not apply.${N}"
+        exit 1
+    }
+    command -v mokutil >/dev/null 2>&1 || {
+        echo "${R}mokutil not installed.${N} (dnf/apt install mokutil)"
+        exit 1
+    }
+}
+
+# ─── find_mok_der ─── echo path to the install's mok.der; empty if none.
+# On the installed system this is a local file. From the live ISO the
+# installed pool is imported READ-ONLY under an altroot, the boot
+# environment located via the pool's bootfs property, and the key copied
+# to /tmp so the pool can be exported again before MokManager runs.
+find_mok_der() {
+    if [[ -f /var/lib/dkms/mok.der ]]; then
+        echo /var/lib/dkms/mok.der
+        return 0
+    fi
+    command -v zpool >/dev/null 2>&1 || return 0
+    local pool
+    pool=$(zpool import 2>/dev/null | awk '/pool:/{print $2; exit}')
+    [[ -n "$pool" ]] || return 0
+    echo "${C}Live rescue: importing pool '${pool}' read-only...${N}" >&2
+    local alt=/run/kldload-mok-recovery
+    mkdir -p "$alt"
+    zpool import -N -o readonly=on -R "$alt" "$pool" >&2 || return 0
+    local bootfs
+    bootfs=$(zpool get -H -o value bootfs "$pool")
+    # Encrypted root: ask for the passphrase to read the one file we need.
+    if [[ "$(zfs get -H -o value keystatus "$bootfs" 2>/dev/null)" == "unavailable" ]]; then
+        echo "${Y}Root dataset is encrypted — enter the ZFS passphrase:${N}" >&2
+        zfs load-key "$bootfs" >&2 || {
+            zpool export "$pool" >&2 || true
+            return 0
+        }
+    fi
+    zfs mount "$bootfs" >&2 || true
+    if [[ -f "${alt}/var/lib/dkms/mok.der" ]]; then
+        cp "${alt}/var/lib/dkms/mok.der" /tmp/kldload-rescue-mok.der
+        echo "/tmp/kldload-rescue-mok.der"
+    fi
+    zfs unmount "$bootfs" >&2 2>/dev/null || true
+    zpool export "$pool" >&2 || true
+}
+
+# ─── status ──────────────────────────────────────────────────────────────
+cmd_status() {
+    echo "${C}── Secure Boot ─────────────────────────────${N}"
+    mokutil --sb-state 2>&1 || true
+    local total stale
+    total=$(mokutil --list-enrolled 2>/dev/null | grep -c 'Subject:' || true)
+    stale=$(mokutil --list-enrolled 2>/dev/null | grep -c 'CN=kldload-mok-' || true)
+    echo "Enrolled MOKs: ${total} total, ${stale} kldload install key(s)"
+    if ((stale > 1)); then
+        echo "${Y}⚠ ${stale} kldload keys enrolled — only the newest install's key is in use; the rest are stale NVRAM bloat.${N}"
+    fi
+    local pending
+    pending=$(mokutil --list-new 2>/dev/null | grep -c 'Subject:' || true)
+    echo "Pending enrollment requests: ${pending}"
+    local der
+    der=$(find_mok_der)
+    if [[ -n "$der" ]]; then
+        echo "Install key: ${der}"
+        if command -v openssl >/dev/null 2>&1; then
+            openssl x509 -inform der -in "$der" -noout -subject 2>/dev/null | sed 's/^/  /'
+        fi
+        if mokutil --test-key "$der" >/dev/null 2>&1; then
+            echo "${G}✓ this key is already enrolled — Secure Boot should verify the boot chain.${N}"
+        else
+            echo "${R}✗ this key is NOT enrolled — booting with Secure Boot ON will fail ('validation failed').${N}"
+            echo "  Run: ${C}kldload-mok-repair repair${N}"
+        fi
+    else
+        echo "${Y}No install key found (no kldload install on local disks?).${N}"
+    fi
+}
+
+# ─── repair ──────────────────────────────────────────────────────────────
+cmd_repair() {
+    local der
+    der=$(find_mok_der)
+    [[ -n "$der" ]] || {
+        echo "${R}Cannot repair: no mok.der found on this system or any local pool.${N}"
+        exit 1
+    }
+    echo "${C}Queuing: MOK list reset (clears ALL enrolled MOKs, incl. stale kldload keys)...${N}"
+    printf '%s\n%s\n' "$PASS" "$PASS" | mokutil --reset
+    echo "${C}Queuing: enrollment of the current install key...${N}"
+    printf '%s\n%s\n' "$PASS" "$PASS" | mokutil --ignore-keyring --import "$der"
+    cat <<EOF
+
+${G}Both requests are queued.${N} On the ${Y}next reboot${N}:
+
+  1. A ${C}blue 'MOK management' screen${N} appears BEFORE the OS.
+     ${R}It waits only ~10 seconds — press any key immediately.${N}
+  2. Choose ${C}Reset MOK list${N}  → Continue → Yes → password: ${Y}${PASS}${N}
+  3. Choose ${C}Enroll MOK${N}      → Continue → Yes → password: ${Y}${PASS}${N}
+  4. Reboot. Verify with:  mokutil --list-enrolled | grep -c Subject:   (expect 1)
+  5. Secure Boot can then be enabled in firmware — the boot chain will verify.
+
+EOF
+    read -rp "Reboot now? [y/N] " a
+    [[ "${a,,}" == y* ]] && systemctl reboot
+}
+
+case "${1:-status}" in
+status) preflight && cmd_status ;;
+repair) preflight && cmd_repair ;;
+-h | --help) usage 0 ;;
+*) echo "unknown command: $1" >&2 && usage 1 ;;
+esac

@@ -54,6 +54,11 @@ def zfs():
         o.append(P(f"M{cx-rx} {y} V{y+34} A{rx} {ry} 0 0 0 {cx+rx} {y+34} V{y}"))
         o.append(f'<ellipse cx="{cx}" cy="{y}" rx="{rx}" ry="{ry}" fill="none" {S} stroke-width="11"/>')
     return "".join(o)
+def mok_repair():  # shield + keyhole = Secure Boot / MOK recovery
+    shield = P("M128 48 L198 76 V136 C198 180 168 210 128 226 "
+               "C88 210 58 180 58 136 V76 Z", w=12)
+    keyhole = Cf2(128, 122, 15) + P("M128 136 L118 172 H138 Z", True)
+    return shield + keyhole
 def zfs_manager(): # zfs stack + gear badge
     g=[];cx,rx,ry=118,46,15
     for y in (96,124,152):
@@ -161,7 +166,7 @@ ICONS = {
  # kst (System Health) launcher was removed — see commit dropping kst.desktop.
  # Generator no longer ships its icon.
  "kst-dashboard":kst_dashboard, "ksnap":ksnap, "kexport":kexport,
- "kldload-k9s":k9s,
+ "kldload-k9s":k9s, "kldload-mok-repair":mok_repair,
 }
 LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-webui":"Web UI","kldload-terminal":"Terminal","kldload-zfs":"ZFS",
@@ -169,7 +174,7 @@ LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-metrics":"Metrics","bob-chat":"Bob (jinn)","bob-gaming":"Gaming",
  "kldload-helm":"Helm","kldload-ansible":"Ansible","kldload-klab":"klab",
  "kst":"Health","kst-dashboard":"Dashboard","ksnap":"Snapshot","kexport":"Export",
- "kldload-k9s":"k9s","kldload-console":"kldload",
+ "kldload-k9s":"k9s","kldload-console":"kldload","kldload-mok-repair":"SB Repair",
 }
 
 # Colour-coded by FUNCTION GROUP so colour tells you the category at a glance
@@ -182,8 +187,9 @@ COLORS = {
  "kldload-zfs":"#4cb98a","kldload-zfs-manager":"#3fae7e","ksnap":"#6cc9a2","kexport":"#84d4b0",
  # compute — RED (was coral; user wanted a real saturated red for VMs)
  "kldload-vms":"#dc4848",
- # monitoring — orange
+ # monitoring — orange (mok-repair joins: security/health-of-boot amber)
  "kldload-metrics":"#e6a55f","kst":"#e8b878","kst-dashboard":"#edc28a",
+ "kldload-mok-repair":"#dfae64",
  # orchestration — blue
  "kldload-k8s":"#6a9fd8","kldload-k9s":"#82b0e0","kldload-helm":"#5a8fc8","kldload-klab":"#92bce8","kldload-ansible":"#7aa6d6",
  # ai — violet

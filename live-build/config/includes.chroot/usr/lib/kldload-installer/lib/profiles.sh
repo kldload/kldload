@@ -1099,8 +1099,11 @@ DASHSTART
         # found" (.116 2026-07-26). Any future non-k tool needs adding here too.
         _skip_tools="kldload-install-target kldload-overview"
         shopt -s nullglob
+        # wgx is explicit like zxplore: the WG networks console breaks the k*
+        # naming convention, so the globs would silently drop it.
         for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/_s* \
-            /usr/local/bin/zxplore* /usr/local/bin/zexplore* /usr/local/bin/bob*; do
+            /usr/local/bin/zxplore* /usr/local/bin/zexplore* /usr/local/bin/bob* \
+            /usr/local/bin/wgx; do
             [[ -x "$_src" ]] || continue
             _name="$(basename "$_src")"
             # ZFS Console is an installer checkbox (default on) — honor an

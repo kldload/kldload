@@ -533,6 +533,23 @@ if [[ "$EDITION" != "core" ]]; then
     install -d "${ROOTFS}/etc/kldload"
     printf '%s\n' "$_zx_commit" >"${ROOTFS}/etc/kldload/zxplore-commit"
 
+    # ── wgx — WireGuard networks console (PROTOTYPE, lives in-tree at
+    # tools/wgx until it gets its name and repo — see its README and
+    # docs/WG-NETWORKS-DESIGN.md). Static pure-Go; every profile: declared
+    # networks + container netns attach are substrate features, not desktop
+    # ones. When it moves upstream, this block becomes a tracks-main clone
+    # like zxplore above.
+    if (cd /build/tools/wgx &&
+        HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+            CGO_ENABLED=0 go build -trimpath -o /tmp/wgx-bin .) >>"$LOG_FILE" 2>&1; then
+        install -Dm0755 /tmp/wgx-bin "${ROOTFS}/usr/local/bin/wgx" ||
+            die "FATAL: wgx install failed."
+        rm -f /tmp/wgx-bin
+        log "wgx installed (static, all profiles)."
+    else
+        die "FATAL: wgx build failed — refusing to ship an ISO without the WG networks tool."
+    fi
+
     # Static TUI — every profile. No build tag = the terminal-only variant
     # (pure Go, no Fyne/GL); CGO_ENABLED=0 keeps it fully static.
     if (cd /tmp/zxplore-src &&

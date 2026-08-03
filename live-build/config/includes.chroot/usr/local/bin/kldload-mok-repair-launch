@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# kldload-mok-repair-launch — open the Secure Boot repair tool in a terminal
+# window. Same terminal-resolution ladder as kldload-sysdiag-launch (see its
+# header for the gnome-terminal-first rationale); smaller geometry — this is
+# a dialog-sized flow, not a tmux cockpit. The app-grid tile points here so
+# the tool works as a "GUI app" on the live ISO and installed desktops alike.
+set -u
+
+TOOL="/usr/local/bin/kldload-mok-repair"
+# Hold the window open after the tool exits so the operator can read the
+# MokManager walkthrough it printed before the terminal vanishes.
+RUN="bash -c '${TOOL}; echo; read -rp \"[press Enter to close]\"'"
+
+if command -v gnome-terminal >/dev/null 2>&1; then
+    exec gnome-terminal --geometry=100x36 -- bash -c "${TOOL}; echo; read -rp '[press Enter to close]'"
+fi
+for _t in ptyxis gnome-console kgx konsole xterm; do
+    command -v "$_t" >/dev/null 2>&1 || continue
+    case "$_t" in
+    ptyxis) exec ptyxis -- bash -c "${TOOL}; echo; read -rp '[press Enter to close]'" ;;
+    gnome-console | kgx) exec "$_t" -e "$RUN" ;;
+    konsole) exec konsole -p TerminalColumns=100 -p TerminalRows=36 -e bash -c "${TOOL}; echo; read -rp '[press Enter to close]'" ;;
+    xterm) exec xterm -geometry 100x36 -e bash -c "${TOOL}; echo; read -rp '[press Enter to close]'" ;;
+    esac
+done
+echo "kldload-mok-repair-launch: no terminal emulator found" >&2
+exit 1

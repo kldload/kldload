@@ -191,6 +191,27 @@ test_file "zxplore icon (dark, launcher face)" "/usr/share/icons/hicolor/scalabl
 test_file "zxplore icon (logo)" "/usr/share/icons/hicolor/scalable/apps/zxplore.svg"
 test_file "zxplore commit breadcrumb" "/etc/kldload/zxplore-commit"
 
+# ── Secure Boot repair tool ───────────────────────────────────────────────────
+# Rescue tooling must exist and its read-only status mode must run clean on
+# a UEFI install (the smoke VM boots UEFI, so efivars/mokutil are live).
+_section "Secure Boot Repair"
+test_cmd "kldload-mok-repair" "kldload-mok-repair"
+if kldload-mok-repair status >/dev/null 2>&1; then
+    _pass "kldload-mok-repair status runs clean"
+else
+    _fail "kldload-mok-repair status" "non-zero exit"
+fi
+test_file "SB repair launcher" "/usr/share/applications/kldload-mok-repair.desktop"
+
+# ── WG networks console (prototype) ───────────────────────────────────────────
+_section "WG Networks"
+test_cmd "wgx" "wgx"
+if wgx --help 2>/dev/null | grep -q 'WireGuard networks'; then
+    _pass "wgx --help reports"
+else
+    _fail "wgx --help" "no usage output"
+fi
+
 _section "eBPF / Observability"
 test_cmd "bpftrace" "bpftrace"
 
