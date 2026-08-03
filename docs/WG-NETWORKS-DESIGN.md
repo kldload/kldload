@@ -91,6 +91,33 @@ fabric get read-only panes at most:
   installer/firstboot enroll boxes into a declared estate network;
   zrepl-over-wg0 config generation (see storage design discussions).
 
+## Privilege model & policy
+
+Same discipline as zxplore, adapted to the domain:
+
+- **Unprivileged-first.** Declarations are plain files a user can create,
+  edit, diff, and version without root. Reading live state and every
+  mutation elevate per-command (pkexec on desktops, sudo in the TUI),
+  with the exact wg/ip command shown before it runs and appended to the
+  audit log. Destructive ops (detach, network delete, key rotation)
+  require target-name retyping, zxplore-style.
+- **add / subtract are declaration edits**, not imperative daemon calls:
+  adding a member appends to the network file; applying renders configs
+  and elevates only for the interface operations. Removing a member is
+  the reverse — and because the declaration is the source of truth, a
+  subtracted peer disappears from every other member's allowed-ips on
+  the next render.
+- **Policy compiles to cryptokey routing.** WireGuard's allowed-ips is
+  both routing AND ingress filter — a peer cannot address, and will not
+  be heard from, outside its declared scope. So "imbue policy" means
+  declaring reachability in the network file (member roles/tags:
+  full-mesh, service-only, gateway; who-sees-what subsets), and the
+  renderer emits per-member allowed-ips accordingly. Tailscale-style
+  ACLs, except enforcement is the kernel's crypto — no policy daemon, no
+  iptables management, nothing to bypass. (nftables beyond what wg-quick
+  itself emits is OUT of scope: the moment we manage a firewall we have
+  left the fabric.)
+
 ## Composition with the storage primitives (the point of it all)
 
 With zxplore managing ZFS and this tool managing networks, fleets become
