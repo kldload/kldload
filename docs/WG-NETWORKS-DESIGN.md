@@ -167,6 +167,41 @@ Same discipline as zxplore, adapted to the domain:
   itself emits is OUT of scope: the moment we manage a firewall we have
   left the fabric.)
 
+## Kubernetes as a backplane (scope, decided 2026-08-03)
+
+A fresh kldload k8s install already builds the thing worth managing:
+`wg-k8s` (10.251.0.0/24) with one peer per node, plus `wg-mgmt`
+(10.250.0.0/24) — observed on .119 the day the console shipped. Nobody
+manages those today; `kube-cluster` creates them and walks away.
+
+**In scope — the node backplane.** Node-to-node encrypted transport is a
+fabric, so it is ours: which nodes exist, which tunnels are actually
+handshaking, which node may reach which (allowed-ips IS the reachability
+policy, kernel-enforced, no rule engine), key rotation across the
+backplane, and adding/removing a node's membership. This is the
+"manage it like a backplane" ask, and it is genuinely underserved — no
+tool today shows an operator their node mesh as a thing with health.
+
+**Out of scope — pod networking.** NetworkPolicy, service routing,
+kube-proxy/eBPF datapath and per-pod firewalling belong to the CNI
+(Cilium/Calico) and to Kubernetes' own API. We do not reimplement them,
+and we do not manage iptables/nftables beyond the fabric plumbing a
+declared network needs to function. The CNI's own WireGuard interfaces
+appear in the tree **read-only**, so the operator sees the whole
+encrypted fabric — machine mesh, backplane, CNI overlay — in one view
+without us owning any of it.
+
+The line, restated: **we manage the wires between nodes; Kubernetes
+manages what rides them.** The moment we start writing NetworkPolicy or
+managing a firewall we have rebuilt a CNI badly and lost the thing that
+makes this tool worth using.
+
+**adopt (planned).** Interfaces created by other tooling (kube-cluster's
+wg-k8s, a hand-rolled wg-mgmt) currently show as UNDECLARED — correct,
+but noisy. `wgx net adopt <iface>` will import a live interface into a
+declaration so the estate has one source of truth and the undeclared row
+goes back to meaning "nobody added this".
+
 ## Composition with the storage primitives (the point of it all)
 
 With zxplore managing ZFS and this tool managing networks, fleets become
