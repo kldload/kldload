@@ -57,7 +57,7 @@ Secure Boot and full-disk ZFS encryption both work end-to-end. The full flow:
    The password is literally `kldload` &mdash; *not* your admin or encryption
    password.
 7. At the **ZFSBootMenu** unlock prompt, enter your **encryption passphrase**
-   (TPM2 hardware unlocks automatically after the first boot seals the key).
+   (TPM2 auto-unlock is on the roadmap — today the passphrase is always asked, which also means disabling Secure Boot never bypasses it).
 8. The desktop loads and the console opens at `https://<host>:8443` &mdash; **no
    certificate warning, no login prompt.** Done.
 
