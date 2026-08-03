@@ -1,7 +1,7 @@
 # WG Networks — the WireGuard primitives console (design)
 
-Captured 2026-08-02 from operator design sessions. Working name: **wgxplore**
-(final name TBD — sets the console-family convention). Sister project to
+Captured 2026-08-02 from operator design sessions. Name: **wgxplore**
+(confirmed 2026-08-02 — domains verified available; binary short-name `wgx`). Sister project to
 zxplore: own repo, BSD-3, runs on any Linux with kernel WireGuard; kldload
 is its first-party distribution.
 
