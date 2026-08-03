@@ -8,6 +8,8 @@ Pick a distro, pick a profile, install. The profiles are examples of what the su
 
 **Website:** [kldload.com](https://kldload.com) &middot; **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) &middot; **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
 
+**The family:** **kldload** — the substrate &middot; [zxplore](https://github.com/zxplore/zxplore) — the ZFS console &middot; [wgxplore](https://github.com/wgxplore/wgxplore) — the WireGuard console
+
 **Installer**
 
 ![kldload Installer](screenshots/installer-ui.png)
