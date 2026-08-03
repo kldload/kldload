@@ -211,6 +211,9 @@ if wgx --help 2>/dev/null | grep -q 'WireGuard networks'; then
 else
     _fail "wgx --help" "no usage output"
 fi
+# GUI-capable rootfs: the console must have a tile like zxplore's.
+test_file "wgxplore launcher" "/usr/share/applications/wgxplore.desktop"
+test_file "wgxplore icon" "/usr/share/icons/hicolor/scalable/apps/wgxplore.svg"
 
 _section "eBPF / Observability"
 test_cmd "bpftrace" "bpftrace"

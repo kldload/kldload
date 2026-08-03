@@ -59,6 +59,19 @@ def mok_repair():  # shield + keyhole = Secure Boot / MOK recovery
                "C88 210 58 180 58 136 V76 Z", w=12)
     keyhole = Cf2(128, 122, 15) + P("M128 136 L118 172 H138 Z", True)
     return shield + keyhole
+def wgxplore():  # mesh: hub + spokes with a locked link = WireGuard estate
+    cx = cy = 128
+    o = [C(cx, cy, 20, w=11), Cf2(cx, cy, 9)]
+    import math as _m
+    pts = []
+    for k in range(5):
+        a = _m.radians(-90 + k * 72)
+        x, y = cx + 74 * _m.cos(a), cy + 74 * _m.sin(a)
+        pts.append((x, y))
+        o.append(L(cx + 20 * _m.cos(a), cy + 20 * _m.sin(a), x, y, 9))
+        o.append(C(x, y, 12, w=9))
+    o.append(P("M" + " L".join(f"{x:.1f} {y:.1f}" for x, y in pts) + " Z", w=7))
+    return "".join(o)
 def zfs_manager(): # zfs stack + gear badge
     g=[];cx,rx,ry=118,46,15
     for y in (96,124,152):
@@ -166,7 +179,7 @@ ICONS = {
  # kst (System Health) launcher was removed — see commit dropping kst.desktop.
  # Generator no longer ships its icon.
  "kst-dashboard":kst_dashboard, "ksnap":ksnap, "kexport":kexport,
- "kldload-k9s":k9s, "kldload-mok-repair":mok_repair,
+ "kldload-k9s":k9s, "kldload-mok-repair":mok_repair, "wgxplore":wgxplore,
 }
 LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-webui":"Web UI","kldload-terminal":"Terminal","kldload-zfs":"ZFS",
@@ -175,6 +188,7 @@ LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-helm":"Helm","kldload-ansible":"Ansible","kldload-klab":"klab",
  "kst":"Health","kst-dashboard":"Dashboard","ksnap":"Snapshot","kexport":"Export",
  "kldload-k9s":"k9s","kldload-console":"kldload","kldload-mok-repair":"SB Repair",
+ "wgxplore":"WG Console",
 }
 
 # Colour-coded by FUNCTION GROUP so colour tells you the category at a glance
@@ -190,6 +204,8 @@ COLORS = {
  # monitoring — orange (mok-repair joins: security/health-of-boot amber)
  "kldload-metrics":"#e6a55f","kst":"#e8b878","kst-dashboard":"#edc28a",
  "kldload-mok-repair":"#dfae64",
+ # networking — cyan-teal (wgxplore: the fabric console)
+ "wgxplore":"#49c7c0",
  # orchestration — blue
  "kldload-k8s":"#6a9fd8","kldload-k9s":"#82b0e0","kldload-helm":"#5a8fc8","kldload-klab":"#92bce8","kldload-ansible":"#7aa6d6",
  # ai — violet

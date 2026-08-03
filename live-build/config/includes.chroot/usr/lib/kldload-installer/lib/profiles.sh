@@ -904,7 +904,8 @@ DASHSTART
             # (observed .139 2026-07-28).
             for _lnch in /usr/share/applications/kldload-*.desktop \
                 /usr/share/applications/bob-*.desktop \
-                /usr/share/applications/zxplore.desktop; do
+                /usr/share/applications/zxplore.desktop \
+                /usr/share/applications/wgxplore.desktop; do
                 [[ -f "$_lnch" ]] || continue
                 # honor the ZFS Console opt-out (checkbox, default on)
                 [[ "$(basename "$_lnch")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
@@ -920,7 +921,7 @@ DASHSTART
                 mkdir -p "${target}/${themedir}"
                 for _ic in /${themedir}/kldload-*.svg /${themedir}/bob-*.svg \
                     /${themedir}/kst*.svg /${themedir}/ksnap.svg /${themedir}/kexport.svg \
-                    /${themedir}/zxplore*.svg; do
+                    /${themedir}/zxplore*.svg /${themedir}/wgxplore.svg; do
                     [[ -f "$_ic" ]] || continue
                     # honor the ZFS Console opt-out (checkbox, default on)
                     [[ "$(basename "$_ic")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue

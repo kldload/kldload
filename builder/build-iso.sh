@@ -539,13 +539,34 @@ if [[ "$EDITION" != "core" ]]; then
     # networks + container netns attach are substrate features, not desktop
     # ones. When it moves upstream, this block becomes a tracks-main clone
     # like zxplore above.
-    if (cd /build/tools/wgx &&
+    # GUI variant wherever a GL stack exists (same capability gate as
+    # zxplore), static TUI everywhere. Vendored source is a temporary
+    # bridge — see tools/wgx/README.md.
+    if [[ -e "${ROOTFS}/usr/lib64/libGL.so.1" && -e "${ROOTFS}/usr/lib64/libxkbcommon.so.0" ]]; then
+        if (cd /build/tools/wgx &&
+            HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+                CGO_ENABLED=1 go build -trimpath -tags gui -o /tmp/wgx-bin .) >>"$LOG_FILE" 2>&1; then
+            # Assert we really built the GUI, not a silent tagless fallback —
+            # the zxplore lesson: a Fyne cgo build links the GL/X/wayland
+            # stack, the terminal build links only libc.
+            if ! readelf -d /tmp/wgx-bin 2>/dev/null |
+                grep -qiE 'NEEDED.*(libGL|libX11|libwayland|libxkbcommon)'; then
+                die "FATAL: wgx built WITHOUT the GUI (no GL/X11/wayland libs) — '-tags gui' produced the terminal variant."
+            fi
+            install -Dm0755 /tmp/wgx-bin "${ROOTFS}/usr/local/bin/wgx" ||
+                die "FATAL: wgx (GUI) install failed."
+            rm -f /tmp/wgx-bin
+            log "wgx installed (GUI + TUI, GL-capable rootfs)."
+        else
+            die "FATAL: wgx GUI build failed — refusing to ship a GUI ISO without the WG console."
+        fi
+    elif (cd /build/tools/wgx &&
         HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
             CGO_ENABLED=0 go build -trimpath -o /tmp/wgx-bin .) >>"$LOG_FILE" 2>&1; then
         install -Dm0755 /tmp/wgx-bin "${ROOTFS}/usr/local/bin/wgx" ||
             die "FATAL: wgx install failed."
         rm -f /tmp/wgx-bin
-        log "wgx installed (static, all profiles)."
+        log "wgx installed (static TUI, headless rootfs)."
     else
         die "FATAL: wgx build failed — refusing to ship an ISO without the WG networks tool."
     fi
