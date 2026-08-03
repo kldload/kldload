@@ -533,43 +533,65 @@ if [[ "$EDITION" != "core" ]]; then
     install -d "${ROOTFS}/etc/kldload"
     printf '%s\n' "$_zx_commit" >"${ROOTFS}/etc/kldload/zxplore-commit"
 
-    # ── wgx — WireGuard networks console (PROTOTYPE, lives in-tree at
-    # tools/wgx until it gets its name and repo — see its README and
-    # docs/WG-NETWORKS-DESIGN.md). Static pure-Go; every profile: declared
-    # networks + container netns attach are substrate features, not desktop
-    # ones. When it moves upstream, this block becomes a tracks-main clone
-    # like zxplore above.
-    # GUI variant wherever a GL stack exists (same capability gate as
-    # zxplore), static TUI everywhere. Vendored source is a temporary
-    # bridge — see tools/wgx/README.md.
+    # ── wgxplore — the WireGuard networks console, built from its OWN repo
+    # (github.com/kldload/wgxplore; moving to the zxplore family org later).
+    # Same tracks-main + cache model as zxplore above: online builds refresh
+    # the cache and ship newest, an air-gapped builder ships the cached
+    # source with a loud warning, and the ingested commit is baked into
+    # /etc/kldload/wgxplore-commit for traceability. GUI wherever the rootfs
+    # has GL (readelf-asserted), static TUI everywhere else.
+    WGXPLORE_REF="${WGXPLORE_REF:-}"
+    log "Building wgxplore (${WGXPLORE_REF:-main HEAD}) from github.com/kldload/wgxplore ..."
+    rm -rf /tmp/wgx-src
+    _wgx_cache="/build/live-build/wgxplore-cache"
+    _wgx_fresh=0
+    if [[ -d "${_wgx_cache}/.git" ]]; then
+        if (git -C "$_wgx_cache" fetch --depth 1 origin "${WGXPLORE_REF:-main}" &&
+            git -C "$_wgx_cache" reset --hard FETCH_HEAD) >>"$LOG_FILE" 2>&1; then
+            _wgx_fresh=1
+        fi
+    else
+        _wgx_clone=(git clone --depth 1)
+        [[ -n "$WGXPLORE_REF" ]] && _wgx_clone+=(--branch "$WGXPLORE_REF")
+        if "${_wgx_clone[@]}" https://github.com/kldload/wgxplore.git "$_wgx_cache" >>"$LOG_FILE" 2>&1; then
+            _wgx_fresh=1
+        fi
+    fi
+    [[ -d "${_wgx_cache}/.git" ]] ||
+        die "FATAL: wgxplore unavailable — no network AND no cached source at live-build/wgxplore-cache. Run one online build to populate the cache for darksite builds."
+    if ((!_wgx_fresh)); then
+        log "WARNING: wgxplore refresh failed (offline/darksite builder?) — shipping CACHED commit $(git -C "$_wgx_cache" rev-parse --short HEAD)"
+    fi
+    cp -a "$_wgx_cache" /tmp/wgx-src
+    _wgx_commit="$(git -C /tmp/wgx-src rev-parse HEAD)"
+    log "wgxplore commit: ${_wgx_commit}"
+    printf '%s\n' "$_wgx_commit" >"${ROOTFS}/etc/kldload/wgxplore-commit"
+
     if [[ -e "${ROOTFS}/usr/lib64/libGL.so.1" && -e "${ROOTFS}/usr/lib64/libxkbcommon.so.0" ]]; then
-        if (cd /build/tools/wgx &&
+        if (cd /tmp/wgx-src &&
             HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
                 CGO_ENABLED=1 go build -trimpath -tags gui -o /tmp/wgx-bin .) >>"$LOG_FILE" 2>&1; then
-            # Assert we really built the GUI, not a silent tagless fallback —
-            # the zxplore lesson: a Fyne cgo build links the GL/X/wayland
-            # stack, the terminal build links only libc.
             if ! readelf -d /tmp/wgx-bin 2>/dev/null |
                 grep -qiE 'NEEDED.*(libGL|libX11|libwayland|libxkbcommon)'; then
-                die "FATAL: wgx built WITHOUT the GUI (no GL/X11/wayland libs) — '-tags gui' produced the terminal variant."
+                die "FATAL: wgxplore built WITHOUT the GUI (no GL/X11/wayland libs) — '-tags gui' produced the terminal variant."
             fi
             install -Dm0755 /tmp/wgx-bin "${ROOTFS}/usr/local/bin/wgx" ||
                 die "FATAL: wgx (GUI) install failed."
-            rm -f /tmp/wgx-bin
             log "wgx installed (GUI + TUI, GL-capable rootfs)."
         else
-            die "FATAL: wgx GUI build failed — refusing to ship a GUI ISO without the WG console."
+            die "FATAL: wgxplore GUI build failed — refusing to ship a GUI ISO without the WG console."
         fi
-    elif (cd /build/tools/wgx &&
+    elif (cd /tmp/wgx-src &&
         HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
             CGO_ENABLED=0 go build -trimpath -o /tmp/wgx-bin .) >>"$LOG_FILE" 2>&1; then
         install -Dm0755 /tmp/wgx-bin "${ROOTFS}/usr/local/bin/wgx" ||
             die "FATAL: wgx install failed."
-        rm -f /tmp/wgx-bin
         log "wgx installed (static TUI, headless rootfs)."
     else
-        die "FATAL: wgx build failed — refusing to ship an ISO without the WG networks tool."
+        die "FATAL: wgxplore build failed — refusing to ship an ISO without the WG networks tool."
     fi
+    rm -f /tmp/wgx-bin
+    rm -rf /tmp/wgx-src
 
     # Static TUI — every profile. No build tag = the terminal-only variant
     # (pure Go, no Fyne/GL); CGO_ENABLED=0 keeps it fully static.
