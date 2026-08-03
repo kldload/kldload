@@ -535,6 +535,13 @@ if [[ "$EDITION" != "core" ]]; then
 
     # ── wgxplore — the WireGuard networks console, built from its OWN repo
     # (github.com/kldload/wgxplore; moving to the zxplore family org later).
+    # NB: that repo is PRIVATE for now, so the anonymous clone/fetch below
+    # cannot reach it — the build therefore runs on the seeded local cache
+    # (live-build/wgxplore-cache, refreshed from the host with
+    # `git -C live-build/wgxplore-cache pull` while you hold the ssh key)
+    # and logs the cached commit. That path is the same one darksite builds
+    # take, so it is well-trodden rather than a special case. When the repo
+    # goes public the anonymous refresh starts working with no code change.
     # Same tracks-main + cache model as zxplore above: online builds refresh
     # the cache and ship newest, an air-gapped builder ships the cached
     # source with a loud warning, and the ingested commit is baked into
