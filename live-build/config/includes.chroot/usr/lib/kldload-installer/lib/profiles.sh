@@ -2358,16 +2358,51 @@ KLABFB
         done
     fi
 
-    # ── SELinux on ZFS — disabled ─────────────────────────────────────────
-    # ZFS does not support xattr-based SELinux labels. All files get unlabeled_t
-    # which triggers thousands of AVC denials. Permissive still floods the
-    # console and audit log with noise. Disabled is the only clean option until
-    # OpenZFS ships proper SELinux policy modules.
-    # RPM distros only (CentOS, RHEL, Rocky, Fedora) — Debian/Ubuntu/Arch don't ship SELinux.
+    # ── SELinux on ZFS — ENFORCING, with first-boot relabel ───────────────
+    # HISTORY: this block used to force SELINUX=disabled on the belief that
+    # "ZFS does not support xattr-based SELinux labels" — that claim is
+    # outdated: labels store fine (pool default xattr=sa), and the upstream
+    # OpenZFS Root-on-ZFS guide keeps SELinux ON and simply schedules a
+    # relabel ("fixfiles -F onboot"). The 2026-07 leap incident (8b83a90:
+    # PID-1 frozen pre-sshd) was caused by loading policy against a
+    # NEVER-LABELED root — a consequence of disabling, not of ZFS. The fix
+    # is to label, not to disable. Flipped 2026-08-02 (operator decision:
+    # enforcing is the posture the security story claims).
+    #
+    # Flow: LABEL AT INSTALL TIME, from the chroot — then enforcing from
+    # boot #1. Two prior designs failed on the fedora lifecycle VM
+    # 2026-08-03 and inform this one:
+    #   (a) enforcing + first-boot relabel: PID-1 froze ("Failed to
+    #       allocate manager object: Permission denied") before the
+    #       autorelabel service could run — a live-copied root has no
+    #       labels at all;
+    #   (b) permissive + autorelabel + firstboot flip: autorelabel raced
+    #       ZFS child-dataset mounts — /var/lib etc. (own datasets) stayed
+    #       unlabeled_t, and autorelabel's completion-reboot killed
+    #       whatever was mid-flight (it nuked the test suite).
+    # Here the installer holds EVERY dataset mounted under ${target}, so a
+    # chroot setfiles labels the complete tree deterministically: no
+    # relabel boot, no mount race, no surprise reboot.
+    # Fallback if setfiles fails: the staged permissive+autorelabel flow —
+    # boots (permissive never freezes PID-1) and kldload-firstboot's
+    # SELinux block flips to enforcing once the relabel marker clears.
+    # RPM distros only — Debian/Ubuntu/Arch ship AppArmor/none, untouched.
     if [[ -f "${target}/etc/selinux/config" ]]; then
-        sed -i 's/^SELINUX=enforcing/SELINUX=disabled/' "${target}/etc/selinux/config"
-        sed -i 's/^SELINUX=permissive/SELINUX=disabled/' "${target}/etc/selinux/config"
-        k_log "SELinux disabled (ZFS has no SELinux policy — re-enable manually if needed)"
+        local _fc="etc/selinux/targeted/contexts/files/file_contexts"
+        if [[ -f "${target}/${_fc}" ]] &&
+            chroot "${target}" setfiles -F -e /proc -e /sys -e /dev \
+                "/${_fc}" / >>"${log_dir:-/var/log/installer}/selinux-label.log" 2>&1; then
+            sed -i 's/^SELINUX=disabled/SELINUX=enforcing/' "${target}/etc/selinux/config"
+            sed -i 's/^SELINUX=permissive/SELINUX=enforcing/' "${target}/etc/selinux/config"
+            k_log "SELinux: target fully labeled from chroot — ENFORCING from first boot"
+        else
+            sed -i 's/^SELINUX=disabled/SELINUX=permissive/' "${target}/etc/selinux/config"
+            sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' "${target}/etc/selinux/config"
+            # swallow: fixfiles may be absent — plain marker is equivalent
+            chroot "${target}" fixfiles -F onboot 2>/dev/null ||
+                touch "${target}/.autorelabel"
+            k_log "WARNING: chroot setfiles failed — falling back to permissive + first-boot relabel (firstboot flips to enforcing)"
+        fi
     fi
 
     k_log "System files installed (root_ds=${root_ds})"

@@ -973,6 +973,25 @@ main() {
 
     log "kldload-firstboot start — role=${ROLE} hostname=${HOSTNAME} edition=${_edition}"
 
+    # ── SELinux: flip to ENFORCING once the first-boot relabel is done ─────────
+    # The installer sets SELINUX=permissive + a forced relabel (profiles.sh):
+    # a live-copied root has NO labels, and loading enforcing policy against
+    # it freezes PID-1 before anything can run ("Failed to allocate manager
+    # object: Permission denied" — console-captured 2026-08-03, same class
+    # as the 8b83a90 leap incident). Boot #1 relabels + auto-reboots; THIS
+    # runs on boot #2 with a labeled root. Idempotent: after the flip the
+    # config no longer says permissive. RPM distros only — the config file
+    # doesn't exist elsewhere. /.autorelabel present would mean the relabel
+    # hasn't happened yet (shouldn't occur — autorelabel runs before us).
+    if [[ -f /etc/selinux/config ]] && grep -q '^SELINUX=permissive' /etc/selinux/config &&
+        [[ ! -e /.autorelabel ]]; then
+        sed -i 's/^SELINUX=permissive/SELINUX=enforcing/' /etc/selinux/config
+        # swallow: setenforce absent/EPERM only on non-SELinux kernels — the
+        # config flip above still lands enforcing from the next boot
+        setenforce 1 2>/dev/null || true
+        ok "SELinux: first-boot relabel complete — now ENFORCING (runtime + config)"
+    fi
+
     # ── Persistent journal directory ──────────────────────────────────────────
     # The installer creates /var/log/journal/ but the per-machine-id sub-dir
     # has to be created on the actual target (the live env's machine-id is
