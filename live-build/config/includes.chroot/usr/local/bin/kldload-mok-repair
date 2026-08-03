@@ -115,7 +115,10 @@ cmd_status() {
     mokutil --sb-state 2>&1 || true
     local total stale
     total=$(mokutil --list-enrolled 2>/dev/null | grep -c 'Subject:' || true)
-    stale=$(mokutil --list-enrolled 2>/dev/null | grep -c 'CN=kldload-mok-' || true)
+    # Match Subject lines ONLY: these certs are self-signed, so the CN also
+    # appears on every Issuer line and a bare grep double-counts (reported
+    # "36 of 19" on fiend 2026-08-03).
+    stale=$(mokutil --list-enrolled 2>/dev/null | grep -c 'Subject:.*CN=kldload-mok-' || true)
     echo "Enrolled MOKs: ${total} total, ${stale} kldload install key(s)"
     if ((stale > 1)); then
         echo "${Y}⚠ ${stale} kldload keys enrolled — only the newest install's key is in use; the rest are stale NVRAM bloat.${N}"
@@ -133,12 +136,31 @@ cmd_status() {
         # Parse the TEXT, not the exit code: mokutil --test-key exits 1 when
         # the key IS enrolled and 0 when it is not — verified empirically
         # 2026-08-03 after the inverted check misreported a live install.
-        if mokutil --test-key "$der" 2>/dev/null | grep -q 'is already enrolled'; then
+        # THREE states matter, and conflating the last two is what made the
+        # tool useless on its first real call (fiend, same day): a key can be
+        # enrolled, QUEUED (installer already staged it — just reboot and
+        # finish at MokManager), or absent from both.
+        local _tk
+        # `|| true` is load-bearing: --test-key exits NON-ZERO for both the
+        # enrolled and queued cases, and under `set -e` a failing command
+        # substitution aborts the function — the status output simply stopped
+        # after the subject line (observed on fiend 2026-08-03).
+        _tk="$(mokutil --test-key "$der" 2>/dev/null || true)"
+        case "$_tk" in
+        *"is already enrolled"*)
             echo "${G}✓ this key is already enrolled — Secure Boot should verify the boot chain.${N}"
-        else
+            ;;
+        *"already in the enrollment request"*)
+            echo "${Y}⏳ this key is QUEUED for enrollment — nothing to repair, you just have to finish it:${N}"
+            echo "   reboot → ${R}press a key within ~10s${N} at the blue MOK screen →"
+            echo "   ${C}Enroll MOK${N} → Continue → Yes → password ${Y}${PASS}${N} → Reboot,"
+            echo "   then enable Secure Boot in firmware."
+            ;;
+        *)
             echo "${R}✗ this key is NOT enrolled — booting with Secure Boot ON will fail ('validation failed').${N}"
             echo "  Run: ${C}kldload-mok-repair repair${N}"
-        fi
+            ;;
+        esac
     else
         echo "${Y}No install key found (no kldload install on local disks?).${N}"
     fi
@@ -152,6 +174,9 @@ cmd_repair() {
         echo "${R}Cannot repair: no mok.der found on this system or any local pool.${N}"
         exit 1
     }
+    # ORDER IS LOAD-BEARING: `mokutil --reset` clears MokNew, so it wipes any
+    # pending import. Reset FIRST, import SECOND — doing it by hand in the
+    # other order silently discards the enrollment (fiend 2026-08-03).
     echo "${C}Queuing: MOK list reset (clears ALL enrolled MOKs, incl. stale kldload keys)...${N}"
     printf '%s\n%s\n' "$PASS" "$PASS" | mokutil --reset
     echo "${C}Queuing: enrollment of the current install key...${N}"
