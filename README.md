@@ -82,6 +82,7 @@ Secure Boot and full-disk ZFS encryption both work end-to-end. The full flow:
 | Check enrollment / signing state | `sudo kldload-mok-repair` (or `kldload-secure-boot status`, `mokutil --list-enrolled`). |
 | NVIDIA or ZFS module won't load under SB | Same cause &mdash; enroll the MOK. `sudo kldload-secure-boot status` shows the module signer. |
 | Forgot the MOK password | It's `kldload` (set a different one at install with `KLDLOAD_MOK_PASSWORD`). |
+| Boots fine with SB off, fails with SB on (installed before 1.4.0-rc3) | Older builds re-signed the staged kernel with the per-install MOK key, discarding the distro's own signature. Restore it: `sudo cp /boot/vmlinuz-$(uname -r) /boot/efi/EFI/BOOT/vmlinuz` then enable Secure Boot. Fixed at install time from 1.4.0-rc3 on. |
 
 ### Console certificate warning
 

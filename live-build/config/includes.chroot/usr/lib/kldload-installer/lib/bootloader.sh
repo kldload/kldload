@@ -490,7 +490,39 @@ EOFSTAB
         # SB-on installs keep the re-sign because some distros (notably Rocky 9
         # under a CentOS-built shim whose vendor_cert doesn't chain to Rocky's CA)
         # still need it for the direct-kernel grub entry to verify.
-        if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] &&
+        # Does the staged kernel actually NEED our MOK signature?
+        # HISTORY 2026-08-03 (fiend, real hardware): re-signing a FEDORA
+        # kernel BROKE Secure Boot. Fedora's kernel is signed by the Fedora
+        # CA that Fedora's shim 16.1 already carries as its vendor cert, so
+        # the pristine kernel verifies on its own; stripping that signature
+        # and substituting a per-install MOK leaf made SB boot die at GRUB's
+        # load-kernel step EVEN WITH the MOK correctly enrolled (verified:
+        # mokutil --test-key said "already enrolled", ZBM + zfs.ko both
+        # MOK-signed and fine). Swapping the pristine kernel back onto the
+        # ESP booted immediately — SecureBoot enabled, lockdown=integrity,
+        # ZFS loaded. So: re-sign ONLY where the distro's own kernel
+        # signature cannot chain to the shim we ship (the documented Rocky-
+        # under-CentOS-shim case, .109/.128 2026-05-04), or where the kernel
+        # carries no signature at all. Never strip a good vendor signature.
+        local _need_resign=0
+        case "${KLDLOAD_DISTRO:-}" in
+        rocky)
+            _need_resign=1
+            ;;
+        *)
+            if command -v sbverify >/dev/null 2>&1 &&
+                ! sbverify --list "${zbm_fallback_dir}/vmlinuz" >/dev/null 2>&1; then
+                _need_resign=1 # unsigned kernel — our leaf beats nothing
+            fi
+            ;;
+        esac
+
+        if ((_need_resign == 0)) && [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]]; then
+            k_log "Kernel re-sign skipped — ${KLDLOAD_DISTRO:-distro} kernel keeps its vendor signature (shim's vendor cert validates it; re-signing broke SB on Fedora 2026-08-03)"
+        fi
+
+        if ((_need_resign)) &&
+            [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] &&
             [[ -f "$_mok_key" && -f "$_mok_pub" ]] &&
             command -v sbsign >/dev/null 2>&1; then
             local _signed="${zbm_fallback_dir}/vmlinuz.signed"
