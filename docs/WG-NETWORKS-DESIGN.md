@@ -91,6 +91,28 @@ fabric get read-only panes at most:
   installer/firstboot enroll boxes into a declared estate network;
   zrepl-over-wg0 config generation (see storage design discussions).
 
+## Composition with the storage primitives (the point of it all)
+
+With zxplore managing ZFS and this tool managing networks, fleets become
+à-la-carte: **clone-time network membership**. kldload VMs are ZFS clones
+of golden snapshots — near-free to stamp. Add one step to kvm-clone/klab:
+generate a keypair, append the member to the network's declaration,
+inject the peer config via cloud-init. Then:
+
+- Build the 27 goldens once. Clone 50 more — **all 50 are on the estate
+  mesh at first boot**, or on their own freshly declared hub-spoke,
+  chosen per clone batch. No DHCP archaeology, no per-VM setup: storage
+  primitive (instant clone) × network primitive (declared attach) =
+  connected fleets materialize in one command.
+- This also dissolves the nested-lab subnet problem at its root (see the
+  subnet-aware-networking backlog item): lab VMs addressed on a declared
+  WG network stop depending on which 192.168.122.0/24 their host's
+  libvirt NAT could or could not claim. The NAT bridge becomes mere
+  transport; identity and reachability live in the mesh.
+- The IaC layers above compose unchanged: Terraform/OpenTofu creates
+  machines; the substrate answers with machines that are already
+  storage-managed and network-attached. Layer 0 keeps its promise.
+
 ## Open decisions
 
 - Name + org (family convention: zxplore sibling; operator to confirm).
