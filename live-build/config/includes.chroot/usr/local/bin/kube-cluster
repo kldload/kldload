@@ -331,8 +331,24 @@ _preflight_control_planes() {
     # subtract the workers this run will also stand up.
     local avail_mem
     avail_mem="$(free -m 2>/dev/null | awk '/^Mem:/ {print $7}')"
+    # WHY the ARC correction: every kldload box is root-on-ZFS, and free(1)
+    # counts the ZFS ARC as *used* even though it shrinks under memory
+    # pressure. Right after an install the ARC is fat from installer I/O, so
+    # "available" undercounts by tens of GB and this preflight silently
+    # demoted a 3-CP HA request to 1 on a 64 GB host (seen .119 2026-08-03:
+    # avail 16 GB, ARC holding 21 GB reclaimable). Reclaimable ARC =
+    # size - c_min from arcstats; add it back into the budget.
+    local arc_reclaim_mb=0
+    if [[ -r /proc/spl/kstat/zfs/arcstats ]]; then
+        arc_reclaim_mb=$(awk '$1=="size"{s=$3} $1=="c_min"{m=$3}
+            END{if (s>m) printf "%d",(s-m)/1048576; else print 0}' \
+            /proc/spl/kstat/zfs/arcstats 2>/dev/null)
+    fi
+    [[ "$arc_reclaim_mb" =~ ^[0-9]+$ ]] || arc_reclaim_mb=0
+    ((arc_reclaim_mb > 0)) &&
+        log "RAM budget: ${avail_mem}MB available + ${arc_reclaim_mb}MB reclaimable ZFS ARC"
     if [[ "$avail_mem" =~ ^[0-9]+$ ]]; then
-        local budget=$((avail_mem - 2048 - WORKERS * RAM))
+        local budget=$((avail_mem + arc_reclaim_mb - 2048 - WORKERS * RAM))
         local fit=0
         ((CP_RAM > 0)) && fit=$((budget / CP_RAM))
         ((fit < 1)) && fit=1
@@ -1722,6 +1738,24 @@ cmd_bootstrap() {
                 [[ -n "${worker_ips[$i]}" ]] && _ssh_cmd "${worker_ips[$i]}" "kube-network pin-kubelet" || true
             done
             log "WireGuard full mesh configured (${WORKERS} workers + CP)"
+
+            # wgx estate inventory — the console scans ~/.config/wgx/hosts
+            # (or ~/.ssh/config) to show remote hosts; without this file the
+            # estate view shows only the hypervisor and the cluster's nodes
+            # appear as bare peer keys, not hosts (operator hit this on the
+            # first 1.4.0-rc2 install: "shouldn't I see a full tree?").
+            # We know every node IP right here, so write the inventory now —
+            # the full host → interface → peer tree is the out-of-box view.
+            local _wgx_inv=/root/.config/wgx/hosts
+            mkdir -p /root/.config/wgx
+            {
+                echo "# k8s backplane nodes — written by kube-cluster bootstrap"
+                echo "root@${cp_ip}"
+                for i in $(seq 0 $((WORKERS - 1))); do
+                    [[ -n "${worker_ips[$i]:-}" ]] && echo "root@${worker_ips[$i]}"
+                done
+            } >"$_wgx_inv"
+            log "wgx estate inventory written: $_wgx_inv ($((WORKERS + 1)) nodes)"
         else
             warn "WireGuard key exchange failed — cluster will use LAN networking"
         fi
