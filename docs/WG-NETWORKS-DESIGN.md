@@ -120,6 +120,14 @@ Same discipline as zxplore, adapted to the domain:
   the reverse — and because the declaration is the source of truth, a
   subtracted peer disappears from every other member's allowed-ips on
   the next render.
+- **Fabric plumbing is IN scope** (refined 2026-08-02): a declared network
+  implies host facts that must be true or the network does not work — the
+  hub's listen port open, ip_forward on hubs/gateways, the joined-gateway
+  route. `net up` emits exactly these (additive firewalld/nftables rules,
+  one per network, shown before applied, removed on `net down`).
+  "Everything just works" means the network finishes its own promise —
+  NOT that the tool becomes a general firewall/NetworkManager. Positioning:
+  NetworkManager : interfaces :: this tool : networks.
 - **Policy compiles to cryptokey routing.** WireGuard's allowed-ips is
   both routing AND ingress filter — a peer cannot address, and will not
   be heard from, outside its declared scope. So "imbue policy" means
