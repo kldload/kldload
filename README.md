@@ -275,7 +275,7 @@ enroll the MOK (password `kldload`), unlock with your passphrase, and boot into 
 clean, signed, encrypted system. See
 [Installing with Secure Boot &amp; encryption](#installing-with-secure-boot--encryption).
 
-**[zxplore](https://zxplore.dev) &mdash; the universal ZFS console (new)**
+**[zxplore](https://github.com/zxplore/zxplore) &mdash; the universal ZFS console (new)**
 - A native desktop app for the whole ZFS lifecycle: browse datasets, a live
   4-column dossier, snapshot / clone / rollback, replicate (local&harr;remote
   and server-to-server), boot environments, encryption keys, pool scrub / trim,
@@ -287,6 +287,16 @@ clean, signed, encrypted system. See
   [github.com/zxplore/zxplore](https://github.com/zxplore/zxplore). On kldload
   it auto-detects the `k`-commands and lights up extra tools. Replaces the older
   bundled ZFS utilities. `zxplore --tui` for headless/SSH.
+
+**[wgxplore](https://github.com/wgxplore/wgxplore) &mdash; the WireGuard networks console (new)**
+- The same console, one domain over: every host, interface and peer in one
+  tree, read live from the kernel over plain SSH &mdash; so the encrypted
+  backplane under your VMs and Kubernetes nodes is something you can *see*.
+- Declares networks as small files, renders them to plain WireGuard configs,
+  and flags any peer that is running but was never declared.
+- Independent and universal like its sibling: it manages estates it did not
+  create, and any device that speaks WireGuard can join one it did. Baked into
+  every kldload profile; `wgx` on every install, GUI where there's a screen.
 
 **Console &amp; access**
 - **Zero-prompt on-box console.** The web console (`:8443`) authenticates you
@@ -321,7 +331,7 @@ clean, signed, encrypted system. See
 - **One image, many substrates** &mdash; RHEL / Rocky / CentOS Stream / Fedora /
   Debian / Ubuntu / Arch, picked at install; upstream packages thereafter.
 - **ZFS-native** &mdash; boot environments, snapshots, and replication are
-  first-class; [zxplore](https://zxplore.dev) is the desktop face.
+  first-class; [zxplore](https://github.com/zxplore/zxplore) is the desktop face.
 - **One click to a cluster** &mdash; a KVM host, a real multi-node Kubernetes
   cluster, and a full observability plane (Prometheus / Grafana / Cilium+Hubble /
   Tetragon) stand up on first boot.
