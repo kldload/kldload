@@ -142,8 +142,8 @@ bad rename is easy to bisect. After each: `shfmt -w -i 4`, `shellcheck -S error`
   — **stale R2 = wrong download**. Re-upload under the new key, flip the website
   link in the same change.
 - **Website repo**: pages + screenshots (anything showing the old name/branding).
-- **claude-brain repo**: `CLAUDE.md` + memories reference `kldload`; update after
-  the code cutover so future sessions use the new name. The **commit identity**
+- **Private ops notes**: internal runbooks and working notes reference `kldload`;
+  update after the code cutover so the new name is used everywhere. The **commit identity**
   (`kldload <anthony@kldload.com>`) is a separate decision — tied to the person/
   email, not the product; change only if the email domain moves.
 
