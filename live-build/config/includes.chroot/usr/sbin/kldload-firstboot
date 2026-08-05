@@ -1472,6 +1472,29 @@ main() {
     # heal attempt.
     if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]] &&
         command -v dnf >/dev/null 2>&1; then
+        # steam lives in RPM Fusion, but RPM Fusion enablement used to hide
+        # inside the NVIDIA healing net above — Intel/AMD boxes never got the
+        # repo, so the steam heal below failed 3x with "No match for argument:
+        # steam" on every non-NVIDIA Fedora desktop (XPS 13 fresh install,
+        # 2026-08-05). Ensure the release packages here, GPU-agnostic, before
+        # the loop needs them. Fedora-only: EL gets Steam via Flathub instead.
+        if rpm -E %fedora 2>/dev/null | grep -qE '^[0-9]+$' &&
+            ! rpm -q rpmfusion-nonfree-release >/dev/null 2>&1 &&
+            ! rpm -q steam >/dev/null 2>&1; then
+            _fedver_heal="$(rpm -E %fedora)"
+            if curl -fsS -m 8 -o /dev/null https://mirrors.rpmfusion.org/ 2>/dev/null; then
+                if dnf install -y \
+                    "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${_fedver_heal}.noarch.rpm" \
+                    "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${_fedver_heal}.noarch.rpm" \
+                    >>"$LOG" 2>&1; then
+                    ok "RPM Fusion enabled (steam prerequisite, GPU-agnostic)"
+                else
+                    log "WARNING: RPM Fusion release install failed — steam heal below will miss; see $LOG"
+                fi
+            else
+                log "WARNING: no network to RPM Fusion — steam will miss below and be queued for the network-up heal hook"
+            fi
+        fi
         for _pkg in vim-X11 steam \
             libbpf-tools bpftrace bcc-tools \
             libvirt-daemon-driver-network libvirt-daemon-config-network; do
@@ -1491,7 +1514,14 @@ main() {
                 ok "healed desktop package: $_pkg"
                 _healed_any=1
             else
-                log "WARNING: could not install $_pkg after 3 tries (offline? not in repo?) — feature degraded but boot is fine"
+                # Fail nicer: queue the miss for the NetworkManager dispatcher
+                # hook (98-kldload-heal-pending), which retries on every
+                # network-up until it lands. firstboot runs ONCE — without the
+                # queue a miss here was permanent (steam, XPS 13 2026-08-05).
+                mkdir -p /var/lib/kldload
+                grep -qx "$_pkg" /var/lib/kldload/heal-pending 2>/dev/null ||
+                    printf '%s\n' "$_pkg" >>/var/lib/kldload/heal-pending
+                log "WARNING: could not install $_pkg after 3 tries — queued in /var/lib/kldload/heal-pending; auto-retries on next network-up"
             fi
         done
         # A package healed LATE — after the login session already built its app

@@ -1042,6 +1042,41 @@ X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=8
 AUTOSTART
 
+    # Relaunch path — the autostart above opens the installer UI ONCE, but
+    # xdg-autostart entries never appear in the app grid. Operator on the
+    # 1.4.0-rc2 live ISO (2026-08-04): closed the installer window and had
+    # NO way back — no Win+A icon, and stock Chrome's default page isn't
+    # the UI. Two live-only artifacts fix it; BOTH carry the `-live` suffix
+    # and are removed by profiles.sh at install time (installed systems get
+    # their surface from the profile, never from live leftovers):
+    #   1. a VISIBLE grid launcher, so closing the window is recoverable;
+    #   2. a Chrome managed policy so even a stock Chrome launch lands on
+    #      the UI instead of a blank new-tab page.
+    mkdir -p "${ROOTFS}/usr/share/applications"
+    cat >"${ROOTFS}/usr/share/applications/kldload-installer-live.desktop" <<'LIVEDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Install kldload
+GenericName=System installer
+Comment=Reopen the kldload installer UI
+Exec=/usr/local/bin/kldload-webui-launch
+Icon=kldload-console
+StartupWMClass=com.kldload.webui
+Terminal=false
+Categories=System;
+StartupNotify=true
+LIVEDESKTOP
+    mkdir -p "${ROOTFS}/etc/opt/chrome/policies/managed"
+    cat >"${ROOTFS}/etc/opt/chrome/policies/managed/kldload-live.json" <<'LIVECHROME'
+{
+  "RestoreOnStartup": 4,
+  "RestoreOnStartupURLs": ["https://localhost:8443"],
+  "HomepageLocation": "https://localhost:8443",
+  "HomepageIsNewTabPage": false,
+  "ShowHomeButton": true
+}
+LIVECHROME
+
     # Disable screensaver / screen blank / auto-lock on live session
     # Method 1: dconf system database (GNOME settings)
     #
@@ -1645,6 +1680,7 @@ if [[ "$EDITION" != "core" ]]; then
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/promtail.service \
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-*.service \
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-*.timer \
+        /build/live-build/config/includes.chroot/usr/lib/systemd/system/zexplore-api.service \
         /build/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-session@.service; do
         [[ -f "$_unit_path" ]] && cp "$_unit_path" "${ROOTFS}/usr/lib/systemd/system/$(basename "$_unit_path")"
     done
@@ -1760,6 +1796,15 @@ if [[ "$EDITION" != "core" ]]; then
         install -m 0755 \
             /build/live-build/config/includes.chroot/etc/NetworkManager/dispatcher.d/99-kldload-tls-cert \
             "${ROOTFS}/etc/NetworkManager/dispatcher.d/99-kldload-tls-cert"
+    fi
+    # Heal-pending retry hook — re-attempts firstboot's missed desktop
+    # packages (steam et al) whenever a network comes up. See the hook's
+    # banner for the why.
+    if [[ -f /build/live-build/config/includes.chroot/etc/NetworkManager/dispatcher.d/98-kldload-heal-pending ]]; then
+        mkdir -p "${ROOTFS}/etc/NetworkManager/dispatcher.d"
+        install -m 0755 \
+            /build/live-build/config/includes.chroot/etc/NetworkManager/dispatcher.d/98-kldload-heal-pending \
+            "${ROOTFS}/etc/NetworkManager/dispatcher.d/98-kldload-heal-pending"
     fi
 
     # /etc/kldload — admin-editable config dir (tls-extra-sans.txt etc.)

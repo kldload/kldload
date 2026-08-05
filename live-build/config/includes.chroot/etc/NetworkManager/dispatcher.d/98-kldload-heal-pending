@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# 98-kldload-heal-pending — retry failed desktop-package heals when a network
+# actually exists.
+#
+# What it does, in order:
+#   1. Fires on NetworkManager 'up' / 'connectivity-change' events only.
+#   2. If /var/lib/kldload/heal-pending lists packages (written by
+#      kldload-firstboot's healing net when a dnf install missed), probes for
+#      real reachability, ensures RPM Fusion when steam is queued (Fedora,
+#      GPU-agnostic), then retries each package.
+#   3. Successes leave the queue; failures stay queued for the next event.
+#      When the queue empties, the file is removed and desktop/icon caches
+#      are rebuilt so late-healed apps appear in the grid WITHOUT a re-login.
+#
+# WHY: kldload-firstboot runs exactly once (firstboot-done gate). Before this
+# hook, a package that missed there — most often because first boot raced the
+# network, or a repo prerequisite was absent — stayed missing forever with
+# only a log-line WARNING (steam on the XPS 13, 2026-08-05). Retrying on
+# network-up matches the failure cause instead of a blind timer.
+#
+# INPUT:  $1 = interface, $2 = action (NetworkManager dispatcher contract).
+# STATE:  /var/lib/kldload/heal-pending — one package name per line.
+# OUTPUT: /var/log/kldload/heal.log
+# Notes:  flock guard — dispatcher can fire for several interfaces at once.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+
+IFACE="${1:-}"
+ACTION="${2:-}"
+PENDING=/var/lib/kldload/heal-pending
+LOG=/var/log/kldload/heal.log
+
+case "$ACTION" in
+up | connectivity-change) ;;
+*) exit 0 ;;
+esac
+[[ -s "$PENDING" ]] || exit 0
+command -v dnf >/dev/null 2>&1 || exit 0
+
+exec 9>/run/kldload-heal.lock
+flock -n 9 || exit 0
+
+mkdir -p /var/log/kldload
+_log() { printf '[%s] [heal] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
+
+# Real-reachability probe — dispatcher 'up' can precede usable routes/DNS.
+if ! curl -fsS -m 8 -o /dev/null https://mirrors.rpmfusion.org/ 2>/dev/null &&
+    ! curl -fsS -m 8 -o /dev/null https://fedoraproject.org/ 2>/dev/null; then
+    _log "network probe failed on ${IFACE}/${ACTION} — queue kept for next event"
+    exit 0
+fi
+
+# steam prerequisite: RPM Fusion release packages, Fedora only, any GPU —
+# same ensure kldload-firstboot does; duplicated here because this hook must
+# stand alone on systems whose firstboot predates that fix.
+if grep -qx steam "$PENDING" 2>/dev/null &&
+    rpm -E %fedora 2>/dev/null | grep -qE '^[0-9]+$' &&
+    ! rpm -q rpmfusion-nonfree-release >/dev/null 2>&1; then
+    _fedver="$(rpm -E %fedora)"
+    dnf install -y \
+        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${_fedver}.noarch.rpm" \
+        "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${_fedver}.noarch.rpm" \
+        >>"$LOG" 2>&1 || _log "WARNING: RPM Fusion release install failed — steam retry will miss"
+fi
+
+_still=()
+while IFS= read -r _pkg; do
+    [[ -n "$_pkg" ]] || continue
+    if rpm -q "$_pkg" >/dev/null 2>&1 || dnf install -y "$_pkg" >>"$LOG" 2>&1; then
+        _log "healed: $_pkg"
+    else
+        _log "still missing: $_pkg — kept queued"
+        _still+=("$_pkg")
+    fi
+done <"$PENDING"
+
+if ((${#_still[@]})); then
+    printf '%s\n' "${_still[@]}" >"$PENDING"
+else
+    rm -f "$PENDING"
+    _log "heal queue empty — all pending packages installed"
+fi
+
+# Late-healed apps stay invisible until the desktop DB + icon caches rebuild
+# (same lesson as firstboot's own heal block, found on .111 2026-07-25).
+command -v update-desktop-database >/dev/null 2>&1 &&
+    update-desktop-database /usr/share/applications >>"$LOG" 2>&1 || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 &&
+    gtk-update-icon-cache -f /usr/share/icons/hicolor >>"$LOG" 2>&1 || true

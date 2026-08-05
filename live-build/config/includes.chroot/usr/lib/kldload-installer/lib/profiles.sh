@@ -131,6 +131,16 @@ k_profile_packages() {
         local _viewer="loupe"
         local _terminal="gnome-terminal"
         local _nm="network-manager"
+        # WiFi/NIC firmware must be INSTALLED ON TARGET, not just on the live
+        # ISO. HISTORY: b682 laptop (2026-08-04) and the fresh 1.4.0-rc2
+        # install (2026-08-05) both landed with ZERO iwlwifi firmware — the
+        # AX201 never probed ("no suitable firmware found" / silent no-probe).
+        # build-iso.sh ships the blobs on the LIVE image, but the target's
+        # package transaction never included them, so every real laptop lost
+        # wifi after install. CI can't catch this (VMs have no wifi NIC).
+        # Debian: non-free-firmware component is already in bootstrap.sh's
+        # sources. Per-distro names differ — see the branches below.
+        local _fw="firmware-iwlwifi firmware-realtek firmware-atheros"
         # Debian/Ubuntu desktop profile uses LightDM, NOT gdm3. GDM 48 on
         # Debian Trixie has a systemd-integration bug where it can't pass
         # the session type to gnome-session — gnome-session-binary errors:
@@ -157,6 +167,8 @@ k_profile_packages() {
         if [[ "$_distro" == "ubuntu" ]]; then
             _browser="epiphany-browser"
             _viewer="eog"
+            # Ubuntu keeps the monolithic linux-firmware package (main).
+            _fw="linux-firmware"
             # Ubuntu 24.04 LTS ships GDM 46, not affected by the GDM 48
             # systemd-integration bug we hit on Debian Trixie. Keep gdm3
             # there. (Switch to lightdm if/when Ubuntu lands GDM 48 with
@@ -184,6 +196,13 @@ k_profile_packages() {
             _viewer="eog loupe"
             _terminal="gnome-terminal ptyxis"
             _nm="NetworkManager NetworkManager-wifi NetworkManager-tui"
+            # EL keeps monolithic linux-firmware; F43+ split the blobs into
+            # per-vendor sub-packages and bare linux-firmware carries only
+            # licenses — same list build-iso.sh ships on the live image.
+            _fw="linux-firmware"
+            if [[ "$_distro" == "fedora" ]]; then
+                _fw="linux-firmware iwlwifi-dvm-firmware iwlwifi-mvm-firmware iwlwifi-mld-firmware iwlegacy-firmware realtek-firmware atheros-firmware"
+            fi
             # GDM works on RPM distros once the right session-files package
             # is present. The bug seen on Rocky 9 desktop install 2026-05-04:
             #   "Gdm: GdmSession: no session desktop files installed, aborting"
@@ -235,7 +254,7 @@ k_profile_packages() {
         # GTK4 + WebKit 6.0 stack the per-launcher webview Python script
         # imports. Missing on .139 b651 reinstall 2026-06-11 broke every
         # dock launcher except sysdiag / k9s / Bob.
-        echo "openssh-server sudo curl ca-certificates vim nano less ${_nm} \
+        echo "openssh-server sudo curl ca-certificates vim nano less ${_nm} ${_fw} \
         gnome-shell gnome-session ${_xsession_pkg} gnome-control-center gnome-settings-daemon \
         ${_gdm} nautilus ${_terminal} ${_viewer} \
         adwaita-icon-theme ${_fonts} gvfs ${_gvfs_extra} \
@@ -559,7 +578,11 @@ k_install_system_files() {
         # when bootstrap.sh wrote /var/lib/klab/.rhel-composer-pending (RHEL
         # distro selected). Builds the 6th klab golden via osbuild-composer.
         mkdir -p "${target}/usr/lib/systemd/system"
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rag.service kldload-rag-firstboot.service kldload-rag-index.service kldload-rag-index.timer kldload-rhel-composer.service; do
+        # zexplore-api.service added 2026-08-05 — the guest ZFS-transaction
+        # daemon was enabled by build-iso.sh but never copied to target
+        # (unit "not-found" on the fresh 1.4.0-rc2 install; the `enable ||
+        # true` swallowed it).
+        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rag.service kldload-rag-firstboot.service kldload-rag-index.service kldload-rag-index.timer kldload-rhel-composer.service zexplore-api.service; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
@@ -1325,6 +1348,18 @@ LOCKS
             k_log "carried xdg-autostart: $_au"
         done
     fi
+
+    # ── Live-only artifacts never ship installed ──────────────────────────────
+    # build-iso.sh stamps the live rootfs with `-live`-suffixed surface bits:
+    # the "Install kldload" grid launcher (relaunch path after the operator
+    # closes the autostarted installer window — 1.4.0-rc2 live bug, 2026-08-04)
+    # and a Chrome managed policy that points a stock Chrome launch at the UI.
+    # Neither makes sense on an installed system — an "Install" icon on the
+    # installed grid reads as broken, and the Chrome policy would hijack every
+    # browser launch. Applies to ALL profiles, so it lives here in the common
+    # path, not the desktop-only branch.
+    rm -f "${target}/usr/share/applications/kldload-installer-live.desktop" \
+        "${target}/etc/opt/chrome/policies/managed/kldload-live.json"
     if [[ -d /usr/lib/tmpfiles.d ]]; then
         mkdir -p "${target}/usr/lib/tmpfiles.d"
         for _tf in /usr/lib/tmpfiles.d/kldload-*.conf; do
@@ -1482,7 +1517,9 @@ DCONF
     # redundant against Bob + Grafana). The kst-dashboard binary stays under
     # /usr/local/bin/ for terminal users; just no app-grid tile.
     mkdir -p "${target}/usr/share/applications"
-    for _dt in ksnap.desktop kexport.desktop; do
+    # ksnap.desktop retired 2026-08-04 (FOSSY pass): snapshot management is
+    # zxplore's job now; the ksnap CLI itself still ships for terminal users.
+    for _dt in kexport.desktop; do
         [[ -f "/usr/share/applications/${_dt}" ]] &&
             cp "/usr/share/applications/${_dt}" "${target}/usr/share/applications/${_dt}"
     done
@@ -1885,6 +1922,13 @@ REPL
             mkdir -p "${target}/etc/NetworkManager/dispatcher.d"
             install -m 0755 /etc/NetworkManager/dispatcher.d/99-kldload-tls-cert \
                 "${target}/etc/NetworkManager/dispatcher.d/99-kldload-tls-cert"
+        fi
+        # Heal-pending retry hook — firstboot's missed packages auto-retry on
+        # network-up instead of staying missing forever (steam, 2026-08-05).
+        if [[ -f /etc/NetworkManager/dispatcher.d/98-kldload-heal-pending ]]; then
+            mkdir -p "${target}/etc/NetworkManager/dispatcher.d"
+            install -m 0755 /etc/NetworkManager/dispatcher.d/98-kldload-heal-pending \
+                "${target}/etc/NetworkManager/dispatcher.d/98-kldload-heal-pending"
         fi
         # Admin-editable TLS extra-SANs config (custom DNS names / VIPs)
         if [[ -d /etc/kldload ]]; then
