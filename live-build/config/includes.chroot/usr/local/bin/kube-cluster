@@ -793,11 +793,17 @@ find_cloud_image() {
         return 0
     fi
 
-    # Search common locations — prefer images matching host distro
+    # Search common locations — prefer images matching host distro.
+    # NB: the Fedora download below saves as "Fedora-Cloud-Base-…" (capital C)
+    # but this finder only matched lowercase "-cloud" — so the cache was
+    # INVISIBLE to every subsequent run and "rebuild cluster" re-downloaded
+    # ~500MB (and died outright with no network — FOSSY laptop, 2026-08-05,
+    # "could not resolve download.fedoraproject.org" on a box with the image
+    # already on disk). Match the capitalised spelling too.
     local search_dirs=("/var/lib/libvirt/isos" "/root" "/tmp")
     for dir in "${search_dirs[@]}"; do
         for img in "${dir}"/*-GenericCloud*.qcow2 "${dir}"/*-genericcloud*.qcow2 \
-            "${dir}"/*-cloud*.qcow2 "${dir}"/*nocloud*.qcow2; do
+            "${dir}"/*-Cloud*.qcow2 "${dir}"/*-cloud*.qcow2 "${dir}"/*nocloud*.qcow2; do
             [[ -f "$img" ]] && {
                 echo "$img"
                 return 0
