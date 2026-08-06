@@ -421,6 +421,13 @@ Commands:
   destroy     Tear down the cluster (VMs + zvols)
   status      Show cluster status
   scale N     Add N more workers to existing cluster
+  start [N]   Power the EXISTING cluster back on (CP + workers) and wait for
+              Ready. Cluster VMs do NOT autostart on boot by design (avoids a
+              first-boot reboot storm), so this is how an off cluster comes
+              back. Optional N caps how many workers to start (default: all
+              defined — pass e.g. `start 1` on a RAM-tight host).
+  stop        Gracefully power the cluster off (workers first, then CP). The
+              VMs + zvols stay defined; `start` brings it back.
 
 Options:
   --workers N      Number of worker nodes (default: 0 — CP runs all platform pods)
@@ -449,6 +456,9 @@ Examples:
   kube-cluster bootstrap --ram 8192       # 8GB RAM per node
   kube-cluster destroy                    # tear down everything
   kube-cluster status                     # cluster health
+  kube-cluster start                      # power an off cluster back on
+  kube-cluster start 1                    # ...but only the CP + 1 worker
+  kube-cluster stop                       # power it off, keep the VMs
 EOF
     exit 1
 }
@@ -494,7 +504,19 @@ while [[ $# -gt 0 ]]; do
         YES_FLAG=1
         shift
         ;;
-    *) die "Unknown option: $1" ;;
+    *)
+        # A bare integer is a positional count for `scale`/`start` — the webui
+        # calls `kube-cluster scale 3` (and its own comment documents that
+        # form), which used to die "Unknown option: 3" because only --workers
+        # was parsed. Map it to CONTROL_PLANES in --control-planes mode, else
+        # WORKERS. Anything non-numeric is still a hard error.
+        if [[ "$1" =~ ^[0-9]+$ ]]; then
+            if [[ "${_SCALE_CP:-0}" == 1 ]]; then CONTROL_PLANES="$1"; else WORKERS="$1"; fi
+            shift
+        else
+            die "Unknown option: $1"
+        fi
+        ;;
     esac
 done
 export YES_FLAG
@@ -2810,12 +2832,117 @@ NETCFG
     _ssh_cmd "$cp_ip" "kubectl get nodes -o wide" 2>/dev/null || true
 }
 
+# ── _kubeconfig — resolve the admin kubeconfig path ─────────────────────────
+# bootstrap writes it to /root/.kube/config, but a root-fs rollback or a
+# re-image can leave only the invoking user's copy. Prefer root's, fall back
+# to the sudo-caller's home. Echoes the path (may not exist — caller checks).
+_kubeconfig() {
+    if [[ -f /root/.kube/config ]]; then
+        echo /root/.kube/config
+    elif [[ -n "${SUDO_USER:-}" && -f "/home/${SUDO_USER}/.kube/config" ]]; then
+        echo "/home/${SUDO_USER}/.kube/config"
+    else
+        echo /root/.kube/config
+    fi
+}
+
+# ── cmd_start — power an EXISTING cluster back on ───────────────────────────
+# The cluster VMs deliberately do not autostart (a first-boot storm of CP +
+# workers + platform charts reboot-cycled low-RAM hosts). So after any reboot
+# the cluster is defined-but-off, and before this subcommand the only k8s
+# actions were bootstrap (re-clones from scratch) and scale (ADDS workers) —
+# neither of which is "turn the existing one back on." This is that primitive.
+#
+# ARGS/ENV:  WORKERS (from a positional `start N` or --workers N) caps how many
+#            defined workers to start; 0/unset = start ALL defined workers.
+# BEHAVIOUR: start CP → wait for API readyz → start the workers → wait Ready.
+cmd_start() {
+    virsh dominfo "$CP_NAME" >/dev/null 2>&1 ||
+        die "No cluster: control plane '$CP_NAME' is not defined. Run: kube-cluster bootstrap"
+    _ensure_libvirt_default_net
+
+    local _kc
+    _kc="$(_kubeconfig)"
+
+    mapfile -t _workers_defined < <(virsh list --all --name 2>/dev/null | grep "^${WORKER_PREFIX}-" | sort -V)
+    if [[ "${WORKERS:-0}" -gt 0 && "${WORKERS}" -lt "${#_workers_defined[@]}" ]]; then
+        _workers_defined=("${_workers_defined[@]:0:${WORKERS}}")
+    fi
+
+    if virsh list --state-running --name 2>/dev/null | grep -qx "$CP_NAME"; then
+        log "${CP_NAME} already running"
+    else
+        log "Starting control plane ${CP_NAME}..."
+        virsh start "$CP_NAME" >/dev/null || die "failed to start $CP_NAME"
+        virsh autostart --disable "$CP_NAME" 2>/dev/null || true
+    fi
+
+    log "Waiting for the API server (up to 5 min)..."
+    local _api_ok=0 _i
+    for _i in $(seq 1 50); do
+        if kubectl --kubeconfig "$_kc" get --raw=/readyz >/dev/null 2>&1; then
+            log "API server ready"
+            _api_ok=1
+            break
+        fi
+        sleep 6
+    done
+    ((_api_ok)) || warn "API server not ready yet — starting workers anyway; they'll join when it is"
+
+    local w
+    for w in "${_workers_defined[@]}"; do
+        if virsh list --state-running --name 2>/dev/null | grep -qx "$w"; then
+            log "$w already running"
+        else
+            log "Starting worker $w..."
+            virsh start "$w" >/dev/null 2>&1 || warn "failed to start $w"
+            virsh autostart --disable "$w" 2>/dev/null || true
+        fi
+    done
+
+    log "Waiting for nodes to report Ready..."
+    local _want=$((${#_workers_defined[@]} + 1)) _ready
+    for _i in $(seq 1 40); do
+        _ready="$(kubectl --kubeconfig "$_kc" get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l)"
+        [[ "$_ready" -ge "$_want" ]] && break
+        sleep 6
+    done
+    kubectl --kubeconfig "$_kc" get nodes 2>/dev/null || true
+    log "cluster started (${#_workers_defined[@]} worker(s) + CP)"
+}
+
+# ── cmd_stop — gracefully power the cluster off, keep it defined ────────────
+# Workers first (drain-ish: they can leave the API cleanly), then the CP. VMs
+# and zvols remain; `kube-cluster start` brings them back. For freeing RAM on
+# a laptop between demos without tearing the cluster down.
+cmd_stop() {
+    local w _running
+    mapfile -t _running < <(virsh list --state-running --name 2>/dev/null | grep "^${WORKER_PREFIX}-" | sort -V)
+    for w in "${_running[@]}"; do
+        log "Stopping worker $w..."
+        virsh shutdown "$w" >/dev/null 2>&1 || true
+    done
+    # give workers a moment to ACPI-off before the CP goes
+    local _i
+    for _i in $(seq 1 15); do
+        [[ -z "$(virsh list --state-running --name 2>/dev/null | grep "^${WORKER_PREFIX}-")" ]] && break
+        sleep 2
+    done
+    if virsh list --state-running --name 2>/dev/null | grep -qx "$CP_NAME"; then
+        log "Stopping control plane ${CP_NAME}..."
+        virsh shutdown "$CP_NAME" >/dev/null 2>&1 || true
+    fi
+    log "cluster stopped (VMs + zvols kept — run 'kube-cluster start' to bring it back)"
+}
+
 # ── Dispatch ───────────────────────────────────────────────────────────────
 case "$CMD" in
 bootstrap) cmd_bootstrap ;;
 golden) cmd_golden ;;
 destroy) cmd_destroy "${2:-}" ;;
 status) cmd_status ;;
+start) cmd_start ;;
+stop) cmd_stop ;;
 scale) if [[ "${_SCALE_CP:-0}" == 1 ]]; then cmd_scale_cp; else cmd_scale "${WORKERS:-1}"; fi ;;
 vip-float)
     _ensure_libvirt_default_net

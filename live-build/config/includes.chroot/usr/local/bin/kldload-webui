@@ -7536,10 +7536,37 @@ async def _k8s_bootstrap(websocket, msg):
     --workers 0` does nothing visible — the user sees no progress and
     assumes the button is broken. Caught on .127 2026-05-16."""
     workers = int(msg.get("workers", 3))
-    # Probe: does kldload-cp libvirt domain already exist?
+    # Probe: does kldload-cp libvirt domain already exist, and is it running?
+    # THREE cases, not two — the missing middle one stranded operators:
+    #   absent           -> bootstrap from scratch
+    #   present, OFF     -> START it (cluster VMs don't autostart on boot by
+    #                       design, so after a reboot the cluster is defined
+    #                       but powered off; the old code fell through to
+    #                       `scale`, which cloned MORE workers onto a dead API
+    #                       and errored / OOM'd — "rebuild cluster" failed on
+    #                       the FOSSY laptop 2026-08-05 exactly this way)
+    #   present, running -> scale (add workers), the original behaviour
     rc = subprocess.call(["virsh", "dominfo", "kldload-cp"],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cp_running = False
     if rc == 0:
+        _st = subprocess.run(["virsh", "domstate", "kldload-cp"],
+                             capture_output=True, text=True).stdout.strip()
+        cp_running = (_st == "running")
+    if rc == 0 and not cp_running:
+        _msg = (f"[k8s] Cluster is defined but powered off — starting it "
+                f"(CP + {workers} worker(s)) instead of re-bootstrapping.")
+        await websocket.send(json.dumps({
+            "type": "log_line", "target": "k8s", "line": _msg,
+        }))
+        # No mutation, so no pre-snapshot. `start N` boots the CP, waits for
+        # the API, then starts N of the already-built worker VMs and waits
+        # for Ready — bounded by the requested worker count so a RAM-tight
+        # host isn't overrun.
+        await _stream_proc_detached(websocket,
+            ["kube-cluster", "start", str(workers)],
+            target="k8s")
+    elif rc == 0:
         await websocket.send(json.dumps({
             "type": "log_line", "target": "k8s",
             "line": f"[k8s] Existing cluster detected (kldload-cp present). Scaling to {workers} workers instead of re-bootstrapping.",
