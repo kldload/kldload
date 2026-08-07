@@ -174,6 +174,131 @@ klab matrix run script.sh # run a change against every supported distro in paral
 
 ---
 
+## What's inside &mdash; the open source it's made of
+
+kldload invents almost nothing. It is an opinionated **assembly** of software you
+already know, installed from the vendors' own repos and wired together so the
+pieces actually meet. If you recognise a name below, that is the point &mdash;
+you already know how to operate it, and nothing here is a bespoke
+reimplementation you would have to learn.
+
+**Nothing is forked and nothing is patched.** The tree carries **zero `.patch`
+files and zero vendored third-party source**; every component arrives from its
+upstream package repo, its official release artifact, or its own git remote.
+
+Two shipped components are **not** open source, and it would be dishonest to
+bury them in a list like this: **Google Chrome** (the default desktop browser
+and the renderer for the kldload GUI apps &mdash; its open-source upstream
+Chromium is what Debian targets get) and the **NVIDIA driver + CUDA**, which is
+opt-in at install. Everything else below is open source under its own licence.
+
+### Storage &amp; boot
+| Project | What it does here |
+|---|---|
+| [OpenZFS](https://openzfs.org) | root filesystem, snapshots, clones, `send`/`recv`, native encryption |
+| [ZFSBootMenu](https://zfsbootmenu.org) (2.3.0) | UEFI boot environments, rollback from the boot screen |
+| [sanoid / syncoid](https://github.com/jimsalterjrs/sanoid) | snapshot retention policy and replication |
+| dracut, GRUB2, shim, mokutil, sbsigntools, pesign | initramfs, UEFI boot chain, Secure Boot module signing |
+| cryptsetup, LVM2, mdadm, e2fsprogs, xfsprogs, btrfs-progs | non-ZFS storage the installer must still read |
+
+### Virtualization
+| Project | What it does here |
+|---|---|
+| [libvirt](https://libvirt.org) + [QEMU/KVM](https://www.qemu.org) | every VM, each backed by its own ZFS zvol |
+| `virt-install`, `qemu-img`, qemu-guest-agent | provisioning, image conversion, in-guest control |
+| [swtpm](https://github.com/stefanberger/swtpm) + [edk2/OVMF](https://github.com/tianocore/edk2) | emulated TPM 2.0 and UEFI firmware for guests |
+| [cloud-init](https://cloud-init.io) | first-boot configuration of golden-image clones |
+
+### Kubernetes &amp; networking
+| Project | What it does here |
+|---|---|
+| [Kubernetes](https://kubernetes.io) 1.32 (kubeadm/kubelet/kubectl) | the cluster itself |
+| [containerd](https://containerd.io) | container runtime |
+| [Cilium](https://cilium.io) 1.16.5 + [Hubble](https://github.com/cilium/hubble) | eBPF CNI, kube-proxy replacement, flow visibility |
+| [MetalLB](https://metallb.io) 0.14.9 | bare-metal `LoadBalancer` services |
+| [kube-vip](https://kube-vip.io) 0.8.9 | control-plane VIP for HA |
+| [OpenEBS ZFS LocalPV](https://github.com/openebs/zfs-localpv) | CSI storage on ZFS |
+| [local-path-provisioner](https://github.com/rancher/local-path-provisioner) (Rancher) | fallback StorageClass where a node has no ZFS |
+| [Gateway API](https://gateway-api.sigs.k8s.io) 1.2.1, [metrics-server](https://github.com/kubernetes-sigs/metrics-server) | ingress API, resource metrics |
+| [Helm](https://helm.sh), [k9s](https://k9scli.io), [Headlamp](https://headlamp.dev) | chart installs, terminal cluster UI, web cluster UI |
+| [WireGuard](https://www.wireguard.com), nftables, NetworkManager, chrony | encrypted backplane, firewall, networking, time |
+| [nginx](https://nginx.org) | one TLS reverse proxy on `:8443` for every browser-facing service |
+
+### Observability
+| Project | What it does here |
+|---|---|
+| [Prometheus](https://prometheus.io) + [Alertmanager](https://github.com/prometheus/alertmanager) | metrics and alerting |
+| [Grafana](https://grafana.com) | pre-wired dashboards |
+| [Loki](https://grafana.com/oss/loki/) + Promtail | log aggregation, with ZFS `zed` events bridged in |
+| node&#95;exporter, [ebpf&#95;exporter](https://github.com/cloudflare/ebpf_exporter), process-exporter, smartctl&#95;exporter, zfs&#95;exporter, libvirt-exporter | the metric sources |
+
+### eBPF &amp; security
+| Project | What it does here |
+|---|---|
+| [BCC tools](https://github.com/iovisor/bcc) + [bpftrace](https://bpftrace.org) | the F-key tracing cockpit (execsnoop, biosnoop, tcplife, …) |
+| [Tetragon](https://tetragon.io) | runtime security observability |
+| Secure Boot + MOK toolchain | per-machine keys, DKMS auto-signing on kernel upgrade |
+
+### Desktop
+| Project | What it does here |
+|---|---|
+| [GNOME](https://www.gnome.org) &mdash; Shell, GDM, Nautilus, Terminal/[Ptyxis](https://gitlab.gnome.org/chergert/ptyxis), Control Center | the workstation session (LightDM on Debian Trixie) |
+| [PipeWire](https://pipewire.org) + WirePlumber | audio |
+| [Google Chrome](https://www.google.com/chrome/) | the default browser on RPM desktops, from Google's own repo, and what the kldload GUI apps render in |
+| [Firefox](https://www.mozilla.org/firefox/) | also installed on RPM desktops, and the browser on the GhostBSD posture |
+| [Chromium](https://www.chromium.org) / [Epiphany](https://apps.gnome.org/Epiphany/) | the browser on Debian / Ubuntu targets respectively |
+| [NVIDIA driver + CUDA](https://www.nvidia.com) | optional at install, via RPM Fusion `akmod-nvidia` |
+| [Steam](https://store.steampowered.com) | optional, via [Flathub](https://flathub.org) (Fedora) |
+| [eza](https://eza.rocks), [bat](https://github.com/sharkdp/bat), [fd](https://github.com/sharkdp/fd), [ripgrep](https://github.com/BurntSushi/ripgrep), [zoxide](https://github.com/ajeetdsouza/zoxide), [fzf](https://github.com/junegunn/fzf), [fastfetch](https://github.com/fastfetch-cli/fastfetch), htop | the modern CLI set, pre-wired into the shell |
+| [ttyd](https://github.com/tsl0922/ttyd) + [tmux](https://github.com/tmux/tmux) | browser terminal, and the session everything attaches to |
+
+### AI &mdash; "Bob", entirely local
+| Project | What it does here |
+|---|---|
+| [Ollama](https://ollama.com) | the LLM runtime |
+| [Llama 3.1 / 3.2](https://www.llama.com) &amp; [Qwen2.5](https://github.com/QwenLM/Qwen2.5) | the models, chosen automatically by detected VRAM (incl. Llama 3.2-Vision, Qwen2.5-Coder) |
+| [ChromaDB](https://www.trychroma.com) + `nomic-embed-text` | the RAG vector store and embeddings over your own docs |
+| [whisper.cpp](https://github.com/ggerganov/whisper.cpp) | speech to text (voice input) |
+| [Piper](https://github.com/rhasspy/piper) | text to speech (voice output) |
+
+No cloud, no telemetry, no API key &mdash; the models and the index live on the machine.
+
+### Automation
+| Project | What it does here |
+|---|---|
+| [Ansible](https://www.ansible.com) (ansible-core) | golden-VM provisioning and the web UI's Ansible tab |
+| [Argo CD](https://argo-cd.readthedocs.io) | GitOps engine behind the demo app stack |
+| [osbuild-composer](https://www.osbuild.org) | Red Hat's own toolchain, used to build the RHEL golden image |
+
+### Rescue toolkit (on the live USB)
+[GParted](https://gparted.org), [TestDisk/PhotoRec](https://www.cgsecurity.org), `ddrescue`,
+[fsarchiver](https://www.fsarchiver.org), smartmontools, nvme-cli, `p7zip`,
+ntfs-3g/exfatprogs, `fio`, `stress-ng`, memtest86+ &mdash; the install USB doubles
+as the recovery USB.
+
+### How the eight distros get built
+The installer bootstraps each target with **that distro's own tool** &mdash;
+[debootstrap](https://wiki.debian.org/Debootstrap) (Debian/Ubuntu),
+`dnf --installroot` (Fedora/CentOS Stream/Rocky/RHEL),
+[pacman](https://archlinux.org/pacman/) (Arch, via `pacman-static`) and
+`apk` (Alpine, via `apk-tools-static`). Packages come from the vendors' own
+CDNs; the ISO itself is built with Red Hat's
+[lorax](https://github.com/weldr/lorax), `dracut`, `squashfs-tools` and
+[xorriso](https://www.gnu.org/software/xorriso/) inside a Fedora 44 container.
+
+### The sister consoles
+[zxplore](https://github.com/zxplore/zxplore) (ZFS) and
+[wgxplore](https://github.com/wgxplore/wgxplore) (WireGuard) are separate BSD-3
+projects by the same author, built from their own upstream repos at ISO-build
+time. The exact commit shipped is recorded in `/etc/kldload/zxplore-commit` and
+`/etc/kldload/wgxplore-commit`. They run on any Linux/BSD box &mdash; kldload is
+their first-party distribution, not their owner.
+
+> Licences are each project's own; kldload ships them unmodified and adds no
+> licence terms of its own to them. See [License](#license) for kldload's.
+
+---
+
 ## CLI tools
 
 ### Host
