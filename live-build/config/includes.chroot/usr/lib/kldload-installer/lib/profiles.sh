@@ -186,12 +186,22 @@ k_profile_packages() {
             # RHEL 10 desktop install: gnome-terminal silently dropped,
             # operator booted into a desktop with no terminal app.
             #
-            # Chrome is the ONLY browser on the installed RPM desktop. Firefox
-            # was the previous co-shipped fallback but Task #47 ripped it —
-            # kldload-firstboot has belt-and-suspenders Chrome install if dnf
-            # transaction here didn't land it. Live installer ISO still ships
-            # firefox separately (build-iso.sh) for the installer-GUI render —
-            # that's transient, the user never sees it post-install.
+            # Chrome is the DEFAULT browser on the installed RPM desktop, not
+            # the only one: firefox also ships, from the hardcoded _dnf_pkgs
+            # array in bootstrap.sh. Task #47 removed firefox from the LIVE ISO
+            # (build-iso.sh PKGS carries no firefox — Chrome alone renders the
+            # installer via kldload-chrome-app), but deliberately left it on the
+            # installed desktop as a second browser. Corrected 2026-08-07; this
+            # comment previously claimed the opposite on both counts.
+            #
+            # Shipping both is safe because "default" is enforced, not assumed:
+            # /etc/xdg/mimeapps.list below binds http(s)/html to Chrome, and a
+            # Chrome managed policy suppresses the "make me default" prompt.
+            # Without that pair, http(s) links opened firefox even with Chrome
+            # pinned first in the dock (.137 install, 2026-06-06).
+            #
+            # kldload-firstboot has a belt-and-suspenders Chrome install if the
+            # dnf transaction here didn't land it.
             _browser="google-chrome-stable"
             _viewer="eog loupe"
             _terminal="gnome-terminal ptyxis"
