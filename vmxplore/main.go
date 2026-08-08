@@ -5,7 +5,9 @@
 // clone ancestry, snapshot classes, live counters. Design + phasing:
 // docs/VM-CONSOLE-DESIGN.md (kldload repo, the Phase A home).
 //
-//	vmx            → estate TUI (bubbletea)
+//	vmx            → native GUI (Fyne) in the full build; the static
+//	                 TUI-only build (no `gui` tag) starts the TUI instead
+//	vmx --tui      → estate TUI (bubbletea) — headless / SSH / power use
 //	vmx --once     → print the estate table once and exit (scripts, smoke)
 //	vmx --rules F  → use rules file F for grouping/classification
 //	vmx --version  → version and exit
@@ -29,24 +31,30 @@ import (
 	"golang.org/x/term"
 )
 
-// version is the vmxplore release (shown by --version). Phase/versioning per
-// the design doc: 0.1 = read-only estate view; 0.2 = the safe verbs.
-const version = "0.2.0"
+// version is the vmxplore release (shown by --version and, short-form, in
+// the TUI title / GUI header). Phase/versioning per the design doc: 0.1 =
+// read-only estate view; 0.2 = the safe verbs; .1 = folds/themes/key model;
+// .2 = the Fyne GUI surface (GUI-first, operator call 2026-08-07).
+const version = "0.2.2"
 
-// build is stamped by the Makefile via -X main.build (UTC minute + git short
-// hash) so every binary is distinguishable — the TUI title and --version both
-// show it. A bare `go build` leaves it at "dev".
-var build = "dev"
+// buildNum is stamped by the Makefile (-X main.buildNum=<n>) from the
+// self-incrementing, gitignored .buildnum counter — the family scheme
+// (zxplore/wgxplore identical). Empty in a bare `go build`.
+var buildNum = ""
 
-// versionString is the full "0.2.0+20260807.2153.abc1234" form shown in the
-// TUI title bar and by --version.
-func versionString() string {
-	return version + "+" + build
+// versionFull is version plus the build stamp: "0.2.2 b42".
+func versionFull() string {
+	if buildNum == "" || buildNum == "0" {
+		return version
+	}
+	return version + " b" + buildNum
 }
 
-const usage = `usage: vmx [--once] [--rules FILE] [--version]
+const usage = `usage: vmx [--tui] [--once] [--rules FILE] [--version]
 
-  (no flags)   estate TUI — the joined libvirt + ZFS view
+  (no flags)   native GUI — the estate frame (list · console · details);
+               static/terminal-only builds start the TUI instead
+  --tui        estate TUI (bubbletea) — headless / SSH / power use
   --once       print the estate table once and exit
   --rules F    grouping/classification rules file
                (default: /etc/vmxplore/rules, else built-in profile)
@@ -55,6 +63,8 @@ const usage = `usage: vmx [--once] [--rules FILE] [--version]
 Environment:
   VMX_SSH_USER   user for the TUI's ssh-to-guest verb
                  (default: current user; admin on a kldload host)
+  VMX_THEME      dark | light — override the terminal-background
+                 auto-detection for the TUI palette
 
 Reading is free of side effects. Mutations exist only behind the TUI's verb
 keys (start/stop, force-off, snapshot, rollback, vcpu/mem, autostart): each
@@ -66,18 +76,21 @@ Documentation: docs/VM-CONSOLE-DESIGN.md`
 
 func main() {
 	once := false
+	tui := false
 	rulesPath := ""
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--version", "-V":
-			fmt.Println("vmxplore " + versionString())
+			fmt.Println("vmxplore " + versionFull())
 			return
 		case "--help", "-h":
 			fmt.Println(usage)
 			return
 		case "--once":
 			once = true
+		case "--tui":
+			tui = true
 		case "--rules", "-r":
 			i++
 			if i >= len(args) {
@@ -100,7 +113,19 @@ func main() {
 	if once {
 		os.Exit(runOnce(rs))
 	}
+	if tui {
+		runTUIMain(rs)
+		return
+	}
+	// GUI: no sudo-reexec — root can't reach the user's Wayland/X display
+	// (the zxplore lesson). Privilege comes from the libvirt group; zfs
+	// mutations elevate per-command inside runPlan.
+	runGUI(rs)
+}
 
+// runTUIMain connects to libvirt (self-elevating via sudo when that helps —
+// safe in a terminal, root inherits the tty) and runs the bubbletea TUI.
+func runTUIMain(rs *Ruleset) {
 	lv, err := ConnectSystem()
 	if err != nil {
 		maybeElevate(err) // re-execs and never returns when it can help

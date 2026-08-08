@@ -159,6 +159,7 @@ var vmKTools = []string{
 	"klab", "kube-cluster", "kspawn",
 	"kvm-create", "kvm-clone", "kvm-delete", "kvm-snap", "kvm-list",
 	"kimage", "kexport", "kvm-win", "ksnap",
+	"kvm-demo", "kube-demo",
 }
 
 // KldloadTools returns the kldload VM tools present on this host (nil on a
