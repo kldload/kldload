@@ -206,6 +206,38 @@ func (t *tapArea) CreateRenderer() fyne.WidgetRenderer {
 func (t *tapArea) Tapped(*fyne.PointEvent) { t.onTap() }
 func (t *tapArea) Cursor() desktop.Cursor  { return desktop.PointerCursor }
 
+// vmRow is one estate list row: a state-coloured monospace line that
+// selects on tap and opens the verb context menu on right-click.
+type vmRow struct {
+	widget.BaseWidget
+	text   *canvas.Text
+	onTap  func()
+	onMenu func(pos fyne.Position)
+}
+
+func newVMRow() *vmRow {
+	r := &vmRow{text: canvas.NewText("", theme.Color(theme.ColorNameForeground))}
+	r.text.TextStyle = fyne.TextStyle{Monospace: true}
+	r.ExtendBaseWidget(r)
+	return r
+}
+
+func (r *vmRow) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(r.text)
+}
+
+func (r *vmRow) Tapped(*fyne.PointEvent) {
+	if r.onTap != nil {
+		r.onTap()
+	}
+}
+
+func (r *vmRow) TappedSecondary(e *fyne.PointEvent) {
+	if r.onMenu != nil {
+		r.onMenu(e.AbsolutePosition)
+	}
+}
+
 // newTile is one launcher card: icon + bold coloured title + a faint
 // wrapped description — big enough that a screenshot of the grid explains
 // the product on its own (the operator's ask, verbatim).
@@ -349,6 +381,11 @@ func (g *guiState) dossierSegs(r Row) []widget.RichTextSegment {
 // confirmPlan is the GUI twin of the TUI confirm overlay: exact commands,
 // the warning, and — for retype-gated plans — an entry that must match the
 // domain name before OK arms. Same contract, different chrome.
+// guiStatus, if set, gets a one-line note when a verb fires without a
+// dialog — the exact command still surfaces (teach-the-CLI), just in the
+// status bar instead of a modal. Set once in runGUI.
+var guiStatus func(string)
+
 func confirmPlan(w fyne.Window, p verbPlan, after func()) {
 	cmds := widget.NewLabel(strings.TrimRight(p.cmdLines(), "\n"))
 	cmds.TextStyle = fyne.TextStyle{Monospace: true}
@@ -369,13 +406,16 @@ func confirmPlan(w fyne.Window, p verbPlan, after func()) {
 			})
 		}()
 	}
+	// No retype gate → a safe, reversible verb (start/stop/reboot/snapshot/
+	// clone/…): just run it. Prompting on every routine action is friction
+	// the operator explicitly waived; the audit log keeps the record and
+	// the destructive trio below still arms by retype.
 	if p.retype == "" {
-		dialog.ShowCustomConfirm(p.title, "Run", "Cancel",
-			container.NewVBox(items...), func(ok bool) {
-				if ok {
-					run()
-				}
-			}, w)
+		if guiStatus != nil {
+			guiStatus("· " + strings.TrimSpace(strings.TrimPrefix(
+				strings.TrimSpace(p.cmdLines()), "$")))
+		}
+		run()
 		return
 	}
 	entry := widget.NewEntry()
@@ -434,16 +474,14 @@ func runGUI(rs *Ruleset) {
 		}
 		return ""
 	}
-	// Rows are canvas.Text so the whole line carries the state colour —
-	// the same language as the TUI table: green running, muted off,
-	// amber warned. Monospace + fixed-width cells keep the columns true.
-	list := widget.NewList(
+	// Rows carry the state colour on the whole line — the same language
+	// as the TUI table: green running, muted off, amber warned. vmRow
+	// adds tap-select and the right-click verb menu.
+	var list *widget.List
+	var rowMenu func(i int, pos fyne.Position) // wired after the verbs exist
+	list = widget.NewList(
 		func() int { return len(st.rows) },
-		func() fyne.CanvasObject {
-			t := canvas.NewText("template", theme.Color(theme.ColorNameForeground))
-			t.TextStyle = fyne.TextStyle{Monospace: true}
-			return t
-		},
+		func() fyne.CanvasObject { return newVMRow() },
 		func(i widget.ListItemID, o fyne.CanvasObject) {
 			if i >= len(st.rows) {
 				return
@@ -466,11 +504,17 @@ func runGUI(rs *Ruleset) {
 			if c, ok := st.cpu[r.D.Name]; ok && r.D.State == "running" {
 				cpu = fmt.Sprintf(" %5.1f%%", c)
 			}
-			t := o.(*canvas.Text)
-			t.Text = fmt.Sprintf("%s %-24s %-12s %-14s%s",
+			row := o.(*vmRow)
+			row.text.Text = fmt.Sprintf("%s %-24s %-12s %-14s%s",
 				dot, r.D.Name, r.D.State, groupOf(r), cpu)
-			t.Color = col
-			t.Refresh()
+			row.text.Color = col
+			row.onTap = func() { list.Select(i) }
+			row.onMenu = func(pos fyne.Position) {
+				if rowMenu != nil {
+					rowMenu(i, pos)
+				}
+			}
+			row.text.Refresh()
 		},
 	)
 
@@ -499,7 +543,8 @@ func runGUI(rs *Ruleset) {
 		detachConsole()
 		// virsh console through a pty; the terminal widget speaks to the
 		// pty directly, so virsh's own errors land visibly in the pane
-		cmd := exec.Command("virsh", "-c", "qemu:///system", "console", name)
+		v := virsh("console", name)
+		cmd := exec.Command(v[0], v[1:]...)
 		p, err := pty.Start(cmd)
 		if err != nil {
 			consoleHost.Objects = []fyne.CanvasObject{
@@ -540,7 +585,7 @@ func runGUI(rs *Ruleset) {
 			vncHost.Refresh()
 			return
 		}
-		conn, err := dialRFB(fmt.Sprintf("127.0.0.1:%d", port))
+		conn, err := dialRFB(fmt.Sprintf("%s:%d", vncDialHost(), port))
 		if err != nil {
 			vncHost.Objects = []fyne.CanvasObject{
 				conPlaceholder("vnc: " + err.Error())}
@@ -548,6 +593,10 @@ func runGUI(rs *Ruleset) {
 			return
 		}
 		vncConn, vncName = conn, name
+		// guest clipboard → host clipboard (ServerCutText)
+		conn.onCutText = func(s string) {
+			fyne.Do(func() { w.Clipboard().SetContent(s) })
+		}
 		vncHost.Objects = []fyne.CanvasObject{newVNCViewer(conn)}
 		vncHost.Refresh()
 	}
@@ -916,6 +965,8 @@ func runGUI(rs *Ruleset) {
 	}
 	status := widget.NewLabel(fmt.Sprintf("vmxplore %s · rules: %s",
 		versionFull(), rs.Source))
+	// non-retype verbs fire without a dialog and report here
+	guiStatus = func(s string) { fyne.Do(func() { status.SetText(s) }) }
 
 	// ── the verb toolbar ─────────────────────────────────────────────────
 	// Two tiers, mirroring how operators think: the power verbs are
@@ -1056,19 +1107,289 @@ func runGUI(rs *Ruleset) {
 	btnKill := widget.NewButtonWithIcon("Force off", theme.ErrorIcon(), verb(planForceOff))
 	btnKill.Importance = widget.DangerImportance
 
+	snapAct := nameDialog("zfs snapshot @manual-…",
+		"suffix (empty = timestamp)", planSnapshot)
+
+	// New VM: the native cloud-image pipeline (newvm.go). The dialog is a
+	// form; the pipeline streams its exact commands into the status bar
+	// and the estate refreshes when the domain lands.
+	newVMDialog := func() {
+		name := widget.NewEntry()
+		name.SetPlaceHolder("vm name")
+		// build mode: a cloud image (fast — cloud-init, preset user) or an
+		// installer ISO (boot the distro's own installer in the Graphics
+		// tab, run apt/dnf/pacman the normal way; any ISO — Debian, Fedora,
+		// an Arch live ISO, a RHEL DVD)
+		mode := widget.NewSelect([]string{"cloud image", "installer ISO"}, nil)
+		mode.SetSelected("cloud image")
+		distro := widget.NewSelect(append(CloudDistros(), "custom image…"), nil)
+		distro.SetSelected("fedora")
+		imgPath := widget.NewEntry()
+		imgPath.SetPlaceHolder("/path/to/image.qcow2 (custom only)")
+		imgPath.Hide()
+		isoPath := widget.NewEntry()
+		isoPath.SetPlaceHolder("/path/to/installer.iso")
+		vcpus := widget.NewEntry()
+		vcpus.SetText("2")
+		ram := widget.NewEntry()
+		ram.SetText("2048")
+		diskGB := widget.NewEntry()
+		diskGB.SetText("20")
+		user := widget.NewEntry()
+		user.SetText("admin")
+		pass := widget.NewEntry()
+		pass.SetPlaceHolder("password (optional if key given)")
+		key := widget.NewEntry()
+		key.SetPlaceHolder("ssh public key (optional)")
+		if b, err := os.ReadFile(os.Getenv("HOME") + "/.ssh/id_ed25519.pub"); err == nil {
+			key.SetText(strings.TrimSpace(string(b)))
+		}
+		// the custom post-installer: bash run as root on first boot. This
+		// is "build your own image" — install packages, drop configs, then
+		// Make Golden → Clone. A Load… button reuses a script from disk.
+		post := widget.NewMultiLineEntry()
+		post.SetPlaceHolder("# post-install bash — runs once, as root, on first boot\n" +
+			"# e.g.  dnf install -y nginx && systemctl enable --now nginx")
+		post.SetMinRowsVisible(5)
+		loadPost := widget.NewButtonWithIcon("Load…", theme.FolderOpenIcon(),
+			func() {
+				fd := dialog.NewFileOpen(func(rc fyne.URIReadCloser, err error) {
+					if err != nil || rc == nil {
+						return
+					}
+					defer rc.Close()
+					if b, e := os.ReadFile(rc.URI().Path()); e == nil {
+						post.SetText(string(b))
+					}
+				}, w)
+				fd.Show()
+			})
+		// cloud-only fields hide in installer mode (the guest's installer
+		// collects user/packages/layout itself)
+		cloudOnly := container.NewVBox(
+			widget.NewLabel("distro"), distro, imgPath,
+			widget.NewLabel("user"), user,
+			widget.NewLabel("password"), pass,
+			widget.NewLabel("ssh key"), key,
+			container.NewBorder(nil, nil,
+				widget.NewLabel("post-install"), loadPost),
+			post)
+		isoRow := container.NewVBox(widget.NewLabel("installer ISO"), isoPath)
+		isoRow.Hide()
+		distro.OnChanged = func(s string) {
+			if s == "custom image…" {
+				imgPath.Show()
+			} else {
+				imgPath.Hide()
+			}
+		}
+		mode.OnChanged = func(s string) {
+			if s == "installer ISO" {
+				cloudOnly.Hide()
+				isoRow.Show()
+			} else {
+				cloudOnly.Show()
+				isoRow.Hide()
+			}
+		}
+		form := container.NewVBox(
+			widget.NewLabel("name"), name,
+			widget.NewLabel("source"), mode,
+			isoRow,
+			cloudOnly,
+			container.NewGridWithColumns(3,
+				container.NewVBox(widget.NewLabel("vCPUs"), vcpus),
+				container.NewVBox(widget.NewLabel("RAM (MB)"), ram),
+				container.NewVBox(widget.NewLabel("disk (GB)"), diskGB)),
+		)
+		d := dialog.NewCustomConfirm("New VM — cloud image or installer ISO",
+			"Create", "Cancel", container.NewVScroll(form), func(ok bool) {
+				if !ok {
+					return
+				}
+				var c, m, g int
+				fmt.Sscanf(strings.TrimSpace(vcpus.Text), "%d", &c)
+				fmt.Sscanf(strings.TrimSpace(ram.Text), "%d", &m)
+				fmt.Sscanf(strings.TrimSpace(diskGB.Text), "%d", &g)
+				spec := NewVMSpec{
+					Name:  strings.TrimSpace(name.Text),
+					VCPUs: c, RAMMB: m, DiskGB: g,
+				}
+				if mode.Selected == "installer ISO" {
+					spec.ISOPath = strings.TrimSpace(isoPath.Text)
+				} else {
+					spec.User = strings.TrimSpace(user.Text)
+					spec.Password = pass.Text
+					spec.SSHKey = strings.TrimSpace(key.Text)
+					spec.PostInst = post.Text
+					if distro.Selected == "custom image…" {
+						spec.ImagePath = strings.TrimSpace(imgPath.Text)
+					} else {
+						spec.Distro = distro.Selected
+					}
+				}
+				done := "created — cloud-init finishes the first boot"
+				if spec.install() {
+					done = "created — open the Graphics tab and run the installer"
+				}
+				parent := ZFSVMParent(st.visibleRows())
+				go func() {
+					err := BuildNewVM(spec, parent, func(line string) {
+						fyne.Do(func() { status.SetText(line) })
+					})
+					fyne.Do(func() {
+						if err != nil {
+							dialog.ShowError(err, w)
+							return
+						}
+						refreshNow()
+						dialog.ShowInformation("New VM", spec.Name+" "+done, w)
+					})
+				}()
+			}, w)
+		d.Resize(fyne.NewSize(460, 560))
+		d.Show()
+	}
+
+	// EZ Fleet: one dialog → build a golden + N clones. The whole value
+	// proposition in a gesture ("give me 5 Fedora boxes").
+	fleetDialog := func() {
+		name := widget.NewEntry()
+		name.SetText("fleet")
+		distro := widget.NewSelect(CloudDistros(), nil)
+		distro.SetSelected("fedora")
+		count := widget.NewEntry()
+		count.SetText("5")
+		ram := widget.NewEntry()
+		ram.SetText("2048")
+		diskGB := widget.NewEntry()
+		diskGB.SetText("20")
+		post := widget.NewMultiLineEntry()
+		post.SetPlaceHolder("# optional post-install bash — baked into every clone")
+		post.SetMinRowsVisible(4)
+		form := container.NewVBox(
+			widget.NewLabel("base name (clones: name-1…name-N)"), name,
+			widget.NewLabel("distro"), distro,
+			container.NewGridWithColumns(3,
+				container.NewVBox(widget.NewLabel("clones"), count),
+				container.NewVBox(widget.NewLabel("RAM (MB)"), ram),
+				container.NewVBox(widget.NewLabel("disk (GB)"), diskGB)),
+			widget.NewLabel("post-install (optional)"), post,
+		)
+		d := dialog.NewCustomConfirm("EZ Fleet — golden + clones in one shot",
+			"Build", "Cancel", container.NewVScroll(form), func(ok bool) {
+				if !ok {
+					return
+				}
+				var n, m, g int
+				fmt.Sscanf(strings.TrimSpace(count.Text), "%d", &n)
+				fmt.Sscanf(strings.TrimSpace(ram.Text), "%d", &m)
+				fmt.Sscanf(strings.TrimSpace(diskGB.Text), "%d", &g)
+				spec := NewVMSpec{
+					Name: strings.TrimSpace(name.Text), Distro: distro.Selected,
+					VCPUs: 2, RAMMB: m, DiskGB: g,
+					User: "admin", Password: "kldload", PostInst: post.Text,
+				}
+				parent := ZFSVMParent(st.visibleRows())
+				go func() {
+					err := BuildFleet(spec, n, parent, func(line string) {
+						fyne.Do(func() { status.SetText(line) })
+					})
+					fyne.Do(func() {
+						if err != nil {
+							dialog.ShowError(err, w)
+							return
+						}
+						refreshNow()
+						dialog.ShowInformation("EZ Fleet",
+							fmt.Sprintf("%s golden + %d clones ready", spec.Name, n), w)
+					})
+				}()
+			}, w)
+		d.Resize(fyne.NewSize(460, 520))
+		d.Show()
+	}
+
+	// Make Golden: shutdown → seal → @golden snapshot (golden.go). Then
+	// clones boot as fresh machines.
+	goldenAct := func() {
+		r, ok := st.selected()
+		if !ok {
+			return
+		}
+		dialog.ShowConfirm("Make Golden",
+			"Seal "+r.D.Name+" and snapshot it @golden?\n"+
+				"It will be shut down, sysprepped, and become a clone template.",
+			func(ok bool) {
+				if !ok {
+					return
+				}
+				go func() {
+					err := MakeGolden(r, func(line string) {
+						fyne.Do(func() { status.SetText(line) })
+					})
+					fyne.Do(func() {
+						if err != nil {
+							dialog.ShowError(err, w)
+							return
+						}
+						refreshNow()
+					})
+				}()
+			}, w)
+	}
+	// cloneAny picks the golden clone when a @golden anchor exists, else a
+	// fresh-snapshot clone — one menu entry, right behaviour each time.
+	cloneAny := func() {
+		r, ok := st.selected()
+		if !ok {
+			return
+		}
+		plan := planClone
+		if r.DS != nil && exec.Command("zfs", "list",
+			r.DS.Name+"@golden").Run() == nil {
+			plan = planCloneGolden
+		}
+		nameDialog("clone — name for the new VM", "new VM name", plan)()
+	}
 	mStorage := menuButton("Storage", theme.StorageIcon(),
-		fyne.NewMenuItem("Snapshot…", nameDialog("zfs snapshot @manual-…",
-			"suffix (empty = timestamp)", planSnapshot)),
+		fyne.NewMenuItem("Snapshot…", snapAct),
 		fyne.NewMenuItem("Rollback…", rollbackDialog))
 	mConfig := menuButton("Configure", theme.SettingsIcon(),
 		fyne.NewMenuItem("vCPU / memory…", specsDialog),
 		fyne.NewMenuItem("Autostart on/off", verb(planAutostart)))
 	mBuild := menuButton("Build", theme.ContentAddIcon(),
-		fyne.NewMenuItem("Clone…", nameDialog("clone — name for the new VM",
-			"new VM name", planClone)),
-		fyne.NewMenuItem("New VM…", soon("New VM", "the next milestone")))
+		fyne.NewMenuItem("New VM…", newVMDialog),
+		fyne.NewMenuItem("EZ Fleet — golden + N clones…", fleetDialog),
+		fyne.NewMenuItem("Clone…", cloneAny),
+		fyne.NewMenuItem("Make Golden…", goldenAct))
 	mEstate := menuButton("Estate", theme.ComputerIcon(),
 		fyne.NewMenuItem("Migrate to host…", soon("Migrate (teleport)", "0.3")))
+
+	// the right-click menu on an estate row: every verb, zero travel —
+	// selects the row first so the verbs aim at what you clicked
+	rowMenu = func(i int, pos fyne.Position) {
+		list.Select(i)
+		m := widget.NewPopUpMenu(fyne.NewMenu("",
+			fyne.NewMenuItem("Start", verb(planStart)),
+			fyne.NewMenuItem("Reboot", verb(planReboot)),
+			fyne.NewMenuItem("Suspend", verb(planSuspend)),
+			fyne.NewMenuItem("Resume", verb(planResume)),
+			fyne.NewMenuItem("Shut down", verb(planShutdown)),
+			fyne.NewMenuItem("Force off…", verb(planForceOff)),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Snapshot…", snapAct),
+			fyne.NewMenuItem("Rollback…", rollbackDialog),
+			fyne.NewMenuItem("Clone…", cloneAny),
+			fyne.NewMenuItem("Make Golden…", goldenAct),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("vCPU / memory…", specsDialog),
+			fyne.NewMenuItem("Autostart on/off", verb(planAutostart)),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Delete…", verb(planDelete)),
+		), w.Canvas())
+		m.ShowAtPosition(pos)
+	}
 
 	// NewPadded around every control: the bare HBox packs buttons at
 	// theme padding (~4px) which reads cramped — this doubles the gutters
@@ -1108,6 +1429,15 @@ func runGUI(rs *Ruleset) {
 		st.groups = BuildEstate(doms, st.dss, st.snaps, st.rs, st.ann)
 		st.rows = st.visibleRows()
 		list.Refresh()
+		// selection follows the DOMAIN, not the row index — refreshes
+		// reorder rows and the highlight must not drift onto a neighbour
+		// (Select on the already-selected id is a no-op, so no event loop)
+		for i, r := range st.rows {
+			if r.D.Name == st.selName {
+				list.Select(i)
+				break
+			}
+		}
 		status.SetText(fmt.Sprintf("%d domains · rules: %s · %s · vmxplore %s",
 			len(doms), st.rs.Source, at.Format("15:04:05"), versionFull()))
 		if r, ok := st.selected(); ok {
@@ -1164,8 +1494,36 @@ func runGUI(rs *Ruleset) {
 	gap := func(o fyne.CanvasObject) fyne.CanvasObject {
 		return container.NewPadded(o)
 	}
+	// Connect: switch hypervisors by re-execing with --connect. A live
+	// reconnect would have to rebuild every pane's state; a clean re-exec
+	// is simpler and correct — the new window comes up pointed at the host.
+	connectBtn := widget.NewButtonWithIcon(target.Host, theme.ComputerIcon(),
+		func() {
+			e := widget.NewEntry()
+			e.SetPlaceHolder("host, user@host, or qemu+ssh://host/system (empty = local)")
+			if target.SSHHost != "" {
+				e.SetText(target.SSHHost)
+			}
+			dialog.ShowCustomConfirm("Connect to a hypervisor", "Connect",
+				"Cancel", container.NewVBox(
+					widget.NewLabel("Drives a remote host over ssh — same key as your shell."),
+					e), func(ok bool) {
+					if !ok {
+						return
+					}
+					exe, _ := os.Executable()
+					argv := []string{exe}
+					if d := strings.TrimSpace(e.Text); d != "" {
+						argv = append(argv, "--connect", d)
+					}
+					// hand off: replace this process with one aimed at the host
+					_ = reexec(exe, argv)
+				}, w)
+		})
+	estateHead := container.NewBorder(nil, nil,
+		heading("ESTATE", acBrand), connectBtn)
 	left := gap(card(container.NewBorder(
-		container.NewVBox(heading("ESTATE", acBrand), search), nil, nil, nil,
+		container.NewVBox(estateHead, search), nil, nil, nil,
 		list)))
 	// Serial | Graphics tabs share the console card; ⛶ toggles the card
 	// full-window (and back) for real console work.

@@ -67,15 +67,16 @@ func vncPort(lv *LV, name string) (int, error) {
 // ── the RFB connection ──────────────────────────────────────────────────────
 
 type rfbConn struct {
-	c       net.Conn
-	mu      sync.Mutex // serialises all writes
-	fbW     int
-	fbH     int
-	imgMu   sync.Mutex // guards img swap on DesktopSize
-	img     *image.RGBA
-	onFrame func() // fired after each complete FramebufferUpdate
-	err     error
-	done    chan struct{}
+	c         net.Conn
+	mu        sync.Mutex // serialises all writes
+	fbW       int
+	fbH       int
+	imgMu     sync.Mutex // guards img swap on DesktopSize
+	img       *image.RGBA
+	onFrame   func()            // fired after each complete FramebufferUpdate
+	onCutText func(text string) // guest clipboard arrived (ServerCutText)
+	err       error
+	done      chan struct{}
 }
 
 const rfbVersion = "RFB 003.008\n"
@@ -259,16 +260,27 @@ func (r *rfbConn) readLoop() {
 				return
 			}
 		case 2: // Bell — ignore
-		case 3: // ServerCutText — drain
+		case 3: // ServerCutText — the guest's clipboard, forwarded up
 			var h [7]byte
 			if _, err := io.ReadFull(r.c, h[:]); err != nil {
 				r.err = err
 				return
 			}
 			n := int64(binary.BigEndian.Uint32(h[3:7]))
-			if _, err := io.CopyN(io.Discard, r.c, n); err != nil {
+			if n > 1<<20 { // a clipboard, not a firehose
+				if _, err := io.CopyN(io.Discard, r.c, n); err != nil {
+					r.err = err
+					return
+				}
+				continue
+			}
+			b := make([]byte, n)
+			if _, err := io.ReadFull(r.c, b); err != nil {
 				r.err = err
 				return
+			}
+			if r.onCutText != nil {
+				r.onCutText(string(b)) // RFB cut text is latin-1; close enough
 			}
 		default:
 			r.err = fmt.Errorf("unknown server message %d", hdr[0])
@@ -317,6 +329,19 @@ func (r *rfbConn) key(sym uint32, down bool) {
 	}
 	msg := []byte{4, d, 0, 0, 0, 0, 0, 0}
 	binary.BigEndian.PutUint32(msg[4:8], sym)
+	r.mu.Lock()
+	_, _ = r.c.Write(msg)
+	r.mu.Unlock()
+}
+
+// cutText hands text to the server's clipboard buffer (ClientCutText) —
+// guests with clipboard integration (qemu-vdagent) pick it up.
+func (r *rfbConn) cutText(s string) {
+	b := []byte(s)
+	msg := make([]byte, 8, 8+len(b))
+	msg[0] = 6
+	binary.BigEndian.PutUint32(msg[4:8], uint32(len(b)))
+	msg = append(msg, b...)
 	r.mu.Lock()
 	_, _ = r.c.Write(msg)
 	r.mu.Unlock()
@@ -436,6 +461,41 @@ func mouseBit(b desktop.MouseButton) uint8 {
 // TypedRune carries characters (down+up pairs), TypedKey the specials,
 // KeyDown/KeyUp ONLY the modifiers (sending both TypedRune and KeyDown for
 // a letter would double-type it — the fyne-io/terminal split).
+
+// TypedShortcut handles paste (Ctrl+V): the clipboard goes to the guest
+// twice over — as RFB cut text (guests with clipboard integration take
+// it) and typed as keystrokes (works everywhere, boot consoles included).
+func (v *vncViewer) TypedShortcut(s fyne.Shortcut) {
+	if p, ok := s.(*fyne.ShortcutPaste); ok {
+		text := p.Clipboard.Content()
+		if text == "" {
+			return
+		}
+		v.conn.cutText(text)
+		go v.typeString(text)
+	}
+}
+
+// typeString feeds text as paced key events — outrunning a guest's boot
+// console drops characters, 3ms per key does not.
+func (v *vncViewer) typeString(text string) {
+	for _, r := range text {
+		sym := uint32(r)
+		switch r {
+		case '\n', '\r':
+			sym = 0xff0d
+		case '\t':
+			sym = 0xff09
+		default:
+			if r > 0xff {
+				sym = 0x01000000 + uint32(r)
+			}
+		}
+		v.conn.key(sym, true)
+		v.conn.key(sym, false)
+		time.Sleep(3 * time.Millisecond)
+	}
+}
 
 func (v *vncViewer) FocusGained() {}
 func (v *vncViewer) FocusLost() {
