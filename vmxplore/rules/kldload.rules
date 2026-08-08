@@ -1,0 +1,44 @@
+# kldload.rules — the kldload ruleset for vmxplore.
+#
+# Read by rules.go when running on a kldload host (or via --rules). This file
+# is the ONLY place kldload naming conventions live — the compiled core knows
+# none of these strings (docs/VM-CONSOLE-DESIGN.md: "estate grouping and
+# snapshot classification are data, not Go"). Edit here, no rebuild needed
+# when installed at /etc/vmxplore/rules.
+#
+# Format (first match wins, order matters):
+#   snap  <class>  <name-prefix>     class of a snapshot by its @name prefix;
+#                                    anything unmatched is class "human"
+#   group <regex>  <label…>          estate group for a domain name; $1…$9
+#                                    expand capture groups; unmatched domains
+#                                    land in "ungrouped"
+#
+# Classes the UI understands: noise (collapsed to a count), human (the ✎
+# count — what an operator made), golden, provenance, checkpoint, repl.
+
+# sanoid (every 15 min, ~600 per zvol on a real host) and kvm-snapshot.timer —
+# pure noise at estate scale; the UI shows only their count.
+snap noise      autosnap_
+snap noise      auto-
+snap human      manual-
+snap golden     golden
+snap provenance clone-
+snap provenance create-
+snap checkpoint pre-kube-
+snap repl       repl-
+
+# Goldens first so `-golden` names never fall through to a cluster rule.
+group ^k8s-golden$              goldens
+group ^klab-golden-[a-z]+$      goldens
+group ^.+-golden$               goldens
+
+# klab blue/green lab pairs: klab-{blue,green,ztest,test}-<distro>.
+group ^klab-(blue|green|ztest|test)-[a-z]+$   klab
+
+# kspawn throwaway clusters: kspawn-<cluster>-<NN>.
+group ^kspawn-(.+)-[0-9]+$      kspawn: $1
+
+# k8s clusters from kube-cluster: <cluster>-cp[N] / <cluster>-w<N>; the
+# live estate also carries dashed forms (kldload-w-2), hence the -?.
+group ^(.+)-cp-?[0-9]*$         k8s: $1
+group ^(.+)-w-?[0-9]+$          k8s: $1
