@@ -2,6 +2,7 @@
 package main
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -23,7 +24,7 @@ func TestPlanStartAndShutdownGates(t *testing.T) {
 		t.Error("start of a running domain must refuse")
 	}
 	p, err := planStart(offRow())
-	if err != nil || strings.Join(p.cmds[0], " ") != "virsh start klab-blue-fedora" {
+	if err != nil || strings.Join(p.cmds[0], " ") != "virsh -c qemu:///system start klab-blue-fedora" {
 		t.Errorf("start plan wrong: %v %v", p.cmds, err)
 	}
 	if _, err := planShutdown(offRow()); err == nil {
@@ -94,10 +95,10 @@ func TestPlanSpecs(t *testing.T) {
 		joined += strings.Join(c, " ") + ";"
 	}
 	for _, want := range []string{
-		"virsh setvcpus klab-blue-fedora 4 --config --maximum",
-		"virsh setvcpus klab-blue-fedora 4 --config",
-		"virsh setmaxmem klab-blue-fedora 8G --config",
-		"virsh setmem klab-blue-fedora 8G --config",
+		"virsh -c qemu:///system setvcpus klab-blue-fedora 4 --config --maximum",
+		"virsh -c qemu:///system setvcpus klab-blue-fedora 4 --config",
+		"virsh -c qemu:///system setmaxmem klab-blue-fedora 8G --config",
+		"virsh -c qemu:///system setmem klab-blue-fedora 8G --config",
 	} {
 		if !strings.Contains(joined, want+";") {
 			t.Errorf("specs plan missing %q in %s", want, joined)
@@ -111,15 +112,53 @@ func TestPlanSpecs(t *testing.T) {
 	}
 }
 
+func TestPlanClone(t *testing.T) {
+	if _, err := exec.LookPath("virt-clone"); err != nil {
+		t.Skip("virt-clone not installed on this host")
+	}
+	p, err := planClone(offRow(), "klab-copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, c := range p.cmds {
+		joined += strings.Join(c, " ") + ";"
+	}
+	for _, want := range []string{
+		"zfs snapshot rpool/vms/klab-blue-fedora@clone-klab-copy",
+		"zfs clone rpool/vms/klab-blue-fedora@clone-klab-copy rpool/vms/klab-copy",
+		"virt-clone --connect qemu:///system --original klab-blue-fedora" +
+			" --name klab-copy --preserve-data --file /dev/zvol/rpool/vms/klab-copy",
+	} {
+		if !strings.Contains(joined, want+";") {
+			t.Errorf("clone plan missing %q in %s", want, joined)
+		}
+	}
+	if !p.needsRoot {
+		t.Error("clone must be marked needsRoot (zfs)")
+	}
+	if _, err := planClone(offRow(), "bad name"); err == nil {
+		t.Error("clone name with a space must refuse")
+	}
+	if _, err := planClone(offRow(), "klab-blue-fedora"); err == nil {
+		t.Error("clone onto the source name must refuse")
+	}
+	noDS := offRow()
+	noDS.DS = nil
+	if _, err := planClone(noDS, "x"); err == nil {
+		t.Error("clone without a dataset must refuse")
+	}
+}
+
 func TestPlanAutostartToggle(t *testing.T) {
 	p, _ := planAutostart(offRow())
-	if strings.Join(p.cmds[0], " ") != "virsh autostart klab-blue-fedora" {
+	if strings.Join(p.cmds[0], " ") != "virsh -c qemu:///system autostart klab-blue-fedora" {
 		t.Errorf("autostart enable cmd = %v", p.cmds[0])
 	}
 	on := offRow()
 	on.D.Autostart = true
 	p, _ = planAutostart(on)
-	if strings.Join(p.cmds[0], " ") != "virsh autostart --disable klab-blue-fedora" {
+	if strings.Join(p.cmds[0], " ") != "virsh -c qemu:///system autostart --disable klab-blue-fedora" {
 		t.Errorf("autostart disable cmd = %v", p.cmds[0])
 	}
 }

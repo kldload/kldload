@@ -39,6 +39,14 @@ type verbPlan struct {
 	needsRoot bool       // true for zfs mutations (virsh works via group)
 }
 
+// virsh builds a virsh argv pinned to qemu:///system — the connection the
+// whole tool reads from. Bare virsh as a non-root libvirt-group user
+// defaults to qemu:///session, an empty estate, and every verb would fail
+// with "failed to get domain" (bit us live 2026-08-07).
+func virsh(args ...string) []string {
+	return append([]string{"virsh", "-c", "qemu:///system"}, args...)
+}
+
 // cmdLines renders the exact commands, one per line — the contract that the
 // operator sees precisely what will run.
 func (p verbPlan) cmdLines() string {
@@ -60,7 +68,7 @@ func planStart(r Row) (verbPlan, error) {
 	}
 	return verbPlan{
 		title: "start " + r.D.Name,
-		cmds:  [][]string{{"virsh", "start", r.D.Name}},
+		cmds:  [][]string{virsh("start", r.D.Name)},
 	}, nil
 }
 
@@ -70,7 +78,7 @@ func planShutdown(r Row) (verbPlan, error) {
 	}
 	return verbPlan{
 		title: "shut down " + r.D.Name + " (graceful, ACPI)",
-		cmds:  [][]string{{"virsh", "shutdown", r.D.Name}},
+		cmds:  [][]string{virsh("shutdown", r.D.Name)},
 	}, nil
 }
 
@@ -86,7 +94,7 @@ func planForceOff(r Row) (verbPlan, error) {
 	}
 	return verbPlan{
 		title:  "force off " + r.D.Name,
-		cmds:   [][]string{{"virsh", "destroy", r.D.Name}},
+		cmds:   [][]string{virsh("destroy", r.D.Name)},
 		retype: r.D.Name,
 		warn:   "pulls the plug — the guest gets no chance to flush",
 	}, nil
@@ -118,6 +126,52 @@ func planSnapshot(r Row, suffix string) (verbPlan, error) {
 		cmds:      [][]string{{"zfs", "snapshot", r.DS.Name + "@" + name}},
 		warn:      warn,
 		needsRoot: true,
+	}, nil
+}
+
+// planClone builds "clone r into newName": snapshot the source zvol, clone
+// the snapshot, then virt-clone the domain onto the new zvol with
+// --preserve-data (new uuid + MACs, same disk bytes). Generic — works on
+// any libvirt host whose guest sits on ZFS and has virt-clone installed;
+// the kldload golden-image workflow is exactly this shape.
+func planClone(r Row, newName string) (verbPlan, error) {
+	if r.Synthetic {
+		return verbPlan{}, fmt.Errorf("no domain behind this row")
+	}
+	if r.DS == nil {
+		return verbPlan{}, fmt.Errorf("no local dataset behind %s — clone needs a zvol", r.D.Name)
+	}
+	if _, err := exec.LookPath("virt-clone"); err != nil {
+		return verbPlan{}, fmt.Errorf("virt-clone not found — install virt-install")
+	}
+	newName = strings.TrimSpace(newName)
+	if newName == "" || strings.ContainsAny(newName, " @/") {
+		return verbPlan{}, fmt.Errorf("clone name must be non-empty, no spaces, @ or /")
+	}
+	if newName == r.D.Name {
+		return verbPlan{}, fmt.Errorf("clone name must differ from the source")
+	}
+	parent := r.DS.Name
+	if i := strings.LastIndexByte(parent, '/'); i >= 0 {
+		parent = parent[:i]
+	}
+	newDS := parent + "/" + newName
+	snap := r.DS.Name + "@clone-" + newName
+	warn := "clone shares blocks with " + r.DS.Name + " until it diverges"
+	if r.D.State == "running" {
+		warn = "source is running — the clone is crash-consistent; " + warn
+	}
+	return verbPlan{
+		title: "clone " + r.D.Name + " → " + newName,
+		cmds: [][]string{
+			{"zfs", "snapshot", snap},
+			{"zfs", "clone", snap, newDS},
+			{"virt-clone", "--connect", "qemu:///system", "--original", r.D.Name,
+				"--name", newName, "--preserve-data",
+				"--file", "/dev/zvol/" + newDS},
+		},
+		warn:      warn,
+		needsRoot: true, // zfs snapshot/clone; virt-clone rides along as root
 	}, nil
 }
 
@@ -156,10 +210,10 @@ func planSpecs(r Row, vcpus int, memGiB int) (verbPlan, error) {
 		title: fmt.Sprintf("set %s to %d vcpu / %s (applies on next start)",
 			r.D.Name, vcpus, mem),
 		cmds: [][]string{
-			{"virsh", "setvcpus", r.D.Name, fmt.Sprint(vcpus), "--config", "--maximum"},
-			{"virsh", "setvcpus", r.D.Name, fmt.Sprint(vcpus), "--config"},
-			{"virsh", "setmaxmem", r.D.Name, mem, "--config"},
-			{"virsh", "setmem", r.D.Name, mem, "--config"},
+			virsh("setvcpus", r.D.Name, fmt.Sprint(vcpus), "--config", "--maximum"),
+			virsh("setvcpus", r.D.Name, fmt.Sprint(vcpus), "--config"),
+			virsh("setmaxmem", r.D.Name, mem, "--config"),
+			virsh("setmem", r.D.Name, mem, "--config"),
 		},
 	}
 	if r.D.State == "running" {
@@ -175,12 +229,12 @@ func planAutostart(r Row) (verbPlan, error) {
 	if r.D.Autostart {
 		return verbPlan{
 			title: "disable autostart for " + r.D.Name,
-			cmds:  [][]string{{"virsh", "autostart", "--disable", r.D.Name}},
+			cmds:  [][]string{virsh("autostart", "--disable", r.D.Name)},
 		}, nil
 	}
 	return verbPlan{
 		title: "enable autostart for " + r.D.Name + " (boots with the host)",
-		cmds:  [][]string{{"virsh", "autostart", r.D.Name}},
+		cmds:  [][]string{virsh("autostart", r.D.Name)},
 	}, nil
 }
 

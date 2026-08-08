@@ -1,9 +1,14 @@
 // tui.go — the estate TUI: the joined table, live, keyboard-driven.
 //
 // bubbletea, matching the family. One screen (the headline view from the
-// design doc) plus overlays: detail (enter), snapshots (s, with rollback),
-// actions (a — the 0.2 verb menu; verbs.go builds and gates the plans),
-// confirm/input for the verb flow, help (?). Interactive externals — `c`
+// design doc) with foldable estate groups (←/→, headers are cursor stops)
+// plus overlays: detail (enter), snapshots (s, with rollback), actions
+// (a — the 0.2 verb menu; verbs.go builds and gates the plans),
+// confirm/input for the verb flow, help (?). ← (or q) backs out of any
+// pane — q quits only from the main view — and esc only aborts the
+// confirm/input prompts. Mouse: wheel moves the active cursor, click
+// selects, a header click folds, re-clicking the selected row opens
+// detail. Interactive externals — `c`
 // attaches `virsh console`, `S` opens ssh to the guest's agent-reported
 // IP — run under tea.ExecProcess, which suspends the TUI and also
 // sidesteps DomainOpenConsoleBidirectional's missing abort handle (design
@@ -27,21 +32,52 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// ─── styles ─────────────────────────────────────────────────────────────────
+// ─── styles / theme ─────────────────────────────────────────────────────────
+// One palette drives the whole tool — table, footer, overlays — so it reads
+// as one instrument, not a pile of panes. Two sets: dark terminals get the
+// bright ANSI variants (8–15) so the estate is vivid; light terminals get
+// the deep variants (1–6) that survive a white background. Auto-detected
+// from the terminal background; VMX_THEME=dark|light overrides.
 
 var (
-	styTitle   = lipgloss.NewStyle().Bold(true)
-	styGroup   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	styHeader  = lipgloss.NewStyle().Faint(true).Underline(true)
-	styRunning = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	styOff     = lipgloss.NewStyle().Faint(true)
-	styWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	styCursor  = lipgloss.NewStyle().Reverse(true)
-	styStatus  = lipgloss.NewStyle().Faint(true)
-	styKey     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	styRule    = lipgloss.NewStyle().Faint(true)
-	styOverlay = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	styTitle   lipgloss.Style // app title text
+	styGroup   lipgloss.Style // estate group headers (accent, bold)
+	styHeader  lipgloss.Style // column header row
+	styRunning lipgloss.Style // running rows / ok values
+	styOff     lipgloss.Style // shut-off rows / muted values
+	styWarn    lipgloss.Style // notes, synthetic rows, warnings
+	styCursor  lipgloss.Style // selection bar
+	styStatus  lipgloss.Style // status line, hint prose
+	styKey     lipgloss.Style // key legends (accent, bold)
+	styRule    lipgloss.Style // separator rules
+	styCmd     lipgloss.Style // exact commands in the confirm box
+	styOverlay lipgloss.Style // overlay border box
 )
+
+// applyTheme installs one of the two palettes into the shared styles.
+func applyTheme(light bool) {
+	accent, ok, warn, dim, hdr := "14", "10", "11", "8", "12"
+	if light {
+		accent, ok, warn, dim, hdr = "6", "2", "3", "8", "4"
+	}
+	styTitle = lipgloss.NewStyle().Bold(true)
+	styGroup = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(accent))
+	styHeader = lipgloss.NewStyle().Underline(true).Foreground(lipgloss.Color(hdr))
+	styRunning = lipgloss.NewStyle().Foreground(lipgloss.Color(ok))
+	styOff = lipgloss.NewStyle().Foreground(lipgloss.Color(dim))
+	styWarn = lipgloss.NewStyle().Foreground(lipgloss.Color(warn))
+	styCursor = lipgloss.NewStyle().Reverse(true).Bold(true)
+	styStatus = lipgloss.NewStyle().Faint(true)
+	styKey = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(accent))
+	styRule = lipgloss.NewStyle().Foreground(lipgloss.Color(dim))
+	styCmd = lipgloss.NewStyle().Foreground(lipgloss.Color(ok))
+	styOverlay = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(accent)).Padding(0, 1)
+}
+
+// dark default so non-TUI paths (status messages built before runTUI, tests)
+// never see zero styles; runTUI re-applies with detection + $VMX_THEME
+func init() { applyTheme(false) }
 
 // ─── messages & model ───────────────────────────────────────────────────────
 
@@ -76,10 +112,10 @@ type ui struct {
 	snaps map[string][]string
 	ann   *Annotations
 
-	groups []GroupRows
-	rows   []Row // flattened in render order; cursor indexes this
-	cursor int
-	scroll int
+	groups    []GroupRows
+	collapsed map[string]bool // group label → folded (←/→); survives refresh
+	cursor    int             // indexes navItems(): group headers AND rows
+	scroll    int
 
 	prevCPU map[string]uint64
 	prevAt  time.Time
@@ -102,7 +138,41 @@ type ui struct {
 
 func newUI(lv *LV, rs *Ruleset) *ui {
 	return &ui{lv: lv, rs: rs, cpu: map[string]float64{},
-		status: "loading estate…"}
+		collapsed: map[string]bool{}, status: "loading estate…"}
+}
+
+// navItem is one selectable line of the estate view: a group header
+// (row == -1, foldable with ←/→) or a domain row inside an expanded group.
+type navItem struct {
+	g, row int
+}
+
+// navItems lists the selectable lines in render order, honouring folds.
+// Rebuilt on demand — the estate is dozens of items, not thousands.
+func (m *ui) navItems() []navItem {
+	var items []navItem
+	for gi, g := range m.groups {
+		items = append(items, navItem{gi, -1})
+		if m.collapsed[g.Label] {
+			continue
+		}
+		for ri := range g.Rows {
+			items = append(items, navItem{gi, ri})
+		}
+	}
+	return items
+}
+
+// curRow returns the domain row under the cursor; ok=false when the cursor
+// sits on a group header (or the estate is empty). Verbs and overlays that
+// need a domain must check ok and complain, not index blindly.
+func (m *ui) curRow() (Row, bool) {
+	items := m.navItems()
+	if m.cursor >= len(items) || items[m.cursor].row < 0 {
+		return Row{}, false
+	}
+	it := items[m.cursor]
+	return m.groups[it.g].Rows[it.row], true
 }
 
 func (m *ui) Init() tea.Cmd {
@@ -147,23 +217,37 @@ func after(d time.Duration, msg tea.Msg) tea.Cmd {
 	return tea.Tick(d, func(time.Time) tea.Msg { return msg })
 }
 
-// rebuild re-joins and re-flattens after any data change, keeping the cursor
-// on the same domain when it still exists.
+// rebuild re-joins after any data change, keeping the cursor on the same
+// domain — or the same group header — when it still exists.
 func (m *ui) rebuild() {
-	var selected string
-	if m.cursor < len(m.rows) {
-		selected = m.rows[m.cursor].D.Name
+	var selDom, selHeader string
+	if items := m.navItems(); m.cursor < len(items) {
+		it := items[m.cursor]
+		if it.row < 0 {
+			selHeader = m.groups[it.g].Label
+		} else {
+			selDom = m.groups[it.g].Rows[it.row].D.Name
+		}
 	}
 	m.groups = BuildEstate(m.doms, m.dss, m.snaps, m.rs, m.ann)
-	m.rows = m.rows[:0]
-	for _, g := range m.groups {
-		m.rows = append(m.rows, g.Rows...)
-	}
 	m.cursor = 0
-	for i, r := range m.rows {
-		if r.D.Name == selected {
+	items := m.navItems()
+	for i, it := range items {
+		if it.row < 0 && m.groups[it.g].Label == selHeader ||
+			it.row >= 0 && m.groups[it.g].Rows[it.row].D.Name == selDom {
 			m.cursor = i
 			break
+		}
+	}
+	// first load (nothing selected yet): land on the first domain row, not
+	// the header above it — the verbs expect a row under the cursor, and
+	// "launch, press u" must start a VM, not silently hit a header
+	if selDom == "" && selHeader == "" {
+		for i, it := range items {
+			if it.row >= 0 {
+				m.cursor = i
+				break
+			}
 		}
 	}
 }
@@ -225,15 +309,93 @@ func (m *ui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.key(msg)
+
+	case tea.MouseMsg:
+		return m.mouse(msg)
 	}
 	return m, nil
 }
 
+// mouse: wheel moves whichever cursor the active view owns; in the main
+// view a left click selects (header click folds, clicking the already-
+// selected row drills into detail — the poor man's double click).
+func (m *ui) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch msg.Button {
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+		d := 1
+		if msg.Button == tea.MouseButtonWheelUp {
+			d = -1
+		}
+		switch m.overlay {
+		case "":
+			if n := len(m.navItems()); n > 0 {
+				m.cursor = min(max(m.cursor+d, 0), n-1)
+			}
+		case "snaps":
+			if sel, _ := m.snapSelection(); len(sel) > 0 {
+				m.snapCursor = min(max(m.snapCursor+d, 0), len(sel)-1)
+			}
+		}
+		return m, nil
+	}
+	if msg.Action != tea.MouseActionPress ||
+		msg.Button != tea.MouseButtonLeft || m.overlay != "" {
+		return m, nil
+	}
+	idx := m.itemAt(msg.Y)
+	if idx < 0 {
+		return m, nil
+	}
+	it := m.navItems()[idx]
+	switch {
+	case it.row < 0:
+		l := m.groups[it.g].Label
+		m.collapsed[l] = !m.collapsed[l]
+		m.cursor = idx
+	case idx == m.cursor:
+		m.overlay = "detail"
+	default:
+		m.cursor = idx
+	}
+	return m, nil
+}
+
+// itemAt maps a screen row (0-based, tea.MouseMsg.Y) to a navItems index,
+// or -1 when the click lands outside the table body. Must mirror View's
+// layout exactly: title, optional libvirt-error line, column header, then
+// the scrolled table — change one, change both.
+func (m *ui) itemAt(y int) int {
+	top := 2
+	if m.err != nil {
+		top++
+	}
+	avail := m.height - 6
+	if avail < 3 {
+		avail = 3
+	}
+	if y < top || y-top >= avail {
+		return -1
+	}
+	idx := m.scroll + y - top
+	if idx >= len(m.navItems()) {
+		return -1
+	}
+	return idx
+}
+
+// key routes keystrokes. The model (operator requests 2026-08-07): ← backs
+// out of whatever pane → drilled into, q backs out of panes too and only
+// quits from the main view, panes also close on the key that opened them
+// (enter/?, s, a) — esc is NOT a menu back-out; it survives only as "abort
+// this command prompt" in the confirm/input overlays, where q has to stay
+// typeable for domain names.
 func (m *ui) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.overlay {
 	case "detail", "help":
 		switch msg.String() {
-		case "q", "esc", "enter", "?":
+		case "ctrl+c":
+			return m, tea.Quit
+		case "q", "left", "h", "enter", "?":
 			m.overlay = ""
 		}
 		return m, nil
@@ -246,11 +408,13 @@ func (m *ui) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "input":
 		return m.keyInput(msg)
 	}
+	items := m.navItems()
+	onHeader := m.cursor < len(items) && items[m.cursor].row < 0
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "j", "down":
-		if m.cursor < len(m.rows)-1 {
+		if m.cursor < len(items)-1 {
 			m.cursor++
 		}
 	case "k", "up":
@@ -260,22 +424,53 @@ func (m *ui) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g":
 		m.cursor = 0
 	case "G":
-		m.cursor = max(0, len(m.rows)-1)
-	case "r":
-		return m, tea.Batch(m.fetchEstate(), m.fetchZFS())
+		m.cursor = max(0, len(items)-1)
+	case "left", "h":
+		// back out: fold the group under the cursor; from a row, first hop
+		// up to its header so a second ← folds
+		if m.cursor < len(items) {
+			it := items[m.cursor]
+			if onHeader {
+				m.collapsed[m.groups[it.g].Label] = true
+			} else {
+				for i := m.cursor; i >= 0; i-- {
+					if items[i].row < 0 {
+						m.cursor = i
+						break
+					}
+				}
+			}
+		}
+	case "right", "l":
+		// drill in: unfold a folded group, step into an open one, and on a
+		// row → detail (same as enter)
+		if m.cursor < len(items) {
+			it := items[m.cursor]
+			switch {
+			case onHeader && m.collapsed[m.groups[it.g].Label]:
+				m.collapsed[m.groups[it.g].Label] = false
+			case onHeader && len(m.groups[it.g].Rows) > 0:
+				m.cursor++
+			case !onHeader:
+				m.overlay = "detail"
+			}
+		}
 	case "enter":
-		if len(m.rows) > 0 {
+		if onHeader { // toggle the fold, same as ←/→
+			l := m.groups[items[m.cursor].g].Label
+			m.collapsed[l] = !m.collapsed[l]
+		} else if _, ok := m.curRow(); ok {
 			m.overlay = "detail"
 		}
 	case "s":
-		if len(m.rows) > 0 {
+		if _, ok := m.curRow(); ok {
 			m.overlay = "snaps"
 			m.snapCursor = 0
 		}
 	case "?":
 		m.overlay = "help"
 	case "a":
-		if len(m.rows) > 0 {
+		if _, ok := m.curRow(); ok {
 			m.overlay = "actions"
 		}
 	case "c":
@@ -292,15 +487,23 @@ func (m *ui) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // from the table). Plans that need typed input route through the input
 // overlay first; everything else goes straight to confirm.
 func (m *ui) keyActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.cursor >= len(m.rows) {
+	r, ok := m.curRow()
+	if !ok {
+		// a verb key with a group header under the cursor must say why
+		// nothing happened, not swallow the keystroke
+		if s := msg.String(); len(s) == 1 && strings.ContainsAny(s, "udKApv") {
+			m.status = styWarn.Render(
+				"cursor is on a group header — j/k onto a VM row first")
+		}
 		m.overlay = ""
 		return m, nil
 	}
-	r := m.rows[m.cursor]
 	var plan verbPlan
 	var err error
 	switch msg.String() {
-	case "q", "esc":
+	case "ctrl+c":
+		return m, tea.Quit
+	case "q", "left", "h", "a":
 		m.overlay = ""
 		return m, nil
 	case "u":
@@ -352,6 +555,13 @@ func (m *ui) keyConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pending, m.overlay = nil, ""
 		m.status = "cancelled"
 		return m, nil
+	case "q":
+		// only when q can't be part of a retyped name; backs out like esc —
+		// quitting the app from a prompt was operator-vetoed
+		if p.retype == "" {
+			m.pending, m.overlay = nil, ""
+			m.status = "cancelled"
+		}
 	case "enter":
 		if p.retype != "" && m.typed != p.retype {
 			return m, nil // gate not satisfied; keep typing or esc
@@ -376,11 +586,11 @@ func (m *ui) keyConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // keyInput collects free-text parameters (snapshot suffix, vcpus, memory)
 // and hands the finished values to the plan builders.
 func (m *ui) keyInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.cursor >= len(m.rows) {
+	r, ok := m.curRow()
+	if !ok {
 		m.overlay = ""
 		return m, nil
 	}
-	r := m.rows[m.cursor]
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		m.overlay, m.typed = "", ""
@@ -426,7 +636,9 @@ func (m *ui) keyInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *ui) keySnaps(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	sel, all := m.snapSelection()
 	switch msg.String() {
-	case "q", "esc", "s":
+	case "ctrl+c":
+		return m, tea.Quit
+	case "q", "left", "h", "s":
 		m.overlay = ""
 		return m, nil
 	case "j", "down":
@@ -438,7 +650,8 @@ func (m *ui) keySnaps(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.snapCursor--
 		}
 	case "R":
-		if m.cursor >= len(m.rows) || m.snapCursor >= len(sel) {
+		r, ok := m.curRow()
+		if !ok || m.snapCursor >= len(sel) {
 			return m, nil
 		}
 		target := sel[m.snapCursor]
@@ -449,7 +662,7 @@ func (m *ui) keySnaps(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		plan, err := planRollback(m.rows[m.cursor], target, newer)
+		plan, err := planRollback(r, target, newer)
 		return m.toConfirm(plan, err)
 	}
 	return m, nil
@@ -479,10 +692,10 @@ func (m *ui) firePlan() (tea.Model, tea.Cmd) {
 // CLI, never hides it (design: "vmx must never fight virsh").
 
 func (m *ui) execConsole() tea.Cmd {
-	if m.cursor >= len(m.rows) {
+	r, ok := m.curRow()
+	if !ok {
 		return nil
 	}
-	r := m.rows[m.cursor]
 	if r.Synthetic {
 		m.status = styWarn.Render("no domain behind this row")
 		return nil
@@ -492,17 +705,18 @@ func (m *ui) execConsole() tea.Cmd {
 		return nil
 	}
 	m.status = "→ virsh console " + r.D.Name + "   (exit: ctrl+])"
-	c := exec.Command("virsh", "console", r.D.Name)
+	// pinned URI: bare virsh as a group member lands in qemu:///session
+	c := exec.Command("virsh", "-c", "qemu:///system", "console", r.D.Name)
 	return tea.ExecProcess(c, func(err error) tea.Msg { return execDoneMsg{err} })
 }
 
 // execSSH connects to the guest's first agent-reported IP. User picked from
 // $VMX_SSH_USER; on kldload the installed default is admin.
 func (m *ui) execSSH() tea.Cmd {
-	if m.cursor >= len(m.rows) {
+	r, ok := m.curRow()
+	if !ok {
 		return nil
 	}
-	r := m.rows[m.cursor]
 	ip := firstIPv4(r.D.IPs)
 	if ip == "" {
 		m.status = styWarn.Render("no guest IP (agent down?) — cannot ssh")
@@ -540,11 +754,13 @@ func (m *ui) View() string {
 		return "loading…"
 	}
 	var b strings.Builder
-	title := "vmxplore v" + versionString() + " — VM estate"
+	// short semantic version only — the full build stamp lives in --version
+	// (operator: the long form in the title bar is obnoxious)
+	title := styKey.Render("vmxplore") + styTitle.Render(" v"+version+" — VM estate")
 	if tools := KldloadTools(); len(tools) > 0 {
-		title += "  ·  kldload"
+		title += styStatus.Render("  ·  kldload")
 	}
-	b.WriteString(styTitle.Render(title) + "\n")
+	b.WriteString(title + "\n")
 	if m.err != nil {
 		b.WriteString(styWarn.Render("libvirt: "+m.err.Error()) + "\n")
 	}
@@ -593,7 +809,7 @@ const (
 // falls back to the plain truncated form instead of emitting torn ANSI.
 func (m *ui) footerLine() string {
 	hints := [...][2]string{
-		{"enter", "detail"}, {"s", "snaps"}, {"a", "actions"},
+		{"enter", "detail"}, {"←→", "fold"}, {"s", "snaps"}, {"a", "actions"},
 		{"c", "console"}, {"S", "ssh"}, {"?", "help"}, {"q", "quit"},
 	}
 	plain := m.status + "  "
@@ -608,39 +824,66 @@ func (m *ui) footerLine() string {
 	return styled
 }
 
-// tableLines renders groups+rows to styled lines and reports which line the
-// cursor row landed on (for scrolling).
+// tableLines renders the nav items (group headers + rows of expanded groups)
+// to styled lines and reports which line the cursor landed on (for
+// scrolling). Headers carry the fold arrow: ▾ open, ▸ folded.
 func (m *ui) tableLines() ([]string, int) {
 	var lines []string
 	cursorLine := 0
-	idx := 0
-	for _, g := range m.groups {
-		lines = append(lines, styGroup.Render(truncate(
-			fmt.Sprintf("▸ %s (%d)", g.Label, len(g.Rows)), m.width)))
-		for _, r := range g.Rows {
-			line := fmt.Sprintf("  %-*s %-13s %6s %11s  %-*s %-*s %8s %5s %s",
+	for i, it := range m.navItems() {
+		var line string
+		sty := lipgloss.NewStyle()
+		if it.row < 0 {
+			g := m.groups[it.g]
+			arrow := "▾"
+			suffix := ""
+			if m.collapsed[g.Label] {
+				arrow = "▸"
+				if n := runningIn(g); n > 0 {
+					suffix = fmt.Sprintf(" · %d running", n)
+				}
+			}
+			line = fmt.Sprintf("%s %s (%d)%s", arrow, g.Label, len(g.Rows), suffix)
+			sty = styGroup
+		} else {
+			r := m.groups[it.g].Rows[it.row]
+			line = fmt.Sprintf("  %-*s %-13s %6s %11s  %-*s %-*s %8s %5s %s",
 				nameW, truncate(r.D.Name, nameW), r.D.State,
 				cpuCell(m.cpu, r), memCell(r),
 				backW, truncate(cellOr(r.Backing, "-"), backW),
 				origW, truncate(cellOr(shortOrigin(r.Origin), "-"), origW),
 				snapCell(r), agentCell(r), strings.Join(r.Notes, "; "))
-			line = truncate(line, m.width)
 			switch {
-			case idx == m.cursor:
-				line = styCursor.Render(line)
-				cursorLine = len(lines)
 			case r.Synthetic || len(r.Notes) > 0:
-				line = styWarn.Render(line)
+				sty = styWarn
 			case r.D.State == "running":
-				line = styRunning.Render(line)
+				sty = styRunning
 			case r.D.State == "shut off":
-				line = styOff.Render(line)
+				sty = styOff
 			}
-			lines = append(lines, line)
-			idx++
 		}
+		line = truncate(line, m.width)
+		if i == m.cursor {
+			cursorLine = len(lines)
+			line = styCursor.Render(line)
+		} else {
+			line = sty.Render(line)
+		}
+		lines = append(lines, line)
 	}
 	return lines, cursorLine
+}
+
+// runningIn counts running domains in a group — shown on folded headers so
+// a collapsed group never hides live workload.
+func runningIn(g GroupRows) int {
+	n := 0
+	for _, r := range g.Rows {
+		if r.D.State == "running" {
+			n++
+		}
+	}
+	return n
 }
 
 func (m *ui) renderOverlay(base string) string {
@@ -651,7 +894,7 @@ func (m *ui) renderOverlay(base string) string {
 	case "snaps":
 		content = m.snapsText()
 	case "help":
-		content = helpText
+		content = helpText()
 	case "actions":
 		content = m.actionsText()
 	case "confirm":
@@ -664,40 +907,74 @@ func (m *ui) renderOverlay(base string) string {
 		box, lipgloss.WithWhitespaceChars(" "))
 }
 
+// keyHint renders "key text · key text" overlay-footer hints in the shared
+// palette: accent keys, faint prose. Args alternate key, text.
+func keyHint(pairs ...string) string {
+	var parts []string
+	for i := 0; i+1 < len(pairs); i += 2 {
+		parts = append(parts,
+			styKey.Render(pairs[i])+" "+styStatus.Render(pairs[i+1]))
+	}
+	return strings.Join(parts, styStatus.Render(" · "))
+}
+
+// detailLine is one "label value" row of the detail pane: the attribute
+// name in the accent colour so it stands out (operator ask), the value
+// muted to match the main window — bright default-white read as glare next
+// to the styled table. Pre-styled values (state, warnings) pass through.
+func detailLine(label, val string) string {
+	if !strings.Contains(val, "\x1b") {
+		val = styOff.Render(val)
+	}
+	return styKey.Render(fmt.Sprintf("%-8s", label)) + " " + val + "\n"
+}
+
 func (m *ui) detailText() string {
-	r := m.rows[m.cursor]
+	r, ok := m.curRow()
+	if !ok {
+		return keyHint("←/enter", "close")
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\n", styTitle.Render(r.D.Name))
-	fmt.Fprintf(&b, "state    %s\n", r.D.State)
+	fmt.Fprintf(&b, "%s\n\n", styGroup.Render(r.D.Name))
+	state := r.D.State
+	switch state {
+	case "running":
+		state = styRunning.Render(state)
+	case "shut off":
+		state = styOff.Render(state)
+	}
+	b.WriteString(detailLine("state", state))
 	if !r.Synthetic {
-		fmt.Fprintf(&b, "uuid     %s\n", r.D.UUID)
-		fmt.Fprintf(&b, "vcpu/mem %d / %s\n", r.D.VCPUs, memCell(r))
+		b.WriteString(detailLine("uuid", r.D.UUID))
+		b.WriteString(detailLine("vcpu/mem",
+			fmt.Sprintf("%d / %s", r.D.VCPUs, memCell(r))))
 		auto, pers := "no", "persistent"
 		if r.D.Autostart {
-			auto = "yes"
+			auto = styRunning.Render("yes")
 		}
 		if !r.D.Persistent {
-			pers = "TRANSIENT — gone after destroy"
+			pers = styWarn.Render("TRANSIENT — gone after destroy")
 		}
-		fmt.Fprintf(&b, "config   autostart %s · %s\n", auto, pers)
+		b.WriteString(detailLine("config", "autostart "+auto+" · "+pers))
 		for _, d := range r.D.Disks {
-			fmt.Fprintf(&b, "disk     %s → %s\n", d.Target, cellOr(d.Dev, d.File))
+			b.WriteString(detailLine("disk",
+				d.Target+" → "+cellOr(d.Dev, d.File)))
 		}
 		if len(r.D.IPs) > 0 {
-			fmt.Fprintf(&b, "ip       %s\n", strings.Join(r.D.IPs, ", "))
+			b.WriteString(detailLine("ip", strings.Join(r.D.IPs, ", ")))
 		}
 	}
 	if r.DS != nil {
-		fmt.Fprintf(&b, "dataset  %s  (used %s, refer %s)\n",
-			r.DS.Name, humanBytes(r.DS.Used), humanBytes(r.DS.Refer))
+		b.WriteString(detailLine("dataset", fmt.Sprintf("%s  (used %s, refer %s)",
+			r.DS.Name, humanBytes(r.DS.Used), humanBytes(r.DS.Refer))))
 		if chain := OriginChain(r.DS, m.dss); len(chain) > 0 {
-			fmt.Fprintf(&b, "lineage  %s\n", strings.Join(chain, " ← "))
+			b.WriteString(detailLine("lineage", strings.Join(chain, " ← ")))
 		}
 	}
 	for _, n := range r.Notes {
-		fmt.Fprintf(&b, "note     %s\n", styWarn.Render(n))
+		b.WriteString(detailLine("note", styWarn.Render(n)))
 	}
-	b.WriteString("\n" + styStatus.Render("esc/enter to close"))
+	b.WriteString("\n" + keyHint("←/enter", "close"))
 	return b.String()
 }
 
@@ -706,10 +983,11 @@ func (m *ui) detailText() string {
 // creation order — the latter is what rollback's "destroys N newer" math
 // must count, noise included.
 func (m *ui) snapSelection() (sel []string, all []string) {
-	if m.cursor >= len(m.rows) || m.rows[m.cursor].DS == nil {
+	r, ok := m.curRow()
+	if !ok || r.DS == nil {
 		return nil, nil
 	}
-	all = m.snaps[m.rows[m.cursor].DS.Name]
+	all = m.snaps[r.DS.Name]
 	byClass := make(map[string][]string)
 	for _, s := range all {
 		c := m.rs.ClassifySnap(s)
@@ -738,16 +1016,14 @@ const snapCapPerClass = 12
 // every other class listed (newest last, capped for the box), cursor-
 // selectable for rollback.
 func (m *ui) snapsText() string {
-	r := m.rows[m.cursor]
-	if r.DS == nil {
+	r, ok := m.curRow()
+	if !ok || r.DS == nil {
 		// nil dss = the slow ZFS tick hasn't returned yet; don't claim
 		// "no dataset" when the truth is "not looked yet"
 		if m.dss == nil {
-			return "ZFS data still loading…\n\n" +
-				styStatus.Render("esc to close")
+			return "ZFS data still loading…\n\n" + keyHint("←/s", "close")
 		}
-		return "no local dataset behind this row\n\n" +
-			styStatus.Render("esc to close")
+		return "no local dataset behind this row\n\n" + keyHint("←/s", "close")
 	}
 	sel, all := m.snapSelection()
 	if m.snapCursor >= len(sel) {
@@ -759,8 +1035,8 @@ func (m *ui) snapsText() string {
 		byClass[c] = append(byClass[c], s)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s — %d snapshots\n\n",
-		styTitle.Render(r.DS.Name), len(all))
+	fmt.Fprintf(&b, "%s%s\n\n", styGroup.Render(r.DS.Name),
+		styStatus.Render(fmt.Sprintf(" — %d snapshots", len(all))))
 	if n := len(byClass[SnapNoise]); n > 0 {
 		fmt.Fprintf(&b, "%s\n", styStatus.Render(
 			fmt.Sprintf("%d automated (noise) — collapsed", n)))
@@ -775,11 +1051,12 @@ func (m *ui) snapsText() string {
 	idx := 0
 	for _, c := range classes {
 		list := byClass[c]
-		fmt.Fprintf(&b, "\n%s (%d)\n", styTitle.Render(c), len(list))
+		fmt.Fprintf(&b, "\n%s\n", styGroup.Render(fmt.Sprintf("▾ %s (%d)", c, len(list))))
 		shown := list
 		if len(shown) > snapCapPerClass {
 			shown = shown[len(shown)-snapCapPerClass:]
-			fmt.Fprintf(&b, "  … %d older omitted\n", len(list)-snapCapPerClass)
+			b.WriteString(styStatus.Render(fmt.Sprintf(
+				"  … %d older omitted", len(list)-snapCapPerClass)) + "\n")
 		}
 		for _, s := range shown {
 			line := "  @" + s
@@ -790,27 +1067,34 @@ func (m *ui) snapsText() string {
 			idx++
 		}
 	}
-	b.WriteString("\n" + styStatus.Render("j/k select · R rollback · esc close"))
+	b.WriteString("\n" + keyHint("j/k", "select", "R", "rollback", "←/s", "close"))
 	return b.String()
 }
 
 // actionsText is the verb menu for the selected row.
 func (m *ui) actionsText() string {
-	r := m.rows[m.cursor]
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s — actions\n\n", styTitle.Render(r.D.Name))
-	auto := "off"
-	if r.D.Autostart {
-		auto = "on"
+	r, ok := m.curRow()
+	if !ok {
+		return keyHint("←/a", "close")
 	}
-	fmt.Fprintf(&b, "  u  start\n")
-	fmt.Fprintf(&b, "  d  shut down (graceful)\n")
-	fmt.Fprintf(&b, "  K  force off (retype-gated)\n")
-	fmt.Fprintf(&b, "  p  snapshot (zfs, manual-*)\n")
-	fmt.Fprintf(&b, "  v  edit vcpu/memory (next start)\n")
-	fmt.Fprintf(&b, "  A  autostart toggle (now: %s)\n", auto)
-	b.WriteString("\n" + styStatus.Render(
-		"rollback lives in the snapshot pane (s, then R) · esc close"))
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s%s\n\n", styGroup.Render(r.D.Name),
+		styStatus.Render(" — actions"))
+	auto := styOff.Render("off")
+	if r.D.Autostart {
+		auto = styRunning.Render("on")
+	}
+	verb := func(key, desc string) {
+		b.WriteString("  " + styKey.Render(key) + "  " + desc + "\n")
+	}
+	verb("u", "start")
+	verb("d", "shut down (graceful)")
+	verb("K", "force off "+styWarn.Render("(retype-gated)"))
+	verb("p", "snapshot (zfs, manual-*)")
+	verb("v", "edit vcpu/memory (next start)")
+	verb("A", "autostart toggle (now: "+auto+")")
+	b.WriteString("\n" + styStatus.Render("rollback lives in the snapshot pane (s, then R) · ") +
+		keyHint("←/a", "close"))
 	return b.String()
 }
 
@@ -822,53 +1106,85 @@ func (m *ui) confirmText() string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\n%s", styTitle.Render(p.title), p.cmdLines())
+	fmt.Fprintf(&b, "%s\n\n%s", styGroup.Render(p.title),
+		styCmd.Render(strings.TrimRight(p.cmdLines(), "\n"))+"\n")
 	if p.warn != "" {
 		fmt.Fprintf(&b, "\n%s\n", styWarn.Render("⚠ "+p.warn))
 	}
 	if p.retype != "" {
-		fmt.Fprintf(&b, "\ntype the name %s to arm, then enter:\n  > %s",
-			styTitle.Render(p.retype), m.typed)
+		fmt.Fprintf(&b, "\ntype the name %s to arm, then enter (esc cancels):\n%s %s",
+			styWarn.Render(p.retype), styKey.Render("  >"), m.typed)
 	} else {
-		b.WriteString("\n" + styStatus.Render("y to run · esc to cancel"))
+		b.WriteString("\n" + keyHint("y", "run", "esc/q", "cancel"))
 	}
 	return b.String()
 }
 
 // inputText is the parameter prompt for snapshot / specs.
 func (m *ui) inputText() string {
-	r := m.rows[m.cursor]
+	r, ok := m.curRow()
+	if !ok {
+		return keyHint("esc", "cancel")
+	}
 	var prompt string
 	switch m.inputKind {
 	case "snap":
 		prompt = fmt.Sprintf("snapshot %s@manual-<suffix>\nsuffix (empty = timestamp):",
-			r.DS.Name)
+			styTitle.Render(r.DS.Name))
 	case "vcpus":
-		prompt = fmt.Sprintf("new vCPU count for %s (now %d):", r.D.Name, r.D.VCPUs)
+		prompt = fmt.Sprintf("new vCPU count for %s (now %d):",
+			styTitle.Render(r.D.Name), r.D.VCPUs)
 	case "mem":
 		prompt = fmt.Sprintf("new memory for %s in GiB (now %s):",
-			r.D.Name, humanBytes(r.D.MaxMemKiB*1024))
+			styTitle.Render(r.D.Name), humanBytes(r.D.MaxMemKiB*1024))
 	}
-	return prompt + "\n  > " + m.typed + "\n\n" +
-		styStatus.Render("enter to continue · esc to cancel")
+	return prompt + "\n" + styKey.Render("  >") + " " + m.typed + "\n\n" +
+		keyHint("enter", "continue", "esc", "cancel")
 }
 
-const helpText = `vmxplore — keys
-
-  j/k ↑/↓   move        g/G  top/bottom
-  enter     domain detail (disks, IPs, ZFS lineage)
-  s         snapshots, classified (noise collapsed; R rolls back)
-  a         actions menu — or press the verb key directly:
-  u         start            d   shut down (graceful)
-  K         force off        p   snapshot (zfs, manual-*)
-  v         edit vcpu/mem    A   autostart toggle
-  c         serial console (virsh console; exit ctrl+])
-  S         ssh to guest (agent IP; $VMX_SSH_USER)
-  r         refresh now      q   quit
-
-Every mutation shows its exact virsh/zfs command and asks first;
-force-off and rollback require retyping the domain name. All runs
-land in the audit log (/var/log/kldload/vmx.log).`
+// helpText builds the ?-overlay: sectioned like the estate table, keys in
+// the same accent as the footer menu so the whole tool reads as one palette.
+func helpText() string {
+	var b strings.Builder
+	section := func(name string) {
+		b.WriteString(styGroup.Render("▾ "+name) + "\n")
+	}
+	k := func(key, desc string) {
+		b.WriteString("  " + styKey.Render(fmt.Sprintf("%-9s", key)) +
+			" " + desc + "\n")
+	}
+	b.WriteString(styKey.Render("vmxplore") +
+		styTitle.Render(" v"+version+" — keys") + "\n\n")
+	section("navigate")
+	k("j/k ↑/↓", "move (group headers select too)")
+	k("← →", "fold / unfold the group under the cursor")
+	k("g/G", "top / bottom")
+	k("mouse", "wheel scrolls · click selects · header click folds ·")
+	k("", "clicking the selected row opens detail")
+	k("r", "refresh now")
+	k("q", "quit — main view only; inside a pane it backs out")
+	b.WriteString("\n")
+	section("inspect")
+	k("enter", "domain detail (disks, IPs, ZFS lineage)")
+	k("s", "snapshots, classified (noise collapsed; R rolls back)")
+	k("c", "serial console (virsh console; exit ctrl+])")
+	k("S", "ssh to guest (agent IP; $VMX_SSH_USER)")
+	b.WriteString("\n")
+	section("act — a opens the menu, or press the verb key directly")
+	k("u", "start")
+	k("d", "shut down (graceful)")
+	k("K", "force off "+styWarn.Render("(retype-gated)"))
+	k("p", "snapshot (zfs, manual-*)")
+	k("v", "edit vcpu/mem (next start)")
+	k("A", "autostart toggle")
+	b.WriteString("\n" + styStatus.Render(
+		"Panes close with ← / q / the key that opened them; esc only\n"+
+			"aborts a command prompt. Every mutation shows its exact\n"+
+			"virsh/zfs command and asks first; all runs land in the audit\n"+
+			"log (/var/log/kldload/vmx.log).") + "\n\n" +
+		keyHint("←/?", "close"))
+	return b.String()
+}
 
 func truncate(s string, w int) string {
 	if w <= 0 || len(s) <= w {
@@ -881,7 +1197,16 @@ func truncate(s string, w int) string {
 }
 
 func runTUI(lv *LV, rs *Ruleset) error {
-	p := tea.NewProgram(newUI(lv, rs), tea.WithAltScreen())
+	light := !lipgloss.HasDarkBackground()
+	switch os.Getenv("VMX_THEME") {
+	case "light":
+		light = true
+	case "dark":
+		light = false
+	}
+	applyTheme(light)
+	p := tea.NewProgram(newUI(lv, rs), tea.WithAltScreen(),
+		tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
 }
