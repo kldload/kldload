@@ -122,6 +122,7 @@ var (
 	acGold  = accentPair{color.NRGBA{0xff, 0xd0, 0x43, 0xff}, color.NRGBA{0xb0, 0x7d, 0x00, 0xff}} // the icon's LED amber
 	acGreen = accentPair{color.NRGBA{0x3d, 0xff, 0x88, 0xff}, color.NRGBA{0x0e, 0x9d, 0x4a, 0xff}} // running
 	acBlue  = accentPair{color.NRGBA{0x4d, 0xa6, 0xff, 0xff}, color.NRGBA{0x14, 0x66, 0xd8, 0xff}} // details
+	acOff   = accentPair{color.NRGBA{0x9a, 0x7b, 0x55, 0xff}, color.NRGBA{0x7a, 0x5a, 0x38, 0xff}} // shut off — dull brown, dormant
 )
 
 // repaint holds recolor closures for hand-colored canvas objects (cards,
@@ -178,6 +179,50 @@ func pageHeading(text string, a accentPair) *canvas.Text {
 	return t
 }
 
+// brightFg is the row TITLE colour — a notch brighter than the body text
+// so the machine name pops: near-white on dark, near-black on light.
+func brightFg() color.Color {
+	if variantDark() {
+		return color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+	}
+	return color.NRGBA{R: 0x0a, G: 0x0a, B: 0x0a, A: 0xff}
+}
+
+// rowDetail is the faint second line of an estate row: specs · IP ·
+// group · zvol facts — everything a glance should answer without opening
+// the dossier. Only present fields render, joined by " · ".
+func rowDetail(r Row, group string) string {
+	var parts []string
+	if r.D.VCPUs > 0 {
+		parts = append(parts, fmt.Sprintf("%dvcpu", r.D.VCPUs))
+	}
+	if mem := memCell(r); mem != "" && mem != "-" {
+		parts = append(parts, mem)
+	}
+	if ip := firstIPv4(r.D.IPs); ip != "" {
+		parts = append(parts, ip)
+	} else if r.D.State == "running" && !r.D.AgentUp {
+		parts = append(parts, "no-agent")
+	}
+	if group != "" {
+		parts = append(parts, group)
+	}
+	if r.DS != nil {
+		z := humanBytes(r.DS.Used)
+		if r.SnapTotal > 0 {
+			z += fmt.Sprintf(" ×%d", r.SnapTotal)
+		}
+		if r.Origin != "" {
+			z += " ⑂" // a clone — forked from a parent
+		}
+		parts = append(parts, z)
+	}
+	if len(r.Notes) > 0 {
+		parts = append(parts, strings.Join(r.Notes, "; "))
+	}
+	return "   " + strings.Join(parts, " · ")
+}
+
 // tileColor lifts a launcher tile one more step off the card backdrop.
 func tileColor() color.Color {
 	if variantDark() {
@@ -206,27 +251,83 @@ func (t *tapArea) CreateRenderer() fyne.WidgetRenderer {
 func (t *tapArea) Tapped(*fyne.PointEvent) { t.onTap() }
 func (t *tapArea) Cursor() desktop.Cursor  { return desktop.PointerCursor }
 
-// vmRow is one estate list row: a state-coloured monospace line that
-// selects on tap and opens the verb context menu on right-click.
+// vmRow is one estate list row: two lines — a bold state-coloured title
+// (dot · name · state) over a faint detail line (specs · IP · group · zvol)
+// so the left pane reads as a dossier, not a bare name column. Selects on
+// tap, opens the verb context menu on right-click.
 type vmRow struct {
 	widget.BaseWidget
-	text   *canvas.Text
-	onTap  func()
-	onMenu func(pos fyne.Position)
+	title    *canvas.Text
+	detail   *canvas.Text
+	onTap    func() // click the row body → select (drives panes)
+	onToggle func() // click the state dot → toggle batch check
+	onRange  func() // ctrl/shift-click → check the range from the anchor
+	onMenu   func(pos fyne.Position)
+	modDown  bool // Ctrl or Shift held on MouseDown, read by the next Tapped
 }
 
+// dotZoneW is how wide (px) the leading state-dot hit zone is: clicking
+// inside it toggles the batch checkbox, outside it selects the row.
+const dotZoneW = 22
+
+// MouseDown records whether Ctrl or Shift was held, so the paired Tapped
+// can tell a range-select click from a plain one (Fyne delivers MouseDown
+// before Tapped for the same press).
+func (r *vmRow) MouseDown(e *desktop.MouseEvent) {
+	r.modDown = e.Modifier&(fyne.KeyModifierControl|fyne.KeyModifierShift) != 0
+}
+func (r *vmRow) MouseUp(*desktop.MouseEvent) {}
+
 func newVMRow() *vmRow {
-	r := &vmRow{text: canvas.NewText("", theme.Color(theme.ColorNameForeground))}
-	r.text.TextStyle = fyne.TextStyle{Monospace: true}
+	r := &vmRow{
+		title:  canvas.NewText("", theme.Color(theme.ColorNameForeground)),
+		detail: canvas.NewText("", theme.Color(theme.ColorNameForeground)),
+	}
+	r.title.TextStyle = fyne.TextStyle{Monospace: true, Bold: true}
+	r.detail.TextStyle = fyne.TextStyle{Monospace: true}
+	r.detail.TextSize = theme.TextSize() * 0.85
 	r.ExtendBaseWidget(r)
 	return r
 }
 
 func (r *vmRow) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(r.text)
+	// tight two-line stack; the detail sits just under the title
+	box := container.New(&rowLayout{}, r.title, r.detail)
+	return widget.NewSimpleRenderer(box)
 }
 
-func (r *vmRow) Tapped(*fyne.PointEvent) {
+// rowLayout stacks the title and detail with a small gap, sizing to both —
+// VBox padding was too airy for a dense list.
+type rowLayout struct{}
+
+func (rowLayout) MinSize(o []fyne.CanvasObject) fyne.Size {
+	t, d := o[0].MinSize(), o[1].MinSize()
+	w := t.Width
+	if d.Width > w {
+		w = d.Width
+	}
+	return fyne.NewSize(w, t.Height+d.Height+2)
+}
+
+func (rowLayout) Layout(o []fyne.CanvasObject, sz fyne.Size) {
+	t := o[0].MinSize()
+	o[0].Move(fyne.NewPos(0, 0))
+	o[0].Resize(fyne.NewSize(sz.Width, t.Height))
+	o[1].Move(fyne.NewPos(0, t.Height+2))
+	o[1].Resize(fyne.NewSize(sz.Width, o[1].MinSize().Height))
+}
+
+func (r *vmRow) Tapped(e *fyne.PointEvent) {
+	// ctrl/shift-click anywhere → range-check from the anchor to here
+	if r.modDown && r.onRange != nil {
+		r.onRange()
+		return
+	}
+	// the leading dot is the batch checkbox; the rest of the row selects
+	if e.Position.X < dotZoneW && r.onToggle != nil {
+		r.onToggle()
+		return
+	}
 	if r.onTap != nil {
 		r.onTap()
 	}
@@ -459,62 +560,195 @@ func runGUI(rs *Ruleset) {
 	}
 
 	st := &guiState{lv: lv, rs: rs, cpu: map[string]float64{}}
+	// checked = the batch set (click a row's state dot to toggle). Batch
+	// verbs act on every checked VM at once. refreshBatchBar is wired below.
+	checked := map[string]bool{}
+	checkAnchor := "" // last dot-toggled VM; ctrl/shift-click ranges from it
+	var refreshBatchBar func()
 
-	// ── left: the estate list ────────────────────────────────────────────
-	// One row per domain: state dot, name, group, cpu. Grouping shows as a
-	// column (not separator rows) so filtering stays trivial; the search
-	// box narrows by name.
-	groupOf := func(r Row) string {
-		for _, gr := range st.groups {
-			for _, rr := range gr.Rows {
-				if rr.D.Name == r.D.Name {
-					return gr.Label
+	// ── left: the estate tree ────────────────────────────────────────────
+	// Groups are collapsible branches (the accordion), VMs are two-line
+	// leaves. viewGroups is st.groups after the search filter; the tree and
+	// st.rows both read it so selection, filtering and the flat helpers
+	// stay in sync. uid scheme: "grp/<label>" branch, "vm/<name>" leaf.
+	var viewGroups []GroupRows
+	rebuildView := func() {
+		q := strings.ToLower(strings.TrimSpace(st.filter))
+		viewGroups = viewGroups[:0]
+		st.rows = st.rows[:0]
+		for _, g := range st.groups {
+			var rows []Row
+			for _, r := range g.Rows {
+				if q == "" || strings.Contains(strings.ToLower(r.D.Name), q) {
+					rows = append(rows, r)
+				}
+			}
+			if len(rows) > 0 {
+				viewGroups = append(viewGroups, GroupRows{Label: g.Label, Rows: rows})
+				st.rows = append(st.rows, rows...)
+			}
+		}
+	}
+	rowByUID := func(uid string) (Row, bool) {
+		name := strings.TrimPrefix(uid, "vm/")
+		for _, g := range viewGroups {
+			for _, r := range g.Rows {
+				if r.D.Name == name {
+					return r, true
 				}
 			}
 		}
-		return ""
+		return Row{}, false
 	}
-	// Rows carry the state colour on the whole line — the same language
-	// as the TUI table: green running, muted off, amber warned. vmRow
-	// adds tap-select and the right-click verb menu.
-	var list *widget.List
-	var rowMenu func(i int, pos fyne.Position) // wired after the verbs exist
-	list = widget.NewList(
-		func() int { return len(st.rows) },
-		func() fyne.CanvasObject { return newVMRow() },
-		func(i widget.ListItemID, o fyne.CanvasObject) {
-			if i >= len(st.rows) {
+	groupStats := func(label string) (n, run int) {
+		for _, g := range viewGroups {
+			if g.Label == label {
+				n = len(g.Rows)
+				for _, r := range g.Rows {
+					if r.D.State == "running" {
+						run++
+					}
+				}
+			}
+		}
+		return
+	}
+
+	var tree *widget.Tree
+	var rowMenuAt func(r Row, pos fyne.Position) // wired after the verbs exist
+	childUIDs := func(uid string) []string {
+		if uid == "" {
+			out := make([]string, 0, len(viewGroups))
+			for _, g := range viewGroups {
+				out = append(out, "grp/"+g.Label)
+			}
+			return out
+		}
+		if label, ok := strings.CutPrefix(uid, "grp/"); ok {
+			for _, g := range viewGroups {
+				if g.Label == label {
+					out := make([]string, 0, len(g.Rows))
+					for _, r := range g.Rows {
+						out = append(out, "vm/"+r.D.Name)
+					}
+					return out
+				}
+			}
+		}
+		return nil
+	}
+	isBranch := func(uid string) bool {
+		return uid == "" || strings.HasPrefix(uid, "grp/")
+	}
+	tree = widget.NewTree(childUIDs, isBranch,
+		func(branch bool) fyne.CanvasObject {
+			if branch {
+				t := canvas.NewText("", acBrand.at())
+				t.TextStyle = fyne.TextStyle{Bold: true}
+				return t
+			}
+			return newVMRow()
+		},
+		func(uid string, branch bool, o fyne.CanvasObject) {
+			if branch {
+				label := strings.TrimPrefix(uid, "grp/")
+				n, run := groupStats(label)
+				s := fmt.Sprintf("%s  (%d)", label, n)
+				if run > 0 {
+					s += fmt.Sprintf("  ·  %d running", run)
+				}
+				t := o.(*canvas.Text)
+				t.Text = s
+				t.Color = acBrand.at()
+				t.Refresh()
 				return
 			}
-			r := st.rows[i]
-			// stopped rows keep full foreground (readable in both
-			// variants); colour is reserved for meaning — electric green
-			// running, LED-amber warned (the accentPair palette)
-			dot := "○"
-			col := theme.Color(theme.ColorNameForeground)
+			r, ok := rowByUID(uid)
+			if !ok {
+				return
+			}
+			// title colour is the state at a glance: green running, dull
+			// brown shut-off (dormant), amber warned, bright-white for the
+			// in-between states (paused, shutting down); the stats line
+			// sits at full foreground, one notch below the title
+			dot, col := "◆", brightFg()
 			switch {
 			case r.Synthetic || len(r.Notes) > 0:
-				dot = "!"
-				col = acGold.at()
+				dot, col = "!", acGold.at()
 			case r.D.State == "running":
-				dot = "●"
-				col = acGreen.at()
+				dot, col = "●", acGreen.at()
+			case r.D.State == "shut off":
+				dot, col = "○", acOff.at()
+			}
+			// batch-checked → the dot becomes a filled check in the brand
+			// colour, so the selection is unmistakable
+			if checked[r.D.Name] {
+				dot, col = "☑", acBrand.at()
 			}
 			cpu := ""
 			if c, ok := st.cpu[r.D.Name]; ok && r.D.State == "running" {
-				cpu = fmt.Sprintf(" %5.1f%%", c)
+				cpu = fmt.Sprintf("   %.0f%% cpu", c)
 			}
 			row := o.(*vmRow)
-			row.text.Text = fmt.Sprintf("%s %-24s %-12s %-14s%s",
-				dot, r.D.Name, r.D.State, groupOf(r), cpu)
-			row.text.Color = col
-			row.onTap = func() { list.Select(i) }
-			row.onMenu = func(pos fyne.Position) {
-				if rowMenu != nil {
-					rowMenu(i, pos)
+			row.title.Text = fmt.Sprintf("%s %s   %s%s",
+				dot, r.D.Name, r.D.State, cpu)
+			row.title.Color = col
+			row.detail.Text = rowDetail(r, "") // group is the branch above
+			row.detail.Color = theme.Color(theme.ColorNameForeground)
+			// the leaf widget consumes taps, so it must drive selection
+			// itself — the tree never sees the click otherwise
+			leafUID := uid
+			name := r.D.Name
+			row.onTap = func() { tree.Select(leafUID) }
+			row.onToggle = func() {
+				if checked[name] {
+					delete(checked, name)
+				} else {
+					checked[name] = true
+				}
+				checkAnchor = name // range select measures from here
+				tree.RefreshItem(leafUID)
+				if refreshBatchBar != nil {
+					refreshBatchBar()
 				}
 			}
-			row.text.Refresh()
+			// ctrl/shift-click → check every VM between the anchor and
+			// this one, in visible order (the file-manager range gesture)
+			row.onRange = func() {
+				if checkAnchor == "" {
+					row.onToggle()
+					return
+				}
+				lo, hi := -1, -1
+				for i, rr := range st.rows {
+					if rr.D.Name == checkAnchor {
+						lo = i
+					}
+					if rr.D.Name == name {
+						hi = i
+					}
+				}
+				if lo < 0 || hi < 0 {
+					return
+				}
+				if lo > hi {
+					lo, hi = hi, lo
+				}
+				for i := lo; i <= hi; i++ {
+					checked[st.rows[i].D.Name] = true
+				}
+				tree.Refresh()
+				if refreshBatchBar != nil {
+					refreshBatchBar()
+				}
+			}
+			row.onMenu = func(pos fyne.Position) {
+				if rowMenuAt != nil {
+					rowMenuAt(r, pos)
+				}
+			}
+			row.title.Refresh()
+			row.detail.Refresh()
 		},
 	)
 
@@ -1368,8 +1602,8 @@ func runGUI(rs *Ruleset) {
 
 	// the right-click menu on an estate row: every verb, zero travel —
 	// selects the row first so the verbs aim at what you clicked
-	rowMenu = func(i int, pos fyne.Position) {
-		list.Select(i)
+	rowMenuAt = func(r Row, pos fyne.Position) {
+		tree.Select("vm/" + r.D.Name)
 		m := widget.NewPopUpMenu(fyne.NewMenu("",
 			fyne.NewMenuItem("Start", verb(planStart)),
 			fyne.NewMenuItem("Reboot", verb(planReboot)),
@@ -1391,6 +1625,103 @@ func runGUI(rs *Ruleset) {
 		m.ShowAtPosition(pos)
 	}
 
+	// ── batch bar: verbs over the checked set ────────────────────────────
+	// Appears only when ≥1 VM is checked (dot-click). Safe verbs fire
+	// across the set immediately; the destructive ones show ONE confirm
+	// listing the targets (retyping N names would be absurd).
+	checkedRows := func() []Row {
+		var rows []Row
+		for _, g := range st.groups {
+			for _, r := range g.Rows {
+				if checked[r.D.Name] {
+					rows = append(rows, r)
+				}
+			}
+		}
+		return rows
+	}
+	clearChecked := func() {
+		for k := range checked {
+			delete(checked, k)
+		}
+		tree.Refresh()
+		refreshBatchBar()
+	}
+	// batchRun builds each row's plan and runs it; destructive plans confirm
+	// once for the whole set. Per-VM errors are collected, not fatal — one
+	// bad VM must not abort the rest of a 40-VM sweep.
+	batchRun := func(label string, build func(Row) (verbPlan, error), destructive bool) {
+		rows := checkedRows()
+		if len(rows) == 0 {
+			return
+		}
+		fire := func() {
+			go func() {
+				var failed []string
+				for _, r := range rows {
+					p, err := build(r)
+					if err == nil {
+						err = runPlan(p)
+					}
+					if err != nil {
+						failed = append(failed, r.D.Name+": "+err.Error())
+					}
+				}
+				fyne.Do(func() {
+					if len(failed) > 0 {
+						dialog.ShowError(fmt.Errorf("%s — %d failed:\n%s",
+							label, len(failed), strings.Join(failed, "\n")), w)
+					}
+					clearChecked()
+					refreshNow()
+				})
+			}()
+		}
+		if !destructive {
+			fire()
+			return
+		}
+		names := make([]string, len(rows))
+		for i, r := range rows {
+			names[i] = r.D.Name
+		}
+		dialog.ShowConfirm(label+" — "+fmt.Sprint(len(rows))+" VMs",
+			label+" these "+fmt.Sprint(len(rows))+" VMs?\n\n"+
+				strings.Join(names, "\n"), func(ok bool) {
+				if ok {
+					fire()
+				}
+			}, w)
+	}
+	batchBar := container.NewHBox()
+	refreshBatchBar = func() {
+		n := len(checkedRows())
+		if n == 0 {
+			batchBar.Hide()
+			return
+		}
+		lbl := pageHeading(fmt.Sprintf("%d selected", n), acBrand)
+		bStart := widget.NewButtonWithIcon("Start", theme.MediaPlayIcon(),
+			func() { batchRun("Start", planStart, false) })
+		bStart.Importance = widget.SuccessImportance
+		bReboot := widget.NewButtonWithIcon("Reboot", theme.ViewRefreshIcon(),
+			func() { batchRun("Reboot", planReboot, false) })
+		bStop := widget.NewButtonWithIcon("Shut down", theme.MediaStopIcon(),
+			func() { batchRun("Shut down", planShutdown, false) })
+		bKill := widget.NewButtonWithIcon("Force off", theme.ErrorIcon(),
+			func() { batchRun("Force off", planForceOff, true) })
+		bKill.Importance = widget.DangerImportance
+		bDel := widget.NewButtonWithIcon("Delete", theme.DeleteIcon(),
+			func() { batchRun("Delete", planDelete, true) })
+		bDel.Importance = widget.DangerImportance
+		bClear := widget.NewButtonWithIcon("", theme.CancelIcon(), clearChecked)
+		batchBar.Objects = []fyne.CanvasObject{
+			lbl, bStart, bReboot, bStop, bKill, bDel, bClear}
+		batchBar.Refresh()
+		batchBar.Show()
+	}
+	batchBar.Hide()
+
 	// NewPadded around every control: the bare HBox packs buttons at
 	// theme padding (~4px) which reads cramped — this doubles the gutters
 	// and floats the row off the dossier above it
@@ -1403,21 +1734,46 @@ func runGUI(rs *Ruleset) {
 		pad(mStorage), pad(mConfig), pad(mBuild), pad(mEstate)))
 
 	// ── selection → panes ────────────────────────────────────────────────
-	list.OnSelected = func(i widget.ListItemID) {
-		if i >= len(st.rows) {
+	// A branch (group header) toggles its own fold; a leaf drives the panes.
+	tree.OnSelected = func(uid string) {
+		if isBranch(uid) {
+			if tree.IsBranchOpen(uid) {
+				tree.CloseBranch(uid)
+			} else {
+				tree.OpenBranch(uid)
+			}
+			tree.Unselect(uid)
 			return
 		}
-		st.selName = st.rows[i].D.Name
-		renderDossier(st.rows[i])
-		followConsole(st.rows[i])
+		r, ok := rowByUID(uid)
+		if !ok {
+			return
+		}
+		st.selName = r.D.Name
+		renderDossier(r)
+		followConsole(r)
 	}
 
 	search := widget.NewEntry()
 	search.SetPlaceHolder("filter VMs…")
 	search.OnChanged = func(q string) {
 		st.filter = q
-		st.rows = st.visibleRows()
-		list.Refresh()
+		rebuildView()
+		tree.Refresh()
+	}
+
+	// foldOffGroups: on first paint, collapse groups with nothing running —
+	// "off doesn't need to be expanded" (operator). Runs once so it never
+	// fights a manual toggle later.
+	didFold := false
+	foldOffGroups := func() {
+		for _, g := range viewGroups {
+			if _, run := groupStats(g.Label); run == 0 {
+				tree.CloseBranch("grp/" + g.Label)
+			} else {
+				tree.OpenBranch("grp/" + g.Label)
+			}
+		}
 	}
 
 	// ── refresh: estate every 2s, ZFS every 30s (the TUI cadence) ────────
@@ -1427,15 +1783,17 @@ func runGUI(rs *Ruleset) {
 		}
 		st.prevCPU, st.prevAt = cpuRaw, at
 		st.groups = BuildEstate(doms, st.dss, st.snaps, st.rs, st.ann)
-		st.rows = st.visibleRows()
-		list.Refresh()
-		// selection follows the DOMAIN, not the row index — refreshes
-		// reorder rows and the highlight must not drift onto a neighbour
-		// (Select on the already-selected id is a no-op, so no event loop)
-		for i, r := range st.rows {
-			if r.D.Name == st.selName {
-				list.Select(i)
-				break
+		rebuildView()
+		tree.Refresh()
+		if !didFold && len(viewGroups) > 0 {
+			foldOffGroups()
+			didFold = true
+		}
+		// selection follows the DOMAIN across refreshes (Select on the
+		// already-selected id is a no-op, so no event loop)
+		if st.selName != "" {
+			if _, ok := rowByUID("vm/" + st.selName); ok {
+				tree.Select("vm/" + st.selName)
 			}
 		}
 		status.SetText(fmt.Sprintf("%d domains · rules: %s · %s · vmxplore %s",
@@ -1523,8 +1881,8 @@ func runGUI(rs *Ruleset) {
 	estateHead := container.NewBorder(nil, nil,
 		heading("ESTATE", acBrand), connectBtn)
 	left := gap(card(container.NewBorder(
-		container.NewVBox(estateHead, search), nil, nil, nil,
-		list)))
+		container.NewVBox(estateHead, search, batchBar), nil, nil, nil,
+		tree)))
 	// Serial | Graphics tabs share the console card; ⛶ toggles the card
 	// full-window (and back) for real console work.
 	tabs := container.NewAppTabs(
