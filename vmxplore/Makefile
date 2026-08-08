@@ -29,7 +29,14 @@ BIN_GUI := vmxplore
 BUILDNUM_FILE = .buildnum
 STAMPFLAGS    = -ldflags "-X main.buildNum=$$(cat $(BUILDNUM_FILE) 2>/dev/null || echo 0)"
 
-.PHONY: build bump tui gui test vet fmt check clean
+PREFIX  ?= /usr/local
+DESTDIR ?=
+BINDIR   = $(DESTDIR)$(PREFIX)/bin
+APPDIR   = $(DESTDIR)$(PREFIX)/share/applications
+ICONDIR  = $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps
+DOCDIR   = $(DESTDIR)$(PREFIX)/share/doc/vmxplore
+
+.PHONY: build bump tui gui test vet fmt check clean install uninstall
 
 bump:
 	@n=$$(cat $(BUILDNUM_FILE) 2>/dev/null || echo 0); echo $$((n + 1)) > $(BUILDNUM_FILE)
@@ -57,3 +64,19 @@ check: vet test build
 
 clean:
 	rm -f $(BIN_TUI) $(BIN_GUI)
+
+install: build
+	install -d $(BINDIR) $(APPDIR) $(ICONDIR) $(DOCDIR)
+	install -m 0755 $(BIN_GUI) $(BINDIR)/$(BIN_GUI)
+	install -m 0755 $(BIN_TUI) $(BINDIR)/$(BIN_TUI)
+	install -m 0644 packaging/vmxplore.svg          $(ICONDIR)/vmxplore.svg
+	install -m 0644 packaging/vmxplore.desktop      $(APPDIR)/vmxplore.desktop
+	install -m 0644 packaging/vmxplore-tui.desktop  $(APPDIR)/vmxplore-tui.desktop
+	@if [ -f README.md ]; then install -m 0644 README.md $(DOCDIR); fi
+	@echo "vmxplore installed to $(PREFIX)/bin"
+
+uninstall:
+	rm -f $(BINDIR)/$(BIN_GUI) $(BINDIR)/$(BIN_TUI) \
+	  $(APPDIR)/vmxplore.desktop $(APPDIR)/vmxplore-tui.desktop \
+	  $(ICONDIR)/vmxplore.svg
+	rm -rf $(DOCDIR)
