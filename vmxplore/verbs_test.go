@@ -112,6 +112,53 @@ func TestPlanSpecs(t *testing.T) {
 	}
 }
 
+func TestPlanLightVerbs(t *testing.T) {
+	if _, err := planReboot(offRow()); err == nil {
+		t.Error("reboot of a stopped domain must refuse")
+	}
+	if p, err := planReboot(runningRow()); err != nil ||
+		strings.Join(p.cmds[0], " ") != "virsh -c qemu:///system reboot klab-blue-fedora" {
+		t.Errorf("reboot plan wrong: %v %v", p.cmds, err)
+	}
+	if _, err := planSuspend(offRow()); err == nil {
+		t.Error("suspend of a stopped domain must refuse")
+	}
+	if _, err := planResume(runningRow()); err == nil {
+		t.Error("resume of a running (not paused) domain must refuse")
+	}
+	paused := runningRow()
+	paused.D.State = "paused"
+	if _, err := planResume(paused); err != nil {
+		t.Errorf("resume of a paused domain must plan: %v", err)
+	}
+}
+
+func TestPlanDeleteGates(t *testing.T) {
+	if _, err := planDelete(runningRow()); err == nil {
+		t.Error("delete of a running domain must refuse")
+	}
+	p, err := planDelete(offRow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.retype != "klab-blue-fedora" {
+		t.Error("delete must be retype-gated")
+	}
+	joined := ""
+	for _, c := range p.cmds {
+		joined += strings.Join(c, " ") + ";"
+	}
+	if !strings.Contains(joined, "undefine klab-blue-fedora --nvram;") ||
+		!strings.Contains(joined, "zfs destroy -r rpool/vms/klab-blue-fedora;") {
+		t.Errorf("delete plan wrong: %s", joined)
+	}
+	noDS := offRow()
+	noDS.DS = nil
+	if p, _ := planDelete(noDS); len(p.cmds) != 1 || p.needsRoot {
+		t.Error("delete without a dataset must only undefine, unprivileged")
+	}
+}
+
 func TestPlanClone(t *testing.T) {
 	if _, err := exec.LookPath("virt-clone"); err != nil {
 		t.Skip("virt-clone not installed on this host")
@@ -147,6 +194,27 @@ func TestPlanClone(t *testing.T) {
 	noDS.DS = nil
 	if _, err := planClone(noDS, "x"); err == nil {
 		t.Error("clone without a dataset must refuse")
+	}
+}
+
+func TestPlanCloneGolden(t *testing.T) {
+	if _, err := exec.LookPath("virt-clone"); err != nil {
+		t.Skip("virt-clone not installed on this host")
+	}
+	p, err := planCloneGolden(offRow(), "stamped")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, c := range p.cmds {
+		joined += strings.Join(c, " ") + ";"
+	}
+	if !strings.Contains(joined,
+		"zfs clone rpool/vms/klab-blue-fedora@golden rpool/vms/stamped;") {
+		t.Errorf("golden clone must clone @golden, got %s", joined)
+	}
+	if strings.Contains(joined, "zfs snapshot") {
+		t.Error("golden clone must NOT take a fresh snapshot")
 	}
 }
 

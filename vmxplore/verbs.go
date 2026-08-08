@@ -39,13 +39,8 @@ type verbPlan struct {
 	needsRoot bool       // true for zfs mutations (virsh works via group)
 }
 
-// virsh builds a virsh argv pinned to qemu:///system — the connection the
-// whole tool reads from. Bare virsh as a non-root libvirt-group user
-// defaults to qemu:///session, an empty estate, and every verb would fail
-// with "failed to get domain" (bit us live 2026-08-07).
-func virsh(args ...string) []string {
-	return append([]string{"virsh", "-c", "qemu:///system"}, args...)
-}
+// virsh() and zfsArgv() live in remote.go — they route to the connection
+// target (local or a remote host over ssh).
 
 // cmdLines renders the exact commands, one per line — the contract that the
 // operator sees precisely what will run.
@@ -123,9 +118,78 @@ func planSnapshot(r Row, suffix string) (verbPlan, error) {
 	}
 	return verbPlan{
 		title:     "snapshot " + r.DS.Name + "@" + name,
-		cmds:      [][]string{{"zfs", "snapshot", r.DS.Name + "@" + name}},
+		cmds:      [][]string{zfsArgv("snapshot", r.DS.Name+"@"+name)},
 		warn:      warn,
 		needsRoot: true,
+	}, nil
+}
+
+// planReboot / planSuspend / planResume — the light lifecycle verbs every
+// right-click menu is expected to carry.
+func planReboot(r Row) (verbPlan, error) {
+	if r.Synthetic {
+		return verbPlan{}, fmt.Errorf("no domain behind this row")
+	}
+	if r.D.State != "running" {
+		return verbPlan{}, fmt.Errorf("%s is not running", r.D.Name)
+	}
+	return verbPlan{
+		title: "reboot " + r.D.Name,
+		cmds:  [][]string{virsh("reboot", r.D.Name)},
+	}, nil
+}
+
+func planSuspend(r Row) (verbPlan, error) {
+	if r.Synthetic {
+		return verbPlan{}, fmt.Errorf("no domain behind this row")
+	}
+	if r.D.State != "running" {
+		return verbPlan{}, fmt.Errorf("%s is not running", r.D.Name)
+	}
+	return verbPlan{
+		title: "suspend " + r.D.Name,
+		cmds:  [][]string{virsh("suspend", r.D.Name)},
+	}, nil
+}
+
+func planResume(r Row) (verbPlan, error) {
+	if r.Synthetic {
+		return verbPlan{}, fmt.Errorf("no domain behind this row")
+	}
+	if r.D.State != "paused" {
+		return verbPlan{}, fmt.Errorf("%s is not paused", r.D.Name)
+	}
+	return verbPlan{
+		title: "resume " + r.D.Name,
+		cmds:  [][]string{virsh("resume", r.D.Name)},
+	}, nil
+}
+
+// planDelete removes a VM for good: undefine (nvram included) and, when a
+// zvol sits underneath, destroy the dataset with every snapshot on it.
+// Retype-gated — this is the one verb with no undo.
+func planDelete(r Row) (verbPlan, error) {
+	if r.Synthetic {
+		return verbPlan{}, fmt.Errorf("no domain behind this row")
+	}
+	if r.D.State == "running" {
+		return verbPlan{}, fmt.Errorf("%s is running — shut it down (or force off) first", r.D.Name)
+	}
+	cmds := [][]string{virsh("undefine", r.D.Name, "--nvram")}
+	warn := "removes the domain definition permanently"
+	needsRoot := false
+	if r.DS != nil {
+		cmds = append(cmds, zfsArgv("destroy", "-r", r.DS.Name))
+		warn = "removes the domain AND destroys " + r.DS.Name +
+			" with every snapshot and clone under it"
+		needsRoot = true
+	}
+	return verbPlan{
+		title:     "DELETE " + r.D.Name,
+		cmds:      cmds,
+		retype:    r.D.Name,
+		warn:      warn,
+		needsRoot: needsRoot,
 	}, nil
 }
 
@@ -164,8 +228,8 @@ func planClone(r Row, newName string) (verbPlan, error) {
 	return verbPlan{
 		title: "clone " + r.D.Name + " → " + newName,
 		cmds: [][]string{
-			{"zfs", "snapshot", snap},
-			{"zfs", "clone", snap, newDS},
+			zfsArgv("snapshot", snap),
+			zfsArgv("clone", snap, newDS),
 			{"virt-clone", "--connect", "qemu:///system", "--original", r.D.Name,
 				"--name", newName, "--preserve-data",
 				"--file", "/dev/zvol/" + newDS},
@@ -185,10 +249,10 @@ func planRollback(r Row, snap string, newer int) (verbPlan, error) {
 	if !r.Synthetic && r.D.State != "shut off" {
 		return verbPlan{}, fmt.Errorf("%s must be shut off to roll back its disk", r.D.Name)
 	}
-	target := r.DS.Name + "@" + snap
+	snapPath := r.DS.Name + "@" + snap
 	return verbPlan{
-		title:     "rollback " + target,
-		cmds:      [][]string{{"zfs", "rollback", "-r", target}},
+		title:     "rollback " + snapPath,
+		cmds:      [][]string{zfsArgv("rollback", "-r", snapPath)},
 		retype:    r.D.Name,
 		warn:      fmt.Sprintf("destroys the %d snapshot(s) newer than @%s", newer, snap),
 		needsRoot: true,
