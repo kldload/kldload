@@ -31,16 +31,24 @@ type Dataset struct {
 	Type   string // filesystem | volume
 }
 
-// HasZFS reports whether the join can light up at all (tier 2 gate).
+// HasZFS reports whether the join can light up at all (tier 2 gate). Local:
+// is `zfs` on PATH. Remote: assume the hypervisor has it (the estate read
+// already succeeded over ssh); a probe would be a second round trip and
+// zfsRun degrades gracefully if it's absent.
 func HasZFS() bool {
+	if target.SSHHost != "" {
+		return true
+	}
 	_, err := exec.LookPath("zfs")
 	return err == nil
 }
 
-// zfsRun executes zfs with stdout captured; stderr rides the error so a
-// failure names its cause in the status line instead of a bare exit code.
+// zfsRun executes zfs on the hypervisor (locally or over ssh — zfsArgv
+// routes it) with stdout captured; stderr rides the error so a failure
+// names its cause in the status line instead of a bare exit code.
 func zfsRun(args ...string) (string, error) {
-	cmd := exec.Command("zfs", args...)
+	argv := zfsArgv(args...)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	var errb strings.Builder
 	cmd.Stderr = &errb
 	out, err := cmd.Output()

@@ -57,10 +57,12 @@ type LV struct {
 	l *libvirt.Libvirt
 }
 
-// ConnectSystem connects to local qemu:///system. Requires root or the
-// libvirt group — main.go handles elevation before retrying.
+// ConnectSystem connects to the current target's libvirt URI (local
+// qemu:///system by default; a remote qemu+ssh://host/system when
+// ConnectTarget set one). Local needs root or the libvirt group — main.go
+// handles elevation before retrying.
 func ConnectSystem() (*LV, error) {
-	uri, err := url.Parse("qemu:///system")
+	uri, err := url.Parse(target.LibvirtURI)
 	if err != nil {
 		return nil, err
 	}
@@ -69,6 +71,21 @@ func ConnectSystem() (*LV, error) {
 		return nil, err
 	}
 	return &LV{l: l}, nil
+}
+
+// ConnectTarget points the process at a host (see ParseTarget) and connects.
+// go-libvirt speaks qemu+ssh:// over a pure-Go dialer, so remote needs no
+// cgo — the static story holds. Sets the global target on success so the
+// verbs, ZFS reads and consoles all follow.
+func ConnectTarget(dest string) (*LV, error) {
+	prev := target
+	target = ParseTarget(dest)
+	lv, err := ConnectSystem()
+	if err != nil {
+		target = prev // don't leave the process pointed at a dead host
+		return nil, err
+	}
+	return lv, nil
 }
 
 // Close disconnects. Errors are irrelevant on the way out.

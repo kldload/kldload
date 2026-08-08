@@ -50,12 +50,15 @@ func versionFull() string {
 	return version + " b" + buildNum
 }
 
-const usage = `usage: vmx [--tui] [--once] [--rules FILE] [--version]
+const usage = `usage: vmx [--tui] [--once] [--connect DEST] [--rules FILE] [--version]
 
   (no flags)   native GUI — the estate frame (list · console · details);
                static/terminal-only builds start the TUI instead
   --tui        estate TUI (bubbletea) — headless / SSH / power use
   --once       print the estate table once and exit
+  --connect D  drive a remote hypervisor: a host (fiend.unixbox.net),
+               user@host, or a full libvirt URI (qemu+ssh://host/system).
+               Uses ssh — same key/known_hosts as your shell.
   --rules F    grouping/classification rules file
                (default: /etc/vmxplore/rules, else built-in profile)
   --version    print version and exit
@@ -98,6 +101,13 @@ func main() {
 				os.Exit(2)
 			}
 			rulesPath = args[i]
+		case "--connect", "-c":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "vmx: --connect needs a host or libvirt URI")
+				os.Exit(2)
+			}
+			target = ParseTarget(args[i])
 		default:
 			fmt.Fprintf(os.Stderr, "vmx: unknown option %q\n%s\n", args[i], usage)
 			os.Exit(2)
@@ -145,6 +155,11 @@ func runTUIMain(rs *Ruleset) {
 // (VMX_ELEVATED guards the loop), only on a tty (sudo needs one to prompt),
 // and never as root (a root refusal is a different problem worth seeing).
 func maybeElevate(connectErr error) {
+	// a remote target authenticates over ssh — local sudo can't help, and
+	// re-execing under sudo would drop the user's ssh agent/keys
+	if target.SSHHost != "" {
+		return
+	}
 	if os.Geteuid() == 0 || os.Getenv("VMX_ELEVATED") != "" ||
 		!term.IsTerminal(int(os.Stdin.Fd())) {
 		return

@@ -706,7 +706,8 @@ func (m *ui) execConsole() tea.Cmd {
 	}
 	m.status = "→ virsh console " + r.D.Name + "   (exit: ctrl+])"
 	// pinned URI: bare virsh as a group member lands in qemu:///session
-	c := exec.Command("virsh", "-c", "qemu:///system", "console", r.D.Name)
+	v := virsh("console", r.D.Name)
+	c := exec.Command(v[0], v[1:]...)
 	return tea.ExecProcess(c, func(err error) tea.Msg { return execDoneMsg{err} })
 }
 
