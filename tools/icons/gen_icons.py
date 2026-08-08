@@ -72,6 +72,22 @@ def wgxplore():  # mesh: hub + spokes with a locked link = WireGuard estate
         o.append(C(x, y, 12, w=9))
     o.append(P("M" + " L".join(f"{x:.1f} {y:.1f}" for x, y in pts) + " Z", w=7))
     return "".join(o)
+def vmxplore():  # golden VM box forking to two clones, all standing on a
+    # dataset plate — the domain↔zvol join that IS the console. Plates+branch
+    # keep it in the zxplore family; the amber dot marks the running clone.
+    golden=RR(48,58,84,60,10,sw=10)
+    gr=(f'<rect x="64" y="76" width="52" height="9" rx="4.5"'
+        f' fill="{ACCENT}" opacity="0.95"/>')
+    c1=RR(160,44,50,40,8,sw=9)
+    c2=RR(160,108,50,40,8,sw=9)
+    fork=(P("M132 88 C 148 88, 148 64, 160 64",w=9)
+          +P("M132 88 C 148 88, 148 128, 160 128",w=9))
+    join=L(90,118,90,172,9)
+    plate=RR(48,172,162,36,10,sw=10)
+    pr=(f'<rect x="68" y="184" width="72" height="9" rx="4.5"'
+        f' fill="{ACCENT}" opacity="0.6"/>')
+    led=Cf2(172,120,7)  # amber = the clone that is running
+    return golden+gr+c1+c2+fork+join+plate+pr+led
 def zfslab(): # dataset plates + a branch forking to two experiment nodes:
     # "clone it, try it" — the lab story, sibling of the zfs plates glyph.
     plates="".join(RR(48,y,132,36,10,sw=10) for y in (96,142))
@@ -202,6 +218,7 @@ ICONS = {
  "kldload-helm":helm, "kldload-ansible":ansible, "kldload-klab":klab,
  "kexport":kexport,
  "kldload-k9s":k9s, "kldload-mok-repair":mok_repair, "wgxplore":wgxplore,
+ "vmxplore":vmxplore,
 }
 LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-zfs":"ZFS","kldload-zfslab":"ZFS Lab",
@@ -211,6 +228,7 @@ LABELS = {  # also reused to set Icon= in .desktop later
  "kexport":"Export",
  "kldload-k9s":"k9s","kldload-console":"kldload","kldload-mok-repair":"SB Repair",
  "wgxplore":"WG Console",
+ "vmxplore":"VM Console",
 }
 
 # Colour-coded by FUNCTION GROUP so colour tells you the category at a glance
@@ -222,7 +240,8 @@ COLORS = {
  # storage — green (true red for VMs swap — see ACCENTS2 for highlight)
  "kldload-zfs":"#4cb98a","kldload-zfslab":"#3fae7e","kexport":"#84d4b0",
  # compute — RED (was coral; user wanted a real saturated red for VMs)
- "kldload-vms":"#dc4848",
+ # vmxplore joins the compute reds, shifted warm so the two stay apart
+ "kldload-vms":"#dc4848","vmxplore":"#e2695d",
  # monitoring — orange (mok-repair joins: security/health-of-boot amber)
  "kldload-metrics":"#e6a55f","kst":"#e8b878",
  "kldload-mok-repair":"#dfae64",
@@ -245,7 +264,7 @@ ACCENTS2 = {
  # storage greens → warm amber highlight (think disk activity LED)
  "kldload-zfs":"#f0c674","kldload-zfslab":"#f0c674","kexport":"#f0c674",
  # compute red → amber highlight (the "powered" LED on a screen)
- "kldload-vms":"#f0c674",
+ "kldload-vms":"#f0c674","vmxplore":"#f0c674",
  # monitoring oranges → bright lime (data callout)
  "kldload-metrics":"#c8e670","kst":"#c8e670",
  # orchestration blues → warm amber (hub / node indicator)
