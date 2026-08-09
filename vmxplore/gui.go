@@ -2352,6 +2352,7 @@ func runGUI(rs *Ruleset) {
 	})
 
 	restoreBtn := widget.NewButtonWithIcon("", theme.ViewRestoreIcon(), func() {
+		w.SetPadded(true) // the window's own margin comes back with the chrome
 		w.SetContent(mainContent)
 		// the borrowed pane is going back into its tab: Fyne needs telling
 		// that the tab's content moved parents and back again
@@ -2360,10 +2361,17 @@ func runGUI(rs *Ruleset) {
 	restoreBtn.Importance = widget.LowImportance
 	fullBtn := widget.NewButtonWithIcon("", theme.ViewFullScreenIcon(), func() {
 		pane := tabs.Selected().Content
+		// SetPadded(false) is the last of the border: Fyne insets window
+		// content by a theme margin, which on a maximised window is a
+		// visible frame around a guest that should be reaching the edges.
+		w.SetPadded(false)
+		// The two controls stack vertically rather than sitting side by
+		// side, so they cost one button of width instead of two — the
+		// difference is guest pixels, which is the entire point of the mode.
 		w.SetContent(container.NewStack(
 			pane,
 			container.NewVBox(container.NewHBox(layout.NewSpacer(),
-				container.NewPadded(container.NewHBox(pasteBtn, restoreBtn))))))
+				container.NewVBox(pasteBtn, restoreBtn)))))
 	})
 	consoleHead := container.NewBorder(nil, nil,
 		heading("CONSOLE", acGold),
