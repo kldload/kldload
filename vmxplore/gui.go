@@ -1564,7 +1564,11 @@ func runGUI(rs *Ruleset) {
 							return
 						}
 						refreshNow()
-						dialog.ShowInformation("New VM", spec.Name+" "+done, w)
+						// The status line, not a modal: the VM is already
+						// built and in the list by now, so a popup asking to
+						// be dismissed is pure friction between the operator
+						// and the machine they just made.
+						status.SetText(spec.Name + " " + done)
 					})
 				}()
 			}, w)
@@ -1682,12 +1686,14 @@ func runGUI(rs *Ruleset) {
 							return
 						}
 						refreshNow()
-						dialog.ShowInformation("Appliance",
-							fmt.Sprintf("%s is building %s.\n\n"+
-								"First boot installs and configures it — give it a "+
-								"few minutes, then it serves on:\n%s\n\n"+
-								"Credentials land in /root/ inside the guest.",
-								spec.Name, a.Name, a.LandsOn), w)
+						// No modal: the build already narrated itself here,
+						// ending with the appliance's real URL, and the
+						// catalog entry's notes carry the rest. Where it
+						// lands is the one thing worth repeating.
+						status.SetText(fmt.Sprintf(
+							"%s — %s ready · %s · credentials in /root/ "+
+								"inside the guest",
+							spec.Name, a.Name, a.LandsOn))
 					})
 				}()
 			}, w)
@@ -1747,8 +1753,8 @@ func runGUI(rs *Ruleset) {
 							return
 						}
 						refreshNow()
-						dialog.ShowInformation("EZ Fleet",
-							fmt.Sprintf("%s golden + %d clones ready", spec.Name, n), w)
+						status.SetText(fmt.Sprintf(
+							"%s golden + %d clones ready", spec.Name, n))
 					})
 				}()
 			}, w)
