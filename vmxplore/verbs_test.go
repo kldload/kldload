@@ -134,9 +134,32 @@ func TestPlanLightVerbs(t *testing.T) {
 }
 
 func TestPlanDeleteGates(t *testing.T) {
-	if _, err := planDelete(runningRow()); err == nil {
-		t.Error("delete of a running domain must refuse")
+	// Delete means delete: a running domain is forced off inside the same
+	// plan rather than refused, and the force-off has to come first.
+	run, err := planDelete(runningRow())
+	if err != nil {
+		t.Fatalf("delete of a running domain must plan, not refuse: %v", err)
 	}
+	if len(run.cmds) == 0 ||
+		strings.Join(run.cmds[0], " ") != "virsh -c qemu:///system destroy klab-blue-fedora" {
+		t.Errorf("delete of a running domain must force off first: %v", run.cmds)
+	}
+	if run.retype != "klab-blue-fedora" {
+		t.Error("delete must stay retype-gated even when it forces off")
+	}
+	// A transient domain is erased by the destroy above; undefine would
+	// then fail and abort the plan before the zvol is destroyed.
+	tr := runningRow()
+	tr.D.Persistent = false
+	trJoined := ""
+	trPlan, _ := planDelete(tr)
+	for _, c := range trPlan.cmds {
+		trJoined += strings.Join(c, " ") + ";"
+	}
+	if strings.Contains(trJoined, "undefine") {
+		t.Errorf("transient delete must not undefine: %s", trJoined)
+	}
+
 	p, err := planDelete(offRow())
 	if err != nil {
 		t.Fatal(err)

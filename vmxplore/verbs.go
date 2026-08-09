@@ -165,22 +165,38 @@ func planResume(r Row) (verbPlan, error) {
 	}, nil
 }
 
-// planDelete removes a VM for good: undefine (nvram included) and, when a
-// zvol sits underneath, destroy the dataset with every snapshot on it.
-// Retype-gated — this is the one verb with no undo.
+// planDelete removes a VM for good: pull the plug if it is still up,
+// undefine (nvram included) and, when a zvol sits underneath, destroy the
+// dataset with every snapshot on it. Retype-gated — this is the one verb
+// with no undo.
+//
+// WHY the force-off is part of the plan rather than a precondition: delete
+// means delete. Refusing a running domain and telling the operator to go
+// force it off first is a two-step dance whose only product is the same
+// erased VM, and there is nothing in a guest being destroyed in the next
+// command that a graceful shutdown would preserve. The retype gate is what
+// makes this safe, not the state check.
 func planDelete(r Row) (verbPlan, error) {
 	if r.Synthetic {
 		return verbPlan{}, fmt.Errorf("no domain behind this row")
 	}
-	if r.D.State == "running" {
-		return verbPlan{}, fmt.Errorf("%s is running — shut it down (or force off) first", r.D.Name)
+	var cmds [][]string
+	forced := ""
+	if r.D.State != "shut off" {
+		cmds = append(cmds, virsh("destroy", r.D.Name))
+		forced = "forces it off (the guest gets no chance to flush), then "
 	}
-	cmds := [][]string{virsh("undefine", r.D.Name, "--nvram")}
-	warn := "removes the domain definition permanently"
+	// A transient domain has no definition on disk: `virsh destroy` above
+	// already erased it, and undefine would then fail and abort the plan
+	// before the zvol is destroyed. See planForceOff for the same hazard.
+	if r.D.Persistent {
+		cmds = append(cmds, virsh("undefine", r.D.Name, "--nvram"))
+	}
+	warn := forced + "removes the domain definition permanently"
 	needsRoot := false
 	if r.DS != nil {
 		cmds = append(cmds, zfsArgv("destroy", "-r", r.DS.Name))
-		warn = "removes the domain AND destroys " + r.DS.Name +
+		warn = forced + "removes the domain AND destroys " + r.DS.Name +
 			" with every snapshot and clone under it"
 		needsRoot = true
 	}
@@ -310,7 +326,12 @@ func planAutostart(r Row) (verbPlan, error) {
 // a TUI on a hidden prompt. Every command lands in the audit log either way.
 func runPlan(p verbPlan) error {
 	for _, argv := range p.cmds {
-		if p.needsRoot && os.Geteuid() != 0 {
+		// Only the zfs mutation in a mixed plan needs root. Wrapping the
+		// whole plan — as this did — also ran virsh as root, which on a
+		// remote target means root's ssh keys and a connection the
+		// operator never authorized. ssh-transported zfs carries its own
+		// privilege on the far side, so it is left alone too.
+		if p.needsRoot && argv[0] == "zfs" && os.Geteuid() != 0 {
 			argv = append([]string{"sudo", "-n"}, argv...)
 		}
 		out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
