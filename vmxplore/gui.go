@@ -990,6 +990,39 @@ func runGUI(rs *Ruleset) {
 		}
 		return theme.ComputerIcon()
 	}
+	// toolAccent colours a tile by what the tool DOES, so the launcher is
+	// scannable before a single label is read — the same colour language
+	// the verb tiles already speak inside a tool (green makes, red
+	// destroys, steel reads), lifted one level up to the tools themselves.
+	//
+	//	green  builds or creates something new
+	//	blue   storage: snapshots, images, the ZFS consoles
+	//	gold   read-only — looking, never touching
+	//	red    destroys, and cannot be undone
+	//	purple guided demos (the brand accent: these are the showpieces)
+	//
+	// Unknown tools fall through to gold rather than a neutral grey: a new
+	// k-tool nobody has classified yet is, at worst, safe to look at.
+	toolAccent := func(name string) accentPair {
+		switch {
+		case strings.HasSuffix(name, "-demo"):
+			return acBrand
+		case name == "kvm-delete":
+			return acRed
+		case name == "kvm-snap" || name == "ksnap" || name == "kexport" ||
+			name == "kimage" || name == "zxplore":
+			return acBlue
+		case name == "kvm-list" || name == "kst":
+			return acGold
+		case name == "klab" || name == "kube-cluster" || name == "kspawn" ||
+			name == "kvm-create" || name == "kvm-clone" || name == "kvm-win" ||
+			name == "kzfs-lab":
+			return acGreen
+		case name == "shell":
+			return acOff // a plain prompt: no verb, no colour to earn
+		}
+		return acGold
+	}
 	// ── the action catalog ───────────────────────────────────────────────
 	// Curated from each tool's REAL usage banner (2026-08-07 sweep) —
 	// most k-tools are `tool <subcommand>` CLIs, so a bare tile just
@@ -1179,9 +1212,11 @@ func runGUI(rs *Ruleset) {
 		tiles := make([]fyne.CanvasObject, 0, len(acts))
 		for _, act := range acts {
 			act := act
-			// colour says what a verb does before you read it: green
-			// builds, red destroys, steel reads
-			col := theme.Color(theme.ColorNameForeground)
+			// colour says what a verb does before you read it, in the
+			// same language as the tools grid one level up: green
+			// builds, red destroys, gold reads. Nothing is left neutral
+			// — a grey tile reads as disabled, not as safe.
+			col := acGold.at()
 			switch {
 			case act.confirm:
 				col = acRed.at()
@@ -1241,16 +1276,18 @@ func runGUI(rs *Ruleset) {
 		tiles := make([]fyne.CanvasObject, 0, len(ktools)+1)
 		for _, t := range append(append([]string{}, ktools...), "shell") {
 			t := t
-			col := theme.Color(theme.ColorNameForeground)
-			if strings.HasSuffix(t, "-demo") {
-				col = acBrand.at() // demos pop in the brand purple
-			}
-			tiles = append(tiles, newTile(toolIcon(t), t, toolDesc[t], col,
-				func() { openTool(t) }))
+			tiles = append(tiles, newTile(toolIcon(t), t, toolDesc[t],
+				toolAccent(t).at(), func() { openTool(t) }))
 		}
+		// The legend is spelled out because a colour language nobody
+		// explains is decoration. One line, once, at the top.
+		legend := widget.NewLabel(
+			"green builds · blue storage · gold reads · red destroys · purple demos")
+		legend.TextStyle = fyne.TextStyle{Italic: true}
 		head := container.NewVBox(
 			pageHeading("kldload tools", acBrand),
-			widget.NewLabel("clusters, goldens, clones, demos — they run right here"))
+			widget.NewLabel("clusters, goldens, clones, demos — they run right here"),
+			legend)
 		grid := container.NewGridWrap(fyne.NewSize(250, 96), tiles...)
 		toolsHost.Objects = []fyne.CanvasObject{container.NewBorder(
 			container.NewPadded(head), nil, nil, nil,
@@ -2126,19 +2163,22 @@ func runGUI(rs *Ruleset) {
 	}
 	vmsHost := container.NewBorder(
 		container.NewCenter(pageHeading("NEW VM", acBrand)), nil, nil, nil,
+		// Same colour language as the tools grid: the three that end with
+		// a new machine are green; Make Golden is blue because it seals
+		// storage rather than creating a VM.
 		tileGrid(
 			newTile(theme.ContentAddIcon(), "New VM",
 				"cloud image, or boot an installer ISO",
-				acBrand.at(), newVMDialog),
+				acGreen.at(), newVMDialog),
 			newTile(theme.ViewRefreshIcon(), "EZ Fleet",
 				"a golden plus N clones, one shot",
 				acGreen.at(), fleetDialog),
 			newTile(theme.ContentCopyIcon(), "Clone",
 				"instant zero-copy ZFS clone of the selected VM",
-				acGold.at(), cloneAny),
+				acGreen.at(), cloneAny),
 			newTile(theme.ConfirmIcon(), "Make Golden",
 				"seal the selected VM into a clone template",
-				acBrand.at(), goldenAct),
+				acBlue.at(), goldenAct),
 		))
 
 	// One tile per catalog entry (appliances.go). The catalog is data, so
