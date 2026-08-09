@@ -903,7 +903,8 @@ func runGUI(rs *Ruleset) {
 	toolsHost := container.NewStack()
 	var toolCmd *exec.Cmd
 	var toolPty interface{ Close() error }
-	var selectToolsTab func() // set once the tab bar exists below
+	var selectToolsTab func()    // set once the tab bar exists below
+	var selectGraphicsTab func() // ditto — where a new VM's first boot shows
 	var showToolTiles func()
 	stopTool := func() {
 		if toolCmd != nil && toolCmd.Process != nil {
@@ -1595,6 +1596,18 @@ func runGUI(rs *Ruleset) {
 					done = "created — open the Graphics tab and run the installer"
 				}
 				parent := ZFSVMParent(st.visibleRows())
+				// Focus the machine being built, and show it. Selection
+				// follows the domain BY NAME across refreshes (see the
+				// refresh loop), so naming it here means the estate list
+				// jumps to the new VM the moment it first appears; the tab
+				// switch means the operator is looking at its first boot
+				// rather than at the form they just submitted. That boot is
+				// the part worth watching and it is over before the build
+				// call returns.
+				st.selName = spec.Name
+				if selectGraphicsTab != nil {
+					selectGraphicsTab()
+				}
 				go func() {
 					err := BuildNewVM(spec, parent, func(line string) {
 						fyne.Do(func() { status.SetText(line) })
@@ -1728,6 +1741,18 @@ func runGUI(rs *Ruleset) {
 					return
 				}
 				parent := ZFSVMParent(st.visibleRows())
+				// Focus the machine being built, and show it. Selection
+				// follows the domain BY NAME across refreshes (see the
+				// refresh loop), so naming it here means the estate list
+				// jumps to the new VM the moment it first appears; the tab
+				// switch means the operator is looking at its first boot
+				// rather than at the form they just submitted. That boot is
+				// the part worth watching and it is over before the build
+				// call returns.
+				st.selName = spec.Name
+				if selectGraphicsTab != nil {
+					selectGraphicsTab()
+				}
 				go func() {
 					err := BuildNewVM(spec, parent, func(line string) {
 						fyne.Do(func() { status.SetText(line) })
@@ -1799,6 +1824,11 @@ func runGUI(rs *Ruleset) {
 					User: "admin", Password: "kldload", PostInst: post.Text,
 				}
 				parent := ZFSVMParent(st.visibleRows())
+				// the golden appears first; the clones land under it
+				st.selName = spec.Name
+				if selectGraphicsTab != nil {
+					selectGraphicsTab()
+				}
 				go func() {
 					err := BuildFleet(spec, n, parent, func(line string) {
 						fyne.Do(func() { status.SetText(line) })
@@ -2213,6 +2243,7 @@ func runGUI(rs *Ruleset) {
 	// get-kldload pitch elsewhere
 	tabs.Append(container.NewTabItem("kldload", toolsHost))
 	selectToolsTab = func() { tabs.SelectIndex(2) }
+	selectGraphicsTab = func() { tabs.SelectIndex(1) }
 	tabs.Append(container.NewTabItem("New VM", vmsHost))
 	tabs.Append(container.NewTabItem("Appliances", appliancesHost))
 	// Graphics, not Serial, is where the work happens: it shows the same
