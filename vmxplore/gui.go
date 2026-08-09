@@ -1572,11 +1572,46 @@ func runGUI(rs *Ruleset) {
 			})
 		// cloud-only fields hide in installer mode (the guest's installer
 		// collects user/packages/layout itself)
+		// NVIDIA mode, offered only where it could possibly work.
+		//
+		// The tool tiers itself by what the host can DO — the same probe
+		// rule the kldload toolset follows — so this checkbox exists only
+		// when the hypervisor actually has an NVIDIA card in it. On a
+		// machine with no GPU it would be several hundred megabytes of
+		// driver, ten minutes of build, and nothing to drive.
+		//
+		// The label says what it does AND what it does not: installing the
+		// driver is the guest half. Handing the card to the guest is a
+		// host-side passthrough job that this checkbox does not do.
+		gpus := HostGPUs()
+		nvidia := widget.NewCheck("NVIDIA drivers in the guest", nil)
+		nvidiaRow := container.NewVBox(nvidia)
+		if NVIDIAHost(gpus) {
+			what := "an NVIDIA card"
+			for _, g := range gpus {
+				if g.IsNVIDIA() && g.Model != "" {
+					what = g.Model
+					break
+				}
+			}
+			note := widget.NewLabel("host has " + what +
+				" — the guest still needs the card passed through to use it")
+			if !IOMMUEnabled() {
+				note.SetText("host has " + what +
+					" — but the IOMMU is off, so no card can be passed to a guest yet")
+			}
+			note.Wrapping = fyne.TextWrapWord
+			note.TextStyle = fyne.TextStyle{Italic: true}
+			nvidiaRow.Add(note)
+		} else {
+			nvidiaRow.Hide()
+		}
 		cloudOnly := container.NewVBox(
 			widget.NewLabel("distro"), distro, imgPath,
 			widget.NewLabel("user"), user,
 			widget.NewLabel("password"), pass,
 			widget.NewLabel("ssh key"), key,
+			nvidiaRow,
 			container.NewBorder(nil, nil,
 				widget.NewLabel("post-install"), loadPost),
 			post)
@@ -1628,6 +1663,12 @@ func runGUI(rs *Ruleset) {
 					spec.Password = pass.Text
 					spec.SSHKey = strings.TrimSpace(key.Text)
 					spec.PostInst = post.Text
+					// Composed, not merged: the driver layer runs first
+					// and reboots, and cloud-init resumes the operator's
+					// own script on the way back up.
+					if nvidia.Checked {
+						spec.PostInst = nvidiaGuestScript + "\n" + post.Text
+					}
 					if distro.Selected == "custom image…" {
 						spec.ImagePath = strings.TrimSpace(imgPath.Text)
 					} else {
