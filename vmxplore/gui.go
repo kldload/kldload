@@ -278,6 +278,13 @@ func (r *vmRow) MouseDown(e *desktop.MouseEvent) {
 }
 func (r *vmRow) MouseUp(*desktop.MouseEvent) {}
 
+// Tree UIDs for the catalog branch. They live outside the "grp/" and "vm/"
+// namespaces so no estate lookup can ever collide with a catalog entry.
+const (
+	applianceBranchUID = "appliances"
+	applianceUIDPrefix = "app/"
+)
+
 func newVMRow() *vmRow {
 	r := &vmRow{
 		title:  canvas.NewText("", theme.Color(theme.ColorNameForeground)),
@@ -616,11 +623,24 @@ func runGUI(rs *Ruleset) {
 
 	var tree *widget.Tree
 	var rowMenuAt func(r Row, pos fyne.Position) // wired after the verbs exist
+	// openAppliance is wired once the dialog exists, further down. The tree
+	// is built before it, so the catalog branch reaches it through this.
+	var openAppliance func(name string)
 	childUIDs := func(uid string) []string {
 		if uid == "" {
-			out := make([]string, 0, len(viewGroups))
+			out := make([]string, 0, len(viewGroups)+1)
 			for _, g := range viewGroups {
 				out = append(out, "grp/"+g.Label)
+			}
+			// The catalog sits last and closed: it is a menu of things to
+			// build, not estate, so it must never push the running VMs
+			// down the pane.
+			return append(out, applianceBranchUID)
+		}
+		if uid == applianceBranchUID {
+			out := make([]string, 0, len(Appliances()))
+			for _, n := range ApplianceNames() {
+				out = append(out, applianceUIDPrefix+n)
 			}
 			return out
 		}
@@ -638,7 +658,8 @@ func runGUI(rs *Ruleset) {
 		return nil
 	}
 	isBranch := func(uid string) bool {
-		return uid == "" || strings.HasPrefix(uid, "grp/")
+		return uid == "" || uid == applianceBranchUID ||
+			strings.HasPrefix(uid, "grp/")
 	}
 	tree = widget.NewTree(childUIDs, isBranch,
 		func(branch bool) fyne.CanvasObject {
@@ -651,16 +672,50 @@ func runGUI(rs *Ruleset) {
 		},
 		func(uid string, branch bool, o fyne.CanvasObject) {
 			if branch {
+				t := o.(*canvas.Text)
+				if uid == applianceBranchUID {
+					t.Text = fmt.Sprintf("Appliances  (%d)", len(Appliances()))
+					t.Color = acBrand.at()
+					t.Refresh()
+					return
+				}
 				label := strings.TrimPrefix(uid, "grp/")
 				n, run := groupStats(label)
 				s := fmt.Sprintf("%s  (%d)", label, n)
 				if run > 0 {
 					s += fmt.Sprintf("  ·  %d running", run)
 				}
-				t := o.(*canvas.Text)
 				t.Text = s
 				t.Color = acBrand.at()
 				t.Refresh()
+				return
+			}
+			// A catalog leaf is a thing to build, not a thing that exists,
+			// so it borrows the row widget but none of its estate gestures.
+			// Every callback is reassigned because Fyne recycles leaf
+			// widgets — a stale closure here would aim a VM verb at an
+			// appliance.
+			if name, ok := strings.CutPrefix(uid, applianceUIDPrefix); ok {
+				a, found := ApplianceByName(name)
+				if !found {
+					return
+				}
+				row := o.(*vmRow)
+				row.title.Text = "＋ " + a.Name
+				row.title.Color = acBrand.at()
+				row.detail.Text = fmt.Sprintf("%s   ·   %d vCPU, %d MB, %d GB",
+					a.Summary, a.VCPUs, a.RAMMB, a.DiskGB)
+				row.detail.Color = theme.Color(theme.ColorNameForeground)
+				row.onTap = func() {
+					if openAppliance != nil {
+						openAppliance(a.Name)
+					}
+				}
+				row.onToggle = func() {}
+				row.onRange = func() {}
+				row.onMenu = func(fyne.Position) {}
+				row.title.Refresh()
+				row.detail.Refresh()
 				return
 			}
 			r, ok := rowByUID(uid)
@@ -1490,11 +1545,16 @@ func runGUI(rs *Ruleset) {
 	// the only things left to answer are app-specific — which is the whole
 	// point: "give me a blog" instead of "give me a Debian VM, then follow
 	// a writeup." The build path is the ordinary New VM pipeline.
-	applianceDialog := func() {
+	// preselect names the catalog entry to open on; empty picks the first.
+	// The left-tree catalog branch passes the entry that was clicked.
+	applianceDialog := func(preselect string) {
 		catalog := Appliances()
 		if len(catalog) == 0 {
 			dialog.ShowInformation("Appliances", "The catalog is empty.", w)
 			return
+		}
+		if _, ok := ApplianceByName(preselect); !ok {
+			preselect = catalog[0].Name
 		}
 		name := widget.NewEntry()
 		name.SetPlaceHolder("vm name")
@@ -1548,7 +1608,7 @@ func runGUI(rs *Ruleset) {
 			fields.Refresh()
 		}
 		pick.OnChanged = rebuild
-		pick.SetSelected(catalog[0].Name)
+		pick.SetSelected(preselect)
 
 		form := container.NewVBox(
 			widget.NewLabel("appliance"), pick, summary,
@@ -1602,6 +1662,8 @@ func runGUI(rs *Ruleset) {
 		d.Resize(fyne.NewSize(480, 620))
 		d.Show()
 	}
+	// close the forward reference the catalog branch in the tree holds
+	openAppliance = applianceDialog
 
 	// EZ Fleet: one dialog → build a golden + N clones. The whole value
 	// proposition in a gesture ("give me 5 Fedora boxes").
@@ -1712,7 +1774,8 @@ func runGUI(rs *Ruleset) {
 		fyne.NewMenuItem("Autostart on/off", verb(planAutostart)))
 	mBuild := menuButton("Build", theme.ContentAddIcon(),
 		fyne.NewMenuItem("New VM…", newVMDialog),
-		fyne.NewMenuItem("Appliance — a configured app…", applianceDialog),
+		fyne.NewMenuItem("Appliance — a configured app…",
+			func() { applianceDialog("") }),
 		fyne.NewMenuItem("EZ Fleet — golden + N clones…", fleetDialog),
 		fyne.NewMenuItem("Clone…", cloneAny),
 		fyne.NewMenuItem("Make Golden…", goldenAct))
@@ -1864,6 +1927,18 @@ func runGUI(rs *Ruleset) {
 			tree.Unselect(uid)
 			return
 		}
+		// A catalog leaf is an action, not a selection: opening the build
+		// dialog is the whole point, and leaving it selected would strand
+		// the dossier and console panes on a VM that does not exist yet.
+		// (The leaf's own tap handler covers mouse clicks; this is the
+		// path keyboard navigation takes.)
+		if name, ok := strings.CutPrefix(uid, applianceUIDPrefix); ok {
+			tree.Unselect(uid)
+			if openAppliance != nil {
+				openAppliance(name)
+			}
+			return
+		}
 		r, ok := rowByUID(uid)
 		if !ok {
 			return
@@ -2002,6 +2077,45 @@ func runGUI(rs *Ruleset) {
 	left := gap(card(container.NewBorder(
 		container.NewVBox(estateHead, search, batchBar), nil, nil, nil,
 		tree)))
+	// The build surfaces are tabs in the console card, not menu items,
+	// because the tile grid the kldload tab already uses reads as a menu
+	// you can see: every way to make a VM is one glance, and a tile opens
+	// the dialog that collects its details. Same layout in all three tabs
+	// so the pane behaves identically wherever you are.
+	tileGrid := func(tiles ...fyne.CanvasObject) fyne.CanvasObject {
+		return container.NewVScroll(container.NewPadded(
+			container.NewGridWrap(fyne.NewSize(250, 96), tiles...)))
+	}
+	vmsHost := container.NewBorder(
+		container.NewCenter(pageHeading("NEW VM", acBrand)), nil, nil, nil,
+		tileGrid(
+			newTile(theme.ContentAddIcon(), "New VM",
+				"cloud image, or boot an installer ISO",
+				acBrand.at(), newVMDialog),
+			newTile(theme.ViewRefreshIcon(), "EZ Fleet",
+				"a golden plus N clones, one shot",
+				acGreen.at(), fleetDialog),
+			newTile(theme.ContentCopyIcon(), "Clone",
+				"instant zero-copy ZFS clone of the selected VM",
+				acGold.at(), cloneAny),
+			newTile(theme.ConfirmIcon(), "Make Golden",
+				"seal the selected VM into a clone template",
+				acBrand.at(), goldenAct),
+		))
+
+	// One tile per catalog entry (appliances.go). The catalog is data, so
+	// this grid grows on its own as entries are added — nothing here to
+	// edit per app.
+	appTiles := make([]fyne.CanvasObject, 0, len(Appliances()))
+	for _, ap := range Appliances() {
+		ap := ap // the tile closure outlives the loop iteration
+		appTiles = append(appTiles, newTile(theme.StorageIcon(), ap.Name,
+			ap.Summary, acGreen.at(), func() { applianceDialog(ap.Name) }))
+	}
+	appliancesHost := container.NewBorder(
+		container.NewCenter(pageHeading("APPLIANCES", acGreen)), nil, nil, nil,
+		tileGrid(appTiles...))
+
 	// Serial | Graphics tabs share the console card; ⛶ toggles the card
 	// full-window (and back) for real console work.
 	tabs := container.NewAppTabs(
@@ -2011,6 +2125,8 @@ func runGUI(rs *Ruleset) {
 	// get-kldload pitch elsewhere
 	tabs.Append(container.NewTabItem("kldload", toolsHost))
 	selectToolsTab = func() { tabs.SelectIndex(2) }
+	tabs.Append(container.NewTabItem("New VM", vmsHost))
+	tabs.Append(container.NewTabItem("Appliances", appliancesHost))
 	var mainContent fyne.CanvasObject
 	consoleCard := card(container.NewBorder(nil, nil, nil, nil, tabs))
 	restoreBtn := widget.NewButtonWithIcon("", theme.ViewRestoreIcon(), func() {
