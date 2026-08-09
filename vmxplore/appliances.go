@@ -961,9 +961,55 @@ if command -v apt-get >/dev/null 2>&1; then
     # image has to install it and boot into it once.
     # HISTORY: wf-desk, 2026-08-09 — installed cleanly, served the blog on
     # :80, and never put a pixel on screen.
-    if dpkg-query -W -f='${Status}' "linux-image-cloud-$(dpkg --print-architecture)" \
+    wf_arch="$(dpkg --print-architecture)"
+    if dpkg-query -W -f='${Status}' "linux-image-cloud-$wf_arch" \
         2>/dev/null | grep -q '^install ok installed$'; then
-        apt-get install -y "linux-image-$(dpkg --print-architecture)"
+        apt-get install -y "linux-image-$wf_arch"
+
+        # Installing it is not enough. Both flavours carry the SAME
+        # version, and grub's sort puts "…-cloud-amd64" after
+        # "…-amd64", so the newest-kernel default picks the cloud one and
+        # the machine boots straight back into a kernel with no DRM.
+        # HISTORY: wf-desk, 2026-08-09 — installed the generic kernel,
+        # rebooted, came up on the cloud one, X died again.
+        #
+        # Purging the cloud kernel is NOT the way out: its prerm refuses
+        # with "Aborting removal of the running kernel", and it is by
+        # definition the running one at this point. So point grub at the
+        # generic entry explicitly. The id path is submenu>entry, both
+        # read out of the generated grub.cfg rather than guessed, and
+        # update-grub bakes it into grub.cfg's "set default=" line.
+        # Glob, not ls|grep: the cloud images are the ones whose name
+        # ends -cloud-<arch>, so everything else in /boot is a candidate
+        # and the newest by version sort wins.
+        wf_gen=""
+        for wf_k in /boot/vmlinuz-*; do
+            case "$wf_k" in *-cloud-*) continue ;; esac
+            wf_gen="$wf_k"
+        done
+        wf_ver="${wf_gen#/boot/vmlinuz-}"
+        if [ -z "$wf_ver" ]; then
+            echo "FATAL: generic kernel installed but no vmlinuz for it" >&2
+            exit 1
+        fi
+        wf_sub="$(grep -o 'gnulinux-advanced-[a-f0-9-]*' /boot/grub/grub.cfg | head -1)"
+        wf_ent="$(grep -o "gnulinux-$wf_ver-advanced-[a-f0-9-]*" /boot/grub/grub.cfg | head -1)"
+        if [ -z "$wf_sub" ] || [ -z "$wf_ent" ]; then
+            echo "FATAL: cannot find the generic kernel's grub menu id" >&2
+            exit 1
+        fi
+        sed -i '/^GRUB_DEFAULT=/d' /etc/default/grub
+        echo "GRUB_DEFAULT=\"$wf_sub>$wf_ent\"" >>/etc/default/grub
+
+        # The meta package goes even though the running image cannot:
+        # left in place it pulls a NEWER cloud kernel on the next upgrade,
+        # which would out-sort the generic one and undo all of this. Only
+        # the meta is named here, so the running kernel is untouched and
+        # the machine stays bootable either way; a failure is reported but
+        # is not fatal, since grub already points at the generic entry.
+        apt-get purge -y "linux-image-cloud-$wf_arch" ||
+            echo "WARN: could not drop the cloud kernel meta package" >&2
+        update-grub
         wf_need_reboot=1
     fi
 elif command -v dnf >/dev/null 2>&1; then
@@ -990,6 +1036,12 @@ wf_home="$(getent passwd "$wf_desk" | cut -d: -f6)"
 # upgrade cannot silently revert it.
 mkdir -p /etc/systemd/system/getty@tty1.service.d
 cat >/etc/systemd/system/getty@tty1.service.d/autologin.conf <<EOF
+[Unit]
+# A kiosk must keep trying. The default 5-starts-in-10s limit exists to
+# stop a broken service thrashing; here the "thrash" IS the retry loop
+# that recovers the session, so the limit is what breaks it.
+StartLimitIntervalSec=0
+
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin ${wf_desk} --noclear %I \$TERM
@@ -998,8 +1050,16 @@ EOF
 # tty1 starts X and nothing else. Guarding on the tty matters: without it
 # an ssh login would try to start a second X server.
 cat >"$wf_home/.bash_profile" <<'PROFILE'
+# Not exec, and never instant: if X cannot start, an exec'd startx exits
+# the login shell immediately, agetty respawns, and systemd kills the
+# getty for good after 5 restarts in 10s — turning a recoverable X
+# failure into a console that is dead until someone reboots it. The sleep
+# turns the same loop into a retry every 5 seconds, which is what heals
+# a kiosk once the reason X failed goes away.
+# HISTORY: wf-desk, 2026-08-09 — getty@tty1 start-limit-hit, black screen.
 if [ "$(tty)" = "/dev/tty1" ] && [ -z "${DISPLAY:-}" ]; then
-    exec startx -- -nocursor
+    startx -- -nocursor || sleep 5
+    exit
 fi
 PROFILE
 
