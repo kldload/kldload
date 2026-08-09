@@ -160,6 +160,10 @@ var vmKTools = []string{
 	"kvm-create", "kvm-clone", "kvm-delete", "kvm-snap", "kvm-list",
 	"kimage", "kexport", "kvm-win", "ksnap",
 	"kvm-demo", "kube-demo",
+	// the ZFS surfaces: zxplore is the family's storage console, kst the
+	// host's pool/health summary. Both were missing here, so a kldload
+	// host showed every VM tool and no way to reach its storage.
+	"zxplore", "kst",
 }
 
 // KldloadTools returns the kldload VM tools present on this host (nil on a

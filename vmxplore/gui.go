@@ -1103,6 +1103,8 @@ func runGUI(rs *Ruleset) {
 		"ksnap":        "host-level ZFS snapshots and rollback",
 		"kvm-demo":     "guided KVM / ZFS / GPU showcase",
 		"kube-demo":    "guided Kubernetes-on-ZFS showcase",
+		"zxplore":      "the ZFS console: pools, datasets, snapshots, clones",
+		"kst":          "this host at a glance: pool health, capacity, build",
 		"shell":        "a plain bash prompt, right here",
 	}
 
@@ -2127,6 +2129,11 @@ func runGUI(rs *Ruleset) {
 	selectToolsTab = func() { tabs.SelectIndex(2) }
 	tabs.Append(container.NewTabItem("New VM", vmsHost))
 	tabs.Append(container.NewTabItem("Appliances", appliancesHost))
+	// Graphics, not Serial, is where the work happens: it shows the same
+	// console plus everything graphical, so it is the right landing tab.
+	// Serial stays for the case Graphics cannot cover — a guest with no
+	// video, or one whose X is broken, where it is the only way in.
+	tabs.SelectIndex(1)
 	var mainContent fyne.CanvasObject
 	consoleCard := card(container.NewBorder(nil, nil, nil, nil, tabs))
 	restoreBtn := widget.NewButtonWithIcon("", theme.ViewRestoreIcon(), func() {

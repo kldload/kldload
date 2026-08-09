@@ -79,11 +79,63 @@ var vmNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // runStep executes one pipeline command: sudo -n when root work is needed
 // and we aren't root, the exact argv echoed to progress, the run
 // audit-logged with its exit code — the same contract as the verb plans.
+// stepLabel turns a pipeline command into a line worth showing a person.
+//
+// The status bar used to echo raw argv, which read as debug output and
+// told the operator nothing they could act on. The exact command still
+// goes to the audit log, where it belongs and where it can be replayed;
+// this is the narration. An empty result means the step is plumbing not
+// worth a line (mkdir, cp).
+//
+// Note this is deliberately NOT applied to the verb confirmation dialog:
+// there, showing the precise command before asking is the safety
+// feature, not noise.
+func stepLabel(argv []string) string {
+	for len(argv) > 0 && (argv[0] == "sudo" || argv[0] == "-n") {
+		argv = argv[1:]
+	}
+	if len(argv) == 0 {
+		return ""
+	}
+	sub := ""
+	if len(argv) > 1 {
+		sub = argv[1]
+	}
+	switch argv[0] {
+	case "zfs":
+		if sub == "create" {
+			return "creating the disk"
+		}
+		return "storage: " + sub
+	case "qemu-img":
+		if sub == "resize" {
+			return "sizing the disk"
+		}
+		return "writing the cloud image to the disk"
+	case "curl":
+		return "downloading the cloud image (once — cached after)"
+	case "mkisofs", "xorriso", "genisoimage":
+		return "building the cloud-init seed"
+	case "virt-install":
+		return "creating the VM"
+	case "virsh":
+		if sub == "-c" || sub == "--connect" {
+			return "defining the VM so it survives a shutdown"
+		}
+		return "libvirt: " + sub
+	case "mkdir", "cp", "rm":
+		return "" // plumbing
+	}
+	return argv[0]
+}
+
 func runStep(progress func(string), root bool, argv ...string) error {
 	if root && os.Geteuid() != 0 {
 		argv = append([]string{"sudo", "-n"}, argv...)
 	}
-	progress("$ " + strings.Join(argv, " "))
+	if label := stepLabel(argv); label != "" {
+		progress(label)
+	}
 	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
 	rc := 0
 	if err != nil {
