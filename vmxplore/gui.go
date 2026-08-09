@@ -1300,8 +1300,17 @@ func runGUI(rs *Ruleset) {
 	}
 	showToolTiles()
 
+	// conName/conState remember what the panes are actually attached TO,
+	// as opposed to what is merely selected — the refresh loop compares
+	// against these to notice a machine that changed underneath a standing
+	// attachment. conLast* are the previous poll's sample, which is what
+	// makes a restart detectable at all (see the refresh loop).
+	var conName, conState, conLastName string
+	var conCPU uint64
+
 	// followConsole keeps both panes in lock-step with the selection.
 	followConsole := func(r Row) {
+		conName, conState = r.D.Name, r.D.State
 		if r.D.State == "running" && !r.Synthetic {
 			attachConsole(r.D.Name)
 			attachVNC(r.D.Name)
@@ -2109,6 +2118,26 @@ func runGUI(rs *Ruleset) {
 			len(doms), st.rs.Source, at.Format("15:04:05"), versionFull()))
 		if r, ok := st.selected(); ok {
 			renderDossier(r)
+			// The console is attached to a PROCESS, not to a name. A domain
+			// that stopped and started again is a new qemu with a new
+			// serial pty and a new VNC port, so the standing attachment is
+			// a dead pipe over stale pixels — and nothing noticed, because
+			// this only ever ran on a click. The operator's workaround was
+			// to select another VM and come back.
+			//
+			// Three things mean "re-follow": a different domain, a
+			// different power state, or a cumulative CPU counter that went
+			// BACKWARDS. That last one is what catches an off-and-on cycle
+			// completed between two polls, where the state reads "running"
+			// both times and only the counter reveals that the process
+			// behind the name was replaced. A reboot from inside the guest
+			// keeps the same qemu, keeps counting up, and correctly does
+			// not disturb the attachment.
+			restarted := r.D.Name == conLastName && r.D.CPUTimeNs < conCPU
+			if r.D.Name != conName || r.D.State != conState || restarted {
+				followConsole(r)
+			}
+			conLastName, conCPU = r.D.Name, r.D.CPUTimeNs
 		}
 	}
 	fetchEstate := func() {
