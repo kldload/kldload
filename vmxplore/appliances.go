@@ -914,15 +914,23 @@ var writeFreelyDesktop = Appliance{
 	RAMMB:  3072,
 	DiskGB: 16,
 
-	Port:    80,
-	LandsOn: "the Graphics tab — it boots into the editor. Also http://<vm-ip>/",
+	Port: 80,
+	LandsOn: "the Graphics tab — it boots into the editor, signed in. " +
+		"Also http://<vm-ip>/",
 
 	Notes: "Boots with no login prompt straight into a full-screen editor, " +
-		"so the Graphics tab is the whole interface. The blog is also " +
-		"served on the network exactly as the headless entry does.\n\n" +
+		"already signed in as the admin you set up here — the Graphics " +
+		"tab is the whole interface. The blog is also served on the " +
+		"network exactly as the headless entry does.\n\n" +
+		"There is no desktop and nothing to navigate away into. " +
+		"ctrl+alt+F2 gives an ordinary console login if you need one, " +
+		"ctrl+alt+F1 comes back. Power off from the console you are " +
+		"reading this in — the guest answers the ACPI button with a " +
+		"clean shutdown.\n\n" +
 		"Heavier than the server appliance — it carries X, a kiosk window " +
 		"manager and a browser — so give it the 2 vCPU / 3 GB it asks for. " +
-		"First boot takes longer because it installs those packages.",
+		"First boot installs those packages and reboots once into a " +
+		"kernel that has graphics drivers, so it takes a few minutes.",
 
 	Fields:   writeFreely.Fields,
 	Validate: writeFreely.Validate,
@@ -1063,16 +1071,70 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "${DISPLAY:-}" ]; then
 fi
 PROFILE
 
+# ─── Signed in, not just pointed at a login page ──────────────────────
+#
+# The appliance asked for an admin username and password during setup;
+# making the operator type them again at a login form on every fresh boot
+# is asking the same question twice. The machine has exactly one user by
+# construction, so it signs that user in and lands in the editor.
+#
+# How, and why this way: WriteFreely's session is an HttpOnly cookie set
+# by a form POST to /auth/login, which no script can hand to a browser
+# after the fact. So the kiosk opens a local page that submits that exact
+# form — alias, pass, and the "to" field the login handler honours — and
+# the browser stores the cookie itself, in its own jar, exactly as if a
+# human had typed it. Verified against WriteFreely v0.17.1: the POST
+# answers 302 to /me/new with a six-month wfu cookie.
+#
+# The page is a local file, never served: Caddy serves WriteFreely's own
+# root on :80 and knows nothing about $wf_home. It is 0600 and owned by
+# the session user, which is the same exposure the rendered post-install
+# script already carries — one machine, one user, credentials the
+# operator chose.
+#
+# WARN: values are HTML-escaped before they land in an attribute. A
+# password containing a quote or an angle bracket would otherwise break
+# out of value="..." — the same discipline the script banner demands for
+# shell quoting, one layer out.
+wf_esc() {
+    printf '%s' "$1" |
+        sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+cat >"$wf_home/autologin.html" <<HTML
+<!doctype html>
+<meta charset="utf-8">
+<title>signing in…</title>
+<body onload="document.forms[0].submit()">
+<form action="http://localhost/auth/login" method="post">
+<input type="hidden" name="alias" value="$(wf_esc "$WF_ADMIN_USER")">
+<input type="hidden" name="pass" value="$(wf_esc "$WF_ADMIN_PASS")">
+<input type="hidden" name="to" value="/me/new">
+<noscript><button type="submit">Continue</button></noscript>
+</form>
+</body>
+HTML
+chmod 0600 "$wf_home/autologin.html"
+
+# A way out that is not a desktop. There is deliberately no launcher, no
+# taskbar and no window to close — but a machine with no escape hatch is
+# a machine you can only fix by destroying it, so tty2 carries an
+# ordinary login prompt reachable with ctrl+alt+F2 (ctrl+alt+F1 returns
+# to the editor). Power off is the host's job: the VM answers the ACPI
+# power button, so "Shut down" in any console does a clean systemd
+# poweroff.
+systemctl enable getty@tty2.service
+
 # The session. The browser is restarted if it ever exits, because a kiosk
-# that can be quit into a black screen is a broken appliance. /me/new is
-# the compose view — land in the editor, not on the public page.
+# that can be quit into a black screen is a broken appliance. It opens the
+# sign-in page above, which lands on /me/new — the compose view, not the
+# public page — and re-establishes the session if it ever expires.
 cat >"$wf_home/.xinitrc" <<'XINIT'
 #!/bin/sh
 xset s off -dpms          # a writing machine must not blank mid-sentence
 unclutter -idle 3 &
 matchbox-window-manager -use_titlebar no &
 while :; do
-    firefox --kiosk http://localhost/me/new
+    firefox --kiosk "file://$HOME/autologin.html"
     sleep 2
 done
 XINIT
