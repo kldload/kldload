@@ -43,6 +43,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/creack/pty"
@@ -2291,14 +2292,39 @@ func runGUI(rs *Ruleset) {
 	tabs.Select(screenTab)
 	var mainContent fyne.CanvasObject
 	consoleCard := card(container.NewBorder(nil, nil, nil, nil, tabs))
+
+	// ⛶ — the whole display, and nothing but the guest.
+	//
+	// It used to hand the console CARD to the window: tab bar, padding and
+	// card border included, inside a window that was still merely maximised.
+	// On a 2560x1440 guest that chrome is the difference between reading the
+	// screen and squinting at it, and every pixel of it is showing you
+	// controls you are not using while you are looking at a machine.
+	//
+	// So: the SELECTED tab's content alone, the OS window put into real
+	// fullscreen, and the restore control floated over the top-right corner
+	// rather than given a row of its own.
+	//
+	// WARN: the restore button is the ONLY way back. Escape cannot be the
+	// escape — the VNC widget owns the keyboard and forwards it to the
+	// guest, so a guest that wants Escape (vi, a BIOS menu, the editor here)
+	// would eat it. The button stays visible for that reason; it is small
+	// and cornered, but it is never hidden.
 	restoreBtn := widget.NewButtonWithIcon("", theme.ViewRestoreIcon(), func() {
+		w.SetFullScreen(false)
 		w.SetContent(mainContent)
+		// the borrowed pane is going back into its tab: Fyne needs telling
+		// that the tab's content moved parents and back again
+		tabs.Refresh()
 	})
+	restoreBtn.Importance = widget.LowImportance
 	fullBtn := widget.NewButtonWithIcon("", theme.ViewFullScreenIcon(), func() {
-		// the console card alone, edge to edge, with its own way back
-		w.SetContent(container.NewBorder(
-			container.NewBorder(nil, nil, nil, restoreBtn), nil, nil, nil,
-			gap(consoleCard)))
+		pane := tabs.Selected().Content
+		w.SetContent(container.NewStack(
+			pane,
+			container.NewVBox(container.NewHBox(
+				layout.NewSpacer(), container.NewPadded(restoreBtn)))))
+		w.SetFullScreen(true)
 	})
 	consoleHead := container.NewBorder(nil, nil,
 		heading("CONSOLE", acGold), fullBtn)
