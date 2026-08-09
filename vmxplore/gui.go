@@ -691,7 +691,7 @@ func runGUI(rs *Ruleset) {
 			if branch {
 				t := o.(*canvas.Text)
 				if uid == applianceBranchUID {
-					t.Text = fmt.Sprintf("Applications  (%d)", len(Appliances()))
+					t.Text = fmt.Sprintf("Apps  (%d)", len(Appliances()))
 					t.Color = acBrand.at()
 					t.Refresh()
 					return
@@ -1493,9 +1493,22 @@ func runGUI(rs *Ruleset) {
 		}
 	}
 
+	// The action row speaks one language, in two families.
+	//
+	// Lifecycle verbs are traffic lights — green runs it, amber stops it
+	// politely, red pulls the plug — so the consequence is legible before
+	// the label is read. Everything else is a MENU rather than an act, and
+	// those all carry the brand accent so they read as one family and never
+	// as something that is about to happen to a machine.
+	//
+	// The palette is Fyne's Importance rather than hand-painted colour:
+	// Success/Warning/Danger/High are the four the theme already resolves
+	// per light and dark variant, so the row stays right when GNOME flips
+	// and nothing here has to be repainted by applyPalette.
 	btnStart := widget.NewButtonWithIcon("Start", theme.MediaPlayIcon(), verb(planStart))
 	btnStart.Importance = widget.SuccessImportance
 	btnStop := widget.NewButtonWithIcon("Shut down", theme.MediaStopIcon(), verb(planShutdown))
+	btnStop.Importance = widget.WarningImportance
 	btnKill := widget.NewButtonWithIcon("Force off", theme.ErrorIcon(), verb(planForceOff))
 	btnKill.Importance = widget.DangerImportance
 
@@ -2033,8 +2046,10 @@ func runGUI(rs *Ruleset) {
 		bStart.Importance = widget.SuccessImportance
 		bReboot := widget.NewButtonWithIcon("Reboot", theme.ViewRefreshIcon(),
 			func() { batchRun("Reboot", planReboot) })
+		bReboot.Importance = widget.HighImportance
 		bStop := widget.NewButtonWithIcon("Shut down", theme.MediaStopIcon(),
 			func() { batchRun("Shut down", planShutdown) })
+		bStop.Importance = widget.WarningImportance
 		bKill := widget.NewButtonWithIcon("Force off", theme.ErrorIcon(),
 			func() { batchRun("Force off", planForceOff) })
 		bKill.Importance = widget.DangerImportance
@@ -2055,10 +2070,16 @@ func runGUI(rs *Ruleset) {
 	pad := func(o fyne.CanvasObject) fyne.CanvasObject {
 		return container.NewPadded(o)
 	}
-	buttons := container.NewPadded(container.NewHBox(
+	for _, m := range []*widget.Button{mStorage, mConfig, mBuild, mEstate} {
+		m.Importance = widget.HighImportance
+	}
+	// Centred, not flush left: the row used to run off the right edge with
+	// no margin left on it, which reads as truncated rather than as a row
+	// that ended.
+	buttons := container.NewPadded(container.NewCenter(container.NewHBox(
 		pad(btnStart), pad(btnStop), pad(btnKill),
 		widget.NewSeparator(),
-		pad(mStorage), pad(mConfig), pad(mBuild), pad(mEstate)))
+		pad(mStorage), pad(mConfig), pad(mBuild), pad(mEstate))))
 
 	// ── selection → panes ────────────────────────────────────────────────
 	// A branch (group header) toggles its own fold; a leaf drives the panes.
@@ -2281,7 +2302,7 @@ func runGUI(rs *Ruleset) {
 			ap.Summary, acGreen.at(), func() { applianceDialog(ap.Name) }))
 	}
 	appliancesHost := container.NewBorder(
-		container.NewCenter(pageHeading("APPLICATIONS", acGreen)), nil, nil, nil,
+		container.NewCenter(pageHeading("APPS", acGreen)), nil, nil, nil,
 		tileGrid(appTiles...))
 
 	// The tab order is the order of the work: look at the machine you have
@@ -2295,7 +2316,7 @@ func runGUI(rs *Ruleset) {
 	tabs := container.NewAppTabs(
 		container.NewTabItem("Serial", consoleHost),
 		screenTab,
-		container.NewTabItem("Applications", appliancesHost),
+		container.NewTabItem("Apps", appliancesHost),
 		container.NewTabItem("VM", vmsHost))
 	// this one exists on every host too, but says different things: the
 	// tools launcher on kldload, the get-kldload pitch elsewhere
