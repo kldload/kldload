@@ -39,6 +39,12 @@ type CloudImage struct {
 	Variant string
 }
 
+// DefaultGuestPassword is what a cloud-mode VM gets when the operator gave
+// neither a password nor an ssh key — the same one EZ Fleet has always
+// baked into its clones, so there is one answer to "what's the password"
+// across every path that builds a VM here.
+const DefaultGuestPassword = "kldload"
+
 var cloudImages = map[string]CloudImage{
 	"fedora": {"https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2", "fedora44"},
 	"debian": {"https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-genericcloud-amd64-daily.qcow2", "debian12"},
@@ -246,10 +252,22 @@ func userData(s NewVMSpec) string {
 		fmt.Fprintf(&b, "    ssh_authorized_keys:\n      - %s\n",
 			strings.TrimSpace(s.SSHKey))
 	}
-	if s.Password != "" {
+	// A machine nobody can log into is a broken machine. cloud-init leaves
+	// an account with lock_passwd:false and no password unusable at the
+	// console AND over ssh, so when the operator supplied neither a
+	// password nor a key we fall back to the family default rather than
+	// building a VM with no way in.
+	// HISTORY: wf-desk, 2026-08-09 — the appliance dialog's app fields and
+	// its guest-login fields look alike, the guest ones were left empty,
+	// and the finished VM could only be reached by destroying it.
+	pw := s.Password
+	if pw == "" && s.SSHKey == "" {
+		pw = DefaultGuestPassword
+	}
+	if pw != "" {
 		b.WriteString("chpasswd:\n  expire: false\n  users:\n")
 		fmt.Fprintf(&b, "    - {name: %s, password: %s, type: text}\n",
-			s.User, s.Password)
+			s.User, pw)
 	}
 	// the custom post-installer: the operator's bash, written to a script
 	// and run once as root on first boot via runcmd — output lands in the

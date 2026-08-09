@@ -1496,15 +1496,16 @@ func runGUI(rs *Ruleset) {
 		ram.SetText("2048")
 		diskGB := widget.NewEntry()
 		diskGB.SetText("20")
+		// Prefilled, not placeholdered: an empty password box and an
+		// empty key box build a VM with no way in, and a grey hint is
+		// too easy to read as "already handled".
 		user := widget.NewEntry()
 		user.SetText("admin")
 		pass := widget.NewEntry()
-		pass.SetPlaceHolder("password (optional if key given)")
+		pass.SetText(DefaultGuestPassword)
 		key := widget.NewEntry()
 		key.SetPlaceHolder("ssh public key (optional)")
-		if b, err := os.ReadFile(os.Getenv("HOME") + "/.ssh/id_ed25519.pub"); err == nil {
-			key.SetText(strings.TrimSpace(string(b)))
-		}
+		key.SetText(pickPubKey())
 		// the custom post-installer: bash run as root on first boot. This
 		// is "build your own image" — install packages, drop configs, then
 		// Make Golden → Clone. A Load… button reuses a script from disk.
@@ -1646,16 +1647,17 @@ func runGUI(rs *Ruleset) {
 		entries := map[string]*widget.Entry{}
 		current := catalog[0]
 
-		// guest login — the VM's own account, distinct from the app's admin
+		// The VM's own account, and prefilled for the same reason as New
+		// VM: this dialog carries TWO credential pairs — the app's admin
+		// login above and the machine's login here — and the machine's
+		// were the easy ones to leave blank.
 		user := widget.NewEntry()
 		user.SetText("admin")
 		pass := widget.NewEntry()
-		pass.SetPlaceHolder("guest password (optional if key given)")
+		pass.SetText(DefaultGuestPassword)
 		key := widget.NewEntry()
 		key.SetPlaceHolder("ssh public key (optional)")
-		if b, err := os.ReadFile(os.Getenv("HOME") + "/.ssh/id_ed25519.pub"); err == nil {
-			key.SetText(strings.TrimSpace(string(b)))
-		}
+		key.SetText(pickPubKey())
 
 		rebuild := func(appName string) {
 			a, ok := ApplianceByName(appName)
@@ -1686,13 +1688,23 @@ func runGUI(rs *Ruleset) {
 		pick.OnChanged = rebuild
 		pick.SetSelected(preselect)
 
+		// The two credential blocks are labelled as a pair of opposites
+		// on purpose. Filling the app's login and leaving the machine's
+		// blank is the mistake this dialog invites, and the result used
+		// to be a VM that served its app perfectly and could not be
+		// logged into at all.
+		appHead := widget.NewLabel("the app's own login — you sign into the website with this")
+		appHead.TextStyle = fyne.TextStyle{Bold: true}
+		vmHead := widget.NewLabel("the machine's login — console and ssh, not the app")
+		vmHead.TextStyle = fyne.TextStyle{Bold: true}
 		form := container.NewVBox(
 			widget.NewLabel("appliance"), pick, summary,
 			widget.NewSeparator(),
 			widget.NewLabel("vm name"), name,
+			appHead,
 			fields,
 			widget.NewSeparator(),
-			widget.NewLabel("guest login (ssh into the VM itself)"),
+			vmHead,
 			user, pass, key,
 			widget.NewSeparator(),
 			notes,
@@ -1730,10 +1742,14 @@ func runGUI(rs *Ruleset) {
 						// ending with the appliance's real URL, and the
 						// catalog entry's notes carry the rest. Where it
 						// lands is the one thing worth repeating.
+						// The machine login goes in the line too: the
+						// app's credentials are in the guest's /root/,
+						// but you need to get in to read them.
 						status.SetText(fmt.Sprintf(
-							"%s — %s ready · %s · credentials in /root/ "+
-								"inside the guest",
-							spec.Name, a.Name, a.LandsOn))
+							"%s — %s ready · %s · machine login %s/%s · "+
+								"app credentials in /root/ inside the guest",
+							spec.Name, a.Name, a.LandsOn,
+							spec.User, spec.Password))
 					})
 				}()
 			}, w)

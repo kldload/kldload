@@ -97,3 +97,25 @@ func TestWaitZvolNodeAcceptsRealZvol(t *testing.T) {
 		t.Errorf("rejected real zvol %s: %v", dev, err)
 	}
 }
+
+// TestUserDataAlwaysReachable guards the wf-desk incident (2026-08-09): the
+// appliance dialog's guest-login fields were left empty, cloud-init made an
+// account with no password and no key, and the finished VM could not be
+// entered at the console or over ssh — only destroyed.
+func TestUserDataAlwaysReachable(t *testing.T) {
+	s := NewVMSpec{Name: "x", Distro: "debian", User: "admin",
+		VCPUs: 1, RAMMB: 512, DiskGB: 4}
+	ud := userData(s)
+	if !strings.Contains(ud, "chpasswd:") ||
+		!strings.Contains(ud, DefaultGuestPassword) {
+		t.Errorf("no password and no key must fall back to a default:\n%s", ud)
+	}
+	s.SSHKey = "ssh-ed25519 AAAA test"
+	if strings.Contains(userData(s), "chpasswd:") {
+		t.Error("a key on its own must not force a password")
+	}
+	s.SSHKey, s.Password = "", "hunter2"
+	if !strings.Contains(userData(s), "hunter2") {
+		t.Error("an explicit password must be used verbatim")
+	}
+}
