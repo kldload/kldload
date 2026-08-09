@@ -259,6 +259,38 @@ func (lv *LV) CPUSample() (map[string]uint64, time.Time, error) {
 }
 
 // XML returns the full domain XML (the detail view's raw tab).
+// LeaseIPs returns a domain's IPv4 addresses from the hypervisor's own
+// DHCP leases.
+//
+// Estate uses the guest-agent source, which is richer but needs
+// qemu-guest-agent running in the guest. A freshly built appliance has no
+// agent and is still running its first boot, so the lease source is the
+// only thing that can answer "where did this VM land?" — which is what
+// turns "it serves on http://<vm-ip>/" into a real URL.
+//
+// Returns an empty slice (not an error) when the domain simply has no
+// lease yet; callers poll.
+func (lv *LV) LeaseIPs(name string) ([]string, error) {
+	d, err := lv.l.DomainLookupByName(name)
+	if err != nil {
+		return nil, err
+	}
+	ifs, err := lv.l.DomainInterfaceAddresses(d,
+		uint32(libvirt.DomainInterfaceAddressesSrcLease), 0)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, i := range ifs {
+		for _, a := range i.Addrs {
+			if a.Addr != "" && a.Addr != "127.0.0.1" && a.Addr != "::1" {
+				out = append(out, a.Addr)
+			}
+		}
+	}
+	return out, nil
+}
+
 func (lv *LV) XML(name string) (string, error) {
 	d, err := lv.l.DomainLookupByName(name)
 	if err != nil {

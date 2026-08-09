@@ -27,9 +27,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // ─── The catalog types ───────────────────────────────────────────────
@@ -258,6 +260,67 @@ func applianceOverrides(a Appliance, vals map[string]string,
 	return nil
 }
 
+// WaitAppliance blocks until a freshly built appliance answers on its
+// port, and returns the URL it answered on.
+//
+// Why this exists: the pipeline returns as soon as the domain is defined,
+// but the appliance is not usable until cloud-init has run the installer —
+// a minute or three later, on an address nobody knows yet. Without this
+// the operator is handed "http://<vm-ip>/" and has to go hunt for the
+// lease, which is precisely the seam that stops a deploy feeling like one
+// action.
+//
+// Args: name is the domain; port is the appliance's Port; progress gets a
+// line per phase. Returns the URL, or an error describing which phase
+// timed out — the two phases fail for entirely different reasons (no DHCP
+// lease vs. an installer that died), so they are reported separately.
+func WaitAppliance(name string, port int, progress func(string)) (string, error) {
+	const (
+		leaseTimeout = 3 * time.Minute
+		bootTimeout  = 10 * time.Minute
+	)
+	lv, err := ConnectSystem()
+	if err != nil {
+		return "", err
+	}
+	defer lv.Close()
+
+	progress("waiting for " + name + " to get an address")
+	var ip string
+	for deadline := time.Now().Add(leaseTimeout); time.Now().Before(deadline); {
+		if ips, err := lv.LeaseIPs(name); err == nil && len(ips) > 0 {
+			ip = ips[0]
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if ip == "" {
+		return "", fmt.Errorf("%s got no DHCP lease within %s — is its "+
+			"network up?", name, leaseTimeout)
+	}
+
+	url := fmt.Sprintf("http://%s/", ip)
+	if port != 80 && port != 0 {
+		url = fmt.Sprintf("http://%s:%d/", ip, port)
+	}
+	progress("at " + ip + " — waiting for the first boot to finish installing")
+
+	// Any HTTP response counts as ready: a redirect or even a 404 means
+	// the service is listening, and only the appliance knows what its own
+	// landing page should be.
+	client := &http.Client{Timeout: 5 * time.Second}
+	for deadline := time.Now().Add(bootTimeout); time.Now().Before(deadline); {
+		resp, err := client.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			return url, nil
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return url, fmt.Errorf("%s never answered on %s within %s — check "+
+		"`journalctl -u cloud-final` in the guest", name, url, bootTimeout)
+}
+
 // applianceFlags are the non-KEY=VALUE options --appliance accepts. They
 // describe the *guest* (its login), never the app — app configuration is
 // the catalog entry's Fields, so the flag set never grows per appliance.
@@ -266,6 +329,7 @@ type applianceFlags struct {
 	user     string
 	password string
 	sshKey   string
+	noWait   bool
 	rest     []string
 }
 
@@ -294,6 +358,8 @@ func parseApplianceFlags(args []string) (applianceFlags, error) {
 		case "--password":
 			i++
 			f.password, err = need(i, "--password")
+		case "--no-wait":
+			f.noWait = true
 		case "--ssh-key":
 			i++
 			var p string
@@ -374,18 +440,24 @@ func RunApplianceBuild(name string, args []string) int {
 		}
 	}
 
-	err = BuildNewVM(spec, parent, func(line string) {
-		fmt.Fprintln(os.Stderr, line)
-	})
+	log := func(line string) { fmt.Fprintln(os.Stderr, line) }
+	if err := BuildNewVM(spec, parent, log); err != nil {
+		fmt.Fprintf(os.Stderr, "vmx: %v\n", err)
+		return 1
+	}
+	if f.noWait {
+		fmt.Fprintf(os.Stderr, "\n%s is building %s — it will serve on %s\n",
+			spec.Name, a.Name, a.LandsOn)
+		return 0
+	}
+	url, err := WaitAppliance(spec.Name, a.Port, log)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "vmx: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "\n%s is building %s. First boot installs and\n"+
-		"configures it — give it a few minutes, then it serves on:\n",
-		spec.Name, a.Name)
-	fmt.Println(a.LandsOn)
-	fmt.Fprintf(os.Stderr, "Credentials land in /root/ inside the guest.\n")
+	fmt.Fprintf(os.Stderr, "\n%s is ready. Credentials are in "+
+		"/root/ inside the guest.\n", a.Name)
+	fmt.Println(url)
 	return 0
 }
 

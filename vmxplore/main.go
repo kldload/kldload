@@ -77,6 +77,9 @@ Appliances — push-button self-hosted apps (Build ▸ Appliance… in the GUI):
                             --password P  guest password
                             --ssh-key F   public key file
                                           (default: ~/.ssh/id_ed25519.pub)
+                            --no-wait     return once the VM is defined
+                          By default it waits for the first boot to finish
+                          and prints the appliance's real URL on stdout.
   --appliance-script N    print the post-install script instead of building.
                           The output is a standalone bash installer: it needs
                           no vmxplore, no libvirt and no kldload, so it also
