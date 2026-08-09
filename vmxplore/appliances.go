@@ -889,7 +889,7 @@ echo "WriteFreely ${WF_VERSION} is up at ${wf_host} — sign in as ${WF_ADMIN_US
 //
 // The same blog, plus a machine to write on: the VM boots straight into a
 // full-screen editor with no login prompt and no desktop to navigate, so
-// vmxplore's Graphics tab *is* the writing surface. Zero to writing in one
+// vmxplore's Screen tab *is* the writing surface. Zero to writing in one
 // action, on any Linux with KVM — nothing kldload-specific in the guest.
 //
 // Why a second entry rather than a flag on the first: the two have
@@ -915,11 +915,11 @@ var writeFreelyDesktop = Appliance{
 	DiskGB: 16,
 
 	Port: 80,
-	LandsOn: "the Graphics tab — it boots into the editor, signed in. " +
+	LandsOn: "the Screen tab — it boots into the editor, signed in. " +
 		"Also http://<vm-ip>/",
 
 	Notes: "Boots with no login prompt straight into a full-screen editor, " +
-		"already signed in as the admin you set up here — the Graphics " +
+		"already signed in as the admin you set up here — the Screen " +
 		"tab is the whole interface. The blog is also served on the " +
 		"network exactly as the headless entry does.\n\n" +
 		"There is no desktop and nothing to navigate away into. " +
@@ -964,7 +964,7 @@ if command -v apt-get >/dev/null 2>&1; then
     # virtio_gpu module, no /dev/dri/card0, no /dev/fb0. Xorg probes
     # modesetting, falls back to fbdev, finds neither and dies with
     # "no screens found"; agetty then re-runs startx forever and the
-    # Graphics tab shows a black 720x400 VGA text screen. The generic
+    # Screen tab shows a black 720x400 VGA text screen. The generic
     # kernel carries the drivers, so a graphical appliance on a cloud
     # image has to install it and boot into it once.
     # HISTORY: wf-desk, 2026-08-09 — installed cleanly, served the blog on
@@ -1012,7 +1012,7 @@ if command -v apt-get >/dev/null 2>&1; then
         # And put the boot on the screen, at a size worth looking at.
         #
         # console=tty0: the cloud image's cmdline sends every kernel
-        # message to the serial port only, so the Graphics tab is blank
+        # message to the serial port only, so the Screen tab is blank
         # from power-on until X claims it — which reads as a hang on the
         # one boot where the operator is watching hardest. tty0 first and
         # ttyS0 last, because kernel messages go to every console= listed
@@ -1204,7 +1204,7 @@ systemctl daemon-reload
 systemctl set-default multi-user.target   # no display manager; tty1 owns X
 systemctl restart getty@tty1.service
 
-echo "writing desktop ready — the Graphics tab boots into the editor"
+echo "writing desktop ready — the Screen tab boots into the editor"
 
 # One reboot, and only when the kernel actually changed underneath us: the
 # running cloud kernel has no DRM, so X cannot come up until the generic

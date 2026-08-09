@@ -1,6 +1,6 @@
 //go:build gui
 
-// vnc.go — a minimal RFB (VNC) client + Fyne viewer widget: the Graphics
+// vnc.go — a minimal RFB (VNC) client + Fyne viewer widget: the Screen
 // console pane.
 //
 // What it does, in order:

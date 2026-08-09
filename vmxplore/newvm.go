@@ -63,7 +63,7 @@ func CloudDistros() []string {
 //   - cloud   (ISOPath == ""): import a cloud image + cloud-init seed,
 //     boots straight to a configured guest — the fast path.
 //   - install (ISOPath != ""): blank disk + installer ISO, boots the
-//     distro's own installer in the Graphics tab. You run apt/dnf/pacman
+//     distro's own installer in the Screen tab. You run apt/dnf/pacman
 //     the normal way; no cloud-init, no preset user.
 type NewVMSpec struct {
 	Name      string
@@ -283,7 +283,7 @@ func userData(s NewVMSpec) string {
 	// instead of showing a login prompt above ten silent minutes of apt.
 	// /dev/console is the serial port on a cloud image (console=ttyS0 is
 	// baked into its cmdline and cannot be changed before the first boot);
-	// /dev/tty0 is the VGA text console the Graphics tab renders, which is
+	// /dev/tty0 is the VGA text console the Screen tab renders, which is
 	// otherwise blank until X claims it. An appliance's first boot
 	// installs packages, writes configs and sometimes reboots; watching
 	// that happen is the difference between "it is working" and "it is
@@ -352,7 +352,7 @@ func BuildNewVM(s NewVMSpec, zfsParent string, progress func(string)) error {
 
 	// ── install mode: blank disk + installer ISO, boot the installer ────
 	// No cloud image, no seed — the guest's own installer runs in the
-	// Graphics tab and you drive apt/dnf/pacman the normal way. Any
+	// Screen tab and you drive apt/dnf/pacman the normal way. Any
 	// installer ISO works: Debian, Fedora, an Arch live ISO, a RHEL DVD.
 	if s.install() {
 		var diskArg string
@@ -389,7 +389,7 @@ func BuildNewVM(s NewVMSpec, zfsParent string, progress func(string)) error {
 		if err := run(false, argv...); err != nil {
 			return err
 		}
-		progress(s.Name + " created — open the Graphics tab and run the installer")
+		progress(s.Name + " created — open the Screen tab and run the installer")
 		return nil
 	}
 

@@ -677,7 +677,7 @@ func runGUI(rs *Ruleset) {
 			if branch {
 				t := o.(*canvas.Text)
 				if uid == applianceBranchUID {
-					t.Text = fmt.Sprintf("Appliances  (%d)", len(Appliances()))
+					t.Text = fmt.Sprintf("Applications  (%d)", len(Appliances()))
 					t.Color = acBrand.at()
 					t.Refresh()
 					return
@@ -854,7 +854,7 @@ func runGUI(rs *Ruleset) {
 		consoleHost.Objects = []fyne.CanvasObject{term}
 		consoleHost.Refresh()
 	}
-	// Graphics pane: the native RFB viewer (vnc.go) — same auto-follow
+	// Screen pane: the native RFB viewer (vnc.go) — same auto-follow
 	// contract as serial. Loopback makes eager attach cheap.
 	vncHost := container.NewStack(conPlaceholder(
 		"select a running VM — its graphical console renders here"))
@@ -903,8 +903,8 @@ func runGUI(rs *Ruleset) {
 	toolsHost := container.NewStack()
 	var toolCmd *exec.Cmd
 	var toolPty interface{ Close() error }
-	var selectToolsTab func()    // set once the tab bar exists below
-	var selectGraphicsTab func() // ditto — where a new VM's first boot shows
+	var selectToolsTab func()  // set once the tab bar exists below
+	var selectScreenTab func() // ditto — where a new VM's first boot shows
 	var showToolTiles func()
 	stopTool := func() {
 		if toolCmd != nil && toolCmd.Process != nil {
@@ -1488,7 +1488,7 @@ func runGUI(rs *Ruleset) {
 		name := widget.NewEntry()
 		name.SetPlaceHolder("vm name")
 		// build mode: a cloud image (fast — cloud-init, preset user) or an
-		// installer ISO (boot the distro's own installer in the Graphics
+		// installer ISO (boot the distro's own installer in the Screen
 		// tab, run apt/dnf/pacman the normal way; any ISO — Debian, Fedora,
 		// an Arch live ISO, a RHEL DVD)
 		mode := widget.NewSelect([]string{"cloud image", "installer ISO"}, nil)
@@ -1602,7 +1602,7 @@ func runGUI(rs *Ruleset) {
 				}
 				done := "created — cloud-init finishes the first boot"
 				if spec.install() {
-					done = "created — open the Graphics tab and run the installer"
+					done = "created — open the Screen tab and run the installer"
 				}
 				parent := ZFSVMParent(st.visibleRows())
 				// Focus the machine being built, and show it. Selection
@@ -1614,8 +1614,8 @@ func runGUI(rs *Ruleset) {
 				// the part worth watching and it is over before the build
 				// call returns.
 				st.selName = spec.Name
-				if selectGraphicsTab != nil {
-					selectGraphicsTab()
+				if selectScreenTab != nil {
+					selectScreenTab()
 				}
 				go func() {
 					err := BuildNewVM(spec, parent, func(line string) {
@@ -1649,7 +1649,7 @@ func runGUI(rs *Ruleset) {
 	applianceDialog := func(preselect string) {
 		catalog := Appliances()
 		if len(catalog) == 0 {
-			dialog.ShowInformation("Appliances", "The catalog is empty.", w)
+			dialog.ShowInformation("Applications", "The catalog is empty.", w)
 			return
 		}
 		if _, ok := ApplianceByName(preselect); !ok {
@@ -1731,7 +1731,7 @@ func runGUI(rs *Ruleset) {
 			widget.NewSeparator(),
 			notes,
 		)
-		d := dialog.NewCustomConfirm("Appliance — a configured app in one shot",
+		d := dialog.NewCustomConfirm("Application — a configured app in one shot",
 			"Build", "Cancel", container.NewVScroll(form), func(ok bool) {
 				if !ok {
 					return
@@ -1759,8 +1759,8 @@ func runGUI(rs *Ruleset) {
 				// the part worth watching and it is over before the build
 				// call returns.
 				st.selName = spec.Name
-				if selectGraphicsTab != nil {
-					selectGraphicsTab()
+				if selectScreenTab != nil {
+					selectScreenTab()
 				}
 				go func() {
 					err := BuildNewVM(spec, parent, func(line string) {
@@ -1835,8 +1835,8 @@ func runGUI(rs *Ruleset) {
 				parent := ZFSVMParent(st.visibleRows())
 				// the golden appears first; the clones land under it
 				st.selName = spec.Name
-				if selectGraphicsTab != nil {
-					selectGraphicsTab()
+				if selectScreenTab != nil {
+					selectScreenTab()
 				}
 				go func() {
 					err := BuildFleet(spec, n, parent, func(line string) {
@@ -1907,7 +1907,7 @@ func runGUI(rs *Ruleset) {
 		fyne.NewMenuItem("Autostart on/off", verb(planAutostart)))
 	mBuild := menuButton("Build", theme.ContentAddIcon(),
 		fyne.NewMenuItem("New VM…", newVMDialog),
-		fyne.NewMenuItem("Appliance — a configured app…",
+		fyne.NewMenuItem("Application — a configured app…",
 			func() { applianceDialog("") }),
 		fyne.NewMenuItem("EZ Fleet — golden + N clones…", fleetDialog),
 		fyne.NewMenuItem("Clone…", cloneAny),
@@ -2260,26 +2260,35 @@ func runGUI(rs *Ruleset) {
 			ap.Summary, acGreen.at(), func() { applianceDialog(ap.Name) }))
 	}
 	appliancesHost := container.NewBorder(
-		container.NewCenter(pageHeading("APPLIANCES", acGreen)), nil, nil, nil,
+		container.NewCenter(pageHeading("APPLICATIONS", acGreen)), nil, nil, nil,
 		tileGrid(appTiles...))
 
-	// Serial | Graphics tabs share the console card; ⛶ toggles the card
-	// full-window (and back) for real console work.
+	// The tab order is the order of the work: look at the machine you have
+	// (Serial, Screen), then make one — an Applications entry if somebody
+	// already solved it, a bare VM if not — and the kldload toolset last,
+	// since it is the only tab that isn't there on every host.
+	//
+	// The tabs share the console card; ⛶ toggles the card full-window (and
+	// back) for real console work.
+	screenTab := container.NewTabItem("Screen", vncHost)
 	tabs := container.NewAppTabs(
 		container.NewTabItem("Serial", consoleHost),
-		container.NewTabItem("Graphics", vncHost))
-	// the tab exists on every host: tools launcher on kldload, the
-	// get-kldload pitch elsewhere
-	tabs.Append(container.NewTabItem("kldload", toolsHost))
-	selectToolsTab = func() { tabs.SelectIndex(2) }
-	selectGraphicsTab = func() { tabs.SelectIndex(1) }
-	tabs.Append(container.NewTabItem("New VM", vmsHost))
-	tabs.Append(container.NewTabItem("Appliances", appliancesHost))
-	// Graphics, not Serial, is where the work happens: it shows the same
+		screenTab,
+		container.NewTabItem("Applications", appliancesHost),
+		container.NewTabItem("VM", vmsHost))
+	// this one exists on every host too, but says different things: the
+	// tools launcher on kldload, the get-kldload pitch elsewhere
+	toolsTab := container.NewTabItem("kldload", toolsHost)
+	tabs.Append(toolsTab)
+	// Select by tab, never by index: the index form silently pointed at
+	// whatever had moved into slot 2 the first time these were reordered.
+	selectToolsTab = func() { tabs.Select(toolsTab) }
+	selectScreenTab = func() { tabs.Select(screenTab) }
+	// Screen, not Serial, is where the work happens: it shows the same
 	// console plus everything graphical, so it is the right landing tab.
-	// Serial stays for the case Graphics cannot cover — a guest with no
+	// Serial stays for the case Screen cannot cover — a guest with no
 	// video, or one whose X is broken, where it is the only way in.
-	tabs.SelectIndex(1)
+	tabs.Select(screenTab)
 	var mainContent fyne.CanvasObject
 	consoleCard := card(container.NewBorder(nil, nil, nil, nil, tabs))
 	restoreBtn := widget.NewButtonWithIcon("", theme.ViewRestoreIcon(), func() {
