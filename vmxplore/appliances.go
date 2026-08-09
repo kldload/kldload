@@ -507,7 +507,7 @@ func ApplianceNames() []string {
 	return out
 }
 
-var applianceCatalog = []Appliance{writeFreely}
+var applianceCatalog = []Appliance{writeFreely, writeFreelyDesktop}
 
 // ─── WriteFreely ─────────────────────────────────────────────────────
 //
@@ -883,4 +883,136 @@ EOF
 chmod 0600 /root/writefreely-credentials.txt
 
 echo "WriteFreely ${WF_VERSION} is up at ${wf_host} — sign in as ${WF_ADMIN_USER}"
+`
+
+// ─── WriteFreely Desktop ─────────────────────────────────────────────
+//
+// The same blog, plus a machine to write on: the VM boots straight into a
+// full-screen editor with no login prompt and no desktop to navigate, so
+// vmxplore's Graphics tab *is* the writing surface. Zero to writing in one
+// action, on any Linux with KVM — nothing kldload-specific in the guest.
+//
+// Why a second entry rather than a flag on the first: the two have
+// genuinely different shapes. The server is a 1 GB headless box you reach
+// from your own browser; this is a workstation whose whole job is to
+// render one application. Sizing, package set and failure modes all
+// differ, and a boolean hiding that would make both worse.
+//
+// The desktop is deliberately not GNOME. Measured on the built appliance,
+// gnome-core costs 802 additional packages; X plus a kiosk window manager
+// plus a browser is a fraction of that, and every one of those packages
+// exists to put a single window on screen.
+var writeFreelyDesktop = Appliance{
+	Name: "WriteFreely Desktop",
+	Summary: "A writing machine: the blog plus a full-screen editor, " +
+		"booting straight into it",
+	Homepage: "https://writefreely.org",
+	License:  "AGPL-3.0",
+
+	Distro: "debian",
+	VCPUs:  2,
+	RAMMB:  3072,
+	DiskGB: 16,
+
+	Port:    80,
+	LandsOn: "the Graphics tab — it boots into the editor. Also http://<vm-ip>/",
+
+	Notes: "Boots with no login prompt straight into a full-screen editor, " +
+		"so the Graphics tab is the whole interface. The blog is also " +
+		"served on the network exactly as the headless entry does.\n\n" +
+		"Heavier than the server appliance — it carries X, a kiosk window " +
+		"manager and a browser — so give it the 2 vCPU / 3 GB it asks for. " +
+		"First boot takes longer because it installs those packages.",
+
+	Fields:   writeFreely.Fields,
+	Validate: writeFreely.Validate,
+
+	// Composed, not copied: the desktop layer is appended to the exact
+	// server script the headless entry ships, so a fix to the install
+	// reaches both and the two can never drift.
+	Script: writeFreelyScript + "\n" + writingDesktopScript,
+}
+
+// writingDesktopScript turns the freshly installed server into a writing
+// station. It runs after writeFreelyScript, so WriteFreely and Caddy are
+// already up on loopback and :80 respectively.
+const writingDesktopScript = `
+# ─── The writing desktop ─────────────────────────────────────────────
+#
+# X, a kiosk window manager and a browser — nothing else. matchbox is a
+# window manager built for exactly this: it forces every window
+# full-screen and has no decorations, menus or desktop, so there is
+# nothing to navigate away into and no way to land on a bare root window
+# if the browser restarts.
+if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y --no-install-recommends \
+        xserver-xorg-core xserver-xorg-video-fbdev \
+        xserver-xorg-input-libinput xinit x11-xserver-utils \
+        matchbox-window-manager firefox-esr fonts-dejavu-core unclutter
+elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y --setopt=install_weak_deps=False \
+        xorg-x11-server-Xorg xorg-x11-xinit matchbox-window-manager \
+        firefox dejavu-sans-fonts unclutter
+else
+    echo "FATAL: no supported package manager for the desktop layer" >&2
+    exit 1
+fi
+
+# A dedicated session user. This is not the cloud-init login: that account
+# keeps its password and ssh key for administration, while this one exists
+# only to own the X session. It needs no password because it is
+# autologged in, and its password is locked so it cannot be used to log in
+# anywhere else.
+wf_desk=writer
+id -u "$wf_desk" >/dev/null 2>&1 ||
+    useradd --create-home --shell /bin/bash "$wf_desk"
+passwd -l "$wf_desk"
+wf_home="$(getent passwd "$wf_desk" | cut -d: -f6)"
+
+# Autologin on tty1, as a drop-in rather than an edit so a getty package
+# upgrade cannot silently revert it.
+mkdir -p /etc/systemd/system/getty@tty1.service.d
+cat >/etc/systemd/system/getty@tty1.service.d/autologin.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin ${wf_desk} --noclear %I \$TERM
+EOF
+
+# tty1 starts X and nothing else. Guarding on the tty matters: without it
+# an ssh login would try to start a second X server.
+cat >"$wf_home/.bash_profile" <<'PROFILE'
+if [ "$(tty)" = "/dev/tty1" ] && [ -z "${DISPLAY:-}" ]; then
+    exec startx -- -nocursor
+fi
+PROFILE
+
+# The session. The browser is restarted if it ever exits, because a kiosk
+# that can be quit into a black screen is a broken appliance. /me/new is
+# the compose view — land in the editor, not on the public page.
+cat >"$wf_home/.xinitrc" <<'XINIT'
+#!/bin/sh
+xset s off -dpms          # a writing machine must not blank mid-sentence
+unclutter -idle 3 &
+matchbox-window-manager -use_titlebar no &
+while :; do
+    firefox --kiosk http://localhost/me/new
+    sleep 2
+done
+XINIT
+chmod 0755 "$wf_home/.xinitrc"
+chown -R "$wf_desk:$wf_desk" "$wf_home"
+
+# Debian's X is not setuid root; a console user needs this to start it.
+if [ -f /etc/X11/Xwrapper.config ]; then
+    sed -i '/^allowed_users=/d;/^needs_root_rights=/d' /etc/X11/Xwrapper.config
+fi
+printf 'allowed_users=anybody\nneeds_root_rights=yes\n' \
+    >>/etc/X11/Xwrapper.config
+
+systemctl daemon-reload
+systemctl set-default multi-user.target   # no display manager; tty1 owns X
+systemctl restart getty@tty1.service
+
+echo "writing desktop ready — the Graphics tab boots into the editor"
 `
