@@ -511,6 +511,53 @@ source; Phase C flips 1–4 to clone-and-cache.
 
 ---
 
+## Appliances — the catalog
+
+Nearly every "how to self-host X" writeup is the same four moves: fetch a
+pinned artifact, write a config, initialise a database, drop a unit file.
+The New VM pipeline already ends in a post-install hook that runs once as
+root on first boot, so encoding those four moves per app costs one struct
+literal and one bash string — and turns a weekend of following a blog post
+into a button.
+
+An `Appliance` (`appliances.go`) is **data, not code**: a cloud-image preset,
+a sizing default, a list of operator-facing fields, an optional `Validate`,
+and a fixed script. Adding an entry never touches the pipeline, the GUI or
+the tests. `Build ▸ Appliance…` renders it and hands the result to
+`BuildNewVM` unchanged, so an appliance is a New VM with the form pre-filled.
+
+**The self-contained rule.** An appliance script assumes nothing but a stock
+cloud image and a network: it fetches its own binaries, writes its own
+config, and installs its own reverse proxy. It must not require vmxplore,
+libvirt, or kldload to have touched the guest. That is deliberate — most
+people running one of these will never install kldload, and the script has
+to stand alone as something an upstream project can publish as their own
+install path. `vmx --appliance-script NAME KEY=VALUE` prints exactly that
+file. On a kldload host the *surroundings* get better (zvol-backed disks,
+`Make Golden` → instant clones, the estate view), but the guest is identical.
+
+**Injection is handled structurally, not by escaping rules.** Operator values
+are never interpolated into the body of a script. The body is fixed bash that
+reads named variables; rendering only prepends single-quoted assignments, and
+values containing a newline are rejected because the scripts write them into
+line-oriented config formats. The test suite round-trips shell metacharacter
+payloads through a real bash and asserts both that the value survives byte-
+identical and that the marker file a successful injection would create never
+appears.
+
+**Verification ladder.** `bash -n` and `shellcheck -S warning` run against
+every rendered script in `go test`, so a broken heredoc in a catalog entry
+fails at CI rather than in a guest where the only symptom is a VM that boots
+without its service. Above that, an entry is proven by actually running it:
+the WriteFreely script was verified end to end in a systemd container —
+services active, site served through the proxy, admin login accepted, wrong
+password rejected, and the app confirmed unreachable except through the edge.
+
+**Pin and verify.** Every artifact an appliance downloads is version-pinned
+with a checksum, using whatever algorithm upstream publishes (WriteFreely
+ships no manifest, so those are ours; Caddy's is SHA-512). A tampered or
+truncated download is a hard failure, not a mystery.
+
 ## Phasing
 
 - **0.1 (Phase A, in-repo)** — read-only estate view: the joined table, live
@@ -522,6 +569,10 @@ source; Phase C flips 1–4 to clone-and-cache.
 - **0.2** — safe verbs: start / shutdown / destroy / snapshot / rollback /
   clone-from-golden, each printing its command, destructive ones retype-gated.
   Audit log.
+- **0.2.3** — the appliance catalog: `Build ▸ Appliance…`, `--appliances`,
+  `--appliance-script`. First entry WriteFreely (federated blogging, behind
+  Caddy with automatic HTTPS). The catalog is the cheap, compounding surface —
+  each new entry is a struct literal and a bash string.
 - **0.3 — teleport.** ssh remote transport (the `~/.ssh/config`-as-inventory
   model inherited from zxplore) so one console sees several hypervisors, then
   the headline verb: send a VM to another host and boot it there. Reuses

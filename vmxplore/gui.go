@@ -1485,6 +1485,124 @@ func runGUI(rs *Ruleset) {
 		d.Show()
 	}
 
+	// Appliances: the catalog (appliances.go) as a button. Picking an entry
+	// fixes the distro and sizing and supplies the post-install script, so
+	// the only things left to answer are app-specific — which is the whole
+	// point: "give me a blog" instead of "give me a Debian VM, then follow
+	// a writeup." The build path is the ordinary New VM pipeline.
+	applianceDialog := func() {
+		catalog := Appliances()
+		if len(catalog) == 0 {
+			dialog.ShowInformation("Appliances", "The catalog is empty.", w)
+			return
+		}
+		name := widget.NewEntry()
+		name.SetPlaceHolder("vm name")
+		pick := widget.NewSelect(ApplianceNames(), nil)
+		summary := widget.NewLabel("")
+		summary.Wrapping = fyne.TextWrapWord
+		notes := widget.NewLabel("")
+		notes.Wrapping = fyne.TextWrapWord
+		notes.TextStyle = fyne.TextStyle{Italic: true}
+		// fields is rebuilt on every pick; entries indexes the live widgets
+		// by field key so the submit handler can read them back.
+		fields := container.NewVBox()
+		entries := map[string]*widget.Entry{}
+		current := catalog[0]
+
+		// guest login — the VM's own account, distinct from the app's admin
+		user := widget.NewEntry()
+		user.SetText("admin")
+		pass := widget.NewEntry()
+		pass.SetPlaceHolder("guest password (optional if key given)")
+		key := widget.NewEntry()
+		key.SetPlaceHolder("ssh public key (optional)")
+		if b, err := os.ReadFile(os.Getenv("HOME") + "/.ssh/id_ed25519.pub"); err == nil {
+			key.SetText(strings.TrimSpace(string(b)))
+		}
+
+		rebuild := func(appName string) {
+			a, ok := ApplianceByName(appName)
+			if !ok {
+				return
+			}
+			current = a
+			summary.SetText(fmt.Sprintf("%s — %s\n%s · %s · %d vCPU, %d MB, %d GB",
+				a.Name, a.Summary, a.License, a.Distro, a.VCPUs, a.RAMMB, a.DiskGB))
+			notes.SetText(a.Notes)
+			fields.RemoveAll()
+			entries = map[string]*widget.Entry{}
+			for _, f := range a.Fields {
+				var e *widget.Entry
+				if f.Secret {
+					e = widget.NewPasswordEntry()
+				} else {
+					e = widget.NewEntry()
+				}
+				e.SetText(f.Default)
+				e.SetPlaceHolder(f.Placeholder)
+				entries[f.Key] = e
+				fields.Add(widget.NewLabel(f.Label))
+				fields.Add(e)
+			}
+			fields.Refresh()
+		}
+		pick.OnChanged = rebuild
+		pick.SetSelected(catalog[0].Name)
+
+		form := container.NewVBox(
+			widget.NewLabel("appliance"), pick, summary,
+			widget.NewSeparator(),
+			widget.NewLabel("vm name"), name,
+			fields,
+			widget.NewSeparator(),
+			widget.NewLabel("guest login (ssh into the VM itself)"),
+			user, pass, key,
+			widget.NewSeparator(),
+			notes,
+		)
+		d := dialog.NewCustomConfirm("Appliance — a configured app in one shot",
+			"Build", "Cancel", container.NewVScroll(form), func(ok bool) {
+				if !ok {
+					return
+				}
+				vals := map[string]string{}
+				for k, e := range entries {
+					vals[k] = e.Text
+				}
+				a := current
+				spec, err := a.Spec(name.Text, user.Text, pass.Text, key.Text, vals)
+				if err != nil {
+					// Field validation lives in the catalog entry, so a bad
+					// value is reported here rather than 90 seconds later in
+					// the guest's cloud-init log.
+					dialog.ShowError(err, w)
+					return
+				}
+				parent := ZFSVMParent(st.visibleRows())
+				go func() {
+					err := BuildNewVM(spec, parent, func(line string) {
+						fyne.Do(func() { status.SetText(line) })
+					})
+					fyne.Do(func() {
+						if err != nil {
+							dialog.ShowError(err, w)
+							return
+						}
+						refreshNow()
+						dialog.ShowInformation("Appliance",
+							fmt.Sprintf("%s is building %s.\n\n"+
+								"First boot installs and configures it — give it a "+
+								"few minutes, then it serves on:\n%s\n\n"+
+								"Credentials land in /root/ inside the guest.",
+								spec.Name, a.Name, a.LandsOn), w)
+					})
+				}()
+			}, w)
+		d.Resize(fyne.NewSize(480, 620))
+		d.Show()
+	}
+
 	// EZ Fleet: one dialog → build a golden + N clones. The whole value
 	// proposition in a gesture ("give me 5 Fedora boxes").
 	fleetDialog := func() {
@@ -1594,6 +1712,7 @@ func runGUI(rs *Ruleset) {
 		fyne.NewMenuItem("Autostart on/off", verb(planAutostart)))
 	mBuild := menuButton("Build", theme.ContentAddIcon(),
 		fyne.NewMenuItem("New VM…", newVMDialog),
+		fyne.NewMenuItem("Appliance — a configured app…", applianceDialog),
 		fyne.NewMenuItem("EZ Fleet — golden + N clones…", fleetDialog),
 		fyne.NewMenuItem("Clone…", cloneAny),
 		fyne.NewMenuItem("Make Golden…", goldenAct))

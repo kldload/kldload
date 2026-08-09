@@ -51,6 +51,9 @@ func versionFull() string {
 }
 
 const usage = `usage: vmx [--tui] [--once] [--connect DEST] [--rules FILE] [--version]
+       vmx --appliances
+       vmx --appliance NAME --vm VMNAME [KEY=VALUE ...]
+       vmx --appliance-script NAME [KEY=VALUE ...]
 
   (no flags)   native GUI — the estate frame (list · console · details);
                static/terminal-only builds start the TUI instead
@@ -62,6 +65,27 @@ const usage = `usage: vmx [--tui] [--once] [--connect DEST] [--rules FILE] [--ve
   --rules F    grouping/classification rules file
                (default: /etc/vmxplore/rules, else built-in profile)
   --version    print version and exit
+
+Appliances — push-button self-hosted apps (Build ▸ Appliance… in the GUI):
+
+  --appliances            list the catalog with each entry's fields
+  --appliance N           deploy appliance N as a VM and exit. Options
+                          describe the guest, KEY=VALUE configures the app
+                          (see --appliances for each entry's keys):
+                            --vm NAME     the VM's name (required)
+                            --user U      guest login    (default: admin)
+                            --password P  guest password
+                            --ssh-key F   public key file
+                                          (default: ~/.ssh/id_ed25519.pub)
+  --appliance-script N    print the post-install script instead of building.
+                          The output is a standalone bash installer: it needs
+                          no vmxplore, no libvirt and no kldload, so it also
+                          works by hand on any fresh cloud VM.
+
+    vmx --appliance WriteFreely --vm blog \
+        WF_SITE_NAME='My Blog' WF_ADMIN_USER=matt
+
+    vmx --appliance-script WriteFreely WF_DOMAIN=blog.example.com
 
 Environment:
   VMX_SSH_USER   user for the TUI's ssh-to-guest verb
@@ -108,6 +132,28 @@ func main() {
 				os.Exit(2)
 			}
 			target = ParseTarget(args[i])
+		case "--appliances":
+			PrintAppliances(os.Stdout)
+			return
+		case "--appliance":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr, "vmx: --appliance needs a name")
+				os.Exit(2)
+			}
+			// Everything after the name belongs to the appliance, so the
+			// rest of the loop must not try to parse it as flags.
+			os.Exit(RunApplianceBuild(args[i], args[i+1:]))
+		case "--appliance-script":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(os.Stderr,
+					"vmx: --appliance-script needs an appliance name")
+				os.Exit(2)
+			}
+			// Everything after the name is KEY=VALUE for that appliance,
+			// so the rest of the loop must not try to parse it as flags.
+			os.Exit(RunApplianceScript(args[i], args[i+1:]))
 		default:
 			fmt.Fprintf(os.Stderr, "vmx: unknown option %q\n%s\n", args[i], usage)
 			os.Exit(2)
