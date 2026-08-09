@@ -65,9 +65,11 @@ type compactTheme struct{ fyne.Theme }
 func (t compactTheme) Size(name fyne.ThemeSizeName) float32 {
 	switch name {
 	case theme.SizeNameInnerPadding:
-		return 3 // tight rows (single-spaced list)
+		return 2 // tight rows (single-spaced list)
 	case theme.SizeNamePadding:
-		return 6 // space between panes / regions
+		return 3 // space between panes / regions — small on purpose: this
+		// window is mostly other machines' screens, and every margin is
+		// drawn at the expense of one
 	}
 	return t.Theme.Size(name)
 }
@@ -159,6 +161,17 @@ func card(content fyne.CanvasObject) fyne.CanvasObject {
 	r.CornerRadius = 8
 	repaint = append(repaint, func() { r.FillColor = cardColor(); r.Refresh() })
 	return container.NewStack(r, container.NewPadded(content))
+}
+
+// cardTight is card without the inner inset — for the console, where the
+// content is a guest's screen and every pixel spent on a margin is a pixel
+// not spent on the machine. The rounded backdrop stays, so the pane still
+// reads as a card next to the others.
+func cardTight(content fyne.CanvasObject) fyne.CanvasObject {
+	r := canvas.NewRectangle(cardColor())
+	r.CornerRadius = 8
+	repaint = append(repaint, func() { r.FillColor = cardColor(); r.Refresh() })
+	return container.NewStack(r, content)
 }
 
 // heading is a bold accent-colored section title (long-lived surfaces —
@@ -2298,7 +2311,7 @@ func runGUI(rs *Ruleset) {
 	// video, or one whose X is broken, where it is the only way in.
 	tabs.Select(screenTab)
 	var mainContent fyne.CanvasObject
-	consoleCard := card(container.NewBorder(nil, nil, nil, nil, tabs))
+	consoleCard := cardTight(container.NewBorder(nil, nil, nil, nil, tabs))
 
 	// ⛶ — nothing but the guest, in the window you already have.
 	//
