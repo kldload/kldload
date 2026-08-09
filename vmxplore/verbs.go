@@ -1,22 +1,31 @@
 // verbs.go — the 0.2 mutation verbs: what they run, and the gates around them.
 //
 // Policy (docs/VM-CONSOLE-DESIGN.md "Privilege model"): every mutation shows
-// the EXACT command it is about to run and asks first; the verbs that have
-// already cost real homelab hours (force-off, zfs rollback) additionally
-// require retyping the domain name; everything executed lands in an audit
-// log. Verbs delegate to virsh/zfs rather than reimplementing them — the TUI
+// the EXACT command it runs and everything executed lands in an audit log.
+// Verbs delegate to virsh/zfs rather than reimplementing them — the console
 // teaches the CLI, never hides it.
 //
-// Inputs:  a Row (the selected estate line) + operator-typed parameters.
-// Outputs: verbPlan — the command list plus its gates — consumed by tui.go's
+// What is deliberately NOT here is a confirmation step. Force off, delete
+// and rollback used to demand the domain name be retyped; the operator's
+// call (2026-08-09) is that these are cattle — a VM is remade from a golden
+// in seconds, and the gate taxed every real deletion to insure against a
+// rare mistaken one. The audit log is the record that replaced it.
 //
-//	confirm overlay, then executed by runPlan.
+// Inputs:  a Row (the selected estate line) + operator-typed parameters.
+// Outputs: verbPlan — the command list plus its warning — reported by the
+//
+//	console as it fires, then executed by runPlan.
 //
 // Notes: command construction is pure (verbs_test.go); execution is the only
 // I/O here. `virsh destroy` on a TRANSIENT domain loses the domain (webui
-// lesson) — planForceOff refuses unless the domain is persistent. Rollback
-// refuses while the domain runs, and uses `zfs rollback -r`, which destroys
-// every newer snapshot — the confirm text says so with the count.
+// lesson) — planForceOff refuses unless the domain is persistent, and
+// planDelete skips the undefine that would then fail. Rollback refuses while
+// the domain runs, and uses `zfs rollback -r`, which destroys every newer
+// snapshot — the warning says so with the count.
+//
+// WARN: `zfs destroy -r` takes the dataset's snapshots with it. Sanoid
+// history on a destroyed zvol is gone with the zvol; only replication to
+// another pool or host is a recovery path.
 package main
 
 import (
@@ -29,13 +38,18 @@ import (
 	"time"
 )
 
-// verbPlan is a mutation ready to confirm: the argv list(s) to run in order,
-// and the gates the confirm overlay must apply.
+// verbPlan is a mutation ready to run: the argv list(s) to run in order,
+// plus what to tell the operator while it happens.
+//
+// There is no retype gate any more, on any verb. It used to guard force
+// off, delete and rollback; the operator's call is that VMs here are cattle
+// and typing a hostname to prove you meant the button you pressed is a tax
+// on every real deletion to insure against a rare mistaken one. The record
+// lives in the audit log instead.
 type verbPlan struct {
-	title     string     // one-line description for the overlay
+	title     string     // one-line description, shown as it runs
 	cmds      [][]string // executed in order, stop on first failure
-	retype    string     // non-empty: the string that must be typed to arm
-	warn      string     // extra red text in the confirm overlay
+	warn      string     // the consequence, surfaced in the status line / TUI
 	needsRoot bool       // true for zfs mutations (virsh works via group)
 }
 
@@ -77,8 +91,8 @@ func planShutdown(r Row) (verbPlan, error) {
 	}, nil
 }
 
-// planForceOff is `virsh destroy` — the plug-pull. Retype-gated, and refused
-// for transient domains, where destroy doesn't stop the VM, it ERASES it.
+// planForceOff is `virsh destroy` — the plug-pull. Refused for transient
+// domains, where destroy doesn't stop the VM, it ERASES it.
 func planForceOff(r Row) (verbPlan, error) {
 	if r.Synthetic || r.D.State == "shut off" {
 		return verbPlan{}, fmt.Errorf("%s is not up", r.D.Name)
@@ -88,10 +102,9 @@ func planForceOff(r Row) (verbPlan, error) {
 			"%s is transient — destroy would erase the domain, not stop it", r.D.Name)
 	}
 	return verbPlan{
-		title:  "force off " + r.D.Name,
-		cmds:   [][]string{virsh("destroy", r.D.Name)},
-		retype: r.D.Name,
-		warn:   "pulls the plug — the guest gets no chance to flush",
+		title: "force off " + r.D.Name,
+		cmds:  [][]string{virsh("destroy", r.D.Name)},
+		warn:  "pulls the plug — the guest gets no chance to flush",
 	}, nil
 }
 
@@ -167,15 +180,14 @@ func planResume(r Row) (verbPlan, error) {
 
 // planDelete removes a VM for good: pull the plug if it is still up,
 // undefine (nvram included) and, when a zvol sits underneath, destroy the
-// dataset with every snapshot on it. Retype-gated — this is the one verb
-// with no undo.
+// dataset with every snapshot on it. This is the one verb with no undo.
 //
 // WHY the force-off is part of the plan rather than a precondition: delete
 // means delete. Refusing a running domain and telling the operator to go
 // force it off first is a two-step dance whose only product is the same
 // erased VM, and there is nothing in a guest being destroyed in the next
-// command that a graceful shutdown would preserve. The retype gate is what
-// makes this safe, not the state check.
+// command that a graceful shutdown would preserve. Clicking delete is the
+// confirmation; there is no second one.
 func planDelete(r Row) (verbPlan, error) {
 	if r.Synthetic {
 		return verbPlan{}, fmt.Errorf("no domain behind this row")
@@ -203,7 +215,6 @@ func planDelete(r Row) (verbPlan, error) {
 	return verbPlan{
 		title:     "DELETE " + r.D.Name,
 		cmds:      cmds,
-		retype:    r.D.Name,
 		warn:      warn,
 		needsRoot: needsRoot,
 	}, nil
@@ -257,7 +268,7 @@ func planClone(r Row, newName string) (verbPlan, error) {
 
 // planRollback rewinds the zvol to a snapshot. -r destroys every snapshot
 // newer than the target — the single most dangerous verb here, so it counts
-// the casualties into the confirm text and retype-gates.
+// the casualties into the warning it reports.
 func planRollback(r Row, snap string, newer int) (verbPlan, error) {
 	if r.DS == nil {
 		return verbPlan{}, fmt.Errorf("no local dataset behind this row")
@@ -269,7 +280,6 @@ func planRollback(r Row, snap string, newer int) (verbPlan, error) {
 	return verbPlan{
 		title:     "rollback " + snapPath,
 		cmds:      [][]string{zfsArgv("rollback", "-r", snapPath)},
-		retype:    r.D.Name,
 		warn:      fmt.Sprintf("destroys the %d snapshot(s) newer than @%s", newer, snap),
 		needsRoot: true,
 	}, nil

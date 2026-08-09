@@ -11,9 +11,9 @@
 //  3. Right-top pane: the serial console — a real terminal widget attached
 //     to `virsh console` for the selected domain, in-window.
 //  4. Right-bottom pane: details dossier + settings + the verb buttons,
-//     driving the SAME plan builders and gates as the TUI (verbs.go): every
-//     mutation shows its exact commands and confirms first; destructive
-//     verbs require retyping the domain name; all runs audit-log.
+//     driving the SAME plan builders as the TUI (verbs.go): every mutation
+//     shows the exact command it runs in the status line and runs it — no
+//     confirmation step, including delete; all runs audit-log.
 //
 // Why: vmxplore is the giveaway KVM console — GUI for the desktop, TUI for
 // ssh — that lights up extra powers on kldload/ZFS hosts via capability
@@ -32,6 +32,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -486,63 +487,65 @@ func (g *guiState) dossierSegs(r Row) []widget.RichTextSegment {
 	return segs
 }
 
-// confirmPlan is the GUI twin of the TUI confirm overlay: exact commands,
-// the warning, and — for retype-gated plans — an entry that must match the
-// domain name before OK arms. Same contract, different chrome.
-// guiStatus, if set, gets a one-line note when a verb fires without a
-// dialog — the exact command still surfaces (teach-the-CLI), just in the
-// status bar instead of a modal. Set once in runGUI.
+// guiStatus, if set, gets a one-line note when a verb fires — the exact
+// command still surfaces (teach-the-CLI), in the status bar rather than a
+// modal. Set once in runGUI.
 var guiStatus func(string)
 
-func confirmPlan(w fyne.Window, p verbPlan, after func()) {
-	cmds := widget.NewLabel(strings.TrimRight(p.cmdLines(), "\n"))
-	cmds.TextStyle = fyne.TextStyle{Monospace: true}
-	items := []fyne.CanvasObject{cmds}
-	if p.warn != "" {
-		warn := widget.NewLabel("⚠ " + p.warn)
-		warn.Importance = widget.WarningImportance
-		items = append(items, warn)
-	}
-	run := func() {
-		go func() {
-			err := runPlan(p)
-			fyne.Do(func() {
-				if err != nil {
-					dialog.ShowError(err, w)
-				}
-				after()
-			})
-		}()
-	}
-	// No retype gate → a safe, reversible verb (start/stop/reboot/snapshot/
-	// clone/…): just run it. Prompting on every routine action is friction
-	// the operator explicitly waived; the audit log keeps the record and
-	// the destructive trio below still arms by retype.
-	if p.retype == "" {
-		if guiStatus != nil {
-			guiStatus("· " + strings.TrimSpace(strings.TrimPrefix(
-				strings.TrimSpace(p.cmdLines()), "$")))
+// pickPubKey returns the operator's ssh public key for prefilling the
+// guest-login field, or "" when there is none to offer. It walks a
+// preference order and then falls back to any *.pub, because hardcoding
+// one filename silently offered nothing on a host whose only key is an
+// id_kldload or an id_rsa — and an empty key box next to an empty password
+// box is how a VM gets built that nobody can log into.
+func pickPubKey() string {
+	dir := os.Getenv("HOME") + "/.ssh/"
+	for _, n := range []string{"id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"} {
+		if b, err := os.ReadFile(dir + n); err == nil {
+			return strings.TrimSpace(string(b))
 		}
-		run()
-		return
 	}
-	entry := widget.NewEntry()
-	entry.SetPlaceHolder(p.retype)
-	items = append(items,
-		widget.NewLabel("type the name "+p.retype+" to arm:"), entry)
-	d := dialog.NewCustomConfirm(p.title, "Run", "Cancel",
-		container.NewVBox(items...), func(ok bool) {
-			if !ok {
-				return
+	names, _ := filepath.Glob(dir + "*.pub")
+	for _, n := range names {
+		if b, err := os.ReadFile(n); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return ""
+}
+
+// firePlan runs a plan and reports it. There is no confirmation step of any
+// kind, including for delete.
+//
+// WHY (operator call, 2026-08-09): these are cattle, not pets. A VM here is
+// a thing you make in seconds from a golden and remake just as fast, and
+// every dialog between the click and the deed was taxing the common case to
+// insure against a rare one. Clicking delete IS the confirmation.
+//
+// What remains of the safety net is deliberate and worth knowing: every
+// command lands in the audit log (runPlan → /var/log/kldload/vmx.log) with
+// who ran it and its exit code, and the command itself shows in the status
+// bar as it fires. WARN: `zfs destroy -r` takes the dataset's snapshots
+// with it, so sanoid history on that zvol is not a recovery path — only
+// replication to another pool or host is.
+func firePlan(w fyne.Window, p verbPlan, after func()) {
+	if guiStatus != nil {
+		note := "· " + strings.TrimSpace(strings.TrimPrefix(
+			strings.TrimSpace(p.cmdLines()), "$"))
+		if p.warn != "" {
+			note += "  ⚠ " + p.warn
+		}
+		guiStatus(note)
+	}
+	go func() {
+		err := runPlan(p)
+		fyne.Do(func() {
+			if err != nil {
+				dialog.ShowError(err, w)
 			}
-			if entry.Text != p.retype {
-				dialog.ShowInformation(p.title,
-					"not armed — the typed name did not match", w)
-				return
-			}
-			run()
-		}, w)
-	d.Show()
+			after()
+		})
+	}()
 }
 
 func runGUI(rs *Ruleset) {
@@ -1323,7 +1326,7 @@ func runGUI(rs *Ruleset) {
 	}
 	status := widget.NewLabel(fmt.Sprintf("vmxplore %s · rules: %s",
 		versionFull(), rs.Source))
-	// non-retype verbs fire without a dialog and report here
+	// every verb fires without a dialog and reports here
 	guiStatus = func(s string) { fyne.Do(func() { status.SetText(s) }) }
 
 	// ── the verb toolbar ─────────────────────────────────────────────────
@@ -1331,7 +1334,7 @@ func runGUI(rs *Ruleset) {
 	// always-visible icon buttons; everything else lives behind labelled
 	// dropdown menus (Storage / Configure / Build / Estate) so the pane
 	// stays organized as verbs accumulate. Every path funnels through the
-	// same plan builders + confirmPlan gates as the TUI.
+	// same plan builders as the TUI, fired the same way.
 	var refreshNow func()
 	withSel := func(f func(Row)) func() {
 		return func() {
@@ -1347,7 +1350,7 @@ func runGUI(rs *Ruleset) {
 				dialog.ShowError(err, w)
 				return
 			}
-			confirmPlan(w, p, func() { refreshNow() })
+			firePlan(w, p, func() { refreshNow() })
 		})
 	}
 
@@ -1366,7 +1369,7 @@ func runGUI(rs *Ruleset) {
 						dialog.ShowError(err, w)
 						return
 					}
-					confirmPlan(w, p, func() { refreshNow() })
+					firePlan(w, p, func() { refreshNow() })
 				}, w)
 		})
 	}
@@ -1406,7 +1409,7 @@ func runGUI(rs *Ruleset) {
 					dialog.ShowError(err, w)
 					return
 				}
-				confirmPlan(w, p, func() { refreshNow() })
+				firePlan(w, p, func() { refreshNow() })
 			}, w)
 	})
 
@@ -1437,7 +1440,7 @@ func runGUI(rs *Ruleset) {
 					dialog.ShowError(err, w)
 					return
 				}
-				confirmPlan(w, p, func() { refreshNow() })
+				firePlan(w, p, func() { refreshNow() })
 			}, w)
 	})
 
@@ -1877,15 +1880,16 @@ func runGUI(rs *Ruleset) {
 			fyne.NewMenuItem("vCPU / memory…", specsDialog),
 			fyne.NewMenuItem("Autostart on/off", verb(planAutostart)),
 			fyne.NewMenuItemSeparator(),
-			fyne.NewMenuItem("Delete…", verb(planDelete)),
+			// no ellipsis: nothing opens, it deletes
+			fyne.NewMenuItem("Delete", verb(planDelete)),
 		), w.Canvas())
 		m.ShowAtPosition(pos)
 	}
 
 	// ── batch bar: verbs over the checked set ────────────────────────────
-	// Appears only when ≥1 VM is checked (dot-click). Safe verbs fire
-	// across the set immediately; the destructive ones show ONE confirm
-	// listing the targets (retyping N names would be absurd).
+	// Appears only when ≥1 VM is checked (dot-click). Every verb fires
+	// across the set immediately — checking the rows and pressing the
+	// button is the deliberate act; a dialog asking again is not.
 	checkedRows := func() []Row {
 		var rows []Row
 		for _, g := range st.groups {
@@ -1904,10 +1908,10 @@ func runGUI(rs *Ruleset) {
 		tree.Refresh()
 		refreshBatchBar()
 	}
-	// batchRun builds each row's plan and runs it; destructive plans confirm
+	// batchRun builds each row's plan and runs it — no confirmation step
 	// once for the whole set. Per-VM errors are collected, not fatal — one
 	// bad VM must not abort the rest of a 40-VM sweep.
-	batchRun := func(label string, build func(Row) (verbPlan, error), destructive bool) {
+	batchRun := func(label string, build func(Row) (verbPlan, error)) {
 		rows := checkedRows()
 		if len(rows) == 0 {
 			return
@@ -1934,21 +1938,11 @@ func runGUI(rs *Ruleset) {
 				})
 			}()
 		}
-		if !destructive {
-			fire()
-			return
-		}
-		names := make([]string, len(rows))
-		for i, r := range rows {
-			names[i] = r.D.Name
-		}
-		dialog.ShowConfirm(label+" — "+fmt.Sprint(len(rows))+" VMs",
-			label+" these "+fmt.Sprint(len(rows))+" VMs?\n\n"+
-				strings.Join(names, "\n"), func(ok bool) {
-				if ok {
-					fire()
-				}
-			}, w)
+		// No confirm, destructive or not: the operator picked the rows and
+		// pressed the button, which is the same two deliberate acts a
+		// dialog would have asked for again. Failures still surface, and
+		// every command is in the audit log.
+		fire()
 	}
 	batchBar := container.NewHBox()
 	refreshBatchBar = func() {
@@ -1959,17 +1953,17 @@ func runGUI(rs *Ruleset) {
 		}
 		lbl := pageHeading(fmt.Sprintf("%d selected", n), acBrand)
 		bStart := widget.NewButtonWithIcon("Start", theme.MediaPlayIcon(),
-			func() { batchRun("Start", planStart, false) })
+			func() { batchRun("Start", planStart) })
 		bStart.Importance = widget.SuccessImportance
 		bReboot := widget.NewButtonWithIcon("Reboot", theme.ViewRefreshIcon(),
-			func() { batchRun("Reboot", planReboot, false) })
+			func() { batchRun("Reboot", planReboot) })
 		bStop := widget.NewButtonWithIcon("Shut down", theme.MediaStopIcon(),
-			func() { batchRun("Shut down", planShutdown, false) })
+			func() { batchRun("Shut down", planShutdown) })
 		bKill := widget.NewButtonWithIcon("Force off", theme.ErrorIcon(),
-			func() { batchRun("Force off", planForceOff, true) })
+			func() { batchRun("Force off", planForceOff) })
 		bKill.Importance = widget.DangerImportance
 		bDel := widget.NewButtonWithIcon("Delete", theme.DeleteIcon(),
-			func() { batchRun("Delete", planDelete, true) })
+			func() { batchRun("Delete", planDelete) })
 		bDel.Importance = widget.DangerImportance
 		bClear := widget.NewButtonWithIcon("", theme.CancelIcon(), clearChecked)
 		batchBar.Objects = []fyne.CanvasObject{

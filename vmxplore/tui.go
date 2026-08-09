@@ -127,7 +127,7 @@ type ui struct {
 	err           error
 
 	// verb state: a plan awaiting confirmation, the operator's typed buffer
-	// (retype gate or input field), and the staged specs value between the
+	// (the input field), and the staged specs value between the
 	// two input rounds. snapCursor selects inside the snaps overlay.
 	pending    *verbPlan
 	typed      string
@@ -542,43 +542,23 @@ func (m *ui) keyActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// keyConfirm arms and fires a pending plan: plain verbs on y, retype-gated
-// ones only when the typed name matches exactly.
+// keyConfirm fires a pending plan: y or enter runs it, esc/q backs out.
+// One keypress is the whole confirmation — the retype gate that used to
+// stand in front of force off, delete and rollback is gone (see verbs.go's
+// banner for why). q backs out rather than quitting the app: quitting from
+// a prompt was operator-vetoed.
 func (m *ui) keyConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	p := m.pending
-	if p == nil {
+	if m.pending == nil {
 		m.overlay = ""
 		return m, nil
 	}
 	switch msg.String() {
-	case "esc", "ctrl+c":
+	case "esc", "ctrl+c", "q":
 		m.pending, m.overlay = nil, ""
 		m.status = "cancelled"
 		return m, nil
-	case "q":
-		// only when q can't be part of a retyped name; backs out like esc —
-		// quitting the app from a prompt was operator-vetoed
-		if p.retype == "" {
-			m.pending, m.overlay = nil, ""
-			m.status = "cancelled"
-		}
-	case "enter":
-		if p.retype != "" && m.typed != p.retype {
-			return m, nil // gate not satisfied; keep typing or esc
-		}
+	case "enter", "y":
 		return m.firePlan()
-	case "y":
-		if p.retype == "" {
-			return m.firePlan()
-		}
-	case "backspace":
-		if len(m.typed) > 0 {
-			m.typed = m.typed[:len(m.typed)-1]
-		}
-		return m, nil
-	}
-	if p.retype != "" && len(msg.String()) >= 1 && !strings.HasPrefix(msg.String(), "ctrl") {
-		m.typed += msg.String()
 	}
 	return m, nil
 }
@@ -1090,7 +1070,7 @@ func (m *ui) actionsText() string {
 	}
 	verb("u", "start")
 	verb("d", "shut down (graceful)")
-	verb("K", "force off "+styWarn.Render("(retype-gated)"))
+	verb("K", "force off "+styWarn.Render("(no undo)"))
 	verb("p", "snapshot (zfs, manual-*)")
 	verb("v", "edit vcpu/memory (next start)")
 	verb("A", "autostart toggle (now: "+auto+")")
@@ -1112,12 +1092,7 @@ func (m *ui) confirmText() string {
 	if p.warn != "" {
 		fmt.Fprintf(&b, "\n%s\n", styWarn.Render("⚠ "+p.warn))
 	}
-	if p.retype != "" {
-		fmt.Fprintf(&b, "\ntype the name %s to arm, then enter (esc cancels):\n%s %s",
-			styWarn.Render(p.retype), styKey.Render("  >"), m.typed)
-	} else {
-		b.WriteString("\n" + keyHint("y", "run", "esc/q", "cancel"))
-	}
+	b.WriteString("\n" + keyHint("y", "run", "esc/q", "cancel"))
 	return b.String()
 }
 
@@ -1174,7 +1149,7 @@ func helpText() string {
 	section("act — a opens the menu, or press the verb key directly")
 	k("u", "start")
 	k("d", "shut down (graceful)")
-	k("K", "force off "+styWarn.Render("(retype-gated)"))
+	k("K", "force off "+styWarn.Render("(no undo)"))
 	k("p", "snapshot (zfs, manual-*)")
 	k("v", "edit vcpu/mem (next start)")
 	k("A", "autostart toggle")

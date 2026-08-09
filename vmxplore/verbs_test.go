@@ -37,8 +37,8 @@ func TestPlanForceOffGates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.retype != "klab-blue-fedora" {
-		t.Error("force-off must retype-gate on the domain name")
+	if p.warn == "" {
+		t.Error("force-off must warn that the guest gets no chance to flush")
 	}
 	// the webui lesson: destroy on a transient domain erases it
 	tr := runningRow()
@@ -76,8 +76,8 @@ func TestPlanRollbackGates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.retype == "" || !strings.Contains(p.warn, "3 snapshot") {
-		t.Errorf("rollback gates wrong: retype=%q warn=%q", p.retype, p.warn)
+	if !strings.Contains(p.warn, "3 snapshot") {
+		t.Errorf("rollback must count its casualties: warn=%q", p.warn)
 	}
 	want := "zfs rollback -r rpool/vms/klab-blue-fedora@manual-x"
 	if strings.Join(p.cmds[0], " ") != want {
@@ -144,8 +144,8 @@ func TestPlanDeleteGates(t *testing.T) {
 		strings.Join(run.cmds[0], " ") != "virsh -c qemu:///system destroy klab-blue-fedora" {
 		t.Errorf("delete of a running domain must force off first: %v", run.cmds)
 	}
-	if run.retype != "klab-blue-fedora" {
-		t.Error("delete must stay retype-gated even when it forces off")
+	if run.warn == "" || !strings.Contains(run.warn, "forces it off") {
+		t.Errorf("delete of a running domain must say it forces off: %q", run.warn)
 	}
 	// A transient domain is erased by the destroy above; undefine would
 	// then fail and abort the plan before the zvol is destroyed.
@@ -164,8 +164,8 @@ func TestPlanDeleteGates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.retype != "klab-blue-fedora" {
-		t.Error("delete must be retype-gated")
+	if !strings.Contains(p.warn, "every snapshot") {
+		t.Errorf("delete must spell out what the zvol takes with it: %q", p.warn)
 	}
 	joined := ""
 	for _, c := range p.cmds {
