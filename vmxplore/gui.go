@@ -2075,11 +2075,16 @@ func runGUI(rs *Ruleset) {
 	}
 	// Centred, not flush left: the row used to run off the right edge with
 	// no margin left on it, which reads as truncated rather than as a row
-	// that ended.
+	// that ended. The trailing gap is a fixed 20px rather than more theme
+	// padding, because it is doing a different job — theme padding scales
+	// with the theme, this is a deliberate margin at the end of a row of
+	// buttons so the last one is never the last pixel.
+	endGap := canvas.NewRectangle(color.Transparent)
+	endGap.SetMinSize(fyne.NewSize(20, 1))
 	buttons := container.NewPadded(container.NewCenter(container.NewHBox(
 		pad(btnStart), pad(btnStop), pad(btnKill),
 		widget.NewSeparator(),
-		pad(mStorage), pad(mConfig), pad(mBuild), pad(mEstate))))
+		pad(mStorage), pad(mConfig), pad(mBuild), pad(mEstate), endGap)))
 
 	// ── selection → panes ────────────────────────────────────────────────
 	// A branch (group header) toggles its own fold; a leaf drives the panes.
