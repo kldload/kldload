@@ -950,6 +950,22 @@ if command -v apt-get >/dev/null 2>&1; then
         xserver-xorg-core xserver-xorg-video-fbdev \
         xserver-xorg-input-libinput xinit x11-xserver-utils \
         matchbox-window-manager firefox-esr fonts-dejavu-core unclutter
+
+    # WHY: Debian's cloud images run linux-image-cloud-amd64, a kernel
+    # flavour built with no DRM subsystem and no framebuffer at all — no
+    # virtio_gpu module, no /dev/dri/card0, no /dev/fb0. Xorg probes
+    # modesetting, falls back to fbdev, finds neither and dies with
+    # "no screens found"; agetty then re-runs startx forever and the
+    # Graphics tab shows a black 720x400 VGA text screen. The generic
+    # kernel carries the drivers, so a graphical appliance on a cloud
+    # image has to install it and boot into it once.
+    # HISTORY: wf-desk, 2026-08-09 — installed cleanly, served the blog on
+    # :80, and never put a pixel on screen.
+    if dpkg-query -W -f='${Status}' "linux-image-cloud-$(dpkg --print-architecture)" \
+        2>/dev/null | grep -q '^install ok installed$'; then
+        apt-get install -y "linux-image-$(dpkg --print-architecture)"
+        wf_need_reboot=1
+    fi
 elif command -v dnf >/dev/null 2>&1; then
     dnf install -y --setopt=install_weak_deps=False \
         xorg-x11-server-Xorg xorg-x11-xinit matchbox-window-manager \
@@ -1015,4 +1031,14 @@ systemctl set-default multi-user.target   # no display manager; tty1 owns X
 systemctl restart getty@tty1.service
 
 echo "writing desktop ready — the Graphics tab boots into the editor"
+
+# One reboot, and only when the kernel actually changed underneath us: the
+# running cloud kernel has no DRM, so X cannot come up until the generic
+# kernel is the one booted. cloud-init is gated on instance-id and will not
+# run this script again, so this cannot become a reboot loop. The blog is
+# already installed and enabled, so it comes back on its own.
+if [ "${wf_need_reboot:-0}" = 1 ]; then
+    echo "rebooting once into the generic kernel — X needs its DRM drivers"
+    systemctl reboot
+fi
 `
