@@ -922,7 +922,10 @@ var writeFreelyDesktop = Appliance{
 		"already signed in as the admin you set up here — the Screen " +
 		"tab is the whole interface. The blog is also served on the " +
 		"network exactly as the headless entry does.\n\n" +
-		"There is no desktop and nothing to navigate away into. " +
+		"There is no desktop and nothing to navigate away into — the " +
+		"browser is policy-locked to the local app, so a stray link " +
+		"cannot strand the machine on the public internet, and alt+Home " +
+		"always returns to the editor. " +
 		"ctrl+alt+F2 gives an ordinary console login if you need one, " +
 		"ctrl+alt+F1 comes back. Power off from the console you are " +
 		"reading this in — the guest answers the ACPI button with a " +
@@ -1137,6 +1140,47 @@ cat >"$wf_home/autologin.html" <<HTML
 </body>
 HTML
 chmod 0600 "$wf_home/autologin.html"
+
+# ─── The writing machine only reaches the writing app ────────────────
+#
+# A kiosk with no address bar, no back button and no tabs is a one-way
+# door: WriteFreely's own pages link out to writefreely.org and
+# developers.write.as, and one click leaves the operator stranded on the
+# public internet with no chrome to navigate back with. Observed exactly
+# that — a machine whose whole job is writing, parked on a pricing page,
+# with keystrokes going nowhere anybody wanted.
+#
+# Firefox's enterprise policy fixes it at the browser rather than by
+# asking people not to click: everything is blocked except the local app,
+# and a Homepage is set so alt+Home always comes back. The policy file is
+# read at startup from /etc/firefox-esr/policies on Debian's ESR build.
+#
+# Note the file:// exception — Firefox's WebsiteFilter does not police
+# file:// URLs, and the sign-in page lives there, so it is listed for
+# clarity rather than because the filter would otherwise catch it.
+mkdir -p /etc/firefox-esr/policies
+cat >/etc/firefox-esr/policies/policies.json <<'POLICY'
+{
+  "policies": {
+    "WebsiteFilter": {
+      "Block": ["<all_urls>"],
+      "Exceptions": ["http://localhost/*", "http://127.0.0.1/*", "file:///*"]
+    },
+    "Homepage": {
+      "URL": "file:///home/writer/autologin.html",
+      "StartPage": "homepage",
+      "Locked": true
+    },
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "DisableProfileImport": true,
+    "DisableFirefoxAccounts": true,
+    "DisableTelemetry": true,
+    "DisablePocket": true,
+    "NoDefaultBookmarks": true
+  }
+}
+POLICY
 
 # A way out that is not a desktop. There is deliberately no launcher, no
 # taskbar and no window to close — but a machine with no escape hatch is
