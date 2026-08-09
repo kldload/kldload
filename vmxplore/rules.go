@@ -160,10 +160,12 @@ var vmKTools = []string{
 	"kvm-create", "kvm-clone", "kvm-delete", "kvm-snap", "kvm-list",
 	"kimage", "kexport", "kvm-win", "ksnap",
 	"kvm-demo", "kube-demo",
-	// the ZFS surfaces: zxplore is the family's storage console, kst the
-	// host's pool/health summary. Both were missing here, so a kldload
-	// host showed every VM tool and no way to reach its storage.
-	"zxplore", "kst",
+	// the ZFS surfaces: kzfs-lab is the OpenZFS Lab (goldens, blue/green
+	// sites, the ZFS test suite and its eBPF metrics), zxplore the
+	// family's storage console, kst the host's pool/health summary. All
+	// three were missing here, so a kldload host showed every way to make
+	// a VM and no way to reach its storage or its tests.
+	"kzfs-lab", "zxplore", "kst",
 }
 
 // KldloadTools returns the kldload VM tools present on this host (nil on a

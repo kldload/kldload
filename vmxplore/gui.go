@@ -1017,6 +1017,35 @@ func runGUI(rs *Ruleset) {
 			{label: "destroy", desc: "tear down the cluster — VMs and zvols", argv: []string{"kube-cluster", "destroy"},
 				confirm: true},
 		},
+		// The OpenZFS Lab is a whole workflow, not one command: build
+		// goldens once, clone them into a blue site, run the suite, stage
+		// changes in green and promote when they pass. The verbs are
+		// grouped in that order so the tile grid reads as the process.
+		"kzfs-lab": {
+			{label: "status", desc: "every VM, site and snapshot in the lab", argv: []string{"kzfs-lab", "status"}},
+			{label: "health…", desc: "system health dashboard for a site", argv: []string{"kzfs-lab", "health"},
+				prompt: "site (blue/green, empty = blue)"},
+			{label: "build…", desc: "golden images with the ZFS dev tools baked in", builds: true, argv: []string{"kzfs-lab", "build"},
+				prompt: "distro or all (centos rocky fedora debian ubuntu arch)"},
+			{label: "deploy blue", desc: "clone the goldens into the blue site", builds: true, argv: []string{"kzfs-lab", "deploy", "blue"}},
+			{label: "deploy green", desc: "clone the goldens into green — the staging site", builds: true, argv: []string{"kzfs-lab", "deploy", "green"}},
+			{label: "test…", desc: "quick ZFS tests across the site's VMs", argv: []string{"kzfs-lab", "test"},
+				prompt: "distro or all"},
+			{label: "test-full…", desc: "the complete zfs-tests.sh suite — slow", argv: []string{"kzfs-lab", "test-full"},
+				prompt: "distro (empty = all)"},
+			{label: "ebpf-latency…", desc: "I/O latency across the site, measured with eBPF", argv: []string{"kzfs-lab", "ebpf-latency"},
+				prompt: "site (empty = blue)"},
+			{label: "ebpf-arc…", desc: "ARC hit/miss ratios across the site", argv: []string{"kzfs-lab", "ebpf-arc"},
+				prompt: "site (empty = blue)"},
+			{label: "snapshot…", desc: "tag every lab VM at once", argv: []string{"kzfs-lab", "snapshot"},
+				prompt: "tag (empty = timestamp)"},
+			{label: "promote green", desc: "green becomes blue — blue is snapshotted first", argv: []string{"kzfs-lab", "promote", "green"},
+				confirm: true},
+			{label: "rollback", desc: "revert blue to its previous snapshot", argv: []string{"kzfs-lab", "rollback"},
+				confirm: true},
+			{label: "destroy…", desc: "tear down a site; goldens are preserved", argv: []string{"kzfs-lab", "destroy"},
+				prompt: "blue, green, all or goldens", confirm: true},
+		},
 		"kspawn": {
 			{label: "list", desc: "every spawned cluster", argv: []string{"kspawn", "list"}},
 			{label: "spawn…", desc: "instant multi-node cluster from klab goldens", builds: true, argv: []string{"kspawn", "spawn"},
@@ -1103,6 +1132,7 @@ func runGUI(rs *Ruleset) {
 		"ksnap":        "host-level ZFS snapshots and rollback",
 		"kvm-demo":     "guided KVM / ZFS / GPU showcase",
 		"kube-demo":    "guided Kubernetes-on-ZFS showcase",
+		"kzfs-lab":     "OpenZFS Lab: goldens, blue/green sites, ZFS tests, eBPF",
 		"zxplore":      "the ZFS console: pools, datasets, snapshots, clones",
 		"kst":          "this host at a glance: pool health, capacity, build",
 		"shell":        "a plain bash prompt, right here",
