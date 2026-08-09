@@ -119,3 +119,28 @@ func TestUserDataAlwaysReachable(t *testing.T) {
 		t.Error("an explicit password must be used verbatim")
 	}
 }
+
+// TestUserDataQuotesOperatorValues pins the wf-desktop incident
+// (2026-08-09): an ssh key whose comment contained a colon —
+// "ek-debug: dev login to appliances" — was emitted as a bare YAML
+// scalar, parsed as a mapping, and cloud-init threw out the entire users
+// block. The VM booted, the app worked, and the key was never installed.
+func TestUserDataQuotesOperatorValues(t *testing.T) {
+	key := "ssh-ed25519 AAAAC3Nz test ek-debug: dev login to appliances"
+	s := NewVMSpec{Name: "x", Distro: "debian", User: "admin",
+		Password: `p, w"d}`, SSHKey: key, VCPUs: 1, RAMMB: 512, DiskGB: 4}
+	ud := userData(s)
+	if !strings.Contains(ud, `- "`+key+`"`) {
+		t.Errorf("ssh key must be a quoted scalar:\n%s", ud)
+	}
+	// the password carries a comma and a brace — both fatal unquoted
+	// inside the chpasswd flow mapping
+	if !strings.Contains(ud, `password: "p, w\"d}"`) {
+		t.Errorf("password must be quoted and escaped:\n%s", ud)
+	}
+	for _, line := range strings.Split(ud, "\n") {
+		if strings.HasPrefix(line, "hostname:") && !strings.Contains(line, `"`) {
+			t.Errorf("hostname must be quoted: %q", line)
+		}
+	}
+}

@@ -1009,6 +1009,18 @@ if command -v apt-get >/dev/null 2>&1; then
         sed -i '/^GRUB_DEFAULT=/d' /etc/default/grub
         echo "GRUB_DEFAULT=\"$wf_sub>$wf_ent\"" >>/etc/default/grub
 
+        # And put the boot on the screen. The cloud image's cmdline sends
+        # every kernel message to the serial port only, so the Graphics
+        # tab is blank from power-on until X claims it — which reads as a
+        # hang on the one boot where the operator is watching hardest.
+        # tty0 first, ttyS0 last: kernel messages go to every console=
+        # listed, and the last one wins /dev/console for userspace, so
+        # the serial console stays the interactive one.
+        if ! grep -q 'console=tty0' /etc/default/grub; then
+            sed -i 's/^GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="console=tty0 /' \
+                /etc/default/grub
+        fi
+
         # The meta package goes even though the running image cannot:
         # left in place it pulls a NEWER cloud kernel on the next upgrade,
         # which would out-sort the generic one and undo all of this. Only

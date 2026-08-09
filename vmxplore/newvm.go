@@ -236,30 +236,57 @@ func isoTool(out, ud, md string) ([]string, error) {
 	return nil, fmt.Errorf("no mkisofs/genisoimage/xorriso — install one for cloud-init seeds")
 }
 
+// yamlQuote renders s as a YAML double-quoted scalar.
+//
+// WHY every operator-supplied value goes through this: a bare scalar is
+// safe only until it contains YAML punctuation, and these values come
+// from the operator's keyboard and their ~/.ssh. An ssh key whose comment
+// carries a colon — "ek-debug: dev login to appliances", which is what a
+// real key on this host looks like — parses as a nested MAPPING, not a
+// string. cloud-init then rejects the whole users block and the key is
+// never installed, silently: the VM boots, the app works, and ssh answers
+// "Permission denied (publickey)" forever. A password containing a comma
+// or a brace breaks the chpasswd flow mapping the same way.
+// HISTORY: wf-desktop, 2026-08-09 — `cloud-init schema --system` reported
+// users.0.ssh_authorized_keys.0 "is not of type 'string'".
+//
+// Double quotes are the one YAML style with defined escaping for every
+// printable character; backslash and quote are the only two needing it.
+// Newlines are rejected upstream, since these land in line-oriented
+// config.
+func yamlQuote(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return `"` + r.Replace(s) + `"`
+}
+
 // userData renders the #cloud-config the seed carries. Same behaviours as
 // the family tools: named sudo user, password auth on, growpart.
 func userData(s NewVMSpec) string {
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
-	fmt.Fprintf(&b, "hostname: %s\n", s.Name)
-	// Everything cloud-init does goes to the console as well as the log,
-	// so the Serial tab narrates the build instead of showing a login
-	// prompt above ten silent minutes of apt. An appliance's first boot
+	fmt.Fprintf(&b, "hostname: %s\n", yamlQuote(s.Name))
+	// Everything cloud-init does goes to BOTH consoles as well as the log,
+	// so the build narrates itself wherever the operator is watching
+	// instead of showing a login prompt above ten silent minutes of apt.
+	// /dev/console is the serial port on a cloud image (console=ttyS0 is
+	// baked into its cmdline and cannot be changed before the first boot);
+	// /dev/tty0 is the VGA text console the Graphics tab renders, which is
+	// otherwise blank until X claims it. An appliance's first boot
 	// installs packages, writes configs and sometimes reboots; watching
 	// that happen is the difference between "it is working" and "it is
 	// hung". The default only tees to /var/log/cloud-init-output.log,
 	// which nobody can read until the machine they are waiting on is up.
 	b.WriteString("output: {all: '| tee -a /var/log/cloud-init-output.log " +
-		"> /dev/console'}\n")
+		"/dev/tty0 > /dev/console'}\n")
 	b.WriteString("ssh_pwauth: true\n")
 	b.WriteString("growpart:\n  mode: auto\n  devices: ['/']\n")
-	fmt.Fprintf(&b, "users:\n  - name: %s\n", s.User)
+	fmt.Fprintf(&b, "users:\n  - name: %s\n", yamlQuote(s.User))
 	b.WriteString("    sudo: ALL=(ALL) NOPASSWD:ALL\n")
 	b.WriteString("    shell: /bin/bash\n")
 	b.WriteString("    lock_passwd: false\n")
 	if s.SSHKey != "" {
 		fmt.Fprintf(&b, "    ssh_authorized_keys:\n      - %s\n",
-			strings.TrimSpace(s.SSHKey))
+			yamlQuote(strings.TrimSpace(s.SSHKey)))
 	}
 	// A machine nobody can log into is a broken machine. cloud-init leaves
 	// an account with lock_passwd:false and no password unusable at the
@@ -276,7 +303,7 @@ func userData(s NewVMSpec) string {
 	if pw != "" {
 		b.WriteString("chpasswd:\n  expire: false\n  users:\n")
 		fmt.Fprintf(&b, "    - {name: %s, password: %s, type: text}\n",
-			s.User, pw)
+			yamlQuote(s.User), yamlQuote(pw))
 	}
 	// the custom post-installer: the operator's bash, written to a script
 	// and run once as root on first boot via runcmd — output lands in the
