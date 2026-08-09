@@ -861,7 +861,12 @@ func runGUI(rs *Ruleset) {
 		"select a running VM — its graphical console renders here"))
 	var vncConn *rfbConn
 	vncName := ""
+	// curVNC is the live viewer, so a control outside the pane (the paste
+	// button in the console header) can drive the session the pane owns.
+	// Nil whenever nothing is attached.
+	var curVNC *vncViewer
 	detachVNC := func() {
+		curVNC = nil
 		if vncConn != nil {
 			vncConn.Close()
 		}
@@ -890,7 +895,9 @@ func runGUI(rs *Ruleset) {
 		conn.onCutText = func(s string) {
 			fyne.Do(func() { w.Clipboard().SetContent(s) })
 		}
-		vncHost.Objects = []fyne.CanvasObject{newVNCViewer(conn)}
+		v := newVNCViewer(conn)
+		curVNC = v
+		vncHost.Objects = []fyne.CanvasObject{v}
 		vncHost.Refresh()
 	}
 
@@ -2293,25 +2300,58 @@ func runGUI(rs *Ruleset) {
 	var mainContent fyne.CanvasObject
 	consoleCard := card(container.NewBorder(nil, nil, nil, nil, tabs))
 
-	// ⛶ — the whole display, and nothing but the guest.
+	// ⛶ — nothing but the guest, in the window you already have.
 	//
-	// It used to hand the console CARD to the window: tab bar, padding and
-	// card border included, inside a window that was still merely maximised.
-	// On a 2560x1440 guest that chrome is the difference between reading the
-	// screen and squinting at it, and every pixel of it is showing you
-	// controls you are not using while you are looking at a machine.
+	// It used to hand over the console CARD — tab bar, padding and card
+	// border included. On a 2560x1440 guest that chrome is the difference
+	// between reading the screen and squinting at it, and every pixel of it
+	// shows controls nobody is using while they look at a machine. Now the
+	// selected tab's content goes edge to edge with the restore control
+	// floated over the top-right corner instead of given a row of its own.
 	//
-	// So: the SELECTED tab's content alone, the OS window put into real
-	// fullscreen, and the restore control floated over the top-right corner
-	// rather than given a row of its own.
+	// WHY it does NOT call SetFullScreen, which is the obvious thing:
+	// because on a multi-monitor desktop it moves the window to the WRONG
+	// display. Fyne picks the target itself and offers no way to say which;
+	// read getMonitorForWindow in its glfw driver — under Wayland it skips
+	// the geometry search outright, and even on X11 a miss falls through to
+	// GetPrimaryMonitor. Observed here on a three-head desktop: ⛶ threw the
+	// console onto monitor 1 from a window that was on another.
 	//
-	// WARN: the restore button is the ONLY way back. Escape cannot be the
-	// escape — the VNC widget owns the keyboard and forwards it to the
-	// guest, so a guest that wants Escape (vi, a BIOS menu, the editor here)
-	// would eat it. The button stays visible for that reason; it is small
-	// and cornered, but it is never hidden.
+	// Filling the window is a smaller promise that is always kept. The
+	// window manager already does true fullscreen correctly and on the
+	// right monitor — its own shortcut composes with this, and the result
+	// is the guest occupying the whole display with no furniture at all.
+	//
+	// WARN: the restore button is the ONLY way back out of this mode.
+	// Escape cannot be the escape — the VNC widget owns the keyboard and
+	// forwards it to the guest, so anything that wants Escape (vi, a
+	// firmware menu, the editor in the writing appliance) would eat it.
+	// Small and cornered, never hidden.
+	// Paste, as a button you can see.
+	//
+	// Ctrl+V already worked — TypedShortcut sends the host clipboard as RFB
+	// cut text AND types it as keystrokes, so it lands in a guest whether or
+	// not that guest runs a clipboard agent. Nobody knew, because a keyboard
+	// shortcut inside a pane that swallows the keyboard is invisible. This
+	// is the same code path with a control attached to it.
+	//
+	// Not a right-click menu: right-click belongs to the guest. A guest is
+	// exactly the place where stealing the secondary button breaks real work.
+	pasteBtn := widget.NewButtonWithIcon("", theme.ContentPasteIcon(), func() {
+		if curVNC == nil {
+			guiStatus("paste: no screen attached — select a running VM")
+			return
+		}
+		text := w.Clipboard().Content()
+		if text == "" {
+			guiStatus("paste: the host clipboard is empty")
+			return
+		}
+		curVNC.pasteText(text)
+		guiStatus(fmt.Sprintf("pasted %d characters into the guest", len(text)))
+	})
+
 	restoreBtn := widget.NewButtonWithIcon("", theme.ViewRestoreIcon(), func() {
-		w.SetFullScreen(false)
 		w.SetContent(mainContent)
 		// the borrowed pane is going back into its tab: Fyne needs telling
 		// that the tab's content moved parents and back again
@@ -2322,12 +2362,12 @@ func runGUI(rs *Ruleset) {
 		pane := tabs.Selected().Content
 		w.SetContent(container.NewStack(
 			pane,
-			container.NewVBox(container.NewHBox(
-				layout.NewSpacer(), container.NewPadded(restoreBtn)))))
-		w.SetFullScreen(true)
+			container.NewVBox(container.NewHBox(layout.NewSpacer(),
+				container.NewPadded(container.NewHBox(pasteBtn, restoreBtn))))))
 	})
 	consoleHead := container.NewBorder(nil, nil,
-		heading("CONSOLE", acGold), fullBtn)
+		heading("CONSOLE", acGold),
+		container.NewHBox(pasteBtn, fullBtn))
 	consolePane := gap(container.NewBorder(consoleHead, nil, nil, nil,
 		consoleCard))
 	rightBottom := gap(card(container.NewBorder(

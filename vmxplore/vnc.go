@@ -467,13 +467,21 @@ func mouseBit(b desktop.MouseButton) uint8 {
 // it) and typed as keystrokes (works everywhere, boot consoles included).
 func (v *vncViewer) TypedShortcut(s fyne.Shortcut) {
 	if p, ok := s.(*fyne.ShortcutPaste); ok {
-		text := p.Clipboard.Content()
-		if text == "" {
-			return
-		}
-		v.conn.cutText(text)
-		go v.typeString(text)
+		v.pasteText(p.Clipboard.Content())
 	}
+}
+
+// pasteText is the paste itself, split out so a button can reach it as
+// well as Ctrl+V. Both routes are always taken: cut text is instant and
+// exact for a guest running a clipboard agent, and the typed fallback
+// works on everything else — a boot console, a firmware menu, a fresh
+// cloud image with no agent installed at all.
+func (v *vncViewer) pasteText(text string) {
+	if text == "" {
+		return
+	}
+	v.conn.cutText(text)
+	go v.typeString(text)
 }
 
 // typeString feeds text as paced key events — outrunning a guest's boot
