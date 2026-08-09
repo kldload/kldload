@@ -1009,15 +1009,26 @@ if command -v apt-get >/dev/null 2>&1; then
         sed -i '/^GRUB_DEFAULT=/d' /etc/default/grub
         echo "GRUB_DEFAULT=\"$wf_sub>$wf_ent\"" >>/etc/default/grub
 
-        # And put the boot on the screen. The cloud image's cmdline sends
-        # every kernel message to the serial port only, so the Graphics
-        # tab is blank from power-on until X claims it — which reads as a
-        # hang on the one boot where the operator is watching hardest.
-        # tty0 first, ttyS0 last: kernel messages go to every console=
-        # listed, and the last one wins /dev/console for userspace, so
-        # the serial console stays the interactive one.
+        # And put the boot on the screen, at a size worth looking at.
+        #
+        # console=tty0: the cloud image's cmdline sends every kernel
+        # message to the serial port only, so the Graphics tab is blank
+        # from power-on until X claims it — which reads as a hang on the
+        # one boot where the operator is watching hardest. tty0 first and
+        # ttyS0 last, because kernel messages go to every console= listed
+        # but the LAST one wins /dev/console for userspace, and the serial
+        # console should stay the interactive one.
+        #
+        # video=: a virtual GPU has no monitor to ask, so DRM picks a
+        # small safe mode and the whole machine — text console and X
+        # alike — comes up at 1280x800. Naming the mode on the cmdline
+        # sets it once, before anything has drawn, so the install output
+        # and the editor are both full size. Virtual-1 is virtio-gpu's
+        # connector; if a future kernel names it differently the argument
+        # is ignored and the guest keeps its default, which is why the
+        # session also asks for the mode at runtime below.
         if ! grep -q 'console=tty0' /etc/default/grub; then
-            sed -i 's/^GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="console=tty0 /' \
+            sed -i 's/^GRUB_CMDLINE_LINUX="/GRUB_CMDLINE_LINUX="console=tty0 video=Virtual-1:2560x1440 /' \
                 /etc/default/grub
         fi
 
@@ -1143,6 +1154,35 @@ systemctl enable getty@tty2.service
 cat >"$wf_home/.xinitrc" <<'XINIT'
 #!/bin/sh
 xset s off -dpms          # a writing machine must not blank mid-sentence
+
+# Ask for the desktop-sized mode. A virtual GPU has no monitor to ask, so
+# it advertises a fixed list that happens NOT to include 2560x1440 (it
+# offers 1280x800, 1920x1200, 3840x2160 and friends) and comes up at the
+# smallest of them. The mode has to be constructed and added by hand.
+#
+# gtf, not cvt: cvt is not installed in a Debian cloud image and neither
+# is the package that carries it, while gtf ships in x11-xserver-utils,
+# which this appliance already installs for xset. Its modeline is quoted
+# and xrandr takes the quotes literally into the mode NAME, so they are
+# stripped before use — with them left in, --newmode succeeds and every
+# later reference fails to find the mode it just made.
+#
+# Every step may fail without consequence: a writing machine that will
+# not start because it could not get the resolution it wanted is worse
+# than one at 1280x800.
+wf_out=$(xrandr 2>/dev/null | awk '/ connected/{print $1; exit}')
+if [ -n "$wf_out" ]; then
+    wf_ml=$(gtf 2560 1440 60 2>/dev/null |
+        sed -n -e 's/^[[:space:]]*Modeline //p' | tr -d '"')
+    if [ -n "$wf_ml" ]; then
+        wf_mode=$(printf '%s' "$wf_ml" | cut -d' ' -f1)
+        # shellcheck disable=SC2086 # a modeline IS a list of arguments
+        xrandr --newmode $wf_ml 2>/dev/null
+        xrandr --addmode "$wf_out" "$wf_mode" 2>/dev/null
+        xrandr --output "$wf_out" --mode "$wf_mode" 2>/dev/null
+    fi
+fi
+
 unclutter -idle 3 &
 matchbox-window-manager -use_titlebar no &
 while :; do

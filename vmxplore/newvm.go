@@ -259,6 +259,19 @@ func yamlQuote(s string) string {
 	return `"` + r.Replace(s) + `"`
 }
 
+// videoArg is the virtio-gpu device every VM gets.
+//
+// vram is in KiB. Measured, not assumed: a guest reached 2560x1440 on
+// the libvirt default, because virtio-gpu allocates its framebuffer from
+// guest RAM rather than from a fixed VGA aperture. 64 MB is stated
+// anyway as headroom for the modes above that and for the VGA-compat
+// path a pre-DRM boot uses, and it costs nothing on a host with
+// gigabytes.
+//
+// Applies to newly created VMs only; an existing domain keeps whatever
+// its XML already says.
+const videoArg = "model.type=virtio,model.vram=65536"
+
 // userData renders the #cloud-config the seed carries. Same behaviours as
 // the family tools: named sudo user, password auth on, growpart.
 func userData(s NewVMSpec) string {
@@ -371,7 +384,7 @@ func BuildNewVM(s NewVMSpec, zfsParent string, progress func(string)) error {
 		argv = append(argv,
 			"--network", "network=default,model=virtio",
 			"--graphics", "vnc,listen=0.0.0.0",
-			"--video", "virtio",
+			"--video", videoArg,
 			"--noautoconsole")
 		if err := run(false, argv...); err != nil {
 			return err
@@ -480,7 +493,7 @@ func BuildNewVM(s NewVMSpec, zfsParent string, progress func(string)) error {
 		return append(argv,
 			"--network", "network=default,model=virtio",
 			"--graphics", "vnc,listen=0.0.0.0",
-			"--video", "virtio",
+			"--video", videoArg,
 			"--noautoconsole")
 	}
 	err = run(false, installArgs("--os-variant", variant)...)
