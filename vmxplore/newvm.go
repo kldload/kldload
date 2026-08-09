@@ -242,6 +242,15 @@ func userData(s NewVMSpec) string {
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
 	fmt.Fprintf(&b, "hostname: %s\n", s.Name)
+	// Everything cloud-init does goes to the console as well as the log,
+	// so the Serial tab narrates the build instead of showing a login
+	// prompt above ten silent minutes of apt. An appliance's first boot
+	// installs packages, writes configs and sometimes reboots; watching
+	// that happen is the difference between "it is working" and "it is
+	// hung". The default only tees to /var/log/cloud-init-output.log,
+	// which nobody can read until the machine they are waiting on is up.
+	b.WriteString("output: {all: '| tee -a /var/log/cloud-init-output.log " +
+		"> /dev/console'}\n")
 	b.WriteString("ssh_pwauth: true\n")
 	b.WriteString("growpart:\n  mode: auto\n  devices: ['/']\n")
 	fmt.Fprintf(&b, "users:\n  - name: %s\n", s.User)
