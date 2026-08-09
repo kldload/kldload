@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // CloudImage is one distro preset — URL and libvirt os-variant, lifted
@@ -302,6 +303,16 @@ func BuildNewVM(s NewVMSpec, zfsParent string, progress func(string)) error {
 			fmt.Sprintf("%dG", s.DiskGB), ds); err != nil {
 			return err
 		}
+		// WHY: `zfs create -V` returns before udev has published
+		// /dev/zvol/<ds>. qemu-img does not care — it happily *creates* a
+		// regular file at a missing path, so the convert below would land
+		// a multi-GB image in devtmpfs (RAM) while the real zvol stayed
+		// empty. The VM then boots off RAM, is stuck at the cloud image's
+		// size, loses everything on host reboot, and has no snapshots or
+		// clones. Wait for a real block device, and fail loudly instead.
+		if err := waitZvolNode("/dev/zvol/"+ds, progress); err != nil {
+			return err
+		}
 		if err := run(true, "qemu-img", "convert", "-O", "raw", img,
 			"/dev/zvol/"+ds); err != nil {
 			return err
@@ -390,6 +401,54 @@ func BuildNewVM(s NewVMSpec, zfsParent string, progress func(string)) error {
 	}
 	progress(s.Name + " is up — cloud-init finishes the first boot (1–3 min)")
 	return nil
+}
+
+// waitZvolNode blocks until dev is a real block device, or fails.
+//
+// Args: dev is the /dev/zvol/<dataset> path; progress may be nil-safe here
+// because callers always pass the pipeline's logger.
+//
+// Returns nil once dev resolves to a block device. Two distinct failures,
+// both fatal and both worth telling apart in the message:
+//   - the node never appeared (udev not running, or ZFS did not publish it)
+//   - the path exists but is NOT a device — the signature of an earlier
+//     run having written a plain file there, which must never be used as
+//     a disk and must not be silently overwritten either.
+//
+// HISTORY: shipped without this, a New VM on a ZFS host raced udev and put
+// the guest's whole disk in devtmpfs. Found 2026-08-09 by inspecting a
+// built appliance: lsblk showed 3G (the cloud image) on a 10G request, and
+// /dev/zvol/<ds> was a regular file while the zvol itself had USED=56K.
+func waitZvolNode(dev string, progress func(string)) error {
+	return waitZvolNodeFor(dev, 30*time.Second, progress)
+}
+
+// waitZvolNodeFor is waitZvolNode with the deadline exposed, so tests can
+// exercise the timeout path without actually waiting for it.
+func waitZvolNodeFor(dev string, timeout time.Duration,
+	progress func(string)) error {
+	deadline := time.Now().Add(timeout)
+	warned := false
+	for {
+		fi, err := os.Stat(dev) // Stat follows the symlink udev creates
+		switch {
+		case err == nil && fi.Mode()&os.ModeDevice != 0:
+			return nil
+		case err == nil:
+			return fmt.Errorf("%s exists but is not a block device (%s) — "+
+				"refusing to use it as a disk; remove it and retry",
+				dev, fi.Mode().String())
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s did not appear within %s — is udev running?",
+				dev, timeout)
+		}
+		if !warned {
+			progress("waiting for " + dev + " to appear")
+			warned = true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // ZFSVMParent derives where VM zvols live on this host from the estate

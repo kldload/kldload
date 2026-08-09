@@ -1,8 +1,11 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // userData must stay valid #cloud-config; the post-install block is the
@@ -31,5 +34,66 @@ func TestUserDataPostInstall(t *testing.T) {
 	// no post-install → no runcmd/write_files at all
 	if strings.Contains(userData(NewVMSpec{Name: "n", User: "a"}), "runcmd") {
 		t.Error("empty post-install must not emit runcmd")
+	}
+}
+
+// waitZvolNode is the guard on the devtmpfs bug: qemu-img creates a plain
+// file at a missing path, so a New VM that raced udev put the guest's
+// whole disk in RAM. A non-device at the zvol path must be a hard error,
+// never something to overwrite.
+func TestWaitZvolNodeRejectsNonDevice(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "fake-zvol")
+	if err := os.WriteFile(f, []byte("not a block device"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := waitZvolNode(f, func(string) {})
+	if err == nil {
+		t.Fatal("accepted a regular file as a zvol node")
+	}
+	if !strings.Contains(err.Error(), "not a block device") {
+		t.Errorf("error should name the cause, got: %v", err)
+	}
+}
+
+// A path that never appears must time out with an actionable message
+// rather than hanging or, worse, proceeding.
+func TestWaitZvolNodeTimesOut(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "never-appears")
+	start := time.Now()
+	err := waitZvolNodeFor(missing, 300*time.Millisecond, func(string) {})
+	if err == nil {
+		t.Fatal("accepted a path that does not exist")
+	}
+	if !strings.Contains(err.Error(), "did not appear") {
+		t.Errorf("error should say the node never appeared, got: %v", err)
+	}
+	if time.Since(start) < 300*time.Millisecond {
+		t.Error("returned without actually waiting")
+	}
+}
+
+// Whatever /dev/zvol nodes this host already has must be accepted, so the
+// guard cannot reject a legitimately-published zvol.
+func TestWaitZvolNodeAcceptsRealZvol(t *testing.T) {
+	// Datasets nest arbitrarily deep (rpool/vms/<name>), so try each depth
+	// rather than assuming a layout.
+	var matches []string
+	for _, pat := range []string{"/dev/zvol/*/*", "/dev/zvol/*/*/*",
+		"/dev/zvol/*/*/*/*"} {
+		m, _ := filepath.Glob(pat)
+		matches = append(matches, m...)
+	}
+	var dev string
+	for _, m := range matches {
+		if fi, err := os.Stat(m); err == nil && fi.Mode()&os.ModeDevice != 0 {
+			dev = m
+			break
+		}
+	}
+	if dev == "" {
+		t.Skip("no zvol block devices on this host")
+	}
+	if err := waitZvolNode(dev, func(string) {}); err != nil {
+		t.Errorf("rejected real zvol %s: %v", dev, err)
 	}
 }
