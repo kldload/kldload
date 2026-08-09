@@ -118,14 +118,22 @@ func (a accentPair) at() color.Color {
 }
 
 var (
-	// brand accent: light purple (operator call — the bright red glared);
-	// the zxplore acPurple pair, lavender on dark / deep violet on light
-	acBrand = accentPair{color.NRGBA{0xc7, 0x7d, 0xff, 0xff}, color.NRGBA{0x7a, 0x2f, 0xe0, 0xff}}
+	// The brand accent IS the details blue (operator call, 2026-08-09 —
+	// the purple sat apart from everything else it was next to). One pair,
+	// one name each, deliberately aliased rather than duplicated: two
+	// literals that must stay equal are two literals that will not.
+	//
+	// It reaches further than a heading colour. Fyne resolves
+	// ColorNamePrimary from it, so every HighImportance control — the
+	// Storage / Configure / Build / Estate menus — follows without being
+	// told, and so do the estate group names, the page headings and the
+	// selected tab.
+	acBlue  = accentPair{color.NRGBA{0x4d, 0xa6, 0xff, 0xff}, color.NRGBA{0x14, 0x66, 0xd8, 0xff}}
+	acBrand = acBlue
 	// red survives ONLY as danger — toned to the icon's compute red
 	acRed   = accentPair{color.NRGBA{0xe2, 0x69, 0x5d, 0xff}, color.NRGBA{0xb8, 0x38, 0x28, 0xff}}
 	acGold  = accentPair{color.NRGBA{0xff, 0xd0, 0x43, 0xff}, color.NRGBA{0xb0, 0x7d, 0x00, 0xff}} // the icon's LED amber
 	acGreen = accentPair{color.NRGBA{0x3d, 0xff, 0x88, 0xff}, color.NRGBA{0x0e, 0x9d, 0x4a, 0xff}} // running
-	acBlue  = accentPair{color.NRGBA{0x4d, 0xa6, 0xff, 0xff}, color.NRGBA{0x14, 0x66, 0xd8, 0xff}} // details
 	acOff   = accentPair{color.NRGBA{0x9a, 0x7b, 0x55, 0xff}, color.NRGBA{0x7a, 0x5a, 0x38, 0xff}} // shut off — dull brown, dormant
 )
 
