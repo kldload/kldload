@@ -1033,9 +1033,19 @@ DASHSTART
                 # it's the OpenZFS VM test lab, a different job, not file/snapshot
                 # management. (2026-07-26: operator "the other zfs tools should all
                 # be in the 1 zfs tool".)
-                for _ldskt in kldload-vms kldload-k8s kldload-helm kldload-klab \
+                # 2026-08-09, same consolidation as the ZFS tiles above: the
+                # VM, klab and ZFS-lab launchers are NO LONGER stripped. Their
+                # functions live inside vmxplore's kldload tab, which carries
+                # 27 tools with descriptions and colour — so a loose grid icon
+                # for each was the same toolset twice, once organised and once
+                # as a wall. kexport goes with them (it is a vmxplore tile).
+                # Kubernetes, k9s, Metrics, Ansible, Helm, the web GUI and
+                # sysdiag stay: the console has no equivalent for them, so the
+                # icon IS the interface. Operator: "you can remove everything
+                # in the kldload folder — that's all the old tools."
+                for _ldskt in kldload-k8s kldload-helm \
                     kldload-ansible kldload-metrics kldload-zexplore \
-                    kldload-zfslab kldload-sysdiag \
+                    kldload-sysdiag \
                     bob-chat kldload-k9s bob-gaming kldload-webui; do
                     if [[ -f "${_appdir}/${_ldskt}.desktop" ]]; then
                         sed -i '/^NoDisplay=true$/d' "${_appdir}/${_ldskt}.desktop"
@@ -1309,7 +1319,7 @@ OSREL
     # keeps the same 3-pin in sync; do not let them drift.
     cat >"${target}/etc/dconf/db/local.d/50-kldload-installed-favorites" <<'DCONF'
 [org/gnome/shell]
-favorite-apps=['org.gnome.Nautilus.desktop', 'google-chrome.desktop', 'kldload-sysdiag.desktop']
+favorite-apps=['org.gnome.Nautilus.desktop', 'google-chrome.desktop', 'vmxplore.desktop', 'zxplore.desktop', 'wgxplore.desktop', 'kldload-sysdiag.desktop']
 DCONF
     # .135 + onyx both shipped without this file in the installed system —
     # dock came up empty for fresh users. The heredoc won't fail on disk-full

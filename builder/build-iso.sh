@@ -751,13 +751,17 @@ if [[ "$EDITION" != "core" ]]; then
             # failed SILENTLY and .129 shipped the binary with no icon/.desktop
             # while the log still said "installed". Existence-gate + `|| die`
             # turns that into a build-time failure the operator sees.
-            # Ship BOTH upstream SVGs. The launcher's face is Icon=zxplore-tui
-            # (the dark tile — the operator's intended look); zxplore.svg is
-            # the teal logo variant. HISTORY: 2026-08-02 the build shipped
-            # only zxplore.svg while the launcher referenced zxplore-tui →
-            # dangling Icon= → generic fallback icon on every install. A
-            # kldload-branded replacement icon was tried and reverted the
-            # same day: upstream's own art is the right face.
+            # Ship BOTH upstream SVGs. As of 2026-08-10 the launcher's face is
+            # Icon=zxplore — the borderless line-art mark that matches vmxplore
+            # and wgxplore in the dock; zxplore-tui.svg is the terminal
+            # edition's dark tile and still ships because that launcher points
+            # at it. Install both regardless of which one the .desktop names:
+            # HISTORY 2026-08-02, the build shipped only zxplore.svg while the
+            # launcher referenced zxplore-tui → dangling Icon= → generic
+            # fallback icon on every install. A kldload-branded replacement
+            # icon was tried and reverted the same day: upstream's own art is
+            # the right face, and upstream is where the family look is kept in
+            # step across all three tools.
             _zx_desktop="/tmp/zxplore-src/contrib/zxplore.desktop"
             for _zx_svg in zxplore.svg zxplore-tui.svg; do
                 [[ -r "/tmp/zxplore-src/assets/${_zx_svg}" ]] ||
