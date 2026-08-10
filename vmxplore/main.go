@@ -64,6 +64,9 @@ const usage = `usage: vmx [--tui] [--once] [--connect DEST] [--rules FILE] [--ve
                Uses ssh — same key/known_hosts as your shell.
   --rules F    grouping/classification rules file
                (default: /etc/vmxplore/rules, else built-in profile)
+  --setup      install the KVM stack on THIS machine and exit — packages,
+               libvirtd, the default network, and your libvirt group
+               membership. Prints every command before running any of them.
   --version    print version and exit
 
 Appliances — push-button self-hosted apps (Build ▸ Appliance… in the GUI):
@@ -135,6 +138,8 @@ func main() {
 				os.Exit(2)
 			}
 			target = ParseTarget(args[i])
+		case "--setup":
+			os.Exit(RunSetup())
 		case "--appliances":
 			PrintAppliances(os.Stdout)
 			return
