@@ -1012,6 +1012,23 @@ if command -v apt-get >/dev/null 2>&1; then
         sed -i '/^GRUB_DEFAULT=/d' /etc/default/grub
         echo "GRUB_DEFAULT=\"$wf_sub>$wf_ent\"" >>/etc/default/grub
 
+        # And stop grub sitting at the menu for half a minute.
+        #
+        # grub sets recordfail at boot and grub-common clears it once the
+        # boot succeeds, so any boot that does not get that far — a
+        # plug-pull, a reset, the reboot this very script performs at the
+        # wrong moment — leaves the flag set and the NEXT boot waits 30
+        # seconds at a menu nobody is watching. Debian's generated config
+        # spells it out: "if recordfail = 1, set timeout=30", against a
+        # normal-path timeout of 0.
+        #
+        # For a machine whose whole promise is power-on-and-write, 30
+        # seconds of nothing is the most visible thing it does. The
+        # recovery the timeout exists to offer is a menu on a VM with no
+        # keyboard attached during a build.
+        sed -i '/^GRUB_RECORDFAIL_TIMEOUT=/d' /etc/default/grub
+        echo 'GRUB_RECORDFAIL_TIMEOUT=0' >>/etc/default/grub
+
         # And put the boot on the screen, at a size worth looking at.
         #
         # console=tty0: the cloud image's cmdline sends every kernel
