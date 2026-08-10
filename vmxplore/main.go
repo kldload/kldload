@@ -35,7 +35,7 @@ import (
 // the TUI title / GUI header). Phase/versioning per the design doc: 0.1 =
 // read-only estate view; 0.2 = the safe verbs; .1 = folds/themes/key model;
 // .2 = the Fyne GUI surface (GUI-first, operator call 2026-08-07).
-const version = "0.2.2"
+const version = "0.3.0"
 
 // buildNum is stamped by the Makefile (-X main.buildNum=<n>) from the
 // self-incrementing, gitignored .buildnum counter — the family scheme
