@@ -1193,13 +1193,25 @@ chmod 0600 "$wf_home/autologin.html"
 #
 # Firefox's enterprise policy fixes it at the browser rather than by
 # asking people not to click: everything is blocked except the local app,
-# and a Homepage is set so alt+Home always comes back. The policy file is
-# read at startup from /etc/firefox-esr/policies on Debian's ESR build.
+# and a Homepage is set so alt+Home always comes back.
+#
+# WARN: the policy is written to BOTH known locations because the one
+# that actually gets read is not obvious. Debian's firefox-esr reads
+# <install-dir>/distribution/policies.json — writing only to
+# /etc/firefox-esr/policies/ produced a browser with NO policy at all,
+# which looked like the lock silently not working: alt+Home landed on
+# Firefox's default new-tab page, Pocket stories and sponsored tiles
+# included, on a machine whose entire premise is one application and no
+# fluff. HISTORY: 2026-08-09, found by screenshotting the guest.
+#
+# NewTabPage false and the locked Homepage matter as much as the URL
+# filter: the ways to get lost are a blocked link, an empty new tab, and
+# a search box, and the filter only covers the first.
 #
 # Note the file:// exception — Firefox's WebsiteFilter does not police
 # file:// URLs, and the sign-in page lives there, so it is listed for
 # clarity rather than because the filter would otherwise catch it.
-mkdir -p /etc/firefox-esr/policies
+mkdir -p /etc/firefox-esr/policies /usr/lib/firefox-esr/distribution
 cat >/etc/firefox-esr/policies/policies.json <<'POLICY'
 {
   "policies": {
@@ -1212,16 +1224,21 @@ cat >/etc/firefox-esr/policies/policies.json <<'POLICY'
       "StartPage": "homepage",
       "Locked": true
     },
+    "NewTabPage": false,
     "OverrideFirstRunPage": "",
     "OverridePostUpdatePage": "",
     "DisableProfileImport": true,
     "DisableFirefoxAccounts": true,
     "DisableTelemetry": true,
     "DisablePocket": true,
-    "NoDefaultBookmarks": true
+    "DisableFirefoxStudies": true,
+    "NoDefaultBookmarks": true,
+    "SearchBar": "unified"
   }
 }
 POLICY
+cp /etc/firefox-esr/policies/policies.json \
+    /usr/lib/firefox-esr/distribution/policies.json
 
 # A way out that is not a desktop. There is deliberately no launcher, no
 # taskbar and no window to close — but a machine with no escape hatch is
