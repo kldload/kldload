@@ -1138,10 +1138,15 @@ DASHSTART
         _skip_tools="kldload-install-target kldload-overview"
         shopt -s nullglob
         # wgx is explicit like zxplore: the WG networks console breaks the k*
-        # naming convention, so the globs would silently drop it.
+        # naming convention, so the globs would silently drop it. vmxplore and
+        # vmx are explicit for the same reason and cost a broken install to
+        # learn: 1.4.0-rc2 shipped both launchers, the icon and the commit
+        # stamp to the target and NOT the binaries, so a fresh .149 install had
+        # two app tiles that opened onto "vmxplore: command not found". The
+        # warning three lines above this one was already there. Read it.
         for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/_s* \
             /usr/local/bin/zxplore* /usr/local/bin/zexplore* /usr/local/bin/bob* \
-            /usr/local/bin/wgx; do
+            /usr/local/bin/wgx /usr/local/bin/vmxplore /usr/local/bin/vmx; do
             [[ -x "$_src" ]] || continue
             _name="$(basename "$_src")"
             # ZFS Console is an installer checkbox (default on) — honor an
