@@ -481,7 +481,7 @@ func (v *vncViewer) pasteText(text string) {
 		return
 	}
 	v.conn.cutText(text)
-	// WARN: release every modifier BEFORE typing a single character.
+	// WARN: release every modifier before sending anything.
 	//
 	// The obvious paste is ctrl+V, and ctrl is genuinely held down at that
 	// moment — KeyDown already forwarded the press to the guest. Typing the
@@ -494,7 +494,32 @@ func (v *vncViewer) pasteText(text string) {
 	for _, sym := range modSyms {
 		v.conn.key(sym, false)
 	}
-	go v.typeString(text)
+	// Let the GUEST do the paste.
+	//
+	// cutText only fills the guest's clipboard — by itself it inserts
+	// nothing, because something inside the guest still has to ask for it.
+	// The first cut of this typed the text as well, which meant every
+	// paste was a typewriter even on a guest whose clipboard had just been
+	// set correctly: slow, and wrong wherever a shifted character survived
+	// the keysym-to-scancode trip. HISTORY: 2026-08-09 — "it starts
+	// dictating but spews additional junk chars".
+	//
+	// One ctrl+V hands the job to the guest's own paste, which is atomic
+	// and knows its own keyboard layout. The small pause is for the
+	// clipboard to arrive over virtio-serial before the key that reads it.
+	//
+	// A guest with no clipboard agent will do nothing with this, and that
+	// is the honest trade: a paste that no-ops is recoverable, a paste
+	// that inserts mangled text is not. typeString below is kept for that
+	// case — synthetic keys reach a boot console or an agent-less image —
+	// but it is deliberately no longer on the default path.
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		v.conn.key(0xffe3, true) // Control_L
+		v.conn.key(0x0076, true) // v
+		v.conn.key(0x0076, false)
+		v.conn.key(0xffe3, false)
+	}()
 }
 
 // typeString feeds text as paced key events.
