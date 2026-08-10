@@ -1294,8 +1294,17 @@ unclutter -idle 3 &
 spice-vdagent &
 
 matchbox-window-manager -use_titlebar no &
+# Dark by default. WriteFreely's editor picks its theme from
+# window.matchMedia("(prefers-color-scheme: dark)"), which on Linux
+# Firefox follows from the toolkit theme — and a minimal X session with no
+# desktop has no theme daemon to set one, so it defaults to light. Naming
+# the GTK theme on the command line is the whole fix, and it needs no
+# theme package: Adwaita ships inside GTK itself.
+#
+# A writing machine that opens a white rectangle at night is a worse
+# writing machine, and there is nowhere in this kiosk to go and change it.
 while :; do
-    firefox --kiosk "file://$HOME/autologin.html"
+    GTK_THEME=Adwaita:dark firefox --kiosk "file://$HOME/autologin.html"
     sleep 2
 done
 XINIT
