@@ -2461,9 +2461,27 @@ func runGUI(rs *Ruleset) {
 			container.NewVBox(container.NewHBox(layout.NewSpacer(),
 				container.NewVBox(pasteBtn, restoreBtn)))))
 	})
+	// ── the manual: the family front page, shipped in the binary ─────────
+	//
+	// Same shape as zxplore's and wgxplore's so the three read as one
+	// product: a full-window page on the base colour, a centred mark with
+	// the wordmark stacked beside it, the manual body centred so the
+	// fixed-width page floats mid-window rather than hugging the left
+	// edge, and a footer that credits the substrate and closes the page.
+	// Only the icon and the accent belong to this console.
+	//
+	// A static binary copied onto a stranger's box must not be
+	// undocumented, which is why the page travels inside it (manual.go)
+	// rather than depending on a man(1) installation.
+	var showManual func()
+	// Labelled "Manual", exactly as zxplore and wgxplore label theirs — a
+	// bare "?" beside two unlabelled icon buttons reads as a third mystery
+	// glyph rather than as the way to the documentation.
+	manualBtn := widget.NewButtonWithIcon("Manual", theme.HelpIcon(),
+		func() { showManual() })
 	consoleHead := container.NewBorder(nil, nil,
 		heading("CONSOLE", acGold),
-		container.NewHBox(pasteBtn, fullBtn))
+		container.NewHBox(manualBtn, pasteBtn, fullBtn))
 	consolePane := gap(container.NewBorder(consoleHead, nil, nil, nil,
 		consoleCard))
 	rightBottom := gap(card(container.NewBorder(
@@ -2476,6 +2494,107 @@ func runGUI(rs *Ruleset) {
 	body := container.NewHSplit(left, right)
 	body.SetOffset(0.38)
 	mainContent = container.NewBorder(nil, status, nil, nil, gap(body))
+
+	pageColor := func() color.Color {
+		if variantDark() {
+			return color.NRGBA{R: 0x08, G: 0x09, B: 0x0c, A: 0xff}
+		}
+		return color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+	}
+	pageBG := canvas.NewRectangle(pageColor())
+	repaint = append(repaint, func() { pageBG.FillColor = pageColor(); pageBG.Refresh() })
+	pageLogo := canvas.NewImageFromResource(
+		fyne.NewStaticResource("vmxplore.svg", iconSVG))
+	pageLogo.FillMode = canvas.ImageFillContain
+	pageLogo.SetMinSize(fyne.NewSize(96, 96))
+	pageTitle := heading("v m x p l o r e", acBrand)
+	pageTitle.TextSize = 26
+	pageSub := heading("the KVM console — vmxplore(1)", acGreen)
+	pageSub.TextSize = 13
+	pageVer := heading("v"+versionFull(), acGold)
+	pageVer.TextSize = 12
+	pageHead := container.NewCenter(container.NewHBox(
+		pageLogo, container.NewVBox(pageTitle, pageSub, pageVer)))
+
+	// The body renders async: mandoc can take a beat, and a console that
+	// stalls on its own help screen is a bad console.
+	manBody := widget.NewRichText()
+	manBody.Wrapping = fyne.TextWrapOff
+	manScroll := container.NewScroll(container.NewCenter(manBody))
+	go func() {
+		text := renderManual()
+		fyne.Do(func() {
+			manBody.Segments = manualSegments(text)
+			manBody.Refresh()
+		})
+	}()
+
+	siteU, _ := url.Parse("https://kldload.com")
+	powered := widget.NewHyperlink("powered by kldload.com", siteU)
+	manClose := widget.NewButtonWithIcon("Close  ⏎", theme.ConfirmIcon(), nil)
+	manClose.Importance = widget.HighImportance
+	manualPage := container.NewStack(pageBG, container.NewBorder(
+		container.NewPadded(pageHead), container.NewPadded(
+			container.NewBorder(nil, nil, powered, manClose, nil)),
+		nil, nil, manScroll))
+	manualOpen := false
+	closeManual := func() {
+		manualOpen = false
+		w.SetContent(mainContent)
+	}
+	manClose.OnTapped = closeManual
+	showManual = func() {
+		manualOpen = true
+		w.SetContent(manualPage)
+	}
+
+	// Keys for the manual page.
+	//
+	// A container.Scroll answers the wheel and nothing else — no PgUp, no
+	// Home, no arrows — so a 559-line manual could only be read by
+	// dragging. Fyne gives no scrolled-text widget that handles them, so
+	// the page drives the offset itself.
+	//
+	// 0.9 of a screen per page keeps two lines of overlap, which is what
+	// stops a reader losing their place across a jump.
+	scrollBy := func(frac float32) {
+		max := manScroll.Content.MinSize().Height - manScroll.Size().Height
+		if max < 0 {
+			max = 0
+		}
+		o := manScroll.Offset
+		o.Y += manScroll.Size().Height * frac
+		if o.Y < 0 {
+			o.Y = 0
+		}
+		if o.Y > max {
+			o.Y = max
+		}
+		manScroll.Offset = o
+		manScroll.Refresh()
+	}
+	w.Canvas().SetOnTypedKey(func(e *fyne.KeyEvent) {
+		if !manualOpen {
+			return
+		}
+		switch e.Name {
+		case fyne.KeyPageDown, fyne.KeySpace:
+			scrollBy(0.9)
+		case fyne.KeyPageUp:
+			scrollBy(-0.9)
+		case fyne.KeyDown:
+			scrollBy(0.1)
+		case fyne.KeyUp:
+			scrollBy(-0.1)
+		case fyne.KeyHome:
+			manScroll.ScrollToTop()
+		case fyne.KeyEnd:
+			manScroll.ScrollToBottom()
+		case fyne.KeyEscape, fyne.KeyReturn, fyne.KeyEnter:
+			closeManual()
+		}
+	})
+
 	w.SetContent(mainContent)
 	w.SetOnClosed(func() { detachConsole(); detachVNC(); stopTool(); lv.Close() })
 

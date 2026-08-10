@@ -1,0 +1,764 @@
+.\" vmxplore.1 — manual page for vmxplore, the KVM console.
+.\" Format: mdoc(7). Render check: mandoc -Tlint docs/vmxplore.1
+.Dd August 9, 2026
+.Dt VMXPLORE 1
+.Os
+.Sh NAME
+.Nm vmxplore ,
+.Nm vmx
+.Nd KVM and libvirt console for Linux
+.Sh SYNOPSIS
+.Nm
+.Op Fl -tui
+.Op Fl -once
+.Op Fl -connect Ar dest
+.Op Fl -rules Ar file
+.Op Fl -version
+.Nm
+.Fl -appliances
+.Nm
+.Fl -appliance Ar name Fl -vm Ar vmname
+.Op Ar KEY Ns = Ns Ar value ...
+.Nm
+.Fl -appliance-script Ar name
+.Op Ar KEY Ns = Ns Ar value ...
+.Sh DESCRIPTION
+.Nm
+is a console for the KVM hypervisor your kernel already has.
+It reads the estate through
+.Xr libvirt 3 ,
+joins it to the ZFS volumes underneath when there are any, and drives
+everything with plain
+.Xr virsh 1 ,
+.Xr zfs 8
+and
+.Xr virt-install 1
+commands.
+Nothing is hidden and nothing is invented: every mutation prints the exact
+command it runs, and every executed command is appended to an audit log
+.Pq see Sx FILES .
+.Pp
+Two surfaces share one engine:
+.Bl -tag -width "vmxplore --tui"
+.It Nm
+the native GUI.
+In the static terminal-only build this starts the TUI instead.
+.It Nm Fl -tui
+the terminal UI, for headless hosts and SSH sessions.
+.El
+.Pp
+The tool is tiered by what the host can do, by probe and never by licence
+check.
+Stock Linux with KVM gives the full console; adding OpenZFS unlocks clone
+lineage, golden images and rollback; a
+.Lk https://kldload.com kldload
+host additionally exposes its own toolset.
+.Pp
+The options are as follows:
+.Bl -tag -width "--appliance-script name"
+.It Fl -tui
+Start the terminal UI.
+.It Fl -once
+Print the estate table once and exit.
+Intended for scripts, cron and smoke tests.
+.It Fl -connect Ar dest
+Drive a remote hypervisor.
+.Ar dest
+may be a host name, a
+.Ar user Ns @ Ns Ar host
+pair, or a full libvirt URI such as
+.Pa qemu+ssh://host/system .
+Estate, verbs, the ZFS join and both consoles all follow, authenticated
+with the same SSH key as your shell.
+No agent is installed on the far side.
+.It Fl -rules Ar file
+Grouping and classification rules.
+Defaults to
+.Pa /etc/vmxplore/rules
+when present, otherwise a built-in profile.
+.It Fl -appliances
+List the Apps catalog with each entry's fields, then exit.
+.It Fl -appliance Ar name
+Build catalog entry
+.Ar name
+as a VM and exit.
+Options describe the guest;
+.Ar KEY Ns = Ns Ar value
+pairs configure the application.
+By default it waits for the first boot to finish and prints the
+appliance's real URL on standard output.
+.It Fl -appliance-script Ar name
+Print the generated installer for
+.Ar name
+and exit, without building anything.
+The result is ordinary
+.Xr bash 1
+with no dependency on
+.Nm ,
+libvirt or ZFS.
+.It Fl -version
+Print the version and exit.
+.El
+.Pp
+These accompany
+.Fl -appliance :
+.Bl -tag -width "--password pass"
+.It Fl -vm Ar name
+The VM's name.
+Required.
+.It Fl -user Ar user
+Guest login.
+Defaults to
+.Ar admin .
+.It Fl -password Ar pass
+Guest password.
+.It Fl -ssh-key Ar file
+Public key file to install for the guest login.
+.It Fl -no-wait
+Return as soon as the VM is defined, without waiting for its first boot.
+.El
+.Sh THE ESTATE
+The left pane is the estate: every domain libvirt knows about, joined to
+the storage underneath it.
+.Pp
+Domains are grouped into collapsible branches by the ruleset
+.Pq see Sx RULES .
+A branch header carries its member count and how many are running; groups
+with nothing running are folded on first paint and never fought with
+afterwards.
+Each leaf carries two lines: the domain name and its state, then vCPU
+count, memory, guest address, backing volume and snapshot count.
+.Pp
+State is colour as well as text — green for running, dull brown for shut
+off, amber for warned, white for paused.
+.Bl -tag -width "ctrl-click"
+.It Ic click
+Select a domain.
+The console pane, the dossier and the verb row all follow it.
+.It Ic click No on the state dot
+Check the row for a batch operation.
+A bar appears above the list once anything is checked.
+.It Ic shift-click , Ic ctrl-click
+Extend the checked range from the last one toggled.
+.It Ic right-click
+The full verb menu for that domain.
+.El
+.Pp
+The batch bar runs Start, Reboot, Shut down, Force off or Delete across
+every checked domain.
+Failures are collected per domain rather than aborting the sweep, so one
+bad machine cannot stop a run of forty.
+.Pp
+The search box filters the tree as you type; branches with no surviving
+member disappear with their members.
+.Sh THE CONSOLE
+The right pane carries five tabs, in the order of the work — look at the
+machine you have, then make one, with the substrate's toolset last.
+.Ss Serial
+A real terminal attached to
+.Xr virsh 1
+.Cm console
+for the selected domain, inside the window.
+Boot messages, a login prompt, a headless tty, copy and paste.
+It follows the selection automatically: attaching when a running domain is
+picked, swapping when the selection changes, detaching when it stops.
+.Ss Screen
+The guest's framebuffer, rendered by a from-scratch RFB (VNC) client
+directly into the window.
+There is no
+.Xr websockify 1 ,
+no noVNC and no external viewer anywhere in the path — the client speaks
+to qemu's VNC server over loopback, or over the SSH transport when the
+target is remote.
+.Pp
+Mouse and keyboard are forwarded, including modifiers; pointer position is
+mapped through the letterbox so clicks land where they appear to.
+The guest's own clipboard changes arrive on the host clipboard.
+.Ss Apps
+The catalog: a self-hosted application delivered as a configured machine.
+See
+.Sx APPS .
+.Ss VM
+The builders: New VM, Application, EZ Fleet, Clone and Make Golden, as a
+grid of tiles.
+See
+.Sx BUILDING MACHINES .
+.Ss kldload
+On a kldload host, a launcher for the substrate's own tools, each running
+in an embedded terminal in the pane.
+Tools are coloured by what they do: green builds, blue is storage, gold
+reads, red destroys, purple is a guided demo.
+Selecting a tool opens a second page of its verbs, curated from that
+tool's real usage banner rather than guessed.
+.Pp
+On any other host the tab explains what a kldload substrate adds.
+.Ss Console controls
+.Bl -tag -width "the paste button"
+.It Ic \(sh
+Hand the selected pane the whole window, with no tab bar, no card border
+and no window padding.
+The restore control floats in the top-right corner and is the only way
+back — a key chord cannot be, because the guest owns the keyboard and
+anything that wants
+.Ic Escape
+would swallow it.
+.It Ic paste
+Send the host clipboard to the guest.
+See
+.Sx CLIPBOARD .
+.El
+.Sh VERBS
+Every mutation is a plan: a title, an exact list of commands, and a
+warning when there is a consequence worth stating.
+Plans execute in order and stop at the first failure.
+The command appears in the status line as it runs and is appended to the
+audit log
+.Pq see Sx FILES .
+.Pp
+There is no confirmation step on any verb, including
+.Cm delete .
+A VM here is made from a golden in seconds and remade as fast; a gate that
+taxes every real deletion to insure against a rare mistaken one is the
+wrong trade.
+The audit log is the record that replaced it.
+.Ss Lifecycle
+.Bl -tag -width "Force off"
+.It Cm Start
+.Xr virsh 1
+.Cm start .
+Refuses a domain that is already running.
+.It Cm Shut down
+.Xr virsh 1
+.Cm shutdown
+— a graceful ACPI request the guest may take its time over.
+.It Cm Force off
+.Xr virsh 1
+.Cm destroy
+— the plug pull, with no chance for the guest to flush.
+Refused for transient domains, where
+.Cm destroy
+does not stop the machine but erases its definition.
+.It Cm Reboot , Cm Suspend , Cm Resume
+The light lifecycle verbs, each refusing a domain in the wrong state.
+.It Cm Delete
+Forces the domain off if it is running, undefines it including its NVRAM,
+and destroys the backing volume with every snapshot and clone under it.
+A transient domain is not undefined, because
+.Cm destroy
+already erased it and the failed
+.Cm undefine
+would abort the plan before the volume was removed.
+.El
+.Ss Storage
+.Bl -tag -width "Rollback..."
+.It Cm Snapshot ...
+A ZFS snapshot of the backing volume, named
+.Pa manual- Ns Ar suffix ,
+defaulting to a timestamp.
+This is a storage snapshot, not
+.Xr virsh 1
+.Cm snapshot-create :
+the volume is the truth.
+A running guest is warned that the result is crash-consistent.
+.It Cm Rollback ...
+.Xr zfs 8
+.Cm rollback Fl r
+to a chosen snapshot, newest first.
+Refuses while the domain runs, and states how many newer snapshots
+.Fl r
+will destroy.
+.El
+.Ss Configure
+.Bl -tag -width "Autostart on/off"
+.It Cm vCPU / memory ...
+Sets both through
+.Fl -config ,
+so the change lands in the persistent definition and takes effect on the
+next start.
+Safe for a running domain, and the only variant that survives a reboot.
+.It Cm Autostart on/off
+Whether the domain starts with the host.
+.El
+.Ss Estate
+.Bl -tag -width "Migrate to host..."
+.It Cm Migrate to host ...
+Live migration with storage.
+Designed, not yet built.
+.El
+.Sh BUILDING MACHINES
+.Ss New VM
+Two sources, chosen in the dialog:
+.Bl -tag -width "installer ISO"
+.It Cm cloud image
+A distribution's own cloud image, configured by cloud-init and booting
+ready to use.
+Presets cover
+.Ar fedora ,
+.Ar debian ,
+.Ar ubuntu ,
+.Ar centos ,
+.Ar rocky
+and
+.Ar arch ,
+or a path to any qcow2 you already have.
+Images are cached — the family's caches are searched first, so a host
+never downloads the same image twice.
+.It Cm installer ISO
+Any installer image, booted the ordinary way with the distribution's own
+installer in the Screen tab.
+An Arch live ISO or a RHEL DVD work exactly as they would on metal.
+Nothing is special-cased.
+.El
+.Pp
+The dialog also collects vCPU count, memory, disk size, and — in cloud
+mode — the guest login.
+.Pp
+Storage is a sparse ZFS volume when the host has a pool, with the parent
+dataset derived from where the existing estate already lives.
+Without ZFS the pipeline falls back to a qcow2 file, and everything else
+behaves identically.
+.Pp
+The machine is defined persistently before the dialog closes: a domain
+that exists only until the host reboots is a trap, not a VM.
+.Ss The guest login
+A named account with passwordless
+.Xr sudo 8 ,
+a shell, and whichever of a password or an SSH public key was supplied.
+The key field is prefilled from the operator's own
+.Pa ~/.ssh
+when a public key can be found.
+.Pp
+If neither a password nor a key is given, a default password is set
+anyway.
+An account with neither is unusable at the console
+.Em and
+over SSH, and a machine nobody can log into is a machine that can only be
+destroyed.
+.Ss Post-install scripts
+Anything pasted into the post-install box is written into the guest and
+run once, as root, on its first boot.
+Output goes to the guest's cloud-init log and to both consoles, so the
+build narrates itself rather than sitting on a login prompt.
+.Pp
+This is how a stock image becomes somebody's own appliance: cloud image,
+plus a script, then Make Golden, then clone.
+.Ss Make Golden
+Seals a machine into a template:
+.Bl -enum -compact
+.It
+shut it down and wait for it,
+.It
+generalise it — the substrate's own sealer when present, otherwise
+.Xr virt-sysprep 1 ,
+otherwise a loud warning that neither was found,
+.It
+snapshot the volume as
+.Pa @golden .
+.El
+.Pp
+Re-sealing is refused while clones still depend on the existing golden,
+and the dependants are named.
+.Ss Clone
+A zero-copy ZFS clone: snapshot the source volume, clone the snapshot, and
+register the new domain with
+.Xr virt-clone 1
+.Fl -preserve-data
+so it gets a fresh UUID and MAC addresses over the same blocks.
+When the source has a
+.Pa @golden ,
+that snapshot is used directly and no new one is taken.
+.Pp
+Blocks are shared until a clone diverges, so a clone costs almost nothing
+until it is used.
+.Ss EZ Fleet
+One dialog for the whole pattern: build a machine, let it settle, seal it
+into a golden, then stamp out a chosen number of clones.
+Cloud mode only — a golden must be a finished system — and it needs a ZFS
+parent.
+.Ss GPUs
+The host's display controllers are probed from sysfs, and over the SSH
+transport when the target is remote: the card that matters is the one
+attached to the machines, not the one in the laptop driving them.
+.Pp
+When an NVIDIA card is present, New VM offers to install its drivers in
+the guest — the generic kernel with matching headers for DKMS, the
+non-free component enabled, and one reboot into it.
+The option does not appear on a host without one.
+.Pp
+Installing the driver is the guest half.
+Handing the card to the guest is host-side
+.Xr vfio 4
+passthrough, which
+.Nm
+does not do; passthrough is exclusive, so on a single-GPU desktop the
+host's display goes with it.
+.Sh APPS
+An entry in the catalog is data, not code: a cloud-image preset, a sizing
+default, a handful of operator-facing fields, and a fixed
+.Xr bash 1
+post-installer.
+Adding an application touches neither the pipeline, the GUI, nor the
+tests.
+.Pp
+Pick an entry, answer its questions, and the ordinary New VM pipeline
+builds it — then waits until the application answers on its port and
+prints the URL it actually reached.
+.Pp
+Fields marked as generated are filled from
+crypto/rand
+when left blank, so the happy path needs no typing and no reused password.
+Secret fields are masked in the interface; they are necessarily in clear
+in the rendered script, which is written into the guest.
+.Pp
+Operator input is
+.Em never
+interpolated into the body of a script.
+The body is fixed bash that reads named variables, and only shell-quoted
+assignments are prepended — a site name containing a quote, a
+.Ql $(...)
+or a backtick is inert data.
+Values containing a newline are rejected, because the scripts write them
+into line-oriented configuration.
+.Pp
+.Fl -appliance-script
+prints the rendered installer without building anything.
+The result has no dependency on
+.Nm ,
+libvirt or ZFS: it is an ordinary script an upstream project could publish
+as its own install page, and it lets you read exactly what the button is
+about to run.
+.Sh REMOTE
+.Fl -connect
+points the whole tool at another hypervisor.
+The estate read, every verb, the ZFS join, the serial console and the
+graphical console all follow, authenticated with the same SSH key as your
+shell.
+Nothing is installed on the far side.
+.Pp
+Only the ZFS mutations are elevated, and only locally; the libvirt calls
+are not wrapped in
+.Xr sudo 8 ,
+because running them as root on a remote target would use root's SSH keys
+and a connection the operator never authorised.
+.Sh CLIPBOARD
+Copying inside a guest puts the text on the host clipboard.
+.Pp
+Pasting into a guest sets the guest's clipboard and sends it one
+.Ic ctrl-V ,
+so the guest performs its own paste: atomic, and correct for its keyboard
+layout.
+Every machine
+.Nm
+builds is given the virtio-serial channel this needs, and appliances
+install the guest agent that reads it.
+.Pp
+An imported image with no agent will ignore the channel.
+A paste that does nothing is recoverable; a paste that inserts mangled
+text is not.
+.Sh RULES
+A rules file classifies snapshots and groups domains.
+Lines are:
+.Bl -tag -width "group <regex> <label>"
+.It Cm snap noise Ar prefix
+Snapshots with this prefix are automation, and are kept out of the
+operator-visible count.
+.It Cm group Ar regex Ar label
+Domains matching
+.Ar regex
+are collected under
+.Ar label .
+.El
+.Pp
+Without a site naming convention every domain is its own story, so the
+default profile groups nothing and everything lands in
+.Ar ungrouped .
+Copy the built-in profile to
+.Pa /etc/vmxplore/rules
+and add
+.Cm group
+lines to teach it your convention.
+.Sh FILES
+.Bl -tag -width "~/.local/state/vmxplore/vmx.log"
+.It Pa /var/log/kldload/vmx.log
+Audit log: when, who, the exact command, and its exit code.
+.It Pa ~/.local/state/vmxplore/vmx.log
+The same, when the system path is not writable.
+.It Pa /etc/vmxplore/rules
+Grouping and classification rules.
+.It Pa /var/lib/vmxplore/images
+Downloaded cloud images.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+.Ss Everyday
+Print the estate once, for a script or a cron check:
+.Bd -literal -offset indent
+vmx --once
+.Ed
+.Pp
+Drive a headless hypervisor over SSH, with both consoles following:
+.Bd -literal -offset indent
+vmx --connect qemu+ssh://fiend.example.net/system
+vmx --connect user@fiend.example.net
+vmx --connect fiend
+.Ed
+.Pp
+List the catalog with every entry's fields, then build one and wait for
+its URL:
+.Bd -literal -offset indent
+vmx --appliances
+vmx --appliance "WriteFreely" --vm blog \e
+    WF_SITE_NAME="My Blog" WF_ADMIN_USER=matt
+.Ed
+.Pp
+Read the installer an entry would run, without building anything:
+.Bd -literal -offset indent
+vmx --appliance-script "WriteFreely" > writefreely-install.sh
+.Ed
+.Ss Post-install scripts
+Anything in the post-install box is written into the guest and run once,
+as root, on the first boot.
+Output lands in the guest's cloud-init log and on both consoles, so you
+can watch it work.
+.Pp
+Start every one of them the same way.
+.Sy set -Eeuo pipefail
+means a failed step stops the script instead of quietly leaving a
+half-built machine that looks finished:
+.Bd -literal -offset indent
+#!/usr/bin/env bash
+set -Eeuo pipefail
+.Ed
+.Pp
+.Sy Packages and a shell you can live in .
+The guest login is the account you named in the dialog; the script runs as
+root, so anything written into a home directory has to be given back to
+its owner:
+.Bd -literal -offset indent
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends \e
+    vim tmux git curl htop ripgrep jq rsync
+
+u=admin                          # the guest login from the dialog
+h=$(getent passwd "$u" | cut -d: -f6)
+
+cat >>"$h/.bashrc" <<'RC'
+# --- added at first boot -------------------------------------------
+export EDITOR=vim
+export HISTSIZE=100000 HISTFILESIZE=100000
+export HISTCONTROL=ignoreboth:erasedups
+shopt -s histappend checkwinsize
+
+alias ll='ls -alh --color=auto'
+alias ..='cd ..'
+alias g=git
+PS1='\eu@\eh:\ew\e$ '
+RC
+
+cat >"$h/.vimrc" <<'VIM'
+set nocompatible
+syntax on
+filetype plugin indent on
+set number relativenumber
+set expandtab shiftwidth=4 tabstop=4
+set ignorecase smartcase incsearch hlsearch
+set undofile undodir=~/.vim/undo
+set mouse=a
+VIM
+
+install -d -o "$u" -g "$u" "$h/.vim/undo"
+chown "$u:$u" "$h/.bashrc" "$h/.vimrc"
+.Ed
+.Pp
+.Sy A web server .
+Install it, write a page, and leave the service enabled so the machine
+comes back serving after a reboot:
+.Bd -literal -offset indent
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends nginx
+
+cat >/var/www/html/index.html <<'HTML'
+<!doctype html>
+<title>it works</title>
+<h1>built on first boot</h1>
+HTML
+
+systemctl enable --now nginx
+echo "serving on http://$(hostname -I | awk '{print $1}')/"
+.Ed
+.Pp
+.Sy A container host .
+Docker's own repository, because a distribution's package is usually
+older than the documentation people will follow:
+.Bd -literal -offset indent
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y ca-certificates curl gnupg
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg |
+    gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+
+\&. /etc/os-release
+echo "deb [signed-by=/etc/apt/keyrings/docker.gpg]" \e
+     "https://download.docker.com/linux/debian $VERSION_CODENAME stable" \e
+     >/etc/apt/sources.list.d/docker.list
+
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io \e
+    docker-buildx-plugin docker-compose-plugin
+usermod -aG docker admin
+systemctl enable --now docker
+.Ed
+.Pp
+.Sy A development box .
+Toolchains that move faster than the distribution ships them are worth
+pinning by hand:
+.Bd -literal -offset indent
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+GO_VERSION=1.26.0
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends \e
+    build-essential git curl ca-certificates
+
+tar_name="go${GO_VERSION}.linux-amd64.tar.gz"
+curl -fsSLO "https://go.dev/dl/${tar_name}"
+rm -rf /usr/local/go
+tar -C /usr/local -xzf "$tar_name"
+rm -f "$tar_name"
+
+cat >/etc/profile.d/go.sh <<'SH'
+export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
+SH
+chmod 0644 /etc/profile.d/go.sh
+/usr/local/go/bin/go version
+.Ed
+.Pp
+.Sy Locking SSH down .
+Only ever do this when a key was supplied in the dialog — turning off
+password authentication on a machine whose only credential is a password
+locks you out of your own VM:
+.Bd -literal -offset indent
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+u=admin
+if [ -s "/home/$u/.ssh/authorized_keys" ]; then
+    cat >/etc/ssh/sshd_config.d/90-hardening.conf <<'CONF'
+PasswordAuthentication no
+PermitRootLogin no
+KbdInteractiveAuthentication no
+CONF
+    systemctl restart ssh
+    echo "password auth disabled; key auth only"
+else
+    echo "WARNING: no authorized_keys — leaving password auth ON" >&2
+fi
+.Ed
+.Pp
+.Sy Making the result reproducible .
+End a script by recording what it built.
+The next person to open the machine — including you, months later — reads
+this before they read the script:
+.Bd -literal -offset indent
+cat >/etc/motd <<EOF
+Built by vmxplore on $(date -u +%Y-%m-%dT%H:%MZ)
+  role     : web front end
+  installed: nginx, vim, tmux, ripgrep
+  see      : /var/log/cloud-init-output.log
+EOF
+.Ed
+.Ss From one machine to a fleet
+The whole pattern, in order.
+Build one machine with a post-install script, check it by hand, then seal
+and stamp:
+.Bl -enum
+.It
+Build with
+.Cm New VM ,
+cloud image, pasting the post-install script.
+.It
+Open the Screen or Serial tab and watch it install.
+.It
+Log in, confirm it is what you wanted, fix the script if it is not, and
+rebuild.
+A script is cheap to re-run; a machine you patched by hand is not
+reproducible.
+.It
+.Cm Make Golden .
+The machine is shut down, generalised and snapshotted as
+.Pa @golden .
+.It
+.Cm Clone
+as many as you need.
+Each is a zero-copy ZFS clone: instant, and sharing blocks with the
+golden until it diverges.
+.El
+.Pp
+.Cm EZ Fleet
+does all five in one dialog when you already trust the script.
+.Ss A rules file
+Copy the built-in profile and teach it your naming convention:
+.Bd -literal -offset indent
+# /etc/vmxplore/rules
+
+# automation that should not count as an operator snapshot
+snap noise autosnap_
+snap noise zfs-auto-snap
+snap noise syncoid_
+
+# the estate, grouped the way you think about it
+group ^web-        web tier
+group ^db-         databases
+group ^k8s-(cp|w)- kubernetes
+group ^build-      CI runners
+.Ed
+.Sh SEE ALSO
+.Xr virsh 1 ,
+.Xr virt-clone 1 ,
+.Xr virt-install 1 ,
+.Xr virt-sysprep 1 ,
+.Xr libvirtd 8 ,
+.Xr zfs 8 ,
+.Xr zpool 8
+.Pp
+The sister consoles:
+.Xr zxplore 1
+for ZFS and
+.Xr wgx 1
+for WireGuard.
+.Sh HISTORY
+.Nm
+began in 2026 as the third console in the
+.Em xplore
+family, sharing zxplore's shape and theme.
+.Sh AUTHORS
+.An Anthony Aq Mt admin@vmxplore.dev
+.Sh CAVEATS
+The Screen tab sends raw pixels.
+A full frame at 2560x1440 is about 14 MB, so a remote hypervisor over a
+slow link will feel it.
+That is a transport property, not a graphics card one — a GPU in the guest
+will not change it.
+.Pp
+.Cm zfs destroy Fl r
+takes the dataset's snapshots with it.
+Snapshot history on a destroyed volume dies with the volume; only
+replication to another pool or host is a recovery path.
