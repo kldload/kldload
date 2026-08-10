@@ -481,11 +481,34 @@ func (v *vncViewer) pasteText(text string) {
 		return
 	}
 	v.conn.cutText(text)
+	// WARN: release every modifier BEFORE typing a single character.
+	//
+	// The obvious paste is ctrl+V, and ctrl is genuinely held down at that
+	// moment — KeyDown already forwarded the press to the guest. Typing the
+	// clipboard on top of that delivers ctrl+H, ctrl+e, ctrl+l… instead of
+	// "Hello": in a terminal that is backspace and clear-line, in a browser
+	// it is a fistful of shortcuts. The pasted text arrives mangled or not
+	// at all, and it looks like the paste is broken rather than the
+	// modifier state.
+	// HISTORY: 2026-08-09 — "pasting info in is really messed up".
+	for _, sym := range modSyms {
+		v.conn.key(sym, false)
+	}
 	go v.typeString(text)
 }
 
-// typeString feeds text as paced key events — outrunning a guest's boot
-// console drops characters, 3ms per key does not.
+// typeString feeds text as paced key events.
+//
+// The pace is a compromise between two failure modes: too fast and a
+// guest's boot console or a page's own keydown handler drops characters,
+// too slow and pasting a paragraph is visibly a typewriter. 8ms holds up
+// in a browser textarea, which is the hardest case — it runs JavaScript
+// per keystroke — while still moving 125 characters a second.
+//
+// A newline is sent as Return, which SUBMITS in some forms. That is the
+// price of typing rather than pasting, and the reason the real fix is a
+// clipboard agent in the guest (qemu-vdagent) so cutText lands as an
+// actual paste and this path is never taken.
 func (v *vncViewer) typeString(text string) {
 	for _, r := range text {
 		sym := uint32(r)
@@ -501,7 +524,7 @@ func (v *vncViewer) typeString(text string) {
 		}
 		v.conn.key(sym, true)
 		v.conn.key(sym, false)
-		time.Sleep(3 * time.Millisecond)
+		time.Sleep(8 * time.Millisecond)
 	}
 }
 

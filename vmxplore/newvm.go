@@ -259,6 +259,26 @@ func yamlQuote(s string) string {
 	return `"` + r.Replace(s) + `"`
 }
 
+// vdagentArg gives every VM a real clipboard.
+//
+// Without it, "paste" into a guest can only mean synthesising keystrokes —
+// which is fragile in anything running JavaScript, mangles anything needing
+// a modifier, and turns a newline into a form submission. With it, qemu
+// carries the VNC client's cut text over a virtio-serial port to
+// spice-vdagent inside the guest, which sets the guest's own clipboard.
+// Paste then behaves the way paste behaves: instant, atomic, and ctrl+V
+// inside the guest works on its own.
+//
+// The guest half is the spice-vdagent package; a guest without it simply
+// ignores the port, so this costs nothing on machines that never install
+// it and the keystroke fallback still covers them.
+//
+// mouse.mode=client is the same channel's other job — absolute pointer
+// positioning, so the guest cursor tracks the host cursor instead of
+// drifting.
+const vdagentArg = "qemu-vdagent,source.clipboard.copypaste=on," +
+	"source.mouse.mode=client,target.type=virtio,target.name=com.redhat.spice.0"
+
 // videoArg is the virtio-gpu device every VM gets.
 //
 // vram is in KiB. Measured, not assumed: a guest reached 2560x1440 on
@@ -385,6 +405,7 @@ func BuildNewVM(s NewVMSpec, zfsParent string, progress func(string)) error {
 			"--network", "network=default,model=virtio",
 			"--graphics", "vnc,listen=0.0.0.0",
 			"--video", videoArg,
+			"--channel", vdagentArg,
 			"--noautoconsole")
 		if err := run(false, argv...); err != nil {
 			return err
@@ -494,6 +515,7 @@ func BuildNewVM(s NewVMSpec, zfsParent string, progress func(string)) error {
 			"--network", "network=default,model=virtio",
 			"--graphics", "vnc,listen=0.0.0.0",
 			"--video", videoArg,
+			"--channel", vdagentArg,
 			"--noautoconsole")
 	}
 	err = run(false, installArgs("--os-variant", variant)...)

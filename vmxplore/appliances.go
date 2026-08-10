@@ -983,7 +983,8 @@ if command -v apt-get >/dev/null 2>&1; then
     apt-get install -y --no-install-recommends \
         xserver-xorg-core xserver-xorg-video-fbdev \
         xserver-xorg-input-libinput xinit x11-xserver-utils \
-        matchbox-window-manager firefox-esr fonts-dejavu-core unclutter
+        matchbox-window-manager firefox-esr fonts-dejavu-core unclutter \
+        spice-vdagent
 
     # WHY: Debian's cloud images run linux-image-cloud-amd64, a kernel
     # flavour built with no DRM subsystem and no framebuffer at all — no
@@ -1268,6 +1269,13 @@ if [ -n "$wf_out" ]; then
 fi
 
 unclutter -idle 3 &
+
+# A real clipboard, not a simulated keyboard. spice-vdagent talks to qemu
+# over the virtio-serial port the VM is given, so the console's paste
+# arrives as an actual clipboard event instead of a few hundred synthetic
+# keystrokes — atomic, instant, and safe for text containing newlines.
+spice-vdagent &
+
 matchbox-window-manager -use_titlebar no &
 while :; do
     firefox --kiosk "file://$HOME/autologin.html"
