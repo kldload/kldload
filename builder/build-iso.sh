@@ -596,6 +596,109 @@ if [[ "$EDITION" != "core" ]]; then
     rm -f /tmp/wgx-bin
     rm -rf /tmp/wgx-src
 
+    # ── vmxplore — the KVM console, built from its OWN repo
+    # (github.com/vmxplore/vmxplore, public). Third console in the family and
+    # the same deal as zxplore and wgxplore: it runs on ANY libvirt host, and
+    # kldload is simply its first-party distribution. Tracks main with a
+    # cache fallback so an air-gapped builder still ships something and says
+    # loudly that it is cached; the ingested commit is baked into
+    # /etc/kldload/vmxplore-commit so an image traces to its source.
+    #
+    # TWO binaries, like the sisters: `vmx` is the static terminal build
+    # (CGO_ENABLED=0, zero runtime deps) and goes on EVERY profile, including
+    # headless servers where it is the only way to drive KVM from the box.
+    # `vmxplore` is the Fyne GUI and needs the GL/X/wayland stack, so it is
+    # gated on the rootfs actually having one — asserted with readelf rather
+    # than assumed, because a '-tags gui' build that silently produced the
+    # terminal variant is how a GUI ISO ships without its console.
+    VMXPLORE_REF="${VMXPLORE_REF:-}"
+    log "Building vmxplore (${VMXPLORE_REF:-main HEAD}) from github.com/vmxplore/vmxplore ..."
+    rm -rf /tmp/vmx-src
+    _vmx_cache="/build/live-build/vmxplore-cache"
+    _vmx_fresh=0
+    if [[ -d "${_vmx_cache}/.git" ]]; then
+        if (git -C "$_vmx_cache" fetch --depth 1 origin "${VMXPLORE_REF:-main}" &&
+            git -C "$_vmx_cache" reset --hard FETCH_HEAD) >>"$LOG_FILE" 2>&1; then
+            _vmx_fresh=1
+        fi
+    else
+        _vmx_clone=(git clone --depth 1)
+        [[ -n "$VMXPLORE_REF" ]] && _vmx_clone+=(--branch "$VMXPLORE_REF")
+        if "${_vmx_clone[@]}" https://github.com/vmxplore/vmxplore.git "$_vmx_cache" >>"$LOG_FILE" 2>&1; then
+            _vmx_fresh=1
+        fi
+    fi
+    [[ -d "${_vmx_cache}/.git" ]] ||
+        die "FATAL: vmxplore unavailable — no network AND no cached source at live-build/vmxplore-cache. Run one online build to populate the cache for darksite builds."
+    if ((!_vmx_fresh)); then
+        log "WARNING: vmxplore refresh failed (offline/darksite builder?) — shipping CACHED commit $(git -C "$_vmx_cache" rev-parse --short HEAD)"
+    fi
+    cp -a "$_vmx_cache" /tmp/vmx-src
+    _vmx_commit="$(git -C /tmp/vmx-src rev-parse HEAD)"
+    log "vmxplore commit: ${_vmx_commit}"
+    printf '%s\n' "$_vmx_commit" >"${ROOTFS}/etc/kldload/vmxplore-commit"
+
+    # the static TUI first: it is the one every profile gets
+    if (cd /tmp/vmx-src &&
+        HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+            CGO_ENABLED=0 go build -trimpath -o /tmp/vmx-bin .) >>"$LOG_FILE" 2>&1; then
+        install -Dm0755 /tmp/vmx-bin "${ROOTFS}/usr/local/bin/vmx" ||
+            die "FATAL: vmx (static TUI) install failed."
+        log "vmx installed (static TUI, all profiles)."
+    else
+        die "FATAL: vmxplore TUI build failed — refusing to ship an ISO without the KVM console."
+    fi
+    rm -f /tmp/vmx-bin
+
+    # the man page travels with either build: a console on a stranger's box
+    # must not be undocumented, and `man vmxplore` is the first thing an
+    # operator tries.
+    if [[ -r /tmp/vmx-src/docs/vmxplore.1 ]]; then
+        install -Dm0644 /tmp/vmx-src/docs/vmxplore.1 \
+            "${ROOTFS}/usr/share/man/man1/vmxplore.1" ||
+            die "FATAL: vmxplore man page install failed."
+    else
+        die "FATAL: vmxplore man page absent (docs/vmxplore.1) — upstream moved it."
+    fi
+
+    # the GUI, only where the rootfs can actually run it
+    if [[ -e "${ROOTFS}/usr/lib64/libGL.so.1" && -e "${ROOTFS}/usr/lib64/libxkbcommon.so.0" ]]; then
+        if (cd /tmp/vmx-src &&
+            HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+                CGO_ENABLED=1 go build -trimpath -tags gui -o /tmp/vmxplore-bin .) >>"$LOG_FILE" 2>&1; then
+            if ! readelf -d /tmp/vmxplore-bin 2>/dev/null |
+                grep -qiE 'NEEDED.*(libGL|libX11|libwayland|libxkbcommon)'; then
+                die "FATAL: vmxplore built WITHOUT the GUI (no GL/X11/wayland libs) — '-tags gui' produced the terminal variant."
+            fi
+            install -Dm0755 /tmp/vmxplore-bin "${ROOTFS}/usr/local/bin/vmxplore" ||
+                die "FATAL: vmxplore (GUI) install failed."
+            # Launcher + icon are not optional on a desktop profile — a KVM
+            # console with no app icon is a broken install. Both come from
+            # the upstream repo, so an absent file is a build-time failure
+            # rather than a silently icon-less tool (the zxplore lesson,
+            # 2026-07-27).
+            [[ -r /tmp/vmx-src/packaging/vmxplore.svg ]] ||
+                die "FATAL: vmxplore icon absent (packaging/vmxplore.svg) — upstream moved it."
+            install -Dm0644 /tmp/vmx-src/packaging/vmxplore.svg \
+                "${ROOTFS}/usr/share/icons/hicolor/scalable/apps/vmxplore.svg" ||
+                die "FATAL: vmxplore icon install failed."
+            for _vmx_desk in vmxplore.desktop vmxplore-tui.desktop; do
+                [[ -r "/tmp/vmx-src/packaging/${_vmx_desk}" ]] ||
+                    die "FATAL: vmxplore launcher absent (packaging/${_vmx_desk}) — upstream moved it."
+                install -Dm0644 "/tmp/vmx-src/packaging/${_vmx_desk}" \
+                    "${ROOTFS}/usr/share/applications/${_vmx_desk}" ||
+                    die "FATAL: vmxplore .desktop install failed (${_vmx_desk})."
+            done
+            log "vmxplore installed: GUI + icon + launchers (from repo)."
+        else
+            die "FATAL: vmxplore GUI build failed — refusing to ship a GUI ISO without the KVM console."
+        fi
+    else
+        log "vmxplore: headless rootfs — static vmx only, no GUI."
+    fi
+    rm -f /tmp/vmxplore-bin
+    rm -rf /tmp/vmx-src
+
     # Static TUI — every profile. No build tag = the terminal-only variant
     # (pure Go, no Fyne/GL); CGO_ENABLED=0 keeps it fully static.
     if (cd /tmp/zxplore-src &&

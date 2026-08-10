@@ -483,6 +483,7 @@ k_install_system_files() {
     # for the tracks-upstream-main build model.
     [[ -f /etc/kldload/zxplore-commit ]] && cp /etc/kldload/zxplore-commit "${target}/etc/kldload/zxplore-commit"
     [[ -f /etc/kldload/wgxplore-commit ]] && cp /etc/kldload/wgxplore-commit "${target}/etc/kldload/wgxplore-commit"
+    [[ -f /etc/kldload/vmxplore-commit ]] && cp /etc/kldload/vmxplore-commit "${target}/etc/kldload/vmxplore-commit"
     # process-exporter config — kldload-process-exporter.service
     # ConditionPathExists on this file, so without it the unit silently
     # skips and the per-process Grafana dashboards stay empty on the target.
@@ -939,7 +940,8 @@ DASHSTART
             for _lnch in /usr/share/applications/kldload-*.desktop \
                 /usr/share/applications/bob-*.desktop \
                 /usr/share/applications/zxplore.desktop \
-                /usr/share/applications/wgxplore.desktop; do
+                /usr/share/applications/wgxplore.desktop \
+                /usr/share/applications/vmxplore*.desktop; do
                 [[ -f "$_lnch" ]] || continue
                 # honor the ZFS Console opt-out (checkbox, default on)
                 [[ "$(basename "$_lnch")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
@@ -955,7 +957,8 @@ DASHSTART
                 mkdir -p "${target}/${themedir}"
                 for _ic in /${themedir}/kldload-*.svg /${themedir}/bob-*.svg \
                     /${themedir}/kst*.svg /${themedir}/ksnap.svg /${themedir}/kexport.svg \
-                    /${themedir}/zxplore*.svg /${themedir}/wgxplore.svg; do
+                    /${themedir}/zxplore*.svg /${themedir}/wgxplore.svg \
+                    /${themedir}/vmxplore.svg; do
                     [[ -f "$_ic" ]] || continue
                     # honor the ZFS Console opt-out (checkbox, default on)
                     [[ "$(basename "$_ic")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
