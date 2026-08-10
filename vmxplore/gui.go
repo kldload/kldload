@@ -1038,18 +1038,21 @@ func runGUI(rs *Ruleset) {
 	// k-tool nobody has classified yet is, at worst, safe to look at.
 	toolAccent := func(name string) accentPair {
 		switch {
-		case strings.HasSuffix(name, "-demo"):
+		case strings.HasSuffix(name, "-demo") || name == "bob":
 			return acBrand
 		case name == "kvm-delete":
 			return acRed
 		case name == "kvm-snap" || name == "ksnap" || name == "kexport" ||
-			name == "kimage" || name == "zxplore":
+			name == "kimage" || name == "zxplore" || name == "wgx" ||
+			name == "kbe" || name == "kldload-snapshot" || name == "krecovery":
 			return acBlue
-		case name == "kvm-list" || name == "kst":
+		case name == "kvm-list" || name == "kst" || name == "kst-dashboard" ||
+			name == "kldload-sysdiag" || name == "kldload-doctor" ||
+			name == "kldload-console":
 			return acGold
 		case name == "klab" || name == "kube-cluster" || name == "kspawn" ||
 			name == "kvm-create" || name == "kvm-clone" || name == "kvm-win" ||
-			name == "kzfs-lab":
+			name == "kzfs-lab" || name == "kube-init":
 			return acGreen
 		case name == "shell":
 			return acOff // a plain prompt: no verb, no colour to earn
@@ -1184,24 +1187,34 @@ func runGUI(rs *Ruleset) {
 	// toolDesc is the one-liner on each top-level tile — a screenshot of
 	// this grid should explain the product on its own.
 	toolDesc := map[string]string{
-		"klab":         "multi-distro lab VMs from goldens — interactive",
-		"kube-cluster": "Kubernetes on ZFS: bootstrap, scale, status",
-		"kspawn":       "instant multi-node clusters from ZFS clones",
-		"kvm-create":   "new VM on a fresh zvol",
-		"kvm-clone":    "instant copy-on-write clone of a VM",
-		"kvm-delete":   "remove a VM and its storage",
-		"kvm-snap":     "snapshot a VM's zvol",
-		"kvm-list":     "every VM with state, RAM and ZFS usage",
-		"kimage":       "golden cloud-init images: build, export, deploy",
-		"kexport":      "ship the selected VM anywhere — 9 formats, sealed",
-		"kvm-win":      "Windows goldens: unattended, virtio, TPM, WSL",
-		"ksnap":        "host-level ZFS snapshots and rollback",
-		"kvm-demo":     "guided KVM / ZFS / GPU showcase",
-		"kube-demo":    "guided Kubernetes-on-ZFS showcase",
-		"kzfs-lab":     "OpenZFS Lab: goldens, blue/green sites, ZFS tests, eBPF",
-		"zxplore":      "the ZFS console: pools, datasets, snapshots, clones",
-		"kst":          "this host at a glance: pool health, capacity, build",
-		"shell":        "a plain bash prompt, right here",
+		"klab":             "multi-distro lab VMs from goldens — interactive",
+		"kube-cluster":     "Kubernetes on ZFS: bootstrap, scale, status",
+		"kspawn":           "instant multi-node clusters from ZFS clones",
+		"kvm-create":       "new VM on a fresh zvol",
+		"kvm-clone":        "instant copy-on-write clone of a VM",
+		"kvm-delete":       "remove a VM and its storage",
+		"kvm-snap":         "snapshot a VM's zvol",
+		"kvm-list":         "every VM with state, RAM and ZFS usage",
+		"kimage":           "golden cloud-init images: build, export, deploy",
+		"kexport":          "ship the selected VM anywhere — 9 formats, sealed",
+		"kvm-win":          "Windows goldens: unattended, virtio, TPM, WSL",
+		"ksnap":            "host-level ZFS snapshots and rollback",
+		"kvm-demo":         "guided KVM / ZFS / GPU showcase",
+		"kube-demo":        "guided Kubernetes-on-ZFS showcase",
+		"kzfs-lab":         "OpenZFS Lab: goldens, blue/green sites, ZFS tests, eBPF",
+		"zxplore":          "the ZFS console: pools, datasets, snapshots, clones",
+		"wgx":              "the WireGuard console: hosts, interfaces, peers",
+		"kst-dashboard":    "live host dashboard — pools, capacity, services",
+		"kldload-sysdiag":  "observability cockpit: disk, ZFS, network, kernel",
+		"kldload-doctor":   "health checks with the fix for what they find",
+		"kbe":              "boot environments: list, create, activate, roll back",
+		"kldload-snapshot": "host-level snapshots of the whole system",
+		"krecovery":        "the way back when a boot goes wrong",
+		"kldload-console":  "the cluster cockpit — klab and Kubernetes",
+		"kube-init":        "bring up a Kubernetes control plane",
+		"bob":              "the substrate's assistant, in a terminal",
+		"kst":              "this host at a glance: pool health, capacity, build",
+		"shell":            "a plain bash prompt, right here",
 	}
 
 	var showToolActions func(tool string)

@@ -166,6 +166,19 @@ var vmKTools = []string{
 	// three were missing here, so a kldload host showed every way to make
 	// a VM and no way to reach its storage or its tests.
 	"kzfs-lab", "zxplore", "kst",
+	// the sister console: a kldload host runs the WireGuard estate too, and
+	// the operator should not have to remember a second launcher for it
+	"wgx",
+	// the diagnostics: this host's own health, from a one-shot report to a
+	// full observability cockpit. Reachable FROM the estate is the point —
+	// you want them at the moment a machine looks wrong, not in another
+	// window (2026-08-09 operator call).
+	"kst-dashboard", "kldload-sysdiag", "kldload-doctor",
+	// storage and recovery beyond the VM layer: boot environments, host
+	// snapshots, and the path back when a boot goes wrong
+	"kbe", "kldload-snapshot", "krecovery",
+	// the cockpits and the assistant
+	"kldload-console", "kube-init", "bob",
 }
 
 // KldloadTools returns the kldload VM tools present on this host (nil on a
