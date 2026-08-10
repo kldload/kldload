@@ -820,6 +820,29 @@ ${caddy_site} {
 	reverse_proxy 127.0.0.1:8080
 }
 EOF
+    # Loopback ALWAYS answers, whatever the public name is.
+    #
+    # A site address of "$WF_DOMAIN" makes Caddy serve that name and 308
+    # everything else to https://$WF_DOMAIN — including the loopback the
+    # machine talks to itself on. The desktop entry's sign-in page posts to
+    # http://localhost/auth/login, so with a domain set it was redirected to
+    # a public name that does not resolve to this box yet, and the kiosk
+    # came up on a certificate error instead of the editor.
+    # HISTORY: blog.kldload.com, 2026-08-09 — worked without a domain,
+    # broke the moment one was given, and ctrl+W "fixed" it only because
+    # that reloads the same page.
+    #
+    # It is also what makes the appliance reachable while DNS is still
+    # being pointed at it, which is most of the first hour of its life.
+    if [ -n "$WF_DOMAIN" ]; then
+        cat <<'EOF'
+
+http://localhost, http://127.0.0.1 {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
+}
+EOF
+    fi
 } >/etc/caddy/Caddyfile
 
 cat >/etc/systemd/system/caddy.service <<'EOF'
