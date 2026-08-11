@@ -967,6 +967,28 @@ DASHSTART
                 done
             fi
 
+            # ── polkit actions: carry them to the target ──────────────────────
+            # The target is debootstrapped fresh, so NOTHING from the live
+            # ISO's rootfs arrives unless it is copied explicitly. build-iso.sh
+            # puts org.kldload.wgxplore.policy into the ISO (fixed 2026-08-03
+            # after it reached neither ISO nor install), but that only ever got
+            # it as far as the live environment — every INSTALL has shipped
+            # without it since.
+            #
+            # allow_active=yes in that policy is what makes the estate console
+            # refresh without a prompt. Its absence is currently masked by the
+            # NOPASSWD sudoers entry, which the elevation ladder tries before
+            # pkexec — so nobody saw a prompt. On any install that tightens
+            # sudo, the ladder falls through to pkexec and the GUI starts
+            # raising a dialog on every periodic refresh.
+            # HISTORY: found 2026-08-10 while tracing the libvirt prompt on
+            # .149; `ls /usr/share/polkit-1/actions` there matched nothing.
+            if [[ -d /usr/share/polkit-1 ]]; then
+                mkdir -p "${target}/usr/share/polkit-1"
+                cp -r /usr/share/polkit-1/. "${target}/usr/share/polkit-1/" ||
+                    k_log "WARN: polkit actions not copied — consoles may prompt on refresh"
+            fi
+
             # Konsole's stock .desktop references Icon=utilities-terminal — a
             # name that exists in Breeze (KDE) but NOT in Adwaita/hicolor on
             # RHEL 10 / GNOME 50. Without a fallback in hicolor, the dock pin
