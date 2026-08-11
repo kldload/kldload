@@ -74,16 +74,21 @@ Secure Boot and full-disk ZFS encryption both work end-to-end. The full flow:
 
 ## Troubleshooting
 
+> Full install walkthrough, including what each Secure Boot failure looks
+> like and how to decide whether to run with it on at all:
+> **[docs/INSTALL.md](docs/INSTALL.md)**.
+
 ### Secure Boot / MOK
 
 | Symptom | Fix |
 |---|---|
-| Missed the blue MokManager screen | Reboot &mdash; enrollment is re-offered automatically. Or `sudo kldload-secure-boot reenroll`, then reboot. |
+| Missed the blue MokManager screen | Reboot &mdash; enrollment is re-offered automatically. Or `sudo kldload-mok-repair repair`, then reboot. |
 | "Secure Boot validation failed" / "Verification failed" at boot | The install's MOK isn't enrolled. Run **`sudo kldload-mok-repair`** (installed system or live USB) &mdash; it shows whether the boot chain's key is enrolled and `repair` queues the fix; then reboot, **press a key at the 10-second blue screen**, Reset &rarr; Enroll, password `kldload`. Or temporarily disable Secure Boot in firmware to boot and repair from the OS. |
 | Reinstalled several times / MOK operations start failing | Stale keys accumulate in NVRAM (one per install). `sudo kldload-mok-repair repair` queues a **Reset MOK list** + enrollment of the current key in one pass. |
-| Check enrollment / signing state | `sudo kldload-mok-repair` (or `kldload-secure-boot status`, `mokutil --list-enrolled`). |
-| NVIDIA or ZFS module won't load under SB | Same cause &mdash; enroll the MOK. `sudo kldload-secure-boot status` shows the module signer. |
+| Check enrollment / signing state | `sudo kldload-mok-repair` (or `kldload-mok-repair status`, `mokutil --list-enrolled`). |
+| NVIDIA or ZFS module won't load under SB | Same cause &mdash; enroll the MOK. `sudo kldload-mok-repair status` shows the module signer. |
 | Forgot the MOK password | It's `kldload` (set a different one at install with `KLDLOAD_MOK_PASSWORD`). |
+| **Boots to emergency mode** after skipping enrollment | The MOK is not enrolled, so the kernel refuses the DKMS-signed ZFS module and non-root datasets never mount. Confirm with `modprobe zfs` &mdash; **`Key was rejected by service`** is conclusive. Fix: `sudo kldload-mok-repair repair` then reboot and enroll, **or** disable Secure Boot in firmware if this is a lab box. Note this can appear weeks later, at the first kernel update after the missed prompt. |
 | Boots fine with SB off, fails with SB on (installed before 1.4.0-rc3) | Older builds re-signed the staged kernel with the per-install MOK key, discarding the distro's own signature. Restore it: `sudo cp /boot/vmlinuz-$(uname -r) /boot/efi/EFI/BOOT/vmlinuz` then enable Secure Boot. Fixed at install time from 1.4.0-rc3 on. |
 
 ### Console certificate warning
