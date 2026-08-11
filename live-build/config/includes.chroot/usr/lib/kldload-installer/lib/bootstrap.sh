@@ -1662,7 +1662,18 @@ CUSTOMREPO
             fi
         fi
 
-        if [[ "$_zfsrel_ok" != "1" ]]; then
+        # Darksite-first (2026-07-07): the online zfs-release RPM only drops a
+        # repo file — redundant when the ISO's offline mirror already carries
+        # ZFS and the kldload-darksite.repo written above points dnf at it. So an
+        # unreachable zfs-release is only fatal when there is NO local ZFS mirror.
+        # This makes the F44 install air-gapped (wifi-independent) and fixes the
+        # "wifi not up yet -> FATAL" break: the darksite ships zfs + zfs-dkms +
+        # zfs-dracut + kernel(-devel), so pass-3 installs ZFS offline from it.
+        if [[ "$_zfsrel_ok" != "1" ]] && ls /run/kldload-darksite/fedora/rpm/zfs-dkms-*.rpm >/dev/null 2>&1; then
+            k_log_to "$log" "zfs-release unreachable — darksite carries ZFS; continuing OFFLINE via kldload-darksite.repo"
+            _zfsrel_ok="skip_darksite"
+        fi
+        if [[ "$_zfsrel_ok" != "1" && "$_zfsrel_ok" != "skip_darksite" ]]; then
             # All HEAD probes failed. This is the "OpenZFS upstream has not
             # published a Fedora N repo yet AND the fc43 bridge URL is also
             # unreachable" case. Surface exactly what we tried so the operator
@@ -1766,16 +1777,29 @@ CUSTOMREPO
         '--exclude=kernel-debug-modules-extra' '--exclude=kernel-debug-devel'
         '--exclude=zfs' '--exclude=zfs-dkms' '--exclude=zfs-dracut'
     )
-    # Fedora 44 kernel-7 lockout RETIRED. OpenZFS 2.4.3 (published 2026-06-12,
-    # Conflicts: kernel-uname-r > 7.0.999) builds against F44's native kernel,
-    # including the 7.0.x updates — so we no longer exclude kernel-7.* from the
-    # target dnf pass, and the installed system rides 7.0.x with a buildable ZFS
-    # module. The earlier 6.19.999 cap on zfs-dkms-2.4.1 was the only reason for
-    # the pin (it dropped F44+zfslab to dracut emergency, caught 2026-05-12).
-    # Kept as an empty array so the dnf invocation below is unchanged; if a
-    # future kernel ever exceeds the OpenZFS cap before the 2.4 line raises it,
-    # re-populate this — do NOT re-add a hardcoded 6.x/7.x pin.
+    # Fedora 44 kernel-7 lockout REINSTATED. The future the retired hook was
+    # left for arrived: F44 updates serves kernel 7.1.4-202 and pruned the
+    # 7.0.x line, while OpenZFS 2.4.3 still caps at `Conflicts: kernel-uname-r
+    # > 7.0.999` (no 2.4.4, no 2.5 repo — checked 2026-07-23). Unpinned, the
+    # target dnf pass resolves 7.1.4, zfs-dkms refuses to build against it, and
+    # the install lands in a dracut emergency shell — the same break as the
+    # 2026-05-12 6.19.999 incident.
+    #
+    # The glob matches build-iso.sh's DNF_KERNEL_ARGS exactly (`kernel*-7.[1-9]*`,
+    # NOT a hardcoded NVR): it excludes 7.1 through 7.9 and KEEPS 7.0.x, which
+    # is what the ISO koji-pins (7.0.14-201.fc44) and what the darksite mirrors.
+    # Load-bearing: a broader `kernel*-7.*` also filters the darksite's own
+    # 7.0.14 out and breaks pass 3 (2026-07-07). Fedora-only — EL10 rides 6.12
+    # and never reaches this cap.
+    #
+    # Drop the exclude here AND in build-iso.sh together, once a 7.1-capable
+    # OpenZFS ships (`dnf repoquery --repoid=zfs zfs-dkms`). firstboot's
+    # versionlock then freezes whatever pair this installed, so a later
+    # `dnf update` cannot drift onto an unbuildable kernel either.
     local _f44_kernel_lockout=()
+    if [[ "${distro}" == "fedora" ]]; then
+        _f44_kernel_lockout=('--exclude=kernel*-7.[1-9]*')
+    fi
     # Fedora-only repo flags. dnf5 errors hard on --setopt='REPO.X=Y' AND on
     # --disablerepo=REPO when REPO is not defined in the installroot. RHEL
     # / CentOS / Rocky don't have fedora/updates/fedora-cisco-openh264/etc.
@@ -1784,14 +1808,22 @@ CUSTOMREPO
     # 2026-05-26). Build the array per-distro and inject only when fedora.
     local _fed_repo_flags=()
     if [[ "${distro}" == "fedora" ]]; then
-        _fed_repo_flags=(
-            --setopt='updates.excludepkgs=selinux-policy*,policycoreutils*'
-            --setopt='updates.enabled=0'
-            --setopt='fedora.enabled=0'
-            --setopt='fedora-cisco-openh264.enabled=0'
-            --setopt='updates-testing.enabled=0'
-            --setopt='updates-debuginfo.enabled=0'
-        )
+        # Only reference repos that ACTUALLY EXIST in the target — dnf5 hard-errors
+        # ("No matching repositories") on --setopt for an undefined repo. In
+        # darksite/offline mode the online Fedora repos (updates,
+        # fedora-cisco-openh264, updates-testing, updates-debuginfo) are never
+        # written, so passing their setopts aborted pass 1 on a no-wifi install
+        # (offline KVM proof, 2026-07-07). Gate each setopt on the repo being
+        # defined, so the same code works online (all present) and offline (only
+        # [fedora] + [kldload-darksite] present -> we just disable [fedora]).
+        _fed_has_repo() { grep -rqsE "^\[${1}\]" "${target}/etc/yum.repos.d/" 2>/dev/null; }
+        if _fed_has_repo updates; then
+            _fed_repo_flags+=(--setopt='updates.excludepkgs=selinux-policy*,policycoreutils*' --setopt='updates.enabled=0')
+        fi
+        if _fed_has_repo fedora; then _fed_repo_flags+=(--setopt='fedora.enabled=0'); fi
+        if _fed_has_repo fedora-cisco-openh264; then _fed_repo_flags+=(--setopt='fedora-cisco-openh264.enabled=0'); fi
+        if _fed_has_repo updates-testing; then _fed_repo_flags+=(--setopt='updates-testing.enabled=0'); fi
+        if _fed_has_repo updates-debuginfo; then _fed_repo_flags+=(--setopt='updates-debuginfo.enabled=0'); fi
     fi
 
     k_log_to "$log" "Running dnf --installroot pass 1 (main, ${#_dnf_pkgs[@]} packages, profile=${_profile})..."
