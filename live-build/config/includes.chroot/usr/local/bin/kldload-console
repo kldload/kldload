@@ -244,7 +244,22 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
     tmux bind -n F8 run-shell "_kgroup cilium"
     tmux bind -n F9 run-shell "_kgroup top"
     tmux bind -n F10 run-shell "_kgroup zfs"
+    # ── F11/F12 are not ours to take ─────────────────────────────────
+    # F11 is the window manager's maximize and F12 is swallowed before it
+    # reaches the terminal, in both a native window and the browser-embedded
+    # console (where it is devtools). Verified on .149, 2026-08-10: "11 is
+    # maximize, f12 does nothing" — so these two cockpit groups had no
+    # working key at all.
+    #
+    # They move onto the Alt layer, which is where tmux verbs already live.
+    # M-r is kernel-stress in BOTH cockpits on purpose: F2/k9s is deliberately
+    # the same in both so muscle memory transfers, and this follows that.
+    #
+    # The F-key stays bound as well. It costs nothing, and a terminal that
+    # does pass it through still works — but the cheatsheet advertises the
+    # Alt key, because that is the one that always fires.
     tmux bind -n F11 run-shell "_kgroup tracing"
+    tmux bind -n M-o run-shell "_kgroup tracing"
     # F12 = the kernel-stress cockpit (replaces the older _ktcp-expanded
     # TCP rich view — that data was already on F7's TCP bcc cockpit
     # anyway). Five panes, eBPF-heavy:
@@ -258,6 +273,7 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
     # This is the "in-kernel top" cockpit F9 was *labeled* as for a while
     # but never actually delivered (F9 is plain htop). Adopted 2026-05-27.
     tmux bind -n F12 run-shell "_kgroup kernel-stress"
+    tmux bind -n M-r run-shell "_kgroup kernel-stress"
 
     # NO client-attached welcome hook here — the old hook fired
     # _khelp-toggle (a tmux display-popup) on first attach. The popup

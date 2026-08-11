@@ -246,21 +246,37 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
     # Multi-pane groups (F5/F6/F7/F10/F11/F12) reuse _kgroup from
     # kldload-console for full bcc-tools mini-cockpit polish. _kgroup
     # reads KLDLOAD_TMUX_SESSION so we target sysdiag, not klab.
-    tmux bind -n F2 run-shell "_ktoggle-win k9s       '_sys_k9s'"
-    tmux bind -n F3 run-shell "_ktoggle-win journal   '_sys_journal'"
-    tmux bind -n F4 run-shell "_ktoggle-win dmesg     '_sys_dmesg'"
+    tmux bind -n F2 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _ktoggle-win k9s       '_sys_k9s'"
+    tmux bind -n F3 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _ktoggle-win journal   '_sys_journal'"
+    tmux bind -n F4 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _ktoggle-win dmesg     '_sys_dmesg'"
     tmux bind -n F5 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup disk"
     tmux bind -n F6 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup syscall"
     tmux bind -n F7 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup tcp"
-    tmux bind -n F8 run-shell "_ktoggle-win net       '_sys_net'"
-    tmux bind -n F9 run-shell "_ktoggle-win services  '_sys_services'"
+    tmux bind -n F8 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _ktoggle-win net       '_sys_net'"
+    tmux bind -n F9 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _ktoggle-win services  '_sys_services'"
     tmux bind -n F10 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup zfs"
+    # ── F11/F12 are not ours to take ─────────────────────────────────
+    # F11 is the window manager's maximize and F12 is swallowed before it
+    # reaches the terminal, in both a native window and the browser-embedded
+    # console (where it is devtools). Verified on .149, 2026-08-10: "11 is
+    # maximize, f12 does nothing" — so these two cockpit groups had no
+    # working key at all.
+    #
+    # They move onto the Alt layer, which is where tmux verbs already live.
+    # M-r is kernel-stress in BOTH cockpits on purpose: F2/k9s is deliberately
+    # the same in both so muscle memory transfers, and this follows that.
+    #
+    # The F-key stays bound as well. It costs nothing, and a terminal that
+    # does pass it through still works — but the cheatsheet advertises the
+    # Alt key, because that is the one that always fires.
     tmux bind -n F11 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup kernel-stress"
+    tmux bind -n M-r run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup kernel-stress"
     tmux bind -n F12 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup bandwidth"
+    tmux bind -n M-t run-shell "KLDLOAD_TMUX_SESSION=$SESSION _kgroup bandwidth"
     # Shift-F supplemental: hw / packages / kernel (single-pane info dumps)
-    tmux bind -n S-F6 run-shell "_ktoggle-win hw       '_sys_hw'"
-    tmux bind -n S-F7 run-shell "_ktoggle-win packages '_sys_packages'"
-    tmux bind -n S-F8 run-shell "_ktoggle-win kernel   '_sys_kernel'"
+    tmux bind -n S-F6 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _ktoggle-win hw       '_sys_hw'"
+    tmux bind -n S-F7 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _ktoggle-win packages '_sys_packages'"
+    tmux bind -n S-F8 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _ktoggle-win kernel   '_sys_kernel'"
 
     # Alt-letter heads-up popups
     tmux bind -n M-u display-popup -E -w 80% -h 50% "bash -c 'uptime; echo; who; echo; echo --- last logins ---; last -n 10; echo; read -r -p \"Enter to dismiss…\" _'"
@@ -274,10 +290,10 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
 
     # Shift-Fn deep dive
     tmux bind -n S-F2 new-window -t "$SESSION" -n root 'sudo -i'
-    tmux bind -n S-F3 run-shell "_ktoggle-win dmesg-grep '_sys_dmesg_grep'"
-    tmux bind -n S-F4 run-shell "_ktoggle-win sysctl-explorer 'bash -c \"sysctl -a 2>/dev/null | less\"'"
-    tmux bind -n S-F5 run-shell "_ktoggle-win doctor '_sys_doctor_loop'"
-    tmux bind -n S-F9 run-shell "_ktoggle-win htop '_sys_htop'"
+    tmux bind -n S-F3 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _ktoggle-win dmesg-grep '_sys_dmesg_grep'"
+    tmux bind -n S-F4 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _ktoggle-win sysctl-explorer 'bash -c \"sysctl -a 2>/dev/null | less\"'"
+    tmux bind -n S-F5 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _ktoggle-win doctor '_sys_doctor_loop'"
+    tmux bind -n S-F9 run-shell "KLDLOAD_TMUX_SESSION=$SESSION _ktoggle-win htop '_sys_htop'"
 
     # ── Simple nav: Alt for walk, Alt+Shift for splits ────────────────
     # Alt+arrow walks windows. Alt+Shift+arrow JOINS the adjacent window
