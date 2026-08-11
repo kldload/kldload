@@ -16,6 +16,22 @@ StandardError=journal+console
 # 6-hour cap — klab + k8s + ai should fit in ~1.5hr worst case; padding for
 # slow mirrors. systemd will SIGTERM after this if something hangs.
 TimeoutStartSec=21600
+# The default OOMPolicy for a oneshot unit is "stop": if the kernel OOM-kills
+# any process in this cgroup, systemd tears the whole unit down. That is the
+# wrong trade here — the heavy phases (model pull, golden VM builds) are the
+# plausible OOM victims, and killing the orchestrator with them loses every
+# remaining phase and every marker the web UI waits on. Convergence is
+# idempotent and re-runnable, so keep the orchestrator alive and let the
+# per-phase logging say what died (HISTORY: a fresh full-toggle install went
+# unreachable and reboot-cycled on boot #1, 10.100.10.123 2026-06-15).
+OOMPolicy=continue
+# Convergence is background work: it must never outrank the operator's own
+# session on a box that is also running a desktop. Nice only affects CPU, so
+# the IO class matters more here — cloning goldens onto ZFS is what actually
+# starves an interactive shell.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
 
 [Install]
 WantedBy=multi-user.target

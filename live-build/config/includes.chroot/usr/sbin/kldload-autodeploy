@@ -12,10 +12,15 @@
 # Dashboard's Lab Ready banner (green ✅ when everything requested is done).
 #
 # Ordering rules (enforced by this script):
-#   1. AI pull runs FIRST in the background — it's ~5GB download, wants to
-#      overlap with other long work. If AI wasn't requested, skipped.
+#   1. The AI phase starts FIRST in the background, but only its cheap part —
+#      GPU probe, ollama service, darksite rehydrate. A real multi-GB model
+#      DOWNLOAD holds until the k8s phase finishes, because running it
+#      alongside kubeadm and the golden builds made boot #1 reboot-cycle
+#      (2026-06-15). An air-gapped pull (weights already on disk) does not
+#      wait. If AI wasn't requested, skipped.
 #   2. Kubernetes bootstrap runs next (foreground) — ~15 min on fresh build,
-#      ~5 min if golden cached. Blocks until cluster is Ready or fails.
+#      ~5 min if golden cached. Blocks until cluster is Ready or fails, then
+#      writes k8s-phase-done, which releases the AI download.
 #   3. klab golden-all runs last (foreground) — ~1hr for 5 distros. Takes
 #      the longest, so we do it last to not block faster phases.
 #   4. AI model gets pre-warmed once its pull completes (24h keepalive).
@@ -28,6 +33,11 @@
 #
 # Idempotent — safe to re-run. Won't redo phases that already have markers.
 # Manual trigger: `sudo kldload-autodeploy`
+#
+# Environment overrides (beyond the install manifest read below):
+#   KLDLOAD_AUTODEPLOY_PARALLEL_AI=1 — let the model download run alongside the
+#     k8s bootstrap again (the pre-2026-08-11 behaviour). Faster on a host with
+#     headroom; it is what made a full-toggle first boot reboot-cycle.
 # ══════════════════════════════════════════════════════════════════════════════
 
 set -uo pipefail
@@ -374,6 +384,38 @@ if [[ "${WANT[ai]}" == "1" ]]; then
             curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
             sleep 2
         done
+        # ── Hold the download until the cluster is up ────────────────────────
+        # WHY: on a fresh install with ENABLE_K8S + K8S_BOOTSTRAP + BUILD_IMAGES
+        # + ENABLE_AI all set, boot #1 ran kubeadm/Cilium, the klab golden
+        # builds AND a 9.3 GB model pull at once. The box went unreachable for
+        # long stretches and reboot-cycled — too unstable to even ssh in
+        # (HISTORY: 10.100.10.123, 2026-06-15). The old comment above claimed
+        # the pull is bandwidth-bound so overlap is free; on a box that is also
+        # cloning VMs and writing them to ZFS, it is not.
+        #
+        # Only the real download waits. An air-gapped install (darksite carries
+        # the weights) does a local hash check, costs nothing, and proceeds —
+        # which is the common kldload case, so Bob is ready as early as ever
+        # there. Cap the wait at 30 min so a wedged bootstrap cannot strand
+        # Bob; KLDLOAD_AUTODEPLOY_PARALLEL_AI=1 restores the old overlap.
+        if [[ "${WANT[k8s]}" == "1" && "$_darksite_has_model" != "1" &&
+            "${KLDLOAD_AUTODEPLOY_PARALLEL_AI:-0}" != "1" ]]; then
+            log "[ai] holding the ${_chat_model} download until the k8s phase finishes (KLDLOAD_AUTODEPLOY_PARALLEL_AI=1 to overlap)"
+            for _ in $(seq 1 360); do
+                # `if`, not `[[ … ]] && break`: a false test as the loop's last
+                # command makes the whole `for` return 1, which `set -e` in this
+                # subshell would turn into a silent AI phase death.
+                if [[ -f "${STATE_DIR}/k8s-phase-done" ]]; then
+                    break
+                fi
+                sleep 5
+            done
+            if [[ -f "${STATE_DIR}/k8s-phase-done" ]]; then
+                log "[ai] k8s phase finished — starting the download"
+            else
+                log "[ai] WARNING: k8s phase still running after 30 min — starting the download anyway"
+            fi
+        fi
         # Pull with retry + verification. `ollama pull` can silently exit 0 on
         # transient network issues, leaving no model loaded. Check /api/tags
         # afterward; retry up to 3 times if the model didn't land. Without this,
@@ -594,6 +636,10 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
         fi
     fi
 fi
+# The AI subshell waits on this before starting a multi-GB download (see the
+# hold in phase 1). Written whether the bootstrap succeeded, failed, or was
+# skipped as already-ready — a failed cluster must not strand Bob forever.
+[[ "${WANT[k8s]}" != "1" ]] || touch "${STATE_DIR}/k8s-phase-done"
 
 # ── Phase 3: klab goldens (foreground) ────────────────────────────────────────
 # Last because it's the longest (~1hr). RHEL is auto-skipped if no creds
