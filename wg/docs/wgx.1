@@ -69,6 +69,42 @@ pointing at it looks orphaned;
 .Cm check
 counts unreachable hosts and says so above the findings rather than
 presenting the artefact as fact.
+.Ss Planes
+An interface name is not just a name here.
+The installer builds four WireGuard planes on every node and
+.Xr kube-network 8
+builds two more on cluster members, and each has a job:
+.Bl -tag -width "wg-mgmt" -compact
+.It Cm wg0
+enrollment only; carries no services, by design
+.It Cm wg1
+management \(em ssh and the configuration-management agent
+.It Cm wg2
+the Kubernetes backend
+.It Cm wg3
+storage replication
+.It Cm wg-mgmt
+cluster management plane
+.It Cm wg-k8s
+cluster Kubernetes plane
+.El
+.Pp
+.Nm
+groups the estate by that role, which is the one thing
+.Xr wg 8
+cannot do: it reports interfaces and byte counters, and has no idea ssh is
+bound to wg1, so it cannot tell you that a stale peer there is why a node
+stopped answering.
+Reporting per plane also turns a wall of peer rows into a line an operator
+can read during an incident \(em "management degraded on n4" rather than
+forty hex keys.
+.Pp
+An interface the substrate does not recognise is classified as unclassified
+and still reported.
+This console is pointed at estates it did not build, and a hand-rolled
+.Pa wg0.conf
+is a legitimate thing to look at.
+Planes that do not exist on this estate are omitted entirely.
 .Ss Views
 .Bl -tag -width "estate"
 .It Cm tui
@@ -77,8 +113,8 @@ Estate tree on the left, dossier on the right.
 .It Cm estate
 Print the whole estate as a text tree, for scripts, cron and remote checks.
 .It Cm check
-Report orphaned peers and one-way links.
-Silent on a healthy estate apart from one line saying so, which is what makes
+Summarise each plane, then report orphaned peers and one-way links.
+Silent on a healthy estate apart from one line per plane, which is what makes
 it usable in a loop.
 .It Cm show
 One-shot peer dossiers for the local host.

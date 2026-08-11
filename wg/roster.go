@@ -232,6 +232,13 @@ func (f Findings) Report() string {
 // cmdCheck is `wgx check` — sweep the estate and report what does not add up.
 func cmdCheck() error {
 	devs := CollectEstate(sshHosts())
-	fmt.Print(Analyse(devs).Report())
+	f := Analyse(devs)
+	// Planes first: an operator reading this during an incident wants "which
+	// plane is broken" before "which peer key is unaccounted for".
+	if ps := PlaneSummary(devs); ps != "" {
+		fmt.Print(ps)
+		fmt.Println()
+	}
+	fmt.Print(f.Report())
 	return nil
 }
