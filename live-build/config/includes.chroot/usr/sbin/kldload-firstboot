@@ -3082,6 +3082,29 @@ CHROMEPOL
     # kiosk autostart. See arm_vm_restore() above.
     arm_vm_restore
 
+    # ── Heal: virtualisation group membership ─────────────────────────────────
+    # Second failsafe for the group assignment k_create_users makes at install
+    # time. It runs here too because the install-time pass can only add groups
+    # that already exist in the target, and a box that gains libvirt later — a
+    # profile change, an operator running `dnf install libvirt`, vmxplore
+    # --setup — would otherwise leave the admin user outside the group.
+    #
+    # Outside the `libvirt` group, 50-libvirt.rules makes every libvirt call
+    # raise a polkit password dialog. Cancelling it still works (the read-only
+    # monitor action is not gated the same way), so the symptom is not a
+    # failure, it is a prompt on every click — which is worse, because it
+    # trains the operator to dismiss auth dialogs without reading them.
+    for _grp in libvirt kvm; do
+        getent group "$_grp" >/dev/null 2>&1 || continue
+        for _u in "${KLDLOAD_USERNAME:-admin}" $(getent group wheel sudo 2>/dev/null |
+            cut -d: -f4 | tr ',' ' '); do
+            [[ -n "$_u" ]] && id "$_u" >/dev/null 2>&1 || continue
+            id -nG "$_u" 2>/dev/null | tr ' ' '\n' | grep -qx "$_grp" && continue
+            usermod -aG "$_grp" "$_u" &&
+                log "Added $_u to $_grp (libvirt would otherwise prompt for a password)"
+        done
+    done
+
     # ── Darksite cleanup ──────────────────────────────────────────────────────
     # ZBM EFI already on EFI partition, APT pool not needed post-install —
     # reclaim the space.

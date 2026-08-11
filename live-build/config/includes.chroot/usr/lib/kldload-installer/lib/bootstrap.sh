@@ -211,6 +211,35 @@ k_create_users() {
         k_in_chroot "${target}" useradd -m -s /bin/bash -G "${admin_group}" "${user}"
     fi
 
+    # ── Supplementary groups: the ones that decide whether the desktop
+    #    prompts for a password all day ──────────────────────────────────
+    # Being in wheel/sudo is NOT enough for libvirt. The distro ships
+    # /usr/share/polkit-1/rules.d/50-libvirt.rules, which grants
+    # org.libvirt.unix.manage without a password to members of the
+    # `libvirt` group and to nobody else. Outside that group every single
+    # libvirt call raises a polkit dialog — and because the read-only
+    # monitor action is not gated the same way, cancelling the dialog
+    # still works, so the prompt is pure noise that teaches the operator
+    # to dismiss auth dialogs.
+    #
+    # HISTORY: .149, 2026-08-10 — "vmxplore is asking for the password
+    # every time I click on a screen for a VM, but if I click cancel it
+    # shows it to me." One `virsh dumpxml` per click, one dialog per
+    # dumpxml. The group was simply never assigned: `getent group libvirt`
+    # on that install returned `libvirt:x:981:` — created by the package,
+    # empty forever.
+    #
+    # kvm comes along for /dev/kvm on the distros that gate it by group
+    # rather than by udev mode 0666. Both are skipped when absent, which
+    # is the normal case on core/server installs that carry no
+    # virtualisation stack — so this is safe to run unconditionally.
+    local _grp
+    for _grp in libvirt kvm; do
+        chroot "${target}" getent group "${_grp}" >/dev/null 2>&1 || continue
+        k_in_chroot "${target}" usermod -aG "${_grp}" "${user}" ||
+            k_log "WARN: could not add ${user} to ${_grp} — libvirt will prompt for a password"
+    done
+
     if [[ -n "${KLDLOAD_PASSWORD:-}" ]]; then
         echo "${user}:${KLDLOAD_PASSWORD}" | chroot "${target}" /usr/sbin/chpasswd
     fi
@@ -296,6 +325,12 @@ KLDLOAD_K8S_BOOTSTRAP=${KLDLOAD_K8S_BOOTSTRAP:-0}
 KLDLOAD_ENABLE_DEVOPS=${KLDLOAD_ENABLE_DEVOPS:-0}
 KLDLOAD_KLAB_ZFS_DEV=${KLDLOAD_KLAB_ZFS_DEV:-0}
 KLDLOAD_ZFSLAB_MODE=${KLDLOAD_ZFSLAB_MODE:-0}
+# The account name the operator actually typed in the installer, not the
+# 'admin' default. Recorded because firstboot runs after the installer's
+# environment is gone, and anything that heals per-user state there — group
+# membership, dotfiles, desktop layout — would otherwise silently act on a
+# user named 'admin' that does not exist on this box.
+KLDLOAD_USERNAME=${KLDLOAD_USERNAME:-admin}
 EOM
 }
 
