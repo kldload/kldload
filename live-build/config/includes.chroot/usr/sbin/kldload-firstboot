@@ -1326,20 +1326,12 @@ main() {
     # silently grabs it as a Recommended dep. We explicitly remove it post-
     # install so the user-visible system has a single browser (Chrome).
     # Operator on .142 b642: "fire fox is not removed".
-    if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]] &&
-        command -v dnf >/dev/null 2>&1 &&
-        rpm -q firefox >/dev/null 2>&1; then
-        log "Firefox present despite Task #47 — removing"
-        if dnf remove -y firefox >>"$LOG" 2>&1; then
-            ok "Firefox removed (Chrome is the only browser now)"
-        else
-            log "WARNING: dnf remove firefox failed — operator can: dnf remove -y firefox"
-        fi
-        # Clean any leftover firefox-specific config (kldload's old crash-guard
-        # policies/autoconfig from the pre-Task-#47 build still ship in /etc and
-        # /usr/lib64/firefox; they're harmless when firefox is gone but ugly).
-        rm -rf /etc/firefox /usr/lib64/firefox 2>/dev/null || true
-    fi
+    # Firefox is now SHIPPED, not purged. It used to be removed here because
+    # Chrome was the only supported browser; Chrome is still installed and
+    # still required (kldload-chrome-app, and Bob's Web Speech voice, which
+    # is Chromium-only) but it is no longer the one the operator is handed.
+    # 2026-08-10: "that way it's a little more free".
+    :
 
     # ── Grafana: anonymous viewer + allow_embedding ─────────────────────────
     # The webui Metrics tab loads Grafana dashboards into iframes. Without

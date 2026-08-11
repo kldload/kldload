@@ -1333,16 +1333,19 @@ OSREL
     # GNOME silently drops favorites whose .desktop is missing, so on a
     # build without Chrome the dock still renders Files + Konsole.
     # 3-pin (no Konsole). Operator on .142 b647 2026-06-08: "the dock should
-    # be files, chrome, sysdiag we dont need terminal now right?" Konsole
-    # stays accessible via the app grid (Super+A) for ad-hoc shells, but
-    # sysdiag — which itself opens IN Konsole with the tmux cockpit — is the
-    # pinned daily-driver terminal entry. Source file at
-    # live-build/config/includes.chroot/etc/dconf/db/local.d/50-kldload-installed-favorites
-    # keeps the same 3-pin in sync; do not let them drift.
-    cat >"${target}/etc/dconf/db/local.d/50-kldload-installed-favorites" <<'DCONF'
-[org/gnome/shell]
-favorite-apps=['org.gnome.Nautilus.desktop', 'google-chrome.desktop', 'vmxplore.desktop', 'zxplore.desktop', 'wgxplore.desktop', 'kldload-sysdiag.desktop']
-DCONF
+    # The dock's contents live in ONE place — the shipped file under
+    # live-build/config/includes.chroot/etc/dconf/db/local.d/. This block
+    # only places it on the target.
+    # COPY the shipped file; do not restate the pins here. This heredoc used
+    # to carry its own copy of the list "kept in sync by hand", and it drifted
+    # exactly as that always does: by 2026-08-10 the shipped file had nine
+    # pins and this one still wrote six, and because this runs at install time
+    # it WON. Every install got the stale dock while the repo looked correct.
+    # One source of truth, and the assertion below still catches a failed copy.
+    if [[ -f /etc/dconf/db/local.d/50-kldload-installed-favorites ]]; then
+        cp /etc/dconf/db/local.d/50-kldload-installed-favorites \
+            "${target}/etc/dconf/db/local.d/50-kldload-installed-favorites"
+    fi
     # .135 + onyx both shipped without this file in the installed system —
     # dock came up empty for fresh users. The heredoc won't fail on disk-full
     # or missing parent dir; assert the write landed and is non-empty.
