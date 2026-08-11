@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+<!--
+  org.wgxplore.dump.policy — lets the wgxplore console READ WireGuard
+  state without a password prompt.
+
+  Why this file exists: `wg show` needs CAP_NET_ADMIN, so a console launched
+  from the desktop (running as the operator, not root) reads nothing and
+  renders an empty estate — observed on a fresh install 2026-08-03. The
+  console re-reads every 30s, so an auth prompt per refresh is unusable.
+
+  Why allow_active=yes is defensible here: `wgx dump` is READ-ONLY — it
+  execs `wg show all dump` and prints it. It exposes interface names, peer
+  public keys, endpoints and byte counters to a locally-logged-in user;
+  it exposes NO private keys (wg omits them for non-root callers of the
+  config, and this action performs no writes at all). Mutating verbs
+  (net up, attach, rotate) are NOT covered by this action — they elevate
+  separately and show their exact command first.
+
+  Remote (ssh) logins get auth_admin: an inactive session must authenticate.
+-->
+<policyconfig>
+  <vendor>wgxplore</vendor>
+  <vendor_url>https://github.com/wgxplore/wgxplore</vendor_url>
+
+  <action id="org.wgxplore.dump.dump">
+    <description>Read WireGuard interface and peer state</description>
+    <message>Authentication is required to read WireGuard state</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/wgx</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">dump</annotate>
+  </action>
+</policyconfig>

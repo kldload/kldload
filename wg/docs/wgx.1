@@ -1,0 +1,209 @@
+.\" wgx.1 — manual for the wgxplore console. mdoc, OpenBSD section order.
+.\" Keep in lockstep with the --help banner and the verbs in main.go.
+.Dd August 10, 2026
+.Dt WGX 1
+.Os
+.Sh NAME
+.Nm wgx ,
+.Nm wgx-tui
+.Nd the WireGuard estate console: sweep, join, explain
+.Sh SYNOPSIS
+.Nm
+.Op Cm tui | Cm estate | Cm check | Cm show
+.Nm
+.Cm attach Ar interface Ar container
+.Sh DESCRIPTION
+.Nm
+is a keyboard-driven console for kernel WireGuard across a fleet.
+It reaches every host in an inventory over plain
+.Xr ssh 1 ,
+reads the WireGuard state each one reports, and joins the results into a
+single view: every interface, every peer, handshake-fresh or long dead.
+.Pp
+.Nm
+does not generate keys and cannot declare a network.
+That is a deliberate boundary, not a missing feature.
+Hosts mint their own keypairs at install time, so a private key never
+crosses a filesystem or network boundary and dies with the machine that owned
+it; a console that also minted keys would be a second, weaker identity system
+holding every private key in one place.
+Because it only reads,
+.Nm
+adopts whatever is already running — a cluster built by configuration
+management, a hand-rolled
+.Pa wg0.conf ,
+a host it has never seen.
+There is no daemon, no server, no agent and no state of its own.
+.Pp
+Run with no arguments,
+.Nm
+opens the native GUI, falling back to the terminal console when no display is
+available.
+.Nm wgx-tui
+is the fully static terminal-only build.
+.Ss Membership without a registry
+Nothing writes down who is supposed to be in a WireGuard network, so
+.Nm
+derives it.
+Every legitimate peer entry in a mesh is some other host's own interface, so
+the union of the hosts' own public keys is the membership roster, and set
+difference against it answers the questions an inventory would have:
+.Bl -tag -width "one-way link"
+.It Em orphan
+A peer entry whose key belongs to no host in the sweep.
+Either a destroyed node whose entry nobody reaped, or an off-estate client
+such as a laptop or phone.
+The handshake age distinguishes them: an orphan handshaking right now is
+somebody's device, an orphan that has never handshaken is debris.
+.It Em one-way link
+Host A carries host B as a peer, and B has no entry for A.
+The tunnel looks configured from one end and does not exist from the other.
+No single-host tool can see this, because
+.Xr wg 8
+only ever reports one end.
+.El
+.Pp
+This is sound only over a sweep that reached the whole estate.
+A host that does not answer contributes no key, so every legitimate peer
+pointing at it looks orphaned;
+.Cm check
+counts unreachable hosts and says so above the findings rather than
+presenting the artefact as fact.
+.Ss Views
+.Bl -tag -width "estate"
+.It Cm tui
+Force the terminal console.
+Estate tree on the left, dossier on the right.
+.It Cm estate
+Print the whole estate as a text tree, for scripts, cron and remote checks.
+.It Cm check
+Report orphaned peers and one-way links.
+Silent on a healthy estate apart from one line saying so, which is what makes
+it usable in a loop.
+.It Cm show
+One-shot peer dossiers for the local host.
+.El
+.Ss Verbs
+.Bl -tag -width "attach"
+.It Cm attach
+Move a live WireGuard interface into a running container's network namespace.
+The encrypted socket stays anchored in the namespace where the interface was
+created, so the tunnel keeps working while the interface lives inside the
+container.
+With
+.Ic --network none
+the tunnel becomes the container's only network.
+The literal
+.Xr ip 8
+command is printed before it runs.
+Requires root.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width "WGXPLORE_REF" -compact
+.It Ev WGXPLORE_REF
+Used by downstream builds to pin the ingested revision; not read at runtime.
+.El
+.Sh FILES
+.Bl -tag -width "~/.config/wgx/hosts" -compact
+.It Pa ~/.config/wgx/hosts
+Explicit estate inventory, one ssh target per line.
+Takes precedence over the ssh configuration.
+.It Pa /etc/wgx/hosts
+System-wide inventory, same format.
+.It Pa ~/.ssh/config
+Fallback inventory.
+Git forges and
+.Ic gh-*
+aliases are skipped.
+.El
+.Sh EXIT STATUS
+.Ex -std
+A non-zero status accompanies a human-readable message on standard error, so
+the verbs compose with
+.Ic &&
+and
+.Ic || .
+.Pp
+.Cm check
+exits zero whether or not it finds anything; its findings are advisory, and a
+sweep that could not reach part of the estate is not the same as a failure.
+Match on its output when you want an alarm.
+.Sh EXAMPLES
+Look at the whole fleet at once:
+.Bd -literal -offset indent
+wgx estate
+.Ed
+.Pp
+Nightly reaping check — orphans that have never handshaken are almost
+always peer entries for nodes that no longer exist:
+.Bd -literal -offset indent
+wgx check | grep never && notify "stale WireGuard peers to reap"
+.Ed
+.Pp
+Find the half-built tunnel after adding a node to a mesh, which is the
+failure that leaves traffic flowing one way:
+.Bd -literal -offset indent
+wgx check | grep "no return peer"
+.Ed
+.Pp
+Restrict an inventory to the cluster, leaving the ssh configuration alone:
+.Bd -literal -offset indent
+printf '%s\en' node1 node2 node3 > /etc/wgx/hosts
+wgx check
+.Ed
+.Pp
+Give a running container exactly one network, the tunnel and nothing
+else:
+.Bd -literal -offset indent
+podman run -d --network none --name job image
+wgx attach wg-lab job
+podman exec job ip addr add 10.44.0.7/24 dev wg-lab
+podman exec job ip link set wg-lab up
+.Ed
+.Sh SEE ALSO
+.Xr zxplore 1 ,
+.Xr ip 8 ,
+.Xr ip-netns 8 ,
+.Xr wg 8 ,
+.Xr wg-quick 8
+.Sh HISTORY
+.Nm
+first appeared in 2026 as the sister console to
+.Xr zxplore 1 .
+It carried a declaration model until August 2026 —
+.Cm net create ,
+.Cm net add ,
+.Cm net render ,
+.Cm net up
+— which generated every member's keypair and stored the private keys in one
+file on one host.
+That was removed when the console was folded into its parent project, whose
+hosts already generate their own keys.
+Losing the ability to create a network is what gave it the ability to read
+every network.
+.Sh AUTHORS
+.An Anthony Aq anthony@kldload.com
+.Sh CAVEATS
+Reading WireGuard state requires
+.Dv CAP_NET_ADMIN .
+.Nm
+escalates the read as gently as it can: directly when root, then
+.Xr sudo 8
+.Fl n ,
+then
+.Xr pkexec 1 .
+Unprivileged,
+.Xr wg 8
+writes nothing to standard output and still exits zero, so a console that did
+not escalate would report an empty estate rather than a permission problem.
+.Pp
+A peer that is legitimately outside the inventory — a phone, a laptop, a
+host you chose not to sweep — is reported as an orphan, because from the
+sweep's position the two are indistinguishable.
+Handshake age is the tell.
+.Pp
+The estate view works wherever
+.Xr wg 8
+runs, but the container attach is Linux-only: it depends on network
+namespaces.
+Runtime testing to date is Linux.
