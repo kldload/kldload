@@ -20,6 +20,36 @@ N=$'\e[0m'
 B=$'\e[1m'
 
 LC_ALL=${LC_ALL:-C.UTF-8}
+# ── Width adaptation ─────────────────────────────────────────────────
+# The cheatsheet was laid out for a terminal it does not always get. Two
+# columns of key(12) + name(22) + desc(36) needs ~140 columns; the launcher
+# asks for 200x60, but that request is not always honoured — Wayland may
+# ignore a geometry hint, a small screen clamps it, and ptyxis and
+# gnome-console (which replace gnome-terminal on newer GNOME) take no
+# geometry argument at all. When it is not honoured the right-hand column
+# wraps into the left and the menu is unreadable until the operator resizes
+# the window by hand.
+#
+# HISTORY: reported 2026-08-10 — "the terminal also needs to be resized to
+# see the os menu".
+#
+# Three layouts, chosen from the width we actually have:
+#   >=136  two columns with descriptions   (the original)
+#   >=72   two columns, descriptions dropped
+#   <72    one column, stacked, descriptions dropped
+# stty is asked before tput because COLUMNS is not exported into a command
+# substitution, and tput reads the terminfo size which can be stale after a
+# resize; stty size asks the kernel.
+_COLS=$( (stty size 2>/dev/null | awk '{print $2}') || true)
+[[ -z "${_COLS:-}" || "${_COLS}" -lt 20 ]] && _COLS=$(tput cols 2>/dev/null || echo 80)
+if ((_COLS >= 136)); then
+    _LAYOUT=wide
+elif ((_COLS >= 72)); then
+    _LAYOUT=medium
+else
+    _LAYOUT=narrow
+fi
+
 _pad() {
     local s="$1" w="$2" cl=${#1}
     if ((cl < w)); then
@@ -42,13 +72,23 @@ R_ROWS=()
 _head() {
     local col="$1" title="$2" subtitle="$3" color="$4"
     local row
-    row="${color}${B}$(_pad "$title" 40)${N}${M}$(_pad "$subtitle" 32)${N}"
+    if [[ "$_LAYOUT" == wide ]]; then
+        row="${color}${B}$(_pad "$title" 40)${N}${M}$(_pad "$subtitle" 32)${N}"
+    else
+        row="${color}${B}${title}${N}"
+    fi
     if [[ "$col" == "L" ]]; then L_ROWS+=("$row"); else R_ROWS+=("$row"); fi
 }
 _emit() {
     local col="$1" key="$2" name="$3" desc="$4" color="$5"
     local row
-    row="${color}$(_pad "  $key" 12)${W}$(_pad "$name" 22)${N}${M}$(_pad "$desc" 36)${N}"
+    if [[ "$_LAYOUT" == wide ]]; then
+        row="${color}$(_pad "  $key" 12)${W}$(_pad "$name" 22)${N}${M}$(_pad "$desc" 36)${N}"
+    else
+        # Drop the description, keep the binding and its name — the two
+        # things the sheet exists to tell you.
+        row="${color}$(_pad "  $key" 12)${W}$(_pad "$name" 20)${N}"
+    fi
     if [[ "$col" == "L" ]]; then L_ROWS+=("$row"); else R_ROWS+=("$row"); fi
 }
 _blank() {
@@ -125,11 +165,18 @@ _emit R "Super-Sh+←/→" "tile L/R" "snap to half-screen" "$M"
 # ── Compose side-by-side ─────────────────────────────────────────────
 _max=${#L_ROWS[@]}
 ((${#R_ROWS[@]} > _max)) && _max=${#R_ROWS[@]}
-for ((i = 0; i < _max; i++)); do
-    L="${L_ROWS[i]:-}"
-    R="${R_ROWS[i]:-}"
-    printf '%s   %s\n' "$L" "$R"
-done
+if [[ "$_LAYOUT" == narrow ]]; then
+    # Too thin for two columns at all: stack them so nothing wraps.
+    printf '%s\n' "${L_ROWS[@]}"
+    printf '\n'
+    printf '%s\n' "${R_ROWS[@]}"
+else
+    for ((i = 0; i < _max; i++)); do
+        L="${L_ROWS[i]:-}"
+        R="${R_ROWS[i]:-}"
+        printf '%s   %s\n' "$L" "$R"
+    done
+fi
 
 cat <<FOOT
 
