@@ -35,7 +35,28 @@ _visible_len() {
     printf '%d' "${#plain}"
 }
 
+# Render the sheet twice-aware: first ask it what it needs at full width so
+# we can decide the composition, then re-render it inside whatever budget
+# that decision leaves. Without the second pass each block sized itself to
+# the whole terminal and the SUM overflowed.
 mapfile -t RIGHT < <(/usr/local/bin/_sysdiag-home 2>/dev/null)
+
+# ── Side-by-side, or stacked ─────────────────────────────────────────
+# fastfetch is ~54 columns and the cheatsheet ~119, so composing them
+# side by side needs ~175 before anything wraps. A 191-column terminal
+# fits that only at a font size small enough to be unpleasant, which is
+# what the operator hit (2026-08-10: "at this resolution it displays but
+# it's small").
+#
+# Stacking removes the ADDITION: the widest thing on screen becomes
+# max(54, 119) = 119 rather than 54+119, so the same content is readable
+# at a far larger font. Side-by-side is still used when there is genuinely
+# room for it, because it is the denser view when the screen can afford it.
+#
+# stty is asked before tput: COLUMNS is not exported into a command
+# substitution, and terminfo can be stale after a resize.
+_cols=$( (stty size 2>/dev/null | awk '{print $2}') || true)
+[[ -z "${_cols:-}" || "${_cols}" -lt 20 ]] && _cols=$(tput cols 2>/dev/null || echo 80)
 
 if command -v fastfetch >/dev/null 2>&1; then
     # --logo-position top: SEQUENTIAL line-by-line (default "left"
@@ -82,21 +103,41 @@ if command -v fastfetch >/dev/null 2>&1; then
         ((w > maxw)) && maxw=$w
     done
 
-    # Compose side-by-side
-    n=${#LEFT[@]}
-    m=${#RIGHT[@]}
-    ((n > m)) && total=$n || total=$m
-    for ((i = 0; i < total; i++)); do
-        l="${LEFT[i]:-}"
-        r="${RIGHT[i]:-}"
-        if [[ -n "$l" ]]; then
-            visw=$(_visible_len "$l")
-            padding=$((maxw - visw + 2))
-        else
-            padding=$((maxw + 2))
-        fi
-        printf '%s%*s%s\n' "$l" "$padding" '' "$r"
+    # Widest cheatsheet row, so the decision uses real numbers rather than
+    # an assumption about either block's size.
+    rmax=0
+    for row in "${RIGHT[@]}"; do
+        w=$(_visible_len "$row")
+        ((w > rmax)) && rmax=$w
     done
+
+    if ((_cols >= maxw + rmax + 2)); then
+        # Re-render the sheet inside the leftover width so it lays itself
+        # out for the space it will actually occupy, not the whole screen.
+        mapfile -t RIGHT < <(SYSDIAG_COLS=$((_cols - maxw - 2)) \
+            /usr/local/bin/_sysdiag-home 2>/dev/null)
+        m=${#RIGHT[@]}
+        # Compose side-by-side
+        n=${#LEFT[@]}
+        m=${#RIGHT[@]}
+        ((n > m)) && total=$n || total=$m
+        for ((i = 0; i < total; i++)); do
+            l="${LEFT[i]:-}"
+            r="${RIGHT[i]:-}"
+            if [[ -n "$l" ]]; then
+                visw=$(_visible_len "$l")
+                padding=$((maxw - visw + 2))
+            else
+                padding=$((maxw + 2))
+            fi
+            printf '%s%*s%s\n' "$l" "$padding" '' "$r"
+        done
+    else
+        # Stacked: system summary, then the cheatsheet under it.
+        printf '%s\n' "${LEFT[@]}"
+        printf '\n'
+        printf '%s\n' "${RIGHT[@]}"
+    fi
 else
     # No fastfetch — just print the cheatsheet alone.
     printf '%s\n' "${RIGHT[@]}"

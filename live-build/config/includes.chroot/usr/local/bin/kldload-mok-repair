@@ -193,8 +193,22 @@ ${G}Both requests are queued.${N} On the ${Y}next reboot${N}:
   5. Secure Boot can then be enabled in firmware — the boot chain will verify.
 
 EOF
-    read -rp "Reboot now? [y/N] " a
-    [[ "${a,,}" == y* ]] && systemctl reboot
+    # Only offer the reboot when there is somebody to answer. Run over ssh
+    # or from a script, `read` gets nothing, the test below returns 1, and
+    # with `set -e` a SUCCESSFUL repair exited non-zero reporting
+    # "FAIL at line 202" — which reads exactly like the queuing failed.
+    # It had not: both requests were staged. (Found 2026-08-10 queuing a
+    # repair on .149 over ssh.)
+    if [[ ! -t 0 ]]; then
+        echo "(no terminal here — reboot when you are ready to enroll)"
+        return 0
+    fi
+    local a=""
+    read -rp "Reboot now? [y/N] " a || true
+    if [[ "${a,,}" == y* ]]; then
+        systemctl reboot
+    fi
+    return 0
 }
 
 case "${1:-status}" in

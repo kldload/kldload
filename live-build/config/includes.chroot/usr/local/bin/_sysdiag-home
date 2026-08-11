@@ -40,8 +40,20 @@ LC_ALL=${LC_ALL:-C.UTF-8}
 # stty is asked before tput because COLUMNS is not exported into a command
 # substitution, and tput reads the terminfo size which can be stale after a
 # resize; stty size asks the kernel.
-_COLS=$( (stty size 2>/dev/null | awk '{print $2}') || true)
+# SYSDIAG_COLS lets the caller state the budget. _sysdiag-greeting sets it
+# to (terminal - fastfetch - padding) when it composes side by side; without
+# it each block sized to the full terminal and the sum overflowed — 154
+# columns of output in a 140-column window (measured 2026-08-10).
+_COLS="${SYSDIAG_COLS:-}"
+[[ -z "$_COLS" ]] && _COLS=$( (stty size 2>/dev/null | awk '{print $2}') || true)
 [[ -z "${_COLS:-}" || "${_COLS}" -lt 20 ]] && _COLS=$(tput cols 2>/dev/null || echo 80)
+# The rule spans the usable width rather than a hardcoded 76 characters.
+_RULE=""
+_rw=$((_COLS - 4))
+((_rw < 8)) && _rw=8
+((_rw > 76)) && _rw=76
+for ((_i = 0; _i < _rw; _i++)); do _RULE+="─"; done
+
 if ((_COLS >= 136)); then
     _LAYOUT=wide
 elif ((_COLS >= 72)); then
@@ -62,7 +74,7 @@ _pad() {
 cat <<BANNER
 
 ${W}  sysdiag${N}${M}  ─ local-OS observability cockpit ${D}(parallel to klab)${N}
-${D}  ────────────────────────────────────────────────────────────────────────────${N}
+${D}  ${_RULE}${N}
 
 BANNER
 
@@ -178,9 +190,13 @@ else
     done
 fi
 
+# The worked example is ~100 columns; keep it only when it fits.
+_BOBEG=""
+((_COLS >= 110)) && _BOBEG=" ${D}Ask: ${N}${C}\"sysdiag: open zfs pane, tell me if any pool is degraded\"${N}"
+
 cat <<FOOT
 
 ${M}  ${D}Type ${N}${C}menu${M}${D} to redraw, ${N}${C}help${M}${D} for the full kldload-help docs.${N}
-${M}  ${D}Bob can drive these same panes — ask: ${N}${C}\"sysdiag: open zfs pane, tell me if any pool is degraded\"${N}
+${M}  ${D}Bob can drive these same panes.${N}${_BOBEG}
 
 FOOT

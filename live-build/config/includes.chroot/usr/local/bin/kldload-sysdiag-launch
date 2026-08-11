@@ -36,8 +36,22 @@ fi
 
 # gnome-terminal first. 200x60 chars (~1600x900 px) is the size the tmux
 # F-key layout in sysdiag was designed around.
+# ── Window size: maximize, do not guess ──────────────────────────────
+# --geometry=200x60 was a request, not a guarantee. A Wayland compositor
+# may ignore the size hint, and where it is honoured 200 columns is wider
+# than many screens so the window manager clamps it — landing two screen
+# sizes short of what the cheatsheet needs, which is what the operator
+# reported (2026-08-10: "sysdiag also starts 2 resolutions too small").
+#
+# --maximize asks for the whole screen instead, which is what a cockpit
+# wants anyway and cannot be clamped into something too small. It is kept
+# alongside --geometry so a compositor that honours neither still gets a
+# sensible fallback size rather than 80x24.
+#
+# _sysdiag-home adapts its layout to whatever width actually arrives, so
+# a terminal that ignores both still renders a readable sheet.
 if command -v gnome-terminal >/dev/null 2>&1; then
-    exec gnome-terminal --geometry=200x60 -- "$SYSDIAG"
+    exec gnome-terminal --maximize --geometry=200x60 -- "$SYSDIAG"
 fi
 
 # Fallbacks, in order of preference, so sysdiag ALWAYS opens:
@@ -51,10 +65,10 @@ fi
 for _t in ptyxis gnome-console kgx konsole xterm; do
     command -v "$_t" >/dev/null 2>&1 || continue
     case "$_t" in
-    ptyxis) exec ptyxis -- "$SYSDIAG" ;;
-    gnome-console | kgx) exec "$_t" -e "$SYSDIAG" ;;
+    ptyxis) exec ptyxis --maximize -- "$SYSDIAG" ;;
+    gnome-console | kgx) exec "$_t" --maximize -e "$SYSDIAG" ;;
     konsole) exec konsole -p TerminalColumns=200 -p TerminalRows=60 -p ColorScheme="$SCHEME" -e "$SYSDIAG" ;;
-    xterm) exec xterm -geometry 200x60 -e "$SYSDIAG" ;;
+    xterm) exec xterm -maximized -e "$SYSDIAG" ;;
     esac
 done
 echo "kldload-sysdiag-launch: no terminal emulator found (install gnome-terminal or konsole)" >&2
