@@ -533,41 +533,35 @@ if [[ "$EDITION" != "core" ]]; then
     install -d "${ROOTFS}/etc/kldload"
     printf '%s\n' "$_zx_commit" >"${ROOTFS}/etc/kldload/zxplore-commit"
 
-    # ── wgxplore — the WireGuard networks console, built from its OWN repo
-    # (github.com/wgxplore/wgxplore, public). Separate repo for the same
-    # reason as zxplore: wgxplore runs on ANY system with WireGuard, kldload
-    # is just its first-party distribution — anyone can use either explorer
-    # without kldload. Same tracks-main + cache model as zxplore above:
-    # online builds refresh the cache and ship newest, an air-gapped builder
-    # ships the cached source with a loud warning, and the ingested commit
-    # is baked into /etc/kldload/wgxplore-commit for traceability. GUI
-    # wherever the rootfs has GL (readelf-asserted), static TUI everywhere
-    # else.
-    WGXPLORE_REF="${WGXPLORE_REF:-}"
-    log "Building wgxplore (${WGXPLORE_REF:-main HEAD}) from github.com/wgxplore/wgxplore ..."
+    # ── wgxplore — the WireGuard estate console, built from THIS repo (wg/).
+    # It is the one console that is NOT a separate product. It was folded in
+    # on 2026-08-10 because the thing it needs — who owns WireGuard identity
+    # — is decided here: hosts mint their own keypairs at install time, and a
+    # console that also minted keys was a second, weaker identity system.
+    # zxplore and vmxplore stay upstream because they ARE products people run
+    # on non-kldload machines; building those from a vendored copy would ship
+    # something that is not the released binary.
+    #
+    # So: no clone, no cache, no network fetch for the source. The commit
+    # stamp is this repo's HEAD, which is also the ISO's own build identity —
+    # one answer to "which wgxplore is this?" instead of two that can differ.
+    #
+    # NOTE: Go MODULE downloads still need the network here, same as the
+    # other two consoles (there is no vendor/ and GOPATH is wiped each run).
+    # Moving the source in-tree removes one network dependency, not all of
+    # them. A truly offline builder needs a seeded module cache — untouched
+    # by this change and still an open gap.
+    _wgx_src="/build/wg"
+    [[ -f "${_wgx_src}/main.go" ]] ||
+        die "FATAL: wg/ missing from the repo — the WireGuard console lives in-tree now, not upstream."
+    log "Building wgxplore from in-tree wg/ ..."
     rm -rf /tmp/wgx-src
-    _wgx_cache="/build/live-build/wgxplore-cache"
-    _wgx_fresh=0
-    if [[ -d "${_wgx_cache}/.git" ]]; then
-        if (git -C "$_wgx_cache" fetch --depth 1 origin "${WGXPLORE_REF:-main}" &&
-            git -C "$_wgx_cache" reset --hard FETCH_HEAD) >>"$LOG_FILE" 2>&1; then
-            _wgx_fresh=1
-        fi
-    else
-        _wgx_clone=(git clone --depth 1)
-        [[ -n "$WGXPLORE_REF" ]] && _wgx_clone+=(--branch "$WGXPLORE_REF")
-        if "${_wgx_clone[@]}" https://github.com/wgxplore/wgxplore.git "$_wgx_cache" >>"$LOG_FILE" 2>&1; then
-            _wgx_fresh=1
-        fi
-    fi
-    [[ -d "${_wgx_cache}/.git" ]] ||
-        die "FATAL: wgxplore unavailable — no network AND no cached source at live-build/wgxplore-cache. Run one online build to populate the cache for darksite builds."
-    if ((!_wgx_fresh)); then
-        log "WARNING: wgxplore refresh failed (offline/darksite builder?) — shipping CACHED commit $(git -C "$_wgx_cache" rev-parse --short HEAD)"
-    fi
-    cp -a "$_wgx_cache" /tmp/wgx-src
-    _wgx_commit="$(git -C /tmp/wgx-src rev-parse HEAD)"
-    log "wgxplore commit: ${_wgx_commit}"
+    cp -a "$_wgx_src" /tmp/wgx-src
+    # Build artefacts from a developer's working tree must never reach the
+    # ISO: .gotmp is the exec-capable TMPDIR used when testing locally.
+    rm -rf /tmp/wgx-src/.gotmp
+    _wgx_commit="$(git -C /build rev-parse HEAD 2>/dev/null || echo unknown)"
+    log "wgxplore commit (kldload HEAD): ${_wgx_commit}"
     printf '%s\n' "$_wgx_commit" >"${ROOTFS}/etc/kldload/wgxplore-commit"
 
     if [[ -e "${ROOTFS}/usr/lib64/libGL.so.1" && -e "${ROOTFS}/usr/lib64/libxkbcommon.so.0" ]]; then
@@ -593,6 +587,28 @@ if [[ "$EDITION" != "core" ]]; then
     else
         die "FATAL: wgxplore build failed — refusing to ship an ISO without the WG networks tool."
     fi
+
+    # Icon, launcher and manual come from wg/ too, for the same reason the
+    # binary does: one source. HISTORY 2026-08-10 — the icon used to be a
+    # hand-maintained copy under includes.chroot, and it went stale the day
+    # the mark was redrawn: the ISO would have shipped the old teal tile
+    # while the repo and upstream both carried the new one. Fail loud rather
+    # than ship a console with a missing or wrong face.
+    [[ -r /tmp/wgx-src/assets/wgxplore.svg ]] ||
+        die "FATAL: wgxplore icon absent (wg/assets/wgxplore.svg)."
+    install -Dm0644 /tmp/wgx-src/assets/wgxplore.svg \
+        "${ROOTFS}/usr/share/icons/hicolor/scalable/apps/wgxplore.svg" ||
+        die "FATAL: wgxplore icon install failed."
+    [[ -r /tmp/wgx-src/contrib/wgxplore.desktop ]] ||
+        die "FATAL: wgxplore launcher absent (wg/contrib/wgxplore.desktop)."
+    install -Dm0644 /tmp/wgx-src/contrib/wgxplore.desktop \
+        "${ROOTFS}/usr/share/applications/wgxplore.desktop" ||
+        die "FATAL: wgxplore launcher install failed."
+    if [[ -r /tmp/wgx-src/docs/wgx.1 ]]; then
+        install -Dm0644 /tmp/wgx-src/docs/wgx.1 \
+            "${ROOTFS}/usr/share/man/man1/wgx.1"
+    fi
+
     rm -f /tmp/wgx-bin
     rm -rf /tmp/wgx-src
 
