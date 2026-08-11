@@ -79,9 +79,6 @@ __ps1_k8s_ns() {
 
 PS1='$(__ps1_k8s_ns)\[\e[1;36m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
 
-# ── Internal helpers (must be before tool sections) ─────────────────────────
-__have()           { command -v "$1" >/dev/null 2>&1; }
-
 # ── Bracketed paste ───────────────────────────────────────────────────────────
 bpoff() { bind 'set enable-bracketed-paste off' 2>/dev/null || true; }
 bpon()  { bind 'set enable-bracketed-paste on'  2>/dev/null || true; }
