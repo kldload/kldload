@@ -1378,9 +1378,23 @@ OSREL
     # the install-time default (set in 00-kldload-desktop), but GNOME
     # Settings can override it for the session. Locks now stick to
     # structural-only (app folders + dock pins).
+    # favorite-apps is a DEFAULT, not a lock. Locked, GNOME hides the
+    # Pin/Unpin item entirely and `gsettings set` answers "The key is not
+    # writable" — so an operator who wants their own editor on the dock has
+    # no way to do it and nothing telling them why. Reported 2026-08-10:
+    # "i dont see a way to pin/unpin from the dock .. I feel like i missed
+    # something?" They had not; the system was refusing them.
+    #
+    # This is the same call already made for the wallpaper on .142 b647,
+    # where locking identity beat ergonomics and was reverted. The shipped
+    # pin list stays the install-time default; the operator owns it after.
+    #
+    # folder-children STAYS locked. That one has an incident behind it
+    # rather than a preference: on RHEL 10 leftover upstream app-folders
+    # ('System', 'Utilities', 'YaST', 'Pardus') intermix with ours and
+    # scatter the grid.
     cat >"${target}/etc/dconf/db/local.d/locks/kldload-desktop" <<'LOCKS'
 /org/gnome/desktop/app-folders/folder-children
-/org/gnome/shell/favorite-apps
 LOCKS
 
     # ── Per-user xdg autostart + systemd tmpfiles glob copy ──────────────────
