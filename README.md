@@ -31,6 +31,7 @@ sudo dd if=kldload.iso of=/dev/sdX bs=4M oflag=direct conv=fsync status=progress
 # Or build from source
 git clone https://github.com/kldload/kldload.git && cd kldload
 PROFILE=desktop ./deploy.sh build
+sudo ./deploy.sh burn /dev/sdX      # names the device, shows it, asks before writing
 ```
 
 Boot the USB &rarr; the web UI opens over TLS at `https://<host>:8443` &rarr; pick distro + profile + disk &rarr; install.
@@ -112,7 +113,7 @@ Only **remote** browsers do &mdash; sign in with your admin account (a `wheel`/
 
 ---
 
-## Eight distributions, one USB
+## Seven distributions, one USB
 
 | Distribution | Install method | Offline |
 |---|---|---|
@@ -123,7 +124,6 @@ Only **remote** browsers do &mdash; sign in with your admin account (a `wheel`/
 | Rocky Linux 10 | `dnf --installroot` | Network (no EL darksite yet) |
 | RHEL 10 | `dnf --installroot` | No (Red Hat CDN; subscription required) |
 | Arch Linux | `pacstrap` | No (rolling; requires internet) |
-| Alpine Linux | `apk add --root` | Partial (apk cache) |
 
 Live environment is **Fedora 44** (kernel 7.0.x — currently `7.0.12` — with OpenZFS `2.4.3` on root).
 
@@ -281,23 +281,28 @@ No cloud, no telemetry, no API key &mdash; the models and the index live on the 
 ntfs-3g/exfatprogs, `fio`, `stress-ng`, memtest86+ &mdash; the install USB doubles
 as the recovery USB.
 
-### How the eight distros get built
+### How the seven distros get built
 The installer bootstraps each target with **that distro's own tool** &mdash;
 [debootstrap](https://wiki.debian.org/Debootstrap) (Debian/Ubuntu),
 `dnf --installroot` (Fedora/CentOS Stream/Rocky/RHEL),
-[pacman](https://archlinux.org/pacman/) (Arch, via `pacman-static`) and
-`apk` (Alpine, via `apk-tools-static`). Packages come from the vendors' own
+and [pacman](https://archlinux.org/pacman/) (Arch, via `pacman-static`).
+Packages come from the vendors' own
 CDNs; the ISO itself is built with Red Hat's
 [lorax](https://github.com/weldr/lorax), `dracut`, `squashfs-tools` and
 [xorriso](https://www.gnu.org/software/xorriso/) inside a Fedora 44 container.
 
 ### The sister consoles
-[zxplore](https://github.com/zxplore/zxplore) (ZFS) and
-[wgxplore](https://github.com/wgxplore/wgxplore) (WireGuard) are separate BSD-3
-projects by the same author, built from their own upstream repos at ISO-build
-time. The exact commit shipped is recorded in `/etc/kldload/zxplore-commit` and
-`/etc/kldload/wgxplore-commit`. They run on any Linux/BSD box &mdash; kldload is
-their first-party distribution, not their owner.
+[zxplore](https://github.com/zxplore/zxplore) (ZFS) is a separate BSD-3 project
+by the same author, built from its own upstream repo at ISO-build time; the
+exact commit shipped is recorded in `/etc/kldload/zxplore-commit`. It runs on
+any Linux/BSD box &mdash; kldload is its first-party distribution, not its owner.
+
+[vmxplore](https://github.com/vmxplore/vmxplore) (KVM) is the same arrangement:
+its own repo, its own release cadence, shipped here.
+
+**wg** (WireGuard) is built from this repository's own `wg/` directory, so
+`/etc/kldload/wgxplore-commit` records kldload's HEAD rather than a separate
+upstream. It was folded in on 2026-08-10 as a read-only estate lens.
 
 > Licences are each project's own; kldload ships them unmodified and adds no
 > licence terms of its own to them. See [License](#license) for kldload's.
@@ -358,7 +363,7 @@ their first-party distribution, not their owner.
 | `build` | Build the ISO (uses cached darksites) |
 | `full` | Rebuild the builder image + all darksites, then build the ISO |
 | `clean` | Remove build artifacts |
-| `burn` | Write the ISO to a USB device |
+| `burn [/dev/sdX] [--yes]` | Write the ISO to a USB device. Names the target; falls back to `USB_DEVICE`, then auto-detects a single removable drive. Confirms interactively (prints the device's model and size, and asks you to type the name back); `--yes` skips the prompt for scripts. |
 | `builder-image` | Rebuild the Fedora 44 builder container |
 | `smoke-build` | Static checks on the built ISO (size, freshness, content) |
 | `smoke-test <distro> <profile>` | Full install lifecycle in KVM, then smoke-test the installed target |
@@ -379,7 +384,6 @@ Builder:           Fedora 44 container (lorax + squashfs-tools + xorriso + dracu
 Bootstrap paths:   dnf --installroot  (CentOS / Fedora / Rocky / RHEL)
                    debootstrap        (Debian / Ubuntu)
                    pacstrap           (Arch)
-                   apk add --root     (Alpine)
 
 Installer:         Python web UI + ~10 bash libraries (lib/) + backend/bin tools
 Web UI:            single HTML file per edition + WebSocket install-log stream
@@ -510,7 +514,7 @@ in the lower-right corner saying *this isn't stock*.
 - Install path rewritten end-to-end against real hardware
 
 ### 1.0.x &mdash; Foundations
-ZFS on root + ZFSBootMenu, the offline RPM/APT darksites, KVM-on-ZFS with instant zvol clones, `kube-cluster` (K8s on ZFS-backed VMs with Cilium/Hubble/Tetragon), the Bob agent, the observability stack, and the growth from 4 to all eight distributions.
+ZFS on root + ZFSBootMenu, the offline RPM/APT darksites, KVM-on-ZFS with instant zvol clones, `kube-cluster` (K8s on ZFS-backed VMs with Cilium/Hubble/Tetragon), the Bob agent, the observability stack, and the growth from 4 to all seven distributions.
 
 ---
 
