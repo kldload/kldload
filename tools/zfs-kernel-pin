@@ -7,7 +7,9 @@
 #   2. reads that release's declared kernel ceiling (META: Linux-Maximum);
 #   3. asks koji for the highest kernel build at or below that ceiling for the
 #      target Fedora release;
-#   4. prints the resulting pin, or with --check compares it against the pin
+#   4. does the same for the master branch, because master always targets the
+#      latest kernel while a release freezes its ceiling;
+#   5. prints both, or with --check compares the RELEASE pin against the one
 #      currently hardcoded in builder/build-iso.sh and reports drift.
 #
 # WHY THIS EXISTS:
@@ -27,7 +29,9 @@
 #   ARCH            target architecture     (default: x86_64)
 #   --check         exit 1 if build-iso.sh disagrees with the derived pin
 #   --json          machine-readable, for a build step to consume
-#   Prints the ZFS version, its ceiling, and the kernel NVR to pin.
+#   Prints both tracks: the ZFS version, its ceiling, and the kernel NVR each
+#   one allows. --check only ever gates on the RELEASE track — master moves
+#   daily and is a decision, not a target to auto-follow.
 #
 # NOTES:
 #   - Network-dependent by nature: it asks GitHub and koji what exists. It
@@ -122,16 +126,35 @@ current_pin() {
 }
 
 main() {
-    local mode="${1:-report}" tag cap nvr cur
+    local mode="${1:-report}" tag cap nvr cur mcap mnvr mver
     tag="$(newest_zfs_tag)"
     cap="$(zfs_kernel_ceiling "$tag")"
     nvr="$(highest_kernel_at_or_below "$cap")"
     cur="$(current_pin)"
 
+    # The master track, reported alongside because it is the actual decision.
+    #
+    # Upstream's guidance (2026-08-12, from the OpenZFS call): master always
+    # targets the latest kernel, while a RELEASE freezes its ceiling. That
+    # matters here because Fedora prunes kernels faster than OpenZFS cuts
+    # releases — 7.0 is already gone from the repos and will never be built
+    # again, so the release track is pinned to a kernel that stops receiving
+    # fixes. Seeing both numbers side by side is what makes that visible
+    # instead of arriving as a surprise.
+    #
+    # build-iso.sh can already build this track: KLDLOAD_ZFS_GIT=<ref>.
+    mver="$(curl -sSf --max-time 20 "${GH_RAW}/master/META" |
+        awk '/^Version:/ {print $2}')" || mver="?"
+    mcap="$(zfs_kernel_ceiling master)"
+    mnvr="$(highest_kernel_at_or_below "$mcap")"
+
     case "$mode" in
     --json)
-        printf '{"zfs":"%s","linux_maximum":"%s","kernel_nvr":"%s","current":"%s","drift":%s}\n' \
-            "${tag#zfs-}" "$cap" "$nvr" "$cur" \
+        printf '{"release":{"zfs":"%s","linux_maximum":"%s","kernel_nvr":"%s"},' \
+            "${tag#zfs-}" "$cap" "$nvr"
+        printf '"master":{"zfs":"%s","linux_maximum":"%s","kernel_nvr":"%s"},' \
+            "$mver" "$mcap" "$mnvr"
+        printf '"current":"%s","drift":%s}\n' "$cur" \
             "$([[ "$nvr" == "$cur" ]] && echo false || echo true)"
         ;;
     --check)
@@ -143,10 +166,13 @@ main() {
         echo "pin is current: ${cur} (${tag}, Linux-Maximum ${cap})"
         ;;
     *)
-        echo "newest ZFS release : ${tag#zfs-}"
-        echo "declared ceiling   : Linux-Maximum ${cap}"
-        echo "highest kernel <= it: ${nvr}"
-        echo "build-iso.sh pins  : ${cur}"
+        echo "release track  ${tag#zfs-}  ceiling ${cap}  ->  ${nvr}"
+        echo "master track   ${mver}  ceiling ${mcap}  ->  ${mnvr}"
+        echo "build-iso.sh pins   : ${cur}"
+        if [[ "$mnvr" != "$nvr" ]]; then
+            echo "note               : master supports a newer kernel than the" \
+                "release. Build it with KLDLOAD_ZFS_GIT=master to reach ${mnvr}."
+        fi
         if [[ "$nvr" == "$cur" ]]; then
             echo "status             : current"
         else
