@@ -1798,12 +1798,36 @@ WPEOF
     local _distro="${KLDLOAD_DISTRO:-debian}"
     if [[ -d "${tgt_files}" && ("$_distro" == "debian" || "$_distro" == "ubuntu") ]]; then
         mkdir -p "${target}/etc/apt/apt.conf.d"
-        cp "${tgt_files}/etc/apt/apt.conf.d/60-kldload-kernel" \
-            "${target}/etc/apt/apt.conf.d/60-kldload-kernel" 2>/dev/null || true
+        # WHY the name matters and why this is not swallowed: this file is the
+        # APT::NeverAutoRemove list that keeps linux-headers-* and zfs-dkms
+        # installed. Without it `apt autoremove` — which apt itself suggests
+        # after an upgrade — can take the DKMS build environment away, and the
+        # NEXT kernel upgrade then produces a kernel with no ZFS module. On ZFS
+        # root that is an unbootable machine.
+        #
+        # HISTORY: this copied "60-kldload-kernel", but the file shipped in
+        # target-files is named "60-debz-kernel". cp failed, 2>/dev/null || true
+        # hid it, and every Debian/Ubuntu install went out with no protection
+        # at all. Found 2026-08-12 while answering a user asking exactly this:
+        # "will apt upgrade blow out the kernel?"
+        if ! cp "${tgt_files}/etc/apt/apt.conf.d/60-debz-kernel" \
+            "${target}/etc/apt/apt.conf.d/60-debz-kernel"; then
+            k_log "FATAL: could not install 60-debz-kernel — apt autoremove" \
+                "would be free to strip the DKMS build environment"
+            return 1
+        fi
         mkdir -p "${target}/etc/kernel/postinst.d"
         cp "${tgt_files}/etc/kernel/postinst.d/kldload-dkms-verify" \
             "${target}/etc/kernel/postinst.d/kldload-dkms-verify" 2>/dev/null || true
         chmod +x "${target}/etc/kernel/postinst.d/kldload-dkms-verify" 2>/dev/null || true
+        # Second failsafe (the b653 pattern): apt-mark hold on the kernel, the
+        # headers and the ZFS packages. The unit shipped but nothing ever
+        # enabled it, so BOTH layers of this protection were inert.
+        if ! chroot "${target}" systemctl enable kldload-package-holds.service \
+            >/dev/null 2>&1; then
+            k_log "WARN: kldload-package-holds.service not enabled — kernel" \
+                "and zfs-dkms are unheld; apt upgrade may replace the kernel"
+        fi
     fi
 
     # ── APT mirror service on the installed target (skip for core) ────────────────
