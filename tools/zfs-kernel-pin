@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# =============================================================================
+# zfs-kernel-pin — derive the kernel pin from ZFS, instead of remembering it.
+#
+# WHAT IT DOES, IN ORDER:
+#   1. resolves the newest OpenZFS RELEASE tag;
+#   2. reads that release's declared kernel ceiling (META: Linux-Maximum);
+#   3. asks koji for the highest kernel build at or below that ceiling for the
+#      target Fedora release;
+#   4. prints the resulting pin, or with --check compares it against the pin
+#      currently hardcoded in builder/build-iso.sh and reports drift.
+#
+# WHY THIS EXISTS:
+#   The substrate's constraint order is ZFS first, kernel second, everything
+#   that builds against the kernel third. That policy was already written down
+#   in build-iso.sh — "modules only build against RELEASE zfs; the kernel holds
+#   at the newest that release supports" — but the RESULT of applying it was
+#   typed in by hand as KOJI_KERNEL_NVR. So the policy could not drift, and the
+#   number could: the pin sat at 7.0.12 while koji had shipped 7.0.14, which is
+#   two months of kernel fixes nobody decided to skip.
+#
+#   All three inputs are machine-readable, so the number should be derived and
+#   the human should only ever review it.
+#
+# INPUTS / OUTPUTS:
+#   FEDORA_RELEASE  target Fedora major     (default: 44)
+#   ARCH            target architecture     (default: x86_64)
+#   --check         exit 1 if build-iso.sh disagrees with the derived pin
+#   --json          machine-readable, for a build step to consume
+#   Prints the ZFS version, its ceiling, and the kernel NVR to pin.
+#
+# NOTES:
+#   - Network-dependent by nature: it asks GitHub and koji what exists. It
+#     FAILS rather than guessing, because a wrong pin is a kernel ZFS cannot
+#     build against — an unbootable machine on ZFS root.
+#   - kojipkgs keeps every built NVR forever, which is the whole reason this
+#     works: Fedora's repos prune old kernels, koji does not.
+# =============================================================================
+set -Eeuo pipefail
+trap 'echo "zfs-kernel-pin: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+FEDORA_RELEASE="${FEDORA_RELEASE:-44}"
+ARCH="${ARCH:-x86_64}"
+BUILD_ISO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/builder/build-iso.sh"
+GH_API="https://api.github.com/repos/openzfs/zfs/releases/latest"
+GH_RAW="https://raw.githubusercontent.com/openzfs/zfs"
+KOJI="https://kojipkgs.fedoraproject.org/packages/kernel"
+
+die() {
+    echo "zfs-kernel-pin: $*" >&2
+    exit 1
+}
+
+# newest_zfs_tag — echo the newest OpenZFS release tag (e.g. "zfs-2.4.3").
+#
+# Release, deliberately, not the newest tag: -rc builds have their own ceiling
+# and are not what a substrate pins to.
+newest_zfs_tag() {
+    local tag
+    tag="$(curl -sSf --max-time 20 "$GH_API" |
+        grep -oP '"tag_name":\s*"\K[^"]+' | head -1)" ||
+        die "could not reach the OpenZFS release API"
+    [[ -n "$tag" ]] || die "release API returned no tag_name"
+    echo "$tag"
+}
+
+# zfs_kernel_ceiling — echo the Linux-Maximum a given release declares.
+#
+# Args:    $1 — release tag.
+# Returns: the ceiling as "MAJOR.MINOR" on stdout.
+#
+# This is the number the whole pin hangs off. configure(1) gates on it, so it
+# is the difference between "builds" and "does not".
+zfs_kernel_ceiling() {
+    local tag="$1" max
+    max="$(curl -sSf --max-time 20 "${GH_RAW}/${tag}/META" |
+        awk '/^Linux-Maximum:/ {print $2}')" ||
+        die "could not read META for ${tag}"
+    [[ -n "$max" ]] || die "${tag} declares no Linux-Maximum"
+    echo "$max"
+}
+
+# highest_kernel_at_or_below — echo the newest koji kernel NVR within the cap.
+#
+# Args:    $1 — ceiling as MAJOR.MINOR.
+# Returns: NVR such as "7.0.14-201.fc44".
+#
+# Ceiling semantics: Linux-Maximum 7.0 means the 7.0.x LINE is supported, so
+# 7.0.14 qualifies and 7.1.0 does not. Comparing full versions with sort -V
+# against "7.0" would wrongly exclude every 7.0.x point release, so the match
+# is on the line.
+highest_kernel_at_or_below() {
+    local cap="$1" versions best="" v
+    versions="$(curl -sSf --max-time 30 "${KOJI}/" |
+        grep -oE '>[0-9]+\.[0-9]+\.[0-9]+/' | tr -d '>/' | sort -uV)" ||
+        die "could not list kernel builds from koji"
+
+    for v in $versions; do
+        # Keep only versions whose MAJOR.MINOR is <= the cap.
+        local line="${v%.*}"
+        [[ "$(printf '%s\n%s\n' "$line" "$cap" | sort -V | head -1)" == "$line" ]] ||
+            continue
+        best="$v"
+    done
+    [[ -n "$best" ]] || die "no kernel build at or below ${cap} found in koji"
+
+    # Now the release half: the newest build of that version for this Fedora.
+    local rel
+    rel="$(curl -sSf --max-time 30 "${KOJI}/${best}/" |
+        grep -oE ">[0-9]+\.fc${FEDORA_RELEASE}/" | tr -d '>/' | sort -uV |
+        tail -1)" ||
+        die "could not list releases for kernel ${best}"
+    [[ -n "$rel" ]] ||
+        die "kernel ${best} has no fc${FEDORA_RELEASE} build (wrong FEDORA_RELEASE?)"
+    echo "${best}-${rel}"
+}
+
+# current_pin — echo the NVR build-iso.sh has hardcoded today.
+current_pin() {
+    [[ -f "$BUILD_ISO" ]] || die "cannot find $BUILD_ISO"
+    awk -F'"' '/^KOJI_KERNEL_NVR=/ {print $2; exit}' "$BUILD_ISO"
+}
+
+main() {
+    local mode="${1:-report}" tag cap nvr cur
+    tag="$(newest_zfs_tag)"
+    cap="$(zfs_kernel_ceiling "$tag")"
+    nvr="$(highest_kernel_at_or_below "$cap")"
+    cur="$(current_pin)"
+
+    case "$mode" in
+    --json)
+        printf '{"zfs":"%s","linux_maximum":"%s","kernel_nvr":"%s","current":"%s","drift":%s}\n' \
+            "${tag#zfs-}" "$cap" "$nvr" "$cur" \
+            "$([[ "$nvr" == "$cur" ]] && echo false || echo true)"
+        ;;
+    --check)
+        if [[ "$nvr" != "$cur" ]]; then
+            echo "DRIFT: build-iso.sh pins ${cur}, but ${tag} (Linux-Maximum ${cap})" >&2
+            echo "       allows ${nvr}. Update KOJI_KERNEL_NVR." >&2
+            exit 1
+        fi
+        echo "pin is current: ${cur} (${tag}, Linux-Maximum ${cap})"
+        ;;
+    *)
+        echo "newest ZFS release : ${tag#zfs-}"
+        echo "declared ceiling   : Linux-Maximum ${cap}"
+        echo "highest kernel <= it: ${nvr}"
+        echo "build-iso.sh pins  : ${cur}"
+        if [[ "$nvr" == "$cur" ]]; then
+            echo "status             : current"
+        else
+            echo "status             : DRIFT — ${cur} -> ${nvr}"
+        fi
+        ;;
+    esac
+}
+
+main "${1:-report}"

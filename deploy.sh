@@ -999,6 +999,12 @@ build-k8s-darksite)
     fi
     log "K8s darksite ready"
     ;;
+zfs-pin)
+    # The kernel pin is DERIVED from ZFS, never remembered: newest release ->
+    # its Linux-Maximum -> highest koji kernel at or below it. See
+    # tools/zfs-kernel-pin for why the number must not be hand-maintained.
+    exec "$ROOT/tools/zfs-kernel-pin" "${2:-report}"
+    ;;
 build-ai-docs) cmd_build_ai_docs ;;
 builder-image) cmd_builder_image ;;
 clean) cmd_clean ;;

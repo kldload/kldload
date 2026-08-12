@@ -366,6 +366,7 @@ upstream. It was folded in on 2026-08-10 as a read-only estate lens.
 | `burn [/dev/sdX] [--yes]` | Write the ISO to a USB device. Names the target; falls back to `USB_DEVICE`, then auto-detects a single removable drive. Confirms interactively (prints the device's model and size, and asks you to type the name back); `--yes` skips the prompt for scripts. |
 | `builder-image` | Rebuild the Fedora 44 builder container |
 | `smoke-build` | Static checks on the built ISO (size, freshness, content) |
+| `zfs-pin` | Derive the kernel pin from the newest OpenZFS release's declared `Linux-Maximum` and report drift against `build-iso.sh` (`--check` for CI, `--json` for scripts) |
 | `smoke-test <distro> <profile>` | Full install lifecycle in KVM, then smoke-test the installed target |
 | `build-debian-darksite` / `build-ubuntu-darksite` | Build / refresh the APT offline mirrors |
 | `build-fedora-darksite` | Build / refresh the RPM offline mirror |
