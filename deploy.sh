@@ -607,9 +607,30 @@ cmd_clean() {
 # If USB_DEVICE is not set, auto-detects removable drives.
 # Refuses to auto-detect if multiple removable drives are found.
 cmd_burn() {
-    local iso
+    local iso requested="" assume_yes="${BURN_ASSUME_YES:-no}"
+    # --yes travels as an ARGUMENT, not an environment variable, because
+    # cmd_ship re-execs this through sudo and env_reset drops anything not in
+    # env_keep. An unattended loop that silently regained a prompt would hang
+    # forever behind a tee.
+    local _a
+    for _a in "$@"; do
+        case "$_a" in
+        --yes | -y) assume_yes="yes" ;;
+        *) requested="$_a" ;;
+        esac
+    done
     iso="$(latest_iso)"
     [[ -n "$iso" ]] || die "No ISO found"
+
+    # An explicitly named device wins over USB_DEVICE and over auto-detect.
+    # HISTORY: `./deploy.sh burn /dev/sdX` was documented and accepted but the
+    # argument was never passed to this function (dispatch called cmd_burn
+    # with no args), so naming a disk silently burned to whatever auto-detect
+    # picked instead — or died telling you to set USB_DEVICE. Naming a target
+    # and writing 9 GB somewhere else is the worst shape a burn can have.
+    if [[ -n "$requested" ]]; then
+        USB_DEVICE="$requested"
+    fi
 
     if [[ -z "$USB_DEVICE" ]]; then
         local candidates=()
@@ -631,6 +652,29 @@ cmd_burn() {
     # check makes the failure mode loud and obvious (and protects callers that
     # passed USB_DEVICE in explicitly and bypassed the candidate search).
     [[ -b "$USB_DEVICE" ]] || die "$USB_DEVICE is not a block device — refusing to burn (was the stick unplugged?)"
+
+    # Say what is about to be destroyed, and require agreement.
+    #
+    # WHY: this is an unrecoverable 9 GB overwrite of a whole block device,
+    # chosen by auto-detect in the common case. The documented interface has
+    # always claimed it "asks first" and it never did. Model and size are
+    # printed because /dev/sdb means nothing to a human — "SanDisk 57.3G" is
+    # what tells you whether it is the stick or the backup drive.
+    #
+    # Skipped when stdin is not a terminal (CI, scripts) or when
+    # BURN_ASSUME_YES=yes, which is how cmd_ship keeps its unattended
+    # build → burn → notify loop.
+    if [[ -t 0 && "$assume_yes" != "yes" ]]; then
+        local _model _size
+        _model="$(lsblk -ndo MODEL "$USB_DEVICE" 2>/dev/null | tr -s ' ')"
+        _size="$(lsblk -ndo SIZE "$USB_DEVICE" 2>/dev/null)"
+        printf '\n  About to ERASE %s  [%s %s]\n  and write: %s\n\n' \
+            "$USB_DEVICE" "${_model:-unknown}" "${_size:-?}" "$(basename "$iso")"
+        local _reply
+        read -r -p "  Type the device name to confirm: " _reply
+        [[ "$_reply" == "$USB_DEVICE" ]] ||
+            die "confirmation did not match — nothing was written"
+    fi
 
     log "Burning $iso to $USB_DEVICE..."
     dd if="$iso" of="$USB_DEVICE" bs=4M status=progress oflag=direct conv=fsync
@@ -717,7 +761,7 @@ cmd_ship() {
     # stick gets a loud refusal rather than a silent file-write (b649).
     {
         echo "=== burn phase $(date -Is) ==="
-        sudo "$0" burn 2>&1
+        sudo "$0" burn --yes 2>&1
         echo "=== burn exit: $? ==="
     } | tee -a "$ship_log"
     local burn_rc=${PIPESTATUS[0]}
@@ -793,7 +837,9 @@ cmd_full() {
     cmd_builder_image
     cmd_build
     if [[ "$USB_BURN_ON_DEPLOY" == "yes" ]]; then
-        cmd_burn
+        # Setting USB_BURN_ON_DEPLOY=yes IS the consent; do not ask again
+        # in the middle of an unattended build.
+        cmd_burn --yes
     fi
     local iso
     iso="$(latest_iso)"
@@ -956,7 +1002,7 @@ build-k8s-darksite)
 build-ai-docs) cmd_build_ai_docs ;;
 builder-image) cmd_builder_image ;;
 clean) cmd_clean ;;
-burn) cmd_burn ;;
+burn) cmd_burn "${@:2}" ;;
 ship) cmd_ship ;;
 full) cmd_full ;;
 kvm-deploy) cmd_kvm_deploy ;;
@@ -1002,7 +1048,11 @@ Deploy:
   kvm-deploy-bob         Deploy Bob AI appliance to KVM (created off)
   proxmox-deploy         Deploy ISO to remote Proxmox (SSH + qm API)
   deploy-all             Deploy to KVM + Proxmox + print USB command
-  burn                   Write ISO to USB drive
+  burn [/dev/sdX] [--yes]
+                         Write ISO to USB drive. Names the target device;
+                         falls back to USB_DEVICE, then to auto-detect of a
+                         single removable drive. Asks for confirmation when
+                         interactive; --yes skips the prompt.
   ship                   build → burn → notify in one shot. The default
                          iteration loop. Honours PROFILE/EDITION/USB_DEVICE
                          same as their individual subcommands. Per-run log
