@@ -177,11 +177,30 @@ enabled=1
 gpgcheck=1
 gpgkey=https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/rpm/repodata/repomd.xml.key
 EOF
-        dnf install -y kubelet kubeadm kubectl cri-tools conntrack-tools socat ipvsadm nftables wireguard-tools || {
-            warn "Some packages failed — retrying with --skip-broken"
-            dnf install -y --skip-broken kubelet kubeadm kubectl cri-tools conntrack-tools socat ipvsadm nftables wireguard-tools || true
+        # WARN: --skip-broken is only safe behind a gate that names what it
+        # skipped. Bare `--skip-broken || true` is the b652 pattern: it
+        # dropped webkitgtk6.0 and shipped a ghost install that looked green.
+        # The retry is kept because a mirror flake mid-transaction is real,
+        # but what survives it is now checked package by package.
+        _k8s_pkgs=(kubelet kubeadm kubectl cri-tools conntrack-tools socat
+            ipvsadm nftables wireguard-tools)
+        dnf install -y "${_k8s_pkgs[@]}" || {
+            warn "Some packages failed — retrying once with --skip-broken"
+            dnf install -y --skip-broken "${_k8s_pkgs[@]}" || true
         }
-        # Verify critical packages installed
+        # Verify by PACKAGE, not by binary. The previous check covered only
+        # kubeadm/kubelet/kubectl, so a dropped socat or conntrack-tools went
+        # unnoticed until kubeadm's preflight failed later with an error
+        # nobody could trace back to this install, and a dropped
+        # wireguard-tools broke the WireGuard path with no message at all.
+        # Package names are checked because most of these do not provide a
+        # binary of the same name (nftables→nft, cri-tools→crictl).
+        _missing=()
+        for _pkg in "${_k8s_pkgs[@]}"; do
+            rpm -q "$_pkg" >/dev/null 2>&1 || _missing+=("$_pkg")
+        done
+        ((${#_missing[@]} == 0)) ||
+            die "kubernetes packages missing after install: ${_missing[*]}"
         for _pkg in kubeadm kubelet kubectl; do
             command -v "$_pkg" >/dev/null 2>&1 || die "$_pkg not installed after dnf"
         done
