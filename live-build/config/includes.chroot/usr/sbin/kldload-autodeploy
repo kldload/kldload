@@ -492,6 +492,22 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         curl -sf -X POST http://127.0.0.1:11434/api/generate \
             -d "{\"model\":\"${_chat_model}\",\"prompt\":\"ok\",\"stream\":false,\"keep_alive\":\"24h\"}" \
             >/dev/null 2>&1 || true
+        # The engine is up; now put an interface in front of it.
+        #
+        # HISTORY: 2026-08-13. autodeploy installed Ollama and stopped there,
+        # while the desktop tile opened http://ollama:8080/ and reported "site
+        # not found". The Open WebUI setup existed only inside
+        # kldload-firstboot's AI block — the block autodeploy's own presence
+        # causes firstboot to skip. Shared script, called from both, so the two
+        # paths cannot disagree about whether the AI stack has a UI.
+        if [[ -x /usr/local/bin/kldload-ai-webui ]]; then
+            log "[ai] setting up Open WebUI"
+            /usr/local/bin/kldload-ai-webui >>"$LOG" 2>&1 ||
+                log "[ai] WARN: Open WebUI setup returned non-zero — engine and CLI still work"
+        else
+            log "[ai] WARN: kldload-ai-webui missing — the Ollama tile will have no interface"
+        fi
+
         mark "ai"
         log "[ai] complete"
         # kldload-rag-firstboot.service is WantedBy=multi-user.target but its

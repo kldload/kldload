@@ -651,6 +651,30 @@ EOFSTAB
         _direct_bootargs+=" rd.driver.blacklist=nouveau,nova_core"
         _direct_bootargs+=" modprobe.blacklist=nouveau,nova_core nvidia-drm.modeset=1"
     fi
+
+    # Cap the ARC on the COMMAND LINE, not only in /etc/modprobe.d.
+    #
+    # profiles.sh writes zfs_arc_max into /etc/modprobe.d/zfs.conf and that
+    # file has never taken effect on a kldload install. On root-on-ZFS the zfs
+    # module is loaded by the INITRAMFS, before that file exists, and nothing
+    # regenerates the initramfs afterwards — `lsinitrd | grep
+    # modprobe.d/zfs.conf` returns zero on a fresh install.
+    #
+    # HISTORY: 2026-08-13. zfs.conf said 31.3G; the live limit was 61.7G, the
+    # whole machine. That host also ran a 39 GB VM fleet with no swap: ARC took
+    # 21.6 GB, free memory fell to 6 GB of 62 GB, and the desktop stopped
+    # responding well enough to be reported as frozen. Capping ARC by hand
+    # returned 17 GB within twenty seconds.
+    #
+    # A module parameter on the kernel command line is honoured wherever the
+    # module loads, initramfs included, so it cannot be missed by an initramfs
+    # that was built at the wrong moment. Half of RAM, matching the value
+    # profiles.sh documents.
+    local _ram_b _arc_b
+    _ram_b="$(awk '/MemTotal/{print $2 * 1024}' /proc/meminfo 2>/dev/null || echo 0)"
+    _arc_b=$((_ram_b / 2))
+    ((_arc_b > 0)) || _arc_b=8589934592
+    _direct_bootargs+=" zfs.zfs_arc_max=${_arc_b}"
     local _grub_cfg=""
     read -r -d '' _grub_cfg <<GRUBCFG || true
 # kldload — auto-generated at install time

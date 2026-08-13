@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# =============================================================================
+# kldload-ai-webui — stand up Open WebUI in front of a local Ollama, offline.
+#
+# WHAT IT DOES, IN ORDER:
+#   1. resolves the host alias the desktop tile opens (127.0.0.1 ollama);
+#   2. stages Whisper weights so voice input works without a network;
+#   3. loads the Open WebUI image from the darksite, or pulls it if the ISO
+#      was built without one;
+#   4. (re)creates the container wired to the local Ollama, with RAG
+#      embeddings pointed at a model that is already on disk;
+#   5. enables podman-restart.service so it survives a reboot;
+#   6. waits for :8080 to answer.
+#
+# WHY IT IS A SEPARATE SCRIPT:
+#   There are TWO code paths that set up AI, and only one of them used to know
+#   about the interface. kldload-firstboot has an AI block, but it defers to
+#   kldload-autodeploy whenever K8s, klab or an explicit AI flag is set —
+#   which is most installs. autodeploy then installed the Ollama engine and
+#   nothing else.
+#
+#   HISTORY: 2026-08-13, fresh install audit. The Ollama tile opened
+#   http://ollama:8080/ and reported "site not found". The engine was healthy
+#   and listening on 11434; there was no container, and the host alias did not
+#   resolve. Both pieces existed — in firstboot's AI block, which had logged
+#   "autodeploy is present — skipping firstboot's AI block" and never ran. The
+#   interface had been written into the one path the profile does not take.
+#
+#   One implementation, called from both, is the only version of this that
+#   cannot drift apart again.
+#
+# INPUTS / OUTPUTS:
+#   OWUI_IMAGE   image ref     (default: ghcr.io/open-webui/open-webui:main)
+#   DARKSITE     payload root  (default: /root/darksite/ollama/webui)
+#   Creates the `open-webui` container, /srv/open-webui/{data,whisper},
+#   and a 127.0.0.1 entry for `ollama` in /etc/hosts.
+#
+# NOTES:
+#   - IDEMPOTENT by construction: safe to run from both callers and safe to
+#     re-run by hand after a failure. Every step checks before acting.
+#   - Exits 0 even when the interface cannot be brought up. The engine and the
+#     CLI still work, and failing here must not take a whole first boot with
+#     it — the failure is logged loudly instead.
+# =============================================================================
+set -Eeuo pipefail
+
+readonly OWUI_IMAGE="${OWUI_IMAGE:-ghcr.io/open-webui/open-webui:main}"
+readonly DARKSITE="${DARKSITE:-/root/darksite/ollama/webui}"
+readonly DATA=/srv/open-webui/data
+readonly WHISPER=/srv/open-webui/whisper
+readonly LOG=/var/log/kldload/ai-webui.log
+
+mkdir -p /var/log/kldload
+log() { printf '[%s] [ai-webui] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"; }
+trap 'log "FAIL at line $LINENO: $BASH_COMMAND"' ERR
+
+_crt=""
+for c in /usr/bin/podman /usr/bin/docker; do
+    [[ -x "$c" ]] && {
+        _crt="$c"
+        break
+    }
+done
+if [[ -z "$_crt" ]]; then
+    log "no container runtime — Open WebUI not installed. Ollama CLI still works."
+    exit 0
+fi
+
+# ── host alias ───────────────────────────────────────────────────────────────
+# The tile opens http://ollama:8080/ rather than localhost because Chrome
+# derives a Wayland app_id from the URL host+path with the PORT STRIPPED, so
+# localhost:8080 would collide with the kldload console on :8443 and the window
+# would wear the wrong icon. A single-label host keeps them apart.
+#
+# WARN: this shadows any LAN host genuinely named "ollama", for this machine
+# only. Accepted cost.
+if ! grep -qE '^127\.0\.0\.1[[:space:]]+ollama([[:space:]]|$)' /etc/hosts; then
+    printf '127.0.0.1 ollama\n' >>/etc/hosts &&
+        log "added the 'ollama' hosts alias" ||
+        log "WARNING: could not add the hosts alias — the tile will not resolve"
+fi
+
+mkdir -p "$DATA" "$WHISPER"
+
+# ── voice, offline ───────────────────────────────────────────────────────────
+# faster-whisper treats model_size_or_path as a DIRECTORY when one exists and
+# loads it straight from disk; any other value sends it to HuggingFace, which
+# on a darksite box is the one call guaranteed to fail. Without these weights
+# the microphone button is a control that never answers.
+if [[ -s "${DARKSITE}/whisper/base/model.bin" ]]; then
+    if [[ ! -s "${WHISPER}/base/model.bin" ]]; then
+        cp -r "${DARKSITE}/whisper/." "${WHISPER}/" 2>>"$LOG" &&
+            log "staged Whisper weights — voice input works offline" ||
+            log "WARNING: Whisper weights failed to stage — voice needs a network"
+    fi
+else
+    log "WARNING: no Whisper weights in the darksite — voice needs a network on first use"
+fi
+
+# ── the image: darksite first ────────────────────────────────────────────────
+_have=0
+if "$_crt" image exists "$OWUI_IMAGE" >/dev/null 2>&1; then
+    _have=1
+    log "image already present"
+elif [[ -s "${DARKSITE}/open-webui.oci.tar" ]]; then
+    log "loading Open WebUI from the darksite (offline)..."
+    "$_crt" load -i "${DARKSITE}/open-webui.oci.tar" >>"$LOG" 2>&1 && _have=1 ||
+        log "WARNING: darksite image failed to load — trying the network"
+fi
+if ((_have == 0)); then
+    "$_crt" pull "$OWUI_IMAGE" >>"$LOG" 2>&1 && _have=1 ||
+        log "WARNING: Open WebUI image unavailable (no darksite copy, no network)"
+fi
+((_have == 1)) || exit 0
+
+# ── the container ────────────────────────────────────────────────────────────
+# RAG embeddings are pointed at Ollama's nomic-embed-text, which the darksite
+# ships. The upstream default is a sentence-transformers model fetched from
+# HuggingFace at first use — the same offline failure as Whisper, one layer up.
+# OFFLINE_MODE=true sets HF_HUB_OFFLINE for anything left.
+"$_crt" rm -f open-webui >>"$LOG" 2>&1 || true
+# swallow: only fails when no such container exists, the normal first run.
+if "$_crt" run -d \
+    --name open-webui \
+    --network host \
+    -v "${DATA}:/app/backend/data:z" \
+    -v "${WHISPER}:/whisper:z,ro" \
+    -e OLLAMA_BASE_URL=http://127.0.0.1:11434 \
+    -e OFFLINE_MODE=true \
+    -e WHISPER_MODEL=/whisper/base \
+    -e RAG_EMBEDDING_ENGINE=ollama \
+    -e RAG_EMBEDDING_MODEL=nomic-embed-text \
+    --restart always \
+    "$OWUI_IMAGE" >>"$LOG" 2>&1; then
+    log "container created"
+else
+    log "WARNING: Open WebUI container failed to start — see $LOG"
+    exit 0
+fi
+
+# --restart always is a podman POLICY governing restarts while the machine is
+# up; it does nothing across a reboot. podman-restart.service is what brings
+# restart-policy containers back at boot, and it ships disabled.
+systemctl enable --now podman-restart.service >>"$LOG" 2>&1 ||
+    log "WARNING: podman-restart.service not enabled — Open WebUI will not survive a reboot"
+
+for _i in $(seq 1 60); do
+    if curl -sf -o /dev/null http://localhost:8080 2>/dev/null; then
+        log "Open WebUI ready on http://ollama:8080/ (attempt ${_i})"
+        exit 0
+    fi
+    sleep 5
+done
+log "WARNING: Open WebUI not answering on :8080 after 5 minutes — check '${_crt} logs open-webui'"
+exit 0
