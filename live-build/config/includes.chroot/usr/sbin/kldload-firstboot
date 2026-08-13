@@ -1729,7 +1729,26 @@ SALT
         if [[ -x /usr/sbin/kldload-autodeploy ]] &&
             ([[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]] || [[ "${KLDLOAD_KLAB_ZFS_DEV:-0}" == "1" ]] || [[ "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]); then
             log "autodeploy is present — skipping firstboot's AI block (autodeploy will handle it)"
-        elif [[ "$ROLE" == "ai" || "${KLDLOAD_ENABLE_AI:-0}" == "1" ]]; then
+        # The desktop profile gets the AI stack too, without being asked.
+        #
+        # HISTORY: 2026-08-13, fiend. A desktop install on a box with an
+        # RTX 3080 rehydrated 2.2 GB of Ollama weights from the darksite —
+        # that copy is NOT gated on role — and then skipped the runtime,
+        # because only ROLE=ai reached this branch. The result was a
+        # machine carrying a full model tree, an Ollama tile in the dash,
+        # and no ollama binary to serve any of it. Weights without an
+        # engine is the same defect as an engine without weights.
+        #
+        # The extra conditions are deliberately narrow. Darksite-present
+        # means the whole install is a local copy: no download, no
+        # first-boot network dependency, so there is no reason to ask. A
+        # GPU with no darksite still qualifies, because that is the
+        # machine someone bought the GPU for — but it is the only case
+        # here that can reach for the network.
+        elif [[ "$ROLE" == "ai" || "${KLDLOAD_ENABLE_AI:-0}" == "1" ]] ||
+            { [[ "$ROLE" == "desktop" ]] &&
+                { [[ -s /root/darksite/ollama/runtime/ollama-linux-amd64.tar.zst ]] ||
+                    lspci 2>/dev/null | grep -qi nvidia; }; }; then
             log "AI profile — installing Ollama and kldload-trained model..."
 
             # Status file — dashboard reads this to show progress
@@ -2395,19 +2414,92 @@ KAIREMOTE
 
                     ok "Voice control installed: kai-voice, kai-do, kai-remote"
 
-                    # ── Open WebUI — ChatGPT-like web interface for Ollama ──────────
+                    # ── Open WebUI — the interface people already recognize ─────────
+                    #
+                    # WHY a container and not our own UI: there is no official Ollama
+                    # desktop app for Linux. Upstream ships Ollama.dmg and
+                    # OllamaSetup.exe; every Linux asset is the engine plus inference
+                    # libraries. Open WebUI is the de-facto front end, and it already
+                    # does the things that mattered — hands-free voice call with local
+                    # Whisper, RAG over your own documents, and pulling models from
+                    # the UI instead of memorising registry tags.
+                    #
+                    # HISTORY: this used to `podman pull` from ghcr.io at first boot,
+                    # which made the interface the one part of the AI stack that could
+                    # not come up air-gapped — on a machine that had just rehydrated
+                    # 2 GB of weights from the darksite. The image is now packed as an
+                    # OCI archive by deploy.sh and loaded from disk; the pull is only
+                    # a fallback for ISOs built without it.
                     _status "Installing Open WebUI..."
                     if [[ -x /usr/bin/podman ]] || [[ -x /usr/bin/docker ]]; then
-                        local _crt
+                        local _crt _owui_img _owui_ar _owui_have
                         _crt="$([[ -x /usr/bin/podman ]] && echo /usr/bin/podman || echo /usr/bin/docker)"
-                        "$_crt" pull ghcr.io/open-webui/open-webui:main >>"${LOG}" 2>&1 && {
+                        _owui_img="ghcr.io/open-webui/open-webui:main"
+                        _owui_ar=/root/darksite/ollama/webui/open-webui.oci.tar
+                        _owui_have=0
+                        if [[ -s "$_owui_ar" ]]; then
+                            log "Loading Open WebUI from darksite (offline)..."
+                            "$_crt" load -i "$_owui_ar" >>"${LOG}" 2>&1 &&
+                                _owui_have=1 ||
+                                log "WARNING: darksite Open WebUI image failed to load — trying the network"
+                        fi
+                        if ((_owui_have == 0)); then
+                            "$_crt" pull "$_owui_img" >>"${LOG}" 2>&1 && _owui_have=1 ||
+                                log "WARNING: Open WebUI image unavailable (no darksite copy, no network)"
+                        fi
+
+                        # The desktop tile opens http://ollama:8080/ rather than
+                        # localhost, because Chrome strips the port when deriving a
+                        # Wayland app_id and localhost:8080 would collide with the
+                        # kldload console on :8443 — the window would wear the wrong
+                        # icon. A single-label host keeps them apart.
+                        #
+                        # WARN: this shadows any LAN host actually named "ollama"
+                        # for THIS machine only. That is the accepted cost; the
+                        # alternative is a tile whose window groups under the
+                        # console icon.
+                        if ! grep -qE '^127\.0\.0\.1[[:space:]]+ollama([[:space:]]|$)' /etc/hosts; then
+                            printf '127.0.0.1 ollama\n' >>/etc/hosts &&
+                                ok "Added the 'ollama' hosts entry for the desktop tile" ||
+                                log "WARNING: could not add the ollama hosts entry — the tile will not resolve"
+                        fi
+
+                        # Data on /srv so it lands on the ZFS side with the weights, and
+                        # as a BIND mount rather than a named volume so the Whisper
+                        # weights below can be seeded before the container ever starts.
+                        mkdir -p /srv/open-webui/data /srv/open-webui/whisper
+
+                        # Voice chat offline. faster-whisper treats model_size_or_path as
+                        # a DIRECTORY when one exists and loads it straight from disk; any
+                        # other value sends it to HuggingFace, which on a darksite box is
+                        # the one call guaranteed to fail. Pointing WHISPER_MODEL at the
+                        # packed directory therefore sidesteps the hub entirely — no cache
+                        # layout to reproduce, no network. Without this the mic button is
+                        # simply a control that never answers.
+                        if [[ -s /root/darksite/ollama/webui/whisper/base/model.bin ]]; then
+                            cp -r /root/darksite/ollama/webui/whisper/. /srv/open-webui/whisper/ 2>>"${LOG}" &&
+                                ok "Whisper weights staged — voice chat works offline" ||
+                                log "WARNING: Whisper weights failed to stage — voice input will not work offline"
+                        else
+                            log "WARNING: no Whisper weights in the darksite — voice input needs internet on first use"
+                        fi
+
+                        if ((_owui_have == 1)); then
+                            "$_crt" rm -f open-webui >>"${LOG}" 2>&1 || true
+                            # swallow: only fails when no such container exists, which is
+                            # the normal first-boot case.
                             "$_crt" run -d \
                                 --name open-webui \
                                 --network host \
-                                -v open-webui:/app/backend/data \
+                                -v /srv/open-webui/data:/app/backend/data:z \
+                                -v /srv/open-webui/whisper:/whisper:z,ro \
                                 -e OLLAMA_BASE_URL=http://127.0.0.1:11434 \
+                                -e OFFLINE_MODE=true \
+                                -e WHISPER_MODEL=/whisper/base \
+                                -e RAG_EMBEDDING_ENGINE=ollama \
+                                -e RAG_EMBEDDING_MODEL=nomic-embed-text \
                                 --restart always \
-                                ghcr.io/open-webui/open-webui:main >>"${LOG}" 2>&1 ||
+                                "$_owui_img" >>"${LOG}" 2>&1 ||
                                 log "WARNING: Open WebUI container failed to start"
 
                             # Wait for Open WebUI to be ready — no fancy stuff, just wait
@@ -2424,7 +2516,7 @@ KAIREMOTE
                             if [[ "$_webui_ready" != "true" ]]; then
                                 log "WARNING: Open WebUI not responding after 10 minutes — check 'podman logs open-webui'"
                             fi
-                        } || log "WARNING: Open WebUI image pull failed — run manually with podman"
+                        fi
                     else
                         log "No container runtime (podman/docker) — skipping Open WebUI"
                         log "Install later: dnf install podman && podman run -d --name open-webui --network host -e OLLAMA_BASE_URL=http://127.0.0.1:11434 --restart always ghcr.io/open-webui/open-webui:main"

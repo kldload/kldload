@@ -1,13 +1,19 @@
 [Desktop Entry]
 Type=Application
 Name=Ollama
-Comment=Local AI — chat, voice, and model management. Runs on this machine; nothing leaves it.
-# Chrome app-mode (not kldload-webview/WebKit): Bob is voice-first and the Web
-# Speech API (SpeechRecognition) only exists in Chromium. --class matches
-# StartupWMClass so the window still groups under the Bob icon. Chrome already
-# trusts the localhost:8443 cert (seeded at firstboot) and grants mic on
-# localhost (secure context).
-Exec=/usr/local/bin/kldload-chrome-app com.kldload.bob "https://localhost:8443/app/bob?app=1#bob"
+Comment=Local AI — chat, voice, and documents. Runs on this machine; nothing leaves it.
+# Chrome app-mode (not kldload-webview/WebKit): the voice call uses the Web
+# Speech API, which only exists in Chromium.
+#
+# The host is "ollama", not "localhost", and that is load-bearing. On native
+# Wayland, Chrome derives the surface app_id from the URL host+path with the
+# PORT STRIPPED, so http://localhost:8080/ collapses to the same
+# "chrome-localhost__-Default" the kldload console at :8443/ already owns —
+# and this window would group under the console's icon instead of its own.
+# A distinct single-label host gives a distinct id. firstboot adds the
+# 127.0.0.1 entry to /etc/hosts.
+# Measured, not assumed: WAYLAND_DEBUG set_app_id on onyx, 2026-08-13.
+Exec=/usr/local/bin/kldload-chrome-app com.kldload.ollama "http://ollama:8080/"
 # Icon is ollama, not bob-chat: the tile is called Ollama now, and the
 # bob-chat artwork is a genie's lamp. A menu entry that says one thing
 # and draws another teaches the operator to distrust the labels. The
@@ -17,7 +23,7 @@ Exec=/usr/local/bin/kldload-chrome-app com.kldload.bob "https://localhost:8443/a
 Icon=ollama
 Terminal=false
 Categories=System;
-StartupWMClass=chrome-localhost__app_bob-Default
+StartupWMClass=chrome-ollama__-Default
 # Hidden on the live ISO (Bob needs Ollama + the model, not installed on a USB
 # live). The installer reveals it on the desktop profile — see profiles.sh.
 NoDisplay=true

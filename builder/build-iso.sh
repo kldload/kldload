@@ -2620,6 +2620,21 @@ if [[ "$EDITION" != "core" ]]; then
         else
             die "Ollama darksite requested but the runtime tarball is missing — weights without a runtime cannot come up offline"
         fi
+        # The interface travels with the engine, for the same reason the
+        # runtime travels with the weights. An engine and 2 GB of weights
+        # with nothing to talk to them is a machine where "local AI" means
+        # a command line, which is not what the desktop tile promises.
+        # WARN, not die: the engine alone is still usable from the CLI, and
+        # an ISO built before the webui cache existed should not be blocked
+        # from building — but the log has to say so plainly.
+        if [[ -s /build/live-build/darksite-ollama-cache/webui/open-webui.oci.tar ]]; then
+            mkdir -p "${ROOTFS}/root/darksite/ollama/webui"
+            cp -r /build/live-build/darksite-ollama-cache/webui/. \
+                "${ROOTFS}/root/darksite/ollama/webui/"
+            log "Open WebUI image + Whisper weights copied: $(du -sh "${ROOTFS}/root/darksite/ollama/webui" 2>/dev/null | cut -f1)"
+        else
+            log "WARNING: no Open WebUI image in the darksite cache — the target gets the Ollama engine and CLI only, and the desktop tile will have no interface. Re-run deploy.sh build-ollama-darksite."
+        fi
         log "Ollama darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/ollama" 2>/dev/null | cut -f1)"
     else
         log "Ollama darksite NOT baked in (opt-in via KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1). Bob pulls model at firstboot (internet required)."

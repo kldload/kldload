@@ -265,6 +265,70 @@ cmd_build_ollama_darksite() {
         log "Ollama runtime cached: $(du -sh "$rt_tar" | cut -f1)"
     fi
 
+    # ── Open WebUI: the front end people actually recognize ──────────────
+    #
+    # WHY a second artifact instead of shipping our own UI: there is no
+    # official Ollama desktop app for Linux. Upstream's release carries
+    # Ollama.dmg and OllamaSetup.exe for macOS and Windows; every Linux
+    # asset is ollama-linux-*.tar.zst, which is bin/ollama plus inference
+    # libraries and nothing else. So "ship the official client" has no
+    # Linux target, and a bespoke UI means every operator has to learn a
+    # one-off. Open WebUI is the de-facto standard front end for Ollama,
+    # and it already implements the pieces that mattered — hands-free
+    # voice/video call with local Whisper, RAG over your own documents,
+    # and pulling models from the UI.
+    #
+    # The :main tag, NOT :cuda. Inference happens in Ollama, which ships
+    # its own CUDA libraries in the runtime tarball above; :cuda only
+    # GPU-accelerates Open WebUI's OWN workloads (Whisper and embeddings)
+    # and costs ~3.9 GB more. Whisper on CPU is fine for dictation, and
+    # embeddings are pointed at Ollama below, so the extra CUDA stack
+    # would be a duplicate that never earns its size.
+    #
+    # oci-archive preserves the layer compression the registry already
+    # applied; docker-archive would rewrite them uncompressed and roughly
+    # double what lands on the ISO.
+    local owui_img="${OWUI_IMAGE:-ghcr.io/open-webui/open-webui:main}"
+    local webui="${darksite_dir}/webui"
+    local owui_tar="${webui}/open-webui.oci.tar"
+    mkdir -p "$webui"
+    if [[ -s "$owui_tar" ]]; then
+        log "Open WebUI image already cached ($(du -sh "$owui_tar" | cut -f1))"
+    else
+        log "Pulling Open WebUI (${owui_img}, ~1.8 GB)..."
+        "$runtime" pull "$owui_img" ||
+            die "could not pull ${owui_img} — the ISO would ship an AI stack with no interface"
+        "$runtime" save --format oci-archive -o "${owui_tar}.part" "$owui_img" ||
+            die "could not export ${owui_img} to an OCI archive"
+        mv "${owui_tar}.part" "$owui_tar"
+        log "Open WebUI cached: $(du -sh "$owui_tar" | cut -f1)"
+    fi
+
+    # ── Whisper weights, or voice chat is a button that fails offline ────
+    #
+    # Open WebUI transcribes with faster-whisper, which lazily downloads
+    # its weights from HuggingFace the first time someone presses the mic.
+    # On a darksite box that download is the one thing guaranteed not to
+    # work, and the failure surfaces as a mic button that does nothing —
+    # so the weights are packed here and OFFLINE_MODE is set at firstboot.
+    # 'base' is the default WHISPER_MODEL and ~145 MB; large-v3 is ~3 GB
+    # and not worth it for dictation.
+    local wsp="${webui}/whisper/base"
+    if [[ -s "${wsp}/model.bin" ]]; then
+        log "Whisper weights already cached ($(du -sh "$wsp" | cut -f1))"
+    else
+        log "Fetching Whisper 'base' weights for offline speech-to-text..."
+        mkdir -p "$wsp"
+        local _f
+        for _f in config.json model.bin tokenizer.json vocabulary.txt; do
+            curl -fL --connect-timeout 30 -o "${wsp}/${_f}.part" \
+                "https://huggingface.co/Systran/faster-whisper-base/resolve/main/${_f}" ||
+                die "could not fetch Whisper ${_f} — voice chat would fail offline"
+            mv "${wsp}/${_f}.part" "${wsp}/${_f}"
+        done
+        log "Whisper weights cached: $(du -sh "$wsp" | cut -f1)"
+    fi
+
     log "Building Ollama model darksite (models=${models})..."
     "$runtime" run --rm \
         --platform linux/amd64 \
