@@ -1091,6 +1091,40 @@ main() {
         ln -sfn /var/log/kldload /root/kldload-logs 2>/dev/null || true
     fi
 
+    # _queue_nvidia_heal — hand the NVIDIA packages to the retry queue.
+    #
+    # Returns: 0 always; this must never be the thing that fails first boot.
+    #
+    # WHY THIS EXISTS: the healing net below is one-shot, and one flaky mirror
+    # was enough to lose the GPU permanently.
+    #
+    # HISTORY: 2026-08-13, fiend. The net fired correctly, added RPM Fusion,
+    # and pulled 365 MB of a 42-package transaction at 17 MB/s — then a single
+    # dependency failed to download:
+    #
+    #     Librepo error: Cannot download egl-gbm-1.1.3-2.fc44.x86_64.rpm:
+    #     All mirrors were tried
+    #
+    # dnf is transactional, so that one file took the whole install down. The
+    # net logged a WARNING and never tried again: an RTX 3080 left on nouveau,
+    # Ollama quietly running on CPU, and nothing on the machine ever
+    # revisiting the decision.
+    #
+    # /var/lib/kldload/heal-pending already exists for exactly this shape —
+    # 98-kldload-heal-pending drains it on every NetworkManager up event and
+    # keeps whatever still fails. Queueing here turns a transient mirror
+    # failure into a self-correcting one instead of a permanent downgrade.
+    _queue_nvidia_heal() {
+        local _p
+        mkdir -p /var/lib/kldload 2>/dev/null || return 0
+        for _p in akmod-nvidia xorg-x11-drv-nvidia xorg-x11-drv-nvidia-cuda; do
+            grep -qxF "$_p" /var/lib/kldload/heal-pending 2>/dev/null ||
+                printf '%s\n' "$_p" >>/var/lib/kldload/heal-pending
+        done
+        log "NVIDIA packages queued for retry on next network-up (see /var/log/kldload/heal.log)"
+        return 0
+    }
+
     # ── NVIDIA healing net — driver never installed at install-time ───────────
     # WHY: install-time akmod-nvidia comes from RPM Fusion, a NETWORK repo the
     # strict-offline install can't reach unless it's packed into the darksite.
@@ -1114,6 +1148,7 @@ main() {
             log "WARNING: no package manager on PATH — cannot install NVIDIA driver (desktop stays on nouveau)"
         elif ! curl -fsS -m 8 -o /dev/null https://mirrors.rpmfusion.org/ 2>/dev/null; then
             log "WARNING: no network to RPM Fusion — NVIDIA driver NOT installed. Pack rpmfusion+akmod-nvidia into the darksite for offline; desktop runs on nouveau at reduced resolution until fixed."
+            _queue_nvidia_heal
         elif "$_dnf" install -y \
             "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${_fedver}.noarch.rpm" \
             "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${_fedver}.noarch.rpm" \
@@ -1127,6 +1162,7 @@ main() {
             ok "NVIDIA driver installed — reboot once to load it (resolution corrects after reboot)"
         else
             log "WARNING: NVIDIA driver install failed — see $LOG; desktop stays on nouveau"
+            _queue_nvidia_heal
         fi
     fi
 

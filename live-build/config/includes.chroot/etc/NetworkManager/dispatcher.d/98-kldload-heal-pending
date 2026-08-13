@@ -82,6 +82,27 @@ else
     _log "heal queue empty — all pending packages installed"
 fi
 
+# akmod-nvidia is not done when the RPM lands: akmods still has to build
+# nvidia.ko against the running kernel, and dracut has to pick it up. The
+# per-package loop above only knows "rpm -q succeeds", which for a driver is
+# exactly the state that still leaves the desktop on nouveau.
+#
+# Only runs when nvidia was actually healed THIS pass and no module exists
+# yet, so a normal steam retry never pays for a dracut run.
+if rpm -q akmod-nvidia >/dev/null 2>&1 &&
+    ! compgen -G "/lib/modules/$(uname -r)/extra/nvidia.ko*" >/dev/null 2>&1; then
+    _log "akmod-nvidia present but nvidia.ko is not built — building"
+    if command -v akmods >/dev/null 2>&1 &&
+        akmods --force --kernels "$(uname -r)" >>"$LOG" 2>&1; then
+        command -v dracut >/dev/null 2>&1 &&
+            { dracut --force --regenerate-all >>"$LOG" 2>&1 ||
+                _log "WARNING: dracut regenerate failed after the nvidia build"; }
+        _log "nvidia.ko built — reboot once to load it"
+    else
+        _log "WARNING: akmods build failed — desktop stays on nouveau, see $LOG"
+    fi
+fi
+
 # Late-healed apps stay invisible until the desktop DB + icon caches rebuild
 # (same lesson as firstboot's own heal block, found on .111 2026-07-25).
 command -v update-desktop-database >/dev/null 2>&1 &&
