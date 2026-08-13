@@ -1342,15 +1342,40 @@ OSREL
     # pins and this one still wrote six, and because this runs at install time
     # it WON. Every install got the stale dock while the repo looked correct.
     # One source of truth, and the assertion below still catches a failed copy.
-    if [[ -f /etc/dconf/db/local.d/50-kldload-installed-favorites ]]; then
-        cp /etc/dconf/db/local.d/50-kldload-installed-favorites \
+    # SOURCE ORDER MATTERS. Read from target-files/ FIRST, because the live
+    # session's own /etc/dconf/db/local.d/ deliberately does NOT contain this
+    # file — build-iso.sh:1244 excludes it on purpose so the LIVE desktop does
+    # not get install-only dock pins.
+    #
+    # HISTORY: 2026-08-13, fiend. This block read only the live path, found
+    # nothing (by design), skipped the copy, and the assertion below then
+    # fired k_die — which is `k_log ERROR; exit 1`. That exit happened inside
+    # k_install_system_files, which runs from k_apply_profile at
+    # install-target:2048, LONG BEFORE k_install_bootloader at :2113. So the
+    # installer aborted before writing any bootloader and left a machine that
+    # dropped to firmware with Secure Boot on or off. Every desktop install
+    # from an ISO built after that exclusion was unbootable, and the symptom
+    # looked like a Secure Boot or USB problem.
+    local _pins_src=""
+    for _c in \
+        /usr/lib/kldload-installer/target-files/etc/dconf/db/local.d/50-kldload-installed-favorites \
+        /etc/dconf/db/local.d/50-kldload-installed-favorites; do
+        [[ -s "$_c" ]] && {
+            _pins_src="$_c"
+            break
+        }
+    done
+    if [[ -n "$_pins_src" ]]; then
+        cp "$_pins_src" \
             "${target}/etc/dconf/db/local.d/50-kldload-installed-favorites"
     fi
     # .135 + onyx both shipped without this file in the installed system —
-    # dock came up empty for fresh users. The heredoc won't fail on disk-full
-    # or missing parent dir; assert the write landed and is non-empty.
+    # dock came up empty for fresh users. So the check stays; what changed is
+    # the CONSEQUENCE. A missing dock pin is a cosmetically incomplete
+    # desktop. k_die here costs a bootloader, which is an unbootable machine.
+    # Those are not the same severity and must not share an exit path.
     [[ -s "${target}/etc/dconf/db/local.d/50-kldload-installed-favorites" ]] ||
-        k_die "dock pins: 50-kldload-installed-favorites was not written to ${target}"
+        k_log "WARN: dock pins not installed (looked in target-files/ and /etc/dconf/db/local.d/) — the desktop will come up without kldload's pinned apps. NOT fatal: a bare dock is not worth an unbootable system."
 
     # ── Lock the visual-identity keys so re-login doesn't drift ───────────────
     # Operator on .137 b628 logged out, logged back in, and the carefully-set
