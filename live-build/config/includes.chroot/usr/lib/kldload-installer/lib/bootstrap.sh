@@ -2435,7 +2435,14 @@ NOUVEAU
             fi
 
             # Blacklist nouveau in the ZFSBootMenu cmdline AT INSTALL — this is what
-            # makes NVIDIA load on the FIRST boot. kldload boots via ZBM, which reads
+            # makes NVIDIA load on the FIRST boot *when ZBM is the boot path*.
+            #
+            # WARN: that is only true with Secure Boot OFF. With SB on, grub.cfg
+            # defaults to the `direct` entry (ZBM cannot chainload under shim
+            # 15.8) and this property is read by nobody — so the identical args
+            # are also written into the direct entry by bootloader.sh. Change
+            # one, change the other, or SB installs silently lose the GPU
+            # (fiend, 2026-08-13). kldload boots via ZBM, which reads
             # the kernel command line ONLY from org.zfsbootmenu:commandline (it ignores
             # /etc/modprobe.d AND grub.cfg, so the modprobe.d blacklist above is never
             # honored early enough — nouveau won boot #1 and nvidia never bound:

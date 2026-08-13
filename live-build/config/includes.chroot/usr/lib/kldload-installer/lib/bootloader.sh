@@ -625,6 +625,32 @@ EOFSTAB
     # HISTORY: 2026-07-26 encrypted-boot path audit.
     local _direct_bootargs="rhgb quiet"
     [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]] && _direct_bootargs="console=tty1 console=ttyS0,115200"
+
+    # The GPU args have to be HERE as well as in the ZBM property, because
+    # this entry is the one Secure Boot actually boots.
+    #
+    # bootstrap.sh blacklists nouveau by setting org.zfsbootmenu:commandline,
+    # on the stated assumption that "kldload boots via ZBM". That is true
+    # only when Secure Boot is OFF. Ten lines above, _grub_default flips to
+    # "direct" when KLDLOAD_ENABLE_SECURE_BOOT=1, because ZBM cannot
+    # chainload under shim 15.8 — and the direct entry's command line is
+    # written right here, from scratch, carrying none of it.
+    #
+    # HISTORY: 2026-08-13, fiend. First install with Secure Boot enabled.
+    # The ZFS property was set correctly and read by nobody: /proc/cmdline
+    # showed BOOT_IMAGE=/EFI/BOOT/vmlinuz with no blacklist, nouveau claimed
+    # the RTX 3080, and akmod-nvidia's freshly built, correctly MOK-signed
+    # nvidia.ko could not bind — `modprobe nvidia` returned "No such
+    # device", which reads like missing hardware rather than a boot
+    # argument. Turning Secure Boot on silently disabled the GPU. The
+    # operator also lost the boot-environment picker without being told.
+    #
+    # Same detection as bootstrap.sh (lspci on the LIVE system, which is the
+    # same hardware being installed to) so the two cannot disagree.
+    if lspci 2>/dev/null | grep -qiE 'vga.*nvidia|3d.*nvidia'; then
+        _direct_bootargs+=" rd.driver.blacklist=nouveau,nova_core"
+        _direct_bootargs+=" modprobe.blacklist=nouveau,nova_core nvidia-drm.modeset=1"
+    fi
     local _grub_cfg=""
     read -r -d '' _grub_cfg <<GRUBCFG || true
 # kldload — auto-generated at install time
