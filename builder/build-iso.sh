@@ -567,7 +567,7 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -e "${ROOTFS}/usr/lib64/libGL.so.1" && -e "${ROOTFS}/usr/lib64/libxkbcommon.so.0" ]]; then
         if (cd /tmp/wgx-src &&
             HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
-                CGO_ENABLED=1 go build -trimpath -tags gui -o /tmp/wgx-bin .) >>"$LOG_FILE" 2>&1; then
+                CGO_ENABLED=1 go build -trimpath -tags gui -ldflags "-X main.buildNum=${_wgx_commit:0:8}" -o /tmp/wgx-bin .) >>"$LOG_FILE" 2>&1; then
             if ! readelf -d /tmp/wgx-bin 2>/dev/null |
                 grep -qiE 'NEEDED.*(libGL|libX11|libwayland|libxkbcommon)'; then
                 die "FATAL: wgxplore built WITHOUT the GUI (no GL/X11/wayland libs) — '-tags gui' produced the terminal variant."
@@ -580,7 +580,7 @@ if [[ "$EDITION" != "core" ]]; then
         fi
     elif (cd /tmp/wgx-src &&
         HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
-            CGO_ENABLED=0 go build -trimpath -o /tmp/wgx-bin .) >>"$LOG_FILE" 2>&1; then
+            CGO_ENABLED=0 go build -trimpath -ldflags "-X main.buildNum=${_wgx_commit:0:8}" -o /tmp/wgx-bin .) >>"$LOG_FILE" 2>&1; then
         install -Dm0755 /tmp/wgx-bin "${ROOTFS}/usr/local/bin/wgx" ||
             die "FATAL: wgx install failed."
         log "wgx installed (static TUI, headless rootfs)."
@@ -657,7 +657,7 @@ if [[ "$EDITION" != "core" ]]; then
     # the static TUI first: it is the one every profile gets
     if (cd /tmp/vmx-src &&
         HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
-            CGO_ENABLED=0 go build -trimpath -o /tmp/vmx-bin .) >>"$LOG_FILE" 2>&1; then
+            CGO_ENABLED=0 go build -trimpath -ldflags "-X main.buildNum=${_vmx_commit:0:8}" -o /tmp/vmx-bin .) >>"$LOG_FILE" 2>&1; then
         install -Dm0755 /tmp/vmx-bin "${ROOTFS}/usr/local/bin/vmx" ||
             die "FATAL: vmx (static TUI) install failed."
         log "vmx installed (static TUI, all profiles)."
@@ -681,7 +681,7 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ -e "${ROOTFS}/usr/lib64/libGL.so.1" && -e "${ROOTFS}/usr/lib64/libxkbcommon.so.0" ]]; then
         if (cd /tmp/vmx-src &&
             HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
-                CGO_ENABLED=1 go build -trimpath -tags gui -o /tmp/vmxplore-bin .) >>"$LOG_FILE" 2>&1; then
+                CGO_ENABLED=1 go build -trimpath -tags gui -ldflags "-X main.buildNum=${_vmx_commit:0:8}" -o /tmp/vmxplore-bin .) >>"$LOG_FILE" 2>&1; then
             if ! readelf -d /tmp/vmxplore-bin 2>/dev/null |
                 grep -qiE 'NEEDED.*(libGL|libX11|libwayland|libxkbcommon)'; then
                 die "FATAL: vmxplore built WITHOUT the GUI (no GL/X11/wayland libs) — '-tags gui' produced the terminal variant."
@@ -719,7 +719,7 @@ if [[ "$EDITION" != "core" ]]; then
     # (pure Go, no Fyne/GL); CGO_ENABLED=0 keeps it fully static.
     if (cd /tmp/zxplore-src &&
         HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
-            CGO_ENABLED=0 go build -trimpath -o zxplore-tui .) >>"$LOG_FILE" 2>&1; then
+            CGO_ENABLED=0 go build -trimpath -ldflags "-X main.buildNum=${_zx_commit:0:8}" -o zxplore-tui .) >>"$LOG_FILE" 2>&1; then
         install -Dm0755 /tmp/zxplore-src/zxplore-tui "${ROOTFS}/usr/local/bin/zxplore-tui" ||
             die "FATAL: zxplore-tui install failed."
         log "zxplore-tui installed (static, all profiles)."
@@ -745,7 +745,7 @@ if [[ "$EDITION" != "core" ]]; then
         # piped `... | tee` returns tee's 0 and silently ships a broken build.
         if (cd /tmp/zxplore-src &&
             HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
-                CGO_ENABLED=1 go build -trimpath -tags gui -o zxplore .) >>"$LOG_FILE" 2>&1; then
+                CGO_ENABLED=1 go build -trimpath -tags gui -ldflags "-X main.buildNum=${_zx_commit:0:8}" -o zxplore .) >>"$LOG_FILE" 2>&1; then
             # Assert we actually built the GUI, not the tagless CLI fallback. A
             # Fyne cgo build dynamically links the GL/X11/wayland stack; the CLI
             # variant links only libc. If the GUI libs are absent the build tag

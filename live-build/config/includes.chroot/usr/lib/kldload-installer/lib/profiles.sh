@@ -2213,15 +2213,51 @@ set -Eeuo pipefail
 
 readonly _net="default"
 _log() { logger -t kldload-virbr0 -- "$*"; printf '%s\n' "$*"; }
+trap '_log "FAIL at line $LINENO: $BASH_COMMAND"' ERR
 
-# Wait for libvirtd's UNIX socket — Type=notify on libvirtd means the unit is
-# 'active' before the socket accepts; poll briefly.
-for _ in $(seq 1 30); do
-    virsh -c qemu:///system list >/dev/null 2>&1 && break
+# _net_ready — can this connection actually serve NETWORK calls?
+#
+# Returns: 0 when the libvirt network driver answers, 1 otherwise.
+#
+# WHY this and not `virsh list`: they are different daemons. Fedora's modular
+# libvirt splits domains (virtqemud) from networks (virtnetworkd), each with
+# its own socket, each socket-activated independently. `virsh list` succeeds
+# the moment virtqemud is up and says NOTHING about whether networks can be
+# defined.
+#
+# HISTORY: 2026-08-13, fiend (.121) first boot after the Secure Boot install.
+# The old gate polled `virsh list`, saw virtqemud, and declared libvirt ready
+# — then net-define died instantly with:
+#
+#     error: this function is not supported by the connection driver:
+#            virNetworkDefineXML
+#
+# which is what libvirt says when you ask the domain driver about networks.
+# All six retries burned in 90s against a driver that was never going to
+# answer, the unit latched failed, and libvirt's own config-network package
+# defined the net correctly moments later. Net result: a HEALTHY host with a
+# permanently red unit — a false alarm on the CI runner, and the worst kind,
+# because the thing it claims is broken is demonstrably working.
+_net_ready() { virsh -c qemu:///system net-list --all >/dev/null 2>&1; }
+
+for _ in $(seq 1 60); do
+    _net_ready && break
     sleep 1
 done
-virsh -c qemu:///system list >/dev/null 2>&1 || {
-    _log "libvirtd not responsive after 30s"
+if ! _net_ready; then
+    # Second failsafe (the boot-critical-dep rule): the network driver may
+    # simply not be running rather than not-yet-started. Ask for it by name
+    # and give it a final window. Both units are absent on a monolithic
+    # libvirtd host, where the first poll would already have succeeded.
+    _log "libvirt network driver not answering — starting virtnetworkd"
+    systemctl start virtnetworkd.socket virtnetworkd.service 2>/dev/null || true
+    for _ in $(seq 1 30); do
+        _net_ready && break
+        sleep 1
+    done
+fi
+_net_ready || {
+    _log "libvirt network driver unavailable after 90s"
     exit 1
 }
 
@@ -2285,8 +2321,12 @@ VIRBR0SH
         cat >"${target}/etc/systemd/system/kldload-virbr0.service" <<'VIRBR0SVC'
 [Unit]
 Description=Enable libvirt default network (virbr0) autostart
-After=libvirtd.service network-online.target
-Wants=libvirtd.service network-online.target
+# virtnetworkd.socket is listed because the NETWORK driver is what this unit
+# needs; libvirtd alone is the monolithic case, where the socket unit simply
+# does not exist and the dependency is inert. Ordering alone is not enough —
+# see the readiness poll in the script, which is the real gate.
+After=libvirtd.service virtnetworkd.socket virtnetworkd.service network-online.target
+Wants=libvirtd.service virtnetworkd.socket network-online.target
 # Stop retrying after ~10 minutes (6 attempts * (90s + 15s)); failed state
 # is now visible to kldload-doctor instead of being papered over.
 # These keys MUST live in [Unit], not [Service]. On .137 b628 systemd

@@ -124,6 +124,22 @@ def bob(): # genie's lamp (filled silhouette) + rising smoke + sparkle
     spark=Pf2("M150 56 L157 78 L179 85 L157 92 L150 114 L143 92 L121 85 L143 78 Z")  # pink sparkle accent
     return body+base+spout+lid+handle+smoke+spark
 
+def ollama(): # llama head — Ollama's own mark, not Bob's lamp
+    # WHY a llama and not the genie: the tile is called Ollama now. It used to
+    # be Bob, and Bob is a jinn — lamp, smoke, wish. Renaming the label while
+    # keeping the lamp left the menu saying "Ollama" over Bob's artwork, which
+    # is how an operator learns to distrust every other label on the screen.
+    # Bob keeps the lamp; he is becoming the kldload assistant (a RAG over the
+    # docs), which is a genuinely different thing from "a local model runner".
+    head = P("M96 108 Q96 74 128 74 Q160 74 160 108 L160 140 "
+             "Q160 156 128 156 Q96 156 96 140 Z", True)          # muzzle-ish skull
+    ears = (P("M104 78 L98 40 Q116 52 118 76 Z", True) +
+            P("M152 78 L158 40 Q140 52 138 76 Z", True))          # the tell: long ears
+    neck = P("M110 150 Q104 186 118 214 L150 214 Q140 184 146 150 Z", True)
+    eye  = Cf2(118, 106, 7)                                        # pink accent eye
+    nose = P("M120 138 Q128 132 136 138", w=8)
+    return head + ears + neck + eye + nose
+
 def argus(): # all-seeing eye in a triangle + rays = divine kernel observability
     tri=P("M128 56 L196 184 L60 184 Z",w=10)
     lens=P("M94 146 Q128 118 162 146 Q128 174 94 146 Z",w=10)
@@ -215,6 +231,7 @@ ICONS = {
  "kldload-zfs":zfs, "kldload-zfslab":zfslab,
  "kldload-k8s":kubernetes, "kldload-vms":vms,
  "kldload-metrics":metrics, "bob-chat":bob, "bob-gaming":bob_gaming,
+    "ollama":ollama,
  "kldload-helm":helm, "kldload-ansible":ansible, "kldload-klab":klab,
  "kexport":kexport,
  "kldload-k9s":k9s, "kldload-mok-repair":mok_repair, "wgxplore":wgxplore,
@@ -224,6 +241,7 @@ LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-zfs":"ZFS","kldload-zfslab":"ZFS Lab",
  "kldload-k8s":"Kubernetes","kldload-vms":"VMs",
  "kldload-metrics":"Metrics","bob-chat":"Bob (jinn)","bob-gaming":"Gaming",
+    "ollama":"Ollama",
  "kldload-helm":"Helm","kldload-ansible":"Ansible","kldload-klab":"klab",
  "kexport":"Export",
  "kldload-k9s":"k9s","kldload-console":"kldload","kldload-mok-repair":"SB Repair",
@@ -251,7 +269,7 @@ COLORS = {
  # is red everywhere operators have seen it — a blue one reads as a fake)
  "kldload-k8s":"#6a9fd8","kldload-k9s":"#82b0e0","kldload-helm":"#5a8fc8","kldload-klab":"#92bce8","kldload-ansible":"#e05a52",
  # ai — violet
- "bob-chat":"#c79be0","bob-gaming":"#d3a8ec",
+ "bob-chat":"#c79be0","bob-gaming":"#d3a8ec","ollama":"#c79be0",
  # kldload brand mark — a distinct bright kldload blue (no tool uses it)
  "kldload-console":"#5ab0ff",
 }
@@ -270,7 +288,7 @@ ACCENTS2 = {
  # orchestration blues → warm amber (hub / node indicator)
  "kldload-k8s":"#f0c674","kldload-k9s":"#f0c674","kldload-helm":"#f0c674","kldload-klab":"#f0c674","kldload-ansible":"#f0c674",
  # ai violet → pink sparkle
- "bob-chat":"#ffafd2","bob-gaming":"#ffafd2",
+ "bob-chat":"#ffafd2","bob-gaming":"#ffafd2","ollama":"#ffafd2",
  # brand mark → amber "loaded" accent (matches the set's warm highlight)
  "kldload-console":"#f0c674",
 }
