@@ -232,7 +232,7 @@ PKGS+=(
     # installer's browser renders them as nothing, so every tile shows blank
     # above its label (10.100.10.119, 2026-06-14: "icons on the tiles still
     # don't show up"). This font makes them render.
-    google-noto-emoji-color-fonts
+    google-noto-color-emoji-fonts
     # F44 branded wallpapers for the LIVE installer only. The installed
     # system uses /usr/share/backgrounds/kldload/default{,-dark}.png set by
     # 00-kldload-desktop dconf. The live ISO overrides those with the F44

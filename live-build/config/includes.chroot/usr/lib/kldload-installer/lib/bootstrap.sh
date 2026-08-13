@@ -1263,10 +1263,10 @@ CUSTOMREPO
         #    emoji (color), CJK (Noto CJK for international users), math
         #    (STIX Two). Adds ~350MB but transforms the "it looks like a Linux
         #    install" first-boot feel into a modern type experience.
-        liberation-fonts liberation-mono-fonts liberation-serif-fonts
+        liberation-sans-fonts liberation-mono-fonts liberation-serif-fonts
         dejavu-sans-fonts dejavu-serif-fonts dejavu-sans-mono-fonts
         google-noto-sans-fonts google-noto-serif-fonts
-        google-noto-sans-mono-fonts google-noto-emoji-color-fonts
+        google-noto-sans-mono-fonts google-noto-color-emoji-fonts
         google-noto-sans-cjk-fonts google-noto-serif-cjk-fonts
         cascadia-code-fonts jetbrains-mono-fonts fira-code-fonts
         adobe-source-sans-pro-fonts adobe-source-serif-pro-fonts

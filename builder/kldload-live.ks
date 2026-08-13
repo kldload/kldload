@@ -122,8 +122,17 @@ gnome-system-monitor
 file-roller
 adwaita-icon-theme
 adwaita-cursor-theme
-liberation-fonts
+# liberation-fonts is not a package on F44 — the family is split into
+# sans/mono/serif/narrow, and the bare name silently resolves to nothing.
+liberation-sans-fonts
 google-noto-sans-fonts
+# Color emoji, or every icon in the installer's own web UI is a box.
+#
+# HISTORY: 2026-08-13. The live ISO shipped with NO emoji font at all, so
+# the installer SPA — and every other browser surface an operator sees
+# before the system is even installed — rendered emoji as tofu. The first
+# impression of kldload was a UI full of empty squares. It is 4.6 MB.
+google-noto-color-emoji-fonts
 firefox
 
 # ── Monitoring / ops ─────────────────────────────────────────────────────
