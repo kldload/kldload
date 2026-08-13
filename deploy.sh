@@ -447,8 +447,29 @@ cmd_build() {
         # at live-build/darksite-fedora-cache/. Marker file is the createrepo
         # repomd.xml — its presence means the repo was built successfully.
         local fedora_darksite="$ROOT/live-build/darksite-fedora-cache"
+        # The marker alone is not enough: it says a repo was built, not that it
+        # was built from the CURRENT package list. Stamp the cache with a hash
+        # of the package sets and rebuild when they diverge.
+        #
+        # HISTORY: 2026-08-13. 22 font packages were added to
+        # target-fedora-extras.txt on 08-12; the cache had been built on 07-24
+        # and repomd.xml existed, so the build reported "Fedora darksite
+        # cached: 2.7G" and mirrored none of them. The install then ran dnf
+        # with --skip-unavailable against that mirror, dropped every font
+        # without a word, and shipped a desktop with ZERO emoji fonts — the
+        # tofu boxes the fonts were declared to fix. Declaring a package has to
+        # be enough; remembering to hand-rebuild a mirror is not a contract.
+        local _fed_stamp="$fedora_darksite/.pkgset-sha256"
+        local _fed_hash
+        _fed_hash="$(cat "$ROOT"/build/darksite-fedora/config/package-sets/*.txt 2>/dev/null |
+            sha256sum | cut -d" " -f1)"
         if [[ ! -f "$fedora_darksite/rpm/repodata/repomd.xml" ]]; then
             cmd_build_fedora_darksite
+            printf '%s\n' "$_fed_hash" >"$_fed_stamp"
+        elif [[ "$(cat "$_fed_stamp" 2>/dev/null)" != "$_fed_hash" ]]; then
+            log "Fedora package sets changed since the darksite was built — rebuilding the mirror"
+            cmd_build_fedora_darksite
+            printf '%s\n' "$_fed_hash" >"$_fed_stamp"
         else
             log "Fedora darksite cached: $(du -sh "$fedora_darksite" | cut -f1)"
         fi

@@ -955,10 +955,17 @@ DASHSTART
             local themedir="usr/share/icons/hicolor/scalable/apps"
             if [[ -d "/${themedir}" ]]; then
                 mkdir -p "${target}/${themedir}"
+                # WARN: this is a CURATED list, so a new icon is invisible here
+                # until its name is added — the launcher then shows a generic
+                # square and nothing logs a thing.
+                # HISTORY: 2026-08-13. ollama.svg shipped on the ISO, passed
+                # every check that looked at the ISO, and still did not reach
+                # the installed system: bob-*.svg matched, ollama.svg matched
+                # no pattern, and the Ollama tile rendered as a blank square.
                 for _ic in /${themedir}/kldload-*.svg /${themedir}/bob-*.svg \
                     /${themedir}/kst*.svg /${themedir}/ksnap.svg /${themedir}/kexport.svg \
                     /${themedir}/zxplore*.svg /${themedir}/wgxplore.svg \
-                    /${themedir}/vmxplore.svg; do
+                    /${themedir}/vmxplore.svg /${themedir}/ollama.svg; do
                     [[ -f "$_ic" ]] || continue
                     # honor the ZFS Console opt-out (checkbox, default on)
                     [[ "$(basename "$_ic")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
