@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+# =============================================================================
+# kldload-build-monitor — say, unmissably, that the machine is still building.
+#
+# WHAT IT DOES, IN ORDER:
+#   1. decides whether the post-install build is finished, from the two markers
+#      the units themselves gate on;
+#   2. if it is not, paints a full-screen BUILDING banner with the current
+#      phase, elapsed time, and a live tail of the log that is actually moving;
+#   3. refreshes every 2s until both markers exist;
+#   4. paints a READY banner and exits, so the window closing IS the signal
+#      that the machine is safe to reboot.
+#
+# WHY IT EXISTS:
+#   A kldload install reaches a usable desktop LONG before it is finished.
+#   kldload-firstboot pulls multi-GB models and builds kernel modules;
+#   kldload-autodeploy then builds golden VMs and bootstraps a cluster, and its
+#   unit allows SIX HOURS (TimeoutStartSec=21600). Until this existed, the only
+#   evidence of any of that was journal lines nobody was watching and a
+#   notify-send toast that vanishes in seconds.
+#
+#   HISTORY: 2026-08-13, user report. Someone saw a working desktop, assumed
+#   the install was done, and rebooted mid-build. firstboot's ExecStartPost
+#   never ran, so it restarted from the beginning on the next boot — and
+#   kldload-rag.service, already enabled but with no model pulled yet, began
+#   respawning every five seconds. The machine looked broken. Nothing had
+#   failed; it had been interrupted, and nothing on screen had said not to.
+#
+#   The fix for "the user rebooted too early" is not a smaller window or a
+#   louder log. It is telling them, in letters they cannot miss, that work is
+#   still happening and roughly how much.
+#
+# INPUTS / OUTPUTS:
+#   Reads  /var/lib/kldload/firstboot-done   (written by kldload-firstboot)
+#          /var/lib/kldload/all-ready        (written by kldload-autodeploy)
+#          /var/lib/kldload/ai-*             (phase markers from autodeploy)
+#          /tmp/kldload-firstboot-status     (current step, when written)
+#          /var/log/kldload/{firstboot,autodeploy}.log
+#   Writes nothing. Read-only by design: a progress display must never be
+#   able to damage the thing it is watching.
+#
+#   --once   paint one frame and exit (for a login banner or a test)
+#
+# NOTES:
+#   - Runs as the DESKTOP USER, not root. It only reads world-readable state,
+#     so it needs no privilege, and a monitor that needs sudo is a monitor
+#     nobody runs.
+#   - No dependency beyond coreutils and a terminal. tput is used when present
+#     and every use degrades to plain output when it is not — this has to work
+#     on a half-built system, which is the entire point.
+# =============================================================================
+set -Eeuo pipefail
+
+readonly STATE_DIR=/var/lib/kldload
+readonly LOG_DIR=/var/log/kldload
+readonly FIRSTBOOT_DONE="${STATE_DIR}/firstboot-done"
+readonly ALL_READY="${STATE_DIR}/all-ready"
+readonly STATUS_FILE=/tmp/kldload-firstboot-status
+readonly REFRESH=2
+
+# Colour, only when the terminal admits to having any.
+if [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]]; then
+    C_AMBER="$(tput setaf 3)"
+    C_GREEN="$(tput setaf 2)"
+    C_DIM="$(tput setaf 8 2>/dev/null || tput setaf 7)"
+    C_BOLD="$(tput bold)"
+    C_OFF="$(tput sgr0)"
+else
+    C_AMBER="" C_GREEN="" C_DIM="" C_BOLD="" C_OFF=""
+fi
+
+# cols — terminal width, with a sane floor so the banner never wraps into mush.
+cols() {
+    local c
+    c="$(tput cols 2>/dev/null || echo 80)"
+    ((c >= 40)) || c=80
+    printf '%s' "$c"
+}
+
+# rule — a full-width horizontal rule.
+#
+# Built by repetition rather than `printf %*s | tr ' ' '─'`: tr substitutes
+# BYTES, and U+2500 is three bytes in UTF-8, so that idiom emits one third of
+# a box-drawing character per column and the line renders as mojibake.
+rule() {
+    local w
+    w="$(cols)"
+    printf '─%.0s' $(seq 1 "$w")
+    printf '\n'
+}
+
+# centre — print $1 centred in the terminal.
+centre() {
+    local text="$1" w pad
+    w="$(cols)"
+    pad=$(((w - ${#text}) / 2))
+    ((pad > 0)) || pad=0
+    printf '%*s%s\n' "$pad" '' "$text"
+}
+
+# banner_building / banner_ready — the part visible from across a room.
+#
+# Block capitals rather than figlet: figlet is not installed on a kldload
+# target, and a banner that depends on a package the build may not have
+# finished installing is a banner that is blank exactly when it matters.
+banner_building() {
+    printf '%s' "${C_AMBER}${C_BOLD}"
+    centre "██████  ██   ██ ██ ██     ██████  ██ ██   ██  ██████ "
+    centre "██   ██ ██   ██ ██ ██     ██   ██ ██ ███  ██ ██      "
+    centre "██████  ██   ██ ██ ██     ██   ██ ██ ██ █ ██ ██   ███"
+    centre "██   ██ ██   ██ ██ ██     ██   ██ ██ ██  ███ ██    ██"
+    centre "██████   █████  ██ ██████ ██████  ██ ██   ██  ██████ "
+    printf '%s' "${C_OFF}"
+}
+
+banner_ready() {
+    printf '%s' "${C_GREEN}${C_BOLD}"
+    centre "██████  ███████  █████  ██████  ██    ██"
+    centre "██   ██ ██      ██   ██ ██   ██  ██  ██ "
+    centre "██████  █████   ███████ ██   ██   ████  "
+    centre "██   ██ ██      ██   ██ ██   ██    ██   "
+    centre "██   ██ ███████ ██   ██ ██████     ██   "
+    printf '%s' "${C_OFF}"
+}
+
+# phase — which stage is running, as a human sentence.
+#
+# Returns: the phase on stdout. Derived from the same markers the systemd
+# units gate on, so this cannot disagree with what is actually happening.
+phase() {
+    if [[ ! -f "$FIRSTBOOT_DONE" ]]; then
+        printf 'Stage 1 of 2 — first boot: packages, drivers, AI models'
+    elif [[ ! -f "$ALL_READY" ]]; then
+        printf 'Stage 2 of 2 — deployment: golden VMs, cluster, services'
+    else
+        printf 'Complete'
+    fi
+}
+
+# current_step — the finest-grained thing we know, or "" when nothing said.
+current_step() {
+    [[ -r "$STATUS_FILE" ]] || return 0
+    tail -n1 "$STATUS_FILE" 2>/dev/null || true
+}
+
+# live_log — the log that is actually moving right now.
+live_log() {
+    if [[ ! -f "$FIRSTBOOT_DONE" ]]; then
+        printf '%s/firstboot.log' "$LOG_DIR"
+    else
+        printf '%s/autodeploy.log' "$LOG_DIR"
+    fi
+}
+
+# elapsed — how long this machine has been up, as Xh Ym.
+#
+# Uptime rather than a stored start time: the build spans reboots, and a start
+# time written to disk would lie after the first one.
+elapsed() {
+    local s h m
+    s="$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)"
+    h=$((s / 3600))
+    m=$(((s % 3600) / 60))
+    printf '%dh %02dm' "$h" "$m"
+}
+
+# markers — the AI phase outcome, when autodeploy has decided one.
+markers() {
+    local m out=""
+    for m in ai-ready ai-failed ai-skipped k8s-ready klab-ready; do
+        [[ -e "${STATE_DIR}/${m}" ]] && out+="${m} "
+    done
+    printf '%s' "$out"
+}
+
+# frame — paint one screen.
+frame() {
+    local step log w
+    w="$(cols)"
+    log="$(live_log)"
+    clear 2>/dev/null || printf '\033[2J\033[H'
+    printf '\n\n'
+
+    if [[ -f "$ALL_READY" ]]; then
+        banner_ready
+        printf '\n'
+        centre "This machine is finished building. It is safe to reboot."
+        printf '\n'
+        rule
+        printf '%s' "${C_DIM}"
+        centre "kldload · $(hostname) · up $(elapsed)"
+        printf '%s\n' "${C_OFF}"
+        return 0
+    fi
+
+    banner_building
+    printf '\n'
+    printf '%s' "${C_BOLD}"
+    centre "DO NOT REBOOT OR POWER OFF"
+    printf '%s' "${C_OFF}${C_DIM}"
+    centre "The desktop is ready early on purpose. The system is still working."
+    printf '%s\n\n' "${C_OFF}"
+    rule
+
+    printf '  %sPhase%s    %s\n' "${C_BOLD}" "${C_OFF}" "$(phase)"
+    step="$(current_step)"
+    [[ -n "$step" ]] && printf '  %sStep%s     %s\n' "${C_BOLD}" "${C_OFF}" "$step"
+    printf '  %sElapsed%s  %s\n' "${C_BOLD}" "${C_OFF}" "$(elapsed)"
+    local mk
+    mk="$(markers)"
+    [[ -n "$mk" ]] && printf '  %sDone%s     %s\n' "${C_BOLD}" "${C_OFF}" "$mk"
+    printf '\n'
+    rule
+    printf '  %s%s%s\n' "${C_DIM}" "$log" "${C_OFF}"
+    printf '\n'
+
+    # The tail is the "something to look at": proof of motion. Lines are cut to
+    # the terminal width because a wrapped 200-column log line destroys the
+    # layout and hides the banner above it.
+    if [[ -r "$log" ]]; then
+        tail -n 10 "$log" 2>/dev/null | cut -c1-$((w - 4)) | sed 's/^/  /'
+    else
+        printf '  %s(waiting for the log to appear)%s\n' "${C_DIM}" "${C_OFF}"
+    fi
+}
+
+main() {
+    if [[ "${1:-}" == "--once" ]]; then
+        frame
+        return 0
+    fi
+    # Hide the cursor while looping; always put it back, including on Ctrl-C.
+    command -v tput >/dev/null 2>&1 && tput civis 2>/dev/null || true
+    trap 'command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null || true; printf "\n"' EXIT INT TERM
+
+    while true; do
+        frame
+        [[ -f "$ALL_READY" ]] && break
+        sleep "$REFRESH"
+    done
+    # Hold the READY screen briefly so a passing glance still catches it.
+    sleep 20
+}
+
+main "$@"

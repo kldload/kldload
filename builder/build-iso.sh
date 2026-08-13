@@ -1154,6 +1154,27 @@ GDMCONF
 # desktop, push-button UI behind familiar chrome" positioning.
 if [[ "$EDITION" != "core" && "${BOB_LIVE:-}" != "1" ]]; then
     mkdir -p "${ROOTFS}/etc/xdg/autostart"
+
+    # Carry kldload's own autostart entries from includes.chroot.
+    #
+    # Only the build monitor by name, deliberately. includes.chroot also holds
+    # kldload-zfs-bookmarks.desktop, which is referenced by NOTHING in this
+    # build script or the installer — a dead file, and a glob here would
+    # silently switch it on for every user. It stays dead until someone
+    # decides otherwise on purpose.
+    #
+    # The installer glob-copies /etc/xdg/autostart/kldload-*.desktop from the
+    # live system to the target (profiles.sh), so getting the file onto the
+    # LIVE rootfs here is what makes it reach an installed machine too.
+    if [[ -f /build/live-build/config/includes.chroot/etc/xdg/autostart/kldload-build-monitor.desktop ]]; then
+        install -m0644 \
+            /build/live-build/config/includes.chroot/etc/xdg/autostart/kldload-build-monitor.desktop \
+            "${ROOTFS}/etc/xdg/autostart/kldload-build-monitor.desktop"
+        log "Build-progress monitor autostart installed."
+    else
+        log "WARNING: kldload-build-monitor.desktop missing — an install will give no on-screen build progress."
+    fi
+
     cat >"${ROOTFS}/etc/xdg/autostart/kldload-webui.desktop" <<'AUTOSTART'
 [Desktop Entry]
 Type=Application

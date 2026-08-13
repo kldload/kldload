@@ -1,0 +1,27 @@
+[Desktop Entry]
+Type=Application
+Name=kldload — build in progress
+Comment=Full-screen notice that the post-install build is still running
+# WHY THIS AUTOSTARTS FOR EVERY USER:
+#
+# A kldload install reaches a usable desktop long before it is finished.
+# kldload-firstboot is still pulling models and building kernel modules, and
+# kldload-autodeploy then builds golden VMs and bootstraps a cluster — its unit
+# allows six hours. A desktop that looks finished while multi-GB work continues
+# invites exactly one action, and it is the wrong one.
+#
+# HISTORY: 2026-08-13. A user saw the desktop, assumed the install was done,
+# and rebooted mid-build. firstboot's ExecStartPost never ran, so it started
+# over on the next boot, and kldload-rag.service — enabled but with no model
+# pulled yet — began respawning every five seconds. Nothing had failed; it had
+# been interrupted, and nothing on screen had said not to.
+#
+# The wrapper exits immediately and opens no window once /var/lib/kldload/
+# all-ready exists, so on a finished machine this costs one process spawn at
+# login and nothing else.
+Exec=/usr/local/bin/kldload-build-monitor-autostart
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+# Late in the login sequence: the session needs a terminal emulator available.
+X-GNOME-Autostart-Phase=Applications

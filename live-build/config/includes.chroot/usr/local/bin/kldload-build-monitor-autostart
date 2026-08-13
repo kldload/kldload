@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# =============================================================================
+# kldload-build-monitor-autostart — open the BUILDING screen, but only when
+# there is actually something to say.
+#
+# WHAT IT DOES, IN ORDER:
+#   1. exits silently if the machine has finished building;
+#   2. otherwise finds a terminal emulator this desktop actually has;
+#   3. opens it full-screen running kldload-build-monitor, which closes itself
+#      when the build completes.
+#
+# WHY IT IS SEPARATE FROM THE .desktop:
+#   XDG autostart has no conditional. Without this wrapper every login on a
+#   finished machine would open a window that immediately closed — a flash of
+#   black on every login, forever, to communicate nothing. The condition has to
+#   live in a script, so it does.
+#
+# INPUTS / OUTPUTS:
+#   Reads /var/lib/kldload/all-ready. Opens one terminal window. Never writes.
+#   Exits 0 in every path: an autostart entry that fails is a login error
+#   dialog, which is a worse outcome than a missing progress window.
+#
+# NOTES:
+#   - Terminal preference follows what kldload actually ships, most modern
+#     first. gnome-terminal is last because it is the one most likely to be
+#     absent on a trimmed profile, not because it works worst.
+#   - No `exec`: the wrapper returns immediately and the terminal owns its own
+#     lifetime, so a session manager waiting on autostart is never blocked by
+#     a window that intentionally lives for hours.
+# =============================================================================
+set -Eeuo pipefail
+
+readonly ALL_READY=/var/lib/kldload/all-ready
+readonly MONITOR=/usr/local/bin/kldload-build-monitor
+
+# Nothing to report on a finished machine — and no window either.
+[[ -f "$ALL_READY" ]] && exit 0
+[[ -x "$MONITOR" ]] || exit 0
+
+# find_term — echo a command line that opens $MONITOR full-screen.
+#
+# Returns: 0 and a command on stdout, or 1 when the session has no terminal
+# emulator at all (a headless or heavily trimmed profile), in which case the
+# caller gives up quietly rather than erroring into the login sequence.
+find_term() {
+    if command -v ptyxis >/dev/null 2>&1; then
+        printf 'ptyxis --new-window --maximize -- %s' "$MONITOR"
+    elif command -v kgx >/dev/null 2>&1; then
+        printf 'kgx --full-screen -- %s' "$MONITOR"
+    elif command -v konsole >/dev/null 2>&1; then
+        printf 'konsole --fullscreen -e %s' "$MONITOR"
+    elif command -v gnome-terminal >/dev/null 2>&1; then
+        printf 'gnome-terminal --full-screen -- %s' "$MONITOR"
+    elif command -v xterm >/dev/null 2>&1; then
+        printf 'xterm -fullscreen -e %s' "$MONITOR"
+    else
+        return 1
+    fi
+}
+
+_cmd="$(find_term)" || exit 0
+
+# bash -c with a fixed command string built above from literals only — no
+# operator- or network-supplied data reaches a shell here.
+setsid bash -c "$_cmd" >/dev/null 2>&1 &
+exit 0
