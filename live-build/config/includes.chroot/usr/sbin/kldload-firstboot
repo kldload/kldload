@@ -3176,6 +3176,31 @@ CHROMEPOL
                 chown -R ollama:ollama /srv/ollama 2>/dev/null || true
                 log "Ollama models rehydrated: $(du -sh /srv/ollama/models 2>/dev/null | cut -f1)"
             fi
+            # Stage the AI interface payload OUT before the darksite dies.
+            #
+            # The Ollama weights above are rehydrated here for exactly this
+            # reason, and the Open WebUI image needs the same treatment for a
+            # reason that is easy to miss: kldload-ai-webui is called from
+            # kldload-autodeploy, which runs AFTER this script — so by the time
+            # it looks for /root/darksite/ollama/webui, this function has
+            # already deleted it.
+            #
+            # HISTORY: 2026-08-13. First install with the packed image. The
+            # tile came up only because that machine had internet and the
+            # script fell back to pulling from ghcr.io; the log still said "no
+            # Whisper weights in the darksite". On an air-gapped box both the
+            # image and the voice weights would simply have been gone —
+            # 2 GB packed onto the ISO and deleted minutes before the one
+            # consumer looked for it.
+            if [[ -d /root/darksite/ollama/webui ]]; then
+                mkdir -p /var/lib/kldload/ai-payload
+                if cp -r /root/darksite/ollama/webui/. /var/lib/kldload/ai-payload/ 2>>"${LOG}"; then
+                    ok "AI interface payload staged ($(du -sh /var/lib/kldload/ai-payload 2>/dev/null | cut -f1)) — Open WebUI installs offline"
+                else
+                    log "WARNING: could not stage the Open WebUI payload — the interface will need a network"
+                fi
+            fi
+
             rm -f /etc/yum.repos.d/kldload-darksite.repo 2>/dev/null
             if [[ -f /etc/kldload/keep-darksite ]]; then
                 log "LAN-mirror mode: keeping /root/darksite ($(du -sh /root/darksite 2>/dev/null | cut -f1)) and enabling kldload-apt-mirror.service"

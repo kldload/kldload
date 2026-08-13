@@ -31,7 +31,7 @@
 #
 # INPUTS / OUTPUTS:
 #   OWUI_IMAGE   image ref     (default: ghcr.io/open-webui/open-webui:main)
-#   DARKSITE     payload root  (default: /root/darksite/ollama/webui)
+#   DARKSITE     payload root  (default: the staged copy, then the darksite)
 #   Creates the `open-webui` container, /srv/open-webui/{data,whisper},
 #   and a 127.0.0.1 entry for `ollama` in /etc/hosts.
 #
@@ -45,7 +45,22 @@
 set -Eeuo pipefail
 
 readonly OWUI_IMAGE="${OWUI_IMAGE:-ghcr.io/open-webui/open-webui:main}"
-readonly DARKSITE="${DARKSITE:-/root/darksite/ollama/webui}"
+# Two locations, in order. /root/darksite is only present DURING first boot;
+# kldload-firstboot stages the payload to /var/lib/kldload/ai-payload before it
+# deletes the darksite, because this script is normally invoked later, from
+# kldload-autodeploy, when the darksite no longer exists.
+_pick_payload() {
+    local d
+    for d in /var/lib/kldload/ai-payload /root/darksite/ollama/webui; do
+        [[ -s "${d}/open-webui.oci.tar" ]] && {
+            printf '%s' "$d"
+            return 0
+        }
+    done
+    printf '/var/lib/kldload/ai-payload'
+}
+DARKSITE="${DARKSITE:-$(_pick_payload)}"
+readonly DARKSITE
 readonly DATA=/srv/open-webui/data
 readonly WHISPER=/srv/open-webui/whisper
 readonly LOG=/var/log/kldload/ai-webui.log
