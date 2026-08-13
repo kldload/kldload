@@ -2539,6 +2539,19 @@ KAIREMOTE
                                 log "WARNING: Open WebUI container failed to start"
 
                             # Wait for Open WebUI to be ready — no fancy stuff, just wait
+                            # --restart always is a podman POLICY, not a boot hook: it governs
+                            # restarts while the machine is up and does nothing across a
+                            # reboot. podman-restart.service is the unit that actually brings
+                            # restart-policy containers back at boot, and it ships disabled.
+                            #
+                            # HISTORY: 2026-08-13, fiend. Open WebUI came up fine, survived
+                            # hours of use, and was Exited(0) after the first reboot — the AI
+                            # tile opened onto nothing, with a healthy ollama behind it. The
+                            # container that vanishes at the first reboot is worse than one
+                            # that never started, because the operator has already trusted it.
+                            systemctl enable --now podman-restart.service >>"${LOG}" 2>&1 ||
+                                log "WARNING: podman-restart.service not enabled — Open WebUI will not come back after a reboot"
+
                             _status "Waiting for Open WebUI to start... When ready, refresh the AI Chat tab."
                             local _webui_ready=false
                             for _attempt in $(seq 1 120); do
