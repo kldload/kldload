@@ -39,20 +39,38 @@ Result: **MokManager blue screen, "Verification failed: 0x1A security
 violation"**, and the machine would not continue. Recovery was a
 power-cycle plus selecting the GRUB entry from the firmware boot menu.
 
-## Why it actually fails
+## Why it fails — NOT YET ESTABLISHED
 
-Not the signature. shim checks **SBAT before it checks signatures**, and
-ZBM's `.sbat` section declares:
+Two plausible explanations were checked on the running system and BOTH
+are ruled out. Recorded here precisely so neither is chased again.
 
-    systemd-stub,1,The systemd Developers,systemd,256,...
-    systemd-stub.void,1,Void,systemd-boot,256.6_2,...
+**Not a revoked SBAT generation.** ZBM's `.sbat` declares
+`systemd-stub,1,...` and `systemd-stub.void,1,...,256.6_2`, and the
+first guess was that shim 16.1 revokes old systemd-stub generations. The
+firmware's actual revocation level says otherwise:
 
-ZBM ships as a systemd-stub UKI built from Void packaging. shim 16.1
-carries SBAT revocations covering old `systemd-stub` generations, so a
-correctly signed binary is still rejected with 0x1A. This is also why
-enrolling anything at the MokManager prompt would not have helped — and
-why it must not be done: the prompt offers to trust the hash of the
-binary that just failed.
+    sbat,1,2024040900
+    shim,4
+    grub,4
+    grub.peimage,2
+
+There is no `systemd-stub` entry, so nothing about ZBM's SBAT is
+revoked. (`mokutil --list-sbat` — answerable on a running system, no
+reboot.)
+
+**Not an unenrolled key.** The certificate that signed ZBM,
+`CN=kldload-mok-20260813022408-...`, is present in MokList and shim
+consults MokList when validating its second stage.
+
+So a binary with acceptable SBAT, signed by an enrolled key, laid out
+where shim looks for it, is still refused with 0x1A. The cause is
+something else and is currently unknown. **Do not reboot into another
+attempt until there is a specific hypothesis that can be tested
+offline.**
+
+Whatever the cause, do NOT enroll at the MokManager prompt: it offers to
+trust the hash of the binary that just failed, which grants boot trust to
+something on the basis that it was rejected.
 
 ## What to investigate next — WITHOUT rebooting first
 
@@ -73,3 +91,21 @@ binary that just failed.
 *generation* the running shim revokes. Check that before a reboot, not
 after — on fiend this cost a MokManager lockout and a power-cycle on a
 machine that was otherwise healthy.
+
+## Unrelated finding: MOK certificates accumulate
+
+`mokutil --list-enrolled` on fiend shows **eight** distinct kldload MOK
+certificates, one per install/rebuild since 2026-08-02, none ever
+removed:
+
+    kldload-mok-20260802201418   kldload-mok-20260803214716
+    kldload-mok-20260802230137   kldload-mok-20260810132316
+    kldload-mok-20260803122931   kldload-mok-20260811021059
+    kldload-mok-20260803160104   kldload-mok-20260813022408
+
+Only the newest signs anything. The other seven remain trusted to load
+kernel modules and EFI binaries on this machine forever. Each is a
+private key that existed on some earlier build host, and the whole point
+of Secure Boot is that the set of keys allowed to load code is small and
+deliberate. Worth a cleanup pass that removes superseded kldload MOKs at
+enrollment time.
