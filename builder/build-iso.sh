@@ -2609,6 +2609,17 @@ if [[ "$EDITION" != "core" ]]; then
     if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" == "1" ]] && [[ -d /build/live-build/darksite-ollama-cache/models ]]; then
         mkdir -p "${ROOTFS}/root/darksite/ollama"
         cp -r /build/live-build/darksite-ollama-cache/models "${ROOTFS}/root/darksite/ollama/"
+        # The runtime travels with the weights or neither is any use: a model
+        # tree on a machine that cannot install ollama offline is 2 GB of
+        # nothing. Absent runtime is FATAL rather than a warning, because the
+        # failure would only surface at first boot on the operator's hardware.
+        if [[ -f /build/live-build/darksite-ollama-cache/runtime/ollama-linux-amd64.tar.zst ]]; then
+            mkdir -p "${ROOTFS}/root/darksite/ollama/runtime"
+            cp /build/live-build/darksite-ollama-cache/runtime/ollama-linux-amd64.tar.zst \
+                "${ROOTFS}/root/darksite/ollama/runtime/"
+        else
+            die "Ollama darksite requested but the runtime tarball is missing — weights without a runtime cannot come up offline"
+        fi
         log "Ollama darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/ollama" 2>/dev/null | cut -f1)"
     else
         log "Ollama darksite NOT baked in (opt-in via KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1). Bob pulls model at firstboot (internet required)."

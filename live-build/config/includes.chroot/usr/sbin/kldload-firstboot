@@ -1800,8 +1800,40 @@ SALT
             mkdir -p /srv/ollama/models
             # ollama user created by the installer script, set ownership after install
 
-            # Install Ollama
-            if curl -fsSL --connect-timeout 30 https://ollama.com/install.sh | sh >>"${LOG}" 2>&1; then
+            # ── Install Ollama: darksite first, network only as fallback ──
+            #
+            # HISTORY: this was `curl -fsSL https://ollama.com/install.sh | sh`
+            # with no local alternative, which made AI the ONE part of kldload
+            # that could not come up air-gapped. Every other subsystem installs
+            # from a pre-verified local mirror; this one piped a remote script
+            # into sh on first boot. The darksite now carries the official
+            # release tarball, so an offline machine gets a working runtime and
+            # the network path is only for images built without it.
+            _ollama_installed=0
+            _rt=/root/darksite/ollama/runtime/ollama-linux-amd64.tar.zst
+            if [[ -s "$_rt" ]]; then
+                log "Installing Ollama from darksite runtime (offline)..."
+                mkdir -p /usr/local/bin /usr/local/lib/ollama
+                # --zstd first; older tar needs the explicit filter. Either
+                # extraction failing falls through to the network path rather
+                # than leaving a half-unpacked runtime.
+                if tar --zstd -xf "$_rt" -C /usr/local/ >>"${LOG}" 2>&1 ||
+                    tar -I zstd -xf "$_rt" -C /usr/local/ >>"${LOG}" 2>&1; then
+                    if [[ -x /usr/local/bin/ollama ]]; then
+                        chmod +x /usr/local/bin/ollama
+                        useradd -r -s /bin/false -U -m -d /usr/share/ollama ollama 2>/dev/null || true
+                        # swallow: the user already existing is the re-run case
+                        _ollama_installed=1
+                        ok "Ollama installed from darksite (no network needed)"
+                    else
+                        log "WARNING: darksite runtime extracted but no ollama binary — falling back to network"
+                    fi
+                else
+                    log "WARNING: darksite runtime failed to extract — falling back to network"
+                fi
+            fi
+            if ((_ollama_installed == 1)) ||
+                curl -fsSL --connect-timeout 30 https://ollama.com/install.sh | sh >>"${LOG}" 2>&1; then
                 ok "Ollama installed"
                 _status "Downloading AI model (~4.9 GB)..."
 
@@ -1924,6 +1956,30 @@ OLLAMA
                             _status "Downloading AI model (3B — light, ${_total_ram_gb}GB RAM)..."
                         fi
                         log "Hardware: ${_total_ram_gb}GB RAM, GPU=${_has_gpu} VRAM=${_vram_gb}GB — selected ${_bob_base}"
+
+                        # DARKSITE WINS OVER THE HARDWARE PICK.
+                        #
+                        # The probe above chooses the best model for the card,
+                        # which is right when there is internet and wrong when
+                        # there is not: an offline machine whose darksite holds
+                        # llama3.2:3b would still try to fetch qwen2.5:14b and
+                        # sit there failing. A model that is already on the disk
+                        # beats a better one that cannot be downloaded.
+                        #
+                        # The hardware pick is kept as the suggestion — the
+                        # operator can pull it later from the model picker when
+                        # they have a network — and we log both so the choice is
+                        # explainable rather than mysterious.
+                        if ! ollama list 2>/dev/null | awk 'NR>1{print $1}' |
+                            grep -qx "$_bob_base"; then
+                            _local="$(ollama list 2>/dev/null | awk 'NR>1{print $1}' |
+                                grep -v '^nomic-embed-text' | head -1)"
+                            if [[ -n "$_local" ]]; then
+                                log "Darksite provides ${_local}; using it instead of ${_bob_base} (pull ${_bob_base} later for better results)"
+                                _status "Using bundled model ${_local} (offline)"
+                                _bob_base="$_local"
+                            fi
+                        fi
                         _pull_model "$_bob_base" "Bob base model"
 
                         # Embedding model — required by kldload-rag-index. Tiny (~270MB),

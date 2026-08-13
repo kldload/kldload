@@ -238,7 +238,33 @@ cmd_build_ollama_darksite() {
     # Users with weaker GPUs can manually `ollama pull llama3.1:8b` post-
     # install if they prefer the smaller model. Override with
     # OLLAMA_MODELS=... to bake anything else.
-    local models="${OLLAMA_MODELS:-qwen2.5:14b}"
+    local models="${OLLAMA_MODELS:-llama3.2:3b}"
+
+    # ── The RUNTIME, not just the weights ────────────────────────────────
+    # Without this the darksite ships ~2-9 GB of model weights to a machine
+    # that then cannot install ollama without internet: firstboot ran
+    # `curl -fsSL https://ollama.com/install.sh | sh`. So AI was the ONE
+    # part of kldload that could not come up air-gapped — the exact claim
+    # the darksite exists to make good on.
+    #
+    # The official release tarball is used rather than the install script:
+    # a fixed artifact we can verify and cache, instead of piping a remote
+    # shell script into sh at first boot on a machine we just built. Same
+    # approach bob-ai's builder uses, which is where it is proven.
+    local rt="${darksite_dir}/runtime"
+    local rt_tar="${rt}/ollama-linux-amd64.tar.zst"
+    mkdir -p "$rt"
+    if [[ -s "$rt_tar" ]]; then
+        log "Ollama runtime already cached ($(du -sh "$rt_tar" | cut -f1))"
+    else
+        log "Fetching Ollama runtime (~1.7 GB, includes CUDA libs)..."
+        curl -fL --connect-timeout 30 -o "${rt_tar}.part" \
+            "https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tar.zst" ||
+            die "could not fetch the Ollama runtime — the darksite would ship weights with no way to run them"
+        mv "${rt_tar}.part" "$rt_tar"
+        log "Ollama runtime cached: $(du -sh "$rt_tar" | cut -f1)"
+    fi
+
     log "Building Ollama model darksite (models=${models})..."
     "$runtime" run --rm \
         --platform linux/amd64 \
