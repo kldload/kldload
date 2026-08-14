@@ -254,12 +254,29 @@ cmd_build_ollama_darksite() {
     runtime="$(detect_runtime)"
     local darksite_dir="$ROOT/live-build/darksite-ollama-cache"
     mkdir -p "$darksite_dir"
-    # Bake qwen2.5:14b only. It's strictly better than llama3.1:8b at
-    # tool calling + reasoning, and one model keeps the ISO ~5 GB smaller.
-    # Users with weaker GPUs can manually `ollama pull llama3.1:8b` post-
-    # install if they prefer the smaller model. Override with
-    # OLLAMA_MODELS=... to bake anything else.
-    local models="${OLLAMA_MODELS:-llama3.2:3b}"
+    # Bake the model kldload-autodeploy ACTUALLY ASKS FOR — qwen3:14b, ~9 GB.
+    #
+    # 100% darksite is the goal: a fresh install must reach a working Bob with
+    # the network unplugged. Shipping a smaller model than the runtime selects
+    # does not achieve that — autodeploy's VRAM tier picks qwen3:14b on any
+    # card with >=8 GB, so a 3b in the ISO just means a 9 GB download anyway.
+    #
+    # Cost: ~9 GB of ISO. Offsets: dropping the Ubuntu darksite frees ~2.6 GB,
+    # and this removes the single largest first-boot download.
+    # Operator decision 2026-08-14: "bite the bullet and add the 9 gig llm so
+    # gtg without having to download anything .. I want 100% darksite".
+    #
+    # This value is load-bearing in two other places — keep them in step:
+    #   * build/darksite-ollama/build-darksite-ollama.sh (MODELS=)
+    #   * the build-ollama-darksite line in usage() below
+    # HISTORY: 2026-08-14 — these three had drifted to THREE different models
+    # (llama3.2:3b here, qwen2.5:14b in the darksite builder, llama3.1:8b in
+    # --help) while kldload-autodeploy pulled a fourth (qwen3:14b). The shipped
+    # weights could therefore never satisfy the runtime, so every install
+    # downloaded ~9 GB regardless of what the ISO carried.
+    # kldload-autodeploy now prefers ANY model already present over its own
+    # tier choice, so the exact name here no longer has to match its tiers.
+    local models="${OLLAMA_MODELS:-qwen3:14b nomic-embed-text}"
 
     # ── The RUNTIME, not just the weights ────────────────────────────────
     # Without this the darksite ships ~2-9 GB of model weights to a machine
@@ -464,18 +481,32 @@ cmd_build() {
             log "Debian darksite cached: $(du -sh "$debian_darksite" | cut -f1)"
         fi
 
-        local ubuntu_darksite="$ROOT/live-build/darksite-ubuntu-cache"
-        if [[ ! -f "$ubuntu_darksite/apt/dists/noble/Release" ]]; then
-            cmd_build_ubuntu_darksite
-            printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-ubuntu/config/package-sets")" \
-                >"$ubuntu_darksite/.pkgset-sha256"
-        elif [[ "$(cat "$ubuntu_darksite/.pkgset-sha256" 2>/dev/null)" != "$(_pkgset_hash "$ROOT/build/darksite-ubuntu/config/package-sets")" ]]; then
-            log "Ubuntu package sets changed since the darksite was built — rebuilding the mirror"
-            cmd_build_ubuntu_darksite
-            printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-ubuntu/config/package-sets")" \
-                >"$ubuntu_darksite/.pkgset-sha256"
+        # ── Ubuntu darksite: RETIRED 2026-08-14 ──────────────────────────
+        # Ubuntu is deprecated as a substrate (see docs/substrate-matrix.md).
+        # It was the only deprecated target carrying real weight: a SECOND full
+        # APT mirror (~2.6 GB in the ISO) built and gated on every single build,
+        # for a distro that is a Debian variant. CentOS/Rocky/Arch cost zero ISO
+        # bytes because they were never darksited at all.
+        #
+        # Dropping it frees ~2.6 GB, which is most of the room the qwen3:14b
+        # model needs, and removes the leg that aborted an ISO build on
+        # 2026-08-14 (a Debian-shaped resolvability gate run against an Ubuntu
+        # mirror).
+        #
+        # Ubuntu still INSTALLS — it simply requires a network, the same posture
+        # Arch has always had. builder/build-iso.sh already handles the absent
+        # cache and logs "No Ubuntu darksite found — Ubuntu installs will
+        # require internet".
+        # Set KLDLOAD_INCLUDE_UBUNTU_DARKSITE=1 to build it anyway.
+        if [[ "${KLDLOAD_INCLUDE_UBUNTU_DARKSITE:-0}" == "1" ]]; then
+            local ubuntu_darksite="$ROOT/live-build/darksite-ubuntu-cache"
+            if [[ ! -f "$ubuntu_darksite/apt/dists/noble/Release" ]]; then
+                cmd_build_ubuntu_darksite
+            else
+                log "Ubuntu darksite cached: $(du -sh "$ubuntu_darksite" | cut -f1)"
+            fi
         else
-            log "Ubuntu darksite cached: $(du -sh "$ubuntu_darksite" | cut -f1)"
+            log "Ubuntu darksite retired — Ubuntu installs require a network (KLDLOAD_INCLUDE_UBUNTU_DARKSITE=1 to restore)"
         fi
 
         # Fedora RPM darksite — built in a fedora:<RELEASE> container, cached
@@ -526,15 +557,31 @@ cmd_build() {
         #      boot kldload-firstboot detects the directory and
         #      rsyncs it into /srv/ollama/models/ before starting
         #      Ollama — same offline behaviour, no rebuild.
-        if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" == "1" ]]; then
+        if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-1}" == "1" ]]; then
             local ollama_darksite="$ROOT/live-build/darksite-ollama-cache"
-            if ! ls "$ollama_darksite"/models/manifests/registry.ollama.ai/library/*/* >/dev/null 2>&1; then
+            # Verify the REQUESTED models are present, not merely that the
+            # cache holds something. The old test (`library/*/*`) passed on any
+            # model at all, so after the default changed the build happily
+            # shipped the previous model while the runtime asked for the new
+            # one — the same presence-vs-correctness trap that shipped a broken
+            # Debian mirror on 2026-08-14.
+            _ol_want="${OLLAMA_MODELS:-qwen3:14b nomic-embed-text}"
+            _ol_missing=0
+            for _m in $_ol_want; do
+                _mn="${_m%%:*}"
+                _mt="${_m##*:}"
+                [[ "$_mt" == "$_mn" ]] && _mt=latest
+                [[ -f "$ollama_darksite/models/manifests/registry.ollama.ai/library/${_mn}/${_mt}" ]] ||
+                    _ol_missing=1
+            done
+            if ((_ol_missing == 1)); then
+                log "Ollama darksite missing one of: ${_ol_want} — rebuilding"
                 cmd_build_ollama_darksite
             else
                 log "Ollama darksite cached: $(du -sh "$ollama_darksite" | cut -f1)"
             fi
         else
-            log "Skipping Ollama darksite (opt-in: KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1)"
+            log "Skipping Ollama darksite (KLDLOAD_INCLUDE_OLLAMA_DARKSITE=0) — the target will DOWNLOAD its model on first boot"
         fi
 
         # Arch has no darksite — rolling release, not worth caching.
@@ -688,7 +735,8 @@ cmd_build() {
         -e RELEASE="$RELEASE" \
         -e ISO_NAME_OVERRIDE="${ISO_NAME_OVERRIDE:-}" \
         -e BOB_LIVE="${BOB_LIVE:-}" \
-        -e KLDLOAD_INCLUDE_OLLAMA_DARKSITE="${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" \
+        -e KLDLOAD_INCLUDE_OLLAMA_DARKSITE="${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-1}" \
+        -e KLDLOAD_INCLUDE_UBUNTU_DARKSITE="${KLDLOAD_INCLUDE_UBUNTU_DARKSITE:-0}" \
         -e KLDLOAD_ZFS_GIT="${KLDLOAD_ZFS_GIT:-}" \
         -e KLDLOAD_DEBUG_ALLOW="${KLDLOAD_DEBUG_ALLOW:-}" \
         -e KLDLOAD_VERSION="${KLDLOAD_VERSION:-}" \
@@ -1188,7 +1236,8 @@ Build:
   build-debian-darksite  Rebuild the Debian APT offline mirror cache
   build-ubuntu-darksite  Rebuild the Ubuntu APT offline mirror cache
   build-fedora-darksite  Rebuild the Fedora RPM offline mirror cache
-  build-ollama-darksite  Pre-pull Ollama LLM models (llama3.1:8b by default) for offline Bob
+  build-ollama-darksite  Pre-pull the Ollama model (qwen3:14b, ~9GB) for offline Bob
+                         Included in the ISO by default; KLDLOAD_INCLUDE_OLLAMA_DARKSITE=0 to omit
   build-k8s-darksite     Pre-pull Kubernetes + Cilium container images
   build-ai-docs          Scrape website + OCR PDF for AI knowledge base
   build-ai-appliance     Build self-contained Bob AI appliance ISO

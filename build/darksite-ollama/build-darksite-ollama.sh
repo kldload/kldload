@@ -17,7 +17,7 @@ set -euo pipefail
 # Default bakes qwen2.5:14b only — better tool calling + reasoning than
 # llama3.1:8b at similar VRAM cost, keeps the ISO ~5 GB smaller. Users
 # who want the smaller model can pull it post-install.
-MODELS="${OLLAMA_MODELS:-qwen2.5:14b}"
+MODELS="${OLLAMA_MODELS:-qwen3:14b nomic-embed-text}"
 DARKSITE_OUT="${DARKSITE_OUT:-/output}"
 MODELS_DIR="${DARKSITE_OUT}/models"
 

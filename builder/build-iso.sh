@@ -65,7 +65,7 @@ BUILD_DATE="$(date +%Y%m%d)"
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
 DISTRO_TAG="${DISTRO:-fedora}"
-VERSION="${KLDLOAD_VERSION:-1.4.0-rc2}"
+VERSION="${KLDLOAD_VERSION:-1.4.0-rc3}"
 ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
@@ -2598,7 +2598,12 @@ if [[ "$EDITION" != "core" ]]; then
     fi
 
     # Copy Ubuntu darksite APT mirror into the rootfs
-    if [[ -d /build/live-build/darksite-ubuntu-cache/apt ]]; then
+    # Gate on the SWITCH as well as the directory: deploy.sh retired the
+    # Ubuntu darksite on 2026-08-14, but a stale cache left on disk from an
+    # earlier build would otherwise still be baked in — costing the 2.6 GB
+    # the retirement was meant to save, silently.
+    if [[ "${KLDLOAD_INCLUDE_UBUNTU_DARKSITE:-0}" == "1" &&
+        -d /build/live-build/darksite-ubuntu-cache/apt ]]; then
         mkdir -p "${ROOTFS}/root/darksite/ubuntu"
         cp -r /build/live-build/darksite-ubuntu-cache/apt "${ROOTFS}/root/darksite/ubuntu/"
         log "Ubuntu darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/ubuntu" 2>/dev/null | cut -f1)"
