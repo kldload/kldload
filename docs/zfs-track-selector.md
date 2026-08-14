@@ -1,7 +1,8 @@
 # ZFS track selector — released vs testing
 
-**Status: DESIGNED, not built.** Decided 2026-08-13 with the operator
-after an OpenZFS developer confirmed they test on Debian via backports.
+**Status: Debian backports SHIPPED 2026-08-13; the track selector itself
+is still DESIGNED, not built.** Decided with the operator after an
+OpenZFS developer confirmed they test on Debian via backports.
 
 ## The problem
 
@@ -24,18 +25,21 @@ Fedora-only build flag.
 
 Measured 2026-08-13:
 
-    trixie-backports kernel : 7.1.3
-    OpenZFS 2.4.3 maximum   : 7.0     <- released ZFS CANNOT build here
-    OpenZFS master maximum  : 7.1     <- only master reaches it
+    trixie-backports kernel        : 7.1.3
+    UPSTREAM OpenZFS 2.4.3 maximum : 7.0
+    DEBIAN zfs-dkms 2.4.3-2~bpo13+1: 7.1   <- Debian raised the ceiling
 
-Debian backports — the channel OpenZFS uses for Debian testing — has
-moved PAST the ceiling of the current ZFS release. So "enable backports
-on Debian" is not a small convenience: taken with the backports kernel it
-produces a machine where ZFS will not compile, unless ZFS also moves to
-master. The two choices are coupled, and nothing currently enforces that.
+An earlier revision of this document read the ceiling off UPSTREAM's META
+and concluded the backports kernel was unbuildable without moving ZFS to
+git master. That is wrong for Debian specifically: Debian's packaged
+zfs-dkms ships `Linux-Maximum: 7.1` (read directly out of
+`zfs-dkms_2.4.3-2~bpo13+1_all.deb`), so the backports kernel and the
+backports ZFS are a matched pair the archive ships together on purpose.
 
-This is the same failure kldload left Fedora to avoid — the kernel
-outrunning ZFS — arriving on Debian by a different road.
+The coupling argument still holds in general — a kernel above the ZFS
+ceiling is an unbootable root — it simply does not bite here, because the
+distro that ships the kernel also ships the ZFS that supports it. The
+build gate below is what keeps that true rather than assumed.
 
 ## What already exists
 
@@ -81,10 +85,24 @@ nothing installs from it unless named with `-t trixie-backports`. Adding
 the source alone changes nothing, which is what makes it safe to enable
 by default and select from per package.
 
-An implementation was started and reverted on 2026-08-13: the Debian path
-has no established baseline yet, and changing the least-tested substrate
-before it has one makes a new bug indistinguishable from an old one.
-Establish the baseline first.
+An implementation was started and reverted earlier on 2026-08-13, on the
+reasoning that the Debian path had no baseline yet. That baseline now
+exists: a Debian install was audited on hardware and found running stock
+trixie (kernel 6.12.101, zfs 2.3.2) with no backports source at all —
+i.e. two years behind the Fedora substrate on kernel and a full minor
+behind on ZFS. Backports is now enabled by default for Debian:
+
+- `k_debian_backports_suite` (lib/bootstrap.sh) names the pocket, and
+  returns EMPTY for Ubuntu, for an offline darksite mirror, or when
+  `KLDLOAD_DEBIAN_BACKPORTS=0`.
+- The source is written both at install time and into the installed
+  system's sources.list — omitting the latter makes the next
+  `apt full-upgrade` offer to REMOVE the backports kernel.
+- The kernel, its headers and the whole ZFS stack are named in one
+  `-t <suite>-backports` transaction, so apt cannot resolve zfs-dkms
+  from stable against a backports kernel.
+- The install then asserts both installed versions contain `bpo` and
+  logs a loud WARNING if apt silently fell back to stable.
 
 ## Order of work
 
