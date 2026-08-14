@@ -128,6 +128,16 @@ k_profile_packages() {
         # post-install. Leaving _browser empty would result in a desktop
         # with NO browser at all, so chromium is the safer default.
         local _browser="chromium"
+        # certutil lives in a DIFFERENTLY NAMED package per family:
+        #   RPM (Fedora/RHEL/CentOS/Rocky) -> nss-tools
+        #   Debian/Ubuntu                  -> libnss3-tools
+        # kldload-trust-cert uses certutil to add the kldload CA to
+        # ~/.pki/nssdb so the browser trusts the webui cert silently.
+        # With the RPM name on Debian the package simply never installed,
+        # certutil was absent, the CA never reached the browser store, and
+        # every tile opened with a certificate warning.
+        # HISTORY: 2026-08-14, fiend rc3 — "worked, just wasn't trusted".
+        local _nsstools="libnss3-tools"
         local _viewer="loupe"
         local _terminal="gnome-terminal"
         local _nm="network-manager"
@@ -176,6 +186,7 @@ k_profile_packages() {
             _gdm="gdm3"
         elif [[ "$_distro" == "centos" || "$_distro" == "rocky" || "$_distro" == "rhel" || "$_distro" == "fedora" ]]; then
             # RPM branch — match package naming on those ecosystems.
+            _nsstools="nss-tools"
             # Note: on RHEL 10+ and Fedora 41+, Red Hat dropped gnome-terminal
             # and eog from AppStream in favor of modern GNOME 47 replacements
             # (ptyxis + loupe). dnf without --skip-broken errors out if the
@@ -269,8 +280,9 @@ k_profile_packages() {
         ${_gdm} nautilus ${_terminal} ${_viewer} \
         adwaita-icon-theme ${_fonts} gvfs ${_gvfs_extra} \
         gnome-keyring ${_pam_extras} ${_portal_extras} ${_dbus_extras} \
+        gnome-tweaks \
         ${_xsrv} ${_netools_extra} \
-        ${_browser} nss-tools \
+        ${_browser} ${_nsstools} \
         gir1.2-webkit-6.0 libgtk-4-1 python3-gi \
         pulseaudio-utils \
         tmux eject sanoid python3 python3-websockets python3-yaml htop iotop lm_sensors net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
@@ -405,7 +417,24 @@ k_profile_optional_packages() {
         if [[ "$_distro" == "arch" ]]; then
             out+=(qemu-full libvirt virt-install bridge-utils edk2-ovmf dnsmasq sshpass)
         elif [[ "$_distro" == "ubuntu" || "$_distro" == "debian" ]]; then
-            out+=(qemu-system-x86 libvirt-daemon-system libvirt-clients virtinst bridge-utils ovmf dnsmasq-base sshpass)
+            # qemu-utils / cloud-image-utils / genisoimage are NOT optional here.
+            # Debian splits the image tooling out of qemu-system-x86, and nothing
+            # in this set pulls it back in — unlike Arch, where qemu-full carries
+            # qemu-img, and RPM, where qemu-img is a hard dependency of qemu-kvm.
+            # Debian is the only branch that loses it silently.
+            #
+            # WHY IT MATTERS: kube-cluster and klab both shell out to qemu-img
+            # (3 call sites each) to import a cloud image into a ZFS zvol, and to
+            # cloud-localds/genisoimage to build the cloud-init seed ISO.
+            #
+            # HISTORY: 2026-08-14, fiend. k8s bootstrap died with
+            # "kube-cluster: line 969: qemu-img: command not found", and the klab
+            # golden VM booted with no imported disk and no seed, so it never took
+            # a DHCP lease — klab then broadcast-pinged for it until timeout,
+            # which on screen looked like a hung installer ("no IP found").
+            out+=(qemu-system-x86 libvirt-daemon-system libvirt-clients virtinst
+                bridge-utils ovmf dnsmasq-base sshpass
+                qemu-utils cloud-image-utils genisoimage)
         else
             out+=(qemu-kvm libvirt-daemon libvirt-daemon-driver-qemu libvirt-daemon-driver-storage libvirt-daemon-config-network libvirt-client virt-install bridge-utils edk2-ovmf dnsmasq sshpass)
         fi
@@ -1618,6 +1647,46 @@ AutomaticLogin=${_install_user}
 [debug]
 EOGDM
     done
+
+    # ── lightdm autologin, AT INSTALL TIME ───────────────────────────────────
+    # Debian deliberately runs lightdm rather than GDM (GDM 48 has a systemd
+    # integration bug on Trixie — see the _gdm selection near the top of this
+    # file), so everything written above lands in files lightdm never reads.
+    #
+    # WHY HERE AND NOT ONLY IN FIRSTBOOT: kldload-firstboot also re-asserts
+    # this, but it runs AFTER the display manager has already started, so the
+    # very first boot still shows a greeter and autologin only takes effect on
+    # the second. Writing it now — before the target has ever booted — is what
+    # makes the FIRST boot go straight to the desktop.
+    # HISTORY: 2026-08-14, fiend — "on first boot the gdm or whatever is
+    # prompting me to log in, it should autoboot directly in right?"
+    # Gate on the DISTRO, not on _gdm and not on the directory existing.
+    #   * _gdm is `local` to the package-set function above — reading it here
+    #     is an unbound-variable abort under `set -u`.
+    #   * `[[ -d ${target}/etc/lightdm ]]` looks tempting but repeats the exact
+    #     ordering bug that broke the wallpaper: if this runs before lightdm is
+    #     unpacked, the test is false and the config is silently never written.
+    # The distro is known before any package is installed, so it cannot race.
+    # Mirrors the _gdm selection above: ubuntu→gdm3, RPM family→gdm, rest→lightdm.
+    case "${KLDLOAD_DISTRO:-centos}" in
+    ubuntu | centos | rocky | rhel | fedora) _want_lightdm=0 ;;
+    *) _want_lightdm=1 ;;
+    esac
+    if [[ "$_want_lightdm" == "1" ]]; then
+        mkdir -p "${target}/etc/lightdm/lightdm.conf.d"
+        cat >"${target}/etc/lightdm/lightdm.conf.d/50-kldload-autologin.conf" <<EOLDM
+# Written by the kldload installer. A drop-in rather than an edit to
+# lightdm.conf so a package upgrade cannot silently revert it.
+[Seat:*]
+autologin-user=${_install_user}
+autologin-user-timeout=0
+EOLDM
+        # Debian gates autologin on this group: without it lightdm ignores
+        # autologin-user and still shows the greeter.
+        chroot "${target}" sh -c 'getent group autologin >/dev/null 2>&1 || groupadd -r autologin' 2>/dev/null || true
+        chroot "${target}" usermod -aG autologin "${_install_user}" 2>/dev/null || true
+        k_log "lightdm autologin configured for ${_install_user} (install-time)"
+    fi
 
     # Wayland is the default — xserver-xorg is installed as fallback so GDM
     # can fall back to X11 if Wayland fails (older virtual GPUs, etc.)

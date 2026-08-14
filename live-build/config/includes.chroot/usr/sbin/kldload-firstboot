@@ -945,6 +945,32 @@ LVG
         [[ -d /etc/gdm3 ]] && _audir=/etc/gdm3
         [[ -z "$_audir" && -d /etc/gdm ]] && _audir=/etc/gdm
         _au=$(id -nu 1000 2>/dev/null || true)
+        # ── lightdm autologin ────────────────────────────────────────────────
+        # Debian DELIBERATELY runs lightdm, not GDM (profiles.sh: GDM 48 has a
+        # systemd-integration bug on Trixie). The GDM block below therefore
+        # writes a correct autologin config into a file nothing reads, and the
+        # operator lands on a greeter every boot.
+        # HISTORY: 2026-08-14, fiend — first Debian install to reach a desktop.
+        if [[ -d /etc/lightdm ]] && command -v lightdm >/dev/null 2>&1; then
+            _au=$(id -nu 1000 2>/dev/null || true)
+            if [[ -n "$_au" ]]; then
+                mkdir -p /etc/lightdm/lightdm.conf.d
+                cat >/etc/lightdm/lightdm.conf.d/50-kldload-autologin.conf <<LIGHTDM
+# Written by kldload-firstboot. Debian uses lightdm, so GDM's daemon.conf is
+# never read here. Drop-in rather than editing lightdm.conf so a package
+# upgrade cannot silently revert it.
+[Seat:*]
+autologin-user=${_au}
+autologin-user-timeout=0
+LIGHTDM
+                # Debian gates autologin on this group; without it lightdm
+                # ignores autologin-user and still shows the greeter.
+                getent group autologin >/dev/null 2>&1 || groupadd -r autologin
+                usermod -aG autologin "$_au" 2>/dev/null || true
+                log "desktop: lightdm autologin configured for ${_au}"
+            fi
+        fi
+
         if [[ -n "$_audir" && -n "$_au" ]]; then
             for _gc in custom.conf daemon.conf; do
                 cat >"${_audir}/${_gc}" <<AUTOLOGIN
@@ -962,6 +988,85 @@ AutomaticLogin=${_au}
 AUTOLOGIN
             done
             log "desktop: GDM autologin re-asserted for ${_au} (${_audir})"
+        fi
+
+        # ── Re-assert the distro-native wallpaper ────────────────────────────
+        # profiles.sh picks a per-distro wallpaper at install time, but guards
+        # on the file existing in the target — and on Debian the check runs
+        # BEFORE desktop-base is unpacked, so it takes the "missing" branch and
+        # never writes 01-kldload-wallpaper. 00-kldload-desktop's kldload nebula
+        # then wins, and a Debian box comes up wearing what reads as the RHEL
+        # look. Re-checking here, once every package is unpacked, is the second
+        # failsafe — same pattern as the autologin and dconf blocks below.
+        # HISTORY: 2026-08-14, fiend — "lol and it put the rhel 10 desktop
+        # wallpaper" on a Debian 13 install that had desktop-base 13.0.4 present.
+        _wp=""
+        case "$(. /etc/os-release 2>/dev/null && echo "${ID:-}")" in
+        debian) _wp=/usr/share/desktop-base/active-theme/wallpaper/contents/images/1920x1080.svg ;;
+        ubuntu) _wp=/usr/share/backgrounds/warty-final-ubuntu.png ;;
+        fedora) _wp=/usr/share/backgrounds/f44/default/f44-01-day.jxl ;;
+        centos | rocky | rhel) _wp=/usr/share/backgrounds/default.png ;;
+        esac
+        if [[ -n "$_wp" && -e "$_wp" && ! -e /etc/dconf/db/local.d/01-kldload-wallpaper ]]; then
+            _wpd="$_wp"
+            [[ "$(. /etc/os-release 2>/dev/null && echo "${ID:-}")" == "fedora" &&
+            -e /usr/share/backgrounds/f44/default/f44-01-night.jxl ]] &&
+                _wpd=/usr/share/backgrounds/f44/default/f44-01-night.jxl
+            mkdir -p /etc/dconf/db/local.d
+            cat >/etc/dconf/db/local.d/01-kldload-wallpaper <<WPEOF
+[org/gnome/desktop/background]
+picture-uri='file://${_wp}'
+picture-uri-dark='file://${_wpd}'
+picture-options='zoom'
+WPEOF
+            log "desktop: distro-native wallpaper re-asserted (${_wp})"
+        fi
+        unset _wp _wpd
+
+        # ── Mirror browser policies to the CHROMIUM path ─────────────────────
+        # Nine call sites (this file + profiles.sh) write managed policies to
+        # /etc/opt/chrome/policies/managed — Google Chrome's location. Debian
+        # ships CHROMIUM, which reads /etc/chromium/policies/managed and
+        # therefore ignored every one of them: the kiosk/homepage/allowlist
+        # policy was written, logged as "OK", and silently never applied.
+        #
+        # Mirroring here rather than editing nine writers keeps one place to
+        # reason about, and runs late enough to catch policies written at
+        # install time AND during this firstboot.
+        # HISTORY: 2026-08-14, fiend rc3 — "Chrome homepage set to Grafana klab
+        # dashboard" logged OK on a box with no Chrome installed.
+        if [[ -d /etc/opt/chrome/policies/managed ]] &&
+            command -v chromium >/dev/null 2>&1; then
+            mkdir -p /etc/chromium/policies/managed
+            if cp -f /etc/opt/chrome/policies/managed/*.json \
+                /etc/chromium/policies/managed/ 2>>"${LOG}"; then
+                ok "desktop: browser policies mirrored to chromium ($(ls /etc/chromium/policies/managed/ | wc -l) files)"
+            else
+                log "WARNING: could not mirror browser policies to /etc/chromium — kiosk/homepage policy will not apply"
+            fi
+        fi
+
+        # ── Compile the dconf database ───────────────────────────────────────
+        # /etc/dconf/db/local.d/* are SOURCES. dconf reads the compiled binary
+        # /etc/dconf/db/local, and without `dconf update` that file does not
+        # exist — so every kldload default (dock favourites, app folders,
+        # terminal, power, wallpaper) is silently ignored and GNOME falls back
+        # to the distro's own defaults.
+        #
+        # profiles.sh already runs this in the chroot, but with
+        # `2>/dev/null || true`; on Debian it failed there and the swallow hid
+        # it. Running it again HERE, on the real system, is the second failsafe
+        # — dconf-cli is certainly installed by now and there is no chroot to
+        # confuse it. Cheap and idempotent.
+        # HISTORY: 2026-08-14, fiend — /etc/dconf/db/local absent after a full
+        # install; app grid showed stock Debian favourites and YaST/Pardus
+        # folders. `dconf update` alone fixed it.
+        if command -v dconf >/dev/null 2>&1 && [[ -d /etc/dconf/db/local.d ]]; then
+            if dconf update >>"${LOG}" 2>&1 && [[ -f /etc/dconf/db/local ]]; then
+                ok "desktop: dconf database compiled ($(stat -c %s /etc/dconf/db/local) bytes)"
+            else
+                log "WARNING: dconf update failed — GNOME will use distro defaults, not kldload's (no dock favourites or app folders)"
+            fi
         fi
     fi
 }
@@ -1362,7 +1467,35 @@ main() {
                 fi
             fi
         else
-            log "WARNING: NVIDIA DKMS still failing on running system — staying on nouveau"
+            # LAST RESORT on Debian: the distro driver cannot build here.
+            #
+            # Debian ships 550.163.01 in every suite, and it fails against
+            # kernel 7.1 on vm_area_struct.__vm_flags (removed upstream). No
+            # number of retries fixes that — it needs newer driver SOURCE.
+            # NVIDIA's own Debian 13 repo has 610.57.04, which builds and
+            # signs cleanly under Secure Boot (verified fiend 2026-08-14).
+            #
+            # WARN: the old message here said "staying on nouveau", which was
+            # actively misleading — the block above blacklists nouveau on the
+            # ZBM cmdline for NVIDIA cards, so the real outcome is NO display
+            # driver at all and a text console, not a degraded fallback.
+            _nv_healed=0
+            if [[ -r /etc/os-release ]] && grep -qE '^ID=debian' /etc/os-release &&
+                command -v apt-get >/dev/null 2>&1; then
+                log "NVIDIA: Debian's driver cannot build on this kernel — trying NVIDIA's vendor repo (610)"
+                if curl -fsSL -o /tmp/cuda-keyring.deb \
+                    https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/cuda-keyring_1.1-1_all.deb >>"$LOG" 2>&1 &&
+                    dpkg -i /tmp/cuda-keyring.deb >>"$LOG" 2>&1 &&
+                    DEBIAN_FRONTEND=noninteractive apt-get update -qq >>"$LOG" 2>&1 &&
+                    DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-open >>"$LOG" 2>&1; then
+                    _nv_healed=1
+                    ok "NVIDIA: healed via the vendor repo — nvidia-open installed, driver loads next boot"
+                fi
+            fi
+            if ((_nv_healed == 0)); then
+                log "WARNING: NVIDIA driver could not be built. nouveau is BLACKLISTED for this card, so there is NO display driver — the machine will boot to a text console. Fix: install nvidia-open from https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/ (needs a network)."
+            fi
+            unset _nv_healed
         fi
         unset _nv_src _nv_ver _nv_ko_present _nv_restored _disabled _be_ds _root_ds _cl
     fi
@@ -2850,9 +2983,21 @@ AIMOTD
                 "${KLDLOAD_ZFSLAB_MODE:-0}" == "1" ]]; then
                 log "Setting up klab observability stack on host..."
 
-                # ── Grafana (from official repo — RPM available online) ──
-                if ! command -v grafana >/dev/null 2>&1; then
-                    cat >/etc/yum.repos.d/grafana.repo <<'GREPO'
+                # ── Grafana (from Grafana's own repo — not in any distro archive) ──
+                # BOTH package managers. This used to be dnf-only, so on Debian
+                # it silently did nothing — and the block below then logged five
+                # "OK: Grafana ..." lines (dashboards, anonymous embedding,
+                # feature toggles, Chrome homepage) for software that was never
+                # installed and could not be: grafana is absent from Debian's
+                # archive entirely, so it needs apt.grafana.com the same way
+                # NVIDIA needs its vendor repo.
+                # HISTORY: 2026-08-14, fiend rc3 — the Reporting tile opened an
+                # empty frame; `apt-cache policy grafana` returned nothing at all
+                # while firstboot.log claimed Grafana was configured.
+                if ! command -v grafana >/dev/null 2>&1 &&
+                    ! command -v grafana-server >/dev/null 2>&1; then
+                    if command -v dnf >/dev/null 2>&1; then
+                        cat >/etc/yum.repos.d/grafana.repo <<'GREPO'
 [grafana]
 name=Grafana OSS
 baseurl=https://rpm.grafana.com
@@ -2860,7 +3005,28 @@ gpgcheck=1
 gpgkey=https://rpm.grafana.com/gpg.key
 enabled=1
 GREPO
-                    dnf install -y grafana 2>/dev/null || true
+                        dnf install -y grafana >>"${LOG}" 2>&1 ||
+                            log "WARNING: grafana install failed (dnf) — the Reporting tile will be empty"
+                    elif command -v apt-get >/dev/null 2>&1; then
+                        mkdir -p /etc/apt/keyrings
+                        if curl -fsSL https://apt.grafana.com/gpg.key |
+                            gpg --dearmor -o /etc/apt/keyrings/grafana.gpg 2>>"${LOG}"; then
+                            printf 'deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main\n' \
+                                >/etc/apt/sources.list.d/grafana.list
+                            DEBIAN_FRONTEND=noninteractive apt-get update -qq >>"${LOG}" 2>&1 || true
+                            DEBIAN_FRONTEND=noninteractive apt-get install -y grafana >>"${LOG}" 2>&1 ||
+                                log "WARNING: grafana install failed (apt) — the Reporting tile will be empty"
+                        else
+                            log "WARNING: could not fetch the Grafana signing key — Reporting tile will be empty"
+                        fi
+                    fi
+                fi
+                # Do not claim success for something that is not there. Every
+                # "OK: Grafana ..." line below is conditional on this.
+                if command -v grafana >/dev/null 2>&1 || command -v grafana-server >/dev/null 2>&1; then
+                    ok "Grafana installed ($(command -v grafana grafana-server 2>/dev/null | head -1))"
+                else
+                    log "WARNING: Grafana NOT installed — Reporting tile and dashboards will be unavailable"
                 fi
 
                 # ── Prometheus (binary — not in CentOS/EPEL repos) ──
@@ -3279,6 +3445,23 @@ CHROMEPOL
             shred -uz /etc/kldload/zfs-passphrase 2>/dev/null || rm -f /etc/kldload/zfs-passphrase
             log "Plaintext ZFS passphrase shredded"
         fi
+
+        # ── Desktop + VM-restore setup, on the path that ACTUALLY RUNS ───────
+        # arm_vm_restore() is invoked far below, in the PRO tail of main() —
+        # code this free branch returns before ever reaching. Free is the only
+        # edition that ships, so that function has never executed on a real
+        # install, and everything inside it silently did nothing:
+        #   * the web-GUI kiosk autostart was never removed
+        #   * GDM/lightdm autologin was never asserted -> greeter every boot
+        #   * the distro wallpaper was never re-applied -> kldload nebula
+        #   * `dconf update` never ran -> NO dock favourites, NO app folders,
+        #     because /etc/dconf/db/local (the compiled DB) was never built
+        #
+        # This is the same shape as the plaintext-passphrase bug fixed directly
+        # above: work parked in the pro tail, silently skipped on every install.
+        # HISTORY: 2026-08-14, fiend rc3 — firstboot logged "complete" with zero
+        # "desktop:" lines and /etc/dconf/db/local absent on a desktop install.
+        arm_vm_restore
 
         rm -f /tmp/kldload-firstboot-status
         log "kldload-firstboot complete (free edition)"
