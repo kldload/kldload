@@ -42,6 +42,17 @@ elif command -v "$tool" >/dev/null 2>&1; then
     bin="sudo $tool"
 elif command -v "${tool}-bpfcc" >/dev/null 2>&1; then
     bin="sudo ${tool}-bpfcc"
+# Debian installs the bcc tools into /usr/sbin with a -bpfcc suffix, and
+# /usr/sbin is NOT in a desktop user's PATH there (measured on trixie:
+# PATH=/usr/local/bin:/usr/bin:/bin:/usr/games). So `command -v` above says
+# "missing" for a tool that is installed and works — every eBPF F-key pane
+# went dead on Debian while /usr/sbin/execsnoop-bpfcc ran fine by hand.
+# Probe the absolute path the same way the legacy bcc path below is probed.
+# HISTORY: 2026-08-14, fiend.
+elif [ -x "/usr/sbin/${tool}-bpfcc" ]; then
+    bin="sudo /usr/sbin/${tool}-bpfcc"
+elif [ -x "/usr/sbin/$tool" ]; then
+    bin="sudo /usr/sbin/$tool"
 elif [ -x "/usr/share/bcc/tools/$tool" ]; then
     bin="sudo /usr/share/bcc/tools/$tool"
 else

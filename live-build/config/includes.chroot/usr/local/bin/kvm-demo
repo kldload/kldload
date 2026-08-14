@@ -25,10 +25,19 @@ DISTRO="unknown"
 GPU_NAME="N/A"
 [[ "$HAS_NVIDIA" == "1" ]] && GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
 
-# eBPF tool paths: CentOS=/usr/share/bcc/tools/<name>, Debian=/usr/sbin/<name>-bpfcc
+# eBPF tool paths, CO-RE FIRST:
+#   libbpf-tools = /usr/bin/bpf-<name>            (BTF, compiles nothing)
+#   CentOS legacy = /usr/share/bcc/tools/<name>
+#   Debian legacy = /usr/sbin/<name>-bpfcc
+# The legacy paths runtime-compile BPF-C against kernel headers and FAIL on
+# kernel 7.x (fs.h static_assert on sizeof(struct filename) breaks Clang), so
+# preferring them on a current substrate means every demo pane dies rc=1.
+# HISTORY: 2026-08-14, fiend on 7.1.3.
 _bcc() {
     local tool="$1"
-    if [[ -x "/usr/share/bcc/tools/$tool" ]]; then
+    if [[ -x "/usr/bin/bpf-$tool" ]]; then
+        echo "/usr/bin/bpf-$tool"
+    elif [[ -x "/usr/share/bcc/tools/$tool" ]]; then
         echo "/usr/share/bcc/tools/$tool"
     elif [[ -x "/usr/sbin/${tool}-bpfcc" ]]; then
         echo "/usr/sbin/${tool}-bpfcc"

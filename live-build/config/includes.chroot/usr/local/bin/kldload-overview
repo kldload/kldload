@@ -214,8 +214,23 @@ if command -v bpftool >/dev/null 2>&1; then
     echo -e "    $(_dot_ok) bpftool"
     has_ebpf=true
 fi
-if [[ -d /usr/share/bcc/tools ]] || compgen -G '/usr/sbin/*-bpfcc' >/dev/null 2>&1; then
-    echo -e "    $(_dot_ok) bcc-tools"
+# CO-RE (libbpf-tools) is reported separately from legacy bcc, because on
+# kernel 7.x they are not interchangeable: legacy bcc compiles BPF-C against
+# kernel headers when invoked and fails outright (fs.h static_assert on
+# sizeof(struct filename)). Reporting a green dot for legacy alone told the
+# operator eBPF was fine on a box where every tool died rc=1.
+# HISTORY: 2026-08-14, fiend on 7.1.3.
+if compgen -G '/usr/bin/bpf-*' >/dev/null 2>&1; then
+    echo -e "    $(_dot_ok) libbpf-tools (CO-RE)"
+    has_ebpf=true
+elif [[ -d /usr/share/bcc/tools ]] || compgen -G '/usr/sbin/*-bpfcc' >/dev/null 2>&1; then
+    # Legacy only. Fine on older substrates, broken from 7.0 onward — say so
+    # rather than implying it works.
+    if [[ "$(uname -r)" == 7.* ]]; then
+        echo -e "    $(_dot_warn) bcc-tools (legacy — needs libbpf-tools on kernel 7.x)"
+    else
+        echo -e "    $(_dot_ok) bcc-tools"
+    fi
     has_ebpf=true
 fi
 if command -v bpftrace >/dev/null 2>&1; then

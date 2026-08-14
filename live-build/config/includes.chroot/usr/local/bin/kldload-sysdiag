@@ -65,19 +65,33 @@ _sys_disk() {
         df -h | grep -vE 'tmpfs|devtmpfs|overlay|squashfs|cgroup' | head -15
         echo
         echo "── BCC biolatency (1s) ────────────────────────────────"
-        timeout 1 sudo /usr/share/bcc/tools/biolatency 1 1 2>/dev/null ||
+        # CO-RE FIRST. Both fallbacks below are LEGACY bcc, which compiles
+        # BPF-C against kernel headers at run time and dies on kernel 7.x:
+        #   fs.h:2434: static assertion failed:
+        #   'sizeof(struct filename) % 64 == 0'
+        # so on a current substrate they BOTH fail and the tool reported
+        # "install bcc-tools" on a machine where bcc was installed and had 130
+        # tools on disk. libbpf-tools ships BTF-based binaries as /usr/bin/bpf-*
+        # that compile nothing at run time — the only ones that work here.
+        # HISTORY: 2026-08-14, fiend on 7.1.3 (same failure as _kbcc-pane,
+        # 2026-06-13 on 7.0).
+        timeout 1 sudo /usr/bin/bpf-biolatency 1 1 2>/dev/null ||
+            timeout 1 sudo /usr/share/bcc/tools/biolatency 1 1 2>/dev/null ||
             timeout 1 sudo biolatency-bpfcc 1 1 2>/dev/null ||
-            echo "(biolatency unavailable — install bcc-tools)"
+            echo "(biolatency unavailable — install libbpf-tools for CO-RE binaries)"
         sleep 4
     done
 }
 export -f _sys_disk
 
 _sys_syscall() {
-    sudo /usr/share/bcc/tools/execsnoop 2>/dev/null ||
+    # CO-RE first — see the biolatency note above: legacy bcc cannot compile
+    # against kernel 7.x headers, so both legacy paths fail on a current box.
+    sudo /usr/bin/bpf-execsnoop 2>/dev/null ||
+        sudo /usr/share/bcc/tools/execsnoop 2>/dev/null ||
         sudo execsnoop-bpfcc 2>/dev/null ||
         {
-            echo "(execsnoop needs bcc-tools — install bcc-tools)"
+            echo "(execsnoop unavailable — install libbpf-tools for CO-RE binaries)"
             sleep 99
         }
 }
