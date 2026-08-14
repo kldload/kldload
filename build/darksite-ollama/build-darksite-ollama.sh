@@ -4,7 +4,7 @@ set -euo pipefail
 # build-darksite-ollama.sh — Ollama model darksite builder.
 #
 # Pulls the Ollama models we want baked into every ISO (default:
-# llama3.1:8b) into a host-shared blob store. `builder/build-iso.sh`
+# qwen3:14b + nomic-embed-text) into a host-shared blob store. `builder/build-iso.sh`
 # copies the result into the ISO rootfs at /root/darksite/ollama/,
 # and `kldload-firstboot` rsyncs it into /usr/share/ollama/.ollama/
 # on first boot so Bob is chat-ready without internet.
@@ -14,9 +14,10 @@ set -euo pipefail
 #     models/blobs/sha256-<hex>
 #     models/manifests/registry.ollama.ai/library/<model>/<tag>
 
-# Default bakes qwen2.5:14b only — better tool calling + reasoning than
-# llama3.1:8b at similar VRAM cost, keeps the ISO ~5 GB smaller. Users
-# who want the smaller model can pull it post-install.
+# Default bakes qwen3:14b (chat, ~9 GB) plus nomic-embed-text (embeddings,
+# ~275 MB): better tool calling and reasoning than llama3.1:8b at similar
+# VRAM cost. Both are required for a fully darksite Bob — chat alone cannot
+# answer from the knowledge base without the embedding model.
 MODELS="${OLLAMA_MODELS:-qwen3:14b nomic-embed-text}"
 DARKSITE_OUT="${DARKSITE_OUT:-/output}"
 MODELS_DIR="${DARKSITE_OUT}/models"
@@ -77,9 +78,15 @@ mkdir -p "$OLLAMA_MODELS"
 
 # Pull every requested model. `ollama pull` is idempotent — if the blob
 # is already present it's a no-op.
-IFS=',' read -ra _models <<<"$MODELS"
+#
+# WHY THE IFS INCLUDES A SPACE: deploy.sh passes the list space-separated
+# ("qwen3:14b nomic-embed-text"), but this split was comma-only, so the whole
+# string arrived as ONE element and the following line stripped its spaces —
+# producing the model name "qwen3:14bnomic-embed-text" and failing every build
+# with "pull model manifest: file does not exist" (2026-08-14). Accept either
+# separator, and never strip characters from inside a name.
+IFS=', ' read -ra _models <<<"$MODELS"
 for _m in "${_models[@]}"; do
-    _m="${_m// /}"
     [[ -z "$_m" ]] && continue
     log "Pulling ${_m}..."
     ollama pull "${_m}" 2>&1 | tail -5 || die "pull failed: ${_m}"
@@ -106,8 +113,9 @@ _blob_count=$(find "${MODELS_DIR}/blobs" -type f 2>/dev/null | wc -l)
 _size=$(du -sh "${MODELS_DIR}" 2>/dev/null | cut -f1)
 log "Ollama darksite ready: ${MODELS_DIR} (${_blob_count} blobs, ${_size})"
 
-# Sanity check — require at least 3 blobs (layers) for llama3.1:8b to
-# exist. Catches silent failures where pull aborted mid-download.
+# Sanity check — a complete pull leaves several blobs per model. Catches
+# silent failures where a pull aborted mid-download and left a manifest
+# with no layers behind it.
 if [[ "${_blob_count}" -lt 3 ]]; then
     die "too few blobs (${_blob_count}) — model pull likely incomplete"
 fi

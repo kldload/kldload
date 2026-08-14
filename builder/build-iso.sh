@@ -1502,6 +1502,21 @@ if [[ "$EDITION" != "core" ]]; then
         chmod +x "${ROOTFS}/usr/local/bin/$(basename "$src")"
     done
 
+    # Component registry for kldload-component. Globbed, not listed, for the
+    # same reason the loop above is: an opt-in list silently drops new entries.
+    # This bit us immediately — rc4 shipped /usr/local/bin/kldload-component
+    # (picked up by the glob above) with NO registry, so `list` printed a bare
+    # header and every `install` answered "unknown component". A tool without
+    # its data is a broken tool, not a missing feature.
+    if compgen -G "/build/live-build/config/includes.chroot/usr/lib/kldload/components/*.component" >/dev/null; then
+        mkdir -p "${ROOTFS}/usr/lib/kldload/components"
+        cp -p /build/live-build/config/includes.chroot/usr/lib/kldload/components/*.component \
+            "${ROOTFS}/usr/lib/kldload/components/"
+        log "component registry: $(find "${ROOTFS}/usr/lib/kldload/components" -name '*.component' | wc -l) components"
+    else
+        log "WARN: no component definitions found — kldload-component will have an empty registry"
+    fi
+
     # Bob's sbin tools — boot splash (hardware detect + progress + quotes)
     # and the appliance UI launcher. These live at /usr/local/sbin.
     # kldload-tls-cert added for pass-12 — self-signed TLS for webui HTTPS.
