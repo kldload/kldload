@@ -1029,6 +1029,36 @@ DASHSTART
             if [[ -f "${_appdir}/htop.desktop" ]] && ! grep -q '^NoDisplay=true' "${_appdir}/htop.desktop"; then
                 printf 'NoDisplay=true\n' >>"${_appdir}/htop.desktop"
             fi
+
+            # ── One terminal in the grid, not four ───────────────────────────
+            # The package set pulls konsole, ptyxis, gnome-console AND
+            # gnome-terminal — konsole for its kldload colourschemes, ptyxis
+            # and gnome-console as Fedora desktop defaults, gnome-terminal
+            # because the dock pins it. Every one ships a launcher, so the
+            # grid ends up with "Terminal", "Terminal", "Console" and
+            # "Konsole" side by side and no way to tell which is which.
+            #
+            # HISTORY: reported by the operator 2026-08-13 on a fresh desktop
+            # install — "a terminal and a console and printsettings and a
+            # konsole .. idk where that came from but dont want it".
+            #
+            # Hidden, not uninstalled: konsole's colourschemes are still used
+            # by kldload-term, ptyxis is a dependency of the Fedora desktop
+            # group, and removing packages to tidy a menu invites a
+            # dependency cascade. NoDisplay only affects the launcher.
+            #
+            # org.gnome.Terminal.desktop is deliberately NOT in this list —
+            # it is the one 50-kldload-installed-favorites pins to the dock,
+            # so it is the terminal the operator actually sees and uses.
+            local _dupe
+            for _dupe in org.gnome.Console.desktop org.gnome.Ptyxis.desktop \
+                org.kde.konsole.desktop system-config-printer.desktop; do
+                if [[ -f "${_appdir}/${_dupe}" ]] &&
+                    ! grep -q '^NoDisplay=true' "${_appdir}/${_dupe}"; then
+                    printf 'NoDisplay=true\n' >>"${_appdir}/${_dupe}"
+                    k_log "hid duplicate launcher: ${_dupe}"
+                fi
+            done
             if [[ -f "${_appdir}/vim.desktop" ]] && grep -q '^Exec=gnome-terminal' "${_appdir}/vim.desktop"; then
                 sed -i 's|^Exec=gnome-terminal[[:space:]]*--[[:space:]]*|Exec=kldload-term |' "${_appdir}/vim.desktop"
             fi

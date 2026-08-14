@@ -22,6 +22,43 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -Eeuo pipefail
 
+# ── Open once after an install, then stop autostarting ───────────────────────
+#
+# The console is a tool you reach for (win+A), not something that should fling
+# a window open at every login for the rest of the machine's life. It IS worth
+# opening automatically on the first boots after an install, while the operator
+# is still watching the machine build itself — that is when they want to see it.
+#
+# So: once the build has finished (all-ready) AND this has already opened once,
+# retire the autostart. Both conditions matter. Retiring on all-ready alone
+# would mean a machine that finished building overnight never shows the console
+# at all; retiring on first-run alone would kill it while the build is still
+# going, which is exactly when it is useful.
+#
+# HISTORY: operator request, twice, 2026-08-13 — "I don't want it appearing
+# every time the computer reboots". An earlier removal exists in
+# kldload-firstboot but is buried inside arm_vm_restore() and did not run;
+# self-retirement here does not depend on that plumbing, on ROLE being
+# resolved correctly, or on the installer having taken the desktop branch.
+#
+# Removes the SYSTEM entry when writable, otherwise masks it with a per-user
+# override — an autostart entry is disabled by a same-named file carrying
+# Hidden=true in ~/.config/autostart.
+_retire_autostart() {
+    local sys=/etc/xdg/autostart/kldload-webui.desktop
+    local usr="${HOME}/.config/autostart/kldload-webui.desktop"
+    [[ -f /var/lib/kldload/all-ready ]] || return 0
+    [[ -f "${HOME}/.local/state/kldload/webui-opened" ]] || return 0
+    if [[ -w /etc/xdg/autostart ]] && rm -f "$sys" 2>/dev/null; then
+        return 0
+    fi
+    mkdir -p "$(dirname "$usr")" 2>/dev/null || return 0
+    printf '[Desktop Entry]\nType=Application\nName=kldload Web UI\nHidden=true\n' >"$usr" 2>/dev/null || true
+}
+_retire_autostart
+mkdir -p "${HOME}/.local/state/kldload" 2>/dev/null || true
+: >"${HOME}/.local/state/kldload/webui-opened" 2>/dev/null || true
+
 url='https://localhost:8443/'
 
 # Wait for the SPA to answer (up to ~60s). `curl -k` because the cert is the
