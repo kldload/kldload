@@ -37,22 +37,35 @@ readonly MONITOR=/usr/local/bin/kldload-build-monitor
 [[ -f "$ALL_READY" ]] && exit 0
 [[ -x "$MONITOR" ]] || exit 0
 
-# find_term — echo a command line that opens $MONITOR full-screen.
+# find_term — echo a command line that opens $MONITOR in a NORMAL WINDOW.
+#
+# WHY NOT FULL-SCREEN: it used to open maximised/full-screen on every emulator,
+# which hijacked the desktop the operator had just logged into. The job here is
+# to be *unmissable*, not to be *modal* — the banner is already 5 rows of block
+# capitals, so a normal window carries the message perfectly well while leaving
+# the machine usable. A progress display that has to be dismissed before you can
+# work is a worse experience than the problem it solves.
+# HISTORY: 2026-08-14, operator feedback — "the build box should just be a
+# window and doesn't need to try and hide the whole desktop."
+#
+# 100x30 is chosen to fit the banner (it is 53 columns wide, centred) plus the
+# phase block and a 10-line log tail, with margin — so nothing wraps into mush
+# at the default font size.
 #
 # Returns: 0 and a command on stdout, or 1 when the session has no terminal
 # emulator at all (a headless or heavily trimmed profile), in which case the
 # caller gives up quietly rather than erroring into the login sequence.
 find_term() {
     if command -v ptyxis >/dev/null 2>&1; then
-        printf 'ptyxis --new-window --maximize -- %s' "$MONITOR"
+        printf 'ptyxis --new-window -- %s' "$MONITOR"
     elif command -v kgx >/dev/null 2>&1; then
-        printf 'kgx --full-screen -- %s' "$MONITOR"
+        printf 'kgx -- %s' "$MONITOR"
     elif command -v konsole >/dev/null 2>&1; then
-        printf 'konsole --fullscreen -e %s' "$MONITOR"
+        printf 'konsole --geometry 100x30 -e %s' "$MONITOR"
     elif command -v gnome-terminal >/dev/null 2>&1; then
-        printf 'gnome-terminal --full-screen -- %s' "$MONITOR"
+        printf 'gnome-terminal --geometry=100x30 -- %s' "$MONITOR"
     elif command -v xterm >/dev/null 2>&1; then
-        printf 'xterm -fullscreen -e %s' "$MONITOR"
+        printf 'xterm -geometry 100x30 -e %s' "$MONITOR"
     else
         return 1
     fi

@@ -54,7 +54,60 @@ touch "$LOG_FILE"
 chmod 644 "$LOG_FILE"
 
 log() { printf '[%(%F %T)T] [autodeploy] %s\n' -1 "$*" | tee -a "$LOG_FILE" >&2; }
+# ── Phase state, as DATA ─────────────────────────────────────────────────────
+# current-phase alone answers "what is running" but not "how much is left", so
+# anything rendering progress could only ever show a spinner and an elapsed
+# time. PHASE_DIR gives the whole plan: one file per phase, named NN-<phase>
+# so a plain `ls` sorts into run order, each holding "<state> <epoch>".
+#
+# States: pending | running | done | failed
+#
+# Read by kldload-build-monitor to draw a checklist. Deliberately files rather
+# than one status file: each write is a single atomic create/replace, so a
+# reader can never catch a half-written plan, and a crashed phase leaves its
+# last honest state behind instead of an empty file.
+PHASE_DIR="${STATE_DIR}/phases"
+
+# phase_plan — declare the phases THIS run will execute, in order.
+# Call once, after the enable-flags are known, so the plan reflects what is
+# actually going to happen rather than everything that could.
+phase_plan() {
+    local _i=0 _p
+    rm -rf "$PHASE_DIR"
+    mkdir -p "$PHASE_DIR"
+    for _p in "$@"; do
+        _i=$((_i + 10))
+        printf 'pending 0\n' >"${PHASE_DIR}/$(printf '%02d' "$_i")-${_p}"
+    done
+    log "plan: $* ($# phases)"
+}
+
+# _phase_file — the plan file for a phase name, or empty if not planned.
+_phase_file() {
+    local _f
+    _f="$(compgen -G "${PHASE_DIR}/[0-9][0-9]-$1" 2>/dev/null | head -1)"
+    printf '%s' "$_f"
+}
+
+# phase_state — set a phase's state explicitly (used for failures).
+phase_state() {
+    local _f
+    _f="$(_phase_file "$1")"
+    [[ -n "$_f" ]] && printf '%s %s\n' "$2" "$(date +%s)" >"$_f"
+}
+
 phase() {
+    local _f _prev
+    # Close out whatever was running: reaching a new phase means the previous
+    # one finished. A phase that FAILED calls phase_state explicitly first, and
+    # this must not overwrite that.
+    for _prev in "$PHASE_DIR"/[0-9][0-9]-*; do
+        [[ -e "$_prev" ]] || continue
+        [[ "$(cut -d' ' -f1 "$_prev" 2>/dev/null)" == "running" ]] &&
+            printf 'done %s\n' "$(date +%s)" >"$_prev"
+    done
+    _f="$(_phase_file "$1")"
+    [[ -n "$_f" ]] && printf 'running %s\n' "$(date +%s)" >"$_f"
     printf '%s\n' "$1" >"$PHASE_FILE"
     log "PHASE: $1"
 }
@@ -177,6 +230,27 @@ if [[ "${WANT[k8s]}${WANT[ai]}${WANT[klab]}" == "000" ]]; then
     exit 0
 fi
 
+# ── Declare the plan ──────────────────────────────────────────────────────────
+# Built from the WANT flags so it lists only what this run will actually do —
+# a plan promising a cluster on a box that never asked for one is worse than no
+# plan at all. Kept in the same order the phases execute below; if you add a
+# phase() call, add it here or the checklist silently under-reports.
+# ORDER MATTERS. Kubernetes and a usable Bob come BEFORE golden images:
+# goldens are the longest phase on the box (≈1 hr for 5 distros) and nothing
+# depends on them, whereas the operator wants kubectl and Ollama answering as
+# early as possible. Building images first meant the AI model download — which
+# is deliberately held until k8s finishes so boot #1 does not thrash — only
+# started after an hour of golden builds.
+# Operator decision 2026-08-14: "I want ollama up and running along with
+# kubernetes before images are built".
+_plan=(prereqs)
+[[ "${WANT[ai]}" == "1" ]] && _plan+=(ai-pull-kicking)
+[[ "${WANT[k8s]}" == "1" ]] && _plan+=(k8s-bootstrap)
+[[ "${WANT[ai]}" == "1" ]] && _plan+=(ai-wait)
+[[ "${WANT[klab]}" == "1" ]] && _plan+=(klab-goldens klab-ztest-goldens)
+_plan+=(ready)
+phase_plan "${_plan[@]}"
+
 # ── Phase 0: Prereqs ──────────────────────────────────────────────────────────
 phase "prereqs"
 # Wait up to 5 min for network-online (first boot can race here)
@@ -240,6 +314,47 @@ if [[ "${WANT[ai]}" == "1" ]]; then
             large) _chat_model="qwen3:30b-a3b" ;;
             *) _chat_model="qwen3:14b" ;;
             esac
+        fi
+
+        # ── A model already on this machine ALWAYS beats a download ──────────
+        #
+        # The tier above picks by VRAM alone, which ignores what is already
+        # here. Two ways that goes wrong, both seen on fiend 2026-08-14:
+        #
+        #   1. The ISO ships a model in the darksite, but the VRAM tier asks
+        #      for a DIFFERENT one. The darksite check below then reports MISS
+        #      and pulls ~9 GB over the network — on a machine that already had
+        #      working weights on disk. The offline model was never usable
+        #      because nothing compared it to what was wanted.
+        #   2. A re-run (or a reinstall over an existing /srv/ollama) already
+        #      has weights pulled, and this pulls them again.
+        #
+        # So: if ollama already serves a model, or the darksite carries one,
+        # take it. An explicit KLDLOAD_AI_MODEL is still honoured above — this
+        # only overrides the automatic tier choice, never an operator's request.
+        if [[ -z "${KLDLOAD_AI_MODEL:-}" ]]; then
+            _have_model=""
+            # (a) already pulled — ollama is authoritative about its own store
+            if command -v ollama >/dev/null 2>&1; then
+                _have_model="$(ollama list 2>/dev/null | awk 'NR>1 && $1 != "" {print $1; exit}')"
+            fi
+            # (b) not pulled, but shipped in the darksite: take the first
+            #     manifest present rather than demanding one specific name.
+            if [[ -z "$_have_model" && -d /root/darksite/ollama/models/manifests/registry.ollama.ai/library ]]; then
+                _have_model="$(
+                    find /root/darksite/ollama/models/manifests/registry.ollama.ai/library \
+                        -mindepth 2 -maxdepth 2 -type f 2>/dev/null |
+                        head -1 |
+                        awk -F/ '{printf "%s:%s", $(NF - 1), $NF}'
+                )"
+            fi
+            if [[ -n "$_have_model" && "$_have_model" != "$_chat_model" ]]; then
+                log "[ai] using the model already present (${_have_model}) instead of pulling ${_chat_model}"
+                log "[ai] to force a different one: KLDLOAD_AI_MODEL=<model> kldload-autodeploy"
+                _chat_model="$_have_model"
+            elif [[ -n "$_have_model" ]]; then
+                log "[ai] ${_chat_model} is already present — no download needed"
+            fi
         fi
         # VRAM probe. Try nvidia-smi (dedicated NVIDIA GPU), fall back to
         # rocminfo (AMD), then DRM sysfs (Intel Arc / fallback). 0 GB means
@@ -648,6 +763,7 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
                 log "[k8s] ArgoCD initial-admin password exposed at /var/lib/kldload/argocd-admin-password"
             fi
         else
+            phase_state "k8s-bootstrap" failed
             log "[k8s] FAILED — see /var/log/kldload/kube-bootstrap.log"
         fi
     fi
@@ -663,6 +779,18 @@ fi
 #   lean  → run 3a only (kvm/klab/devops/ai)
 #   ztest → run 3b only (zfslab) — saves ~30 min by skipping the lean
 #           lineage that zfslab doesn't use.
+# ── Phase 3: Wait for backgrounded AI — BEFORE the golden builds ────────────
+# Moved ahead of klab on 2026-08-14. The model download is held until the k8s
+# phase finishes (so boot #1 does not thrash), and golden builds take ~1 hr —
+# so leaving this after klab meant Ollama was unusable for an hour after
+# Kubernetes was already serving. Nothing in the golden pipeline depends on
+# the model, so waiting here costs the goldens nothing and gets Bob answering
+# as soon as the cluster is up.
+if [[ -n "$AI_PID" ]]; then
+    phase "ai-wait"
+    wait "$AI_PID" 2>/dev/null || true
+fi
+
 if [[ "${WANT[klab]}" == "1" ]]; then
     # ── 3a: blue-green lean OS goldens — DEFERRED to klab-firstboot.service ────
     # klab-firstboot.service has its own per-distro ExecStart lines, each with
@@ -736,18 +864,13 @@ if [[ "${WANT[klab]}" == "1" ]]; then
                 mark "klab-ztest"
                 log "[klab] ztest goldens complete"
             else
+                phase_state "klab-ztest-goldens" failed
                 log "[klab] ztest FAILED — see /var/log/kldload/klab-firstboot.log (non-fatal)"
             fi
         fi
     else
         log "[klab] ztest goldens skipped (not a ZFS Lab install)"
     fi
-fi
-
-# ── Phase 4: Wait for backgrounded AI ────────────────────────────────────────
-if [[ -n "$AI_PID" ]]; then
-    phase "ai-wait"
-    wait "$AI_PID" 2>/dev/null || true
 fi
 
 # ── Final: overall ready marker ──────────────────────────────────────────────

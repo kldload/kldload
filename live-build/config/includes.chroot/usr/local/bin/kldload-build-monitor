@@ -3,13 +3,14 @@
 # kldload-build-monitor — say, unmissably, that the machine is still building.
 #
 # WHAT IT DOES, IN ORDER:
-#   1. decides whether the post-install build is finished, from the two markers
-#      the units themselves gate on;
-#   2. if it is not, paints a full-screen BUILDING banner with the current
-#      phase, elapsed time, and a live tail of the log that is actually moving;
-#   3. refreshes every 2s until both markers exist;
-#   4. paints a READY banner and exits, so the window closing IS the signal
-#      that the machine is safe to reboot.
+#   1. decides whether the post-install build has STOPPED — see finished(),
+#      which counts partial success as stopped, not just all-ready;
+#   2. if it has not, paints a BUILDING banner with the current phase, a
+#      checklist of every planned phase, elapsed time, and a live tail of the
+#      log that is actually moving;
+#   3. refreshes every 2s until finished();
+#   4. paints a closing banner — READY, or "finished, but some phases did not
+#      complete" — so the window closing IS the signal it is safe to reboot.
 #
 # WHY IT EXISTS:
 #   A kldload install reaches a usable desktop LONG before it is finished.
@@ -55,6 +56,7 @@ readonly STATE_DIR=/var/lib/kldload
 readonly LOG_DIR=/var/log/kldload
 readonly FIRSTBOOT_DONE="${STATE_DIR}/firstboot-done"
 readonly ALL_READY="${STATE_DIR}/all-ready"
+readonly PHASE_FILE_AD="${STATE_DIR}/current-phase"
 readonly STATUS_FILE=/tmp/kldload-firstboot-status
 readonly REFRESH=2
 
@@ -164,6 +166,34 @@ elapsed() {
     printf '%dh %02dm' "$h" "$m"
 }
 
+# finished — has the build STOPPED, whatever the outcome?
+#
+# all-ready alone is not that question. autodeploy writes it ONLY when every
+# requested phase succeeded; on partial success it writes phase "partial" and
+# exits. Gating solely on all-ready therefore leaves this window painting
+# BUILDING forever on a machine where nothing is running — telling the operator
+# to keep waiting for work that already stopped, which is the exact opposite of
+# what this program exists to do.
+#
+# HISTORY: 2026-08-14, fiend. klab, ztest and AI all succeeded, k8s failed, and
+# the window was still up ~10 minutes later. Operator asked "the building
+# terminal never stopped, is it done?" — it was.
+#
+# Returns: 0 when the build has reached a terminal state.
+finished() {
+    [[ -f "$ALL_READY" ]] && return 0
+    [[ -e "${STATE_DIR}/autodeploy-skipped" ]] && return 0
+    case "$(cat "$PHASE_FILE_AD" 2>/dev/null)" in
+    partial | ready | nothing-requested) return 0 ;;
+    esac
+    return 1
+}
+
+# outcome — "ready" or "partial", for the closing banner.
+outcome() {
+    if [[ -f "$ALL_READY" ]]; then printf 'ready'; else printf 'partial'; fi
+}
+
 # markers — the AI phase outcome, when autodeploy has decided one.
 markers() {
     local m out=""
@@ -171,6 +201,76 @@ markers() {
         [[ -e "${STATE_DIR}/${m}" ]] && out+="${m} "
     done
     printf '%s' "$out"
+}
+
+# hms — seconds as a compact duration (2h 05m / 8m 12s / 44s).
+hms() {
+    local s="$1"
+    ((s < 0)) && s=0
+    if ((s >= 3600)); then
+        printf '%dh %02dm' $((s / 3600)) $(((s % 3600) / 60))
+    elif ((s >= 60)); then
+        printf '%dm %02ds' $((s / 60)) $((s % 60))
+    else
+        printf '%ds' "$s"
+    fi
+}
+
+# checklist — the plan, one line per phase, with state and elapsed.
+#
+# Reads the plan autodeploy declares in $STATE_DIR/phases (NN-<name> files
+# holding "<state> <epoch>"). Without a plan there is nothing honest to draw —
+# a percentage invented from an unknown total is worse than no percentage — so
+# this prints nothing at all and the caller falls back to the phase line.
+#
+# Returns: the rendered block on stdout, empty when no plan exists.
+checklist() {
+    local d="${STATE_DIR}/phases" f name state epoch now done_n total icon col dur
+    [[ -d "$d" ]] || return 0
+    compgen -G "${d}/[0-9][0-9]-*" >/dev/null 2>&1 || return 0
+    now="$(date +%s)"
+    done_n=0
+    total=0
+    for f in "$d"/[0-9][0-9]-*; do
+        [[ -e "$f" ]] || continue
+        total=$((total + 1))
+        [[ "$(cut -d' ' -f1 "$f" 2>/dev/null)" == "done" ]] && done_n=$((done_n + 1))
+    done
+    ((total > 0)) || return 0
+
+    printf '  %sProgress%s %d of %d phases complete\n\n' \
+        "${C_BOLD}" "${C_OFF}" "$done_n" "$total"
+
+    for f in "$d"/[0-9][0-9]-*; do
+        [[ -e "$f" ]] || continue
+        name="${f##*/}"
+        name="${name#[0-9][0-9]-}"
+        state="$(cut -d' ' -f1 "$f" 2>/dev/null)"
+        epoch="$(cut -d' ' -f2 "$f" 2>/dev/null)"
+        dur=""
+        case "$state" in
+        done)
+            icon="✓"
+            col="${C_GREEN}"
+            ;;
+        running)
+            icon="▶"
+            col="${C_AMBER}"
+            [[ "${epoch:-0}" -gt 0 ]] && dur="$(hms $((now - epoch)))"
+            ;;
+        failed)
+            icon="✗"
+            col="${C_AMBER}"
+            ;;
+        *)
+            icon="·"
+            col="${C_DIM}"
+            ;;
+        esac
+        printf '    %s%s %-22s %s%s%s\n' \
+            "$col" "$icon" "$name" "${C_DIM}" "${dur:-$state}" "${C_OFF}"
+    done
+    printf '\n'
 }
 
 # frame — paint one screen.
@@ -181,12 +281,25 @@ frame() {
     clear 2>/dev/null || printf '\033[2J\033[H'
     printf '\n\n'
 
-    if [[ -f "$ALL_READY" ]]; then
+    if finished; then
         banner_ready
         printf '\n'
-        centre "This machine is finished building. It is safe to reboot."
+        if [[ "$(outcome)" == "ready" ]]; then
+            centre "This machine is finished building. It is safe to reboot."
+        else
+            # Finished, but not everything succeeded. Say so plainly and point
+            # at the checklist below rather than implying a clean run — and
+            # still say it is safe to reboot, because it IS.
+            printf '%s' "${C_AMBER}"
+            centre "Finished — but some phases did not complete."
+            printf '%s' "${C_OFF}"
+            centre "It is safe to reboot. See the phases below and /var/log/kldload/."
+        fi
         printf '\n'
         rule
+        local cl_done
+        cl_done="$(checklist)"
+        [[ -n "$cl_done" ]] && printf '%s\n' "$cl_done"
         printf '%s' "${C_DIM}"
         centre "kldload · $(hostname) · up $(elapsed)"
         printf '%s\n' "${C_OFF}"
@@ -210,6 +323,16 @@ frame() {
     mk="$(markers)"
     [[ -n "$mk" ]] && printf '  %sDone%s     %s\n' "${C_BOLD}" "${C_OFF}" "$mk"
     printf '\n'
+
+    # The plan, when autodeploy has declared one. Prints nothing on an older
+    # target (or during firstboot, before autodeploy runs), so the phase line
+    # above remains the fallback rather than leaving a hole in the layout.
+    local cl
+    cl="$(checklist)"
+    if [[ -n "$cl" ]]; then
+        rule
+        printf '%s\n' "$cl"
+    fi
     rule
     printf '  %s%s%s\n' "${C_DIM}" "$log" "${C_OFF}"
     printf '\n'
@@ -235,7 +358,7 @@ main() {
 
     while true; do
         frame
-        [[ -f "$ALL_READY" ]] && break
+        finished && break
         sleep "$REFRESH"
     done
     # Hold the READY screen briefly so a passing glance still catches it.
