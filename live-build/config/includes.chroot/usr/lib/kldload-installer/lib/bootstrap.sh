@@ -465,6 +465,44 @@ k_generate_mok_keys() {
     chmod 0600 "${mok_dir}/mok.key"
     chmod 0644 "${mok_dir}/mok.pub" "${mok_dir}/mok.der"
 
+    # ── akmods signs with the SAME key, or its modules never load ────────────
+    #
+    # There are two module-signing systems on a kldload target and they do not
+    # share a key by default. DKMS uses /var/lib/dkms/mok.* — the keypair
+    # generated above, and the one enrolled via mokutil. akmods generates its
+    # OWN keypair under /etc/pki/akmods the first time it runs, named after the
+    # hostname, and nothing ever enrols that.
+    #
+    # So under Secure Boot: zfs (DKMS) loads, and anything akmods builds —
+    # nvidia, on every GPU machine — is refused.
+    #
+    # HISTORY: 2026-08-13, fresh install. akmods generated
+    # kldload-node_1786628728_bc4347f9 at 06:45 and signed nvidia.ko with it.
+    # `modprobe nvidia` returned "Key was rejected by service" while zfs, signed
+    # by the enrolled kldload-mok, loaded fine on the same boot. Symptom to the
+    # operator: nvidia-smi fails, desktop stuck on the basic framebuffer, and a
+    # driver that is built, present and correct sitting there unusable. Copying
+    # the enrolled key into akmods' paths and re-signing made it load
+    # immediately.
+    #
+    # Written BEFORE first boot on purpose: akmods only generates a key when
+    # one is absent, so pre-placing ours means it never invents a second.
+    local akmods_certs="${target}/etc/pki/akmods/certs"
+    local akmods_priv="${target}/etc/pki/akmods/private"
+    mkdir -p "${akmods_certs}" "${akmods_priv}"
+    if cp -f "${mok_dir}/mok.der" "${akmods_certs}/public_key.der" &&
+        cp -f "${mok_dir}/mok.key" "${akmods_priv}/private_key.priv"; then
+        chmod 0644 "${akmods_certs}/public_key.der"
+        chmod 0640 "${akmods_priv}/private_key.priv"
+        # The akmods group owns the private key on Fedora; it may not exist yet
+        # if the package lands later, in which case root-only is correct and
+        # akmods still reads it (it runs as root).
+        chroot "${target}" chgrp akmods /etc/pki/akmods/private/private_key.priv 2>/dev/null || true
+        k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "akmods pointed at the enrolled MOK — nvidia and other akmod modules will load under Secure Boot"
+    else
+        k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "WARNING: could not seed /etc/pki/akmods with the MOK — akmod-built modules (nvidia) will be signed with an unenrolled key and refused under Secure Boot"
+    fi
+
     # DKMS sign_tool script — called by DKMS as: script KVER MODULE_PATH
     # Searches both Debian (linux-headers-) and CentOS (kernels/) paths for sign-file.
     mkdir -p "${target}/etc/dkms"

@@ -1125,6 +1125,37 @@ main() {
         return 0
     }
 
+    # ── akmods signing key must BE the enrolled MOK ──────────────────────────
+    # Second failsafe for the install-time seeding in bootstrap.sh. akmods
+    # generates its own keypair the first time it runs if one is absent, and
+    # nothing enrols that key — so under Secure Boot every module it builds
+    # (nvidia, on any GPU box) is refused with "Key was rejected by service"
+    # while DKMS modules signed with the enrolled MOK load fine.
+    #
+    # Runs before the NVIDIA healing net below on purpose: installing the
+    # driver is pointless if it will be signed with a key nothing trusts.
+    if [[ -s /var/lib/dkms/mok.der && -s /var/lib/dkms/mok.key ]]; then
+        _ak_cert=/etc/pki/akmods/certs/public_key.der
+        if ! cmp -s /var/lib/dkms/mok.der "$_ak_cert" 2>/dev/null; then
+            mkdir -p /etc/pki/akmods/certs /etc/pki/akmods/private
+            [[ -f "$_ak_cert" ]] && cp -a "$_ak_cert" "${_ak_cert}.autogen-$(date +%s)" 2>/dev/null
+            if cp -f /var/lib/dkms/mok.der "$_ak_cert" &&
+                cp -f /var/lib/dkms/mok.key /etc/pki/akmods/private/private_key.priv; then
+                chmod 0644 "$_ak_cert"
+                chmod 0640 /etc/pki/akmods/private/private_key.priv
+                chgrp akmods /etc/pki/akmods/private/private_key.priv 2>/dev/null || true
+                ok "akmods re-pointed at the enrolled MOK (was signing with an unenrolled key)"
+                # Anything akmods already built carries the wrong signature and
+                # will never load; force a rebuild against the right key.
+                command -v akmods >/dev/null 2>&1 &&
+                    { akmods --force --kernels "$(uname -r)" >>"$LOG" 2>&1 || log "WARNING: akmods rebuild after key fix failed — see $LOG"; }
+            else
+                log "WARNING: could not align the akmods key with the MOK — akmod modules will be refused under Secure Boot"
+            fi
+        fi
+        unset _ak_cert
+    fi
+
     # ── NVIDIA healing net — driver never installed at install-time ───────────
     # WHY: install-time akmod-nvidia comes from RPM Fusion, a NETWORK repo the
     # strict-offline install can't reach unless it's packed into the darksite.
