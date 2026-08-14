@@ -575,6 +575,12 @@ EOS
             # target (which is what bit .137).
 
             # Pass A: base userland (no kernel/DKMS triggers in this set)
+            # libbpf-tools ships the CO-RE/BTF rebuilds of the bcc tools as
+            # /usr/bin/bpf-*. _kbcc-pane PREFERS those because legacy bcc
+            # runtime-compiles BPF-C against kernel headers and broke on 7.0.
+            # Debian has it in stable, but only the KLDLOAD_ENABLE_EBPF path
+            # asked for it, so a default install silently landed on the legacy
+            # fallback. HISTORY: 2026-08-14, fiend on kernel 7.1.3.
             DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y \
                 --no-install-recommends \
                 locales sudo openssh-server systemd-resolved network-manager \
@@ -583,19 +589,47 @@ EOS
                 keyboard-configuration console-setup tzdata \
                 tmux jq rsync \
                 nethogs iftop iotop htop bpfcc-tools bpftrace \
+                libbpf-tools \
                 >>"$log" 2>&1 ||
                 k_die "apt-get install pass A (base userland) failed — check ${log}"
 
             # Pass B: kernel + headers + bootloader + zfs. Install headers
             # BEFORE the kernel so when linux-image-amd64's postinst fires
             # the dkms triggers for zfs, kernel-devel is already on disk.
+            #
+            # BACKPORTS: on Debian the kernel and the entire ZFS stack come
+            # from <suite>-backports (kernel 7.1.3, zfs 2.4.3) rather than
+            # frozen stable (6.12.101, zfs 2.3.2) — see
+            # k_debian_backports_suite for why that pair is safe. They must be
+            # named in ONE transaction with -t so apt resolves the kernel, its
+            # headers and zfs-dkms from the same pocket; splitting them lets
+            # apt satisfy zfs-dkms from stable against a backports kernel,
+            # which is the version skew this is meant to remove.
+            #
+            # The bootloader stays on stable on purpose: shim-signed is part of
+            # the Secure Boot chain, and moving it gains nothing.
+            local _bpo
+            local _apt_t=()
+            _bpo="$(k_debian_backports_suite)"
+            if [[ -n "$_bpo" ]]; then
+                _apt_t=(-t "$_bpo")
+                k_log "Debian: kernel + ZFS come from ${_bpo}"
+            else
+                k_log "Debian: kernel + ZFS come from ${KLDLOAD_SUITE:-trixie} (backports off or offline)"
+            fi
+
             DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y \
                 --no-install-recommends \
-                linux-headers-amd64 linux-image-amd64 \
                 grub-efi-amd64 shim-signed \
+                >>"$log" 2>&1 ||
+                k_die "apt-get install pass B1 (bootloader) failed — check ${log}"
+
+            DEBIAN_FRONTEND=noninteractive chroot "${target}" apt-get install -y \
+                --no-install-recommends "${_apt_t[@]}" \
+                linux-headers-amd64 linux-image-amd64 \
                 zfs-dkms zfsutils-linux zfs-initramfs zfs-zed \
                 >>"$log" 2>&1 ||
-                k_die "apt-get install pass B (kernel + zfs) failed — check ${log}"
+                k_die "apt-get install pass B2 (kernel + zfs) failed — check ${log}"
 
             # Post-install verification — assert the critical packages actually
             # landed. apt-get can return 0 even when a postinst failed and
@@ -616,6 +650,27 @@ EOS
                 k_die "Required packages missing or half-configured after apt install: ${_missing[*]} — target will not boot. Check ${log}"
             fi
             k_log "Debian/Ubuntu apt install verified: kernel + bootloader + zfs all installed"
+
+            # Assert the POCKET, not just presence. apt will happily satisfy
+            # the kernel from stable if the backports pocket is unreachable,
+            # returning 0 the whole way — leaving a 6.12/2.3.2 machine whose
+            # install log says "backports". That silent-downgrade shape is the
+            # b652 pattern: the check that passes is not the claim being made.
+            # Not fatal — a stable-pocket machine still boots correctly, it is
+            # simply older than asked for — but it must be impossible to miss.
+            if [[ -n "$_bpo" ]]; then
+                local _kver _zver
+                _kver="$(chroot "${target}" /usr/bin/dpkg-query -W -f='${Version}' \
+                    linux-image-amd64 2>/dev/null || echo '?')"
+                _zver="$(chroot "${target}" /usr/bin/dpkg-query -W -f='${Version}' \
+                    zfs-dkms 2>/dev/null || echo '?')"
+                k_log "Debian versions: linux-image-amd64=${_kver} zfs-dkms=${_zver}"
+                if [[ "$_kver" != *bpo* || "$_zver" != *bpo* ]]; then
+                    k_log "WARNING: ${_bpo} was requested but apt installed kernel=${_kver} zfs-dkms=${_zver} from stable — the backports pocket was unreachable. The system will boot, but on the frozen stable kernel/ZFS. Check ${log}"
+                else
+                    k_log "Debian: confirmed kernel and ZFS both from ${_bpo}"
+                fi
+            fi
             ;;
 
         # ── BSD / illumos ──────────────────────────────────────────────────

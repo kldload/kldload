@@ -2,6 +2,59 @@
 # Sourced by kldload-install-target — k_bootstrap_base (debootstrap, APT mirror detection, locale, timezone, extra packages)
 set -Eeuo pipefail
 
+# k_debian_backports_suite — name the backports suite to use, or nothing.
+#
+# WHY: Debian stable freezes kernel and ZFS for the life of the release. Trixie
+# sits on kernel 6.12.101 / zfs 2.3.2 while trixie-backports carries 7.1.3 /
+# zfs 2.4.3 — the pair OpenZFS developers actually test against on Debian, and
+# the same ZFS the Fedora substrate ships. Without this, "Debian support" means
+# shipping a two-year-old kernel and a ZFS a full minor behind every other
+# substrate in the matrix.
+#
+# SAFETY: backports is APT priority 100 against stable's 500, so merely ADDING
+# the source installs nothing and upgrades nothing. Packages come from it only
+# when named with `-t <suite>-backports`. That asymmetry is what makes it safe
+# to enable by default and select from per package.
+#
+# WHY IT IS BUILDABLE: upstream OpenZFS 2.4.3 declares Linux-Maximum 7.0, which
+# would rule the backports kernel out — but Debian's zfs-dkms 2.4.3-2~bpo13+1
+# ships META with Linux-Maximum 7.1 (verified 2026-08-13 from the .deb), so the
+# backports kernel and backports ZFS are a matched pair by construction.
+#
+# Returns: suite name on stdout ("trixie-backports"), or EMPTY when backports
+# must not be used — Ubuntu (different pocket semantics), an offline darksite
+# mirror (which carries no backports pocket), or an explicit opt-out via
+# KLDLOAD_DEBIAN_BACKPORTS=0. Always exits 0; callers test for an empty string.
+k_debian_backports_suite() {
+    if [[ "${KLDLOAD_DISTRO:-debian}" != "debian" ]]; then
+        return 0
+    fi
+    if [[ "${KLDLOAD_DEBIAN_BACKPORTS:-1}" != "1" ]]; then
+        return 0
+    fi
+    # MODE ($1) decides whether the offline mirror suppresses this:
+    #
+    #   install (default) — the target is being built against whatever mirror
+    #     is live right now. The darksite is a FLAT single-suite snapshot: the
+    #     backports packages are merged straight into `trixie main` (that is
+    #     how an offline install gets kernel 7.1.3 and zfs 2.4.3 at all), so
+    #     there is no -backports pocket to select and asking for one turns
+    #     every apt call into an error. Suppress.
+    #
+    #   final — writing the sources.list the INSTALLED system will use from
+    #     here on, against the internet. The darksite is irrelevant now, and
+    #     suppressing here is a bug: the machine would be running a backports
+    #     kernel with no source that provides it, so the next
+    #     `apt full-upgrade` offers to REMOVE the running kernel.
+    #     HISTORY: 2026-08-14, fiend — installed offline, ended up with no
+    #     backports line despite running 7.1.3.
+    if [[ "${1:-install}" != "final" ]] &&
+        [[ "${KLDLOAD_MIRROR:-}" == "http://127.0.0.1:"* ]]; then
+        return 0
+    fi
+    printf '%s-backports' "${KLDLOAD_SUITE:-trixie}"
+}
+
 # k_write_sources_list — INSTALL-TIME only.
 # Points the target at whatever mirror is being used right now (local darksite
 # or internet).  This is intentionally temporary — k_finalize_sources_list
@@ -36,6 +89,15 @@ deb ${mirror} ${suite} main contrib non-free non-free-firmware
 deb ${mirror} ${suite}-updates main contrib non-free non-free-firmware
 deb http://security.debian.org/debian-security ${suite}-security main contrib non-free non-free-firmware
 EOS
+        local _bpo
+        _bpo="$(k_debian_backports_suite)"
+        if [[ -n "$_bpo" ]]; then
+            cat >>"${target}/etc/apt/sources.list" <<EOS
+# Backports: kernel + ZFS are installed from here explicitly (-t ${_bpo}).
+# Priority 100 vs stable's 500 — nothing else is pulled from it.
+deb ${mirror} ${_bpo} main contrib non-free non-free-firmware
+EOS
+        fi
     fi
 }
 
@@ -80,6 +142,18 @@ deb https://deb.debian.org/debian ${suite} main contrib non-free non-free-firmwa
 deb https://deb.debian.org/debian ${suite}-updates main contrib non-free non-free-firmware
 deb https://security.debian.org/debian-security ${suite}-security main contrib non-free non-free-firmware
 EOS
+        # Keep backports on the INSTALLED system too, not just at install time:
+        # without it, the next `apt full-upgrade` finds the backports kernel and
+        # zfs-dkms unresolvable and offers to remove them.
+        local _bpo
+        _bpo="$(k_debian_backports_suite final)"
+        if [[ -n "$_bpo" ]]; then
+            cat >>"${target}/etc/apt/sources.list" <<EOS
+# Backports: source of the running kernel and zfs-dkms. Priority 100, so it
+# upgrades nothing on its own — packages come from it only with -t ${_bpo}.
+deb https://deb.debian.org/debian ${_bpo} main contrib non-free non-free-firmware
+EOS
+        fi
     fi
 }
 
@@ -2837,9 +2911,60 @@ NMCONF
                 >"$_nvidia_list"
         fi
         DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >>"$log" 2>&1 || true
+
+        # Firmware + pciutils still come from Debian; the DRIVER does not.
         DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y --no-install-recommends \
-            nvidia-driver nvidia-smi firmware-misc-nonfree pciutils \
-            >>"$log" 2>&1 || k_log_to "$log" "WARNING: NVIDIA driver install had issues"
+            firmware-misc-nonfree pciutils \
+            >>"$log" 2>&1 || k_log_to "$log" "WARNING: NVIDIA firmware/pciutils install had issues"
+
+        # ── The driver comes from NVIDIA, not Debian ─────────────────────────
+        # Debian's newest nvidia-driver is 550.163.01 in EVERY suite (stable,
+        # backports, testing, unstable; experimental has 555.58.02) and it
+        # CANNOT build against kernel 7.1 — nv-mm.h references
+        # vm_area_struct.__vm_flags, which the kernel removed in favour of the
+        # vm_flags_set() accessors. Since kldload installs the backports kernel
+        # (7.1.3), Debian's driver is guaranteed to fail here.
+        #
+        # HISTORY: 2026-08-14, fiend. DKMS died with "no member named
+        # '__vm_flags'" on both 550.163.01-2 and -4~bpo13+1. firstboot's
+        # healing net re-attempted on the running kernel and failed the same
+        # way, then logged "staying on nouveau" — which is a dead end, because
+        # nouveau is blacklisted on the cmdline for NVIDIA cards. Net effect:
+        # NO display driver, a text console instead of a desktop, and the AI
+        # phase skipped because nvidia-smi reported 0GB VRAM.
+        #
+        # NVIDIA's own Debian 13 repo carries 610.57.04 — the SAME driver the
+        # Fedora substrate runs — and it builds and signs cleanly against
+        # 7.1.3 under Secure Boot (verified on fiend 2026-08-14: dkms
+        # "nvidia/610.57.04, 7.1.3+deb13-amd64: installed", nvidia-smi
+        # reporting the RTX 3080 with 10240 MiB).
+        #
+        # `nvidia-open` is the single top-level package; it pulls the
+        # open-kernel DKMS module and the full userland. Open modules are the
+        # supported flavour for Turing and newer.
+        #
+        # NOTE: this path already required the internet before this change (it
+        # adds deb.debian.org for non-free and curls NVIDIA's gpgkey), so
+        # nothing offline regresses here. Mirroring these into the darksite is
+        # tracked separately.
+        local _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64"
+        if [[ "$distro" == "debian" ]] &&
+            k_in_chroot "${target}" bash -c "curl -fsSL -o /tmp/cuda-keyring.deb ${_cuda_repo}/cuda-keyring_1.1-1_all.deb" >>"$log" 2>&1 &&
+            k_in_chroot "${target}" dpkg -i /tmp/cuda-keyring.deb >>"$log" 2>&1; then
+            DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >>"$log" 2>&1 || true
+            if DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" \
+                apt-get install -y nvidia-open >>"$log" 2>&1; then
+                k_log_to "$log" "NVIDIA: installed nvidia-open from the vendor repo (builds on kernel 7.1)"
+            else
+                k_log_to "$log" "WARNING: nvidia-open failed — falling back to Debian's driver, which CANNOT build on kernel 7.1. Expect no display driver; kldload-firstboot will re-attempt."
+                DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y --no-install-recommends \
+                    nvidia-driver nvidia-smi >>"$log" 2>&1 || true
+            fi
+        else
+            k_log_to "$log" "WARNING: could not reach NVIDIA's vendor repo — falling back to Debian's nvidia-driver, which CANNOT build on the backports kernel. The desktop will not start until this is resolved."
+            DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y --no-install-recommends \
+                nvidia-driver nvidia-smi >>"$log" 2>&1 || true
+        fi
         # nvidia-container-toolkit from NVIDIA's own repo
         curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey |
             gpg --batch --yes --dearmor -o "${target}/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg" 2>/dev/null
