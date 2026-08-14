@@ -1229,7 +1229,8 @@ NETCFG
         rm -rf "$ci_dir"
 
         # Attach cloud-init ISO and start
-        virsh attach-disk "$vm" "$ci_iso" sdb --type cdrom --config 2>/dev/null || true
+        virsh attach-disk "$vm" "$ci_iso" sdb --type cdrom --targetbus sata --config 2>/dev/null ||
+            log "WARNING: could not attach the cloud-init seed to ${vm} — cloud-init will not run"
 
         # Control plane gets more RAM/CPU — it runs etcd, API server, Cilium,
         # MetalLB, and Hubble. Workers only run kubelet + pods.
@@ -1364,7 +1365,8 @@ NETCFG
         xorriso -as mkisofs -o "$ci_iso" -volid cidata -joliet -rock \
             "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" >/dev/null 2>&1
     rm -rf "$ci_dir"
-    virsh attach-disk "$name" "$ci_iso" sdb --type cdrom --config >/dev/null 2>&1 || true
+    virsh attach-disk "$name" "$ci_iso" sdb --type cdrom --targetbus sata --config >/dev/null 2>&1 ||
+        log "WARNING: could not attach the cloud-init seed to ${name} — cloud-init will not run"
     # Control-plane sized: etcd + apiserver + Cilium need the headroom.
     virsh setmaxmem "$name" "${CP_RAM}M" --config >/dev/null 2>&1 || true
     virsh setmem "$name" "${CP_RAM}M" --config >/dev/null 2>&1 || true
@@ -2640,7 +2642,8 @@ NETCFG
             xorriso -as mkisofs -o "$ci_iso" -volid cidata -joliet -rock \
                 "${ci_dir}/user-data" "${ci_dir}/meta-data" "${ci_dir}/network-config" 2>/dev/null
         rm -rf "$ci_dir"
-        virsh attach-disk "$name" "$ci_iso" sdb --type cdrom --config 2>/dev/null || true
+        virsh attach-disk "$name" "$ci_iso" sdb --type cdrom --targetbus sata --config 2>/dev/null ||
+            log "WARNING: could not attach the cloud-init seed to ${name} — cloud-init will not run"
         # Retry virsh start once after a brief pause — back-to-back virsh start
         # calls during a multi-VM scale can hit libvirtd lock contention and the
         # first call returns non-zero silently. Caught during scale on .127
