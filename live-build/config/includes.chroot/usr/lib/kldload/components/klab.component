@@ -1,0 +1,58 @@
+# shellcheck shell=bash
+# ─────────────────────────────────────────────────────────────────────────────
+# component: klab — the multi-distro test bay
+#
+# WHAT IT IS: golden VM images for several distros built from their official
+# cloud images, plus blue/green clones to run a payload against. It answers
+# "does my change work on all of them" without touching the host.
+#
+# HOW IT DIFFERS FROM zfslab: klab golden images are STOCK cloud images — the
+# distro as shipped. zfslab goldens additionally carry the OpenZFS source tree
+# and the upstream test suite. klab is for testing YOUR payload across distros;
+# zfslab is for testing ZFS ITSELF. Both use cloud images as the starting point.
+#
+# WHY IT SHUTS THE GOLDENS DOWN: a golden image is a template, not a running
+# service. Leaving nine clones powered on after a build starves the host of RAM
+# and CPU for the work the operator actually asked for next (reported on fiend,
+# 2026-08-14). Building them and leaving them running are separate decisions,
+# and only the first one is this component's job.
+#
+# REMOVE SEMANTICS: destroys the goldens and every clone, reclaiming the disk.
+# ─────────────────────────────────────────────────────────────────────────────
+COMPONENT_SUMMARY="Multi-distro test bay: stock cloud-image goldens + blue/green clones"
+COMPONENT_MINUTES=25
+COMPONENT_REQUIRES="kvm"
+
+# Probe for the goldens themselves rather than calling `klab status`, which
+# queries every VM and is far too slow for the `list` table.
+component_status() {
+    if have_vm '^klab-golden-'; then echo installed; else echo absent; fi
+}
+
+component_install() {
+    command -v klab >/dev/null 2>&1 || {
+        echo "FATAL: klab not installed — the profile did not ship the test bay" >&2
+        return 1
+    }
+    klab goldens
+
+    # A built golden must not be left running: it is a template that gets
+    # cloned, and an idle clone costs the operator RAM and CPU for nothing.
+    # Failing to power one down is not a build failure, so this must not abort
+    # the component — but it IS reported, because silently leaving VMs running
+    # is exactly the surprise this component exists to remove.
+    local _vm
+    while read -r _vm; do
+        [[ -n "$_vm" ]] || continue
+        echo "powering down golden: ${_vm}"
+        virsh shutdown "$_vm" >/dev/null 2>&1 ||
+            echo "WARN: could not shut down ${_vm} — it is left running" >&2
+    done < <(virsh list --name --state-running 2>/dev/null | grep -E 'klab-golden' || true)
+
+    klab status
+}
+
+component_remove() {
+    command -v klab >/dev/null 2>&1 || return 0
+    klab destroy
+}

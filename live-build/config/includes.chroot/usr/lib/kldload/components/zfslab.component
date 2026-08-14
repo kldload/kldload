@@ -1,0 +1,51 @@
+# shellcheck shell=bash
+# ─────────────────────────────────────────────────────────────────────────────
+# component: zfslab — the OpenZFS development and test lab
+#
+# WHAT IT IS: golden VM images across several distros carrying the OpenZFS
+# source tree and the upstream test suite, plus throwaway clones to run
+# zfs-tests.sh on. This is the component OpenZFS developers actually want, so
+# it is the one that most needs to be a single obvious verb.
+#
+# WHY A THIN WRAPPER: kzfs-lab already implements build/goldens/destroy/status.
+# Those verbs work and are exercised by the nightly matrix — re-implementing
+# them here to fit a component shape would be a regression risk for zero gain.
+# This file exists to give them ONE name, a state file and a survivable log.
+#
+# COST: the goldens are built from cloud images and then have the OpenZFS tree
+# and test suite installed, so this is the most expensive component by a wide
+# margin. That is precisely why it must be opt-in and removable rather than a
+# side effect of picking a template in the installer.
+#
+# REMOVE SEMANTICS: destroys the lab VMs and their clones, reclaiming the disk.
+# The host's own ZFS pool is never touched.
+# ─────────────────────────────────────────────────────────────────────────────
+COMPONENT_SUMMARY="OpenZFS dev lab: golden VMs with the source + upstream test suite"
+COMPONENT_MINUTES=40
+COMPONENT_REQUIRES="kvm"
+
+# Probe for the golden VMs, NOT `kzfs-lab status` — that inspects each VM in
+# turn and is far too slow to run for every row of the `list` table.
+component_status() {
+    if have_vm '^zfslab-golden-'; then echo installed; else echo absent; fi
+}
+
+component_install() {
+    command -v kzfs-lab >/dev/null 2>&1 || {
+        echo "FATAL: kzfs-lab not installed — the profile did not ship the ZFS lab" >&2
+        return 1
+    }
+    kzfs-lab goldens
+    kzfs-lab status
+    cat <<'EOF'
+
+The lab is built. To run the upstream suite:
+    kzfs-lab test          # the standard run, on throwaway clones
+    kzfs-lab test-full     # the long run
+EOF
+}
+
+component_remove() {
+    command -v kzfs-lab >/dev/null 2>&1 || return 0 # nothing to undo
+    kzfs-lab destroy
+}

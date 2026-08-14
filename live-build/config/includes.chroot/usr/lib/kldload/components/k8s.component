@@ -1,0 +1,45 @@
+# shellcheck shell=bash
+# ─────────────────────────────────────────────────────────────────────────────
+# component: k8s — a Kubernetes cluster in local VMs
+#
+# WHAT IT IS: kube-cluster bootstraps control planes and workers as libvirt VMs
+# with Cilium (eBPF dataplane), Hubble, MetalLB and WireGuard.
+#
+# WHY A COMPONENT: this was requestable through FIVE different env vars
+# (KLDLOAD_TEMPLATE, KLDLOAD_ENABLE_K8S, KLDLOAD_K8S_BOOTSTRAP, plus the klab
+# and zfslab templates implying it), each added by a different front-end and
+# each needing a reconciliation rule in kldload-autodeploy. One name, one verb.
+#
+# SIZING: KLDLOAD_K8S_CPS / KLDLOAD_K8S_WORKERS still tune the shape, so the
+# HA default (3 CPs) and a laptop-sized single CP are the same component.
+# WHY 3 AND NOT 2: etcd quorum is (n/2)+1, so a 2-CP cluster tolerates ZERO
+# failures — strictly worse than 1 CP, with double the resource cost.
+#
+# REMOVE SEMANTICS: destroys the cluster VMs and reclaims their disk. It does
+# NOT remove kubectl/k9s/cilium from the host — those are harmless, useful
+# against other clusters, and re-installing them is not free.
+# ─────────────────────────────────────────────────────────────────────────────
+COMPONENT_SUMMARY="Kubernetes cluster in VMs (Cilium eBPF, Hubble, MetalLB)"
+COMPONENT_MINUTES=25
+COMPONENT_REQUIRES="kvm"
+
+# Probe for the cluster's VMs, NOT `kube-cluster status`: that subcommand talks
+# to the Kubernetes API and blocks when the cluster is down or libvirt is
+# stale, which is exactly the state an operator runs `list` to diagnose.
+component_status() {
+    if have_vm '^k8s-'; then echo installed; else echo absent; fi
+}
+
+component_install() {
+    command -v kube-cluster >/dev/null 2>&1 || {
+        echo "FATAL: kube-cluster not installed — the profile did not ship it" >&2
+        return 1
+    }
+    kube-cluster bootstrap
+    kube-cluster status
+}
+
+component_remove() {
+    command -v kube-cluster >/dev/null 2>&1 || return 0
+    kube-cluster destroy
+}

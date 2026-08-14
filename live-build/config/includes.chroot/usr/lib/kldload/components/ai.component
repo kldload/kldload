@@ -1,0 +1,87 @@
+# shellcheck shell=bash
+# ─────────────────────────────────────────────────────────────────────────────
+# component: ai — the local LLM stack (Ollama + a chat model)
+#
+# WHAT IT IS: the ollama service plus the chat model Bob and the web UI talk
+# to. Everything runs on this machine; nothing is sent anywhere.
+#
+# WHY A COMPONENT: the model is ~9 GB. Shipping it on the ISO makes a fully
+# darksite install possible, but unpacking and registering it still costs real
+# time and ~9 GB of disk — so an operator who does not want a local LLM should
+# not pay for one, and one who changes their mind should not need a reinstall.
+#
+# DARKSITE: the model is baked into the ISO and laid down under OLLAMA_MODELS
+# by the installer, so component_install normally just starts the service and
+# confirms the model registered. The pull is the NETWORK FALLBACK for a system
+# installed from a stripped image, and it is the slow path by design.
+#
+# REMOVE SEMANTICS: stops ollama and deletes the pulled models, reclaiming the
+# disk — the whole reason an operator removes this component.
+# ─────────────────────────────────────────────────────────────────────────────
+COMPONENT_SUMMARY="Local LLM: ollama + chat model, fully offline"
+COMPONENT_MINUTES=15
+COMPONENT_REQUIRES=""
+
+# The default matches kldload-autodeploy's `recommended` tier: ~9 GB, fits a
+# 10 GB-VRAM consumer GPU. Override with KLDLOAD_AI_MODEL.
+_ai_model() { printf '%s' "${KLDLOAD_AI_MODEL:-qwen3:14b}"; }
+
+component_status() {
+    command -v ollama >/dev/null 2>&1 || {
+        echo absent
+        return 0
+    }
+    systemctl is-active ollama >/dev/null 2>&1 || {
+        echo absent
+        return 0
+    }
+    # A running service with no model is NOT a working AI stack — Bob answers
+    # every prompt with an error. Require both. The timeout guards a service
+    # that is up but still loading: `list` must never block on it.
+    if timeout 5 ollama list 2>/dev/null | awk 'NR>1 && $1 != ""{f=1} END{exit !f}'; then
+        echo installed
+    else
+        echo absent
+    fi
+}
+
+component_install() {
+    command -v ollama >/dev/null 2>&1 || {
+        echo "FATAL: ollama not installed — the profile did not ship the AI stack" >&2
+        return 1
+    }
+    export OLLAMA_MODELS="${OLLAMA_MODELS:-/srv/ollama/models}"
+    systemctl enable --now ollama
+
+    # Give the service a moment to bind before asking it anything; a cold
+    # start on a busy host is not instant and `ollama list` would otherwise
+    # report an empty catalogue that is merely not-ready-yet.
+    local _i
+    for _i in $(seq 1 30); do
+        ollama list >/dev/null 2>&1 && break
+        sleep 2
+    done
+
+    local _model
+    _model="$(_ai_model)"
+    if ollama list 2>/dev/null | awk -v m="$_model" 'NR>1 && $1==m{f=1} END{exit !f}'; then
+        echo "model ${_model} already present (darksite copy) — nothing to fetch"
+    else
+        echo "model ${_model} not present; pulling (NETWORK path, slow)"
+        ollama pull "$_model"
+    fi
+    ollama list
+}
+
+component_remove() {
+    command -v ollama >/dev/null 2>&1 || return 0
+    export OLLAMA_MODELS="${OLLAMA_MODELS:-/srv/ollama/models}"
+    local _m
+    # Delete models before stopping the service — `ollama rm` needs it running.
+    while read -r _m; do
+        [[ -n "$_m" ]] || continue
+        echo "removing model ${_m}"
+        ollama rm "$_m" || echo "WARN: could not remove ${_m}" >&2
+    done < <(ollama list 2>/dev/null | awk 'NR>1 && $1 != "" {print $1}')
+    systemctl disable --now ollama || true # already stopped: harmless
+}
