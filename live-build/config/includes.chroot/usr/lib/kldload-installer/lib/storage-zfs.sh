@@ -465,14 +465,16 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     fi
 
     # Set ZFSBootMenu properties — inherited by all boot environments
-    # console=tty1 keeps VGA output; console=ttyS0 adds serial (Proxmox console tab)
+    # Both consoles get kernel output; k_console_args decides which one is
+    # LAST and therefore owns /dev/console and interactive input. That choice
+    # is what makes an encrypted root answerable — see k_console_args.
     # psi=1 enables Pressure Stall Information (/proc/pressure/*) — built into
     # the kernel but disabled by default on RHEL-family builds. The kldload
     # console F12 cockpit reads PSI as its headline "what's saturated right
     # now" pane; without psi=1 the pane falls back to vmstat. Detected
     # 2026-05-27 on a RHEL 10 kernel (6.12.0-211.16.1.el10_2.x86_64) that
     # ships PSI built in but boot-disabled.
-    zfs set org.zfsbootmenu:commandline="rw console=tty1 console=ttyS0,115200 psi=1 selinux=0" rpool/ROOT
+    zfs set org.zfsbootmenu:commandline="rw $(k_console_args) psi=1 selinux=0" rpool/ROOT
 
     # Data datasets
     zfs create -o mountpoint=/root rpool/root

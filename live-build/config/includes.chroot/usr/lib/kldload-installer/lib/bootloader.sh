@@ -624,7 +624,7 @@ EOFSTAB
     # serial so it's unmistakable. Plaintext installs keep the quiet splash.
     # HISTORY: 2026-07-26 encrypted-boot path audit.
     local _direct_bootargs="rhgb quiet"
-    [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]] && _direct_bootargs="console=tty1 console=ttyS0,115200"
+    [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]] && _direct_bootargs="$(k_console_args)"
 
     # The GPU args have to be HERE as well as in the ZBM property, because
     # this entry is the one Secure Boot actually boots.

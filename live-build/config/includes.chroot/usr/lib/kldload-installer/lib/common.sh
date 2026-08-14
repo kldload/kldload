@@ -35,6 +35,39 @@ k_need_cmd() {
     command -v "$1" >/dev/null 2>&1 || k_die "required command missing: $1"
 }
 
+# k_console_args — the console= boot arguments, ordered so the console a human
+# will actually type at comes LAST.
+#
+# WHY THE ORDER MATTERS: given several console= arguments the kernel MIRRORS
+# output to all of them, but /dev/console — the single device that carries
+# interactive INPUT — is the LAST one on the line. Anything that prompts by
+# reading /dev/console is therefore answerable from exactly one of them.
+#
+# HISTORY: 2026-08-13, fiend. A Debian install on an encrypted root booted,
+# loaded ZFS, printed "zfs filesystem version 5000" and then sat there taking
+# no keyboard input. The cmdline was "console=tty1 console=ttyS0,115200", so
+# /dev/console was the SERIAL port; Debian's zfs-initramfs asks for the
+# encryption passphrase by reading /dev/console directly, so the prompt went
+# out the serial line and the physical keyboard could not answer it. Fedora
+# never showed this because dracut asks via systemd-ask-password, which
+# BROADCASTS the prompt to every console instead of reading one.
+#
+# Returns: the console arguments on stdout, interactive console last. A
+# connected DRM output is the test for "somebody can stand at this machine";
+# with no display attached the box is headless and serial is the only console
+# that can be typed at, so the order flips.
+k_console_args() {
+    local _c
+    for _c in /sys/class/drm/card*/status; do
+        [[ -r "$_c" ]] || continue
+        if grep -qx connected "$_c" 2>/dev/null; then
+            printf 'console=ttyS0,115200 console=tty1'
+            return 0
+        fi
+    done
+    printf 'console=tty1 console=ttyS0,115200'
+}
+
 k_run() {
     k_debug "RUN: $*"
     "$@"
