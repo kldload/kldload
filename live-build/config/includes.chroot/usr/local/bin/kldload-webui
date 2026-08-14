@@ -10687,8 +10687,24 @@ BCC_TOOLS = {
 }
 
 def _find_bcc_tool(name):
-    """Find a bcc tool binary path."""
-    for path in [f"/usr/share/bcc/tools/{name}",
+    """Find a bcc tool binary path, preferring CO-RE.
+
+    /usr/bin/bpf-<name> comes from libbpf-tools: BTF-based binaries that
+    compile nothing at run time. Every other entry here is LEGACY bcc, which
+    compiles BPF-C against kernel headers when invoked and fails outright on
+    kernel 7.x:
+
+        include/linux/fs.h:2434: static assertion failed:
+        'sizeof(struct filename) % 64 == 0'
+
+    Ordering legacy first therefore returns a path that exists and then dies
+    at run time, which reads to the operator as "bcc is not installed" on a
+    machine carrying 130 working tools.
+    HISTORY: 2026-08-14, fiend on kernel 7.1.3.
+    """
+    for path in [f"/usr/bin/bpf-{name}",
+                 f"/usr/sbin/bpf-{name}",
+                 f"/usr/share/bcc/tools/{name}",
                  f"/usr/sbin/{name}-bpfcc",
                  f"/usr/bin/{name}-bpfcc",
                  f"/usr/sbin/{name}",
@@ -11407,10 +11423,37 @@ async def main_async(args):
             origins=_origins,
         )
         try:
-            _gid = _grp.getgrnam("nginx").gr_gid
-            os.chown(_sp, 0, _gid)
-            os.chmod(_sp, 0o660)
-        except (KeyError, OSError) as _e:
+            # The web server's group is NOT "nginx" everywhere:
+            #   RHEL/Fedora/CentOS -> nginx
+            #   Debian/Ubuntu      -> www-data
+            #   Arch               -> http
+            # Hardcoding "nginx" raised KeyError on Debian, so the chown/chmod
+            # below never ran, the socket stayed 0755 root:root, and nginx
+            # (www-data) could not connect to it. A unix socket needs WRITE
+            # permission to connect — the result was HTTP 502 on the ENTIRE web
+            # UI, with only a log line to show for it.
+            # HISTORY: 2026-08-14, fiend (Debian 13) — first Debian install
+            # where the UI was reachable at all.
+            _gid = None
+            for _grpname in ("nginx", "www-data", "http"):
+                try:
+                    _gid = _grp.getgrnam(_grpname).gr_gid
+                    break
+                except KeyError:
+                    continue
+            if _gid is None:
+                # No known web-server group. 0660 with an unknown group would
+                # be unreachable, so fall back to 0666: the socket still lives
+                # in root-owned /run/kldload, and this is strictly better than
+                # a UI that cannot serve at all.
+                os.chmod(_sp, 0o666)
+                LOG.warning(
+                    "no nginx/www-data/http group found — socket %s left 0666", _sp)
+            else:
+                os.chown(_sp, 0, _gid)
+                os.chmod(_sp, 0o660)
+                LOG.info("socket %s set 0660 root:%s", _sp, _grpname)
+        except OSError as _e:
             LOG.error("socket perms on %s failed (%s) — proxy may not connect", _sp, _e)
         LOG.info("kldload Web UI on unix:%s (HTTP + WebSocket, proxy-only)", _sp)
     else:

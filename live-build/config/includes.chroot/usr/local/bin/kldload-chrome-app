@@ -89,8 +89,30 @@ fi
 #       kldload-webui.desktop), NOT by --class. Every tool opens the same root
 #       URL, so they all share that one app_id — one cohesive console icon.
 #       --class is kept only as a harmless hint for any future XWayland path.
+# ── Ozone platform: follow the SESSION, do not assume Wayland ────────────────
+# `--ozone-platform=wayland` was hardcoded because the Fedora/RHEL substrates
+# run GDM, which defaults to a Wayland session. Debian deliberately runs
+# lightdm (GDM 48 has a systemd bug on Trixie), and lightdm defaults to X11 —
+# so chromium was told to use a Wayland display that does not exist and exited
+# immediately with:
+#     Failed to connect to Wayland display
+#     The platform failed to initialize.  Exiting.
+# Every dock/app-grid tile therefore did nothing at all when clicked.
+# HISTORY: 2026-08-14, fiend rc3 (Debian 13, XDG_SESSION_TYPE=x11).
+#
+# Honour an explicit override, else take the session's own answer, else let
+# chromium decide for itself ("auto") rather than forcing a wrong platform.
+_ozone="${KLDLOAD_OZONE_PLATFORM:-}"
+if [[ -z "$_ozone" ]]; then
+    case "${XDG_SESSION_TYPE:-}" in
+    wayland) _ozone=wayland ;;
+    x11) _ozone=x11 ;;
+    *) _ozone="$([[ -n "${WAYLAND_DISPLAY:-}" ]] && echo wayland || echo auto)" ;;
+    esac
+fi
+
 exec "$chrome" \
-    --ozone-platform=wayland \
+    --ozone-platform="$_ozone" \
     --user-data-dir="$profile_dir" \
     --class="$app_id" \
     --no-first-run \
