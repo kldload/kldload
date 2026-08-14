@@ -228,6 +228,27 @@ cmd_build_fedora_darksite() {
 # Build the Ollama model darksite. Pulls the LLM weights into a host
 # cache so every ISO ships Bob chat-ready without an internet roundtrip.
 # Default model set via OLLAMA_MODELS (comma-sep); adds ~5GB per model.
+# _pkgset_hash — sha256 of every package list in a darksite config dir.
+#
+# Args:    $1 — directory of *.txt package sets.
+# Returns: the hash on stdout; empty string when the directory is absent.
+#
+# WHY: a darksite marker file says a repo was BUILT, not that it was built from
+# the current package list. Stamping the cache with this and comparing on each
+# build is what makes "add a package to a set" actually reach an install.
+#
+# HISTORY: 2026-08-13. Fonts were added to the Fedora set on 08-12 against a
+# cache built on 07-24; the marker existed, so the build logged "cached" and
+# mirrored none of them. The install then dropped every one silently through
+# --skip-unavailable. Debian and Ubuntu had the identical check and identical
+# three-week-old caches — Debian's from 07-23 — so any package added to those
+# sets since had never been mirrored either.
+_pkgset_hash() {
+    local dir="${1:?}"
+    [[ -d "$dir" ]] || return 0
+    cat "$dir"/*.txt 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+
 cmd_build_ollama_darksite() {
     local runtime
     runtime="$(detect_runtime)"
@@ -432,6 +453,13 @@ cmd_build() {
         local debian_darksite="$ROOT/live-build/darksite-debian-cache"
         if [[ ! -f "$debian_darksite/apt/dists/trixie/Release" ]]; then
             cmd_build_debian_darksite
+            printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets")" \
+                >"$debian_darksite/.pkgset-sha256"
+        elif [[ "$(cat "$debian_darksite/.pkgset-sha256" 2>/dev/null)" != "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets")" ]]; then
+            log "Debian package sets changed since the darksite was built — rebuilding the mirror"
+            cmd_build_debian_darksite
+            printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets")" \
+                >"$debian_darksite/.pkgset-sha256"
         else
             log "Debian darksite cached: $(du -sh "$debian_darksite" | cut -f1)"
         fi
@@ -439,6 +467,13 @@ cmd_build() {
         local ubuntu_darksite="$ROOT/live-build/darksite-ubuntu-cache"
         if [[ ! -f "$ubuntu_darksite/apt/dists/noble/Release" ]]; then
             cmd_build_ubuntu_darksite
+            printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-ubuntu/config/package-sets")" \
+                >"$ubuntu_darksite/.pkgset-sha256"
+        elif [[ "$(cat "$ubuntu_darksite/.pkgset-sha256" 2>/dev/null)" != "$(_pkgset_hash "$ROOT/build/darksite-ubuntu/config/package-sets")" ]]; then
+            log "Ubuntu package sets changed since the darksite was built — rebuilding the mirror"
+            cmd_build_ubuntu_darksite
+            printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-ubuntu/config/package-sets")" \
+                >"$ubuntu_darksite/.pkgset-sha256"
         else
             log "Ubuntu darksite cached: $(du -sh "$ubuntu_darksite" | cut -f1)"
         fi
@@ -461,8 +496,7 @@ cmd_build() {
         # be enough; remembering to hand-rebuild a mirror is not a contract.
         local _fed_stamp="$fedora_darksite/.pkgset-sha256"
         local _fed_hash
-        _fed_hash="$(cat "$ROOT"/build/darksite-fedora/config/package-sets/*.txt 2>/dev/null |
-            sha256sum | cut -d" " -f1)"
+        _fed_hash="$(_pkgset_hash "$ROOT/build/darksite-fedora/config/package-sets")"
         if [[ ! -f "$fedora_darksite/rpm/repodata/repomd.xml" ]]; then
             cmd_build_fedora_darksite
             printf '%s\n' "$_fed_hash" >"$_fed_stamp"
