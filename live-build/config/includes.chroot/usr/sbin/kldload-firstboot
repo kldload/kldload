@@ -1136,6 +1136,28 @@ main() {
     # driver is pointless if it will be signed with a key nothing trusts.
     if [[ -s /var/lib/dkms/mok.der && -s /var/lib/dkms/mok.key ]]; then
         _ak_cert=/etc/pki/akmods/certs/public_key.der
+        _ak_key=/etc/pki/akmods/private/private_key.priv
+
+        # Ownership is checked SEPARATELY from the certificate, because the
+        # right key with the wrong owner fails exactly as hard as the wrong
+        # key — and looks like a build error rather than a permission one.
+        #
+        # akmodsbuild drops to the akmods user; it cannot read a root:root
+        # key. HISTORY: 2026-08-13. The installer seeded the correct key but
+        # its chgrp was a no-op (the akmods group is created by a package that
+        # lands later), so the key stayed root:root and the build died with
+        # "sign-file: Permission denied ... brp-kmodsign: modules are
+        # unsigned! ... Bad exit status from %install". The cert MATCHED, so a
+        # repair that only compared certificates skipped it entirely.
+        if [[ -f "$_ak_key" ]] && ! getent group akmods >/dev/null 2>&1; then
+            groupadd -r akmods 2>/dev/null || true
+        fi
+        if [[ -f "$_ak_key" ]] && [[ "$(stat -c '%G' "$_ak_key" 2>/dev/null)" != "akmods" ]]; then
+            chgrp akmods "$_ak_key" 2>/dev/null && chmod 0640 "$_ak_key" 2>/dev/null &&
+                ok "akmods signing key ownership corrected (was $(stat -c '%U:%G' "$_ak_key" 2>/dev/null)) — akmod builds can sign again" ||
+                log "WARNING: could not fix akmods key ownership — akmod modules will build unsigned and be refused under Secure Boot"
+        fi
+
         if ! cmp -s /var/lib/dkms/mok.der "$_ak_cert" 2>/dev/null; then
             mkdir -p /etc/pki/akmods/certs /etc/pki/akmods/private
             [[ -f "$_ak_cert" ]] && cp -a "$_ak_cert" "${_ak_cert}.autogen-$(date +%s)" 2>/dev/null
@@ -1153,7 +1175,7 @@ main() {
                 log "WARNING: could not align the akmods key with the MOK — akmod modules will be refused under Secure Boot"
             fi
         fi
-        unset _ak_cert
+        unset _ak_cert _ak_key
     fi
 
     # ── NVIDIA healing net — driver never installed at install-time ───────────

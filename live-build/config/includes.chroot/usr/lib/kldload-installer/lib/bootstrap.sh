@@ -493,11 +493,32 @@ k_generate_mok_keys() {
     if cp -f "${mok_dir}/mok.der" "${akmods_certs}/public_key.der" &&
         cp -f "${mok_dir}/mok.key" "${akmods_priv}/private_key.priv"; then
         chmod 0644 "${akmods_certs}/public_key.der"
+        # 0640 root:akmods, matching what akmods itself creates.
+        #
+        # WARN: akmodsbuild does NOT run as root — it drops to the akmods
+        # user. A key it cannot read fails in a way that reads like a build
+        # error rather than a permission one.
+        #
+        # HISTORY: 2026-08-13, second attempt at this fix. The key was seeded
+        # correctly and `cmp` confirmed it matched the enrolled MOK, but the
+        # chgrp was a no-op — the akmods GROUP does not exist in the target
+        # yet at this point, because the package that creates it installs
+        # later. The key stayed root:root and akmodsbuild reported:
+        #
+        #     sign-file: /etc/pki/akmods/private/private_key.priv
+        #     - SSL error: Permission denied
+        #     brp-kmodsign: modules are unsigned!
+        #     error: Bad exit status from %install
+        #
+        # So the right key with the wrong owner fails exactly as hard as the
+        # wrong key. Create the group if the package has not yet, so the
+        # ownership is correct whichever order they land in. firstboot
+        # re-checks it as the second failsafe.
+        chroot "${target}" getent group akmods >/dev/null 2>&1 ||
+            chroot "${target}" groupadd -r akmods 2>/dev/null || true
+        chroot "${target}" chgrp akmods /etc/pki/akmods/private/private_key.priv 2>/dev/null ||
+            k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "WARNING: could not set akmods group on the signing key — akmod builds will fail to sign"
         chmod 0640 "${akmods_priv}/private_key.priv"
-        # The akmods group owns the private key on Fedora; it may not exist yet
-        # if the package lands later, in which case root-only is correct and
-        # akmods still reads it (it runs as root).
-        chroot "${target}" chgrp akmods /etc/pki/akmods/private/private_key.priv 2>/dev/null || true
         k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "akmods pointed at the enrolled MOK — nvidia and other akmod modules will load under Secure Boot"
     else
         k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "WARNING: could not seed /etc/pki/akmods with the MOK — akmod-built modules (nvidia) will be signed with an unenrolled key and refused under Secure Boot"
