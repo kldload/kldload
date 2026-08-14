@@ -1,0 +1,391 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-component — install, remove and inspect optional kldload components
+#
+# WHAT IT DOES, IN ORDER:
+#   1. Reads a registry of component definitions from /usr/lib/kldload/components.
+#   2. For install/remove, runs the component's verb DETACHED under systemd-run
+#      so the work outlives whatever launched it (a GUI tab, an ssh session, the
+#      installer's firstboot unit).
+#   3. Records state in /var/lib/kldload/components/<name> and streams every
+#      line of output to /var/log/kldload/component-<name>.log.
+#
+# WHY THIS EXISTS:
+#   Optional capabilities (a K8s cluster, the ZFS test lab, golden images, the
+#   local LLM) used to be install-time-only decisions, reachable ONLY as tick
+#   boxes in the live installer and executed once by kldload-autodeploy. That
+#   had three consequences, each of which bit us:
+#
+#     - The installer grew an option for every capability, so a first-time
+#       operator faced a wall of choices before they had a running system, and
+#       every install paid for capabilities most operators never use.
+#     - Seven different env vars accumulated to request the SAME work
+#       (KLDLOAD_TEMPLATE, KLDLOAD_KLAB_ZFS_DEV, KLDLOAD_BUILD_IMAGES,
+#       KLDLOAD_ZFSLAB_MODE, KLDLOAD_ENABLE_K8S, KLDLOAD_K8S_BOOTSTRAP,
+#       KLDLOAD_KLAB_NO_AUTO) because each new front-end added its own flag
+#       plus a reconciliation rule. There was no single name for a capability.
+#     - Nothing could be REMOVED, and nothing could be added later, so getting
+#       the tick boxes wrong meant a reinstall.
+#
+#   A component is that single name. The installer, kldload-autodeploy and
+#   vmxplore are now three front-ends over ONE verb set, and the answer to
+#   "how do I add K8s afterwards" is the same command the installer runs.
+#
+# WHY DETACHED (systemd-run), NOT A CHILD PROCESS:
+#   vmxplore ran these tools as a child of a GUI terminal widget and killed the
+#   process group when the operator navigated away — a 40-minute golden-image
+#   build died on a tab switch with no log and no trace (2026-08-14). Detaching
+#   makes the caller a VIEWER, never an owner: closing the tab, dropping the ssh
+#   session or rebooting the installer's shell cannot interrupt the work, and
+#   reattaching is just tailing the log again.
+#
+# USAGE:
+#   kldload-component list                     # every component + state
+#   kldload-component status <name>            # one word, for scripts
+#   kldload-component install <name>...        # detached; --now to block
+#   kldload-component remove  <name>...        # detached; --now to block
+#   kldload-component log <name> [-f]          # read/follow the work log
+#
+# INPUTS:   /usr/lib/kldload/components/*.component  (registry)
+# OUTPUTS:  /var/lib/kldload/components/<name>       (state: <state> <epoch>)
+#           /var/log/kldload/component-<name>.log    (work log)
+#
+# EXIT:     0 ok; 1 usage/unknown component; 2 the component's verb failed.
+#
+# NOTES:
+#   - Verbs MUST be idempotent: installing an installed component re-asserts it
+#     rather than failing, because the healing paths in kldload-firstboot
+#     re-run them blind.
+#   - State is a FILE, not a systemd unit, on purpose: units are garbage
+#     collected and do not survive a reboot, but "did the operator ask for a
+#     K8s cluster" must.
+#   - A component left `running` whose unit is gone reports `interrupted` — an
+#     honest answer beats a stale `running` after a power cut.
+# ─────────────────────────────────────────────────────────────────────────────
+set -Eeuo pipefail
+trap 'echo "kldload-component: FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+readonly REG_DIR="${KLDLOAD_COMPONENT_REG:-/usr/lib/kldload/components}"
+readonly STATE_DIR="${KLDLOAD_COMPONENT_STATE:-/var/lib/kldload/components}"
+readonly LOG_DIR="${KLDLOAD_LOG_DIR:-/var/log/kldload}"
+
+# ─── Registry access ─────────────────────────────────────────────────────────
+# A component is a sourced bash fragment declaring metadata (COMPONENT_*) and
+# up to three verbs (component_install/remove/status). Sourcing rather than
+# parsing means a component can be an arbitrary script — several delegate
+# straight to an existing tool's own subcommands (klab destroy, kube-cluster
+# bootstrap), which is why this file stays thin.
+
+# reg_path — registry file for a component name, or empty if it is not known.
+reg_path() {
+    local _p="${REG_DIR}/${1}.component"
+    [[ -r "$_p" ]] && printf '%s' "$_p"
+}
+
+# all_components — every registered name, one per line, alphabetical.
+all_components() {
+    local _f
+    for _f in "${REG_DIR}"/*.component; do
+        [[ -e "$_f" ]] || continue
+        basename "$_f" .component
+    done | sort
+}
+
+# load_component — source a component into the CURRENT shell.
+# Args: $1 name. Sets COMPONENT_* and defines component_*; exits 1 if unknown.
+# WARN: clears the verb functions first so a component that omits one does not
+# silently inherit the previous component's implementation in a loop.
+load_component() {
+    local _p
+    _p="$(reg_path "$1")" || true
+    if [[ -z "$_p" ]]; then
+        echo "kldload-component: unknown component '$1'" >&2
+        echo "  known: $(all_components | tr '\n' ' ')" >&2
+        exit 1
+    fi
+    unset -f component_install component_remove component_status 2>/dev/null || true
+    COMPONENT_SUMMARY="" COMPONENT_MINUTES="?" COMPONENT_REQUIRES=""
+    # shellcheck source=/dev/null
+    source "$_p"
+}
+
+# ─── State ───────────────────────────────────────────────────────────────────
+# State is authoritative for "what did the operator ask for"; the component's
+# own component_status() is authoritative for "is it actually there right now".
+# They disagree after a failed build, and that disagreement is the useful bit.
+
+state_file() { printf '%s/%s' "$STATE_DIR" "$1"; }
+
+# state_set — record a component's state. Args: $1 name, $2 state word.
+state_set() {
+    mkdir -p "$STATE_DIR"
+    printf '%s %s\n' "$2" "$(date +%s)" >"$(state_file "$1")".tmp
+    mv -f "$(state_file "$1")".tmp "$(state_file "$1")"
+}
+
+# state_get — print a component's recorded state word (absent if never set).
+# Corrects a stale `running` left by a crash/power-cut into `interrupted`, so
+# an operator is never told work is in flight when no unit is running.
+state_get() {
+    local _f _s
+    _f="$(state_file "$1")"
+    [[ -r "$_f" ]] || {
+        printf 'absent'
+        return 0
+    }
+    read -r _s _ <"$_f" || _s=absent
+    if [[ "$_s" == "running" ]] && ! unit_active "$1"; then
+        _s=interrupted
+    fi
+    printf '%s' "$_s"
+}
+
+unit_name() { printf 'kldload-comp-%s' "$1"; }
+
+# unit_active — true while the detached worker for a component is running.
+unit_active() {
+    command -v systemctl >/dev/null 2>&1 || return 1
+    [[ "$(systemctl is-active "$(unit_name "$1")" 2>/dev/null)" == "active" ]]
+}
+
+log_file() { printf '%s/component-%s.log' "$LOG_DIR" "$1"; }
+
+# ─── Cheap probes for component_status ───────────────────────────────────────
+# component_status() is called for EVERY component by `list`, so it must be
+# fast and side-effect free. It must NOT shell out to a tool's own `status`
+# subcommand: those reach for libvirt, wait on a cluster API and can block
+# indefinitely — `kube-cluster status` hung `list` forever the first time this
+# was tried (2026-08-14). Probe for the ARTEFACT instead, from one cached
+# libvirt query.
+#
+# The timeout is not paranoia: a stale libvirt connection is a known failure
+# mode on this stack, and a wedged hypervisor must degrade `list` to "absent",
+# never hang the operator's terminal.
+
+_vm_cache=""
+_vm_cache_done=0
+
+# vm_prime — fetch the VM list once per invocation. Safe to call repeatedly.
+vm_prime() {
+    ((_vm_cache_done)) && return 0
+    if command -v virsh >/dev/null 2>&1; then
+        _vm_cache="$(timeout 5 virsh list --all --name 2>/dev/null || true)"
+    fi
+    _vm_cache_done=1
+}
+
+# have_vm — true if any defined VM name matches the ERE in $1.
+# Example: have_vm '^k8s-'   # is a cluster defined on this host?
+have_vm() {
+    vm_prime
+    [[ -n "$_vm_cache" ]] && grep -qE "$1" <<<"$_vm_cache"
+}
+
+# ─── Running a verb ──────────────────────────────────────────────────────────
+
+# run_verb — execute one component verb IN THIS PROCESS, with logging.
+# Args: $1 name, $2 verb (install|remove). Returns the verb's exit status.
+# This is the body of the detached unit; operators reach it via --now.
+run_verb() {
+    local _name="$1" _verb="$2" _fn="component_${2}" _rc=0
+    mkdir -p "$LOG_DIR"
+    load_component "$_name"
+    if ! declare -F "$_fn" >/dev/null; then
+        echo "kldload-component: '$_name' has no $_verb verb" >&2
+        return 1
+    fi
+
+    # Dependencies first, and only for install: removing a component must not
+    # drag its dependencies down with it (destroying the K8s cluster should
+    # leave the KVM host alone — the operator still has VMs on it).
+    if [[ "$_verb" == "install" && -n "${COMPONENT_REQUIRES:-}" ]]; then
+        local _dep
+        for _dep in $COMPONENT_REQUIRES; do
+            if [[ "$(state_get "$_dep")" != "installed" ]]; then
+                echo "==> dependency: installing $_dep first"
+                run_verb "$_dep" install || return 1
+                load_component "$_name" # restore our own verbs after recursion
+            fi
+        done
+    fi
+
+    state_set "$_name" running
+    {
+        echo "═══ ${_verb} ${_name} — $(date -Is) ═══"
+        "$_fn"
+    } 2>&1 | tee -a "$(log_file "$_name")"
+    _rc="${PIPESTATUS[0]}"
+
+    if ((_rc == 0)); then
+        state_set "$_name" "$([[ "$_verb" == "install" ]] && echo installed || echo absent)"
+        echo "OK: ${_verb} ${_name}" | tee -a "$(log_file "$_name")"
+    else
+        state_set "$_name" failed
+        echo "FATAL: ${_verb} ${_name} failed (rc=${_rc}) — see $(log_file "$_name")" |
+            tee -a "$(log_file "$_name")" >&2
+    fi
+    return "$_rc"
+}
+
+# detach — start a verb as a transient unit and return immediately.
+# Args: $1 name, $2 verb. The unit is --collect'd (self-cleaning) because our
+# state file, not the unit, is what survives.
+detach() {
+    local _name="$1" _verb="$2" _unit
+    _unit="$(unit_name "$_name")"
+    if unit_active "$_name"; then
+        echo "kldload-component: ${_name} is already running — 'log ${_name} -f' to watch" >&2
+        return 0
+    fi
+    systemctl reset-failed "$_unit" 2>/dev/null || true # no-op when not failed
+    systemd-run --unit="$_unit" --collect \
+        --description="kldload ${_verb} ${_name}" \
+        --setenv=KLDLOAD_COMPONENT_REG="$REG_DIR" \
+        --setenv=KLDLOAD_COMPONENT_STATE="$STATE_DIR" \
+        --setenv=KLDLOAD_LOG_DIR="$LOG_DIR" \
+        "$0" --exec "$_verb" "$_name" >/dev/null
+    state_set "$_name" running
+    echo "${_verb} ${_name}: started (detached) — kldload-component log ${_name} -f"
+}
+
+# ─── Sub-commands ────────────────────────────────────────────────────────────
+
+cmd_list() {
+    local _n _state _live
+    vm_prime # one libvirt query for the whole table, not one per component
+    printf '%-12s %-12s %-8s %s\n' NAME STATE APPROX SUMMARY
+    for _n in $(all_components); do
+        (
+            load_component "$_n"
+            _state="$(state_get "$_n")"
+            # Show what is actually on the box when it contradicts the record:
+            # "installed" that no longer answers its own status check is the
+            # single most misleading thing this table could print.
+            if declare -F component_status >/dev/null; then
+                _live="$(component_status 2>/dev/null || true)"
+                [[ "$_state" == "installed" && "$_live" == "absent" ]] && _state="missing"
+            fi
+            printf '%-12s %-12s %-8s %s\n' \
+                "$_n" "$_state" "~${COMPONENT_MINUTES}m" "${COMPONENT_SUMMARY}"
+        )
+    done
+}
+
+cmd_status() {
+    [[ $# -ge 1 ]] || {
+        echo "usage: kldload-component status <name>" >&2
+        exit 1
+    }
+    load_component "$1"
+    state_get "$1"
+    echo
+}
+
+cmd_log() {
+    [[ $# -ge 1 ]] || {
+        echo "usage: kldload-component log <name> [-f]" >&2
+        exit 1
+    }
+    local _f
+    _f="$(log_file "$1")"
+    [[ -r "$_f" ]] || {
+        echo "no log yet for '$1'" >&2
+        exit 1
+    }
+    if [[ "${2:-}" == "-f" ]]; then tail -f "$_f"; else cat "$_f"; fi
+}
+
+usage() {
+    cat <<'EOF'
+kldload-component — install, remove and inspect optional kldload components
+
+USAGE
+  kldload-component list                    every component, its state and cost
+  kldload-component status <name>           one state word (for scripts)
+  kldload-component install <name>...       add a component
+  kldload-component remove  <name>...       take a component away
+  kldload-component log <name> [-f]         read (or follow) the work log
+
+OPTIONS
+  --now      run in THIS process instead of detaching; output goes to the
+             terminal as well as the log. Use in scripts that must block.
+
+STATES
+  absent       not installed
+  installed    installed and its own status check agrees
+  missing      recorded as installed, but no longer present on the system
+  running      a detached worker is doing the work now
+  interrupted  a worker was killed (reboot, power cut) mid-run — re-run it
+  failed       the verb returned non-zero; see the log
+
+FILES
+  /usr/lib/kldload/components/*.component   component definitions
+  /var/lib/kldload/components/<name>        recorded state
+  /var/log/kldload/component-<name>.log     work log
+
+EXAMPLES
+  kldload-component list
+  kldload-component install k8s             # detached; survives a closed tab
+  kldload-component log k8s -f              # watch it
+  kldload-component remove zfslab           # reclaim the disk
+
+EXIT STATUS
+  0 ok    1 usage or unknown component    2 the component's verb failed
+EOF
+}
+
+# ─── Entry point ─────────────────────────────────────────────────────────────
+# --exec is the INTERNAL re-entry used by the detached unit; it is deliberately
+# undocumented in --help because an operator never needs it.
+
+main() {
+    local _now=0 _args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --now) _now=1 ;;
+        --exec)
+            shift
+            run_verb "$2" "$1" || exit 2
+            exit 0
+            ;;
+        -h | --help | help)
+            usage
+            exit 0
+            ;;
+        *) _args+=("$1") ;;
+        esac
+        shift
+    done
+    set -- "${_args[@]:-}"
+
+    local _cmd="${1:-list}"
+    shift || true
+    case "$_cmd" in
+    list | "") cmd_list ;;
+    status) cmd_status "$@" ;;
+    log) cmd_log "$@" ;;
+    install | remove)
+        [[ $# -ge 1 ]] || {
+            echo "usage: kldload-component $_cmd <name>..." >&2
+            exit 1
+        }
+        local _n _rc=0
+        for _n in "$@"; do
+            load_component "$_n" # validates the name before we start anything
+            if ((_now)); then
+                run_verb "$_n" "$_cmd" || _rc=2
+            else
+                detach "$_n" "$_cmd"
+            fi
+        done
+        exit "$_rc"
+        ;;
+    *)
+        echo "kldload-component: unknown command '$_cmd'" >&2
+        usage >&2
+        exit 1
+        ;;
+    esac
+}
+
+main "$@"

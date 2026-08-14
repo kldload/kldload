@@ -1,0 +1,51 @@
+# shellcheck shell=bash
+# ─────────────────────────────────────────────────────────────────────────────
+# component: kvm — the libvirt/QEMU virtualisation host
+#
+# WHY IT IS A COMPONENT: every lab component (klab, zfslab, k8s) builds VMs, so
+# this is the one component others depend on. It is cheap and near-instant,
+# which is exactly why it should NOT have been an installer question.
+#
+# REMOVE SEMANTICS: stops and disables libvirtd but does NOT delete VMs or
+# storage — "remove the hypervisor service" must never be a data-destroying
+# operation. Removing the components that OWN those VMs is what deletes them.
+# ─────────────────────────────────────────────────────────────────────────────
+COMPONENT_SUMMARY="KVM/libvirt host: run VMs on this machine"
+COMPONENT_MINUTES=2
+COMPONENT_REQUIRES=""
+
+component_status() {
+    if systemctl is-active libvirtd >/dev/null 2>&1 ||
+        systemctl is-active libvirtd.socket >/dev/null 2>&1; then
+        echo installed
+    else
+        echo absent
+    fi
+}
+
+component_install() {
+    command -v virsh >/dev/null 2>&1 || {
+        echo "FATAL: virsh not present — the profile did not ship libvirt" >&2
+        return 1
+    }
+    # Socket activation on modern libvirt; the service name is the fallback for
+    # substrates still shipping the monolithic daemon.
+    systemctl enable --now libvirtd.socket 2>/dev/null ||
+        systemctl enable --now libvirtd
+    # The default NAT network is what every lab component attaches to. It is
+    # inert on a fresh install until started, and autostart makes it survive
+    # the reboot the operator is about to do.
+    if ! virsh net-info default >/dev/null 2>&1; then
+        echo "note: no 'default' network defined; labs will define their own"
+    else
+        virsh net-autostart default || true # already autostarted: harmless
+        virsh net-start default 2>/dev/null || true
+    fi
+    virsh version
+}
+
+component_remove() {
+    echo "stopping libvirtd (VMs and storage are left untouched)"
+    systemctl disable --now libvirtd.socket 2>/dev/null || true
+    systemctl disable --now libvirtd 2>/dev/null || true
+}

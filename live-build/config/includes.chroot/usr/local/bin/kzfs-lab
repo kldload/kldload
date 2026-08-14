@@ -53,6 +53,10 @@ CPUS="${CPUS:-2}"     # Per-VM vCPUs
 DISK="${DISK:-40}"    # Golden zvol size in GB — must fit cloud image + ZFS source + tests
 SSH_KEY="${SSH_KEY:-/root/.ssh/id_ed25519}"
 ISO_DIR="/var/lib/libvirt/isos" # Where cloud images and cloud-init ISOs are stored
+# Cloud images baked into the ISO by the darksite build, named <distro>-cloud.qcow2.
+# Preferred over the network so an air-gapped host can still build the lab; klab,
+# kube-cluster and kube-demo read the same directory.
+DARKSITE_IMG_DIR="${DARKSITE_IMG_DIR:-/var/lib/kldload/cloud-init}"
 
 DISTROS=(centos rocky fedora debian ubuntu arch)
 # shellcheck disable=SC2034  # OBS_VM used in deploy_site
@@ -895,14 +899,28 @@ build_golden_single() {
         done
     fi
 
+    # Image resolution order: local cache → DARKSITE payload → network.
+    #
+    # WHY THE DARKSITE STEP EXISTS: the ISO already ships these images, under
+    # exactly this filename, in DARKSITE_IMG_DIR — klab, kube-cluster and
+    # kube-demo all use them. kzfs-lab was the ONE consumer that didn't, so the
+    # OpenZFS lab re-downloaded all six distros over the network even on a
+    # fully darksite install, and on a machine with no route out it could not
+    # build a lab at all. Two directories apart, same filename (fiend,
+    # 2026-08-14). The darksite copy is used READ-ONLY as a conversion source,
+    # so it is safe to point straight at it rather than copying it twice.
     local img_file="${ISO_DIR}/${distro}-cloud.qcow2"
+    local dark_img="${DARKSITE_IMG_DIR}/${distro}-cloud.qcow2"
 
-    if [[ ! -f "$img_file" ]]; then
-        log "  Downloading ${distro} cloud image..."
+    if [[ -f "$img_file" ]]; then
+        log "  Using cached cloud image: ${img_file}"
+    elif [[ -f "$dark_img" ]]; then
+        log "  Using darksite cloud image: ${dark_img}"
+        img_file="$dark_img"
+    else
+        log "  No local image for ${distro}; downloading (NETWORK path)..."
         curl -fSL -o "$img_file" "$url" || die "Failed to download ${distro} cloud image"
         log "  Download complete"
-    else
-        log "  Using cached cloud image: ${img_file}"
     fi
 
     # Create ZFS zvol (destroy partial if exists without snapshot)
