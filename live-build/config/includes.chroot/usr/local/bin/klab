@@ -107,7 +107,12 @@ declare -A OS_VARIANTS=(
     [centos]="centos-stream9"
     [rocky]="centos-stream9"
     [fedora]="fedora44"
-    [debian]="debian12"
+    # debian13, matching the trixie image actually fetched above. This said
+    # debian12 while installing Debian 13, so libvirt was given hints for the
+    # wrong release; harmless in practice but wrong, and the kind of drift that
+    # bites when a version bump changes a default. Verified accepted by
+    # virt-install on fiend, 2026-08-15.
+    [debian]="debian13"
     [ubuntu]="ubuntu24.04"
     [arch]="archlinux"
     # RHEL 10 first; older osinfo-dbs (CentOS 9 host, Fedora <43) won't know
@@ -162,7 +167,8 @@ _resolve_os_variants() {
         _fallback=""
         case "$_want" in
         fedora*)
-            for _n in 43 42 41 40 39 38; do
+            # 44 is the target; osinfo-db lags it by a release or two.
+            for _n in 44 43 42 41 40 39 38; do
                 _try="fedora$_n"
                 _osvariant_known "$_try" && {
                     _fallback="$_try"
