@@ -97,7 +97,10 @@ centre() {
     w="$(cols)"
     pad=$(((w - ${#text}) / 2))
     ((pad > 0)) || pad=0
-    printf '%*s%s\n' "$pad" '' "$text"
+    # \033[K erases to end of line. Required because frames are painted OVER
+    # the previous one rather than after a clear: a shorter line would
+    # otherwise leave the tail of the longer line that was there before.
+    printf '%*s%s\033[K\n' "$pad" '' "$text"
 }
 
 # banner_building / banner_ready — the part visible from across a room.
@@ -278,7 +281,15 @@ frame() {
     local step log w
     w="$(cols)"
     log="$(live_log)"
-    clear 2>/dev/null || printf '\033[2J\033[H'
+    # Home the cursor and overwrite, rather than `clear`.
+    #
+    # WHY: `clear` erases the whole screen and THEN repaints it, so on every
+    # refresh the operator sees a blank frame — the display visibly flashes
+    # (reported 2026-08-15). Painting over the previous frame in place removes
+    # the blank interval entirely. Each line erases to end-of-line as it is
+    # written (see `eol`), and erase-to-end-of-screen at the end of the frame
+    # removes any leftovers when a frame gets shorter.
+    printf '\033[H'
     printf '\n\n'
 
     if finished; then
@@ -341,10 +352,16 @@ frame() {
     # the terminal width because a wrapped 200-column log line destroys the
     # layout and hides the banner above it.
     if [[ -r "$log" ]]; then
-        tail -n 10 "$log" 2>/dev/null | cut -c1-$((w - 4)) | sed 's/^/  /'
+        tail -n 10 "$log" 2>/dev/null | cut -c1-$((w - 4)) |
+            sed $'s/^/  /; s/$/\033[K/'
     else
         printf '  %s(waiting for the log to appear)%s\n' "${C_DIM}" "${C_OFF}"
     fi
+    # Erase anything the PREVIOUS frame left below this one. Required now that
+    # we overwrite in place instead of clearing: a frame that shrinks (fewer
+    # log lines, a phase list that got shorter) would otherwise leave the old
+    # tail on screen forever.
+    printf '\033[J'
 }
 
 main() {
