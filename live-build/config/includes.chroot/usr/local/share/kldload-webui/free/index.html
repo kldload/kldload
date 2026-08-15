@@ -609,6 +609,132 @@ html.kld-app #term-drawer{display:none!important;}
           </div>
         </div>
 
+        <!-- Options live HERE, directly under distro + profile: the operator
+             picks a platform, then everything that platform can carry, in one
+             place. They used to sit far below, past the Bob panel and the RHEL
+             auth block, so the two halves of one decision were separated by a
+             screenful of unrelated form. -->
+        <div class="panel" id="platform-panel" style="margin-bottom:1rem">
+          <div class="panel-hdr">⚙ Platform Options</div>
+          <div class="panel-body">
+            <div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
+              ZFS, WireGuard, and eBPF are included on all profiles (except Core). Toggle NVIDIA if you have a GPU. Secure Boot is <strong>on</strong> by default (MOK enrollment on first boot, password <code>kldload</code>) — disable it only if your firmware can't enroll MOK. Web ops console is <strong>off</strong> on server/workstation by default — enable to use the dashboard as an in-place toolkit (Doctor / VM / K8s / Install). Lab profiles (kvm / ai / zfslab / klab) always auto-start it.
+              <br><strong style="color:#c9a04a">⚠ KVM, Kubernetes, and the lab profiles run real VMs through KVM &mdash; they need CPU virtualization (Intel VT-x / AMD-V): bare metal, or a guest with <em>nested virtualization</em> enabled on the host. Without it QEMU falls back to TCG software emulation and VMs are unusably slow. A plain workstation / server or Core (no KVM) runs fine virtualized.</strong>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.5rem;margin-bottom:0.8rem;max-width:760px">
+              <div class="opt-card" id="opt-nvidia" onclick="toggleOpt('nvidia')" title="Drivers + CUDA + container toolkit" style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                <div style="font-size:1.5rem;margin-bottom:0.3rem">🎮</div>
+                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">NVIDIA GPU</div>
+              </div>
+              <!-- Secure Boot default = ON again as of 2026-07-22.
+                   The 1.1.0 reason for OFF (ZBM SBAT gap: shim 15.8 rejects
+                   ZBM chainload regardless of MOK) is now handled in the
+                   installer instead of by disabling SB: the GRUB default is
+                   FIRMWARE-SB-aware (lib/bootloader.sh) — SB-active firmware
+                   boots the signed direct chain, SB-inactive firmware keeps
+                   ZBM as default while MOK enrollment + module signing still
+                   arm the box for a later SB flip (grub fallback=direct
+                   covers that flip). Uncheck for firmware that can't enroll
+                   MOK or throwaway test installs. -->
+
+              <div class="opt-card" id="opt-secure-boot" onclick="toggleOpt('secure-boot')" title="kldload CA → MOK → signed ZFS kmod + ZBM" style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                <div style="font-size:1.5rem;margin-bottom:0.3rem">🔒</div>
+                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Secure Boot</div>
+              </div>
+              <!-- Web ops console at boot — opt-in.
+                   Lab profiles (kvm/ai/zfslab/klab) auto-enable the webui
+                   regardless of this toggle since the operator booted
+                   kldload FOR the UI. desktop/server profiles install the
+                   binary either way; this toggle decides whether the
+                   service starts at boot. Lets a workstation become a
+                   self-converting host (in-place reinstall to klab,
+                   diagnostics via Doctor, etc.) without forcing the cost
+                   on operators who'd rather keep it cold. -->
+              <div class="opt-card" id="opt-webui" onclick="toggleOpt('webui')" title="Auto-start kldload-webui + ttyd + proxy at boot (Doctor / VM / K8s / Install panel)" style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                <div style="font-size:1.5rem;margin-bottom:0.3rem">🖥</div>
+                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Auto-start GUI</div>
+              </div>
+              <!-- Bob AI opt-in card. Mirrors the install-bob checkbox (which
+                   feeds enable_ai → KLDLOAD_ENABLE_AI). firstboot installs
+                   Ollama + builds the bob model when that flag is set on ANY
+                   profile (kldload-firstboot gates on ROLE==ai OR ENABLE_AI),
+                   so this card surfaces Bob without picking the AI profile.
+                   GPU sharing with games is handled post-install by bobctl. -->
+              <div class="opt-card" id="opt-bob" onclick="toggleOpt('bob')" title="Local AI — installs Ollama with a small model bundled on this ISO (no download, works offline). Pull bigger models later from the model picker. Available on any profile. After install, free/load the GPU with bobctl (or the Bob: Gaming Mode menu item)." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                <div style="font-size:1.5rem;margin-bottom:0.3rem">🤖</div>
+                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Ollama</div>
+              </div>
+            </div>
+            <!-- kldload Workstation "lab" extras — shown only on the desktop profile
+                 (selectTarget() toggles #opt-lab-cluster). Each card flips a flag the
+                 distro-aware backend already acts on; default all-off = plain workstation. -->
+            <div id="opt-lab-cluster" style="display:none">
+              <div style="font-size:0.74rem;color:var(--muted);margin:0.5rem 0 0.3rem">Workstation extras (optional — leave all off for a plain workstation) — <a href="#" onclick="selectAllExtras();return false" style="color:var(--accent);text-decoration:none">select all</a></div>
+              <div style="font-size:0.72rem;color:#c9a04a;margin:0 0 0.4rem">⚠ KVM, Kubernetes &amp; Build Images need hardware virtualization (VT-x / AMD-V) — bare metal, or a guest with nested virt enabled. In a plain VM they fall back to slow software emulation.</div>
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.5rem;max-width:760px">
+                <div class="opt-card" id="opt-kvm" onclick="toggleOpt('kvm')" title="KVM hypervisor on ZFS — libvirt + virt-manager + zvol-backed VMs with instant clones (kvm-create/clone). REQUIRES hardware virtualization (Intel VT-x / AMD-V) — bare metal, or a guest with nested virt enabled on the host; otherwise VMs run under slow TCG emulation. Flag: KLDLOAD_ENABLE_KVM." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                  <div style="font-size:1.5rem;margin-bottom:0.3rem">🖥</div>
+                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">KVM</div>
+                </div>
+                <div class="opt-card" id="opt-k8s" onclick="toggleOpt('k8s')" title="Kubernetes on KVM (Cilium + Hubble), built on first boot. Runs on KVM VMs — REQUIRES hardware virtualization (bare metal or nested-virt guest). Flag: KLDLOAD_K8S_BOOTSTRAP." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                  <div style="font-size:1.5rem;margin-bottom:0.3rem">☸</div>
+                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Kubernetes</div>
+                </div>
+                <div class="opt-card" id="opt-ebpf" onclick="toggleOpt('ebpf')" title="Observability / eBPF — Prometheus + Grafana + Loki + BCC/bpftrace exporters. Flag: KLDLOAD_ENABLE_EBPF." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                  <div style="font-size:1.5rem;margin-bottom:0.3rem">📊</div>
+                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Observability</div>
+                </div>
+                <div class="opt-card" id="opt-zxplore" onclick="toggleOpt('zxplore')" title="ZFS Console (zxplore) — keyboard-driven console for the ZFS you're installing: browse datasets/snapshots, replicate, restore files, boot environments. Static TUI on every profile; native GUI + tray icon where a desktop shell ships. Flag: KLDLOAD_ENABLE_ZXPLORE." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                  <div style="font-size:1.5rem;margin-bottom:0.3rem">🗂</div>
+                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">ZFS Console</div>
+                </div>
+                <div class="opt-card" id="opt-images" onclick="toggleOpt('images')" title="Build Images — build the 5 distro cloud-image goldens (klab) on first boot for the VM lab. Several GB download; RHEL golden needs a subscription. Flag: KLDLOAD_BUILD_IMAGES." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                  <div style="font-size:1.5rem;margin-bottom:0.3rem">💿</div>
+                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Build Images</div>
+                </div>
+              </div>
+            </div>
+            <input type="checkbox" id="install-kvm" style="display:none">
+            <input type="checkbox" id="install-images" style="display:none">
+            <input type="checkbox" id="install-nvidia" style="display:none">
+            <input type="checkbox" id="install-wireguard" checked style="display:none">
+            <input type="checkbox" id="install-ebpf" checked style="display:none">
+            <input type="checkbox" id="install-zxplore" checked style="display:none">
+            <input type="checkbox" id="install-zfs-dedup" style="display:none">
+            <input type="checkbox" id="install-k8s" style="display:none">
+            <input type="checkbox" id="install-k8s-bootstrap" style="display:none">
+            <input type="checkbox" id="install-secure-boot" style="display:none" checked>
+            <input type="checkbox" id="install-webui" style="display:none">
+            <!-- Export format -->
+            <div style="margin-top:0.8rem;padding-top:0.8rem;border-top:1px solid var(--border)">
+              <label style="font-size:0.82rem;color:var(--subtle);display:block;margin-bottom:0.3rem">Export image format</label>
+              <select id="install-export-format" onchange="toggleExportFields()" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem">
+                <option value="none">None — install to disk only</option>
+                <option value="qcow2">qcow2 — KVM / Proxmox / OpenStack</option>
+                <option value="raw">raw — dd-ready disk image</option>
+                <option value="vhd">VHD — Azure / Hyper-V</option>
+                <option value="vmdk">VMDK — VMware ESXi / vSphere</option>
+                <option value="ova">OVA — VMware / VirtualBox portable</option>
+              </select>
+              <div style="font-size:0.72rem;color:var(--muted);margin-top:0.3rem">Build a golden image — ZFS on root, WireGuard, eBPF baked in. Use as a Packer base or hypervisor template. Cloud-init ready.</div>
+              <!-- Remote export target (shown when export != none) -->
+              <div id="export-remote-fields" style="display:none;margin-top:0.6rem;padding:0.6rem;background:var(--bg2);border-radius:4px;border:1px solid var(--border)">
+                <label style="font-size:0.78rem;color:var(--subtle);display:block;margin-bottom:0.3rem">SCP export target (optional — leave blank to save locally)</label>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.3rem">
+                  <input type="text" id="export-scp-host" placeholder="host or IP" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
+                  <input type="text" id="export-scp-user" placeholder="user (default: root)" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
+                </div>
+                <input type="text" id="export-scp-path" placeholder="remote path (default: /root/)" style="width:100%;padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem;margin-bottom:0.3rem">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.3rem">
+                  <input type="password" id="export-scp-pass" placeholder="SSH password (if no key)" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
+                  <input type="text" id="export-scp-key" placeholder="SSH key path (optional)" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
+                </div>
+                <div style="font-size:0.68rem;color:var(--muted);margin-top:0.3rem">Provide either a password or SSH key path. Key auth is preferred — set up with: <code>ssh-keygen && ssh-copy-id user@host</code></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Bob AI assistant — compact 2-row layout.
              Row 1: install-bob + GPU status + airgap darksite toggle.
              Row 2: 5 model pills side-by-side with VRAM auto-gating.
@@ -622,7 +748,12 @@ html.kld-app #term-drawer{display:none!important;}
           .bob-pill .sz { color: var(--muted); font-size:0.7rem; margin-left:0.15rem; }
           .bob-pill.disabled { opacity:0.4; cursor:not-allowed; }
         </style>
-        <div class="panel" id="bob-panel" style="margin-bottom:1rem;display:none">
+        <!-- HIDDEN, not deleted. The visible AI control is the opt-bob card in
+               Platform Options; this panel duplicated it, so the installer showed
+               two toggles for one decision (operator, 2026-08-15). Its inputs stay
+               because submit reads them: install-bob feeds enable_ai, bob-darksite
+               feeds the airgap flag, and the tier radio feeds model selection. -->
+          <div class="panel" id="bob-panel" style="margin-bottom:1rem;display:none !important">
           <div class="panel-hdr">🤖 Ollama — Local AI</div>
           <div class="panel-body">
 
@@ -976,126 +1107,6 @@ html.kld-app #term-drawer{display:none!important;}
         </div>
 
         <!-- Platform Options -->
-        <div class="panel" id="platform-panel" style="margin-bottom:1rem">
-          <div class="panel-hdr">⚙ Platform Options</div>
-          <div class="panel-body">
-            <div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
-              ZFS, WireGuard, and eBPF are included on all profiles (except Core). Toggle NVIDIA if you have a GPU. Secure Boot is <strong>on</strong> by default (MOK enrollment on first boot, password <code>kldload</code>) — disable it only if your firmware can't enroll MOK. Web ops console is <strong>off</strong> on server/workstation by default — enable to use the dashboard as an in-place toolkit (Doctor / VM / K8s / Install). Lab profiles (kvm / ai / zfslab / klab) always auto-start it.
-              <br><strong style="color:#c9a04a">⚠ KVM, Kubernetes, and the lab profiles run real VMs through KVM &mdash; they need CPU virtualization (Intel VT-x / AMD-V): bare metal, or a guest with <em>nested virtualization</em> enabled on the host. Without it QEMU falls back to TCG software emulation and VMs are unusably slow. A plain workstation / server or Core (no KVM) runs fine virtualized.</strong>
-            </div>
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.5rem;margin-bottom:0.8rem;max-width:760px">
-              <div class="opt-card" id="opt-nvidia" onclick="toggleOpt('nvidia')" title="Drivers + CUDA + container toolkit" style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                <div style="font-size:1.5rem;margin-bottom:0.3rem">🎮</div>
-                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">NVIDIA GPU</div>
-              </div>
-              <!-- Secure Boot default = ON again as of 2026-07-22.
-                   The 1.1.0 reason for OFF (ZBM SBAT gap: shim 15.8 rejects
-                   ZBM chainload regardless of MOK) is now handled in the
-                   installer instead of by disabling SB: the GRUB default is
-                   FIRMWARE-SB-aware (lib/bootloader.sh) — SB-active firmware
-                   boots the signed direct chain, SB-inactive firmware keeps
-                   ZBM as default while MOK enrollment + module signing still
-                   arm the box for a later SB flip (grub fallback=direct
-                   covers that flip). Uncheck for firmware that can't enroll
-                   MOK or throwaway test installs. -->
-
-              <div class="opt-card" id="opt-secure-boot" onclick="toggleOpt('secure-boot')" title="kldload CA → MOK → signed ZFS kmod + ZBM" style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                <div style="font-size:1.5rem;margin-bottom:0.3rem">🔒</div>
-                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Secure Boot</div>
-              </div>
-              <!-- Web ops console at boot — opt-in.
-                   Lab profiles (kvm/ai/zfslab/klab) auto-enable the webui
-                   regardless of this toggle since the operator booted
-                   kldload FOR the UI. desktop/server profiles install the
-                   binary either way; this toggle decides whether the
-                   service starts at boot. Lets a workstation become a
-                   self-converting host (in-place reinstall to klab,
-                   diagnostics via Doctor, etc.) without forcing the cost
-                   on operators who'd rather keep it cold. -->
-              <div class="opt-card" id="opt-webui" onclick="toggleOpt('webui')" title="Auto-start kldload-webui + ttyd + proxy at boot (Doctor / VM / K8s / Install panel)" style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                <div style="font-size:1.5rem;margin-bottom:0.3rem">🖥</div>
-                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Auto-start GUI</div>
-              </div>
-              <!-- Bob AI opt-in card. Mirrors the install-bob checkbox (which
-                   feeds enable_ai → KLDLOAD_ENABLE_AI). firstboot installs
-                   Ollama + builds the bob model when that flag is set on ANY
-                   profile (kldload-firstboot gates on ROLE==ai OR ENABLE_AI),
-                   so this card surfaces Bob without picking the AI profile.
-                   GPU sharing with games is handled post-install by bobctl. -->
-              <div class="opt-card" id="opt-bob" onclick="toggleOpt('bob')" title="Local AI — installs Ollama with a small model bundled on this ISO (no download, works offline). Pull bigger models later from the model picker. Available on any profile. After install, free/load the GPU with bobctl (or the Bob: Gaming Mode menu item)." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                <div style="font-size:1.5rem;margin-bottom:0.3rem">🤖</div>
-                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Ollama</div>
-              </div>
-            </div>
-            <!-- kldload Workstation "lab" extras — shown only on the desktop profile
-                 (selectTarget() toggles #opt-lab-cluster). Each card flips a flag the
-                 distro-aware backend already acts on; default all-off = plain workstation. -->
-            <div id="opt-lab-cluster" style="display:none">
-              <div style="font-size:0.74rem;color:var(--muted);margin:0.5rem 0 0.3rem">Workstation extras (optional — leave all off for a plain workstation) — <a href="#" onclick="selectAllExtras();return false" style="color:var(--accent);text-decoration:none">select all</a></div>
-              <div style="font-size:0.72rem;color:#c9a04a;margin:0 0 0.4rem">⚠ KVM, Kubernetes &amp; Build Images need hardware virtualization (VT-x / AMD-V) — bare metal, or a guest with nested virt enabled. In a plain VM they fall back to slow software emulation.</div>
-              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.5rem;max-width:760px">
-                <div class="opt-card" id="opt-kvm" onclick="toggleOpt('kvm')" title="KVM hypervisor on ZFS — libvirt + virt-manager + zvol-backed VMs with instant clones (kvm-create/clone). REQUIRES hardware virtualization (Intel VT-x / AMD-V) — bare metal, or a guest with nested virt enabled on the host; otherwise VMs run under slow TCG emulation. Flag: KLDLOAD_ENABLE_KVM." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                  <div style="font-size:1.5rem;margin-bottom:0.3rem">🖥</div>
-                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">KVM</div>
-                </div>
-                <div class="opt-card" id="opt-k8s" onclick="toggleOpt('k8s')" title="Kubernetes on KVM (Cilium + Hubble), built on first boot. Runs on KVM VMs — REQUIRES hardware virtualization (bare metal or nested-virt guest). Flag: KLDLOAD_K8S_BOOTSTRAP." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                  <div style="font-size:1.5rem;margin-bottom:0.3rem">☸</div>
-                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Kubernetes</div>
-                </div>
-                <div class="opt-card" id="opt-ebpf" onclick="toggleOpt('ebpf')" title="Observability / eBPF — Prometheus + Grafana + Loki + BCC/bpftrace exporters. Flag: KLDLOAD_ENABLE_EBPF." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                  <div style="font-size:1.5rem;margin-bottom:0.3rem">📊</div>
-                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Observability</div>
-                </div>
-                <div class="opt-card" id="opt-zxplore" onclick="toggleOpt('zxplore')" title="ZFS Console (zxplore) — keyboard-driven console for the ZFS you're installing: browse datasets/snapshots, replicate, restore files, boot environments. Static TUI on every profile; native GUI + tray icon where a desktop shell ships. Flag: KLDLOAD_ENABLE_ZXPLORE." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                  <div style="font-size:1.5rem;margin-bottom:0.3rem">🗂</div>
-                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">ZFS Console</div>
-                </div>
-                <div class="opt-card" id="opt-images" onclick="toggleOpt('images')" title="Build Images — build the 5 distro cloud-image goldens (klab) on first boot for the VM lab. Several GB download; RHEL golden needs a subscription. Flag: KLDLOAD_BUILD_IMAGES." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                  <div style="font-size:1.5rem;margin-bottom:0.3rem">💿</div>
-                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Build Images</div>
-                </div>
-              </div>
-            </div>
-            <input type="checkbox" id="install-kvm" style="display:none">
-            <input type="checkbox" id="install-images" style="display:none">
-            <input type="checkbox" id="install-nvidia" style="display:none">
-            <input type="checkbox" id="install-wireguard" checked style="display:none">
-            <input type="checkbox" id="install-ebpf" checked style="display:none">
-            <input type="checkbox" id="install-zxplore" checked style="display:none">
-            <input type="checkbox" id="install-zfs-dedup" style="display:none">
-            <input type="checkbox" id="install-k8s" style="display:none">
-            <input type="checkbox" id="install-k8s-bootstrap" style="display:none">
-            <input type="checkbox" id="install-secure-boot" style="display:none" checked>
-            <input type="checkbox" id="install-webui" style="display:none">
-            <!-- Export format -->
-            <div style="margin-top:0.8rem;padding-top:0.8rem;border-top:1px solid var(--border)">
-              <label style="font-size:0.82rem;color:var(--subtle);display:block;margin-bottom:0.3rem">Export image format</label>
-              <select id="install-export-format" onchange="toggleExportFields()" style="width:100%;padding:0.4rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.82rem">
-                <option value="none">None — install to disk only</option>
-                <option value="qcow2">qcow2 — KVM / Proxmox / OpenStack</option>
-                <option value="raw">raw — dd-ready disk image</option>
-                <option value="vhd">VHD — Azure / Hyper-V</option>
-                <option value="vmdk">VMDK — VMware ESXi / vSphere</option>
-                <option value="ova">OVA — VMware / VirtualBox portable</option>
-              </select>
-              <div style="font-size:0.72rem;color:var(--muted);margin-top:0.3rem">Build a golden image — ZFS on root, WireGuard, eBPF baked in. Use as a Packer base or hypervisor template. Cloud-init ready.</div>
-              <!-- Remote export target (shown when export != none) -->
-              <div id="export-remote-fields" style="display:none;margin-top:0.6rem;padding:0.6rem;background:var(--bg2);border-radius:4px;border:1px solid var(--border)">
-                <label style="font-size:0.78rem;color:var(--subtle);display:block;margin-bottom:0.3rem">SCP export target (optional — leave blank to save locally)</label>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.3rem">
-                  <input type="text" id="export-scp-host" placeholder="host or IP" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
-                  <input type="text" id="export-scp-user" placeholder="user (default: root)" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
-                </div>
-                <input type="text" id="export-scp-path" placeholder="remote path (default: /root/)" style="width:100%;padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem;margin-bottom:0.3rem">
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.3rem">
-                  <input type="password" id="export-scp-pass" placeholder="SSH password (if no key)" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
-                  <input type="text" id="export-scp-key" placeholder="SSH key path (optional)" style="padding:0.3rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.78rem">
-                </div>
-                <div style="font-size:0.68rem;color:var(--muted);margin-top:0.3rem">Provide either a password or SSH key path. Key auth is preferred — set up with: <code>ssh-keygen && ssh-copy-id user@host</code></div>
-              </div>
-            </div>
-          </div>
-        </div>
 
         <div id="install-err" style="color:var(--danger);font-size:0.82rem;margin-bottom:0.75rem;display:none"></div>
         <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap">
