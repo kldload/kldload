@@ -196,6 +196,51 @@ def check_virbr0():
 
 # ── Kubernetes ────────────────────────────────────────────────────────────────
 
+def _powered_off_nodes():
+    """Node names whose backing VM is deliberately powered down.
+
+    kldload BUILDS a cluster with 3 control planes and 3 workers and RUNS it
+    with 2 of each: quiesce_idle_vms() powers the rest off once the build is
+    done, because two of a three-member etcd is still a strict majority and a
+    desktop that is also a hypervisor should not carry six idle VMs. See the
+    quiesce block in kldload-autodeploy.
+
+    Without this, every quiesced machine reports four permanent failures --
+    nodes, cilium health, cilium agents, metallb -- all saying 4/6 when 4/6 is
+    the intended state. An audit whose loudest items are wrong by design
+    teaches the operator to ignore the red, which costs more than the checks
+    are worth (observed on .145, 2026-08-15).
+
+    Returns: a set of node names known to be off. Empty when virsh is absent
+    or unreadable -- in which case the checks behave exactly as before.
+    """
+    if not _has("virsh"):
+        return set()
+    rc, out, _ = _run(["virsh", "list", "--all", "--name"], timeout=10)
+    if rc != 0:
+        return set()
+    all_vms = {n.strip() for n in out.splitlines() if n.strip()}
+    rc, out, _ = _run(["virsh", "list", "--state-running", "--name"], timeout=10)
+    if rc != 0:
+        return set()
+    running = {n.strip() for n in out.splitlines() if n.strip()}
+    return all_vms - running
+
+
+def _node_expectation(total):
+    """(expected_ready, note) for a cluster of `total` registered nodes."""
+    off = _powered_off_nodes()
+    rc, out, _ = _run(["kubectl", "get", "nodes", "-o=jsonpath={.items[*].metadata.name}"],
+                      timeout=10)
+    if rc != 0 or not out:
+        return total, ""
+    names = out.split()
+    off_nodes = [n for n in names if n in off]
+    if not off_nodes:
+        return total, ""
+    return total - len(off_nodes), " (%d powered down by quiesce: %s)" % (
+        len(off_nodes), ", ".join(sorted(off_nodes)))
+
 def check_k8s_nodes():
     if not _has("kubectl"):
         return _result("kubernetes", "nodes ready", "skip",
@@ -213,12 +258,13 @@ def check_k8s_nodes():
     if total == 0:
         return _result("kubernetes", "nodes ready", "skip",
                        "nodes registered", "no nodes")
-    if ready == total:
+    want, note = _node_expectation(total)
+    if ready >= want:
         return _result("kubernetes", "nodes ready", "ok",
-                       f"{total}/{total} Ready", f"{ready}/{total} Ready",
+                       f"{want}/{total} Ready{note}", f"{ready}/{total} Ready",
                        severity="critical")
     return _result("kubernetes", "nodes ready", "fail",
-                   f"{total}/{total} Ready", f"{ready}/{total} Ready",
+                   f"{want}/{total} Ready{note}", f"{ready}/{total} Ready",
                    severity="critical",
                    remediation="kubectl get nodes -o wide; kube-status")
 
@@ -232,10 +278,13 @@ def check_cilium():
     ready, total = _pods_ready("kube-system", "k8s-app=cilium")
     if total == 0:
         return _result("kubernetes", "cilium healthy", "skip", "", "no cilium pods")
-    ok = ready == total
+    # One agent per node: a node powered down by quiesce has no pod to be
+    # Ready, so expect the running-node count, not the registered-node count.
+    want, note = _node_expectation(total)
+    ok = ready >= want
     return _result("kubernetes", "cilium healthy",
                    "ok" if ok else "fail",
-                   f"{total}/{total} daemon Ready",
+                   f"{want}/{total} daemon Ready{note}",
                    f"{ready}/{total} daemon Ready",
                    severity="critical" if not ok else "medium",
                    remediation="kubectl -n kube-system get po -l k8s-app=cilium")
@@ -313,9 +362,10 @@ def check_cilium_pods():
     if total == 0:
         return _result("k8s-stack", "cilium agents", "skip",
                        "Cilium DaemonSet pods Ready", "no Cilium pods — is kube-cluster bootstrapped?")
-    ok = ready == total
+    want, note = _node_expectation(total)  # see check_cilium(): one per node
+    ok = ready >= want
     return _result("k8s-stack", "cilium agents", "ok" if ok else "fail",
-                   f"{total}/{total} Ready", f"{ready}/{total} Ready",
+                   f"{want}/{total} Ready{note}", f"{ready}/{total} Ready",
                    severity="critical" if not ok else "medium",
                    remediation="kubectl -n kube-system get po -l k8s-app=cilium; cilium status --verbose")
 
