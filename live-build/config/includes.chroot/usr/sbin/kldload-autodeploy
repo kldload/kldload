@@ -864,13 +864,39 @@ if [[ "${WANT[klab]}" == "1" ]]; then
         if [[ -f "${STATE_DIR}/klab-ztest-ready" ]]; then
             log "[klab] ztest already marked ready — skipping"
         else
-            log "[klab] running klab golden-ztest all (ZFS test-lab lineage, ~60 min)"
-            if klab golden-ztest all >>/var/log/kldload/klab-firstboot.log 2>&1; then
+            # Build the distros ONE AT A TIME instead of `golden-ztest all`.
+            #
+            # WHY: `all` is a single opaque call that takes about an hour, and
+            # nothing published progress until it returned — so every progress
+            # surface (the build monitor checklist, the web console, vmxplore)
+            # honestly reported nothing built for the whole run and then jumped
+            # to done. Operator on .131 watched centos finish and asked why
+            # nothing registered; there was simply no per-distro signal to read.
+            #
+            # A second win: one distro failing no longer takes the other four
+            # with it. Each is independent, so a broken mirror for one release
+            # costs that release only, and the log names which.
+            _zt_distros=(centos rocky fedora debian ubuntu)
+            _zt_total="${#_zt_distros[@]}"
+            _zt_ok=0
+            _zt_failed=()
+            log "[klab] building ${_zt_total} ztest goldens, one at a time (~60 min total)"
+            for _zt_d in "${_zt_distros[@]}"; do
+                log "[klab] ztest ${_zt_d} — starting ($((_zt_ok + ${#_zt_failed[@]} + 1))/${_zt_total})"
+                if klab golden-ztest "$_zt_d" >>/var/log/kldload/klab-firstboot.log 2>&1; then
+                    _zt_ok=$((_zt_ok + 1))
+                    log "[klab] ztest ${_zt_d} — done (${_zt_ok}/${_zt_total} built)"
+                else
+                    _zt_failed+=("$_zt_d")
+                    log "[klab] ztest ${_zt_d} — FAILED (continuing with the rest)"
+                fi
+            done
+            if ((${#_zt_failed[@]} == 0)); then
                 mark "klab-ztest"
-                log "[klab] ztest goldens complete"
+                log "[klab] ztest goldens complete (${_zt_ok}/${_zt_total})"
             else
                 phase_state "klab-ztest-goldens" failed
-                log "[klab] ztest FAILED — see /var/log/kldload/klab-firstboot.log (non-fatal)"
+                log "[klab] ztest finished ${_zt_ok}/${_zt_total}; failed: ${_zt_failed[*]} — see /var/log/kldload/klab-firstboot.log (non-fatal)"
             fi
         fi
     else
