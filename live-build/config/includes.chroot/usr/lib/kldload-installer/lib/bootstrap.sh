@@ -703,6 +703,34 @@ k_install_target_packages() {
         novnc websockify
     )
 
+    # Steam, natively — not Flatpak.
+    #
+    # Debian ships steam-installer in trixie/contrib (contrib is already in our
+    # sources.list), so the apt distros get the SAME treatment Fedora gets from
+    # RPM Fusion: a native package. That matters beyond tidiness — the Flatpak
+    # sandbox is measurably worse for anti-cheat, controller access and reaching
+    # game libraries on other filesystems, which is why kldload-firstboot has
+    # always preferred native and treated Flathub as the fallback.
+    #
+    # Steam is 32-bit, so i386 multiarch has to be enabled BEFORE `apt-get
+    # update` runs below, or steam-installer's dependencies cannot resolve.
+    #
+    # HISTORY: 2026-08-15, .131 — Debian desktops got no Steam at all. The
+    # Flathub fallback in firstboot is gated on `command -v flatpak`, and
+    # flatpak was only ever listed in _dnf_pkgs (the RPM array), so on Debian
+    # the gate silently failed and firstboot.log said nothing whatsoever.
+    #
+    # NOTE: steam-installer is a bootstrap — the Steam client and its runtime
+    # (several hundred MB) download on FIRST LAUNCH. Steam therefore cannot be
+    # made darksite; baking the .deb in buys a launcher that still needs the
+    # network before it can do anything.
+    if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
+        k_log_to "$log" "Enabling i386 multiarch (steam-installer is 32-bit)"
+        k_in_chroot "${target}" dpkg --add-architecture i386 2>&1 | tee -a "$log" ||
+            k_log_to "$log" "WARNING: could not enable i386 — steam-installer will not resolve"
+        pkgs+=(steam-installer)
+    fi
+
     if [[ "${KLDLOAD_STORAGE_MODE:-standard}" == "zfs" ]]; then
         # zfs-dkms must be explicit so DKMS builds (and signs) the kernel module;
         # zfsutils-linux alone may pull a pre-built binary that bypasses DKMS.
