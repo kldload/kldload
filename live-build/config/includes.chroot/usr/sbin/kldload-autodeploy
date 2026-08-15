@@ -804,7 +804,12 @@ if [[ "${WANT[klab]}" == "1" ]]; then
     # the same zvols (caught 2026-05-12: TWO klab-golden-centos process trees
     # at the same time during firstboot, each clobbering the other's zvol).
     # Wait for klab-firstboot.service to complete instead.
-    if [[ "${KLAB_GOLDEN_KIND}" == "lean" ]]; then
+    # "Build all images" means all three lineages, whatever the profile said.
+    # KLAB_GOLDEN_KIND is a per-profile PREFERENCE (zfslab wants only the ztest
+    # lineage); Build Images is an explicit operator request that overrides it.
+    # Without this, a zfslab kickstart with Build Images ticked silently skipped
+    # the lean goldens — "all" that quietly meant "some".
+    if [[ "${KLAB_GOLDEN_KIND}" == "lean" || "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]]; then
         phase "klab-goldens"
         if [[ -f "${STATE_DIR}/klab-ready" ]]; then
             log "[klab] blue-green already marked ready — skipping"
