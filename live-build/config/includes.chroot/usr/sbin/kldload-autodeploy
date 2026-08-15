@@ -140,15 +140,11 @@ done
 # emits KLDLOAD_TEMPLATE in addition for tile-level dispatch.)
 #
 #   kvm    — libvirt + ZFS + OS lean goldens (5 distros). NO K8s.
-#   k8s    — HA K8s (3 CPs + 3 workers) + full obs stack. NO goldens.
-#   klab   — kvm + HA K8s (3 CPs + 3 workers) + obs.
+#   k8s    — lean K8s (1 CP + 3 workers locked) + full obs stack. NO goldens.
+#   klab   — kvm + K8s (1 CP + 0 workers, scalable post-install) + obs.
 #            "Everything sandbox" — all goldens except ZFS-test variant.
 #   zfslab — K8s (1 CP + 0 workers, fixed) + obs + ZFS-test goldens.
 #            No OS lean goldens (host budget for ZFS test runs).
-#
-# Control planes are 3 on the cluster templates so etcd can lose one and keep
-# quorum. Until 2026-08-15 autodeploy passed only --workers, so every install
-# silently took kube-cluster's 1-CP default regardless of the tile.
 #
 # Legacy compat: devops + ai TEMPLATE values map to klab. Pre-1.1.0 installs
 # only have KLDLOAD_PROFILE + the ENABLE_* / *_MODE flags; we infer the
@@ -211,30 +207,6 @@ zfslab) K8S_WORKERS_DEFAULT=0 ;; # intentional — budget for ZFS test VMs
 esac
 K8S_WORKERS="${KLDLOAD_K8S_WORKERS:-$K8S_WORKERS_DEFAULT}"
 
-# Control planes — HA by default on the cluster templates.
-#
-# WHY THIS EXISTS AT ALL: autodeploy only ever passed --workers, so the control
-# plane count fell through to kube-cluster's default of 1. Every install landed
-# 1 CP + 3 workers no matter what the tile promised, and the only 3-CP cluster
-# we ever had was scaled by hand afterwards (.131 came up 1+3, 2026-08-15).
-#
-# WHY 3 AND NOT 2: etcd needs a strict majority, (n/2)+1. Three members tolerate
-# one failure; TWO tolerate none — a 2-CP cluster is strictly worse than a 1-CP
-# one and costs double. Never default to an even number here.
-#
-# zfslab keeps a single CP on purpose: its host budget belongs to ZFS test VMs,
-# and it runs 0 workers for the same reason.
-case "$TEMPLATE" in
-k8s | klab | devops | ai) K8S_CPS_DEFAULT=3 ;;
-zfslab) K8S_CPS_DEFAULT=1 ;;
-*)
-    # Explicit Kubernetes tile on another profile gets the same HA cluster the
-    # k8s template would have given it.
-    [[ "${KLDLOAD_K8S_BOOTSTRAP:-0}" == "1" ]] && K8S_CPS_DEFAULT=3 || K8S_CPS_DEFAULT=1
-    ;;
-esac
-K8S_CPS="${KLDLOAD_K8S_CPS:-$K8S_CPS_DEFAULT}"
-
 # klab golden flavor — zfslab template builds ZFS-test goldens (with
 # zfs-tests.sh + ksh + vdev images); everything else builds lean OS
 # goldens. KLAB_GOLDEN_KIND used by phase 3 below to pick the right
@@ -246,7 +218,7 @@ if [[ "$TEMPLATE" == "zfslab" ||
     KLAB_GOLDEN_KIND="ztest"
 fi
 
-log "Template: ${TEMPLATE:-<none>} → k8s=${WANT[k8s]}(cps=${K8S_CPS} workers=${K8S_WORKERS}) ai=${WANT[ai]} klab=${WANT[klab]}(${KLAB_GOLDEN_KIND})"
+log "Template: ${TEMPLATE:-<none>} → k8s=${WANT[k8s]}(workers=${K8S_WORKERS}) ai=${WANT[ai]} klab=${WANT[klab]}(${KLAB_GOLDEN_KIND})"
 
 # Early-out if nothing was requested — avoids a green "ready" banner on a
 # plain install that didn't ask for any of these. The ConditionPathExists
@@ -521,13 +493,7 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         # are already visible in /api/tags when serve comes up.
         if [[ "$_darksite_has_model" == "1" ]]; then
             log "[ai] rehydrating /srv/ollama/models/ from darksite (air-gap path)"
-            # rsync when present, cp -a otherwise — rsync is absent on Debian
-            # targets and this is the air-gap path, so it must not need network.
-            if command -v rsync >/dev/null 2>&1; then
-                rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ >>"$LOG_FILE" 2>&1
-            else
-                cp -a /root/darksite/ollama/models/. /srv/ollama/models/ >>"$LOG_FILE" 2>&1
-            fi &&
+            rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ >>"$LOG_FILE" 2>&1 &&
                 log "[ai] darksite rehydrate ok" ||
                 log "[ai] WARNING: darksite rehydrate failed — ollama pull will need internet"
             chown -R ollama:ollama /srv/ollama 2>/dev/null || true
@@ -696,9 +662,8 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
         # Bug seen 2026-05-05 on fiend: pre-1.1.0 auto-scaled cluster pods
         # to a third of host RAM each, hitting 30 vCPU / 51 GB on a 24-core
         # / 63 GB host. Fixed defaults in kube-cluster keep this bounded.
-        log "[k8s] running kube-cluster bootstrap --control-planes ${K8S_CPS} --workers ${K8S_WORKERS}"
-        if kube-cluster bootstrap --control-planes "${K8S_CPS}" --workers "${K8S_WORKERS}" \
-            >>/var/log/kldload/kube-bootstrap.log 2>&1; then
+        log "[k8s] running kube-cluster bootstrap --workers ${K8S_WORKERS}"
+        if kube-cluster bootstrap --workers "${K8S_WORKERS}" >>/var/log/kldload/kube-bootstrap.log 2>&1; then
             mark "k8s"
             log "[k8s] complete"
 
