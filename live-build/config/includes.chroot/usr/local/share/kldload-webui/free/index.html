@@ -574,26 +574,16 @@ html.kld-app #term-drawer{display:none!important;}
                 <div class="tc-name">Kubernetes</div>
                 <div class="tc-sub">Auto 4-node cluster</div>
               </div>
-              <div class="target-card" data-role="devops" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
-                <div class="tc-icon">🔬</div>
-                <div class="tc-name">klab</div>
-                <div class="tc-sub">Everything wired up</div>
-              </div>
-              <div class="target-card" data-role="zfslab" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
-                <div class="tc-icon">🧪</div>
-                <div class="tc-name">OpenZFS Lab</div>
-                <div class="tc-sub">For OpenZFS devs</div>
-              </div>
-              <div class="target-card" data-role="storage" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
-                <div class="tc-icon">🗃</div>
-                <div class="tc-name">Storage</div>
-                <div class="tc-sub">ZFS NFS + iSCSI</div>
-              </div>
-              <div class="target-card" data-role="master" onclick="selectTarget(this)" onmouseenter="hoverTarget(this)" onmouseleave="leaveTarget()">
-                <div class="tc-icon">★</div>
-                <div class="tc-name">Master</div>
-                <div class="tc-sub">Central Command</div>
-              </div>
+              <!-- Five profiles, deliberately. klab / OpenZFS Lab / Storage /
+                   Master were removed: the first two are now CAPABILITIES you
+                   add to any profile (Build Images builds both lineages, and
+                   kldload-component installs them after the fact), not whole
+                   machine roles, and a profile that only differs by "which lab
+                   got prebuilt" forced an irreversible choice at install time
+                   for something that takes one command later. Storage and
+                   Master had no backend profile at all — profiles.sh
+                   implements desktop/server/core/kvm/ai only, so picking them
+                   silently fell through to a default. -->
             </div>
             <div id="role-summary" style="margin-top:0.7rem;padding:0.8rem 1rem;background:var(--surface2);border:1px solid var(--border);border-radius:6px;min-height:7rem">
               <!-- populated by renderRoleDesc() on page load + hover/click -->
@@ -649,19 +639,19 @@ html.kld-app #term-drawer{display:none!important;}
               </label>
             </div>
 
-            <!-- Row 2: Default qwen3:14b for ~10 GB VRAM consumer GPUs. Single Larger option for bigger boxes. All else via `ollama pull` post-install. -->
-            <div id="bob-model-panel" style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center">
-              <span style="font-size:0.73rem;color:var(--muted);margin-right:0.2rem">Model:</span>
-              <label class="bob-pill selected" data-tier="recommended" data-model="qwen3:14b" data-vram-gb="10" title="qwen3:14b — ~9 GB, fits 10 GB VRAM (RTX 3080 / 3060&nbsp;12G / 4070 / A4000). First-class tool calling, hybrid /think + /no_think.">
-                <input type="radio" name="bob-model" value="recommended" checked> Default<span class="sz">9G</span>
-              </label>
-              <label class="bob-pill" data-tier="large" data-model="qwen3:30b-a3b" data-vram-gb="22" title="qwen3:30b-a3b — ~19 GB MoE (3B active per token). 22+ GB VRAM or CPU spill.">
-                <input type="radio" name="bob-model" value="large"> Larger<span class="sz">19G</span>
-              </label>
+            <!-- Model picker removed. The ISO bakes exactly ONE chat model
+                 (qwen3:14b) plus nomic-embed-text for embeddings, so a picker
+                 offering a "Larger" 19 GB option was a choice the medium could
+                 not honour: selecting it on an air-gapped install produced a
+                 box with no working model at all. The tier radios are kept as
+                 a hidden no-op so old kickstarts that set them still parse.
+                 Any other model is one `ollama pull` away once online. -->
+            <div id="bob-model-panel" style="display:none">
+              <input type="radio" name="bob-model" value="recommended" checked>
             </div>
 
             <div style="font-size:0.7rem;color:var(--muted);padding:0.5rem 0.7rem;background:var(--surface2);border-radius:4px;line-height:1.5">
-              Default is <code>qwen3:14b</code> &mdash; fits ~10 GB VRAM (RTX 3080 / 3060&nbsp;12G / 4070 / A4000-class). Switch to any other Ollama model post-install: <code>ollama pull &lt;model&gt;</code>.
+              Ships <code>qwen3:14b</code> (~9&nbsp;GB) and <code>nomic-embed-text</code>, both baked into the install &mdash; no download, works air-gapped. Fits ~10&nbsp;GB VRAM (RTX 3080 / 3060&nbsp;12G / 4070 / A4000-class); runs on CPU otherwise. Add any other model later with <code>ollama pull &lt;model&gt;</code>.
             </div>
           </div>
         </div>
@@ -3348,6 +3338,17 @@ html.kld-app #term-drawer{display:none!important;}
 </div><!-- /#app -->
 
 <script>
+// ── Which profiles may install the local AI ─────────────────────────────────
+// ONE definition, referenced everywhere. This rule previously existed as two
+// separate array literals — selectTarget() and the GPU-detect callback — and
+// they drifted: fixing one still left a detected GPU auto-ticking AI on a
+// Kubernetes node. A rule duplicated is a rule half-applied.
+//
+// Desktop only: AI is a workstation capability. A server, core, KVM host or
+// cluster node has nobody sitting at it and should not spend ~9 GB of disk
+// and GPU memory on a chat model.
+window.BOB_ELIGIBLE_ROLES = ['desktop'];
+
 // ── Command Palette + Action Registry ───────────────────────────────────────
 // The UI should be equally usable by mouse and keyboard. Every operator
 // action that's worth a button is also worth a typed command. The registry
@@ -4073,7 +4074,7 @@ function handle(msg) {
       // If a Bob-eligible profile is currently selected, re-sync the checkbox
       // to the auto-detect default (user can still override manually after).
       const _selected = document.querySelector('#target-grid .target-card.selected');
-      if (_selected && ['devops','k8s','kvm','zfslab'].includes(_selected.dataset.role)) {
+      if (_selected && window.BOB_ELIGIBLE_ROLES.includes(_selected.dataset.role)) {
         const bobCb = document.getElementById('install-bob');
         const aiCb = document.getElementById('install-ai');
         if (bobCb && !bobCb.dataset.userTouched) {
@@ -5242,7 +5243,8 @@ function selectTarget(el) {
   const aiCb = document.getElementById('install-ai');
   const bobCb = document.getElementById('install-bob');
   const bobPanel = document.getElementById('bob-panel');
-  const bobEligibleRoles = ['devops', 'k8s', 'kvm', 'zfslab'];
+  // Shared with the GPU-detect path — see window.BOB_ELIGIBLE_ROLES.
+  const bobEligibleRoles = window.BOB_ELIGIBLE_ROLES;
   const bobEligible = bobEligibleRoles.includes(el.dataset.role);
   if (bobPanel) bobPanel.style.display = bobEligible ? 'block' : 'none';
   // kldload Workstation "lab" extras (KVM/K8s/eBPF/Build-Images) — desktop profile only.
@@ -5259,12 +5261,16 @@ function selectTarget(el) {
       bobCb.checked = false;
     }
   }
-  // Keep the always-visible "Bob AI" opt-card visual in sync with install-bob,
-  // whichever path (profile logic or the card) last changed it.
+  // The Ollama opt-card follows the same desktop-only rule as the panel above.
+  // It used to be visible on EVERY profile, so a server or Kubernetes install
+  // could tick it and pull ~9 GB of model onto a box no one sits at.
   var _bobCard = document.getElementById('opt-bob');
-  if (_bobCard && bobCb) {
-    _bobCard.style.borderColor = bobCb.checked ? 'var(--accent)' : 'var(--border)';
-    _bobCard.style.background = bobCb.checked ? 'rgba(0,184,217,0.08)' : 'transparent';
+  if (_bobCard) {
+    _bobCard.style.display = bobEligible ? '' : 'none';
+    if (bobCb) {
+      _bobCard.style.borderColor = bobCb.checked ? 'var(--accent)' : 'var(--border)';
+      _bobCard.style.background = bobCb.checked ? 'rgba(0,184,217,0.08)' : 'transparent';
+    }
   }
   // Keep the legacy install-ai hidden checkbox in sync so submit payloads
   // that still reference it (and the summary badge code) behave consistently.
