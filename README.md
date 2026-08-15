@@ -295,7 +295,7 @@ No cloud, no telemetry, no API key &mdash; the models and the index live on the 
 ntfs-3g/exfatprogs, `fio`, `stress-ng`, memtest86+ &mdash; the install USB doubles
 as the recovery USB.
 
-### How the seven distros get built
+### How a distro gets built
 The installer bootstraps each target with **that distro's own tool** &mdash;
 [debootstrap](https://wiki.debian.org/Debootstrap) (Debian/Ubuntu),
 `dnf --installroot` (Fedora/CentOS Stream/Rocky/RHEL),
@@ -382,7 +382,8 @@ upstream. It was folded in on 2026-08-10 as a read-only estate lens.
 | `smoke-build` | Static checks on the built ISO (size, freshness, content) |
 | `zfs-pin` | Derive the kernel pin from the newest OpenZFS release's declared `Linux-Maximum` and report drift against `build-iso.sh` (`--check` for CI, `--json` for scripts) |
 | `smoke-test <distro> <profile>` | Full install lifecycle in KVM, then smoke-test the installed target |
-| `build-debian-darksite` / `build-ubuntu-darksite` | Build / refresh the APT offline mirrors |
+| `build-debian-darksite` | Build / refresh the Debian APT offline mirror |
+| `build-ubuntu-darksite` | Ubuntu mirror &mdash; retired 2026-08, opt in with `KLDLOAD_INCLUDE_UBUNTU_DARKSITE=1` |
 | `build-fedora-darksite` | Build / refresh the RPM offline mirror |
 | `build-ollama-darksite` | Cache the Bob/Ollama model bundle |
 | `kvm-deploy` / `kvm-deploy-bob` | Deploy the ISO to local KVM via virt-install |
