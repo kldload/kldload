@@ -57,6 +57,15 @@ import (
 //go:embed assets/kldload-buildmon.svg
 var iconSVG []byte
 
+// iconPNG is the SAME drawing, rasterised. Fyne hands the app icon to the
+// window manager as _NET_WM_ICON, which is a bitmap property — given only an
+// SVG it sets nothing at all, which is why the dock fell back to Fyne's own
+// glyph while the menu entry (which reads Icon= from the .desktop) showed the
+// right one. Verified empty on a real session, 2026-08-15.
+//
+//go:embed assets/kldload-buildmon.png
+var iconPNG []byte
+
 // Palette. Deliberately few colours: one per meaning, so a glance at the
 // banner is enough and nothing else on screen competes with it.
 var (
@@ -110,8 +119,20 @@ func RunGUI(opt GatherOpts) error {
 	// nothing dependable to match — which shows up as a generic icon and a
 	// duplicate dock entry.
 	a := app.NewWithID("com.kldload.buildmon")
-	a.SetIcon(fyne.NewStaticResource("kldload-buildmon.svg", iconSVG))
-	w := a.NewWindow("kldload — System Build & Audit")
+	a.SetIcon(fyne.NewStaticResource("kldload-buildmon.png", iconPNG))
+	// WINDOW TITLE = WM_CLASS. Fyne derives the X11 class from the title, not
+	// from the binary name or the app ID -- measured on a live session:
+	//
+	//   WM_CLASS = "kldload — System Build & Audit"
+	//
+	// while the .desktop said StartupWMClass=kldload-buildmon. They did not
+	// match, so the shell could not associate the window with its launcher,
+	// never read Icon= from it, and drew its own fallback in the dock.
+	//
+	// Kept deliberately plain and ASCII: this exact string is duplicated in
+	// kldload-buildmon.desktop's StartupWMClass and the two must stay
+	// byte-identical, so an em dash is a liability for no gain.
+	w := a.NewWindow(windowTitle)
 	w.Resize(fyne.NewSize(980, 720))
 
 	g := &gui{win: w, opt: opt}

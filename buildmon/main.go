@@ -51,6 +51,12 @@ var buildNum = "0"
 
 const version = "0.1.0"
 
+// windowTitle is the GUI window's title AND, because Fyne derives the X11
+// class from the title, its WM_CLASS. It MUST stay byte-identical to
+// StartupWMClass in kldload-buildmon.desktop or the shell cannot match the
+// window to its launcher and draws a fallback icon in the dock.
+const windowTitle = "kldload Build & Audit"
+
 func main() {
 	var (
 		stateDir = flag.String("state-dir", DefaultStateDir, "where the build records its phases")
