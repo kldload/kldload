@@ -597,8 +597,10 @@ EOFSTAB
     # default brings the boot-env UX back for the 95% case without breaking
     # SB users' chain.
     #
-    # timeout=0 + timeout_style=hidden = silent boot to default. ESC during
-    # boot interrupts and exposes the full menu (ZBM + direct + rescue).
+    # A visible 5s menu (timeout=5, timeout_style=menu) lists ZBM, direct and
+    # rescue; without a keypress the default boots exactly as before. This was
+    # a hidden zero-timeout menu reachable only by pressing ESC, which meant
+    # in practice it was not reachable at all.
     # The default keys on the operator's Secure Boot INTENT, never on the
     # firmware SB state at install time. The install-then-enable-SB flow
     # (install with SB intent, then enable SB + enroll MOK in firmware
@@ -684,8 +686,19 @@ EOFSTAB
 # fallback=direct: if the zbm entry fails (e.g. the operator enables SB in
 # firmware AFTER install, and shim then rejects ZBM's chainload), GRUB falls
 # through to the signed direct entry instead of stalling at a hidden menu.
-set timeout=0
-set timeout_style=hidden
+# A VISIBLE five-second menu, not a hidden zero.
+#
+# It used to be timeout=0 + timeout_style=hidden, with ESC as the documented
+# way to reach ZBM and rescue. In practice nobody finds a key you have to know
+# about and press inside a window with no prompt: the operator's report was
+# simply "didn't see any zfsbm" (2026-08-15). Five seconds is long enough to
+# read three entries and choose one, short enough that an unattended reboot in
+# a cluster is not meaningfully slower.
+#
+# The DEFAULT is unchanged, so behaviour without a keypress is identical --
+# this only makes the choice discoverable.
+set timeout=5
+set timeout_style=menu
 set default=${_grub_default}
 set fallback=direct
 
