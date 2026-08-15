@@ -32,10 +32,57 @@ set -Eeuo pipefail
 
 readonly ALL_READY=/var/lib/kldload/all-ready
 readonly MONITOR=/usr/local/bin/kldload-build-monitor
+readonly GUI=/usr/local/bin/kldload-buildmon
 
 # Nothing to report on a finished machine — and no window either.
 [[ -f "$ALL_READY" ]] && exit 0
+
+# ── The GUI is the real one; the terminal monitor is the fallback ────────────
+#
+# kldload-buildmon shows the same build state plus the install audit, the
+# health checks and the component list, in a window that cannot corrupt itself
+# the way two terminal repainters did on 2026-08-15. It asks for the
+# foreground once on its first paint, because during an install this window's
+# job is telling the operator NOT to reboot — which it cannot do from behind a
+# browser.
+#
+# Conditions, all of which have to hold:
+#   - the binary exists (a headless rootfs ships only the static one);
+#   - there is a display to open on. WAYLAND_DISPLAY or DISPLAY, because this
+#     runs from XDG autostart inside a session, and a GUI launched without
+#     either just fails with a message nobody sees.
+if [[ -x "$GUI" ]] && [[ -n "${WAYLAND_DISPLAY:-}" || -n "${DISPLAY:-}" ]]; then
+    if pgrep -f "[k]ldload-buildmon$" >/dev/null 2>&1; then
+        exit 0 # already up — see the single-instance note below
+    fi
+    setsid "$GUI" >/dev/null 2>&1 &
+    exit 0
+fi
+
+# No GUI available: fall back to the terminal monitor below.
 [[ -x "$MONITOR" ]] || exit 0
+
+# ── One monitor, ever ────────────────────────────────────────────────────────
+#
+# The monitor paints by homing the cursor and overwriting the previous frame in
+# place (3b29f22c, to stop the screen flashing on every refresh). That design
+# has exactly one requirement: it must be the ONLY thing writing to that
+# screen. Two instances interleave into unreadable mush — duplicated Phase /
+# Elapsed / Progress blocks carrying different numbers, half-overwritten words
+# ("doneing", "done12s"), and a banner whose block capitals overlap into a
+# smear. It does not recover, because neither writer ever clears.
+#
+# HISTORY: 2026-08-15, .145. A screenshot showed one pane being painted by two
+# monitors whose elapsed times were 23 minutes apart — a second one had been
+# started while the first was still running. Nothing prevented it: this wrapper
+# launched a monitor every time it was invoked, and XDG autostart can fire more
+# than once (a second session, a re-login, a manual run).
+#
+# pgrep -f against the interpreter line, because the script runs as
+# `bash /usr/local/bin/kldload-build-monitor` and a bare -x match misses it.
+if pgrep -f "[k]ldload-build-monitor$" >/dev/null 2>&1; then
+    exit 0
+fi
 
 # find_term — echo a command line that opens $MONITOR in a NORMAL WINDOW.
 #

@@ -612,6 +612,76 @@ if [[ "$EDITION" != "core" ]]; then
     rm -f /tmp/wgx-bin
     rm -rf /tmp/wgx-src
 
+    # ── kldload-buildmon — build progress and install audit, from in-tree
+    # buildmon/. In-tree for the same reason wg/ is: it reads
+    # /var/lib/kldload/phases, drives kldload-component and parses
+    # /var/log/installer, so it is meaningless off a kldload box and there is
+    # no upstream that would want it.
+    #
+    # WHY IT SHIPS AT ALL: the post-install build runs for up to six hours
+    # after the desktop appears, and the display that used to say so was a
+    # bash script repainting a terminal in place. On 2026-08-15 a screenshot
+    # from .145 showed one pane painted by TWO of them 23 minutes apart —
+    # duplicated Phase/Elapsed/Progress blocks, half-overwritten words, a
+    # banner smeared into itself. The second job is bigger: `buildmon audit`
+    # answers "did this install actually work", which is the question nobody
+    # could answer on the morning an install shipped with no kernel because
+    # one `E: Unable to locate package` line sat in a 387 KB log.
+    #
+    # TWO binaries, like the sisters: the static one goes everywhere
+    # (headless servers included, where `buildmon audit` is the point), the
+    # GUI only where the rootfs can actually link GL.
+    _bm_src="/build/buildmon"
+    [[ -f "${_bm_src}/main.go" ]] ||
+        die "FATAL: buildmon/ missing from the repo — the build monitor lives in-tree."
+    log "Building kldload-buildmon from in-tree buildmon/ ..."
+    rm -rf /tmp/bm-src
+    cp -a "$_bm_src" /tmp/bm-src
+    # A developer's working tree carries build output and an exec-capable
+    # TMPDIR; neither may reach the ISO.
+    rm -rf /tmp/bm-src/.testtmp /tmp/bm-src/kldload-buildmon /tmp/bm-src/kldload-buildmon-tui
+    _bm_commit="$(git -C /build rev-parse HEAD 2>/dev/null || echo unknown)"
+    log "buildmon commit (kldload HEAD): ${_bm_commit}"
+    printf '%s\n' "$_bm_commit" >"${ROOTFS}/etc/kldload/buildmon-commit"
+
+    # Static first: this one is not optional on any profile.
+    if (cd /tmp/bm-src &&
+        HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+            CGO_ENABLED=0 go build -trimpath -ldflags "-X main.buildNum=${_bm_commit:0:8}" \
+            -o /tmp/bm-tui .) >>"$LOG_FILE" 2>&1; then
+        install -Dm0755 /tmp/bm-tui "${ROOTFS}/usr/local/bin/kldload-buildmon-tui" ||
+            die "FATAL: kldload-buildmon-tui install failed."
+        log "kldload-buildmon-tui installed (static)."
+    else
+        die "FATAL: buildmon static build failed — refusing to ship an ISO that cannot audit its own installs."
+    fi
+
+    # GUI only where the rootfs can link it. Same readelf guard as wgx: a
+    # '-tags gui' build that silently produced the terminal binary would
+    # install a 'GUI' that opens no window, and nobody would notice until an
+    # operator double-clicked it.
+    if [[ -e "${ROOTFS}/usr/lib64/libGL.so.1" && -e "${ROOTFS}/usr/lib64/libxkbcommon.so.0" ]]; then
+        if (cd /tmp/bm-src &&
+            HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+                CGO_ENABLED=1 go build -trimpath -tags gui \
+                -ldflags "-X main.buildNum=${_bm_commit:0:8}" -o /tmp/bm-bin .) >>"$LOG_FILE" 2>&1; then
+            if ! readelf -d /tmp/bm-bin 2>/dev/null |
+                grep -qiE 'NEEDED.*(libGL|libX11|libwayland|libxkbcommon)'; then
+                die "FATAL: kldload-buildmon built WITHOUT the GUI (no GL/X11/wayland libs) — '-tags gui' produced the terminal binary."
+            fi
+            install -Dm0755 /tmp/bm-bin "${ROOTFS}/usr/local/bin/kldload-buildmon" ||
+                die "FATAL: kldload-buildmon (GUI) install failed."
+            log "kldload-buildmon installed (GUI, GL-capable rootfs)."
+        else
+            die "FATAL: buildmon GUI build failed on a GL-capable rootfs."
+        fi
+    else
+        log "buildmon GUI skipped (headless rootfs) — the static binary covers it."
+    fi
+
+    rm -f /tmp/bm-bin /tmp/bm-tui
+    rm -rf /tmp/bm-src
+
     # ── vmxplore — the KVM console, built from its OWN repo
     # (github.com/vmxplore/vmxplore, public). Third console in the family and
     # the same deal as zxplore and wgxplore: it runs on ANY libvirt host, and
