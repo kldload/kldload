@@ -21,6 +21,7 @@
 # Usage:
 #   klab                                    Interactive menu
 #   klab golden [distro|all]                Build golden images
+#   klab golden-desktop [distro...]         Build GNOME desktop goldens (default: all)
 #   klab deploy blue|green                  Clone goldens to site
 #   klab promote green                      Green becomes new blue
 #   klab rollback                           Revert blue to previous
@@ -452,11 +453,156 @@ timer_elapsed_ms() {
 # Each distro has exactly one version at a time (CentOS 9 Stream,
 # Fedora 44, Debian 13, Ubuntu 24.04, Rocky 9) — no versioned slug.
 golden_name() {
-    if [[ "${KLAB_GOLDEN_KIND:-regular}" == "ztest" ]]; then
-        echo "${PREFIX}-ztest-${1}"
-    else
-        echo "${PREFIX}-golden-${1}"
-    fi
+    case "${KLAB_GOLDEN_KIND:-regular}" in
+    ztest) echo "${PREFIX}-ztest-${1}" ;;
+    desktop) echo "${PREFIX}-desktop-${1}" ;;
+    *) echo "${PREFIX}-golden-${1}" ;;
+    esac
+}
+
+# set_guest_arc_cap — stop the guest caching what the host already cached.
+#
+# THE PROBLEM, which is specific to ZFS-on-ZFS and easy to miss: every golden
+# installs zfs-dkms, so every clone runs its own ARC. The guest's disk is a
+# zvol whose blocks are ALREADY in the host's ARC (rpool/vms is
+# primarycache=all). So the same data is held twice — once by the host for the
+# zvol, once by the guest for its filesystem — and the second copy is bought
+# with the guest's own memory. OpenZFS defaults zfs_arc_max to HALF of RAM, so
+# a 2 GB desktop VM hands 1 GB of its 2 GB to a cache that is duplicating the
+# hypervisor's.
+#
+# HISTORY: the host-side version of this cost a working desktop already —
+# 2026-08-13, zfs.conf said 31.3G on a 61.7G box, ARC took 21.6 GB, free
+# memory fell to 6 GB and the machine was reported frozen. Inside a 2 GB guest
+# the same mistake is proportionally far worse.
+#
+# WHY THE HOST KEEPS primarycache=all AND THE GUEST SHRINKS, not the reverse:
+# clones share the golden's blocks. One cached copy on the host serves five
+# clones; five guest ARCs cache five private copies of the same thing. The
+# host cache is the one with leverage.
+#
+# WHY modprobe.d IS ENOUGH HERE, when kldload's own bootloader.sh insists on a
+# kernel command-line parameter instead: on a kldload host the ROOT is ZFS, so
+# zfs.ko loads from the initramfs before /etc/modprobe.d on the real root is
+# readable, and an initramfs built at the wrong moment silently drops the
+# setting. These guests boot ext4/xfs roots on a zvol and load zfs.ko normally
+# afterwards, so modprobe.d is read every time.
+#
+# Args:    $1 — guest IP, $2 — distro
+# Returns: 0 always. A cache setting is never worth failing a golden over.
+set_guest_arc_cap() {
+    local ip="$1" distro="$2"
+    local mb="${KLAB_GUEST_ARC_MB:-256}"
+    log "  Capping guest ARC at ${mb}MB on ${distro} (host ARC already caches the zvol)..."
+    _ssh_cmd "$ip" bash -s -- "$mb" <<'ARCCAP'
+set -uo pipefail
+MB="${1:-256}"
+BYTES=$((MB * 1024 * 1024))
+mkdir -p /etc/modprobe.d
+printf '# klab: the host ARC already caches this zvol; a second copy here is\n# pure duplication paid for with this guest RAM. Override: KLAB_GUEST_ARC_MB.\noptions zfs zfs_arc_max=%s\n' \
+    "$BYTES" >/etc/modprobe.d/zfs-arc.conf
+# Apply to the running module too, so a golden sealed without a reboot is
+# already correct rather than correct-on-next-boot.
+if [ -w /sys/module/zfs/parameters/zfs_arc_max ]; then
+    echo "$BYTES" >/sys/module/zfs/parameters/zfs_arc_max 2>/dev/null || true
+fi
+echo "klab: guest zfs_arc_max=${BYTES} (${MB}MB)"
+ARCCAP
+    return 0
+}
+
+# setup_vm_desktop — put a GNOME desktop on a golden that is otherwise built.
+#
+# WHY A SEPARATE GOLDEN LINEAGE: a desktop is ~6 GB of packages and about five
+# minutes of install. Paying that once per distro and then cloning is the whole
+# point — a clone off a golden costs 17-460 MB and 0.2s (measured on this host,
+# 2026-08-15), so the second desktop VM and the fiftieth are both instant.
+#
+# Args:    $1 — guest IP, $2 — distro
+# Returns: 0 even when the desktop fails. The golden is still a working server
+#          and the caller's own failure handling is about the base build.
+#
+# NOTES — two rules learned the hard way on 2026-08-15, VM "fed":
+#
+#   1. NEVER name the display manager when the packages already chose one.
+#      Fedora 44's KDE ships plasmalogin, not sddm, and `systemctl enable sddm`
+#      on top of it EXITS NON-ZERO. Under `set -e` that killed the script
+#      before `set-default graphical.target` ever ran, and the guest booted to
+#      a text login with a complete desktop installed. Read
+#      display-manager.service and respect what is already there.
+#
+#   2. NOTHING here may abort the rest. Every step tolerates its own failure,
+#      because the step after it is the one that matters.
+setup_vm_desktop() {
+    local ip="$1" distro="$2"
+    local family="${DISTRO_FAMILY[$distro]}"
+
+    # NOTE: wireguard-tools, node_exporter and the eBPF tools are NOT installed
+    # here — setup_vm_golden already installs them for every golden, so a
+    # desktop is joined to the estate exactly like the rest of the fleet.
+    # qemu-guest-agent is in that same common list (added 2026-08-15).
+    #
+    # NOT the NVIDIA driver. These guests have <video model='virtio'> and no
+    # NVIDIA device: the host card does not reach a VM without VFIO
+    # passthrough (exclusive to one guest) or vGPU (datacenter cards only,
+    # which an RTX 3080 is not). Installing the kmod with no device to bind is
+    # a black-screen risk for exactly the reason `systemctl enable sddm` was —
+    # configuring something that does not apply, and breaking the login on the
+    # way. Accelerated graphics here is mesa + virtio-gpu, which GNOME pulls.
+    log "  Installing GNOME on ${distro} (~5 min, ~6GB)..."
+    case "$family" in
+    dnf)
+        # workstation-product-environment, NOT workstation-product: the latter
+        # is "Workstation product CORE" — a shell and nothing else. A guest
+        # built from it came up with no terminal, no file manager and no
+        # browser. Verified id on Fedora and EL10 alike.
+        _ssh_cmd "$ip" bash -s <<'DESKTOPDNF'
+set -uo pipefail
+dnf group install -y workstation-product-environment ||
+    echo "klab: GNOME group install FAILED — this golden stays a server" >&2
+DESKTOPDNF
+        ;;
+    apt)
+        # task-gnome-desktop pulls gdm3 itself. noninteractive or tasksel stops
+        # to ask about keyboard layout and waits forever with nobody at the
+        # console.
+        _ssh_cmd "$ip" bash -s <<'DESKTOPAPT'
+set -uo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq || true
+apt-get install -y task-gnome-desktop ||
+    echo "klab: GNOME task install FAILED — this golden stays a server" >&2
+DESKTOPAPT
+        ;;
+    *)
+        warn "  no GNOME recipe for family ${family} — ${distro} golden stays a server"
+        return 0
+        ;;
+    esac
+
+    # Enable it. Distro-agnostic on purpose: this is pure systemd and works
+    # the same on every family, so there is one copy of the tricky part.
+    _ssh_cmd "$ip" bash -s <<'DESKTOPENABLE'
+set -uo pipefail
+if [ -e /etc/systemd/system/display-manager.service ]; then
+    dm=$(basename "$(readlink -f /etc/systemd/system/display-manager.service)")
+    echo "klab: display manager already enabled by the packages: ${dm}"
+else
+    dm=""
+    for c in gdm gdm3 sddm lightdm; do
+        if systemctl list-unit-files "${c}.service" >/dev/null 2>&1 &&
+            systemctl enable "$c" >/dev/null 2>&1; then
+            dm="${c}.service"
+            echo "klab: enabled ${c}"
+            break
+        fi
+    done
+    [ -n "$dm" ] || echo "klab: no display manager found — the desktop will not start" >&2
+fi
+systemctl set-default graphical.target ||
+    echo "klab: could not set graphical.target" >&2
+DESKTOPENABLE
+    return 0
 }
 site_name() { echo "${PREFIX}-${1}-${2}"; } # site_name blue centos
 test_vm_name() { echo "${PREFIX}-test-${1}"; }
@@ -828,6 +974,23 @@ setup_vm_golden() {
     # `klab golden-ztest` command that sets this to "1" and produces
     # klab-ztest-<distro> images separate from klab-golden-<distro>.
     local dev_tools="${KLAB_ZFS_DEV:-0}"
+    # want_zfs: 0 builds this golden WITHOUT ZFS in the guest.
+    #
+    # The desktop lineage turns it off. Those guests boot ext4/xfs on a zvol
+    # and never mount a ZFS filesystem, so zfs-dkms buys them nothing and
+    # costs three things that all matter for an image meant to be cloned:
+    # a DKMS rebuild on every kernel update (the largest single failure
+    # surface in a golden build), ~1-2 GB of toolchain and kernel-devel, and
+    # a second ARC caching blocks the host already has (see
+    # set_guest_arc_cap). Operator, 2026-08-15: "if we're gonna do the
+    # desktops no zfs".
+    #
+    # KLAB_DESKTOP_ZFS=1 puts it back, for a desktop meant to demo zxplore
+    # against real pools.
+    local want_zfs=1
+    if [[ "${KLAB_DESKTOP:-0}" == "1" && "${KLAB_DESKTOP_ZFS:-0}" != "1" ]]; then
+        want_zfs=0
+    fi
 
     # RHEL: register subscription before installing packages
     if [[ "$distro" == "rhel" && -n "$RHEL_USERNAME" && -n "$RHEL_PASSWORD" ]]; then
@@ -839,9 +1002,11 @@ setup_vm_golden() {
 
     case "$family" in
     dnf)
-        _ssh_cmd "$ip" bash -s -- "$dev_tools" <<'DNFSETUP'
+        _ssh_cmd "$ip" bash -s -- "$dev_tools" "$want_zfs" <<'DNFSETUP'
 set -e
 KLAB_ZFS_DEV="${1:-1}"
+# 0 = build this golden WITHOUT ZFS (the desktop lineage).
+WANT_ZFS="${2:-1}"
 # Disable ALL firewalling
 systemctl stop firewalld 2>/dev/null || true
 systemctl disable firewalld 2>/dev/null || true
@@ -863,7 +1028,11 @@ dnf install -y kernel-devel-${KVER} dkms gcc gcc-c++ make autoconf automake libt
 
 # ZFS
 DISTRO_ID=$(. /etc/os-release && echo "$ID")
-if ! command -v zfs >/dev/null 2>&1; then
+# WANT_ZFS=0 skips ZFS entirely. The desktop lineage sets it: those guests
+# boot ext4/xfs on a zvol and never mount a ZFS filesystem, so zfs-dkms
+# there is a kernel module compiled on every kernel update, for nothing —
+# and DKMS is the largest single failure surface in a golden build.
+if [ "$WANT_ZFS" = "1" ] && ! command -v zfs >/dev/null 2>&1; then
   if [ "$DISTRO_ID" = "fedora" ]; then
     FEDORA_VER=$(rpm --eval "%{fedora}")
     # zfsonlinux.org/fedora publishes one zfs-release rpm per supported
@@ -911,7 +1080,14 @@ if [ "$KLAB_ZFS_DEV" = "1" ] && ! test -f /usr/share/zfs/zfs-tests.sh; then
 fi
 
 # eBPF + essentials (always)
-dnf install -y bpftrace bcc-tools wireguard-tools curl jq 2>/dev/null || true
+dnf install -y bpftrace bcc-tools wireguard-tools curl jq qemu-guest-agent 2>/dev/null || true
+# qemu-guest-agent: IP reporting, a graceful shutdown the hypervisor can
+# actually wait on, and fs-freeze — fs-freeze is what makes a snapshot of a
+# RUNNING guest consistent rather than crash-consistent, which matters for an
+# image whose whole purpose is being cloned. Verified missing on 2026-08-15:
+# VM "fed" had no org.qemu.guest_agent channel, so `virsh domifaddr --source
+# agent` returned nothing.
+systemctl enable --now qemu-guest-agent 2>/dev/null || true
 
 # Test suite deps + dev tools (only when KLAB_ZFS_DEV=1).
 # The full OpenZFS test suite needs: ksh (run), fio/parted/attr/bc/acl
@@ -1046,9 +1222,11 @@ echo "DNF setup complete"
 DNFSETUP
         ;;
     apt)
-        _ssh_cmd "$ip" bash -s -- "$dev_tools" <<'APTSETUP'
+        _ssh_cmd "$ip" bash -s -- "$dev_tools" "$want_zfs" <<'APTSETUP'
 set -e
 KLAB_ZFS_DEV="${1:-1}"
+# 0 = build this golden WITHOUT ZFS (the desktop lineage).
+WANT_ZFS="${2:-1}"
 export DEBIAN_FRONTEND=noninteractive
 
 # Enable contrib + universe repos (ZFS packages live there)
@@ -1077,7 +1255,11 @@ else
 fi
 
 # ZFS
-if ! command -v zfs >/dev/null 2>&1; then
+# WANT_ZFS=0 skips ZFS entirely. The desktop lineage sets it: those guests
+# boot ext4/xfs on a zvol and never mount a ZFS filesystem, so zfs-dkms
+# there is a kernel module compiled on every kernel update, for nothing —
+# and DKMS is the largest single failure surface in a golden build.
+if [ "$WANT_ZFS" = "1" ] && ! command -v zfs >/dev/null 2>&1; then
   if [ "$KLAB_ZFS_DEV" = "1" ]; then
     apt-get install -y zfsutils-linux zfs-dkms zfs-test 2>/dev/null || true
   else
@@ -1086,7 +1268,9 @@ if ! command -v zfs >/dev/null 2>&1; then
 fi
 
 # eBPF + essentials (always)
-apt-get install -y bpftrace bpfcc-tools wireguard-tools curl jq 2>/dev/null || true
+apt-get install -y bpftrace bpfcc-tools wireguard-tools curl jq qemu-guest-agent 2>/dev/null || true
+# See the dnf branch for why the guest agent matters on a cloned image.
+systemctl enable --now qemu-guest-agent 2>/dev/null || true
 
 # Test suite deps + dev tools (only when KLAB_ZFS_DEV=1).
 # See the dnf branch for the rationale — full OpenZFS test suite
@@ -1182,9 +1366,11 @@ echo "APT setup complete"
 APTSETUP
         ;;
     pacman)
-        _ssh_cmd "$ip" bash -s -- "$dev_tools" <<'PACSETUP'
+        _ssh_cmd "$ip" bash -s -- "$dev_tools" "$want_zfs" <<'PACSETUP'
 set -e
 KLAB_ZFS_DEV="${1:-1}"
+# 0 = build this golden WITHOUT ZFS (the desktop lineage).
+WANT_ZFS="${2:-1}"
 pacman -Syu --noconfirm 2>/dev/null || true
 
 # Always: headers, dkms, eBPF, essentials
@@ -1195,7 +1381,11 @@ if [ "$KLAB_ZFS_DEV" = "1" ]; then
   pacman -S --noconfirm gcc make git fio parted attr bc acl sysstat 2>/dev/null || true
 fi
 
-if ! command -v zfs >/dev/null 2>&1; then
+# WANT_ZFS=0 skips ZFS entirely. The desktop lineage sets it: those guests
+# boot ext4/xfs on a zvol and never mount a ZFS filesystem, so zfs-dkms
+# there is a kernel module compiled on every kernel update, for nothing —
+# and DKMS is the largest single failure surface in a golden build.
+if [ "$WANT_ZFS" = "1" ] && ! command -v zfs >/dev/null 2>&1; then
   curl -fsSL https://archzfs.com/archzfs.gpg | pacman-key -a - 2>/dev/null || true
   pacman-key --lsign-key DDF7DB817396A49B2A2723F7403BD972F75D9D76 2>/dev/null || true
   echo -e '\n[archzfs]\nServer = https://archzfs.com/$repo/$arch' >> /etc/pacman.conf
@@ -1221,9 +1411,11 @@ echo "Pacman setup complete"
 PACSETUP
         ;;
     apk)
-        _ssh_cmd "$ip" sh -s -- "$dev_tools" <<'APKSETUP'
+        _ssh_cmd "$ip" sh -s -- "$dev_tools" "$want_zfs" <<'APKSETUP'
 set -e
 KLAB_ZFS_DEV="${1:-1}"
+# 0 = build this golden WITHOUT ZFS (the desktop lineage).
+WANT_ZFS="${2:-1}"
 apk update
 if ! grep -q 'community' /etc/apk/repositories 2>/dev/null; then
   sed -i 's|^#\(.*community\)|\1|' /etc/apk/repositories
@@ -1427,6 +1619,23 @@ MOKSETUP
     fi # end disabled MOK block
 
     log "  Test environment ready on ${distro}"
+
+    # Cap the guest ARC — only where ZFS actually got installed, and EXCEPT on
+    # the ztest lineage, whose whole job is exercising ZFS. Those images want a
+    # realistic cache; shrinking it would change the behaviour the suite exists
+    # to measure. Every other lineage is a workload VM whose blocks the host is
+    # already caching.
+    if [[ "$want_zfs" == "1" && "${KLAB_GOLDEN_KIND:-regular}" != "ztest" ]]; then
+        set_guest_arc_cap "$ip" "$distro"
+    fi
+
+    # Desktop last, and only for the desktop lineage. It runs here rather than
+    # in its own pass so it inherits build_golden_single's heartbeat and
+    # watchdog — a five-minute silent package install is exactly what that
+    # machinery exists for.
+    if [[ "${KLAB_DESKTOP:-0}" == "1" ]]; then
+        setup_vm_desktop "$ip" "$distro"
+    fi
 }
 
 # ── ZFS Build-from-Source ─────────────────────────────────────────────────
@@ -1642,7 +1851,8 @@ build_golden_single() {
         virt-install --name "$name" --ram "$RAM" --vcpus "$CPUS" \
             --os-variant "${OS_VARIANTS[$distro]}" \
             --disk "path=${zdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
-            --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 --video virtio --noautoconsole --import \
+            --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 --video virtio --noautoconsole \
+            --channel "unix,target.type=virtio,target.name=org.qemu.guest_agent.0" --import \
             --serial "pty,log.file=${_console_log},log.append=on" \
             "${VIRT_GOLDEN_BOOT_ARGS[@]}" \
             2>&1 || die "Failed to boot RHEL golden VM"
@@ -1776,7 +1986,8 @@ build_golden_single() {
     virt-install --name "$name" --ram "$RAM" --vcpus "$CPUS" \
         --os-variant "${OS_VARIANTS[$distro]}" \
         --disk "path=${zdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
-        --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 --video virtio --noautoconsole --import \
+        --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 --video virtio --noautoconsole \
+        --channel "unix,target.type=virtio,target.name=org.qemu.guest_agent.0" --import \
         --serial "pty,log.file=${_console_log},log.append=on" \
         "${VIRT_GOLDEN_BOOT_ARGS[@]}" \
         2>&1 || die "Failed to boot golden VM for ${distro}"
@@ -2083,6 +2294,61 @@ cmd_golden_ztest() {
     log "ZFS test goldens ready. Names: klab-ztest-<distro>"
 }
 
+# Build the DESKTOP golden lineage — a GNOME image per distro, sealed and
+# ready to clone. Exports:
+#   KLAB_GOLDEN_KIND=desktop → golden_name() returns klab-desktop-<distro>
+#   KLAB_DESKTOP=1           → setup_vm_golden() also installs GNOME
+#
+# ONE desktop, GNOME, on EVERY distro. Anyone who wants KDE or XFCE builds
+# their own from the base golden — offering four desktops across five distros
+# is twenty images nobody asked for, and the second desktop is the one people
+# have opinions about anyway.
+#
+# EVERY RECIPE BELOW IS VERIFIED AGAINST A REAL REPOSITORY, 2026-08-15,
+# because "the group probably exists" is how this lineage would ship a golden
+# that is 1100 packages of desktop with no way to log in:
+#
+#   centos/rocky  workstation-product-environment  1109 pkgs, 1.3 GB, HAS gdm
+#                 (checked in quay.io/centos/centos:stream10. The container
+#                 also reports a coreutils-single conflict — that is a
+#                 CONTAINER artifact: container bases ship coreutils-single
+#                 where a cloud image ships full coreutils, so the real guest
+#                 has nothing to remove.)
+#   fedora        workstation-product-environment  the id a real Workstation
+#                 install uses; workstation-product alone is "product CORE",
+#                 a shell with no terminal, file manager or browser.
+#   debian        task-gnome-desktop               3.81   on trixie
+#   ubuntu        task-gnome-desktop               3.75ubuntu1 on 24.04
+#                 (the same name works on both, so apt gets ONE code path)
+#
+# Cost, measured on this host 2026-08-15: ~8.5 GB per desktop golden and
+# roughly 6-8 minutes each. Every clone taken afterwards is 17-460 MB and
+# 0.2s, which is the entire reason this lineage exists.
+cmd_golden_desktop() {
+    [[ $# -eq 0 ]] && set -- all
+    export KLAB_GOLDEN_KIND=desktop
+    export KLAB_DESKTOP=1
+    # A desktop adds ~5 min of package install on top of the base build, and
+    # the default per-distro watchdog is 20 min. Raise it so a slow mirror
+    # cannot make a normal desktop build look like a hang — the operator can
+    # still override.
+    export KLAB_GOLDEN_MAX_SECS="${KLAB_GOLDEN_MAX_SECS:-2400}"
+    local _distros=()
+    for _arg in "$@"; do
+        if [[ "$_arg" == "all" ]]; then
+            _distros+=("${DISTROS[@]}")
+        else
+            _distros+=("$_arg")
+        fi
+    done
+    log "Building GNOME desktop goldens (target=$*) — separate from blue-green and ztest goldens."
+    # Subshell-isolated: see cmd_golden for the why.
+    for distro in "${_distros[@]}"; do
+        (build_golden_single "$distro") || warn "Failed to build DESKTOP golden for ${distro} (continuing)"
+    done
+    log "Desktop goldens ready. Names: klab-desktop-<distro> — clone them for instant desktops."
+}
+
 # ── Section 6: Site Deploy (Blue-Green) ──────────────────────────────────
 
 deploy_site() {
@@ -2163,6 +2429,7 @@ deploy_site() {
             --os-variant "${OS_VARIANTS[$distro]}" \
             --disk "path=${sdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
             --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 \
+            --channel "unix,target.type=virtio,target.name=org.qemu.guest_agent.0" \
             "${VIRT_BOOT_ARGS[@]}" "${VIRT_TPM_ARGS[@]}" \
             --noautoconsole --import 2>&1 || {
             warn "Failed to boot ${sname}"
@@ -2947,7 +3214,8 @@ cmd_test() {
         virt-install --name "$name" --ram "$RAM" --vcpus "$CPUS" \
             --os-variant "${OS_VARIANTS[$distro]}" \
             --disk "path=${zdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
-            --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 --video virtio --noautoconsole --import \
+            --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 --video virtio --noautoconsole \
+            --channel "unix,target.type=virtio,target.name=org.qemu.guest_agent.0" --import \
             "${VIRT_BOOT_ARGS[@]}" "${VIRT_TPM_ARGS[@]}" \
             >/dev/null 2>&1 || {
             warn "Failed to boot ${distro}"
@@ -3481,7 +3749,8 @@ cmd_verify() {
         virt-install --name "$vm_name" --ram 2048 --vcpus 2 \
             --os-variant "${OS_VARIANTS[$distro]}" \
             --disk "path=${vm_zdev},bus=virtio" --disk "path=${ci_iso},device=cdrom" \
-            --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 --video virtio --noautoconsole --import \
+            --network bridge=virbr0,model=virtio --graphics vnc,listen=0.0.0.0 --video virtio --noautoconsole \
+            --channel "unix,target.type=virtio,target.name=org.qemu.guest_agent.0" --import \
             "${VIRT_BOOT_ARGS[@]}" "${VIRT_TPM_ARGS[@]}" \
             >/dev/null 2>&1
 
@@ -3785,6 +4054,8 @@ klab — Multi-Distro Test Platform
 Usage:
   klab                                    Interactive menu
   klab golden [distro|all]                Build golden images
+  klab golden-desktop [distro...]         GNOME desktop goldens for instant clones
+                                          (default: all — one GNOME image per distro)
   klab deploy blue|green                  Deploy site from goldens
   klab promote green                      Promote green to blue
   klab rollback                           Revert blue to previous snapshot
@@ -3848,6 +4119,7 @@ set -- "${_args[@]+"${_args[@]}"}"
 case "$CMD" in
 golden) cmd_golden "${1:-all}" ;;
 golden-ztest) cmd_golden_ztest "${1:-all}" ;;
+golden-desktop) cmd_golden_desktop "$@" ;;
 build-all) cmd_build_all ;;
 fetch-rhel-image) cmd_fetch_rhel_image "$@" ;;
 deploy) deploy_site "${1:-blue}" ;;
