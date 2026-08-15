@@ -476,6 +476,20 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     # ships PSI built in but boot-disabled.
     zfs set org.zfsbootmenu:commandline="rw $(k_console_args) psi=1 selinux=0" rpool/ROOT
 
+    # ── Make the boot menu reachable ─────────────────────────────────────────
+    # ZFSBootMenu is the rollback path: it is where you pick an older boot
+    # environment when an update goes wrong. Nothing here set a timeout, so it
+    # used ZFSBootMenu's built-in default — and on a machine whose monitor takes
+    # a few seconds to sync after the firmware hands off, that countdown is over
+    # before anything is on screen. Operators reported never once seeing the
+    # menu (2026-08-15), which means the recovery tool was effectively absent
+    # even though the boot chain was correct.
+    #
+    # 10 seconds: long enough to see the countdown and press a key on a slow
+    # display, short enough not to feel like the machine has hung. Override with
+    # KLDLOAD_ZBM_TIMEOUT; 0 boots straight through, -1 waits for a key.
+    zfs set org.zfsbootmenu:timeout="${KLDLOAD_ZBM_TIMEOUT:-10}" rpool/ROOT
+
     # Data datasets
     zfs create -o mountpoint=/root rpool/root
     zfs create -o mountpoint=/home rpool/home
