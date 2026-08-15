@@ -206,6 +206,28 @@ def kldload_k():  # brand mark B: bold geometric "k" monogram + amber load dot
     arm_dn = L(94, 132, 162, 196, 17)
     return stem + arm_up + arm_dn + Cf2(156, 70, 11)  # amber tip = "loaded"
 
+def buildmon():
+    # A build STACK: rows of blocks rising, finished ones filled, the one in
+    # flight amber, the rest still outlines. Chosen over a progress bar or a
+    # gauge because it survives 32px — three fill states are legible as shape
+    # alone, where a bar becomes a smudge. Operator asked for "the blocks"
+    # (2026-08-15) and the motif already carries the meaning: a build is
+    # something assembled a piece at a time, and this says which piece.
+    #
+    # The single ACCENT2 element is the in-flight block, per the one-warm-
+    # accent rule at the top of this file.
+    w, h, r = 56, 40, 8
+    xs = (32, 100, 168)
+    out = []
+    for x in xs:                       # bottom course — done
+        out.append(RR(x, 168, w, h, r, fill=True))
+    out.append(RR(xs[0], 112, w, h, r, fill=True))   # middle — two done...
+    out.append(RR(xs[1], 112, w, h, r, fill=True))
+    out.append(RRf2(xs[2], 112, w, h, r))            # ...one building
+    for x in xs:                       # top course — not started
+        out.append(RR(x, 56, w, h, r, fill=False, sw=9))
+    return "".join(out)
+
 ICONS = {
  # kldload-console = the unique brand/tray mark (kldload_k is a ready alt).
  # RETIRED 2026-08-04 (operator, FOSSY pass): kldload-webui (tile uses the
@@ -225,6 +247,7 @@ ICONS = {
  "kexport":kexport,
  "kldload-k9s":k9s, "kldload-mok-repair":mok_repair, "wgxplore":wgxplore,
  "vmxplore":vmxplore,
+ "kldload-buildmon":buildmon,
 }
 LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-zfs":"ZFS","kldload-zfslab":"ZFS Lab",
@@ -236,6 +259,7 @@ LABELS = {  # also reused to set Icon= in .desktop later
  "kldload-k9s":"k9s","kldload-console":"kldload","kldload-mok-repair":"SB Repair",
  "wgxplore":"WG Console",
  "vmxplore":"VM Console",
+ "kldload-buildmon":"Build & Audit",
 }
 
 # Colour-coded by FUNCTION GROUP so colour tells you the category at a glance

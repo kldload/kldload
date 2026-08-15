@@ -34,6 +34,7 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"image/color"
 	"strings"
@@ -47,6 +48,14 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
+
+// iconSVG is the app's own face, carried in the binary so the window and the
+// dock show it even where the hicolor theme is not installed (a bare session,
+// a remote X client). Same file the .desktop points at — one drawing, two
+// consumers, so they cannot drift.
+//
+//go:embed assets/kldload-buildmon.svg
+var iconSVG []byte
 
 // Palette. Deliberately few colours: one per meaning, so a glance at the
 // banner is enough and nothing else on screen competes with it.
@@ -101,6 +110,7 @@ func RunGUI(opt GatherOpts) error {
 	// nothing dependable to match — which shows up as a generic icon and a
 	// duplicate dock entry.
 	a := app.NewWithID("com.kldload.buildmon")
+	a.SetIcon(fyne.NewStaticResource("kldload-buildmon.svg", iconSVG))
 	w := a.NewWindow("kldload — System Build & Audit")
 	w.Resize(fyne.NewSize(980, 720))
 
