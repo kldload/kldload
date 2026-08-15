@@ -116,6 +116,57 @@ mark() {
     log "marker: $1-ready"
 }
 
+# ── Power a VM down the moment it is finished with ───────────────────────────
+#
+# WHY THIS IS NOT LEFT TO THE QUIESCE PASS AT THE END: quiesce_idle_vms() runs
+# after every phase, so during the run itself nothing is ever released. The
+# ztest phase builds five VMs one at a time over about an hour and each one
+# stayed powered on until the whole install finished — stacked on top of the
+# eight blue/green clones and the six cluster nodes. Peak memory pressure
+# therefore landed in the middle of the LONGEST phase, and the box spent that
+# hour starved: the remaining builds ran slower, which made the window during
+# which everything was up longer still.
+#
+# HISTORY: 2026-08-15, .145. 15 VMs running while the installer was only on
+# phase 6 of 7. Operator: "you're just killing the system resources, making
+# the install slower." Build it, set it up, shut it down — during the install,
+# not after it.
+#
+# Args:    $1 — libvirt domain name.
+# Returns: 0 always. Powering a build VM down is a courtesy, never a reason to
+#          fail an install that otherwise succeeded.
+# Notes:   ACPI shutdown, not destroy — a guest that ignores it is logged and
+#          left running rather than risking a half-written golden image.
+power_off_vm() {
+    local _vm="$1"
+    [[ -n "$_vm" ]] || return 0
+    command -v virsh >/dev/null 2>&1 || return 0
+    virsh domstate "$_vm" 2>/dev/null | grep -q running || return 0
+    if virsh shutdown "$_vm" >/dev/null 2>&1; then
+        log "[quiesce] ${_vm} is built — powering it down (virsh start ${_vm} to use it)"
+    else
+        log "[quiesce] WARN: ${_vm} did not accept shutdown — left running"
+    fi
+    return 0
+}
+
+# power_off_group — power down every running VM whose name matches a glob.
+#
+# Args:    $1 — a shell glob, e.g. 'klab-blue-*'
+# Returns: 0 always.
+power_off_group() {
+    local _glob="$1" _vm
+    command -v virsh >/dev/null 2>&1 || return 0
+    while read -r _vm; do
+        [[ -n "$_vm" ]] || continue
+        # shellcheck disable=SC2254  # the glob is the whole point of this call
+        case "$_vm" in
+        $_glob) power_off_vm "$_vm" ;;
+        esac
+    done < <(virsh list --name --state-running 2>/dev/null)
+    return 0
+}
+
 # ── Load install-time flags ───────────────────────────────────────────────────
 # Two files:
 #   /etc/kldload/install-manifest.env         — persisted manifest (user-set)
@@ -332,18 +383,33 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         # So: if ollama already serves a model, or the darksite carries one,
         # take it. An explicit KLDLOAD_AI_MODEL is still honoured above — this
         # only overrides the automatic tier choice, never an operator's request.
+        # The embedding model is NOT a chat model. nomic-embed-text ships
+        # alongside the chat weights in every darksite (RAG needs it), but it
+        # cannot answer a prompt — pointing Bob at it yields errors on every
+        # message. Both discovery paths below therefore skip it.
+        #
+        # WHY THIS IS LOAD-BEARING: (b) takes whatever `find` returns first,
+        # which is arbitrary directory order. While the darksite carried three
+        # models the chat one happened to come back first and this was latent.
+        # The darksite now ships exactly two manifests — one chat, one embed —
+        # so without this filter it is a coin flip whether an air-gapped
+        # install configures Bob with a model that cannot talk (2026-08-15).
+        # kldload-firstboot has always filtered it; this is the same guard.
+        _embed_model="nomic-embed-text"
         if [[ -z "${KLDLOAD_AI_MODEL:-}" ]]; then
             _have_model=""
             # (a) already pulled — ollama is authoritative about its own store
             if command -v ollama >/dev/null 2>&1; then
-                _have_model="$(ollama list 2>/dev/null | awk 'NR>1 && $1 != "" {print $1; exit}')"
+                _have_model="$(ollama list 2>/dev/null |
+                    awk -v skip="^${_embed_model}" 'NR>1 && $1 != "" && $1 !~ skip {print $1; exit}')"
             fi
             # (b) not pulled, but shipped in the darksite: take the first
-            #     manifest present rather than demanding one specific name.
+            #     CHAT manifest present rather than demanding one specific name.
             if [[ -z "$_have_model" && -d /root/darksite/ollama/models/manifests/registry.ollama.ai/library ]]; then
                 _have_model="$(
                     find /root/darksite/ollama/models/manifests/registry.ollama.ai/library \
                         -mindepth 2 -maxdepth 2 -type f 2>/dev/null |
+                        grep -v "/${_embed_model}/" |
                         head -1 |
                         awk -F/ '{printf "%s:%s", $(NF - 1), $NF}'
                 )"
@@ -434,20 +500,10 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         # Restore ERR trap (only if we actually had one saved — fresh shells
         # without an ERR trap return empty from `trap -p ERR`).
         [[ -n "$_saved_err_trap" ]] && eval "$_saved_err_trap"
-        # Minimum VRAM to host Bob usably. qwen2.5:14b is ~9 GB quantised and
-        # barely fits in 10 GB; below 8 GB the model won't load and CPU-fallback
-        # inference is ~30 tok/min — unusable. Gracefully skip Bob entirely so
-        # firstboot doesn't wedge on a 5 GB pull for a model that can't run.
-        # Override via KLDLOAD_FORCE_AI=1 (user explicitly wants CPU inference).
-        _min_vram_gb="${KLDLOAD_MIN_AI_VRAM_GB:-8}"
-        if [[ "$_vram_gb" -lt "$_min_vram_gb" && "${KLDLOAD_FORCE_AI:-0}" != "1" ]]; then
-            log "[ai] SKIP — insufficient VRAM (${_vram_gb}GB < ${_min_vram_gb}GB minimum). Bob will not be installed."
-            log "[ai] To override: KLDLOAD_FORCE_AI=1 kldload-autodeploy (CPU inference, very slow)."
-            log "[ai] Or manually later: ollama pull ${_chat_model}  (once you know your hardware can handle it)."
-            mark "ai-skipped"
-            exit 0
-        fi
-        log "[ai] VRAM=${_vram_gb}GB (ok, minimum ${_min_vram_gb}GB) → chat model: ${_chat_model}"
+        # NOTE: the VRAM gate used to live HERE, in front of everything. It has
+        # moved below, to immediately before the model download — the only step
+        # it was ever really about. See "VRAM gate" further down.
+        log "[ai] VRAM=${_vram_gb}GB → candidate chat model: ${_chat_model}"
         # Darksite-vs-internet branch. KLDLOAD_BOB_DARKSITE=1 comes from the
         # Bob panel "use darksite" checkbox. We still need the ollama binary
         # itself — darksite only ships model weights, not the runtime — so
@@ -499,6 +555,102 @@ if [[ "${WANT[ai]}" == "1" ]]; then
             curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
             sleep 2
         done
+        # ── The interface, BEFORE any model work ────────────────────────────
+        #
+        # Open WebUI is a frontend. It needs no model, no VRAM and no GPU: it
+        # starts with an empty model list and offers a picker. So it is stood up
+        # here — as soon as the engine answers — and nothing below can prevent
+        # it.
+        #
+        # WHY THE ORDER IS THE FIX: this used to run at the very END of the
+        # phase, behind two `exit 0`s — the VRAM gate and a failed model pull.
+        # The machines that took either exit got no interface at all, which is
+        # backwards: a box with no GPU, or one whose download failed, is exactly
+        # the box whose owner needs a working UI to choose and fetch a model
+        # from. As of 2026-08-15 no weights ship by default
+        # (KLDLOAD_INCLUDE_OLLAMA_DARKSITE=0), so the old order would have made
+        # "no model" mean "no AI stack whatsoever" on every default install.
+        #
+        # HISTORY: 2026-08-15, .145. The call was made once, its non-zero return
+        # treated as advisory, one WARN logged, and the phase marked complete.
+        # The script exited non-zero having written NOTHING — not to its own log,
+        # not to this one — though every exit path in it is `exit 0`. The desktop
+        # reported AI as installed while the tile opened http://ollama:8080/ and
+        # found nothing listening. Running the same script by hand afterwards
+        # worked first time. That signature — instant, silent, unreproducible —
+        # is a transient, and a transient nothing retries is a permanent failure
+        # to the person looking at the screen. Hence: verify the OUTCOME (does
+        # :8080 answer) rather than the exit code, and retry once.
+        _owui_ok=0
+        if [[ -x /usr/local/bin/kldload-ai-webui ]]; then
+            for _try in 1 2; do
+                log "[ai] setting up Open WebUI (attempt ${_try})"
+                /usr/local/bin/kldload-ai-webui >>"$LOG_FILE" 2>&1 ||
+                    log "[ai] WARN: kldload-ai-webui returned non-zero on attempt ${_try}"
+                if curl -sf -o /dev/null --max-time 5 http://localhost:8080 2>/dev/null; then
+                    _owui_ok=1
+                    break
+                fi
+                log "[ai] :8080 not answering after attempt ${_try}"
+                sleep 5
+            done
+        else
+            log "[ai] WARN: kldload-ai-webui missing — the Ollama tile will have no interface"
+        fi
+        if [[ "$_owui_ok" -eq 1 ]]; then
+            log "[ai] Open WebUI verified answering on :8080"
+        else
+            log "[ai] WARN: Open WebUI is NOT answering on :8080 — the desktop tile will fail."
+            log "[ai]       The Ollama engine and CLI still work. Repair with: sudo kldload-ai-webui"
+        fi
+
+        # ── Is a model wanted at all? ───────────────────────────────────────
+        #
+        # Default: NO. The AI checkbox means "install Ollama + Open WebUI",
+        # which is now done — engine running, interface answering, empty model
+        # list. WHICH model to run is a question the operator is better placed
+        # to answer than the ISO is, and a multi-GB download nobody asked for is
+        # a poor default on a metered or slow link.
+        #
+        # Three ways a machine ends up with weights:
+        #   1. baked into the ISO at build time
+        #      (KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1) — the air-gapped path;
+        #      _darksite_has_model is already 1 here and the rehydrate above
+        #      has run, so there is nothing to download;
+        #   2. the installer's "download an AI model" checkbox
+        #      (KLDLOAD_AI_PULL_MODEL=1) — pull it during first boot;
+        #   3. the operator, later, from the Open WebUI picker or `ollama pull`.
+        #
+        # Case 3 is the default and it costs nothing: the picker is right there
+        # in a working UI.
+        if [[ "$_darksite_has_model" != "1" && "${KLDLOAD_AI_PULL_MODEL:-0}" != "1" ]]; then
+            log "[ai] no model requested — Ollama and Open WebUI are installed and running with an empty model list."
+            log "[ai] Pull one from the Open WebUI model picker, or run: ollama pull llama3.2:3b"
+            log "[ai] To have the installer do it, tick 'Download an AI model' (KLDLOAD_AI_PULL_MODEL=1);"
+            log "[ai] for an air-gapped machine, build the ISO with KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1."
+            mark "ai"
+            log "[ai] complete (engine + interface, no model)"
+            exit 0
+        fi
+
+        # ── VRAM gate — governs the DOWNLOAD only ───────────────────────────
+        #
+        # Below 8 GB a 14b-class model will not load and CPU fallback is ~30
+        # tok/min, so pulling several GB for it wastes the operator's bandwidth
+        # and disk. Skip the download — but the engine and the interface are
+        # already up by this point, so "skipped" now means "no model yet",
+        # not "no AI". The operator can pull a small model from the Open WebUI
+        # picker, and on CPU a 3b one is perfectly usable.
+        # Override with KLDLOAD_FORCE_AI=1 to pull regardless.
+        _min_vram_gb="${KLDLOAD_MIN_AI_VRAM_GB:-8}"
+        if [[ "$_vram_gb" -lt "$_min_vram_gb" && "${KLDLOAD_FORCE_AI:-0}" != "1" ]]; then
+            log "[ai] no model will be downloaded — ${_vram_gb}GB VRAM is below the ${_min_vram_gb}GB minimum for ${_chat_model}."
+            log "[ai] Ollama and Open WebUI ARE installed and running; pull a model you can run from the picker,"
+            log "[ai] e.g. 'ollama pull llama3.2:3b' (runs on CPU), or force this one with KLDLOAD_FORCE_AI=1."
+            mark "ai-skipped"
+            exit 0
+        fi
+
         # ── Hold the download until the cluster is up ────────────────────────
         # WHY: on a fresh install with ENABLE_K8S + K8S_BOOTSTRAP + BUILD_IMAGES
         # + ENABLE_AI all set, boot #1 ran kubeadm/Cilium, the klab golden
@@ -615,14 +767,6 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         # kldload-firstboot's AI block — the block autodeploy's own presence
         # causes firstboot to skip. Shared script, called from both, so the two
         # paths cannot disagree about whether the AI stack has a UI.
-        if [[ -x /usr/local/bin/kldload-ai-webui ]]; then
-            log "[ai] setting up Open WebUI"
-            /usr/local/bin/kldload-ai-webui >>"$LOG" 2>&1 ||
-                log "[ai] WARN: Open WebUI setup returned non-zero — engine and CLI still work"
-        else
-            log "[ai] WARN: kldload-ai-webui missing — the Ollama tile will have no interface"
-        fi
-
         mark "ai"
         log "[ai] complete"
         # kldload-rag-firstboot.service is WantedBy=multi-user.target but its
@@ -834,6 +978,12 @@ if [[ "${WANT[klab]}" == "1" ]]; then
             if [[ -f /var/lib/kldload/klab-firstboot-done ]]; then
                 mark "klab"
                 log "[klab] klab-firstboot.service finished — blue-green ready"
+                # The blue/green sites are clones waiting for a test run, and
+                # the ztest phase below runs for another ~hour. Handing that
+                # phase eight idle VMs' worth of RAM is the whole difference
+                # between a build that finishes and one that thrashes.
+                power_off_group 'klab-blue-*'
+                power_off_group 'klab-green-*'
             else
                 _klab_ok=0
                 log "[klab] klab-firstboot.service did not complete within timeout — see /var/log/klab/"
@@ -886,6 +1036,9 @@ if [[ "${WANT[klab]}" == "1" ]]; then
                 if klab golden-ztest "$_zt_d" >>/var/log/kldload/klab-firstboot.log 2>&1; then
                     _zt_ok=$((_zt_ok + 1))
                     log "[klab] ztest ${_zt_d} — done (${_zt_ok}/${_zt_total} built)"
+                    # Release it NOW, not in the quiesce pass an hour from now.
+                    # The next distro builds on a box with that memory back.
+                    power_off_vm "klab-ztest-${_zt_d}"
                 else
                     _zt_failed+=("$_zt_d")
                     log "[klab] ztest ${_zt_d} — FAILED (continuing with the rest)"
