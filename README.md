@@ -1,8 +1,8 @@
 # kldload
 
-**One USB. ZFS on root across eight Linux distributions — plus a GUI-first RHEL workstation, a KVM-on-ZFS hypervisor, Kubernetes, and a local AI assistant, all assembled from stock vendor repos.**
+**One USB. ZFS on root across any dnf, apt or pacman distribution — plus a GUI-first RHEL workstation, a KVM-on-ZFS hypervisor, Kubernetes, and a local AI assistant, all assembled from stock vendor repos.**
 
-kldload builds any of eight supported Linux distributions from their own package repos (dnf, apt, pacman, apk) onto **ZFS on root**, with **ZFSBootMenu** boot environments, **WireGuard**, **eBPF**, and an optional **KVM hypervisor**, **Kubernetes**, **klab** multi-distro test platform, and **Bob** local AI. Nothing is forked. Nothing is patched. Every package comes straight from the vendor's CDN, and most distros install fully offline from mirrors baked into the ISO.
+kldload builds a distribution from their own package repos (dnf, apt, pacman, apk) onto **ZFS on root**, with **ZFSBootMenu** boot environments, **WireGuard**, **eBPF**, and an optional **KVM hypervisor**, **Kubernetes**, **klab** multi-distro test platform, and **Ollama + Open WebUI** local AI. Nothing is forked. Nothing is patched. Every package comes straight from the vendor's CDN, and most distros install fully offline from mirrors baked into the ISO.
 
 Pick a distro, pick a profile, install. The profiles are examples of what the substrate can become — start with one, mix in another with `kpkg add`, or build your own from the primitives.
 
@@ -113,17 +113,31 @@ Only **remote** browsers do &mdash; sign in with your admin account (a `wheel`/
 
 ---
 
-## Seven distributions, one USB
+## Five in the menu, three package managers underneath
 
 | Distribution | Install method | Offline |
 |---|---|---|
-| CentOS Stream 10 | `dnf --installroot` | Network (no EL darksite yet) |
-| Debian 13 (Trixie) | `debootstrap` | Yes (APT darksite) |
-| Ubuntu 24.04 (Noble) | `debootstrap` | Yes (APT darksite, universe enabled) |
 | Fedora 44 | `dnf --installroot` | Yes (RPM darksite) |
-| Rocky Linux 10 | `dnf --installroot` | Network (no EL darksite yet) |
+| Debian 13 (Trixie) | `debootstrap` | Yes (APT darksite) |
 | RHEL 10 | `dnf --installroot` | No (Red Hat CDN; subscription required) |
 | Arch Linux | `pacstrap` | No (rolling; requires internet) |
+| FreeBSD | base sets | No (requires internet) |
+
+Those five are what the installer offers, because they are the five that get
+tested. The *method* underneath is not distro-specific: kldload installs by
+calling `dnf --installroot`, `debootstrap` or `pacstrap` against a distribution's
+own repositories. Nothing is forked, nothing is patched, and no image is
+pre-baked for a given distro.
+
+Which means the supported set is really "distributions whose packages come from
+dnf, apt or pacman" — CentOS Stream, Rocky and Ubuntu are all still installable
+today with `KLDLOAD_DISTRO=<name>`; they are simply not on the menu, because a
+menu of everything is a menu nobody can use. Adding a distribution in one of
+those families is repository configuration, not new machinery.
+
+The honest bound: a new distribution needs its repos and keys declared, and its
+kernel paired with a version of OpenZFS that builds against it. That is a
+morning's work, not a port.
 
 Live environment is **Fedora 44** (kernel 7.0.x — currently `7.0.12` — with OpenZFS `2.4.3` on root).
 
@@ -136,9 +150,9 @@ Live environment is **Fedora 44** (kernel 7.0.x — currently `7.0.12` — with 
 The **Desktop** profile is a GUI-first RHEL 10 workstation: expert operations — ZFS replication, KVM, Kubernetes, eBPF observability — exposed as point-and-shoot desktop apps, not CLI rituals.
 
 - **Install-time Platform Options.** Checkboxes for NVIDIA drivers, KVM, Kubernetes, eBPF tooling, and golden-image building. Desktop-only, default-clean — you opt into the heavy stuff.
-- **Native app windows.** Each tool (VMs, Kubernetes, ZFS, Metrics, Bob, …) opens as its own chromeless GTK/WebKit window — no browser chrome, no left menu — backed by the same web console the server edition serves.
+- **Native app windows.** Each tool (VMs, Kubernetes, ZFS, Metrics, the model, …) opens as its own chromeless GTK/WebKit window — no browser chrome, no left menu — backed by the same web console the server edition serves.
 - **Console as its own app.** The tmux F-key operator cockpit (k9s, ZFS internals, eBPF panels, VM/log streams) is a single Console application — not embedded inside every tool window.
-- **Bob.** Local AI assistant (Ollama + RAG + voice) as a desktop app. No cloud, no telemetry.
+- **Local model.** Ollama with Open WebUI (plus RAG and voice) as a desktop app. No cloud, no telemetry.
 
 ---
 
@@ -146,10 +160,10 @@ The **Desktop** profile is a GUI-first RHEL 10 workstation: expert operations �
 
 | Profile | What gets assembled on first boot |
 |---|---|
-| **Desktop** | GNOME + ZFS root + Firefox + GPU drivers + Bob AI + full `k*` tool suite + native app windows + the Console cockpit + offline darksites |
+| **Desktop** | GNOME + ZFS root + Firefox + GPU drivers + Ollama + full `k*` tool suite + native app windows + the Console cockpit + offline darksites |
 | **Server** | Headless SSH + ZFS root + full `k*` tools + sanoid + WireGuard + eBPF + offline darksites |
 | **KVM Host** | libvirt + qemu-kvm + virtio, every VM on a ZFS zvol, `~100`&nbsp;ms COW clones, atomic snapshots, `zfs send` replication |
-| **AI (Bob)** | KVM Host + Ollama + RAG + the Bob agent stack on the local GPU |
+| **AI** | KVM Host + Ollama + Open WebUI + RAG on the local GPU |
 | **klab** | KVM Host + golden VMs per supported distro, blue/green via ZFS instant clone, fault injection, Distro Matrix Runner, live Hubble traffic map |
 | **OpenZFS Suite** | KVM Host + dedicated test goldens wired into `ztest`/`zloop` for upstream OpenZFS regression hunting |
 | **Core** | ZFS on root only. Stock distro. No `k*` tools, no web UI, no darksites. ~200 MB beyond the vendor's base install |
@@ -170,8 +184,8 @@ klab matrix run script.sh # run a change against every supported distro in paral
 - **WireGuard** — kernel-level encrypted networking. One UDP port at the firewall.
 - **eBPF observability** — BCC tools + bpftrace + an F-key tmux cockpit on the host; Cilium + Hubble + Tetragon inside the K8s profile (no kube-proxy, no iptables, no sidecars).
 - **KVM hypervisor** — libvirt + qemu-kvm with every VM on a ZFS zvol. `~100`&nbsp;ms clones via COW. Atomic snapshots. fs-freeze app-consistency. Incremental `zfs send` replication.
-- **NVIDIA + CUDA** — drivers and CUDA optional at install. Time-sliced GPU sharing across Bob and guest VMs. No PCIe passthrough required.
-- **Bob** — local AI assistant: Ollama + RAG over the codebase + voice + tmux awareness + ReAct agent loop + eBPF-aware tool registry. No cloud, no telemetry.
+- **NVIDIA + CUDA** — drivers and CUDA optional at install. Time-sliced GPU sharing across the model and guest VMs. No PCIe passthrough required.
+- **Ollama + Open WebUI** — local model: RAG over the codebase + voice + tmux awareness + ReAct agent loop + eBPF-aware tool registry. No cloud, no telemetry.
 - **Observability** — Prometheus + Grafana + Loki + Alertmanager, Go + bash exporters, pre-wired dashboards, `zed` ZFS events bridged to Loki.
 - **Secure Boot + MOK** — per-machine key generation, automatic module signing, DKMS auto-sign on kernel upgrades. Off by default.
 - **Image export** — `kexport` produces qcow2 / VMDK / VHD / OVA / raw, auto-sealed with cloud-init multi-datasource config. Ready for Packer or direct hypervisor import.
@@ -257,7 +271,7 @@ opt-in at install. Everything else below is open source under its own licence.
 | [eza](https://eza.rocks), [bat](https://github.com/sharkdp/bat), [fd](https://github.com/sharkdp/fd), [ripgrep](https://github.com/BurntSushi/ripgrep), [zoxide](https://github.com/ajeetdsouza/zoxide), [fzf](https://github.com/junegunn/fzf), [fastfetch](https://github.com/fastfetch-cli/fastfetch), htop | the modern CLI set, pre-wired into the shell |
 | [ttyd](https://github.com/tsl0922/ttyd) + [tmux](https://github.com/tmux/tmux) | browser terminal, and the session everything attaches to |
 
-### AI &mdash; "Bob", entirely local
+### AI &mdash; Ollama and Open WebUI, entirely local
 | Project | What it does here |
 |---|---|
 | [Ollama](https://ollama.com) | the LLM runtime |
