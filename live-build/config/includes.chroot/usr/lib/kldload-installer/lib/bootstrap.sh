@@ -724,11 +724,22 @@ k_install_target_packages() {
     # (several hundred MB) download on FIRST LAUNCH. Steam therefore cannot be
     # made darksite; baking the .deb in buys a launcher that still needs the
     # network before it can do anything.
+    # NOT in pkgs. steam-installer is installed separately, further down, where
+    # its failure cannot matter.
+    #
+    # HISTORY: 2026-08-15, fiend. It WAS added to this array, and that array is
+    # handed to a single `apt-get install`, which is all-or-nothing. The darksite
+    # mirror ships Components: main only, steam-installer lives in contrib, so
+    # apt could not locate it and aborted the ENTIRE transaction — taking
+    # linux-image-amd64, linux-headers, shim-signed, grub and mokutil with it.
+    # The machine installed, booted to ZFSBootMenu, and had no kernel to boot.
+    #
+    # The rule this cost us: nothing optional goes in the same apt transaction
+    # as the kernel. Boot-critical packages travel alone.
     if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
         k_log_to "$log" "Enabling i386 multiarch (steam-installer is 32-bit)"
         k_in_chroot "${target}" dpkg --add-architecture i386 2>&1 | tee -a "$log" ||
-            k_log_to "$log" "WARNING: could not enable i386 — steam-installer will not resolve"
-        pkgs+=(steam-installer)
+            k_log_to "$log" "WARNING: could not enable i386 — Steam will not resolve"
     fi
 
     if [[ "${KLDLOAD_STORAGE_MODE:-standard}" == "zfs" ]]; then
@@ -760,6 +771,37 @@ k_install_target_packages() {
     DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update 2>&1 | tee -a "$log" || true
     k_log_to "$log" "Installing packages: ${pkgs[*]}"
     DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get install -y "${pkgs[@]}" 2>&1 | tee -a "$log"
+
+    # VERIFY THE OUTCOME, not the exit code. This transaction carries the kernel,
+    # and an install that reaches the end without one produces a machine that
+    # boots to ZFSBootMenu and then has nothing to load — which is what shipped
+    # twice on 2026-08-15 before anyone noticed, because the failure was a single
+    # `E: Unable to locate package` line in the middle of a long log.
+    #
+    # Checking for vmlinuz catches every cause at once: an unavailable package,
+    # a mirror that went away mid-transaction, a full disk. Fatal on purpose —
+    # an unbootable install is worse than a failed one, because a failed one
+    # tells you.
+    if ! compgen -G "${target}/boot/vmlinuz-*" >/dev/null &&
+        ! compgen -G "${target}/boot/vmlinuz" >/dev/null; then
+        k_log_to "$log" "FATAL: no kernel in ${target}/boot after the base package install."
+        k_log_to "$log" "       The apt transaction above did not complete. Search the log for 'E:'"
+        k_log_to "$log" "       — one unavailable package aborts the whole batch, kernel included."
+        k_die "base package install produced no kernel — see ${log}"
+    fi
+    k_log_to "$log" "kernel present: $(basename "$(compgen -G "${target}/boot/vmlinuz-*" | head -1)")"
+
+    # Steam, in its OWN transaction so it cannot take the kernel down with it.
+    # It lives in contrib, which the darksite does not carry, so on an offline
+    # install this is expected to fail — and that must cost Steam only.
+    if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
+        if DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" \
+            apt-get install -y steam-installer >>"$log" 2>&1; then
+            k_log_to "$log" "Steam installed (steam-installer)"
+        else
+            k_log_to "$log" "NOTE: steam-installer unavailable (contrib not in the offline mirror) — install later with: apt-get install steam-installer"
+        fi
+    fi
 
     profile_pkgs="$(k_profile_packages)"
     profile_opt="$(k_profile_optional_packages)"
