@@ -248,6 +248,10 @@ _plan=(prereqs)
 [[ "${WANT[k8s]}" == "1" ]] && _plan+=(k8s-bootstrap)
 [[ "${WANT[ai]}" == "1" ]] && _plan+=(ai-wait)
 [[ "${WANT[klab]}" == "1" ]] && _plan+=(klab-goldens klab-ztest-goldens)
+# "Build all images" additionally builds the OpenZFS dev lab (phase 3c). Listed
+# separately because it is the only lineage gated purely on BUILD_IMAGES — the
+# klab phases above also arrive via templates.
+[[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && _plan+=(zfslab-goldens)
 _plan+=(ready)
 phase_plan "${_plan[@]}"
 
@@ -870,6 +874,36 @@ if [[ "${WANT[klab]}" == "1" ]]; then
         fi
     else
         log "[klab] ztest goldens skipped (not a ZFS Lab install)"
+    fi
+
+    # ── 3c: the OpenZFS development lab (kzfs-lab) ───────────────────────────
+    # "Build all images" means ALL of them, including the test suites. kzfs-lab
+    # was the one lineage nothing automatic ever built: no profile, no tile and
+    # no phase invoked it, so it existed only as a manual command. That is why
+    # its darksite-image bug survived — every automated path skipped it.
+    #
+    # It is distinct from 3b: klab's ztest lineage carries ZFS dev TOOLS on a
+    # stock cloud image, while kzfs-lab carries the OpenZFS SOURCE plus the
+    # upstream test suite, which is what an OpenZFS developer actually runs.
+    #
+    # Non-fatal, like 3b: a lab that fails to build must not fail the install.
+    if [[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]]; then
+        phase "zfslab-goldens"
+        if ! command -v kzfs-lab >/dev/null 2>&1; then
+            phase_state "zfslab-goldens" failed
+            log "[zfslab] kzfs-lab not installed — profile did not ship the OpenZFS lab"
+        elif [[ -f "${STATE_DIR}/zfslab-ready" ]]; then
+            log "[zfslab] already marked ready — skipping"
+        else
+            log "[zfslab] running kzfs-lab goldens (OpenZFS source + test suite, ~40 min)"
+            if kzfs-lab goldens >>/var/log/kldload/kzfs-lab-firstboot.log 2>&1; then
+                mark "zfslab"
+                log "[zfslab] OpenZFS lab goldens complete"
+            else
+                phase_state "zfslab-goldens" failed
+                log "[zfslab] FAILED — see /var/log/kldload/kzfs-lab-firstboot.log (non-fatal)"
+            fi
+        fi
     fi
 fi
 
