@@ -120,21 +120,51 @@ declare -A OS_VARIANTS=(
 # virt-install from exiting non-zero when we bump to a distro version
 # newer than the host's osinfo-db package (e.g. klab targets fedora43
 # on a CentOS 9 host whose osinfo-db tops out at fedora42).
+# _osvariant_known: is this --os-variant value usable on THIS host?
+#
+# Two oracles, in order of cost. osinfo-query is exact and fast but is a
+# separate package that is frequently absent -- and its absence used to make
+# the whole resolver give up (`command -v osinfo-query || return 0`), leaving
+# an unknown variant in place for virt-install to choke on. virt-install itself
+# is always present, since we are about to run it, so it is the reliable
+# fallback: --print-xml resolves the variant and builds no VM.
+#
+# HISTORY: 2026-08-15, fiend. osinfo-query was not installed, the resolver
+# returned immediately, and `--os-variant fedora44` reached virt-install on a
+# host whose newest known Fedora was 42. It exited "Unknown OS name
+# 'fedora44'", the golden never booted, and a 601 MB zvol was left behind with
+# no domain and no @golden -- which vmxplore then showed as an orphan. The
+# phase still reported "ztest goldens complete (5/5)".
+#
+# Args:    $1 — an os-variant short id
+# Returns: 0 when virt-install will accept it.
+_osvariant_known() {
+    local _v="$1"
+    if [[ -n "${_OSINFO_KNOWN:-}" ]]; then
+        grep -qxF "$_v" <<<"$_OSINFO_KNOWN" && return 0
+        return 1
+    fi
+    virt-install --osinfo "$_v" --print-xml --name _klabprobe \
+        --memory 512 --disk none --boot hd >/dev/null 2>&1
+}
+
 _resolve_os_variants() {
-    command -v osinfo-query >/dev/null 2>&1 || return 0
-    local _known
-    _known="$(osinfo-query -f short-id os 2>/dev/null | awk 'NR>2 {print $1}')"
-    [[ -z "$_known" ]] && return 0
+    # Cache the exact list when the tool exists; otherwise _osvariant_known
+    # probes virt-install per candidate, which is slower but always works.
+    if command -v osinfo-query >/dev/null 2>&1; then
+        _OSINFO_KNOWN="$(osinfo-query -f short-id os 2>/dev/null | awk 'NR>2 {print $1}')"
+    fi
+    command -v virt-install >/dev/null 2>&1 || return 0
     local _d _want _try _fallback _n
     for _d in "${!OS_VARIANTS[@]}"; do
         _want="${OS_VARIANTS[$_d]}"
-        grep -qxF "$_want" <<<"$_known" && continue
+        _osvariant_known "$_want" && continue
         _fallback=""
         case "$_want" in
         fedora*)
             for _n in 43 42 41 40 39 38; do
                 _try="fedora$_n"
-                grep -qxF "$_try" <<<"$_known" && {
+                _osvariant_known "$_try" && {
                     _fallback="$_try"
                     break
                 }
@@ -142,7 +172,7 @@ _resolve_os_variants() {
             ;;
         ubuntu*)
             for _try in ubuntu24.04 ubuntu22.04 ubuntu20.04; do
-                grep -qxF "$_try" <<<"$_known" && {
+                _osvariant_known "$_try" && {
                     _fallback="$_try"
                     break
                 }
@@ -150,7 +180,7 @@ _resolve_os_variants() {
             ;;
         debian*)
             for _try in debian13 debian12 debian11; do
-                grep -qxF "$_try" <<<"$_known" && {
+                _osvariant_known "$_try" && {
                     _fallback="$_try"
                     break
                 }
@@ -158,7 +188,7 @@ _resolve_os_variants() {
             ;;
         centos-stream*)
             for _try in centos-stream9 centos-stream8 centos9; do
-                grep -qxF "$_try" <<<"$_known" && {
+                _osvariant_known "$_try" && {
                     _fallback="$_try"
                     break
                 }
@@ -169,14 +199,14 @@ _resolve_os_variants() {
             # for virtio/UEFI hints. The guest still self-identifies correctly
             # via /etc/redhat-release; os-variant only affects libvirt defaults.
             for _try in rhel10.0 rhel9.4 rhel9.0 centos-stream10 centos-stream9; do
-                grep -qxF "$_try" <<<"$_known" && {
+                _osvariant_known "$_try" && {
                     _fallback="$_try"
                     break
                 }
             done
             ;;
         esac
-        [[ -z "$_fallback" ]] && grep -qxF "linux2022" <<<"$_known" && _fallback="linux2022"
+        [[ -z "$_fallback" ]] && _osvariant_known "linux2022" && _fallback="linux2022"
         [[ -z "$_fallback" ]] && _fallback="linux"
         echo "[klab] os-variant '$_want' unknown to osinfo-db; using '$_fallback' for ${_d}" >&2
         OS_VARIANTS[$_d]="$_fallback"
