@@ -1841,6 +1841,85 @@ async def ws_handler(websocket):
                         "output": "\n".join(lines) + "\n\n--- zpool status ---\n" + status_out,
                     }))
 
+                elif action == "ai_models":
+                    # Which models exist on disk, and which are RESIDENT in
+                    # VRAM/RAM right now. /api/tags answers the first, /api/ps
+                    # the second — they are different questions and conflating
+                    # them is why "Bob is ready" used to lie about a model that
+                    # was merely pulled.
+                    _models = []
+                    try:
+                        import urllib.request
+                        _r = urllib.request.urlopen(
+                            "http://127.0.0.1:11434/api/tags", timeout=3)
+                        _tags = json.loads(_r.read()).get("models", [])
+                        _resident = {}
+                        try:
+                            _rp = urllib.request.urlopen(
+                                "http://127.0.0.1:11434/api/ps", timeout=3)
+                            for _m in json.loads(_rp.read()).get("models", []):
+                                _resident[_m.get("name", "")] = {
+                                    "size_vram": _m.get("size_vram", 0),
+                                    "until":     _m.get("expires_at", ""),
+                                }
+                        except Exception:
+                            pass
+                        for _m in _tags:
+                            _n = _m.get("name", "")
+                            _models.append({
+                                "name":     _n,
+                                "size":     _m.get("size", 0),
+                                "loaded":   _n in _resident,
+                                "vram":     _resident.get(_n, {}).get("size_vram", 0),
+                                "until":    _resident.get(_n, {}).get("until", ""),
+                            })
+                    except Exception as _e:
+                        LOG.warning("ai_models: ollama not answering: %s", _e)
+                    await websocket.send(json.dumps(
+                        {"type": "ai_models", "models": _models}))
+
+                elif action in ("ai_load", "ai_unload"):
+                    # Load / unload a model from VRAM.
+                    #
+                    # WHY THIS EXISTS: kldload ships OLLAMA_KEEP_ALIVE=-1, which
+                    # pins a model in VRAM indefinitely so Bob answers instantly
+                    # and never vanishes from the nav. The cost is that models
+                    # NEVER release on their own — switch models a few times and
+                    # every one of them is still resident. On a host that is also
+                    # running VMs that is how you arrive at "nothing launches":
+                    # .131 hit 3 GB free of 62 GB with a 9 GB model pinned.
+                    #
+                    # Ollama's documented control is keep_alive on a generate
+                    # call: 0 unloads immediately, -1 pins. No prompt is sent, so
+                    # this is purely a residency change and costs no inference.
+                    _m = (msg.get("model") or "").strip()
+                    if not _m:
+                        await websocket.send(json.dumps(
+                            {"type": "ai_model_op", "ok": False,
+                             "error": "no model given"}))
+                    else:
+                        _ka = -1 if action == "ai_load" else 0
+                        _body = json.dumps({
+                            "model": _m, "prompt": "", "stream": False,
+                            "keep_alive": _ka}).encode()
+                        try:
+                            import urllib.request
+                            _rq = urllib.request.Request(
+                                "http://127.0.0.1:11434/api/generate", data=_body,
+                                headers={"Content-Type": "application/json"})
+                            # Loading a 9 GB model off disk is not instant.
+                            urllib.request.urlopen(_rq, timeout=180).read()
+                            _verb = "loaded" if action == "ai_load" else "unloaded"
+                            LOG.info("ai: %s %s", _verb, _m)
+                            await websocket.send(json.dumps(
+                                {"type": "ai_model_op", "ok": True,
+                                 "model": _m, "state": _verb}))
+                        except Exception as _e:
+                            LOG.warning("ai %s failed for %s: %s", action, _m, _e)
+                            await websocket.send(json.dumps(
+                                {"type": "ai_model_op", "ok": False,
+                                 "model": _m, "error": str(_e)}))
+
                 elif action == "snapshot_list":
                     # Sort newest-first (-S creation) so the most recent
                     # snaps land at the top of the panel. Previously
