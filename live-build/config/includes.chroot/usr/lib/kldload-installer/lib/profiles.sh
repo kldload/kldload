@@ -1707,7 +1707,25 @@ idle-activation-enabled=false
 DCONF
     mkdir -p "${target}/etc/dconf/profile"
     echo -e "user-db:user\nsystem-db:local" >"${target}/etc/dconf/profile/user"
-    chroot "${target}" dconf update 2>/dev/null || true
+    # Compile the dconf database INTO the install, and verify it landed.
+    #
+    # This was `dconf update 2>/dev/null || true`. When it failed there was no
+    # /etc/dconf/db/local, GNOME fell back to its own defaults, and nothing said
+    # so — the operator got a LIGHT desktop with stock favourites and no app
+    # folders on a build that reported success (.131, 2026-08-15).
+    #
+    # It must work at INSTALL time, not just in firstboot's healing net: the
+    # database is what the very first login reads, so a firstboot-only fix still
+    # shows the user a light, unorganised desktop the first time they see the
+    # machine. Failure is reported and left to firstboot to heal rather than
+    # aborting the install — a wrong-looking desktop is not worth failing an
+    # otherwise good install over, but it is absolutely worth logging.
+    if chroot "${target}" dconf update &&
+        [[ -s "${target}/etc/dconf/db/local" ]]; then
+        k_log "desktop: dconf database compiled into target ($(stat -c %s "${target}/etc/dconf/db/local") bytes)"
+    else
+        k_log "WARNING: dconf update failed on target — first login will show GNOME defaults (light theme, stock favourites); kldload-firstboot will retry"
+    fi
 
     # ── Custom .desktop launchers ───────────────────────────────────────────────
     # kst-dashboard.desktop removed 2026-06-05 — operator feedback was that the
