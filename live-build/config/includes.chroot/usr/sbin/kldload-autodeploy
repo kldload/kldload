@@ -947,6 +947,67 @@ if [[ "${WANT[klab]}" == "1" ]]; then
     fi
 fi
 
+# ── Quiesce: built is not the same as running ────────────────────────────────
+# Everything above BUILDS VMs. Almost none of them need to stay powered on, and
+# leaving them up is what makes a freshly-built machine feel broken:
+#
+#   .131, 2026-08-15 — a full-toggle install finished with 16 VMs running and
+#   3 GB of 62 GB free. Chromium could not allocate, so every desktop tile and
+#   the web console "did not launch". Nothing had failed; the host was simply
+#   out of memory because a build left its scaffolding standing.
+#
+# What stays up, and why:
+#   - KEEP_CPS control planes + KEEP_WORKERS workers, so the cluster is usable
+#     the moment the operator looks at it. Default 2+2. Two of a three-member
+#     etcd is still a strict majority, so quorum holds with one CP powered off;
+#     this is why the cluster is BUILT with three and RUN with two.
+#   - Everything else is off: goldens are templates that exist to be cloned,
+#     blue/green sites are clones waiting for a test run, and ztest images are
+#     inputs to a suite that starts them itself.
+#
+# Nothing is destroyed — `virsh start <vm>` brings any of it back, and the
+# tools that use these VMs start them on demand.
+#
+# Override with KLDLOAD_KEEP_CPS / KLDLOAD_KEEP_WORKERS; 0 powers all of them
+# down, which is right for a build host that is not also the lab.
+quiesce_idle_vms() {
+    command -v virsh >/dev/null 2>&1 || return 0
+    local _keep_cp="${KLDLOAD_KEEP_CPS:-2}" _keep_w="${KLDLOAD_KEEP_WORKERS:-2}"
+    local _vm _cp_seen=0 _w_seen=0 _off=0
+
+    log "[quiesce] powering down idle VMs (keeping ${_keep_cp} CP + ${_keep_w} workers)"
+    while read -r _vm; do
+        [[ -n "$_vm" ]] || continue
+        case "$_vm" in
+        *-cp | *-cp-*)
+            _cp_seen=$((_cp_seen + 1))
+            ((_cp_seen <= _keep_cp)) && continue
+            ;;
+        *-w-*)
+            _w_seen=$((_w_seen + 1))
+            ((_w_seen <= _keep_w)) && continue
+            ;;
+        esac
+        # A guest that ignores ACPI is not a failure worth aborting for — it is
+        # reported and left running, because forcing it off could corrupt a
+        # golden mid-write.
+        if virsh shutdown "$_vm" >/dev/null 2>&1; then
+            _off=$((_off + 1))
+            log "[quiesce]   shutdown ${_vm}"
+        else
+            log "[quiesce]   WARN ${_vm} did not accept shutdown — left running"
+        fi
+    done < <(virsh list --name --state-running 2>/dev/null)
+
+    log "[quiesce] ${_off} VM(s) powered down; start any of them with: virsh start <name>"
+}
+
+# Only quiesce when this run actually built something. A re-run that did no
+# work must not power off VMs the operator started themselves since.
+if [[ "${WANT[klab]}" == "1" || "${WANT[k8s]}" == "1" ]]; then
+    quiesce_idle_vms
+fi
+
 # ── Final: overall ready marker ──────────────────────────────────────────────
 # All requested phases must have written their marker. Unrequested phases
 # count as satisfied. This is what firstboot_status keys off.
