@@ -2103,7 +2103,13 @@ OLLAMA
                 if [[ -d /root/darksite/ollama/models ]]; then
                     mkdir -p /srv/ollama/models
                     log "Rehydrating Ollama models from darksite..."
-                    rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ >>"${LOG}" 2>&1 &&
+                    # rsync when present, cp -a otherwise: rsync is not
+                    # installed on a Debian target (see line ~3394 history).
+                    if command -v rsync >/dev/null 2>&1; then
+                        rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ >>"${LOG}" 2>&1
+                    else
+                        cp -a /root/darksite/ollama/models/. /srv/ollama/models/ >>"${LOG}" 2>&1
+                    fi &&
                         ok "Darksite models copied to /srv/ollama/models" ||
                         log "WARNING: darksite rehydrate failed — will pull from internet"
                     chown -R ollama:ollama /srv/ollama 2>/dev/null || true
@@ -3388,10 +3394,25 @@ CHROMEPOL
         # internet, not the local mirror — but the mirror dir itself stays
         # so other machines can point at it.
         if [[ -d /root/darksite ]]; then
-            if [[ -d /root/darksite/ollama/models ]] && [[ ! -f /srv/ollama/models/manifests/registry.ollama.ai/library/qwen2.5/14b && ! -f /srv/ollama/models/manifests/registry.ollama.ai/library/llama3.1/8b ]]; then
+            # Rehydrate only when nothing is there yet. The old guard tested for
+            # qwen2.5/14b and llama3.1/8b — models we stopped shipping — so it
+            # could never see an existing install and re-copied 11 GB on every
+            # run. Test for ANY manifest instead, so this stays correct the next
+            # time the shipped model changes.
+            if [[ -d /root/darksite/ollama/models ]] &&
+                ! compgen -G "/srv/ollama/models/manifests/registry.ollama.ai/library/*/*" >/dev/null; then
                 mkdir -p /srv/ollama/models
                 log "Rehydrating Ollama models from darksite (before darksite cleanup)..."
-                rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ 2>&1 | tail -3
+                # cp, not rsync: rsync is absent on a Debian target and this
+                # line exited 127 and took the whole firstboot service with it,
+                # leaving the model stranded in /root/darksite (.131,
+                # 2026-08-15). cp -a is coreutils — it is always there. rsync is
+                # still preferred when present for its progress/partial handling.
+                if command -v rsync >/dev/null 2>&1; then
+                    rsync -a /root/darksite/ollama/models/ /srv/ollama/models/ 2>&1 | tail -3
+                else
+                    cp -a /root/darksite/ollama/models/. /srv/ollama/models/
+                fi
                 chown -R ollama:ollama /srv/ollama 2>/dev/null || true
                 log "Ollama models rehydrated: $(du -sh /srv/ollama/models 2>/dev/null | cut -f1)"
             fi

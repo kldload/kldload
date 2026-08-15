@@ -677,6 +677,15 @@ k_install_target_packages() {
         systemd-sysv
         initramfs-tools
         sudo
+        # rsync — NOT optional. kldload-firstboot rehydrates the Ollama models
+        # out of /root/darksite with it, and on Debian it was absent: the RPM
+        # path lists rsync in _dnf_pkgs but this array never did. firstboot hit
+        # "line 3394: rsync: command not found", exited 127 and the whole
+        # kldload-firstboot.service failed — with the 11 GB model sitting in
+        # /root/darksite and /srv/ollama/models empty, so the AI was dead on
+        # arrival (.131, 2026-08-15). The call sites also fall back to cp now;
+        # this is the other half of that pair.
+        rsync
         openssh-server
         network-manager
         qemu-guest-agent
