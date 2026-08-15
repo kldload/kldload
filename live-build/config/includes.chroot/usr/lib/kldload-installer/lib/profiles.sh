@@ -83,6 +83,7 @@ k_profile_packages() {
           gnome-keyring \
           webkitgtk6.0 gtk4 python3-gobject \
           pulseaudio-utils \
+          speech-dispatcher espeak-ng \
           tmux python python-websockets python-yaml htop net-tools wireguard-tools iproute2 fzf bat eza fd ripgrep zoxide podman fastfetch"
             ;;
         core)
@@ -285,6 +286,7 @@ k_profile_packages() {
         ${_browser} ${_nsstools} \
         gir1.2-webkit-6.0 libgtk-4-1 python3-gi \
         pulseaudio-utils \
+        speech-dispatcher espeak-ng \
         tmux eject sanoid python3 python3-websockets python3-yaml htop iotop lm-sensors net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
         zenity chromium"
         ;;

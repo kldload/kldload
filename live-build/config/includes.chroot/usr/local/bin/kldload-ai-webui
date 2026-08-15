@@ -129,6 +129,13 @@ fi
 ((_have == 1)) || exit 0
 
 # ── the container ────────────────────────────────────────────────────────────
+# HOST=127.0.0.1 because this runs with --network host, so whatever Open
+# WebUI binds is bound on the machine itself. It defaults to 0.0.0.0, which
+# made it the ONE service on a kldload box handing out an unencrypted session
+# on every interface while the console, Grafana and k9s all sat behind TLS on
+# 8443 (found 2026-08-15). It is reached at https://<host>:8443/ai/ now, so it
+# inherits that certificate and front door. The desktop tile still opens
+# http://ollama:8080/ on the machine itself, which is loopback and fine.
 # RAG embeddings are pointed at Ollama's nomic-embed-text, which the darksite
 # ships. The upstream default is a sentence-transformers model fetched from
 # HuggingFace at first use — the same offline failure as Whisper, one layer up.
@@ -141,6 +148,7 @@ if "$_crt" run -d \
     -v "${DATA}:/app/backend/data:z" \
     -v "${WHISPER}:/whisper:z,ro" \
     -e OLLAMA_BASE_URL=http://127.0.0.1:11434 \
+    -e HOST=127.0.0.1 \
     -e OFFLINE_MODE=true \
     -e WHISPER_MODEL=/whisper/base \
     -e RAG_EMBEDDING_ENGINE=ollama \
