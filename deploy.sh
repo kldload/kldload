@@ -254,17 +254,22 @@ cmd_build_ollama_darksite() {
     runtime="$(detect_runtime)"
     local darksite_dir="$ROOT/live-build/darksite-ollama-cache"
     mkdir -p "$darksite_dir"
-    # Bake the model kldload-autodeploy ACTUALLY ASKS FOR — qwen3:14b, ~9 GB.
+    # Bake the SMALL chat model — llama3.2:3b, ~2 GB — plus the embedder.
     #
-    # 100% darksite is the goal: a fresh install must reach a working Bob with
-    # the network unplugged. Shipping a smaller model than the runtime selects
-    # does not achieve that — autodeploy's VRAM tier picks qwen3:14b on any
-    # card with >=8 GB, so a 3b in the ISO just means a 9 GB download anyway.
+    # 100% darksite is still the goal: a fresh install must reach a working
+    # assistant with the network unplugged. The size of the model is what
+    # changed, not the ambition.
     #
-    # Cost: ~9 GB of ISO. Offsets: dropping the Ubuntu darksite frees ~2.6 GB,
-    # and this removes the single largest first-boot download.
-    # Operator decision 2026-08-14: "bite the bullet and add the 9 gig llm so
-    # gtg without having to download anything .. I want 100% darksite".
+    # WHY SMALL BEAT BIG (operator decision 2026-08-15, superseding the
+    # 2026-08-14 "bite the bullet and add the 9 gig llm" call):
+    #   * qwen3:14b needs >=8 GB VRAM or kldload-autodeploy's [ai] phase skips
+    #     the assistant entirely (KLDLOAD_MIN_AI_VRAM_GB). So the 9 GB payload
+    #     did nothing at all on any machine without a big GPU — it made
+    #     out-of-the-box work on FEWER machines, not more.
+    #   * llama3.2:3b runs on CPU, so every machine gets a working assistant.
+    #   * ~9 GB off the ISO is most of a build-and-burn cycle.
+    # An operator who wants a 14b pulls it in one command once they have a
+    # network; that beats every ISO paying for it.
     #
     # This value is load-bearing in two other places — keep them in step:
     #   * build/darksite-ollama/build-darksite-ollama.sh (MODELS=)
@@ -276,7 +281,7 @@ cmd_build_ollama_darksite() {
     # downloaded ~9 GB regardless of what the ISO carried.
     # kldload-autodeploy now prefers ANY model already present over its own
     # tier choice, so the exact name here no longer has to match its tiers.
-    local models="${OLLAMA_MODELS:-qwen3:14b nomic-embed-text}"
+    local models="${OLLAMA_MODELS:-llama3.2:3b nomic-embed-text}"
 
     # ── The RUNTIME, not just the weights ────────────────────────────────
     # Without this the darksite ships ~2-9 GB of model weights to a machine
@@ -488,8 +493,8 @@ cmd_build() {
         # for a distro that is a Debian variant. CentOS/Rocky/Arch cost zero ISO
         # bytes because they were never darksited at all.
         #
-        # Dropping it frees ~2.6 GB, which is most of the room the qwen3:14b
-        # model needs, and removes the leg that aborted an ISO build on
+        # Dropping it frees ~2.6 GB — more than the entire baked model set now
+        # costs (~2.2 GB) — and removes the leg that aborted an ISO build on
         # 2026-08-14 (a Debian-shaped resolvability gate run against an Ubuntu
         # mirror).
         #
@@ -539,25 +544,40 @@ cmd_build() {
             log "Fedora darksite cached: $(du -sh "$fedora_darksite" | cut -f1)"
         fi
 
-        # Ollama model darksite — opt-IN as of 1.0.5. By default the ISO
-        # ships WITHOUT baked-in LLM weights (saves ~9 GB / ~46% of the
-        # ISO). On first boot with Bob enabled, kldload-firstboot falls
-        # back to pulling qwen2.5:14b from ollama.com — same model,
-        # ~5 min on a typical home connection. Users who need offline
-        # AI (air-gapped labs, classified networks) have two options:
+        # Ollama model darksite — OPT-IN. No model weights ship by default.
         #
-        #   1. Build the darksite in: KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1
-        #      on the deploy.sh build command — rebuilds the ISO with
-        #      the weights embedded (~17 GB total).
+        # THE SHAPE OF THE DECISION (operator, 2026-08-15):
+        #   default build   → Ollama + Open WebUI installed, set up and running,
+        #                     with an EMPTY model list. The operator pulls the
+        #                     model they want: `ollama pull <name>`, or straight
+        #                     from the model picker in the Open WebUI window.
+        #   =1 at build time → the model is downloaded during the ISO build,
+        #                     baked into the image, and installs offline. This
+        #                     is the air-gapped path and it costs ISO size.
         #
-        #   2. BYOM (Bring Your Own Models) after install — drop the
-        #      Ollama model tree into /root/darksite/ollama/models/ on
-        #      the installed target (rsync from a box that already
-        #      pulled it, or copy from a pre-populated USB). On next
-        #      boot kldload-firstboot detects the directory and
-        #      rsyncs it into /srv/ollama/models/ before starting
-        #      Ollama — same offline behaviour, no rebuild.
-        if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-1}" == "1" ]]; then
+        # WHY THIS IS THE RIGHT DEFAULT: the interface needs no model to work.
+        # Open WebUI is a frontend — it starts with zero models and offers a
+        # picker. So "everything set up and ready to go" is fully delivered
+        # without shipping weights, and shipping weights only pre-answers a
+        # question (WHICH model) that the operator is better placed to answer.
+        # Most people are not air-gapped and would rather have the smaller ISO
+        # and their own choice of model.
+        #
+        # WARN: with this at 0 an AIR-GAPPED install gets the interface and no
+        # model, and no way to fetch one. Air-gapped builds must set
+        # KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1. That is the whole point of the flag.
+        #
+        # kldload-autodeploy sets Ollama and Open WebUI up BEFORE it looks at
+        # models or VRAM, precisely so this default cannot produce a machine
+        # with no interface.
+        #
+        # BYOM (Bring Your Own Models) after install — drop the Ollama model
+        # tree into /root/darksite/ollama/models/ on the installed target
+        # (rsync from a box that already pulled it, or copy from a
+        # pre-populated USB). On next boot kldload-firstboot detects the
+        # directory and rsyncs it into /srv/ollama/models/ before starting
+        # Ollama — same offline behaviour, no rebuild.
+        if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" == "1" ]]; then
             local ollama_darksite="$ROOT/live-build/darksite-ollama-cache"
             # Verify the REQUESTED models are present, not merely that the
             # cache holds something. The old test (`library/*/*`) passed on any
@@ -565,7 +585,7 @@ cmd_build() {
             # shipped the previous model while the runtime asked for the new
             # one — the same presence-vs-correctness trap that shipped a broken
             # Debian mirror on 2026-08-14.
-            _ol_want="${OLLAMA_MODELS:-qwen3:14b nomic-embed-text}"
+            _ol_want="${OLLAMA_MODELS:-llama3.2:3b nomic-embed-text}"
             _ol_missing=0
             for _m in $_ol_want; do
                 _mn="${_m%%:*}"
@@ -735,7 +755,7 @@ cmd_build() {
         -e RELEASE="$RELEASE" \
         -e ISO_NAME_OVERRIDE="${ISO_NAME_OVERRIDE:-}" \
         -e BOB_LIVE="${BOB_LIVE:-}" \
-        -e KLDLOAD_INCLUDE_OLLAMA_DARKSITE="${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-1}" \
+        -e KLDLOAD_INCLUDE_OLLAMA_DARKSITE="${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" \
         -e KLDLOAD_INCLUDE_UBUNTU_DARKSITE="${KLDLOAD_INCLUDE_UBUNTU_DARKSITE:-0}" \
         -e KLDLOAD_ZFS_GIT="${KLDLOAD_ZFS_GIT:-}" \
         -e KLDLOAD_DEBUG_ALLOW="${KLDLOAD_DEBUG_ALLOW:-}" \
@@ -1236,8 +1256,10 @@ Build:
   build-debian-darksite  Rebuild the Debian APT offline mirror cache
   build-ubuntu-darksite  Rebuild the Ubuntu APT offline mirror cache
   build-fedora-darksite  Rebuild the Fedora RPM offline mirror cache
-  build-ollama-darksite  Pre-pull the Ollama model (qwen3:14b, ~9GB) for offline Bob
-                         Included in the ISO by default; KLDLOAD_INCLUDE_OLLAMA_DARKSITE=0 to omit
+  build-ollama-darksite  Pre-pull the Ollama models (llama3.2:3b + nomic-embed-text, ~2.2GB) for offline AI
+                         OPT-IN: build with KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1 to bake them into
+                         the ISO for an air-gapped install. By default no weights ship — Ollama
+                         and Open WebUI are still installed and running, with an empty model list.
   build-k8s-darksite     Pre-pull Kubernetes + Cilium container images
   build-ai-docs          Scrape website + OCR PDF for AI knowledge base
   build-ai-appliance     Build self-contained Bob AI appliance ISO

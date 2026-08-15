@@ -77,8 +77,11 @@ every combination.
 
 ## AI
 
-- **Bob** — a local, GPU-resident LLM assistant (Ollama, qwen3), **offline**, no
-  data leaves the box; voice via Chrome's Web Speech API.
+- **Ollama + Open WebUI** — a local LLM assistant, **offline**, no data leaves
+  the box. The ISO bakes `llama3.2:3b` (~2 GB) plus the `nomic-embed-text`
+  embedder, so an air-gapped install is chat-ready with nothing to download;
+  a 3B model runs on CPU, so this works without a GPU. Pull a larger model
+  (`ollama pull qwen3:14b`) once you have a network.
 
 ## Control plane
 

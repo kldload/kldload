@@ -390,6 +390,13 @@ KLDLOAD_SECURE_BOOT=${KLDLOAD_SECURE_BOOT:-1}
 KLDLOAD_ENABLE_SECURE_BOOT=${KLDLOAD_ENABLE_SECURE_BOOT:-1}
 KLDLOAD_TPM_PRESENT=${KLDLOAD_TPM_PRESENT:-0}
 KLDLOAD_ENABLE_AI=${KLDLOAD_ENABLE_AI:-0}
+# Install the AI stack (KLDLOAD_ENABLE_AI) and download a model are SEPARATE
+# choices. The first gets Ollama + Open WebUI, set up and running with an empty
+# model list, on any profile. The second is an opt-in multi-GB download, off by
+# default: which model to run is the operator's call, and Open WebUI's picker
+# makes it a two-click job later. An ISO built with
+# KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1 carries weights already and ignores this.
+KLDLOAD_AI_PULL_MODEL=${KLDLOAD_AI_PULL_MODEL:-0}
 KLDLOAD_BOB_MODEL=${KLDLOAD_BOB_MODEL:-recommended}
 KLDLOAD_BOB_DARKSITE=${KLDLOAD_BOB_DARKSITE:-0}
 KLDLOAD_ENABLE_KVM=${KLDLOAD_ENABLE_KVM:-0}

@@ -85,8 +85,15 @@ change.
 
 ## Also worth fixing while in here
 
-`kldload-autodeploy` pulls `qwen3:14b` (~9 GB) unconditionally and never
-checks what is already on disk, while the darksite ships `llama3.2:3b`.
-On an air-gapped install that download simply fails and the assistant
-has no model. `kldload-firstboot` already has the "prefer what is local"
-check; autodeploy needs the same.
+~~`kldload-autodeploy` pulls `qwen3:14b` (~9 GB) unconditionally and never
+checks what is already on disk, while the darksite ships `llama3.2:3b`.~~
+**Fixed.** autodeploy now takes any model already present (pulled or in the
+darksite) over its own VRAM-tier choice, and as of 2026-08-15 the darksite
+bakes `llama3.2:3b` deliberately — small enough to run on CPU, which the
+14b could not, so the offline assistant now works on every machine rather
+than only on ones with ≥8 GB of VRAM.
+
+One trap that came with it: the darksite now holds exactly two manifests,
+one chat and one embedding model. Both of autodeploy's discovery paths had
+to learn to skip `nomic-embed-text`, or an air-gapped box could configure
+the assistant with an embedding model that cannot answer a prompt.

@@ -654,17 +654,34 @@ html.kld-app #term-drawer{display:none!important;}
                 <div style="font-size:1.5rem;margin-bottom:0.3rem">🖥</div>
                 <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Auto-start GUI</div>
               </div>
-              <!-- Bob AI opt-in card. Mirrors the install-bob checkbox (which
-                   feeds enable_ai → KLDLOAD_ENABLE_AI). firstboot installs
-                   Ollama + builds the bob model when that flag is set on ANY
-                   profile (kldload-firstboot gates on ROLE==ai OR ENABLE_AI),
-                   so this card surfaces Bob without picking the AI profile.
-                   GPU sharing with games is handled post-install by bobctl. -->
-              <div class="opt-card" id="opt-bob" onclick="toggleOpt('bob')" title="Local AI — installs Ollama with a small model bundled on this ISO (no download, works offline). Pull bigger models later from the model picker. Available on any profile. After install, free/load the GPU with bobctl (or the Bob: Gaming Mode menu item)." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+              <!-- AI stack opt-in. Feeds enable_ai → KLDLOAD_ENABLE_AI, which
+                   works on ANY profile (kldload-firstboot gates on ROLE==ai OR
+                   ENABLE_AI), so the AI stack does not require picking the AI
+                   profile.
+                   This installs the ENGINE AND THE INTERFACE ONLY. No model
+                   weights ship by default as of 2026-08-15 — Open WebUI starts
+                   with an empty model list and its picker pulls one in two
+                   clicks. The separate card below asks for a model up front. -->
+              <div class="opt-card" id="opt-bob" onclick="toggleOpt('bob')" title="Local AI — installs Ollama plus the Open WebUI interface, set up and running on any profile. No model is downloaded: Open WebUI opens with an empty model list and you pull the one you want from its picker. Tick 'AI model' as well to have the installer download one during first boot." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
                 <div style="font-size:1.5rem;margin-bottom:0.3rem">🤖</div>
                 <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Ollama</div>
               </div>
+              <!-- Model download opt-in — deliberately SEPARATE from the stack.
+                   "Install the AI stack" and "spend several GB of bandwidth"
+                   are different decisions, and the second is a poor default on
+                   a metered or slow link. Feeds ai_pull_model →
+                   KLDLOAD_AI_PULL_MODEL, which kldload-autodeploy reads just
+                   before the download step. An ISO built with
+                   KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1 already carries weights and
+                   ignores this entirely. -->
+              <div class="opt-card" id="opt-aimodel" onclick="toggleOpt('aimodel')" title="Download an AI model during first boot (~2 GB, needs a network). Leave this off to finish the install faster and choose your own model later from the Open WebUI picker. Ignored on an air-gapped ISO built with the model already baked in. Needs the Ollama card ticked." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
+                <div style="font-size:1.5rem;margin-bottom:0.3rem">⬇</div>
+                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">AI model</div>
+              </div>
             </div>
+            <!-- Hidden checkbox the card drives; toggleOpt()/submit read it by
+                 id, exactly as they do for every other opt-card. -->
+            <input type="checkbox" id="install-ai-model" style="display:none">
             <!-- kldload Workstation "lab" extras — shown only on the desktop profile
                  (selectTarget() toggles #opt-lab-cluster). Each card flips a flag the
                  distro-aware backend already acts on; default all-off = plain workstation. -->
@@ -5370,7 +5387,7 @@ const DISTRO_DESCS = {
   windows:  'Microsoft Windows — bare-metal install from your install.wim ISO (Desktop/Downloads/USB)',
 };
 function toggleOpt(name) {
-  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', images: 'install-images', zxplore: 'install-zxplore'};
+  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', aimodel: 'install-ai-model', images: 'install-images', zxplore: 'install-zxplore'};
   var cb = document.getElementById(map[name]);
   var card = document.getElementById('opt-' + name);
   if (!cb || !card) return;
@@ -5408,7 +5425,7 @@ function selectAllExtras() {
 // Init option cards on load
 document.addEventListener('DOMContentLoaded', function() {
   ['wireguard','nvidia','ebpf','dedup','secure-boot','webui','bob','kvm','k8s','images','zxplore'].forEach(function(name) {
-    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', images: 'install-images', zxplore: 'install-zxplore'};
+    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', aimodel: 'install-ai-model', images: 'install-images', zxplore: 'install-zxplore'};
     var cb = document.getElementById(map[name]);
     var card = document.getElementById('opt-' + name);
     if (cb && card && cb.checked) {
@@ -5886,6 +5903,12 @@ function startInstall() {
     // profiles want. On kldlab/k8s/kvm/zfslab, default is set from GPU
     // auto-detection (refreshSystemInfo) and user can override.
     enable_ai: document.getElementById('install-bob')?.checked ? '1' : '0',
+    // ai_pull_model → KLDLOAD_AI_PULL_MODEL. Separate from enable_ai on
+    // purpose: enable_ai installs Ollama + Open WebUI and downloads nothing,
+    // this asks the installer to also fetch a model during first boot.
+    // Default unchecked, so a plain AI install costs no bandwidth and still
+    // lands a working interface with a model picker.
+    ai_pull_model: document.getElementById('install-ai-model')?.checked ? '1' : '0',
     // Bob model selection (tier name — firstboot maps to Ollama model).
     // bob_darksite=1 → expect /root/darksite/ollama/models/ pre-staged.
     bob_model: document.querySelector('input[name="bob-model"]:checked')?.value || 'recommended',
