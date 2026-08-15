@@ -285,7 +285,7 @@ k_profile_packages() {
         ${_browser} ${_nsstools} \
         gir1.2-webkit-6.0 libgtk-4-1 python3-gi \
         pulseaudio-utils \
-        tmux eject sanoid python3 python3-websockets python3-yaml htop iotop lm_sensors net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
+        tmux eject sanoid python3 python3-websockets python3-yaml htop iotop lm-sensors net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
         zenity chromium"
         ;;
 
@@ -1255,6 +1255,35 @@ DASHSTART
             chmod +x "${target}/usr/local/bin/${_name}"
         done
         shopt -u nullglob
+
+        # ── Component DEFINITIONS ───────────────────────────────────────
+        #
+        # kldload-component itself rides the k* glob above, so the CLI has
+        # always landed. Its definitions do not: they live in
+        # /usr/lib/kldload/components/*.component, which is a data directory
+        # no glob here touches. The result is a tool that installs perfectly
+        # and manages nothing.
+        #
+        # HISTORY: 2026-08-15, .145. `kldload-component list` printed its
+        # header row and not one component. /usr/lib/kldload did not exist on
+        # the target at all. Every optional component — ai, k8s, klab, kvm,
+        # zfslab — was therefore un-installable and un-removable on every
+        # machine kldload has ever installed, with no error anywhere: the CLI
+        # was present, it ran, it just had an empty catalogue. This is the
+        # same shape as the vmxplore launcher-without-a-binary bug recorded
+        # forty lines above, and the same lesson — shipping the entry point
+        # is not shipping the feature.
+        if [[ -d /usr/lib/kldload/components ]]; then
+            mkdir -p "${target}/usr/lib/kldload/components"
+            if cp -a /usr/lib/kldload/components/. \
+                "${target}/usr/lib/kldload/components/" 2>/dev/null; then
+                k_log "installed component definitions ($(find /usr/lib/kldload/components -name '*.component' | wc -l) components)"
+            else
+                k_log "WARNING: component definitions failed to copy — kldload-component will list nothing"
+            fi
+        else
+            k_log "WARNING: /usr/lib/kldload/components missing from the live env — kldload-component will list nothing"
+        fi
 
         # ── Install ansible-core NOW, at install time, not first boot. ──
         # Autodeploy + kube-cluster + klab all call ansible-playbook for
