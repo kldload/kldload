@@ -127,5 +127,19 @@ func (s Snapshot) Verdict() (Level, string) {
 	return LevelReady, "This system is ready."
 }
 
+// Complete reports whether the build has finished successfully, which is the
+// question the progress bar should answer.
+//
+// It is NOT the same as "every phase file says done". autodeploy writes the
+// all-ready marker and then exits, and the final phase file is left saying
+// "running" -- so a finished machine showed a headline of "This system is
+// ready" above a bar stuck at 6 of 7, 85%, which reads as an install that
+// stalled at the last step (reported 2026-08-15). The marker is the
+// authority on completion; the phase files are the authority on detail.
+func (s Snapshot) Complete() bool {
+	lvl, _ := s.Verdict()
+	return lvl == LevelReady
+}
+
 // Headline is the Verdict sentence alone.
 func (s Snapshot) Headline() string { _, msg := s.Verdict(); return msg }

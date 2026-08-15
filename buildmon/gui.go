@@ -426,13 +426,27 @@ func (g *gui) refresh(full bool) {
 			g.sub.SetText("All build phases finished and nothing was flagged.")
 		}
 
-		if f, ok := snap.Progress.Fraction(); ok {
-			g.bar.SetValue(f)
-			g.barLabel.SetText(fmt.Sprintf("%d of %d phases",
-				snap.Progress.Done(), len(snap.Progress.Phases)))
-		} else {
-			g.bar.SetValue(0)
-			g.barLabel.SetText("no phase plan")
+		switch {
+		case snap.Complete():
+			// The build is finished; say so with a full bar. autodeploy leaves
+			// the last phase file reading "running" after it writes all-ready,
+			// so trusting the phase count here showed 6 of 7 (85%) under a
+			// headline that said the system was ready.
+			g.bar.SetValue(1)
+			if snap.Progress.HasPlan {
+				g.barLabel.SetText(fmt.Sprintf("complete — %d phases", len(snap.Progress.Phases)))
+			} else {
+				g.barLabel.SetText("complete")
+			}
+		default:
+			if f, ok := snap.Progress.Fraction(); ok {
+				g.bar.SetValue(f)
+				g.barLabel.SetText(fmt.Sprintf("%d of %d phases",
+					snap.Progress.Done(), len(snap.Progress.Phases)))
+			} else {
+				g.bar.SetValue(0)
+				g.barLabel.SetText("no phase plan")
+			}
 		}
 
 		g.phases = snap.Progress.Phases

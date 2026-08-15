@@ -89,8 +89,16 @@ func printFrame(p painter, s Snapshot) {
 	fmt.Println()
 
 	if s.Progress.HasPlan {
-		fmt.Printf("  %s %d of %d phases complete\n\n",
-			p.wrap(cBold, "Progress"), s.Progress.Done(), len(s.Progress.Phases))
+		// See Snapshot.Complete(): the last phase file still says "running"
+		// once all-ready is written, so a finished build must not be reported
+		// as 6 of 7.
+		if s.Complete() {
+			fmt.Printf("  %s all %d phases complete\n\n",
+				p.wrap(cBold, "Progress"), len(s.Progress.Phases))
+		} else {
+			fmt.Printf("  %s %d of %d phases complete\n\n",
+				p.wrap(cBold, "Progress"), s.Progress.Done(), len(s.Progress.Phases))
+		}
 		for _, ph := range s.Progress.Phases {
 			icon, right, c := "·", "pending", cDim
 			switch ph.State {
