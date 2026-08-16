@@ -65,7 +65,7 @@ BUILD_DATE="$(date +%Y%m%d)"
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
 DISTRO_TAG="${DISTRO:-fedora}"
-VERSION="${KLDLOAD_VERSION:-1.4.0-rc10}"
+VERSION="${KLDLOAD_VERSION:-1.4.0-rc11}"
 ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
@@ -2233,10 +2233,46 @@ HELMCHARTS
     # goldens). Without it on the live ISO the installer's cp to target is
     # a silent no-op, which is the 1.0.4/1.0.5 root cause for installs
     # finishing but never building goldens, K8s, or AI.
-    for sbin_tool in kldload-install-target kldload-firstboot kldload-autodeploy kldload-recovery kldload-snapshot kldload-apply-platform-holds kldload-export-deferred; do
+    for sbin_tool in kldload-install-target kldload-firstboot kldload-autodeploy kldload-recovery kldload-snapshot kldload-apply-platform-holds kldload-export-deferred kldload-rollback; do
         src="/build/live-build/config/includes.chroot/usr/sbin/${sbin_tool}"
         [[ -f "$src" ]] && cp "$src" "${ROOTFS}/usr/sbin/${sbin_tool}" && chmod +x "${ROOTFS}/usr/sbin/${sbin_tool}"
     done
+
+    # ─── systemd units shipped via includes.chroot ────────────────────────
+    # Copied WHOLESALE, deliberately, because the alternative was a hand
+    # written `cp` per unit and that list silently rotted: of the 11 units in
+    # includes.chroot/etc/systemd/system, only bob-live and kldload-autoinstall
+    # had a copy line, so NINE never reached the ISO at all (verified by
+    # mounting the rc10 squashfs, 2026-08-16).
+    #
+    # The consequences were all of the same shape — a feature that looked
+    # shipped and did nothing:
+    #   kldload-package-holds   the kernel went unheld on every install; the
+    #                           installer's `systemctl enable` failed because
+    #                           the unit was not there to enable
+    #   kldload-zfs-dbgmsg.*    nothing drained the ZFS kstat, so the
+    #                           "kernel's own narration" dashboard was empty
+    #   kldload-apt-snapshot    apt's pre-transaction snapshot never fired
+    #   kldload-*snapshot.timer scheduled snapshots never ran
+    #
+    # Copying a unit is NOT enabling it: without a *.wants symlink systemd
+    # ignores it, and the units that must start are enabled explicitly further
+    # down (or by the installer on the target). So a blanket copy is safe, and
+    # it means a new unit is picked up automatically instead of waiting to be
+    # discovered missing by whoever mounts the next squashfs.
+    _unit_src="/build/live-build/config/includes.chroot/etc/systemd/system"
+    if [[ -d "$_unit_src" ]]; then
+        mkdir -p "${ROOTFS}/etc/systemd/system"
+        _unit_n=0
+        for _unit in "${_unit_src}"/*.service "${_unit_src}"/*.timer "${_unit_src}"/*.path; do
+            [[ -f "$_unit" ]] || continue
+            cp "$_unit" "${ROOTFS}/etc/systemd/system/$(basename "$_unit")"
+            _unit_n=$((_unit_n + 1))
+        done
+        log "systemd units copied from includes.chroot: ${_unit_n}"
+    else
+        log "WARNING: ${_unit_src} missing — no shipped systemd units copied"
+    fi
 
     # Copy the sbin-level CLI tools users invoke directly.
     #   kspawn               — ZFS-native cluster spawner (new in 1.0.5)
