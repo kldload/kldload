@@ -8,7 +8,7 @@ lint sweeps are omitted unless they change behaviour.
 
 ---
 
-## 1.4.0 — unreleased (building as 1.4.0-rc7)
+## 1.4.0 — unreleased (building as 1.4.0-rc8)
 
 **The largest release the project has had.** 291 commits over two months,
 and it changes what kldload *is*: 1.3.x was an installer that left you at a
@@ -62,6 +62,50 @@ These are the ones with an incident behind them.
 - **The ZFS passphrase prompt is visible on encrypted installs**, and the
   interactive console is ordered last so an encrypted root can actually be
   typed into.
+- **A build VM that ignored the shutdown request was logged as powered
+  down.** `virsh shutdown` returns 0 when it has SENT the ACPI request, not
+  when the guest stopped, so VMs kept their RAM for the rest of the install —
+  the exact starvation the quiesce phase exists to prevent. The outcome is
+  now verified.
+- **Steam is no longer carried.** Its client is 32-bit, so shipping it meant
+  i386 multiarch on every desktop and 126 MB of 32-bit libraries in the
+  offline mirror. No target enables multiarch now; a desktop that wants Steam
+  installs it from the network in two commands.
+
+### The OpenZFS test lab, as its own application
+
+- **ztxplore** — the lab in one window: build the golden matrix, pick which
+  OpenZFS is under test (distro packages, a release version, a git ref or a
+  local tarball), run the suite, and read the result beside the evidence —
+  the kernel ring buffer classified for ZFS assertions, ARC and pool
+  metrics, and the eBPF tracers. It replaces holding five surfaces open and
+  correlating them by wall-clock time.
+- **The lab now actually runs tests.** `zfs-tests.sh` refuses to run as
+  root, and the harness reached each guest over ssh as root — so every run
+  finished in about a second having executed nothing, and wrote a summary of
+  0 pass / 0 fail / 0 skip. Anything counting failures read that as a clean
+  pass. Goldens now carry the unprivileged runner the suite expects, and a
+  complete-but-empty summary is reported as "no tests ran", not as success.
+- A run with no golden images is refused outright rather than skipping every
+  distro and reporting success in a second.
+- One combined Grafana board carrying all 51 ZFS and lab panels, composed
+  from the shipped dashboards rather than rewritten, so a panel improved on
+  its source board is the same panel there.
+
+### Containers
+
+- **Docker on the apt distros, podman on the RPM ones** — each ecosystem's
+  own choice. Both coexist.
+- **Container layers are ZFS datasets.** With the zfs storage driver a pull
+  becomes a clone, layers inherit compression, and the store — layers, the
+  engine's database and the volumes — snapshots and replicates as one
+  recursive stream. Measured: 22 datasets in one snapshot, and a container
+  cloned and running in 328 ms with its state intact.
+- **A Containers tab in zxplore**, shown only where an engine exists: start,
+  stop, restart, logs, remove, plus estate-level snapshot, rollback and
+  replicate.
+- See `docs/EVERYTHING-IS-A-DATASET.md` for the full list of what this
+  replaces, and its limits.
 
 ### Consoles
 
