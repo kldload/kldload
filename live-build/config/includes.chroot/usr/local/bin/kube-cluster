@@ -18,10 +18,13 @@
 #   clone W3 ─┘→ WireGuard mesh → kubeadm init/join → Cilium eBPF → done
 #
 # Network topology (dual WireGuard planes):
-#   wg-mgmt  (10.251.0.0/24) — management plane: SSH, kubelet, API server
-#   wg-k8s   (10.252.0.0/24) — data plane: pod-to-pod traffic, Cilium eBPF
+#   wg-mgmt  (10.250.0.0/24) — management plane: SSH, monitoring
+#   wg-k8s   (10.251.0.0/24) — data plane: kubelet, API server, Cilium eBPF
 #   Both are full-mesh: every node peers with every other node directly.
-#   kubelet is pinned to the wg-mgmt IP so all K8s traffic stays encrypted.
+#   kubelet is pinned to the wg-k8s IP so all K8s traffic stays encrypted.
+#   (Subnets and the pinned plane are kube-network's: MGMT_SUBNET/K8S_SUBNET
+#   and `pin-kubelet`, which sets --node-ip to the wg-k8s address. This block
+#   previously named the wrong subnets and the wrong plane.)
 #
 # Dependencies:
 #   Host:  zfs, qemu-img, virt-install, virsh, genisoimage/mkisofs/xorriso,
@@ -721,6 +724,34 @@ _db_event() {
     _db event --type "$1" --subject "$2" --message "$3"
 }
 
+# _cluster_node_mgmt_ips <exclude-ip> — management IP of every registered
+# cluster node except one, newline separated.
+#
+# The state DB is the only place that knows every node including the ones
+# added after bootstrap; node-register keeps it current (verified: cp-2, cp-3
+# and w-3 were all present with their IPs after their adds). jq is not
+# installed on the hypervisor, and kldload-db is python already, so parse with
+# python3 rather than adding a dependency.
+#
+# Silent-empty when kldload-db is missing, matching the other _db helpers:
+# callers treat "no inventory" as "nothing to mesh", not as an error.
+_cluster_node_mgmt_ips() {
+    local exclude="${1:-}"
+    command -v kldload-db >/dev/null 2>&1 || return 0
+    kldload-db dump 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+ex = sys.argv[1] if len(sys.argv) > 1 else ""
+for n in d.get("nodes", []) or []:
+    ip = (n.get("ip_mgmt") or "").strip()
+    if ip and ip != ex:
+        print(ip)
+' "$exclude" 2>/dev/null
+}
+
 # ── Ansible wrapper ───────────────────────────────────────────────────────
 # Runs a playbook from the kldload library against one or more IPs as root.
 # Falls back from key-based auth (cloud-init has already seeded ~/.ssh/
@@ -1389,7 +1420,7 @@ NETCFG
 # Mirrors what the bootstrap does for workers: allocate a node id, bring the
 # interface up, mesh with every existing node in both directions, then pin.
 # Node ids 1..N are already taken by the first CP and the workers, so the id
-# is derived from the highest allowed-ip currently on the plane.
+# is one past the highest node id currently registered.
 #
 # Returns 0 always: a control plane that joined the CLUSTER but not the mesh
 # is degraded, not broken, and failing the whole join here would be worse.
@@ -1397,25 +1428,96 @@ _cp_wg_join() {
     local cp_ip="$1" new_ip="$2" name="$3"
     local next_id pub
 
-    # Highest 10.251.0.N already in use, +1.
-    next_id="$(_ssh_cmd "$cp_ip" "wg show wg-k8s allowed-ips 2>/dev/null | grep -oE '10\\.251\\.0\\.[0-9]+' | cut -d. -f4 | sort -n | tail -1")"
-    [[ "$next_id" =~ ^[0-9]+$ ]] || next_id=1
+    # Discover the existing nodes once: their management IP, WireGuard pubkey
+    # and node id. Everything below is driven off this, so the plane is only
+    # walked a single time.
+    #
+    # Collected into arrays before any loop that calls _ssh_cmd: that helper
+    # passes neither -n nor </dev/null, so ssh would swallow a `while read`
+    # loop's stdin and the walk would silently stop after one node.
+    local -a peer_ips=() peer_pubs=() peer_ids=()
+    local -a _cand=()
+    mapfile -t _cand < <(_cluster_node_mgmt_ips "$new_ip")
+
+    local _ip _pub _id
+    for _ip in "${_cand[@]}"; do
+        [[ -n "$_ip" ]] || continue
+        _pub="$(_ssh_cmd "$_ip" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)" || continue
+        _id="$(_ssh_cmd "$_ip" 'cat /etc/wireguard/.node-id' 2>/dev/null)" || continue
+        _pub="${_pub//[[:space:]]/}"
+        _id="${_id//[[:space:]]/}"
+        [[ -n "$_pub" && "$_id" =~ ^[0-9]+$ ]] || continue
+        peer_ips+=("$_ip")
+        peer_pubs+=("$_pub")
+        peer_ids+=("$_id")
+    done
+
+    # One past the highest node id the CLUSTER actually has.
+    #
+    # This used to read the highest 10.251.0.N out of the first CP's
+    # allowed-ips, which counts peers that are not cluster nodes: the
+    # hypervisor sits on the plane at 10.251.0.100, so on a six-node cluster
+    # whose real maximum was 4 this produced 101, and every later control
+    # plane climbed further toward the end of the /24 (fiend, 2026-08-16).
+    # Node ids come from /etc/wireguard/.node-id, which kube-network writes
+    # and which only cluster nodes have.
+    next_id=1
+    for _id in "${peer_ids[@]}"; do
+        ((_id > next_id)) && next_id="$_id"
+    done
     next_id=$((next_id + 1))
 
     _ssh_cmd "$new_ip" "kube-network init ${next_id}" || {
         warn "${name}: could not join the WireGuard k8s plane — kubelet stays on its DHCP address"
         return 0
     }
-    pub="$(_ssh_cmd "$new_ip" "wg show wg-k8s public-key" 2>/dev/null)"
+    # Same file the bootstrap mesh reads. init generates one keypair and uses
+    # it for both planes, so wg-mgmt.pub and wg-k8s.pub are identical.
+    pub="$(_ssh_cmd "$new_ip" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null)"
+    pub="${pub//[[:space:]]/}"
     local wip="10.251.0.${next_id}"
 
-    # Mesh both directions with the existing control plane. That is enough
-    # for the API traffic and the metrics scrape; worker-to-new-CP paths are
-    # rebuilt by the bootstrap mesh pass when the cluster next scales.
-    local peer_pub
-    [[ -n "$pub" ]] && _ssh_cmd "$cp_ip" "kube-network add-peer ${wip} ${pub} ${next_id}" || true
-    peer_pub="$(_ssh_cmd "$cp_ip" "wg show wg-k8s public-key" 2>/dev/null)"
-    [[ -n "$peer_pub" ]] && _ssh_cmd "$new_ip" "kube-network add-peer 10.251.0.1 ${peer_pub} 1" || true
+    # Full mesh, both directions, against every other registered node.
+    #
+    # This peered the new control plane with the FIRST control plane only, on
+    # the theory that API traffic and the metrics scrape were all it needed.
+    # That is not what this file promises — the header says "every node peers
+    # with every other node directly" — and it is not what workers get: when
+    # w-3 was added, every pre-existing node picked up its 10.251.0.4. A
+    # control plane meshed only with cp-1 is invisible to every worker, so
+    # MetalLB speaker gossip and any worker-to-CP path over the plane has no
+    # route (fiend, 2026-08-16).
+    #
+    local _i meshed=0
+    for _i in "${!peer_ips[@]}"; do
+        # them -> new, and new -> them
+        _ssh_cmd "${peer_ips[$_i]}" "kube-network add-peer ${new_ip} ${pub} ${next_id}" ||
+            warn "${name}: ${peer_ips[$_i]} did not accept the new peer"
+        _ssh_cmd "$new_ip" "kube-network add-peer ${peer_ips[$_i]} ${peer_pubs[$_i]} ${peer_ids[$_i]}" ||
+            warn "${name}: could not add ${peer_ips[$_i]} as a peer on ${name}"
+        meshed=$((meshed + 1))
+    done
+    # The hypervisor is on this plane too, as node 100, and it is not in the
+    # node registry — so meshing "every registered node" still leaves it out.
+    #
+    # That is not cosmetic: Prometheus runs on the host and scrapes kubelet,
+    # cilium, hubble and tetragon over the wg-k8s plane. When cp-2 and cp-3
+    # came up with node IPs but no host peer, service discovery created eight
+    # new targets and every one of them was unreachable — 25 up of 33, all
+    # failures on 10.251.0.5/.6 (fiend, 2026-08-16).
+    #
+    # Endpoint is $cp_ip to match what the bootstrap writes; WireGuard learns
+    # the host's real endpoint from the first packet it receives.
+    local host_pub
+    host_pub="$(cat /etc/wireguard/wg-mgmt.pub 2>/dev/null || true)"
+    if [[ -n "$host_pub" ]] && command -v kube-network >/dev/null 2>&1; then
+        _ssh_cmd "$new_ip" "kube-network add-peer ${cp_ip} ${host_pub} 100" ||
+            warn "${name}: could not add the hypervisor as a peer — host-side scrapes will time out"
+        kube-network add-peer "$new_ip" "$pub" "$next_id" 2>/dev/null ||
+            warn "${name}: hypervisor did not accept ${name} as a peer — its metrics will not scrape"
+    fi
+
+    log "${name}: meshed with ${meshed} existing node(s) + hypervisor at 10.251.0.${next_id}"
 
     _ssh_cmd "$new_ip" "kube-network pin-kubelet" || true
     log "${name}: on the WireGuard plane at ${wip}, kubelet pinned"
@@ -1470,6 +1572,16 @@ _join_control_plane_one() {
             # WireGuard address is the whole reason the other nodes survive a
             # lease change.
             _cp_wg_join "$cp_ip" "$new_ip" "$name" || true
+
+            # Firewall the added control plane too. Bootstrap applies
+            # `kube-network nft` to the first CP and to every worker, and to
+            # nothing else — so a cluster grown past one control plane ended up
+            # with cp-2 and cp-3 unfirewalled while every other node was
+            # locked down. Same blind spot as the WireGuard address above:
+            # the added-CP path was written as "join and untaint" and never
+            # picked up the per-node setup the other paths do.
+            _ssh_cmd "$new_ip" "kube-network nft" \
+                >>"$logfile" 2>&1 || echo "[warn] nft rules not applied on ${name}" >>"$logfile"
 
             # Ordering matters: address first, then untaint, so the node
             # advertises the right IP before workloads land on it.
@@ -1753,8 +1865,13 @@ cmd_bootstrap() {
 
     # Step 3: WireGuard mesh
     # Two WireGuard interfaces per node form independent encrypted planes:
-    #   wg-mgmt (10.251.0.0/24): management traffic — SSH, kubelet<->API, etcd
-    #   wg-k8s  (10.252.0.0/24): data plane — pod-to-pod, service mesh, CNI
+    #   wg-mgmt (10.250.0.0/24): management traffic — SSH, monitoring
+    #   wg-k8s  (10.251.0.0/24): kubelet, API server, Cilium, pod-to-pod
+    #
+    # These subnets are set by kube-network (MGMT_SUBNET/K8S_SUBNET) and the
+    # numbers above were stale — this block claimed 10.251/10.252 while the
+    # running cluster uses 10.250/10.251, which matters because kubelet's
+    # advertised InternalIP is a wg-k8s address (corrected 2026-08-16).
     #
     # Separating planes prevents a pod traffic flood from starving the API
     # server, and lets you apply different MTU/QoS per interface. The topology
@@ -1769,7 +1886,7 @@ cmd_bootstrap() {
     step 3 "WireGuard Encrypted Backplane"
 
     if _ssh_cmd "$cp_ip" "command -v wg >/dev/null 2>&1"; then
-        # Init control plane as node 1 (10.251.0.1 on wg-mgmt, 10.252.0.1 on wg-k8s)
+        # Init control plane as node 1 (10.250.0.1 on wg-mgmt, 10.251.0.1 on wg-k8s)
         _ssh_cmd "$cp_ip" "kube-network init 1" || true
         local node_id=2
         for i in $(seq 0 $((WORKERS - 1))); do
@@ -1951,9 +2068,14 @@ cmd_bootstrap() {
 
     # Apply nftables firewall rules. This locks down each node to only accept
     # K8s traffic on WireGuard interfaces and SSH on the management plane.
-    _ssh_cmd "$cp_ip" "kube-network nft" 2>/dev/null || true
+    # Not swallowed: a firewall that silently fails to apply looks identical
+    # to one that applied, and the node stays open. Record which node it was.
+    _ssh_cmd "$cp_ip" "kube-network nft" ||
+        warn "nft rules not applied on control plane ${cp_ip} — node left unfirewalled"
     for i in $(seq 0 $((WORKERS - 1))); do
-        [[ -n "${worker_ips[$i]:-}" ]] && _ssh_cmd "${worker_ips[$i]}" "kube-network nft" 2>/dev/null || true
+        [[ -z "${worker_ips[$i]:-}" ]] && continue
+        _ssh_cmd "${worker_ips[$i]}" "kube-network nft" ||
+            warn "nft rules not applied on worker ${worker_ips[$i]} — node left unfirewalled"
     done
 
     # Step 7: Smoke test
