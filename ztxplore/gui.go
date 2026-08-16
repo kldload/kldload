@@ -380,7 +380,31 @@ func RunGUI(resultsDir string) error {
 
 	// ── Lab pane ────────────────────────────────────────────────────
 	labLog := newLogView(8000)
-	labStatus := widget.NewLabel("press Status to ask the lab what it has")
+	labStatus := widget.NewLabel("checking what the lab has…")
+
+	// Keep the status line honest. It was a fixed string — "press Status to
+	// ask the lab what it has" — that no code path ever replaced, so after a
+	// successful build it still read as though nothing had been built, and the
+	// only place the truth appeared was buried in the log dump below
+	// (fiend, 2026-08-16).
+	//
+	// Reads the sealed @golden snapshots rather than the CLI's coloured table:
+	// that table is a display, and a domain existing does not mean its build
+	// finished. Runs off the UI thread because zfs can block on a busy pool.
+	refreshLabStatus := func() {
+		go func() {
+			snaps, err := ListGoldenSnapshots()
+			var text string
+			if err != nil {
+				text = "cannot read golden state: " + err.Error()
+			} else {
+				ready, missing := GoldenSealed(nil, snaps)
+				text = LabSummary(ready, missing)
+			}
+			fyne.Do(func() { labStatus.SetText(text) })
+		}()
+	}
+	refreshLabStatus()
 
 	labPane := container.NewBorder(
 		container.NewVBox(
@@ -391,6 +415,7 @@ func RunGUI(resultsDir string) error {
 			labStatus,
 			container.NewGridWithColumns(4,
 				widget.NewButtonWithIcon("Status", theme.SearchIcon(), func() {
+					refreshLabStatus()
 					stream([]string{LabBin, "status"}, nil, labLog, "lab status")
 				}),
 				widget.NewButtonWithIcon("Verify", theme.ConfirmIcon(), func() {
@@ -412,6 +437,7 @@ func RunGUI(resultsDir string) error {
 							setSource(s)
 							stream([]string{LabBin, "golden", "all"},
 								[]string{"ZFS_SOURCE=" + s.String()}, labLog, "golden build")
+							refreshLabStatus()
 						}, w)
 				}),
 				widget.NewButtonWithIcon("Destroy test VMs", theme.DeleteIcon(), func() {

@@ -342,6 +342,26 @@ func (e EBPFRequest) Argv() ([]string, error) {
 	return argv, nil
 }
 
+// ListGoldenSnapshots returns every ZFS snapshot name on the host.
+//
+// Returns: the names, or an error when zfs is missing or the pool is unreadable.
+// Paired with GoldenSealed to answer "which goldens are actually finished"
+// without parsing kzfs-test's coloured status table, which is a display and
+// not an API.
+func ListGoldenSnapshots() ([]string, error) {
+	out, err := runCapture(15*time.Second, "zfs", "list", "-H", "-o", "name", "-t", "snapshot")
+	if err != nil {
+		return nil, fmt.Errorf("cannot ask zfs what is snapshotted: %w", err)
+	}
+	var names []string
+	for _, l := range strings.Split(out, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			names = append(names, l)
+		}
+	}
+	return names, nil
+}
+
 // ListDomains returns every domain libvirt knows, running or not.
 //
 // Returns: the names, or an error when virsh is missing or cannot connect.

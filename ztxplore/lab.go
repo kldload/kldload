@@ -298,6 +298,66 @@ func GoldenState(distros []string, domains []string) (present, missing []string)
 	return present, missing
 }
 
+// GoldenSealed reports which distros have a golden that is actually finished.
+//
+// WHY a second function next to GoldenState: a libvirt domain existing proves
+// only that a build STARTED. When the rocky golden failed to boot, its domain
+// sat there "shut off" looking exactly like a completed one, so anything keying
+// off domain presence would have called a broken lab ready. kzfs-test seals a
+// finished golden with an @golden snapshot and nothing else creates one, which
+// makes the snapshot the only honest readiness signal (fiend, 2026-08-16).
+//
+// Args:    distros, the keys to check (empty = the whole matrix);
+//
+//	snapshots, every snapshot name ZFS knows.
+//
+// Returns: ready and missing, in the matrix's order.
+//
+// Split from the zfs call so it is testable without a pool.
+func GoldenSealed(distros []string, snapshots []string) (ready, missing []string) {
+	if len(distros) == 0 {
+		distros = DistroKeys()
+	}
+	sealed := make(map[string]bool, len(snapshots))
+	for _, s := range snapshots {
+		s = strings.TrimSpace(s)
+		at := strings.LastIndex(s, "@")
+		if at < 0 || s[at+1:] != "golden" {
+			continue
+		}
+		ds := s[:at]
+		if i := strings.LastIndex(ds, "/"); i >= 0 {
+			ds = ds[i+1:]
+		}
+		sealed[ds] = true
+	}
+	for _, d := range distros {
+		if sealed[GoldenName(d)] {
+			ready = append(ready, d)
+		} else {
+			missing = append(missing, d)
+		}
+	}
+	return ready, missing
+}
+
+// LabSummary is the one-line answer to "what does the lab have right now".
+//
+// Written for the Lab tab's status line, which used to be a hardcoded prompt
+// that never changed no matter what had been built.
+func LabSummary(ready, missing []string) string {
+	total := len(ready) + len(missing)
+	switch {
+	case len(ready) == 0:
+		return fmt.Sprintf("no goldens built yet — 0 of %d ready", total)
+	case len(missing) == 0:
+		return fmt.Sprintf("all %d goldens ready: %s", total, strings.Join(ready, ", "))
+	default:
+		return fmt.Sprintf("%d of %d goldens ready: %s — missing: %s",
+			len(ready), total, strings.Join(ready, ", "), strings.Join(missing, ", "))
+	}
+}
+
 // GoldenGap reports why a run cannot proceed, or nil when it can.
 //
 // The message names the command that fixes it, because "no goldens" without

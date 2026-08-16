@@ -578,3 +578,44 @@ func TestCombinedDashboardIsFirst(t *testing.T) {
 		t.Error("the title list has drifted from the dashboard list")
 	}
 }
+
+// TestGoldenSealedIgnoresUnfinishedBuilds pins the distinction that matters:
+// a domain can exist for a build that never completed, but only a finished
+// golden carries an @golden snapshot. Rocky is the real case — its domain sat
+// "shut off" looking identical to a good one.
+func TestGoldenSealedIgnoresUnfinishedBuilds(t *testing.T) {
+	snaps := []string{
+		"rpool/vms/kzfstest-golden-centos@golden",
+		"rpool/vms/kzfstest-golden-centos@autosnap_2026-08-16_15:45:08_daily",
+		"rpool/vms/kzfstest-golden-rocky@autosnap_2026-08-16_16:00:00_hourly",
+		"rpool/vms/klab-blue-debian@somethingelse",
+		"",
+	}
+	ready, missing := GoldenSealed([]string{"centos", "rocky", "debian"}, snaps)
+	if len(ready) != 1 || ready[0] != "centos" {
+		t.Fatalf("only centos is sealed; got ready=%v", ready)
+	}
+	for _, m := range missing {
+		if m == "centos" {
+			t.Fatalf("centos is sealed but was reported missing: %v", missing)
+		}
+	}
+	if len(missing) != 2 {
+		t.Fatalf("rocky and debian are unsealed; got missing=%v", missing)
+	}
+}
+
+// TestLabSummaryStatesWhatIsThere guards the status line against going back to
+// a fixed string that says nothing.
+func TestLabSummaryStatesWhatIsThere(t *testing.T) {
+	if got := LabSummary(nil, []string{"a", "b"}); !strings.Contains(got, "0 of 2") {
+		t.Fatalf("empty lab should say so, got %q", got)
+	}
+	got := LabSummary([]string{"centos"}, []string{"rocky"})
+	if !strings.Contains(got, "centos") || !strings.Contains(got, "rocky") {
+		t.Fatalf("summary must name both sides, got %q", got)
+	}
+	if got := LabSummary([]string{"a", "b"}, nil); !strings.Contains(got, "all 2") {
+		t.Fatalf("complete lab should say so, got %q", got)
+	}
+}
