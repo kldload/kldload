@@ -75,15 +75,37 @@ declare -A DISTRO_FAMILY=(
     [ubuntu]="apt"
 )
 
-# Auto-scale resources based on host hardware
+# ── Sizing the golden VM ──────────────────────────────────────────────────
+#
+# Size against what is FREE, not what is installed, and for ONE VM, not all
+# of them.
+#
+# The old sum did `(MemTotal - 12000) / 5` — dividing by the distro count as
+# though the five goldens ran side by side. `golden all` builds them strictly
+# one at a time, so that under-sized each VM on an idle host; and because it
+# read MemTotal it could not see memory already committed to something else.
+# On a host running a 6-node k8s cluster (36GB committed, 6.1GB actually
+# available, no swap) it still asked for 8192MB per golden. qemu allocates
+# lazily so `virsh start` succeeds, and the shortfall lands later as the OOM
+# killer taking qemu down mid-compile — a golden that fails four minutes in,
+# after the ZFS build, for a reason that is nowhere near the error message
+# (fiend, 2026-08-16).
+#
+# MemAvailable is the kernel's own estimate of what can be had without
+# swapping, so reclaimable page cache is already counted.
 _host_ram_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 32768)
+_avail_ram_mb=$(awk '/MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo "$_host_ram_mb")
 _host_cpus=$(nproc 2>/dev/null || echo 8)
-# Reserve 12GB for host + ZFS ARC, divide rest among VMs
 _max_vms=${#DISTROS[@]}
-RAM="${RAM:-$(((_host_ram_mb - 12000) / _max_vms))}"
+# Leave 2GB of the free pool for the host and ARC; one golden runs at a time.
+RAM="${RAM:-$((_avail_ram_mb - 2048))}"
 [[ $RAM -lt 2048 ]] && RAM=2048
 [[ $RAM -gt 8192 ]] && RAM=8192
-CPUS="${CPUS:-$((_host_cpus / _max_vms > 2 ? _host_cpus / _max_vms : 2))}"
+# Same sequential logic as RAM: the compile is the long pole in a golden
+# build, and slicing cores five ways for a VM that runs alone just made DKMS
+# take five times longer. Half the host, capped at 8.
+CPUS="${CPUS:-$((_host_cpus / 2 > 2 ? _host_cpus / 2 : 2))}"
+[[ $CPUS -gt 8 ]] && CPUS=8
 DISK="${DISK:-40}"
 
 # ── Colors ────────────────────────────────────────────────────────────────
@@ -97,20 +119,33 @@ N="\033[0m"
 
 _ensure_log_dir() { mkdir -p "$RESULTS_DIR" 2>/dev/null; }
 _ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+# _plain — strip colour from a message before it goes into a log FILE.
+#
+# The terminal path uses `echo -e`, so $C/$G/$N render as colour there. The
+# file path used a plain `echo`, so the same message arrived on disk as the
+# literal text "\033[1;36mkzfstest-golden-centos\033[0m" — unreadable in a
+# log an operator greps at 3am (seen in centos-20260816-154351.log).
+#
+# Strips both spellings: the literal backslash-033 form these vars actually
+# hold, and a real ESC byte in case a callee emits one.
+# Args: message on stdin.  Returns: cleaned message on stdout.
+_plain() { sed -e 's/\\033\[[0-9;]*m//g' -e $'s/\033\[[0-9;]*m//g'; }
+
 log() {
     _ensure_log_dir
     echo -e "${G}[kzfs-test]${N} $*"
-    echo "[${$}] $(_ts) [INFO] $*" >>"$MASTER_LOG" 2>/dev/null
+    echo "[${$}] $(_ts) [INFO] $*" | _plain >>"$MASTER_LOG" 2>/dev/null
 }
 warn() {
     _ensure_log_dir
     echo -e "${Y}[kzfs-test]${N} $*" >&2
-    echo "[${$}] $(_ts) [WARN] $*" >>"$MASTER_LOG" 2>/dev/null
+    echo "[${$}] $(_ts) [WARN] $*" | _plain >>"$MASTER_LOG" 2>/dev/null
 }
 die() {
     _ensure_log_dir
     echo -e "${R}[kzfs-test]${N} $*" >&2
-    echo "[${$}] $(_ts) [FATAL] $*" >>"$MASTER_LOG" 2>/dev/null
+    echo "[${$}] $(_ts) [FATAL] $*" | _plain >>"$MASTER_LOG" 2>/dev/null
     exit 1
 }
 
@@ -462,16 +497,28 @@ dnf install -y kernel-devel-${KVER} dkms gcc make autoconf automake libtool 2>/d
 DISTRO_ID=$(. /etc/os-release && echo "$ID")
 if ! command -v zfs >/dev/null 2>&1; then
   if [ "$DISTRO_ID" = "fedora" ]; then
-    # Fedora uses its own ZFS release RPM
-    FEDORA_VER=$(rpm --eval "%{fedora}")
-    dnf install -y "https://zfsonlinux.org/fedora/zfs-release-2-7.fc${FEDORA_VER}.noarch.rpm" 2>/dev/null || \
-      dnf install -y "https://zfsonlinux.org/fedora/zfs-release-2-6.fc${FEDORA_VER}.noarch.rpm" 2>/dev/null || \
-      dnf install -y "https://zfsonlinux.org/fedora/zfs-release.fc${FEDORA_VER}.noarch.rpm" 2>/dev/null || true
+    # There is no OpenZFS repository for Fedora. This branch used to try three
+    # zfs-release RPM URLs under https://zfsonlinux.org/fedora/ and swallow
+    # every failure with `|| true`; that whole path is 404 — the directory
+    # itself, not just the filenames (verified 2026-08-16). OpenZFS publishes
+    # EL repos only.
+    #
+    # The old silence was expensive: dnf found no zfs package, the golden got
+    # built and SEALED with no ZFS in it, and the only clue was a mangled DKMS
+    # line where an "is not installed" message had been interpolated into a
+    # path. Say the true thing, and name the fix — the lab already builds from
+    # source for exactly this case.
+    echo "kzfs-test: Fedora has no OpenZFS package repository (zfsonlinux.org/fedora is 404)."
+    echo "kzfs-test: build from source instead:  ZFS_SOURCE=git:master kzfs-test golden fedora"
+    echo "kzfs-test: this golden will fail validation and will NOT be sealed."
   else
     # EL distros (CentOS, Rocky, RHEL)
     dnf install -y "https://zfsonlinux.org/epel/zfs-release-2-3$(rpm --eval "%{dist}").noarch.rpm" 2>/dev/null || true
   fi
-  dnf install -y zfs zfs-dkms zfs-test 2>/dev/null || true
+  # Not silenced: when this fails it is the whole reason the golden ends up
+  # empty, and the error belongs in the golden's log where somebody reads it.
+  dnf install -y zfs zfs-dkms zfs-test 2>&1 | tail -20 ||
+    echo "kzfs-test: zfs package install FAILED on ${DISTRO_ID}"
 fi
 
 # If zfs-test didn't install, try again explicitly
@@ -707,6 +754,66 @@ APKSETUP
     log "  ZFS test environment ready on ${distro}"
 }
 
+# _has_esp <blockdev> — does the imported cloud image boot via UEFI?
+#
+# WHY: goldens were all booted on virt-install's default SeaBIOS, which suited
+# the first distro tried — centos ships an MBR image with a boot flag. Rocky 9
+# GenericCloud is GPT with a populated ESP and no working legacy path, so on
+# SeaBIOS it spun at 100% CPU forever: no serial output, not one packet on the
+# wire, and all the lab could see was "No IP" three minutes later — a firmware
+# mismatch wearing a network error's clothes (fiend, 2026-08-16).
+#
+# Detect rather than hardcode: the distro list moves and upstream flips image
+# layouts between releases. Matches the ESP type GUID from the UEFI spec.
+# Args: block device holding the imported image.
+# Returns: 0 if an ESP is present (boot UEFI), 1 otherwise (boot BIOS).
+_has_esp() {
+    sfdisk --dump "$1" 2>/dev/null |
+        grep -qi 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B'
+}
+
+# _root_partnum <blockdev> — which partition holds the OS root?
+#
+# WHY: the import step ran `growpart "$zdev" 1` unconditionally, which is only
+# right for a single-partition MBR image like centos. Rocky 9 puts root on p4
+# behind a 2MB BIOS-boot and a 100MB ESP, so partition 1 got "grown" instead and
+# root stayed at 8.9G of a 40G zvol — invisible until the ZFS suite runs out of
+# room laying down vdev images.
+#
+# Picks the largest partition, not the first or last: cloud images disagree
+# about numbering (Debian roots on p1 behind p14/p15; Rocky on p4) but all of
+# them make root by far the biggest. Verified against real sfdisk dumps for
+# both layouts: centos -> 1, rocky -> 4.
+# Args: block device.  stdout: partition number, empty if none found.
+_root_partnum() {
+    sfdisk --dump "$1" 2>/dev/null |
+        awk '$1 ~ /^\/dev\// {
+                 n = $1; gsub(/[^0-9]/, " ", n); split(n, a, " "); num = a[length(a)]
+                 for (i = 1; i <= NF; i++) if ($i == "size=") { sz = $(i+1) + 0 }
+                 if (sz > max) { max = sz; best = num }
+             }
+             END { if (best != "") print best }'
+}
+
+# UEFI, with Secure Boot explicitly OFF.
+#
+# WARN: do not simplify this to `--boot uefi`. That asks libvirt for its default
+# EFI firmware, which on this host resolves to OVMF_CODE_4M.ms.fd — Microsoft
+# keys, secure='yes', SMM on. Rocky's shim then refuses to hand off:
+#
+#     \EFI\rocky\shimx64.efi
+#     error: grub-core/kern/efi/sb.c:169: prohibited by secure boot policy.
+#
+# and GRUB falls back to its interactive menu, waiting for a keypress that a
+# --graphics none VM will never get. Identical symptom to the SeaBIOS failure —
+# pegged CPU, no network, "No IP" — for an entirely different reason, which is
+# what made this take two wrong diagnoses to find.
+#
+# These goldens exist to build and test out-of-tree ZFS modules; Secure Boot
+# would reject those anyway. Verified: Rocky 9.8 boots to a login prompt and
+# takes a DHCP lease under this firmware.
+_UEFI_BOOT_ARGS='firmware=efi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no'
+
 # ── Golden Build ──────────────────────────────────────────────────────────
 
 build_golden_single() {
@@ -804,6 +911,14 @@ build_golden_single() {
         local ci_iso
         ci_iso="$(make_cloud_init_iso "$name" "$name" "/var/lib/cloud/instance/kzfstest-ready")"
 
+        # RHEL clones the centos zvol, so it inherits that image's firmware
+        # expectations — detect on the clone rather than assuming.
+        local -a _fw=()
+        if _has_esp "$zdev"; then
+            _fw=(--boot "$_UEFI_BOOT_ARGS")
+            log "  Image is UEFI (ESP present) — booting OVMF with Secure Boot off"
+        fi
+
         log "  Booting RHEL golden VM..."
         virt-install \
             --name "$name" \
@@ -814,6 +929,7 @@ build_golden_single() {
             --network bridge=virbr0,model=virtio \
             --graphics none \
             --noautoconsole \
+            "${_fw[@]}" \
             --import \
             2>&1 || die "Failed to boot RHEL golden VM"
 
@@ -947,7 +1063,26 @@ build_golden_single() {
 
     log "  Importing cloud image..."
     qemu-img convert -f qcow2 -O raw "$img_file" "$zdev"
-    growpart "$zdev" 1 2>/dev/null || true
+    partx -u "$zdev" 2>/dev/null || true # re-read the table we just wrote
+
+    # Grow the root partition into the rest of the zvol. Not fatal: growpart
+    # exits non-zero when the partition is already at full size, which is a
+    # legitimate no-op on a re-import — but a real failure is worth saying out
+    # loud, because the suite only notices as "no space left" much later.
+    local _rootpart
+    _rootpart="$(_root_partnum "$zdev")"
+    if [[ -n "$_rootpart" ]]; then
+        growpart "$zdev" "$_rootpart" >/dev/null 2>&1 ||
+            warn "growpart: root partition ${_rootpart} not resized (already full size?)"
+    else
+        warn "could not identify the root partition on ${zdev} — left unresized"
+    fi
+
+    local -a _fw=()
+    if _has_esp "$zdev"; then
+        _fw=(--boot "$_UEFI_BOOT_ARGS")
+        log "  Image is UEFI (ESP present) — booting OVMF with Secure Boot off"
+    fi
 
     local ci_iso
     ci_iso="$(make_cloud_init_iso "$name" "$name" "/var/lib/cloud/instance/kzfstest-ready")"
@@ -962,6 +1097,7 @@ build_golden_single() {
         --network bridge=virbr0,model=virtio \
         --graphics none \
         --noautoconsole \
+        "${_fw[@]}" \
         --import \
         2>&1 || die "Failed to boot golden VM for ${distro}"
 
@@ -1070,12 +1206,32 @@ VALIDATE
     log "    vdev images:    ${_v_vdevs}/4"
     log "    ksh:            ${_v_ksh}"
 
+    # A golden that cannot run the suite must not be sealed.
+    #
+    # WHY: this used to warn and seal anyway — "the golden will still be
+    # created but tests will fail on this distro". The fedora golden came back
+    # with ZFS binary MISSING, module NOT LOADED and zfs-tests.sh MISSING, got
+    # its @golden snapshot regardless, and was announced as "Golden ready" and
+    # counted in the status table's Ready column. Every later run would clone
+    # an empty image, test nothing, and report that quickly and cleanly
+    # (fiend, 2026-08-16).
+    #
+    # The @golden snapshot is the lab's only durable claim that an image works;
+    # refusing to take it is what keeps `status` and the ztx Lab tab honest,
+    # and it agrees with the rebuild check above, which already treats an
+    # existing FAIL/PARTIAL golden as something to rebuild.
+    #
+    # The zvol is left in place deliberately: unsealed it reads as PARTIAL, and
+    # keeping it means the log and the disk are both still there to look at.
     if [[ "$_v_zfs" != "OK" || "$_v_mod" -lt 1 ]]; then
-        warn "  FAILED: ZFS not functional on ${distro} — golden will be incomplete"
-        warn "  The golden will still be created but tests will fail on this distro"
+        warn "  FAILED: ZFS not functional on ${distro} (binary ${_v_zfs}, module loaded=${_v_mod})"
+        warn "  Refusing to seal ${name} — an image with no ZFS would test nothing and pass"
+        return 1
     fi
     if [[ "$_v_tests" != "OK" ]]; then
-        warn "  WARNING: zfs-tests.sh not found on ${distro} — test runs will skip this distro"
+        warn "  FAILED: zfs-tests.sh missing on ${distro} — the suite cannot run there"
+        warn "  Refusing to seal ${name} — see ${golden_log}"
+        return 1
     fi
 
     # Seal + shutdown already done inside validation heredoc
@@ -1116,9 +1272,38 @@ cmd_golden() {
     ensure_ssh_key
 
     if [[ "$target" == "all" ]]; then
+        # Failures are counted and re-reported, and they set the exit status.
+        # This loop used to end in `|| warn`, which returns 0 — so `golden all`
+        # exited 0 with a clean-looking tail even when every golden had failed,
+        # and anything scripted on top of it (CI, the ztx GUI) read that as a
+        # working lab. Same failure shape as a test run reporting 0/0/0 as a
+        # pass: the thing that did not happen must not look like success.
+        local _failed=() _built=()
         for distro in "${DISTROS[@]}"; do
-            build_golden_single "$distro" || warn "Failed: ${distro}"
+            # Subshell on purpose. build_golden_single reports every one of its
+            # ten failure paths through die(), which is `exit 1` — so a single
+            # distro failing took the whole run down with it. A rocky VM that
+            # came up without a DHCP lease ended the run at distro 2 of 5, and
+            # fedora, debian and ubuntu were never attempted; the operator saw
+            # "builds failed" with no build having been tried (fiend,
+            # 2026-08-16). In a subshell that exit ends only this distro, the
+            # loop records it and moves to the next.
+            #
+            # Safe because the builder keeps no state for the caller: every
+            # variable it sets is `local` and its real output is a zvol, a
+            # snapshot and a log on disk.
+            if (build_golden_single "$distro"); then
+                _built+=("$distro")
+            else
+                _failed+=("$distro")
+                warn "Failed: ${distro}"
+            fi
         done
+        log "Goldens built: ${#_built[@]}/${#DISTROS[@]} (${_built[*]:-none})"
+        if ((${#_failed[@]} > 0)); then
+            warn "Goldens FAILED: ${_failed[*]}"
+            return 1
+        fi
     else
         validate_distro "$target"
         build_golden_single "$target"
