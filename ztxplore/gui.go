@@ -268,14 +268,30 @@ func RunGUI(resultsDir string) error {
 		return s, s.Validate()
 	}
 
-	var runBtn, stopBtn *widget.Button
+	var runBtn, stopBtn, labStopBtn *widget.Button
+	// Stop must be reachable from the tab that started the work.
+	//
+	// runner.Start is cancellable and the Run tab has always had a Stop, but
+	// the Lab tab's Status/Verify/Build/Destroy buttons go through the same
+	// runner with no Stop of their own. Starting a Verify from the Lab tab
+	// therefore locked the whole console: every other button answered
+	// "something is already running — stop it first" and the only control
+	// that could stop it was on another tab (operator report, 2026-08-16).
+	labStopBtn = widget.NewButtonWithIcon("Stop", theme.MediaStopIcon(), func() {
+		runner.Stop()
+	})
+	labStopBtn.Importance = widget.DangerImportance
+	labStopBtn.Disable()
+
 	setBusy := func(busy bool) {
 		if busy {
 			runBtn.Disable()
 			stopBtn.Enable()
+			labStopBtn.Enable()
 		} else {
 			runBtn.Enable()
 			stopBtn.Disable()
+			labStopBtn.Disable()
 		}
 	}
 
@@ -406,6 +422,50 @@ func RunGUI(resultsDir string) error {
 	}
 	refreshLabStatus()
 
+	// Colour carries meaning in this row: a read-only enquiry, a build that
+	// costs an hour, and a destroy are not the same kind of click, and four
+	// identical grey buttons said they were.
+	labStatusBtn := widget.NewButtonWithIcon("Status", theme.SearchIcon(), func() {
+		refreshLabStatus()
+		stream([]string{LabBin, "status"}, nil, labLog, "lab status")
+	})
+	labVerifyBtn := widget.NewButtonWithIcon("Verify", theme.ConfirmIcon(), func() {
+		stream([]string{LabBin, "verify", "all"}, nil, labLog, "verify")
+	})
+	labVerifyBtn.Importance = widget.HighImportance
+
+	labBuildBtn := widget.NewButtonWithIcon("Build goldens", theme.StorageIcon(), func() {
+		dialog.ShowConfirm("Build every golden?",
+			"This builds one VM per distro and installs the ZFS under test "+
+				"in each. It takes a long time and a lot of disk.\n\nGo ahead?",
+			func(ok bool) {
+				if !ok {
+					return
+				}
+				src, err := buildSource()
+				if err != nil {
+					dialog.ShowError(err, w)
+					return
+				}
+				setSource(src)
+				stream([]string{LabBin, "golden", "all"},
+					[]string{"ZFS_SOURCE=" + src.String()}, labLog, "golden build")
+				refreshLabStatus()
+			}, w)
+	})
+	labBuildBtn.Importance = widget.HighImportance
+
+	labDestroyBtn := widget.NewButtonWithIcon("Destroy test VMs", theme.DeleteIcon(), func() {
+		dialog.ShowConfirm("Destroy the test VMs?",
+			"The per-run clones are destroyed. The goldens are kept.",
+			func(ok bool) {
+				if ok {
+					stream([]string{LabBin, "destroy"}, nil, labLog, "destroy")
+				}
+			}, w)
+	})
+	labDestroyBtn.Importance = widget.DangerImportance
+
 	labPane := container.NewBorder(
 		container.NewVBox(
 			widget.NewLabelWithStyle("The lab", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -413,42 +473,8 @@ func RunGUI(resultsDir string) error {
 				"Building the full set takes a while; destroying keeps the goldens "+
 				"unless you say otherwise."),
 			labStatus,
-			container.NewGridWithColumns(4,
-				widget.NewButtonWithIcon("Status", theme.SearchIcon(), func() {
-					refreshLabStatus()
-					stream([]string{LabBin, "status"}, nil, labLog, "lab status")
-				}),
-				widget.NewButtonWithIcon("Verify", theme.ConfirmIcon(), func() {
-					stream([]string{LabBin, "verify", "all"}, nil, labLog, "verify")
-				}),
-				widget.NewButtonWithIcon("Build goldens", theme.StorageIcon(), func() {
-					dialog.ShowConfirm("Build every golden?",
-						"This builds one VM per distro and installs the ZFS under test "+
-							"in each. It takes a long time and a lot of disk.\n\nGo ahead?",
-						func(ok bool) {
-							if !ok {
-								return
-							}
-							s, err := buildSource()
-							if err != nil {
-								dialog.ShowError(err, w)
-								return
-							}
-							setSource(s)
-							stream([]string{LabBin, "golden", "all"},
-								[]string{"ZFS_SOURCE=" + s.String()}, labLog, "golden build")
-							refreshLabStatus()
-						}, w)
-				}),
-				widget.NewButtonWithIcon("Destroy test VMs", theme.DeleteIcon(), func() {
-					dialog.ShowConfirm("Destroy the test VMs?",
-						"The per-run clones are destroyed. The goldens are kept.",
-						func(ok bool) {
-							if ok {
-								stream([]string{LabBin, "destroy"}, nil, labLog, "destroy")
-							}
-						}, w)
-				}),
+			container.NewGridWithColumns(5,
+				labStatusBtn, labVerifyBtn, labBuildBtn, labDestroyBtn, labStopBtn,
 			),
 		), nil, nil, nil, labLog.view)
 
