@@ -616,8 +616,18 @@ cmd_build() {
     local k8s_images_dir="$ROOT/live-build/config/includes.chroot/root/darksite/k8s-images"
     local k8s_images_list="$ROOT/build/darksite/k8s-images.txt"
     if [[ -f "$k8s_images_list" ]] && [[ "$EDITION" != "core" ]]; then
-        if [[ ! -d "$k8s_images_dir" ]] || [[ "$(find "$k8s_images_dir" -name '*.tar' 2>/dev/null | wc -l)" -eq 0 ]]; then
-            log "Pre-pulling Kubernetes + Cilium container images for offline deploy..."
+        # Always run the puller. It skips images it already has, one at a
+        # time, so this is cheap on a warm cache and — unlike the old
+        # "directory is non-empty, therefore done" test — it actually notices
+        # when k8s-images.txt gains entries. That test is why adding nine
+        # images to the list changed nothing: fourteen tarballs were already
+        # on disk, so the build logged "K8s images cached: 763M (14 images)"
+        # and pulled none of the new ones (2026-08-16).
+        local _want _have
+        _want="$(grep -cvE '^\s*(#|$)' "$k8s_images_list")"
+        _have="$(find "$k8s_images_dir" -name '*.tar' 2>/dev/null | wc -l)"
+        if [[ "$_have" -lt "$_want" ]]; then
+            log "Pre-pulling Kubernetes container images for offline deploy (${_have}/${_want} cached)..."
             bash "$ROOT/build/darksite/pull-k8s-images.sh" "$k8s_images_dir"
         else
             log "K8s images cached: $(du -sh "$k8s_images_dir" | cut -f1) ($(ls "$k8s_images_dir"/*.tar 2>/dev/null | wc -l) images)"

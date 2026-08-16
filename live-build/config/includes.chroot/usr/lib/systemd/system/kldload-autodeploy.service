@@ -8,7 +8,31 @@ Wants=network-online.target kldload-firstboot.service
 ConditionPathExists=!/var/lib/kldload/all-ready
 
 [Service]
-Type=oneshot
+# Type=exec, NOT oneshot.
+#
+# systemd does not consider a target reached until every oneshot wanted by it
+# has FINISHED its ExecStart. This unit is WantedBy=multi-user.target and its
+# ExecStart builds a Kubernetes cluster and a set of golden VMs, so the box
+# did not reach multi-user.target — and therefore did not reach
+# graphical.target — until all of that completed:
+#
+#   graphical.target @1h 23min 34s
+#   └─kldload-autodeploy.service @50.2s +1h 22min 44s
+#
+# An operator watched a boot screen for 84 minutes on a machine that was
+# otherwise ready in under a minute, and if convergence ever hung, the desktop
+# never arrived at all. Provisioning is background work; it was being modelled
+# as a boot dependency.
+#
+# With Type=exec the unit is "started" once the binary is exec'd, the target is
+# reached immediately, and convergence continues in the background — which is
+# also what the Nice/IOSchedulingClass settings below were already assuming.
+#
+# Safe for the one unit that orders after this one: kldload-smoke-firstboot
+# waits on the readiness MARKERS in its own ExecStartPre, not on this unit's
+# exit, precisely because a oneshot reports "active (exited)" while its
+# background work is still running (fiend, 2026-08-16).
+Type=exec
 ExecStart=/usr/sbin/kldload-autodeploy
 RemainAfterExit=yes
 StandardOutput=journal+console

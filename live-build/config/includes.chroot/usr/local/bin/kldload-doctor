@@ -776,6 +776,126 @@ def check_bob_tools_present():
                    "k8s_*, prom_query, zfs_status, host_vitals, doctor_check")
 
 
+
+def check_wg_mesh_coherence():
+    """Every cluster node peers with every other node, and with nobody who left.
+
+    WHY this check exists: the WireGuard mesh was only ever built
+    incrementally, and every incremental path had a hole. Adds peered a new
+    node with the first control plane alone; removals dropped nothing at all.
+    Nothing ever compared the result against the cluster that actually
+    existed, so the drift was invisible until something downstream broke:
+    two control planes with no InternalIP, MetalLB stuck at 4/6, a worker
+    carrying one peer with all four of its metrics targets dark, and the
+    first control plane carrying 17 peers where 8 were correct
+    (fiend, 2026-08-16).
+
+    Expected: N running cluster nodes each hold N-1 node peers plus the
+    hypervisor. Anything else is drift, and `kube-cluster mesh-repair`
+    reconciles it.
+    """
+    rc, out, _ = _run(["virsh", "list", "--state-running", "--name"], timeout=15)
+    if rc != 0:
+        return _result("kubernetes", "cluster mesh peers", "skip", "", "libvirt not reachable")
+    nodes = [n.strip() for n in out.splitlines()
+             if n.strip().startswith("kldload-cp") or n.strip().startswith("kldload-w")]
+    if len(nodes) < 2:
+        return _result("kubernetes", "cluster mesh peers", "skip", "",
+                       f"{len(nodes)} cluster node(s) running — nothing to mesh")
+
+    # Expected peer count: the other nodes, plus the hypervisor at .100.
+    expect = len(nodes) - 1
+    rc, hv, _ = _run(["wg", "show", "wg-k8s", "peers"], timeout=15)
+    host_on_mesh = rc == 0 and bool(hv.strip())
+    if host_on_mesh:
+        expect += 1
+
+    bad = []
+    for n in nodes:
+        rc, ip, _ = _run(["bash", "-c",
+                          "virsh domifaddr %s --source lease 2>/dev/null | "
+                          "awk '/ipv4/{split($4,a,\"/\");print a[1];exit}'" % n], timeout=15)
+        ip = (ip or "").strip()
+        if not ip:
+            continue
+        rc, cnt, _ = _run(["bash", "-c",
+                           "timeout 12 ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "
+                           "-o BatchMode=yes -i /root/.ssh/id_ed25519 root@%s "
+                           "'wg show wg-k8s peers | wc -l' </dev/null" % ip], timeout=20)
+        cnt = (cnt or "").strip()
+        if not cnt.isdigit():
+            continue
+        if int(cnt) != expect:
+            bad.append(f"{n}={cnt}")
+
+    if not bad:
+        return _result("kubernetes", "cluster mesh peers", "ok",
+                       f"every node holds {expect} peers",
+                       f"{len(nodes)} nodes, full mesh")
+    return _result("kubernetes", "cluster mesh peers", "fail",
+                   f"every node holds {expect} peers",
+                   "peer-count drift: " + ", ".join(bad),
+                   severity="high",
+                   remediation="kube-cluster mesh-repair")
+
+
+def check_darksite_charts():
+    """Can this box deploy Kubernetes with no network?
+
+    WHY: the ISO shipped helm charts and the install still pulled everything
+    from quay.io, because kldload-firstboot deleted /root/darksite eight
+    minutes before the k8s phase looked in it, and the installer never copied
+    helm-charts/ onto the target in the first place. Nothing noticed — the
+    deploy simply logged "chart not in darksite, trying online helm repo" and
+    carried on, which reads like a fallback rather than the air-gap promise
+    being broken (fiend, 2026-08-16).
+    """
+    d = "/root/darksite/helm-charts"
+    if not os.path.isdir(d):
+        return _result("k8s-stack", "darksite charts", "fail",
+                       "helm charts staged for offline deploy",
+                       "no /root/darksite/helm-charts — k8s deploy needs a network",
+                       severity="medium",
+                       remediation="rebuild the ISO; charts are staged by builder/build-iso.sh")
+    try:
+        charts = sorted(f[:-4] for f in os.listdir(d) if f.endswith(".tgz"))
+    except Exception:
+        charts = []
+    want = {"cilium", "tetragon", "argo-cd", "metallb"}
+    missing = sorted(want - set(charts))
+    if missing:
+        return _result("k8s-stack", "darksite charts", "warn",
+                       "cilium, tetragon, argo-cd, metallb staged",
+                       f"missing: {', '.join(missing)} (present: {', '.join(charts) or 'none'})",
+                       severity="medium",
+                       remediation="rebuild the ISO")
+    return _result("k8s-stack", "darksite charts", "ok",
+                   "charts staged for offline deploy", ", ".join(charts))
+
+
+def check_darksite_images():
+    """Are the container images cached, or will the cluster phone home?
+
+    Counts the tarballs the build staged against the list it was built from.
+    A short count is how ~129 of 138 images ended up being pulled from public
+    registries on a machine advertised as air-gapped.
+    """
+    d = "/root/darksite/k8s-images"
+    if not os.path.isdir(d):
+        return _result("k8s-stack", "darksite images", "skip", "",
+                       "no /root/darksite/k8s-images on this install")
+    try:
+        have = len([f for f in os.listdir(d) if f.endswith(".tar")])
+    except Exception:
+        have = 0
+    if have == 0:
+        return _result("k8s-stack", "darksite images", "fail",
+                       "k8s container images cached", "no image tarballs",
+                       severity="medium", remediation="rebuild the ISO")
+    return _result("k8s-stack", "darksite images", "ok",
+                   "k8s container images cached", f"{have} image tarball(s)")
+
+
 CHECKS = [
     check_zfs_pool, check_zfs_errors, check_zfs_arc_target, check_sanoid_timer,
     check_kldload_datasets, check_secrets_encryption,
@@ -790,6 +910,8 @@ CHECKS = [
     check_cilium_scrape_labels, check_tetragon_scrape, check_hubble_scrape,
     check_grafana_running, check_grafana_dashboards,
     check_cluster_firewall,
+    check_wg_mesh_coherence,
+    check_darksite_charts, check_darksite_images,
     check_ollama, check_bob_tools_present,
     check_install_artifacts,
     check_webui_running, check_libvirtd, check_kldload_tools,
