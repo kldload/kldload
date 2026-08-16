@@ -4340,6 +4340,21 @@ function handle(msg) {
           // We already predicted names client-side on click — reconcile here.
           // Any predicted placeholders that DON'T match (off-by-one due to
           // orphans not visible to kubectl) get dropped + replaced.
+          // Control-plane scales announce each node individually as
+          // "+ control plane <name>", never as an "Adding workers:" list, so
+          // without this their placeholders never advance past "starting" and
+          // the table shows predicted rows until kubectl catches up.
+          const mcp = line.match(/\+ control plane\s+(kldload-[\w-]+)/);
+          if (mcp) {
+            const realCp = mcp[1];
+            const prevCp = window._k8sPending[realCp];
+            window._k8sPending[realCp] = {
+              name: realCp, phase: 'cloning', role: 'control-plane',
+              started: prevCp?.started || Date.now(), slot: prevCp?.slot,
+            };
+            throttleStatus('k8s_status', 1500);
+          }
+
           let m = line.match(/Adding workers:\s*(.+)$/);
           if (m) {
             const realNames = m[1].trim().split(/\s+/).filter(s => s.startsWith('kldload-'));
@@ -6971,12 +6986,44 @@ function k8sAddNodes() {
     const m = nm.match(/^kldload-w-(\d+)$/);
     if (m) { const idx = parseInt(m[1]); if (idx > existingMax) existingMax = idx; }
   });
-  for (let i = 1; i <= n; i++) {
-    const predName = `kldload-w-${existingMax + i}`;
-    window._k8sPending[predName] = { name: predName, phase: 'starting', placeholder: true, slot: i, predicted: true };
+  // Placeholders must name the node type actually being built.
+  //
+  // This predicted `kldload-w-N` rows and announced "+N worker(s)" whatever
+  // the dropdown said, so asking for control planes filled the Nodes table
+  // with invented WORKER rows and a worker banner while kube-cluster was
+  // correctly building kldload-cp-4 and cp-5. Every visible signal said
+  // "worker", so the obvious reading was that control planes were not being
+  // deployed at all (fiend, 2026-08-16).
+  //
+  // The two modes also count differently: a worker count ADDS n, while a
+  // control-plane count is a TARGET TOTAL, so only (target - existing) rows
+  // are new and a target at or below the current count adds nothing.
+  if (kind === 'cp') {
+    let cpMax = 1, cpHave = 0;
+    const scanCp = (nm) => {
+      if (nm === 'kldload-cp') { cpHave++; return; }
+      const m = nm.match(/^kldload-cp-(\d+)$/);
+      if (m) { cpHave++; const idx = parseInt(m[1]); if (idx > cpMax) cpMax = idx; }
+    };
+    Object.keys(window._k8sNodesByName || {}).forEach(scanCp);
+    Object.keys(window._k8sPending).forEach(scanCp);
+    const newCps = Math.max(0, n - cpHave);
+    for (let i = 1; i <= newCps; i++) {
+      const predName = `kldload-cp-${cpMax + i}`;
+      window._k8sPending[predName] = { name: predName, phase: 'starting', placeholder: true, slot: i, predicted: true, role: 'control-plane' };
+    }
+    send({ action: 'k8s_status' });
+    _busyShow(newCps > 0
+      ? `scaling cluster \u2192 ${n} control plane(s) (${newCps} new)\u2026`
+      : `cluster already has ${cpHave} control plane(s) \u2014 nothing to add`, 30000);
+  } else {
+    for (let i = 1; i <= n; i++) {
+      const predName = `kldload-w-${existingMax + i}`;
+      window._k8sPending[predName] = { name: predName, phase: 'starting', placeholder: true, slot: i, predicted: true, role: 'worker' };
+    }
+    send({ action: 'k8s_status' });   // immediate render
+    _busyShow(`scaling cluster +${n} worker(s)\u2026`, 30000);
   }
-  send({ action: 'k8s_status' });   // immediate render
-  _busyShow(`scaling cluster +${n} worker(s)…`, 30000);
   const cpRam = parseInt(document.getElementById('k8s-ov-cp-ram')?.value || '0') || 0;
   send({ action: 'k8s_cluster_scale', kind: kind, workers: n, control_planes: n, cp_ram: cpRam });
   // No more auto-tab-switch — user stays on Nodes and watches the live

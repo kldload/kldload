@@ -33,6 +33,7 @@ Usage: kube-network <command> [args]
 Commands:
   init <node-id>                          Generate keys, create WireGuard configs
   add-peer <endpoint> <pubkey> <peer-id>  Add a peer to the mesh
+  remove-peer <peer-id>                   Remove a peer from both planes
   show-keys                               Show this node's public keys
   status                                  WireGuard interface status
   pin-kubelet                             Pin kubelet node-ip to wg-k8s
@@ -163,6 +164,72 @@ EOF
     log "Peer ${peer_id} added: ${endpoint}"
     log "  Management: ${MGMT_SUBNET}.${peer_id}"
     log "  Kubernetes: ${K8S_SUBNET}.${peer_id}"
+}
+
+# ── remove-peer ────────────────────────────────────────────────────────────
+# Drop a peer from BOTH planes by node id.
+#
+# WHY this exists: there was no way to remove a peer at all. add-peer appends a
+# [Peer] block and nothing ever took one away, so a node that got destroyed
+# stayed in every surviving node's config forever. On a cluster that had seen a
+# few add/remove cycles the first control plane carried 17 peers where 8 were
+# correct — dead tunnels retrying keepalives against IPs that now belong to
+# nothing, and a config no operator could reconcile by reading it
+# (fiend, 2026-08-16).
+#
+# Matches on the "# Node <id>" comment that add-peer writes, which is the only
+# stable identifier in the block: the endpoint IP is a DHCP lease that moves,
+# and the pubkey is regenerated whenever a node is rebuilt.
+#
+# Args: peer node id.  Exit: 0 whether or not the peer was present — removing
+# something already absent is the desired end state, and callers doing cluster
+# cleanup should not have to care which.
+cmd_remove_peer() {
+    local peer_id="${1:?Usage: kube-network remove-peer <peer-id>}"
+    [[ "$peer_id" =~ ^[0-9]+$ ]] || die "peer-id must be a number (got '${peer_id}')"
+
+    local removed=0 conf tmp
+    for conf in /etc/wireguard/wg-mgmt.conf /etc/wireguard/wg-k8s.conf; do
+        [[ -f "$conf" ]] || continue
+        tmp="$(mktemp)"
+        # Buffer each [Peer] stanza and emit it only if it is not the one asked
+        # for. Everything before the first [Peer] (the [Interface] section)
+        # passes through untouched.
+        awk -v id="$peer_id" '
+            function flush() {
+                if (inpeer && !drop) printf "%s", buf
+                inpeer = 0; buf = ""; drop = 0
+            }
+            /^\[Peer\]/ { flush(); inpeer = 1; buf = $0 "\n"; next }
+            inpeer {
+                buf = buf $0 "\n"
+                if ($0 ~ "^# Node " id "$") drop = 1
+                next
+            }
+            { print }
+            END { flush() }
+        ' "$conf" >"$tmp" || {
+            rm -f "$tmp"
+            die "failed to rewrite ${conf}"
+        }
+        if ! cmp -s "$conf" "$tmp"; then
+            # Atomic replace: a half-written wg config is a node that cannot
+            # rejoin the mesh on the next wg-quick up.
+            cat "$tmp" >"$conf"
+            removed=1
+        fi
+        rm -f "$tmp"
+    done
+
+    if ((removed)); then
+        wg-quick down wg-mgmt 2>/dev/null
+        wg-quick up wg-mgmt 2>/dev/null || true
+        wg-quick down wg-k8s 2>/dev/null
+        wg-quick up wg-k8s 2>/dev/null || true
+        log "Peer ${peer_id} removed"
+    else
+        log "Peer ${peer_id} not present — nothing to do"
+    fi
 }
 
 # ── show-keys ──────────────────────────────────────────────────────────────
@@ -311,6 +378,10 @@ init)
 add-peer)
     shift
     cmd_add_peer "$@"
+    ;;
+remove-peer)
+    shift
+    cmd_remove_peer "$@"
     ;;
 show-keys) cmd_show_keys ;;
 status) cmd_status ;;

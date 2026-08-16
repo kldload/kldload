@@ -74,6 +74,108 @@ _ssh_cp() {
     fi
 }
 
+# _rssh <ip> <cmd...> — run a command on a cluster node.
+#
+# Key first, password second, mirroring _ssh_cp. stdin is /dev/null on every
+# call: these run inside `while read` loops over node lists, and ssh inherits
+# and drains the loop's stdin, which silently ends the loop after one node.
+_rssh() {
+    local ip="$1"
+    shift
+    [[ -n "$ip" ]] || return 1
+    if [[ -f /root/.ssh/id_ed25519 ]] &&
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
+            -i /root/.ssh/id_ed25519 "root@${ip}" true </dev/null 2>/dev/null; then
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes \
+            -i /root/.ssh/id_ed25519 "root@${ip}" "$@" </dev/null 2>/dev/null
+        return
+    fi
+    sshpass -p kldload ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+        "root@${ip}" "$@" </dev/null 2>/dev/null
+}
+
+# _node_ip_for <vm-name> — management IP of a cluster VM, or empty.
+# Tries the domain's own lease first, then the network lease table, because
+# domifaddr comes back empty on a domain that is defined but not running.
+_node_ip_for() {
+    local n="$1" ip=""
+    ip="$(virsh domifaddr "$n" --source lease 2>/dev/null |
+        awk '/ipv4/ {split($4, a, "/"); print a[1]; exit}')"
+    [[ -n "$ip" ]] || ip="$(virsh net-dhcp-leases default 2>/dev/null |
+        awk -v N="$n" '$6 == N {split($5, a, "/"); print a[1]}' | tail -1)"
+    printf '%s' "$ip"
+}
+
+# _demo_etcd_forget <node> — drop a departing control plane from etcd.
+#
+# `kubectl delete node` removes the Node object only; the etcd member remains
+# as an unreachable voter. Quorum is computed over MEMBERS, not over reachable
+# ones, so removing control planes without this eventually leaves a cluster
+# that cannot elect a leader and an API server that stops answering — with
+# nothing in `kubectl get nodes` to explain it.
+#
+# Runs etcdctl inside a surviving etcd pod so the hypervisor needs no etcdctl
+# and no certificates of its own.
+_demo_etcd_forget() {
+    local gone="$1" surv pod mid
+    surv="$(_kctl get nodes -l node-role.kubernetes.io/control-plane \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null |
+        grep -v "^${gone}$" | head -1)"
+    [[ -n "$surv" ]] || {
+        echo -e "  ${Y}⚠ no surviving control plane — etcd member left in place${N}"
+        return 0
+    }
+    pod="etcd-${surv}"
+    local etcdctl='ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key'
+    mid="$(_kctl -n kube-system exec "$pod" -- sh -c "$etcdctl member list" 2>/dev/null |
+        awk -F', *' -v n="$gone" '$3 == n {print $1}')"
+    if [[ -z "$mid" ]]; then
+        echo -e "  ${D}(no etcd member for ${gone})${N}"
+        return 0
+    fi
+    if _kctl -n kube-system exec "$pod" -- sh -c "$etcdctl member remove $mid" >/dev/null 2>&1; then
+        echo -e "  ${G}✓ etcd member removed (${mid})${N}"
+    else
+        echo -e "  ${Y}⚠ etcd member ${mid} could not be removed — check quorum${N}"
+    fi
+}
+
+# _demo_wg_forget <wg-node-id> <name> — drop the departing node's [Peer] from
+# every surviving node and from the hypervisor.
+#
+# Nothing did this, so each removed node left a stanza behind on all the
+# others; one control plane accumulated 17 peers where 8 were correct. The
+# survivors are collected into an array BEFORE the loop, because _rssh is an
+# ssh call and a `while read` pipeline would lose its stdin to it.
+#
+# nftables deliberately needs no update here: kube-network's ruleset trusts the
+# node CIDR and pod CIDR as subnets rather than listing hosts, so a departing
+# node leaves no per-host rule behind.
+_demo_wg_forget() {
+    local id="$1" gone="$2"
+    [[ "$id" =~ ^[0-9]+$ ]] || {
+        echo -e "  ${Y}⚠ no WireGuard id for ${gone} — its peer stanza may survive on other nodes${N}"
+        return 0
+    }
+    local -a survivors=()
+    mapfile -t survivors < <(virsh list --all --name 2>/dev/null |
+        grep -E '^kldload-(cp|w)' | grep -v "^${gone}$")
+
+    local n ip cleaned=0
+    for n in "${survivors[@]}"; do
+        [[ -n "$n" ]] || continue
+        ip="$(_node_ip_for "$n")"
+        [[ -n "$ip" ]] || continue
+        _rssh "$ip" "kube-network remove-peer ${id}" >/dev/null 2>&1 && cleaned=$((cleaned + 1))
+    done
+    # The hypervisor is on the mesh as node 100 and is not a VM, so it is not
+    # in the list above.
+    command -v kube-network >/dev/null 2>&1 &&
+        kube-network remove-peer "$id" >/dev/null 2>&1 || true
+    echo -e "  ${G}✓ WireGuard peer ${id} removed from ${cleaned} node(s) + hypervisor${N}"
+}
+
 pause() {
     if [[ "$KUBE_DEMO_PAUSE" -eq 1 ]]; then
         echo ""
@@ -1222,12 +1324,48 @@ demo_remove_nodes() {
         echo -e "${W}  Removing ${node}${N}"
         echo -e "${C}──────────────────────────────────────────────────────────────${N}"
 
+        # 0. Learn who this node is on the WireGuard mesh, and whether it is a
+        #    control plane, BEFORE anything is torn down.
+        #
+        # Both facts are only readable while the node still exists: the id
+        # lives in /etc/wireguard/.node-id on the guest, and the role comes
+        # from the cluster that is about to forget it. Without the id there is
+        # no way to remove this node's [Peer] stanza from everybody else, which
+        # is exactly how the first control plane ended up carrying 17 peers on
+        # a cluster whose correct count was 8 — dead tunnels keepaliving at
+        # addresses that belong to nothing (fiend, 2026-08-16).
+        local _wg_id="" _node_ip="" _was_cp=0
+        _node_ip="$(_node_ip_for "$node")"
+        if [[ -n "$_node_ip" ]]; then
+            _wg_id="$(_rssh "$_node_ip" 'cat /etc/wireguard/.node-id' 2>/dev/null | tr -cd '0-9')"
+        fi
+        if [[ -z "$_wg_id" ]]; then
+            # Fall back to the InternalIP kubelet advertises — it is
+            # 10.251.0.<node-id> by construction (kube-network pin-kubelet).
+            _wg_id="$(_kctl get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null |
+                awk -F. '{print $4}' | tr -cd '0-9')"
+        fi
+        _kctl get node "$node" -o jsonpath='{.metadata.labels}' 2>/dev/null |
+            grep -q 'node-role.kubernetes.io/control-plane' && _was_cp=1
+
         # 1. Cordon + drain (best-effort — skip if node no longer in cluster).
         if _kctl get node "$node" >/dev/null 2>&1; then
             echo -e "  ${D}cordon + drain...${N}"
             _kctl cordon "$node" >/dev/null 2>&1 || true
             _kctl drain "$node" --ignore-daemonsets --delete-emptydir-data \
                 --force --timeout=60s 2>&1 | grep -v '^WARNING\|evicting\|error' | tail -3 || true
+
+            # 1a. A control plane must leave the etcd quorum explicitly.
+            #
+            # `kubectl delete node` removes the Node object and nothing else;
+            # the etcd member stays in the cluster list as an unreachable
+            # voter. Remove enough of those and quorum is lost against members
+            # that no longer exist — the cluster stops accepting writes and
+            # the only symptom is a dead API server.
+            if ((_was_cp)); then
+                _demo_etcd_forget "$node"
+            fi
+
             _kctl delete node "$node" >/dev/null 2>&1 || true
             echo -e "  ${G}✓ removed from cluster${N}"
         else
@@ -1242,6 +1380,13 @@ demo_remove_nodes() {
                 virsh undefine "$node" >/dev/null 2>&1 || true
             echo -e "  ${G}✓ VM destroyed${N}"
         fi
+
+        # 2a. Forget it on the WireGuard mesh, now that it is certainly gone.
+        #     Deliberately after the destroy: while the VM still exists it can
+        #     re-handshake and re-add nothing, but removing the peer first and
+        #     then failing to destroy the VM would leave a live node that no
+        #     one can reach.
+        _demo_wg_forget "$_wg_id" "$node"
 
         # 3. Destroy the zvol — `-Rf` not `-r`:
         #   -R = also destroy clones rooted at any of this dataset's snapshots

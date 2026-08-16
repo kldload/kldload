@@ -431,6 +431,12 @@ Commands:
               defined — pass e.g. `start 1` on a RAM-tight host).
   stop        Gracefully power the cluster off (workers first, then CP). The
               VMs + zvols stay defined; `start` brings it back.
+  mesh-repair Reconcile the WireGuard mesh against the cluster that exists:
+              every node peers with every other node plus the hypervisor, and
+              peers for nodes that no longer exist are dropped. Only touches
+              differences, so it is safe to run on a healthy cluster. Runs
+              automatically after every scale; run it by hand after a manual
+              virsh removal, or if metrics targets for one node go dark.
 
 Options:
   --workers N      Number of worker nodes (default: 0 — CP runs all platform pods)
@@ -2642,6 +2648,156 @@ cmd_golden() {
 # index. So if you have w-1, w-2, w-5 (because w-3, w-4 were destroyed),
 # you get w-6, w-7. This avoids reusing names that may still have stale
 # entries in the apiserver's node list.
+# ── Mesh reconcile ────────────────────────────────────────────────────────
+# cmd_mesh_repair — make the WireGuard mesh match the cluster that exists.
+#
+# WHY this exists: the mesh was only ever built incrementally, and every
+# incremental path had a hole. Adds peered a new node with the first control
+# plane alone, so a node added after bootstrap could be invisible to every
+# other node; removals dropped nothing at all, so departed nodes stayed in
+# everyone's config forever. A cluster that had seen a few add/remove cycles
+# had a control plane carrying 17 peers where 8 were correct, one worker
+# carrying 1, and four metrics targets permanently down (fiend, 2026-08-16).
+#
+# The design point is that this is a RECONCILER, not a rebuilder: it computes
+# the peers each node should have, compares them with what the node's config
+# actually lists, and only touches the difference. That matters because
+# kube-network's add-peer/remove-peer both bounce wg-mgmt and wg-k8s, so
+# re-asserting every pair on an 8-node cluster would tear the mesh down and up
+# ~56 times underneath a running control plane. On a healthy cluster this is a
+# silent no-op.
+#
+# Args: none.  Exit: 0 if the mesh converged, 1 if any node could not be read.
+cmd_mesh_repair() {
+    echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+    echo -e "${W}  kube-cluster mesh-repair — reconcile the WireGuard mesh${N}"
+    echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+
+    local -a names=()
+    mapfile -t names < <(virsh list --all --name 2>/dev/null | grep -E '^kldload-(cp|w)')
+    ((${#names[@]})) || {
+        warn "no cluster VMs found — nothing to reconcile"
+        return 0
+    }
+
+    # Pass 1: learn every live node's IP, WireGuard id and public key.
+    local -a n_name=() n_ip=() n_id=() n_pub=()
+    local nm ip id pub unreachable=0
+    for nm in "${names[@]}"; do
+        ip="$(_node_ip "$nm")"
+        [[ -n "$ip" ]] || {
+            warn "${nm}: no IP — skipped (start it, then re-run)"
+            unreachable=1
+            continue
+        }
+        id="$(_ssh_cmd "$ip" 'cat /etc/wireguard/.node-id' 2>/dev/null | tr -cd '0-9')"
+        pub="$(_ssh_cmd "$ip" 'cat /etc/wireguard/wg-mgmt.pub' 2>/dev/null | tr -d '[:space:]')"
+        if [[ -z "$id" || -z "$pub" ]]; then
+            warn "${nm} (${ip}): not on the mesh yet — run 'kube-network init <id>' there first"
+            unreachable=1
+            continue
+        fi
+        n_name+=("$nm")
+        n_ip+=("$ip")
+        n_id+=("$id")
+        n_pub+=("$pub")
+    done
+    ((${#n_name[@]})) || {
+        warn "no reachable cluster nodes — nothing reconciled"
+        return 1
+    }
+
+    # The hypervisor is on the mesh as node 100 and is not a VM, so it never
+    # appears in the list above. Prometheus scrapes the nodes across this
+    # plane, so leaving it out silently breaks every host-side target.
+    local host_pub host_id=100
+    host_pub="$(cat /etc/wireguard/wg-mgmt.pub 2>/dev/null | tr -d '[:space:]' || true)"
+
+    local -a live_ids=("${n_id[@]}")
+    [[ -n "$host_pub" ]] && live_ids+=("$host_id")
+
+    log "Reconciling ${#n_name[@]} node(s) against $((${#live_ids[@]} - 1)) peer(s) + hypervisor"
+
+    # Pass 2: per node, drop what should not be there and add what is missing.
+    local i j added=0 removed=0 cur want stale
+    for i in "${!n_name[@]}"; do
+        # Peer ids currently written into this node's config.
+        local -a have=()
+        mapfile -t have < <(_ssh_cmd "${n_ip[$i]}" \
+            "grep -hoE '^# Node [0-9]+' /etc/wireguard/wg-k8s.conf 2>/dev/null | awk '{print \$3}' | sort -un")
+
+        # Anything not in the live set is a node that no longer exists.
+        for stale in "${have[@]}"; do
+            [[ -n "$stale" ]] || continue
+            local keep=0
+            for cur in "${live_ids[@]}"; do [[ "$stale" == "$cur" ]] && keep=1 && break; done
+            [[ "$stale" == "${n_id[$i]}" ]] && keep=0 # never peer with itself
+            if ((!keep)); then
+                _ssh_cmd "${n_ip[$i]}" "kube-network remove-peer ${stale}" >/dev/null 2>&1 &&
+                    removed=$((removed + 1))
+                log "  ${n_name[$i]}: dropped stale peer ${stale}"
+            fi
+        done
+
+        # Every other live node must be present.
+        for j in "${!n_name[@]}"; do
+            ((i == j)) && continue
+            local present=0
+            for cur in "${have[@]}"; do [[ "$cur" == "${n_id[$j]}" ]] && present=1 && break; done
+            ((present)) && continue
+            _ssh_cmd "${n_ip[$i]}" \
+                "kube-network add-peer ${n_ip[$j]} ${n_pub[$j]} ${n_id[$j]}" >/dev/null 2>&1 &&
+                added=$((added + 1))
+            log "  ${n_name[$i]}: added missing peer ${n_name[$j]} (${n_id[$j]})"
+        done
+
+        # ...and so must the hypervisor.
+        if [[ -n "$host_pub" ]]; then
+            local has_host=0
+            for cur in "${have[@]}"; do [[ "$cur" == "$host_id" ]] && has_host=1 && break; done
+            if ((!has_host)); then
+                _ssh_cmd "${n_ip[$i]}" \
+                    "kube-network add-peer ${n_ip[0]} ${host_pub} ${host_id}" >/dev/null 2>&1 &&
+                    added=$((added + 1))
+                log "  ${n_name[$i]}: added hypervisor peer"
+            fi
+        fi
+    done
+
+    # Pass 3: the hypervisor's own view of the mesh.
+    if [[ -n "$host_pub" ]] && command -v kube-network >/dev/null 2>&1; then
+        local -a hv_have=()
+        mapfile -t hv_have < <(grep -hoE '^# Node [0-9]+' /etc/wireguard/wg-k8s.conf 2>/dev/null |
+            awk '{print $3}' | sort -un)
+        for stale in "${hv_have[@]}"; do
+            [[ -n "$stale" ]] || continue
+            local keep=0
+            for cur in "${live_ids[@]}"; do [[ "$stale" == "$cur" ]] && keep=1 && break; done
+            [[ "$stale" == "$host_id" ]] && keep=1
+            ((keep)) || {
+                kube-network remove-peer "$stale" >/dev/null 2>&1 && removed=$((removed + 1))
+                log "  hypervisor: dropped stale peer ${stale}"
+            }
+        done
+        for j in "${!n_name[@]}"; do
+            local present=0
+            for cur in "${hv_have[@]}"; do [[ "$cur" == "${n_id[$j]}" ]] && present=1 && break; done
+            ((present)) && continue
+            kube-network add-peer "${n_ip[$j]}" "${n_pub[$j]}" "${n_id[$j]}" >/dev/null 2>&1 &&
+                added=$((added + 1))
+            log "  hypervisor: added missing peer ${n_name[$j]} (${n_id[$j]})"
+        done
+    fi
+
+    if ((added == 0 && removed == 0)); then
+        log "Mesh already correct — nothing changed"
+    else
+        log "Mesh reconciled: ${added} peer(s) added, ${removed} stale peer(s) removed"
+    fi
+    ((unreachable)) && return 1
+    return 0
+}
+
 # cmd_scale_cp — `kube-cluster scale --control-planes N`: grow the cluster's
 # control-plane count to N (odd, host-fitting). The cluster must already exist
 # and be HA-ready (bootstrap sets the VIP endpoint). Uses the same VIP the
@@ -2696,6 +2852,10 @@ cmd_scale_cp() {
     fi
 
     _scale_control_planes "$CONTROL_PLANES"
+
+    # Same reason as the worker path: converge rather than trust incremental
+    # meshing across every add path.
+    cmd_mesh_repair || warn "mesh reconcile incomplete — run 'kube-cluster mesh-repair' once the nodes settle"
 }
 
 cmd_scale() {
@@ -3048,6 +3208,18 @@ NETCFG
         echo -e "${Y}  Per-worker logs: /var/log/kldload/kube-join-<name>.log${N}"
     fi
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+
+    # Converge the mesh before declaring the scale done.
+    #
+    # The per-worker path above peers each new node with the first control
+    # plane only, which leaves it invisible to every other node and to the
+    # hypervisor's Prometheus — and a batch of workers added together never
+    # peers with each other at all. Rather than thread incremental meshing
+    # through three code paths and hope the ordering holds, converge once here:
+    # the reconciler only touches differences, so on an already-correct mesh
+    # this costs one ssh per node and changes nothing.
+    cmd_mesh_repair || warn "mesh reconcile incomplete — run 'kube-cluster mesh-repair' once the nodes settle"
+
     _ssh_cmd "$cp_ip" "kubectl get nodes -o wide" 2>/dev/null || true
 }
 
@@ -3163,6 +3335,7 @@ status) cmd_status ;;
 start) cmd_start ;;
 stop) cmd_stop ;;
 scale) if [[ "${_SCALE_CP:-0}" == 1 ]]; then cmd_scale_cp; else cmd_scale "${WORKERS:-1}"; fi ;;
+mesh-repair | mesh) cmd_mesh_repair ;;
 vip-float)
     _ensure_libvirt_default_net
     KUBE_VIP_ADDRESS="${KUBE_VIP_ADDRESS:-$KUBE_VIP_DEFAULT}"
