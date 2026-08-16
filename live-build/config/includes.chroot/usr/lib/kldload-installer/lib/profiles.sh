@@ -642,8 +642,19 @@ k_install_system_files() {
         # the "Kernel's own ZFS narration" panel on the OpenZFS test-bench
         # dashboard was permanently empty — with the collector binary present
         # and the kstat readable the whole time (fiend, 2026-08-16).
+        #
+        # kldload-package-holds.service is in this list for the same reason.
+        # Its `systemctl enable` further down has been failing since the day it
+        # was written — you cannot enable a unit whose file was never copied —
+        # so it warned into the installer log and every install shipped with an
+        # unheld kernel. That unit is the SECOND failsafe on the kernel/DKMS
+        # pairing; the first, APT::NeverAutoRemove in 60-debz-kernel, only stops
+        # the OLD kernel being garbage-collected and does nothing to stop a NEW
+        # one arriving and orphaning the ZFS and NVIDIA modules (fiend,
+        # 2026-08-16: `apt-mark showhold` was empty on a running install).
         mkdir -p "${target}/etc/systemd/system"
-        for f in kldload-zfs-dbgmsg.service kldload-zfs-dbgmsg.timer; do
+        for f in kldload-zfs-dbgmsg.service kldload-zfs-dbgmsg.timer \
+            kldload-package-holds.service; do
             [[ -f "/etc/systemd/system/${f}" ]] &&
                 cp "/etc/systemd/system/${f}" "${target}/etc/systemd/system/${f}"
         done
@@ -686,15 +697,46 @@ k_install_system_files() {
         # was the 1.0.4 regression where kldload-autodeploy.service had a
         # symlink in multi-user.target.wants but no binary behind it.
         mkdir -p "${target}/usr/sbin"
-        for bin in kldload-autodeploy; do
+        # kldload-apply-platform-holds and kldload-rollback are the two halves
+        # of the update model — pin the substrate, and provide a way back when
+        # something moves anyway. Both are useless without the other: holds
+        # with no rollback means an operator who unholds and upgrades has no
+        # undo, and rollback with no holds means they need it far more often.
+        for bin in kldload-autodeploy kldload-apply-platform-holds kldload-rollback; do
             if [[ -f "/usr/sbin/${bin}" ]]; then
                 cp "/usr/sbin/${bin}" "${target}/usr/sbin/${bin}" &&
                     chmod +x "${target}/usr/sbin/${bin}" &&
                     k_log "installed /usr/sbin/${bin}"
             else
-                k_log "WARNING: /usr/sbin/${bin} missing in live root — autodeploy will not run"
+                k_log "WARNING: /usr/sbin/${bin} missing in live root"
             fi
         done
+
+        # ── apt/dnf snapshot+rollback wrappers ────────────────────────────
+        # Installed as /usr/local/bin/{apt,apt-get,dnf}, which precede
+        # /usr/bin in both the login PATH and sudo's secure_path, so a plain
+        # `sudo apt install` gets a pre-transaction snapshot and `apt rollback`
+        # becomes a real command. kpkg still exists and is unchanged; this is
+        # for the operators — which is all of them — who type the normal
+        # command out of habit rather than learning a kldload-specific one.
+        #
+        # Symlinks, not copies: the wrapper reads argv[0] to decide which real
+        # binary to exec, and three copies would be three things to keep in
+        # sync. Only linked for a manager that is actually present, so a Debian
+        # target does not get a dnf wrapper pointing at nothing.
+        if [[ -f /usr/local/bin/kldload-pkg-wrapper ]]; then
+            mkdir -p "${target}/usr/local/bin"
+            cp /usr/local/bin/kldload-pkg-wrapper "${target}/usr/local/bin/kldload-pkg-wrapper"
+            chmod +x "${target}/usr/local/bin/kldload-pkg-wrapper"
+            for _mgr in apt apt-get dnf; do
+                if [[ -x "${target}/usr/bin/${_mgr}" ]]; then
+                    ln -sf kldload-pkg-wrapper "${target}/usr/local/bin/${_mgr}"
+                    k_log "wrapped ${_mgr} for snapshot+rollback"
+                fi
+            done
+        else
+            k_log "WARNING: kldload-pkg-wrapper missing — apt/dnf will not snapshot"
+        fi
         # Explicit bin copies — tools whose names don't match the `k*` wholesale
         # glob below.
         # (`lh` was here for LogHog, removed 2026-08-16.)
