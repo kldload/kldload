@@ -450,8 +450,21 @@ esac
 
 echo "Building ZFS ($(nproc) cores)..."
 [ -f autogen.sh ] && sh autogen.sh
-./configure --with-linux="$(ls -d /usr/src/kernels/$(uname -r) 2>/dev/null || ls -d /usr/lib/modules/$(uname -r)/build 2>/dev/null)" \
-  --enable-debug 2>&1 || ./configure --enable-debug 2>&1
+# --prefix=/usr, not the autotools default of /usr/local.
+#
+# The build itself was fine without it — ZFS 2.4.99-1 from master compiled,
+# installed and loaded on fedora — but `make install` put the test suite in
+# /usr/local/share/zfs while everything downstream looks for
+# /usr/share/zfs/zfs-tests.sh, so validation reported "zfs-tests.sh: MISSING"
+# and the golden was refused a seal for want of a path prefix
+# (fiend, 2026-08-16).
+#
+# /usr also matches where the distro packages put ZFS, which is the point of a
+# golden that is meant to stand in for the packaged one.
+./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+  --with-linux="$(ls -d /usr/src/kernels/$(uname -r) 2>/dev/null || ls -d /usr/lib/modules/$(uname -r)/build 2>/dev/null)" \
+  --enable-debug 2>&1 ||
+  ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --enable-debug 2>&1
 make -j${NCPU} 2>&1
 make install 2>&1
 
