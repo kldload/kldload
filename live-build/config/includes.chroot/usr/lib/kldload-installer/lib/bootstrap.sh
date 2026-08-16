@@ -3051,6 +3051,26 @@ NMCONF
             nvidia-container-toolkit \
             >>"$log" 2>&1 || k_log_to "$log" "WARNING: nvidia-container-toolkit install failed (optional)"
         k_in_chroot "${target}" bash -c 'nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' 2>/dev/null || true
+
+        # Remove the temporary mirror line now that the packages are in.
+        #
+        # It says "temporarily" where it is written above, and it meant it:
+        # the line exists only because the darksite mirror carries `main`
+        # while firmware-misc-nonfree lives in non-free. Nothing removed it,
+        # so it survived onto the installed system — where sources.list
+        # already lists the same suite WITH non-free and non-free-firmware.
+        # apt then reported the same repository configured twice and printed
+        # roughly thirty "Target Packages ... is configured multiple times"
+        # warnings on EVERY apt update, burying anything that mattered
+        # (fiend, 2026-08-16).
+        #
+        # The driver itself does not need it: that comes from NVIDIA's own
+        # repo in nvidia-container-toolkit.list / cuda-*.list, which stay.
+        if [[ -f "$_nvidia_list" ]]; then
+            rm -f "$_nvidia_list"
+            k_log_to "$log" "NVIDIA: removed the temporary Debian mirror line (sources.list already covers non-free)"
+        fi
+
         k_log_to "$log" "NVIDIA drivers + container toolkit installed (Debian/Ubuntu)"
     fi
 
