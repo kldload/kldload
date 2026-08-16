@@ -29,9 +29,19 @@ ok "Ollama ready"
 # ── Start Open WebUI ──────────────────────────────────────────────────────────
 _status "Starting Open WebUI..."
 if command -v open-webui >/dev/null 2>&1; then
-    # Installed via pip — run directly
-    open-webui serve --host 0.0.0.0 --port 8080 >>"$LOG" 2>&1 &
-    log "Open WebUI started (pip)"
+    # Installed via pip — hand it to systemd rather than backgrounding it.
+    #
+    # This used to be `open-webui serve ... &`, which left the server with no
+    # unit of its own, inheriting the cgroup of whatever called bob-live. On
+    # installs that was kldload-autodeploy.service — a oneshot that had already
+    # exited — so the web UI could not be restarted, was not restarted when it
+    # died, and filled the provisioning journal with request logs forever
+    # (fiend, 2026-08-16). kldload-open-webui.service owns it now.
+    if systemctl start kldload-open-webui.service >>"$LOG" 2>&1; then
+        log "Open WebUI started (pip, kldload-open-webui.service)"
+    else
+        log "WARNING: kldload-open-webui.service failed to start — see journalctl -u kldload-open-webui"
+    fi
 elif command -v podman >/dev/null 2>&1; then
     # Fallback: podman container
     podman run -d --name open-webui --network host \

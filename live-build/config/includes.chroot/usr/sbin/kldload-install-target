@@ -2370,6 +2370,10 @@ Description=kldload post-install smoke test
 # noise. Wait for the markers that say firstboot orchestration is done.
 After=network-online.target multi-user.target kldload-autodeploy.service klab-firstboot.service
 Wants=network-online.target kldload-autodeploy.service
+# Run-once guard, matching the other first-boot units (kldload-firstboot,
+# kldload-autodeploy, klab-firstboot all carry one). This unit was the only
+# one without it.
+ConditionPathExists=!/var/lib/kldload/smoke-firstboot-done
 
 [Service]
 Type=oneshot
@@ -2388,7 +2392,21 @@ ExecStartPre=/bin/bash -c '\
     done; \
     echo "smoke: readiness markers not present after 90 min — running anyway"'
 ExecStart=/bin/bash -c 'if [[ -x /usr/local/share/kldload/tests/smoke-all.sh ]]; then /usr/local/share/kldload/tests/smoke-all.sh > /root/kldload-smoke-report.txt 2>&1; fi'
+# Run once, whatever the outcome.
+#
+# This was ExecStartPost, which systemd runs ONLY on success — so a smoke
+# test that failed never disabled itself. It then re-ran on every boot, failed
+# again, and parked the machine in systemd's `degraded` state indefinitely;
+# `systemctl --failed` showed this unit for hours after the underlying
+# problems had been fixed, because nothing re-evaluated it (fiend,
+# 2026-08-16).
+#
+# ExecStopPost runs on success AND failure, so the stamp is always written and
+# the Condition above skips the unit next boot. The result stays readable in
+# /root/kldload-smoke-report.txt, and a genuine failure is still surfaced once
+# — which is the point — rather than every boot forever.
 ExecStartPost=/bin/bash -c 'systemctl disable kldload-smoke-firstboot.service'
+ExecStopPost=/bin/bash -c 'touch /var/lib/kldload/smoke-firstboot-done; systemctl disable kldload-smoke-firstboot.service 2>/dev/null || true'
 StandardOutput=journal
 StandardError=journal
 TimeoutStartSec=6000

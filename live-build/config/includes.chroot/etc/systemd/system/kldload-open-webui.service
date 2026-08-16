@@ -1,0 +1,58 @@
+# kldload-open-webui.service — Open WebUI, Bob's chat interface.
+#
+# Role: runs the pip-installed `open-webui` server that fronts Ollama.
+# Read by: systemd. Started by bob-live (live boot) and enabled on installs
+# where Open WebUI came from pip rather than the podman image.
+#
+# WHY this unit exists: on the LIVE ISO, bob-live launches the pip-installed
+# server as a bare background job —
+#
+#     open-webui serve --host 0.0.0.0 --port 8080 >>"$LOG" 2>&1 &
+#
+# — which leaves it with no unit of its own, inheriting whatever cgroup called
+# bob-live, with nothing to restart it if it dies and no way to restart it on
+# purpose.
+#
+# NOTE the installed-system path is different and already sound: there Open
+# WebUI runs as a podman container with --restart always, and
+# podman-restart.service brings it back across reboots (verified on fiend,
+# 2026-08-16 — enabled+active, policy always, container up 5 hours). The only
+# residue there is that conmon sits in kldload-autodeploy.service's cgroup and
+# its request logs land in that unit's journal. This unit governs the pip path
+# only, and is skipped by ConditionPathExists when the binary is absent.
+#
+# Consequence if missing: bob-live falls back to the bare `&` launch and the
+# above returns.
+
+[Unit]
+Description=Open WebUI — Bob's chat interface
+Documentation=https://github.com/open-webui/open-webui
+After=network-online.target ollama.service
+Wants=network-online.target
+# Wants, not Requires: Open WebUI starts and shows its UI without a model
+# backend, and a failed Ollama should not leave the operator with no
+# interface at all to diagnose it from.
+Wants=ollama.service
+ConditionPathExists=/usr/local/bin/open-webui
+
+[Service]
+Type=exec
+# Points at the same Ollama the rest of the box uses. Set here rather than in
+# the script so `systemctl show` tells the truth about the running config.
+Environment=OLLAMA_BASE_URL=http://127.0.0.1:11434
+ExecStart=/usr/local/bin/open-webui serve --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=5s
+# Give it time to lay down its SQLite schema on very first start before
+# systemd decides a slow boot is a failed one.
+TimeoutStartSec=180
+
+# Modest hardening. Deliberately NOT ProtectHome/ProtectSystem=strict: the
+# server writes its database and uploads under the invoking user's data dir,
+# and locking those down turns a working install into a blank UI with a
+# permission error nobody reads.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
