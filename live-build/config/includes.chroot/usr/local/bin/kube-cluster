@@ -2661,7 +2661,34 @@ cmd_scale_cp() {
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
     echo -e "${W}  kube-cluster scale — control planes → ${CONTROL_PLANES} on ${CLUSTER_NAME}${N}"
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
+    local _cp_requested="$CONTROL_PLANES"
     _preflight_control_planes
+
+    # Say so when the RAM cap has made the request impossible, instead of
+    # letting it look like it worked.
+    #
+    # _preflight_control_planes caps CONTROL_PLANES to the largest ODD count
+    # the host can fit. That is a TARGET TOTAL, so on a full host the capped
+    # target can land BELOW the number of control planes already running, and
+    # _scale_control_planes then reports "already N (target M) — nothing to
+    # add" and exits 0 in about a second. Asked for 5 on a host with 3, the
+    # operator saw a run that started, said nothing they could see, and
+    # finished successfully — and reasonably concluded the request had gone to
+    # the wrong node type (fiend, 2026-08-16).
+    if [[ "$CONTROL_PLANES" != "$_cp_requested" ]]; then
+        local _have_cp
+        _have_cp="$(_ssh_cmd "$(_node_ip "$CP_NAME")" \
+            'kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers 2>/dev/null | wc -l')"
+        [[ "$_have_cp" =~ ^[0-9]+$ ]] || _have_cp=0
+        if ((CONTROL_PLANES <= _have_cp)); then
+            warn "Cannot grow to ${_cp_requested} control planes: this host has RAM for ${CONTROL_PLANES} at ${CP_RAM}MB each, and ${_have_cp} are already running."
+            warn "Nothing was added. Free RAM (each worker holds ${RAM}MB), or retry with a smaller CP_RAM, e.g.:"
+            warn "    CP_RAM=4096 kube-cluster scale --control-planes ${_cp_requested}"
+            return 1
+        fi
+        warn "Capped to ${CONTROL_PLANES} control planes (asked for ${_cp_requested}) — that is what this host's RAM fits."
+    fi
+
     _scale_control_planes "$CONTROL_PLANES"
 }
 
