@@ -2681,8 +2681,14 @@ cmd_scale_cp() {
             'kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers 2>/dev/null | wc -l')"
         [[ "$_have_cp" =~ ^[0-9]+$ ]] || _have_cp=0
         if ((CONTROL_PLANES <= _have_cp)); then
+            local _short=$(((_cp_requested - _have_cp) * CP_RAM))
             warn "Cannot grow to ${_cp_requested} control planes: this host has RAM for ${CONTROL_PLANES} at ${CP_RAM}MB each, and ${_have_cp} are already running."
-            warn "Nothing was added. Free RAM (each worker holds ${RAM}MB), or retry with a smaller CP_RAM, e.g.:"
+            warn "Nothing was added. Growing to ${_cp_requested} needs room for $((_cp_requested - _have_cp)) more (${_short}MB)."
+            # Deliberately "and", not "or": on a host this full, halving CP_RAM
+            # alone can still leave the fitted target at or below the running
+            # count, and an operator who tries only that gets the same silent
+            # nothing a second time.
+            warn "Free RAM and/or lower CP_RAM — each worker holds ${RAM}MB, so removing workers is the biggest lever:"
             warn "    CP_RAM=4096 kube-cluster scale --control-planes ${_cp_requested}"
             return 1
         fi
