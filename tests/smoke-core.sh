@@ -21,6 +21,22 @@ printf "  Kernel:        %s\n" "$(uname -r)"
 echo ""
 
 # ── ZFS ──────────────────────────────────────────────────────────────────────
+_section "Packages the installer asked for"
+
+# The installer verifies its own package transaction and records anything
+# that did not arrive. Reading that file here turns a warning buried in a
+# 400 KB install log into a visible test result.
+#
+# HISTORY: Docker sat in the offline mirror, was never named in the
+# installer's package list, and the install came up with no docker binary,
+# no dataset and no daemon.json — while every log line said success.
+if [[ -f /var/lib/kldload/packages-missing ]]; then
+    _n=$(grep -c . /var/lib/kldload/packages-missing 2>/dev/null || echo 0)
+    _fail "profile packages" "$_n did not install: $(tr '\n' ' ' </var/lib/kldload/packages-missing)"
+else
+    _pass "every profile package the installer asked for is present"
+fi
+
 _section "ZFS"
 
 test_cmd "ZFS userspace (zfs)" "zfs"

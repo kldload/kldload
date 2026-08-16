@@ -786,6 +786,34 @@ k_install_target_packages() {
                     k_log_to "$log" "WARNING: package ${_pkg} not available — skipping"
             done
         }
+
+        # ── Verify the OUTCOME, not the exit code ────────────────────
+        #
+        # The transaction above runs with --ignore-missing, so apt walks past
+        # anything it cannot find and still exits 0. Nothing then checked
+        # whether the packages actually arrived, and a whole feature can go
+        # missing in silence: Docker was in the offline mirror, was never
+        # named in this list, and the install came up with no docker binary,
+        # no /var/lib/docker dataset and no daemon.json — while every log line
+        # said success (fiend, 2026-08-16).
+        #
+        # This is not fatal. Profile packages are not the kernel, and an
+        # install that is missing chromium is still an install. But it is
+        # WRITTEN DOWN, both in the log and in a file, so the smoke tests and
+        # the operator can see it without reading a 400 KB transcript.
+        local _missing=()
+        for _pkg in ${profile_pkgs} ${profile_opt}; do
+            k_in_chroot "${target}" dpkg-query -W -f='${Status}' "$_pkg" 2>/dev/null |
+                grep -q "ok installed" || _missing+=("$_pkg")
+        done
+        mkdir -p "${target}/var/lib/kldload"
+        if ((${#_missing[@]})); then
+            k_log_to "$log" "WARNING: ${#_missing[@]} profile package(s) NOT installed: ${_missing[*]}"
+            printf '%s\n' "${_missing[@]}" >"${target}/var/lib/kldload/packages-missing"
+        else
+            k_log_to "$log" "All profile packages verified present on the target"
+            rm -f "${target}/var/lib/kldload/packages-missing"
+        fi
     fi
 }
 
