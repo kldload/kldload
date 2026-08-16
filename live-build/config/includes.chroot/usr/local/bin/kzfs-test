@@ -754,33 +754,36 @@ APKSETUP
             # install" (fiend, 2026-08-16). --skip-unavailable keeps one
             # renamed package from taking the whole transaction down, the same
             # lesson as rule 2a.
-            _ssh_cmd "$ip" bash -c 'dnf install -y --skip-unavailable \
-          gcc make autoconf automake libtool rpm-build kernel-rpm-macros \
-          git libuuid-devel libblkid-devel libudev-devel \
-          openssl-devel libtirpc-devel libffi-devel libcurl-devel \
-          python3 python3-devel python3-setuptools python3-cffi \
-          libaio-devel libattr-devel ncompress elfutils-libelf-devel \
-          zlib-devel "kernel-devel-$(uname -r)"' ||
+            # ONE argument, single-quoted locally.
+            #
+            # This was `_ssh_cmd "$ip" bash -c '...'`, and _ssh_cmd passes its
+            # arguments to ssh, which joins them with spaces before the remote
+            # shell ever sees them. So the remote ran `bash -c dnf install -y
+            # ...` — `bash -c` took "dnf" as the whole command string and the
+            # rest became $0, $1... dnf5 answered "Missing command. Add --help
+            # for more information about the arguments." and installed nothing.
+            #
+            # It had `2>/dev/null || true` on it, so it had almost certainly
+            # never installed a single package on ANY distro; un-silencing it
+            # is what made this visible (fiend, 2026-08-16). Single quotes keep
+            # $(uname -r) unexpanded locally so the guest resolves its own
+            # kernel.
+            _ssh_cmd "$ip" 'dnf install -y --skip-unavailable gcc make autoconf automake libtool rpm-build kernel-rpm-macros git libuuid-devel libblkid-devel libudev-devel openssl-devel libtirpc-devel libffi-devel libcurl-devel python3 python3-devel python3-setuptools python3-cffi libaio-devel libattr-devel ncompress elfutils-libelf-devel zlib-devel kernel-devel-$(uname -r)' ||
                 warn "  build deps incomplete on ${distro} — ./configure will name what is missing"
             ;;
         apt)
-            _ssh_cmd "$ip" bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-          build-essential autoconf automake libtool gawk dkms \
-          git uuid-dev libblkid-dev libudev-dev libssl-dev libtirpc-dev \
-          libffi-dev libcurl4-openssl-dev python3 python3-dev \
-          python3-setuptools python3-cffi python3-packaging \
-          libaio-dev libattr1-dev ncompress libelf-dev zlib1g-dev \
-          "linux-headers-$(uname -r)"' ||
+            # Same single-argument form as the dnf branch above, for the same
+            # reason.
+            _ssh_cmd "$ip" 'DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential autoconf automake libtool gawk dkms git uuid-dev libblkid-dev libudev-dev libssl-dev libtirpc-dev libffi-dev libcurl4-openssl-dev python3 python3-dev python3-setuptools python3-cffi python3-packaging libaio-dev libattr1-dev ncompress libelf-dev zlib1g-dev linux-headers-$(uname -r)' ||
                 warn "  build deps incomplete on ${distro} — ./configure will name what is missing"
             ;;
         pacman)
-            _ssh_cmd "$ip" bash -c 'pacman -S --noconfirm git openssl \
-          python python-cffi libtirpc 2>/dev/null || true'
+            _ssh_cmd "$ip" 'pacman -S --noconfirm --needed git openssl python python-cffi libtirpc base-devel' ||
+                warn "  build deps incomplete on ${distro}"
             ;;
         apk)
-            _ssh_cmd "$ip" sh -c 'apk add git libuuid libblkid openssl-dev \
-          libtirpc-dev python3-dev py3-cffi linux-headers \
-          autoconf automake libtool 2>/dev/null || true'
+            _ssh_cmd "$ip" 'apk add git libuuid libblkid openssl-dev libtirpc-dev python3-dev py3-cffi linux-headers autoconf automake libtool build-base' ||
+                warn "  build deps incomplete on ${distro}"
             ;;
         esac
 

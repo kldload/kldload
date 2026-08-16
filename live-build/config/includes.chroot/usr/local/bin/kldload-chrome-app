@@ -111,6 +111,19 @@ if [[ -z "$_ozone" ]]; then
     esac
 fi
 
+# --disable-background-networking and friends: these windows front local
+# SPAs on a machine that is meant to work air-gapped, and Chrome was doing
+# none of that quietly. It repeatedly tried to register with Google Cloud
+# Messaging and failed, three times in ninety seconds, which is both noise
+# in the operator's notifications and outbound traffic a "darksite" install
+# should never generate:
+#
+#   kldload-k8s.desktop: ERROR:google_apis/gcm/engine/registration_request.cc
+#
+# Component update, domain reliability, sync and crash reporting are the
+# other background talkers; none of them do anything useful for a window
+# whose entire content is served from a unix socket on this box
+# (fiend, 2026-08-16).
 exec "$chrome" \
     --ozone-platform="$_ozone" \
     --user-data-dir="$profile_dir" \
@@ -119,5 +132,10 @@ exec "$chrome" \
     --no-default-browser-check \
     --password-store=basic \
     --disable-session-crashed-bubble \
-    --disable-features=Translate \
+    --disable-features=Translate,OptimizationHints,MediaRouter \
+    --disable-background-networking \
+    --disable-sync \
+    --disable-domain-reliability \
+    --disable-component-update \
+    --disable-breakpad \
     --app="$url"
