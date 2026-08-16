@@ -63,10 +63,9 @@ if [[ "${SUITE}" == "noble" || "${SUITE}" == "jammy" || "${SUITE}" == "mantic" |
         sed -i 's/main$/main restricted universe multiverse/' /etc/apt/sources.list 2>/dev/null || true
     fi
 else
-    # i386 multiarch is NOT enabled here — see the Steam fetch far below,
-    # where it is enabled for that one step only. Enabling it at this point
-    # puts it in scope for the main dependency closure, which is a mistake
-    # measured in gigabytes.
+    # No i386 multiarch, deliberately: nothing in this mirror is 32-bit.
+    # Steam was the only thing that ever needed it and is no longer carried —
+    # see the note in lib/bootstrap.sh.
     log "Debian detected — enabling contrib and non-free-firmware..."
     sed -i 's/Components: main/Components: main contrib non-free-firmware/' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
     if [[ -f /etc/apt/sources.list ]]; then
@@ -245,65 +244,6 @@ for _pkg in "${CLOSURE[@]}"; do
 done
 log "Download complete: ${_dl_new} new, ${_dl_skip} cached, ${_dl_fail} skipped"
 
-# ─── Steam, fetched on its own terms ─────────────────────────────────────────
-#
-# WHY SEPARATE FROM THE CLOSURE ABOVE: that closure is resolved with
-# `apt-cache depends --recurse`, which yields bare package names. Steam's
-# dependencies are arch-qualified (libgl1:i386 and ~120 more), and a bare
-# `apt-get download libgl1` fetches the amd64 build — so the i386 half would
-# silently never arrive and steam-installer would be unsatisfiable in the
-# mirror. Asking apt to plan the install and reading back the URIs it would
-# fetch gets the exact closure, i386 included, without touching the resolution
-# path that the kernel and ZFS depend on.
-#
-# NOT FATAL. Steam is the definition of optional, and the rule this project
-# paid for in kernels is that optional packages never share a failure with
-# boot-critical ones. A miss here costs Steam and nothing else.
-if [[ "${SUITE}" != "noble" && "${SUITE}" != "jammy" && "${SUITE}" != "mantic" && "${SUITE}" != "oracular" ]]; then
-    # i386 is enabled HERE, and the ordering is the whole point.
-    #
-    # Steam's Linux client is a 32-bit binary — Valve moved Proton, the
-    # runtime and the games to 64-bit, but the client bootstrap is still
-    # i386, so steam-installer drags ~120 32-bit libraries and cannot be
-    # fetched at all without multiarch.
-    #
-    # Enabling it before the MAIN closure is resolved, though, makes
-    # `apt-cache depends --recurse` return the 32-bit variant of everything:
-    # the closure went from ~1500 packages to 3448 and the mirror began
-    # fetching i386 builds of accountsservice, acl and the rest of the base
-    # system — gigabytes of 32-bit libraries no 64-bit install will ever
-    # load (caught mid-build, 2026-08-16). Steam is the only thing in this
-    # mirror that needs 32-bit, so only Steam's fetch runs with it enabled.
-    dpkg --add-architecture i386
-    apt-get update -qq >/dev/null 2>&1 || true
-    log "Fetching Steam closure (steam-installer + i386 libraries)..."
-    _steam_before="$(find "$APT_POOL" -maxdepth 1 -name '*.deb' | wc -l)"
-    if _steam_uris="$(apt-get install -y --print-uris steam-installer 2>/dev/null |
-        grep -oE "https?://[^']+" || true)" && [[ -n "$_steam_uris" ]]; then
-        _steam_got=0 _steam_miss=0
-        while IFS= read -r _u; do
-            [[ -n "$_u" ]] || continue
-            _f="${_u##*/}"
-            _f="${_f//%3a/:}"
-            if [[ -f "${APT_POOL}/${_f}" ]]; then
-                continue
-            fi
-            if (cd "$APT_POOL" && curl -fsSL -O "$_u" 2>/dev/null); then
-                ((_steam_got++)) || true
-            else
-                ((_steam_miss++)) || true
-            fi
-        done <<<"$_steam_uris"
-        _steam_after="$(find "$APT_POOL" -maxdepth 1 -name '*.deb' | wc -l)"
-        log "Steam closure: ${_steam_got} fetched, ${_steam_miss} missed (pool ${_steam_before} → ${_steam_after})"
-        if ((_steam_miss > 0)); then
-            log "WARNING: ${_steam_miss} Steam packages did not download — Steam may not install offline"
-        fi
-    else
-        log "WARNING: could not plan the Steam install — is i386 enabled and contrib reachable?"
-    fi
-fi
-
 # Normalise epoch filenames
 log "Normalising epoch filenames..."
 while IFS= read -r -d '' f; do
@@ -349,17 +289,6 @@ log "Generating Packages index..."
 )
 gzip -9c "${APT_DISTS}/Packages" >"${APT_DISTS}/Packages.gz"
 
-# The i386 index. apt reads a SEPARATE Packages file per architecture, so the
-# i386 half of the Steam closure is invisible without one — the debs would sit
-# in the pool and steam-installer would still be unsatisfiable.
-#
-# The same scan serves both: each stanza carries its own Architecture field and
-# apt ignores the ones that are not its own, so one listing published in two
-# places is correct and cannot drift from itself.
-APT_DISTS_I386="${APT_ROOT}/dists/${SUITE}/main/binary-i386"
-mkdir -p "$APT_DISTS_I386"
-cp "${APT_DISTS}/Packages" "${APT_DISTS_I386}/Packages"
-gzip -9c "${APT_DISTS_I386}/Packages" >"${APT_DISTS_I386}/Packages.gz"
 
 # Generate Release file
 log "Generating Release file..."
@@ -369,28 +298,22 @@ _sha256() { sha256sum "$1" | awk '{print $1}'; }
 
 PKG_PATH="dists/${SUITE}/main/binary-${ARCH}/Packages"
 PKG_GZ_PATH="dists/${SUITE}/main/binary-${ARCH}/Packages.gz"
-PKG_I386_PATH="dists/${SUITE}/main/binary-i386/Packages"
-PKG_I386_GZ_PATH="dists/${SUITE}/main/binary-i386/Packages.gz"
 
 cat >"${APT_ROOT}/dists/${SUITE}/Release" <<EOF
 Origin: kldload Darksite
 Label: kldload
 Suite: ${SUITE}
 Codename: ${SUITE}
-Architectures: ${ARCH} i386
+Architectures: ${ARCH}
 Components: main
 Description: kldload offline Debian APT repository
 Date: $(date -u '+%a, %d %b %Y %H:%M:%S UTC')
 MD5Sum:
  $(_md5 "${APT_ROOT}/${PKG_PATH}") $(_size "${APT_ROOT}/${PKG_PATH}") main/binary-${ARCH}/Packages
  $(_md5 "${APT_ROOT}/${PKG_GZ_PATH}") $(_size "${APT_ROOT}/${PKG_GZ_PATH}") main/binary-${ARCH}/Packages.gz
- $(_md5 "${APT_ROOT}/${PKG_I386_PATH}") $(_size "${APT_ROOT}/${PKG_I386_PATH}") main/binary-i386/Packages
- $(_md5 "${APT_ROOT}/${PKG_I386_GZ_PATH}") $(_size "${APT_ROOT}/${PKG_I386_GZ_PATH}") main/binary-i386/Packages.gz
 SHA256:
  $(_sha256 "${APT_ROOT}/${PKG_PATH}") $(_size "${APT_ROOT}/${PKG_PATH}") main/binary-${ARCH}/Packages
  $(_sha256 "${APT_ROOT}/${PKG_GZ_PATH}") $(_size "${APT_ROOT}/${PKG_GZ_PATH}") main/binary-${ARCH}/Packages.gz
- $(_sha256 "${APT_ROOT}/${PKG_I386_PATH}") $(_size "${APT_ROOT}/${PKG_I386_PATH}") main/binary-i386/Packages
- $(_sha256 "${APT_ROOT}/${PKG_I386_GZ_PATH}") $(_size "${APT_ROOT}/${PKG_I386_GZ_PATH}") main/binary-i386/Packages.gz
 EOF
 
 # ─── Resolvability gate ──────────────────────────────────────────────────────

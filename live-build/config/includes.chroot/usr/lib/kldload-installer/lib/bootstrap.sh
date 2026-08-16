@@ -710,45 +710,19 @@ k_install_target_packages() {
         novnc websockify
     )
 
-    # Steam, natively — not Flatpak.
+    # NO STEAM, and no i386 multiarch with it.
     #
-    # Debian ships steam-installer in trixie/contrib (contrib is already in our
-    # sources.list), so the apt distros get the SAME treatment Fedora gets from
-    # RPM Fusion: a native package. That matters beyond tidiness — the Flatpak
-    # sandbox is measurably worse for anti-cheat, controller access and reaching
-    # game libraries on other filesystems, which is why kldload-firstboot has
-    # always preferred native and treated Flathub as the fallback.
+    # Steam's Linux client is a 32-bit binary, so carrying it meant enabling
+    # multiarch on every desktop target and pulling ~120 i386 libraries into
+    # the offline mirror — 126 MB of 32-bit code that nothing else on a
+    # 64-bit substrate will ever load. It also cost a second architecture in
+    # the darksite index and, once, the kernel itself when it shared an apt
+    # transaction (see the kernel-present assertion below).
     #
-    # Steam is 32-bit, so i386 multiarch has to be enabled BEFORE `apt-get
-    # update` runs below, or steam-installer's dependencies cannot resolve.
-    #
-    # HISTORY: 2026-08-15, .131 — Debian desktops got no Steam at all. The
-    # Flathub fallback in firstboot is gated on `command -v flatpak`, and
-    # flatpak was only ever listed in _dnf_pkgs (the RPM array), so on Debian
-    # the gate silently failed and firstboot.log said nothing whatsoever.
-    #
-    # NOTE: steam-installer is a bootstrap — the Steam client and its runtime
-    # (several hundred MB) download on FIRST LAUNCH. Steam therefore cannot be
-    # made darksite; baking the .deb in buys a launcher that still needs the
-    # network before it can do anything.
-    # NOT in pkgs. steam-installer is installed separately, further down, where
-    # its failure cannot matter.
-    #
-    # HISTORY: 2026-08-15, fiend. It WAS added to this array, and that array is
-    # handed to a single `apt-get install`, which is all-or-nothing. The darksite
-    # mirror ships Components: main only, steam-installer lives in contrib, so
-    # apt could not locate it and aborted the ENTIRE transaction — taking
-    # linux-image-amd64, linux-headers, shim-signed, grub and mokutil with it.
-    # The machine installed, booted to ZFSBootMenu, and had no kernel to boot.
-    #
-    # The rule this cost us: nothing optional goes in the same apt transaction
-    # as the kernel. Boot-critical packages travel alone.
-    if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
-        k_log_to "$log" "Enabling i386 multiarch (steam-installer is 32-bit)"
-        k_in_chroot "${target}" dpkg --add-architecture i386 2>&1 | tee -a "$log" ||
-            k_log_to "$log" "WARNING: could not enable i386 — Steam will not resolve"
-    fi
-
+    # Operator call, 2026-08-16: out of scope. A desktop that wants Steam has
+    # a network and one apt-get away:
+    #     sudo dpkg --add-architecture i386 && sudo apt-get update
+    #     sudo apt-get install steam-installer
     if [[ "${KLDLOAD_STORAGE_MODE:-standard}" == "zfs" ]]; then
         # zfs-dkms must be explicit so DKMS builds (and signs) the kernel module;
         # zfsutils-linux alone may pull a pre-built binary that bypasses DKMS.
@@ -797,18 +771,6 @@ k_install_target_packages() {
         k_die "base package install produced no kernel — see ${log}"
     fi
     k_log_to "$log" "kernel present: $(basename "$(compgen -G "${target}/boot/vmlinuz-*" | head -1)")"
-
-    # Steam, in its OWN transaction so it cannot take the kernel down with it.
-    # It lives in contrib, which the darksite does not carry, so on an offline
-    # install this is expected to fail — and that must cost Steam only.
-    if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
-        if DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" \
-            apt-get install -y steam-installer >>"$log" 2>&1; then
-            k_log_to "$log" "Steam installed (steam-installer)"
-        else
-            k_log_to "$log" "NOTE: steam-installer unavailable (contrib not in the offline mirror) — install later with: apt-get install steam-installer"
-        fi
-    fi
 
     profile_pkgs="$(k_profile_packages)"
     profile_opt="$(k_profile_optional_packages)"
