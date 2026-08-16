@@ -651,6 +651,27 @@ def check_cluster_firewall():
     # between K8s nodes. Requires node subnet trust rule to be present.
     if not os.path.exists("/etc/nftables.conf"):
         return _result("observability", "cluster firewall", "skip", "", "no /etc/nftables.conf")
+    # A trust rule is only needed where something is DROPPING. This check
+    # exists to catch a policy-drop chain that blocked kubelet:10250 and
+    # hubble:4244 between nodes — but it read the config file alone, so on a
+    # host where nftables is inactive and disabled, with no policy drop
+    # anywhere in the file, it failed anyway and announced that "metrics
+    # scrape will timeout" while every one of 25 scrape targets was up
+    # (fiend, 2026-08-16).
+    #
+    # Ask the running firewall, not the file on disk: if nothing is dropping,
+    # there is nothing to trust-list.
+    # _run returns (rc, stdout, stderr) — three values, as every other check
+    # here unpacks it. And `systemctl is-active` prints "inactive", which
+    # CONTAINS "active", so this must be an equality test and not a substring
+    # one; the first version of this fix got both wrong and raised ValueError
+    # inside the check, which the harness reported as the very failure it was
+    # meant to clear.
+    _rc, _active, _ = _run(["systemctl", "is-active", "nftables"])
+    _rc2, _live, _ = _run(["nft", "list", "ruleset"])
+    if (_active or "").strip() != "active" or "policy drop" not in (_live or ""):
+        return _result("observability", "cluster firewall", "skip", "",
+                       "no policy-drop firewall in effect — nothing to trust-list")
     try:
         with open("/etc/nftables.conf") as f:
             conf = f.read()
