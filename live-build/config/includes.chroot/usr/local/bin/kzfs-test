@@ -416,11 +416,22 @@ case "$MODE" in
     cd "zfs-${REF}"
     ;;
   git)
-    # Clone from git — ref format is "owner/repo@branch" or just "@branch" for openzfs/zfs
-    REPO="${REF%%@*}"
-    BRANCH="${REF#*@}"
-    [[ "$REPO" == "$BRANCH" ]] && BRANCH="master"
-    [[ "$REPO" == @* ]] && REPO="openzfs/zfs" && BRANCH="${REF#@}"
+    # Ref format: "owner/repo@branch", "@branch" (openzfs/zfs), or a bare
+    # branch name (also openzfs/zfs).
+    #
+    # The previous parser only handled the first form. It stripped REPO with
+    # ${REF%%@*} and THEN tested `[[ "$REPO" == @* ]]`, which can never be true
+    # because the @ has already been removed — so "@master" produced an empty
+    # repo and cloned https://github.com/.git, and a bare "master" cloned
+    # https://github.com/master.git. Both failed with a git error that looked
+    # nothing like "your ref format is wrong" (fiend, 2026-08-16).
+    case "$REF" in
+    @*) REPO="openzfs/zfs" BRANCH="${REF#@}" ;;
+    */*@*) REPO="${REF%%@*}" BRANCH="${REF#*@}" ;;
+    */*) REPO="$REF" BRANCH="master" ;;
+    *) REPO="openzfs/zfs" BRANCH="$REF" ;;
+    esac
+    [ -n "$BRANCH" ] || BRANCH="master"
     echo "Cloning https://github.com/${REPO}.git @ ${BRANCH}..."
     git clone --depth 1 --branch "$BRANCH" "https://github.com/${REPO}.git" zfs-src
     cd zfs-src
@@ -509,7 +520,7 @@ if ! command -v zfs >/dev/null 2>&1; then
     # path. Say the true thing, and name the fix — the lab already builds from
     # source for exactly this case.
     echo "kzfs-test: Fedora has no OpenZFS package repository (zfsonlinux.org/fedora is 404)."
-    echo "kzfs-test: build from source instead:  ZFS_SOURCE=git:master kzfs-test golden fedora"
+    echo "kzfs-test: build from source instead:  ZFS_SOURCE=git:@master kzfs-test golden fedora"
     echo "kzfs-test: this golden will fail validation and will NOT be sealed."
   else
     # EL distros (CentOS, Rocky, RHEL)
@@ -720,7 +731,11 @@ APKSETUP
     # choice; an explicit ZFS_SOURCE still wins everywhere.
     local _src="$ZFS_SOURCE"
     if [[ "$distro" == "fedora" && "$_src" == "repo" ]]; then
-        _src="${KZFS_FEDORA_SOURCE:-git:master}"
+        # NOTE the '@': the ref parser reads git:<owner/repo>@<branch>, and a
+        # bare "git:master" is therefore a REPO named master —
+        # https://github.com/master.git, which is what it actually tried to
+        # clone. "git:@master" is openzfs/zfs at master (fiend, 2026-08-16).
+        _src="${KZFS_FEDORA_SOURCE:-git:@master}"
         log "  fedora has no OpenZFS repo — building from source (${_src})"
         ZFS_SOURCE="$_src"
     fi
