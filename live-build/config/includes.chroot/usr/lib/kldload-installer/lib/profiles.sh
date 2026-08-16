@@ -631,6 +631,32 @@ k_install_system_files() {
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
+        # Units that live in /etc/systemd/system on the live ISO.
+        #
+        # The loop above only reaches /usr/lib/systemd/system, so anything
+        # shipped via includes.chroot/etc/systemd/system never arrived on the
+        # target at all. kldload-zfs-dbgmsg.timer is the case that showed it:
+        # `systemctl is-enabled` answered "not-found" on the installed system,
+        # nothing drained /proc/spl/kstat/zfs/dbgmsg into
+        # /var/log/kldload/zfs-dbgmsg.log, promtail had nothing to tail, and
+        # the "Kernel's own ZFS narration" panel on the OpenZFS test-bench
+        # dashboard was permanently empty — with the collector binary present
+        # and the kstat readable the whole time (fiend, 2026-08-16).
+        mkdir -p "${target}/etc/systemd/system"
+        for f in kldload-zfs-dbgmsg.service kldload-zfs-dbgmsg.timer; do
+            [[ -f "/etc/systemd/system/${f}" ]] &&
+                cp "/etc/systemd/system/${f}" "${target}/etc/systemd/system/${f}"
+        done
+        # Enable the timer by hand rather than chrooting: the symlink IS what
+        # `systemctl enable` writes for a timer, and doing it this way works
+        # on a target whose systemd cannot be run from the installer.
+        if [[ -f "${target}/etc/systemd/system/kldload-zfs-dbgmsg.timer" ]]; then
+            mkdir -p "${target}/etc/systemd/system/timers.target.wants"
+            ln -sf ../kldload-zfs-dbgmsg.timer \
+                "${target}/etc/systemd/system/timers.target.wants/kldload-zfs-dbgmsg.timer"
+            k_log "zfs-dbgmsg collector installed and timer enabled"
+        fi
+
         # Ensure the proxy BINARY is present on target. Its systemd unit above
         # is useless without the script. build-iso.sh copies to the live ISO's
         # /usr/local/sbin but the target-side installer path doesn't always

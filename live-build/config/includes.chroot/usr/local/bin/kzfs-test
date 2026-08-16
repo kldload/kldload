@@ -640,6 +640,27 @@ for i in 0 1 2 3; do
   truncate -s 4G /var/tmp/zfs-vdev${i}.img 2>/dev/null || true
 done
 
+
+# The suite refuses to run as root, so it needs an ordinary user that can
+# sudo without a password.
+#
+# This existed only in the DNF setup block. There are four of these heredocs
+# — DNFSETUP/APTSETUP/PACSETUP/APKSETUP — and the fix was applied to one, so
+# centos and rocky got a working golden while debian and ubuntu got one that
+# aborts the moment a run starts:
+#
+#   FATAL: no zfstest user on this guest
+#
+# and the harness then wrote pass=0 fail=0 total=0 with status=pass. Exactly
+# the single-family fix CLAUDE.md 4.3 is about (fiend, 2026-08-16).
+if ! id zfstest >/dev/null 2>&1; then
+  useradd -m -s /bin/bash zfstest 2>/dev/null || true
+fi
+printf 'zfstest ALL=(ALL) NOPASSWD: ALL\n' >/etc/sudoers.d/zfstest
+chmod 0440 /etc/sudoers.d/zfstest
+chown zfstest /var/tmp/zfs-vdev*.img 2>/dev/null || true
+echo "zfstest user:  $(id zfstest >/dev/null 2>&1 && echo OK || echo MISSING)"
+
 echo "=== APT Setup Validation ==="
 echo "zfs binary: $(command -v zfs 2>/dev/null || echo MISSING)"
 echo "zfs module: $(lsmod | grep -c '^zfs ' 2>/dev/null | tr -d '[:space:]' || echo 0)"
@@ -672,6 +693,27 @@ modprobe zfs 2>/dev/null || true
 for i in 0 1 2 3; do
   truncate -s 4G /var/tmp/zfs-vdev${i}.img 2>/dev/null || true
 done
+
+
+# The suite refuses to run as root, so it needs an ordinary user that can
+# sudo without a password.
+#
+# This existed only in the DNF setup block. There are four of these heredocs
+# — DNFSETUP/APTSETUP/PACSETUP/APKSETUP — and the fix was applied to one, so
+# centos and rocky got a working golden while debian and ubuntu got one that
+# aborts the moment a run starts:
+#
+#   FATAL: no zfstest user on this guest
+#
+# and the harness then wrote pass=0 fail=0 total=0 with status=pass. Exactly
+# the single-family fix CLAUDE.md 4.3 is about (fiend, 2026-08-16).
+if ! id zfstest >/dev/null 2>&1; then
+  useradd -m -s /bin/bash zfstest 2>/dev/null || true
+fi
+printf 'zfstest ALL=(ALL) NOPASSWD: ALL\n' >/etc/sudoers.d/zfstest
+chmod 0440 /etc/sudoers.d/zfstest
+chown zfstest /var/tmp/zfs-vdev*.img 2>/dev/null || true
+echo "zfstest user:  $(id zfstest >/dev/null 2>&1 && echo OK || echo MISSING)"
 
 echo "=== Pacman Setup Validation ==="
 echo "zfs binary: $(command -v zfs 2>/dev/null || echo MISSING)"
@@ -710,6 +752,27 @@ modprobe zfs 2>/dev/null || true
 for i in 0 1 2 3; do
   truncate -s 4G /var/tmp/zfs-vdev${i}.img 2>/dev/null || true
 done
+
+
+# The suite refuses to run as root, so it needs an ordinary user that can
+# sudo without a password.
+#
+# This existed only in the DNF setup block. There are four of these heredocs
+# — DNFSETUP/APTSETUP/PACSETUP/APKSETUP — and the fix was applied to one, so
+# centos and rocky got a working golden while debian and ubuntu got one that
+# aborts the moment a run starts:
+#
+#   FATAL: no zfstest user on this guest
+#
+# and the harness then wrote pass=0 fail=0 total=0 with status=pass. Exactly
+# the single-family fix CLAUDE.md 4.3 is about (fiend, 2026-08-16).
+if ! id zfstest >/dev/null 2>&1; then
+  useradd -m -s /bin/bash zfstest 2>/dev/null || true
+fi
+printf 'zfstest ALL=(ALL) NOPASSWD: ALL\n' >/etc/sudoers.d/zfstest
+chmod 0440 /etc/sudoers.d/zfstest
+chown zfstest /var/tmp/zfs-vdev*.img 2>/dev/null || true
+echo "zfstest user:  $(id zfstest >/dev/null 2>&1 && echo OK || echo MISSING)"
 
 echo "=== APK Setup Validation ==="
 echo "zfs binary: $(command -v zfs 2>/dev/null || echo MISSING)"
@@ -1570,19 +1633,44 @@ run_tests_on_vm() {
     [[ "$total_fail" =~ ^[0-9]+$ ]] || total_fail=0
     [[ "$total_skip" =~ ^[0-9]+$ ]] || total_skip=0
 
-    # Write summary
+    local total_all=$((total_pass + total_fail + total_skip))
+
+    # A run that executed NOTHING is not a pass.
+    #
+    # This was `if [[ $total_fail -eq 0 ]]`, and zero tests satisfies that
+    # trivially — so a guest that aborted before running anything was written
+    # down as pass=0 fail=0 skip=0 status=pass. That is precisely what the
+    # debian and ubuntu guests did today: they hit "FATAL: no zfstest user"
+    # and exited in one second, and the harness recorded a clean pass for
+    # each. Nothing downstream could tell that apart from a real green run
+    # (fiend, 2026-08-16).
+    #
+    # `error` is a distinct state from `fail` on purpose: fail means the suite
+    # ran and something broke, error means we never got an answer at all, and
+    # those call for different responses from whoever reads the report.
+    local _status="pass"
+    if [[ $total_all -eq 0 ]]; then
+        _status="error"
+    elif [[ $total_fail -gt 0 ]]; then
+        _status="fail"
+    fi
+
+    # Write summary. status= is written into the summary too, so a consumer
+    # never has to re-derive the verdict from the counts and get it wrong the
+    # same way this function did.
     cat >"${run_dir}/${distro}.summary" <<SUMMARY
 distro=${distro}
 pass=${total_pass}
 fail=${total_fail}
 skip=${total_skip}
-total=$((total_pass + total_fail + total_skip))
+total=${total_all}
+status=${_status}
 SUMMARY
 
-    if [[ $total_fail -eq 0 ]]; then
-        echo "pass" >"$progress_file"
-    else
-        echo "fail" >"$progress_file"
+    echo "$_status" >"$progress_file"
+
+    if [[ "$_status" == "error" ]]; then
+        warn "  [${distro}] ran NO tests — see ${log_file}"
     fi
 
     log "  [${distro}] Done: ${total_pass} pass, ${total_fail} fail, ${total_skip} skip"

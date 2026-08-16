@@ -55,12 +55,24 @@ scrape_configs:
           host: kldload-node
           __path__: /var/log/installer/*.log
 
-  # ── klab test output (pre-digested, 1 file per distro) ─────────────
-  # klab writes /root/klab/<run-id>/<distro>.log during test runs. Tail
-  # all of them with vm label extracted from the filename so the klab
-  # Test Debug dashboard can correlate on {vm=<distro>}.
+  # ── ZFS test-suite output (pre-digested, 1 file per distro) ────────
+  # The runner writes <run-id>/<distro>.log during test runs. Tail all of
+  # them with the vm label extracted from the filename so the test-bench
+  # dashboards can correlate on {vm=<distro>}.
+  #
+  # BOTH paths on purpose. The lab was renamed klab -> kzfs-test and now
+  # writes /root/kzfs-test/<run-id>/<distro>.log; this scrape still pointed
+  # only at /root/klab, so the "klab test output — every distro, every test,
+  # live" panel went to "No data" the day the tool was renamed and stayed
+  # there, with the run producing logs the whole time. Keeping the old path
+  # costs nothing and keeps historical runs visible (fiend, 2026-08-16).
   - job_name: klab-test-logs
     static_configs:
+      - targets: [localhost]
+        labels:
+          job: klab-test-logs
+          host: kldload-node
+          __path__: /root/kzfs-test/*/*.log
       - targets: [localhost]
         labels:
           job: klab-test-logs
@@ -69,7 +81,7 @@ scrape_configs:
     pipeline_stages:
       - regex:
           source: filename
-          expression: '/root/klab/[^/]+/(?P<vm>[a-z]+)\.log'
+          expression: '/root/(?:klab|kzfs-test)/[^/]+/(?P<vm>[a-z]+)\.log'
       - labels:
           vm:
 
