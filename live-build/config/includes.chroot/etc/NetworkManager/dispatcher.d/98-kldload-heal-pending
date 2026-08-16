@@ -36,7 +36,18 @@ up | connectivity-change) ;;
 *) exit 0 ;;
 esac
 [[ -s "$PENDING" ]] || exit 0
-command -v dnf >/dev/null 2>&1 || exit 0
+
+# Which package manager is this? The hook used to be `command -v dnf || exit 0`,
+# which meant a Debian desktop queued packages that nothing ever drained: the
+# queue grew forever and Steam never arrived (fiend, 2026-08-15 — a Debian
+# desktop install with no Steam at all, and no log line explaining why).
+if command -v dnf >/dev/null 2>&1; then
+    _pm=dnf
+elif command -v apt-get >/dev/null 2>&1; then
+    _pm=apt
+else
+    exit 0
+fi
 
 exec 9>/run/kldload-heal.lock
 flock -n 9 || exit 0
@@ -44,17 +55,53 @@ flock -n 9 || exit 0
 mkdir -p /var/log/kldload
 _log() { printf '[%s] [heal] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
 
+# _have_pkg / _install_pkg — the two operations this hook needs, per package
+# manager, so the drain loop below stays one loop.
+#
+# Steam is the reason apt needs a special case: Debian's package is
+# steam-installer (a bootstrap that fetches the client on first launch), so a
+# queue entry of "steam" would never resolve.
+_have_pkg() {
+    case "$_pm" in
+    dnf) rpm -q "$1" >/dev/null 2>&1 ;;
+    apt) dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "ok installed" ;;
+    esac
+}
+_install_pkg() {
+    case "$_pm" in
+    dnf) dnf install -y "$1" >>"$LOG" 2>&1 ;;
+    apt) DEBIAN_FRONTEND=noninteractive apt-get install -y "$1" >>"$LOG" 2>&1 ;;
+    esac
+}
+
 # Real-reachability probe — dispatcher 'up' can precede usable routes/DNS.
-if ! curl -fsS -m 8 -o /dev/null https://mirrors.rpmfusion.org/ 2>/dev/null &&
-    ! curl -fsS -m 8 -o /dev/null https://fedoraproject.org/ 2>/dev/null; then
+# The probe targets the archive this box actually installs from; probing
+# Fedora's mirrors on a Debian host fails for the wrong reason and keeps the
+# queue parked forever.
+if [[ "$_pm" == dnf ]]; then
+    _probes=(https://mirrors.rpmfusion.org/ https://fedoraproject.org/)
+else
+    _probes=(https://deb.debian.org/ https://security.debian.org/)
+fi
+_reachable=0
+for _u in "${_probes[@]}"; do
+    curl -fsS -m 8 -o /dev/null "$_u" 2>/dev/null && _reachable=1 && break
+done
+if ((_reachable == 0)); then
     _log "network probe failed on ${IFACE}/${ACTION} — queue kept for next event"
     exit 0
+fi
+
+# apt needs its index before it can locate anything; on the first successful
+# network event the lists are still the darksite mirror's.
+if [[ "$_pm" == apt ]]; then
+    DEBIAN_FRONTEND=noninteractive apt-get update >>"$LOG" 2>&1 || true
 fi
 
 # steam prerequisite: RPM Fusion release packages, Fedora only, any GPU —
 # same ensure kldload-firstboot does; duplicated here because this hook must
 # stand alone on systems whose firstboot predates that fix.
-if grep -qx steam "$PENDING" 2>/dev/null &&
+if [[ "$_pm" == dnf ]] && grep -qx steam "$PENDING" 2>/dev/null &&
     rpm -E %fedora 2>/dev/null | grep -qE '^[0-9]+$' &&
     ! rpm -q rpmfusion-nonfree-release >/dev/null 2>&1; then
     _fedver="$(rpm -E %fedora)"
@@ -67,7 +114,7 @@ fi
 _still=()
 while IFS= read -r _pkg; do
     [[ -n "$_pkg" ]] || continue
-    if rpm -q "$_pkg" >/dev/null 2>&1 || dnf install -y "$_pkg" >>"$LOG" 2>&1; then
+    if _have_pkg "$_pkg" || _install_pkg "$_pkg"; then
         _log "healed: $_pkg"
     else
         _log "still missing: $_pkg — kept queued"
