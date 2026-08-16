@@ -670,15 +670,14 @@ k_install_system_files() {
             fi
         done
         # Explicit bin copies — tools whose names don't match the `k*` wholesale
-        # glob below. `lh` (LogHog, C binary compiled at build time) is the one
-        # that slips through the glob. Without this, `kldload-lh` calls lh and
-        # gets "command not found" on the installed target.
+        # glob below.
+        # (`lh` was here for LogHog, removed 2026-08-16.)
         # kldload-mgmt: the operator-catalog wrapper that the F1 popup invokes.
         # Without this on the installed target the F1 popup runs `kldload-mgmt`
         # which returns rc=127 (command not found); the popup briefly flashes
         # then exits, looking like "the popup is hidden" because nothing
         # renders. Caught 2026-05-14 on .111 after the help-popup refactor.
-        for bin in kldload-console kldload-mgmt ttyd k9s lh; do
+        for bin in kldload-console kldload-mgmt ttyd k9s; do
             [[ -f "/usr/local/bin/${bin}" ]] &&
                 cp "/usr/local/bin/${bin}" "${target}/usr/local/bin/${bin}" &&
                 chmod +x "${target}/usr/local/bin/${bin}"

@@ -125,8 +125,34 @@ var auditRules = []auditRule{
 		SevCritical,
 		"the installer logged a fatal condition.",
 	},
+	// A blanket /WARNING|WARN/ used to live here. On a real build it produced
+	// 36 of the tab's 48 findings, and all but a handful were upstream
+	// compiler noise or lines whose only crime was a file path containing the
+	// word "warning". An audit nobody reads catches nothing, so the blanket
+	// rule is gone and the warnings that actually mean something are named.
 	{
-		regexp.MustCompile(`(?i)\bWARNING\b|\bWARN\b`),
+		// Packages installed without signature verification is a
+		// supply-chain fact worth surfacing on a platform that ships a
+		// darksite and claims reproducibility.
+		regexp.MustCompile(`(?i)skipped OpenPGP checks|GPG check FAILED|NO_PUBKEY`),
+		SevWarning,
+		"packages were accepted without signature verification.",
+	},
+	{
+		// The installer's own voice. Our scripts log with these prefixes, and
+		// when they warn it is about this build, not about vendored C.
+		// Any number of bracketed prefixes, then WARNING/WARN at the start of
+		// the message. The installer logs `[2026-08-15 18:17:13] WARNING: ...`
+		// and our scripts log `[kldload] WARN: ...`; an earlier version of this
+		// pattern only allowed a lowercase tag and silently missed the
+		// timestamped form — which is the common one. Caught by
+		// TestAuditSeveritiesAcrossTheIncident, which is exactly what that
+		// fixture is for.
+		//
+		// Anchoring at line start is what keeps upstream compiler noise out:
+		// `common.h:5:9: warning: ...` and `[ 73%] Building ...` do not begin
+		// with WARNING and so no longer match.
+		regexp.MustCompile(`^\s*(\[[^\]]*\]\s*)*(WARNING|WARN)\b`),
 		SevWarning,
 		"the installer continued past something it did not like.",
 	},
@@ -153,7 +179,19 @@ var noiseRe = regexp.MustCompile(
 	`Running in chroot, ignoring|` +
 		`invoke-rc\.d: policy-rc\.d denied|` +
 		`^\s*W: Target \S+ is configured multiple times|` +
-		`dpkg: warning: version .* has bad syntax`)
+		`dpkg: warning: version .* has bad syntax|` +
+		// Compiler and build-system chatter from vendored sources (whisper.cpp,
+		// llama.cpp). These are upstream's warnings about upstream's code; we
+		// are not going to fix them and they are not signal about THIS build.
+		// Measured on an 18,334-line desktop build: they were 30 of 36
+		// "warnings" reported, which is what made the Audit tab unreadable.
+		`^\S+\.(c|h|cc|cpp|hpp|cxx):[0-9]+:[0-9]+: warning:|` +
+		`^\s*CMake (Deprecation )?Warning|` +
+		`ccache not found - consider installing it|` +
+		// Build-progress lines matched only because a PATH contains the word
+		// "warning" — e.g. examples/deprecation-warning/CMakeFiles/main.dir/...
+		// Nine of the reported findings were this and nothing else.
+		`^\s*\[\s*[0-9]+%\]`)
 
 // ScanLog reads one log file and returns its findings.
 //

@@ -1618,8 +1618,7 @@ OSREL
 # Core edition: skip all of this — just ZFS on root with stock tools
 # ---------------------------------------------------------------------------
 if [[ "$EDITION" != "core" ]]; then
-    # Copy kldload tools (short names). Added for pass-12:
-    #   kldload-lh — LogHog cluster-wide wrapper (F5 in tmux console)
+    # Copy kldload tools (short names).
     # Wholesale-copy /usr/local/bin/ from includes.chroot — the includes
     # tree is the curated source of truth, so anything that lands there
     # should reach the rootfs without an allow-list maintenance burden.
@@ -1715,45 +1714,13 @@ if [[ "$EDITION" != "core" ]]; then
     fi
     rm -rf "${_whisper_tmp}"
 
-    # ── LogHog (lh) — multi-source log stitcher, wired to F5 ────────────
-    # Source tree is shipped at /opt/lh/src via includes.chroot. We compile
-    # it inside the rootfs chroot so the binary links against the target
-    # system's json-c / readline / ncurses (not the builder container's),
-    # then strip and install to /usr/local/bin/lh. kldload-lh wraps it for
-    # cluster-wide SSHFS mounts.
-    # build-iso.sh uses a whitelist-copy (not a wholesale includes.chroot
-    # mirror), so the /opt/lh/src tree has to be copied in explicitly
-    # before the compile-guard below can find it.
-    if [[ -d /build/live-build/config/includes.chroot/opt/lh/src ]]; then
-        mkdir -p "${ROOTFS}/opt/lh"
-        cp -r /build/live-build/config/includes.chroot/opt/lh/src \
-            "${ROOTFS}/opt/lh/src"
-    fi
-    if [[ -d "${ROOTFS}/opt/lh/src" ]]; then
-        log "Building LogHog (lh)..."
-        mount --bind /proc "${ROOTFS}/proc" 2>/dev/null || true
-        mount --bind /sys "${ROOTFS}/sys" 2>/dev/null || true
-        mount --bind /dev "${ROOTFS}/dev" 2>/dev/null || true
-        if chroot "${ROOTFS}" bash -c "
-            set -e
-            # json-c-devel + readline-devel + ncurses-devel are in the
-            # ISO's base package set. gcc/make come from the toolchain
-            # group installed by the rootfs bootstrap step above.
-            dnf install -y json-c-devel readline-devel ncurses-devel gcc make >/dev/null 2>&1 || true
-            cd /opt/lh/src
-            make clean >/dev/null 2>&1 || true
-            make >/dev/null
-            install -m 0755 lh /usr/local/bin/lh
-            strip /usr/local/bin/lh 2>/dev/null || true
-        " >>"$LOG_FILE" 2>&1; then
-            log "  lh installed: $(stat -c '%s bytes' "${ROOTFS}/usr/local/bin/lh" 2>/dev/null)"
-        else
-            log "  WARNING: lh build failed — F5 will fall back to journalctl"
-        fi
-        umount "${ROOTFS}/proc" 2>/dev/null || true
-        umount "${ROOTFS}/sys" 2>/dev/null || true
-        umount "${ROOTFS}/dev" 2>/dev/null || true
-    fi
+    # LogHog (lh) removed 2026-08-16 — the operator does not use it, and it
+    # was the only thing in the build that needed json-c headers. It had been
+    # failing silently for some time: the chroot `dnf install json-c-devel ...`
+    # was suffixed `|| true`, so a missing devel package produced no error, the
+    # compile then died on <json-c/json.h>, and the outer guard logged a soft
+    # "lh build failed — F5 will fall back to journalctl". Six fatal compiler
+    # lines per build, invisible under the audit tab's warning noise.
 
     # ── Observability stack — zfs_exporter, smartctl_exporter, loki, promtail ─
     # These are Go binaries downloaded from GitHub releases and installed to
