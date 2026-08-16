@@ -22,6 +22,59 @@ rpool/var/lib/containers/storage/zfs/…  one dataset per image layer
 
 ---
 
+## What if all of it was just one kind of thing?
+
+Every technology below arrived with its own way of saving state, its own way
+of making a copy, and its own way of going back. Boot loaders got boot
+environments. Hypervisors got qcow2 chains. Containers got image registries.
+Backup got agents. Each one solved the same three problems again, badly, in
+its own vocabulary.
+
+Now none of them are their own thing. They are all a dataset or a zvol.
+
+And once that is true, three verbs apply to **everything on the machine**,
+without any of those technologies knowing about it:
+
+- **snapshot** — constant time, whatever the size
+- **clone** — milliseconds, sharing blocks until something diverges
+- **send** — only the blocks that changed, to any machine
+
+### What if containers had undo?
+
+They do, and not as a feature somebody wrote — as a consequence.
+
+A bad `pull`, a migration that ate the database, an image that broke on
+update: roll the store back. Every image, every container, every volume
+returns to the moment before. The engine does not need to support it and does
+not need to know it happened.
+
+### You can clone a running container
+
+Measured on a live box, off a 5.16 GB image:
+
+```
+commit the running container   3.9 s     (its state becomes an image)
+clone + start a new container  0.328 s
+state carried into the copy    yes — the file written into the original
+                               was there in the clone
+```
+
+A third of a second to stand up a second copy of a container **with its
+state**. Not a rebuild, not a registry push and pull, not a `docker save`
+piped to another host: a clone, because the layer was a dataset the whole
+time.
+
+Stack the same idea up a level and the estate moves too — 22 datasets in one
+recursive snapshot, one stream carrying every layer, the engine's database
+and every volume, incremental after the first.
+
+The point is not that any single one of these is impossible elsewhere. It is
+that here they are all *the same operation*, on the same object, with the
+same three commands — and that the machine did not need a plugin, an agent
+or a registry to make it so.
+
+---
+
 ## What this replaces
 
 Each row is a thing you would otherwise install, learn and maintain. The
