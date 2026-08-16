@@ -194,6 +194,35 @@ fi
 rmdir "$MOUNTPOINT" 2>/dev/null
 
 # ── Git state ────────────────────────────────────────────────────────────────
+_section "Duplicated files that must not drift"
+
+# Some files are shipped TWICE on purpose: once into the live rootfs and once
+# into the installer's target-files/, which profiles.sh reads FIRST. Editing
+# only one is silent — the repo looks correct, the ISO builds, and the install
+# quietly uses the stale copy.
+#
+# HISTORY: 2026-08-16. The dock pin list gained chromium.desktop in the
+# includes.chroot copy only. Two ISOs were built and verified before anyone
+# noticed the installed dock still had the old list, because the file that
+# ships to the target is the OTHER one.
+_dupes=(
+    "etc/dconf/db/local.d/50-kldload-installed-favorites"
+)
+_ic="${ROOT}/live-build/config/includes.chroot"
+for _d in "${_dupes[@]}"; do
+    _a="${_ic}/${_d}"
+    _b="${_ic}/usr/lib/kldload-installer/target-files/${_d}"
+    if [[ ! -f "$_a" || ! -f "$_b" ]]; then
+        _warn "$(basename "$_d")" "only one copy present — nothing to compare"
+        continue
+    fi
+    if diff -q "$_a" "$_b" >/dev/null 2>&1; then
+        _pass "$(basename "$_d") — both copies identical"
+    else
+        _fail "$(basename "$_d")" "the two shipped copies DIFFER — the installer reads target-files/ first and would use the stale one"
+    fi
+done
+
 _section "Git State"
 
 cd "$ROOT"
