@@ -334,6 +334,95 @@ else
     fi
 fi
 
+# ── Python gates (shebang-selected, same reason as the shell gates) ─────────
+# HISTORY: the repo map claimed gen_icons.py was "the only Python in the tree".
+# One file carries a .py extension; twelve are Python by shebang — including
+# kldload-webui (7.6k lines) and kldload-doctor, the two programs an operator
+# leans on hardest. A '*.py' gate therefore covered 1 of 12, so ruff and mypy
+# had never run on either of them (counted 2026-08-16). Same trap the shell
+# gates above already document, one language over.
+_section "Python Syntax"
+
+PY_SCRIPTS=()
+if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    while IFS= read -r -d '' f; do
+        [[ -f "$ROOT/$f" ]] || continue
+        if [[ "$f" == *.py ]] ||
+            head -c 80 "$ROOT/$f" 2>/dev/null | head -n 1 | grep -qE '^#!.*python3?'; then
+            PY_SCRIPTS+=("$f")
+        fi
+    done < <(git -C "$ROOT" ls-files -z)
+fi
+
+if [[ ${#PY_SCRIPTS[@]} -eq 0 ]]; then
+    _warn "python inventory" "no python files found — gate did not run"
+else
+    PY_BAD=0
+    for f in "${PY_SCRIPTS[@]}"; do
+        if ! python3 -m py_compile "$ROOT/$f" 2>/dev/null; then
+            _fail "$f py_compile" "python3 -m py_compile $f"
+            PY_BAD=1
+        fi
+    done
+    [[ $PY_BAD -eq 0 ]] && _pass "all ${#PY_SCRIPTS[@]} python files py_compile clean"
+
+    # Advisory, not fatal: these files have never been linted, so failing on
+    # the existing findings would block every commit. The count is printed so
+    # it can be ratcheted down like the shell baseline was.
+    if command -v ruff >/dev/null 2>&1; then
+        _ruff_n=0
+        for f in "${PY_SCRIPTS[@]}"; do
+            _ruff_n=$((_ruff_n + $(ruff check --select=E9,F --quiet "$ROOT/$f" 2>/dev/null | grep -cE '^[A-Z][0-9]+' || true)))
+        done
+        if [[ $_ruff_n -eq 0 ]]; then
+            _pass "python: no syntax/undefined-name findings (ruff E9,F)"
+        else
+            _warn "python ruff" "${_ruff_n} E9/F finding(s) across ${#PY_SCRIPTS[@]} files — ratchet down, do not add more"
+        fi
+    else
+        _warn "python ruff" "ruff not installed — these files are ungated without it"
+    fi
+fi
+
+# ── Silent-failure ratchet ─────────────────────────────────────────────────
+# CLAUDE.md §4.1: no `|| true` unless a comment names the harmless case. The
+# tree carries 1,478 that do not, and every "reported success while broken"
+# defect has come out of that population: `golden all` exiting 0 after every
+# golden failed; a golden with no ZFS sealed and announced ready;
+# `kube-network nft` failing silently so two control planes stayed
+# unfirewalled; a control-plane scale exiting 0 having added nothing.
+#
+# Removing 1,478 in one pass is not safe, so this is a RATCHET: the count may
+# fall, never rise. New code obeys the rule; the debt only shrinks. Lower
+# tests/silent-failure-baseline.txt whenever you clear some.
+_section "Silent-failure ratchet"
+
+_sf_baseline_file="$ROOT/tests/silent-failure-baseline.txt"
+if [[ ${#SHELL_SCRIPTS[@]} -eq 0 || ! -f "$_sf_baseline_file" ]]; then
+    _warn "silent-failure ratchet" "no baseline or no scripts — gate did not run"
+else
+    _sf_baseline="$(tr -cd '0-9' <"$_sf_baseline_file")"
+    _sf_now=0
+    for f in "${SHELL_SCRIPTS[@]}"; do
+        while IFS= read -r _ln; do
+            [[ -n "$_ln" ]] || continue
+            # A comment directly above is the rule's escape hatch: it must name
+            # the specific harmless case being swallowed.
+            _prev="$(sed -n "$((_ln - 1))p" "$ROOT/$f" 2>/dev/null)"
+            [[ "$_prev" =~ ^[[:space:]]*# ]] || _sf_now=$((_sf_now + 1))
+        done < <(grep -n '|| true' "$ROOT/$f" 2>/dev/null | cut -d: -f1)
+    done
+
+    if [[ "$_sf_now" -gt "$_sf_baseline" ]]; then
+        _fail "silent-failure ratchet" \
+            "${_sf_now} unexplained '|| true', baseline ${_sf_baseline} — name the harmless case in a comment above the line"
+    elif [[ "$_sf_now" -lt "$_sf_baseline" ]]; then
+        _pass "silent-failure ratchet: ${_sf_now} unexplained '|| true' (was ${_sf_baseline} — lower the baseline)"
+    else
+        _pass "silent-failure ratchet: ${_sf_now} unexplained '|| true' (at baseline, not rising)"
+    fi
+fi
+
 # ── Behavioural units (installer/security fixes the ISO checks can't reach) ──
 _section "Behavioural Units"
 if bash "$ROOT/tests/smoke-unit.sh"; then

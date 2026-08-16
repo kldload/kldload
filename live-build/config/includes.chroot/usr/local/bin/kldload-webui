@@ -8296,7 +8296,13 @@ async def _klab_test(websocket, msg):
     # output while connected. The tail exits when the subprocess
     # dies OR the WS fails — neither kills the subprocess, which
     # continues writing to log_path until it exits naturally.
-    await _klab_test_tail(websocket, proc.pid, log_path, target="klab")
+    # main_pid, not proc.pid: this function was refactored from
+    # subprocess.Popen to systemd-run, and `proc` went away with the rewrite
+    # while this reference did not. Every klab test launch that reached this
+    # line raised NameError instead of tailing the log — invisible because no
+    # Python gate ran on this file (found 2026-08-16 by the new shebang-based
+    # ruff gate, which is also why the file had never been linted).
+    await _klab_test_tail(websocket, main_pid, log_path, target="klab")
 
 
 def _detached_find_active(target):

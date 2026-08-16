@@ -346,10 +346,26 @@ if [[ -f /etc/kubernetes/admin.conf ]]; then
     # output, the counter read zero, and four jobs whose targets were up
     # reported 'zero up targets' — including /ready, which answered instantly
     # when asked by hand a minute later.
+    _prom_reachable=1
+
+    # A check that cannot reach its dependency must SKIP, not FAIL.
+    #
+    # Prometheus runs on the hypervisor, not inside the cluster VMs. Wherever
+    # this section ran without it, /ready was unreachable and the four scrape
+    # checks below then cascaded into "cilium-agent/hubble-metrics/tetragon/
+    # node_exporter has zero up targets" — four red lines, on a cluster where
+    # `curl` on the hypervisor showed 57 of 57 targets up and every one of
+    # those jobs reporting 12. The post-install smoke report carried those
+    # failures for hours after the underlying problems were fixed, which is
+    # exactly how an operator learns to stop reading it (fiend, 2026-08-16).
+    #
+    # Absent Prometheus is "not measurable here", not "your metrics pipeline
+    # is broken". Say so and move on.
     if curl -fsS -m15 http://localhost:9090/-/ready >/dev/null 2>&1; then
         pass "prometheus: /ready on :9090"
     else
-        warn "prometheus: /ready not reachable on localhost:9090"
+        warn "prometheus: not reachable on localhost:9090 — scrape checks skipped (it runs on the hypervisor, not in-cluster)"
+        _prom_reachable=0
     fi
 
     # Expected scrape jobs present with at least one target up.
@@ -360,6 +376,7 @@ if [[ -f /etc/kubernetes/admin.conf ]]; then
     # reported a permanent red on a working node exporter (fiend,
     # 2026-08-16).
     for job in cilium-agent hubble-metrics tetragon klab-host; do
+        ((_prom_reachable)) || continue
         up_count="$(curl -fsS -m15 "http://localhost:9090/api/v1/targets" 2>/dev/null |
             python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for t in d['data']['activeTargets'] if t['labels'].get('job')=='${job}' and t['health']=='up'))" 2>/dev/null || echo 0)"
         if [[ "$up_count" -gt 0 ]]; then
