@@ -39,7 +39,6 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,53 +62,9 @@ import (
 //go:embed assets/ztxplore.svg
 var iconSVG []byte
 
-// labTheme wraps the default theme with tighter metrics and a dark palette,
-// and — the part that is not decoration — decides the light/dark variant
-// itself.
-//
-// WHY: Fyne does not read GNOME's colour preference on Linux, so it hands
-// Color() VariantDark regardless of the desktop setting. Switching the OS to
-// light left this window dark, with no way to change it from inside the app
-// (operator report, 2026-08-16). We resolve the desktop's own answer once at
-// construction and use that instead of the variant Fyne passes.
-type labTheme struct {
-	fyne.Theme
-	variant fyne.ThemeVariant
-}
-
-// desktopVariant asks the desktop what it wants, honouring the usual override.
-//
-// Order: FYNE_THEME (because a user who sets it means it) → GNOME's
-// color-scheme → dark, which is what this tool has always defaulted to and
-// what a lab console at 3am generally wants.
-func desktopVariant() fyne.ThemeVariant {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("FYNE_THEME"))) {
-	case "light":
-		return theme.VariantLight
-	case "dark":
-		return theme.VariantDark
-	}
-	out, err := runCapture(3*time.Second, "gsettings", "get",
-		"org.gnome.desktop.interface", "color-scheme")
-	if err == nil {
-		v := strings.ToLower(out)
-		switch {
-		case strings.Contains(v, "prefer-light"):
-			return theme.VariantLight
-		case strings.Contains(v, "prefer-dark"):
-			return theme.VariantDark
-		case strings.Contains(v, "default"):
-			// GNOME's "default" follows the GTK theme rather than stating a
-			// preference, so ask that instead of guessing.
-			if gtk, err := runCapture(3*time.Second, "gsettings", "get",
-				"org.gnome.desktop.interface", "gtk-theme"); err == nil &&
-				!strings.Contains(strings.ToLower(gtk), "dark") {
-				return theme.VariantLight
-			}
-		}
-	}
-	return theme.VariantDark
-}
+// labTheme is the default theme with tighter metrics and a named palette for
+// both variants.
+type labTheme struct{ fyne.Theme }
 
 func (t labTheme) Size(name fyne.ThemeSizeName) float32 {
 	switch name {
@@ -128,21 +83,29 @@ var (
 	badRed   = color.NRGBA{R: 0xe0, G: 0x5b, B: 0x5b, A: 0xff}
 )
 
-func (t labTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
-	// The variant Fyne passes is ignored on purpose — see the type comment.
-	v := t.variant
+func (t labTheme) Color(name fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {
 	dark := v == theme.VariantDark
 	switch name {
 	case theme.ColorNamePrimary:
 		return accent
+	// Both branches must return a colour.
+	//
+	// These used to set a dark value and fall through for light, on the
+	// assumption that the default theme would supply a light background. It
+	// did not: only the chrome Fyne paints itself changed with the desktop
+	// while every pane this theme touched stayed dark. vmxplore and zxplore
+	// name both variants explicitly and follow the desktop correctly, which
+	// is the pattern copied here (operator report, 2026-08-16).
 	case theme.ColorNameBackground:
 		if dark {
 			return color.NRGBA{R: 0x14, G: 0x16, B: 0x1a, A: 0xff}
 		}
+		return color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
 	case theme.ColorNameOverlayBackground, theme.ColorNameMenuBackground:
 		if dark {
 			return color.NRGBA{R: 0x1b, G: 0x1e, B: 0x24, A: 0xff}
 		}
+		return color.NRGBA{R: 0xf6, G: 0xf6, B: 0xf8, A: 0xff}
 	}
 	return t.Theme.Color(name, v)
 }
@@ -211,7 +174,7 @@ func (l *logView) flush() {
 // RunGUI opens the console.
 func RunGUI(resultsDir string) error {
 	a := app.NewWithID("com.kldload.ztxplore")
-	a.Settings().SetTheme(labTheme{Theme: theme.DefaultTheme(), variant: desktopVariant()})
+	a.Settings().SetTheme(labTheme{Theme: theme.DefaultTheme()})
 	a.SetIcon(fyne.NewStaticResource("ztxplore.svg", iconSVG))
 	w := a.NewWindow(windowTitle)
 	w.Resize(fyne.NewSize(1280, 860))
