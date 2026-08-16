@@ -2369,10 +2369,38 @@ STORAGE
   "data-root": "/var/lib/docker"
 }
 DOCKERJSON
-            # Anyone in the docker group can ask dockerd to run a container as
-            # root, so this is deliberately NOT added for every user — the
-            # operator opts in with: usermod -aG docker <user>
             chroot "${target}" systemctl enable docker 2>/dev/null || true
+
+            # ── Who may talk to the daemon ───────────────────────────
+            #
+            # Membership of the docker group is equivalent to root: anyone in
+            # it can ask dockerd to run a container that mounts / and writes
+            # anywhere. That is not a reason to refuse it — it is a reason to
+            # decide it per profile rather than everywhere.
+            #
+            # DESKTOP: the installed user is added. This is a workstation with
+            # one human on it who already has sudo, so the group grants them
+            # nothing they did not already have, and withholding it means the
+            # first command a container developer types fails with a
+            # permission error and no explanation.
+            #
+            # SERVER and everything else: NOT added. A server's accounts are
+            # not all the administrator, sudo there is deliberate and audited,
+            # and silently making an account root-equivalent because a package
+            # got installed is exactly the kind of thing nobody notices until
+            # it matters. The message names the one command that grants it.
+            if [[ "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
+                local _docker_user="${KLDLOAD_USERNAME:-admin}"
+                if chroot "${target}" usermod -aG docker "${_docker_user}" 2>/dev/null; then
+                    k_log_to "$log" "Added ${_docker_user} to the docker group (desktop profile)"
+                else
+                    k_log_to "$log" "WARNING: could not add ${_docker_user} to the docker group — " \
+                        "docker will need sudo"
+                fi
+            else
+                k_log_to "$log" "Docker installed; no account added to the docker group " \
+                    "(that group is root-equivalent). Grant it with: usermod -aG docker <user>"
+            fi
         fi
 
         # Enable libvirtd + default network (virbr0)
