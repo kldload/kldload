@@ -107,8 +107,26 @@ else
 fi
 
 # ── 6. Kubernetes Binaries ────────────────────────────────────────────────
-section "Kubernetes Binaries"
-for bin in kubeadm kubelet kubectl; do
+#
+# WHICH binaries depends on what this machine IS.
+#
+# On kldload the cluster runs inside VMs: kldload-cp, -w-1 and friends are the
+# nodes, and the host drives them. kubeadm and kubelet are NODE components and
+# are correctly absent from a hypervisor that is not itself a node — checking
+# for them there reported two permanent failures on a perfectly healthy setup
+# (fiend, 2026-08-16), which is worse than not checking, because a red that is
+# always red teaches people to ignore reds.
+#
+# So: the client tools are required everywhere; the node components are
+# required only where this host is actually a node.
+_k8s_bins=(kubectl)
+if kubectl get nodes -o name 2>/dev/null | grep -qi "$(hostname -s)"; then
+    _k8s_bins+=(kubeadm kubelet)
+    section "Kubernetes Binaries (this host IS a cluster node)"
+else
+    section "Kubernetes Binaries (host drives the cluster; nodes are VMs)"
+fi
+for bin in "${_k8s_bins[@]}"; do
     if command -v "$bin" >/dev/null 2>&1; then
         ver="$($bin version --client -o yaml 2>/dev/null | grep gitVersion | awk '{print $2}' || $bin version -o short 2>/dev/null || echo "unknown")"
         pass "$bin installed ($ver)"
@@ -322,15 +340,27 @@ if [[ -f /etc/kubernetes/admin.conf ]]; then
     fi
 
     # Prometheus reachable
-    if curl -fsS -m4 http://localhost:9090/-/ready >/dev/null 2>&1; then
+    # 15s, not 4s. These run while the same machine is building golden
+    # images and running a k8s cluster, and a loaded Prometheus answering in
+    # five seconds is healthy, not broken. At -m4 the timeout produced empty
+    # output, the counter read zero, and four jobs whose targets were up
+    # reported 'zero up targets' — including /ready, which answered instantly
+    # when asked by hand a minute later.
+    if curl -fsS -m15 http://localhost:9090/-/ready >/dev/null 2>&1; then
         pass "prometheus: /ready on :9090"
     else
         warn "prometheus: /ready not reachable on localhost:9090"
     fi
 
-    # Expected scrape jobs present with at least one target up
-    for job in cilium-agent hubble-metrics tetragon node_exporter; do
-        up_count="$(curl -fsS -m4 "http://localhost:9090/api/v1/targets" 2>/dev/null |
+    # Expected scrape jobs present with at least one target up.
+    #
+    # The job is klab-host, NOT node_exporter. Nothing has ever published a
+    # job by that name — prometheus.yml scrapes localhost:9100 under
+    # klab-host — so this check could not pass on any install, ever, and
+    # reported a permanent red on a working node exporter (fiend,
+    # 2026-08-16).
+    for job in cilium-agent hubble-metrics tetragon klab-host; do
+        up_count="$(curl -fsS -m15 "http://localhost:9090/api/v1/targets" 2>/dev/null |
             python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for t in d['data']['activeTargets'] if t['labels'].get('job')=='${job}' and t['health']=='up'))" 2>/dev/null || echo 0)"
         if [[ "$up_count" -gt 0 ]]; then
             pass "prometheus scrape: ${job} (${up_count} targets up)"
@@ -340,7 +370,7 @@ if [[ -f /etc/kubernetes/admin.conf ]]; then
     done
 
     # Cilium label synthesis — dashboards won't render without this
-    cilium_series="$(curl -fsS -m4 -G http://localhost:9090/api/v1/query \
+    cilium_series="$(curl -fsS -m15 -G http://localhost:9090/api/v1/query \
         --data-urlencode 'query=cilium_version{k8s_app="cilium"}' 2>/dev/null |
         python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']['result']))" 2>/dev/null || echo 0)"
     if [[ "$cilium_series" -gt 0 ]]; then
@@ -350,7 +380,7 @@ if [[ -f /etc/kubernetes/admin.conf ]]; then
     fi
 
     # Tetragon emitting events
-    tg_series="$(curl -fsS -m4 -G http://localhost:9090/api/v1/query \
+    tg_series="$(curl -fsS -m15 -G http://localhost:9090/api/v1/query \
         --data-urlencode 'query=tetragon_events_total' 2>/dev/null |
         python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']['result']))" 2>/dev/null || echo 0)"
     if [[ "$tg_series" -gt 0 ]]; then
