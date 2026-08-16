@@ -289,7 +289,6 @@ log "Generating Packages index..."
 )
 gzip -9c "${APT_DISTS}/Packages" >"${APT_DISTS}/Packages.gz"
 
-
 # Generate Release file
 log "Generating Release file..."
 _size() { stat -c%s "$1"; }
