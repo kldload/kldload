@@ -39,6 +39,7 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,7 +63,53 @@ import (
 //go:embed assets/ztxplore.svg
 var iconSVG []byte
 
-type labTheme struct{ fyne.Theme }
+// labTheme wraps the default theme with tighter metrics and a dark palette,
+// and — the part that is not decoration — decides the light/dark variant
+// itself.
+//
+// WHY: Fyne does not read GNOME's colour preference on Linux, so it hands
+// Color() VariantDark regardless of the desktop setting. Switching the OS to
+// light left this window dark, with no way to change it from inside the app
+// (operator report, 2026-08-16). We resolve the desktop's own answer once at
+// construction and use that instead of the variant Fyne passes.
+type labTheme struct {
+	fyne.Theme
+	variant fyne.ThemeVariant
+}
+
+// desktopVariant asks the desktop what it wants, honouring the usual override.
+//
+// Order: FYNE_THEME (because a user who sets it means it) → GNOME's
+// color-scheme → dark, which is what this tool has always defaulted to and
+// what a lab console at 3am generally wants.
+func desktopVariant() fyne.ThemeVariant {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("FYNE_THEME"))) {
+	case "light":
+		return theme.VariantLight
+	case "dark":
+		return theme.VariantDark
+	}
+	out, err := runCapture(3*time.Second, "gsettings", "get",
+		"org.gnome.desktop.interface", "color-scheme")
+	if err == nil {
+		v := strings.ToLower(out)
+		switch {
+		case strings.Contains(v, "prefer-light"):
+			return theme.VariantLight
+		case strings.Contains(v, "prefer-dark"):
+			return theme.VariantDark
+		case strings.Contains(v, "default"):
+			// GNOME's "default" follows the GTK theme rather than stating a
+			// preference, so ask that instead of guessing.
+			if gtk, err := runCapture(3*time.Second, "gsettings", "get",
+				"org.gnome.desktop.interface", "gtk-theme"); err == nil &&
+				!strings.Contains(strings.ToLower(gtk), "dark") {
+				return theme.VariantLight
+			}
+		}
+	}
+	return theme.VariantDark
+}
 
 func (t labTheme) Size(name fyne.ThemeSizeName) float32 {
 	switch name {
@@ -81,7 +128,9 @@ var (
 	badRed   = color.NRGBA{R: 0xe0, G: 0x5b, B: 0x5b, A: 0xff}
 )
 
-func (t labTheme) Color(name fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {
+func (t labTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
+	// The variant Fyne passes is ignored on purpose — see the type comment.
+	v := t.variant
 	dark := v == theme.VariantDark
 	switch name {
 	case theme.ColorNamePrimary:
@@ -162,7 +211,7 @@ func (l *logView) flush() {
 // RunGUI opens the console.
 func RunGUI(resultsDir string) error {
 	a := app.NewWithID("com.kldload.ztxplore")
-	a.Settings().SetTheme(labTheme{Theme: theme.DefaultTheme()})
+	a.Settings().SetTheme(labTheme{Theme: theme.DefaultTheme(), variant: desktopVariant()})
 	a.SetIcon(fyne.NewStaticResource("ztxplore.svg", iconSVG))
 	w := a.NewWindow(windowTitle)
 	w.Resize(fyne.NewSize(1280, 860))
@@ -865,6 +914,48 @@ func RunGUI(resultsDir string) error {
 	}()
 
 	refreshRuns()
+	// ── Reattach to a run that is already going ─────────────────────
+	//
+	// Closing this window does not stop a test run: the process is reparented
+	// to systemd and carries on. Reopening used to show an empty console with
+	// no status and a Stop that controlled nothing, on a machine the operator
+	// could hear working. Adopt the run instead.
+	go func() {
+		act := DetectActiveRun(resultsDir, 5*time.Second)
+		if !act.Active() {
+			return
+		}
+		fyne.Do(func() {
+			status.SetText(act.Summary())
+			runLog.Add("")
+			runLog.Add("── reattached to a run already in progress ──")
+			if act.RunID != "" {
+				runLog.Add("run:     " + act.RunID)
+				runLog.Add("results: " + act.Dir)
+			}
+			runLog.Add("This console did not start it, so Stop below signals the")
+			runLog.Add("detached process group by PID.")
+			runLog.Add("")
+			// Stop has to work on a run we did not launch, or the button is a
+			// lie. runner.Stop() only knows about children of this process.
+			labStopBtn.Enable()
+			stopBtn.Enable()
+			stopBtn.OnTapped = func() {
+				runner.Stop()
+				for _, pid := range act.PIDs {
+					_ = StopPID(pid)
+				}
+				status.SetText("stop signalled to the detached run")
+			}
+			labStopBtn.OnTapped = stopBtn.OnTapped
+		})
+		// Tail the per-distro logs so the pane fills with what is happening
+		// now rather than staying blank until the next run.
+		TailRunLogs(act, func(line string) {
+			fyne.Do(func() { runLog.Add(line) })
+		})
+	}()
+
 	w.ShowAndRun()
 	return nil
 }
