@@ -1,0 +1,1910 @@
+{
+  "uid": "ztxplore-metrics",
+  "title": "OpenZFS Test Lab \u2014 Metrics",
+  "description": "Every ZFS and test-lab panel on one board, composed from the shipped dashboards. This is the board ztxplore's Metrics tab opens. Copy it and edit freely \u2014 the sources it was built from are still there untouched.",
+  "tags": [
+    "zfs",
+    "openzfs",
+    "test-lab",
+    "ztxplore"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "pool",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values(zfs_pool_health, pool)",
+        "refresh": 2,
+        "multi": false,
+        "includeAll": false,
+        "current": {
+          "text": "rpool",
+          "value": "rpool"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Live test bench \u2014 what the lab is doing right now",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "txg sync rate (/s)",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "description": "klab_zfs_txg_synced_total \u2014 how many transaction groups committed per second. Spikes during write-heavy phases. A stuck flat counter while writes are flowing = txg sync stall.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(klab_zfs_txg_synced_total[1m])) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "hertz",
+          "color": {
+            "mode": "continuous-GrYlRd"
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Pool read ops (/s)",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "id": 3,
+      "description": "klab_zfs_pool_read_ops \u2014 read operations the pool serviced. Includes both ARC hits and disk reads. Pair with ARC hit ratio to see what fraction was cache-served.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(klab_zfs_pool_read_ops) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "continuous-BlPu"
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Pool write ops (/s)",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "id": 4,
+      "description": "klab_zfs_pool_write_ops \u2014 write operations queued to the pool. Goes through ZIL for sync writes, async writes batch into txg.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(klab_zfs_pool_write_ops) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "continuous-RdYlGr"
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "ARC hit ratio",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "id": 5,
+      "description": "klab_zfs_arc_hit_ratio \u2014 fraction of reads served from ARC vs disk. >0.95 = warm cache. A dive to 0.5 mid-test means the test is reading data that doesn't fit in ARC (cold-miss thrashing).",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg(klab_zfs_arc_hit_ratio) or vector(0)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.6
+              },
+              {
+                "color": "green",
+                "value": 0.9
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pool throughput \u2014 bytes/sec (read = blue, write = orange)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      },
+      "id": 6,
+      "description": "klab_zfs_pool_read_bw_bytes vs klab_zfs_pool_write_bw_bytes \u2014 actual byte rates through the pool. The read line going flat while ops climb = ARC absorbing them; the read line tracking ops = disk-bound.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(klab_zfs_pool_read_bw_bytes) or vector(0)",
+          "legendFormat": "read"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(klab_zfs_pool_write_bw_bytes) or vector(0)",
+          "legendFormat": "write"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "txg syncs/sec over test run",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "id": 7,
+      "description": "Sustained txg sync rate during a test. Watch for: cliffs (test phase change), plateaus (steady-state write pressure), spikes during the dirty-data flush cycle.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(klab_zfs_txg_synced_total[1m])) or vector(0)",
+          "legendFormat": "txg/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "hertz",
+          "custom": {
+            "fillOpacity": 30,
+            "lineWidth": 2,
+            "gradientMode": "opacity"
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "ARC composition \u2014 MRU vs MFU vs target",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "id": 8,
+      "description": "klab_zfs_arc_mru_size_bytes + klab_zfs_arc_mfu_size_bytes vs target. When MRU dominates \u2192 working set is being introduced fresh. When MFU dominates \u2192 test is re-reading. The target line is what ZFS's heuristic wants the total to be.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg(klab_zfs_arc_mru_size_bytes)",
+          "legendFormat": "MRU"
+        },
+        {
+          "refId": "B",
+          "expr": "avg(klab_zfs_arc_mfu_size_bytes)",
+          "legendFormat": "MFU"
+        },
+        {
+          "refId": "C",
+          "expr": "avg(klab_zfs_arc_target_bytes)",
+          "legendFormat": "target"
+        },
+        {
+          "refId": "D",
+          "expr": "avg(klab_zfs_arc_size_bytes)",
+          "legendFormat": "total size"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "ARC hits, misses, evictions \u2014 the cache's verdict per second",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "id": 9,
+      "description": "rate of klab_zfs_arc_hits/misses/evict_total. Misses spike when the test reads cold data. Evictions spike when the working set exceeds ARC size and entries are being pushed out. The relationship between these three is the cache management story.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(klab_zfs_arc_hits_total[1m])) or vector(0)",
+          "legendFormat": "hits"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(klab_zfs_arc_misses_total[1m])) or vector(0)",
+          "legendFormat": "misses"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(klab_zfs_arc_evict_total[1m])) or vector(0)",
+          "legendFormat": "evictions"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(klab_zfs_arc_demand_hits_total[1m])) or vector(0)",
+          "legendFormat": "demand hits"
+        },
+        {
+          "refId": "E",
+          "expr": "sum(rate(klab_zfs_arc_prefetch_hits_total[1m])) or vector(0)",
+          "legendFormat": "prefetch hits"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "hertz",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Block READ latency during test",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 10,
+      "description": "ebpf_exporter_bio_latency_seconds_bucket{operation='read'} \u2014 every block read serviced by the kernel.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"read\"}[2m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 4
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Block WRITE latency during test",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 11,
+      "description": "ebpf_exporter_bio_latency_seconds_bucket{operation='write'} \u2014 every block write the kernel committed. Wide spread during txg flushes.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(ebpf_exporter_bio_latency_seconds_bucket{operation=\"write\"}[2m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 4
+        },
+        "color": {
+          "scheme": "Spectral",
+          "mode": "scheme",
+          "exponent": 0.5
+        },
+        "cellGap": 1
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Pool used %",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 33
+      },
+      "id": 12,
+      "description": "klab_zfs_pool_used_bytes / size. Tests that create big datasets push this number; cleanup phases pull it back.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg(klab_zfs_pool_used_bytes / klab_zfs_pool_size_bytes)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.75
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Pool fragmentation",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 33
+      },
+      "id": 13,
+      "description": "klab_zfs_pool_fragmentation. Higher = freer space is more fractured. Climbs during random-write tests, stays put during sequential.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg(klab_zfs_pool_fragmentation)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Compression ratio",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 33
+      },
+      "id": 14,
+      "description": "klab_zfs_pool_compress_ratio. >1 means data on disk is smaller than logical. Tests that write compressible data raise this.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg(klab_zfs_pool_compress_ratio)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Snapshots",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 33
+      },
+      "id": 15,
+      "description": "klab_zfs_snapshot_count \u2014 total snapshots on pool. Tests that take/destroy snapshots churn this number; the kldload klab-pre snapshot is here too.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(klab_zfs_snapshot_count)"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "type": "logs",
+      "title": "zfs-dbgmsg \u2014 live",
+      "gridPos": {
+        "h": 14,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "id": 16,
+      "description": "Loki tail of {job='zfs-dbgmsg'} \u2014 the kernel ZFS module's own narration during the test. Wraps to fit; scroll for history.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{job=\"zfs-dbgmsg\"}"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "type": "logs",
+      "title": "klab test output \u2014 every distro, every test, live",
+      "gridPos": {
+        "h": 14,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "id": 17,
+      "description": "Loki tail of {job='klab-test-logs'} \u2014 what zfs-tests.sh is printing as it runs. Pair this panel with the ARC + txg + dbgmsg panels above to correlate test events with kernel-side behavior.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{job=\"klab-test-logs\"}"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Test matrix \u2014 pass/fail across distros and runs",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 66
+      },
+      "id": 18,
+      "panels": []
+    },
+    {
+      "id": 19,
+      "title": "Tests PASS \u2014 current run",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 67
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(klab_test_pass_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
+        }
+      }
+    },
+    {
+      "id": 20,
+      "title": "Tests FAIL \u2014 current run",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 67
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(klab_test_fail_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "red"
+          }
+        }
+      }
+    },
+    {
+      "id": 21,
+      "title": "Tests SKIP",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 67
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(klab_test_skip_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "yellow"
+          }
+        }
+      }
+    },
+    {
+      "id": 22,
+      "title": "Test VMs active",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 67
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(klab_test_vm_running)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "title": "Per-distro PASS/FAIL/SKIP",
+      "type": "table",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 71
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "klab_test_pass_total",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "expr": "klab_test_fail_total",
+          "refId": "B",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "expr": "klab_test_skip_total",
+          "refId": "C",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "run": true
+            },
+            "renameByName": {
+              "Value #A": "PASS",
+              "Value #B": "FAIL",
+              "Value #C": "SKIP"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "title": "Per-distro current status",
+      "type": "table",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 71
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "klab_test_status",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "Value": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "title": "Current test (last test line seen per distro)",
+      "type": "table",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 81
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "klab_test_last_test_info",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "Value": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "title": "Test progression timeline (all distros)",
+      "type": "logs",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 87
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "expr": "{job=\"klab-test-logs\"} |~ \"\\\\[PASS\\\\]|\\\\[FAIL\\\\]|\\\\[SKIP\\\\]|Finished:\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "enableLogDetails": true
+      }
+    },
+    {
+      "id": 27,
+      "title": "Goldens ready (per distro, kernel + ZFS version)",
+      "type": "table",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 97
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "klab_golden_info",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "Value": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Pool health \u2014 ARC, capacity, datasets",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 103
+      },
+      "id": 28,
+      "panels": []
+    },
+    {
+      "id": 29,
+      "title": "Health",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 104
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "zfs_pool_health{pool=\"$pool\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "ONLINE",
+                  "color": "green"
+                },
+                "1": {
+                  "text": "DEGRADED",
+                  "color": "orange"
+                },
+                "2": {
+                  "text": "FAULTED",
+                  "color": "red"
+                },
+                "3": {
+                  "text": "OFFLINE",
+                  "color": "red"
+                },
+                "4": {
+                  "text": "UNAVAIL",
+                  "color": "red"
+                },
+                "5": {
+                  "text": "REMOVED",
+                  "color": "red"
+                },
+                "6": {
+                  "text": "SUSPENDED",
+                  "color": "red"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "description": "NAME\n    Health \u2014 aggregate pool state\n\nDESCRIPTION\n    The single-value state ZFS assigns to the pool. ZFS classifies a\n    pool as one of: ONLINE, DEGRADED, FAULTED, OFFLINE, REMOVED, or\n    UNAVAIL. The state is the same value `zpool status` reports.\n\nEQUIVALENT IN OTHER TOOLS\n    In a non-ZFS Linux storage stack there is no single equivalent.\n    The same information is distributed across:\n        mdadm --detail            array layout, member state, sync\n                                  progress (software RAID only).\n        lvs / vgs / pvs           volume manager state.\n        cryptsetup status         per-mapping encryption state.\n        dmsetup status            device-mapper target state.\n        fsck output / dmesg       filesystem-detected errors.\n    None of those tools reports block-level checksum errors, because\n    none of those layers performs end-to-end checksumming. A silent\n    data corruption (bit rot, controller bug, cable error) that\n    bypasses RAID parity is invisible to that stack until an\n    application reads the data and notices it is wrong.\n\n    ZFS combines volume management, redundancy, encryption, and\n    end-to-end checksums into one subsystem with one reported state.\n\nSOURCE\n    zfs_exporter polls `zpool list -H -o name,health` every scrape\n    interval (15s default) and emits:\n        zfs_pool_health{pool=\"...\"}\n    Numeric values map to:\n        0   ONLINE\n        1   DEGRADED\n        2   FAULTED\n        3   OFFLINE\n        4   REMOVED\n        5   UNAVAIL\n\nFIELDS\n    ONLINE      Normal operation. All vdevs reachable and healthy.\n    DEGRADED    A vdev failure has occurred but redundancy is\n                tolerating it. Service continues. Investigate which\n                vdev (zpool status) and replace before redundancy is\n                exhausted.\n    FAULTED     The pool cannot be opened in its current state.\n                Service is down for any dataset on this pool.\n    OFFLINE     Operator explicitly took a vdev offline.\n    REMOVED     A vdev was physically removed at runtime.\n    UNAVAIL     A vdev is missing on import (disk gone, path moved).\n\nCAVEATS\n    This panel reports the pool's overall state only. Per-vdev\n    detail, specific error counts, and recovery progress are not\n    here. Use the zed events panel (#12) for individual vdev\n    transitions and zpool status(8) for full per-vdev state.\n\nSEE ALSO\n    Panel #12 \u2014 zed events. Live transitions of vdev state.\n    zpool(8) status \u2014 full pool state as a tree.\n    /etc/zfs/zpool.cache \u2014 last-known layout.\n    Documentation/admin-guide/zfs-tuning.rst \u2014 Linux kernel notes.\n"
+    },
+    {
+      "id": 30,
+      "title": "Capacity",
+      "type": "gauge",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 104
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "100 * zfs_pool_allocated_bytes{pool=\"$pool\"} / zfs_pool_size_bytes{pool=\"$pool\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 70,
+                "color": "orange"
+              },
+              {
+                "value": 85,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 31,
+      "title": "Fragmentation",
+      "type": "gauge",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 104
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "zfs_pool_fragmentation_ratio{pool=\"$pool\"} * 100",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 50,
+                "color": "orange"
+              },
+              {
+                "value": 70,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 32,
+      "title": "Dedup Ratio",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 104
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "zfs_pool_deduplication_ratio{pool=\"$pool\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2
+        }
+      }
+    },
+    {
+      "id": 33,
+      "title": "Free Space",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 104
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "zfs_pool_free_bytes{pool=\"$pool\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      }
+    },
+    {
+      "id": 34,
+      "title": "Allocated",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 104
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "zfs_pool_allocated_bytes{pool=\"$pool\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      }
+    },
+    {
+      "id": 35,
+      "title": "ARC Hit Rate",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 108
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "100 * sum(rate(zfs_arcstat{metric=\"hits\"}[5m])) / sum(rate(zfs_arcstat{metric=~\"hits|misses\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "ARC hit %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "description": "NAME\n    ARC Hit Rate \u2014 read requests served from the in-kernel cache\n\nDESCRIPTION\n    Percentage of read requests served from the ZFS Adaptive\n    Replacement Cache (ARC) without reaching the underlying vdevs,\n    computed over a 5-minute rolling window.\n\nEQUIVALENT IN OTHER TOOLS\n    The Linux page cache, used by ext4/xfs/btrfs, does not expose an\n    equivalent hit-rate metric by default. The closest approximation\n    in a non-ZFS stack is /usr/share/bcc/tools/cachestat \u2014 an eBPF\n    tool that traces page-cache events in real time. Two structural\n    differences make the numbers not directly comparable:\n\n        Eviction policy. The Linux page cache is LRU (Least Recently\n        Used). ARC is MRU+MFU (Most Recently Used + Most Frequently\n        Used, with a ghost list to detect repeated misses). For\n        repeated random-access workloads \u2014 database working sets,\n        for example \u2014 ARC retains hot data through scans that would\n        evict the page cache.\n\n        Scope. The page cache covers all filesystems' read I/O. ARC\n        covers ZFS read I/O specifically. The two can coexist; ZFS\n        sets primarycache=metadata on datasets where the application\n        has its own cache (Postgres shared_buffers) to avoid\n        double-caching.\n\n    No Splunk, Loki, or Dynatrace panel reports ARC hit rate by\n    default. Some Splunk apps include cachestat output if it was\n    scraped to a log file, in which case the data is sampled and\n    delayed, not real-time.\n\nSOURCE\n    zfs_exporter reads /proc/spl/kstat/zfs/arcstats every scrape\n    interval (15s default) and exposes per-counter gauges:\n        zfs_arcstat{metric=\"hits\"}\n        zfs_arcstat{metric=\"misses\"}\n    Query:\n        100 * rate(hits[5m]) / rate(hits+misses[5m])\n\nFIELDS\n    > 95 %     Working set fits comfortably in ARC.\n    80 - 95 %  Healthy with occasional capacity misses.\n    < 80 %     Working set exceeds ARC capacity. Consider larger\n               primarycache, more system RAM allocated to ZFS, or\n               L2ARC if read pattern justifies it.\n    Sudden drops to near-0 % indicate either a cache flush (e.g.,\n    primarycache property change on a busy dataset) or a large new\n    dataset displacing the working set.\n\nCAVEATS\n    Hit rate is system-wide, not per-dataset. A high overall rate\n    can mask a poor rate on one specific dataset. The arcstats\n    counters are accumulative from boot; if the ZFS module is\n    reloaded, the rate calculation resets.\n\nSEE ALSO\n    Panel #8 \u2014 ARC Size vs Target. Shows current cache size and\n        how it compares to the configured target.\n    /proc/spl/kstat/zfs/arcstats \u2014 raw counters.\n    /usr/share/bcc/tools/cachestat \u2014 page cache equivalent.\n    zfs(8) primarycache property documentation.\n    Sun Solaris ARC paper (Megiddo & Modha, 2003) \u2014 original design.\n"
+    },
+    {
+      "id": 36,
+      "title": "ARC Size vs Target",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 108
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "zfs_arcstat{metric=\"size\"}",
+          "refId": "A",
+          "legendFormat": "size"
+        },
+        {
+          "expr": "zfs_arcstat{metric=\"c\"}",
+          "refId": "B",
+          "legendFormat": "target"
+        },
+        {
+          "expr": "zfs_arcstat{metric=\"c_max\"}",
+          "refId": "C",
+          "legendFormat": "max"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      }
+    },
+    {
+      "id": 37,
+      "title": "Dataset Top 10 \u2014 Used",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 115
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "topk(10, zfs_dataset_used_bytes{pool=\"$pool\"})",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "pool": true,
+              "type": true
+            },
+            "renameByName": {
+              "name": "Dataset",
+              "Value": "Used"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Used"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 38,
+      "title": "Dataset Top 10 \u2014 Compression Ratio (logical/physical)",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 115
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "topk(10, zfs_dataset_logical_used_bytes{pool=\"$pool\"} / ignoring(__name__) zfs_dataset_used_bytes{pool=\"$pool\"})",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "pool": true,
+              "type": true
+            },
+            "renameByName": {
+              "name": "Dataset",
+              "Value": "Ratio"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2
+        }
+      }
+    },
+    {
+      "id": 39,
+      "title": "ZFS Module Debug Messages (dbgmsg)",
+      "type": "logs",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 123
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "expr": "{job=\"zfs-dbgmsg\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "enableLogDetails": true
+      }
+    },
+    {
+      "id": 40,
+      "title": "ZFS Events (zed) \u2014 checksum, resilver, scrub, vdev state",
+      "type": "logs",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 133
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "expr": "{job=\"zed\",pool=\"$pool\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Compression \u2014 logical vs physical",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 143
+      },
+      "id": 41,
+      "panels": []
+    },
+    {
+      "id": 42,
+      "title": "Pool-wide compression ratio",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 144
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(zfs_dataset_logical_used_bytes{pool=\"$pool\"}) / sum(zfs_dataset_used_bytes{pool=\"$pool\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2
+        }
+      }
+    },
+    {
+      "id": 43,
+      "title": "Total logical (before compression)",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 144
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(zfs_dataset_logical_used_bytes{pool=\"$pool\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      }
+    },
+    {
+      "id": 44,
+      "title": "Total physical (after compression)",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 144
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(zfs_dataset_used_bytes{pool=\"$pool\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      }
+    },
+    {
+      "id": 45,
+      "title": "Bytes saved by compression",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 144
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(zfs_dataset_logical_used_bytes{pool=\"$pool\"}) - sum(zfs_dataset_used_bytes{pool=\"$pool\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      }
+    },
+    {
+      "id": 46,
+      "title": "Compression ratio \u2014 top 10 datasets (time series)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 149
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "topk(10, zfs_dataset_logical_used_bytes{pool=\"$pool\"} / ignoring(__name__) zfs_dataset_used_bytes{pool=\"$pool\"})",
+          "refId": "A",
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2
+        }
+      }
+    },
+    {
+      "id": 47,
+      "title": "Dataset logical vs physical (top 10 by logical)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 160
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "topk(10, zfs_dataset_logical_used_bytes{pool=\"$pool\"})",
+          "refId": "A",
+          "legendFormat": "{{name}} logical"
+        },
+        {
+          "expr": "topk(10, zfs_dataset_used_bytes{pool=\"$pool\"})",
+          "refId": "B",
+          "legendFormat": "{{name}} physical"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Scrub history",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 171
+      },
+      "id": 48,
+      "panels": []
+    },
+    {
+      "id": 49,
+      "title": "Days since last scrub",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 172
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "(time() - zpool_scrub_last_timestamp{pool=\"$pool\"}) / 86400",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 1,
+          "thresholds": {
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 14,
+                "color": "orange"
+              },
+              {
+                "value": 30,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 50,
+      "title": "Last scrub duration",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 172
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "zpool_scrub_last_duration_seconds{pool=\"$pool\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "id": 51,
+      "title": "Last scrub errors",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 172
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "zpool_scrub_last_errors{pool=\"$pool\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 1,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 52,
+      "title": "Scrub in progress",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 172
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "zpool_scrub_in_progress{pool=\"$pool\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "IDLE",
+                  "color": "green"
+                },
+                "1": {
+                  "text": "SCRUBBING",
+                  "color": "blue"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": 53,
+      "title": "Scrub progress (when running)",
+      "type": "gauge",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 177
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "zpool_scrub_progress_ratio{pool=\"$pool\"} * 100",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      }
+    },
+    {
+      "id": 54,
+      "title": "Per-vdev error counts",
+      "type": "table",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 177
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "zpool_read_errors{pool=\"$pool\"}",
+          "refId": "A",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "read"
+        },
+        {
+          "expr": "zpool_write_errors{pool=\"$pool\"}",
+          "refId": "B",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "write"
+        },
+        {
+          "expr": "zpool_checksum_errors{pool=\"$pool\"}",
+          "refId": "C",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "cksum"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "pool": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 55,
+      "title": "Scrub timeline (zed events)",
+      "type": "logs",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 183
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "expr": "{job=\"zed\",pool=\"$pool\"} |~ \"scrub|resilver|trim\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "enableLogDetails": true
+      }
+    },
+    {
+      "id": 56,
+      "title": "All zed events on this pool",
+      "type": "logs",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 193
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "expr": "{job=\"zed\",pool=\"$pool\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "enableLogDetails": true
+      }
+    }
+  ]
+}

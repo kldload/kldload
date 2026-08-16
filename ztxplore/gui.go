@@ -36,6 +36,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"image/color"
 	"strconv"
@@ -543,7 +544,54 @@ func RunGUI(resultsDir string) error {
 	poolBox := container.NewVBox()
 	latBox := container.NewVBox()
 	promBox := container.NewVBox()
+	// The dashboards themselves. Grafana renders these better than a window
+	// can, and — the actual point — it is where a developer EDITS them. The
+	// numbers below work headless and when Grafana is down; this is for
+	// sitting down and reading, or for adding your own panel.
+	dashSel := widget.NewSelect(DashboardTitles(), nil)
+	dashSel.SetSelected(DashboardTitles()[0])
+	dashNote := widget.NewLabel("")
+	dashNote.Wrapping = fyne.TextWrapWord
+	updateDashNote := func(string) {
+		for _, d := range ZFSDashboards {
+			if d.Title == dashSel.Selected {
+				dashNote.SetText(d.Why)
+				return
+			}
+		}
+	}
+	dashSel.OnChanged = updateDashNote
+	updateDashNote("")
+	openDash := func(kiosk bool) {
+		for _, d := range ZFSDashboards {
+			if d.Title != dashSel.Selected {
+				continue
+			}
+			if up, why := GrafanaUp(3 * time.Second); !up {
+				dialog.ShowError(errors.New(why), w)
+				return
+			}
+			if err := OpenInBrowser(d.URL(kiosk)); err != nil {
+				dialog.ShowError(err, w)
+			}
+			return
+		}
+	}
+	dashBox := container.NewVBox(
+		widget.NewLabelWithStyle("Dashboards", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		dashSel, dashNote,
+		container.NewGridWithColumns(2,
+			widget.NewButtonWithIcon("Open to read", theme.VisibilityIcon(),
+				func() { openDash(true) }),
+			// NOT kiosk: editing is the reason these ship, and kiosk mode
+			// hides the controls that make it possible.
+			widget.NewButtonWithIcon("Open to edit", theme.DocumentCreateIcon(),
+				func() { openDash(false) })),
+		widget.NewSeparator(),
+	)
+
 	metricsPane := container.NewScroll(container.NewVBox(
+		dashBox,
 		// The dashboard readings first: they carry rate() and history, which
 		// is what shows the ARC moving during a run. The /proc sections below
 		// are the fallback that works with no monitoring stack at all.

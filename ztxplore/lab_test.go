@@ -548,3 +548,33 @@ func TestStripANSILeavesNoEscapeBytes(t *testing.T) {
 		t.Errorf("stripping ate the text: %q", got)
 	}
 }
+
+// TestDashboardURLs pins the two modes apart. Kiosk hides Grafana's chrome,
+// which is right for reading and wrong for editing — and editing is the
+// entire reason the dashboards ship rather than being redrawn in Go.
+func TestDashboardURLs(t *testing.T) {
+	d, ok := DashboardByUID("ztxplore-metrics")
+	if !ok {
+		t.Fatal("the combined metrics dashboard is not in the list")
+	}
+	if got := d.URL(true); !strings.HasSuffix(got, "?kiosk") {
+		t.Errorf("read URL = %q, want it to end in ?kiosk", got)
+	}
+	if got := d.URL(false); strings.Contains(got, "kiosk") {
+		t.Errorf("edit URL = %q, must not be kiosk", got)
+	}
+	if !strings.Contains(d.URL(false), "/d/ztxplore-metrics") {
+		t.Errorf("URL does not address the dashboard by uid: %q", d.URL(false))
+	}
+}
+
+// TestCombinedDashboardIsFirst — it is the one that answers "show me
+// everything", so it must be what the Metrics tab offers by default.
+func TestCombinedDashboardIsFirst(t *testing.T) {
+	if len(ZFSDashboards) == 0 || ZFSDashboards[0].UID != "ztxplore-metrics" {
+		t.Errorf("first dashboard is %v, want the combined board", ZFSDashboards[0].UID)
+	}
+	if DashboardTitles()[0] != ZFSDashboards[0].Title {
+		t.Error("the title list has drifted from the dashboard list")
+	}
+}
