@@ -59,6 +59,35 @@ test_service_enabled "sanoid.timer" "sanoid.timer"
 test_cmd "wg (WireGuard)" "wg"
 
 # ── GNOME Desktop ────────────────────────────────────────────────────────────
+_section "Launchers point at binaries that exist"
+
+# Every .desktop that runs something out of /usr/local/bin must have that
+# binary present. The installer copies launchers, icons and binaries from
+# THREE separate curated lists, so adding a tool to one and not the others
+# ships an app-grid tile that opens onto nothing — and nothing logs a thing.
+#
+# HISTORY: three times now. vmxplore (1.4.0-rc2) shipped both launchers, the
+# icon and the commit stamp with no binaries. ollama.svg matched no icon
+# pattern and rendered a blank square. ztx (rc8) shipped the launcher, the
+# icon and the System-folder entry with no binary. Each fix added one more
+# name to one more list; this checks the result instead.
+_broken_launchers=0
+for _d in /usr/share/applications/*.desktop; do
+    [[ -f "$_d" ]] || continue
+    _exec=$(awk -F= '/^Exec=/{print $2; exit}' "$_d" 2>/dev/null | awk '{print $1}')
+    case "$_exec" in
+    /usr/local/bin/*) ;;
+    *) continue ;;
+    esac
+    if [[ -x "$_exec" ]]; then
+        _pass "$(basename "$_d") → $(basename "$_exec")"
+    else
+        _fail "$(basename "$_d") points at $_exec which is NOT installed"
+        _broken_launchers=$((_broken_launchers + 1))
+    fi
+done
+[[ "$_broken_launchers" -eq 0 ]] && _pass "every launcher resolves to an installed binary"
+
 _section "GNOME Desktop"
 
 test_cmd "gnome-shell" "gnome-shell"

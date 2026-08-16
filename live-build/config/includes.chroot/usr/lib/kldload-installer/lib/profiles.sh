@@ -515,6 +515,7 @@ k_install_system_files() {
     [[ -f /etc/kldload/zxplore-commit ]] && cp /etc/kldload/zxplore-commit "${target}/etc/kldload/zxplore-commit"
     [[ -f /etc/kldload/wgxplore-commit ]] && cp /etc/kldload/wgxplore-commit "${target}/etc/kldload/wgxplore-commit"
     [[ -f /etc/kldload/vmxplore-commit ]] && cp /etc/kldload/vmxplore-commit "${target}/etc/kldload/vmxplore-commit"
+    [[ -f /etc/kldload/ztxplore-commit ]] && cp /etc/kldload/ztxplore-commit "${target}/etc/kldload/ztxplore-commit"
     # process-exporter config — kldload-process-exporter.service
     # ConditionPathExists on this file, so without it the unit silently
     # skips and the per-process Grafana dashboards stay empty on the target.
@@ -972,7 +973,8 @@ DASHSTART
                 /usr/share/applications/bob-*.desktop \
                 /usr/share/applications/zxplore.desktop \
                 /usr/share/applications/wgxplore.desktop \
-                /usr/share/applications/vmxplore*.desktop; do
+                /usr/share/applications/vmxplore*.desktop \
+                /usr/share/applications/ztxplore.desktop; do
                 [[ -f "$_lnch" ]] || continue
                 # honor the ZFS Console opt-out (checkbox, default on)
                 [[ "$(basename "$_lnch")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
@@ -996,7 +998,8 @@ DASHSTART
                 for _ic in /${themedir}/kldload-*.svg /${themedir}/bob-*.svg \
                     /${themedir}/kst*.svg /${themedir}/ksnap.svg /${themedir}/kexport.svg \
                     /${themedir}/zxplore*.svg /${themedir}/wgxplore.svg \
-                    /${themedir}/vmxplore.svg /${themedir}/ollama.svg; do
+                    /${themedir}/vmxplore.svg /${themedir}/ollama.svg \
+                    /${themedir}/ztxplore.svg; do
                     [[ -f "$_ic" ]] || continue
                     # honor the ZFS Console opt-out (checkbox, default on)
                     [[ "$(basename "$_ic")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
@@ -1244,9 +1247,16 @@ DASHSTART
         # stamp to the target and NOT the binaries, so a fresh .149 install had
         # two app tiles that opened onto "vmxplore: command not found". The
         # warning three lines above this one was already there. Read it.
+        # ztx/ztx-tui are explicit for the SAME reason as wgx and vmxplore,
+        # and cost the same broken install to learn a third time: rc8 shipped
+        # the launcher, the icon and the System-folder entry to the target and
+        # NOT the binaries, so the app-grid tile opened onto nothing (fiend,
+        # 2026-08-16). The warning above was already there. It is now three
+        # names long.
         for _src in /usr/local/bin/k* /usr/local/bin/_k* /usr/local/bin/_s* \
             /usr/local/bin/zxplore* /usr/local/bin/zexplore* /usr/local/bin/bob* \
-            /usr/local/bin/wgx /usr/local/bin/vmxplore /usr/local/bin/vmx; do
+            /usr/local/bin/wgx /usr/local/bin/vmxplore /usr/local/bin/vmx \
+            /usr/local/bin/ztx /usr/local/bin/ztx-tui; do
             [[ -x "$_src" ]] || continue
             _name="$(basename "$_src")"
             # ZFS Console is an installer checkbox (default on) — honor an
