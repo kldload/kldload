@@ -67,7 +67,12 @@ var (
 	// of the words above, so a pattern built only from subsystem names files
 	// the most important line in the buffer as unrelated.
 	zfsRE = regexp.MustCompile(`(?i)(\b(zfs|spl|zpool|zvol|dmu|dsl|arc|zio|vdev|zil|dnode|spa|zed|zthr|dbuf|metaslab|dnbuf|zap|zvol)\b` +
-		`|\b(txg_sync|txg_quiesce|spa_sync|arc_prune|arc_reclaim|arc_evict|z_wr_[a-z]+|z_rd_[a-z]+|zvol_[a-z]+|zfs_[a-z_]+|zio_[a-z_]+|dmu_[a-z_]+|dsl_[a-z_]+)\b)`)
+		`|\b(txg_sync|txg_quiesce|spa_sync|arc_prune|arc_reclaim|arc_evict|z_wr_[a-z]+|z_rd_[a-z]+|zvol_[a-z]+|zfs_[a-z_]+|zio_[a-z_]+|dmu_[a-z_]+|dsl_[a-z_]+)\b` +
+		// zvol block devices. On a lab box that clones a zvol per test VM
+		// these are most of the ZFS traffic in the buffer, and they carry
+		// none of the words above — "zd528: p1 p14 p15" was filed as
+		// unrelated (fiend, 2026-08-15).
+		`|\bzd[0-9]+\b)`)
 	// The assertions OpenZFS actually raises, plus the kernel's own worst
 	// news. VERIFY/ASSERT are the ones a ZFS developer is hunting.
 	critRE = regexp.MustCompile(`(?i)(VERIFY[0-9BFPSU]*\(|ASSERT[0-9]*\(|kernel BUG|BUG:|Oops|general protection fault|kernel panic|PANIC at|call trace:)`)

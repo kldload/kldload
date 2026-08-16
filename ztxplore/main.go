@@ -51,7 +51,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -65,7 +67,49 @@ const version = "0.1.0"
 // StartupWMClass in the .desktop file or the shell draws a fallback icon.
 const windowTitle = "OpenZFS Test Lab"
 
+// elevate re-executes this process under sudo when it is not already root.
+//
+// WHY: three of the six panes need privilege — the kernel ring buffer
+// (dmesg is restricted on any sane host), the results directory kzfs-test
+// writes as root, and the lab operations themselves. Launched from the
+// application grid there is no terminal to type a password into, so the
+// panes would simply show three permission errors and the app would look
+// broken rather than unprivileged.
+//
+// It re-execs only when sudo can do it WITHOUT asking (`sudo -n`), which is
+// how kldload hosts are configured and is the only form that can work from a
+// desktop launcher. When it cannot, the app carries on unprivileged and each
+// pane says what it could not read — which is the honest outcome, and better
+// than a password prompt nobody can see.
+//
+// The guard variable stops an infinite re-exec if sudo somehow preserves a
+// non-root euid.
+func elevate() {
+	if os.Geteuid() == 0 || os.Getenv("ZTX_ELEVATED") == "1" {
+		return
+	}
+	sudo, err := exec.LookPath("sudo")
+	if err != nil {
+		return
+	}
+	if exec.Command(sudo, "-n", "true").Run() != nil {
+		return // sudo would prompt, and there may be no terminal to prompt on
+	}
+	// argv[0] is the program NAME by convention, so the slice passed to Exec
+	// starts with "sudo" and not with its path or its first flag.
+	argv := append([]string{"sudo", "-n",
+		"--preserve-env=DISPLAY,WAYLAND_DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR",
+		"env", "ZTX_ELEVATED=1"}, os.Args...)
+	// Exec, not fork: the launcher is watching THIS pid, and a forked child
+	// would leave an unprivileged parent holding the window slot.
+	if err := syscall.Exec(sudo, argv, append(os.Environ(), "ZTX_ELEVATED=1")); err != nil {
+		return // carry on unprivileged; the panes will say what they cannot read
+	}
+}
+
 func main() {
+	elevate()
+
 	var (
 		tui        = flag.Bool("tui", false, "force the text view")
 		showVer    = flag.Bool("version", false, "print version and exit")

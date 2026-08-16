@@ -296,6 +296,11 @@ func TestClassifyKernelLine(t *testing.T) {
 		{"ZFS: Loaded module v2.4.3-1", KernZFS, true},
 		{"spl: loading out-of-tree module taints kernel.", KernWarn, true},
 		{"INFO: task txg_sync:1234 blocked for more than 120 seconds.", KernWarn, true},
+		// zvol block devices. On a lab box that clones zvols per test run
+		// these are the dominant ZFS traffic in the buffer, and none of the
+		// obvious keywords appear in them (fiend, 2026-08-15).
+		{" zd528: p1 p14 p15", KernZFS, true},
+		{"zd0: detected capacity change from 0 to 41943040", KernZFS, true},
 		{"usb 1-1: new high-speed USB device", KernNormal, false},
 	}
 	for _, c := range cases {
