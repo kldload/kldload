@@ -93,12 +93,23 @@ controller:
     requests: { cpu: 100m, memory: 192Mi }
     limits:   { cpu: 1,    memory: 512Mi }
 
-# ── dex (SSO — disabled UI-wise but we keep the pod for future SSO) ──
+# ── dex (SSO) — off, because nothing here uses it ────────────────────
+#
+# WHY off: dex only does anything once an OIDC/SSO connector is configured
+# in configs.cm (dex.config / oidc.config), and kldload configures none —
+# Argo is reached with the local admin account. The pod was kept "for future
+# SSO", and the cost of that was not zero: ArgoCD copies its own binary into
+# the dex image and runs it there, and with argo-cd 10.3.3 (v3.5.1) against
+# ghcr.io/dexidp/dex:v2.45.1 that binary dies on SIGSEGV (exit 139) the
+# instant it starts, with no log output at all. It crash-looped 45 times in
+# three hours and left the whole helm release in `failed` state, which is
+# what kldload-doctor had been reporting as "helm/releases: 1/4 in bad
+# state" (fiend, 2026-08-16).
+#
+# Turning it on again is this one line plus a connector under configs.cm —
+# do both together, and pin a dex image that matches the Argo release.
 dex:
-  enabled: true
-  resources:
-    requests: { cpu: 10m,  memory: 32Mi }
-    limits:   { cpu: 100m, memory: 64Mi }
+  enabled: false
 
 # ── redis (HA state cache) ─────────────────────────────────────────
 redis:
