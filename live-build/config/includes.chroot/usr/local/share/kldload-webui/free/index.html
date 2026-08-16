@@ -1810,6 +1810,8 @@ html.kld-app #term-drawer{display:none!important;}
               <option value="worker">Worker(s)</option>
               <option value="cp">Control planes (HA total — odd: 1/3/5)</option>
             </select>
+            <label id="k8s-ov-cp-ram-wrap" style="display:none;font-size:0.78rem;color:var(--text-dim)">RAM each
+              <input type="number" id="k8s-ov-cp-ram" value="8192" min="1024" max="65536" step="1024" style="width:75px;margin:0 0.4rem;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:0.3rem;border-radius:5px">MB</label>
             <button id="k8s-ov-scale-btn" class="btn btn-primary btn-sm" onclick="k8sAddNodesFromOverview()">Add 1 worker</button>
             <span class="k8s-panel-hdr-muted" style="margin-left:auto;font-size:0.75rem">~2 min per node — progress streams on Nodes tab</span>
           </div>
@@ -6843,6 +6845,12 @@ function k8sOvUpdateBtn() {
   btn.textContent = kind === 'cp'
     ? 'Set control planes to ' + n
     : 'Add ' + n + ' worker' + (n > 1 ? 's' : '');
+  // RAM-per-CP only matters in cp mode, and it is the ONLY lever that makes a
+  // control-plane scale possible on a host whose free memory cannot fit
+  // another 8GB node: kube-cluster caps the CP target to what fits, and a cap
+  // at or below the running count refuses outright.
+  const ramWrap = document.getElementById('k8s-ov-cp-ram-wrap');
+  if (ramWrap) ramWrap.style.display = (kind === 'cp') ? '' : 'none';
 }
 
 function k8sUpdateAddBtn() {
@@ -6969,7 +6977,8 @@ function k8sAddNodes() {
   }
   send({ action: 'k8s_status' });   // immediate render
   _busyShow(`scaling cluster +${n} worker(s)…`, 30000);
-  send({ action: 'k8s_cluster_scale', kind: kind, workers: n, control_planes: n });
+  const cpRam = parseInt(document.getElementById('k8s-ov-cp-ram')?.value || '0') || 0;
+  send({ action: 'k8s_cluster_scale', kind: kind, workers: n, control_planes: n, cp_ram: cpRam });
   // No more auto-tab-switch — user stays on Nodes and watches the live
   // progress + table updates side-by-side.
 }

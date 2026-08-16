@@ -7686,10 +7686,28 @@ async def _k8s_cluster_scale(websocket, msg):
         # count (1/3/5), caps to host RAM, joins the new CPs to etcd quorum, and
         # flips the VIP from static to leader-elected kube-vip failover.
         target = int(msg.get("control_planes", msg.get("workers", 3)))
+        # Let the UI choose the control-plane RAM.
+        #
+        # kube-cluster caps the CP target to what the host's RAM fits at
+        # CP_RAM (8192 by default), and on a busy hypervisor that cap can land
+        # at or below the running count -- so the scale refuses and NOTHING
+        # the operator can do from this page changes the outcome. CP_RAM was
+        # never referenced by the webui at all, which made control-plane
+        # scaling permanently impossible from the UI on a full host
+        # (fiend, 2026-08-16).
+        _env = None
+        try:
+            _cpram = int(msg.get("cp_ram") or 0)
+        except (TypeError, ValueError):
+            _cpram = 0
+        # 1024 floor: a control plane below that will not run etcd + apiserver,
+        # and a typo like "64" should not quietly produce an unbootable node.
+        if _cpram >= 1024:
+            _env = {"CP_RAM": str(_cpram)}
         await _auto_snapshot(websocket, f"k8s-scale-cp-{target}")
         await _stream_proc_detached(websocket,
             ["kube-cluster", "scale", "--control-planes", str(target)],
-            target="k8s")
+            env=_env, target="k8s")
         await _k8s_status(websocket)
         return
     workers = int(msg.get("workers", 1))
