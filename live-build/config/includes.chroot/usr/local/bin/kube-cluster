@@ -1383,6 +1383,45 @@ NETCFG
     printf '%s' "$ip"
 }
 
+# _cp_wg_join <existing-cp-ip> <new-ip> <name> — put an added control plane on
+# the WireGuard k8s plane and pin its kubelet there.
+#
+# Mirrors what the bootstrap does for workers: allocate a node id, bring the
+# interface up, mesh with every existing node in both directions, then pin.
+# Node ids 1..N are already taken by the first CP and the workers, so the id
+# is derived from the highest allowed-ip currently on the plane.
+#
+# Returns 0 always: a control plane that joined the CLUSTER but not the mesh
+# is degraded, not broken, and failing the whole join here would be worse.
+_cp_wg_join() {
+    local cp_ip="$1" new_ip="$2" name="$3"
+    local next_id pub
+
+    # Highest 10.251.0.N already in use, +1.
+    next_id="$(_ssh_cmd "$cp_ip" "wg show wg-k8s allowed-ips 2>/dev/null | grep -oE '10\\.251\\.0\\.[0-9]+' | cut -d. -f4 | sort -n | tail -1")"
+    [[ "$next_id" =~ ^[0-9]+$ ]] || next_id=1
+    next_id=$((next_id + 1))
+
+    _ssh_cmd "$new_ip" "kube-network init ${next_id}" || {
+        warn "${name}: could not join the WireGuard k8s plane — kubelet stays on its DHCP address"
+        return 0
+    }
+    pub="$(_ssh_cmd "$new_ip" "wg show wg-k8s public-key" 2>/dev/null)"
+    local wip="10.251.0.${next_id}"
+
+    # Mesh both directions with the existing control plane. That is enough
+    # for the API traffic and the metrics scrape; worker-to-new-CP paths are
+    # rebuilt by the bootstrap mesh pass when the cluster next scales.
+    local peer_pub
+    [[ -n "$pub" ]] && _ssh_cmd "$cp_ip" "kube-network add-peer ${wip} ${pub} ${next_id}" || true
+    peer_pub="$(_ssh_cmd "$cp_ip" "wg show wg-k8s public-key" 2>/dev/null)"
+    [[ -n "$peer_pub" ]] && _ssh_cmd "$new_ip" "kube-network add-peer 10.251.0.1 ${peer_pub} 1" || true
+
+    _ssh_cmd "$new_ip" "kube-network pin-kubelet" || true
+    log "${name}: on the WireGuard plane at ${wip}, kubelet pinned"
+    return 0
+}
+
 # _join_control_plane_one <existing-cp-ip> <new-ip> <new-name> — join an already
 # booted+node-prepped node as an ADDITIONAL control plane, host-driven. Mints a
 # FRESH token and a FRESH certificate key (kubeadm's key expires ~2h) from an
@@ -1413,6 +1452,28 @@ _join_control_plane_one() {
         if _ssh_cmd_logged "$new_ip" "$logfile" \
             "${join_cmd} --control-plane --certificate-key ${cert_key} --apiserver-advertise-address ${new_ip} --v=5"; then
             _ssh_cmd "$new_ip" 'mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config && chmod 600 /root/.kube/config' 2>/dev/null || true
+            # Put this control plane on the WireGuard k8s plane, then pin
+            # kubelet to that address.
+            #
+            # The bootstrap path does this for the first CP and every worker
+            # and NOT for control planes added later, so cp-2 and cp-3 ended
+            # up with no wg-k8s interface, no peer in the mesh, and kubelet
+            # pinned to a virbr0 DHCP address. When that lease moved, kubelet
+            # advertised an IP the machine no longer had and the node reported
+            # NO InternalIP at all — `kubectl get nodes -o wide` showed <none>
+            # while every worker showed 10.251.0.x. MetalLB's speaker then
+            # cannot start there ("host IP unknown; known addresses: []"),
+            # taking the DaemonSet to 4/7 and surfacing as a doctor failure
+            # that reads like a MetalLB fault (fiend, 2026-08-16).
+            #
+            # Pinning to DHCP was the underlying mistake: the static
+            # WireGuard address is the whole reason the other nodes survive a
+            # lease change.
+            _cp_wg_join "$cp_ip" "$new_ip" "$name" || true
+
+            # Ordering matters: address first, then untaint, so the node
+            # advertises the right IP before workloads land on it.
+
             # Schedulable CP (kldload runs workloads on control planes).
             _ssh_cmd "$cp_ip" "kubectl taint nodes ${name} node-role.kubernetes.io/control-plane- --overwrite 2>/dev/null || true" 2>/dev/null || true
             echo "[ok] ${name} joined as control plane on attempt ${attempt}" >>"$logfile"
