@@ -135,35 +135,87 @@ mark() {
 # Args:    $1 — libvirt domain name.
 # Returns: 0 always. Powering a build VM down is a courtesy, never a reason to
 #          fail an install that otherwise succeeded.
-# Notes:   ACPI shutdown, not destroy — a guest that ignores it is logged and
-#          left running rather than risking a half-written golden image.
+# Notes:   ACPI shutdown first, and the OUTCOME is then verified — see below.
+#
+# HISTORY: 2026-08-16, .145. This logged "powering it down" for six VMs and
+# klab-green-ubuntu was still running afterwards. The bug was trusting the
+# exit code: `virsh shutdown` returns 0 when it has SENT the ACPI request,
+# not when the guest has stopped. A guest still booting, or without acpid
+# listening, simply ignores it — so the log claimed success while the VM kept
+# its RAM, which is the exact starvation this function exists to prevent.
+# Verify the outcome, not the exit code.
+#
+# Args:    $1 — libvirt domain name.
+#          $2 — 1 to destroy it if it will not stop gracefully (disposable
+#               clones only), 0/absent to leave it running with a warning.
+# Returns: 0 always. Powering a build VM down is a courtesy, never a reason to
+#          fail an install that otherwise succeeded.
 power_off_vm() {
-    local _vm="$1"
+    local _vm="$1" _force="${2:-0}"
     [[ -n "$_vm" ]] || return 0
     command -v virsh >/dev/null 2>&1 || return 0
     virsh domstate "$_vm" 2>/dev/null | grep -q running || return 0
-    if virsh shutdown "$_vm" >/dev/null 2>&1; then
-        log "[quiesce] ${_vm} is built — powering it down (virsh start ${_vm} to use it)"
-    else
-        log "[quiesce] WARN: ${_vm} did not accept shutdown — left running"
+    virsh shutdown "$_vm" >/dev/null 2>&1 ||
+        log "[quiesce] WARN: ${_vm} did not accept the shutdown request"
+    _await_power_off "$_vm" 90 "$_force"
+    return 0
+}
+
+# _await_power_off — wait for a guest to actually stop, then say what happened.
+#
+# Args:    $1 domain, $2 seconds to wait, $3 destroy-on-timeout (1/0).
+# Returns: 0 always.
+#
+# WHY DESTROY IS GATED: a golden image caught mid-write is a corrupt golden,
+# and this same helper powers down the ztest goldens. Blue/green sites are
+# disposable clones and pass 1; anything that a later phase reads from passes
+# 0 and is left running with a warning loud enough to find.
+_await_power_off() {
+    local _vm="$1" _wait="${2:-90}" _force="${3:-0}" _i
+    for ((_i = 0; _i < _wait; _i += 3)); do
+        virsh domstate "$_vm" 2>/dev/null | grep -q running || {
+            log "[quiesce] ${_vm} is down (virsh start ${_vm} to use it)"
+            return 0
+        }
+        sleep 3
+    done
+    if [[ "$_force" == "1" ]]; then
+        # It had 90 seconds of ACPI and ignored it. This is a clone that
+        # exists to be thrown away, and its RAM is needed now.
+        virsh destroy "$_vm" >/dev/null 2>&1 &&
+            log "[quiesce] ${_vm} ignored ACPI for ${_wait}s — stopped it (disposable clone)" &&
+            return 0
     fi
+    log "[quiesce] WARN: ${_vm} is STILL RUNNING after ${_wait}s of ACPI — it keeps its RAM"
     return 0
 }
 
 # power_off_group — power down every running VM whose name matches a glob.
 #
 # Args:    $1 — a shell glob, e.g. 'klab-blue-*'
+#          $2 — 1 to destroy stragglers (disposable clones), 0/absent not to.
 # Returns: 0 always.
+#
+# The request is sent to EVERY match first, and only then does it wait. Doing
+# it one at a time meant up to 90s of waiting per VM — twelve minutes for the
+# eight blue/green sites, serially, in the middle of an install.
 power_off_group() {
-    local _glob="$1" _vm
+    local _glob="$1" _force="${2:-0}" _vm
+    local _targets=()
     command -v virsh >/dev/null 2>&1 || return 0
     while read -r _vm; do
         [[ -n "$_vm" ]] || continue
         # shellcheck disable=SC2254  # the glob is the whole point of this call
         case "$_vm" in
-        $_glob) power_off_vm "$_vm" ;;
+        $_glob)
+            virsh shutdown "$_vm" >/dev/null 2>&1 || true
+            _targets+=("$_vm")
+            ;;
         esac
     done < <(virsh list --name --state-running 2>/dev/null)
+    for _vm in "${_targets[@]}"; do
+        _await_power_off "$_vm" 90 "$_force"
+    done
     return 0
 }
 
@@ -982,8 +1034,12 @@ if [[ "${WANT[klab]}" == "1" ]]; then
                 # the ztest phase below runs for another ~hour. Handing that
                 # phase eight idle VMs' worth of RAM is the whole difference
                 # between a build that finishes and one that thrashes.
-                power_off_group 'klab-blue-*'
-                power_off_group 'klab-green-*'
+                # force=1: these are disposable clones of the goldens,
+                # re-made by `klab deploy` in seconds. Nothing later reads
+                # from them, so a straggler that ignores ACPI is stopped
+                # rather than left holding RAM for the rest of the install.
+                power_off_group 'klab-blue-*' 1
+                power_off_group 'klab-green-*' 1
             else
                 _klab_ok=0
                 log "[klab] klab-firstboot.service did not complete within timeout — see /var/log/klab/"
