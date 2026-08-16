@@ -288,7 +288,8 @@ k_profile_packages() {
         pulseaudio-utils \
         speech-dispatcher espeak-ng \
         tmux eject sanoid python3 python3-websockets python3-yaml htop iotop lm-sensors net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
-        zenity chromium"
+        zenity chromium \
+        docker.io docker-cli docker-compose"
         ;;
 
     # ── kldload templates ────────────────────────────────────────────────────────
@@ -309,7 +310,8 @@ k_profile_packages() {
         # Hypervisor: KVM + libvirt (KVM-specific qemu/libvirt added by k_profile_optional_packages per-distro)
         echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
         wireguard-tools tmux python3 python3-websockets python3-yaml htop net-tools ethtool tcpdump \
-        fzf bat eza fd-find ripgrep zoxide podman sanoid qemu-utils pciutils ${_fastfetch}"
+        fzf bat eza fd-find ripgrep zoxide podman sanoid qemu-utils pciutils ${_fastfetch} \
+        docker.io docker-cli docker-compose"
         ;;
 
     storage)
