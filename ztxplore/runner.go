@@ -37,6 +37,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -211,6 +212,27 @@ func (r *Runner) Stop() {
 	}
 }
 
+// ansiRE matches a real escape sequence (ESC [ ... letter) and the literal
+// two-character form "\033[...m" that kzfs-test writes into its own log file.
+//
+// Both have to go. kzfs-test colours its output for a terminal, and a GUI
+// text widget renders those bytes literally: the Lab pane came up full of
+// "?1;32mREADY" and "?0m", with the ESC byte drawn as the replacement glyph
+// (fiend, 2026-08-15). The tool is not misbehaving — it is talking to a
+// terminal that is not there.
+var ansiRE = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]|\\0[0-9]{2}\[[0-9;?]*[a-zA-Z]`)
+
+// stripANSI removes terminal colour codes from a line.
+//
+// Applied on the way IN rather than at render time so every pane, and any
+// future consumer of a Streamer, gets clean text without having to remember.
+func stripANSI(s string) string {
+	if !strings.ContainsAny(s, "\x1b\\") {
+		return s // the overwhelmingly common case, no allocation
+	}
+	return ansiRE.ReplaceAllString(s, "")
+}
+
 // pump forwards lines, tolerating the very long ones a test suite emits.
 func pump(rc io.Reader, out Streamer) {
 	sc := bufio.NewScanner(rc)
@@ -219,7 +241,7 @@ func pump(rc io.Reader, out Streamer) {
 	// output at the most interesting moment.
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
-		out(sc.Text())
+		out(stripANSI(sc.Text()))
 	}
 }
 

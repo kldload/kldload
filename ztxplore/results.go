@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,6 +46,11 @@ import (
 
 // DefaultResultsDir mirrors kzfs-test's RESULTS_DIR.
 const DefaultResultsDir = "/root/kzfs-test"
+
+// runIDRE is the shape kzfs-test stamps a run directory with: YYYYMMDD-HHMMSS.
+// Sorting these lexically is also what makes newest-first work without
+// stat-ing anything.
+var runIDRE = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}$`)
 
 // DistroResult is one distro's outcome within a run.
 type DistroResult struct {
@@ -143,6 +149,15 @@ func ListRuns(dir string) ([]Run, error) {
 		if !e.IsDir() || e.Name() == "latest" {
 			continue
 		}
+		// Only run directories. kzfs-test also keeps "goldens/" in here for
+		// per-distro golden build logs, which was listed as a run with "no
+		// results recorded" — a permanent phantom failure in the history
+		// (fiend, 2026-08-15). Matching the run-id SHAPE rather than
+		// blocklisting names means the next sibling directory somebody adds
+		// does not reappear as a phantom run.
+		if !runIDRE.MatchString(e.Name()) {
+			continue
+		}
 		if e.Type()&os.ModeSymlink != 0 {
 			continue
 		}
@@ -234,10 +249,24 @@ func readSummary(path string) DistroResult {
 		}
 	}
 	// A summary missing its counts is a run that died while writing it.
-	// Reporting 0/0/0 as a pass would be the worst possible lie here.
 	if seen < 3 {
 		res.Incomplete = true
 		res.Note = "summary truncated — the run did not finish this distro"
+		return res
+	}
+	// A COMPLETE summary of all zeroes is the same lie wearing a better
+	// suit: zfs-tests.sh started, produced no results, and wrote 0/0/0.
+	// Nothing ran, so "0 failures" is true and "passed" is not — and this
+	// is the shape a broken test environment in the golden actually takes
+	// (fiend, 2026-08-15: a run finished in 15s and reported a pass).
+	//
+	// Checked on the counts rather than on `total` alone, because a summary
+	// with total=0 but a non-zero pass count is a different kind of broken
+	// and must not be silently treated as empty.
+	if res.Pass == 0 && res.Fail == 0 && res.Skip == 0 {
+		res.Incomplete = true
+		res.Note = "no tests ran — zfs-tests.sh produced no results, " +
+			"so this distro's ZFS test environment is not working"
 	}
 	return res
 }

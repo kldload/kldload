@@ -242,6 +242,22 @@ func cmdResults(dir, id string) int {
 
 // cmdMetrics prints one sample of everything the Metrics pane shows.
 func cmdMetrics() int {
+	// The dashboard queries first — they carry rate() and history, which the
+	// kernel counters below cannot give.
+	if ok, why := PromAvailable(3 * time.Second); !ok {
+		fmt.Println("ZFS dashboard readings\n  " + why)
+	} else {
+		fmt.Println("ZFS dashboard readings (the Grafana queries, via Prometheus)")
+		for _, r := range ReadZFSPanels(4 * time.Second) {
+			v := r.Render()
+			if !r.OK {
+				v = "no data"
+			}
+			fmt.Printf("  %-24s %s\n", r.Label, v)
+		}
+	}
+	fmt.Println()
+
 	arc := ReadARC("")
 	fmt.Println("ARC")
 	if !arc.Available {

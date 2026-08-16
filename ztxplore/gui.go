@@ -542,8 +542,17 @@ func RunGUI(resultsDir string) error {
 	arcBox := container.NewVBox()
 	poolBox := container.NewVBox()
 	latBox := container.NewVBox()
+	promBox := container.NewVBox()
 	metricsPane := container.NewScroll(container.NewVBox(
-		widget.NewLabelWithStyle("ARC", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		// The dashboard readings first: they carry rate() and history, which
+		// is what shows the ARC moving during a run. The /proc sections below
+		// are the fallback that works with no monitoring stack at all.
+		widget.NewLabelWithStyle("ZFS — the Grafana dashboard queries",
+			fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		promBox,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("ARC (read straight from the kernel)",
+			fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		arcBox,
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Pool I/O", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -653,7 +662,29 @@ func RunGUI(resultsDir string) error {
 			arc := ReadARC("")
 			pools, poolErr := ReadPoolIO(5 * time.Second)
 			lat := ReadLatency(3 * time.Second)
+			promOK, promWhy := PromAvailable(3 * time.Second)
+			var panels []PromReading
+			if promOK {
+				panels = ReadZFSPanels(4 * time.Second)
+			}
 			fyne.Do(func() {
+				promBox.Objects = nil
+				if !promOK {
+					promBox.Add(colouredLabel(promWhy, warnGold))
+				} else {
+					for _, r := range panels {
+						v := r.Render()
+						c := okGreen
+						if !r.OK {
+							c = warnGold
+							v = "no data"
+						}
+						promBox.Add(container.NewGridWithColumns(2,
+							widget.NewLabel(r.Label), colouredLabel(v, c)))
+					}
+				}
+				promBox.Refresh()
+
 				arcBox.Objects = nil
 				if !arc.Available {
 					arcBox.Add(colouredLabel(arc.Why, warnGold))

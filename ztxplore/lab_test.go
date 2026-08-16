@@ -432,3 +432,119 @@ func TestUnsupportedDistrosAreNotOffered(t *testing.T) {
 		t.Errorf("the matrix has %d distros; kzfs-test's DISTROS has 6", len(Distros))
 	}
 }
+
+// TestListRunsIgnoresNonRunDirectories — kzfs-test keeps golden build logs in
+// a "goldens" directory beside the runs, and it was listed as a run with "no
+// results recorded": a permanent phantom failure at the top of the history.
+func TestListRunsIgnoresNonRunDirectories(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"20260816-002218", "goldens", "cache", "logs"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSummary(t, filepath.Join(root, "20260816-002218"), "centos", 10, 0, 1)
+	runs, err := ListRuns(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		var ids []string
+		for _, r := range runs {
+			ids = append(ids, r.ID)
+		}
+		t.Fatalf("got %d runs %v, want only the timestamped one", len(runs), ids)
+	}
+}
+
+// TestAZeroRunIsNotAPass is the most important assertion in this file.
+//
+// A complete summary of all zeroes means zfs-tests.sh started and produced
+// nothing — a broken test environment in the golden. Reporting that as
+// "all distros passed" with exit 0 would send a CI job green on a run that
+// tested nothing, which is the exact failure this tool exists to prevent.
+// Observed on fiend 2026-08-15: a run finished in 15 seconds and reported a
+// pass.
+func TestAZeroRunIsNotAPass(t *testing.T) {
+	dir := t.TempDir()
+	writeSummary(t, dir, "centos", 0, 0, 0)
+
+	run := ReadRun(dir)
+	if len(run.Results) != 1 {
+		t.Fatalf("got %d results, want 1", len(run.Results))
+	}
+	if run.Results[0].OK() {
+		t.Error("a run where nothing executed reported OK")
+	}
+	if run.Incomplete() != 1 {
+		t.Errorf("Incomplete() = %d, want 1", run.Incomplete())
+	}
+	if strings.Contains(run.Verdict(), "passed") {
+		t.Errorf("verdict claims a pass: %q", run.Verdict())
+	}
+	if !strings.Contains(run.Results[0].Note, "no tests ran") {
+		t.Errorf("the note does not say nothing ran: %q", run.Results[0].Note)
+	}
+}
+
+// TestAGenuinePassIsStillAPass guards the fix from over-reaching: a real run
+// with zero failures must not be dragged into "incomplete".
+func TestAGenuinePassIsStillAPass(t *testing.T) {
+	dir := t.TempDir()
+	writeSummary(t, dir, "debian", 1382, 0, 44)
+	run := ReadRun(dir)
+	if !run.Results[0].OK() {
+		t.Error("a genuine pass was reported as not OK")
+	}
+	if !strings.Contains(run.Verdict(), "passed") {
+		t.Errorf("verdict = %q, want a pass", run.Verdict())
+	}
+}
+
+// TestASkipOnlyRunIsAPass — a distro that skipped everything did run the
+// suite; that is a legitimate (if uninteresting) result, not an empty one.
+func TestASkipOnlyRunIsAPass(t *testing.T) {
+	dir := t.TempDir()
+	writeSummary(t, dir, "rocky", 0, 0, 120)
+	run := ReadRun(dir)
+	if !run.Results[0].OK() {
+		t.Error("a skip-only run was treated as empty; the suite did execute")
+	}
+}
+
+// TestStripANSI covers what kzfs-test actually emits. Its output is coloured
+// for a terminal, and a GUI text widget draws those bytes literally — the Lab
+// pane came up reading "?1;32mREADY" and "?0m" (fiend, 2026-08-15).
+func TestStripANSI(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// real escape sequences, as they arrive on the pipe
+		{"\x1b[1;32mREADY\x1b[0m", "READY"},
+		{"\x1b[0;37m—\x1b[0m", "—"},
+		{"  centos    \x1b[1;32mOK\x1b[0m   192.168.122.180", "  centos    OK   192.168.122.180"},
+		// the literal form kzfs-test writes into its own log file
+		{`Golden ready: \033[1;36mkzfstest-golden-centos\033[0m (223s)`,
+			"Golden ready: kzfstest-golden-centos (223s)"},
+		// untouched: plain text, and text with a stray backslash
+		{"Cloned centos in 40ms", "Cloned centos in 40ms"},
+		{`C:\path\to\thing`, `C:\path\to\thing`},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := stripANSI(c.in); got != c.want {
+			t.Errorf("stripANSI(%q)\n got %q\nwant %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestStripANSILeavesNoEscapeBytes is the property the pane cares about:
+// whatever the shape of the sequence, no ESC survives to be drawn as a box.
+func TestStripANSILeavesNoEscapeBytes(t *testing.T) {
+	noisy := "\x1b[1;37m  DISTRO \x1b[0m\x1b[1;36m════\x1b[0m\x1b[K done"
+	got := stripANSI(noisy)
+	if strings.ContainsRune(got, 0x1b) {
+		t.Errorf("an escape byte survived: %q", got)
+	}
+	if !strings.Contains(got, "DISTRO") || !strings.Contains(got, "done") {
+		t.Errorf("stripping ate the text: %q", got)
+	}
+}

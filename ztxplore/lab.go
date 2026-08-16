@@ -61,12 +61,19 @@ type Distro struct {
 // about what the lab tests. A release number belongs to the golden that
 // was actually built, so it is read off the guest and shown beside it,
 // never typed here.
-// WHY ONLY SIX: kzfs-test carries cloud images for arch and alpine but its
-// DISTROS array is these six, and anything else is answered with
-// "[FATAL] Unknown distro: arch". Offering them here produced a checkbox
-// whose only possible outcome was a fatal error (fiend, 2026-08-15) — the
-// exact failure the note above warns about. The list is kzfs-test's, not
-// the image map's.
+// WHY ONLY SIX — and why arch and alpine are not coming back:
+//
+// A rolling release has no stable kernel to build a module against. The
+// kernel moves under you between the image being fetched and the module
+// being compiled, so there is no install path that reliably produces a
+// working ZFS on either, and a test result from a box where the module
+// failed to build tells you nothing about ZFS (operator, 2026-08-15).
+//
+// kzfs-test agrees: it carries cloud images for both in CLOUD_IMAGES but
+// its DISTROS array is these six, and anything else is answered with
+// "[FATAL] Unknown distro: arch". Taking the list from the image map rather
+// than from DISTROS produced checkboxes whose only possible outcome was a
+// fatal error — the exact failure the note above warns about.
 var Distros = []Distro{
 	{"centos", "CentOS Stream", "dnf"},
 	{"rocky", "Rocky Linux", "dnf"},

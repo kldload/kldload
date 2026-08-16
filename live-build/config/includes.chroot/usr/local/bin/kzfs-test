@@ -39,6 +39,13 @@ RHEL_USERNAME="${RHEL_USERNAME:-}"
 RHEL_PASSWORD="${RHEL_PASSWORD:-}"
 RHEL_CREDS_FILE="/root/.kzfs-rhel-creds"
 
+# Arch and Alpine are deliberately absent. A rolling release has no stable
+# kernel to build a module against — it moves between the image being fetched
+# and the module being compiled — so there is no install path that reliably
+# produces a working ZFS, and a result from a guest where the module failed to
+# build says nothing about ZFS (operator, 2026-08-15). They were listed here
+# but never in DISTROS, which made them look supported to anything reading the
+# image map instead of the matrix.
 declare -A CLOUD_IMAGES=(
     [centos]="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
     [rocky]="https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"
@@ -47,8 +54,6 @@ declare -A CLOUD_IMAGES=(
     [fedora]="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
     [debian]="https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-genericcloud-amd64-daily.qcow2"
     [ubuntu]="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
-    [arch]="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
-    [alpine]="https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.0-x86_64-uefi-cloudinit-r0.qcow2"
     [rhel]="REQUIRES_MANUAL_DOWNLOAD"
 )
 
@@ -58,8 +63,6 @@ declare -A OS_VARIANTS=(
     [fedora]="fedora-unknown"
     [debian]="debian12"
     [ubuntu]="ubuntu24.04"
-    [arch]="archlinux"
-    [alpine]="alpinelinux"
     [rhel]="centos-stream9"
 )
 
@@ -70,8 +73,6 @@ declare -A DISTRO_FAMILY=(
     [rhel]="dnf"
     [debian]="apt"
     [ubuntu]="apt"
-    [arch]="pacman"
-    [alpine]="apk"
 )
 
 # Auto-scale resources based on host hardware
@@ -1241,8 +1242,16 @@ run_tests_on_vm() {
 
     local test_cmd
     if [[ "$mode" == "quick" ]]; then
-        # Quick: functional CLI tests only (~15 min)
-        test_cmd="/usr/share/zfs/zfs-tests.sh -vx -T functional -c 2>&1 || true"
+        # Quick: the functional tags only.
+        #
+        # NOT -c. zfs-tests.sh's -c is "Only create and populate constrained
+        # path" — it sets the path up and EXITS without running a single
+        # test. Every quick run therefore finished in about a second and
+        # wrote a summary of 0 pass, 0 fail, 0 skip, which reads as a clean
+        # pass to anything that only checks the failure count (fiend,
+        # 2026-08-15). Verified against zfs-tests.sh's own option list in
+        # zfs-2.4.3/scripts.
+        test_cmd="/usr/share/zfs/zfs-tests.sh -vx -T functional 2>&1 || true"
     else
         # Full: everything (~2-4 hours)
         test_cmd="/usr/share/zfs/zfs-tests.sh -vx 2>&1 || true"
@@ -1260,7 +1269,8 @@ run_tests_on_vm() {
     # Build test command — simple string, no heredocs
     local _test_args=""
     if [[ "$mode" == "quick" ]]; then
-        _test_args="-vx -T functional -c"
+        # See the note above: -c runs nothing.
+        _test_args="-vx -T functional"
     else
         _test_args="-vx"
     fi
