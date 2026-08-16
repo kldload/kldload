@@ -2339,6 +2339,42 @@ STORAGE
         # Create the container storage dataset
         chroot "${target}" bash -c 'zfs create -p -o mountpoint=/var/lib/containers/storage/zfs rpool/var/lib/containers/storage/zfs' 2>/dev/null || true
 
+        # ── Docker, on the same terms as podman ──────────────────────
+        #
+        # apt distros get Docker because that is what their users reach for;
+        # the RPM side keeps podman, which is what RHEL ships. Both engines
+        # coexist (they do not conflict), and both put their layers on ZFS.
+        #
+        # WHY THIS MATTERS BEYOND TIDINESS: with the zfs storage driver every
+        # image layer becomes a real dataset, so a pull is a clone, layers
+        # inherit compression, and the whole container estate — layers, the
+        # engine's database and the volumes — can be snapshotted and sent as
+        # one recursive stream. On overlay2 a layer is a directory inside one
+        # filesystem with no handle to snapshot or send.
+        #
+        # The dataset MUST exist before dockerd first starts: Docker picks a
+        # storage driver on first run and records it, and one that came up on
+        # overlay2 will not move to zfs afterwards without discarding its
+        # images.
+        if chroot "${target}" sh -c 'command -v dockerd >/dev/null 2>&1'; then
+            k_log_to "$log" "Configuring Docker for the ZFS storage driver"
+            chroot "${target}" bash -c \
+                'zfs create -p -o mountpoint=/var/lib/docker rpool/var/lib/docker' \
+                >>"$log" 2>&1 ||
+                k_log_to "$log" "WARNING: could not create rpool/var/lib/docker — Docker will fall back to overlay2"
+            mkdir -p "${target}/etc/docker"
+            cat >"${target}/etc/docker/daemon.json" <<'DOCKERJSON'
+{
+  "storage-driver": "zfs",
+  "data-root": "/var/lib/docker"
+}
+DOCKERJSON
+            # Anyone in the docker group can ask dockerd to run a container as
+            # root, so this is deliberately NOT added for every user — the
+            # operator opts in with: usermod -aG docker <user>
+            chroot "${target}" systemctl enable docker 2>/dev/null || true
+        fi
+
         # Enable libvirtd + default network (virbr0)
         chroot "${target}" systemctl enable libvirtd 2>/dev/null || true
         # virsh can't run in a chroot (no running libvirtd to connect to). At
