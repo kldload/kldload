@@ -1829,12 +1829,20 @@ if [[ "$EDITION" != "core" ]]; then
     # cluster actually deployed 1.7.0 from the network — so even the single
     # vendored chart was the wrong version.
     #
-    # NEWEST-at-build-time, by design: `helm pull` with no --version resolves
-    # whatever the upstream repo currently publishes. That is the intent —
-    # the ISO is the version boundary, not a hardcoded list that silently
-    # rots. Every resolved version is written to a manifest in the darksite,
-    # so an ISO is still exactly auditable after the fact ("what did this
-    # build actually bake in?") without the pins needing hand-maintenance.
+    # Versions are PINNED, and pinned to the same numbers as
+    # build/darksite/k8s-images.txt — deliberately, because charts and images
+    # are one decision, not two.
+    #
+    # Resolving "newest" here is tempting and was tried: `helm pull` with no
+    # --version gave Cilium 1.20.0 while the image cache held v1.16.5, so the
+    # cluster would have pulled 1.20.0 images over the network and the
+    # darksite would have been decorative — a worse outcome than the bug being
+    # fixed. Whoever moves these numbers must move k8s-images.txt in the same
+    # commit; the image list documents how to re-derive its entries from a
+    # chart with `helm template`.
+    #
+    # Every staged version is recorded in helm-charts/MANIFEST.txt so an ISO
+    # stays auditable after the fact.
     #
     # This directory is also the operator's drop-in point: any *.tgz placed in
     # /root/darksite/helm-charts/workloads is installed at first boot, which is
@@ -1865,9 +1873,9 @@ metallb|https://metallb.github.io/metallb|metallb
 HELMREPOS
         "$_helm_bin" repo update >>"$LOG_FILE" 2>&1 || true
 
-        while IFS='|' read -r _rname _rurl _cname; do
+        while IFS='|' read -r _rname _rurl _cname _cver; do
             [[ -n "$_cname" ]] || continue
-            if "$_helm_bin" pull "${_rname}/${_cname}" \
+            if "$_helm_bin" pull "${_rname}/${_cname}" --version "$_cver" \
                 -d "${ROOTFS}/root/darksite/helm-charts" >>"$LOG_FILE" 2>&1; then
                 # helm names the file <chart>-<version>.tgz; autodeploy looks
                 # for the bare <chart>.tgz, so record the version and rename.
@@ -1885,10 +1893,10 @@ HELMREPOS
             log "  WARNING helm chart download failed: ${_cname} — install will fall back to the online repo"
             _chart_fail=$((_chart_fail + 1))
         done <<'HELMCHARTS'
-cilium|https://helm.cilium.io/|tetragon
-cilium|https://helm.cilium.io/|cilium
-argo|https://argoproj.github.io/argo-helm|argo-cd
-metallb|https://metallb.github.io/metallb|metallb
+cilium|https://helm.cilium.io/|tetragon|1.7.0
+cilium|https://helm.cilium.io/|cilium|1.16.5
+argo|https://argoproj.github.io/argo-helm|argo-cd|10.3.3
+metallb|https://metallb.github.io/metallb|metallb|0.14.9
 HELMCHARTS
         unset HELM_CACHE_HOME HELM_CONFIG_HOME HELM_DATA_HOME
     else

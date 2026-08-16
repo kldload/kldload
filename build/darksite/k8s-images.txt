@@ -1,23 +1,71 @@
-# Container images required for offline Kubernetes + Cilium deployment
-# These are pulled during darksite build and baked into the ISO
-# Format: registry/image:tag
+# Container images baked into the darksite for offline Kubernetes.
+#
+# Pulled by build/darksite/pull-k8s-images.sh during the ISO build and saved
+# as tarballs under /root/darksite/k8s-images, then imported into the golden
+# image's containerd so a cluster can come up with no network at all.
+#
+# WHY the list looks the way it does — three lessons, all from one install:
+#
+#   1. It must match what actually gets DEPLOYED. The list pinned Kubernetes
+#      v1.32.3 while the apt repo installs the current 1.32.x (v1.32.13 on
+#      2026-08-16), so every core image was a cache miss and came from
+#      registry.k8s.io anyway.
+#
+#   2. It must match the CHARTS. build-iso.sh stages helm charts into the
+#      darksite; if those resolve to a different version than the images here,
+#      the cluster pulls the chart's images over the network and the cache is
+#      decorative. Chart versions in build-iso.sh and the versions below are
+#      one decision — change them together.
+#
+#   3. It has to be complete. Cilium's own DaemonSet needs cilium-envoy, which
+#      was never listed, so it was fetched from quay.io on every deploy. The
+#      reliable way to extend this file is to ask helm, not to guess:
+#
+#        helm template x cilium/cilium --version <v> \
+#          | grep -oE '^\s+image:\s*"?[^"]+' | sed 's/.*image:\s*//'
+#
+# An install with these cached still reached for ~129 images off the public
+# internet before this was fixed (fiend, 2026-08-16).
+#
+# Format: registry/image:tag — one per line, # for comments.
 
-# Kubernetes core (match K8S_VERSION)
-registry.k8s.io/kube-apiserver:v1.32.3
-registry.k8s.io/kube-controller-manager:v1.32.3
-registry.k8s.io/kube-scheduler:v1.32.3
-registry.k8s.io/kube-proxy:v1.32.3
+# ── Kubernetes core ──────────────────────────────────────────────────────
+# Must track the kubeadm/kubelet version the golden installs.
+registry.k8s.io/kube-apiserver:v1.32.13
+registry.k8s.io/kube-controller-manager:v1.32.13
+registry.k8s.io/kube-scheduler:v1.32.13
+registry.k8s.io/kube-proxy:v1.32.13
 registry.k8s.io/etcd:3.5.16-0
 registry.k8s.io/coredns/coredns:v1.12.0
 registry.k8s.io/pause:3.10
+# metrics-server — kubectl top, and the doctor checks it
+registry.k8s.io/metrics-server/metrics-server:v0.7.2
 
-# Cilium CNI (match CILIUM_VERSION)
+# ── Cilium CNI (chart pinned to 1.16.5 in builder/build-iso.sh) ──────────
 quay.io/cilium/cilium:v1.16.5
 quay.io/cilium/operator-generic:v1.16.5
+# Required by the cilium DaemonSet and previously missing from this list.
+quay.io/cilium/cilium-envoy:v1.30.8-1733837904-eaae5aca0fb988583e5617170a65ac5aa51c0aa8
 quay.io/cilium/hubble-relay:v1.16.5
 quay.io/cilium/hubble-ui:v0.13.1
 quay.io/cilium/hubble-ui-backend:v0.13.1
 quay.io/cilium/certgen:v0.2.2
 
-# HA control-plane VIP (kube-vip static pod) — pin must match KUBE_VIP_VERSION in kube-init
+# ── Tetragon (chart pinned to 1.7.0) ─────────────────────────────────────
+quay.io/cilium/tetragon:v1.7.0
+quay.io/cilium/tetragon-operator:v1.7.0
+quay.io/cilium/hubble-export-stdout:v1.1.1
+
+# ── MetalLB (chart pinned to 0.14.9) ─────────────────────────────────────
+# FRR mode is not enabled, so quay.io/frrouting/frr is deliberately not here.
+quay.io/metallb/controller:v0.14.9
+quay.io/metallb/speaker:v0.14.9
+
+# ── ArgoCD (chart pinned to 10.3.3 / appVersion v3.5.1) ──────────────────
+# dex is NOT listed: argocd-values.yaml sets dex.enabled=false because no SSO
+# connector is configured and the pod crash-looped on SIGSEGV.
+quay.io/argoproj/argocd:v3.5.1
+ecr-public.aws.com/docker/library/redis:8.6.4-alpine
+
+# ── HA control-plane VIP (must match KUBE_VIP_VERSION in kube-cluster) ────
 ghcr.io/kube-vip/kube-vip:v0.8.9
