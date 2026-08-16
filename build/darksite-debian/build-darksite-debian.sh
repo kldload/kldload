@@ -63,19 +63,10 @@ if [[ "${SUITE}" == "noble" || "${SUITE}" == "jammy" || "${SUITE}" == "mantic" |
         sed -i 's/main$/main restricted universe multiverse/' /etc/apt/sources.list 2>/dev/null || true
     fi
 else
-    # Steam is a 32-bit application: steam-installer pulls an i386 library
-    # closure (~65 MB over ~150 packages) that cannot be fetched at all unless
-    # the builder knows about the architecture. Without this the desktop
-    # install had no Steam whatsoever — the package was never in the mirror,
-    # the install-time attempt could not resolve it, and Debian had no healing
-    # retry (fiend, 2026-08-15).
-    #
-    # 65 MB against an 11.5 GB ISO is cheap for the difference between a
-    # working launcher and none. NOTE what this does NOT buy: Steam's client
-    # and runtime (several hundred MB) download from Valve on FIRST LAUNCH.
-    # That is Steam's design and no mirror can pre-empt it — what is bought
-    # here is that the package installs offline and the launcher is there.
-    dpkg --add-architecture i386
+    # i386 multiarch is NOT enabled here — see the Steam fetch far below,
+    # where it is enabled for that one step only. Enabling it at this point
+    # puts it in scope for the main dependency closure, which is a mistake
+    # measured in gigabytes.
     log "Debian detected — enabling contrib and non-free-firmware..."
     sed -i 's/Components: main/Components: main contrib non-free-firmware/' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
     if [[ -f /etc/apt/sources.list ]]; then
@@ -269,6 +260,22 @@ log "Download complete: ${_dl_new} new, ${_dl_skip} cached, ${_dl_fail} skipped"
 # paid for in kernels is that optional packages never share a failure with
 # boot-critical ones. A miss here costs Steam and nothing else.
 if [[ "${SUITE}" != "noble" && "${SUITE}" != "jammy" && "${SUITE}" != "mantic" && "${SUITE}" != "oracular" ]]; then
+    # i386 is enabled HERE, and the ordering is the whole point.
+    #
+    # Steam's Linux client is a 32-bit binary — Valve moved Proton, the
+    # runtime and the games to 64-bit, but the client bootstrap is still
+    # i386, so steam-installer drags ~120 32-bit libraries and cannot be
+    # fetched at all without multiarch.
+    #
+    # Enabling it before the MAIN closure is resolved, though, makes
+    # `apt-cache depends --recurse` return the 32-bit variant of everything:
+    # the closure went from ~1500 packages to 3448 and the mirror began
+    # fetching i386 builds of accountsservice, acl and the rest of the base
+    # system — gigabytes of 32-bit libraries no 64-bit install will ever
+    # load (caught mid-build, 2026-08-16). Steam is the only thing in this
+    # mirror that needs 32-bit, so only Steam's fetch runs with it enabled.
+    dpkg --add-architecture i386
+    apt-get update -qq >/dev/null 2>&1 || true
     log "Fetching Steam closure (steam-installer + i386 libraries)..."
     _steam_before="$(find "$APT_POOL" -maxdepth 1 -name '*.deb' | wc -l)"
     if _steam_uris="$(apt-get install -y --print-uris steam-installer 2>/dev/null |
