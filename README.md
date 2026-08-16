@@ -1,6 +1,6 @@
 # kldload
 
-**One USB. ZFS on root across any dnf, apt or pacman distribution — plus a GUI-first RHEL workstation, a KVM-on-ZFS hypervisor, Kubernetes, and a local AI assistant, all assembled from stock vendor repos.**
+**One USB. ZFS on root across any dnf, apt or pacman distribution — plus a GUI-first RHEL workstation, a KVM-on-ZFS hypervisor, containers whose image layers are ZFS datasets, Kubernetes, and a local AI assistant, all assembled from stock vendor repos.**
 
 kldload builds a distribution from their own package repos (dnf, apt, pacman, apk) onto **ZFS on root**, with **ZFSBootMenu** boot environments, **WireGuard**, **eBPF**, and an optional **KVM hypervisor**, **Kubernetes**, **klab** multi-distro test platform, and **Ollama + Open WebUI** local AI. Nothing is forked. Nothing is patched. Every package comes straight from the vendor's CDN, and most distros install fully offline from mirrors baked into the ISO.
 
@@ -184,6 +184,7 @@ klab matrix run script.sh # run a change against every supported distro in paral
 - **WireGuard** — kernel-level encrypted networking. One UDP port at the firewall.
 - **eBPF observability** — BCC tools + bpftrace + an F-key tmux cockpit on the host; Cilium + Hubble + Tetragon inside the K8s profile (no kube-proxy, no iptables, no sidecars).
 - **KVM hypervisor** — libvirt + qemu-kvm with every VM on a ZFS zvol. `~100`&nbsp;ms clones via COW. Atomic snapshots. fs-freeze app-consistency. Incremental `zfs send` replication.
+- **Docker &amp; podman on ZFS** — every image layer is a real **dataset**, not a directory inside an overlay. A `pull` is a clone, layers inherit compression, and the whole container estate — layers, the engine's database *and* the volumes — snapshots and replicates as one recursive `zfs send`. Measured: a running container cloned and started in **328&nbsp;ms** with its state intact, and 24.7&nbsp;GB of estate in a single stream. Docker on the apt distros, podman on the RPM ones. [The full list of what this replaces →](docs/EVERYTHING-IS-A-DATASET.md)
 - **NVIDIA + CUDA** — drivers and CUDA optional at install. Time-sliced GPU sharing across the model and guest VMs. No PCIe passthrough required.
 - **Ollama + Open WebUI** — local model: RAG over the codebase + voice + tmux awareness + ReAct agent loop + eBPF-aware tool registry. No cloud, no telemetry.
 - **Observability** — Prometheus + Grafana + Loki + Alertmanager, Go + bash exporters, pre-wired dashboards, `zed` ZFS events bridged to Loki.
