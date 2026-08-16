@@ -1,5 +1,35 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+# ---------------------------------------------------------------------------
+# kldload-apply-platform-holds — pin the kernel-coupled substrate
+#
+# What it does, in order:
+#   1. Collects the installed kernel / ZFS / boot-chain meta-packages by name.
+#   2. Collects the installed NVIDIA driver packages by pattern.
+#   3. apt-mark holds the union, then VERIFIES the holds actually landed.
+#
+# WHY: kldload's update model is a versionlocked substrate — security updates
+# to userspace, but the kernel does not move on its own, because ZFS and NVIDIA
+# are out-of-tree DKMS modules built against one specific kernel. An unattended
+# `apt upgrade` that pulls a new linux-image leaves the pool unmountable at the
+# next boot if the DKMS rebuild fails for any reason. APT::NeverAutoRemove (see
+# 60-debz-kernel) keeps the OLD kernel from being garbage-collected; it does
+# NOT stop a NEW one from being installed. This does.
+#
+# Run by: kldload-package-holds.service, once, at first boot. Not a daemon —
+# Type=oneshot, runs and exits. Re-running it is harmless and idempotent.
+#
+# Outputs: holds in apt's state; a log at /var/log/kldload/platform-holds.log.
+#
+# Notes:
+#   - To deliberately move the kernel: `apt-mark unhold linux-image-amd64 ...`,
+#     upgrade, confirm `dkms status` shows zfs AND nvidia built for the new
+#     kernel, then re-run this script. `kldload-rollback` is the way back if
+#     that goes wrong.
+#   - Debian AND Ubuntu meta-package names are both listed on purpose; only
+#     installed ones are held, so listing both costs nothing while omitting one
+#     fails SILENTLY — which is how Ubuntu boxes ended up with an unheld kernel.
+# ---------------------------------------------------------------------------
 
 # Debian AND Ubuntu meta-package names. Only installed packages are held (see
 # the dpkg-query filter below), so listing both schemes costs nothing — while
@@ -21,13 +51,73 @@ PKGS=(
     mokutil
 )
 
+# NVIDIA is matched by PATTERN, not by name, because the package set differs
+# per driver branch and per flavour — nvidia-driver + nvidia-kernel-dkms on the
+# proprietary branch, nvidia-open + nvidia-kernel-open-dkms on the open one
+# (fiend ships the latter), plus the versioned libs. A static list silently
+# misses whichever branch it wasn't written for, and a missed lib is worse than
+# a missed kernel: the userspace libs must match the loaded kernel module
+# EXACTLY. Let libcuda1 move to 611 while the DKMS module stays at 610 and X
+# dies at startup with "API mismatch" — a black screen on a desktop install.
+# Holding them as one set is what keeps that pairing intact.
+NVIDIA_RE='^(nvidia-|libnvidia|firmware-nvidia|libcuda|libcudadebugger|libegl-nvidia|libgles-nvidia|libglx-nvidia|xserver-xorg-video-nvidia)'
+
+# ...except the container toolkit, which is a SEPARATE upstream on its own
+# version line (1.20.0 next to driver 610.57.04) and is not coupled to the
+# kernel module at all. Holding it would block its security updates for no
+# safety gain.
+NVIDIA_SKIP_RE='^(nvidia|libnvidia)-container'
+
 installed=()
 for p in "${PKGS[@]}"; do
-    if dpkg-query -W -f='${Status}\n' "$p" 2>/dev/null | grep -q installed; then
+    # Compare the WHOLE status, not `grep installed`. dpkg reports a package it
+    # merely knows about as "unknown ok not-installed" — which contains the
+    # substring "installed", so the grep form matched every Ubuntu kernel name
+    # on a Debian box, tried to hold packages that were not there, and printed
+    # a scary warning about an unheld kernel that was in fact held fine
+    # (fiend, 2026-08-16). The only state we want is this exact one.
+    if [[ "$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null)" == "install ok installed" ]]; then
         installed+=("$p")
     fi
 done
 
-if ((${#installed[@]} > 0)); then
-    apt-mark hold "${installed[@]}" || true
+# Architecture qualifiers ("libcuda1:amd64") are stripped: apt-mark takes the
+# bare package name and chokes on the qualified form.
+while read -r p; do
+    [[ -z "$p" ]] && continue
+    [[ "$p" =~ $NVIDIA_SKIP_RE ]] && continue
+    installed+=("$p")
+done < <(dpkg-query -W -f='${Status}\t${Package}\n' 2>/dev/null |
+    awk -F'\t' '$1 ~ /^install ok installed/ {print $2}' |
+    sed 's/:.*//' | grep -E "$NVIDIA_RE" | sort -u || true)
+
+LOG=/var/log/kldload/platform-holds.log
+mkdir -p "$(dirname "$LOG")"
+
+if ((${#installed[@]} == 0)); then
+    echo "$(date '+%Y-%m-%dT%H:%M:%S') nothing to hold — no platform packages installed" >>"$LOG"
+    exit 0
+fi
+
+# WHY the outcome is verified rather than trusting the exit code: apt-mark
+# reports success for names it merely recognised, and a hold that did not
+# actually land is invisible until the day an upgrade moves the kernel out
+# from under the DKMS modules and the box boots without ZFS. Assert the state
+# we wanted, and say plainly which ones we failed to get.
+apt-mark hold "${installed[@]}" >>"$LOG" 2>&1 || true
+
+mapfile -t held < <(apt-mark showhold 2>/dev/null | sort -u)
+missing=()
+for p in "${installed[@]}"; do
+    printf '%s\n' "${held[@]}" | grep -qxF "$p" || missing+=("$p")
+done
+
+{
+    echo "$(date '+%Y-%m-%dT%H:%M:%S') held ${#held[@]} package(s): ${held[*]}"
+    ((${#missing[@]} > 0)) && echo "  WARNING: requested but NOT held: ${missing[*]}"
+} >>"$LOG"
+
+if ((${#missing[@]} > 0)); then
+    echo "kldload: WARNING — these platform packages were not held: ${missing[*]}" >&2
+    echo "kldload: an upgrade could move them independently; see $LOG" >&2
 fi
