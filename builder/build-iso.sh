@@ -682,6 +682,67 @@ if [[ "$EDITION" != "core" ]]; then
     rm -f /tmp/bm-bin /tmp/bm-tui
     rm -rf /tmp/bm-src
 
+    # ── ztxplore — the OpenZFS test lab, from in-tree ztxplore/.
+    #
+    # In-tree for the same reason buildmon and wg are: it drives kzfs-test,
+    # reads kzfs-test's results directory and classifies this kernel's ring
+    # buffer, so it is only correct against the version of those shipped in
+    # the same ISO.
+    #
+    # It is one application on purpose. The lab used to be a web console tab
+    # for the matrix, Grafana for the metrics, a terminal for dmesg and a
+    # different web tab for the eBPF tools — four surfaces a ZFS developer had
+    # to correlate by wall-clock time while chasing one assertion.
+    _ztx_src="/build/ztxplore"
+    [[ -f "${_ztx_src}/main.go" ]] ||
+        die "FATAL: ztxplore/ missing from the repo — the OpenZFS test lab lives in-tree."
+    log "Building ztxplore from in-tree ztxplore/ ..."
+    rm -rf /tmp/ztx-src
+    cp -a "$_ztx_src" /tmp/ztx-src
+    # A developer's working tree carries build output and an exec-capable
+    # TMPDIR; neither may reach the ISO.
+    rm -rf /tmp/ztx-src/.testtmp /tmp/ztx-src/ztx /tmp/ztx-src/ztx-tui
+    _ztx_commit="$(git -C /build rev-parse HEAD 2>/dev/null || echo unknown)"
+    printf '%s\n' "$_ztx_commit" >"${ROOTFS}/etc/kldload/ztxplore-commit"
+
+    # Static first. The lab runs on hypervisors, which are headless, so the
+    # terminal build is the one that must always exist.
+    if (cd /tmp/ztx-src &&
+        HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+            CGO_ENABLED=0 go build -trimpath -ldflags "-X main.buildNum=${_ztx_commit:0:8}" \
+            -o /tmp/ztx-tui .) >>"$LOG_FILE" 2>&1; then
+        install -Dm0755 /tmp/ztx-tui "${ROOTFS}/usr/local/bin/ztx-tui" ||
+            die "FATAL: ztx-tui install failed."
+        log "ztx-tui installed (static)."
+    else
+        die "FATAL: ztxplore static build failed."
+    fi
+
+    # GUI only where the rootfs can link it, with the same readelf guard as
+    # buildmon and wgx: a '-tags gui' build that silently produced the
+    # terminal binary installs a "GUI" that opens no window.
+    if [[ -e "${ROOTFS}/usr/lib64/libGL.so.1" && -e "${ROOTFS}/usr/lib64/libxkbcommon.so.0" ]]; then
+        if (cd /tmp/ztx-src &&
+            HOME=/tmp GOCACHE=/tmp/go-cache GOPATH=/tmp/go \
+                CGO_ENABLED=1 go build -trimpath -tags gui \
+                -ldflags "-X main.buildNum=${_ztx_commit:0:8}" -o /tmp/ztx-bin .) >>"$LOG_FILE" 2>&1; then
+            if ! readelf -d /tmp/ztx-bin 2>/dev/null |
+                grep -qiE 'NEEDED.*(libGL|libX11|libwayland|libxkbcommon)'; then
+                die "FATAL: ztx built WITHOUT the GUI (no GL/X11/wayland libs) — '-tags gui' produced the terminal binary."
+            fi
+            install -Dm0755 /tmp/ztx-bin "${ROOTFS}/usr/local/bin/ztx" ||
+                die "FATAL: ztx (GUI) install failed."
+            log "ztx installed (GUI, GL-capable rootfs)."
+        else
+            die "FATAL: ztxplore GUI build failed on a GL-capable rootfs."
+        fi
+    else
+        log "ztxplore GUI skipped (headless rootfs) — ztx-tui covers it."
+    fi
+
+    rm -f /tmp/ztx-bin /tmp/ztx-tui
+    rm -rf /tmp/ztx-src
+
     # ── vmxplore — the KVM console, built from its OWN repo
     # (github.com/vmxplore/vmxplore, public). Third console in the family and
     # the same deal as zxplore and wgxplore: it runs on ANY libvirt host, and
