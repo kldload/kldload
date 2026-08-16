@@ -1714,6 +1714,15 @@ cmd_run() {
     local run_dir="${RESULTS_DIR}/${run_id}"
     mkdir -p "$run_dir"
 
+    # Publish `latest` -> this run.
+    #
+    # klab-exporter finds the current run through ${RESULTS_DIR}/latest and
+    # exports klab_test_pass_total / fail / skip from its summaries. Nothing
+    # ever created that symlink here, so the exporter had no run to read and
+    # published no counts at all — which is why the Grafana panels that used
+    # to show ~2000 tests per distro went blank (fiend, 2026-08-16).
+    ln -sfn "$run_dir" "${RESULTS_DIR}/latest"
+
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
     echo -e "${W}  kzfs-test run — ${mode} mode${N}"
     echo -e "${D}  Distros: ${selected_distros[*]}${N}"
