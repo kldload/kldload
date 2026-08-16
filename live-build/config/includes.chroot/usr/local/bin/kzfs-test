@@ -500,6 +500,27 @@ for i in 0 1 2 3; do
   truncate -s 4G /var/tmp/zfs-vdev${i}.img 2>/dev/null || true
 done
 
+# The unprivileged runner the OpenZFS suite insists on.
+#
+# zfs-tests.sh's first act is to refuse: "This script must not be run as
+# root." We reach the guest over ssh AS root, so every run ended there —
+# instantly, with no tests executed and no other output. The harness then
+# wrote a summary of 0 pass / 0 fail / 0 skip, which reads as a clean pass
+# to anything counting failures (fiend, 2026-08-15).
+#
+# The suite expects exactly this shape: an ordinary user that can sudo
+# without a password, because the tests themselves escalate per operation.
+# Creating it in the GOLDEN means every clone inherits it and no per-run
+# setup can drift.
+if ! id zfstest >/dev/null 2>&1; then
+  useradd -m -s /bin/bash zfstest 2>/dev/null || true
+fi
+printf 'zfstest ALL=(ALL) NOPASSWD: ALL\n' >/etc/sudoers.d/zfstest
+chmod 0440 /etc/sudoers.d/zfstest
+# The runner has to be able to write the vdev images it is handed.
+chown zfstest /var/tmp/zfs-vdev*.img 2>/dev/null || true
+echo "zfstest user:  $(id zfstest >/dev/null 2>&1 && echo OK || echo MISSING)"
+
 # Ensure network stays alive after all package installs
 systemctl restart NetworkManager 2>/dev/null || systemctl restart systemd-networkd 2>/dev/null || true
 # Re-disable firewall in case packages re-enabled it
@@ -1240,22 +1261,10 @@ run_tests_on_vm() {
     echo "running" >"$progress_file"
     log "  [${distro}] Starting ${mode} tests on ${ip}..."
 
-    local test_cmd
-    if [[ "$mode" == "quick" ]]; then
-        # Quick: the functional tags only.
-        #
-        # NOT -c. zfs-tests.sh's -c is "Only create and populate constrained
-        # path" — it sets the path up and EXITS without running a single
-        # test. Every quick run therefore finished in about a second and
-        # wrote a summary of 0 pass, 0 fail, 0 skip, which reads as a clean
-        # pass to anything that only checks the failure count (fiend,
-        # 2026-08-15). Verified against zfs-tests.sh's own option list in
-        # zfs-2.4.3/scripts.
-        test_cmd="/usr/share/zfs/zfs-tests.sh -vx -T functional 2>&1 || true"
-    else
-        # Full: everything (~2-4 hours)
-        test_cmd="/usr/share/zfs/zfs-tests.sh -vx 2>&1 || true"
-    fi
+    # NOTE: the arguments are built in _test_args below, NOT here. There used
+    # to be a `test_cmd` assigned at this point and never read — dead since
+    # the remote script was rewritten — which is a trap: the obvious place to
+    # fix the invocation was the one place that had no effect on it.
 
     # Check if zfs-tests.sh exists first
     local tests_path
@@ -1294,8 +1303,27 @@ run_tests_on_vm() {
       exit 1
     fi
     echo ''
-    /usr/share/zfs/zfs-tests.sh ${_test_args} 2>&1
+    # Diagnostics around the run. A suite that produces no output at all
+    # leaves nothing to explain itself with, and that is what happened:
+    # 0 pass / 0 fail / 0 skip in one second, empty log (fiend, 2026-08-15).
+    # Who we run as and whether the script is executable are the two things
+    # that answer it — OpenZFS's zfs-tests.sh refuses to run as root, and
+    # refusing quietly is indistinguishable from passing nothing.
+    echo \"Connected as: \$(id -un) uid=\$(id -u)\"
+    ls -l /usr/share/zfs/zfs-tests.sh 2>&1
+    if ! id zfstest >/dev/null 2>&1; then
+      echo 'FATAL: no zfstest user on this guest — the golden predates the'
+      echo '       unprivileged-runner fix. Rebuild it: kzfs-test golden <distro>'
+      exit 1
+    fi
     echo ''
+    # su -l, not sudo -u: the suite wants a real login environment (PATH,
+    # HOME, and a shell that ksh scripts can rely on). Run as the
+    # unprivileged user because zfs-tests.sh refuses root outright.
+    su -l zfstest -c \"/usr/share/zfs/zfs-tests.sh ${_test_args}\" 2>&1
+    _zt_rc=\$?
+    echo ''
+    echo \"zfs-tests.sh exited: \${_zt_rc}\"
     echo \"Finished: \$(date)\"
   " >"$log_file" 2>&1 || true
 
