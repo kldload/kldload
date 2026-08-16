@@ -4,7 +4,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # snapshot-create.sh — create a ZFS snapshot for the given context
 # Usage: snapshot-create.sh <context> [dataset]
-# Contexts: apt-pre, apt-post, srv, manual
+# Contexts: apt-pre, apt-post, dnf-pre, dnf-post, srv, manual
 # ---------------------------------------------------------------------------
 
 CONTEXT="${1:-manual}"
@@ -44,6 +44,22 @@ apt-post)
     PREFIX=apt-post
     KEEP=10
     ;;
+# The dnf contexts mirror the apt ones for the RPM substrates (Fedora, RHEL,
+# Rocky, CentOS Stream). Same dataset, same retention — the only difference is
+# the prefix, which is what lets `kldload-rollback list` say which package
+# manager took a given snapshot. Added when the apt/dnf wrappers landed; an
+# unknown context is fatal below, so omitting these would have made every
+# dnf transaction on an RPM box warn and proceed with no rollback point.
+dnf-pre)
+    DS="${ROOT_DS}"
+    PREFIX=dnf-pre
+    KEEP=10
+    ;;
+dnf-post)
+    DS="${ROOT_DS}"
+    PREFIX=dnf-post
+    KEEP=10
+    ;;
 srv)
     DS=rpool/srv
     PREFIX=srv
@@ -55,7 +71,7 @@ manual)
     KEEP=10
     ;;
 *)
-    die "Unknown context: '$CONTEXT'. Valid: apt-pre, apt-post, srv, manual"
+    die "Unknown context: '$CONTEXT'. Valid: apt-pre, apt-post, dnf-pre, dnf-post, srv, manual"
     ;;
 esac
 

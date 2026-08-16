@@ -1,0 +1,493 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+# ---------------------------------------------------------------------------
+# kldload-rollback — put the system back the way it was before a package
+#                    transaction, using boot environments.
+#
+# What it does, in order:
+#   1. Finds the running boot environment (the pool's bootfs).
+#   2. Lists / selects a snapshot of it — the apt and dnf hooks take one before
+#      every transaction, so there is almost always a recent one.
+#   3. CLONES that snapshot into a NEW boot environment.
+#   4. Copies the boot-critical properties onto the clone.
+#   5. Points the pool's bootfs at it. Next reboot lands in the old state.
+#
+# WHY a clone and not `zfs rollback`:
+#   `zfs rollback` cannot run against a mounted root ("dataset is busy"), and
+#   it DESTROYS every snapshot newer than the target — so the operation has no
+#   way back if the rollback itself was the mistake. Cloning is reversible:
+#   the environment you rolled away from is still there, untouched, and
+#   `kldload-rollback cancel` re-points bootfs at it before you even reboot.
+#   This is what boot environments are for, and what ZFSBootMenu boots from.
+#
+# WHY no daemon: nothing here runs in the background. The snapshots are made
+#   by apt/dnf themselves via their own hook mechanisms; this tool only runs
+#   when an operator invokes it.
+#
+# Inputs:  a snapshot name (or `last`), the rpool.
+# Outputs: a new dataset under rpool/ROOT/, a changed bootfs, a log at
+#          /var/log/kldload/rollback.log. Nothing is destroyed, ever.
+#
+# Notes:
+#   - The clone holds a dependency on its origin snapshot: the old environment
+#     cannot be destroyed while the clone exists. `zfs promote` breaks that
+#     link once you are satisfied with the rollback. This tool never destroys.
+#   - org.zfsbootmenu:commandline is copied EXPLICITLY. ZFSBootMenu builds the
+#     kernel command line from that property and nowhere else — not from grub,
+#     not from /etc/kernel/cmdline. A clone does not inherit a property that
+#     was set LOCALLY on the origin, so a rollback that skipped this step would
+#     boot without the nouveau blacklist and hang on an NVIDIA box.
+#   - Rolling back the root does NOT roll back the pool's other datasets
+#     (/home, /srv, zvols). That is deliberate: nobody wants a kernel rollback
+#     to eat two days of their home directory.
+# ---------------------------------------------------------------------------
+
+LOG=/var/log/kldload/rollback.log
+mkdir -p "$(dirname "$LOG")"
+
+_ts() { date '+%Y-%m-%dT%H:%M:%S'; }
+log() { echo "$(_ts) $*" >>"$LOG"; }
+say() { printf '%s\n' "$*"; }
+die() {
+    log "ERROR: $*"
+    printf 'kldload-rollback: %s\n' "$*" >&2
+    exit 1
+}
+
+command -v zfs >/dev/null 2>&1 || die "zfs is not installed — nothing to roll back"
+
+# ─── Locating the running environment ──────────────────────────────────────
+# bootfs is the authority: it is what ZFSBootMenu reads to pick a default, so
+# it is also what has to change for a rollback to take effect. Fall back to
+# the dataset actually mounted at / when bootfs is unset on an odd pool.
+_pool() { zpool list -H -o name 2>/dev/null | head -1; }
+
+_current_be() {
+    local pool bootfs
+    pool="$(_pool)"
+    [[ -n "$pool" ]] || return 1
+    bootfs="$(zpool get -H -o value bootfs "$pool" 2>/dev/null || true)"
+    if [[ -n "$bootfs" && "$bootfs" != "-" ]]; then
+        printf '%s\n' "$bootfs"
+        return 0
+    fi
+    mount | awk '$3=="/" && $5=="zfs" {print $1; exit}'
+}
+
+# The environment we are RUNNING from, which is not always the one bootfs
+# names — after a rollback is staged, they differ until the reboot.
+_running_be() { mount | awk '$3=="/" && $5=="zfs" {print $1; exit}'; }
+
+BE="$(_current_be)" || die "could not find a ZFS pool"
+[[ -n "$BE" ]] || die "could not determine the boot environment"
+POOL="${BE%%/*}"
+BE_PARENT="${BE%/*}"
+
+# ─── Snapshot listing ──────────────────────────────────────────────────────
+# _rule <n> — n box-drawing characters. See the call site for why this is not
+# a printf precision cut.
+_rule() {
+    local n="$1" s=''
+    while ((n-- > 0)); do s+='─'; done
+    printf '%s' "$s"
+}
+
+# Grouped by who took it, because that is how an operator thinks about it:
+# "the one from just before I ran apt".
+_snapshots() {
+    zfs list -H -t snapshot -o name,creation,used -s creation "$BE" 2>/dev/null || true
+}
+
+cmd_list() {
+    local rows
+    rows="$(_snapshots)"
+    if [[ -z "$rows" ]]; then
+        say "No snapshots of $BE."
+        say ""
+        say "The apt/dnf hooks take one before each transaction; if this is a"
+        say "fresh install you may simply not have run one yet."
+        return 0
+    fi
+    say "Snapshots of $BE (newest last):"
+    say ""
+    printf '  %-34s %-22s %8s  %s\n' "SNAPSHOT" "CREATED" "USED" "SOURCE"
+    # Built by repetition rather than `printf '%.34s'`: that truncates by BYTE
+    # and this rule is drawn with a 3-byte box character, so the precision cut
+    # landed mid-character and printed a replacement glyph followed by short
+    # columns. Repetition is encoding-agnostic.
+    printf '  %s %s %s  %s\n' "$(_rule 34)" "$(_rule 22)" "$(_rule 8)" "$(_rule 12)"
+    while IFS=$'\t' read -r name creation used; do
+        [[ -z "$name" ]] && continue
+        local tag="${name#*@}" src
+        case "$tag" in
+        apt-pre-*) src="before apt" ;;
+        apt-post-*) src="after apt" ;;
+        dnf-pre-*) src="before dnf" ;;
+        dnf-post-*) src="after dnf" ;;
+        kpkg-*) src="kpkg" ;;
+        auto-*) src="scheduled" ;;
+        manual-*) src="manual" ;;
+        rollback-*) src="pre-rollback" ;;
+        # sanoid's own naming; these are the periodic retention snapshots and
+        # are perfectly valid rollback targets, so they are labelled rather
+        # than left as "-" for an operator to wonder about.
+        autosnap_*) src="sanoid" ;;
+        install-*) src="install" ;;
+        smoketest-*) src="smoke test" ;;
+        *) src="-" ;;
+        esac
+        printf '  %-34s %-22s %8s  %s\n' "${tag:0:34}" "${creation:0:22}" "$used" "$src"
+    done <<<"$rows"
+    say ""
+    say "Roll back with:  kldload-rollback to <snapshot>"
+    say "Or the newest pre-transaction one:  kldload-rollback last"
+}
+
+# _pick_last — newest snapshot taken BEFORE a package transaction.
+# Returns the bare tag on stdout; empty if there is none.
+# apt-post/dnf-post are excluded on purpose: those record the state AFTER the
+# change, which is the state you are trying to get away from.
+_pick_last() {
+    _snapshots | awk -F'\t' '{print $1}' | sed 's/.*@//' |
+        grep -E '^(apt-pre|dnf-pre|kpkg)-' | tail -1
+}
+
+# ─── The boot path actually in force ───────────────────────────────────────
+# There are TWO ways a kldload box boots, and a rollback that only handles one
+# of them fails silently on the other — which is the worst possible outcome
+# for this particular tool.
+#
+#   ZBM path   (Secure Boot OFF): shim/GRUB chainloads /EFI/zbm/BOOTX64.EFI,
+#              ZFSBootMenu reads the pool's bootfs and boots that dataset.
+#              Setting bootfs is sufficient and nothing else is needed.
+#
+#   DIRECT path (Secure Boot ON): ZBM is a 64MB unsigned bundle and shim 15.8
+#              refuses to chainload it, so the install writes a `direct` GRUB
+#              entry that boots a COPY of the kernel from the ESP with
+#              root=ZFS=<dataset> hardcoded in grub.cfg. bootfs is not
+#              consulted at all. Verified on fiend 2026-08-16: Secure Boot
+#              enabled, only Debian's CA enrolled, /proc/cmdline showed
+#              BOOT_IMAGE=/EFI/BOOT/vmlinuz root=ZFS=rpool/ROOT/kldload-node.
+#
+# So on the direct path a rollback must also rewrite grub.cfg AND restore the
+# kernel+initrd that belong to the snapshot: the ESP copy is whatever the last
+# kernel upgrade put there, and booting a NEW vmlinuz against the OLD
+# /lib/modules in the rolled-back root gives a system with no modules — no
+# ZFS, no network, no disks.
+ESP_GRUB_CFG=/boot/efi/EFI/BOOT/grub.cfg
+ESP_DIR=/boot/efi/EFI/BOOT
+
+_boot_mode() {
+    if [[ -f "$ESP_GRUB_CFG" ]] && grep -q 'root=ZFS=' "$ESP_GRUB_CFG" 2>/dev/null; then
+        echo direct
+    else
+        echo zbm
+    fi
+}
+
+# _sync_esp <new-be> — make the ESP boot the given environment.
+# Args:    dataset name of the freshly cloned boot environment.
+# Returns: 0 on success; dies on failure AFTER restoring what it touched.
+# Side effects: rewrites grub.cfg and replaces vmlinuz/initrd.img on the ESP,
+#               keeping .kldload-bak copies of all three for `cancel`.
+_sync_esp() {
+    local newbe="$1"
+    local mnt
+    mnt="$(mktemp -d)"
+    # shellcheck disable=SC2064  # expand $mnt now: the path must survive the trap
+    trap "umount '$mnt' 2>/dev/null || true; rmdir '$mnt' 2>/dev/null || true" RETURN
+
+    # zfsutil is required for a dataset whose mountpoint property is /; without
+    # it mount(8) refuses rather than honouring the explicit target.
+    mount -t zfs -o ro,zfsutil "$newbe" "$mnt" ||
+        die "could not mount $newbe to read its kernel — bootfs was set but \
+the ESP was NOT updated, so this system still boots the current environment. \
+Nothing is broken; see $LOG"
+
+    local kern initrd
+    kern="$(find "$mnt/boot" -maxdepth 1 -name 'vmlinuz-*' -printf '%T@ %p\n' 2>/dev/null |
+        sort -rn | head -1 | cut -d' ' -f2-)"
+    initrd="$(find "$mnt/boot" -maxdepth 1 -name 'initrd.img-*' -printf '%T@ %p\n' 2>/dev/null |
+        sort -rn | head -1 | cut -d' ' -f2-)"
+
+    [[ -n "$kern" && -f "$kern" ]] ||
+        die "the snapshot contains no kernel under /boot — refusing to stage a \
+rollback that would leave this machine unbootable. bootfs was set; run \
+'kldload-rollback cancel' to undo it."
+    [[ -n "$initrd" && -f "$initrd" ]] ||
+        die "the snapshot has a kernel but no initrd — refusing to stage an \
+unbootable rollback. Run 'kldload-rollback cancel' to undo the bootfs change."
+
+    log "restoring kernel from snapshot: $(basename "$kern") / $(basename "$initrd")"
+
+    # Back up before overwriting, so cancel is a real undo and not a rebuild.
+    cp -a "$ESP_GRUB_CFG" "${ESP_GRUB_CFG}.kldload-bak" || die "could not back up grub.cfg"
+    [[ -f "$ESP_DIR/vmlinuz" ]] && cp -a "$ESP_DIR/vmlinuz" "$ESP_DIR/vmlinuz.kldload-bak"
+    [[ -f "$ESP_DIR/initrd.img" ]] && cp -a "$ESP_DIR/initrd.img" "$ESP_DIR/initrd.img.kldload-bak"
+
+    # Write to a temp name and mv into place: a half-copied kernel on the ESP
+    # is an unbootable machine, and vfat gives us no atomicity for free.
+    cp "$kern" "$ESP_DIR/.vmlinuz.new" || die "could not stage the kernel onto the ESP"
+    cp "$initrd" "$ESP_DIR/.initrd.img.new" || die "could not stage the initrd onto the ESP"
+    mv -f "$ESP_DIR/.vmlinuz.new" "$ESP_DIR/vmlinuz" || die "could not install the kernel onto the ESP"
+    mv -f "$ESP_DIR/.initrd.img.new" "$ESP_DIR/initrd.img" || die "could not install the initrd onto the ESP"
+
+    # Point every hardcoded root= at the new environment. Both the `direct` and
+    # `rescue` entries carry one; missing rescue would strand the operator in a
+    # single-user shell on the WRONG environment exactly when they need it.
+    local tmpcfg="${ESP_GRUB_CFG}.new"
+    sed -E "s|root=ZFS=[^ ]+|root=ZFS=${newbe}|g" "$ESP_GRUB_CFG" >"$tmpcfg" ||
+        die "could not rewrite grub.cfg"
+    grep -q "root=ZFS=${newbe}" "$tmpcfg" ||
+        die "grub.cfg rewrite did not take — refusing to install it"
+    mv -f "$tmpcfg" "$ESP_GRUB_CFG" || die "could not install the rewritten grub.cfg"
+
+    sync
+    log "ESP updated: grub.cfg root=ZFS=$newbe, kernel $(basename "$kern")"
+}
+
+# ─── Staging a rollback ────────────────────────────────────────────────────
+# _clone_be <snapshot-tag> — build the new environment and point bootfs at it.
+# Args:    the bare snapshot tag (no dataset, no @).
+# Returns: 0 on success; dies with a message on any failure.
+# Failure modes the caller must expect: snapshot gone, name collision, a pool
+# with no free space for the clone's metadata.
+_clone_be() {
+    local tag="$1"
+    local snap="${BE}@${tag}"
+
+    zfs list -H -t snapshot "$snap" >/dev/null 2>&1 ||
+        die "no such snapshot: $snap (see: kldload-rollback list)"
+
+    # Name the new environment after what it restores, plus when the rollback
+    # happened — two rollbacks to the same snapshot must not collide.
+    local newbe="${BE_PARENT}/rollback-${tag}-$(date +%Y%m%d-%H%M%S)"
+
+    log "cloning $snap -> $newbe"
+    zfs clone "$snap" "$newbe" ||
+        die "clone failed — see $LOG"
+
+    # A boot environment must not auto-mount: ZFSBootMenu mounts the one it
+    # boots and nothing else. canmount=on here would mount BOTH environments
+    # over / at import and produce a system that is half one and half another.
+    zfs set canmount=noauto "$newbe" || die "could not set canmount on $newbe"
+    zfs set mountpoint=/ "$newbe" || die "could not set mountpoint on $newbe"
+
+    # The ZBM kernel command line. Read from the ORIGIN, not from the parent:
+    # a locally-set property is not inherited by a clone. If the origin has
+    # none, inheriting from the parent is the correct default and we leave it.
+    local cmdline
+    cmdline="$(zfs get -H -o value org.zfsbootmenu:commandline "$BE" 2>/dev/null || true)"
+    if [[ -n "$cmdline" && "$cmdline" != "-" ]]; then
+        zfs set "org.zfsbootmenu:commandline=${cmdline}" "$newbe" ||
+            die "could not set the ZBM command line on $newbe — refusing to \
+leave a boot environment that would boot with the wrong kernel arguments"
+        log "carried org.zfsbootmenu:commandline=${cmdline}"
+    else
+        log "origin has no local org.zfsbootmenu:commandline — inheriting"
+    fi
+
+    # Record where we came from, so `status` and a later operator can tell what
+    # this environment is without reading the log.
+    zfs set "org.kldload:rollback-from=${BE}" "$newbe" 2>/dev/null || true # cosmetic metadata only
+    zfs set "org.kldload:rollback-snapshot=${tag}" "$newbe" 2>/dev/null || true
+
+    log "setting bootfs=$newbe on pool $POOL"
+    zpool set "bootfs=${newbe}" "$POOL" ||
+        die "clone succeeded but bootfs could not be set — the system will \
+still boot the CURRENT environment, so nothing is broken. See $LOG"
+
+    # bootfs alone is only enough on the ZBM path. On the direct/Secure-Boot
+    # path GRUB never reads it, so without this the rollback would report
+    # success and then boot the unchanged system.
+    local mode
+    mode="$(_boot_mode)"
+    if [[ "$mode" == direct ]]; then
+        log "direct boot path detected — updating the ESP"
+        _sync_esp "$newbe"
+    else
+        log "ZBM boot path — bootfs is sufficient"
+    fi
+
+    say ""
+    say "Rollback staged."
+    say "  from snapshot  : $tag"
+    say "  new environment: $newbe"
+    if [[ "$mode" == direct ]]; then
+        say "  boot path      : direct kernel (Secure Boot compatible)"
+        say "                   grub.cfg and the ESP kernel were updated to match"
+    else
+        say "  boot path      : ZFSBootMenu (follows the pool's bootfs)"
+    fi
+    say "  the current environment ($BE) is untouched."
+    say ""
+    say "  reboot to apply   :  systemctl reboot"
+    say "  changed your mind :  kldload-rollback cancel"
+    say ""
+}
+
+cmd_to() {
+    local tag="${1:-}"
+    [[ -n "$tag" ]] || die "usage: kldload-rollback to <snapshot>"
+    tag="${tag#*@}" # accept either the full name or the bare tag
+    _clone_be "$tag"
+}
+
+cmd_last() {
+    local tag
+    tag="$(_pick_last)"
+    [[ -n "$tag" ]] ||
+        die "no pre-transaction snapshot found. 'kldload-rollback list' shows \
+what exists; 'kldload-rollback to <snap>' takes any of them."
+    say "Most recent pre-transaction snapshot: $tag"
+    _clone_be "$tag"
+}
+
+cmd_cancel() {
+    local running staged="$BE"
+    running="$(_running_be)"
+    [[ -n "$running" ]] || die "could not determine the running environment"
+
+    local esp_staged=0
+    [[ -f "${ESP_GRUB_CFG}.kldload-bak" ]] && esp_staged=1
+
+    if [[ "$staged" == "$running" && $esp_staged -eq 0 ]]; then
+        say "Nothing staged — this system already boots what it is running:"
+        say "  $running"
+        return 0
+    fi
+
+    if [[ "$staged" != "$running" ]]; then
+        log "cancelling staged rollback: bootfs $staged -> $running"
+        zpool set "bootfs=${running}" "$POOL" || die "could not reset bootfs"
+    fi
+
+    # Restore the ESP from the backups _sync_esp left. Do grub.cfg LAST: if we
+    # die partway, a config still pointing at the staged environment with the
+    # staged kernel in place is consistent, whereas the reverse is not.
+    if [[ $esp_staged -eq 1 ]]; then
+        log "restoring ESP from backup"
+        [[ -f "$ESP_DIR/vmlinuz.kldload-bak" ]] &&
+            mv -f "$ESP_DIR/vmlinuz.kldload-bak" "$ESP_DIR/vmlinuz"
+        [[ -f "$ESP_DIR/initrd.img.kldload-bak" ]] &&
+            mv -f "$ESP_DIR/initrd.img.kldload-bak" "$ESP_DIR/initrd.img"
+        mv -f "${ESP_GRUB_CFG}.kldload-bak" "$ESP_GRUB_CFG" ||
+            die "could not restore grub.cfg from backup"
+        sync
+    fi
+
+    say "Cancelled. Next boot returns to the running environment:"
+    say "  $running"
+    if [[ "$staged" != "$running" ]]; then
+        say ""
+        say "The staged environment was left in place; remove it with:"
+        say "  zfs destroy $staged"
+    fi
+}
+
+cmd_status() {
+    local running
+    running="$(_running_be)"
+    local mode
+    mode="$(_boot_mode)"
+    say "Pool             : $POOL"
+    say "Running from     : ${running:-unknown}"
+    say "Next boot        : $BE"
+    if [[ "$mode" == direct ]]; then
+        # Show what GRUB will really do, not what bootfs says, because on this
+        # path they can disagree and only one of them is the truth.
+        local cfg_be
+        cfg_be="$(grep -oE 'root=ZFS=[^ ]+' "$ESP_GRUB_CFG" 2>/dev/null | head -1 | cut -d= -f3)"
+        say "Boot path        : direct kernel (Secure Boot compatible)"
+        say "grub.cfg boots   : ${cfg_be:-unknown}"
+        if [[ -n "$cfg_be" && -n "$running" && "$cfg_be" != "$running" ]]; then
+            say ""
+            say "  ** A rollback is STAGED — GRUB will boot $cfg_be on next"
+            say "     restart. 'kldload-rollback cancel' undoes it."
+        fi
+    else
+        say "Boot path        : ZFSBootMenu (follows bootfs)"
+        if [[ -n "$running" && "$BE" != "$running" ]]; then
+            say ""
+            say "  ** A rollback is STAGED — this system will boot a different"
+            say "     environment on next restart. 'kldload-rollback cancel' undoes it."
+        fi
+    fi
+    local n
+    n="$(_snapshots | grep -c . || true)"
+    say ""
+    say "Snapshots of the running environment: ${n:-0}"
+    local last
+    last="$(_pick_last)"
+    [[ -n "$last" ]] && say "Newest pre-transaction snapshot     : $last"
+    # Holds are the other half of the update model; surfacing them here means
+    # one command answers "is this box pinned and can I get back?".
+    if command -v apt-mark >/dev/null 2>&1; then
+        local h
+        h="$(apt-mark showhold 2>/dev/null | grep -c . || true)"
+        say "Held platform packages             : ${h:-0}"
+    fi
+}
+
+cmd_help() {
+    cat <<'EOF'
+kldload-rollback — return the system to a previous boot environment
+
+  kldload-rollback list            Show snapshots of the current environment
+  kldload-rollback last            Roll back to the newest PRE-transaction
+                                   snapshot (the one apt/dnf took before it
+                                   changed anything)
+  kldload-rollback to <snapshot>   Roll back to a specific snapshot
+  kldload-rollback cancel          Un-stage a rollback that has not booted yet
+  kldload-rollback status          What is running, what boots next
+  kldload-rollback help            This text
+
+HOW IT WORKS
+  A rollback clones the chosen snapshot into a new boot environment and points
+  the pool's bootfs at it. Nothing is overwritten and nothing is destroyed —
+  the environment you are running is still there afterwards, and `cancel`
+  reverses the whole thing until you reboot.
+
+  Snapshots are taken automatically before every apt/dnf transaction. There is
+  no daemon; apt and dnf invoke the hook themselves.
+
+WHAT IT DOES NOT DO
+  Only the root environment moves. /home, /srv and any zvols are left alone,
+  so rolling back a bad kernel does not also roll back your data.
+
+EXAMPLES
+  An upgrade broke the system; go back to just before it:
+      kldload-rollback last && systemctl reboot
+
+  Look first, then choose:
+      kldload-rollback list
+      kldload-rollback to apt-pre-20260816-141230
+
+  Staged one by mistake:
+      kldload-rollback cancel
+
+EXIT STATUS
+  0 on success, 1 on any failure (no snapshot, clone failed, bootfs unset).
+
+FILES
+  /var/log/kldload/rollback.log    every action this tool takes
+EOF
+}
+
+case "${1:-help}" in
+list | ls) cmd_list ;;
+last) cmd_last ;;
+to)
+    shift
+    cmd_to "${1:-}"
+    ;;
+cancel) cmd_cancel ;;
+status) cmd_status ;;
+help | -h | --help) cmd_help ;;
+*)
+    printf 'kldload-rollback: unknown command: %s\n\n' "$1" >&2
+    cmd_help >&2
+    exit 1
+    ;;
+esac

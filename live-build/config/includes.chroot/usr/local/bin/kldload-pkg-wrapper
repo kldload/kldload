@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+# ---------------------------------------------------------------------------
+# kldload-pkg-wrapper — give plain `apt` and `dnf` snapshots and rollback
+#
+# What it does, in order:
+#   1. Works out which package manager it was invoked as (argv[0]).
+#   2. If the verb is `rollback`, hands off to kldload-rollback and stops.
+#   3. If the verb CHANGES the system, takes a pre-transaction ZFS snapshot.
+#   4. exec's the real package manager with the original arguments, untouched.
+#
+# WHY this exists: kpkg has done snapshot-before-install for a long time, but
+# only for people who know to type `kpkg`. Everybody else — and every guide on
+# the internet, and every muscle memory — types `apt install`. Those users got
+# no snapshot and no way back. This closes that gap without asking anyone to
+# learn a new command, and adds the one command worth learning:
+#
+#     apt rollback        # undo the last transaction, reboot to apply
+#     dnf rollback list   # see what you could go back to
+#
+# WHY a PATH wrapper and not a plugin: it is the only mechanism that works
+# identically across apt, dnf4 and dnf5 without binding to a plugin API that
+# changes between releases (dnf5 rewrote it entirely). /usr/local/bin precedes
+# /usr/bin in both the login PATH and sudo's secure_path, so `sudo apt install`
+# lands here. Nothing runs in the background: this executes only while you are
+# running a package command, then exec's away and is gone.
+#
+# The apt.conf.d hooks (00-kldload-snapshot-pre/post) remain the belt to this
+# tool's braces: they fire for aptitude, unattended-upgrades, and anything
+# calling /usr/bin/apt directly, which a PATH wrapper cannot see. Double
+# snapshots are harmless — ZFS snapshots of an unchanged dataset cost nothing.
+#
+# Inputs:  argv, and argv[0] as the manager selector.
+# Outputs: a snapshot (via snapshot-create.sh), then the real command's own
+#          output and exit status, unmodified.
+#
+# Notes:
+#   - The verb lists are PER MANAGER on purpose: `apt update` only refreshes
+#     package lists and changes nothing, while `dnf update` is a full system
+#     upgrade. Treating them the same would either miss a real upgrade or
+#     snapshot every metadata refresh.
+#   - Unknown verbs pass through WITHOUT a snapshot. Erring toward "do nothing
+#     unusual" keeps this wrapper from becoming a thing people work around.
+# ---------------------------------------------------------------------------
+
+_self="$(basename "$0")"
+
+# Resolve the real binary by absolute path. Never by PATH lookup: this script
+# IS earlier in PATH than the thing it wraps, and a lookup would re-enter here
+# forever.
+case "$_self" in
+apt | apt-get)
+    REAL="/usr/bin/${_self}"
+    # apt verbs that mutate the installed system. `update` is deliberately NOT
+    # here — it rewrites /var/lib/apt/lists and nothing else.
+    MUTATING="install remove purge upgrade full-upgrade dist-upgrade autoremove reinstall satisfy build-dep"
+    CTX=apt-pre
+    ;;
+dnf | dnf5 | yum | microdnf)
+    REAL="/usr/bin/${_self}"
+    # `update` and `upgrade` are synonyms here and both change the system —
+    # the opposite of apt, which is why these lists are not shared.
+    MUTATING="install upgrade update remove erase downgrade reinstall distro-sync distrosync autoremove swap upgrade-minimal"
+    CTX=dnf-pre
+    ;;
+*)
+    printf 'kldload-pkg-wrapper: invoked under an unexpected name: %s\n' "$_self" >&2
+    exit 1
+    ;;
+esac
+
+if [[ ! -x "$REAL" ]]; then
+    printf 'kldload-pkg-wrapper: %s is missing — cannot continue\n' "$REAL" >&2
+    exit 1
+fi
+
+VERB="${1:-}"
+
+# ─── rollback: the QoL verb ────────────────────────────────────────────────
+# Not a package-manager operation at all, so it never reaches the real binary.
+# Bare `apt rollback` means the obvious thing: undo the last transaction. It
+# only STAGES the change, so a mistyped rollback costs a `cancel`, not a
+# rebuild.
+if [[ "$VERB" == "rollback" ]]; then
+    shift
+    if [[ ! -x /usr/sbin/kldload-rollback ]]; then
+        printf 'kldload-pkg-wrapper: kldload-rollback is not installed\n' >&2
+        exit 1
+    fi
+    if (($# == 0)); then
+        exec /usr/sbin/kldload-rollback last
+    fi
+    exec /usr/sbin/kldload-rollback "$@"
+fi
+
+# ─── Pre-transaction snapshot ──────────────────────────────────────────────
+# Only for verbs that change something, only when we can actually snapshot.
+# A failure to snapshot must NOT block the operator's command: refusing to let
+# someone install a package because the pool is busy would be a worse bug than
+# the missing snapshot. It warns loudly instead.
+_is_mutating() {
+    local v
+    for v in $MUTATING; do
+        [[ "$v" == "$VERB" ]] && return 0
+    done
+    return 1
+}
+
+# A simulated run changes nothing, so snapshotting one is pure noise in the
+# operator's snapshot list — and this list is meant to be readable at 3am.
+_is_simulation() {
+    local a
+    for a in "$@"; do
+        case "$a" in
+        -s | --simulate | --dry-run | --just-print | --no-act | --recon) return 0 ;;
+        --) break ;; # everything after -- is a package name, not a flag
+        esac
+    done
+    return 1
+}
+
+if _is_mutating && ! _is_simulation "$@" && [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    if [[ -x /usr/local/sbin/snapshot-create.sh ]] && command -v zfs >/dev/null 2>&1; then
+        if ! /usr/local/sbin/snapshot-create.sh "$CTX" >/dev/null 2>&1; then
+            printf 'kldload: WARNING — pre-transaction snapshot FAILED; proceeding without a rollback point.\n' >&2
+            printf 'kldload: see /var/log/kldload/snapshots.log\n' >&2
+        fi
+    fi
+fi
+
+exec "$REAL" "$@"
