@@ -1966,6 +1966,26 @@ WPEOF
             ;;
         esac
 
+        # Helm charts — distro-independent, and the reason an "air-gapped"
+        # install used to reach for quay.io.
+        #
+        # The build stages charts under /root/darksite/helm-charts and
+        # kldload-autodeploy looks for them there at first boot, but nothing
+        # ever copied them onto the target: the case above copies only the
+        # distro package mirror. So every install found an empty darksite,
+        # logged "chart not in darksite — trying online helm repo", and pulled
+        # Cilium, MetalLB, ArgoCD and Tetragon over the internet (fiend,
+        # 2026-08-16).
+        #
+        # A few MB, and it is also where an operator drops their OWN charts to
+        # have them applied on a machine with no network.
+        if [[ -d /root/darksite/helm-charts ]]; then
+            rsync -a --exclude='*.lock' /root/darksite/helm-charts/ "${darksite_tgt}/helm-charts/"
+            k_log "Helm charts installed to target: $(find "${darksite_tgt}/helm-charts" -name '*.tgz' | wc -l) chart(s)"
+        else
+            k_log "WARN: no helm charts in the live darksite — k8s deploy will need a network"
+        fi
+
         # Copy support scripts if present
         for f in kldload-syscheck.sh audit.sh; do
             [[ -f "/root/darksite/${f}" ]] && cp "/root/darksite/${f}" "${darksite_tgt}/${f}" && chmod +x "${darksite_tgt}/${f}"

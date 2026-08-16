@@ -1817,33 +1817,86 @@ if [[ "$EDITION" != "core" ]]; then
     # Pre-create Loki + promtail state dirs so services come up clean.
     mkdir -p "${ROOTFS}/var/lib/loki" "${ROOTFS}/var/lib/promtail" "${ROOTFS}/var/log/journal"
 
-    # ── Tetragon helm chart (for eBPF syscall policies in K8s) ──────────
-    # autodeploy looks for /root/darksite/helm-charts/tetragon.tgz. Without
-    # this, pass-20 install said "Tetragon chart not in darksite —
-    # trying online helm repo" and skipped because cluster had no internet
-    # during bootstrap. Download once into the rootfs so every installed
-    # target has it ready.
-    mkdir -p "${ROOTFS}/root/darksite/helm-charts"
+    # ── Helm charts for the K8s stack (offline install) ─────────────────
+    #
+    # Every chart kldload deploys is staged here, because the alternative is
+    # what actually shipped: an "air-gapped" install that logged "chart not in
+    # darksite — trying online helm repo" and pulled Cilium, MetalLB, ArgoCD
+    # and Tetragon — plus ~138 container images — straight off quay.io and
+    # registry.k8s.io at first boot (fiend, 2026-08-16).
+    #
+    # Only Tetragon was ever fetched before, and pinned at 1.4.1 while the
+    # cluster actually deployed 1.7.0 from the network — so even the single
+    # vendored chart was the wrong version.
+    #
+    # NEWEST-at-build-time, by design: `helm pull` with no --version resolves
+    # whatever the upstream repo currently publishes. That is the intent —
+    # the ISO is the version boundary, not a hardcoded list that silently
+    # rots. Every resolved version is written to a manifest in the darksite,
+    # so an ISO is still exactly auditable after the fact ("what did this
+    # build actually bake in?") without the pins needing hand-maintenance.
+    #
+    # This directory is also the operator's drop-in point: any *.tgz placed in
+    # /root/darksite/helm-charts/workloads is installed at first boot, which is
+    # how you run your own charts on a machine that has never had a network.
+    mkdir -p "${ROOTFS}/root/darksite/helm-charts/workloads"
     _helm_tmp="$(mktemp -d)"
-    if curl -fsSL -o "${_helm_tmp}/helm.tgz" \
-        "https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz" >>"$LOG_FILE" 2>&1; then
-        tar xzf "${_helm_tmp}/helm.tgz" -C "${_helm_tmp}" >>"$LOG_FILE" 2>&1 || true
+    _helm_bin=""
+    if curl -fsSL --retry 3 -o "${_helm_tmp}/helm.tgz" \
+        "https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz" >>"$LOG_FILE" 2>&1 &&
+        tar xzf "${_helm_tmp}/helm.tgz" -C "${_helm_tmp}" >>"$LOG_FILE" 2>&1; then
+        _helm_bin="$(find "${_helm_tmp}" -type f -name helm | head -1)"
     fi
-    # Pull tetragon chart directly from the cilium oci registry via HTTPS
-    if curl -fsSL -o "${ROOTFS}/root/darksite/helm-charts/tetragon.tgz" \
-        "https://helm.cilium.io/tetragon-1.4.1.tgz" >>"$LOG_FILE" 2>&1; then
-        log "Observability: tetragon chart downloaded to darksite"
+
+    _chart_ok=0
+    _chart_fail=0
+    _chart_manifest="${ROOTFS}/root/darksite/helm-charts/MANIFEST.txt"
+    : >"$_chart_manifest"
+    if [[ -n "$_helm_bin" ]]; then
+        export HELM_CACHE_HOME="${_helm_tmp}/cache" HELM_CONFIG_HOME="${_helm_tmp}/config" \
+            HELM_DATA_HOME="${_helm_tmp}/data"
+        while IFS='|' read -r _rname _rurl _cname; do
+            [[ -n "$_rname" ]] || continue
+            "$_helm_bin" repo add "$_rname" "$_rurl" >>"$LOG_FILE" 2>&1 || true
+        done <<'HELMREPOS'
+cilium|https://helm.cilium.io/|tetragon
+argo|https://argoproj.github.io/argo-helm|argo-cd
+metallb|https://metallb.github.io/metallb|metallb
+HELMREPOS
+        "$_helm_bin" repo update >>"$LOG_FILE" 2>&1 || true
+
+        while IFS='|' read -r _rname _rurl _cname; do
+            [[ -n "$_cname" ]] || continue
+            if "$_helm_bin" pull "${_rname}/${_cname}" \
+                -d "${ROOTFS}/root/darksite/helm-charts" >>"$LOG_FILE" 2>&1; then
+                # helm names the file <chart>-<version>.tgz; autodeploy looks
+                # for the bare <chart>.tgz, so record the version and rename.
+                _got="$(find "${ROOTFS}/root/darksite/helm-charts" -maxdepth 1 \
+                    -name "${_cname}-*.tgz" -printf '%f\n' | sort -V | tail -1)"
+                if [[ -n "$_got" ]]; then
+                    mv -f "${ROOTFS}/root/darksite/helm-charts/${_got}" \
+                        "${ROOTFS}/root/darksite/helm-charts/${_cname}.tgz"
+                    echo "${_cname} ${_got}" >>"$_chart_manifest"
+                    log "  helm chart staged: ${_got}"
+                    _chart_ok=$((_chart_ok + 1))
+                    continue
+                fi
+            fi
+            log "  WARNING helm chart download failed: ${_cname} — install will fall back to the online repo"
+            _chart_fail=$((_chart_fail + 1))
+        done <<'HELMCHARTS'
+cilium|https://helm.cilium.io/|tetragon
+cilium|https://helm.cilium.io/|cilium
+argo|https://argoproj.github.io/argo-helm|argo-cd
+metallb|https://metallb.github.io/metallb|metallb
+HELMCHARTS
+        unset HELM_CACHE_HOME HELM_CONFIG_HOME HELM_DATA_HOME
     else
-        # Fallback: try the latest release
-        if curl -fsSL -o "${ROOTFS}/root/darksite/helm-charts/tetragon.tgz" \
-            "https://github.com/cilium/tetragon/releases/download/tetragon-1.4.1/tetragon-1.4.1.tgz" \
-            >>"$LOG_FILE" 2>&1; then
-            log "Observability: tetragon chart (from github) downloaded"
-        else
-            log "  WARNING tetragon chart download failed — will skip during install"
-        fi
+        log "  WARNING helm binary unavailable at build time — no charts staged"
+        _chart_fail=4
     fi
     rm -rf "${_helm_tmp}"
+    log "Helm charts staged for offline install: ${_chart_ok} ok, ${_chart_fail} failed"
     # smartmontools (smartctl CLI) — required at runtime by smartctl_exporter
     chroot "${ROOTFS}" dnf install -y smartmontools >>"$LOG_FILE" 2>&1 ||
         log "  WARNING smartmontools install failed"

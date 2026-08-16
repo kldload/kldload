@@ -1072,6 +1072,46 @@ WPEOF
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+# _darksite_reclaim — free the bulk of /root/darksite while KEEPING what is
+# still needed after first boot.
+#
+# WHY not `rm -rf /root/darksite`: that is exactly what used to happen, and it
+# ran EIGHT MINUTES before kldload-autodeploy went looking for the helm charts
+# the ISO had carefully shipped:
+#
+#   13:49:12 [firstboot]  Darksite removed.
+#   13:57:43 [autodeploy] Tetragon chart not in darksite — trying online helm repo
+#   13:57:44 [autodeploy] ArgoCD chart not in darksite — trying online helm repo
+#
+# The result was an "air-gapped" install that pulled every chart and 138
+# container images off the public internet, on a machine whose entire purpose
+# is not needing them (fiend, 2026-08-16).
+#
+# What goes: the distro package mirrors — ~1.8G, already consumed by the
+# installer before this runs.
+# What stays: helm-charts/ (a few MB, needed by autodeploy at first boot AND by
+# the operator afterwards for their own workloads).
+#
+# Args: none.  Returns: 0 always — reclaiming disk must never fail a boot.
+_darksite_reclaim() {
+    [[ -d /root/darksite ]] || return 0
+    if [[ -f /etc/kldload/keep-darksite ]]; then
+        log "LAN-mirror mode: keeping all of /root/darksite ($(du -sh /root/darksite 2>/dev/null | cut -f1))"
+        systemctl enable --now kldload-apt-mirror.service 2>/dev/null || true
+        return 0
+    fi
+    local before after d
+    before="$(du -sh /root/darksite 2>/dev/null | cut -f1)"
+    for d in debian ubuntu rpm fedora arch alpine; do
+        [[ -d "/root/darksite/${d}" ]] && rm -rf "/root/darksite/${d}"
+    done
+    rm -f /etc/yum.repos.d/kldload-darksite.repo 2>/dev/null
+    systemctl disable --now kldload-apt-mirror.service 2>/dev/null || true
+    after="$(du -sh /root/darksite 2>/dev/null | cut -f1)"
+    log "Darksite package mirrors removed (${before} → ${after}); helm charts kept for offline k8s deploys"
+    return 0
+}
+
 main() {
     local _edition
     _edition="$(cat /etc/kldload/edition 2>/dev/null || echo free)"
@@ -3446,10 +3486,7 @@ CHROMEPOL
                 log "LAN-mirror mode: keeping /root/darksite ($(du -sh /root/darksite 2>/dev/null | cut -f1)) and enabling kldload-apt-mirror.service"
                 systemctl enable --now kldload-apt-mirror.service 2>/dev/null || true
             else
-                log "Removing darksite directory ($(du -sh /root/darksite 2>/dev/null | cut -f1)) — touch /etc/kldload/keep-darksite before firstboot to retain as a LAN mirror"
-                rm -rf /root/darksite
-                systemctl disable --now kldload-apt-mirror.service 2>/dev/null || true
-                log "Darksite removed."
+                _darksite_reclaim
             fi
         fi
 
@@ -3594,13 +3631,10 @@ CHROMEPOL
     # ── Darksite cleanup ──────────────────────────────────────────────────────
     # ZBM EFI already on EFI partition, APT pool not needed post-install —
     # reclaim the space.
-    if [[ -d /root/darksite ]]; then
-        log "Removing darksite directory (~1.8G)..."
-        rm -rf /root/darksite
-        rm -f /etc/yum.repos.d/kldload-darksite.repo 2>/dev/null
-        log "Darksite removed."
-    fi
-    systemctl disable --now kldload-apt-mirror.service 2>/dev/null || true
+    # This block used to `rm -rf /root/darksite` with no guard at all, so the
+    # documented /etc/kldload/keep-darksite escape hatch never actually worked:
+    # whichever path ran first, this one finished the job.
+    _darksite_reclaim
 
     rm -f /tmp/kldload-firstboot-status
     log "kldload-firstboot complete (free edition)"
