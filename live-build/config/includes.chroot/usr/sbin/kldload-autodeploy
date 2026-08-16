@@ -932,9 +932,9 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
                     --set notifications.enabled=true \
                     --set applicationSet.enabled=true \
                     --set dex.enabled=true \
-                    --wait --timeout 5m \
+                    --wait --timeout 15m \
                     >>"$LOG_FILE" 2>&1 && log "[k8s] ArgoCD installed (offline) — UI at https://10.100.10.31" ||
-                    log "[k8s] ArgoCD install failed — non-fatal"
+                    log "[k8s] ArgoCD did not become ready within the timeout — non-fatal, it may still converge"
             else
                 log "[k8s] ArgoCD chart not in darksite — trying online helm repo"
                 helm repo add argo https://argoproj.github.io/argo-helm >>"$LOG_FILE" 2>&1 || true
@@ -946,10 +946,19 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
                     --set notifications.enabled=true \
                     --set applicationSet.enabled=true \
                     --set dex.enabled=true \
-                    --wait --timeout 5m \
+                    --wait --timeout 15m \
                     >>"$LOG_FILE" 2>&1 && log "[k8s] ArgoCD installed (online) — UI at https://10.100.10.31" ||
-                    log "[k8s] ArgoCD install skipped — non-fatal"
+                    log "[k8s] ArgoCD did not become ready within the timeout — non-fatal, it may still converge"
             fi
+
+            # 15m, not 5m. `--wait` blocks until every pod is Ready, and this
+            # runs while the same box is bringing up six k8s guests and, on an
+            # AI profile, pulling model weights. Five minutes was optimistic
+            # enough that a healthy cluster reported "INSTALLATION FAILED:
+            # context deadline exceeded" and moved on, leaving ArgoCD half
+            # deployed and the log claiming it was skipped (fiend,
+            # 2026-08-16). The release was converging fine; only the patience
+            # was wrong.
 
             # Surface the initial admin password to the webui by
             # writing it to a file the webui has read access to.
