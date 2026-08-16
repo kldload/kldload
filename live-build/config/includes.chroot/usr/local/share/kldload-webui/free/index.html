@@ -1805,12 +1805,12 @@ html.kld-app #term-drawer{display:none!important;}
             <span class="k8s-panel-hdr-muted">clone golden + cloud-init + kubeadm join</span>
           </div>
           <div style="padding:0.7rem 1rem;display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
-            <label style="font-size:0.78rem;color:var(--text-dim)"><input type="number" id="k8s-ov-scale-count" value="1" min="1" max="20" style="width:55px;margin:0 0.4rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:0.2rem 0.4rem"></label>
-            <select id="k8s-ov-scale-kind" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.82rem">
+            <label style="font-size:0.78rem;color:var(--text-dim)"><input type="number" id="k8s-ov-scale-count" value="1" min="1" max="20" oninput="k8sOvUpdateBtn()" style="width:55px;margin:0 0.4rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:0.2rem 0.4rem"></label>
+            <select id="k8s-ov-scale-kind" onchange="k8sOvUpdateBtn()" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.82rem">
               <option value="worker">Worker(s)</option>
               <option value="cp">Control planes (HA total — odd: 1/3/5)</option>
             </select>
-            <button class="btn btn-primary btn-sm" onclick="k8sAddNodesFromOverview()">Add worker</button>
+            <button id="k8s-ov-scale-btn" class="btn btn-primary btn-sm" onclick="k8sAddNodesFromOverview()">Add 1 worker</button>
             <span class="k8s-panel-hdr-muted" style="margin-left:auto;font-size:0.75rem">~2 min per node — progress streams on Nodes tab</span>
           </div>
         </div>
@@ -4453,6 +4453,32 @@ function handle(msg) {
 
     case 'exec_done': {
       const target = msg.target || '';
+      if (target === 'k8s') {
+        // Tear the Nodes-tab progress panel down on the process's OWN
+        // completion event.
+        //
+        // It used to close only on a log line matching /Added \d+\/\d+
+        // workers/, which a control-plane scale never prints. Asking for 5
+        // CPs on a full host, the scale exited in about a second having added
+        // nothing, no marker was ever emitted, and the panel stayed in
+        // "Adding 5 CPs…" with the Add button disabled — while the worker
+        // scale still running from two minutes earlier streamed ITS output
+        // into that same panel. The operator saw workers being built under a
+        // "control planes" title and concluded the request had gone to the
+        // wrong node type (fiend, 2026-08-16).
+        //
+        // rc is the truth here: it covers CP scales, worker scales and the
+        // failure path, none of which share a common log line.
+        window._k8sScaleActive = false;
+        window._k8sPending = {};
+        const _kb = document.getElementById('k8s-scale-btn');
+        const _kt = document.getElementById('k8s-node-progress-title');
+        const _kl = document.getElementById('k8s-node-progress-log');
+        if (_kb) { _kb.disabled = false; _kb.textContent = k8sAddBtnLabel(); _kb.style.opacity = ''; }
+        if (_kt) _kt.textContent = msg.rc === 0 ? 'Scale complete' : 'Scale failed (exit ' + msg.rc + ') — see the log below';
+        if (_kl && msg.rc !== 0) appendLog(_kl, '✗ scale exited ' + msg.rc + ' — nothing further will be added');
+        throttleStatus('k8s_status', 500);
+      }
       if (target === 'install') {
         const bar = document.getElementById('install-progress');
         const st  = document.getElementById('install-status');
@@ -6800,6 +6826,25 @@ function k8sAddBtnLabel() {
   const noun = kind === 'cp' ? 'CP' : 'worker';
   return `Add ${n>1 ? n+' ' : ''}${noun}${n>1?'s':''}`;
 }
+// k8sOvUpdateBtn — keep the Overview scale button honest about what it will do.
+//
+// The button was hardcoded to "Add worker" and had no id, so selecting
+// "Control planes" in the dropdown beside it left the button still promising
+// workers. Not merely a stale label: the two modes do not mean the same thing
+// -- a worker count ADDS that many, a control-plane count is a TARGET TOTAL.
+// An operator who set the dropdown to control planes, read "Add worker", and
+// then saw workers appear from an earlier run had every reason to conclude the
+// dropdown had been ignored (fiend, 2026-08-16).
+function k8sOvUpdateBtn() {
+  const btn = document.getElementById('k8s-ov-scale-btn');
+  if (!btn) return;
+  const n = parseInt(document.getElementById('k8s-ov-scale-count')?.value || '1') || 1;
+  const kind = document.getElementById('k8s-ov-scale-kind')?.value || 'worker';
+  btn.textContent = kind === 'cp'
+    ? 'Set control planes to ' + n
+    : 'Add ' + n + ' worker' + (n > 1 ? 's' : '');
+}
+
 function k8sUpdateAddBtn() {
   const btn = document.getElementById('k8s-scale-btn');
   if (btn && !btn.disabled) btn.textContent = k8sAddBtnLabel();
@@ -6816,6 +6861,10 @@ function k8sDestroyClusterPrompt() {
 // Wire the count input to update the label live
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('k8s-scale-count')?.addEventListener('input', k8sUpdateAddBtn);
+  // The kind select was never wired, so the Nodes-tab button had the same
+  // stale-label problem as the Overview one.
+  document.getElementById('k8s-scale-kind')?.addEventListener('change', k8sUpdateAddBtn);
+  k8sOvUpdateBtn();
 });
 
 // Cluster rebuild dialog — single confirm modal that combines the legacy
