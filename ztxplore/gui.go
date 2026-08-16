@@ -322,6 +322,35 @@ func RunGUI(resultsDir string) error {
 			dialog.ShowError(err, w)
 			return
 		}
+		// Refuse a run that would test nothing. kzfs-test warns per missing
+		// golden and then completes in about a second with an empty results
+		// directory, which reads as a pass — see GoldenGap.
+		domains, derr := ListDomains()
+		if derr != nil {
+			dialog.ShowError(derr, w)
+			return
+		}
+		present, missing := GoldenState(req.Distros, domains)
+		if gap := GoldenGap(present, missing); gap != nil {
+			// Partial coverage is the operator's call: they may genuinely
+			// want the four distros that are ready. Nothing to run is not.
+			if len(present) == 0 {
+				dialog.ShowError(gap, w)
+				return
+			}
+			dialog.ShowConfirm("Some distros have no golden",
+				gap.Error()+"\n\nRun on the "+strconv.Itoa(len(present))+
+					" that are ready?",
+				func(ok bool) {
+					if !ok {
+						return
+					}
+					req.Distros = present
+					argv, env := req.Argv()
+					stream(argv, env, runLog, "test run")
+				}, w)
+			return
+		}
 		argv, env := req.Argv()
 		stream(argv, env, runLog, "test run")
 	})

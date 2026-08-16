@@ -61,6 +61,12 @@ type Distro struct {
 // about what the lab tests. A release number belongs to the golden that
 // was actually built, so it is read off the guest and shown beside it,
 // never typed here.
+// WHY ONLY SIX: kzfs-test carries cloud images for arch and alpine but its
+// DISTROS array is these six, and anything else is answered with
+// "[FATAL] Unknown distro: arch". Offering them here produced a checkbox
+// whose only possible outcome was a fatal error (fiend, 2026-08-15) — the
+// exact failure the note above warns about. The list is kzfs-test's, not
+// the image map's.
 var Distros = []Distro{
 	{"centos", "CentOS Stream", "dnf"},
 	{"rocky", "Rocky Linux", "dnf"},
@@ -68,8 +74,6 @@ var Distros = []Distro{
 	{"rhel", "RHEL", "dnf"},
 	{"debian", "Debian", "apt"},
 	{"ubuntu", "Ubuntu", "apt"},
-	{"arch", "Arch Linux", "pacman"},
-	{"alpine", "Alpine", "apk"},
 }
 
 // DistroByKey looks one up. Returns ok=false rather than a zero Distro so a
@@ -242,4 +246,66 @@ func ParseZFSSource(spec string) (ZFSSource, error) {
 	}
 	return ZFSSource{}, fmt.Errorf("unrecognised ZFS source %q — expected repo, "+
 		"version:X.Y.Z, git:owner/repo@ref or tarball:/path", spec)
+}
+
+// ─── Do the goldens the run needs actually exist? ────────────────────
+//
+// WHY THIS EXISTS AT ALL: kzfs-test warns once per missing golden and then
+// carries on — "Phase 3: Running full tests in parallel... Total time: 0s"
+// with an empty results directory. A run that tests NOTHING and reports no
+// error is the single worst thing a test lab can do, because the next thing
+// anybody does is trust it. Reported as "the test tool fails right away"
+// (fiend, 2026-08-15); it did not fail, which was the problem.
+
+// GoldenName is the domain kzfs-test clones for a distro.
+//
+// It mirrors kzfs-test's golden_name(): "${PREFIX}-golden-${distro}" with
+// PREFIX=kzfstest. Keep them in step — a mismatch here reports goldens as
+// missing when they exist, or as present when they do not.
+func GoldenName(distro string) string { return "kzfstest-golden-" + distro }
+
+// GoldenState lists which of the requested distros can actually be tested.
+//
+// Args:    distros, the keys to check (empty = the whole matrix);
+//
+//	domains, every domain name libvirt knows.
+//
+// Returns: present and missing, in the matrix's order.
+//
+// Split from the libvirt call so it is testable without a hypervisor.
+func GoldenState(distros []string, domains []string) (present, missing []string) {
+	if len(distros) == 0 {
+		distros = DistroKeys()
+	}
+	have := make(map[string]bool, len(domains))
+	for _, d := range domains {
+		have[strings.TrimSpace(d)] = true
+	}
+	for _, d := range distros {
+		if have[GoldenName(d)] {
+			present = append(present, d)
+		} else {
+			missing = append(missing, d)
+		}
+	}
+	return present, missing
+}
+
+// GoldenGap reports why a run cannot proceed, or nil when it can.
+//
+// The message names the command that fixes it, because "no goldens" without
+// the remedy sends somebody back to the documentation.
+func GoldenGap(present, missing []string) error {
+	switch {
+	case len(present) == 0 && len(missing) > 0:
+		return fmt.Errorf("none of the selected distros have a golden image yet, so this "+
+			"run would test nothing and report success in about a second.\n\n"+
+			"Build them first — the Lab tab's \"Build goldens\", or:\n"+
+			"    kzfs-test golden %s", missing[0])
+	case len(missing) > 0:
+		return fmt.Errorf("no golden image for: %s\n\n"+
+			"Those distros would be silently skipped. Untick them, or build them "+
+			"first from the Lab tab.", strings.Join(missing, ", "))
+	}
+	return nil
 }

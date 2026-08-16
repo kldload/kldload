@@ -362,3 +362,73 @@ func TestReadARCSaysWhyWhenZFSIsAbsent(t *testing.T) {
 		t.Errorf("Why = %q, want it to name the missing module", arc.Why)
 	}
 }
+
+// ─── The guard against a run that tests nothing ──────────────────────
+
+// TestGoldenStateSplitsPresentFromMissing pins the matching against the name
+// kzfs-test actually clones.
+func TestGoldenStateSplitsPresentFromMissing(t *testing.T) {
+	domains := []string{
+		"kzfstest-golden-centos", "kzfstest-golden-debian",
+		// The OTHER lineages on the same host. klab-ztest-* is also a ZFS
+		// test golden, but kzfs-test does not clone it, so counting it as
+		// present would let a run start that then silently skips.
+		"klab-ztest-rocky", "klab-golden-ubuntu", "k8s-golden",
+	}
+	present, missing := GoldenState([]string{"centos", "debian", "rocky"}, domains)
+	if len(present) != 2 || present[0] != "centos" || present[1] != "debian" {
+		t.Errorf("present = %v, want [centos debian]", present)
+	}
+	if len(missing) != 1 || missing[0] != "rocky" {
+		t.Errorf("missing = %v, want [rocky] — klab-ztest-rocky is a different lineage", missing)
+	}
+}
+
+func TestGoldenStateEmptySelectionMeansTheWholeMatrix(t *testing.T) {
+	present, missing := GoldenState(nil, []string{"kzfstest-golden-fedora"})
+	if len(present) != 1 || present[0] != "fedora" {
+		t.Errorf("present = %v, want [fedora]", present)
+	}
+	if len(missing) != len(Distros)-1 {
+		t.Errorf("missing = %d entries, want %d", len(missing), len(Distros)-1)
+	}
+}
+
+// TestGoldenGapRefusesARunThatWouldTestNothing is the one with the incident
+// behind it: kzfs-test skipped all six distros, printed "Total time: 0s" and
+// left an empty results directory, which reads as a pass.
+func TestGoldenGapRefusesARunThatWouldTestNothing(t *testing.T) {
+	err := GoldenGap(nil, []string{"centos", "debian"})
+	if err == nil {
+		t.Fatal("a run with no goldens at all was allowed")
+	}
+	// The message has to carry the remedy, not just the diagnosis.
+	if !strings.Contains(err.Error(), "kzfs-test golden") {
+		t.Errorf("the refusal does not say how to fix it: %q", err)
+	}
+}
+
+func TestGoldenGapWarnsOnPartialCoverage(t *testing.T) {
+	if err := GoldenGap([]string{"centos"}, []string{"rhel"}); err == nil {
+		t.Error("a partially-covered run gave no warning; rhel would be skipped silently")
+	}
+}
+
+func TestGoldenGapIsSilentWhenEverythingIsReady(t *testing.T) {
+	if err := GoldenGap([]string{"centos", "debian"}, nil); err != nil {
+		t.Errorf("a fully-covered run was blocked: %v", err)
+	}
+}
+
+// TestUnsupportedDistrosAreNotOffered — kzfs-test answers arch and alpine
+// with "[FATAL] Unknown distro", so a checkbox for them can only fail.
+func TestUnsupportedDistrosAreNotOffered(t *testing.T) {
+	for _, k := range []string{"arch", "alpine"} {
+		if _, ok := DistroByKey(k); ok {
+			t.Errorf("%q is offered but kzfs-test rejects it as an unknown distro", k)
+		}
+	}
+	if len(Distros) != 6 {
+		t.Errorf("the matrix has %d distros; kzfs-test's DISTROS has 6", len(Distros))
+	}
+}

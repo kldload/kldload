@@ -41,6 +41,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // LabBin is the shell tool that owns the machinery.
@@ -317,4 +318,23 @@ func (e EBPFRequest) Argv() ([]string, error) {
 		argv = append(argv, strconv.Itoa(e.Duration))
 	}
 	return argv, nil
+}
+
+// ListDomains returns every domain libvirt knows, running or not.
+//
+// Returns: the names, or an error when virsh is missing or cannot connect.
+// Used to answer "does this distro have a golden" without parsing
+// kzfs-test's coloured status table, which is a display and not an API.
+func ListDomains() ([]string, error) {
+	out, err := runCapture(10*time.Second, "virsh", "list", "--all", "--name")
+	if err != nil {
+		return nil, fmt.Errorf("cannot ask libvirt what exists: %w", err)
+	}
+	var names []string
+	for _, l := range strings.Split(out, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			names = append(names, l)
+		}
+	}
+	return names, nil
 }
