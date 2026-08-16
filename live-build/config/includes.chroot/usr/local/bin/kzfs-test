@@ -712,20 +712,51 @@ APKSETUP
     esac
 
     # If building from source, install extra build deps then build
+    # Fedora has no OpenZFS repository, so "repo" is not a thing that can
+    # succeed there — zfsonlinux.org/fedora is 404, the whole directory
+    # (verified 2026-08-16). Rather than build a golden that is guaranteed to
+    # fail validation and be refused a seal, take the source path
+    # automatically and say so. Every other distro keeps the operator's
+    # choice; an explicit ZFS_SOURCE still wins everywhere.
+    local _src="$ZFS_SOURCE"
+    if [[ "$distro" == "fedora" && "$_src" == "repo" ]]; then
+        _src="${KZFS_FEDORA_SOURCE:-git:master}"
+        log "  fedora has no OpenZFS repo — building from source (${_src})"
+        ZFS_SOURCE="$_src"
+    fi
+
     if [[ "$ZFS_SOURCE" != "repo" ]]; then
         log "  Installing build dependencies for from-source ZFS..."
         case "$family" in
         dnf)
-            _ssh_cmd "$ip" bash -c 'dnf install -y git libuuid-devel libblkid-devel \
-          openssl-devel libtirpc-devel libffi-devel python3-devel python3-cffi \
+            # Upstream's own list from the OpenZFS "Building ZFS" docs, plus
+            # the kernel headers configure needs to find a build tree.
+            #
+            # NOT silenced. This used to end `2>/dev/null || true`, so a
+            # missing package produced no output and the build died later at
+            # ./configure on the first absent header — which read as "the
+            # source build is broken" rather than "a dependency did not
+            # install" (fiend, 2026-08-16). --skip-unavailable keeps one
+            # renamed package from taking the whole transaction down, the same
+            # lesson as rule 2a.
+            _ssh_cmd "$ip" bash -c 'dnf install -y --skip-unavailable \
+          gcc make autoconf automake libtool rpm-build kernel-rpm-macros \
+          git libuuid-devel libblkid-devel libudev-devel \
+          openssl-devel libtirpc-devel libffi-devel libcurl-devel \
+          python3 python3-devel python3-setuptools python3-cffi \
           libaio-devel libattr-devel ncompress elfutils-libelf-devel \
-          zlib-devel 2>/dev/null || true'
+          zlib-devel "kernel-devel-$(uname -r)"' ||
+                warn "  build deps incomplete on ${distro} — ./configure will name what is missing"
             ;;
         apt)
-            _ssh_cmd "$ip" bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          git uuid-dev libblkid-dev libssl-dev libtirpc-dev \
-          python3-dev python3-cffi libaio-dev libattr1-dev ncompress \
-          libelf-dev zlib1g-dev autoconf automake libtool 2>/dev/null || true'
+            _ssh_cmd "$ip" bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          build-essential autoconf automake libtool gawk dkms \
+          git uuid-dev libblkid-dev libudev-dev libssl-dev libtirpc-dev \
+          libffi-dev libcurl4-openssl-dev python3 python3-dev \
+          python3-setuptools python3-cffi python3-packaging \
+          libaio-dev libattr1-dev ncompress libelf-dev zlib1g-dev \
+          "linux-headers-$(uname -r)"' ||
+                warn "  build deps incomplete on ${distro} — ./configure will name what is missing"
             ;;
         pacman)
             _ssh_cmd "$ip" bash -c 'pacman -S --noconfirm git openssl \
