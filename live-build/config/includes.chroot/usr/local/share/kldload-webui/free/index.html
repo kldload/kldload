@@ -496,13 +496,14 @@ html.kld-app #term-drawer{display:none!important;}
         <!-- AI state (hidden checkbox + model selection, shown when AI profile selected) -->
         <input type="checkbox" id="install-ai" style="display:none">
         <!-- AI model picker is the 2-tier Default/Larger pills above.
-             Default is qwen3:14b (~9 GB, fits 10 GB VRAM consumer GPUs).
+             Ships llama3.2:3b (~2 GB) — runs on CPU or any modern GPU.
              Users switch models post-install via `ollama pull` or the
              Bob panel. The smart/code legacy checkboxes are kept as
              hidden no-ops for backwards compatibility with old kickstarts. -->
+        <!-- Model tier inputs removed: the ISO ships exactly one chat model.
+             Kept as a single hidden checked box so older kickstarts that set
+             ai-model-chat still parse. -->
         <input type="checkbox" id="ai-model-chat" checked style="display:none">
-        <input type="checkbox" id="ai-model-code" style="display:none">
-        <input type="checkbox" id="ai-model-smart" style="display:none">
 
         <!-- klab options panel removed. ZFS dev-tools goldens are a
              separate lineage now (klab-ztest-<distro>) that's built on
@@ -658,30 +659,18 @@ html.kld-app #term-drawer{display:none!important;}
                    works on ANY profile (kldload-firstboot gates on ROLE==ai OR
                    ENABLE_AI), so the AI stack does not require picking the AI
                    profile.
-                   This installs the ENGINE AND THE INTERFACE ONLY. No model
-                   weights ship by default as of 2026-08-15 — Open WebUI starts
-                   with an empty model list and its picker pulls one in two
-                   clicks. The separate card below asks for a model up front. -->
+                   ONE control, deliberately. It installs the engine, the
+                   interface and the model, because the ISO carries all three
+                   (KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1). There is nothing to
+                   choose: a size picker offering weights the medium does not
+                   carry produced air-gapped boxes with no working model, and a
+                   separate "download a model" card asked the operator to
+                   confirm something already on the disk. -->
               <div class="opt-card" id="opt-bob" onclick="toggleOpt('bob')" title="Local AI — installs Ollama plus the Open WebUI interface, set up and running on any profile. No model is downloaded: Open WebUI opens with an empty model list and you pull the one you want from its picker. Tick 'AI model' as well to have the installer download one during first boot." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
                 <div style="font-size:1.5rem;margin-bottom:0.3rem">🤖</div>
                 <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Ollama</div>
               </div>
-              <!-- Model download opt-in — deliberately SEPARATE from the stack.
-                   "Install the AI stack" and "spend several GB of bandwidth"
-                   are different decisions, and the second is a poor default on
-                   a metered or slow link. Feeds ai_pull_model →
-                   KLDLOAD_AI_PULL_MODEL, which kldload-autodeploy reads just
-                   before the download step. An ISO built with
-                   KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1 already carries weights and
-                   ignores this entirely. -->
-              <div class="opt-card" id="opt-aimodel" onclick="toggleOpt('aimodel')" title="Download an AI model during first boot (~2 GB, needs a network). Leave this off to finish the install faster and choose your own model later from the Open WebUI picker. Ignored on an air-gapped ISO built with the model already baked in. Needs the Ollama card ticked." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                <div style="font-size:1.5rem;margin-bottom:0.3rem">⬇</div>
-                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">AI model</div>
-              </div>
             </div>
-            <!-- Hidden checkbox the card drives; toggleOpt()/submit read it by
-                 id, exactly as they do for every other opt-card. -->
-            <input type="checkbox" id="install-ai-model" style="display:none">
             <!-- kldload Workstation "lab" extras — shown only on the desktop profile
                  (selectTarget() toggles #opt-lab-cluster). Each card flips a flag the
                  distro-aware backend already acts on; default all-off = plain workstation. -->
@@ -768,7 +757,7 @@ html.kld-app #term-drawer{display:none!important;}
         <!-- HIDDEN, not deleted. The visible AI control is the opt-bob card in
                Platform Options; this panel duplicated it, so the installer showed
                two toggles for one decision (operator, 2026-08-15). Its inputs stay
-               because submit reads them: install-bob feeds enable_ai, bob-darksite
+               because submit reads them: install-bob feeds enable_ai
                feeds the airgap flag, and the tier radio feeds model selection. -->
           <div class="panel" id="bob-panel" style="margin-bottom:1rem;display:none !important">
           <div class="panel-hdr">🤖 Ollama — Local AI</div>
@@ -781,14 +770,10 @@ html.kld-app #term-drawer{display:none!important;}
                 Install Ollama
               </label>
               <span id="bob-gpu-status" style="flex:1;min-width:0;font-size:0.73rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Detecting GPU…</span>
-              <label style="display:inline-flex;align-items:center;gap:0.35rem;cursor:pointer;font-size:0.75rem;color:var(--subtle);white-space:nowrap" title="Airgapped installs: pre-stage the selected model at /root/darksite/ollama/models/ on the target before first boot. kldload-firstboot loads it locally instead of pulling from ollama.com.">
-                <input type="checkbox" id="bob-darksite">
-                Airgapped <span style="color:var(--muted);font-size:0.7rem">(darksite)</span>
-              </label>
             </div>
 
             <!-- Model picker removed. The ISO bakes exactly ONE chat model
-                 (qwen3:14b) plus nomic-embed-text for embeddings, so a picker
+                 (llama3.2:3b) plus nomic-embed-text for embeddings, so a picker
                  offering a "Larger" 19 GB option was a choice the medium could
                  not honour: selecting it on an air-gapped install produced a
                  box with no working model at all. The tier radios are kept as
@@ -799,7 +784,7 @@ html.kld-app #term-drawer{display:none!important;}
             </div>
 
             <div style="font-size:0.7rem;color:var(--muted);padding:0.5rem 0.7rem;background:var(--surface2);border-radius:4px;line-height:1.5">
-              Ships <code>qwen3:14b</code> (~9&nbsp;GB) and <code>nomic-embed-text</code>, both baked into the install &mdash; no download, works air-gapped. Fits ~10&nbsp;GB VRAM (RTX 3080 / 3060&nbsp;12G / 4070 / A4000-class); runs on CPU otherwise. Add any other model later with <code>ollama pull &lt;model&gt;</code>.
+              Ships <code>llama3.2:3b</code> (~2&nbsp;GB) and <code>nomic-embed-text</code>, both baked into the install &mdash; no download, works air-gapped. Fits ~10&nbsp;GB VRAM (RTX 3080 / 3060&nbsp;12G / 4070 / A4000-class); runs on CPU otherwise. Add any other model later with <code>ollama pull &lt;model&gt;</code>.
             </div>
           </div>
         </div>
@@ -4071,26 +4056,29 @@ function handle(msg) {
       // qwen2.5:14b chat needs ~9 GB of RAM/VRAM to feel responsive.
       //   - NVIDIA ≥ 8 GB VRAM → capable (GPU-accelerated, fast)
       //   - NVIDIA present but small VRAM → capable (still useful)
-      //   - No NVIDIA but ≥ 16 GB RAM → capable (CPU-only, slower)
+      //   - No NVIDIA but ≥ 8 GB RAM → capable (CPU-only, usable)
       //   - Everything else → not capable (skip Bob by default)
       const _vram = d.vram_gb || 0;
       const _ram = d.ram_gb || 0;
       let _bobCapable = false;
       let _bobReason = '';
-      if (d.has_nvidia && _vram >= 10) {
-        _bobCapable = true;
-        _bobReason = `NVIDIA GPU detected — ${_vram} GB VRAM, qwen3:14b fits cleanly`;
-      } else if (d.has_nvidia && _vram >= 8) {
-        _bobCapable = true;
-        _bobReason = `NVIDIA GPU detected — ${_vram} GB VRAM, qwen3:14b will partial-spill (slow)`;
-      } else if (_ram >= 16) {
-        _bobCapable = true;
-        _bobReason = `No GPU, ${_ram} GB RAM — qwen3:14b on CPU (slow: ~2–5 tok/s)`;
-      } else {
-        _bobCapable = false;
-        _bobReason = `No GPU, only ${_ram} GB RAM — not enough for qwen3:14b; Bob skipped by default`;
-      }
-      window._bobGpuCapable = _bobCapable;
+      if (d.has_nvidia && _vram >= 4) {
+    _bobCapable = true;
+    _bobReason = `NVIDIA GPU detected — ${_vram} GB VRAM, llama3.2:3b fits comfortably`;
+  } else if (d.has_nvidia && _vram >= 2) {
+    _bobCapable = true;
+    _bobReason = `NVIDIA GPU detected — ${_vram} GB VRAM, llama3.2:3b fits (may spill slightly)`;
+  } else if (_ram >= 8) {
+    _bobCapable = true;
+    _bobReason = `No GPU, ${_ram} GB RAM — llama3.2:3b on CPU, usable`;
+  } else if (_ram >= 4) {
+    _bobCapable = true;
+    _bobReason = `No GPU, ${_ram} GB RAM — llama3.2:3b on CPU, slow but works`;
+  } else {
+    _bobCapable = false;
+    _bobReason = `Only ${_ram} GB RAM — not enough for a local model; Ollama skipped by default`;
+  }
+  window._bobGpuCapable = _bobCapable;
       const bobStatusEl = document.getElementById('bob-gpu-status');
       if (bobStatusEl) {
         bobStatusEl.textContent = _bobReason;
@@ -5378,7 +5366,7 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // updateBobModelGating() — disable pills whose VRAM floor exceeds
-// detected VRAM. The Default pill (qwen3:14b, ~9 GB) stays available
+// detected VRAM. The shipped model (llama3.2:3b, ~2 GB) stays available
 // when system RAM >= 16 GB even without a GPU — CPU inference is slow
 // but works. Larger (qwen3:30b-a3b) only enables on 22+ GB VRAM.
 window.updateBobModelGating = function(vramGB, ramGB) {
@@ -5402,7 +5390,7 @@ window.updateBobModelGating = function(vramGB, ramGB) {
     } else {
       pill.classList.remove('disabled');
       if (r) r.disabled = false;
-      // Track best-fit default: prefer Default (qwen3:14b). User opts up
+      // Track best-fit default: prefer the shipped model. User opts up
       // to Larger explicitly — never auto-promote to it.
       if (tier === 'recommended') bestDefault = tier;
     }
@@ -5430,7 +5418,7 @@ const DISTRO_DESCS = {
   windows:  'Microsoft Windows — bare-metal install from your install.wim ISO (Desktop/Downloads/USB)',
 };
 function toggleOpt(name) {
-  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', aimodel: 'install-ai-model', images: 'install-images', zxplore: 'install-zxplore'};
+  var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', images: 'install-images', zxplore: 'install-zxplore'};
   var cb = document.getElementById(map[name]);
   var card = document.getElementById('opt-' + name);
   if (!cb || !card) return;
@@ -5468,7 +5456,7 @@ function selectAllExtras() {
 // Init option cards on load
 document.addEventListener('DOMContentLoaded', function() {
   ['wireguard','nvidia','ebpf','dedup','secure-boot','webui','bob','kvm','k8s','images','zxplore'].forEach(function(name) {
-    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', aimodel: 'install-ai-model', images: 'install-images', zxplore: 'install-zxplore'};
+    var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', images: 'install-images', zxplore: 'install-zxplore'};
     var cb = document.getElementById(map[name]);
     var card = document.getElementById('opt-' + name);
     if (cb && card && cb.checked) {
@@ -5951,11 +5939,18 @@ function startInstall() {
     // this asks the installer to also fetch a model during first boot.
     // Default unchecked, so a plain AI install costs no bandwidth and still
     // lands a working interface with a model picker.
-    ai_pull_model: document.getElementById('install-ai-model')?.checked ? '1' : '0',
+    // Always 1: on a darksite ISO autodeploy finds the weights and ignores
+    // this; on one built without them, pulling beats handing the operator a
+    // working Ollama with an empty model list. Removed from the UI because it
+    // asked the operator a question the filesystem already answers.
+    ai_pull_model: '1',
     // Bob model selection (tier name — firstboot maps to Ollama model).
     // bob_darksite=1 → expect /root/darksite/ollama/models/ pre-staged.
     bob_model: document.querySelector('input[name="bob-model"]:checked')?.value || 'recommended',
-    bob_darksite: document.getElementById('bob-darksite')?.checked ? '1' : '0',
+    // Detected by autodeploy from /root/darksite/ollama/models/ rather than
+    // asked. The checkbox meant a darksite ISO ignored its own weights unless
+    // the operator found and ticked it.
+    bob_darksite: '0',
     enable_devops: roleRaw === 'devops' ? '1' : '0',
     // ZFS dev-tools goldens are now a separate on-demand lineage
     // (klab-ztest-<distro>) built from the ZFS Test Lab tile. Installer

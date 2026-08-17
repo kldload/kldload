@@ -571,18 +571,33 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         # selected model's manifest, rehydrate /srv/ollama/models/ BEFORE
         # starting ollama. The subsequent `ollama pull` then hash-matches
         # every blob and is a no-op — no internet touched for weights.
+        # Detection is UNCONDITIONAL. It used to be gated on
+        # KLDLOAD_BOB_DARKSITE=1 — that is, on the operator having found and
+        # ticked an "Airgapped (darksite)" box in the Bob panel — so an ISO
+        # built with KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1, carrying 5.4 GB of
+        # weights, ignored them unless asked twice. The operator either waited
+        # on an internet pull they had already paid for in ISO size, or landed
+        # on a working Ollama with an empty model list.
+        #
+        # If the weights are on the disk, use them. Asking a human to confirm
+        # something the filesystem can answer is what produced the bug.
         _bob_darksite="${KLDLOAD_BOB_DARKSITE:-0}"
         _darksite_has_model=0
-        if [[ "$_bob_darksite" == "1" ]]; then
-            _model_name="${_chat_model%%:*}"
-            _model_tag="${_chat_model##*:}"
-            if [[ -d /root/darksite/ollama/models ]] &&
-                compgen -G "/root/darksite/ollama/models/manifests/registry.ollama.ai/library/${_model_name}/${_model_tag}" >/dev/null; then
-                _darksite_has_model=1
-                log "[ai] darksite HIT: ${_chat_model} weights present under /root/darksite/ollama/"
-            else
-                log "[ai] darksite MISS: ${_chat_model} not in /root/darksite/ollama/models/ — falling back to internet pull"
-            fi
+        _model_name="${_chat_model%%:*}"
+        _model_tag="${_chat_model##*:}"
+        if [[ -d /root/darksite/ollama/models ]] &&
+            compgen -G "/root/darksite/ollama/models/manifests/registry.ollama.ai/library/${_model_name}/${_model_tag}" >/dev/null; then
+            _darksite_has_model=1
+            log "[ai] darksite HIT: ${_chat_model} weights present under /root/darksite/ollama/"
+        elif [[ "$_bob_darksite" == "1" ]]; then
+            # Only an ERROR when air-gapped was explicitly requested: that
+            # operator has no fallback and needs to know before the reboot.
+            log "[ai] darksite MISS: ${_chat_model} not in /root/darksite/ollama/models/"
+            log "[ai] air-gapped install was requested but the weights are absent —"
+            log "[ai] build with KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1, or stage them"
+            log "[ai] under /root/darksite/ollama/models/ before first boot."
+        else
+            log "[ai] no darksite weights for ${_chat_model} — will pull if requested"
         fi
         log "[ai] installing ollama runtime"
         command -v ollama >/dev/null 2>&1 ||
