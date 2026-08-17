@@ -1,0 +1,372 @@
+.\" ztxplore.1 — manual page for ztxplore, the OpenZFS test lab.
+.\" Format: mdoc(7). Render check: mandoc -Tlint docs/ztxplore.1
+.Dd August 17, 2026
+.Dt ZTXPLORE 1
+.Os
+.Sh NAME
+.Nm ztxplore ,
+.Nm ztx ,
+.Nm kzfs-test
+.Nd OpenZFS test lab across six Linux distributions
+.Sh SYNOPSIS
+.Nm
+.Op Fl -tui
+.Op Fl -metrics
+.Op Fl -results
+.Op Fl -runs
+.Op Fl -kernel
+.Op Fl -results-dir Ar path
+.Op Fl -version
+.Nm kzfs-test
+.Nm kzfs-test
+.Cm golden
+.Op Ar distro | Cm all
+.Op Ar zfs-source
+.Nm kzfs-test
+.Cm verify
+.Op Ar distro | Cm all
+.Nm kzfs-test
+.Cm run
+.Op Fl -quick | Fl -full
+.Op Fl -distro Ar list
+.Op Ar zfs-source
+.Nm kzfs-test
+.Cm status
+.Nm kzfs-test
+.Cm results
+.Op Ar run-id
+.Nm kzfs-test
+.Cm destroy
+.Op Fl -all
+.Sh DESCRIPTION
+.Nm
+runs the OpenZFS test suite against six Linux distributions at once, in
+virtual machines, on ZFS zvols.
+Point it at a pool.
+It builds one golden image per distribution, clones them, runs
+.Xr zfs-tests.sh 1
+inside each clone, and returns a matrix of what passed where.
+.Pp
+Testing a ZFS change on one distribution proves it works on that
+distribution.
+The interesting failures are the ones that only appear on a 5.14 EL kernel,
+or against a distribution's own ZFS packaging, or on the release where the
+DKMS glue changed.
+Assembling that harness by hand is a day of work and a pile of VM plumbing.
+This is that harness, already built.
+.Pp
+Two surfaces share one engine:
+.Bl -tag -width "kzfs-test"
+.It Nm
+the native GUI.
+In the static terminal-only build this starts the TUI instead.
+.It Nm Fl -tui
+the terminal UI, for headless hypervisors and SSH sessions.
+.It Nm kzfs-test
+the harness itself, a shell script with no build step.
+Everything the consoles do, they do by calling this.
+.El
+.Pp
+Nothing is hidden.
+The consoles shell out to
+.Xr virsh 1 ,
+.Xr virt-install 1 ,
+.Xr zfs 8
+and ssh, and every run leaves its full log on disk
+.Pq see Sx FILES .
+.Sh THE MODEL
+A
+.Em golden
+is a sealed, powered-off VM with ZFS built and the test suite installed.
+It is built once and cached.
+A
+.Em run
+clones the goldens and tests the clones, so a run never touches the golden
+it came from and a wrecked run is thrown away rather than repaired.
+Cloning is a ZFS operation, so a fresh test VM costs a snapshot and a
+metadata write rather than a copy of the image.
+.Pp
+Two rules exist because their absence produced answers that looked fine and
+were not:
+.Bl -bullet
+.It
+A golden that comes up without a working ZFS is
+.Em refused ,
+not sealed.
+An image with no ZFS runs zero tests and reports a pass, which is worse than
+a failure because nothing tells you.
+.It
+A run that executes zero tests is scored
+.Em error ,
+never pass.
+The count reaching zero is itself the finding.
+.El
+.Sh THE CONSOLE
+The GUI opens on the lab.
+Panes, in the order an operator needs them:
+.Bl -tag -width "Metrics"
+.It Cm Lab
+Build goldens, start runs, watch the live log.
+A run started here can be stopped here, and a console reopened mid-run
+reattaches to the run already in flight rather than showing an empty screen.
+.It Cm Results
+The pass/fail/skip matrix per distribution, per run.
+.It Cm Runs
+Previous runs, newest first.
+.It Cm Kernel
+The kernel and ZFS version each golden actually carries, which is the pairing
+that decides whether a result means anything.
+.It Cm Metrics
+Links into the Grafana dashboards fed by
+.Xr klab-exporter 8
+.Pq see Sx METRICS .
+.El
+.Sh COMMANDS
+.Bl -tag -width "destroy [--all]"
+.It Cm golden Op Ar distro | Cm all
+Build golden images.
+One-time and cached; a golden that already exists is left alone.
+Roughly three to five minutes per distribution when ZFS comes from the
+distribution's package, longer when it is compiled from source.
+.It Cm verify Op Ar distro | Cm all
+Boot each golden, confirm ZFS loads and the test suite is present, power it
+back down.
+Fast, and the right thing to run before a long suite.
+.It Cm run Op Fl -quick | Fl -full
+Clone the goldens and run
+.Xr zfs-tests.sh 1 .
+.Fl -quick
+runs a subset, about fifteen minutes across the matrix.
+.Fl -full
+runs the whole suite, which is hours.
+.It Cm status
+Goldens, running VMs, last results, pool usage.
+.It Cm results Op Ar run-id
+Print a run's matrix.
+Defaults to the most recent run.
+.It Cm destroy Op Fl -all
+Destroy the test VMs.
+.Fl -all
+takes the goldens with them, which means the next run rebuilds from scratch.
+.El
+.Sh ZFS SOURCES
+By default each guest installs the ZFS its own distribution ships, which is
+what makes the matrix a statement about distributions.
+To test one specific ZFS everywhere instead:
+.Bl -tag -width "--zfs-tarball path"
+.It Fl -zfs-version Ar x.y.z
+Build from an upstream release tarball.
+.It Fl -zfs-git Ar owner/repo@ref
+Build from a git branch, tag or commit.
+.It Fl -zfs-git Ar @ref
+Shorthand for
+.Ar openzfs/zfs@ref .
+.It Fl -zfs-tarball Ar path
+Build from a tarball you already have, which is how you test an unpublished
+tree.
+.El
+.Pp
+These apply to both
+.Cm golden
+and
+.Cm run .
+Applying one to
+.Cm golden
+bakes that ZFS into the image; applying it to
+.Cm run
+builds it in the clone.
+.Sh THE MATRIX
+.Bl -tag -width "CentOS Stream" -compact
+.It CentOS Stream
+EL kernel lineage
+.It Rocky
+EL kernel lineage
+.It RHEL
+EL, and the only one that needs credentials
+.It Fedora
+current kernels, moves fastest
+.It Debian
+stable
+.It Ubuntu
+LTS
+.El
+.Pp
+Each guest is a real VM from the distribution's own cloud image.
+Nothing is forked and nothing is patched.
+.Pp
+RHEL is skipped unless a subscription is available
+.Pq see Sx ENVIRONMENT ;
+the other five need nothing.
+A skipped RHEL is reported as
+.Em not built ,
+not as a failure.
+.Pp
+The guest kernel is pinned for the life of the build
+.Pq dnf exclude , apt-mark hold , pacman IgnorePkg .
+The DKMS module is compiled against the kernel the guest is running, and a
+guest that later boots a different one has no module and runs zero tests.
+.Sh METRICS
+.Xr klab-exporter 8
+serves Prometheus metrics on port 9101 while a run is in progress:
+pass, fail and skip counts per distribution, run status, the most recent test
+seen, and golden readiness with kernel and ZFS labels.
+Counts come from each run's summary file when it exists and from a live parse
+of the log while it does not, so a run in flight is visible rather than
+opaque.
+.Pp
+Grafana dashboards live under the
+.Em ZFS Test Lab
+folder: a run matrix, per-VM debug, a live test bench, and the ztxplore
+metrics overview.
+The exporter is optional.
+Without it the tests run exactly the same and only the graphs are missing.
+.Sh ENVIRONMENT
+.Bl -tag -width "KZFS_FEDORA_SOURCE"
+.It Ev POOL
+Pool the goldens and clones live on.
+Default
+.Pa rpool .
+.It Ev ZFS_SOURCE
+Where ZFS comes from inside the guest.
+Default
+.Cm repo .
+.It Ev KZFS_FEDORA_SOURCE
+Fedora only, default
+.Cm git:@master :
+Fedora's packaged ZFS routinely lags its own kernel, so tracking git is the
+only way that row means anything.
+.It Ev RAM
+Memory per VM in MB.
+Default is what the host has available less 2 GB, because one VM runs at a
+time and the shortfall otherwise arrives as the OOM killer taking qemu down
+mid-compile.
+.It Ev CPUS
+vCPUs per VM.
+Default half the host, capped at eight.
+.It Ev DISK
+Disk per VM in GB.
+Default 40.
+.It Ev SSH_KEY
+Key injected into the guests.
+Default
+.Pa /root/.ssh/id_ed25519 .
+.It Ev RHEL_USERNAME , Ev RHEL_PASSWORD
+Red Hat subscription credentials, or put them in
+.Pa /root/.kzfs-rhel-creds .
+.El
+.Sh FILES
+.Bl -tag -width "/root/kzfs-test/goldens/" -compact
+.It Pa /root/kzfs-test/
+Results root.
+.It Pa /root/kzfs-test/latest
+Symlink to the most recent run.
+.It Pa /root/kzfs-test/goldens/
+Golden build logs, one per distribution, with a
+.Pa -latest.log
+symlink each.
+.It Pa /root/kzfs-test/<run-id>/
+Per-run directory:
+.Pa <distro>.log ,
+.Pa <distro>.status
+and, once finished,
+.Pa <distro>.summary .
+.It Pa /var/lib/libvirt/isos/
+Cached cloud images.
+.El
+.Sh EXIT STATUS
+.Ex -std
+A run exits non-zero when any distribution fails or when any distribution
+executes zero tests.
+.Sh EXAMPLES
+Build every golden, then check they work:
+.Bd -literal -offset indent
+kzfs-test golden all
+kzfs-test verify
+.Ed
+.Pp
+A quick pass across the whole matrix:
+.Bd -literal -offset indent
+kzfs-test run --quick
+.Ed
+.Pp
+The full suite on two distributions:
+.Bd -literal -offset indent
+kzfs-test run --full --distro centos,debian
+.Ed
+.Pp
+Test an unmerged branch everywhere:
+.Bd -literal -offset indent
+kzfs-test golden all --zfs-git @fix-arc-deadlock
+kzfs-test run --full
+.Ed
+.Pp
+Test a local tree:
+.Bd -literal -offset indent
+kzfs-test golden debian --zfs-tarball ~/zfs.tar.gz
+.Ed
+.Pp
+Use a pool that is not
+.Pa rpool :
+.Bd -literal -offset indent
+POOL=tank kzfs-test golden all
+.Ed
+.Pp
+Look at the last run, then clean up:
+.Bd -literal -offset indent
+kzfs-test results
+kzfs-test destroy
+.Ed
+.Pp
+The console on a headless hypervisor:
+.Bd -literal -offset indent
+ztx --tui
+.Ed
+.Sh SEE ALSO
+.Xr virsh 1 ,
+.Xr virt-install 1 ,
+.Xr vmxplore 1 ,
+.Xr zxplore 1 ,
+.Xr dkms 8 ,
+.Xr klab-exporter 8 ,
+.Xr zfs 8 ,
+.Xr zpool 8
+.Pp
+OpenZFS test suite:
+.Lk https://github.com/openzfs/zfs/tree/master/tests
+.Sh HISTORY
+Written for
+.Xr kldload 7 ,
+which ships it preinstalled, and published separately so it can be used and
+updated without adopting a substrate.
+Nothing in the harness knows about kldload: a stock Debian host with
+.Sy zfsutils-linux
+and
+.Sy libvirt-daemon-system
+runs it.
+.Sh AUTHORS
+.An kldload Aq Mt anthony@kldload.com
+.Sh CAVEATS
+One VM runs at a time.
+Memory is sized from what the host has free on the assumption that nothing
+else is competing, so a run on a busy hypervisor will size small or collide.
+.Pp
+The first golden build needs a network to fetch cloud images.
+Afterwards the images are cached and rebuilds are local.
+.Pp
+Results live at
+.Pa /root/kzfs-test
+and the cloud image cache at
+.Pa /var/lib/libvirt/isos ;
+both paths are currently fixed.
+.Pp
+Root is required.
+The harness drives libvirt, creates zvols and writes under
+.Pa /root .
+.Pp
+A golden is a point in time.
+The distribution it came from keeps moving, so a golden built months ago
+tests the kernel and ZFS of months ago.
+That is sometimes exactly what you want and sometimes not what you meant.
+.Cm kzfs-test status
+prints the kernel and ZFS each golden actually carries; read it before
+trusting an old matrix.

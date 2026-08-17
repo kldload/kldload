@@ -743,6 +743,26 @@ func RunGUI(resultsDir string) error {
 		), nil, nil, nil, bpfLog.view)
 
 	// ── frame ───────────────────────────────────────────────────────
+	// ─── Manual ──────────────────────────────────────────────────────────
+	// The page is embedded in the binary (see manual.go), so a static build
+	// copied onto a stranger's machine is never undocumented — and it renders
+	// through mandoc or man when either is present, falling back to the mdoc
+	// source when neither is. Same treatment zxplore, wgxplore and vmxplore
+	// give theirs, so the family reads as one product from the first screen.
+	//
+	// Rendered on a background goroutine: mandoc takes a beat on a cold cache,
+	// and a console that stalls opening its own help is a bad console.
+	manBody := widget.NewRichText()
+	manBody.Wrapping = fyne.TextWrapOff
+	manPane := container.NewScroll(manBody)
+	go func() {
+		text := renderManual()
+		fyne.Do(func() {
+			manBody.Segments = manualSegments(text)
+			manBody.Refresh()
+		})
+	}()
+
 	tabs := container.NewAppTabs(
 		container.NewTabItem("   Lab   ", labPane),
 		container.NewTabItem("   Run   ", runPane),
@@ -750,6 +770,7 @@ func RunGUI(resultsDir string) error {
 		container.NewTabItem("   Kernel   ", kernPane),
 		container.NewTabItem("   Metrics   ", metricsPane),
 		container.NewTabItem("   eBPF   ", bpfPane),
+		container.NewTabItem("   Manual   ", manPane),
 	)
 
 	header := container.NewVBox(
