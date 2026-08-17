@@ -74,6 +74,64 @@ The consoles shell out to
 .Xr zfs 8
 and ssh, and every run leaves its full log on disk
 .Pq see Sx FILES .
+.Sh QUICK START
+Everything, from an empty pool to a matrix, in the order you would type it.
+.Bd -literal -offset indent
+# 1. build the goldens — one-time, cached, ~3-5 min each
+kzfs-test golden all
+
+# 2. confirm they boot and ZFS loads before committing to a long run
+kzfs-test verify
+
+# 3. run the suite
+kzfs-test run --quick                    # ~15 min across the matrix
+kzfs-test run --full                     # the whole suite, hours
+kzfs-test run --full --distro debian     # one distribution
+
+# 4. read the result
+kzfs-test status                         # goldens, VMs, last run
+kzfs-test results                        # the matrix
+
+# 5. clean up
+kzfs-test destroy                        # test VMs only
+kzfs-test destroy --all                  # goldens too
+.Ed
+.Pp
+Testing one specific ZFS everywhere instead of each distribution's own:
+.Bd -literal -offset indent
+kzfs-test golden all --zfs-git @master
+kzfs-test golden all --zfs-version 2.3.0
+kzfs-test golden debian --zfs-tarball ~/zfs.tar.gz
+kzfs-test run --full
+.Ed
+.Pp
+The consoles, which drive all of the above:
+.Bd -literal -offset indent
+ztx                                      # GUI
+ztx --tui                                # terminal, for headless hosts
+ztx --results                            # print the last matrix and exit
+ztx --runs                               # list previous runs
+ztx --kernel                             # kernel + ZFS per golden
+ztx --metrics                            # where the dashboards are
+ztx --version
+.Ed
+.Pp
+.Sy WHILE IT RUNS, WATCH IT HERE .
+The run is live in Grafana from the first test:
+.Bd -literal -offset indent
+https://<host>:8443/grafana/d/klab-test-matrix/    pass/fail per distro
+https://<host>:8443/grafana/d/ztxplore-metrics/    lab overview
+https://<host>:8443/grafana/d/kldload-zfs-live/    live test bench
+https://<host>:8443/grafana/d/klab-test-debug/     per-VM debug
+.Ed
+.Pp
+All four are in the
+.Sy ZFS Test Lab
+folder in Grafana, alongside the
+.Sy ZFS
+folder that carries pool health, scrub history and compression.
+Counts appear while the suite is still running — see
+.Sx METRICS .
 .Sh THE MODEL
 A
 .Em golden
@@ -214,10 +272,27 @@ Counts come from each run's summary file when it exists and from a live parse
 of the log while it does not, so a run in flight is visible rather than
 opaque.
 .Pp
+.Sy WHERE TO LOOK .
 Grafana dashboards live under the
-.Em ZFS Test Lab
-folder: a run matrix, per-VM debug, a live test bench, and the ztxplore
-metrics overview.
+.Sy ZFS Test Lab
+folder, reachable at
+.Pa https://<host>:8443/grafana/ :
+.Bl -tag -width "klab-test-matrix" -compact
+.It Pa klab-test-matrix
+pass, fail and skip per distribution — the one to open first
+.It Pa ztxplore-metrics
+lab overview: goldens, sizes, kernel and ZFS labels
+.It Pa kldload-zfs-live
+live test bench while a suite is running
+.It Pa klab-test-debug
+per-VM detail when one distribution misbehaves
+.El
+.Pp
+The neighbouring
+.Sy ZFS
+folder carries the pool itself: health, scrub history and compression.
+So "is the pool healthy" and "did the suite pass" sit one click apart,
+rather than three folders apart as they used to.
 The exporter is optional.
 Without it the tests run exactly the same and only the graphs are missing.
 .Sh ENVIRONMENT

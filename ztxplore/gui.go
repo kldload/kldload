@@ -39,6 +39,7 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -745,16 +746,34 @@ func RunGUI(resultsDir string) error {
 	// ── frame ───────────────────────────────────────────────────────
 	// ─── Manual ──────────────────────────────────────────────────────────
 	// The page is embedded in the binary (see manual.go), so a static build
-	// copied onto a stranger's machine is never undocumented — and it renders
-	// through mandoc or man when either is present, falling back to the mdoc
-	// source when neither is. Same treatment zxplore, wgxplore and vmxplore
-	// give theirs, so the family reads as one product from the first screen.
+	// copied onto a stranger's machine is never undocumented, and it renders
+	// through mandoc or man when either is present.
 	//
-	// Rendered on a background goroutine: mandoc takes a beat on a cold cache,
-	// and a console that stalls opening its own help is a bad console.
+	// Presented the way zxplore, wgxplore and vmxplore present theirs: the
+	// logo, the spaced wordmark, the section reference and the version above
+	// the rendered page. The family should look like one product from the
+	// first screen a new user opens, and a help screen that is just a wall of
+	// text is where that impression is usually lost.
+	manLogo := canvas.NewImageFromResource(
+		fyne.NewStaticResource("ztxplore.svg", iconSVG))
+	manLogo.FillMode = canvas.ImageFillContain
+	manLogo.SetMinSize(fyne.NewSize(96, 96))
+
+	manTitle := canvas.NewText("z t x p l o r e", accent)
+	manTitle.TextStyle = fyne.TextStyle{Bold: true}
+	manTitle.TextSize = 26
+	manSub := canvas.NewText("the OpenZFS test lab — ztxplore(1)", okGreen)
+	manSub.TextSize = 13
+	manVer := canvas.NewText("v"+version+" b"+buildNum, warnGold)
+	manVer.TextSize = 12
+	manHead := container.NewCenter(container.NewHBox(
+		manLogo, container.NewVBox(manTitle, manSub, manVer)))
+
+	// Rendered on a background goroutine: mandoc takes a beat on a cold
+	// cache, and a console that stalls opening its own help is a bad console.
 	manBody := widget.NewRichText()
 	manBody.Wrapping = fyne.TextWrapOff
-	manPane := container.NewScroll(manBody)
+	manScroll := container.NewScroll(container.NewCenter(manBody))
 	go func() {
 		text := renderManual()
 		fyne.Do(func() {
@@ -762,6 +781,12 @@ func RunGUI(resultsDir string) error {
 			manBody.Refresh()
 		})
 	}()
+
+	manSite, _ := url.Parse("https://kldload.com")
+	manPane := container.NewBorder(
+		container.NewPadded(manHead),
+		container.NewPadded(widget.NewHyperlink("powered by kldload.com", manSite)),
+		nil, nil, manScroll)
 
 	tabs := container.NewAppTabs(
 		container.NewTabItem("   Lab   ", labPane),

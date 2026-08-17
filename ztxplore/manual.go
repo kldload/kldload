@@ -82,6 +82,15 @@ func stripOverstrike(s string) string {
 }
 
 // manHeadRE matches a man SECTION HEADER line: all caps, column zero.
+// manTokenRE matches the things worth colouring inside a line: URLs first
+// (they contain slashes), then absolute paths, then flags, then the names of
+// the commands this page documents.
+var manTokenRE = regexp.MustCompile(
+	`https?://[^\s,]+` +
+		`|/(?:etc|var|root|usr|dev|tmp)[A-Za-z0-9_./<>-]*` +
+		`|(?:^|\s)--?[a-z][a-z-]*` +
+		`|\b(?:kzfs-test|ztxplore|ztx|zfs-tests\.sh|virsh|virt-install|zfs|zpool|mandoc)\b`)
+
 var manHeadRE = regexp.MustCompile(`^[A-Z][A-Z0-9 /()-]*$`)
 
 // manualSegments colours the rendered manual for RichText.
@@ -98,12 +107,52 @@ func manualSegments(text string) []widget.RichTextSegment {
 		return &widget.TextSegment{Text: s, Style: widget.RichTextStyle{
 			Inline: true, TextStyle: st, ColorName: cn}}
 	}
+
+	// Colour carries meaning, so the eye can find things without reading:
+	//
+	//	section headers  accent, bold   the map of the page
+	//	commands         success        what you type
+	//	flags            warning        how you change it
+	//	paths and URLs   hyperlink      where things are
+	//
+	// A manual rendered in one colour is a wall, and a wall is what people
+	// close. The other consoles in the family colour theirs the same way.
 	var out []widget.RichTextSegment
 	for _, line := range strings.Split(text, "\n") {
-		if line != "" && manHeadRE.MatchString(strings.TrimRight(line, " ")) {
+		trimmed := strings.TrimRight(line, " ")
+
+		// Whole-line: a section header owns its line.
+		if trimmed != "" && manHeadRE.MatchString(trimmed) {
 			out = append(out, seg(line, theme.ColorNamePrimary, true))
-		} else {
-			out = append(out, seg(line, theme.ColorNameForeground, false))
+			out = append(out, seg("\n", theme.ColorNameForeground, false))
+			continue
+		}
+
+		// Inline: walk the line and colour the tokens that mean something.
+		// Order matters — URLs contain slashes, so they must match before
+		// the path pattern gets a chance at them.
+		rest := line
+		for rest != "" {
+			loc := manTokenRE.FindStringIndex(rest)
+			if loc == nil {
+				out = append(out, seg(rest, theme.ColorNameForeground, false))
+				break
+			}
+			if loc[0] > 0 {
+				out = append(out, seg(rest[:loc[0]], theme.ColorNameForeground, false))
+			}
+			tok := rest[loc[0]:loc[1]]
+			switch {
+			case strings.HasPrefix(tok, "http"):
+				out = append(out, seg(tok, theme.ColorNameHyperlink, false))
+			case strings.HasPrefix(tok, "-"):
+				out = append(out, seg(tok, theme.ColorNameWarning, false))
+			case strings.HasPrefix(tok, "/"):
+				out = append(out, seg(tok, theme.ColorNameHyperlink, false))
+			default:
+				out = append(out, seg(tok, theme.ColorNameSuccess, true))
+			}
+			rest = rest[loc[1]:]
 		}
 		out = append(out, seg("\n", theme.ColorNameForeground, false))
 	}
