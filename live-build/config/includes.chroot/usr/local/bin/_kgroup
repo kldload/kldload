@@ -154,8 +154,14 @@ disk)
         10
     # zfsdist is a bpftrace script, not a stock bcc tool. Reuse the same
     # script-on-disk approach _kebpf-io uses so behaviour matches there.
-    mkdir -p /run/kldload
-    cat >/run/kldload/zfsdist.bt <<'BT'
+    #
+    # WARN: XDG_RUNTIME_DIR, not /run/kldload — that one is root-owned 0755
+    # (it holds webui.sock) and this runs as the desktop user, so both the
+    # mkdir and the heredoc failed silently and the pane looped on
+    # "failed to open file". (fiend, 2026-08-17)
+    _btdir="${XDG_RUNTIME_DIR:-/tmp}/kldload"
+    mkdir -p "$_btdir"
+    cat >"$_btdir/zfsdist.bt" <<'BT'
 kprobe:zfs_read,kprobe:zfs_write { @start[tid] = nsecs; }
 kretprobe:zfs_read /@start[tid]/ { @us["zfs_read"]  = hist((nsecs - @start[tid])/1000); delete(@start[tid]); }
 kretprobe:zfs_write /@start[tid]/ { @us["zfs_write"] = hist((nsecs - @start[tid])/1000); delete(@start[tid]); }
@@ -165,7 +171,7 @@ BT
         $(printf '%q ' \
         'ZFS per-call latency histogram in microseconds, refreshed every 5s.' \
         'Most heat in 4-32µs on healthy NVMe. Right-shift = scrub or txg pressure.' \
-        -f text /run/kldload/zfsdist.bt)"
+        -f text "$_btdir/zfsdist.bt")"
     tmux select-window -t "${SESSION}:=biosnoop"
     ;;
 

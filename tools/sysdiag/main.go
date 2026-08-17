@@ -98,6 +98,34 @@ var sections = []section{
 		"sensors 2>/dev/null | head -18 || echo '(install lm_sensors)'",
 		"lspci | head -25",
 	}},
+	// eBPF — is the machinery there, and is anything using it?
+	//
+	// This section answers "can this kernel do eBPF and is kldload's share of
+	// it alive", NOT "trace something for me". A diagnostic console must
+	// return promptly; every bcc tool worth running is a sampler that blocks
+	// until you stop it, so those belong in ztxplore's trace tab, not here.
+	//
+	// The bcc lookup is spelled out because the tools are never installed
+	// under the bare name: Debian ships <name>-bpfcc in /usr/sbin, RHEL puts
+	// them in /usr/share/bcc/tools which is on nobody's PATH. Reporting "not
+	// installed" for a package that is installed is worse than saying nothing.
+	{"ebpf", []string{
+		"echo '— kernel support —'; " +
+			"test -f /sys/kernel/btf/vmlinux && echo 'BTF: present (CO-RE works)' || echo 'BTF: MISSING — CO-RE probes will not load'; " +
+			"sysctl -n kernel.unprivileged_bpf_disabled 2>/dev/null | " +
+			"sed 's/^0$/unprivileged bpf: allowed/;s/^1$/unprivileged bpf: disabled (root only)/;s/^2$/unprivileged bpf: disabled/'",
+		"echo '— tooling —'; " +
+			"command -v bpftrace >/dev/null && bpftrace --version 2>&1 | head -1 || echo 'bpftrace: not installed'; " +
+			"n=$(ls /usr/sbin/*-bpfcc /usr/share/bcc/tools/* 2>/dev/null | wc -l); " +
+			"echo \"bcc tools: $n found\"; " +
+			"ls /usr/sbin/*-bpfcc 2>/dev/null | head -4 | sed 's|.*/|  |'",
+		"echo '— exporter —'; " +
+			"systemctl is-active ebpf_exporter 2>/dev/null | sed 's/^/ebpf_exporter: /'; " +
+			"curl -s --max-time 3 http://127.0.0.1:9435/metrics 2>/dev/null | grep -c '^ebpf_exporter\\|^bio' | sed 's/^/metric series: /' || echo 'metrics: not answering'",
+		"echo '— loaded programs —'; " +
+			"bpftool prog show 2>/dev/null | grep -cE '^[0-9]+:' | sed 's/^/programs attached: /' || echo '(bpftool not installed or needs root)'; " +
+			"bpftool prog show 2>/dev/null | grep -oE 'name [a-z_]+' | sort | uniq -c | sort -rn | head -6",
+	}},
 	{"journal", []string{
 		"journalctl -n 40 --no-pager 2>/dev/null || echo '(journal needs privileges — run as root)'",
 	}},

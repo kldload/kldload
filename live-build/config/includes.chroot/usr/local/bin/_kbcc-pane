@@ -1,79 +1,297 @@
 #!/usr/bin/env bash
-# Helper for the F4/F5 eBPF cockpits — prints a 4-line banner
-# (command, description, what-to-look-for, rule) then runs the tool
-# in a restart loop so the pane never goes "dead". If the tool exits
-# (no events to print, BPF detach, sudo permission glitch, anything),
-# the loop prints a short note and retries after 3 seconds — keeping
-# the audience's attention on a live, banner-led view instead of a
-# "↩ tool exited" tmux dead-pane prompt that needs a click to dismiss.
+# ─────────────────────────────────────────────────────────────────────────
+# _kbcc-pane — run one eBPF tool in a cockpit pane, on whatever substrate
+#              this actually is.
 #
-# Usage:  _kbcc-pane <tool> "<desc>" "<hint>" [tool-args...]
+# What it does, in order:
+#   1. Identifies the distro family (rpm / deb / arch) from /etc/os-release.
+#   2. Builds an ORDERED list of every implementation of the requested tool
+#      that exists on this box: libbpf CO-RE binary, bcc python build,
+#      bpftrace script. The order is family-dependent (see below).
+#   3. Prints a banner (command, description, what to look for, backend).
+#   4. Runs the first candidate. If it dies in under MIN_ALIVE seconds it is
+#      declared unusable and the NEXT candidate is tried — so a pane heals
+#      itself instead of restart-looping on a tool that cannot work here.
+#   5. Restarts the surviving candidate forever, so the pane is never a dead
+#      tmux prompt the operator has to click to dismiss.
 #
-# Tool-resolution order (CO-RE FIRST): /usr/bin/bpf-<tool> (libbpf-tools,
-# BTF-based — runs on modern kernels), then upstream <tool>, then
-# <tool>-bpfcc, then legacy /usr/share/bcc/tools/<tool>. The CO-RE binary
-# is preferred because legacy bcc runtime-compiles BPF-C against kernel
-# headers and FAILS on kernel 7.0 (fs.h `static_assert sizeof(struct
-# filename) % 64` breaks Clang → every F-key died rc=1, 2026-06-13). Legacy
-# stays as the fallback for older substrates (RHEL 9 / 5.14 still compiles).
-# Falls through to a helpful message if none exist; the loop keeps the pane
-# alive regardless.
+# WHY the ordering is per-family: bcc's python tools compile their BPF-C
+# against the running kernel's headers at each start. Debian trixie ships
+# bcc 0.31 + clang 19 against kernel 7.1, and fs.h's
+#   static_assert(sizeof(struct filename) % 64 == 0)
+# fails under that clang — EVERY bcc tool exits rc=1 with a page of clang
+# errors, which is exactly what F5/F6/F7/F11/F12 showed on fiend
+# (2026-08-17). The same tools are fine on Fedora/RHEL, where bcc and the
+# kernel ship from one distro and are built to agree. libbpf-tools have no
+# such coupling: they are pre-compiled and relocate against BTF at load, so
+# they run on any kernel with /sys/kernel/btf/vmlinux. Hence:
+#   deb   → CO-RE, then bpftrace, then bcc (bcc is known-broken there)
+#   rpm   → CO-RE, then bcc, then bpftrace (bcc is first-class there)
+#
+# Naming differs per packaging, which is why probing is by absolute path:
+#   Debian  libbpf-tools → /usr/sbin/<tool>-libbpf
+#   Debian  bcc          → /usr/sbin/<tool>-bpfcc   (and /usr/sbin is NOT in
+#                          a desktop user's PATH on trixie)
+#   Fedora  bcc          → /usr/share/bcc/tools/<tool>
+#   others  libbpf-tools → /usr/bin/bpf-<tool>, /usr/libexec/bpf-tools/<tool>
+#
+# Two tools are renamed by libbpf-tools upstream (killsnoop→sigsnoop) and
+# two take different flags there (see CORE_ARGS), so the tables below are
+# not decoration — a blind s/-bpfcc/-libbpf/ produces a pane that argues
+# with its own arguments.
+#
+# Usage:  _kbcc-pane <tool> "<desc>" "<hint>" [bcc-style tool args...]
+#         The args are written in bcc's dialect; CORE_ARGS translates them
+#         for the CO-RE build where the two disagree.
+#
+# Inputs:  /etc/os-release, /usr/sbin, /usr/bin, /usr/share/bcc/tools,
+#          /usr/share/bpftrace/tools. Writes /run/kldload/*.bt for the
+#          bpftrace fallbacks it has to synthesise.
+# Outputs: a live pane. Never exits on its own.
+#
+# Notes:
+#   - MIN_ALIVE is the whole safety mechanism: "exited immediately" is the
+#     only reliable signal that a tool cannot run here, because bcc reports
+#     a failed BPF compile the same way a tool with nothing to print does.
+#   - A candidate that survives MIN_ALIVE is pinned. Otherwise a tool that
+#     runs for an hour and then dies would demote itself to a worse backend.
+# ─────────────────────────────────────────────────────────────────────────
 set -u
-tool="$1"
-desc="$2"
-hint="$3"
-shift 3
+
+tool="${1:-}"
+desc="${2:-}"
+hint="${3:-}"
+[[ -n "$tool" ]] || {
+    echo "usage: _kbcc-pane <tool> <desc> <hint> [args...]" >&2
+    exit 2
+}
+shift 3 2>/dev/null || shift $#
 args=("$@")
+
+# Seconds a candidate must survive before we believe it works here.
+MIN_ALIVE=6
 
 # ANSI palette
 C=$'\033[1;36m'
 D=$'\033[2;37m'
 Y=$'\033[33m'
+G=$'\033[32m'
 N=$'\033[0m'
 
-# Resolve tool path once so we don't recompute every restart.
-# CO-RE (libbpf-tools) FIRST — see header note: it's the only one that runs
-# on kernel 7.0. Legacy bcc paths remain as fallbacks for older kernels.
-if [ -x "/usr/bin/bpf-$tool" ]; then
-    bin="sudo /usr/bin/bpf-$tool"
-elif command -v "bpf-$tool" >/dev/null 2>&1; then
-    bin="sudo bpf-$tool"
-elif command -v "$tool" >/dev/null 2>&1; then
-    bin="sudo $tool"
-elif command -v "${tool}-bpfcc" >/dev/null 2>&1; then
-    bin="sudo ${tool}-bpfcc"
-# Debian installs the bcc tools into /usr/sbin with a -bpfcc suffix, and
-# /usr/sbin is NOT in a desktop user's PATH there (measured on trixie:
-# PATH=/usr/local/bin:/usr/bin:/bin:/usr/games). So `command -v` above says
-# "missing" for a tool that is installed and works — every eBPF F-key pane
-# went dead on Debian while /usr/sbin/execsnoop-bpfcc ran fine by hand.
-# Probe the absolute path the same way the legacy bcc path below is probed.
-# HISTORY: 2026-08-14, fiend.
-elif [ -x "/usr/sbin/${tool}-bpfcc" ]; then
-    bin="sudo /usr/sbin/${tool}-bpfcc"
-elif [ -x "/usr/sbin/$tool" ]; then
-    bin="sudo /usr/sbin/$tool"
-elif [ -x "/usr/share/bcc/tools/$tool" ]; then
-    bin="sudo /usr/share/bcc/tools/$tool"
+# ── Substrate identification ──────────────────────────────────────────
+# Family, not distro: the packaging layout is what changes, and it changes
+# per family. ID_LIKE catches the derivatives (Rocky/Alma say rhel, Mint
+# says debian) without a case arm each.
+_family() {
+    local id like
+    id=$(
+        . /etc/os-release 2>/dev/null
+        printf '%s' "${ID:-}"
+    )
+    like=$(
+        . /etc/os-release 2>/dev/null
+        printf '%s' "${ID_LIKE:-}"
+    )
+    case " $id $like " in
+    *" debian "* | *" ubuntu "*) printf 'deb' ;;
+    *" rhel "* | *" fedora "* | *" centos "*) printf 'rpm' ;;
+    *" arch "*) printf 'arch' ;;
+    *) printf 'unknown' ;;
+    esac
+}
+FAMILY=$(_family)
+
+# ── Per-tool implementation tables ────────────────────────────────────
+# CORE_NAME: bcc tool name → libbpf-tools name. Absent means "no CO-RE
+# build exists upstream" (fileslower, tcpretrans), not "same name".
+declare -A CORE_NAME=(
+    [biolatency]=biolatency [biosnoop]=biosnoop [biotop]=biotop
+    [cachestat]=cachestat [capable]=capable [cpudist]=cpudist
+    [execsnoop]=execsnoop [exitsnoop]=exitsnoop [filetop]=filetop
+    [funclatency]=funclatency [hardirqs]=hardirqs [killsnoop]=sigsnoop
+    [llcstat]=llcstat [memleak]=memleak [mountsnoop]=mountsnoop
+    [offcputime]=offcputime [oomkill]=oomkill [opensnoop]=opensnoop
+    [profile]=profile [readahead]=readahead [runqlat]=runqlat
+    [runqlen]=runqlen [softirqs]=softirqs [statsnoop]=statsnoop
+    [syscount]=syscount [tcpconnect]=tcpconnect [tcpconnlat]=tcpconnlat
+    [tcplife]=tcplife [tcprtt]=tcprtt [tcptop]=tcptop [vfsstat]=vfsstat
+)
+
+# CORE_ARGS: where the CO-RE build's flags differ from bcc's, the whole
+# argument vector for the CO-RE build. Only tools that actually disagree
+# belong here; everything else passes the caller's args through.
+#   syscount: bcc has -T <top N>; libbpf-tools has no such flag and errors
+#             out on it. Interval-only is the closest honest equivalent.
+declare -A CORE_ARGS=(
+    [syscount]='-i 5'
+)
+
+# BT_NAME: bcc tool name → bpftrace script basename. bpftrace parses BTF
+# rather than kernel headers, so these run where bcc cannot. `__vfsslower`
+# is ours (see _write_bt) because upstream has no fileslower.bt.
+declare -A BT_NAME=(
+    [biolatency]=biolatency [biosnoop]=biosnoop [capable]=capable
+    [execsnoop]=execsnoop [killsnoop]=killsnoop [opensnoop]=opensnoop
+    [runqlat]=runqlat [statsnoop]=statsnoop [syscount]=syscount
+    [tcpconnect]=tcpconnect [tcplife]=tcplife [tcpretrans]=tcpretrans
+    [vfsstat]=vfsstat [fileslower]=__vfsslower
+)
+
+# ── Synthesised bpftrace fallbacks ────────────────────────────────────
+# fileslower has no CO-RE build and no upstream .bt, and it is the one
+# I/O pane that matters on a ZFS box — fsslower-libbpf only knows
+# ext4/xfs/btrfs/nfs, so it cannot replace it. This traces the VFS layer
+# instead, which is filesystem-agnostic and therefore covers ZFS.
+# $1 is the millisecond threshold, matching bcc fileslower's positional.
+#
+# WARN: written under XDG_RUNTIME_DIR, not /run/kldload. The latter is
+# root-owned 0755 (it holds webui.sock), so the pane — which runs as the
+# desktop user — cannot create a file there. It failed silently: the
+# heredoc redirect died, bpftrace was handed a path that did not exist,
+# and the pane restart-looped on "failed to open file". The same trap ate
+# _kgroup's zfsdist.bt. (fiend, 2026-08-17)
+_write_bt() {
+    local name="$1" thresh="${2:-10}" dir="${XDG_RUNTIME_DIR:-/tmp}/kldload"
+    mkdir -p "$dir" || return 1
+    case "$name" in
+    __vfsslower)
+        cat >"$dir/vfsslower.bt" <<BT
+kprobe:vfs_read,kprobe:vfs_write { @s[tid] = nsecs; }
+kretprobe:vfs_read /@s[tid]/ {
+    \$ms = (nsecs - @s[tid]) / 1000000; delete(@s[tid]);
+    if (\$ms >= $thresh) { printf("%-8s %-16s %-6d R %6d ms\n", strftime("%H:%M:%S", nsecs), comm, pid, \$ms); }
+}
+kretprobe:vfs_write /@s[tid]/ {
+    \$ms = (nsecs - @s[tid]) / 1000000; delete(@s[tid]);
+    if (\$ms >= $thresh) { printf("%-8s %-16s %-6d W %6d ms\n", strftime("%H:%M:%S", nsecs), comm, pid, \$ms); }
+}
+BEGIN { printf("%-8s %-16s %-6s %s %9s\n", "TIME", "COMM", "PID", "T", "LAT"); }
+BT
+        printf '%s' "$dir/vfsslower.bt"
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+# ── Candidate construction ────────────────────────────────────────────
+# Two parallel arrays rather than one command string: the args have to
+# survive as separate words without re-splitting on the operator's behalf.
+CAND_BIN=()
+CAND_ARG=()
+CAND_KIND=()
+
+_add() { # _add <path> <kind> [args...]
+    local path="$1" kind="$2"
+    shift 2
+    [[ -x "$path" ]] || return 0
+    CAND_BIN+=("$path")
+    CAND_ARG+=("$*")
+    CAND_KIND+=("$kind")
+}
+
+_add_core() {
+    local c="${CORE_NAME[$tool]:-}" a
+    [[ -n "$c" ]] || return 0
+    a="${CORE_ARGS[$tool]:-${args[*]:-}}"
+    local p
+    for p in "/usr/sbin/${c}-libbpf" "/usr/bin/${c}-libbpf" \
+        "/usr/bin/bpf-${c}" "/usr/sbin/bpf-${c}" \
+        "/usr/libexec/bpf-tools/${c}"; do
+        # shellcheck disable=SC2086  # $a is our own table value, tokens intended
+        _add "$p" "libbpf CO-RE" $a
+    done
+}
+
+_add_bcc() {
+    local p
+    for p in "/usr/share/bcc/tools/${tool}" \
+        "/usr/sbin/${tool}-bpfcc" "/usr/bin/${tool}-bpfcc" \
+        "/usr/sbin/${tool}" "/usr/bin/${tool}"; do
+        _add "$p" "bcc python" "${args[@]:-}"
+    done
+}
+
+_add_bt() {
+    local b="${BT_NAME[$tool]:-}" p
+    [[ -n "$b" ]] || return 0
+    if [[ "$b" == __* ]]; then
+        p=$(_write_bt "$b" "${args[0]:-10}") || return 0
+        # bpftrace absent yields an empty path, and _add's -x test rejects it —
+        # this substrate simply has one fewer backend.
+        [[ -n "$p" ]] && _add "$(command -v bpftrace || true)" "bpftrace" "$p"
+        return 0
+    fi
+    for p in "/usr/sbin/${b}.bt" "/usr/share/bpftrace/tools/${b}.bt" \
+        "/usr/bin/${b}.bt"; do
+        _add "$p" "bpftrace"
+    done
+}
+
+if [[ "$tool" == "bpftrace" ]]; then
+    # Called with a script of our own (zfsdist and friends) — no table, no
+    # alternatives, the caller already chose the implementation.
+    _add "$(command -v bpftrace || true)" "bpftrace" "${args[@]:-}"
 else
-    bin=""
+    case "$FAMILY" in
+    deb)
+        _add_core
+        _add_bt
+        _add_bcc
+        ;;
+    *)
+        _add_core
+        _add_bcc
+        _add_bt
+        ;;
+    esac
 fi
+
+# ── Run ───────────────────────────────────────────────────────────────
+idx=0
+pinned=0
 
 while :; do
     clear
-    printf "${C}\$ %s %s${N}\n" "$bin" "${args[*]}"
-    printf "${D}ℹ  %s${N}\n" "$desc"
-    printf "${D}👀 %s${N}\n" "$hint"
-    printf "${D}─────────────────────────────────────────────────────────────────────${N}\n"
-
-    if [ -z "$bin" ]; then
-        printf "${Y}[${tool}] not installed — pkg: bcc-tools or bpfcc-tools${N}\n"
+    if ((${#CAND_BIN[@]} == 0)); then
+        printf "${C}\$ %s${N}\n" "$tool"
+        printf "${D}ℹ  %s${N}\n" "$desc"
+        printf "${D}─────────────────────────────────────────────────────${N}\n"
+        case "$FAMILY" in
+        deb) printf "${Y}[%s] no eBPF implementation on this box — apt install libbpf-tools bpftrace bpfcc-tools${N}\n" "$tool" ;;
+        *) printf "${Y}[%s] no eBPF implementation on this box — dnf install bcc-tools bpftrace${N}\n" "$tool" ;;
+        esac
         sleep 99
         continue
     fi
 
-    $bin "${args[@]}"
+    bin="${CAND_BIN[idx]}"
+    kind="${CAND_KIND[idx]}"
+    read -r -a a <<<"${CAND_ARG[idx]}"
+
+    printf "${C}\$ sudo %s %s${N}\n" "$bin" "${a[*]}"
+    printf "${D}ℹ  %s${N}\n" "$desc"
+    printf "${D}👀 %s${N}\n" "$hint"
+    printf "${G}⚙  backend: %s${N}${D}  (%s substrate, %d of %d implementations present)${N}\n" \
+        "$kind" "$FAMILY" "$((idx + 1))" "${#CAND_BIN[@]}"
+    printf "${D}─────────────────────────────────────────────────────────────────────${N}\n"
+
+    started=$SECONDS
+    sudo "$bin" "${a[@]}"
     rc=$?
-    printf "\n${Y}[${tool}] exited (rc=%d) — restarting in 3s. Ctrl-C aborts.${N}\n" "$rc"
+    alive=$((SECONDS - started))
+    ((alive >= MIN_ALIVE)) && pinned=1
+
+    # Died on the spot and something else is available → this backend
+    # cannot run here. Say so and move down the list. bcc's failure mode
+    # is a page of clang errors above this line, so name the next one.
+    if ((pinned == 0 && rc != 0 && alive < MIN_ALIVE && idx + 1 < ${#CAND_BIN[@]})); then
+        idx=$((idx + 1))
+        printf "\n${Y}[%s] %s build failed here (rc=%d after %ds) — falling back to %s${N}\n" \
+            "$tool" "$kind" "$rc" "$alive" "${CAND_KIND[idx]}"
+        sleep 2
+        continue
+    fi
+
+    printf "\n${Y}[%s] exited (rc=%d) — restarting in 3s. Ctrl-C aborts.${N}\n" "$tool" "$rc"
     sleep 3
 done

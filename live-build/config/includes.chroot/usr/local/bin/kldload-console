@@ -135,7 +135,22 @@ if ! tmux has-session -t $SESSION 2>/dev/null; then
     # pre-loaded. Every F-key brings up its own content window on demand,
     # and pressing the same key again closes it. User controls what's
     # running, nothing steals CPU/memory just because the drawer is open.
-    tmux new-session -d -s $SESSION -n klab
+    # WHY -x/-y: a session created with -d has no client to measure, so tmux
+    # sizes it 80x24 and the greeting sent in on the next line composes for
+    # 80 columns — stacked and wrapped — before the client attaches at the
+    # real width. Hand tmux the terminal's actual size instead of racing it.
+    # (fiend, 2026-08-17; kldload-sysdiag shares this bootstrap and this bug.)
+    _tc=$(tput cols 2>/dev/null || echo 200)
+    _tl=$(tput lines 2>/dev/null || echo 50)
+    ((_tc >= 40)) || _tc=200
+    ((_tl >= 10)) || _tl=50
+    tmux new-session -d -s $SESSION -n klab -x "$_tc" -y "$_tl"
+    # Window names are addresses: F1 targets `klab`, and _kgroup decides
+    # "is this group already open?" by window name. automatic-rename
+    # overwrites them with the running command the moment one exits back
+    # to a shell, which orphans every name-based binding.
+    tmux set-option -g allow-rename off
+    tmux set-option -g automatic-rename off
     # Session-level survivability:
     #   destroy-unattached off — when ttyd's browser tab disconnects momentarily
     #     (network blip, iframe reload, F-key window churn under load), tmux

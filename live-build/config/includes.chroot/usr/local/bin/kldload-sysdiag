@@ -238,9 +238,28 @@ export -f _ktoggle-win
 
 # ── bootstrap session ─────────────────────────────────────────────────
 if ! tmux has-session -t $SESSION 2>/dev/null; then
-    tmux new-session -d -s $SESSION -n home
+    # WHY -x/-y: `new-session -d` creates the session DETACHED, and a
+    # detached session is 80x24 — tmux's default for "no client to measure".
+    # The greeting is sent into it immediately, so it composed itself for 80
+    # columns and only then did the client attach at 191, leaving the landing
+    # view stacked, wrapped and hugging the left edge of a wide window while
+    # the top of fastfetch scrolled away. Handing tmux the real terminal size
+    # up front removes the race rather than papering over it with a sleep.
+    # (fiend, 2026-08-17 — the same bootstrap in kldload-console had it too.)
+    _tc=$(tput cols 2>/dev/null || echo 200)
+    _tl=$(tput lines 2>/dev/null || echo 50)
+    ((_tc >= 40)) || _tc=200
+    ((_tl >= 10)) || _tl=50
+    tmux new-session -d -s $SESSION -n home -x "$_tc" -y "$_tl"
     tmux set-option -g destroy-unattached off
     tmux set-option -g remain-on-exit on
+    # Window names are addresses here: F1 targets `home`, and _kgroup /
+    # _ktoggle-win decide "is this group already open?" by window name.
+    # tmux's automatic-rename overwrites them with the running command as
+    # soon as one exits back to a shell — `home` became `bash`, and F1
+    # then selected a window that no longer existed under that name.
+    tmux set-option -g allow-rename off
+    tmux set-option -g automatic-rename off
     tmux set-hook -g pane-died 'display-message -d 0 "↩ tool exited — Enter / Alt+X to close"'
     tmux bind-key -T root -N "close dead pane with Enter" Enter \
         if-shell -F "#{pane_dead}" "kill-pane" "send-keys Enter"
