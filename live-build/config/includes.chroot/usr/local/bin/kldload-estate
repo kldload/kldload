@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+# ══════════════════════════════════════════════════════════════════════════════
+# kldload-estate — one truth about every machine, by comparing all of them
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# What it does, in order:
+#   1. Asks each subsystem what it believes: libvirt, the kldload state DB,
+#      DHCP leases, WireGuard, Kubernetes, and (optionally) SSH.
+#   2. Merges those beliefs per machine.
+#   3. Reports where they DISAGREE, because disagreement is the bug.
+#
+# WHY this exists: every subsystem already has an excellent console, and each
+# one tells the truth about its own layer. Nothing compared them. On a running
+# host, `kubectl get nodes` reported six control planes and workers Ready while
+# `wg show` had four peers — two control planes had joined Kubernetes but were
+# never added to the WireGuard mesh, so the hypervisor could not reach them on
+# the very addresses kubelet advertised. Both tools were correct. The cluster
+# was broken. It was found by eye, in a GUI, by chance (2026-08-17).
+#
+# This is the missing view: not another list of VMs, but the one place the
+# layers are put side by side so drift cannot hide.
+#
+# Inputs:  virsh, wg, kubectl, kldload-db — whichever are present.
+# Outputs: JSON on stdout (the contract). --table renders the same data for a
+#          terminal; nothing else in this program formats anything.
+#
+# Notes:
+#   - Every subprocess has a timeout. A wedged libvirt must not wedge the view
+#     an operator opened *because* something is wedged.
+#   - Missing tools degrade to an absent column, never an error: this runs on a
+#     server with no Kubernetes and on a laptop with no cluster at all.
+#   - The SSH probe is opt-in (--probe). It is the only slow check, and the one
+#     that answers "can Ansible actually reach this".
+# ══════════════════════════════════════════════════════════════════════════════
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+from typing import Any
+
+TIMEOUT = 8  # seconds; every external call is bounded
+
+
+def _run(cmd: list[str], timeout: int = TIMEOUT) -> str:
+    """Run a command, return stdout, never raise.
+
+    Args:
+        cmd: argv list. Never a shell string — these take hostnames from a
+             database and a shell would make that an injection surface.
+        timeout: seconds before giving up on a wedged daemon.
+
+    Returns:
+        stdout on success, "" on any failure, timeout, or missing binary.
+    """
+    if not shutil.which(cmd[0]):
+        return ""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.stdout if p.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+# ── Sources ──────────────────────────────────────────────────────────────────
+# Each returns {machine_name: fact}. A source that cannot answer returns {} and
+# the column simply does not appear, rather than the whole view failing.
+
+
+def src_libvirt() -> dict[str, str]:
+    """Domain power state from libvirt. The authority on 'is it running'."""
+    out = _run(["virsh", "list", "--all"])
+    state: dict[str, str] = {}
+    for line in out.splitlines()[2:]:
+        parts = line.split(None, 2)
+        if len(parts) >= 3:
+            state[parts[1]] = parts[2].strip()
+    return state
+
+
+def src_db() -> dict[str, dict[str, Any]]:
+    """What kldload believes each VM is: class, cluster, address, status."""
+    out = _run(["kldload-db", "dump"])
+    if not out:
+        return {}
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return {}
+    vms: dict[str, dict[str, Any]] = {}
+    for v in data.get("vms", []):
+        if v.get("deleted_at"):
+            continue
+        vms[v["name"]] = {
+            "role": v.get("role") or "",
+            "status": v.get("status") or "",
+            "ip": v.get("ip_addr") or "",
+            "cluster": v.get("cluster_id") or "",
+            "golden_src": v.get("golden_src") or "",
+        }
+    return vms
+
+
+def src_leases() -> dict[str, dict[str, str]]:
+    """Addresses libvirt actually handed out, and on which network.
+
+    A lease OUTLIVES the guest that held it, so this is evidence of an address,
+    never evidence that a machine is up. Cross-checked against libvirt state.
+    """
+    leases: dict[str, dict[str, str]] = {}
+    for net in _run(["virsh", "net-list", "--name"]).split():
+        for line in _run(["virsh", "net-dhcp-leases", net]).splitlines()[2:]:
+            f = line.split()
+            # date time MAC proto IP/prefix hostname client-id
+            if len(f) >= 6 and f[5] != "-":
+                leases[f[5]] = {"ip": f[4].split("/")[0], "network": net}
+    return leases
+
+
+def src_wireguard() -> dict[str, str]:
+    """Peer addresses present in the mesh, keyed by allowed-ip.
+
+    Keyed by ADDRESS rather than name because WireGuard has no idea what a
+    machine is called — which is precisely why a missing peer is invisible
+    from every other tool.
+    """
+    peers: dict[str, str] = {}
+    for iface in _run(["wg", "show", "interfaces"]).split():
+        for line in _run(["wg", "show", iface, "allowed-ips"]).splitlines():
+            for ip in re.findall(r"(\d+\.\d+\.\d+\.\d+)/\d+", line):
+                peers.setdefault(ip, "")
+                peers[ip] = (peers[ip] + " " + iface).strip()
+    return peers
+
+
+def src_kubernetes() -> dict[str, dict[str, str]]:
+    """Node membership and readiness, plus the address kubelet advertises.
+
+    That advertised address is the interesting part: a node can be Ready while
+    the address it publishes is unreachable from the hypervisor.
+    """
+    out = _run(
+        ["kubectl", "get", "nodes", "-o", "json"],
+        timeout=12,
+    )
+    if not out:
+        return {}
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return {}
+    nodes: dict[str, dict[str, str]] = {}
+    for item in data.get("items", []):
+        name = item["metadata"]["name"]
+        ready = "NotReady"
+        for c in item.get("status", {}).get("conditions", []):
+            if c.get("type") == "Ready":
+                ready = "Ready" if c.get("status") == "True" else "NotReady"
+        addr = ""
+        for a in item.get("status", {}).get("addresses", []):
+            if a.get("type") == "InternalIP":
+                addr = a.get("address", "")
+                break
+        nodes[name] = {"ready": ready, "node_ip": addr}
+    return nodes
+
+
+def probe_ssh(host: str, ip: str) -> bool:
+    """Can we open an SSH session? The only check Ansible's success depends on.
+
+    Opt-in: it is the one slow source, and on a large estate it dominates.
+    """
+    if not ip:
+        return False
+    out = _run(
+        [
+            "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+            "-o", "ConnectTimeout=3", f"root@{ip}", "true",
+        ],
+        timeout=6,
+    )
+    return out is not None and out == ""  # empty stdout + rc 0 == reachable
+
+
+# ── Merge ────────────────────────────────────────────────────────────────────
+
+
+def collect(probe: bool = False) -> dict[str, Any]:
+    """Build the estate: every machine any source knows about, plus drift.
+
+    Returns:
+        {"machines": [...], "drift": [...], "sources": {...}}
+        `drift` is the point of the program — each entry is a disagreement
+        between two subsystems, with enough detail to act on.
+    """
+    libvirt = src_libvirt()
+    db = src_db()
+    leases = src_leases()
+    wg = src_wireguard()
+    k8s = src_kubernetes()
+
+    names = set(libvirt) | set(db) | set(k8s)
+    machines: list[dict[str, Any]] = []
+    drift: list[dict[str, str]] = []
+
+    for name in sorted(names):
+        d = db.get(name, {})
+        lease = leases.get(name, {})
+        knode = k8s.get(name, {})
+        power = libvirt.get(name, "")
+        running = power == "running"
+
+        # Prefer the address kubelet publishes, then the DB, then the lease.
+        ip = knode.get("node_ip") or d.get("ip") or lease.get("ip") or ""
+
+        m: dict[str, Any] = {
+            "name": name,
+            "class": d.get("role") or ("node" if knode else "unknown"),
+            "power": power or "absent",
+            "db_status": d.get("status", ""),
+            "ip": ip,
+            "network": lease.get("network", ""),
+            "in_mesh": bool(ip and ip in wg),
+            "mesh_ifaces": wg.get(ip, ""),
+            "k8s": knode.get("ready", ""),
+            "golden_src": d.get("golden_src", ""),
+            "targetable": bool(running and ip),
+        }
+        if probe and running and ip:
+            m["ssh"] = probe_ssh(name, ip)
+        machines.append(m)
+
+        # ── the findings ──────────────────────────────────────────────────
+        if knode and running and ip and not m["in_mesh"] and wg:
+            drift.append({
+                "machine": name,
+                "kind": "mesh-missing",
+                "detail": f"Kubernetes reports {knode.get('ready')} on {ip}, "
+                          f"but no WireGuard peer covers that address",
+                "repair": "kube-cluster mesh-repair",
+            })
+        if running and not ip:
+            drift.append({
+                "machine": name,
+                "kind": "no-address",
+                "detail": "running, but no address is known — invisible to Ansible",
+                "repair": "kldload-networks sync",
+            })
+        if not running and d.get("ip"):
+            drift.append({
+                "machine": name,
+                "kind": "stale-address",
+                "detail": f"powered off ({power or 'absent'}) but still holds {d['ip']}",
+                "repair": "kldload-networks sync",
+            })
+        if name in libvirt and name not in db and name not in k8s:
+            drift.append({
+                "machine": name,
+                "kind": "unregistered",
+                "detail": "libvirt knows this domain; the state DB does not",
+                "repair": f"kldload-db vm-register --name {name} --role <class>",
+            })
+
+    return {
+        "machines": machines,
+        "drift": drift,
+        "sources": {
+            "libvirt": bool(libvirt),
+            "state_db": bool(db),
+            "leases": bool(leases),
+            "wireguard": bool(wg),
+            "kubernetes": bool(k8s),
+        },
+    }
+
+
+# ── Rendering (the ONLY place this program formats anything) ─────────────────
+
+
+def render_table(est: dict[str, Any]) -> None:
+    """Human view of the same data the JSON carries. No extra facts."""
+    ms = est["machines"]
+    print(f"  {'MACHINE':<24}{'CLASS':<16}{'POWER':<11}{'ADDRESS':<17}"
+          f"{'MESH':<7}{'K8S':<10}TARGET")
+    print("  " + "-" * 92)
+    for m in ms:
+        mesh = "yes" if m["in_mesh"] else ("--" if not m["ip"] else "NO")
+        print(f"  {m['name']:<24}{m['class']:<16}{m['power']:<11}"
+              f"{m['ip'] or '-':<17}{mesh:<7}{m['k8s'] or '-':<10}"
+              f"{'yes' if m['targetable'] else 'no'}")
+
+    tgt = sum(1 for m in ms if m["targetable"])
+    print(f"\n  {len(ms)} machine(s), {tgt} targetable by Ansible.")
+
+    if est["drift"]:
+        print(f"\n  DRIFT — {len(est['drift'])} finding(s):\n")
+        for d in est["drift"]:
+            print(f"    [{d['kind']}] {d['machine']}")
+            print(f"      {d['detail']}")
+            print(f"      fix: {d['repair']}\n")
+    else:
+        print("\n  No drift: every subsystem agrees.")
+
+    missing = [k for k, v in est["sources"].items() if not v]
+    if missing:
+        print(f"  (not consulted: {', '.join(missing)})")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog="kldload-estate",
+        description="Reconcile every machine across libvirt, the state DB, "
+                    "DHCP, WireGuard and Kubernetes. Report disagreement.",
+    )
+    ap.add_argument("--table", action="store_true", help="human-readable output")
+    ap.add_argument("--drift", action="store_true", help="only the findings")
+    ap.add_argument("--probe", action="store_true", help="also test SSH reachability (slow)")
+    args = ap.parse_args()
+
+    est = collect(probe=args.probe)
+
+    if args.drift:
+        if args.table:
+            for d in est["drift"]:
+                print(f"[{d['kind']}] {d['machine']}: {d['detail']}\n  fix: {d['repair']}")
+        else:
+            print(json.dumps(est["drift"], indent=2))
+        return 1 if est["drift"] else 0
+
+    if args.table:
+        render_table(est)
+    else:
+        print(json.dumps(est, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
