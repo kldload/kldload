@@ -37,6 +37,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -142,6 +143,46 @@ func (r *Runner) Busy() bool {
 // Blocks until the command finishes. Callers run it on their own goroutine;
 // doing that here would hide the completion, and completion is the thing a
 // caller most needs to know.
+// resolveBCCTool maps a bcc tool's logical name to what it is actually called
+// on this system.
+//
+// WHY: bcc installs its tools under a different name on every distro family,
+// and none of them is the bare name the catalogue uses:
+//
+//	Debian/Ubuntu   /usr/sbin/execsnoop-bpfcc      (a "-bpfcc" suffix)
+//	RHEL/Fedora     /usr/share/bcc/tools/execsnoop (not on PATH at all)
+//
+// So `execsnoop` resolves nowhere on either family, and every bcc-backed entry
+// in the Trace panel failed while the packages sat installed and working. Only
+// bpftrace worked, because bpftrace is a real binary on PATH — which is what
+// made it look like eBPF was missing rather than misnamed (operator report,
+// 2026-08-17).
+//
+// Returns the resolved path, or the name unchanged when nothing matches, so
+// the failure still surfaces as a normal "not found" from exec rather than as
+// a silent no-op here.
+func resolveBCCTool(name string) string {
+	// bpftrace is a real binary and takes no suffix.
+	if name == "bpftrace" {
+		return name
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	if p, err := exec.LookPath(name + "-bpfcc"); err == nil {
+		return p
+	}
+	for _, dir := range []string{"/usr/share/bcc/tools", "/usr/sbin", "/usr/bin"} {
+		for _, cand := range []string{name, name + "-bpfcc", name + ".py"} {
+			full := filepath.Join(dir, cand)
+			if fi, err := os.Stat(full); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+				return full
+			}
+		}
+	}
+	return name
+}
+
 func (r *Runner) Start(argv []string, extraEnv []string, out Streamer) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("nothing to run")
@@ -166,7 +207,9 @@ func (r *Runner) Start(argv []string, extraEnv []string, out Streamer) error {
 		cancel()
 	}()
 
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	// Resolve here rather than in Argv(): Argv stays pure and testable,
+	// and the name it returns is the logical one the catalogue uses.
+	cmd := exec.CommandContext(ctx, resolveBCCTool(argv[0]), argv[1:]...)
 	cmd.Env = append(os.Environ(), extraEnv...)
 	// Its own process group, so Stop can take the children with it.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
