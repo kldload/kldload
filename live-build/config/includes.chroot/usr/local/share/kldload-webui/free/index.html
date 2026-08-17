@@ -291,6 +291,22 @@ html.kld-app #term-drawer{display:none!important;}
           <div class="stat-value ok" id="s-nic" style="font-size:0.95rem">—</div>
           <div class="stat-sub" id="s-ip">—</div>
         </div>
+        <!-- 1.4.0: the two substrate properties that are invisible when they
+             work. An operator has no other way to see that the kernel is
+             pinned and that there is a way back, and every release before this
+             one shipped with neither applied while nothing said so. Hidden
+             when the data is unavailable rather than showing a zero, which
+             would read as "unprotected". -->
+        <div class="stat-card" id="pinned-card" style="display:none">
+          <div class="stat-label">Pinned</div>
+          <div class="stat-value ok" id="s-pinned">—</div>
+          <div class="stat-sub">kernel + ZFS + NVIDIA</div>
+        </div>
+        <div class="stat-card" id="rollback-card" style="display:none">
+          <div class="stat-label">Rollback points</div>
+          <div class="stat-value ok" id="s-rollback">—</div>
+          <div class="stat-sub" id="s-be">—</div>
+        </div>
         <div class="stat-card" id="ai-status-card" style="display:none">
           <div class="stat-label">AI Chat</div>
           <div class="stat-value" id="s-ai" style="font-size:0.95rem">—</div>
@@ -3965,6 +3981,18 @@ function handle(msg) {
       document.getElementById('s-hostname').textContent  = d.hostname || '—';
       document.getElementById('s-uptime').textContent    = d.uptime   || '—';
       document.getElementById('s-cpus').textContent      = d.cpus     || '—';
+      // Show only when the backend could actually answer. A dash means "not
+      // measured"; a zero would mean "measured, and you have none" — a very
+      // different statement to put in front of an operator.
+      if (d.pinned_packages !== null && d.pinned_packages !== undefined) {
+        document.getElementById('s-pinned').textContent = d.pinned_packages;
+        document.getElementById('pinned-card').style.display = '';
+      }
+      if (d.rollback_points !== undefined) {
+        document.getElementById('s-rollback').textContent = d.rollback_points;
+        document.getElementById('s-be').textContent = d.boot_environment || '—';
+        document.getElementById('rollback-card').style.display = '';
+      }
       document.getElementById('s-mem').textContent       = d.memory_total || '—';
       document.getElementById('s-mem-free').textContent  = 'free: ' + (d.memory_free || '—');
       document.title = (d.hostname || 'kldload') + ' — kldload';

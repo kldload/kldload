@@ -912,6 +912,35 @@ def get_system_info():
         info["uptime"] = uptime_s
     except Exception:
         pass
+
+    # ── 1.4.0: the substrate's two safety properties, surfaced ────────────
+    # Both are invisible when they work, which is exactly why they belong on
+    # the dashboard: an operator has no other way to see that the kernel is
+    # pinned and that there is a way back. Every prior release shipped with
+    # neither applied and nothing said so.
+    try:
+        held = subprocess.check_output(["apt-mark", "showhold"],
+                                       text=True, timeout=5).split()
+        info["pinned_packages"] = len(held)
+    except Exception:
+        # dnf/pacman substrates, or apt-mark absent: report nothing rather
+        # than a zero that would read as "unprotected".
+        info["pinned_packages"] = None
+    try:
+        # Rollback points are snapshots of the running boot environment. The
+        # count matters more than the names: "can I get back" is a yes/no an
+        # operator wants answered without opening a console.
+        be = subprocess.check_output(
+            ["zpool", "get", "-H", "-o", "value", "bootfs", "rpool"],
+            text=True, timeout=5).strip()
+        if be and be != "-":
+            snaps = subprocess.check_output(
+                ["zfs", "list", "-H", "-t", "snapshot", "-o", "name", be],
+                text=True, timeout=8).splitlines()
+            info["rollback_points"] = len([x for x in snaps if x.strip()])
+            info["boot_environment"] = be.split("/")[-1]
+    except Exception:
+        pass
     try:
         with open("/etc/kldload/install-manifest.env") as f:
             for line in f:

@@ -351,6 +351,11 @@ _plan=(prereqs)
 [[ "${WANT[k8s]}" == "1" ]] && _plan+=(k8s-bootstrap)
 [[ "${WANT[ai]}" == "1" ]] && _plan+=(ai-wait)
 [[ "${WANT[klab]}" == "1" ]] && _plan+=(klab-goldens)
+# Desktop goldens are planned only when they will actually run, for the same
+# reason the ztest phase is: a phase in the plan that never fires leaves the
+# progress bar permanently short of its own total, which reads as a stall.
+[[ "${WANT[klab]}" == "1" && "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] &&
+    _plan+=(klab-desktop-goldens)
 # The ztest phase is PLANNED only when it will actually run. A phase in the
 # plan that never runs leaves the progress bar permanently short of its own
 # total, which reads as a stalled install.
@@ -1075,6 +1080,29 @@ if [[ "${WANT[klab]}" == "1" ]]; then
             else
                 _klab_ok=0
                 log "[klab] klab-firstboot.service did not complete within timeout — see /var/log/klab/"
+            fi
+        fi
+        # ── GNOME desktop goldens ─────────────────────────────────────
+        # ONLY when the operator ticked "Build all images". A desktop is
+        # ~6 GB of packages and about five minutes per distro on top of the
+        # lean golden, so it is not something to hand someone who asked for
+        # a workstation and got a 30 GB surprise.
+        #
+        # WHY IT EXISTS: the point of the golden is that the second desktop
+        # VM and the fiftieth both cost a zvol clone rather than a package
+        # install. Without this the operator has lean OS goldens and no way
+        # to spin up a demo fleet of workstations without building each one.
+        #
+        # Separate lineage: klab-desktop-<distro>, alongside
+        # klab-golden-<distro>. Non-fatal — a failed desktop leaves the lean
+        # goldens intact and the install still finishes.
+        if [[ "${KLDLOAD_BUILD_IMAGES:-0}" == "1" ]] && command -v klab >/dev/null 2>&1; then
+            phase "klab-desktop-goldens"
+            log "[klab] building GNOME desktop goldens (~6GB + ~5 min per distro)"
+            if klab golden-desktop >>"$LOG_FILE" 2>&1; then
+                log "[klab] desktop goldens ready — clone one with: kvm-clone klab-desktop-debian <name>"
+            else
+                log "[klab] WARNING desktop goldens incomplete — lean goldens are unaffected; see /var/log/klab/"
             fi
         fi
     else

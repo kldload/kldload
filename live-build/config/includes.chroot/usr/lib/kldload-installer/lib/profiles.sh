@@ -2465,20 +2465,40 @@ STORAGE
         # storage driver on first run and records it, and one that came up on
         # overlay2 will not move to zfs afterwards without discarding its
         # images.
-        if chroot "${target}" sh -c 'command -v dockerd >/dev/null 2>&1'; then
-            k_log_to "$log" "Configuring Docker for the ZFS storage driver"
-            chroot "${target}" bash -c \
-                'zfs create -p -o mountpoint=/var/lib/docker rpool/var/lib/docker' \
-                >>"$log" 2>&1 ||
-                k_log_to "$log" "WARNING: could not create rpool/var/lib/docker — Docker will fall back to overlay2"
-            mkdir -p "${target}/etc/docker"
-            cat >"${target}/etc/docker/daemon.json" <<'DOCKERJSON'
+        # NOT gated on dockerd being present yet. It used to be, and that is
+        # exactly how a machine ended up with Docker running on overlay2: the
+        # check ran before the package landed, the whole block was skipped, and
+        # dockerd later started with no dataset and no daemon.json, picked
+        # overlay2, and recorded the choice. Every layer was then an ordinary
+        # directory — zxplore said so on its Containers tab while the release
+        # notes claimed "Docker with its layers on ZFS" (fiend, 2026-08-17).
+        #
+        # The dataset and the config file are harmless on a target that never
+        # installs Docker: an empty dataset costs nothing and daemon.json is
+        # read by nothing else. Being unconditional is what makes the ordering
+        # irrelevant, and ordering is what broke it.
+        k_log_to "$log" "Configuring Docker for the ZFS storage driver"
+        chroot "${target}" bash -c \
+            'zfs create -p -o mountpoint=/var/lib/docker rpool/var/lib/docker' \
+            >>"$log" 2>&1 ||
+            k_log_to "$log" "WARNING: could not create rpool/var/lib/docker — Docker would fall back to overlay2"
+        mkdir -p "${target}/etc/docker"
+        cat >"${target}/etc/docker/daemon.json" <<'DOCKERJSON'
 {
   "storage-driver": "zfs",
   "data-root": "/var/lib/docker"
 }
 DOCKERJSON
+
+        if chroot "${target}" sh -c 'command -v dockerd >/dev/null 2>&1'; then
             chroot "${target}" systemctl enable docker 2>/dev/null || true
+            # Verify the OUTCOME, not that the files were written. A dataset
+            # and a config prove intent; only the driver Docker actually chose
+            # proves the result, and it cannot be re-chosen later without
+            # discarding every image.
+            if ! chroot "${target}" sh -c 'test -d /var/lib/docker' 2>/dev/null; then
+                k_log_to "$log" "WARNING: /var/lib/docker missing on target — Docker will pick overlay2 on first start"
+            fi
 
             # ── Who may talk to the daemon ───────────────────────────
             #
