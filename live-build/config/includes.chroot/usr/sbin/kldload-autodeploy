@@ -995,6 +995,69 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
                 chgrp kldload /var/lib/kldload/argocd-admin-password 2>/dev/null || true
                 log "[k8s] ArgoCD initial-admin password exposed at /var/lib/kldload/argocd-admin-password"
             fi
+
+            # ── The operator's own charts ─────────────────────────────────────
+            # Any *.tgz dropped into /root/darksite/helm-charts/workloads is
+            # installed here, into the cluster this box just built. That is the
+            # whole "bring your own workload" story: no registry to reach, no
+            # values plumbing, no pipeline — put the chart on the stick and it
+            # is running when the machine finishes booting.
+            #
+            # HISTORY: build-iso.sh created this directory and a comment
+            # promised it was "installed at first boot", the changelog and the
+            # README repeated it, and NOTHING read it. The directory shipped
+            # empty and inert for the whole 1.4.0 cycle. Caught 2026-08-17 while
+            # writing the website copy that would have advertised it. This is
+            # the code that makes the sentence true.
+            #
+            # Release name comes from the filename, so `wordpress.tgz` becomes
+            # release `wordpress`. Namespace is the release name too, created on
+            # demand: a chart the operator supplied should not land in
+            # kube-system next to the platform's own components.
+            #
+            # Each chart is its own transaction and a failure is logged and
+            # skipped, never fatal — one bad chart must not take the other
+            # charts, or the rest of first boot, with it. Same rule as the
+            # package transactions: nothing optional shares a fate with
+            # something required.
+            _wl_dir=/root/darksite/helm-charts/workloads
+            if [[ -d "$_wl_dir" ]]; then
+                shopt -s nullglob
+                _wl_charts=("$_wl_dir"/*.tgz)
+                shopt -u nullglob
+                if ((${#_wl_charts[@]} == 0)); then
+                    log "[k8s] no operator charts in ${_wl_dir} (drop a .tgz there to have it installed at first boot)"
+                else
+                    log "[k8s] installing ${#_wl_charts[@]} operator chart(s) from ${_wl_dir}"
+                    _wl_ok=0
+                    for _wl in "${_wl_charts[@]}"; do
+                        _wl_name="$(basename "$_wl" .tgz)"
+                        # Helm release names must be a lowercase RFC1123 label.
+                        _wl_rel="$(printf '%s' "$_wl_name" | tr '[:upper:]_' '[:lower:]-' |
+                            sed 's/[^a-z0-9-]//g; s/^-*//; s/-*$//' | cut -c1-53)"
+                        if [[ -z "$_wl_rel" ]]; then
+                            log "[k8s]   ${_wl_name}: no usable release name after sanitising — skipped"
+                            continue
+                        fi
+                        # --values <name>.values.yaml alongside the chart, if the
+                        # operator supplied one. Optional by design: a chart that
+                        # needs no values should need no file.
+                        _wl_args=(--create-namespace --namespace "$_wl_rel" --wait --timeout 10m)
+                        [[ -f "${_wl_dir}/${_wl_name}.values.yaml" ]] &&
+                            _wl_args+=(--values "${_wl_dir}/${_wl_name}.values.yaml") &&
+                            log "[k8s]   ${_wl_rel}: using ${_wl_name}.values.yaml"
+                        if helm upgrade --install "$_wl_rel" "$_wl" "${_wl_args[@]}" \
+                            >>"$LOG_FILE" 2>&1; then
+                            _wl_ok=$((_wl_ok + 1))
+                            log "[k8s]   ${_wl_rel}: installed into namespace ${_wl_rel}"
+                        else
+                            log "[k8s]   ${_wl_rel}: FAILED — see $LOG_FILE; other charts continue"
+                        fi
+                    done
+                    # Outcome, not exit code: say how many of how many landed.
+                    log "[k8s] operator charts: ${_wl_ok}/${#_wl_charts[@]} installed"
+                fi
+            fi
         else
             phase_state "k8s-bootstrap" failed
             log "[k8s] FAILED — see /var/log/kldload/kube-bootstrap.log"
@@ -1252,6 +1315,70 @@ for sub in k8s ai klab; do
         log "SKIP all-ready: ${sub} requested but no marker"
     fi
 done
+# ── Reclaim the AI darksite, once every piece of it is demonstrably spent ────
+# 5.4 GB of /root/darksite/ollama survived on every install: the model weights,
+# the ollama runtime tarball and the Open WebUI OCI image. kldload-firstboot's
+# _darksite_reclaim removes the DISTRO package mirrors and deliberately stops
+# there, and that is correct — it runs long before this script, and deleting the
+# helm charts at that point is what once sent an "air-gapped" box to the public
+# internet for 138 container images.
+#
+# But the ollama payload is consumed HERE, not in firstboot: the weights are
+# rehydrated by firstboot, while the runtime is installed and the webui image is
+# loaded by this script. So this is the earliest point at which all three are
+# spent, and the right place to free the space. Found by the post-install smoke
+# test asserting /root/darksite was gone when 5.4 GB of it was not (.113,
+# 2026-08-17); the install had two copies of the weights on disk.
+#
+# Each piece is gated on PROOF that it was consumed, not on "autodeploy got this
+# far". A missing proof keeps the source, because 2 GB of disk is cheaper than an
+# air-gapped machine that has to fetch a model it already shipped with.
+_reclaim_ai_darksite() {
+    local d=/root/darksite/ollama
+    [[ -d "$d" ]] || return 0
+    [[ -f /etc/kldload/keep-darksite ]] && {
+        log "[ai] LAN-mirror mode — keeping $d"
+        return 0
+    }
+    local freed=0
+
+    # models: proven by ollama listing at least one model from /srv.
+    if [[ -d "$d/models" ]]; then
+        if [[ -n "$(find /srv/ollama/models -name 'sha256-*' -size +1M 2>/dev/null | head -1)" ]]; then
+            rm -rf "$d/models" && freed=1
+            log "[ai] darksite models reclaimed — weights are live under /srv/ollama/models"
+        else
+            log "[ai] KEEPING darksite models — nothing rehydrated under /srv/ollama/models yet"
+        fi
+    fi
+    # runtime: proven by the binary existing.
+    if [[ -d "$d/runtime" ]]; then
+        if command -v ollama >/dev/null 2>&1; then
+            rm -rf "$d/runtime" && freed=1
+            log "[ai] darksite runtime reclaimed — $(ollama --version 2>/dev/null | head -1) is installed"
+        else
+            log "[ai] KEEPING darksite runtime — no ollama binary on PATH"
+        fi
+    fi
+    # webui: proven by the image being present in whichever runtime loaded it.
+    if [[ -d "$d/webui" ]]; then
+        if podman image exists ghcr.io/open-webui/open-webui:main 2>/dev/null ||
+            docker image inspect ghcr.io/open-webui/open-webui:main >/dev/null 2>&1; then
+            rm -rf "$d/webui" && freed=1
+            log "[ai] darksite webui image reclaimed — it is loaded in the container runtime"
+        else
+            log "[ai] KEEPING darksite webui image — not found in podman or docker"
+        fi
+    fi
+    # Only remove the parent if it is genuinely empty; helm-charts lives beside
+    # it and must survive (see _darksite_reclaim's header for what happens when
+    # it does not).
+    rmdir "$d" 2>/dev/null && log "[ai] $d removed"
+    ((freed)) && log "[ai] darksite now $(du -sh /root/darksite 2>/dev/null | cut -f1) (helm charts kept)"
+    return 0
+}
+_reclaim_ai_darksite
+
 if [[ $_all_ok -eq 1 ]]; then
     mark "all"
     phase "ready"

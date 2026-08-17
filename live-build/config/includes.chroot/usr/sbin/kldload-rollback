@@ -67,6 +67,8 @@ _current_be() {
     local pool bootfs
     pool="$(_pool)"
     [[ -n "$pool" ]] || return 1
+    # A pool with no bootfs set is a data pool, not a boot pool — skipped, not
+    # an error.
     bootfs="$(zpool get -H -o value bootfs "$pool" 2>/dev/null || true)"
     if [[ -n "$bootfs" && "$bootfs" != "-" ]]; then
         printf '%s\n' "$bootfs"
@@ -96,6 +98,8 @@ _rule() {
 # Grouped by who took it, because that is how an operator thinks about it:
 # "the one from just before I ran apt".
 _snapshots() {
+    # No snapshots yet is the state of a fresh install before the first
+    # transaction; the caller prints the 'take one first' guidance.
     zfs list -H -t snapshot -o name,creation,used -s creation "$BE" 2>/dev/null || true
 }
 
@@ -278,6 +282,8 @@ _clone_be() {
     # a locally-set property is not inherited by a clone. If the origin has
     # none, inheriting from the parent is the correct default and we leave it.
     local cmdline
+    # The property is unset on installs that boot the ESP kernel directly —
+    # absence is the ZBM-not-in-use case, handled by the caller.
     cmdline="$(zfs get -H -o value org.zfsbootmenu:commandline "$BE" 2>/dev/null || true)"
     if [[ -n "$cmdline" && "$cmdline" != "-" ]]; then
         zfs set "org.zfsbootmenu:commandline=${cmdline}" "$newbe" ||
@@ -291,6 +297,8 @@ leave a boot environment that would boot with the wrong kernel arguments"
     # Record where we came from, so `status` and a later operator can tell what
     # this environment is without reading the log.
     zfs set "org.kldload:rollback-from=${BE}" "$newbe" 2>/dev/null || true # cosmetic metadata only
+    # The tag is a breadcrumb for the operator, not a correctness requirement:
+    # failing to set it must not abort a rollback that already succeeded.
     zfs set "org.kldload:rollback-snapshot=${tag}" "$newbe" 2>/dev/null || true
 
     log "setting bootfs=$newbe on pool $POOL"
@@ -415,18 +423,33 @@ cmd_status() {
         fi
     fi
     local n
+    # grep -c exits 1 when the count is zero, which is a legitimate answer.
     n="$(_snapshots | grep -c . || true)"
     say ""
     say "Snapshots of the running environment: ${n:-0}"
     local last
     last="$(_pick_last)"
     [[ -n "$last" ]] && say "Newest pre-transaction snapshot     : $last"
-    # Holds are the other half of the update model; surfacing them here means
+    # Pins are the other half of the update model; surfacing them here means
     # one command answers "is this box pinned and can I get back?".
-    if command -v apt-mark >/dev/null 2>&1; then
-        local h
+    #
+    # Read the state file kldload-apply-platform-holds writes rather than any
+    # one manager's CLI: this ran `apt-mark showhold` unconditionally, so on a
+    # Fedora or Arch box the line simply did not print — indistinguishable, to
+    # an operator, from a box with nothing pinned. Fall back to apt-mark for
+    # systems installed before that file existed.
+    local h=""
+    if [[ -r /var/lib/kldload/platform-holds.list ]]; then
+        # grep -c exits 1 on an empty file — zero pinned packages, reported as 0.
+        h="$(grep -c . /var/lib/kldload/platform-holds.list 2>/dev/null || true)"
+    elif command -v apt-mark >/dev/null 2>&1; then
+        # Same: no holds is zero, not a failure.
         h="$(apt-mark showhold 2>/dev/null | grep -c . || true)"
-        say "Held platform packages             : ${h:-0}"
+    fi
+    if [[ -n "$h" ]]; then
+        say "Pinned platform packages           : ${h:-0}"
+    else
+        say "Pinned platform packages           : unknown (holds have not run)"
     fi
 }
 

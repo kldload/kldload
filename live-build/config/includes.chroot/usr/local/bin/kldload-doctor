@@ -29,6 +29,7 @@
 from __future__ import annotations
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -896,7 +897,55 @@ def check_darksite_images():
                    "k8s container images cached", f"{have} image tarball(s)")
 
 
+def check_docker_storage_driver():
+    """Docker must use the zfs driver, not overlay2.
+
+    WHY THIS CHECK EXISTS: kldload shipped claiming "Docker with its layers on
+    ZFS" while Docker was running on overlay2 on a real install. Everything
+    worked — pulls, runs, builds — so nothing complained. What was lost is the
+    entire reason for the claim: on zfs each layer is a dataset, a pull is a
+    clone, layers inherit compression, and the whole container estate can be
+    snapshotted and sent as one recursive stream. On overlay2 a layer is a
+    directory with no handle to snapshot or send.
+
+    It is also nearly unfixable after the fact: Docker records its driver on
+    first start and will not move to zfs without discarding every image. So the
+    window to catch it is now, not when someone tries to replicate a container
+    estate and finds there is nothing to send.
+    """
+    if not shutil.which("docker"):
+        return _result("containers", "docker storage driver", "skip", "",
+                       "docker not installed")
+    try:
+        out = subprocess.run(["docker", "info", "--format", "{{.Driver}}"],
+                             capture_output=True, text=True, timeout=10)
+        driver = (out.stdout or "").strip()
+    except Exception:
+        return _result("containers", "docker storage driver", "skip", "",
+                       "could not query the docker daemon")
+    if not driver:
+        return _result("containers", "docker storage driver", "skip", "",
+                       "docker daemon not answering")
+    if driver == "zfs":
+        return _result("containers", "docker storage driver", "ok",
+                       "docker info reports the zfs driver",
+                       "layers are datasets — snapshot, clone and send apply")
+    return _result("containers", "docker storage driver", "fail",
+                   "docker info reports the zfs driver",
+                   f"running on {driver} — layers are ordinary "
+                   "directories, so they cannot be snapshotted or sent",
+                   severity="high",
+                   remediation=(
+                       "Docker keeps its first choice. With no images worth "
+                       "preserving: systemctl stop docker; rm -rf "
+                       "/var/lib/docker; zfs create -o "
+                       "mountpoint=/var/lib/docker rpool/var/lib/docker; "
+                       "printf '{\"storage-driver\":\"zfs\"}' > "
+                       "/etc/docker/daemon.json; systemctl start docker"))
+
+
 CHECKS = [
+    check_docker_storage_driver,
     check_zfs_pool, check_zfs_errors, check_zfs_arc_target, check_sanoid_timer,
     check_kldload_datasets, check_secrets_encryption,
     check_wireguard_module, check_wg_interfaces, check_virbr0,

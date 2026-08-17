@@ -896,12 +896,24 @@ _k_bootstrap_dnf() {
     local distro="${KLDLOAD_DISTRO:-centos}"
 
     # Fedora uses its own release version, not the EL release. Default F44:
-    # F44 ships kernel 7.0.x (currently 7.0.12-201.fc44) and the zfsonlinux fc44
-    # build serves OpenZFS 2.4.3, which conflicts only at kernel > 7.0.999 — so
-    # F44's native kernel is fully buildable and we NO LONGER pin it (the old
-    # exclude=kernel-7.* / 6.19 cap is gone; see build-iso.sh). The installed
-    # system versionlocks the shipped kernel+zfs pair at firstboot, so a routine
-    # update can't drift onto a kernel ZFS can't build for.
+    # F44's updates repo now serves kernel 7.1.x and has PRUNED 7.0.x entirely,
+    # while the zfsonlinux fc44 build still serves OpenZFS 2.4.3 with its
+    # `Conflicts: kernel-uname-r > 7.0.999` cap. So the kernel IS pinned again —
+    # to 7.0.14-201.fc44, the newest 7.0.x, fetched from koji URLs because the
+    # mirrors no longer carry it (KOJI_KERNEL_NVR in build-iso.sh is the single
+    # source of that value; this comment is not).
+    #
+    # HISTORY: the pin was dropped when F44 shipped 7.0.12 and zfs could build
+    # against the native kernel, then REINSTATED 2026-07-23 when the predicted
+    # 7.1 window opened. A comment here claimed "7.0.12" and "we NO LONGER pin
+    # it" for three weeks after that stopped being true, which is exactly the
+    # kind of stale note that sends the next person looking for a bug that is
+    # not there (asked 2026-08-17: "isn't fedora kernel pinning working? it was
+    # pinned to 7.0.12 for a long time" — it was, and now it is 7.0.14).
+    #
+    # The installed system versionlocks the shipped kernel+zfs pair at
+    # firstboot, so a routine update can't drift onto a kernel ZFS can't build
+    # for.
     # WARN: OpenZFS 2.4 caps at kernel 7.0.999. If F44 ships 7.1 before a
     # 7.1-capable ZFS lands, the build aborts on dep resolution (fix = zfs bump,
     # not a kernel pin). KLDLOAD_FEDORA_RELEASE=43 for the older 6.17 GA.
@@ -963,7 +975,21 @@ ROCKYREPO
             k_log_to "$log" "RHEL auth: username/password (user=${rhel_user})"
         elif [[ -n "${rhel_key}" && -n "${rhel_org}" ]]; then
             rhel_auth="activation"
-            k_log_to "$log" "RHEL auth: activation key (key=${rhel_key}, org=${rhel_org})"
+            # The key is REDACTED, and the org id is not.
+            #
+            # This line used to print the activation key verbatim. That log is
+            # /var/log/installer/bootstrap.log, which kldload-install-target
+            # copies wholesale to ${target}/root/kldload-install-logs/ and then
+            # tells the operator about — so a Red Hat activation key ended up
+            # in plaintext on the installed disk, and would travel into any
+            # golden image sealed from it. Nothing scrubs it.
+            #
+            # The org id stays: it is not a secret (it identifies the account,
+            # not the bearer), and it is the first thing to check when a
+            # registration fails. The key's length is logged instead of the key,
+            # which is enough to tell "empty/truncated" from "wrong key" without
+            # writing the credential down. Found 2026-08-17.
+            k_log_to "$log" "RHEL auth: activation key (key=<redacted, ${#rhel_key} chars>, org=${rhel_org})"
         else
             k_die "RHEL install requires either KLDLOAD_RHEL_USERNAME + KLDLOAD_RHEL_PASSWORD (Red Hat portal login) or KLDLOAD_RHEL_KEY + KLDLOAD_RHEL_ORG (activation key + org ID)"
         fi
