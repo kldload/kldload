@@ -18,6 +18,40 @@ Pick a distro, pick a profile, install. The profiles are examples of what the su
 
 ![kldload Dashboard](screenshots/dashboard.png)
 
+### What it looks like once it is up
+
+**zxplore — the ZFS console.** Every dataset, every property, and the snapshot
+list that makes `apt rollback` possible.
+
+![zxplore datasets and snapshots](screenshots/zxplore-datasets-snapshots.png)
+
+**Docker's layers are ZFS datasets.** The storage driver is `zfs`, so a pull is
+a clone and every layer inherits the pool's compression.
+
+![Docker on ZFS in zxplore](screenshots/zxplore-docker-on-zfs.png)
+
+**wgxplore — the WireGuard estate.** Four planes across the fleet, joined into
+one view, with every peer no host declares called out.
+
+![wgxplore estate view](screenshots/wgxplore-estate.png)
+
+**Kubernetes, HA by default.** Three control planes behind a kube-vip VIP;
+adding a node reconciles the mesh, etcd and the firewall everywhere else.
+
+![Kubernetes in the web console](screenshots/console-kubernetes.png)
+
+![k9s showing the whole cluster](screenshots/k9s-cluster.png)
+
+**Metrics, grouped.** 29 Grafana dashboards: the estate, eBPF, the pool, and
+the OpenZFS test lab kept separate from it.
+
+![The metrics section](screenshots/console-metrics.png)
+
+**Man pages that travel with the binary.** `wgxplore(1)`, `vmxplore(1)` and
+`ztxplore(1)` embed their own manual and render it in-app.
+
+![wgxplore's embedded manual](screenshots/wgxplore-manual.png)
+
 ---
 
 ## Quickstart
@@ -413,6 +447,79 @@ The user picks the target distro at install time. After install the system runs 
 ---
 
 ## Releases
+
+### 1.4.0 &mdash; An update you can undo
+
+369 commits since 1.3.1: 106 features, 179 fixes, 389 files changed. Full
+detail in [CHANGELOG.md](CHANGELOG.md); the short version:
+
+**`apt` and `dnf` snapshot before every transaction, and any of them can be
+reversed.** These are the normal commands, not a wrapper &mdash; a script,
+`unattended-upgrades` or the GUI updater all get the same protection, because
+the hooks fire from inside the package manager.
+
+```console
+$ sudo apt upgrade
+kldload: snapshot rpool/ROOT/kldload@apt-pre-20260817-023105
+
+$ sudo apt rollback
+Rollback staged.
+  new environment : rpool/ROOT/rollback-20260817-023340
+  boot path       : direct kernel (Secure Boot compatible)
+
+$ systemctl reboot
+```
+
+Rollback **clones** the snapshot into a new boot environment rather than running
+`zfs rollback`, which cannot touch a mounted root and destroys every newer
+snapshot. Nothing is overwritten, and `apt rollback cancel` reverses it until
+you reboot. Under Secure Boot the ESP kernel, initrd and `grub.cfg` are rewritten
+to match the dataset &mdash; backed up first &mdash; because restoring a root
+without its matching kernel means no ZFS, no network and no disks.
+
+**The kernel is pinned as a matched set.** ZFS and NVIDIA are out-of-tree DKMS
+modules built against one specific kernel, so the kernel, the ZFS packages, the
+whole NVIDIA driver set and the boot chain are held together &mdash; 56 packages
+on a desktop install. `nvidia-container-toolkit` is deliberately excluded: own
+version line, not coupled to the kernel module.
+
+**A console per subsystem**, each shipping a GUI *and* a TUI so a headless
+hypervisor gets the same tool over SSH: `zxplore` (pools, datasets, snapshots,
+replication, both permission layers), `wgxplore` (every WireGuard interface and
+peer, declared against actual), `vmxplore` (the VM estate and its consoles),
+`ztxplore` (the OpenZFS test lab), `buildmon`. `vmxplore(1)` and `ztxplore(1)`
+carry full man pages embedded in the binary.
+
+**Kubernetes is HA by default** &mdash; three control planes via kube-vip, VIP
+float proven by failover, control planes addable after install, and node
+add/remove reconciling the WireGuard mesh, etcd membership and firewall rules on
+every other node. New day-2 verbs: port-forward, editing resources as YAML,
+Events, StatefulSets, DaemonSets, ConfigMaps, cluster start/stop.
+
+**The AI stack runs offline.** With `KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1` the ISO
+carries 5.4 GB &mdash; the model, the embedding model, the Open WebUI image and
+the Ollama runtime &mdash; so first boot has a working assistant with the network
+unplugged.
+
+**An estate Ansible can target.** VMs land on a network that says what they are
+(`kldload-networks apply`), a dynamic inventory turns that into groups, and
+`kldload-estate` reconciles what libvirt, the state database, DHCP, WireGuard and
+Kubernetes each believe &mdash; reporting where they disagree.
+
+**Also:** the OpenZFS test lab across six distributions on zvols with guest
+kernels pinned for the life of the build &middot; Docker with its layers on ZFS
+&middot; 29 Grafana dashboards, ZFS split between the pool and the test lab
+&middot; offline install for Debian, Fedora and RHEL &middot; `kexport` to
+qcow2, raw, VMDK or OVA, sealed by default.
+
+**Fixed, and you would have noticed:** nine of eleven systemd units never
+reached the ISO, so the package-holds unit, the ZFS dbgmsg collector and the apt
+snapshot hook shipped and did nothing &middot; darksite AI weights were ignored
+unless a checkbox was ticked &middot; NVIDIA was unheld, letting its userspace
+advance past the kernel module &middot; bcc tools were installed but never found,
+because their names and paths differ per distribution &middot; NetworkManager
+managed WireGuard, libvirt and Cilium interfaces and raised an activation failure
+for each during first boot.
 
 ### 1.4.0-rc2 &mdash; The ZFS Console (release candidate)
 
