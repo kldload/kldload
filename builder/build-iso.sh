@@ -3033,8 +3033,26 @@ mkdir -p "$SQUASHFS_DIR"
 # aarch64 it doesn't apply, so use arm filter there (or leave it off).
 SQFS_BCJ=(-Xbcj x86)
 [[ "$ARCH" == "aarch64" ]] && SQFS_BCJ=(-Xbcj arm)
+
+# ─── Leave the operator a machine ───────────────────────────────────────────
+#
+# mksquashfs with no -processors takes EVERY core, and -comp xz keeps them all
+# at 100% for the length of the compress — on a 24-core box that is the whole
+# machine, unusable, for the longest single step of the build.
+#
+# KLDLOAD_BUILD_PROCESSORS caps it. Unset means every core, which is what this
+# has always done and what CI wants; setting it is how you keep working while
+# a build runs. nice/ionice alone are not enough here: they yield CPU under
+# contention but a fully saturated scheduler still makes an interactive
+# session stutter, and the I/O of writing a 4 GB image is what makes a desktop
+# feel stalled.
+SQFS_PROC=()
+if [[ -n "${KLDLOAD_BUILD_PROCESSORS:-}" ]]; then
+    SQFS_PROC=(-processors "$KLDLOAD_BUILD_PROCESSORS")
+    log "squashfs limited to ${KLDLOAD_BUILD_PROCESSORS} of $(nproc) processors"
+fi
 mksquashfs "$ROOTFS" "${SQUASHFS_DIR}/squashfs.img" \
-    -comp xz "${SQFS_BCJ[@]}" -b 1M -noappend 2>&1 | tail -5
+    -comp xz "${SQFS_BCJ[@]}" "${SQFS_PROC[@]}" -b 1M -noappend 2>&1 | tail -5
 
 log "Squashfs: $(du -sh "${SQUASHFS_DIR}/squashfs.img" | cut -f1)"
 

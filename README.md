@@ -81,6 +81,13 @@ sudo ./deploy.sh burn /dev/sdX      # names the device, shows it, asks before wr
 
 Boot the USB &rarr; the web UI opens over TLS at `https://<host>:8443` &rarr; pick distro + profile + disk &rarr; install.
 
+Building saturates every core by default. To keep the machine usable while it
+runs, cap the compress step — it is the long one:
+
+```bash
+KLDLOAD_BUILD_PROCESSORS=$(( $(nproc) - 4 )) PROFILE=desktop ./deploy.sh build
+```
+
 ---
 
 ## Installing with Secure Boot &amp; encryption
