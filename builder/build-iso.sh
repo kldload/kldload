@@ -65,7 +65,7 @@ BUILD_DATE="$(date +%Y%m%d)"
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
 DISTRO_TAG="${DISTRO:-fedora}"
-VERSION="${KLDLOAD_VERSION:-1.4.0-rc14}"
+VERSION="${KLDLOAD_VERSION:-1.4.0}"
 ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
@@ -297,38 +297,35 @@ fi
 # cause SIGPIPE from "dnf | tee" to propagate as a non-zero exit, which set -e
 # would turn into a fatal build abort. The SIGPIPE is harmless (just tee closing).
 set +o pipefail
-# Kernel pin REINSTATED 2026-07-23: the predicted 7.1 window opened. F44
-# updates now serves kernel 7.1.4-202 (and pruned 7.0.x entirely), while the
-# OpenZFS 2.4 repo still serves zfs-dkms-2.4.3 with its
-# `Conflicts: kernel-uname-r > 7.0.999` cap — unpinned, this transaction
-# aborts on dep resolution (exactly as the previous comment here predicted).
+# ─── Kernel pin — RESOLVED AT BUILD TIME, not hardcoded ──────────────────────
+# OpenZFS is out-of-tree, so each release states the newest kernel it will
+# build against (`Conflicts: kernel-uname-r > X`). Fedora ships kernels faster
+# than OpenZFS blesses them: F44 now serves 7.1.x and has pruned 7.0.x from the
+# mirrors, while zfs-dkms 2.4.3 still caps at 7.0.999. Unpinned, this
+# transaction aborts on dep resolution.
 #
-# Pin choice: koji URLs for the newest 7.0.x NVR — the kernel line the
-# shipping ISOs already boot-verified with zfs 2.4.3 — rather than falling
-# back to GA 6.19.10 (an untested combo). Modules only build against RELEASE
-# zfs; the kernel holds at the newest that release supports. kojipkgs keeps
-# every built NVR forever (mirrors prune; updates-archive unreachable from
-# the builder, probed 2026-07-23). All six subpackage URLs verified 200.
-# The --exclude keeps any repo 7.1+ kernel out of the transaction; it does
-# NOT match the 7.0.x URL packages.
-# REMOVE this pin (restore kernel names in PKGS) when the 2.4 line ships a
-# zfs-dkms whose cap covers the then-current F44 kernel —
-# check: dnf repoquery --repoid=zfs zfs-dkms
-KOJI_KERNEL_NVR="7.0.14-201.fc44"
-KOJI_KERNEL_BASE="https://kojipkgs.fedoraproject.org/packages/kernel/${KOJI_KERNEL_NVR%%-*}/${KOJI_KERNEL_NVR#*-}/${ARCH}"
-KOJI_KERNEL_URLS=()
-# kernel-devel-matched must be pinned too: something in the closure requires
-# it, and without a matching provider on the command line dnf pulls the
-# repo's 6.19 one — which drags a SECOND kernel-core/devel into the
-# transaction (kernels are installonly, so dnf stacks both; verified
-# 2026-07-23).
-# kernel-modules-extra included: it wasn't pinned in the first 7.0.14 build,
-# so the resolver pulled the repo's 6.19.10 one — mixed-NVR modules-extra on
-# a 7.0.14 kernel (uncommon drivers missing) — caught on the smoke VM's
-# versionlock list 2026-07-23.
-for _ksub in kernel kernel-core kernel-modules kernel-modules-core kernel-modules-extra kernel-devel kernel-devel-matched; do
-    KOJI_KERNEL_URLS+=("${KOJI_KERNEL_BASE}/${_ksub}-${KOJI_KERNEL_NVR}.${ARCH}.rpm")
-done
+# This USED to be a hardcoded NVR that a human had to bump whenever the cap
+# moved — and nothing failed when nobody did, so the build quietly kept
+# shipping an older kernel while comments elsewhere claimed a value two pins
+# out of date. kernel-pin.sh reads the cap off the repo, finds the newest NVR
+# under it (mirrors first, then koji, which keeps every NVR forever), verifies
+# every subpackage URL is fetchable, and prints the result. So the pin tracks
+# the matched set at BUILD time, and moves on its own the day OpenZFS ships a
+# release whose cap covers a newer kernel.
+#
+# It exits 2 only when it cannot produce a fetchable pin at all — including its
+# own last-known-good fallback — and that is fatal on purpose: an ISO with a
+# guessed kernel is an ISO whose ZFS may not build, which is not a thing to
+# discover after install.
+log "Resolving the Fedora kernel pin against the zfs repo's cap…"
+if ! eval "$(ARCH="$ARCH" RELEASEVER=44 bash /build/builder/kernel-pin.sh)"; then
+    die "kernel-pin.sh could not resolve a fetchable kernel NVR — refusing to guess"
+fi
+KOJI_KERNEL_NVR="$KPIN_NVR"
+KOJI_KERNEL_BASE="$KPIN_BASE"
+KOJI_KERNEL_URLS=("${KPIN_URLS[@]}")
+KOJI_KERNEL_EXCLUDES=("${KPIN_EXCLUDES[@]}")
+log "Kernel pinned to ${KOJI_KERNEL_NVR} (${#KOJI_KERNEL_URLS[@]} subpackages, $(printf '%s ' "${KOJI_KERNEL_EXCLUDES[@]}"))"
 
 # ─── ZFS-from-git test mode (KLDLOAD_ZFS_GIT) ────────────────────────────────
 # OPT-IN escape hatch for the "zfs lags the kernel" window: build OpenZFS
@@ -385,7 +382,10 @@ DNF_KERNEL_ARGS=()
 if ((${#ZFS_GIT_RPMS[@]})); then
     DNF_KERNEL_ARGS=(kernel kernel-core kernel-modules kernel-devel)
 else
-    DNF_KERNEL_ARGS=(--exclude='kernel*-7.[1-9]*' "${KOJI_KERNEL_URLS[@]}")
+    # Excludes come from the resolver so they always match the pinned line —
+    # a hardcoded `--exclude=kernel*-7.[1-9]*` silently stops protecting
+    # anything the moment the pin moves to a different line.
+    DNF_KERNEL_ARGS=("${KOJI_KERNEL_EXCLUDES[@]}" "${KOJI_KERNEL_URLS[@]}")
 fi
 dnf --installroot="$ROOTFS" --releasever=44 --setopt=install_weak_deps=False \
     --setopt=tsflags=nodocs --nogpgcheck -y install \
@@ -1155,10 +1155,22 @@ else
     fi
 fi
 
-# Unmount chroot mounts
+# Unmount chroot mounts.
+#
+# Each swallow below covers ONE harmless case: the matching `mount --bind` a
+# thousand lines up is itself best-effort, so on a path where it did not run
+# (or ran twice and was already cleaned) umount exits non-zero because there
+# is nothing mounted there. That is the desired end state, not a failure —
+# and this is teardown, so aborting here would leave MORE mounted, not less.
+# A real failure (target busy) still prints to stderr; only the exit code is
+# ignored.
+# Nothing mounted at /dev/pts is the end state we want.
 umount "${ROOTFS}/dev/pts" 2>/dev/null || true
+# Nothing mounted at /dev is the end state we want.
 umount "${ROOTFS}/dev" 2>/dev/null || true
+# Nothing mounted at /sys is the end state we want.
 umount "${ROOTFS}/sys" 2>/dev/null || true
+# Nothing mounted at /proc is the end state we want.
 umount "${ROOTFS}/proc" 2>/dev/null || true
 
 # Download pacman-static for Arch Linux bootstrap support.
@@ -1286,24 +1298,28 @@ GDMCONF
 if [[ "$EDITION" != "core" && "${BOB_LIVE:-}" != "1" ]]; then
     mkdir -p "${ROOTFS}/etc/xdg/autostart"
 
-    # Carry kldload's own autostart entries from includes.chroot.
+    # The build monitor is NOT installed into the live session's autostart.
     #
-    # Only the build monitor by name, deliberately. includes.chroot also holds
-    # kldload-zfs-bookmarks.desktop, which is referenced by NOTHING in this
-    # build script or the installer — a dead file, and a glob here would
-    # silently switch it on for every user. It stays dead until someone
-    # decides otherwise on purpose.
+    # WHY: it exists to tell an operator "the post-install build is still
+    # running, do not reboot" — a state that cannot exist on the live ISO,
+    # because nothing has been installed yet. Autostarting it there opened a
+    # progress window over the installer for a build that was not happening.
     #
-    # The installer glob-copies /etc/xdg/autostart/kldload-*.desktop from the
-    # live system to the target (profiles.sh), so getting the file onto the
-    # LIVE rootfs here is what makes it reach an installed machine too.
-    if [[ -f /build/live-build/config/includes.chroot/etc/xdg/autostart/kldload-build-monitor.desktop ]]; then
-        install -m0644 \
-            /build/live-build/config/includes.chroot/etc/xdg/autostart/kldload-build-monitor.desktop \
-            "${ROOTFS}/etc/xdg/autostart/kldload-build-monitor.desktop"
-        log "Build-progress monitor autostart installed."
+    # It used to live in includes.chroot/etc/xdg/autostart/ and be copied here,
+    # which put it in the LIVE session's autostart dir — and the installer's
+    # glob-copy of /etc/xdg/autostart/kldload-*.desktop then carried it to the
+    # target. So the live copy was doing double duty as the staging copy, and
+    # simply deleting it would have taken the installed behaviour with it.
+    #
+    # It now lives under the installer's target-files/ tree, which reaches the
+    # ISO via the /usr/lib/kldload-installer copy further down and is installed
+    # onto the TARGET explicitly by profiles.sh. Staged, never live-active.
+    # (operator request, 2026-08-17.)
+    _bm_staged=/build/live-build/config/includes.chroot/usr/lib/kldload-installer/target-files/etc/xdg/autostart/kldload-build-monitor.desktop
+    if [[ -f "$_bm_staged" ]]; then
+        log "Build-progress monitor staged for install (not autostarted on live)."
     else
-        log "WARNING: kldload-build-monitor.desktop missing — an install will give no on-screen build progress."
+        die "kldload-build-monitor.desktop missing from target-files — an installed system would give no on-screen build progress"
     fi
 
     cat >"${ROOTFS}/etc/xdg/autostart/kldload-webui.desktop" <<'AUTOSTART'
@@ -1336,11 +1352,38 @@ GenericName=System installer
 Comment=Reopen the kldload installer UI
 Exec=/usr/local/bin/kldload-webui-launch
 Icon=kldload-console
-StartupWMClass=com.kldload.webui
+StartupWMClass=com.kldload.installer
 Terminal=false
 Categories=System;
 StartupNotify=true
 LIVEDESKTOP
+
+    # ── One window class, one owner ───────────────────────────────────────────
+    # GNOME matches a window to its .desktop by StartupWMClass and takes the
+    # dash icon from there. This entry used to claim `com.kldload.webui`, which
+    # the shipped kldload-webui.desktop ALSO claims — both launch the same UI
+    # through kldload-webui-launch. With two claimants the shell cannot decide
+    # which app the window belongs to and falls back to the generic icon: the
+    # blue diamond the operator saw in the dash. (reported 2026-08-17.)
+    #
+    # The fix is a distinct identity rather than removing a claim, because the
+    # two ARE different things: on live the window is the installer, on an
+    # installed system it is the dashboard. kldload-webui-launch emits
+    # com.kldload.installer when it detects the live medium and
+    # com.kldload.webui otherwise, so each entry owns exactly one class.
+    #
+    # NOT done by editing the live copy of kldload-webui.desktop: the installer
+    # glob-copies /usr/share/applications/kldload-*.desktop from the live system
+    # to the target, so stripping the claim there would have handed the same
+    # blue diamond to every INSTALLED machine instead. The live root is the
+    # source for the installed root; it cannot be used as scratch space.
+    _wmdupes=$(grep -rh '^StartupWMClass=com\.kldload\.' \
+        "${ROOTFS}/usr/share/applications/" 2>/dev/null | sort | uniq -d)
+    if [[ -n "$_wmdupes" ]]; then
+        die "two .desktop entries claim the same window class, the dash will show a generic icon: ${_wmdupes}"
+    fi
+    log "Window classes are unique across /usr/share/applications."
+
     mkdir -p "${ROOTFS}/etc/opt/chrome/policies/managed"
     cat >"${ROOTFS}/etc/opt/chrome/policies/managed/kldload-live.json" <<'LIVECHROME'
 {
