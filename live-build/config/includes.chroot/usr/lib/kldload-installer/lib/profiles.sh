@@ -728,7 +728,11 @@ k_install_system_files() {
             mkdir -p "${target}/usr/local/bin"
             cp /usr/local/bin/kldload-pkg-wrapper "${target}/usr/local/bin/kldload-pkg-wrapper"
             chmod +x "${target}/usr/local/bin/kldload-pkg-wrapper"
-            for _mgr in apt apt-get dnf; do
+            # dnf5 and yum are listed because on Fedora /usr/bin/dnf is a
+            # SYMLINK to dnf5 — wrapping only the `dnf` name leaves anyone
+            # who types the real binary, or the yum name muscle memory still
+            # reaches for, running an unsnapshotted transaction.
+            for _mgr in apt apt-get dnf dnf5 yum; do
                 if [[ -x "${target}/usr/bin/${_mgr}" ]]; then
                     ln -sf kldload-pkg-wrapper "${target}/usr/local/bin/${_mgr}"
                     k_log "wrapped ${_mgr} for snapshot+rollback"
@@ -1163,13 +1167,70 @@ DASHSTART
             # org.gnome.Terminal.desktop is deliberately NOT in this list —
             # it is the one 50-kldload-installed-favorites pins to the dock,
             # so it is the terminal the operator actually sees and uses.
+            # WHY BOTH KEYS: NoDisplay=true alone does NOT keep them out of
+            # the GNOME app grid. NoDisplay means "do not list me in menus",
+            # and GNOME Shell still enumerates the entry — so when Shell wrote
+            # its `app-picker-layout` at first login it recorded positions for
+            # org.kde.konsole, org.gnome.Ptyxis and org.gnome.Console, and an
+            # explicit position in that layout puts an app on the grid whether
+            # it is NoDisplay or not. Super+A then showed the three terminals
+            # this block exists to remove.
+            #
+            # Timestamps ruled out a race: the launchers were hidden at
+            # 21:47:40 and the first login was at 22:01:27, so they were
+            # already NoDisplay when Shell built the layout and Shell listed
+            # them anyway. (.105, Fedora 44 / GNOME 48, 2026-08-17.)
+            #
+            # Hidden=true is the stronger statement — the spec says treat the
+            # entry as if it did not exist — so Shell drops it from the app
+            # system entirely and cannot record a position for it. Nothing
+            # here depends on these .desktop files: kldload-term execs the
+            # konsole BINARY for its colourschemes, and the sysdiag launcher
+            # and build monitor exec ptyxis the binary. Only the launcher
+            # goes away.
+            # WHY THIS INSERTS RATHER THAN APPENDS — the whole reason this
+            # block never worked:
+            #
+            # A .desktop file is an INI, and these three all end with
+            # `[Desktop Action …]` groups (Ptyxis has three: new-window,
+            # new-tab, preferences; konsole has two). `printf >> file` puts
+            # the key at end of file, which is INSIDE the last action group,
+            # where NoDisplay means nothing at all. The installer logged "hid
+            # duplicate launcher" and the launcher stayed exactly where it
+            # was — success reported, nothing done, for as long as this block
+            # has existed. Verified on .105: line 265 of
+            # org.gnome.Ptyxis.desktop is `NoDisplay=true`, sitting under
+            # `[Desktop Action preferences]` at line 228. (2026-08-17.)
+            #
+            # So: strip any stray copies wherever they landed, then insert
+            # both keys immediately after the `[Desktop Entry]` header, which
+            # is the only group in which they are read.
+            #
+            # Both keys, because they say different things and only the second
+            # is strong enough: NoDisplay means "do not list me in menus", and
+            # GNOME Shell still enumerates the entry — it recorded grid
+            # positions for all three in `app-picker-layout`. Hidden means
+            # "treat this entry as deleted", so Shell drops it entirely.
+            #
+            # Nothing depends on these .desktop files: kldload-term execs the
+            # konsole BINARY for its colourschemes, and the sysdiag launcher
+            # and build monitor exec ptyxis the binary. Only the launcher goes.
             local _dupe
             for _dupe in org.gnome.Console.desktop org.gnome.Ptyxis.desktop \
                 org.kde.konsole.desktop system-config-printer.desktop; do
-                if [[ -f "${_appdir}/${_dupe}" ]] &&
-                    ! grep -q '^NoDisplay=true' "${_appdir}/${_dupe}"; then
-                    printf 'NoDisplay=true\n' >>"${_appdir}/${_dupe}"
+                [[ -f "${_appdir}/${_dupe}" ]] || continue
+                sed -i -e '/^NoDisplay[[:space:]]*=/d' -e '/^Hidden[[:space:]]*=/d' \
+                    -e '/^\[Desktop Entry\]/a NoDisplay=true\nHidden=true' \
+                    "${_appdir}/${_dupe}"
+                # Assert the OUTCOME: the key must now be in the first group,
+                # i.e. before any `[Desktop Action …]` header. Checking that
+                # the string is merely present is what made the old version
+                # look like it worked.
+                if awk '/^\[/ && !/^\[Desktop Entry\]/ {exit 1} /^Hidden=true/ {found=1} END {exit !found}' \
+                    "${_appdir}/${_dupe}"; then
                     k_log "hid duplicate launcher: ${_dupe}"
+                else
+                    k_log "WARN: could not hide ${_dupe} — it will show up as a duplicate terminal"
                 fi
             done
             if [[ -f "${_appdir}/vim.desktop" ]] && grep -q '^Exec=gnome-terminal' "${_appdir}/vim.desktop"; then
@@ -1625,6 +1686,32 @@ LOCKS
             install -m 0644 "$_au" "${target}${_au}"
             k_log "carried xdg-autostart: $_au"
         done
+    fi
+
+    # The build monitor is copied EXPLICITLY, from the staging tree rather than
+    # from the live session's autostart dir, because it is deliberately not in
+    # that dir: the "your post-install build is still running, do not reboot"
+    # window describes a state the live ISO can never be in, so autostarting it
+    # there put a progress window over the installer for a build that was not
+    # happening.
+    #
+    # It is boot-critical in the b653 sense — an operator who reboots mid-build
+    # lands in the interrupted-firstboot state that took hours to unpick — so
+    # a failure to place it is logged FATAL-loud rather than swallowed.
+    # (moved out of the live autostart dir 2026-08-17, operator request.)
+    _bm_src="/usr/lib/kldload-installer/target-files/etc/xdg/autostart/kldload-build-monitor.desktop"
+    if [[ -f "$_bm_src" ]]; then
+        mkdir -p "${target}/etc/xdg/autostart"
+        if install -m 0644 "$_bm_src" \
+            "${target}/etc/xdg/autostart/kldload-build-monitor.desktop"; then
+            k_log "build-monitor autostart installed on target (live session stays clear)"
+        else
+            k_log "FATAL: could not install the build-monitor autostart — first boot" \
+                "will look finished while the build is still running"
+        fi
+    else
+        k_log "FATAL: ${_bm_src} missing from the ISO — first boot will give no" \
+            "on-screen build progress and an operator may reboot mid-build"
     fi
 
     # ── Live-only artifacts never ship installed ──────────────────────────────
@@ -2109,14 +2196,26 @@ WPEOF
         cp "${tgt_files}/etc/kernel/postinst.d/kldload-dkms-verify" \
             "${target}/etc/kernel/postinst.d/kldload-dkms-verify" 2>/dev/null || true
         chmod +x "${target}/etc/kernel/postinst.d/kldload-dkms-verify" 2>/dev/null || true
-        # Second failsafe (the b653 pattern): apt-mark hold on the kernel, the
-        # headers and the ZFS packages. The unit shipped but nothing ever
-        # enabled it, so BOTH layers of this protection were inert.
-        if ! chroot "${target}" systemctl enable kldload-package-holds.service \
-            >/dev/null 2>&1; then
-            k_log "WARN: kldload-package-holds.service not enabled — kernel" \
-                "and zfs-dkms are unheld; apt upgrade may replace the kernel"
-        fi
+    fi
+
+    # ── Pin the kernel-coupled substrate — EVERY distro ───────────────────────
+    # Second failsafe for Debian (the b653 pattern, paired with the apt.conf.d
+    # drop-in above); the ONLY pinning on every other substrate.
+    #
+    # WHY it sits outside the debian/ubuntu block: it used to sit inside it, so
+    # a Fedora or RHEL install — the primary substrate — enabled nothing, and
+    # the script it would have run was apt-only anyway. Both halves were fixed
+    # together 2026-08-17; kldload-apply-platform-holds now dispatches on the
+    # package manager (apt-mark / dnf versionlock / pacman IgnorePkg) and
+    # writes what it actually pinned to /var/lib/kldload/platform-holds.list.
+    #
+    # The unit shipped from the very first build but nothing ever enabled it,
+    # so on Debian BOTH layers of this protection were inert too.
+    if ! chroot "${target}" systemctl enable kldload-package-holds.service \
+        >/dev/null 2>&1; then
+        k_log "WARN: kldload-package-holds.service not enabled — the kernel," \
+            "zfs and nvidia are unpinned; an upgrade may replace the kernel" \
+            "out from under the DKMS modules (distro=${_distro})"
     fi
 
     # ── APT mirror service on the installed target (skip for core) ────────────────

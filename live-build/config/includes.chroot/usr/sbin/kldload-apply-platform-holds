@@ -4,38 +4,63 @@ set -Eeuo pipefail
 # kldload-apply-platform-holds — pin the kernel-coupled substrate
 #
 # What it does, in order:
-#   1. Collects the installed kernel / ZFS / boot-chain meta-packages by name.
-#   2. Collects the installed NVIDIA driver packages by pattern.
-#   3. apt-mark holds the union, then VERIFIES the holds actually landed.
+#   1. Identifies the package manager on this substrate (apt / dnf / pacman).
+#   2. Collects the INSTALLED kernel, ZFS, boot-chain and NVIDIA packages,
+#      by name where names are stable and by pattern where they are not.
+#   3. Pins them with that manager's own mechanism, then VERIFIES the pins
+#      actually landed by reading the state back.
 #
 # WHY: kldload's update model is a versionlocked substrate — security updates
 # to userspace, but the kernel does not move on its own, because ZFS and NVIDIA
 # are out-of-tree DKMS modules built against one specific kernel. An unattended
-# `apt upgrade` that pulls a new linux-image leaves the pool unmountable at the
-# next boot if the DKMS rebuild fails for any reason. APT::NeverAutoRemove (see
+# upgrade that pulls a new kernel leaves the pool unmountable at the next boot
+# if the DKMS rebuild fails for any reason. Debian's APT::NeverAutoRemove (see
 # 60-debz-kernel) keeps the OLD kernel from being garbage-collected; it does
 # NOT stop a NEW one from being installed. This does.
+#
+# WHY it is per-manager and not apt-only: it WAS apt-only through 1.4.0-rc14,
+# so a Fedora or RHEL install — the primary substrate — got no pinning at all
+# and nothing said so. The dashboard's "Pinned" card read `apt-mark showhold`,
+# found no apt, reported nothing, and the absence looked like a UI gap rather
+# than an unpinned kernel. Found 2026-08-17, before the 1.4.0 build.
 #
 # Run by: kldload-package-holds.service, once, at first boot. Not a daemon —
 # Type=oneshot, runs and exits. Re-running it is harmless and idempotent.
 #
-# Outputs: holds in apt's state; a log at /var/log/kldload/platform-holds.log.
+# Outputs: pins in the package manager's state; a log at
+#          /var/log/kldload/platform-holds.log; a machine-readable list at
+#          /var/lib/kldload/platform-holds.list that the web console reads,
+#          so the dashboard does not have to know three managers' CLIs.
 #
 # Notes:
-#   - To deliberately move the kernel: `apt-mark unhold linux-image-amd64 ...`,
-#     upgrade, confirm `dkms status` shows zfs AND nvidia built for the new
-#     kernel, then re-run this script. `kldload-rollback` is the way back if
-#     that goes wrong.
+#   - To deliberately move the kernel: unpin (see the per-manager note in the
+#     log), upgrade, confirm `dkms status` shows zfs AND nvidia built for the
+#     new kernel, then re-run this script. `kldload-rollback` is the way back
+#     if that goes wrong.
 #   - Debian AND Ubuntu meta-package names are both listed on purpose; only
-#     installed ones are held, so listing both costs nothing while omitting one
-#     fails SILENTLY — which is how Ubuntu boxes ended up with an unheld kernel.
+#     installed ones are pinned, so listing both costs nothing while omitting
+#     one fails SILENTLY — which is how Ubuntu boxes ended up with an unheld
+#     kernel.
 # ---------------------------------------------------------------------------
 
-# Debian AND Ubuntu meta-package names. Only installed packages are held (see
-# the dpkg-query filter below), so listing both schemes costs nothing — while
-# omitting one fails SILENTLY, which is how Ubuntu boxes ended up with an
-# unheld kernel.
-PKGS=(
+LOG=/var/log/kldload/platform-holds.log
+STATE=/var/lib/kldload/platform-holds.list
+mkdir -p "$(dirname "$LOG")" "$(dirname "$STATE")"
+
+_log() { echo "$(date '+%Y-%m-%dT%H:%M:%S') $*" >>"$LOG"; }
+
+# ── What counts as "the substrate" ─────────────────────────────────────────
+# Names where the packaging is stable, patterns where it is not. NVIDIA is
+# always a pattern: the package set differs per driver branch and per flavour
+# — nvidia-driver + nvidia-kernel-dkms on the proprietary branch, nvidia-open
+# + nvidia-kernel-open-dkms on the open one (fiend ships the latter), plus the
+# versioned libs. A static list silently misses whichever branch it wasn't
+# written for, and a missed lib is worse than a missed kernel: the userspace
+# libs must match the loaded kernel module EXACTLY. Let libcuda1 move to 611
+# while the DKMS module stays at 610 and X dies at startup with "API mismatch"
+# — a black screen on a desktop install. Holding them as one set keeps the
+# pairing intact.
+DEB_PKGS=(
     linux-image-amd64
     linux-headers-amd64
     linux-image-generic
@@ -50,74 +75,218 @@ PKGS=(
     shim-signed
     mokutil
 )
+DEB_NVIDIA_RE='^(nvidia-|libnvidia|firmware-nvidia|libcuda|libcudadebugger|libegl-nvidia|libgles-nvidia|libglx-nvidia|xserver-xorg-video-nvidia)'
 
-# NVIDIA is matched by PATTERN, not by name, because the package set differs
-# per driver branch and per flavour — nvidia-driver + nvidia-kernel-dkms on the
-# proprietary branch, nvidia-open + nvidia-kernel-open-dkms on the open one
-# (fiend ships the latter), plus the versioned libs. A static list silently
-# misses whichever branch it wasn't written for, and a missed lib is worse than
-# a missed kernel: the userspace libs must match the loaded kernel module
-# EXACTLY. Let libcuda1 move to 611 while the DKMS module stays at 610 and X
-# dies at startup with "API mismatch" — a black screen on a desktop install.
-# Holding them as one set is what keeps that pairing intact.
-NVIDIA_RE='^(nvidia-|libnvidia|firmware-nvidia|libcuda|libcudadebugger|libegl-nvidia|libgles-nvidia|libglx-nvidia|xserver-xorg-video-nvidia)'
+# RPM names are regular enough to match wholly by pattern. kernel-devel and
+# kernel-headers ARE included here (unlike the test lab's guest pinning, which
+# excludes them so DKMS can still pull matching headers) because on the host
+# the whole point is that the running kernel and its headers move together or
+# not at all.
+RPM_RE='^(kernel|kernel-core|kernel-modules|kernel-devel|kernel-headers|kernel-uki|zfs|libzfs|libzpool|libnvpair|libuutil|python3-pyzfs|grub2-efi|grub2-common|grub2-tools|shim-|mokutil)'
+RPM_NVIDIA_RE='^(nvidia-|akmod-nvidia|kmod-nvidia|xorg-x11-drv-nvidia|libnvidia|cuda-)'
+
+ARCH_RE='^(linux$|linux-lts|linux-headers|linux-lts-headers|zfs-|zfs-utils|zfs-dkms|grub|efibootmgr|mokutil|nvidia|nvidia-dkms|nvidia-open|nvidia-utils|lib32-nvidia-utils|opencl-nvidia)'
 
 # ...except the container toolkit, which is a SEPARATE upstream on its own
 # version line (1.20.0 next to driver 610.57.04) and is not coupled to the
-# kernel module at all. Holding it would block its security updates for no
-# safety gain.
+# kernel module at all. Pinning it would block its security updates for no
+# safety gain. Same name on deb and rpm, so one pattern covers both.
 NVIDIA_SKIP_RE='^(nvidia|libnvidia)-container'
 
-installed=()
-for p in "${PKGS[@]}"; do
-    # Compare the WHOLE status, not `grep installed`. dpkg reports a package it
-    # merely knows about as "unknown ok not-installed" — which contains the
-    # substring "installed", so the grep form matched every Ubuntu kernel name
-    # on a Debian box, tried to hold packages that were not there, and printed
-    # a scary warning about an unheld kernel that was in fact held fine
-    # (fiend, 2026-08-16). The only state we want is this exact one.
-    if [[ "$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null)" == "install ok installed" ]]; then
-        installed+=("$p")
-    fi
-done
+# Two rpm names the patterns above catch that must NOT be pinned:
+#   kernel-srpm-macros  rpm-build macros, not a kernel artifact at all
+#   zfs-release         the repo DEFINITION. Pinning it freezes the repo file,
+#                       so the box could never be told where newer ZFS lives —
+#                       the exact opposite of a controlled upgrade.
+RPM_SKIP_RE='^(kernel-srpm-macros|zfs-release|zfs-release-)'
 
-# Architecture qualifiers ("libcuda1:amd64") are stripped: apt-mark takes the
-# bare package name and chokes on the qualified form.
-while read -r p; do
-    [[ -z "$p" ]] && continue
-    [[ "$p" =~ $NVIDIA_SKIP_RE ]] && continue
-    installed+=("$p")
-done < <(dpkg-query -W -f='${Status}\t${Package}\n' 2>/dev/null |
-    awk -F'\t' '$1 ~ /^install ok installed/ {print $2}' |
-    sed 's/:.*//' | grep -E "$NVIDIA_RE" | sort -u || true)
-
-LOG=/var/log/kldload/platform-holds.log
-mkdir -p "$(dirname "$LOG")"
-
-if ((${#installed[@]} == 0)); then
-    echo "$(date '+%Y-%m-%dT%H:%M:%S') nothing to hold — no platform packages installed" >>"$LOG"
+# ── Substrate identification ───────────────────────────────────────────────
+# By the query tool, not by /etc/os-release: what matters here is which
+# database holds the answer, and a derivative that renames itself still has
+# the same one.
+if command -v dpkg-query >/dev/null 2>&1 && [[ -d /var/lib/dpkg ]]; then
+    MANAGER=apt
+elif command -v rpm >/dev/null 2>&1 && command -v dnf >/dev/null 2>&1; then
+    MANAGER=dnf
+elif command -v pacman >/dev/null 2>&1; then
+    MANAGER=pacman
+else
+    _log "no supported package manager found — nothing pinned"
+    echo "kldload: WARNING — no apt/dnf/pacman found; the kernel is NOT pinned" >&2
     exit 0
 fi
 
-# WHY the outcome is verified rather than trusting the exit code: apt-mark
-# reports success for names it merely recognised, and a hold that did not
-# actually land is invisible until the day an upgrade moves the kernel out
-# from under the DKMS modules and the box boots without ZFS. Assert the state
-# we wanted, and say plainly which ones we failed to get.
-apt-mark hold "${installed[@]}" >>"$LOG" 2>&1 || true
+# ── Collect ────────────────────────────────────────────────────────────────
+installed=()
 
-mapfile -t held < <(apt-mark showhold 2>/dev/null | sort -u)
+_collect_apt() {
+    local p
+    for p in "${DEB_PKGS[@]}"; do
+        # Compare the WHOLE status, not `grep installed`. dpkg reports a
+        # package it merely knows about as "unknown ok not-installed" — which
+        # contains the substring "installed", so the grep form matched every
+        # Ubuntu kernel name on a Debian box, tried to hold packages that were
+        # not there, and printed a scary warning about an unheld kernel that
+        # was in fact held fine (fiend, 2026-08-16). This exact state only.
+        if [[ "$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null)" == "install ok installed" ]]; then
+            installed+=("$p")
+        fi
+    done
+    # Architecture qualifiers ("libcuda1:amd64") are stripped: apt-mark takes
+    # the bare package name and chokes on the qualified form.
+    while read -r p; do
+        [[ -z "$p" ]] && continue
+        [[ "$p" =~ $NVIDIA_SKIP_RE ]] && continue
+        installed+=("$p")
+    done < <(dpkg-query -W -f='${Status}\t${Package}\n' 2>/dev/null |
+        awk -F'\t' '$1 ~ /^install ok installed/ {print $2}' |
+        # grep exits 1 on a machine with no NVIDIA packages installed. That is an
+        # empty set, not a failure — most servers have no GPU.
+        sed 's/:.*//' | grep -E "$DEB_NVIDIA_RE" | sort -u || true)
+}
+
+_collect_rpm() {
+    local p
+    while read -r p; do
+        [[ -z "$p" ]] && continue
+        [[ "$p" =~ $NVIDIA_SKIP_RE ]] && continue
+        [[ "$p" =~ $RPM_SKIP_RE ]] && continue
+        installed+=("$p")
+    done < <(rpm -qa --qf '%{NAME}\n' 2>/dev/null |
+        # Same as the deb path: no match means nothing to pin here, not an error.
+        grep -E "${RPM_RE}|${RPM_NVIDIA_RE}" | sort -u || true)
+}
+
+_collect_pacman() {
+    local p
+    while read -r p; do
+        [[ -z "$p" ]] && continue
+        [[ "$p" =~ $NVIDIA_SKIP_RE ]] && continue
+        installed+=("$p")
+        # Same again: grep finding no platform packages is an empty set.
+    done < <(pacman -Qq 2>/dev/null | grep -E "$ARCH_RE" | sort -u || true)
+}
+
+case "$MANAGER" in
+apt) _collect_apt ;;
+dnf) _collect_rpm ;;
+pacman) _collect_pacman ;;
+esac
+
+if ((${#installed[@]} == 0)); then
+    _log "nothing to pin — no platform packages installed ($MANAGER)"
+    : >"$STATE"
+    exit 0
+fi
+
+# ── Apply, then verify the OUTCOME ─────────────────────────────────────────
+# Every manager here reports success for names it merely recognised, and a pin
+# that did not actually land is invisible until the day an upgrade moves the
+# kernel out from under the DKMS modules and the box boots without ZFS. So
+# each branch asserts the state it wanted by reading it back, and says plainly
+# which names it failed to get.
+pinned=()
+
+_apply_apt() {
+    # apt-mark's exit code is deliberately ignored: it reports success for
+    # names it merely recognised, so it is not evidence. The showhold read
+    # on the next line is the evidence, and missing names are reported.
+    apt-mark hold "${installed[@]}" >>"$LOG" 2>&1 || true
+    mapfile -t pinned < <(apt-mark showhold 2>/dev/null | sort -u)
+    _log "unpin with: apt-mark unhold <pkg>"
+}
+
+_apply_dnf() {
+    # versionlock is the right mechanism: it pins the installed VERSION, so a
+    # reinstall or a DKMS-driven `dnf install kernel-devel-$(uname -r)` still
+    # resolves, exactly like apt-mark hold. dnf5 carries it built in; dnf4
+    # needs python3-dnf-plugin-versionlock, which is NOT a dependency we add
+    # to the install transaction — nothing optional shares a transaction with
+    # the kernel (steam-installer, 2026-08-15) — so we fall back instead.
+    if dnf versionlock --help >/dev/null 2>&1; then
+        # Ignored for the same reason as apt-mark above — the versionlock list
+        # read below is what decides whether the pin actually landed.
+        dnf -q versionlock add "${installed[@]}" >>"$LOG" 2>&1 || true
+        local listing
+        # An empty lock list is the state on a first run, before anything is
+        # pinned; every name then shows up as missing, which is correct.
+        listing=$(dnf versionlock list 2>/dev/null || true)
+        local p
+        for p in "${installed[@]}"; do
+            grep -qE "(^|[[:space:]/])${p}(-[0-9]|-\*|[[:space:]]|$)" <<<"$listing" &&
+                pinned+=("$p")
+        done
+        _log "mechanism: dnf versionlock; unpin with: dnf versionlock delete <pkg>"
+    else
+        # Fallback: exclude= in dnf.conf. Universally available, no plugin,
+        # and the same idiom kzfs-test uses to pin guest kernels. WARN: its
+        # semantics are BROADER than a hold — an excluded package cannot be
+        # installed either, only left alone — so it is the fallback, not the
+        # default, and the log says so where an operator will find it.
+        local conf=/etc/dnf/dnf.conf p
+        touch "$conf"
+        for p in "${installed[@]}"; do
+            grep -qE "^exclude=.*(^|[=,])${p}(,|$)" "$conf" 2>/dev/null && continue
+            if grep -q '^exclude=' "$conf" 2>/dev/null; then
+                sed -i "s/^exclude=.*/&,${p}/" "$conf"
+            else
+                printf 'exclude=%s\n' "$p" >>"$conf"
+            fi
+        done
+        local line
+        # No exclude= line yet is the first-run state of a stock dnf.conf.
+        line=$(grep '^exclude=' "$conf" 2>/dev/null || true)
+        for p in "${installed[@]}"; do
+            grep -qE "(^|[=,])${p}(,|$)" <<<"$line" && pinned+=("$p")
+        done
+        _log "mechanism: dnf.conf exclude= (versionlock plugin absent); unpin by editing /etc/dnf/dnf.conf"
+        echo "kldload: dnf versionlock unavailable — pinned via exclude= in /etc/dnf/dnf.conf." >&2
+        echo "kldload: install python3-dnf-plugin-versionlock and re-run for hold semantics." >&2
+    fi
+}
+
+_apply_pacman() {
+    # IgnorePkg in pacman.conf. Arch is a rolling release, so this is the one
+    # substrate where an unpinned kernel is not a risk but a certainty.
+    local conf=/etc/pacman.conf p line
+    for p in "${installed[@]}"; do
+        if grep -qE '^IgnorePkg' "$conf" 2>/dev/null; then
+            grep -qE "^IgnorePkg.*[= ]${p}( |$)" "$conf" && continue
+            sed -i "0,/^IgnorePkg.*/s//& ${p}/" "$conf"
+        else
+            printf 'IgnorePkg = %s\n' "$p" >>"$conf"
+        fi
+    done
+    # No IgnorePkg line yet is the first-run state of a stock pacman.conf.
+    line=$(grep -E '^IgnorePkg' "$conf" 2>/dev/null | tr '\n' ' ' || true)
+    for p in "${installed[@]}"; do
+        grep -qE "[= ]${p}( |$)" <<<"$line" && pinned+=("$p")
+    done
+    _log "mechanism: pacman.conf IgnorePkg; unpin by editing /etc/pacman.conf"
+}
+
+case "$MANAGER" in
+apt) _apply_apt ;;
+dnf) _apply_dnf ;;
+pacman) _apply_pacman ;;
+esac
+
 missing=()
 for p in "${installed[@]}"; do
-    printf '%s\n' "${held[@]}" | grep -qxF "$p" || missing+=("$p")
+    printf '%s\n' "${pinned[@]:-}" | grep -qxF "$p" || missing+=("$p")
 done
 
+# One file, one format, three managers — so the web console can answer "is
+# this kernel pinned?" without shelling out to whichever CLI this substrate
+# happens to use.
+printf '%s\n' "${pinned[@]:-}" | grep -v '^$' | sort -u >"$STATE" || true
+
 {
-    echo "$(date '+%Y-%m-%dT%H:%M:%S') held ${#held[@]} package(s): ${held[*]}"
-    ((${#missing[@]} > 0)) && echo "  WARNING: requested but NOT held: ${missing[*]}"
+    echo "$(date '+%Y-%m-%dT%H:%M:%S') [$MANAGER] pinned $(wc -l <"$STATE") package(s)"
+    ((${#missing[@]} > 0)) && echo "  WARNING: requested but NOT pinned: ${missing[*]}"
 } >>"$LOG"
 
 if ((${#missing[@]} > 0)); then
-    echo "kldload: WARNING — these platform packages were not held: ${missing[*]}" >&2
+    echo "kldload: WARNING — these platform packages were not pinned: ${missing[*]}" >&2
     echo "kldload: an upgrade could move them independently; see $LOG" >&2
 fi
