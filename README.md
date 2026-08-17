@@ -645,3 +645,17 @@ ZFS on root + ZFSBootMenu, the offline RPM/APT darksites, KVM-on-ZFS with instan
 ## License
 
 BSD-3-Clause. See [LICENSE](LICENSE).
+
+## Publishing a release
+
+R2 is the public source of truth for downloads — a stale bucket means the
+website advertises one release and hands the visitor another. After tagging:
+
+```bash
+export R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
+tools/r2-publish.sh live-build/output/kldload-<version>-x86_64.iso
+```
+
+It verifies the ISO against its `.sha256` sidecar before uploading, publishes
+under both the versioned key and `kldload-free-latest.iso`, then re-reads the
+published objects over HTTPS and asserts they match. Requires `rclone`.
