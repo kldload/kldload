@@ -2950,13 +2950,42 @@ NMEOF
     rm -f "${target}"/etc/netplan/*.yaml 2>/dev/null || true
     # Tell NetworkManager to manage all devices (Ubuntu/Debian default to unmanaged)
     mkdir -p "${target}/etc/NetworkManager/conf.d"
+    # unmanaged-devices was `none` — i.e. "manage EVERYTHING". That was written
+    # to stop NM leaving the primary NIC unmanaged on Debian/Ubuntu, which it
+    # does correctly, but "everything" is too much on this OS: firstboot brings
+    # up WireGuard (wg-mgmt, wg-k8s), libvirt (virbr*, vnet*) and the Cilium
+    # datapath (cni*, lxc*, cilium_*). Those interfaces belong to wg-quick,
+    # libvirt and the CNI — NM sees each one appear, tries to activate it,
+    # fails because it has no profile for it, and raises a desktop
+    # notification. On a first boot that stands up a cluster that is a stream
+    # of "activation of network connection failed" popups with nothing
+    # actually wrong (fiend, first install from 1.4.0-rc12).
+    #
+    # So: manage physical NICs, leave the virtual estate to its owners.
     cat >"${target}/etc/NetworkManager/conf.d/10-manage-all.conf" <<'NMCONF'
 [keyfile]
-unmanaged-devices=none
+unmanaged-devices=interface-name:wg*;interface-name:virbr*;interface-name:vnet*;interface-name:cni*;interface-name:lxc*;interface-name:cilium_*;interface-name:veth*;interface-name:docker*;interface-name:kube-*;interface-name:zt*
 
 [device]
 wifi.scan-rand-mac-address=no
 NMCONF
+    # Carry every conf.d snippet shipped on the live ISO to the target, rather
+    # than hand-writing each one here. 20-kldload-connectivity.conf is the case
+    # that showed why: NetworkManager's connectivity probe is ON by default on
+    # Debian, re-runs on a timer and on every carrier change, and fails on an
+    # air-gapped box — so the operator gets a stream of "activation of network
+    # connection failed" popups over the installer while nothing is wrong.
+    # Written as a glob so the next snippet is not another silent omission.
+    if [[ -d /etc/NetworkManager/conf.d ]]; then
+        for _nmc in /etc/NetworkManager/conf.d/*.conf; do
+            [[ -f "$_nmc" ]] || continue
+            # 10-manage-all.conf is generated above with target-specific
+            # content; never let the live ISO's copy overwrite it.
+            [[ "$(basename "$_nmc")" == "10-manage-all.conf" ]] && continue
+            install -m 0644 "$_nmc" "${target}/etc/NetworkManager/conf.d/$(basename "$_nmc")" &&
+                k_log "NetworkManager conf.d: $(basename "$_nmc")"
+        done
+    fi
     k_in_chroot "${target}" systemctl enable NetworkManager 2>/dev/null || true
 
     if [[ -d "${target}/etc/dconf/db/local.d" ]]; then
