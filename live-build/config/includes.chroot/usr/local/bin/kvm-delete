@@ -25,6 +25,38 @@ FORCE="${2:-}"
 
 ZVOL="rpool/vms/${NAME}"
 
+# ─── Refuse before mutating, not after ──────────────────────────────────────
+#
+# WHY THIS RUNS FIRST: the order used to be undefine-then-destroy, so a zvol
+# that ZFS refuses to destroy left the DOMAIN already gone and the dataset
+# orphaned — the operator sees an error, believes the delete failed, and the
+# VM is in fact deleted with its storage stranded. Anything that can refuse
+# has to refuse before the first irreversible step.
+#
+# A golden with clones is the normal case for this: ZFS will not destroy a
+# snapshot that clones depend on, which is the protection that stops a delete
+# from orphaning every machine stamped off it.
+if zfs list "${ZVOL}" >/dev/null 2>&1; then
+    # Clones anywhere in the pool whose origin is a snapshot of THIS zvol.
+    DEPS=$(zfs list -H -o name,origin -t volume,filesystem 2>/dev/null |
+        awk -v z="${ZVOL}@" '$2 ~ "^"z {print $1}')
+    if [[ -n "$DEPS" ]]; then
+        echo "ERROR: ${NAME} still has machines cloned from it:" >&2
+        printf '  %s\n' ${DEPS} >&2
+        cat >&2 <<EOF
+
+Nothing has been changed. Delete those first, or take one off its origin
+with:
+
+  zfs promote <clone>
+
+which makes that clone own the data and leaves the rest working. Deleting
+this VM with its clones still attached would strand every one of them.
+EOF
+        exit 1
+    fi
+fi
+
 # Check VM exists
 if ! virsh dominfo "${NAME}" >/dev/null 2>&1; then
     echo "Warning: VM '${NAME}' not found in libvirt (removing zvol only)"
