@@ -271,17 +271,32 @@ if ((prune)); then
     echo "r2-publish: looking for older releases to remove…"
     keep=("$iso_name" "${iso_name}.sha256" "$LATEST_KEY" "${LATEST_KEY}.sha256")
 
+    # A dry run prints a verdict for EVERY object, not just the candidates.
+    # WHY: the operator's real question at prune time is "what else is in this
+    # bucket?" — an artefact from another project can sit there for months and
+    # a tool that only reports its own candidates will never mention it.
     doomed=()
+    other=()
     while IFS= read -r key; do
         [[ -n "$key" ]] || continue
-        # Release artefacts only. Anything else in the bucket is somebody
-        # else's and is left alone.
-        [[ "$key" =~ ^kldload-.*\.iso(\.sha256)?$ ]] || continue
+
+        # Release artefacts only. Anything else belongs to something else and
+        # is reported but never touched.
+        if [[ ! "$key" =~ ^kldload-.*\.iso(\.sha256)?$ ]]; then
+            other+=("$key")
+            continue
+        fi
+
         for k in "${keep[@]}"; do
             [[ "$key" == "$k" ]] && continue 2
         done
         doomed+=("$key")
     done < <(rclone lsf ":s3:${R2_BUCKET}" "${remote[@]}" 2>/dev/null)
+
+    if ((${#other[@]})); then
+        echo "r2-publish: not release artefacts — left alone:"
+        printf '  %s\n' "${other[@]}"
+    fi
 
     if ((${#doomed[@]} == 0)); then
         echo "r2-publish: nothing to prune."
