@@ -106,6 +106,25 @@ func (t labTheme) Color(name fyne.ThemeColorName, v fyne.ThemeVariant) color.Col
 			return color.NRGBA{R: 0x1b, G: 0x1e, B: 0x24, A: 0xff}
 		}
 		return color.NRGBA{R: 0xf6, G: 0xf6, B: 0xf8, A: 0xff}
+
+	// InputBackground and Foreground are what the CONTENT is painted with:
+	// every pane here is built from widget.Entry and widget.Label, and those
+	// two names decide their fill and their text. Overriding Background alone
+	// repainted the window behind them and nothing else, so switching GNOME to
+	// light turned the title bar white and left every pane dark — which is
+	// exactly what an operator reported after the previous attempt at this
+	// (2026-08-17). vmxplore and zxplore both name these and both follow the
+	// desktop correctly; this is that pattern, not a third variation on it.
+	case theme.ColorNameInputBackground:
+		if dark {
+			return color.NRGBA{R: 0x13, G: 0x18, B: 0x20, A: 0xff}
+		}
+		return color.NRGBA{R: 0xf4, G: 0xf6, B: 0xf9, A: 0xff}
+	case theme.ColorNameForeground:
+		if dark {
+			return color.NRGBA{R: 0xe6, G: 0xed, B: 0xf5, A: 0xff}
+		}
+		return color.NRGBA{R: 0x14, G: 0x18, B: 0x1e, A: 0xff}
 	}
 	return t.Theme.Color(name, v)
 }
