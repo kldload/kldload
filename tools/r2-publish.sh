@@ -11,6 +11,9 @@
 #   3. Uploads the .sha256 sidecar alongside each.
 #   4. Re-reads the published objects over HTTPS and asserts that the size and
 #      checksum match what was just sent.
+#   5. With --prune, removes older release objects from the bucket, so old
+#      versions do not sit there costing storage and confusing anyone who
+#      browses the keys.
 #
 # WHY THIS EXISTS: R2 is the public source of truth for downloads. A stale
 # bucket means the website advertises one release and hands the visitor a
@@ -45,6 +48,10 @@
 #   - The upload is not atomic across the two keys. The versioned key goes
 #     first so that, if the run dies midway, the new release exists under its
 #     real name and only "latest" is stale — the recoverable direction.
+#   - --prune only ever runs AFTER verification passes, and never touches the
+#     version being published or the latest keys. Deleting the old release
+#     before the new one is proven good would leave the bucket with nothing
+#     downloadable at all.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -Eeuo pipefail
@@ -56,7 +63,7 @@ LATEST_KEY="kldload-free-latest.iso"
 
 usage() {
     cat <<'EOF'
-Usage: r2-publish.sh <path-to-iso>
+Usage: r2-publish.sh [--prune] [--prune-dry-run] <path-to-iso>
 
 Publishes a release ISO and its .sha256 sidecar to the kldload R2 bucket,
 under both its versioned key and the kldload-free-latest.iso key that the
@@ -66,6 +73,12 @@ by re-reading them.
 Arguments:
   <path-to-iso>   The ISO to publish. A sidecar named <path-to-iso>.sha256
                   must exist next to it and must match.
+
+Options:
+  --prune           After verification passes, delete older kldload-*.iso and
+                    .sha256 objects from the bucket. Never touches the version
+                    being published or the kldload-free-latest.iso keys.
+  --prune-dry-run   List what --prune would delete, and delete nothing.
 
 Environment (required):
   R2_ACCOUNT_ID           Cloudflare account id.
@@ -77,7 +90,7 @@ Environment (optional):
   R2_PUBLIC_BASE          Public base URL.   Default: https://dl.kldload.com
 
 Exit status:
-  0  every object uploaded and verified
+  0  every object uploaded and verified (and pruned, if asked)
   1  a precondition failed, or a published object did not match
 
 Examples:
@@ -85,17 +98,48 @@ Examples:
   export R2_ACCOUNT_ID=de773e77... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
   tools/r2-publish.sh live-build/output/kldload-1.4.0-x86_64.iso
 
+  # Publish 1.4.0 and clear out the older releases behind it.
+  tools/r2-publish.sh --prune live-build/output/kldload-1.4.0-x86_64.iso
+
+  # See what would be removed without removing it.
+  tools/r2-publish.sh --prune-dry-run live-build/output/kldload-1.4.0-x86_64.iso
+
   # Publish to a staging bucket instead.
   R2_BUCKET=kldload-staging tools/r2-publish.sh out/kldload-1.4.0-x86_64.iso
 EOF
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    usage
-    exit 0
-fi
+prune=0
+prune_dry=0
+iso=""
 
-iso="${1:-}"
+while (($#)); do
+    case "$1" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    --prune) prune=1 ;;
+    --prune-dry-run)
+        prune=1
+        prune_dry=1
+        ;;
+    -*)
+        echo "r2-publish: unknown option: $1" >&2
+        usage >&2
+        exit 1
+        ;;
+    *)
+        if [[ -n "$iso" ]]; then
+            echo "r2-publish: unexpected extra argument: $1" >&2
+            exit 1
+        fi
+        iso="$1"
+        ;;
+    esac
+    shift
+done
+
 if [[ -z "$iso" ]]; then
     usage >&2
     exit 1
@@ -216,6 +260,42 @@ fi
 if ((fail)); then
     echo "r2-publish: FAILED — the bucket does not match the local release" >&2
     exit 1
+fi
+
+# ─── Prune older releases ────────────────────────────────────────────────────
+# Only reached once the new release is uploaded AND verified. The keep-list is
+# explicit rather than pattern-based: an object is deleted only if it looks
+# like a release artefact AND is not one of the four things just published.
+
+if ((prune)); then
+    echo "r2-publish: looking for older releases to remove…"
+    keep=("$iso_name" "${iso_name}.sha256" "$LATEST_KEY" "${LATEST_KEY}.sha256")
+
+    doomed=()
+    while IFS= read -r key; do
+        [[ -n "$key" ]] || continue
+        # Release artefacts only. Anything else in the bucket is somebody
+        # else's and is left alone.
+        [[ "$key" =~ ^kldload-.*\.iso(\.sha256)?$ ]] || continue
+        for k in "${keep[@]}"; do
+            [[ "$key" == "$k" ]] && continue 2
+        done
+        doomed+=("$key")
+    done < <(rclone lsf ":s3:${R2_BUCKET}" "${remote[@]}" 2>/dev/null)
+
+    if ((${#doomed[@]} == 0)); then
+        echo "r2-publish: nothing to prune."
+    else
+        for key in "${doomed[@]}"; do
+            if ((prune_dry)); then
+                echo "r2-publish: would delete ${key}"
+            else
+                echo "r2-publish: deleting ${key}"
+                rclone deletefile ":s3:${R2_BUCKET}/${key}" "${remote[@]}"
+            fi
+        done
+        ((prune_dry)) && echo "r2-publish: dry run — nothing was deleted."
+    fi
 fi
 
 echo "r2-publish: done. ${R2_PUBLIC_BASE}/${LATEST_KEY} now serves ${iso_name}."
