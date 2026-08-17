@@ -72,7 +72,27 @@ idle-dim=false
 # install (see kldload-installer/lib/profiles.sh) to pin Files, Firefox, and
 # the System Dashboard (kst-dashboard) on the installed system.
 favorite-apps=@as []
-enabled-extensions=@as []
+# The move-and-follow keybindings are useless if the extension providing
+# them is not running, so it is enabled here rather than left to the
+# operator to discover in Extensions.
+enabled-extensions=['kldload-workspace-keys@kldload.com']
+# Start every user with an EMPTY app-grid layout so GNOME Shell composes the
+# grid from what is actually visible, rather than replaying a layout it
+# recorded earlier.
+#
+# This is the belt, not the brace. The brace is in profiles.sh: konsole,
+# Ptyxis and gnome-console kept appearing under Super+A because the keys meant
+# to hide them were being APPENDED to the .desktop files, which put them
+# inside a trailing `[Desktop Action …]` group where they mean nothing — so
+# they were never hidden and Shell was right to list them. They are inserted
+# into `[Desktop Entry]` now.
+#
+# This default still earns its place: Shell had already written those three
+# into a user's `app-picker-layout`, and an entry with a recorded position is
+# placed on the grid regardless. Without clearing it, fixing the .desktop
+# files would leave existing profiles unchanged. Costs nothing — a user who
+# rearranges the grid simply writes their own layout over this default.
+app-picker-layout=@aa{sv} []
 # Suppress the "welcome to GNOME" / first-run dialog
 welcome-dialog-last-shown-version='99.0.0'
 
@@ -86,7 +106,7 @@ system-service-activated=true
 
 # ── Mutter / window manager ───────────────────────────────────────────────────
 # Static 4 workspaces in a + layout — operator settled on this 2D map on
-# .142 b644 2026-06-07. The Ctrl+Alt+Arrow / Super+Arrow / Super+Shift+Arrow
+# .142 b644 2026-06-07. The Ctrl+Alt+Arrow / Super+Arrow / Ctrl+Arrow
 # keymap below depends on a FIXED 4-workspace setup; dynamic mode (the
 # typical GNOME default elsewhere) doesn't play with absolute switch-to-
 # workspace-1/2/3/4 bindings — workspaces get added/removed under your
@@ -194,8 +214,23 @@ toggle-application-view=['<Super>a']
 # Operator on .142 b644 settled on this scheme: workspaces 1/2/3/4 arranged
 # as compass points (1=N, 2=W, 3=E, 4=S) with two symmetric keymaps:
 #
-#   Ctrl+Alt+Arrow → SWITCH to workspace (no window movement)
-#   Super+Arrow    → SEND current window to workspace AND follow it there
+#   Ctrl+Alt+Arrow   → SWITCH to workspace (no window movement)
+#   Ctrl+Shift+Arrow → SEND window there, stay put   (stock move-to-workspace-N)
+#   Super+Arrow      → SEND window there AND follow  (kldload-workspace-keys)
+#
+# WARN: the line above used to claim Super+Arrow follows the window. It does
+# not, and never did. mutter's handle_move_to_workspace() only calls
+# meta_workspace_activate_with_focus() when `flip` is set, and flip is true
+# only for the DIRECTIONAL variants (move-to-workspace-left/right/up/down,
+# whose index is negative). The numbered variants bound here —
+# move-to-workspace-1..4 — take the else branch: the window changes workspace
+# and the view stays put. Read out of mutter gnome-48 src/core/keybindings.c
+# on 2026-08-17 rather than assumed.
+#
+# Consequence: Super+Arrow and Ctrl+Shift+Arrow are currently the SAME action.
+# A genuine move-and-follow to an ABSOLUTE workspace is not bindable in stock
+# GNOME — the directional variants do follow, but they are relative, so they
+# cannot express this compass layout where "left" is always workspace 2.
 #
 # Conflicts cleared in [org/gnome/desktop/wm/keybindings] below: maximize,
 # unmaximize (were on Super+Up/Down), and the relative-direction
@@ -210,16 +245,35 @@ switch-to-workspace-up=@as []
 switch-to-workspace-down=@as []
 switch-to-workspace-left=@as []
 switch-to-workspace-right=@as []
-move-to-workspace-1=['<Super>Up']
-move-to-workspace-2=['<Super>Left']
-move-to-workspace-3=['<Super>Right']
-move-to-workspace-4=['<Super>Down']
-# Window ops on Super+Shift+Arrow — Ctrl+Arrow was the operator's first
-# instinct but it eats word-by-word cursor navigation in every text input
-# (bash readline, every editor, Chrome address bar, etc.). Super+Shift+Arrow
-# pairs cleanly with the Super+Arrow workspace map above: same right hand,
-# left thumb adds Shift, mental model is "Super=WM domain, Shift=transform
-# this window instead of moving it."
+move-to-workspace-1=['<Control><Shift>Up']
+move-to-workspace-2=['<Control><Shift>Left']
+move-to-workspace-3=['<Control><Shift>Right']
+move-to-workspace-4=['<Control><Shift>Down']
+# Window ops stay on Super+Shift+Arrow. Ctrl+Shift+Arrow sends the window to
+# a workspace (see move-to-workspace-* above).
+#
+# HISTORY, and it moved twice in one day. These ops were originally on
+# Ctrl+Arrow, moved to Super+Shift+Arrow to protect word-by-word cursor
+# navigation, moved back to Ctrl+Arrow on 2026-08-17 after the report
+# "ctrl+shift+arrows is not working" — which turned out to be the wrong combo
+# being pressed, not a broken binding — and then returned here when the
+# operator tried Super+Shift and confirmed it was right after all. The layer
+# that was actually missing was "send this window over there", which now has
+# Ctrl+Arrow to itself.
+#
+# The keymap now reads as four layers, one modifier each:
+#   Ctrl+Alt+Arrow    switch to that workspace
+#   Super+Arrow       move this window there, and follow it
+#   Ctrl+Shift+Arrow  send this window there
+#   Super+Shift+Arrow reshape this window (maximize / minimize / tile)
+#
+# Ctrl+SHIFT+Arrow, not plain Ctrl+Arrow, and that detail is the whole point:
+# a WM binding outranks the focused application, so plain Ctrl+Left/Right would
+# have taken word-by-word cursor navigation away from every terminal, editor
+# and text field on the system. Adding Shift dodges that entirely — nothing in
+# readline, an editor or the Chrome address bar wants Ctrl+Shift+Arrow — so the
+# send-to-workspace layer costs nothing at all. Settled 2026-08-17 after the
+# bindings moved twice; this arrangement is the one with no trade in it.
 #
 # Use toggle-maximized (NOT maximize): plain `maximize` is a one-way action
 # that only ever maximizes; toggle-maximized handles both directions so the
@@ -250,3 +304,16 @@ move-to-monitor-right=@as []
 [org/gnome/mutter/keybindings]
 toggle-tiled-left=['<Super><Shift>Left']
 toggle-tiled-right=['<Super><Shift>Right']
+
+# ── Move-and-follow — provided by the kldload-workspace-keys extension ───────
+# The other half of the workspace keymap. Stock GNOME can send a window to a
+# NUMBERED workspace without following (Ctrl+Shift+Arrow above) but cannot send
+# it and go along: mutter only activates the target for the RELATIVE variants,
+# which cannot express this absolute compass layout. The extension supplies the
+# missing action; the bindings live here with everything else so an operator
+# reading this file sees the whole map rather than half of it.
+[org/gnome/shell/extensions/kldload-workspace-keys]
+move-follow-1=['<Super>Up']
+move-follow-2=['<Super>Left']
+move-follow-3=['<Super>Right']
+move-follow-4=['<Super>Down']

@@ -37,6 +37,25 @@ readonly GUI=/usr/local/bin/kldload-buildmon
 # Nothing to report on a finished machine — and no window either.
 [[ -f "$ALL_READY" ]] && exit 0
 
+# ── Never on the live ISO ──────────────────────────────────────────────────
+# This window says "the post-install build is still running, do not reboot".
+# On the live ISO nothing has been installed, so there is no build and the
+# window is pure noise over the installer.
+#
+# The structural fix is that the .desktop is staged under the installer's
+# target-files/ tree and only placed on the TARGET (build-iso.sh + profiles.sh),
+# so on live there is normally nothing to run. This is the failsafe for the day
+# a copy path puts it back — the same class of mistake that had the live copy
+# doubling as the staging copy in the first place. (2026-08-17.)
+#
+# Detection is positive: look for a mounted live medium, the same three paths
+# kldload-install-target probes, rather than inferring "not installed" from a
+# missing file — a missing file is also what a half-finished install looks like,
+# and that is exactly when this window is most needed.
+for _live in /run/live/medium /run/initramfs/live /lib/live/mount/medium; do
+    [[ -d "$_live" ]] && exit 0
+done
+
 # ── The GUI is the real one; the terminal monitor is the fallback ────────────
 #
 # kldload-buildmon shows the same build state plus the install audit, the

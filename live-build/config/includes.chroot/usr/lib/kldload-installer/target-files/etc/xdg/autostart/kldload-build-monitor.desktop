@@ -23,5 +23,20 @@ Exec=/usr/local/bin/kldload-build-monitor-autostart
 Terminal=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
-# Late in the login sequence: the session needs a terminal emulator available.
-X-GNOME-Autostart-Phase=Applications
+# NO X-GNOME-Autostart-Phase HERE. It used to say `Applications`, to land late
+# enough in the login sequence that a terminal emulator was available. On
+# GNOME 48 (Fedora 44) that key does not merely get ignored — the entry is
+# SKIPPED. gnome-session logs it and moves on:
+#
+#   gnome-session-service: App kldload-build-monitor.desktop sets
+#   X-GNOME-Autostart-Phase, but gnome-session no longer manages session
+#   services
+#
+# so the monitor never launched on a Fedora desktop, and the operator reached
+# a finished-looking desktop with a multi-GB build still running behind it —
+# the exact failure this autostart exists to prevent. The four entries without
+# the key (kldload-webui, nvidia-settings-user, ...) started normally in the
+# same login, which is what made it obvious. (.105, 2026-08-17.)
+#
+# The phase key was never load-bearing anyway: the wrapper exits quietly when
+# no terminal emulator is present, and the GUI path it prefers needs none.
