@@ -143,6 +143,28 @@ declare -A OS_VARIANTS=(
 #
 # Args:    $1 — an os-variant short id
 # Returns: 0 when virt-install will accept it.
+# _register_golden — record a sealed golden in the kldload state DB.
+# Args:    $1 — the golden's VM name.
+# Returns: 0 always; failure is reported, never propagated.
+#
+# WHY: kldload-inventory builds the Ansible inventory from the vms table, so a
+# golden that was never registered is invisible to every playbook — you cannot
+# target what the inventory has not heard of. Clones made by kvm-clone have
+# registered themselves for a long time; the goldens they are cloned FROM did
+# not, which is why "run this against the lab" saw the clones and not their
+# source.
+#
+# Non-fatal on purpose: a golden that built and sealed correctly must not be
+# failed by a bookkeeping error. But the miss IS logged, because a silent one
+# is exactly how the estate drifts out of step with the inventory.
+_register_golden() {
+    local _name="$1"
+    command -v kldload-db >/dev/null 2>&1 || return 0
+    kldload-db vm-register --name "$_name" --role klab-golden --status sealed >/dev/null 2>&1 ||
+        warn "could not register ${_name} in the state DB — it will not appear in the Ansible inventory"
+    return 0
+}
+
 _osvariant_known() {
     local _v="$1"
     if [[ -n "${_OSINFO_KNOWN:-}" ]]; then
@@ -1967,6 +1989,7 @@ build_golden_single() {
         } | tee -a "$golden_log"
         ln -sfn "$golden_log" "${golden_log_dir}/${distro}-latest.log"
         log "Golden ready: ${C}${name}${N} ($((elapsed / 1000))s) — log: ${golden_log}"
+        _register_golden "$name"
         return 0
     fi
 
@@ -2219,6 +2242,7 @@ VALIDATE
     } | tee -a "$golden_log"
     ln -sfn "$golden_log" "${golden_log_dir}/${distro}-latest.log"
     log "Golden ready: ${C}${name}${N} ($((elapsed / 1000))s) — log: ${golden_log}"
+    _register_golden "$name"
 }
 
 cmd_golden() {

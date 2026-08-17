@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+# ---------------------------------------------------------------------------
+# kldload-networks — define the per-class libvirt networks
+#
+# What it does, in order:
+#   1. Waits for libvirtd to answer (it may still be starting at first boot).
+#   2. For each shipped network XML: defines it if absent, marks it autostart,
+#      and starts it if it is not already running.
+#   3. Reports what exists, so the operator can see the estate in one command.
+#
+# WHY separate networks at all: every VM used to land on libvirt's `default`
+# bridge, so a klab golden, a ZFS-test clone and an operator's scratch VM were
+# indistinguishable by address. That matters once Ansible is pointed at them —
+# "run this against the lab clones" has to mean something more precise than
+# "everything on virbr0", and a destructive playbook that fans out to the wrong
+# class is not a mistake you get to undo.
+#
+# A fixed subnet per class also means the inventory group and the address range
+# agree, so a play can select by either.
+#
+#   kld-klab    192.168.150.0/24   klab goldens and blue/green sites
+#   kld-zfslab  192.168.151.0/24   the ZFS test lab
+#   kld-vms     192.168.152.0/24   regular operator VMs
+#   default     192.168.122.0/24   the Kubernetes cluster — NOT managed here
+#
+# The cluster is deliberately left on `default`. It works, its real traffic
+# rides WireGuard, and re-homing a running control plane to chase tidiness is
+# a bad trade.
+#
+# Inputs:  /usr/local/share/kldload-networks/*.xml
+# Outputs: libvirt networks, defined + autostarted. Idempotent — safe to
+#          re-run, and re-running is how a host repairs itself after someone
+#          removes one by hand.
+#
+# Notes:
+#   - Defining a network does NOT move any existing VM. Guests attach at
+#     creation time; this only makes the networks available to attach to.
+#   - Subnets were chosen to avoid 192.168.122.0/24 (libvirt default) and the
+#     WireGuard planes at 10.250.0.0/24 and 10.251.0.0/24.
+# ---------------------------------------------------------------------------
+
+XML_DIR="${KLDLOAD_NETWORK_DIR:-/usr/local/share/kldload-networks}"
+LOG=/var/log/kldload/networks.log
+mkdir -p "$(dirname "$LOG")"
+
+_ts() { date '+%Y-%m-%dT%H:%M:%S'; }
+log() { echo "$(_ts) $*" >>"$LOG"; }
+say() { printf '%s\n' "$*"; }
+die() {
+    log "ERROR: $*"
+    printf 'kldload-networks: %s\n' "$*" >&2
+    exit 1
+}
+
+command -v virsh >/dev/null 2>&1 || die "virsh not installed — libvirt is required"
+
+# _wait_libvirt — libvirtd may still be coming up when this runs at boot.
+# Returns 0 once virsh answers, 1 after ~30s. Callers must treat failure as
+# fatal: defining networks against a dead daemon silently does nothing.
+_wait_libvirt() {
+    local i
+    for i in $(seq 1 30); do
+        virsh net-list --all >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    return 1
+}
+
+cmd_apply() {
+    _wait_libvirt || die "libvirtd did not answer after 30s"
+    [[ -d "$XML_DIR" ]] || die "no network definitions at $XML_DIR"
+
+    local xml name defined=0 started=0 skipped=0
+    for xml in "$XML_DIR"/*.xml; do
+        [[ -f "$xml" ]] || continue
+        name="$(basename "$xml" .xml)"
+
+        if ! virsh net-info "$name" >/dev/null 2>&1; then
+            if virsh net-define "$xml" >>"$LOG" 2>&1; then
+                log "defined $name"
+                defined=$((defined + 1))
+            else
+                # Not fatal: one malformed definition must not stop the rest.
+                say "  ! failed to define ${name} — see $LOG"
+                continue
+            fi
+        else
+            skipped=$((skipped + 1))
+        fi
+
+        # Autostart is what makes this survive a reboot without the unit.
+        virsh net-autostart "$name" >>"$LOG" 2>&1 || true # already-autostart is not an error
+
+        if ! virsh net-info "$name" 2>/dev/null | grep -qi '^Active:.*yes'; then
+            if virsh net-start "$name" >>"$LOG" 2>&1; then
+                log "started $name"
+                started=$((started + 1))
+            else
+                say "  ! failed to start ${name} — see $LOG"
+            fi
+        fi
+    done
+
+    log "apply: ${defined} defined, ${started} started, ${skipped} already present"
+    say "Networks: ${defined} defined, ${started} started, ${skipped} already present."
+    say ""
+    cmd_list
+}
+
+cmd_list() {
+    printf '  %-14s %-8s %-12s %-18s %s\n' "NETWORK" "STATE" "AUTOSTART" "SUBNET" "PURPOSE"
+    printf '  %-14s %-8s %-12s %-18s %s\n' "──────────────" "────────" "────────────" "──────────────────" "───────────────"
+    local n state auto subnet purpose
+    while read -r n; do
+        [[ -z "$n" ]] && continue
+        state="$(virsh net-info "$n" 2>/dev/null | awk '/^Active:/{print $2}')"
+        auto="$(virsh net-info "$n" 2>/dev/null | awk '/^Autostart:/{print $2}')"
+        subnet="$(virsh net-dumpxml "$n" 2>/dev/null |
+            grep -oE "address='[0-9.]+' netmask='[0-9.]+'" |
+            head -1 | sed "s/address='//;s/' netmask='/ \//;s/'//")"
+        case "$n" in
+        kld-klab) purpose="klab goldens + sites" ;;
+        kld-zfslab) purpose="ZFS test lab" ;;
+        kld-vms) purpose="operator VMs" ;;
+        default) purpose="kubernetes cluster" ;;
+        *) purpose="-" ;;
+        esac
+        printf '  %-14s %-8s %-12s %-18s %s\n' "$n" "${state:-?}" "${auto:-?}" "${subnet:-?}" "$purpose"
+    done < <(virsh net-list --all --name 2>/dev/null)
+}
+
+# ─── Lease → inventory reconciliation ──────────────────────────────────────
+# cmd_sync — teach the state DB what libvirt already knows.
+#
+# WHY this exists: kvm-clone registers every clone it makes, and the goldens
+# register themselves now too — but they all register with an EMPTY ip_addr,
+# because at creation time the guest has not asked for a DHCP lease yet.
+# kldload-inventory selects VMs `WHERE ip_addr != ''`, quite correctly, since
+# a VM with no address cannot be reached by a playbook. The result was an
+# inventory whose VM half was permanently empty: 10 VMs registered, 0 with an
+# address, none of them targetable (verified on a running host, 2026-08-17).
+#
+# Nothing was ever going to fill that column in, because the API to do it
+# (`kldload-db vm-status --ip`) had no caller. libvirt has known the answer
+# the whole time — it issued the leases. This copies them across.
+#
+# Run it after cloning, or on a timer; it is idempotent and cheap.
+cmd_sync() {
+    _wait_libvirt || die "libvirtd did not answer after 30s"
+    command -v kldload-db >/dev/null 2>&1 || die "kldload-db not installed"
+
+    # _vms_with_ip — how many registered VMs currently carry an address.
+    # This is the OUTCOME measure. `kldload-db vm-status` issues a plain SQL
+    # UPDATE, and an UPDATE whose WHERE clause matches nothing is a perfectly
+    # successful no-op — exit 0, zero rows touched. The first version of this
+    # function trusted that exit code and cheerfully reported "11 VMs updated"
+    # while the database was completely unchanged, because it was passing the
+    # DHCP client-id as the hostname. Counting before and after is the only
+    # claim worth making.
+    _vms_with_ip() {
+        kldload-db dump 2>/dev/null |
+            python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print(0); sys.exit()
+print(sum(1 for v in d.get("vms",[]) if v.get("ip_addr")))' 2>/dev/null || echo 0
+    }
+
+    local net name ip seen=0 attempted=0 stale=0 before after
+    before="$(_vms_with_ip)"
+
+    while read -r net; do
+        [[ -z "$net" ]] && continue
+        # `virsh net-dhcp-leases` columns are:
+        #   1 date  2 time  3 MAC  4 protocol  5 IP/prefix  6 hostname  7 client-id
+        # Hostname is SIX, not seven. Reading seven silently fed client-ids to
+        # the updater and matched no rows at all.
+        while read -r _ _ _ _ ip name _; do
+            [[ -z "${ip:-}" || -z "${name:-}" || "$name" == "-" ]] && continue
+            ip="${ip%%/*}"
+            seen=$((seen + 1))
+
+            # A DHCP lease OUTLIVES the guest that held it. Trusting the lease
+            # alone marked three sealed, powered-off goldens as running with
+            # stale addresses, and the inventory then handed Ansible three
+            # machines that were not on — every one UNREACHABLE. libvirt knows
+            # the truth; ask it.
+            local _state
+            _state="$(virsh domstate "$name" 2>/dev/null | head -1 | tr -d '\r')"
+
+            if [[ "$_state" == "running" ]]; then
+                # Reconcile the address for a VM the DB already knows. This
+                # does not invent inventory from stray leases on the bridge.
+                kldload-db vm-status --name "$name" --ip "$ip" --status running >/dev/null 2>&1 &&
+                    attempted=$((attempted + 1))
+                log "sync: ${name} -> ${ip} (${net}, running)"
+            else
+                # Clear the address so kldload-inventory (which selects
+                # `WHERE ip_addr != ''`) drops it. A powered-off VM must not
+                # appear as a target: a play that "fails" against a machine
+                # that was never up teaches operators to ignore failures.
+                kldload-db vm-status --name "$name" --ip "" --status "${_state:-shut}" >/dev/null 2>&1 || true
+                log "sync: ${name} is ${_state:-absent} — address cleared (stale lease ${ip})"
+                stale=$((stale + 1))
+            fi
+        done < <(virsh net-dhcp-leases "$net" 2>/dev/null | tail -n +3)
+    done < <(virsh net-list --name 2>/dev/null)
+
+    after="$(_vms_with_ip)"
+    log "sync: ${seen} lease(s), ${stale} stale, VMs with an address ${before} -> ${after}"
+    say "Leases seen: ${seen} (${stale} stale).  VMs with an address: ${before} → ${after}."
+    say "Only VMs libvirt reports as running are given an address."
+
+    if ((seen > 0)) && [[ "$before" == "$after" ]]; then
+        say ""
+        say "  WARNING: nothing changed. Either every VM already had its address,"
+        say "  or the lease hostnames do not match any registered VM name."
+        say "  Compare:  virsh net-dhcp-leases <net>   against   kldload-db dump"
+    fi
+}
+
+cmd_help() {
+    cat <<'EOF'
+kldload-networks — per-class libvirt networks for the VM estate
+
+  kldload-networks apply    Define, autostart and start every shipped network
+  kldload-networks sync     Copy libvirt DHCP leases into the state DB, so
+                            running VMs appear in the Ansible inventory
+  kldload-networks list     Show every libvirt network, state and subnet
+  kldload-networks help     This text
+
+WHY
+  Every VM used to land on libvirt's default bridge, so a klab golden, a ZFS
+  test clone and a scratch VM were indistinguishable by address. Once Ansible
+  is pointed at them that distinction matters: "run this against the lab
+  clones" must mean something narrower than "everything on virbr0".
+
+NETWORKS
+  kld-klab    192.168.150.0/24   klab goldens and blue/green sites
+  kld-zfslab  192.168.151.0/24   the ZFS test lab
+  kld-vms     192.168.152.0/24   regular operator VMs
+  default     192.168.122.0/24   the Kubernetes cluster (not managed here)
+
+NOTES
+  Idempotent — re-running repairs a host where a network was removed by hand.
+  Defining a network does not move any existing VM; guests attach at creation.
+
+EXAMPLES
+  kldload-networks apply
+  virsh net-dhcp-leases kld-zfslab        # what is on the lab network
+  ansible -i /usr/local/bin/kldload-inventory 'role:clone' -m ping
+
+EXIT STATUS
+  0 on success, 1 if libvirt is absent or unreachable.
+
+FILES
+  /usr/local/share/kldload-networks/*.xml   the definitions
+  /var/log/kldload/networks.log             what this tool did
+EOF
+}
+
+case "${1:-apply}" in
+apply | up) cmd_apply ;;
+sync) cmd_sync ;;
+list | ls) cmd_list ;;
+help | -h | --help) cmd_help ;;
+*)
+    printf 'kldload-networks: unknown command: %s\n\n' "$1" >&2
+    cmd_help >&2
+    exit 1
+    ;;
+esac

@@ -130,6 +130,28 @@ _ts() { date '+%Y-%m-%d %H:%M:%S'; }
 # Strips both spellings: the literal backslash-033 form these vars actually
 # hold, and a real ESC byte in case a callee emits one.
 # Args: message on stdin.  Returns: cleaned message on stdout.
+# _register_golden — record a sealed golden in the kldload state DB.
+# Args:    $1 — the golden's VM name.
+# Returns: 0 always; failure is reported, never propagated.
+#
+# WHY: kldload-inventory builds the Ansible inventory from the vms table, so a
+# golden that was never registered is invisible to every playbook — you cannot
+# target what the inventory has not heard of. Clones made by kvm-clone have
+# registered themselves for a long time; the goldens they are cloned FROM did
+# not, which is why "run this against the lab" saw the clones and not their
+# source.
+#
+# Non-fatal on purpose: a golden that built and sealed correctly must not be
+# failed by a bookkeeping error. But the miss IS logged, because a silent one
+# is exactly how the estate drifts out of step with the inventory.
+_register_golden() {
+    local _name="$1"
+    command -v kldload-db >/dev/null 2>&1 || return 0
+    kldload-db vm-register --name "$_name" --role zfslab-golden --status sealed >/dev/null 2>&1 ||
+        warn "could not register ${_name} in the state DB — it will not appear in the Ansible inventory"
+    return 0
+}
+
 _plain() { sed -e 's/\\033\[[0-9;]*m//g' -e $'s/\033\[[0-9;]*m//g'; }
 
 log() {
@@ -1162,6 +1184,7 @@ build_golden_single() {
 
         ln -sfn "$golden_log" "${golden_log_dir}/${distro}-latest.log"
         log "Golden ready: ${C}${name}${N} ($((elapsed / 1000))s) — log: ${golden_log}"
+        _register_golden "$name"
         return 0
     elif [[ ! -f "$img_file" ]]; then
         log "  Downloading ${distro} cloud image..."
@@ -1390,6 +1413,7 @@ VALIDATE
     ln -sfn "$golden_log" "${golden_log_dir}/${distro}-latest.log"
 
     log "Golden ready: ${C}${name}${N} ($((elapsed / 1000))s) — log: ${golden_log}"
+    _register_golden "$name"
 }
 
 cmd_golden() {

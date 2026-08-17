@@ -177,7 +177,13 @@ def cmd_vm_status(args):
     con = _connect()
     sets = ["status=?", "last_seen=?"]
     vals = [args.status, _now()]
-    if args.ip:
+    # `is not None`, not truthiness: an EMPTY --ip is a deliberate request to
+    # clear the address, and the truthy test silently ignored it. That mattered
+    # once kldload-networks began reconciling DHCP leases — a VM that had shut
+    # down kept its stale address, stayed in the Ansible inventory, and every
+    # play against it failed UNREACHABLE against a machine that was never up.
+    # Omitting --ip still leaves the column untouched.
+    if args.ip is not None:
         sets.append("ip_addr=?"); vals.append(args.ip)
     vals.append(args.name)
     con.execute(f"UPDATE vms SET {', '.join(sets)} WHERE name=?", vals)

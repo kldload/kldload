@@ -34,6 +34,7 @@
 from __future__ import annotations
 import argparse
 import json
+import re
 import os
 import sqlite3
 import sys
@@ -78,6 +79,21 @@ def _fetch_nodes(con):
         out.append(d)
     return out
 
+
+def _group(prefix: str, value: str) -> str:
+    """Ansible-safe group name.
+
+    Ansible parses ':' as its host-pattern separator, so a group called
+    "role:worker" is read as the two patterns "role" and "worker" and matches
+    nothing at all — with only a WARNING, never an error. Every role:, status:
+    and cluster: group this inventory emitted was therefore untargetable; the
+    hardcoded kube_control_plane / kube_workers groups worked purely because
+    they happened to use underscores.
+
+    Anything Ansible dislikes (':', '-', '.', space) becomes '_'.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_]", "_", f"{prefix}_{value}")
+    return re.sub(r"_+", "_", safe).strip("_")
 
 def _fetch_vms(con):
     """VMs that aren't registered as nodes yet (still booting) still
@@ -131,7 +147,7 @@ def build_inventory():
 
         # Role group
         if role:
-            g = f"role:{role}"
+            g = _group("role", role)
             inv.setdefault(g, {"hosts": []})["hosts"].append(host)
             if role == "control_plane":
                 inv["kube_control_plane"]["hosts"].append(host)
@@ -140,13 +156,13 @@ def build_inventory():
 
         # Status group
         if status:
-            g = f"status:{status}"
+            g = _group("status", status)
             inv.setdefault(g, {"hosts": []})["hosts"].append(host)
 
         # Cluster group (by human name when available)
         if cluster_id:
             cname = cluster_names.get(cluster_id, cluster_id)
-            g = f"cluster:{cname}"
+            g = _group("cluster", cname)
             inv.setdefault(g, {"hosts": []})["hosts"].append(host)
         else:
             inv["ungrouped"]["hosts"].append(host)
