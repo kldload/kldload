@@ -532,6 +532,29 @@ mkdir -p /etc/ssh/sshd_config.d
 echo -e 'PermitRootLogin yes\nPasswordAuthentication yes' > /etc/ssh/sshd_config.d/99-kzfstest.conf 2>/dev/null || true
 systemctl restart sshd 2>/dev/null || true
 
+# Pin the kernel BEFORE installing anything.
+#
+# The DKMS module is built against the RUNNING kernel. Installing the build
+# dependencies used to drag kernel-core in from `updates` -- on Fedora 44 the
+# image booted 6.19.10 and the dep install pulled 7.1.8 -- so the golden ended
+# up with two kernels, DKMS built for the one that was running, and the clone
+# booted the other. modprobe then found no module and the run scored zero
+# tests (fiend, 2026-08-17).
+#
+# kernel-devel and kernel-headers are deliberately NOT excluded: DKMS needs
+# them, and they do not change which kernel boots. kernel-devel-matched IS
+# excluded because it requires the matching kernel package and drags one in.
+for _p in kernel kernel-core kernel-modules kernel-modules-core \
+          kernel-modules-extra kernel-devel-matched; do
+    grep -q "^exclude=.*${_p}" /etc/dnf/dnf.conf 2>/dev/null && continue
+    if grep -q '^exclude=' /etc/dnf/dnf.conf 2>/dev/null; then
+        sed -i "s/^exclude=.*/&,${_p}/" /etc/dnf/dnf.conf
+    else
+        echo "exclude=${_p}" >> /etc/dnf/dnf.conf
+    fi
+done
+echo "kernel pinned to $(uname -r) for the duration of this build"
+
 dnf install -y epel-release 2>/dev/null || true
 
 # kernel-devel MUST match running kernel for DKMS
@@ -660,6 +683,21 @@ KVER=$(uname -r)
 apt-get install -y linux-headers-${KVER} dkms gcc make 2>/dev/null || \
   apt-get install -y linux-headers-generic dkms gcc make 2>/dev/null || true
 
+# Pin the kernel now that the headers are in.
+#
+# Held AFTER the install, not before: holding linux-image-* first would block
+# the headers this DKMS build needs. Only the IMAGE packages are held --
+# headers can move without changing which kernel boots, and the module is
+# built against the running one.
+#
+# Same failure this prevents as the dnf exclude above: a guest that boots a
+# kernel the module was not built for has no ZFS and runs zero tests, which
+# the harness now scores as an error rather than a pass.
+apt-mark hold $(dpkg-query -W -f='${Package}\n' 'linux-image-*' 2>/dev/null |
+    grep -vE -- '-dbg$' | tr '\n' ' ') 2>/dev/null || true
+apt-mark hold linux-image-amd64 linux-image-generic linux-image-virtual 2>/dev/null || true
+echo "kernel pinned to ${KVER}: $(apt-mark showhold 2>/dev/null | tr '\n' ' ')"
+
 # ZFS + test suite
 if ! command -v zfs >/dev/null 2>&1; then
   apt-get install -y zfsutils-linux zfs-dkms zfs-test 2>/dev/null || true
@@ -708,6 +746,13 @@ APTSETUP
     pacman)
         _ssh_cmd "$ip" bash -s <<'PACSETUP'
 set -e
+# Pin the kernel before the full upgrade: `pacman -Syu` on a rolling distro
+# will happily replace it, leaving the DKMS module built for a kernel that is
+# no longer installed.
+grep -q '^IgnorePkg' /etc/pacman.conf 2>/dev/null &&
+    sed -i 's/^IgnorePkg.*/& linux linux-lts/' /etc/pacman.conf ||
+    echo 'IgnorePkg = linux linux-lts' >> /etc/pacman.conf
+
 pacman -Syu --noconfirm 2>/dev/null || true
 
 # Headers + build tools
