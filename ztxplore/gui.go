@@ -101,7 +101,11 @@ func (t labTheme) Color(name fyne.ThemeColorName, v fyne.ThemeVariant) color.Col
 		if dark {
 			return color.NRGBA{R: 0x14, G: 0x16, B: 0x1a, A: 0xff}
 		}
-		return color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+		// Not pure white. #ffffff under a full-screen console is glare, and
+		// the panes above it are lighter still, so the ground wants to sit
+		// a step down. Blue-biased to agree with the accent rather than
+		// reading as dirty grey.
+		return color.NRGBA{R: 0xec, G: 0xef, B: 0xf4, A: 0xff}
 	case theme.ColorNameOverlayBackground, theme.ColorNameMenuBackground:
 		if dark {
 			return color.NRGBA{R: 0x1b, G: 0x1e, B: 0x24, A: 0xff}
@@ -117,15 +121,54 @@ func (t labTheme) Color(name fyne.ThemeColorName, v fyne.ThemeVariant) color.Col
 	// (2026-08-17). vmxplore and zxplore both name these and both follow the
 	// desktop correctly; this is that pattern, not a third variation on it.
 	case theme.ColorNameInputBackground:
+		// LIGHTER than the background, deliberately. Panes then float above
+		// the ground instead of dissolving into it, which is the only depth
+		// cue a flat toolkit gives you — and the thing that makes a tab bar
+		// legible without drawing a single border.
 		if dark {
-			return color.NRGBA{R: 0x13, G: 0x18, B: 0x20, A: 0xff}
+			return color.NRGBA{R: 0x1b, G: 0x1f, B: 0x26, A: 0xff}
 		}
-		return color.NRGBA{R: 0xf4, G: 0xf6, B: 0xf9, A: 0xff}
+		return color.NRGBA{R: 0xf7, G: 0xf9, B: 0xfc, A: 0xff}
 	case theme.ColorNameForeground:
 		if dark {
 			return color.NRGBA{R: 0xe6, G: 0xed, B: 0xf5, A: 0xff}
 		}
 		return color.NRGBA{R: 0x14, G: 0x18, B: 0x1e, A: 0xff}
+
+	// ─── the states that make an unselected tab readable ────────────────
+	// AppTabs cannot be styled directly — Fyne paints its headers from these
+	// names and offers no hook of its own. So the palette does the work: an
+	// unselected tab sits on Button, brightens to Hover under the cursor, and
+	// the selected one takes Selection. All three are close in value, so the
+	// bar reads as one surface with a current position rather than as buttons
+	// competing for attention.
+	case theme.ColorNameButton:
+		if dark {
+			return color.NRGBA{R: 0x23, G: 0x28, B: 0x33, A: 0xff}
+		}
+		return color.NRGBA{R: 0xdf, G: 0xe5, B: 0xec, A: 0xff}
+	case theme.ColorNameHover:
+		if dark {
+			return color.NRGBA{R: 0x2b, G: 0x32, B: 0x3e, A: 0xff}
+		}
+		return color.NRGBA{R: 0xd4, G: 0xdd, B: 0xe8, A: 0xff}
+	case theme.ColorNameSelection:
+		if dark {
+			return color.NRGBA{R: 0x26, G: 0x40, B: 0x5a, A: 0xff}
+		}
+		return color.NRGBA{R: 0xcf, G: 0xe4, B: 0xf7, A: 0xff}
+	case theme.ColorNameDisabled:
+		// The label of a tab you are not on. Muted enough to recede, dark
+		// enough to read — a tab you cannot find is worse than a loud one.
+		if dark {
+			return color.NRGBA{R: 0x8b, G: 0x98, B: 0xa8, A: 0xff}
+		}
+		return color.NRGBA{R: 0x64, G: 0x70, B: 0x80, A: 0xff}
+	case theme.ColorNameSeparator, theme.ColorNameShadow:
+		if dark {
+			return color.NRGBA{R: 0x2a, G: 0x30, B: 0x3a, A: 0xff}
+		}
+		return color.NRGBA{R: 0xc8, G: 0xd1, B: 0xdc, A: 0xff}
 	}
 	return t.Theme.Color(name, v)
 }
