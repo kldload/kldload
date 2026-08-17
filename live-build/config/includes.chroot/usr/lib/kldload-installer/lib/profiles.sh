@@ -984,7 +984,17 @@ k_install_system_files() {
         # Five kldload-* top-level dirs exist in /usr/local/share — handle
         # each with an explicit cp -r so a new one needs an explicit line
         # (avoiding the "all of /usr/local/share/ copies blindly" footgun).
-        for _share in kldload kldload-examples; do
+        # kldload-networks added 2026-08-17: the libvirt network definitions
+        # for the per-class estate (kld-klab / kld-zfslab / kld-vms). Without
+        # them `kldload-networks apply` has nothing to define and every guest
+        # lands on libvirt's default bridge again.
+        #
+        # klab-bob added at the same time for the same reason — it was in
+        # neither this list NOR the ISO builder's, so Bob's knowledge base has
+        # never reached an installed system. Note kldload-examples was in THIS
+        # list already but not in build-iso.sh, so the copy below has been
+        # finding an empty source: the chain was broken at the first link.
+        for _share in kldload kldload-examples kldload-networks klab-bob; do
             if [[ -d "/usr/local/share/${_share}" ]]; then
                 mkdir -p "${target}/usr/local/share/${_share}"
                 cp -r "/usr/local/share/${_share}/." "${target}/usr/local/share/${_share}/"

@@ -65,7 +65,7 @@ BUILD_DATE="$(date +%Y%m%d)"
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
 DISTRO_TAG="${DISTRO:-fedora}"
-VERSION="${KLDLOAD_VERSION:-1.4.0-rc12}"
+VERSION="${KLDLOAD_VERSION:-1.4.0-rc13}"
 ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
@@ -2131,6 +2131,32 @@ HELMCHARTS
         cp /build/live-build/config/includes.chroot/etc/kldload/*.txt \
             "${ROOTFS}/etc/kldload/" 2>/dev/null || true
     fi
+    # ─── /usr/local/share, wholesale ──────────────────────────────────────
+    # Copied as a tree rather than directory-by-directory, for the same reason
+    # the systemd units are: the by-name list rotted silently. An audit found
+    # THREE shipped directories that had never reached an ISO —
+    #   klab-bob           Bob's knowledge base
+    #   kldload-examples   the example playbooks and manifests operators are
+    #                      pointed at, absent from every install to date
+    #   kldload-networks   the libvirt network definitions, without which
+    #                      `kldload-networks apply` has nothing to define
+    # — because each needed a hand-written block that nobody wrote.
+    #
+    # The whole tree is under 4 MB, so there is no size argument for curating
+    # it. The specific blocks below still run afterwards: they verify counts
+    # and fail the build when something required is missing, which a blanket
+    # copy cannot do. This makes the default "it ships", and leaves those
+    # blocks to assert "it must".
+    if [[ -d /build/live-build/config/includes.chroot/usr/local/share ]]; then
+        mkdir -p "${ROOTFS}/usr/local/share"
+        cp -a /build/live-build/config/includes.chroot/usr/local/share/. \
+            "${ROOTFS}/usr/local/share/"
+        log "share tree copied: $(find /build/live-build/config/includes.chroot/usr/local/share \
+            -mindepth 1 -maxdepth 1 -type d | wc -l) directories"
+    else
+        log "WARNING: includes.chroot/usr/local/share missing — bind mount broken?"
+    fi
+
     # tetragon zfs tracing policy
     if [[ -f /build/live-build/config/includes.chroot/usr/local/share/klab/tetragon-zfs-policy.yaml ]]; then
         mkdir -p "${ROOTFS}/usr/local/share/klab"

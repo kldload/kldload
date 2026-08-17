@@ -400,6 +400,31 @@ setup_kvm() {
         log "WARNING: libvirt isos pool not defined — klab golden builds will fail with 'missing storage pool target path'"
     fi
 
+    # ── Per-class guest networks ──────────────────────────────────────────
+    # kld-klab / kld-zfslab / kld-vms, so a klab golden, a ZFS-test clone and
+    # an operator's scratch VM are distinguishable by address as well as by
+    # name. Everything used to land on libvirt's default bridge, which is
+    # tolerable until Ansible is pointed at the estate: "run this against the
+    # lab clones" then has to mean something narrower than "everything on
+    # virbr0", and a destructive play that fans out past its class is not a
+    # mistake anyone gets to undo.
+    #
+    # Runs here because it needs libvirtd up, which the block above has just
+    # ensured. Idempotent: defining a network that exists is a no-op, and it
+    # never moves an existing guest — attachment happens at creation.
+    #
+    # Non-fatal. A host with no per-class networks still builds VMs on the
+    # default bridge exactly as before; it only loses the classification.
+    if command -v kldload-networks >/dev/null 2>&1; then
+        if kldload-networks apply >/dev/null 2>&1; then
+            log "per-class libvirt networks defined (kld-klab, kld-zfslab, kld-vms)"
+        else
+            log "WARNING: kldload-networks apply failed — guests will fall back to the default bridge; see /var/log/kldload/networks.log"
+        fi
+    else
+        log "WARNING: kldload-networks not installed — per-class guest networks unavailable"
+    fi
+
     # kldload-managed storage pools — fixed UUIDs shipped as
     # /etc/libvirt/storage/<name>.xml. Each tool (kube-cluster, klab,
     # webui vm_create_cloud) writes cloud-init ISOs to /var/lib/kldload/
