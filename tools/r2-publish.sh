@@ -215,10 +215,27 @@ upload() {
         --progress --s3-chunk-size 64M --s3-upload-concurrency 4
 }
 
+server_copy() {
+    # server_copy <source-key> <dest-key>
+    #
+    # Duplicates an object inside the bucket without sending it again. rclone
+    # issues a server-side copy when source and destination are the same
+    # remote, using multipart copy above --s3-copy-cutoff.
+    local src="$1" dst="$2"
+    echo "r2-publish: copying ${src} -> ${dst} (server-side)"
+    rclone copyto ":s3:${R2_BUCKET}/${src}" ":s3:${R2_BUCKET}/${dst}" \
+        "${remote[@]}" --s3-copy-cutoff 4G
+}
+
 upload "$iso" "$iso_name"
 upload "$sidecar" "${iso_name}.sha256"
-upload "$iso" "$LATEST_KEY"
-upload "$sidecar" "${LATEST_KEY}.sha256"
+
+# WHY NOT a second upload: the ISO has to exist under both the versioned key
+# and the latest key, and an earlier version of this sent the whole image
+# twice. At 18.4 GB that is 18.4 GB of uplink spent to produce bytes R2
+# already has. Copy it inside the bucket instead.
+server_copy "$iso_name" "$LATEST_KEY"
+server_copy "${iso_name}.sha256" "${LATEST_KEY}.sha256"
 
 # ─── Verify what is actually being served ────────────────────────────────────
 # Re-read over the public URL, not the S3 API: that is the path a visitor

@@ -1,14 +1,31 @@
 # kldload
 
-**One USB. ZFS on root across any dnf, apt or pacman distribution — plus a GUI-first RHEL workstation, a KVM-on-ZFS hypervisor, containers whose image layers are ZFS datasets, Kubernetes, and a local AI assistant, all assembled from stock vendor repos.**
+**A build tool that assembles a Linux distribution onto ZFS root from the
+vendor's own package repositories — and the artifact OS that falls out of it.**
 
-kldload builds a distribution from their own package repos (dnf, apt, pacman, apk) onto **ZFS on root**, with **ZFSBootMenu** boot environments, **WireGuard**, **eBPF**, and an optional **KVM hypervisor**, **Kubernetes**, **klab** multi-distro test platform, and **Ollama + Open WebUI** local AI. Nothing is forked. Nothing is patched. Every package comes straight from the vendor's CDN, and most distros install fully offline from mirrors baked into the ISO.
+There are two ways to use this.
 
-Pick a distro, pick a profile, install. The profiles are examples of what the substrate can become — start with one, mix in another with `kpkg add`, or build your own from the primitives.
+**1 — As a build tool, against your own Linux.** It replaces the
+"download the .iso" step. `dnf --installroot`, `debootstrap` or `pacstrap`
+against the vendor's own CDN, then ZFS and NVIDIA compiled against the kernel
+that install just laid down, signed and MOK-enrolled so they load with Secure
+Boot left on. Nothing forked, nothing patched. The build stops wherever you
+decide — a plain install you finish by hand, or a fully baked image that gets
+*deployed* rather than installed.
 
-**Website:** [kldload.com](https://kldload.com) &middot; **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) &middot; **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
+**2 — As the finished article.** The ISO is what that build leaves behind: ZFS
+on root with boot environments, WireGuard, KVM, Kubernetes, an eBPF
+observability plane and a local AI stack, with the kernel and its out-of-tree
+modules pinned as one matched set so a routine update cannot separate them.
 
-**The family:** **kldload** — the substrate &middot; [zxplore](https://github.com/zxplore/zxplore) — the ZFS console &middot; [wgxplore](https://github.com/wgxplore/wgxplore) — the WireGuard console &middot; [vmxplore](https://github.com/vmxplore/vmxplore) — the VM console
+The thing it adds that a vendor image does not have: **`apt`, `dnf` and
+`pacman` snapshot the root before every transaction**, so reversing a failed
+upgrade is one command rather than a rescue USB and an evening.
+
+Five substrates in the installer menu, three package managers underneath. Most
+install fully offline from mirrors baked into the ISO.
+
+**Website:** [kldload.com](https://kldload.com) &middot; **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) &middot; **Release notes:** [1.4.0](https://kldload.com/releases/1.4.0.html) &middot; **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
 
 **Installer**
 
@@ -40,17 +57,10 @@ adding a node reconciles the mesh, etcd and the firewall everywhere else.
 
 ![Kubernetes in the web console](screenshots/console-kubernetes.png)
 
-![k9s showing the whole cluster](screenshots/k9s-cluster.png)
-
 **Metrics, grouped.** 29 Grafana dashboards: the estate, eBPF, the pool, and
 the OpenZFS test lab kept separate from it.
 
 ![The metrics section](screenshots/console-metrics.png)
-
-**Man pages that travel with the binary.** `wgxplore(1)`, `vmxplore(1)` and
-`ztxplore(1)` embed their own manual and render it in-app.
-
-![wgxplore's embedded manual](screenshots/wgxplore-manual.png)
 
 ---
 
@@ -179,9 +189,9 @@ Live environment is **Fedora 44** (kernel 7.0.x — currently `7.0.12` — with 
 
 ---
 
-## Workstation edition (1.3.1)
+## The desktop profile
 
-The **Desktop** profile is a GUI-first RHEL 10 workstation: expert operations — ZFS replication, KVM, Kubernetes, eBPF observability — exposed as point-and-shoot desktop apps, not CLI rituals.
+A GUI-first workstation that looks like stock RHEL 10: expert operations — ZFS replication, KVM, Kubernetes, eBPF observability — exposed as point-and-shoot desktop apps, not CLI rituals.
 
 - **Install-time Platform Options.** Checkboxes for NVIDIA drivers, KVM, Kubernetes, eBPF tooling, and golden-image building. Desktop-only, default-clean — you opt into the heavy stuff.
 - **Native app windows.** Each tool (VMs, Kubernetes, ZFS, Metrics, the model, …) opens as its own chromeless GTK/WebKit window — no browser chrome, no left menu — backed by the same web console the server edition serves.
@@ -341,17 +351,22 @@ CDNs; the ISO itself is built with Red Hat's
 [xorriso](https://www.gnu.org/software/xorriso/) inside a Fedora 44 container.
 
 ### The sister consoles
-[zxplore](https://github.com/zxplore/zxplore) (ZFS) is a separate BSD-3 project
-by the same author, built from its own upstream repo at ISO-build time; the
-exact commit shipped is recorded in `/etc/kldload/zxplore-commit`. It runs on
-any Linux/BSD box &mdash; kldload is its first-party distribution, not its owner.
 
-[vmxplore](https://github.com/vmxplore/vmxplore) (KVM) is the same arrangement:
-its own repo, its own release cadence, shipped here.
+Three of the consoles are their own BSD-3 projects by the same author, with
+their own repos and release cadence. kldload builds each from its own upstream
+at ISO-build time and records the exact commit it shipped, so an installed
+system can say precisely what it is running:
 
-**wg** (WireGuard) is built from this repository's own `wg/` directory, so
-`/etc/kldload/wgxplore-commit` records kldload's HEAD rather than a separate
-upstream. It was folded in on 2026-08-10 as a read-only estate lens.
+| Console | Upstream | Commit recorded in |
+|---|---|---|
+| [zxplore](https://github.com/zxplore/zxplore) — ZFS | its own repo | `/etc/kldload/zxplore-commit` |
+| [vmxplore](https://github.com/vmxplore/vmxplore) — KVM | its own repo | `/etc/kldload/vmxplore-commit` |
+| [wgxplore](https://github.com/wgxplore/wgxplore) — WireGuard | this repo's `wg/` | `/etc/kldload/wgxplore-commit` |
+
+wgxplore was folded into this repository on 2026-08-10 as a read-only estate
+lens, which is why its recorded commit is kldload's HEAD rather than a separate
+upstream. They run on any Linux or BSD box — kldload is their first-party
+distribution, not their owner.
 
 > Licences are each project's own; kldload ships them unmodified and adds no
 > licence terms of its own to them. See [License](#license) for kldload's.
@@ -448,203 +463,15 @@ The user picks the target distro at install time. After install the system runs 
 
 ## Releases
 
-### 1.4.0 &mdash; An update you can undo
+Current release: **1.4.0 — An update you can undo** (August 2026). 369 commits
+since 1.3.1: 106 features, 179 fixes, 389 files changed.
 
-369 commits since 1.3.1: 106 features, 179 fixes, 389 files changed. Full
-detail in [CHANGELOG.md](CHANGELOG.md); the short version:
+- Full changelog: [`CHANGELOG.md`](live-build/config/includes.chroot/usr/local/share/kldload/CHANGELOG.md)
+- Release notes, with screenshots: [kldload.com/releases/1.4.0.html](https://kldload.com/releases/1.4.0.html)
+- History back to 1.0: [kldload.com/release-notes.html](https://kldload.com/release-notes.html)
 
-**`apt` and `dnf` snapshot before every transaction, and any of them can be
-reversed.** These are the normal commands, not a wrapper &mdash; a script,
-`unattended-upgrades` or the GUI updater all get the same protection, because
-the hooks fire from inside the package manager.
-
-```console
-$ sudo apt upgrade
-kldload: snapshot rpool/ROOT/kldload@apt-pre-20260817-023105
-
-$ sudo apt rollback
-Rollback staged.
-  new environment : rpool/ROOT/rollback-20260817-023340
-  boot path       : direct kernel (Secure Boot compatible)
-
-$ systemctl reboot
-```
-
-Rollback **clones** the snapshot into a new boot environment rather than running
-`zfs rollback`, which cannot touch a mounted root and destroys every newer
-snapshot. Nothing is overwritten, and `apt rollback cancel` reverses it until
-you reboot. Under Secure Boot the ESP kernel, initrd and `grub.cfg` are rewritten
-to match the dataset &mdash; backed up first &mdash; because restoring a root
-without its matching kernel means no ZFS, no network and no disks.
-
-**The kernel is pinned as a matched set.** ZFS and NVIDIA are out-of-tree DKMS
-modules built against one specific kernel, so the kernel, the ZFS packages, the
-whole NVIDIA driver set and the boot chain are held together &mdash; 56 packages
-on a desktop install. `nvidia-container-toolkit` is deliberately excluded: own
-version line, not coupled to the kernel module.
-
-**A console per subsystem**, each shipping a GUI *and* a TUI so a headless
-hypervisor gets the same tool over SSH: `zxplore` (pools, datasets, snapshots,
-replication, both permission layers), `wgxplore` (every WireGuard interface and
-peer, declared against actual), `vmxplore` (the VM estate and its consoles),
-`ztxplore` (the OpenZFS test lab), `buildmon`. `vmxplore(1)` and `ztxplore(1)`
-carry full man pages embedded in the binary.
-
-**Kubernetes is HA by default** &mdash; three control planes via kube-vip, VIP
-float proven by failover, control planes addable after install, and node
-add/remove reconciling the WireGuard mesh, etcd membership and firewall rules on
-every other node. New day-2 verbs: port-forward, editing resources as YAML,
-Events, StatefulSets, DaemonSets, ConfigMaps, cluster start/stop.
-
-**The AI stack runs offline.** With `KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1` the ISO
-carries 5.4 GB &mdash; the model, the embedding model, the Open WebUI image and
-the Ollama runtime &mdash; so first boot has a working assistant with the network
-unplugged.
-
-**An estate Ansible can target.** VMs land on a network that says what they are
-(`kldload-networks apply`), a dynamic inventory turns that into groups, and
-`kldload-estate` reconciles what libvirt, the state database, DHCP, WireGuard and
-Kubernetes each believe &mdash; reporting where they disagree.
-
-**Also:** the OpenZFS test lab across six distributions on zvols with guest
-kernels pinned for the life of the build &middot; Docker with its layers on ZFS
-&middot; 29 Grafana dashboards, ZFS split between the pool and the test lab
-&middot; offline install for Debian, Fedora and RHEL &middot; `kexport` to
-qcow2, raw, VMDK or OVA, sealed by default.
-
-**Fixed, and you would have noticed:** nine of eleven systemd units never
-reached the ISO, so the package-holds unit, the ZFS dbgmsg collector and the apt
-snapshot hook shipped and did nothing &middot; darksite AI weights were ignored
-unless a checkbox was ticked &middot; NVIDIA was unheld, letting its userspace
-advance past the kernel module &middot; bcc tools were installed but never found,
-because their names and paths differ per distribution &middot; NetworkManager
-managed WireGuard, libvirt and Cilium interfaces and raised an activation failure
-for each during first boot.
-
-### 1.4.0-rc2 &mdash; The ZFS Console (release candidate)
-
-The workstation gains a real ZFS control surface and a friction-free web
-console. This collapses the 1.3.2&ndash;1.3.6 development work &mdash; never
-cut as separate point releases &mdash; into one release.
-
-**Secure Boot + full-disk ZFS encryption both work end-to-end** &mdash; validated
-on hardware: the installer powers off after install, you enable Secure Boot and
-enroll the MOK (password `kldload`), unlock with your passphrase, and boot into a
-clean, signed, encrypted system. See
-[Installing with Secure Boot &amp; encryption](#installing-with-secure-boot--encryption).
-
-**[zxplore](https://github.com/zxplore/zxplore) &mdash; the universal ZFS console (new)**
-- A native desktop app for the whole ZFS lifecycle: browse datasets, a live
-  4-column dossier, snapshot / clone / rollback, replicate (local&harr;remote
-  and server-to-server), boot environments, encryption keys, pool scrub / trim,
-  inline property editing &mdash; right-click on any dataset.
-- Built-in server manager (WinSCP-style saved connections, key-first auth,
-  paste/generate keys, proxy jump hosts) with dual connectable panes for
-  remote-to-remote replication.
-- Runs on **any** Linux/BSD box with ZFS &mdash; an independent open project at
-  [github.com/zxplore/zxplore](https://github.com/zxplore/zxplore). On kldload
-  it auto-detects the `k`-commands and lights up extra tools. Replaces the older
-  bundled ZFS utilities. `zxplore --tui` for headless/SSH.
-
-**[wgxplore](https://github.com/wgxplore/wgxplore) &mdash; the WireGuard networks console (new)**
-- The same console, one domain over: every host, interface and peer in one
-  tree, read live from the kernel over plain SSH &mdash; so the encrypted
-  backplane under your VMs and Kubernetes nodes is something you can *see*.
-- Declares networks as small files, renders them to plain WireGuard configs,
-  and flags any peer that is running but was never declared.
-- Independent and universal like its sibling: it manages estates it did not
-  create, and any device that speaks WireGuard can join one it did. Baked into
-  every kldload profile; `wgx` on every install, GUI where there's a screen.
-
-**Console &amp; access**
-- **Zero-prompt on-box console.** The web console (`:8443`) authenticates you
-  automatically when you're at the machine (loopback trust over a proxy-only
-  socket) &mdash; no token, no password, ever, for local use.
-- **Remote access = your system password** (PAM, wheel/sudo), kept in memory for
-  the session only. A scriptable bearer token remains for automation.
-- **The live installer opens straight into the installer** &mdash; no credential
-  needed to run an install.
-- **No certificate warning** &mdash; the kldload CA root is trusted in the
-  browser on first paint and stays trusted across cert rotation.
-
-**Boot &amp; install reliability**
-- **Offline-resilient first boot** &mdash; a flaky or absent network download no
-  longer aborts firstboot; the box still comes up fully configured.
-- **Secure Boot is forgiving** &mdash; Secure-Boot installs power off so you
-  control the MOK-enrollment boot, and a healing net re-offers the blue
-  MokManager prompt every boot until the key is actually enrolled (no more
-  one-shot dead end).
-- Boot fixes: the libvirt default network self-heals offline, the TLS cert stops
-  churning against the cluster mesh, and NVIDIA VRAM is re-checked before the AI
-  assistant is skipped.
-- Installer safety: the boot USB is excluded from wipe targets, a failed
-  disk-wipe aborts instead of silently continuing, and the encrypted-passphrase
-  install is boot-verified.
-- Observability dashboards no longer paint healthy metrics red.
-
-#### What makes kldload different
-- **Reproducible, air-gapped substrate** &mdash; every artifact (RPMs, binaries,
-  container images, models) is packed at build time; install and first boot run
-  fully offline (darksite).
-- **One image, many substrates** &mdash; RHEL / Rocky / CentOS Stream / Fedora /
-  Debian / Ubuntu / Arch, picked at install; upstream packages thereafter.
-- **ZFS-native** &mdash; boot environments, snapshots, and replication are
-  first-class; [zxplore](https://github.com/zxplore/zxplore) is the desktop face.
-- **One click to a cluster** &mdash; a KVM host, a real multi-node Kubernetes
-  cluster, and a full observability plane (Prometheus / Grafana / Cilium+Hubble /
-  Tetragon) stand up on first boot.
-- **Looks like stock RHEL, on purpose** &mdash; the whole expert toolbox sits one
-  click behind familiar chrome.
-- **Encrypted by default** &mdash; per-dataset encryption unlocked by USB keyfile
-  &rarr; TPM &rarr; passphrase, on a Secure-Boot signed chain.
-
-### 1.3.1 &mdash; The Kernel-Loaded Desktop
-- **CentOS Stream + Rocky moved to EL10** (kernel 6.12, OpenZFS 2.3) to match RHEL 10 &mdash; retires the EL9 (5.14) path that wedged dracut/NVIDIA on first boot
-- Per-tool **native-app dashboards** (each web tool opens as its own dock-iconed window) and **VM restore-on-reboot** (running VMs return after a reboot; stopped stay stopped)
-- Live env corrected to Fedora 44 **kernel 7.0.12 / OpenZFS 2.4.3** (the old 6.19 pin is gone; ZFS 2.4.3 builds against the GA 7.0 kernel)
-- Substrate (kernel + OpenZFS + NVIDIA) **versionlocked at first boot** so `dnf update` can't brick ZFS boot
-- KVM / Kubernetes / lab profiles now warn they need hardware virtualization (VT-x / AMD-V or nested virt)
-
-### 1.3.0 &mdash; Workstation+
-The Full Stack Automation work-in-progress that was tagged 1.2.0 internally
-was never released as a separate version &mdash; it shipped as part of 1.3.0
-alongside the Workstation polish. "+" is the hotrod mark on the default
-wallpaper: same RHEL 10 desktop image, steel-blue tint, faint &lsquo;+&rsquo;
-in the lower-right corner saying *this isn't stock*.
-
-**Workstation (the GUI layer):**
-- GUI-first RHEL 10 workstation: expert ops (ZFS / KVM / K8s / eBPF) as point-and-shoot desktop apps
-- Install-time **Platform Options** &mdash; NVIDIA / KVM / Kubernetes / eBPF / golden-image building, desktop-only, default-clean
-- Native per-tool app windows (chromeless GTK/WebKit), NVIDIA + Wayland render fixes (GSK_RENDERER=ngl pre-baked; firstboot also reloads running user sessions so the fix lands without a re-login &mdash; no first-session Nautilus segfault)
-- Console (tmux cockpit) promoted to its own application, de-duplicated from every tool window
-- VM serial console embedded in the web UI via the same ttyd-k9s session
-- RHEL 10 desktop package + TLS fixes (ptyxis, zenity, glib-networking)
-- Steam (Flathub) + nvidia-settings + gvim as default workstation apps
-- Refined icon set: per-family colour with one warm accent per glyph, hotrodded RHEL 10 wallpaper, dock pinned to Files / Firefox / Konsole on installed systems (empty on the live ISO so the installer is the focus)
-
-**Full Stack Automation (the install-time layer):**
-- PetClinic Microservices + ArgoCD wired into autodeploy
-- sanoid / syncoid on by default with sensible policies
-- Web UI Demo Mode with deploy / disaster / recover buttons
-- State & reconciliation layer under `/var/lib/kldload/state/`
-- Deterministic install ordering (CP &rarr; workers &rarr; Cilium &rarr; observability &rarr; Tetragon &rarr; klab)
-- Installer auto-generates + bakes an admin SSH key into every install &mdash; nodes are peer-reachable out of the box
-
-### 1.1.0 &mdash; Hardware Reality
-- Live env cut over from CentOS Stream 9 to Fedora 44 (kernel 6.19, OpenZFS 2.4.x)
-- Single-port TLS reverse proxy fronting every internal service
-- Tetragon wired through to Grafana panels
-- klab graduated to a first-class profile with per-distro goldens
-- Install path rewritten end-to-end against real hardware
-
-### 1.0.x &mdash; Foundations
-ZFS on root + ZFSBootMenu, the offline RPM/APT darksites, KVM-on-ZFS with instant zvol clones, `kube-cluster` (K8s on ZFS-backed VMs with Cilium/Hubble/Tetragon), the Bob agent, the observability stack, and the growth from 4 to all seven distributions.
-
----
-
-## License
-
-BSD-3-Clause. See [LICENSE](LICENSE).
+Every release is tagged, so `git show v1.4.0` is the exact tree an ISO was
+built from.
 
 ## Publishing a release
 
@@ -653,9 +480,16 @@ website advertises one release and hands the visitor another. After tagging:
 
 ```bash
 export R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
-tools/r2-publish.sh live-build/output/kldload-<version>-x86_64.iso
+tools/r2-publish.sh --prune live-build/output/kldload-<version>-x86_64.iso
 ```
 
 It verifies the ISO against its `.sha256` sidecar before uploading, publishes
-under both the versioned key and `kldload-free-latest.iso`, then re-reads the
-published objects over HTTPS and asserts they match. Requires `rclone`.
+under both the versioned key and `kldload-free-latest.iso` (server-side copy,
+so the image is sent once), then re-reads the published objects over HTTPS and
+asserts size and checksum. `--prune` clears older releases out of the bucket
+afterwards; `--prune-dry-run` shows what it would remove first. Requires
+`rclone`.
+
+## License
+
+BSD-3-Clause. See [LICENSE](LICENSE).
