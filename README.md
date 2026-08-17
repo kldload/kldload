@@ -22,8 +22,9 @@ The thing it adds that a vendor image does not have: **`apt`, `dnf` and
 `pacman` snapshot the root before every transaction**, so reversing a failed
 upgrade is one command rather than a rescue USB and an evening.
 
-Five substrates in the installer menu, three package managers underneath. Most
-install fully offline from mirrors baked into the ISO.
+Four substrates in the installer menu — **Fedora, Debian, RHEL, Arch** — and
+three package managers underneath. Debian and Fedora install with the network
+unplugged, from complete mirrors baked into the ISO.
 
 **Website:** [kldload.com](https://kldload.com) &middot; **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) &middot; **Release notes:** [1.4.0](https://kldload.com/releases/1.4.0.html) &middot; **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
 
@@ -157,7 +158,7 @@ Only **remote** browsers do &mdash; sign in with your admin account (a `wheel`/
 
 ---
 
-## Five in the menu, three package managers underneath
+## Four in the menu, three package managers underneath
 
 | Distribution | Install method | Offline |
 |---|---|---|
@@ -165,19 +166,19 @@ Only **remote** browsers do &mdash; sign in with your admin account (a `wheel`/
 | Debian 13 (Trixie) | `debootstrap` | Yes (APT darksite) |
 | RHEL 10 | `dnf --installroot` | No (Red Hat CDN; subscription required) |
 | Arch Linux | `pacstrap` | No (rolling; requires internet) |
-| FreeBSD | base sets | No (requires internet) |
 
-Those five are what the installer offers, because they are the five that get
+Those four are what the installer offers, because they are the four that get
 tested. The *method* underneath is not distro-specific: kldload installs by
 calling `dnf --installroot`, `debootstrap` or `pacstrap` against a distribution's
 own repositories. Nothing is forked, nothing is patched, and no image is
 pre-baked for a given distro.
 
 Which means the supported set is really "distributions whose packages come from
-dnf, apt or pacman" — CentOS Stream, Rocky and Ubuntu are all still installable
-today with `KLDLOAD_DISTRO=<name>`; they are simply not on the menu, because a
-menu of everything is a menu nobody can use. Adding a distribution in one of
-those families is repository configuration, not new machinery.
+dnf, apt or pacman". Others in those families — CentOS Stream, Rocky, Ubuntu —
+remain reachable with `KLDLOAD_DISTRO=<name>`, but they are **not on the menu
+and not tested**, and the menu is the honest statement of what is. Adding a
+distribution in one of those families is repository configuration, not new
+machinery.
 
 The honest bound: a new distribution needs its repos and keys declared, and its
 kernel paired with a version of OpenZFS that builds against it. That is a
@@ -185,7 +186,7 @@ morning's work, not a port.
 
 Live environment is **Fedora 44** (kernel 7.0.x — currently `7.0.12` — with OpenZFS `2.4.3` on root).
 
-> **Fedora 44 + ZFS:** OpenZFS now ships a native `fc44` build (`2.4.3`) that builds against Fedora 44's stock 7.0 kernel, so there is no `fc43` bridge and no kernel pin — the live ISO and the installed target ride the GA kernel. The shipped kernel + OpenZFS + NVIDIA are **versionlocked at first boot**, so a routine `dnf update` can't pull a kernel ZFS can't build for. (OpenZFS 2.4.x caps at kernel ≤ 7.0.x; the substrate only moves to a newer kernel once a matching ZFS build exists.)
+> **Fedora 44 + ZFS:** OpenZFS ships a native `fc44` build (`2.4.3`), so there is no `fc43` bridge. The kernel is **not** taken as whatever Fedora ships today: `builder/kernel-pin.sh` reads the ceiling OpenZFS itself declares (`zfs-dkms` Conflicts — 2.4.3 caps at kernel ≤ 7.0.999) and resolves the newest matching build, pulling kernel, `-core`, `-modules`, `-devel` and `-headers` as one set so they cannot be split. On the installed system that set plus NVIDIA is **versionlocked at first boot**, so a routine `dnf update` cannot pull a kernel ZFS has no build for.
 
 ---
 
@@ -374,6 +375,26 @@ distribution, not their owner.
 ---
 
 ## CLI tools
+
+### Packages and rollback
+
+`apt`, `dnf` and `pacman` are symlinked to `kldload-pkg-wrapper` at install, so
+these are the *normal* commands — a script, `unattended-upgrades` or the GUI
+updater get the same protection.
+
+| Command | What it does |
+|---|---|
+| `apt upgrade` / `dnf update` | Snapshots the root, then runs the real transaction |
+| `apt rollback` | Stages a return to the pre-transaction snapshot; reboot to apply |
+| `apt rollback list` | Shows which transactions you could go back to |
+| `apt rollback cancel` | Un-stages it — nothing has changed until you reboot |
+| `kldload-rollback` | The same machinery directly, with boot-environment control |
+| `kpkg` | Package operations with pre-install snapshots |
+| `kupgrade` | Guided upgrade with automatic rollback on failure |
+
+Rollback **clones** the snapshot into a new boot environment rather than running
+`zfs rollback`, which cannot touch a mounted root and would destroy every newer
+snapshot. Nothing is overwritten.
 
 ### Host
 | Command | What it does |

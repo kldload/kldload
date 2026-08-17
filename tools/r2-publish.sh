@@ -6,9 +6,11 @@
 # What it does, in order:
 #   1. Verifies the local ISO against its .sha256 sidecar before anything
 #      leaves the machine.
-#   2. Uploads the ISO under BOTH keys: the versioned name and the
-#      kldload-free-latest.iso name the website's download button resolves to.
-#   3. Uploads the .sha256 sidecar alongside each.
+#   2. Uploads the ISO as kldload-free-latest.iso, the name the website's
+#      download button resolves to.
+#   3. Uploads the .sha256 sidecar alongside it. The sidecar still names the
+#      versioned filename inside, which is how a downloader identifies which
+#      release they actually got.
 #   4. Re-reads the published objects over HTTPS and asserts that the size and
 #      checksum match what was just sent.
 #   5. With --prune, removes older release objects from the bucket, so old
@@ -45,9 +47,11 @@
 #     them as arguments; argv is world-readable in /proc.
 #   - rclone is required. It handles R2 multipart correctly for objects in the
 #     tens of gigabytes, where a naive single PUT fails.
-#   - The upload is not atomic across the two keys. The versioned key goes
-#     first so that, if the run dies midway, the new release exists under its
-#     real name and only "latest" is stale — the recoverable direction.
+#   - Only the latest key is published by default. Keeping a second, versioned
+#     copy doubles the bucket for one release — 36.7 GB at 1.4.0 — and the
+#     operator's call is that it is not worth it. --versioned opts back in when
+#     a permanent per-version URL is wanted; note that without it, a release
+#     page's download link necessarily follows "latest" rather than pinning.
 #   - --prune only ever runs AFTER verification passes, and never touches the
 #     version being published or the latest keys. Deleting the old release
 #     before the new one is proven good would leave the bucket with nothing
@@ -63,7 +67,7 @@ LATEST_KEY="kldload-free-latest.iso"
 
 usage() {
     cat <<'EOF'
-Usage: r2-publish.sh [--prune] [--prune-dry-run] <path-to-iso>
+Usage: r2-publish.sh [--prune] [--prune-dry-run] [--versioned] <path-to-iso>
 
 Publishes a release ISO and its .sha256 sidecar to the kldload R2 bucket,
 under both its versioned key and the kldload-free-latest.iso key that the
@@ -79,6 +83,9 @@ Options:
                     .sha256 objects from the bucket. Never touches the version
                     being published or the kldload-free-latest.iso keys.
   --prune-dry-run   List what --prune would delete, and delete nothing.
+  --versioned       Also publish under kldload-<version>-x86_64.iso, giving the
+                    release a permanent URL. Off by default: it doubles the
+                    bucket for one release.
 
 Environment (required):
   R2_ACCOUNT_ID           Cloudflare account id.
@@ -111,6 +118,7 @@ EOF
 
 prune=0
 prune_dry=0
+versioned=0
 iso=""
 
 while (($#)); do
@@ -227,15 +235,15 @@ server_copy() {
         "${remote[@]}" --s3-copy-cutoff 4G
 }
 
-upload "$iso" "$iso_name"
-upload "$sidecar" "${iso_name}.sha256"
+upload "$iso" "$LATEST_KEY"
+upload "$sidecar" "${LATEST_KEY}.sha256"
 
-# WHY NOT a second upload: the ISO has to exist under both the versioned key
-# and the latest key, and an earlier version of this sent the whole image
-# twice. At 18.4 GB that is 18.4 GB of uplink spent to produce bytes R2
-# already has. Copy it inside the bucket instead.
-server_copy "$iso_name" "$LATEST_KEY"
-server_copy "${iso_name}.sha256" "${LATEST_KEY}.sha256"
+# The versioned copy is a server-side copy, never a second upload: R2 already
+# holds the bytes, and re-sending 18.4 GB to produce them again is pure waste.
+if ((versioned)); then
+    server_copy "$LATEST_KEY" "$iso_name"
+    server_copy "${LATEST_KEY}.sha256" "${iso_name}.sha256"
+fi
 
 # ─── Verify what is actually being served ────────────────────────────────────
 # Re-read over the public URL, not the S3 API: that is the path a visitor
@@ -260,8 +268,8 @@ check_size() {
 }
 
 echo "r2-publish: verifying published objects…"
-check_size "$iso_name" "$local_size"
 check_size "$LATEST_KEY" "$local_size"
+((versioned)) && check_size "$iso_name" "$local_size"
 
 # The sidecar is small enough to read in full, so compare the checksum itself
 # rather than just its length.
@@ -286,7 +294,8 @@ fi
 
 if ((prune)); then
     echo "r2-publish: looking for older releases to remove…"
-    keep=("$iso_name" "${iso_name}.sha256" "$LATEST_KEY" "${LATEST_KEY}.sha256")
+    keep=("$LATEST_KEY" "${LATEST_KEY}.sha256")
+    ((versioned)) && keep+=("$iso_name" "${iso_name}.sha256")
 
     # A dry run prints a verdict for EVERY object, not just the candidates.
     # WHY: the operator's real question at prune time is "what else is in this
