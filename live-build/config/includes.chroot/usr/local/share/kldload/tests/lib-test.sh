@@ -52,23 +52,42 @@ test_dir() {
 }
 
 # Test: systemd service is active
+#
+# WARN: the `|| true` on the assignment is load-bearing, not decoration.
+# `systemctl is-active` EXITS NON-ZERO when the unit is not active — 3 for
+# inactive — and every suite here runs under `set -e`. So a plain
+# `state=$(systemctl is-active "$svc")` aborted the entire run the moment it
+# found a service that was down: exactly the case the check exists to report.
+#
+# On .113 that was gdm3: smoke-desktop.sh died at line 62 of 200-odd, exited 3,
+# and printed 47 lines. Every check after it never ran, its failures were never
+# counted, and the aggregate report said "FAIL: 3" while naming only two —
+# the missing one was this abort. A test helper that kills the suite when the
+# assertion fails is worse than no test: the report looks short, not red.
+# (2026-08-17.)
 test_service_active() {
     local name="$1" svc="$2"
     local state
-    state=$(systemctl is-active "$svc" 2>/dev/null)
+    # is-active exits 3 on inactive; capture the word, not the exit code.
+    state=$(systemctl is-active "$svc" 2>/dev/null || true)
     if [[ "$state" == "active" ]]; then
         _pass "$name"
-    else _fail "$name" "$svc is $state"; fi
+    else _fail "$name" "$svc is ${state:-unknown}"; fi
 }
 
 # Test: systemd service is enabled
+#
+# Same trap as test_service_active above: `is-enabled` exits 1 for disabled and
+# non-zero for several other states (alias, static, masked), any of which would
+# have aborted the run under set -e.
 test_service_enabled() {
     local name="$1" svc="$2"
     local state
-    state=$(systemctl is-enabled "$svc" 2>/dev/null)
+    # is-enabled exits 1 for disabled; capture the word, not the exit code.
+    state=$(systemctl is-enabled "$svc" 2>/dev/null || true)
     if [[ "$state" == "enabled" ]]; then
         _pass "$name"
-    else _warn "$name" "$svc is $state"; fi
+    else _warn "$name" "$svc is ${state:-unknown}"; fi
 }
 
 # Test: ZFS dataset exists

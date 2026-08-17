@@ -151,8 +151,20 @@ kbe delete "$BE_NAME" >/dev/null 2>&1 || true
 # /boot/efi/EFI/zbm/ (signed, MOK-verified), NOT inside the darksite
 # tree (that was an old layout). So presence here is a regression.
 _section "Darksite (post-firstboot cleanup)"
-test_succeeds "darksite removed from /root (firstboot reclaim)" \
-    "[[ ! -d /root/darksite ]]"
+# NOT `[[ ! -d /root/darksite ]]`. helm-charts/ legitimately survives — the
+# reclaim keeps it on purpose so an air-gapped box can still deploy its charts
+# (and so an operator can drop their own in), so asserting the whole directory
+# is gone can never pass on a correct install. It failed on every install for
+# that reason, which is worse than not testing it: a permanent red that trains
+# you to ignore the report. What actually matters is that the CONSUMED payloads
+# are gone — the distro mirrors and the 5.4 GB ollama set — while the charts
+# remain. (.113, 2026-08-17.)
+test_succeeds "darksite package mirrors reclaimed" \
+    "! ls -d /root/darksite/{debian,ubuntu,rpm,fedora,arch,alpine} >/dev/null 2>&1"
+test_succeeds "darksite ollama payload reclaimed (weights/runtime/webui)" \
+    "[[ ! -d /root/darksite/ollama ]]"
+test_succeeds "darksite helm charts KEPT (offline k8s deploys need them)" \
+    "[[ ! -d /root/darksite ]] || [[ -d /root/darksite/helm-charts ]]"
 test_succeeds "darksite repo file removed" \
     "[[ ! -f /etc/yum.repos.d/kldload-darksite.repo ]]"
 # LAN mirror opt-in: when /etc/kldload/keep-darksite exists, the admin

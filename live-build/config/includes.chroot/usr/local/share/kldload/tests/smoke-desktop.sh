@@ -55,26 +55,48 @@ if [[ "$DISTRO" == "deb" ]]; then
     test_cmd "gnome-control-center" "gnome-control-center"
 fi
 
-# ── GDM ──────────────────────────────────────────────────────────────────────
+# ── Display manager ──────────────────────────────────────────────────────────
+# Assert display-manager.service, NOT a named DM.
+#
+# This checked `gdm` on deb and `gdm` on rpm, and failed on .113 where the
+# desktop was perfectly healthy: display-manager.service is an alias managed by
+# the distro and pointed at LIGHTDM, with gdm3 installed but inactive. The check
+# was reporting on an implementation detail instead of the property that matters
+# — "is there a display manager running that got the operator a session" — and
+# because it was the first failure under set -e it aborted the whole suite.
+# (2026-08-17. See lib-test.sh for the abort; fixed there.)
+#
+# display-manager.service is the correct target: Debian and Fedora both point it
+# at whichever DM is configured, so one assertion covers every substrate and
+# keeps passing if the DM is ever swapped deliberately.
 _section "Display Manager"
 
-if [[ "$DISTRO" == "deb" ]]; then
-    test_service_active "gdm3" "gdm"
-    test_service_enabled "gdm3" "gdm"
-else
-    test_service_active "gdm" "gdm"
-    test_service_enabled "gdm" "gdm"
-fi
-
+test_service_active "display manager" "display-manager"
 test_output_contains "Graphical target" "systemctl get-default" "graphical"
+# Which DM won is worth RECORDING even though it is not worth failing on — an
+# unexpected one explains a lot of later oddities (session type, user switching).
+_info "display manager in use: $(basename "$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null || echo unknown)" .service)"
 
-# ── Firefox ──────────────────────────────────────────────────────────────────
-_section "Firefox"
+# ── Browser ──────────────────────────────────────────────────────────────────
+# A browser, not a NAMED browser.
+#
+# This asserted firefox-esr on deb, which is not installed on a kldload target
+# and is not supposed to be: firefox ships on the LIVE ISO, and the installed
+# system gets a Chromium-family browser instead. So the check could only ever
+# fail on a correct install — the same shape of permanently-red test as the old
+# darksite assertion. What matters is that the operator has a browser to reach
+# the :8443 console with.
+_section "Browser"
 
-if [[ "$DISTRO" == "deb" ]]; then
-    test_cmd "firefox-esr" "firefox-esr"
+if command -v google-chrome-stable >/dev/null 2>&1 || command -v google-chrome >/dev/null 2>&1 ||
+    command -v chromium >/dev/null 2>&1 || command -v firefox-esr >/dev/null 2>&1 ||
+    command -v firefox >/dev/null 2>&1; then
+    _pass "a browser is installed ($(for b in google-chrome-stable google-chrome chromium firefox-esr firefox; do command -v $b >/dev/null 2>&1 && {
+        echo "$b"
+        break
+    }; done))"
 else
-    test_cmd "firefox" "firefox"
+    _fail "a browser is installed" "none of google-chrome/chromium/firefox found — the web console is unreachable from the desktop"
 fi
 
 # ── Desktop Theme / Config ───────────────────────────────────────────────────
@@ -128,8 +150,20 @@ fi
 #     is enabled and /root/darksite/<distro>/apt persists.
 # For default installs, just verify the rehydrated outputs landed.
 _section "Darksite (post-firstboot cleanup)"
-test_succeeds "darksite removed from /root (firstboot reclaim)" \
-    "[[ ! -d /root/darksite ]]"
+# NOT `[[ ! -d /root/darksite ]]`. helm-charts/ legitimately survives — the
+# reclaim keeps it on purpose so an air-gapped box can still deploy its charts
+# (and so an operator can drop their own in), so asserting the whole directory
+# is gone can never pass on a correct install. It failed on every install for
+# that reason, which is worse than not testing it: a permanent red that trains
+# you to ignore the report. What actually matters is that the CONSUMED payloads
+# are gone — the distro mirrors and the 5.4 GB ollama set — while the charts
+# remain. (.113, 2026-08-17.)
+test_succeeds "darksite package mirrors reclaimed" \
+    "! ls -d /root/darksite/{debian,ubuntu,rpm,fedora,arch,alpine} >/dev/null 2>&1"
+test_succeeds "darksite ollama payload reclaimed (weights/runtime/webui)" \
+    "[[ ! -d /root/darksite/ollama ]]"
+test_succeeds "darksite helm charts KEPT (offline k8s deploys need them)" \
+    "[[ ! -d /root/darksite ]] || [[ -d /root/darksite/helm-charts ]]"
 test_succeeds "darksite repo file removed" \
     "[[ ! -f /etc/yum.repos.d/kldload-darksite.repo ]]"
 # When KLDLOAD_KEEP_DARKSITE=1 was set at install (LAN mirror mode),

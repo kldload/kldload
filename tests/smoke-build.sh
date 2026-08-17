@@ -385,7 +385,7 @@ else
 fi
 
 # ── Silent-failure ratchet ─────────────────────────────────────────────────
-# CLAUDE.md §4.1: no `|| true` unless a comment names the harmless case. The
+# Project rule §4.1: no `|| true` unless a comment names the harmless case. The
 # tree carries 1,478 that do not, and every "reported success while broken"
 # defect has come out of that population: `golden all` exiting 0 after every
 # golden failed; a golden with no ZFS sealed and announced ready;
