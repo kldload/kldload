@@ -93,4 +93,25 @@ if [[ ! -e /run/initramfs/live ]]; then
     done
 fi
 
-exec /usr/local/bin/kldload-chrome-app com.kldload.webui "$url"
+# ── Which app is this window? ─────────────────────────────────────────────
+# The same launcher opens two different things: the INSTALLER on the live ISO,
+# and the DASHBOARD on an installed machine. They had one app_id between them,
+# so both kldload-installer-live.desktop and kldload-webui.desktop claimed
+# `com.kldload.webui` as their StartupWMClass — and with two claimants GNOME
+# cannot decide which .desktop a window belongs to, so it drew the generic
+# fallback icon (a blue diamond) in the dash instead of the kldload mark.
+# (reported 2026-08-17.)
+#
+# Giving the live installer its own identity fixes the icon AND is simply
+# truer: "Install kldload" and "kldload Web UI" are not the same application.
+# Detection matches the live-medium probe used above and in
+# kldload-install-target — positive evidence of a live boot, never an
+# inference from something being absent.
+_app_id=com.kldload.webui
+for _live in /run/live/medium /run/initramfs/live /lib/live/mount/medium; do
+    if [[ -d "$_live" ]]; then
+        _app_id=com.kldload.installer
+        break
+    fi
+done
+exec /usr/local/bin/kldload-chrome-app "$_app_id" "$url"

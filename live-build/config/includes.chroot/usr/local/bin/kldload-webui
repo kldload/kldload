@@ -918,14 +918,25 @@ def get_system_info():
     # the dashboard: an operator has no other way to see that the kernel is
     # pinned and that there is a way back. Every prior release shipped with
     # neither applied and nothing said so.
+    # kldload-apply-platform-holds writes what it actually pinned to one
+    # manager-neutral file, so this does not have to know apt-mark from dnf
+    # versionlock from pacman's IgnorePkg. Reading apt-mark directly is kept
+    # as the fallback for a system installed before that file existed —
+    # without it, every Fedora and Arch install reported no pinning at all
+    # and the card silently vanished on the primary substrate.
+    info["pinned_packages"] = None
     try:
-        held = subprocess.check_output(["apt-mark", "showhold"],
-                                       text=True, timeout=5).split()
-        info["pinned_packages"] = len(held)
+        with open("/var/lib/kldload/platform-holds.list") as f:
+            info["pinned_packages"] = len([x for x in f.read().split() if x])
     except Exception:
-        # dnf/pacman substrates, or apt-mark absent: report nothing rather
-        # than a zero that would read as "unprotected".
-        info["pinned_packages"] = None
+        try:
+            held = subprocess.check_output(["apt-mark", "showhold"],
+                                           text=True, timeout=5).split()
+            info["pinned_packages"] = len(held)
+        except Exception:
+            # No state file and no apt-mark: report nothing rather than a
+            # zero, which would read as "measured, and you are unprotected".
+            info["pinned_packages"] = None
     try:
         # Rollback points are snapshots of the running boot environment. The
         # count matters more than the names: "can I get back" is a yes/no an
@@ -941,6 +952,13 @@ def get_system_info():
             info["boot_environment"] = be.split("/")[-1]
     except Exception:
         pass
+    # Build id of the ISO this system was installed from. The dashboard's
+    # release-notes panel prints it next to the version so "what are you
+    # running?" is answered by a screenshot rather than a shell session.
+    try:
+        info["build_id"] = open("/etc/kldload-build-id").read().strip()
+    except Exception:
+        info["build_id"] = None
     try:
         with open("/etc/kldload/install-manifest.env") as f:
             for line in f:
