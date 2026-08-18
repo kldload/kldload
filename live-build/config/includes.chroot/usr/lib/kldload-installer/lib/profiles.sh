@@ -285,8 +285,31 @@ k_profile_packages() {
             # it the user gets bounced back to the lightdm greeter on
             # login (gnome-session-binary errors "Failed to execute child
             # process dbus-launch").
+            #
+            # dbus-user-session is the OTHER half and was missing. It ships
+            # /usr/lib/systemd/user/dbus.{socket,service} — the per-user bus
+            # every systemd user service depends on. dbus-x11 does not provide
+            # them; it only provides the dbus-launch binary.
+            #
+            # Without it the user manager has no dbus.service, and anything
+            # that pulls it in fails at the queueing stage rather than at
+            # runtime, so the error names dbus rather than the thing that
+            # broke. Measured on a fresh desktop install 2026-08-18:
+            #
+            #   pipewire.socket: Failed to queue service startup job:
+            #                    Unit dbus.service not found.
+            #   pipewire.socket: Failed with result 'resources'.
+            #
+            # pipewire and wireplumber therefore never started, pipewire-pulse
+            # retried every five seconds forever, and the desktop had no audio
+            # at all — with the sound hardware present and snd_hda_intel bound
+            # to both cards. The same missing bus is why gsettings/dconf work
+            # in the session — dock pinning, desktop cleanup — did not stick.
+            #
+            # Co-installable with dbus-x11: no Conflicts or Breaks between
+            # them, verified against trixie. It Provides default-dbus-session-bus.
             _pam_extras="libpam-gnome-keyring libpam-systemd"
-            _dbus_extras="dbus-x11"
+            _dbus_extras="dbus-x11 dbus-user-session"
         fi
         # kldload-webview deps for Debian/Ubuntu — gir1.2-webkit-6.0 +
         # libgtk-4-1 + python3-gi. Same role as webkitgtk6.0 on RHEL: the
