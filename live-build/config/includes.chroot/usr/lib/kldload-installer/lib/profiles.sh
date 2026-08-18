@@ -79,7 +79,7 @@ k_profile_packages() {
             echo "openssh sudo curl ca-certificates vim less networkmanager \
           gnome-shell gnome-session gnome-control-center gnome-settings-daemon \
           gdm nautilus gnome-terminal eog \
-          adwaita-icon-theme cantarell-fonts gvfs gvfs-mtp gvfs-smb \
+          adwaita-icon-theme cantarell-fonts noto-fonts-emoji gvfs gvfs-mtp gvfs-smb \
           gnome-keyring \
           webkitgtk6.0 gtk4 python3-gobject \
           pulseaudio-utils \
@@ -166,7 +166,14 @@ k_profile_packages() {
         # session via Xsession scripts, lands in a working GNOME desktop.
         # Lose the GDM greeter chrome, gain a working desktop.
         local _gdm="lightdm"
-        local _fonts="fonts-cantarell"
+        # Emoji font is NOT cosmetic here: the installer UI draws its
+        # distribution and profile icons as emoji, and a target without one
+        # renders them as blank boxes. The live ISO installs it
+        # (build-iso.sh) so it looks right there and wrong on the machine
+        # you just installed — which is exactly how it was found
+        # (fiend, 2026-08-18: fc-list matched zero emoji fonts, DejaVu
+        # answered for every glyph and covers almost none of them).
+        local _fonts="fonts-cantarell fonts-noto-color-emoji"
         local _gvfs_extra="gvfs-backends"
         local _xsrv="xserver-xorg"
         local _netools_extra="iputils-ping"
@@ -243,7 +250,7 @@ k_profile_packages() {
             # quietly fell back to gdm without lightdm. Sticking with gdm +
             # the missing sub-package is simpler and avoids EPEL.
             _gdm="gdm"
-            _fonts="cantarell-fonts"
+            _fonts="cantarell-fonts google-noto-color-emoji-fonts"
             _gvfs_extra="gvfs-mtp gvfs-smb gvfs-archive"
             _xsrv="xorg-x11-server-Xorg xorg-x11-xauth"
             _netools_extra="iputils"

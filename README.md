@@ -28,9 +28,17 @@ unplugged, from complete mirrors baked into the ISO.
 
 **Website:** [kldload.com](https://kldload.com) &middot; **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) &middot; **Release notes:** [1.4.0](https://kldload.com/releases/1.4.0.html) &middot; **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
 
-**Installer**
+**The install, in two screens.** Boot the USB and this opens by itself — no
+terminal, no wiki. It is also reachable at `https://<host>:8443` from another
+machine, for a box with no screen.
 
-![kldload Installer](screenshots/installer-ui.png)
+*Pick what to build — the distribution, the profile, and what goes in:*
+
+![Installer: pick what to build](screenshots/installer-1-what.png)
+
+*Say where it goes, then start it:*
+
+![Installer: target disk and identity](screenshots/installer-2-where.png)
 
 **Dashboard (first boot)**
 
