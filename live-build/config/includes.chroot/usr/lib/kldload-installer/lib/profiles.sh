@@ -1615,6 +1615,41 @@ OSREL
     if [[ -n "$_pins_src" ]]; then
         cp "$_pins_src" \
             "${target}/etc/dconf/db/local.d/50-kldload-installed-favorites"
+
+        # ── Drop pins for apps this target does not have ──────────────────────
+        #
+        # The list pins four browsers on purpose — chrome, chromium, firefox,
+        # firefox-esr — because which one is present depends on the distro, and
+        # the hedge means the dock gets whichever landed. The cost is that every
+        # target keeps the ones it does NOT have as dead entries: on the Debian
+        # desktop that is three of fourteen, and a pinned app with no .desktop
+        # behind it is a gap in the dock the operator cannot remove without
+        # editing dconf (the key is locked).
+        #
+        # Verified on fiend 2026-08-18: google-chrome, firefox and firefox-esr
+        # all pinned, none installed.
+        #
+        # Filtering here rather than shipping per-distro lists keeps one file to
+        # maintain, and it is checked against the target's OWN applications
+        # directories so it stays correct however the profile was assembled.
+        local _fav_file="${target}/etc/dconf/db/local.d/50-kldload-installed-favorites"
+        local _fav_line _kept=""
+        _fav_line="$(sed -n 's/^favorite-apps=\[\(.*\)\]$/\1/p' "$_fav_file" | head -1)"
+        if [[ -n "$_fav_line" ]]; then
+            local _app
+            while IFS= read -r _app; do
+                [[ -n "$_app" ]] || continue
+                if [[ -f "${target}/usr/share/applications/${_app}" ||
+                    -f "${target}/usr/local/share/applications/${_app}" ]]; then
+                    _kept+="${_kept:+, }'${_app}'"
+                else
+                    k_log "dock: dropping pin for ${_app} (not installed on target)"
+                fi
+            done < <(printf '%s\n' "$_fav_line" | tr ',' '\n' | tr -d " '")
+            if [[ -n "$_kept" ]]; then
+                sed -i "s|^favorite-apps=\[.*\]$|favorite-apps=[${_kept}]|" "$_fav_file"
+            fi
+        fi
     fi
     # .135 + onyx both shipped without this file in the installed system —
     # dock came up empty for fresh users. So the check stays; what changed is
