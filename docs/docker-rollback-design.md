@@ -77,7 +77,9 @@ The parts of the pitch that survive this, and are separately verified:
 
 # The trashcan, which does work
 
-**Status: VERIFIED PRIMITIVE, not yet built.** Tested on fiend 2026-08-18.
+**Status: VERIFIED PRIMITIVE, DELIBERATELY NOT BUILT.** Tested on fiend
+2026-08-18. The mechanism works; the feature is not worth having. See the
+verdict at the end before building anything here.
 
 The framing that fixes this is not "undo the destroy" — it is **"what if docker
 had a trashcan?"** A trashcan does not need to reverse anything. It needs to get
@@ -112,3 +114,39 @@ Still to design:
   anonymous volumes without `-v`), so `-v` is the case that needs catching.
 - **Naming.** The trash dataset should record what it was, when, and the command
   that caused it, because a directory of hashes is not a trashcan anyone uses.
+
+
+---
+
+## Verdict: do not build it
+
+The primitive works. The feature is still not worth a wrapper on `docker`, and
+the reason is that it protects the wrong half.
+
+**Layers are derived data.** They are what `docker rm`/`rmi` actually destroys,
+and they are re-creatable with `docker pull` — from the darksite mirror, with
+no network, on a kldload host. Losing one costs seconds.
+
+**Volume data is the half worth protecting, and docker does not destroy it.**
+`docker rm -f` leaves anonymous volumes alone; only `-v` or
+`prune --volumes` removes them. Volumes live on `rpool/var/lib/docker`, which
+is never the dataset docker destroys, so its snapshots survive any container
+deletion.
+
+**And that dataset is already snapshotted.** sanoid covers `[rpool/var/lib]`
+with `recursive = yes`, so the docker root and every layer beneath it are on the
+normal snapshot schedule — 50 autosnaps present on the test host. Recovery is
+`/var/lib/docker/.zfs/snapshot/<snap>/volumes/<id>/_data`, with no tooling.
+
+So a trashcan would close one gap: the window between the last scheduled
+snapshot and the delete. That window is real — the newest root snapshot on the
+test host was `00:00:03_daily`, hours before a container created at 03:30, so a
+volume deleted at 03:35 would not have been in it.
+
+**But the fix for that is the snapshot cadence on one dataset, which is a line
+of sanoid config, not a wrapper intercepting a command people run hundreds of
+times a day.** A `[rpool/var/lib/docker]` section on the frequent template
+closes the same gap with no code, nothing in `$PATH`, and nothing to go wrong
+in front of `docker`.
+
+Build that instead, if the window matters.
