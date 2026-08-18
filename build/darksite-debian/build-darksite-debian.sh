@@ -55,6 +55,65 @@ read_package_set "target-desktop"
 read_package_set "target-server"
 read_package_set "target-kubernetes"
 
+# ─── Packages the installer will actually ask for ────────────────────────────
+#
+# The seed lists above are hand-maintained, and until now nothing checked them
+# against the installer. A package added to lib/profiles.sh stayed invisible to
+# this mirror until somebody remembered to edit a second file — so the offline
+# path could be asked for something that was never downloaded. That is not a
+# warning on the offline path: the machine can only install what this mirror
+# contains, so a miss is a feature silently absent from the installed system.
+#
+# Sourcing the real k_profile_packages is the only way the two cannot drift:
+# the mirror now learns every package the installer knows about, by itself.
+# fonts-noto-color-emoji is the case that exposed the gap (2026-08-18) — it was
+# added to the desktop profile and to no seed list.
+declare -a INSTALLER_PKGS=()
+INSTALLER_LIB="${INSTALLER_LIB:-/installer-lib}"
+if [[ -r "${INSTALLER_LIB}/profiles.sh" ]]; then
+    # common.sh creates these on load. Both are env-overridable and neither
+    # means anything inside this build container.
+    export KLDLOAD_LOG_DIR="${KLDLOAD_LOG_DIR:-/tmp/kld-darksite-log}"
+    export KLDLOAD_STATE_DIR="${KLDLOAD_STATE_DIR:-/tmp/kld-darksite-state}"
+    # shellcheck source=/dev/null
+    source "${INSTALLER_LIB}/profiles.sh"
+
+    # The suite decides which naming branch the installer takes; asking for
+    # Debian names while building a noble mirror would mirror the wrong set.
+    if [[ "${SUITE}" == "noble" || "${SUITE}" == "jammy" ||
+        "${SUITE}" == "mantic" || "${SUITE}" == "oracular" ]]; then
+        _kdistro="ubuntu"
+    else
+        _kdistro="debian"
+    fi
+
+    for _prof in core server desktop kvm ai master storage vdi monitoring proxmox klab; do
+        # k_die aborts on a profile a distro does not support. That is a
+        # legitimate combination to ask about here, so it must not fail the
+        # mirror build — only contribute nothing.
+        # The `|| ""` must sit OUTSIDE the assignment. k_die exits the
+        # substitution subshell, the assignment inherits that status, and
+        # under `set -e` a failing assignment kills this script — an inner
+        # `|| true` never runs because exit is immediate. klab is not a
+        # supported profile and hits exactly that path.
+        _base="$(KLDLOAD_DISTRO="$_kdistro" KLDLOAD_PROFILE="$_prof" \
+            k_profile_packages 2>/dev/null)" || _base=""
+        _opt="$(KLDLOAD_DISTRO="$_kdistro" KLDLOAD_PROFILE="$_prof" \
+            KLDLOAD_ENABLE_EBPF=1 KLDLOAD_ENABLE_KVM=1 KLDLOAD_ENABLE_K8S=1 \
+            KLDLOAD_STORAGE_MODE=zfs k_profile_optional_packages 2>/dev/null)" || _opt=""
+        mapfile -t _arr < <(printf '%s %s' "$_base" "$_opt" | tr -s ' \t\n' '\n' | sed '/^$/d')
+        [[ "${#_arr[@]}" -gt 0 ]] && INSTALLER_PKGS+=("${_arr[@]}")
+    done
+    if [[ "${#INSTALLER_PKGS[@]}" -gt 0 ]]; then
+        PACKAGES+=("${INSTALLER_PKGS[@]}")
+    fi
+    log "Installer profile lists contributed ${#INSTALLER_PKGS[@]} package names (${_kdistro})"
+else
+    log "WARNING: ${INSTALLER_LIB}/profiles.sh is not mounted — this mirror is"
+    log "         built from the seed lists ALONE and may lack packages the"
+    log "         installer asks for. Mount it to close that gap."
+fi
+
 # Enable extra components — Debian needs contrib (ZFS), Ubuntu needs universe (ZFS)
 if [[ "${SUITE}" == "noble" || "${SUITE}" == "jammy" || "${SUITE}" == "mantic" || "${SUITE}" == "oracular" ]]; then
     log "Ubuntu detected — enabling universe, restricted, multiverse..."
@@ -120,6 +179,41 @@ fi
 # Update APT cache
 log "Updating APT package lists..."
 apt-get update -q 2>&1 | grep -v '^Get\|^Hit\|^Ign' || true
+
+# ─── Gate: every package the installer asks for must exist here ──────────────
+#
+# This mirror is the ONLY source on the offline path, so a name with no
+# candidate becomes a feature silently missing from the installed system —
+# apt-cache and the closure resolver both walk straight past an unknown name.
+# Three shipped undetected until 2026-08-18: htopfzf (htop and fzf run
+# together), plus gcc-c++ and pipewire-utils (RPM names on the Debian arm).
+# Only an explicit assertion catches that class.
+#
+# _external lists names that legitimately cannot resolve here: they install
+# from their vendor's own repository, never from Debian. Adding to it is a
+# deliberate act that needs a reason, which is the point.
+if [[ "${#INSTALLER_PKGS[@]}" -gt 0 ]]; then
+    # Subscripts are QUOTED: unquoted, a hyphen inside [ ] is read as
+    # arithmetic subtraction and shfmt rewrites [salt-api] to [salt - api],
+    # so the key never matches and the gate fires on its own allowlist.
+    declare -A _external=(
+        ["grafana"]=1  # Grafana Labs repo, added at firstboot
+        ["salt-api"]=1 # SaltProject repo — Debian dropped salt after bookworm
+        ["salt-master"]=1
+        ["salt-minion"]=1
+    )
+    declare -a _unresolvable=()
+    while read -r _p; do
+        [[ -n "${_external[$_p]:-}" ]] && continue
+        apt-cache show "$_p" >/dev/null 2>&1 || _unresolvable+=("$_p")
+    done < <(printf '%s\n' "${INSTALLER_PKGS[@]}" | LC_ALL=C sort -u)
+    if [[ "${#_unresolvable[@]}" -gt 0 ]]; then
+        log "FATAL: the installer asks for packages that do not exist in ${SUITE}:"
+        for _p in "${_unresolvable[@]}"; do log "         ${_p}"; done
+        die "fix the name in lib/profiles.sh, or add it to _external with a reason"
+    fi
+    log "Gate passed: all ${#INSTALLER_PKGS[@]} installer package names resolve in ${SUITE}"
+fi
 
 # Add required+important priority packages for debootstrap
 log "Adding required+important Debian base packages..."

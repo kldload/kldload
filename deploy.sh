@@ -143,6 +143,7 @@ cmd_build_debian_darksite() {
     "$runtime" run --rm \
         --platform "linux/${_deb_arch}" \
         -v "$ROOT/build/darksite-debian:/darksite-build:z,ro" \
+        -v "$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib:/installer-lib:z,ro" \
         -v "$darksite_dir:/output:z" \
         -e PROFILE="$PROFILE" \
         -e ARCH="${_deb_arch}" \
@@ -177,6 +178,7 @@ cmd_build_ubuntu_darksite() {
     "$runtime" run --rm \
         --platform "linux/${_deb_arch}" \
         -v "$ROOT/build/darksite-debian:/darksite-build:z,ro" \
+        -v "$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib:/installer-lib:z,ro" \
         -v "$ROOT/build/darksite-ubuntu:/darksite-ubuntu:z,ro" \
         -v "$darksite_dir:/output:z" \
         -e PROFILE="$PROFILE" \
@@ -245,8 +247,16 @@ cmd_build_fedora_darksite() {
 # sets since had never been mirrored either.
 _pkgset_hash() {
     local dir="${1:?}"
+    shift
     [[ -d "$dir" ]] || return 0
-    cat "$dir"/*.txt 2>/dev/null | sha256sum | cut -d' ' -f1
+    # Extra files are hashed alongside the sets because the mirror's contents
+    # now depend on them too: build-darksite-debian.sh derives its package list
+    # from the installer's own k_profile_packages, so a package added THERE has
+    # to invalidate this cache exactly as a package added to a .txt does.
+    # Without this the 2026-08-13 failure returns in a new costume — the cache
+    # looks current, the mirror never learns the package, and the install drops
+    # it in silence.
+    cat "$dir"/*.txt "$@" 2>/dev/null | sha256sum | cut -d' ' -f1
 }
 
 cmd_build_ollama_darksite() {
@@ -473,14 +483,15 @@ cmd_build() {
     # Skip for core edition (no darksites needed — stock distro only)
     if [[ "$EDITION" != "core" ]]; then
         local debian_darksite="$ROOT/live-build/darksite-debian-cache"
+        local _deb_profiles="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
         if [[ ! -f "$debian_darksite/apt/dists/trixie/Release" ]]; then
             cmd_build_debian_darksite
-            printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets")" \
+            printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles")" \
                 >"$debian_darksite/.pkgset-sha256"
-        elif [[ "$(cat "$debian_darksite/.pkgset-sha256" 2>/dev/null)" != "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets")" ]]; then
+        elif [[ "$(cat "$debian_darksite/.pkgset-sha256" 2>/dev/null)" != "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles")" ]]; then
             log "Debian package sets changed since the darksite was built — rebuilding the mirror"
             cmd_build_debian_darksite
-            printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets")" \
+            printf '%s\n' "$(_pkgset_hash "$ROOT/build/darksite-debian/config/package-sets" "$_deb_profiles")" \
                 >"$debian_darksite/.pkgset-sha256"
         else
             log "Debian darksite cached: $(du -sh "$debian_darksite" | cut -f1)"
