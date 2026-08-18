@@ -350,13 +350,56 @@ if [[ -f /etc/apt/preferences.d/kldload-backports ]]; then
     log "Evicted ${_evicted} stale stable kernel/ZFS debs so backports can replace them"
 fi
 
+# ─── What version does the archive serve right now ───────────────────────────
+#
+# The skip below used to match on NAME alone (`${_pkg}_*.deb`), so any package
+# already in the pool was never re-downloaded, at any version. A mirror left
+# for two months stayed two months old for everything already in it, and only
+# newly-added packages arrived current. The kernel and ZFS were evicted by
+# hand further up to defeat exactly this — proof the trap was known, patched
+# for two names, and left in place for the other 2800.
+#
+# In a stable suite the packages that DO move are the security updates, which
+# is the worst possible set to freeze. Measured 2026-08-18: libexpat1 sat at
+# 2.8.2-1~deb13u1 while the archive served 2.8.3-1~deb13u1.
+#
+# One batched apt-cache policy is far cheaper than 2800 individual queries.
+log "Resolving current archive versions for ${#CLOSURE[@]} packages..."
+declare -A _cand=()
+while read -r _n _v; do
+    [[ -n "$_n" && -n "$_v" && "$_v" != "(none)" ]] && _cand["$_n"]="$_v"
+done < <(apt-cache policy "${CLOSURE[@]}" 2>/dev/null | awk '
+    /^[^ ]/  { name = $0; sub(/:$/, "", name); next }
+    /Candidate:/ { print name" "$2 }
+')
+log "Archive candidates resolved: ${#_cand[@]}"
+
 # Download packages
 log "Downloading ${#CLOSURE[@]} packages..."
-_dl_new=0 _dl_skip=0 _dl_fail=0 _dl_idx=0 _dl_total="${#CLOSURE[@]}"
+_dl_new=0 _dl_skip=0 _dl_fail=0 _dl_idx=0 _dl_stale=0 _dl_total="${#CLOSURE[@]}"
 for _pkg in "${CLOSURE[@]}"; do
     ((_dl_idx++)) || true
-    ((_dl_idx % 100 == 0)) && log "Progress: ${_dl_idx}/${_dl_total} — ${_dl_new} new, ${_dl_skip} cached, ${_dl_fail} skipped"
-    if compgen -G "${APT_POOL}/${_pkg}_*.deb" >/dev/null 2>&1; then
+    ((_dl_idx % 100 == 0)) && log "Progress: ${_dl_idx}/${_dl_total} — ${_dl_new} new, ${_dl_skip} cached, ${_dl_stale} refreshed, ${_dl_fail} skipped"
+    _want="${_cand[$_pkg]:-}"
+    if [[ -n "$_want" ]]; then
+        # Epochs are written %3a on disk by apt and normalised to ':' further
+        # down, so a cached file may carry either spelling. Check both.
+        if compgen -G "${APT_POOL}/${_pkg}_${_want}_*.deb" >/dev/null 2>&1 ||
+            compgen -G "${APT_POOL}/${_pkg}_${_want//:/%3a}_*.deb" >/dev/null 2>&1; then
+            ((_dl_skip++)) || true
+            continue
+        fi
+        # Present but at another version: drop the superseded copy, or the
+        # pool ends up serving two versions of one package and the Packages
+        # index becomes ambiguous.
+        if compgen -G "${APT_POOL}/${_pkg}_*.deb" >/dev/null 2>&1; then
+            rm -f "${APT_POOL}/${_pkg}"_*.deb
+            ((_dl_stale++)) || true
+        fi
+    elif compgen -G "${APT_POOL}/${_pkg}_*.deb" >/dev/null 2>&1; then
+        # No candidate to compare against (virtual or vanished from the
+        # archive). Keep what is cached rather than deleting something the
+        # install may still need.
         ((_dl_skip++)) || true
         continue
     fi
@@ -366,7 +409,7 @@ for _pkg in "${CLOSURE[@]}"; do
         ((_dl_fail++)) || true
     }
 done
-log "Download complete: ${_dl_new} new, ${_dl_skip} cached, ${_dl_fail} skipped"
+log "Download complete: ${_dl_new} new, ${_dl_skip} cached, ${_dl_stale} refreshed, ${_dl_fail} skipped"
 
 # Normalise epoch filenames
 log "Normalising epoch filenames..."
