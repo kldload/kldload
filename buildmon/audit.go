@@ -113,6 +113,30 @@ var auditRules = []auditRule{
 			"'Unable to locate package'.",
 	},
 	{
+		// zfsutils-linux's postinst runs `modprobe zfs` from inside the chroot,
+		// where uname -r is the LIVE ISO's kernel. It looks in
+		// /lib/modules/<live-kernel>/ and finds nothing, because the module it
+		// wants is built by DKMS against the TARGET kernel moments later. The
+		// pool is created and imported successfully in the same run.
+		//
+		// The tell is the kernel it names: a Fedora one, from the live image,
+		// which the installed system never boots. A real ZFS failure on a
+		// Debian target names 7.1.3+deb13 and still matches the generic rule
+		// below.
+		//
+		// HISTORY: 2026-08-18. This one line WAS the entire
+		// "1 critical problem(s) with this install" banner, on a machine whose
+		// ZFS was demonstrably fine: rpool ONLINE, zfs 2.4.3-2~bpo13+1,
+		// zfs.ko present for 7.1.3+deb13-amd64. It was reported as a critical
+		// ZFS failure twice in one evening, which is the cost this file's
+		// own comments warn about — the operator learns to scroll past the red.
+		regexp.MustCompile(`modprobe: FATAL: Module zfs not found in directory /lib/modules/\S*\.fc[0-9]+\.`),
+		SevInfo,
+		"zfsutils-linux probed for the module inside the chroot, against the " +
+			"live ISO's kernel rather than the target's. DKMS builds it for the " +
+			"installed kernel separately; the pool import below is the real evidence.",
+	},
+	{
 		// NOT preceded by a hyphen or word character, so "non-fatal" does not
 		// match. RE2 has no lookbehind, hence the explicit leading class.
 		//

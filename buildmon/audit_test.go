@@ -245,3 +245,49 @@ func TestRealWorldFalsePositivesAndNoise(t *testing.T) {
 		t.Fatal("tightening the FATAL rule lost a real FATAL — that is the one it exists for")
 	}
 }
+
+// TestChrootZfsModprobeIsNotCritical pins the classification of a line that
+// was, on 2026-08-18, the entire "1 critical problem(s) with this install"
+// banner on a machine whose ZFS was completely healthy: rpool ONLINE,
+// zfs 2.4.3-2~bpo13+1, zfs.ko present for the target kernel.
+//
+// zfsutils-linux's postinst probes for the module inside the chroot, where
+// uname -r is the live ISO's Fedora kernel, so it looks in a directory that
+// cannot contain it. DKMS builds the module against the target kernel
+// afterwards and the pool imports fine.
+//
+// The discriminator is the kernel named: a .fc<N> one comes from the live
+// image, which the installed system never boots. A failure naming the
+// target's own kernel is real and must stay critical.
+func TestChrootZfsModprobeIsNotCritical(t *testing.T) {
+	dir := t.TempDir()
+
+	benign := writeLog(t, dir, "benign.log",
+		"Setting up zfsutils-linux (2.4.3-2~bpo13+1) ...\n"+
+			"modprobe: FATAL: Module zfs not found in directory /lib/modules/7.0.14-201.fc44.x86_64\n")
+	found, err := ScanLog(benign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range found {
+		if f.Severity == SevCritical && strings.Contains(f.Message, "Module zfs not found") {
+			t.Errorf("chroot modprobe artifact reported CRITICAL: %q", f.Message)
+		}
+	}
+
+	real := writeLog(t, dir, "real.log",
+		"modprobe: FATAL: Module zfs not found in directory /lib/modules/7.1.3+deb13-amd64\n")
+	found, err = ScanLog(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crit bool
+	for _, f := range found {
+		if f.Severity == SevCritical && strings.Contains(f.Message, "Module zfs not found") {
+			crit = true
+		}
+	}
+	if !crit {
+		t.Error("a FATAL naming the TARGET kernel must stay critical — the benign rule is too broad")
+	}
+}
