@@ -262,6 +262,9 @@ func TestRealWorldFalsePositivesAndNoise(t *testing.T) {
 func TestChrootZfsModprobeIsNotCritical(t *testing.T) {
 	dir := t.TempDir()
 
+	// Suppressed outright: it is chroot noise the operator cannot act on.
+	// Demoting it to INFO was not enough — it still appeared in the Audit tab
+	// and was reported as "still comes up with that zfs error".
 	benign := writeLog(t, dir, "benign.log",
 		"Setting up zfsutils-linux (2.4.3-2~bpo13+1) ...\n"+
 			"modprobe: FATAL: Module zfs not found in directory /lib/modules/7.0.14-201.fc44.x86_64\n")
@@ -270,11 +273,12 @@ func TestChrootZfsModprobeIsNotCritical(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range found {
-		if f.Severity == SevCritical && strings.Contains(f.Message, "Module zfs not found") {
-			t.Errorf("chroot modprobe artifact reported CRITICAL: %q", f.Message)
+		if strings.Contains(f.Message, "Module zfs not found") {
+			t.Errorf("chroot modprobe artifact still reported (%v): %q", f.Severity, f.Message)
 		}
 	}
 
+	// A FATAL naming the TARGET's own kernel is real and must survive.
 	real := writeLog(t, dir, "real.log",
 		"modprobe: FATAL: Module zfs not found in directory /lib/modules/7.1.3+deb13-amd64\n")
 	found, err = ScanLog(real)
@@ -288,6 +292,6 @@ func TestChrootZfsModprobeIsNotCritical(t *testing.T) {
 		}
 	}
 	if !crit {
-		t.Error("a FATAL naming the TARGET kernel must stay critical — the benign rule is too broad")
+		t.Error("a FATAL naming the TARGET kernel must stay critical — the suppression is too broad")
 	}
 }

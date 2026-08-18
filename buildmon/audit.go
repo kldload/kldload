@@ -113,30 +113,6 @@ var auditRules = []auditRule{
 			"'Unable to locate package'.",
 	},
 	{
-		// zfsutils-linux's postinst runs `modprobe zfs` from inside the chroot,
-		// where uname -r is the LIVE ISO's kernel. It looks in
-		// /lib/modules/<live-kernel>/ and finds nothing, because the module it
-		// wants is built by DKMS against the TARGET kernel moments later. The
-		// pool is created and imported successfully in the same run.
-		//
-		// The tell is the kernel it names: a Fedora one, from the live image,
-		// which the installed system never boots. A real ZFS failure on a
-		// Debian target names 7.1.3+deb13 and still matches the generic rule
-		// below.
-		//
-		// HISTORY: 2026-08-18. This one line WAS the entire
-		// "1 critical problem(s) with this install" banner, on a machine whose
-		// ZFS was demonstrably fine: rpool ONLINE, zfs 2.4.3-2~bpo13+1,
-		// zfs.ko present for 7.1.3+deb13-amd64. It was reported as a critical
-		// ZFS failure twice in one evening, which is the cost this file's
-		// own comments warn about — the operator learns to scroll past the red.
-		regexp.MustCompile(`modprobe: FATAL: Module zfs not found in directory /lib/modules/\S*\.fc[0-9]+\.`),
-		SevInfo,
-		"zfsutils-linux probed for the module inside the chroot, against the " +
-			"live ISO's kernel rather than the target's. DKMS builds it for the " +
-			"installed kernel separately; the pool import below is the real evidence.",
-	},
-	{
 		// NOT preceded by a hyphen or word character, so "non-fatal" does not
 		// match. RE2 has no lookbehind, hence the explicit leading class.
 		//
@@ -201,6 +177,22 @@ var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
 // what keeps the audit short enough to actually be read.
 var noiseRe = regexp.MustCompile(
 	`Running in chroot, ignoring|` +
+		// zfsutils-linux's postinst probes for the module from inside the
+		// chroot, where uname -r is the LIVE ISO's Fedora kernel, so it looks
+		// in a directory that cannot contain it. DKMS builds the module
+		// against the TARGET kernel moments later and the pool imports fine.
+		//
+		// The tell is the kernel it names: a .fc<N> one comes from the live
+		// image, which the installed system never boots. A failure naming the
+		// target's own kernel is real and still reaches the rules below.
+		//
+		// HISTORY: 2026-08-18. This line WAS the "1 critical problem(s) with
+		// this install" banner on a machine whose ZFS was healthy — rpool
+		// ONLINE, zfs 2.4.3, zfs.ko present for 7.1.3+deb13. Demoting it to
+		// INFO stopped the false alarm but still listed it, and the operator's
+		// reply was "still comes up with that zfs error .. quite annoying".
+		// A line nobody can act on does not belong in an audit at all.
+		`modprobe: FATAL: Module zfs not found in directory /lib/modules/\S*\.fc[0-9]+\.|` +
 		`invoke-rc\.d: policy-rc\.d denied|` +
 		`^\s*W: Target \S+ is configured multiple times|` +
 		`dpkg: warning: version .* has bad syntax|` +
