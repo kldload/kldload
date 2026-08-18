@@ -282,6 +282,32 @@ done
 log "Koji kernel pin injected: ${KOJI_KERNEL_NVR} (7 subpackages)"
 
 log "Creating repo metadata..."
+# ─── Evict superseded RPM versions ───────────────────────────────────────────
+#
+# `dnf download --resolve` resolves the CURRENT version and writes it, but it
+# leaves whatever was already there, so this pool accumulates every version it
+# has ever carried. Measured 2026-08-18: the xorg-x11-drv-nvidia stack, xxd and
+# zchunk-libs each sat at two versions. That costs ISO space, makes the repo
+# metadata advertise builds nothing should install, and means a rebuild is
+# never "the darksite as of today" — it is every previous day stacked up.
+#
+# Runs BEFORE createrepo_c so the metadata describes what actually remains.
+# --keep 1 leaves exactly the newest build of each name; repomanage does the
+# RPM version comparison, which is not something to hand-roll in shell.
+log "Evicting superseded RPM versions..."
+_old_count=0
+while IFS= read -r _old; do
+    [[ -n "$_old" ]] || continue
+    log "  evicting (superseded): $(basename "$_old")"
+    rm -f "$_old"
+    ((_old_count++)) || true
+done < <(
+    # An empty pool, or a dnf too old for `repomanage`, must not abort the
+    # build — there is simply nothing to evict in either case.
+    dnf repomanage --old --keep 1 "${REPO_DIR}" 2>/dev/null || true
+)
+log "Evicted ${_old_count} superseded RPM(s)"
+
 createrepo_c "${REPO_DIR}"
 
 _rpm_count=$(find "${REPO_DIR}" -name '*.rpm' | wc -l)

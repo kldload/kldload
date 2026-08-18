@@ -548,7 +548,10 @@ cmd_build() {
         # be enough; remembering to hand-rebuild a mirror is not a contract.
         local _fed_stamp="$fedora_darksite/.pkgset-sha256"
         local _fed_hash
-        _fed_hash="$(_pkgset_hash "$ROOT/build/darksite-fedora/config/package-sets")"
+        # The builder is hashed for the same reason as Debian's: it decides what
+        # ends up in the pool, so an edit there must invalidate the cache.
+        _fed_hash="$(_pkgset_hash "$ROOT/build/darksite-fedora/config/package-sets" \
+            "$ROOT/build/darksite-fedora/build-darksite-fedora.sh")"
         if [[ ! -f "$fedora_darksite/rpm/repodata/repomd.xml" ]]; then
             cmd_build_fedora_darksite
             printf '%s\n' "$_fed_hash" >"$_fed_stamp"
