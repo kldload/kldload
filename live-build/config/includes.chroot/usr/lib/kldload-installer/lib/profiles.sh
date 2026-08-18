@@ -2975,7 +2975,15 @@ ConditionPathExists=!/var/lib/kldload/klab-firstboot-done
 
 [Service]
 Type=oneshot
-ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do curl -sf --connect-timeout 5 https://cloud.debian.org >/dev/null 2>&1 && exit 0; echo "Waiting for internet ($i/30)..."; sleep 10; done'
+# The probe MUST fail when there is no internet. It used to end on `sleep 10`,
+# so the loop fell out with status 0 and the unit proceeded to run six cloud-image
+# downloads that could not possibly work — while multi-user.target, and therefore
+# graphical.target, waited on this oneshot for up to TimeoutStartSec (2 hours).
+# An offline install got no desktop at all, which reads as "the installer broke"
+# (RTX 3080 box, 2026-08-18: graphical.target inactive, job still "start running"
+# 25 minutes in). Failing here aborts the unit in ~60s and the boot continues;
+# golden images are then built later by hand or on the next boot with a network.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 12); do curl -sf --connect-timeout 5 https://cloud.debian.org >/dev/null 2>&1 && exit 0; echo "Waiting for internet ($i/12)..."; sleep 5; done; echo "no internet after 60s — skipping golden image builds (run: klab golden all)" >&2; exit 1'
 # Build #49+: webui no longer stores RHEL creds (no Dashboard panel).
 # Creds are entered once in the install form, used to (a) register the
 # host, (b) fetch the RHEL Cloud Image, (c) build the 6th klab golden
