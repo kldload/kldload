@@ -474,7 +474,19 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     # now" pane; without psi=1 the pane falls back to vmstat. Detected
     # 2026-05-27 on a RHEL 10 kernel (6.12.0-211.16.1.el10_2.x86_64) that
     # ships PSI built in but boot-disabled.
-    zfs set org.zfsbootmenu:commandline="rw $(k_console_args) psi=1 selinux=0" rpool/ROOT
+    #
+    # `quiet` is not cosmetic on an ENCRYPTED root. zfs-initramfs writes the
+    # passphrase prompt to /dev/console and waits; with kernel messages still
+    # printing, the prompt scrolls away the instant it appears and the screen
+    # looks like log spam with no question on it. Pressing Enter submits an
+    # empty passphrase, the initramfs re-prompts, and THAT copy is visible
+    # because the storm has passed — which is exactly the reported behaviour:
+    # "at 10 sec an invisible prompt asking for the pw again" (2026-08-18).
+    #
+    # This is the cmdline ZFSBootMenu kexecs with. The GRUB direct entry has
+    # its own args in lib/bootloader.sh, and fixing `quiet` there did NOT fix
+    # this path — a machine that boots via ZBM never reads those. Both need it.
+    zfs set org.zfsbootmenu:commandline="rw $(k_console_args) quiet psi=1 selinux=0" rpool/ROOT
 
     # ── Make the boot menu reachable ─────────────────────────────────────────
     # ZFSBootMenu is the rollback path: it is where you pick an older boot
