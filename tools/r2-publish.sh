@@ -195,6 +195,16 @@ fi
 iso_name="$(basename "$iso")"
 local_sum="$(cut -d' ' -f1 <"$sidecar")"
 local_size="$(stat -c %s "$iso")"
+
+# Normalise the sidecar to "<sum>  <basename>" before it is published.
+#
+# WHY: the sidecar reaching this tool has carried the full build path —
+# "…  /home/<user>/kldload/live-build/output/kldload-1.4.1-x86_64.iso" — which
+# publishes the builder's home directory to everyone who downloads, and makes
+# `sha256sum -c` fail for them because that path does not exist on their
+# machine. The builder itself writes a bare basename, so this is defensive: it
+# guarantees the published form regardless of which step produced the file.
+printf '%s  %s\n' "$local_sum" "$iso_name" >"$sidecar"
 echo "r2-publish: ok — ${iso_name}, ${local_size} bytes, ${local_sum:0:12}…"
 
 # rclone reads R2 as an S3-compatible endpoint. Config goes on the command line
