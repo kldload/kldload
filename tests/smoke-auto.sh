@@ -43,4 +43,36 @@ if [[ ! -r "${SCRIPT_DIR}/smoke-${PROFILE}.sh" ]]; then
     PROFILE="core"
 fi
 
+# ─── The offline mirror actually carried what the installer asked for ────────
+#
+# Runs for every profile, before dispatch, because it is not profile-specific.
+#
+# When the darksite is detected the target's sources.list is darksite-only and
+# profile packages install BEFORE the internet repos are written, so anything
+# the mirror lacks simply cannot be installed. The retry loop then records one
+# line per package and the install still reports success — which is why
+# chromium, git, gir1.2-webkit-6.0 and fonts-noto-color-emoji all shipped
+# missing and nothing ever looked broken: firstboot healed the webview stack
+# over the network, and no test read this log (2026-08-18).
+#
+# This is deliberately a HARD failure. A package silently absent from an
+# offline install is the exact class of defect the darksite exists to prevent.
+_boot_log="/var/log/kldload/bootstrap.log"
+if [[ -r "$_boot_log" ]]; then
+    _missed=()
+    while IFS= read -r _line; do
+        [[ -n "$_line" ]] && _missed+=("$_line")
+    done < <(sed -n 's/.*package \(.*\) not available.*/\1/p' "$_boot_log")
+    if [[ "${#_missed[@]}" -gt 0 ]]; then
+        echo "FAIL: the install could not fetch ${#_missed[@]} package(s) — the offline mirror is incomplete:" >&2
+        printf '  %s\n' "${_missed[@]}" >&2
+        echo "  (add them to the darksite, or stop installing them in lib/profiles.sh)" >&2
+        exit 1
+    fi
+    echo "Offline mirror: every profile package the installer asked for was installed"
+else
+    echo "WARNING: ${_boot_log} is absent — cannot verify the offline mirror was complete" >&2
+fi
+echo ""
+
 exec bash "${SCRIPT_DIR}/smoke-${PROFILE}.sh"

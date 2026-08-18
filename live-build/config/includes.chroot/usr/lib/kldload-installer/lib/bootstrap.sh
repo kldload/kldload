@@ -3155,6 +3155,20 @@ WGEOF
     k_finalize_sources_list
 
     mkdir -p "${target}/var/log/kldload"
+    # Preserve the install log ON the installed system. It is written in the
+    # live environment and dies with it at reboot, so the record of what the
+    # install could not fetch was gone exactly when somebody needed it.
+    #
+    # WHY IT MATTERS: profile packages install from the darksite-only
+    # sources.list, so anything the offline mirror lacks cannot be installed
+    # and the retry loop records one line — "not available - skipping" — then
+    # the install reports success. chromium, git, gir1.2-webkit-6.0 and
+    # fonts-noto-color-emoji all shipped missing this way; firstboot healed
+    # the webview stack over the network, so no machine with a cable ever
+    # looked wrong. Grepping this file for that line is the cheapest test
+    # that the mirror is actually complete (2026-08-18).
+    cp -a "$log" "${target}/var/log/kldload/bootstrap.log" ||
+        k_log_to "$log" "WARNING: could not preserve the install log to the target — post-install verification will have nothing to read"
     k_log_to "$log" "Debian bootstrap complete"
 }
 
