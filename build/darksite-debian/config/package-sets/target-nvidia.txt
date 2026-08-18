@@ -1,0 +1,36 @@
+# target-nvidia.txt — NVIDIA driver packages for Debian/Ubuntu targets
+#
+# Sourced when building the offline darksite mirror, so installs to Debian
+# targets with NVIDIA hardware can complete with zero internet — the same
+# guarantee target-nvidia.txt already gives the Fedora mirror.
+#
+# Why the CUDA repo and not Debian's own nvidia-driver:
+#
+#   kldload installs the backports kernel (7.1.3+deb13) for the ZFS pairing.
+#   Debian's non-free nvidia-driver cannot build against it, which the
+#   installer says out loud before falling back to it. NVIDIA's own
+#   debian13 CUDA repo ships nvidia-open, which does — verified on an
+#   RTX 3080: "nvidia/610.57.04, 7.1.3+deb13-amd64: installed".
+#
+#   That repo is also the only Debian NVIDIA source the installer actually
+#   asks for (lib/bootstrap.sh adds cuda-keyring, then `apt-get install
+#   nvidia-open`), so mirroring it is what makes that path work offline
+#   rather than a second, divergent choice.
+#
+# WHY THIS FILE EXISTS AT ALL: without it an offline Debian install on
+# NVIDIA hardware got no driver, and — until the blacklist was gated — no
+# display either, because nouveau was blacklisted for a driver that never
+# arrived (RTX 3080, 2026-08-18). Fedora had carried its NVIDIA packages
+# since the darksite was built; Debian never did, so months of Fedora
+# testing could not surface it.
+#
+# nvidia-open is the single top-level package; the dependency closure pulls
+# the open-kernel DKMS module and the full userland. The DKMS build happens
+# on the target, which already has linux-headers-amd64, linux-kbuild,
+# dkms, gcc and make in this mirror.
+nvidia-open
+
+# cuda-keyring installs the repo definition + signing key on the target.
+# The installer fetches it with curl today, which is an internet reach even
+# when everything else is local; carrying it here removes that.
+cuda-keyring

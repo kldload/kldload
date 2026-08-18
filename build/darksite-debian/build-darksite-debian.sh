@@ -54,6 +54,7 @@ read_package_set "target-zfs"
 read_package_set "target-desktop"
 read_package_set "target-server"
 read_package_set "target-kubernetes"
+read_package_set "target-nvidia"
 
 # ─── Packages the installer will actually ask for ────────────────────────────
 #
@@ -129,6 +130,40 @@ else
     sed -i 's/Components: main/Components: main contrib non-free-firmware/' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
     if [[ -f /etc/apt/sources.list ]]; then
         sed -i 's/main$/main contrib non-free-firmware/' /etc/apt/sources.list 2>/dev/null || true
+    fi
+fi
+
+# ─── NVIDIA's CUDA repo — the only Debian source for a driver that builds ────
+#
+# kldload installs the backports kernel (7.1.3+deb13) for the ZFS pairing, and
+# Debian's own non-free nvidia-driver cannot build against it. NVIDIA's debian13
+# CUDA repo ships nvidia-open, which does — verified on an RTX 3080 as
+# "nvidia/610.57.04, 7.1.3+deb13-amd64: installed". It is also the exact source
+# lib/bootstrap.sh asks for, so mirroring it makes that path work offline rather
+# than introducing a second, divergent driver choice.
+#
+# WHY IT HAS TO HAPPEN HERE: on the offline path the installed machine can only
+# install what this mirror contains. Without these packages an NVIDIA box got no
+# driver at all, and — before the blacklist was gated — no display either,
+# because nouveau was blacklisted for a driver that never arrived (2026-08-18).
+# Fedora's mirror has carried its NVIDIA packages since the darksite was built;
+# Debian's never did, which is why months of Fedora testing could not surface it.
+#
+# trusted=yes because this runs at BUILD time against a vendor repo over HTTPS,
+# and the packages are verified again by dpkg on the target via cuda-keyring.
+# Ubuntu suites are skipped: their CUDA path is a different repo directory.
+if [[ "${SUITE}" != "noble" && "${SUITE}" != "jammy" &&
+    "${SUITE}" != "mantic" && "${SUITE}" != "oracular" ]]; then
+    _nv_repo="https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64"
+    if curl -sfI --max-time 20 "${_nv_repo}/Packages.gz" >/dev/null 2>&1; then
+        log "Adding NVIDIA CUDA repo for the driver closure..."
+        printf 'deb [trusted=yes] %s /\n' "${_nv_repo}" \
+            >/etc/apt/sources.list.d/kldload-nvidia.list
+    else
+        # Not fatal: the gate below reports nvidia-open as unresolvable and the
+        # operator sees exactly which packages the mirror will lack, rather than
+        # the build dying on a vendor outage.
+        log "WARNING: NVIDIA CUDA repo unreachable — the mirror will carry NO NVIDIA driver"
     fi
 fi
 
