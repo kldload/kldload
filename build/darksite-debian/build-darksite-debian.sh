@@ -411,6 +411,37 @@ for _pkg in "${CLOSURE[@]}"; do
 done
 log "Download complete: ${_dl_new} new, ${_dl_skip} cached, ${_dl_stale} refreshed, ${_dl_fail} skipped"
 
+# ─── Evict packages that are no longer part of this mirror ───────────────────
+#
+# The loop above only ever ADDS. A package dropped from a profile, renamed
+# upstream, or withdrawn from the archive stayed in the pool forever, and the
+# generated Packages index kept advertising it. That is how a mirror drifts
+# into being an archaeological record instead of a build artifact: it still
+# carries what the installer wanted months ago, so a rebuild that should have
+# been "the darksite as of today" quietly shipped yesterday's decisions too.
+#
+# The closure IS the definition of this mirror. Anything outside it cannot be
+# reached by any install this ISO performs, so removing it is subtraction of
+# dead weight, not of function. Every eviction is named in the log, because a
+# prune that deletes silently is indistinguishable from one that deletes the
+# wrong thing.
+log "Pruning packages no longer in the closure..."
+declare -A _keep=()
+for _pkg in "${CLOSURE[@]}"; do _keep["$_pkg"]=1; done
+
+_pruned=0
+while IFS= read -r -d '' _f; do
+    # name_version_arch.deb — the name is everything before the first '_'.
+    _base="$(basename "$_f")"
+    _name="${_base%%_*}"
+    if [[ -z "${_keep[$_name]:-}" ]]; then
+        log "  evicting (not in closure): ${_base}"
+        rm -f "$_f"
+        ((_pruned++)) || true
+    fi
+done < <(find "$APT_POOL" -maxdepth 1 -name '*.deb' -print0)
+log "Pruned ${_pruned} package(s); the pool is now exactly the closure"
+
 # Normalise epoch filenames
 log "Normalising epoch filenames..."
 while IFS= read -r -d '' f; do
