@@ -1765,22 +1765,22 @@ main() {
         # the loop needs them. Fedora-only: EL gets Steam via Flathub instead.
         if rpm -E %fedora 2>/dev/null | grep -qE '^[0-9]+$' &&
             ! rpm -q rpmfusion-nonfree-release >/dev/null 2>&1 &&
-            ! rpm -q steam >/dev/null 2>&1; then
+            true; then
             _fedver_heal="$(rpm -E %fedora)"
             if curl -fsS -m 8 -o /dev/null https://mirrors.rpmfusion.org/ 2>/dev/null; then
                 if dnf install -y \
                     "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${_fedver_heal}.noarch.rpm" \
                     "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${_fedver_heal}.noarch.rpm" \
                     >>"$LOG" 2>&1; then
-                    ok "RPM Fusion enabled (steam prerequisite, GPU-agnostic)"
+                    ok "RPM Fusion enabled (gamescope + akmod-nvidia source, GPU-agnostic)"
                 else
-                    log "WARNING: RPM Fusion release install failed — steam heal below will miss; see $LOG"
+                    log "WARNING: RPM Fusion release install failed — gamescope heal below will miss; see $LOG"
                 fi
             else
-                log "WARNING: no network to RPM Fusion — steam will miss below and be queued for the network-up heal hook"
+                log "WARNING: no network to RPM Fusion — gamescope will miss below and be queued for the network-up heal hook"
             fi
         fi
-        for _pkg in vim-X11 steam gamescope \
+        for _pkg in vim-X11 gamescope \
             libbpf-tools bpftrace bcc-tools \
             libvirt-daemon-driver-network libvirt-daemon-config-network; do
             rpm -q "$_pkg" >/dev/null 2>&1 && continue
@@ -1881,30 +1881,6 @@ main() {
             sed -i 's/^installonly_limit=.*/installonly_limit=5/' /etc/dnf/dnf.conf
         elif [[ -f /etc/dnf/dnf.conf ]]; then
             echo "installonly_limit=5" >>/etc/dnf/dnf.conf
-        fi
-    fi
-
-    # Flatpak Steam is the FALLBACK only where there's no native RPM steam
-    # (RHEL/Rocky/CentOS Stream have no steam package; Fedora does via RPM Fusion,
-    # installed by the desktop heal loop above). Installing both leaves two Steams
-    # with separate game libraries, and the Flatpak sandbox is worse for
-    # anti-cheat and controllers than the native RPM — so native wins where it
-    # exists. Gate on `rpm -q steam` (and a `steam` on PATH) so Fedora skips this
-    # entirely and only the native-less distros take the Flathub path.
-    if [[ "${ROLE}" == "desktop" || "${KLDLOAD_PROFILE:-}" == "desktop" ]] &&
-        command -v flatpak >/dev/null 2>&1 &&
-        ! rpm -q steam >/dev/null 2>&1 &&
-        ! command -v steam >/dev/null 2>&1; then
-        log "No native steam package — installing Steam via Flathub"
-        if flatpak remote-add --if-not-exists --system flathub \
-            https://flathub.org/repo/flathub.flatpakrepo 2>>"$LOG"; then
-            if flatpak install -y --system flathub com.valvesoftware.Steam >>"$LOG" 2>&1; then
-                ok "Steam installed via Flathub"
-            else
-                log "WARNING: Steam Flathub install failed (no internet? slow mirror?) — user can retry: flatpak install flathub com.valvesoftware.Steam"
-            fi
-        else
-            log "WARNING: flathub remote-add failed (no internet?) — skipping Steam install"
         fi
     fi
 
