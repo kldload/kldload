@@ -1246,8 +1246,22 @@ DRACUT
 
     # ── MOK enrollment queue (if configured) ─────────────────────────────────
 
-    if declare -F k_configure_mok >/dev/null 2>&1; then
+    # Only when Secure Boot was actually asked for. MOK exists to get our own
+    # keys trusted by shim; with SB off the modules load unsigned and the
+    # enrollment buys nothing — while still showing the operator MokManager's
+    # blue screen on first boot, which reads like a fault on a machine that
+    # never wanted Secure Boot.
+    #
+    # This drops the "pre-arm the box for a later SB flip" behaviour from
+    # 2026-07-22. That traded a confusing enrollment screen on every install
+    # against saving a reinstall for the rare operator who flips SB on later.
+    # Enabling SB afterwards now means ticking the box and reinstalling, or
+    # enrolling by hand — a deliberate act, rather than a tax on everyone.
+    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] &&
+        declare -F k_configure_mok >/dev/null 2>&1; then
         k_configure_mok
+    else
+        k_log "MOK enrollment skipped — Secure Boot not requested (modules load unsigned)"
     fi
 
     k_log "Bootloader EFI + initramfs + efibootmgr complete (ZFSBootMenu)"
