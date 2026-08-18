@@ -548,6 +548,23 @@ VNETDEF
             local gh_url
             case "${tool}" in
             firecracker | jailer)
+                # Baked copy first — build-iso.sh puts it in /root/darksite/bin
+                # so an air-gapped install has it. Reaching GitHub first meant
+                # an offline machine logged "no network" and silently had no
+                # microVM runtime at all.
+                if [[ -s /root/darksite/bin/firecracker.tgz ]]; then
+                    # A partial tarball leaves nothing to install and the finds
+                    # below then match nothing — the missing binary is reported
+                    # by the caller, so failing here would only lose that.
+                    tar -xzf /root/darksite/bin/firecracker.tgz -C /tmp 2>/dev/null || true
+                    # find exits non-zero when the archive layout changes and
+                    # the name does not match; the caller checks for the binary.
+                    find /tmp -name "firecracker-*-x86_64" -exec install -m 0755 {} "${bin_dest}/firecracker" \; 2>/dev/null || true
+                    # jailer is optional — firecracker runs without it.
+                    find /tmp -name "jailer-*-x86_64" -exec install -m 0755 {} "${bin_dest}/jailer" \; 2>/dev/null || true
+                    log "  ${tool}: installed from the darksite (no network needed)"
+                    return 0
+                fi
                 local fc_ver
                 fc_ver="$(curl -fsSL --connect-timeout 10 \
                     https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest \
@@ -569,6 +586,12 @@ VNETDEF
                 rm -f "${tgz}"
                 ;;
             firectl)
+                # Baked copy first — same reasoning as firecracker above.
+                if [[ -s /root/darksite/bin/firectl ]]; then
+                    install -m 0755 /root/darksite/bin/firectl "${bin_dest}/firectl" &&
+                        log "  firectl: installed from the darksite (no network needed)" &&
+                        return 0
+                fi
                 local fc_ver
                 fc_ver="$(curl -fsSL --connect-timeout 10 \
                     https://api.github.com/repos/firecracker-microvm/firectl/releases/latest \
@@ -632,16 +655,24 @@ TGT
 setup_vdi() {
     log "=== VDI setup ==="
 
-    # mediamtx latest stable
-    local api_url="https://api.github.com/repos/bluenviron/mediamtx/releases/latest"
-    local dl_url
-    dl_url="$(curl -sL "${api_url}" |
-        grep -o '"browser_download_url":"[^"]*linux_amd64\.tar\.gz"' |
-        cut -d'"' -f4)"
-    [[ -n "${dl_url}" ]] || die "Cannot find mediamtx download URL"
+    # Baked copy first. This path used to die outright when the GitHub API was
+    # unreachable — "Cannot find mediamtx download URL" — so an air-gapped VDI
+    # install failed at first boot on a streaming server, of all things.
+    # build-iso.sh now bakes it into /root/darksite/bin.
+    if [[ -s /root/darksite/bin/mediamtx.tar.gz ]]; then
+        log "Installing mediamtx from the darksite (no network needed)"
+        tar -xzf /root/darksite/bin/mediamtx.tar.gz -C /usr/local/bin mediamtx
+    else
+        local api_url="https://api.github.com/repos/bluenviron/mediamtx/releases/latest"
+        local dl_url
+        dl_url="$(curl -sL "${api_url}" |
+            grep -o '"browser_download_url":"[^"]*linux_amd64\.tar\.gz"' |
+            cut -d'"' -f4)"
+        [[ -n "${dl_url}" ]] || die "Cannot find mediamtx download URL"
 
-    log "Downloading mediamtx: ${dl_url}"
-    curl -sL "${dl_url}" | tar -xz -C /usr/local/bin mediamtx
+        log "Downloading mediamtx: ${dl_url}"
+        curl -sL "${dl_url}" | tar -xz -C /usr/local/bin mediamtx
+    fi
     chmod +x /usr/local/bin/mediamtx
     ok "mediamtx: $(/usr/local/bin/mediamtx --version 2>&1 | head -1)"
 

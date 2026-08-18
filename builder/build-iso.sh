@@ -2854,6 +2854,57 @@ else
     log "WARNING: ZFSBootMenu EFI not available — installer will try to download at install time"
 fi
 
+# ── Standalone binaries the installed system used to curl at first boot ──────
+#
+# helm, firecracker, firectl and mediamtx were each fetched from the internet
+# by kube-setup / kldload-firstboot AFTER the ISO was built, which quietly
+# made "darksite" untrue: an air-gapped machine got none of them and the only
+# evidence was a WARNING nobody reads. Under ~50 MB total, against an ISO
+# measured in GB — the cost of baking them is noise, and it is the difference
+# between an offline install that works and one that half-works.
+#
+# Downloads are best effort. A vendor outage must not fail the ISO build; the
+# runtime paths still fall back to the network exactly as before, so a missing
+# binary here degrades to today's behaviour rather than to a broken image.
+mkdir -p "${ROOTFS}/root/darksite/bin"
+
+_bake_bin() {
+    # $1 name for the log, $2 destination filename, $3 URL
+    local _what="$1" _dest="${ROOTFS}/root/darksite/bin/$2" _url="$3"
+    if curl -sL --connect-timeout 20 --max-time 300 -o "${_dest}.part" "$_url" &&
+        [[ -s "${_dest}.part" ]]; then
+        mv -f "${_dest}.part" "$_dest"
+        log "baked ${_what}: $(du -sh "$_dest" | cut -f1)"
+    else
+        rm -f "${_dest}.part"
+        log "WARNING: could not bake ${_what} — an OFFLINE install will not have it"
+    fi
+}
+
+# Versions are resolved at build time so the ISO records exactly what it
+# carries, rather than "whatever latest meant on the day it was installed".
+_HELM_V="$(curl -sL --max-time 20 https://api.github.com/repos/helm/helm/releases/latest 2>/dev/null |
+    grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4)"
+[[ -n "$_HELM_V" ]] && _bake_bin "helm ${_HELM_V}" "helm-linux-amd64.tar.gz" \
+    "https://get.helm.sh/helm-${_HELM_V}-linux-amd64.tar.gz"
+
+_FC_V="$(curl -sL --max-time 20 https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest 2>/dev/null |
+    grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4)"
+[[ -n "$_FC_V" ]] && _bake_bin "firecracker ${_FC_V}" "firecracker.tgz" \
+    "https://github.com/firecracker-microvm/firecracker/releases/download/${_FC_V}/firecracker-${_FC_V}-x86_64.tgz"
+
+_FCTL_V="$(curl -sL --max-time 20 https://api.github.com/repos/firecracker-microvm/firectl/releases/latest 2>/dev/null |
+    grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4)"
+[[ -n "$_FCTL_V" ]] && _bake_bin "firectl ${_FCTL_V}" "firectl" \
+    "https://github.com/firecracker-microvm/firectl/releases/download/${_FCTL_V}/firectl"
+
+_MTX_V="$(curl -sL --max-time 20 https://api.github.com/repos/bluenviron/mediamtx/releases/latest 2>/dev/null |
+    grep -oE '"tag_name": *"[^"]+"' | head -1 | cut -d'"' -f4)"
+[[ -n "$_MTX_V" ]] && _bake_bin "mediamtx ${_MTX_V}" "mediamtx.tar.gz" \
+    "https://github.com/bluenviron/mediamtx/releases/download/${_MTX_V}/mediamtx_${_MTX_V}_linux_amd64.tar.gz"
+
+log "darksite binaries: $(du -sh "${ROOTFS}/root/darksite/bin" 2>/dev/null | cut -f1)"
+
 # Offline package darksites (free edition only — core requires internet for installs)
 # Darksites are pre-resolved package mirrors baked into the ISO so target installs
 # work without internet. Each distro's darksite was built in an earlier pipeline

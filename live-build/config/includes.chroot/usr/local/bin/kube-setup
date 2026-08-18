@@ -306,8 +306,20 @@ install_helm() {
     [[ "$arch" == "x86_64" ]] && arch="amd64"
     [[ "$arch" == "aarch64" ]] && arch="arm64"
 
-    curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${arch}.tar.gz" |
-        tar -xz -C /tmp
+    # Prefer the baked copy. build-iso.sh downloads helm into
+    # /root/darksite/bin at BUILD time precisely so an air-gapped install has
+    # it; going to get.helm.sh first meant an offline machine got no helm and
+    # every chart install failed afterwards, with the only clue a curl error
+    # in a log. Same "prefer local, fall back to the network" shape the apt
+    # and NVIDIA paths use.
+    local _hd="/root/darksite/bin/helm-linux-${arch}.tar.gz"
+    if [[ -s "$_hd" ]]; then
+        log "Installing Helm from the darksite (no network needed)"
+        tar -xzf "$_hd" -C /tmp
+    else
+        curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${arch}.tar.gz" |
+            tar -xz -C /tmp
+    fi
     install -m 755 "/tmp/linux-${arch}/helm" /usr/local/bin/helm
     rm -rf "/tmp/linux-${arch}"
 
