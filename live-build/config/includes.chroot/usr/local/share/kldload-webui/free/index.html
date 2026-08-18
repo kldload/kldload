@@ -6105,16 +6105,22 @@ function startInstall() {
     // profiles want. On kldlab/k8s/kvm/zfslab, default is set from GPU
     // auto-detection (refreshSystemInfo) and user can override.
     enable_ai: document.getElementById('install-bob')?.checked ? '1' : '0',
-    // ai_pull_model → KLDLOAD_AI_PULL_MODEL. Separate from enable_ai on
-    // purpose: enable_ai installs Ollama + Open WebUI and downloads nothing,
-    // this asks the installer to also fetch a model during first boot.
-    // Default unchecked, so a plain AI install costs no bandwidth and still
-    // lands a working interface with a model picker.
-    // Always 1: on a darksite ISO autodeploy finds the weights and ignores
-    // this; on one built without them, pulling beats handing the operator a
-    // working Ollama with an empty model list. Removed from the UI because it
-    // asked the operator a question the filesystem already answers.
-    ai_pull_model: '1',
+    // ai_pull_model → KLDLOAD_AI_PULL_MODEL. Always 0: the installer never
+    // downloads a model.
+    //
+    // It used to be 1, on the reasoning that "pulling beats handing the
+    // operator a working Ollama with an empty model list". That trades a
+    // multi-GB download nobody asked for against a picker that is already
+    // sitting in front of them, and it guesses which model they want. An
+    // empty picker in a working UI is not a broken install; it is a choice
+    // deferred to the person who knows the answer.
+    //
+    // Ollama and Open WebUI are still installed and running. A model arrives
+    // by whichever route the operator prefers: the Open WebUI picker,
+    // `ollama pull <name>`, or a file copied in from a darksite — autodeploy
+    // rehydrates /root/darksite/ollama/models/ independently of this flag, so
+    // an air-gapped ISO built with weights still lands them. (2026-08-18)
+    ai_pull_model: '0',
     // Bob model selection (tier name — firstboot maps to Ollama model).
     // bob_darksite=1 → expect /root/darksite/ollama/models/ pre-staged.
     bob_model: document.querySelector('input[name="bob-model"]:checked')?.value || 'recommended',
