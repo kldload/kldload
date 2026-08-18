@@ -649,9 +649,29 @@ EOFSTAB
     #
     # Same detection as bootstrap.sh (lspci on the LIVE system, which is the
     # same hardware being installed to) so the two cannot disagree.
+    #
+    # ONLY when a driver will actually load. Hardware detection alone is not
+    # enough: blacklisting nouveau with no nvidia.ko removes the last display
+    # driver, and THIS is the cmdline that boots — the ZFS property above is
+    # not read on the direct-EFI path.
+    #
+    # HISTORY: 2026-08-18, RTX 3080, offline install. NVIDIA's vendor repo was
+    # unreachable and Debian's driver cannot build on the backports kernel, so
+    # nothing provided nvidia.ko — but the blacklist went on regardless and the
+    # machine booted with /sys/class/drm holding only `version`: no card, no
+    # display, lightdm "active" with nothing to draw on. The operator saw a
+    # dead desktop; every log line claimed the driver was installed.
     if lspci 2>/dev/null | grep -qiE 'vga.*nvidia|3d.*nvidia'; then
-        _direct_bootargs+=" rd.driver.blacklist=nouveau,nova_core"
-        _direct_bootargs+=" modprobe.blacklist=nouveau,nova_core nvidia-drm.modeset=1"
+        if declare -F _k_nvidia_will_load >/dev/null 2>&1 &&
+            ! _k_nvidia_will_load "${target}"; then
+            k_log "NVIDIA GPU present but NO driver installed — not blacklisting nouveau"
+            k_log "  Blacklisting it without nvidia.ko would leave this machine with no display"
+            k_log "  driver at all. nouveau stays enabled; kldload-firstboot adds the blacklist"
+            k_log "  once a driver is really present."
+        else
+            _direct_bootargs+=" rd.driver.blacklist=nouveau,nova_core"
+            _direct_bootargs+=" modprobe.blacklist=nouveau,nova_core nvidia-drm.modeset=1"
+        fi
     fi
 
     # Cap the ARC on the COMMAND LINE, not only in /etc/modprobe.d.
