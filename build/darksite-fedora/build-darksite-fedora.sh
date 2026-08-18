@@ -300,6 +300,7 @@ while IFS= read -r _old; do
     [[ -n "$_old" ]] || continue
     log "  evicting (superseded): $(basename "$_old")"
     rm -f "$_old"
+    # Counter only — ((x++)) returns non-zero from 0 under set -e.
     ((_old_count++)) || true
 done < <(
     # An empty pool, or a dnf too old for `repomanage`, must not abort the

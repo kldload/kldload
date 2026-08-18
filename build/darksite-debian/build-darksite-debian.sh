@@ -386,6 +386,8 @@ for _pkg in "${CLOSURE[@]}"; do
         # down, so a cached file may carry either spelling. Check both.
         if compgen -G "${APT_POOL}/${_pkg}_${_want}_*.deb" >/dev/null 2>&1 ||
             compgen -G "${APT_POOL}/${_pkg}_${_want//:/%3a}_*.deb" >/dev/null 2>&1; then
+            # ((x++)) returns non-zero when the pre-increment value is 0, which
+            # would trip set -e. Only the counter is being swallowed.
             ((_dl_skip++)) || true
             continue
         fi
@@ -394,6 +396,7 @@ for _pkg in "${CLOSURE[@]}"; do
         # index becomes ambiguous.
         if compgen -G "${APT_POOL}/${_pkg}_*.deb" >/dev/null 2>&1; then
             rm -f "${APT_POOL}/${_pkg}"_*.deb
+            # Counter only — see the ((x++)) note above.
             ((_dl_stale++)) || true
         fi
     elif compgen -G "${APT_POOL}/${_pkg}_*.deb" >/dev/null 2>&1; then
@@ -437,6 +440,7 @@ while IFS= read -r -d '' _f; do
     if [[ -z "${_keep[$_name]:-}" ]]; then
         log "  evicting (not in closure): ${_base}"
         rm -f "$_f"
+        # Counter only — ((x++)) returns non-zero from 0 under set -e.
         ((_pruned++)) || true
     fi
 done < <(find "$APT_POOL" -maxdepth 1 -name '*.deb' -print0)
