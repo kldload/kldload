@@ -2235,7 +2235,18 @@ WPEOF
         # without an internet roundtrip. Missing this copy was the reason
         # Bob fell back to online pulls on installed systems even though
         # the ISO had the weights baked in.
-        if [[ -d /root/darksite/ollama/models ]]; then
+        # Gated on the ollama directory ITSELF, not on models/. The weights are
+        # opt-in (KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1) while the runtime and the
+        # Open WebUI image always ship, so testing for models/ meant a default
+        # ISO copied NOTHING — no runtime, no interface, no Whisper weights —
+        # and the installed system fell back to the network for all three.
+        #
+        # Measured 2026-08-18: /var/lib/kldload/ai-payload and
+        # /root/darksite/ollama/webui were both empty on the target while the
+        # ISO carried 3.3G of payload, and ai-webui.log said "no Whisper
+        # weights in the darksite". Same failure the comment above describes,
+        # re-triggered by making the weights optional.
+        if [[ -d /root/darksite/ollama ]]; then
             mkdir -p "${darksite_tgt}/ollama"
             rsync -a --exclude='*.lock' /root/darksite/ollama/ "${darksite_tgt}/ollama/"
             k_log "Ollama darksite installed to target: $(du -sh "${darksite_tgt}/ollama" 2>/dev/null | cut -f1)"
