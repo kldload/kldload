@@ -1,5 +1,69 @@
 # Changelog
 
+## 1.4.1 — 18 August 2026
+
+A same-day follow-up to 1.4.0. Every fix here was found by installing 1.4.0 on
+real hardware and using it, and each was verified on that machine before it was
+written down.
+
+---
+
+### The installer's icons were blank on every installed system
+
+The distribution and profile cards are drawn with emoji, and the ISO build
+installs an emoji font for the **live** medium only — nothing ever installed one
+on the target. So the installer looked right while you were installing and wrong
+on the machine you had just installed. One glyph rendered (FreeBSD's, which
+DejaVu happens to carry) and five did not.
+
+Now installed on every target: `fonts-noto-color-emoji` (apt),
+`google-noto-color-emoji-fonts` (dnf), `noto-fonts-emoji` (pacman).
+
+### Clones shared the golden's identity
+
+`virt-clone --preserve-data` remaps only the first disk, so the golden's
+cloud-init seed cdrom was carried into every clone by reference. All of them
+booted the golden's user-data and came up answering to its hostname, which is
+why they never registered as separate peers on the mesh.
+
+Each clone is now given its own seed — its own hostname and a fresh
+instance-id — before it is started. Reusing the instance-id makes cloud-init
+treat the run as already done and skip it, so both had to change.
+
+### Clones also shared its console log
+
+The same by-reference problem, one device along. libvirt holds that log open
+for the life of the guest, so the first clone to start owned it and every other
+one failed with `Device or resource busy` — reported to the operator as
+"failed to start". Starting them one at a time does not help; the lock is held
+for as long as the guest runs.
+
+### The guest agent was never installed
+
+Every domain has carried the virtio guest-agent channel since it was added, and
+nothing ever installed the guest half — a channel with nothing on the other end.
+On a host with eleven guests libvirtd logged "Guest agent is not responding"
+1,863 times in ten minutes, and the estate fell back to DHCP leases for
+addresses it should have been able to ask the guest for.
+
+### Picking a desktop silently built a server
+
+Selecting a row in the image list reset the desktop choice to "none" on every
+selection. "none" is a valid answer, so the build went ahead and produced
+headless machines with nothing anywhere saying why. Three "Fedora GNOME
+desktops" came up as three Fedora servers.
+
+### Also
+
+- `kvm-delete` undefined the domain *before* attempting the zvol destroy, so a
+  golden with clones left the VM deleted and its storage orphaned. It now
+  refuses up front and names the clones.
+- Dock pins are filtered to applications that exist on the target. The list
+  pins four browsers deliberately; every target also kept the ones it does not
+  have as dead entries.
+- The squashfs step accepts `KLDLOAD_BUILD_PROCESSORS` so a build can leave the
+  machine usable.
+
 ## 1.4.0 — 17 August 2026
 
 369 commits since 1.3.1: 106 features, 179 fixes, 389 files changed.
