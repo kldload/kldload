@@ -614,46 +614,25 @@ EOFSTAB
     # whenever SB is intended; ZBM stays reachable with ESC. SB-off installs
     # (intent=0) keep ZBM as the default boot-env picker.
     #
-    # Read the ACTUAL firmware state, not the installer's intent flag. The
-    # comment above has always described firmware state, but the code tested
-    # KLDLOAD_ENABLE_SECURE_BOOT, which DEFAULTS TO 1 — so an operator who left
-    # Secure Boot OFF in firmware and simply never touched the installer's
-    # Secure Boot option still got `direct` and never saw the boot-env picker.
-    # Reported as "didn't see any zfsbm" on 2026-08-15, and again on
-    # 2026-08-18 with Secure Boot confirmed off in firmware.
+    # KEYS ON INTENT, NOT FIRMWARE STATE — and that is deliberate.
     #
-    # ZBM chainloads correctly when SB is inactive, which is exactly when it is
-    # meant to be the default. Intent decides whether the MOK/signing chain is
-    # built; it must not decide what boots.
+    # Reading mokutil --sb-state here looks obviously right and is wrong. The
+    # normal flow is install with SB intent, then enable SB and enroll the MOK
+    # in firmware AFTERWARDS, so firmware SB is commonly OFF during the
+    # install. A firmware check therefore bakes default=zbm and the machine
+    # breaks the moment SB is switched on: ZBM cannot load a kernel under
+    # Secure Boot (SBAT gap), and fallback=direct cannot rescue it because the
+    # chainload SUCCEEDS — the failure happens inside ZBM after grub has
+    # handed off. Confirmed on hardware 2026-07-24, and re-introduced by
+    # mistake on 2026-08-18 before this note was expanded.
+    #
+    # `direct` boots with SB and without it, so it is the safe default
+    # whenever SB is intended. Operators who are not using Secure Boot untick
+    # the Secure Boot card in the installer and get ZBM as the default
+    # boot-environment picker; ZBM also stays reachable from the 5s menu.
     local _grub_default="zbm"
-    local _sb_state="unknown"
-    if command -v mokutil >/dev/null 2>&1; then
-        case "$(mokutil --sb-state 2>/dev/null)" in
-        *[Ee]nabled*) _sb_state="on" ;;
-        # "disabled", and also firmware with no Secure Boot support at all —
-        # both mean SB is not active, so ZBM chainloads and is the right default.
-        *[Dd]isabled* | *"not supported"* | *"doesn't support"*) _sb_state="off" ;;
-        esac
-    fi
-    if [[ "$_sb_state" == "unknown" ]]; then
-        # efivar fallback: the 5th byte of SecureBoot-<guid> is 1 when active.
-        local _sbvar
-        _sbvar="$(find /sys/firmware/efi/efivars -maxdepth 1 -name 'SecureBoot-*' 2>/dev/null | head -1)"
-        if [[ -n "$_sbvar" ]]; then
-            case "$(od -An -t u1 "$_sbvar" 2>/dev/null | awk '{print $5}')" in
-            1) _sb_state="on" ;;
-            0) _sb_state="off" ;;
-            esac
-        fi
-    fi
-    case "$_sb_state" in
-    on) _grub_default="direct" ;;
-    off) _grub_default="zbm" ;;
-    # Firmware unreadable — fall back to the operator's intent, which is the
-    # old behaviour and errs toward the chain that boots either way.
-    *) [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] && _grub_default="direct" ;;
-    esac
-    k_log "GRUB default entry: ${_grub_default} (firmware Secure Boot: ${_sb_state})"
+    [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] && _grub_default="direct"
+    k_log "GRUB default entry: ${_grub_default} (Secure Boot intent: ${KLDLOAD_ENABLE_SECURE_BOOT:-1})"
 
     # Kernel args for the `direct` entry differ for ENCRYPTED installs: the
     # passphrase prompt raised by the initramfs (dracut 90zfs / distro zfs hook)
