@@ -613,8 +613,47 @@ EOFSTAB
     # kernel) boots under SB AND without it, so it is the correct default
     # whenever SB is intended; ZBM stays reachable with ESC. SB-off installs
     # (intent=0) keep ZBM as the default boot-env picker.
+    #
+    # Read the ACTUAL firmware state, not the installer's intent flag. The
+    # comment above has always described firmware state, but the code tested
+    # KLDLOAD_ENABLE_SECURE_BOOT, which DEFAULTS TO 1 — so an operator who left
+    # Secure Boot OFF in firmware and simply never touched the installer's
+    # Secure Boot option still got `direct` and never saw the boot-env picker.
+    # Reported as "didn't see any zfsbm" on 2026-08-15, and again on
+    # 2026-08-18 with Secure Boot confirmed off in firmware.
+    #
+    # ZBM chainloads correctly when SB is inactive, which is exactly when it is
+    # meant to be the default. Intent decides whether the MOK/signing chain is
+    # built; it must not decide what boots.
     local _grub_default="zbm"
-    [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] && _grub_default="direct"
+    local _sb_state="unknown"
+    if command -v mokutil >/dev/null 2>&1; then
+        case "$(mokutil --sb-state 2>/dev/null)" in
+        *[Ee]nabled*) _sb_state="on" ;;
+        # "disabled", and also firmware with no Secure Boot support at all —
+        # both mean SB is not active, so ZBM chainloads and is the right default.
+        *[Dd]isabled* | *"not supported"* | *"doesn't support"*) _sb_state="off" ;;
+        esac
+    fi
+    if [[ "$_sb_state" == "unknown" ]]; then
+        # efivar fallback: the 5th byte of SecureBoot-<guid> is 1 when active.
+        local _sbvar
+        _sbvar="$(find /sys/firmware/efi/efivars -maxdepth 1 -name 'SecureBoot-*' 2>/dev/null | head -1)"
+        if [[ -n "$_sbvar" ]]; then
+            case "$(od -An -t u1 "$_sbvar" 2>/dev/null | awk '{print $5}')" in
+            1) _sb_state="on" ;;
+            0) _sb_state="off" ;;
+            esac
+        fi
+    fi
+    case "$_sb_state" in
+    on) _grub_default="direct" ;;
+    off) _grub_default="zbm" ;;
+    # Firmware unreadable — fall back to the operator's intent, which is the
+    # old behaviour and errs toward the chain that boots either way.
+    *) [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]] && _grub_default="direct" ;;
+    esac
+    k_log "GRUB default entry: ${_grub_default} (firmware Secure Boot: ${_sb_state})"
 
     # Kernel args for the `direct` entry differ for ENCRYPTED installs: the
     # passphrase prompt raised by the initramfs (dracut 90zfs / distro zfs hook)
