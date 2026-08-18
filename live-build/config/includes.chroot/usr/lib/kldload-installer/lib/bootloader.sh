@@ -661,17 +661,30 @@ EOFSTAB
     # machine booted with /sys/class/drm holding only `version`: no card, no
     # display, lightdm "active" with nothing to draw on. The operator saw a
     # dead desktop; every log line claimed the driver was installed.
+    #
+    # The UNKNOWN case must fail toward keeping a display. An earlier version of
+    # this guard put the blacklist in the else branch, so a missing
+    # _k_nvidia_will_load (lib load order changing) silently restored the very
+    # bug being fixed. Blacklisting on no information risks a black screen;
+    # not blacklisting costs NVIDIA one extra reboot, because kldload-firstboot
+    # applies the blacklist itself once nvidia.ko actually exists.
     if lspci 2>/dev/null | grep -qiE 'vga.*nvidia|3d.*nvidia'; then
-        if declare -F _k_nvidia_will_load >/dev/null 2>&1 &&
-            ! _k_nvidia_will_load "${target}"; then
+        _nv_will_load=0
+        if declare -F _k_nvidia_will_load >/dev/null 2>&1; then
+            _k_nvidia_will_load "${target}" && _nv_will_load=1
+        else
+            k_log "WARNING: _k_nvidia_will_load unavailable — not blacklisting nouveau (fail-safe)"
+        fi
+        if [[ "$_nv_will_load" == "1" ]]; then
+            _direct_bootargs+=" rd.driver.blacklist=nouveau,nova_core"
+            _direct_bootargs+=" modprobe.blacklist=nouveau,nova_core nvidia-drm.modeset=1"
+        else
             k_log "NVIDIA GPU present but NO driver installed — not blacklisting nouveau"
             k_log "  Blacklisting it without nvidia.ko would leave this machine with no display"
             k_log "  driver at all. nouveau stays enabled; kldload-firstboot adds the blacklist"
             k_log "  once a driver is really present."
-        else
-            _direct_bootargs+=" rd.driver.blacklist=nouveau,nova_core"
-            _direct_bootargs+=" modprobe.blacklist=nouveau,nova_core nvidia-drm.modeset=1"
         fi
+        unset _nv_will_load
     fi
 
     # Cap the ARC on the COMMAND LINE, not only in /etc/modprobe.d.
