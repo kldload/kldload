@@ -3135,7 +3135,28 @@ NMCONF
         # nothing offline regresses here. Mirroring these into the darksite is
         # tracked separately.
         local _cuda_repo="https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64"
-        if [[ "$distro" == "debian" ]] &&
+
+        # ── Try the LOCAL mirror first ───────────────────────────────────────
+        #
+        # The darksite carries nvidia-open and nvidia-kernel-open-dkms in the
+        # same flat pocket as everything else, so on the offline path this
+        # succeeds with no keyring and no vendor repo at all.
+        #
+        # WHY THIS COMES FIRST: the whole driver install used to sit behind a
+        # curl to NVIDIA's repo, so an air-gapped machine skipped a driver that
+        # was sitting in its own mirror — the packages shipped on the ISO and
+        # were never installed. Mirroring them is only half the fix; the
+        # installer has to be willing to use them (2026-08-18).
+        local _nv_from_mirror=0
+        if DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" \
+            apt-get install -y nvidia-open >>"$log" 2>&1; then
+            k_log_to "$log" "NVIDIA: installed nvidia-open from the local darksite mirror (no internet needed)"
+            _nv_from_mirror=1
+        fi
+
+        if [[ "$_nv_from_mirror" == "1" ]]; then
+            : # already installed from the mirror; nothing to fetch
+        elif [[ "$distro" == "debian" ]] &&
             k_in_chroot "${target}" bash -c "curl -fsSL -o /tmp/cuda-keyring.deb ${_cuda_repo}/cuda-keyring_1.1-1_all.deb" >>"$log" 2>&1 &&
             k_in_chroot "${target}" dpkg -i /tmp/cuda-keyring.deb >>"$log" 2>&1; then
             DEBIAN_FRONTEND=noninteractive k_in_chroot "${target}" apt-get update -qq >>"$log" 2>&1 || true
