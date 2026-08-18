@@ -43,6 +43,16 @@ k_profile_packages() {
     local _fastfetch="fastfetch"
     [[ "$_distro" == "ubuntu" ]] && _fastfetch=""
 
+    # The ai profile builds Python wheels (needs a C++ toolchain) and captures
+    # audio (needs the PipeWire CLI tools). Both are named differently on RPM
+    # and Debian substrates, and the generic ai) arm below is reached by BOTH
+    # families, so a single hardcoded name is always wrong on one of them.
+    # Verified against Debian trixie and Fedora 44, 2026-08-18.
+    local _cxx="g++" _pw_utils="pipewire-bin"
+    case "$_distro" in
+    fedora | centos | rocky | rhel) _cxx="gcc-c++" _pw_utils="pipewire-utils" ;;
+    esac
+
     # Alpine Linux — core profile only (Alpine is a musl-based distro that lacks
     # the glibc ecosystem needed by GNOME, sanoid, k* tools, etc.)
     if [[ "$_distro" == "alpine" ]]; then
@@ -91,7 +101,7 @@ k_profile_packages() {
             ;;
         ai)
             echo "openssh sudo curl ca-certificates vim less iproute2 chrony nftables \
-          wireguard-tools tmux python python-pip jq htopfzf bat eza fd ripgrep zoxide podman fastfetch \
+          wireguard-tools tmux python python-pip jq htop fzf bat eza fd ripgrep zoxide podman fastfetch \
           zstd cloud-init qemu-guest-agent \
           python-websockets python-yaml net-tools ethtool tcpdump \
           pipewire cmake gcc make git"
@@ -373,10 +383,10 @@ k_profile_packages() {
     ai)
         # AI learning tool — core + WireGuard + Python + tmux + modern CLI. Ollama on firstboot.
         echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
-        wireguard-tools tmux python3 python3-pip jq htopfzf bat eza fd-find ripgrep zoxide ${_fastfetch} \
+        wireguard-tools tmux python3 python3-pip jq htop fzf bat eza fd-find ripgrep zoxide ${_fastfetch} \
         sanoid cloud-init qemu-guest-agent qemu-utils eject zstd \
         python3-websockets python3-yaml net-tools ethtool tcpdump \
-        alsa-utils pipewire pipewire-utils cmake gcc-c++ make git podman"
+        alsa-utils pipewire ${_pw_utils} cmake ${_cxx} make git podman"
         ;;
 
     *)
