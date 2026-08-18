@@ -2903,47 +2903,58 @@ if [[ "$EDITION" != "core" ]]; then
         log "No Fedora darksite found — Fedora installs will require internet"
     fi
 
-    # Copy Ollama model darksite (llama3.1:8b + Bob personality) into rootfs.
-    # Ollama darksite is OPT-IN — the ISO defaults to no baked-in model,
-    # which keeps it at ~8 GB instead of ~17 GB. First boot with Bob
-    # enabled pulls from ollama.com (internet required). Users who want
-    # offline AI set KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1 on deploy.sh and
-    # the ~9 GB model tree gets baked in. Users who want BYOM drop the
-    # tree into /root/darksite/ollama/models/ on the target before first
-    # boot — kldload-firstboot honours it either way.
-    if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" == "1" ]] && [[ -d /build/live-build/darksite-ollama-cache/models ]]; then
-        mkdir -p "${ROOTFS}/root/darksite/ollama"
-        cp -r /build/live-build/darksite-ollama-cache/models "${ROOTFS}/root/darksite/ollama/"
-        # The runtime travels with the weights or neither is any use: a model
-        # tree on a machine that cannot install ollama offline is 2 GB of
-        # nothing. Absent runtime is FATAL rather than a warning, because the
-        # failure would only surface at first boot on the operator's hardware.
-        if [[ -f /build/live-build/darksite-ollama-cache/runtime/ollama-linux-amd64.tar.zst ]]; then
-            mkdir -p "${ROOTFS}/root/darksite/ollama/runtime"
-            cp /build/live-build/darksite-ollama-cache/runtime/ollama-linux-amd64.tar.zst \
-                "${ROOTFS}/root/darksite/ollama/runtime/"
-        else
-            die "Ollama darksite requested but the runtime tarball is missing — weights without a runtime cannot come up offline"
-        fi
-        # The interface travels with the engine, for the same reason the
-        # runtime travels with the weights. An engine and 2 GB of weights
-        # with nothing to talk to them is a machine where "local AI" means
-        # a command line, which is not what the desktop tile promises.
-        # WARN, not die: the engine alone is still usable from the CLI, and
-        # an ISO built before the webui cache existed should not be blocked
-        # from building — but the log has to say so plainly.
-        if [[ -s /build/live-build/darksite-ollama-cache/webui/open-webui.oci.tar ]]; then
-            mkdir -p "${ROOTFS}/root/darksite/ollama/webui"
-            cp -r /build/live-build/darksite-ollama-cache/webui/. \
-                "${ROOTFS}/root/darksite/ollama/webui/"
-            log "Open WebUI image + Whisper weights copied: $(du -sh "${ROOTFS}/root/darksite/ollama/webui" 2>/dev/null | cut -f1)"
-        else
-            log "WARNING: no Open WebUI image in the darksite cache — the target gets the Ollama engine and CLI only, and the desktop tile will have no interface. Re-run deploy.sh build-ollama-darksite."
-        fi
-        log "Ollama darksite copied to rootfs: $(du -sh "${ROOTFS}/root/darksite/ollama" 2>/dev/null | cut -f1)"
+    # ── Ollama: the ENGINE and INTERFACE always; the MODEL only on request ──
+    #
+    # The shipped default is "Ollama + Open WebUI installed and running, empty
+    # model picker" — the operator chooses a model from the picker, pulls one
+    # by name, or copies a tree in from their own darksite.
+    #
+    # That promise only holds OFFLINE if the engine and the interface are on
+    # the ISO. They used to sit behind KLDLOAD_INCLUDE_OLLAMA_DARKSITE together
+    # with the weights, so an air-gapped install got no AI at all — the runtime
+    # was fetched from ollama.com and the interface pulled as an OCI image,
+    # both impossible with no network. "No model" quietly became "no AI".
+    #
+    # Size is why the split is worth it: runtime 1.4G + interface 2.0G is the
+    # working stack, while the weights are 2.2G of opinion about which model
+    # someone wants. Baking the first two and not the third keeps the ISO well
+    # under the published 18.4 GB while making offline AI actually work.
+    # (2026-08-18)
+    mkdir -p "${ROOTFS}/root/darksite/ollama"
+
+    if [[ -f /build/live-build/darksite-ollama-cache/runtime/ollama-linux-amd64.tar.zst ]]; then
+        mkdir -p "${ROOTFS}/root/darksite/ollama/runtime"
+        cp /build/live-build/darksite-ollama-cache/runtime/ollama-linux-amd64.tar.zst \
+            "${ROOTFS}/root/darksite/ollama/runtime/"
+        log "Ollama runtime baked in: $(du -sh "${ROOTFS}/root/darksite/ollama/runtime" 2>/dev/null | cut -f1)"
     else
-        log "Ollama darksite NOT baked in (opt-in via KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1). Bob pulls model at firstboot (internet required)."
+        log "WARNING: no Ollama runtime in the darksite cache — an OFFLINE install will have no AI engine"
+        log "         (build it with: ./deploy.sh build-ollama-darksite)"
     fi
+
+    if [[ -s /build/live-build/darksite-ollama-cache/webui/open-webui.oci.tar ]]; then
+        mkdir -p "${ROOTFS}/root/darksite/ollama/webui"
+        cp -r /build/live-build/darksite-ollama-cache/webui/. \
+            "${ROOTFS}/root/darksite/ollama/webui/"
+        log "Open WebUI image + Whisper weights baked in: $(du -sh "${ROOTFS}/root/darksite/ollama/webui" 2>/dev/null | cut -f1)"
+    else
+        log "WARNING: no Open WebUI image in the darksite cache — an OFFLINE install gets the Ollama CLI only"
+    fi
+
+    # Weights stay opt-in. This is the only part that is genuinely a choice
+    # about someone else's model, and the only part that costs multiple GB.
+    if [[ "${KLDLOAD_INCLUDE_OLLAMA_DARKSITE:-0}" == "1" ]] && [[ -d /build/live-build/darksite-ollama-cache/models ]]; then
+        # Weights without a runtime cannot come up offline, and the failure
+        # would only surface at first boot on the operator's hardware.
+        if [[ ! -f "${ROOTFS}/root/darksite/ollama/runtime/ollama-linux-amd64.tar.zst" ]]; then
+            die "Ollama weights requested but the runtime tarball is missing — weights without a runtime cannot come up offline"
+        fi
+        cp -r /build/live-build/darksite-ollama-cache/models "${ROOTFS}/root/darksite/ollama/"
+        log "Ollama MODEL weights baked in (opt-in): $(du -sh "${ROOTFS}/root/darksite/ollama/models" 2>/dev/null | cut -f1)"
+    else
+        log "Ollama model weights NOT baked in (opt-in via KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1) — engine + interface ship ready, picker starts empty"
+    fi
+    log "Ollama darksite total: $(du -sh "${ROOTFS}/root/darksite/ollama" 2>/dev/null | cut -f1)"
 
     # Copy Alpine darksite apk cache into the rootfs
     if [[ -d /build/live-build/darksite-alpine-cache/apk ]]; then

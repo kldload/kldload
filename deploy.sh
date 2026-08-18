@@ -620,7 +620,24 @@ cmd_build() {
                 log "Ollama darksite cached: $(du -sh "$ollama_darksite" | cut -f1)"
             fi
         else
-            log "Skipping Ollama darksite (KLDLOAD_INCLUDE_OLLAMA_DARKSITE=0) — the target will DOWNLOAD its model on first boot"
+            # The ENGINE and INTERFACE ship even when the weights do not, so an
+            # offline install lands a working Ollama + Open WebUI with an empty
+            # model picker rather than no AI at all. Only the model tree is
+            # opt-in — it is the multi-GB part and the only part that is an
+            # opinion about which model someone wants.
+            #
+            # Building the cache here also pulls the weights; they simply are
+            # not copied into the ISO. The cache lives on the build host, the
+            # size that matters is the ISO's.
+            local ollama_darksite="$ROOT/live-build/darksite-ollama-cache"
+            if [[ ! -f "$ollama_darksite/runtime/ollama-linux-amd64.tar.zst" ]] ||
+                [[ ! -s "$ollama_darksite/webui/open-webui.oci.tar" ]]; then
+                log "Ollama engine/interface not cached — building them (weights cached but NOT baked into the ISO)"
+                cmd_build_ollama_darksite
+            else
+                log "Ollama engine + interface cached: runtime $(du -sh "$ollama_darksite/runtime" 2>/dev/null | cut -f1), webui $(du -sh "$ollama_darksite/webui" 2>/dev/null | cut -f1)"
+            fi
+            log "Ollama model weights NOT baked in (opt-in via KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1) — picker starts empty"
         fi
 
         # Arch has no darksite — rolling release, not worth caching.
