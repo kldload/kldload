@@ -269,8 +269,19 @@ DARKSITE_BLACKLIST=(
     fluidr3mono-gm-soundfont opl3-soundfont timgm6mb-soundfont
     enlightenment-data libelementary-data mate-backgrounds
     breeze-wallpaper lxqt-themes lomiri-sounds lomiri-wallpapers-16.04
-    chromium chromium-common snapd
+    snapd
 )
+
+# WHY chromium is NOT here any more: it arrived in this list with the darksite
+# itself, lumped in with soundfonts and wallpapers as a bulk size-saver, back
+# when the desktop shipped Firefox. The desktop profile now asks for chromium
+# by name on Debian (_browser), and the per-tool dock launchers depend on a
+# Chromium-family browser — `--class` sets the Wayland app_id and the
+# /app/<tool> paths need chrome-app mode, neither of which Firefox offers.
+# Blacklisting it meant the installer asked for a browser the mirror stripped,
+# so an offline desktop install got no browser at all and the failure was
+# invisible: the retry loop logged "not available - skipping" and moved on.
+# (2026-08-18)
 
 if [[ "${#DARKSITE_BLACKLIST[@]}" -gt 0 ]]; then
     declare -A _bl
@@ -281,6 +292,25 @@ if [[ "${#DARKSITE_BLACKLIST[@]}" -gt 0 ]]; then
     done
     log "Removed $((${#CLOSURE[@]} - ${#_filtered[@]})) blacklisted packages"
     CLOSURE=("${_filtered[@]}")
+fi
+
+# ─── Gate: never blacklist something the installer asks for ──────────────────
+#
+# These two lists are edited by different people for different reasons, and
+# until now nothing compared them. chromium sat in the blacklist while the
+# desktop profile asked for it by name, so every offline Debian desktop
+# install came up with no browser — and said nothing, because a stripped
+# package is indistinguishable from one that was never wanted.
+if [[ "${#INSTALLER_PKGS[@]}" -gt 0 && "${#DARKSITE_BLACKLIST[@]}" -gt 0 ]]; then
+    declare -a _contradictions=()
+    while read -r _p; do
+        [[ -n "${_bl[$_p]:-}" ]] && _contradictions+=("$_p")
+    done < <(printf '%s\n' "${INSTALLER_PKGS[@]}" | LC_ALL=C sort -u)
+    if [[ "${#_contradictions[@]}" -gt 0 ]]; then
+        log "FATAL: the installer asks for packages this mirror blacklists:"
+        for _p in "${_contradictions[@]}"; do log "         ${_p}"; done
+        die "drop it from DARKSITE_BLACKLIST, or stop installing it in lib/profiles.sh"
+    fi
 fi
 
 # Evict stale stable-pocket copies of the backports-pinned packages.
