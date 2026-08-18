@@ -888,6 +888,44 @@ k_bootstrap_base() {
     esac
 }
 
+# _k_nvidia_will_load — will this target actually have an nvidia module at boot?
+#
+# Args:    $1 — the target root.
+# Returns: 0 when nvidia.ko is already present, or when a package that builds
+#          it during boot #1 is installed (akmods on Fedora, DKMS elsewhere).
+#          1 when nothing will ever provide it.
+#
+# WHY THIS EXISTS: the nouveau blacklist below is what makes NVIDIA bind on the
+# first boot, and it was applied on NVIDIA hardware unconditionally — including
+# when no driver installed at all. That combination removes the only remaining
+# display driver and the machine boots with no graphics whatsoever.
+#
+# HISTORY: 2026-08-18, RTX 3080, offline install. NVIDIA's vendor repo was
+# unreachable, Debian's driver cannot build on the backports kernel, and the
+# blacklist went on anyway: /sys/class/drm held only `version` — no card at
+# all — while lightdm sat "active" with nothing to draw on. The in-code claim
+# that blocking nouveau without nvidia.ko "is NOT a black screen … boots on the
+# basic framebuffer" did not hold on this hardware.
+#
+# Callers must treat a non-zero return as "leave nouveau alone" — a slow
+# software-rendered desktop is recoverable, no display driver is not.
+_k_nvidia_will_load() {
+    local target="${1:?}"
+    # Already built into the target (DKMS ran in the chroot, or prebuilt).
+    compgen -G "${target}/lib/modules/"*"/updates/dkms/nvidia"*.ko* >/dev/null 2>&1 && return 0
+    compgen -G "${target}/usr/lib/modules/"*"/extra/nvidia"*.ko* >/dev/null 2>&1 && return 0
+    compgen -G "${target}/lib/modules/"*"/extra/nvidia"*.ko* >/dev/null 2>&1 && return 0
+    # Or a source package that builds it during boot #1. rpm on a .deb target
+    # (and dpkg on an RPM one) simply fails and falls through — that is the
+    # cheapest way to ask "did anything land" without branching on distro.
+    local _p
+    for _p in akmod-nvidia kmod-nvidia-open-dkms nvidia-open nvidia-kernel-dkms nvidia-driver; do
+        chroot "${target}" rpm -q "$_p" >/dev/null 2>&1 && return 0
+        chroot "${target}" dpkg -s "$_p" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
 _k_bootstrap_dnf() {
     local target="${KLDLOAD_TARGET:?}"
     local release="${KLDLOAD_RELEASE:-10}"
@@ -2696,7 +2734,11 @@ NOUVEAU
             # The firstboot catch-all re-asserts this if the install ever didn't. Set on
             # the ROOT parent so every BE inherits it; ZFS property, not a bootloader
             # binary — BE/snapshot-safe and reversible.
-            if zfs list rpool/ROOT >/dev/null 2>&1; then
+            if zfs list rpool/ROOT >/dev/null 2>&1 && ! _k_nvidia_will_load "${target}"; then
+                k_log_to "$log" "  NOT blacklisting nouveau: no NVIDIA driver installed and nothing will build one."
+                k_log_to "$log" "  Blacklisting it with no nvidia.ko leaves the machine with NO display driver at all."
+                k_log_to "$log" "  nouveau stays enabled; kldload-firstboot blacklists it once a driver is actually present."
+            elif zfs list rpool/ROOT >/dev/null 2>&1; then
                 _zbm_cl="$(zfs get -H -o value org.zfsbootmenu:commandline rpool/ROOT 2>/dev/null)"
                 if [[ "$_zbm_cl" != *blacklist=nouveau* ]]; then
                     if zfs set org.zfsbootmenu:commandline="${_zbm_cl} rd.driver.blacklist=nouveau,nova_core modprobe.blacklist=nouveau,nova_core nvidia-drm.modeset=1" rpool/ROOT 2>>"$log"; then
@@ -2761,7 +2803,13 @@ CUDAREPO
         # 2026-06-16). Setting it here for all distros makes NVIDIA bind on the
         # FIRST boot everywhere. Idempotent guard; ROOT parent so every BE
         # inherits; ZFS property = BE/snapshot-safe + reversible.
-        if zfs list rpool/ROOT >/dev/null 2>&1; then
+        if zfs list rpool/ROOT >/dev/null 2>&1 && ! _k_nvidia_will_load "${target}"; then
+            k_log_to "$log" "  NOT blacklisting nouveau: no NVIDIA driver installed and nothing will build one."
+            k_log_to "$log" "  Blacklisting it with no nvidia.ko leaves the machine with NO display driver at all"
+            k_log_to "$log" "  (RTX 3080, offline install, 2026-08-18: /sys/class/drm had no card and the desktop"
+            k_log_to "$log" "  never drew). nouveau stays enabled so the console works; kldload-firstboot applies the"
+            k_log_to "$log" "  blacklist once nvidia.ko actually exists."
+        elif zfs list rpool/ROOT >/dev/null 2>&1; then
             local _zbm_cl_u
             _zbm_cl_u="$(zfs get -H -o value org.zfsbootmenu:commandline rpool/ROOT 2>/dev/null)"
             if [[ "$_zbm_cl_u" != *blacklist=nouveau* ]]; then
@@ -2838,7 +2886,15 @@ CUDAREPO
         fi
         # Generate CDI spec for container GPU access
         chroot "${target}" bash -c 'nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' 2>/dev/null || true
-        k_log_to "$log" "NVIDIA drivers + container toolkit installed"
+        # Report the OUTCOME. This said "installed" unconditionally, after both
+        # the vendor repo and the fallback had failed (2026-08-18).
+        if _k_nvidia_will_load "${target}"; then
+            k_log_to "$log" "NVIDIA drivers + container toolkit installed"
+        else
+            k_log_to "$log" "WARNING: NVIDIA driver NOT installed — nothing will provide nvidia.ko at boot."
+            k_log_to "$log" "         nouveau has been left enabled so this machine still has a display."
+            k_log_to "$log" "         kldload-firstboot re-attempts the install when a network is available."
+        fi
     fi
 
     # BCC tools: symlink into PATH (installed to /usr/share/bcc/tools/ on RPM distros)
@@ -3126,7 +3182,12 @@ NMCONF
             k_log_to "$log" "NVIDIA: removed the temporary Debian mirror line (sources.list already covers non-free)"
         fi
 
-        k_log_to "$log" "NVIDIA drivers + container toolkit installed (Debian/Ubuntu)"
+        if _k_nvidia_will_load "${target}"; then
+            k_log_to "$log" "NVIDIA drivers + container toolkit installed (Debian/Ubuntu)"
+        else
+            k_log_to "$log" "WARNING: NVIDIA driver NOT installed (Debian/Ubuntu) — nothing will provide nvidia.ko."
+            k_log_to "$log" "         nouveau left enabled so the machine still has a display; firstboot re-attempts."
+        fi
     fi
 
     # WireGuard config — only when user selected WireGuard in web UI
