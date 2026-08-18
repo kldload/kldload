@@ -599,7 +599,25 @@ k_storage_zfs_install() {
     k_zfs_log "host=${KLDLOAD_HOSTNAME}"
     k_zfs_log "encrypt=${KLDLOAD_ZFS_ENCRYPT}"
 
-    modprobe zfs
+    # ZFS is normally ALREADY usable on the live image — the module is built
+    # into the live kernel, or dracut loaded it to find the pool. A bare
+    # `modprobe zfs` then prints
+    #     modprobe: FATAL: Module zfs not found in directory /lib/modules/<kver>
+    # to the console, near the top of every install, naming the LIVE kernel
+    # (7.0.14-201.fc44) rather than the target's. It is not a failure: zpool
+    # works in the very next line, the pool gets created, and the installed
+    # system has ZFS. It was reported as a critical error twice on 2026-08-18,
+    # which is the whole cost of it — an operator cannot tell a real fault
+    # from this one.
+    #
+    # So ask whether ZFS WORKS, and only try to load it when it does not.
+    if zpool --version >/dev/null 2>&1; then
+        k_zfs_log "zfs already usable: $(zpool --version 2>/dev/null | head -1)"
+    else
+        k_zfs_log "zfs not yet usable — loading the module"
+        modprobe zfs >>"${KLDLOAD_ZFS_LOG}" 2>&1 ||
+            k_zfs_log "WARNING: modprobe zfs failed — the pool commands below will fail loudly if ZFS really is unusable"
+    fi
     zpool --version >>"${KLDLOAD_ZFS_LOG}" 2>&1 || true
 
     mkdir -p "${KLDLOAD_TARGET_MNT}"
