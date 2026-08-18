@@ -63,6 +63,19 @@ one view, with every peer no host declares called out.
 
 ![wgxplore estate view](screenshots/wgxplore-estate.png)
 
+**vmxplore — the VM estate.** Grouped by what the machines are for rather than
+by name, with the guest's own screen rendered in the console — no separate
+viewer. Disks are ZFS zvols, so a clone is instant and a rollback is one
+command.
+
+![vmxplore: the VM estate with a live guest screen](screenshots/vmxplore-estate.png)
+
+**ztxplore — the OpenZFS test lab.** Six distributions on zvols, each running
+the distro's *own* ZFS packages against its own kernel. Goldens are built once
+and cloned per run, and it reports what did not build as plainly as what did.
+
+![ztxplore: the OpenZFS test lab](screenshots/ztxplore-lab.png)
+
 **Kubernetes, HA by default.** Three control planes behind a kube-vip VIP;
 adding a node reconciles the mesh, etcd and the firewall everywhere else.
 
