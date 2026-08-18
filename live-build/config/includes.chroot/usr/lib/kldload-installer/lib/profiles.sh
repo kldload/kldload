@@ -3050,11 +3050,37 @@ StandardOutput=journal+console
 StandardError=journal+console
 TimeoutStartSec=7200
 
-[Install]
-WantedBy=multi-user.target
+# No [Install] section on purpose — a klab-firstboot.timer starts this
+# AFTER the boot has finished. Being WantedBy=multi-user.target made the
+# boot wait on it: Type=oneshot means "started" only once the process
+# exits, so multi-user.target — and therefore graphical.target — blocked
+# behind six cloud-image downloads and six VM builds, for up to
+# TimeoutStartSec. Measured 2026-08-18 on an RTX 3080 with a working
+# network: NVIDIA installed and bound, lightdm active, and still no
+# desktop, because job "klab-firstboot start running" held graphical.target
+# while it downloaded the CentOS cloud image. Golden images are a
+# background luxury; the desktop is the product.
 KLABFB
-        ln -sf /etc/systemd/system/klab-firstboot.service \
-            "${target}/etc/systemd/system/multi-user.target.wants/klab-firstboot.service" 2>/dev/null || true
+        # The timer, not the service, is what gets enabled. OnBootSec puts the
+        # work safely after the graphical session is up; Persistent=false
+        # because ConditionPathExists on the service already makes it once-only.
+        cat >"${target}/etc/systemd/system/klab-firstboot.timer" <<'KLABTIMER'
+[Unit]
+Description=klab — build golden images shortly after first boot
+Documentation=man:systemd.timer(5)
+
+[Timer]
+OnBootSec=3min
+AccuracySec=30s
+Unit=klab-firstboot.service
+
+[Install]
+WantedBy=timers.target
+KLABTIMER
+        ln -sf /etc/systemd/system/klab-firstboot.timer \
+            "${target}/etc/systemd/system/timers.target.wants/klab-firstboot.timer" 2>/dev/null || true
+        # Remove any boot-blocking enablement left by an earlier install.
+        rm -f "${target}/etc/systemd/system/multi-user.target.wants/klab-firstboot.service" 2>/dev/null || true
         k_log "klab will auto-build golden images on first boot (centos/rocky/fedora/debian/ubuntu/rhel — RHEL skipped if creds+image unavailable)"
 
         # Enable klab services: Prometheus exporter + Hubble relay (captures from second zero)
