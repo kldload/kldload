@@ -40,9 +40,11 @@ machine, for a box with no screen.
 
 ![Installer: target disk and identity](screenshots/installer-2-where.png)
 
-**Dashboard (first boot)**
+**First boot.** Nobody drives this part. The machine bootstraps Kubernetes,
+pulls the AI model and builds its golden images on its own, then tells you
+whether anything was flagged.
 
-![kldload Dashboard](screenshots/dashboard.png)
+![First boot: build phases complete, nothing flagged](screenshots/dashboard.png)
 
 ### What it looks like once it is up
 
