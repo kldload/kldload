@@ -664,8 +664,24 @@ EOFSTAB
     # For encrypted installs drop the splash and force the prompt onto tty1 +
     # serial so it's unmistakable. Plaintext installs keep the quiet splash.
     # HISTORY: 2026-07-26 encrypted-boot path audit.
+    #
+    # APPEND the console args, do not replace. This line used to assign, so an
+    # encrypted install lost `quiet` and was the only configuration that booted
+    # with full kernel log output — straight over the passphrase prompt.
+    #
+    # zfs-initramfs writes the prompt to /dev/console and then waits. With
+    # kernel messages still printing, the prompt scrolls away as soon as it
+    # appears, so the screen looks like log spam with no question on it.
+    # Pressing Enter submits an empty passphrase, zfs-initramfs re-prompts, and
+    # THAT copy is visible because the message storm has died down by then —
+    # which is exactly the reported behaviour: "it never displays the prompt
+    # unless you press enter", with corrupted output before it (2026-08-18).
+    #
+    # rhgb is a Fedora-ism and inert on Debian; `quiet` is the one that matters
+    # here, and it is precisely the flag the encrypted path was dropping.
     local _direct_bootargs="rhgb quiet"
-    [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]] && _direct_bootargs="$(k_console_args)"
+    [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]] &&
+        _direct_bootargs="rhgb quiet $(k_console_args)"
 
     # The GPU args have to be HERE as well as in the ZBM property, because
     # this entry is the one Secure Boot actually boots.
