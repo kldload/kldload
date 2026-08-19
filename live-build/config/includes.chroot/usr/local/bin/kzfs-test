@@ -541,19 +541,46 @@ systemctl restart sshd 2>/dev/null || true
 # booted the other. modprobe then found no module and the run scored zero
 # tests (fiend, 2026-08-17).
 #
-# kernel-devel and kernel-headers are deliberately NOT excluded: DKMS needs
-# them, and they do not change which kernel boots. kernel-devel-matched IS
-# excluded because it requires the matching kernel package and drags one in.
-for _p in kernel kernel-core kernel-modules kernel-modules-core \
-          kernel-modules-extra kernel-devel-matched; do
-    grep -q "^exclude=.*${_p}" /etc/dnf/dnf.conf 2>/dev/null && continue
-    if grep -q '^exclude=' /etc/dnf/dnf.conf 2>/dev/null; then
-        sed -i "s/^exclude=.*/&,${_p}/" /etc/dnf/dnf.conf
-    else
-        echo "exclude=${_p}" >> /etc/dnf/dnf.conf
-    fi
-done
-echo "kernel pinned to $(uname -r) for the duration of this build"
+# versionlock, NOT exclude. `exclude` tells dnf the package does not exist,
+# and that applies to dependency RESOLUTION as well as installation — including
+# against packages already on the system. versionlock pins the version while
+# leaving the package visible, which is what "pin the kernel" actually means.
+#
+# HISTORY: this used to exclude kernel-devel-matched too, reasoning that it
+# drags in a matching kernel. True on Fedora. Fatal on EL9, where
+# dkms-3.4.2 requires `(kernel-devel-matched if kernel-core)`: with both that
+# and kernel-core excluded, the INSTALLED kernel-core-5.14.0-737 could not
+# satisfy its own dependency, so dkms would not install, so zfs-dkms would not
+# install, and the golden came back with no ZFS module at all. The seal gate
+# caught it and refused — correctly — but every EL distro failed the same way
+# and burned an hour each doing it (fiend .129, 2026-08-19).
+if dnf install -y "dnf-command(versionlock)" >/dev/null 2>&1 ||
+    dnf install -y python3-dnf-plugin-versionlock >/dev/null 2>&1 ||
+    dnf install -y python3-dnf-plugins-extras-versionlock >/dev/null 2>&1; then
+    for _p in kernel kernel-core kernel-modules kernel-modules-core \
+        kernel-modules-extra; do
+        rpm -q "$_p" >/dev/null 2>&1 || continue
+        # Lock to exactly what is installed and running. Nothing is hidden, so
+        # kernel-devel/-matched still resolve against it.
+        dnf versionlock add "${_p}-$(uname -r)" >/dev/null 2>&1 ||
+            echo "  note: could not versionlock ${_p}"
+    done
+    echo "kernel versionlocked to $(uname -r) for the duration of this build"
+else
+    # No versionlock plugin: fall back to the old exclude, minus the entry that
+    # breaks EL. A stray kernel upgrade is recoverable; an unbuildable module
+    # is not.
+    for _p in kernel kernel-core kernel-modules kernel-modules-core \
+        kernel-modules-extra; do
+        grep -q "^exclude=.*${_p}" /etc/dnf/dnf.conf 2>/dev/null && continue
+        if grep -q '^exclude=' /etc/dnf/dnf.conf 2>/dev/null; then
+            sed -i "s/^exclude=.*/&,${_p}/" /etc/dnf/dnf.conf
+        else
+            echo "exclude=${_p}" >>/etc/dnf/dnf.conf
+        fi
+    done
+    echo "kernel pinned by exclude (no versionlock plugin) to $(uname -r)"
+fi
 
 dnf install -y epel-release 2>/dev/null || true
 
