@@ -912,6 +912,28 @@ _install_initramfs_zfs_key() {
     )
     chmod 0400 "$keyfile"
 
+    # PROVE the key is right before anything depends on it.
+    #
+    # `load-key -n` is a dry run: it checks the key unwraps the pool and loads
+    # nothing. Without this, a stale or mangled passphrase file produces an
+    # initramfs that fails at boot with
+    #
+    #   Key load error: Incorrect key provided for 'rpool'
+    #
+    # at the exact moment the operator can do least about it — and by then the
+    # plaintext is shredded, so it cannot be regenerated. Checking here costs
+    # nothing and turns an unbootable surprise into a log line.
+    local _encroot
+    _encroot="$(zfs get -H -o value encryptionroot / 2>/dev/null)"
+    [[ -z "$_encroot" || "$_encroot" == "-" ]] && _encroot=rpool
+    if ! zfs load-key -n -L "file://${keyfile}" "$_encroot" >>"$LOG" 2>&1; then
+        log "WARNING: the staged passphrase does not unlock ${_encroot} — NOT embedding it"
+        log "  the boot will keep asking twice, which is correct; a wrong key would fail instead"
+        rm -f "$keyfile"
+        return 0
+    fi
+    log "staged passphrase verified against ${_encroot}"
+
     cat >/etc/zfs/initramfs-tools-load-key.d/kldload <<'KEYHOOK'
 # Sourced by /usr/share/initramfs-tools/scripts/zfs with $ZFS and
 # $ENCRYPTIONROOT already set. Loading the key here is what keeps the boot to a
@@ -1022,10 +1044,6 @@ setup_zero_trust() {
         else
             log "WARNING: kldload-clevis-seal not installed — TPM auto-unlock NOT configured; ZFS will prompt for the passphrase at boot"
         fi
-        # Teach the initramfs the key BEFORE the plaintext goes away — this
-        # is the last moment it is available.
-        _install_initramfs_zfs_key "${passphrase_file}"
-
         # Shred the plaintext passphrase UNCONDITIONALLY — including when the
         # seal tool is absent. The old gate ([[ -f pass && -x seal ]]) skipped
         # this whole block when the tool was missing, leaving the plaintext
@@ -3667,6 +3685,17 @@ CHROMEPOL
         # /etc/kldload/zfs-passphrase was still present after firstboot on an
         # encrypted install.
         if [[ -f /etc/kldload/zfs-passphrase ]]; then
+            # Teach the initramfs the key BEFORE the plaintext goes away —
+            # this is the last moment it exists.
+            #
+            # It has to be HERE, next to the shred, for the same reason the
+            # shred is here: setup_zero_trust is the old "pro" path that this
+            # branch returns before ever reaching. Putting it there meant the
+            # hook was never installed on a single free install, and the
+            # machine kept asking twice with nothing in the log to say why
+            # (fiend .137, 2026-08-19) — the identical mistake this comment
+            # block was already written to warn about.
+            _install_initramfs_zfs_key /etc/kldload/zfs-passphrase
             shred -uz /etc/kldload/zfs-passphrase 2>/dev/null || rm -f /etc/kldload/zfs-passphrase
             log "Plaintext ZFS passphrase shredded"
         fi
