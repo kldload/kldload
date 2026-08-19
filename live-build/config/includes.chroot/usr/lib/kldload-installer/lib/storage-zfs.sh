@@ -535,8 +535,22 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     chmod 1777 "${KLDLOAD_TARGET_MNT}/tmp" || true
     chmod 1777 "${KLDLOAD_TARGET_MNT}/var/tmp" || true
 
-    # Set pool bootfs — ZFSBootMenu uses this to select the default BE
-    zpool set bootfs="${root_ds}" rpool || true
+    # Set pool bootfs — ZFSBootMenu uses this to select the default BE.
+    #
+    # VERIFY THE OUTCOME. This was `|| true`, which is the one swallow on the
+    # boot path that costs a bootable machine: without bootfs, ZBM has no
+    # default boot environment to select, and the failure would have been
+    # invisible until somebody watched the machine not boot.
+    #
+    # Not fatal — the pool and the BE both exist, and ZBM can still be driven
+    # by hand — so this reports loudly rather than aborting an otherwise
+    # complete install. Loud beats dead; both beat silent.
+    if zpool set bootfs="${root_ds}" rpool 2>>"${KLDLOAD_ZFS_LOG}"; then
+        k_zfs_log "bootfs set: ${root_ds}"
+    else
+        k_zfs_log "WARNING: could not set bootfs=${root_ds} on rpool — ZFSBootMenu will have no"
+        k_zfs_log "         default boot environment. Fix with: zpool set bootfs=${root_ds} rpool"
+    fi
 }
 
 # Add special vdev to rpool for metadata/small-block acceleration.

@@ -944,7 +944,98 @@ def check_docker_storage_driver():
                        "/etc/docker/daemon.json; systemctl start docker"))
 
 
+def check_zfs_bootfs():
+    """bootfs is what ZFSBootMenu picks as the default boot environment.
+
+    Without it ZBM lists boot environments but has no default to select, so
+    an unattended reboot stops at a menu. The installer used to set it with
+    `|| true`, which meant a failure here was invisible until somebody
+    watched the machine not boot (2026-08-19).
+    """
+    rc, out, _ = _run(["zpool", "get", "-H", "-o", "value", "bootfs", "rpool"])
+    if rc != 0:
+        return _result("boot", "bootfs set", "skip", "", "rpool not imported")
+    if out and out != "-":
+        return _result("boot", "bootfs set", "ok", "a boot environment", out,
+                       severity="critical")
+    return _result("boot", "bootfs set", "fail",
+                   "a boot environment", "unset",
+                   severity="critical",
+                   remediation="zpool set bootfs=rpool/ROOT/$(hostname) rpool")
+
+
+def check_audio_stack():
+    """PipeWire needs a user D-Bus; without one it fails at the queueing stage.
+
+    dbus-user-session ships /usr/lib/systemd/user/dbus.{socket,service}. When
+    it was missing, pipewire.socket failed with "Unit dbus.service not found",
+    pipewire and wireplumber never started, and the desktop had no audio at
+    all while the hardware sat there fully driven (2026-08-18).
+    """
+    if not _has("pactl"):
+        return _result("desktop", "audio sinks", "skip", "", "pactl absent")
+    rc, out, _ = _run(["pactl", "list", "short", "sinks"])
+    n = len([ln for ln in out.splitlines() if ln.strip()]) if rc == 0 else 0
+    if n > 0:
+        return _result("desktop", "audio sinks", "ok",
+                       "at least one sink", f"{n} sink(s)")
+    return _result("desktop", "audio sinks", "fail",
+                   "at least one sink", "none",
+                   severity="medium",
+                   remediation="apt-get install -y dbus-user-session; "
+                               "systemctl --user restart pipewire.socket")
+
+
+def check_dock_pins():
+    """Dock pins are the visible half of firstboot having actually run.
+
+    They are written near the end of a 3698-line script. When firstboot died
+    at line 55, everything after it silently did not happen, and an empty dock
+    was the first symptom anybody noticed (2026-08-19).
+    """
+    if not _has("gsettings"):
+        return _result("desktop", "dock pins", "skip", "", "gsettings absent")
+    rc, out, _ = _run(["gsettings", "get", "org.gnome.shell", "favorite-apps"])
+    if rc != 0:
+        return _result("desktop", "dock pins", "skip", "", "no GNOME schema")
+    n = out.count(".desktop")
+    if n > 0:
+        return _result("desktop", "dock pins", "ok", "kldload tools pinned",
+                       f"{n} pinned")
+    return _result("desktop", "dock pins", "fail",
+                   "kldload tools pinned", "dock is empty",
+                   severity="medium",
+                   remediation="check kldload-firstboot ran to completion: "
+                               "systemctl status kldload-firstboot")
+
+
+def check_ai_payload_reclaimed():
+    """The darksite AI payload is 3.3G and one-shot.
+
+    The runtime is installed, the Open WebUI image is loaded and the Whisper
+    weights are staged; afterwards the copy under /root is dead weight on
+    every installed machine. Kept deliberately on LAN-mirror hosts.
+    """
+    if os.path.exists("/etc/kldload/keep-darksite"):
+        return _result("disk", "AI payload reclaimed", "ok",
+                       "kept (LAN-mirror mode)", "kept by policy")
+    if not os.path.isdir("/root/darksite/ollama"):
+        return _result("disk", "AI payload reclaimed", "ok",
+                       "reclaimed after use", "reclaimed")
+    rc, out, _ = _run(["du", "-sh", "/root/darksite/ollama"])
+    size = out.split()[0] if rc == 0 and out else "?"
+    return _result("disk", "AI payload reclaimed", "warn",
+                   "reclaimed after use", f"still present ({size})",
+                   severity="low",
+                   remediation="rm -rf /root/darksite/ollama  "
+                               "(safe once Ollama and Open WebUI are running)")
+
+
 CHECKS = [
+    check_zfs_bootfs,
+    check_audio_stack,
+    check_dock_pins,
+    check_ai_payload_reclaimed,
     check_docker_storage_driver,
     check_zfs_pool, check_zfs_errors, check_zfs_arc_target, check_sanoid_timer,
     check_kldload_datasets, check_secrets_encryption,
