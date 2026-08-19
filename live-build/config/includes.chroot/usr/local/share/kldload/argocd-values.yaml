@@ -25,13 +25,22 @@ server:
     requests: { cpu: 100m, memory: 128Mi }
     limits:   { cpu: 500m, memory: 256Mi }
   service:
-    # Exposed via MetalLB. The VIP is set on the helm install command
-    # line so it stays a single source of truth (kldload-autodeploy
-    # line ~440). Pool 10.100.10.30-39 must include this IP — see
-    # the metallb-pool ConfigMap created by kube-cluster bootstrap.
+    # Exposed via MetalLB, from whichever pool MetalLB auto-assigns.
+    #
+    # WHY NO address-pool ANNOTATION: naming a pool here hardcodes an operator's
+    # choice into a shipped file. This said `kldload-pool` while the cluster
+    # bootstrap created `default-pool`, so MetalLB logged `unknown pool` and
+    # refused to allocate — argocd-server sat at EXTERNAL-IP <pending> and
+    # `helm install --wait` blocked for its whole 15-minute timeout with every
+    # ArgoCD pod already Running (fiend, 2026-08-19). It looked like a frozen
+    # installer and it was a spelling mismatch.
+    #
+    # Un-annotated, MetalLB assigns from any pool with autoAssign — which is
+    # correct whatever the operator named theirs. kldload-autodeploy re-adds
+    # the annotation ONLY when METALLB_POOL_NAME is explicitly set, so an
+    # operator who wants a specific pool still gets one, and everyone else
+    # gets an address instead of a stall.
     type: LoadBalancer
-    annotations:
-      metallb.universe.tf/address-pool: kldload-pool
   ingress:
     # We do NOT use an ingress — MetalLB LB IP is enough. ingress
     # adds the nginx-controller dependency for what is otherwise a

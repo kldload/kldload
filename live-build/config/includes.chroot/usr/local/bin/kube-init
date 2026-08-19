@@ -11,6 +11,18 @@ SVC_CIDR="${SVC_CIDR:-10.96.0.0/12}"
 CILIUM_VERSION="${CILIUM_VERSION:-1.16.5}"
 METALLB_VERSION="${METALLB_VERSION:-0.14.9}"
 METALLB_POOL="${METALLB_POOL:-}" # auto-detect from node subnet if empty
+# The pool's NAME, not its range. Anything that asks MetalLB for an address BY
+# NAME — a Service annotated metallb.universe.tf/address-pool — has to spell
+# this exactly, and MetalLB refuses the allocation outright when it does not.
+#
+# WHY IT IS A VARIABLE: it used to be the literal "default-pool" here while
+# four other files in the tree asked for "kldload-pool". MetalLB logged
+# `unknown pool "kldload-pool"`, left argocd-server EXTERNAL-IP <pending>
+# forever, and `helm install --wait` then blocked for its full 15-minute
+# timeout — with all seven ArgoCD pods Running and Ready. The operator saw a
+# first boot frozen at 40% and reported a failed installer (fiend,
+# 2026-08-19). One name in one place, and every consumer reads it.
+METALLB_POOL_NAME="${METALLB_POOL_NAME:-kldload-pool}"
 
 # ── HA control-plane VIP (kube-vip) ──────────────────────────────────────────
 # When KUBE_VIP_ADDRESS is set, the cluster is built HA-READY: kubeadm init uses
@@ -335,7 +347,7 @@ install_metallb() {
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
-  name: default-pool
+  name: ${METALLB_POOL_NAME}
   namespace: metallb-system
 spec:
   addresses:
@@ -348,12 +360,23 @@ metadata:
   namespace: metallb-system
 spec:
   ipAddressPools:
-    - default-pool
+    - ${METALLB_POOL_NAME}
 METALLB_CFG
 
     for _try in $(seq 1 12); do
         kubectl apply -f /tmp/metallb-pool.yaml 2>/dev/null && {
-            log "MetalLB pool configured"
+            # Assert the OUTCOME, not the exit code. `kubectl apply` succeeding
+            # says the object was accepted, not that a later consumer can find
+            # it under the name it will ask for — and a pool that is missing or
+            # misnamed does not fail anything until something blocks on an
+            # address that will never arrive.
+            if kubectl -n metallb-system get ipaddresspool "$METALLB_POOL_NAME" \
+                >/dev/null 2>&1; then
+                log "MetalLB pool configured: ${METALLB_POOL_NAME} (${pool})"
+            else
+                log "FATAL: MetalLB accepted the config but pool ${METALLB_POOL_NAME} is not present"
+                return 1
+            fi
             break
         }
         log "Waiting for MetalLB CRDs... (attempt ${_try}/12)"

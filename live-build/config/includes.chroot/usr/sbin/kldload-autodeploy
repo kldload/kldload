@@ -977,6 +977,28 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
             _argo_values="/usr/local/share/kldload/argocd-values.yaml"
             _argo_helm_args=()
             [[ -f "$_argo_values" ]] && _argo_helm_args+=(-f "$_argo_values")
+
+            # Pin the LoadBalancer to a named MetalLB pool ONLY when the
+            # operator named one. Un-annotated, MetalLB assigns from any pool
+            # with autoAssign, which is what works on a cluster whose pool the
+            # operator called something we cannot guess.
+            #
+            # And check the pool EXISTS before asking for it by name: MetalLB
+            # answers an unknown pool by declining to allocate, the Service
+            # then never leaves <pending>, and `helm --wait` below burns its
+            # full 15 minutes looking exactly like a hung install — which is
+            # how this was reported (fiend, 2026-08-19). If the named pool is
+            # absent, say so and let auto-assign have it rather than stall.
+            if [[ -n "${METALLB_POOL_NAME:-}" ]]; then
+                if kubectl -n metallb-system get ipaddresspool \
+                    "$METALLB_POOL_NAME" >/dev/null 2>&1; then
+                    _argo_helm_args+=(--set-string
+                        "server.service.annotations.metallb\\.universe\\.tf/address-pool=${METALLB_POOL_NAME}")
+                    log "[k8s] ArgoCD will request MetalLB pool ${METALLB_POOL_NAME}"
+                else
+                    log "[k8s] WARNING: METALLB_POOL_NAME=${METALLB_POOL_NAME} does not exist — letting MetalLB auto-assign"
+                fi
+            fi
             if [[ -f "$_argo_tgz" ]]; then
                 helm install argocd "$_argo_tgz" -n argocd \
                     "${_argo_helm_args[@]}" \

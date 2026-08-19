@@ -74,7 +74,15 @@
           metadata:
             name: "{{ app_name }}"
             namespace: "{{ namespace }}"
-            annotations: { metallb.universe.tf/address-pool: kldload-pool }
+            # Pool names are an operator's choice, not a constant — discover
+            # yours with: kubectl get ipaddresspools -A
+            # Leave metallb_pool empty to let MetalLB auto-assign, which is
+            # correct on any cluster with one autoAssign pool. Naming a pool
+            # that does not exist makes MetalLB decline the address and the
+            # Service sit at <pending> forever.
+            annotations: >-
+              {{ { 'metallb.universe.tf/address-pool': metallb_pool }
+                 if metallb_pool | default('', true) | length > 0 else {} }}
             labels: { kldload.io/app: "true" }
           spec:
             type: LoadBalancer

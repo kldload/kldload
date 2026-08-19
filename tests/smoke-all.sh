@@ -8,6 +8,26 @@ if [[ $EUID -ne 0 ]]; then exec sudo "$0" "$@"; fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPORT="/tmp/kldload-smoke-report-$(date -u +%Y%m%d-%H%M%S).txt"
+# _count_results — how many result lines of one kind a suite emitted.
+#
+# Args:    $1 the captured suite output, $2 one of PASS / FAIL / WARN.
+# Returns: the count on stdout; always exits 0, so a suite with none of a
+#          given kind does not have to be special-cased by the caller.
+#
+# WHY NOT `grep -c WORD`: see the note at the call site. Also, grep -c exits 1
+# when the count is zero, so the old `$(grep -c … || echo 0)` appended a SECOND
+# "0" to a substitution that had already captured one — yielding "0\n0" and an
+# arithmetic error the first time a suite passed everything.
+_count_results() {
+    local out=$1 kind=$2 n
+    # Strip SGR sequences first: both emitters colour the marker, so the word
+    # is never at the start of the raw line.
+    n=$(printf '%s\n' "$out" |
+        sed 's/\x1b\[[0-9;]*m//g' |
+        grep -cE "^[[:space:]]*(✓|✗|⚠)?[[:space:]]*${kind}[[:space:]]") || n=0
+    printf '%s\n' "$n"
+}
+
 TOTAL_PASS=0
 TOTAL_FAIL=0
 TOTAL_WARN=0
@@ -75,11 +95,24 @@ run_suite() {
     output=$(bash "$script" 2>&1) || true
     echo "$output" | tee_report
 
-    # Parse results from output
+    # Parse results from output.
+    #
+    # Count RESULT LINES, not every line containing the word. A bare substring
+    # match also counts each suite's own summary block — "PASS: 41", "FAIL: 1",
+    # "WARN: 3" and the "N FAILURES — review report above" trailer — so a suite
+    # reporting one failure contributed two to the total. On fiend
+    # (2026-08-19) a single cilium-scrape failure was reported as "FAIL: 2" and
+    # the unit exited 2, which sent the operator looking for a second fault
+    # that never existed.
+    #
+    # Two emitters have to match: tests/lib-test.sh prints "✗ FAIL <name> — …"
+    # and kldload-doctor prints "FAIL  <name>: …". Both are anchored to the
+    # start of the line and followed by whitespace, which is what separates a
+    # result from the "FAIL:" of a summary.
     local p f w
-    p=$(echo "$output" | grep -c "PASS" || echo 0)
-    f=$(echo "$output" | grep -c "FAIL" || echo 0)
-    w=$(echo "$output" | grep -c "WARN" || echo 0)
+    p=$(_count_results "$output" 'PASS') || p=0
+    f=$(_count_results "$output" 'FAIL') || f=0
+    w=$(_count_results "$output" 'WARN') || w=0
 
     TOTAL_PASS=$((TOTAL_PASS + p))
     TOTAL_FAIL=$((TOTAL_FAIL + f))
@@ -124,9 +157,9 @@ if virsh list --name 2>/dev/null | grep -q kldload-cp; then
             "root@${CP_IP}" "kube-smoke-test" 2>&1) || true
         echo "$output" | tee_report
 
-        p=$(echo "$output" | grep -c "PASS" || echo 0)
-        f=$(echo "$output" | grep -c "FAIL" || echo 0)
-        w=$(echo "$output" | grep -c "WARN" || echo 0)
+        p=$(_count_results "$output" 'PASS') || p=0
+        f=$(_count_results "$output" 'FAIL') || f=0
+        w=$(_count_results "$output" 'WARN') || w=0
         TOTAL_PASS=$((TOTAL_PASS + p))
         TOTAL_FAIL=$((TOTAL_FAIL + f))
         TOTAL_WARN=$((TOTAL_WARN + w))
@@ -192,4 +225,9 @@ fi
 
 echo -e "${C}══════════════════════════════════════════════════════════════${N}"
 
-exit $TOTAL_FAIL
+# Exit status is a boolean, not a count: `exit $TOTAL_FAIL` is taken mod 256 by
+# the shell, so a run with exactly 256 failures would have reported success.
+if ((TOTAL_FAIL > 0)); then
+    exit 1
+fi
+exit 0

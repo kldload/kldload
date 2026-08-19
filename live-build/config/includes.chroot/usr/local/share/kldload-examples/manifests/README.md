@@ -13,7 +13,7 @@ kubectl apply -f /usr/local/share/kldload-examples/manifests/deployment-with-pvc
 | `statefulset-multi-pvc.yaml` | 3-replica StatefulSet, each pod gets its own PVC, headless Service |
 | `cronjob-loadgen.yaml` | k6 every minute, no PVC (results to stdout — Loki picks them up) |
 | `networkpolicy-allow-namespace.yaml` | Default-deny, then explicit allow from same namespace — Cilium pattern |
-| `ingress-metallb-vip.yaml` | LoadBalancer Service requesting a specific VIP from the kldload-pool |
+| `ingress-metallb-vip.yaml` | LoadBalancer Service requesting a specific VIP (pool name is yours — `kubectl get ipaddresspools -A`) |
 
 Every file uses the `examples` namespace by default. Edit the
 `metadata.namespace:` line to retarget.

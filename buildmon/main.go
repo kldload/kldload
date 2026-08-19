@@ -62,6 +62,7 @@ func main() {
 		stateDir = flag.String("state-dir", DefaultStateDir, "where the build records its phases")
 		root     = flag.String("root", "/", "filesystem root to audit (for testing against a mounted target)")
 		showVer  = flag.Bool("version", false, "print version and exit")
+		bundleTo = flag.String("o", "", "bundle: write the archive here instead of the default path")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -76,6 +77,13 @@ func main() {
 	switch strings.ToLower(flag.Arg(0)) {
 	case "audit":
 		os.Exit(runAudit(opt))
+	case "bundle":
+		path, err := WriteBundle(opt, *bundleTo)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "buildmon: support bundle:", err)
+			os.Exit(2)
+		}
+		fmt.Println(path)
 	case "tui":
 		if err := RunTUI(opt); err != nil {
 			fmt.Fprintln(os.Stderr, "buildmon:", err)
@@ -108,6 +116,11 @@ COMMANDS
   (none) | gui   open the window; falls back to the text view when there is
                  no display or this binary was built without a GUI
   tui            force the text view
+  bundle         collect a support bundle — the audit verdict, the installer
+                 and first-boot logs, the boot chain, storage, network and
+                 hardware — into one .tar.gz, and print its path. Secrets are
+                 recorded as present-with-mode and never copied; collected
+                 text is scrubbed for credentials on the way in.
   audit          print the install audit and exit; status 1 if anything
                  CRITICAL was found (use this one from scripts and CI)
 
