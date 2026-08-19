@@ -439,10 +439,14 @@ system can say precisely what it is running:
 | [vmxplore](https://github.com/vmxplore/vmxplore) — KVM | its own repo | `/etc/kldload/vmxplore-commit` |
 | [wgxplore](https://github.com/wgxplore/wgxplore) — WireGuard | this repo's `wg/` | `/etc/kldload/wgxplore-commit` |
 
-wgxplore was folded into this repository on 2026-08-10 as a read-only estate
-lens, which is why its recorded commit is kldload's HEAD rather than a separate
-upstream. They run on any Linux or BSD box — kldload is their first-party
-distribution, not their owner.
+wgxplore now has its own repo, but the copy kldload builds and ships is the
+in-tree `wg/` — folded in on 2026-08-10 as a read-only estate lens, which is
+why its recorded commit is kldload's HEAD rather than a separate upstream. The
+two have since diverged, with the in-tree copy carrying work the standalone
+repo does not, so treat `wg/` as the source of what is on the ISO.
+
+They run on any Linux or BSD box — kldload is their first-party distribution,
+not their owner.
 
 > Licences are each project's own; kldload ships them unmodified and adds no
 > licence terms of its own to them. See [License](#license) for kldload's.
@@ -567,24 +571,7 @@ since 1.3.1: 106 features, 179 fixes, 389 files changed.
 - History back to 1.0: [kldload.com/release-notes.html](https://kldload.com/release-notes.html)
 
 Every release is tagged, so `git show v1.4.0` is the exact tree an ISO was
-built from.
-
-## Publishing a release
-
-R2 is the public source of truth for downloads — a stale bucket means the
-website advertises one release and hands the visitor another. After tagging:
-
-```bash
-export R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
-tools/r2-publish.sh --prune live-build/output/kldload-<version>-x86_64.iso
-```
-
-It verifies the ISO against its `.sha256` sidecar before uploading, publishes
-under both the versioned key and `kldload-free-latest.iso` (server-side copy,
-so the image is sent once), then re-reads the published objects over HTTPS and
-asserts size and checksum. `--prune` clears older releases out of the bucket
-afterwards; `--prune-dry-run` shows what it would remove first. Requires
-`rclone`.
+built from. Cutting one: [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 

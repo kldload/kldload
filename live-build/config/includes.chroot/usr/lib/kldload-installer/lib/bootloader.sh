@@ -83,6 +83,125 @@ k_zfs_bootloader_write_hostid() {
     k_log "hostid written: $(xxd -p "${target}/etc/hostid" 2>/dev/null)"
 }
 
+# k_install_initramfs_zfs_key — make the FIRST boot single-prompt too.
+#
+# Args:    $1 the target root.
+# Returns: 0 always. This is an ergonomics win, never a reason to fail an
+#          install — and kldload-firstboot installs the same key on first boot,
+#          so the worst case here is the behaviour we already shipped.
+#
+# WHY AT INSTALL TIME: kldload-firstboot writes the pool key into the initramfs,
+# but it can only run once the system is up — which is one boot too late. The
+# first boot after an install therefore asked for the passphrase twice: once at
+# ZFSBootMenu, once at an initramfs that did not yet have the key. Correct, and
+# still the thing an operator notices first (fiend, 2026-08-19). The installer
+# already knows the passphrase and the target, so it can close that gap.
+#
+# SECURITY: identical to the firstboot path — the key file and the initramfs
+# that carries it both live on the encrypted root, so both are protected by the
+# passphrase ZFSBootMenu already demanded. Refused outright when Secure Boot is
+# on, because that path stages a copy of the initramfs on the unencrypted ESP.
+k_install_initramfs_zfs_key() {
+    local target="$1"
+    local keyfile="${target}/etc/zfs/kldload-rpool.key"
+    local pass="${KLDLOAD_ZFS_PASSPHRASE:-}"
+
+    [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]] || return 0
+    [[ -n "$pass" ]] || return 0
+
+    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]]; then
+        k_log "Secure Boot on — not embedding a pool key (the ESP copy is unencrypted)"
+        return 0
+    fi
+    if [[ ! -d "${target}/etc/initramfs-tools" ]]; then
+        k_log "target has no initramfs-tools — first boot will ask for the passphrase twice"
+        return 0
+    fi
+
+    install -d -m 0700 "${target}/etc/zfs" "${target}/etc/zfs/initramfs-tools-load-key.d"
+    (
+        umask 077
+        printf '%s' "$pass" >"$keyfile"
+    )
+    chmod 0400 "$keyfile"
+
+    # Prove the key unwraps the pool before anything depends on it. The pool is
+    # imported right now, so this is a real check, not a guess.
+    local encroot="${KLDLOAD_ZFS_POOL:-rpool}"
+    if ! zfs load-key -n -L "file://${keyfile}" "$encroot" >&7 2>&1; then
+        k_log "WARNING: staged passphrase does not unlock ${encroot} — not embedding it"
+        rm -f "$keyfile"
+        return 0
+    fi
+
+    cat >"${target}/etc/zfs/initramfs-tools-load-key.d/kldload" <<'KEYHOOK'
+# Sourced by /usr/share/initramfs-tools/scripts/zfs with $ZFS and
+# $ENCRYPTIONROOT already set. Loading the key here is what keeps the boot to a
+# single passphrase prompt. Returning non-zero simply falls through to
+# prompting, which is the right behaviour if the key is missing or wrong.
+[ -r /etc/zfs/kldload-rpool.key ] || return 1
+"${ZFS}" load-key -L file:///etc/zfs/kldload-rpool.key "${ENCRYPTIONROOT}"
+KEYHOOK
+    chmod 0444 "${target}/etc/zfs/initramfs-tools-load-key.d/kldload"
+
+    cat >"${target}/etc/initramfs-tools/hooks/kldload-zfs-key" <<'HOOK'
+#!/bin/sh
+# Copy the pool key and its loader INTO the image. At unlock time the pool is
+# not mounted, so /etc/zfs on the root filesystem does not exist yet.
+set -e
+[ "$1" = "prereqs" ] && {
+    echo
+    exit 0
+}
+. /usr/share/initramfs-tools/hook-functions
+mkdir -p "${DESTDIR}/etc/zfs/initramfs-tools-load-key.d"
+[ -r /etc/zfs/kldload-rpool.key ] &&
+    cp -a /etc/zfs/kldload-rpool.key "${DESTDIR}/etc/zfs/kldload-rpool.key"
+[ -r /etc/zfs/initramfs-tools-load-key.d/kldload ] &&
+    cp -a /etc/zfs/initramfs-tools-load-key.d/kldload \
+        "${DESTDIR}/etc/zfs/initramfs-tools-load-key.d/kldload"
+exit 0
+HOOK
+    chmod 0755 "${target}/etc/initramfs-tools/hooks/kldload-zfs-key"
+
+    # update-initramfs needs a live /proc; the bootstrap phase already unmounted
+    # the chroot binds by now, so re-establish them just for this and put them
+    # back exactly as they were.
+    # Mount only what is missing, and remember it, so the target is left
+    # exactly as it was found. Testing with mountpoint instead of swallowing a
+    # failure means an unmountable /proc is reported rather than assumed
+    # harmless — it is the one thing update-initramfs cannot run without.
+    local _unbind=() _m
+    if ! mountpoint -q "${target}/proc" && mount -t proc proc "${target}/proc"; then
+        _unbind+=("${target}/proc")
+    fi
+    if ! mountpoint -q "${target}/sys" && mount -t sysfs sys "${target}/sys"; then
+        _unbind+=("${target}/sys")
+    fi
+    if ! mountpoint -q "${target}/dev" && mount --bind /dev "${target}/dev"; then
+        _unbind+=("${target}/dev")
+    fi
+
+    chroot "${target}" update-initramfs -u -k all >&7 2>&1 ||
+        k_log "WARNING: update-initramfs failed in the target"
+
+    for _m in ${_unbind[@]+"${_unbind[@]}"}; do
+        umount "$_m" || k_log "note: ${_m} still busy — left mounted"
+    done
+
+    # Verify the OUTCOME. An image rebuilt without the key is indistinguishable
+    # from one rebuilt with it until the machine asks twice.
+    local img
+    img="$(ls -1t "${target}"/boot/initrd.img-* 2>/dev/null | head -1)"
+    if [[ -n "$img" ]] && lsinitramfs "$img" 2>/dev/null |
+        grep -q '^etc/zfs/kldload-rpool.key$'; then
+        k_log "First boot will be single-prompt (key embedded in $(basename "$img"))"
+    else
+        k_log "NOTE: key not in the target initramfs — the first boot will ask twice, firstboot fixes it after"
+    fi
+    return 0
+}
+
 # k_zbm_find_efi — locate the ZFSBootMenu EFI binary.
 # Checks the baked-in darksite first, then falls back to downloading.
 k_zbm_find_efi() {
@@ -466,6 +585,9 @@ EOFSTAB
     # changes from colliding.
     if [[ -n "${_kver:-}" ]] && [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" != "1" ]]; then
         k_log "Secure Boot off — not staging kernel/initramfs on the ESP (nothing boots them, and the ESP is unencrypted)"
+        # Same branch, same reason: with no ESP copy to leak it to, the pool key
+        # can go into the initramfs now instead of one boot later.
+        k_install_initramfs_zfs_key "${target}"
     elif [[ -n "${_kver:-}" ]]; then
         mkdir -p "${zbm_fallback_dir}"
         cp "$_kpath" "${zbm_fallback_dir}/vmlinuz"
