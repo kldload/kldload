@@ -144,23 +144,32 @@ server-class systems whose only surface is the web console on port 8443.
 passphrase** here — you will be asked for it at every boot, before the
 system starts. It is not your login password.
 
-**Secure Boot.** Enabled by default. See
-[section 7](#7-secure-boot-on-or-off) if you are unsure.
+**Secure Boot.** **Off by default** — set `KLDLOAD_ENABLE_SECURE_BOOT=1` to
+turn it on. With it off the firmware boots ZFSBootMenu directly and there is
+no MOK enrollment to perform; sections 6 and 7 do not apply. See
+[section 7](#7-secure-boot-on-or-off) before enabling it.
 
 **Account.** The name you enter here is the admin account. It is a
 `wheel`/`sudo` member and, from 1.4.0-rc3, is also added to the `libvirt`
 and `kvm` groups so the virtualisation tools do not raise a password prompt
 on every action.
 
-When a Secure Boot install finishes, the machine **powers off** rather than
-rebooting. That is deliberate: it hands you control of the enrollment boot
-instead of racing an automatic restart. **Remove the USB stick now.**
+When the install finishes the machine **reboots**. Remove the USB stick.
+
+A **Secure Boot** install is the exception: it **powers off** instead. That is
+deliberate — it hands you control of the enrollment boot rather than racing an
+automatic restart into a ten-second MokManager prompt.
 
 ---
 
 ## 6. First boot: the Secure Boot enrollment
 
-This is the step people get wrong, so it gets its own section.
+**Skip this section unless you set `KLDLOAD_ENABLE_SECURE_BOOT=1`.** With
+Secure Boot off — the default — there is no MOK, no blue screen, and nothing
+to enroll. Your first boot asks for the encryption passphrase and comes up.
+
+This is the step people get wrong when they DO enable it, so it gets its own
+section.
 
 kldload generates a **Machine Owner Key** (MOK) unique to each install. It
 signs two things with it:

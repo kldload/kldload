@@ -134,31 +134,51 @@ KLDLOAD_BUILD_PROCESSORS=$(( $(nproc) - 4 )) PROFILE=desktop ./deploy.sh build
 
 ---
 
-## Installing with Secure Boot &amp; encryption
+## Installing with encryption
 
-Secure Boot and full-disk ZFS encryption both work end-to-end. The full flow:
+Full-disk ZFS encryption is on by default and the flow is short:
 
 1. **Download &amp; burn** the ISO to a USB stick (see [Quickstart](#quickstart) above).
 2. **Boot the USB.** The installer opens automatically in the browser at
    `https://<host>:8443` &mdash; no login prompt.
 3. **Choose** your distribution, profile, and target disk. Encryption is
    **pre-selected (recommended)** &mdash; set your **disk encryption
-   passphrase** &mdash; and leave **Secure Boot** enabled (the default), then
-   start the install.
-4. When it finishes, a Secure-Boot install **powers the machine off** &mdash; so
-   *you* control the enrollment boot instead of racing an auto-reboot.
-   **Remove the USB stick.**
-5. **Power on and enter firmware setup** (usually `Del`, `F2`, or `F10`).
+   passphrase** &mdash; and start the install.
+4. When it finishes the machine **reboots**. Remove the USB stick.
+5. At the **ZFSBootMenu** prompt, enter your **encryption passphrase**. It is
+   asked **once**: first boot re-asks a second time while the system installs
+   the key that makes the later boots single-prompt, and every boot after that
+   takes one passphrase.
+6. The desktop loads and the console opens at `https://<host>:8443` &mdash; **no
+   certificate warning, no login prompt.** Done.
+
+The passphrase is always required. There is no configuration in which
+encryption is silently skipped, and turning Secure Boot on or off does not
+change that. TPM2 auto-unlock is on the roadmap.
+
+### Secure Boot &mdash; opt in
+
+**Secure Boot is off by default.** With it off the firmware boots ZFSBootMenu
+directly: no shim, no GRUB stage, no MOK enrollment, and nothing to miss at a
+ten-second prompt. That is the right default for a lab machine, and it is the
+path above.
+
+Turn it on when the machine's threat model wants a verified boot chain, by
+setting `KLDLOAD_ENABLE_SECURE_BOOT=1` at install time. The install then
+generates a per-install MOK, signs ZFSBootMenu and the out-of-tree modules
+with it, and boots firmware &rarr; shim &rarr; GRUB &rarr; kernel. That path
+needs three extra steps:
+
+1. **When the install finishes it powers the machine off** rather than
+   rebooting &mdash; so *you* control the enrollment boot instead of racing an
+   auto-reboot. Remove the USB stick.
+2. **Power on and enter firmware setup** (usually `Del`, `F2`, or `F10`).
    **Enable Secure Boot**, then save and exit.
-6. On the next boot the blue **MokManager** screen appears &mdash; it waits
+3. On the next boot the blue **MokManager** screen appears &mdash; it waits
    **only ~10 seconds, so press any key immediately**, then:
    **Enroll MOK &rarr; Continue &rarr; Yes &rarr; password `kldload` &rarr; Reboot.**
    The password is literally `kldload` &mdash; *not* your admin or encryption
    password.
-7. At the **ZFSBootMenu** unlock prompt, enter your **encryption passphrase**
-   (TPM2 auto-unlock is on the roadmap — today the passphrase is always asked, which also means disabling Secure Boot never bypasses it).
-8. The desktop loads and the console opens at `https://<host>:8443` &mdash; **no
-   certificate warning, no login prompt.** Done.
 
 > **Missed the MokManager screen?** Just reboot &mdash; kldload re-offers
 > enrollment on every boot until the key is actually enrolled. No reinstall.
@@ -175,7 +195,11 @@ Secure Boot and full-disk ZFS encryption both work end-to-end. The full flow:
 > like and how to decide whether to run with it on at all:
 > **[docs/INSTALL.md](docs/INSTALL.md)**.
 
-### Secure Boot / MOK
+### Secure Boot / MOK &mdash; only if you enabled it
+
+Secure Boot is off by default, and none of the below applies to a default
+install. These are the failure modes of the opt-in path
+(`KLDLOAD_ENABLE_SECURE_BOOT=1`).
 
 | Symptom | Fix |
 |---|---|
