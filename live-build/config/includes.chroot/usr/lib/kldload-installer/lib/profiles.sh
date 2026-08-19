@@ -2858,8 +2858,18 @@ Description=Enable libvirt default network (virbr0) autostart
 # needs; libvirtd alone is the monolithic case, where the socket unit simply
 # does not exist and the dependency is inert. Ordering alone is not enough —
 # see the readiness poll in the script, which is the real gate.
-After=libvirtd.service virtnetworkd.socket virtnetworkd.service network-online.target
-Wants=libvirtd.service virtnetworkd.socket network-online.target
+# NOT ordered on network-online.target. virbr0 is libvirt's NAT bridge with
+# its own dnsmasq: it serves addresses to guests and needs no uplink, no
+# carrier and no route. Waiting for the network meant that on a machine with
+# the cable out, this sat behind NetworkManager-wait-online (measured at 35s
+# with a link, far longer without) before it would even try — and the guests
+# that depend on virbr0 came up with no NIC at all.
+#
+# An air-gapped host is precisely the case where local VM networking still has
+# to work, so the one prerequisite that does not apply is the one it was
+# waiting for (2026-08-18).
+After=libvirtd.service virtnetworkd.socket virtnetworkd.service
+Wants=libvirtd.service virtnetworkd.socket
 # Stop retrying after ~10 minutes (6 attempts * (90s + 15s)); failed state
 # is now visible to kldload-doctor instead of being papered over.
 # These keys MUST live in [Unit], not [Service]. On .137 b628 systemd
