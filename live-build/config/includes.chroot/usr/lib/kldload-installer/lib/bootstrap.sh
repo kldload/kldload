@@ -419,6 +419,62 @@ EOM
 # configure DKMS to sign modules during build.  Must be called BEFORE any
 # package installation so that when zfs-dkms is installed, DKMS builds the
 # kernel module and signs it in a single pass — no retroactive signing needed.
+# k_init_tls_ca — create this install's TLS trust root.
+#
+# Args:    $1 the target root.
+# Returns: 0 when /etc/kldload/ca/root/ca.crt exists on the target.
+#          Non-zero, loudly, when it does not.
+#
+# WHY IT IS ITS OWN FUNCTION: this used to live inside k_generate_mok_keys,
+# which runs only when Secure Boot is enabled. Secure Boot became opt-out on
+# 2026-08-19 and took the TLS CA with it — a coupling nobody intended, because
+# a web certificate has nothing to do with signing kernel modules.
+#
+# The failure was silent three times over. No CA was created; kldload-firstboot
+# guards its trust-install with `[[ -f /etc/kldload/ca/root/ca.crt ]]`, so it
+# skipped without a word; and the webui fell back to a self-signed cert. The
+# operator's symptom was every GUI app — Kubernetes, Metrics — demanding
+# certificate trust, three layers away from the cause.
+#
+# Verified by OUTCOME, not exit code: `kldload-ca init` writing nothing while
+# returning 0 is precisely the case that produced this bug.
+k_init_tls_ca() {
+    local target="$1"
+    local ca_dir="${target}/etc/kldload/ca"
+
+    if [[ ! -x /usr/local/sbin/kldload-ca ]]; then
+        k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
+            "FATAL: /usr/local/sbin/kldload-ca missing — no TLS trust root for this install"
+        return 1
+    fi
+
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Initialising TLS trust root in ${ca_dir}"
+    # `init` is idempotent and returns non-zero when a root already exists — a
+    # re-run over a partially installed target. That is not an error, but it is
+    # not silence either: note it, then let the ca.crt assertion below decide,
+    # because the outcome is what matters and the exit code is not.
+    if ! KLDLOAD_CA_DIR="${ca_dir}" /usr/local/sbin/kldload-ca init \
+        >>"${KLDLOAD_BOOTSTRAP_LOG}" 2>&1; then
+        k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
+            "kldload-ca init returned non-zero — checking whether a root already exists"
+    fi
+
+    if [[ -f "${ca_dir}/root/ca.crt" ]]; then
+        # Stage it where update-ca-certificates will pick it up on first boot,
+        # so host tooling trusts what nginx serves without a manual step.
+        mkdir -p "${target}/usr/local/share/ca-certificates"
+        cp "${ca_dir}/root/ca.crt" \
+            "${target}/usr/local/share/ca-certificates/kldload-ca.crt"
+        chmod 0644 "${target}/usr/local/share/ca-certificates/kldload-ca.crt"
+        k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "TLS trust root ready: ${ca_dir}/root/ca.crt"
+        return 0
+    fi
+
+    k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" \
+        "FATAL: kldload-ca init produced no ca.crt — the webui will serve an untrusted self-signed cert"
+    return 1
+}
+
 k_generate_mok_keys() {
     local target="${KLDLOAD_TARGET:?}"
     local mok_dir="${target}/var/lib/dkms"
@@ -512,13 +568,6 @@ k_generate_mok_keys() {
         # via the MOK list; sign-file accepts any (key, cert) pair for
         # module signing; mokutil's import only cares about DER format.
         k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "Generating MOK code-signing leaf (separate from TLS CA)"
-        if [[ -x /usr/local/sbin/kldload-ca ]]; then
-            # Still init the kldload-ca for TLS purposes — it just no longer
-            # supplies the MOK material.
-            KLDLOAD_CA_DIR="${ca_dir}" /usr/local/sbin/kldload-ca init \
-                >>"${KLDLOAD_BOOTSTRAP_LOG}" 2>&1
-        fi
-
         # Generate per-install MOK leaf. RSA-4096 to match common SB key
         # strength (sbctl, shim's vendor_cert, MS db keys are 2048+; 4096
         # matches the kldload-ca root). Self-signed — no chain to verify.
@@ -650,6 +699,9 @@ k_install_target_packages() {
     # KLDLOAD_ENABLE_SECURE_BOOT=1 at install time to enable the full
     # MOK + signed-ZBM + shim pipeline. See the big comment on
     # _secure_boot_enabled() in kldload-install-target for rationale.
+    # The TLS trust root is NOT Secure Boot's business — create it either way.
+    k_init_tls_ca "${target}" ||
+        k_log_to "${KLDLOAD_BOOTSTRAP_LOG}" "WARNING: continuing without a TLS trust root"
     if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]]; then
         k_generate_mok_keys
     else
@@ -1870,6 +1922,9 @@ CUSTOMREPO
     # Generate MOK keys BEFORE package installation so DKMS signs ZFS modules
     # during build. Secure Boot is OPT-IN as of 1.0.5 — default off; set
     # KLDLOAD_ENABLE_SECURE_BOOT=1 at install time to enable.
+    # As above: TLS trust is independent of Secure Boot.
+    k_init_tls_ca "${target}" ||
+        k_log_to "$log" "WARNING: continuing without a TLS trust root"
     if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]]; then
         k_generate_mok_keys
     else

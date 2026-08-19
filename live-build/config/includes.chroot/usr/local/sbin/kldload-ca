@@ -403,6 +403,74 @@ cmd_trust_install() {
     fi
 
     [[ $installed -eq 1 ]] || die "no known system trust store found — unsupported distro?"
+
+    # ── Browser trust (NSS) ──────────────────────────────────────────────
+    # Chrome and Firefox on Linux do NOT read the system trust store. They
+    # each read an NSS database under the USER's home, so a CA that curl and
+    # python trust perfectly is still an interstitial warning in the browser.
+    #
+    # WHY THIS MATTERS HERE: every kldload GUI app — the Kubernetes view, the
+    # Metrics dashboards, the installer's own web UI — is a browser tab
+    # against https://<host>:8443. Getting the system store right and stopping
+    # there means the operator's actual experience is unchanged: a full-page
+    # certificate warning on every tool the product ships (fiend, 2026-08-19).
+    _nss_trust_install
+}
+
+# _nss_trust_install — seed each human user's NSS database with the root CA.
+#
+# Returns: 0 always. Browser trust is a convenience on top of a system trust
+#          store that is already installed and verified; a user whose profile
+#          cannot be written should not fail the whole command.
+#
+# Notes:
+#   - certutil comes from libnss3-tools / nss-tools. Absent, we say so rather
+#     than pretending the browser is configured.
+#   - The `sql:` prefix is required: modern NSS uses the sqlite format, and
+#     omitting it writes a legacy dbm store that Chrome ignores — which looks
+#     exactly like success.
+_nss_trust_install() {
+    if ! command -v certutil >/dev/null 2>&1; then
+        log "certutil not present — browsers will NOT trust this CA"
+        log "  install libnss3-tools (Debian/Ubuntu) or nss-tools (RHEL/Fedora), then re-run"
+        return 0
+    fi
+
+    local home user db seeded=0
+    while IFS=: read -r user _ uid _ _ home _; do
+        # Human accounts only; system users have no browser profile.
+        ((uid >= 1000 && uid < 65534)) || continue
+        [[ -d "$home" ]] || continue
+
+        db="${home}/.pki/nssdb"
+        if [[ ! -d "$db" ]]; then
+            install -d -m 0700 -o "$user" -g "$user" "$db" 2>/dev/null || continue
+            # An empty db has to be created before anything can be added; the
+            # browser would otherwise make it on first launch, long after this.
+            # A browser launching right now can create the db between the -d
+            # test above and this line; -N then refuses, correctly. Either way
+            # the -A below runs against a db that exists, which is the only
+            # thing this step needed to guarantee.
+            if ! su -s /bin/sh -c "certutil -d sql:${db} -N --empty-password" \
+                "$user" >/dev/null 2>&1; then
+                log "note: ${user}'s NSS db already existed — adding to it"
+            fi
+        fi
+
+        # -A is add-or-replace keyed on the nickname, so a re-run rotates the
+        # cert in place instead of stacking duplicates.
+        if su -s /bin/sh -c \
+            "certutil -d sql:${db} -A -t 'C,,' -n 'kldload-ca' -i '${ROOT_CRT}'" \
+            "$user" >/dev/null 2>&1; then
+            log "browser trust installed for ${user} (${db})"
+            seeded=1
+        else
+            log "WARNING: could not add the CA to ${user}'s NSS db at ${db}"
+        fi
+    done </etc/passwd
+
+    ((seeded)) || log "no user NSS databases seeded — browsers may still warn"
+    return 0
 }
 
 # ──────────────────────────────────────────────────────────────────────

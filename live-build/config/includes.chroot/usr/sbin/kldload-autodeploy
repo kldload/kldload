@@ -116,6 +116,26 @@ mark() {
     log "marker: $1-ready"
 }
 
+# phase_close_all — flip any still-"running" phase to done.
+#
+# WHY IT EXISTS: phase() closes the PREVIOUS phase when a new one begins, so
+# closure is a side effect of starting something else. The LAST phase has no
+# successor and therefore never closed: `50-ready` sat at "running" forever
+# while every marker said the run had finished. buildmon counted 4 of 5 done
+# and drew 80% under a headline that said complete — the operator reasonably
+# read that as a stalled install (fiend, 2026-08-19).
+#
+# Call once, at the end of the run. Failed phases set their state explicitly
+# via phase_state and are left alone.
+phase_close_all() {
+    local _f
+    for _f in "$PHASE_DIR"/[0-9][0-9]-*; do
+        [[ -e "$_f" ]] || continue
+        [[ "$(cut -d' ' -f1 "$_f" 2>/dev/null)" == "running" ]] &&
+            printf 'done %s\n' "$(date +%s)" >"$_f"
+    done
+}
+
 # ── Power a VM down the moment it is finished with ───────────────────────────
 #
 # WHY THIS IS NOT LEFT TO THE QUIESCE PASS AT THE END: quiesce_idle_vms() runs
@@ -1454,3 +1474,8 @@ else
     phase "partial"
     log "autodeploy finished with partial success — see markers in $STATE_DIR"
 fi
+
+# Nothing runs after this, so nothing else will ever close the phase that
+# `phase` just opened. Close it here or the progress view is permanently one
+# phase short of the story its own headline tells.
+phase_close_all
