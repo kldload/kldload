@@ -1168,6 +1168,17 @@ if ! k_have_func k_install_tools; then
         done
 
         # /usr/local/sbin kldload-* scripts (exclude live-only)
+        #
+        # A tool that also ships in /usr/local/bin gets a SYMLINK here, not a
+        # second copy. Both directories are on root's PATH with sbin first, so
+        # two files means the sbin one silently wins for root while every edit
+        # lands on the bin one — the canonical source in includes.chroot.
+        #
+        # HISTORY: kldload-doctor existed in both. Fixing a false-negative
+        # audio check in /usr/local/bin/kldload-doctor changed nothing at all,
+        # because `sudo kldload-doctor` resolved to a months-old copy in
+        # /usr/local/sbin. The two had different md5s and nothing compared them
+        # (fiend, 2026-08-19). A symlink cannot drift.
         for f in /usr/local/sbin/kldload-*; do
             [[ -f "${f}" ]] || continue
             local base
@@ -1175,6 +1186,12 @@ if ! k_have_func k_install_tools; then
             case "${base}" in
             kldload-live-* | kldload-deploy-tui) continue ;;
             esac
+            if [[ -f "${target}/usr/local/bin/${base}" ]]; then
+                ln -sf "/usr/local/bin/${base}" "${lsbin_dst}/${base}"
+                printf '  linked:    /usr/local/sbin/%s -> /usr/local/bin/%s\n' \
+                    "${base}" "${base}" >>"${log}"
+                continue
+            fi
             install -m 0755 "${f}" "${lsbin_dst}/${base}"
             printf '  installed: /usr/local/sbin/%s\n' "${base}" >>"${log}"
         done

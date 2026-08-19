@@ -937,8 +937,7 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
         # / 63 GB host. Fixed defaults in kube-cluster keep this bounded.
         log "[k8s] running kube-cluster bootstrap --workers ${K8S_WORKERS}"
         if kube-cluster bootstrap --workers "${K8S_WORKERS}" >>/var/log/kldload/kube-bootstrap.log 2>&1; then
-            mark "k8s"
-            log "[k8s] complete"
+            log "[k8s] control plane and workers up — installing add-ons"
 
             # After cluster up, install Tetragon for eBPF syscall/process/file
             # observability. Installs from the ISO-shipped chart tarball
@@ -1133,6 +1132,20 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
                     log "[k8s] operator charts: ${_wl_ok}/${#_wl_charts[@]} installed"
                 fi
             fi
+
+            # Mark k8s ready HERE, not when the control plane came up.
+            #
+            # WHY: the marker used to be set immediately after `kube-cluster
+            # bootstrap` returned — before Tetragon, ArgoCD and the operator
+            # charts were installed, which is another fifteen minutes of work.
+            # kldload-smoke-firstboot.service gates its start on this marker,
+            # so the post-install smoke test ran against a half-built cluster
+            # and reported failures for add-ons that had not been installed
+            # yet: "cilium scrape labels: no series" on a box that had 29 of
+            # them minutes later (fiend, 2026-08-19). The marker has to mean
+            # "done", or everything waiting on it starts too early.
+            mark "k8s"
+            log "[k8s] complete"
         else
             phase_state "k8s-bootstrap" failed
             log "[k8s] FAILED — see /var/log/kldload/kube-bootstrap.log"

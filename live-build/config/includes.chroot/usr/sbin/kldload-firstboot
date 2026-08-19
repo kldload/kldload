@@ -859,6 +859,114 @@ setup_proxmox() {
 # 2. Enable Salt mTLS using the issued cert
 # 3. Apply nftables per-plane microsegmentation
 # 4. Mark node as permanently installed
+# _install_initramfs_zfs_key — stop asking for the passphrase twice.
+#
+# Args:    $1 path to the plaintext passphrase, still present at this point.
+# Returns: 0 when the initramfs can unlock unattended, or when this platform is
+#          not one we implement it for. Never fatal — a machine that asks twice
+#          still boots, and refusing to finish firstboot over it would be worse.
+#
+# WHY TWO PROMPTS HAPPEN: ZFSBootMenu unlocks the pool to READ /boot, then
+# kexecs the target kernel with the target's OWN initramfs. That is a fresh
+# kernel with a fresh keyring, so the pool is locked again and the initramfs
+# prompts a second time. ZBM passes that initramfs through untouched and
+# injects nothing — zfsbootmenu-core.sh builds its kexec with
+# --initrd="${mnt}${initramfs}" — so nothing but the initramfs itself can fix
+# it. Confirmed by reading the shipped ZBM source, not inferred.
+#
+# Debian's zfs initramfs script has a purpose-built hook for exactly this:
+# /usr/share/initramfs-tools/scripts/zfs sources every file in
+# /etc/zfs/initramfs-tools-load-key.d/, re-checks keystatus after each, and
+# prompts only if the key is still unavailable.
+#
+# SECURITY: the key file and the initramfs carrying it BOTH live on the
+# encrypted root dataset, so both are protected by the same passphrase ZBM
+# already demanded. That holds only while nothing copies the initramfs
+# somewhere unencrypted — which is why bootloader.sh stops staging it on the
+# ESP when Secure Boot is off, and why this refuses to run when it is on.
+_install_initramfs_zfs_key() {
+    local passphrase_file="$1"
+    local keyfile=/etc/zfs/kldload-rpool.key
+
+    [[ -f "$passphrase_file" ]] || return 0
+
+    # Under Secure Boot the kernel and initramfs are staged on the ESP, which
+    # is unencrypted FAT. A key inside that initramfs would be a plaintext key
+    # on an unencrypted partition — strictly worse than typing the passphrase.
+    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]]; then
+        log "Secure Boot on — not embedding a pool key in the initramfs (the ESP copy is unencrypted)"
+        return 0
+    fi
+
+    if [[ ! -d /etc/initramfs-tools ]]; then
+        # dracut hosts need a different mechanism. Say so, rather than leave an
+        # operator wondering why one distro asks once and another asks twice.
+        log "initramfs-tools not present — single-prompt unlock not configured on this platform"
+        return 0
+    fi
+
+    install -d -m 0700 /etc/zfs /etc/zfs/initramfs-tools-load-key.d
+    (
+        umask 077
+        cat "$passphrase_file" >"$keyfile"
+    )
+    chmod 0400 "$keyfile"
+
+    cat >/etc/zfs/initramfs-tools-load-key.d/kldload <<'KEYHOOK'
+# Sourced by /usr/share/initramfs-tools/scripts/zfs with $ZFS and
+# $ENCRYPTIONROOT already set. Loading the key here is what keeps the boot to a
+# single passphrase prompt: ZFSBootMenu asked once, and this answers the second
+# ask the kexec'd kernel would otherwise make.
+#
+# Returning non-zero lets the caller fall through to prompting, which is the
+# correct behaviour when the key is missing or wrong.
+[ -r /etc/zfs/kldload-rpool.key ] || return 1
+"${ZFS}" load-key -L file:///etc/zfs/kldload-rpool.key "${ENCRYPTIONROOT}"
+KEYHOOK
+    chmod 0444 /etc/zfs/initramfs-tools-load-key.d/kldload
+
+    # The key has to be INSIDE the image, not merely referenced from it: at
+    # unlock time the pool is not mounted, so /etc/zfs on the root filesystem
+    # does not exist yet.
+    cat >/etc/initramfs-tools/hooks/kldload-zfs-key <<'HOOK'
+#!/bin/sh
+# Copy the pool key and its loader into the initramfs. Without this the hook
+# directory is empty at boot and the second passphrase prompt comes back.
+set -e
+[ "$1" = "prereqs" ] && {
+    echo
+    exit 0
+}
+. /usr/share/initramfs-tools/hook-functions
+mkdir -p "${DESTDIR}/etc/zfs/initramfs-tools-load-key.d"
+[ -r /etc/zfs/kldload-rpool.key ] &&
+    cp -a /etc/zfs/kldload-rpool.key "${DESTDIR}/etc/zfs/kldload-rpool.key"
+[ -r /etc/zfs/initramfs-tools-load-key.d/kldload ] &&
+    cp -a /etc/zfs/initramfs-tools-load-key.d/kldload \
+        "${DESTDIR}/etc/zfs/initramfs-tools-load-key.d/kldload"
+exit 0
+HOOK
+    chmod 0755 /etc/initramfs-tools/hooks/kldload-zfs-key
+
+    if ! update-initramfs -u -k all >>"$LOG" 2>&1; then
+        log "WARNING: update-initramfs failed — the boot will still ask for the passphrase twice"
+        return 0
+    fi
+
+    # Verify the OUTCOME. An initramfs rebuilt WITHOUT the key looks identical
+    # to one rebuilt with it, right up until the machine asks twice — and by
+    # then the plaintext passphrase has been shredded and cannot be retried.
+    local img
+    img="$(ls -1t /boot/initrd.img-* 2>/dev/null | head -1)"
+    if [[ -n "$img" ]] && lsinitramfs "$img" 2>/dev/null |
+        grep -q '^etc/zfs/kldload-rpool.key$'; then
+        ok "single-prompt unlock configured (key present in $(basename "$img"))"
+    else
+        log "WARNING: the pool key is NOT in the initramfs — the boot will ask twice"
+    fi
+    return 0
+}
+
 setup_zero_trust() {
     local idx="${KLDLOAD_NODE_INDEX:-1}"
     local color="${KLDLOAD_NODE_COLOR:-blue}"
@@ -914,6 +1022,10 @@ setup_zero_trust() {
         else
             log "WARNING: kldload-clevis-seal not installed — TPM auto-unlock NOT configured; ZFS will prompt for the passphrase at boot"
         fi
+        # Teach the initramfs the key BEFORE the plaintext goes away — this
+        # is the last moment it is available.
+        _install_initramfs_zfs_key "${passphrase_file}"
+
         # Shred the plaintext passphrase UNCONDITIONALLY — including when the
         # seal tool is absent. The old gate ([[ -f pass && -x seal ]]) skipped
         # this whole block when the tool was missing, leaving the plaintext

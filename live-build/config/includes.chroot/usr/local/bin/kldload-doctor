@@ -964,6 +964,28 @@ def check_zfs_bootfs():
                    remediation="zpool set bootfs=rpool/ROOT/$(hostname) rpool")
 
 
+def _seat_session():
+    """Return (username, uid) of the session attached to a seat, or None.
+
+    loginctl is authoritative: a session with a SEAT is a human at a screen,
+    which is the one running pipewire. Picking "whoever owns /run/user/1000"
+    instead is a guess, and it guesses wrong on a multi-user box.
+    """
+    rc, out, _ = _run(["loginctl", "list-sessions", "--no-legend"])
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        # SESSION UID USER SEAT ...  — a "-" in the seat column means no screen.
+        if len(parts) < 4 or parts[3] in ("-", ""):
+            continue
+        try:
+            return parts[2], int(parts[1])
+        except ValueError:
+            continue
+    return None
+
+
 def check_audio_stack():
     """PipeWire needs a user D-Bus; without one it fails at the queueing stage.
 
@@ -974,7 +996,31 @@ def check_audio_stack():
     """
     if not _has("pactl"):
         return _result("desktop", "audio sinks", "skip", "", "pactl absent")
-    rc, out, _ = _run(["pactl", "list", "short", "sinks"])
+
+    # PipeWire is a USER service. Asked as root, pactl has no session bus to
+    # reach and answers "Connection refused" — which is not "no sinks", it is
+    # "wrong question". Reporting that as a failure told an operator their
+    # audio was broken on a machine with two working sinks (2026-08-19), and a
+    # check that cries wolf is worse than no check, because the next real
+    # failure gets ignored too.
+    #
+    # So ask as the logged-in graphical user when we are root. Their session
+    # is the one that owns the sinks.
+    argv = ["pactl", "list", "short", "sinks"]
+    if os.geteuid() == 0:
+        seat = _seat_session()
+        if not seat:
+            return _result("desktop", "audio sinks", "skip", "",
+                           "no seat session to query")
+        user, uid = seat
+        # XDG_RUNTIME_DIR is not optional here. runuser alone leaves it unset,
+        # pactl then has no socket path, and the answer is "Connection
+        # refused" — indistinguishable from a broken audio stack unless you
+        # know to look. Measured on a host with two healthy sinks.
+        argv = ["env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                "runuser", "-u", user, "--"] + argv
+
+    rc, out, _ = _run(argv)
     n = len([ln for ln in out.splitlines() if ln.strip()]) if rc == 0 else 0
     if n > 0:
         return _result("desktop", "audio sinks", "ok",

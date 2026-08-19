@@ -452,7 +452,21 @@ EOFSTAB
         k_log "skipping kernel ${_kv} — vmlinuz=$([[ -f $_kp ]] && echo present || echo MISSING) initramfs=$([[ -f $_ip ]] && echo present || echo MISSING)"
     done < <(ls "${target}/boot" 2>/dev/null | grep -oP '^vmlinuz-\K[^ ]+' | sort -V -r)
 
-    if [[ -n "${_kver:-}" ]]; then
+    # The staged kernel + initramfs exist for ONE consumer: GRUB's "direct"
+    # entry, which is the Secure Boot path. With Secure Boot off the firmware
+    # boots ZFSBootMenu directly and nothing ever reads these.
+    #
+    # SECURITY: the ESP is a plain FAT partition with no encryption. A copy of
+    # the initramfs there is a copy OUTSIDE the encrypted root — fine while it
+    # holds nothing secret, and a disclosure the moment anything does. That
+    # matters because the fix for the double passphrase prompt is to give the
+    # initramfs a key file (Debian's /etc/zfs/initramfs-tools-load-key.d/), and
+    # an initramfs carrying a key must never be written anywhere but the
+    # encrypted dataset. Not staging it when it cannot be used keeps those two
+    # changes from colliding.
+    if [[ -n "${_kver:-}" ]] && [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" != "1" ]]; then
+        k_log "Secure Boot off — not staging kernel/initramfs on the ESP (nothing boots them, and the ESP is unencrypted)"
+    elif [[ -n "${_kver:-}" ]]; then
         mkdir -p "${zbm_fallback_dir}"
         cp "$_kpath" "${zbm_fallback_dir}/vmlinuz"
         cp "$_ipath" "${zbm_fallback_dir}/initrd.img"
@@ -1223,12 +1237,35 @@ DRACUT
             k_log "  Removed fbx64.efi (RHEL fallback boot manager)"
         fi
 
-        # Always create a fresh "kldload" boot entry pointing to shim.
-        # Chain: firmware → shim → signed GRUB → chainloader → ZFSBootMenu
+        # Create a fresh "kldload" boot entry. WHERE it points follows the
+        # Secure Boot decision, because the shim chain only earns its cost when
+        # Secure Boot is actually on.
+        #
+        #   SB ON:  firmware → shim → signed GRUB → chainloader → ZFSBootMenu.
+        #           Every link is needed: only shim is Microsoft-signed, and
+        #           shim will not chainload ZBM directly (SBAT gap, shim 15.8).
+        #
+        #   SB OFF: firmware → ZFSBootMenu. Nothing in between validates
+        #           anything, so shim and GRUB are pure cost — an extra two
+        #           stages and a five-second menu in front of the boot manager
+        #           the operator actually wants.
+        #
+        # HISTORY: this pointed at shim unconditionally. After Secure Boot
+        # became opt-out (2026-08-19) every install still booted
+        # firmware → shim → GRUB → 5s menu → ZBM with Secure Boot disabled and
+        # nothing verifying a signature anywhere along it. The operator's
+        # report was "it went to grub, then to zbm" — two stages they never
+        # asked for, on a machine where neither could do its job.
+        local _efi_target='\EFI\BOOT\BOOTX64.EFI' _efi_desc="shim (Secure Boot chain)"
+        if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" != "1" ]]; then
+            _efi_target='\EFI\zbm\BOOTX64.EFI'
+            _efi_desc="ZFSBootMenu (direct — Secure Boot off)"
+        fi
+        k_log "EFI boot entry → ${_efi_target}  [${_efi_desc}]"
         efibootmgr \
             -c -d "${disk}" -p "${part_num}" \
             -L "kldload" \
-            -l '\EFI\BOOT\BOOTX64.EFI' >&7 2>&1 ||
+            -l "${_efi_target}" >&7 2>&1 ||
             k_log "WARNING: efibootmgr entry creation failed"
 
         local _uefi_bootnum
