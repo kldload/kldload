@@ -229,17 +229,28 @@ def _powered_off_nodes():
 
 
 def _node_expectation(total):
-    """(expected_ready, note) for a cluster of `total` registered nodes."""
+    """(expected_ready, note) for a cluster of `total` registered nodes.
+
+    Every registered node is expected Ready. Full stop.
+
+    WHY THIS USED TO SUBTRACT: nodes powered off by the end-of-run quiesce were
+    deducted from the expectation, so a 6-node cluster running on 4 reported
+    "ok". The tool had been calibrated to accept a defect — and it worked
+    exactly as designed on 2026-08-19, staying green while an etcd member, an
+    apiserver and a scheduler were all down. quiesce no longer touches cluster
+    nodes, and even if it did, a node that is off is a finding, not an
+    expectation. The note still NAMES the powered-off nodes, because that turns
+    "4/6 Ready" into something an operator can act on in one step.
+    """
     off = _powered_off_nodes()
     rc, out, _ = _run(["kubectl", "get", "nodes", "-o=jsonpath={.items[*].metadata.name}"],
                       timeout=10)
     if rc != 0 or not out:
         return total, ""
-    names = out.split()
-    off_nodes = [n for n in names if n in off]
+    off_nodes = [n for n in out.split() if n in off]
     if not off_nodes:
         return total, ""
-    return total - len(off_nodes), " (%d powered down by quiesce: %s)" % (
+    return total, " (%d powered off: %s — start with: virsh start <name>)" % (
         len(off_nodes), ", ".join(sorted(off_nodes)))
 
 def check_k8s_nodes():
