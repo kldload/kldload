@@ -368,16 +368,39 @@ DNS
 setup_kvm() {
     log "=== KVM setup ==="
 
-    # Network bridge for VMs
+    # Network bridge for VMs that want to sit on the LAN. Optional: the default
+    # libvirt network is NAT via virbr0, and nothing here requires br0.
+    #
+    # WHY IT IS CREATED WITHOUT AN ADDRESS: nmcli's default for a new bridge is
+    # ipv4.method=auto, so br0 came up asking for DHCP. Enslaving the primary
+    # NIC then failed — it already had an active connection — and that failure
+    # was swallowed by `2>/dev/null || true`, leaving an empty bridge with no
+    # carrier, DHCP-ing forever. NetworkManager-wait-online waits for every
+    # managed device to settle, so it timed out and FAILED on every boot. The
+    # machine was fine; it just reported a failed unit permanently, which is
+    # exactly the noise that trains an operator to ignore `systemctl --failed`
+    # (fiend, 2026-08-19).
+    #
+    # A bridge with no address activates instantly and blocks nothing. It is
+    # still there to attach VMs to, which is the only reason it exists.
+    #
+    # And the primary NIC is NOT enslaved automatically: doing that moves the
+    # host's own address onto the bridge, and doing it silently, over SSH, on
+    # someone's only link is not a decision this script gets to make.
     if command -v nmcli >/dev/null 2>&1; then
-        nmcli con add type bridge ifname br0 con-name br0 stp no \
-            -- bridge.forward-delay 0 2>/dev/null || true
-        # Attach first physical ethernet to bridge
-        local eth
-        eth="$(ip -o link | awk -F': ' '/^[0-9]+: e/{print $2}' | head -1)"
-        [[ -n "${eth}" ]] &&
-            nmcli con add type bridge-slave ifname "${eth}" master br0 2>/dev/null || true
-        nmcli con up br0 2>/dev/null || true
+        if nmcli -t -f NAME con show 2>/dev/null | grep -qx br0; then
+            log "bridge br0 already defined — leaving it alone"
+        elif nmcli con add type bridge ifname br0 con-name br0 stp no \
+            ipv4.method disabled ipv6.method ignore \
+            -- bridge.forward-delay 0 >>"$LOG" 2>&1; then
+            if nmcli con up br0 >>"$LOG" 2>&1; then
+                ok "bridge br0 ready (no address — attach VMs, or enslave a NIC by hand)"
+            else
+                log "WARNING: br0 defined but would not activate — see $LOG"
+            fi
+        else
+            log "WARNING: could not define bridge br0 — bridged VM networking unavailable (NAT via virbr0 still works)"
+        fi
     fi
 
     # libvirt default pool + default NAT network (virbr0). libvirtd's socket
