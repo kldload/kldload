@@ -108,10 +108,22 @@ k_poweroff_after_success() {
     # 2026-07-28). Unattended/seed installs still reboot — nobody's there to
     # press the power button. The kldload-mok-heal service re-offers enrollment
     # on later boots if it's still missed, so this is belt-and-suspenders.
+    # Powering off costs the operator a trip to the machine, so it has to be
+    # earned. It is earned by exactly one thing: an attended Secure Boot
+    # install, where the next boot has a ~10s MokManager window a running
+    # auto-reboot would race past.
+    #
+    # Note the EXPLICIT "1" test rather than _secure_boot_enabled(), whose
+    # default is 1 — so an install that never set the variable at all was
+    # treated as a Secure Boot install and powered off. Secure Boot is opt-in
+    # as of 2026-08-19; without MOK there is no enrollment window to protect
+    # and no reason not to reboot straight into the installed system.
     local _sb_shutdown=0
-    if _secure_boot_enabled && [[ ! -f /etc/kldload/autoinstall.env ]]; then
+    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]] &&
+        [[ ! -f /etc/kldload/autoinstall.env ]]; then
         _sb_shutdown=1
     fi
+    k_log "Post-install action: $([[ "$_sb_shutdown" == "1" ]] && echo "poweroff (Secure Boot MOK enrollment)" || echo "reboot")"
 
     if [[ "${KLDLOAD_NO_AUTO_REBOOT:-0}" == "1" ]]; then
         printf '\e[1;32m║   Remove the USB / ISO and reboot when ready.            ║\e[0m\n'
