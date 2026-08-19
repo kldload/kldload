@@ -26,7 +26,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -48,6 +51,16 @@ type Snapshot struct {
 	DoctorErr  error
 	Components []Component
 	CompErr    error
+
+	// FailedUnits is `systemctl --failed`, and it is in the verdict for a
+	// reason. On 2026-08-19 kldload-firstboot died at line 55 of 3698 on a
+	// fresh install. The machine still booted, the desktop still came up and
+	// NVIDIA still worked, so it looked fine — the operator found it three
+	// symptoms later, from icons that had not been pinned. The failure sat in
+	// `systemctl --failed` the whole time and nothing put it in front of
+	// anyone. A script that fails loudly into a log nobody reads is
+	// indistinguishable from one that did not fail at all.
+	FailedUnits []string
 }
 
 // GatherOpts lets tests and the CLI point the collectors somewhere else.
@@ -80,7 +93,38 @@ func Gather(o GatherOpts) Snapshot {
 		s.Doctor, s.DoctorErr = RunDoctor(o.DoctorBin, o.Timeout)
 	}
 	s.Components, s.CompErr = ListComponents(o.ComponentBin, o.Timeout)
+	s.FailedUnits = failedUnits(o.Timeout)
 	return s
+}
+
+// failedUnits returns the names of systemd units in the failed state.
+//
+// Returns an empty slice when systemctl is absent, times out, or reports
+// nothing — a reading we could not take must not masquerade as a clean bill
+// of health, but it must not invent a problem either. The caller reports only
+// what is actually listed.
+func failedUnits(timeout time.Duration) []string {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "systemctl", "--failed",
+		"--no-legend", "--plain", "--no-pager").Output()
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) > 0 && strings.HasSuffix(f[0], ".service") {
+			names = append(names, f[0])
+		}
+	}
+	return names
 }
 
 // Criticals counts audit findings that make the machine broken rather than
@@ -110,6 +154,13 @@ func (s Snapshot) Verdict() (Level, string) {
 			}
 		}
 		return LevelProblem, fmt.Sprintf("%d critical problem(s) with this install — %s", n, worst)
+	}
+	// Ranked directly under audit criticals and above everything else: a unit
+	// that failed is a concrete, already-happened fault, whereas an unsettled
+	// build is only a fault if it stays that way.
+	if n := len(s.FailedUnits); n > 0 {
+		return LevelProblem, fmt.Sprintf("%d systemd unit(s) failed — %s",
+			n, strings.Join(s.FailedUnits, ", "))
 	}
 	if s.Progress.Failed() > 0 {
 		return LevelProblem, fmt.Sprintf("%d build phase(s) failed — see Progress", s.Progress.Failed())

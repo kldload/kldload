@@ -295,3 +295,35 @@ func TestChrootZfsModprobeIsNotCritical(t *testing.T) {
 		t.Error("a FATAL naming the TARGET kernel must stay critical — the suppression is too broad")
 	}
 }
+
+// TestFailedUnitReachesTheVerdict pins the lesson from 2026-08-19:
+// kldload-firstboot died at line 55 of 3698 on a fresh install. The machine
+// booted, the desktop came up, NVIDIA worked — so it looked fine, and the
+// failure was found three symptoms later from unpinned icons. It had been
+// sitting in `systemctl --failed` the entire time.
+//
+// A failed unit is a concrete, already-happened fault. It must outrank an
+// unsettled build in the headline, and it must never be silent.
+func TestFailedUnitReachesTheVerdict(t *testing.T) {
+	s := Snapshot{FailedUnits: []string{"kldload-firstboot.service"}}
+	lvl, msg := s.Verdict()
+	if lvl != LevelProblem {
+		t.Errorf("level = %v, want LevelProblem", lvl)
+	}
+	if !strings.Contains(msg, "kldload-firstboot.service") {
+		t.Errorf("verdict does not name the failed unit: %q", msg)
+	}
+
+	// A critical audit finding still outranks it — a broken install is worse
+	// than a unit that failed on an otherwise sound one.
+	s.Findings = []Finding{{Severity: SevCritical, Message: "no kernel"}}
+	if _, msg = s.Verdict(); !strings.Contains(msg, "critical problem") {
+		t.Errorf("criticals must still win the headline, got %q", msg)
+	}
+
+	// And a clean machine still reads clean.
+	clean := Snapshot{}
+	if lvl, _ := clean.Verdict(); lvl == LevelProblem {
+		t.Error("empty snapshot must not report a problem")
+	}
+}
