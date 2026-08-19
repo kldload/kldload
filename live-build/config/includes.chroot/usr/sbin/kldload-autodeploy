@@ -199,6 +199,34 @@ _await_power_off() {
 # The request is sent to EVERY match first, and only then does it wait. Doing
 # it one at a time meant up to 90s of waiting per VM — twelve minutes for the
 # eight blue/green sites, serially, in the middle of an install.
+# _ai_payload_reclaim — free /root/darksite/ollama once it has been consumed.
+#
+# The payload is 3.3G: the ollama runtime tarball, the Open WebUI OCI image and
+# the Whisper weights. All three are one-shot — the runtime is installed, the
+# image is loaded into the container store, the weights are rsynced into
+# /srv/open-webui. After that the copy under /root is dead weight on every
+# installed machine.
+#
+# WHY HERE AND NOT IN firstboot's _darksite_reclaim: because that is the
+# mistake this codebase already made once. Reclaiming there removed the helm
+# charts EIGHT MINUTES before autodeploy went looking for them, and an
+# air-gapped install pulled 138 images off the internet. The consumer has to be
+# the one that frees it, after it has actually consumed it — which is here.
+#
+# Args: none.  Returns: 0 always — reclaiming disk must never fail a deploy.
+_ai_payload_reclaim() {
+    [[ -d /root/darksite/ollama ]] || return 0
+    if [[ -f /etc/kldload/keep-darksite ]]; then
+        log "[ai] LAN-mirror mode: keeping /root/darksite/ollama"
+        return 0
+    fi
+    local _sz
+    _sz="$(du -sh /root/darksite/ollama 2>/dev/null | cut -f1)" || _sz="?"
+    rm -rf /root/darksite/ollama
+    log "[ai] darksite AI payload reclaimed (${_sz}) — runtime installed, interface loaded, weights staged"
+    return 0
+}
+
 power_off_group() {
     local _glob="$1" _force="${2:-0}" _vm
     local _targets=()
@@ -709,6 +737,7 @@ if [[ "${WANT[ai]}" == "1" ]]; then
             log "[ai] To have the installer do it, tick 'Download an AI model' (KLDLOAD_AI_PULL_MODEL=1);"
             log "[ai] for an air-gapped machine, build the ISO with KLDLOAD_INCLUDE_OLLAMA_DARKSITE=1."
             mark "ai"
+            _ai_payload_reclaim
             log "[ai] complete (engine + interface, no model)"
             exit 0
         fi
@@ -848,6 +877,10 @@ if [[ "${WANT[ai]}" == "1" ]]; then
         # causes firstboot to skip. Shared script, called from both, so the two
         # paths cannot disagree about whether the AI stack has a UI.
         mark "ai"
+        # Same reclaim as the no-model path: by here the runtime is installed,
+        # the interface is loaded and any darksite weights have been rsynced
+        # into /srv/ollama, so the copy under /root is spent.
+        _ai_payload_reclaim
         log "[ai] complete"
         # kldload-rag-firstboot.service is WantedBy=multi-user.target but its
         # ConditionPathExists gates skip it at boot — ollama.service didn't
