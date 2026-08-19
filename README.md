@@ -1,8 +1,11 @@
 <div align="center">
 
 <h1>
-  <img src="live-build/config/includes.chroot/usr/local/share/kldload-webui/assets/kldload-lockup.svg" width="300" alt="kldload — BYOL0 — bring your own layer zero"/>
+  <img src="assets/kldload-mark.png" width="86" align="middle" alt=""/>
+  &nbsp;kldload
 </h1>
+
+<em>BYOL0 — bring your own layer zero</em>
 
 **A build tool that assembles a Linux distribution onto ZFS root from the
 vendor's own package repositories — and the artifact OS that falls out of it.**
