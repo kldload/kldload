@@ -46,9 +46,23 @@ trap 'rc=$?; log "ERR: line ${LINENO} exited ${rc} running: ${BASH_COMMAND}"' ER
 source "${MANIFEST}"
 ROLE="${KLDLOAD_PROFILE:-server}"
 HOSTNAME="$(cat /etc/hostname | tr -d '[:space:]')"
-LAN_IP="$(ip route get 1.1.1.1 2>/dev/null |
-    awk '/src/{print $7}' | head -1 ||
-    ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
+# The fallback used to hang off `||` at the end of a PIPELINE, which binds to
+# the last command — `head -1` — and that exits 0 even with no input. So the
+# fallback was dead code and LAN_IP came back empty whenever there was no
+# default route, taking nine downstream users with it. An offline install has
+# no route to 1.1.1.1 by definition, which is exactly when the fallback was
+# supposed to earn its place (2026-08-18).
+LAN_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7}' | head -1)"
+if [[ -z "$LAN_IP" ]]; then
+    # No default route — take any global address instead. A machine can be
+    # perfectly configured on a LAN with no gateway.
+    LAN_IP="$(ip -o -4 addr show scope global 2>/dev/null |
+        awk '{print $4}' | cut -d/ -f1 | head -1)"
+fi
+if [[ -z "$LAN_IP" ]]; then
+    log "WARNING: no IPv4 address on any interface — this node has no LAN identity."
+    log "         Steps that publish or bind to it will be skipped, not silently wrong."
+fi
 
 log "Node: ${HOSTNAME}  role: ${ROLE}  lan_ip: ${LAN_IP}"
 
