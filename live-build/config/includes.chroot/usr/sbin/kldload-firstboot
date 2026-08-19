@@ -52,12 +52,21 @@ HOSTNAME="$(cat /etc/hostname | tr -d '[:space:]')"
 # default route, taking nine downstream users with it. An offline install has
 # no route to 1.1.1.1 by definition, which is exactly when the fallback was
 # supposed to earn its place (2026-08-18).
-LAN_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7}' | head -1)"
+#
+# The `|| LAN_IP=""` sits OUTSIDE the assignment and is load-bearing. Under
+# `set -Eeuo pipefail`, `ip route get` exits 2 when there is no route, pipefail
+# propagates that through the pipeline, the assignment inherits it, and set -e
+# kills firstboot outright. The original line got away with it only because its
+# trailing `||` swallowed the status — the same `||` that made the fallback
+# unreachable. Removing one without adding the other turned a silently empty
+# variable into a dead firstboot on the first air-gapped install that ran it
+# (2026-08-19, exit 2 at this line).
+LAN_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7}' | head -1)" || LAN_IP=""
 if [[ -z "$LAN_IP" ]]; then
     # No default route — take any global address instead. A machine can be
     # perfectly configured on a LAN with no gateway.
     LAN_IP="$(ip -o -4 addr show scope global 2>/dev/null |
-        awk '{print $4}' | cut -d/ -f1 | head -1)"
+        awk '{print $4}' | cut -d/ -f1 | head -1)" || LAN_IP=""
 fi
 if [[ -z "$LAN_IP" ]]; then
     log "WARNING: no IPv4 address on any interface — this node has no LAN identity."
