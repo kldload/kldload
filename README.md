@@ -1,7 +1,25 @@
-# kldload
+<div align="center">
+
+<h1>
+  <img src="live-build/config/includes.chroot/usr/local/share/kldload-webui/assets/kldload-lockup.svg" width="300" alt="kldload — BYOL0 — bring your own layer zero"/>
+</h1>
 
 **A build tool that assembles a Linux distribution onto ZFS root from the
 vendor's own package repositories — and the artifact OS that falls out of it.**
+
+*Boot environments, air-gapped installs, and a snapshot before every package transaction.*
+
+[![License: BSD-3](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Linux-brightgreen.svg)
+![Substrates](https://img.shields.io/badge/substrates-Fedora%20%7C%20Debian%20%7C%20RHEL%20%7C%20Arch-orange.svg)
+![Root](https://img.shields.io/badge/root-OpenZFS-orange.svg)
+![Boot](https://img.shields.io/badge/boot-ZFSBootMenu-blue.svg)
+
+**The family:** **kldload** — the substrate &middot; [zxplore](https://github.com/zxplore/zxplore) — the ZFS console &middot; [wgxplore](https://github.com/wgxplore/wgxplore) — the WireGuard console &middot; [vmxplore](https://github.com/vmxplore/vmxplore) — the VM console
+
+<img src="screenshots/desktop.png" width="880" alt="kldload desktop — the installed system, with the console tools on the dock"/>
+
+</div>
 
 There are two ways to use this.
 
