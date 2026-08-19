@@ -2476,10 +2476,44 @@ HELMCHARTS
         mkdir -p "${ROOTFS}/usr/local/share/kldload"
         cp -r /build/live-build/config/includes.chroot/usr/local/share/kldload/. \
             "${ROOTFS}/usr/local/share/kldload/"
+        # The repo's tests/ is the ONE source of truth for the smoke suite.
+        #
+        # WHY: includes.chroot carried its own copy of every smoke script, and
+        # those copies were a fork. The shipped smoke-all.sh had not been
+        # touched since 2026-06-05 while tests/ moved on, so eight of twelve
+        # files differed and every test fix since June reached the repo and
+        # never reached an installed machine. The tally fix that stops one
+        # failure being reported as two was in tests/ and absent from the ISO
+        # built after it (fiend .137, 2026-08-19).
+        #
+        # Copying tests/ LAST means it wins over the includes.chroot copy
+        # unconditionally, and drift becomes impossible rather than merely
+        # discouraged.
+        if [[ -d /build/tests ]]; then
+            mkdir -p "${ROOTFS}/usr/local/share/kldload/tests"
+            cp /build/tests/*.sh "${ROOTFS}/usr/local/share/kldload/tests/"
+            log "tests: synced $(find /build/tests -maxdepth 1 -name '*.sh' | wc -l) script(s) from tests/ (canonical)"
+        else
+            log "WARNING: /build/tests missing — the ISO keeps whatever includes.chroot had"
+        fi
+
         # Tests subdir needs execute bit; everything else (awk, jq,
         # yaml) is read-only data and stays mode-from-source.
         [[ -d "${ROOTFS}/usr/local/share/kldload/tests" ]] &&
             chmod +x "${ROOTFS}/usr/local/share/kldload/tests/"*.sh 2>/dev/null || true
+
+        # Assert the OUTCOME: a smoke suite that silently did not ship is a
+        # machine that reports itself healthy because nothing checked it.
+        if [[ -f "${ROOTFS}/usr/local/share/kldload/tests/smoke-all.sh" ]]; then
+            if ! grep -q '_count_results' \
+                "${ROOTFS}/usr/local/share/kldload/tests/smoke-all.sh"; then
+                log "FATAL: shipped smoke-all.sh is not the copy from tests/ — the fork is back"
+                exit 1
+            fi
+        else
+            log "FATAL: no smoke-all.sh in the ISO — the post-install smoke test cannot run"
+            exit 1
+        fi
     fi
 
     # Create kldload-webui systemd service

@@ -571,6 +571,21 @@ def check_cilium_scrape_labels():
     if r is None:
         return _result("observability", "cilium scrape labels", "skip", "", "prometheus unreachable")
     if not r:
+        # "No series" has two very different causes and only one is a defect.
+        #
+        # If Prometheus has never scraped the cilium-agent job, there are no
+        # series yet because the scrape has not happened — the cluster is
+        # still converging. If it HAS scraped and the labelled series is still
+        # absent, the labels really are missing from the scrape config.
+        #
+        # Without this split, every fresh install failed here: the post-install
+        # smoke test runs seconds after the cluster is declared ready, and the
+        # same box had 127 cilium metric names minutes later (fiend, .127 and
+        # .137, 2026-08-19). A check that fails on every healthy install is a
+        # check people learn to ignore.
+        if not _prom_query('up{job="cilium-agent"}'):
+            return _result("observability", "cilium scrape labels", "skip", "",
+                           "cilium-agent not scraped yet — cluster still converging")
         return _result("observability", "cilium scrape labels", "fail",
                        'cilium_version{k8s_app="cilium"} returns ≥1 series (needed for dashboard 16611)',
                        "no series — synthesized labels missing from scrape config",
@@ -581,6 +596,11 @@ def check_cilium_scrape_labels():
                    f"{len(r)} agents reporting")
 
 def check_tetragon_scrape():
+    # Same convergence split as the cilium check above: an unscraped job is
+    # "not yet", not "broken".
+    if not _prom_query('up{job="tetragon"}'):
+        return _result("observability", "tetragon scrape", "skip", "",
+                       "tetragon not scraped yet — cluster still converging")
     r = _prom_query("tetragon_events_total")
     if r is None:
         return _result("observability", "tetragon scrape", "skip", "", "prometheus unreachable")

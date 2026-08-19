@@ -1357,7 +1357,23 @@ fi
 # down, which is right for a build host that is not also the lab.
 quiesce_idle_vms() {
     command -v virsh >/dev/null 2>&1 || return 0
-    local _keep_cp="${KLDLOAD_KEEP_CPS:-2}" _keep_w="${KLDLOAD_KEEP_WORKERS:-2}"
+
+    # Cluster nodes are the DELIVERABLE, not build scratch. Keep every one of
+    # them unless an operator explicitly asks for fewer.
+    #
+    # HISTORY: these defaulted to 2 and 2, so a requested 3-control-plane,
+    # 3-worker cluster was powered down to 2+2 at the end of the install. The
+    # box then sat with two nodes NotReady, eighteen pods not Ready including
+    # an etcd member and an apiserver, a 3-member etcd running on 2, and the
+    # summary still printing "K8s: deployed (3 workers)". Found by auditing a
+    # finished install (fiend .137, 2026-08-19); the log said what it had done,
+    # in one line, four hours earlier.
+    #
+    # Build VMs are already powered down individually as each one finishes —
+    # that is what bounds peak memory, and it is why every klab golden was
+    # already off when this pass ran. This pass had nothing left to reclaim
+    # except the cluster the operator asked for.
+    local _keep_cp="${KLDLOAD_KEEP_CPS:-999}" _keep_w="${KLDLOAD_KEEP_WORKERS:-999}"
     local _vm _cp_seen=0 _w_seen=0 _off=0
 
     log "[quiesce] powering down idle VMs (keeping ${_keep_cp} CP + ${_keep_w} workers)"
