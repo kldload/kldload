@@ -614,6 +614,33 @@ EOFSTAB
         # Same branch, same reason: with no ESP copy to leak it to, the pool key
         # can go into the initramfs now instead of one boot later.
         k_install_initramfs_zfs_key "${target}"
+
+        # Make the FALLBACK path agree with the decision we just made.
+        #
+        # Firmware auto-creates its own boot entry — usually labelled "UEFI OS"
+        # — for any ESP that contains \EFI\BOOT\BOOTX64.EFI. Ours holds shim
+        # there for the Secure Boot chain, so an SB-off install ends up with TWO
+        # entries on the same partition: "kldload" pointing at ZFSBootMenu, and
+        # a firmware one pointing at shim. Picking the second drops the operator
+        # into shim → GRUB → five-second menu → ZBM, the chain this branch
+        # exists to avoid, on a machine where nothing verifies a signature
+        # anyway. Reported as "two versions of the 2TB boot device in the boot
+        # menu" (fiend .135, 2026-08-20) — same GPT UUID on both entries.
+        #
+        # Putting ZBM at the fallback path makes both entries do the same
+        # correct thing, and dropping GRUB removes the dead second stage rather
+        # than leaving it to be found later.
+        if [[ -f "${target}/boot/efi/EFI/zbm/BOOTX64.EFI" ]]; then
+            mkdir -p "${zbm_fallback_dir}"
+            if cp "${target}/boot/efi/EFI/zbm/BOOTX64.EFI" \
+                "${zbm_fallback_dir}/BOOTX64.EFI"; then
+                k_log "Fallback \\EFI\\BOOT\\BOOTX64.EFI is now ZFSBootMenu (was shim)"
+                rm -f "${zbm_fallback_dir}/grubx64.efi" "${zbm_fallback_dir}/grub.cfg"
+                k_log "  removed grubx64.efi + grub.cfg — nothing chainloads with Secure Boot off"
+            else
+                k_log "WARNING: could not place ZBM at the fallback path — the firmware entry still boots shim"
+            fi
+        fi
     elif [[ -n "${_kver:-}" ]]; then
         mkdir -p "${zbm_fallback_dir}"
         cp "$_kpath" "${zbm_fallback_dir}/vmlinuz"

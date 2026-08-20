@@ -99,16 +99,29 @@ if [[ "$DISTRO" == "deb" ]]; then
     test_cmd "gnome-control-center" "gnome-control-center"
 fi
 
-# ── GDM ──────────────────────────────────────────────────────────────────────
+# ── Display manager ──────────────────────────────────────────────────────────
 _section "Display Manager"
 
-if [[ "$DISTRO" == "deb" ]]; then
-    test_service_active "gdm3" "gdm"
-    test_service_enabled "gdm3" "gdm"
-else
-    test_service_active "gdm" "gdm"
-    test_service_enabled "gdm" "gdm"
-fi
+# Which DM is correct is a per-distro decision, not a constant. Debian Trixie
+# deliberately ships LightDM: GDM 48 there cannot pass the session type to
+# gnome-session ("Unit name gnome-session-(null)@gnome.target is not valid")
+# and aborts with "no session desktop files installed". profiles.sh picks
+# LightDM to bypass that path entirely, and that is the working configuration.
+#
+# This test asserted gdm3 on Debian regardless, so a correctly-installed
+# desktop failed here every time — and the failure invited exactly the wrong
+# fix. Caught 2026-08-20, after the "wrong" DM was switched to gdm3 on a
+# working machine and had to be put back.
+#
+# Assert what the machine actually needs: SOME display manager is enabled and
+# running, and it is the one this distro chose.
+_dm_expected="gdm"
+case "$DISTRO" in
+deb | debian) _dm_expected="lightdm" ;;
+ubuntu) _dm_expected="gdm3" ;;
+esac
+test_service_active "$_dm_expected" "gdm"
+test_service_enabled "$_dm_expected" "gdm"
 
 test_output_contains "Graphical target" "systemctl get-default" "graphical"
 
