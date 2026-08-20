@@ -83,6 +83,110 @@ k_zfs_bootloader_write_hostid() {
     k_log "hostid written: $(xxd -p "${target}/etc/hostid" 2>/dev/null)"
 }
 
+# k_target_tool — find an executable inside the target, across sbin AND bin.
+#
+# Args:    $1 target root, $2.. tool names to try, in preference order.
+# Stdout:  the path of the first hit, RELATIVE TO THE TARGET (e.g. /usr/sbin/x).
+# Returns: 0 on a hit, 1 when none of the names exist.
+#
+# WHY: `[[ -x "${target}/usr/bin/update-initramfs" ]]` is false on every Debian
+# install — the binary is in /usr/sbin. That single wrong directory meant the
+# initramfs rebuild block fell all the way through to "no initramfs tool found"
+# on every Debian target it has ever run against, and then logged "initramfs
+# rebuilt" regardless (.143, 2026-08-20). Distros disagree about sbin vs bin
+# and the usrmerge state varies, so ask instead of assuming.
+k_target_tool() {
+    local target="$1" name d
+    shift
+    for name in "$@"; do
+        for d in /usr/sbin /usr/bin /sbin /bin; do
+            [[ -x "${target}${d}/${name}" ]] && {
+                printf '%s\n' "${d}/${name}"
+                return 0
+            }
+        done
+    done
+    return 1
+}
+
+# k_chroot_tool — run a target binary in the chroot with a sane PATH.
+#
+# Args:    $1 target root, $2 absolute in-target path, $3.. arguments.
+# Returns: whatever the command returns. Output goes to fd 7 (bootloader.log).
+#
+# WHY THE PATH MATTERS: `chroot target foo` resolves foo against the CALLING
+# process's PATH, and the installer runs under systemd-run with
+# PATH=/usr/local/bin:/usr/bin — no sbin at all. Passing an absolute path fixes
+# only the outer lookup; the script being run then fails one level down when it
+# calls a helper by bare name. update-initramfs invoking `mkinitramfs` did
+# exactly that and exited 127 (.143, 2026-08-20). Setting PATH covers the whole
+# process subtree, including every hook under /etc/initramfs-tools/hooks.
+k_chroot_tool() {
+    local target="$1"
+    shift
+    chroot "${target}" /usr/bin/env \
+        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        "$@" >&7 2>&1
+}
+
+# k_initramfs_lists_key — is the pool key actually INSIDE an initramfs image?
+#
+# Args:    $1 target root, $2 absolute path to the image ON THE LIVE HOST.
+# Returns: 0 key present · 1 key absent · 2 could not look (no usable lister).
+# Stdout:  nothing. Callers must distinguish 1 from 2 — see WHY below.
+#
+# WHY THIS IS NOT A ONE-LINER: the live ISO is Fedora 44 (builder/Dockerfile),
+# and the target it installs is usually Debian. `lsinitramfs` is Debian's tool
+# and does not exist on the live system, so the original
+#
+#     lsinitramfs "$img" 2>/dev/null | grep -q ...
+#
+# resolved to "command not found", the 2>/dev/null ate the message, grep read an
+# empty pipe, and EVERY encrypted install reported the key missing — including
+# the ones where it was embedded correctly. The install log then said the boot
+# would ask twice whether or not it would, which is worse than no check at all:
+# it made a working fix indistinguishable from a broken one, and it is why the
+# lifecycle assertion added for exactly this could never pass.
+#
+# The target's own lsinitramfs is tried FIRST because it is the tool that
+# matches the image format we just built. lsinitrd (dracut) is the fallback for
+# an EL/Fedora target. If neither exists we say so rather than guess.
+k_initramfs_lists_key() {
+    local target="$1" img="$2"
+    local want='etc/zfs/kldload-rpool.key'
+    local listing=""
+
+    # Cascade rather than pick one: a tool being PRESENT is not the same as it
+    # WORKING here. The target's own lister comes first because it matches the
+    # image format we just built, but it needs a functioning target userland,
+    # so an empty result falls through to the next candidate instead of being
+    # reported as "no key".
+    #
+    # ABSOLUTE PATHS inside the chroot, never a bare name. `chroot target foo`
+    # resolves foo against the CALLER's PATH — the installer runs under
+    # systemd-run with PATH=/usr/local/bin:/usr/bin, so anything in sbin is
+    # invisible and fails as "No such file or directory". Same trap that took
+    # out update-initramfs on .104 (2026-08-20).
+    local _t
+    for _t in /usr/bin/lsinitramfs /usr/sbin/lsinitramfs /usr/bin/lsinitrd /usr/sbin/lsinitrd; do
+        [[ -x "${target}${_t}" ]] || continue
+        listing="$(chroot "${target}" "$_t" "/boot/$(basename "$img")" 2>/dev/null)"
+        [[ -n "$listing" ]] && break
+    done
+    if [[ -z "$listing" ]] && command -v lsinitramfs >/dev/null 2>&1; then
+        listing="$(lsinitramfs "$img" 2>/dev/null)"
+    fi
+    if [[ -z "$listing" ]] && command -v lsinitrd >/dev/null 2>&1; then
+        listing="$(lsinitrd "$img" 2>/dev/null)"
+    fi
+
+    # Nothing could read the image. Say "I could not look", never "it is absent".
+    [[ -n "$listing" ]] || return 2
+    # lsinitramfs prints bare relative paths, lsinitrd prints an ls -l style
+    # long listing; match the path anywhere on the line so both are covered.
+    grep -q "${want}\$" <<<"$listing"
+}
+
 # k_install_initramfs_zfs_key — make the FIRST boot single-prompt too.
 #
 # Args:    $1 the target root.
@@ -135,16 +239,36 @@ k_install_initramfs_zfs_key() {
         return 0
     fi
 
-    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]]; then
+    # Default to "Secure Boot is on" when the variable is unset, matching the
+    # ESP-staging branch's `:-1`. The two decisions have to agree: staging puts
+    # a copy of the initramfs on unencrypted FAT, and this puts a key inside
+    # the initramfs. Disagreeing defaults (this used to say `:-0`) meant an
+    # unset variable staged the image AND embedded the key — a plaintext pool
+    # key on a partition anyone can read. Wrong in the safe direction is one
+    # extra passphrase prompt; wrong in the other direction is no encryption.
+    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]]; then
         k_log "Secure Boot on — not embedding a pool key (the ESP copy is unencrypted)"
         return 0
     fi
     if [[ ! -d "${target}/etc/initramfs-tools" ]]; then
-        k_log "target has no initramfs-tools — first boot will ask for the passphrase twice"
+        # dracut and mkinitcpio targets need their own mechanism and do not
+        # have one yet: zfs-dracut's 90zfs/module-setup.sh installs zpool.cache,
+        # hostid and vdev_id.conf and NO keyfile, so an EL/Fedora/Arch install
+        # asks for the passphrase at ZFSBootMenu and again in the initramfs,
+        # every boot, by design. Say so plainly — an operator comparing two
+        # machines deserves to know why one asks once and the other twice.
+        k_log "NOTE: ${KLDLOAD_DISTRO:-target} uses dracut/mkinitcpio, not initramfs-tools"
+        k_log "  single-prompt unlock is not implemented there — this boot will ask for the passphrase TWICE"
         return 0
     fi
 
-    install -d -m 0700 "${target}/etc/zfs" "${target}/etc/zfs/initramfs-tools-load-key.d"
+    # 0755 on /etc/zfs: it is a normal system directory that also holds
+    # zpool.cache and zfs-functions, and re-moding it to 0700 as a side effect
+    # of embedding a key is not this function's business. The secret is the key
+    # FILE (0400 root) and the directory that will only ever hold loader
+    # snippets stays 0700 for tidiness.
+    install -d -m 0755 "${target}/etc/zfs"
+    install -d -m 0700 "${target}/etc/zfs/initramfs-tools-load-key.d"
     (
         umask 077
         printf '%s' "$pass" >"$keyfile"
@@ -208,23 +332,107 @@ HOOK
         _unbind+=("${target}/dev")
     fi
 
-    chroot "${target}" update-initramfs -u -k all >&7 2>&1 ||
-        k_log "WARNING: update-initramfs failed in the target"
+    # Call update-initramfs by ABSOLUTE PATH.
+    #
+    # `chroot target update-initramfs` resolves the binary using the PATH of
+    # the CALLING process, not a PATH from inside the target. The installer is
+    # started by kldload-webui via systemd-run, and that unit's PATH is
+    # /usr/local/bin:/usr/bin — no /usr/sbin, no /sbin. update-initramfs lives
+    # in /usr/sbin on Debian, so the call died with
+    #
+    #   chroot: failed to run command 'update-initramfs': No such file or directory
+    #
+    # which reads exactly like "the package is missing" and is not: on .104
+    # initramfs-tools 0.148.4 was installed and the binary was present at both
+    # /usr/sbin and /sbin. Purely a lookup failure. (2026-08-20, .104.)
+    #
+    # Resolving it against the target also makes a better guard than the
+    # `-d /etc/initramfs-tools` test above: that checks a directory shipped by
+    # initramfs-tools-core, while this checks the thing we are about to run.
+    local _uinitramfs="" _cand
+    for _cand in /usr/sbin/update-initramfs /sbin/update-initramfs /usr/bin/update-initramfs; do
+        [[ -x "${target}${_cand}" ]] && {
+            _uinitramfs="$_cand"
+            break
+        }
+    done
+    if [[ -z "$_uinitramfs" ]]; then
+        k_log "WARNING: no update-initramfs binary in the target — this boot WILL ask for the passphrase twice"
+        k_log "  key and hook are written; kldload-firstboot re-attempts on the target where the tool is on PATH"
+        return 0
+    fi
+
+    # Give the chroot a REAL PATH, not just an absolute argv[0].
+    #
+    # Calling /usr/sbin/update-initramfs by absolute path fixes only the outer
+    # lookup. update-initramfs is a /bin/sh script that invokes `mkinitramfs`
+    # by bare name (line 142 of initramfs-tools 0.148.4), and mkinitramfs is
+    # also in /usr/sbin — so with the installer's inherited
+    # PATH=/usr/local/bin:/usr/bin it died one level down instead:
+    #
+    #   /usr/sbin/update-initramfs: 142: mkinitramfs: not found
+    #   update-initramfs: failed for /boot/initrd.img-7.1.3+deb13-amd64 with 127
+    #
+    # 127 is "command not found", and it was the SECOND time the same missing
+    # sbin bit this call (.143, 2026-08-20). Setting PATH fixes the whole
+    # subtree — the script, everything it shells out to, and every hook under
+    # /etc/initramfs-tools/hooks that does the same thing. env is used rather
+    # than a login shell so nothing else about the environment changes.
+    local _uiok=1
+    chroot "${target}" /usr/bin/env \
+        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        "$_uinitramfs" -u -k all >&7 2>&1 || {
+        _uiok=0
+        k_log "WARNING: ${_uinitramfs} failed in the target — see bootloader.log"
+    }
 
     for _m in ${_unbind[@]+"${_unbind[@]}"}; do
         umount "$_m" || k_log "note: ${_m} still busy — left mounted"
     done
 
     # Verify the OUTCOME. An image rebuilt without the key is indistinguishable
-    # from one rebuilt with it until the machine asks twice.
+    # from one rebuilt with it until the machine asks twice — and by then the
+    # operator is standing at a boot prompt, which is the worst place to learn
+    # it. Three outcomes, three different messages: "did not look" is NOT the
+    # same answer as "looked and it is missing", and reporting one as the other
+    # is the bug this check previously had (see k_initramfs_lists_key).
     local img
     img="$(ls -1t "${target}"/boot/initrd.img-* 2>/dev/null | head -1)"
-    if [[ -n "$img" ]] && lsinitramfs "$img" 2>/dev/null |
-        grep -q '^etc/zfs/kldload-rpool.key$'; then
-        k_log "First boot will be single-prompt (key embedded in $(basename "$img"))"
-    else
-        k_log "NOTE: key not in the target initramfs — the first boot will ask twice, firstboot fixes it after"
+    if [[ -z "$img" ]]; then
+        k_log "WARNING: no initrd.img-* on the target after update-initramfs — this boot WILL ask for the passphrase twice"
+        return 0
     fi
+
+    # Capture the status in a CONDITION context. A bare `k_initramfs_lists_key`
+    # followed by `case $?` reads correctly and is fatal: under `set -Eeuo
+    # pipefail` a simple command that returns non-zero aborts the script, and a
+    # function call is a simple command. So the moment the key was genuinely
+    # absent — return 1, the case this branch exists to report — the installer
+    # died at the bootloader stage instead of logging it.
+    #
+    # HISTORY: 2026-08-20, .104. First install off 1.4.2-rc2. update-initramfs
+    # failed (see below), the key was therefore not in the image, this returned
+    # 1, and the install stopped dead with no grub.cfg and no EFI entry. The
+    # previous code was an if/else, which is a condition context and survived a
+    # non-zero return; converting it to case/$? for a third outcome introduced
+    # the abort. `|| _keystate=$?` restores the condition context.
+    local _keystate=0
+    k_initramfs_lists_key "${target}" "$img" || _keystate=$?
+    case $_keystate in
+    0)
+        k_log "First boot will be single-prompt (key embedded in $(basename "$img"))"
+        ;;
+    1)
+        k_log "WARNING: the pool key is NOT in $(basename "$img") — this boot WILL ask for the passphrase twice"
+        k_log "  update-initramfs $([[ "$_uiok" == 1 ]] && echo succeeded || echo FAILED); hook: ${target}/etc/initramfs-tools/hooks/kldload-zfs-key"
+        k_log "  kldload-firstboot re-attempts this on first boot and logs the result"
+        ;;
+    *)
+        # No lister anywhere. Do not claim success and do not claim failure.
+        k_log "NOTE: cannot inspect $(basename "$img") from this live system (no lsinitramfs/lsinitrd)"
+        k_log "  the key and hook are written; kldload-firstboot verifies on the target, where the tool exists"
+        ;;
+    esac
     return 0
 }
 
@@ -611,9 +819,6 @@ EOFSTAB
     # changes from colliding.
     if [[ -n "${_kver:-}" ]] && [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" != "1" ]]; then
         k_log "Secure Boot off — not staging kernel/initramfs on the ESP (nothing boots them, and the ESP is unencrypted)"
-        # Same branch, same reason: with no ESP copy to leak it to, the pool key
-        # can go into the initramfs now instead of one boot later.
-        k_install_initramfs_zfs_key "${target}"
 
         # Make the FALLBACK path agree with the decision we just made.
         #
@@ -750,6 +955,27 @@ EOFSTAB
     else
         k_log "WARNING: no kernel with matching initramfs found on target — direct-boot path will fail (ZBM still usable)"
     fi
+
+    # Embed the pool key so the FIRST boot takes one passphrase, not two.
+    #
+    # This call used to live inside the SB-off branch above, next to the
+    # "not staging kernel/initramfs" log line, because both decisions turn on
+    # the same fact: with no copy of the initramfs on the unencrypted ESP,
+    # a key inside it is as protected as the pool itself.
+    #
+    # That coupling was wrong in one direction. The branch also requires
+    # ${_kver} — a kernel on the target with a MATCHING initramfs, which is
+    # the ESP-staging precondition and has nothing to do with encryption. A
+    # multi-kernel install where the scan finds no matched pair (see the long
+    # note above the scan) therefore skipped the key for a completely
+    # unrelated reason, and said nothing about it: the log showed the
+    # "no kernel with matching initramfs" warning, which reads as a
+    # direct-boot problem, and the operator's next boot asked twice.
+    #
+    # The Secure Boot refusal that DOES matter lives inside the function,
+    # where it is checked against the same default (:-1) the staging branch
+    # uses. So the call belongs out here, on every path.
+    k_install_initramfs_zfs_key "${target}"
 
     # Write grub.cfg at both paths the distro GRUB might look for:
     # CentOS/Rocky/Fedora grubx64.efi is built with prefix \EFI\<vendor>\,
@@ -1281,26 +1507,39 @@ DRACUT
 
     # ── Rebuild initramfs (picks up ZFS + hostid) ─────────────────────────────
 
-    if [[ -x "${target}/usr/bin/update-initramfs" ]]; then
-        chroot "${target}" update-initramfs -c -k all >&7 2>&1 ||
-            chroot "${target}" update-initramfs -u -k all >&7 2>&1 ||
-            k_log "WARNING: update-initramfs had errors — check ${KLDLOAD_LOG_DIR}/bootloader.log"
-    elif [[ -x "${target}/usr/bin/mkinitcpio" ]]; then
+    # _rebuilt tracks whether an initramfs tool actually RAN and succeeded, so
+    # the summary at the end of this block can stop announcing "initramfs
+    # rebuilt" on installs where nothing rebuilt anything.
+    local _rebuilt=0 _uitool
+    if _uitool="$(k_target_tool "${target}" update-initramfs)"; then
+        if k_chroot_tool "${target}" "$_uitool" -c -k all ||
+            k_chroot_tool "${target}" "$_uitool" -u -k all; then
+            _rebuilt=1
+        else
+            k_log "WARNING: ${_uitool} had errors — check ${KLDLOAD_LOG_DIR}/bootloader.log"
+        fi
+    elif _uitool="$(k_target_tool "${target}" mkinitcpio)"; then
         # Arch Linux uses mkinitcpio — rebuild all presets
         k_log "Rebuilding initramfs with mkinitcpio..."
-        chroot "${target}" mkinitcpio -P >&7 2>&1 ||
+        if k_chroot_tool "${target}" "$_uitool" -P; then
+            _rebuilt=1
+        else
             k_log "WARNING: mkinitcpio had errors — check ${KLDLOAD_LOG_DIR}/bootloader.log"
-    elif [[ -x "${target}/sbin/mkinitfs" ]]; then
+        fi
+    elif _uitool="$(k_target_tool "${target}" mkinitfs)"; then
         # Alpine Linux uses mkinitfs
         k_log "Rebuilding initramfs with mkinitfs..."
         local _akver
         _akver=$(ls "${target}/lib/modules/" 2>/dev/null | grep lts | head -1)
         [[ -z "$_akver" ]] && _akver=$(ls "${target}/lib/modules/" 2>/dev/null | grep -v '^$' | head -1)
         if [[ -n "$_akver" ]]; then
-            chroot "${target}" mkinitfs -k "$_akver" >&7 2>&1 ||
+            if k_chroot_tool "${target}" "$_uitool" -k "$_akver"; then
+                _rebuilt=1
+            else
                 k_log "WARNING: mkinitfs had errors — check ${KLDLOAD_LOG_DIR}/bootloader.log"
+            fi
         fi
-    elif [[ -x "${target}/usr/bin/dracut" ]]; then
+    elif _uitool="$(k_target_tool "${target}" dracut)"; then
         # Verify zfs-dracut is installed — without it, dracut --add "zfs" silently
         # produces an initramfs that can't import ZFS pools, causing a boot loop.
         if [[ ! -d "${target}/usr/lib/dracut/modules.d/90zfs" ]]; then
@@ -1351,18 +1590,33 @@ DRACUT
                 k_log "skipping initramfs build for ${_kver} — no zfs.ko (DKMS didn't build for this kernel)"
                 continue
             fi
-            chroot "${target}" dracut --force --add "zfs" --kver "$_kver" >&7 2>&1 ||
+            if k_chroot_tool "${target}" "$_uitool" --force --add "zfs" --kver "$_kver"; then
+                _rebuilt=1
+            else
                 k_log "WARNING: dracut rebuild failed for ${_kver}"
+            fi
         done
         # Verify ZFS made it into the initramfs
-        if ! chroot "${target}" lsinitrd "/boot/initramfs-$(ls "${target}"/usr/lib/modules/ 2>/dev/null | head -1).img" 2>/dev/null | grep -q '90zfs'; then
+        local _lsinitrd
+        if _lsinitrd="$(k_target_tool "${target}" lsinitrd)" &&
+            ! chroot "${target}" "$_lsinitrd" \
+                "/boot/initramfs-$(ls "${target}"/usr/lib/modules/ 2>/dev/null | head -1).img" 2>/dev/null |
+            grep -q '90zfs'; then
             k_log "WARNING: ZFS module may not be in initramfs — check bootloader.log"
         fi
     else
-        k_log "WARNING: no initramfs tool found — check ${KLDLOAD_LOG_DIR}/bootloader.log"
+        k_log "WARNING: no initramfs tool found in the target (looked for update-initramfs, mkinitcpio, mkinitfs, dracut in sbin and bin)"
     fi
 
-    k_log "initramfs rebuilt"
+    # Report what happened, not what was attempted. This line used to be
+    # unconditional, so an install that found no tool at all logged
+    # "no initramfs tool found" and "initramfs rebuilt" back to back — the
+    # second one erasing the first for anyone skimming (.143, 2026-08-20).
+    if [[ "$_rebuilt" == "1" ]]; then
+        k_log "initramfs rebuilt"
+    else
+        k_log "WARNING: initramfs NOT rebuilt — ZFS/hostid may be missing from the image"
+    fi
 
     # ── Register ZFSBootMenu with efibootmgr ──────────────────────────────────
 

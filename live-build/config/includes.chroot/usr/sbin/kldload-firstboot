@@ -1012,6 +1012,128 @@ HOOK
     return 0
 }
 
+# _heal_initramfs_zfs_key — the SECOND failsafe for single-prompt unlock.
+#
+# Args:    none.
+# Returns: always 0. A machine that asks twice still boots; nothing here is
+#          worth failing firstboot over.
+#
+# WHY THIS EXISTS SEPARATELY from _install_initramfs_zfs_key: that function is
+# reachable only while /etc/kldload/zfs-passphrase is still on disk, and the
+# line directly after it shreds that file. So it gets exactly ONE attempt, ever.
+# If the installer already wrote the key but its update-initramfs did not take —
+# a failed chroot rebuild, a later package transaction regenerating the image
+# from a tree that had not been re-hooked yet — nothing ever tried again, and
+# the machine asked for the passphrase twice on every boot for the rest of its
+# life with no way back except a reinstall.
+#
+# This path needs no plaintext passphrase at all. The key file itself is the
+# input, it lives on the encrypted root, and it has already been verified
+# against the pool by whichever function wrote it. So it can re-assert the hook
+# and rebuild whenever the image and the key disagree. Boot-critical work gets
+# two failsafes (the b653 pattern); this is the second one.
+_heal_initramfs_zfs_key() {
+    local keyfile=/etc/zfs/kldload-rpool.key
+    local img
+
+    [[ -r "$keyfile" ]] || return 0
+
+    # THIS FUNCTION ONLY ADDS. It must never delete key material.
+    #
+    # It used to "clean up" a key it believed was unsafe: if Secure Boot looked
+    # enabled, it shredded the keyfile and removed both hooks, on the reasoning
+    # that under SB the initramfs is copied to the unencrypted ESP and a key
+    # inside it would be plaintext on FAT. That reasoning is sound and the
+    # action was still wrong, for two reasons.
+    #
+    # First, it fired on a DEFAULT, not on a fact. `${KLDLOAD_ENABLE_SECURE_BOOT:-1}`
+    # reads 1 when the variable is simply absent — and the manifest that
+    # kldload-install-target actually writes does not carry that key at all, so
+    # it is absent on every install. Meanwhile the sibling function twenty
+    # lines up defaults the SAME variable to 0. On .143 (2026-08-20) both ran in
+    # one firstboot: _install_initramfs_zfs_key embedded the key and logged
+    # "single-prompt unlock configured", then this deleted it one second later
+    # and logged "Secure Boot on" on a machine where `mokutil --sb-state` says
+    # disabled. Two defaults, one process, opposite conclusions.
+    #
+    # Second, and the reason the branch is gone rather than corrected: if
+    # Secure Boot really were on, the install-time path and the sibling here
+    # both REFUSE TO CREATE the key, so there would be nothing to clean up. The
+    # branch could only ever fire on a false positive, and its cost when it did
+    # was to destroy a working single-prompt setup after the plaintext
+    # passphrase had already been shredded — unrecoverable without a reinstall.
+    #
+    # A stale key under real Secure Boot is worth a loud log line, not a
+    # deletion this function is not positioned to judge.
+    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]]; then
+        log "WARNING: Secure Boot is on and a pool key exists at ${keyfile}"
+        log "  the ESP copy of the initramfs is unencrypted — review this by hand; not touching it"
+        return 0
+    fi
+
+    [[ -d /etc/initramfs-tools ]] || return 0
+
+    img="$(ls -1t /boot/initrd.img-* 2>/dev/null | head -1)"
+    if [[ -n "$img" ]] && lsinitramfs "$img" 2>/dev/null |
+        grep -q '^etc/zfs/kldload-rpool.key$'; then
+        return 0 # already correct — the installer's copy took
+    fi
+
+    log "pool key present but missing from $(basename "${img:-initramfs}") — re-asserting the hook and rebuilding"
+
+    # Re-assert both halves. Either can be absent independently: the installer
+    # writes them into the target, and anything that reinstalls initramfs-tools
+    # or ships a conffile can take the hook out from under us.
+    install -d -m 0755 /etc/zfs
+    install -d -m 0700 /etc/zfs/initramfs-tools-load-key.d
+    if [[ ! -r /etc/zfs/initramfs-tools-load-key.d/kldload ]]; then
+        cat >/etc/zfs/initramfs-tools-load-key.d/kldload <<'KEYHOOK'
+# Sourced by /usr/share/initramfs-tools/scripts/zfs with $ZFS and
+# $ENCRYPTIONROOT already set. Loading the key here is what keeps the boot to a
+# single passphrase prompt. Returning non-zero falls through to prompting,
+# which is the right behaviour when the key is missing or wrong.
+[ -r /etc/zfs/kldload-rpool.key ] || return 1
+"${ZFS}" load-key -L file:///etc/zfs/kldload-rpool.key "${ENCRYPTIONROOT}"
+KEYHOOK
+        chmod 0444 /etc/zfs/initramfs-tools-load-key.d/kldload
+    fi
+    if [[ ! -x /etc/initramfs-tools/hooks/kldload-zfs-key ]]; then
+        cat >/etc/initramfs-tools/hooks/kldload-zfs-key <<'HOOK'
+#!/bin/sh
+# Copy the pool key and its loader into the initramfs. Without this the hook
+# directory is empty at boot and the second passphrase prompt comes back.
+set -e
+[ "$1" = "prereqs" ] && {
+    echo
+    exit 0
+}
+. /usr/share/initramfs-tools/hook-functions
+mkdir -p "${DESTDIR}/etc/zfs/initramfs-tools-load-key.d"
+[ -r /etc/zfs/kldload-rpool.key ] &&
+    cp -a /etc/zfs/kldload-rpool.key "${DESTDIR}/etc/zfs/kldload-rpool.key"
+[ -r /etc/zfs/initramfs-tools-load-key.d/kldload ] &&
+    cp -a /etc/zfs/initramfs-tools-load-key.d/kldload \
+        "${DESTDIR}/etc/zfs/initramfs-tools-load-key.d/kldload"
+exit 0
+HOOK
+        chmod 0755 /etc/initramfs-tools/hooks/kldload-zfs-key
+    fi
+
+    if ! update-initramfs -u -k all >>"$LOG" 2>&1; then
+        log "WARNING: update-initramfs failed — the boot will keep asking for the passphrase twice"
+        return 0
+    fi
+
+    img="$(ls -1t /boot/initrd.img-* 2>/dev/null | head -1)"
+    if [[ -n "$img" ]] && lsinitramfs "$img" 2>/dev/null |
+        grep -q '^etc/zfs/kldload-rpool.key$'; then
+        ok "single-prompt unlock healed (key now in $(basename "$img"))"
+    else
+        log "WARNING: rebuild did not put the key in $(basename "${img:-initramfs}") — the boot will ask twice"
+    fi
+    return 0
+}
+
 setup_zero_trust() {
     local idx="${KLDLOAD_NODE_INDEX:-1}"
     local color="${KLDLOAD_NODE_COLOR:-blue}"
@@ -3722,6 +3844,13 @@ CHROMEPOL
             shred -uz /etc/kldload/zfs-passphrase 2>/dev/null || rm -f /etc/kldload/zfs-passphrase
             log "Plaintext ZFS passphrase shredded"
         fi
+
+        # Second failsafe, and it must sit OUTSIDE the block above: that block
+        # runs only while the plaintext passphrase still exists, and its last
+        # act is to destroy it. This one takes the already-verified key file as
+        # its input instead, so it still works when the installer embedded the
+        # key and something later rebuilt the initramfs without it.
+        _heal_initramfs_zfs_key
 
         # ── Desktop + VM-restore setup, on the path that ACTUALLY RUNS ───────
         # arm_vm_restore() is invoked far below, in the PRO tail of main() —

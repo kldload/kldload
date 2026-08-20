@@ -1315,6 +1315,20 @@ KLDLOAD_ENABLE_EBPF="${KLDLOAD_ENABLE_EBPF:-0}"
 KLDLOAD_NVIDIA_DRIVERS="${KLDLOAD_NVIDIA_DRIVERS:-auto}"
 KLDLOAD_WIREGUARD="${KLDLOAD_WIREGUARD:-0}"
 KLDLOAD_EXPORT_FORMAT="${KLDLOAD_EXPORT_FORMAT:-none}"
+# The operator's Secure Boot INTENT, recorded because kldload-firstboot has to
+# make the same decision the installer made and has no other source for it.
+#
+# Every code path that touches the pool key gates on this: under Secure Boot a
+# copy of the initramfs lands on the unencrypted ESP, so a key embedded inside
+# it would be plaintext on FAT. Until now this key was absent from the manifest
+# entirely, so firstboot read an unset variable and each function applied its
+# own default — one embedded the key, the next deleted it, on the same boot
+# (.143, 2026-08-20). Writing the fact removes the guessing.
+#
+# Intent, not firmware state: an SB install is normally performed with SB off
+# in firmware and enabled afterwards, so mokutil would answer the wrong
+# question here.
+KLDLOAD_ENABLE_SECURE_BOOT="${KLDLOAD_ENABLE_SECURE_BOOT:-0}"
 # ── Runtime requests — kldload-autodeploy reads these to decide which
 # subsystems to stand up on first boot (unattended). Without these, the
 # firstboot orchestrator doesn't know what the user picked in the UI.
