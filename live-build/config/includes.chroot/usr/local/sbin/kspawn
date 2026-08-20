@@ -324,9 +324,10 @@ register_cluster_db() {
         fi
     done
 
-    kldload-db event --type "cluster" --subject "$cluster" \
-        --message "kspawn spawned ${registered}/${#nodes[@]} node(s) from ${distro}" \
-        >/dev/null 2>&1 || true
+    # HARMLESS CASE: the event log is a breadcrumb, not state — every node is
+    # already registered above, so a failed event row costs an audit line and
+    # nothing else, and must not fail a spawn that produced working machines.
+    kldload-db event --type "cluster" --subject "$cluster" --message "kspawn spawned ${registered}/${#nodes[@]} node(s) from ${distro}" >/dev/null 2>&1 || true
 
     # Fill in the addresses NOW rather than waiting up to a minute for
     # kldload-inventory-sync.timer. kspawn already blocked on wait_for_ip for
@@ -362,9 +363,13 @@ deregister_cluster_db() {
         kldload-db vm-delete --name "$n" >/dev/null 2>&1 ||
             warn "  kldload-db vm-delete failed for ${n} — stale inventory row left behind"
     done
+    # HARMLESS CASE: the nodes are already deregistered by the loop above, which
+    # is the part the Ansible inventory reads. Marking the now-empty cluster row
+    # "destroyed" is bookkeeping; failing it would abort a destroy that has
+    # already removed every VM and zvol, leaving the caller worse off.
     kldload-db cluster-upsert --name "$cluster" --status "destroyed" >/dev/null 2>&1 || true
-    kldload-db event --type "cluster" --subject "$cluster" \
-        --message "kspawn destroyed the cluster" >/dev/null 2>&1 || true
+    # HARMLESS CASE: audit breadcrumb only — see above.
+    kldload-db event --type "cluster" --subject "$cluster" --message "kspawn destroyed the cluster" >/dev/null 2>&1 || true
     return 0
 }
 
