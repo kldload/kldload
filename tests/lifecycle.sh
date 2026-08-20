@@ -312,7 +312,13 @@ done
 # covered an encrypted install at all, which is why it got that far (fiend
 # .135, 2026-08-20).
 if [[ "${SMOKE_ENCRYPT:-0}" == "1" ]] && [[ "$_install_state" == "done" ]]; then
-    _keylog="$(ssh_live 'sudo grep -iE "single-prompt|not embedding|no passphrase staged|does not unlock" /tmp/install.log' 2>/dev/null || true)"
+    # grep exits 1 when it matches nothing, which is a real outcome here (the
+    # key step logged nothing at all) and not an error to swallow — capture it
+    # and let the check below decide what it means.
+    _keylog=""
+    if ! _keylog="$(ssh_live 'sudo grep -iE "single-prompt|not embedding|no passphrase staged|does not unlock" /tmp/install.log' 2>/dev/null)"; then
+        _keylog=""
+    fi
     if grep -q "single-prompt unlock configured\|First boot will be single-prompt" <<<"$_keylog"; then
         ok "encrypted install: pool key embedded — first boot is single-prompt"
     else
