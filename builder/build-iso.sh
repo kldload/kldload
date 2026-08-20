@@ -65,7 +65,7 @@ BUILD_DATE="$(date +%Y%m%d)"
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
 DISTRO_TAG="${DISTRO:-fedora}"
-VERSION="${KLDLOAD_VERSION:-1.4.2-rc1}"
+VERSION="${KLDLOAD_VERSION:-1.4.2-rc2}"
 ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
@@ -2130,6 +2130,24 @@ HELMCHARTS
     # Enable kldload-tls-cert.timer at boot (fires cert-drift check hourly)
     if [[ -f "${ROOTFS}/usr/lib/systemd/system/kldload-tls-cert.timer" ]]; then
         chroot "${ROOTFS}" systemctl enable kldload-tls-cert.timer >>"$LOG_FILE" 2>&1 || true
+    fi
+    # Enable the inventory sync every minute. This is what makes a freshly
+    # cloned fleet visible to Ansible without anyone running a refresh: it
+    # copies each VM's DHCP lease from libvirt into the state DB, and
+    # kldload-inventory selects VMs `WHERE ip_addr != ''`.
+    #
+    # Enabled unconditionally, not gated on the KVM profile. The service is
+    # ordered After=libvirtd and the tool exits cleanly when libvirt or
+    # kldload-db is absent, so on a host with no VMs it is a no-op that costs
+    # one wakeup a minute. Gating it on a profile is how the previous
+    # generation of this went wrong — nothing filled ip_addr on any install,
+    # so the VM half of the inventory was permanently empty (verified on a
+    # running host 2026-08-17, seen again on .104 2026-08-20).
+    if [[ -f "${ROOTFS}/usr/lib/systemd/system/kldload-inventory-sync.timer" ]]; then
+        chroot "${ROOTFS}" systemctl enable kldload-inventory-sync.timer >>"$LOG_FILE" 2>&1 ||
+            log "WARNING: could not enable kldload-inventory-sync.timer — Ansible inventory will not self-update"
+    else
+        log "WARNING: kldload-inventory-sync.timer missing from the rootfs — inventory will not self-update"
     fi
     # Enable kldload-tls-cert.service at boot (regenerates cert once
     # network is up — handles the DHCP race)

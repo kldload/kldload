@@ -254,6 +254,120 @@ spawn_kvm_node() {
 }
 
 # ── Manifest write ──────────────────────────────────────────────────────
+# ── register_cluster_db — put the cluster and its nodes in the state DB ──────
+#
+# Args:    $1 cluster, $2 distro, $3 role, $4 cpu, $5 ram_mb, $6 disk_gb,
+#          then one "name|zvol|seed|ip" entry per node.
+# Returns: always 0. The manifest on disk is still the source of truth for
+#          kspawn's own verbs, so a DB that is absent, locked or a schema
+#          version ahead must never fail a spawn that otherwise worked.
+#
+# WHY THIS EXISTS: kspawn was the ONLY VM tool that did not register what it
+# created. kvm-create, kvm-clone, kvm-delete and klab all call kldload-db;
+# kspawn wrote /var/lib/kspawn/clusters/<name>/manifest.json and stopped there.
+#
+# The consequence is not cosmetic. kldload-inventory is the dynamic Ansible
+# inventory, and it is built ENTIRELY from the state DB — so every node kspawn
+# has ever created was invisible to `ansible -i kldload-inventory`, and to
+# anything downstream of it: node-prep.yml, kube-join.yml, the cluster and role
+# groups, deployment history. Spawn five nodes and Ansible sees none of them.
+# "No wonder things aren't showing up" (operator, 2026-08-20).
+#
+# Registering here rather than inside spawn_kvm_node is deliberate: that
+# function runs in parallel subshells writing to per-node temp files, and
+# concurrent upserts to one sqlite file is how you collect "database is
+# locked". By the time this runs, every node has succeeded or been dropped,
+# and the writes are serial.
+register_cluster_db() {
+    local cluster="$1" distro="$2" role="$3" cpu="$4" ram_mb="$5" disk_gb="$6"
+    shift 6
+    local -a nodes=("$@")
+
+    command -v kldload-db >/dev/null 2>&1 || {
+        # Not an error: kspawn runs on hosts without the kldload control plane.
+        # Say it once so the absence is explained rather than merely silent.
+        log "  kldload-db not present — cluster not registered (Ansible inventory will not see it)"
+        return 0
+    }
+
+    # The cluster row first: vm-register takes --cluster CID_OR_NAME and the
+    # nodes below reference it, so creating it after them would leave the first
+    # writes pointing at a name that did not exist yet.
+    kldload-db cluster-upsert --name "$cluster" --template "kspawn" \
+        --status "active" \
+        --data "$(printf '{"distro":"%s","role":"%s","source":"kspawn"}' "$distro" "$role")" \
+        >/dev/null 2>&1 ||
+        warn "  kldload-db cluster-upsert failed for ${cluster} — continuing"
+
+    # ram-gb, not ram-mb: the DB column is GB and kspawn carries MB. Integer
+    # division is right here — these are inventory hints, not billing.
+    local ram_gb=$((ram_mb / 1024))
+    ((ram_gb < 1)) && ram_gb=1
+
+    local entry n zvol seed ip registered=0
+    for entry in "${nodes[@]}"; do
+        IFS='|' read -r n zvol seed ip <<<"$entry"
+        [[ -n "$n" ]] || continue
+        # A node that never got a lease is still registered — it exists, it is
+        # just unreachable, and an inventory that omits it hides the problem.
+        # status reflects that instead.
+        local _status="running"
+        [[ -n "$ip" ]] || _status="no-ip"
+        if kldload-db vm-register --name "$n" --cluster "$cluster" \
+            --role "$role" ${ip:+--ip "$ip"} \
+            --cpu "$cpu" --ram-gb "$ram_gb" --disk-gb "$disk_gb" \
+            --golden-src "$(golden_snapshot "$distro" 2>/dev/null || echo "$distro")" \
+            --status "$_status" >/dev/null 2>&1; then
+            registered=$((registered + 1))
+        else
+            warn "  kldload-db vm-register failed for ${n} — Ansible will not see this node"
+        fi
+    done
+
+    kldload-db event --type "cluster" --subject "$cluster" \
+        --message "kspawn spawned ${registered}/${#nodes[@]} node(s) from ${distro}" \
+        >/dev/null 2>&1 || true
+
+    # Fill in the addresses NOW rather than waiting up to a minute for
+    # kldload-inventory-sync.timer. kspawn already blocked on wait_for_ip for
+    # every node, so the leases exist and libvirt can be read immediately —
+    # which means `ansible -i kldload-inventory` works the instant this command
+    # returns, instead of a minute later. The timer still owns the steady state
+    # (reboots, DHCP renewals, VMs shut down by hand).
+    if command -v kldload-networks >/dev/null 2>&1; then
+        kldload-networks sync >/dev/null 2>&1 ||
+            log "  address sync deferred to kldload-inventory-sync.timer"
+    fi
+
+    log "  registered ${registered}/${#nodes[@]} node(s) — visible to kldload-inventory"
+    return 0
+}
+
+# ── deregister_cluster_db — remove what destroy just tore down ───────────────
+#
+# Args:    $1 cluster, then each node name.
+# Returns: always 0 — a stale row is a smaller problem than a failed destroy.
+#
+# Without this the inventory grows ghosts: Ansible keeps targeting nodes whose
+# zvols were destroyed minutes ago, and every play against the cluster group
+# starts with unreachable hosts.
+deregister_cluster_db() {
+    local cluster="$1"
+    shift
+    command -v kldload-db >/dev/null 2>&1 || return 0
+
+    local n
+    for n in "$@"; do
+        [[ -n "$n" ]] || continue
+        kldload-db vm-delete --name "$n" >/dev/null 2>&1 ||
+            warn "  kldload-db vm-delete failed for ${n} — stale inventory row left behind"
+    done
+    kldload-db cluster-upsert --name "$cluster" --status "destroyed" >/dev/null 2>&1 || true
+    kldload-db event --type "cluster" --subject "$cluster" \
+        --message "kspawn destroyed the cluster" >/dev/null 2>&1 || true
+    return 0
+}
+
 write_manifest() {
     local cluster="$1" distro="$2" runtime="$3" role="$4"
     local dir="${CLUSTERS_DIR}/${cluster}"
@@ -375,6 +489,12 @@ cmd_spawn() {
 
     write_manifest "$cluster" "$distro" "$runtime" "$role" "${nodes[@]}"
 
+    # The manifest is kspawn's own record; the DB is what everything ELSE reads
+    # — kldload-inventory builds the Ansible groups from it, so this is the step
+    # that makes a freshly spawned cluster reachable by node-prep.yml and
+    # kube-join.yml instead of invisible. Never fatal: see register_cluster_db.
+    register_cluster_db "$cluster" "$distro" "$role" "$cpu" "$ram" "$disk" "${nodes[@]}"
+
     log "${C_CYN}══ Cluster '${cluster}' ready ══${C_RST}"
     printf '%b\n' "$C_DIM"
     for entry in "${nodes[@]}"; do
@@ -483,6 +603,9 @@ cmd_destroy() {
     for s in "${seeds[@]}"; do
         [[ -f "$s" ]] && rm -f "$s"
     done
+    # Drop the inventory rows too, or Ansible keeps targeting nodes whose zvols
+    # were destroyed seconds ago and every play opens with unreachable hosts.
+    deregister_cluster_db "$cluster" "${names[@]}"
     rm -rf "$dir"
     log "Cluster '${cluster}' destroyed."
 }

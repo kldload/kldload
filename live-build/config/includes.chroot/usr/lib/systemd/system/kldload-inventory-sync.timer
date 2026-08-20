@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-inventory-sync.timer — how often the inventory catches up.
+#
+# Role:       fires kldload-inventory-sync.service.
+# Read by:    systemd.
+# Consequence
+# if missing: nothing ever fills ip_addr; see the .service header.
+#
+# 60s, because this is what makes "clone 50 machines and they all show up"
+# true. A clone gets its lease within seconds of booting, and an operator who
+# clones a fleet and then runs a playbook should not have to know that an
+# inventory refresh exists. One minute is short enough to feel automatic and
+# long enough that the cost is nil — the sync is a virsh list plus at most one
+# UPDATE per changed VM.
+#
+# RandomizedDelaySec is deliberate and the other kldload timers should copy it.
+# Four of them (kldload-snapshot, kvm-snapshot, sanoid, sysstat-collect) all
+# carry RandomizedDelaySec=0 and fire on the same second at the top of the
+# hour, which puts four ZFS-heavy jobs on the pool simultaneously. This one is
+# cheap, but it runs every minute, and a cheap job landing on the same tick as
+# an expensive one is how a cheap job gets blamed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=Sync libvirt VM addresses into the kldload inventory, every minute
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+# The reconcile is not time-critical to the second; letting systemd coalesce it
+# with other wakeups is free power saving on a workstation.
+AccuracySec=10s
+RandomizedDelaySec=5s
+Unit=kldload-inventory-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -118,15 +118,30 @@ echo "  Snap:   kvm-snap ${DEST}"
 if command -v kldload-db >/dev/null 2>&1; then
     _role="clone"
     _cluster=""
+    # MATCH THE NAMES kube-cluster ACTUALLY USES.
+    #
+    # kube-cluster sets WORKER_PREFIX="${CLUSTER_NAME}-w" (kube-cluster:182),
+    # so its workers are kldload-w-1, kldload-w-2 … The patterns here only
+    # looked for -worker-, which matches none of them. Every worker a cluster
+    # ever built was therefore filed as role="clone" with an EMPTY cluster,
+    # which is exactly what a running host showed: kldload-cp correctly
+    # control_plane, and kldload-w-1/2/3 as unclustered clones (.104,
+    # 2026-08-20). kube_workers in the Ansible inventory is role="worker", so
+    # those three nodes could never be targeted as workers by any playbook.
+    #
+    # -w-<digits> is anchored on the digits so a VM legitimately called
+    # something like "db-w-cache" is not mistaken for a worker.
     case "$DEST" in
     *-cp | *-cp-*) _role="control_plane" ;;
     *-worker-* | *worker*) _role="worker" ;;
+    *-w-[0-9] | *-w-[0-9][0-9]) _role="worker" ;;
     esac
-    # Extract cluster prefix (everything before the first role suffix)
-    if [[ "$DEST" == *-cp* || "$DEST" == *-worker* ]]; then
-        _cluster="${DEST%%-cp*}"
-        _cluster="${_cluster%%-worker*}"
-    fi
+    # Extract cluster prefix (everything before the first role suffix).
+    case "$DEST" in
+    *-cp*) _cluster="${DEST%%-cp*}" ;;
+    *-worker*) _cluster="${DEST%%-worker*}" ;;
+    *-w-[0-9] | *-w-[0-9][0-9]) _cluster="${DEST%-w-*}" ;;
+    esac
     kldload-db vm-register --name "$DEST" --role "$_role" \
         --cluster "$_cluster" --golden-src "$SOURCE" --status "cloned" 2>/dev/null || true
     kldload-db event --type "vm" --subject "$DEST" \

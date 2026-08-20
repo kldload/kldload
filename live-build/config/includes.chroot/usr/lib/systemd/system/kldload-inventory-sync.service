@@ -1,0 +1,38 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-inventory-sync.service — keep the Ansible inventory true to libvirt.
+#
+# Role:        copies each running VM's DHCP lease from libvirt into the state
+#              DB (`kldload-networks sync`), and clears the address of any VM
+#              that is shut off or gone.
+# Read by:     systemd, fired by kldload-inventory-sync.timer.
+# Consequence
+# if missing:  the `ip_addr` column stays empty forever. kldload-inventory
+#              selects VMs `WHERE ip_addr != ''` — quite correctly, since a VM
+#              with no address cannot be reached by a playbook — so the VM half
+#              of the Ansible inventory is permanently empty. Verified on a
+#              running host 2026-08-17: 10 VMs registered, 0 with an address,
+#              none targetable. Seen again on .104, 2026-08-20.
+#
+# WHY A TIMER AND NOT A POST-CLONE HOOK: at the moment a clone is created it
+# has no lease, because it has not booted yet. Calling sync from kvm-clone
+# would reliably record nothing. The address appears seconds-to-minutes later,
+# when the guest DHCPs, and only something running after that can see it. Its
+# own header says as much: "Run it after cloning, or on a timer".
+#
+# Type=oneshot: this is a reconcile that finishes, not a daemon.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=Sync libvirt VM addresses into the kldload inventory
+# libvirt is the source of the leases; without it there is nothing to read.
+After=libvirtd.service virtqemud.service
+Wants=libvirtd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/kldload-networks sync
+# A reconcile that cannot run is not a system failure — the next tick retries,
+# and a red unit here would train the operator to ignore a red unit.
+SuccessExitStatus=0 1
+Nice=10
+IOSchedulingClass=idle
