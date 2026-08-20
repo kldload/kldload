@@ -203,7 +203,8 @@ KLDLOAD_PASSWORD=admin
 KLDLOAD_NET_METHOD=dhcp
 KLDLOAD_STORAGE_MODE=zfs
 KLDLOAD_ZFS_TOPOLOGY=single
-KLDLOAD_ZFS_ENCRYPT=0
+KLDLOAD_ZFS_ENCRYPT=${SMOKE_ENCRYPT:-0}
+KLDLOAD_ZFS_PASSPHRASE=${SMOKE_PASSPHRASE:-}
 KLDLOAD_DEBIAN_RELEASE=trixie
 KLDLOAD_FEDORA_RELEASE=44
 KLDLOAD_NVIDIA_DRIVERS=0
@@ -297,6 +298,27 @@ done
 # (2026-07 audit finding).
 [[ "$_install_state" != "running" ]] ||
     fail "install timed out — still running after 60 min (VM left up for inspection)"
+
+# ── Encrypted installs: did the single-prompt key actually get embedded? ──────
+#
+# Checked HERE, while the live environment still has /tmp/install.log and the
+# target is still mounted — before any reboot, and without ever needing to type
+# a passphrase at a console.
+#
+# WHY THIS EXISTS: the install-time key embedding shipped twice doing nothing.
+# The first version read KLDLOAD_ZFS_PASSPHRASE, which only the interactive
+# path exports, and returned 0 silently when it was empty — so the install log
+# went straight past it and the operator found out at a boot prompt. No test
+# covered an encrypted install at all, which is why it got that far (fiend
+# .135, 2026-08-20).
+if [[ "${SMOKE_ENCRYPT:-0}" == "1" ]] && [[ "$_install_state" == "done" ]]; then
+    _keylog="$(ssh_live 'sudo grep -iE "single-prompt|not embedding|no passphrase staged|does not unlock" /tmp/install.log' 2>/dev/null || true)"
+    if grep -q "single-prompt unlock configured\|First boot will be single-prompt" <<<"$_keylog"; then
+        ok "encrypted install: pool key embedded — first boot is single-prompt"
+    else
+        fail "encrypted install: key NOT embedded — first boot will ask twice${_keylog:+ (${_keylog})}"
+    fi
+fi
 
 # ── Reboot into the installed target ─────────────────────────────────────────
 log "shutting down VM, switching boot order to disk-first, restarting"
