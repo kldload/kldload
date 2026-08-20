@@ -104,10 +104,36 @@ k_zfs_bootloader_write_hostid() {
 k_install_initramfs_zfs_key() {
     local target="$1"
     local keyfile="${target}/etc/zfs/kldload-rpool.key"
-    local pass="${KLDLOAD_ZFS_PASSPHRASE:-}"
+    local staged="${target}/etc/kldload/zfs-passphrase"
+    local pass=""
 
-    [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]] || return 0
-    [[ -n "$pass" ]] || return 0
+    [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]] || {
+        k_log "no ZFS encryption — nothing to embed, boot will not prompt"
+        return 0
+    }
+
+    # Read the STAGED passphrase, not the environment variable.
+    #
+    # WHY: KLDLOAD_ZFS_PASSPHRASE is exported by the TUI path only. A webui
+    # install collects it elsewhere, so by the time this runs the variable is
+    # empty — and the first version of this guard returned 0 silently on that,
+    # which is how it shipped doing nothing at all. The install said
+    # "Secure Boot off — not staging kernel/initramfs" and then simply never
+    # mentioned the key again (fiend .135, 2026-08-20).
+    #
+    # storage-zfs.sh has already written the passphrase to the target for
+    # firstboot's TPM sealing, and that file is on disk before the bootloader
+    # stage regardless of which front end collected it. One source, no scope.
+    if [[ -r "$staged" ]]; then
+        pass="$(cat "$staged")"
+    elif [[ -n "${KLDLOAD_ZFS_PASSPHRASE:-}" ]]; then
+        pass="${KLDLOAD_ZFS_PASSPHRASE}"
+    fi
+    if [[ -z "$pass" ]]; then
+        k_log "WARNING: encrypted install but no passphrase staged at ${staged}"
+        k_log "  first boot will ask twice; firstboot installs the key for later boots"
+        return 0
+    fi
 
     if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-0}" == "1" ]]; then
         k_log "Secure Boot on — not embedding a pool key (the ESP copy is unencrypted)"
