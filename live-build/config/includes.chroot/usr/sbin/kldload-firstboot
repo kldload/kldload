@@ -1294,26 +1294,42 @@ START_DELAY=15
 # something for guests that WOULD have finished — so the right value is "how
 # long does a healthy guest need", not "how safe do I want to be".
 #
-# 20s. A healthy Linux guest acknowledges ACPI immediately and then spends
-# 5-15s stopping services and flushing; 20s clears that with margin, and the
-# loop exits the instant the last guest is gone, so a normal shutdown costs
-# what the guests actually take and a host with none running costs nothing.
-# A wedged guest — no ACPI handler, still in cloud-init, or from a cluster
-# bootstrap that failed — burns the full 20s and is then SIGTERMed, which is
-# what would have happened at 120s anyway.
+# 5s, and the number follows from what a VM IS on this platform.
 #
-# WARN: a Windows guest applying updates on its way down can exceed 20s and
-# will be cut off. This platform ships Windows goldens via kvm-win. If you run
-# stateful Windows guests, shut them down before the host, or switch this file
-# to ON_SHUTDOWN=managedsave — which is upstream's own default, freezes RAM to
-# disk instead of asking the guest to stop, and is bounded by guest memory
-# rather than by guest cooperation.
+# A kldload guest is cattle. It was cloned from a golden in about two tenths of
+# a second and it can be replaced the same way; the goldens are the artefact
+# that matters, and they are built by klab, not left running at shutdown. So a
+# guest killed mid-write costs nothing worth protecting — shoot it and clone
+# another. Spending real wall-clock at every single shutdown to protect state
+# that is designed to be disposable is the wrong trade.
+#
+# What 5s actually buys, given the loop exits as soon as the guests are gone:
+#   healthy guests  — they will not finish in 5s, so they are SIGTERMed. The
+#                     zvol is crash-consistent, the guest replays its journal
+#                     next boot, and nobody cares because it is a clone.
+#   wedged guests   — the real case here — cost 5s instead of 20s or 120s.
+# Shorter is strictly faster in the case that actually hurts, and the case it
+# degrades is one this platform has already decided not to value.
+#
+# Not 0: in libvirt-guests.sh, `if [ $timeout -gt 0 ]` gates the countdown, so
+# 0 means "never time out" — the opposite of what it reads like.
+#
+# libvirt-guests is still enabled and still wanted, for ON_BOOT=start: guests
+# running at shutdown come back on boot. That is the half worth keeping.
+#
+# WARN: this makes the host hostile to STATEFUL guests. A Windows guest
+# applying updates, or anything holding data that is not in a golden, will be
+# cut off mid-write. If you run those, shut them down before the host, or set
+# ON_SHUTDOWN=managedsave — upstream's own default, which freezes RAM to disk
+# instead of asking the guest to stop and is bounded by guest memory rather
+# than guest cooperation. That is the setting to reach for the day this box
+# stops being a lab.
 #
 # HISTORY 2026-08-21, fiend: shutdown with three k8s VMs from a failed
 # bootstrap took ~128s — the full 120s budget plus the tail. Networking and the
 # display manager were already gone and the kernel had released fan control, so
 # the machine sat black with fans at full and read as a hard hang.
-SHUTDOWN_TIMEOUT=20
+SHUTDOWN_TIMEOUT=5
 # A sliding window, not batches: libvirt-guests tops the in-flight set back up
 # to PARALLEL_SHUTDOWN as each guest finishes. At 8, a typical workstation's
 # guests are all signalled at once, so the budget above is spent waiting on
