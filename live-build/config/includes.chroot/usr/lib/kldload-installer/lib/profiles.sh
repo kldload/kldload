@@ -2601,17 +2601,36 @@ SNAPTMR
         if [[ -f "${target}/etc/sanoid/sanoid.conf" ]]; then
             cat >>"${target}/etc/sanoid/sanoid.conf" <<'KVMSANOID'
 
-# KVM VM datasets — hourly snapshots for VM zvols
+# KVM VM datasets.
+#
+# DELIBERATELY THIN, and thinner than the policy for /home or rpool/ROOT,
+# because a kldload guest is cattle. It was cloned from a golden in about two
+# tenths of a second and it can be replaced the same way; nothing here holds
+# state worth 69 retained snapshots per dataset.
+#
+# The old policy was hourly=48, daily=14, weekly=4, monthly=3 — 69 per dataset,
+# applied recursively across every VM dataset. On a lab host that is ~31
+# datasets, so roughly 2,100 retained snapshots and 744 creations a day, of
+# golden images that never change and clones that are disposable by design.
+#
+# It also duplicated work. kvm-snapshot.timer (installed directly above) already
+# snapshots this exact tree with an `auto-` prefix and prunes to 48, so VM
+# datasets had TWO independent snapshot systems competing over them. This keeps
+# sanoid's coverage as a thin safety net and leaves kvm-snapshot as the owner.
+#
+# What still protects a VM: kvm-snapshot's 48 `auto-` snapshots, the named
+# `@golden` snapshots klab creates (which sanoid never touches — it only prunes
+# its own autosnap_ prefix), and the snapshot kvm-clone takes at clone time.
 [rpool/vms]
 use_template = kvm
 recursive = yes
 
 [template_kvm]
 frequently = 0
-hourly     = 48
-daily      = 14
-weekly     = 4
-monthly    = 3
+hourly     = 6
+daily      = 3
+weekly     = 1
+monthly    = 0
 yearly     = 0
 autosnap   = yes
 autoprune  = yes

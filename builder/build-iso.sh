@@ -417,11 +417,40 @@ if [[ "$EDITION" != "core" ]]; then
     # Copy sanoid.defaults.conf — required by sanoid at runtime
     mkdir -p "${ROOTFS}/etc/sanoid"
     cp "/tmp/sanoid-${SANOID_VER}/sanoid.defaults.conf" "${ROOTFS}/etc/sanoid/sanoid.defaults.conf"
-    # Sanoid systemd units
+    # Sanoid systemd units — ALL THREE. Upstream ships a three-unit design and
+    # kldload copied two of them, which is why nothing has ever been pruned.
+    #
+    #   sanoid.timer          fires every 15 minutes
+    #   sanoid.service        --take-snapshots, and Wants=/Before= the prune
+    #   sanoid-prune.service  --prune-snapshots        <- was never copied
+    #
+    # sanoid.service declares `Wants=sanoid-prune.service`, so with the prune
+    # unit absent that dependency simply pointed at nothing: snapshots were
+    # taken 96 times a day and expired ones were never removed. Measured on a
+    # running host 2026-08-20 — 28,655 snapshots against a policy that allows
+    # roughly 1,200, of which a dry run said 23,407 were already expired, and
+    # 489 GiB held by snapshots that should have been released. The retention
+    # policy in sanoid.conf was never the problem; nothing enforced it.
+    #
+    # sanoid-prune.service carries `WantedBy=sanoid.service`, so enabling it
+    # installs the sanoid.service.wants symlink and the take/prune pair runs
+    # as upstream intended.
     cp "/tmp/sanoid-${SANOID_VER}/packages/debian/sanoid.timer" "${ROOTFS}/usr/lib/systemd/system/"
     cp "/tmp/sanoid-${SANOID_VER}/packages/debian/sanoid.service" "${ROOTFS}/usr/lib/systemd/system/"
-    sed -i 's|/usr/sbin/sanoid|/usr/local/sbin/sanoid|' "${ROOTFS}/usr/lib/systemd/system/sanoid.service"
+    cp "/tmp/sanoid-${SANOID_VER}/packages/debian/sanoid-prune.service" "${ROOTFS}/usr/lib/systemd/system/" ||
+        die "FATAL: sanoid-prune.service missing from the ${SANOID_VER} tarball — snapshots would never be pruned"
+    # Both units hardcode /usr/sbin/sanoid; we install to /usr/local/sbin.
+    sed -i 's|/usr/sbin/sanoid|/usr/local/sbin/sanoid|' \
+        "${ROOTFS}/usr/lib/systemd/system/sanoid.service" \
+        "${ROOTFS}/usr/lib/systemd/system/sanoid-prune.service"
     chroot "$ROOTFS" systemctl enable sanoid.timer 2>/dev/null || true
+    chroot "$ROOTFS" systemctl enable sanoid-prune.service 2>/dev/null ||
+        log "WARNING: could not enable sanoid-prune.service — snapshots will accumulate unpruned"
+    # Verify the OUTCOME: an unpruned pool looks identical to a pruned one for
+    # weeks, and by the time it does not, it is hundreds of GiB.
+    if [[ -f "${ROOTFS}/usr/lib/systemd/system/sanoid-prune.service" ]]; then
+        log "Sanoid prune unit installed and enabled (take + prune, as upstream intends)."
+    fi
     rm -rf "/tmp/sanoid-${SANOID_VER}"
     log "Sanoid ${SANOID_VER} installed."
 
