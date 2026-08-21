@@ -104,6 +104,89 @@ virsh dumpxml "${SOURCE}" |
     exit 1
 }
 
+# ── Give the clone an identity of its own ────────────────────────────────────
+#
+# A clone is a byte-for-byte copy of the golden, so without this it boots
+# believing it IS the golden: same hostname, same machine-id, same (or absent)
+# host keys. Three symptoms, one cause, all observed on .110 2026-08-21:
+#
+#   1. Its DHCP lease carries no hostname, so the inventory sync could not
+#      match it and it never reached Ansible at all.
+#   2. sshd is not configured for it — `ansible -m ping` gets connection
+#      refused on every clone while every seeded VM answers SUCCESS.
+#   3. qemu-guest-agent is not running, so libvirt can see nothing inside it
+#      and can only ask it to shut down via ACPI.
+#
+# kspawn has always regenerated a seed per node, which is exactly why its
+# clones behave and these did not. This gives kvm-clone the same treatment.
+#
+# cloud-init reads a NoCloud seed from a volume labelled "cidata". Writing a
+# fresh one and attaching it as a cdrom is all it takes: on first boot the
+# clone sets its own hostname, installs the operator's key, and starts sshd and
+# the guest agent.
+#
+# BEST EFFORT, deliberately. A clone that boots is worth more than a clone that
+# refused to be created because genisoimage was missing or the guest has no
+# cloud-init — the clone itself already succeeded by this point, and every
+# failure below leaves it exactly as it was before: usable, just anonymous.
+_seed_dir="/var/lib/libvirt/images"
+_seed_iso="${_seed_dir}/${DEST}-seed.iso"
+_mkiso=""
+for _c in genisoimage mkisofs xorrisofs; do
+    command -v "$_c" >/dev/null 2>&1 && {
+        _mkiso="$_c"
+        break
+    }
+done
+
+if [[ -n "$_mkiso" ]]; then
+    _ssh_pub=""
+    for _k in /root/.ssh/id_ed25519.pub /root/.ssh/id_rsa.pub; do
+        [[ -r "$_k" ]] && {
+            _ssh_pub="$(cat "$_k")"
+            break
+        }
+    done
+
+    _tmp="$(mktemp -d)"
+    trap 'rm -rf "${_tmp}"' EXIT
+    printf 'instance-id: %s\nlocal-hostname: %s\n' "$DEST" "$DEST" >"${_tmp}/meta-data"
+    {
+        echo "#cloud-config"
+        echo "hostname: ${DEST}"
+        echo "manage_etc_hosts: true"
+        echo "preserve_hostname: false"
+        [[ -n "$_ssh_pub" ]] && printf 'ssh_authorized_keys:\n  - %s\n' "$_ssh_pub"
+        # Regenerate the machine-id: cloned guests otherwise share the golden's,
+        # and a duplicate machine-id makes DHCP hand out the same lease twice
+        # and systemd-journald collide on the same identifier.
+        echo "runcmd:"
+        echo "  - [ sh, -c, \"rm -f /etc/machine-id && systemd-machine-id-setup\" ]"
+        echo "  - [ sh, -c, \"systemctl enable --now ssh.service sshd.service 2>/dev/null; true\" ]"
+        echo "  - [ sh, -c, \"systemctl enable --now qemu-guest-agent 2>/dev/null; true\" ]"
+    } >"${_tmp}/user-data"
+
+    mkdir -p "$_seed_dir"
+    if "$_mkiso" -output "$_seed_iso" -volid cidata -joliet -rock \
+        "${_tmp}/user-data" "${_tmp}/meta-data" >/dev/null 2>&1; then
+        chmod 0600 "$_seed_iso" 2>/dev/null
+        # --config so it persists into the definition rather than only the
+        # running domain; the clone is defined but not started at this point.
+        if virsh attach-disk "$DEST" "$_seed_iso" sdz \
+            --type cdrom --mode readonly --config >/dev/null 2>&1; then
+            echo "  Seed:   ${_seed_iso} (hostname, ssh key, guest agent)"
+        else
+            echo "  NOTE: seed built but could not be attached — clone will boot as '${SOURCE}'" >&2
+        fi
+    else
+        echo "  NOTE: could not build a cloud-init seed — clone will boot as '${SOURCE}'" >&2
+    fi
+    rm -rf "${_tmp}"
+    trap - EXIT
+else
+    echo "  NOTE: no genisoimage/mkisofs/xorrisofs — clone will boot as '${SOURCE}'" >&2
+fi
+
 echo ""
 echo "✔ Cloned '${SOURCE}' → '${DEST}' (instant, zero bytes copied)"
 echo "  Source: /dev/zvol/${SRC_ZVOL}"

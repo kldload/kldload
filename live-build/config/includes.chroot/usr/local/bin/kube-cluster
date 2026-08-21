@@ -1047,6 +1047,35 @@ bootcmd:
   - [ sh, -c, "systemctl stop ufw 2>/dev/null; systemctl disable ufw 2>/dev/null; ufw --force disable 2>/dev/null; true" ]
   - [ sh, -c, "passwd -uf root 2>/dev/null || true" ]
   - [ sh, -c, "mkdir -p /etc/ssh/sshd_config.d && printf 'PermitRootLogin yes\\nPasswordAuthentication yes\\n' > /etc/ssh/sshd_config.d/99-kldload.conf" ]
+  # qemu-guest-agent, because this golden is the parent of every cluster VM.
+  #
+  # Without it libvirt can see nothing inside the guest: virsh domifaddr
+  # returns empty (get_vm_ip's method 1 always fails and silently falls back to
+  # DHCP lease matching), filesystem freeze/thaw for a consistent snapshot is
+  # impossible, and — the one that bites hardest — the hypervisor has no way to
+  # ask the guest to shut down except an ACPI power-button event.
+  #
+  # That last one is not theoretical. Host shutdown with three of these VMs
+  # running took the full libvirt-guests timeout because none of them answered
+  # ACPI, and the machine sat black with its fans at full while it waited
+  # (2026-08-21). An agent-equipped guest shuts down promptly instead.
+  #
+  # klab already does this for its own goldens (klab:1141,1329) and enables the
+  # unit; kube-cluster only ever READ the agent via virsh domifaddr and never
+  # installed it, so no cluster VM has ever had one. Verified on .110: the
+  # channel is attached to every domain, guest-ping fails on all of them, and
+  # the package is absent inside.
+  #
+  # NOTE: no backticks and no dollar-paren anywhere in this block — the heredoc
+  # is UNQUOTED, so bash expands them while writing the file rather than
+  # treating them as text. The same trap is recorded in kldload-install-target, where it
+  # produced a cosmetic awk error on every install for two months.
+  #
+  # Both package managers attempted, failures swallowed on purpose: a cloud
+  # image that lacks the package in its configured repos must still produce a
+  # working golden, and the agent is an enhancement to a VM that boots fine
+  # without it.
+  - [ sh, -c, "(apt-get install -y qemu-guest-agent || dnf install -y qemu-guest-agent) 2>/dev/null; systemctl enable --now qemu-guest-agent 2>/dev/null; true" ]
 USERDATA
 
     # Network config matches both naming conventions: Debian uses predictable
