@@ -161,7 +161,27 @@ k_profile_packages() {
         # wifi after install. CI can't catch this (VMs have no wifi NIC).
         # Debian: non-free-firmware component is already in bootstrap.sh's
         # sources. Per-distro names differ — see the branches below.
-        local _fw="firmware-iwlwifi firmware-realtek firmware-atheros"
+        # wpasupplicant is NOT optional and is NOT implied by the blobs.
+        #
+        # The firmware above lets the kernel bring the radio up; wpasupplicant
+        # is what actually associates with a WPA network, and NetworkManager
+        # delegates to it over D-Bus. Without it the interface exists and sits
+        # "unavailable" forever, and the journal repeats
+        #
+        #   device (wlp5s0): Couldn't initialize supplicant interface:
+        #   Failed to D-Bus activate wpa_supplicant service
+        #
+        # which is the same incident as the comment above — "every real laptop
+        # lost wifi after install" — recurring one layer up. Verified on .110,
+        # 2026-08-21: all four firmware packages present, wpasupplicant absent,
+        # wifi dead, ethernet fine.
+        #
+        # On an AIR-GAPPED install this is not an inconvenience, it is terminal:
+        # a laptop whose only link is wifi comes up with no network and no way
+        # to fetch the package that would fix it. iw ships alongside for the
+        # same reason — diagnosing a radio without it means having no tools at
+        # exactly the moment you cannot download any.
+        local _fw="firmware-iwlwifi firmware-realtek firmware-atheros wpasupplicant iw"
         # Debian/Ubuntu desktop profile uses LightDM, NOT gdm3. GDM 48 on
         # Debian Trixie has a systemd-integration bug where it can't pass
         # the session type to gnome-session — gnome-session-binary errors:
