@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════════
+# kldload-corpus — build the assistant's knowledge base FROM the running system
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# What it does, in order:
+#   1. Walks every operator tool shipped in /usr/local/{bin,sbin} and extracts
+#      its usage banner — the thing kldload treats as each tool's contract.
+#   2. Adds any man pages the system carries for those tools.
+#   3. Folds in the hand-written reference material under /usr/local/share/
+#      (the website extract and the operator playbook), so prose that no
+#      generator could produce is not lost.
+#   4. Emits one markdown file per section plus an INDEX, shaped for a
+#      retrieval collection rather than for reading top to bottom.
+#
+# WHY IT EXISTS: the previous corpus was a scrape of 178 website pages. It
+# describes the product; it does not describe the machine. An operator asking
+# "how do I clone a VM" wants kvm-clone's actual flags on the box in front of
+# them, and those existed nowhere in it — 106 tools ship and the corpus covered
+# them as commands not at all.
+#
+# WHY IT GENERATES RATHER THAN STORES: a hand-maintained corpus is stale the
+# day a flag changes, and nothing tells you. CLAUDE.md already requires every
+# tool's --help to be accurate and updated in the same commit as any flag
+# change, which makes the banners the one source of truth that is kept honest
+# by an existing rule. Harvesting them means the knowledge base is correct by
+# construction and regenerating is the whole maintenance story.
+#
+# WHY NOT A RAG SERVICE: kldload-rag and chromadb were deliberately retired on
+# 2026-08-15 (docs/bob-deprecation.md) because Open WebUI ships built-in RAG
+# with collections. This produces the corpus; Open WebUI does the retrieval.
+# Rebuilding the deleted service would undo a decision five days old.
+#
+# Inputs:  /usr/local/{bin,sbin}/*, /usr/share/man, /usr/local/share/klab-bob,
+#          /usr/local/share/kldload-ai
+# Outputs: $OUTDIR (default /var/lib/kldload/corpus) — *.md + INDEX.md
+#
+# Notes:
+#   - Tools are executed with --help in a subshell with a timeout. A tool that
+#     hangs or ignores --help costs one second and is skipped, never the run.
+#   - NOTHING here runs a tool without --help. Several kldload tools treat
+#     argv[1] as a VM name; kvm-create built a zvol called "--help" once. The
+#     banner is read from the FILE first and only executed as a fallback for
+#     tools that build their usage string at runtime.
+# ═══════════════════════════════════════════════════════════════════════════════
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+OUTDIR="${KLDLOAD_CORPUS_DIR:-/var/lib/kldload/corpus}"
+TOOL_DIRS=(/usr/local/bin /usr/local/sbin)
+PROSE_DIRS=(/usr/local/share/klab-bob /usr/local/share/kldload-ai)
+DOCS_DIRS=(/usr/local/share/kldload/docs /usr/share/doc/kldload)
+
+_log() { printf '[kldload-corpus] %s\n' "$*" >&2; }
+
+usage() {
+    cat <<'USAGE'
+kldload-corpus — build the assistant knowledge base from this system
+
+Usage:
+  kldload-corpus [build] [--out DIR]   Generate the corpus (default: build)
+  kldload-corpus stats                 What the corpus would contain
+  kldload-corpus --help
+
+Options:
+  --out DIR    Where to write. Default /var/lib/kldload/corpus,
+               override with KLDLOAD_CORPUS_DIR.
+
+The output is markdown intended for a retrieval collection — one file per
+section, chunked by tool, with an INDEX.md naming every command found.
+
+Load it into Open WebUI: Workspace -> Knowledge -> create a collection and
+upload the directory. Open WebUI provides the RAG; this provides the text.
+USAGE
+}
+
+# _banner FILE — print a tool's usage text, or nothing.
+#
+# Reads the FILE rather than running it, because several kldload tools treat
+# argv[1] as a VM name and would act on "--help". Two shapes are recognised:
+# a leading comment block (the documented house style) and a usage() function
+# containing a heredoc.
+_banner() {
+    local f="$1"
+
+    # A COMPILED tool has no readable banner in the file, so ask it.
+    #
+    # Split deliberately. The scripts are read from disk and never executed,
+    # because several kldload bash tools treat argv[1] as a VM name and one of
+    # them created a zvol literally called "--help" during testing. The Go
+    # consoles (zxplore, vmxplore, wgx, ztx) parse flags properly, take no
+    # destructive positional argument, and are precisely the tools an operator
+    # asks about — so they get run with --help behind a timeout.
+    #
+    # Detecting by shebang rather than by `file` keeps this working on a
+    # trimmed image where file(1) is not installed.
+    if ! head -c 2 "$f" 2>/dev/null | grep -q '#!'; then
+        timeout 5 "$f" --help 2>&1 | head -40 || true
+        return 0
+    fi
+    # Shape 1: the leading '#' header, minus the shebang and the ruled lines.
+    local hdr
+    hdr="$(sed -n '2,60p' "$f" 2>/dev/null |
+        sed -n '/^#/p' |
+        sed 's/^# \{0,1\}//' |
+        grep -vE '^[═─=-]{4,}$' || true)"
+    # Shape 2: a usage() heredoc, which carries the real flag list.
+    local use
+    use="$(sed -n '/^usage() *{/,/^}/p' "$f" 2>/dev/null |
+        sed -n '/<<.*$/,/^[A-Z][A-Z0-9_]*$/p' |
+        sed '1d;$d' || true)"
+    [[ -n "$use" ]] && printf '%s\n' "$use" && return 0
+    [[ -n "$hdr" ]] && printf '%s\n' "$hdr" && return 0
+    return 0
+}
+
+# _tools — every executable operator tool, deduplicated, sorted.
+_tools() {
+    local d f
+    for d in "${TOOL_DIRS[@]}"; do
+        [[ -d "$d" ]] || continue
+        for f in "$d"/*; do
+            [[ -f "$f" && -x "$f" ]] || continue
+            # Skip forwarders: a 4-line exec shim documents nothing.
+            [[ "$(wc -l <"$f" 2>/dev/null || echo 0)" -lt 6 ]] && continue
+            printf '%s\n' "$f"
+        done
+    done | sort -u | awk -F/ '!seen[$NF]++'
+}
+
+# NOTE on the awk above: dedupe by BASENAME, not by path. Several tools ship in
+# both /usr/local/bin and /usr/local/sbin — kvm-clone is in both — and sort -u
+# on full paths keeps both, so the corpus documented the same command twice and
+# a retrieval hit could land on either copy.
+
+cmd_stats() {
+    local n=0 withdoc=0 f b
+    while IFS= read -r f; do
+        n=$((n + 1))
+        b="$(_banner "$f")"
+        [[ -n "$b" ]] && withdoc=$((withdoc + 1))
+    done < <(_tools)
+    printf 'tools found:        %s\n' "$n"
+    printf 'with a usage text:  %s\n' "$withdoc"
+    printf 'man pages:          %s\n' "$(find /usr/share/man -name 'k*' 2>/dev/null | wc -l)"
+    local p=0 d
+    for d in "${PROSE_DIRS[@]}"; do
+        [[ -d "$d" ]] && p=$((p + $(find "$d" -name '*.md' 2>/dev/null | wc -l)))
+    done
+    printf 'prose documents:    %s\n' "$p"
+}
+
+cmd_build() {
+    mkdir -p "$OUTDIR"
+    local commands="${OUTDIR}/01-commands.md"
+    local manpages="${OUTDIR}/02-manpages.md"
+    local index="${OUTDIR}/INDEX.md"
+    local n=0 withdoc=0 f name b
+
+    _log "harvesting tool usage banners..."
+    {
+        echo "# kldload commands"
+        echo
+        echo "Every operator tool shipped on this system, with the usage text the"
+        echo "tool itself carries. Generated from the running machine, so it"
+        echo "describes this install and not a release note."
+        echo
+    } >"$commands"
+
+    while IFS= read -r f; do
+        name="$(basename "$f")"
+        n=$((n + 1))
+        b="$(_banner "$f")"
+        [[ -z "$b" ]] && continue
+        withdoc=$((withdoc + 1))
+        {
+            printf '## %s\n\n' "$name"
+            printf 'Path: `%s`\n\n' "$f"
+            printf '```\n%s\n```\n\n' "$b"
+        } >>"$commands"
+    done < <(_tools)
+
+    _log "collecting man pages..."
+    {
+        echo "# kldload man pages"
+        echo
+    } >"$manpages"
+    local m mname
+    while IFS= read -r m; do
+        mname="$(basename "$m")"
+        mname="${mname%%.*}"
+        {
+            printf '## %s(8)\n\n```\n' "$mname"
+            # mandoc renders; the fallback keeps the raw mdoc rather than
+            # emitting nothing on a box without a formatter.
+            (mandoc -T ascii "$m" 2>/dev/null || zcat -f "$m" 2>/dev/null) |
+                col -bx 2>/dev/null || true
+            printf '```\n\n'
+        } >>"$manpages"
+    done < <(find /usr/share/man -name 'k*.[18]*' 2>/dev/null | sort | head -60)
+
+    _log "folding in written reference material..."
+    local d src i=3
+    for d in "${PROSE_DIRS[@]}" "${DOCS_DIRS[@]}"; do
+        [[ -d "$d" ]] || continue
+        while IFS= read -r src; do
+            cp -f "$src" "${OUTDIR}/$(printf '%02d' "$i")-$(basename "$src")" 2>/dev/null || true
+            i=$((i + 1))
+        done < <(find "$d" -name '*.md' -size -2M 2>/dev/null | sort)
+    done
+
+    _log "writing index..."
+    {
+        printf '# kldload knowledge base\n\n'
+        printf 'Generated %s on %s (build %s).\n\n' \
+            "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$(hostname)" \
+            "$(cat /etc/kldload-build-id 2>/dev/null || echo unknown)"
+        printf 'Load into Open WebUI: Workspace -> Knowledge -> new collection -> upload this directory.\n\n'
+        printf '## Files\n\n'
+        local ff
+        for ff in "$OUTDIR"/*.md; do
+            [[ "$ff" == "$index" ]] && continue
+            printf -- '- `%s` (%s lines)\n' "$(basename "$ff")" "$(wc -l <"$ff")"
+        done
+        printf '\n## Commands documented\n\n'
+        grep -h '^## ' "$commands" 2>/dev/null | sed 's/^## /- /' || true
+    } >"$index"
+
+    # Verify the OUTCOME. An empty corpus and a full one look identical from
+    # the exit code, and a knowledge base nobody notices is empty is worse
+    # than one that never generated.
+    local total
+    total="$(cat "$OUTDIR"/*.md 2>/dev/null | wc -l)"
+    if ((withdoc == 0)) || ((total < 100)); then
+        _log "WARNING: corpus is suspiciously small (${withdoc} documented tools, ${total} lines)"
+        return 1
+    fi
+    _log "corpus ready: ${OUTDIR} — ${withdoc}/${n} tools documented, ${total} lines total"
+}
+
+case "${1:-build}" in
+--help | -h | help) usage ;;
+stats) cmd_stats ;;
+build | "")
+    shift || true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --out)
+            OUTDIR="$2"
+            shift 2
+            ;;
+        *)
+            echo "unknown option: $1" >&2
+            usage
+            exit 64
+            ;;
+        esac
+    done
+    cmd_build
+    ;;
+*)
+    usage
+    exit 64
+    ;;
+esac
