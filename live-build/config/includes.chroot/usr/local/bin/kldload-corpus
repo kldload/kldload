@@ -49,7 +49,9 @@ trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
 OUTDIR="${KLDLOAD_CORPUS_DIR:-/var/lib/kldload/corpus}"
 TOOL_DIRS=(/usr/local/bin /usr/local/sbin)
 PROSE_DIRS=(/usr/local/share/klab-bob /usr/local/share/kldload-ai)
-DOCS_DIRS=(/usr/local/share/kldload/docs /usr/share/doc/kldload)
+# The design rationale lives in the shipped docs as well as the tool headers —
+# an operator asking "why is it built this way" is asking about these.
+DOCS_DIRS=(/usr/local/share/kldload/docs /usr/share/doc/kldload /usr/local/share/kldload-ai)
 
 _log() { printf '[kldload-corpus] %s\n' "$*" >&2; }
 
@@ -102,7 +104,7 @@ _banner() {
     fi
     # Shape 1: the leading '#' header, minus the shebang and the ruled lines.
     local hdr
-    hdr="$(sed -n '2,60p' "$f" 2>/dev/null |
+    hdr="$(sed -n '2,90p' "$f" 2>/dev/null |
         sed -n '/^#/p' |
         sed 's/^# \{0,1\}//' |
         # HARMLESS: grep exits 1 when a header is nothing but rule lines,
@@ -115,8 +117,33 @@ _banner() {
         # HARMLESS: sed exits non-zero when the usage() heredoc is absent,
         # which is simply a tool documented by header comment instead.
         sed '1d;$d' || true)"
-    [[ -n "$use" ]] && printf '%s\n' "$use" && return 0
-    [[ -n "$hdr" ]] && printf '%s\n' "$hdr" && return 0
+    # BOTH, not one or the other. The usage block says HOW to call a tool; the
+    # header block says WHY it exists and what bit us before — and those are
+    # different questions an operator asks. Returning only the usage threw away
+    # klab's 49 lines of rationale and kept 35 of syntax, which is precisely
+    # backwards for the 3am case the assistant is for.
+    if [[ -n "$hdr" ]]; then
+        printf '%s\n' "$hdr"
+        [[ -n "$use" ]] && printf '\n%s\n' "$use"
+        return 0
+    fi
+    [[ -n "$use" ]] && printf '%s\n' "$use"
+    return 0
+}
+
+# _is_ours FILE — is this a kldload tool, or something pip dropped in the PATH?
+#
+# /usr/local/bin collects console-script shims from pip installs — chroma,
+# dotenv, hf, httpx and friends. Their --help is accurate and completely
+# irrelevant to an operator asking about this OS, and including them buries the
+# kldload tools in third-party noise. pip's shims are recognisable: a python
+# shebang plus the console_scripts import template.
+_is_ours() {
+    local f="$1"
+    head -c 2 "$f" 2>/dev/null | grep -q '#!' || return 0 # binaries are ours
+    head -1 "$f" | grep -qi python || return 0            # not python, ours
+    grep -qE 'from [a-zA-Z_.]+ import|sys\.argv\[0\]' "$f" 2>/dev/null &&
+        ! grep -qiE 'kldload|klab|kvm-|zexplore|bob' "$f" 2>/dev/null && return 1
     return 0
 }
 
@@ -129,6 +156,7 @@ _tools() {
             [[ -f "$f" && -x "$f" ]] || continue
             # Skip forwarders: a 4-line exec shim documents nothing.
             [[ "$(wc -l <"$f" 2>/dev/null || echo 0)" -lt 6 ]] && continue
+            _is_ours "$f" || continue
             printf '%s\n' "$f"
         done
     done | sort -u | awk -F/ '!seen[$NF]++'
