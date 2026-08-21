@@ -722,7 +722,7 @@ k_install_system_files() {
         # daemon was enabled by build-iso.sh but never copied to target
         # (unit "not-found" on the fresh 1.4.0-rc2 install; the `enable ||
         # true` swallowed it).
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rag.service kldload-rag-firstboot.service kldload-rag-index.service kldload-rag-index.timer kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer; do
+        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rag.service kldload-rag-firstboot.service kldload-rag-index.service kldload-rag-index.timer kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
@@ -950,8 +950,11 @@ k_install_system_files() {
         # the unit sat in the squashfs — the sixth time an entry missing from
         # this list has silently disabled a feature on every install. See the
         # note above the list itself.
-        ln -sf "/usr/lib/systemd/system/kldload-inventory-sync.timer" \
-            "${target}/etc/systemd/system/timers.target.wants/kldload-inventory-sync.timer" || true
+        # HARMLESS CASE: an existing symlink. ln -sf replaces one silently, but
+        # a read-only or already-populated wants dir must not abort the whole
+        # install for a timer — the unit is copied either way and the operator
+        # can enable it by hand. Same swallow as every sibling ln in this block.
+        ln -sf "/usr/lib/systemd/system/kldload-inventory-sync.timer" "${target}/etc/systemd/system/timers.target.wants/kldload-inventory-sync.timer" || true
 
         mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
         ln -sf "/usr/lib/systemd/system/kldload-firstboot.service" \
