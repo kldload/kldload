@@ -631,12 +631,41 @@ k_install_system_files() {
             fi
         fi
         # Sanoid systemd units — copy from live if not already on target (RPM)
-        for _su in sanoid.service sanoid.timer; do
+        # ALL THREE sanoid units, not two. Upstream's design is a pair:
+        # sanoid.service takes snapshots and declares Wants=/Before= the prune,
+        # and sanoid-prune.service does the removing. Copying only the first two
+        # leaves that Wants= pointing at a unit the target does not have, so the
+        # installed system takes snapshots forever and prunes nothing.
+        #
+        # This is the SECOND place the same two-of-three mistake was made —
+        # build-iso.sh had it too, which is why fixing that alone would have put
+        # the prune unit on the live ISO and on no installed system at all.
+        # Measured consequence on a running host: 28,655 snapshots against a
+        # policy allowing ~1,200, 23,407 of them already expired, and 489 GiB
+        # held that should have been released (2026-08-20).
+        for _su in sanoid.service sanoid.timer sanoid-prune.service; do
             if [[ -f "/lib/systemd/system/${_su}" ]] && [[ ! -f "${target}/lib/systemd/system/${_su}" ]]; then
                 mkdir -p "${target}/lib/systemd/system"
                 cp "/lib/systemd/system/${_su}" "${target}/lib/systemd/system/${_su}"
             fi
         done
+        # Enable the prune explicitly. Its [Install] is WantedBy=sanoid.service,
+        # so enabling installs the sanoid.service.wants symlink — without this
+        # the unit file is present and still never runs, which is the failure
+        # mode this whole fix exists to remove. Verify the outcome rather than
+        # trusting the exit code: `systemctl enable` on an already-enabled unit
+        # and on a missing one can both look calm in a log.
+        if [[ -f "${target}/lib/systemd/system/sanoid-prune.service" ]] ||
+            [[ -f "${target}/usr/lib/systemd/system/sanoid-prune.service" ]]; then
+            chroot "${target}" systemctl enable sanoid-prune.service >/dev/null 2>&1 || true
+            if chroot "${target}" test -e /etc/systemd/system/sanoid.service.wants/sanoid-prune.service; then
+                k_log "sanoid: take + prune both enabled on target"
+            else
+                k_log "WARNING: sanoid-prune.service present but not wanted by sanoid.service — snapshots will accumulate unpruned"
+            fi
+        else
+            k_log "WARNING: sanoid-prune.service missing on target — snapshots will be taken and never pruned"
+        fi
 
         # ── APT pre/post snapshot hooks ────────────────────────────────────────────
         if [[ -d /etc/apt/apt.conf.d ]]; then
