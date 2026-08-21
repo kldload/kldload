@@ -657,6 +657,12 @@ k_install_system_files() {
         # and on a missing one can both look calm in a log.
         if [[ -f "${target}/lib/systemd/system/sanoid-prune.service" ]] ||
             [[ -f "${target}/usr/lib/systemd/system/sanoid-prune.service" ]]; then
+            # HARMLESS CASE: this exit code is not the thing being trusted. The
+            # symlink check on the very next line is the real test, and it is
+            # what decides pass or warn — `systemctl enable` looks identical in
+            # a log whether it enabled the unit, found it already enabled, or
+            # was handed a name it could not resolve. Swallowing here and
+            # verifying below is the whole point.
             chroot "${target}" systemctl enable sanoid-prune.service >/dev/null 2>&1 || true
             if chroot "${target}" test -e /etc/systemd/system/sanoid.service.wants/sanoid-prune.service; then
                 k_log "sanoid: take + prune both enabled on target"
