@@ -95,6 +95,8 @@ _banner() {
     # Detecting by shebang rather than by `file` keeps this working on a
     # trimmed image where file(1) is not installed.
     if ! head -c 2 "$f" 2>/dev/null | grep -q '#!'; then
+        # HARMLESS: a binary that does not implement --help exits non-zero.
+        # That is a tool with no documentation, not a failed corpus run.
         timeout 5 "$f" --help 2>&1 | head -40 || true
         return 0
     fi
@@ -103,11 +105,15 @@ _banner() {
     hdr="$(sed -n '2,60p' "$f" 2>/dev/null |
         sed -n '/^#/p' |
         sed 's/^# \{0,1\}//' |
+        # HARMLESS: grep exits 1 when a header is nothing but rule lines,
+        # which means "no prose here" — an empty banner, not an error.
         grep -vE '^[═─=-]{4,}$' || true)"
     # Shape 2: a usage() heredoc, which carries the real flag list.
     local use
     use="$(sed -n '/^usage() *{/,/^}/p' "$f" 2>/dev/null |
         sed -n '/<<.*$/,/^[A-Z][A-Z0-9_]*$/p' |
+        # HARMLESS: sed exits non-zero when the usage() heredoc is absent,
+        # which is simply a tool documented by header comment instead.
         sed '1d;$d' || true)"
     [[ -n "$use" ]] && printf '%s\n' "$use" && return 0
     [[ -n "$hdr" ]] && printf '%s\n' "$hdr" && return 0
@@ -194,6 +200,8 @@ cmd_build() {
             # mandoc renders; the fallback keeps the raw mdoc rather than
             # emitting nothing on a box without a formatter.
             (mandoc -T ascii "$m" 2>/dev/null || zcat -f "$m" 2>/dev/null) |
+                # HARMLESS: col(1) is absent on a trimmed image. The page still
+                # lands, just with backspace-overstrike left in.
                 col -bx 2>/dev/null || true
             printf '```\n\n'
         } >>"$manpages"
@@ -204,6 +212,8 @@ cmd_build() {
     for d in "${PROSE_DIRS[@]}" "${DOCS_DIRS[@]}"; do
         [[ -d "$d" ]] || continue
         while IFS= read -r src; do
+            # HARMLESS: an unreadable or vanished source doc costs one file,
+            # not the corpus. The outcome check below catches an empty result.
             cp -f "$src" "${OUTDIR}/$(printf '%02d' "$i")-$(basename "$src")" 2>/dev/null || true
             i=$((i + 1))
         done < <(find "$d" -name '*.md' -size -2M 2>/dev/null | sort)
@@ -223,6 +233,8 @@ cmd_build() {
             printf -- '- `%s` (%s lines)\n' "$(basename "$ff")" "$(wc -l <"$ff")"
         done
         printf '\n## Commands documented\n\n'
+        # HARMLESS: grep exits 1 when no tool had a banner, which the
+        # outcome check below already reports properly.
         grep -h '^## ' "$commands" 2>/dev/null | sed 's/^## /- /' || true
     } >"$index"
 
@@ -242,6 +254,7 @@ case "${1:-build}" in
 --help | -h | help) usage ;;
 stats) cmd_stats ;;
 build | "")
+    # HARMLESS: nothing to shift when invoked bare as `kldload-corpus`.
     shift || true
     while [[ $# -gt 0 ]]; do
         case "$1" in
