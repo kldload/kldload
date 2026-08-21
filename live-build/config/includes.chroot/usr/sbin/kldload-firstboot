@@ -1278,37 +1278,46 @@ URIS=default
 ON_BOOT=start
 ON_SHUTDOWN=shutdown
 START_DELAY=15
-# This is a SINGLE GLOBAL BUDGET for shutting down every guest on the URI, not
-# a per-guest or per-batch wait. Read /usr/lib/libvirt/libvirt-guests.sh: the
-# countdown is initialised once before the wait loop and decremented once per
-# second until every guest is gone; when it reaches zero the remaining guests
-# are abandoned with "Timeout expired while shutting down domains".
+# A SINGLE GLOBAL BUDGET for shutting down every guest, and a pure GRACE
+# WINDOW — not a safety margin. This is the part that decides the number.
 #
-# It costs nothing on a healthy shutdown. The loop condition is "any guest
-# still pending or shutting down", so it exits the moment the last one is gone
-# — a workstation whose guests stop in ten seconds waits ten seconds, and a
-# host with no running guests waits none. The budget only ever bites guests
-# that do not answer.
+# Read /usr/libexec/libvirt-guests.sh: the countdown is initialised once before
+# the wait loop and decremented per second until every guest is gone. When it
+# expires the script does `RETVAL=1; return` — it does NOT destroy anything;
+# there is no `destroy` anywhere in it. The guests are then killed by systemd
+# stopping their machine-qemu-*.scope units, which carry KillSignal=SIGTERM,
+# and qemu exits promptly on SIGTERM. The guest experiences that as a power
+# cut.
 #
-# 90s, down from 120s, and deliberately NOT lower. A guest with no ACPI handler
-# (one still in cloud-init, or from a cluster bootstrap that failed) never
-# answers and burns the whole budget — but a Windows guest applying updates on
-# its way down legitimately takes more than a minute, and this platform ships
-# Windows goldens via kvm-win. Cutting to 45s would have force-killed those
-# mid-write, trading a slow shutdown for a corrupted guest. 90s is short enough
-# that an operator is not left staring at a dead-looking machine and long
-# enough that nothing which was going to finish gets killed.
+# The consequence is the whole design: a LONGER timeout never protects a guest
+# that overruns it. It delays an identical hard kill. The budget only buys
+# something for guests that WOULD have finished — so the right value is "how
+# long does a healthy guest need", not "how safe do I want to be".
 #
-# HISTORY 2026-08-21, fiend: shutdown with three running k8s VMs from a failed
-# bootstrap took ~128 seconds — the full 120s budget plus the tail. By then the
-# desktop was gone and networking was down, so the box showed a black screen
-# with fans at full (the kernel releases fan control on its way out) and read
-# as a hard hang. It was not: it was this timeout, doing what it was told.
-SHUTDOWN_TIMEOUT=90
+# 20s. A healthy Linux guest acknowledges ACPI immediately and then spends
+# 5-15s stopping services and flushing; 20s clears that with margin, and the
+# loop exits the instant the last guest is gone, so a normal shutdown costs
+# what the guests actually take and a host with none running costs nothing.
+# A wedged guest — no ACPI handler, still in cloud-init, or from a cluster
+# bootstrap that failed — burns the full 20s and is then SIGTERMed, which is
+# what would have happened at 120s anyway.
+#
+# WARN: a Windows guest applying updates on its way down can exceed 20s and
+# will be cut off. This platform ships Windows goldens via kvm-win. If you run
+# stateful Windows guests, shut them down before the host, or switch this file
+# to ON_SHUTDOWN=managedsave — which is upstream's own default, freezes RAM to
+# disk instead of asking the guest to stop, and is bounded by guest memory
+# rather than by guest cooperation.
+#
+# HISTORY 2026-08-21, fiend: shutdown with three k8s VMs from a failed
+# bootstrap took ~128s — the full 120s budget plus the tail. Networking and the
+# display manager were already gone and the kernel had released fan control, so
+# the machine sat black with fans at full and read as a hard hang.
+SHUTDOWN_TIMEOUT=20
 # A sliding window, not batches: libvirt-guests tops the in-flight set back up
-# to PARALLEL_SHUTDOWN as each guest finishes. Raising it to 8 means a typical
-# workstation's guests are all signalled at once, so the global budget above is
-# spent waiting on them concurrently rather than serially.
+# to PARALLEL_SHUTDOWN as each guest finishes. At 8, a typical workstation's
+# guests are all signalled at once, so the budget above is spent waiting on
+# them concurrently rather than serially.
 PARALLEL_SHUTDOWN=8
 LVG
 
