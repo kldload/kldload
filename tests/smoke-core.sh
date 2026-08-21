@@ -122,28 +122,50 @@ else
 fi
 
 # ── Core Profile Verification (should NOT have k* tools) ────────────────────
-_section "Core Profile Verification"
+#
+# GATED ON THE PROFILE, because these are the only assertions in this file that
+# are not universal. Everything above holds on any kldload install; everything
+# in this block asserts the ABSENCE of tooling, which is true of `core` and
+# false — correctly, deliberately — of every other profile.
+#
+# smoke-all.sh runs this suite unconditionally on every profile (smoke-all.sh
+# :123), so ungated it produced 14 failures on a perfectly good desktop:
+# "kst found — should not be in core profile", and so on for ksnap, kbe, kdf,
+# kexport, krecovery, kldload-webui, sanoid, plus the two service checks. The
+# desktop is SUPPOSED to have those. Measured on .104, 2026-08-20: 29 failures
+# reported, 16 of them this block and the deprecated-Bob checks.
+#
+# A test that fails on a correct system is worse than no test. It buries the
+# real failures — the other 11 were a genuinely missing RAG stack, invisible in
+# the noise — and it argues for breaking a working machine to make it pass.
+# Same trap as the display-manager assertion fixed in 05ad06ac, which claimed
+# Debian should run gdm3 when profiles.sh deliberately chooses lightdm, and
+# which nearly cost a working desktop.
+_kld_profile="$(cat /etc/kldload/profile 2>/dev/null || echo unknown)"
+if [[ "$_kld_profile" == "core" ]]; then
+    for tool in kst ksnap kbe kclone kdf kdir kpkg kupgrade kexport krecovery kldload-webui sanoid; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            _fail "$tool absent (core)" "$tool found — should not be in core profile"
+        else
+            _pass "$tool absent (core)"
+        fi
+    done
 
-for tool in kst ksnap kbe kclone kdf kdir kpkg kupgrade kexport krecovery kldload-webui sanoid; do
-    if command -v "$tool" >/dev/null 2>&1; then
-        _fail "$tool absent (core)" "$tool found — should not be in core profile"
+    # Webui should not be running
+    if systemctl is-active kldload-webui >/dev/null 2>&1; then
+        _fail "kldload-webui not running (core)" "webui is active — should not be in core"
     else
-        _pass "$tool absent (core)"
+        _pass "kldload-webui not running (core)"
     fi
-done
 
-# Webui should not be running
-if systemctl is-active kldload-webui >/dev/null 2>&1; then
-    _fail "kldload-webui not running (core)" "webui is active — should not be in core"
+    # Sanoid should not be running
+    if systemctl is-active sanoid.timer >/dev/null 2>&1; then
+        _fail "sanoid not running (core)" "sanoid.timer is active — should not be in core"
+    else
+        _pass "sanoid not running (core)"
+    fi
 else
-    _pass "kldload-webui not running (core)"
-fi
-
-# Sanoid should not be running
-if systemctl is-active sanoid.timer >/dev/null 2>&1; then
-    _fail "sanoid not running (core)" "sanoid.timer is active — should not be in core"
-else
-    _pass "sanoid not running (core)"
+    _pass "core-only checks skipped (profile: ${_kld_profile})"
 fi
 
 # ── Snapshot Test ────────────────────────────────────────────────────────────
