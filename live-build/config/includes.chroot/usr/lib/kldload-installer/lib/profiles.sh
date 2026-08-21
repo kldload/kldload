@@ -702,7 +702,7 @@ k_install_system_files() {
         # daemon was enabled by build-iso.sh but never copied to target
         # (unit "not-found" on the fresh 1.4.0-rc2 install; the `enable ||
         # true` swallowed it).
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rag.service kldload-rag-firstboot.service kldload-rag-index.service kldload-rag-index.timer kldload-rhel-composer.service zexplore-api.service; do
+        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rag.service kldload-rag-firstboot.service kldload-rag-index.service kldload-rag-index.timer kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
@@ -918,6 +918,20 @@ k_install_system_files() {
         # Prometheus file_sd target regeneration (every 30s, zero hardcoded IPs)
         ln -sf "/usr/lib/systemd/system/klab-prom-targets.timer" \
             "${target}/etc/systemd/system/timers.target.wants/klab-prom-targets.timer" || true
+
+        # The inventory sync: copies each running VM's DHCP lease from libvirt
+        # into the state DB every 60s. kldload-inventory selects VMs
+        # `WHERE ip_addr != ''`, so without this the VM half of the Ansible
+        # inventory is permanently empty and a cloned fleet is invisible to
+        # every playbook.
+        #
+        # HISTORY 2026-08-21: shipped enabled on the live ISO and absent from
+        # this list, so a fresh install reported the timer "not-found" while
+        # the unit sat in the squashfs — the sixth time an entry missing from
+        # this list has silently disabled a feature on every install. See the
+        # note above the list itself.
+        ln -sf "/usr/lib/systemd/system/kldload-inventory-sync.timer" \
+            "${target}/etc/systemd/system/timers.target.wants/kldload-inventory-sync.timer" || true
 
         mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
         ln -sf "/usr/lib/systemd/system/kldload-firstboot.service" \

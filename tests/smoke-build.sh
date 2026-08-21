@@ -384,6 +384,58 @@ else
     fi
 fi
 
+# ── Unit-copy completeness ─────────────────────────────────────────────────
+#
+# Every kldload systemd unit shipped in includes.chroot must appear in
+# profiles.sh's explicit copy list, or it lands on the live ISO and never on an
+# installed system.
+#
+# That list is deliberately explicit so adding a unit is a conscious decision.
+# The cost is that FORGETTING one is completely silent: the unit file sits in
+# the squashfs, `systemctl enable` in the installer fails into a log nobody
+# reads, and the installed machine answers "not-found" for a feature that
+# looks, from the repo, entirely present.
+#
+# By its own comments this has bitten: the kldload-rag-* units, zexplore-api,
+# kldload-zfs-dbgmsg.timer, kldload-package-holds.service, sanoid-prune.service
+# — and then kldload-inventory-sync.{service,timer} on 2026-08-21, added and
+# enabled on the ISO in the same session that documented the previous five.
+# Six times is not carelessness, it is a missing gate.
+_section "Unit-copy completeness"
+
+_uc_units="$ROOT/live-build/config/includes.chroot/usr/lib/systemd/system"
+_uc_profiles="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+if [[ ! -d "$_uc_units" || ! -f "$_uc_profiles" ]]; then
+    _warn "unit-copy completeness" "unit dir or profiles.sh missing — gate did not run"
+else
+    # Search the WHOLE install path, not just profiles.sh: a unit can legitimately
+    # reach a target from bootstrap.sh, kldload-install-target or build-iso.sh's
+    # own target-copy blocks. Naming it nowhere in any of them is the thing that
+    # cannot possibly work.
+    _uc_haystack=(
+        "$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer"
+        "$ROOT/live-build/config/includes.chroot/usr/sbin/kldload-install-target"
+        "$ROOT/builder/build-iso.sh"
+    )
+    _uc_missing=()
+    for _u in "$_uc_units"/kldload-*.service "$_uc_units"/kldload-*.timer; do
+        [[ -f "$_u" ]] || continue
+        _un="$(basename "$_u")"
+        # Templates are instantiated by name, never copied literally.
+        [[ "$_un" == *"@"* ]] && continue
+        # kldload-live-* exist only on the live ISO by design — the installer
+        # is supposed to leave them behind, so absence is correct, not a bug.
+        [[ "$_un" == kldload-live-* ]] && continue
+        grep -rqF "$_un" "${_uc_haystack[@]}" 2>/dev/null || _uc_missing+=("$_un")
+    done
+    if [[ ${#_uc_missing[@]} -eq 0 ]]; then
+        _pass "unit-copy completeness: every shipped kldload unit is in the installer copy list"
+    else
+        _fail "unit-copy completeness" \
+            "${#_uc_missing[@]} unit(s) ship on the ISO but profiles.sh never copies them to the target: ${_uc_missing[*]}"
+    fi
+fi
+
 # ── Silent-failure ratchet ─────────────────────────────────────────────────
 # Project rule §4.1: no `|| true` unless a comment names the harmless case. The
 # tree carries 1,478 that do not, and every "reported success while broken"
