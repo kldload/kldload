@@ -167,8 +167,19 @@ except Exception: print(0); sys.exit()
 print(sum(1 for v in d.get("vms",[]) if v.get("ip_addr")))' 2>/dev/null || echo 0
     }
 
-    local net name ip seen=0 attempted=0 stale=0 before after
+    local net name ip mac seen=0 attempted=0 stale=0 before after
     before="$(_vms_with_ip)"
+
+    # MAC -> domain, straight from libvirt. Built once: this is the fallback for
+    # leases whose guest announced no hostname (see the loop below).
+    local -A _mac_owner=()
+    local _dom _m
+    while read -r _dom; do
+        [[ -z "$_dom" ]] && continue
+        while read -r _m; do
+            [[ -n "$_m" ]] && _mac_owner["${_m,,}"]="$_dom"
+        done < <(virsh domiflist "$_dom" 2>/dev/null | awk 'NR>2 && NF {print $5}')
+    done < <(virsh list --all --name 2>/dev/null)
 
     while read -r net; do
         [[ -z "$net" ]] && continue
@@ -176,9 +187,31 @@ print(sum(1 for v in d.get("vms",[]) if v.get("ip_addr")))' 2>/dev/null || echo 
         #   1 date  2 time  3 MAC  4 protocol  5 IP/prefix  6 hostname  7 client-id
         # Hostname is SIX, not seven. Reading seven silently fed client-ids to
         # the updater and matched no rows at all.
-        while read -r _ _ _ _ ip name _; do
-            [[ -z "${ip:-}" || -z "${name:-}" || "$name" == "-" ]] && continue
+        while read -r _ _ mac _ ip name _; do
+            [[ -z "${ip:-}" ]] && continue
             ip="${ip%%/*}"
+
+            # A lease with no hostname is NOT a lease to skip.
+            #
+            # dnsmasq records the hostname the GUEST announced. A VM cloned
+            # straight off a golden never announces one: kvm-clone copies the
+            # zvol and the domain and regenerates no cloud-init seed, so the
+            # clone carries the golden's identity and sends nothing. The lease
+            # is real, the address works, and the hostname column is "-".
+            #
+            # Skipping those meant every raw kvm-clone was invisible to the
+            # inventory forever — three clones on .110 held .115, .44 and .246
+            # and none of them reached Ansible (2026-08-21). kspawn clones were
+            # unaffected because it writes a per-node seed that sets a hostname,
+            # which is exactly why this went unnoticed.
+            #
+            # The host does not need the guest to identify itself. libvirt
+            # assigned the MAC and knows which domain owns it, so resolve the
+            # MAC instead — authoritative, and true of an uncooperative guest.
+            if [[ -z "${name:-}" || "$name" == "-" ]]; then
+                name="${_mac_owner[${mac,,}]:-}"
+                [[ -z "$name" ]] && continue
+            fi
             seen=$((seen + 1))
 
             # A DHCP lease OUTLIVES the guest that held it. Trusting the lease
