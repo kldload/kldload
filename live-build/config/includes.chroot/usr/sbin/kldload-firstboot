@@ -1278,24 +1278,37 @@ URIS=default
 ON_BOOT=start
 ON_SHUTDOWN=shutdown
 START_DELAY=15
-# 45s, not 120s, and it is a PER-BATCH wait — worst case is
-# ceil(guests / PARALLEL_SHUTDOWN) * SHUTDOWN_TIMEOUT.
+# This is a SINGLE GLOBAL BUDGET for shutting down every guest on the URI, not
+# a per-guest or per-batch wait. Read /usr/lib/libvirt/libvirt-guests.sh: the
+# countdown is initialised once before the wait loop and decremented once per
+# second until every guest is gone; when it reaches zero the remaining guests
+# are abandoned with "Timeout expired while shutting down domains".
 #
-# A guest is sent an ACPI power-button event and libvirt-guests then waits.
-# A guest that has not answered ACPI in 45 seconds is not going to: either no
-# ACPI handler is running yet (a VM still in cloud-init, or one from a cluster
-# bootstrap that failed) or the guest OS is wedged. Waiting two minutes per
-# batch buys nothing and costs the operator a machine that looks dead.
+# It costs nothing on a healthy shutdown. The loop condition is "any guest
+# still pending or shutting down", so it exits the moment the last one is gone
+# — a workstation whose guests stop in ten seconds waits ten seconds, and a
+# host with no running guests waits none. The budget only ever bites guests
+# that do not answer.
+#
+# 90s, down from 120s, and deliberately NOT lower. A guest with no ACPI handler
+# (one still in cloud-init, or from a cluster bootstrap that failed) never
+# answers and burns the whole budget — but a Windows guest applying updates on
+# its way down legitimately takes more than a minute, and this platform ships
+# Windows goldens via kvm-win. Cutting to 45s would have force-killed those
+# mid-write, trading a slow shutdown for a corrupted guest. 90s is short enough
+# that an operator is not left staring at a dead-looking machine and long
+# enough that nothing which was going to finish gets killed.
 #
 # HISTORY 2026-08-21, fiend: shutdown with three running k8s VMs from a failed
-# bootstrap took ~128 seconds — 120s of SHUTDOWN_TIMEOUT plus the tail. By then
-# the desktop was gone and networking was down, so the box showed a black
-# screen with fans at full (the kernel releases fan control on its way out) and
-# read as a hard hang. It was not: it was this timeout, doing what it was told.
-SHUTDOWN_TIMEOUT=45
-# 8, so a typical workstation's guests fit in ONE batch. These are ACPI events
-# and waits, not work — parallelism here costs nothing and halves the number of
-# 45-second windows an operator can be made to sit through.
+# bootstrap took ~128 seconds — the full 120s budget plus the tail. By then the
+# desktop was gone and networking was down, so the box showed a black screen
+# with fans at full (the kernel releases fan control on its way out) and read
+# as a hard hang. It was not: it was this timeout, doing what it was told.
+SHUTDOWN_TIMEOUT=90
+# A sliding window, not batches: libvirt-guests tops the in-flight set back up
+# to PARALLEL_SHUTDOWN as each guest finishes. Raising it to 8 means a typical
+# workstation's guests are all signalled at once, so the global budget above is
+# spent waiting on them concurrently rather than serially.
 PARALLEL_SHUTDOWN=8
 LVG
 
