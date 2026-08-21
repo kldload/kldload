@@ -1278,9 +1278,47 @@ URIS=default
 ON_BOOT=start
 ON_SHUTDOWN=shutdown
 START_DELAY=15
-SHUTDOWN_TIMEOUT=120
-PARALLEL_SHUTDOWN=4
+# 45s, not 120s, and it is a PER-BATCH wait — worst case is
+# ceil(guests / PARALLEL_SHUTDOWN) * SHUTDOWN_TIMEOUT.
+#
+# A guest is sent an ACPI power-button event and libvirt-guests then waits.
+# A guest that has not answered ACPI in 45 seconds is not going to: either no
+# ACPI handler is running yet (a VM still in cloud-init, or one from a cluster
+# bootstrap that failed) or the guest OS is wedged. Waiting two minutes per
+# batch buys nothing and costs the operator a machine that looks dead.
+#
+# HISTORY 2026-08-21, fiend: shutdown with three running k8s VMs from a failed
+# bootstrap took ~128 seconds — 120s of SHUTDOWN_TIMEOUT plus the tail. By then
+# the desktop was gone and networking was down, so the box showed a black
+# screen with fans at full (the kernel releases fan control on its way out) and
+# read as a hard hang. It was not: it was this timeout, doing what it was told.
+SHUTDOWN_TIMEOUT=45
+# 8, so a typical workstation's guests fit in ONE batch. These are ACPI events
+# and waits, not work — parallelism here costs nothing and halves the number of
+# 45-second windows an operator can be made to sit through.
+PARALLEL_SHUTDOWN=8
 LVG
+
+        # A finite backstop, because libvirt-guests ships TimeoutStopUSec=infinity.
+        #
+        # That default means systemd will wait FOREVER for this unit: if the
+        # per-batch timeouts above are ever misconfigured, or a guest hangs in a
+        # way libvirt itself does not time out, there is nothing left to cut it
+        # short and the machine never powers off. Every other stop job on the
+        # system is bounded by DefaultTimeoutStopSec (90s); this one was the
+        # exception, on the exact path where an operator is standing there
+        # holding a power button.
+        #
+        # 180s is above the worst case the settings above can produce on any
+        # sane guest count, so it never truncates a shutdown that was going to
+        # succeed — it only ends one that was not.
+        install -d -m 0755 /etc/systemd/system/libvirt-guests.service.d
+        cat >/etc/systemd/system/libvirt-guests.service.d/10-kldload-timeout.conf <<'LVGT'
+# kldload: bound the stop job. Upstream ships TimeoutStopUSec=infinity, which
+# turns one unresponsive guest into a machine that will not power off.
+[Service]
+TimeoutStopSec=180
+LVGT
         # || true: VM-restore is an enhancement; a trimmed libvirt without the
         # libvirt-guests unit must not abort firstboot.
         systemctl enable --now libvirt-guests 2>/dev/null || true
