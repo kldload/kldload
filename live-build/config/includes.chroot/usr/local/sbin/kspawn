@@ -500,6 +500,29 @@ cmd_spawn() {
     # kube-join.yml instead of invisible. Never fatal: see register_cluster_db.
     register_cluster_db "$cluster" "$distro" "$role" "$cpu" "$ram" "$disk" "${nodes[@]}"
 
+    # ── WireGuard enrollment ────────────────────────────────────────────────
+    # Registering in the DB makes a node VISIBLE; it does not make it REACHABLE
+    # over the encrypted plane. Until this existed only kube-cluster meshed the
+    # guests it created, so a cloud node spawned here sat on libvirt NAT with no
+    # mesh address, no host peer, and nothing for Prometheus to scrape — beside
+    # a k8s node on the same hypervisor that had all three. That split was an
+    # accident of which file the code lived in, not a decision.
+    #
+    # kldload-enroll is idempotent and non-fatal by contract, so a busy mesh or
+    # a guest that is still booting costs a warning, never the cluster. Nodes
+    # that have not got an address yet are skipped and can be enrolled later by
+    # re-running `kldload-enroll <name>`.
+    if command -v kldload-enroll >/dev/null 2>&1; then
+        for entry in "${nodes[@]}"; do
+            IFS='|' read -r _n _zvol _seed _ip <<<"$entry"
+            [[ -n "$_ip" ]] || continue
+            kldload-enroll "$_n" --ip "$_ip" --role "$role" --cluster "$cluster" \
+                >/dev/null 2>&1 ||
+                warn "  ${_n}: mesh enrollment incomplete — run 'kldload-enroll ${_n}'"
+        done
+        log "  WireGuard: enrolled ${#nodes[@]} node(s) on the mesh"
+    fi
+
     log "${C_CYN}══ Cluster '${cluster}' ready ══${C_RST}"
     printf '%b\n' "$C_DIM"
     for entry in "${nodes[@]}"; do

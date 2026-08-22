@@ -1,0 +1,308 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# kldload-enroll — put ANY VM on the WireGuard mesh and in the inventory.
+#
+# What it does, in order:
+#   1. Resolves the VM's address (libvirt lease, or --ip).
+#   2. Allocates a mesh node id that cannot collide with the k8s bands.
+#   3. Runs `kube-network init <id>` inside the guest.
+#   4. Peers host <-> guest on BOTH planes, in both directions.
+#   5. Registers the VM in the state DB with a role and cluster.
+#   6. Kicks kldload-networks so the Ansible inventory sees it immediately.
+#
+# WHY THIS EXISTS: enrollment used to be a privilege of kube-cluster. It
+# carried eighteen `kube-network add-peer` calls and was the only path that
+# put a guest on the mesh. Every other way of making a VM — kspawn for cloud
+# nodes, kvm-create for a custom post-install, kvm-clone for a golden copy —
+# registered a row in the state DB and stopped there. Measured on .107
+# 2026-08-22: kube-cluster 18 wg calls, kspawn 0, kvm-create 0, kvm-clone 0.
+#
+# The result was a two-tier estate. A k8s node was reachable over 10.250.0.0/24,
+# scraped by Prometheus, and addressable by Ansible. A cloud VM sitting beside
+# it on the same hypervisor was reachable only over libvirt NAT, invisible to
+# the host's mesh, and had no encrypted path at all. Nothing about that
+# difference was intentional — it is just where the code happened to be.
+#
+# So the mechanism moves here, once, and every creation path calls it. Adding
+# a fifth kind of VM later means one call, not another eighteen.
+#
+# Inputs:  $1 — libvirt domain name, or --all to sweep every running VM
+#          --ip A.B.C.D    skip lease lookup (the VM is not in libvirt's DHCP)
+#          --role NAME     inventory role; default "vm"
+#          --cluster NAME  inventory cluster; default "" (unclustered)
+#          --id N          force a mesh node id instead of allocating one
+#          --no-wg         register in the DB only, skip the mesh
+# Outputs: log lines on stdout. The guest gains 10.250.0.<id>/10.251.0.<id>,
+#          the host gains a peer, the state DB gains a row.
+# Exit:    0 enrolled (or already enrolled), 1 could not resolve the VM,
+#          2 mesh enrollment failed but the DB row was still written.
+#
+# Notes:
+#   - IDEMPOTENT. A guest that already has /etc/wireguard/.node-id keeps its
+#     id and is only re-peered where a peer is missing. Re-running is how you
+#     repair, not how you break things.
+#   - NON-FATAL BY DESIGN for the caller. Creating a VM must not fail because
+#     the mesh was busy; callers invoke this with `|| true` and the operator
+#     gets a warning plus a working VM rather than a rollback.
+#   - The id band matters. kube-cluster uses 1 for the first control plane,
+#     2..N for bootstrap workers, 100+index for scale-out workers, and 100 for
+#     the hypervisor itself. General VMs therefore start at 150, which leaves
+#     the k8s bands alone and keeps `wg show` readable: anything >=150 was not
+#     built by kube-cluster.
+# ---------------------------------------------------------------------------
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+VM_ID_BASE=150 # first id handed to a non-k8s VM; see Notes
+MGMT_SUBNET="${MGMT_SUBNET:-10.250.0}"
+HOST_ID=100
+
+log() { printf '[%(%F %T)T] [enroll] %s\n' -1 "$*"; }
+warn() { log "WARNING: $*" >&2; }
+die() {
+    log "FATAL: $*" >&2
+    exit 1
+}
+
+usage() {
+    sed -n '2,/^# ---/p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+}
+
+# ── Sweep mode ──────────────────────────────────────────────────────────────
+# `kldload-enroll --all` enrols every running VM that has an address and is not
+# already a peer.
+#
+# WHY A SWEEP AND NOT JUST A CALL PER TOOL: a VM cannot be enrolled at creation
+# time, because at that moment it has no address — kvm-create registers its VM
+# with status "defined", before the thing has ever booted. Wiring enrollment
+# into each creation path therefore only ever covers the paths that happen to
+# create a RUNNING guest, and misses create-then-start-later entirely, which is
+# the normal way people use kvm-create.
+#
+# A sweep is indifferent to which tool made the VM, so it covers kvm-create,
+# kvm-clone, kspawn and anything added later without touching them. Run it from
+# cron, from a timer, or by hand after starting a batch.
+if [[ "${1:-}" == "--all" ]]; then
+    shift
+    _sweep_role="vm"
+    _sweep_cluster=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --role)
+            _sweep_role="$2"
+            shift 2
+            ;;
+        --cluster)
+            _sweep_cluster="$2"
+            shift 2
+            ;;
+        *)
+            echo "unknown option for --all: $1" >&2
+            exit 1
+            ;;
+        esac
+    done
+    [[ $EUID -eq 0 ]] || exec sudo "$0" --all --role "$_sweep_role" ${_sweep_cluster:+--cluster "$_sweep_cluster"}
+    _done=0
+    _skipped=0
+    while read -r _vm; do
+        [[ -n "$_vm" ]] || continue
+        # Already a peer? `wg show` is the authority — the DB can disagree with
+        # the kernel, and the kernel is what carries traffic.
+        _known="$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=5 -o BatchMode=yes -i /root/.ssh/id_ed25519 \
+            "root@$(virsh domifaddr "$_vm" 2>/dev/null |
+                awk '/ipv4/{split($4,a,"/");print a[1];exit}')" \
+            'cat /etc/wireguard/.node-id 2>/dev/null' 2>/dev/null | tr -cd '0-9')"
+        if [[ -n "$_known" ]] &&
+            wg show wg-mgmt allowed-ips 2>/dev/null | grep -q "\.${_known}/32"; then
+            _skipped=$((_skipped + 1))
+            continue
+        fi
+        if "$0" "$_vm" --role "$_sweep_role" ${_sweep_cluster:+--cluster "$_sweep_cluster"}; then
+            _done=$((_done + 1))
+        fi
+    done < <(virsh list --state-running --name 2>/dev/null)
+    printf '[enroll] sweep complete: %d enrolled, %d already on the mesh\n' "$_done" "$_skipped"
+    exit 0
+fi
+
+# ── Argument parsing ────────────────────────────────────────────────────────
+[[ $# -ge 1 ]] || usage
+case "$1" in -h | --help | help) usage ;; esac
+
+# Keep the original argv so the root re-exec below can replay it verbatim.
+# Rebuilding it from parsed variables is how a flag gets silently dropped or,
+# worse, turned into a positional the parser then rejects.
+declare -a _ORIG_ARGV=("$@")
+
+VM="$1"
+shift
+IP=""
+ROLE="vm"
+CLUSTER=""
+FORCE_ID=""
+DO_WG=1
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --ip)
+        IP="$2"
+        shift 2
+        ;;
+    --role)
+        ROLE="$2"
+        shift 2
+        ;;
+    --cluster)
+        CLUSTER="$2"
+        shift 2
+        ;;
+    --id)
+        FORCE_ID="$2"
+        shift 2
+        ;;
+    --no-wg)
+        DO_WG=0
+        shift
+        ;;
+    *) die "unknown option: $1 (try --help)" ;;
+    esac
+done
+
+# Everything below needs root: virsh, /etc/wireguard, and the guest key.
+[[ $EUID -eq 0 ]] || exec sudo "$0" "${_ORIG_ARGV[@]}"
+
+# ── Resolve the guest address ───────────────────────────────────────────────
+# Two sources because neither is reliable alone: domifaddr needs a guest agent,
+# and the DHCP lease needs the guest to have asked. A VM that has one but not
+# the other is normal, not broken.
+_resolve_ip() {
+    local ip mac
+    ip="$(virsh domifaddr "$VM" 2>/dev/null | awk '/ipv4/{split($4,a,"/");print a[1];exit}')"
+    [[ -n "$ip" ]] && {
+        printf '%s' "$ip"
+        return 0
+    }
+    mac="$(virsh domiflist "$VM" 2>/dev/null | awk 'NR>2 && NF {print $5; exit}')"
+    [[ -n "$mac" ]] || return 1
+    virsh net-dhcp-leases default 2>/dev/null |
+        awk -v m="$mac" 'tolower($0) ~ tolower(m) {split($5,a,"/"); print a[1]; exit}'
+}
+
+if [[ -z "$IP" ]]; then
+    IP="$(_resolve_ip || true)"
+fi
+[[ -n "$IP" ]] || {
+    warn "${VM}: no address yet — nothing to enroll. Start it, wait for DHCP, re-run."
+    exit 1
+}
+log "${VM}: at ${IP}"
+
+_ssh() {
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 -o BatchMode=yes \
+        -i /root/.ssh/id_ed25519 "root@${IP}" "$@" 2>/dev/null
+}
+
+# ── State DB registration ───────────────────────────────────────────────────
+# Done FIRST and independently of the mesh. A VM the inventory knows about but
+# which is not yet meshed is useful — Ansible can still reach it over the
+# libvirt network. A meshed VM the inventory does not know about is not.
+if command -v kldload-db >/dev/null 2>&1; then
+    if kldload-db vm-register --name "$VM" --role "$ROLE" \
+        --cluster "$CLUSTER" --status "running" 2>/dev/null; then
+        log "${VM}: registered (role=${ROLE}${CLUSTER:+ cluster=${CLUSTER}})"
+    else
+        warn "${VM}: kldload-db vm-register failed — Ansible will not see this VM"
+    fi
+    kldload-db event --type vm --subject "$VM" \
+        --message "enrolled: role=${ROLE} ip=${IP}" 2>/dev/null || true
+else
+    warn "kldload-db not installed — skipping inventory registration"
+fi
+
+if ((!DO_WG)); then
+    command -v kldload-networks >/dev/null 2>&1 && kldload-networks sync >/dev/null 2>&1 || true
+    log "${VM}: --no-wg, done"
+    exit 0
+fi
+
+# ── Mesh enrollment ─────────────────────────────────────────────────────────
+if ! _ssh true; then
+    warn "${VM}: no SSH as root — cannot enrol on the mesh (DB row was written)"
+    exit 2
+fi
+if ! _ssh 'command -v kube-network >/dev/null 2>&1'; then
+    warn "${VM}: kube-network absent in the guest — not a kldload image? (DB row was written)"
+    exit 2
+fi
+
+# Allocate an id. Reuse the guest's own if it has one — re-running must not
+# renumber a VM out from under its existing peers.
+node_id="$(_ssh 'cat /etc/wireguard/.node-id 2>/dev/null' | tr -cd '0-9')"
+if [[ -n "$FORCE_ID" ]]; then
+    node_id="$FORCE_ID"
+elif [[ -z "$node_id" ]]; then
+    # Highest id the host already peers with, floored at the VM band. Reading
+    # the host's own config is enough: every enrolled guest is a peer here by
+    # construction, so the host's view is the authoritative allocation map.
+    highest="$(grep -hoE '^# Node [0-9]+' /etc/wireguard/wg-mgmt.conf 2>/dev/null |
+        awk '{print $3}' | sort -n | tail -1)"
+    highest="${highest:-0}"
+    ((highest < VM_ID_BASE)) && highest=$((VM_ID_BASE - 1))
+    node_id=$((highest + 1))
+fi
+log "${VM}: mesh id ${node_id} (${MGMT_SUBNET}.${node_id})"
+
+_ssh "kube-network init ${node_id}" >/dev/null 2>&1 ||
+    log "${VM}: kube-network init reported a problem (already initialised?)"
+
+guest_pub="$(_ssh 'cat /etc/wireguard/wg-mgmt.pub' | tr -d '[:space:]')"
+[[ -n "$guest_pub" ]] || {
+    warn "${VM}: guest produced no public key — mesh enrollment incomplete"
+    exit 2
+}
+host_pub="$(cat /etc/wireguard/wg-mgmt.pub 2>/dev/null || true)"
+[[ -n "$host_pub" ]] || {
+    warn "hypervisor is not on the mesh (run 'kube-network init ${HOST_ID}') — enrollment incomplete"
+    exit 2
+}
+
+# Peer both directions. add-peer is append-and-reload, so only call it where
+# the peer is genuinely missing — bouncing wg-mgmt under a live guest for a
+# peer that already exists is pure disruption.
+host_ip="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7; exit}')"
+if ! grep -qE "^# Node ${node_id}([[:space:]]|\$)" /etc/wireguard/wg-mgmt.conf 2>/dev/null; then
+    kube-network add-peer "$IP" "$guest_pub" "$node_id" >/dev/null 2>&1 &&
+        log "${VM}: hypervisor now peers ${node_id}" ||
+        warn "${VM}: hypervisor did not accept the peer"
+else
+    log "${VM}: hypervisor already peers ${node_id}"
+fi
+# Match the marker without anchoring the end of the line: kube-network writes
+# "# Node <id>" and a trailing space or CR (a config that has been through an
+# editor) makes an anchored $ miss, which reports "now peers" for a peer that
+# was already there. Harmless — add-peer is append-and-reload and the count
+# stayed at 1 — but a log line that misdescribes what happened is how the next
+# person mis-diagnoses a real duplicate.
+if ! _ssh "grep -qE '^# Node ${HOST_ID}([[:space:]]|\$)' /etc/wireguard/wg-mgmt.conf"; then
+    _ssh "kube-network add-peer ${host_ip:-$IP} ${host_pub} ${HOST_ID}" >/dev/null 2>&1 &&
+        log "${VM}: guest now peers the hypervisor" ||
+        warn "${VM}: guest did not accept the hypervisor peer"
+else
+    log "${VM}: guest already peers the hypervisor"
+fi
+
+# ── Verify the OUTCOME, not the exit codes ──────────────────────────────────
+# Every command above can return 0 having achieved nothing. The only proof
+# that matters is a handshake-capable peer carrying the expected address.
+if wg show wg-mgmt allowed-ips 2>/dev/null | grep -q "${MGMT_SUBNET}.${node_id}/32"; then
+    log "${VM}: on the mesh at ${MGMT_SUBNET}.${node_id}"
+else
+    warn "${VM}: peer did not appear in the running wg-mgmt — check 'wg show'"
+    exit 2
+fi
+
+command -v kldload-networks >/dev/null 2>&1 && kldload-networks sync >/dev/null 2>&1 || true
+log "${VM}: enrolled"
