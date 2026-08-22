@@ -2404,6 +2404,7 @@ $ ansible -i /usr/local/bin/kldload-inventory role_klab_golden -m ping</div>
         </div>
         <div class="ws-tabs" role="tablist">
           <button class="ws-tab active" data-sub="run"       onclick="ansibleSubTab('run')">Run</button>
+          <button class="ws-tab"        data-sub="inventory" onclick="ansibleSubTab('inventory')">Inventory <span id="ansible-cnt-inv" class="tab-count">0</span></button>
           <button class="ws-tab"        data-sub="playbooks" onclick="ansibleSubTab('playbooks')">Playbooks <span id="ansible-cnt-pb" class="tab-count">0</span></button>
           <button class="ws-tab"        data-sub="ledger"    onclick="ansibleSubTab('ledger')">Ledger</button>
           <button class="ws-tab"        data-sub="log"       onclick="ansibleSubTab('log')">Output</button>
@@ -2428,8 +2429,21 @@ $ ansible -i /usr/local/bin/kldload-inventory role_klab_golden -m ping</div>
               </select>
             </div>
             <div class="form-group" style="margin:0">
-              <label>Target (IP, host, or group)</label>
-              <input type="text" id="ansible-target" value="localhost" placeholder="localhost | 10.0.0.5 | kube_workers" style="width:100%">
+              <label>Target</label>
+              <!--
+                A picker fed by the live inventory, with the free-text box kept
+                for addresses the inventory has never seen (a machine being
+                bootstrapped). Choosing "custom" reveals it. Previously this
+                was free-text only, which required knowing the group names by
+                heart — and the placeholder advertised "kube_workers", which
+                the runner then failed to resolve.
+              -->
+              <select id="ansible-target-select" onchange="ansibleTargetPick()" style="width:100%">
+                <option value="localhost">localhost (this host)</option>
+              </select>
+              <input type="text" id="ansible-target" value="localhost"
+                     placeholder="10.0.0.5 or host,host2"
+                     style="width:100%;margin-top:0.35rem;display:none">
             </div>
             <div class="form-group" style="margin:0">
               <label>SSH User</label>
@@ -2445,6 +2459,12 @@ $ ansible -i /usr/local/bin/kldload-inventory role_klab_golden -m ping</div>
             <label style="font-size:0.8rem;color:var(--subtle)"><input type="checkbox" id="ansible-diff"> Show diff</label>
             <label style="font-size:0.8rem;color:var(--subtle)"><input type="checkbox" id="ansible-verbose"> Verbose (-vv)</label>
             <span style="flex:1"></span>
+            <!--
+              Reachability before action. "which of these can I even reach?"
+              is the question asked before every playbook, and answering it
+              needed no playbook to exist — it just had nowhere to be asked.
+            -->
+            <button class="btn btn-ghost btn-sm" onclick="ansiblePing()" title="ansible &lt;target&gt; -m ping">Ping target</button>
             <button class="btn btn-primary btn-sm" onclick="ansibleRun()">Run</button>
             <button class="btn btn-danger btn-sm" onclick="ansibleCancel()">Cancel</button>
           </div>
@@ -2452,6 +2472,44 @@ $ ansible -i /usr/local/bin/kldload-inventory role_klab_golden -m ping</div>
       </div>
 
       </div><!-- /ansible-sub-run -->
+
+      <!-- ── Inventory ─────────────────────────────────────────────────── -->
+      <!--
+        The estate as Ansible actually sees it. Before this existed the Run
+        tab's only targeting control was a free-text box, so an operator had
+        to already know the group names to use them — and the placeholder
+        suggested one ("kube_workers") that the runner could not honour.
+        Groups first because that is the unit people act on; hosts second for
+        answering "where did that node go".
+      -->
+      <div class="ws-subview" id="ansible-sub-inventory">
+        <div class="stat-grid" style="margin-bottom:0.9rem">
+          <div class="stat-card"><div class="stat-label">Groups</div><div class="stat-value" id="ansible-inv-groups">—</div></div>
+          <div class="stat-card"><div class="stat-label">Hosts</div><div class="stat-value" id="ansible-inv-hosts">—</div></div>
+          <div class="stat-card"><div class="stat-label">Source</div><div class="stat-value" style="font-size:0.85rem" id="ansible-inv-src">—</div></div>
+        </div>
+
+        <div class="ws-panel" style="margin-bottom:1rem">
+          <div class="ws-panel-hdr">
+            <span>Groups</span>
+            <span style="flex:1"></span>
+            <button class="btn btn-ghost btn-sm" onclick="ansibleRefresh()" title="Reload inventory">↻</button>
+          </div>
+          <table>
+            <thead><tr><th>Group</th><th>Hosts</th><th>Members</th><th style="width:1%"></th></tr></thead>
+            <tbody id="ansible-inv-group-tbody"><tr><td colspan="4" style="color:var(--muted);padding:1rem">Loading…</td></tr></tbody>
+          </table>
+        </div>
+
+        <div class="ws-panel">
+          <div class="ws-panel-hdr"><span>Hosts</span></div>
+          <input class="ws-table-search" placeholder="Filter hosts…" oninput="zfsTableFilter('ansible-inv-host-tbody', this.value)">
+          <table>
+            <thead><tr><th>Host</th><th>Address</th><th>Role</th><th>Cluster</th><th>Status</th><th>Groups</th><th style="width:1%"></th></tr></thead>
+            <tbody id="ansible-inv-host-tbody"><tr><td colspan="7" style="color:var(--muted);padding:1rem">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div><!-- /ansible-sub-inventory -->
 
       <!-- ── Playbooks ─────────────────────────────────────────────────── -->
       <div class="ws-subview" id="ansible-sub-playbooks">
@@ -4849,6 +4907,7 @@ function handle(msg) {
 
     case 'ansible_status': { renderAnsibleStatus(msg); break; }
     case 'ansible_list':   { renderAnsibleList(msg);   break; }
+    case 'ansible_inventory': { renderAnsibleInventory(msg); break; }
     case 'deploy_list':    { renderDeployList(msg);    break; }
     case 'doctor_report':    { renderDoctorReport(msg);    break; }
     case 'firstboot_status': { renderFirstbootStatus(msg); break; }
@@ -9449,7 +9508,111 @@ function renderDoctorReport(msg) {
 function ansibleRefresh() {
   send({ action: 'ansible_status' });
   send({ action: 'ansible_list' });
+  send({ action: 'ansible_inventory' });
   send({ action: 'deploy_list' });
+}
+
+// Render the estate: groups, hosts, and the Run tab's target picker — all
+// three from one payload so they cannot drift apart.
+function renderAnsibleInventory(msg) {
+  const groups = msg.groups || [];
+  const hosts  = msg.hosts  || [];
+  const setTxt = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  setTxt('ansible-inv-groups', groups.length);
+  setTxt('ansible-inv-hosts',  hosts.length);
+  setTxt('ansible-inv-src', msg.available ? 'kldload-inventory' : 'unavailable');
+  const badge = document.getElementById('ansible-cnt-inv');
+  if (badge) badge.textContent = String(hosts.length);
+
+  // Groups table. Each row can target itself — reading the estate and acting
+  // on it should not require retyping a name you are already looking at.
+  const gt = document.getElementById('ansible-inv-group-tbody');
+  if (gt) {
+    gt.innerHTML = groups.length
+      ? groups.map(g => '<tr>' +
+          '<td><code>' + esc(g.name) + '</code></td>' +
+          '<td>' + g.count + '</td>' +
+          '<td style="color:var(--muted);font-size:0.8rem">' + (esc((g.hosts || []).join(', ')) || '&mdash;') + '</td>' +
+          '<td><button class="btn btn-ghost btn-sm" onclick="ansibleUseTarget(\'' + esc(g.name) + '\')">Target</button></td>' +
+        '</tr>').join('')
+      : '<tr><td colspan="4" style="color:var(--muted);padding:1rem">No groups &mdash; nothing is registered in the state DB yet.</td></tr>';
+  }
+
+  const ht = document.getElementById('ansible-inv-host-tbody');
+  if (ht) {
+    ht.innerHTML = hosts.length
+      ? hosts.map(h => '<tr>' +
+          '<td><code>' + esc(h.name) + '</code></td>' +
+          '<td>' + (esc(h.ip) || '&mdash;') + '</td>' +
+          '<td>' + (esc(h.role) || '&mdash;') + '</td>' +
+          '<td>' + (esc(h.cluster) || '&mdash;') + '</td>' +
+          '<td>' + (esc(h.status) || '&mdash;') + '</td>' +
+          '<td style="color:var(--muted);font-size:0.78rem">' + (esc((h.groups || []).join(', ')) || '&mdash;') + '</td>' +
+          '<td><button class="btn btn-ghost btn-sm" onclick="ansibleUseTarget(\'' + esc(h.name) + '\')">Target</button></td>' +
+        '</tr>').join('')
+      : '<tr><td colspan="7" style="color:var(--muted);padding:1rem">No hosts. A VM appears here once it has an address &mdash; see the inventory sync timer.</td></tr>';
+  }
+
+  // Target picker: localhost, then groups (the unit people act on), then
+  // individual hosts, then an escape hatch for anything unregistered.
+  const sel = document.getElementById('ansible-target-select');
+  if (sel) {
+    const cur = sel.value;
+    let html = '<option value="localhost">localhost (this host)</option>';
+    const named = groups.filter(g => g.name !== 'all' && g.name !== 'ungrouped' && g.count);
+    if (named.length) html += '<optgroup label="Groups">' +
+      named.map(g => '<option value="' + esc(g.name) + '">' + esc(g.name) + ' (' + g.count + ')</option>').join('') + '</optgroup>';
+    if (hosts.length) html += '<optgroup label="Hosts">' +
+      hosts.map(h => '<option value="' + esc(h.name) + '">' + esc(h.name) + (h.ip ? ' &mdash; ' + esc(h.ip) : '') + '</option>').join('') + '</optgroup>';
+    html += '<option value="__custom__">custom address&hellip;</option>';
+    sel.innerHTML = html;
+    if (cur && [].slice.call(sel.options).some(o => o.value === cur)) sel.value = cur;
+  }
+}
+
+// Jump from a row in Inventory straight to a scoped run.
+function ansibleUseTarget(name) {
+  const sel = document.getElementById('ansible-target-select');
+  if (sel && [].slice.call(sel.options).some(o => o.value === name)) {
+    sel.value = name;
+    ansibleTargetPick();
+  }
+  ansibleSubTab('run');
+}
+
+// The effective target: the picker's value, unless it is "custom", in which
+// case the free-text box beside it wins. Run and Ping both read through here
+// so they can never disagree about what is being addressed.
+function ansibleTarget() {
+  const sel = document.getElementById('ansible-target-select');
+  const txt = document.getElementById('ansible-target');
+  if (sel && sel.value && sel.value !== '__custom__') return sel.value;
+  return ((txt && txt.value) || 'localhost').trim() || 'localhost';
+}
+
+function ansibleTargetPick() {
+  const sel = document.getElementById('ansible-target-select');
+  const txt = document.getElementById('ansible-target');
+  if (!sel || !txt) return;
+  const custom = sel.value === '__custom__';
+  txt.style.display = custom ? '' : 'none';
+  if (custom) { txt.value = ''; txt.focus(); } else { txt.value = sel.value; }
+}
+
+// Reachability check — `ansible <target> -m ping`. Streams into the same
+// Output pane as a playbook run, so the answer lands where the operator is
+// already looking. "Which of these can I even reach?" is the question asked
+// before every playbook, and it needed no playbook to exist — it just had
+// nowhere to be asked.
+function ansiblePing() {
+  const target = ansibleTarget();
+  const user   = document.getElementById('ansible-user')?.value || 'root';
+  const panel  = document.getElementById('ansible-log-panel');
+  if (panel) panel.style.display = '';
+  const log = document.getElementById('ansible-log');
+  if (log) log.textContent = '';
+  ansibleSubTab('log');
+  send({ action: 'ansible_adhoc', target: target, module: 'ping', user: user });
 }
 
 function renderDeployList(msg) {
@@ -9479,7 +9642,7 @@ function renderDeployList(msg) {
 
 function ansibleRun() {
   const pb     = document.getElementById('ansible-playbook')?.value || '';
-  const target = document.getElementById('ansible-target')?.value || 'localhost';
+  const target = ansibleTarget();
   const user   = document.getElementById('ansible-user')?.value || 'root';
   const raw    = document.getElementById('ansible-extra')?.value || '';
   const chk    = document.getElementById('ansible-check')?.checked || false;

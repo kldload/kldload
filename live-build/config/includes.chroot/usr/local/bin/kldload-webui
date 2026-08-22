@@ -2281,6 +2281,10 @@ async def ws_handler(websocket):
                     await _ansible_status(websocket)
                 elif action == "ansible_list":
                     await _ansible_list(websocket)
+                elif action == "ansible_inventory":
+                    await _ansible_inventory(websocket)
+                elif action == "ansible_adhoc":
+                    await _ansible_adhoc(websocket, msg)
                 elif action == "ansible_run":
                     await _ansible_run(websocket, msg)
                 elif action == "ansible_cancel":
@@ -5546,6 +5550,126 @@ async def _ansible_list(websocket):
               + _scan_playbooks(USER_PB_DIR,    "user")
     await websocket.send(json.dumps({"type": "ansible_list", "playbooks": playbooks}))
 
+ANSIBLE_INV_BIN = "/usr/local/bin/kldload-inventory"
+
+def _inventory_json():
+    """Return the dynamic inventory as a dict, or {} if it cannot be read.
+
+    Shells out to kldload-inventory rather than reading the state DB directly
+    so this UI and a human running `ansible` see byte-identical grouping — the
+    inventory script stays the single source of truth for both.
+    """
+    if not os.path.exists(ANSIBLE_INV_BIN):
+        return {}
+    try:
+        out = subprocess.check_output([ANSIBLE_INV_BIN, "--list"], text=True,
+                                      stderr=subprocess.DEVNULL, timeout=15)
+        return json.loads(out) if out.strip() else {}
+    except Exception:
+        return {}
+
+def _target_in_inventory(target):
+    """True when `target` names a group or host the dynamic inventory knows.
+
+    Decides between --limit (the real inventory, so groups resolve) and an
+    ad-hoc `-i host,` list for a raw address the operator typed that no
+    inventory contains and which must still be runnable.
+    """
+    inv = _inventory_json()
+    if not inv:
+        return False
+    meta = (inv.get("_meta") or {}).get("hostvars") or {}
+    if (target in inv and target != "_meta") or target in meta:
+        return True
+    # Comma lists: addressable when every literal element is known, so
+    # "kube_workers,kldload-cp" still resolves through the inventory.
+    parts = [p.strip() for p in target.split(",") if p.strip()]
+    if len(parts) > 1 and all(p in inv or p in meta for p in parts):
+        return True
+    return False
+
+def _inventory_model():
+    """Flatten the inventory into {groups, hosts} for the UI.
+
+    Ansible's --list format mixes real groups, parent/child links and the
+    _meta hostvars blob. The UI wants two flat tables, so unpick it once here
+    rather than teaching the browser Ansible's schema.
+    """
+    inv = _inventory_json()
+    if not inv:
+        return {"groups": [], "hosts": [], "available": False}
+
+    meta = (inv.get("_meta") or {}).get("hostvars") or {}
+    groups = []
+    for name, body in sorted(inv.items()):
+        if name == "_meta" or not isinstance(body, dict):
+            continue
+        direct = body.get("hosts") or []
+        children = body.get("children") or []
+        # A group holding only children still matters for targeting (`kube` is
+        # how you address every node), so roll up membership rather than
+        # showing it as empty.
+        rolled = set(direct)
+        for ch in children:
+            rolled.update((inv.get(ch) or {}).get("hosts") or [])
+        groups.append({"name": name, "hosts": sorted(rolled), "count": len(rolled),
+                       "children": children, "direct": len(direct)})
+
+    hosts = []
+    for hn, hv in sorted(meta.items()):
+        member_of = [g["name"] for g in groups
+                     if hn in g["hosts"] and g["name"] not in ("all", "ungrouped")]
+        hosts.append({
+            "name": hn,
+            "ip": hv.get("ansible_host", ""),
+            "user": hv.get("ansible_user", ""),
+            "role": hv.get("kldload_role", ""),
+            "cluster": hv.get("kldload_cluster", ""),
+            "status": hv.get("kldload_status", ""),
+            "wg": (hv.get("kldload_wg_ips") or {}).get("wg0", ""),
+            "groups": sorted(member_of),
+        })
+    return {"groups": groups, "hosts": hosts, "available": True}
+
+async def _ansible_inventory(websocket):
+    """Ship the dynamic inventory to the UI.
+
+    WHY THIS EXISTS: the Run tab offered a free-text Target box whose own
+    placeholder suggested `kube_workers` — a group the runner could not
+    actually honour (see _ansible_run). An operator had no way to discover
+    which groups or hosts existed, so the only reliably-working target was an
+    IP typed from memory. Showing the inventory turns targeting from recall
+    into selection.
+    """
+    await websocket.send(json.dumps({"type": "ansible_inventory", **_inventory_model()}))
+
+async def _ansible_adhoc(websocket, msg):
+    """Run one ad-hoc module against a target — the estate's smoke test.
+
+    `ping` across a group answers the question an operator actually asks
+    before running anything ("which of these can I even reach?") and needs no
+    playbook to exist. Anything richer belongs in a playbook, where it is
+    reviewable and lands in the deployment ledger.
+    """
+    target = (msg.get("target") or "").strip()
+    module = (msg.get("module") or "ping").strip() or "ping"
+    args = (msg.get("args") or "").strip()
+    user = (msg.get("user") or "root").strip() or "root"
+    if not target:
+        await websocket.send(json.dumps({"type": "log_line", "target": "ansible_log",
+                                         "line": "ERROR: no target given"}))
+        await websocket.send(json.dumps({"type": "exec_done", "target": "ansible_log", "rc": 2}))
+        return
+    cmd = ["ansible", target, "-m", module, "-u", user]
+    if args:
+        cmd += ["-a", args]
+    if target == "localhost":
+        cmd += ["-i", "localhost,", "--connection", "local"]
+    elif not _target_in_inventory(target):
+        cmd += ["-i", f"{target},"]
+    db_log_event("ansible", f"adhoc:{module}", f"against {target}", {"args": args})
+    await _stream_proc_detached(websocket, cmd, env=_ansible_env(), target="ansible_log")
+
 async def _ansible_run(websocket, msg):
     import json as _json
     pb       = msg.get("playbook", "")
@@ -5592,7 +5716,29 @@ async def _ansible_run(websocket, msg):
     cmd = ["ansible-playbook", pb, "-u", user]
     if limit == "localhost":
         cmd += ["-i", "localhost,", "--connection", "local"]
+    elif _target_in_inventory(limit):
+        # THE TARGET NAMES SOMETHING THE INVENTORY KNOWS — use the inventory
+        # itself and scope the run with --limit.
+        #
+        # This branch is new, and it is what makes group targeting work at
+        # all. Every non-localhost target used to be turned into an ad-hoc
+        # one-element inventory (`-i "<target>,"`), which makes Ansible read
+        # the string as a literal HOSTNAME. So `kube_workers` — the very
+        # example this view's placeholder text suggested — resolved as a host
+        # named "kube_workers", failed to connect, and no playbook could be
+        # run against a group from this UI at all.
+        #
+        # ANSIBLE_CONFIG (see _ansible_env) already points at the kldload
+        # ansible.cfg whose inventory is the dynamic kldload-inventory script,
+        # so NOT overriding -i yields the real inventory with its groups.
+        # Credentials come from there too — hostvars carry
+        # ansible_ssh_private_key_file and the cfg disables host-key checking
+        # — which is why this branch needs neither --private-key nor the
+        # ssh_common_args the ad-hoc branch below still sets by hand.
+        cmd += ["--limit", limit]
     else:
+        # An address the inventory has never heard of — usually a machine
+        # being bootstrapped. Keep the ad-hoc list so that still works.
         inv = limit if limit.endswith(",") else f"{limit},"
         cmd += ["-i", inv]
         # SSH key path — kube-cluster uses /root/.ssh/id_ed25519; fall back
