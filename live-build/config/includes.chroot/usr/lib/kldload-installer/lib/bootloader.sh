@@ -1074,8 +1074,22 @@ EOFSTAB
     # rhgb is a Fedora-ism and inert on Debian; `quiet` is the one that matters
     # here, and it is precisely the flag the encrypted path was dropping.
     local _direct_bootargs="rhgb quiet"
-    [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]] &&
-        _direct_bootargs="rhgb quiet $(k_console_args)"
+    if [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]]; then
+        # DROP `quiet` — do not merely add console args alongside it.
+        #
+        # The comment above says `quiet` "is precisely the flag the encrypted
+        # path was dropping", and then the code kept it and only appended
+        # k_console_args. So the prompt was still written into a silenced
+        # console and the operator still had to press Enter to force the
+        # redraw that reveals it. Reported again on .120, 2026-08-22, the
+        # first Secure Boot install from the new stick: "the password prompt
+        # wasn't clear, I had to press enter to get it to appear."
+        #
+        # rhgb goes too. It expects plymouth, and plymouth is not in this
+        # initramfs at all — it buys nothing and misleads the next reader
+        # into thinking a splash owns the console.
+        _direct_bootargs="$(k_console_args)"
+    fi
 
     # The GPU args have to be HERE as well as in the ZBM property, because
     # this entry is the one Secure Boot actually boots.

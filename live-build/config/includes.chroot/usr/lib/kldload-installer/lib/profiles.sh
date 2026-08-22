@@ -48,9 +48,22 @@ k_profile_packages() {
     # and Debian substrates, and the generic ai) arm below is reached by BOTH
     # families, so a single hardcoded name is always wrong on one of them.
     # Verified against Debian trixie and Fedora 44, 2026-08-18.
+    # THE PAM MODULE HAS THE SAME PACKAGE NAME ON BOTH FAMILIES AND SHIPS A
+    # DIFFERENT MODULE ON EACH. Verified in clean containers 2026-08-22:
+    #
+    #   fedora  python3-pam    -> site-packages/pam/     `import pam`  OK
+    #   debian  python3-pam    -> PAM.cpython-*.so       `import pam`  FAILS
+    #   debian  python3-pampy  -> dist-packages/pam/     `import pam`  OK
+    #
+    # kldload-webui does `import pam` then pam.pam().authenticate() for console
+    # password auth, and that import sits in a try/except — so on Debian the
+    # service came up healthy and silently refused every login while logging
+    # "PAM auth error" where nobody reads (.120, 2026-08-22). Packaging the
+    # same name on both families is wrong on exactly one of them, every time.
+    local _pam="python3-pampy"
     local _cxx="g++" _pw_utils="pipewire-bin"
     case "$_distro" in
-    fedora | centos | rocky | rhel) _cxx="gcc-c++" _pw_utils="pipewire-utils" ;;
+    fedora | centos | rocky | rhel) _cxx="gcc-c++" _pw_utils="pipewire-utils" _pam="python3-pam" ;;
     esac
 
     # Alpine Linux — core profile only (Alpine is a musl-based distro that lacks
@@ -118,7 +131,7 @@ k_profile_packages() {
     # which also work on RPM distros via the darksite package sets.
     case "$profile" in
     server)
-        echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml python3-pam python3-pip htop net-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
+        echo "openssh-server sudo curl ca-certificates vim less systemd-resolved chrony wireguard-tools iproute2 tmux eject sanoid python3 python3-websockets python3-yaml ${_pam} python3-pip htop net-tools ethtool nftables tcpdump fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch}"
         ;;
     client)
         echo "openssh-server sudo curl ca-certificates vim less network-manager wireguard-tools iproute2"
@@ -347,7 +360,7 @@ k_profile_packages() {
         gir1.2-webkit-6.0 libgtk-4-1 python3-gi \
         pulseaudio-utils \
         speech-dispatcher espeak-ng \
-        tmux eject sanoid python3 python3-websockets python3-yaml python3-pam python3-pip htop iotop lm-sensors net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
+        tmux eject sanoid python3 python3-websockets python3-yaml ${_pam} python3-pip htop iotop lm-sensors net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
         zenity chromium \
         docker.io docker-cli docker-compose"
         ;;
@@ -369,7 +382,7 @@ k_profile_packages() {
     kvm)
         # Hypervisor: KVM + libvirt (KVM-specific qemu/libvirt added by k_profile_optional_packages per-distro)
         echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
-        wireguard-tools tmux python3 python3-websockets python3-yaml python3-pam python3-pip htop net-tools ethtool tcpdump \
+        wireguard-tools tmux python3 python3-websockets python3-yaml ${_pam} python3-pip htop net-tools ethtool tcpdump \
         fzf bat eza fd-find ripgrep zoxide podman sanoid qemu-utils pciutils ${_fastfetch} \
         docker.io docker-cli docker-compose"
         ;;
@@ -394,7 +407,7 @@ k_profile_packages() {
         pipewire wireplumber \
         wf-recorder \
         xdotool xclip \
-        python3-websockets python3-pam python3-pip \
+        python3-websockets ${_pam} python3-pip \
         evemu-tools \
         nginx \
         nftables chrony \
@@ -428,7 +441,7 @@ k_profile_packages() {
         echo "openssh-server sudo curl ca-certificates vim less iproute2 chrony nftables \
         wireguard-tools tmux python3 python3-pip jq htop fzf bat eza fd-find ripgrep zoxide ${_fastfetch} \
         sanoid cloud-init qemu-guest-agent qemu-utils eject zstd \
-        python3-websockets python3-yaml python3-pam python3-pip net-tools ethtool tcpdump \
+        python3-websockets python3-yaml ${_pam} python3-pip net-tools ethtool tcpdump \
         alsa-utils pipewire ${_pw_utils} cmake ${_cxx} make git podman"
         ;;
 

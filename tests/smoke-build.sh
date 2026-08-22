@@ -545,6 +545,32 @@ else
     _fail "python3-pip is in a package list" "pip fallbacks silently no-op without it"
 fi
 
+# Per-family package names must BRANCH, not be hardcoded. The pam module is
+# the worst case: the same package name ships a different module on each
+# family, so one hardcoded name is silently wrong on exactly one of them.
+#   fedora python3-pam   -> import pam   OK
+#   debian python3-pam   -> import PAM   FAILS
+#   debian python3-pampy -> import pam   OK
+_pf="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+if grep -q '_pam="python3-pampy"' "$_pf" 2>/dev/null &&
+    grep -qE 'fedora \| centos \| rocky \| rhel\).*_pam="python3-pam"' "$_pf" 2>/dev/null; then
+    _pass "pam package branches per family"
+else
+    _fail "pam package branches per family" \
+        "one hardcoded name is wrong on one family — console auth dies silently there"
+fi
+
+# The encrypted direct-boot entry must NOT carry `quiet`: the passphrase prompt
+# goes to /dev/console and quiet is what hides it, so the operator has to press
+# Enter to force a redraw (.120, 2026-08-22, and .143 before it).
+if grep -qE '_direct_bootargs="\$\(k_console_args\)"' \
+    "$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/bootloader.sh" 2>/dev/null; then
+    _pass "encrypted direct-boot drops rhgb quiet"
+else
+    _fail "encrypted direct-boot drops rhgb quiet" \
+        "quiet silences the console the passphrase prompt is written to"
+fi
+
 # The kernel pin must be installed BY NAME when the mirrors still carry it.
 # Handing dnf the same NVR from @commandline while it is also resolvable from
 # the repo is a hard conflict that killed a build on 2026-08-22. That case only
