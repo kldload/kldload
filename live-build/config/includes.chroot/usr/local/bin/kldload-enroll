@@ -104,27 +104,36 @@ if [[ "${1:-}" == "--all" ]]; then
         esac
     done
     [[ $EUID -eq 0 ]] || exec sudo "$0" --all --role "$_sweep_role" ${_sweep_cluster:+--cluster "$_sweep_cluster"}
+    # DELEGATE. The single-VM path below already resolves an address two ways
+    # (guest agent, then MAC-to-DHCP-lease) and is already idempotent, so the
+    # sweep just invokes it per VM and counts exit codes.
+    #
+    # The first version re-implemented resolution here using only
+    # `virsh domifaddr`, which needs a qemu-guest-agent the goldens do not
+    # install — so it reported "10 without an address" for ten VMs that all had
+    # perfectly good DHCP leases (.107, 2026-08-22). Two copies of one lookup
+    # is how the copies drift.
     _done=0
-    _skipped=0
+    _noip=0
+    _partial=0
     while read -r _vm; do
         [[ -n "$_vm" ]] || continue
-        # Already a peer? `wg show` is the authority — the DB can disagree with
-        # the kernel, and the kernel is what carries traffic.
-        _known="$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=5 -o BatchMode=yes -i /root/.ssh/id_ed25519 \
-            "root@$(virsh domifaddr "$_vm" 2>/dev/null |
-                awk '/ipv4/{split($4,a,"/");print a[1];exit}')" \
-            'cat /etc/wireguard/.node-id 2>/dev/null' 2>/dev/null | tr -cd '0-9')"
-        if [[ -n "$_known" ]] &&
-            wg show wg-mgmt allowed-ips 2>/dev/null | grep -q "\.${_known}/32"; then
-            _skipped=$((_skipped + 1))
-            continue
-        fi
-        if "$0" "$_vm" --role "$_sweep_role" ${_sweep_cluster:+--cluster "$_sweep_cluster"}; then
-            _done=$((_done + 1))
-        fi
+        _rc=0
+        # </dev/null is load-bearing. Without it the child inherits this loop's
+        # stdin — the process substitution feeding `read` — and consumes the
+        # remaining VM names, so the loop runs exactly once. Observed: a sweep
+        # over 10 running VMs reported "1 on the mesh" and silently skipped the
+        # other nine (.107, 2026-08-22).
+        "$0" "$_vm" --role "$_sweep_role" ${_sweep_cluster:+--cluster "$_sweep_cluster"} \
+            </dev/null >/dev/null 2>&1 || _rc=$?
+        case "$_rc" in
+        0) _done=$((_done + 1)) ;;
+        1) _noip=$((_noip + 1)) ;;
+        *) _partial=$((_partial + 1)) ;;
+        esac
     done < <(virsh list --state-running --name 2>/dev/null)
-    printf '[enroll] sweep complete: %d enrolled, %d already on the mesh\n' "$_done" "$_skipped"
+    printf '[enroll] sweep: %d on the mesh, %d without an address, %d incomplete\n' \
+        "$_done" "$_noip" "$_partial"
     exit 0
 fi
 
