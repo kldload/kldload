@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# pre-commit — run the mandatory gates on STAGED content, before it lands.
+#
+# What it does, in order:
+#   1. Collects staged files (added/copied/modified only — never deletions).
+#   2. Shell, by shebang not extension: bash -n, shellcheck -S error, shfmt.
+#   3. Python, by shebang not extension: py_compile, ruff (no new findings).
+#   4. YAML / JSON parse. Dockerfile via hadolint when present.
+#   5. Blocks the commit on any failure, naming the file and the fix.
+#
+# WHY: every gate this repo mandates already existed, and every one of them
+# depended on somebody remembering to run it. On 2026-08-22 a session
+# committed twelve defects; the gates would have caught several and were
+# simply not run on the way past. A rule that relies on memory is a rule that
+# holds only on days nobody is busy.
+#
+# It deliberately checks STAGED content, not the working tree: committing a
+# file whose on-disk copy is clean but whose staged copy is not is exactly the
+# kind of thing nobody notices until CI.
+#
+# Inputs:  the git index. Outputs: nothing on success; diagnostics + exit 1 on
+#          failure. Bypass is `--no-verify`, which this repo's rules forbid —
+#          if a gate fails, fix it or explain it, do not route around it.
+#
+# Notes:
+#   - Missing tool = LOUD WARNING, not silent pass. smoke-build's habit of
+#     warning when shellcheck is absent is explicitly called out in the rules
+#     as something not to read as a green light.
+#   - Fast by construction: only staged files, and the linters are the same
+#     ones the full gate runs, so nothing new needs installing.
+# ---------------------------------------------------------------------------
+set -Eeuo pipefail
+
+RED=$'\033[0;31m'
+YEL=$'\033[0;33m'
+GRN=$'\033[0;32m'
+RST=$'\033[0m'
+fail=0
+
+_err() {
+    printf '%s  BLOCKED%s %s\n' "$RED" "$RST" "$*" >&2
+    fail=1
+}
+_warn() { printf '%s  WARN%s    %s\n' "$YEL" "$RST" "$*" >&2; }
+_ok() { printf '%s  ok%s      %s\n' "$GRN" "$RST" "$*"; }
+
+# Staged, still-present files only.
+mapfile -t STAGED < <(git diff --cached --name-only --diff-filter=ACM)
+[[ ${#STAGED[@]} -gt 0 ]] || exit 0
+
+# Classify by SHEBANG, not extension: most shipped tools here are
+# extensionless, so an extension filter misses the majority of the tree.
+declare -a SH=() PY=()
+for f in "${STAGED[@]}"; do
+    [[ -f "$f" ]] || continue
+    case "$f" in
+    *.sh | *.bash) SH+=("$f") && continue ;;
+    esac
+    head -c 200 "$f" 2>/dev/null | head -1 | grep -qE '^#!.*(bash|/bin/sh)' && SH+=("$f")
+    head -c 200 "$f" 2>/dev/null | head -1 | grep -qE '^#!.*python' && PY+=("$f")
+done
+
+# ── Shell ──────────────────────────────────────────────────────────────────
+if ((${#SH[@]})); then
+    for f in "${SH[@]}"; do
+        bash -n "$f" 2>/dev/null || _err "bash -n: $f"
+    done
+    if command -v shellcheck >/dev/null 2>&1; then
+        for f in "${SH[@]}"; do
+            shellcheck -S error "$f" >/dev/null 2>&1 || {
+                _err "shellcheck -S error: $f"
+                shellcheck -S error "$f" 2>&1 | head -8 >&2
+            }
+        done
+    else
+        _warn "shellcheck NOT INSTALLED — the error gate did not run. Install it; do not read this as a pass."
+    fi
+    if command -v shfmt >/dev/null 2>&1; then
+        for f in "${SH[@]}"; do
+            shfmt -d -i 4 "$f" >/dev/null 2>&1 || _err "shfmt drift: $f  (fix: shfmt -w -i 4 '$f')"
+        done
+    else
+        _warn "shfmt NOT INSTALLED — the format gate did not run."
+    fi
+    ((fail)) || _ok "${#SH[@]} shell file(s): bash -n, shellcheck -S error, shfmt"
+fi
+
+# ── Python ─────────────────────────────────────────────────────────────────
+if ((${#PY[@]})); then
+    for f in "${PY[@]}"; do
+        python3 -m py_compile "$f" 2>/dev/null || _err "py_compile: $f"
+    done
+    if command -v ruff >/dev/null 2>&1; then
+        # RATCHET, not a clean-tree demand: these files carry pre-existing
+        # findings and the rule is that the baseline only improves. Compare the
+        # staged copy against HEAD's and block only on an INCREASE.
+        for f in "${PY[@]}"; do
+            now=$(ruff check --select=E,F,W "$f" 2>/dev/null | grep -c '^  -->' || true)
+            was=$(git show "HEAD:$f" 2>/dev/null |
+                ruff check --select=E,F,W --stdin-filename "$f" - 2>/dev/null |
+                grep -c '^  -->' || true)
+            if [[ "${now:-0}" -gt "${was:-0}" ]]; then
+                _err "ruff findings rose ${was} -> ${now}: $f"
+            fi
+        done
+    else
+        _warn "ruff NOT INSTALLED — the python lint gate did not run."
+    fi
+    ((fail)) || _ok "${#PY[@]} python file(s): py_compile, ruff (no new findings)"
+fi
+
+# ── YAML / JSON / Dockerfile ───────────────────────────────────────────────
+for f in "${STAGED[@]}"; do
+    [[ -f "$f" ]] || continue
+    case "$f" in
+    *.yml | *.yaml)
+        python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' "$f" 2>/dev/null ||
+            _err "YAML does not parse: $f"
+        ;;
+    *.json)
+        jq -e '.' "$f" >/dev/null 2>&1 || _err "JSON does not parse: $f"
+        ;;
+    *Dockerfile* | *Containerfile*)
+        if command -v hadolint >/dev/null 2>&1; then
+            hadolint "$f" >/dev/null 2>&1 || {
+                _err "hadolint: $f"
+                hadolint "$f" 2>&1 | head -6 >&2
+            }
+        else
+            _warn "hadolint NOT INSTALLED — $f was not linted (the rules mandate it)."
+        fi
+        ;;
+    esac
+done
+
+# ── Identity + secrets ─────────────────────────────────────────────────────
+# The repo carries no Claude-named files or references; catching it here is
+# cheaper than rewriting a pushed commit.
+# EXEMPTIONS are infrastructure telling a tool what to skip, not attribution:
+# .gitignore's exclusion rules, ci/README.md's rsync --exclude, and THIS FILE,
+# which has to name the words in order to search for them. Everything else is a
+# defect. (This hook blocked its own first commit on exactly that, which is a
+# reassuring way to learn the check works.)
+_refscan=$(git diff --cached --name-only --diff-filter=ACM |
+    grep -vE '^(\.gitignore|ci/README\.md|\.githooks/pre-commit)$' || true)
+if [[ -n "$_refscan" ]]; then
+    while IFS= read -r _f; do
+        [[ -n "$_f" && -f "$_f" ]] || continue
+        if git diff --cached -U0 -- "$_f" | grep -qiE '^\+.*(claude|anthropic)'; then
+            _err "staged diff adds a claude/anthropic reference: $_f — this repo carries none"
+        fi
+    done <<<"$_refscan"
+fi
+
+if ((fail)); then
+    printf '\n%sCommit blocked.%s Fix the above, or explain the exception in the code.\n' "$RED" "$RST" >&2
+    printf 'Do NOT use --no-verify: this repo forbids bypassing hooks.\n' >&2
+    exit 1
+fi
+exit 0
