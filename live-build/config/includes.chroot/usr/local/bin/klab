@@ -1121,6 +1121,10 @@ echo -e 'PermitRootLogin yes\nPasswordAuthentication yes' > /etc/ssh/sshd_config
 # sshd.service. This line only ever named sshd, so the Debian arm was a no-op
 # even as a restart. Enabling both and tolerating the absent one covers the
 # matrix without a distro case.
+# swallow x2: exactly one of these unit names exists per family — ssh on
+# Debian/Ubuntu, sshd on RPM — so the other is guaranteed to fail. Naming both
+# and tolerating the absent one is what makes this work across the matrix
+# without a distro case.
 systemctl enable --now ssh 2>/dev/null || true
 systemctl enable --now sshd 2>/dev/null || true
 
@@ -1130,6 +1134,8 @@ systemctl enable --now sshd 2>/dev/null || true
 # key and no regenerated host keys — verified across all five desktop
 # goldens on .120, 2026-08-22. seal-golden.yml gained this earlier today but
 # klab seals its own goldens by a different path and did not inherit it.
+# swallow: an image with no cloud-init installed at all is a legitimate
+# golden. Enabling a target that does not exist is a no-op, not a failure.
 systemctl enable cloud-init.target 2>/dev/null || true
 
 dnf install -y epel-release 2>/dev/null || true
@@ -1210,6 +1216,9 @@ fi
 # multi-user.target.wants), so the agent is present and never runs — which
 # is what vmxplore reports as "no-agent" (.120, 2026-08-22).
 dnf install -y qemu-guest-agent 2>/dev/null || echo "klab: WARNING qemu-guest-agent FAILED — hypervisor cannot read this guest's IP" >&2
+# swallow: these are the OPTIONAL half of the split above. bcc/bpfcc is
+# absent or renamed on some releases, and a lab image without eBPF tooling
+# is degraded, not broken — unlike the agent, which now installs alone.
 dnf install -y bpftrace bcc-tools wireguard-tools curl jq 2>/dev/null || true
 # qemu-guest-agent: IP reporting, a graceful shutdown the hypervisor can
 # actually wait on, and fs-freeze — fs-freeze is what makes a snapshot of a
@@ -1222,6 +1231,9 @@ dnf install -y bpftrace bcc-tools wireguard-tools curl jq 2>/dev/null || true
 # desktop goldens carry the binary and zero enable symlinks (.120,
 # 2026-08-22), so the agent never starts in a clone.
 systemctl enable qemu-guest-agent 2>/dev/null || true
+# swallow: start can fail in a chroot or a container with no virtio channel,
+# which is normal at build time. The `is-enabled` check below is the one that
+# actually decides, and it reports loudly.
 systemctl start qemu-guest-agent 2>/dev/null || true
 if systemctl is-enabled qemu-guest-agent >/dev/null 2>&1; then
     echo "klab: qemu-guest-agent enabled"
@@ -1418,6 +1430,9 @@ fi
 # only stop them by ACPI. The agent is the one the hypervisor depends on,
 # so it must not share a transaction with anything optional.
 apt-get install -y qemu-guest-agent 2>/dev/null || echo "klab: WARNING qemu-guest-agent FAILED — hypervisor cannot read this guest's IP" >&2
+# swallow: these are the OPTIONAL half of the split above. bcc/bpfcc is
+# absent or renamed on some releases, and a lab image without eBPF tooling
+# is degraded, not broken — unlike the agent, which now installs alone.
 apt-get install -y bpftrace bpfcc-tools wireguard-tools curl jq 2>/dev/null || true
 # See the dnf branch for why the guest agent matters on a cloned image.
 systemctl enable --now qemu-guest-agent 2>/dev/null || true
