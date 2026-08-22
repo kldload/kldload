@@ -516,6 +516,24 @@ else
         "resolve-stack.sh exists but nothing invokes it — the stack would be unpinned"
 fi
 
+# Capture-then-eval must stay PAIRED. Splitting `eval "$(cmd)"` into a capture
+# plus a later eval is correct — eval reports its own status, not the
+# command's, so a resolver exiting 2 reads as success. But a half-applied edit
+# leaves the capture with no eval, and then the variables it was supposed to
+# define are unbound: the build dies with "KPIN_NVR: unbound variable" four
+# minutes in, pointing nowhere near the actual mistake (2026-08-22, twice).
+for _f in "$ROOT/builder/build-iso.sh" "$ROOT/build/darksite-fedora/build-darksite-fedora.sh"; do
+    [[ -f "$_f" ]] || continue
+    _cap=$(grep -c '_kpin_out="\$(' "$_f" 2>/dev/null || true)
+    _ev=$(grep -c 'eval "\$_kpin_out"' "$_f" 2>/dev/null || true)
+    if [[ "${_cap:-0}" -eq "${_ev:-0}" ]]; then
+        _pass "kpin capture/eval paired: $(basename "$_f")"
+    else
+        _fail "kpin capture/eval paired: $(basename "$_f")" \
+            "captured ${_cap} time(s) but evaluated ${_ev} — the pin variables will be unbound"
+    fi
+done
+
 # The resolver must reject kernel FLAVOURS. Its first run picked
 # 7.1.8+deb13-rt because sort -V ranks a suffixed name above the bare one, and
 # the same bug would happily pick -cloud, the flavour with no DRM.

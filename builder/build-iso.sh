@@ -324,6 +324,10 @@ log "Resolving the Fedora kernel pin against the zfs repo's cap…"
 if ! _kpin_out="$(ARCH="$ARCH" RELEASEVER=44 bash /build/builder/kernel-pin.sh)"; then
     die "kernel-pin.sh could not resolve a fetchable kernel NVR — refusing to guess"
 fi
+# Evaluate only AFTER the status check above has passed. Splitting capture
+# from eval is the whole point: eval "$(cmd)" reports eval's success, not the
+# resolver's.
+eval "$_kpin_out"
 KOJI_KERNEL_NVR="$KPIN_NVR"
 KOJI_KERNEL_BASE="$KPIN_BASE"
 KOJI_KERNEL_URLS=("${KPIN_URLS[@]}")
