@@ -172,8 +172,25 @@ if [[ -n "$_mkiso" ]]; then
         chmod 0600 "$_seed_iso" 2>/dev/null
         # --config so it persists into the definition rather than only the
         # running domain; the clone is defined but not started at this point.
-        if virsh attach-disk "$DEST" "$_seed_iso" sdz \
-            --type cdrom --mode readonly --config >/dev/null 2>&1; then
+        # TARGET sda ON THE SATA BUS, NOT sdz ON SCSI.
+        #
+        # `sdz` is the 26th SCSI device. The goldens have no SCSI controller at
+        # all (their disk is virtio, vda), so asking for that address made
+        # libvirt silently synthesise FOUR lsilogic controllers to reach unit
+        # 25 — and the guest kernel never enumerated a drive there. The seed
+        # was attached, visible in the domain XML, and completely absent
+        # inside the VM: `blkid` showed no cidata volume, and cloud-init fell
+        # through to DataSourceNone ("Used fallback datasource"), so no
+        # hostname, no authorized key, no host keys and no guest agent.
+        #
+        # That is why clones came up as `localhost` with sshd refusing
+        # connections (.107, 2026-08-22) — the seed this function carefully
+        # builds was never readable by the guest that needed it.
+        #
+        # Every golden already has a SATA controller, and cloud-init's NoCloud
+        # datasource does not care which bus the cidata volume arrives on.
+        if virsh attach-disk "$DEST" "$_seed_iso" sda \
+            --type cdrom --mode readonly --config --targetbus sata >/dev/null 2>&1; then
             echo "  Seed:   ${_seed_iso} (hostname, ssh key, guest agent)"
         else
             echo "  NOTE: seed built but could not be attached — clone will boot as '${SOURCE}'" >&2

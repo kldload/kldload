@@ -30,6 +30,80 @@
       shell: rm -f /etc/ssh/ssh_host_*
       changed_when: false
 
+    # THE TWO TASKS BELOW ARE WHAT MAKES THE LINE ABOVE SAFE.
+    #
+    # Removing the host keys is correct — clones must not share an SSH
+    # identity — but "clones regenerate on first boot" was an assumption, not
+    # a mechanism, and it was false. Measured on .107 2026-08-22: ten clones
+    # of k8s-golden booted and networked fine (ping 0% loss) and every one
+    # refused port 22. Their disks showed no /etc/ssh/ssh_host_* and no
+    # /var/log/cloud-init.log at all — cloud-init had never executed, so
+    # nothing had regenerated the keys sshd needs in order to start.
+    #
+    # Cause: cloud-init.target was not enabled. Its five services sat
+    # correctly in cloud-init.target.wants/, but nothing pulled the target
+    # into the boot, so the NoCloud seed kvm-clone attaches was inert — no
+    # hostname, no authorized key, no host keys, no guest agent.
+    #
+    # Two failsafes, because a clone that cannot be reached is indistinguish-
+    # able from a clone that never booted, and this is the boot-critical path
+    # for every fleet operation (see CLAUDE.md rule 2):
+    #
+    #   1. enable cloud-init.target, so the seed applies as designed;
+    #   2. generate host keys from ssh.service itself, so SSH comes up even
+    #      when cloud-init is absent, masked, or fails — on a distro whose
+    #      image never shipped it, task 1 is a no-op and this is the whole
+    #      safety net.
+    - name: Ensure cloud-init actually runs on the clone
+      shell: |
+        # The seed is useless if the target that consumes it never starts.
+        systemctl enable cloud-init.target 2>/dev/null || true
+        # Debian/Ubuntu pull the services via cloud-init.target; RHEL-family
+        # images historically enable them individually. Enabling both shapes
+        # is harmless and covers the matrix.
+        for _u in cloud-init-local cloud-init cloud-init-main cloud-init-network cloud-config cloud-final; do
+            systemctl enable "${_u}.service" 2>/dev/null || true
+        done
+      changed_when: false
+
+    - name: Guarantee SSH host keys exist at boot, with or without cloud-init
+      shell: |
+        # ssh-keygen -A creates only the key types that are MISSING, so this
+        # is idempotent and never replaces a key cloud-init already wrote.
+        # `-` prefix so a failure here cannot block sshd from starting.
+        install -d -m 0755 /etc/systemd/system/ssh.service.d
+        printf '[Service]\nExecStartPre=-/usr/sbin/ssh-keygen -A\n' \
+            > /etc/systemd/system/ssh.service.d/10-kldload-hostkeys.conf
+        # Debian calls it ssh.service, RHEL-family sshd.service. Write both;
+        # the drop-in for a unit that does not exist is simply ignored.
+        install -d -m 0755 /etc/systemd/system/sshd.service.d
+        printf '[Service]\nExecStartPre=-/usr/sbin/ssh-keygen -A\n' \
+            > /etc/systemd/system/sshd.service.d/10-kldload-hostkeys.conf
+      changed_when: false
+
+    - name: Pin cloud-init to the NoCloud seed
+      # The seed kvm-clone/kspawn attach is a NoCloud cidata volume. Debian's
+      # cloud images leave datasource_list unset, so cloud-init probes the EC2
+      # metadata service FIRST and spends up to 240s on 50-second timeouts
+      # against 169.254.169.254 — which does not exist on a libvirt NAT
+      # network — before falling through to the seed sitting on the local bus.
+      #
+      # Measured on .107 2026-08-22: a clone was still unreachable 90s after
+      # boot, with cloud-init logging
+      #   "Calling 'http://169.254.169.254/.../instance-id' failed [50/240s]"
+      # The clone was not broken, only four minutes late — which for a fleet
+      # of ten is indistinguishable from broken.
+      #
+      # Pinning the list makes the seed the first and only thing it looks for.
+      copy:
+        dest: /etc/cloud/cloud.cfg.d/99-kldload-nocloud.cfg
+        mode: "0644"
+        content: |
+          # kldload: clones are seeded with a local NoCloud cidata volume.
+          # Probing EC2/Azure/GCE metadata services first costs minutes of
+          # timeouts on a network where they cannot exist.
+          datasource_list: [ NoCloud, None ]
+
     - name: Clean cloud-init state
       shell: |
         cloud-init clean --logs 2>/dev/null || true
