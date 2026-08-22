@@ -1576,6 +1576,46 @@ DASHSTART
         else
             k_die "/usr/local/share/kldload-ansible missing in live root — kube-cluster + Ansible tab will fail"
         fi
+
+        # Make the shipped config Ansible's SYSTEM DEFAULT.
+        #
+        # Without this, a bare `ansible` finds no inventory at all. kldload's
+        # own callers (kube-cluster, the webui's Ansible tab) export
+        # ANSIBLE_CONFIG=/usr/local/share/kldload-ansible/ansible.cfg and so
+        # work fine, which is exactly why this stayed invisible: every code
+        # path that was tested set the variable, and the operator's shell —
+        # the one path nobody tests — does not.
+        #
+        # Measured on .107 2026-08-22 with a healthy 6-node cluster registered
+        # in the state DB: `ansible all -m ping` answered
+        #   "No inventory was parsed, only implicit localhost is available"
+        # while `ansible -i /usr/local/bin/kldload-inventory all -m ping`
+        # returned SUCCESS from all six. The dynamic inventory was never
+        # broken; nothing pointed Ansible at it.
+        #
+        # /etc/ansible/ansible.cfg is Ansible's documented system-wide
+        # location and the lowest-precedence one, so ANSIBLE_CONFIG, a
+        # project ./ansible.cfg and ~/.ansible.cfg all still win — this sets a
+        # floor, it does not override anybody. The file's paths are absolute,
+        # so it works verbatim from either location.
+        #
+        # Copy rather than symlink: Ansible refuses to load a config it
+        # considers unsafe, and a copy owned by root with 0644 is the shape it
+        # expects.
+        install -d -m 0755 "${target}/etc/ansible"
+        if [[ -f /usr/local/share/kldload-ansible/ansible.cfg ]]; then
+            install -m 0644 /usr/local/share/kldload-ansible/ansible.cfg \
+                "${target}/etc/ansible/ansible.cfg"
+            # Verify the OUTCOME: the inventory line has to survive the copy,
+            # because a cfg without it is indistinguishable from no cfg.
+            if grep -q '^inventory *=.*kldload-inventory' "${target}/etc/ansible/ansible.cfg"; then
+                k_log "ansible: /etc/ansible/ansible.cfg installed (dynamic inventory is the default)"
+            else
+                k_die "ansible.cfg landed at /etc/ansible without its inventory line — a bare ansible would see no hosts"
+            fi
+        else
+            k_log "WARNING: no ansible.cfg in the live root — a bare 'ansible' will find no inventory"
+        fi
         [[ -f /usr/local/sbin/adduser.local ]] &&
             cp /usr/local/sbin/adduser.local "${target}/usr/local/sbin/adduser.local" &&
             chmod +x "${target}/usr/local/sbin/adduser.local"
