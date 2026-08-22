@@ -594,7 +594,17 @@ def check_cilium_scrape_labels():
         # same box had 127 cilium metric names minutes later (fiend, .127 and
         # .137, 2026-08-19). A check that fails on every healthy install is a
         # check people learn to ignore.
-        if not _prom_query('up{job="cilium-agent"}'):
+        # `up` MUST be compared to 1. A target that Prometheus has merely
+        # DISCOVERED — file_sd regenerates cilium targets every 30s — already
+        # has an up series carrying the value 0, so testing only for the
+        # series' existence lets this fall through to `fail` during the window
+        # between discovery and the first successful scrape. That is precisely
+        # what happened on .107 2026-08-22: k8s-ready was written at 05:26:13,
+        # the check ran at 05:26:42 and failed, and minutes later the same box
+        # served cilium_version with k8s_app="cilium" from 12 healthy
+        # cilium-agent targets. Same false negative this guard was added for
+        # (.127/.137, 2026-08-19), one layer further in.
+        if not _prom_query('up{job="cilium-agent"} == 1'):
             return _result("observability", "cilium scrape labels", "skip", "",
                            "cilium-agent not scraped yet — cluster still converging")
         return _result("observability", "cilium scrape labels", "fail",
