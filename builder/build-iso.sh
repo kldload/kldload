@@ -392,7 +392,23 @@ else
     # Excludes come from the resolver so they always match the pinned line —
     # a hardcoded `--exclude=kernel*-7.[1-9]*` silently stops protecting
     # anything the moment the pin moves to a different line.
-    DNF_KERNEL_ARGS=("${KOJI_KERNEL_EXCLUDES[@]}" "${KOJI_KERNEL_URLS[@]}")
+    # Pass explicit koji RPM URLs ONLY when the mirrors no longer carry the
+    # pinned NVR. If they still carry it, naming that NVR on the command line
+    # while it is also resolvable from the repo is a hard dnf conflict —
+    #   "cannot install both kernel-devel-7.1.9-200.fc44 from @commandline
+    #    and kernel-devel-7.1.9-200.fc44 from updates"
+    # which killed a build on 2026-08-22. It never arose before because the
+    # pin was always OLDER than whatever updates carried; now that the pin
+    # tracks the ZFS ceiling the two routinely coincide. The excludes apply
+    # either way — they are what keeps a newer line out.
+    if [[ "${KPIN_SOURCE:-koji}" == "mirrors" ]]; then
+        DNF_KERNEL_ARGS=("${KOJI_KERNEL_EXCLUDES[@]}" kernel kernel-core kernel-modules
+            kernel-modules-core kernel-modules-extra kernel-devel kernel-devel-matched)
+        log "Kernel on the mirrors — resolving by name under the excludes, not by URL"
+    else
+        DNF_KERNEL_ARGS=("${KOJI_KERNEL_EXCLUDES[@]}" "${KOJI_KERNEL_URLS[@]}")
+        log "Kernel pruned from the mirrors — installing ${#KOJI_KERNEL_URLS[@]} RPMs from koji by URL"
+    fi
 fi
 dnf --installroot="$ROOTFS" --releasever=44 --setopt=install_weak_deps=False \
     --setopt=tsflags=nodocs --nogpgcheck -y install \

@@ -230,11 +230,13 @@ main() {
     for line in "${_lines[@]}"; do
         nvr=$(kpin_from_mirrors "$line" || true)
         if [[ -n "$nvr" ]]; then
+            source="mirrors"
             _warn "mirrors carry ${line}: ${nvr}"
             break
         fi
         nvr=$(kpin_from_koji "$line" || true)
         if [[ -n "$nvr" ]]; then
+            source="koji"
             _warn "mirrors pruned ${line}; koji has ${nvr}"
             break
         fi
@@ -258,6 +260,15 @@ main() {
 
     _warn "resolved kernel pin: ${nvr} (${source}, under zfs cap ${cap})"
 
+    # WHERE the kernel came from decides whether the caller may pass explicit
+    # RPM URLs. When the mirrors still carry the pinned NVR, handing dnf the
+    # same NVR from @commandline AND from the repo is a hard conflict:
+    #   "cannot install both kernel-devel-7.1.9-200.fc44 from @commandline
+    #    and kernel-devel-7.1.9-200.fc44 from updates"
+    # which stopped a build on 2026-08-22. That case never arose before,
+    # because the pin was always OLDER than whatever updates carried; now that
+    # the resolver tracks the ZFS ceiling, the two routinely coincide.
+    printf 'KPIN_SOURCE=%q\n' "$source"
     printf 'KPIN_NVR=%q\n' "$nvr"
     printf 'KPIN_BASE=%q\n' "$base"
 

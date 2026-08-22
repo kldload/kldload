@@ -540,6 +540,18 @@ else
     _fail "python3-pip is in a package list" "pip fallbacks silently no-op without it"
 fi
 
+# The kernel pin must be installed BY NAME when the mirrors still carry it.
+# Handing dnf the same NVR from @commandline while it is also resolvable from
+# the repo is a hard conflict that killed a build on 2026-08-22. That case only
+# started arising once the pin tracked the ZFS ceiling instead of lagging it.
+if grep -q 'KPIN_SOURCE' "$ROOT/builder/kernel-pin.sh" 2>/dev/null &&
+    grep -q 'KPIN_SOURCE:-koji' "$ROOT/builder/build-iso.sh" 2>/dev/null; then
+    _pass "kernel pin: by-name when mirrors carry it, by-URL only when pruned"
+else
+    _fail "kernel pin: by-name when mirrors carry it" \
+        "resolver must emit KPIN_SOURCE and build-iso must branch on it, or dnf sees a duplicate NVR"
+fi
+
 # Capture-then-eval must stay PAIRED. Splitting `eval "$(cmd)"` into a capture
 # plus a later eval is correct — eval reports its own status, not the
 # command's, so a resolver exiting 2 reads as success. But a half-applied edit
