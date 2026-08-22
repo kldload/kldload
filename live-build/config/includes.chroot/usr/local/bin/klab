@@ -1124,6 +1124,14 @@ echo -e 'PermitRootLogin yes\nPasswordAuthentication yes' > /etc/ssh/sshd_config
 systemctl enable --now ssh 2>/dev/null || true
 systemctl enable --now sshd 2>/dev/null || true
 
+# cloud-init.target must be ENABLED or the seed a clone is given is inert.
+# klab never touched it (0 references), so every klab golden shipped with
+# cloud-init disabled and its clones came up with no hostname, no injected
+# key and no regenerated host keys — verified across all five desktop
+# goldens on .120, 2026-08-22. seal-golden.yml gained this earlier today but
+# klab seals its own goldens by a different path and did not inherit it.
+systemctl enable cloud-init.target 2>/dev/null || true
+
 dnf install -y epel-release 2>/dev/null || true
 
 # kernel-devel MUST match running kernel for DKMS
@@ -1185,14 +1193,41 @@ if [ "$KLAB_ZFS_DEV" = "1" ] && ! test -f /usr/share/zfs/zfs-tests.sh; then
 fi
 
 # eBPF + essentials (always)
-dnf install -y bpftrace bcc-tools wireguard-tools curl jq qemu-guest-agent 2>/dev/null || true
+# SPLIT: qemu-guest-agent installs ALONE.
+# An install list is all-or-nothing — one unavailable package aborts the
+# batch and takes everything with it. bcc-tools/bpfcc-tools is the fragile
+# member here (absent or renamed depending on release), and it was taking
+# the guest agent down with it: klab-desktop-rocky and klab-desktop-centos
+# The agent is what the hypervisor depends on for a guest's IP, a graceful
+# shutdown it can wait on, and fs-freeze; it must not be able to fail
+# because something optional beside it was unavailable.
+#
+# HISTORY, corrected: this was first written claiming Rocky and CentOS had
+# no qemu-ga. That was a measurement error — the probe looked at
+# /usr/sbin/qemu-ga, which is the Debian path, while EL ships
+# /usr/bin/qemu-ga. The package installs fine on both. The REAL defect on
+# those images is that the unit is not enabled (0 symlinks in
+# multi-user.target.wants), so the agent is present and never runs — which
+# is what vmxplore reports as "no-agent" (.120, 2026-08-22).
+dnf install -y qemu-guest-agent 2>/dev/null || echo "klab: WARNING qemu-guest-agent FAILED — hypervisor cannot read this guest's IP" >&2
+dnf install -y bpftrace bcc-tools wireguard-tools curl jq 2>/dev/null || true
 # qemu-guest-agent: IP reporting, a graceful shutdown the hypervisor can
 # actually wait on, and fs-freeze — fs-freeze is what makes a snapshot of a
 # RUNNING guest consistent rather than crash-consistent, which matters for an
 # image whose whole purpose is being cloned. Verified missing on 2026-08-15:
 # VM "fed" had no org.qemu.guest_agent channel, so `virsh domifaddr --source
 # agent` returned nothing.
-systemctl enable --now qemu-guest-agent 2>/dev/null || true
+# ENABLE explicitly and CHECK it took. `enable --now` in the build session is
+# not evidence the symlink survived into the sealed image: all five klab
+# desktop goldens carry the binary and zero enable symlinks (.120,
+# 2026-08-22), so the agent never starts in a clone.
+systemctl enable qemu-guest-agent 2>/dev/null || true
+systemctl start qemu-guest-agent 2>/dev/null || true
+if systemctl is-enabled qemu-guest-agent >/dev/null 2>&1; then
+    echo "klab: qemu-guest-agent enabled"
+else
+    echo "klab: WARNING qemu-guest-agent is NOT enabled — clones will report no-agent" >&2
+fi
 
 # Test suite deps + dev tools (only when KLAB_ZFS_DEV=1).
 # The full OpenZFS test suite needs: ksh (run), fio/parted/attr/bc/acl
@@ -1373,7 +1408,17 @@ if [ "$WANT_ZFS" = "1" ] && ! command -v zfs >/dev/null 2>&1; then
 fi
 
 # eBPF + essentials (always)
-apt-get install -y bpftrace bpfcc-tools wireguard-tools curl jq qemu-guest-agent 2>/dev/null || true
+# SPLIT: qemu-guest-agent installs ALONE.
+# An install list is all-or-nothing — one unavailable package aborts the
+# batch and takes everything with it. bcc-tools/bpfcc-tools is the fragile
+# member here (absent or renamed depending on release), and it was taking
+# the guest agent down with it: klab-desktop-rocky and klab-desktop-centos
+# both came out with no qemu-ga at all (.120, 2026-08-22), which is why
+# `virsh domifaddr` returns nothing for those images and the hypervisor can
+# only stop them by ACPI. The agent is the one the hypervisor depends on,
+# so it must not share a transaction with anything optional.
+apt-get install -y qemu-guest-agent 2>/dev/null || echo "klab: WARNING qemu-guest-agent FAILED — hypervisor cannot read this guest's IP" >&2
+apt-get install -y bpftrace bpfcc-tools wireguard-tools curl jq 2>/dev/null || true
 # See the dnf branch for why the guest agent matters on a cloned image.
 systemctl enable --now qemu-guest-agent 2>/dev/null || true
 
