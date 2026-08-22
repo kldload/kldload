@@ -34,18 +34,28 @@ does.
 
 ## Intended end state
 
-"Bob" becomes a knowledge collection plus a named model inside Open
-WebUI:
+**There is no end state with a Bob in it. Decided 2026-08-21.**
 
-1. index `/usr/local/share/kldload-ai/kldload-docs.txt` (2.1 MB) and
-   `kldload-manual.txt` (1.25 MB) — both already shipped;
-2. embeddings via `nomic-embed-text`, which the darksite carries, so it
-   indexes offline with no HuggingFace call;
-3. a model entry named Bob with a system prompt pointing at that
-   collection.
+The plan below was built and then backed out (revert of 5590c4f5,
+8c879da6, edbbcab5 — `kldload-corpus`, `kldload-bob-setup`, the persona
+file and the toolbar tile):
 
-RAG rather than fine-tuning on purpose: edit the manual and Bob is
-current on the next index, with citations, and no retraining.
+> "Bob" becomes a knowledge collection plus a named model inside Open
+> WebUI: index `kldload-docs.txt` and `kldload-manual.txt`, embed with
+> `nomic-embed-text` from the darksite, and add a model entry named Bob
+> whose system prompt points at that collection.
+
+It worked, and it was still the wrong shape. Open WebUI already ships a
+chat UI, a model picker and its own retrieval; wrapping a second
+assistant identity around them meant another setup step, another thing
+to grey out until a model exists, another surface to keep working across
+upgrades — for no capability the operator did not already have by
+opening Open WebUI and asking. The knowledge-attach step also needed a
+274 MB embedder pulled before it did anything at all.
+
+So: **Open WebUI is the AI feature.** Ship it, point the tile at it, and
+stop building assistants on top of it. Anything that reads "make Bob
+do X" is out of scope by decision, not by oversight.
 
 ## What removal involves — 75 references, 7 files
 
