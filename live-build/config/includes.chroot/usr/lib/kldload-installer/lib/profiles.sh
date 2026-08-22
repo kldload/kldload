@@ -708,12 +708,13 @@ k_install_system_files() {
         done
 
         # ── Systemd units ──────────────────────────────────────────────────────────
-        # Explicit list so adding a unit is a conscious decision. Lines 627-638
-        # below `ln -sf` symlink the RAG units into multi-user.target.wants but
-        # those symlinks point nowhere unless the unit files are copied here
-        # first. The kldload-rag-* entries below were missing pre-build-#48 and
-        # caused RAG to be completely dead on every installed system even though
-        # smoke-build saw the files in the squashfs (caught on .101 / build #47).
+        # Explicit list so adding a unit is a conscious decision — and the one
+        # place this file has gone wrong most often. A unit that ships in the
+        # squashfs but is absent here never reaches the target at all, and the
+        # symlink blocks further down then point at nothing; that has silently
+        # killed a feature on every install six separate times (RAG pre-#48,
+        # zexplore-api, sanoid-prune, the inventory-sync pair, kldload-collect).
+        # smoke-build's unit-copy completeness gate exists to catch the seventh.
         # kldload-rhel-composer.service added in build #50 -- runs at firstboot
         # when bootstrap.sh wrote /var/lib/klab/.rhel-composer-pending (RHEL
         # distro selected). Builds the 6th klab golden via osbuild-composer.
@@ -722,7 +723,7 @@ k_install_system_files() {
         # daemon was enabled by build-iso.sh but never copied to target
         # (unit "not-found" on the fresh 1.4.0-rc2 install; the `enable ||
         # true` swallowed it).
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rag.service kldload-rag-firstboot.service kldload-rag-index.service kldload-rag-index.timer kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer; do
+        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
@@ -893,10 +894,10 @@ k_install_system_files() {
         fi
 
         # /usr/local/lib/kldload-* — Python modules consumed by the k* CLIs.
-        # Currently: kldload-rag/ (used by kldload-rag-index, kai-rag, and the
-        # bob RAG bridge). Without these on target, `bob` falls back to no-RAG
-        # mode silently and every kldload-specific question gets a generic
-        # answer. Glob handles future additions. Caught 2026-05-23 on .101.
+        # Nothing populates this today: the only consumer was kldload-rag/,
+        # removed with the rest of the RAG stack in 6dd32240. The glob is kept
+        # because it costs nothing when it matches nothing and is how any
+        # future python module under /usr/local/lib reaches the target at all.
         if compgen -G '/usr/local/lib/kldload-*' >/dev/null 2>&1; then
             mkdir -p "${target}/usr/local/lib"
             for _libdir in /usr/local/lib/kldload-*/; do
@@ -909,17 +910,6 @@ k_install_system_files() {
         fi
 
         # (ChromaDB data dir created below alongside the symlink block.)
-
-        # RAG python deps — chromadb (vector store) + beautifulsoup4 (HTML doc
-        # extraction). No RPM ships either; dnf --installroot has no path to
-        # pip-install into the target, so we do it explicitly here. Same
-        # pattern as the websockets pip install below. --break-system-packages
-        # is required on PEP 668 distros (Fedora 43+, RHEL 10+, Debian 13+).
-        # Without this, `kldload-rag-index` crashes on import and Bob's RAG
-        # bridge can't index anything.
-        chroot "${target}" pip3 install --quiet --break-system-packages \
-            chromadb beautifulsoup4 2>/dev/null ||
-            k_log "WARNING: chromadb/bs4 pip install failed — RAG will not function"
 
         # webui service already ships with --port 8443 baked into its unit file
         # (see builder/build-iso.sh). No post-install sed needed — removed the
@@ -956,31 +946,21 @@ k_install_system_files() {
         # can enable it by hand. Same swallow as every sibling ln in this block.
         ln -sf "/usr/lib/systemd/system/kldload-inventory-sync.timer" "${target}/etc/systemd/system/timers.target.wants/kldload-inventory-sync.timer" || true
 
+        # kldload-collect: samples the kernel cockpit's signal set into a JSONL
+        # corpus every 60s. Added to the copy list in 99355e23 but never given
+        # an enable symlink, so it shipped in the squashfs and never ran — the
+        # same defect as the inventory-sync timer directly above and the
+        # sanoid-prune unit before it. Copying a unit is not enabling it.
+        # HARMLESS CASE: an existing symlink, exactly as the sibling lns here.
+        ln -sf "/usr/lib/systemd/system/kldload-collect.timer" \
+            "${target}/etc/systemd/system/timers.target.wants/kldload-collect.timer" || true
+
         mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
         ln -sf "/usr/lib/systemd/system/kldload-firstboot.service" \
             "${target}/etc/systemd/system/multi-user.target.wants/kldload-firstboot.service" || true
         # kldload-webui enabled at boot (firstboot also starts it, but enable here for robustness)
         ln -sf "/usr/lib/systemd/system/kldload-webui.service" \
             "${target}/etc/systemd/system/multi-user.target.wants/kldload-webui.service" || true
-
-        # ── kldload RAG service + indexer ───────────────────────────────────
-        # The RAG service answers /query and /health on :8400. The first-boot
-        # service runs the indexer once after install to populate ChromaDB.
-        # The nightly timer keeps it fresh as kldload tools/docs change.
-        if [[ -f /usr/lib/systemd/system/kldload-rag.service ]]; then
-            ln -sf "/usr/lib/systemd/system/kldload-rag.service" \
-                "${target}/etc/systemd/system/multi-user.target.wants/kldload-rag.service" || true
-        fi
-        if [[ -f /usr/lib/systemd/system/kldload-rag-firstboot.service ]]; then
-            ln -sf "/usr/lib/systemd/system/kldload-rag-firstboot.service" \
-                "${target}/etc/systemd/system/multi-user.target.wants/kldload-rag-firstboot.service" || true
-        fi
-        if [[ -f /usr/lib/systemd/system/kldload-rag-index.timer ]]; then
-            ln -sf "/usr/lib/systemd/system/kldload-rag-index.timer" \
-                "${target}/etc/systemd/system/timers.target.wants/kldload-rag-index.timer" || true
-        fi
-        # ChromaDB data dir
-        install -d -m 0755 "${target}/var/lib/kldload-rag"
 
         # ── RHEL firstboot composer build ──────────────────────────────────
         # Wires kldload-rhel-composer.service into multi-user.target.wants/.
