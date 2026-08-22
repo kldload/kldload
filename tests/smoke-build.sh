@@ -385,6 +385,144 @@ else
     fi
 fi
 
+# ── Regression guards for fixes with no other coverage ─────────────────────
+#
+# Every check here guards a defect that SHIPPED, was found on hardware, and
+# was fixed — and that no other gate would notice being undone. They are
+# source invariants rather than behavioural tests: they cannot prove the fix
+# still works, only that the mechanism is still present. That is a deliberate
+# trade, because they cost milliseconds and run on every build, whereas the
+# behaviour needs a VM and forty minutes.
+#
+# The pattern to preserve: when a fix is a LINE that can be deleted by a
+# refactor and produce a silently-degraded system, it gets a line here.
+_section "Regression guards"
+
+_ic="$ROOT/live-build/config/includes.chroot"
+
+# _guard <label> <file> <regex> <why-it-matters>
+# Present = pass. Absent = fail, naming the failure the removal would cause.
+_guard() {
+    local label="$1" file="$2" rx="$3" why="$4"
+    if [[ ! -f "$file" ]]; then
+        _fail "$label" "file missing: ${file#"$ROOT"/}"
+        return
+    fi
+    if grep -qE "$rx" "$file" 2>/dev/null; then
+        _pass "$label"
+    else
+        _fail "$label" "$why"
+    fi
+}
+
+# br0 came up with no port on every boot, so nm-online failed and the box was
+# degraded for its whole life. STP off and the cloned MAC are what make the
+# handover work at all: with STP the DHCP request lands in a 15s forwarding
+# hole, and without the MAC the bridge takes a different lease (.101 -> .118).
+_guard "br0: STP disabled" "$_ic/usr/sbin/kldload-firstboot" \
+    'bridge\.stp no' \
+    "without stp off the bridge cannot forward for 15s and DHCP times out"
+_guard "br0: MAC cloned from NIC" "$_ic/usr/sbin/kldload-firstboot" \
+    'bridge\.mac-address' \
+    "without the NIC's MAC the bridge takes a NEW dhcp lease — the host moves address"
+_guard "br0: rollback on failure" "$_ic/usr/sbin/kldload-firstboot" \
+    'rolling back' \
+    "a half-built bridge with no rollback leaves the host unreachable and unfixable remotely"
+
+# A unit copied to the target but never enabled is a unit that never runs.
+# This list has silently disabled a feature six times.
+_guard "kldload-collect enabled" "$_ic/usr/lib/kldload-installer/lib/profiles.sh" \
+    'timers\.target\.wants/kldload-collect\.timer' \
+    "collect ships in the squashfs but never runs without its enable symlink"
+
+# A bare `ansible` found no inventory on a fully registered box, because only
+# kldload's own callers exported ANSIBLE_CONFIG.
+_guard "ansible.cfg is the system default" "$_ic/usr/lib/kldload-installer/lib/profiles.sh" \
+    '/etc/ansible/ansible\.cfg' \
+    "without this a bare 'ansible' parses no inventory and sees only localhost"
+
+# Group targeting was impossible from the webui: every target became a
+# one-element ad-hoc inventory, so a group name resolved as a hostname.
+_guard "ansible runs against the real inventory" "$_ic/usr/local/bin/kldload-webui" \
+    '_target_in_inventory' \
+    "without this every target becomes '-i host,' and no group can ever be addressed"
+
+# Scaled workers joined k8s and the mesh but never entered the state DB, so
+# the Ansible inventory could not see them.
+_guard "scaled workers register in the DB" "$_ic/usr/local/bin/kube-cluster" \
+    '_db_register_node "\$name" "worker"' \
+    "a worker missing from the nodes table is invisible to every playbook"
+
+# Control planes created during bootstrap never joined the host mesh, because
+# the hypervisor key does not exist yet at that point in the sequence.
+_guard "bootstrap reconciles the mesh" "$_ic/usr/local/bin/kube-cluster" \
+    'cmd_mesh_repair' \
+    "without this a cluster born with N control planes leaves the extra ones off the mesh"
+
+# The clone seed was attached at sdz on a SCSI bus the goldens do not have, so
+# the guest never saw it: no hostname, no keys, no agent, sshd refusing.
+_guard "clone seed on the SATA bus" "$_ic/usr/local/bin/kvm-clone" \
+    'targetbus sata' \
+    "on scsi the guest never enumerates the seed and cloud-init falls back to DataSourceNone"
+
+# Sealing removes host keys promising clones regenerate them; nothing did.
+_guard "seal enables cloud-init" "$_ic/usr/local/share/kldload-ansible/playbooks/seal-golden.yml" \
+    'systemctl enable cloud-init\.target' \
+    "with the target disabled the seed is inert: no hostname, no keys, no agent"
+_guard "seal guarantees ssh host keys" "$_ic/usr/local/share/kldload-ansible/playbooks/seal-golden.yml" \
+    'ssh-keygen -A' \
+    "sshd will not start without host keys, and the seal deletes them"
+_guard "seal pins the NoCloud datasource" "$_ic/usr/local/share/kldload-ansible/playbooks/seal-golden.yml" \
+    'datasource_list' \
+    "unpinned, cloud-init spends up to 240s probing EC2 metadata that cannot exist here"
+
+# Desktop goldens were built on the cloud kernel, which carries no DRM at all,
+# so five goldens were built repeatedly and none ever rendered a desktop.
+_guard "desktop goldens get a generic kernel" "$_ic/usr/local/bin/klab" \
+    'apt-get install -y linux-image-amd64' \
+    "the cloud kernel has no drm/virtio_gpu — X exits and the desktop is a black screen"
+
+# Every k8s node reported no-agent because the install lived in a cloud-init
+# runcmd that never ran.
+_guard "golden installs the guest agent" \
+    "$_ic/usr/local/share/kldload-ansible/playbooks/provision-golden.yml" \
+    'qemu-guest-agent' \
+    "without the agent libvirt cannot read a guest's IP and can only stop it by ACPI"
+
+# Enrollment was a privilege of kube-cluster; every other VM path stopped at
+# the DB row.
+_guard "kspawn enrols its nodes" "$_ic/usr/local/sbin/kspawn" \
+    'kldload-enroll' \
+    "cloud VMs land in the DB but never on the mesh — a two-tier estate"
+
+# ── Build-path invariants ──────────────────────────────────────────────────
+
+# No arbitrary versions. Every version is derived from the ZFS cap and locked
+# as a unit; a literal here goes stale silently and lies about being tested.
+if git -C "$ROOT" grep -qIE '^[^#]*[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.fc[0-9]+' -- builder build deploy.sh 2>/dev/null; then
+    _fail "no literal kernel NVR in the build path" \
+        "a hardcoded NVR reintroduces the stale-pin defect the resolver exists to remove"
+else
+    _pass "no literal kernel NVR in the build path"
+fi
+
+# Written-but-never-wired is this repo's most repeated defect: the guest-agent
+# install parked in a runcmd, the ansible.cfg that existed but was not the
+# default, the resolver committed with zero callers.
+if grep -q 'resolve-stack' "$ROOT/build/darksite-debian/build-darksite-debian.sh" 2>/dev/null; then
+    _pass "stack resolver is actually called"
+else
+    _fail "stack resolver is actually called" \
+        "resolve-stack.sh exists but nothing invokes it — the stack would be unpinned"
+fi
+
+# The resolver must reject kernel FLAVOURS. Its first run picked
+# 7.1.8+deb13-rt because sort -V ranks a suffixed name above the bare one, and
+# the same bug would happily pick -cloud, the flavour with no DRM.
+_guard "resolver rejects kernel flavours" "$ROOT/build/darksite-debian/resolve-stack.sh" \
+    'grep -E "\^linux-image-\[0-9\]' \
+    "without the flavour filter the resolver picks -rt or -cloud over the plain kernel"
+
 # ── Silent-failure ratchet ─────────────────────────────────────────────────
 # Project rule §4.1: no `|| true` unless a comment names the harmless case. The
 # tree carries 1,478 that do not, and every "reported success while broken"

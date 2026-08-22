@@ -99,8 +99,22 @@ _r "zfs kernel ceiling: ${kernel_max}"
 # Candidates come from the versioned metapackages actually present in the
 # archive. Sorting with -V and filtering on the ceiling gives the newest
 # buildable pair without naming any version here.
+# FLAVOUR FILTER — this is load-bearing, not tidiness.
+#
+# Debian ships several flavours under the same version: the plain one, -rt
+# (realtime), -cloud (no DRM subsystem at all) and others. `sort -V` ranks a
+# suffixed name ABOVE the bare one, so taking the highest without filtering
+# picks a flavour rather than a kernel: the first run of this resolver chose
+# 7.1.8+deb13-rt. Picking -cloud would be worse still — that is precisely the
+# flavour that left five desktop goldens unable to start X, because it carries
+# no drm, drm_kms_helper or virtio_gpu.
+#
+# So accept ONLY the plain flavour: version, then optional +debN, then the
+# architecture. Anything with a flavour token between them is rejected.
 mapfile -t _kcands < <(apt-cache search --names-only "^linux-image-[0-9].*-${ARCH}\$" 2>/dev/null |
-    awk '{print $1}' | sed -E "s/^linux-image-//; s/-${ARCH}\$//" | sort -V)
+    awk '{print $1}' |
+    grep -E "^linux-image-[0-9]+\.[0-9]+\.[0-9]+(\+[a-z0-9]+)?-${ARCH}\$" |
+    sed -E "s/^linux-image-//; s/-${ARCH}\$//" | sort -V)
 kernel_ver=""
 for _k in "${_kcands[@]}"; do
     # Compare only major.minor against the ceiling: a ceiling of 7.1 admits
