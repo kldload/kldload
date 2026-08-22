@@ -952,6 +952,9 @@ k_install_system_files() {
         # same defect as the inventory-sync timer directly above and the
         # sanoid-prune unit before it. Copying a unit is not enabling it.
         # HARMLESS CASE: an existing symlink, exactly as the sibling lns here.
+        # swallow: an existing symlink, exactly as the sibling lns in this block.
+        # ln -sf replaces one silently; a read-only wants dir must not abort the
+        # whole install for one timer the operator can enable by hand.
         ln -sf "/usr/lib/systemd/system/kldload-collect.timer" \
             "${target}/etc/systemd/system/timers.target.wants/kldload-collect.timer" || true
 

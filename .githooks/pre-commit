@@ -96,10 +96,14 @@ if ((${#PY[@]})); then
         # findings and the rule is that the baseline only improves. Compare the
         # staged copy against HEAD's and block only on an INCREASE.
         for f in "${PY[@]}"; do
-            now=$(ruff check --select=E,F,W "$f" 2>/dev/null | grep -c '^  -->' || true)
+            # `grep -c` exits 1 when the count is ZERO, which is the GOOD case
+            # here — a clean file. Rather than swallow that with `|| true`,
+            # default the variable explicitly: it says what the zero means and
+            # leaves no unexplained swallow behind.
+            now=$(ruff check --select=E,F,W "$f" 2>/dev/null | grep -c '^  -->') || now=0
             was=$(git show "HEAD:$f" 2>/dev/null |
                 ruff check --select=E,F,W --stdin-filename "$f" - 2>/dev/null |
-                grep -c '^  -->' || true)
+                grep -c '^  -->') || was=0
             if [[ "${now:-0}" -gt "${was:-0}" ]]; then
                 _err "ruff findings rose ${was} -> ${now}: $f"
             fi
@@ -143,6 +147,8 @@ done
 # defect. (This hook blocked its own first commit on exactly that, which is a
 # reassuring way to learn the check works.)
 _refscan=$(git diff --cached --name-only --diff-filter=ACM |
+    # swallow: grep -v exits 1 when it filters everything out — i.e. when the
+    # only staged files are the exempt ones. That is a normal commit, not an error.
     grep -vE '^(\.gitignore|ci/README\.md|\.githooks/pre-commit)$' || true)
 if [[ -n "$_refscan" ]]; then
     while IFS= read -r _f; do

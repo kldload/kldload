@@ -252,6 +252,9 @@ else
     if command -v shellcheck >/dev/null 2>&1; then
         _section "Shellcheck"
         SC_OUT=$(cd "$ROOT" && printf '%s\0' "${SHELL_SCRIPTS[@]}" |
+            # swallow: shellcheck exits non-zero when it HAS findings, which is
+            # the case this gate exists to report. The findings are counted
+            # below; a non-zero exit here is data, not an error.
             xargs -0 shellcheck -S error 2>&1) || true
         if [[ -z "$SC_OUT" ]]; then
             _pass "all ${#SHELL_SCRIPTS[@]} shell scripts shellcheck -S error clean"
@@ -270,6 +273,8 @@ else
     if command -v shfmt >/dev/null 2>&1; then
         _section "shfmt drift"
         DRIFT=$(cd "$ROOT" && printf '%s\0' "${SHELL_SCRIPTS[@]}" |
+            # swallow: as above — shfmt -l exits non-zero when files need
+            # formatting, which is exactly what is being measured.
             xargs -0 shfmt -l -i 4 2>&1) || true
         if [[ -z "$DRIFT" ]]; then
             _pass "all ${#SHELL_SCRIPTS[@]} shell scripts shfmt-clean"

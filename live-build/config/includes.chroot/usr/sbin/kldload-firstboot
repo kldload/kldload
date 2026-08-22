@@ -3457,11 +3457,17 @@ AIMOTD
                 # the two can never race for the device again on a later boot.
                 # swallow: a profile that is already down or already non-auto.
                 if [[ -n "$_owner" && "$_owner" != "br0" ]]; then
+                    # swallow: the profile may already be non-auto from an earlier
+                    # run. Failing to stand down something already stood down is
+                    # the re-run case, not an error.
                     nmcli connection modify "${_owner}" connection.autoconnect no >/dev/null 2>&1 || true
                 fi
                 # swallow: `up` reports failure for states that still settle a
                 # moment later; the verify loop below is what actually decides.
                 nmcli connection up "${_slave}" >/dev/null 2>&1 || true
+                # swallow: `up` reports failure for states that settle a moment
+                # later; the verify loop below is what actually decides, so an
+                # early non-zero here is noise rather than an outcome.
                 nmcli connection up br0 >/dev/null 2>&1 || true
 
                 # VERIFY THE OUTCOME, NOT THE EXIT CODE: a port enslaved AND an
@@ -3487,9 +3493,16 @@ AIMOTD
                     # swallow: each of these is best-effort teardown; a failure
                     # here must not stop the restore that follows it.
                     nmcli connection down br0 >/dev/null 2>&1 || true
+                    # swallow x2: best-effort teardown. Either profile may already
+                    # be gone, and a failure here must not stop the restore below —
+                    # leaving the host on a half-built bridge is the outcome this
+                    # whole branch exists to prevent.
                     nmcli connection delete "${_slave}" >/dev/null 2>&1 || true
                     nmcli connection delete br0 >/dev/null 2>&1 || true
                     if [[ -n "$_owner" ]]; then
+                        # swallow x2: this is the restore path and it is already the
+                        # error path — there is nothing further to escalate to. Both
+                        # are attempted so the host gets its link back either way.
                         nmcli connection modify "${_owner}" connection.autoconnect yes >/dev/null 2>&1 || true
                         nmcli connection up "${_owner}" >/dev/null 2>&1 || true
                         log "  restored ${_owner} on ${_primary_nic}"
