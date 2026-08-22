@@ -55,6 +55,46 @@
         state: reloaded
       failed_when: false
 
+    - name: Install qemu-guest-agent (hypervisor visibility)
+      # WHY HERE AND NOT IN THE SEED: kube-cluster asks for this in a
+      # cloud-init runcmd, and cloud-init does not run on these images —
+      # cloud-init.target was never enabled, so the seed is inert. The result
+      # was that EVERY k8s node reported "no-agent" in vmxplore (.107,
+      # 2026-08-22, all nine of them) and `virsh domifaddr` returned nothing
+      # for any of them, which is why the enrollment sweep had to fall back to
+      # matching DHCP leases by MAC.
+      #
+      # Without the agent the hypervisor cannot read a guest's addresses, can
+      # only stop it by ACPI, and every tool that asks libvirt "what is this
+      # VM's IP" gets silence. Ansible runs for certain, so the install goes
+      # where the certainty is.
+      package:
+        name: qemu-guest-agent
+        state: present
+      failed_when: false
+
+    - name: Enable qemu-guest-agent
+      systemd:
+        name: qemu-guest-agent
+        enabled: true
+        state: started
+      failed_when: false
+
+    - name: Verify the agent is actually there
+      # Verify the OUTCOME: `package` returns ok on plenty of states that
+      # leave no binary, and a golden that silently lacks the agent clones
+      # into a whole fleet that libvirt cannot see into.
+      stat:
+        path: /usr/sbin/qemu-ga
+      register: _qga
+
+    - name: Report a missing agent loudly
+      debug:
+        msg: >-
+          WARNING: qemu-guest-agent is NOT installed in this golden — every
+          clone of it will show no-agent and report no IP to the hypervisor.
+      when: not _qga.stat.exists
+
     - name: Disable swap (Kubernetes requirement)
       shell: |
         swapoff -a || true

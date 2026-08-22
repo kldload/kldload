@@ -628,8 +628,42 @@ DESKTOPDNF
 set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq || true
+
+# THE GENERIC KERNEL FIRST — a desktop cannot render on the cloud kernel.
+#
+# Debian's genericcloud base image ships linux-image-cloud-amd64, and that
+# flavour is built WITHOUT the DRM subsystem: no drm.ko, no drm_kms_helper,
+# no virtio_gpu, no bochs. That is deliberate — cloud images are headless —
+# but it means no /dev/dri, no framebuffer, and X exits immediately no
+# matter how complete the GNOME install on top of it is.
+#
+# Measured on a klab-desktop-debian clone (.107, 2026-08-22): GNOME fully
+# installed with gnome.desktop and gnome-xorg.desktop present,
+# graphical.target active, gdm3 active — and zero GUI processes, because
+#   Xorg: "Server terminated with error (1)"
+#   gdm3: "GdmLocalDisplayFactory: maximum number of X display failures"
+# The vmxplore Screen console for those clones was a black rectangle. The
+# desktop goldens had never once rendered a desktop.
+#
+# linux-image-amd64 is the generic flavour and carries the DRM stack. It is
+# installed BEFORE the desktop task so the reboot at the end of provisioning
+# comes up on a kernel that can actually drive a display.
+apt-get install -y linux-image-amd64 ||
+    echo "klab: generic kernel install FAILED — desktop will not render" >&2
+
 apt-get install -y task-gnome-desktop ||
     echo "klab: GNOME task install FAILED — this golden stays a server" >&2
+
+# VERIFY THE OUTCOME, not the exit code. apt returns 0 for plenty of states
+# that leave no usable kernel, and a silently headless desktop golden is the
+# exact defect this block exists to prevent.
+_kver="$(dpkg -l 'linux-image-[0-9]*' 2>/dev/null | awk '/^ii/{print $2}' |
+    grep -v cloud | sed 's/^linux-image-//' | sort -V | tail -1)"
+if [ -n "$_kver" ] && [ -e "/lib/modules/${_kver}/kernel/drivers/gpu/drm" ]; then
+    echo "klab: DRM present in ${_kver} — desktop can render"
+else
+    echo "klab: WARNING no DRM modules in any installed kernel — desktop will be a black screen" >&2
+fi
 DESKTOPAPT
         ;;
     *)
