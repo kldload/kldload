@@ -17,6 +17,28 @@ Wants=network-online.target
 # NO Before= — that would make dependent services wait on our
 # ExecStartPost, which itself restarts those services → circular wait.
 
+# NO START RATE LIMIT. The NM dispatcher try-restarts this unit on every
+# `up`/`dhcp4-change`, and a single boot legitimately produces a burst of
+# them: bringing br0 up moves the host address off the NIC and onto the
+# bridge, so the slave goes down, the bridge comes up, and DHCP binds —
+# several events within a second or two. systemd's default of 5 starts in
+# 10s turns that burst into a PERMANENT `failed`, and because try-restart
+# SIGTERMs the in-flight run the cert can be left mid-regeneration.
+#
+# This has now bitten twice from two different sources — the wg-mgmt/wg-k8s
+# mesh coming up during `kube-cluster bootstrap` (.129, 2026-07-27) and the
+# br0 handover at firstboot (.107, 2026-08-22) — and each time the fix was
+# to add another interface to the dispatcher's skip list. That does not
+# generalise: br0 CANNOT be skipped, because it carries the host's primary
+# address and that address is exactly what the SAN needs.
+#
+# Rate-limiting is the wrong tool here. The unit is oneshot and idempotent
+# (kldload-tls-cert drift-checks and short-circuits when the SAN already
+# covers the current IPs), so an extra run costs a few milliseconds, while
+# hitting the limit costs a broken cert and a `degraded` box until someone
+# reset-failed's it by hand. Let it run as often as the network changes.
+StartLimitIntervalSec=0
+
 [Service]
 Type=oneshot
 RemainAfterExit=true
