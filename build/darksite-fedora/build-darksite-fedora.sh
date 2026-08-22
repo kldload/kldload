@@ -259,15 +259,52 @@ log "Boolean-dep closure: harvested ${_harvested} additional RPMs into the mirro
 rm -rf "${_clcache}" "${_clroot}" "${_clcache}.log"
 
 # ─── Koji kernel pin injection ──────────────────────────────────────────────
-# F44's updates repo pruned 7.0.x when 7.1.4 landed, and zfs-dkms 2.4.3 caps
-# at kernel 7.0.999 — with the 7.[1-9] excludes above, plain resolution would
-# capture the GA 6.19 kernel. Inject the boot-verified 7.0.14 NVR from koji
-# so the mirror serves the same kernel the live ISO pins (builder/build-iso.sh
-# KOJI_KERNEL_NVR — keep these two in lockstep). The 6.19 copies pulled by
-# dep-resolution stay in the mirror harmlessly; installs pick the highest.
-# Hard-fail on any fetch: a mirror silently missing its kernel is the exact
-# ghost-install class the gates below exist to kill.
-KOJI_KERNEL_NVR="${KOJI_KERNEL_NVR:-7.0.14-201.fc44}"
+# F44's updates repo pruned 7.0.x when 7.1.4 landed, and zfs-dkms caps at the
+# newest kernel it will build against — with the 7.[1-9] excludes above, plain
+# resolution would capture the GA 6.19 kernel. Inject the pinned NVR from koji
+# so the mirror serves THE SAME kernel the live ISO ships.
+#
+# WHY THIS IS DERIVED AND NOT A CONSTANT: it used to read
+#   KOJI_KERNEL_NVR="${KOJI_KERNEL_NVR:-7.0.14-201.fc44}"
+# with a comment telling the reader to keep it "in lockstep with
+# builder/build-iso.sh KOJI_KERNEL_NVR". That instruction became impossible to
+# follow the day build-iso.sh stopped having a constant: it now derives the pin
+# with builder/kernel-pin.sh, which reads OpenZFS's own kernel cap and resolves
+# the newest NVR under it. One side moved on its own, the other was frozen, so
+# "lockstep" was guaranteed to break rather than merely likely to.
+#
+# The failure that produces is the nastiest kind: the ISO pins kernel X, this
+# mirror carries 7.0.14, and an OFFLINE Fedora install — the whole point of the
+# darksite — cannot find the kernel its own ISO expects. Nothing errors at build
+# time. Deriving from the same resolver makes the two agree by construction, and
+# there is no longer a number for anybody to forget to bump.
+#
+# The 6.19 copies pulled by dep-resolution stay in the mirror harmlessly;
+# installs pick the highest. Hard-fail on any fetch: a mirror silently missing
+# its kernel is the exact ghost-install class the gates below exist to kill.
+if [[ -z "${KOJI_KERNEL_NVR:-}" ]]; then
+    if [[ -r /builder/kernel-pin.sh ]]; then
+        log "Resolving the kernel pin against the zfs repo's cap (kernel-pin.sh)..."
+        # kernel-pin.sh prints assignments on stdout, diagnostics on stderr,
+        # so eval is safe. It exits 2 when it cannot produce a FETCHABLE pin —
+        # including its own last-known-good fallback — and that is fatal here
+        # for the same reason it is fatal in build-iso.sh: a mirror built
+        # around a guessed kernel is worse than no mirror.
+        if ! eval "$(ARCH="${ARCH}" RELEASEVER="${RELEASE:-44}" bash /builder/kernel-pin.sh)"; then
+            log "FATAL: kernel-pin.sh could not resolve a fetchable kernel NVR" >&2
+            exit 1
+        fi
+        KOJI_KERNEL_NVR="${KPIN_NVR}"
+    else
+        # The resolver is mounted by deploy.sh. If it is absent this script is
+        # being run by hand or by an older caller; refuse rather than fall back
+        # to a stale literal, which is precisely the failure being removed.
+        log "FATAL: /builder/kernel-pin.sh not mounted and KOJI_KERNEL_NVR unset —" >&2
+        log "       refusing to guess a kernel. Pass KOJI_KERNEL_NVR=<nvr> to override." >&2
+        exit 1
+    fi
+fi
+log "Kernel pin for this mirror: ${KOJI_KERNEL_NVR}"
 _koji_base="https://kojipkgs.fedoraproject.org/packages/kernel/${KOJI_KERNEL_NVR%%-*}/${KOJI_KERNEL_NVR#*-}/${ARCH}"
 for _ksub in kernel kernel-core kernel-modules kernel-modules-core kernel-modules-extra kernel-devel kernel-devel-matched; do
     _krpm="${_ksub}-${KOJI_KERNEL_NVR}.${ARCH}.rpm"

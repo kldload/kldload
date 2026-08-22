@@ -217,6 +217,7 @@ cmd_build_fedora_darksite() {
         --platform "linux/amd64" \
         -v "$ROOT/build/darksite-fedora:/darksite-build:z,ro" \
         -v "$ROOT/build/darksite:/darksite-el:z,ro" \
+        -v "$ROOT/builder:/builder:z,ro" \
         -v "$darksite_dir:/output:z" \
         -e ARCH="${_fed_arch}" \
         -e RELEASE="${fed_release}" \
