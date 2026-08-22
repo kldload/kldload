@@ -215,6 +215,41 @@ fi
 log "Updating APT package lists..."
 apt-get update -q 2>&1 | grep -v '^Get\|^Hit\|^Ign' || true
 
+# ─── Resolve the ZFS / kernel / NVIDIA triple, and lock it ──────────────────
+#
+# The backports pin above makes apt PREFER the newest kernel and ZFS. It does
+# not check that the two agree: nothing verified the kernel was inside the
+# range zfs-dkms will build against, and NVIDIA was not in the conversation at
+# all. That is a moving target, not a resolved stack — whatever backports
+# happened to hold on the day won.
+#
+# resolve-stack.sh derives the set in constraint order (newest ZFS fixes the
+# kernel ceiling, kernel is chosen under it, NVIDIA matched to the kernel) and
+# writes a lock file next to the mirror so the artefacts and the record of what
+# they are ship together. Fatal on failure by design: a mirror built around a
+# kernel its own ZFS cannot compile against is an unbootable root pool, and
+# that is worse than a build that stopped and said why.
+_resolver="$(dirname "${BASH_SOURCE[0]}")/resolve-stack.sh"
+if [[ -r "$_resolver" ]]; then
+    log "Resolving the ZFS/kernel/NVIDIA stack..."
+    if ! eval "$(SUITE="${SUITE}" ARCH="${ARCH}" LOCK_FILE="${DARKSITE_OUT}/kldload-stack.lock" bash "$_resolver")"; then
+        log "FATAL: could not resolve a coherent ZFS/kernel/NVIDIA stack" >&2
+        exit 1
+    fi
+    log "Stack locked: zfs=${KLD_ZFS_VER} kernel=${KLD_KERNEL_VER} nvidia=${KLD_NVIDIA_VER:-none}"
+
+    # Verify the OUTCOME rather than trusting the pin: assert the kernel apt
+    # will actually install is the one the resolver chose. A mismatch here means
+    # the preferences file and the constraint disagree, which is the exact
+    # silent divergence this whole section exists to remove.
+    _apt_kernel="$(apt-cache policy linux-image-"${ARCH}" 2>/dev/null |
+        awk '/Candidate:/ {print $2}' | head -1)"
+    log "  apt would install linux-image-${ARCH} ${_apt_kernel:-unknown}"
+else
+    log "FATAL: resolve-stack.sh not found beside this script — refusing to build an unpinned stack" >&2
+    exit 1
+fi
+
 # ─── Gate: every package the installer asks for must exist here ──────────────
 #
 # This mirror is the ONLY source on the offline path, so a name with no
