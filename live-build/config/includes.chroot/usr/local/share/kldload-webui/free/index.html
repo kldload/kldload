@@ -2458,13 +2458,19 @@ $ ansible -i /usr/local/bin/kldload-inventory role_klab_golden -m ping</div>
             <label style="font-size:0.8rem;color:var(--subtle)"><input type="checkbox" id="ansible-check"> Check mode (dry-run)</label>
             <label style="font-size:0.8rem;color:var(--subtle)"><input type="checkbox" id="ansible-diff"> Show diff</label>
             <label style="font-size:0.8rem;color:var(--subtle)"><input type="checkbox" id="ansible-verbose"> Verbose (-vv)</label>
+            <label style="font-size:0.8rem;color:var(--subtle)"><input type="checkbox" id="ansible-become"> Become (sudo)</label>
+            <input type="text" id="ansible-tags" placeholder="tags (comma sep)" style="width:11rem" title="--tags: run only these tagged tasks">
+            <input type="text" id="ansible-skiptags" placeholder="skip tags" style="width:9rem" title="--skip-tags">
+            <input type="number" id="ansible-forks" min="1" max="100" placeholder="forks" style="width:5.5rem" title="--forks: parallel hosts (default 10)">
             <span style="flex:1"></span>
             <!--
               Reachability before action. "which of these can I even reach?"
               is the question asked before every playbook, and answering it
               needed no playbook to exist — it just had nowhere to be asked.
             -->
-            <button class="btn btn-ghost btn-sm" onclick="ansiblePing()" title="ansible &lt;target&gt; -m ping">Ping target</button>
+            <select id="ansible-adhoc-mod" style="width:9rem" title="ad-hoc module to run against the target"><option value="ping">ping</option><option value="setup">setup (facts)</option><option value="uptime">uptime</option><option value="service">service</option><option value="systemd">systemd</option><option value="package_facts">package_facts</option><option value="command">command</option><option value="shell">shell</option></select>
+            <input type="text" id="ansible-adhoc-args" placeholder="module args" style="width:12rem">
+            <button class="btn btn-ghost btn-sm" onclick="ansibleAdhoc()" title="run the selected module against the target">Run module</button>
             <button class="btn btn-primary btn-sm" onclick="ansibleRun()">Run</button>
             <button class="btn btn-danger btn-sm" onclick="ansibleCancel()">Cancel</button>
           </div>
@@ -9609,16 +9615,26 @@ function ansibleTargetPick() {
 // already looking. "Which of these can I even reach?" is the question asked
 // before every playbook, and it needed no playbook to exist — it just had
 // nowhere to be asked.
-function ansiblePing() {
+// Run one ad-hoc module against the target. The backend allowlists which
+// modules are permitted — anything richer belongs in a playbook, where it is
+// reviewable and lands in the deployment ledger.
+function ansibleAdhoc(forceModule) {
   const target = ansibleTarget();
   const user   = document.getElementById('ansible-user')?.value || 'root';
+  const mod    = forceModule || document.getElementById('ansible-adhoc-mod')?.value || 'ping';
+  const args   = (document.getElementById('ansible-adhoc-args')?.value || '').trim();
   const panel  = document.getElementById('ansible-log-panel');
   if (panel) panel.style.display = '';
   const log = document.getElementById('ansible-log');
   if (log) log.textContent = '';
   ansibleSubTab('log');
-  send({ action: 'ansible_adhoc', target: target, module: 'ping', user: user });
+  send({ action: 'ansible_adhoc', target: target, module: mod, user: user,
+         args: args,
+         become: document.getElementById('ansible-become')?.checked || false });
 }
+// Kept so the older Ping affordance keeps working.
+function ansiblePing() { ansibleAdhoc('ping'); }
+
 
 function renderDeployList(msg) {
   const tbody = document.getElementById('ansible-deploy-tbody');
@@ -9661,11 +9677,19 @@ function ansibleRun() {
   }
   document.getElementById('ansible-log-panel').style.display = '';
   document.getElementById('ansible-log').textContent = '';
+  const _v = id => (document.getElementById(id)?.value || '').trim();
   send({
     action: 'ansible_run',
     playbook: pb, limit: target, user: user,
     extra_vars: extra,
     check: chk, diff: diff, verbose: verb,
+    // Real playbooks are tag-driven and most need escalation; without these
+    // this could only run a whole playbook as the connecting user, which is a
+    // launcher rather than an operations tool.
+    become:    document.getElementById('ansible-become')?.checked || false,
+    tags:      _v('ansible-tags'),
+    skip_tags: _v('ansible-skiptags'),
+    forks:     _v('ansible-forks'),
   });
 }
 

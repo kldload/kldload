@@ -5652,7 +5652,19 @@ async def _ansible_adhoc(websocket, msg):
     reviewable and lands in the deployment ledger.
     """
     target = (msg.get("target") or "").strip()
+    # ALLOWLIST the module. The backend already took one, but the UI only ever
+    # sent "ping", so this was never reachable. Now that a picker exposes it,
+    # an arbitrary module name from the browser is an arbitrary command on
+    # every host in the estate — so only these are accepted, and anything else
+    # belongs in a playbook where it is reviewable and lands in the ledger.
+    _ADHOC_OK = {"ping", "setup", "service", "systemd", "uptime",
+                 "command", "shell", "package_facts"}
     module = (msg.get("module") or "ping").strip() or "ping"
+    if module not in _ADHOC_OK:
+        await websocket.send(json.dumps({"type": "log_line", "target": "ansible_log",
+                                         "line": f"ERROR: module {module!r} is not allowed ad-hoc; put it in a playbook"}))
+        await websocket.send(json.dumps({"type": "exec_done", "target": "ansible_log", "rc": 2}))
+        return
     args = (msg.get("args") or "").strip()
     user = (msg.get("user") or "root").strip() or "root"
     if not target:
@@ -5661,6 +5673,8 @@ async def _ansible_adhoc(websocket, msg):
         await websocket.send(json.dumps({"type": "exec_done", "target": "ansible_log", "rc": 2}))
         return
     cmd = ["ansible", target, "-m", module, "-u", user]
+    if bool(msg.get("become", False)):
+        cmd += ["--become"]
     if args:
         cmd += ["-a", args]
     if target == "localhost":
@@ -5679,6 +5693,18 @@ async def _ansible_run(websocket, msg):
     check    = bool(msg.get("check", False))
     diff     = bool(msg.get("diff", False))
     verbose  = bool(msg.get("verbose", False))
+    # Real playbooks are tag-driven and most of them need privilege
+    # escalation, so without these the tool can only run whole playbooks as
+    # whatever user it connects with — which is a launcher, not an operations
+    # tool. forks matters once the estate is bigger than ansible's default 10.
+    tags     = (msg.get("tags") or "").strip()
+    skiptags = (msg.get("skip_tags") or "").strip()
+    become   = bool(msg.get("become", False))
+    start_at = (msg.get("start_at") or "").strip()
+    try:
+        forks = int(msg.get("forks") or 0)
+    except (TypeError, ValueError):
+        forks = 0
 
     if not pb or not os.path.isfile(pb):
         await websocket.send(json.dumps({"type": "log_line", "target": "ansible_log",
@@ -5705,7 +5731,9 @@ async def _ansible_run(websocket, msg):
             pass
     db_log_event("ansible", os.path.basename(pb),
                  f"run against {limit}",
-                 {"check": check, "diff": diff, "user": user})
+                 {"check": check, "diff": diff, "user": user,
+                  "tags": tags, "skip_tags": skiptags, "become": become,
+                  "start_at": start_at, "forks": forks})
 
     # Pre-run snapshot — matches the pattern used for other state-changing ops
     await _auto_snapshot(websocket, "ansible")
@@ -5754,6 +5782,13 @@ async def _ansible_run(websocket, msg):
     if check:   cmd += ["--check"]
     if diff:    cmd += ["--diff"]
     if verbose: cmd += ["-vv"]
+    # Passed as separate argv entries, never interpolated into a string: a tag
+    # name comes from the browser and must not be able to become a flag.
+    if tags:     cmd += ["--tags", tags]
+    if skiptags: cmd += ["--skip-tags", skiptags]
+    if become:   cmd += ["--become"]
+    if start_at: cmd += ["--start-at-task", start_at]
+    if forks > 0: cmd += ["--forks", str(forks)]
 
     # ansible-playbook across an inventory of nodes — minutes to tens of
     # minutes. Detached so partial deploys don't get aborted by a UI reload.
