@@ -11,7 +11,7 @@
 #   3. Verifies every subpackage URL it is about to hand dnf actually exists.
 #   4. Prints the resolved pin as shell assignments for the caller to eval.
 #
-# WHY: this was a hardcoded string. `KOJI_KERNEL_NVR="7.0.14-201.fc44"` had to
+# WHY: this was a hardcoded string. A literal `KOJI_KERNEL_NVR` had to
 # be bumped by hand whenever OpenZFS moved its cap, and nothing failed when it
 # was not — the build just kept shipping an older kernel while a comment three
 # files away still claimed a value from two pins ago. The operator asked
@@ -43,9 +43,9 @@
 #   - It NEVER returns a pin whose RPMs it has not confirmed are fetchable.
 #     A pin that 404s at dnf time fails the build 40 minutes in; a pin that
 #     fails here fails it in 10 seconds, with a reason.
-#   - KPIN_FALLBACK_NVR is the last NVR verified to produce a booting ISO. It
-#     is used when the network, koji or the repo query fails, and saying so
-#     loudly is the point: a silent fallback is how a stale pin lasts a month.
+#   - There is NO fallback NVR, by design. Every version here is derived from
+#     the ZFS cap; a last-known-good literal goes stale silently and lies
+#     about having been tested against today's ZFS. Unresolvable is fatal.
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
@@ -68,9 +68,19 @@ KOJI_ROOT="https://kojipkgs.fedoraproject.org/packages/kernel"
 # Same URL the build itself installs from — keep them in step.
 KPIN_ZFS_BASEURL="${KPIN_ZFS_BASEURL:-http://download.zfsonlinux.org/2.4/fedora/${RELEASEVER}/${ARCH}/}"
 
-# Last NVR verified end-to-end (built, booted, zfs DKMS built against it).
-# Only used when resolution fails; update it when a build is blessed.
-KPIN_FALLBACK_NVR="${KPIN_FALLBACK_NVR:-7.0.14-201.fc44}"
+# NO FALLBACK NVR. There is deliberately no last-known-good literal here.
+#
+# A version in this project is DERIVED, never chosen: the newest ZFS fixes the
+# kernel ceiling, the kernel is picked under it, and the set is locked as a
+# unit. A "last verified" constant re-introduces exactly the failure the
+# resolver exists to remove — it goes stale silently, and the build keeps
+# shipping an old kernel while every comment nearby claims otherwise. It also
+# lies about what was tested: nothing verified that literal against TODAY's
+# ZFS.
+#
+# So an unresolvable stack is fatal. An ISO built on a guessed kernel is an
+# ISO whose ZFS may not build, which is an unbootable root pool — strictly
+# worse than a build that stopped and said why.
 
 # The subpackages that must all come from the SAME NVR.
 #   kernel-devel-matched: something in the closure requires it, and without a
@@ -165,61 +175,46 @@ kpin_excludes() {
 main() {
     local cap line nvr base source="derived"
 
-    # An unreadable cap (offline, or the repo moved) is handled below as a
-    # fallback with a warning — it must not abort under set -e first.
+    # An unreadable cap must not abort under set -e before it can be reported.
     cap=$(kpin_zfs_cap || true)
     if [[ -z "$cap" ]]; then
-        _warn "could not read the zfs-dkms kernel cap from the zfs repo"
-        nvr="$KPIN_FALLBACK_NVR"
-        source="FALLBACK (no cap)"
-        line="${nvr%%-*}"
-        line="${line%.*}"
-    else
-        # "7.0.999" is a cap on the 7.0 line: the newest thing zfs will build
-        # against is a 7.0.x. Drop the patch component to get the line.
-        line="${cap%.*}"
-        _warn "zfs-dkms caps at kernel-uname-r > ${cap} → pinning the ${line} line"
+        _warn "FATAL: could not read the zfs-dkms kernel cap from the zfs repo"
+        _warn "       the cap IS the constraint — without it there is nothing to"
+        _warn "       resolve against, and guessing a kernel is what this exists"
+        _warn "       to prevent. Check the network and ${KPIN_ZFS_BASEURL}"
+        return 2
+    fi
 
-        # The mirrors NOT carrying this line is the normal case once Fedora
-        # prunes it; koji is asked next.
-        nvr=$(kpin_from_mirrors "$line" || true)
-        if [[ -n "$nvr" ]]; then
-            _warn "mirrors still carry ${line}: ${nvr}"
-        else
-            # koji unreachable leaves nvr empty, which the fallback below reports.
-            nvr=$(kpin_from_koji "$line" || true)
-            [[ -n "$nvr" ]] && _warn "mirrors pruned ${line}; koji has ${nvr}"
-        fi
+    # "7.0.999" is a cap on the 7.0 line: the newest thing zfs will build
+    # against is a 7.0.x. Drop the patch component to get the line.
+    line="${cap%.*}"
+    _warn "zfs-dkms caps at kernel-uname-r > ${cap} → pinning the ${line} line"
+
+    # The mirrors NOT carrying this line is the normal case once Fedora prunes
+    # it; koji is asked next and keeps every NVR forever.
+    nvr=$(kpin_from_mirrors "$line" || true)
+    if [[ -n "$nvr" ]]; then
+        _warn "mirrors still carry ${line}: ${nvr}"
+    else
+        nvr=$(kpin_from_koji "$line" || true)
+        [[ -n "$nvr" ]] && _warn "mirrors pruned ${line}; koji has ${nvr}"
     fi
 
     if [[ -z "$nvr" ]]; then
-        _warn "could not resolve any kernel on the ${line} line"
-        nvr="$KPIN_FALLBACK_NVR"
-        source="FALLBACK (unresolved)"
+        _warn "FATAL: no kernel found on the ${line} line at the mirrors or koji"
+        return 2
     fi
 
     base="${KOJI_ROOT}/${nvr%%-*}/${nvr#*-}/${ARCH}"
 
     if ! kpin_urls_ok "$nvr" "$base"; then
-        if [[ "$nvr" == "$KPIN_FALLBACK_NVR" ]]; then
-            _warn "FATAL: even the fallback ${KPIN_FALLBACK_NVR} is not fetchable"
-            return 2
-        fi
-        _warn "resolved ${nvr} but its RPMs are not all present — using fallback"
-        nvr="$KPIN_FALLBACK_NVR"
-        source="FALLBACK (incomplete NVR)"
-        base="${KOJI_ROOT}/${nvr%%-*}/${nvr#*-}/${ARCH}"
-        kpin_urls_ok "$nvr" "$base" || {
-            _warn "FATAL: fallback ${nvr} is not fetchable either"
-            return 2
-        }
+        # A pin whose RPMs 404 fails the build forty minutes in at dnf time;
+        # failing here costs ten seconds and names the reason.
+        _warn "FATAL: resolved ${nvr} but its RPMs are not all fetchable"
+        return 2
     fi
 
-    # A fallback is a defect, not a mode. Say so where a build log gets read.
-    case "$source" in
-    FALLBACK*) _warn "WARNING: using ${source} pin ${nvr} — resolution failed, check the network and the zfs repo" ;;
-    *) _warn "resolved kernel pin: ${nvr} (${source})" ;;
-    esac
+    _warn "resolved kernel pin: ${nvr} (${source}, under zfs cap ${cap})"
 
     printf 'KPIN_NVR=%q\n' "$nvr"
     printf 'KPIN_BASE=%q\n' "$base"

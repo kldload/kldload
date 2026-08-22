@@ -265,7 +265,7 @@ rm -rf "${_clcache}" "${_clroot}" "${_clcache}.log"
 # so the mirror serves THE SAME kernel the live ISO ships.
 #
 # WHY THIS IS DERIVED AND NOT A CONSTANT: it used to read
-#   KOJI_KERNEL_NVR="${KOJI_KERNEL_NVR:-7.0.14-201.fc44}"
+#   KOJI_KERNEL_NVR="${KOJI_KERNEL_NVR:-<a literal NVR>}"
 # with a comment telling the reader to keep it "in lockstep with
 # builder/build-iso.sh KOJI_KERNEL_NVR". That instruction became impossible to
 # follow the day build-iso.sh stopped having a constant: it now derives the pin
