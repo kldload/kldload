@@ -604,9 +604,24 @@ def check_cilium_scrape_labels():
         # served cilium_version with k8s_app="cilium" from 12 healthy
         # cilium-agent targets. Same false negative this guard was added for
         # (.127/.137, 2026-08-19), one layer further in.
+        # Two guards, because "up" and "the metric exists" are different clocks.
+        #
+        # up==1 goes true on the FIRST successful scrape, but the labelled
+        # series can take another scrape interval to appear — so testing only
+        # up==1 still fails during that window. Measured on .120 2026-08-22:
+        # the post-install smoke test failed here while, minutes later, the
+        # same box served 6 scraped targets and 6 labelled series.
+        #
+        # So ask the metric itself. If cilium_version does not exist AT ALL,
+        # nothing has been scraped yet and this is a timing question. If it
+        # exists but the k8s_app-labelled form does not, the labels really are
+        # missing from the scrape config and that is worth failing on.
         if not _prom_query('up{job="cilium-agent"} == 1'):
             return _result("observability", "cilium scrape labels", "skip", "",
                            "cilium-agent not scraped yet — cluster still converging")
+        if not _prom_query('cilium_version'):
+            return _result("observability", "cilium scrape labels", "skip", "",
+                           "cilium_version not present yet — scraped but metrics not landed")
         return _result("observability", "cilium scrape labels", "fail",
                        'cilium_version{k8s_app="cilium"} returns ≥1 series (needed for dashboard 16611)',
                        "no series — synthesized labels missing from scrape config",
