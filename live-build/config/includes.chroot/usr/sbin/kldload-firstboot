@@ -3365,22 +3365,137 @@ AIMOTD
             systemctl start libvirtd 2>/dev/null || true
             ok "libvirt ready — zvols accessed as raw /dev/zvol/… paths (no pool needed)"
 
-            # Set up bridge networking
+            # ── Host bridge br0 for LAN-routable VMs ─────────────────────
+            #
+            # WHY THIS IS NOT JUST TWO nmcli ADDS: the installer has already
+            # written kldload-dhcp.nmconnection bound to this same NIC (see
+            # kldload-install-target). Adding a bridge-slave profile for a
+            # device another profile already owns leaves TWO autoconnect
+            # candidates at priority 0, and NetworkManager activates whichever
+            # it reaches first.
+            #
+            # HISTORY 2026-08-21 (.101): kldload-dhcp won. The slave never
+            # activated, so br0 came up with no port, so it had no carrier, so
+            # its DHCP never completed, so it sat in "connecting" forever,
+            # so `nm-online -s` exited 1 and NetworkManager-wait-online.service
+            # failed on EVERY boot — the machine reported `degraded` for its
+            # whole life, and the bridge this feature exists for carried no
+            # VMs. The old code printed ok "Bridge br0 configured" regardless,
+            # so the log asserted the opposite of the truth.
+            #
+            # So hand the NIC over deliberately, verify the OUTCOME, and put it
+            # back if the handover did not take. A host that loses its only
+            # link to a half-built bridge is unreachable and unfixable
+            # remotely, which is strictly worse than having no bridge at all.
             local _primary_nic
             _primary_nic=$(nmcli -t -f DEVICE,TYPE device | grep ':ethernet' | head -1 | cut -d: -f1)
-            if [[ -n "$_primary_nic" && "$_primary_nic" != "br0" ]]; then
+            if [[ -z "$_primary_nic" || "$_primary_nic" == "br0" ]]; then
+                log "No ethernet device to bridge — VMs will use virbr0 NAT"
+            elif [[ -n "$(ls -A /sys/class/net/br0/brif 2>/dev/null)" ]]; then
+                ok "Bridge br0 already has a port ($(ls -A /sys/class/net/br0/brif | tr '\n' ' '))"
+            else
                 log "Setting up bridge br0 on ${_primary_nic}..."
-                nmcli connection add type bridge ifname br0 con-name br0 2>/dev/null || true
-                nmcli connection add type bridge-slave ifname "${_primary_nic}" master br0 2>/dev/null || true
-                # Copy IP config from primary NIC to bridge
-                local _ip _gw _dns
-                _ip=$(nmcli -g IP4.ADDRESS device show "${_primary_nic}" 2>/dev/null | head -1)
-                _gw=$(nmcli -g IP4.GATEWAY device show "${_primary_nic}" 2>/dev/null | head -1)
-                _dns=$(nmcli -g IP4.DNS device show "${_primary_nic}" 2>/dev/null | head -1)
-                if [[ -n "$_ip" ]]; then
-                    nmcli connection modify br0 ipv4.addresses "${_ip}" ipv4.gateway "${_gw}" ipv4.dns "${_dns}" ipv4.method manual 2>/dev/null || true
+                local _owner _method _slave
+                _slave="bridge-slave-${_primary_nic}"
+                # The profile that currently owns the NIC: what we must stand
+                # down, and what we restore if this goes wrong.
+                _owner=$(nmcli -t -f GENERAL.CONNECTION device show "${_primary_nic}" 2>/dev/null | cut -d: -f2-)
+                # Match the bridge to how the NIC is actually addressed — a
+                # static host must not silently become DHCP, and a DHCP host
+                # must not get a hardcoded lease that expires under it.
+                _method=auto
+                if [[ -n "$_owner" ]]; then
+                    _method=$(nmcli -g ipv4.method connection show "${_owner}" 2>/dev/null || echo auto)
                 fi
-                ok "Bridge br0 configured on ${_primary_nic}"
+                [[ -n "$_method" ]] || _method=auto
+
+                # STP OFF, and the bridge wears the NIC's MAC. Both are load
+                # bearing, and both were learned the hard way on 2026-08-21:
+                #
+                #   bridge.stp defaults to yes with forward-delay 15, so a new
+                #   bridge cannot forward a frame for the first 15 seconds. The
+                #   DHCP request goes into that hole, the client backs off, and
+                #   the bridge is still addressless when anything reasonable
+                #   gives up — the handover then looks like a hard failure when
+                #   it is really a timing one. A bridge with a single uplink
+                #   port cannot form a loop, so STP buys nothing here and costs
+                #   15s on every boot.
+                #
+                #   bridge.mac-address is unset by default, so the bridge comes
+                #   up with a MAC that is not the NIC's and the DHCP server
+                #   hands out a DIFFERENT lease. A test host moved from .101 to
+                #   .118 doing exactly this; on a machine reached by address or
+                #   by DHCP reservation that is indistinguishable from losing
+                #   it. Wearing the NIC's MAC keeps the lease.
+                local _mac
+                _mac=$(cat "/sys/class/net/${_primary_nic}/address" 2>/dev/null || echo "")
+                # swallow: `connection add` fails when the profile already
+                # exists from an earlier firstboot run; that is the re-run case
+                # and the modify/up below still do the right thing.
+                nmcli connection add type bridge ifname br0 con-name br0 \
+                    connection.autoconnect yes ipv4.method "$_method" \
+                    bridge.stp no ${_mac:+bridge.mac-address "$_mac"} >/dev/null 2>&1 ||
+                    log "  note: br0 profile already existed"
+                # Re-assert on the re-run path, where the add above was a no-op
+                # and an older profile may still carry STP and no MAC.
+                nmcli connection modify br0 bridge.stp no \
+                    ${_mac:+bridge.mac-address "$_mac"} >/dev/null 2>&1 ||
+                    log "  note: could not re-assert stp/mac on br0"
+                if [[ "$_method" == "manual" && -n "$_owner" ]]; then
+                    nmcli connection modify br0 \
+                        ipv4.addresses "$(nmcli -g ipv4.addresses connection show "${_owner}" 2>/dev/null)" \
+                        ipv4.gateway "$(nmcli -g ipv4.gateway connection show "${_owner}" 2>/dev/null)" \
+                        ipv4.dns "$(nmcli -g ipv4.dns connection show "${_owner}" 2>/dev/null)" >/dev/null 2>&1 ||
+                        log "  note: could not copy static addressing onto br0"
+                fi
+                # swallow: same re-run case as the bridge add above.
+                nmcli connection add type bridge-slave ifname "${_primary_nic}" \
+                    master br0 con-name "${_slave}" >/dev/null 2>&1 ||
+                    log "  note: ${_slave} profile already existed"
+
+                # Stand the old profile down BEFORE bringing the bridge up, so
+                # the two can never race for the device again on a later boot.
+                # swallow: a profile that is already down or already non-auto.
+                if [[ -n "$_owner" && "$_owner" != "br0" ]]; then
+                    nmcli connection modify "${_owner}" connection.autoconnect no >/dev/null 2>&1 || true
+                fi
+                # swallow: `up` reports failure for states that still settle a
+                # moment later; the verify loop below is what actually decides.
+                nmcli connection up "${_slave}" >/dev/null 2>&1 || true
+                nmcli connection up br0 >/dev/null 2>&1 || true
+
+                # VERIFY THE OUTCOME, NOT THE EXIT CODE: a port enslaved AND an
+                # address on the bridge. nmcli returns 0 for plenty of states
+                # that leave the host with no route at all.
+                local _bridged=0 _try
+                for _try in $(seq 1 25); do
+                    if [[ -n "$(ls -A /sys/class/net/br0/brif 2>/dev/null)" ]] &&
+                        ip -4 addr show br0 2>/dev/null | grep -q 'inet '; then
+                        _bridged=1
+                        break
+                    fi
+                    sleep 2
+                done
+
+                if [[ "$_bridged" == "1" ]]; then
+                    ok "Bridge br0 up on ${_primary_nic} ($(ip -4 -br addr show br0 | awk '{print $3}'))"
+                else
+                    # ROLL BACK: restore the profile that was working and take
+                    # the half-built bridge out of the way, so the next boot
+                    # does not retry straight back into the broken state.
+                    log "WARNING: br0 did not come up on ${_primary_nic} — rolling back"
+                    # swallow: each of these is best-effort teardown; a failure
+                    # here must not stop the restore that follows it.
+                    nmcli connection down br0 >/dev/null 2>&1 || true
+                    nmcli connection delete "${_slave}" >/dev/null 2>&1 || true
+                    nmcli connection delete br0 >/dev/null 2>&1 || true
+                    if [[ -n "$_owner" ]]; then
+                        nmcli connection modify "${_owner}" connection.autoconnect yes >/dev/null 2>&1 || true
+                        nmcli connection up "${_owner}" >/dev/null 2>&1 || true
+                        log "  restored ${_owner} on ${_primary_nic}"
+                    fi
+                    log "  VMs can still reach the LAN via virbr0 NAT"
+                fi
             fi
 
             # Enable IP forwarding
