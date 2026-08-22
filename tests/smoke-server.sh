@@ -151,14 +151,19 @@ kbe delete "$BE_NAME" >/dev/null 2>&1 || true
 # /boot/efi/EFI/zbm/ (signed, MOK-verified), NOT inside the darksite
 # tree (that was an old layout). So presence here is a regression.
 _section "Darksite (post-firstboot cleanup)"
-test_succeeds "darksite removed from /root (firstboot reclaim)" \
-    "[[ ! -d /root/darksite ]]"
 test_succeeds "darksite repo file removed" \
     "[[ ! -f /etc/yum.repos.d/kldload-darksite.repo ]]"
-# LAN mirror opt-in: when /etc/kldload/keep-darksite exists, the admin
-# kept darksite at install time as a network-accessible package mirror
-# for other machines. In that case it SHOULD still be there and the
-# service active.
+# LAN mirror opt-in: when /etc/kldload/keep-darksite exists, the admin kept
+# darksite at install time as a network-accessible package mirror for other
+# machines. In that case it SHOULD still be there and the service active.
+#
+# Otherwise firstboot reclaims it -- but it reclaims the PACKAGE MIRRORS only
+# (5.8G -> 3.3G) and deliberately KEEPS the helm charts for offline k8s
+# deploys, so /root/darksite itself survives by design. The old assertion here
+# was `[[ ! -d /root/darksite ]]`, unconditionally: it therefore failed on
+# every correctly reclaimed install (.101 left /root/darksite/helm-charts,
+# 2026-08-21) and, in keep-darksite mode, directly contradicted the test_dir
+# three lines below it. Assert what firstboot actually promises instead.
 if [[ -f /etc/kldload/keep-darksite ]]; then
     test_dir "LAN mirror mode: darksite kept" "/root/darksite"
     test_service_active "LAN mirror service" "kldload-apt-mirror"
@@ -166,6 +171,9 @@ if [[ -f /etc/kldload/keep-darksite ]]; then
         test_dir "APT darksite" "/root/darksite/debian/apt"
         test_file "APT Release file" "/root/darksite/debian/apt/dists/trixie/Release"
     fi
+else
+    test_succeeds "darksite package mirrors reclaimed (firstboot)" \
+        "[[ ! -d /root/darksite/debian/apt && ! -d /root/darksite/rpms ]]"
 fi
 # ZBM EFI lives at the canonical EFI System Partition path, not inside
 # /root/darksite (old layout). Verify it's where the bootloader actually
@@ -240,65 +248,25 @@ else
     _pass "NVIDIA not installed (expected if checkbox not selected)"
 fi
 
-# ── Bob + RAG ────────────────────────────────────────────────────────────────
-# Verifies the Bob CLI + the RAG service stack added in commit ec5bd90:
-# previous builds shipped the RAG code but it never worked because deps
-# weren't installed, units weren't enabled, and Bob didn't call it.
-_section "Bob + RAG"
+# ── AI (Open WebUI) ────────────────────────────────────────────
+# Open WebUI IS the AI surface. There is no kldload-side assistant layer on
+# top of it: the `bob` CLI and the standalone RAG service on :8400 were
+# removed in 6dd32240 (docs/bob-deprecation.md), and the later attempt to
+# recreate Bob as a workspace model inside Open WebUI was backed out too —
+# Open WebUI's own chat, model picker and retrieval cover it, and a second
+# assistant layer was one more thing to keep working for no gain.
+#
+# WHY THIS SECTION WAS REWRITTEN: it asserted that whole deleted stack —
+# /usr/local/bin/bob, /usr/local/lib/kldload-rag/*.py, chromadb, the four
+# kldload-rag-* units and their enable symlinks, and a health endpoint on
+# :8400. All gone by design, so a correctly built machine failed twelve
+# checks here. .101 reported 14 smoke failures on 2026-08-21 and every one
+# was this section plus the darksite check above — noise that trains an
+# operator to stop reading the report, which is how a real failure gets
+# missed.
+_section "AI (Open WebUI)"
 
-# CLI presence
-test_file "Bob CLI" "/usr/local/bin/bob"
-test_file "RAG service code" "/usr/local/lib/kldload-rag/kldload_rag.py"
-test_file "RAG indexer code" "/usr/local/lib/kldload-rag/kldload_rag_index.py"
-test_file "RAG indexer CLI" "/usr/local/bin/kldload-rag-index"
-test_file "kai-rag CLI" "/usr/local/bin/kai-rag"
-
-# Bob CLI was actually patched (not the 3-line stub from older builds)
-if [[ -f /usr/local/bin/bob ]] && grep -q 'BOB_RAG\b' /usr/local/bin/bob 2>/dev/null; then
-    _pass "Bob CLI has RAG bridge"
-else
-    _fail "Bob CLI has RAG bridge" "no BOB_RAG reference -- stub installed instead of full bob"
-fi
-
-# Systemd unit files installed
-test_file "RAG service unit" "/usr/lib/systemd/system/kldload-rag.service"
-test_file "RAG firstboot unit" "/usr/lib/systemd/system/kldload-rag-firstboot.service"
-test_file "RAG index timer" "/usr/lib/systemd/system/kldload-rag-index.timer"
-test_file "RAG index service" "/usr/lib/systemd/system/kldload-rag-index.service"
-
-# Symlinks created by profiles.sh (units enabled to start at boot)
-test_file "RAG service enabled (symlink)" \
-    "/etc/systemd/system/multi-user.target.wants/kldload-rag.service"
-test_file "RAG firstboot enabled (symlink)" \
-    "/etc/systemd/system/multi-user.target.wants/kldload-rag-firstboot.service"
-test_file "RAG index timer enabled (symlink)" \
-    "/etc/systemd/system/timers.target.wants/kldload-rag-index.timer"
-
-# ChromaDB data dir
-test_dir "RAG ChromaDB data dir" "/var/lib/kldload-rag"
-
-# Python imports succeed (the actual reason RAG used to never start)
-if python3 -c "import chromadb, bs4" 2>/dev/null; then
-    _pass "Python deps importable (chromadb, bs4)"
-else
-    _fail "Python deps importable" "chromadb or beautifulsoup4 missing -- RAG service can't start"
-fi
-
-# RAG service is actually running and responding
-if curl -sf --max-time 3 http://localhost:8400/health >/dev/null 2>&1; then
-    _pass "RAG service responds on :8400"
-    # And ChromaDB has some chunks indexed (first-boot indexer ran successfully)
-    chunks=$(curl -sf --max-time 3 http://localhost:8400/health | grep -oE '"chunks":\s*[0-9]+' | grep -oE '[0-9]+' | head -1)
-    if [[ -n "$chunks" && "$chunks" -gt 0 ]]; then
-        _pass "RAG corpus indexed ($chunks chunks)"
-    else
-        _warn "RAG corpus indexed" "0 chunks -- first-boot indexer may still be running"
-    fi
-else
-    _fail "RAG service responds on :8400" "no response from /health -- service down"
-fi
-
-# Ollama (RAG and Bob both depend on this)
+# Ollama backs the chat models Open WebUI serves.
 if command -v ollama >/dev/null 2>&1; then
     _pass "Ollama CLI"
     if curl -sf --max-time 3 http://localhost:11434/api/tags >/dev/null 2>&1; then
@@ -307,14 +275,23 @@ if command -v ollama >/dev/null 2>&1; then
         _warn "Ollama API responds" "ollama service may not be running yet"
     fi
 else
-    _warn "Ollama CLI" "not installed -- Bob/RAG will not work"
+    _warn "Ollama CLI" "not installed -- Open WebUI will have no models to serve"
 fi
 
-# Indexer is callable
-if [[ -x /usr/local/bin/kldload-rag-index ]]; then
-    _pass "kldload-rag-index is executable"
+# Open WebUI runs as a podman container with --network host, so it binds the
+# host's 127.0.0.1:8080 directly and `podman port` lists nothing published —
+# that is expected, not a fault. Operators reach it through nginx at /ai/ on
+# 8443; the box has no listener on 443, so probing 443 yields a connection
+# refused that looks exactly like a broken proxy.
+if curl -sf --max-time 4 http://127.0.0.1:8080/health >/dev/null 2>&1; then
+    _pass "Open WebUI responds (127.0.0.1:8080)"
+    if [[ "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 https://localhost:8443/ai/ 2>/dev/null)" == "200" ]]; then
+        _pass "Open WebUI proxied at https://<host>:8443/ai/"
+    else
+        _fail "Open WebUI proxied at /ai/" "nginx is not serving the /ai/ route on 8443"
+    fi
 else
-    _fail "kldload-rag-index is executable" "not executable -- nightly re-index will fail"
+    _warn "Open WebUI responds" "container not up yet -- it starts on demand"
 fi
 
 # ── System Files ─────────────────────────────────────────────────────────────

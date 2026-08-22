@@ -101,48 +101,6 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
         _warn "Boot loader" "no isolinux or grub — may not boot on all systems"
     fi
 
-    # ── Bob + RAG content inside the squashfs ───────────────────────────
-    # Catches the regression where RAG code shipped but indexer/units/
-    # deps were missing. unsquashfs returns 0 even when some requested
-    # files don't exist in the image, so we verify each file
-    # individually after the extract instead of trusting its exit code.
-    if [[ -f "$MOUNTPOINT/LiveOS/squashfs.img" ]] && command -v unsquashfs >/dev/null 2>&1; then
-        SQEXTRACT=$(mktemp -d)
-        declare -a RAG_FILES=(
-            usr/local/bin/bob
-            usr/local/bin/kldload-rag-index
-            usr/local/bin/kai-rag
-            usr/local/lib/kldload-rag/kldload_rag.py
-            usr/local/lib/kldload-rag/kldload_rag_index.py
-            usr/lib/systemd/system/kldload-rag.service
-            usr/lib/systemd/system/kldload-rag-firstboot.service
-            usr/lib/systemd/system/kldload-rag-index.timer
-            usr/lib/systemd/system/kldload-rag-index.service
-        )
-        unsquashfs -q -f -d "$SQEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" \
-            "${RAG_FILES[@]}" >/dev/null 2>&1 || true
-
-        # Per-file existence + content checks
-        for _f in "${RAG_FILES[@]}"; do
-            if [[ -f "$SQEXTRACT/root/$_f" ]]; then
-                _pass "squashfs has $_f"
-            else
-                _fail "squashfs has $_f" "file missing from squashfs"
-            fi
-        done
-
-        # bob must contain BOB_RAG (the bridge marker) -- catches the stub
-        if [[ -f "$SQEXTRACT/root/usr/local/bin/bob" ]]; then
-            if grep -q 'BOB_RAG' "$SQEXTRACT/root/usr/local/bin/bob"; then
-                _pass "squashfs bob CLI has RAG bridge"
-            else
-                _fail "squashfs bob CLI has RAG bridge" "stub installed instead of full bob -- RAG won't be used"
-            fi
-        fi
-
-        rm -rf "$SQEXTRACT"
-    fi
-
     # ── Workstation launchers + custom app icons inside the squashfs ────
     # Catches the icon-drop regression: build-iso.sh must copy the hicolor
     # app-icon theme + the Web UI launcher into the live rootfs, else the
@@ -155,7 +113,6 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
             usr/share/icons/hicolor/scalable/apps/kldload-webui.svg
             usr/share/icons/hicolor/scalable/apps/bob-chat.svg
             usr/share/icons/hicolor/scalable/apps/kldload-zfs.svg
-            usr/local/bin/bob-models
         )
         unsquashfs -q -f -d "$WSEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" \
             "${WS_FILES[@]}" usr/share/applications/kldload-console.desktop >/dev/null 2>&1 || true
@@ -173,14 +130,6 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
             _fail "console launcher replaced" "kldload-console.desktop still in squashfs"
         else
             _pass "console launcher replaced by Web UI"
-        fi
-
-        # bob delegates model mgmt to bob-models; bob-models swaps the resident
-        # model via the ollama keep_alive API (load/unload).
-        if [[ -f "$WSEXTRACT/root/usr/local/bin/bob-models" ]] && grep -q 'keep_alive' "$WSEXTRACT/root/usr/local/bin/bob-models"; then
-            _pass "bob-models has load/unload (keep_alive) support"
-        else
-            _fail "bob-models load/unload" "keep_alive missing — model swap won't work"
         fi
 
         rm -rf "$WSEXTRACT"
