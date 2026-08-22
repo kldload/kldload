@@ -545,6 +545,36 @@ else
     _fail "python3-pip is in a package list" "pip fallbacks silently no-op without it"
 fi
 
+# INSTALLED IS NOT ENABLED. Five services shipped dead in one codebase on
+# 2026-08-22 — present on disk, package query says installed, nothing errors,
+# and none of them ever ran. Each pair below is (thing that must be enabled,
+# file that must enable it).
+while IFS='|' read -r _svc _file _why; do
+    [[ -n "$_svc" ]] || continue
+    _p="$ROOT/$_file"
+    if [[ ! -f "$_p" ]]; then
+        _fail "enabled: $_svc" "missing file: $_file"
+    # Two syntaxes count as enabling, because both are used here: a shell
+    # `systemctl enable`, and Ansible's systemd module with `enabled: true`.
+    # Matching only the shell form failed provision-golden.yml, which enables
+    # the agent perfectly well through Ansible — a gate that only knows one
+    # dialect reports a bug that is not there.
+    elif grep -qE "systemctl enable[^|;&]*${_svc}|timers\.target\.wants/${_svc}|multi-user\.target\.wants/${_svc}" "$_p" 2>/dev/null ||
+        { grep -qF "$_svc" "$_p" 2>/dev/null && grep -qE '^[[:space:]]*enabled:[[:space:]]*(true|yes)' "$_p" 2>/dev/null; }; then
+        _pass "enabled: $_svc"
+    else
+        _fail "enabled: $_svc" "$_why"
+    fi
+done <<'ENABLES'
+ssh|live-build/config/includes.chroot/usr/local/bin/klab|a golden whose sshd is not enabled clones into unreachable VMs
+qemu-guest-agent|live-build/config/includes.chroot/usr/local/bin/klab|without it the hypervisor cannot read a guest IP or stop it gracefully
+cloud-init.target|live-build/config/includes.chroot/usr/local/bin/klab|disabled cloud-init makes every clone seed inert: no hostname, no keys
+cloud-init.target|live-build/config/includes.chroot/usr/local/share/kldload-ansible/playbooks/seal-golden.yml|same, on the k8s golden path
+kldload-collect.timer|live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh|copied to the target but never enabled means it never runs
+sanoid-prune|live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh|nothing prunes snapshots without it
+qemu-guest-agent|live-build/config/includes.chroot/usr/local/share/kldload-ansible/playbooks/provision-golden.yml|k8s nodes report no-agent without it
+ENABLES
+
 # Per-family package names must BRANCH, not be hardcoded. The pam module is
 # the worst case: the same package name ships a different module on each
 # family, so one hardcoded name is silently wrong on exactly one of them.
