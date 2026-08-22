@@ -2842,15 +2842,6 @@ BOBMODEL
         log "Bob: pip install open-webui failed — will use podman on boot"
     }
 
-    # Install kldload-rag Python deps (chromadb + beautifulsoup4) so the
-    # RAG service at /usr/local/lib/kldload-rag/kldload_rag.py can start.
-    # Without these, imports fail and the RAG silently never works -- which
-    # is exactly what shipped in earlier builds.
-    log "Bob: installing kldload-rag Python deps (chromadb, beautifulsoup4)..."
-    chroot "${ROOTFS}" pip3 install --quiet --break-system-packages chromadb beautifulsoup4 2>&1 | tail -5 || {
-        log "Bob: pip install chromadb/bs4 failed -- RAG will fall back to direct Ollama"
-    }
-
     # Bob CLI: always pull from the source-of-truth in includes.chroot,
     # don't rely on ROOTFS state (it races with the wholesale copy below
     # the BOB_LIVE block in some build sequences). If the source is

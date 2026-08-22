@@ -516,6 +516,30 @@ else
         "resolve-stack.sh exists but nothing invokes it — the stack would be unpinned"
 fi
 
+# A shipped tool's imports must be PACKAGED. This is the "coded correctly and
+# cannot work" class: kldload-webui imports pam for console password auth,
+# python3-pam was in no package list, and because the import sits in a
+# try/except the webui came up fine and silently refused every console login
+# while logging "PAM auth error" where nobody looks (.107, 2026-08-22). A
+# guarded import turns a missing dependency from a crash into a dead feature,
+# which is strictly harder to notice.
+_ic_pf="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+for _mod in pam websockets yaml; do
+    if grep -q "python3-${_mod}" "$_ic_pf" 2>/dev/null; then
+        _pass "python3-${_mod} is in a package list"
+    else
+        _fail "python3-${_mod} is in a package list" \
+            "a shipped tool imports ${_mod}; unpackaged it becomes a silently dead feature"
+    fi
+done
+# pip must exist wherever anything falls back to it (profiles.sh installs
+# websockets via pip3 on distros whose package is too old).
+if grep -q 'python3-pip' "$_ic_pf" 2>/dev/null; then
+    _pass "python3-pip is in a package list"
+else
+    _fail "python3-pip is in a package list" "pip fallbacks silently no-op without it"
+fi
+
 # Capture-then-eval must stay PAIRED. Splitting `eval "$(cmd)"` into a capture
 # plus a later eval is correct — eval reports its own status, not the
 # command's, so a resolver exiting 2 reads as success. But a half-applied edit
