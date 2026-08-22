@@ -107,6 +107,26 @@ kpin_zfs_cap() {
         sort -V | tail -1
 }
 
+# ── Candidate lines ────────────────────────────────────────────────────────
+# Every kernel LINE (major.minor) koji knows, newest first, filtered to those
+# at or below the ceiling. koji is the source because it keeps every build
+# forever, so this sees lines the mirrors have already pruned.
+kpin_lines_at_or_below() {
+    local ceiling="$1"
+    curl -fsS --max-time 20 "${KOJI_ROOT}/" 2>/dev/null |
+        grep -oE 'href="[0-9]+\.[0-9]+\.[0-9]+/"' |
+        sed -E 's|^href="||; s|/"$||' |
+        awk -F. '{print $1"."$2}' | sort -uV |
+        awk -v c="$ceiling" '
+            function vle(a, b,   x, y) {
+                split(a, x, "."); split(b, y, ".")
+                if (x[1] != y[1]) return x[1] < y[1]
+                return x[2] <= y[2]
+            }
+            vle($0, c) { print }
+        ' | sort -rV
+}
+
 # ── Candidate NVRs ─────────────────────────────────────────────────────────
 # The mirrors first: if Fedora still serves a kernel under the cap, use it and
 # skip koji entirely. Returns the newest matching version-release, or nothing.
@@ -185,23 +205,45 @@ main() {
         return 2
     fi
 
-    # "7.0.999" is a cap on the 7.0 line: the newest thing zfs will build
-    # against is a 7.0.x. Drop the patch component to get the line.
-    line="${cap%.*}"
-    _warn "zfs-dkms caps at kernel-uname-r > ${cap} → pinning the ${line} line"
+    # THE CAP IS A CEILING, NOT A TARGET.
+    #
+    # "7.2.999" means zfs builds against anything up to 7.2.x — it does NOT
+    # mean a 7.2 kernel has to exist. Searching only the cap's own line is the
+    # bug that stopped this build: the zfs repo moved its ceiling to 7.2.999,
+    # koji had a 7.2.0 but none built for this releasever, and the resolver
+    # declared FATAL while F44 was sitting on a perfectly good 7.1.9 that is
+    # comfortably under the ceiling (2026-08-22).
+    #
+    # So walk DOWN from the cap's line and take the newest line that actually
+    # has a fetchable kernel for this releasever. Lines are derived from what
+    # the archive offers, so no version is named here either.
+    local cap_line="${cap%.*}"
+    _warn "zfs-dkms caps at kernel-uname-r > ${cap} → searching at or below the ${cap_line} line"
 
-    # The mirrors NOT carrying this line is the normal case once Fedora prunes
-    # it; koji is asked next and keeps every NVR forever.
-    nvr=$(kpin_from_mirrors "$line" || true)
-    if [[ -n "$nvr" ]]; then
-        _warn "mirrors still carry ${line}: ${nvr}"
-    else
-        nvr=$(kpin_from_koji "$line" || true)
-        [[ -n "$nvr" ]] && _warn "mirrors pruned ${line}; koji has ${nvr}"
+    local -a _lines=()
+    mapfile -t _lines < <(kpin_lines_at_or_below "$cap_line")
+    if [[ "${#_lines[@]}" -eq 0 ]]; then
+        _warn "FATAL: the archive offers no kernel line at or below ${cap_line}"
+        return 2
     fi
 
+    for line in "${_lines[@]}"; do
+        nvr=$(kpin_from_mirrors "$line" || true)
+        if [[ -n "$nvr" ]]; then
+            _warn "mirrors carry ${line}: ${nvr}"
+            break
+        fi
+        nvr=$(kpin_from_koji "$line" || true)
+        if [[ -n "$nvr" ]]; then
+            _warn "mirrors pruned ${line}; koji has ${nvr}"
+            break
+        fi
+        _warn "nothing fetchable on the ${line} line — trying the next line down"
+    done
+
     if [[ -z "$nvr" ]]; then
-        _warn "FATAL: no kernel found on the ${line} line at the mirrors or koji"
+        _warn "FATAL: no fetchable kernel on any line at or below ${cap_line}"
+        _warn "       lines tried: ${_lines[*]}"
         return 2
     fi
 

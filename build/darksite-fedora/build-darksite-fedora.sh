@@ -290,10 +290,14 @@ if [[ -z "${KOJI_KERNEL_NVR:-}" ]]; then
         # including its own last-known-good fallback — and that is fatal here
         # for the same reason it is fatal in build-iso.sh: a mirror built
         # around a guessed kernel is worse than no mirror.
-        if ! eval "$(ARCH="${ARCH}" RELEASEVER="${RELEASE:-44}" bash /builder/kernel-pin.sh)"; then
+        # CAPTURE, CHECK, THEN eval. `eval "$(cmd)"` returns EVAL's status,
+        # not cmd's, so a resolver exiting 2 read as success and execution
+        # fell through to an unbound KPIN_NVR (2026-08-22).
+        if ! _kpin_out="$(ARCH="${ARCH}" RELEASEVER="${RELEASE:-44}" bash /builder/kernel-pin.sh)"; then
             log "FATAL: kernel-pin.sh could not resolve a fetchable kernel NVR" >&2
             exit 1
         fi
+        eval "$_kpin_out"
         KOJI_KERNEL_NVR="${KPIN_NVR}"
     else
         # The resolver is mounted by deploy.sh. If it is absent this script is

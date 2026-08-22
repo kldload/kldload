@@ -318,7 +318,10 @@ set +o pipefail
 # guessed kernel is an ISO whose ZFS may not build, which is not a thing to
 # discover after install.
 log "Resolving the Fedora kernel pin against the zfs repo's cap…"
-if ! eval "$(ARCH="$ARCH" RELEASEVER=44 bash /build/builder/kernel-pin.sh)"; then
+# CAPTURE, CHECK, THEN eval. `eval "$(cmd)"` returns EVAL's status,
+# not cmd's, so a resolver exiting 2 read as success and execution
+# fell through to an unbound KPIN_NVR (2026-08-22).
+if ! _kpin_out="$(ARCH="$ARCH" RELEASEVER=44 bash /build/builder/kernel-pin.sh)"; then
     die "kernel-pin.sh could not resolve a fetchable kernel NVR — refusing to guess"
 fi
 KOJI_KERNEL_NVR="$KPIN_NVR"
