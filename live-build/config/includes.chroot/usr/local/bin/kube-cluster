@@ -2322,7 +2322,40 @@ KBYAML
         fi
     fi
 
+    # RECONCILE THE MESH BEFORE DECLARING IT BUILT.
+    #
+    # The block above peers the hypervisor with $cp_ip and $worker_ips — the
+    # FIRST control plane and the workers. A control plane created by
+    # _scale_control_planes is in neither list, and it could not have peered
+    # itself either: that runs at step 3, reads the hypervisor key from
+    # /etc/wireguard/wg-mgmt.pub, and that file does not exist until
+    # `kube-network init 100` runs here at step 10. host_pub comes back empty,
+    # its `[[ -n "$host_pub" ]]` guard fails, and host-peering is skipped
+    # silently.
+    #
+    # A cluster born with 3 control planes therefore ends up with exactly four
+    # peers on the hypervisor — cp-1 plus three workers — while kubectl
+    # reports six Ready nodes on 10.251.0.1 through .6. Measured on .107
+    # 2026-08-22: wg-k8s and wg-mgmt each held 4 peers against 6 nodes,
+    # 10.251.0.5/.6 were unreachable from the host, and Prometheus could not
+    # scrape either new control plane (29 up / 4 down — the same shape as the
+    # 25/8 this file already records for fiend on 2026-08-16).
+    #
+    # mesh-repair reconciles exactly this: every node against every other, plus
+    # the hypervisor's own view, and its header notes it is a silent no-op on a
+    # healthy mesh. Calling it makes bootstrap self-correcting instead of
+    # order-dependent, and covers any future path that adds a node without
+    # telling the host.
+    if declare -f cmd_mesh_repair >/dev/null 2>&1; then
+        log "Reconciling the WireGuard mesh (covers control planes added after step 3)..."
+        cmd_mesh_repair || warn "mesh reconciliation reported problems — run 'kube-cluster mesh-repair'"
+    fi
+
     # /etc/hosts entries — use WireGuard IPs if mesh is up, else virbr0
+    # NOTE: this block names only ${CP_NAME} and the workers, so a control
+    # plane added by _scale_control_planes gets no /etc/hosts entry. It stays
+    # reachable by IP and through cluster DNS, so this is cosmetic rather than
+    # load-bearing — but it is the same 1-CP assumption the mesh bug came from.
     log "Adding cluster DNS entries to /etc/hosts..."
     sed -i '/# kldload-k8s-cluster/,/# end-kldload-k8s-cluster/d' /etc/hosts 2>/dev/null || true
     {
