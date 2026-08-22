@@ -8136,6 +8136,11 @@ function ansibleSubTab(name) {
   try { localStorage.setItem(ANSIBLE_TAB_KEY, name); } catch (e) {}
   if (name === 'playbooks' || name === 'run') send({action: 'ansible_status'});
   if (name === 'ledger')                       send({action: 'deploy_list'});
+  // Inventory had no case here, so switching to it sent nothing and its two
+  // tables sat on their "Loading…" placeholder forever — the backend was
+  // fine throughout (kldload-inventory returns 11 groups on this host).
+  // Every other sub-tab fetches on switch; this one was simply omitted.
+  if (name === 'inventory') send({action: 'ansible_inventory'});
 }
 function _ansibleRestoreTab() {
   try { const t = localStorage.getItem(ANSIBLE_TAB_KEY); if (t) ansibleSubTab(t); } catch (e) {}

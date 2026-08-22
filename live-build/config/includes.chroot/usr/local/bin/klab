@@ -1109,7 +1109,20 @@ nft flush ruleset 2>/dev/null || true
 # Ensure sshd stays accessible
 mkdir -p /etc/ssh/sshd_config.d
 echo -e 'PermitRootLogin yes\nPasswordAuthentication yes' > /etc/ssh/sshd_config.d/99-klab.conf 2>/dev/null || true
-systemctl restart sshd 2>/dev/null || true
+# ENABLE, not just restart, and under BOTH unit names.
+#
+# `restart` affects the session that is building the golden and nothing else:
+# if the unit is not enabled, the clone boots with sshd down and is
+# unreachable. Measured 2026-08-22 on .120 — klab-desktop-debian and
+# klab-desktop-ubuntu clones both took a DHCP lease and refused port 22, with
+# three host keys present, so it was never the host-key path.
+#
+# The name differs by family: Debian/Ubuntu ship ssh.service, RPM families
+# sshd.service. This line only ever named sshd, so the Debian arm was a no-op
+# even as a restart. Enabling both and tolerating the absent one covers the
+# matrix without a distro case.
+systemctl enable --now ssh 2>/dev/null || true
+systemctl enable --now sshd 2>/dev/null || true
 
 dnf install -y epel-release 2>/dev/null || true
 
