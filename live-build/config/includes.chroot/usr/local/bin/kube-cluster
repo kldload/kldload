@@ -3182,6 +3182,22 @@ NETCFG
 
         if _kube_join_one "$cp_ip" "$ip" "$name"; then
             joined=$((joined + 1))
+            # REGISTER IT. Bootstrap registers its CP and workers (see
+            # cmd_bootstrap) and _scale_control_planes registers each new
+            # control plane, but this loop — the one that adds workers — never
+            # did. The result was a node that Kubernetes and WireGuard both
+            # knew about and the state DB did not.
+            #
+            # That is not cosmetic bookkeeping. kldload-inventory builds the
+            # Ansible inventory by SELECTing from this table, so an
+            # unregistered worker is invisible to every playbook: measured on
+            # .107 2026-08-22, `kube-cluster scale 2` produced kldload-w-4 and
+            # w-5 Ready in kubectl with all 8 WireGuard peers meshed, while
+            # `ansible kube_workers --list-hosts` still returned only the
+            # original three. A fleet you cannot address is a fleet you cannot
+            # automate.
+            _db_register_node "$name" "worker" "$ip" "${CLUSTER_NAME}" "ready" 2>/dev/null || true
+            _db_event "node" "$name" "joined cluster ${CLUSTER_NAME} as worker" 2>/dev/null || true
         else
             failed+=("$name(join)")
         fi
