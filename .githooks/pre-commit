@@ -115,12 +115,30 @@ if ((${#PY[@]})); then
 fi
 
 # ── YAML / JSON / Dockerfile ───────────────────────────────────────────────
+# Charts are linted once each, after the loop, rather than once per template.
+declare -a CHARTS_TO_LINT=()
 for f in "${STAGED[@]}"; do
     [[ -f "$f" ]] || continue
     case "$f" in
     *.yml | *.yaml)
-        python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' "$f" 2>/dev/null ||
-            _err "YAML does not parse: $f"
+        # Helm templates are Go templates that RENDER YAML; {{ ... }} is not
+        # valid YAML and never will be. Parsing them as plain YAML blocked a
+        # correct chart on 2026-08-22. Detect them by the layout Helm mandates
+        # -- a templates/ directory with Chart.yaml beside it -- and defer to
+        # `helm template`, which is the check that actually applies.
+        _chartdir=""
+        case "$f" in
+        */templates/*)
+            _maybe="${f%/templates/*}"
+            [[ -f "$_maybe/Chart.yaml" ]] && _chartdir="$_maybe"
+            ;;
+        esac
+        if [[ -n "$_chartdir" ]]; then
+            CHARTS_TO_LINT+=("$_chartdir")
+        else
+            python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' "$f" 2>/dev/null ||
+                _err "YAML does not parse: $f"
+        fi
         ;;
     *.json)
         jq -e '.' "$f" >/dev/null 2>&1 || _err "JSON does not parse: $f"
@@ -137,6 +155,25 @@ for f in "${STAGED[@]}"; do
         ;;
     esac
 done
+
+# ── Helm charts ────────────────────────────────────────────────────────────
+# `helm template` is the real gate: it renders every template and parses the
+# result, so a broken template fails here exactly as it would on deploy.
+if ((${#CHARTS_TO_LINT[@]})); then
+    if command -v helm >/dev/null 2>&1; then
+        # shellcheck disable=SC2207 # names are chart paths: no spaces, no globs
+        for c in $(printf '%s\n' "${CHARTS_TO_LINT[@]}" | sort -u); do
+            if helm template precommit "$c" >/dev/null 2>&1; then
+                _ok "helm chart renders: $c"
+            else
+                _err "helm template failed: $c"
+                helm template precommit "$c" 2>&1 | tail -6 >&2
+            fi
+        done
+    else
+        _warn "helm NOT INSTALLED — chart templates were not rendered."
+    fi
+fi
 
 # ── Identity + secrets ─────────────────────────────────────────────────────
 # The repo carries no Claude-named files or references; catching it here is
