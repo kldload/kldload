@@ -514,6 +514,7 @@ golden_name() {
     case "${KLAB_GOLDEN_KIND:-regular}" in
     ztest) echo "${PREFIX}-ztest-${1}" ;;
     desktop) echo "${PREFIX}-desktop-${1}" ;;
+    db) echo "${PREFIX}-db-${1}" ;;
     *) echo "${PREFIX}-golden-${1}" ;;
     esac
 }
@@ -591,6 +592,110 @@ ARCCAP
 #
 #   2. NOTHING here may abort the rest. Every step tolerates its own failure,
 #      because the step after it is the one that matters.
+# setup_vm_db — turn a golden into a loaded database server.
+#
+# Args:    $1 = guest IP, $2 = distro.
+# Returns: 0 when the dataset is present and queryable; non-zero otherwise.
+#
+# WHY THIS LINEAGE EXISTS: the expensive part of a database is never the
+# install, it is the DATA. Restoring or generating a realistic dataset costs
+# minutes to hours, and every developer who needs one pays that cost again and
+# keeps a full copy on disk. A golden pays it ONCE; each clone is a writable
+# copy in ~180ms that shares the golden's blocks until it diverges, so twenty
+# developers cost roughly one dataset rather than twenty.
+#
+# pgbench generates it rather than a restored dump: it ships with Postgres,
+# needs no download, no licence and no third-party data, scales linearly with
+# -s, and produces real tables and indexes that plan realistically. Roughly
+# 15MB per scale unit, so -s 200 is ~3GB and -s 3400 is ~500GB. Time to
+# generate grows with it; the CLONE time does not, which is the entire point.
+#
+# Sizing: the zvol is sparse with lz4, so a large DISK costs nothing until
+# written and pgbench data compresses well. Set DISK to comfortably exceed the
+# dataset — DISK=600 klab golden-db debian for a -s 3400 build.
+setup_vm_db() {
+    local ip="$1" distro="$2"
+    local family="${DISTRO_FAMILY[$distro]}"
+    local scale="${KLAB_DB_SCALE:-200}"
+    local dbname="${KLAB_DB_NAME:-devdb}"
+    local dbuser="${KLAB_DB_USER:-dev}"
+    local dbpass="${KLAB_DB_PASS:-kldload}"
+
+    log "  Installing PostgreSQL on ${distro} and generating ~$((scale * 15))MB (scale ${scale})..."
+    case "$family" in
+    debian)
+        _ssh_cmd "$ip" bash -s <<DBAPT
+set -uo pipefail
+export DEBIAN_FRONTEND=noninteractive
+# postgresql-contrib carries pgbench on both families.
+apt-get install -y postgresql postgresql-contrib ||
+    echo "klab: postgres install FAILED — this golden stays a plain server" >&2
+DBAPT
+        ;;
+    rhel)
+        _ssh_cmd "$ip" bash -s <<DBDNF
+set -uo pipefail
+dnf install -y postgresql-server postgresql-contrib ||
+    echo "klab: postgres install FAILED — this golden stays a plain server" >&2
+# EL ships an uninitialised cluster; Debian creates one on install.
+[ -f /var/lib/pgsql/data/PG_VERSION ] || postgresql-setup --initdb >/dev/null 2>&1 ||
+    echo "klab: initdb FAILED" >&2
+systemctl enable postgresql >/dev/null 2>&1 || true # swallow: already-enabled is the normal re-run case
+DBDNF
+        ;;
+    *)
+        warn "  no PostgreSQL recipe for family ${family} — ${distro} db golden stays a server"
+        return 0
+        ;;
+    esac
+
+    # Reachable from outside, then seeded. Distro-agnostic: both families put a
+    # conf.d-style include in the data dir, and pg_hba lives beside it.
+    _ssh_cmd "$ip" bash -s <<DBSETUP
+set -uo pipefail
+# The data directory differs per family and per major version. Ask the running
+# server rather than guessing a path that changes every release.
+systemctl start postgresql >/dev/null 2>&1 || systemctl start postgresql.service >/dev/null 2>&1 || true # swallow: one of the two unit names is always absent
+for _ in \$(seq 1 30); do su - postgres -c "psql -tAc 'SELECT 1'" >/dev/null 2>&1 && break; sleep 2; done
+PGDATA=\$(su - postgres -c "psql -tAc 'SHOW data_directory'" 2>/dev/null | tr -d '[:space:]')
+if [ -z "\$PGDATA" ]; then
+    echo "klab: could not locate PGDATA — server not answering" >&2
+    exit 1
+fi
+# Clones get their own DHCP address, so the server has to listen off-loopback
+# or a developer can reach nothing. This is a lab credential on a lab network;
+# say so rather than pretending otherwise.
+printf "listen_addresses = '*'\\n" > "\$PGDATA/conf.d-listen.conf" 2>/dev/null ||
+    printf "listen_addresses = '*'\\n" >> "\$PGDATA/postgresql.conf"
+grep -q "^listen_addresses" "\$PGDATA/postgresql.conf" ||
+    printf "listen_addresses = '*'\\n" >> "\$PGDATA/postgresql.conf"
+sed -i "s/^listen_addresses.*/listen_addresses = '*'/" "\$PGDATA/postgresql.conf"
+grep -q "klab-lab-access" "\$PGDATA/pg_hba.conf" ||
+    printf "# klab-lab-access: lab network only, scram over the wire\\nhost all all 0.0.0.0/0 scram-sha-256\\n" >> "\$PGDATA/pg_hba.conf"
+systemctl restart postgresql >/dev/null 2>&1 || systemctl restart postgresql.service >/dev/null 2>&1 || true # swallow: as above, one unit name exists
+for _ in \$(seq 1 30); do su - postgres -c "psql -tAc 'SELECT 1'" >/dev/null 2>&1 && break; sleep 2; done
+
+su - postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${dbuser}'\"" | grep -q 1 ||
+    su - postgres -c "psql -c \"CREATE ROLE ${dbuser} LOGIN PASSWORD '${dbpass}'\"" >/dev/null
+su - postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='${dbname}'\"" | grep -q 1 ||
+    su - postgres -c "createdb -O ${dbuser} ${dbname}" >/dev/null
+
+echo "klab: generating the dataset (scale ${scale}) — this is the slow part, once"
+su - postgres -c "pgbench -i -s ${scale} -q ${dbname}" 2>&1 | tail -3
+
+# VERIFY THE OUTCOME. pgbench_accounts holds exactly scale x 100000 rows, so
+# the row count proves the data actually generated rather than that a command
+# exited 0 having written nothing.
+want=\$(( ${scale} * 100000 ))
+got=\$(su - postgres -c "psql -tAc 'SELECT count(*) FROM pgbench_accounts' ${dbname}" 2>/dev/null | tr -d '[:space:]')
+if [ "\${got:-0}" = "\$want" ]; then
+    echo "klab: dataset ready — \$got rows in pgbench_accounts, \$(su - postgres -c "psql -tAc \"SELECT pg_size_pretty(pg_database_size('${dbname}'))\"" | tr -d '[:space:]') on disk"
+else
+    echo "klab: WARNING dataset row count is \${got:-0}, expected \$want — the clone will be short of data" >&2
+fi
+DBSETUP
+}
+
 setup_vm_desktop() {
     local ip="$1" distro="$2"
     local family="${DISTRO_FAMILY[$distro]}"
@@ -1878,6 +1983,12 @@ MOKSETUP
     if [[ "${KLAB_DESKTOP:-0}" == "1" ]]; then
         setup_vm_desktop "$ip" "$distro"
     fi
+    # Same placement, same reason: it inherits the heartbeat and watchdog, and
+    # generating a large dataset is exactly the kind of long silent step that
+    # machinery exists for.
+    if [[ "${KLAB_DB:-0}" == "1" ]]; then
+        setup_vm_db "$ip" "$distro"
+    fi
 }
 
 # ── ZFS Build-from-Source ─────────────────────────────────────────────────
@@ -2578,6 +2689,37 @@ cmd_golden_ztest() {
 # Cost, measured on this host 2026-08-15: ~8.5 GB per desktop golden and
 # roughly 6-8 minutes each. Every clone taken afterwards is 17-460 MB and
 # 0.2s, which is the entire reason this lineage exists.
+# Build the DATABASE golden lineage — Postgres plus a generated dataset.
+#
+#   KLAB_GOLDEN_KIND=db  → golden_name() returns klab-db-<distro>
+#   KLAB_DB=1            → setup_vm_golden() also installs and seeds Postgres
+#
+# Knobs: KLAB_DB_SCALE (pgbench scale, default 200 ≈ 3GB), KLAB_DB_NAME,
+# KLAB_DB_USER, KLAB_DB_PASS, and DISK for the zvol.
+#
+# The watchdog is raised well past the desktop's: generating a large dataset is
+# genuinely slow — minutes at scale 200, hours at 3400 — and the whole point of
+# the lineage is that it happens once so that no clone ever pays it again.
+cmd_golden_db() {
+    [[ $# -eq 0 ]] && set -- all
+    export KLAB_GOLDEN_KIND=db
+    export KLAB_DB=1
+    export KLAB_GOLDEN_MAX_SECS="${KLAB_GOLDEN_MAX_SECS:-14400}"
+    local _distros=()
+    for _arg in "$@"; do
+        if [[ "$_arg" == "all" ]]; then
+            _distros+=("${DISTROS[@]}")
+        else
+            _distros+=("$_arg")
+        fi
+    done
+    log "Building DATABASE goldens (target=$*, scale=${KLAB_DB_SCALE:-200}) — clone them for instant writable copies."
+    for distro in "${_distros[@]}"; do
+        (build_golden_single "$distro") || warn "Failed to build DB golden for ${distro} (continuing)"
+    done
+    log "Database goldens ready. Names: klab-db-<distro> — kvm-clone one per developer."
+}
+
 cmd_golden_desktop() {
     [[ $# -eq 0 ]] && set -- all
     export KLAB_GOLDEN_KIND=desktop
@@ -4310,6 +4452,9 @@ Usage:
   klab golden [distro|all]                Build golden images
   klab golden-desktop [distro...]         GNOME desktop goldens for instant clones
                                           (default: all — one GNOME image per distro)
+  klab golden-db [distro...]              PostgreSQL goldens carrying a generated
+                                          dataset — clone one per developer
+                                          (KLAB_DB_SCALE=200 ≈ 3GB, 3400 ≈ 500GB)
   klab deploy blue|green                  Deploy site from goldens
   klab promote green                      Promote green to blue
   klab rollback                           Revert blue to previous snapshot
@@ -4374,6 +4519,7 @@ case "$CMD" in
 golden) cmd_golden "${1:-all}" ;;
 golden-ztest) cmd_golden_ztest "${1:-all}" ;;
 golden-desktop) cmd_golden_desktop "$@" ;;
+golden-db) cmd_golden_db "$@" ;;
 build-all) cmd_build_all ;;
 fetch-rhel-image) cmd_fetch_rhel_image "$@" ;;
 deploy) deploy_site "${1:-blue}" ;;
