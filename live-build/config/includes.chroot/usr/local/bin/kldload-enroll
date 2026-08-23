@@ -209,7 +209,12 @@ fi
 log "${VM}: at ${IP}"
 
 _ssh() {
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    # -n: without it ssh reads the CALLER's stdin. kldload-enroll is routinely
+    # driven from a script fed on stdin, and each ssh call silently swallowed
+    # the rest of it — the enrollment ran, printed nothing, and every command
+    # after it never executed. Measured on .120 (2026-08-23): a driver script
+    # vanished after the first ssh and looked exactly like a hang.
+    ssh -n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=10 -o BatchMode=yes \
         -i /root/.ssh/id_ed25519 "root@${IP}" "$@" 2>/dev/null
 }

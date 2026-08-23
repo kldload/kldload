@@ -180,7 +180,7 @@ if [[ -n "$_mkiso" ]]; then
         # and +/= and would need quoting through two layers to survive.
         if [[ -n "$_ssh_pub" ]]; then
             printf 'write_files:\n'
-            printf '  - path: /root/.ssh/authorized_keys\n'
+            printf '  - path: /root/.ssh/kldload_authorized_key\n'
             printf '    permissions: %s\n' "'0600'"
             printf '    owner: root:root\n'
             printf '    content: %s\n' "$_ssh_pub"
@@ -192,6 +192,15 @@ if [[ -n "$_mkiso" ]]; then
         echo "  - [ sh, -c, \"rm -f /etc/machine-id && systemd-machine-id-setup\" ]"
         echo "  - [ sh, -c, \"systemctl enable --now ssh.service sshd.service 2>/dev/null; true\" ]"
         echo "  - [ sh, -c, \"systemctl enable --now qemu-guest-agent 2>/dev/null; true\" ]"
+        # Install root's key LAST. cloud-init's ssh module has already run by
+        # now and has rewritten /root/.ssh/authorized_keys with the distro's
+        # forced-command banner ("Please login as the user debian..."), so
+        # anything written earlier is gone. Everything in this estate connects
+        # as root — klab, kldload-enroll, the image harness — so this is not
+        # cosmetic. Copied from the staged file so the key never has to survive
+        # shell quoting.
+        [[ -n "$_ssh_pub" ]] &&
+            echo "  - [ sh, -c, \"install -d -m 0700 /root/.ssh && install -m 0600 -o root -g root /root/.ssh/kldload_authorized_key /root/.ssh/authorized_keys\" ]"
     } >"${_tmp}/user-data"
 
     mkdir -p "$_seed_dir"
