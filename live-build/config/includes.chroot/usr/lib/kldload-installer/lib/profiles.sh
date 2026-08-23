@@ -1169,6 +1169,18 @@ DASHSTART
                 [[ -f "$_lnch" ]] || continue
                 # honor the ZFS Console opt-out (checkbox, default on)
                 [[ "$(basename "$_lnch")" == zxplore* && "${KLDLOAD_ENABLE_ZXPLORE:-1}" != "1" ]] && continue
+                # The web console's own launcher is not shipped to a workstation.
+                # Every tool it fronted that has a native equivalent already has
+                # its own icon — vmxplore, zxplore, ztxplore, wgxplore, k9s — and
+                # the webui icon just opened a browser onto the same estate those
+                # tools show natively and better. It stays INSTALLED (the binary,
+                # the unit, kldload-doctor's repair path) so `systemctl start
+                # kldload-webui` brings it back for the panels that have no native
+                # twin: ansible, helm, metrics, bob. Lab profiles keep the icon.
+                if [[ "$(basename "$_lnch")" == "kldload-webui.desktop" &&
+                "${KLDLOAD_PROFILE:-server}" == "desktop" ]]; then
+                    continue
+                fi
                 install -m 0644 "$_lnch" \
                     "${target}/usr/share/applications/$(basename "$_lnch")"
             done
@@ -1419,8 +1431,25 @@ DASHSTART
         #     sudo systemctl enable --now kldload-proxy kldload-webui ttyd-k9s
         # core: always disabled — bare ZFS only, no UI of any kind.
         case "${KLDLOAD_PROFILE:-server}" in
-        kvm | ai | zfslab | klab | desktop)
+        kvm | ai | zfslab | klab)
             : # keep defaults — enabled in each unit's [Install] WantedBy
+            ;;
+        desktop)
+            # A workstation does not run an ops console at boot. Every tool the
+            # webui fronted that matters here is a native application with its
+            # own icon, so the service was a listener on :8443 nobody opened —
+            # and ttyd-k9s exists only to feed the webui's terminal panel, so it
+            # goes with it (the k9s launcher uses kldload-term, not ttyd).
+            # NOT removed, disabled: `systemctl start kldload-webui` brings it
+            # back for the ansible/helm/metrics/bob panels, which have no native
+            # equivalent, and kldload-doctor still starts it to repair.
+            # swallow: a re-run finds these already disabled, and `systemctl
+            # disable` on an already-disabled unit is a non-zero no-op.
+            chroot "${target}" systemctl disable kldload-webui.service 2>/dev/null || true
+            # swallow: same, and ttyd-k9s is absent entirely on a profile that
+            # never installed it.
+            chroot "${target}" systemctl disable ttyd-k9s.service 2>/dev/null || true
+            k_log "Web ops console: installed but not started at boot (workstation) — systemctl start kldload-webui to use it."
             ;;
         server)
             if [[ "${KLDLOAD_ENABLE_WEBUI:-0}" == "1" ]]; then
