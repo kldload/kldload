@@ -664,6 +664,40 @@ if [ -n "$_kver" ] && [ -e "/lib/modules/${_kver}/kernel/drivers/gpu/drm" ]; the
 else
     echo "klab: WARNING no DRM modules in any installed kernel — desktop will be a black screen" >&2
 fi
+
+# Installing the generic kernel is NOT enough, and checking that it is on disk
+# is checking the wrong outcome. Both flavours carry the SAME version, and
+# grub's sort puts "…-cloud-amd64" ahead of "…-amd64", so GRUB_DEFAULT=0 boots
+# straight back into the cloud kernel that has no DRM.
+#
+# Measured on klab-desktop-debian (.120, 2026-08-23): both kernels installed,
+# DRM present in the generic one, and grub's first menu entry was still
+# …-cloud-amd64. The golden had a perfectly good kernel it never booted.
+#
+# Purging the cloud kernel is not the way out — its prerm refuses to remove the
+# running kernel, and at this point that is exactly what it is. So point grub at
+# the generic entry explicitly, reading both ids out of the GENERATED grub.cfg
+# rather than guessing them.
+# HISTORY: the same trap cost vmxplore a graphical appliance (wf-desk,
+# 2026-08-09: installed the generic kernel, rebooted, came up on the cloud one).
+if [ -n "$_kver" ]; then
+    update-grub >/dev/null 2>&1 || update-grub2 >/dev/null 2>&1 || true
+    _sub="$(grep -o 'gnulinux-advanced-[a-f0-9-]*' /boot/grub/grub.cfg 2>/dev/null | head -1)"
+    _ent="$(grep -o "gnulinux-${_kver}-advanced-[a-f0-9-]*" /boot/grub/grub.cfg 2>/dev/null | head -1)"
+    if [ -n "$_sub" ] && [ -n "$_ent" ]; then
+        sed -i '/^GRUB_DEFAULT=/d' /etc/default/grub
+        echo "GRUB_DEFAULT=\"${_sub}>${_ent}\"" >>/etc/default/grub
+        update-grub >/dev/null 2>&1 || update-grub2 >/dev/null 2>&1 || true
+        # VERIFY: grub.cfg must now name the generic entry as its default.
+        if grep -q "set default=.*${_ent}" /boot/grub/grub.cfg 2>/dev/null; then
+            echo "klab: grub will boot ${_kver} (the kernel with DRM)"
+        else
+            echo "klab: WARNING grub default did not take — desktop may boot the cloud kernel" >&2
+        fi
+    else
+        echo "klab: WARNING could not find grub menu ids — leaving default alone" >&2
+    fi
+fi
 DESKTOPAPT
         ;;
     *)
