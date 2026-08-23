@@ -1,88 +1,127 @@
-# javaapi-fullstack — values.yaml
+# ---------------------------------------------------------------------------
+# values.yaml — the full-stack demo's knobs.
 #
-# Defaults tuned for a single-host klab cluster (1 CP + 3 workers, ~4
-# CPU + 8 GB RAM per worker). Every image tag is pinned to a specific
-# version — no `:latest` anywhere — so a chart upgrade is a deliberate
-# version-bump, not a silent base-image change.
+# Sized for a 3-worker kldload cluster (4 vCPU + 8 GB RAM per worker). Every
+# tag is pinned so a redeploy is a deliberate version bump, not a silent
+# base-image change under you.
 #
-# Build #46 rewrite: dropped the seven Spring Petclinic services that
-# referenced springcommunity/spring-petclinic-*:3.1.0 images. Those
-# tags don't exist on Docker Hub (404 on every pull), so every fresh
-# install hit ImagePullBackOff on the entire microservices tier. The
-# rollback story doesn't depend on the Spring tier — it's
-# Postgres + ZFS snapshots — so the chart is now a minimal verified-
-# working stack: Postgres on a PVC + nginx as the public face + k6
-# loadgen. All three images exist, all three pull cleanly. The
-# "Christmas tree" topology demo is restored in build #47+ when we
-# replace the Spring tier with images that actually exist (Sock Shop
-# or Online Boutique — both proven public).
-
-# ── Global ──────────────────────────────────────────────────────────
+# HISTORY: build #46 had to gut this chart because it depended on
+# springcommunity/spring-petclinic-*:3.1.0, and those tags were removed from
+# Docker Hub. Every fresh install then hit ImagePullBackOff on the whole
+# application tier, and the demo was cut back to Postgres plus a contentless
+# nginx that served 404 on every path.
+#
+# The fix was not a different third-party image, it was owning the image:
+# `kube-demo-image` builds the app from this repo and imports it into
+# containerd on every node. That is why app.image.pullPolicy is Never — the
+# image is placed on the node deliberately, and a missing image should fail
+# loudly and immediately rather than silently reaching for a registry that may
+# not be reachable.
+# ---------------------------------------------------------------------------
 global:
   namespace: demo
-  imageRegistry: docker.io
   imagePullPolicy: IfNotPresent
-  storageClass: ""  # empty = cluster default (kldload sets local-path
-                    # as the default on klab clusters via kube-init
-                    # install_local_path_provisioner)
+  # Empty = the cluster default StorageClass (kldload sets local-path on a
+  # ZFS-backed dataset, which is what makes the snapshot/rollback demo real).
+  storageClass: ""
 
-# ── PostgreSQL ──────────────────────────────────────────────────────
+# ── The application ─────────────────────────────────────────────────────────
+app:
+  image:
+    repository: localhost/kldload-demo
+    # Never: this image is imported node-side by kube-demo-image. Pulling would
+    # reach for a registry that does not have it, turning a clear "image
+    # missing" into a slow, confusing ImagePullBackOff.
+    pullPolicy: Never
+  replicas: 3
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+
+  # The two tracks. Both are always deployed; `activeTrack` decides which one
+  # the public VIP points at. The tag is what actually differs between them in
+  # a real rollout — here both run the same image with a different version
+  # string and theme, so the cutover is visible without needing two builds.
+  blue:
+    enabled: true
+    tag: "1.0.0"
+    version: "1.0.0"
+  green:
+    enabled: true
+    tag: "1.0.0"
+    version: "2.0.0"
+
+# Which track the public Service sends traffic to. Flipping this value and
+# running `helm upgrade` IS the cutover; `kube-bluegreen` does exactly that and
+# nothing more, because a blue/green switch should be one label change and not
+# a bespoke mechanism.
+activeTrack: blue
+
+# ── Postgres ────────────────────────────────────────────────────────────────
+# Shared by both tracks on purpose: the demo's whole argument is that a cutover
+# swaps the application without disturbing the data underneath it.
 postgres:
-  enabled: true
   image:
     repository: postgres
-    tag: 16-alpine
+    tag: "16-alpine"
   storageSize: 5Gi
-  resources:
-    requests: { cpu: 100m, memory: 256Mi }
-    limits:   { cpu: 500m, memory: 512Mi }
+  database: shop
   credentials:
-    user: petclinic
-    database: petclinic
-    # NOT a secret in any real sense — published in the demo README.
-    # The Postgres service is ClusterIP-only; never reachable from
-    # outside the cluster. Override for any non-demo install:
+    user: shop
+    # Demo credential, and it is in git on purpose so the chart installs with no
+    # prerequisites. Override for anything reachable from a real network:
     #   --set postgres.credentials.password=<your-password>
-    password: petclinic-demo-2026
+    password: kldload-demo-2026
+  resources:
+    requests: { cpu: 100m, memory: 192Mi }
+    limits:   { cpu: 1000m, memory: 768Mi }
 
-# ── Public web tier — nginx, MetalLB-exposed ─────────────────────────
+# ── Public edge ─────────────────────────────────────────────────────────────
+# nginx in front of the app: security headers, per-IP rate limiting, gzip, and
+# a stable public address that a blue/green cutover never moves.
 web:
-  enabled: true
-  replicas: 3
+  replicas: 2
   image:
     repository: nginx
-    tag: 1.27-alpine
+    tag: "1.27-alpine"
+  # Generous enough that a demo audience refreshing hard never trips it, low
+  # enough that it is a real limit rather than decoration.
+  # Cluster DNS address. nginx's resolver takes an IP, never a name. 10.96.0.10
+  # is the kubeadm default (the .10 of the service CIDR); kube-demo detects the
+  # live value and overrides this, so a non-default service CIDR still works.
+  dnsResolver: "10.96.0.10"
+  rateLimit: 50r/s
+  rateLimitBurst: 100
   resources:
-    requests: { cpu: 50m, memory: 32Mi }
-    limits:   { cpu: 200m, memory: 64Mi }
-  service:
-    # Type LoadBalancer + MetalLB annotation. The pool name is the
-    # kube-cluster bootstrap default ("default-pool"); override at
-    # install time if a different pool is configured.
-    type: LoadBalancer
-    # No address-pool annotation: MetalLB assigns from any autoAssign pool, so
-    # the demo works whatever the operator named theirs. Naming one that does
-    # not exist makes MetalLB decline the allocation and the Service never
-    # leaves <pending> — set it here only if you have a specific pool.
+    requests: { cpu: 25m, memory: 32Mi }
+    limits:   { cpu: 300m, memory: 128Mi }
 
-# ── Load generator — k6 CronJob ──────────────────────────────────────
-# Runs every minute, 50 RPS for 30s against the web service ClusterIP.
-# Idempotent, no destructive operations. Stdout goes to Loki via the
-# {job="kldload-app"} promtail target.
+# ── Public VIP ──────────────────────────────────────────────────────────────
+# The address the browser talks to. It lands on the `web` proxy, which is why
+# it stays put across a cutover.
+service:
+  type: LoadBalancer
+  port: 80
+  # Left empty so MetalLB assigns from its configured pool. Hardcoding an
+  # address here is how the old demo ended up telling operators to curl
+  # 10.100.10.30 while MetalLB had actually handed out 192.168.122.201.
+  loadBalancerIP: ""
+
+# ── Load generator ──────────────────────────────────────────────────────────
+# Runs continuously against the VIP so a cutover can be shown to drop zero
+# requests. That is the claim blue/green exists to make, so the demo should
+# measure it rather than assert it.
 loadgen:
   enabled: true
   image:
     repository: grafana/k6
-    tag: 0.52.0
-  schedule: "* * * * *"
-  rps: 50
-  durationSeconds: 30
+    tag: "0.52.0"
+  vus: 5
   resources:
     requests: { cpu: 50m, memory: 64Mi }
-    limits:   { cpu: 500m, memory: 128Mi }
+    limits:   { cpu: 300m, memory: 192Mi }
 
-# ── Observability annotations propagated to every pod ────────────────
 observability:
   scrape: true
-  prometheusPort: 8080
   prometheusPath: /metrics
+  prometheusPort: 8080

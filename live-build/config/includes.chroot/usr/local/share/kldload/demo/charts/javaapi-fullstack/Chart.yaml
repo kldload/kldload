@@ -1,33 +1,33 @@
 apiVersion: v2
 name: javaapi-fullstack
 description: |
-  Spring PetClinic Microservices — the kldload 1.0 "Christmas tree" demo
-  workload. Deploys 7 Spring Boot services + Postgres + nginx ingress + k6
-  loadgen as one cohesive stack, behind a single MetalLB VIP.
+  The kldload full-stack demo: a storefront application with a real schema,
+  real seeded data, a real write path, and blue/green deployment built in.
 
-  Designed to light up every dashboard on a kldload install (block I/O,
-  TCP_INFO, Hubble L4/L7, Tetragon EXEC, ZFS txg/ARC, Cilium service map,
-  Prometheus scrape, Loki log ingest). The stateful tier (Postgres) sits
-  on a ZFS-tuned PVC so the rollback-recovery demo works end-to-end.
+  Deploys Postgres on a ZFS-tuned PVC, two independently versioned copies of
+  the application (the blue and green tracks), a MetalLB VIP whose selector is
+  the cutover switch, and a k6 load generator that proves the cutover drops no
+  requests.
 
-  Managed by Argo CD — every change is reconciled continuously, drift
-  visible in the Argo UI at https://argo.<vip>/.
+  The application image is built by kldload itself (kube-demo-image) and
+  imported straight into containerd on every node, so the demo works with the
+  network unplugged. Nothing here pulls a third-party application image.
+
+  Managed by Argo CD — drift is reconciled continuously and visible in the Argo
+  UI at https://argo.<vip>/.
 
 type: application
-version: 1.0.0
-appVersion: "3.1.0"
+version: 2.0.0
+appVersion: "2.0.0"
 
 home: https://github.com/kldload/kldload
 sources:
-  - https://github.com/spring-petclinic/spring-petclinic-microservices
-  - https://github.com/kldload/kldload/tree/main/live-build/config/includes.chroot/root/demo/charts/javaapi-fullstack
+  - https://github.com/kldload/kldload
 
 keywords:
   - kldload
   - demo
-  - javaapi
-  - spring
-  - microservices
+  - bluegreen
   - postgres
   - zfs
 
@@ -36,9 +36,8 @@ maintainers:
     url: https://kldload.com
 
 annotations:
-  # Marks this chart as part of the kldload 1.0 demo bundle. The webui
-  # Demo Mode view filters Argo Applications by this annotation so the
-  # presenter view only shows demo workloads, not operator workloads
-  # an admin may have deployed alongside.
+  # The webui Demo Mode view filters Argo Applications on this annotation so the
+  # presenter view shows only demo workloads. The VALUE is load-bearing and must
+  # stay in step with the label in _helpers.tpl and the webui's filter.
   kldload.io/demo: "javaapi-fullstack"
-  kldload.io/version: "1.0"
+  kldload.io/version: "2.0"

@@ -1,57 +1,95 @@
+# ---------------------------------------------------------------------------
+# loadgen.yaml — continuous traffic against the public VIP.
+#
+# WHY it runs forever rather than as a CronJob: the claim a blue/green cutover
+# makes is "no request was dropped". You cannot demonstrate that with traffic
+# that happens to be between runs when the switch is thrown. This keeps a
+# steady stream flowing so the cutover is measured, not asserted.
+#
+# It targets the in-cluster Service name rather than the MetalLB VIP so the
+# generator keeps working on a cluster whose LoadBalancer is still pending,
+# and so its traffic follows the exact same selector the public VIP does.
+#
+# The k6 thresholds are deliberately strict: a cutover that drops requests
+# should turn this pod's logs red, not quietly pass.
+# ---------------------------------------------------------------------------
 {{- if .Values.loadgen.enabled }}
-# k6 load generator — fires {{ .Values.loadgen.rps }} RPS for
-# {{ .Values.loadgen.durationSeconds }}s every minute against the
-# in-cluster web service ClusterIP. Stdout streams to Loki via the
-# kldload-app job label. Build #46 rewrite: target is now the
-# simplified web service (was api-gateway from the dropped Spring
-# tier).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loadgen-script
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "javaapi.commonLabels" . | nindent 4 }}
+data:
+  load.js: |
+    import http from 'k6/http';
+    import { check } from 'k6';
+    import { Counter } from 'k6/metrics';
+
+    // Counted separately per track so the log shows the handover happening:
+    // blue's counter stops climbing at the same moment green's starts.
+    const servedBlue  = new Counter('served_blue');
+    const servedGreen = new Counter('served_green');
+    const failed      = new Counter('requests_failed');
+
+    export const options = {
+      vus: {{ .Values.loadgen.vus }},
+      duration: '336h',           // effectively forever; the Deployment restarts it
+      thresholds: {
+        // A cutover must not drop requests. If this trips, the demo's central
+        // claim is false and the pod should say so loudly.
+        'requests_failed': ['count<1'],
+        'http_req_duration': ['p(95)<1500'],
+      },
+    };
+
+    export default function () {
+      const res = http.get('http://shop/api/stats', { timeout: '10s' });
+      const ok = check(res, { 'status is 200': (r) => r.status === 200 });
+      if (!ok) { failed.add(1); return; }
+      // The API stamps the serving track into a response header, which is what
+      // makes the handover observable from the client side.
+      const track = res.headers['X-Kldload-Track'];
+      if (track === 'green') { servedGreen.add(1); } else { servedBlue.add(1); }
+    }
 ---
-apiVersion: batch/v1
-kind: CronJob
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: loadgen
   namespace: {{ .Values.global.namespace }}
   labels:
     {{- include "javaapi.commonLabels" . | nindent 4 }}
+    app: loadgen
+    kldload.io/component: loadgen
 spec:
-  schedule: {{ .Values.loadgen.schedule | quote }}
-  concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 1
-  failedJobsHistoryLimit: 1
-  jobTemplate:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "javaapi.selectorLabels" . | nindent 6 }}
+      app: loadgen
+  template:
+    metadata:
+      labels:
+        {{- include "javaapi.commonLabels" . | nindent 8 }}
+        app: loadgen
+        kldload.io/component: loadgen
     spec:
-      ttlSecondsAfterFinished: 120
-      template:
-        metadata:
-          labels:
-            {{- include "javaapi.commonLabels" . | nindent 12 }}
-            app: loadgen
-        spec:
-          restartPolicy: Never
-          containers:
-            - name: k6
-              image: "{{ .Values.loadgen.image.repository }}:{{ .Values.loadgen.image.tag }}"
-              imagePullPolicy: {{ .Values.global.imagePullPolicy }}
-              env:
-                - { name: TARGET, value: "http://web.{{ .Values.global.namespace }}.svc.cluster.local" }
-              command: [sh, -c]
-              args:
-                - |
-                  cat > /tmp/run.js <<'EOF'
-                  import http from 'k6/http';
-                  export const options = {
-                    scenarios: {
-                      steady: {
-                        executor: 'constant-arrival-rate',
-                        rate: {{ .Values.loadgen.rps }},
-                        timeUnit: '1s',
-                        duration: '{{ .Values.loadgen.durationSeconds }}s',
-                        preAllocatedVUs: 50, maxVUs: 200,
-                      },
-                    },
-                  };
-                  export default function () { http.get(__ENV.TARGET); }
-                  EOF
-                  k6 run /tmp/run.js
-              resources: {{- toYaml .Values.loadgen.resources | nindent 16 }}
+      containers:
+        - name: k6
+          image: "{{ .Values.loadgen.image.repository }}:{{ .Values.loadgen.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          # --summary-trend-stats keeps the periodic log line readable at a
+          # glance from the back of a room, which is where this gets watched.
+          args: ["run", "--quiet", "--no-usage-report",
+                 "--summary-trend-stats", "avg,p(95),max",
+                 "/scripts/load.js"]
+          volumeMounts:
+            - { name: script, mountPath: /scripts }
+          resources: {{- toYaml .Values.loadgen.resources | nindent 12 }}
+      volumes:
+        - name: script
+          configMap:
+            name: loadgen-script
 {{- end }}

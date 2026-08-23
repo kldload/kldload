@@ -1,20 +1,16 @@
-{{- if .Values.postgres.enabled }}
-# Postgres 16 (official Alpine image) — the demo's stateful tier and
-# the dataset the rollback story rotates around. Named pvc-postgres-data
-# so the host-side ZFS dataset (the worker VM's zvol or local-path
-# directory on the worker) is easy to find:
+# ---------------------------------------------------------------------------
+# postgres.yaml — the demo's stateful tier.
 #
-#   On the worker VM:
-#     ls /opt/local-path-provisioner/*/pvc-postgres-data*
+# A StatefulSet with one replica on a PVC, plus the schema mounted into
+# /docker-entrypoint-initdb.d so a fresh volume comes up already seeded.
 #
-#   For the host-level rollback (the actual kldload pattern):
-#     zfs snapshot rpool/vms/kldload-w-<n>@before-disaster
-#     zfs rollback rpool/vms/kldload-w-<n>@before-disaster
-#
-# Sanoid policy (/etc/sanoid/sanoid.d/javaapi.conf) snapshots the
-# WORKER VM's zvol every 5 minutes; that captures the PVC data
-# transitively (the worker disk contains the local-path PVC dir).
----
+# WHY the initdb ConfigMap: the previous chart shipped Postgres with an empty
+# data directory, so "full stack" was a database nothing had ever written to.
+# Postgres runs everything in that directory exactly once — on a data dir that
+# is empty — which is precisely the semantic wanted here: seed a new install,
+# and never touch the data of an existing one. That is what makes the
+# blue/green story true, because the data visibly outlives the app.
+# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: Secret
 metadata:
@@ -24,27 +20,39 @@ metadata:
     {{- include "javaapi.commonLabels" . | nindent 4 }}
 type: Opaque
 stringData:
-  POSTGRES_USER:     {{ .Values.postgres.credentials.user | quote }}
-  POSTGRES_DB:       {{ .Values.postgres.credentials.database | quote }}
-  POSTGRES_PASSWORD: {{ .Values.postgres.credentials.password | quote }}
+  password: {{ .Values.postgres.credentials.password | quote }}
 ---
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: ConfigMap
 metadata:
-  name: pvc-postgres-data
+  name: postgres-initdb
   namespace: {{ .Values.global.namespace }}
   labels:
     {{- include "javaapi.commonLabels" . | nindent 4 }}
-    kldload.io/dataset-class: postgres
-    kldload.io/snapshot-policy: javaapi
+data:
+  # .Files.Get keeps the schema a real .sql file in the chart: it stays
+  # syntax-highlighted, diffable and runnable by hand against a scratch
+  # database, which a schema embedded in YAML never is.
+  schema.sql: |
+{{ .Files.Get "files/schema.sql" | indent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "javaapi.commonLabels" . | nindent 4 }}
+    app: postgres
 spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: {{ .Values.postgres.storageSize }}
-  {{- if .Values.global.storageClass }}
-  storageClassName: {{ .Values.global.storageClass }}
-  {{- end }}
+  clusterIP: None          # headless: the StatefulSet wants stable DNS, not a VIP
+  selector:
+    {{- include "javaapi.selectorLabels" . | nindent 4 }}
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -54,7 +62,7 @@ metadata:
   labels:
     {{- include "javaapi.commonLabels" . | nindent 4 }}
     app: postgres
-    kldload.io/component: stateful-tier
+    kldload.io/component: data
 spec:
   serviceName: postgres
   replicas: 1
@@ -67,53 +75,64 @@ spec:
       labels:
         {{- include "javaapi.commonLabels" . | nindent 8 }}
         app: postgres
-        kldload.io/component: stateful-tier
+        kldload.io/component: data
     spec:
+      terminationGracePeriodSeconds: 30
       containers:
         - name: postgres
           image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
-          envFrom:
-            - secretRef: { name: postgres-credentials }
-          env:
-            - name: PGDATA
-              value: /var/lib/postgresql/data/pgdata
           ports:
             - name: postgres
               containerPort: 5432
-          resources: {{- toYaml .Values.postgres.resources | nindent 12 }}
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.credentials.user | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            # The image refuses to initdb into a non-empty mount point, and a
+            # PVC arrives carrying lost+found. A subdirectory sidesteps that.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           volumeMounts:
-            - name: data
-              mountPath: /var/lib/postgresql/data
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: initdb, mountPath: /docker-entrypoint-initdb.d }
+          resources: {{- toYaml .Values.postgres.resources | nindent 12 }}
+          # pg_isready over TCP, as the app connects, not a bare socket check:
+          # a server still replaying WAL accepts a socket and refuses queries.
           readinessProbe:
             exec:
-              command: [pg_isready, -U, petclinic, -d, petclinic]
-            initialDelaySeconds: 5
+              command: ["pg_isready", "-U", "{{ .Values.postgres.credentials.user }}",
+                        "-d", "{{ .Values.postgres.database }}", "-h", "127.0.0.1"]
+            initialDelaySeconds: 10
             periodSeconds: 5
+            failureThreshold: 12
           livenessProbe:
             exec:
-              command: [pg_isready, -U, petclinic, -d, petclinic]
-            initialDelaySeconds: 20
+              command: ["pg_isready", "-U", "{{ .Values.postgres.credentials.user }}",
+                        "-d", "{{ .Values.postgres.database }}", "-h", "127.0.0.1"]
+            initialDelaySeconds: 45
             periodSeconds: 15
+            failureThreshold: 6
       volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: pvc-postgres-data
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgres
-  namespace: {{ .Values.global.namespace }}
-  labels:
-    {{- include "javaapi.commonLabels" . | nindent 4 }}
-spec:
-  clusterIP: None
-  selector:
-    {{- include "javaapi.selectorLabels" . | nindent 4 }}
-    app: postgres
-  ports:
-    - name: postgres
-      port: 5432
-      targetPort: 5432
-{{- end }}
+        - name: initdb
+          configMap:
+            name: postgres-initdb
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "javaapi.commonLabels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.global.storageClass }}
+        storageClassName: {{ .Values.global.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storageSize }}

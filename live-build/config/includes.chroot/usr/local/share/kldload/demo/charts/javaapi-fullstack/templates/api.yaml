@@ -1,0 +1,92 @@
+# ---------------------------------------------------------------------------
+# api.yaml — the two application tracks, blue and green.
+#
+# Both are deployed at all times. They are identical but for their version
+# string and theme colour, and they share one database. Which one the public
+# VIP reaches is decided entirely by the selector on the Service in
+# service.yaml, so a cutover moves no pods, pulls no images and restarts
+# nothing — it changes one label and takes effect on the next connection.
+#
+# WHY both run permanently: a blue/green that has to deploy the new track at
+# cutover time is really a slow rolling update wearing a costume. Keeping the
+# idle track warm and healthy is the entire reason the switch is instant and
+# the rollback is equally instant.
+# ---------------------------------------------------------------------------
+{{- range $track := list "blue" "green" }}
+{{- $cfg := index $.Values.app $track }}
+{{- if $cfg.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-{{ $track }}
+  namespace: {{ $.Values.global.namespace }}
+  labels:
+    {{- include "javaapi.commonLabels" $ | nindent 4 }}
+    app: app
+    track: {{ $track }}
+    kldload.io/component: app
+spec:
+  replicas: {{ $.Values.app.replicas }}
+  selector:
+    matchLabels:
+      {{- include "javaapi.selectorLabels" $ | nindent 6 }}
+      app: app
+      track: {{ $track }}
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0     # never shrink a track below full while it may be live
+  template:
+    metadata:
+      labels:
+        {{- include "javaapi.commonLabels" $ | nindent 8 }}
+        app: app
+        track: {{ $track }}
+        kldload.io/component: app
+    spec:
+      # Spread each track across nodes so losing one node cannot take a whole
+      # track down — which would make a cutover to it fail at the worst moment.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: app
+              track: {{ $track }}
+      containers:
+        - name: app
+          image: "{{ $.Values.app.image.repository }}:{{ $cfg.tag }}"
+          imagePullPolicy: {{ $.Values.app.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: APP_TRACK
+              value: {{ $track | quote }}
+            - name: APP_VERSION
+              value: {{ $cfg.version | quote }}
+            {{- include "javaapi.dbEnv" $ | nindent 12 }}
+            {{- include "javaapi.identityEnv" $ | nindent 12 }}
+          resources: {{- toYaml $.Values.app.resources | nindent 12 }}
+          # Readiness runs a real query; liveness deliberately does not. If the
+          # database blips, the track should stop taking traffic — not be killed
+          # and restarted, which turns one outage into two.
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 4
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+{{- end }}
+{{- end }}

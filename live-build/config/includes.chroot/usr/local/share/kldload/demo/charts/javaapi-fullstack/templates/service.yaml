@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# service.yaml — the public VIP and the two per-track preview addresses.
+#
+# `shop` is the cutover switch. Its selector carries track: {{ .Values.activeTrack }},
+# so changing that one value and running `helm upgrade` moves all public
+# traffic between tracks. kube-bluegreen does exactly this and nothing more.
+#
+# `shop-blue` and `shop-green` are stable per-track addresses that never move.
+# They exist so the idle track can be smoke-tested with real traffic BEFORE it
+# is promoted — verifying green through the public VIP would mean cutting over
+# first and finding out afterwards, which is the failure mode blue/green is
+# supposed to eliminate.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "javaapi.commonLabels" . | nindent 4 }}
+    app: app
+  annotations:
+    kldload.io/active-track: {{ .Values.activeTrack | quote }}
+spec:
+  # ClusterIP, not LoadBalancer: the public address lives on the `web` proxy so
+  # that it survives a cutover untouched. This Service is the switch, one hop in.
+  type: ClusterIP
+  selector:
+    {{- include "javaapi.selectorLabels" . | nindent 4 }}
+    app: app
+    track: {{ .Values.activeTrack }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: 8080
+{{- range $track := list "blue" "green" }}
+{{- if (index $.Values.app $track).enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop-{{ $track }}
+  namespace: {{ $.Values.global.namespace }}
+  labels:
+    {{- include "javaapi.commonLabels" $ | nindent 4 }}
+    app: app
+    track: {{ $track }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "javaapi.selectorLabels" $ | nindent 4 }}
+    app: app
+    track: {{ $track }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+{{- end }}
+{{- end }}
