@@ -760,6 +760,38 @@ chpasswd:
   expire: false
   list: |
     root:kldload
+    admin:kldload
+# ACCOUNTS. Until 2026-08-22 klab created none at all: every golden carried
+# root (password set here) plus whatever user its cloud image happened to ship
+# — rocky, cloud-user, fedora, debian, ubuntu — with the locked password those
+# images always ship. Two consequences, both measured on .120's clones:
+#   * the human username differed per distro, so any playbook or runbook had to
+#     special-case five names across the matrix;
+#   * the ONLY unlocked account was root, and GDM refuses root, so a desktop
+#     golden booted to a login screen nobody could get past.
+#
+# The 'default' entry MUST stay first: without it cloud-init REPLACES the
+# distro user rather than adding to it, which breaks the image's own
+# assumptions about who owns /home and who it writes its keys to.
+users:
+  - default
+  # admin — the human account, same name on every distro in the matrix, and the
+  # same name the installed system uses. This is the one that logs into GDM.
+  - name: admin
+    lock_passwd: false
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ${pubkey}
+  # ansible — automation only. No password at all (key-only by construction),
+  # so it cannot be used as an interactive login even if a password leaks.
+  # Kept separate from admin so automation survives locking down human logins.
+  - name: ansible
+    lock_passwd: true
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ${pubkey}
 bootcmd:
   # Open the door BEFORE sshd gets a chance to sit behind a closed firewall
   - [ sh, -c, "systemctl stop firewalld 2>/dev/null; systemctl disable firewalld 2>/dev/null; systemctl mask firewalld 2>/dev/null; true" ]
@@ -773,6 +805,10 @@ ${runcmd_extra}
 ssh_authorized_keys:
   - ${pubkey}
 runcmd:
+  # Group membership after the users exist. Whichever of wheel/sudo is present
+  # wins; the other is a no-op. Not in the users: block above because a
+  # missing group name aborts cloud-init's entire user module.
+  - [ sh, -c, "for u in admin ansible; do usermod -aG wheel $u 2>/dev/null || usermod -aG sudo $u 2>/dev/null || true; done" ]
   # Belt-and-suspenders — if bootcmd failed somehow, fire these late too.
   - [ sh, -c, "systemctl stop firewalld 2>/dev/null; systemctl mask firewalld 2>/dev/null; true" ]
   - [ sh, -c, "systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true" ]
