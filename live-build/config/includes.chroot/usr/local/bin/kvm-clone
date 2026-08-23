@@ -167,6 +167,24 @@ if [[ -n "$_mkiso" ]]; then
         echo "manage_etc_hosts: true"
         echo "preserve_hostname: false"
         [[ -n "$_ssh_pub" ]] && printf 'ssh_authorized_keys:\n  - %s\n' "$_ssh_pub"
+        # ROOT's key, explicitly. The line above is cloud-init's top-level form,
+        # which installs the key for the DEFAULT user only — root keeps whatever
+        # the distro image shipped, and Debian/Ubuntu cloud images ship a forced
+        # command that answers every root login with
+        #   Please login as the user "debian" rather than the user "root".
+        # Everything here connects as root: klab drives goldens that way,
+        # kldload-enroll hardcodes root@, and so does the image test harness.
+        # Measured on .120 (2026-08-23): four fresh clones, root refused on all
+        # four, enrollment dead in the water.
+        # write_files rather than a runcmd shell line: the key contains spaces
+        # and +/= and would need quoting through two layers to survive.
+        if [[ -n "$_ssh_pub" ]]; then
+            printf 'write_files:\n'
+            printf '  - path: /root/.ssh/authorized_keys\n'
+            printf '    permissions: %s\n' "'0600'"
+            printf '    owner: root:root\n'
+            printf '    content: %s\n' "$_ssh_pub"
+        fi
         # Regenerate the machine-id: cloned guests otherwise share the golden's,
         # and a duplicate machine-id makes DHCP hand out the same lease twice
         # and systemd-journald collide on the same identifier.
