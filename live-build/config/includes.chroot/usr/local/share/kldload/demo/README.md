@@ -1,125 +1,97 @@
-# kldload demo workload — the 1.0 release "Christmas tree"
+# kldload full-stack demo
 
-Full-stack Java API + PostgreSQL + nginx (powered by Spring PetClinic
-Microservices upstream) + k6 loadgen, deployed via Argo CD. Designed
-to light up every Grafana dashboard on a kldload install and to
-demonstrate sub-60-second ZFS-rollback recovery.
+A storefront application with a real schema, real seeded data, a real write
+path, and blue/green deployment built in. It exists to show a complete
+Kubernetes workload standing up from nothing in seconds, and to make a
+blue/green cutover something you watch happen rather than something you read
+about.
+
+## What it deploys
+
+| Tier | What | Why it is here |
+|---|---|---|
+| `postgres` | StatefulSet on a PVC, schema seeded at initdb | The data the cutover has to preserve |
+| `app-blue` / `app-green` | Two independently versioned copies of the app | Both stay warm, so promotion and rollback are instant |
+| `shop` | ClusterIP whose selector names the live track | **This selector is the cutover switch** |
+| `shop-blue` / `shop-green` | Per-track private addresses | Lets the idle track be tested with real traffic before promotion |
+| `web` | nginx reverse proxy, holds the public VIP | Security headers, rate limiting, and an address that never moves |
+| `loadgen` | k6, continuous traffic | Measures the "no dropped requests" claim instead of asserting it |
+
+The application image is **built by this project** (`kube-demo-image`) and
+imported straight into containerd on every node. Nothing pulls a third-party
+application image, so the demo works with the network unplugged.
+
+> **HISTORY.** This chart used to deploy seven Spring PetClinic services. Those
+> image tags were removed from Docker Hub, so every fresh install hit
+> ImagePullBackOff, and build #46 cut the chart back to Postgres plus a
+> contentless nginx that returned 404 on every path. Depending on someone
+> else's tag for the centrepiece of an offline-first product was the real
+> defect; owning the image is the fix.
+
+## Getting to it from a browser
+
+MetalLB assigns the VIP from the cluster's own pool, which on a single-node box
+is reachable **on the host and nowhere else**. Worse, the default libvirt subnet
+(`192.168.122.0/24`) is usually identical on a workstation, so a laptop trying
+that address quietly reaches its own `virbr0`.
+
+```sh
+kube-demo-publish              # publish on the host's LAN address, default :8088
+kube-demo-publish --status
+kube-demo-publish --off
+```
+
+It prints the URL, and verifies it by fetching the page over that address
+before claiming success.
+
+## Blue/green
+
+```sh
+kube-bluegreen status          # which track is live, and both tracks' health
+kube-bluegreen preview green   # real traffic to green, privately; production untouched
+kube-bluegreen cutover green   # health-gated, smoke-tested, then flips the selector
+kube-bluegreen rollback        # straight back
+```
+
+A cutover is **refused** unless every replica of the target is Ready and its
+`/readyz` answers over the real network path. After the flip it verifies the
+*endpoints*, not just the manifest: the spec says what was asked for, endpoints
+say what traffic actually reaches.
+
+Measured on a 6-node cluster: **~520ms**, zero failed requests at 10 req/s.
 
 ## CLI — kube-demo subcommands
 
-This demo is wired into the existing `kube-demo` tool (no new CLI).
-
 | Subcommand | What it does |
 |---|---|
-| `kube-demo javaapi` | Apply the Argo Application — Argo syncs the helm chart, ~5 min to fully Ready |
-| `kube-demo javaapi_status` | Argo sync state + pod readiness + snapshot inventory + replication lag |
-| `kube-demo javaapi_disaster [app\|fs\|operator]` | Break the workload: drop tables / corrupt fs / delete PVC |
-| `kube-demo javaapi_recover` | ZFS rollback to the latest autosnap + restart Postgres + Argo re-sync. Measured TTR. |
-| `kube-demo javaapi_verify` | Sanity SQL queries to confirm data is intact after a recover |
-| `kube-demo javaapi_destroy` | Delete the Argo Application (cascade-deletes the demo namespace) |
+| `kube-demo javaapi` | helm install the local chart (no Argo round-trip, no clone) |
+| `kube-demo javaapi_status` | Pod readiness + snapshot inventory + replication lag |
+| `kube-demo javaapi_disaster [app\|fs\|operator]` | Break it: drop tables / corrupt fs / delete PVC |
+| `kube-demo javaapi_recover` | ZFS rollback + restart. Measured TTR. |
+| `kube-demo javaapi_verify` | Sanity SQL confirming data is intact |
+| `kube-demo javaapi_destroy` | Delete the release and namespace |
 
-Interactive menu: run `kube-demo` and pick **25-29** under the
-"Full-stack demo (1.0 headline)" section.
+## Endpoints
 
-## Architecture
+| Path | Returns |
+|---|---|
+| `/` | The storefront page; theme and version come from the serving track |
+| `/api/products` | Catalogue rows, with live stock |
+| `/api/orders` | Recent orders via the `order_totals` view |
+| `/api/customers` | Customer list |
+| `/api/stats` | Totals, plus the pod and node that answered |
+| `/api/version` | Track, version, and the schema version from the database |
+| `POST /api/orders` | Places an order; decrements stock in the same transaction |
+| `/healthz` `/readyz` | Liveness (no DB) and readiness (a real query) |
+| `/metrics` | Prometheus counters, labelled by track |
 
-| Component | Where | Image |
-|---|---|---|
-| Postgres 16 | StatefulSet, ZFS-tuned PVC `pvc-postgres-data` | `bitnami/postgresql:16.4.0-debian-12-r0` |
-| Spring Cloud Config | `config-server` deployment | `springcommunity/spring-petclinic-config-server:3.1.0` |
-| Eureka | `discovery-server` deployment | `springcommunity/spring-petclinic-discovery-server:3.1.0` |
-| customers/vets/visits domain services | 3 deployments, each → Postgres | `springcommunity/spring-petclinic-*-service:3.1.0` |
-| Spring Cloud Gateway | `api-gateway` (2 replicas) | `springcommunity/spring-petclinic-api-gateway:3.1.0` |
-| Spring Boot Admin | `admin-server` | `springcommunity/spring-petclinic-admin-server:3.1.0` |
-| nginx front | 2 replicas, MetalLB VIP `10.100.10.30` | `nginx:1.27-alpine` |
-| k6 loadgen | CronJob, every minute, 50 RPS for 30s | `grafana/k6:0.52.0` |
+Every response carries `X-Kldload-Track` and `X-Kldload-Pod`, which is what
+makes a cutover observable from the client side.
 
-8 deployments + 1 StatefulSet + 1 CronJob — 11 resources total. Argo
-manages them all via one Application CRD.
+## A caveat worth knowing
 
-## Files in this directory
-
-```
-argo/javaapi-fullstack-app.yaml          ← Argo Application CRD (the "deploy" trigger)
-charts/javaapi-fullstack/Chart.yaml      ← Helm chart metadata
-charts/javaapi-fullstack/values.yaml     ← every tunable, every image tag pinned
-charts/javaapi-fullstack/templates/      ← _helpers.tpl + postgres / spring-services / ingress / loadgen
-```
-
-Host-side:
-```
-/etc/sanoid/sanoid.d/javaapi.conf        ← snapshot policy (every 5 min)
-/usr/local/share/kldload/argocd-values.yaml ← Argo CD helm values for the autodeploy install
-/usr/local/bin/kube-demo                   ← extended with 6 javaapi_* functions
-```
-
-## ZFS dataset — the rollback story
-
-Postgres PVC `pvc-postgres-data` maps to ZFS dataset
-`rpool/k8s/pvc-postgres-data` via the kldload default storage class.
-
-Sanoid policy keeps **90+ snapshots online per dataset**:
-- 12 × 5-min frequent (1 hour of fine-grained rollback)
-- 48 × hourly (last 2 days)
-- 30 × daily (last month)
-
-Each snapshot costs only the ZFS-COW delta — typically ~50 MB/hr on
-the steady-state load, ~1.5 GB total for the 48-hour rolling window.
-
-When `kube-demo javaapi_recover` runs:
-1. Find newest `autosnap_*` on `rpool/k8s/pvc-postgres-data`
-2. If PVC was deleted (operator disaster), pause Argo auto-sync first
-3. `zfs rollback -r <snap>` — sub-second on a quiet pool
-4. Force-restart `postgres-0` to re-mount the rolled-back dataset
-5. Re-enable Argo auto-sync — Argo confirms everything matches truth
-6. Print TTR
-
-End-to-end TTR target: **<60 seconds** (the 1.0 acceptance gate).
-Most of the time is dominated by Postgres restart, NOT the rollback
-itself.
-
-## Webui
-
-K8s tab → Overview sub-view → "+ Deploy & lifecycle" panel:
-
-- **🎄 Full-stack demo** (primary button) — fires `kube-demo javaapi`
-- **Demo mode** row (always visible):
-  - 💥 Disaster — fires `kube-demo javaapi_disaster` (sub-prompts in CLI)
-  - ↻ Recover — fires `kube-demo javaapi_recover`
-  - 📊 Status, ✓ Verify data, ✕ Destroy demo
-
-Every button has a `title` mouseover with the underlying CLI command
-so the operator can run the same thing from a shell.
-
-## Argo CD
-
-Argo CD itself is installed by `kldload-autodeploy` after Cilium /
-Tetragon (helm chart from `/root/darksite/helm-charts/argo-cd.tgz` if
-vendored, online fallback otherwise). Server runs at
-`https://10.100.10.31` (MetalLB VIP), admin password at
-`/var/lib/kldload/argocd-admin-password`.
-
-The Argo Application CRD points at the GitHub repo for the chart
-path. For offline air-gap installs, repoint via:
-
-```bash
-kubectl -n argocd edit application javaapi-fullstack
-# change spec.source.repoURL to a local git/OCI source
-```
-
-## Acceptance gate
-
-`tests/smoke-javaapi-rollback.sh` is the 1.0 release gate:
-
-1. Deploy via `kube-demo javaapi`
-2. Verify 8 pods Ready + ingress VIP serves /api/customer
-3. Capture baseline `owners.count()`
-4. Trigger disaster (default: `app` — drop tables)
-5. Confirm /api/customer now errors
-6. Run `kube-demo javaapi_recover` — measure TTR
-7. Assert TTR < 60 seconds
-8. Verify owners table back + counts match baseline
-9. Cleanup (unless `KEEP_DEMO=1`)
-
-Pass on at least 3 distros (kvm + server + desktop profiles) → 1.0
-ships.
+`javaapi_disaster` / `javaapi_recover` roll back a ZFS dataset **on the host**.
+If the cluster's nodes are VMs, the Postgres PV lives inside a guest where the
+host cannot snapshot it, and the recovery path does not apply. The acceptance
+test checks for the dataset and **skips the destructive phase** rather than
+breaking a demo it cannot restore.

@@ -284,7 +284,7 @@ menu() {
     echo -e "  ${G}24${N}  Kernel datapath trace — live packet through eBPF"
     echo ""
     echo -e "  ${C}── Full-stack demo (1.0 headline) ──────────────────────${N}"
-    echo -e "  ${G}25${N}  ${W}Deploy PetClinic full-stack${N}     (Postgres + 7 Spring services + nginx + k6 via Argo)"
+    echo -e "  ${G}25${N}  ${W}Deploy full-stack demo${N}          (Postgres + blue/green app + nginx proxy + k6)"
     echo -e "  ${Y}26${N}  Disaster mode                  (drop tables / corrupt fs / delete PVC)"
     echo -e "  ${G}27${N}  Recover (ZFS rollback)          ${D}— headline 1.0 capability${N}"
     echo -e "  ${G}28${N}  Status (Argo + snapshots + replication)"
@@ -3420,17 +3420,30 @@ done
 [[ -z "$_javaapi_app_yaml" ]] && _javaapi_app_yaml='/usr/local/share/kldload/demo/argo/javaapi-fullstack-app.yaml' # for the not-found error path
 _javaapi_ns='demo'
 _javaapi_pvc_dataset='rpool/k8s/pvc-postgres-data'
-_javaapi_vip='10.100.10.30'
+# No default VIP. MetalLB decides the address, and printing a guess is how
+# operators were told to curl 10.100.10.30 while the real VIP was 192.168.122.201.
+_javaapi_vip=''
+
+# Runs psql inside the demo's postgres pod as the application user.
+# Args: $1 = psql flag (-c or -tAc), $2 = SQL. Prints psql's stdout.
+# The password comes from the Secret the chart created, never a literal here.
+_javaapi_psql() {
+    local _pw
+    _pw=$(_kctl -n "$_javaapi_ns" get secret postgres-credentials \
+        -o jsonpath='{.data.password}' 2>/dev/null | base64 -d)
+    _kctl -n "$_javaapi_ns" exec postgres-0 -- env PGPASSWORD="$_pw" \
+        psql -U shop -d shop "$1" "$2"
+}
 
 demo_javaapi() {
     header
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
-    echo -e "${W}  Full-stack PetClinic — the kldload 1.0 demo workload${N}"
+    echo -e "${W}  Full-stack demo — storefront, database, blue/green${N}"
     echo -e "${C}══════════════════════════════════════════════════════════════${N}"
     echo
-    echo -e "${D}  Deploys: Postgres + 7 Spring services + nginx + k6 loadgen${N}"
-    echo -e "${D}  via direct helm install of the local chart.${N}"
-    echo -e "${D}  Target VIP: ${C}http://${_javaapi_vip}/${N}"
+    echo -e "${D}  Deploys: Postgres (seeded schema) + the app on two tracks${N}"
+    echo -e "${D}  (blue and green) + an nginx reverse proxy + k6 load.${N}"
+    echo -e "${D}  The app image is built locally, so nothing is pulled.${N}"
     echo
 
     # Locate the helm chart (mirrors the path-resolution pattern used by
@@ -3461,15 +3474,21 @@ demo_javaapi() {
     # a chart that's already on disk. Direct helm install is faster, more
     # reliable, and doesn't require ArgoCD to be working. Build #46 fix.
     echo -e "${G}→${N} ${W}helm install javaapi-fullstack ${_chart}${N}"
-    local _t0 _t1
+    local _t0 _t1 _dns
+    # nginx's resolver takes an IP. Detect it rather than assume 10.96.0.10,
+    # which is only right for the default service CIDR.
+    _dns=$(_kctl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+    [[ -n "$_dns" ]] || _dns='10.96.0.10'
     _t0=$(date +%s)
     if helm status javaapi-fullstack -n "${_javaapi_ns}" >/dev/null 2>&1; then
         helm upgrade javaapi-fullstack "$_chart" \
             -n "${_javaapi_ns}" --create-namespace \
+            --set "web.dnsResolver=${_dns}" \
             --wait --timeout 5m 2>&1 | tail -8
     else
         helm install javaapi-fullstack "$_chart" \
             -n "${_javaapi_ns}" --create-namespace \
+            --set "web.dnsResolver=${_dns}" \
             --wait --timeout 5m 2>&1 | tail -8
     fi
     _t1=$(date +%s)
@@ -3481,13 +3500,23 @@ demo_javaapi() {
     # discovered live; falls back to the legacy hardcoded VIP if the
     # service hasn't gotten an EXTERNAL-IP yet.
     local _vip
-    _vip=$(_kctl -n "${_javaapi_ns}" get svc ingress \
+    _vip=$(_kctl -n "${_javaapi_ns}" get svc web \
         -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-    [[ -z "$_vip" ]] && _vip="${_javaapi_vip}"
+    if [[ -z "$_vip" ]]; then
+        # Say so plainly. A guessed address sends people chasing a network
+        # fault that does not exist.
+        echo -e "${Y}  MetalLB has not assigned a VIP yet — check:${N}"
+        echo -e "  ${W}kubectl -n ${_javaapi_ns} get svc web${N}"
+        pause
+        return 0
+    fi
 
     echo -e "${C}Try it:${N}"
-    echo -e "  ${W}curl http://${_vip}/${N}                       (homepage)"
-    echo -e "  ${W}curl http://${_vip}/api/customer${N}           (REST endpoint)"
+    echo -e "  ${W}http://${_vip}/${N}                            (open it in a browser)"
+    echo -e "  ${W}curl http://${_vip}/api/products${N}           (live rows from Postgres)"
+    echo -e "  ${W}curl http://${_vip}/api/stats${N}              (totals + which pod served)"
+    echo -e "  ${W}kube-bluegreen status${N}                  (which track is live)"
+    echo -e "  ${W}kube-bluegreen cutover green${N}           (promote green, health-gated)"
     echo -e "  ${W}kube-demo javaapi_status${N}              (sync + snapshots + replication)"
     echo -e "  ${W}kube-demo javaapi_disaster${N}            (drop a table — watch it break)"
     echo -e "  ${W}kube-demo javaapi_recover${N}             (zfs rollback — watch it recover)"
@@ -3539,9 +3568,7 @@ demo_javaapi_disaster() {
     case "$_mode" in
     app)
         echo -e "${Y}→${N} dropping customers table via psql"
-        _kctl -n "$_javaapi_ns" exec postgres-0 -- env PGPASSWORD=petclinic-demo-2026 \
-            psql -U petclinic -d petclinic \
-            -c "DROP TABLE IF EXISTS owners CASCADE;" 2>&1 | tail -3
+        _javaapi_psql -c "DROP TABLE IF EXISTS shop.orders CASCADE;" 2>&1 | tail -3
         ;;
     fs)
         echo -e "${Y}→${N} corrupting random bytes inside /bitnami/postgresql"
@@ -3614,15 +3641,13 @@ demo_javaapi_recover() {
 demo_javaapi_verify() {
     echo -e "${C}── Verifying PetClinic data integrity after recovery ───${N}"
     local _rows
-    _rows=$(_kctl -n "$_javaapi_ns" exec postgres-0 -- env PGPASSWORD=petclinic-demo-2026 \
-        psql -U petclinic -d petclinic -tAc "SELECT count(*) FROM owners;" 2>/dev/null | tr -d '[:space:]')
+    _rows=$(_javaapi_psql -tAc "SELECT count(*) FROM shop.orders;" 2>/dev/null | tr -d '[:space:]')
     if [[ -n "$_rows" && "$_rows" -gt 0 ]]; then
-        echo -e "${G}  ✓ owners table has $_rows rows — data intact${N}"
-        _kctl -n "$_javaapi_ns" exec postgres-0 -- env PGPASSWORD=petclinic-demo-2026 \
-            psql -U petclinic -d petclinic -c "SELECT id,first_name,last_name FROM owners LIMIT 3;" 2>/dev/null
+        echo -e "${G}  ✓ orders table has $_rows rows — data intact${N}"
+        _javaapi_psql -c "SELECT order_id,customer,total FROM shop.order_totals LIMIT 3;" 2>/dev/null
         return 0
     else
-        echo -e "${R}  ✗ owners table empty or missing (rows=${_rows:-error})${N}"
+        echo -e "${R}  ✗ orders table empty or missing (rows=${_rows:-error})${N}"
         return 1
     fi
 }
