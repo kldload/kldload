@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# Containerfile — the demo storefront image, built by this project.
+#
+# WHY this exists at all: build #46 had to delete seven services from the demo
+# because springcommunity/spring-petclinic-*:3.1.0 stopped existing on Docker
+# Hub, and every fresh install hit ImagePullBackOff. Depending on somebody
+# else's tag for the centrepiece of an offline-first product was the actual
+# defect. This image is built from the project, exported to a tarball and
+# imported straight into containerd on every node, so the demo cannot be broken
+# by a registry, a rate limit, a rename, or the absence of a network.
+#
+# Base is python:3.12-slim rather than -alpine on purpose: psycopg's binary
+# wheels are manylinux (glibc). On musl, pip falls back to a source build and
+# needs a compiler and libpq headers, which is a slow, fragile way to arrive at
+# the same place.
+#
+# Inputs:  api.py, static/. Outputs: an image serving :8080.
+# ---------------------------------------------------------------------------
+FROM python:3.12-slim
+
+# Pin so a rebuild six months from now produces the same image. psycopg[binary]
+# carries its own libpq, which is why no apt package is needed here at all.
+RUN pip install --no-cache-dir "psycopg[binary,pool]==3.2.3"
+
+WORKDIR /app
+COPY api.py /app/api.py
+COPY static /app/static
+
+# Non-root: the demo is the code people copy, so it should model the default
+# they ought to keep. 65532 matches the distroless "nonroot" uid convention.
+RUN useradd --uid 65532 --no-create-home --shell /usr/sbin/nologin nonroot
+USER 65532
+
+EXPOSE 8080
+ENV PYTHONUNBUFFERED=1
+HEALTHCHECK --interval=10s --timeout=3s --start-period=20s \
+    CMD python3 -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/healthz')"
+ENTRYPOINT ["python3", "/app/api.py"]

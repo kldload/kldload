@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# kube-demo-image — build the demo storefront image and put it on every node.
+#
+# What it does, in order:
+#   1. Syntax-checks the app (python + JS) before building anything.
+#   2. Builds localhost/kldload-demo:<tag> with podman from the demo app dir.
+#   3. Exports it to a single OCI tarball.
+#   4. Imports that tarball into containerd on EVERY cluster node, in parallel.
+#   5. Verifies the image is actually present on each node afterwards, and
+#      fails naming the nodes that are missing it.
+#
+# Why it exists: the demo used to pull its application tier from Docker Hub.
+# When those tags were removed upstream every fresh install broke, and the demo
+# had to be gutted to make it start again. An offline-first product cannot have
+# its flagship demo depend on a registry it does not control. Building locally
+# and importing directly into containerd means the demo works with the network
+# unplugged, which is the claim the product makes everywhere else.
+#
+# Inputs:  $1 = image tag (default: 1.0.0)
+#          DEMO_DIR (default /usr/local/share/kldload/demo)
+#          KUBECONFIG (default /root/.kube/config)
+# Outputs: localhost/kldload-demo:<tag> present in containerd on every node.
+#          Exit 0 only if every node has it.
+#
+# Notes:
+#   - `ctr images import` is used, not `crictl`, because the image has to land
+#     in the k8s.io namespace for the kubelet to find it. Importing into the
+#     default namespace produces an image that exists and is still unusable,
+#     which is a genuinely baffling failure to debug.
+#   - The chart pairs this with imagePullPolicy: Never. That is deliberate: it
+#     turns "the image is missing" into an immediate, obvious error instead of
+#     a slow pull from a registry that may not be reachable.
+# ---------------------------------------------------------------------------
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+TAG="${1:-1.0.0}"
+DEMO_DIR="${DEMO_DIR:-/usr/local/share/kldload/demo}"
+APP_DIR="$DEMO_DIR/app"
+IMAGE="localhost/kldload-demo:${TAG}"
+export KUBECONFIG="${KUBECONFIG:-/root/.kube/config}"
+
+_log() { printf '\033[1;32m[demo-image]\033[0m %s\n' "$*"; }
+_die() {
+    printf '\033[1;31m[demo-image] FATAL:\033[0m %s\n' "$*" >&2
+    exit 1
+}
+
+[[ $EUID -eq 0 ]] || exec sudo -E "$0" "$@"
+[[ -d "$APP_DIR" ]] || _die "app dir not found: $APP_DIR"
+command -v podman >/dev/null || _die "podman is required to build the demo image"
+
+# ── Syntax gates ────────────────────────────────────────────────────────────
+# Cheap, and they run before a multi-minute build rather than after it. The JS
+# check runs in a container because no host in this matrix is guaranteed a JS
+# engine, and a syntax error in app.js produces a blank page with a clean
+# HTTP 200 — the worst kind of failure to debug from the outside.
+python3 -m py_compile "$APP_DIR/api.py" || _die "api.py does not compile"
+if podman image exists docker.io/library/node:22-alpine 2>/dev/null; then
+    podman run --rm -v "$APP_DIR/static:/s:ro,Z" docker.io/library/node:22-alpine \
+        node --check /s/app.js || _die "app.js has a syntax error"
+else
+    _log "node image absent — JS syntax gate SKIPPED (not a pass; run with network once)"
+fi
+
+# ── Build ───────────────────────────────────────────────────────────────────
+_log "building $IMAGE"
+podman build --quiet -t "$IMAGE" -f "$APP_DIR/Containerfile" "$APP_DIR" >/dev/null ||
+    _die "podman build failed"
+
+# Import the app INSIDE the finished image. py_compile only parses; it cannot
+# catch an error raised while a class body executes. A bad base-class pair
+# (ThreadingMixIn alongside ThreadingHTTPServer, which already includes it)
+# compiles perfectly and then CrashLoops every replica on startup -- which is
+# precisely how it was found, in the cluster, instead of here.
+_log "import-testing the built image"
+podman run --rm --entrypoint python3 "$IMAGE" -c \
+    'import sys; sys.path.insert(0, "/app"); import api; print("import ok")' >/dev/null ||
+    _die "the built image cannot import api.py — it would CrashLoopBackOff on every node"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+TAR="$TMP/kldload-demo-${TAG}.tar"
+_log "exporting to tarball"
+podman save --format oci-archive -o "$TAR" "$IMAGE" || _die "podman save failed"
+_log "tarball is $(du -h "$TAR" | cut -f1)"
+
+# ── Distribute ──────────────────────────────────────────────────────────────
+mapfile -t NODES < <(kubectl get nodes -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}')
+[[ ${#NODES[@]} -gt 0 ]] || _die "no cluster nodes found — is the cluster up?"
+_log "distributing to ${#NODES[@]} node(s)"
+
+SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    -o BatchMode=yes -o ConnectTimeout=10)
+
+_push_one() {
+    local ip="$1"
+    scp -q "${SSH_OPTS[@]}" "$TAR" "root@${ip}:/tmp/kldload-demo.tar" || return 1
+    # -n k8s.io: the kubelet only sees images in that namespace.
+    ssh "${SSH_OPTS[@]}" "root@${ip}" \
+        "ctr -n k8s.io images import --no-unpack=false /tmp/kldload-demo.tar >/dev/null && \
+         rm -f /tmp/kldload-demo.tar" || return 1
+}
+
+pids=()
+for ip in "${NODES[@]}"; do
+    _push_one "$ip" &
+    pids+=("$!")
+done
+for p in "${pids[@]}"; do wait "$p" || true; done
+
+# ── Verify the OUTCOME on every node ────────────────────────────────────────
+# The import above is deliberately not trusted: a background job's exit code
+# tells you the ssh ran, not that the image landed. Ask each node what it has.
+missing=()
+for ip in "${NODES[@]}"; do
+    if ssh "${SSH_OPTS[@]}" "root@${ip}" \
+        "ctr -n k8s.io images ls -q | grep -qx '$IMAGE'" 2>/dev/null; then
+        _log "  ok   $ip"
+    else
+        missing+=("$ip")
+        printf '\033[1;31m  MISSING %s\033[0m\n' "$ip" >&2
+    fi
+done
+
+if ((${#missing[@]})); then
+    _die "image absent on ${#missing[@]} node(s): ${missing[*]} — the demo would ImagePullBackOff there"
+fi
+_log "$IMAGE present on all ${#NODES[@]} nodes"
