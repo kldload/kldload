@@ -681,12 +681,19 @@ fi
 # HISTORY: the same trap cost vmxplore a graphical appliance (wf-desk,
 # 2026-08-09: installed the generic kernel, rebooted, came up on the cloud one).
 if [ -n "$_kver" ]; then
+    # swallow: the name differs by distro (update-grub on Debian, update-grub2
+    # on some others) and one of the two is always absent. Whether it worked is
+    # not read from here anyway — the menu ids are grepped out of grub.cfg next,
+    # and an empty result is handled explicitly below.
     update-grub >/dev/null 2>&1 || update-grub2 >/dev/null 2>&1 || true
     _sub="$(grep -o 'gnulinux-advanced-[a-f0-9-]*' /boot/grub/grub.cfg 2>/dev/null | head -1)"
     _ent="$(grep -o "gnulinux-${_kver}-advanced-[a-f0-9-]*" /boot/grub/grub.cfg 2>/dev/null | head -1)"
     if [ -n "$_sub" ] && [ -n "$_ent" ]; then
         sed -i '/^GRUB_DEFAULT=/d' /etc/default/grub
         echo "GRUB_DEFAULT=\"${_sub}>${_ent}\"" >>/etc/default/grub
+        # swallow: same either/or as above. The OUTCOME is asserted on the next
+        # line by grepping grub.cfg for the entry, which is the only thing that
+        # actually proves the default took.
         update-grub >/dev/null 2>&1 || update-grub2 >/dev/null 2>&1 || true
         # VERIFY: grub.cfg must now name the generic entry as its default.
         if grep -q "set default=.*${_ent}" /boot/grub/grub.cfg 2>/dev/null; then
