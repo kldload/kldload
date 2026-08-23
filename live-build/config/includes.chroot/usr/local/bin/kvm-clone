@@ -96,6 +96,16 @@ virsh dumpxml "${SOURCE}" |
     sed "s|${SRC_ZVOL}|${DST_ZVOL}|g" |
     sed "s|${SRC_DEV}|${DST_DEV}|g" |
     sed "s|${SOURCE}_VARS.fd|${DEST}_VARS.fd|g" |
+    # Per-VM log paths. klab points <serial> and <console> at
+    # /var/log/klab/<vm>-console.log, and a straight XML copy leaves every
+    # clone pointing at the GOLDEN's file. libvirt opens it exclusively, so
+    # the first clone to boot takes it and every later one dies with
+    #   Cannot open log file: ... Device or resource busy
+    # which caps a golden at exactly one running clone. Measured on .120
+    # (2026-08-23): dtest-a started, dtest-b refused, same log path.
+    # Rewrite the whole prefix rather than just -console.log, so any other
+    # per-VM log klab adds later is carried along too.
+    sed "s|/var/log/klab/${SOURCE}-|/var/log/klab/${DEST}-|g" |
     sed '/<uuid>/d' |
     sed '/<mac address/d' |
     virsh define /dev/stdin || {
