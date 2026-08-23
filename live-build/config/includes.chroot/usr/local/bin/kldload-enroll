@@ -252,6 +252,40 @@ if ! _ssh 'command -v kube-network >/dev/null 2>&1'; then
     exit 2
 fi
 
+# ── Identity: give the guest its own name ───────────────────────────────────
+# A golden is sealed with an EMPTY /etc/hostname so it carries no identity into
+# its clones, which means every clone boots as localhost.localdomain until
+# something tells it otherwise. Measured on .120 (2026-08-22): eight running
+# desktop clones, all eight named localhost.localdomain — indistinguishable in
+# their own logs, in journald, in a DHCP lease, and in an Ansible play's output.
+#
+# The guest cannot work this out for itself: nothing inside a libvirt domain
+# reports the domain's name. The hypervisor is the only party that knows it,
+# and this tool is already talking to both, so it is the right place to say so.
+#
+# Skipped when the guest already has a real name: an operator who renamed a VM
+# on purpose should not have it reverted by a re-run.
+_cur_hn="$(_ssh 'hostname' 2>/dev/null | tr -d '[:space:]')"
+case "$_cur_hn" in
+"" | localhost | localhost.localdomain)
+    if _ssh "hostnamectl set-hostname '${VM}' 2>/dev/null || (echo '${VM}' >/etc/hostname && hostname '${VM}')"; then
+        # Verify the OUTCOME: hostnamectl exits 0 on images where systemd-hostnamed
+        # is not running, having changed nothing.
+        _new_hn="$(_ssh 'hostname' 2>/dev/null | tr -d '[:space:]')"
+        if [[ "$_new_hn" == "$VM" ]]; then
+            log "${VM}: hostname set (was ${_cur_hn:-empty})"
+        else
+            warn "${VM}: hostname still '${_new_hn:-empty}' after being set — check systemd-hostnamed"
+        fi
+    else
+        warn "${VM}: could not set hostname"
+    fi
+    ;;
+*)
+    log "${VM}: keeping existing hostname '${_cur_hn}'"
+    ;;
+esac
+
 # Allocate an id. Reuse the guest's own if it has one — re-running must not
 # renumber a VM out from under its existing peers.
 node_id="$(_ssh 'cat /etc/wireguard/.node-id 2>/dev/null' | tr -cd '0-9')"
