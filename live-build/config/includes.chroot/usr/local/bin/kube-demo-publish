@@ -118,10 +118,14 @@ status)
         printf '%sactive%s   listening on %s\n' "$G" "$N" \
             "$(systemctl show -p Listen --value "${UNIT}.socket" 2>/dev/null)" ||
         printf '%sinactive%s\n' "$Y" "$N"
+    # swallow: --status on a host where the forwarder was never installed is
+    # a normal query, not an error; the line above already said "inactive".
     grep -h ExecStart "/etc/systemd/system/${UNIT}.service" 2>/dev/null | sed 's/^/  target: /' || true
     exit 0
     ;;
 off)
+    # swallow: --off is idempotent by design. Units that are already gone are
+    # the expected case on a second run, which is how an operator recovers.
     systemctl disable --now "${UNIT}.socket" "${UNIT}.service" >/dev/null 2>&1 || true
     rm -f "/etc/systemd/system/${UNIT}.socket" "/etc/systemd/system/${UNIT}.service"
     systemctl daemon-reload
@@ -131,6 +135,8 @@ off)
 esac
 
 command -v kubectl >/dev/null || _die "kubectl not found"
+# swallow: no address yet is a normal state, and the emptiness is turned into
+# a clear fatal on the very next line rather than a bare non-zero exit.
 VIP="$(kubectl -n "$NS" get svc web -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
 [[ -n "$VIP" ]] || _die "the demo's web Service has no LoadBalancer IP yet. Deploy it first (kube-demo), then re-run."
 
@@ -184,6 +190,8 @@ systemctl enable --now "${UNIT}.socket" >/dev/null 2>&1 ||
 # question is whether a browser gets the page, so fetch it the way one would.
 code=""
 for _ in $(seq 1 10); do
+    # swallow: the socket may not be accepting yet on the first attempts;
+    # that is what the retry loop is for. A persistent failure is fatal below.
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://${HOST_IP}:${PORT}/" || true)"
     [[ "$code" == "200" ]] && break
     sleep 1

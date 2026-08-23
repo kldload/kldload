@@ -65,6 +65,9 @@ _track_ready() {
 # Count of addresses actually behind a Service. Zero here means traffic is
 # black-holing regardless of what the selector claims.
 _endpoints() {
+    # swallow: grep -c exits 1 when the count is ZERO, which is a real and
+    # important answer here (a Service with no endpoints black-holes traffic).
+    # Without this the function would abort instead of reporting 0.
     kubectl -n "$NS" get endpointslice -l "kubernetes.io/service-name=$1" \
         -o jsonpath='{range .items[*]}{range .endpoints[*]}{.addresses[0]}{"\n"}{end}{end}' 2>/dev/null |
         grep -c . || true
@@ -91,6 +94,8 @@ _status() {
     printf '   %sidle%s   %-6s  replicas %-8s endpoints %s\n' \
         "$Y" "$N" "$idle" "$(_track_ready "$idle")" "$(_endpoints "shop-$idle")"
     local vip
+    # swallow: the LoadBalancer has no address until MetalLB assigns one. That
+    # is a normal transient state, reported below as <pending>, not an error.
     vip=$(kubectl -n "$NS" get svc web -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
     _say ""
     _say "   public VIP:  ${W}http://${vip:-<pending>}/${N}"
@@ -105,6 +110,8 @@ _preview() {
     ready="$(_track_ready "$t")"
     _say "${W}→${N} previewing ${t} (replicas ${ready}) via its private address"
     local out
+    # swallow: an unreachable track is the thing being reported, and the
+    # empty result is checked on the next line.
     out="$(_incluster_get "http://shop-${t}/api/stats" || true)"
     [[ -n "$out" ]] || _die "${t} returned nothing — it is not serving"
     _say "$out"
@@ -134,6 +141,8 @@ _cutover() {
     # ── Smoke-test the target on the real network path ──────────────────────
     _say "${W}→${N} smoke-testing ${target} before sending it production traffic"
     local probe
+    # swallow: a failed probe is exactly what must block the cutover, and it
+    # is checked immediately below. Aborting here would skip that message.
     probe="$(_incluster_get "http://shop-${target}/readyz" || true)"
     [[ "$probe" == *ready* ]] || _die "refusing to cut over: ${target}/readyz returned '${probe:-nothing}'"
     _say "   ${G}ok${N}  ${target} is Ready and serving"
