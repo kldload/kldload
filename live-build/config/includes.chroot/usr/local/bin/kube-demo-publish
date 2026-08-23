@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# kube-demo-publish — put the demo on the host's LAN address so a browser can
+# reach it.
+#
+# What it does, in order:
+#   1. Reads the MetalLB VIP the demo's `web` Service was actually assigned.
+#   2. Writes a systemd .socket/.service pair that forwards <host>:<port> to it.
+#   3. Enables and starts them, then VERIFIES by fetching the page over the
+#      host's LAN address — the same path a browser takes.
+#   4. Prints the URL to open, or fails saying which step did not hold.
+#
+# Why it exists: MetalLB hands out addresses from a pool on the cluster's own
+# network. On a single-node kldload box that pool is behind libvirt, so the VIP
+# is reachable ON the host and nowhere else. Worse, the default libvirt subnet
+# (192.168.122.0/24) is the SAME on most workstations, so a laptop trying that
+# address silently reaches its own virbr0 instead. Publishing on the host's LAN
+# address sidesteps both problems and is what makes the demo demoable.
+#
+# systemd-socket-proxyd is used rather than socat/nginx because it ships with
+# systemd: no package to install, on any distro in the matrix, offline.
+#
+# Inputs:  --port N   (default 8088)   --off   --status
+#          NS (default demo), KUBECONFIG (default /root/.kube/config)
+# Outputs: a listening socket on the host's LAN address, and the URL on stdout.
+#
+# Notes:
+#   - The VIP is baked into the unit at write time. If the Service is deleted
+#     and recreated MetalLB may hand out a different address; re-run this and
+#     it rewrites the unit. It re-reads the VIP every run for that reason.
+#   - Re-running is safe and idempotent.
+# ---------------------------------------------------------------------------
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+PORT=8088
+NS="${NS:-demo}"
+ACTION=publish
+UNIT=kldload-demo-publish
+export KUBECONFIG="${KUBECONFIG:-/root/.kube/config}"
+
+G=$'\033[1;32m' Y=$'\033[1;33m' R=$'\033[1;31m' W=$'\033[1;37m' D=$'\033[2m' N=$'\033[0m'
+_die() {
+    printf '%sFATAL:%s %s\n' "$R" "$N" "$*" >&2
+    exit 1
+}
+
+_help() {
+    cat <<'HELPTEXT'
+kube-demo-publish — expose the demo on the host's LAN address for a browser
+
+SYNOPSIS
+    kube-demo-publish [--port N]
+    kube-demo-publish --status
+    kube-demo-publish --off
+
+DESCRIPTION
+    The demo's MetalLB VIP is only reachable from the host itself. This
+    forwards a port on the host's LAN address to that VIP, using a systemd
+    socket unit, so the demo can be opened from any browser on the network.
+
+OPTIONS
+    --port N    port to listen on (default: 8088)
+    --status    show whether the forwarder is running, and its target
+    --off       stop and remove the forwarder
+
+EXAMPLES
+    kube-demo-publish                 # publish on the default port
+    kube-demo-publish --port 9000     # publish on 9000 instead
+    kube-demo-publish --status        # check what is running
+    kube-demo-publish --off           # tear it down
+
+EXIT STATUS
+    0  the demo was verified reachable over the host's LAN address
+    1  the VIP was missing, or the published address did not answer
+HELPTEXT
+}
+
+while (($#)); do
+    case "$1" in
+    --port)
+        PORT="${2:?--port needs a value}"
+        shift 2
+        ;;
+    --off)
+        ACTION=off
+        shift
+        ;;
+    --status)
+        ACTION=status
+        shift
+        ;;
+    -h | --help)
+        _help
+        exit 0
+        ;;
+    *) _die "unknown argument: $1 (try --help)" ;;
+    esac
+done
+
+if [[ $EUID -ne 0 ]]; then
+    _args=(--port "$PORT")
+    [[ $ACTION == off ]] && _args+=(--off)
+    [[ $ACTION == status ]] && _args+=(--status)
+    exec sudo -E "$0" "${_args[@]}"
+fi
+
+# The host's primary LAN address — the one a browser elsewhere can reach. The
+# default route's source address is the right answer even with several bridges,
+# wireguard links and libvirt networks present, as there are here.
+_host_ip() {
+    ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'
+}
+
+case "$ACTION" in
+status)
+    systemctl is-active --quiet "${UNIT}.socket" &&
+        printf '%sactive%s   listening on %s\n' "$G" "$N" \
+            "$(systemctl show -p Listen --value "${UNIT}.socket" 2>/dev/null)" ||
+        printf '%sinactive%s\n' "$Y" "$N"
+    grep -h ExecStart "/etc/systemd/system/${UNIT}.service" 2>/dev/null | sed 's/^/  target: /' || true
+    exit 0
+    ;;
+off)
+    systemctl disable --now "${UNIT}.socket" "${UNIT}.service" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${UNIT}.socket" "/etc/systemd/system/${UNIT}.service"
+    systemctl daemon-reload
+    printf '%sremoved%s — the demo is no longer published on this host\n' "$G" "$N"
+    exit 0
+    ;;
+esac
+
+command -v kubectl >/dev/null || _die "kubectl not found"
+VIP="$(kubectl -n "$NS" get svc web -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+[[ -n "$VIP" ]] || _die "the demo's web Service has no LoadBalancer IP yet. Deploy it first (kube-demo), then re-run."
+
+HOST_IP="$(_host_ip)"
+[[ -n "$HOST_IP" ]] || _die "could not determine this host's LAN address"
+
+cat >"/etc/systemd/system/${UNIT}.socket" <<UNITEOF
+# Publishes the kldload demo on this host's LAN address.
+# Written by kube-demo-publish. Re-run that tool to change the port or retarget
+# it; edits here are overwritten.
+[Unit]
+Description=kldload demo — public listener on :${PORT}
+
+[Socket]
+ListenStream=0.0.0.0:${PORT}
+# The proxy is per-connection; without this each browser tab would need its own
+# unit instance to be started by hand.
+Accept=no
+
+[Install]
+WantedBy=sockets.target
+UNITEOF
+
+cat >"/etc/systemd/system/${UNIT}.service" <<UNITEOF
+# Forwards the socket above to the demo's MetalLB VIP.
+# The VIP is baked in at write time: MetalLB may assign a different address if
+# the Service is recreated, and re-running kube-demo-publish refreshes it.
+[Unit]
+Description=kldload demo — forward to ${VIP}:80
+Requires=${UNIT}.socket
+After=${UNIT}.socket network-online.target
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd ${VIP}:80
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+
+systemctl daemon-reload
+systemctl enable --now "${UNIT}.socket" >/dev/null 2>&1 ||
+    _die "could not start ${UNIT}.socket — check: systemctl status ${UNIT}.socket"
+
+# ── Verify the OUTCOME over the real path ───────────────────────────────────
+# systemctl reporting the socket active only proves something is listening. The
+# question is whether a browser gets the page, so fetch it the way one would.
+code=""
+for _ in $(seq 1 10); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://${HOST_IP}:${PORT}/" || true)"
+    [[ "$code" == "200" ]] && break
+    sleep 1
+done
+[[ "$code" == "200" ]] ||
+    _die "published on ${HOST_IP}:${PORT} but it returned '${code:-nothing}' — the demo is not reachable"
+
+printf '\n%s  The demo is live:%s  %shttp://%s:%s/%s\n' "$G" "$N" "$W" "$HOST_IP" "$PORT" "$N"
+printf '%s  Open that in any browser on the network.%s\n' "$D" "$N"
+printf '%s  Turn it off with: kube-demo-publish --off%s\n\n' "$D" "$N"

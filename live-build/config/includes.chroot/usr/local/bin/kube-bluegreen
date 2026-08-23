@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# kube-bluegreen — drive the demo's blue/green cutover from one command.
+#
+# What it does, in order:
+#   status    reports which track is live, and whether each track is healthy.
+#   preview   sends real traffic to the IDLE track's private address and shows
+#             what it returns, without touching production traffic.
+#   cutover   gates on the target track being fully Ready, smoke-tests it, then
+#             moves the public Service's selector to it and verifies the move.
+#   rollback  the same operation aimed at the previously-live track.
+#
+# Why it exists: blue/green has a reputation for being hard, and the reason is
+# almost never the switch itself — it is that the switch is usually a bespoke
+# pile of scripts nobody trusts. Here the switch is one label on one Service.
+# Everything below it is verification, which is the part that actually earns
+# the trust: refusing to cut over to a track that is not Ready, and confirming
+# afterwards that the endpoints really moved.
+#
+# Inputs:  $1 = status|preview|cutover|rollback, $2 = blue|green (where taken)
+#          RELEASE (default javaapi-fullstack), NS (default demo),
+#          CHART (default /usr/local/share/kldload/demo/charts/javaapi-fullstack)
+#          KUBECONFIG (default /root/.kube/config)
+# Outputs: human-readable status on stdout. Exit 0 only when the requested
+#          transition is verified to have happened.
+#
+# Notes:
+#   - A cutover is refused unless every replica of the target is Ready. The
+#     whole value of blue/green is that you look before you leap; a switch that
+#     will flip to a broken track is a rolling update with extra steps.
+#   - The verification after the flip reads ENDPOINTS, not the Service spec.
+#     The spec says what was asked for; the endpoints say what traffic will
+#     actually reach, and those disagree exactly when something is wrong.
+# ---------------------------------------------------------------------------
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+RELEASE="${RELEASE:-javaapi-fullstack}"
+NS="${NS:-demo}"
+CHART="${CHART:-/usr/local/share/kldload/demo/charts/javaapi-fullstack}"
+export KUBECONFIG="${KUBECONFIG:-/root/.kube/config}"
+
+G=$'\033[1;32m' Y=$'\033[1;33m' R=$'\033[1;31m' W=$'\033[1;37m' D=$'\033[2m' N=$'\033[0m'
+_say() { printf '%s\n' "$*"; }
+_die() {
+    printf '%sFATAL:%s %s\n' "$R" "$N" "$*" >&2
+    exit 1
+}
+
+command -v kubectl >/dev/null || _die "kubectl not found"
+command -v helm >/dev/null || _die "helm not found"
+
+_active() { kubectl -n "$NS" get svc shop -o jsonpath='{.spec.selector.track}' 2>/dev/null; }
+_other() { [[ "$1" == "blue" ]] && echo green || echo blue; }
+
+# Ready/desired for one track. Prints "ready/desired"; callers compare them
+# rather than trusting a rollout command's exit code.
+_track_ready() {
+    local t="$1" ready desired
+    desired=$(kubectl -n "$NS" get deploy "app-$t" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)
+    ready=$(kubectl -n "$NS" get deploy "app-$t" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
+    printf '%s/%s' "${ready:-0}" "${desired:-0}"
+}
+
+# Count of addresses actually behind a Service. Zero here means traffic is
+# black-holing regardless of what the selector claims.
+_endpoints() {
+    kubectl -n "$NS" get endpointslice -l "kubernetes.io/service-name=$1" \
+        -o jsonpath='{range .items[*]}{range .endpoints[*]}{.addresses[0]}{"\n"}{end}{end}' 2>/dev/null |
+        grep -c . || true
+}
+
+# Curl from inside the cluster: the preview services are ClusterIP, and the
+# point of a preview is to exercise the real network path a user would take.
+_incluster_get() {
+    local url="$1"
+    kubectl -n "$NS" run "bg-probe-$RANDOM" --rm -i --restart=Never --quiet \
+        --image=busybox:1.36 --command -- wget -q -T8 -O- "$url" 2>/dev/null
+}
+
+_status() {
+    local live idle
+    live="$(_active)"
+    [[ -n "$live" ]] || _die "release $RELEASE not found in namespace $NS — deploy it first"
+    idle="$(_other "$live")"
+    _say ""
+    _say "${W}  Blue/green status — ${RELEASE} in ${NS}${N}"
+    _say "${D}  ────────────────────────────────────────────────${N}"
+    printf '   %sLIVE%s   %-6s  replicas %-8s endpoints %s\n' \
+        "$G" "$N" "$live" "$(_track_ready "$live")" "$(_endpoints shop)"
+    printf '   %sidle%s   %-6s  replicas %-8s endpoints %s\n' \
+        "$Y" "$N" "$idle" "$(_track_ready "$idle")" "$(_endpoints "shop-$idle")"
+    local vip
+    vip=$(kubectl -n "$NS" get svc web -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+    _say ""
+    _say "   public VIP:  ${W}http://${vip:-<pending>}/${N}"
+    _say "   preview:     ${D}kube-bluegreen preview ${idle}${N}"
+    _say ""
+}
+
+_preview() {
+    local t="${1:-}"
+    [[ "$t" == blue || "$t" == green ]] || _die "usage: kube-bluegreen preview blue|green"
+    local ready
+    ready="$(_track_ready "$t")"
+    _say "${W}→${N} previewing ${t} (replicas ${ready}) via its private address"
+    local out
+    out="$(_incluster_get "http://shop-${t}/api/stats" || true)"
+    [[ -n "$out" ]] || _die "${t} returned nothing — it is not serving"
+    _say "$out"
+}
+
+_cutover() {
+    local target="${1:-}"
+    [[ "$target" == blue || "$target" == green ]] || _die "usage: kube-bluegreen cutover blue|green"
+    local live
+    live="$(_active)"
+    [[ -n "$live" ]] || _die "release $RELEASE not found in namespace $NS"
+    if [[ "$live" == "$target" ]]; then
+        _say "${Y}!${N} ${target} is already live — nothing to do"
+        return 0
+    fi
+
+    # ── Gate ────────────────────────────────────────────────────────────────
+    # Refuse to move traffic onto a track that cannot serve it. This is the
+    # single most valuable line in the script.
+    local rd
+    rd="$(_track_ready "$target")"
+    local ready="${rd%%/*}" desired="${rd##*/}"
+    _say "${W}→${N} pre-flight: ${target} has ${rd} replicas Ready"
+    [[ "$desired" != "0" && "$ready" == "$desired" ]] ||
+        _die "refusing to cut over: ${target} is ${rd} Ready. Fix it, then retry."
+
+    # ── Smoke-test the target on the real network path ──────────────────────
+    _say "${W}→${N} smoke-testing ${target} before sending it production traffic"
+    local probe
+    probe="$(_incluster_get "http://shop-${target}/readyz" || true)"
+    [[ "$probe" == *ready* ]] || _die "refusing to cut over: ${target}/readyz returned '${probe:-nothing}'"
+    _say "   ${G}ok${N}  ${target} is Ready and serving"
+
+    # ── Flip ────────────────────────────────────────────────────────────────
+    # One value. The entire cutover is this line; everything else is proof.
+    _say "${W}→${N} moving the public VIP: ${live} → ${G}${target}${N}"
+    local t0 t1
+    t0=$(date +%s%N)
+    helm upgrade "$RELEASE" "$CHART" -n "$NS" --reuse-values \
+        --set "activeTrack=${target}" --wait --timeout 2m >/dev/null ||
+        _die "helm upgrade failed — traffic is still on ${live}"
+    t1=$(date +%s%N)
+
+    # ── Verify the OUTCOME ──────────────────────────────────────────────────
+    # Read what the Service now selects AND how many endpoints back it. helm
+    # exiting 0 says the manifest applied, not that traffic moved.
+    local now eps
+    now="$(_active)"
+    eps="$(_endpoints shop)"
+    [[ "$now" == "$target" ]] || _die "selector still reads '${now}' after upgrade"
+    [[ "${eps:-0}" -gt 0 ]] || _die "public VIP has ZERO endpoints after cutover — traffic is black-holed"
+    _say "   ${G}ok${N}  selector=${now}, ${eps} endpoint(s) behind the VIP"
+    _say ""
+    _say "${G}  Cutover complete in $(((t1 - t0) / 1000000))ms — ${live} → ${target}${N}"
+    _say "${D}  Roll back with: kube-bluegreen rollback${N}"
+    _say ""
+}
+
+_usage() {
+    cat <<'HELPTEXT'
+kube-bluegreen — drive the demo's blue/green cutover
+
+USAGE
+    kube-bluegreen status              show which track is live and both tracks' health
+    kube-bluegreen preview <track>     send real traffic to the idle track, privately
+    kube-bluegreen cutover <track>     health-gate, smoke-test, then move the public VIP
+    kube-bluegreen rollback            cut back to the previously-live track
+
+ARGUMENTS
+    <track>    blue | green
+
+ENVIRONMENT
+    RELEASE    helm release name          (default: javaapi-fullstack)
+    NS         namespace                  (default: demo)
+    CHART      chart path                 (default: /usr/local/share/kldload/demo/charts/javaapi-fullstack)
+    KUBECONFIG cluster credentials        (default: /root/.kube/config)
+
+EXAMPLES
+    kube-bluegreen status
+    kube-bluegreen preview green       # check green privately, production untouched
+    kube-bluegreen cutover green       # promote green; refused unless it is fully Ready
+    kube-bluegreen rollback            # instantly back to blue
+
+EXIT STATUS
+    0  the requested transition was verified to have happened
+    1  the transition was refused or could not be verified
+HELPTEXT
+}
+
+case "${1:-status}" in
+status) _status ;;
+preview) _preview "${2:-}" ;;
+cutover) _cutover "${2:-}" ;;
+rollback)
+    _live="$(_active)"
+    [[ -n "$_live" ]] || _die "release $RELEASE not found in namespace $NS"
+    _cutover "$(_other "$_live")"
+    ;;
+-h | --help | help) _usage ;;
+*)
+    _usage >&2
+    exit 1
+    ;;
+esac
