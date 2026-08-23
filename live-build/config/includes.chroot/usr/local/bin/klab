@@ -2074,7 +2074,13 @@ build_golden_single() {
             echo ""
         } | tee -a "$golden_log"
 
-        _ssh_cmd "$golden_ip" "cloud-init clean --logs 2>/dev/null || true; rm -f /etc/machine-id; touch /etc/machine-id; truncate -s 0 /etc/hostname"
+        # SSH HOST KEYS: removed so every clone mints its own on first boot.
+        # kldload-seal has always done this; klab seals by its own path and did
+        # not inherit it, so every clone of a golden presented the SAME host key
+        # — measured 2026-08-22 on .120, where six running desktop clones shared
+        # exactly two keys, one per golden lineage. Clients cannot tell those
+        # hosts apart, and a key lifted from any one of them impersonates all.
+        _ssh_cmd "$golden_ip" "cloud-init clean --logs 2>/dev/null || true; rm -f /etc/machine-id; touch /etc/machine-id; truncate -s 0 /etc/hostname; rm -f /etc/ssh/ssh_host_*key*"
         _ssh_cmd "$golden_ip" "systemctl enable cloud-init-local cloud-init cloud-config cloud-final 2>/dev/null || true"
         _ssh_cmd "$golden_ip" "shutdown -h now" || true
 
@@ -2271,6 +2277,10 @@ depmod -a 2>/dev/null || true
 cloud-init clean --logs 2>/dev/null || true
 rm -f /etc/machine-id; touch /etc/machine-id
 truncate -s 0 /etc/hostname
+# See the note at the other seal site: without this every clone of this golden
+# serves the same SSH host key. sshd regenerates on first boot (sshd-keygen on
+# EL, ssh-keygen -A via the ssh unit on Debian/Ubuntu).
+rm -f /etc/ssh/ssh_host_*key*
 rm -f /etc/netplan/*.yaml /etc/systemd/network/*.network 2>/dev/null || true
 systemctl enable cloud-init-local cloud-init cloud-config cloud-final 2>/dev/null || true
 mkdir -p /etc/systemd/network && cat > /etc/systemd/network/10-dhcp.network <<'NETD'
