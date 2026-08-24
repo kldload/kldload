@@ -386,14 +386,39 @@ if [[ -f /etc/kubernetes/admin.conf ]]; then
         fi
     done
 
-    # Cilium label synthesis — dashboards won't render without this
-    cilium_series="$(curl -fsS -m15 -G http://localhost:9090/api/v1/query \
-        --data-urlencode 'query=cilium_version{k8s_app="cilium"}' 2>/dev/null |
-        python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']['result']))" 2>/dev/null || echo 0)"
+    # Cilium label synthesis — dashboards won't render without this.
+    #
+    # THREE OUTCOMES, NOT TWO. "No series" means one of two entirely different
+    # things and only one of them is a defect:
+    #
+    #   nothing scraped yet          -> the cluster is still converging
+    #   scraped, but no labelled form -> the scrape config really is wrong
+    #
+    # Reporting both as a failure is why this check has cried wolf three times:
+    # .127/.137 (2026-08-19), .107 (2026-08-22), and .120 (2026-08-23), each on
+    # a box that served the full set of labelled series minutes later. The
+    # third one left kldload-smoke-firstboot.service sitting in a failed state
+    # on a healthy machine, which is exactly the noise that trains an operator
+    # to ignore a red unit.
+    #
+    # kldload-doctor already learned this and got the split; this check never
+    # did, so the doctor said ok while the smoke report said FAIL on the same
+    # host. Same logic, same order, so the two agree.
+    _prom_count() {
+        curl -fsS -m15 -G http://localhost:9090/api/v1/query \
+            --data-urlencode "query=$1" 2>/dev/null |
+            python3 -c "import sys,json; print(len(json.load(sys.stdin)['data']['result']))" \
+                2>/dev/null || echo 0
+    }
+    cilium_series="$(_prom_count 'cilium_version{k8s_app="cilium"}')"
     if [[ "$cilium_series" -gt 0 ]]; then
         pass "cilium scrape labels: {k8s_app=cilium} resolves (${cilium_series} agents)"
+    elif [[ "$(_prom_count 'up{job="cilium-agent"} == 1')" -eq 0 ]]; then
+        skip "cilium scrape labels: cilium-agent not scraped yet — cluster still converging"
+    elif [[ "$(_prom_count 'cilium_version')" -eq 0 ]]; then
+        skip "cilium scrape labels: scraped, metrics not landed yet — one scrape interval behind"
     else
-        fail "cilium scrape labels: no series — dashboards 16611/16613 won't render"
+        fail "cilium scrape labels: cilium_version exists but not with k8s_app=cilium — dashboards 16611/16613 won't render"
     fi
 
     # Tetragon emitting events
