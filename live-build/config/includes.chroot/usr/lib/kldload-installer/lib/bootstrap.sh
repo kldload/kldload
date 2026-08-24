@@ -285,6 +285,43 @@ k_create_users() {
         k_in_chroot "${target}" useradd -m -s /bin/bash -G "${admin_group}" "${user}"
     fi
 
+    # ── An SSH key for the human, because the human drives the VM tools ──
+    # Every console here reaches guests over SSH with the CALLER's key.
+    # root gets one at firstboot; the desktop user never did, so vmxplore's
+    # new-VM dialog — which prefills from $HOME/.ssh/*.pub and runs as that
+    # user — found nothing and built every cloud VM password-only.
+    #
+    # Measured on .120 (2026-08-23): four Fedora VMs created from the GUI,
+    # none reachable by the hypervisor, none visible to Ansible, and the
+    # operator's own password needed to debug them. root had two keys; the
+    # user driving the tool had none.
+    #
+    # NO PASSPHRASE, deliberately and consistently with root's: this is a lab
+    # automation key, and a prompt would defeat the tools that use it. It is
+    # NOT added to root's authorized_keys — the user already has sudo, and
+    # reaching guests needs no trust on the host at all. Replace it with your
+    # own if you want one with a passphrase; nothing here regenerates it.
+    if ! chroot "${target}" test -f "/home/${user}/.ssh/id_ed25519"; then
+        k_in_chroot "${target}" install -d -m 0700 -o "${user}" -g "${user}" "/home/${user}/.ssh"
+        # Generated as root and then chowned, rather than via sudo -u: sudo is
+        # not guaranteed to be installed in the target at this point, and
+        # nothing else in this file assumes it is.
+        if k_in_chroot "${target}" ssh-keygen -q -t ed25519 -N "" \
+            -C "kldload-workstation@$(hostname 2>/dev/null || echo kldload)" \
+            -f "/home/${user}/.ssh/id_ed25519"; then
+            # Verify the OUTCOME: ssh-keygen can exit 0 having written nothing
+            # useful if the home directory was not writable.
+            k_in_chroot "${target}" chown -R "${user}:${user}" "/home/${user}/.ssh"
+            if chroot "${target}" test -s "/home/${user}/.ssh/id_ed25519.pub"; then
+                k_log "ssh: generated a key for ${user} — VM tools can reach the guests they build"
+            else
+                k_log "WARN: ssh: keygen for ${user} produced no public key — GUI-built VMs will be password-only"
+            fi
+        else
+            k_log "WARN: ssh: could not generate a key for ${user} — GUI-built VMs will be password-only"
+        fi
+    fi
+
     # ── Supplementary groups: the ones that decide whether the desktop
     #    prompts for a password all day ──────────────────────────────────
     # Being in wheel/sudo is NOT enough for libvirt. The distro ships
