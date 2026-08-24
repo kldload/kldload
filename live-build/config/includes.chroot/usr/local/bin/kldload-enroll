@@ -307,8 +307,29 @@ elif [[ -z "$node_id" ]]; then
 fi
 log "${VM}: mesh id ${node_id} (${MGMT_SUBNET}.${node_id})"
 
-_ssh "kube-network init ${node_id}" >/dev/null 2>&1 ||
-    log "${VM}: kube-network init reported a problem (already initialised?)"
+# INIT ONLY ONCE. `kube-network init` is not idempotent: it does
+# `cat >/etc/wireguard/wg-k8s.conf` and the same for wg-mgmt, so it TRUNCATES
+# both configs and every peer in them, then bounces the interfaces. Calling it
+# on a guest that is already meshed does not "re-assert" anything — it wipes
+# the mesh that guest was part of.
+#
+# This ran unconditionally, and once the enroll sweep started firing every ten
+# minutes it took the whole Kubernetes mesh down on every pass. Measured on
+# .124 (2026-08-24): a repaired 6-node cluster with 6 peers per node was back
+# to 1 peer per node within one sweep, three times in a row, and cross-node
+# traffic — kubectl exec, cluster DNS, every multi-node workload — died with it.
+# The cluster still reported six Ready nodes throughout, because kubelet only
+# needs the one peer it kept.
+#
+# The guest's own .node-id is the marker: it exists only after a successful
+# init, and it is already read above to reuse the id. If it is there, the guest
+# is meshed and init must not run.
+if _ssh 'test -s /etc/wireguard/.node-id'; then
+    log "${VM}: already initialised (id ${node_id}) — not re-running init"
+else
+    _ssh "kube-network init ${node_id}" >/dev/null 2>&1 ||
+        log "${VM}: kube-network init reported a problem"
+fi
 
 guest_pub="$(_ssh 'cat /etc/wireguard/wg-mgmt.pub' | tr -d '[:space:]')"
 [[ -n "$guest_pub" ]] || {
