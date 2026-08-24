@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-enroll-sweep.service — make every running VM a member of the estate.
+#
+# Role:        runs `kldload-enroll --all`, which for each running guest sets
+#              its hostname, allocates a mesh id, peers host<->guest on both
+#              WireGuard planes, registers it in the state DB, and refreshes
+#              the Ansible inventory.
+# Read by:     systemd, fired by kldload-enroll-sweep.timer.
+# Consequence
+# if missing:  membership depends on which tool happened to create the VM, and
+#              they do not agree. Measured across four creation paths on
+#              .120 (2026-08-23): kvm-clone set a hostname, seeded a key and
+#              registered; vmxplore's golden-clone path did none of the three
+#              and its clones booted as "localhost"; vmxplore's new-VM dialog
+#              seeded a key only when the desktop user happened to have one,
+#              and that user had no key at all; klab registered the golden but
+#              not the machines cloned from it. Nothing had gone wrong in any
+#              of them — each simply implemented a different subset.
+#
+# WHY A SWEEP AND NOT A HOOK IN EACH TOOL: a VM has no address at the moment it
+# is created, so enrollment cannot happen there — kvm-create registers its VM
+# as "defined", before it has ever booted. A hook per tool also only ever
+# covers the tools that exist today; the sweep is indifferent to who made the
+# guest, so a creation path added next month is absorbed rather than forgotten.
+# kldload-enroll's own header makes the same argument.
+#
+# This is the companion to kldload-inventory-sync.service, not a duplicate of
+# it: that one copies DHCP leases into the state DB every minute, which is what
+# makes a VM *addressable*. This one makes it a *member* — named, meshed and
+# in the inventory. Addresses change often and cost nothing to read; membership
+# changes rarely and costs an SSH per guest, which is why they run at
+# different rates.
+#
+# Type=oneshot: a reconcile that finishes, not a daemon. Non-zero exits are
+# tolerated because partial success is the normal case — a guest still booting
+# has no address yet and is simply picked up on the next pass.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=Enrol every running VM into the kldload estate (name, mesh, inventory)
+# libvirt supplies the guest list and the leases; without it there is nothing
+# to sweep. wg-quick brings up the planes the guests are peered onto.
+After=libvirtd.service virtqemud.service network-online.target
+Wants=libvirtd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/kldload-enroll --all --role vm
+# A guest that is mid-boot, or one that is not a kldload image, makes the
+# sweep exit non-zero having still enrolled everything it could. That is a
+# report, not a failure, and marking the unit failed would bury the real ones.
+SuccessExitStatus=0 1 2
+# Bounded so a wedged guest cannot hold the timer's next run.
+TimeoutStartSec=10min
+Nice=10
+IOSchedulingClass=idle

@@ -736,7 +736,7 @@ k_install_system_files() {
         # daemon was enabled by build-iso.sh but never copied to target
         # (unit "not-found" on the fresh 1.4.0-rc2 install; the `enable ||
         # true` swallowed it).
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer; do
+        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
@@ -958,6 +958,21 @@ k_install_system_files() {
         # install for a timer — the unit is copied either way and the operator
         # can enable it by hand. Same swallow as every sibling ln in this block.
         ln -sf "/usr/lib/systemd/system/kldload-inventory-sync.timer" "${target}/etc/systemd/system/timers.target.wants/kldload-inventory-sync.timer" || true
+
+        # kldload-enroll-sweep: reconciles estate MEMBERSHIP — hostname, mesh
+        # peering and inventory registration — for every running guest,
+        # whichever tool created it. Its companion above reconciles addresses;
+        # this one reconciles identity.
+        #
+        # WHY IT EXISTS: measured across four creation paths on .120
+        # (2026-08-23), no two agreed on what a new VM gets. kvm-clone named
+        # it, seeded a key and registered it; vmxplore's golden-clone path did
+        # none of the three, so its clones booted as "localhost"; the new-VM
+        # dialog seeded a key only if the desktop user had one, and that user
+        # had none. A sweep is indifferent to who made the guest, so the next
+        # creation path is absorbed instead of forgotten.
+        # HARMLESS CASE: an existing symlink, exactly as the sibling lns here.
+        ln -sf "/usr/lib/systemd/system/kldload-enroll-sweep.timer" "${target}/etc/systemd/system/timers.target.wants/kldload-enroll-sweep.timer" || true
 
         # kldload-collect: samples the kernel cockpit's signal set into a JSONL
         # corpus every 60s. Added to the copy list in 99355e23 but never given

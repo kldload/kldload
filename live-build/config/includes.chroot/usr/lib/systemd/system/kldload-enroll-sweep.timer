@@ -1,0 +1,39 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# kldload-enroll-sweep.timer — how often the estate reconciles its membership.
+#
+# Role:       fires kldload-enroll-sweep.service.
+# Read by:    systemd.
+# Consequence
+# if missing: nothing enrols a VM that its creator did not; see the .service.
+#
+# 10 minutes, not 60 seconds. The inventory sync runs every minute because
+# reading a DHCP lease is free and an operator who clones a fleet expects it to
+# be targetable immediately. Enrollment is an SSH per running guest, so on a
+# host with thirty VMs a one-minute cadence would mean thirty connections a
+# minute forever to re-confirm facts that almost never change. Ten minutes is
+# short enough that a machine started by hand joins the estate before anyone
+# goes looking for it, and long enough to be invisible.
+#
+# OnBootSec=3min so the sweep lands after libvirt has started its autostart
+# guests and they have had time to DHCP — enrolling a guest that has not
+# reached the network yet just burns a pass.
+#
+# RandomizedDelaySec, following kldload-inventory-sync's lead: several kldload
+# timers used to fire on the same second and put four ZFS-heavy jobs on the
+# pool at once. This one is not heavy, but it holds SSH connections, and a
+# cheap job landing on an expensive one's tick is how the cheap job gets blamed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=Reconcile kldload estate membership every 10 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+RandomizedDelaySec=45s
+# Coalesce with other timers rather than insisting on an exact second.
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
