@@ -640,6 +640,8 @@ dnf install -y postgresql-server postgresql-contrib ||
 # EL ships an uninitialised cluster; Debian creates one on install.
 [ -f /var/lib/pgsql/data/PG_VERSION ] || postgresql-setup --initdb >/dev/null 2>&1 ||
     echo "klab: initdb FAILED" >&2
+# swallow: already-enabled is the normal case on a re-run, and the unit is
+# reported active by the verification below rather than by this exit code.
 systemctl enable postgresql >/dev/null 2>&1 || true # swallow: already-enabled is the normal re-run case
 DBDNF
         ;;
@@ -655,6 +657,9 @@ DBDNF
 set -uo pipefail
 # The data directory differs per family and per major version. Ask the running
 # server rather than guessing a path that changes every release.
+# swallow: the unit is postgresql on one family and postgresql.service on the
+# other, so one of the two always fails. Whether the server came up is decided
+# by the psql retry loop on the next line, not by this.
 systemctl start postgresql >/dev/null 2>&1 || systemctl start postgresql.service >/dev/null 2>&1 || true # swallow: one of the two unit names is always absent
 for _ in \$(seq 1 30); do su - postgres -c "psql -tAc 'SELECT 1'" >/dev/null 2>&1 && break; sleep 2; done
 PGDATA=\$(su - postgres -c "psql -tAc 'SHOW data_directory'" 2>/dev/null | tr -d '[:space:]')
@@ -672,6 +677,8 @@ grep -q "^listen_addresses" "\$PGDATA/postgresql.conf" ||
 sed -i "s/^listen_addresses.*/listen_addresses = '*'/" "\$PGDATA/postgresql.conf"
 grep -q "klab-lab-access" "\$PGDATA/pg_hba.conf" ||
     printf "# klab-lab-access: lab network only, scram over the wire\\nhost all all 0.0.0.0/0 scram-sha-256\\n" >> "\$PGDATA/pg_hba.conf"
+# swallow: same either/or as the start above; the retry loop that follows is
+# what establishes the server is actually answering again.
 systemctl restart postgresql >/dev/null 2>&1 || systemctl restart postgresql.service >/dev/null 2>&1 || true # swallow: as above, one unit name exists
 for _ in \$(seq 1 30); do su - postgres -c "psql -tAc 'SELECT 1'" >/dev/null 2>&1 && break; sleep 2; done
 
