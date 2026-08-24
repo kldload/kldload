@@ -69,6 +69,36 @@ cmd_init() {
     [[ "$node_id" =~ ^[0-9]+$ ]] || die "node-id must be a number (1-254)"
     [[ "$node_id" -ge 1 && "$node_id" -le 254 ]] || die "node-id must be 1-254"
 
+    # REFUSE TO CLOBBER AN INITIALISED NODE.
+    #
+    # Everything below does `cat >/etc/wireguard/wg-*.conf`, which truncates
+    # both files and every [Peer] in them, then bounces the interfaces. On a
+    # node that is already meshed that is not a re-init, it is a teardown: the
+    # node keeps its keys but loses every peer it had, and the mesh it belonged
+    # to loses a member without anything failing or logging.
+    #
+    # HISTORY: .124, 2026-08-24. kldload-enroll called this unconditionally on
+    # every guest, and once the enrollment sweep ran on a ten-minute timer it
+    # flattened a healthy 6-node Kubernetes mesh — 6 peers per node down to 1 —
+    # on every pass. kubectl exec, cluster DNS and every cross-node workload
+    # broke while all six nodes still reported Ready, because a kubelet only
+    # needs the single peer that init leaves behind. The caller is fixed, but a
+    # destructive default with no guard will find another caller eventually.
+    #
+    # --force is the escape hatch for a genuine re-key or a node being moved to
+    # a new id; it is deliberately explicit, because the cost of doing this by
+    # accident is an estate-wide outage that reports success.
+    if [[ -s /etc/wireguard/.node-id && "${2:-}" != "--force" ]]; then
+        local _have_id _peers
+        _have_id="$(tr -cd '0-9' </etc/wireguard/.node-id)"
+        _peers="$(awk '/^\[Peer\]/ {n++} END {print n+0}' \
+            /etc/wireguard/wg-mgmt.conf /etc/wireguard/wg-k8s.conf 2>/dev/null)"
+        log "already initialised as node ${_have_id}, holding ${_peers:-0} peer(s) across both planes — refusing to re-init"
+        log "  (this would erase every peer; pass --force if you really mean to re-key)"
+        [[ "$_have_id" == "$node_id" ]] && return 0
+        die "requested id ${node_id} but this node is ${_have_id} — use --force to move it"
+    fi
+
     install -d -m700 /etc/wireguard
     local old_umask
     old_umask="$(umask)"
