@@ -736,7 +736,7 @@ k_install_system_files() {
         # daemon was enabled by build-iso.sh but never copied to target
         # (unit "not-found" on the fresh 1.4.0-rc2 install; the `enable ||
         # true` swallowed it).
-        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer; do
+        for f in kldload-srv-snapshot.service kldload-srv-snapshot.timer kldload-firstboot.service kldload-webui.service kldload-proxy.service kldload-export.service kldload-autodeploy.service ttyd-k9s.service kldload-tls-cert.service kldload-tls-cert.timer kldload-journal-flush.service klab-prom-targets.service klab-prom-targets.timer kldload-headlamp.service kldload-session@.service kldload-rhel-composer.service zexplore-api.service kldload-inventory-sync.service kldload-inventory-sync.timer kldload-collect.service kldload-collect.timer kldload-enroll-sweep.service kldload-enroll-sweep.timer kldload-boot-assert.service; do
             [[ -f "/usr/lib/systemd/system/${f}" ]] &&
                 cp "/usr/lib/systemd/system/${f}" "${target}/usr/lib/systemd/system/${f}"
         done
@@ -973,6 +973,15 @@ k_install_system_files() {
         # creation path is absorbed instead of forgotten.
         # HARMLESS CASE: an existing symlink, exactly as the sibling lns here.
         ln -sf "/usr/lib/systemd/system/kldload-enroll-sweep.timer" "${target}/etc/systemd/system/timers.target.wants/kldload-enroll-sweep.timer" || true
+
+        # kldload-boot-assert: re-checks the EFI boot path on EVERY boot and
+        # repairs it. Copied in the loop above; without this symlink it would
+        # ship in the squashfs and never run -- the exact defect the comments
+        # for kldload-collect and inventory-sync directly below describe, and
+        # the reason the SB-off fallback breakage went unnoticed for six days.
+        # HARMLESS CASE: an existing symlink, exactly as the sibling lns here.
+        mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
+        ln -sf "/usr/lib/systemd/system/kldload-boot-assert.service" "${target}/etc/systemd/system/multi-user.target.wants/kldload-boot-assert.service" || true
 
         # kldload-collect: samples the kernel cockpit's signal set into a JSONL
         # corpus every 60s. Added to the copy list in 99355e23 but never given

@@ -1,0 +1,32 @@
+# kldload-boot-assert — re-establish the boot invariants on every boot.
+#
+# Read by systemd at boot. Without this, the ESP layout and the NVRAM entry are
+# decided once at install time and never checked again — so a firmware update
+# that clears NVRAM, or a distro grub package that rewrites \EFI\BOOT, silently
+# removes the machine's ability to boot and nobody finds out until the next
+# reboot, long after the change that caused it.
+#
+# Consequence if missing: the boot path is set-once. It will usually be fine,
+# which is exactly what makes the failure expensive when it is not.
+[Unit]
+Description=kldload — verify and repair the EFI boot path
+DefaultDependencies=no
+# The ESP must be mounted before this can assert anything about it, and this
+# must finish before anything that might rewrite \EFI\BOOT.
+After=local-fs.target
+Wants=local-fs.target
+Before=multi-user.target
+# Nothing to assert on a machine that booted without UEFI.
+ConditionPathExists=/sys/firmware/efi
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kldload-boot-assert
+RemainAfterExit=yes
+# Exit 1 means "an invariant is broken and could not be repaired" — a real
+# failure worth surfacing in `systemctl --failed`, not something to mask.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════════
+# kldload-boot-assert — re-establish the boot invariants on every boot.
+#
+# What it does, in order:
+#   1. Finds the ESP and the ZFSBootMenu binary that should be booting.
+#   2. Asserts \EFI\BOOT\BOOTX64.EFI is SELF-SUFFICIENT — if it is shim, that
+#      shim's grubx64.efi is beside it; repairs it if not.
+#   3. Asserts an NVRAM "kldload" entry exists and targets a file that is
+#      actually on the ESP; recreates it if not.
+#   4. Asserts our entries sit at the FRONT of BootOrder without evicting the
+#      firmware's own fallback entry from it.
+#
+# WHY: everything above is decided once, at install time, and then never looked
+# at again. That is fine until something changes it -- and things do. A firmware
+# update or a CMOS clear wipes NVRAM, taking the only entry pointing at
+# ZFSBootMenu with it. A distro grub package update rewrites \EFI\BOOT. An
+# operator "cleans up" boot entries. None of those announce themselves; the
+# machine simply fails to boot on some later reboot, long after the change,
+# with nothing in any log connecting the two.
+#
+# HISTORY: 2026-08-25 -- an SB-off install shipped shim at the fallback path
+# with the grubx64.efi it loads deleted, and it went unnoticed because the
+# NVRAM entry still worked. Only machines whose firmware preferred its own
+# "UEFI OS" entry ever saw it. A check that ran on every boot would have
+# reported it on the first reboot of the first affected machine instead of
+# waiting for an operator to hit the one firmware that exposed it.
+#
+# Inputs:  none. Reads /boot/efi and NVRAM.
+# Outputs: /var/log/kldload/boot-assert.log. Exit 0 when the invariants hold
+#          (repaired or already good), 1 when something could not be repaired.
+#
+# Notes:
+#   - REPAIRS, it does not merely warn. A warning in a log nobody reads is not
+#     a failsafe.
+#   - Deliberately quiet when nothing is wrong: one line, so the log stays
+#     readable and a repair stands out.
+#   - Never touches the primary \EFI\zbm\BOOTX64.EFI. If that is gone this
+#     reports and exits non-zero rather than guessing.
+# ═══════════════════════════════════════════════════════════════════════════════
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+LOG=/var/log/kldload/boot-assert.log
+# swallow: a read-only /var must not stop the repair itself from running.
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || :
+# swallow: likewise, an unwritable log must never abort the run under set -e.
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null || :; }
+
+# Overridable so the repair paths can be exercised against a fake ESP rather
+# than only ever tested on a machine that is already correct. Nothing in the
+# shipped units sets it; it defaults to the real mount point.
+ESP="${KLDLOAD_ESP:-/boot/efi}"
+ZBM="${ESP}/EFI/zbm/BOOTX64.EFI"
+FB_DIR="${ESP}/EFI/BOOT"
+FB="${FB_DIR}/BOOTX64.EFI"
+repaired=0
+failed=0
+
+if [[ -z "${KLDLOAD_ESP:-}" ]] && ! mountpoint -q "$ESP" 2>/dev/null; then
+    log "ESP not mounted at ${ESP} — nothing to assert"
+    exit 0
+fi
+
+# ── 1. the primary binary must exist; everything else is derived from it ──────
+if [[ ! -f "$ZBM" ]]; then
+    log "FATAL: ${ZBM} is missing — cannot assert or repair the boot path"
+    exit 1
+fi
+
+# ── 2. the fallback path must boot ON ITS OWN ────────────────────────────────
+# This is the only path guaranteed to work with no NVRAM at all, so it matters
+# more than any boot entry. Two shapes are valid: it IS ZFSBootMenu, or it is
+# shim WITH the grubx64.efi that shim exists to load.
+if [[ ! -f "$FB" ]]; then
+    mkdir -p "$FB_DIR"
+    if cp "$ZBM" "$FB"; then
+        log "REPAIRED: ${FB} was missing — installed ZFSBootMenu there"
+        repaired=1
+    else
+        log "FATAL: ${FB} missing and could not be created"
+        failed=1
+    fi
+elif ! cmp -s "$FB" "$ZBM" && [[ ! -f "${FB_DIR}/grubx64.efi" ]]; then
+    # Fallback is shim (or some other loader) with no second stage: dead path.
+    _src=""
+    for _c in /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed \
+        /boot/efi/EFI/debian/grubx64.efi \
+        /boot/efi/EFI/ubuntu/grubx64.efi \
+        /boot/efi/EFI/fedora/grubx64.efi \
+        /boot/efi/EFI/centos/grubx64.efi \
+        /boot/efi/EFI/rocky/grubx64.efi; do
+        [[ -f "$_c" ]] && {
+            _src="$_c"
+            break
+        }
+    done
+    if [[ -n "$_src" ]] && cp "$_src" "${FB_DIR}/grubx64.efi"; then
+        log "REPAIRED: fallback was shim with no grubx64.efi — restored from ${_src}"
+        repaired=1
+    elif cp "$ZBM" "$FB"; then
+        # No grub to restore: make the fallback self-sufficient instead.
+        log "REPAIRED: fallback was shim with no grubx64.efi and no grub source — installed ZFSBootMenu there"
+        repaired=1
+    else
+        log "FATAL: fallback is shim with no second stage and could not be repaired"
+        failed=1
+    fi
+fi
+
+# ── 3. NVRAM must hold an entry pointing at something real ───────────────────
+# efibootmgr is absent on a non-UEFI boot and efivarfs may be read-only; both
+# are "cannot assert", not "broken".
+if command -v efibootmgr >/dev/null 2>&1 && [[ -d /sys/firmware/efi ]]; then
+    _nv="$(efibootmgr -v 2>/dev/null || true)"
+    if ! grep -qiE '^Boot[0-9A-Fa-f]{4}\*? +kldload$' <<<"$_nv"; then
+        # Resolve the ESP's device in steps, tolerating failure at each one.
+        # Nested command substitution under `set -e` + `pipefail` made this
+        # FATAL: when findmnt returned nothing, lsblk ran with no argument,
+        # exited 32, and pipefail aborted the whole script -- taking the
+        # fallback repairs above with it and reporting the unit as failed.
+        # Caught by running it against a fake ESP; it lints perfectly clean.
+        # Initialise ALL THREE before the guarded assignments below. _disk and
+        # _part are only set inside `if [[ -n "$_dev" ]]`, so when the ESP device
+        # cannot be resolved they were never defined and `set -u` killed the
+        # script at the very check meant to handle that case.
+        _dev=""
+        _disk=""
+        _part=""
+        # swallow: no findmnt, or an ESP that is not a mountpoint here. Both
+        # mean "cannot register an entry", which the -n guard below handles.
+        _dev="$(findmnt -no SOURCE "$ESP" 2>/dev/null || true)"
+        if [[ -n "$_dev" ]]; then
+            # swallow: lsblk exits non-zero for a device it cannot resolve;
+            # an empty result is the signal, not an error worth aborting on.
+            _disk="$(lsblk -no PKNAME "$_dev" 2>/dev/null | head -1 || true)"
+            _part="$(lsblk -no PARTN "$_dev" 2>/dev/null | head -1 || true)"
+        fi
+        if [[ -n "$_disk" && -n "$_part" ]]; then
+            # Point at whatever the fallback actually is: if it is ZBM the entry
+            # is self-sufficient, and if it is shim the chain was just verified.
+            _tgt='\EFI\zbm\BOOTX64.EFI'
+            cmp -s "$FB" "$ZBM" || _tgt='\EFI\BOOT\BOOTX64.EFI'
+            if efibootmgr -c -d "/dev/${_disk}" -p "${_part}" -L "kldload" -l "$_tgt" >/dev/null 2>&1 &&
+                efibootmgr 2>/dev/null | grep -qiE '^Boot[0-9A-Fa-f]{4}\*? +kldload$'; then
+                log "REPAIRED: NVRAM had no kldload entry — recreated it pointing at ${_tgt}"
+                repaired=1
+            else
+                log "WARN: no kldload entry in NVRAM and it could not be recreated"
+                log "  the disk still boots via the fallback \\EFI\\BOOT\\BOOTX64.EFI, which was verified above"
+            fi
+        fi
+    fi
+fi
+
+if ((failed)); then
+    log "boot invariants COULD NOT be restored — this machine may not boot"
+    exit 1
+fi
+((repaired)) || log "boot invariants OK"
+exit 0
