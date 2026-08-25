@@ -215,6 +215,21 @@ KLDLOAD_ENABLE_KVM=$([[ "$PROFILE" == "kvm" ]] && echo 1 || echo 0)
 # a surface no human install has. HISTORY: 2026-08-01 smoke-kvm failed on
 # bpftrace because this answer was missing and autoinstall defaulted it to 0.
 KLDLOAD_ENABLE_EBPF=1
+# Tell the INSTALLER what the firmware is actually doing.
+#
+# SB_ENABLED above only sets the VM's firmware feature; it never reached the
+# answers file, so KLDLOAD_ENABLE_SECURE_BOOT fell through to its default of 1
+# and every smoke install took the Secure-Boot-ON branch -- on a VM booted with
+# Secure Boot OFF. The two disagreed on every run.
+#
+# That is why the SB-off fallback regression (dd73ba00) shipped: the branch that
+# broke had NO coverage at all. The install still passed, because the SB-on path
+# it actually exercised was fine. Same defect as the EBPF answer directly above
+# -- an answers file that does not mirror reality tests a surface no human
+# install has.
+#
+# Default is SB off, which is the common install and the path that broke.
+KLDLOAD_ENABLE_SECURE_BOOT=$([[ "$SB_ENABLED" == "yes" ]] && echo 1 || echo 0)
 KLDLOAD_TIMEZONE=UTC
 EOF
 
