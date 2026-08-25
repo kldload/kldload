@@ -1558,6 +1558,26 @@ _darksite_reclaim() {
     for d in debian ubuntu rpm fedora arch alpine; do
         [[ -d "/root/darksite/${d}" ]] && rm -rf "/root/darksite/${d}"
     done
+
+    # The Ollama payload is 3.3G and is CONSUMED earlier in this same run: the
+    # runtime tarball is extracted and any bundled models are rsynced into
+    # /srv/ollama. After that it is a second copy of things already on disk, and
+    # it was never on this list, so every install carried it forever. Measured
+    # on the 2026-08-25 smoke VM: /root/darksite total 3.3G, of which
+    # /root/darksite/ollama was 3.3G and helm-charts 571K.
+    #
+    # GATED on the install having actually WORKED. If the ollama binary is not
+    # there, the extraction failed or was skipped, and this payload is the only
+    # copy of the bits needed to retry — deleting it would turn a recoverable
+    # state into an unrecoverable one. Disk is cheaper than that.
+    if [[ -d /root/darksite/ollama ]]; then
+        if command -v ollama >/dev/null 2>&1 || [[ -x /usr/local/bin/ollama ]]; then
+            rm -rf /root/darksite/ollama
+            log "  reclaimed /root/darksite/ollama — runtime installed and models staged"
+        else
+            log "  KEEPING /root/darksite/ollama ($(du -sh /root/darksite/ollama 2>/dev/null | cut -f1)) — ollama is not installed, so this is still the only copy"
+        fi
+    fi
     rm -f /etc/yum.repos.d/kldload-darksite.repo 2>/dev/null
     systemctl disable --now kldload-apt-mirror.service 2>/dev/null || true
     after="$(du -sh /root/darksite 2>/dev/null | cut -f1)"

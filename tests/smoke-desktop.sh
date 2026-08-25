@@ -135,7 +135,25 @@ test_output_contains "Graphical target" "systemctl get-default" "graphical"
 # every correctly-built desktop install.
 _section "Browser"
 
-test_cmd "google-chrome" "google-chrome-stable"
+# Which Chromium-based browser is correct is a per-distro decision, not a
+# constant — the same mistake the Display Manager block above documents.
+# kldload-chrome-app resolves google-chrome-stable -> google-chrome -> chromium
+# -> chromium-browser and works with any of them; its own comment says
+# "google-chrome on the RPM distros, chromium on Debian/Ubuntu". Debian ships
+# chromium BY DESIGN, so asserting google-chrome-stable failed a correctly
+# installed desktop. Assert that the wrapper has SOMETHING it can launch.
+_browser=""
+for _b in google-chrome-stable google-chrome chromium chromium-browser; do
+    if command -v "$_b" >/dev/null 2>&1; then
+        _browser="$_b"
+        break
+    fi
+done
+if [[ -n "$_browser" ]]; then
+    _pass "chromium-based browser present (${_browser})"
+else
+    _fail "chromium-based browser present" "none of google-chrome-stable/google-chrome/chromium/chromium-browser — every app launcher is dead"
+fi
 
 # ── Desktop Theme / Config ───────────────────────────────────────────────────
 _section "Desktop Configuration"
