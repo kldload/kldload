@@ -867,7 +867,11 @@ k_install_system_files() {
         #   kspawn            — ZFS-native cluster spawner
         #   kldload-tls-cert  — self-signed TLS cert script for webui HTTPS
         mkdir -p "${target}/usr/local/sbin"
-        for bin in kspawn kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-session kldload-headlamp-install kldload-secure-boot kldload-debug-bundle kldload-rhel-composer-build; do
+        # kldload-boot-assert must reach the TARGET too, not just the live ISO:
+        # its unit is enabled on the installed system, so a copy that stops at
+        # the squashfs leaves multi-user.target pulling in a unit whose
+        # ExecStart does not exist.
+        for bin in kspawn kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-session kldload-headlamp-install kldload-secure-boot kldload-debug-bundle kldload-rhel-composer-build kldload-boot-assert; do
             [[ -f "/usr/local/sbin/${bin}" ]] &&
                 cp "/usr/local/sbin/${bin}" "${target}/usr/local/sbin/${bin}" &&
                 chmod +x "${target}/usr/local/sbin/${bin}" &&

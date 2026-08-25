@@ -2420,7 +2420,12 @@ HELMCHARTS
     #     a stuck install can capture state from the live env, AND so
     #     profiles.sh's per-binary copy list can find it as a source when
     #     installing onto the target.
-    for _lsbin in kspawn kldload-debug-bundle kldload-rhel-composer-build kldload-backup-pack kldload-backup-restore; do
+    #   kldload-boot-assert  — re-checks the EFI boot path on every boot. Same
+    #     omission as kldload-rhel-composer-build below: the script sat in
+    #     includes.chroot/ and the unit shipped, but this list did not name it,
+    #     so the unit would have failed 203/EXEC on every boot of every install
+    #     (caught 2026-08-25 by grepping the built squashfs, not by any linter).
+    for _lsbin in kspawn kldload-debug-bundle kldload-rhel-composer-build kldload-backup-pack kldload-backup-restore kldload-boot-assert; do
         _src="/build/live-build/config/includes.chroot/usr/local/sbin/${_lsbin}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/local/sbin/${_lsbin}" && chmod +x "${ROOTFS}/usr/local/sbin/${_lsbin}"
     done

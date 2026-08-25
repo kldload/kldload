@@ -135,6 +135,56 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
         rm -rf "$WSEXTRACT"
     fi
 
+    # ── Every shipped unit's ExecStart must EXIST in the rootfs ─────────────
+    # This repo copies binaries out of includes.chroot/ using CURATED LISTS in
+    # build-iso.sh and profiles.sh, while systemd units are copied wholesale.
+    # So adding a unit is one edit and shipping the program it runs is another,
+    # and forgetting the second produces a unit that fails 203/EXEC on every
+    # boot -- silently, because a failed oneshot rarely stops anything visible.
+    #
+    # It has now happened at least twice: kldload-rhel-composer-build (build
+    # #50, caught on .103) and kldload-boot-assert (2026-08-25, caught only by
+    # grepping the built squashfs by hand). Both were invisible to every
+    # linter this repo runs, because nothing about either FILE is wrong -- the
+    # defect is a file that is absent from an image, which only the image shows.
+    # (That wording is deliberate: a comment line beginning with the linter's
+    # own name is parsed as a directive and fails the parse. Learned here.)
+    #
+    # Checking the finished image is the only place this is visible, so it is
+    # checked here rather than in a linter that cannot see it.
+    if [[ -f "$MOUNTPOINT/LiveOS/squashfs.img" ]] && command -v unsquashfs >/dev/null 2>&1; then
+        UEXTRACT=$(mktemp -d)
+        if unsquashfs -q -f -d "$UEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" \
+            usr/lib/systemd/system usr/local/bin usr/local/sbin usr/sbin usr/bin >/dev/null 2>&1; then
+            _missing=0
+            _checked=0
+            while IFS= read -r _unit; do
+                # Only the kldload-owned units; distro units are the distro's problem.
+                case "$(basename "$_unit")" in kldload-* | klab-* | zexplore-* | bob-*) ;; *) continue ;; esac
+                while IFS= read -r _exec; do
+                    [[ -n "$_exec" ]] || continue
+                    # Strip systemd's leading modifiers (-, @, :, !, +) and any arguments.
+                    _bin="${_exec#"${_exec%%[!-@:!+]*}"}"
+                    _bin="${_bin%% *}"
+                    [[ "$_bin" == /* ]] || continue
+                    _checked=$((_checked + 1))
+                    if [[ ! -e "${UEXTRACT}/root${_bin}" ]]; then
+                        _fail "unit ExecStart exists" "$(basename "$_unit") -> ${_bin} is NOT in the rootfs (would fail 203/EXEC)"
+                        _missing=$((_missing + 1))
+                    fi
+                done < <(grep -hoP '^ExecStart=\K.*' "$_unit" 2>/dev/null)
+            done < <(find "$UEXTRACT/root/usr/lib/systemd/system" -maxdepth 1 -name '*.service' 2>/dev/null)
+            if ((_checked == 0)); then
+                _warn "no kldload unit ExecStart paths were checked — this gate DID NOT RUN"
+            elif ((_missing == 0)); then
+                _pass "all ${_checked} kldload unit ExecStart paths exist in the rootfs"
+            fi
+        else
+            _warn "could not extract units from squashfs — the ExecStart gate DID NOT RUN"
+        fi
+        rm -rf "$UEXTRACT"
+    fi
+
     umount "$MOUNTPOINT" 2>/dev/null
     _pass "ISO unmounted cleanly"
 else
