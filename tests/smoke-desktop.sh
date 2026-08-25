@@ -120,8 +120,12 @@ case "$DISTRO" in
 deb | debian) _dm_expected="lightdm" ;;
 ubuntu) _dm_expected="gdm3" ;;
 esac
-test_service_active "$_dm_expected" "gdm"
-test_service_enabled "$_dm_expected" "gdm"
+# Check the DM this distro ACTUALLY chose. These calls are (label, service) and
+# passed a hardcoded "gdm" as the service, so the per-distro choice computed
+# directly above was used only as a display label -- Debian correctly resolved
+# lightdm and then asserted gdm anyway. The 05ad06ac fix never took effect.
+test_service_active "display manager (${_dm_expected})" "$_dm_expected"
+test_service_enabled "display manager (${_dm_expected}) enabled" "$_dm_expected"
 
 test_output_contains "Graphical target" "systemctl get-default" "graphical"
 

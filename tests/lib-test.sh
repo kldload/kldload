@@ -55,7 +55,14 @@ test_dir() {
 test_service_active() {
     local name="$1" svc="$2"
     local state
-    state=$(systemctl is-active "$svc" 2>/dev/null)
+    # swallow: `systemctl is-active` exits non-zero for a service that is
+    # inactive, failed or not-found -- which is precisely the case this helper
+    # exists to REPORT. Capturing it bare meant that under the callers' `set -e`
+    # the assignment aborted the whole suite before reaching the _fail below, so
+    # this function could only ever pass. tests/smoke-desktop.sh died mid-run at
+    # "Display Manager" this way on 2026-08-25: no FAIL line, no summary, just a
+    # truncated log and a non-zero exit nobody could attribute.
+    state=$(systemctl is-active "$svc" 2>/dev/null || true)
     if [[ "$state" == "active" ]]; then
         _pass "$name"
     else _fail "$name" "$svc is $state"; fi
@@ -65,7 +72,9 @@ test_service_active() {
 test_service_enabled() {
     local name="$1" svc="$2"
     local state
-    state=$(systemctl is-enabled "$svc" 2>/dev/null)
+    # swallow: same as test_service_active above -- a disabled or absent unit
+    # exits non-zero, and that is the finding, not an error.
+    state=$(systemctl is-enabled "$svc" 2>/dev/null || true)
     if [[ "$state" == "enabled" ]]; then
         _pass "$name"
     else _warn "$name" "$svc is $state"; fi
@@ -83,7 +92,10 @@ test_dataset() {
 test_output_contains() {
     local name="$1" cmd="$2" expected="$3"
     local output
-    output=$(eval "$cmd" 2>&1)
+    # swallow: the command under test is EXPECTED to fail sometimes; that is
+    # what the assertion below decides. Aborting here would turn every failing
+    # assertion into a silent death of the whole suite.
+    output=$(eval "$cmd" 2>&1 || true)
     if echo "$output" | grep -qi "$expected"; then
         _pass "$name"
     else _fail "$name" "expected '$expected' in output of: $cmd"; fi
