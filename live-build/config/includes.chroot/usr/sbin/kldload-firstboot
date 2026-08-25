@@ -3593,9 +3593,46 @@ GREPO
                             gpg --dearmor -o /etc/apt/keyrings/grafana.gpg 2>>"${LOG}"; then
                             printf 'deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main\n' \
                                 >/etc/apt/sources.list.d/grafana.list
-                            DEBIAN_FRONTEND=noninteractive apt-get update -qq >>"${LOG}" 2>&1 || true
-                            DEBIAN_FRONTEND=noninteractive apt-get install -y grafana >>"${LOG}" 2>&1 ||
-                                log "WARNING: grafana install failed (apt) — the Reporting tile will be empty"
+
+                            # RETRY, because this failure mode is genuinely transient.
+                            # apt.grafana.com is a CDN that serves a Packages index
+                            # whose size can disagree with the Release file that
+                            # describes it while a mirror is mid-sync. apt then
+                            # correctly refuses the index, drops it, and the repo has
+                            # no package list at all -- so the install below fails
+                            # with "E: Unable to locate package grafana" even though
+                            # the repo and the key are both perfectly fine.
+                            #
+                            # HISTORY: fiend .124, 2026-08-25 01:22:20 --
+                            #   E: Failed to fetch .../Packages.bz2  File has
+                            #      unexpected size (363031 != 362878). Mirror sync
+                            #      in progress?
+                            #   E: Some index files failed to download. They have
+                            #      been ignored, or old ones used instead.
+                            # Re-running the identical commands two minutes later
+                            # fetched 363 kB cleanly and installed 13.2.0. One
+                            # retry would have turned a dead Reporting tile into a
+                            # thirty-second delay nobody would have noticed.
+                            #
+                            # Bounded and backed off: retrying a deterministic
+                            # failure (repo genuinely gone, no network) just delays
+                            # the warning, so three attempts is the whole budget.
+                            _gf_ok=0
+                            for _gf_try in 1 2 3; do
+                                DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+                                    -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/grafana.list \
+                                    -o Dir::Etc::sourceparts=/dev/null \
+                                    -o APT::Get::List-Cleanup=0 >>"${LOG}" 2>&1 ||
+                                    log "  grafana repo refresh attempt ${_gf_try} reported a problem"
+                                if DEBIAN_FRONTEND=noninteractive apt-get install -y grafana >>"${LOG}" 2>&1; then
+                                    _gf_ok=1
+                                    break
+                                fi
+                                log "  grafana install attempt ${_gf_try}/3 failed"
+                                [[ "${_gf_try}" -lt 3 ]] && sleep $((_gf_try * 30))
+                            done
+                            ((_gf_ok)) ||
+                                log "WARNING: grafana install failed after 3 attempts (apt) — the Reporting tile will be empty"
                         else
                             log "WARNING: could not fetch the Grafana signing key — Reporting tile will be empty"
                         fi
@@ -3607,6 +3644,103 @@ GREPO
                     ok "Grafana installed ($(command -v grafana grafana-server 2>/dev/null | head -1))"
                 else
                     log "WARNING: Grafana NOT installed — Reporting tile and dashboards will be unavailable"
+
+                    # SECOND FAILSAFE. firstboot is ConditionPathExists=!/var/lib/
+                    # kldload/firstboot-done, so it runs once and never again --
+                    # meaning without this, a Grafana that missed its window stays
+                    # missing until an operator notices the empty Reporting tile and
+                    # installs it by hand. That is exactly what happened on .124.
+                    #
+                    # The retry above covers a mirror mid-sync (minutes). This covers
+                    # the longer cases the retry cannot: an install done offline, the
+                    # repo down for an hour, DNS not up yet. It retries on a timer and
+                    # DISABLES ITSELF the moment Grafana is present, so a healthy box
+                    # pays for one ExecStart that exits immediately.
+                    cat >/usr/local/sbin/kldload-grafana-heal <<'GFHEAL'
+#!/usr/bin/env bash
+# kldload-grafana-heal — install Grafana if firstboot could not, then stand down.
+#
+# Runs from kldload-grafana-heal.timer. Exits 0 and disables the timer as soon
+# as Grafana is present, so this is a no-op on every healthy system.
+# Grafana is not in any distro archive; it needs its own vendor repo, which is
+# why this is a network-dependent install rather than a package in the profile.
+set -Eeuo pipefail
+LOG=/var/log/kldload/grafana-heal.log
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || :  # swallow: read-only /var is not a reason to skip the install
+# swallow: a healer must never abort because its own log is unwritable -- under
+# set -e an unwritable $LOG would kill the run that was supposed to fix things.
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null || :; }
+
+_stand_down() {
+    log "Grafana present ($(command -v grafana grafana-server 2>/dev/null | head -1)) — disabling healer"
+    systemctl disable --now kldload-grafana-heal.timer >/dev/null 2>&1 ||
+        log "  could not disable the timer; it will no-op from here regardless"
+    exit 0
+}
+command -v grafana >/dev/null 2>&1 && _stand_down
+command -v grafana-server >/dev/null 2>&1 && _stand_down
+
+log "Grafana still absent — attempting install"
+if command -v dnf >/dev/null 2>&1; then
+    dnf install -y grafana >>"$LOG" 2>&1 || log "dnf install failed; will retry on the next timer tick"
+elif command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq \
+        -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/grafana.list \
+        -o Dir::Etc::sourceparts=/dev/null \
+        -o APT::Get::List-Cleanup=0 >>"$LOG" 2>&1 ||
+        log "repo refresh reported a problem; trying the install anyway"
+    apt-get install -y grafana >>"$LOG" 2>&1 || log "apt install failed; will retry on the next timer tick"
+fi
+
+# Verify the OUTCOME. A package manager exiting 0 is not evidence a binary landed.
+if command -v grafana >/dev/null 2>&1 || command -v grafana-server >/dev/null 2>&1; then
+    systemctl enable --now grafana-server >>"$LOG" 2>&1 ||
+        log "WARN: grafana installed but grafana-server would not start"
+    log "Grafana installed and started by the healer"
+    systemctl disable --now kldload-grafana-heal.timer >/dev/null 2>&1 || true
+else
+    log "Grafana still not installed after this attempt"
+    exit 1
+fi
+GFHEAL
+                    chmod 0755 /usr/local/sbin/kldload-grafana-heal
+
+                    cat >/etc/systemd/system/kldload-grafana-heal.service <<'GFSVC'
+[Unit]
+# Reporting tile is empty without Grafana, and firstboot only runs once.
+Description=kldload — install Grafana if firstboot could not
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kldload-grafana-heal
+# 1 = "still not installed, try again later". Not a unit failure worth alerting on.
+SuccessExitStatus=0 1
+GFSVC
+
+                    cat >/etc/systemd/system/kldload-grafana-heal.timer <<'GFTMR'
+[Unit]
+Description=kldload — retry the Grafana install until it lands
+
+[Timer]
+# 3 min after boot so the network is genuinely up, then every 30 min. The unit
+# disables this timer as soon as Grafana is present, so a healthy box runs it
+# at most once.
+OnBootSec=3min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+GFTMR
+                    systemctl daemon-reload >/dev/null 2>&1 || true
+                    if systemctl enable --now kldload-grafana-heal.timer >/dev/null 2>&1; then
+                        log "  kldload-grafana-heal.timer enabled — will retry every 30 min until Grafana lands"
+                    else
+                        log "  WARNING: could not enable kldload-grafana-heal.timer — Grafana will NOT self-heal"
+                    fi
                 fi
 
                 # ── Prometheus (binary — not in CentOS/EPEL repos) ──
@@ -3705,10 +3839,26 @@ GRAFDS
                 # Remove any stale klab.yaml that pre-existed.
                 rm -f /etc/grafana/provisioning/dashboards/klab.yaml 2>/dev/null || true
 
+                # STAGED vs PROVISIONED is not a wording quibble. These files are
+                # worth copying either way -- the healing timer may install Grafana
+                # later and it reads this directory on start -- but calling it
+                # "provisioned" when Grafana is absent puts five OK lines directly
+                # below the WARNING that says it is not installed, which is how a
+                # log stops being evidence.
+                # HISTORY: fiend .124, 2026-08-25 -- firstboot.log line 64 reads
+                # "WARNING: Grafana NOT installed", and lines 67-72 then report
+                # five Grafana dashboards provisioned. Both were accurate about
+                # what the code did; together they were useless.
+                local _gf_live=0
+                if command -v grafana >/dev/null 2>&1 || command -v grafana-server >/dev/null 2>&1; then
+                    _gf_live=1
+                fi
+                _gf_word() { ((_gf_live)) && printf 'provisioned' || printf 'staged (Grafana not installed yet)'; }
+
                 # Copy pre-built dashboard
                 if [[ -f /usr/local/share/klab/grafana-dashboard.json ]]; then
                     cp /usr/local/share/klab/grafana-dashboard.json /var/lib/grafana/dashboards/klab-estate.json
-                    ok "Grafana dashboard provisioned"
+                    ok "Grafana dashboard $(_gf_word)"
                 fi
 
                 # Additional community dashboards — node_exporter full + Cilium +
@@ -3721,11 +3871,11 @@ GRAFDS
                     _target="/var/lib/grafana/dashboards/grafana-${id}.json"
                     if [[ -f "$_cached" ]]; then
                         cp "$_cached" "$_target"
-                        ok "Grafana dashboard ${id} provisioned (offline)"
+                        ok "Grafana dashboard ${id} $(_gf_word) — offline copy"
                     else
                         curl -fsSL "https://grafana.com/api/dashboards/${id}/revisions/latest/download" \
                             -o "$_target" 2>/dev/null &&
-                            ok "Grafana dashboard ${id} provisioned (online)" || true
+                            ok "Grafana dashboard ${id} $(_gf_word) — fetched online" || true
                     fi
                 done
 
@@ -3735,7 +3885,7 @@ GRAFDS
                 if [[ -f /usr/local/share/klab/grafana-dashboards/tetragon.json ]]; then
                     cp /usr/local/share/klab/grafana-dashboards/tetragon.json \
                         /var/lib/grafana/dashboards/tetragon.json
-                    ok "Grafana dashboard Tetragon eBPF provisioned"
+                    ok "Grafana dashboard Tetragon eBPF $(_gf_word)"
                 fi
 
                 # Pin Node Exporter Full (1860) default "job" to node_exporter.
