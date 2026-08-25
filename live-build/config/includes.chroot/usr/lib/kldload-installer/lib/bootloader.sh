@@ -1410,7 +1410,29 @@ GRUBREFRESHPATH
         fi
     done
 
-    if [[ -n "$shim_src" ]]; then
+    # GATE ON SECURE BOOT, not merely on shim being present.
+    #
+    # This copy is unconditional no longer. shim-signed is in the Debian base
+    # set and shim-x64 in the EL one, so "$shim_src is non-empty" is true on
+    # essentially every install -- including the Secure-Boot-OFF ones, where
+    # the branch ~570 lines above has already put ZFSBootMenu at this exact
+    # path and DELETED grubx64.efi + grub.cfg because nothing chainloads with
+    # SB off. This copy then overwrote ZBM with shim, leaving shim at the
+    # fallback with the second stage it exists to load already removed.
+    #
+    # HISTORY: fiend .124, 2026-08-25 -- three lines of install-direct.log, all
+    # stamped the same second:
+    #     Fallback \EFI\BOOT\BOOTX64.EFI is now ZFSBootMenu (was shim)
+    #       removed grubx64.efi + grub.cfg -- nothing chainloads with SB off
+    #     Shim installed as UEFI fallback: .../EFI/BOOT/BOOTX64.EFI
+    # Firmware auto-creates a "UEFI OS" entry for \EFI\BOOT\BOOTX64.EFI, so
+    # any machine that boots via that entry rather than the "kldload" one --
+    # firmware that prunes OS-created NVRAM entries, a full or cleared NVRAM,
+    # a boot order preferring the firmware entry -- got shim with nothing to
+    # chain to. Reported as an SB-off, unencrypted install that would not boot.
+    # Introduced 05ad06ac (2026-08-19), which added the rm without noticing
+    # this copy runs after it.
+    if [[ -n "$shim_src" ]] && [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]]; then
         cp "$shim_src" "${zbm_fallback_dir}/BOOTX64.EFI"
         k_log "Shim installed as UEFI fallback: ${zbm_fallback_dir}/BOOTX64.EFI (source: ${shim_src})"
 
@@ -1441,12 +1463,49 @@ GRUBREFRESHPATH
             k_log "MOK certificate (mok.der) copied to EFI partition for enrollment from disk"
         fi
     else
-        # No shim found — install ZFSBootMenu directly as the fallback.
-        # This works without Secure Boot but will fail with Secure Boot enabled
-        # unless the user manually disables it or enrolls via other means.
+        # ZFSBootMenu IS the fallback here. Two ways to land in this branch,
+        # and they are not the same event -- one is the design, the other is a
+        # degraded install -- so do not log them identically.
         cp "${zbm_src}" "${zbm_fallback_dir}/BOOTX64.EFI"
-        k_log "WARNING: No shim found — ZFSBootMenu installed unsigned as fallback"
-        k_log "  Secure Boot will block this. Install shim-x64 (RPM) or shim-signed (deb)."
+        if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" != "1" ]]; then
+            k_log "Fallback \\EFI\\BOOT\\BOOTX64.EFI is ZFSBootMenu (Secure Boot off — no shim chain)"
+            k_log "  both the kldload entry and the firmware's own \"UEFI OS\" entry now boot ZBM"
+        else
+            k_log "WARNING: No shim found — ZFSBootMenu installed unsigned as fallback"
+            k_log "  Secure Boot will block this. Install shim-x64 (RPM) or shim-signed (deb)."
+        fi
+    fi
+
+    # ── Post-condition: the ESP must be COHERENT before we call this done ────
+    #
+    # Every part of this function is individually correct; the .124 brick came
+    # from two correct parts running in the wrong order. A per-step check would
+    # not have caught it -- only looking at the finished ESP does. So assert the
+    # OUTCOME, which is the one check that catches a reordering, a new early
+    # return, or anyone re-introducing an ungated copy.
+    #
+    # The invariant: whatever sits at the fallback path must be able to boot on
+    # its own. shim cannot -- it needs grubx64.efi beside it.
+    local _fb="${zbm_fallback_dir}/BOOTX64.EFI"
+    local _esp_ok=1
+    if [[ ! -f "${zbm_efi_dir}/BOOTX64.EFI" ]]; then
+        k_log "FATAL: ZFSBootMenu missing at \\EFI\\zbm\\BOOTX64.EFI — the kldload boot entry has no target"
+        _esp_ok=0
+    fi
+    if [[ ! -f "$_fb" ]]; then
+        k_log "FATAL: nothing at \\EFI\\BOOT\\BOOTX64.EFI — firmware that uses the removable-media path cannot boot this disk"
+        _esp_ok=0
+    elif cmp -s "$_fb" "${zbm_efi_dir}/BOOTX64.EFI"; then
+        k_log "ESP check: fallback is ZFSBootMenu — self-contained, boots on its own"
+    elif [[ -f "${zbm_fallback_dir}/grubx64.efi" ]]; then
+        k_log "ESP check: fallback is shim + grubx64.efi present — chain is complete"
+    else
+        k_log "FATAL: fallback is shim but \\EFI\\BOOT\\grubx64.efi is MISSING — shim has nothing to load"
+        k_log "  this is the .124 failure mode; refusing to finish with an unbootable fallback"
+        _esp_ok=0
+    fi
+    if ((!_esp_ok)); then
+        k_die "ESP is not coherent — see the FATAL lines above; the install would not boot reliably"
     fi
 
     # startup.nsh — UEFI shell auto-runs this if no boot entries exist (exported images)
