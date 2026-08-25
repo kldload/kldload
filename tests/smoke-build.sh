@@ -214,7 +214,7 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
                         # program lands -- or delete the units if it never will.
                         case "$(basename "$_unit")" in
                         kldload-autobootstrap.service)
-                            _warn "unit ExecStart missing (known, unimplemented): $(basename "$_unit") -> ${_bin} — firstboot does not enable it"
+                            _warn "unit ExecStart missing (known, unimplemented)" "$(basename "$_unit") -> ${_bin} — the program was never written; firstboot does not enable it"
                             continue
                             ;;
                         esac
@@ -224,13 +224,13 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
                 done < <(grep -hoP '^ExecStart=\K.*' "$_unit" 2>/dev/null)
             done < <(find "$UUNITS/root/usr/lib/systemd/system" -maxdepth 1 -name '*.service' 2>/dev/null)
             if ((_checked == 0)); then
-                _warn "no kldload unit ExecStart paths were checked — this gate DID NOT RUN"
+                _warn "unit ExecStart gate" "no kldload unit ExecStart paths were checked — this gate DID NOT RUN"
             elif ((_missing == 0)); then
                 _pass "all ${_checked} kldload unit ExecStart paths exist in the rootfs"
             fi
             rm -rf "$UUNITS"
         else
-            _warn "could not list the squashfs — the ExecStart gate DID NOT RUN"
+            _warn "unit ExecStart gate" "could not list the squashfs — this gate DID NOT RUN"
         fi
         rm -f "$ULIST"
     fi
