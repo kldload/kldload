@@ -152,14 +152,58 @@ bootenv_install() {
             efibootmgr -b "$_bnum" -B 2>/dev/null && log "  Removed Boot${_bnum}" || true
         done
 
-        log "Registering with efibootmgr: disk=$disk part=$part_num"
-        run efibootmgr \
-            -c \
-            -d "$disk" \
-            -p "$part_num" \
-            -L "KLDload ZBM" \
-            -l '\EFI\kldload\zfsbootmenu.efi' \
-            2>&1 || log "WARNING: efibootmgr registration failed — may need manual EFI entry"
+        # The loader path must match where ZFSBootMenu was ACTUALLY installed,
+        # and it is Secure-Boot-conditional:
+        #   SB on  -> \EFI\BOOT\BOOTX64.EFI   (shim, which chains onward)
+        #   SB off -> \EFI\zbm\BOOTX64.EFI    (ZBM directly)
+        # k_install_bootloader picks between exactly these two; this function
+        # must not invent a third.
+        #
+        # It used to hardcode \EFI\kldload\zfsbootmenu.efi -- wrong in both
+        # the directory and the filename. Nothing has ever been installed
+        # there: the tree is \EFI\zbm\BOOTX64.EFI (see the file banner in
+        # lib/bootloader.sh, and .125's firmware showing
+        # "Boot0000* kldload  ...\EFI\ZBM\BOOTX64.EFI").
+        #
+        # That made this a brick, not a cosmetic bug, because the sweep above
+        # DELETES the working kldload entry first. A recovery run therefore
+        # removed the entry that booted the machine and replaced it with one
+        # aimed at a file that does not exist -- on a host the operator was
+        # already recovering. Found 2026-08-25 while auditing the boot path
+        # after the SB-off fallback regression.
+        local _efi_target='\EFI\BOOT\BOOTX64.EFI'
+        if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" != "1" ]]; then
+            _efi_target='\EFI\zbm\BOOTX64.EFI'
+        fi
+
+        # Assert the target EXISTS before pointing firmware at it. This is a
+        # recovery path; creating an entry to a missing file is the failure it
+        # is supposed to undo.
+        local _efi_check="${target}/boot/efi${_efi_target//\\//}"
+        if [[ ! -f "$_efi_check" ]]; then
+            log "WARNING: ${_efi_target} is not on the ESP (looked for ${_efi_check})"
+            log "  registering it anyway would create a boot entry to nothing — skipping"
+        else
+            log "Registering with efibootmgr: disk=$disk part=$part_num target=${_efi_target}"
+            run efibootmgr \
+                -c \
+                -d "$disk" \
+                -p "$part_num" \
+                -L "kldload" \
+                -l "$_efi_target" \
+                2>&1 || log "WARNING: efibootmgr registration failed — may need manual EFI entry"
+
+            # VERIFY THE OUTCOME. efibootmgr exiting 0 is not evidence NVRAM
+            # took the write -- it fails on full NVRAM and on firmware that
+            # refuses efivarfs writes, and the fallback path is then the only
+            # way this disk boots.
+            if efibootmgr 2>/dev/null | grep -qi 'kldload'; then
+                log "  verified: a kldload entry is present in NVRAM"
+            else
+                log "WARNING: no kldload entry in NVRAM after registration —"
+                log "  this disk now boots ONLY via the firmware fallback \\EFI\\BOOT\\BOOTX64.EFI"
+            fi
+        fi
     else
         log "WARNING: Could not determine disk for efibootmgr — skipping EFI registration"
     fi
