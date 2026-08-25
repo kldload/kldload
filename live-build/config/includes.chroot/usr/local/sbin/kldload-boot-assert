@@ -112,6 +112,9 @@ fi
 # efibootmgr is absent on a non-UEFI boot and efivarfs may be read-only; both
 # are "cannot assert", not "broken".
 if command -v efibootmgr >/dev/null 2>&1 && [[ -d /sys/firmware/efi ]]; then
+    # swallow: efibootmgr exits non-zero when efivarfs is read-only or absent.
+    # An empty _nv then means "cannot read NVRAM", which the grep below treats
+    # as "no entry" and handles by trying to create one.
     _nv="$(efibootmgr -v 2>/dev/null || true)"
     if ! grep -qiE '^Boot[0-9A-Fa-f]{4}\*? +kldload$' <<<"$_nv"; then
         # Resolve the ESP's device in steps, tolerating failure at each one.
@@ -134,6 +137,8 @@ if command -v efibootmgr >/dev/null 2>&1 && [[ -d /sys/firmware/efi ]]; then
             # swallow: lsblk exits non-zero for a device it cannot resolve;
             # an empty result is the signal, not an error worth aborting on.
             _disk="$(lsblk -no PKNAME "$_dev" 2>/dev/null | head -1 || true)"
+            # swallow: same as _disk directly above -- an unresolvable device
+            # yields an empty value, which the -n guard below is there to catch.
             _part="$(lsblk -no PARTN "$_dev" 2>/dev/null | head -1 || true)"
         fi
         if [[ -n "$_disk" && -n "$_part" ]]; then

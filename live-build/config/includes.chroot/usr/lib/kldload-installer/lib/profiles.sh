@@ -985,6 +985,8 @@ k_install_system_files() {
         # the reason the SB-off fallback breakage went unnoticed for six days.
         # HARMLESS CASE: an existing symlink, exactly as the sibling lns here.
         mkdir -p "${target}/etc/systemd/system/multi-user.target.wants"
+        # swallow: ln -sf fails only if the wants dir is unwritable; the
+        # symlink already existing is the normal re-run case and succeeds.
         ln -sf "/usr/lib/systemd/system/kldload-boot-assert.service" "${target}/etc/systemd/system/multi-user.target.wants/kldload-boot-assert.service" || true
 
         # kldload-collect: samples the kernel cockpit's signal set into a JSONL

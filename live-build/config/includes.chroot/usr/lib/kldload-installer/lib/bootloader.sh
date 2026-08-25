@@ -1801,11 +1801,19 @@ DRACUT
         # one. Put ours at the front and let the rest stand behind it, so a
         # firmware that fails our entry still has somewhere to go.
         local _primary _backup _rest _order
+        # swallow: grep exits 1 when NO kldload entry exists. That is a real
+        # outcome handled by the -z test below (it warns and leaves the order
+        # alone), not an error -- so an empty result must not abort under set -e.
         _primary=$(efibootmgr 2>/dev/null | grep -iE '^Boot[0-9A-Fa-f]{4}\*? +kldload$' | grep -oP '^Boot\K[0-9A-Fa-f]{4}' | head -1 || true)
+        # swallow: the backup entry is optional -- absent whenever
+        # BOOTX64-BACKUP.EFI is not on the ESP. grep's exit 1 says exactly that.
         _backup=$(efibootmgr 2>/dev/null | grep -iE '^Boot[0-9A-Fa-f]{4}\*? +kldload \(backup\)$' | grep -oP '^Boot\K[0-9A-Fa-f]{4}' | head -1 || true)
         if [[ -n "$_primary" ]]; then
             # Everything already in BootOrder that is not one of ours, order kept.
             _rest=$(efibootmgr 2>/dev/null | sed -n 's/^BootOrder: //p' | tr ',' '\n' |
+                # swallow: grep -v exits 1 when it filters EVERYTHING out --
+                # i.e. BootOrder held only our own entries. An empty _rest is
+                # the correct answer there, not a failure.
                 grep -viE "^(${_primary}|${_backup:-NOMATCH})$" | paste -sd, - || true)
             _order="${_primary}"
             [[ -n "$_backup" ]] && _order="${_order},${_backup}"

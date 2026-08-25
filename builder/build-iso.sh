@@ -2425,7 +2425,11 @@ HELMCHARTS
     #     includes.chroot/ and the unit shipped, but this list did not name it,
     #     so the unit would have failed 203/EXEC on every boot of every install
     #     (caught 2026-08-25 by grepping the built squashfs, not by any linter).
-    for _lsbin in kspawn kldload-debug-bundle kldload-rhel-composer-build kldload-backup-pack kldload-backup-restore kldload-boot-assert; do
+    #   kldload-live-ssh-init — the LIVE ISO's ssh bootstrap. Its unit shipped
+    #     and referenced /usr/local/sbin/kldload-live-ssh-init, but no copy list
+    #     named the script, so it failed 203/EXEC on every live boot. Found
+    #     2026-08-25 by the ExecStart gate in smoke-build, not by any linter.
+    for _lsbin in kspawn kldload-debug-bundle kldload-rhel-composer-build kldload-backup-pack kldload-backup-restore kldload-boot-assert kldload-live-ssh-init; do
         _src="/build/live-build/config/includes.chroot/usr/local/sbin/${_lsbin}"
         [[ -f "$_src" ]] && cp "$_src" "${ROOTFS}/usr/local/sbin/${_lsbin}" && chmod +x "${ROOTFS}/usr/local/sbin/${_lsbin}"
     done

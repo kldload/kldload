@@ -110,7 +110,14 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
         WSEXTRACT=$(mktemp -d)
         declare -a WS_FILES=(
             usr/share/applications/kldload-webui.desktop
-            usr/share/icons/hicolor/scalable/apps/kldload-webui.svg
+            # kldload-console.svg, not kldload-webui.svg: the webui icon was
+            # RETIRED in 0d65de24 ("icons: xplore-family redesign; retire
+            # tiles"), and kldload-webui.desktop has read `Icon=kldload-console`
+            # ever since. This list was never updated, so the gate demanded a
+            # file the tree deliberately no longer has and failed every build
+            # from that commit onward -- a test failing on a correct system,
+            # which trains everyone to ignore the whole suite.
+            usr/share/icons/hicolor/scalable/apps/kldload-console.svg
             usr/share/icons/hicolor/scalable/apps/bob-chat.svg
             usr/share/icons/hicolor/scalable/apps/kldload-zfs.svg
         )
@@ -153,36 +160,79 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
     # Checking the finished image is the only place this is visible, so it is
     # checked here rather than in a linter that cannot see it.
     if [[ -f "$MOUNTPOINT/LiveOS/squashfs.img" ]] && command -v unsquashfs >/dev/null 2>&1; then
-        UEXTRACT=$(mktemp -d)
-        if unsquashfs -q -f -d "$UEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" \
-            usr/lib/systemd/system usr/local/bin usr/local/sbin usr/sbin usr/bin >/dev/null 2>&1; then
+        # LIST the squashfs, do not extract a subset of it. The first version of
+        # this gate extracted five directories and then asked whether each
+        # ExecStart existed underneath them -- so every unit pointing anywhere
+        # else (/bin/sh, /sbin/agetty, /usr/libexec/...) was reported missing.
+        # Seven false positives on a good image. A gate that cries wolf gets
+        # ignored, which is worse than not having one.
+        ULIST=$(mktemp)
+        if unsquashfs -l "$MOUNTPOINT/LiveOS/squashfs.img" 2>/dev/null | sed 's|^squashfs-root||' | grep '^/' >"$ULIST"; then
+            UUNITS=$(mktemp -d)
+            unsquashfs -q -f -d "$UUNITS/root" "$MOUNTPOINT/LiveOS/squashfs.img" \
+                usr/lib/systemd/system >/dev/null 2>&1 || true
             _missing=0
             _checked=0
             while IFS= read -r _unit; do
-                # Only the kldload-owned units; distro units are the distro's problem.
                 case "$(basename "$_unit")" in kldload-* | klab-* | zexplore-* | bob-*) ;; *) continue ;; esac
                 while IFS= read -r _exec; do
                     [[ -n "$_exec" ]] || continue
-                    # Strip systemd's leading modifiers (-, @, :, !, +) and any arguments.
+                    # Strip systemd's leading modifiers (- @ : ! +) and arguments.
                     _bin="${_exec#"${_exec%%[!-@:!+]*}"}"
                     _bin="${_bin%% *}"
                     [[ "$_bin" == /* ]] || continue
+                    # usrmerge: /bin, /sbin, /lib and /usr/sbin are symlinks into
+                    # /usr/bin and /usr/lib, and /usr/local/sbin is a symlink to
+                    # /usr/local/bin. A listing shows the TARGET, so normalise
+                    # before asking whether the file is there.
+                    _alt="$_bin"
+                    case "$_bin" in
+                    /bin/*) _alt="/usr${_bin}" ;;
+                    /sbin/*) _alt="/usr/bin/${_bin#/sbin/}" ;;
+                    /usr/sbin/*) _alt="/usr/bin/${_bin#/usr/sbin/}" ;;
+                    /usr/local/sbin/*) _alt="/usr/local/bin/${_bin#/usr/local/sbin/}" ;;
+                    /lib/*) _alt="/usr${_bin}" ;;
+                    esac
+                    # /var/lib is state, not image content. kldload-headlamp's
+                    # server binary is downloaded from GitHub at runtime by
+                    # kldload-headlamp-install, so it is CORRECTLY absent from
+                    # the ISO. Flagging it would be a false positive, and the
+                    # first version of this gate produced seven of those --
+                    # enough to make the whole suite ignorable.
+                    case "$_bin" in /var/*) continue ;; esac
                     _checked=$((_checked + 1))
-                    if [[ ! -e "${UEXTRACT}/root${_bin}" ]]; then
+                    if ! grep -qxF "$_bin" "$ULIST" && ! grep -qxF "$_alt" "$ULIST"; then
+                        # KNOWN-UNIMPLEMENTED, named explicitly rather than
+                        # skipped silently. kldload-autobootstrap's program has
+                        # never existed in this repository -- the unit and timer
+                        # ship, and until 2026-08-25 firstboot enabled the timer,
+                        # so it failed 203/EXEC on every install unnoticed.
+                        # firstboot now refuses to enable it while the binary is
+                        # absent, which makes it inert rather than broken. It
+                        # stays on this list, and stays reported every build, so
+                        # it is not forgotten again. Delete the entry the day the
+                        # program lands -- or delete the units if it never will.
+                        case "$(basename "$_unit")" in
+                        kldload-autobootstrap.service)
+                            _warn "unit ExecStart missing (known, unimplemented): $(basename "$_unit") -> ${_bin} — firstboot does not enable it"
+                            continue
+                            ;;
+                        esac
                         _fail "unit ExecStart exists" "$(basename "$_unit") -> ${_bin} is NOT in the rootfs (would fail 203/EXEC)"
                         _missing=$((_missing + 1))
                     fi
                 done < <(grep -hoP '^ExecStart=\K.*' "$_unit" 2>/dev/null)
-            done < <(find "$UEXTRACT/root/usr/lib/systemd/system" -maxdepth 1 -name '*.service' 2>/dev/null)
+            done < <(find "$UUNITS/root/usr/lib/systemd/system" -maxdepth 1 -name '*.service' 2>/dev/null)
             if ((_checked == 0)); then
                 _warn "no kldload unit ExecStart paths were checked — this gate DID NOT RUN"
             elif ((_missing == 0)); then
                 _pass "all ${_checked} kldload unit ExecStart paths exist in the rootfs"
             fi
+            rm -rf "$UUNITS"
         else
-            _warn "could not extract units from squashfs — the ExecStart gate DID NOT RUN"
+            _warn "could not list the squashfs — the ExecStart gate DID NOT RUN"
         fi
-        rm -rf "$UEXTRACT"
+        rm -f "$ULIST"
     fi
 
     umount "$MOUNTPOINT" 2>/dev/null

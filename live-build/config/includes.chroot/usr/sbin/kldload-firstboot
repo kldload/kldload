@@ -356,7 +356,30 @@ DNS
         log "WARNING: kldload-dns-api.service failed to start"
 
     # 10. cluster-autobootstrap timer
-    systemctl enable --now kldload-autobootstrap.timer 2>/dev/null || true
+    # DO NOT enable this until the binary exists.
+    #
+    # kldload-autobootstrap.service declares
+    # ExecStart=/usr/local/sbin/kldload-autobootstrap, and that program is not
+    # in this repository -- not in includes.chroot, not in any build-iso.sh or
+    # profiles.sh copy list, nowhere. The unit and its timer have shipped and
+    # been enabled on every install regardless, so the timer has been firing and
+    # the service failing 203/EXEC every time, invisibly: the `2>/dev/null ||
+    # true` here swallowed the enable's own complaint, and a failing oneshot
+    # blocks nothing an operator would notice.
+    #
+    # Found 2026-08-25 by the ExecStart gate added to smoke-build, which reads
+    # every shipped unit and asserts its binary is in the rootfs. "kldload
+    # cluster autobootstrap and WireGuard reflector" has therefore never run.
+    #
+    # The units stay so the feature can be implemented against them. Enabling is
+    # gated on the program actually being there, so the day it lands this starts
+    # working with no further change -- and until then nothing pretends it works.
+    if [[ -x /usr/local/sbin/kldload-autobootstrap ]]; then
+        systemctl enable --now kldload-autobootstrap.timer 2>/dev/null ||
+            log "WARNING: kldload-autobootstrap.timer would not enable"
+    else
+        log "SKIP: kldload-autobootstrap.timer — /usr/local/sbin/kldload-autobootstrap does not exist (unimplemented; see the note in kldload-firstboot)"
+    fi
 
     # 11. Snapshot timer (inherited from base)
     systemctl enable --now kldload-snapshot.timer 2>/dev/null || true
@@ -3698,6 +3721,8 @@ if command -v grafana >/dev/null 2>&1 || command -v grafana-server >/dev/null 2>
     systemctl enable --now grafana-server >>"$LOG" 2>&1 ||
         log "WARN: grafana installed but grafana-server would not start"
     log "Grafana installed and started by the healer"
+    # swallow: the timer may already be disabled (a prior run stood it down),
+    # which is the success case, not a failure worth aborting the healer for.
     systemctl disable --now kldload-grafana-heal.timer >/dev/null 2>&1 || true
 else
     log "Grafana still not installed after this attempt"
@@ -3735,6 +3760,8 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 GFTMR
+                    # swallow: daemon-reload is advisory here -- the enable
+                    # below is what must work, and it reports its own failure.
                     systemctl daemon-reload >/dev/null 2>&1 || true
                     if systemctl enable --now kldload-grafana-heal.timer >/dev/null 2>&1; then
                         log "  kldload-grafana-heal.timer enabled — will retry every 30 min until Grafana lands"
@@ -3875,6 +3902,8 @@ GRAFDS
                     else
                         curl -fsSL "https://grafana.com/api/dashboards/${id}/revisions/latest/download" \
                             -o "$_target" 2>/dev/null &&
+                            # swallow: `ok` is a logging helper; a failed write
+                            # to the log must not abort the dashboard loop.
                             ok "Grafana dashboard ${id} $(_gf_word) — fetched online" || true
                     fi
                 done
