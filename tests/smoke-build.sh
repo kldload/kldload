@@ -730,6 +730,38 @@ else
         "hostid resolves from two sources that can disagree — import fails and drops to initramfs"
 fi
 
+# The apt snapshot hooks must reach the live rootfs, or the PATH shim at
+# /usr/local/bin/apt is the ONLY thing taking pre-transaction snapshots — and a
+# PATH shim cannot see unattended-upgrades (python-apt never execs the binary),
+# aptitude, absolute-path /usr/bin/apt-get calls, or a systemd unit with a
+# trimmed PATH. Those users get no snapshot and no way back.
+#
+# This shipped broken for as long as the hooks have existed: two installer loops
+# copy them to the target, both read from the LIVE ISO's /etc/apt/apt.conf.d,
+# and build-iso.sh never put them there. Both loops globbed nothing and exited
+# 0. The wrapper's own header calls these hooks "the belt to this tool's
+# braces"; the braces were never on a single install (found 2026-08-26 on rc6).
+if grep -q 'includes.chroot/etc/apt/apt.conf.d' "$ROOT/builder/build-iso.sh" 2>/dev/null; then
+    _pass "build-iso copies the apt snapshot hooks into the rootfs"
+else
+    _fail "build-iso copies the apt snapshot hooks into the rootfs" \
+        "nothing copies includes.chroot/etc/apt/ — the installer's copy loops will glob nothing, silently"
+fi
+
+# And the OUTCOME check, when a built ISO is available: the source having a cp
+# is not evidence the file landed.
+if [[ -n "${SQUASHFS_ROOT:-}" && -d "${SQUASHFS_ROOT:-/nonexistent}" ]]; then
+    _aptmissing=""
+    for _h in 00-kldload-snapshot-pre 00-kldload-snapshot-post; do
+        [[ -f "${SQUASHFS_ROOT}/etc/apt/apt.conf.d/${_h}" ]] || _aptmissing+="$_h "
+    done
+    if [[ -z "$_aptmissing" ]]; then
+        _pass "apt snapshot hooks are present in the built rootfs"
+    else
+        _fail "apt snapshot hooks present in the built rootfs" "missing: $_aptmissing"
+    fi
+fi
+
 # The package database must live INSIDE the boot environment, or a rollback
 # produces a system whose dpkg lies. /usr is already in the BE (rpool/usr is
 # canmount=off); /var/lib has to be too, because that is where dpkg/rpm keep

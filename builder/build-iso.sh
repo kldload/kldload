@@ -2069,6 +2069,40 @@ HELMCHARTS
         install -m 0755 /build/live-build/config/includes.chroot/etc/zfs/zed.d/all-loki.sh \
             "${ROOTFS}/etc/zfs/zed.d/all-loki.sh"
     fi
+    # APT pre/post snapshot hooks. These are the BACKSTOP to the PATH shim at
+    # /usr/local/bin/apt: a shim only sees what resolves through PATH, so
+    # unattended-upgrades (which drives python-apt and never execs the binary),
+    # aptitude, absolute-path /usr/bin/apt-get calls in scripts, and systemd
+    # units with a trimmed PATH all bypass it entirely. DPkg::Pre-Invoke fires
+    # inside apt itself and catches every one of them.
+    #
+    # WHY THIS BLOCK EXISTS AT ALL: the hooks were written, and TWO installer
+    # loops copy them to the target (profiles.sh and kldload-install-target) --
+    # but both read from the LIVE ISO's /etc/apt/apt.conf.d, and nothing ever
+    # put them there. includes.chroot/etc is copied subtree by explicit subtree
+    # here, and apt/ was never on the list. So both loops globbed nothing and
+    # installed nothing, silently, on every build. The wrapper's own header
+    # describes these hooks as "the belt to this tool's braces"; the braces have
+    # never existed on a single install.
+    #
+    # Found 2026-08-26 on a fresh rc6 install by checking whether the documented
+    # backstop was actually present. It was not, and nothing anywhere reported
+    # it -- the copy loops iterate an empty glob and exit 0.
+    if [[ -d /build/live-build/config/includes.chroot/etc/apt/apt.conf.d ]]; then
+        mkdir -p "${ROOTFS}/etc/apt/apt.conf.d"
+        cp /build/live-build/config/includes.chroot/etc/apt/apt.conf.d/00-kldload-snapshot-* \
+            "${ROOTFS}/etc/apt/apt.conf.d/"
+        # Assert the outcome: an empty glob would leave this block "successful"
+        # and the hooks absent, which is precisely how this shipped broken.
+        for _h in 00-kldload-snapshot-pre 00-kldload-snapshot-post; do
+            [[ -f "${ROOTFS}/etc/apt/apt.conf.d/${_h}" ]] ||
+                die "FATAL: ${_h} did not land in the rootfs — the apt snapshot backstop would be absent again"
+        done
+        log "APT snapshot hooks installed into the live rootfs (backstop for the PATH shim)"
+    else
+        die "FATAL: includes.chroot/etc/apt/apt.conf.d missing — apt snapshot hooks cannot be installed"
+    fi
+
     if [[ -d /build/live-build/config/includes.chroot/etc/systemd/journald.conf.d ]]; then
         mkdir -p "${ROOTFS}/etc/systemd/journald.conf.d"
         cp /build/live-build/config/includes.chroot/etc/systemd/journald.conf.d/*.conf \
