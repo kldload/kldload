@@ -1129,8 +1129,12 @@ EOFSTAB
     # argument. Turning Secure Boot on silently disabled the GPU. The
     # operator also lost the boot-environment picker without being told.
     #
-    # Same detection as bootstrap.sh (lspci on the LIVE system, which is the
-    # same hardware being installed to) so the two cannot disagree.
+    # The SAME FUNCTION as bootstrap.sh, not a second copy of the same idea.
+    # This comment used to claim "same detection ... so the two cannot
+    # disagree" over a regex that differed from bootstrap.sh's: that one
+    # matched any NVIDIA PCI function, this one matched display classes. An
+    # NVIDIA HDMI-audio device or an nForce NIC beside a non-NVIDIA GPU split
+    # them. Calling one function is how the claim becomes true.
     #
     # ONLY when a driver will actually load. Hardware detection alone is not
     # enough: blacklisting nouveau with no nvidia.ko removes the last display
@@ -1150,7 +1154,15 @@ EOFSTAB
     # bug being fixed. Blacklisting on no information risks a black screen;
     # not blacklisting costs NVIDIA one extra reboot, because kldload-firstboot
     # applies the blacklist itself once nvidia.ko actually exists.
-    if lspci 2>/dev/null | grep -qiE 'vga.*nvidia|3d.*nvidia'; then
+    _nv_present=0
+    if declare -F _k_has_nvidia_gpu >/dev/null 2>&1; then
+        _k_has_nvidia_gpu && _nv_present=1
+    else
+        # Fail toward "no NVIDIA": the only thing this branch adds is a
+        # blacklist, and adding one on no information is the black-screen case.
+        k_log "WARNING: _k_has_nvidia_gpu unavailable — assuming no NVIDIA GPU (fail-safe)"
+    fi
+    if [[ "$_nv_present" == "1" ]]; then
         _nv_will_load=0
         if declare -F _k_nvidia_will_load >/dev/null 2>&1; then
             _k_nvidia_will_load "${target}" && _nv_will_load=1
@@ -1168,6 +1180,7 @@ EOFSTAB
         fi
         unset _nv_will_load
     fi
+    unset _nv_present
 
     # Cap the ARC on the COMMAND LINE, not only in /etc/modprobe.d.
     #

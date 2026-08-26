@@ -998,6 +998,29 @@ k_bootstrap_base() {
 #
 # Callers must treat a non-zero return as "leave nouveau alone" — a slow
 # software-rendered desktop is recoverable, no display driver is not.
+# _k_has_nvidia_gpu — is there an NVIDIA DISPLAY device on this machine?
+#
+# stdout: nothing. Exit 0 if an NVIDIA GPU is present, 1 otherwise.
+#
+# One function because there used to be four, and bootloader.sh's copy carried
+# the comment "Same detection as bootstrap.sh ... so the two cannot disagree"
+# while using a different pattern. The three sites here matched `lspci | grep
+# -qi nvidia` — ANY NVIDIA PCI function — and bootloader.sh matched the display
+# classes only. On an nForce board, or any machine with an NVIDIA HDMI-audio
+# function beside a non-NVIDIA GPU, the first says yes and the second says no.
+# A comment asserting an invariant the code does not hold is worse than no
+# comment: it stops the next person from checking.
+#
+# Display classes, not "any NVIDIA device", because the only thing this
+# decision is about is which driver drives the screen. An NVIDIA NIC has no
+# opinion on nouveau. The three classes cover what lspci actually prints for
+# GPUs: "VGA compatible controller" (desktop cards), "3D controller" (laptop
+# discrete / Optimus) and "Display controller" (some datacenter parts).
+_k_has_nvidia_gpu() {
+    lspci 2>/dev/null |
+        grep -qiE '(vga compatible controller|3d controller|display controller).*nvidia'
+}
+
 _k_nvidia_will_load() {
     local target="${1:?}"
     # Already built into the target (DKMS ran in the chroot, or prebuilt).
@@ -2717,7 +2740,7 @@ CUSTOMREPO
     # NVIDIA drivers — auto-detect GPU or honor explicit flag
     local _nvidia="${KLDLOAD_NVIDIA_DRIVERS:-auto}"
     if [[ "$_nvidia" == "auto" ]]; then
-        if lspci 2>/dev/null | grep -qi nvidia; then
+        if _k_has_nvidia_gpu; then
             _nvidia=1
             k_log_to "$log" "NVIDIA GPU detected — installing drivers"
         else
@@ -2791,7 +2814,25 @@ NCTREPO
             #    will build the module against the running kernel; without
             #    nouveau blacklisted, the X server / Wayland session bind to
             #    nouveau and a driver switch needs a second reboot.
-            if [[ -d "${target}/etc/modprobe.d" ]]; then
+            #
+            # GATED ON A DRIVER ACTUALLY EXISTING, exactly like the ZBM cmdline
+            # blacklist below. It was not, and that was a hole in the 2026-08-18
+            # fix: that incident added _k_nvidia_will_load and wired it into the
+            # boot COMMAND LINE, leaving this file to be written unconditionally
+            # whenever an NVIDIA device was seen. The two do different jobs —
+            # rd.driver.blacklist keeps nouveau out of the initramfs, this file
+            # keeps udev from loading it on the real root — so an ungated
+            # modprobe.d entry reproduces the same black screen one stage later,
+            # on a machine whose cmdline correctly declined to blacklist. The
+            # RTX 3080 case (vendor repo unreachable, no nvidia.ko ever built)
+            # is exactly that shape.
+            if ! _k_nvidia_will_load "${target}"; then
+                k_log_to "$log" "  NOT writing the nouveau modprobe.d blacklist: nothing provides nvidia.ko."
+                k_log_to "$log" "  kldload-firstboot blacklists nouveau on the BOOT CMDLINE once a driver"
+                k_log_to "$log" "  is really present (the akmod/dkms catch-all), which is what actually"
+                k_log_to "$log" "  decides the GPU. Nothing recreates this modprobe.d file, by design."
+                rm -f "${target}/etc/modprobe.d/blacklist-nouveau.conf"
+            elif [[ -d "${target}/etc/modprobe.d" ]]; then
                 cat >"${target}/etc/modprobe.d/blacklist-nouveau.conf" <<'NOUVEAU'
 blacklist nouveau
 options nouveau modeset=0
@@ -3169,7 +3210,7 @@ NMCONF
     # NVIDIA drivers — only when user selected GPU support in web UI
     local _nvidia="${KLDLOAD_NVIDIA_DRIVERS:-auto}"
     if [[ "$_nvidia" == "auto" ]]; then
-        if lspci 2>/dev/null | grep -qi nvidia; then
+        if _k_has_nvidia_gpu; then
             _nvidia=1
             k_log_to "$log" "NVIDIA GPU detected — installing drivers"
         else
@@ -3686,7 +3727,7 @@ MIRRORS
     # ── NVIDIA drivers — auto-detect GPU or honor explicit flag ────────────────
     local _nvidia_arch="${KLDLOAD_NVIDIA_DRIVERS:-auto}"
     if [[ "$_nvidia_arch" == "auto" ]]; then
-        if lspci 2>/dev/null | grep -qi nvidia; then
+        if _k_has_nvidia_gpu; then
             _nvidia_arch=1
             k_log_to "$log" "NVIDIA GPU detected — installing drivers"
         else
