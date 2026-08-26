@@ -182,12 +182,51 @@ _pick_last() {
 ESP_GRUB_CFG=/boot/efi/EFI/BOOT/grub.cfg
 ESP_DIR=/boot/efi/EFI/BOOT
 
+# _boot_mode — which entry does this machine ACTUALLY boot?
+#
+# stdout: "direct" (GRUB's signed direct-kernel entry) or "zbm" (ZFSBootMenu).
+#
+# It used to answer "direct" whenever grub.cfg merely CONTAINED the string
+# root=ZFS= — but the installer always writes the direct and rescue entries,
+# whatever the default is, so that string is present on every install and the
+# answer was "direct" every time. On .137/.132 2026-08-26 (Secure Boot off) it
+# reported "direct kernel (Secure Boot compatible)" for a machine with no GRUB
+# in its boot chain at all: \EFI\BOOT\BOOTX64.EFI was byte-identical to the ZBM
+# UKI, there was no grubx64.efi anywhere on the ESP, and NVRAM pointed straight
+# at \EFI\ZBM\BOOTX64.EFI. /proc/cmdline said root=zfs: — ZBM's format, not
+# GRUB's root=ZFS=.
+#
+# Asked properly, in order of how directly each source answers the question:
+#   1. /proc/cmdline — how this kernel was ACTUALLY loaded. root=ZFS= is GRUB's
+#      direct entry; root=zfs: is ZBM's. Nothing beats observing the real boot.
+#   2. no grubx64.efi on the ESP -> GRUB cannot run, so it must be ZBM.
+#   3. grub.cfg's `set default=` — GRUB exists; believe what it says it boots.
+# Unknown falls to "direct", which only costs an inert ESP sync; guessing "zbm"
+# on a machine that really boots GRUB would skip the sync it genuinely needs.
 _boot_mode() {
-    if [[ -f "$ESP_GRUB_CFG" ]] && grep -q 'root=ZFS=' "$ESP_GRUB_CFG" 2>/dev/null; then
+    local cl
+    cl="$(cat /proc/cmdline 2>/dev/null || true)"
+    case "$cl" in
+    *root=ZFS=*)
         echo direct
-    else
+        return
+        ;;
+    *root=zfs:*)
         echo zbm
+        return
+        ;;
+    esac
+
+    if ! compgen -G "/boot/efi/EFI/*/grubx64.efi" >/dev/null 2>&1; then
+        echo zbm
+        return
     fi
+
+    if [[ -f "$ESP_GRUB_CFG" ]] && grep -qE '^[[:space:]]*set default=zbm' "$ESP_GRUB_CFG" 2>/dev/null; then
+        echo zbm
+        return
+    fi
+    echo direct
 }
 
 # _sync_esp <new-be> — make the ESP boot the given environment.
