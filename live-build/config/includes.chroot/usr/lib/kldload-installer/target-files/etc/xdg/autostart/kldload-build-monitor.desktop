@@ -31,7 +31,20 @@ NoDisplay=true
 # the build is still running, so a machine that looks finished can be rebooted
 # mid-build again. `cat /var/lib/kldload/current-phase` answers it, and the
 # absence of /var/lib/kldload/all-ready is the same signal this used to show.
-X-GNOME-Autostart-enabled=false
+# RE-ENABLED 2026-08-26. The operator's requirement is precise: the build
+# monitor should open ONCE, on the first boot after an install, and never
+# again on later reboots. Disabling the entry outright gave neither half —
+# it never opened at all, while kldload-webui.desktop (resurrected by the
+# glob-copy in profiles.sh) opened on EVERY login. Exactly inverted.
+#
+# "Once, then never" needs no scheduling: kldload-build-monitor-autostart
+# already reads /var/lib/kldload/all-ready and exits silently when it
+# exists. During the first boot the build is still running, all-ready is
+# absent, and the window opens. Once autodeploy writes the marker the
+# wrapper returns immediately at every subsequent login, opening nothing.
+# The state that decides is the build's own completion marker, not a count
+# or a flag that could drift out of sync with it.
+X-GNOME-Autostart-enabled=true
 # NO X-GNOME-Autostart-Phase HERE. It used to say `Applications`, to land late
 # enough in the login sequence that a terminal emulator was available. On
 # GNOME 48 (Fedora 44) that key does not merely get ignored — the entry is

@@ -1427,6 +1427,10 @@ DASHSTART
                 # build-iso.sh ships (lab/server profiles keep it as their kiosk
                 # surface). Operator request 2026-06-15.
                 rm -f "${target}/etc/xdg/autostart/kldload-webui.desktop"
+                # Latched so the glob-copy later in this file cannot resurrect
+                # it. Deleting a file and then copying it back is only an
+                # ordering accident away, and that is exactly what happened.
+                _no_login_gui=1
             fi
             chroot "${target}" update-desktop-database /usr/share/applications 2>/dev/null || true
         fi
@@ -1896,6 +1900,25 @@ LOCKS
         mkdir -p "${target}/etc/xdg/autostart"
         for _au in /etc/xdg/autostart/kldload-*.desktop /etc/xdg/autostart/bob-*.desktop; do
             [[ -f "$_au" ]] || continue
+            # NEVER carry an entry a profile has deliberately removed.
+            #
+            # The workstation branch ~470 lines above deletes
+            # kldload-webui.desktop from the target so the web GUI is opened on
+            # demand from win+A rather than flung open at every login. This glob
+            # then copied it straight back from the LIVE session, where it DOES
+            # ship as the installer's kiosk surface — silently undoing the
+            # removal. Both steps were individually right; only the order was
+            # wrong, and nothing looked at the finished state.
+            #
+            # HISTORY: .132, 2026-08-26 — a fresh desktop install opened the web
+            # GUI at first login. GNOME 48 hands autostart to systemd, so the
+            # evidence was a generated app-kldload\x2dwebui@autostart.service in
+            # /run/user/1000/systemd/generator.late/ for a .desktop the operator
+            # had asked to be gone.
+            if [[ -n "${_no_login_gui:-}" && "$(basename "$_au")" == "kldload-webui.desktop" ]]; then
+                k_log "skipped xdg-autostart (profile opens the GUI on demand): $_au"
+                continue
+            fi
             install -m 0644 "$_au" "${target}${_au}"
             k_log "carried xdg-autostart: $_au"
         done
