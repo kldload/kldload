@@ -251,6 +251,47 @@ unbootable rollback. Run 'kldload-rollback cancel' to undo the bootfs change."
     log "ESP updated: grub.cfg root=ZFS=$newbe, kernel $(basename "$kern")"
 }
 
+# ─── Package-database layout guard ─────────────────────────────────────────
+# _pkgdb_outside_be — is the package database on a dataset the BE rollback
+#                     will not touch?
+#
+# stdout: the offending dataset when the layout is wrong, nothing otherwise.
+# Returns: 0 when the layout is BROKEN, 1 when it is correct.
+#
+# A rollback moves exactly one dataset: the boot environment. The package FILES
+# live in /usr, which is part of it. The package DATABASE has to be part of it
+# too, or the two land on different sides of the rollback and dpkg ends up
+# insisting on packages whose binaries are gone. `apt-get check` does not catch
+# that — it validates dependency consistency, not file presence — so the system
+# reports healthy while being wrong.
+#
+# HISTORY .137 2026-08-26 (Secure Boot off, encrypted pool, ZBM boot path):
+# seven packages installed, `kldload-rollback last`, reboot. Every mechanical
+# step was correct — snapshot taken by the apt hook, clone made from it, bootfs
+# re-pointed, ZBM booted the clone unattended, original BE left intact, and the
+# binaries genuinely gone. dpkg still said 1128 packages instead of 1117 and
+# listed all seven as installed, because /var/lib was its own dataset
+# (rpool/var/lib) and survived. Fixed for new installs by giving /var/lib
+# canmount=off so it belongs to the BE; existing pools cannot be fixed by that
+# change, which is why this guard exists.
+_pkgdb_outside_be() {
+    local be db_ds
+    be="$(_running_be)"
+    [[ -n "$be" ]] || return 1
+
+    local dbpath
+    for dbpath in /var/lib/dpkg /var/lib/rpm /var/lib/pacman; do
+        [[ -d "$dbpath" ]] || continue
+        db_ds="$(findmnt -no SOURCE --target "$dbpath" 2>/dev/null)"
+        [[ -n "$db_ds" ]] || continue
+        if [[ "$db_ds" != "$be" ]]; then
+            printf '%s %s\n' "$dbpath" "$db_ds"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ─── Staging a rollback ────────────────────────────────────────────────────
 # _clone_be <snapshot-tag> — build the new environment and point bootfs at it.
 # Args:    the bare snapshot tag (no dataset, no @).
@@ -260,6 +301,33 @@ unbootable rollback. Run 'kldload-rollback cancel' to undo the bootfs change."
 _clone_be() {
     local tag="$1"
     local snap="${BE}@${tag}"
+
+    # Refuse BEFORE touching anything. A rollback that half-works is worse than
+    # one that does not run: the operator reboots, sees the packages "installed",
+    # and only finds out later that the files are gone.
+    local _bad
+    if _bad="$(_pkgdb_outside_be)"; then
+        local _dbpath="${_bad%% *}" _dbds="${_bad##* }"
+        printf 'kldload-rollback: REFUSING — the package database is not part of this boot environment.\n\n' >&2
+        printf '  package database : %s\n' "$_dbpath" >&2
+        printf '  lives on dataset : %s\n' "$_dbds" >&2
+        printf '  boot environment : %s\n\n' "$BE" >&2
+        printf 'A rollback moves only the boot environment. The package FILES (in /usr)\n' >&2
+        printf 'would revert while the DATABASE above would not, leaving dpkg/rpm insisting\n' >&2
+        printf 'on packages whose binaries are gone. Nothing reports that: `apt-get check`\n' >&2
+        printf 'validates dependencies, not file presence.\n\n' >&2
+        printf 'This pool predates the layout fix. To repair it, move the database into the\n' >&2
+        printf 'boot environment (one reboot, no reinstall):\n\n' >&2
+        printf '    kldload-rollback migrate-pkgdb\n\n' >&2
+        printf 'Or override, understanding the result will be inconsistent:\n\n' >&2
+        printf '    KLDLOAD_ROLLBACK_ALLOW_SPLIT_PKGDB=1 kldload-rollback %s\n' "${1:-last}" >&2
+        if [[ "${KLDLOAD_ROLLBACK_ALLOW_SPLIT_PKGDB:-0}" != "1" ]]; then
+            log "REFUSED: package DB on $_dbds, BE is $BE"
+            exit 1
+        fi
+        printf '\nKLDLOAD_ROLLBACK_ALLOW_SPLIT_PKGDB=1 set — proceeding anyway.\n\n' >&2
+        log "WARNING: proceeding with split package DB ($_dbds) by explicit override"
+    fi
 
     zfs list -H -t snapshot "$snap" >/dev/null 2>&1 ||
         die "no such snapshot: $snap (see: kldload-rollback list)"
@@ -463,6 +531,9 @@ kldload-rollback — return the system to a previous boot environment
                                    changed anything)
   kldload-rollback to <snapshot>   Roll back to a specific snapshot
   kldload-rollback cancel          Un-stage a rollback that has not booted yet
+  kldload-rollback migrate-pkgdb   Move the package database into the boot
+                                   environment. For pools old enough to
+                                   have it on its own dataset. One reboot.
   kldload-rollback status          What is running, what boots next
   kldload-rollback help            This text
 
@@ -498,6 +569,81 @@ FILES
 EOF
 }
 
+# cmd_migrate_pkgdb — move the package database into the boot environment.
+#
+# For pools created before /var/lib was given canmount=off. Copies what the
+# shared rpool/var/lib holds into the BE's own (currently shadowed) /var/lib
+# directory, then stops the shared dataset from mounting. After one reboot the
+# package database is part of the BE and a rollback moves it with the files.
+#
+# Order is chosen so a failure at ANY step leaves the machine exactly as it
+# was: snapshot, copy, VERIFY the copy, and only then flip canmount. Nothing is
+# ever deleted — the old dataset keeps its data and `canmount=on` restores it.
+#
+# Child datasets (containerd, containers, docker, etcd, kubelet, kldload state)
+# are excluded: they mount at their own mountpoints and must NOT follow the BE.
+cmd_migrate_pkgdb() {
+    local bad be
+    if ! bad="$(_pkgdb_outside_be)"; then
+        say "Nothing to do: the package database is already part of $(_running_be)."
+        return 0
+    fi
+    be="$(_running_be)"
+    local dbds="${bad##* }" src_db="${bad%% *}"
+
+    say "Migrating ${dbds} into the boot environment ${be}"
+    say ""
+
+    local stamp
+    stamp="migrate-pkgdb-$(date +%Y%m%d-%H%M%S)"
+    zfs snapshot "${dbds}@${stamp}" || die "could not snapshot ${dbds} — refusing to continue"
+    zfs snapshot "${be}@${stamp}" || die "could not snapshot ${be} — refusing to continue"
+    log "migrate-pkgdb: snapshots ${dbds}@${stamp} and ${be}@${stamp}"
+    say "  snapshots taken: @${stamp} on both datasets (undo breadcrumb)"
+
+    local mnt
+    mnt="$(mktemp -d)"
+    # shellcheck disable=SC2064  # expand now: the path must survive the trap
+    trap "umount '$mnt' 2>/dev/null || true; rmdir '$mnt' 2>/dev/null || true" RETURN
+    mount -t zfs -o zfsutil "$be" "$mnt" ||
+        die "could not mount $be to reach its /var/lib — nothing has been changed"
+    mkdir -p "${mnt}/var/lib"
+
+    local -a excl=()
+    local child
+    while IFS= read -r child; do
+        [[ -n "$child" ]] || continue
+        excl+=(--exclude "./${child#/var/lib/}")
+    done < <(zfs list -H -o mountpoint 2>/dev/null | grep '^/var/lib/' | sort)
+
+    say "  copying (excluding ${#excl[@]} child dataset mountpoints)..."
+    if ! tar -C /var/lib -cf - "${excl[@]}" . 2>/dev/null |
+        tar -C "${mnt}/var/lib" -xf - 2>/dev/null; then
+        die "copy failed — nothing has been changed; canmount is untouched"
+    fi
+
+    # VERIFY THE OUTCOME, not tar's exit status.
+    local dst_db="${mnt}${src_db}"
+    [[ -e "$dst_db" ]] ||
+        die "copy reported success but ${dst_db} does not exist — canmount untouched"
+    if [[ -f "${src_db}/status" ]]; then
+        cmp -s "${src_db}/status" "${dst_db}/status" ||
+            die "copied ${src_db}/status differs from the original — canmount untouched"
+        say "  verified: ${src_db}/status matches byte for byte"
+    fi
+
+    umount "$mnt" || die "could not unmount the staging mount — canmount untouched"
+
+    zfs set canmount=off "$dbds" || die "copy succeeded but could not set canmount=off on ${dbds}"
+    log "migrate-pkgdb: ${dbds} canmount=off; data copied into ${be}"
+
+    say ""
+    say "Done. ${dbds} will no longer mount; /var/lib now comes from the boot environment."
+    say "REBOOT to apply — until then the old dataset is still mounted and in use."
+    say ""
+    say "  undo:  zfs set canmount=on ${dbds}   (data untouched, plus @${stamp})"
+}
+
 case "${1:-help}" in
 list | ls) cmd_list ;;
 last) cmd_last ;;
@@ -506,6 +652,7 @@ to)
     cmd_to "${1:-}"
     ;;
 cancel) cmd_cancel ;;
+migrate-pkgdb) cmd_migrate_pkgdb ;;
 status) cmd_status ;;
 help | -h | --help) cmd_help ;;
 *)

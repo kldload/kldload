@@ -730,6 +730,28 @@ else
         "hostid resolves from two sources that can disagree — import fails and drops to initramfs"
 fi
 
+# The package database must live INSIDE the boot environment, or a rollback
+# produces a system whose dpkg lies. /usr is already in the BE (rpool/usr is
+# canmount=off); /var/lib has to be too, because that is where dpkg/rpm keep
+# their state. If /var/lib gets its own mounted dataset, a BE rollback removes
+# the package FILES and leaves the DATABASE untouched, and `apt-get check`
+# passes because it validates dependencies rather than file presence.
+#
+# Caught on .137 2026-08-26 (SB off, encrypted, ZBM path): install seven
+# packages, `kldload-rollback last`, reboot. Right snapshot, right clone, right
+# bootfs, binaries correctly gone — and dpkg still reporting 1128 packages
+# instead of 1117, listing all seven as installed. Silent.
+_sz_varlib="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/storage-zfs.sh"
+if grep -qE 'zfs create -o canmount=off -o mountpoint=/var/lib rpool/var/lib' "$_sz_varlib" 2>/dev/null; then
+    _pass "/var/lib stays in the boot environment (package DB rolls back with its files)"
+elif grep -qE 'zfs create -o mountpoint=/var/lib rpool/var/lib' "$_sz_varlib" 2>/dev/null; then
+    _fail "/var/lib stays in the boot environment" \
+        "rpool/var/lib is a MOUNTED dataset — dpkg/rpm state will not roll back with the BE"
+else
+    _fail "/var/lib stays in the boot environment" \
+        "could not find the rpool/var/lib create line — the layout changed shape, re-check this gate"
+fi
+
 # The SAME pin has to reach the GRUB direct entry, and for a long time it did
 # not: grub.cfg emitted a literal `spl_hostid=${spl_hostid}` referring to a GRUB
 # variable nothing ever set, so every direct boot passed an EMPTY value and SPL

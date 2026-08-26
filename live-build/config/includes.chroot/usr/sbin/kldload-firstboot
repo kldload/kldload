@@ -1585,6 +1585,39 @@ _darksite_reclaim() {
     return 0
 }
 
+# _fb_nvidia_ko_present — is a built NVIDIA kernel module on disk for the
+# RUNNING kernel?
+#
+# stdout: nothing. Exit 0 if found, 1 if not.
+#
+# Three layouts, because three packaging systems put it in three places and
+# every caller here previously checked only ONE of them:
+#   extra/nvidia.ko*         akmod / kmod RPM (Fedora, EL)
+#   extra/nvidia/nvidia.ko*  some akmod builds nest it
+#   updates/dkms/nvidia.ko*  DKMS — which is what DEBIAN uses, and what every
+#                            check in this file used to miss
+#
+# HISTORY .132 2026-08-26, RTX 3080 on Debian trixie: the chroot DKMS build
+# failed at install, so the installer correctly declined to blacklist nouveau,
+# and firstboot then healed it from NVIDIA's vendor repo — nvidia-open 610.57.04,
+# four modules loaded, nvidia-smi happy. But the catch-all that puts the nouveau
+# blacklist onto org.zfsbootmenu:commandline once a driver really exists looked
+# only under extra/ and found nothing. The module was at updates/dkms/nvidia.ko.xz
+# the whole time. Net effect: the direct/Secure-Boot entry carried the blacklist
+# and the ZBM cmdline did not, so the machine was fine under Secure Boot and
+# would have handed the GPU to nouveau the moment anyone turned Secure Boot off
+# to reach the boot-environment picker.
+#
+# bootstrap.sh's _k_nvidia_will_load already knew about updates/dkms; this file
+# did not. Same question, two answers, which is the shape of the bug.
+_fb_nvidia_ko_present() {
+    local kver="${1:-$(uname -r)}"
+    compgen -G "/lib/modules/${kver}/extra/nvidia.ko"* >/dev/null 2>&1 && return 0
+    compgen -G "/lib/modules/${kver}/extra/nvidia/nvidia.ko"* >/dev/null 2>&1 && return 0
+    compgen -G "/lib/modules/${kver}/updates/dkms/nvidia.ko"* >/dev/null 2>&1 && return 0
+    return 1
+}
+
 main() {
     local _edition
     _edition="$(cat /etc/kldload/edition 2>/dev/null || echo free)"
@@ -1809,7 +1842,7 @@ main() {
     # darksite at build time (follow-up). Until then this needs a network at
     # first boot and says so LOUDLY if it can't reach one — no silent skip.
     if lspci 2>/dev/null | grep -qiE '(vga compatible controller|3d controller|display controller).*nvidia' &&
-        ! compgen -G "/lib/modules/$(uname -r)/extra/nvidia.ko*" >/dev/null 2>&1 &&
+        ! _fb_nvidia_ko_present &&
         ! compgen -G '/usr/src/nvidia-*' >/dev/null 2>&1 &&
         ! rpm -q akmod-nvidia >/dev/null 2>&1; then
         log "NVIDIA GPU present but no driver installed — attempting install (needs network)"
@@ -1858,7 +1891,7 @@ main() {
         _nv_src="$(ls -d /usr/src/nvidia-* 2>/dev/null | head -1)"
         _nv_ver="${_nv_src##*/nvidia-}"
         _nv_ko_present=0
-        compgen -G "/lib/modules/$(uname -r)/extra/nvidia.ko*" >/dev/null 2>&1 &&
+        _fb_nvidia_ko_present &&
             _nv_ko_present=1
 
         if [[ $_nv_ko_present -eq 0 ]]; then
@@ -1869,7 +1902,7 @@ main() {
             log "NVIDIA DKMS not built (chroot install failed) — retrying on running kernel ${_nv_ver}"
             dkms add -m nvidia -v "$_nv_ver" >/dev/null 2>&1 || true
             if dkms autoinstall -k "$(uname -r)" >/dev/null 2>&1; then
-                compgen -G "/lib/modules/$(uname -r)/extra/nvidia.ko*" >/dev/null 2>&1 &&
+                _fb_nvidia_ko_present &&
                     _nv_ko_present=1
             fi
         fi
@@ -2028,8 +2061,7 @@ main() {
     # blacklist is already present, so it never double-appends or fights the DKMS
     # block above). NVIDIA loads on the next boot.
     if lspci 2>/dev/null | grep -qiE '(vga compatible controller|3d controller|display controller).*nvidia' &&
-        { compgen -G "/lib/modules/$(uname -r)/extra/nvidia/nvidia.ko"* >/dev/null 2>&1 ||
-            compgen -G "/lib/modules/$(uname -r)/extra/nvidia.ko"* >/dev/null 2>&1; } &&
+        _fb_nvidia_ko_present &&
         command -v zfs >/dev/null 2>&1; then
         _be_ds="$(findmnt -no SOURCE / 2>/dev/null)"
         _root_ds="${_be_ds%/*}"

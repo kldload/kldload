@@ -549,7 +549,34 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
 
     zfs create -o canmount=off -o mountpoint=/var rpool/var
     zfs create -o mountpoint=/var/cache rpool/var/cache
-    zfs create -o mountpoint=/var/lib rpool/var/lib
+    # /var/lib STAYS IN THE BOOT ENVIRONMENT — canmount=off, exactly like
+    # rpool/usr above. This is the single property that decides whether a
+    # package rollback produces a working system or a lying one.
+    #
+    # /var/lib/dpkg (and /var/lib/rpm) is the package database. The package
+    # FILES live in /usr, which is part of the BE. If the database sits on its
+    # own dataset it does not move when the BE is rolled back, and you get a
+    # system whose dpkg insists seven packages are installed while their
+    # binaries are gone. `apt-get check` passes, because it validates
+    # dependencies and not file presence, so nothing reports the damage until
+    # something tries to run a missing binary or an upgrade trips over files
+    # that should exist.
+    #
+    # HISTORY 2026-08-26, .137 (SB off, encrypted, ZBM path): installed
+    # cowsay/sl/figlet/tree/ncdu/jq/nmap, ran `kldload-rollback last`, rebooted.
+    # Everything about the rollback worked — right snapshot, right clone, bootfs
+    # re-pointed, ZBM booted it unattended, original BE untouched — and the
+    # binaries were correctly gone. But dpkg still reported 1128 packages
+    # instead of 1117 and listed all seven as installed, because /var/lib was
+    # rpool/var/lib and survived. Silent, and exactly the failure class this
+    # tree is meant not to ship.
+    #
+    # The stateful things under /var/lib that genuinely must survive a BE
+    # rollback already have their own datasets — containerd, containers,
+    # docker, etcd, kubelet, and rpool/kldload/state at /var/lib/kldload — and
+    # they still mount over their directories here, because a ZFS dataset
+    # mounts at its own mountpoint regardless of whether its parent is mounted.
+    zfs create -o canmount=off -o mountpoint=/var/lib rpool/var/lib
     zfs create -o mountpoint=/var/log rpool/var/log
     zfs create -o mountpoint=/var/spool rpool/var/spool
     zfs create -o mountpoint=/var/tmp rpool/var/tmp
