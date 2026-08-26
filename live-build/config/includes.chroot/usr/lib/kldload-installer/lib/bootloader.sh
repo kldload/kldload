@@ -1770,62 +1770,12 @@ DRACUT
             -l "${_efi_target}" >&7 2>&1 ||
             k_log "WARNING: efibootmgr entry creation failed"
 
-        # SECOND ENTRY, pointing at a DIFFERENT binary.
-        #
-        # The 64 MB BOOTX64-BACKUP.EFI has been copied to the ESP since this
-        # file was written, and the banner at the top has always documented a
-        # "ZFSBootMenu (Backup)" boot entry -- but nothing ever registered one.
-        # It was 64 MB of unreachable disk and a comment describing a boot order
-        # that did not exist. Registering it is free redundancy against the one
-        # thing a second entry to the SAME binary cannot help with: that binary
-        # being corrupt.
-        local _bkp='\EFI\zbm\BOOTX64-BACKUP.EFI'
-        if [[ -f "${target}/boot/efi/EFI/zbm/BOOTX64-BACKUP.EFI" ]]; then
-            efibootmgr \
-                -c -d "${disk}" -p "${part_num}" \
-                -L "kldload (backup)" \
-                -l "${_bkp}" >&7 2>&1 &&
-                k_log "Backup boot entry → ${_bkp}" ||
-                k_log "WARNING: could not register the backup boot entry"
-        else
-            k_log "WARNING: ${_bkp} absent — no backup boot entry registered"
-        fi
-
-        # BOOT ORDER: ours first, then EVERYTHING ELSE -- never ours alone.
-        #
-        # This used to be `efibootmgr -o "$_uefi_bootnum"`, which sets BootOrder
-        # to exactly one entry and therefore DELETES every other entry from the
-        # order, including the firmware's own \EFI\BOOT\BOOTX64.EFI fallback.
-        # That is precisely backwards for a machine that must always boot: it
-        # removes the universal path from consideration to prioritise a specific
-        # one. Put ours at the front and let the rest stand behind it, so a
-        # firmware that fails our entry still has somewhere to go.
-        local _primary _backup _rest _order
-        # swallow: grep exits 1 when NO kldload entry exists. That is a real
-        # outcome handled by the -z test below (it warns and leaves the order
-        # alone), not an error -- so an empty result must not abort under set -e.
-        _primary=$(efibootmgr 2>/dev/null | grep -iE '^Boot[0-9A-Fa-f]{4}\*? +kldload$' | grep -oP '^Boot\K[0-9A-Fa-f]{4}' | head -1 || true)
-        # swallow: the backup entry is optional -- absent whenever
-        # BOOTX64-BACKUP.EFI is not on the ESP. grep's exit 1 says exactly that.
-        _backup=$(efibootmgr 2>/dev/null | grep -iE '^Boot[0-9A-Fa-f]{4}\*? +kldload \(backup\)$' | grep -oP '^Boot\K[0-9A-Fa-f]{4}' | head -1 || true)
-        if [[ -n "$_primary" ]]; then
-            # Everything already in BootOrder that is not one of ours, order kept.
-            _rest=$(efibootmgr 2>/dev/null | sed -n 's/^BootOrder: //p' | tr ',' '\n' |
-                # swallow: grep -v exits 1 when it filters EVERYTHING out --
-                # i.e. BootOrder held only our own entries. An empty _rest is
-                # the correct answer there, not a failure.
-                grep -viE "^(${_primary}|${_backup:-NOMATCH})$" | paste -sd, - || true)
-            _order="${_primary}"
-            [[ -n "$_backup" ]] && _order="${_order},${_backup}"
-            [[ -n "$_rest" ]] && _order="${_order},${_rest}"
-            if efibootmgr -o "${_order}" >&7 2>&1; then
-                k_log "Boot order: ${_order}  (kldload${_backup:+ → backup} → firmware's own entries)"
-            else
-                k_log "WARNING: could not set boot order — firmware keeps its existing order"
-            fi
-        else
-            k_log "WARNING: no kldload entry found in NVRAM after registration —"
-            k_log "  this disk boots ONLY via the firmware fallback \\EFI\\BOOT\\BOOTX64.EFI"
+        local _uefi_bootnum
+        _uefi_bootnum=$(efibootmgr 2>/dev/null | grep -i 'kldload' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+' || true)
+        if [[ -n "$_uefi_bootnum" ]]; then
+            efibootmgr -o "${_uefi_bootnum}" >&7 2>&1 ||
+                k_log "WARNING: Could not set boot order"
+            k_log "Boot order set: ${_uefi_bootnum} (shim → signed GRUB → ZFSBootMenu)"
         fi
 
         k_log "EFI boot entries registered: disk=${disk} part=${part_num}"

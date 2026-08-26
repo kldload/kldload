@@ -116,7 +116,7 @@ if command -v efibootmgr >/dev/null 2>&1 && [[ -d /sys/firmware/efi ]]; then
     # An empty _nv then means "cannot read NVRAM", which the grep below treats
     # as "no entry" and handles by trying to create one.
     _nv="$(efibootmgr -v 2>/dev/null || true)"
-    if ! grep -qiE '^Boot[0-9A-Fa-f]{4}\*? +kldload$' <<<"$_nv"; then
+    if ! awk -F'\t' '$1 ~ /^Boot[0-9A-Fa-f]{4}\*? +kldload$/ {f=1} END{exit !f}' <<<"$_nv"; then
         # Resolve the ESP's device in steps, tolerating failure at each one.
         # Nested command substitution under `set -e` + `pipefail` made this
         # FATAL: when findmnt returned nothing, lsblk ran with no argument,
@@ -147,7 +147,7 @@ if command -v efibootmgr >/dev/null 2>&1 && [[ -d /sys/firmware/efi ]]; then
             _tgt='\EFI\zbm\BOOTX64.EFI'
             cmp -s "$FB" "$ZBM" || _tgt='\EFI\BOOT\BOOTX64.EFI'
             if efibootmgr -c -d "/dev/${_disk}" -p "${_part}" -L "kldload" -l "$_tgt" >/dev/null 2>&1 &&
-                efibootmgr 2>/dev/null | grep -qiE '^Boot[0-9A-Fa-f]{4}\*? +kldload$'; then
+                efibootmgr 2>/dev/null | awk -F'\t' '$1 ~ /^Boot[0-9A-Fa-f]{4}\*? +kldload$/ {f=1} END{exit !f}'; then
                 log "REPAIRED: NVRAM had no kldload entry — recreated it pointing at ${_tgt}"
                 repaired=1
             else
