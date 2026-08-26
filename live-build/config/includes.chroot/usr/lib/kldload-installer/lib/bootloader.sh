@@ -1073,6 +1073,25 @@ EOFSTAB
     #
     # rhgb is a Fedora-ism and inert on Debian; `quiet` is the one that matters
     # here, and it is precisely the flag the encrypted path was dropping.
+    # The hostid the pool was stamped with, as a literal. grub.cfg referenced
+    # \${spl_hostid} — a GRUB variable NOTHING ever sets — so every direct boot
+    # passed "spl_hostid=" empty. SPL then falls back to /etc/hostid, which is
+    # right only while the two agree; when they do not the pool refuses to
+    # import and the boot drops to an initramfs prompt. Under Secure Boot the
+    # direct entry is the ONLY entry used (ZBM cannot chainload through shim
+    # 15.8), so this is the path that matters most and it was the one guessing.
+    # Confirmed on fiend 2026-08-26: /proc/cmdline carried a bare "spl_hostid=".
+    local _hostid_hex=""
+    if [[ -s "${target}/etc/hostid" ]]; then
+        _hostid_hex="$(od -An -tx4 "${target}/etc/hostid" 2>/dev/null | tr -d ' \n')"
+    fi
+    if [[ -n "$_hostid_hex" && "$_hostid_hex" != "00000000" ]]; then
+        k_log "grub direct entry pinned to spl_hostid=0x${_hostid_hex}"
+    else
+        k_log "WARNING: target /etc/hostid unusable — direct boot cannot pin spl_hostid"
+        _hostid_hex=""
+    fi
+
     local _direct_bootargs="rhgb quiet"
     if [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]]; then
         # DROP `quiet` — do not merely add console args alongside it.
@@ -1203,12 +1222,17 @@ menuentry "kldload — ZFS Boot Menu (boot environments + snapshot rollback)" --
 }
 
 menuentry "kldload — direct kernel boot (Secure Boot compatible)" --id=direct {
-    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro ${_direct_bootargs} spl_hostid=\${spl_hostid} psi=1 selinux=0
+    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro ${_direct_bootargs}${_hostid_hex:+ spl_hostid=0x${_hostid_hex}} psi=1 selinux=0
     initrd /EFI/BOOT/initrd.img
 }
 
+# Rescue carries the SAME hostid pin and the same selinux=0 as the direct
+# entry. It had neither. Rescue is what an operator picks when the normal boot
+# has already failed — and if a hostid mismatch is what failed it, a rescue
+# entry that also cannot import the pool leaves them with nothing but the
+# initramfs prompt they were trying to escape.
 menuentry "kldload — rescue (single-user)" --id=rescue {
-    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro single
+    linux  /EFI/BOOT/vmlinuz root=ZFS=${_zfs_root:-rpool/ROOT/default} ro single${_hostid_hex:+ spl_hostid=0x${_hostid_hex}} selinux=0
     initrd /EFI/BOOT/initrd.img
 }
 GRUBCFG

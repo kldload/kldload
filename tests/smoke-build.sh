@@ -730,6 +730,25 @@ else
         "hostid resolves from two sources that can disagree — import fails and drops to initramfs"
 fi
 
+# The SAME pin has to reach the GRUB direct entry, and for a long time it did
+# not: grub.cfg emitted a literal `spl_hostid=${spl_hostid}` referring to a GRUB
+# variable nothing ever set, so every direct boot passed an EMPTY value and SPL
+# fell back to /etc/hostid. Under Secure Boot the direct entry is the ONLY entry
+# that runs — ZBM cannot chainload through shim 15.8 — so the ZBM-property fix
+# above never reached the path that matters most. Caught on fiend .132
+# 2026-08-26: /proc/cmdline read "... ro ... spl_hostid= psi=1".
+_bl="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/bootloader.sh"
+if grep -qE 'spl_hostid=\\\$\{spl_hostid\}' "$_bl" 2>/dev/null; then
+    _fail "grub direct entry pins a real spl_hostid" \
+        "grub.cfg references \${spl_hostid}, a GRUB variable nothing sets — the direct entry boots with it EMPTY"
+elif grep -qE '_hostid_hex:\+ spl_hostid=0x' "$_bl" 2>/dev/null &&
+    grep -qE 'od -An -tx4 "\$\{target\}/etc/hostid"' "$_bl" 2>/dev/null; then
+    _pass "grub direct entry pins a real spl_hostid (the only entry Secure Boot uses)"
+else
+    _fail "grub direct entry pins a real spl_hostid" \
+        "the direct entry must resolve the target's hostid and inline it, not reference an unset GRUB variable"
+fi
+
 # The kernel pin must be installed BY NAME when the mirrors still carry it.
 # Handing dnf the same NVR from @commandline while it is also resolvable from
 # the repo is a hard conflict that killed a build on 2026-08-22. That case only
