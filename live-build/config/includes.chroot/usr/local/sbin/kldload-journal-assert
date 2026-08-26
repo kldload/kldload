@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# kldload-journal-assert — make the system journal persistent, then PROVE it
+#                          is actually recording, and repair it if it is not.
+#
+# What it does, in order:
+#   1. Ensures /var/log/journal exists with the right ownership and ACLs.
+#   2. Writes a probe line, reads it back, and only then calls the journal
+#      healthy. Existence of a .journal file is NOT the check — see below.
+#   3. If the probe does not come back: rotates, flushes, and restarts
+#      journald, then probes again.
+#   4. Reports what it found. A journal that is still dead after the repair is
+#      a loud WARNING, never a silent pass.
+#
+# WHY this exists at all, and why the check is a round-trip:
+#
+# /var/log on a kldload install is its own ZFS dataset, mounted by
+# zfs-mount.service. systemd-journald starts far earlier than that. With
+# journald's Storage=persistent, journald creates and opens
+# /var/log/journal/<machine-id>/system.journal on the still-unmounted parent
+# dataset; zfs-mount then mounts rpool/var/log over the top. journald goes on
+# writing to the shadowed inode forever, journalctl reads the visible one, and
+# the machine keeps NO system journal — no kernel ring, no PID 1, nothing —
+# while systemd-journald reports "active (running), Processing requests...".
+#
+# journald.conf.d/persistent.conf now sets Storage=auto, which removes the race
+# at the source. This unit is the second failsafe, and the reason it round-trips
+# a probe is that the PREVIOUS version of it checked
+#     if ! ls /var/log/journal/*/*.journal
+# — file EXISTENCE. On .132 (2026-08-26) a stale system.journal existed, whose
+# mtime had not moved since the previous day's shutdown, so the condition was
+# false and the repair never ran across two entire boots. A check that only
+# ever fires in the direction you tested is decoration; this one asks the
+# journal a question and waits for the answer.
+#
+# Inputs:  none. Honours KLDLOAD_JOURNAL_PROBE_TIMEOUT (seconds, default 10).
+# Outputs: diagnostics on stderr, one summary line on stdout.
+# Exit:    0 journal records (possibly after repair). 1 still dead after repair.
+#
+# Notes:
+#   - Idempotent: safe on every boot and safe to run by hand.
+#   - It deliberately does NOT trust `systemctl is-active systemd-journald`.
+#     That was green the whole time the journal was dead.
+# ---------------------------------------------------------------------------
+set -Eeuo pipefail
+trap 'echo "FAIL at line $LINENO: $BASH_COMMAND" >&2' ERR
+
+PROBE_TIMEOUT="${KLDLOAD_JOURNAL_PROBE_TIMEOUT:-10}"
+
+# journal_records — write a unique line and see whether it comes back.
+#
+# Returns 0 if the probe is readable from the journal within PROBE_TIMEOUT,
+# 1 otherwise. Uses daemon.err so it survives any plausible MaxLevelStore, and
+# a tag unique per invocation so a previous run's probe can never be mistaken
+# for this one's.
+journal_records() {
+    local tag="kldload-journal-probe"
+    local token="probe-$$-${SRANDOM:-$RANDOM}-$(date +%s)"
+    logger -p daemon.err -t "$tag" "$token" 2>/dev/null || return 1
+
+    local waited=0
+    while ((waited < PROBE_TIMEOUT)); do
+        if journalctl -t "$tag" --since "-2 min" --no-pager 2>/dev/null |
+            grep -qF "$token"; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
+# ── 1. The directory ────────────────────────────────────────────────────────
+# systemd-tmpfiles owns the mode/ownership/ACL for /var/log/journal; calling it
+# is how the directory ends up correct rather than merely present.
+mkdir -p /var/log/journal
+systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 ||
+    echo "kldload-journal-assert: systemd-tmpfiles could not fix up /var/log/journal" >&2
+
+# ── 2. Does it record? ──────────────────────────────────────────────────────
+if journal_records; then
+    echo "journal: recording (persistent dir $(stat -c %U:%G /var/log/journal))"
+    exit 0
+fi
+
+echo "kldload-journal-assert: the journal accepted a probe but did not return it —" >&2
+echo "  journald is wedged or writing to a shadowed inode. Repairing." >&2
+
+# ── 3. Repair ───────────────────────────────────────────────────────────────
+# Order matters: rotate and flush first so anything journald is still holding
+# reaches disk, THEN restart so it reopens the visible, mounted path.
+journalctl --rotate >/dev/null 2>&1 ||
+    echo "kldload-journal-assert: journalctl --rotate failed" >&2
+journalctl --flush >/dev/null 2>&1 ||
+    echo "kldload-journal-assert: journalctl --flush failed" >&2
+systemctl restart systemd-journald ||
+    echo "kldload-journal-assert: journald restart failed" >&2
+sleep 2
+
+# ── 4. Prove the repair, or say so loudly ───────────────────────────────────
+if journal_records; then
+    echo "journal: recording after repair (journald had to be restarted)"
+    exit 0
+fi
+
+echo "kldload-journal-assert: WARNING — the system journal is STILL not" >&2
+echo "  recording after rotate+flush+restart. Boot-time failures on this host" >&2
+echo "  cannot be diagnosed until this is fixed. Check that /var/log is" >&2
+echo "  mounted (findmnt /var/log) and that /var/log/journal is not shadowed." >&2
+exit 1

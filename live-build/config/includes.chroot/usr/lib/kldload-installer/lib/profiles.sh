@@ -871,7 +871,7 @@ k_install_system_files() {
         # its unit is enabled on the installed system, so a copy that stops at
         # the squashfs leaves multi-user.target pulling in a unit whose
         # ExecStart does not exist.
-        for bin in kspawn kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-session kldload-headlamp-install kldload-secure-boot kldload-debug-bundle kldload-rhel-composer-build kldload-boot-assert; do
+        for bin in kspawn kldload-ca kldload-tls-cert kldload-wait-for-ip kldload-bounce-tls-services kldload-session kldload-headlamp-install kldload-secure-boot kldload-debug-bundle kldload-rhel-composer-build kldload-boot-assert kldload-journal-assert; do
             [[ -f "/usr/local/sbin/${bin}" ]] &&
                 cp "/usr/local/sbin/${bin}" "${target}/usr/local/sbin/${bin}" &&
                 chmod +x "${target}/usr/local/sbin/${bin}" &&
@@ -988,6 +988,22 @@ k_install_system_files() {
         # swallow: ln -sf fails only if the wants dir is unwritable; the
         # symlink already existing is the normal re-run case and succeeds.
         ln -sf "/usr/lib/systemd/system/kldload-boot-assert.service" "${target}/etc/systemd/system/multi-user.target.wants/kldload-boot-assert.service" || true
+
+        # kldload-journal-flush: makes the system journal persistent and then
+        # PROVES it is recording, restarting journald if it is not.
+        #
+        # The unit has been in the copy loop above for months and was never
+        # given this symlink, so on every installed system it read
+        # "disabled / inactive" and nothing ever healed the journal. That is
+        # the seventh instance of the defect the copy loop's own comment warns
+        # about, and it is the one that hid all the others: .132 2026-08-26 ran
+        # two consecutive boots recording ZERO system messages — no kernel
+        # ring, no PID 1 — because journald had opened its file on the
+        # unmounted rpool/var and zfs-mount then covered it. journald reported
+        # "active (running)" throughout. The failure was invisible precisely
+        # because the thing that would have reported it was never started.
+        # HARMLESS CASE: an existing symlink, exactly as the sibling lns here.
+        ln -sf "/usr/lib/systemd/system/kldload-journal-flush.service" "${target}/etc/systemd/system/multi-user.target.wants/kldload-journal-flush.service" || true
 
         # kldload-collect: samples the kernel cockpit's signal set into a JSONL
         # corpus every 60s. Added to the copy list in 99355e23 but never given
