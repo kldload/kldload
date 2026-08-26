@@ -690,15 +690,44 @@ else
         "one hardcoded name is wrong on one family — console auth dies silently there"
 fi
 
-# The encrypted direct-boot entry must NOT carry `quiet`: the passphrase prompt
-# goes to /dev/console and quiet is what hides it, so the operator has to press
-# Enter to force a redraw (.120, 2026-08-22, and .143 before it).
+# The encrypted boot path must NOT carry `quiet`: the passphrase prompt goes to
+# /dev/console and quiet is what hides it, so the operator has to press Enter to
+# force a redraw (.120, 2026-08-22, and .143 before it).
+#
+# THERE ARE TWO CMDLINES AND ONLY ONE OF THEM IS EVER READ ON A NORMAL BOOT.
+# This checked _direct_bootargs — GRUB's direct entry — which a machine booting
+# via ZFSBootMenu never reads, because ZBM builds its cmdline EXCLUSIVELY from
+# org.zfsbootmenu:commandline. So this passed continuously from 2026-08-18 while
+# every encrypted install still hid its prompt, and the bug was only found by an
+# operator sitting in front of one on 2026-08-26. A gate on the branch nobody
+# takes is not a gate.
 if grep -qE '_direct_bootargs="\$\(k_console_args\)"' \
     "$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/bootloader.sh" 2>/dev/null; then
     _pass "encrypted direct-boot drops rhgb quiet"
 else
     _fail "encrypted direct-boot drops rhgb quiet" \
         "quiet silences the console the passphrase prompt is written to"
+fi
+
+# The path that actually boots: the ZBM property must gate quiet on encryption.
+_sz="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/storage-zfs.sh"
+if grep -qE 'KLDLOAD_ZFS_ENCRYPT.*!=.*"1"' "$_sz" 2>/dev/null &&
+    grep -qE '_zbm_args\+=" quiet"' "$_sz" 2>/dev/null; then
+    _pass "encrypted ZBM cmdline drops quiet (the path a normal boot reads)"
+else
+    _fail "encrypted ZBM cmdline drops quiet" \
+        "org.zfsbootmenu:commandline sets quiet unconditionally — the passphrase prompt is invisible on every ZBM boot"
+fi
+
+# And the hostid must be pinned, or which value ZFS sees depends on how it
+# booted: the SPL module parameter when set, /etc/hostid otherwise. Those
+# disagreed on fiend and the pool refused to import ("previously in use from
+# another system"), dropping to an initramfs prompt.
+if grep -qE 'spl_hostid=0x\$\{_hid\}' "$_sz" 2>/dev/null; then
+    _pass "spl_hostid pinned on the ZBM cmdline"
+else
+    _fail "spl_hostid pinned on the ZBM cmdline" \
+        "hostid resolves from two sources that can disagree — import fails and drops to initramfs"
 fi
 
 # The kernel pin must be installed BY NAME when the mirrors still carry it.
