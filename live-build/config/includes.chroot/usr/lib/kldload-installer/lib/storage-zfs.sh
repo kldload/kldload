@@ -486,7 +486,38 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     # This is the cmdline ZFSBootMenu kexecs with. The GRUB direct entry has
     # its own args in lib/bootloader.sh, and fixing `quiet` there did NOT fix
     # this path — a machine that boots via ZBM never reads those. Both need it.
-    zfs set org.zfsbootmenu:commandline="rw $(k_console_args) quiet psi=1 selinux=0" rpool/ROOT
+    # An ENCRYPTED pool must not carry `quiet`: the passphrase prompt is the one
+    # thing on screen that needs to be seen, and plymouth swallows it. The
+    # comment above has said "both need it" since 2026-08-18 while this line
+    # kept setting it — the fix landed on the GRUB direct args in bootloader.sh
+    # and never here, so every machine that boots via ZBM (which is every normal
+    # boot) still hid the prompt. Confirmed on fiend 2026-08-26: /proc/cmdline
+    # carried quiet, the pool was aes-256-gcm, and the operator saw ten lines
+    # and a silent wait until Enter woke the console.
+    #
+    # spl_hostid is pinned here too. ZFS resolves the hostid from the SPL module
+    # parameter when set and /etc/hostid otherwise, and those two disagreed on
+    # fiend: the cmdline carried spl.spl_hostid=0x00bab10c on one boot and
+    # nothing on the next, while /etc/hostid said 0x7e9cfe16. A pool stamped
+    # with one and imported under the other fails with "previously in use from
+    # another system" and drops to an initramfs prompt. Putting the value ZFS
+    # was given at pool-create time on the cmdline makes it deterministic
+    # instead of dependent on which source happens to answer first.
+    local _zbm_args="rw $(k_console_args)"
+    if [[ "${KLDLOAD_ZFS_ENCRYPT}" != "1" ]]; then
+        _zbm_args+=" quiet"
+    else
+        k_zfs_log "encrypted pool — omitting 'quiet' so the passphrase prompt is visible"
+    fi
+    local _hid
+    _hid="$(od -An -tx4 /etc/hostid 2>/dev/null | tr -d ' \n')"
+    if [[ -n "$_hid" && "$_hid" != "00000000" ]]; then
+        _zbm_args+=" spl_hostid=0x${_hid}"
+        k_zfs_log "pinned spl_hostid=0x${_hid} on the ZBM cmdline (matches /etc/hostid)"
+    else
+        k_zfs_log "WARNING: /etc/hostid unusable — pool import may fail on a hostid mismatch"
+    fi
+    zfs set org.zfsbootmenu:commandline="${_zbm_args} psi=1 selinux=0" rpool/ROOT
 
     # ── Make the boot menu reachable ─────────────────────────────────────────
     # ZFSBootMenu is the rollback path: it is where you pick an older boot
