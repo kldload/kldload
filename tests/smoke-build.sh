@@ -730,6 +730,36 @@ else
         "hostid resolves from two sources that can disagree — import fails and drops to initramfs"
 fi
 
+# The ZFS passphrase-prompt extension must ship, or an encrypted install falls
+# back to upstream's printk-7 branch and the prompt is buried by kernel output.
+#
+# Upstream raises printk to 7 to defeat `quiet`; kldload REMOVES `quiet` on
+# encrypted pools, so that workaround instead means maximum verbosity while the
+# boot waits for input. fiend 2026-08-27: 386 kernel messages in the 5-15s
+# window, a blank nine-second pause, operator pressed Enter to reveal the
+# prompt. VERIFIED FIXED on that same machine once this extension shipped --
+# Secure Boot on, encrypted pool, boxed banner shown, passphrase NOT echoed,
+# printk restored to "7 4 1 7" afterwards.
+#
+# /etc/zfs is NOT copied wholesale into the rootfs -- only zed.d/all-loki.sh
+# was, which is exactly how the apt snapshot hooks sat unshipped for months.
+_pf="$ROOT/live-build/config/includes.chroot/etc/zfs/initramfs-tools-load-key.d/kldload-prompt"
+_pp="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+if [[ ! -f "$_pf" ]]; then
+    _fail "ZFS passphrase-prompt extension ships" "missing: $_pf"
+elif ! grep -q 'initramfs-tools-load-key.d/kldload-prompt' "$ROOT/builder/build-iso.sh" 2>/dev/null; then
+    _fail "ZFS passphrase-prompt extension ships" \
+        "build-iso.sh does not copy it into the live rootfs - it would never reach an initramfs"
+elif ! grep -q 'initramfs-tools-load-key.d' "$_pp" 2>/dev/null; then
+    _fail "ZFS passphrase-prompt extension ships" \
+        "profiles.sh does not copy it onto the target - installed systems get upstream's buried prompt"
+elif ! grep -q 'kernel/printk' "$_pf" 2>/dev/null; then
+    _fail "ZFS passphrase-prompt extension ships" \
+        "the extension no longer quietens the console - the prompt will be buried again"
+else
+    _pass "ZFS passphrase-prompt extension ships and is wired into both copy paths"
+fi
+
 # The apt snapshot hooks must reach the live rootfs, or the PATH shim at
 # /usr/local/bin/apt is the ONLY thing taking pre-transaction snapshots — and a
 # PATH shim cannot see unattended-upgrades (python-apt never execs the binary),
