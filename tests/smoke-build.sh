@@ -718,17 +718,30 @@ _sz="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/stora
 _bl="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/bootloader.sh"
 _pfx="$ROOT/live-build/config/includes.chroot/etc/zfs/initramfs-tools-load-key.d/kldload-prompt"
 
+# And quiet on an ENCRYPTED install must be gated on whether the extension
+# actually runs there. /etc/zfs/initramfs-tools-load-key.d/ is an
+# initramfs-tools mechanism; dracut (Fedora, EL) and mkinitcpio (Arch) never
+# source it, so on those substrates quiet would hide the passphrase prompt
+# exactly as it did before 2026-08-18.
+#
+# Caught 2026-08-27 before shipping: the quiet change was written and proven
+# entirely on Debian trixie, then applied to all nine substrates at once. An
+# encrypted Fedora install would have booted to a blank screen that looked hung.
+_cm="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/common.sh"
 if ! grep -q 'kernel/printk' "$_pfx" 2>/dev/null; then
-    _fail "quiet boot is safe (prompt extension backs it)" \
-        "the prompt extension does not quieten the console — quiet on the cmdline would hide the passphrase prompt again"
-elif ! grep -qE '_direct_bootargs="\$\(k_console_args\) quiet' "$_bl" 2>/dev/null; then
-    _fail "quiet boot is safe (prompt extension backs it)" \
-        "the encrypted direct entry does not set quiet — an encrypted install boots with full kernel log output"
-elif ! grep -qE '_zbm_args="rw \$\(k_console_args\) quiet' "$_sz" 2>/dev/null; then
-    _fail "quiet boot is safe (prompt extension backs it)" \
-        "the ZBM cmdline does not set quiet — the path a normal SB-off boot reads"
+    _fail "quiet boot gated on the prompt extension" \
+        "the extension no longer quietens the console — quiet would hide the passphrase prompt again"
+elif ! grep -q 'k_prompt_extension_applies()' "$_cm" 2>/dev/null; then
+    _fail "quiet boot gated on the prompt extension" \
+        "k_prompt_extension_applies is gone — quiet would be applied on dracut/mkinitcpio where the extension is inert"
+elif ! grep -q 'k_prompt_extension_applies' "$_bl" 2>/dev/null; then
+    _fail "quiet boot gated on the prompt extension" \
+        "the direct entry does not consult it — encrypted Fedora/EL/Arch would boot quiet with an invisible prompt"
+elif ! grep -q 'k_prompt_extension_applies' "$_sz" 2>/dev/null; then
+    _fail "quiet boot gated on the prompt extension" \
+        "the ZBM cmdline does not consult it — same failure on the SB-off path"
 else
-    _pass "quiet boot on both cmdlines, backed by the prompt extension"
+    _pass "quiet boot gated per-substrate on whether the prompt extension runs"
 fi
 
 # And the hostid must be pinned, or which value ZFS sees depends on how it

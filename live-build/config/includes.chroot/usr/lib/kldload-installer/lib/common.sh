@@ -56,6 +56,33 @@ k_need_cmd() {
 # connected DRM output is the test for "somebody can stand at this machine";
 # with no display attached the box is headless and serial is the only console
 # that can be typed at, so the order flips.
+# k_prompt_extension_applies — will the passphrase-prompt extension actually run
+#                              on this target's initramfs?
+#
+# stdout: nothing. Exit 0 if yes, 1 if no.
+#
+# /etc/zfs/initramfs-tools-load-key.d/ is an INITRAMFS-TOOLS mechanism. Its
+# /scripts/zfs sources everything in that directory before its own prompt
+# branches, which is what lets kldload replace the prompt without patching
+# upstream. dracut (Fedora, EL) and mkinitcpio (Arch) have no equivalent hook
+# and will never source it -- the file lands on those targets and does nothing.
+#
+# This matters because `quiet` on an encrypted install is only safe WHERE THE
+# EXTENSION RUNS. The extension lowers printk while it asks, so quiet cannot
+# hide the prompt; without it, quiet hides the prompt exactly as it did before
+# 2026-08-18 and the machine looks hung at a blank screen.
+#
+# Caught 2026-08-27 before shipping: the quiet change was written and verified
+# entirely on Debian trixie and then applied to all nine substrates at once.
+# On Fedora it would have reintroduced the invisible prompt on the one path
+# nobody had tested. Portable by default, specific by intent.
+k_prompt_extension_applies() {
+    case "${KLDLOAD_DISTRO:-debian}" in
+    debian | ubuntu) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
 k_console_args() {
     local _c
     for _c in /sys/class/drm/card*/status; do

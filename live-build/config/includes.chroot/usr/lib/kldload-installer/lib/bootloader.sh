@@ -1145,11 +1145,20 @@ EOFSTAB
         # rhgb still goes. It expects plymouth, plymouth is not in this
         # initramfs, and it only misleads the next reader into thinking a splash
         # owns the console.
-        # Same args as the default above. The branch is kept because the
-        # comment is the point: this is the configuration whose prompt has to
-        # survive `quiet`, and it does so via the initramfs extension, not by
-        # dropping the flag.
-        _direct_bootargs="$(k_console_args) quiet loglevel=3"
+        # Encrypted: quiet ONLY where our prompt extension actually runs.
+        #
+        # On initramfs-tools it does, and the prompt survives quiet because the
+        # extension lowers printk itself. On dracut and mkinitcpio it does not
+        # -- nothing sources /etc/zfs/initramfs-tools-load-key.d -- so quiet
+        # would hide the passphrase prompt and the machine would look hung,
+        # which is the 2026-08-18 bug all over again.
+        if k_prompt_extension_applies; then
+            _direct_bootargs="$(k_console_args) quiet loglevel=3"
+            k_log "encrypted + initramfs-tools: quiet boot (prompt extension makes it visible)"
+        else
+            _direct_bootargs="$(k_console_args)"
+            k_log "encrypted + ${KLDLOAD_DISTRO:-?}: dropping quiet — no prompt extension on this initramfs"
+        fi
     fi
 
     # The GPU args have to be HERE as well as in the ZBM property, because
