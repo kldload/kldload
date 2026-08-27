@@ -537,10 +537,24 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     # menu (2026-08-15), which means the recovery tool was effectively absent
     # even though the boot chain was correct.
     #
-    # 10 seconds: long enough to see the countdown and press a key on a slow
-    # display, short enough not to feel like the machine has hung. Override with
-    # KLDLOAD_ZBM_TIMEOUT; 0 boots straight through, -1 waits for a key.
-    zfs set org.zfsbootmenu:timeout="${KLDLOAD_ZBM_TIMEOUT:-10}" rpool/ROOT
+    # 2 seconds, reduced from 10 at the operator's request 2026-08-27, and the
+    # trade is worth stating because it runs against the incident above.
+    #
+    # 10 was chosen so a monitor that takes a few seconds to sync after the
+    # firmware hands off would still show the countdown. At 2 that is no longer
+    # guaranteed: on a slow-syncing display the menu may again be gone before
+    # anything is on screen, which is exactly the 2026-08-15 report. What buys
+    # that back is that the recovery path no longer depends on catching this
+    # window -- `kldload-rollback` selects a boot environment from a running
+    # system and works on both boot paths, so ZBM's menu is the convenient way
+    # in rather than the only one.
+    #
+    # If a machine ever needs the menu and cannot catch it, raise it for that
+    # install rather than for everyone:
+    #     zfs set org.zfsbootmenu:timeout=10 rpool/ROOT
+    # KLDLOAD_ZBM_TIMEOUT overrides at install; 0 boots straight through and -1
+    # waits for a key.
+    zfs set org.zfsbootmenu:timeout="${KLDLOAD_ZBM_TIMEOUT:-2}" rpool/ROOT
 
     # Data datasets
     zfs create -o mountpoint=/root rpool/root
