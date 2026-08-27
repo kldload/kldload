@@ -503,12 +503,21 @@ open('/etc/hostid','wb').write(struct.pack('<I', hid))
     # another system" and drops to an initramfs prompt. Putting the value ZFS
     # was given at pool-create time on the cmdline makes it deterministic
     # instead of dependent on which source happens to answer first.
-    local _zbm_args="rw $(k_console_args)"
-    if [[ "${KLDLOAD_ZFS_ENCRYPT}" != "1" ]]; then
-        _zbm_args+=" quiet"
-    else
-        k_zfs_log "encrypted pool — omitting 'quiet' so the passphrase prompt is visible"
-    fi
+    # QUIET ON BOTH PATHS NOW, encrypted or not.
+    #
+    # This used to omit it for encrypted pools so the passphrase prompt was not
+    # scrolled away by kernel output. kldload now ships
+    # /etc/zfs/initramfs-tools-load-key.d/kldload-prompt, which upstream's
+    # /scripts/zfs sources before any of its own branches; it lowers printk
+    # itself while it asks and restores it afterwards. printk gates KERNEL
+    # messages, and the prompt is userspace output written straight to the
+    # console, so `quiet` no longer hides it.
+    #
+    # Verified on fiend 2026-08-27 with the extension in place: boxed banner
+    # shown, passphrase not echoed, 386 kernel messages generated in the 5-15s
+    # window and none on screen. Leaving `quiet` off was costing every encrypted
+    # install a boot full of log spam for no remaining benefit.
+    local _zbm_args="rw $(k_console_args) quiet loglevel=3"
     local _hid
     _hid="$(od -An -tx4 /etc/hostid 2>/dev/null | tr -d ' \n')"
     if [[ -n "$_hid" && "$_hid" != "00000000" ]]; then

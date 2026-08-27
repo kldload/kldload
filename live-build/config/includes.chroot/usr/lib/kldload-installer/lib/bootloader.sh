@@ -1092,7 +1092,22 @@ EOFSTAB
         _hostid_hex=""
     fi
 
-    local _direct_bootargs="rhgb quiet"
+    # BOTH configurations boot quietly now, and they differ only in whether a
+    # passphrase is asked for along the way:
+    #
+    #   unencrypted  quiet -> straight to the display manager, nothing on screen
+    #   encrypted    quiet -> same, plus the boxed prompt the initramfs extension
+    #                draws (it lowers printk itself, so quiet cannot hide it)
+    #
+    # rhgb is gone from the default. It asks for a plymouth splash, plymouth is
+    # not installed and not in the initramfs, so it bought nothing and only
+    # suggested to the next reader that a splash owned the console.
+    #
+    # loglevel=3 alongside quiet: quiet sets the console level to 4, which still
+    # lets KERN_ERR through. 3 keeps genuine errors visible while dropping the
+    # warning chatter -- an error during boot is something the operator should
+    # see even on a quiet boot.
+    local _direct_bootargs="$(k_console_args) quiet loglevel=3"
     if [[ "${KLDLOAD_ZFS_ENCRYPT:-0}" == "1" ]]; then
         # DROP `quiet` — do not merely add console args alongside it.
         #
@@ -1107,7 +1122,34 @@ EOFSTAB
         # rhgb goes too. It expects plymouth, and plymouth is not in this
         # initramfs at all — it buys nothing and misleads the next reader
         # into thinking a splash owns the console.
-        _direct_bootargs="$(k_console_args)"
+        # QUIET IS BACK, and the reason the whole comment above exists is gone.
+        #
+        # Dropping it was the right call while the prompt came from upstream's
+        # /scripts/zfs, which writes to /dev/console and then lets the kernel
+        # scroll over it. It is the wrong call now: kldload ships
+        # /etc/zfs/initramfs-tools-load-key.d/kldload-prompt, which upstream
+        # sources BEFORE any of its own branches. That extension drops printk to
+        # 1 itself, draws a boxed banner, reads with echo off, and restores
+        # printk afterwards — so the prompt is visible whether or not `quiet` is
+        # on the command line, because printk gates KERNEL messages and the
+        # prompt is userspace output written straight to the console.
+        #
+        # Verified on fiend 2026-08-27, Secure Boot + encrypted: banner shown,
+        # passphrase not echoed, 386 kernel messages still generated in the
+        # 5-15s window and none of them on screen.
+        #
+        # Keeping `quiet` off was costing a clean boot for no remaining benefit:
+        # an encrypted install was the only configuration that booted with full
+        # kernel log output all the way to the display manager.
+        #
+        # rhgb still goes. It expects plymouth, plymouth is not in this
+        # initramfs, and it only misleads the next reader into thinking a splash
+        # owns the console.
+        # Same args as the default above. The branch is kept because the
+        # comment is the point: this is the configuration whose prompt has to
+        # survive `quiet`, and it does so via the initramfs extension, not by
+        # dropping the flag.
+        _direct_bootargs="$(k_console_args) quiet loglevel=3"
     fi
 
     # The GPU args have to be HERE as well as in the ZBM property, because

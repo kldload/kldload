@@ -701,22 +701,34 @@ fi
 # every encrypted install still hid its prompt, and the bug was only found by an
 # operator sitting in front of one on 2026-08-26. A gate on the branch nobody
 # takes is not a gate.
-if grep -qE '_direct_bootargs="\$\(k_console_args\)"' \
-    "$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/bootloader.sh" 2>/dev/null; then
-    _pass "encrypted direct-boot drops rhgb quiet"
-else
-    _fail "encrypted direct-boot drops rhgb quiet" \
-        "quiet silences the console the passphrase prompt is written to"
-fi
-
-# The path that actually boots: the ZBM property must gate quiet on encryption.
+# THE INVARIANT CHANGED, and this gate changed with it rather than being deleted.
+#
+# What must hold is "the passphrase prompt is visible", not "quiet is absent".
+# Dropping quiet was the old way of guaranteeing it and it cost every encrypted
+# install a boot full of kernel log output. The guarantee now comes from
+# /etc/zfs/initramfs-tools-load-key.d/kldload-prompt, which lowers printk while
+# it asks and writes the prompt as userspace output straight to the console --
+# so quiet, which gates KERNEL messages, cannot hide it.
+#
+# So quiet is now REQUIRED on both cmdlines, and the extension is what makes
+# that safe. The gate above ("ZFS passphrase-prompt extension ships") is the
+# other half; if it ever fails, this one becomes a liability rather than a
+# feature, which is exactly why they are checked together.
 _sz="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/storage-zfs.sh"
-if grep -qE 'KLDLOAD_ZFS_ENCRYPT.*!=.*"1"' "$_sz" 2>/dev/null &&
-    grep -qE '_zbm_args\+=" quiet"' "$_sz" 2>/dev/null; then
-    _pass "encrypted ZBM cmdline drops quiet (the path a normal boot reads)"
+_bl="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/bootloader.sh"
+_pfx="$ROOT/live-build/config/includes.chroot/etc/zfs/initramfs-tools-load-key.d/kldload-prompt"
+
+if ! grep -q 'kernel/printk' "$_pfx" 2>/dev/null; then
+    _fail "quiet boot is safe (prompt extension backs it)" \
+        "the prompt extension does not quieten the console — quiet on the cmdline would hide the passphrase prompt again"
+elif ! grep -qE '_direct_bootargs="\$\(k_console_args\) quiet' "$_bl" 2>/dev/null; then
+    _fail "quiet boot is safe (prompt extension backs it)" \
+        "the encrypted direct entry does not set quiet — an encrypted install boots with full kernel log output"
+elif ! grep -qE '_zbm_args="rw \$\(k_console_args\) quiet' "$_sz" 2>/dev/null; then
+    _fail "quiet boot is safe (prompt extension backs it)" \
+        "the ZBM cmdline does not set quiet — the path a normal SB-off boot reads"
 else
-    _fail "encrypted ZBM cmdline drops quiet" \
-        "org.zfsbootmenu:commandline sets quiet unconditionally — the passphrase prompt is invisible on every ZBM boot"
+    _pass "quiet boot on both cmdlines, backed by the prompt extension"
 fi
 
 # And the hostid must be pinned, or which value ZFS sees depends on how it
