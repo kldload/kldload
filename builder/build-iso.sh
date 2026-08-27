@@ -65,7 +65,7 @@ BUILD_DATE="$(date +%Y%m%d)"
 ROOTFS="/var/tmp/kldload-rootfs"
 ISO_STAGING="/var/tmp/kldload-iso"
 DISTRO_TAG="${DISTRO:-fedora}"
-VERSION="${KLDLOAD_VERSION:-1.4.2-rc8}"
+VERSION="${KLDLOAD_VERSION:-1.4.2-rc9}"
 ISO_NAME="${ISO_NAME_OVERRIDE:-kldload-${VERSION}-${ARCH}.iso}"
 SQUASHFS_DIR="${ISO_STAGING}/LiveOS"
 
@@ -2064,6 +2064,26 @@ HELMCHARTS
         mkdir -p "${ROOTFS}/etc/ebpf_exporter"
         cp /build/live-build/config/includes.chroot/etc/ebpf_exporter/* "${ROOTFS}/etc/ebpf_exporter/" 2>/dev/null || true
     fi
+    # The ZFS passphrase-prompt extension. /scripts/zfs sources everything in
+    # /etc/zfs/initramfs-tools-load-key.d/ BEFORE its own plymouth/systemd/printk
+    # branches, so this is the supported way to replace the prompt without
+    # patching upstream's file.
+    #
+    # It has to be present when the initramfs is BUILT, or it is simply absent
+    # from the image and nothing says so -- the same shape as the apt snapshot
+    # hooks, which sat in includes.chroot for months while two copy loops
+    # globbed nothing.
+    if [[ -f /build/live-build/config/includes.chroot/etc/zfs/initramfs-tools-load-key.d/kldload-prompt ]]; then
+        mkdir -p "${ROOTFS}/etc/zfs/initramfs-tools-load-key.d"
+        install -m 0644 /build/live-build/config/includes.chroot/etc/zfs/initramfs-tools-load-key.d/kldload-prompt \
+            "${ROOTFS}/etc/zfs/initramfs-tools-load-key.d/kldload-prompt"
+        [[ -f "${ROOTFS}/etc/zfs/initramfs-tools-load-key.d/kldload-prompt" ]] ||
+            die "FATAL: kldload-prompt did not land in the rootfs — the passphrase prompt would be buried again"
+        log "ZFS passphrase-prompt extension installed into the live rootfs"
+    else
+        die "FATAL: includes.chroot/etc/zfs/initramfs-tools-load-key.d/kldload-prompt missing"
+    fi
+
     if [[ -f /build/live-build/config/includes.chroot/etc/zfs/zed.d/all-loki.sh ]]; then
         mkdir -p "${ROOTFS}/etc/zfs/zed.d"
         install -m 0755 /build/live-build/config/includes.chroot/etc/zfs/zed.d/all-loki.sh \

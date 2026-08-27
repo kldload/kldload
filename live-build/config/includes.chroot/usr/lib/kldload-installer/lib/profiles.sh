@@ -2655,6 +2655,20 @@ REPL
         fi
         # zed → Loki event shipping script
         if [[ -f /etc/zfs/zed.d/all-loki.sh ]]; then
+            # Passphrase-prompt extension, onto the TARGET, before its
+            # initramfs is built. Without it the installed system falls back to
+            # upstream's printk-7 branch and the prompt is scrolled away by
+            # kernel chatter (fiend 2026-08-27: 387 messages between 5s and 15s,
+            # a blank 9-second pause, operator had to press Enter to reveal it).
+            if [[ -f /etc/zfs/initramfs-tools-load-key.d/kldload-prompt ]]; then
+                mkdir -p "${target}/etc/zfs/initramfs-tools-load-key.d"
+                install -m 0644 /etc/zfs/initramfs-tools-load-key.d/kldload-prompt \
+                    "${target}/etc/zfs/initramfs-tools-load-key.d/kldload-prompt" &&
+                    k_log "installed /etc/zfs/initramfs-tools-load-key.d/kldload-prompt on target"
+            else
+                k_log "WARNING: kldload-prompt absent from the live env — the installed system will use upstream's prompt"
+            fi
+
             mkdir -p "${target}/etc/zfs/zed.d"
             install -m 0755 /etc/zfs/zed.d/all-loki.sh \
                 "${target}/etc/zfs/zed.d/all-loki.sh"

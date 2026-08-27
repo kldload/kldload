@@ -1,0 +1,71 @@
+# kldload — ask for the ZFS passphrase in a way the operator can actually see.
+#
+# Sourced by /scripts/zfs in the initramfs, from the "Try extensions first"
+# loop, BEFORE any of its own plymouth / systemd / printk branches. Returning
+# 0 with the key loaded ends the search; returning non-zero falls through to
+# upstream's own handling, so this can only improve on the default.
+#
+# WHY: upstream's last-resort branch does
+#
+#     echo 7 > /proc/sys/kernel/printk      # "so the prompt appears with quiet"
+#     "${ZFS}" load-key "${ENCRYPTIONROOT}"
+#
+# That workaround assumes the `quiet` kernel argument is set. kldload REMOVES
+# `quiet` on encrypted pools precisely so the prompt is visible — so printk 7
+# means maximum console verbosity with nothing suppressed, and the prompt is
+# scrolled away by kernel chatter while it waits for input.
+#
+# HISTORY fiend 2026-08-27, Secure Boot + encrypted: the boot paused ~9s with a
+# blank screen and no prompt; pressing Enter made it appear. 387 kernel messages
+# landed between 5s and 15s — USB enumeration, an ASUS AURA LED controller —
+# with printk at "7 4 1 7". The prompt had been printed and buried. The operator
+# reads that as a hung machine, which on a box whose failure mode is "reboot
+# into a brick" is the worst possible ambiguity.
+#
+# So: quieten the console FIRST, draw an unmissable banner, read with echo off,
+# and restore printk on every exit path.
+
+# The console is a variable ONLY so this can be exercised outside a boot.
+# In the initramfs it is always /dev/console; the test harness points it at a
+# pty. An extension that can never be run before it ships is an extension
+# nobody has tested.
+_kld_con="${KLDLOAD_PROMPT_CONSOLE:-/dev/console}"
+
+[ -n "${ENCRYPTIONROOT}" ] || return 1
+[ "$(get_fs_value "${ENCRYPTIONROOT}" keylocation)" = "prompt" ] || return 1
+
+_kld_printk="$(cut -f1 /proc/sys/kernel/printk 2>/dev/null || echo 4)"
+# 1 = emergency only. The kernel keeps logging to the ring buffer; it just
+# stops writing over the prompt.
+echo 1 >/proc/sys/kernel/printk 2>/dev/null || true
+
+_kld_rc=1
+_kld_try=1
+while [ "${_kld_try}" -le 3 ]; do
+    {
+        printf '\n\n'
+        printf '  ┌────────────────────────────────────────────────┐\n'
+        printf '  │  kldload — encrypted pool                      │\n'
+        printf '  └────────────────────────────────────────────────┘\n'
+        printf '\n  Pool: %s\n' "${ENCRYPTIONROOT}"
+        [ "${_kld_try}" -gt 1 ] && printf '  Wrong passphrase — attempt %s of 3\n' "${_kld_try}"
+        printf '\n  Passphrase: '
+    } >"${_kld_con}" 2>/dev/null
+
+    stty -echo <"${_kld_con}" >"${_kld_con}" 2>/dev/null || true
+    read -r _kld_pass <"${_kld_con}" || _kld_pass=""
+    stty echo <"${_kld_con}" >"${_kld_con}" 2>/dev/null || true
+    printf '\n' >"${_kld_con}" 2>/dev/null
+
+    if printf '%s' "${_kld_pass}" | "${ZFS}" load-key "${ENCRYPTIONROOT}" >"${_kld_con}" 2>&1; then
+        _kld_rc=0
+        printf '  Key loaded.\n\n' >"${_kld_con}" 2>/dev/null
+        break
+    fi
+    _kld_try=$((_kld_try + 1))
+done
+
+unset _kld_pass
+echo "${_kld_printk}" >/proc/sys/kernel/printk 2>/dev/null || true
+unset _kld_printk _kld_try _kld_con
+return "${_kld_rc}"
