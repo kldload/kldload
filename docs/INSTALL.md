@@ -28,10 +28,25 @@ installer is actually doing to your machine.
 
 | | |
 |---|---|
-| A 64-bit x86 machine | UEFI firmware. Legacy BIOS-only machines are not supported. |
-| A USB stick, 16 GB or larger | The image is ~12 GB. |
+| A 64-bit x86 machine | **UEFI required. Legacy BIOS boot is not supported and never has been.** |
+| A USB stick, **32 GB or larger** | The image is ~17.7 GB. A 16 GB stick cannot hold it. |
 | A target disk | **It will be erased.** |
 | Network | Optional for most distributions — see below. |
+
+**On UEFI.** This is not an untested configuration, it is an absent one. The
+installer writes a GPT layout with an EFI System Partition and a ZFS pool and
+nothing else — there is no BIOS boot partition and no `grub-install
+--target=i386-pc` anywhere in the tree. Secure Boot needs shim and NVRAM boot
+entries, ZFSBootMenu is an EFI binary, and the boot-repair and rollback tools
+both operate on the ESP. None of that has a legacy equivalent.
+
+It is also a deliberate choice rather than an omission: GRUB on legacy BIOS
+with a ZFS root embeds stage-1.5 in the post-MBR gap, and that code has to
+understand your pool's feature flags. A routine `zpool upgrade` can therefore
+make the machine unbootable. Requiring UEFI removes that entire failure class.
+
+Practically this excludes pre-2012 hardware, OEM desktops left in CSM-only
+mode, and VMs configured for SeaBIOS instead of OVMF.
 
 **About the network.** Debian, Ubuntu and Fedora installs are fully
 offline: their packages are baked into the image. **Arch installs require

@@ -109,6 +109,20 @@ the OpenZFS test lab kept separate from it.
 
 ---
 
+## Requirements
+
+| | |
+|---|---|
+| A 64-bit x86 machine | **UEFI required. Legacy BIOS boot is not supported.** |
+| A USB stick, **32 GB or larger** | The image is ~17.7 GB. |
+| A target disk | **It will be erased.** |
+| Network | Optional for Debian, Ubuntu and Fedora. Required for Arch. |
+
+Legacy BIOS is absent by design, not untested: the installer writes GPT with an
+EFI System Partition and a ZFS pool, and Secure Boot, ZFSBootMenu, boot repair
+and rollback all operate on the ESP. See [docs/INSTALL.md](docs/INSTALL.md) for
+the full detail.
+
 ## Quickstart
 
 ```bash
