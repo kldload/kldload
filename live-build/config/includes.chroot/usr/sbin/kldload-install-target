@@ -1224,6 +1224,34 @@ if ! k_have_func k_install_tools; then
             kldload-live-* | kldload-deploy-tui) continue ;;
             esac
             if [[ -f "${target}/usr/local/bin/${base}" ]]; then
+                # ON A USRMERGE TARGET THIS SYMLINK IS A SELF-LOOP THAT EATS THE
+                # BINARY, so check before making it.
+                #
+                # Fedora 44 ships /usr/local/sbin as a symlink to bin. The link
+                # below is then created AT /usr/local/bin/${base} pointing to
+                # /usr/local/bin/${base} -- itself -- and `ln -sf` forces it over
+                # the real file. Every caller gets ELOOP:
+                #     Unable to locate executable '/usr/local/sbin/kldload-...':
+                #     Too many levels of symbolic links
+                #
+                # fiend, 2026-08-27, first Fedora 44 install of the night: 58 of
+                # 168 entries in /usr/local/bin were links to themselves. Five
+                # units failed at boot -- boot-assert, journal-flush,
+                # inventory-sync, zfs-dbgmsg and tls-cert -- and kldload-doctor,
+                # kldload-db, kldload-enroll and fifty others were simply gone.
+                # The Debian installs all night were unaffected because there
+                # /usr/local/sbin is a real directory and the shim is correct.
+                #
+                # -ef compares device+inode, so it is true exactly when the two
+                # paths are the same directory however that came about --
+                # symlink, bind mount or otherwise. When they are the same, the
+                # file copied to bin IS the sbin copy and there is nothing to
+                # link.
+                if [[ "${target}/usr/local/sbin" -ef "${target}/usr/local/bin" ]]; then
+                    printf '  usrmerge:  /usr/local/sbin is /usr/local/bin — %s needs no link\n' \
+                        "${base}" >>"${log}"
+                    continue
+                fi
                 ln -sf "/usr/local/bin/${base}" "${lsbin_dst}/${base}"
                 printf '  linked:    /usr/local/sbin/%s -> /usr/local/bin/%s\n' \
                     "${base}" "${base}" >>"${log}"

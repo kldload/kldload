@@ -755,6 +755,27 @@ else
         "hostid resolves from two sources that can disagree — import fails and drops to initramfs"
 fi
 
+# The /usr/local/sbin compat symlink must be guarded against usrmerge.
+#
+# kldload-install-target links /usr/local/sbin/kldload-* -> /usr/local/bin/... so
+# the two copies cannot drift. On Fedora 44 /usr/local/sbin IS /usr/local/bin (a
+# symlink), so that link is created at the destination pointing to itself, and
+# `ln -sf` forces it over the real binary. Every caller then gets ELOOP.
+#
+# fiend 2026-08-27, first F44 install: 58 of 168 entries in /usr/local/bin were
+# links to themselves. Five units failed at boot and fifty-odd tools were gone.
+# Every Debian install that night was fine, because there the two are separate
+# directories and the shim is correct -- which is exactly why it shipped.
+_it="$ROOT/live-build/config/includes.chroot/usr/sbin/kldload-install-target"
+if ! grep -q 'ln -sf "/usr/local/bin/\${base}"' "$_it" 2>/dev/null; then
+    _pass "usrmerge: the /usr/local/sbin compat link is gone entirely"
+elif grep -q 'usr/local/sbin" -ef "\${target}/usr/local/bin' "$_it" 2>/dev/null; then
+    _pass "usrmerge: the /usr/local/sbin compat link is guarded by an -ef check"
+else
+    _fail "usrmerge: the /usr/local/sbin compat link is guarded" \
+        "ln -sf into /usr/local/sbin with no same-directory check — on Fedora this overwrites every tool with a symlink to itself"
+fi
+
 # The ZFS passphrase-prompt extension must ship, or an encrypted install falls
 # back to upstream's printk-7 branch and the prompt is buried by kernel output.
 #
