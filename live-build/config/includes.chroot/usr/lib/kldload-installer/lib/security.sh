@@ -38,9 +38,35 @@ k_configure_mok() {
     # If efivars aren't mounted (running in a non-EFI container or similar)
     # we skip — mokutil cannot write staging variables without them.
 
-    # TODO: restore random password once web UI displays it before reboot
-    # mok_pass="$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-20)"
-    local mok_pass="kldload"
+    # DELIBERATELY DETERMINISTIC, and honouring the documented override.
+    #
+    # A random password here is strictly worse, and the old TODO asking for one
+    # back had the trade upside down. MokManager runs BEFORE first boot, on the
+    # console, and asks for this password with no way to look it up: the machine
+    # it is installing is not running yet. A random value the operator never saw
+    # is therefore not "more secure", it is an unbootable Secure Boot install.
+    #
+    # And it buys almost nothing. The real gate on MOK enrollment is PHYSICAL
+    # PRESENCE — MokManager only runs at the console and needs a human. The
+    # password confirms that the person at the console is the one who staged the
+    # import; but staging requires root already, and the password is stored on
+    # the same machine, so an attacker with root reads it either way. The one
+    # case it helps is an operator who reboots into a MokManager they did not
+    # expect, and there the fix is to make them stop and read, not to make the
+    # password unguessable.
+    #
+    # HISTORY fiend 2026-08-26: install with Secure Boot + encryption, MokManager
+    # appeared, the operator had no password to type, enrollment was abandoned.
+    # zfs.ko was correctly signed by kldload-mok-20260826231823 and that exact
+    # key sat in MokNew, never enrolled — so the kernel refused the module with
+    # "Loading of module with unavailable key is rejected" and the boot died at
+    # an initramfs prompt. Every mechanical step worked; the operator simply
+    # could not answer a prompt whose answer was written only to the target's
+    # /root, readable only after a boot that could not happen.
+    #
+    # Operators who want their own set KLDLOAD_MOK_PASSWORD; it is already
+    # documented in `kldload-secure-boot --help`.
+    local mok_pass="${KLDLOAD_MOK_PASSWORD:-kldload}"
 
     local enrolled=0
     if chroot "${target}" command -v mokutil >/dev/null 2>&1; then
@@ -72,6 +98,37 @@ k_configure_mok() {
         echo "MOK_KEY=/var/lib/dkms/mok.key"
     } >"${log_dir}/mok-password.txt"
     chmod 0600 "${log_dir}/mok-password.txt"
+
+    # ALSO write it where it can be read BEFORE the machine boots. The file
+    # above lives on the target's /root at mode 0600 — unreadable until the
+    # install boots, which is exactly the boot MokManager is standing in front
+    # of. The ESP is FAT, mounted by any live USB or any other machine, and
+    # present at the moment it is needed.
+    #
+    # Not treated as a secret, and that is a deliberate call: this password
+    # authorises one thing, enrolling a key that is already sitting on this
+    # disk, and only from the physical console. Anyone who can read the ESP can
+    # already boot the machine and turn Secure Boot off in firmware, which is
+    # strictly more powerful. Recoverability wins.
+    local _esp="${target}/boot/efi"
+    if [[ -d "$_esp" ]]; then
+        {
+            echo "kldload — Secure Boot MOK enrollment"
+            echo
+            echo "On the next boot a blue MokManager screen appears. Choose:"
+            echo "    Enroll MOK  ->  Continue  ->  Yes  ->  password below  ->  Reboot"
+            echo
+            echo "    password: ${mok_pass}"
+            echo
+            echo "Enable Secure Boot in firmware AFTER the key is enrolled."
+            echo "If the screen never appears, the enrollment did not queue --"
+            echo "run: mokutil --import /var/lib/dkms/mok.der   and reboot."
+            echo
+            echo "This is not a secret: it authorises enrolling a key already on"
+            echo "this disk, from the console only. See kldload-secure-boot --help."
+        } >"${_esp}/MOK-ENROLLMENT.txt" 2>/dev/null &&
+            k_log "MOK instructions written to the ESP: /boot/efi/MOK-ENROLLMENT.txt"
+    fi
 
     k_log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     k_log " MOK ENROLLMENT — action required on first boot"

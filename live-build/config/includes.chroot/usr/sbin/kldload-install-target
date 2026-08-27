@@ -90,6 +90,31 @@ k_poweroff_after_success() {
         fi
         printf '\e[1;32m║                                                          ║\e[0m\n'
     fi
+    # THE MOK PASSWORD, ON SCREEN, AS THE LAST THING BEFORE POWER-OFF.
+    #
+    # A Secure Boot install powers off here so the operator controls the one
+    # attention-critical boot. The very next thing they will see is MokManager
+    # asking for a password — and until now nothing ever told them what it was.
+    # It was written to the target's /root at mode 0600, readable only after a
+    # boot that MokManager is standing in front of.
+    #
+    # fiend 2026-08-26: exactly that. Enrollment abandoned at the blue screen,
+    # zfs.ko correctly signed by a key that then sat unenrolled in MokNew, and
+    # the boot died with "Loading of module with unavailable key is rejected".
+    if [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" == "1" ]]; then
+        local _mokpw="${KLDLOAD_MOK_PASSWORD:-kldload}"
+        printf '\e[1;33m║   ⚠  SECURE BOOT — do this on the next power-on:         ║\e[0m\n'
+        printf '\e[1;33m║                                                          ║\e[0m\n'
+        printf '\e[1;33m║      A blue MokManager screen will appear. Choose:       ║\e[0m\n'
+        printf '\e[1;33m║      Enroll MOK → Continue → Yes → password → Reboot     ║\e[0m\n'
+        printf '\e[1;33m║                                                          ║\e[0m\n'
+        printf '\e[1;33m║      password:  %-40s ║\e[0m\n' "$_mokpw"
+        printf '\e[1;33m║                                                          ║\e[0m\n'
+        printf '\e[1;33m║      Turn Secure Boot ON in firmware AFTER enrolling.    ║\e[0m\n'
+        printf '\e[1;33m║      Also saved to /boot/efi/MOK-ENROLLMENT.txt          ║\e[0m\n'
+        printf '\e[1;32m║                                                          ║\e[0m\n'
+    fi
+
     # Auto-reboot by default after a 10-second window. Pre-build #47 this
     # was gated on /etc/kldload/autoinstall.env existing (the seed-disk
     # path) so only unattended installs rebooted. Webui-driven installs
