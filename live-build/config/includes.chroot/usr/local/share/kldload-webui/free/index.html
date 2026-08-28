@@ -763,7 +763,7 @@ $ ansible -i /usr/local/bin/kldload-inventory role_klab_golden -m ping</div>
           <div class="panel-hdr">⚙ Platform Options</div>
           <div class="panel-body">
             <div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.6rem">
-              ZFS, WireGuard, and eBPF are included on all profiles (except Core). Toggle NVIDIA if you have a GPU. Secure Boot is <strong>on</strong> by default (MOK enrollment on first boot, password <code>kldload</code>) — disable it only if your firmware can't enroll MOK. Web ops console is <strong>off</strong> on server/workstation by default — enable to use the dashboard as an in-place toolkit (Doctor / VM / K8s / Install). Lab profiles (kvm / ai / zfslab / klab) always auto-start it.
+              The workstation ships complete: ZFS, WireGuard, KVM, Kubernetes, observability, the ZFS console and Ollama all install and come up on their own. Only the choices that depend on <em>your</em> machine are left here. Toggle NVIDIA if you have a GPU. Secure Boot is <strong>on</strong> by default (MOK enrollment on first boot, password <code>kldload</code>) — disable it only if your firmware can't enroll MOK.
               <br><strong style="color:#c9a04a">⚠ KVM, Kubernetes, and the lab profiles run real VMs through KVM &mdash; they need CPU virtualization (Intel VT-x / AMD-V): bare metal, or a guest with <em>nested virtualization</em> enabled on the host. Without it QEMU falls back to TCG software emulation and VMs are unusably slow. A plain workstation / server or Core (no KVM) runs fine virtualized.</strong>
             </div>
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.5rem;margin-bottom:0.8rem;max-width:760px">
@@ -795,10 +795,6 @@ $ ansible -i /usr/local/bin/kldload-inventory role_klab_golden -m ping</div>
                    self-converting host (in-place reinstall to klab,
                    diagnostics via Doctor, etc.) without forcing the cost
                    on operators who'd rather keep it cold. -->
-              <div class="opt-card" id="opt-webui" onclick="toggleOpt('webui')" title="Auto-start kldload-webui + ttyd + proxy at boot (Doctor / VM / K8s / Install panel)" style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                <div style="font-size:1.5rem;margin-bottom:0.3rem">🖥</div>
-                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Auto-start GUI</div>
-              </div>
               <!-- AI stack opt-in. Feeds enable_ai → KLDLOAD_ENABLE_AI, which
                    works on ANY profile (kldload-firstboot gates on ROLE==ai OR
                    ENABLE_AI), so the AI stack does not require picking the AI
@@ -810,35 +806,15 @@ $ ansible -i /usr/local/bin/kldload-inventory role_klab_golden -m ping</div>
                    carry produced air-gapped boxes with no working model, and a
                    separate "download a model" card asked the operator to
                    confirm something already on the disk. -->
-              <div class="opt-card" id="opt-bob" onclick="toggleOpt('bob')" title="Local AI — installs Ollama plus the Open WebUI interface, set up and running on any profile. No model is downloaded: Open WebUI opens with an empty model list and you pull the one you want from its picker. Tick 'AI model' as well to have the installer download one during first boot." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                <div style="font-size:1.5rem;margin-bottom:0.3rem">🤖</div>
-                <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Ollama</div>
-              </div>
             </div>
             <!-- kldload Workstation "lab" extras — shown only on the desktop profile
                  (selectTarget() toggles #opt-lab-cluster). Each card flips a flag the
                  distro-aware backend already acts on; default all-off = plain workstation. -->
             <div id="opt-lab-cluster" style="display:none">
-              <div style="font-size:0.74rem;color:var(--muted);margin:0.5rem 0 0.3rem">Workstation extras (optional — leave all off for a plain workstation) — <a href="#" onclick="selectAllExtras();return false" style="color:var(--accent);text-decoration:none">select all</a></div>
-              <div style="font-size:0.72rem;color:#c9a04a;margin:0 0 0.4rem">Note: KVM, Kubernetes &amp; Build Images need hardware virtualization (VT-x / AMD-V) — bare metal, or a guest with nested virt enabled. In a plain VM they fall back to slow software emulation.</div>
+              <div style="font-size:0.74rem;color:var(--muted);margin:0.5rem 0 0.3rem">The one workstation extra that is <em>not</em> automatic, because it has a hard memory floor:</div>
+              <div style="font-size:0.72rem;color:#c9a04a;margin:0 0 0.4rem">Note: the workstation's KVM, Kubernetes and Build Images all need hardware virtualization (VT-x / AMD-V) — bare metal, or a guest with nested virt enabled. In a plain VM they fall back to slow software emulation.</div>
               <div style="font-size:0.72rem;color:#c9a04a;margin:0 0 0.4rem">Build Images wants 24 GB RAM or more. It builds five distro goldens at once during first boot, on top of everything else firstboot is doing — on a smaller machine that contends with the desktop coming up and phases start failing. With less RAM, leave it off and build the goldens later, one at a time, from vmxplore.</div>
               <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.5rem;max-width:760px">
-                <div class="opt-card" id="opt-kvm" onclick="toggleOpt('kvm')" title="KVM hypervisor on ZFS — libvirt + virt-manager + zvol-backed VMs with instant clones (kvm-create/clone). REQUIRES hardware virtualization (Intel VT-x / AMD-V) — bare metal, or a guest with nested virt enabled on the host; otherwise VMs run under slow TCG emulation. Flag: KLDLOAD_ENABLE_KVM." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                  <div style="font-size:1.5rem;margin-bottom:0.3rem">🖥</div>
-                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">KVM</div>
-                </div>
-                <div class="opt-card" id="opt-k8s" onclick="toggleOpt('k8s')" title="Kubernetes on KVM (Cilium + Hubble), built on first boot. Runs on KVM VMs — REQUIRES hardware virtualization (bare metal or nested-virt guest). Flag: KLDLOAD_K8S_BOOTSTRAP." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                  <div style="font-size:1.5rem;margin-bottom:0.3rem">☸</div>
-                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Kubernetes</div>
-                </div>
-                <div class="opt-card" id="opt-ebpf" onclick="toggleOpt('ebpf')" title="Observability / eBPF — Prometheus + Grafana + Loki + BCC/bpftrace exporters. Flag: KLDLOAD_ENABLE_EBPF." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                  <div style="font-size:1.5rem;margin-bottom:0.3rem">📊</div>
-                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Observability</div>
-                </div>
-                <div class="opt-card" id="opt-zxplore" onclick="toggleOpt('zxplore')" title="ZFS Console (zxplore) — keyboard-driven console for the ZFS you're installing: browse datasets/snapshots, replicate, restore files, boot environments. Static TUI on every profile; native GUI + tray icon where a desktop shell ships. Flag: KLDLOAD_ENABLE_ZXPLORE." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
-                  <div style="font-size:1.5rem;margin-bottom:0.3rem">🗂</div>
-                  <div style="font-size:0.8rem;font-weight:600;color:var(--text)">ZFS Console</div>
-                </div>
                 <div class="opt-card" id="opt-images" onclick="toggleOpt('images')" title="Build Images — build the 5 distro cloud-image goldens (klab) on first boot for the VM lab. Wants 24 GB RAM or more: all five build during first boot, alongside the rest of firstboot, so on a smaller machine the phases contend with the desktop coming up and start failing. With less RAM, leave this off and build the goldens afterwards, one at a time, from vmxplore — same result, no first-boot pile-up. Several GB download; RHEL golden needs a subscription. Flag: KLDLOAD_BUILD_IMAGES." style="cursor:pointer;padding:0.75rem 0.5rem;border:1px solid var(--border);border-radius:8px;transition:all 0.15s;text-align:center;display:flex;flex-direction:column;justify-content:center">
                   <div style="font-size:1.5rem;margin-bottom:0.3rem">💿</div>
                   <div style="font-size:0.8rem;font-weight:600;color:var(--text)">Build Images</div>
@@ -5560,6 +5536,36 @@ function selectTarget(el) {
       _bobCard.style.background = bobCb.checked ? 'rgba(0,184,217,0.08)' : 'transparent';
     }
   }
+  // ── Desktop ships the whole workstation, not a pick-list ────────────────
+  // The desktop profile used to present nine cards, six of which asked the
+  // operator to opt into things the profile is named for. Every one of them
+  // had to be ticked to get the intended experience, and the packages ship on
+  // the ISO either way — so the buttons only ever gated first-boot work while
+  // looking like install choices. Desktop now forces them on and shows the
+  // three decisions that genuinely differ per machine: NVIDIA (hardware),
+  // Secure Boot (firmware), and Build Images (the only one with a hard RAM
+  // floor). (operator request, 2026-08-28: "no point in so many buttons".)
+  //
+  // Forced HERE, at the end of selectTarget, for two reasons: it runs AFTER
+  // the GPU-capability auto-check above, which would otherwise stomp Ollama
+  // straight back off; and it is scoped to one role, so server / core / kvm /
+  // k8s / zfslab keep exactly the logic they had. Nothing in the payload
+  // builder changed, which is what keeps the blast radius at one profile.
+  if (el.dataset.role === 'desktop') {
+    ['install-kvm', 'install-k8s', 'install-k8s-bootstrap',
+     'install-ebpf', 'install-zxplore', 'install-bob'].forEach(function (id) {
+      var cb = document.getElementById(id);
+      // dataset.blocked is set by the distro pass for substrates that cannot
+      // run the thing (Arch / BSD have no K8s darksite). Never force those on.
+      if (cb && cb.dataset.blocked !== '1') cb.checked = true;
+    });
+    // The web console is the one card that turned on a PERMANENT service.
+    // A workstation already has a GUI; it does not need a second one
+    // listening after every reboot. The tools stay installed and startable
+    // on demand — this only stops the unit auto-starting at boot.
+    var _wcb = document.getElementById('install-webui');
+    if (_wcb) _wcb.checked = false;
+  }
   // Keep the legacy install-ai hidden checkbox in sync so submit payloads
   // that still reference it (and the summary badge code) behave consistently.
   if (aiCb) aiCb.checked = !!(bobCb && bobCb.checked);
@@ -5680,20 +5686,14 @@ function toggleOpt(name) {
   }
 }
 
-// Select-all for the Workstation extras (KVM / Kubernetes / Observability /
-// Build Images). Turns ON any that are off, routing through toggleOpt so the
-// K8s tile's cluster-bootstrap default fires too. This is what "I selected all
-// the checkboxes" should have done.
-function selectAllExtras() {
-  ['kvm','k8s','ebpf','images'].forEach(function(n){
-    var cb = document.getElementById('install-' + n);
-    if (cb && !cb.checked) toggleOpt(n);
-  });
-}
+// selectAllExtras() removed with its only caller, the "select all" link.
+// Desktop now sets these flags in selectTarget() and the cards it ticked
+// are gone, so it would be a function nothing calls, reaching for
+// elements that no longer exist. (2026-08-28)
 
 // Init option cards on load
 document.addEventListener('DOMContentLoaded', function() {
-  ['wireguard','nvidia','ebpf','dedup','secure-boot','webui','bob','kvm','k8s','images','zxplore'].forEach(function(name) {
+  ['wireguard','nvidia','dedup','secure-boot','images'].forEach(function(name) {
     var map = {wireguard: 'install-wireguard', nvidia: 'install-nvidia', ebpf: 'install-ebpf', dedup: 'install-zfs-dedup', kvm: 'install-kvm', k8s: 'install-k8s', 'secure-boot': 'install-secure-boot', webui: 'install-webui', bob: 'install-bob', images: 'install-images', zxplore: 'install-zxplore'};
     var cb = document.getElementById(map[name]);
     var card = document.getElementById('opt-' + name);
@@ -5757,16 +5757,22 @@ function selectDistro(el) {
       if (serverCard) selectTarget(serverCard);
     }
   }
-  // Grey out K8s checkbox for distros without darksite support
-  const k8sOpt = document.getElementById('opt-k8s');
-  if (k8sOpt) {
+  // Arch and the BSDs have no K8s darksite, so K8s must stay off there. This
+  // used to hang off the opt-k8s CARD and grey it out. The card is gone (the
+  // desktop no longer asks), but the CONSTRAINT is not -- and with the card
+  // absent the whole block went unreachable, which would have let the desktop
+  // force-on below switch K8s on for exactly the two substrates that cannot
+  // run it. Drive the checkbox directly and mark it, so the force-on sees the
+  // block whichever of the two functions runs last. (2026-08-28)
+  const k8sCb = document.getElementById('install-k8s');
+  if (k8sCb) {
     const k8sBlocked = isArch || isBSD;
-    k8sOpt.style.opacity = k8sBlocked ? '0.3' : '';
-    k8sOpt.style.pointerEvents = k8sBlocked ? 'none' : '';
-    if (k8sBlocked) {
-      document.getElementById('install-k8s').checked = false;
-      k8sOpt.style.borderColor = 'var(--border)';
-      k8sOpt.style.background = '';
+    k8sCb.dataset.blocked = k8sBlocked ? '1' : '';
+    if (k8sBlocked) k8sCb.checked = false;
+    const k8sBootCb = document.getElementById('install-k8s-bootstrap');
+    if (k8sBootCb) {
+      k8sBootCb.dataset.blocked = k8sBlocked ? '1' : '';
+      if (k8sBlocked) k8sBootCb.checked = false;
     }
   }
 }

@@ -898,6 +898,41 @@ else
         "could not find the rpool/var/lib create line — the layout changed shape, re-check this gate"
 fi
 
+# The desktop profile asks three questions, not nine. Six cards asked the
+# operator to opt into things the profile is named for -- KVM, Kubernetes,
+# observability, the ZFS console, Ollama -- which ship on the ISO regardless,
+# so the buttons only ever gated first-boot work while looking like install
+# choices. Every one had to be ticked to get the intended workstation, which
+# made the install unrepeatable. Desktop now forces them on and keeps the
+# three decisions that vary per machine: NVIDIA, Secure Boot, Build Images.
+# (operator request, 2026-08-28.)
+#
+# Two halves are gated because removing the cards silently broke the second:
+# the Arch/BSD K8s guard hung off the opt-k8s CARD, so deleting the card made
+# the guard unreachable and would have forced K8s on for the two substrates
+# with no K8s darksite. It now drives the checkbox and marks it, and the
+# force-on skips anything marked.
+_spa="$ROOT/live-build/config/includes.chroot/usr/local/share/kldload-webui/free/index.html"
+_spa_ok=0
+grep -qF "if (el.dataset.role === 'desktop') {" "$_spa" 2>/dev/null && _spa_ok=$((_spa_ok + 1))
+grep -qF "cb.dataset.blocked !== '1'" "$_spa" 2>/dev/null && _spa_ok=$((_spa_ok + 1))
+grep -qF "k8sCb.dataset.blocked" "$_spa" 2>/dev/null && _spa_ok=$((_spa_ok + 1))
+# The six retired cards must stay retired; the three survivors must stay.
+_spa_dead=0
+for _c in opt-webui opt-bob opt-kvm opt-k8s opt-ebpf opt-zxplore; do
+    grep -qF "id=\"${_c}\"" "$_spa" 2>/dev/null && _spa_dead=$((_spa_dead + 1))
+done
+_spa_live=0
+for _c in opt-nvidia opt-secure-boot opt-images; do
+    grep -qF "id=\"${_c}\"" "$_spa" 2>/dev/null && _spa_live=$((_spa_live + 1))
+done
+if ((_spa_ok == 3 && _spa_dead == 0 && _spa_live == 3)); then
+    _pass "desktop asks 3 questions; the rest are silent defaults"
+else
+    _fail "desktop asks 3 questions; the rest are silent defaults" \
+        "force-on/blocked-guard checks $_spa_ok/3, retired cards still present: $_spa_dead (want 0), surviving cards: $_spa_live/3"
+fi
+
 # The kernel exclude that protects the pin must COME FROM the pin. These two
 # halves lived in different files and drifted: build-iso.sh switched to
 # resolver-derived excludes, lib/bootstrap.sh kept a literal
