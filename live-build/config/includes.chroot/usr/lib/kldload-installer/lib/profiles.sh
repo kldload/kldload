@@ -217,6 +217,18 @@ k_profile_packages() {
         # wired trap as the Fedora side. Debian shipped 1361 firmware files
         # against Fedora's 2874.
         _fw+=" firmware-linux-free firmware-linux-nonfree"
+        # The per-vendor split, which the metapackages do NOT pull.
+        # firmware-linux-nonfree Depends only on firmware-misc-nonfree and
+        # firmware-amd-graphics -- everything below is Recommends at best, and
+        # this install uses --no-install-recommends, so none of it arrived.
+        # Measured on .105 2026-08-28: brcm 1 file, mediatek/cirrus/qcom/i915
+        # all ZERO. firmware-intel-graphics is Debian's i915 firmware, the same
+        # gap intel-gpu-firmware was on Fedora. firmware-sof-signed is the
+        # Intel audio DSP that most laptops made since ~2019 need for sound.
+        # Adding these took the box from 1361 firmware files to 3093.
+        _fw+=" firmware-brcm80211 firmware-mediatek firmware-cirrus"
+        _fw+=" firmware-qcom-soc firmware-intel-graphics firmware-nvidia-graphics"
+        _fw+=" firmware-ti-connectivity firmware-libertas firmware-sof-signed"
         # Debian/Ubuntu desktop profile uses LightDM, NOT gdm3. GDM 48 on
         # Debian Trixie has a systemd-integration bug where it can't pass
         # the session type to gnome-session — gnome-session-binary errors:

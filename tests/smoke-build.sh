@@ -1016,7 +1016,10 @@ _dprof="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/pr
 _dmissing=""
 for _p in amd64-microcode intel-microcode firmware-linux-free firmware-linux-nonfree \
     firmware-amd-graphics firmware-misc-nonfree gstreamer1.0-libav libavcodec-extra \
-    gstreamer1.0-tools mesa-va-drivers va-driver-all intel-media-va-driver; do
+    gstreamer1.0-tools mesa-va-drivers va-driver-all intel-media-va-driver \
+    firmware-brcm80211 firmware-mediatek firmware-cirrus firmware-qcom-soc \
+    firmware-intel-graphics firmware-nvidia-graphics firmware-ti-connectivity \
+    firmware-libertas firmware-sof-signed; do
     grep -qE "(^|[[:space:]])${_p}([[:space:]]|\"|\\\\|\$)" \
         < <(grep -vE '^[[:space:]]*#' "$_dprof" 2>/dev/null) ||
         _dmissing+=" ${_p}"
