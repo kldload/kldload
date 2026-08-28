@@ -130,9 +130,26 @@ ibus-libpinyin
 ibus-anthy
 ibus-hangul
 glibc-all-langpacks
-mesa-vdpau-drivers
+# Video acceleration. Two names here resolved NOWHERE on F44 -- not in Fedora,
+# not in RPM Fusion -- and had been quietly doing nothing: mesa-vdpau-drivers
+# and nvidia-vaapi-driver. A name-only mirror query cannot fail loudly on a
+# package that does not exist, so they read as coverage while providing none.
+# Verified 2026-08-28 by resolving every name against a real F44 container with
+# both RPM Fusion repos enabled.
+#
+# What actually delivers accelerated playback, and does resolve:
+#   mesa-va-drivers-freeworld  VA-API for AMD/Intel WITH the patented codecs.
+#                              Stock mesa-dri-drivers Provides mesa-va-drivers,
+#                              but only the free subset -- so H.264/H.265 fell
+#                              back to software on every AMD and Intel box.
+#   libavcodec-freeworld       the H.264/H.265/AAC decoders themselves. Fedora
+#                              ships -free builds with those stripped, which is
+#                              why ordinary video would not play at all.
+# Both confirmed to coexist with the free stack (no conflicts, no swap needed);
+# RPM Fusion free+nonfree are already enabled by build-darksite-fedora.sh.
 libva-intel-driver
-nvidia-vaapi-driver
+mesa-va-drivers-freeworld
+libavcodec-freeworld
 
 # Versionlock plugin — the F44 anti-brick. firstboot (kldload-firstboot ~1508)
 # runs `dnf install python3-dnf-plugin-versionlock` then locks kernel*/zfs* at
@@ -211,6 +228,18 @@ NetworkManager-openvpn-gnome
 NetworkManager-ppp
 NetworkManager-tui
 NetworkManager-wwan
+# GPU firmware, declared rather than inherited. These were in the mirror only
+# as somebody else's dependency, so the day that dependency moved they would
+# have vanished and the install-list entry in profiles.sh would resolve to
+# nothing. amdgpu and i915 do not initialise without their blobs -- that is a
+# black screen on any Radeon or recent Intel box, not a degraded desktop, and
+# it is the likeliest cause of "the installer gave me no desktop" on non-NVIDIA
+# hardware. F43+ split linux-firmware so the bare package carries licences and
+# ONE amdgpu file against 679 here. All three vendors, because the machine is
+# not known at build time. (2026-08-28)
+amd-gpu-firmware
+intel-gpu-firmware
+nvidia-gpu-firmware
 alsa-sof-firmware
 alsa-ucm
 bluez-tools

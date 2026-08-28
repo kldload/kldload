@@ -194,7 +194,15 @@ k_profile_packages() {
         # to fetch the package that would fix it. iw ships alongside for the
         # same reason — diagnosing a radio without it means having no tools at
         # exactly the moment you cannot download any.
+        # GPU firmware is NOT optional on a desktop: amdgpu and i915 refuse to
+        # initialise without their blobs, so the box lands on a black screen or
+        # a software framebuffer. This list was all WIFI firmware — every
+        # Radeon and every recent Intel iGPU shipped with no firmware at all,
+        # while firmware-amd-graphics sat unused in our own darksite. Found
+        # 2026-08-28 asking whether a non-NVIDIA machine works; it did not,
+        # properly. firmware-misc-nonfree carries the Intel GPU blobs on Debian.
         local _fw="firmware-iwlwifi firmware-realtek firmware-atheros wpasupplicant iw"
+        _fw+=" firmware-amd-graphics firmware-misc-nonfree"
         # Debian/Ubuntu desktop profile uses LightDM, NOT gdm3. GDM 48 on
         # Debian Trixie has a systemd-integration bug where it can't pass
         # the session type to gnome-session — gnome-session-binary errors:
@@ -273,7 +281,13 @@ k_profile_packages() {
             # licenses — same list build-iso.sh ships on the live image.
             _fw="linux-firmware"
             if [[ "$_distro" == "fedora" ]]; then
+                # Same gap as the Debian branch above, and worse here: F43+
+                # split linux-firmware so the bare package carries licences and
+                # ONE amdgpu file, against 679 in amd-gpu-firmware. A Radeon on
+                # Fedora had essentially no firmware. All three GPU vendors are
+                # listed because the machine is not known at build time.
                 _fw="linux-firmware iwlwifi-dvm-firmware iwlwifi-mvm-firmware iwlwifi-mld-firmware iwlegacy-firmware realtek-firmware atheros-firmware"
+                _fw+=" amd-gpu-firmware intel-gpu-firmware nvidia-gpu-firmware"
             fi
             # GDM works on RPM distros once the right session-files package
             # is present. The bug seen on Rocky 9 desktop install 2026-05-04:
@@ -1837,6 +1851,29 @@ OSREL
             local _app
             while IFS= read -r _app; do
                 [[ -n "$_app" ]] || continue
+                # Chrome is exempt because it is not necessarily on the target
+                # YET. profiles.sh installs it here, but kldload-firstboot has a
+                # belt-and-suspenders re-install for the case where this dnf
+                # transaction did not land it -- so at prune time it may legitimately
+                # be absent and arrive minutes later.
+                #
+                # .105 2026-08-28 is the exact sequence: favorites pruned 10:18:17,
+                # google-chrome-stable installed 10:22:09. Four minutes, and the
+                # browser the system itself depends on (kldload-chrome-app opens ten
+                # tool windows through it) was silently unpinned from the dock.
+                # Keeping a pin whose launcher never shows up costs one dead icon;
+                # dropping this one costs the browser on every install.
+                # Only the canonical name is exempt. .105 ships BOTH
+                # google-chrome.desktop and com.google.Chrome.desktop for the same
+                # browser, so exempting both pinned Chrome twice; and on a substrate
+                # that ships only one, the other becomes the dead dock icon this
+                # pruner exists to prevent.
+                case "$_app" in
+                google-chrome.desktop)
+                    _kept+="${_kept:+, }'${_app}'"
+                    continue
+                    ;;
+                esac
                 if [[ -f "${target}/usr/share/applications/${_app}" ||
                     -f "${target}/usr/local/share/applications/${_app}" ]]; then
                     _kept+="${_kept:+, }'${_app}'"
