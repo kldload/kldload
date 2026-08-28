@@ -1,10 +1,30 @@
+# Applies the platform package holds (kernel, ZFS, NVIDIA, shim) and records
+# what it pinned to /var/lib/kldload/platform-holds.list, which the web console
+# and `kldload-rollback status` read to answer "is this box pinned?".
+#
+# The After= lines are the whole point of this file. /var/lib/kldload is its OWN
+# dataset (rpool/kldload/state), and without ordering this unit ran before
+# zfs-mount: the tool wrote the list into the directory UNDERNEATH the
+# mountpoint, the dataset then mounted on top, and the file became unreachable.
+# The tool logged "[apt] pinned 56 package(s)" and exited 0 the whole time, so
+# nothing anywhere reported a problem — `kldload-rollback status` simply said
+# "holds have not run" on a machine with 56 holds in force. Seen on .101, .105,
+# .111 and .132; every install, both distros, since the state dataset was
+# introduced. (2026-08-28)
+#
+# Same failure shape as the journal: correct work, written somewhere a later
+# mount hides. kldload-journal-flush.service carries the identical ordering for
+# the identical reason.
 [Unit]
 Description=Apply KLDload platform package holds
 ConditionPathExists=/usr/sbin/kldload-apply-platform-holds
+After=zfs-mount.service local-fs.target
+Wants=zfs-mount.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/sbin/kldload-apply-platform-holds
+RemainAfterExit=true
 
 [Install]
 WantedBy=multi-user.target

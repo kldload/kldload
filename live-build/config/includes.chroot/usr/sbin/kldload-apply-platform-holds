@@ -298,10 +298,33 @@ done
 # happens to use.
 printf '%s\n' "${pinned[@]:-}" | grep -v '^$' | sort -u >"$STATE" || true
 
+# Verify the OUTCOME, not that the write returned 0. /var/lib/kldload is its
+# own dataset; if this ran before zfs-mount the list went to the directory
+# under the mountpoint and vanished when the dataset mounted over it -- while
+# this log recorded a confident "pinned N package(s)". The unit now orders
+# After=zfs-mount, and this re-reads what it just wrote so the two can never
+# disagree silently again. (2026-08-28)
+# NOT `$(grep -c . f || echo 0)`. On an EMPTY file grep -c prints 0 AND exits
+# 1, so the || fires too and the substitution yields "0\n0", which then blows up
+# in (( )). That is the 2026-08-22 two-line-count incident, reproduced here
+# while writing the check meant to catch a different silent failure. Assign on
+# the failure branch instead of echoing.
+_state_back=0
+if [[ -r "$STATE" ]]; then
+    _state_back=$(grep -c . "$STATE" 2>/dev/null) || _state_back=0
+fi
 {
     echo "$(date '+%Y-%m-%dT%H:%M:%S') [$MANAGER] pinned $(wc -l <"$STATE") package(s)"
+    if ((_state_back == 0)) && ((${#pinned[@]} > 0)); then
+        echo "  ERROR: wrote ${#pinned[@]} names to $STATE and read back ZERO —"
+        echo "  the file is being shadowed by a later mount. status will report"
+        echo "  'holds have not run' even though the holds themselves are set."
+    fi
     ((${#missing[@]} > 0)) && echo "  WARNING: requested but NOT pinned: ${missing[*]}"
 } >>"$LOG"
+if ((_state_back == 0)) && ((${#pinned[@]} > 0)); then
+    echo "kldload-apply-platform-holds: $STATE unreadable after writing ${#pinned[@]} entries" >&2
+fi
 
 if ((${#missing[@]} > 0)); then
     echo "kldload: WARNING — these platform packages were not pinned: ${missing[*]}" >&2

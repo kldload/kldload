@@ -1031,6 +1031,30 @@ else
         "not in the apt install list:${_dmissing}"
 fi
 
+# The holds unit must be ordered after the datasets it writes into.
+# /var/lib/kldload is its OWN dataset (rpool/kldload/state). The unit carried no
+# After= at all, so it could run before zfs-mount, write platform-holds.list
+# into the directory UNDERNEATH the mountpoint, and have the dataset mount on
+# top and hide it. The tool logged "pinned 56 package(s)" and exited 0
+# throughout, so `kldload-rollback status` reported "holds have not run" on a
+# machine with 56 holds actually in force. Every install, both distros: .101,
+# .105, .111, .132. Fixed and measured on .105 2026-08-28 -- MISSING -> 57
+# lines, with apt-mark, the file and status finally agreeing. (Same shape as
+# the journal bug; kldload-journal-flush carries the identical ordering.)
+_hu="$ROOT/live-build/config/includes.chroot/etc/systemd/system/kldload-package-holds.service"
+_hu_ok=0
+grep -qE '^After=.*zfs-mount\.service' "$_hu" 2>/dev/null && _hu_ok=$((_hu_ok + 1))
+grep -qE '^After=.*local-fs\.target' "$_hu" 2>/dev/null && _hu_ok=$((_hu_ok + 1))
+# ...and the tool must re-read what it wrote, so the two can never disagree
+# silently again even if the ordering is lost.
+grep -qF '_state_back' "$ROOT/live-build/config/includes.chroot/usr/sbin/kldload-apply-platform-holds" 2>/dev/null && _hu_ok=$((_hu_ok + 1))
+if ((_hu_ok == 3)); then
+    _pass "platform holds: unit ordered after zfs-mount, and the write is read back"
+else
+    _fail "platform holds: unit ordered after zfs-mount, and the write is read back" \
+        "need After=zfs-mount.service, After=local-fs.target, and the read-back check — have $_hu_ok/3"
+fi
+
 # Hardware coverage is the product. Fedora 43+ split linux-firmware per vendor
 # and this tree named only a handful of wifi packages, so eight firmware sets
 # were absent from every install. Measured on .111 2026-08-28: amd-ucode, i915,
