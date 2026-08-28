@@ -4304,24 +4304,27 @@ function handle(msg) {
           if (aiCb) aiCb.checked = _bobCapable;
         }
       }
-      // NVIDIA: hide panel if no GPU, auto-select if detected
+      // NVIDIA is DETECTED, not asked: the card appears and self-selects when
+      // a GPU is present and simply is not shown when one is not.
+      //
+      // It used to hide #platform-panel on a machine with no NVIDIA — and that
+      // panel contains Secure Boot and Build Images as well, plus every hidden
+      // checkbox that carries the answers. So an AMD or Intel-graphics box was
+      // shown NO platform questions at all and silently submitted whatever the
+      // hidden defaults happened to be: Secure Boot could not be turned off,
+      // Build Images could not be turned on. Harmless-looking while NVIDIA was
+      // one card among nine; fatal once the profile is meant to ask exactly
+      // three questions. Hide the CARD, never the panel. (2026-08-28)
       const nvidiaCard = document.getElementById('opt-nvidia');
-      const nvidiaPanel = document.getElementById('platform-panel');
+      const nvidiaCb = document.getElementById('install-nvidia');
       if (nvidiaCard) {
-        if (!d.has_nvidia) {
-          // No GPU — hide the entire platform options panel
-          if (nvidiaPanel) nvidiaPanel.style.display = 'none';
-          const cb = document.getElementById('install-nvidia');
-          if (cb) cb.checked = false;
-        } else {
-          // GPU detected — show panel, auto-select NVIDIA, highlight the card
-          if (nvidiaPanel) nvidiaPanel.style.display = 'block';
-          const cb = document.getElementById('install-nvidia');
-          if (cb) cb.checked = true;
+        nvidiaCard.style.display = d.has_nvidia ? '' : 'none';
+        if (d.has_nvidia) {
           nvidiaCard.style.borderColor = 'var(--accent)';
           nvidiaCard.style.background = 'rgba(0,184,217,0.08)';
         }
       }
+      if (nvidiaCb) nvidiaCb.checked = !!d.has_nvidia;
       // Gate AI model checkboxes by available RAM/VRAM
       // General Chat (8b): always enabled
       // Code Assistant (14b): needs 16GB RAM or 10GB VRAM
