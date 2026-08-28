@@ -334,6 +334,27 @@ KOJI_KERNEL_URLS=("${KPIN_URLS[@]}")
 KOJI_KERNEL_EXCLUDES=("${KPIN_EXCLUDES[@]}")
 log "Kernel pinned to ${KOJI_KERNEL_NVR} (${#KOJI_KERNEL_URLS[@]} subpackages, $(printf '%s ' "${KOJI_KERNEL_EXCLUDES[@]}"))"
 
+# ─── Carry the resolved pin into the image ──────────────────────────────────
+# The installer needs the SAME excludes the resolver just derived. It used to
+# carry its own literal `--exclude=kernel*-7.[1-9]*`, and that literal kept
+# "working" long after it stopped being correct: OpenZFS moved its cap to
+# 7.2.999, the resolver moved the pin onto the 7.1 line, and the installer
+# went on excluding all of 7.1 — so a darksite that CONTAINED kernel-7.1.9
+# installed 7.0.14 from July instead. Five weeks of security fixes behind,
+# no error, no warning. (fiend .101, 2026-08-28, auditing an rc10 F44 install.)
+#
+# One source of truth per ISO means the two halves cannot drift again.
+cat >"${ROOTFS}/etc/kldload-kernel-pin" <<PINEOF
+# Resolved by builder/kernel-pin.sh at ISO build time; read by
+# _k_bootstrap_dnf() in lib/bootstrap.sh. Missing file => the installer falls
+# back to a legacy literal and says so loudly in the install log.
+KPIN_NVR='${KOJI_KERNEL_NVR}'
+KPIN_EXCLUDES='$(printf '%s ' "${KOJI_KERNEL_EXCLUDES[@]}" | sed 's/ *$//')'
+PINEOF
+grep -q "^KPIN_NVR='${KOJI_KERNEL_NVR}'\$" "${ROOTFS}/etc/kldload-kernel-pin" ||
+    die "kernel pin manifest did not land in the rootfs"
+log "Kernel pin manifest written to /etc/kldload-kernel-pin (${KOJI_KERNEL_NVR})"
+
 # ─── ZFS-from-git test mode (KLDLOAD_ZFS_GIT) ────────────────────────────────
 # OPT-IN escape hatch for the "zfs lags the kernel" window: build OpenZFS
 # rpms from git (1 = master, anything else = branch/tag) and UNPIN the kernel

@@ -139,6 +139,44 @@ if mount -o loop,ro "$ISO" "$MOUNTPOINT" 2>/dev/null; then
             _pass "console launcher replaced by Web UI"
         fi
 
+        # ── The shipped kernel pin must not exclude itself ──────────────────
+        # This is the invariant that was violated: build-iso.sh derived its
+        # excludes from the resolver while lib/bootstrap.sh carried its own
+        # literal, and nothing compared them. OpenZFS raised its cap, the pin
+        # moved onto the 7.1 line, the installer kept excluding all of 7.1, and
+        # an rc10 darksite holding kernel-7.1.9 installed 7.0.14 from July.
+        # Silent, and the install reported success. (fiend .101, 2026-08-28.)
+        #
+        # Checking self-consistency in the SHIPPED artifact catches it whichever
+        # half drifts, and needs no knowledge of which kernel is current.
+        KPEXTRACT=$(mktemp -d)
+        # The true-guard covers one case: unsquashfs exits non-zero when the
+        # requested path is not in the image, which is exactly the condition
+        # the missing-file check below reports properly.
+        unsquashfs -q -f -d "$KPEXTRACT/root" "$MOUNTPOINT/LiveOS/squashfs.img" etc/kldload-kernel-pin >/dev/null 2>&1 || true
+        _kpf="$KPEXTRACT/root/etc/kldload-kernel-pin"
+        if [[ ! -f "$_kpf" ]]; then
+            _fail "ISO ships /etc/kldload-kernel-pin" \
+                "missing — the installer will fall back to its legacy literal and may install an older kernel than ZFS allows"
+        else
+            _kp_nvr=$(sed -n "s/^KPIN_NVR='\(.*\)'\$/\1/p" "$_kpf")
+            _kp_ex=$(sed -n "s/^KPIN_EXCLUDES='\(.*\)'\$/\1/p" "$_kpf")
+            _kp_blocked=no
+            for _e in $_kp_ex; do
+                # shellcheck disable=SC2254  # the glob IS the thing under test
+                case "kernel-${_kp_nvr}" in ${_e#--exclude=}) _kp_blocked=yes ;; esac
+            done
+            if [[ -z "$_kp_nvr" ]]; then
+                _fail "ISO ships a resolved kernel pin" "manifest present but KPIN_NVR is empty"
+            elif [[ "$_kp_blocked" == yes ]]; then
+                _fail "shipped kernel pin is not excluded by its own excludes" \
+                    "pin ${_kp_nvr} is blocked by '${_kp_ex}' — the installer cannot install the kernel this ISO pinned"
+            else
+                _pass "ISO ships a self-consistent kernel pin (${_kp_nvr})"
+            fi
+        fi
+        rm -rf "$KPEXTRACT"
+
         rm -rf "$WSEXTRACT"
     fi
 
@@ -858,6 +896,34 @@ elif grep -qE 'zfs create -o mountpoint=/var/lib rpool/var/lib' "$_sz_varlib" 2>
 else
     _fail "/var/lib stays in the boot environment" \
         "could not find the rpool/var/lib create line — the layout changed shape, re-check this gate"
+fi
+
+# The kernel exclude that protects the pin must COME FROM the pin. These two
+# halves lived in different files and drifted: build-iso.sh switched to
+# resolver-derived excludes, lib/bootstrap.sh kept a literal
+# `--exclude=kernel*-7.[1-9]*`, and nothing failed when they disagreed. OpenZFS
+# moved its cap to 7.2.999, the resolver moved the pin onto the 7.1 line, and
+# the installer went on excluding all of 7.1 — so an rc10 darksite that
+# CONTAINED kernel-7.1.9 installed kernel-7.0.14 from July instead. Five weeks
+# of security fixes, silently, on a box that reported a clean install.
+# (fiend .101, 2026-08-28.)
+#
+# The build now writes /etc/kldload-kernel-pin and the installer reads it. The
+# legacy literal survives ONLY as the no-manifest fallback for older ISOs, and
+# it must stay paired with the warning that says the pin may be stale.
+_kpb="$ROOT/builder/build-iso.sh"
+_kpi="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/bootstrap.sh"
+_kp_ok=0
+grep -qF 'ROOTFS}/etc/kldload-kernel-pin' "$_kpb" 2>/dev/null && _kp_ok=$((_kp_ok + 1))
+grep -qF 'kernel pin manifest did not land in the rootfs' "$_kpb" 2>/dev/null && _kp_ok=$((_kp_ok + 1))
+grep -qF '_kpin_file=/etc/kldload-kernel-pin' "$_kpi" 2>/dev/null && _kp_ok=$((_kp_ok + 1))
+grep -qF 'read -ra _f44_kernel_lockout' "$_kpi" 2>/dev/null && _kp_ok=$((_kp_ok + 1))
+grep -qF 'may install an OLDER kernel than its ZFS supports' "$_kpi" 2>/dev/null && _kp_ok=$((_kp_ok + 1))
+if ((_kp_ok == 5)); then
+    _pass "kernel exclude is derived from the resolved pin, not a literal"
+else
+    _fail "kernel exclude is derived from the resolved pin, not a literal" \
+        "need all 5: build writes the manifest + asserts it landed; installer reads it, splits it with read -ra, and warns loudly on fallback — have $_kp_ok/5"
 fi
 
 # The kernel re-sign must never leave the ESP kernel unsigned. `sbattach

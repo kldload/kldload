@@ -2180,13 +2180,32 @@ CUSTOMREPO
     # 7.0.14 out and breaks pass 3 (2026-07-07). Fedora-only — EL10 rides 6.12
     # and never reaches this cap.
     #
-    # Drop the exclude here AND in build-iso.sh together, once a 7.1-capable
-    # OpenZFS ships (`dnf repoquery --repoid=zfs zfs-dkms`). firstboot's
-    # versionlock then freezes whatever pair this installed, so a later
-    # `dnf update` cannot drift onto an unbuildable kernel either.
+    # SUPERSEDED 2026-08-28: this no longer carries its own literal. The old
+    # note here said to drop the exclude "once a 7.1-capable OpenZFS ships" —
+    # which happened (2.4.4 caps at kernel-uname-r > 7.2.999) and nobody
+    # noticed, because a stale exclude fails silently in the safe-looking
+    # direction. build-iso.sh had already switched to resolver-derived
+    # excludes; this half had not, so an rc10 darksite carrying kernel-7.1.9
+    # installed 7.0.14 from July. Found auditing fiend .101.
+    #
+    # The build now writes what it resolved to /etc/kldload-kernel-pin and we
+    # read it, so the pin and the exclude that protects it can never disagree
+    # again. firstboot's versionlock still freezes whatever pair lands here.
     local _f44_kernel_lockout=()
     if [[ "${distro}" == "fedora" ]]; then
-        _f44_kernel_lockout=('--exclude=kernel*-7.[1-9]*')
+        local _kpin_file=/etc/kldload-kernel-pin _kpin_ex=""
+        # Parsed, never sourced: this is a file on disk and eval on file
+        # contents is out regardless of how trusted the writer is.
+        [[ -r "$_kpin_file" ]] &&
+            _kpin_ex="$(sed -n "s/^KPIN_EXCLUDES='\(.*\)'\$/\1/p" "$_kpin_file")"
+        if [[ -n "$_kpin_ex" ]]; then
+            # read does not glob, so the exclude patterns survive intact.
+            read -ra _f44_kernel_lockout <<<"$_kpin_ex"
+            k_log_to "$log" "  kernel lockout from the build's resolved pin: ${_kpin_ex}"
+        else
+            _f44_kernel_lockout=('--exclude=kernel*-7.[1-9]*')
+            k_log_to "$log" "  WARNING: no readable ${_kpin_file} — using the legacy 7.[1-9] lockout. This ISO may install an OLDER kernel than its ZFS supports."
+        fi
     fi
     # Fedora-only repo flags. dnf5 errors hard on --setopt='REPO.X=Y' AND on
     # --disablerepo=REPO when REPO is not defined in the installroot. RHEL
