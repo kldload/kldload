@@ -203,6 +203,20 @@ k_profile_packages() {
         # properly. firmware-misc-nonfree carries the Intel GPU blobs on Debian.
         local _fw="firmware-iwlwifi firmware-realtek firmware-atheros wpasupplicant iw"
         _fw+=" firmware-amd-graphics firmware-misc-nonfree"
+        # CPU MICROCODE. Neither package was installed and nothing else pulls
+        # them, so a Debian install ran with NO microcode updates on ANY cpu --
+        # measured on .105 2026-08-28, /usr/lib/firmware/amd-ucode AND
+        # intel-ucode both EMPTY. Zenbleed, Inception and the Spectre family
+        # left unpatched, silently, on every machine. Fedora at least got its
+        # 152 Intel files via microcode_ctl; Debian got nothing either way.
+        # Both are listed because the CPU is unknown at build time; the kernel
+        # loads only the matching one and the other is inert.
+        _fw+=" amd64-microcode intel-microcode"
+        # The firmware metapackages were already in the darksite list and named
+        # in NO install list -- mirrored, never installed. Same written-but-not-
+        # wired trap as the Fedora side. Debian shipped 1361 firmware files
+        # against Fedora's 2874.
+        _fw+=" firmware-linux-free firmware-linux-nonfree"
         # Debian/Ubuntu desktop profile uses LightDM, NOT gdm3. GDM 48 on
         # Debian Trixie has a systemd-integration bug where it can't pass
         # the session type to gnome-session — gnome-session-binary errors:
@@ -372,6 +386,8 @@ k_profile_packages() {
         ${_xsrv} ${_netools_extra} \
         ${_browser} ${_nsstools} \
         gir1.2-webkit-6.0 libgtk-4-1 python3-gi \
+        gstreamer1.0-libav libavcodec-extra gstreamer1.0-tools \
+        mesa-va-drivers va-driver-all intel-media-va-driver \
         pulseaudio-utils \
         speech-dispatcher espeak-ng \
         tmux eject sanoid python3 python3-websockets python3-yaml ${_pam} python3-pip htop iotop lm-sensors net-tools wireguard-tools iproute2 fzf bat eza fd-find ripgrep zoxide podman pciutils ${_fastfetch} \
@@ -1868,10 +1884,27 @@ OSREL
                 # browser, so exempting both pinned Chrome twice; and on a substrate
                 # that ships only one, the other becomes the dead dock icon this
                 # pruner exists to prevent.
+                # Chrome is exempt ONLY where it is actually installed. The RPM
+                # branch sets _browser=google-chrome-stable; Debian gets chromium
+                # and Ubuntu gets epiphany. Exempting it unconditionally left a
+                # DEAD pin on Debian -- .105 2026-08-28 came up with
+                # google-chrome.desktop in the dock and no Chrome on the box,
+                # which is precisely the gap this pruner exists to prevent, and
+                # the operator cannot remove it because the key is locked.
+                #
+                # It stays exempt on RPM because there the package can arrive
+                # AFTER this prune runs: profiles.sh installs it, and
+                # kldload-firstboot re-installs it if that transaction did not
+                # land. .105 2026-08-28: pruned 10:18:17, Chrome installed
+                # 10:22:09. Elsewhere it falls through to the existence check.
                 case "$_app" in
                 google-chrome.desktop)
-                    _kept+="${_kept:+, }'${_app}'"
-                    continue
+                    case "${KLDLOAD_DISTRO:-}" in
+                    fedora | centos | rocky | rhel)
+                        _kept+="${_kept:+, }'${_app}'"
+                        continue
+                        ;;
+                    esac
                     ;;
                 esac
                 if [[ -f "${target}/usr/share/applications/${_app}" ||

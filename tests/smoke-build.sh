@@ -999,6 +999,35 @@ else
         "Debian needs firmware-amd-graphics+misc-nonfree in profiles.sh; Fedora needs the three *-gpu-firmware, both freeworld packages, and gstreamer1-plugin-libav in bootstrap.sh _dnf_pkgs — have $_gpufw/4"
 fi
 
+# Debian needs the same hardware sweep, and had it worse. Measured on .105
+# 2026-08-28 from a fresh install: amd-ucode AND intel-ucode both EMPTY, so the
+# machine ran with no CPU microcode on any processor -- Fedora at least got its
+# Intel files from microcode_ctl. Zero VA-API drivers. 1361 firmware files
+# against Fedora's 2874. The firmware-linux metapackages were in the darksite
+# list and in no install list: mirrored, never installed.
+#
+# After wiring: amd-ucode 0->5, intel-ucode 0->126, firmware 1361->1523,
+# VA-API 0->7 (incl. iHD for modern Intel), gstreamer avdec_* 0->211.
+#
+# gstreamer1.0-tools is included deliberately: gst-inspect-1.0 lives there on
+# Debian, and without it a WORKING codec set reads as "0 decoders" -- a
+# diagnostic that lies in the alarming direction, which cost time in this audit.
+_dprof="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+_dmissing=""
+for _p in amd64-microcode intel-microcode firmware-linux-free firmware-linux-nonfree \
+    firmware-amd-graphics firmware-misc-nonfree gstreamer1.0-libav libavcodec-extra \
+    gstreamer1.0-tools mesa-va-drivers va-driver-all intel-media-va-driver; do
+    grep -qE "(^|[[:space:]])${_p}([[:space:]]|\"|\\\\|\$)" \
+        < <(grep -vE '^[[:space:]]*#' "$_dprof" 2>/dev/null) ||
+        _dmissing+=" ${_p}"
+done
+if [[ -z "$_dmissing" ]]; then
+    _pass "Debian hardware: CPU microcode, firmware metapackages, VA-API and codecs all wired"
+else
+    _fail "Debian hardware: CPU microcode, firmware metapackages, VA-API and codecs all wired" \
+        "not in the apt install list:${_dmissing}"
+fi
+
 # Hardware coverage is the product. Fedora 43+ split linux-firmware per vendor
 # and this tree named only a handful of wifi packages, so eight firmware sets
 # were absent from every install. Measured on .111 2026-08-28: amd-ucode, i915,
