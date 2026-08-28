@@ -911,6 +911,26 @@ else
         "need all 3: the 'hold ok installed' arm, the awk (install|hold) alternation, and the true-guard on the dpkg-query capture — have $_kh_ok/3"
 fi
 
+# `_pick_last` returns empty when there is no pre-transaction snapshot, and
+# every caller is written for that: `last` has a die() explaining what to try
+# instead, `status` just omits the line. But the function ends in a `grep | tail`
+# pipeline, and grep exits 1 on no-match — under pipefail that 1 escaped the
+# command substitution and killed the caller, so the die() was DEAD CODE and the
+# operator got a raw ERR trace instead.
+#
+# The state that triggers it is not exotic, it is the state a successful
+# rollback LEAVES YOU IN: the environment you boot into has only sanoid
+# autosnaps, no apt-pre. Caught on .132 2026-08-27 running `apt rollback status`
+# immediately after verifying a Secure Boot + encrypted rollback.
+_kr="$ROOT/live-build/config/includes.chroot/usr/sbin/kldload-rollback"
+if grep -qF "{ grep -E '^(apt-pre|dnf-pre|kpkg)-' || " "$_kr" 2>/dev/null &&
+    grep -qF 'tail -1' "$_kr" 2>/dev/null; then
+    _pass "kldload-rollback: no pre-transaction snapshot is a value, not a crash"
+else
+    _fail "kldload-rollback: no pre-transaction snapshot is a value, not a crash" \
+        "_pick_last's grep must tolerate a no-match exit — pipefail otherwise turns 'none found' into an ERR trace and 'last' never reaches its die()"
+fi
+
 # The SAME pin has to reach the GRUB direct entry, and for a long time it did
 # not: grub.cfg emitted a literal `spl_hostid=${spl_hostid}` referring to a GRUB
 # variable nothing ever set, so every direct boot passed an EMPTY value and SPL

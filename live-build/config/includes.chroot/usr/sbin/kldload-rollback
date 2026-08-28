@@ -152,9 +152,21 @@ cmd_list() {
 # Returns the bare tag on stdout; empty if there is none.
 # apt-post/dnf-post are excluded on purpose: those record the state AFTER the
 # change, which is the state you are trying to get away from.
+#
+# WHY the guard: grep exits 1 when nothing matches, and "nothing matches" is a
+# perfectly normal state — a freshly installed box has no pre-transaction
+# snapshot yet, and neither does the environment you land in right after a
+# rollback applies (its only snapshots are sanoid's autosnaps). Under pipefail
+# that 1 propagated out of the command substitution and killed the caller, so
+# `status` aborted mid-report and `last` never reached its own die() with the
+# helpful message — the operator got an ERR trace instead.
+# (.132, 2026-08-27: `apt rollback status` right after a successful rollback.)
 _pick_last() {
     _snapshots | awk -F'\t' '{print $1}' | sed 's/.*@//' |
-        grep -E '^(apt-pre|dnf-pre|kpkg)-' | tail -1
+        # The true-guard below covers exactly one case: grep exits 1 when
+        # nothing matches, which is the normal "no pre-transaction snapshot"
+        # answer, not an error.
+        { grep -E '^(apt-pre|dnf-pre|kpkg)-' || true; } | tail -1
 }
 
 # ─── The boot path actually in force ───────────────────────────────────────
