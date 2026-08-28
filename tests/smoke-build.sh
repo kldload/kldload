@@ -860,6 +860,31 @@ else
         "could not find the rpool/var/lib create line — the layout changed shape, re-check this gate"
 fi
 
+# The kernel re-sign must never leave the ESP kernel unsigned. `sbattach
+# --remove` strips the vendor signature IN PLACE and runs BEFORE the sbsign
+# meant to replace it, so every failure path after that point has to put the
+# original back — under Secure Boot the direct entry is the ONLY entry that
+# runs, and a stripped kernel there is an unbootable machine announced as a
+# WARNING. sbsign's exit code is also not evidence: a mismatched key/cert pair
+# exits 0 and produces a file shim refuses, so the result is verified against
+# the same cert shim will use, BEFORE it overwrites the staged kernel.
+#
+# Proven on fiend .132 2026-08-27 against the real 14MB kernel and the real
+# MOK: old logic left 0 signatures when sbsign failed; new logic restores the
+# vendor-signed original byte-identically (sha f5f0ea7c…, Debian Secure Boot CA
+# intact) and rejects a rogue-key signature that exits 0.
+_blr="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/bootloader.sh"
+_blr_ok=0
+grep -qF 'vmlinuz.preresign' "$_blr" 2>/dev/null && _blr_ok=$((_blr_ok + 1))
+grep -qF 'sbverify --cert "$_mok_pub" "$_signed"' "$_blr" 2>/dev/null && _blr_ok=$((_blr_ok + 1))
+grep -qF 'mv -f "$_orig" "${zbm_fallback_dir}/vmlinuz"' "$_blr" 2>/dev/null && _blr_ok=$((_blr_ok + 1))
+if ((_blr_ok == 3)); then
+    _pass "kernel re-sign restores the vendor signature on failure (no stripped kernel on the ESP)"
+else
+    _fail "kernel re-sign restores the vendor signature on failure (no stripped kernel on the ESP)" \
+        "need all 3: the .preresign backup, the sbverify --cert outcome check, and the restore on the failure path — have $_blr_ok/3"
+fi
+
 # The SAME pin has to reach the GRUB direct entry, and for a long time it did
 # not: grub.cfg emitted a literal `spl_hostid=${spl_hostid}` referring to a GRUB
 # variable nothing ever set, so every direct boot passed an EMPTY value and SPL

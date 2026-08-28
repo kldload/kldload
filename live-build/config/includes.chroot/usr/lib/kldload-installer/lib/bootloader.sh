@@ -920,6 +920,17 @@ EOFSTAB
             [[ -f "$_mok_key" && -f "$_mok_pub" ]] &&
             command -v sbsign >/dev/null 2>&1; then
             local _signed="${zbm_fallback_dir}/vmlinuz.signed"
+            # SAFETY: the sbattach below strips the vendor signature IN PLACE,
+            # and it runs BEFORE the sbsign meant to replace it. Every failure
+            # path after that point used to leave the staged kernel with NO
+            # signature at all — and under Secure Boot the direct entry is the
+            # only one that runs, so "sbsign failed" was announced as a WARNING
+            # while the machine was already unbootable. Keep the vendor-signed
+            # original and put it back on any failure: a distro signature that
+            # validates against db is worth far more than a stripped one.
+            local _orig="${zbm_fallback_dir}/vmlinuz.preresign"
+            local _resign_ok
+            cp -f "${zbm_fallback_dir}/vmlinuz" "$_orig"
             # Strip the distro-supplied signature first so we ship a SINGLE
             # signature on the staged kernel. sbsign appends rather than
             # replaces — leaving Rocky's sig in front of ours produces a
@@ -939,13 +950,33 @@ EOFSTAB
             # empty redirect target, refused to run sbsign, fell into the
             # failure branch silently. Bug seen Rocky 9 .109 install
             # 2026-05-04: WARNING logged but no actual sbsign error captured.
+            # sbsign's exit code is not evidence that the result will boot: a
+            # mismatched key/cert pair, a full ESP or a truncated write all
+            # exit 0 and produce a file shim refuses. So verify the OUTCOME
+            # against the same cert shim will check it with, and do it BEFORE
+            # overwriting the staged kernel.
+            _resign_ok=0
             if sbsign --key "$_mok_key" --cert "$_mok_pub" \
                 --output "$_signed" "${zbm_fallback_dir}/vmlinuz" >&7 2>&1; then
+                if ! command -v sbverify >/dev/null 2>&1; then
+                    # A gate that cannot run is not a gate — say so rather than
+                    # letting the silence read as a pass.
+                    k_log "WARNING: sbverify missing — the re-signed kernel WAS NOT VERIFIED. Accepting it on sbsign's word alone."
+                    _resign_ok=1
+                elif sbverify --cert "$_mok_pub" "$_signed" >&7 2>&1; then
+                    _resign_ok=1
+                else
+                    k_log "WARNING: sbsign exited 0 but the result does NOT verify against ${_mok_pub##*/} — treating as failure"
+                fi
+            fi
+            if ((_resign_ok)); then
                 mv -f "$_signed" "${zbm_fallback_dir}/vmlinuz"
+                rm -f "$_orig"
                 k_log "/EFI/BOOT/vmlinuz re-signed with kldload MOK leaf (SB-validated via MokListRT)"
             else
                 rm -f "$_signed" 2>/dev/null
-                k_log "WARNING: sbsign failed for /EFI/BOOT/vmlinuz — SB direct-boot will fail until manually signed"
+                mv -f "$_orig" "${zbm_fallback_dir}/vmlinuz"
+                k_log "WARNING: re-sign failed for /EFI/BOOT/vmlinuz — RESTORED the vendor-signed kernel. SB direct-boot works only if the vendor cert is in db."
             fi
         elif [[ "${KLDLOAD_ENABLE_SECURE_BOOT:-1}" != "1" ]]; then
             k_log "Kernel re-sign skipped — SB off (ZBM is the default boot target; staged kernel kept with distro-signed vmlinuz for direct-boot fallback)"
