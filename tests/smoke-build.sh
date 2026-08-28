@@ -898,6 +898,92 @@ else
         "could not find the rpool/var/lib create line — the layout changed shape, re-check this gate"
 fi
 
+# The dock must keep its browsers. Two independent bugs unpinned both on
+# Fedora, and the dock came up with no browser at all:
+#   Firefox -- the pin list carried only the Debian names (firefox.desktop,
+#     firefox-esr.desktop). Fedora ships org.mozilla.firefox.desktop, so the
+#     pruner correctly dropped a launcher that does not exist there.
+#   Chrome  -- a RACE, not a name. .105 2026-08-28: favorites pruned 10:18:17,
+#     google-chrome-stable installed 10:22:09. profiles.sh installs Chrome, but
+#     kldload-firstboot re-installs it if that transaction did not land, so at
+#     prune time it can legitimately be absent and arrive minutes later.
+#
+# Chrome is exempted by the CANONICAL name only. .105 ships both
+# google-chrome.desktop and com.google.Chrome.desktop for the same browser --
+# exempting both pins Chrome twice, and on a substrate with only one the other
+# becomes the dead dock icon the pruner exists to prevent.
+_favl="$ROOT/live-build/config/includes.chroot/etc/dconf/db/local.d/50-kldload-installed-favorites"
+_favt="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/target-files/etc/dconf/db/local.d/50-kldload-installed-favorites"
+_dock=0
+grep -qF 'org.mozilla.firefox.desktop' "$_favl" 2>/dev/null && _dock=$((_dock + 1))
+grep -qF 'google-chrome.desktop' "$_favl" 2>/dev/null && _dock=$((_dock + 1))
+grep -qF 'com.google.Chrome.desktop' "$_favl" 2>/dev/null || _dock=$((_dock + 1))
+# Defined locally, NOT borrowed from a later gate: this block sits above the
+# one that sets _prof, and under set -u an unbound reference here aborts the
+# whole script -- silently skipping every gate below it. (Self-inflicted and
+# caught 2026-08-28; the suite ran 5 checks and stopped.)
+_prof_dock="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+grep -qF 'google-chrome.desktop)' "$_prof_dock" 2>/dev/null && _dock=$((_dock + 1))
+# The two copies are shipped separately; a fix applied to one only is how the
+# installed system and the live image drift apart.
+[[ -f "$_favl" && -f "$_favt" ]] &&
+    [[ "$(sha256sum <"$_favl" | cut -d" " -f1)" == "$(sha256sum <"$_favt" | cut -d" " -f1)" ]] &&
+    _dock=$((_dock + 1))
+if ((_dock == 5)); then
+    _pass "dock pins survive: Fedora Firefox name, Chrome prune race, no duplicate Chrome"
+else
+    _fail "dock pins survive: Fedora Firefox name, Chrome prune race, no duplicate Chrome" \
+        "need the org.mozilla name, google-chrome kept, com.google.Chrome NOT listed, the pruner exemption, and both copies identical — have $_dock/5"
+fi
+
+# The journal assert must check PERSISTENCE, not merely that journald records.
+# A volatile journal passes a write-then-read probe perfectly -- journald is
+# recording, the line comes back, and the entire boot is erased at shutdown.
+# The assert shipped with only the probe and printed "journal: recording
+# (persistent dir ...)" on .105 while /var/log/journal held 0 files and
+# /run/log/journal held 2. That is why the first boot's SSH failure there could
+# not be diagnosed afterwards: the evidence was gone before anyone looked.
+# (2026-08-28.)
+#
+# Storage=auto is correct and must stay -- Storage=persistent recreates the
+# shadowed-inode bug from .132 2026-08-26. The race is that systemd-journal-flush
+# is ordered on local-fs.target, which on a ZFS root does not guarantee
+# rpool/var/log is mounted. So the assert has to notice and repair after the mount.
+_ja="$ROOT/live-build/config/includes.chroot/usr/local/sbin/kldload-journal-assert"
+_ja_ok=0
+grep -qF 'journal_is_persistent()' "$_ja" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
+grep -qF "grep -q '^File path: /var/log/journal/'" "$_ja" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
+grep -qF 'if journal_records && journal_is_persistent; then' "$_ja" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
+grep -qF 'Storage=auto' "$ROOT/live-build/config/includes.chroot/etc/systemd/journald.conf.d/persistent.conf" 2>/dev/null && _ja_ok=$((_ja_ok + 1))
+if ((_ja_ok == 4)); then
+    _pass "journal assert proves persistence, not just that journald records"
+else
+    _fail "journal assert proves persistence, not just that journald records" \
+        "need journal_is_persistent(), the /var/log/journal header check, both conditions gating the success path, and Storage=auto retained — have $_ja_ok/4"
+fi
+
+# A desktop must ship GPU firmware for the card it might actually meet.
+# Both split-firmware distros listed only WIFI firmware: Debian named
+# iwlwifi/realtek/atheros, and Fedora 43+ split linux-firmware so the bare
+# package carries licences plus ONE amdgpu file against 679 in
+# amd-gpu-firmware. Every Radeon and every recent Intel iGPU therefore
+# installed with no firmware, landing on a software framebuffer or a black
+# screen -- while firmware-amd-graphics sat unused in our own darksite.
+# Found 2026-08-28 checking whether a non-NVIDIA machine works. It did not.
+#
+# Ubuntu and EL are deliberately absent here: both keep the monolithic
+# linux-firmware, which still carries the GPU blobs.
+_prof="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+_gpufw=0
+grep -qF 'firmware-amd-graphics firmware-misc-nonfree' "$_prof" 2>/dev/null && _gpufw=$((_gpufw + 1))
+grep -qF 'amd-gpu-firmware intel-gpu-firmware nvidia-gpu-firmware' "$_prof" 2>/dev/null && _gpufw=$((_gpufw + 1))
+if ((_gpufw == 2)); then
+    _pass "GPU firmware ships on both split-firmware distros (AMD/Intel, not just wifi)"
+else
+    _fail "GPU firmware ships on both split-firmware distros (AMD/Intel, not just wifi)" \
+        "Debian needs firmware-amd-graphics + firmware-misc-nonfree, Fedora needs the three *-gpu-firmware packages — have $_gpufw/2"
+fi
+
 # The desktop profile asks three questions, not nine. Six cards asked the
 # operator to opt into things the profile is named for -- KVM, Kubernetes,
 # observability, the ZFS console, Ollama -- which ship on the ISO regardless,

@@ -77,14 +77,49 @@ mkdir -p /var/log/journal
 systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 ||
     echo "kldload-journal-assert: systemd-tmpfiles could not fix up /var/log/journal" >&2
 
-# ── 2. Does it record? ──────────────────────────────────────────────────────
-if journal_records; then
-    echo "journal: recording (persistent dir $(stat -c %U:%G /var/log/journal))"
+# journal_is_persistent — is journald writing where a reboot cannot erase it?
+#
+# journalctl --header lists every journal file journald currently has open. If
+# none of them live under /var/log/journal then journald is buffering to /run
+# and the whole boot disappears at shutdown.
+#
+# WHY this is separate from journal_records: a VOLATILE journal passes the
+# probe perfectly. journald is recording, the line is written, journalctl
+# returns it -- and none of it survives the next reboot. The probe alone
+# reported green on .105 (2026-08-28) while /var/log/journal held 0 files and
+# /run/log/journal held 2, which is precisely why the first boot's failure
+# could not be diagnosed afterwards: the evidence had already been erased. A
+# check that cannot distinguish "recording" from "recording persistently" is
+# not a check on persistence.
+journal_is_persistent() {
+    journalctl --header 2>/dev/null | grep -q '^File path: /var/log/journal/'
+}
+
+# ── 2. Does it record, AND will the record survive a reboot? ────────────────
+# Both, deliberately. Storage=auto means journald buffers to /run and
+# systemd-journal-flush migrates once the dataset is mounted -- but that flush
+# is ordered on local-fs.target, which on a ZFS root does NOT guarantee
+# rpool/var/log is mounted yet. When it loses that race journald stays on /run
+# for the entire boot, and the repair below (rotate, flush, restart AFTER the
+# mount) is exactly what recovers it.
+if journal_records && journal_is_persistent; then
+    echo "journal: recording persistently in /var/log/journal ($(stat -c %U:%G /var/log/journal))"
     exit 0
 fi
 
-echo "kldload-journal-assert: the journal accepted a probe but did not return it —" >&2
-echo "  journald is wedged or writing to a shadowed inode. Repairing." >&2
+# Two distinct failures reach the same repair, and they must not be described
+# with the same sentence: one is "journald is not recording at all", the other
+# is "journald records fine but into /run, so the boot is erased at shutdown".
+# Reporting the second as the first sends whoever reads the log at 3am looking
+# for a wedged daemon that is working perfectly.
+if journal_records; then
+    echo "kldload-journal-assert: journald records but is writing to /run, not" >&2
+    echo "  /var/log/journal — this boot's log will be ERASED on reboot. This is" >&2
+    echo "  the flush losing its race with zfs-mount. Repairing." >&2
+else
+    echo "kldload-journal-assert: the journal accepted a probe but did not return it —" >&2
+    echo "  journald is wedged or writing to a shadowed inode. Repairing." >&2
+fi
 
 # ── 3. Repair ───────────────────────────────────────────────────────────────
 # Order matters: rotate and flush first so anything journald is still holding
