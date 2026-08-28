@@ -1708,6 +1708,33 @@ CUSTOMREPO
             # one red unit + Chrome cert warnings (10.100.10.123/.124 2026-06-14).
             # The .rpm is mirrored via target-fedora-extras.txt.
             nss-tools
+            # GPU firmware + the codecs that make playback work. These MUST be
+            # here and not in k_profile_packages: _dnf_pkgs is the list that is
+            # actually dnf-installed on RPM targets, exactly as the nss-tools
+            # and gnome-terminal notes above say. Adding them to profiles.sh's
+            # _fw only reached the apt path, which is why .111 (rc13) came up
+            # with intel-gpu-firmware absent and neither freeworld package
+            # installed, while all five sat mirrored in the darksite.
+            #
+            # amd-gpu-firmware and nvidia-gpu-firmware appear installed anyway
+            # via weak deps -- which is luck, not coverage: nothing Requires
+            # them, so the day that Supplements changes they vanish. Naming
+            # them makes it deterministic.
+            #
+            # amdgpu and i915 do not initialise without their blobs, so this is
+            # a black screen on Radeon/Intel, not a slow desktop.
+            amd-gpu-firmware intel-gpu-firmware nvidia-gpu-firmware
+            # Fedora ships -free builds with H.264/H.265/AAC stripped, so
+            # ordinary video will not play. Both come from RPM Fusion, which
+            # build-darksite-fedora.sh already enables, and both were verified
+            # to coexist with the free stack in a real F44 container.
+            libavcodec-freeworld mesa-va-drivers-freeworld
+            # The bridge that lets GStreamer use libavcodec at all. Without it
+            # the freeworld decoders are reachable only by apps that link
+            # libavcodec directly (Firefox, Chrome) while GNOME Videos and file
+            # previews still fail. Named gstreamer1-plugin-libav; "gstreamer1-libav"
+            # is only a Provides, which is why querying that name found nothing.
+            gstreamer1-plugin-libav
             # Terminal + text editor: Red Hat DROPPED gnome-terminal and gedit from
             # RHEL 10 / Fedora 41+ AppStream (replaced by ptyxis + gnome-text-editor).
             # This hardcoded list is what actually gets dnf-installed on RPM targets

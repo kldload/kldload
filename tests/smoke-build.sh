@@ -973,15 +973,30 @@ fi
 #
 # Ubuntu and EL are deliberately absent here: both keep the monolithic
 # linux-firmware, which still carries the GPU blobs.
+#
+# The RPM half MUST be checked in bootstrap.sh, not profiles.sh. _dnf_pkgs is
+# what is actually dnf-installed on RPM targets -- the file says so twice, next
+# to nss-tools and gnome-terminal -- and k_profile_packages is not used for that
+# transaction. The first version of this fix went into profiles.sh only, so it
+# was inert on Fedora: .111 (rc13) installed with intel-gpu-firmware absent and
+# neither freeworld package present, while all of them sat in the darksite. The
+# gate passed the whole time, because it too was reading the wrong file.
 _prof="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+_boot="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/bootstrap.sh"
 _gpufw=0
 grep -qF 'firmware-amd-graphics firmware-misc-nonfree' "$_prof" 2>/dev/null && _gpufw=$((_gpufw + 1))
-grep -qF 'amd-gpu-firmware intel-gpu-firmware nvidia-gpu-firmware' "$_prof" 2>/dev/null && _gpufw=$((_gpufw + 1))
-if ((_gpufw == 2)); then
-    _pass "GPU firmware ships on both split-firmware distros (AMD/Intel, not just wifi)"
+grep -qE '^[[:space:]]*amd-gpu-firmware intel-gpu-firmware nvidia-gpu-firmware[[:space:]]*$' "$_boot" 2>/dev/null && _gpufw=$((_gpufw + 1))
+grep -qE '^[[:space:]]*libavcodec-freeworld mesa-va-drivers-freeworld[[:space:]]*$' "$_boot" 2>/dev/null && _gpufw=$((_gpufw + 1))
+# Anchored to a line that is ONLY the package name. A plain substring match
+# also hit the explanatory comment above the entry, so the check passed with
+# the package deleted -- verified by deleting it, which is the only way that
+# ever surfaces. (2026-08-28)
+grep -qE '^[[:space:]]*gstreamer1-plugin-libav[[:space:]]*$' "$_boot" 2>/dev/null && _gpufw=$((_gpufw + 1))
+if ((_gpufw == 4)); then
+    _pass "GPU firmware + codecs are in the lists that actually install (RPM: _dnf_pkgs)"
 else
-    _fail "GPU firmware ships on both split-firmware distros (AMD/Intel, not just wifi)" \
-        "Debian needs firmware-amd-graphics + firmware-misc-nonfree, Fedora needs the three *-gpu-firmware packages — have $_gpufw/2"
+    _fail "GPU firmware + codecs are in the lists that actually install (RPM: _dnf_pkgs)" \
+        "Debian needs firmware-amd-graphics+misc-nonfree in profiles.sh; Fedora needs the three *-gpu-firmware, both freeworld packages, and gstreamer1-plugin-libav in bootstrap.sh _dnf_pkgs — have $_gpufw/4"
 fi
 
 # The desktop profile asks three questions, not nine. Six cards asked the
