@@ -1724,6 +1724,17 @@ CUSTOMREPO
             # amdgpu and i915 do not initialise without their blobs, so this is
             # a black screen on Radeon/Intel, not a slow desktop.
             amd-gpu-firmware intel-gpu-firmware nvidia-gpu-firmware
+            # CPU microcode and the rest of the per-vendor firmware split.
+            # amd-ucode-firmware is microcode, not a driver: without it an AMD
+            # machine boots with no microcode updates at all, silently, while
+            # Intel gets its 152 files from microcode_ctl and looks fine.
+            # The wireless set decides whether a laptop has network on first
+            # boot -- Broadcom, MediaTek, Qualcomm, NXP, TI. cirrus is the
+            # audio codec in recent XPS/ThinkPad. Measured on .111: every one
+            # of these directories was EMPTY before, 2874 -> 4139 files after.
+            amd-ucode-firmware cirrus-audio-firmware
+            brcmfmac-firmware mt7xxx-firmware qcom-firmware
+            nxpwireless-firmware tiwilink-firmware
             # Fedora ships -free builds with H.264/H.265/AAC stripped, so
             # ordinary video will not play. Both come from RPM Fusion, which
             # build-darksite-fedora.sh already enables, and both were verified

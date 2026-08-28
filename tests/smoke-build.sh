@@ -999,6 +999,47 @@ else
         "Debian needs firmware-amd-graphics+misc-nonfree in profiles.sh; Fedora needs the three *-gpu-firmware, both freeworld packages, and gstreamer1-plugin-libav in bootstrap.sh _dnf_pkgs — have $_gpufw/4"
 fi
 
+# Hardware coverage is the product. Fedora 43+ split linux-firmware per vendor
+# and this tree named only a handful of wifi packages, so eight firmware sets
+# were absent from every install. Measured on .111 2026-08-28: amd-ucode, i915,
+# brcm, mediatek, cirrus and qcom directories ALL held zero files; installing
+# the set took /usr/lib/firmware from 2874 files to 4139.
+#
+# amd-ucode-firmware is the one that reads least like a driver and matters
+# most: it is CPU MICROCODE. An AMD machine booted with none, so Zenbleed and
+# Inception class fixes never loaded, while Intel got 152 files from
+# microcode_ctl and looked healthy. Nothing anywhere reported the difference.
+#
+# Both halves are checked because either alone is useless: the darksite list
+# guarantees the RPM is mirrored, _dnf_pkgs is what actually installs it. The
+# earlier version of this fix had the packages mirrored and installed none of
+# them.
+_fwl="$ROOT/build/darksite-fedora/config/package-sets/target-fedora-extras.txt"
+_fwb="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/bootstrap.sh"
+_hw_missing=""
+for _p in amd-ucode-firmware brcmfmac-firmware mt7xxx-firmware qcom-firmware \
+    nxpwireless-firmware tiwilink-firmware cirrus-audio-firmware \
+    amd-gpu-firmware intel-gpu-firmware nvidia-gpu-firmware; do
+    grep -qE "^${_p}\$" "$_fwl" 2>/dev/null || _hw_missing+=" ${_p}(darksite)"
+    # Comments are stripped first: the explanatory block above these entries
+    # names the packages in prose, so a plain match went green with the package
+    # deleted. Verified by deleting amd-ucode-firmware, which is the only way
+    # that ever shows up. (2026-08-28)
+    # Process substitution, NOT a pipe. `grep -q` exits on the first match and
+    # SIGPIPEs the upstream grep; under pipefail the PIPELINE then reports that
+    # failure, so a successful match read as "not found" and every package came
+    # back missing. Same trap as the readback verifier earlier today.
+    grep -qE "(^|[[:space:]])${_p}([[:space:]]|\$)" \
+        < <(grep -vE '^[[:space:]]*#' "$_fwb" 2>/dev/null) ||
+        _hw_missing+=" ${_p}(_dnf_pkgs)"
+done
+if [[ -z "$_hw_missing" ]]; then
+    _pass "hardware firmware: all 10 vendor sets mirrored AND installed (CPU microcode, wifi, audio, GPU)"
+else
+    _fail "hardware firmware: all 10 vendor sets mirrored AND installed" \
+        "not wired:${_hw_missing}"
+fi
+
 # The desktop profile asks three questions, not nine. Six cards asked the
 # operator to opt into things the profile is named for -- KVM, Kubernetes,
 # observability, the ZFS console, Ollama -- which ship on the ISO regardless,
