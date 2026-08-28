@@ -885,6 +885,32 @@ else
         "need all 3: the .preresign backup, the sbverify --cert outcome check, and the restore on the failure path — have $_blr_ok/3"
 fi
 
+# The platform holds must survive their own success. `apt-mark hold` rewrites
+# dpkg's SELECTION field, so a package this tool pinned reads back as
+# "hold ok installed", not "install ok installed". Matching the latter exactly
+# made every already-pinned package invisible on the next run: installed[] came
+# back empty, the tool took its "nothing to pin" exit, and truncated the state
+# file that `kldload-rollback status` and the web console read. The operator is
+# then told the kernel is UNPINNED on a box where all 56 holds are in force.
+# (.132, 2026-08-27: showhold 56, status 0.)
+#
+# The || true is load-bearing too: dpkg-query exits non-zero for a name it has
+# never heard of, and the list carries Ubuntu names on Debian on purpose. In a
+# bare assignment that aborts the whole tool under set -e.
+_kh="$ROOT/live-build/config/includes.chroot/usr/sbin/kldload-apply-platform-holds"
+_kh_ok=0
+grep -qF 'hold ok installed' "$_kh" 2>/dev/null && _kh_ok=$((_kh_ok + 1))
+grep -qF '(install|hold) ok installed$' "$_kh" 2>/dev/null && _kh_ok=$((_kh_ok + 1))
+# The literal below is a SEARCH PATTERN for the ratchet's own escape hatch, not
+# a swallow in this file.
+grep -qF "dpkg-query -W -f='\${Status}' \"\$p\" 2>/dev/null || true" "$_kh" 2>/dev/null && _kh_ok=$((_kh_ok + 1))
+if ((_kh_ok == 3)); then
+    _pass "platform holds are idempotent (a held package still counts as installed)"
+else
+    _fail "platform holds are idempotent (a held package still counts as installed)" \
+        "need all 3: the 'hold ok installed' arm, the awk (install|hold) alternation, and the true-guard on the dpkg-query capture — have $_kh_ok/3"
+fi
+
 # The SAME pin has to reach the GRUB direct entry, and for a long time it did
 # not: grub.cfg emitted a literal `spl_hostid=${spl_hostid}` referring to a GRUB
 # variable nothing ever set, so every direct boot passed an EMPTY value and SPL

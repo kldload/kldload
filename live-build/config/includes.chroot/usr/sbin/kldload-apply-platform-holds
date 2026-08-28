@@ -120,15 +120,29 @@ fi
 installed=()
 
 _collect_apt() {
-    local p
+    local p _st
     for p in "${DEB_PKGS[@]}"; do
-        # Compare the WHOLE status, not `grep installed`. dpkg reports a
-        # package it merely knows about as "unknown ok not-installed" — which
-        # contains the substring "installed", so the grep form matched every
-        # Ubuntu kernel name on a Debian box, tried to hold packages that were
-        # not there, and printed a scary warning about an unheld kernel that
-        # was in fact held fine (fiend, 2026-08-16). This exact state only.
-        if [[ "$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null)" == "install ok installed" ]]; then
+        # Match the SELECTION loosely and the STATE exactly. dpkg's status is
+        # three fields — selection, error flag, current state — and only the
+        # third answers "is this on the disk". Testing the substring
+        # "installed" matched "unknown ok not-installed" and made the tool try
+        # to hold every Ubuntu kernel name on a Debian box (fiend, 2026-08-16);
+        # over-correcting to the exact string "install ok installed" then broke
+        # the opposite way, because `apt-mark hold` REWRITES the selection to
+        # "hold". So every package this tool had already pinned went invisible
+        # to it on the next run, installed[] came back empty, and it took the
+        # "nothing to pin" exit — wiping the state file that the web console
+        # and `kldload-rollback status` read. (.132, 2026-08-27: showhold said
+        # 56, status said 0.) Both selections are legitimate; not-installed and
+        # half-configured are not.
+        # || true because dpkg-query EXITS NON-ZERO for a name it has never
+        # heard of — not "unknown ok not-installed", an actual error — and this
+        # list deliberately carries Ubuntu names on Debian and vice versa. In
+        # the old `if [[ "$(...)" == ... ]]` form the substitution sat inside a
+        # condition where set -e does not apply; hoisting it to a bare
+        # assignment made the first unknown name abort the whole tool.
+        _st="$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null || true)"
+        if [[ "$_st" == "install ok installed" || "$_st" == "hold ok installed" ]]; then
             installed+=("$p")
         fi
     done
@@ -139,7 +153,10 @@ _collect_apt() {
         [[ "$p" =~ $NVIDIA_SKIP_RE ]] && continue
         installed+=("$p")
     done < <(dpkg-query -W -f='${Status}\t${Package}\n' 2>/dev/null |
-        awk -F'\t' '$1 ~ /^install ok installed/ {print $2}' |
+        # Same reason as above: an already-held package reads "hold ok
+        # installed", so anchoring on "install " dropped every NVIDIA package
+        # this tool had pinned on a previous run.
+        awk -F'\t' '$1 ~ /^(install|hold) ok installed$/ {print $2}' |
         # grep exits 1 on a machine with no NVIDIA packages installed. That is an
         # empty set, not a failure — most servers have no GPU.
         sed 's/:.*//' | grep -E "$DEB_NVIDIA_RE" | sort -u || true)
