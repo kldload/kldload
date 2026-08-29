@@ -1031,6 +1031,30 @@ else
         "not in the apt install list:${_dmissing}"
 fi
 
+# Every installed machine must be able to say which ISO built it and what it
+# was asked to install. Nothing recorded either. Asked "which ISO installed
+# .111?" on 2026-08-28 the only way to answer was to infer it from which
+# packages happened to be present and compare the boot-environment creation
+# time against ISO build times. And when an install came up Fedora where Debian
+# was expected, there was no way at all to tell whether the wrong distro was
+# requested or the right one ignored -- the installer's answers live in /tmp on
+# the live medium and die with the session.
+#
+# Written before k_finalize_bootloader on purpose: finalize exports the pool and
+# the target is unreachable after it. And asserted, because a marker that
+# silently fails to land is precisely the blind spot it exists to remove.
+_it="$ROOT/live-build/config/includes.chroot/usr/sbin/kldload-install-target"
+_bm=0
+grep -qF 'etc/kldload-release' "$_it" 2>/dev/null && _bm=$((_bm + 1))
+grep -qF 'requested_distro' "$_it" 2>/dev/null && _bm=$((_bm + 1))
+grep -qF 'did not land — this machine will not be able to say which ISO built it' "$_it" 2>/dev/null && _bm=$((_bm + 1))
+if ((_bm == 3)); then
+    _pass "install records the build id and what was requested (/etc/kldload-release)"
+else
+    _fail "install records the build id and what was requested (/etc/kldload-release)" \
+        "need the file write, the requested_* lines, and the did-not-land assertion — have $_bm/3"
+fi
+
 # The holds unit must be ordered after the datasets it writes into.
 # /var/lib/kldload is its OWN dataset (rpool/kldload/state). The unit carried no
 # After= at all, so it could run before zfs-mount, write platform-holds.list

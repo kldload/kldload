@@ -2514,6 +2514,41 @@ SMOKEFB
         "${target}/etc/systemd/system/multi-user.target.wants/kldload-smoke-firstboot.service" 2>/dev/null || true
     _ok "Smoke test" "scheduled for first boot → /root/kldload-smoke-report.txt"
 
+    # ── Record what built this machine, and what it was asked for ──────────
+    # Written BEFORE finalize, because finalize exports the pool and the target
+    # is unreachable afterwards.
+    #
+    # Nothing recorded this before. Asked "which ISO installed .111?" on
+    # 2026-08-28 the only way to answer was to infer it from which packages
+    # happened to be present and compare the boot-environment creation time
+    # against ISO build times. And when an install came up as Fedora after
+    # Debian was expected, there was no way at all to tell whether the wrong
+    # distro was requested or the right one was ignored -- the installer's
+    # answers live in /tmp on the live medium and die with the session.
+    #
+    # Both halves matter: kldload_version answers "what is this box", and the
+    # requested_* lines answer "what was it told to do", which is the half that
+    # turns a support report into a bug report.
+    {
+        echo "# Written by kldload-install-target at install time. Do not edit."
+        sed -n 's/^kldload_version *= *//p;s/^iso_name *= *//p;s/^built_at *= *//p' \
+            /run/initramfs/live/VERSION 2>/dev/null |
+            paste -d'\n' - - - 2>/dev/null |
+            sed -n '1s/^/kldload_version = /p;2s/^/iso_name        = /p;3s/^/iso_built_at    = /p'
+        echo "installed_at    = $(date -Is)"
+        echo "requested_distro  = ${KLDLOAD_DISTRO:-unset}"
+        echo "requested_release = ${KLDLOAD_RELEASE:-unset}"
+        echo "requested_profile = ${KLDLOAD_PROFILE:-unset}"
+        echo "requested_secureboot = ${KLDLOAD_ENABLE_SECURE_BOOT:-unset}"
+    } >"${target}/etc/kldload-release" 2>/dev/null || true
+    # Assert the OUTCOME: a marker that silently failed to land is exactly the
+    # blind spot this exists to remove.
+    if [[ -s "${target}/etc/kldload-release" ]]; then
+        k_log "Build marker written: $(grep -c . "${target}/etc/kldload-release") lines → /etc/kldload-release"
+    else
+        k_log "WARNING: /etc/kldload-release did not land — this machine will not be able to say which ISO built it"
+    fi
+
     # ── Finalize — unbind chroot, export pools (LAST step) ─────────────────
     k_finalize_bootloader
     _ok "Finalized" "Pools exported, ready to reboot"
