@@ -20,6 +20,29 @@ asserts size and checksum. `--prune` clears older releases out of the bucket
 afterwards; `--prune-dry-run` shows what it would remove first. Requires
 `rclone`.
 
+## Cloudflare: two different tokens
+
+The R2 upload and the website deploy need **different token objects**, and they
+are not interchangeable.
+
+- **R2** — minted from the R2 page, which returns an *Access Key ID* and a
+  *Secret Access Key*. This is what `r2-publish.sh` consumes. Minting a new one
+  **revokes the previous secret**: every R2 token on this account shares one
+  Access Key ID, only the secret changes, so an older secret starts failing with
+  `SignatureDoesNotMatch` the moment a replacement is created.
+- **Pages** — minted from My Profile → API Tokens (or Account API Tokens) with
+  permission **Account → Cloudflare Pages → Edit**. It is a bearer token with no
+  S3 credentials attached.
+
+An R2 token cannot deploy the site. It verifies as `status: active` and then
+returns `Authentication error` on every `/pages/…` call, including a plain list,
+which reads like a broken token rather than a wrong one. Three were minted
+chasing that during the 1.4.2 release before the distinction was spotted.
+
+In practice the Pages token is optional: `kldload-web` is git-connected with
+production branch `main`, so pushing deploys it. The token only exists to force
+a deployment when auto-deploy lags.
+
 ## What "released" means
 
 A release is not done until every one of these names the same build:
