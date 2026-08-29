@@ -999,6 +999,34 @@ else
         "Debian needs firmware-amd-graphics+misc-nonfree in profiles.sh; Fedora needs the three *-gpu-firmware, both freeworld packages, and gstreamer1-plugin-libav in bootstrap.sh _dnf_pkgs — have $_gpufw/4"
 fi
 
+# Hardware diagnostics and IPMI. These were mirrored as other packages'
+# dependencies and named in no install list, so none of them landed -- the .101
+# audit found nethogs, iftop and iotop-c absent with their RPMs sitting on the
+# media. The IPMI set is the difference between a server that boots and one an
+# operator can work on: every server-class driver is already in-tree (ast,
+# mpt3sas, megaraid_sas, mlx5, ixgbe, i40e, ice, qla2xxx, lpfc, ipmi_si), so a
+# Supermicro sees its RAID, NICs and BMC -- but without ipmitool you cannot read
+# the sensors, the SEL or the power state from inside the OS.
+#
+# Shipped on every profile rather than gated to "server": they are small, inert
+# on hardware with no BMC, and gating them means the operator who needs them is
+# the one who did not pick the profile that has them. Verified installing and
+# running in an F44 container -- ipmitool 1.8.19, sensors 3.6.0, lsscsi, sg_scan.
+_tl="$ROOT/build/darksite-fedora/config/package-sets/target-fedora-extras.txt"
+_tb="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/bootstrap.sh"
+_tools_missing=""
+for _p in nethogs iftop iotop-c ipmitool OpenIPMI lm_sensors sg3_utils lsscsi; do
+    grep -qE "^${_p}\$" "$_tl" 2>/dev/null || _tools_missing+=" ${_p}(darksite)"
+    grep -qE "(^|[[:space:]])${_p}([[:space:]]|\$)" \
+        < <(grep -vE '^[[:space:]]*#' "$_tb" 2>/dev/null) ||
+        _tools_missing+=" ${_p}(_dnf_pkgs)"
+done
+if [[ -z "$_tools_missing" ]]; then
+    _pass "hardware diagnostics + IPMI ship (ipmitool, sensors, sg3_utils, lsscsi, nethogs, iftop)"
+else
+    _fail "hardware diagnostics + IPMI ship" "not wired:${_tools_missing}"
+fi
+
 # Debian needs the same hardware sweep, and had it worse. Measured on .105
 # 2026-08-28 from a fresh install: amd-ucode AND intel-ucode both EMPTY, so the
 # machine ran with no CPU microcode on any processor -- Fedora at least got its

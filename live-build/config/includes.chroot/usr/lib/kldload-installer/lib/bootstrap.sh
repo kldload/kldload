@@ -1735,6 +1735,14 @@ CUSTOMREPO
             amd-ucode-firmware cirrus-audio-firmware
             brcmfmac-firmware mt7xxx-firmware qcom-firmware
             nxpwireless-firmware tiwilink-firmware
+            # Hardware diagnostics + IPMI. Mirrored as dependencies but named in
+            # no install list, so they never landed -- the .101 audit found
+            # nethogs/iftop/iotop-c missing with their RPMs on the media. The
+            # IPMI set is the difference between a server that boots and one an
+            # operator can actually work on: the drivers are all in-tree, but
+            # without ipmitool you cannot read sensors, the SEL or power state.
+            # Inert on hardware with no BMC, so they ship everywhere.
+            nethogs iftop iotop-c ipmitool OpenIPMI lm_sensors sg3_utils lsscsi
             # Fedora ships -free builds with H.264/H.265/AAC stripped, so
             # ordinary video will not play. Both come from RPM Fusion, which
             # build-darksite-fedora.sh already enables, and both were verified
