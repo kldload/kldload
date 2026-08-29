@@ -1,5 +1,198 @@
 # Changelog
 
+## 1.4.2 — 28 August 2026
+
+195 commits since 1.4.1: 30 features, 127 fixes, 120 files changed.
+
+---
+
+This release is about hardware. Almost every fix below was found the same way —
+installing on a real machine and measuring what actually landed, rather than
+reading a package list and assuming. The dev box has an NVIDIA GPU and an Intel
+CPU, which turns out to be the single configuration where all of these defects
+are invisible.
+
+### The desktop installer asks three questions
+
+It used to ask nine. Eight of them were things you would answer the same way
+every time to get a working desktop, so they are now silent defaults: the
+virtualisation stack, the Kubernetes lab, the AI assistant, the monitoring
+stack, the ZFS lab and the mesh all install because a desktop without them is
+not the product.
+
+What is left is what genuinely varies by machine:
+
+```
+  [x] NVIDIA proprietary driver     (shown only when an NVIDIA GPU is present)
+  [ ] Secure Boot
+  [x] Build VM golden images
+```
+
+The web console also no longer starts on every boot. It was useful exactly
+once, during install.
+
+### Firmware that was never actually installed
+
+Both distributions shipped installs with large parts of the firmware tree
+empty, and nothing reported it. On Fedora, because 43+ split `linux-firmware`
+into per-vendor packages and this tree named a handful of wifi packages and
+nothing else. On Debian, because `firmware-linux-nonfree` depends on exactly
+two packages and lists every per-vendor set as a `Recommends`, while the
+install runs `--no-install-recommends`.
+
+Measured on real installs before and after, not inferred:
+
+```
+                        Fedora            Debian
+  firmware files     2874 -> 4139      1361 -> 3093
+  amd-ucode             0 -> 7            0 -> 5
+  intel-ucode         152 (ok)            0 -> 126
+  i915                  0 -> 57           0 -> 57
+  brcm                  0 -> 54           1 -> 54
+  mediatek              0 -> 99           0 -> 99
+  cirrus                0 -> 433          0 -> 433
+  qcom                  0 -> 129          0 -> 129
+```
+
+The first row of that table is CPU microcode, and it is the one that matters
+most. An AMD machine booted with none at all, so Zenbleed- and Inception-class
+fixes never loaded. An Intel machine picked its files up through a different
+package and looked perfectly healthy, which is why this went unnoticed.
+
+The rest decides whether a laptop has working wifi, sound and a graphical
+console on first boot — `brcmfmac` is Broadcom, `mt7xxx` is most WiFi 6/6E
+parts since 2023, `cirrus` is the audio codec in recent XPS and ThinkPad
+hardware, `i915` is Intel graphics. A desktop with no GPU firmware is a black
+screen, not a slow one.
+
+### Codecs and video acceleration
+
+Debian installed with no VA-API drivers and no `libav`, so hardware video
+decode was unavailable and a browser fell back to software for everything.
+
+```console
+$ gst-inspect-1.0 | grep -c avdec_
+211
+$ ls /usr/lib/x86_64-linux-gnu/dri/*_drv_video.so | wc -l
+7
+```
+
+Both numbers were zero on Debian before this release.
+
+### The boot chain
+
+**Secure Boot is off by default.** It is still a checkbox, and it still works,
+but an install no longer walks the operator through a MOK enrolment ceremony
+they did not ask for.
+
+**The encrypted-pool passphrase prompt is visible.** It was being buried under
+kernel output on a quiet boot — the pool was waiting for a passphrase on a
+screen that showed no reason to type one.
+
+**`spl_hostid` is set on every boot path.** GRUB was passing an empty value on
+the one entry a Secure Boot install uses, which made pool import a coin flip.
+
+**A failed kernel re-sign no longer destroys the signature.** The Secure Boot
+path strips and re-applies the kernel signature; if that failed, the ESP was
+left with an unsigned kernel and the machine would not boot. It now backs up
+first, verifies the result, and restores on failure.
+
+**The fallback boot entry is registered and stays in `BootOrder`.** The
+recovery path also no longer registers an entry pointing at a file that was
+never written.
+
+ZFSBootMenu's countdown is 2 seconds instead of 10.
+
+### The kernel pin is derived, not written down
+
+ZFS and NVIDIA are out-of-tree DKMS modules built against one specific kernel,
+so the kernel is held. That pin is now resolved at build time from what OpenZFS
+actually declares it supports, rather than a literal someone updated by hand.
+A literal goes stale silently and lies about having been tested.
+
+```console
+$ apt-mark showhold | wc -l
+57
+$ kldload-rollback status
+Boot path        : ZFSBootMenu (follows bootfs)
+Pinned platform packages           : 57
+```
+
+The pins were also being written under a mountpoint that had not been mounted
+yet, so the tool that set them could not see them afterwards. Ordering a unit
+`After=zfs-mount.service` orders it on the *service*, not on the *mount* —
+`RequiresMountsFor=` is the one that works.
+
+The system journal had the same defect, and the symptom was worse: it reported
+that it was recording while every boot was being erased.
+
+### Ansible proves itself on first boot
+
+Ansible shipped configured and had never once run. The inventory listed the
+estate, the dropdown listed playbooks, and "is Ansible working?" was answered
+by reading configuration rather than by evidence.
+
+`system-info.yml` now runs unattended on first boot and writes
+`/root/kldload-ansible-report.txt` — per-host distro, kernel, uptime and
+memory, then a summary that names the hosts it could not reach. A count on its
+own would have read as success while half the estate was unreachable.
+
+The same playbook is in the dropdown, so the proof is one click away later.
+
+### Debian and Fedora
+
+The installer menu offers Debian and Fedora. The other substrates still build
+and the code is unchanged — they are no longer presented as choices a first-time
+operator should be making, and the documentation describes what is supported
+rather than what compiles.
+
+### Every machine records what built it
+
+```console
+$ cat /etc/kldload-release
+kldload_version=1.4.2
+iso_name=kldload-1.4.2-x86_64.iso
+iso_built_at=2026-08-28T...
+installed_at=2026-08-29T04:01:22Z
+requested_distro=debian
+requested_profile=desktop
+requested_secureboot=off
+```
+
+Asked "which ISO installed this machine?", the only previous way to answer was
+to infer it from which packages happened to be present. The second half of that
+file — what the installer was *told* to do — is the half that turns a support
+report into a bug report.
+
+### Diagnostics and IPMI
+
+`smartmontools`, `nvme-cli`, `ipmitool`, `OpenIPMI`, `lm_sensors`, `sg3_utils`,
+`lsscsi`, `usbutils`, `nethogs` and `iftop` ship on every profile, on both
+package managers. A machine that cannot report its own disk health is not a
+substrate you would trust with a pool, and without `ipmitool` a server's
+sensors, event log and power state are unreachable from inside the OS even
+though every driver is already in-tree.
+
+They are inert on hardware with no BMC, so they ship everywhere rather than
+only on the server profile — gating them means the operator who needs them is
+the one who did not pick the profile that has them.
+
+### Validation
+
+Four installs on real hardware, both distributions, both boot paths:
+
+```
+                    Fedora           Fedora        Debian          Debian
+                    SB + enc         no SB         SB + enc        no SB
+  firmware          4139             4139          3093            3093
+  codecs (avdec)    211              211           211             211
+  VA-API            11               11            7               7
+  kubernetes        6/6 Ready        6/6           6/6             6/6
+  failed units      0                0             0               0
+```
+
+`apt rollback` and `dnf rollback` were exercised on both boot paths.
+
 ## 1.4.0 — 17 August 2026
 
 369 commits since 1.3.1: 106 features, 179 fixes, 389 files changed.
