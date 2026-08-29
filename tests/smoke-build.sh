@@ -1096,15 +1096,25 @@ fi
 _hu="$ROOT/live-build/config/includes.chroot/etc/systemd/system/kldload-package-holds.service"
 _hu_ok=0
 grep -qE '^After=.*zfs-mount\.service' "$_hu" 2>/dev/null && _hu_ok=$((_hu_ok + 1))
-grep -qE '^After=.*local-fs\.target' "$_hu" 2>/dev/null && _hu_ok=$((_hu_ok + 1))
+# RequiresMountsFor is the one that actually works. /var/lib/kldload is mounted
+# by a GENERATED var-lib-kldload.mount unit, not by zfs-mount.service, and that
+# activates later: .105 2026-08-28 had zfs-mount done at 19:03:16, this unit run
+# at 19:03:17, and the mount active only at 19:03:27. Ten seconds where the
+# After= is satisfied and the directory is still bare. Both units that write
+# into a late-mounted dataset need it -- holds into /var/lib/kldload, journal
+# into /var/log/journal.
+grep -qF 'RequiresMountsFor=/var/lib/kldload' "$_hu" 2>/dev/null && _hu_ok=$((_hu_ok + 1))
+grep -qF 'RequiresMountsFor=/var/log/journal' \
+    "$ROOT/live-build/config/includes.chroot/usr/lib/systemd/system/kldload-journal-flush.service" 2>/dev/null &&
+    _hu_ok=$((_hu_ok + 1))
 # ...and the tool must re-read what it wrote, so the two can never disagree
 # silently again even if the ordering is lost.
 grep -qF '_state_back' "$ROOT/live-build/config/includes.chroot/usr/sbin/kldload-apply-platform-holds" 2>/dev/null && _hu_ok=$((_hu_ok + 1))
-if ((_hu_ok == 3)); then
+if ((_hu_ok == 4)); then
     _pass "platform holds: unit ordered after zfs-mount, and the write is read back"
 else
     _fail "platform holds: unit ordered after zfs-mount, and the write is read back" \
-        "need After=zfs-mount.service, After=local-fs.target, and the read-back check — have $_hu_ok/3"
+        "need After=zfs-mount.service, RequiresMountsFor on BOTH units, and the read-back check — have $_hu_ok/4"
 fi
 
 # Hardware coverage is the product. Fedora 43+ split linux-firmware per vendor

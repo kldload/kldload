@@ -6,6 +6,15 @@ Documentation=man:systemd-journald.service(8) man:journald.conf(5)
 # about to hide, which is the exact failure this unit exists to repair.
 After=systemd-journal-flush.service systemd-tmpfiles-setup.service
 After=zfs-mount.service local-fs.target
+# Same subtlety as kldload-package-holds: /var/log is its own dataset and gets
+# a GENERATED var-log.mount unit, which activates AFTER zfs-mount.service has
+# already finished. Ordering on the service is not ordering on the mount, and
+# the gap is real -- on .105 2026-08-28 zfs-mount finished 19:03:16 and the
+# sibling mount for /var/lib/kldload did not go active until 19:03:27. This
+# unit hit that race on the same boot and logged "the flush losing its race
+# with zfs-mount. Repairing." It recovered, because the assert has a repair
+# path, but it should not need one.
+RequiresMountsFor=/var/log/journal
 ConditionPathExists=/etc/systemd/journald.conf.d/persistent.conf
 
 [Service]

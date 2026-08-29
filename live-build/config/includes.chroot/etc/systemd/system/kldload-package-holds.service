@@ -20,6 +20,17 @@ Description=Apply KLDload platform package holds
 ConditionPathExists=/usr/sbin/kldload-apply-platform-holds
 After=zfs-mount.service local-fs.target
 Wants=zfs-mount.service
+# RequiresMountsFor is the one that actually works, and the reason is subtle.
+# /var/lib/kldload is NOT mounted by zfs-mount.service -- it gets a GENERATED
+# var-lib-kldload.mount unit, and that activates later. Measured on .105
+# 2026-08-28: zfs-mount finished 19:03:16, this unit ran 19:03:17, and
+# var-lib-kldload.mount did not go active until 19:03:27. Ten seconds in which
+# the ordering above is satisfied and the directory is still bare, so the tool
+# wrote platform-holds.list into the underlying directory and the mount covered
+# it. The read-back check stayed silent because at write time the file really
+# did exist and really was readable -- it only became invisible ten seconds
+# later. Ordering on the SERVICE is not ordering on the MOUNT.
+RequiresMountsFor=/var/lib/kldload
 
 [Service]
 Type=oneshot
