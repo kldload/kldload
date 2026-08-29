@@ -1072,6 +1072,30 @@ else
         "they differ — the installed system would ship stale release notes"
 fi
 
+# Every long option r2-publish.sh documents in its usage banner must have a
+# case arm that actually sets something. --versioned was documented, was
+# honoured at all three points downstream (the server-side copy, the size
+# check, the prune keep-list), and had no arm -- so it fell through to the
+# unknown-option catch-all and exited 1. The flag was unreachable from the
+# day it was written; publishing 1.4.2 on 2026-08-28 is what found it.
+#
+# "--help is the contract" only holds if the contract is executable.
+_r2="$ROOT/tools/r2-publish.sh"
+_r2_unwired=""
+if [[ -f "$_r2" ]]; then
+    for _flag in $(sed -n '/^Usage: r2-publish.sh/,/^Environment/p' "$_r2" |
+        grep -oE '\-\-[a-z][a-z-]+' | sort -u); do
+        grep -qE "^[[:space:]]*(${_flag}|[^)]*\|[[:space:]]*${_flag})[^)]*\)" "$_r2" ||
+            _r2_unwired+=" ${_flag}"
+    done
+    if [[ -z "$_r2_unwired" ]]; then
+        _pass "r2-publish: every documented option has a case arm"
+    else
+        _fail "r2-publish: every documented option has a case arm" \
+            "documented but unreachable:${_r2_unwired}"
+    fi
+fi
+
 # Debian needs the same hardware sweep, and had it worse. Measured on .105
 # 2026-08-28 from a fresh install: amd-ucode AND intel-ucode both EMPTY, so the
 # machine ran with no CPU microcode on any processor -- Fedora at least got its

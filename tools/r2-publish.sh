@@ -128,6 +128,11 @@ while (($#)); do
         exit 0
         ;;
     --prune) prune=1 ;;
+    # HISTORY: --versioned was documented in usage() and honoured at every
+    # point downstream (the server-side copy, the size check, the prune
+    # keep-list) but had no arm here, so it fell through to the unknown-option
+    # catch-all and exited 1. Caught publishing 1.4.2 on 2026-08-28.
+    --versioned) versioned=1 ;;
     --prune-dry-run)
         prune=1
         prune_dry=1
