@@ -47,7 +47,7 @@ Two substrates in the installer menu — **Fedora and Debian** — and two packa
 managers underneath. Both install with the network unplugged, from complete
 mirrors baked into the ISO.
 
-**Website:** [kldload.com](https://kldload.com) &middot; **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) &middot; **Release notes:** [1.4.0](https://kldload.com/releases/1.4.0.html) &middot; **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
+**Website:** [kldload.com](https://kldload.com) &middot; **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) &middot; **Release notes:** [1.4.2](https://kldload.com/releases/1.4.2.html) &middot; **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
 
 **The install, in two screens.** Boot the USB and this opens by itself — no
 terminal, no wiki. It is also reachable at `https://<host>:8443` from another
@@ -582,14 +582,14 @@ The user picks the target distro at install time. After install the system runs 
 
 ## Releases
 
-Current release: **1.4.0 — An update you can undo** (August 2026). 369 commits
-since 1.3.1: 106 features, 179 fixes, 389 files changed.
+Current release: **1.4.2 — Hardware** (August 2026). 195 commits since 1.4.1:
+30 features, 127 fixes, 120 files changed.
 
 - Full changelog: [`CHANGELOG.md`](live-build/config/includes.chroot/usr/local/share/kldload/CHANGELOG.md)
-- Release notes, with screenshots: [kldload.com/releases/1.4.0.html](https://kldload.com/releases/1.4.0.html)
+- Release notes, with screenshots: [kldload.com/releases/1.4.2.html](https://kldload.com/releases/1.4.2.html)
 - History back to 1.0: [kldload.com/release-notes.html](https://kldload.com/release-notes.html)
 
-Every release is tagged, so `git show v1.4.0` is the exact tree an ISO was
+Every release is tagged, so `git show v1.4.2` is the exact tree an ISO was
 built from. Cutting one: [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License

@@ -1052,6 +1052,26 @@ else
     _fail "hardware diagnostics + IPMI ship on the apt path too" "not wired:${_deb_tools_missing}"
 fi
 
+# Two CHANGELOG.md files exist: the repo root one, and the copy under
+# includes.chroot that actually ships to /usr/local/share/kldload on an
+# installed machine. They drifted in BOTH directions before the 1.4.2 release --
+# root carried 1.4.2 and had lost 1.4.1, the shipped copy carried 1.4.1 and had
+# never heard of 1.4.2 -- so the machine an operator was reading the changelog
+# ON was the one with the stale copy. The README links the shipped path, which
+# is what made it look authoritative while being a release behind.
+#
+# Same shape as free/index.html vs index.html: two copies, edits land in one.
+_cl_root="$ROOT/CHANGELOG.md"
+_cl_ship="$ROOT/live-build/config/includes.chroot/usr/local/share/kldload/CHANGELOG.md"
+if [[ ! -f "$_cl_root" || ! -f "$_cl_ship" ]]; then
+    _fail "CHANGELOG copies are in sync" "one of the two files is missing"
+elif cmp -s "$_cl_root" "$_cl_ship"; then
+    _pass "CHANGELOG: repo root and the shipped copy are identical"
+else
+    _fail "CHANGELOG: repo root and the shipped copy are identical" \
+        "they differ — the installed system would ship stale release notes"
+fi
+
 # Debian needs the same hardware sweep, and had it worse. Measured on .105
 # 2026-08-28 from a fresh install: amd-ucode AND intel-ucode both EMPTY, so the
 # machine ran with no CPU microcode on any processor -- Fedora at least got its
