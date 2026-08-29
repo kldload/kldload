@@ -1,0 +1,86 @@
+---
+# system-info.yml — prove Ansible is alive, and say something true about every
+# host it reached.
+#
+#   ansible-playbook /usr/local/share/kldload-ansible/playbooks/system-info.yml
+#
+# Runs at first boot via kldload-ansible-firstboot.service, which leaves the
+# output in /root/kldload-ansible-report.txt. That file is the evidence that
+# the control machine, the dynamic inventory, the mesh and SSH all work — on a
+# fresh install, without anyone typing anything.
+#
+# WHY IT COUNTS WHAT IT REACHED
+#
+# A play that greets three hosts out of six and exits 0 has told you nothing
+# true. kldload has been bitten by exactly that shape more than once: an enrol
+# sweep reporting "6 on the mesh" while a seventh VM sat unenrolled, a loop
+# reporting "1 succeeded, 0 failed" having skipped nine. So the last task
+# compares hosts reached against hosts in the inventory and says so plainly,
+# and a shortfall is visible rather than implied.
+#
+# Deliberately read-only. Nothing here changes a target, so it is safe on every
+# boot and safe to hand to someone who has just met the machine.
+
+- name: kldload system inventory
+  hosts: all
+  gather_facts: true
+  # A host that is down must not stop the report for the ones that are up --
+  # the shortfall is the interesting part, and aborting would hide it.
+  ignore_unreachable: true
+  any_errors_fatal: false
+
+  tasks:
+    - name: Confirm the transport works
+      ansible.builtin.ping:
+      register: pong
+
+    - name: Read uptime
+      ansible.builtin.command: uptime -p
+      register: up
+      changed_when: false
+
+    - name: Read root filesystem usage
+      ansible.builtin.command: df -h --output=source,size,pcent /
+      register: df
+      changed_when: false
+
+    - name: Look for a ZFS pool
+      ansible.builtin.command: zpool list -H -o name,health,cap
+      register: zpool
+      changed_when: false
+      failed_when: false
+
+    # Only for hosts whose facts actually gathered. A host that could not be
+    # reached still reaches this task -- ignore_unreachable lets the play carry
+    # on -- and referencing ansible_distribution there fails the task with an
+    # undefined-variable error that looks like a playbook bug rather than an
+    # unreachable host. Caught against gnome-xfce, an unenrolled VM, 2026-08-28.
+    - name: Per-host detail
+      when: ansible_distribution is defined
+      ansible.builtin.debug:
+        msg:
+          - "host    : {{ inventory_hostname }}  ({{ ansible_host | default('local') }})"
+          - "os      : {{ ansible_distribution }} {{ ansible_distribution_version }}  kernel {{ ansible_kernel }}"
+          - "cpu/mem : {{ ansible_processor_vcpus }} vcpu, {{ ansible_memtotal_mb }} MB"
+          - "uptime  : {{ up.stdout }}"
+          - "root fs : {{ df.stdout_lines[-1] }}"
+          - "zfs     : {{ zpool.stdout_lines | join(', ') if zpool.rc == 0 and zpool.stdout else 'no pool on this host' }}"
+
+- name: Reachability summary
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    # ansible_play_hosts_all is every host the play was given;
+    # ansible_play_hosts is those still alive after unreachable ones dropped.
+    - name: Reached versus expected
+      vars:
+        expected: "{{ groups['all'] | length }}"
+        reached: "{{ hostvars | dict2items | selectattr('value.ansible_kernel', 'defined') | list | length }}"
+      ansible.builtin.debug:
+        msg:
+          - "inventory : {{ expected }} hosts"
+          - "reached   : {{ reached }}"
+          - "verdict   : {{ 'ALL REACHED' if reached | int == expected | int else 'SHORTFALL — ' ~ (expected | int - reached | int) ~ ' host(s) did not answer' }}"
+          - "unreached : {{ (groups['all'] | difference(hostvars | dict2items | selectattr('value.ansible_kernel','defined') | map(attribute='key') | list)) | join(', ') | default('none', true) }}"

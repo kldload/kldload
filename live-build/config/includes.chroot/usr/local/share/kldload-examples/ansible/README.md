@@ -46,3 +46,30 @@ ansible-playbook 01-nginx-app.yml \
 
 Every playbook has commented-out `state: absent` tasks at the bottom.
 Uncomment them, re-run, and the playbook deletes what it created.
+
+## Guest operations (`guest-*`)
+
+The eight above target the **cluster**. These three target a **single guest**,
+which is the other thing operators reach for — and they exist because a VM that
+is not built from a kldload golden behaves differently from one that is.
+
+| File | What it does |
+|---|---|
+| `guest-01-prove-alive.yml` | Reach a host and report enough for "alive" to mean something: uptime, load, memory, gateway reachability |
+| `guest-02-install-package.yml` | Install a package **and verify the binary exists and runs** |
+| `guest-03-enrol-a-clone.yml` | Give a hand-made VM the host ops key so `kldload-enroll` can finish |
+
+Always pass `-l <host>`; without it these run against the whole estate.
+
+`kldload-inventory` hands every VM `ansible_user=root` plus a key, because that
+is how a guest cloned from a kldload golden is reachable. A VM built from any
+other image has an empty `/root/.ssh/authorized_keys`, so it reports
+`unreachable` while being perfectly healthy on `admin`:
+
+```bash
+ansible-playbook guest-01-prove-alive.yml -l <vm-name> \
+  -e ansible_user=admin -e ansible_password="$ADMIN_PASSWORD" \
+  -e ansible_become=true -e ansible_become_password="$ADMIN_PASSWORD"
+```
+
+Run `guest-03-enrol-a-clone.yml` once and that override stops being needed.

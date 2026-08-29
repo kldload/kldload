@@ -804,8 +804,11 @@ k_install_system_files() {
         # one arriving and orphaning the ZFS and NVIDIA modules (fiend,
         # 2026-08-16: `apt-mark showhold` was empty on a running install).
         mkdir -p "${target}/etc/systemd/system"
+        # kldload-ansible-firstboot.service is here for the same reason as the
+        # two above: a unit that is not copied cannot be enabled, and the
+        # `systemctl enable` further down would warn into a log nobody reads.
         for f in kldload-zfs-dbgmsg.service kldload-zfs-dbgmsg.timer \
-            kldload-package-holds.service; do
+            kldload-package-holds.service kldload-ansible-firstboot.service; do
             [[ -f "/etc/systemd/system/${f}" ]] &&
                 cp "/etc/systemd/system/${f}" "${target}/etc/systemd/system/${f}"
         done
@@ -2561,6 +2564,19 @@ WPEOF
         k_log "WARN: kldload-package-holds.service not enabled — the kernel," \
             "zfs and nvidia are unpinned; an upgrade may replace the kernel" \
             "out from under the DKMS modules (distro=${_distro})"
+    fi
+
+    # Proves Ansible reaches the estate, once, at first boot, into
+    # /root/kldload-ansible-report.txt. Nothing did before: the control
+    # machine, the dynamic inventory, the mesh and SSH to every guest all have
+    # to line up before a single play runs, and the first anyone found out was
+    # when they tried it by hand. Not fatal — a machine with no Ansible report
+    # is fully usable, it just cannot answer "is Ansible set up?" without one.
+    if ! chroot "${target}" systemctl enable kldload-ansible-firstboot.service \
+        >/dev/null 2>&1; then
+        k_log "WARN: kldload-ansible-firstboot.service not enabled —" \
+            "/root/kldload-ansible-report.txt will not be written and nothing" \
+            "will prove Ansible reaches the estate on this install"
     fi
 
     # ── APT mirror service on the installed target (skip for core) ────────────────

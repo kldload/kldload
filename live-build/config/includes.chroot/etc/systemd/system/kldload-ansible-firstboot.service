@@ -1,0 +1,35 @@
+# Runs the system-info playbook once at first boot and leaves the output in
+# /root/kldload-ansible-report.txt.
+#
+# WHY THIS EXISTS: nothing on a fresh install proved Ansible worked. The
+# control machine, the dynamic inventory, the WireGuard mesh and SSH to every
+# guest all have to line up before a single play runs, and until now the first
+# time anyone found out was when they tried it by hand. This turns "is Ansible
+# set up?" into a file you can cat.
+#
+# After kldload-firstboot because the estate does not exist until it has built
+# the cluster -- running earlier would honestly report one host and prove very
+# little. RequiresMountsFor because /root is on the boot environment and this
+# writes there; the holds unit was bitten by ordering on a service rather than
+# a mount (.105 2026-08-28) and this avoids the same trap.
+[Unit]
+Description=kldload — prove Ansible reaches the estate, once, at first boot
+After=kldload-firstboot.service network-online.target
+Wants=network-online.target
+RequiresMountsFor=/root
+ConditionPathExists=/usr/local/share/kldload-ansible/playbooks/system-info.yml
+ConditionPathExists=!/root/kldload-ansible-report.txt
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+# The report is the deliverable, so a play that fails still has to leave one --
+# an empty file where the evidence should be is the failure mode this is meant
+# to remove.
+ExecStart=/bin/bash -c '{ echo "# kldload ansible reachability — $(date -Is)"; \
+    ansible-playbook /usr/local/share/kldload-ansible/playbooks/system-info.yml 2>&1 || \
+    echo "PLAY FAILED — see above; ansible did not complete"; } > /root/kldload-ansible-report.txt'
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

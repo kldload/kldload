@@ -1,0 +1,74 @@
+---
+# 03-enrol-a-clone.yml — make a hand-made VM reachable the way kldload expects.
+#
+#   ansible-playbook guest-03-enrol-a-clone.yml -l <vm-name> \
+#     -e ansible_user=admin -e ansible_password="$ADMIN_PASSWORD" \
+#     -e ansible_become=true -e ansible_become_password="$ADMIN_PASSWORD"
+#
+# THE PROBLEM THIS SOLVES
+#
+# kldload-enroll connects as root with BatchMode=yes -- key only, it will never
+# try a password. A guest cloned from a kldload golden already has the host's
+# ops key in /root/.ssh/authorized_keys, so that works. A VM built from any
+# other image has an EMPTY authorized_keys, so enrolment gets exactly as far as
+# writing the inventory row and then logs:
+#
+#   WARNING: <vm>: no SSH as root — cannot enrol on the mesh (DB row was written)
+#
+# which is what "shows up in Ansible but is not on the WireGuard mesh" looks
+# like. Observed on test-kde, .105, 2026-08-28.
+#
+# This installs the host's public key for root, which is the missing half. Run
+# `kldload-enroll <vm>` afterwards and it can finish: generate a keypair inside
+# the guest, hand back the public key, and give it a mesh address.
+#
+# It does NOT install kube-network or wg. kldload-enroll checks for those too,
+# and a guest without them cannot join the mesh at all -- that is a golden
+# image job, not something to bolt on afterwards.
+
+- name: Give a hand-made guest the host ops key
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    # Written by kldload-firstboot on the hypervisor as the host->VM ops key.
+    host_ops_pubkey: "{{ lookup('file', '/root/.ssh/id_kldload.pub') }}"
+
+  tasks:
+    - name: Ensure /root/.ssh exists with the right mode
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Install the host ops key for root
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ host_ops_pubkey }}"
+        state: present
+      register: keyadd
+
+    # Verify the outcome rather than trusting the module: the file existed and
+    # was zero-length on test-kde, which is what started this.
+    - name: Count the keys root will now accept
+      ansible.builtin.command: grep -c . /root/.ssh/authorized_keys
+      register: keycount
+      changed_when: false
+      failed_when: keycount.stdout | int < 1
+
+    - name: What kldload-enroll still needs
+      ansible.builtin.command: "sh -c 'command -v kube-network >/dev/null && command -v wg >/dev/null && echo yes || echo no'"
+      register: prereq
+      changed_when: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg:
+          - "host           : {{ inventory_hostname }}"
+          - "key added      : {{ keyadd.changed }}   (false = already present)"
+          - "root keys      : {{ keycount.stdout }}"
+          - "kube-network+wg: {{ prereq.stdout }}"
+          - "next           : {{ 'run: kldload-enroll ' ~ inventory_hostname if prereq.stdout == 'yes' else 'guest lacks kube-network/wg — it cannot join the mesh; build it from a kldload golden' }}"

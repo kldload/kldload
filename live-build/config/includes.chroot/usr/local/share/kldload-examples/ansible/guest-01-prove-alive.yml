@@ -1,0 +1,65 @@
+---
+# 01-prove-alive.yml — is this guest actually reachable and running?
+#
+# The smallest useful playbook: prove Ansible can reach a host, then show
+# enough about it that "alive" means something more than a green PING.
+#
+# WHY IT TAKES CREDENTIALS ON THE COMMAND LINE
+#
+# kldload-inventory hands every VM ansible_user=root plus a key, because that
+# is how a guest built from a kldload golden is reachable. A VM cloned from any
+# other image has an EMPTY /root/.ssh/authorized_keys, so root-with-key fails
+# and the host is 'unreachable' even though it is running fine and answering on
+# admin. Overriding on the command line is how you talk to a guest that has not
+# been enrolled yet:
+#
+#   ansible-playbook guest-01-prove-alive.yml -l <vm-name> \
+#     -e ansible_user=admin -e ansible_password="$ADMIN_PASSWORD" \
+#     -e ansible_become=true -e ansible_become_password="$ADMIN_PASSWORD"
+#
+# Against an enrolled guest the inventory already has it right, and you need
+# none of that:
+#
+#   ansible-playbook guest-01-prove-alive.yml -l kldload-w-1
+#
+# -l is not optional. Without it this runs against every host in the estate.
+
+- name: Prove the guest is alive
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Ping over the Ansible transport
+      ansible.builtin.ping:
+
+    - name: Read uptime
+      ansible.builtin.command: uptime -p
+      register: up
+      changed_when: false
+
+    - name: Read the load average
+      ansible.builtin.command: cat /proc/loadavg
+      register: loadavg
+      changed_when: false
+
+    # Reported, not asserted: a guest that is up but has no route off its
+    # bridge is still a useful thing to see, and failing the play would hide
+    # everything below it.
+    - name: Check the guest can reach its gateway
+      ansible.builtin.command: ping -c 2 -W 2 {{ ansible_default_ipv4.gateway }}
+      register: gw
+      changed_when: false
+      failed_when: false
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "host      : {{ inventory_hostname }} ({{ ansible_host | default('no ansible_host') }})"
+          - "os        : {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "kernel    : {{ ansible_kernel }}"
+          - "uptime    : {{ up.stdout }}"
+          - "load      : {{ loadavg.stdout.split()[0:3] | join(' ') }}"
+          - "memory    : {{ ansible_memtotal_mb }} MB"
+          - "cpus      : {{ ansible_processor_vcpus }}"
+          - "gateway   : {{ ansible_default_ipv4.gateway | default('none') }} — {{ 'reachable' if gw.rc == 0 else 'NO ROUTE' }}"
+          - "connected : as {{ ansible_user_id }}"

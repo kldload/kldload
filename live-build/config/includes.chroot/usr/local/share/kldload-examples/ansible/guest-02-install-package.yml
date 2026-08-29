@@ -1,0 +1,73 @@
+---
+# 02-install-package.yml — install something on a guest, and prove it landed.
+#
+#   ansible-playbook guest-02-install-package.yml -l <vm-name> \
+#     -e ansible_user=admin -e ansible_password="$ADMIN_PASSWORD" \
+#     -e ansible_become=true -e ansible_become_password="$ADMIN_PASSWORD" \
+#     -e pkg=htop
+#
+# Defaults to htop because it is small, exists under the same name on every
+# substrate kldload ships, and puts a binary on PATH you can actually run --
+# which is what makes the verification below meaningful.
+#
+# WHY IT VERIFIES AFTERWARDS
+#
+# `package:` reporting ok means the package manager exited 0. It does not mean
+# the program is there: a name that resolves to nothing, a --skip-broken that
+# dropped it, a transaction that installed a metapackage pulling none of what
+# you wanted. Checking that the binary exists and runs is one extra task and it
+# is the difference between "the play was green" and "the thing works".
+
+- name: Install a package and prove it works
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    pkg: htop
+    # Most packages name their binary after themselves. Override when they do
+    # not -- e.g. -e pkg=iotop-c -e binary=iotop
+    binary: "{{ pkg }}"
+
+  tasks:
+    - name: Refresh the package cache
+      ansible.builtin.package:
+        update_cache: true
+      changed_when: false
+      # apt and dnf both accept this; a substrate whose module does not is a
+      # cache-refresh failure, not a reason to abandon the install.
+      failed_when: false
+
+    - name: Install {{ pkg }}
+      ansible.builtin.package:
+        name: "{{ pkg }}"
+        state: present
+      register: install
+
+    # The outcome check. Everything above can report success with nothing on
+    # disk; this is the task that would actually fail.
+    - name: Find the binary on PATH
+      ansible.builtin.command: which {{ binary }}
+      register: which_bin
+      changed_when: false
+      failed_when: which_bin.rc != 0
+
+    - name: Run it, so "installed" means "executes"
+      ansible.builtin.command: "{{ binary }} --version"
+      register: ver
+      changed_when: false
+      failed_when: false
+
+    - name: Ask the package manager what it thinks it installed
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Result
+      ansible.builtin.debug:
+        msg:
+          - "host      : {{ inventory_hostname }} ({{ ansible_distribution }})"
+          - "package   : {{ pkg }}"
+          - "changed   : {{ install.changed }}   (false = it was already there)"
+          - "version   : {{ ansible_facts.packages[pkg][0].version | default('not in the package db') }}"
+          - "binary    : {{ which_bin.stdout }}"
+          - "runs      : {{ (ver.stdout_lines | first) if ver.rc == 0 else 'binary present but --version failed (rc=' ~ ver.rc ~ ')' }}"
