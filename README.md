@@ -14,7 +14,7 @@ vendor's own package repositories — and the artifact OS that falls out of it.*
 
 [![License: BSD-3](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Linux-brightgreen.svg)
-![Substrates](https://img.shields.io/badge/substrates-Fedora%20%7C%20Debian%20%7C%20RHEL%20%7C%20Arch-orange.svg)
+![Substrates](https://img.shields.io/badge/substrates-Fedora%20%7C%20Debian-orange.svg)
 ![Root](https://img.shields.io/badge/root-OpenZFS-orange.svg)
 ![Boot](https://img.shields.io/badge/boot-ZFSBootMenu-blue.svg)
 
@@ -43,9 +43,9 @@ The thing it adds that a vendor image does not have: **`apt`, `dnf` and
 `pacman` snapshot the root before every transaction**, so reversing a failed
 upgrade is one command rather than a rescue USB and an evening.
 
-Four substrates in the installer menu — **Fedora, Debian, RHEL, Arch** — and
-three package managers underneath. Debian and Fedora install with the network
-unplugged, from complete mirrors baked into the ISO.
+Two substrates in the installer menu — **Fedora and Debian** — and two package
+managers underneath. Both install with the network unplugged, from complete
+mirrors baked into the ISO.
 
 **Website:** [kldload.com](https://kldload.com) &middot; **Download:** [dl.kldload.com](https://dl.kldload.com/kldload-free-latest.iso) &middot; **Release notes:** [1.4.0](https://kldload.com/releases/1.4.0.html) &middot; **Discord:** [discord.gg/QX8wf38N3V](https://discord.gg/QX8wf38N3V)
 
@@ -116,7 +116,7 @@ the OpenZFS test lab kept separate from it.
 | A 64-bit x86 machine | **UEFI required. Legacy BIOS boot is not supported.** |
 | A USB stick, **32 GB or larger** | The image is ~17.7 GB. |
 | A target disk | **It will be erased.** |
-| Network | Optional for Debian, Ubuntu and Fedora. Required for Arch. |
+| Network | Optional — both substrates install fully offline. |
 
 Legacy BIOS is absent by design, not untested: the installer writes GPT with an
 EFI System Partition and a ZFS pool, and Secure Boot, ZFSBootMenu, boot repair
@@ -247,27 +247,33 @@ Only **remote** browsers do &mdash; sign in with your admin account (a `wheel`/
 
 ---
 
-## Four in the menu, three package managers underneath
+## Two in the menu, two package managers underneath
 
 | Distribution | Install method | Offline |
 |---|---|---|
 | Fedora 44 | `dnf --installroot` | Yes (RPM darksite) |
 | Debian 13 (Trixie) | `debootstrap` | Yes (APT darksite) |
-| RHEL 10 | `dnf --installroot` | No (Red Hat CDN; subscription required) |
-| Arch Linux | `pacstrap` | No (rolling; requires internet) |
 
-Those four are what the installer offers, because they are the four that get
-tested. The *method* underneath is not distro-specific: kldload installs by
-calling `dnf --installroot`, `debootstrap` or `pacstrap` against a distribution's
-own repositories. Nothing is forked, nothing is patched, and no image is
-pre-baked for a given distro.
+Those two are what the installer offers, because they are the two that get
+tested — and the two that deliver the offline promise. Everything else in the
+RPM and APT families is a network install, which is a different product from
+the one this README describes.
 
-Which means the supported set is really "distributions whose packages come from
-dnf, apt or pacman". Others in those families — CentOS Stream, Rocky, Ubuntu —
-remain reachable with `KLDLOAD_DISTRO=<name>`, but they are **not on the menu
-and not tested**, and the menu is the honest statement of what is. Adding a
-distribution in one of those families is repository configuration, not new
-machinery.
+The *method* underneath is not distro-specific: kldload installs by calling
+`dnf --installroot` or `debootstrap` against a distribution's own repositories.
+Nothing is forked, nothing is patched, and no image is pre-baked for a given
+distro.
+
+Which means the reachable set is wider than the tested one. RHEL, CentOS
+Stream, Rocky, Ubuntu and Arch all still work with `KLDLOAD_DISTRO=<name>` —
+the code paths are there and maintained — but they are **not on the menu, not
+mirrored offline, and not tested**, and the menu is the honest statement of
+what is. Adding one back is repository configuration, not new machinery.
+
+Fedora and Debian are deliberately the widest useful pair rather than a narrow
+one: two package managers, two firmware-splitting conventions, two initramfs
+generators, and one leading-edge substrate against one stable one. Most bugs
+worth finding show up as a difference between them.
 
 The honest bound: a new distribution needs its repos and keys declared, and its
 kernel paired with a version of OpenZFS that builds against it. That is a
@@ -400,7 +406,7 @@ opt-in at install. Everything else below is open source under its own licence.
 | [PipeWire](https://pipewire.org) + WirePlumber | audio |
 | [Google Chrome](https://www.google.com/chrome/) | the default browser on RPM desktops, from Google's own repo, and what the kldload GUI apps render in |
 | [Firefox](https://www.mozilla.org/firefox/) | also installed on RPM desktops, and the browser on the GhostBSD posture |
-| [Chromium](https://www.chromium.org) / [Epiphany](https://apps.gnome.org/Epiphany/) | the browser on Debian / Ubuntu targets respectively |
+| [Chromium](https://www.chromium.org) | the browser on Debian targets |
 | [NVIDIA driver + CUDA](https://www.nvidia.com) | optional at install, via RPM Fusion `akmod-nvidia` |
 | [Steam](https://store.steampowered.com) | optional, via [Flathub](https://flathub.org) (Fedora) |
 | [eza](https://eza.rocks), [bat](https://github.com/sharkdp/bat), [fd](https://github.com/sharkdp/fd), [ripgrep](https://github.com/BurntSushi/ripgrep), [zoxide](https://github.com/ajeetdsouza/zoxide), [fzf](https://github.com/junegunn/fzf), [fastfetch](https://github.com/fastfetch-cli/fastfetch), htop | the modern CLI set, pre-wired into the shell |
@@ -432,9 +438,9 @@ as the recovery USB.
 
 ### How a distro gets built
 The installer bootstraps each target with **that distro's own tool** &mdash;
-[debootstrap](https://wiki.debian.org/Debootstrap) (Debian/Ubuntu),
-`dnf --installroot` (Fedora/CentOS Stream/Rocky/RHEL),
-and [pacman](https://archlinux.org/pacman/) (Arch, via `pacman-static`).
+[debootstrap](https://wiki.debian.org/Debootstrap) for Debian and
+`dnf --installroot` for Fedora. The same two paths reach the rest of their
+families when driven directly, but only these two are on the menu and tested.
 Packages come from the vendors' own
 CDNs; the ISO itself is built with Red Hat's
 [lorax](https://github.com/weldr/lorax), `dracut`, `squashfs-tools` and
@@ -561,9 +567,8 @@ snapshot. Nothing is overwritten.
 ```
 Live environment:  Fedora 44 (kernel 7.0.x, OpenZFS 2.4.3)
 Builder:           Fedora 44 container (lorax + squashfs-tools + xorriso + dracut)
-Bootstrap paths:   dnf --installroot  (CentOS / Fedora / Rocky / RHEL)
-                   debootstrap        (Debian / Ubuntu)
-                   pacstrap           (Arch)
+Bootstrap paths:   dnf --installroot  (Fedora)
+                   debootstrap        (Debian)
 
 Installer:         Python web UI + ~10 bash libraries (lib/) + backend/bin tools
 Web UI:            single HTML file per edition + WebSocket install-log stream
