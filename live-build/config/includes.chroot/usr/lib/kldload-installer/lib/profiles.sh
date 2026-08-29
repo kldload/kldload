@@ -502,6 +502,35 @@ k_profile_optional_packages() {
     local out=()
     local _distro="${KLDLOAD_DISTRO:-debian}"
     local _profile="${KLDLOAD_PROFILE:-server}"
+
+    # ── Hardware diagnostics + IPMI (apt/pacman targets) ─────────────────
+    #
+    # The RPM path got this set on 2026-08-28 (bootstrap.sh, the freeworld
+    # block); the apt path did not, and the asymmetry survived four test
+    # installs because the dev box is Fedora. Audited .113 on 2026-08-29:
+    # smartmontools, nvme-cli, usbutils, ipmitool, OpenIPMI, sg3-utils and
+    # lsscsi were all absent, and five of them were already sitting in the
+    # darksite mirror unnamed by any install list -- the same
+    # mirrored-but-never-installed trap as the firmware sets.
+    #
+    # Why it matters more than it reads: a machine that cannot report its own
+    # disk health is not a substrate you would trust with a pool, and without
+    # ipmitool a server's sensors, SEL and power state are unreachable even
+    # though the drivers are all in-tree. Inert on hardware with no BMC, so
+    # they ship on every profile rather than only on server.
+    #
+    # These are optional by construction -- k_profile_optional_packages is
+    # installed in its own transaction, after the kernel has been asserted
+    # present, so an unavailable one costs only itself (the steam-installer
+    # lesson, fiend 2026-08-15).
+    case "$_distro" in
+    alpine | arch) : ;; # different names; not audited, so not claimed
+    *)
+        out+=(smartmontools nvme-cli usbutils ipmitool openipmi
+            sg3-utils lsscsi nethogs iftop dmidecode)
+        ;;
+    esac
+
     if [[ "${KLDLOAD_ENABLE_EBPF:-0}" == "1" ]]; then
         if [[ "$_distro" == "arch" ]]; then
             out+=(bcc bcc-tools bpftrace perf)

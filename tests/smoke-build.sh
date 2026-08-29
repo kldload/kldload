@@ -1027,6 +1027,31 @@ else
     _fail "hardware diagnostics + IPMI ship" "not wired:${_tools_missing}"
 fi
 
+# The same set on the apt path, which the commit above missed entirely. The
+# asymmetry survived four hardware installs because the dev box is Fedora, and
+# the .113 audit on 2026-08-29 is what found it: smartmontools, nvme-cli,
+# usbutils, ipmitool, OpenIPMI, sg3-utils and lsscsi all absent from a finished
+# Debian desktop -- and five of them were already in the darksite mirror,
+# named by no install list, exactly like the firmware sets a week earlier.
+#
+# Both halves are checked because either one alone is a silent failure: named
+# but not mirrored is a network-only install on a darksite build, mirrored but
+# not named is a package that ships on the media and never reaches a machine.
+_dl="$ROOT/build/darksite-debian/config/package-sets/target-base.txt"
+_dp="$ROOT/live-build/config/includes.chroot/usr/lib/kldload-installer/lib/profiles.sh"
+_deb_tools_missing=""
+for _p in smartmontools nvme-cli usbutils ipmitool openipmi sg3-utils lsscsi nethogs iftop dmidecode; do
+    grep -qE "^${_p}\$" "$_dl" 2>/dev/null || _deb_tools_missing+=" ${_p}(darksite)"
+    grep -qE "(^|[[:space:]]|\()${_p}([[:space:]]|\)|\$)" \
+        < <(grep -vE '^[[:space:]]*#' "$_dp" 2>/dev/null) ||
+        _deb_tools_missing+=" ${_p}(profiles)"
+done
+if [[ -z "$_deb_tools_missing" ]]; then
+    _pass "hardware diagnostics + IPMI ship on the apt path too"
+else
+    _fail "hardware diagnostics + IPMI ship on the apt path too" "not wired:${_deb_tools_missing}"
+fi
+
 # Debian needs the same hardware sweep, and had it worse. Measured on .105
 # 2026-08-28 from a fresh install: amd-ucode AND intel-ucode both EMPTY, so the
 # machine ran with no CPU microcode on any processor -- Fedora at least got its
