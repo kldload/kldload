@@ -3300,7 +3300,27 @@ K8SSYS
         # not supported at all, and a root-on-ZFS disk has no spare partition.
         # Sized small on purpose: this is a hypervisor, and guest pages must
         # never end up here — a swapped guest is worse than a stopped one.
-        if chroot "${target}" rpm -q zram-generator-defaults >/dev/null 2>&1; then
+        # The check is the GENERATOR BINARY, not a package name. Every family
+        # ships the same generator under a different package —
+        # zram-generator-defaults on Fedora/EL, systemd-zram-generator on
+        # Debian/Ubuntu, zram-generator on Arch — so `rpm -q <fedora name>` was
+        # false on more than half the matrix and this whole block silently did
+        # nothing there. Those hosts lost the old swapoff too (removed above)
+        # and ended up with no swap AND no zram, which is the failure this
+        # change exists to prevent. A file on disk is family-agnostic and is
+        # fact rather than intent.
+        _zram_pkg="zram-generator-defaults"
+        case "${KLDLOAD_DISTRO:-centos}" in
+        debian | ubuntu) _zram_pkg="systemd-zram-generator" ;;
+        arch) _zram_pkg="zram-generator" ;;
+        esac
+        # -f, not -x. The question is "did the package land", and systemd runs
+        # this generator inside the booted target, not here. -x additionally
+        # asks the KERNEL whether we could exec it right now, which is false on
+        # a target mounted noexec — a false negative whose consequence is the
+        # no-swap host this block exists to prevent. Verified: a 0755 file on a
+        # noexec mount is -f true, -x false.
+        if [[ -f "${target}/usr/lib/systemd/system-generators/zram-generator" ]]; then
             cat >"${target}/etc/systemd/zram-generator.conf" <<'ZRAMCONF'
 [zram0]
 zram-size = min(ram / 8, 4096)
@@ -3309,7 +3329,7 @@ swap-priority = 100
 ZRAMCONF
             k_log "Host swap: zram configured (guests disable their own via kube-setup)"
         else
-            k_log "WARNING: zram-generator-defaults is NOT installed — this host will boot with NO swap and systemd-oomd will have no runway. Check target-fedora-extras.txt made it into the darksite."
+            k_log "WARNING: no zram generator on the target (/usr/lib/systemd/system-generators/zram-generator) — this host will boot with NO swap and systemd-oomd will have no runway. Install ${_zram_pkg} for ${KLDLOAD_DISTRO:-centos}, or check it made it into the darksite package set."
         fi
 
         # ZFS datasets for K8s components
