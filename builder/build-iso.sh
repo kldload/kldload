@@ -2458,6 +2458,10 @@ HELMCHARTS
     # -a so the symlink stays a SYMLINK instead of becoming a second 41KB copy
     # that drifts from the original on the next edit.
     cp -a /build/live-build/config/includes.chroot/usr/sbin/. "${ROOTFS}/usr/sbin/"
+    # The swallow is an empty glob: cp -a already carried the exec bits over,
+    # so this only re-asserts them, and on a tree with no kldload-* the glob
+    # stays literal and chmod has nothing to do. A real permission failure on a
+    # rootfs we just wrote does not happen without the build already being lost.
     chmod +x "${ROOTFS}"/usr/sbin/kldload-* 2>/dev/null || true
 
     # ─── systemd units shipped via includes.chroot ────────────────────────

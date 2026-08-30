@@ -366,6 +366,15 @@ SHELL_SCRIPTS=()
 if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     while IFS= read -r -d '' f; do
         [[ -f "$ROOT/$f" ]] || continue # tracked but deleted in worktree
+        # Symlinks are the SAME script under a second name, and every gate
+        # below would then check it twice. Harmless for bash -n / shellcheck /
+        # shfmt, fatal for anything that COUNTS: the silent-failure ratchet
+        # tallied kldload-rollback's `|| true` lines once per name and reported
+        # the tree as having regressed by the size of the duplicate.
+        # HISTORY: onyx 2026-08-30. b1268 added usr/sbin/rollback as a symlink to
+        # kldload-rollback; smoke-build went red at 1454 vs a 1450 baseline
+        # with 2 of the 4 being that file counted a second time.
+        [[ -L "$ROOT/$f" ]] && continue
         if head -c 80 "$ROOT/$f" 2>/dev/null | head -n 1 |
             grep -qE '^#!.*(bash|/bin/sh)'; then
             SHELL_SCRIPTS+=("$f")

@@ -75,6 +75,10 @@ log() { echo "$(_ts) $*" >>"$LOG"; }
 #     rollback status             -> 0
 # Nobody reading the output is not a reason to abandon a half-applied change.
 trap '' PIPE
+# The swallow is EPIPE and nothing else: with SIGPIPE ignored, a write to a
+# closed stdout returns an error instead of killing us, and that is the whole
+# point of the trap above. Losing a line nobody is reading is correct; dying
+# between `zpool set bootfs` and the restore that follows is not.
 say() { printf '%s\n' "$*" 2>/dev/null || true; }
 die() {
     log "ERROR: $*"
