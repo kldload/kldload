@@ -362,7 +362,12 @@ _preflight_control_planes() {
         # running set, understating the budget by the entire worker footprint.
         # onyx 2026-08-29: 3 workers x 4096 subtracted twice on a 32GB box.
         local _up_workers _pending
-        _up_workers="$(virsh list --name 2>/dev/null | grep -c -- '-w-' || true)"
+        # Anchored on WORKER_PREFIX, which is what every other site in this file
+        # matches on. The first cut used `grep -c -- '-w-'`, which counts ANY
+        # running domain with -w- in its name — a klab golden, an operator's
+        # own VM — and each false positive silently shrinks _pending and lets
+        # the budget over-commit the box it was written to protect.
+        _up_workers="$(virsh list --name 2>/dev/null | grep -c "^${WORKER_PREFIX}-" || true)"
         [[ "$_up_workers" =~ ^[0-9]+$ ]] || _up_workers=0
         _pending=$((WORKERS - _up_workers))
         ((_pending < 0)) && _pending=0
