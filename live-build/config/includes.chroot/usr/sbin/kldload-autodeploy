@@ -358,6 +358,15 @@ zfslab) K8S_WORKERS_DEFAULT=0 ;; # intentional — budget for ZFS test VMs
 esac
 K8S_WORKERS="${KLDLOAD_K8S_WORKERS:-$K8S_WORKERS_DEFAULT}"
 
+# Control planes are ALWAYS three. A single-CP cluster is a demo, not a
+# cluster: lose the one node and the API server, etcd and every controller go
+# with it. Three is the smallest etcd quorum that survives losing one.
+# kube-cluster sizes them to fit the host (shrinking CP_RAM before it will ever
+# reduce the count), so asking for 3 here is a promise about TOPOLOGY, not
+# about RAM. Selecting k8s therefore lays down the full 6-node set: 3 CPs + 3
+# workers. KLDLOAD_K8S_CONTROL_PLANES=1 opts out for a deliberately tiny box.
+K8S_CONTROL_PLANES="${KLDLOAD_K8S_CONTROL_PLANES:-3}"
+
 # klab golden flavor — zfslab template builds ZFS-test goldens (with
 # zfs-tests.sh + ksh + vdev images); everything else builds lean OS
 # goldens. KLAB_GOLDEN_KIND used by phase 3 below to pick the right
@@ -935,8 +944,9 @@ if [[ "${WANT[k8s]}" == "1" ]]; then
         # Bug seen 2026-05-05 on fiend: pre-1.1.0 auto-scaled cluster pods
         # to a third of host RAM each, hitting 30 vCPU / 51 GB on a 24-core
         # / 63 GB host. Fixed defaults in kube-cluster keep this bounded.
-        log "[k8s] running kube-cluster bootstrap --workers ${K8S_WORKERS}"
-        if kube-cluster bootstrap --workers "${K8S_WORKERS}" >>/var/log/kldload/kube-bootstrap.log 2>&1; then
+        log "[k8s] running kube-cluster bootstrap --control-planes ${K8S_CONTROL_PLANES} --workers ${K8S_WORKERS}"
+        if kube-cluster bootstrap --control-planes "${K8S_CONTROL_PLANES}" \
+            --workers "${K8S_WORKERS}" >>/var/log/kldload/kube-bootstrap.log 2>&1; then
             log "[k8s] control plane and workers up — installing add-ons"
 
             # After cluster up, install Tetragon for eBPF syscall/process/file
@@ -1494,7 +1504,7 @@ if [[ $_all_ok -eq 1 ]]; then
     # vs off, with the one command to add each, so a gap is never silent.
     [[ "${WANT[ai]}" == "1" ]] && log "    AI:   deployed" ||
         log "    AI:   off — enable the Bob/AI tile at install"
-    [[ "${WANT[k8s]}" == "1" ]] && log "    K8s:  deployed (${K8S_WORKERS} workers)" ||
+    [[ "${WANT[k8s]}" == "1" ]] && log "    K8s:  deployed (${K8S_CONTROL_PLANES} control planes, ${K8S_WORKERS} workers)" ||
         log "    K8s:  off — to add now: kube-cluster bootstrap --workers 3"
     [[ "${WANT[klab]}" == "1" ]] && log "    klab: deployed" ||
         log "    klab: off — enable the klab option at install"

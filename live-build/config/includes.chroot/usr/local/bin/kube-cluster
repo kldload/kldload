@@ -82,6 +82,10 @@ _host_cpus=$(nproc 2>/dev/null || echo 4)
 # tight hosts so a 16 GB laptop still boots a runnable cluster.
 CP_CPUS="${CP_CPUS:-4}"
 CP_RAM="${CP_RAM:-8192}"
+# kubeadm documents 2GB/2vCPU as the floor for a control plane. Below this
+# etcd and the apiserver start OOM-looping instead of failing honestly, so a
+# host that cannot seat 3 CPs at this size genuinely cannot run HA.
+CP_RAM_FLOOR="${CP_RAM_FLOOR:-2048}"
 CPUS="${CPUS:-2}"
 RAM="${RAM:-4096}"
 # Auto-scale DOWN on tight hosts so we don't OOM the box. Threshold:
@@ -351,7 +355,34 @@ _preflight_control_planes() {
     ((arc_reclaim_mb > 0)) &&
         log "RAM budget: ${avail_mem}MB available + ${arc_reclaim_mb}MB reclaimable ZFS ARC"
     if [[ "$avail_mem" =~ ^[0-9]+$ ]]; then
-        local budget=$((avail_mem + arc_reclaim_mb - 2048 - WORKERS * RAM))
+        # Workers already RUNNING are already excluded from avail_mem. This
+        # function is called twice with very different state — once at bootstrap
+        # (no workers up yet) and once from `scale --control-planes` (all of them
+        # up) — and subtracting WORKERS*RAM unconditionally double-counted the
+        # running set, understating the budget by the entire worker footprint.
+        # onyx 2026-08-29: 3 workers x 4096 subtracted twice on a 32GB box.
+        local _up_workers _pending
+        _up_workers="$(virsh list --name 2>/dev/null | grep -c -- '-w-' || true)"
+        [[ "$_up_workers" =~ ^[0-9]+$ ]] || _up_workers=0
+        _pending=$((WORKERS - _up_workers))
+        ((_pending < 0)) && _pending=0
+
+        local budget=$((avail_mem + arc_reclaim_mb - 2048 - _pending * RAM))
+
+        # HA-FIRST. The COUNT of control planes is the promise — three, so the
+        # cluster survives losing one. Their SIZE is an implementation detail.
+        # The old order asked "how many 8GB CPs fit?", got 1, and silently
+        # shipped a single point of failure. Ask instead "how big may each of
+        # the three be?", and only give up on HA when even the floor won't fit.
+        if ((budget < want * CP_RAM && CP_RAM > CP_RAM_FLOOR)); then
+            local _shrunk=$((budget / want))
+            ((_shrunk >= CP_RAM_FLOOR)) || _shrunk=$CP_RAM_FLOOR
+            if ((budget >= want * _shrunk)); then
+                warn "Control planes sized ${_shrunk}MB each (not ${CP_RAM}MB) so all ${want} fit — HA count kept."
+                CP_RAM=$_shrunk
+            fi
+        fi
+
         local fit=0
         ((CP_RAM > 0)) && fit=$((budget / CP_RAM))
         ((fit < 1)) && fit=1
