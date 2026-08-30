@@ -4029,8 +4029,8 @@ http_addr = 127.0.0.1
 http_port = 3000
 # Sub-path hosting + explicit proxy-facing URL. Grafana 13's preloader
 # rejects the config if root_url doesn't resolve to a full URL, so we
-# hardcode it — %(domain)s is populated below from the primary LAN
-# IP (or a stable DNS entry via KLDLOAD_DOMAIN env). 8443 is the
+# hardcode it — %(domain)s is populated below with the proxy-facing
+# host: localhost by default, KLDLOAD_DOMAIN when set. 8443 is the
 # proxy port. If the user hits Grafana via a DIFFERENT origin
 # (WireGuard IP, hostname), asset loads still work because appSubUrl
 # comes out as /grafana and the browser resolves relative URLs
@@ -4069,15 +4069,30 @@ csrf_additional_headers = X-Forwarded-For
 # iframes black against the kldload light theme (caught 2026-05-18).
 default_theme = system
 GRAFEMBED
-                    # Substitute the real LAN IP for the %(domain)s placeholder in
-                    # root_url. Using the placeholder lets the heredoc stay static
-                    # while a per-install IP is baked in at firstboot time.
-                    _lan_ip="$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
-                    if [[ -n "$_lan_ip" ]]; then
-                        sed -i "s|__KLDLOAD_LAN_IP__|${_lan_ip}|" /etc/grafana/grafana.ini
-                    else
-                        sed -i "s|__KLDLOAD_LAN_IP__|localhost|" /etc/grafana/grafana.ini
-                    fi
+                    # Substitute the proxy-facing host for the %(domain)s
+                    # placeholder in root_url. The placeholder lets the heredoc
+                    # stay static while the value is decided here.
+                    #
+                    # WHY localhost AND NOT AN IP: nginx on :8443 ships
+                    # `allow 127.0.0.1; allow ::1; deny all;` because the webui
+                    # dispatches wipe_disk / zfs destroy with no auth yet. Put an
+                    # IP here and Grafana 302s /grafana/* to an origin its own
+                    # proxy then denies, so the desktop homepage lands on a bare
+                    # nginx "403 Forbidden".
+                    # HISTORY: onyx 2026-08-29, fresh 1.4.2 desktop install. The
+                    # old lookup was `ip -o -4 addr show scope global | head -1`,
+                    # which returned virbr0's 192.168.122.1 — firstboot brings the
+                    # libvirt bridge up at 08:03:44, this block ran at 08:04:28, so
+                    # the bridge sorted first. Chrome opened the klab dashboard,
+                    # Grafana redirected to https://192.168.122.1:8443/grafana/...,
+                    # nginx 403'd it. The real LAN IP (10.100.10.115) 403s
+                    # identically — picking the wrong interface was never the bug,
+                    # using an address at all was.
+                    #
+                    # KLDLOAD_DOMAIN overrides for a deployment that has put a real
+                    # name in front of :8443 AND an allow rule beside it
+                    # (kldload-access-*.conf). Unset is the norm.
+                    sed -i "s|__KLDLOAD_LAN_IP__|${KLDLOAD_DOMAIN:-localhost}|" /etc/grafana/grafana.ini
                     systemctl restart grafana-server 2>/dev/null || true
                     ok "Grafana anonymous + iframe embedding via proxy (/grafana) enabled"
                 fi
