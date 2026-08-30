@@ -2660,8 +2660,16 @@ WPEOF
 # ARC capped at 50% of RAM to leave memory for KVM guests
 options zfs zfs_arc_max=${_arc_max}
 options zfs zfs_txg_timeout=10
-options zfs zfs_vdev_scheduler=none
 options zfs l2arc_noprefetch=0
+# NOTE: on root-on-ZFS this file is read by NOTHING at boot -- the module is
+# loaded from the initramfs, before /etc exists, and nothing regenerates the
+# initramfs afterwards. The values that must actually take effect are put on
+# the kernel command line by bootloader.sh; these lines are kept so the file
+# documents intent and so a manual $(dracut -f) makes them real.
+# zfs_vdev_scheduler was REMOVED here: OpenZFS deleted that parameter, so the
+# line had been a no-op that also made the file look more effective than it is
+# (onyx 2026-08-30: /sys/module/zfs/parameters/zfs_vdev_scheduler does not
+# exist).
 ZFSMOD
 
         # Kernel VM tuning for ZFS on root + KVM

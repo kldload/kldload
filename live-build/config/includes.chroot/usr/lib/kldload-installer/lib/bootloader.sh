@@ -1287,6 +1287,13 @@ EOFSTAB
     _arc_b=$((_ram_b / 2))
     ((_arc_b > 0)) || _arc_b=8589934592
     _direct_bootargs+=" zfs.zfs_arc_max=${_arc_b}"
+    # The SAME reasoning applies to every other option in that file, and they
+    # were left behind when arc_max was rescued onto the command line. Measured
+    # on onyx 2026-08-30: zfs.conf said txg_timeout=10 and l2arc_noprefetch=0,
+    # the kernel had 5 and 1 -- both ZFS defaults, i.e. the file did nothing.
+    # It LOOKED correct only because arc_max happens to equal the default
+    # (half of RAM), which is exactly the coincidence that hid this.
+    _direct_bootargs+=" zfs.zfs_txg_timeout=10 zfs.l2arc_noprefetch=0"
     local _grub_cfg=""
     read -r -d '' _grub_cfg <<GRUBCFG || true
 # kldload — auto-generated at install time
