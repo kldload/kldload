@@ -3282,8 +3282,35 @@ net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
 K8SSYS
 
-        # Disable swap (kubeadm requires it)
-        sed -ri '/\sswap\s/s/^/#/' "${target}/etc/fstab" 2>/dev/null || true
+        # NO swapoff here, deliberately. kubeadm's "swap must be off" rule binds
+        # the NODE, and on kldload the nodes are VMs: kube-setup already masks
+        # systemd-zram-setup@ and removes zram-generator inside every guest it
+        # builds. This host ships kubectl/k9s/cilium and never kubelet or
+        # kubeadm, so disabling its swap enforced a guest constraint on a
+        # hypervisor and cost it the only memory headroom it had.
+        # HISTORY: onyx 2026-08-29 — 32GB RAM, zero swap, 20GB+ of guests.
+        # systemd-oomd logged "No swap; memory pressure usage will be degraded"
+        # on every boot, and boot -1 died at 08:01:56 mid-firstboot with no
+        # panic, no OOM kill and no watchdog: nothing to reclaim, so pressure
+        # went straight from fine to a hard reset.
+        #
+        # zram, NOT a zvol: swap on a ZFS zvol deadlocks — the kernel needs
+        # memory to write the page out, ZFS needs memory to service that write,
+        # and that memory is exactly what is exhausted. A swap FILE on ZFS is
+        # not supported at all, and a root-on-ZFS disk has no spare partition.
+        # Sized small on purpose: this is a hypervisor, and guest pages must
+        # never end up here — a swapped guest is worse than a stopped one.
+        if chroot "${target}" rpm -q zram-generator-defaults >/dev/null 2>&1; then
+            cat >"${target}/etc/systemd/zram-generator.conf" <<'ZRAMCONF'
+[zram0]
+zram-size = min(ram / 8, 4096)
+compression-algorithm = zstd
+swap-priority = 100
+ZRAMCONF
+            k_log "Host swap: zram configured (guests disable their own via kube-setup)"
+        else
+            k_log "WARNING: zram-generator-defaults is NOT installed — this host will boot with NO swap and systemd-oomd will have no runway. Check target-fedora-extras.txt made it into the darksite."
+        fi
 
         # ZFS datasets for K8s components
         local root_pool
